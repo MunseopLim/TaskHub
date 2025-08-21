@@ -1,0 +1,39 @@
+[
+  {
+    "id": "button.build",
+    "title": "Build",
+    "action": {
+      "type": "shell",
+      "command": "echo 'Building...' && sleep 1 && exit 1",
+      "cwd": "${workspaceFolder}",
+      "revealTerminal": "always",
+      "successMessage": "Build completed successfully!",
+      "failMessage": "Build failed. Check terminal for details."
+    }
+  },
+  {
+    "id": "separator.1",
+    "type": "separator",
+    "title": "------------"
+  },
+  {
+    "id": "button.openExplorer",
+    "title": "Open Project Directory",
+    "action": {
+      "type": "shell",
+      "command": "open .",
+      "cwd": "${workspaceFolder}",
+      "revealTerminal": "silent",
+      "successMessage": "Project directory opened."
+    }
+  },
+  {
+    "id": "button.selectExecutable",
+    "title": "Select Executable",
+    "action": {
+      "type": "executablePicker",
+      "folder": "${workspaceFolder}/bin",
+      "runCommand": "bash ${file}"
+    }
+  }
+]

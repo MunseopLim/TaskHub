@@ -1,7 +1,7 @@
 {
   "name": "firmware-toolkit",
   "displayName": "firmware-toolkit",
-  "description": "dev helper",
+  "description": "Firmware Toolkit",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.103.0"
@@ -9,15 +9,77 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onView:mainView.main",
+    "onView:mainView.link"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mainView",
+          "title": "Firmware Toolkit",
+          "icon": "media/h_icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "mainView": [
+        {
+          "id": "mainView.main",
+          "name": "Main"
+        },
+        {
+          "id": "mainView.link",
+          "name": "Link"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "firmware-toolkit.helloWorld",
         "title": "Hello World"
+      },
+      {
+        "command": "firmware-toolkit.openLink",
+        "title": "Open Link"
+      },
+      {
+        "command": "firmware-toolkit.copyLink",
+        "title": "Copy Link"
+      },
+      {
+        "command": "firmware-toolkit.goToLink",
+        "title": "Go to Link"
+      },
+      {
+        "command": "firmware-toolkit.executeAction",
+        "title": "Execute Action"
+      },
+      {
+        "command": "firmware-toolkit.showVersion",
+        "title": "Show Extension Version"
+      },
+      {
+        "command": "firmware-toolkit.showExecutablePicker",
+        "title": "Select and Run Executable"
       }
-    ]
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "firmware-toolkit.copyLink",
+          "when": "view == mainView.link && viewItem == linkItem",
+          "group": "inline"
+        },
+        {
+          "command": "firmware-toolkit.goToLink",
+          "when": "view == mainView.link && viewItem == linkItem",
+          "group": "inline"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
