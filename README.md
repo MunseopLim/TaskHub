@@ -1,25 +1,35 @@
-# Firmware Toolkit VS Code Extension
+# 펌웨어 툴킷 VS Code 확장 프로그램
 
-This VS Code extension provides a set of utility features for firmware development, accessible through a custom Activity Bar view.
+이 VS Code 확장 프로그램은 사용자 지정 활동 표시줄 뷰를 통해 펌웨어 개발을 위한 유틸리티 기능을 제공합니다.
 
-## Features
+## 기능
 
-### 1. Custom Main View
+### 1. 사용자 지정 메인 뷰
 
-The extension introduces a custom view container in the VS Code Activity Bar, identified by an 'H' icon. This main view (`mainView`) hosts two sub-views:
+이 확장 프로그램은 VS Code 활동 표시줄에 'H' 아이콘으로 식별되는 사용자 지정 뷰 컨테이너를 도입합니다. 이 메인 뷰(`mainView`)는 세 개의 하위 뷰를 호스팅합니다:
 
-*   **Main Panel (`mainView.main`)**: Contains various action buttons and information.
-*   **Links Panel (`mainView.link`)**: Displays a list of configurable links.
+*   **메인 패널 (`mainView.main`)**: 다양한 액션 버튼과 정보를 포함합니다.
+*   **링크 패널 (`mainView.link`)**: 구성 가능한 링크 목록을 표시합니다.
+*   **즐겨찾기 패널 (`mainView.favorite`)**: 구성 가능한 즐겨찾는 파일 목록을 표시합니다.
 
-### 2. Custom Icon
+### 2. 사용자 지정 아이콘
 
-The main view in the Activity Bar uses a custom 'H' shaped SVG icon (`media/h_icon.svg`).
+활동 표시줄의 메인 뷰는 사용자 지정 'H' 모양의 SVG 아이콘(`media/h_icon.svg`)을 사용합니다.
 
-### 3. Links Panel (`mainView.link`)
+### 3. JSON 설정 파일
 
-This panel displays a list of links defined in `media/links.json`.
+이 확장 프로그램은 `actions.json`, `links.json`, 그리고 `favorites.json` 파일을 사용하여 뷰의 내용을 구성합니다.
 
-*   **Configurable Links**: Links are loaded from `media/links.json`. Each entry has a `title` and a `link` URL.
+*   **파일 로드 우선순위**: 
+    *   각 뷰는 먼저 확장 프로그램의 `media/` 디렉토리에 있는 기본 JSON 파일을 로드합니다.
+    *   만약 작업 공간의 `.vscode/` 디렉토리에 동일한 이름의 JSON 파일이 존재한다면, 해당 파일의 내용이 `media/` 파일의 내용 뒤에 **추가됩니다**.
+    *   이러한 파일(`media/` 및 `.vscode/` 내의 JSON 파일)이 수정, 생성 또는 삭제되면 해당 뷰는 자동으로 새로 고쳐집니다.
+
+### 4. 링크 패널 (`mainView.link`)
+
+이 패널은 `media/links.json` (그리고 `.vscode/links.json`이 있다면 추가된 내용)에 정의된 링크 목록을 표시합니다.
+
+*   **구성 가능한 링크**: 링크는 `media/links.json`에서 로드됩니다. 각 항목은 `title`과 `link` URL을 가집니다.
     ```json
     [
       {
@@ -27,50 +37,50 @@ This panel displays a list of links defined in `media/links.json`.
         "link": "https://www.google.com"
       },
       {
-        "title": "VS Code Docs",
+        "title": "VS Code 문서",
         "link": "https://code.visualstudio.com/docs"
       }
     ]
     ```
-*   **Link Icon**: Each link item is prefixed with a standard link icon.
-*   **Click to Open**: Clicking a link item will open the corresponding URL in your default web browser.
-*   **Context Menu**: Right-clicking a link item provides two options:
-    *   `Copy Link`: Copies the URL to the clipboard.
-    *   `Go to Link`: Opens the URL in the default web browser (same as clicking).
+*   **링크 아이콘**: 각 링크 항목 앞에는 표준 링크 아이콘이 붙습니다.
+*   **클릭하여 열기**: 링크 항목을 클릭하면 기본 웹 브라우저에서 해당 URL이 열립니다.
+*   **컨텍스트 메뉴**: 링크 항목을 마우스 오른쪽 버튼으로 클릭하면 두 가지 옵션이 제공됩니다:
+    *   `링크 복사`: URL을 클립보드에 복사합니다.
+    *   `링크로 이동`: 기본 웹 브라우저에서 URL을 엽니다 (클릭과 동일).
 
-### 4. Main Panel (`mainView.main`)
+### 5. 메인 패널 (`mainView.main`)
 
-This panel provides various configurable actions, defined in `media/actions.json`.
+이 패널은 `media/actions.json` (그리고 `.vscode/actions.json`이 있다면 추가된 내용)에 정의된 다양한 구성 가능한 액션을 제공합니다.
 
-*   **Configurable Buttons**: Any item in `media/actions.json` with an `id` starting with `button.` will be rendered as a clickable button.
+*   **구성 가능한 버튼**: `media/actions.json`에 있는 `id`가 `button.`으로 시작하는 모든 항목은 클릭 가능한 버튼으로 렌더링됩니다.
     ```json
     [
       {
         "id": "button.build",
-        "title": "Build",
+        "title": "빌드",
         "action": {
           "type": "shell",
-          "command": "echo 'Building...'",
+          "command": "echo '빌드 중...'",
           "cwd": "${workspaceFolder}",
           "revealTerminal": "always",
-          "successMessage": "Build completed successfully!",
-          "failMessage": "Build failed. Check terminal for details."
+          "successMessage": "빌드 완료!",
+          "failMessage": "빌드 실패. 터미널을 확인하세요."
         }
       },
       {
         "id": "button.openExplorer",
-        "title": "Open Project Directory",
+        "title": "프로젝트 디렉토리 열기",
         "action": {
           "type": "shell",
           "command": "open .",
           "cwd": "${workspaceFolder}",
           "revealTerminal": "silent",
-          "successMessage": "Project directory opened."
+          "successMessage": "프로젝트 디렉토리가 열렸습니다."
         }
       }
     ]
     ```
-*   **Separators**: Items with `type: "separator"` will be rendered as visual separators.
+*   **구분선**: `type: "separator"`인 항목은 시각적 구분선으로 렌더링됩니다.
     ```json
     {
       "id": "separator.1",
@@ -78,20 +88,20 @@ This panel provides various configurable actions, defined in `media/actions.json
       "title": "------------"
     }
     ```
-*   **Configurable Terminal Behavior (`revealTerminal`)**: For `shell` type actions, you can control the terminal's visibility:
-    *   `"always"`: Terminal will always be brought to the foreground.
-    *   `"silent"`: Terminal will run in the background without showing.
-    *   `"never"`: Terminal will run in the background and the panel will not be revealed.
-    If not specified, defaults to `silent`.
-*   **Success/Failure Notifications (`successMessage`, `failMessage`)**: For `shell` type actions, you can define messages to be displayed as VS Code notifications upon task completion:
-    *   `"successMessage"`: Displayed if the task completes with exit code 0.
-    *   `"failMessage"`: Displayed if the task completes with a non-zero exit code.
-    These properties are optional. If omitted, no notification will be shown for that outcome.
-*   **Executable Picker**: A special action type (`executablePicker`) that allows selecting and running executables from a specified folder.
+*   **구성 가능한 터미널 동작 (`revealTerminal`)**: `shell` 타입 액션의 경우 터미널의 가시성을 제어할 수 있습니다:
+    *   `"always"`: 터미널이 항상 전면으로 표시됩니다.
+    *   `"silent"`: 터미널이 표시되지 않고 백그라운드에서 실행됩니다.
+    *   `"never"`: 터미널이 표시되지 않고 백그라운드에서 실행됩니다.
+    지정하지 않으면 기본값은 `silent`입니다.
+*   **성공/실패 알림 (`successMessage`, `failMessage`)**: `shell` 타입 액션의 경우 작업 완료 시 VS Code 알림으로 표시될 메시지를 정의할 수 있습니다:
+    *   `"successMessage"`: 작업이 종료 코드 0으로 완료되면 표시됩니다.
+    *   `"failMessage"`: 작업이 0이 아닌 종료 코드로 완료되면 표시됩니다.
+    이 속성들은 선택 사항입니다. 생략하면 해당 결과에 대한 알림이 표시되지 않습니다.
+*   **실행 파일 선택기**: 지정된 폴더에서 실행 파일을 선택하고 실행할 수 있는 특수 액션 타입(`executablePicker`)입니다.
     ```json
     {
       "id": "button.selectExecutable",
-      "title": "Select Executable",
+      "title": "실행 파일 선택",
       "action": {
         "type": "executablePicker",
         "folder": "${workspaceFolder}/bin",
@@ -99,37 +109,59 @@ This panel provides various configurable actions, defined in `media/actions.json
       }
     }
     ```
-    *   `folder`: The directory to scan for executable files. Supports `${workspaceFolder}`.
-    *   `runCommand`: The command template to execute the selected file. `${file}` will be replaced by the full path of the selected executable.
-    *   **Note on `runCommand` for Windows**: For Windows, `bash ${file}` might need to be adjusted based on your shell (e.g., `cmd.exe /c ""${file}""` for batch files, `powershell.exe -File ""${file}""` for PowerShell scripts, or simply `""${file}""` for `.exe` files).
+    *   `folder`: 실행 파일을 스캔할 디렉토리입니다. `${workspaceFolder}`를 지원합니다.
+    *   `runCommand`: 선택된 파일을 실행할 명령 템플릿입니다. `${file}`은 선택된 실행 파일의 전체 경로로 대체됩니다.
+    *   **Windows용 `runCommand` 참고**: Windows의 경우, `bash ${file}`은 셸에 따라 조정해야 할 수 있습니다 (예: 배치 파일의 경우 `cmd.exe /c ""${file}""`, PowerShell 스크립트의 경우 `powershell.exe -File ""${file}""`, `.exe` 파일의 경우 단순히 `""${file}""`).
 
-### 5. Extension Version Display
+### 6. 즐겨찾기 패널 (`mainView.favorite`)
 
-The `mainView.main` panel displays the current version of the extension as a non-clickable label at the top.
+이 패널은 `.vscode/favorites.json`에 정의된 사용자가 즐겨찾는 파일 목록을 표시합니다.
 
-### 6. Show Extension Version Command
+*   **구성 가능한 즐겨찾기**: 즐겨찾기 파일은 `.vscode/favorites.json`에서 로드됩니다. 각 항목은 `title` (표시 이름)과 `path` (파일 경로)를 가집니다.
+    ```json
+    // .vscode/favorites.json 예시
+    [
+      {
+        "title": "내 즐겨찾는 스크립트",
+        "path": "${workspaceFolder}/scripts/my_script.sh"
+      },
+      {
+        "title": "중요 문서",
+        "path": "${workspaceFolder}/docs/important.md"
+      }
+    ]
+    ```
+    *   `path` 속성은 `${workspaceFolder}` 변수를 지원하여 작업 공간 루트에 상대적인 경로를 지정할 수 있습니다.
+*   **파일 아이콘**: 각 즐겨찾기 항목 앞에는 일반 파일 아이콘이 붙습니다.
+*   **클릭하여 열기**: 즐겨찾기 항목을 클릭하면 해당 파일이 VS Code에서 열립니다.
 
-A command `firmware-toolkit.showVersion` is available in the Command Palette (Ctrl+Shift+P or Cmd+Shift+P) that displays the extension's version in an information message.
+### 7. 확장 프로그램 버전 표시
 
-## Installation
+`mainView.main` 패널은 확장 프로그램의 현재 버전을 클릭할 수 없는 레이블로 상단에 표시합니다.
 
-1.  Clone this repository.
-2.  Open the project in VS Code.
-3.  Run `npm install` in the terminal.
-4.  Press `F5` to run the extension in a new Extension Development Host window.
+### 8. 확장 프로그램 버전 표시 명령
 
-## Usage
+명령 팔레트(Ctrl+Shift+P 또는 Cmd+Shift+P)에서 `firmware-toolkit.showVersion` 명령을 사용하여 정보 메시지로 확장 프로그램 버전을 표시할 수 있습니다.
 
-1.  Click the 'H' icon in the Activity Bar to open the Firmware Toolkit view.
-2.  Explore the 'Main Panel' for various actions and the 'Links Panel' for quick access to resources.
-3.  Modify `media/actions.json` and `media/links.json` to customize the buttons and links.
+## 설치
 
-## Development
+1.  이 저장소를 클론합니다.
+2.  VS Code에서 프로젝트를 엽니다.
+3.  터미널에서 `npm install`을 실행합니다.
+4.  `F5` 키를 눌러 새 확장 개발 호스트 창에서 확장 프로그램을 실행합니다.
 
-*   `npm run compile`: Compiles the TypeScript source code.
-*   `npm run watch`: Compiles the code in watch mode.
-*   `npm run test`: Runs the extension tests.
+## 사용법
+
+1.  활동 표시줄의 'H' 아이콘을 클릭하여 펌웨어 툴킷 뷰를 엽니다.
+2.  '메인 패널'에서 다양한 액션을 탐색하고 '링크 패널'에서 리소스에 빠르게 접근합니다.
+3.  `media/actions.json`, `media/links.json`, 그리고 `.vscode/favorites.json` 파일을 수정하여 버튼, 링크 및 즐겨찾는 파일을 사용자 지정합니다.
+
+## 개발
+
+*   `npm run compile`: TypeScript 소스 코드를 컴파일합니다.
+*   `npm run watch`: watch 모드로 코드를 컴파일합니다.
+*   `npm run test`: 확장 프로그램 테스트를 실행합니다.
 
 ---
 
-**Note**: This README is generated based on the features implemented up to this point. For the most up-to-date information, please refer to the source code.
+**참고**: 이 README는 현재까지 구현된 기능을 기반으로 생성되었습니다. 최신 정보는 소스 코드를 참조하십시오.
