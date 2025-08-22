@@ -31,7 +31,7 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
 
       actionsJson.forEach((item: any) => {
         if (item.type === 'separator') {
-          const separatorItem = new vscode.TreeItem(item.title || '------------');
+          const separatorItem = new vscode.TreeItem(item.title);
           separatorItem.collapsibleState = vscode.TreeItemCollapsibleState.None;
           separatorItem.contextValue = 'separator'; // Custom context value for styling/menus if needed
           items.push(separatorItem);
