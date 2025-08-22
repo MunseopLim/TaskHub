@@ -11,7 +11,8 @@
   ],
   "activationEvents": [
     "onView:mainView.main",
-    "onView:mainView.link"
+    "onView:mainView.link",
+    "onView:mainView.favorite"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -33,6 +34,10 @@
         {
           "id": "mainView.link",
           "name": "Link"
+        },
+        {
+          "id": "mainView.favorite",
+          "name": "Favorite"
         }
       ]
     },
@@ -64,6 +69,10 @@
       {
         "command": "firmware-toolkit.showExecutablePicker",
         "title": "Select and Run Executable"
+      },
+      {
+        "command": "firmware-toolkit.openFavoriteFile",
+        "title": "Open Favorite File"
       }
     ],
     "menus": {

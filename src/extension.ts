@@ -140,6 +140,64 @@ class Link extends vscode.TreeItem {
   }
 }
 
+class Favorite extends vscode.TreeItem {
+  constructor(
+    public readonly label: string,
+    private readonly filePath: string,
+    public readonly collapsibleState: vscode.TreeItemCollapsibleState
+  ) {
+    super(label, collapsibleState);
+    this.tooltip = `${this.label} - ${this.filePath}`;
+    this.command = {
+      command: 'firmware-toolkit.openFavoriteFile',
+      title: 'Open Favorite File',
+      arguments: [this.filePath],
+    };
+    this.contextValue = 'favoriteItem';
+    this.iconPath = new vscode.ThemeIcon('file'); // Using a generic file icon
+  }
+
+  getFilePath(): string {
+    return this.filePath;
+  }
+}
+
+class FavoriteViewProvider implements vscode.TreeDataProvider<Favorite> {
+  constructor(private context: vscode.ExtensionContext) {}
+
+  getTreeItem(element: Favorite): vscode.TreeItem {
+    return element;
+  }
+
+  getChildren(element?: Favorite): Thenable<Favorite[]> {
+    if (element) {
+      return Promise.resolve([]);
+    } else {
+      const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'favorites.json');
+      let favoritesJson: { title: string; path: string }[] = [];
+
+      if (fs.existsSync(vscodeJsonPath)) {
+        try {
+          favoritesJson = JSON.parse(fs.readFileSync(vscodeJsonPath, 'utf-8'));
+          console.log(`Using .vscode/favorites.json: ${JSON.stringify(favoritesJson, null, 2)}`);
+        } catch (error: any) {
+          vscode.window.showErrorMessage(`Error parsing .vscode/favorites.json: ${error.message}`);
+          console.error(`Error parsing .vscode/favorites.json: ${error.message}`);
+        }
+      } else {
+        console.log('No .vscode/favorites.json found. Favorite view will be empty.');
+      }
+
+      return Promise.resolve(
+        favoritesJson.map(
+          (item: { title: string; path: string }) =>
+            new Favorite(item.title, item.path, vscode.TreeItemCollapsibleState.None)
+        )
+      );
+    }
+  }
+}
+
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
@@ -161,6 +219,24 @@ export function activate(context: vscode.ExtensionContext) {
 
   vscode.window.registerTreeDataProvider('mainView.main', new MainViewProvider(context));
 	vscode.window.registerTreeDataProvider('mainView.link', new LinkViewProvider(context));
+
+  const openFavoriteFileCommand = vscode.commands.registerCommand('firmware-toolkit.openFavoriteFile', async (filePath: string) => {
+    try {
+      // Resolve ${workspaceFolder} if present
+      const workspaceFolder = vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : '';
+      const resolvedPath = filePath.replace('${workspaceFolder}', workspaceFolder);
+
+      const uri = vscode.Uri.file(resolvedPath);
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document);
+    } catch (error: any) {
+      vscode.window.showErrorMessage(`Could not open file: ${error.message}`);
+      console.error(`Error opening favorite file: ${error.message}`);
+    }
+  });
+  context.subscriptions.push(openFavoriteFileCommand);
+
+  vscode.window.registerTreeDataProvider('mainView.favorite', new FavoriteViewProvider(context));
 
   const openLinkCommand = vscode.commands.registerCommand('firmware-toolkit.openLink', (url: string) => {
     vscode.env.openExternal(vscode.Uri.parse(url));
