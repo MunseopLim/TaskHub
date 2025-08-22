@@ -89,6 +89,24 @@ class Action extends vscode.TreeItem {
       title: 'Execute Action',
       arguments: [{ title: label, action: actionData }], // Pass an object containing both title and actionData
     };
+
+    // Set icon based on action type
+    if (actionData && actionData.type) {
+      switch (actionData.type) {
+        case 'shell':
+          this.iconPath = new vscode.ThemeIcon('terminal');
+          break;
+        case 'executablePicker':
+          this.iconPath = new vscode.ThemeIcon('play');
+          break;
+        // Add more cases for other action types if needed
+        default:
+          this.iconPath = new vscode.ThemeIcon('gear'); // Default icon for unknown types
+          break;
+      }
+    } else {
+      this.iconPath = new vscode.ThemeIcon('gear'); // Default icon if actionData or type is missing
+    }
   }
 }
 
@@ -168,7 +186,7 @@ class Favorite extends vscode.TreeItem {
       arguments: [this.filePath],
     };
     this.contextValue = 'favoriteItem';
-    this.iconPath = new vscode.ThemeIcon('file'); // Using a generic file icon
+    this.iconPath = new vscode.ThemeIcon('star'); // Using a star icon for favorite
   }
 
   getFilePath(): string {
