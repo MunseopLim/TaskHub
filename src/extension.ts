@@ -15,8 +15,17 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
     if (element) {
       return Promise.resolve([]);
     } else {
-      const jsonPath = path.join(this.context.extensionPath, 'media', 'actions.json');
-      const actionsJson = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+      const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'actions.json');
+      let actionsJson = JSON.parse(fs.readFileSync(mediaJsonPath, 'utf-8'));
+      console.log(`Using media/actions.json: ${JSON.stringify(actionsJson, null, 2)}`);
+
+      const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'actions.json');
+
+      if (fs.existsSync(vscodeJsonPath)) {
+        const vscodeActionsJson = JSON.parse(fs.readFileSync(vscodeJsonPath, 'utf-8'));
+        actionsJson = actionsJson.concat(vscodeActionsJson);
+        console.log(`Appended .vscode/actions.json: ${JSON.stringify(vscodeActionsJson, null, 2)}`);
+      }
 
       const packageJsonPath = path.join(this.context.extensionPath, 'package.json');
       const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
@@ -87,8 +96,17 @@ class LinkViewProvider implements vscode.TreeDataProvider<Link> {
     if (element) {
       return Promise.resolve([]);
     } else {
-      const jsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
-      const linksJson = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+      const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
+      let linksJson = JSON.parse(fs.readFileSync(mediaJsonPath, 'utf-8'));
+      console.log(`Using media/links.json: ${JSON.stringify(linksJson, null, 2)}`);
+
+      const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'links.json');
+
+      if (fs.existsSync(vscodeJsonPath)) {
+        const vscodeLinksJson = JSON.parse(fs.readFileSync(vscodeJsonPath, 'utf-8'));
+        linksJson = linksJson.concat(vscodeLinksJson);
+        console.log(`Appended .vscode/links.json: ${JSON.stringify(vscodeLinksJson, null, 2)}`);
+      }
       return Promise.resolve(
         linksJson.map(
           (item: { title: string; link: string }) =>
