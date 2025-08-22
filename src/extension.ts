@@ -5,7 +5,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeItem> {
+  private _onDidChangeTreeData: vscode.EventEmitter<Action | vscode.TreeItem | undefined | null | void> = new vscode.EventEmitter<Action | vscode.TreeItem | undefined | null | void>();
+  readonly onDidChangeTreeData: vscode.Event<Action | vscode.TreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
+
   constructor(private context: vscode.ExtensionContext) {}
+
+  refresh(): void {
+    this._onDidChangeTreeData.fire();
+  }
 
   getTreeItem(element: Action | vscode.TreeItem): vscode.TreeItem {
     return element;
@@ -86,7 +93,14 @@ class Action extends vscode.TreeItem {
 }
 
 class LinkViewProvider implements vscode.TreeDataProvider<Link> {
+  private _onDidChangeTreeData: vscode.EventEmitter<Link | undefined | null | void> = new vscode.EventEmitter<Link | undefined | null | void>();
+  readonly onDidChangeTreeData: vscode.Event<Link | undefined | null | void> = this._onDidChangeTreeData.event;
+
   constructor(private context: vscode.ExtensionContext) {}
+
+  refresh(): void {
+    this._onDidChangeTreeData.fire();
+  }
 
   getTreeItem(element: Link): vscode.TreeItem {
     return element;
@@ -163,7 +177,14 @@ class Favorite extends vscode.TreeItem {
 }
 
 class FavoriteViewProvider implements vscode.TreeDataProvider<Favorite> {
+  private _onDidChangeTreeData: vscode.EventEmitter<Favorite | undefined | null | void> = new vscode.EventEmitter<Favorite | undefined | null | void>();
+  readonly onDidChangeTreeData: vscode.Event<Favorite | undefined | null | void> = this._onDidChangeTreeData.event;
+
   constructor(private context: vscode.ExtensionContext) {}
+
+  refresh(): void {
+    this._onDidChangeTreeData.fire();
+  }
 
   getTreeItem(element: Favorite): vscode.TreeItem {
     return element;
@@ -217,8 +238,63 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(disposable);
 
-  vscode.window.registerTreeDataProvider('mainView.main', new MainViewProvider(context));
-	vscode.window.registerTreeDataProvider('mainView.link', new LinkViewProvider(context));
+  const mainViewProvider = new MainViewProvider(context);
+  const linkViewProvider = new LinkViewProvider(context);
+  const favoriteViewProvider = new FavoriteViewProvider(context);
+
+  vscode.window.registerTreeDataProvider('mainView.main', mainViewProvider);
+	vscode.window.registerTreeDataProvider('mainView.link', linkViewProvider);
+  vscode.window.registerTreeDataProvider('mainView.favorite', favoriteViewProvider);
+
+  // Register file watchers
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+  // Watch media/actions.json
+  const mediaActionsWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(context.extensionPath, 'media/actions.json')
+  );
+  mediaActionsWatcher.onDidChange(() => mainViewProvider.refresh());
+  mediaActionsWatcher.onDidCreate(() => mainViewProvider.refresh());
+  mediaActionsWatcher.onDidDelete(() => mainViewProvider.refresh());
+  context.subscriptions.push(mediaActionsWatcher);
+
+  // Watch media/links.json
+  const mediaLinksWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(context.extensionPath, 'media/links.json')
+  );
+  mediaLinksWatcher.onDidChange(() => linkViewProvider.refresh());
+  mediaLinksWatcher.onDidCreate(() => linkViewProvider.refresh());
+  mediaLinksWatcher.onDidDelete(() => linkViewProvider.refresh());
+  context.subscriptions.push(mediaLinksWatcher);
+
+  if (workspaceRoot) {
+    // Watch .vscode/actions.json
+    const vscodeActionsWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(workspaceRoot, '.vscode/actions.json')
+    );
+    vscodeActionsWatcher.onDidChange(() => mainViewProvider.refresh());
+    vscodeActionsWatcher.onDidCreate(() => mainViewProvider.refresh());
+    vscodeActionsWatcher.onDidDelete(() => mainViewProvider.refresh());
+    context.subscriptions.push(vscodeActionsWatcher);
+
+    // Watch .vscode/links.json
+    const vscodeLinksWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(workspaceRoot, '.vscode/links.json')
+    );
+    vscodeLinksWatcher.onDidChange(() => linkViewProvider.refresh());
+    vscodeLinksWatcher.onDidCreate(() => linkViewProvider.refresh());
+    vscodeLinksWatcher.onDidDelete(() => linkViewProvider.refresh());
+    context.subscriptions.push(vscodeLinksWatcher);
+
+    // Watch .vscode/favorites.json
+    const vscodeFavoritesWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(workspaceRoot, '.vscode/favorites.json')
+    );
+    vscodeFavoritesWatcher.onDidChange(() => favoriteViewProvider.refresh());
+    vscodeFavoritesWatcher.onDidCreate(() => favoriteViewProvider.refresh());
+    vscodeFavoritesWatcher.onDidDelete(() => favoriteViewProvider.refresh());
+    context.subscriptions.push(vscodeFavoritesWatcher);
+  }
 
   const openFavoriteFileCommand = vscode.commands.registerCommand('firmware-toolkit.openFavoriteFile', async (filePath: string) => {
     try {
@@ -235,8 +311,6 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
   context.subscriptions.push(openFavoriteFileCommand);
-
-  vscode.window.registerTreeDataProvider('mainView.favorite', new FavoriteViewProvider(context));
 
   const openLinkCommand = vscode.commands.registerCommand('firmware-toolkit.openLink', (url: string) => {
     vscode.env.openExternal(vscode.Uri.parse(url));
