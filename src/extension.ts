@@ -41,6 +41,11 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
       const versionItem = new vscode.TreeItem(`Version: ${extensionVersion}`);
       versionItem.iconPath = new vscode.ThemeIcon('info'); // Use an info icon
       versionItem.tooltip = `Extension Version: ${extensionVersion}`;
+      versionItem.contextValue = 'versionItem'; // Add contextValue for right-click menu
+      versionItem.command = {
+        command: 'firmware-toolkit.showExampleJsonQuickPick', // New command to show quick pick
+        title: 'Show Example JSONs',
+      };
 
       const items: (Action | vscode.TreeItem)[] = [];
       items.push(versionItem); // Add version item at the top
@@ -641,6 +646,113 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
   context.subscriptions.push(deleteLinkCommand);
+
+  const showExampleJsonCommand = vscode.commands.registerCommand('firmware-toolkit.showExampleJson', async (jsonType: string) => {
+    let exampleContent = '';
+    let fileName = '';
+
+    switch (jsonType) {
+      case 'actions':
+        fileName = 'actions.json';
+        exampleContent = JSON.stringify([
+          {
+            "id": "button.build",
+            "title": "Build Project",
+            "action": {
+              "type": "shell",
+              "command": "npm run build",
+              "cwd": "${workspaceFolder}",
+              "revealTerminal": "always",
+              "successMessage": "Build completed successfully!",
+              "failMessage": "Build failed. Check terminal for details."
+            }
+          },
+          {
+            "id": "separator.1",
+            "type": "separator",
+            "title": "--------"
+          },
+          {
+            "id": "button.openDocs",
+            "title": "Open Documentation",
+            "action": {
+              "type": "shell",
+              "command": "code ${workspaceFolder}/docs/index.md",
+              "revealTerminal": "silent"
+            }
+          },
+          {
+            "id": "button.selectExecutable",
+            "title": "Select and Run Executable",
+            "action": {
+              "type": "executablePicker",
+              "folder": "${workspaceFolder}/bin",
+              "runCommand": "bash ${file}"
+            }
+          }
+        ], null, 2);
+        break;
+      case 'links':
+        fileName = 'links.json';
+        exampleContent = JSON.stringify([
+          {
+            "title": "VS Code API Docs",
+            "link": "https://code.visualstudio.com/api"
+          },
+          {
+            "title": "Firmware Blog",
+            "link": "https://example.com/firmware-blog"
+          }
+        ], null, 2);
+        break;
+      case 'favorites':
+        fileName = 'favorites.json';
+        exampleContent = JSON.stringify([
+          {
+            "title": "My Main Source File",
+            "path": "${workspaceFolder}/src/main.c"
+          },
+          {
+            "title": "Project Readme",
+            "path": "${workspaceFolder}/README.md"
+          }
+        ], null, 2);
+        break;
+      default:
+        vscode.window.showErrorMessage(`Unknown JSON type: ${jsonType}`);
+        return;
+    }
+
+    try {
+      const document = await vscode.workspace.openTextDocument({
+        content: exampleContent,
+        language: 'json'
+      });
+      await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
+      vscode.window.showInformationMessage(`Example ${fileName} opened in a new tab.`);
+    } catch (error: any) {
+      vscode.window.showErrorMessage(`Failed to open example ${fileName}: ${error.message}`);
+    }
+  });
+  context.subscriptions.push(showExampleJsonCommand);
+
+  const showExampleJsonQuickPickCommand = vscode.commands.registerCommand('firmware-toolkit.showExampleJsonQuickPick', async () => {
+    const pick = await vscode.window.showQuickPick(
+      [
+        { label: 'actions.json Example', description: 'Show example content for actions.json', type: 'actions' },
+        { label: 'links.json Example', description: 'Show example content for links.json', type: 'links' },
+        { label: 'favorites.json Example', description: 'Show example content for favorites.json', type: 'favorites' },
+      ],
+      {
+        placeHolder: 'Select which example JSON to display',
+      }
+    );
+
+    if (pick && pick.type) {
+      vscode.commands.executeCommand('firmware-toolkit.showExampleJson', pick.type);
+    }
+  });
+  context.subscriptions.push(showExampleJsonQuickPickCommand);
 
   const addOpenFileToFavoritesCommand = vscode.commands.registerCommand('firmware-toolkit.addOpenFileToFavorites', async () => {
     const editor = vscode.window.activeTextEditor;
