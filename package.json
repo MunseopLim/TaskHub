@@ -88,12 +88,32 @@
         "command": "firmware-toolkit.editActions",
         "title": "Edit Actions",
         "icon": "$(pencil)"
+      },
+      {
+        "command": "firmware-toolkit.addFavoriteFile",
+        "title": "Add Existing File to Favorites",
+        "icon": "$(add)"
+      },
+      {
+        "command": "firmware-toolkit.deleteFavorite",
+        "title": "Delete Favorite",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "firmware-toolkit.deleteLink",
+        "title": "Delete Link",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
       "view/title": [
         {
           "command": "firmware-toolkit.editFavorites",
+          "when": "view == mainView.favorite",
+          "group": "navigation"
+        },
+        {
+          "command": "firmware-toolkit.addFavoriteFile",
           "when": "view == mainView.favorite",
           "group": "navigation"
         },
@@ -117,6 +137,16 @@
         {
           "command": "firmware-toolkit.goToLink",
           "when": "view == mainView.link && viewItem == linkItem",
+          "group": "inline"
+        },
+        {
+          "command": "firmware-toolkit.deleteLink",
+          "when": "view == mainView.link && viewItem == linkItem",
+          "group": "inline"
+        },
+        {
+          "command": "firmware-toolkit.deleteFavorite",
+          "when": "view == mainView.favorite && viewItem == favoriteItem",
           "group": "inline"
         }
       ]

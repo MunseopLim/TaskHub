@@ -545,6 +545,92 @@ export function activate(context: vscode.ExtensionContext) {
     await vscode.window.showTextDocument(document);
   });
   context.subscriptions.push(editActionsCommand);
+
+  const addFavoriteFileCommand = vscode.commands.registerCommand('firmware-toolkit.addFavoriteFile', async () => {
+    const fileUris = await vscode.window.showOpenDialog({
+      canSelectMany: true,
+      openLabel: 'Add to Favorites'
+    });
+
+    if (!fileUris || fileUris.length === 0) {
+      return;
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const favoritesPath = path.join(workspaceFolder, '.vscode', 'favorites.json');
+    let favorites: { title: string; path: string }[] = [];
+    if (fs.existsSync(favoritesPath)) {
+      try {
+        favorites = JSON.parse(fs.readFileSync(favoritesPath, 'utf-8'));
+      } catch (error: any) {
+        vscode.window.showErrorMessage(`Error parsing favorites.json: ${error.message}`);
+        return;
+      }
+    }
+
+    for (const fileUri of fileUris) {
+      const title = await vscode.window.showInputBox({ 
+        prompt: `Enter a title for ${path.basename(fileUri.fsPath)}`,
+        value: path.basename(fileUri.fsPath)
+      });
+      if (!title) {
+        continue;
+      }
+      favorites.push({ title, path: fileUri.fsPath });
+    }
+
+    fs.writeFileSync(favoritesPath, JSON.stringify(favorites, null, 2));
+
+    favoriteViewProvider.refresh();
+  });
+  context.subscriptions.push(addFavoriteFileCommand);
+
+  const deleteFavoriteCommand = vscode.commands.registerCommand('firmware-toolkit.deleteFavorite', async (item: Favorite) => {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const favoritesPath = path.join(workspaceFolder, '.vscode', 'favorites.json');
+    if (!fs.existsSync(favoritesPath)) {
+      return;
+    }
+
+    let favorites: { title: string; path: string }[] = JSON.parse(fs.readFileSync(favoritesPath, 'utf-8'));
+    favorites = favorites.filter(favorite => favorite.path !== item.getFilePath());
+    fs.writeFileSync(favoritesPath, JSON.stringify(favorites, null, 2));
+    favoriteViewProvider.refresh();
+  });
+  context.subscriptions.push(deleteFavoriteCommand);
+
+  const deleteLinkCommand = vscode.commands.registerCommand('firmware-toolkit.deleteLink', async (item: Link) => {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const vscodeLinksPath = path.join(workspaceFolder, '.vscode', 'links.json');
+    const mediaLinksPath = path.join(context.extensionPath, 'media', 'links.json');
+
+    let changed = false;
+
+    if (fs.existsSync(vscodeLinksPath)) {
+      let links: { title: string; link: string }[] = JSON.parse(fs.readFileSync(vscodeLinksPath, 'utf-8'));
+      const initialLength = links.length;
+      links = links.filter(link => link.link !== item.getLink());
+      if (links.length !== initialLength) {
+        fs.writeFileSync(vscodeLinksPath, JSON.stringify(links, null, 2));
+        changed = true;
+      }
+    }
+
+    if (!changed && fs.existsSync(mediaLinksPath)) {
+      let links: { title: string; link: string }[] = JSON.parse(fs.readFileSync(mediaLinksPath, 'utf-8'));
+      const initialLength = links.length;
+      links = links.filter(link => link.link !== item.getLink());
+      if (links.length !== initialLength) {
+        fs.writeFileSync(mediaLinksPath, JSON.stringify(links, null, 2));
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      linkViewProvider.refresh();
+    }
+  });
+  context.subscriptions.push(deleteLinkCommand);
 }
 
 // This method is called when your extension is deactivated
