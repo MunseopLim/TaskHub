@@ -4,7 +4,14 @@
     "title": "Build",
     "action": {
       "type": "shell",
-      "command": "echo 'Building...' && sleep 1 && exit 1",
+      "command": {
+        "macos": "echo 'Building...' && sleep 1",
+        "windows": {
+          "cmd": "echo 'Building with cmd...' && timeout 1",
+          "powershell": "echo 'Building with powershell...' && sleep 1"
+        },
+        "linux": "echo 'Building...' && sleep 1"
+      },
       "cwd": "${workspaceFolder}",
       "revealTerminal": "always",
       "successMessage": "Build completed successfully!",
@@ -21,10 +28,31 @@
     "title": "Open Project Directory",
     "action": {
       "type": "shell",
-      "command": "open .",
+      "command": {
+        "macos": "open .",
+        "windows": "explorer .",
+        "linux": "xdg-open ."
+      },
       "cwd": "${workspaceFolder}",
       "revealTerminal": "silent",
       "successMessage": "Project directory opened."
+    }
+  },
+  {
+    "id": "button.printEnv",
+    "title": "Print Environment Variables",
+    "action": {
+      "type": "shell",
+      "command": {
+        "macos": "printenv && echo \"PATH=$PATH\"",
+        "windows": {
+          "cmd": "set && echo \"PATH=%PATH%\"",
+          "powershell": "Get-ChildItem Env: ; echo \"PATH=$env:PATH\""
+        },
+        "linux": "printenv && echo \"PATH=$PATH\""
+      },
+      "cwd": "${workspaceFolder}",
+      "revealTerminal": "always"
     }
   },
   {

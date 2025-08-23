@@ -116,6 +116,11 @@
       {
         "command": "firmware-toolkit.showExampleJsonQuickPick",
         "title": "Show Example JSON Quick Pick"
+      },
+      {
+        "command": "firmware-toolkit.terminateAllTasks",
+        "title": "Terminate All Tasks",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -137,6 +142,11 @@
         },
         {
           "command": "firmware-toolkit.editActions",
+          "when": "view == mainView.main",
+          "group": "navigation"
+        },
+        {
+          "command": "firmware-toolkit.terminateAllTasks",
           "when": "view == mainView.main",
           "group": "navigation"
         }

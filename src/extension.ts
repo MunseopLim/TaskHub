@@ -251,16 +251,15 @@ export function activate(context: vscode.ExtensionContext) {
 	// This line of code will only be executed once when your extension is activated
 	console.log('Congratulations, your extension "firmware-toolkit" is now active!');
 
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const disposable = vscode.commands.registerCommand('firmware-toolkit.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from firmware-toolkit!');
-	});
+  const taskProcessIds = new Map<number, boolean>();
 
-	context.subscriptions.push(disposable);
+  context.subscriptions.push(vscode.tasks.onDidStartTaskProcess(e => {
+    if (e.execution.task.source === 'firmware-toolkit') {
+      if (e.processId) {
+        taskProcessIds.set(e.processId, true);
+      }
+    }
+  }));
 
   const mainViewProvider = new MainViewProvider(context);
   const linkViewProvider = new LinkViewProvider(context);
@@ -366,6 +365,34 @@ export function activate(context: vscode.ExtensionContext) {
         cwd = cwd.replace('${workspaceFolder}', workspaceFolder);
       }
 
+      let command = action.command;
+      if (typeof command === 'object') {
+        const platform = process.platform;
+        if (platform === 'win32') {
+          const terminal = vscode.workspace.getConfiguration('terminal.integrated.defaultProfile').get<string>('windows')?.toLowerCase();
+          if (terminal && command.windows && typeof command.windows === 'object') {
+            if (terminal.includes('powershell') && command.windows.powershell) {
+              command = command.windows.powershell;
+            } else if (terminal.includes('cmd') && command.windows.cmd) {
+              command = command.windows.cmd;
+            } else {
+              command = command.windows.cmd || command.windows.powershell;
+            }
+          } else {
+            command = command.windows;
+          }
+        } else if (platform === 'darwin') {
+          command = command.macos;
+        } else {
+          command = command.linux;
+        }
+      }
+
+      if (typeof command !== 'string') {
+        vscode.window.showErrorMessage(`No command found for the current OS.`);
+        return;
+      }
+
       let revealKind: vscode.TaskRevealKind = vscode.TaskRevealKind.Silent; // Default to Silent
       if (action.revealTerminal === 'always') {
         revealKind = vscode.TaskRevealKind.Always;
@@ -378,7 +405,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.TaskScope.Workspace, // Scope
         title, // Name
         'firmware-toolkit', // Source
-        new vscode.ShellExecution(action.command, { cwd: cwd }), // Execution
+        new vscode.ShellExecution(command, { cwd: cwd }), // Execution
         [] // Problem Matchers
       );
 
@@ -793,6 +820,27 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.showInformationMessage(`Added ${fileName} to favorites.`);
   });
   context.subscriptions.push(addOpenFileToFavoritesCommand);
+
+  const terminateAllTasksCommand = vscode.commands.registerCommand('firmware-toolkit.terminateAllTasks', async () => {
+    const terminalsToClosePromises = vscode.window.terminals.map(async t => {
+      const processId = await t.processId;
+      return processId && taskProcessIds.has(processId) ? t : null;
+    });
+    const terminalsToClose = (await Promise.all(terminalsToClosePromises)).filter(t => t !== null) as vscode.Terminal[];
+
+    const tasksToTerminate = vscode.tasks.taskExecutions.filter(t => t.task.source === 'firmware-toolkit');
+
+    if (tasksToTerminate.length === 0 && terminalsToClose.length === 0) {
+      vscode.window.showInformationMessage('No tasks or terminals from this extension are currently active.');
+      return;
+    }
+
+    tasksToTerminate.forEach(t => t.terminate());
+    terminalsToClose.forEach(t => t.dispose());
+
+    vscode.window.showInformationMessage(`Terminated ${tasksToTerminate.length} task(s) and closed ${terminalsToClose.length} terminal(s).`);
+  });
+  context.subscriptions.push(terminateAllTasksCommand);
 }
 
 // This method is called when your extension is deactivated
