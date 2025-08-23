@@ -586,6 +586,11 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(addFavoriteFileCommand);
 
   const deleteFavoriteCommand = vscode.commands.registerCommand('firmware-toolkit.deleteFavorite', async (item: Favorite) => {
+    const confirm = await vscode.window.showWarningMessage(`Are you sure you want to delete ${item.label}?`, { modal: true }, 'Yes');
+    if (confirm !== 'Yes') {
+      return;
+    }
+
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const favoritesPath = path.join(workspaceFolder, '.vscode', 'favorites.json');
     if (!fs.existsSync(favoritesPath)) {
@@ -600,6 +605,11 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(deleteFavoriteCommand);
 
   const deleteLinkCommand = vscode.commands.registerCommand('firmware-toolkit.deleteLink', async (item: Link) => {
+    const confirm = await vscode.window.showWarningMessage(`Are you sure you want to delete ${item.label}?`, { modal: true }, 'Yes');
+    if (confirm !== 'Yes') {
+      return;
+    }
+
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const vscodeLinksPath = path.join(workspaceFolder, '.vscode', 'links.json');
     const mediaLinksPath = path.join(context.extensionPath, 'media', 'links.json');
