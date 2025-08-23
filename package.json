@@ -73,9 +73,21 @@
       {
         "command": "firmware-toolkit.openFavoriteFile",
         "title": "Open Favorite File"
+      },
+      {
+        "command": "firmware-toolkit.editFavorites",
+        "title": "Edit Favorites",
+        "icon": "$(pencil)"
       }
     ],
     "menus": {
+      "view/title": [
+        {
+          "command": "firmware-toolkit.editFavorites",
+          "when": "view == mainView.favorite",
+          "group": "navigation"
+        }
+      ],
       "view/item/context": [
         {
           "command": "firmware-toolkit.copyLink",

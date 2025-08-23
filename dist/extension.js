@@ -7,19 +7,13 @@ var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
-  {
     __defProp(target, name, { get: all[name], enumerable: true });
-  }
 };
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
     for (let key of __getOwnPropNames(from))
-    {
       if (!__hasOwnProp.call(to, key) && key !== except)
-      {
         __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
-        }
-    }
   }
   return to;
 };
@@ -426,6 +420,20 @@ function activate(context) {
     }
   });
   context.subscriptions.push(showExecutablePickerCommand);
+  const editFavoritesCommand = vscode.commands.registerCommand("firmware-toolkit.editFavorites", async () => {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
+    const favoritesPath = path.join(workspaceFolder, ".vscode", "favorites.json");
+    if (!fs.existsSync(favoritesPath)) {
+      if (!fs.existsSync(path.dirname(favoritesPath))) {
+        fs.mkdirSync(path.dirname(favoritesPath));
+      }
+      fs.writeFileSync(favoritesPath, JSON.stringify([], null, 2));
+    }
+    const uri = vscode.Uri.file(favoritesPath);
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document);
+  });
+  context.subscriptions.push(editFavoritesCommand);
 }
 function deactivate() {
 }
