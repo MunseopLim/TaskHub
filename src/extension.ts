@@ -59,6 +59,7 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
               title: 'Select and Run Executable',
               arguments: [item.action], // Pass the action object
             };
+            executablePickerItem.contextValue = 'executablePicker';
             items.push(executablePickerItem);
           } else {
             items.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None));
@@ -416,51 +417,80 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(showVersionCommand);
 
   const showExecutablePickerCommand = vscode.commands.registerCommand('firmware-toolkit.showExecutablePicker', async (action: any) => {
-    const folderPath = action.folder.replace('${workspaceFolder}', vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : '');
+    const folderPath = action.folder?.replace('${workspaceFolder}', vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : '');
     const runCommandTemplate = action.runCommand;
 
-    if (!fs.existsSync(folderPath)) {
-      vscode.window.showErrorMessage(`Folder not found: ${folderPath}`);
-      return;
+    const quickPickItems: (vscode.QuickPickItem & { isBrowse?: boolean })[] = [];
+
+    if (folderPath && fs.existsSync(folderPath)) {
+      try {
+        const files = await fs.promises.readdir(folderPath);
+        files.forEach(file => {
+          quickPickItems.push({ label: file, description: path.join(folderPath, file) });
+        });
+      } catch (error: any) {
+        vscode.window.showErrorMessage(`Error reading folder: ${error.message}`);
+      }
     }
 
-    try {
-      const files = await fs.promises.readdir(folderPath);
-      const quickPickItems = files.map(file => ({ label: file, description: path.join(folderPath, file) }));
+    quickPickItems.push({ label: '$(file-directory) Browse for executable...', isBrowse: true });
 
-      const selectedFile = await vscode.window.showQuickPick(quickPickItems, {
-        placeHolder: `Select an executable from ${folderPath}`,
-      });
+    const selectedItem = await vscode.window.showQuickPick(quickPickItems, {
+      placeHolder: 'Select an executable or browse for one',
+    });
 
-      if (selectedFile) {
-        const fullPath = selectedFile.description; // full path is stored in description
-        const commandToExecute = runCommandTemplate.replace('${file}', fullPath);
+    if (selectedItem) {
+      if (selectedItem.isBrowse) {
+        const uris = await vscode.window.showOpenDialog({
+          canSelectMany: false,
+          openLabel: 'Select Executable',
+        });
 
-        // Execute the command using the task system
+        if (uris && uris.length > 0) {
+          const fullPath = uris[0].fsPath;
+          const commandToExecute = runCommandTemplate.replace('${file}', `"${fullPath}"`);
+          const task = new vscode.Task(
+            { type: 'shell', task: 'Run Executable' },
+            vscode.TaskScope.Workspace,
+            'Run Executable',
+            'firmware-toolkit',
+            new vscode.ShellExecution(commandToExecute),
+            []
+          );
+          task.isBackground = false;
+          task.presentationOptions = {
+            reveal: vscode.TaskRevealKind.Always,
+            panel: vscode.TaskPanelKind.Dedicated,
+            clear: true,
+            showReuseMessage: false
+          };
+          await vscode.tasks.executeTask(task);
+        }
+      } else {
+        const fullPath = selectedItem.description;
+        const commandToExecute = runCommandTemplate.replace('${file}', `"${fullPath}"`);
         const task = new vscode.Task(
-          { type: 'shell', task: selectedFile.label },
+          { type: 'shell', task: selectedItem.label },
           vscode.TaskScope.Workspace,
-          selectedFile.label,
+          selectedItem.label,
           'firmware-toolkit',
-          new vscode.ShellExecution(commandToExecute, { cwd: folderPath }), // CWD for the task is the folder where executables are
+          new vscode.ShellExecution(commandToExecute, { cwd: folderPath }),
           []
         );
-
         task.isBackground = false;
         task.presentationOptions = {
-          reveal: vscode.TaskRevealKind.Always, // Show terminal for executable
+          reveal: vscode.TaskRevealKind.Always,
           panel: vscode.TaskPanelKind.Dedicated,
           clear: true,
           showReuseMessage: false
         };
-
         await vscode.tasks.executeTask(task);
       }
-    } catch (error: any) {
-      vscode.window.showErrorMessage(`Error reading folder: ${error.message}`);
     }
   });
   context.subscriptions.push(showExecutablePickerCommand);
+
+  
 
   const editFavoritesCommand = vscode.commands.registerCommand('firmware-toolkit.editFavorites', async () => {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
