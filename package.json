@@ -4,16 +4,12 @@
   "description": "Firmware Toolkit",
   "version": "0.1.0",
   "engines": {
-    "vscode": "^1.30.0"
+    "vscode": "^1.75.0"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [
-    "onView:mainView.main",
-    "onView:mainView.link",
-    "onView:mainView.favorite"
-  ],
+  "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -29,15 +25,18 @@
       "mainView": [
         {
           "id": "mainView.main",
-          "name": "Main"
+          "name": "Main",
+          "icon": "media/m_icon.svg"
         },
         {
           "id": "mainView.link",
-          "name": "Link"
+          "name": "Link",
+          "icon": "media/l_icon.svg"
         },
         {
           "id": "mainView.favorite",
-          "name": "Favorite"
+          "name": "Favorite",
+          "icon": "media/f_icon.svg"
         }
       ]
     },
