@@ -641,6 +641,46 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
   context.subscriptions.push(deleteLinkCommand);
+
+  const addOpenFileToFavoritesCommand = vscode.commands.registerCommand('firmware-toolkit.addOpenFileToFavorites', async () => {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showInformationMessage('No active editor found.');
+      return;
+    }
+
+    const filePath = editor.document.uri.fsPath;
+    const fileName = path.basename(filePath);
+
+    const title = await vscode.window.showInputBox({
+      prompt: `Enter a title for ${fileName}`,
+      value: fileName
+    });
+
+    if (!title) {
+      return;
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const favoritesPath = path.join(workspaceFolder, '.vscode', 'favorites.json');
+    let favorites: { title: string; path: string }[] = [];
+    if (fs.existsSync(favoritesPath)) {
+      try {
+        favorites = JSON.parse(fs.readFileSync(favoritesPath, 'utf-8'));
+      } catch (error: any) {
+        vscode.window.showErrorMessage(`Error parsing favorites.json: ${error.message}`);
+        return;
+      }
+    }
+
+    favorites.push({ title, path: filePath });
+
+    fs.writeFileSync(favoritesPath, JSON.stringify(favorites, null, 2));
+
+    favoriteViewProvider.refresh();
+    vscode.window.showInformationMessage(`Added ${fileName} to favorites.`);
+  });
+  context.subscriptions.push(addOpenFileToFavoritesCommand);
 }
 
 // This method is called when your extension is deactivated

@@ -103,6 +103,11 @@
         "command": "firmware-toolkit.deleteLink",
         "title": "Delete Link",
         "icon": "$(trash)"
+      },
+      {
+        "command": "firmware-toolkit.addOpenFileToFavorites",
+        "title": "Add Open File to Favorites",
+        "icon": "$(add)"
       }
     ],
     "menus": {
@@ -125,6 +130,12 @@
         {
           "command": "firmware-toolkit.editActions",
           "when": "view == mainView.main",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "firmware-toolkit.addOpenFileToFavorites",
           "group": "navigation"
         }
       ],
