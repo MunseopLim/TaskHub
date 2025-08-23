@@ -83,6 +83,11 @@
         "command": "firmware-toolkit.editLinks",
         "title": "Edit Links",
         "icon": "$(pencil)"
+      },
+      {
+        "command": "firmware-toolkit.editActions",
+        "title": "Edit Actions",
+        "icon": "$(pencil)"
       }
     ],
     "menus": {
@@ -95,6 +100,11 @@
         {
           "command": "firmware-toolkit.editLinks",
           "when": "view == mainView.link",
+          "group": "navigation"
+        },
+        {
+          "command": "firmware-toolkit.editActions",
+          "when": "view == mainView.main",
           "group": "navigation"
         }
       ],

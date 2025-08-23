@@ -448,6 +448,20 @@ function activate(context) {
     await vscode.window.showTextDocument(document);
   });
   context.subscriptions.push(editLinksCommand);
+  const editActionsCommand = vscode.commands.registerCommand("firmware-toolkit.editActions", async () => {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
+    const actionsPath = path.join(workspaceFolder, ".vscode", "actions.json");
+    if (!fs.existsSync(actionsPath)) {
+      if (!fs.existsSync(path.dirname(actionsPath))) {
+        fs.mkdirSync(path.dirname(actionsPath));
+      }
+      fs.writeFileSync(actionsPath, JSON.stringify([], null, 2));
+    }
+    const uri = vscode.Uri.file(actionsPath);
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document);
+  });
+  context.subscriptions.push(editActionsCommand);
 }
 function deactivate() {
 }
