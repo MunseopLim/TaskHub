@@ -119,7 +119,7 @@
       {
         "command": "firmware-toolkit.terminateAllTasks",
         "title": "Terminate All Tasks",
-        "icon": "$(trash)"
+        "icon": "$(primitive-square)"
       }
     ],
     "menus": {
