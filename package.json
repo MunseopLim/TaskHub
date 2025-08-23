@@ -78,6 +78,11 @@
         "command": "firmware-toolkit.editFavorites",
         "title": "Edit Favorites",
         "icon": "$(pencil)"
+      },
+      {
+        "command": "firmware-toolkit.editLinks",
+        "title": "Edit Links",
+        "icon": "$(pencil)"
       }
     ],
     "menus": {
@@ -85,6 +90,11 @@
         {
           "command": "firmware-toolkit.editFavorites",
           "when": "view == mainView.favorite",
+          "group": "navigation"
+        },
+        {
+          "command": "firmware-toolkit.editLinks",
+          "when": "view == mainView.link",
           "group": "navigation"
         }
       ],

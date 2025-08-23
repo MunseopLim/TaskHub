@@ -479,6 +479,24 @@ export function activate(context: vscode.ExtensionContext) {
     await vscode.window.showTextDocument(document);
   });
   context.subscriptions.push(editFavoritesCommand);
+
+  const editLinksCommand = vscode.commands.registerCommand('firmware-toolkit.editLinks', async () => {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const linksPath = path.join(workspaceFolder, '.vscode', 'links.json');
+
+    if (!fs.existsSync(linksPath)) {
+      // Create the .vscode directory if it doesn't exist
+      if (!fs.existsSync(path.dirname(linksPath))) {
+        fs.mkdirSync(path.dirname(linksPath));
+      }
+      fs.writeFileSync(linksPath, JSON.stringify([], null, 2));
+    }
+
+    const uri = vscode.Uri.file(linksPath);
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document);
+  });
+  context.subscriptions.push(editLinksCommand);
 }
 
 // This method is called when your extension is deactivated
