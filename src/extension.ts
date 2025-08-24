@@ -99,10 +99,10 @@ class Action extends vscode.TreeItem {
     if (actionData && actionData.type) {
       switch (actionData.type) {
         case 'shell':
-          this.iconPath = vscode.Uri.file(path.join(this.context.extensionPath, 'media', 'h_icon.svg'));
+          this.iconPath = new vscode.ThemeIcon('terminal');
           break;
         case 'executablePicker':
-          this.iconPath = vscode.Uri.file(path.join(this.context.extensionPath, 'media', 'h_icon.svg'));
+          this.iconPath = new vscode.ThemeIcon('play');
           break;
         // Add more cases for other action types if needed
         default:
