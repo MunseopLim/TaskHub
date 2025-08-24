@@ -228,7 +228,7 @@ class FavoriteViewProvider implements vscode.TreeDataProvider<Favorite> {
   private updateTitle(): void {
     if (this.view) {
       const favorites = this.getFavorites();
-      this.view.title = `Favorite (${favorites.length})`;
+      this.view.title = `Favorite Files (${favorites.length})`;
     }
   }
 
