@@ -1,7 +1,9 @@
 {
   "name": "firmware-toolkit",
-  "displayName": "firmware-toolkit",
-  "description": "Firmware Toolkit",
+  "displayName": "Firmware Toolkit",
+  "description": "The helper to connect common tools.",
+  "icon": "media/h_icon.png",
+  "publisher": "Munseop",
   "version": "0.1.0",
   "engines": {
     "vscode": "^1.75.0"
@@ -203,7 +205,7 @@
     "@types/chai": "^5.2.2",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "@types/vscode": "^1.103.0",
+    "@types/vscode": "^1.75.0",
     "@typescript-eslint/eslint-plugin": "^8.39.0",
     "@typescript-eslint/parser": "^8.39.0",
     "@vscode/test-cli": "^0.0.11",

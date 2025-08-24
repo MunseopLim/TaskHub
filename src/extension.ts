@@ -67,7 +67,7 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
             executablePickerItem.contextValue = 'executablePicker';
             items.push(executablePickerItem);
           } else {
-            items.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None));
+            items.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context));
           }
         } else {
           // Handle unknown types or IDs, e.g., log a warning or create a generic item
@@ -86,8 +86,9 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
 class Action extends vscode.TreeItem {
   constructor(
     public readonly label: string,
-    private readonly actionData: any, // Renamed from 'action' to 'actionData' for clarity
-    public readonly collapsibleState: vscode.TreeItemCollapsibleState
+    private readonly actionData: any,
+    public readonly collapsibleState: vscode.TreeItemCollapsibleState,
+    private readonly context: vscode.ExtensionContext
   ) {
     super(label, collapsibleState);
     this.command = {
@@ -100,10 +101,10 @@ class Action extends vscode.TreeItem {
     if (actionData && actionData.type) {
       switch (actionData.type) {
         case 'shell':
-          this.iconPath = new vscode.ThemeIcon('terminal');
+          this.iconPath = vscode.Uri.file(path.join(this.context.extensionPath, 'media', 'h_icon.svg'));
           break;
         case 'executablePicker':
-          this.iconPath = new vscode.ThemeIcon('play');
+          this.iconPath = vscode.Uri.file(path.join(this.context.extensionPath, 'media', 'h_icon.svg'));
           break;
         // Add more cases for other action types if needed
         default:
