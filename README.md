@@ -98,6 +98,28 @@
     *   `"successMessage"`: 작업이 종료 코드 0으로 완료되면 표시됩니다.
     *   `"failMessage"`: 작업이 0이 아닌 종료 코드로 완료되면 표시됩니다.
     이 속성들은 선택 사항입니다. 생략하면 해당 결과에 대한 알림이 표시되지 않습니다.
+*   **OS별 명령 (`command` 객체)**: `command` 속성은 단일 문자열 대신 객체를 사용하여 운영 체제(OS)별로 다른 명령을 지정할 수 있습니다. 이는 크로스 플랫폼 프로젝트에서 유용합니다.
+    ```json
+    {
+      "type": "shell",
+      "command": {
+        "windows": "npm run build:windows",
+        "macos": "npm run build:macos",
+        "linux": "npm run build:linux"
+      },
+      "cwd": "${workspaceFolder}"
+    }
+    ```
+    *   `windows`: Windows 운영 체제에서 실행될 명령입니다. PowerShell 또는 CMD에 따라 추가적으로 세분화할 수 있습니다.
+        ```json
+        "windows": {
+          "powershell": "powershell -File build.ps1",
+          "cmd": "build.bat"
+        }
+        ```
+    *   `macos`: macOS 운영 체제에서 실행될 명령입니다.
+    *   `linux`: Linux 운영 체제에서 실행될 명령입니다.
+    현재 OS에 해당하는 명령이 없으면 오류 메시지가 표시됩니다.
 *   **실행 파일 선택기**: 지정된 폴더에서 실행 파일을 선택하거나 파일 시스템을 탐색하여 실행 파일을 실행할 수 있는 특수 액션 타입(`executablePicker`)입니다.
     ```json
     {

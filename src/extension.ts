@@ -683,6 +683,22 @@ export function activate(context: vscode.ExtensionContext) {
         fileName = 'actions.json';
         exampleContent = JSON.stringify([
           {
+            "id": "button.build.os",
+            "title": "Build Project (OS-Specific)",
+            "action": {
+              "type": "shell",
+              "command": {
+                "windows": "echo 'Building on Windows...'",
+                "macos": "echo 'Building on macOS...'",
+                "linux": "echo 'Building on Linux...'"
+              },
+              "cwd": "${workspaceFolder}",
+              "revealTerminal": "always",
+              "successMessage": "Build completed successfully!",
+              "failMessage": "Build failed. Check terminal for details."
+            }
+          },
+          {
             "id": "button.build",
             "title": "Build Project",
             "action": {
