@@ -24,14 +24,12 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
     } else {
       const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'actions.json');
       let actionsJson = JSON.parse(fs.readFileSync(mediaJsonPath, 'utf-8'));
-      console.log(`Using media/actions.json: ${JSON.stringify(actionsJson, null, 2)}`);
 
       const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'actions.json');
 
       if (fs.existsSync(vscodeJsonPath)) {
         const vscodeActionsJson = JSON.parse(fs.readFileSync(vscodeJsonPath, 'utf-8'));
         actionsJson = actionsJson.concat(vscodeActionsJson);
-        console.log(`Appended .vscode/actions.json: ${JSON.stringify(vscodeActionsJson, null, 2)}`);
       }
 
       const packageJsonPath = path.join(this.context.extensionPath, 'package.json');
@@ -120,11 +118,33 @@ class Action extends vscode.TreeItem {
 class LinkViewProvider implements vscode.TreeDataProvider<Link> {
   private _onDidChangeTreeData: vscode.EventEmitter<Link | undefined | null | void> = new vscode.EventEmitter<Link | undefined | null | void>();
   readonly onDidChangeTreeData: vscode.Event<Link | undefined | null | void> = this._onDidChangeTreeData.event;
+  public view: vscode.TreeView<Link> | undefined;
 
   constructor(private context: vscode.ExtensionContext) {}
 
   refresh(): void {
     this._onDidChangeTreeData.fire();
+    this.updateTitle();
+  }
+
+  private updateTitle(): void {
+    if (this.view) {
+      const links = this.getLinks();
+      this.view.title = `Link (${links.length})`;
+    }
+  }
+
+  private getLinks(): { title: string; link: string }[] {
+    const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
+    let linksJson = JSON.parse(fs.readFileSync(mediaJsonPath, 'utf-8'));
+
+    const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'links.json');
+
+    if (fs.existsSync(vscodeJsonPath)) {
+      const vscodeLinksJson = JSON.parse(fs.readFileSync(vscodeJsonPath, 'utf-8'));
+      linksJson = linksJson.concat(vscodeLinksJson);
+    }
+    return linksJson;
   }
 
   getTreeItem(element: Link): vscode.TreeItem {
@@ -135,17 +155,9 @@ class LinkViewProvider implements vscode.TreeDataProvider<Link> {
     if (element) {
       return Promise.resolve([]);
     } else {
-      const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
-      let linksJson = JSON.parse(fs.readFileSync(mediaJsonPath, 'utf-8'));
-      console.log(`Using media/links.json: ${JSON.stringify(linksJson, null, 2)}`);
+      const linksJson = this.getLinks();
+      this.updateTitle();
 
-      const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'links.json');
-
-      if (fs.existsSync(vscodeJsonPath)) {
-        const vscodeLinksJson = JSON.parse(fs.readFileSync(vscodeJsonPath, 'utf-8'));
-        linksJson = linksJson.concat(vscodeLinksJson);
-        console.log(`Appended .vscode/links.json: ${JSON.stringify(vscodeLinksJson, null, 2)}`);
-      }
       return Promise.resolve(
         linksJson.map(
           (item: { title: string; link: string }) =>
@@ -204,11 +216,35 @@ class Favorite extends vscode.TreeItem {
 class FavoriteViewProvider implements vscode.TreeDataProvider<Favorite> {
   private _onDidChangeTreeData: vscode.EventEmitter<Favorite | undefined | null | void> = new vscode.EventEmitter<Favorite | undefined | null | void>();
   readonly onDidChangeTreeData: vscode.Event<Favorite | undefined | null | void> = this._onDidChangeTreeData.event;
+  public view: vscode.TreeView<Favorite> | undefined;
 
   constructor(private context: vscode.ExtensionContext) {}
 
   refresh(): void {
     this._onDidChangeTreeData.fire();
+    this.updateTitle();
+  }
+
+  private updateTitle(): void {
+    if (this.view) {
+      const favorites = this.getFavorites();
+      this.view.title = `Favorite (${favorites.length})`;
+    }
+  }
+
+  private getFavorites(): { title: string; path: string }[] {
+    const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'favorites.json');
+    let favoritesJson: { title: string; path: string }[] = [];
+
+    if (fs.existsSync(vscodeJsonPath)) {
+      try {
+        favoritesJson = JSON.parse(fs.readFileSync(vscodeJsonPath, 'utf-8'));
+      } catch (error: any) {
+        vscode.window.showErrorMessage(`Error parsing .vscode/favorites.json: ${error.message}`);
+        console.error(`Error parsing .vscode/favorites.json: ${error.message}`);
+      }
+    }
+    return favoritesJson;
   }
 
   getTreeItem(element: Favorite): vscode.TreeItem {
@@ -219,20 +255,8 @@ class FavoriteViewProvider implements vscode.TreeDataProvider<Favorite> {
     if (element) {
       return Promise.resolve([]);
     } else {
-      const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'favorites.json');
-      let favoritesJson: { title: string; path: string }[] = [];
-
-      if (fs.existsSync(vscodeJsonPath)) {
-        try {
-          favoritesJson = JSON.parse(fs.readFileSync(vscodeJsonPath, 'utf-8'));
-          console.log(`Using .vscode/favorites.json: ${JSON.stringify(favoritesJson, null, 2)}`);
-        } catch (error: any) {
-          vscode.window.showErrorMessage(`Error parsing .vscode/favorites.json: ${error.message}`);
-          console.error(`Error parsing .vscode/favorites.json: ${error.message}`);
-        }
-      } else {
-        console.log('No .vscode/favorites.json found. Favorite view will be empty.');
-      }
+      const favoritesJson = this.getFavorites();
+      this.updateTitle();
 
       return Promise.resolve(
         favoritesJson.map(
@@ -250,7 +274,6 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Use the console to output diagnostic information (console.log) and errors (console.error)
 	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "firmware-toolkit" is now active!');
 
   const taskProcessIds = new Map<number, boolean>();
 
@@ -267,8 +290,8 @@ export function activate(context: vscode.ExtensionContext) {
   const favoriteViewProvider = new FavoriteViewProvider(context);
 
   vscode.window.registerTreeDataProvider('mainView.main', mainViewProvider);
-	vscode.window.registerTreeDataProvider('mainView.link', linkViewProvider);
-  vscode.window.registerTreeDataProvider('mainView.favorite', favoriteViewProvider);
+  linkViewProvider.view = vscode.window.createTreeView('mainView.link', { treeDataProvider: linkViewProvider });
+  favoriteViewProvider.view = vscode.window.createTreeView('mainView.favorite', { treeDataProvider: favoriteViewProvider });
 
   // Register file watchers
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -355,9 +378,6 @@ export function activate(context: vscode.ExtensionContext) {
   const executeActionCommand = vscode.commands.registerCommand('firmware-toolkit.executeAction', async (arg: { title: string, action: any }) => {
     const action = arg.action; // Get the action data
     const title = arg.title;   // Get the title
-
-    console.log('Action received:', action);
-    console.log('Action title:', title);
 
     if (action.type === 'shell') {
       let cwd = action.cwd;
