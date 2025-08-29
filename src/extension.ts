@@ -285,13 +285,24 @@ export function activate(context: vscode.ExtensionContext) {
     }
   }));
 
+  context.subscriptions.push(vscode.tasks.onDidEndTaskProcess(e => {
+    if (e.execution.task.source === 'firmware-toolkit') {
+      if (e.processId) {
+        taskProcessIds.delete(e.processId);
+      }
+    }
+  }));
+
   const mainViewProvider = new MainViewProvider(context);
   const linkViewProvider = new LinkViewProvider(context);
   const favoriteViewProvider = new FavoriteViewProvider(context);
 
-  vscode.window.registerTreeDataProvider('mainView.main', mainViewProvider);
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('mainView.main', mainViewProvider));
   linkViewProvider.view = vscode.window.createTreeView('mainView.link', { treeDataProvider: linkViewProvider });
   favoriteViewProvider.view = vscode.window.createTreeView('mainView.favorite', { treeDataProvider: favoriteViewProvider });
+
+  context.subscriptions.push(linkViewProvider.view);
+  context.subscriptions.push(favoriteViewProvider.view);
 
   // Register file watchers
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -456,7 +467,6 @@ export function activate(context: vscode.ExtensionContext) {
           disposable.dispose(); // Dispose the listener after the task we care about ends
         }
       });
-      context.subscriptions.push(disposable); // Ensure the disposable is managed by the context
     }
   });
   context.subscriptions.push(executeActionCommand);
