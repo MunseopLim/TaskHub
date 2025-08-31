@@ -18,6 +18,16 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "Firmware Toolkit",
+      "properties": {
+        "firmware-toolkit.showTaskStatus": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show status indicators (running, success, failure) for actions in the Main view."
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -66,6 +76,11 @@
       {
         "command": "firmware-toolkit.executeAction",
         "title": "Execute Action"
+      },
+      {
+        "command": "firmware-toolkit.stopAction",
+        "title": "Stop Action",
+        "icon": "$(primitive-square)"
       },
       {
         "command": "firmware-toolkit.showVersion",
@@ -186,6 +201,11 @@
         {
           "command": "firmware-toolkit.showExampleJsonQuickPick",
           "when": "view == mainView.main && viewItem == versionItem",
+          "group": "inline"
+        },
+        {
+          "command": "firmware-toolkit.stopAction",
+          "when": "view == mainView.main && viewItem == runningAction",
           "group": "inline"
         }
       ]

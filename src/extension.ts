@@ -65,7 +65,7 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
             executablePickerItem.contextValue = 'executablePicker';
             items.push(executablePickerItem);
           } else {
-            items.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context));
+            items.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id));
           }
         } else {
           // Handle unknown types or IDs, e.g., log a warning or create a generic item
@@ -81,37 +81,61 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
   }
 }
 
+const actionStates = new Map<string, { state: 'running' | 'success' | 'failure' }>();
+const activeTasks = new Map<string, vscode.TaskExecution>();
+
 class Action extends vscode.TreeItem {
   constructor(
     public readonly label: string,
     private readonly actionData: any,
     public readonly collapsibleState: vscode.TreeItemCollapsibleState,
-    private readonly context: vscode.ExtensionContext
+    private readonly context: vscode.ExtensionContext,
+    public readonly id?: string
   ) {
     super(label, collapsibleState);
     this.command = {
       command: 'firmware-toolkit.executeAction',
       title: 'Execute Action',
-      arguments: [{ title: label, action: actionData }], // Pass an object containing both title and actionData
+      arguments: [this],
     };
 
-    // Set icon based on action type
-    if (actionData && actionData.type) {
-      switch (actionData.type) {
-        case 'shell':
-          this.iconPath = new vscode.ThemeIcon('terminal');
+    const state = actionStates.get(this.id || '');
+    if (state) {
+      switch (state.state) {
+        case 'running':
+          this.iconPath = new vscode.ThemeIcon('sync~spin');
+          this.contextValue = 'runningAction';
           break;
-        case 'executablePicker':
-          this.iconPath = new vscode.ThemeIcon('play');
+        case 'success':
+          this.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.blue'));
+          this.contextValue = 'succeededAction';
           break;
-        // Add more cases for other action types if needed
-        default:
-          this.iconPath = new vscode.ThemeIcon('gear'); // Default icon for unknown types
+        case 'failure':
+          this.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('charts.red'));
+          this.contextValue = 'failedAction';
           break;
       }
     } else {
-      this.iconPath = new vscode.ThemeIcon('gear'); // Default icon if actionData or type is missing
+      if (actionData && actionData.type) {
+        switch (actionData.type) {
+          case 'shell':
+            this.iconPath = new vscode.ThemeIcon('terminal');
+            break;
+          case 'executablePicker':
+            this.iconPath = new vscode.ThemeIcon('play');
+            break;
+          default:
+            this.iconPath = new vscode.ThemeIcon('gear');
+            break;
+        }
+      } else {
+        this.iconPath = new vscode.ThemeIcon('gear');
+      }
     }
+  }
+
+  public getActionData() {
+    return this.actionData;
   }
 }
 
@@ -276,19 +300,23 @@ export function activate(context: vscode.ExtensionContext) {
 	// This line of code will only be executed once when your extension is activated
 
   const taskProcessIds = new Map<number, boolean>();
+  const taskNameToProcessId = new Map<string, number>();
 
   context.subscriptions.push(vscode.tasks.onDidStartTaskProcess(e => {
     if (e.execution.task.source === 'firmware-toolkit') {
       if (e.processId) {
         taskProcessIds.set(e.processId, true);
+        taskNameToProcessId.set(e.execution.task.name, e.processId);
       }
     }
   }));
 
   context.subscriptions.push(vscode.tasks.onDidEndTaskProcess(e => {
     if (e.execution.task.source === 'firmware-toolkit') {
-      if (e.processId) {
-        taskProcessIds.delete(e.processId);
+      const processId = taskNameToProcessId.get(e.execution.task.name);
+      if (processId) {
+        taskProcessIds.delete(processId);
+        taskNameToProcessId.delete(e.execution.task.name);
       }
     }
   }));
@@ -386,9 +414,21 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(goToLinkCommand);
 
-  const executeActionCommand = vscode.commands.registerCommand('firmware-toolkit.executeAction', async (arg: { title: string, action: any }) => {
-    const action = arg.action; // Get the action data
-    const title = arg.title;   // Get the title
+  const executeActionCommand = vscode.commands.registerCommand('firmware-toolkit.executeAction', async (actionItem: Action) => {
+    const showTaskStatus = vscode.workspace.getConfiguration('firmware-toolkit').get('showTaskStatus', true);
+    const action = actionItem.getActionData();
+    const title = actionItem.label;
+    const id = actionItem.id || title;
+
+    if (showTaskStatus) {
+      const currentState = actionStates.get(id);
+      if (currentState?.state === 'running') {
+        vscode.window.showInformationMessage(`Action '${title}' is already running.`);
+        return;
+      }
+      actionStates.set(id, { state: 'running' });
+      mainViewProvider.refresh();
+    }
 
     if (action.type === 'shell') {
       let cwd = action.cwd;
@@ -422,6 +462,10 @@ export function activate(context: vscode.ExtensionContext) {
 
       if (typeof command !== 'string') {
         vscode.window.showErrorMessage(`No command found for the current OS.`);
+        if (showTaskStatus) {
+          actionStates.set(id, { state: 'failure' });
+          mainViewProvider.refresh();
+        }
         return;
       }
 
@@ -449,27 +493,66 @@ export function activate(context: vscode.ExtensionContext) {
         showReuseMessage: false
       };
 
-      // Execute the task
-      const taskExecution = await vscode.tasks.executeTask(task);
+      try {
+        const taskExecution = await vscode.tasks.executeTask(task);
+        if (showTaskStatus) {
+          activeTasks.set(id, taskExecution);
+        }
+      } catch (e) {
+        if (showTaskStatus) {
+          actionStates.set(id, { state: 'failure' });
+          mainViewProvider.refresh();
+        }
+      }
 
-      // Listen for task end
       const disposable = vscode.tasks.onDidEndTaskProcess(e => {
-        if (e.execution.task.name === title) { // Check if it's the task we executed
-          if (e.exitCode === 0) { // Success
-            if (action.successMessage) {
-              vscode.window.showInformationMessage(action.successMessage);
+        if (e.execution.task.name === title) {
+          if (showTaskStatus) {
+            if (e.exitCode === 0) {
+              actionStates.set(id, { state: 'success' });
+              if (action.successMessage) {
+                vscode.window.showInformationMessage(action.successMessage);
+              }
+            } else {
+              actionStates.set(id, { state: 'failure' });
+              if (action.failMessage) {
+                vscode.window.showErrorMessage(action.failMessage);
+              }
             }
-          } else { // Failure
-            if (action.failMessage) {
-              vscode.window.showErrorMessage(action.failMessage);
+            activeTasks.delete(id);
+            mainViewProvider.refresh();
+          } else {
+            if (e.exitCode === 0) {
+              if (action.successMessage) {
+                vscode.window.showInformationMessage(action.successMessage);
+              }
+            } else {
+              if (action.failMessage) {
+                vscode.window.showErrorMessage(action.failMessage);
+              }
             }
           }
-          disposable.dispose(); // Dispose the listener after the task we care about ends
+          disposable.dispose();
         }
       });
     }
   });
   context.subscriptions.push(executeActionCommand);
+
+  const stopActionCommand = vscode.commands.registerCommand('firmware-toolkit.stopAction', (actionItem: Action) => {
+    const id = actionItem.id || actionItem.label;
+    const task = activeTasks.get(id);
+    if (task) {
+      task.terminate();
+      actionStates.set(id, { state: 'failure' });
+      activeTasks.delete(id);
+      mainViewProvider.refresh();
+      vscode.window.showInformationMessage(`Action '${actionItem.label}' terminated.`);
+    } else {
+      vscode.window.showWarningMessage(`Could not find active task for '${actionItem.label}'.`);
+    }
+  });
+  context.subscriptions.push(stopActionCommand);
 
   const showVersionCommand = vscode.commands.registerCommand('firmware-toolkit.showVersion', () => {
     const packageJsonPath = path.join(context.extensionPath, 'package.json');
