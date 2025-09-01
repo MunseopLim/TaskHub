@@ -315,7 +315,6 @@ export function activate(context: vscode.ExtensionContext) {
     if (e.execution.task.source === 'firmware-toolkit') {
       const processId = taskNameToProcessId.get(e.execution.task.name);
       if (processId) {
-        taskProcessIds.delete(processId);
         taskNameToProcessId.delete(e.execution.task.name);
       }
     }
@@ -967,6 +966,17 @@ export function activate(context: vscode.ExtensionContext) {
 
     tasksToTerminate.forEach(t => t.terminate());
     terminalsToClose.forEach(t => t.dispose());
+
+    // Clear all states after termination
+    actionStates.forEach((value, key) => {
+      if (value.state === 'running') {
+        actionStates.set(key, { state: 'failure' });
+      }
+    });
+    activeTasks.clear();
+    taskProcessIds.clear();
+    taskNameToProcessId.clear();
+    mainViewProvider.refresh();
 
     vscode.window.showInformationMessage(`Terminated ${tasksToTerminate.length} task(s) and closed ${terminalsToClose.length} terminal(s).`);
   });
