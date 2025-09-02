@@ -968,11 +968,7 @@ export function activate(context: vscode.ExtensionContext) {
     terminalsToClose.forEach(t => t.dispose());
 
     // Clear all states after termination
-    actionStates.forEach((value, key) => {
-      if (value.state === 'running') {
-        actionStates.set(key, { state: 'failure' });
-      }
-    });
+    actionStates.clear();
     activeTasks.clear();
     taskProcessIds.clear();
     taskNameToProcessId.clear();
