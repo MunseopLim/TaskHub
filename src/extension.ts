@@ -301,6 +301,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   const taskProcessIds = new Map<number, boolean>();
   const taskNameToProcessId = new Map<string, number>();
+  const manuallyTerminatedTasks = new Set<string>();
 
   context.subscriptions.push(vscode.tasks.onDidStartTaskProcess(e => {
     if (e.execution.task.source === 'firmware-toolkit') {
@@ -507,7 +508,10 @@ export function activate(context: vscode.ExtensionContext) {
       const disposable = vscode.tasks.onDidEndTaskProcess(e => {
         if (e.execution.task.name === title) {
           if (showTaskStatus) {
-            if (e.exitCode === 0) {
+            if (manuallyTerminatedTasks.has(id)) {
+              actionStates.delete(id);
+              manuallyTerminatedTasks.delete(id);
+            } else if (e.exitCode === 0) {
               actionStates.set(id, { state: 'success' });
               if (action.successMessage) {
                 vscode.window.showInformationMessage(action.successMessage);
@@ -542,9 +546,9 @@ export function activate(context: vscode.ExtensionContext) {
     const id = actionItem.id || actionItem.label;
     const task = activeTasks.get(id);
     if (task) {
+      manuallyTerminatedTasks.add(id);
       task.terminate();
-      actionStates.set(id, { state: 'failure' });
-      activeTasks.delete(id);
+      actionStates.delete(id);
       mainViewProvider.refresh();
       vscode.window.showInformationMessage(`Action '${actionItem.label}' terminated.`);
     } else {
@@ -964,7 +968,19 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    tasksToTerminate.forEach(t => t.terminate());
+    const executionToIdMap = new Map<vscode.TaskExecution, string>();
+    activeTasks.forEach((exec, id) => {
+      executionToIdMap.set(exec, id);
+    });
+
+    tasksToTerminate.forEach(t => {
+      const id = executionToIdMap.get(t);
+      if (id) {
+        manuallyTerminatedTasks.add(id);
+      }
+      t.terminate();
+    });
+    
     terminalsToClose.forEach(t => t.dispose());
 
     // Clear all states after termination
