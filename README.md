@@ -95,6 +95,46 @@
       }
     ]
     ```
+
+*   **폴더 구성**: 액션 버튼들을 폴더로 그룹화하여 정리할 수 있습니다. 폴더는 중첩될 수 있으며, 각 폴더의 열림/닫힘 상태는 작업 공간별로 유지됩니다. `actions.json` 파일에 `type: "folder"` 항목을 추가하여 폴더를 정의할 수 있습니다.
+
+    **예시:**
+    ```json
+    [
+      {
+        "type": "folder",
+        "title": "빌드 작업",
+        "id": "folder.build",
+        "children": [
+          {
+            "id": "button.build.os",
+            "title": "운영체제별 빌드",
+            "action": {
+              "type": "shell",
+              "command": {
+                "windows": "echo 'Windows에서 빌드 중...'",
+                "macos": "echo 'macOS에서 빌드 중...'",
+                "linux": "echo 'Linux에서 빌드 중...'"
+              }
+            }
+          },
+          {
+            "id": "button.build",
+            "title": "프로젝트 빌드",
+            "action": {
+              "type": "shell",
+              "command": "npm run build"
+            }
+          }
+        ]
+      }
+    ]
+    ```
+
+    *   `type`: `"folder"`로 설정해야 합니다.
+    *   `title`: 폴더의 이름입니다.
+    *   `id`: 폴더의 상태를 기억하기 위한 고유 ID입니다. 이 ID를 설정하지 않으면 폴더의 열림/닫힘 상태가 유지되지 않을 수 있습니다.
+    *   `children`: 폴더에 포함될 액션 버튼 또는 다른 폴더들의 배열입니다.
 *   **구분선**: `type: "separator"`인 항목은 시각적 구분선으로 렌더링됩니다.
 *   **구성 가능한 터미널 동작 (`revealTerminal`)**: `shell` 타입 액션의 경우 터미널의 가시성을 제어할 수 있습니다.
 *   **성공/실패 알림 (`successMessage`, `failMessage`)**: `shell` 타입 액션의 경우 작업 완료 시 VS Code 알림으로 표시될 메시지를 정의할 수 있습니다.
@@ -116,7 +156,7 @@
 
 ### 8. 모든 작업 종료
 
-이 확장 프로그램은 `firmware-toolkit.terminateAllTasks` 명령을 제공하여 확장 프로그램에 의해 시작된 모든 활성 작업 및 관련 터미널을 종료할 수 있습니다. 이 명령은 `mainView.main` 패널의 제목 표시줄에 있는 정지 아이콘(`$(primitive-square)`)을 통해 접근할 수 있습니다.
+이 확장 프로그램은 `firmware-toolkit.terminateAllTasks` 명령을 제공하여 확장 프로그램에 의해 시작된 모든 활성 작업 및 관련 터미널을 종료할 수 있습니다. 이 명령은 `mainView.main` 패널의 제목 표시줄에 있는 정지 아이콘(`$(primitive-square)`)을 통해 접근할 수 있습니다. 또한, 모든 액션 버튼의 아이콘을 기본 상태로 초기화합니다.
 
 ## 설정
 
@@ -145,4 +185,4 @@
 
 ---
 
-**참고**: 이 README는 현재까지 구현된 기능을 기반으로 생성되었습니다. 최신 정보는 소스 코드를 참조하십시오.
+**참고**: 이 README는 현재까지 구현된 기능을 기반으로 생성되었습니다. 최신 정보는 소스 코드를 참조하십시오.��
