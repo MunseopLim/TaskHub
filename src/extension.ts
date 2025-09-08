@@ -4,9 +4,9 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
-class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeItem> {
-  private _onDidChangeTreeData: vscode.EventEmitter<Action | vscode.TreeItem | undefined | null | void> = new vscode.EventEmitter<Action | vscode.TreeItem | undefined | null | void>();
-  readonly onDidChangeTreeData: vscode.Event<Action | vscode.TreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
+class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vscode.TreeItem> {
+  private _onDidChangeTreeData: vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void> = new vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void>();
+  readonly onDidChangeTreeData: vscode.Event<Action | Folder | vscode.TreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
 
   constructor(private context: vscode.ExtensionContext) {}
 
@@ -14,12 +14,15 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
     this._onDidChangeTreeData.fire();
   }
 
-  getTreeItem(element: Action | vscode.TreeItem): vscode.TreeItem {
+  getTreeItem(element: Action | Folder | vscode.TreeItem): vscode.TreeItem {
     return element;
   }
 
-  getChildren(element?: Action | vscode.TreeItem): Thenable<(Action | vscode.TreeItem)[]> {
+  getChildren(element?: Action | Folder | vscode.TreeItem): Thenable<(Action | Folder | vscode.TreeItem)[]> {
     if (element) {
+      if (element instanceof Folder) {
+        return Promise.resolve(this.createActionItems(element.children));
+      }
       return Promise.resolve([]);
     } else {
       const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'actions.json');
@@ -45,44 +48,69 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | vscode.TreeIt
         title: 'Show Example JSONs',
       };
 
-      const items: (Action | vscode.TreeItem)[] = [];
+      const items: (Action | Folder | vscode.TreeItem)[] = [];
       items.push(versionItem); // Add version item at the top
 
-      actionsJson.forEach((item: any) => {
-        if (item.type === 'separator') {
-          const separatorItem = new vscode.TreeItem(item.title);
-          separatorItem.collapsibleState = vscode.TreeItemCollapsibleState.None;
-          separatorItem.contextValue = 'separator'; // Custom context value for styling/menus if needed
-          items.push(separatorItem);
-        } else if (item.id && item.id.startsWith('button.')) {
-          if (item.action && item.action.type === 'executablePicker') {
-            const executablePickerItem = new vscode.TreeItem(item.title);
-            executablePickerItem.command = {
-              command: 'firmware-toolkit.showExecutablePicker',
-              title: 'Select and Run Executable',
-              arguments: [item.action], // Pass the action object
-            };
-            executablePickerItem.contextValue = 'executablePicker';
-            items.push(executablePickerItem);
-          } else {
-            items.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id));
-          }
-        } else {
-          // Handle unknown types or IDs, e.g., log a warning or create a generic item
-          console.warn(`Unknown item type or ID in actions.json: ${item.id || item.type}`);
-          const unknownItem = new vscode.TreeItem(item.title || 'Unknown Item');
-          unknownItem.tooltip = `Unknown item type or ID: ${item.id || item.type}`;
-          items.push(unknownItem);
-        }
-      });
+      items.push(...this.createActionItems(actionsJson));
 
       return Promise.resolve(items);
     }
+  }
+
+  private createActionItems(items: any[]): (Action | Folder | vscode.TreeItem)[] {
+    const actionItems: (Action | Folder | vscode.TreeItem)[] = [];
+    items.forEach((item: any) => {
+      if (item.type === 'folder') {
+        actionItems.push(new Folder(item.title, item.children, this.context, item.id));
+      } else if (item.type === 'separator') {
+        const separatorItem = new vscode.TreeItem(item.title);
+        separatorItem.collapsibleState = vscode.TreeItemCollapsibleState.None;
+        separatorItem.contextValue = 'separator'; // Custom context value for styling/menus if needed
+        actionItems.push(separatorItem);
+      } else if (item.id && item.id.startsWith('button.')) {
+        if (item.action && item.action.type === 'executablePicker') {
+          const executablePickerItem = new vscode.TreeItem(item.title);
+          executablePickerItem.command = {
+            command: 'firmware-toolkit.showExecutablePicker',
+            title: 'Select and Run Executable',
+            arguments: [item.action], // Pass the action object
+          };
+          executablePickerItem.contextValue = 'executablePicker';
+          actionItems.push(executablePickerItem);
+        } else {
+          actionItems.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id));
+        }
+      } else {
+        // Handle unknown types or IDs, e.g., log a warning or create a generic item
+        console.warn(`Unknown item type or ID in actions.json: ${item.id || item.type}`);
+        const unknownItem = new vscode.TreeItem(item.title || 'Unknown Item');
+        unknownItem.tooltip = `Unknown item type or ID: ${item.id || item.type}`;
+        actionItems.push(unknownItem);
+      }
+    });
+    return actionItems;
   }
 }
 
 const actionStates = new Map<string, { state: 'running' | 'success' | 'failure' }>();
 const activeTasks = new Map<string, vscode.TaskExecution>();
+
+class Folder extends vscode.TreeItem {
+  public children: any[];
+
+  constructor(
+    public readonly label: string,
+    children: any[],
+    private readonly context: vscode.ExtensionContext,
+    public readonly id?: string
+  ) {
+    const isExpanded = context.workspaceState.get<boolean>(`folderState:${id}`);
+    super(label, isExpanded ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed);
+    this.children = children;
+    this.id = id;
+    this.iconPath = new vscode.ThemeIcon('folder');
+  }
+}
 
 class Action extends vscode.TreeItem {
   constructor(
@@ -325,7 +353,21 @@ export function activate(context: vscode.ExtensionContext) {
   const linkViewProvider = new LinkViewProvider(context);
   const favoriteViewProvider = new FavoriteViewProvider(context);
 
-  context.subscriptions.push(vscode.window.registerTreeDataProvider('mainView.main', mainViewProvider));
+  const mainView = vscode.window.createTreeView('mainView.main', { treeDataProvider: mainViewProvider });
+  context.subscriptions.push(mainView);
+
+  mainView.onDidExpandElement(async e => {
+    if (e.element instanceof Folder && e.element.id) {
+      await context.workspaceState.update(`folderState:${e.element.id}`, true);
+    }
+  });
+
+  mainView.onDidCollapseElement(async e => {
+    if (e.element instanceof Folder && e.element.id) {
+      await context.workspaceState.update(`folderState:${e.element.id}`, false);
+    }
+  });
+
   linkViewProvider.view = vscode.window.createTreeView('mainView.link', { treeDataProvider: linkViewProvider });
   favoriteViewProvider.view = vscode.window.createTreeView('mainView.favorite', { treeDataProvider: favoriteViewProvider });
 
@@ -800,32 +842,39 @@ export function activate(context: vscode.ExtensionContext) {
         fileName = 'actions.json';
         exampleContent = JSON.stringify([
           {
-            "id": "button.build.os",
-            "title": "Build Project (OS-Specific)",
-            "action": {
-              "type": "shell",
-              "command": {
-                "windows": "echo 'Building on Windows...'",
-                "macos": "echo 'Building on macOS...'",
-                "linux": "echo 'Building on Linux...'"
+            "type": "folder",
+            "title": "Build Tasks",
+            "id": "folder.build",
+            "children": [
+              {
+                "id": "button.build.os",
+                "title": "Build Project (OS-Specific)",
+                "action": {
+                  "type": "shell",
+                  "command": {
+                    "windows": "echo 'Building on Windows...'",
+                    "macos": "echo 'Building on macOS...'",
+                    "linux": "echo 'Building on Linux...'"
+                  },
+                  "cwd": "${workspaceFolder}",
+                  "revealTerminal": "always",
+                  "successMessage": "Build completed successfully!",
+                  "failMessage": "Build failed. Check terminal for details."
+                }
               },
-              "cwd": "${workspaceFolder}",
-              "revealTerminal": "always",
-              "successMessage": "Build completed successfully!",
-              "failMessage": "Build failed. Check terminal for details."
-            }
-          },
-          {
-            "id": "button.build",
-            "title": "Build Project",
-            "action": {
-              "type": "shell",
-              "command": "npm run build",
-              "cwd": "${workspaceFolder}",
-              "revealTerminal": "always",
-              "successMessage": "Build completed successfully!",
-              "failMessage": "Build failed. Check terminal for details."
-            }
+              {
+                "id": "button.build",
+                "title": "Build Project",
+                "action": {
+                  "type": "shell",
+                  "command": "npm run build",
+                  "cwd": "${workspaceFolder}",
+                  "revealTerminal": "always",
+                  "successMessage": "Build completed successfully!",
+                  "failMessage": "Build failed. Check terminal for details."
+                }
+              }
+            ]
           },
           {
             "id": "separator.1",
