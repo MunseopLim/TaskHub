@@ -963,25 +963,25 @@ export function activate(context: vscode.ExtensionContext) {
 
     const tasksToTerminate = vscode.tasks.taskExecutions.filter(t => t.task.source === 'firmware-toolkit');
 
-    if (tasksToTerminate.length === 0 && terminalsToClose.length === 0) {
-      vscode.window.showInformationMessage('No tasks or terminals from this extension are currently active.');
-      return;
-    }
+    if (tasksToTerminate.length > 0 || terminalsToClose.length > 0) {
+      const executionToIdMap = new Map<vscode.TaskExecution, string>();
+      activeTasks.forEach((exec, id) => {
+        executionToIdMap.set(exec, id);
+      });
 
-    const executionToIdMap = new Map<vscode.TaskExecution, string>();
-    activeTasks.forEach((exec, id) => {
-      executionToIdMap.set(exec, id);
-    });
-
-    tasksToTerminate.forEach(t => {
-      const id = executionToIdMap.get(t);
-      if (id) {
-        manuallyTerminatedTasks.add(id);
-      }
-      t.terminate();
-    });
+      tasksToTerminate.forEach(t => {
+        const id = executionToIdMap.get(t);
+        if (id) {
+          manuallyTerminatedTasks.add(id);
+        }
+        t.terminate();
+      });
     
-    terminalsToClose.forEach(t => t.dispose());
+      terminalsToClose.forEach(t => t.dispose());
+      vscode.window.showInformationMessage(`Terminated ${tasksToTerminate.length} task(s) and closed ${terminalsToClose.length} terminal(s).`);
+    } else {
+      vscode.window.showInformationMessage('No tasks or terminals from this extension are currently active.');
+    }
 
     // Clear all states after termination
     actionStates.clear();
@@ -989,8 +989,6 @@ export function activate(context: vscode.ExtensionContext) {
     taskProcessIds.clear();
     taskNameToProcessId.clear();
     mainViewProvider.refresh();
-
-    vscode.window.showInformationMessage(`Terminated ${tasksToTerminate.length} task(s) and closed ${terminalsToClose.length} terminal(s).`);
   });
   context.subscriptions.push(terminateAllTasksCommand);
 }
