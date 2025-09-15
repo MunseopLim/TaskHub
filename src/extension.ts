@@ -3,6 +3,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { spawn } from 'child_process';
 
 class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vscode.TreeItem> {
   private _onDidChangeTreeData: vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void> = new vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void>();
@@ -63,37 +64,38 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vsco
       if (item.type === 'folder') {
         actionItems.push(new Folder(item.title, item.children, this.context, item.id));
       } else if (item.type === 'separator') {
-        const separatorItem = new vscode.TreeItem(item.title);
-        separatorItem.collapsibleState = vscode.TreeItemCollapsibleState.None;
-        separatorItem.contextValue = 'separator'; // Custom context value for styling/menus if needed
-        actionItems.push(separatorItem);
-      } else if (item.id && item.id.startsWith('button.')) {
-        if (item.action && item.action.type === 'executablePicker') {
-          const executablePickerItem = new vscode.TreeItem(item.title);
-          executablePickerItem.command = {
-            command: 'firmware-toolkit.showExecutablePicker',
-            title: 'Select and Run Executable',
-            arguments: [item.action], // Pass the action object
-          };
-          executablePickerItem.contextValue = 'executablePicker';
-          actionItems.push(executablePickerItem);
+          const separatorItem = new vscode.TreeItem(item.title);
+          separatorItem.collapsibleState = vscode.TreeItemCollapsibleState.None;
+          separatorItem.contextValue = 'separator'; // Custom context value for styling/menus if needed
+          actionItems.push(separatorItem);
+        } else if (item.id && item.id.startsWith('button.')) {
+          if (item.action && item.action.type === 'executablePicker') {
+            const executablePickerItem = new vscode.TreeItem(item.title);
+            executablePickerItem.command = {
+              command: 'firmware-toolkit.showExecutablePicker',
+              title: 'Select and Run Executable',
+              arguments: [item.action], // Pass the action object
+            };
+            executablePickerItem.contextValue = 'executablePicker';
+            actionItems.push(executablePickerItem);
+          } else {
+            actionItems.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id));
+          }
         } else {
-          actionItems.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id));
+          // Handle unknown types or IDs, e.g., log a warning or create a generic item
+          console.warn(`Unknown item type or ID in actions.json: ${item.id || item.type}`);
+          const unknownItem = new vscode.TreeItem(item.title || 'Unknown Item');
+          unknownItem.tooltip = `Unknown item type or ID: ${item.id || item.type}`;
+          actionItems.push(unknownItem);
         }
-      } else {
-        // Handle unknown types or IDs, e.g., log a warning or create a generic item
-        console.warn(`Unknown item type or ID in actions.json: ${item.id || item.type}`);
-        const unknownItem = new vscode.TreeItem(item.title || 'Unknown Item');
-        unknownItem.tooltip = `Unknown item type or ID: ${item.id || item.type}`;
-        actionItems.push(unknownItem);
-      }
-    });
+      });
     return actionItems;
   }
 }
 
 const actionStates = new Map<string, { state: 'running' | 'success' | 'failure' }>();
 const activeTasks = new Map<string, vscode.TaskExecution>();
+const outputChannel = vscode.window.createOutputChannel('Firmware Toolkit');
 
 class Folder extends vscode.TreeItem {
   public children: any[];
@@ -117,7 +119,7 @@ class Action extends vscode.TreeItem {
     public readonly label: string,
     private readonly actionData: any,
     public readonly collapsibleState: vscode.TreeItemCollapsibleState,
-    private readonly context: vscode.ExtensionContext,
+    public readonly context: vscode.ExtensionContext,
     public readonly id?: string
   ) {
     super(label, collapsibleState);
@@ -151,6 +153,9 @@ class Action extends vscode.TreeItem {
             break;
           case 'executablePicker':
             this.iconPath = new vscode.ThemeIcon('play');
+            break;
+          case 'pipeline':
+            this.iconPath = new vscode.ThemeIcon('debug-alt');
             break;
           default:
             this.iconPath = new vscode.ThemeIcon('gear');
@@ -318,6 +323,200 @@ class FavoriteViewProvider implements vscode.TreeDataProvider<Favorite> {
       );
     }
   }
+}
+
+async function handleStringManipulationStep(step: any, allResults: any): Promise<{ output: string }> {
+    const { function: func, input } = step;
+    const interpolationContext = { ...allResults };
+    const interpolatedInput = interpolatePipelineVariables(input, interpolationContext);
+
+    let output: string;
+
+    switch (func) {
+        case 'stripExtension':
+            output = interpolatedInput.replace(/\.(7z|zip)$/, '');
+            break;
+        default:
+            throw new Error(`Unsupported string manipulation function: ${func}`);
+    }
+
+    return { output: output };
+}
+
+async function handlePipelineAction(action: any, context: vscode.ExtensionContext) {
+    outputChannel.show(true);
+    const { steps, successMessage, failMessage } = action;
+    const stepResults: { [key: string]: any } = {};
+
+    try {
+        for (const step of steps) {
+            let result: any;
+            switch (step.type) {
+                case 'fileDialog':
+                    result = await handleFileDialogStep(step);
+                    break;
+                case 'unzip':
+                    result = await handleUnzipStep(step, stepResults);
+                    break;
+                case 'command':
+                    result = await handleCommandStep(step, stepResults, context);
+                    break;
+                case 'stringManipulation':
+                    result = await handleStringManipulationStep(step, stepResults);
+                    break;
+                default:
+                    throw new Error(`Unsupported pipeline step type: ${step.type}`);
+            }
+            stepResults[step.id] = result;
+        }
+        vscode.window.showInformationMessage(successMessage || 'Pipeline completed successfully!');
+    } catch (error: any) {
+        vscode.window.showErrorMessage(`${failMessage || 'Pipeline failed:'} ${error.message}`);
+        throw error;
+    }
+}
+
+async function handleFileDialogStep(step: any): Promise<{ path: string, dir: string, name: string }> {
+    const options: vscode.OpenDialogOptions = step.options || {};
+    const fileUri = await vscode.window.showOpenDialog(options);
+    if (fileUri && fileUri[0]) {
+        return { path: fileUri[0].fsPath, dir: path.dirname(fileUri[0].fsPath), name: path.basename(fileUri[0].fsPath) };
+    } else {
+        throw new Error('File selection was canceled.');
+    }
+}
+
+async function handleUnzipStep(step: any, allResults: any): Promise<{ outputDir: string }> {
+    const inputs = step.inputs || {};
+    const fileSourceStep = allResults[inputs.file];
+    if (!fileSourceStep || !fileSourceStep.path) {
+        throw new Error(`No file input found for unzip step from step '${inputs.file}'`);
+    }
+
+    const platform = process.platform;
+    const toolPaths = step.tool || {};
+    let toolCommand: string | undefined;
+
+    if (platform === 'win32' && toolPaths.windows) {
+        toolCommand = toolPaths.windows;
+    } else if (platform === 'darwin' && toolPaths.macos) {
+        toolCommand = toolPaths.macos;
+    } else if (platform === 'linux' && toolPaths.linux) {
+        toolCommand = toolPaths.linux;
+    }
+
+    if (!toolCommand) {
+        throw new Error(`No unzip tool path specified for the current platform (${platform}) in actions.json`);
+    }
+
+    const filePath = fileSourceStep.path;
+    const outputDir = fileSourceStep.dir;
+    
+    const args = ['x', filePath, `-o${outputDir}`, '-aoa'];
+    
+    try {
+        await executeCommand(toolCommand, args);
+        return { outputDir: outputDir };
+    } catch (error: any) {
+        throw new Error(`Failed to unzip file: ${error.message}`);
+    }
+}
+
+async function handleCommandStep(step: any, allResults: any, context: vscode.ExtensionContext): Promise<{ output: string }> {
+    const { command, args, output, inputs, scriptPath } = step;
+    const interpolationContext: { [key: string]: any } = { ...allResults, extensionPath: context.extensionPath };
+
+    const finalArgs = [];
+
+    if (scriptPath) {
+        const interpolatedScriptPath = interpolatePipelineVariables(scriptPath, interpolationContext);
+        finalArgs.push(interpolatedScriptPath);
+    }
+
+    if (args) {
+        const interpolatedArgs = args.map((arg: string) => interpolatePipelineVariables(arg, interpolationContext));
+        finalArgs.push(...interpolatedArgs);
+    }
+
+    const commandOutput = await executeCommand(command, finalArgs);
+    if (output?.showInEditor) {
+        const doc = await vscode.workspace.openTextDocument({ content: commandOutput, language: 'plaintext' });
+        await vscode.window.showTextDocument(doc, { preview: false });
+    }
+    return { output: commandOutput.trim() };
+}
+
+function executeCommand(command: string, args: string[]): Promise<string> {
+    return new Promise((resolve, reject) => {
+        outputChannel.appendLine(`[INFO] Executing command: ${command} ${args.join(' ')}`);
+        const process = spawn(command, args);
+        let stdout = '';
+        let stderr = '';
+
+        if (process.stdout) {
+            process.stdout.on('data', (data) => {
+                const output = data.toString();
+                if (stdout === '') {
+                    outputChannel.appendLine('--- STDOUT ---');
+                }
+                outputChannel.append(output);
+                stdout += output;
+            });
+        }
+
+        if (process.stderr) {
+            process.stderr.on('data', (data) => {
+                const output = data.toString();
+                if (stderr === '') {
+                    outputChannel.appendLine('--- STDERR ---');
+                }
+                outputChannel.append(output);
+                stderr += output;
+            });
+        }
+
+        process.on('close', (code) => {
+            outputChannel.appendLine(`[INFO] Command finished with exit code ${code}.`);
+            if (code === 0) {
+                resolve(stdout);
+            } else {
+                reject(new Error(stderr || `Command failed with exit code ${code}`));
+            }
+        });
+
+        process.on('error', (err) => {
+            outputChannel.appendLine(`[ERROR] Failed to start command: ${err.message}`);
+            reject(err);
+        });
+    });
+}
+
+function interpolatePipelineVariables(template: string, context: any): string {
+    let result = template.replace(/\${workspaceFolder}/g, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '');
+    result = result.replace(/\${extensionPath}/g, context.extensionPath || '');
+
+    const regex = /\${([^}]+)}/g;
+    result = result.replace(regex, (match, expression) => {
+        const parts = expression.split('.');
+        const stepId = parts[0];
+        const property = parts[1];
+
+        if (context[stepId] && property && context[stepId][property] !== undefined) {
+            return context[stepId][property];
+        }
+        if (context[stepId] && context[stepId].output !== undefined) {
+            return context[stepId].output;
+        }
+        if (context[stepId] && context[stepId].outputDir !== undefined) {
+            return context[stepId].outputDir;
+        }
+        if (context[stepId] && context[stepId].name !== undefined) {
+            return context[stepId].name;
+        }
+
+        return match;
+    });
+    return result;
 }
 
 // This method is called when your extension is activated
@@ -580,6 +779,19 @@ export function activate(context: vscode.ExtensionContext) {
           disposable.dispose();
         }
       });
+    } else if (action.type === 'pipeline') {
+      try {
+        await handlePipelineAction(action, actionItem.context);
+        if (showTaskStatus) {
+          actionStates.set(id, { state: 'success' });
+          mainViewProvider.refresh();
+        }
+      } catch (error) {
+        if (showTaskStatus) {
+          actionStates.set(id, { state: 'failure' });
+          mainViewProvider.refresh();
+        }
+      }
     }
   });
   context.subscriptions.push(executeActionCommand);
@@ -846,33 +1058,33 @@ export function activate(context: vscode.ExtensionContext) {
             "title": "Build Tasks",
             "id": "folder.build",
             "children": [
-              {
-                "id": "button.build.os",
-                "title": "Build Project (OS-Specific)",
-                "action": {
-                  "type": "shell",
-                  "command": {
-                    "windows": "echo 'Building on Windows...'",
-                    "macos": "echo 'Building on macOS...'",
-                    "linux": "echo 'Building on Linux...'"
-                  },
-                  "cwd": "${workspaceFolder}",
-                  "revealTerminal": "always",
-                  "successMessage": "Build completed successfully!",
-                  "failMessage": "Build failed. Check terminal for details."
-                }
+          {
+            "id": "button.build.os",
+            "title": "Build Project (OS-Specific)",
+            "action": {
+              "type": "shell",
+              "command": {
+                "windows": "echo 'Building on Windows...'",
+                "macos": "echo 'Building on macOS...'",
+                "linux": "echo 'Building on Linux...'"
               },
-              {
-                "id": "button.build",
-                "title": "Build Project",
-                "action": {
-                  "type": "shell",
-                  "command": "npm run build",
-                  "cwd": "${workspaceFolder}",
-                  "revealTerminal": "always",
-                  "successMessage": "Build completed successfully!",
-                  "failMessage": "Build failed. Check terminal for details."
-                }
+              "cwd": "${workspaceFolder}",
+              "revealTerminal": "always",
+              "successMessage": "Build completed successfully!",
+              "failMessage": "Build failed. Check terminal for details."
+            }
+          },
+          {
+            "id": "button.build",
+            "title": "Build Project",
+            "action": {
+              "type": "shell",
+              "command": "npm run build",
+              "cwd": "${workspaceFolder}",
+              "revealTerminal": "always",
+              "successMessage": "Build completed successfully!",
+              "failMessage": "Build failed. Check terminal for details."
+            }
               }
             ]
           },
@@ -1026,8 +1238,8 @@ export function activate(context: vscode.ExtensionContext) {
         t.terminate();
       });
     
-      terminalsToClose.forEach(t => t.dispose());
-      vscode.window.showInformationMessage(`Terminated ${tasksToTerminate.length} task(s) and closed ${terminalsToClose.length} terminal(s).`);
+    terminalsToClose.forEach(t => t.dispose());
+    vscode.window.showInformationMessage(`Terminated ${tasksToTerminate.length} task(s) and closed ${terminalsToClose.length} terminal(s).`);
     } else {
       vscode.window.showInformationMessage('No tasks or terminals from this extension are currently active.');
     }

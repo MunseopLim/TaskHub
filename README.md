@@ -13,6 +13,7 @@
     6.  [즐겨찾기 패널 (`mainView.favorite`)](#6-즐겨찾기-패널-mainviewfavorite)
     7.  [확장 프로그램 버전 표시](#7-확장-프로그램-버전-표시)
     8.  [모든 작업 종료](#8-모든-작업-종료)
+    9.  [쉬운 설정 관리](#9-쉬운-설정-관리)
 2.  [설정](#설정)
 3.  [설치](#설치)
 4.  [사용법](#사용법)
@@ -141,6 +142,87 @@
 *   **OS별 명령 (`command` 객체)**: `command` 속성은 단일 문자열 대신 객체를 사용하여 운영 체제(OS)별로 다른 명령을 지정할 수 있습니다.
 *   **실행 파일 선택기**: 지정된 폴더에서 실행 파일을 선택하거나 파일 시스템을 탐색하여 실행 파일을 실행할 수 있는 특수 액션 타입(`executablePicker`)입니다.
 
+*   **파이프라인 액션**: 여러 단계를 순차적으로 실행하는 복잡한 작업을 정의할 수 있는 `pipeline` 타입의 액션입니다. 각 단계의 출력은 다음 단계의 입력으로 사용될 수 있습니다.
+
+    **예시:**
+    ```json
+    {
+      "id": "button.analyzePackage",
+      "title": "Analyze Firmware Package",
+      "action": {
+        "type": "pipeline",
+        "steps": [
+          {
+            "id": "selectFile",
+            "type": "fileDialog",
+            "options": {
+              "canSelectMany": false,
+              "openLabel": "Select Package (.7z, .zip)",
+              "filters": {
+                "Archives": ["7z", "zip"]
+              }
+            }
+          },
+          {
+            "id": "unzip",
+            "type": "unzip",
+            "tool": {
+              "macos": "7za",
+              "windows": "7z.exe",
+              "linux": "7za"
+            },
+            "inputs": {
+              "file": "selectFile"
+            }
+          },
+          {
+            "id": "getFileName",
+            "type": "command",
+            "command": "bash",
+            "args": [
+              "-c",
+              "echo \"${selectFile.name}\" | sed -e 's/\.7z$//' -e 's/\.zip$//'"
+            ],
+            "inputs": {
+              "selectFile": "selectFile"
+            },
+            "output": {
+              "variable": "fileNameWithoutExtension"
+            }
+          },
+          {
+            "id": "runScript",
+            "type": "command",
+            "command": "bash",
+            "args": [
+              "-c",
+              "echo \"Parameter to script.py: ${unzip.outputDir}/${getFileName.fileNameWithoutExtension}\" && python3 \"/Users/munseop/code/test/script.py\" \"${unzip.outputDir}/${getFileName.fileNameWithoutExtension}\""
+            ],
+            "inputs": {
+              "unzip": "unzip",
+              "getFileName": "getFileName"
+            },
+            "output": {
+              "showInEditor": true,
+              "title": "Analysis Result"
+            }
+          }
+        ],
+        "successMessage": "Package analysis completed successfully!",
+        "failMessage": "Package analysis failed."
+      }
+    }
+    ```
+
+    *   `type`: `"pipeline"`으로 설정해야 합니다.
+    *   `steps`: 파이프라인을 구성하는 단계들의 배열입니다.
+    *   **사용 가능한 단계 유형**:
+        *   `fileDialog`: 파일 선택 대화상자를 엽니다.
+        *   `unzip`: 선택된 압축 파일을 해제합니다.
+        *   `command`: 셸 명령을 실행합니다.
+    *   **데이터 전달**: 이전 단계의 결과는 `${stepId.property}` 형식을 사용하여 후속 단계에서 참조할 수 있습니다. 예를 들어, `unzip` 단계의 출력 디렉터리는 `${unzip.outputDir}`로 참조할 수 있습니다.
+
+
 ### 6. 즐겨찾기 패널 (`mainView.favorite`)
 
 이 패널은 `.vscode/favorites.json`에 정의된 사용자가 즐겨찾는 파일 목록을 표시합니다. 뷰의 제목은 "Favorite Files"이며, 즐겨찾기된 파일의 총 개수가 표시됩니다.
@@ -157,6 +239,11 @@
 ### 8. 모든 작업 종료
 
 이 확장 프로그램은 `firmware-toolkit.terminateAllTasks` 명령을 제공하여 확장 프로그램에 의해 시작된 모든 활성 작업 및 관련 터미널을 종료할 수 있습니다. 이 명령은 `mainView.main` 패널의 제목 표시줄에 있는 정지 아이콘(`$(primitive-square)`)을 통해 접근할 수 있습니다. 또한, 모든 액션 버튼의 아이콘을 기본 상태로 초기화합니다.
+
+### 9. 쉬운 설정 관리
+
+*   **설정 파일 편집**: 각 뷰(메인, 링크, 즐겨찾기)의 제목 표시줄에 있는 연필 아이콘(✏️)을 클릭하여 `.vscode` 폴더에 있는 `actions.json`, `links.json`, `favorites.json` 파일을 쉽게 열고 편집할 수 있습니다. 파일이 없으면 새로 생성됩니다.
+*   **예제 JSON 보기**: 메인 패널에 표시되는 버전 정보 항목의 컨텍스트 메뉴(마우스 오른쪽 클릭)를 통해 각 설정 파일의 예제 JSON 내용을 확인할 수 있습니다.
 
 ## 설정
 
