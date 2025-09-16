@@ -355,6 +355,9 @@ async function handlePipelineAction(action: any, context: vscode.ExtensionContex
                 case 'fileDialog':
                     result = await handleFileDialogStep(step);
                     break;
+                case 'folderDialog':
+                    result = await handleFolderDialogStep(step);
+                    break;
                 case 'unzip':
                     result = await handleUnzipStep(step, stepResults);
                     break;
@@ -383,6 +386,18 @@ async function handleFileDialogStep(step: any): Promise<{ path: string, dir: str
         return { path: fileUri[0].fsPath, dir: path.dirname(fileUri[0].fsPath), name: path.basename(fileUri[0].fsPath) };
     } else {
         throw new Error('File selection was canceled.');
+    }
+}
+
+async function handleFolderDialogStep(step: any): Promise<{ path: string, dir: string, name: string }> {
+    const options: vscode.OpenDialogOptions = step.options || {};
+    options.canSelectFiles = false;
+    options.canSelectFolders = true;
+    const folderUri = await vscode.window.showOpenDialog(options);
+    if (folderUri && folderUri[0]) {
+        return { path: folderUri[0].fsPath, dir: path.dirname(folderUri[0].fsPath), name: path.basename(folderUri[0].fsPath) };
+    } else {
+        throw new Error('Folder selection was canceled.');
     }
 }
 
@@ -423,8 +438,33 @@ async function handleUnzipStep(step: any, allResults: any): Promise<{ outputDir:
 }
 
 async function handleCommandStep(step: any, allResults: any, context: vscode.ExtensionContext): Promise<{ output: string }> {
-    const { command, args, output, inputs, scriptPath } = step;
+    let { command, args, output, inputs, scriptPath } = step;
     const interpolationContext: { [key: string]: any } = { ...allResults, extensionPath: context.extensionPath };
+
+    const platform = process.platform;
+    if (typeof command === 'object' && command !== null) {
+        if (platform === 'win32' && command.windows) {
+            command = command.windows;
+        } else if (platform === 'darwin' && command.macos) {
+            command = command.macos;
+        } else if (platform === 'linux' && command.linux) {
+            command = command.linux;
+        } else {
+            throw new Error('Command not specified for the current OS in command step.');
+        }
+    }
+
+    if (typeof args === 'object' && args !== null && !Array.isArray(args)) {
+        if (platform === 'win32' && args.windows) {
+            args = args.windows;
+        } else if (platform === 'darwin' && args.macos) {
+            args = args.macos;
+        } else if (platform === 'linux' && args.linux) {
+            args = args.linux;
+        } else {
+            args = [];
+        }
+    }
 
     const finalArgs = [];
 
@@ -433,7 +473,7 @@ async function handleCommandStep(step: any, allResults: any, context: vscode.Ext
         finalArgs.push(interpolatedScriptPath);
     }
 
-    if (args) {
+    if (args && Array.isArray(args)) {
         const interpolatedArgs = args.map((arg: string) => interpolatePipelineVariables(arg, interpolationContext));
         finalArgs.push(...interpolatedArgs);
     }

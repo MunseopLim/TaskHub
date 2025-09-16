@@ -61,11 +61,25 @@
         {
           "id": "runScript",
           "type": "command",
-          "command": "bash",
-          "args": [
-            "-c",
-            "echo \"Parameter to script.py: ${unzip.outputDir}/${getFileName.output}\" && python3 \"/Users/munseop/code/test/script.py\" \"${unzip.outputDir}/${getFileName.output}\""
-          ],
+          "command": {
+            "macos": "bash",
+            "linux": "bash",
+            "windows": "powershell"
+          },
+          "args": {
+            "macos": [
+              "-c",
+              "echo \"Parameter to script.py: ${unzip.outputDir}/${getFileName.output}\" && python3 \"/Users/munseop/code/test/script.py\" \"${unzip.outputDir}/${getFileName.output}\""
+            ],
+            "linux": [
+              "-c",
+              "echo \"Parameter to script.py: ${unzip.outputDir}/${getFileName.output}\" && python3 \"/Users/munseop/code/test/script.py\" \"${unzip.outputDir}/${getFileName.output}\""
+            ],
+            "windows": [
+              "-Command",
+              "Write-Host \"Parameter to script.py: ${unzip.outputDir}/${getFileName.output}\"; python3 \"/Users/munseop/code/test/script.py\" \"${unzip.outputDir}/${getFileName.output}\""
+            ]
+          },
           "inputs": {
             "unzip": "unzip",
             "getFileName": "getFileName"
@@ -78,6 +92,51 @@
       ],
       "successMessage": "Package analysis completed successfully!",
       "failMessage": "Package analysis failed."
+    }
+  },
+  {
+    "id": "button.listFolderContents",
+    "title": "List Folder Contents",
+    "action": {
+      "type": "pipeline",
+      "steps": [
+        {
+          "id": "selectFolder",
+          "type": "folderDialog",
+          "options": {
+            "openLabel": "Select a folder to list its contents"
+          }
+        },
+        {
+          "id": "runScript",
+          "type": "command",
+          "command": {
+            "macos": "bash",
+            "linux": "bash",
+            "windows": "powershell"
+          },
+          "args": {
+            "macos": [
+              "-c",
+              "echo \"Parameter to script.py: ${selectFolder.path}\" && python3 \"/Users/munseop/test/script.py\" \"${selectFolder.path}\""
+            ],
+            "linux": [
+              "-c",
+              "echo \"Parameter to script.py: ${selectFolder.path}\" && python3 \"/Users/munseop/test/script.py\" \"${selectFolder.path}\""
+            ],
+            "windows": [
+              "-Command",
+              "Write-Host \"Parameter to script.py: ${selectFolder.path}\"; python3 \"/Users/munseop/test/script.py\" \"${selectFolder.path}\""
+            ]
+          },
+          "output": {
+            "showInEditor": true,
+            "title": "Analysis Result"
+          }
+        }
+      ],
+      "successMessage": "Folder contents listed successfully!",
+      "failMessage": "Failed to list folder contents."
     }
   },
   {

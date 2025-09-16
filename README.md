@@ -218,10 +218,83 @@
     *   `steps`: 파이프라인을 구성하는 단계들의 배열입니다.
     *   **사용 가능한 단계 유형**:
         *   `fileDialog`: 파일 선택 대화상자를 엽니다.
+        *   `folderDialog`: 폴더 선택 대화상자를 엽니다.
         *   `unzip`: 선택된 압축 파일을 해제합니다.
         *   `command`: 셸 명령을 실행합니다.
     *   **데이터 전달**: 이전 단계의 결과는 `${stepId.property}` 형식을 사용하여 후속 단계에서 참조할 수 있습니다. 예를 들어, `unzip` 단계의 출력 디렉터리는 `${unzip.outputDir}`로 참조할 수 있습니다.
 
+    **폴더 선택 예시:**
+    ```json
+    {
+      "id": "button.listFolderContents",
+      "title": "List Folder Contents",
+      "action": {
+        "type": "pipeline",
+        "steps": [
+          {
+            "id": "selectFolder",
+            "type": "folderDialog",
+            "options": {
+              "openLabel": "Select a folder to list its contents"
+            }
+          },
+          {
+            "id": "listContents",
+            "type": "command",
+            "command": {
+              "macos": "ls",
+              "linux": "ls",
+              "windows": "dir"
+            },
+            "args": {
+              "macos": ["-la", "${selectFolder.path}"],
+              "linux": ["-la", "${selectFolder.path}"],
+              "windows": ["${selectFolder.path}"]
+            },
+            "output": {
+              "showInEditor": true,
+              "title": "Folder Contents"
+            }
+          }
+        ],
+        "successMessage": "Folder contents listed successfully!",
+        "failMessage": "Failed to list folder contents."
+      }
+    }
+    ```
+
+*   **OS별 명령어 및 인수**: `command` 단계에서 `command`와 `args` 속성을 객체로 지정하여 운영 체제(OS)별로 다른 명령과 인수를 사용할 수 있습니다.
+
+    **예시:**
+    ```json
+    {
+      "id": "runScript",
+      "type": "command",
+      "command": {
+        "macos": "bash",
+        "linux": "bash",
+        "windows": "powershell"
+      },
+      "args": {
+        "macos": [
+          "-c",
+          "echo \"Parameter to script.py: ${selectFolder.path}\" && python3 \"/path/to/script.py\" \"${selectFolder.path}\""
+        ],
+        "linux": [
+          "-c",
+          "echo \"Parameter to script.py: ${selectFolder.path}\" && python3 \"/path/to/script.py\" \"${selectFolder.path}\""
+        ],
+        "windows": [
+          "-Command",
+          "Write-Host \"Parameter to script.py: ${selectFolder.path}\”; python3 \"/path/to/script.py\" \"${selectFolder.path}\""
+        ]
+      },
+      "output": {
+        "showInEditor": true,
+        "title": "Analysis Result"
+      }
+    }
+    ```
 
 ### 6. 즐겨찾기 패널 (`mainView.favorite`)
 
