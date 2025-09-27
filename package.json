@@ -4,7 +4,7 @@
   "description": "The helper to connect common tools.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/firmware-toolkit.git"
@@ -25,6 +25,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show status indicators (running, success, failure) for actions in the Main view."
+        },
+        "firmware-toolkit.pipeline.showVerboseLogs": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, shows detailed logs in the output panel when executing a pipeline. By default, only minimal status messages are shown."
         }
       }
     },

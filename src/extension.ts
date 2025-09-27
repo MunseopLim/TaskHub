@@ -344,7 +344,10 @@ async function handleStringManipulationStep(step: any, allResults: any): Promise
 }
 
 async function handlePipelineAction(action: any, context: vscode.ExtensionContext) {
-    outputChannel.show(true);
+    const showVerboseLogs = vscode.workspace.getConfiguration('firmware-toolkit').get('pipeline.showVerboseLogs', false);
+    if (showVerboseLogs) {
+        outputChannel.show(true);
+    }
     const { steps, successMessage, failMessage } = action;
     const stepResults: { [key: string]: any } = {};
 
@@ -487,8 +490,12 @@ async function handleCommandStep(step: any, allResults: any, context: vscode.Ext
 }
 
 function executeCommand(command: string, args: string[]): Promise<string> {
+    const showVerboseLogs = vscode.workspace.getConfiguration('firmware-toolkit').get('pipeline.showVerboseLogs', false);
+
     return new Promise((resolve, reject) => {
-        outputChannel.appendLine(`[INFO] Executing command: ${command} ${args.join(' ')}`);
+        if (showVerboseLogs) {
+            outputChannel.appendLine(`[INFO] Executing command: ${command} ${args.join(' ')}`);
+        }
         const process = spawn(command, args);
         let stdout = '';
         let stderr = '';
@@ -496,10 +503,12 @@ function executeCommand(command: string, args: string[]): Promise<string> {
         if (process.stdout) {
             process.stdout.on('data', (data) => {
                 const output = data.toString();
-                if (stdout === '') {
-                    outputChannel.appendLine('--- STDOUT ---');
+                if (showVerboseLogs) {
+                    if (stdout === '') {
+                        outputChannel.appendLine('--- STDOUT ---');
+                    }
+                    outputChannel.append(output);
                 }
-                outputChannel.append(output);
                 stdout += output;
             });
         }
@@ -507,16 +516,20 @@ function executeCommand(command: string, args: string[]): Promise<string> {
         if (process.stderr) {
             process.stderr.on('data', (data) => {
                 const output = data.toString();
-                if (stderr === '') {
-                    outputChannel.appendLine('--- STDERR ---');
+                if (showVerboseLogs) {
+                    if (stderr === '') {
+                        outputChannel.appendLine('--- STDERR ---');
+                    }
+                    outputChannel.append(output);
                 }
-                outputChannel.append(output);
                 stderr += output;
             });
         }
 
         process.on('close', (code) => {
-            outputChannel.appendLine(`[INFO] Command finished with exit code ${code}.`);
+            if (showVerboseLogs) {
+                outputChannel.appendLine(`[INFO] Command finished with exit code ${code}.`);
+            }
             if (code === 0) {
                 resolve(stdout);
             } else {
@@ -525,7 +538,9 @@ function executeCommand(command: string, args: string[]): Promise<string> {
         });
 
         process.on('error', (err) => {
-            outputChannel.appendLine(`[ERROR] Failed to start command: ${err.message}`);
+            if (showVerboseLogs) {
+                outputChannel.appendLine(`[ERROR] Failed to start command: ${err.message}`);
+            }
             reject(err);
         });
     });
@@ -773,6 +788,22 @@ export function activate(context: vscode.ExtensionContext) {
         clear: true,
         showReuseMessage: false
       };
+
+      if (action.isOneShot) {
+        try {
+          await vscode.tasks.executeTask(task);
+          if (showTaskStatus) {
+            actionStates.set(id, { state: 'success' });
+            mainViewProvider.refresh();
+          }
+        } catch (e) {
+          if (showTaskStatus) {
+            actionStates.set(id, { state: 'failure' });
+            mainViewProvider.refresh();
+          }
+        }
+        return;
+      }
 
       try {
         const taskExecution = await vscode.tasks.executeTask(task);
@@ -1149,6 +1180,16 @@ export function activate(context: vscode.ExtensionContext) {
               "type": "executablePicker",
               "folder": "${workspaceFolder}/bin",
               "runCommand": "bash ${file}"
+            }
+          },
+          {
+            "id": "button.runMyTool",
+            "title": "Run My Tool (One Shot)",
+            "action": {
+              "type": "shell",
+              "command": "notepad.exe",
+              "isOneShot": true,
+              "successMessage": "My Tool has been launched."
             }
           }
         ], null, 2);
