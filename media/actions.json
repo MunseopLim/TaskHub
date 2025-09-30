@@ -172,12 +172,32 @@
     }
   },
   {
-    "id": "button.selectExecutable",
-    "title": "Select Executable",
+    "id": "button.selectFile",
+    "title": "Select File",
     "action": {
-      "type": "executablePicker",
+      "type": "filePicker",
+      "folder": "${workspaceFolder}",
+      "runCommand": "${file}"
+    }
+  },
+  {
+    "id": "button.selectExeFile",
+    "title": "Select Executable File (exe, bat)",
+    "action": {
+      "type": "filePicker",
       "folder": "${workspaceFolder}/bin",
-      "runCommand": "bash ${file}"
+      "runCommand": "${file}",
+      "extensions": ["exe", "bat"]
+    }
+  },
+  {
+    "id": "button.selectScriptFile",
+    "title": "Select Script File (sh, py)",
+    "action": {
+      "type": "filePicker",
+      "folder": "${workspaceFolder}/scripts",
+      "runCommand": "python ${file}",
+      "extensions": ["sh", "py"]
     }
   }
 ]

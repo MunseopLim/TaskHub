@@ -92,8 +92,7 @@
         "title": "Show Extension Version"
       },
       {
-        "command": "firmware-toolkit.showExecutablePicker",
-        "title": "Select and Run Executable"
+                  "command": "firmware-toolkit.showFilePicker",        "title": "Select and Run File"
       },
       {
         "command": "firmware-toolkit.openFavoriteFile",

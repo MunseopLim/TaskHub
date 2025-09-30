@@ -69,15 +69,15 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vsco
           separatorItem.contextValue = 'separator'; // Custom context value for styling/menus if needed
           actionItems.push(separatorItem);
         } else if (item.id && item.id.startsWith('button.')) {
-          if (item.action && item.action.type === 'executablePicker') {
-            const executablePickerItem = new vscode.TreeItem(item.title);
-            executablePickerItem.command = {
-              command: 'firmware-toolkit.showExecutablePicker',
-              title: 'Select and Run Executable',
+          if (item.action && item.action.type === 'filePicker') {
+            const filePickerItem = new vscode.TreeItem(item.title);
+            filePickerItem.command = {
+              command: 'firmware-toolkit.showFilePicker',
+              title: 'Select and Run File',
               arguments: [item.action], // Pass the action object
             };
-            executablePickerItem.contextValue = 'executablePicker';
-            actionItems.push(executablePickerItem);
+            filePickerItem.contextValue = 'filePicker';
+            actionItems.push(filePickerItem);
           } else {
             actionItems.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id));
           }
@@ -151,7 +151,7 @@ class Action extends vscode.TreeItem {
           case 'shell':
             this.iconPath = new vscode.ThemeIcon('terminal');
             break;
-          case 'executablePicker':
+          case 'filePicker':
             this.iconPath = new vscode.ThemeIcon('play');
             break;
           case 'pipeline':
@@ -890,15 +890,19 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(showVersionCommand);
 
-  const showExecutablePickerCommand = vscode.commands.registerCommand('firmware-toolkit.showExecutablePicker', async (action: any) => {
+  const showFilePickerCommand = vscode.commands.registerCommand('firmware-toolkit.showFilePicker', async (action: any) => {
     const folderPath = action.folder?.replace('${workspaceFolder}', vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : '');
     const runCommandTemplate = action.runCommand;
+    const extensions = action.extensions;
 
     const quickPickItems: (vscode.QuickPickItem & { isBrowse?: boolean })[] = [];
 
     if (folderPath && fs.existsSync(folderPath)) {
       try {
-        const files = await fs.promises.readdir(folderPath);
+        let files = await fs.promises.readdir(folderPath);
+        if (extensions && extensions.length > 0) {
+            files = files.filter(file => extensions.some((ext: string) => file.endsWith(`.${ext}`)));
+        }
         files.forEach(file => {
           quickPickItems.push({ label: file, description: path.join(folderPath, file) });
         });
@@ -907,48 +911,68 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }
 
-    quickPickItems.push({ label: '$(file-directory) Browse for executable...', isBrowse: true });
+    quickPickItems.push({ label: '$(file-directory) Browse for file...', isBrowse: true });
 
-    const selectedItem = await vscode.window.showQuickPick(quickPickItems, {
-      placeHolder: 'Select an executable or browse for one',
-    });
+    const quickPick = vscode.window.createQuickPick();
+    quickPick.items = quickPickItems;
+    quickPick.placeholder = 'Select a file or type a file name';
 
-    if (selectedItem) {
-      if (selectedItem.isBrowse) {
-        const uris = await vscode.window.showOpenDialog({
-          canSelectMany: false,
-          openLabel: 'Select Executable',
-        });
+    quickPick.onDidAccept(async () => {
+      const selectedItem = quickPick.selectedItems[0];
+      quickPick.hide();
 
-        if (uris && uris.length > 0) {
-          const fullPath = uris[0].fsPath;
-          const commandToExecute = runCommandTemplate.replace('${file}', `"${fullPath}"`);
-          const task = new vscode.Task(
-            { type: 'shell', task: 'Run Executable' },
-            vscode.TaskScope.Workspace,
-            'Run Executable',
-            'firmware-toolkit',
-            new vscode.ShellExecution(commandToExecute),
-            []
-          );
-          task.isBackground = false;
-          task.presentationOptions = {
-            reveal: vscode.TaskRevealKind.Always,
-            panel: vscode.TaskPanelKind.Dedicated,
-            clear: true,
-            showReuseMessage: false
+      let fullPath: string | undefined;
+      let taskLabel: string | undefined;
+      let cwd: string | undefined;
+
+      if (selectedItem) {
+        if ((selectedItem as any).isBrowse) {
+          const openDialogOptions: vscode.OpenDialogOptions = {
+            canSelectMany: false,
+            openLabel: 'Select File',
           };
-          await vscode.tasks.executeTask(task);
+          if (extensions && extensions.length > 0) {
+            openDialogOptions.filters = {
+                'Allowed Files': extensions
+            };
+            console.log('OpenDialog filters:', openDialogOptions.filters);
+          }
+          const uris = await vscode.window.showOpenDialog(openDialogOptions);
+
+          if (uris && uris.length > 0) {
+            fullPath = uris[0].fsPath;
+            taskLabel = 'Run File';
+          }
+        } else {
+          fullPath = (selectedItem as any).description;
+          taskLabel = selectedItem.label;
+          cwd = folderPath;
         }
-      } else {
-        const fullPath = selectedItem.description;
+      } else if (quickPick.value) {
+        // Handle custom file name
+        const fileName = quickPick.value;
+        if (extensions && extensions.length > 0 && !extensions.some((ext: string) => fileName.endsWith(`.${ext}`))) {
+            vscode.window.showErrorMessage(`Invalid file extension. Allowed extensions are: ${extensions.join(', ')}`);
+            return;
+        }
+        if (folderPath) {
+            fullPath = path.join(folderPath, fileName);
+        } else {
+            const workspaceFolder = vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : '';
+            fullPath = path.join(workspaceFolder, fileName);
+        }
+        taskLabel = fileName;
+        cwd = folderPath;
+      }
+
+      if (fullPath && taskLabel) {
         const commandToExecute = runCommandTemplate.replace('${file}', `"${fullPath}"`);
         const task = new vscode.Task(
-          { type: 'shell', task: selectedItem.label },
+          { type: 'shell', task: taskLabel },
           vscode.TaskScope.Workspace,
-          selectedItem.label,
+          taskLabel,
           'firmware-toolkit',
-          new vscode.ShellExecution(commandToExecute, { cwd: folderPath }),
+          new vscode.ShellExecution(commandToExecute, { cwd: cwd }),
           []
         );
         task.isBackground = false;
@@ -960,9 +984,11 @@ export function activate(context: vscode.ExtensionContext) {
         };
         await vscode.tasks.executeTask(task);
       }
-    }
+    });
+
+    quickPick.show();
   });
-  context.subscriptions.push(showExecutablePickerCommand);
+  context.subscriptions.push(showFilePickerCommand);
 
   
 
@@ -1174,12 +1200,32 @@ export function activate(context: vscode.ExtensionContext) {
             }
           },
           {
-            "id": "button.selectExecutable",
-            "title": "Select and Run Executable",
+            "id": "button.selectFile",
+            "title": "Select and Run File",
             "action": {
-              "type": "executablePicker",
+              "type": "filePicker",
               "folder": "${workspaceFolder}/bin",
               "runCommand": "bash ${file}"
+            }
+          },
+          {
+            "id": "button.selectExeFile",
+            "title": "Select Executable File (exe, bat)",
+            "action": {
+              "type": "filePicker",
+              "folder": "${workspaceFolder}/bin",
+              "runCommand": "${file}",
+              "extensions": ["exe", "bat"]
+            }
+          },
+          {
+            "id": "button.selectScriptFile",
+            "title": "Select Script File (sh, ps1)",
+            "action": {
+              "type": "filePicker",
+              "folder": "${workspaceFolder}/scripts",
+              "runCommand": "bash ${file}",
+              "extensions": ["sh", "ps1"]
             }
           },
           {
