@@ -966,7 +966,12 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       if (fullPath && taskLabel) {
-        const commandToExecute = runCommandTemplate.replace('${file}', `"${fullPath}"`);
+        const commandToExecute = runCommandTemplate
+          .replace(/\${file}/g, `"${fullPath}"`)
+          .replace(/\${filePath}/g, `"${path.dirname(fullPath)}"`)
+          .replace(/\${fileName}/g, `"${path.basename(fullPath)}"`)
+          .replace(/\${fileExt}/g, `"${path.extname(fullPath).substring(1)}"`)
+          .replace(/\${fileNameOnly}/g, `"${path.basename(fullPath, path.extname(fullPath))}"`);
         const task = new vscode.Task(
           { type: 'shell', task: taskLabel },
           vscode.TaskScope.Workspace,
