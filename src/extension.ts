@@ -408,6 +408,11 @@ async function handleUnzip(task: any, allResults: any): Promise<{ outputDir: str
         else if (platform === 'linux' && toolPaths.linux) { toolCommand = toolPaths.linux; }
     }
     if (!toolCommand) { throw new Error(`No unzip tool path specified for the current platform (${process.platform}) in actions.json`); }
+
+    // Quote the command if it contains spaces to handle paths like "C:\Program Files\..."
+    if (toolCommand.includes(' ') && !toolCommand.startsWith('"')) {
+        toolCommand = `\"${toolCommand}\"`;
+    }
     const filePath = fileSourceStep.path;
     const outputDir = fileSourceStep.dir;
     const args = ['x', filePath, `-o${outputDir}`, '-aoa'];
