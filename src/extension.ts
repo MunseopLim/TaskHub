@@ -331,7 +331,6 @@ class TaskPty implements vscode.Pseudoterminal {
             const exitCode = code || 0;
             this.writeEmitter.fire(`\r\n> Task finished with exit code ${exitCode}\r\n`);
             this.processEndEmitter.fire(exitCode);
-            this.closeEmitter.fire(exitCode);
         });
 
         this.process.on('error', (err) => {

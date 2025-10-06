@@ -8,7 +8,7 @@
           "id": "show_env_task",
           "type": "shell",
           "command": {
-            "windows": "Get-ChildItem Env:",
+            "windows": "powershell -Command Get-ChildItem Env:",
             "linux": "printenv",
             "macos": "printenv"
           },
