@@ -1,0 +1,139 @@
+[
+  {
+    "id": "button.testLiveStream",
+    "title": "1. Test Live Stream (Default)",
+    "action": {
+      "tasks": [
+        {
+          "id": "selectFileForStream",
+          "type": "fileDialog",
+          "options": {
+            "openLabel": "Select any file for live stream test"
+          }
+        },
+        {
+          "id": "echoFileStream",
+          "type": "shell",
+          "passTheResultToNextTask": true,
+          "command": "echo [STREAM] Path=${selectFileForStream.path}, Dir=${selectFileForStream.dir}, Name=${selectFileForStream.name}, NameOnly=${selectFileForStream.fileNameOnly}, Ext=${selectFileForStream.fileExt}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "button.testCaptureToFile",
+    "title": "2. Test Capture to File",
+    "action": {
+      "tasks": [
+        {
+          "id": "selectFileForFile",
+          "type": "fileDialog",
+          "options": {
+            "openLabel": "Select any file for file capture test"
+          }
+        },
+        {
+          "id": "echoForFile",
+          "type": "shell",
+          "command": "echo [CAPTURED FOR FILE] Path=${selectFileForFile.path}, Dir=${selectFileForFile.dir}, Name=${selectFileForFile.name}, NameOnly=${selectFileForFile.fileNameOnly}, Ext=${selectFileForFile.fileExt}",
+          "passTheResultToNextTask": true,
+          "output": {
+            "mode": "file",
+            "filePath": "${workspaceFolder}/test_output.txt",
+            "overwrite": true
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "button.testCaptureToEditor",
+    "title": "3. Test Capture to Editor",
+    "action": {
+      "tasks": [
+        {
+          "id": "selectFileForEditor",
+          "type": "fileDialog",
+          "options": {
+            "openLabel": "Select any file for editor capture test"
+          }
+        },
+        {
+          "id": "echoForEditor",
+          "type": "shell",
+          "command": "echo [CAPTURED FOR EDITOR] Path=${selectFileForEditor.path}, Dir=${selectFileForEditor.dir}, Name=${selectFileForEditor.name}, NameOnly=${selectFileForEditor.fileNameOnly}, Ext=${selectFileForEditor.fileExt}",
+          "passTheResultToNextTask": true,
+          "output": {
+            "mode": "editor",
+            "title": "Captured Result"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "folder.parser",
+    "type": "folder",
+    "title": "Firmware Parser",
+    "children": [
+      {
+        "id": "button.unzipAndParse",
+        "title": "From ZIP file...",
+        "action": {
+          "tasks": [
+            {
+              "id": "select_zip_file",
+              "type": "fileDialog",
+              "options": {
+                "openLabel": "Select ZIP file",
+                "filters": {
+                  "Zip files": ["zip"]
+                }
+              }
+            },
+            {
+              "id": "unzip_the_file",
+              "type": "unzip",
+              "tool": "C:\\Program Files\\7-Zip\\7z.exe",
+              "inputs": {
+                "file": "select_zip_file"
+              }
+            },
+            {
+              "id": "run_py_parser_from_zip",
+              "type": "shell",
+              "command": "py E:\\dump\\parser.py \"${unzip_the_file.outputDir}\\${select_zip_file.fileNameOnly}\"",
+              "output": {
+                "mode": "terminal"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "button.selectFolderAndParse",
+        "title": "From Folder...",
+        "action": {
+          "tasks": [
+            {
+              "id": "select_target_folder",
+              "type": "folderDialog",
+              "options": {
+                "openLabel": "Select folder to parse"
+              }
+            },
+            {
+              "id": "run_parser_on_folder",
+              "type": "shell",
+              "command": "py E:\\dump\\parser.py \"${select_target_folder.path}\"",
+              "output": {
+                "mode": "terminal"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+]
