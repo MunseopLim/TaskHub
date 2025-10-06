@@ -1,203 +1,26 @@
 [
   {
-    "id": "button.build",
-    "title": "Build",
+    "id": "button.showEnv",
+    "title": "Show Environment Variables",
     "action": {
-      "type": "shell",
-      "command": {
-        "macos": "echo 'Building...' && sleep 1",
-        "windows": {
-          "cmd": "echo 'Building with cmd...' && timeout 1",
-          "powershell": "echo 'Building with powershell...' && sleep 1"
-        },
-        "linux": "echo 'Building...' && sleep 1"
-      },
-      "cwd": "${workspaceFolder}",
-      "revealTerminal": "always",
-      "successMessage": "Build completed successfully!",
-      "failMessage": "Build failed. Check terminal for details."
-    }
-  },
-  {
-    "id": "separator.1",
-    "type": "separator",
-    "title": "------------"
-  },
-  {
-    "id": "button.analyzePackage",
-    "title": "Analyze Firmware Package",
-    "action": {
-      "type": "pipeline",
-      "steps": [
+      "tasks": [
         {
-          "id": "selectFile",
-          "type": "fileDialog",
-          "options": {
-            "canSelectMany": false,
-            "openLabel": "Select Package (.7z, .zip)",
-            "filters": {
-              "Archives": ["7z", "zip"]
-            }
-          }
-        },
-        {
-          "id": "unzip",
-          "type": "unzip",
-          "tool": {
-            "macos": "7za",
-            "windows": "7z.exe",
-            "linux": "7za"
-          },
-          "inputs": {
-            "file": "selectFile"
-          }
-        },
-        {
-          "id": "getFileName",
-          "type": "stringManipulation",
-          "function": "stripExtension",
-          "input": "${selectFile.name}"
-        },
-        {
-          "id": "runScript",
-          "type": "command",
+          "id": "show_env_task",
+          "type": "shell",
           "command": {
-            "macos": "bash",
-            "linux": "bash",
-            "windows": "powershell"
+            "windows": "Get-ChildItem Env:",
+            "linux": "printenv",
+            "macos": "printenv"
           },
-          "args": {
-            "macos": [
-              "-c",
-              "echo \"Parameter to script.py: ${unzip.outputDir}/${getFileName.output}\" && python3 \"/Users/munseop/code/test/script.py\" \"${unzip.outputDir}/${getFileName.output}\""
-            ],
-            "linux": [
-              "-c",
-              "echo \"Parameter to script.py: ${unzip.outputDir}/${getFileName.output}\" && python3 \"/Users/munseop/code/test/script.py\" \"${unzip.outputDir}/${getFileName.output}\""
-            ],
-            "windows": [
-              "-Command",
-              "Write-Host \"Parameter to script.py: ${unzip.outputDir}/${getFileName.output}\"; python3 \"/Users/munseop/code/test/script.py\" \"${unzip.outputDir}/${getFileName.output}\""
-            ]
-          },
-          "inputs": {
-            "unzip": "unzip",
-            "getFileName": "getFileName"
-          },
-          "output": {
-            "showInEditor": true,
-            "title": "Analysis Result"
-          }
+          "passTheResultToNextTask": false,
+          "revealTerminal": "always"
         }
-      ],
-      "successMessage": "Package analysis completed successfully!",
-      "failMessage": "Package analysis failed."
+      ]
     }
   },
   {
-    "id": "button.listFolderContents",
-    "title": "List Folder Contents",
-    "action": {
-      "type": "pipeline",
-      "steps": [
-        {
-          "id": "selectFolder",
-          "type": "folderDialog",
-          "options": {
-            "openLabel": "Select a folder to list its contents"
-          }
-        },
-        {
-          "id": "runScript",
-          "type": "command",
-          "command": {
-            "macos": "bash",
-            "linux": "bash",
-            "windows": "powershell"
-          },
-          "args": {
-            "macos": [
-              "-c",
-              "echo \"Parameter to script.py: ${selectFolder.path}\" && python3 \"/Users/munseop/test/script.py\" \"${selectFolder.path}\""
-            ],
-            "linux": [
-              "-c",
-              "echo \"Parameter to script.py: ${selectFolder.path}\" && python3 \"/Users/munseop/test/script.py\" \"${selectFolder.path}\""
-            ],
-            "windows": [
-              "-Command",
-              "Write-Host \"Parameter to script.py: ${selectFolder.path}\"; python3 \"/Users/munseop/test/script.py\" \"${selectFolder.path}\""
-            ]
-          },
-          "output": {
-            "showInEditor": true,
-            "title": "Analysis Result"
-          }
-        }
-      ],
-      "successMessage": "Folder contents listed successfully!",
-      "failMessage": "Failed to list folder contents."
-    }
-  },
-  {
-    "id": "button.openExplorer",
-    "title": "Open Project Directory",
-    "action": {
-      "type": "shell",
-      "command": {
-        "macos": "open .",
-        "windows": "explorer .",
-        "linux": "xdg-open ."
-      },
-      "cwd": "${workspaceFolder}",
-      "revealTerminal": "silent",
-      "successMessage": "Project directory opened."
-    }
-  },
-  {
-    "id": "button.printEnv",
-    "title": "Print Environment Variables",
-    "action": {
-      "type": "shell",
-      "command": {
-        "macos": "printenv && echo \"PATH=$PATH\"",
-        "windows": {
-          "cmd": "set && echo \"PATH=%PATH%\"",
-          "powershell": "Get-ChildItem Env: ; echo \"PATH=$env:PATH\""
-        },
-        "linux": "printenv && echo \"PATH=$PATH\""
-      },
-      "cwd": "${workspaceFolder}",
-      "revealTerminal": "always"
-    }
-  },
-  {
-    "id": "button.selectFile",
-    "title": "Select File",
-    "action": {
-      "type": "filePicker",
-      "folder": "${workspaceFolder}",
-      "runCommand": "${file}"
-    }
-  },
-  {
-    "id": "button.selectExeFile",
-    "title": "Select Executable File (exe, bat)",
-    "action": {
-      "type": "filePicker",
-      "folder": "${workspaceFolder}/bin",
-      "runCommand": "${file}",
-      "extensions": ["exe", "bat"]
-    }
-  },
-  {
-    "id": "button.selectScriptFile",
-    "title": "Select Script File (sh, py)",
-    "action": {
-      "type": "filePicker",
-      "folder": "${workspaceFolder}/scripts",
-      "runCommand": "python ${file}",
-      "extensions": ["sh", "py"]
-    }
+    "id": "separator.0000",
+    "title": "--------------------",
+    "type": "separator"
   }
 ]

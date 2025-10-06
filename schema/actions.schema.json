@@ -1,0 +1,189 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Firmware Toolkit Actions",
+  "description": "Defines actions, tasks, and pipelines for the Firmware Toolkit extension.",
+  "type": "array",
+  "items": {
+    "$ref": "#/definitions/ActionItem"
+  },
+  "definitions": {
+    "ActionItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the action (e.g., button.build, pipeline.analyze)."
+        },
+        "title": {
+          "type": "string",
+          "description": "The label displayed in the UI for this action."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["separator", "folder"],
+          "description": "Defines special item types like separators or folders."
+        },
+        "action": {
+          "$ref": "#/definitions/Action"
+        },
+        "children": {
+          "type": "array",
+          "description": "If type is 'folder', this contains nested action items.",
+          "items": {
+            "$ref": "#/definitions/ActionItem"
+          }
+        }
+      },
+      "required": ["id", "title"]
+    },
+    "Action": {
+      "type": "object",
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "description": "A list of one or more tasks to execute in sequence.",
+          "items": {
+            "$ref": "#/definitions/Task"
+          }
+        },
+        "successMessage": {
+          "type": "string",
+          "description": "A message to show when the entire task sequence (pipeline) completes successfully."
+        },
+        "failMessage": {
+          "type": "string",
+          "description": "A message to show if any task in the sequence fails."
+        }
+      },
+      "required": ["tasks"]
+    },
+    "Task": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the task within the pipeline. Used to reference its output."
+        },
+        "type": {
+          "type": "string",
+          "description": "The type of the task to execute.",
+          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "stringManipulation"]
+        },
+        "description": {
+          "type": "string",
+          "description": "An optional description of what the task does."
+        },
+        "command": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "windows": { "type": "string" },
+                "macos": { "type": "string" },
+                "linux": { "type": "string" }
+              }
+            }
+          ],
+          "description": "The command to execute. Can be a direct string or an OS-specific object. Required for 'shell' and 'command' types."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Arguments for the command."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Current working directory for the command. Defaults to ${workspaceFolder}."
+        },
+        "revealTerminal": {
+          "type": "string",
+          "enum": ["always", "silent", "never"],
+          "description": "Controls terminal visibility for 'shell' type tasks."
+        },
+        "options": {
+          "type": "object",
+          "description": "Options for 'fileDialog' or 'folderDialog' types, based on VS Code's OpenDialogOptions."
+        },
+        "tool": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "A direct path to the tool executable."
+            },
+            {
+              "type": "object",
+              "description": "OS-specific paths for the tool executable.",
+              "properties": {
+                "windows": { "type": "string" },
+                "macos": { "type": "string" },
+                "linux": { "type": "string" }
+              }
+            }
+          ],
+          "description": "Path to the tool executable. Can be a direct string or an OS-specific object. Required for 'unzip' type."
+        },
+        "inputs": {
+          "type": "object",
+          "description": "Specifies inputs from previous tasks' outputs. e.g., {'file': 'previousTaskId'}"
+        },
+        "function": {
+          "type": "string",
+          "description": "The function to apply for 'stringManipulation' type. e.g., 'stripExtension'."
+        },
+        "input": {
+          "type": "string",
+          "description": "The input string for 'stringManipulation' type."
+        },
+        "output": {
+          "$ref": "#/definitions/Output"
+        },
+        "passTheResultToNextTask": {
+          "type": "boolean",
+          "description": "Defaults to false. If true, the task output (stdout) is captured to be used as a variable in subsequent tasks (e.g., ${task.id.output}). If false or omitted, output is streamed live to the terminal and is not captured.",
+          "default": false
+        },
+        "isOneShot": {
+          "type": "boolean",
+          "description": "If true, the task is considered successful as soon as it starts. Useful for non-terminating processes like GUI applications. Only works when `passTheResultToNextTask` is false.",
+          "default": false
+        }
+      },
+      "required": ["id", "type"]
+    },
+    "Output": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "Defines how to handle the task's output.",
+          "enum": ["editor", "terminal", "file"]
+        },
+        "title": {
+          "type": "string",
+          "description": "Title for the editor tab when mode is 'editor'."
+        },
+        "language": {
+          "type": "string",
+          "description": "Language mode for the editor tab when mode is 'editor'."
+        },
+        "filePath": {
+          "type": "string",
+          "description": "The path to save the output to when mode is 'file'. Can use variables."
+        },
+        "content": {
+          "type": "string",
+          "description": "The content to write to the file. Defaults to the task's stdout."
+        },
+        "overwrite": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether to overwrite the file if it exists."
+        }
+      },
+      "required": ["mode"]
+    }
+  }
+}

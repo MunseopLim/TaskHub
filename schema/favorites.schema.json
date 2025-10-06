@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Firmware Toolkit Favorites",
+  "description": "A list of favorite files for quick access.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "description": "The display name for the favorite file."
+      },
+      "path": {
+        "type": "string",
+        "description": "The absolute path to the file. Can use `${workspaceFolder}`."
+      }
+    },
+    "required": ["title", "path"]
+  }
+}

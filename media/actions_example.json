@@ -1,0 +1,54 @@
+[
+  {
+    "id": "action.simple.echo",
+    "title": "Echo Message (Live Stream)",
+    "action": {
+      "tasks": [
+        {
+          "id": "echo_task",
+          "type": "shell",
+          "command": "echo Hello World from Firmware Toolkit!"
+        }
+      ]
+    }
+  },
+  {
+    "id": "action.pipeline.example",
+    "title": "Pipeline: Select File & Save Output",
+    "action": {
+      "tasks": [
+        {
+          "id": "select_file",
+          "type": "fileDialog"
+        },
+        {
+          "id": "echo_file",
+          "type": "shell",
+          "command": "echo Selected file: ${select_file.path}",
+          "passTheResultToNextTask": true,
+          "output": {
+            "mode": "file",
+            "filePath": "${workspaceFolder}/pipeline_output.txt",
+            "overwrite": true
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "action.oneshot.example",
+    "title": "Run GUI App (One-Shot)",
+    "action": {
+      "tasks": [
+        {
+          "id": "run_notepad",
+          "type": "shell",
+          "command": {
+            "windows": "notepad.exe"
+          },
+          "isOneShot": true
+        }
+      ]
+    }
+  }
+]

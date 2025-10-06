@@ -1,0 +1,10 @@
+[
+  {
+    "title": "Project Main Source File",
+    "path": "${workspaceFolder}/src/extension.ts"
+  },
+  {
+    "title": "README Documentation",
+    "path": "${workspaceFolder}/README.md"
+  }
+]

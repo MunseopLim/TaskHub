@@ -68,248 +68,161 @@
 
 ### 5. 메인 패널 (`mainView.main`)
 
-이 패널은 `media/actions.json` (그리고 `.vscode/actions.json`이 있다면 추가된 내용)에 정의된 다양한 구성 가능한 액션을 제공합니다.
+이 패널은 `media/actions.json` (그리고 `.vscode/actions.json`이 있다면 추가된 내용)에 정의된 다양한 구성 가능한 액션을 제공합니다. 새로운 스키마는 '태스크(Task)'라는 통일된 개념을 중심으로 설계되어, 간단한 명령어부터 여러 단계를 거치는 복잡한 파이프라인까지 일관된 방식으로 정의할 수 있습니다.
 
-*   **액션 상태 표시 및 제어**:
-    *   **상태 아이콘**: 액션 버튼은 실행 상태에 따라 아이콘이 변경됩니다.
-        *   **실행 중**: 액션이 실행 중일 때, 아이콘은 회전하는 동기화 아이콘 (`$(sync~spin)`)으로 표시됩니다.
-        *   **성공**: 액션이 성공적으로 완료되면, 파란색 체크 아이콘 (`$(check)`)이 표시됩니다.
-        *   **실패**: 액션이 실패하면, 붉은색 에러 아이콘 (`$(error)`)이 표시됩니다.
-    *   **액션 중지**: 실행 중인 액션은 마우스 오른쪽 버튼으로 클릭하여 나타나는 컨텍스트 메뉴에서 "Stop Action"을 선택하여 중지할 수 있습니다.
-    *   **재실행**: 완료된 (성공 또는 실패) 액션을 다시 클릭하면 재실행됩니다.
-    *   이 기능은 [설정](#설정)에서 `firmware-toolkit.showTaskStatus` 옵션을 통해 활성화/비활성화할 수 있습니다.
+#### 기본 구조
 
-*   **구성 가능한 버튼**: `media/actions.json`에 있는 `id`가 `button.`으로 시작하는 모든 항목은 클릭 가능한 버튼으로 렌더링됩니다.
-    ```json
-    [
-      {
-        "id": "button.build",
-        "title": "빌드",
-        "action": {
-          "type": "shell",
-          "command": "echo '빌드 중...'",
-          "cwd": "${workspaceFolder}",
-          "revealTerminal": "always",
-          "successMessage": "빌드 완료!",
-          "failMessage": "빌드 실패. 터미널을 확인하세요."
+`actions.json` 파일은 최상위에 객체 배열을 가집니다. 각 객체는 다음 중 하나일 수 있습니다.
+-   **액션 (`ActionItem`)**: UI에 버튼으로 표시되는 실행 가능한 항목입니다.
+-   **폴더 (`Folder`)**: 다른 액션들을 그룹화하는 폴더입니다. (`type: "folder"`)
+-   **구분선 (`Separator`)**: 시각적 구분선입니다. (`type: "separator"`)
+
+**예시:**
+```json
+[
+  {
+    "id": "action.simple.echo",
+    "title": "Echo Message",
+    "action": { ... }
+  },
+  {
+    "type": "separator",
+    "title": "----------"
+  },
+  {
+    "id": "folder.build",
+    "type": "folder",
+    "title": "Build Tasks",
+    "children": [ ... ]
+  }
+]
+```
+
+#### 액션과 태스크 (`action` and `tasks`)
+
+모든 실행 가능한 액션은 `action` 객체를 가지며, 그 안에는 한 개 이상의 `tasks` 배열이 포함됩니다.
+-   `tasks` 배열에 태스크가 하나만 있으면: 간단한 단일 액션입니다.
+-   `tasks` 배열에 태스크가 여러 개 있으면: 태스크가 순서대로 실행되는 **파이프라인**입니다.
+
+```json
+"action": {
+  "successMessage": "Pipeline finished successfully!",
+  "failMessage": "Pipeline failed.",
+  "tasks": [
+    { ... task 1 ... },
+    { ... task 2 ... }
+  ]
+}
+```
+
+#### 태스크 객체 (`Task`)
+
+태스크는 실행의 가장 작은 단위이며, 다음과 같은 주요 속성을 가집니다.
+
+-   `id` (string, **필수**): 태스크의 고유 ID입니다. 파이프라인 내에서 다른 태스크가 이 태스크의 결과를 참조할 때 사용됩니다.
+-   `type` (string, **필수**): 태스크의 종류입니다. (예: `shell`, `fileDialog`, `unzip`, `stringManipulation`)
+-   `description` (string, *선택*): 태스크에 대한 설명입니다.
+
+#### `shell` / `command` 태스크의 핵심 옵션
+
+가장 일반적으로 사용되는 `shell` 또는 `command` 태스크는 다음과 같은 중요한 옵션을 가집니다.
+
+-   **`command`** (`string` | `object`, **필수**): 실행할 명령어입니다.
+    -   단순 문자열: `"command": "echo Hello"`
+    -   OS별 객체:
+        ```json
+        "command": {
+          "windows": "dir",
+          "linux": "ls -la",
+          "macos": "ls -la"
         }
-      }
-    ]
-    ```
+        ```
 
-*   **폴더 구성**: 액션 버튼들을 폴더로 그룹화하여 정리할 수 있습니다. 폴더는 중첩될 수 있으며, 각 폴더의 열림/닫힘 상태는 작업 공간별로 유지됩니다. `actions.json` 파일에 `type: "folder"` 항목을 추가하여 폴더를 정의할 수 있습니다.
+-   **`passTheResultToNextTask`** (`boolean`, *선택*, 기본값: `false`): 태스크의 실행 방식을 결정하는 가장 중요한 옵션입니다.
+    -   **`false` (또는 생략 시) - 스트림 모드 (Stream Mode):**
+        -   명령어의 출력이 터미널에 **실시간으로 스트리밍**됩니다.
+        -   일반적인 터미널 작업처럼 동작하며, 결과를 즉시 눈으로 확인할 수 있습니다.
+        -   이 모드에서는 출력을 캡처하지 않으므로, **다음 태스크에서 이 태스크의 결과를 변수로 사용할 수 없습니다.**
+        -   `revealTerminal` 속성을 `always`로 설정하여 터미널이 항상 표시되도록 할 수 있습니다.
+    -   **`true` - 캡처 모드 (Capture Mode):**
+        -   명령어의 출력이 터미널에 표시되지 않고, 내부적으로 **캡처**됩니다.
+        -   캡처된 결과는 파이프라인의 다음 태스크에서 `${task_id.output}` 형태로 사용할 수 있습니다.
+        -   캡처된 결과는 `output` 블록을 통해 파일이나 에디터로 보내는 등 추가적인 처리가 가능합니다.
 
-    **예시:**
-    ```json
-    [
-      {
-        "type": "folder",
-        "title": "빌드 작업",
-        "id": "folder.build",
-        "children": [
-          {
-            "id": "button.build.os",
-            "title": "운영체제별 빌드",
-            "action": {
-              "type": "shell",
-              "command": {
-                "windows": "echo 'Windows에서 빌드 중...'",
-                "macos": "echo 'macOS에서 빌드 중...'",
-                "linux": "echo 'Linux에서 빌드 중...'"
-              }
-            }
-          },
-          {
-            "id": "button.build",
-            "title": "프로젝트 빌드",
-            "action": {
-              "type": "shell",
-              "command": "npm run build"
-            }
+-   **`output`** (`object`, *선택*): **캡처 모드(`passTheResultToNextTask: true`)에서만 동작합니다.** 캡처된 결과를 어떻게 처리할지 정의합니다.
+    -   `"mode": "editor"`: 새 에디터 탭에 결과를 표시합니다.
+    -   `"mode": "file"`: 지정된 파일에 결과를 저장합니다. (`filePath`, `overwrite` 속성 사용)
+    -   `"mode": "terminal"`: 'Firmware Toolkit' 전용 터미널에 결과를 붙여넣기 합니다.
+
+-   **`isOneShot`** (`boolean`, *선택*, 기본값: `false`): **스트림 모드에서만 의미가 있습니다.**
+    -   `true`로 설정하면, `notepad.exe` 같은 GUI 프로그램처럼 종료되지 않는 프로세스를 실행하고 즉시 '성공'으로 처리합니다.
+
+#### 변수 치환
+
+파이프라인 내에서, 이전 태스크의 결과는 `${task_id.property}` 형식으로 다음 태스크의 속성(예: `command`, `args`, `filePath` 등)에서 사용할 수 있습니다.
+
+-   `fileDialog` 태스크 (`id: "select_file"`)의 결과 사용 예시:
+    -   `${select_file.path}`: 전체 경로
+    -   `${select_file.dir}`: 디렉토리 경로
+    -   `${select_file.name}`: 파일명
+    -   `${select_file.fileNameOnly}`: 확장자를 제외한 파일명
+    -   `${select_file.fileExt}`: 확장자
+
+#### 전체 예시
+
+```json
+[
+  {
+    "id": "action.pipeline.example",
+    "title": "Example: Select File, Echo, and Save",
+    "action": {
+      "successMessage": "Pipeline finished!",
+      "tasks": [
+        {
+          "id": "select_a_file",
+          "type": "fileDialog",
+          "options": {
+            "openLabel": "Select a text file"
           }
-        ]
-      }
-    ]
-    ```
-
-    *   `type`: `"folder"`로 설정해야 합니다.
-    *   `title`: 폴더의 이름입니다.
-    *   `id`: 폴더의 상태를 기억하기 위한 고유 ID입니다. 이 ID를 설정하지 않으면 폴더의 열림/닫힘 상태가 유지되지 않을 수 있습니다.
-    *   `children`: 폴더에 포함될 액션 버튼 또는 다른 폴더들의 배열입니다.
-*   **구분선**: `type: "separator"`인 항목은 시각적 구분선으로 렌더링됩니다.
-*   **구성 가능한 터미널 동작 (`revealTerminal`)**: `shell` 타입 액션의 경우 터미널의 가시성을 제어할 수 있습니다.
-*   **성공/실패 알림 (`successMessage`, `failMessage`)**: `shell` 타입 액션의 경우 작업 완료 시 VS Code 알림으로 표시될 메시지를 정의할 수 있습니다.
-*   **OS별 명령 (`command` 객체)**: `command` 속성은 단일 문자열 대신 객체를 사용하여 운영 체제(OS)별로 다른 명령을 지정할 수 있습니다.
-
-*   **1회성 실행 작업 (`isOneShot`)**: `shell` 타입의 액션에 `isOneShot: true` 속성을 추가할 수 있습니다. 이 속성이 설정된 작업은 'fire-and-forget' 방식으로 동작합니다. 즉, 명령이 시작된 직후 작업 상태가 '성공'으로 표시되며, 실제 프로세스의 종료 여부를 기다리지 않습니다. 이는 별도의 창을 띄우는 GUI 프로그램을 실행하는 등, 시작 후 즉시 제어권을 반환하는 명령에 유용합니다.
-
-    **예시:**
-    ```json
-    {
-      "id": "button.run.mytool",
-      "title": "Run My Tool",
-      "action": {
-        "type": "shell",
-        "command": "C:\\path\\to\\my_tool.exe",
-        "isOneShot": true
-      }
-    }
-    ```
-*   **파일 선택기**: 지정된 폴더에서 파일을 선택하거나, 파일 시스템을 탐색하거나, 파일 이름을 직접 입력하여 파일을 선택하고 실행할 수 있는 특수 액션 타입(`filePicker`)입니다.
-
-*   **파이프라인 액션**: 여러 단계를 순차적으로 실행하는 복잡한 작업을 정의할 수 있는 `pipeline` 타입의 액션입니다. 각 단계의 출력은 다음 단계의 입력으로 사용될 수 있습니다.
-
-    **예시:**
-    ```json
-    {
-      "id": "button.analyzePackage",
-      "title": "Analyze Firmware Package",
-      "action": {
-        "type": "pipeline",
-        "steps": [
-          {
-            "id": "selectFile",
-            "type": "fileDialog",
-            "options": {
-              "canSelectMany": false,
-              "openLabel": "Select Package (.7z, .zip)",
-              "filters": {
-                "Archives": ["7z", "zip"]
-              }
-            }
+        },
+        {
+          "id": "echo_in_terminal",
+          "type": "shell",
+          "description": "This task streams its output live to the terminal. Its output is NOT captured.",
+          "command": "echo [STREAM] You selected ${select_a_file.name}",
+          "passTheResultToNextTask": false, 
+          "revealTerminal": "always"
+        },
+        {
+          "id": "capture_file_content",
+          "type": "shell",
+          "description": "This task captures the file content for the next step.",
+          "command": {
+            "windows": "type \"${select_a_file.path}\"",
+            "linux": "cat \"${select_a_file.path}\"",
+            "macos": "cat \"${select_a_file.path}\""
           },
-          {
-            "id": "unzip",
-            "type": "unzip",
-            "tool": {
-              "macos": "7za",
-              "windows": "7z.exe",
-              "linux": "7za"
-            },
-            "inputs": {
-              "file": "selectFile"
-            }
-          },
-          {
-            "id": "getFileName",
-            "type": "command",
-            "command": "bash",
-            "args": [
-              "-c",
-              "echo \"${selectFile.name}\" | sed -e 's/\.7z$//' -e 's/\.zip$//'"
-            ],
-            "inputs": {
-              "selectFile": "selectFile"
-            },
+          "passTheResultToNextTask": true
+        },
+        {
+            "id": "save_to_file",
+            "type": "shell",
+            "description": "This task takes the previous result and saves it to a file.",
+            "command": "echo The content of ${select_a_file.name} is:\n\n${capture_file_content.output}",
+            "passTheResultToNextTask": true,
             "output": {
-              "variable": "fileNameWithoutExtension"
+                "mode": "file",
+                "filePath": "${workspaceFolder}/report.txt",
+                "overwrite": true
             }
-          },
-          {
-            "id": "runScript",
-            "type": "command",
-            "command": "bash",
-            "args": [
-              "-c",
-              "echo \"Parameter to script.py: ${unzip.outputDir}/${getFileName.fileNameWithoutExtension}\" && python3 \"/Users/munseop/code/test/script.py\" \"${unzip.outputDir}/${getFileName.fileNameWithoutExtension}\""
-            ],
-            "inputs": {
-              "unzip": "unzip",
-              "getFileName": "getFileName"
-            },
-            "output": {
-              "showInEditor": true,
-              "title": "Analysis Result"
-            }
-          }
-        ],
-        "successMessage": "Package analysis completed successfully!",
-        "failMessage": "Package analysis failed."
-      }
+        }
+      ]
     }
-    ```
+  }
+]
+```
 
-    *   `type`: `"pipeline"`으로 설정해야 합니다.
-    *   `steps`: 파이프라인을 구성하는 단계들의 배열입니다.
-    *   **사용 가능한 단계 유형**:
-        *   `fileDialog`: 파일 선택 대화상자를 엽니다.
-        *   `folderDialog`: 폴더 선택 대화상자를 엽니다.
-        *   `unzip`: 선택된 압축 파일을 해제합니다.
-        *   `command`: 셸 명령을 실행합니다.
-    *   **데이터 전달**: 이전 단계의 결과는 `${stepId.property}` 형식을 사용하여 후속 단계에서 참조할 수 있습니다. 예를 들어, `unzip` 단계의 출력 디렉터리는 `${unzip.outputDir}`로 참조할 수 있습니다.
 
-    **폴더 선택 예시:**
-    ```json
-    {
-      "id": "button.listFolderContents",
-      "title": "List Folder Contents",
-      "action": {
-        "type": "pipeline",
-        "steps": [
-          {
-            "id": "selectFolder",
-            "type": "folderDialog",
-            "options": {
-              "openLabel": "Select a folder to list its contents"
-            }
-          },
-          {
-            "id": "listContents",
-            "type": "command",
-            "command": {
-              "macos": "ls",
-              "linux": "ls",
-              "windows": "dir"
-            },
-            "args": {
-              "macos": ["-la", "${selectFolder.path}"],
-              "linux": ["-la", "${selectFolder.path}"],
-              "windows": ["${selectFolder.path}"]
-            },
-            "output": {
-              "showInEditor": true,
-              "title": "Folder Contents"
-            }
-          }
-        ],
-        "successMessage": "Folder contents listed successfully!",
-        "failMessage": "Failed to list folder contents."
-      }
-    }
-    ```
-
-*   **OS별 명령어 및 인수**: `command` 단계에서 `command`와 `args` 속성을 객체로 지정하여 운영 체제(OS)별로 다른 명령과 인수를 사용할 수 있습니다.
-
-    **예시:**
-    ```json
-    {
-      "id": "runScript",
-      "type": "command",
-      "command": {
-        "macos": "bash",
-        "linux": "bash",
-        "windows": "powershell"
-      },
-      "args": {
-        "macos": [
-          "-c",
-          "echo \"Parameter to script.py: ${selectFolder.path}\" && python3 \"/path/to/script.py\" \"${selectFolder.path}\""
-        ],
-        "linux": [
-          "-c",
-          "echo \"Parameter to script.py: ${selectFolder.path}\" && python3 \"/path/to/script.py\" \"${selectFolder.path}\""
-        ],
-        "windows": [
-          "-Command",
-          "Write-Host \"Parameter to script.py: ${selectFolder.path}\”; python3 \"/path/to/script.py\" \"${selectFolder.path}\""
-        ]
-      },
-      "output": {
-        "showInEditor": true,
-        "title": "Analysis Result"
-      }
-    }
-    ```
 
 ### 6. 즐겨찾기 패널 (`mainView.favorite`)
 
