@@ -351,8 +351,13 @@ class TaskPty implements vscode.Pseudoterminal {
 async function handleStreamedCommand(task: any): Promise<void> {
     const { args, cwd, id, isOneShot } = task;
     const command = getCommandString(task.command);
-    const env = { ...process.env, PYTHONIOENCODING: 'utf-8' };
-    const options = { cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', shell: true, env: env };
+    const options = { cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', shell: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } };
+
+    const showVerboseLogs = vscode.workspace.getConfiguration('firmware-toolkit').get('pipeline.showVerboseLogs', false);
+    if (showVerboseLogs) {
+        outputChannel.appendLine(`[INFO] Executing streamed command: ${command} ${(args || []).join(' ')} in ${options.cwd}`);
+    }
+
     const pty = new TaskPty(command, args || [], options);
     const terminal = vscode.window.createTerminal({ name: `Task - ${id}`, pty: pty });
     terminal.show();
@@ -591,6 +596,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('firmware-toolkit.showExampleJsonQuickPick', async () => { const pick = await vscode.window.showQuickPick([ { label: 'actions.json Example', description: 'Show example content for actions.json', type: 'actions' }, { label: 'links.json Example', description: 'Show example content for links.json', type: 'links' }, { label: 'favorites.json Example', description: 'Show example content for favorites.json', type: 'favorites' }, ], { placeHolder: 'Select which example JSON to display' }); if (pick) { vscode.commands.executeCommand('firmware-toolkit.showExampleJson', pick.type); } }));
     context.subscriptions.push(vscode.commands.registerCommand('firmware-toolkit.addOpenFileToFavorites', async () => { const editor = vscode.window.activeTextEditor; if (!editor) { vscode.window.showInformationMessage('No active editor found.'); return; } const filePath = editor.document.uri.fsPath; const title = await vscode.window.showInputBox({ prompt: `Enter a title for ${path.basename(filePath)}`, value: path.basename(filePath) }); if (!title) { return; } const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json'); let favorites: { title: string; path: string }[] = []; if (fs.existsSync(favoritesPath)) { try { favorites = JSON.parse(fs.readFileSync(favoritesPath, 'utf-8')); } catch (e) { vscode.window.showErrorMessage('Error parsing favorites.json'); return; } } favorites.push({ title, path: filePath }); fs.writeFileSync(favoritesPath, JSON.stringify(favorites, null, 2)); favoriteViewProvider.refresh(); }));
     context.subscriptions.push(vscode.commands.registerCommand('firmware-toolkit.terminateAllTasks', async () => { vscode.tasks.taskExecutions.filter(t => t.task.source === 'firmware-toolkit').forEach(t => t.terminate()); actionStates.clear(); activeTasks.clear(); mainViewProvider.refresh(); vscode.window.showInformationMessage('All active tasks from Firmware Toolkit have been terminated.'); }));
+    context.subscriptions.push(vscode.commands.registerCommand('firmware-toolkit.openSettings', () => { vscode.commands.executeCommand('workbench.action.openSettings', '@ext:Munseop.firmware-toolkit'); }));
 }
 
 export function deactivate() {}
