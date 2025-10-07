@@ -24,7 +24,7 @@ export interface Action {
  */
 export interface Task {
     id: string;
-    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'stringManipulation';
+    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'zip' | 'stringManipulation';
     description?: string;
 
     // Properties for 'shell' and 'command' types
@@ -40,13 +40,17 @@ export interface Task {
     // Properties for 'fileDialog' and 'folderDialog'
     options?: any; // Corresponds to vscode.OpenDialogOptions
 
-    // Properties for 'unzip'
+    // Properties for 'unzip' and 'zip'
     tool?: string | { 
         windows?: string;
         macos?: string;
         linux?: string;
     };
     inputs?: { [key: string]: string };
+
+    // Properties for 'zip'
+    source?: string | string[];
+    archive?: string;
 
     // Properties for 'stringManipulation'
     function?: string;

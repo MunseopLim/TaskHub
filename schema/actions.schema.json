@@ -67,7 +67,7 @@
         "type": {
           "type": "string",
           "description": "The type of the task to execute.",
-          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "stringManipulation"]
+          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation"]
         },
         "description": {
           "type": "string",
@@ -128,6 +128,22 @@
         "inputs": {
           "type": "object",
           "description": "Specifies inputs from previous tasks' outputs. e.g., {'file': 'previousTaskId'}"
+        },
+        "source": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          ],
+          "description": "File or directory paths to be compressed. Required for 'zip' type."
+        },
+        "archive": {
+          "type": "string",
+          "description": "The path for the output archive file. Required for 'zip' type."
         },
         "function": {
           "type": "string",

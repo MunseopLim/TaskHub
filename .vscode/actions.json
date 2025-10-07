@@ -20,7 +20,7 @@
       ]
     },
     "successMessage": "Live stream test completed. Check the terminal output.",
-    "faileMessage": "Live stream test failed. Please try again."
+    "failMessage": "Live stream test failed. Please try again."
   },
   {
     "id": "button.testCaptureToFile",
@@ -145,5 +145,31 @@
         }
       }
     ]
+  },
+  {
+    "id": "button.createFirmwareArchive",
+    "title": "Create Firmware Archive from Folder...",
+    "action": {
+      "successMessage": "Firmware archive created successfully!",
+      "tasks": [
+        {
+          "id": "select_folder_to_zip",
+          "type": "folderDialog",
+          "options": {
+            "openLabel": "Select folder to compress"
+          }
+        },
+        {
+          "id": "zip_the_folder",
+          "type": "zip",
+          "tool": {
+            "windows": "C:\\Program Files\\7-Zip\\7z.exe",
+            "macos": "/opt/homebrew/bin/7z"
+          },
+          "source": "${select_folder_to_zip.path}",
+          "archive": "${select_folder_to_zip.path}.zip"
+        }
+      ]
+    }
   }
 ]

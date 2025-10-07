@@ -123,7 +123,7 @@
 태스크는 실행의 가장 작은 단위이며, 다음과 같은 주요 속성을 가집니다.
 
 -   `id` (string, **필수**): 태스크의 고유 ID입니다. 파이프라인 내에서 다른 태스크가 이 태스크의 결과를 참조할 때 사용됩니다.
--   `type` (string, **필수**): 태스크의 종류입니다. (예: `shell`, `fileDialog`, `unzip`, `stringManipulation`)
+-   `type` (string, **필수**): 태스크의 종류입니다. (예: `shell`, `fileDialog`, `unzip`, `zip`, `stringManipulation`)
 -   `description` (string, *선택*): 태스크에 대한 설명입니다.
 
 #### `shell` / `command` 태스크의 핵심 옵션
@@ -159,6 +159,48 @@
 
 -   **`isOneShot`** (`boolean`, *선택*, 기본값: `false`): **스트림 모드에서만 의미가 있습니다.**
     -   `true`로 설정하면, `notepad.exe` 같은 GUI 프로그램처럼 종료되지 않는 프로세스를 실행하고 즉시 '성공'으로 처리합니다.
+
+#### `unzip` 태스크
+
+이 태스크는 지정된 `.zip` 또는 `.7z` 아카이브 파일의 압축을 해제합니다.
+
+-   `type` (string, **필수**): `unzip`으로 설정해야 합니다.
+-   `tool` (string | object, *선택*): 압축 해제에 사용할 도구(예: 7-Zip)의 경로를 지정합니다.
+-   `inputs` (object, **필수**): 압축을 해제할 파일의 경로를 이전 태스크로부터 가져옵니다. `file` 키를 사용해야 합니다. (예: `{"file": "file_dialog_task_id"}`)
+
+#### `zip` 태스크
+
+이 태스크는 지정된 파일이나 폴더를 압축하여 하나의 아카이브 파일을 생성합니다.
+
+-   `type` (string, **필수**): `zip`으로 설정해야 합니다.
+-   `tool` (string | object, *선택*): 압축에 사용할 도구(예: 7-Zip)의 경로를 지정합니다.
+-   `source` (string | string[], **필수**): 압축할 파일 또는 폴더의 경로입니다. 단일 경로는 문자열로, 여러 경로는 배열로 지정할 수 있습니다.
+-   `archive` (string, **필수**): 생성될 압축 파일의 경로와 이름입니다.
+
+**예시:**
+```json
+{
+  "id": "action.zip.files",
+  "title": "Zip Project Files",
+  "action": {
+    "tasks": [
+      {
+        "id": "zip_task",
+        "type": "zip",
+        "tool": {
+          "windows": "C:\\Program Files\\7-Zip\\7z.exe",
+          "macos": "/usr/local/bin/7z"
+        },
+        "source": [
+          "${workspaceFolder}/src",
+          "${workspaceFolder}/README.md"
+        ],
+        "archive": "${workspaceFolder}/project-archive.zip"
+      }
+    ]
+  }
+}
+```
 
 #### 변수 치환
 

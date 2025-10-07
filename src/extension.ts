@@ -49,6 +49,28 @@ function getCommandString(command: any): string {
     throw new Error(`Invalid or unsupported 'command' property for the current platform (${process.platform})`);
 }
 
+function getToolCommand(tool: any): string {
+    let toolCommand: string | undefined;
+    if (typeof tool === 'string') {
+        toolCommand = tool;
+    } else if (typeof tool === 'object' && tool !== null) {
+        const platform = process.platform;
+        if (platform === 'win32' && tool.windows) { toolCommand = tool.windows; }
+        else if (platform === 'darwin' && tool.macos) { toolCommand = tool.macos; }
+        else if (platform === 'linux' && tool.linux) { toolCommand = tool.linux; }
+    }
+
+    if (!toolCommand) {
+        throw new Error(`No tool path specified for the current platform (${process.platform}) in actions.json`);
+    }
+
+    // Quote the command if it contains spaces to handle paths like "C:\Program Files\..."
+    if (toolCommand.includes(' ') && !toolCommand.startsWith('"')) {
+        toolCommand = `"${toolCommand}"`;
+    }
+    return toolCommand;
+}
+
 class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vscode.TreeItem> {
   private _onDidChangeTreeData: vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void> = new vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void>();
   readonly onDidChangeTreeData: vscode.Event<Action | Folder | vscode.TreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
@@ -234,6 +256,9 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
             const interpolatedUnzipTask = { ...task, tool: JSON.parse(interpolatePipelineVariables(JSON.stringify(task.tool), interpolationContext)) };
             result = await handleUnzip(interpolatedUnzipTask, allResults);
             break;
+        case 'zip':
+            result = await handleZip(task, allResults);
+            break;
         case 'stringManipulation':
             const interpolatedInput = interpolatePipelineVariables(task.input || '', interpolationContext);
             result = await handleStringManipulation({ ...task, input: interpolatedInput });
@@ -403,26 +428,41 @@ async function handleUnzip(task: any, allResults: any): Promise<{ outputDir: str
     const inputs = task.inputs || {};
     const fileSourceStep = allResults[inputs.file];
     if (!fileSourceStep || !fileSourceStep.path) { throw new Error(`No file input found for unzip task from step '${inputs.file}'`); }
-    let toolCommand: string | undefined;
-    if (typeof task.tool === 'string') { toolCommand = task.tool; }
-    else if (typeof task.tool === 'object') {
-        const platform = process.platform;
-        const toolPaths = task.tool || {};
-        if (platform === 'win32' && toolPaths.windows) { toolCommand = toolPaths.windows; }
-        else if (platform === 'darwin' && toolPaths.macos) { toolCommand = toolPaths.macos; }
-        else if (platform === 'linux' && toolPaths.linux) { toolCommand = toolPaths.linux; }
-    }
-    if (!toolCommand) { throw new Error(`No unzip tool path specified for the current platform (${process.platform}) in actions.json`); }
 
-    // Quote the command if it contains spaces to handle paths like "C:\Program Files\..."
-    if (toolCommand.includes(' ') && !toolCommand.startsWith('"')) {
-        toolCommand = `\"${toolCommand}\"`;
-    }
+    const toolCommand = getToolCommand(task.tool);
+
     const filePath = fileSourceStep.path;
     const outputDir = fileSourceStep.dir;
     const args = ['x', filePath, `-o${outputDir}`, '-aoa'];
     try { await executeShellCommand(toolCommand, args); return { outputDir: outputDir }; }
     catch (error: any) { throw new Error(`Failed to unzip file: ${error.message}`); }
+}
+
+async function handleZip(task: import('./schema').Task, allResults: any): Promise<{ archivePath: string }> {
+    const interpolationContext = { ...allResults, workspaceFolder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '' };
+    
+    const toolCommand = getToolCommand(task.tool);
+    const archive = task.archive ? interpolatePipelineVariables(task.archive, interpolationContext) : undefined;
+    if (!archive) { throw new Error(`Zip task '${task.id}' is missing the 'archive' property.`); }
+
+    let sourcePaths: string[] = [];
+    if (Array.isArray(task.source)) {
+        sourcePaths = task.source.map(s => interpolatePipelineVariables(s, interpolationContext));
+    } else if (typeof task.source === 'string') {
+        sourcePaths = [interpolatePipelineVariables(task.source, interpolationContext)];
+    }
+
+    if (sourcePaths.length === 0) {
+        throw new Error(`Zip task '${task.id}' has no 'source' files or directories specified.`);
+    }
+
+    const args = ['a', archive, ...sourcePaths];
+    try {
+        await executeShellCommand(toolCommand, args, task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined);
+        return { archivePath: archive };
+    } catch (error: any) {
+        throw new Error(`Failed to zip files for task '${task.id}': ${error.message}`);
+    }
 }
 
 async function handleStringManipulation(task: any): Promise<{ output: string }> {
