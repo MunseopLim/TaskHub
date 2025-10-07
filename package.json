@@ -170,6 +170,10 @@
         "command": "firmware-toolkit.terminateAllTasks",
         "title": "Terminate All Tasks",
         "icon": "$(primitive-square)"
+      },
+      {
+        "command": "firmware-toolkit.openSettings",
+        "title": "Firmware Toolkit: Open Extension Settings"
       }
     ],
     "menus": {
