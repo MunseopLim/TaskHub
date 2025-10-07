@@ -1,13 +1,13 @@
 {
-  "name": "firmware-toolkit",
-  "displayName": "Firmware Toolkit",
-  "description": "The helper to connect common tools.",
+  "name": "taskhub",
+  "displayName": "TaskHub",
+  "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "repository": {
     "type": "git",
-    "url": "https://github.com/munseoplim/firmware-toolkit.git"
+    "url": "https://github.com/munseoplim/TaskHub.git"
   },
   "engines": {
     "vscode": "^1.75.0"
@@ -44,14 +44,14 @@
       }
     ],
     "configuration": {
-      "title": "Firmware Toolkit",
+      "title": "TaskHub",
       "properties": {
-        "firmware-toolkit.showTaskStatus": {
+        "taskhub.showTaskStatus": {
           "type": "boolean",
           "default": true,
           "description": "Show status indicators (running, success, failure) for actions in the Main view."
         },
-        "firmware-toolkit.pipeline.showVerboseLogs": {
+        "taskhub.pipeline.showVerboseLogs": {
           "type": "boolean",
           "default": false,
           "description": "If true, shows detailed logs in the output panel when executing a pipeline. By default, only minimal status messages are shown."
@@ -62,7 +62,7 @@
       "activitybar": [
         {
           "id": "mainView",
-          "title": "Firmware Toolkit",
+          "title": "TaskHub",
           "icon": "media/h_icon.svg"
         }
       ]
@@ -88,156 +88,156 @@
     },
     "commands": [
       {
-        "command": "firmware-toolkit.helloWorld",
+        "command": "taskhub.helloWorld",
         "title": "Hello World"
       },
       {
-        "command": "firmware-toolkit.openLink",
+        "command": "taskhub.openLink",
         "title": "Open Link"
       },
       {
-        "command": "firmware-toolkit.copyLink",
+        "command": "taskhub.copyLink",
         "title": "Copy Link"
       },
       {
-        "command": "firmware-toolkit.goToLink",
+        "command": "taskhub.goToLink",
         "title": "Go to Link"
       },
       {
-        "command": "firmware-toolkit.executeAction",
+        "command": "taskhub.executeAction",
         "title": "Execute Action"
       },
       {
-        "command": "firmware-toolkit.stopAction",
+        "command": "taskhub.stopAction",
         "title": "Stop Action",
         "icon": "$(primitive-square)"
       },
       {
-        "command": "firmware-toolkit.showVersion",
+        "command": "taskhub.showVersion",
         "title": "Show Extension Version"
       },
       {
-                  "command": "firmware-toolkit.showFilePicker",        "title": "Select and Run File"
+                  "command": "taskhub.showFilePicker",        "title": "Select and Run File"
       },
       {
-        "command": "firmware-toolkit.openFavoriteFile",
+        "command": "taskhub.openFavoriteFile",
         "title": "Open Favorite File"
       },
       {
-        "command": "firmware-toolkit.editFavorites",
+        "command": "taskhub.editFavorites",
         "title": "Edit Favorites",
         "icon": "$(pencil)"
       },
       {
-        "command": "firmware-toolkit.editLinks",
+        "command": "taskhub.editLinks",
         "title": "Edit Links",
         "icon": "$(pencil)"
       },
       {
-        "command": "firmware-toolkit.editActions",
+        "command": "taskhub.editActions",
         "title": "Edit Actions",
         "icon": "$(pencil)"
       },
       {
-        "command": "firmware-toolkit.addFavoriteFile",
+        "command": "taskhub.addFavoriteFile",
         "title": "Add Existing File to Favorites",
         "icon": "$(add)"
       },
       {
-        "command": "firmware-toolkit.deleteFavorite",
+        "command": "taskhub.deleteFavorite",
         "title": "Delete Favorite",
         "icon": "$(trash)"
       },
       {
-        "command": "firmware-toolkit.deleteLink",
+        "command": "taskhub.deleteLink",
         "title": "Delete Link",
         "icon": "$(trash)"
       },
       {
-        "command": "firmware-toolkit.addOpenFileToFavorites",
+        "command": "taskhub.addOpenFileToFavorites",
         "title": "Add Open File to Favorites",
         "icon": "$(add)"
       },
       {
-        "command": "firmware-toolkit.showExampleJson",
+        "command": "taskhub.showExampleJson",
         "title": "Show Example JSON"
       },
       {
-        "command": "firmware-toolkit.showExampleJsonQuickPick",
+        "command": "taskhub.showExampleJsonQuickPick",
         "title": "Show Example JSON Quick Pick"
       },
       {
-        "command": "firmware-toolkit.terminateAllTasks",
+        "command": "taskhub.terminateAllTasks",
         "title": "Terminate All Tasks",
         "icon": "$(primitive-square)"
       },
       {
-        "command": "firmware-toolkit.openSettings",
-        "title": "Firmware Toolkit: Open Extension Settings"
+        "command": "taskhub.openSettings",
+        "title": "TaskHub: Open Extension Settings"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "firmware-toolkit.editFavorites",
+          "command": "taskhub.editFavorites",
           "when": "view == mainView.favorite",
           "group": "navigation"
         },
         {
-          "command": "firmware-toolkit.addFavoriteFile",
+          "command": "taskhub.addFavoriteFile",
           "when": "view == mainView.favorite",
           "group": "navigation"
         },
         {
-          "command": "firmware-toolkit.editLinks",
+          "command": "taskhub.editLinks",
           "when": "view == mainView.link",
           "group": "navigation"
         },
         {
-          "command": "firmware-toolkit.editActions",
+          "command": "taskhub.editActions",
           "when": "view == mainView.main",
           "group": "navigation"
         },
         {
-          "command": "firmware-toolkit.terminateAllTasks",
+          "command": "taskhub.terminateAllTasks",
           "when": "view == mainView.main",
           "group": "navigation"
         }
       ],
       "editor/context": [
         {
-          "command": "firmware-toolkit.addOpenFileToFavorites",
+          "command": "taskhub.addOpenFileToFavorites",
           "group": "navigation"
         }
       ],
       "view/item/context": [
         {
-          "command": "firmware-toolkit.copyLink",
+          "command": "taskhub.copyLink",
           "when": "view == mainView.link && viewItem == linkItem",
           "group": "inline"
         },
         {
-          "command": "firmware-toolkit.goToLink",
+          "command": "taskhub.goToLink",
           "when": "view == mainView.link && viewItem == linkItem",
           "group": "inline"
         },
         {
-          "command": "firmware-toolkit.deleteLink",
+          "command": "taskhub.deleteLink",
           "when": "view == mainView.link && viewItem == linkItem",
           "group": "inline"
         },
         {
-          "command": "firmware-toolkit.deleteFavorite",
+          "command": "taskhub.deleteFavorite",
           "when": "view == mainView.favorite && viewItem == favoriteItem",
           "group": "inline"
         },
         {
-          "command": "firmware-toolkit.showExampleJsonQuickPick",
+          "command": "taskhub.showExampleJsonQuickPick",
           "when": "view == mainView.main && viewItem == versionItem",
           "group": "inline"
         },
         {
-          "command": "firmware-toolkit.stopAction",
+          "command": "taskhub.stopAction",
           "when": "view == mainView.main && viewItem == runningAction",
           "group": "inline"
         }

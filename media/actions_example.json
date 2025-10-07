@@ -7,7 +7,7 @@
         {
           "id": "echo_task",
           "type": "shell",
-          "command": "echo Hello World from Firmware Toolkit!"
+          "command": "echo Hello World from TaskHub!"
         }
       ]
     }

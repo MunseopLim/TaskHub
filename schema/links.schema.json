@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Firmware Toolkit Links",
+  "title": "TaskHub Links",
   "description": "A list of useful web links.",
   "type": "array",
   "items": {

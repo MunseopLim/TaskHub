@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Firmware Toolkit Actions",
-  "description": "Defines actions, tasks, and pipelines for the Firmware Toolkit extension.",
+  "title": "TaskHub Actions",
+  "description": "Defines actions, tasks, and pipelines for the TaskHub extension.",
   "type": "array",
   "items": {
     "$ref": "#/definitions/ActionItem"
