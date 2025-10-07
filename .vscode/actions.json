@@ -14,12 +14,13 @@
         {
           "id": "echoFileStream",
           "type": "shell",
-          "passTheResultToNextTask": true,
           "command": "echo [STREAM] Path=${selectFileForStream.path}, Dir=${selectFileForStream.dir}, Name=${selectFileForStream.name}, NameOnly=${selectFileForStream.fileNameOnly}, Ext=${selectFileForStream.fileExt}",
           "revealTerminal": "always"
         }
       ]
-    }
+    },
+    "successMessage": "Live stream test completed. Check the terminal output.",
+    "faileMessage": "Live stream test failed. Please try again."
   },
   {
     "id": "button.testCaptureToFile",
@@ -95,7 +96,10 @@
             {
               "id": "unzip_the_file",
               "type": "unzip",
-              "tool": "C:\\Program Files\\7-Zip\\7z.exe",
+              "tool": {
+                "windows": "C:\\Program Files\\7-Zip\\7z.exe",
+                "macos": "/opt/homebrew/bin/7z"
+              },
               "inputs": {
                 "file": "select_zip_file"
               }
@@ -103,7 +107,10 @@
             {
               "id": "run_py_parser_from_zip",
               "type": "shell",
-              "command": "py E:\\dump\\parser.py \"${unzip_the_file.outputDir}\\${select_zip_file.fileNameOnly}\"",
+              "command": {
+                "windows": "py E:\\dump\\parser.py \"${unzip_the_file.outputDir}\\${select_zip_file.fileNameOnly}\"",
+                "macos": "python3 /Users/munseop/code/test/script.py \"${unzip_the_file.outputDir}/${select_zip_file.fileNameOnly}\""
+              },
               "output": {
                 "mode": "terminal"
               }
@@ -126,7 +133,10 @@
             {
               "id": "run_parser_on_folder",
               "type": "shell",
-              "command": "py E:\\dump\\parser.py \"${select_target_folder.path}\"",
+              "command": {
+                "macos": "python3 /Users/munseop/code/test/script.py \"${select_target_folder.path}\"",
+                "windows": "py E:\\dump\\parser.py \"${select_target_folder.path}\""
+              },
               "output": {
                 "mode": "terminal"
               }
