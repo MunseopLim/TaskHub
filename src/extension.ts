@@ -279,7 +279,14 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
             if (task.passTheResultToNextTask) {
                 result = await handleCommand(handlerTask, context);
             } else {
-                await executeStreamedTask(handlerTask);
+                if (task.isOneShot) {
+                    executeStreamedTask(handlerTask).catch(error => {
+                        console.error(`One-shot task ${task.id} failed:`, error);
+                        vscode.window.showErrorMessage(`One-shot task '${task.id}' failed to start: ${error.message}`);
+                    });
+                } else {
+                    await executeStreamedTask(handlerTask);
+                }
                 result = {};
             }
             break;
@@ -320,7 +327,7 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
 
 async function executeStreamedTask(task: any): Promise<void> {
     return new Promise(async (resolve, reject) => {
-        const { command, args, cwd, id, actionId } = task;
+        const { command, args, cwd, id, actionId, revealTerminal } = task;
 
         const options: vscode.ShellExecutionOptions = {
             cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
@@ -341,8 +348,22 @@ async function executeStreamedTask(task: any): Promise<void> {
             shellExecution
         );
 
+        let revealKind: vscode.TaskRevealKind;
+        switch (revealTerminal) {
+            case 'silent':
+                revealKind = vscode.TaskRevealKind.Silent;
+                break;
+            case 'never':
+                revealKind = vscode.TaskRevealKind.Never;
+                break;
+            case 'always':
+            default:
+                revealKind = vscode.TaskRevealKind.Always;
+                break;
+        }
+
         vsCodeTask.presentationOptions = {
-            reveal: vscode.TaskRevealKind.Always,
+            reveal: revealKind,
             panel: vscode.TaskPanelKind.Shared,
             showReuseMessage: true,
             clear: false, 
