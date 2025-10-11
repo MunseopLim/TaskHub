@@ -39,6 +39,10 @@
     "Action": {
       "type": "object",
       "properties": {
+        "description": {
+          "type": "string",
+          "description": "A short explanation shown in the UI for what this action does."
+        },
         "tasks": {
           "type": "array",
           "description": "A list of one or more tasks to execute in sequence.",
@@ -55,7 +59,7 @@
           "description": "A message to show if any task in the sequence fails."
         }
       },
-      "required": ["tasks"]
+      "required": ["description", "tasks"]
     },
     "Task": {
       "type": "object",
@@ -68,10 +72,6 @@
           "type": "string",
           "description": "The type of the task to execute.",
           "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation"]
-        },
-        "description": {
-          "type": "string",
-          "description": "An optional description of what the task does."
         },
         "command": {
           "oneOf": [

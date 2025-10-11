@@ -3,6 +3,7 @@
     "id": "defaultButton.showEnv",
     "title": "Show Environment Variables",
     "action": {
+      "description": "Print the current environment variables in a terminal.",
       "tasks": [
         {
           "id": "show_env_task",
@@ -22,6 +23,7 @@
     "id": "defaultButton.showProjectDir",
     "title": "Open Current Project Directory",
     "action": {
+      "description": "Open the workspace folder in the system file explorer.",
       "tasks": [
         {
           "id": "open_project_dir_task",
@@ -38,7 +40,7 @@
     }
   },
   {
-    "id": "separator.0000",
+    "id": "defaultSeparator.separator",
     "title": "--------------------",
     "type": "separator"
   }

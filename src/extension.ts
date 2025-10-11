@@ -125,6 +125,7 @@ class Action extends vscode.TreeItem {
   constructor(public readonly label: string, public readonly action: import('./schema').Action, public readonly collapsibleState: vscode.TreeItemCollapsibleState, public readonly context: vscode.ExtensionContext, public readonly id?: string) {
     super(label, collapsibleState);
     this.command = { command: 'taskhub.executeAction', title: 'Execute Action', arguments: [this] };
+    this.tooltip = action.description;
     const state = actionStates.get(this.id || '');
     if (state) {
       switch (state.state) {
@@ -205,6 +206,9 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
     }
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     if (showVerboseLogs) { outputChannel.show(true); }
+    if (showVerboseLogs) {
+        outputChannel.appendLine(`[INFO] Running action '${actionItem.title}': ${action.description}`);
+    }
     const stepResults: { [key: string]: any } = {};
     try {
         for (const task of action.tasks) {

@@ -106,6 +106,7 @@
 
 ```json
 "action": {
+  "description": "Explain what this pipeline does in the TaskHub panel.",
   "successMessage": "Pipeline finished successfully!",
   "failMessage": "Pipeline failed.",
   "tasks": [
@@ -115,6 +116,7 @@
 }
 ```
 
+- `description` (string, **필수**): 메인 패널에서 액션을 마우스오버 할 때 표시되는 간단한 설명입니다.
 - `successMessage` (string, *선택*): 모든 태스크가 성공적으로 완료되었을 때 표시되는 팝업 알림 메시지입니다.
 - `failMessage` (string, *선택*): 태스크 실행 중 오류가 발생했을 때 표시되는 팝업 알림 메시지입니다.
 
@@ -124,7 +126,6 @@
 
 -   `id` (string, **필수**): 태스크의 고유 ID입니다. 파이프라인 내에서 다른 태스크가 이 태스크의 결과를 참조할 때 사용됩니다.
 -   `type` (string, **필수**): 태스크의 종류입니다. (예: `shell`, `fileDialog`, `unzip`, `zip`, `stringManipulation`)
--   `description` (string, *선택*): 태스크에 대한 설명입니다.
 
 #### `shell` / `command` 태스크의 핵심 옵션
 
@@ -234,7 +235,6 @@
         {
           "id": "echo_in_terminal",
           "type": "shell",
-          "description": "This task streams its output live to the terminal. Its output is NOT captured.",
           "command": "echo [STREAM] You selected ${select_a_file.name}",
           "passTheResultToNextTask": false, 
           "revealTerminal": "always"
@@ -242,7 +242,6 @@
         {
           "id": "capture_file_content",
           "type": "shell",
-          "description": "This task captures the file content for the next step.",
           "command": {
             "windows": "type \"${select_a_file.path}\"",
             "linux": "cat \"${select_a_file.path}\"",
@@ -253,7 +252,6 @@
         {
             "id": "save_to_file",
             "type": "shell",
-            "description": "This task takes the previous result and saves it to a file.",
             "command": "echo The content of ${select_a_file.name} is:\n\n${capture_file_content.output}",
             "passTheResultToNextTask": true,
             "output": {

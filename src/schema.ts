@@ -14,6 +14,7 @@ export interface ActionItem {
  * Represents a runnable action, which consists of a sequence of tasks.
  */
 export interface Action {
+    description: string;
     tasks: Task[];
     successMessage?: string;
     failMessage?: string;
@@ -25,7 +26,6 @@ export interface Action {
 export interface Task {
     id: string;
     type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'zip' | 'stringManipulation';
-    description?: string;
 
     // Properties for 'shell' and 'command' types
     command?: string | { 

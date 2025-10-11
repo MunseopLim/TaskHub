@@ -3,6 +3,7 @@
     "id": "button.testLiveStream",
     "title": "1. Test Live Stream (Default)",
     "action": {
+      "description": "Select a file and stream its metadata to the shared terminal.",
       "tasks": [
         {
           "id": "selectFileForStream",
@@ -26,6 +27,7 @@
     "id": "button.testCaptureToFile",
     "title": "2. Test Capture to File",
     "action": {
+      "description": "Capture command output and save it as a file in the workspace.",
       "tasks": [
         {
           "id": "selectFileForFile",
@@ -52,6 +54,7 @@
     "id": "button.testCaptureToEditor",
     "title": "3. Test Capture to Editor",
     "action": {
+      "description": "Capture command output and display it in a temporary editor document.",
       "tasks": [
         {
           "id": "selectFileForEditor",
@@ -82,6 +85,7 @@
         "id": "button.unzipAndParse",
         "title": "From ZIP file...",
         "action": {
+          "description": "Unzip a firmware archive and run the parser on the extracted contents.",
           "tasks": [
             {
               "id": "select_zip_file",
@@ -124,6 +128,7 @@
         "id": "button.selectFolderAndParse",
         "title": "From Folder...",
         "action": {
+          "description": "Run the firmware parser on an already extracted firmware folder.",
           "tasks": [
             {
               "id": "select_target_folder",
@@ -154,6 +159,7 @@
     "id": "button.createFirmwareArchive",
     "title": "Create Firmware Archive from Folder...",
     "action": {
+      "description": "Compress a selected folder into a firmware ZIP archive.",
       "successMessage": "Firmware archive created successfully!",
       "tasks": [
         {
@@ -185,6 +191,7 @@
         "id": "test.reveal.always",
         "title": "Always (Default)",
         "action": {
+          "description": "Demonstrate the default behavior where the terminal is always revealed.",
           "tasks": [
             {
               "id": "echo.always",
@@ -199,6 +206,7 @@
         "id": "test.reveal.silent",
         "title": "Silent",
         "action": {
+          "description": "Run a task without revealing the terminal unless it is already visible.",
           "tasks": [
             {
               "id": "echo.silent",
@@ -213,6 +221,7 @@
         "id": "test.reveal.never",
         "title": "Never",
         "action": {
+          "description": "Run a task that keeps the terminal hidden even while it executes.",
           "tasks": [
             {
               "id": "echo.never",
@@ -229,6 +238,7 @@
     "id": "test.isOneShot",
     "title": "Test isOneShot",
     "action": {
+      "description": "Show how a one-shot background task runs alongside immediate follow-up steps.",
       "tasks": [
         {
           "id": "long.running.task",
@@ -248,6 +258,7 @@
     "id": "test.sharedTerminal",
     "title": "Test Shared Terminal",
     "action": {
+      "description": "Illustrate multiple tasks writing to the same shared terminal instance.",
       "tasks": [
         {
           "id": "shared.task.1",

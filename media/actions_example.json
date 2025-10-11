@@ -3,6 +3,7 @@
     "id": "action.simple.echo",
     "title": "Echo Message (Live Stream)",
     "action": {
+      "description": "Run a single shell command that streams output to the terminal.",
       "tasks": [
         {
           "id": "echo_task",
@@ -16,6 +17,7 @@
     "id": "action.pipeline.example",
     "title": "Pipeline: Select File & Save Output",
     "action": {
+      "description": "Select a file, echo the path, and save the result to disk.",
       "tasks": [
         {
           "id": "select_file",
@@ -39,6 +41,7 @@
     "id": "action.oneshot.example",
     "title": "Run GUI App (One-Shot)",
     "action": {
+      "description": "Launch a GUI application without waiting for it to exit.",
       "tasks": [
         {
           "id": "run_notepad",
