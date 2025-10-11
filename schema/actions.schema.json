@@ -177,10 +177,6 @@
           "description": "Defines how to handle the task's output.",
           "enum": ["editor", "terminal", "file"]
         },
-        "title": {
-          "type": "string",
-          "description": "Title for the editor tab when mode is 'editor'."
-        },
         "language": {
           "type": "string",
           "description": "Language mode for the editor tab when mode is 'editor'."
@@ -192,11 +188,6 @@
         "content": {
           "type": "string",
           "description": "The content to write to the file. Defaults to the task's stdout."
-        },
-        "overwrite": {
-          "type": "boolean",
-          "default": false,
-          "description": "Whether to overwrite the file if it exists."
         }
       },
       "required": ["mode"]
