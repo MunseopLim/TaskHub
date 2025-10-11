@@ -89,7 +89,9 @@
               "options": {
                 "openLabel": "Select ZIP file",
                 "filters": {
-                  "Zip files": ["zip"]
+                  "Zip files": [
+                    "zip"
+                  ]
                 }
               }
             },
@@ -137,8 +139,10 @@
                 "macos": "python3 /Users/munseop/code/test/script.py \"${select_target_folder.path}\"",
                 "windows": "py E:\\dump\\parser.py \"${select_target_folder.path}\""
               },
+              "passTheResultToNextTask": true,
               "output": {
-                "mode": "terminal"
+                "mode": "editor",
+                "title": "Parser Output"
               }
             }
           ]
@@ -168,6 +172,92 @@
           },
           "source": "${select_folder_to_zip.path}",
           "archive": "${select_folder_to_zip.path}.zip"
+        }
+      ]
+    }
+  },
+  {
+    "id": "folder.revealTerminalTest",
+    "type": "folder",
+    "title": "Test revealTerminal",
+    "children": [
+      {
+        "id": "test.reveal.always",
+        "title": "Always (Default)",
+        "action": {
+          "tasks": [
+            {
+              "id": "echo.always",
+              "type": "shell",
+              "command": "echo 'This terminal should always be revealed.'",
+              "revealTerminal": "always"
+            }
+          ]
+        }
+      },
+      {
+        "id": "test.reveal.silent",
+        "title": "Silent",
+        "action": {
+          "tasks": [
+            {
+              "id": "echo.silent",
+              "type": "shell",
+              "command": "echo 'This task should run silently without revealing the terminal unless it was already open.'",
+              "revealTerminal": "silent"
+            }
+          ]
+        }
+      },
+      {
+        "id": "test.reveal.never",
+        "title": "Never",
+        "action": {
+          "tasks": [
+            {
+              "id": "echo.never",
+              "type": "shell",
+              "command": "echo 'This task should run without ever revealing the terminal.'",
+              "revealTerminal": "never"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "test.isOneShot",
+    "title": "Test isOneShot",
+    "action": {
+      "tasks": [
+        {
+          "id": "long.running.task",
+          "type": "shell",
+          "command": "echo 'Starting 10-second background task...'; sleep 10; echo 'Background task finished.'",
+          "isOneShot": true
+        },
+        {
+          "id": "immediate.task",
+          "type": "shell",
+          "command": "echo 'This message should appear immediately, without waiting for the 10-second task to finish.'"
+        }
+      ]
+    }
+  },
+  {
+    "id": "test.sharedTerminal",
+    "title": "Test Shared Terminal",
+    "action": {
+      "tasks": [
+        {
+          "id": "shared.task.1",
+          "type": "shell",
+          "command": "echo 'Task 1: This should appear in the shared terminal.'"
+        },
+        {
+          "id": "shared.task.2",
+          "type": "shell",
+          "command": "echo 'Task 2: This should appear in the SAME shared terminal.'"
         }
       ]
     }
