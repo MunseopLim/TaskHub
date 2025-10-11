@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -117,7 +117,8 @@
         "title": "Show Extension Version"
       },
       {
-                  "command": "taskhub.showFilePicker",        "title": "Select and Run File"
+        "command": "taskhub.showFilePicker",
+        "title": "Select and Run File"
       },
       {
         "command": "taskhub.openFavoriteFile",
@@ -167,8 +168,8 @@
         "title": "Show Example JSON Quick Pick"
       },
       {
-        "command": "taskhub.terminateAllTasks",
-        "title": "Terminate All Tasks",
+        "command": "taskhub.terminateAllActions",
+        "title": "Terminate All Actions",
         "icon": "$(primitive-square)"
       },
       {
@@ -199,7 +200,7 @@
           "group": "navigation"
         },
         {
-          "command": "taskhub.terminateAllTasks",
+          "command": "taskhub.terminateAllActions",
           "when": "view == mainView.main",
           "group": "navigation"
         }
@@ -259,16 +260,15 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    
     "@types/chai": "^5.2.2",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
     "@types/vscode": "^1.75.0",
-    "ajv": "^8.17.1",
     "@typescript-eslint/eslint-plugin": "^8.39.0",
     "@typescript-eslint/parser": "^8.39.0",
     "@vscode/test-cli": "^0.0.11",
     "@vscode/test-electron": "^2.5.2",
+    "ajv": "^8.17.1",
     "chai": "^5.3.1",
     "esbuild": "^0.25.8",
     "eslint": "^9.32.0",
