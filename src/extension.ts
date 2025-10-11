@@ -7,7 +7,7 @@ import { spawn } from 'child_process';
 import Ajv from 'ajv';
 import { ActionItem } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
-import * as iconv from 'iconv-lite';
+
 
 function loadAndValidateActions(filePath: string): ActionItem[] {
     if (!fs.existsSync(filePath)) { return []; }
@@ -76,10 +76,10 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vsco
   private _onDidChangeTreeData: vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void> = new vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void>();
   readonly onDidChangeTreeData: vscode.Event<Action | Folder | vscode.TreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
   constructor(private context: vscode.ExtensionContext) {}  refresh(): void { this._onDidChangeTreeData.fire(); }  getTreeItem(element: Action | Folder | vscode.TreeItem): vscode.TreeItem { return element; }  getChildren(element?: Action | Folder | vscode.TreeItem): Thenable<(Action | Folder | vscode.TreeItem)[]> {
-    if (element) {
+    if (element) { 
       if (element instanceof Folder) { return Promise.resolve(this.createActionItems(element.children)); }
       return Promise.resolve([]);
-    } else {
+    } else { 
         let actionsJson: ActionItem[] = [];
         try {
             const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'actions.json');
@@ -88,7 +88,7 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vsco
             actionsJson = actionsJson.concat(loadAndValidateActions(vscodeJsonPath));
         } catch (error: any) { vscode.window.showErrorMessage(error.message); }      const packageJsonPath = path.join(this.context.extensionPath, 'package.json');
       const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-      const versionItem = new vscode.TreeItem(`Version: ${packageJson.version}`);
+      const versionItem = new vscode.TreeItem(packageJson.version);
       versionItem.iconPath = new vscode.ThemeIcon('info');
       versionItem.tooltip = `Extension Version: ${packageJson.version}`;
       versionItem.contextValue = 'versionItem';
@@ -100,9 +100,9 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vsco
   private createActionItems(items: ActionItem[]): (Action | Folder | vscode.TreeItem)[] {
     const actionItems: (Action | Folder | vscode.TreeItem)[] = [];
     items.forEach((item: ActionItem) => {
-      if (item.type === 'folder') { actionItems.push(new Folder(item.title, item.children || [], this.context, item.id)); }
+      if (item.type === 'folder') { actionItems.push(new Folder(item.title, item.children || [], this.context, item.id)); } 
       else if (item.type === 'separator') { const separatorItem = new vscode.TreeItem(item.title); separatorItem.collapsibleState = vscode.TreeItemCollapsibleState.None; separatorItem.contextValue = 'separator'; actionItems.push(separatorItem); }
-      else if (item.action) { actionItems.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id)); }
+      else if (item.action) { actionItems.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id)); } 
       else if (item.id) { console.warn(`Item '${item.title}' is not a valid folder, separator, or runnable action.`); const unknownItem = new vscode.TreeItem(item.title || 'Unknown Item'); unknownItem.tooltip = `Invalid item definition: ${item.id}`; actionItems.push(unknownItem); }
     });
     return actionItems;
@@ -271,7 +271,7 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
             if (task.passTheResultToNextTask) {
                 result = await handleCommand(handlerTask, context);
             } else {
-                await handleStreamedCommand(handlerTask);
+                await executeStreamedTask(handlerTask);
                 result = {};
             }
             break;
@@ -310,84 +310,57 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
     return result;
 }
 
-class TaskPty implements vscode.Pseudoterminal {
-    private writeEmitter = new vscode.EventEmitter<string>();
-    onDidWrite: vscode.Event<string> = this.writeEmitter.event;
-    private closeEmitter = new vscode.EventEmitter<number>();
-    onDidClose: vscode.Event<number> = this.closeEmitter.event;
+async function executeStreamedTask(task: any): Promise<void> {
+    return new Promise(async (resolve, reject) => {
+        const { command, args, cwd, id } = task;
 
-    private processEndEmitter = new vscode.EventEmitter<number>();
-    public onDidProcessEnd: vscode.Event<number> = this.processEndEmitter.event;
+        const options: vscode.ShellExecutionOptions = {
+            cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
+        };
+        let commandLine = command + ' ' + (args || []).join(' ');
 
-    private process: import('child_process').ChildProcess | undefined;
-
-    constructor(private command: string, private args: string[], private options: any) {}
-
-    open(initialDimensions: vscode.TerminalDimensions | undefined): void {
-        this.writeEmitter.fire(`> Executing: ${this.command} ${this.args.join(' ')}\r\n\r\n`);
-        this.process = spawn(this.command, this.args, this.options);
-
-        this.process.stdout?.setEncoding('utf8');
-        this.process.stderr?.setEncoding('utf8');
-
-        this.process.stdout?.on('data', (data) => {
-            this.writeEmitter.fire(data.replace(/\r?\n/g, '\r\n'));
-        });
-        this.process.stderr?.on('data', (data) => {
-            this.writeEmitter.fire(data.replace(/\r?\n/g, '\r\n'));
-        });
-
-        this.process.on('close', (code) => {
-            const exitCode = code || 0;
-            this.writeEmitter.fire(`\r\n> Task finished with exit code ${exitCode}\r\n`);
-            this.processEndEmitter.fire(exitCode);
-        });
-
-        this.process.on('error', (err) => {
-            this.writeEmitter.fire(`\r\n> Task failed to start: ${err.message}\r\n`);
-            this.processEndEmitter.fire(1);
-            this.closeEmitter.fire(1);
-        });
-    }
-
-    close(): void {
-        if (this.process) {
-            this.process.kill();
+        if (process.platform === 'win32') {
+            options.executable = 'powershell.exe';
+            commandLine = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${commandLine}`;
         }
-        this.closeEmitter.fire(0);
-    }
-}
 
-async function handleStreamedCommand(task: any): Promise<void> {
-    const { args, cwd, id, isOneShot } = task;
-    let command = getCommandString(task.command);
-    let commandArgs = args || [];
-    const options = { cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', shell: process.platform === 'win32' ? 'powershell.exe' : true, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } };
+        const shellExecution = new vscode.ShellExecution(commandLine, options);
+        const vsCodeTask = new vscode.Task(
+            { type: 'shell', id: `taskhub-${id}` },
+            vscode.TaskScope.Workspace,
+            id, // This name is used to identify the task in onDidEndTaskProcess
+            'taskhub', // Source
+            shellExecution
+        );
 
-    if (process.platform === 'win32') {
-        const fullCommand = command + ' ' + commandArgs.join(' ');
-        command = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${fullCommand}`;
-        commandArgs = []; // Args are now part of the command string
-    }
+        vsCodeTask.presentationOptions = {
+            reveal: vscode.TaskRevealKind.Always,
+            panel: vscode.TaskPanelKind.Shared,
+            showReuseMessage: true,
+            clear: false, 
+        };
 
-    const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
-    if (showVerboseLogs) {
-        outputChannel.appendLine(`[INFO] Executing streamed command: ${command} ${(commandArgs).join(' ')} in ${options.cwd}`);
-    }
-
-    const pty = new TaskPty(command, commandArgs, options);
-    const terminal = vscode.window.createTerminal({ name: `Task - ${id}`, pty: pty });
-    terminal.show();
-    if (isOneShot) { return; }
-    return new Promise<void>((resolve, reject) => {
-        const disposable = pty.onDidProcessEnd(exitCode => {
-            disposable.dispose();
-            if (exitCode === 0) {
-                resolve();
-            } else {
-                reject(new Error(`Task ${id} failed with exit code ${exitCode}.`));
+        const disposable = vscode.tasks.onDidEndTaskProcess(e => {
+            if (e.execution.task.name === id) {
+                disposable.dispose();
+                if (e.exitCode === 0) {
+                    resolve();
+                } else {
+                    reject(new Error(`Task ${id} failed with exit code ${e.exitCode}.`));
+                }
             }
         });
+
+        try {
+            const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+            if (showVerboseLogs) {
+                outputChannel.appendLine(`[INFO] Executing task via vscode.tasks: ${commandLine} in ${options.cwd}`);
+            }
+            await vscode.tasks.executeTask(vsCodeTask);
+        } catch (error) { 
+            disposable.dispose();
+            reject(error);
+        }
     });
 }
 
