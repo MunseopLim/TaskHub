@@ -207,7 +207,7 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
     const stepResults: { [key: string]: any } = {};
     try {
         for (const task of action.tasks) {
-            const result = await executeSingleTask(task, stepResults, context);
+            const result = await executeSingleTask(task, stepResults, context, id);
             stepResults[task.id] = result;
         }
         if (showTaskStatus) {
@@ -221,11 +221,12 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
         }
         throw error;
     } finally {
+        activeTasks.delete(id);
         if (showTaskStatus) { mainViewProvider.refresh(); }
     }
 }
 
-async function executeSingleTask(task: import('./schema').Task, allResults: any, context: vscode.ExtensionContext): Promise<any> {
+async function executeSingleTask(task: import('./schema').Task, allResults: any, context: vscode.ExtensionContext, actionId: string): Promise<any> {
     const interpolationContext = { ...allResults, workspaceFolder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', extensionPath: context.extensionPath };
     let result: any;
 
@@ -266,7 +267,7 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
             const cwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined;
 
             if (!command) { throw new Error(`Task ${task.id} of type '${task.type}' requires a 'command' property.`); }            
-            const handlerTask = { ...task, command, args, cwd };
+            const handlerTask = { ...task, command, args, cwd, actionId };
 
             if (task.passTheResultToNextTask) {
                 result = await handleCommand(handlerTask, context);
@@ -312,7 +313,7 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
 
 async function executeStreamedTask(task: any): Promise<void> {
     return new Promise(async (resolve, reject) => {
-        const { command, args, cwd, id } = task;
+        const { command, args, cwd, id, actionId } = task;
 
         const options: vscode.ShellExecutionOptions = {
             cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
@@ -356,7 +357,10 @@ async function executeStreamedTask(task: any): Promise<void> {
             if (showVerboseLogs) {
                 outputChannel.appendLine(`[INFO] Executing task via vscode.tasks: ${commandLine} in ${options.cwd}`);
             }
-            await vscode.tasks.executeTask(vsCodeTask);
+            const execution = await vscode.tasks.executeTask(vsCodeTask);
+            if (actionId) {
+                activeTasks.set(actionId, execution);
+            }
         } catch (error) { 
             disposable.dispose();
             reject(error);
