@@ -1,6 +1,6 @@
 [
   {
-    "id": "button.showEnv",
+    "id": "defaultButton.showEnv",
     "title": "Show Environment Variables",
     "action": {
       "tasks": [
@@ -14,6 +14,25 @@
           },
           "passTheResultToNextTask": false,
           "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "defaultButton.showProjectDir",
+    "title": "Open Current Project Directory",
+    "action": {
+      "tasks": [
+        {
+          "id": "open_project_dir_task",
+          "type": "shell",
+          "command": {
+            "windows": "explorer .",
+            "linux": "xdg-open .",
+            "macos": "open ."
+          },
+          "revealTerminal": "never",
+          "isOneShot": true
         }
       ]
     }
