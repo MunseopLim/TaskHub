@@ -450,20 +450,77 @@ async function handleStringManipulation(task: any): Promise<{ output: string }> 
 }
 
 function executeShellCommand(command: string, args: string[], cwd?: string): Promise<string> {
+
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+
     return new Promise((resolve, reject) => {
+
         const env = { ...process.env, PYTHONIOENCODING: 'utf-8' };
-        const options = { cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', shell: process.platform === 'win32' ? 'powershell.exe' : true, env: env };
-        if (showVerboseLogs) { outputChannel.appendLine(`[INFO] Executing command: ${command} ${args.join(' ')} in ${options.cwd}`); }        const childProcess = spawn(command, args, options);
-        let stdout = ''; let stderr = '';
+
+        
+
+        let commandLine = command + ' ' + (args || []).join(' ');
+
+        const options: import('child_process').SpawnOptions = {
+
+            cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+
+            shell: true,
+
+            env: env
+
+        };
+
+
+
+        if (process.platform === 'win32') {
+
+            options.shell = 'powershell.exe';
+
+            commandLine = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${commandLine}`;
+
+        }
+
+
+
+        if (showVerboseLogs) { outputChannel.appendLine(`[INFO] Executing command: ${commandLine} in ${options.cwd}`); }
+
+        
+
+        const childProcess = spawn(commandLine, [], options);
+
+
+
+        let stdout = '';
+
+        let stderr = '';
+
+        
+
         childProcess.stdout?.setEncoding('utf8');
+
         childProcess.stderr?.setEncoding('utf8');
-        childProcess.stdout?.on('data', (data) => { stdout += data.toString(); });
-        childProcess.stderr?.on('data', (data) => { stderr += data.toString(); });
+
+
+
+        childProcess.stdout?.on('data', (data) => { stdout += data; });
+
+        childProcess.stderr?.on('data', (data) => { stderr += data; });
+
+
+
         childProcess.on('close', (code) => {
-            if (showVerboseLogs) { outputChannel.appendLine(`[INFO] STDOUT: ${stdout}`); outputChannel.appendLine(`[INFO] STDERR: ${stderr}`); outputChannel.appendLine(`[INFO] Command finished with exit code ${code}.`); }            if (code === 0) { resolve(stdout); } else { reject(new Error(stderr || `Command failed with exit code ${code}`)); }        });
+
+            if (showVerboseLogs) { outputChannel.appendLine(`[INFO] STDOUT: ${stdout}`); outputChannel.appendLine(`[INFO] STDERR: ${stderr}`); outputChannel.appendLine(`[INFO] Command finished with exit code ${code}.`); }
+
+            if (code === 0) { resolve(stdout); } else { reject(new Error(stderr || `Command failed with exit code ${code}`)); }
+
+        });
+
         childProcess.on('error', (err) => { if (showVerboseLogs) { outputChannel.appendLine(`[ERROR] Failed to start command: ${err.message}`); } reject(err); });
+
     });
+
 }
 
 export function activate(context: vscode.ExtensionContext) {
