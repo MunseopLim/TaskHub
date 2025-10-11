@@ -7,6 +7,7 @@ import { spawn } from 'child_process';
 import Ajv from 'ajv';
 import { ActionItem } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
+import * as iconv from 'iconv-lite';
 
 function loadAndValidateActions(filePath: string): ActionItem[] {
     if (!fs.existsSync(filePath)) { return []; }
@@ -326,11 +327,14 @@ class TaskPty implements vscode.Pseudoterminal {
         this.writeEmitter.fire(`> Executing: ${this.command} ${this.args.join(' ')}\r\n\r\n`);
         this.process = spawn(this.command, this.args, this.options);
 
+        this.process.stdout?.setEncoding('utf8');
+        this.process.stderr?.setEncoding('utf8');
+
         this.process.stdout?.on('data', (data) => {
-            this.writeEmitter.fire(data.toString().replace(/\r?\n/g, '\r\n'));
+            this.writeEmitter.fire(data.replace(/\r?\n/g, '\r\n'));
         });
         this.process.stderr?.on('data', (data) => {
-            this.writeEmitter.fire(data.toString().replace(/\r?\n/g, '\r\n'));
+            this.writeEmitter.fire(data.replace(/\r?\n/g, '\r\n'));
         });
 
         this.process.on('close', (code) => {
@@ -356,15 +360,22 @@ class TaskPty implements vscode.Pseudoterminal {
 
 async function handleStreamedCommand(task: any): Promise<void> {
     const { args, cwd, id, isOneShot } = task;
-    const command = getCommandString(task.command);
-    const options = { cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', shell: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } };
+    let command = getCommandString(task.command);
+    let commandArgs = args || [];
+    const options = { cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', shell: process.platform === 'win32' ? 'powershell.exe' : true, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } };
+
+    if (process.platform === 'win32') {
+        const fullCommand = command + ' ' + commandArgs.join(' ');
+        command = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${fullCommand}`;
+        commandArgs = []; // Args are now part of the command string
+    }
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     if (showVerboseLogs) {
-        outputChannel.appendLine(`[INFO] Executing streamed command: ${command} ${(args || []).join(' ')} in ${options.cwd}`);
+        outputChannel.appendLine(`[INFO] Executing streamed command: ${command} ${(commandArgs).join(' ')} in ${options.cwd}`);
     }
 
-    const pty = new TaskPty(command, args || [], options);
+    const pty = new TaskPty(command, commandArgs, options);
     const terminal = vscode.window.createTerminal({ name: `Task - ${id}`, pty: pty });
     terminal.show();
     if (isOneShot) { return; }
@@ -458,7 +469,7 @@ function executeShellCommand(command: string, args: string[], cwd?: string): Pro
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     return new Promise((resolve, reject) => {
         const env = { ...process.env, PYTHONIOENCODING: 'utf-8' };
-        const options = { cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', shell: true, env: env };
+        const options = { cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', shell: process.platform === 'win32' ? 'powershell.exe' : true, env: env };
         if (showVerboseLogs) { outputChannel.appendLine(`[INFO] Executing command: ${command} ${args.join(' ')} in ${options.cwd}`); }        const childProcess = spawn(command, args, options);
         let stdout = ''; let stderr = '';
         childProcess.stdout?.setEncoding('utf8');
