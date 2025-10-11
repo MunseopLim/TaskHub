@@ -110,6 +110,7 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vsco
 }
 const actionStates = new Map<string, { state: 'running' | 'success' | 'failure' }>();
 const activeTasks = new Map<string, vscode.TaskExecution>();
+const manuallyTerminatedActions = new Set<string>();
 const outputChannel = vscode.window.createOutputChannel('TaskHub');
 let toolkitTerminal: vscode.Terminal | undefined;
 class Folder extends vscode.TreeItem {
@@ -215,13 +216,19 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
             if (action.successMessage) { vscode.window.showInformationMessage(action.successMessage); }
         }
     } catch (error: any) {
-        if (showTaskStatus) {
-            actionStates.set(id, { state: 'failure' });
-            if (action.failMessage) { vscode.window.showErrorMessage(`${action.failMessage}: ${error.message}`); } else { vscode.window.showErrorMessage(`Action '${actionItem.title}' failed: ${error.message}`); }
+        if (!manuallyTerminatedActions.has(id)) {
+            if (showTaskStatus) {
+                actionStates.set(id, { state: 'failure' });
+                if (action.failMessage) { vscode.window.showErrorMessage(`${action.failMessage}: ${error.message}`); } else { vscode.window.showErrorMessage(`Action '${actionItem.title}' failed: ${error.message}`); }
+            }
+            throw error;
         }
-        throw error;
     } finally {
         activeTasks.delete(id);
+        if (manuallyTerminatedActions.has(id)) {
+            actionStates.delete(id);
+            manuallyTerminatedActions.delete(id);
+        }
         if (showTaskStatus) { mainViewProvider.refresh(); }
     }
 }
@@ -507,7 +514,16 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.goToLink', (item: Link) => { vscode.env.openExternal(vscode.Uri.parse(item.getLink())); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeAction', async (actionItem: Action) => { let allActions: ActionItem[] = []; try { const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json'); allActions = allActions.concat(loadAndValidateActions(mediaJsonPath)); const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'actions.json'); allActions = allActions.concat(loadAndValidateActions(vscodeJsonPath)); } catch (error: any) { console.error(error.message); vscode.window.showErrorMessage(`Could not execute action: Failed to load or validate actions.json.`); return; } function findAction(actions: ActionItem[], id: string): ActionItem | undefined { for (const action of actions) { if (action.id === id) { return action; } if (action.children) { const found = findAction(action.children, id); if (found) { return found; } } } return undefined; } const actionId = actionItem.id; if (!actionId) { return; } const fullActionItem = findAction(allActions, actionId); if (fullActionItem) { try { await executeAction(fullActionItem, context, mainViewProvider); } catch (error) { console.error(`Execution failed for action '${actionId}':`, error); } } else { vscode.window.showErrorMessage(`Could not find action definition for ID '${actionId}'.`); } }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeActionById', async (args: { id: string }) => { if (!args || !args.id) { vscode.window.showErrorMessage('Action ID is required for this command.'); return; } let allActions: ActionItem[] = []; try { const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json'); allActions = allActions.concat(loadAndValidateActions(mediaJsonPath)); const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'actions.json'); allActions = allActions.concat(loadAndValidateActions(vscodeJsonPath)); } catch (error: any) { console.error(error.message); vscode.window.showErrorMessage(`Could not execute action by ID: Failed to load or validate actions.json. Check the Output panel for details.`); return; } function findAction(actions: ActionItem[], id: string): ActionItem | undefined { for (const action of actions) { if (action.id === id) { return action; } if (action.children) { const found = findAction(action.children, id); if (found) { return found; } } } return undefined; } const actionItem = findAction(allActions, args.id); if (actionItem && actionItem.action) { await executeAction(actionItem, context, mainViewProvider); } else { vscode.window.showErrorMessage(`Action with ID '${args.id}' not found or it has no 'action' property.`); } }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => { const id = actionItem.id || actionItem.label; const task = activeTasks.get(id); if (task) { task.terminate(); actionStates.delete(id); mainViewProvider.refresh(); vscode.window.showInformationMessage(`Action '${actionItem.label}' terminated.`); } else { vscode.window.showWarningMessage(`Could not find active task for '${actionItem.label}'.`); } }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
+        const id = actionItem.id || actionItem.label;
+        const task = activeTasks.get(id);
+        if (task) {
+            manuallyTerminatedActions.add(id);
+            task.terminate();
+        } else {
+            vscode.window.showWarningMessage(`Could not find active task for '${actionItem.label}'.`);
+        }
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showVersion', () => { const packageJson = JSON.parse(fs.readFileSync(path.join(context.extensionPath, 'package.json'), 'utf-8')); vscode.window.showInformationMessage(`TaskHub Version: ${packageJson.version}`); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showFilePicker', async (action: any) => { /* Obsolete */ }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.editFavorites', async () => { const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const filePath = path.join(wsPath, '.vscode', 'favorites.json'); if (!fs.existsSync(path.dirname(filePath))) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, JSON.stringify([], null, 2)); } await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath))); }));
@@ -597,20 +613,23 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showExampleJsonQuickPick', async () => { const pick = await vscode.window.showQuickPick([ { label: 'actions.json Example', description: 'Show example content for actions.json', type: 'actions' }, { label: 'links.json Example', description: 'Show example content for links.json', type: 'links' }, { label: 'favorites.json Example', description: 'Show example content for favorites.json', type: 'favorites' }, ], { placeHolder: 'Select which example JSON to display' }); if (pick) { vscode.commands.executeCommand('taskhub.showExampleJson', pick.type); } }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addOpenFileToFavorites', async () => { const editor = vscode.window.activeTextEditor; if (!editor) { vscode.window.showInformationMessage('No active editor found.'); return; } const filePath = editor.document.uri.fsPath; const title = await vscode.window.showInputBox({ prompt: `Enter a title for ${path.basename(filePath)}`, value: path.basename(filePath) }); if (!title) { return; } const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json'); let favorites: { title: string; path: string }[] = []; if (fs.existsSync(favoritesPath)) { try { favorites = JSON.parse(fs.readFileSync(favoritesPath, 'utf-8')); } catch (e) { vscode.window.showErrorMessage('Error parsing favorites.json'); return; } } favorites.push({ title, path: filePath }); fs.writeFileSync(favoritesPath, JSON.stringify(favorites, null, 2)); favoriteViewProvider.refresh(); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.terminateAllActions', async () => {
-        // Terminate any running task processes started by this extension
-        vscode.tasks.taskExecutions.filter(t => t.task.source === 'taskhub').forEach(t => t.terminate());
+        // Flag and terminate all running actions
+        for (const [actionId, execution] of activeTasks.entries()) {
+            manuallyTerminatedActions.add(actionId);
+            execution.terminate();
+        }
 
-        // Find and close any open terminals created by this extension
+        // Close all terminals associated with the extension
         vscode.window.terminals.forEach(terminal => {
             if (terminal.name.startsWith('TaskHub: ')) {
                 terminal.dispose();
             }
         });
 
-        // Clean up internal state
+        // Clear all visual states and refresh
         actionStates.clear();
-        activeTasks.clear();
         mainViewProvider.refresh();
+
         vscode.window.showInformationMessage('All TaskHub terminals have been closed.');
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openSettings', () => { vscode.commands.executeCommand('workbench.action.openSettings', '@ext:Munseop.taskhub'); }));
