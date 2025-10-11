@@ -329,7 +329,7 @@ async function executeStreamedTask(task: any): Promise<void> {
         const vsCodeTask = new vscode.Task(
             { type: 'shell', id: `taskhub-${id}` },
             vscode.TaskScope.Workspace,
-            id, // This name is used to identify the task in onDidEndTaskProcess
+            `TaskHub: ${id}`, // This name is used to identify the task in onDidEndTaskProcess
             'taskhub', // Source
             shellExecution
         );
@@ -342,7 +342,7 @@ async function executeStreamedTask(task: any): Promise<void> {
         };
 
         const disposable = vscode.tasks.onDidEndTaskProcess(e => {
-            if (e.execution.task.name === id) {
+            if (e.execution.task.name === `TaskHub: ${id}`) {
                 disposable.dispose();
                 if (e.exitCode === 0) {
                     resolve();
@@ -599,7 +599,23 @@ export function activate(context: vscode.ExtensionContext) {
   });
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showExampleJsonQuickPick', async () => { const pick = await vscode.window.showQuickPick([ { label: 'actions.json Example', description: 'Show example content for actions.json', type: 'actions' }, { label: 'links.json Example', description: 'Show example content for links.json', type: 'links' }, { label: 'favorites.json Example', description: 'Show example content for favorites.json', type: 'favorites' }, ], { placeHolder: 'Select which example JSON to display' }); if (pick) { vscode.commands.executeCommand('taskhub.showExampleJson', pick.type); } }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addOpenFileToFavorites', async () => { const editor = vscode.window.activeTextEditor; if (!editor) { vscode.window.showInformationMessage('No active editor found.'); return; } const filePath = editor.document.uri.fsPath; const title = await vscode.window.showInputBox({ prompt: `Enter a title for ${path.basename(filePath)}`, value: path.basename(filePath) }); if (!title) { return; } const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json'); let favorites: { title: string; path: string }[] = []; if (fs.existsSync(favoritesPath)) { try { favorites = JSON.parse(fs.readFileSync(favoritesPath, 'utf-8')); } catch (e) { vscode.window.showErrorMessage('Error parsing favorites.json'); return; } } favorites.push({ title, path: filePath }); fs.writeFileSync(favoritesPath, JSON.stringify(favorites, null, 2)); favoriteViewProvider.refresh(); }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.terminateAllTasks', async () => { vscode.tasks.taskExecutions.filter(t => t.task.source === 'taskhub').forEach(t => t.terminate()); actionStates.clear(); activeTasks.clear(); mainViewProvider.refresh(); vscode.window.showInformationMessage('All active tasks from TaskHub have been terminated.'); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.terminateAllActions', async () => {
+        // Terminate any running task processes started by this extension
+        vscode.tasks.taskExecutions.filter(t => t.task.source === 'taskhub').forEach(t => t.terminate());
+
+        // Find and close any open terminals created by this extension
+        vscode.window.terminals.forEach(terminal => {
+            if (terminal.name.startsWith('TaskHub: ')) {
+                terminal.dispose();
+            }
+        });
+
+        // Clean up internal state
+        actionStates.clear();
+        activeTasks.clear();
+        mainViewProvider.refresh();
+        vscode.window.showInformationMessage('All TaskHub terminals have been closed.');
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openSettings', () => { vscode.commands.executeCommand('workbench.action.openSettings', '@ext:Munseop.taskhub'); }));
 }
 
