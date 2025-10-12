@@ -189,6 +189,58 @@
     }
   },
   {
+    "id": "button.testStringManipulation",
+    "title": "Test String Manipulation Helpers",
+    "action": {
+      "description": "Demonstrate the built-in string manipulation helper functions.",
+      "tasks": [
+        {
+          "id": "select_file_for_string",
+          "type": "fileDialog",
+          "options": {
+            "openLabel": "Select a file to inspect"
+          }
+        },
+        {
+          "id": "string_dir",
+          "type": "stringManipulation",
+          "function": "dirname",
+          "input": "${select_file_for_string.path}"
+        },
+        {
+          "id": "string_basename",
+          "type": "stringManipulation",
+          "function": "basename",
+          "input": "${select_file_for_string.path}"
+        },
+        {
+          "id": "string_basename_no_ext",
+          "type": "stringManipulation",
+          "function": "basenameWithoutExtension",
+          "input": "${select_file_for_string.path}"
+        },
+        {
+          "id": "string_extension",
+          "type": "stringManipulation",
+          "function": "extension",
+          "input": "${select_file_for_string.path}"
+        },
+        {
+          "id": "string_uppercase_name",
+          "type": "stringManipulation",
+          "function": "toUpperCase",
+          "input": "${string_basename.output}"
+        },
+        {
+          "id": "echo_string_results",
+          "type": "shell",
+          "command": "echo Directory: ${string_dir.output} && echo Filename: ${string_basename.output} && echo Filename without extension: ${string_basename_no_ext.output} && echo Extension: ${string_extension.output} && echo Uppercase filename: ${string_uppercase_name.output}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
     "id": "folder.revealTerminalTest",
     "type": "folder",
     "title": "Test revealTerminal",

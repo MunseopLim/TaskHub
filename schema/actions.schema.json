@@ -147,7 +147,7 @@
         },
         "function": {
           "type": "string",
-          "description": "The function to apply for 'stringManipulation' type. e.g., 'stripExtension'."
+          "description": "The function to apply for 'stringManipulation' type (stripExtension, basename, basenameWithoutExtension, dirname, extension, toLowerCase, toUpperCase, trim)."
         },
         "input": {
           "type": "string",

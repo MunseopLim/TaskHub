@@ -206,6 +206,38 @@
 }
 ```
 
+#### `stringManipulation` 태스크
+
+간단한 문자열 후처리를 수행하여 다음 태스크에서 사용할 값을 만들 때 활용합니다.
+
+-   `type` (string, **필수**): `stringManipulation`으로 설정해야 합니다.
+-   `function` (string, **필수**): 수행할 내장 함수 이름입니다.
+-   `input` (string, **필수**): 변환 대상 문자열입니다. 이전 태스크 결과를 `${...}` 형태로 참조할 수 있습니다.
+-   **실행 결과**: 변환된 문자열은 `${task_id.output}`으로 접근합니다.
+
+지원되는 함수 목록:
+
+| 함수 | 설명 |
+| --- | --- |
+| `stripExtension` | 마지막 확장자를 제거합니다. (`/path/to/file.zip` → `/path/to/file`) |
+| `basename` | 경로에서 파일 이름만 추출합니다. (`/path/to/file.zip` → `file.zip`) |
+| `basenameWithoutExtension` | 확장자를 제외한 파일 이름을 반환합니다. (`/path/to/file.zip` → `file`) |
+| `dirname` | 상위 디렉터리 경로를 반환합니다. (`/path/to/file.zip` → `/path/to`) |
+| `extension` | 확장자에서 점을 제외한 문자열을 반환합니다. (`/path/to/file.zip` → `zip`) |
+| `toLowerCase` | 전체 문자열을 소문자로 변환합니다. |
+| `toUpperCase` | 전체 문자열을 대문자로 변환합니다. |
+| `trim` | 문자열 앞뒤의 공백을 제거합니다. |
+
+**예시:**
+```json
+{
+  "id": "string_task",
+  "type": "stringManipulation",
+  "function": "basenameWithoutExtension",
+  "input": "${select_file.path}"
+}
+```
+
 #### 변수 치환
 
 파이프라인 내에서, 이전 태스크의 결과는 `${task_id.property}` 형식으로 다음 태스크의 속성(예: `command`, `args`, `filePath` 등)에서 사용할 수 있습니다.

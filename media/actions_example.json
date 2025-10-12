@@ -85,5 +85,48 @@
         }
       ]
     }
+  },
+  {
+    "id": "action.string.manipulation",
+    "title": "String Manipulation Helpers",
+    "action": {
+      "description": "Select a file and run several string manipulation helpers on the path.",
+      "tasks": [
+        {
+          "id": "select_for_string",
+          "type": "fileDialog"
+        },
+        {
+          "id": "string_dir",
+          "type": "stringManipulation",
+          "function": "dirname",
+          "input": "${select_for_string.path}"
+        },
+        {
+          "id": "string_filename",
+          "type": "stringManipulation",
+          "function": "basename",
+          "input": "${select_for_string.path}"
+        },
+        {
+          "id": "string_clean_name",
+          "type": "stringManipulation",
+          "function": "basenameWithoutExtension",
+          "input": "${select_for_string.path}"
+        },
+        {
+          "id": "string_upper_name",
+          "type": "stringManipulation",
+          "function": "toUpperCase",
+          "input": "${string_clean_name.output}"
+        },
+        {
+          "id": "report_strings",
+          "type": "shell",
+          "command": "echo Dir: ${string_dir.output} && echo File: ${string_filename.output} && echo Clean: ${string_clean_name.output} && echo Upper: ${string_upper_name.output}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
   }
 ]

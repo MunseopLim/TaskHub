@@ -466,12 +466,43 @@ async function handleZip(task: import('./schema').Task, allResults: any): Promis
 
 async function handleStringManipulation(task: any): Promise<{ output: string }> {
     const { function: func, input } = task;
+    if (typeof input !== 'string') { throw new Error(`String manipulation task '${task.id}' requires the 'input' property to be a string.`); }
+
+    const value = input;
     let output: string;
     switch (func) {
-        case 'stripExtension': output = input.replace(/\.(7z|zip)$/, ''); break;
-        default: throw new Error(`Unsupported string manipulation function: ${func}`);
+        case 'stripExtension': {
+            const ext = path.extname(value);
+            output = ext ? value.slice(0, -ext.length) : value;
+            break;
+        }
+        case 'basename':
+            output = path.basename(value);
+            break;
+        case 'basenameWithoutExtension':
+            output = path.parse(value).name;
+            break;
+        case 'dirname':
+            output = path.dirname(value);
+            break;
+        case 'extension': {
+            const ext = path.extname(value);
+            output = ext.startsWith('.') ? ext.substring(1) : ext;
+            break;
+        }
+        case 'toLowerCase':
+            output = value.toLowerCase();
+            break;
+        case 'toUpperCase':
+            output = value.toUpperCase();
+            break;
+        case 'trim':
+            output = value.trim();
+            break;
+        default:
+            throw new Error(`Unsupported string manipulation function: ${func}`);
     }
-    return { output: output };
+    return { output };
 }
 
 function executeShellCommand(command: string, args: string[], cwd?: string): Promise<string> {
