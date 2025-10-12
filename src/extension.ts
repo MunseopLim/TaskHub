@@ -300,11 +300,20 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
 
     if (task.passTheResultToNextTask && task.output) {
         const outputContent = task.output.content ? interpolatePipelineVariables(task.output.content, interpolationContext) : (typeof result?.output === 'string' ? result.output : JSON.stringify(result, null, 2));
+
+        let overwriteValue: boolean | undefined;
+        if (typeof task.output.overwrite === 'boolean') {
+            overwriteValue = task.output.overwrite;
+        } else if (typeof task.output.overwrite === 'string') {
+            const interpolated = interpolatePipelineVariables(task.output.overwrite, interpolationContext);
+            overwriteValue = interpolated.trim().toLowerCase() === 'true';
+        }
+
         const interpolatedOutput = {
             ...task.output,
             filePath: task.output.filePath ? interpolatePipelineVariables(task.output.filePath, interpolationContext) : undefined,
-            title: task.output.title ? interpolatePipelineVariables(task.output.title, interpolationContext) : undefined,
-            content: outputContent
+            content: outputContent,
+            overwrite: overwriteValue
         };
 
         switch (interpolatedOutput.mode) {
@@ -316,6 +325,9 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
                 if (!interpolatedOutput.filePath) { throw new Error(`Task '${task.id}' has output mode 'file' but 'filePath' is not defined.`); }
                 const dir = path.dirname(interpolatedOutput.filePath);
                 if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+                if (interpolatedOutput.overwrite !== true && fs.existsSync(interpolatedOutput.filePath)) {
+                    throw new Error(`Task '${task.id}' attempted to write to '${interpolatedOutput.filePath}', but the file already exists. Set 'overwrite': true to replace it.`);
+                }
                 fs.writeFileSync(interpolatedOutput.filePath, interpolatedOutput.content);
                 break;
             case 'terminal':

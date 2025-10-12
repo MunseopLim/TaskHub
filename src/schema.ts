@@ -71,7 +71,6 @@ export interface Output {
     mode: 'editor' | 'terminal' | 'file';
 
     // Properties for 'editor' mode
-    title?: string;
     language?: string;
 
     // Properties for 'file' mode

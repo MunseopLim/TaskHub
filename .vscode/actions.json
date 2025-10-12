@@ -241,6 +241,63 @@
     }
   },
   {
+    "id": "button.testOutputOverwriteFail",
+    "title": "Test Output File Overwrite (Fail)",
+    "action": {
+      "description": "Attempt to save captured output to an existing file without overwrite and observe the failure.",
+      "tasks": [
+        {
+          "id": "prepare_existing_file",
+          "type": "shell",
+          "command": "node -e \"const fs=require('fs'); const path=require('path'); const target=process.argv[1]; fs.mkdirSync(path.dirname(target),{recursive:true}); fs.writeFileSync(target,'Existing content');\" \"${workspaceFolder}/.vscode/taskhub_overwrite_fail.txt\"",
+          "revealTerminal": "silent"
+        },
+        {
+          "id": "attempt_write_without_overwrite",
+          "type": "shell",
+          "command": "echo Trying to save new content without overwrite",
+          "passTheResultToNextTask": true,
+          "output": {
+            "mode": "file",
+            "filePath": "${workspaceFolder}/.vscode/taskhub_overwrite_fail.txt"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "button.testOutputOverwriteSuccess",
+    "title": "Test Output File Overwrite (Success)",
+    "action": {
+      "description": "Demonstrate using the overwrite flag to replace an existing output file.",
+      "tasks": [
+        {
+          "id": "prepare_existing_file_success",
+          "type": "shell",
+          "command": "node -e \"const fs=require('fs'); const path=require('path'); const target=process.argv[1]; fs.mkdirSync(path.dirname(target),{recursive:true}); fs.writeFileSync(target,'Old content');\" \"${workspaceFolder}/.vscode/taskhub_overwrite_success.txt\"",
+          "revealTerminal": "silent"
+        },
+        {
+          "id": "write_with_overwrite",
+          "type": "shell",
+          "command": "echo Replacement content saved with overwrite true",
+          "passTheResultToNextTask": true,
+          "output": {
+            "mode": "file",
+            "filePath": "${workspaceFolder}/.vscode/taskhub_overwrite_success.txt",
+            "overwrite": true
+          }
+        },
+        {
+          "id": "show_overwritten_file",
+          "type": "shell",
+          "command": "node -e \"const fs=require('fs'); const target=process.argv[1]; console.log('Final file contents:', fs.readFileSync(target,'utf8'));\" \"${workspaceFolder}/.vscode/taskhub_overwrite_success.txt\"",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
     "id": "folder.revealTerminalTest",
     "type": "folder",
     "title": "Test revealTerminal",

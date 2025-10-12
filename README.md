@@ -157,6 +157,7 @@
 -   **`output`** (`object`, *선택*): **캡처 모드(`passTheResultToNextTask: true`)에서만 동작합니다.** 캡처된 결과를 어떻게 처리할지 정의합니다.
     -   `"mode": "editor"`: 새 에디터 탭에 결과를 표시합니다.
     -   `"mode": "file"`: 지정된 파일에 결과를 저장합니다. (`filePath`, `overwrite` 속성 사용)
+        -   `overwrite` (boolean, *선택*, 기본값: `false`): `true`로 설정하면 기존 파일을 덮어씁니다. `false`이거나 생략하면 파일이 이미 존재할 때 실행이 실패합니다.
     -   `"mode": "terminal"`: 'TaskHub' 전용 터미널에 결과를 붙여넣기 합니다.
 
 -   **`isOneShot`** (`boolean`, *선택*, 기본값: `false`): **스트림 모드에서만 의미가 있습니다.**
