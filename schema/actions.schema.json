@@ -123,7 +123,7 @@
               }
             }
           ],
-          "description": "Path to the tool executable. Can be a direct string or an OS-specific object. Required for 'unzip' type."
+          "description": "Path to the tool executable. Can be a direct string or an OS-specific object. Required for 'zip' and 'unzip' types."
         },
         "inputs": {
           "type": "object",
@@ -167,7 +167,19 @@
           "default": false
         }
       },
-      "required": ["id", "type"]
+      "required": ["id", "type"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": { "enum": ["zip", "unzip"] }
+            }
+          },
+          "then": {
+            "required": ["tool"]
+          }
+        }
+      ]
     },
     "Output": {
       "type": "object",

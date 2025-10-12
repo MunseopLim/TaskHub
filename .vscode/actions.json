@@ -178,6 +178,12 @@
           },
           "source": "${select_folder_to_zip.path}",
           "archive": "${select_folder_to_zip.path}.zip"
+        },
+        {
+          "id": "confirm_zip_creation",
+          "type": "shell",
+          "command": "echo Firmware archive created at: ${zip_the_folder.archivePath}",
+          "revealTerminal": "always"
         }
       ]
     }

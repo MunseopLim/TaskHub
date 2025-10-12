@@ -53,5 +53,37 @@
         }
       ]
     }
+  },
+  {
+    "id": "action.zip.folder",
+    "title": "Zip Folder And Confirm",
+    "action": {
+      "description": "Select a folder, create a ZIP archive, and announce the result in the terminal.",
+      "tasks": [
+        {
+          "id": "select_folder",
+          "type": "folderDialog",
+          "options": {
+            "openLabel": "Select folder to zip"
+          }
+        },
+        {
+          "id": "zip_folder",
+          "type": "zip",
+          "tool": {
+            "windows": "C:\\Program Files\\7-Zip\\7z.exe",
+            "macos": "/opt/homebrew/bin/7z"
+          },
+          "source": "${select_folder.path}",
+          "archive": "${select_folder.path}.zip"
+        },
+        {
+          "id": "announce_zip",
+          "type": "shell",
+          "command": "echo Archive created at: ${zip_folder.archivePath}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
   }
 ]

@@ -167,17 +167,19 @@
 이 태스크는 지정된 `.zip` 또는 `.7z` 아카이브 파일의 압축을 해제합니다.
 
 -   `type` (string, **필수**): `unzip`으로 설정해야 합니다.
--   `tool` (string | object, *선택*): 압축 해제에 사용할 도구(예: 7-Zip)의 경로를 지정합니다.
+-   `tool` (string | object, **필수**): 압축 해제에 사용할 도구(예: 7-Zip)의 경로를 지정합니다.
 -   `inputs` (object, **필수**): 압축을 해제할 파일의 경로를 이전 태스크로부터 가져옵니다. `file` 키를 사용해야 합니다. (예: `{"file": "file_dialog_task_id"}`)
+-   **실행 결과**: 다음 태스크에서 `${unzip_task.outputDir}`을 사용해 해제된 폴더 경로를 참조할 수 있습니다.
 
 #### `zip` 태스크
 
 이 태스크는 지정된 파일이나 폴더를 압축하여 하나의 아카이브 파일을 생성합니다.
 
 -   `type` (string, **필수**): `zip`으로 설정해야 합니다.
--   `tool` (string | object, *선택*): 압축에 사용할 도구(예: 7-Zip)의 경로를 지정합니다.
+-   `tool` (string | object, **필수**): 압축에 사용할 도구(예: 7-Zip)의 경로를 지정합니다.
 -   `source` (string | string[], **필수**): 압축할 파일 또는 폴더의 경로입니다. 단일 경로는 문자열로, 여러 경로는 배열로 지정할 수 있습니다.
 -   `archive` (string, **필수**): 생성될 압축 파일의 경로와 이름입니다.
+-   **실행 결과**: 생성된 압축 파일 경로는 `${zip_task.archivePath}`로 다음 태스크에서 참조할 수 있습니다.
 
 **예시:**
 ```json
@@ -214,6 +216,8 @@
     -   `${select_file.name}`: 파일명
     -   `${select_file.fileNameOnly}`: 확장자를 제외한 파일명
     -   `${select_file.fileExt}`: 확장자
+-   `${zip_task.archivePath}`: `zip` 태스크가 생성한 아카이브 경로
+-   `${unzip_task.outputDir}`: `unzip` 태스크가 추출한 폴더 경로
 
 #### 전체 예시
 
