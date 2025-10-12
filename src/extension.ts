@@ -70,6 +70,84 @@ function getToolCommand(tool: any): string {
     return toolCommand;
 }
 
+function tokenizeCommandLine(command: string): string[] {
+    const tokens: string[] = [];
+    let current = '';
+    let quoteChar: string | null = null;
+
+    for (let i = 0; i < command.length; i++) {
+        const char = command[i];
+        if (quoteChar) {
+            if (char === quoteChar) {
+                quoteChar = null;
+            } else if (char === '\\' && quoteChar === '"' && i + 1 < command.length) {
+                const next = command[i + 1];
+                if (next === '"' || next === '\\') {
+                    current += next;
+                    i++;
+                } else {
+                    current += char;
+                }
+            } else {
+                current += char;
+            }
+        } else if (char === '"' || char === '\'') {
+            quoteChar = char;
+        } else if (/\s/.test(char)) {
+            if (current.length > 0) {
+                tokens.push(current);
+                current = '';
+            }
+        } else {
+            current += char;
+        }
+    }
+
+    if (current.length > 0) {
+        tokens.push(current);
+    }
+    return tokens;
+}
+
+function mergeCommandAndArgs(command: string, extraArgs: string[]): { executable: string; args: string[] } {
+    const baseTokens = tokenizeCommandLine(command.trim());
+    if (baseTokens.length === 0) {
+        throw new Error('Cannot execute an empty command.');
+    }
+    const executable = baseTokens[0];
+    const initialArgs = baseTokens.slice(1);
+    const combinedArgs = [...initialArgs, ...(extraArgs || [])];
+    return { executable, args: combinedArgs };
+}
+
+function quotePowerShellArgument(value: string): string {
+    return value.length === 0 ? "''" : `'${value.replace(/'/g, "''")}'`;
+}
+
+function buildPowerShellInvocation(command: string, args: string[]): { script: string; display: string } {
+    const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
+    const quotedExe = quotePowerShellArgument(executable);
+    const quotedArgs = combinedArgs.map(arg => quotePowerShellArgument(arg));
+    const invocation = `& ${quotedExe}${quotedArgs.length ? ' ' + quotedArgs.join(' ') : ''}`;
+    const script = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n${invocation}`;
+    return { script, display: invocation };
+}
+
+function encodePowerShellScript(script: string): string {
+    return Buffer.from(script, 'utf16le').toString('base64');
+}
+
+function quotePosixArgument(value: string): string {
+    return value.length === 0 ? "''" : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function buildPosixCommandLine(command: string, args: string[]): string {
+    const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
+    const commandPart = /^[A-Za-z0-9_./-]+$/.test(executable) ? executable : quotePosixArgument(executable);
+    const parts = [commandPart, ...combinedArgs.map(arg => quotePosixArgument(arg))];
+    return parts.join(' ');
+}
+
 class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vscode.TreeItem> {
   private _onDidChangeTreeData: vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void> = new vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void>();
   readonly onDidChangeTreeData: vscode.Event<Action | Folder | vscode.TreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
@@ -364,13 +442,20 @@ async function executeStreamedTask(task: any): Promise<void> {
         const options: vscode.ShellExecutionOptions = {
             cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
         };
-        const commandLine = command + ' ' + (args || []).join(' ');
+        const taskArgs = args || [];
+        let shellExecution: vscode.ShellExecution;
+        let displayCommand: string;
 
         if (process.platform === 'win32') {
-            options.executable = 'powershell.exe';
+            const invocation = buildPowerShellInvocation(command, taskArgs);
+            const encoded = encodePowerShellScript(invocation.script);
+            displayCommand = invocation.display;
+            shellExecution = new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options);
+        } else {
+            const commandLine = buildPosixCommandLine(command, taskArgs);
+            displayCommand = commandLine;
+            shellExecution = new vscode.ShellExecution(commandLine, options);
         }
-
-        const shellExecution = new vscode.ShellExecution(commandLine, options);
         const taskDefinition: vscode.TaskDefinition = { type: 'shell', actionId: actionKey };
         const taskName = `TaskHub: ${actionKey}`;
         const vsCodeTask = new vscode.Task(
@@ -420,7 +505,7 @@ async function executeStreamedTask(task: any): Promise<void> {
         try {
             const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
             if (showVerboseLogs) {
-                outputChannel.appendLine(`[INFO] Executing task via vscode.tasks: ${commandLine} in ${options.cwd}`);
+                outputChannel.appendLine(`[INFO] Executing task via vscode.tasks: ${displayCommand} in ${options.cwd}`);
             }
             taskExecution = await vscode.tasks.executeTask(vsCodeTask);
             if (actionId && taskExecution) {
@@ -583,38 +668,31 @@ function executeShellCommand(command: string, args: string[], cwd?: string): Pro
     return new Promise((resolve, reject) => {
 
         const env = { ...process.env, PYTHONIOENCODING: 'utf-8' };
-
-        
-
-        let commandLine = command + ' ' + (args || []).join(' ');
-
-        const options: import('child_process').SpawnOptions = {
-
-            cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
-
-            shell: true,
-
-            env: env
-
-        };
-
-
+        const workingDirectory = cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        let childProcess: ReturnType<typeof spawn>;
+        let displayCommand: string;
 
         if (process.platform === 'win32') {
-
-            options.shell = 'powershell.exe';
-
-            commandLine = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${commandLine}`;
-
+            const invocation = buildPowerShellInvocation(command, args || []);
+            const encoded = encodePowerShellScript(invocation.script);
+            displayCommand = invocation.display;
+            childProcess = spawn('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], {
+                cwd: workingDirectory,
+                env: env
+            });
+        } else {
+            const commandLine = buildPosixCommandLine(command, args || []);
+            displayCommand = commandLine;
+            childProcess = spawn(commandLine, [], {
+                cwd: workingDirectory,
+                env: env,
+                shell: true
+            });
         }
 
 
 
-        if (showVerboseLogs) { outputChannel.appendLine(`[INFO] Executing command: ${commandLine} in ${options.cwd}`); }
-
-        
-
-        const childProcess = spawn(commandLine, [], options);
+        if (showVerboseLogs) { outputChannel.appendLine(`[INFO] Executing command: ${displayCommand} in ${workingDirectory}`); }
 
 
 
