@@ -110,7 +110,7 @@ const actionStates = new Map<string, { state: 'running' | 'success' | 'failure' 
 const activeTasks = new Map<string, vscode.TaskExecution>();
 const manuallyTerminatedActions = new Set<string>();
 const outputChannel = vscode.window.createOutputChannel('TaskHub');
-let toolkitTerminal: vscode.Terminal | undefined;
+const actionTerminals = new Map<string, vscode.Terminal>();
 class Folder extends vscode.TreeItem {
   public children: any[];
   constructor(public readonly label: string, children: any[], private readonly context: vscode.ExtensionContext, public readonly id?: string) {
@@ -338,10 +338,18 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
                 fs.writeFileSync(interpolatedOutput.filePath, interpolatedOutput.content);
                 break;
             case 'terminal':
-                 if (!toolkitTerminal || toolkitTerminal.exitStatus) { toolkitTerminal = vscode.window.createTerminal("TaskHub"); }                toolkitTerminal.show();
-                const header = `\n# ----- Output for task: ${task.id} ----- #\n`;
-                toolkitTerminal.sendText(header);
-                toolkitTerminal.sendText(interpolatedOutput.content, false);
+                {
+                    const terminalKey = actionId || 'default';
+                    let terminal = actionTerminals.get(terminalKey);
+                    if (!terminal || terminal.exitStatus) {
+                        terminal = vscode.window.createTerminal(`TaskHub: ${terminalKey}`);
+                        actionTerminals.set(terminalKey, terminal);
+                    }
+                    terminal.show();
+                    const header = `\n# ----- Output for task: ${task.id} ----- #\n`;
+                    terminal.sendText(header, false);
+                    terminal.sendText(interpolatedOutput.content, false);
+                }
                 break;
         }
     }
@@ -351,23 +359,25 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
 async function executeStreamedTask(task: any): Promise<void> {
     return new Promise(async (resolve, reject) => {
         const { command, args, cwd, id, actionId, revealTerminal } = task;
+        const actionKey = actionId || id;
 
         const options: vscode.ShellExecutionOptions = {
             cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
         };
-        let commandLine = command + ' ' + (args || []).join(' ');
+        const commandLine = command + ' ' + (args || []).join(' ');
 
         if (process.platform === 'win32') {
             options.executable = 'powershell.exe';
-            commandLine = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${commandLine}`;
         }
 
         const shellExecution = new vscode.ShellExecution(commandLine, options);
+        const taskDefinition: vscode.TaskDefinition = { type: 'shell', actionId: actionKey };
+        const taskName = `TaskHub: ${actionKey}`;
         const vsCodeTask = new vscode.Task(
-            { type: 'shell', id: `taskhub-${id}` },
+            taskDefinition,
             vscode.TaskScope.Workspace,
-            `TaskHub: ${id}`, // This name is used to identify the task in onDidEndTaskProcess
-            'taskhub', // Source
+            taskName,
+            'taskhub',
             shellExecution
         );
 
@@ -389,11 +399,15 @@ async function executeStreamedTask(task: any): Promise<void> {
             reveal: revealKind,
             panel: vscode.TaskPanelKind.Shared,
             showReuseMessage: true,
-            clear: false, 
+            clear: false,
         };
+        // Group tasks by action so each action reuses its Task panel.
+        // @ts-expect-error group is available at runtime even if not in current typings
+        vsCodeTask.presentationOptions.group = actionKey;
 
+        let taskExecution: vscode.TaskExecution | undefined;
         const disposable = vscode.tasks.onDidEndTaskProcess(e => {
-            if (e.execution.task.name === `TaskHub: ${id}`) {
+            if (taskExecution && e.execution === taskExecution) {
                 disposable.dispose();
                 if (e.exitCode === 0) {
                     resolve();
@@ -408,11 +422,11 @@ async function executeStreamedTask(task: any): Promise<void> {
             if (showVerboseLogs) {
                 outputChannel.appendLine(`[INFO] Executing task via vscode.tasks: ${commandLine} in ${options.cwd}`);
             }
-            const execution = await vscode.tasks.executeTask(vsCodeTask);
-            if (actionId) {
-                activeTasks.set(actionId, execution);
+            taskExecution = await vscode.tasks.executeTask(vsCodeTask);
+            if (actionId && taskExecution) {
+                activeTasks.set(actionId, taskExecution);
             }
-        } catch (error) { 
+        } catch (error) {
             disposable.dispose();
             reject(error);
         }
@@ -637,7 +651,15 @@ function executeShellCommand(command: string, args: string[], cwd?: string): Pro
 }
 
 export function activate(context: vscode.ExtensionContext) {
-	vscode.window.onDidCloseTerminal(terminal => { if (toolkitTerminal && terminal.name === toolkitTerminal.name) { toolkitTerminal = undefined; } });
+    const terminalDisposable = vscode.window.onDidCloseTerminal(terminal => {
+        for (const [key, actionTerminal] of actionTerminals.entries()) {
+            if (actionTerminal === terminal) {
+                actionTerminals.delete(key);
+                break;
+            }
+        }
+    });
+    context.subscriptions.push(terminalDisposable);
 
 
     const mainViewProvider = new MainViewProvider(context);
