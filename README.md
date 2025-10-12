@@ -169,8 +169,14 @@
 
 -   `type` (string, **필수**): `unzip`으로 설정해야 합니다.
 -   `tool` (string | object, **필수**): 압축 해제에 사용할 도구(예: 7-Zip)의 경로를 지정합니다.
--   `inputs` (object, **필수**): 압축을 해제할 파일의 경로를 이전 태스크로부터 가져옵니다. `file` 키를 사용해야 합니다. (예: `{"file": "file_dialog_task_id"}`)
+-   `inputs.archive` (string, *선택*): 이전 태스크 ID를 지정하여 아카이브 경로를 전달합니다. (예: `{"archive": "select_zip_file"}`)
+-   `inputs.file` (string, *선택*): `inputs.archive`의 레거시 별칭입니다.
+-   `inputs.destination` (string, *선택*): 이전 태스크 ID를 지정하여 압축 해제 대상 폴더를 전달합니다. (예: `{"destination": "select_destination_folder"}`)
+-   `archive` (string, *선택*): 직접 경로를 지정합니다. `${...}` 치환을 활용할 수 있습니다.
+-   `destination` (string, *선택*): 직접 대상 폴더 경로를 지정합니다. `${...}` 치환을 활용할 수 있습니다.
 -   **실행 결과**: 다음 태스크에서 `${unzip_task.outputDir}`을 사용해 해제된 폴더 경로를 참조할 수 있습니다.
+
+아카이브 경로는 `inputs.archive` → `inputs.file` → `archive` 순으로 해석됩니다. 대상 폴더는 `destination` → `inputs.destination` → (지정된 아카이브의 상위 폴더) 순으로 결정됩니다.
 
 #### `zip` 태스크
 

@@ -302,6 +302,75 @@
     }
   },
   {
+    "id": "button.testUnzipInputs",
+    "title": "Test Unzip Inputs Variants",
+    "action": {
+      "description": "Create an archive and extract it using both inputs-based and direct destination options.",
+      "tasks": [
+        {
+          "id": "select_folder_for_unzip_inputs",
+          "type": "folderDialog",
+          "options": {
+            "openLabel": "Select folder to archive for unzip test"
+          }
+        },
+        {
+          "id": "cleanup_unzip_inputs_artifacts",
+          "type": "shell",
+          "command": "node -e \"const fs=require('fs'); const path=require('path'); const base=process.argv[1]; const targets=[path.join(base,'.vscode','taskhub_unzip_inputs.zip'), path.join(base,'.vscode','taskhub_unzip_destination'), path.join(base,'.vscode','taskhub_unzip_direct')]; for (const target of targets) { if (fs.existsSync(target)) { const stat=fs.statSync(target); if (stat.isDirectory()) { fs.rmSync(target,{recursive:true,force:true}); } else { fs.unlinkSync(target); } } }\" \"${workspaceFolder}\"",
+          "revealTerminal": "silent"
+        },
+        {
+          "id": "zip_for_unzip_inputs",
+          "type": "zip",
+          "tool": {
+            "windows": "C:\\Program Files\\7-Zip\\7z.exe",
+            "macos": "/opt/homebrew/bin/7z"
+          },
+          "source": "${select_folder_for_unzip_inputs.path}",
+          "archive": "${workspaceFolder}/.vscode/taskhub_unzip_inputs.zip"
+        },
+        {
+          "id": "prepare_unzip_destination",
+          "type": "shell",
+          "command": "node -e \"const fs=require('fs'); const path=require('path'); const base=process.argv[1]; const target=path.join(base,'.vscode','taskhub_unzip_destination'); fs.mkdirSync(target,{recursive:true}); process.stdout.write(target);\" \"${workspaceFolder}\"",
+          "passTheResultToNextTask": true,
+          "revealTerminal": "silent"
+        },
+        {
+          "id": "unzip_using_inputs",
+          "type": "unzip",
+          "tool": {
+            "windows": "C:\\Program Files\\7-Zip\\7z.exe",
+            "macos": "/opt/homebrew/bin/7z"
+          },
+          "inputs": {
+            "archive": "zip_for_unzip_inputs",
+            "destination": "prepare_unzip_destination"
+          }
+        },
+        {
+          "id": "unzip_using_direct_destination",
+          "type": "unzip",
+          "tool": {
+            "windows": "C:\\Program Files\\7-Zip\\7z.exe",
+            "macos": "/opt/homebrew/bin/7z"
+          },
+          "inputs": {
+            "archive": "zip_for_unzip_inputs"
+          },
+          "destination": "${workspaceFolder}/.vscode/taskhub_unzip_direct"
+        },
+        {
+          "id": "list_unzip_destinations",
+          "type": "shell",
+          "command": "node -e \"const fs=require('fs'); const path=require('path'); const base=process.argv[1]; const destA=path.join(base,'.vscode','taskhub_unzip_destination'); const destB=path.join(base,'.vscode','taskhub_unzip_direct'); const listDir = dir => fs.existsSync(dir) ? fs.readdirSync(dir) : []; console.log('Destination (inputs):', destA); console.log(listDir(destA)); console.log('Destination (direct):', destB); console.log(listDir(destB));\" \"${workspaceFolder}\"",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
     "id": "folder.revealTerminalTest",
     "type": "folder",
     "title": "Test revealTerminal",

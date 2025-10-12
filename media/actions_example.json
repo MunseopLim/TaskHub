@@ -128,5 +128,54 @@
         }
       ]
     }
+  },
+  {
+    "id": "action.unzip.inputs",
+    "title": "Unzip With Inputs And Direct Destination",
+    "action": {
+      "description": "Demonstrate how unzip tasks can consume archive/destination from prior steps or direct strings.",
+      "tasks": [
+        {
+          "id": "select_zip_for_unzip",
+          "type": "fileDialog",
+          "options": {
+            "filters": {
+              "Archives": ["zip", "7z"]
+            }
+          }
+        },
+        {
+          "id": "select_destination_for_unzip",
+          "type": "folderDialog",
+          "options": {
+            "openLabel": "Select destination folder (will create subfolder)"
+          }
+        },
+        {
+          "id": "unzip_using_task_inputs",
+          "type": "unzip",
+          "tool": {
+            "windows": "C:\\Program Files\\7-Zip\\7z.exe",
+            "macos": "/opt/homebrew/bin/7z"
+          },
+          "inputs": {
+            "archive": "select_zip_for_unzip",
+            "destination": "select_destination_for_unzip"
+          }
+        },
+        {
+          "id": "unzip_using_direct_destination",
+          "type": "unzip",
+          "tool": {
+            "windows": "C:\\Program Files\\7-Zip\\7z.exe",
+            "macos": "/opt/homebrew/bin/7z"
+          },
+          "inputs": {
+            "archive": "select_zip_for_unzip"
+          },
+          "destination": "${workspaceFolder}/.taskhub/unzip-output"
+        }
+      ]
+    }
   }
 ]

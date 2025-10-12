@@ -247,7 +247,16 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
             result = await handleFolderDialog(task);
             break;
         case 'unzip':
-            const interpolatedUnzipTask = { ...task, tool: JSON.parse(interpolatePipelineVariables(JSON.stringify(task.tool), interpolationContext)) };
+            const interpolatedUnzipTask: any = { ...task };
+            if (task.tool) {
+                interpolatedUnzipTask.tool = JSON.parse(interpolatePipelineVariables(JSON.stringify(task.tool), interpolationContext));
+            }
+            if (typeof task.archive === 'string') {
+                interpolatedUnzipTask.archive = interpolatePipelineVariables(task.archive, interpolationContext);
+            }
+            if (typeof task.destination === 'string') {
+                interpolatedUnzipTask.destination = interpolatePipelineVariables(task.destination, interpolationContext);
+            }
             result = await handleUnzip(interpolatedUnzipTask, allResults);
             break;
         case 'zip':
@@ -436,15 +445,53 @@ async function handleFolderDialog(task: any): Promise<{ path: string, dir: strin
 
 async function handleUnzip(task: any, allResults: any): Promise<{ outputDir: string }> {
     const inputs = task.inputs || {};
-    const fileSourceStep = allResults[inputs.file];
-    if (!fileSourceStep || !fileSourceStep.path) { throw new Error(`No file input found for unzip task from step '${inputs.file}'`); }
+
+    const resolveValue = (value: any, preferredKeys: string[]): string | undefined => {
+        if (!value) { return undefined; }
+        if (typeof value === 'string') { return value; }
+        for (const key of preferredKeys) {
+            if (typeof value[key] === 'string') { return value[key]; }
+        }
+        if (typeof value.output === 'string') { return value.output; }
+        if (value.output && typeof value.output === 'object') {
+            for (const key of preferredKeys) {
+                if (typeof value.output[key] === 'string') { return value.output[key]; }
+            }
+        }
+        return undefined;
+    };
+
+    const archiveSourceId = inputs.archive || inputs.file;
+    const archiveSource = archiveSourceId ? allResults[archiveSourceId] : undefined;
+    let archivePath = typeof task.archive === 'string' ? task.archive : undefined;
+    if (!archivePath) {
+        archivePath = resolveValue(archiveSource, ['path', 'archivePath']);
+    }
+    if (!archivePath) {
+        throw new Error(`Unzip task '${task.id}' requires an archive path via 'inputs.archive', 'inputs.file', or the 'archive' property.`);
+    }
+
+    const destinationSourceId = inputs.destination;
+    const destinationSource = destinationSourceId ? allResults[destinationSourceId] : undefined;
+    let outputDir = typeof task.destination === 'string' ? task.destination : undefined;
+    if (!outputDir) {
+        outputDir = resolveValue(destinationSource, ['path', 'outputDir']);
+    }
+    if (!outputDir) {
+        outputDir = resolveValue(archiveSource, ['dir']);
+    }
+    if (!outputDir) {
+        outputDir = path.dirname(archivePath);
+    }
 
     const toolCommand = getToolCommand(task.tool);
-
-    const filePath = fileSourceStep.path;
-    const outputDir = fileSourceStep.dir;
-    const args = ['x', filePath, `-o${outputDir}`, '-aoa'];
-    try { await executeShellCommand(toolCommand, args); return { outputDir: outputDir }; }    catch (error: any) { throw new Error(`Failed to unzip file: ${error.message}`); }
+    const args = ['x', archivePath, `-o${outputDir}`, '-aoa'];
+    try {
+        await executeShellCommand(toolCommand, args);
+        return { outputDir: outputDir };
+    } catch (error: any) {
+        throw new Error(`Failed to unzip file: ${error.message}`);
+    }
 }
 
 async function handleZip(task: import('./schema').Task, allResults: any): Promise<{ archivePath: string }> {

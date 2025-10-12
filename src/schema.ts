@@ -52,6 +52,9 @@ export interface Task {
     source?: string | string[];
     archive?: string;
 
+    // Properties for 'unzip'
+    destination?: string;
+
     // Properties for 'stringManipulation'
     function?: string;
     input?: string;

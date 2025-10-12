@@ -127,7 +127,29 @@
         },
         "inputs": {
           "type": "object",
-          "description": "Specifies inputs from previous tasks' outputs. e.g., {'file': 'previousTaskId'}"
+          "description": "Specifies inputs from previous tasks' outputs. e.g., {'archive': 'zipTaskId', 'destination': 'folderDialogTaskId'}",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Legacy alias for 'archive'. References a previous task that provides an archive path."
+            },
+            "archive": {
+              "type": "string",
+              "description": "References a previous task that provides the archive path (e.g., fileDialog or zip task)."
+            },
+            "destination": {
+              "type": "string",
+              "description": "References a previous task that provides a destination folder path."
+            }
+          }
+        },
+        "archive": {
+          "type": "string",
+          "description": "For 'unzip' tasks, a string (supports interpolation) specifying the archive to extract."
+        },
+        "destination": {
+          "type": "string",
+          "description": "For 'unzip' tasks, a string (supports interpolation) specifying the destination directory."
         },
         "source": {
           "oneOf": [
