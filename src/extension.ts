@@ -44,10 +44,8 @@ function getCommandString(command: any): string {
         if (platform === 'win32' && command.windows) { return command.windows; }
         else if (platform === 'darwin' && command.macos) { return command.macos; }
         else if (platform === 'linux' && command.linux) { return command.linux; }
-        if (command.default) { return command.default; }
-        if (command.command) { return command.command; }
     }
-    throw new Error(`Invalid or unsupported 'command' property for the current platform (${process.platform})`);
+    throw new Error(`Invalid or unsupported 'command' property for the current platform (${process.platform}). Provide a string or an object with platform-specific entries.`);
 }
 
 function getToolCommand(tool: any): string {

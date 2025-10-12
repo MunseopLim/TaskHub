@@ -15,7 +15,11 @@
         {
           "id": "echoFileStream",
           "type": "shell",
-          "command": "echo [STREAM] Path=${selectFileForStream.path}, Dir=${selectFileForStream.dir}, Name=${selectFileForStream.name}, NameOnly=${selectFileForStream.fileNameOnly}, Ext=${selectFileForStream.fileExt}",
+          "command": {
+            "windows": "cmd /c echo [STREAM][WIN] Path=${selectFileForStream.path}, Dir=${selectFileForStream.dir}, Name=${selectFileForStream.name}, NameOnly=${selectFileForStream.fileNameOnly}, Ext=${selectFileForStream.fileExt}",
+            "macos": "echo '[STREAM][macOS] Path=${selectFileForStream.path}, Dir=${selectFileForStream.dir}, Name=${selectFileForStream.name}, NameOnly=${selectFileForStream.fileNameOnly}, Ext=${selectFileForStream.fileExt}'",
+            "linux": "echo '[STREAM][Linux] Path=${selectFileForStream.path}, Dir=${selectFileForStream.dir}, Name=${selectFileForStream.name}, NameOnly=${selectFileForStream.fileNameOnly}, Ext=${selectFileForStream.fileExt}'"
+          },
           "revealTerminal": "always"
         }
       ]
