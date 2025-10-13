@@ -94,6 +94,11 @@
           "items": { "type": "string" },
           "description": "Arguments for the command."
         },
+        "env": {
+          "type": "object",
+          "description": "Environment variables to set for the task. Values support interpolation.",
+          "additionalProperties": { "type": "string" }
+        },
         "cwd": {
           "type": "string",
           "description": "Current working directory for the command. Defaults to ${workspaceFolder}."

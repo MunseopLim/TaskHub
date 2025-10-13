@@ -460,5 +460,24 @@
         }
       ]
     }
+  },
+  {
+    "id": "test.pythonEncoding",
+    "title": "Test Python Encoding",
+    "action": {
+      "description": "Run the bundled Python helper to inspect stdout/stderr encodings and PYTHONIOENCODING.",
+      "tasks": [
+        {
+          "id": "python.encoding.inspect",
+          "type": "shell",
+          "command": {
+            "windows": "python \"${workspaceFolder}\\scripts\\test_encoding.py\"",
+            "macos": "python3 \"${workspaceFolder}/scripts/test_encoding.py\"",
+            "linux": "python3 \"${workspaceFolder}/scripts/test_encoding.py\""
+          },
+          "revealTerminal": "always"
+        }
+      ]
+    }
   }
 ]

@@ -34,6 +34,7 @@ export interface Task {
         linux?: string;
     };
     args?: string[];
+    env?: Record<string, string>;
     cwd?: string;
     revealTerminal?: 'always' | 'silent' | 'never';
 

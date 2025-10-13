@@ -124,17 +124,46 @@ function quotePowerShellArgument(value: string): string {
     return value.length === 0 ? "''" : `'${value.replace(/'/g, "''")}'`;
 }
 
-function buildPowerShellInvocation(command: string, args: string[]): { script: string; display: string } {
+function buildPowerShellInvocation(command: string, args: string[], enforceUtf8Console: boolean): { script: string; display: string } {
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
     const quotedExe = quotePowerShellArgument(executable);
     const quotedArgs = combinedArgs.map(arg => quotePowerShellArgument(arg));
     const invocation = `& ${quotedExe}${quotedArgs.length ? ' ' + quotedArgs.join(' ') : ''}`;
-    const script = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n${invocation}`;
+    const prefix = enforceUtf8Console ? "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n" : '';
+    const script = `${prefix}${invocation}`;
     return { script, display: invocation };
 }
 
 function encodePowerShellScript(script: string): string {
     return Buffer.from(script, 'utf16le').toString('base64');
+}
+
+function resolveExecutionSettings(customEnv?: Record<string, string>): { envOverrides: Record<string, string>; useUtf8Console: boolean } {
+    const configuration = vscode.workspace.getConfiguration('taskhub');
+    const pythonIoEncodingSetting = configuration.get<string>('pipeline.pythonIoEncoding', 'utf-8') || '';
+    const pythonIoEncoding = pythonIoEncodingSetting.trim();
+
+    const envOverrides: Record<string, string> = {};
+
+    if (pythonIoEncoding.length > 0) {
+        envOverrides.PYTHONIOENCODING = pythonIoEncoding;
+    }
+
+    if (customEnv) {
+        for (const [key, value] of Object.entries(customEnv)) {
+            if (typeof value === 'string') {
+                envOverrides[key] = value;
+            }
+        }
+    }
+
+    let useUtf8Console = true;
+    if (process.platform === 'win32') {
+        const encodingPreference = configuration.get<'utf8' | 'system'>('pipeline.windowsPowerShellEncoding', 'utf8');
+        useUtf8Console = encodingPreference === 'utf8';
+    }
+
+    return { envOverrides, useUtf8Console };
 }
 
 function quotePosixArgument(value: string): string {
@@ -335,6 +364,15 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
             if (typeof task.destination === 'string') {
                 interpolatedUnzipTask.destination = interpolatePipelineVariables(task.destination, interpolationContext);
             }
+            if (task.env && typeof task.env === 'object') {
+                const interpolatedEnv: Record<string, string> = {};
+                for (const [key, value] of Object.entries(task.env)) {
+                    if (typeof value === 'string') {
+                        interpolatedEnv[key] = interpolatePipelineVariables(value, interpolationContext);
+                    }
+                }
+                interpolatedUnzipTask.env = interpolatedEnv;
+            }
             result = await handleUnzip(interpolatedUnzipTask, allResults);
             break;
         case 'zip':
@@ -361,9 +399,18 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
 
             const args = task.args ? task.args.map(arg => interpolatePipelineVariables(arg, interpolationContext)) : [];
             const cwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined;
+            let env: Record<string, string> | undefined;
+            if (task.env && typeof task.env === 'object') {
+                env = {};
+                for (const [key, value] of Object.entries(task.env)) {
+                    if (typeof value === 'string') {
+                        env[key] = interpolatePipelineVariables(value, interpolationContext);
+                    }
+                }
+            }
 
             if (!command) { throw new Error(`Task ${task.id} of type '${task.type}' requires a 'command' property.`); }            
-            const handlerTask = { ...task, command, args, cwd, actionId };
+            const handlerTask = { ...task, command, args, cwd, env, actionId };
 
             if (task.passTheResultToNextTask) {
                 result = await handleCommand(handlerTask, context);
@@ -436,18 +483,22 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
 
 async function executeStreamedTask(task: any): Promise<void> {
     return new Promise(async (resolve, reject) => {
-        const { command, args, cwd, id, actionId, revealTerminal } = task;
+        const { command, args, cwd, id, actionId, revealTerminal, env: taskEnv } = task;
         const actionKey = actionId || id;
 
         const options: vscode.ShellExecutionOptions = {
             cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
         };
+        const { envOverrides, useUtf8Console } = resolveExecutionSettings(taskEnv);
+        if (Object.keys(envOverrides).length > 0) {
+            options.env = envOverrides;
+        }
         const taskArgs = args || [];
         let shellExecution: vscode.ShellExecution;
         let displayCommand: string;
 
         if (process.platform === 'win32') {
-            const invocation = buildPowerShellInvocation(command, taskArgs);
+            const invocation = buildPowerShellInvocation(command, taskArgs, useUtf8Console);
             const encoded = encodePowerShellScript(invocation.script);
             displayCommand = invocation.display;
             shellExecution = new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options);
@@ -521,7 +572,7 @@ async function executeStreamedTask(task: any): Promise<void> {
 async function handleCommand(task: any, context: vscode.ExtensionContext): Promise<{ output: string }> {
     const { args, cwd } = task;
     const command = getCommandString(task.command);
-    const commandOutput = await executeShellCommand(command, args || [], cwd);
+    const commandOutput = await executeShellCommand(command, args || [], cwd, task.env);
     return { output: commandOutput.trim() };
 }
 
@@ -586,7 +637,7 @@ async function handleUnzip(task: any, allResults: any): Promise<{ outputDir: str
     const toolCommand = getToolCommand(task.tool);
     const args = ['x', archivePath, `-o${outputDir}`, '-aoa'];
     try {
-        await executeShellCommand(toolCommand, args);
+        await executeShellCommand(toolCommand, args, undefined, task.env);
         return { outputDir: outputDir };
     } catch (error: any) {
         throw new Error(`Failed to unzip file: ${error.message}`);
@@ -612,8 +663,22 @@ async function handleZip(task: import('./schema').Task, allResults: any): Promis
     }
 
     const args = ['a', archive, ...sourcePaths];
+    let envOverrides: Record<string, string> | undefined;
+    if (task.env && typeof task.env === 'object') {
+        envOverrides = {};
+        for (const [key, value] of Object.entries(task.env)) {
+            if (typeof value === 'string') {
+                envOverrides[key] = interpolatePipelineVariables(value, interpolationContext);
+            }
+        }
+    }
     try {
-        await executeShellCommand(toolCommand, args, task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined);
+        await executeShellCommand(
+            toolCommand,
+            args,
+            task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
+            envOverrides
+        );
         return { archivePath: archive };
     } catch (error: any) {
         throw new Error(`Failed to zip files for task '${task.id}': ${error.message}`);
@@ -661,31 +726,35 @@ async function handleStringManipulation(task: any): Promise<{ output: string }> 
     return { output };
 }
 
-function executeShellCommand(command: string, args: string[], cwd?: string): Promise<string> {
+function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>): Promise<string> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
 
     return new Promise((resolve, reject) => {
 
-        const env = { ...process.env, PYTHONIOENCODING: 'utf-8' };
+        const { envOverrides, useUtf8Console } = resolveExecutionSettings(taskEnv);
+        const childEnv: NodeJS.ProcessEnv = { ...process.env };
+        for (const [key, value] of Object.entries(envOverrides)) {
+            childEnv[key] = value;
+        }
         const workingDirectory = cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
         let childProcess: ReturnType<typeof spawn>;
         let displayCommand: string;
 
         if (process.platform === 'win32') {
-            const invocation = buildPowerShellInvocation(command, args || []);
+            const invocation = buildPowerShellInvocation(command, args || [], useUtf8Console);
             const encoded = encodePowerShellScript(invocation.script);
             displayCommand = invocation.display;
             childProcess = spawn('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], {
                 cwd: workingDirectory,
-                env: env
+                env: childEnv
             });
         } else {
             const commandLine = buildPosixCommandLine(command, args || []);
             displayCommand = commandLine;
             childProcess = spawn(commandLine, [], {
                 cwd: workingDirectory,
-                env: env,
+                env: childEnv,
                 shell: true
             });
         }

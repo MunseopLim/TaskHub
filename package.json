@@ -55,6 +55,20 @@
           "type": "boolean",
           "default": false,
           "description": "If true, shows detailed logs in the output panel when executing a pipeline. By default, only minimal status messages are shown."
+        },
+        "taskhub.pipeline.pythonIoEncoding": {
+          "type": "string",
+          "default": "utf-8",
+          "markdownDescription": "Value to assign to the `PYTHONIOENCODING` environment variable for commands launched by TaskHub. Set to an empty string to avoid forcing an encoding or provide values such as `utf-8:ignore` for compatibility."
+        },
+        "taskhub.pipeline.windowsPowerShellEncoding": {
+          "type": "string",
+          "enum": [
+            "utf8",
+            "system"
+          ],
+          "default": "utf8",
+          "description": "Controls how TaskHub configures PowerShell output on Windows. Use `system` to keep the current console code page for legacy tools that do not recognise UTF-8 (code page 65001)."
         }
       }
     },
