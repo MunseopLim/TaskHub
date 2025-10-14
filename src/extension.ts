@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import Ajv from 'ajv';
-import { ActionItem } from './schema';
+import { ActionItem, Action as PipelineAction } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
 
 
@@ -175,6 +175,399 @@ function buildPosixCommandLine(command: string, args: string[]): string {
     const commandPart = /^[A-Za-z0-9_./-]+$/.test(executable) ? executable : quotePosixArgument(executable);
     const parts = [commandPart, ...combinedArgs.map(arg => quotePosixArgument(arg))];
     return parts.join(' ');
+}
+
+class WizardCancelledError extends Error {
+    constructor() {
+        super('Action creation cancelled by user.');
+    }
+}
+
+interface BaseActionInfo {
+    id: string;
+    title: string;
+    description: string;
+    successMessage?: string;
+    failMessage?: string;
+}
+
+interface ActionTemplateDefinition {
+    id: string;
+    label: string;
+    description: string;
+    defaultDescription?: string;
+    build(baseInfo: BaseActionInfo): Promise<PipelineAction>;
+}
+
+type DestinationPickItem = vscode.QuickPickItem & { folderRef?: ActionItem };
+type RevealPickItem = vscode.QuickPickItem & { value: 'always' | 'silent' | 'never' };
+
+const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
+    {
+        id: 'single-shell',
+        label: 'Single Shell Command',
+        description: 'Run one shell command and stream its output to the shared terminal.',
+        defaultDescription: 'Run a shell command.',
+        async build(baseInfo) {
+            const usedTaskIds = new Set<string>();
+            const taskId = await promptForTaskId(usedTaskIds, 'run');
+            usedTaskIds.add(taskId);
+            const command = await promptForRequiredInput({
+                prompt: 'Enter the shell command to execute',
+                placeHolder: 'e.g. npm run build'
+            });
+            const cwd = await promptForOptionalInput({
+                prompt: 'Working directory (optional)',
+                placeHolder: 'Leave empty to use the workspace root'
+            });
+            const reveal = await promptForRevealSelection('always');
+            const task: any = {
+                id: taskId,
+                type: 'shell' as const,
+                command,
+                revealTerminal: reveal
+            };
+            if (cwd) {
+                task.cwd = cwd;
+            }
+            const action: PipelineAction = {
+                description: baseInfo.description,
+                tasks: [task]
+            };
+            if (baseInfo.successMessage) {
+                action.successMessage = baseInfo.successMessage;
+            }
+            if (baseInfo.failMessage) {
+                action.failMessage = baseInfo.failMessage;
+            }
+            return action;
+        }
+    },
+    {
+        id: 'file-dialog-shell',
+        label: 'File Picker + Shell',
+        description: 'Ask the user to pick a file, then run a shell command that receives the selected path.',
+        defaultDescription: 'Pick a file and run a command with the selection.',
+        async build(baseInfo) {
+            const usedTaskIds = new Set<string>();
+            const dialogTaskId = await promptForTaskId(usedTaskIds, 'selectFile');
+            usedTaskIds.add(dialogTaskId);
+            const openLabel = await promptForOptionalInput({
+                prompt: 'File picker button label (optional)',
+                placeHolder: 'Defaults to "Select file"'
+            });
+            const shellTaskId = await promptForTaskId(usedTaskIds, 'run');
+            usedTaskIds.add(shellTaskId);
+            const defaultCommand = `echo Selected file: \${${dialogTaskId}.path}`;
+            const command = await promptForRequiredInput({
+                prompt: 'Enter the shell command to execute',
+                value: defaultCommand,
+                placeHolder: `Use \${${dialogTaskId}.path} to reference the selected file`
+            });
+            const reveal = await promptForRevealSelection('always');
+            const fileTask: any = {
+                id: dialogTaskId,
+                type: 'fileDialog' as const,
+                options: {
+                    openLabel: openLabel || 'Select file'
+                }
+            };
+            const shellTask: any = {
+                id: shellTaskId,
+                type: 'shell' as const,
+                command,
+                revealTerminal: reveal
+            };
+            const action: PipelineAction = {
+                description: baseInfo.description,
+                tasks: [fileTask, shellTask]
+            };
+            if (baseInfo.successMessage) {
+                action.successMessage = baseInfo.successMessage;
+            }
+            if (baseInfo.failMessage) {
+                action.failMessage = baseInfo.failMessage;
+            }
+            return action;
+        }
+    }
+];
+
+function collectActionIds(items: ActionItem[]): Set<string> {
+    const ids = new Set<string>();
+    const visit = (nodes: ActionItem[]) => {
+        for (const node of nodes) {
+            ids.add(node.id);
+            if (Array.isArray(node.children) && node.children.length > 0) {
+                visit(node.children);
+            }
+        }
+    };
+    visit(items);
+    return ids;
+}
+
+function collectFolderDestinations(items: ActionItem[]): DestinationPickItem[] {
+    const destinations: DestinationPickItem[] = [];
+    const traverse = (nodes: ActionItem[], ancestors: string[]) => {
+        for (const node of nodes) {
+            if (node.type === 'folder') {
+                const titlePath = ancestors.length > 0 ? `${ancestors.join(' / ')} / ${node.title}` : node.title;
+                destinations.push({
+                    label: titlePath,
+                    description: node.id,
+                    folderRef: node
+                });
+                if (Array.isArray(node.children) && node.children.length > 0) {
+                    traverse(node.children, [...ancestors, node.title]);
+                }
+            }
+        }
+    };
+    traverse(items, []);
+    return destinations;
+}
+
+async function promptForRequiredInput(options: { prompt: string; value?: string; placeHolder?: string }): Promise<string> {
+    const result = await vscode.window.showInputBox({
+        prompt: options.prompt,
+        value: options.value,
+        placeHolder: options.placeHolder,
+        ignoreFocusOut: true,
+        validateInput: input => {
+            const trimmed = input.trim();
+            if (!trimmed) {
+                return 'Value is required.';
+            }
+            return undefined;
+        }
+    });
+    if (result === undefined) {
+        throw new WizardCancelledError();
+    }
+    return result.trim();
+}
+
+async function promptForOptionalInput(options: { prompt: string; value?: string; placeHolder?: string }): Promise<string | undefined> {
+    const result = await vscode.window.showInputBox({
+        prompt: options.prompt,
+        value: options.value,
+        placeHolder: options.placeHolder,
+        ignoreFocusOut: true
+    });
+    if (result === undefined) {
+        throw new WizardCancelledError();
+    }
+    const trimmed = result.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+}
+
+async function promptForActionId(existingIds: Set<string>): Promise<string> {
+    const idPattern = /^[A-Za-z0-9._-]+$/;
+    const result = await vscode.window.showInputBox({
+        prompt: 'Enter a unique action id',
+        placeHolder: 'e.g. button.buildProject',
+        ignoreFocusOut: true,
+        validateInput: input => {
+            const trimmed = input.trim();
+            if (!trimmed) {
+                return 'Action id is required.';
+            }
+            if (!idPattern.test(trimmed)) {
+                return 'Use letters, numbers, dots, underscores, or hyphens.';
+            }
+            if (existingIds.has(trimmed)) {
+                return 'An action or folder with this id already exists.';
+            }
+            return undefined;
+        }
+    });
+    if (result === undefined) {
+        throw new WizardCancelledError();
+    }
+    return result.trim();
+}
+
+async function promptForTaskId(usedTaskIds: Set<string>, suggestion: string): Promise<string> {
+    const idPattern = /^[A-Za-z0-9._-]+$/;
+    const result = await vscode.window.showInputBox({
+        prompt: 'Enter a task id',
+        value: suggestion,
+        placeHolder: 'Used to reference the task output in later steps',
+        ignoreFocusOut: true,
+        validateInput: input => {
+            const trimmed = input.trim();
+            if (!trimmed) {
+                return 'Task id is required.';
+            }
+            if (!idPattern.test(trimmed)) {
+                return 'Use letters, numbers, dots, underscores, or hyphens.';
+            }
+            if (usedTaskIds.has(trimmed)) {
+                return 'Task id already used in this action.';
+            }
+            return undefined;
+        }
+    });
+    if (result === undefined) {
+        throw new WizardCancelledError();
+    }
+    return result.trim();
+}
+
+async function promptForRevealSelection(defaultValue: 'always' | 'silent' | 'never'): Promise<'always' | 'silent' | 'never'> {
+    const picks: RevealPickItem[] = [
+        {
+            label: defaultValue === 'always' ? 'Always (default)' : 'Always',
+            description: 'Reveal the terminal when the task runs.',
+            value: 'always'
+        },
+        {
+            label: defaultValue === 'silent' ? 'Silent (default)' : 'Silent',
+            description: 'Run without revealing unless the terminal is already visible.',
+            value: 'silent'
+        },
+        {
+            label: defaultValue === 'never' ? 'Never (default)' : 'Never',
+            description: 'Keep the terminal hidden while the task runs.',
+            value: 'never'
+        }
+    ];
+    const selection = await vscode.window.showQuickPick(picks, {
+        placeHolder: 'Choose how the Task terminal should behave.',
+        ignoreFocusOut: true
+    });
+    if (!selection) {
+        throw new WizardCancelledError();
+    }
+    return selection.value;
+}
+
+async function collectBaseActionInfo(template: ActionTemplateDefinition, existingIds: Set<string>): Promise<BaseActionInfo> {
+    const id = await promptForActionId(existingIds);
+    existingIds.add(id);
+    const title = await promptForRequiredInput({
+        prompt: 'Enter the title displayed in TaskHub'
+    });
+    const description = await promptForRequiredInput({
+        prompt: 'Enter a short description for this action',
+        value: template.defaultDescription
+    });
+    const successMessage = await promptForOptionalInput({
+        prompt: 'Success message (optional)',
+        placeHolder: 'Shown when all tasks succeed'
+    });
+    const failMessage = await promptForOptionalInput({
+        prompt: 'Failure message (optional)',
+        placeHolder: 'Shown when any task fails'
+    });
+    return {
+        id,
+        title,
+        description,
+        successMessage,
+        failMessage
+    };
+}
+
+async function runActionCreationWizard(context: vscode.ExtensionContext, mainViewProvider: MainViewProvider): Promise<void> {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceFolder) {
+        vscode.window.showErrorMessage('Open a workspace folder to create actions.');
+        return;
+    }
+
+    const workspaceActionsPath = path.join(workspaceFolder, '.vscode', 'actions.json');
+    let workspaceActions: ActionItem[] = [];
+    try {
+        workspaceActions = loadAndValidateActions(workspaceActionsPath);
+    } catch (error: any) {
+        vscode.window.showErrorMessage(`Could not load ${workspaceActionsPath}: ${error.message}`);
+        return;
+    }
+
+    let bundledActions: ActionItem[] = [];
+    try {
+        const bundledPath = path.join(context.extensionPath, 'media', 'actions.json');
+        bundledActions = loadAndValidateActions(bundledPath);
+    } catch (error) {
+        bundledActions = [];
+    }
+
+    const templatePickItems = ACTION_TEMPLATES.map(template => ({
+        label: template.label,
+        description: template.description,
+        templateId: template.id
+    }));
+    const templatePick = await vscode.window.showQuickPick(templatePickItems, {
+        placeHolder: 'Select a starting template for the new action',
+        ignoreFocusOut: true
+    });
+    if (!templatePick) {
+        return;
+    }
+    const template = ACTION_TEMPLATES.find(t => t.id === templatePick.templateId);
+    if (!template) {
+        vscode.window.showErrorMessage('Selected template was not found.');
+        return;
+    }
+
+    const existingIds = collectActionIds([...bundledActions, ...workspaceActions]);
+
+    try {
+        const baseInfo = await collectBaseActionInfo(template, existingIds);
+        const destinations = collectFolderDestinations(workspaceActions);
+        const destinationPickItems: DestinationPickItem[] = [
+            {
+                label: '$(root-folder) Root (top level)',
+                description: 'Add at the top of actions.json'
+            },
+            ...destinations
+        ];
+        const destination = await vscode.window.showQuickPick(destinationPickItems, {
+            placeHolder: 'Choose where to place the new action',
+            ignoreFocusOut: true
+        });
+        if (!destination) {
+            throw new WizardCancelledError();
+        }
+
+        const actionDefinition = await template.build(baseInfo);
+        const newAction: ActionItem = {
+            id: baseInfo.id,
+            title: baseInfo.title,
+            action: actionDefinition
+        };
+
+        if (destination.folderRef) {
+            if (!Array.isArray(destination.folderRef.children)) {
+                destination.folderRef.children = [];
+            }
+            destination.folderRef.children.push(newAction);
+        } else {
+            workspaceActions.push(newAction);
+        }
+
+        const vscodeDir = path.join(workspaceFolder, '.vscode');
+        fs.mkdirSync(vscodeDir, { recursive: true });
+        fs.writeFileSync(workspaceActionsPath, JSON.stringify(workspaceActions, null, 2) + '\n');
+        mainViewProvider.refresh();
+
+        const openOption = 'Open actions.json';
+        const runOption = 'Run now';
+        const choice = await vscode.window.showInformationMessage(`Action '${baseInfo.title}' was added to actions.json.`, openOption, runOption);
+        if (choice === openOption) {
+            const document = await vscode.workspace.openTextDocument(workspaceActionsPath);
+            await vscode.window.showTextDocument(document, { preview: false });
+        } else if (choice === runOption) {
+            vscode.commands.executeCommand('taskhub.executeActionById', { id: baseInfo.id });
+        }
+    } catch (error) {
+        if (error instanceof WizardCancelledError) {
+            return;
+        }
+        vscode.window.showErrorMessage(`Failed to create a new action: ${(error as Error).message}`);
+    }
 }
 
 class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vscode.TreeItem> {
@@ -847,6 +1240,9 @@ export function activate(context: vscode.ExtensionContext) {
         vscodeFavoritesWatcher.onDidDelete(() => favoriteViewProvider.refresh());
         context.subscriptions.push(vscodeFavoritesWatcher);
     }
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.createAction', async () => {
+        await runActionCreationWizard(context, mainViewProvider);
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openFavoriteFile', async (filePath: string) => { try { const workspaceFolder = vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : ''; const resolvedPath = filePath.replace('${workspaceFolder}', workspaceFolder); const uri = vscode.Uri.file(resolvedPath); await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri)); } catch (error: any) { vscode.window.showErrorMessage(`Could not open file: ${error.message}`); } }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openLink', (url: string) => { vscode.env.openExternal(vscode.Uri.parse(url)); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', (item: Link) => { vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage('Link copied to clipboard.'); }));

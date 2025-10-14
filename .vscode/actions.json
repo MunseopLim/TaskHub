@@ -479,5 +479,46 @@
         }
       ]
     }
+  },
+  {
+    "id": "sample.echoHello",
+    "title": "Sample: Echo Hello",
+    "action": {
+      "description": "Simple check to confirm TaskHub actions stream to the shared terminal.",
+      "tasks": [
+        {
+          "id": "run",
+          "type": "shell",
+          "command": "echo \"Hello from TaskHub!\"",
+          "revealTerminal": "always"
+        }
+      ],
+      "successMessage": "Sample echo finished successfully.",
+      "failMessage": "Sample echo failed."
+    }
+  },
+  {
+    "id": "sample.fileEcho",
+    "title": "Sample: File → Echo",
+    "action": {
+      "description": "Pick a file and print its full path using the fileDialog + shell pattern.",
+      "tasks": [
+        {
+          "id": "selectFile",
+          "type": "fileDialog",
+          "options": {
+            "openLabel": "Select file for sample echo"
+          }
+        },
+        {
+          "id": "reportSelection",
+          "type": "shell",
+          "command": "echo \"Selected: ${selectFile.path}\"",
+          "revealTerminal": "always"
+        }
+      ],
+      "successMessage": "Sample file echo finished.",
+      "failMessage": "Sample file echo failed."
+    }
   }
 ]

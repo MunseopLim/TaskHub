@@ -113,16 +113,21 @@
         "command": "taskhub.copyLink",
         "title": "Copy Link"
       },
-      {
-        "command": "taskhub.goToLink",
-        "title": "Go to Link"
-      },
-      {
-        "command": "taskhub.executeAction",
-        "title": "Execute Action"
-      },
-      {
-        "command": "taskhub.stopAction",
+        {
+          "command": "taskhub.goToLink",
+          "title": "Go to Link"
+        },
+        {
+          "command": "taskhub.createAction",
+          "title": "TaskHub: Create Action",
+          "icon": "$(add)"
+        },
+        {
+          "command": "taskhub.executeAction",
+          "title": "Execute Action"
+        },
+        {
+          "command": "taskhub.stopAction",
         "title": "Stop Action",
         "icon": "$(primitive-square)"
       },
@@ -216,7 +221,12 @@
         {
           "command": "taskhub.terminateAllActions",
           "when": "view == mainView.main",
-          "group": "navigation"
+          "group": "navigation@1"
+        },
+        {
+          "command": "taskhub.createAction",
+          "when": "view == mainView.main",
+          "group": "navigation@2"
         }
       ],
       "editor/context": [
