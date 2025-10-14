@@ -14,6 +14,17 @@
         "type": "string",
         "description": "The URL to open.",
         "format": "uri"
+      },
+      "group": {
+        "type": "string",
+        "description": "Optional group label. Links with the same group appear under a collapsible section."
+      },
+      "tags": {
+        "type": "array",
+        "description": "Optional tags to help filter links.",
+        "items": {
+          "type": "string"
+        }
       }
     },
     "required": ["title", "link"]

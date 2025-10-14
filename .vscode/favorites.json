@@ -1,0 +1,28 @@
+[
+  {
+    "title": "Extension Entry Point",
+    "path": "${workspaceFolder}/src/extension.ts",
+    "group": "Source",
+    "tags": [
+      "core",
+      "typescript"
+    ]
+  },
+  {
+    "title": "Action Schema",
+    "path": "${workspaceFolder}/schema/actions.schema.json",
+    "group": "Schema",
+    "tags": [
+      "json",
+      "validation"
+    ]
+  },
+  {
+    "title": "README",
+    "path": "${workspaceFolder}/README.md",
+    "group": "Docs",
+    "tags": [
+      "reference"
+    ]
+  }
+]

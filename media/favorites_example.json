@@ -1,10 +1,14 @@
 [
   {
     "title": "Project Main Source File",
-    "path": "${workspaceFolder}/src/extension.ts"
+    "path": "${workspaceFolder}/src/extension.ts",
+    "group": "Source",
+    "tags": ["core", "extension"]
   },
   {
     "title": "README Documentation",
-    "path": "${workspaceFolder}/README.md"
+    "path": "${workspaceFolder}/README.md",
+    "group": "Documentation",
+    "tags": ["reference"]
   }
 ]

@@ -1,10 +1,14 @@
 [
   {
     "title": "VS Code API Docs",
-    "link": "https://code.visualstudio.com/api"
+    "link": "https://code.visualstudio.com/api",
+    "group": "Documentation",
+    "tags": ["vscode", "api"]
   },
   {
     "title": "TypeScript Handbook",
-    "link": "https://www.typescriptlang.org/docs/handbook/intro.html"
+    "link": "https://www.typescriptlang.org/docs/handbook/intro.html",
+    "group": "Documentation",
+    "tags": ["typescript", "language"]
   }
 ]

@@ -645,50 +645,463 @@ class Action extends vscode.TreeItem {
     }
   }
 }
-class LinkViewProvider implements vscode.TreeDataProvider<Link> {
-  private _onDidChangeTreeData: vscode.EventEmitter<Link | undefined | null | void> = new vscode.EventEmitter<Link | undefined | null | void>();
-  readonly onDidChangeTreeData: vscode.Event<Link | undefined | null | void> = this._onDidChangeTreeData.event;
-  public view: vscode.TreeView<Link> | undefined;
-  constructor(private context: vscode.ExtensionContext) {}  refresh(): void { this._onDidChangeTreeData.fire(); this.updateTitle(); }  private updateTitle(): void { if (this.view) { this.view.title = `Link (${this.getLinks().length})`; } }  private getLinks(): { title: string; link: string }[] {
-    const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
-    let linksJson = [];
-    if(fs.existsSync(mediaJsonPath)) { linksJson = JSON.parse(fs.readFileSync(mediaJsonPath, 'utf-8')); }    const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'links.json');
-    if (fs.existsSync(vscodeJsonPath)) { linksJson = linksJson.concat(JSON.parse(fs.readFileSync(vscodeJsonPath, 'utf-8'))); }    return linksJson;
-  }
-  getTreeItem(element: Link): vscode.TreeItem { return element; }  getChildren(element?: Link): Thenable<Link[]> {
-    if (element) { return Promise.resolve([]); }    else { const linksJson = this.getLinks(); this.updateTitle(); return Promise.resolve(linksJson.map((item: { title: string; link: string }) => new Link(item.title, item.link, vscode.TreeItemCollapsibleState.None))); }
-  }
+interface LinkEntry {
+    title: string;
+    link: string;
+    group?: string;
+    tags?: string[];
 }
+
+interface FavoriteEntry {
+    title: string;
+    path: string;
+    group?: string;
+    tags?: string[];
+}
+
+function normalizeTags(rawTags: unknown): string[] | undefined {
+    if (!Array.isArray(rawTags)) {
+        return undefined;
+    }
+    const cleaned = rawTags
+        .map(tag => typeof tag === 'string' ? tag.trim() : '')
+        .filter(tag => tag.length > 0);
+    return cleaned.length > 0 ? cleaned : undefined;
+}
+
+function parseTagInput(input: string | undefined): string[] | undefined {
+    if (!input) {
+        return undefined;
+    }
+    const parts = input
+        .split(',')
+        .map(part => part.trim())
+        .filter(part => part.length > 0);
+    return parts.length > 0 ? parts : undefined;
+}
+
+function serializeFavorites(entries: FavoriteEntry[]): any[] {
+    return entries.map(entry => {
+        const payload: any = { title: entry.title, path: entry.path };
+        if (entry.group) {
+            payload.group = entry.group;
+        }
+        if (entry.tags && entry.tags.length > 0) {
+            payload.tags = entry.tags;
+        }
+        return payload;
+    });
+}
+
+function serializeLinks(entries: LinkEntry[]): any[] {
+    return entries.map(entry => {
+        const payload: any = { title: entry.title, link: entry.link };
+        if (entry.group) {
+            payload.group = entry.group;
+        }
+        if (entry.tags && entry.tags.length > 0) {
+            payload.tags = entry.tags;
+        }
+        return payload;
+    });
+}
+
+function loadFavoritesFromDisk(filePath: string, reportErrors: boolean): FavoriteEntry[] {
+    if (!fs.existsSync(filePath)) {
+        return [];
+    }
+
+    try {
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+
+        return parsed.reduce<FavoriteEntry[]>((acc, item) => {
+            if (item && typeof item.title === 'string' && typeof item.path === 'string') {
+                const entry: FavoriteEntry = {
+                    title: item.title,
+                    path: item.path
+                };
+                const group = typeof item.group === 'string' ? item.group.trim() : '';
+                if (group.length > 0) {
+                    entry.group = group;
+                }
+                const tags = normalizeTags(item.tags);
+                if (tags) {
+                    entry.tags = tags;
+                }
+                acc.push(entry);
+            }
+            return acc;
+        }, []);
+    } catch (error: any) {
+        console.error(`Error parsing ${filePath}: ${error.message}`);
+        if (reportErrors) {
+            vscode.window.showErrorMessage(`Error parsing ${path.basename(filePath)}: ${error.message}`);
+        }
+        return [];
+    }
+}
+
+function loadLinksFromDisk(filePath: string, reportErrors: boolean): LinkEntry[] {
+    if (!fs.existsSync(filePath)) {
+        return [];
+    }
+
+    try {
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+
+        return parsed.reduce<LinkEntry[]>((acc, item) => {
+            if (item && typeof item.title === 'string' && typeof item.link === 'string') {
+                const entry: LinkEntry = {
+                    title: item.title,
+                    link: item.link,
+                    group: typeof item.group === 'string' && item.group.trim().length > 0 ? item.group.trim() : undefined,
+                    tags: normalizeTags(item.tags)
+                };
+                acc.push(entry);
+            }
+            return acc;
+        }, []);
+    } catch (error: any) {
+        console.error(`Error parsing ${filePath}: ${error.message}`);
+        if (reportErrors) {
+            vscode.window.showErrorMessage(`Error parsing ${path.basename(filePath)}: ${error.message}`);
+        }
+        return [];
+    }
+}
+
+type LinkTreeNode = Link | LinkGroup;
+
+class LinkGroup extends vscode.TreeItem {
+    constructor(public readonly groupName: string, private readonly entries: LinkEntry[]) {
+        super(groupName, vscode.TreeItemCollapsibleState.Expanded);
+        this.description = `${entries.length}`;
+        this.contextValue = 'linkGroup';
+        this.iconPath = new vscode.ThemeIcon('folder');
+    }
+
+    getEntries(): LinkEntry[] {
+        return this.entries;
+    }
+}
+
 class Link extends vscode.TreeItem {
-  constructor(public readonly label: string, private readonly link: string, public readonly collapsibleState: vscode.TreeItemCollapsibleState) {
-    super(label, collapsibleState);
-    this.tooltip = `${this.label}-${this.link}`; this.description = '';
-    this.command = { command: 'taskhub.openLink', title: 'Open Link', arguments: [this.link] };
-    this.contextValue = 'linkItem'; this.iconPath = new vscode.ThemeIcon('link');
-  }
-  getLink(): string { return this.link; }
+    constructor(private readonly entry: LinkEntry) {
+        super(entry.title, vscode.TreeItemCollapsibleState.None);
+        this.tooltip = `${entry.title} - ${entry.link}`;
+        this.description = entry.tags && entry.tags.length > 0 ? entry.tags.join(', ') : undefined;
+        this.command = { command: 'taskhub.openLink', title: 'Open Link', arguments: [entry.link] };
+        this.contextValue = 'linkItem';
+        this.iconPath = new vscode.ThemeIcon('link');
+    }
+
+    getLink(): string {
+        return this.entry.link;
+    }
+
+    getEntry(): LinkEntry {
+        return this.entry;
+    }
 }
+
+class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
+    private _onDidChangeTreeData: vscode.EventEmitter<LinkTreeNode | undefined | null | void> = new vscode.EventEmitter<LinkTreeNode | undefined | null | void>();
+    readonly onDidChangeTreeData: vscode.Event<LinkTreeNode | undefined | null | void> = this._onDidChangeTreeData.event;
+    public view: vscode.TreeView<LinkTreeNode> | undefined;
+    private cachedEntries: LinkEntry[] = [];
+
+    constructor(private context: vscode.ExtensionContext) {
+        this.cachedEntries = this.loadLinks();
+    }
+
+    refresh(): void {
+        this.cachedEntries = this.loadLinks();
+        this._onDidChangeTreeData.fire();
+        this.updateTitle();
+    }
+
+    private updateTitle(): void {
+        if (this.view) {
+            const count = this.cachedEntries.length;
+            this.view.title = `Link (${count})`;
+        }
+    }
+
+    private loadLinks(): LinkEntry[] {
+        const results: LinkEntry[] = [];
+        const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
+        results.push(...loadLinksFromDisk(mediaJsonPath, false));
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const workspaceLinksPath = path.join(workspacePath, '.vscode', 'links.json');
+        results.push(...loadLinksFromDisk(workspaceLinksPath, true));
+        return results;
+    }
+
+    private ensureCache(): void {
+        if (this.cachedEntries.length === 0) {
+            this.cachedEntries = this.loadLinks();
+        }
+    }
+
+    private sortEntries(entries: LinkEntry[]): LinkEntry[] {
+        return [...entries].sort((a, b) => a.title.localeCompare(b.title));
+    }
+
+    private buildRootNodes(): LinkTreeNode[] {
+        this.ensureCache();
+        const grouped = new Map<string, LinkEntry[]>();
+        const ungrouped: LinkEntry[] = [];
+
+        for (const entry of this.cachedEntries) {
+            const groupName = entry.group;
+            if (groupName) {
+                const bucket = grouped.get(groupName) ?? [];
+                bucket.push(entry);
+                grouped.set(groupName, bucket);
+            } else {
+                ungrouped.push(entry);
+            }
+        }
+
+        const nodes: LinkTreeNode[] = [];
+        const sortedGroupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
+        for (const name of sortedGroupNames) {
+            const entries = this.sortEntries(grouped.get(name)!);
+            nodes.push(new LinkGroup(name, entries));
+        }
+        const sortedUngrouped = this.sortEntries(ungrouped);
+        for (const entry of sortedUngrouped) {
+            nodes.push(new Link(entry));
+        }
+        return nodes;
+    }
+
+    getTreeItem(element: LinkTreeNode): vscode.TreeItem {
+        return element;
+    }
+
+    getChildren(element?: LinkTreeNode): Thenable<LinkTreeNode[]> {
+        if (!element) {
+            return Promise.resolve(this.buildRootNodes());
+        }
+
+        if (element instanceof LinkGroup) {
+            const children = element.getEntries().map(entry => new Link(entry));
+            return Promise.resolve(children);
+        }
+
+        return Promise.resolve([]);
+    }
+
+    public getAllEntries(): LinkEntry[] {
+        this.ensureCache();
+        return [...this.cachedEntries];
+    }
+}
+
+type FavoriteTreeNode = Favorite | FavoriteGroup;
+
+class FavoriteGroup extends vscode.TreeItem {
+    constructor(public readonly groupName: string, private readonly entries: FavoriteEntry[]) {
+        super(groupName, vscode.TreeItemCollapsibleState.Expanded);
+        this.description = `${entries.length}`;
+        this.contextValue = 'favoriteGroup';
+        this.iconPath = new vscode.ThemeIcon('folder');
+    }
+
+    getEntries(): FavoriteEntry[] {
+        return this.entries;
+    }
+}
+
 class Favorite extends vscode.TreeItem {
-  constructor(public readonly label: string, private readonly filePath: string, public readonly collapsibleState: vscode.TreeItemCollapsibleState) {
-    super(label, collapsibleState);
-    this.tooltip = `${this.label} - ${this.filePath}`;
-    this.command = { command: 'taskhub.openFavoriteFile', title: 'Open Favorite File', arguments: [this.filePath] };
-    this.contextValue = 'favoriteItem'; this.iconPath = new vscode.ThemeIcon('star');
-  }
-  getFilePath(): string { return this.filePath; }
+    constructor(private readonly entry: FavoriteEntry) {
+        super(entry.title, vscode.TreeItemCollapsibleState.None);
+        this.tooltip = `${entry.title} - ${entry.path}`;
+        this.description = entry.tags && entry.tags.length > 0 ? entry.tags.join(', ') : undefined;
+        this.command = { command: 'taskhub.openFavoriteFile', title: 'Open Favorite File', arguments: [entry.path] };
+        this.contextValue = 'favoriteItem';
+        this.iconPath = new vscode.ThemeIcon('star');
+    }
+
+    getFilePath(): string {
+        return this.entry.path;
+    }
+
+    getEntry(): FavoriteEntry {
+        return this.entry;
+    }
 }
-class FavoriteViewProvider implements vscode.TreeDataProvider<Favorite> {
-  private _onDidChangeTreeData: vscode.EventEmitter<Favorite | undefined | null | void> = new vscode.EventEmitter<Favorite | undefined | null | void>();
-  readonly onDidChangeTreeData: vscode.Event<Favorite | undefined | null | void> = this._onDidChangeTreeData.event;
-  public view: vscode.TreeView<Favorite> | undefined;
-  constructor(private context: vscode.ExtensionContext) {}  refresh(): void { this._onDidChangeTreeData.fire(); this.updateTitle(); }  private updateTitle(): void { if (this.view) { this.view.title = `Favorite Files (${this.getFavorites().length})`; } }  private getFavorites(): { title: string; path: string }[] {
-    const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'favorites.json');
-    let favoritesJson: { title: string; path: string }[] = [];
-    if (fs.existsSync(vscodeJsonPath)) { try { favoritesJson = JSON.parse(fs.readFileSync(vscodeJsonPath, 'utf-8')); } catch (error: any) { vscode.window.showErrorMessage(`Error parsing .vscode/favorites.json: ${error.message}`); console.error(`Error parsing .vscode/favorites.json: ${error.message}`); } }    return favoritesJson;
-  }
-  getTreeItem(element: Favorite): vscode.TreeItem { return element; }  getChildren(element?: Favorite): Thenable<Favorite[]> {
-    if (element) { return Promise.resolve([]); }    else { const favoritesJson = this.getFavorites(); this.updateTitle(); return Promise.resolve(favoritesJson.map((item: { title: string; path: string }) => new Favorite(item.title, item.path, vscode.TreeItemCollapsibleState.None))); }
-  }
+
+class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTreeNode> {
+    private _onDidChangeTreeData: vscode.EventEmitter<FavoriteTreeNode | undefined | null | void> = new vscode.EventEmitter<FavoriteTreeNode | undefined | null | void>();
+    readonly onDidChangeTreeData: vscode.Event<FavoriteTreeNode | undefined | null | void> = this._onDidChangeTreeData.event;
+    public view: vscode.TreeView<FavoriteTreeNode> | undefined;
+    private cachedFavorites: FavoriteEntry[] = [];
+
+    constructor(private context: vscode.ExtensionContext) {
+        this.cachedFavorites = this.loadFavorites();
+    }
+
+    refresh(): void {
+        this.cachedFavorites = this.loadFavorites();
+        this._onDidChangeTreeData.fire();
+        this.updateTitle();
+    }
+
+    private updateTitle(): void {
+        if (this.view) {
+            this.view.title = `Favorite Files (${this.cachedFavorites.length})`;
+        }
+    }
+
+    private loadFavorites(): FavoriteEntry[] {
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const favoritesPath = path.join(workspacePath, '.vscode', 'favorites.json');
+        return loadFavoritesFromDisk(favoritesPath, true);
+    }
+
+    private ensureCache(): void {
+        if (this.cachedFavorites.length === 0) {
+            this.cachedFavorites = this.loadFavorites();
+        }
+    }
+
+    private sortEntries(entries: FavoriteEntry[]): FavoriteEntry[] {
+        return [...entries].sort((a, b) => a.title.localeCompare(b.title));
+    }
+
+    private buildRootNodes(): FavoriteTreeNode[] {
+        this.ensureCache();
+        const grouped = new Map<string, FavoriteEntry[]>();
+        const ungrouped: FavoriteEntry[] = [];
+
+        for (const entry of this.cachedFavorites) {
+            const groupName = entry.group;
+            if (groupName) {
+                const bucket = grouped.get(groupName) ?? [];
+                bucket.push(entry);
+                grouped.set(groupName, bucket);
+            } else {
+                ungrouped.push(entry);
+            }
+        }
+
+        const nodes: FavoriteTreeNode[] = [];
+        const sortedGroupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
+        for (const name of sortedGroupNames) {
+            const entries = this.sortEntries(grouped.get(name)!);
+            nodes.push(new FavoriteGroup(name, entries));
+        }
+
+        const sortedUngrouped = this.sortEntries(ungrouped);
+        for (const entry of sortedUngrouped) {
+            nodes.push(new Favorite(entry));
+        }
+
+        return nodes;
+    }
+
+    getTreeItem(element: FavoriteTreeNode): vscode.TreeItem {
+        return element;
+    }
+
+    getChildren(element?: FavoriteTreeNode): Thenable<FavoriteTreeNode[]> {
+        if (!element) {
+            return Promise.resolve(this.buildRootNodes());
+        }
+
+        if (element instanceof FavoriteGroup) {
+            const children = element.getEntries().map(entry => new Favorite(entry));
+            return Promise.resolve(children);
+        }
+
+        return Promise.resolve([]);
+    }
+
+    public getAllEntries(): FavoriteEntry[] {
+        this.ensureCache();
+        return [...this.cachedFavorites];
+    }
+}
+
+type LinkQuickPickItem = vscode.QuickPickItem & { entry: LinkEntry };
+type FavoriteQuickPickItem = vscode.QuickPickItem & { entry: FavoriteEntry };
+
+async function promptLinkSearch(linkViewProvider: LinkViewProvider): Promise<void> {
+    const entries = linkViewProvider.getAllEntries();
+    if (entries.length === 0) {
+        vscode.window.showInformationMessage('No links available in TaskHub.');
+        return;
+    }
+
+    const sorted = [...entries].sort((a, b) => {
+        const groupA = a.group || '';
+        const groupB = b.group || '';
+        if (groupA !== groupB) {
+            return groupA.localeCompare(groupB);
+        }
+        return a.title.localeCompare(b.title);
+    });
+
+    const items: LinkQuickPickItem[] = sorted.map(entry => ({
+        label: entry.title,
+        description: entry.group ? `[${entry.group}] ${entry.link}` : entry.link,
+        detail: entry.tags && entry.tags.length > 0 ? `Tags: ${entry.tags.join(', ')}` : undefined,
+        entry
+    }));
+
+    const pick = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Search links by title, group, or tag',
+        matchOnDescription: true,
+        matchOnDetail: true,
+        ignoreFocusOut: true
+    });
+
+    if (pick) {
+        vscode.commands.executeCommand('taskhub.openLink', pick.entry.link);
+    }
+}
+
+async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider): Promise<void> {
+    const entries = favoriteViewProvider.getAllEntries();
+    if (entries.length === 0) {
+        vscode.window.showInformationMessage('No favorites stored in TaskHub.');
+        return;
+    }
+
+    const sorted = [...entries].sort((a, b) => {
+        const groupA = a.group || '';
+        const groupB = b.group || '';
+        if (groupA !== groupB) {
+            return groupA.localeCompare(groupB);
+        }
+        return a.title.localeCompare(b.title);
+    });
+
+    const items: FavoriteQuickPickItem[] = sorted.map(entry => ({
+        label: entry.title,
+        description: entry.group ? `[${entry.group}] ${entry.path}` : entry.path,
+        detail: entry.tags && entry.tags.length > 0 ? `Tags: ${entry.tags.join(', ')}` : undefined,
+        entry
+    }));
+
+    const pick = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Search favorites by title, group, or tag',
+        matchOnDescription: true,
+        matchOnDetail: true,
+        ignoreFocusOut: true
+    });
+
+    if (pick) {
+        vscode.commands.executeCommand('taskhub.openFavoriteFile', pick.entry.path);
+    }
 }
 
 async function executeAction(actionItem: ActionItem, context: vscode.ExtensionContext, mainViewProvider: MainViewProvider) {
@@ -1211,6 +1624,8 @@ export function activate(context: vscode.ExtensionContext) {
     mainView.onDidCollapseElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, false); } });
     linkViewProvider.view = vscode.window.createTreeView('mainView.link', { treeDataProvider: linkViewProvider });
     favoriteViewProvider.view = vscode.window.createTreeView('mainView.favorite', { treeDataProvider: favoriteViewProvider });
+    linkViewProvider.refresh();
+    favoriteViewProvider.refresh();
     context.subscriptions.push(linkViewProvider.view, favoriteViewProvider.view);
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const mediaActionsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/actions.json'));
@@ -1264,6 +1679,12 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.editFavorites', async () => { const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const filePath = path.join(wsPath, '.vscode', 'favorites.json'); if (!fs.existsSync(path.dirname(filePath))) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, JSON.stringify([], null, 2)); } await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath))); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.editLinks', async () => { const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const filePath = path.join(wsPath, '.vscode', 'links.json'); if (!fs.existsSync(path.dirname(filePath))) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, JSON.stringify([], null, 2)); } await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath))); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.editActions', async () => { const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const filePath = path.join(wsPath, '.vscode', 'actions.json'); if (!fs.existsSync(path.dirname(filePath))) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, JSON.stringify([], null, 2)); } await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath))); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.searchLinks', async () => {
+        await promptLinkSearch(linkViewProvider);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.searchFavorites', async () => {
+        await promptFavoriteSearch(favoriteViewProvider);
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addFavoriteFile', async (uri?: vscode.Uri) => {
         let fileUris: vscode.Uri[] | undefined;
         if (uri) {
@@ -1282,32 +1703,97 @@ export function activate(context: vscode.ExtensionContext) {
 
         const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
         const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json');
-        let favorites: { title: string; path: string }[] = [];
-        if (fs.existsSync(favoritesPath)) {
-            try {
-                favorites = JSON.parse(fs.readFileSync(favoritesPath, 'utf-8'));
-            } catch (e) {
-                vscode.window.showErrorMessage('Error parsing favorites.json');
-                return;
-            }
+        let favorites = loadFavoritesFromDisk(favoritesPath, true);
+
+        const groupInput = await vscode.window.showInputBox({
+            prompt: 'Group label (optional)',
+            placeHolder: 'e.g. Backend Services',
+            ignoreFocusOut: true
+        });
+        if (groupInput === undefined) {
+            return;
         }
+        const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
+
+        const tagsInput = await vscode.window.showInputBox({
+            prompt: 'Tags (optional, comma-separated)',
+            placeHolder: 'e.g. api, critical',
+            ignoreFocusOut: true
+        });
+        if (tagsInput === undefined) {
+            return;
+        }
+        const defaultTags = parseTagInput(tagsInput);
 
         for (const fileUri of fileUris) {
             const title = await vscode.window.showInputBox({
                 prompt: `Enter a title for ${path.basename(fileUri.fsPath)}`,
-                value: path.basename(fileUri.fsPath)
+                value: path.basename(fileUri.fsPath),
+                ignoreFocusOut: true
             });
             if (!title) {
                 continue;
             }
-            favorites.push({ title, path: fileUri.fsPath });
+            const favorite: FavoriteEntry = {
+                title,
+                path: fileUri.fsPath
+            };
+            if (group) {
+                favorite.group = group;
+            }
+            if (defaultTags) {
+                favorite.tags = defaultTags;
+            }
+            favorites.push(favorite);
         }
 
-        fs.writeFileSync(favoritesPath, JSON.stringify(favorites, null, 2));
+        const serialized = serializeFavorites(favorites);
+
+        if (!fs.existsSync(path.dirname(favoritesPath))) {
+            fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
+        }
+
+        fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
         favoriteViewProvider.refresh();
     }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteFavorite', async (item: Favorite) => { const confirm = await vscode.window.showWarningMessage(`Are you sure you want to delete ${item.label}?`, { modal: true }, 'Yes'); if (confirm !== 'Yes') { return; } const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json'); if (!fs.existsSync(favoritesPath)) { return; } let favorites: { title: string; path: string }[] = JSON.parse(fs.readFileSync(favoritesPath, 'utf-8')); favorites = favorites.filter(f => f.path !== item.getFilePath()); fs.writeFileSync(favoritesPath, JSON.stringify(favorites, null, 2)); favoriteViewProvider.refresh(); }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteLink', async (item: Link) => { const confirm = await vscode.window.showWarningMessage(`Are you sure you want to delete ${item.label}?`, { modal: true }, 'Yes'); if (confirm !== 'Yes') { return; } const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const vscodeLinksPath = path.join(wsPath, '.vscode', 'links.json'); if (fs.existsSync(vscodeLinksPath)) { let links: { title: string; link: string }[] = JSON.parse(fs.readFileSync(vscodeLinksPath, 'utf-8')); const initialLength = links.length; links = links.filter(l => l.link !== item.getLink()); if (links.length !== initialLength) { fs.writeFileSync(vscodeLinksPath, JSON.stringify(links, null, 2)); linkViewProvider.refresh(); return; } } }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteFavorite', async (item: Favorite) => {
+        const confirm = await vscode.window.showWarningMessage(`Are you sure you want to delete ${item.label}?`, { modal: true }, 'Yes');
+        if (confirm !== 'Yes') {
+            return;
+        }
+        const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json');
+        if (!fs.existsSync(favoritesPath)) {
+            return;
+        }
+        const favorites = loadFavoritesFromDisk(favoritesPath, true);
+        const filtered = favorites.filter(f => f.path !== item.getFilePath());
+        if (filtered.length === favorites.length) {
+            return;
+        }
+        const serialized = serializeFavorites(filtered);
+        fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
+        favoriteViewProvider.refresh();
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteLink', async (item: Link) => {
+        const confirm = await vscode.window.showWarningMessage(`Are you sure you want to delete ${item.label}?`, { modal: true }, 'Yes');
+        if (confirm !== 'Yes') {
+            return;
+        }
+        const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const vscodeLinksPath = path.join(wsPath, '.vscode', 'links.json');
+        if (!fs.existsSync(vscodeLinksPath)) {
+            return;
+        }
+        const links = loadLinksFromDisk(vscodeLinksPath, true);
+        const filtered = links.filter(link => link.link !== item.getLink());
+        if (filtered.length === links.length) {
+            return;
+        }
+        const serialized = serializeLinks(filtered);
+        fs.writeFileSync(vscodeLinksPath, JSON.stringify(serialized, null, 2) + '\n');
+        linkViewProvider.refresh();
+    }));
       const showExampleJsonCommand = vscode.commands.registerCommand('taskhub.showExampleJson', async (jsonType: string) => {
     let exampleContent = '';
     let fileName = '';
@@ -1346,7 +1832,65 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showExampleJsonQuickPick', async () => { const pick = await vscode.window.showQuickPick([ { label: 'actions.json Example', description: 'Show example content for actions.json', type: 'actions' }, { label: 'links.json Example', description: 'Show example content for links.json', type: 'links' }, { label: 'favorites.json Example', description: 'Show example content for favorites.json', type: 'favorites' }, ], { placeHolder: 'Select which example JSON to display' }); if (pick) { vscode.commands.executeCommand('taskhub.showExampleJson', pick.type); } }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.addOpenFileToFavorites', async () => { const editor = vscode.window.activeTextEditor; if (!editor) { vscode.window.showInformationMessage('No active editor found.'); return; } const filePath = editor.document.uri.fsPath; const title = await vscode.window.showInputBox({ prompt: `Enter a title for ${path.basename(filePath)}`, value: path.basename(filePath) }); if (!title) { return; } const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json'); let favorites: { title: string; path: string }[] = []; if (fs.existsSync(favoritesPath)) { try { favorites = JSON.parse(fs.readFileSync(favoritesPath, 'utf-8')); } catch (e) { vscode.window.showErrorMessage('Error parsing favorites.json'); return; } } favorites.push({ title, path: filePath }); fs.writeFileSync(favoritesPath, JSON.stringify(favorites, null, 2)); favoriteViewProvider.refresh(); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.addOpenFileToFavorites', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showInformationMessage('No active editor found.');
+            return;
+        }
+
+        const filePath = editor.document.uri.fsPath;
+        const title = await vscode.window.showInputBox({
+            prompt: `Enter a title for ${path.basename(filePath)}`,
+            value: path.basename(filePath),
+            ignoreFocusOut: true
+        });
+        if (!title) {
+            return;
+        }
+
+        const groupInput = await vscode.window.showInputBox({
+            prompt: 'Group label (optional)',
+            placeHolder: 'e.g. Documentation',
+            ignoreFocusOut: true
+        });
+        if (groupInput === undefined) {
+            return;
+        }
+        const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
+
+        const tagsInput = await vscode.window.showInputBox({
+            prompt: 'Tags (optional, comma-separated)',
+            placeHolder: 'e.g. notes, reference',
+            ignoreFocusOut: true
+        });
+        if (tagsInput === undefined) {
+            return;
+        }
+        const tags = parseTagInput(tagsInput);
+
+        const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json');
+        const favorites = loadFavoritesFromDisk(favoritesPath, true);
+        const favorite: FavoriteEntry = {
+            title,
+            path: filePath
+        };
+        if (group) {
+            favorite.group = group;
+        }
+        if (tags) {
+            favorite.tags = tags;
+        }
+        favorites.push(favorite);
+
+        const serialized = serializeFavorites(favorites);
+        if (!fs.existsSync(path.dirname(favoritesPath))) {
+            fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
+        }
+        fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
+        favoriteViewProvider.refresh();
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.terminateAllActions', async () => {
         // Flag and terminate all running actions
         for (const [actionId, execution] of activeTasks.entries()) {

@@ -13,6 +13,17 @@
       "path": {
         "type": "string",
         "description": "The absolute path to the file. Can use `${workspaceFolder}`."
+      },
+      "group": {
+        "type": "string",
+        "description": "Optional group label. Favorites with the same group appear under a collapsible section."
+      },
+      "tags": {
+        "type": "array",
+        "description": "Optional tags to help filter favorites.",
+        "items": {
+          "type": "string"
+        }
       }
     },
     "required": ["title", "path"]
