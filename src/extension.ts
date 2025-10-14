@@ -9,7 +9,7 @@ import { ActionItem, Action as PipelineAction } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
 
 
-function loadAndValidateActions(filePath: string): ActionItem[] {
+function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
     if (!fs.existsSync(filePath)) { return []; }
     const ajv = new Ajv({ allErrors: true });
     const validate = ajv.compile<ActionItem[]>(actionSchema);
@@ -17,7 +17,99 @@ function loadAndValidateActions(filePath: string): ActionItem[] {
     try { fileContent = fs.readFileSync(filePath, 'utf-8'); } catch (e: any) { throw new Error(`Error reading file ${filePath}: ${e.message}`); }
     let parsedJson: any;
     try { parsedJson = JSON.parse(fileContent); } catch (e: any) { throw new Error(`Error parsing JSON in ${path.basename(filePath)}: ${e.message}`); }
-    if (validate(parsedJson)) { return parsedJson; } else { const errors = validate.errors?.map(error => `  - path: '${error.instancePath}' - message: ${error.message}`).join('\n'); throw new Error(`Validation failed for ${path.basename(filePath)}:\n${errors}`); }
+    if (validate(parsedJson)) { const sourceLabel = options?.sourceLabel ?? filePath; performAdditionalActionValidation(parsedJson, { sourceLabel, filePath }); return parsedJson; } else { const errors = validate.errors?.map(error => `  - path: '${error.instancePath}' - message: ${error.message}`).join('\n'); throw new Error(`Validation failed for ${path.basename(filePath)}:\n${errors}`); }
+}
+
+interface ActionValidationContext {
+    sourceLabel: string;
+    filePath: string;
+}
+
+function formatActionPath(parts: string[]): string {
+    return parts.length > 0 ? parts.join(' > ') : '(root)';
+}
+
+function performAdditionalActionValidation(actions: ActionItem[], context: ActionValidationContext): void {
+    const issues: string[] = [];
+    const idLocations = new Map<string, string>();
+
+    const traverse = (items: ActionItem[], breadcrumbs: string[]) => {
+        for (const item of items) {
+            const currentLabel = item.title || item.id || '(unnamed)';
+            const currentPathParts = [...breadcrumbs, currentLabel];
+            const currentPath = formatActionPath(currentPathParts);
+
+            if (item.id) {
+                if (idLocations.has(item.id)) {
+                    const existingPath = idLocations.get(item.id)!;
+                    issues.push(`Duplicate action id '${item.id}' found at '${existingPath}' and '${currentPath}' in ${context.sourceLabel}.`);
+                } else {
+                    idLocations.set(item.id, currentPath);
+                }
+            }
+
+            if (item.action?.tasks) {
+                const taskIds = new Map<string, number>();
+                for (const task of item.action.tasks) {
+                    if (!task?.id) {
+                        continue;
+                    }
+                    if (taskIds.has(task.id)) {
+                        issues.push(`Action '${item.id}' (${currentPath}) in ${context.sourceLabel} has duplicate task id '${task.id}'.`);
+                    } else {
+                        taskIds.set(task.id, 1);
+                    }
+                }
+            }
+
+            if (item.children && item.children.length > 0) {
+                traverse(item.children, currentPathParts);
+            }
+        }
+    };
+
+    traverse(actions, []);
+
+    if (issues.length > 0) {
+        const uniqueIssues = Array.from(new Set(issues));
+        throw new Error(`Additional validation failed for ${context.sourceLabel}:\n${uniqueIssues.map(issue => `  - ${issue}`).join('\n')}`);
+    }
+}
+
+function traverseActionItems(items: ActionItem[], visitor: (item: ActionItem, pathParts: string[]) => void, breadcrumbs: string[] = []): void {
+    for (const item of items) {
+        const label = item.title || item.id || '(unnamed)';
+        const currentParts = [...breadcrumbs, label];
+        visitor(item, currentParts);
+        if (item.children && item.children.length > 0) {
+            traverseActionItems(item.children, visitor, currentParts);
+        }
+    }
+}
+
+function validateUniqueActionIdsAcrossSources(sources: { sourceLabel: string; actions: ActionItem[] }[]): void {
+    const issues: string[] = [];
+    const idLocations = new Map<string, { sourceLabel: string; path: string }>();
+
+    for (const source of sources) {
+        traverseActionItems(source.actions, (item, pathParts) => {
+            if (!item.id) {
+                return;
+            }
+            const currentPath = formatActionPath(pathParts);
+            if (idLocations.has(item.id)) {
+                const existing = idLocations.get(item.id)!;
+                issues.push(`Action id '${item.id}' defined in both ${existing.sourceLabel} (${existing.path}) and ${source.sourceLabel} (${currentPath}).`);
+            } else {
+                idLocations.set(item.id, { sourceLabel: source.sourceLabel, path: currentPath });
+            }
+        });
+    }
+
+    if (issues.length > 0) {
+        const uniqueIssues = Array.from(new Set(issues));
+        throw new Error(`Duplicate action IDs detected across files:\n${uniqueIssues.map(issue => `  - ${issue}`).join('\n')}`);
+    }
 }
 
 function interpolatePipelineVariables(template: string, context: any): string {
@@ -480,7 +572,7 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
     const workspaceActionsPath = path.join(workspaceFolder, '.vscode', 'actions.json');
     let workspaceActions: ActionItem[] = [];
     try {
-        workspaceActions = loadAndValidateActions(workspaceActionsPath);
+        workspaceActions = loadAndValidateActions(workspaceActionsPath, { sourceLabel: '.vscode/actions.json' });
     } catch (error: any) {
         vscode.window.showErrorMessage(`Could not load ${workspaceActionsPath}: ${error.message}`);
         return;
@@ -489,9 +581,19 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
     let bundledActions: ActionItem[] = [];
     try {
         const bundledPath = path.join(context.extensionPath, 'media', 'actions.json');
-        bundledActions = loadAndValidateActions(bundledPath);
+        bundledActions = loadAndValidateActions(bundledPath, { sourceLabel: 'extension media/actions.json' });
     } catch (error) {
         bundledActions = [];
+    }
+
+    try {
+        validateUniqueActionIdsAcrossSources([
+            { sourceLabel: 'extension media/actions.json', actions: bundledActions },
+            { sourceLabel: '.vscode/actions.json', actions: workspaceActions }
+        ]);
+    } catch (error: any) {
+        vscode.window.showErrorMessage(error.message);
+        return;
     }
 
     const templatePickItems = ACTION_TEMPLATES.map(template => ({
@@ -580,10 +682,25 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vsco
     } else { 
         let actionsJson: ActionItem[] = [];
         try {
+            const extensionLabel = 'extension media/actions.json';
             const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'actions.json');
-            actionsJson = actionsJson.concat(loadAndValidateActions(mediaJsonPath));
-            const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'actions.json');
-            actionsJson = actionsJson.concat(loadAndValidateActions(vscodeJsonPath));
+            const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
+
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+            const workspaceJsonPath = path.join(workspaceRoot, '.vscode', 'actions.json');
+            const workspaceLabel = workspaceRoot ? '.vscode/actions.json' : 'workspace actions.json';
+            const workspaceActions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
+
+            const sources = [
+                { sourceLabel: extensionLabel, actions: extensionActions },
+                { sourceLabel: workspaceLabel, actions: workspaceActions }
+            ].filter(source => source.actions.length > 0);
+
+            if (sources.length > 1) {
+                validateUniqueActionIdsAcrossSources(sources);
+            }
+
+            actionsJson = sources.flatMap(source => source.actions);
         } catch (error: any) { vscode.window.showErrorMessage(error.message); }      const packageJsonPath = path.join(this.context.extensionPath, 'package.json');
       const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
       const versionItem = new vscode.TreeItem(packageJson.version);
@@ -1662,8 +1779,115 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openLink', (url: string) => { vscode.env.openExternal(vscode.Uri.parse(url)); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', (item: Link) => { vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage('Link copied to clipboard.'); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.goToLink', (item: Link) => { vscode.env.openExternal(vscode.Uri.parse(item.getLink())); }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeAction', async (actionItem: Action) => { let allActions: ActionItem[] = []; try { const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json'); allActions = allActions.concat(loadAndValidateActions(mediaJsonPath)); const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'actions.json'); allActions = allActions.concat(loadAndValidateActions(vscodeJsonPath)); } catch (error: any) { console.error(error.message); vscode.window.showErrorMessage(`Could not execute action: Failed to load or validate actions.json.`); return; } function findAction(actions: ActionItem[], id: string): ActionItem | undefined { for (const action of actions) { if (action.id === id) { return action; } if (action.children) { const found = findAction(action.children, id); if (found) { return found; } } } return undefined; } const actionId = actionItem.id; if (!actionId) { return; } const fullActionItem = findAction(allActions, actionId); if (fullActionItem) { try { await executeAction(fullActionItem, context, mainViewProvider); } catch (error) { console.error(`Execution failed for action '${actionId}':`, error); } } else { vscode.window.showErrorMessage(`Could not find action definition for ID '${actionId}'.`); } }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeActionById', async (args: { id: string }) => { if (!args || !args.id) { vscode.window.showErrorMessage('Action ID is required for this command.'); return; } let allActions: ActionItem[] = []; try { const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json'); allActions = allActions.concat(loadAndValidateActions(mediaJsonPath)); const vscodeJsonPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', '.vscode', 'actions.json'); allActions = allActions.concat(loadAndValidateActions(vscodeJsonPath)); } catch (error: any) { console.error(error.message); vscode.window.showErrorMessage(`Could not execute action by ID: Failed to load or validate actions.json. Check the Output panel for details.`); return; } function findAction(actions: ActionItem[], id: string): ActionItem | undefined { for (const action of actions) { if (action.id === id) { return action; } if (action.children) { const found = findAction(action.children, id); if (found) { return found; } } } return undefined; } const actionItem = findAction(allActions, args.id); if (actionItem && actionItem.action) { await executeAction(actionItem, context, mainViewProvider); } else { vscode.window.showErrorMessage(`Action with ID '${args.id}' not found or it has no 'action' property.`); } }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeAction', async (actionItem: Action) => {
+        let allActions: ActionItem[] = [];
+        try {
+            const extensionLabel = 'extension media/actions.json';
+            const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
+            const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
+
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+            const workspaceJsonPath = path.join(workspaceRoot, '.vscode', 'actions.json');
+            const workspaceLabel = workspaceRoot ? '.vscode/actions.json' : 'workspace actions.json';
+            const workspaceActions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
+
+            const sources = [
+                { sourceLabel: extensionLabel, actions: extensionActions },
+                { sourceLabel: workspaceLabel, actions: workspaceActions }
+            ].filter(source => source.actions.length > 0);
+
+            if (sources.length > 1) {
+                validateUniqueActionIdsAcrossSources(sources);
+            }
+
+            allActions = sources.flatMap(source => source.actions);
+        } catch (error: any) {
+            console.error(error.message);
+            vscode.window.showErrorMessage(`Could not execute action: ${error.message}`);
+            return;
+        }
+
+        function findAction(actions: ActionItem[], id: string): ActionItem | undefined {
+            for (const action of actions) {
+                if (action.id === id) {
+                    return action;
+                }
+                if (action.children) {
+                    const found = findAction(action.children, id);
+                    if (found) {
+                        return found;
+                    }
+                }
+            }
+            return undefined;
+        }
+        const actionId = actionItem.id;
+        if (!actionId) {
+            return;
+        }
+        const fullActionItem = findAction(allActions, actionId);
+        if (fullActionItem) {
+            try {
+                await executeAction(fullActionItem, context, mainViewProvider);
+            } catch (error) {
+                console.error(`Execution failed for action '${actionId}':`, error);
+            }
+        } else {
+            vscode.window.showErrorMessage(`Could not find action definition for ID '${actionId}'.`);
+        }
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeActionById', async (args: { id: string }) => {
+        if (!args || !args.id) {
+            vscode.window.showErrorMessage('Action ID is required for this command.');
+            return;
+        }
+        let allActions: ActionItem[] = [];
+        try {
+            const extensionLabel = 'extension media/actions.json';
+            const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
+            const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
+
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+            const workspaceJsonPath = path.join(workspaceRoot, '.vscode', 'actions.json');
+            const workspaceLabel = workspaceRoot ? '.vscode/actions.json' : 'workspace actions.json';
+            const workspaceActions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
+
+            const sources = [
+                { sourceLabel: extensionLabel, actions: extensionActions },
+                { sourceLabel: workspaceLabel, actions: workspaceActions }
+            ].filter(source => source.actions.length > 0);
+
+            if (sources.length > 1) {
+                validateUniqueActionIdsAcrossSources(sources);
+            }
+
+            allActions = sources.flatMap(source => source.actions);
+        } catch (error: any) {
+            console.error(error.message);
+            vscode.window.showErrorMessage(`Could not execute action by ID: ${error.message}`);
+            return;
+        }
+        function findAction(actions: ActionItem[], id: string): ActionItem | undefined {
+            for (const action of actions) {
+                if (action.id === id) {
+                    return action;
+                }
+                if (action.children) {
+                    const found = findAction(action.children, id);
+                    if (found) {
+                        return found;
+                    }
+                }
+            }
+            return undefined;
+        }
+        const actionItem = findAction(allActions, args.id);
+        if (actionItem && actionItem.action) {
+            await executeAction(actionItem, context, mainViewProvider);
+        } else {
+            vscode.window.showErrorMessage(`Action with ID '${args.id}' not found or it has no 'action' property.`);
+        }
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
         const id = actionItem.id || actionItem.label;
         const task = activeTasks.get(id);
