@@ -6,6 +6,10 @@ dist/
 out/
 *.tsbuildinfo
 
+# Test coverage
+coverage/
+.nyc_output/
+
 # VS Code specific
 .vscode-test/
 

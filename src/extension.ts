@@ -25,7 +25,7 @@ interface ActionValidationContext {
     filePath: string;
 }
 
-function formatActionPath(parts: string[]): string {
+export function formatActionPath(parts: string[]): string {
     return parts.length > 0 ? parts.join(' > ') : '(root)';
 }
 
@@ -112,7 +112,7 @@ function validateUniqueActionIdsAcrossSources(sources: { sourceLabel: string; ac
     }
 }
 
-function interpolatePipelineVariables(template: string, context: any): string {
+export function interpolatePipelineVariables(template: string, context: any): string {
     if (typeof template !== 'string') { return template; }
     const regex = /\${([^}]+)}/g;
     return template.replace(regex, (match, expression) => {
@@ -162,7 +162,7 @@ function getToolCommand(tool: any): string {
     return toolCommand;
 }
 
-function tokenizeCommandLine(command: string): string[] {
+export function tokenizeCommandLine(command: string): string[] {
     const tokens: string[] = [];
     let current = '';
     let quoteChar: string | null = null;
@@ -201,7 +201,7 @@ function tokenizeCommandLine(command: string): string[] {
     return tokens;
 }
 
-function mergeCommandAndArgs(command: string, extraArgs: string[]): { executable: string; args: string[] } {
+export function mergeCommandAndArgs(command: string, extraArgs: string[]): { executable: string; args: string[] } {
     const baseTokens = tokenizeCommandLine(command.trim());
     if (baseTokens.length === 0) {
         throw new Error('Cannot execute an empty command.');
@@ -212,7 +212,7 @@ function mergeCommandAndArgs(command: string, extraArgs: string[]): { executable
     return { executable, args: combinedArgs };
 }
 
-function quotePowerShellArgument(value: string): string {
+export function quotePowerShellArgument(value: string): string {
     return value.length === 0 ? "''" : `'${value.replace(/'/g, "''")}'`;
 }
 
@@ -258,7 +258,7 @@ function resolveExecutionSettings(customEnv?: Record<string, string>): { envOver
     return { envOverrides, useUtf8Console };
 }
 
-function quotePosixArgument(value: string): string {
+export function quotePosixArgument(value: string): string {
     return value.length === 0 ? "''" : `'${value.replace(/'/g, "'\\''")}'`;
 }
 
@@ -776,7 +776,7 @@ interface FavoriteEntry {
     tags?: string[];
 }
 
-function normalizeTags(rawTags: unknown): string[] | undefined {
+export function normalizeTags(rawTags: unknown): string[] | undefined {
     if (!Array.isArray(rawTags)) {
         return undefined;
     }
@@ -786,7 +786,7 @@ function normalizeTags(rawTags: unknown): string[] | undefined {
     return cleaned.length > 0 ? cleaned : undefined;
 }
 
-function parseTagInput(input: string | undefined): string[] | undefined {
+export function parseTagInput(input: string | undefined): string[] | undefined {
     if (!input) {
         return undefined;
     }
@@ -797,7 +797,7 @@ function parseTagInput(input: string | undefined): string[] | undefined {
     return parts.length > 0 ? parts : undefined;
 }
 
-function serializeFavorites(entries: FavoriteEntry[]): any[] {
+export function serializeFavorites(entries: FavoriteEntry[]): any[] {
     return entries.map(entry => {
         const payload: any = { title: entry.title, path: entry.path };
         if (entry.group) {
@@ -810,7 +810,7 @@ function serializeFavorites(entries: FavoriteEntry[]): any[] {
     });
 }
 
-function serializeLinks(entries: LinkEntry[]): any[] {
+export function serializeLinks(entries: LinkEntry[]): any[] {
     return entries.map(entry => {
         const payload: any = { title: entry.title, link: entry.link };
         if (entry.group) {
@@ -1608,7 +1608,7 @@ async function handleZip(task: import('./schema').Task, allResults: any): Promis
     }
 }
 
-async function handleStringManipulation(task: any): Promise<{ output: string }> {
+export async function handleStringManipulation(task: any): Promise<{ output: string }> {
     const { function: func, input } = task;
     if (typeof input !== 'string') { throw new Error(`String manipulation task '${task.id}' requires the 'input' property to be a string.`); }
 

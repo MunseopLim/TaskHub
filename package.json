@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -112,32 +112,32 @@
       {
         "command": "taskhub.copyLink",
         "title": "Copy Link"
-        },
-        {
-          "command": "taskhub.goToLink",
-          "title": "Go to Link"
-        },
-        {
-          "command": "taskhub.searchLinks",
-          "title": "TaskHub: Search Links",
-          "icon": "$(search)"
-        },
-        {
-          "command": "taskhub.searchFavorites",
-          "title": "TaskHub: Search Favorites",
-          "icon": "$(search)"
-        },
-        {
-          "command": "taskhub.createAction",
-          "title": "TaskHub: Create Action",
-          "icon": "$(add)"
-        },
-        {
-          "command": "taskhub.executeAction",
-          "title": "Execute Action"
-        },
-        {
-          "command": "taskhub.stopAction",
+      },
+      {
+        "command": "taskhub.goToLink",
+        "title": "Go to Link"
+      },
+      {
+        "command": "taskhub.searchLinks",
+        "title": "TaskHub: Search Links",
+        "icon": "$(search)"
+      },
+      {
+        "command": "taskhub.searchFavorites",
+        "title": "TaskHub: Search Favorites",
+        "icon": "$(search)"
+      },
+      {
+        "command": "taskhub.createAction",
+        "title": "TaskHub: Create Action",
+        "icon": "$(add)"
+      },
+      {
+        "command": "taskhub.executeAction",
+        "title": "Execute Action"
+      },
+      {
+        "command": "taskhub.stopAction",
         "title": "Stop Action",
         "icon": "$(primitive-square)"
       },
