@@ -102,10 +102,6 @@
     },
     "commands": [
       {
-        "command": "taskhub.helloWorld",
-        "title": "Hello World"
-      },
-      {
         "command": "taskhub.openLink",
         "title": "Open Link"
       },
