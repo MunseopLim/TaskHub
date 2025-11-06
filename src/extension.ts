@@ -112,6 +112,10 @@ function validateUniqueActionIdsAcrossSources(sources: { sourceLabel: string; ac
     }
 }
 
+interface GroupableTaskPresentationOptions extends vscode.TaskPresentationOptions {
+    group?: string;
+}
+
 function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
     const extensionLabel = 'extension media/actions.json';
     const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
@@ -1491,15 +1495,15 @@ async function executeStreamedTask(task: any): Promise<void> {
                 break;
         }
 
-        vsCodeTask.presentationOptions = {
+        const presentationOptions: GroupableTaskPresentationOptions = {
             reveal: revealKind,
             panel: vscode.TaskPanelKind.Shared,
             showReuseMessage: true,
             clear: false,
         };
         // Group tasks by action so each action reuses its Task panel.
-        // @ts-expect-error group is available at runtime even if not in current typings
-        vsCodeTask.presentationOptions.group = actionKey;
+        presentationOptions.group = actionKey;
+        vsCodeTask.presentationOptions = presentationOptions;
 
         let taskExecution: vscode.TaskExecution | undefined;
         const disposable = vscode.tasks.onDidEndTaskProcess(e => {
