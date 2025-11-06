@@ -112,6 +112,43 @@ function validateUniqueActionIdsAcrossSources(sources: { sourceLabel: string; ac
     }
 }
 
+function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
+    const extensionLabel = 'extension media/actions.json';
+    const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
+    const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
+
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const workspaceJsonPath = path.join(workspaceRoot, '.vscode', 'actions.json');
+    const workspaceLabel = workspaceRoot ? '.vscode/actions.json' : 'workspace actions.json';
+    const workspaceActions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
+
+    const sources = [
+        { sourceLabel: extensionLabel, actions: extensionActions },
+        { sourceLabel: workspaceLabel, actions: workspaceActions }
+    ].filter(source => source.actions.length > 0);
+
+    if (sources.length > 1) {
+        validateUniqueActionIdsAcrossSources(sources);
+    }
+
+    return sources.flatMap(source => source.actions);
+}
+
+export function findActionById(actions: ActionItem[], id: string): ActionItem | undefined {
+    for (const action of actions) {
+        if (action.id === id) {
+            return action;
+        }
+        if (action.children) {
+            const match = findActionById(action.children, id);
+            if (match) {
+                return match;
+            }
+        }
+    }
+    return undefined;
+}
+
 export function interpolatePipelineVariables(template: string, context: any): string {
     if (typeof template !== 'string') { return template; }
     const regex = /\${([^}]+)}/g;
@@ -1780,52 +1817,20 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', (item: Link) => { vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage('Link copied to clipboard.'); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.goToLink', (item: Link) => { vscode.env.openExternal(vscode.Uri.parse(item.getLink())); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeAction', async (actionItem: Action) => {
-        let allActions: ActionItem[] = [];
+        let allActions: ActionItem[];
         try {
-            const extensionLabel = 'extension media/actions.json';
-            const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
-            const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
-
-            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-            const workspaceJsonPath = path.join(workspaceRoot, '.vscode', 'actions.json');
-            const workspaceLabel = workspaceRoot ? '.vscode/actions.json' : 'workspace actions.json';
-            const workspaceActions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
-
-            const sources = [
-                { sourceLabel: extensionLabel, actions: extensionActions },
-                { sourceLabel: workspaceLabel, actions: workspaceActions }
-            ].filter(source => source.actions.length > 0);
-
-            if (sources.length > 1) {
-                validateUniqueActionIdsAcrossSources(sources);
-            }
-
-            allActions = sources.flatMap(source => source.actions);
+            allActions = loadAllActions(context);
         } catch (error: any) {
             console.error(error.message);
             vscode.window.showErrorMessage(`Could not execute action: ${error.message}`);
             return;
         }
 
-        function findAction(actions: ActionItem[], id: string): ActionItem | undefined {
-            for (const action of actions) {
-                if (action.id === id) {
-                    return action;
-                }
-                if (action.children) {
-                    const found = findAction(action.children, id);
-                    if (found) {
-                        return found;
-                    }
-                }
-            }
-            return undefined;
-        }
         const actionId = actionItem.id;
         if (!actionId) {
             return;
         }
-        const fullActionItem = findAction(allActions, actionId);
+        const fullActionItem = findActionById(allActions, actionId);
         if (fullActionItem) {
             try {
                 await executeAction(fullActionItem, context, mainViewProvider);
@@ -1841,47 +1846,15 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage('Action ID is required for this command.');
             return;
         }
-        let allActions: ActionItem[] = [];
+        let allActions: ActionItem[];
         try {
-            const extensionLabel = 'extension media/actions.json';
-            const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
-            const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
-
-            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-            const workspaceJsonPath = path.join(workspaceRoot, '.vscode', 'actions.json');
-            const workspaceLabel = workspaceRoot ? '.vscode/actions.json' : 'workspace actions.json';
-            const workspaceActions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
-
-            const sources = [
-                { sourceLabel: extensionLabel, actions: extensionActions },
-                { sourceLabel: workspaceLabel, actions: workspaceActions }
-            ].filter(source => source.actions.length > 0);
-
-            if (sources.length > 1) {
-                validateUniqueActionIdsAcrossSources(sources);
-            }
-
-            allActions = sources.flatMap(source => source.actions);
+            allActions = loadAllActions(context);
         } catch (error: any) {
             console.error(error.message);
             vscode.window.showErrorMessage(`Could not execute action by ID: ${error.message}`);
             return;
         }
-        function findAction(actions: ActionItem[], id: string): ActionItem | undefined {
-            for (const action of actions) {
-                if (action.id === id) {
-                    return action;
-                }
-                if (action.children) {
-                    const found = findAction(action.children, id);
-                    if (found) {
-                        return found;
-                    }
-                }
-            }
-            return undefined;
-        }
-        const actionItem = findAction(allActions, args.id);
+        const actionItem = findActionById(allActions, args.id);
         if (actionItem && actionItem.action) {
             await executeAction(actionItem, context, mainViewProvider);
         } else {

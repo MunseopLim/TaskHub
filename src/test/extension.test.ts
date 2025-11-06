@@ -12,7 +12,9 @@ import {
 	formatActionPath,
 	mergeCommandAndArgs,
 	handleStringManipulation,
+	findActionById,
 } from '../extension';
+import { ActionItem } from '../schema';
 
 suite('Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');
@@ -762,6 +764,44 @@ suite('Extension Test Suite', () => {
 			});
 			// path.normalize handles this
 			assert.ok(result.output.includes('/'));
+	});
+});
+
+	suite('findActionById', () => {
+		const sampleActions: ActionItem[] = [
+			{
+				id: 'root-action',
+				title: 'Root Action',
+				action: { description: 'Root description', tasks: [] }
+			},
+			{
+				id: 'folder',
+				title: 'Folder',
+				children: [
+					{
+						id: 'nested-action',
+						title: 'Nested Action',
+						action: { description: 'Nested description', tasks: [] }
+					}
+				]
+			}
+		];
+
+		test('should return top-level action when id matches', () => {
+			const result = findActionById(sampleActions, 'root-action');
+			assert.ok(result);
+			assert.strictEqual(result?.title, 'Root Action');
+		});
+
+		test('should return nested action when id matches child', () => {
+			const result = findActionById(sampleActions, 'nested-action');
+			assert.ok(result);
+			assert.strictEqual(result?.title, 'Nested Action');
+		});
+
+		test('should return undefined when id is not found', () => {
+			const result = findActionById(sampleActions, 'missing');
+			assert.strictEqual(result, undefined);
 		});
 	});
 
