@@ -13,6 +13,8 @@ import {
 	mergeCommandAndArgs,
 	handleStringManipulation,
 	findActionById,
+	insertActionIntoDestination,
+	createGroupedTaskPresentationOptions,
 } from '../extension';
 import { ActionItem } from '../schema';
 
@@ -756,16 +758,16 @@ suite('Extension Test Suite', () => {
 			assert.ok(result.output.length > 0);
 		});
 
-		test('should handle path with multiple slashes', async () => {
-			const result = await handleStringManipulation({
-				id: 'test',
-				function: 'dirname',
-				input: '/path//to///file.txt'
+			test('should handle path with multiple slashes', async () => {
+				const result = await handleStringManipulation({
+					id: 'test',
+					function: 'dirname',
+					input: '/path//to///file.txt'
+				});
+				// path.normalize handles this
+				assert.ok(result.output.includes('/'));
 			});
-			// path.normalize handles this
-			assert.ok(result.output.includes('/'));
-	});
-});
+		});
 
 	suite('findActionById', () => {
 		const sampleActions: ActionItem[] = [
@@ -802,6 +804,63 @@ suite('Extension Test Suite', () => {
 		test('should return undefined when id is not found', () => {
 			const result = findActionById(sampleActions, 'missing');
 			assert.strictEqual(result, undefined);
+		});
+	});
+
+	suite('insertActionIntoDestination', () => {
+		test('should push new action to root when destination has no folderRef', () => {
+			const workspaceActions: ActionItem[] = [];
+			const destination = {
+				label: 'Root',
+				description: 'Add at root'
+			} as any;
+			const newAction: ActionItem = {
+				id: 'new',
+				title: 'New Action',
+				action: { description: 'desc', tasks: [] }
+			};
+
+			insertActionIntoDestination(workspaceActions, destination, newAction);
+			assert.strictEqual(workspaceActions.length, 1);
+			assert.strictEqual(workspaceActions[0], newAction);
+		});
+
+		test('should create children array when inserting into folder', () => {
+			const folder: ActionItem = {
+				id: 'folder',
+				title: 'Folder'
+			};
+			const workspaceActions: ActionItem[] = [folder];
+			const destination = {
+				label: 'Folder',
+				description: 'Insert into folder',
+				folderRef: folder
+			} as any;
+			const newAction: ActionItem = {
+				id: 'nested',
+				title: 'Nested',
+				action: { description: 'nested desc', tasks: [] }
+			};
+
+			insertActionIntoDestination(workspaceActions, destination, newAction);
+			assert.ok(folder.children);
+			assert.strictEqual(folder.children?.length, 1);
+			assert.strictEqual(folder.children?.[0], newAction);
+		});
+	});
+
+	suite('createGroupedTaskPresentationOptions', () => {
+		test('should default to reveal always and assign group', () => {
+			const options = createGroupedTaskPresentationOptions('action-1');
+			assert.strictEqual(options.group, 'action-1');
+			assert.strictEqual(options.reveal, vscode.TaskRevealKind.Always);
+			assert.strictEqual(options.panel, vscode.TaskPanelKind.Shared);
+			assert.strictEqual(options.showReuseMessage, true);
+		});
+
+		test('should map silent reveal option', () => {
+			const options = createGroupedTaskPresentationOptions('action-1', 'silent');
+			assert.strictEqual(options.reveal, vscode.TaskRevealKind.Silent);
 		});
 	});
 

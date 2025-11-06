@@ -116,6 +116,43 @@ interface GroupableTaskPresentationOptions extends vscode.TaskPresentationOption
     group?: string;
 }
 
+interface WizardActionSources {
+    workspaceActions: ActionItem[];
+    bundledActions: ActionItem[];
+    workspaceActionsPath: string;
+}
+
+interface TaskExecutionSetup {
+    vsCodeTask: vscode.Task;
+    displayCommand: string;
+    actionKey: string;
+    cwd: string;
+}
+
+export function createGroupedTaskPresentationOptions(actionKey: string, revealSetting?: 'always' | 'silent' | 'never'): GroupableTaskPresentationOptions {
+    const revealPreference = revealSetting ?? 'always';
+    let revealKind: vscode.TaskRevealKind;
+    switch (revealPreference) {
+        case 'silent':
+            revealKind = vscode.TaskRevealKind.Silent;
+            break;
+        case 'never':
+            revealKind = vscode.TaskRevealKind.Never;
+            break;
+        case 'always':
+        default:
+            revealKind = vscode.TaskRevealKind.Always;
+            break;
+    }
+    return {
+        reveal: revealKind,
+        panel: vscode.TaskPanelKind.Shared,
+        showReuseMessage: true,
+        clear: false,
+        group: actionKey
+    };
+}
+
 function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
     const extensionLabel = 'extension media/actions.json';
     const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
@@ -603,20 +640,13 @@ async function collectBaseActionInfo(template: ActionTemplateDefinition, existin
     };
 }
 
-async function runActionCreationWizard(context: vscode.ExtensionContext, mainViewProvider: MainViewProvider): Promise<void> {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!workspaceFolder) {
-        vscode.window.showErrorMessage('Open a workspace folder to create actions.');
-        return;
-    }
-
+function loadWizardActionSources(context: vscode.ExtensionContext, workspaceFolder: string): WizardActionSources {
     const workspaceActionsPath = path.join(workspaceFolder, '.vscode', 'actions.json');
     let workspaceActions: ActionItem[] = [];
     try {
         workspaceActions = loadAndValidateActions(workspaceActionsPath, { sourceLabel: '.vscode/actions.json' });
     } catch (error: any) {
-        vscode.window.showErrorMessage(`Could not load ${workspaceActionsPath}: ${error.message}`);
-        return;
+        throw new Error(`Could not load ${workspaceActionsPath}: ${error.message}`);
     }
 
     let bundledActions: ActionItem[] = [];
@@ -633,10 +663,13 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
             { sourceLabel: '.vscode/actions.json', actions: workspaceActions }
         ]);
     } catch (error: any) {
-        vscode.window.showErrorMessage(error.message);
-        return;
+        throw error;
     }
 
+    return { workspaceActions, bundledActions, workspaceActionsPath };
+}
+
+async function promptForActionTemplate(): Promise<ActionTemplateDefinition | undefined> {
     const templatePickItems = ACTION_TEMPLATES.map(template => ({
         label: template.label,
         description: template.description,
@@ -647,34 +680,88 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
         ignoreFocusOut: true
     });
     if (!templatePick) {
-        return;
+        return undefined;
     }
     const template = ACTION_TEMPLATES.find(t => t.id === templatePick.templateId);
     if (!template) {
         vscode.window.showErrorMessage('Selected template was not found.');
+        return undefined;
+    }
+    return template;
+}
+
+async function promptForActionDestination(workspaceActions: ActionItem[]): Promise<DestinationPickItem> {
+    const destinationPickItems: DestinationPickItem[] = [
+        {
+            label: '$(root-folder) Root (top level)',
+            description: 'Add at the top of actions.json'
+        },
+        ...collectFolderDestinations(workspaceActions)
+    ];
+    const destination = await vscode.window.showQuickPick(destinationPickItems, {
+        placeHolder: 'Choose where to place the new action',
+        ignoreFocusOut: true
+    });
+    if (!destination) {
+        throw new WizardCancelledError();
+    }
+    return destination;
+}
+
+export function insertActionIntoDestination(workspaceActions: ActionItem[], destination: DestinationPickItem, newAction: ActionItem): void {
+    if (destination.folderRef) {
+        if (!Array.isArray(destination.folderRef.children)) {
+            destination.folderRef.children = [];
+        }
+        destination.folderRef.children.push(newAction);
+    } else {
+        workspaceActions.push(newAction);
+    }
+}
+
+function persistWorkspaceActions(workspaceFolder: string, workspaceActionsPath: string, workspaceActions: ActionItem[]): void {
+    const vscodeDir = path.join(workspaceFolder, '.vscode');
+    fs.mkdirSync(vscodeDir, { recursive: true });
+    fs.writeFileSync(workspaceActionsPath, JSON.stringify(workspaceActions, null, 2) + '\n');
+}
+
+async function handlePostCreationChoice(baseInfo: BaseActionInfo, workspaceActionsPath: string): Promise<void> {
+    const openOption = 'Open actions.json';
+    const runOption = 'Run now';
+    const choice = await vscode.window.showInformationMessage(`Action '${baseInfo.title}' was added to actions.json.`, openOption, runOption);
+    if (choice === openOption) {
+        const document = await vscode.workspace.openTextDocument(workspaceActionsPath);
+        await vscode.window.showTextDocument(document, { preview: false });
+    } else if (choice === runOption) {
+        vscode.commands.executeCommand('taskhub.executeActionById', { id: baseInfo.id });
+    }
+}
+
+async function runActionCreationWizard(context: vscode.ExtensionContext, mainViewProvider: MainViewProvider): Promise<void> {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceFolder) {
+        vscode.window.showErrorMessage('Open a workspace folder to create actions.');
         return;
     }
 
-    const existingIds = collectActionIds([...bundledActions, ...workspaceActions]);
+    let sources: WizardActionSources;
+    try {
+        sources = loadWizardActionSources(context, workspaceFolder);
+    } catch (error: any) {
+        vscode.window.showErrorMessage(error.message);
+        return;
+    }
+
+    const template = await promptForActionTemplate();
+    if (!template) {
+        return;
+    }
+
+    const existingIds = collectActionIds([...sources.bundledActions, ...sources.workspaceActions]);
 
     try {
         const baseInfo = await collectBaseActionInfo(template, existingIds);
-        const destinations = collectFolderDestinations(workspaceActions);
-        const destinationPickItems: DestinationPickItem[] = [
-            {
-                label: '$(root-folder) Root (top level)',
-                description: 'Add at the top of actions.json'
-            },
-            ...destinations
-        ];
-        const destination = await vscode.window.showQuickPick(destinationPickItems, {
-            placeHolder: 'Choose where to place the new action',
-            ignoreFocusOut: true
-        });
-        if (!destination) {
-            throw new WizardCancelledError();
-        }
-
+        const destination = await promptForActionDestination(sources.workspaceActions);
         const actionDefinition = await template.build(baseInfo);
         const newAction: ActionItem = {
             id: baseInfo.id,
@@ -682,29 +769,10 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
             action: actionDefinition
         };
 
-        if (destination.folderRef) {
-            if (!Array.isArray(destination.folderRef.children)) {
-                destination.folderRef.children = [];
-            }
-            destination.folderRef.children.push(newAction);
-        } else {
-            workspaceActions.push(newAction);
-        }
-
-        const vscodeDir = path.join(workspaceFolder, '.vscode');
-        fs.mkdirSync(vscodeDir, { recursive: true });
-        fs.writeFileSync(workspaceActionsPath, JSON.stringify(workspaceActions, null, 2) + '\n');
+        insertActionIntoDestination(sources.workspaceActions, destination, newAction);
+        persistWorkspaceActions(workspaceFolder, sources.workspaceActionsPath, sources.workspaceActions);
         mainViewProvider.refresh();
-
-        const openOption = 'Open actions.json';
-        const runOption = 'Run now';
-        const choice = await vscode.window.showInformationMessage(`Action '${baseInfo.title}' was added to actions.json.`, openOption, runOption);
-        if (choice === openOption) {
-            const document = await vscode.workspace.openTextDocument(workspaceActionsPath);
-            await vscode.window.showTextDocument(document, { preview: false });
-        } else if (choice === runOption) {
-            vscode.commands.executeCommand('taskhub.executeActionById', { id: baseInfo.id });
-        }
+        await handlePostCreationChoice(baseInfo, sources.workspaceActionsPath);
     } catch (error) {
         if (error instanceof WizardCancelledError) {
             return;
@@ -1262,47 +1330,110 @@ async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider):
     }
 }
 
-async function executeAction(actionItem: ActionItem, context: vscode.ExtensionContext, mainViewProvider: MainViewProvider) {
-    const showTaskStatus = vscode.workspace.getConfiguration('taskhub').get('showTaskStatus', true);
+function resolveActionDefinition(actionItem: ActionItem): { action: PipelineAction; id: string } | undefined {
     const action = actionItem.action;
-    const id = actionItem.id;
-    if (!action || !action.tasks) { vscode.window.showErrorMessage(`Action '${actionItem.title}' has no tasks to run.`); return; }
+    if (!action || !action.tasks) {
+        vscode.window.showErrorMessage(`Action '${actionItem.title}' has no tasks to run.`);
+        return undefined;
+    }
+    return { action, id: actionItem.id };
+}
+
+function markActionAsRunning(actionItem: ActionItem, id: string, showTaskStatus: boolean, mainViewProvider: MainViewProvider): boolean {
+    if (!showTaskStatus) {
+        return true;
+    }
+
+    const currentState = actionStates.get(id);
+    if (currentState?.state === 'running') {
+        vscode.window.showInformationMessage(`Action '${actionItem.title}' is already running.`);
+        return false;
+    }
+
+    actionStates.set(id, { state: 'running' });
+    mainViewProvider.refresh();
+    return true;
+}
+
+function logActionStart(showVerboseLogs: boolean, title: string, description?: string): void {
+    if (!showVerboseLogs) {
+        return;
+    }
+    outputChannel.show(true);
+    if (description) {
+        outputChannel.appendLine(`[INFO] Running action '${title}': ${description}`);
+    } else {
+        outputChannel.appendLine(`[INFO] Running action '${title}'.`);
+    }
+}
+
+async function runActionTasks(action: PipelineAction, context: vscode.ExtensionContext, id: string): Promise<void> {
+    const stepResults: Record<string, unknown> = {};
+    for (const task of action.tasks) {
+        const result = await executeSingleTask(task, stepResults, context, id);
+        stepResults[task.id] = result;
+    }
+}
+
+function handleActionSuccess(id: string, action: PipelineAction, showTaskStatus: boolean): void {
+    if (!showTaskStatus) {
+        return;
+    }
+    actionStates.set(id, { state: 'success' });
+    if (action.successMessage) {
+        vscode.window.showInformationMessage(action.successMessage);
+    }
+}
+
+function handleActionFailure(id: string, actionItem: ActionItem, action: PipelineAction, error: Error, showTaskStatus: boolean): void {
+    if (!showTaskStatus) {
+        return;
+    }
+    actionStates.set(id, { state: 'failure' });
+    if (action.failMessage) {
+        vscode.window.showErrorMessage(`${action.failMessage}: ${error.message}`);
+    } else {
+        vscode.window.showErrorMessage(`Action '${actionItem.title}' failed: ${error.message}`);
+    }
+}
+
+function finalizeActionRun(id: string, showTaskStatus: boolean, mainViewProvider: MainViewProvider): void {
+    activeTasks.delete(id);
+    if (manuallyTerminatedActions.has(id)) {
+        actionStates.delete(id);
+        manuallyTerminatedActions.delete(id);
+    }
     if (showTaskStatus) {
-        const currentState = actionStates.get(id);
-        if (currentState?.state === 'running') { vscode.window.showInformationMessage(`Action '${actionItem.title}' is already running.`); return; }
-        actionStates.set(id, { state: 'running' });
         mainViewProvider.refresh();
     }
-    const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
-    if (showVerboseLogs) { outputChannel.show(true); }
-    if (showVerboseLogs) {
-        outputChannel.appendLine(`[INFO] Running action '${actionItem.title}': ${action.description}`);
+}
+
+async function executeAction(actionItem: ActionItem, context: vscode.ExtensionContext, mainViewProvider: MainViewProvider) {
+    const resolved = resolveActionDefinition(actionItem);
+    if (!resolved) {
+        return;
     }
-    const stepResults: { [key: string]: any } = {};
+
+    const { action, id } = resolved;
+    const showTaskStatus = vscode.workspace.getConfiguration('taskhub').get('showTaskStatus', true);
+
+    if (!markActionAsRunning(actionItem, id, showTaskStatus, mainViewProvider)) {
+        return;
+    }
+
+    const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+    logActionStart(showVerboseLogs, actionItem.title, action.description);
+
     try {
-        for (const task of action.tasks) {
-            const result = await executeSingleTask(task, stepResults, context, id);
-            stepResults[task.id] = result;
-        }
-        if (showTaskStatus) {
-            actionStates.set(id, { state: 'success' });
-            if (action.successMessage) { vscode.window.showInformationMessage(action.successMessage); }
-        }
+        await runActionTasks(action, context, id);
+        handleActionSuccess(id, action, showTaskStatus);
     } catch (error: any) {
         if (!manuallyTerminatedActions.has(id)) {
-            if (showTaskStatus) {
-                actionStates.set(id, { state: 'failure' });
-                if (action.failMessage) { vscode.window.showErrorMessage(`${action.failMessage}: ${error.message}`); } else { vscode.window.showErrorMessage(`Action '${actionItem.title}' failed: ${error.message}`); }
-            }
+            handleActionFailure(id, actionItem, action, error, showTaskStatus);
             throw error;
         }
     } finally {
-        activeTasks.delete(id);
-        if (manuallyTerminatedActions.has(id)) {
-            actionStates.delete(id);
-            manuallyTerminatedActions.delete(id);
-        }
-        if (showTaskStatus) { mainViewProvider.refresh(); }
+        finalizeActionRun(id, showTaskStatus, mainViewProvider);
     }
 }
 
@@ -1445,66 +1576,64 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
     return result;
 }
 
+function createShellExecution(command: string, args: string[], options: vscode.ShellExecutionOptions, useUtf8Console: boolean): { shellExecution: vscode.ShellExecution; displayCommand: string } {
+    if (process.platform === 'win32') {
+        const invocation = buildPowerShellInvocation(command, args, useUtf8Console);
+        const encoded = encodePowerShellScript(invocation.script);
+        return {
+            shellExecution: new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options),
+            displayCommand: invocation.display
+        };
+    }
+
+    const commandLine = buildPosixCommandLine(command, args);
+    return {
+        shellExecution: new vscode.ShellExecution(commandLine, options),
+        displayCommand: commandLine
+    };
+}
+
+function prepareTaskExecution(task: any): TaskExecutionSetup {
+    const { command, args, cwd, id, actionId, revealTerminal, env: taskEnv } = task;
+    if (typeof command !== 'string') {
+        throw new Error(`Task ${id} requires a string 'command' property.`);
+    }
+
+    const actionKey = actionId || id;
+    const options: vscode.ShellExecutionOptions = {
+        cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
+    };
+    const { envOverrides, useUtf8Console } = resolveExecutionSettings(taskEnv);
+    if (Object.keys(envOverrides).length > 0) {
+        options.env = envOverrides;
+    }
+
+    const taskArgs = args || [];
+    const { shellExecution, displayCommand } = createShellExecution(command, taskArgs, options, useUtf8Console);
+    const taskDefinition: vscode.TaskDefinition = { type: 'shell', actionId: actionKey };
+    const taskName = `TaskHub: ${actionKey}`;
+    const vsCodeTask = new vscode.Task(taskDefinition, vscode.TaskScope.Workspace, taskName, 'taskhub', shellExecution);
+    vsCodeTask.presentationOptions = createGroupedTaskPresentationOptions(actionKey, revealTerminal);
+
+    return {
+        vsCodeTask,
+        displayCommand,
+        actionKey,
+        cwd: options.cwd || ''
+    };
+}
+
 async function executeStreamedTask(task: any): Promise<void> {
     return new Promise(async (resolve, reject) => {
-        const { command, args, cwd, id, actionId, revealTerminal, env: taskEnv } = task;
-        const actionKey = actionId || id;
-
-        const options: vscode.ShellExecutionOptions = {
-            cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
-        };
-        const { envOverrides, useUtf8Console } = resolveExecutionSettings(taskEnv);
-        if (Object.keys(envOverrides).length > 0) {
-            options.env = envOverrides;
-        }
-        const taskArgs = args || [];
-        let shellExecution: vscode.ShellExecution;
-        let displayCommand: string;
-
-        if (process.platform === 'win32') {
-            const invocation = buildPowerShellInvocation(command, taskArgs, useUtf8Console);
-            const encoded = encodePowerShellScript(invocation.script);
-            displayCommand = invocation.display;
-            shellExecution = new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options);
-        } else {
-            const commandLine = buildPosixCommandLine(command, taskArgs);
-            displayCommand = commandLine;
-            shellExecution = new vscode.ShellExecution(commandLine, options);
-        }
-        const taskDefinition: vscode.TaskDefinition = { type: 'shell', actionId: actionKey };
-        const taskName = `TaskHub: ${actionKey}`;
-        const vsCodeTask = new vscode.Task(
-            taskDefinition,
-            vscode.TaskScope.Workspace,
-            taskName,
-            'taskhub',
-            shellExecution
-        );
-
-        let revealKind: vscode.TaskRevealKind;
-        switch (revealTerminal) {
-            case 'silent':
-                revealKind = vscode.TaskRevealKind.Silent;
-                break;
-            case 'never':
-                revealKind = vscode.TaskRevealKind.Never;
-                break;
-            case 'always':
-            default:
-                revealKind = vscode.TaskRevealKind.Always;
-                break;
+        let setup: TaskExecutionSetup;
+        try {
+            setup = prepareTaskExecution(task);
+        } catch (error) {
+            reject(error);
+            return;
         }
 
-        const presentationOptions: GroupableTaskPresentationOptions = {
-            reveal: revealKind,
-            panel: vscode.TaskPanelKind.Shared,
-            showReuseMessage: true,
-            clear: false,
-        };
-        // Group tasks by action so each action reuses its Task panel.
-        presentationOptions.group = actionKey;
-        vsCodeTask.presentationOptions = presentationOptions;
-
+        const { vsCodeTask, displayCommand, actionKey, cwd } = setup;
         let taskExecution: vscode.TaskExecution | undefined;
         const disposable = vscode.tasks.onDidEndTaskProcess(e => {
             if (taskExecution && e.execution === taskExecution) {
@@ -1512,7 +1641,7 @@ async function executeStreamedTask(task: any): Promise<void> {
                 if (e.exitCode === 0) {
                     resolve();
                 } else {
-                    reject(new Error(`Task ${id} failed with exit code ${e.exitCode}.`));
+                    reject(new Error(`Task ${task.id} failed with exit code ${e.exitCode}.`));
                 }
             }
         });
@@ -1520,11 +1649,11 @@ async function executeStreamedTask(task: any): Promise<void> {
         try {
             const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
             if (showVerboseLogs) {
-                outputChannel.appendLine(`[INFO] Executing task via vscode.tasks: ${displayCommand} in ${options.cwd}`);
+                outputChannel.appendLine(`[INFO] Executing task via vscode.tasks: ${displayCommand} in ${cwd}`);
             }
             taskExecution = await vscode.tasks.executeTask(vsCodeTask);
-            if (actionId && taskExecution) {
-                activeTasks.set(actionId, taskExecution);
+            if (task.actionId && taskExecution) {
+                activeTasks.set(task.actionId, taskExecution);
             }
         } catch (error) {
             disposable.dispose();
