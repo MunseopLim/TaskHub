@@ -15,7 +15,33 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onView:mainView.main",
+    "onView:mainView.link",
+    "onView:mainView.favorite",
+    "onCommand:taskhub.openLink",
+    "onCommand:taskhub.copyLink",
+    "onCommand:taskhub.goToLink",
+    "onCommand:taskhub.searchLinks",
+    "onCommand:taskhub.searchFavorites",
+    "onCommand:taskhub.createAction",
+    "onCommand:taskhub.executeAction",
+    "onCommand:taskhub.stopAction",
+    "onCommand:taskhub.showVersion",
+    "onCommand:taskhub.showFilePicker",
+    "onCommand:taskhub.openFavoriteFile",
+    "onCommand:taskhub.editFavorites",
+    "onCommand:taskhub.editLinks",
+    "onCommand:taskhub.editActions",
+    "onCommand:taskhub.addFavoriteFile",
+    "onCommand:taskhub.deleteFavorite",
+    "onCommand:taskhub.deleteLink",
+    "onCommand:taskhub.addOpenFileToFavorites",
+    "onCommand:taskhub.showExampleJson",
+    "onCommand:taskhub.showExampleJsonQuickPick",
+    "onCommand:taskhub.terminateAllActions",
+    "onCommand:taskhub.openSettings"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "jsonValidation": [
