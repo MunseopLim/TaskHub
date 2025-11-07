@@ -120,6 +120,7 @@ interface WizardActionSources {
     workspaceActions: ActionItem[];
     bundledActions: ActionItem[];
     workspaceActionsPath: string;
+    workspaceFolder: vscode.WorkspaceFolder;
 }
 
 interface TaskExecutionSetup {
@@ -158,18 +159,30 @@ function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
     const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
     const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
 
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-    const workspaceJsonPath = path.join(workspaceRoot, '.vscode', 'actions.json');
-    const workspaceLabel = workspaceRoot ? '.vscode/actions.json' : 'workspace actions.json';
-    const workspaceActions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    const workspaceSources = workspaceFolders.map(folder => {
+        const workspaceJsonPath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
+        const workspaceLabel = `${folder.name}:.vscode/actions.json`;
+        const actions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
+        return { sourceLabel: workspaceLabel, actions, workspaceFolderPath: folder.uri.fsPath };
+    });
 
     const sources = [
-        { sourceLabel: extensionLabel, actions: extensionActions },
-        { sourceLabel: workspaceLabel, actions: workspaceActions }
+        { sourceLabel: extensionLabel, actions: extensionActions, workspaceFolderPath: undefined as string | undefined },
+        ...workspaceSources
     ].filter(source => source.actions.length > 0);
 
     if (sources.length > 1) {
-        validateUniqueActionIdsAcrossSources(sources);
+        validateUniqueActionIdsAcrossSources(sources.map(({ sourceLabel, actions }) => ({ sourceLabel, actions })));
+    }
+
+    actionWorkspaceFolderMap.clear();
+    for (const source of sources) {
+        traverseActionItems(source.actions, (item) => {
+            if (item.id) {
+                actionWorkspaceFolderMap.set(item.id, source.workspaceFolderPath);
+            }
+        });
     }
 
     return sources.flatMap(source => source.actions);
@@ -640,11 +653,12 @@ async function collectBaseActionInfo(template: ActionTemplateDefinition, existin
     };
 }
 
-function loadWizardActionSources(context: vscode.ExtensionContext, workspaceFolder: string): WizardActionSources {
-    const workspaceActionsPath = path.join(workspaceFolder, '.vscode', 'actions.json');
+function loadWizardActionSources(context: vscode.ExtensionContext, workspaceFolder: vscode.WorkspaceFolder): WizardActionSources {
+    const workspaceActionsPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'actions.json');
     let workspaceActions: ActionItem[] = [];
+    const workspaceLabel = `${workspaceFolder.name}:.vscode/actions.json`;
     try {
-        workspaceActions = loadAndValidateActions(workspaceActionsPath, { sourceLabel: '.vscode/actions.json' });
+        workspaceActions = loadAndValidateActions(workspaceActionsPath, { sourceLabel: workspaceLabel });
     } catch (error: any) {
         throw new Error(`Could not load ${workspaceActionsPath}: ${error.message}`);
     }
@@ -660,13 +674,13 @@ function loadWizardActionSources(context: vscode.ExtensionContext, workspaceFold
     try {
         validateUniqueActionIdsAcrossSources([
             { sourceLabel: 'extension media/actions.json', actions: bundledActions },
-            { sourceLabel: '.vscode/actions.json', actions: workspaceActions }
+            { sourceLabel: workspaceLabel, actions: workspaceActions }
         ]);
     } catch (error: any) {
         throw error;
     }
 
-    return { workspaceActions, bundledActions, workspaceActionsPath };
+    return { workspaceActions, bundledActions, workspaceActionsPath, workspaceFolder };
 }
 
 async function promptForActionTemplate(): Promise<ActionTemplateDefinition | undefined> {
@@ -738,15 +752,14 @@ async function handlePostCreationChoice(baseInfo: BaseActionInfo, workspaceActio
 }
 
 async function runActionCreationWizard(context: vscode.ExtensionContext, mainViewProvider: MainViewProvider): Promise<void> {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!workspaceFolder) {
-        vscode.window.showErrorMessage('Open a workspace folder to create actions.');
+    const targetFolder = await pickWorkspaceFolderForCommand('Select the workspace folder whose actions.json should be updated');
+    if (!targetFolder) {
         return;
     }
 
     let sources: WizardActionSources;
     try {
-        sources = loadWizardActionSources(context, workspaceFolder);
+        sources = loadWizardActionSources(context, targetFolder);
     } catch (error: any) {
         vscode.window.showErrorMessage(error.message);
         return;
@@ -770,7 +783,7 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
         };
 
         insertActionIntoDestination(sources.workspaceActions, destination, newAction);
-        persistWorkspaceActions(workspaceFolder, sources.workspaceActionsPath, sources.workspaceActions);
+        persistWorkspaceActions(targetFolder.uri.fsPath, sources.workspaceActionsPath, sources.workspaceActions);
         mainViewProvider.refresh();
         await handlePostCreationChoice(baseInfo, sources.workspaceActionsPath);
     } catch (error) {
@@ -791,34 +804,19 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vsco
     } else { 
         let actionsJson: ActionItem[] = [];
         try {
-            const extensionLabel = 'extension media/actions.json';
-            const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'actions.json');
-            const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
-
-            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-            const workspaceJsonPath = path.join(workspaceRoot, '.vscode', 'actions.json');
-            const workspaceLabel = workspaceRoot ? '.vscode/actions.json' : 'workspace actions.json';
-            const workspaceActions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
-
-            const sources = [
-                { sourceLabel: extensionLabel, actions: extensionActions },
-                { sourceLabel: workspaceLabel, actions: workspaceActions }
-            ].filter(source => source.actions.length > 0);
-
-            if (sources.length > 1) {
-                validateUniqueActionIdsAcrossSources(sources);
-            }
-
-            actionsJson = sources.flatMap(source => source.actions);
-        } catch (error: any) { vscode.window.showErrorMessage(error.message); }      const packageJsonPath = path.join(this.context.extensionPath, 'package.json');
-      const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-      const versionItem = new vscode.TreeItem(packageJson.version);
-      versionItem.iconPath = new vscode.ThemeIcon('info');
-      versionItem.tooltip = `Extension Version: ${packageJson.version}`;
-      versionItem.contextValue = 'versionItem';
-      versionItem.command = { command: 'taskhub.showExampleJsonQuickPick', title: 'Show Example JSONs' };
-      const items: (Action | Folder | vscode.TreeItem)[] = [versionItem, ...this.createActionItems(actionsJson)];
-      return Promise.resolve(items);
+            actionsJson = loadAllActions(this.context);
+        } catch (error: any) {
+            vscode.window.showErrorMessage(error.message);
+        }
+        const packageJsonPath = path.join(this.context.extensionPath, 'package.json');
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+        const versionItem = new vscode.TreeItem(packageJson.version);
+        versionItem.iconPath = new vscode.ThemeIcon('info');
+        versionItem.tooltip = `Extension Version: ${packageJson.version}`;
+        versionItem.contextValue = 'versionItem';
+        versionItem.command = { command: 'taskhub.showExampleJsonQuickPick', title: 'Show Example JSONs' };
+        const items: (Action | Folder | vscode.TreeItem)[] = [versionItem, ...this.createActionItems(actionsJson)];
+        return Promise.resolve(items);
     }
   }
   private createActionItems(items: ActionItem[]): (Action | Folder | vscode.TreeItem)[] {
@@ -837,6 +835,7 @@ const activeTasks = new Map<string, vscode.TaskExecution>();
 const manuallyTerminatedActions = new Set<string>();
 const outputChannel = vscode.window.createOutputChannel('TaskHub');
 const actionTerminals = new Map<string, vscode.Terminal>();
+const actionWorkspaceFolderMap = new Map<string, string | undefined>();
 class Folder extends vscode.TreeItem {
   public children: any[];
   constructor(public readonly label: string, children: any[], private readonly context: vscode.ExtensionContext, public readonly id?: string) {
@@ -876,6 +875,7 @@ interface LinkEntry {
     link: string;
     group?: string;
     tags?: string[];
+    sourceFile?: string;
 }
 
 interface FavoriteEntry {
@@ -883,6 +883,8 @@ interface FavoriteEntry {
     path: string;
     group?: string;
     tags?: string[];
+    sourceFile?: string;
+    workspaceFolder?: string;
 }
 
 export function normalizeTags(rawTags: unknown): string[] | undefined {
@@ -932,7 +934,7 @@ export function serializeLinks(entries: LinkEntry[]): any[] {
     });
 }
 
-function loadFavoritesFromDisk(filePath: string, reportErrors: boolean): FavoriteEntry[] {
+function loadFavoritesFromDisk(filePath: string, reportErrors: boolean, workspaceFolderPath?: string): FavoriteEntry[] {
     if (!fs.existsSync(filePath)) {
         return [];
     }
@@ -956,6 +958,10 @@ function loadFavoritesFromDisk(filePath: string, reportErrors: boolean): Favorit
                 const tags = normalizeTags(item.tags);
                 if (tags) {
                     entry.tags = tags;
+                }
+                entry.sourceFile = filePath;
+                if (workspaceFolderPath) {
+                    entry.workspaceFolder = workspaceFolderPath;
                 }
                 acc.push(entry);
             }
@@ -987,7 +993,8 @@ function loadLinksFromDisk(filePath: string, reportErrors: boolean): LinkEntry[]
                     title: item.title,
                     link: item.link,
                     group: typeof item.group === 'string' && item.group.trim().length > 0 ? item.group.trim() : undefined,
-                    tags: normalizeTags(item.tags)
+                    tags: normalizeTags(item.tags),
+                    sourceFile: filePath
                 };
                 acc.push(entry);
             }
@@ -1063,9 +1070,11 @@ class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
         const results: LinkEntry[] = [];
         const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
         results.push(...loadLinksFromDisk(mediaJsonPath, false));
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-        const workspaceLinksPath = path.join(workspacePath, '.vscode', 'links.json');
-        results.push(...loadLinksFromDisk(workspaceLinksPath, true));
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        for (const folder of folders) {
+            const workspaceLinksPath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
+            results.push(...loadLinksFromDisk(workspaceLinksPath, true));
+        }
         return results;
     }
 
@@ -1151,7 +1160,7 @@ class Favorite extends vscode.TreeItem {
         super(entry.title, vscode.TreeItemCollapsibleState.None);
         this.tooltip = `${entry.title} - ${entry.path}`;
         this.description = entry.tags && entry.tags.length > 0 ? entry.tags.join(', ') : undefined;
-        this.command = { command: 'taskhub.openFavoriteFile', title: 'Open Favorite File', arguments: [entry.path] };
+        this.command = { command: 'taskhub.openFavoriteFile', title: 'Open Favorite File', arguments: [entry] };
         this.contextValue = 'favoriteItem';
         this.iconPath = new vscode.ThemeIcon('star');
     }
@@ -1162,6 +1171,10 @@ class Favorite extends vscode.TreeItem {
 
     getEntry(): FavoriteEntry {
         return this.entry;
+    }
+
+    getSourceFile(): string | undefined {
+        return this.entry.sourceFile;
     }
 }
 
@@ -1188,9 +1201,13 @@ class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTreeNode> 
     }
 
     private loadFavorites(): FavoriteEntry[] {
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-        const favoritesPath = path.join(workspacePath, '.vscode', 'favorites.json');
-        return loadFavoritesFromDisk(favoritesPath, true);
+        const entries: FavoriteEntry[] = [];
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        for (const folder of folders) {
+            const favoritesPath = path.join(folder.uri.fsPath, '.vscode', 'favorites.json');
+            entries.push(...loadFavoritesFromDisk(favoritesPath, true, folder.uri.fsPath));
+        }
+        return entries;
     }
 
     private ensureCache(): void {
@@ -1326,7 +1343,7 @@ async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider):
     });
 
     if (pick) {
-        vscode.commands.executeCommand('taskhub.openFavoriteFile', pick.entry.path);
+        vscode.commands.executeCommand('taskhub.openFavoriteFile', pick.entry);
     }
 }
 
@@ -1367,10 +1384,10 @@ function logActionStart(showVerboseLogs: boolean, title: string, description?: s
     }
 }
 
-async function runActionTasks(action: PipelineAction, context: vscode.ExtensionContext, id: string): Promise<void> {
+async function runActionTasks(action: PipelineAction, context: vscode.ExtensionContext, id: string, workspaceFolderPath?: string): Promise<void> {
     const stepResults: Record<string, unknown> = {};
     for (const task of action.tasks) {
-        const result = await executeSingleTask(task, stepResults, context, id);
+        const result = await executeSingleTask(task, stepResults, context, id, workspaceFolderPath);
         stepResults[task.id] = result;
     }
 }
@@ -1415,6 +1432,7 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
     }
 
     const { action, id } = resolved;
+    const actionWorkspaceFolder = id ? actionWorkspaceFolderMap.get(id) : undefined;
     const showTaskStatus = vscode.workspace.getConfiguration('taskhub').get('showTaskStatus', true);
 
     if (!markActionAsRunning(actionItem, id, showTaskStatus, mainViewProvider)) {
@@ -1425,7 +1443,7 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
     logActionStart(showVerboseLogs, actionItem.title, action.description);
 
     try {
-        await runActionTasks(action, context, id);
+        await runActionTasks(action, context, id, actionWorkspaceFolder);
         handleActionSuccess(id, action, showTaskStatus);
     } catch (error: any) {
         if (!manuallyTerminatedActions.has(id)) {
@@ -1437,8 +1455,9 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
     }
 }
 
-async function executeSingleTask(task: import('./schema').Task, allResults: any, context: vscode.ExtensionContext, actionId: string): Promise<any> {
-    const interpolationContext = { ...allResults, workspaceFolder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '', extensionPath: context.extensionPath };
+async function executeSingleTask(task: import('./schema').Task, allResults: any, context: vscode.ExtensionContext, actionId: string, workspaceFolderPath?: string): Promise<any> {
+    const defaultWorkspace = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const interpolationContext = { ...allResults, workspaceFolder: defaultWorkspace, extensionPath: context.extensionPath };
     let result: any;
 
     switch (task.type) {
@@ -1468,10 +1487,10 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
                 }
                 interpolatedUnzipTask.env = interpolatedEnv;
             }
-            result = await handleUnzip(interpolatedUnzipTask, allResults);
+            result = await handleUnzip(interpolatedUnzipTask, allResults, defaultWorkspace);
             break;
         case 'zip':
-            result = await handleZip(task, allResults);
+            result = await handleZip(task, allResults, defaultWorkspace);
             break;
         case 'stringManipulation':
             const interpolatedInput = interpolatePipelineVariables(task.input || '', interpolationContext);
@@ -1508,15 +1527,15 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
             const handlerTask = { ...task, command, args, cwd, env, actionId };
 
             if (task.passTheResultToNextTask) {
-                result = await handleCommand(handlerTask, context);
+                result = await handleCommand(handlerTask, context, defaultWorkspace);
             } else {
                 if (task.isOneShot) {
-                    executeStreamedTask(handlerTask).catch(error => {
+                    executeStreamedTask(handlerTask, defaultWorkspace).catch(error => {
                         console.error(`One-shot task ${task.id} failed:`, error);
                         vscode.window.showErrorMessage(`One-shot task '${task.id}' failed to start: ${error.message}`);
                     });
                 } else {
-                    await executeStreamedTask(handlerTask);
+                    await executeStreamedTask(handlerTask, defaultWorkspace);
                 }
                 result = {};
             }
@@ -1593,7 +1612,7 @@ function createShellExecution(command: string, args: string[], options: vscode.S
     };
 }
 
-function prepareTaskExecution(task: any): TaskExecutionSetup {
+function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExecutionSetup {
     const { command, args, cwd, id, actionId, revealTerminal, env: taskEnv } = task;
     if (typeof command !== 'string') {
         throw new Error(`Task ${id} requires a string 'command' property.`);
@@ -1601,7 +1620,7 @@ function prepareTaskExecution(task: any): TaskExecutionSetup {
 
     const actionKey = actionId || id;
     const options: vscode.ShellExecutionOptions = {
-        cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
+        cwd: cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
     };
     const { envOverrides, useUtf8Console } = resolveExecutionSettings(taskEnv);
     if (Object.keys(envOverrides).length > 0) {
@@ -1623,11 +1642,11 @@ function prepareTaskExecution(task: any): TaskExecutionSetup {
     };
 }
 
-async function executeStreamedTask(task: any): Promise<void> {
+async function executeStreamedTask(task: any, workspaceFolderPath?: string): Promise<void> {
     return new Promise(async (resolve, reject) => {
         let setup: TaskExecutionSetup;
         try {
-            setup = prepareTaskExecution(task);
+            setup = prepareTaskExecution(task, workspaceFolderPath);
         } catch (error) {
             reject(error);
             return;
@@ -1662,10 +1681,10 @@ async function executeStreamedTask(task: any): Promise<void> {
     });
 }
 
-async function handleCommand(task: any, context: vscode.ExtensionContext): Promise<{ output: string }> {
+async function handleCommand(task: any, context: vscode.ExtensionContext, workspaceFolderPath?: string): Promise<{ output: string }> {
     const { args, cwd } = task;
     const command = getCommandString(task.command);
-    const commandOutput = await executeShellCommand(command, args || [], cwd, task.env);
+    const commandOutput = await executeShellCommand(command, args || [], cwd, task.env, workspaceFolderPath);
     return { output: commandOutput.trim() };
 }
 
@@ -1686,7 +1705,7 @@ async function handleFolderDialog(task: any): Promise<{ path: string, dir: strin
     if (folderUri && folderUri[0]) { return { path: folderUri[0].fsPath, dir: path.dirname(folderUri[0].fsPath), name: path.basename(folderUri[0].fsPath) }; }    else { throw new Error('Folder selection was canceled.'); }
 }
 
-async function handleUnzip(task: any, allResults: any): Promise<{ outputDir: string }> {
+async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: string): Promise<{ outputDir: string }> {
     const inputs = task.inputs || {};
 
     const resolveValue = (value: any, preferredKeys: string[]): string | undefined => {
@@ -1730,15 +1749,15 @@ async function handleUnzip(task: any, allResults: any): Promise<{ outputDir: str
     const toolCommand = getToolCommand(task.tool);
     const args = ['x', archivePath, `-o${outputDir}`, '-aoa'];
     try {
-        await executeShellCommand(toolCommand, args, undefined, task.env);
+        await executeShellCommand(toolCommand, args, undefined, task.env, workspaceFolderPath);
         return { outputDir: outputDir };
     } catch (error: any) {
         throw new Error(`Failed to unzip file: ${error.message}`);
     }
 }
 
-async function handleZip(task: import('./schema').Task, allResults: any): Promise<{ archivePath: string }> {
-    const interpolationContext = { ...allResults, workspaceFolder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '' };
+async function handleZip(task: import('./schema').Task, allResults: any, workspaceFolderPath?: string): Promise<{ archivePath: string }> {
+    const interpolationContext = { ...allResults, workspaceFolder: workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '' };
     
     const toolCommand = getToolCommand(task.tool);
     const archive = task.archive ? interpolatePipelineVariables(task.archive, interpolationContext) : undefined;
@@ -1770,7 +1789,8 @@ async function handleZip(task: import('./schema').Task, allResults: any): Promis
             toolCommand,
             args,
             task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
-            envOverrides
+            envOverrides,
+            workspaceFolderPath
         );
         return { archivePath: archive };
     } catch (error: any) {
@@ -1819,7 +1839,7 @@ export async function handleStringManipulation(task: any): Promise<{ output: str
     return { output };
 }
 
-function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>): Promise<string> {
+function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string): Promise<string> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
 
@@ -1830,7 +1850,7 @@ function executeShellCommand(command: string, args: string[], cwd?: string, task
         for (const [key, value] of Object.entries(envOverrides)) {
             childEnv[key] = value;
         }
-        const workingDirectory = cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const workingDirectory = cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
         let childProcess: ReturnType<typeof spawn>;
         let displayCommand: string;
 
@@ -1890,6 +1910,50 @@ function executeShellCommand(command: string, args: string[], cwd?: string, task
 
 }
 
+function registerWorkspaceFileWatchers(relativePath: string, callback: () => void): vscode.Disposable {
+    const watchers: vscode.FileSystemWatcher[] = [];
+
+    const resetWatchers = () => {
+        while (watchers.length > 0) {
+            watchers.pop()?.dispose();
+        }
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        for (const folder of folders) {
+            const pattern = new vscode.RelativePattern(folder, relativePath);
+            const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+            watcher.onDidChange(callback);
+            watcher.onDidCreate(callback);
+            watcher.onDidDelete(callback);
+            watchers.push(watcher);
+        }
+    };
+
+    resetWatchers();
+    const workspaceSubscription = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        resetWatchers();
+        callback();
+    });
+
+    return new vscode.Disposable(() => {
+        workspaceSubscription.dispose();
+        while (watchers.length > 0) {
+            watchers.pop()?.dispose();
+        }
+    });
+}
+
+async function pickWorkspaceFolderForCommand(placeHolder: string): Promise<vscode.WorkspaceFolder | undefined> {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) {
+        vscode.window.showErrorMessage('Open a workspace folder to use this feature.');
+        return undefined;
+    }
+    if (folders.length === 1) {
+        return folders[0];
+    }
+    return vscode.window.showWorkspaceFolderPick({ placeHolder });
+}
+
 export function activate(context: vscode.ExtensionContext) {
     const terminalDisposable = vscode.window.onDidCloseTerminal(terminal => {
         for (const [key, actionTerminal] of actionTerminals.entries()) {
@@ -1914,7 +1978,6 @@ export function activate(context: vscode.ExtensionContext) {
     linkViewProvider.refresh();
     favoriteViewProvider.refresh();
     context.subscriptions.push(linkViewProvider.view, favoriteViewProvider.view);
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const mediaActionsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/actions.json'));
     mediaActionsWatcher.onDidChange(() => mainViewProvider.refresh());
     mediaActionsWatcher.onDidCreate(() => mainViewProvider.refresh());
@@ -1925,27 +1988,27 @@ export function activate(context: vscode.ExtensionContext) {
     mediaLinksWatcher.onDidCreate(() => linkViewProvider.refresh());
     mediaLinksWatcher.onDidDelete(() => linkViewProvider.refresh());
     context.subscriptions.push(mediaLinksWatcher);
-    if (workspaceRoot) {
-        const vscodeActionsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceRoot, '.vscode/actions.json'));
-        vscodeActionsWatcher.onDidChange(() => mainViewProvider.refresh());
-        vscodeActionsWatcher.onDidCreate(() => mainViewProvider.refresh());
-        vscodeActionsWatcher.onDidDelete(() => mainViewProvider.refresh());
-        context.subscriptions.push(vscodeActionsWatcher);
-        const vscodeLinksWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceRoot, '.vscode/links.json'));
-        vscodeLinksWatcher.onDidChange(() => linkViewProvider.refresh());
-        vscodeLinksWatcher.onDidCreate(() => linkViewProvider.refresh());
-        vscodeLinksWatcher.onDidDelete(() => linkViewProvider.refresh());
-        context.subscriptions.push(vscodeLinksWatcher);
-        const vscodeFavoritesWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceRoot, '.vscode/favorites.json'));
-        vscodeFavoritesWatcher.onDidChange(() => favoriteViewProvider.refresh());
-        vscodeFavoritesWatcher.onDidCreate(() => favoriteViewProvider.refresh());
-        vscodeFavoritesWatcher.onDidDelete(() => favoriteViewProvider.refresh());
-        context.subscriptions.push(vscodeFavoritesWatcher);
-    }
+    const workspaceActionsWatchers = registerWorkspaceFileWatchers('.vscode/actions.json', () => mainViewProvider.refresh());
+    const workspaceLinksWatchers = registerWorkspaceFileWatchers('.vscode/links.json', () => linkViewProvider.refresh());
+    const workspaceFavoritesWatchers = registerWorkspaceFileWatchers('.vscode/favorites.json', () => favoriteViewProvider.refresh());
+    context.subscriptions.push(workspaceActionsWatchers, workspaceLinksWatchers, workspaceFavoritesWatchers);
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.createAction', async () => {
         await runActionCreationWizard(context, mainViewProvider);
     }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openFavoriteFile', async (filePath: string) => { try { const workspaceFolder = vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : ''; const resolvedPath = filePath.replace('${workspaceFolder}', workspaceFolder); const uri = vscode.Uri.file(resolvedPath); await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri)); } catch (error: any) { vscode.window.showErrorMessage(`Could not open file: ${error.message}`); } }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openFavoriteFile', async (favorite: FavoriteEntry | string) => {
+        try {
+            const target: FavoriteEntry = typeof favorite === 'string' ? { title: path.basename(favorite), path: favorite } : favorite;
+            const workspaceFolderPath = target.workspaceFolder
+                || vscode.workspace.getWorkspaceFolder(vscode.Uri.file(target.path))?.uri.fsPath
+                || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+                || '';
+            const resolvedPath = target.path.replace('${workspaceFolder}', workspaceFolderPath || '');
+            const uri = vscode.Uri.file(resolvedPath);
+            await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Could not open file: ${error.message}`);
+        }
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openLink', (url: string) => { vscode.env.openExternal(vscode.Uri.parse(url)); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', (item: Link) => { vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage('Link copied to clipboard.'); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.goToLink', (item: Link) => { vscode.env.openExternal(vscode.Uri.parse(item.getLink())); }));
@@ -2006,9 +2069,36 @@ export function activate(context: vscode.ExtensionContext) {
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showVersion', () => { const packageJson = JSON.parse(fs.readFileSync(path.join(context.extensionPath, 'package.json'), 'utf-8')); vscode.window.showInformationMessage(`TaskHub Version: ${packageJson.version}`); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showFilePicker', async (action: any) => { /* Obsolete */ }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.editFavorites', async () => { const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const filePath = path.join(wsPath, '.vscode', 'favorites.json'); if (!fs.existsSync(path.dirname(filePath))) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, JSON.stringify([], null, 2)); } await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath))); }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.editLinks', async () => { const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const filePath = path.join(wsPath, '.vscode', 'links.json'); if (!fs.existsSync(path.dirname(filePath))) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, JSON.stringify([], null, 2)); } await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath))); }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.editActions', async () => { const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''; const filePath = path.join(wsPath, '.vscode', 'actions.json'); if (!fs.existsSync(path.dirname(filePath))) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, JSON.stringify([], null, 2)); } await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath))); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.editFavorites', async () => {
+        const folder = await pickWorkspaceFolderForCommand('Select a workspace folder to edit favorites for');
+        if (!folder) {
+            return;
+        }
+        const filePath = path.join(folder.uri.fsPath, '.vscode', 'favorites.json');
+        if (!fs.existsSync(path.dirname(filePath))) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); }
+        if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, JSON.stringify([], null, 2)); }
+        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath)));
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.editLinks', async () => {
+        const folder = await pickWorkspaceFolderForCommand('Select a workspace folder to edit links for');
+        if (!folder) {
+            return;
+        }
+        const filePath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
+        if (!fs.existsSync(path.dirname(filePath))) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); }
+        if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, JSON.stringify([], null, 2)); }
+        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath)));
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.editActions', async () => {
+        const folder = await pickWorkspaceFolderForCommand('Select a workspace folder to edit actions for');
+        if (!folder) {
+            return;
+        }
+        const filePath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
+        if (!fs.existsSync(path.dirname(filePath))) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); }
+        if (!fs.existsSync(filePath)) { fs.writeFileSync(filePath, JSON.stringify([], null, 2)); }
+        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath)));
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.searchLinks', async () => {
         await promptLinkSearch(linkViewProvider);
     }));
@@ -2031,10 +2121,6 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-        const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json');
-        let favorites = loadFavoritesFromDisk(favoritesPath, true);
-
         const groupInput = await vscode.window.showInputBox({
             prompt: 'Group label (optional)',
             placeHolder: 'e.g. Backend Services',
@@ -2055,7 +2141,19 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const defaultTags = parseTagInput(tagsInput);
 
+        const favoritesByPath = new Map<string, FavoriteEntry[]>();
+
         for (const fileUri of fileUris) {
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
+            if (!workspaceFolder) {
+                vscode.window.showWarningMessage(`Skipping ${fileUri.fsPath} because it is not part of the current workspace.`);
+                continue;
+            }
+            const favoritesPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'favorites.json');
+            if (!favoritesByPath.has(favoritesPath)) {
+                favoritesByPath.set(favoritesPath, loadFavoritesFromDisk(favoritesPath, true, workspaceFolder.uri.fsPath));
+            }
+            const favorites = favoritesByPath.get(favoritesPath)!;
             const title = await vscode.window.showInputBox({
                 prompt: `Enter a title for ${path.basename(fileUri.fsPath)}`,
                 value: path.basename(fileUri.fsPath),
@@ -2066,7 +2164,9 @@ export function activate(context: vscode.ExtensionContext) {
             }
             const favorite: FavoriteEntry = {
                 title,
-                path: fileUri.fsPath
+                path: fileUri.fsPath,
+                sourceFile: favoritesPath,
+                workspaceFolder: workspaceFolder.uri.fsPath
             };
             if (group) {
                 favorite.group = group;
@@ -2077,32 +2177,38 @@ export function activate(context: vscode.ExtensionContext) {
             favorites.push(favorite);
         }
 
-        const serialized = serializeFavorites(favorites);
-
-        if (!fs.existsSync(path.dirname(favoritesPath))) {
-            fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
+        for (const [favoritesPath, favorites] of favoritesByPath.entries()) {
+            const serialized = serializeFavorites(favorites);
+            if (!fs.existsSync(path.dirname(favoritesPath))) {
+                fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
+            }
+            fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
         }
 
-        fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
-        favoriteViewProvider.refresh();
+        if (favoritesByPath.size > 0) {
+            favoriteViewProvider.refresh();
+        }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteFavorite', async (item: Favorite) => {
         const confirm = await vscode.window.showWarningMessage(`Are you sure you want to delete ${item.label}?`, { modal: true }, 'Yes');
         if (confirm !== 'Yes') {
             return;
         }
-        const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-        const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json');
-        if (!fs.existsSync(favoritesPath)) {
+        const sourceFile = item.getSourceFile();
+        if (!sourceFile) {
+            vscode.window.showInformationMessage('This favorite is read-only.');
             return;
         }
-        const favorites = loadFavoritesFromDisk(favoritesPath, true);
+        if (!fs.existsSync(sourceFile)) {
+            return;
+        }
+        const favorites = loadFavoritesFromDisk(sourceFile, true, item.getEntry().workspaceFolder);
         const filtered = favorites.filter(f => f.path !== item.getFilePath());
         if (filtered.length === favorites.length) {
             return;
         }
         const serialized = serializeFavorites(filtered);
-        fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
+        fs.writeFileSync(sourceFile, JSON.stringify(serialized, null, 2) + '\n');
         favoriteViewProvider.refresh();
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteLink', async (item: Link) => {
@@ -2110,18 +2216,26 @@ export function activate(context: vscode.ExtensionContext) {
         if (confirm !== 'Yes') {
             return;
         }
-        const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-        const vscodeLinksPath = path.join(wsPath, '.vscode', 'links.json');
-        if (!fs.existsSync(vscodeLinksPath)) {
+        const sourceFile = item.getEntry().sourceFile;
+        if (!sourceFile) {
+            vscode.window.showInformationMessage('This link is provided by the extension and cannot be deleted here.');
             return;
         }
-        const links = loadLinksFromDisk(vscodeLinksPath, true);
+        const belongsToWorkspace = (vscode.workspace.workspaceFolders ?? []).some(folder => sourceFile.startsWith(folder.uri.fsPath + path.sep));
+        if (!belongsToWorkspace) {
+            vscode.window.showInformationMessage('This link is provided by the extension and cannot be deleted here.');
+            return;
+        }
+        if (!fs.existsSync(sourceFile)) {
+            return;
+        }
+        const links = loadLinksFromDisk(sourceFile, true);
         const filtered = links.filter(link => link.link !== item.getLink());
         if (filtered.length === links.length) {
             return;
         }
         const serialized = serializeLinks(filtered);
-        fs.writeFileSync(vscodeLinksPath, JSON.stringify(serialized, null, 2) + '\n');
+        fs.writeFileSync(sourceFile, JSON.stringify(serialized, null, 2) + '\n');
         linkViewProvider.refresh();
     }));
       const showExampleJsonCommand = vscode.commands.registerCommand('taskhub.showExampleJson', async (jsonType: string) => {
@@ -2199,12 +2313,18 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const tags = parseTagInput(tagsInput);
 
-        const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-        const favoritesPath = path.join(wsPath, '.vscode', 'favorites.json');
-        const favorites = loadFavoritesFromDisk(favoritesPath, true);
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+        if (!workspaceFolder) {
+            vscode.window.showErrorMessage('The active file does not belong to an open workspace folder.');
+            return;
+        }
+        const favoritesPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'favorites.json');
+        const favorites = loadFavoritesFromDisk(favoritesPath, true, workspaceFolder.uri.fsPath);
         const favorite: FavoriteEntry = {
             title,
-            path: filePath
+            path: filePath,
+            sourceFile: favoritesPath,
+            workspaceFolder: workspaceFolder.uri.fsPath
         };
         if (group) {
             favorite.group = group;
