@@ -310,6 +310,21 @@ suite('Extension Test Suite', () => {
 				{ title: 'File2', path: '/path/to/file2', group: 'Group1' }
 			]);
 		});
+
+		test('should omit metadata fields', () => {
+			const entries = [
+				{
+					title: 'File1',
+					path: '/path/to/file1',
+					sourceFile: '/workspace/.vscode/favorites.json',
+					workspaceFolder: '/workspace'
+				}
+			];
+			const result = serializeFavorites(entries as any);
+			assert.deepStrictEqual(result, [
+				{ title: 'File1', path: '/path/to/file1' }
+			]);
+		});
 	});
 
 	suite('serializeLinks', () => {
@@ -328,6 +343,22 @@ suite('Extension Test Suite', () => {
 				{ title: 'Link1', link: 'https://example.com', group: 'Group1', tags: ['tag1'] }
 			];
 			const result = serializeLinks(entries);
+			assert.deepStrictEqual(result, [
+				{ title: 'Link1', link: 'https://example.com', group: 'Group1', tags: ['tag1'] }
+			]);
+		});
+
+		test('should omit metadata fields', () => {
+			const entries = [
+				{
+					title: 'Link1',
+					link: 'https://example.com',
+					group: 'Group1',
+					tags: ['tag1'],
+					sourceFile: '/workspace/.vscode/links.json'
+				}
+			];
+			const result = serializeLinks(entries as any);
 			assert.deepStrictEqual(result, [
 				{ title: 'Link1', link: 'https://example.com', group: 'Group1', tags: ['tag1'] }
 			]);
