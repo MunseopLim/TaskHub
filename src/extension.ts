@@ -2326,6 +2326,7 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.showErrorMessage(`Failed to open example ${fileName}: ${error.message}`);
     }
   });
+    context.subscriptions.push(showExampleJsonCommand);
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showExampleJsonQuickPick', async () => { const pick = await vscode.window.showQuickPick([ { label: 'actions.json Example', description: 'Show example content for actions.json', type: 'actions' }, { label: 'links.json Example', description: 'Show example content for links.json', type: 'links' }, { label: 'favorites.json Example', description: 'Show example content for favorites.json', type: 'favorites' }, ], { placeHolder: 'Select which example JSON to display' }); if (pick) { vscode.commands.executeCommand('taskhub.showExampleJson', pick.type); } }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addOpenFileToFavorites', async () => {
         const editor = vscode.window.activeTextEditor;
