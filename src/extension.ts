@@ -836,6 +836,25 @@ const manuallyTerminatedActions = new Set<string>();
 const outputChannel = vscode.window.createOutputChannel('TaskHub');
 const actionTerminals = new Map<string, vscode.Terminal>();
 const actionWorkspaceFolderMap = new Map<string, string | undefined>();
+const actionChildProcesses = new Map<string, Set<ReturnType<typeof spawn>>>();
+
+function terminateChildProcesses(actionId: string): boolean {
+    const processes = actionChildProcesses.get(actionId);
+    if (!processes || processes.size === 0) {
+        return false;
+    }
+    for (const child of processes) {
+        try {
+            if (!child.killed) {
+                child.kill();
+            }
+        } catch (error) {
+            console.error(`Failed to terminate child process for action '${actionId}':`, error);
+        }
+    }
+    actionChildProcesses.delete(actionId);
+    return true;
+}
 class Folder extends vscode.TreeItem {
   public children: any[];
   constructor(public readonly label: string, children: any[], private readonly context: vscode.ExtensionContext, public readonly id?: string) {
@@ -1487,10 +1506,10 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
                 }
                 interpolatedUnzipTask.env = interpolatedEnv;
             }
-            result = await handleUnzip(interpolatedUnzipTask, allResults, defaultWorkspace);
+            result = await handleUnzip(interpolatedUnzipTask, allResults, defaultWorkspace, actionId);
             break;
         case 'zip':
-            result = await handleZip(task, allResults, defaultWorkspace);
+            result = await handleZip(task, allResults, defaultWorkspace, actionId);
             break;
         case 'stringManipulation':
             const interpolatedInput = interpolatePipelineVariables(task.input || '', interpolationContext);
@@ -1684,7 +1703,7 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
 async function handleCommand(task: any, context: vscode.ExtensionContext, workspaceFolderPath?: string): Promise<{ output: string }> {
     const { args, cwd } = task;
     const command = getCommandString(task.command);
-    const commandOutput = await executeShellCommand(command, args || [], cwd, task.env, workspaceFolderPath);
+    const commandOutput = await executeShellCommand(command, args || [], cwd, task.env, workspaceFolderPath, task.actionId);
     return { output: commandOutput.trim() };
 }
 
@@ -1705,7 +1724,7 @@ async function handleFolderDialog(task: any): Promise<{ path: string, dir: strin
     if (folderUri && folderUri[0]) { return { path: folderUri[0].fsPath, dir: path.dirname(folderUri[0].fsPath), name: path.basename(folderUri[0].fsPath) }; }    else { throw new Error('Folder selection was canceled.'); }
 }
 
-async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: string): Promise<{ outputDir: string }> {
+async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: string, actionId?: string): Promise<{ outputDir: string }> {
     const inputs = task.inputs || {};
 
     const resolveValue = (value: any, preferredKeys: string[]): string | undefined => {
@@ -1749,14 +1768,14 @@ async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: str
     const toolCommand = getToolCommand(task.tool);
     const args = ['x', archivePath, `-o${outputDir}`, '-aoa'];
     try {
-        await executeShellCommand(toolCommand, args, undefined, task.env, workspaceFolderPath);
+        await executeShellCommand(toolCommand, args, undefined, task.env, workspaceFolderPath, actionId);
         return { outputDir: outputDir };
     } catch (error: any) {
         throw new Error(`Failed to unzip file: ${error.message}`);
     }
 }
 
-async function handleZip(task: import('./schema').Task, allResults: any, workspaceFolderPath?: string): Promise<{ archivePath: string }> {
+async function handleZip(task: import('./schema').Task, allResults: any, workspaceFolderPath?: string, actionId?: string): Promise<{ archivePath: string }> {
     const interpolationContext = { ...allResults, workspaceFolder: workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '' };
     
     const toolCommand = getToolCommand(task.tool);
@@ -1790,7 +1809,8 @@ async function handleZip(task: import('./schema').Task, allResults: any, workspa
             args,
             task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
             envOverrides,
-            workspaceFolderPath
+            workspaceFolderPath,
+            actionId
         );
         return { archivePath: archive };
     } catch (error: any) {
@@ -1839,7 +1859,7 @@ export async function handleStringManipulation(task: any): Promise<{ output: str
     return { output };
 }
 
-function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string): Promise<string> {
+function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string): Promise<string> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
 
@@ -1872,6 +1892,25 @@ function executeShellCommand(command: string, args: string[], cwd?: string, task
             });
         }
 
+        if (actionKey) {
+            const processes = actionChildProcesses.get(actionKey) ?? new Set<ReturnType<typeof spawn>>();
+            processes.add(childProcess);
+            actionChildProcesses.set(actionKey, processes);
+        }
+
+        const cleanupChildTracking = () => {
+            if (!actionKey) {
+                return;
+            }
+            const processes = actionChildProcesses.get(actionKey);
+            if (processes) {
+                processes.delete(childProcess);
+                if (processes.size === 0) {
+                    actionChildProcesses.delete(actionKey);
+                }
+            }
+        };
+
 
 
         if (showVerboseLogs) { outputChannel.appendLine(`[INFO] Executing command: ${displayCommand} in ${workingDirectory}`); }
@@ -1897,6 +1936,7 @@ function executeShellCommand(command: string, args: string[], cwd?: string, task
 
 
         childProcess.on('close', (code) => {
+            cleanupChildTracking();
 
             if (showVerboseLogs) { outputChannel.appendLine(`[INFO] STDOUT: ${stdout}`); outputChannel.appendLine(`[INFO] STDERR: ${stderr}`); outputChannel.appendLine(`[INFO] Command finished with exit code ${code}.`); }
 
@@ -1904,7 +1944,7 @@ function executeShellCommand(command: string, args: string[], cwd?: string, task
 
         });
 
-        childProcess.on('error', (err) => { if (showVerboseLogs) { outputChannel.appendLine(`[ERROR] Failed to start command: ${err.message}`); } reject(err); });
+        childProcess.on('error', (err) => { cleanupChildTracking(); if (showVerboseLogs) { outputChannel.appendLine(`[ERROR] Failed to start command: ${err.message}`); } reject(err); });
 
     });
 
@@ -2059,11 +2099,22 @@ export function activate(context: vscode.ExtensionContext) {
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
         const id = actionItem.id || actionItem.label;
+        if (!id) {
+            return;
+        }
+        let stopped = false;
         const task = activeTasks.get(id);
         if (task) {
             manuallyTerminatedActions.add(id);
             task.terminate();
-        } else {
+            stopped = true;
+        }
+        if (terminateChildProcesses(id)) {
+            manuallyTerminatedActions.add(id);
+            stopped = true;
+        }
+        if (!stopped) {
+            manuallyTerminatedActions.delete(id);
             vscode.window.showWarningMessage(`Could not find active task for '${actionItem.label}'.`);
         }
     }));
@@ -2346,6 +2397,10 @@ export function activate(context: vscode.ExtensionContext) {
         for (const [actionId, execution] of activeTasks.entries()) {
             manuallyTerminatedActions.add(actionId);
             execution.terminate();
+        }
+        for (const actionId of Array.from(actionChildProcesses.keys())) {
+            manuallyTerminatedActions.add(actionId);
+            terminateChildProcesses(actionId);
         }
 
         // Close all terminals associated with the extension
