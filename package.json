@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -24,6 +24,7 @@
     "onCommand:taskhub.copyLink",
     "onCommand:taskhub.goToLink",
     "onCommand:taskhub.addLink",
+    "onCommand:taskhub.editWorkspaceLink",
     "onCommand:taskhub.searchLinks",
     "onCommand:taskhub.searchFavorites",
     "onCommand:taskhub.createAction",
@@ -150,6 +151,11 @@
         "command": "taskhub.addLink",
         "title": "TaskHub: Add Link",
         "icon": "$(add)"
+      },
+      {
+        "command": "taskhub.editWorkspaceLink",
+        "title": "TaskHub: Edit Workspace Link",
+        "icon": "$(pencil)"
       },
       {
         "command": "taskhub.searchLinks",
@@ -303,6 +309,11 @@
         {
           "command": "taskhub.goToLink",
           "when": "(view == mainView.linkWorkspace || view == mainView.linkBuiltin) && viewItem == linkItem",
+          "group": "inline"
+        },
+        {
+          "command": "taskhub.editWorkspaceLink",
+          "when": "view == mainView.linkWorkspace && viewItem == linkItem",
           "group": "inline"
         },
         {

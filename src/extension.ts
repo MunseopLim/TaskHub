@@ -1390,6 +1390,110 @@ async function promptLinkSearch(linkViewProvider: LinkViewProvider): Promise<voi
     }
 }
 
+async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, target?: Link): Promise<void> {
+    const entries = linkViewProvider.getAllEntries().filter(entry => entry.sourceFile);
+    if (entries.length === 0) {
+        vscode.window.showInformationMessage('No workspace links available to edit.');
+        return;
+    }
+
+    let entryToEdit: LinkEntry | undefined;
+    if (target) {
+        entryToEdit = target.getEntry();
+    } else {
+        const items: LinkQuickPickItem[] = entries.map(entry => ({
+            label: entry.title,
+            description: entry.group ? `[${entry.group}] ${entry.link}` : entry.link,
+            detail: entry.tags && entry.tags.length > 0 ? `Tags: ${entry.tags.join(', ')}` : undefined,
+            entry
+        }));
+        const pick = await vscode.window.showQuickPick(items, {
+            placeHolder: 'Select a workspace link to edit',
+            matchOnDescription: true,
+            matchOnDetail: true,
+            ignoreFocusOut: true
+        });
+        if (!pick) {
+            return;
+        }
+        entryToEdit = pick.entry;
+    }
+
+    if (!entryToEdit?.sourceFile) {
+        vscode.window.showInformationMessage('This link is read-only and cannot be edited here.');
+        return;
+    }
+
+    const titleInput = await vscode.window.showInputBox({
+        prompt: 'Title for the link',
+        value: entryToEdit.title,
+        ignoreFocusOut: true,
+        validateInput: value => value.trim().length === 0 ? 'Enter a title' : null
+    });
+    if (!titleInput) {
+        return;
+    }
+
+    const urlInput = await vscode.window.showInputBox({
+        prompt: 'URL to open',
+        value: entryToEdit.link,
+        ignoreFocusOut: true,
+        validateInput: value => value.trim().length === 0 ? 'Enter a URL' : null
+    });
+    if (!urlInput) {
+        return;
+    }
+
+    const groupInput = await vscode.window.showInputBox({
+        prompt: 'Group label (optional)',
+        value: entryToEdit.group ?? '',
+        ignoreFocusOut: true
+    });
+    if (groupInput === undefined) {
+        return;
+    }
+    const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
+
+    const tagsInput = await vscode.window.showInputBox({
+        prompt: 'Tags (optional, comma-separated)',
+        value: entryToEdit.tags?.join(', ') ?? '',
+        ignoreFocusOut: true
+    });
+    if (tagsInput === undefined) {
+        return;
+    }
+    const tags = parseTagInput(tagsInput);
+
+    const trimmedTitle = titleInput.trim();
+    const trimmedUrl = urlInput.trim();
+    const links = loadLinksFromDisk(entryToEdit.sourceFile, true);
+    const targetIndex = links.findIndex(link => link.title === entryToEdit.title && link.link === entryToEdit.link);
+    if (targetIndex === -1) {
+        vscode.window.showInformationMessage('Could not find the selected link in links.json.');
+        return;
+    }
+
+    const duplicate = links.some((link, index) => index !== targetIndex && link.title === trimmedTitle && link.link === trimmedUrl);
+    if (duplicate) {
+        vscode.window.showInformationMessage('Another link with the same title and URL already exists.');
+        return;
+    }
+
+    const updated: LinkEntry = {
+        ...links[targetIndex],
+        title: trimmedTitle,
+        link: trimmedUrl,
+        group,
+        tags,
+        sourceFile: entryToEdit.sourceFile
+    };
+    links[targetIndex] = updated;
+
+    const serialized = serializeLinks(links);
+    fs.writeFileSync(entryToEdit.sourceFile, JSON.stringify(serialized, null, 2) + '\n');
+    linkViewProvider.refresh();
+}
+
 async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider): Promise<void> {
     const entries = favoriteViewProvider.getAllEntries();
     if (entries.length === 0) {
@@ -2289,6 +2393,9 @@ export function activate(context: vscode.ExtensionContext) {
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.searchLinks', async () => {
         await promptLinkSearch(workspaceLinkViewProvider);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.editWorkspaceLink', async (item?: Link) => {
+        await promptWorkspaceLinkEdit(workspaceLinkViewProvider, item);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addLink', async () => {
         const folder = await pickWorkspaceFolderForCommand('Select a workspace folder to add the link to');
