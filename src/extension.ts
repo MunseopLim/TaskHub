@@ -900,6 +900,7 @@ interface LinkEntry {
 interface FavoriteEntry {
     title: string;
     path: string;
+    line?: number;
     group?: string;
     tags?: string[];
     sourceFile?: string;
@@ -927,9 +928,27 @@ export function parseTagInput(input: string | undefined): string[] | undefined {
     return parts.length > 0 ? parts : undefined;
 }
 
+function normalizeLineNumber(raw: unknown): number | undefined {
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+        const value = Math.floor(raw);
+        return value > 0 ? value : undefined;
+    }
+    if (typeof raw === 'string') {
+        const parsed = parseInt(raw, 10);
+        if (!isNaN(parsed) && parsed > 0) {
+            return parsed;
+        }
+    }
+    return undefined;
+}
+
 export function serializeFavorites(entries: FavoriteEntry[]): any[] {
     return entries.map(entry => {
         const payload: any = { title: entry.title, path: entry.path };
+        const line = normalizeLineNumber(entry.line);
+        if (line !== undefined) {
+            payload.line = line;
+        }
         if (entry.group) {
             payload.group = entry.group;
         }
@@ -970,6 +989,10 @@ function loadFavoritesFromDisk(filePath: string, reportErrors: boolean, workspac
                     title: item.title,
                     path: item.path
                 };
+                const line = normalizeLineNumber(item.line);
+                if (line !== undefined) {
+                    entry.line = line;
+                }
                 const group = typeof item.group === 'string' ? item.group.trim() : '';
                 if (group.length > 0) {
                     entry.group = group;
@@ -1177,8 +1200,17 @@ class FavoriteGroup extends vscode.TreeItem {
 class Favorite extends vscode.TreeItem {
     constructor(private readonly entry: FavoriteEntry) {
         super(entry.title, vscode.TreeItemCollapsibleState.None);
-        this.tooltip = `${entry.title} - ${entry.path}`;
-        this.description = entry.tags && entry.tags.length > 0 ? entry.tags.join(', ') : undefined;
+        const line = normalizeLineNumber(entry.line);
+        const location = line !== undefined ? `${entry.path}:${line}` : entry.path;
+        const descriptionParts: string[] = [];
+        if (line !== undefined) {
+            descriptionParts.push(`line ${line}`);
+        }
+        if (entry.tags && entry.tags.length > 0) {
+            descriptionParts.push(entry.tags.join(', '));
+        }
+        this.tooltip = `${entry.title} - ${location}`;
+        this.description = descriptionParts.length > 0 ? descriptionParts.join(' • ') : undefined;
         this.command = { command: 'taskhub.openFavoriteFile', title: 'Open Favorite File', arguments: [entry] };
         this.contextValue = 'favoriteItem';
         this.iconPath = new vscode.ThemeIcon('star');
@@ -1186,6 +1218,10 @@ class Favorite extends vscode.TreeItem {
 
     getFilePath(): string {
         return this.entry.path;
+    }
+
+    getLine(): number | undefined {
+        return this.entry.line;
     }
 
     getEntry(): FavoriteEntry {
@@ -1236,7 +1272,15 @@ class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTreeNode> 
     }
 
     private sortEntries(entries: FavoriteEntry[]): FavoriteEntry[] {
-        return [...entries].sort((a, b) => a.title.localeCompare(b.title));
+        return [...entries].sort((a, b) => {
+            const titleCompare = a.title.localeCompare(b.title);
+            if (titleCompare !== 0) {
+                return titleCompare;
+            }
+            const lineA = normalizeLineNumber(a.line) || 0;
+            const lineB = normalizeLineNumber(b.line) || 0;
+            return lineA - lineB;
+        });
     }
 
     private buildRootNodes(): FavoriteTreeNode[] {
@@ -1344,18 +1388,28 @@ async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider):
         if (groupA !== groupB) {
             return groupA.localeCompare(groupB);
         }
-        return a.title.localeCompare(b.title);
+        const titleCompare = a.title.localeCompare(b.title);
+        if (titleCompare !== 0) {
+            return titleCompare;
+        }
+        const lineA = normalizeLineNumber(a.line) || 0;
+        const lineB = normalizeLineNumber(b.line) || 0;
+        return lineA - lineB;
     });
 
-    const items: FavoriteQuickPickItem[] = sorted.map(entry => ({
-        label: entry.title,
-        description: entry.group ? `[${entry.group}] ${entry.path}` : entry.path,
-        detail: entry.tags && entry.tags.length > 0 ? `Tags: ${entry.tags.join(', ')}` : undefined,
-        entry
-    }));
+    const items: FavoriteQuickPickItem[] = sorted.map(entry => {
+        const line = normalizeLineNumber(entry.line);
+        const location = line !== undefined ? `${entry.path}:${line}` : entry.path;
+        return {
+            label: entry.title,
+            description: entry.group ? `[${entry.group}] ${location}` : location,
+            detail: entry.tags && entry.tags.length > 0 ? `Tags: ${entry.tags.join(', ')}` : undefined,
+            entry
+        };
+    });
 
     const pick = await vscode.window.showQuickPick(items, {
-        placeHolder: 'Search favorites by title, group, or tag',
+        placeHolder: 'Search favorites by title, group, line, or tag',
         matchOnDescription: true,
         matchOnDetail: true,
         ignoreFocusOut: true
@@ -1364,6 +1418,27 @@ async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider):
     if (pick) {
         vscode.commands.executeCommand('taskhub.openFavoriteFile', pick.entry);
     }
+}
+
+async function promptFavoriteLineNumber(promptLabel: string, initialLine?: number): Promise<number | undefined | 'cancel'> {
+    const input = await vscode.window.showInputBox({
+        prompt: promptLabel,
+        placeHolder: 'Leave empty to open at the top of the file',
+        value: initialLine !== undefined ? `${initialLine}` : undefined,
+        ignoreFocusOut: true,
+        validateInput: text => {
+            if (text.trim().length === 0) {
+                return null;
+            }
+            return normalizeLineNumber(text) ? null : 'Enter a positive line number';
+        }
+    });
+
+    if (input === undefined) {
+        return 'cancel';
+    }
+
+    return normalizeLineNumber(input);
 }
 
 function resolveActionDefinition(actionItem: ActionItem): { action: PipelineAction; id: string } | undefined {
@@ -2081,7 +2156,14 @@ export function activate(context: vscode.ExtensionContext) {
                 || '';
             const resolvedPath = target.path.replace('${workspaceFolder}', workspaceFolderPath || '');
             const uri = vscode.Uri.file(resolvedPath);
-            await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+            const document = await vscode.workspace.openTextDocument(uri);
+            const editor = await vscode.window.showTextDocument(document);
+            const line = normalizeLineNumber(target.line);
+            if (line !== undefined) {
+                const position = new vscode.Position(Math.max(line - 1, 0), 0);
+                editor.selection = new vscode.Selection(position, position);
+                editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+            }
         } catch (error: any) {
             vscode.window.showErrorMessage(`Could not open file: ${error.message}`);
         }
@@ -2250,6 +2332,10 @@ export function activate(context: vscode.ExtensionContext) {
             if (!title) {
                 continue;
             }
+            const line = await promptFavoriteLineNumber(`Line number for ${path.basename(fileUri.fsPath)} (optional)`);
+            if (line === 'cancel') {
+                return;
+            }
             const favorite: FavoriteEntry = {
                 title,
                 path: fileUri.fsPath,
@@ -2261,6 +2347,9 @@ export function activate(context: vscode.ExtensionContext) {
             }
             if (defaultTags) {
                 favorite.tags = defaultTags;
+            }
+            if (line !== undefined) {
+                favorite.line = line;
             }
             favorites.push(favorite);
         }
@@ -2290,8 +2379,15 @@ export function activate(context: vscode.ExtensionContext) {
         if (!fs.existsSync(sourceFile)) {
             return;
         }
-        const favorites = loadFavoritesFromDisk(sourceFile, true, item.getEntry().workspaceFolder);
-        const filtered = favorites.filter(f => f.path !== item.getFilePath());
+        const target = item.getEntry();
+        const targetLine = normalizeLineNumber(target.line);
+        const favorites = loadFavoritesFromDisk(sourceFile, true, target.workspaceFolder);
+        const filtered = favorites.filter(f => {
+            const line = normalizeLineNumber(f.line);
+            const samePath = f.path === target.path;
+            const sameLine = (line ?? null) === (targetLine ?? null);
+            return !(samePath && sameLine);
+        });
         if (filtered.length === favorites.length) {
             return;
         }
@@ -2401,6 +2497,11 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
         const tags = parseTagInput(tagsInput);
+        const defaultLine = editor.selection.active.line + 1;
+        const line = await promptFavoriteLineNumber('Line number for this favorite (optional)', defaultLine);
+        if (line === 'cancel') {
+            return;
+        }
 
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
         if (!workspaceFolder) {
@@ -2420,6 +2521,9 @@ export function activate(context: vscode.ExtensionContext) {
         }
         if (tags) {
             favorite.tags = tags;
+        }
+        if (line !== undefined) {
+            favorite.line = line;
         }
         favorites.push(favorite);
 

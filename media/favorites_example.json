@@ -2,6 +2,7 @@
   {
     "title": "Project Main Source File",
     "path": "${workspaceFolder}/src/extension.ts",
+    "line": 12,
     "group": "Source",
     "tags": ["core", "extension"]
   },

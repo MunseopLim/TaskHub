@@ -14,6 +14,11 @@
         "type": "string",
         "description": "The absolute path to the file. Can use `${workspaceFolder}`."
       },
+      "line": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Optional 1-based line number to open."
+      },
       "group": {
         "type": "string",
         "description": "Optional group label. Favorites with the same group appear under a collapsible section."

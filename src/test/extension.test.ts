@@ -279,6 +279,16 @@ suite('Extension Test Suite', () => {
 			]);
 		});
 
+		test('should serialize favorite with line', () => {
+			const entries = [
+				{ title: 'File1', path: '/path/to/file1', line: 15 }
+			];
+			const result = serializeFavorites(entries);
+			assert.deepStrictEqual(result, [
+				{ title: 'File1', path: '/path/to/file1', line: 15 }
+			]);
+		});
+
 		test('should serialize favorite with group and tags', () => {
 			const entries = [
 				{ title: 'File1', path: '/path/to/file1', group: 'Group1', tags: ['tag1'] }
@@ -930,6 +940,16 @@ suite('Extension Test Suite', () => {
 		test('should handle entry with empty tags array', () => {
 			const entries = [
 				{ title: 'File', path: '/path', tags: [] }
+			];
+			const result = serializeFavorites(entries);
+			assert.deepStrictEqual(result, [
+				{ title: 'File', path: '/path' }
+			]);
+		});
+
+		test('should ignore non-positive line numbers', () => {
+			const entries = [
+				{ title: 'File', path: '/path', line: 0 }
 			];
 			const result = serializeFavorites(entries);
 			assert.deepStrictEqual(result, [
