@@ -15,6 +15,7 @@ import {
 	findActionById,
 	insertActionIntoDestination,
 	createGroupedTaskPresentationOptions,
+	addLinkEntry,
 } from '../extension';
 import { ActionItem } from '../schema';
 
@@ -1000,6 +1001,35 @@ suite('Extension Test Suite', () => {
 			const entries: any[] = [];
 			const result = serializeLinks(entries);
 			assert.deepStrictEqual(result, []);
+		});
+	});
+
+	suite('addLinkEntry', () => {
+		test('should add a new unique link', () => {
+			const existing = [
+				{ title: 'Existing', link: 'https://existing.com' }
+			];
+			const { entries, added } = addLinkEntry(existing as any, { title: 'New', link: 'https://new.com' } as any);
+			assert.strictEqual(added, true);
+			assert.notStrictEqual(entries, existing);
+			assert.strictEqual(entries.length, 2);
+			assert.deepStrictEqual(entries[1], { title: 'New', link: 'https://new.com' });
+		});
+
+		test('should prevent duplicates by title and link', () => {
+			const existing = [
+				{ title: 'Link', link: 'https://example.com' }
+			];
+			const { entries, added } = addLinkEntry(existing as any, { title: 'Link', link: 'https://example.com', group: 'Docs' } as any);
+			assert.strictEqual(added, false);
+			assert.strictEqual(entries, existing);
+			assert.strictEqual(entries.length, 1);
+		});
+
+		test('should trim title and link before adding', () => {
+			const { entries, added } = addLinkEntry([], { title: '  Trim  ', link: '  https://trim.com  ', tags: ['tag'] } as any);
+			assert.strictEqual(added, true);
+			assert.deepStrictEqual(entries[0], { title: 'Trim', link: 'https://trim.com', tags: ['tag'] });
 		});
 	});
 });

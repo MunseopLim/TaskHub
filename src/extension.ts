@@ -972,6 +972,17 @@ export function serializeLinks(entries: LinkEntry[]): any[] {
     });
 }
 
+export function addLinkEntry(entries: LinkEntry[], newEntry: LinkEntry): { entries: LinkEntry[]; added: boolean } {
+    const trimmedTitle = newEntry.title.trim();
+    const trimmedLink = newEntry.link.trim();
+    const duplicate = entries.some(entry => entry.title === trimmedTitle && entry.link === trimmedLink);
+    if (duplicate) {
+        return { entries, added: false };
+    }
+    const normalized: LinkEntry = { ...newEntry, title: trimmedTitle, link: trimmedLink };
+    return { entries: [...entries, normalized], added: true };
+}
+
 function loadFavoritesFromDisk(filePath: string, reportErrors: boolean, workspaceFolderPath?: string): FavoriteEntry[] {
     if (!fs.existsSync(filePath)) {
         return [];
@@ -2271,6 +2282,73 @@ export function activate(context: vscode.ExtensionContext) {
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.searchLinks', async () => {
         await promptLinkSearch(linkViewProvider);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.addLink', async () => {
+        const folder = await pickWorkspaceFolderForCommand('Select a workspace folder to add the link to');
+        if (!folder) {
+            return;
+        }
+
+        const title = await vscode.window.showInputBox({
+            prompt: 'Title for the link',
+            placeHolder: 'e.g. Project Dashboard',
+            ignoreFocusOut: true,
+            validateInput: value => value.trim().length === 0 ? 'Enter a title' : null
+        });
+        if (!title) {
+            return;
+        }
+
+        const url = await vscode.window.showInputBox({
+            prompt: 'URL to open',
+            placeHolder: 'https://example.com',
+            ignoreFocusOut: true,
+            validateInput: value => value.trim().length === 0 ? 'Enter a URL' : null
+        });
+        if (!url) {
+            return;
+        }
+
+        const groupInput = await vscode.window.showInputBox({
+            prompt: 'Group label (optional)',
+            placeHolder: 'e.g. Documentation',
+            ignoreFocusOut: true
+        });
+        if (groupInput === undefined) {
+            return;
+        }
+        const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
+
+        const tagsInput = await vscode.window.showInputBox({
+            prompt: 'Tags (optional, comma-separated)',
+            placeHolder: 'e.g. docs, api',
+            ignoreFocusOut: true
+        });
+        if (tagsInput === undefined) {
+            return;
+        }
+        const tags = parseTagInput(tagsInput);
+
+        const linksPath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
+        const links = loadLinksFromDisk(linksPath, true);
+        const { entries: updatedLinks, added } = addLinkEntry(links, {
+            title,
+            link: url,
+            group,
+            tags,
+            sourceFile: linksPath
+        });
+        if (!added) {
+            vscode.window.showInformationMessage('This link already exists in links.json.');
+            return;
+        }
+
+        const serialized = serializeLinks(updatedLinks);
+        if (!fs.existsSync(path.dirname(linksPath))) {
+            fs.mkdirSync(path.dirname(linksPath), { recursive: true });
+        }
+        fs.writeFileSync(linksPath, JSON.stringify(serialized, null, 2) + '\n');
+        linkViewProvider.refresh();
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.searchFavorites', async () => {
         await promptFavoriteSearch(favoriteViewProvider);
