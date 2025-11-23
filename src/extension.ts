@@ -1631,8 +1631,25 @@ function createShellExecution(command: string, args: string[], options: vscode.S
     };
 }
 
+function wrapCommandForOneShot(command: string, args: string[], cwd: string | undefined, useUtf8Console: boolean): { commandLine: string; displayCommand: string; isPowerShellScript: boolean } {
+    const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
+    if (process.platform === 'win32') {
+        const filePath = quotePowerShellArgument(executable);
+        const argList = combinedArgs.map(arg => quotePowerShellArgument(arg));
+        const argumentListPart = argList.length > 0 ? ` -ArgumentList @(${argList.join(', ')})` : '';
+        const workingDirectoryPart = cwd ? ` -WorkingDirectory ${quotePowerShellArgument(cwd)}` : '';
+        const utf8Prefix = useUtf8Console ? "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n" : '';
+        const script = `${utf8Prefix}Start-Process -FilePath ${filePath}${argumentListPart}${workingDirectoryPart}`;
+        return { commandLine: script, displayCommand: script, isPowerShellScript: true };
+    }
+
+    const baseCommandLine = buildPosixCommandLine(command, args);
+    const wrapped = `nohup ${baseCommandLine} >/dev/null 2>&1 &`;
+    return { commandLine: wrapped, displayCommand: wrapped, isPowerShellScript: false };
+}
+
 function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExecutionSetup {
-    const { command, args, cwd, id, actionId, revealTerminal, env: taskEnv } = task;
+    const { command, args, cwd, id, actionId, revealTerminal, env: taskEnv, isOneShot } = task;
     if (typeof command !== 'string') {
         throw new Error(`Task ${id} requires a string 'command' property.`);
     }
@@ -1647,7 +1664,27 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
     }
 
     const taskArgs = args || [];
-    const { shellExecution, displayCommand } = createShellExecution(command, taskArgs, options, useUtf8Console);
+
+    let shellExecution: vscode.ShellExecution;
+    let displayCommand: string;
+
+    if (isOneShot) {
+        const wrapped = wrapCommandForOneShot(command, taskArgs, options.cwd, useUtf8Console);
+        if (wrapped.isPowerShellScript) {
+            const encoded = encodePowerShellScript(wrapped.commandLine);
+            shellExecution = new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options);
+        } else {
+            shellExecution = new vscode.ShellExecution(wrapped.commandLine, options);
+        }
+        displayCommand = wrapped.displayCommand;
+    } else {
+        const execCommand = command;
+        const execArgs = taskArgs;
+        const result = createShellExecution(execCommand, execArgs, options, useUtf8Console);
+        shellExecution = result.shellExecution;
+        displayCommand = result.displayCommand;
+    }
+
     const taskDefinition: vscode.TaskDefinition = { type: 'shell', actionId: actionKey };
     const taskName = `TaskHub: ${actionKey}`;
     const vsCodeTask = new vscode.Task(taskDefinition, vscode.TaskScope.Workspace, taskName, 'taskhub', shellExecution);
