@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -17,7 +17,8 @@
   ],
   "activationEvents": [
     "onView:mainView.main",
-    "onView:mainView.link",
+    "onView:mainView.linkBuiltin",
+    "onView:mainView.linkWorkspace",
     "onView:mainView.favorite",
     "onCommand:taskhub.openLink",
     "onCommand:taskhub.copyLink",
@@ -116,8 +117,13 @@
           "icon": "media/m_icon.svg"
         },
         {
-          "id": "mainView.link",
-          "name": "Link",
+          "id": "mainView.linkBuiltin",
+          "name": "Built-in Links",
+          "icon": "media/l_icon.svg"
+        },
+        {
+          "id": "mainView.linkWorkspace",
+          "name": "Workspace Links",
           "icon": "media/l_icon.svg"
         },
         {
@@ -253,17 +259,17 @@
         },
         {
           "command": "taskhub.searchLinks",
-          "when": "view == mainView.link",
+          "when": "view == mainView.linkWorkspace",
           "group": "navigation@1"
         },
         {
           "command": "taskhub.addLink",
-          "when": "view == mainView.link",
+          "when": "view == mainView.linkWorkspace",
           "group": "navigation@2"
         },
         {
           "command": "taskhub.editLinks",
-          "when": "view == mainView.link",
+          "when": "view == mainView.linkWorkspace",
           "group": "navigation@3"
         },
         {
@@ -291,17 +297,17 @@
       "view/item/context": [
         {
           "command": "taskhub.copyLink",
-          "when": "view == mainView.link && viewItem == linkItem",
+          "when": "(view == mainView.linkWorkspace || view == mainView.linkBuiltin) && viewItem == linkItem",
           "group": "inline"
         },
         {
           "command": "taskhub.goToLink",
-          "when": "view == mainView.link && viewItem == linkItem",
+          "when": "(view == mainView.linkWorkspace || view == mainView.linkBuiltin) && viewItem == linkItem",
           "group": "inline"
         },
         {
           "command": "taskhub.deleteLink",
-          "when": "view == mainView.link && viewItem == linkItem",
+          "when": "view == mainView.linkWorkspace && viewItem == linkItem",
           "group": "inline"
         },
         {

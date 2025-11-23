@@ -1102,7 +1102,7 @@ class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
     public view: vscode.TreeView<LinkTreeNode> | undefined;
     private cachedEntries: LinkEntry[] = [];
 
-    constructor(private context: vscode.ExtensionContext) {
+    constructor(private context: vscode.ExtensionContext, private readonly mode: 'builtin' | 'workspace') {
         this.cachedEntries = this.loadLinks();
     }
 
@@ -1115,18 +1115,22 @@ class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
     private updateTitle(): void {
         if (this.view) {
             const count = this.cachedEntries.length;
-            this.view.title = `Link (${count})`;
+            const label = this.mode === 'builtin' ? 'Built-in Links' : 'Workspace Links';
+            this.view.title = `${label} (${count})`;
         }
     }
 
     private loadLinks(): LinkEntry[] {
         const results: LinkEntry[] = [];
-        const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
-        results.push(...loadLinksFromDisk(mediaJsonPath, false));
-        const folders = vscode.workspace.workspaceFolders ?? [];
-        for (const folder of folders) {
-            const workspaceLinksPath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
-            results.push(...loadLinksFromDisk(workspaceLinksPath, true));
+        if (this.mode === 'builtin') {
+            const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
+            results.push(...loadLinksFromDisk(mediaJsonPath, false));
+        } else {
+            const folders = vscode.workspace.workspaceFolders ?? [];
+            for (const folder of folders) {
+                const workspaceLinksPath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
+                results.push(...loadLinksFromDisk(workspaceLinksPath, true));
+            }
         }
         return results;
     }
@@ -2130,29 +2134,32 @@ export function activate(context: vscode.ExtensionContext) {
 
 
     const mainViewProvider = new MainViewProvider(context);
-    const linkViewProvider = new LinkViewProvider(context);
+    const builtInLinkViewProvider = new LinkViewProvider(context, 'builtin');
+    const workspaceLinkViewProvider = new LinkViewProvider(context, 'workspace');
     const favoriteViewProvider = new FavoriteViewProvider(context);
     const mainView = vscode.window.createTreeView('mainView.main', { treeDataProvider: mainViewProvider });
     context.subscriptions.push(mainView);
     mainView.onDidExpandElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, true); } });
     mainView.onDidCollapseElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, false); } });
-    linkViewProvider.view = vscode.window.createTreeView('mainView.link', { treeDataProvider: linkViewProvider });
+    builtInLinkViewProvider.view = vscode.window.createTreeView('mainView.linkBuiltin', { treeDataProvider: builtInLinkViewProvider });
+    workspaceLinkViewProvider.view = vscode.window.createTreeView('mainView.linkWorkspace', { treeDataProvider: workspaceLinkViewProvider });
     favoriteViewProvider.view = vscode.window.createTreeView('mainView.favorite', { treeDataProvider: favoriteViewProvider });
-    linkViewProvider.refresh();
+    builtInLinkViewProvider.refresh();
+    workspaceLinkViewProvider.refresh();
     favoriteViewProvider.refresh();
-    context.subscriptions.push(linkViewProvider.view, favoriteViewProvider.view);
+    context.subscriptions.push(builtInLinkViewProvider.view, workspaceLinkViewProvider.view, favoriteViewProvider.view);
     const mediaActionsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/actions.json'));
     mediaActionsWatcher.onDidChange(() => mainViewProvider.refresh());
     mediaActionsWatcher.onDidCreate(() => mainViewProvider.refresh());
     mediaActionsWatcher.onDidDelete(() => mainViewProvider.refresh());
     context.subscriptions.push(mediaActionsWatcher);
     const mediaLinksWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/links.json'));
-    mediaLinksWatcher.onDidChange(() => linkViewProvider.refresh());
-    mediaLinksWatcher.onDidCreate(() => linkViewProvider.refresh());
-    mediaLinksWatcher.onDidDelete(() => linkViewProvider.refresh());
+    mediaLinksWatcher.onDidChange(() => builtInLinkViewProvider.refresh());
+    mediaLinksWatcher.onDidCreate(() => builtInLinkViewProvider.refresh());
+    mediaLinksWatcher.onDidDelete(() => builtInLinkViewProvider.refresh());
     context.subscriptions.push(mediaLinksWatcher);
     const workspaceActionsWatchers = registerWorkspaceFileWatchers('.vscode/actions.json', () => mainViewProvider.refresh());
-    const workspaceLinksWatchers = registerWorkspaceFileWatchers('.vscode/links.json', () => linkViewProvider.refresh());
+    const workspaceLinksWatchers = registerWorkspaceFileWatchers('.vscode/links.json', () => workspaceLinkViewProvider.refresh());
     const workspaceFavoritesWatchers = registerWorkspaceFileWatchers('.vscode/favorites.json', () => favoriteViewProvider.refresh());
     context.subscriptions.push(workspaceActionsWatchers, workspaceLinksWatchers, workspaceFavoritesWatchers);
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.createAction', async () => {
@@ -2281,7 +2288,7 @@ export function activate(context: vscode.ExtensionContext) {
         await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath)));
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.searchLinks', async () => {
-        await promptLinkSearch(linkViewProvider);
+        await promptLinkSearch(workspaceLinkViewProvider);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addLink', async () => {
         const folder = await pickWorkspaceFolderForCommand('Select a workspace folder to add the link to');
@@ -2348,7 +2355,7 @@ export function activate(context: vscode.ExtensionContext) {
             fs.mkdirSync(path.dirname(linksPath), { recursive: true });
         }
         fs.writeFileSync(linksPath, JSON.stringify(serialized, null, 2) + '\n');
-        linkViewProvider.refresh();
+        workspaceLinkViewProvider.refresh();
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.searchFavorites', async () => {
         await promptFavoriteSearch(favoriteViewProvider);
@@ -2498,7 +2505,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const serialized = serializeLinks(filtered);
         fs.writeFileSync(sourceFile, JSON.stringify(serialized, null, 2) + '\n');
-        linkViewProvider.refresh();
+        workspaceLinkViewProvider.refresh();
     }));
       const showExampleJsonCommand = vscode.commands.registerCommand('taskhub.showExampleJson', async (jsonType: string) => {
     let exampleContent = '';
