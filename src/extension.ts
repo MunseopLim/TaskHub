@@ -2605,8 +2605,9 @@ export function activate(context: vscode.ExtensionContext) {
         if (!fs.existsSync(sourceFile)) {
             return;
         }
+        const target = item.getEntry();
         const links = loadLinksFromDisk(sourceFile, true);
-        const filtered = links.filter(link => link.link !== item.getLink());
+        const filtered = links.filter(link => !(link.title === target.title && link.link === target.link));
         if (filtered.length === links.length) {
             return;
         }
