@@ -80,5 +80,10 @@ export interface Output {
     // Properties for 'file' mode
     filePath?: string;
     content?: string;
-    overwrite?: boolean;
+    /**
+     * Whether to overwrite the file if it already exists.
+     * Can be a boolean or a string (e.g., "${someVar}") that will be interpolated.
+     * String values are evaluated as "true" (case-insensitive) to enable overwrite.
+     */
+    overwrite?: boolean | string;
 }
