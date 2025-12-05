@@ -1,0 +1,10 @@
+---
+alwaysApply: true
+---
+- 모든 정보는 PCIe(Peripheral Component Interconnect Express) 공식 스펙에서 가져오며, 추가적으로 필요한 사항이 있을 경우 신뢰도가 높은 출처(예: 공식 문서, 국제 표준, 주요 반도체 업체의 공식 자료 등)를 우선적으로 참고한다.
+
+- NVMe(Non-Volatile Memory Express) 관련 정보는 NVM Express 공식 스펙(nvmexpress.org)에서 가져오며, 추가적으로 필요한 사항이 있을 경우 신뢰도가 높은 출처(예: NVMe 공식 문서, JEDEC 표준, 주요 스토리지 업체의 공식 자료 등)를 우선적으로 참고한다.
+
+- 만약 정보의 정확성이 의심스럽거나 출처가 불분명한 경우, 사용자에게 해당 사항에 대해 확인 후 사용자의 의도를 반영하여 작업을 진행한다.
+
+- 구현이 필요하다면 TDD로 구현하고 결과를 알려줘.
