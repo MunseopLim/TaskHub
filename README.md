@@ -146,7 +146,7 @@
 -   **`output`** (`object`, *선택*): **캡처 모드(`passTheResultToNextTask: true`)에서만 동작합니다.** 캡처된 결과를 어떻게 처리할지 정의합니다.
     -   `"mode": "editor"`: 새 에디터 탭에 결과를 표시합니다.
     -   `"mode": "file"`: 지정된 파일에 결과를 저장합니다. (`filePath`, `overwrite` 속성 사용)
-        -   `overwrite` (boolean, *선택*, 기본값: `false`): `true`로 설정하면 기존 파일을 덮어씁니다. `false`이거나 생략하면 파일이 이미 존재할 때 실행이 실패합니다.
+        -   `overwrite` (boolean | string, *선택*, 기본값: `false`): `true`로 설정하면 기존 파일을 덮어씁니다. `false`이거나 생략하면 파일이 이미 존재할 때 실행이 실패합니다. 문자열로 지정하면 변수 치환(예: `"${someVar}"`)을 사용할 수 있으며, 치환된 값이 `"true"`(대소문자 무시)이면 덮어쓰기가 활성화됩니다.
     -   `"mode": "terminal"`: 액션 ID별로 재사용되는 Task 패널(`TaskHub: <액션 ID>`)에 결과를 붙여넣습니다.
 
 -   **`isOneShot`** (`boolean`, *선택*, 기본값: `false`): **스트림 모드에서만 의미가 있습니다.**
@@ -328,6 +328,9 @@
 | 설정 ID | 타입 | 기본값 | 설명 |
 | --- | --- | --- | --- |
 | `taskhub.showTaskStatus` | `boolean` | `true` | 메인 뷰의 액션에 대한 상태 아이콘(실행 중, 성공, 실패) 및 작업 완료 후 표시되는 팝업 알림을 활성화/비활성화합니다. |
+| `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | 파이프라인 실행 시 Output 패널에 상세 로그를 표시합니다. 기본적으로는 최소한의 상태 메시지만 표시됩니다. |
+| `taskhub.pipeline.pythonIoEncoding` | `string` | `utf-8` | TaskHub에서 실행하는 명령어의 `PYTHONIOENCODING` 환경 변수 값입니다. 빈 문자열로 설정하면 인코딩을 강제하지 않으며, `utf-8:ignore`와 같은 값을 지정할 수도 있습니다. |
+| `taskhub.pipeline.windowsPowerShellEncoding` | `string` | `utf8` | Windows에서 PowerShell 출력 인코딩을 제어합니다. `utf8`은 UTF-8(코드 페이지 65001)을 사용하고, `system`은 현재 콘솔 코드 페이지를 유지합니다. UTF-8을 인식하지 못하는 레거시 도구에는 `system`을 사용하세요. |
 
 ## 설치
 
