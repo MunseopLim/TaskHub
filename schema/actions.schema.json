@@ -150,7 +150,7 @@
         },
         "archive": {
           "type": "string",
-          "description": "For 'unzip' tasks, a string (supports interpolation) specifying the archive to extract."
+          "description": "For 'unzip' tasks, specifies the archive to extract. For 'zip' tasks, specifies the output archive path. Supports interpolation."
         },
         "destination": {
           "type": "string",
@@ -167,10 +167,6 @@
             }
           ],
           "description": "File or directory paths to be compressed. Required for 'zip' type."
-        },
-        "archive": {
-          "type": "string",
-          "description": "The path for the output archive file. Required for 'zip' type."
         },
         "function": {
           "type": "string",
