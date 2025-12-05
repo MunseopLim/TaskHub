@@ -229,8 +229,11 @@
           "description": "The content to write to the file. Defaults to the task's stdout."
         },
         "overwrite": {
-          "type": "boolean",
-          "description": "If true, overwrite the target when mode is 'file'. Defaults to false.",
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "string" }
+          ],
+          "description": "If true, overwrite the target when mode is 'file'. Defaults to false. Can be a boolean or a string variable (e.g., '${someVar}') that evaluates to 'true'.",
           "default": false
         }
       },
