@@ -907,6 +907,14 @@ interface FavoriteEntry {
     workspaceFolder?: string;
 }
 
+interface HistoryEntry {
+    actionId: string;
+    actionTitle: string;
+    timestamp: number;
+    status: 'success' | 'failure' | 'running';
+    output?: string;
+}
+
 export function normalizeTags(rawTags: unknown): string[] | undefined {
     if (!Array.isArray(rawTags)) {
         return undefined;
@@ -1352,6 +1360,120 @@ class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTreeNode> 
     }
 }
 
+class HistoryItem extends vscode.TreeItem {
+    constructor(private entry: HistoryEntry) {
+        super(entry.actionTitle, vscode.TreeItemCollapsibleState.None);
+
+        const statusIcon = entry.status === 'success' ? '✅' : entry.status === 'failure' ? '❌' : '⏳';
+        this.label = `${statusIcon} ${entry.actionTitle}`;
+
+        // Set contextValue based on whether output exists
+        this.contextValue = entry.output ? 'historyItemWithOutput' : 'historyItem';
+
+        const date = new Date(entry.timestamp);
+        this.tooltip = `Executed at: ${date.toLocaleString()}`;
+
+        this.command = {
+            command: 'taskhub.rerunFromHistory',
+            title: 'Re-run Action',
+            arguments: [this.entry]
+        };
+    }
+
+    getEntry(): HistoryEntry {
+        return this.entry;
+    }
+}
+
+class HistoryProvider implements vscode.TreeDataProvider<HistoryItem> {
+    private _onDidChangeTreeData: vscode.EventEmitter<HistoryItem | undefined | null | void> = new vscode.EventEmitter<HistoryItem | undefined | null | void>();
+    readonly onDidChangeTreeData: vscode.Event<HistoryItem | undefined | null | void> = this._onDidChangeTreeData.event;
+    public view: vscode.TreeView<HistoryItem> | undefined;
+    private historyKey = 'taskhub.actionHistory';
+
+    constructor(private context: vscode.ExtensionContext) {}
+
+    refresh(): void {
+        this._onDidChangeTreeData.fire();
+        this.updateTitle();
+    }
+
+    private updateTitle(): void {
+        if (this.view) {
+            const history = this.getHistory();
+            this.view.title = `History (${history.length})`;
+        }
+    }
+
+    getTreeItem(element: HistoryItem): vscode.TreeItem {
+        return element;
+    }
+
+    getChildren(element?: HistoryItem): Thenable<HistoryItem[]> {
+        if (!element) {
+            const history = this.getHistory();
+            return Promise.resolve(history.map(entry => new HistoryItem(entry)));
+        }
+        return Promise.resolve([]);
+    }
+
+    getHistory(): HistoryEntry[] {
+        return this.context.workspaceState.get<HistoryEntry[]>(this.historyKey, []);
+    }
+
+    addHistoryEntry(entry: HistoryEntry): void {
+        const maxItems = vscode.workspace.getConfiguration('taskhub.history').get<number>('maxItems', 10);
+        const history = this.getHistory();
+
+        history.unshift(entry);
+
+        if (history.length > maxItems) {
+            history.splice(maxItems);
+        }
+
+        this.context.workspaceState.update(this.historyKey, history);
+        this.refresh();
+    }
+
+    updateHistoryStatus(actionId: string, timestamp: number, status: 'success' | 'failure', output?: string): void {
+        const history = this.getHistory();
+        const entry = history.find(e => e.actionId === actionId && e.timestamp === timestamp);
+        if (entry) {
+            entry.status = status;
+            if (output !== undefined) {
+                entry.output = output;
+            }
+            this.context.workspaceState.update(this.historyKey, history);
+            this.refresh();
+        }
+    }
+
+    deleteHistoryItem(entry: HistoryEntry): void {
+        const history = this.getHistory();
+        const index = history.findIndex(e => e.actionId === entry.actionId && e.timestamp === entry.timestamp);
+        if (index !== -1) {
+            history.splice(index, 1);
+            this.context.workspaceState.update(this.historyKey, history);
+            this.refresh();
+        }
+    }
+
+    clearAllHistory(): void {
+        this.context.workspaceState.update(this.historyKey, []);
+        this.refresh();
+    }
+
+    trimHistoryToMax(): void {
+        const maxItems = vscode.workspace.getConfiguration('taskhub.history').get<number>('maxItems', 10);
+        const history = this.getHistory();
+        if (history.length > maxItems) {
+            history.splice(maxItems);
+            this.context.workspaceState.update(this.historyKey, history);
+            this.refresh();
+        }
+    }
+}
+
 type LinkQuickPickItem = vscode.QuickPickItem & { entry: LinkEntry };
 type FavoriteQuickPickItem = vscode.QuickPickItem & { entry: FavoriteEntry };
 
@@ -1638,7 +1760,7 @@ function finalizeActionRun(id: string, showTaskStatus: boolean, mainViewProvider
     }
 }
 
-async function executeAction(actionItem: ActionItem, context: vscode.ExtensionContext, mainViewProvider: MainViewProvider) {
+async function executeAction(actionItem: ActionItem, context: vscode.ExtensionContext, mainViewProvider: MainViewProvider, historyProvider?: HistoryProvider) {
     const resolved = resolveActionDefinition(actionItem);
     if (!resolved) {
         return;
@@ -1655,12 +1777,35 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     logActionStart(showVerboseLogs, actionItem.title, action.description);
 
+    // Add history entry
+    const timestamp = Date.now();
+    if (historyProvider) {
+        historyProvider.addHistoryEntry({
+            actionId: id,
+            actionTitle: actionItem.title,
+            timestamp: timestamp,
+            status: 'running'
+        });
+    }
+
     try {
         await runActionTasks(action, context, id, actionWorkspaceFolder);
         handleActionSuccess(id, action, showTaskStatus);
+
+        // Update history to success
+        if (historyProvider) {
+            historyProvider.updateHistoryStatus(id, timestamp, 'success');
+        }
     } catch (error: any) {
         if (!manuallyTerminatedActions.has(id)) {
             handleActionFailure(id, actionItem, action, error, showTaskStatus);
+
+            // Update history to failure
+            if (historyProvider) {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                historyProvider.updateHistoryStatus(id, timestamp, 'failure', errorMessage);
+            }
+
             throw error;
         }
     } finally {
@@ -2241,6 +2386,7 @@ export function activate(context: vscode.ExtensionContext) {
     const builtInLinkViewProvider = new LinkViewProvider(context, 'builtin');
     const workspaceLinkViewProvider = new LinkViewProvider(context, 'workspace');
     const favoriteViewProvider = new FavoriteViewProvider(context);
+    const historyProvider = new HistoryProvider(context);
     const mainView = vscode.window.createTreeView('mainView.main', { treeDataProvider: mainViewProvider });
     context.subscriptions.push(mainView);
     mainView.onDidExpandElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, true); } });
@@ -2248,10 +2394,12 @@ export function activate(context: vscode.ExtensionContext) {
     builtInLinkViewProvider.view = vscode.window.createTreeView('mainView.linkBuiltin', { treeDataProvider: builtInLinkViewProvider });
     workspaceLinkViewProvider.view = vscode.window.createTreeView('mainView.linkWorkspace', { treeDataProvider: workspaceLinkViewProvider });
     favoriteViewProvider.view = vscode.window.createTreeView('mainView.favorite', { treeDataProvider: favoriteViewProvider });
+    historyProvider.view = vscode.window.createTreeView('mainView.history', { treeDataProvider: historyProvider });
     builtInLinkViewProvider.refresh();
     workspaceLinkViewProvider.refresh();
     favoriteViewProvider.refresh();
-    context.subscriptions.push(builtInLinkViewProvider.view, workspaceLinkViewProvider.view, favoriteViewProvider.view);
+    historyProvider.refresh();
+    context.subscriptions.push(builtInLinkViewProvider.view, workspaceLinkViewProvider.view, favoriteViewProvider.view, historyProvider.view);
     const mediaActionsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/actions.json'));
     mediaActionsWatcher.onDidChange(() => mainViewProvider.refresh());
     mediaActionsWatcher.onDidCreate(() => mainViewProvider.refresh());
@@ -2310,7 +2458,7 @@ export function activate(context: vscode.ExtensionContext) {
         const fullActionItem = findActionById(allActions, actionId);
         if (fullActionItem) {
             try {
-                await executeAction(fullActionItem, context, mainViewProvider);
+                await executeAction(fullActionItem, context, mainViewProvider, historyProvider);
             } catch (error) {
                 console.error(`Execution failed for action '${actionId}':`, error);
             }
@@ -2333,7 +2481,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const actionItem = findActionById(allActions, args.id);
         if (actionItem && actionItem.action) {
-            await executeAction(actionItem, context, mainViewProvider);
+            await executeAction(actionItem, context, mainViewProvider, historyProvider);
         } else {
             vscode.window.showErrorMessage(`Action with ID '${args.id}' not found or it has no 'action' property.`);
         }
@@ -2751,6 +2899,81 @@ export function activate(context: vscode.ExtensionContext) {
 
         vscode.window.showInformationMessage('All TaskHub terminals have been closed.');
     }));
+
+    // History commands
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.rerunFromHistory', async (entry: HistoryEntry) => {
+        if (!entry || !entry.actionId) {
+            vscode.window.showErrorMessage('Invalid history entry.');
+            return;
+        }
+
+        let allActions: ActionItem[];
+        try {
+            allActions = loadAllActions(context);
+        } catch (error: any) {
+            console.error(error.message);
+            vscode.window.showErrorMessage(`Could not execute action: ${error.message}`);
+            return;
+        }
+
+        const fullActionItem = findActionById(allActions, entry.actionId);
+        if (fullActionItem) {
+            try {
+                await executeAction(fullActionItem, context, mainViewProvider, historyProvider);
+            } catch (error) {
+                console.error(`Execution failed for action '${entry.actionId}':`, error);
+            }
+        } else {
+            vscode.window.showErrorMessage(`Could not find action definition for ID '${entry.actionId}'.`);
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.viewHistoryOutput', async (item: HistoryItem) => {
+        const entry = item.getEntry();
+        if (!entry.output) {
+            vscode.window.showInformationMessage('No output available for this history item.');
+            return;
+        }
+
+        const doc = await vscode.workspace.openTextDocument({
+            content: entry.output,
+            language: 'text'
+        });
+        await vscode.window.showTextDocument(doc);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteHistoryItem', async (item: HistoryItem) => {
+        const entry = item.getEntry();
+        historyProvider.deleteHistoryItem(entry);
+        vscode.window.showInformationMessage('History item deleted.');
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.clearAllHistory', async () => {
+        const confirm = await vscode.window.showWarningMessage(
+            'Are you sure you want to clear all history?',
+            { modal: true },
+            'Clear All'
+        );
+        if (confirm === 'Clear All') {
+            historyProvider.clearAllHistory();
+            vscode.window.showInformationMessage('All history cleared.');
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.toggleHistoryPanel', async () => {
+        const config = vscode.workspace.getConfiguration('taskhub.history');
+        const currentValue = config.get<boolean>('showPanel', true);
+        await config.update('showPanel', !currentValue, vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage(`History panel ${!currentValue ? 'shown' : 'hidden'}.`);
+    }));
+
+    // Watch for configuration changes
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
+        if (e.affectsConfiguration('taskhub.history.maxItems')) {
+            historyProvider.trimHistoryToMax();
+        }
+    }));
+
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openSettings', () => { vscode.commands.executeCommand('workbench.action.openSettings', '@ext:Munseop.taskhub'); }));
 }
 

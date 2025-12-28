@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.17",
+  "version": "0.2.18",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -20,6 +20,7 @@
     "onView:mainView.linkBuiltin",
     "onView:mainView.linkWorkspace",
     "onView:mainView.favorite",
+    "onView:mainView.history",
     "onCommand:taskhub.openLink",
     "onCommand:taskhub.copyLink",
     "onCommand:taskhub.goToLink",
@@ -98,6 +99,18 @@
           ],
           "default": "utf8",
           "description": "Controls how TaskHub configures PowerShell output on Windows. Use `system` to keep the current console code page for legacy tools that do not recognise UTF-8 (code page 65001)."
+        },
+        "taskhub.history.maxItems": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum number of action history items to keep."
+        },
+        "taskhub.history.showPanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show or hide the History panel in the TaskHub sidebar."
         }
       }
     },
@@ -131,6 +144,12 @@
           "id": "mainView.favorite",
           "name": "Favorite Files",
           "icon": "media/f_icon.svg"
+        },
+        {
+          "id": "mainView.history",
+          "name": "History",
+          "icon": "media/h_icon.svg",
+          "when": "config.taskhub.history.showPanel"
         }
       ]
     },
@@ -244,6 +263,29 @@
       {
         "command": "taskhub.openSettings",
         "title": "TaskHub: Open Extension Settings"
+      },
+      {
+        "command": "taskhub.rerunFromHistory",
+        "title": "Re-run Action"
+      },
+      {
+        "command": "taskhub.viewHistoryOutput",
+        "title": "View Output",
+        "icon": "$(output)"
+      },
+      {
+        "command": "taskhub.deleteHistoryItem",
+        "title": "Delete History Item",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "taskhub.clearAllHistory",
+        "title": "Clear All History",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "taskhub.toggleHistoryPanel",
+        "title": "TaskHub: Show History Panel"
       }
     ],
     "menus": {
@@ -292,6 +334,11 @@
           "command": "taskhub.createAction",
           "when": "view == mainView.main",
           "group": "navigation@2"
+        },
+        {
+          "command": "taskhub.clearAllHistory",
+          "when": "view == mainView.history",
+          "group": "navigation"
         }
       ],
       "editor/context": [
@@ -335,6 +382,16 @@
           "command": "taskhub.stopAction",
           "when": "view == mainView.main && viewItem == runningAction",
           "group": "inline"
+        },
+        {
+          "command": "taskhub.viewHistoryOutput",
+          "when": "view == mainView.history && viewItem == historyItemWithOutput",
+          "group": "inline@1"
+        },
+        {
+          "command": "taskhub.deleteHistoryItem",
+          "when": "view == mainView.history && (viewItem == historyItem || viewItem == historyItemWithOutput)",
+          "group": "inline@2"
         }
       ]
     }

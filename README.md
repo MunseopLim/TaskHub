@@ -18,6 +18,7 @@
     11. [작업 종료](#11-작업-종료)
     12. [Multi-root 워크스페이스 지원](#12-multi-root-워크스페이스-지원)
     13. [쉬운 설정 관리](#13-쉬운-설정-관리)
+    14. [액션 실행 히스토리](#14-액션-실행-히스토리)
 2.  [설정](#설정)
 3.  [설치](#설치)
 4.  [사용법](#사용법)
@@ -27,12 +28,13 @@
 
 ### 1. 사용자 지정 메인 뷰
 
-이 확장 프로그램은 VS Code 활동 표시줄에 'H' 아이콘으로 식별되는 사용자 지정 뷰 컨테이너를 도입합니다. 이 메인 뷰(`mainView`)는 네 개의 하위 뷰를 호스팅합니다:
+이 확장 프로그램은 VS Code 활동 표시줄에 'H' 아이콘으로 식별되는 사용자 지정 뷰 컨테이너를 도입합니다. 이 메인 뷰(`mainView`)는 다섯 개의 하위 뷰를 호스팅합니다:
 
 *   **메인 패널 (`mainView.main`)**: 다양한 액션 버튼과 정보를 포함하며, 'M' 아이콘으로 식별됩니다.
 *   **Built-in 링크 패널 (`mainView.linkBuiltin`)**: 확장에서 기본 제공하는 링크를 표시하며, 'L' 아이콘으로 식별됩니다. 읽기 전용입니다.
 *   **워크스페이스 링크 패널 (`mainView.linkWorkspace`)**: 현재 워크스페이스에 정의된 링크를 표시하며, 'L' 아이콘으로 식별됩니다.
 *   **즐겨찾기 패널 (`mainView.favorite`)**: 구성 가능한 즐겨찾는 파일 목록을 표시하며, 'F' 아이콘으로 식별됩니다.
+*   **히스토리 패널 (`mainView.history`)**: 최근 실행한 액션들의 기록을 추적하고 관리하며, 'H' 아이콘으로 식별됩니다.
 
 ### 2. 사용자 지정 아이콘
 
@@ -375,6 +377,25 @@
 *   **예제 JSON 보기**: 메인 패널에 표시되는 버전 정보 항목의 컨텍스트 메뉴(마우스 오른쪽 클릭)를 통해 각 설정 파일의 예제 JSON 내용을 확인할 수 있습니다.
 *   **확장 프로그램 설정 열기**: 명령 팔레트(Cmd/Ctrl+Shift+P)에서 `TaskHub: Open Extension Settings`를 실행하여 확장 프로그램과 관련된 모든 설정을 VS Code 설정 화면에서 쉽게 확인하고 수정할 수 있습니다.
 
+### 14. 액션 실행 히스토리
+
+메인 뷰의 최하단에 위치한 히스토리 패널은 최근 실행한 액션들의 기록을 추적하고 관리합니다.
+
+**주요 기능:**
+*   **실행 기록 추적**: 액션을 실행할 때마다 히스토리에 자동으로 추가되며, 제목에는 총 개수가 표시됩니다 (예: "History (10)").
+*   **상태 표시**: 각 히스토리 항목은 실행 상태를 시각적으로 표시합니다:
+    *   ✅ 성공
+    *   ❌ 실패
+    *   ⏳ 실행 중
+*   **실행 시간 정보**: 히스토리 항목에 마우스를 올리면 액션이 실행된 정확한 시간이 툴팁으로 표시됩니다 (예: "Executed at: 2025-12-28 14:30:45").
+*   **빠른 재실행**: 히스토리 항목을 클릭하면 해당 액션을 즉시 재실행할 수 있습니다. 재실행된 액션은 새로운 히스토리 엔트리로 추가됩니다.
+*   **인라인 액션**: 각 히스토리 항목에 마우스를 올리면 다음 아이콘들이 표시됩니다:
+    *   출력 보기 아이콘 (📄): 실패한 액션의 에러 메시지를 확인할 수 있습니다. 출력이 있는 항목에만 표시됩니다.
+    *   휴지통 아이콘 (🗑️): 개별 히스토리 항목을 삭제합니다.
+*   **전체 히스토리 삭제**: 패널 제목 표시줄의 🗑️ 버튼을 클릭하여 모든 히스토리를 한 번에 삭제할 수 있습니다 (확인 대화상자 표시).
+*   **자동 제한**: 히스토리는 설정된 최대 개수까지만 유지되며, 초과 시 가장 오래된 항목부터 자동으로 삭제됩니다 (기본값: 10개).
+*   **패널 표시/숨김**: 설정에서 히스토리 패널을 숨길 수 있으며, `TaskHub: Show History Panel` 명령으로 다시 표시할 수 있습니다.
+
 ## 설정
 
 | 설정 ID | 타입 | 기본값 | 설명 |
@@ -383,6 +404,8 @@
 | `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | 파이프라인 실행 시 Output 패널에 상세 로그를 표시합니다. 기본적으로는 최소한의 상태 메시지만 표시됩니다. |
 | `taskhub.pipeline.pythonIoEncoding` | `string` | `utf-8` | TaskHub에서 실행하는 명령어의 `PYTHONIOENCODING` 환경 변수 값입니다. 빈 문자열로 설정하면 인코딩을 강제하지 않으며, `utf-8:ignore`와 같은 값을 지정할 수도 있습니다. |
 | `taskhub.pipeline.windowsPowerShellEncoding` | `string` | `utf8` | Windows에서 PowerShell 출력 인코딩을 제어합니다. `utf8`은 UTF-8(코드 페이지 65001)을 사용하고, `system`은 현재 콘솔 코드 페이지를 유지합니다. UTF-8을 인식하지 못하는 레거시 도구에는 `system`을 사용하세요. |
+| `taskhub.history.maxItems` | `number` | `10` | 히스토리 패널에 유지할 최대 액션 실행 기록 개수입니다. 1에서 50 사이의 값을 설정할 수 있습니다. |
+| `taskhub.history.showPanel` | `boolean` | `true` | TaskHub 사이드바에서 히스토리 패널을 표시하거나 숨깁니다. |
 
 ## 설치
 
@@ -399,9 +422,144 @@
 
 ## 개발
 
+### 빌드 및 테스트
+
 *   `npm run compile`: TypeScript 소스 코드를 컴파일합니다.
 *   `npm run watch`: watch 모드로 코드를 컴파일합니다.
 *   `npm run test`: 확장 프로그램 테스트를 실행합니다.
+*   `npm run check-types`: TypeScript 타입 체크만 실행합니다.
+*   `npm run lint`: ESLint로 코드 스타일을 검사합니다.
+
+### 프로젝트 구조
+
+```
+TaskHub/
+├── src/
+│   ├── extension.ts          # 메인 확장 파일 (2,900+ 줄)
+│   │                          # - activate() 함수: 확장 초기화 및 등록
+│   │                          # - Provider 클래스들: MainViewProvider, LinkViewProvider, FavoriteViewProvider, HistoryProvider
+│   │                          # - 액션 실행 로직: executeAction(), executeSingleTask()
+│   │                          # - 히스토리 관리: HistoryProvider (1386-1473줄)
+│   │                          # - 명령어 핸들러: taskhub.* 명령어들
+│   ├── schema.ts              # TypeScript 타입 정의
+│   └── test/
+│       └── extension.test.ts  # 유닛 테스트 (1,280+ 줄, 166개 테스트)
+├── schema/
+│   ├── actions.schema.json    # actions.json 스키마 및 검증
+│   ├── links.schema.json      # links.json 스키마 및 검증
+│   └── favorites.schema.json  # favorites.json 스키마 및 검증
+├── media/
+│   ├── h_icon.svg            # 메인 뷰 아이콘
+│   ├── actions.json          # 기본 제공 액션 예제
+│   ├── links.json            # 기본 제공 링크 예제
+│   └── *_example.json        # 각종 예제 파일들
+├── .vscode/
+│   ├── actions.json          # 워크스페이스별 액션 (선택사항)
+│   ├── links.json            # 워크스페이스별 링크 (선택사항)
+│   └── favorites.json        # 워크스페이스별 즐겨찾기 (선택사항)
+├── package.json              # 확장 메타데이터, 설정, 명령어, 뷰 정의
+└── README.md                 # 이 파일
+```
+
+### 주요 컴포넌트
+
+#### 1. TreeDataProvider 구현
+
+각 패널은 `vscode.TreeDataProvider`를 구현합니다:
+
+*   **MainViewProvider** (797-1094줄): 액션 버튼과 폴더 트리 관리
+*   **LinkViewProvider** (1099-1249줄): Built-in 및 Workspace 링크 관리
+*   **FavoriteViewProvider** (1251-1361줄): 즐겨찾기 파일 관리
+*   **HistoryProvider** (1386-1473줄): 액션 실행 히스토리 관리
+    *   `addHistoryEntry()`: 새 히스토리 추가
+    *   `updateHistoryStatus()`: 상태 업데이트 (running → success/failure)
+    *   `deleteHistoryItem()`: 개별 삭제
+    *   `clearAllHistory()`: 전체 삭제
+    *   `trimHistoryToMax()`: maxItems 초과 시 트리밍
+
+#### 2. 액션 실행 파이프라인
+
+*   **executeAction()** (1761-1812줄): 메인 액션 실행 함수
+    *   히스토리 추적 통합 (historyProvider 옵션 파라미터)
+    *   실행 시작: `running` 상태로 히스토리 추가
+    *   성공 시: `success` 상태로 업데이트
+    *   실패 시: `failure` 상태로 업데이트, 에러 메시지 저장
+
+*   **executeSingleTask()** (1814줄~): 개별 태스크 실행
+    *   지원 태스크 타입: fileDialog, folderDialog, unzip, zip, stringManipulation, shell/command
+
+*   **변수 치환**: `${변수명}` 형태의 변수를 실제 값으로 치환
+
+#### 3. 데이터 구조
+
+```typescript
+// 히스토리 엔트리 (910-916줄)
+interface HistoryEntry {
+    actionId: string;        // 액션 ID
+    actionTitle: string;     // 액션 제목
+    timestamp: number;       // 실행 시간 (Unix timestamp)
+    status: 'success' | 'failure' | 'running';  // 실행 상태
+    output?: string;         // 출력 (실패 시 에러 메시지)
+}
+
+// 링크 엔트리 (892-898줄)
+interface LinkEntry {
+    title: string;
+    link: string;
+    group?: string;
+    tags?: string[];
+    sourceFile?: string;
+}
+
+// 즐겨찾기 엔트리 (900-908줄)
+interface FavoriteEntry {
+    title: string;
+    path: string;
+    line?: number;
+    group?: string;
+    tags?: string[];
+    sourceFile?: string;
+    workspaceFolder?: string;
+}
+```
+
+#### 4. 설정 및 저장소
+
+*   **workspaceState**: 히스토리 데이터 저장 (VS Code API)
+    *   키: `'taskhub.actionHistory'`
+    *   값: `HistoryEntry[]` 배열
+
+*   **configuration**: VS Code 설정
+    *   `taskhub.history.maxItems`: 히스토리 최대 개수 (1-50, 기본값: 10)
+    *   `taskhub.history.showPanel`: 패널 표시 여부 (기본값: true)
+
+### 개발 시 주의사항
+
+1. **히스토리 기능 수정 시**:
+   *   `HistoryProvider` 클래스 수정 (extension.ts:1386-1473)
+   *   `executeAction()` 함수의 히스토리 추적 로직 확인 (extension.ts:1778-1806)
+   *   테스트 업데이트 (src/test/extension.test.ts:1036-1283)
+
+2. **새 패널 추가 시**:
+   *   `package.json`의 `views` 섹션에 뷰 정의 추가
+   *   `extension.ts`에 TreeDataProvider 클래스 구현
+   *   `activate()` 함수에서 등록 (2240-2377줄)
+
+3. **새 명령어 추가 시**:
+   *   `package.json`의 `commands` 섹션에 명령어 정의
+   *   `activate()` 함수에서 명령어 핸들러 등록
+   *   필요 시 `menus` 섹션에서 UI 위치 지정
+
+4. **스키마 수정 시**:
+   *   `schema/*.schema.json` 파일 업데이트
+   *   JSON 검증 로직 확인
+
+### 디버깅
+
+*   **F5** 키: Extension Development Host 실행
+*   breakpoint 설정 가능
+*   Console 로그: `Developer: Toggle Developer Tools`
+*   Output 패널: "TaskHub" 채널에서 로그 확인
 
 ---
 
