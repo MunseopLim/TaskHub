@@ -1991,7 +1991,7 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
     return result;
 }
 
-function createShellExecution(command: string, args: string[], options: vscode.ShellExecutionOptions, useUtf8Console: boolean): { shellExecution: vscode.ShellExecution; displayCommand: string } {
+export function createShellExecution(command: string, args: string[], options: vscode.ShellExecutionOptions, useUtf8Console: boolean): { shellExecution: vscode.ShellExecution; displayCommand: string } {
     if (process.platform === 'win32') {
         const invocation = buildPowerShellInvocation(command, args, useUtf8Console);
         const encoded = encodePowerShellScript(invocation.script);
@@ -2008,7 +2008,7 @@ function createShellExecution(command: string, args: string[], options: vscode.S
     };
 }
 
-function wrapCommandForOneShot(command: string, args: string[], cwd: string | undefined, useUtf8Console: boolean): { commandLine: string; displayCommand: string; isPowerShellScript: boolean } {
+export function wrapCommandForOneShot(command: string, args: string[], cwd: string | undefined, useUtf8Console: boolean): { commandLine: string; displayCommand: string; isPowerShellScript: boolean } {
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
     if (process.platform === 'win32') {
         const filePath = quotePowerShellArgument(executable);

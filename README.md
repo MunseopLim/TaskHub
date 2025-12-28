@@ -182,6 +182,14 @@
 
 아카이브 경로는 `inputs.archive` → `inputs.file` → `archive` 순으로 해석됩니다. 대상 폴더는 `destination` → `inputs.destination` → (지정된 아카이브의 상위 폴더) 순으로 결정됩니다.
 
+#### `folderDialog` 태스크
+
+사용자에게 폴더 선택 대화상자를 표시합니다.
+
+- `type` (string, **필수**): `folderDialog`로 설정해야 합니다.
+- `options` (object, *선택*): `vscode.OpenDialogOptions`와 동일한 옵션을 사용할 수 있습니다. (예: `openLabel`, `defaultUri`)
+- **실행 결과**: 다음 태스크에서 `${task_id.path}`(선택된 폴더의 절대 경로), `${task_id.name}`(폴더 이름) 등을 사용할 수 있습니다.
+
 #### `zip` 태스크
 
 이 태스크는 지정된 파일이나 폴더를 압축하여 하나의 아카이브 파일을 생성합니다.
@@ -367,8 +375,10 @@
 -   `quickPick` 태스크 (`id: "select_env"`)의 결과 사용 예시:
     -   `${select_env.value}`: 선택된 항목 (단일 선택 또는 다중 선택의 첫 번째 항목)
     -   `${select_env.values}`: 선택된 모든 항목 (다중 선택 시 쉼표로 구분된 문자열)
--   `${zip_task.archivePath}`: `zip` 태스크가 생성한 아카이브 경로
--   `${unzip_task.outputDir}`: `unzip` 태스크가 추출한 폴더 경로
+- `${zip_task.archivePath}`: `zip` 태스크가 생성한 아카이브 경로
+- `${unzip_task.outputDir}`: `unzip` 태스크가 추출한 폴더 경로
+- `${workspaceFolder}`: 현재 워크스페이스 폴더의 절대 경로
+- `${extensionPath}`: 확장 프로그램이 설치된 절대 경로. 확장 내부에 포함된 리소스를 참조할 때 유용합니다.
 
 #### 전체 예시
 
@@ -621,7 +631,7 @@ TaskHub/
 │   │                          # - 명령어 핸들러: taskhub.* 명령어들
 │   ├── schema.ts              # TypeScript 타입 정의
 │   └── test/
-│       └── extension.test.ts  # 유닛 테스트 (1,280+ 줄, 166개 테스트)
+│       └── extension.test.ts  # 유닛 테스트 (1,600+ 줄, 189개 테스트)
 ├── schema/
 │   ├── actions.schema.json    # actions.json 스키마 및 검증
 │   ├── links.schema.json      # links.json 스키마 및 검증

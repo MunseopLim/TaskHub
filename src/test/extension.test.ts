@@ -22,6 +22,8 @@ import {
 	buildPosixCommandLine,
 	encodePowerShellScript,
 	normalizeLineNumber,
+	wrapCommandForOneShot,
+	createShellExecution,
 } from '../extension';
 import { ActionItem } from '../schema';
 
@@ -1623,6 +1625,79 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(normalizeLineNumber({}), undefined);
 			assert.strictEqual(normalizeLineNumber([]), undefined);
 			assert.strictEqual(normalizeLineNumber(true), undefined);
+		});
+	});
+
+	suite('wrapCommandForOneShot', () => {
+		test('should wrap command for Windows PowerShell with UTF-8', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'win32' });
+			
+			const result = wrapCommandForOneShot('notepad', ['file.txt'], undefined, true);
+			
+			assert.strictEqual(result.isPowerShellScript, true);
+			assert.ok(result.commandLine.includes('Start-Process'));
+			assert.ok(result.commandLine.includes("-FilePath 'notepad'"));
+			assert.ok(result.commandLine.includes("-ArgumentList @('file.txt')"));
+			assert.ok(result.commandLine.includes('[Console]::OutputEncoding'));
+			
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+
+		test('should wrap command for Windows PowerShell without UTF-8', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'win32' });
+			
+			const result = wrapCommandForOneShot('notepad', [], 'C:\\cwd', false);
+			
+			assert.strictEqual(result.isPowerShellScript, true);
+			assert.ok(!result.commandLine.includes('[Console]::OutputEncoding'));
+			assert.ok(result.commandLine.includes("-WorkingDirectory 'C:\\cwd'"));
+			
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+
+		test('should wrap command for POSIX with nohup', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'linux' });
+			
+			const result = wrapCommandForOneShot('python', ['script.py'], undefined, false);
+			
+			assert.strictEqual(result.isPowerShellScript, false);
+			assert.ok(result.commandLine.startsWith('nohup python'));
+			assert.ok(result.commandLine.includes("'script.py'"));
+			assert.ok(result.commandLine.endsWith('>/dev/null 2>&1 &'));
+			
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+	});
+
+	suite('createShellExecution', () => {
+		test('should create PowerShell execution for Windows', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'win32' });
+			
+			const options: vscode.ShellExecutionOptions = { cwd: 'C:\\' };
+			const result = createShellExecution('echo', ['hello'], options, true);
+			
+			assert.ok(result.shellExecution);
+			// Verify display command matches expected format
+			assert.ok(result.displayCommand.includes('echo'));
+			
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+
+		test('should create ShellExecution for POSIX', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'darwin' });
+			
+			const options: vscode.ShellExecutionOptions = { cwd: '/tmp' };
+			const result = createShellExecution('ls', ['-la'], options, false);
+			
+			assert.ok(result.shellExecution);
+			assert.strictEqual(result.displayCommand, "ls '-la'");
+			
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
 		});
 	});
 });
