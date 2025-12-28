@@ -71,7 +71,7 @@
         "type": {
           "type": "string",
           "description": "The type of the task to execute.",
-          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation"]
+          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick"]
         },
         "command": {
           "oneOf": [
@@ -111,6 +111,68 @@
         "options": {
           "type": "object",
           "description": "Options for 'fileDialog' or 'folderDialog' types, based on VS Code's OpenDialogOptions."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "The prompt text for 'inputBox' type."
+        },
+        "value": {
+          "type": "string",
+          "description": "The default value for 'inputBox' type."
+        },
+        "placeHolder": {
+          "type": "string",
+          "description": "The placeholder text for 'inputBox' or 'quickPick' type."
+        },
+        "password": {
+          "type": "boolean",
+          "description": "If true, the input box will be masked (for 'inputBox' type).",
+          "default": false
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Text to prepend to the user input (for 'inputBox' type). The final value will be: prefix + userInput + suffix"
+        },
+        "suffix": {
+          "type": "string",
+          "description": "Text to append to the user input (for 'inputBox' type). The final value will be: prefix + userInput + suffix"
+        },
+        "items": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Array of simple string items for 'quickPick' type."
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "description": "The main text to display."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Additional description text."
+                  },
+                  "detail": {
+                    "type": "string",
+                    "description": "Detailed information about this option."
+                  }
+                },
+                "required": ["label"]
+              },
+              "description": "Array of quick pick items with labels and optional descriptions."
+            }
+          ],
+          "description": "List of items to select from (for 'quickPick' type)."
+        },
+        "canPickMany": {
+          "type": "boolean",
+          "description": "If true, allows multiple selection (for 'quickPick' type). Results will be available as both 'value' (first selection) and 'values' (comma-separated list).",
+          "default": false
         },
         "tool": {
           "oneOf": [

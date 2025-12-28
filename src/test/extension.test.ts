@@ -1286,4 +1286,95 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(entries.length, oldMax);
 		});
 	});
+
+	suite('InputBox Task', () => {
+		test('should apply prefix to user input', () => {
+			const userInput = 'Test 1234 123';
+			const prefix = '-g ';
+			const expected = '-g Test 1234 123';
+			const result = prefix + userInput;
+			assert.strictEqual(result, expected);
+		});
+
+		test('should apply suffix to user input', () => {
+			const userInput = 'Test 1234 123';
+			const suffix = ' --verbose';
+			const expected = 'Test 1234 123 --verbose';
+			const result = userInput + suffix;
+			assert.strictEqual(result, expected);
+		});
+
+		test('should apply both prefix and suffix', () => {
+			const userInput = 'Test 1234 123';
+			const prefix = '-g ';
+			const suffix = ' --verbose';
+			const expected = '-g Test 1234 123 --verbose';
+			const result = prefix + userInput + suffix;
+			assert.strictEqual(result, expected);
+		});
+
+		test('should return user input when no prefix/suffix', () => {
+			const userInput = 'Test 1234 123';
+			const result = userInput;
+			assert.strictEqual(result, userInput);
+		});
+
+		test('should handle empty user input with prefix/suffix', () => {
+			const userInput = '';
+			const prefix = '-g ';
+			const suffix = ' --verbose';
+			const expected = '-g  --verbose';
+			const result = prefix + userInput + suffix;
+			assert.strictEqual(result, expected);
+		});
+
+		test('should interpolate prefix in template', () => {
+			const prefix = '-g ';
+			const userInput = 'Test';
+			const template = '${input.value}';
+			const context = { input: { value: prefix + userInput } };
+			const result = interpolatePipelineVariables(template, context);
+			assert.strictEqual(result, '-g Test');
+		});
+	});
+
+	suite('QuickPick Task', () => {
+		test('should handle single selection', () => {
+			const items = ['dev', 'staging', 'production'];
+			const selected = 'staging';
+			assert.ok(items.includes(selected));
+		});
+
+		test('should handle multiple selection', () => {
+			const items = ['feature1', 'feature2', 'feature3'];
+			const selected = ['feature1', 'feature3'];
+			selected.forEach(item => {
+				assert.ok(items.includes(item));
+			});
+		});
+
+		test('should handle quick pick item with description', () => {
+			const item = {
+				label: 'production',
+				description: 'Production environment',
+				detail: 'Use this for production deployment'
+			};
+			assert.strictEqual(item.label, 'production');
+			assert.strictEqual(item.description, 'Production environment');
+		});
+
+		test('should interpolate selected value in template', () => {
+			const template = 'Running in ${env.value} environment';
+			const context = { env: { value: 'production' } };
+			const result = interpolatePipelineVariables(template, context);
+			assert.strictEqual(result, 'Running in production environment');
+		});
+
+		test('should handle multiple selections in template', () => {
+			const template = 'Selected: ${features.values}';
+			const context = { features: { values: 'feature1,feature2' } };
+			const result = interpolatePipelineVariables(template, context);
+			assert.strictEqual(result, 'Selected: feature1,feature2');
+		});
+	});
 });

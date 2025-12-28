@@ -249,6 +249,109 @@
 }
 ```
 
+#### `inputBox` 태스크
+
+사용자로부터 텍스트 입력을 받아 다음 태스크에서 사용할 수 있습니다. 명령어 실행 시 필요한 파라미터를 동적으로 입력받을 때 유용합니다.
+
+-   `type` (string, **필수**): `inputBox`로 설정해야 합니다.
+-   `prompt` (string, *선택*): 입력 박스에 표시될 프롬프트 메시지입니다.
+-   `value` (string, *선택*): 입력 박스의 기본값입니다.
+-   `placeHolder` (string, *선택*): 입력 박스의 플레이스홀더 텍스트입니다.
+-   `password` (boolean, *선택*, 기본값: `false`): `true`로 설정하면 입력값이 마스킹됩니다 (비밀번호 입력용).
+-   `prefix` (string, *선택*): 사용자 입력 앞에 자동으로 추가될 텍스트입니다. 최종값은 `prefix + 사용자입력 + suffix`가 됩니다.
+-   `suffix` (string, *선택*): 사용자 입력 뒤에 자동으로 추가될 텍스트입니다.
+-   **실행 결과**: 입력된 값(prefix/suffix 포함)은 `${task_id.value}`로 접근합니다.
+
+**예시 1: 간단한 입력**
+```json
+{
+  "id": "input_name",
+  "type": "inputBox",
+  "prompt": "Enter your name",
+  "placeHolder": "John Doe"
+}
+```
+
+**예시 2: prefix와 suffix 사용**
+```json
+{
+  "id": "input_args",
+  "type": "inputBox",
+  "prompt": "Enter arguments (prefix '-g' will be added automatically)",
+  "placeHolder": "Test 1234 123",
+  "prefix": "-g ",
+  "suffix": " --verbose"
+}
+```
+사용자가 "Test 1234 123"을 입력하면 `${input_args.value}` = "-g Test 1234 123 --verbose"
+
+**예시 3: 비밀번호 입력**
+```json
+{
+  "id": "input_password",
+  "type": "inputBox",
+  "prompt": "Enter API key",
+  "password": true
+}
+```
+
+#### `quickPick` 태스크
+
+미리 정의된 옵션 목록에서 사용자가 선택할 수 있습니다. 환경 선택, 빌드 타입 선택 등에 유용합니다.
+
+-   `type` (string, **필수**): `quickPick`으로 설정해야 합니다.
+-   `items` (array, **필수**): 선택 가능한 항목 목록입니다. 문자열 배열 또는 객체 배열을 사용할 수 있습니다.
+    -   문자열 배열: `["dev", "staging", "production"]`
+    -   객체 배열: `[{"label": "dev", "description": "개발 환경", "detail": "상세 설명"}]`
+-   `placeHolder` (string, *선택*): Quick Pick에 표시될 플레이스홀더 텍스트입니다.
+-   `canPickMany` (boolean, *선택*, 기본값: `false`): `true`로 설정하면 다중 선택이 가능합니다.
+-   **실행 결과**:
+    -   단일 선택: `${task_id.value}` (선택된 항목의 label)
+    -   다중 선택: `${task_id.value}` (첫 번째 선택), `${task_id.values}` (모든 선택, 쉼표로 구분)
+
+**예시 1: 간단한 선택**
+```json
+{
+  "id": "select_env",
+  "type": "quickPick",
+  "placeHolder": "Select deployment environment",
+  "items": ["dev", "staging", "production"]
+}
+```
+
+**예시 2: 설명이 있는 선택**
+```json
+{
+  "id": "select_build",
+  "type": "quickPick",
+  "placeHolder": "Select build type",
+  "items": [
+    {
+      "label": "debug",
+      "description": "Debug build with symbols",
+      "detail": "Best for development and debugging"
+    },
+    {
+      "label": "release",
+      "description": "Optimized release build",
+      "detail": "Best for production deployment"
+    }
+  ]
+}
+```
+
+**예시 3: 다중 선택**
+```json
+{
+  "id": "select_features",
+  "type": "quickPick",
+  "placeHolder": "Select features to enable (multiple selection)",
+  "canPickMany": true,
+  "items": ["authentication", "logging", "caching", "monitoring"]
+}
+```
+선택 결과: `${select_features.values}` = "authentication,logging"
+
 #### 변수 치환
 
 파이프라인 내에서, 이전 태스크의 결과는 `${task_id.property}` 형식으로 다음 태스크의 속성(예: `command`, `args`, `filePath` 등)에서 사용할 수 있습니다.
@@ -259,6 +362,11 @@
     -   `${select_file.name}`: 파일명
     -   `${select_file.fileNameOnly}`: 확장자를 제외한 파일명
     -   `${select_file.fileExt}`: 확장자
+-   `inputBox` 태스크 (`id: "input_name"`)의 결과 사용 예시:
+    -   `${input_name.value}`: 입력된 값 (prefix/suffix 포함)
+-   `quickPick` 태스크 (`id: "select_env"`)의 결과 사용 예시:
+    -   `${select_env.value}`: 선택된 항목 (단일 선택 또는 다중 선택의 첫 번째 항목)
+    -   `${select_env.values}`: 선택된 모든 항목 (다중 선택 시 쉼표로 구분된 문자열)
 -   `${zip_task.archivePath}`: `zip` 태스크가 생성한 아카이브 경로
 -   `${unzip_task.outputDir}`: `unzip` 태스크가 추출한 폴더 경로
 
@@ -313,7 +421,77 @@
 ]
 ```
 
+**파일 실행 + 파라미터 입력 예시:**
 
+파일을 선택하고, 환경과 파라미터를 동적으로 입력받아 실행하는 실제 사용 예제입니다.
+
+```json
+{
+  "id": "action.run.script.with.params",
+  "title": "Run Script with Parameters",
+  "action": {
+    "description": "Select file, environment, and parameters to run a script",
+    "successMessage": "Script executed successfully!",
+    "tasks": [
+      {
+        "id": "select_script",
+        "type": "fileDialog",
+        "options": {
+          "filters": {
+            "Scripts": ["js", "py", "sh"]
+          }
+        }
+      },
+      {
+        "id": "select_environment",
+        "type": "quickPick",
+        "placeHolder": "Select environment",
+        "items": [
+          {
+            "label": "development",
+            "description": "Development environment"
+          },
+          {
+            "label": "staging",
+            "description": "Staging environment"
+          },
+          {
+            "label": "production",
+            "description": "Production environment"
+          }
+        ]
+      },
+      {
+        "id": "input_port",
+        "type": "inputBox",
+        "prompt": "Enter port number",
+        "value": "3000",
+        "placeHolder": "3000"
+      },
+      {
+        "id": "input_extra_args",
+        "type": "inputBox",
+        "prompt": "Enter extra arguments (optional)",
+        "placeHolder": "additional flags",
+        "prefix": "--extra "
+      },
+      {
+        "id": "run_script",
+        "type": "shell",
+        "command": "node ${select_script.path} --env ${select_environment.value} --port ${input_port.value} ${input_extra_args.value}",
+        "revealTerminal": "always"
+      }
+    ]
+  }
+}
+```
+
+이 예제는 다음 과정을 거칩니다:
+1. **파일 선택**: 실행할 스크립트 파일 선택 (`.js`, `.py`, `.sh`)
+2. **환경 선택**: Quick Pick으로 development/staging/production 중 선택
+3. **포트 입력**: 기본값 3000이 제시되며 사용자가 변경 가능
+4. **추가 인자 입력**: 사용자가 입력하면 자동으로 `--extra` 플래그가 앞에 붙음
+5. **스크립트 실행**: 모든 파라미터를 조합하여 명령어 실행
 
 ### 6. 즐겨찾기 패널 (`mainView.favorite`)
 

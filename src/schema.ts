@@ -25,10 +25,10 @@ export interface Action {
  */
 export interface Task {
     id: string;
-    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'zip' | 'stringManipulation';
+    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick';
 
     // Properties for 'shell' and 'command' types
-    command?: string | { 
+    command?: string | {
         windows?: string;
         macos?: string;
         linux?: string;
@@ -41,8 +41,20 @@ export interface Task {
     // Properties for 'fileDialog' and 'folderDialog'
     options?: any; // Corresponds to vscode.OpenDialogOptions
 
+    // Properties for 'inputBox'
+    prompt?: string;
+    value?: string;
+    placeHolder?: string;
+    password?: boolean;
+    prefix?: string;
+    suffix?: string;
+
+    // Properties for 'quickPick'
+    items?: string[] | QuickPickItem[];
+    canPickMany?: boolean;
+
     // Properties for 'unzip' and 'zip'
-    tool?: string | { 
+    tool?: string | {
         windows?: string;
         macos?: string;
         linux?: string;
@@ -66,6 +78,15 @@ export interface Task {
     // Execution behavior
     passTheResultToNextTask?: boolean;
     isOneShot?: boolean;
+}
+
+/**
+ * Represents a quick pick item with label and optional description.
+ */
+export interface QuickPickItem {
+    label: string;
+    description?: string;
+    detail?: string;
 }
 
 /**

@@ -1831,6 +1831,38 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
         case 'folderDialog':
             result = await handleFolderDialog(task);
             break;
+        case 'inputBox':
+            // Interpolate prompt, value, placeHolder, prefix, suffix
+            const interpolatedTask = {
+                ...task,
+                prompt: task.prompt ? interpolatePipelineVariables(task.prompt, interpolationContext) : undefined,
+                value: task.value ? interpolatePipelineVariables(task.value, interpolationContext) : undefined,
+                placeHolder: task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined,
+                prefix: task.prefix ? interpolatePipelineVariables(task.prefix, interpolationContext) : undefined,
+                suffix: task.suffix ? interpolatePipelineVariables(task.suffix, interpolationContext) : undefined
+            };
+            result = await handleInputBox(interpolatedTask);
+            break;
+        case 'quickPick':
+            // Interpolate items if they're strings or contain interpolatable properties
+            const interpolatedItems = task.items?.map((item: any) => {
+                if (typeof item === 'string') {
+                    return interpolatePipelineVariables(item, interpolationContext);
+                } else {
+                    return {
+                        label: item.label ? interpolatePipelineVariables(item.label, interpolationContext) : item.label,
+                        description: item.description ? interpolatePipelineVariables(item.description, interpolationContext) : item.description,
+                        detail: item.detail ? interpolatePipelineVariables(item.detail, interpolationContext) : item.detail
+                    };
+                }
+            });
+            const interpolatedQuickPickTask = {
+                ...task,
+                items: interpolatedItems,
+                placeHolder: task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined
+            };
+            result = await handleQuickPick(interpolatedQuickPickTask);
+            break;
         case 'unzip':
             const interpolatedUnzipTask: any = { ...task };
             if (task.tool) {
@@ -2104,6 +2136,65 @@ async function handleFolderDialog(task: any): Promise<{ path: string, dir: strin
     options.canSelectFiles = false; options.canSelectFolders = true;
     const folderUri = await vscode.window.showOpenDialog(options);
     if (folderUri && folderUri[0]) { return { path: folderUri[0].fsPath, dir: path.dirname(folderUri[0].fsPath), name: path.basename(folderUri[0].fsPath) }; }    else { throw new Error('Folder selection was canceled.'); }
+}
+
+async function handleInputBox(task: any): Promise<{ value: string }> {
+    const options: vscode.InputBoxOptions = {
+        prompt: task.prompt,
+        value: task.value,
+        placeHolder: task.placeHolder,
+        password: task.password || false
+    };
+    const userInput = await vscode.window.showInputBox(options);
+    if (userInput !== undefined) {
+        const prefix = task.prefix || '';
+        const suffix = task.suffix || '';
+        const finalValue = prefix + userInput + suffix;
+        return { value: finalValue };
+    } else {
+        throw new Error('Input was canceled.');
+    }
+}
+
+async function handleQuickPick(task: any): Promise<{ value: string; values?: string }> {
+    if (!task.items || !Array.isArray(task.items) || task.items.length === 0) {
+        throw new Error(`Task '${task.id}' of type 'quickPick' requires a non-empty 'items' array.`);
+    }
+
+    const options: vscode.QuickPickOptions = {
+        placeHolder: task.placeHolder,
+        canPickMany: task.canPickMany || false
+    };
+
+    // Convert string items to QuickPickItem format
+    const items: vscode.QuickPickItem[] = task.items.map((item: any) => {
+        if (typeof item === 'string') {
+            return { label: item };
+        } else {
+            return {
+                label: item.label,
+                description: item.description,
+                detail: item.detail
+            };
+        }
+    });
+
+    if (task.canPickMany) {
+        const selected = await vscode.window.showQuickPick(items, { ...options, canPickMany: true });
+        if (selected && selected.length > 0) {
+            const labels = selected.map(item => item.label);
+            return { value: labels[0], values: labels.join(',') };
+        } else {
+            throw new Error('Quick pick selection was canceled.');
+        }
+    } else {
+        const selected = await vscode.window.showQuickPick(items, options);
+        if (selected) {
+            return { value: selected.label };
+        } else {
+            throw new Error('Quick pick selection was canceled.');
+        }
+    }
 }
 
 async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: string, actionId?: string): Promise<{ outputDir: string }> {

@@ -177,5 +177,187 @@
         }
       ]
     }
+  },
+  {
+    "id": "action.inputbox.simple",
+    "title": "InputBox: Enter Text",
+    "action": {
+      "description": "Prompt user for input and echo it",
+      "tasks": [
+        {
+          "id": "input_name",
+          "type": "inputBox",
+          "prompt": "Enter your name",
+          "placeHolder": "John Doe"
+        },
+        {
+          "id": "echo_name",
+          "type": "shell",
+          "command": "echo Hello, ${input_name.value}!",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "action.inputbox.with.prefix",
+    "title": "InputBox: With Prefix/Suffix",
+    "action": {
+      "description": "Demonstrate prefix and suffix in inputBox - user only enters the main value",
+      "tasks": [
+        {
+          "id": "input_args",
+          "type": "inputBox",
+          "prompt": "Enter arguments (prefix '-g' will be added automatically)",
+          "placeHolder": "Test 1234 123",
+          "prefix": "-g ",
+          "suffix": " --verbose"
+        },
+        {
+          "id": "show_args",
+          "type": "shell",
+          "command": "echo Full command args: ${input_args.value}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "action.quickpick.simple",
+    "title": "QuickPick: Select Environment",
+    "action": {
+      "description": "Select environment from predefined options",
+      "tasks": [
+        {
+          "id": "select_env",
+          "type": "quickPick",
+          "placeHolder": "Select deployment environment",
+          "items": ["dev", "staging", "production"]
+        },
+        {
+          "id": "show_env",
+          "type": "shell",
+          "command": "echo Selected environment: ${select_env.value}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "action.quickpick.with.description",
+    "title": "QuickPick: With Descriptions",
+    "action": {
+      "description": "Select option with detailed descriptions",
+      "tasks": [
+        {
+          "id": "select_build",
+          "type": "quickPick",
+          "placeHolder": "Select build type",
+          "items": [
+            {
+              "label": "debug",
+              "description": "Debug build with symbols",
+              "detail": "Best for development and debugging"
+            },
+            {
+              "label": "release",
+              "description": "Optimized release build",
+              "detail": "Best for production deployment"
+            },
+            {
+              "label": "profile",
+              "description": "Release build with profiling",
+              "detail": "For performance analysis"
+            }
+          ]
+        },
+        {
+          "id": "show_build",
+          "type": "shell",
+          "command": "echo Build type: ${select_build.value}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "action.quickpick.multiple",
+    "title": "QuickPick: Multiple Selection",
+    "action": {
+      "description": "Select multiple features to enable",
+      "tasks": [
+        {
+          "id": "select_features",
+          "type": "quickPick",
+          "placeHolder": "Select features to enable (multiple selection)",
+          "canPickMany": true,
+          "items": ["authentication", "logging", "caching", "monitoring", "analytics"]
+        },
+        {
+          "id": "show_features",
+          "type": "shell",
+          "command": "echo Enabled features: ${select_features.values}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "action.run.script.with.params",
+    "title": "Complete Example: Run Script with Parameters",
+    "action": {
+      "description": "Select file, environment, and parameters to run a script",
+      "successMessage": "Script executed successfully!",
+      "tasks": [
+        {
+          "id": "select_script",
+          "type": "fileDialog",
+          "options": {
+            "filters": {
+              "Scripts": ["js", "py", "sh"]
+            }
+          }
+        },
+        {
+          "id": "select_environment",
+          "type": "quickPick",
+          "placeHolder": "Select environment",
+          "items": [
+            {
+              "label": "development",
+              "description": "Development environment"
+            },
+            {
+              "label": "staging",
+              "description": "Staging environment"
+            },
+            {
+              "label": "production",
+              "description": "Production environment"
+            }
+          ]
+        },
+        {
+          "id": "input_port",
+          "type": "inputBox",
+          "prompt": "Enter port number",
+          "value": "3000",
+          "placeHolder": "3000"
+        },
+        {
+          "id": "input_extra_args",
+          "type": "inputBox",
+          "prompt": "Enter extra arguments (optional)",
+          "placeHolder": "additional flags",
+          "prefix": "--extra "
+        },
+        {
+          "id": "run_script",
+          "type": "shell",
+          "command": "node ${select_script.path} --env ${select_environment.value} --port ${input_port.value} ${input_extra_args.value}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
   }
 ]
