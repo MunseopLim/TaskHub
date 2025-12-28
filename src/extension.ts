@@ -220,7 +220,7 @@ export function interpolatePipelineVariables(template: string, context: any): st
     });
 }
 
-function getCommandString(command: any): string {
+export function getCommandString(command: any): string {
     if (typeof command === 'string') { return command; }
     if (typeof command === 'object' && command !== null) {
         const platform = process.platform;
@@ -231,7 +231,7 @@ function getCommandString(command: any): string {
     throw new Error(`Invalid or unsupported 'command' property for the current platform (${process.platform}). Provide a string or an object with platform-specific entries.`);
 }
 
-function getToolCommand(tool: any): string {
+export function getToolCommand(tool: any): string {
     let toolCommand: string | undefined;
     if (typeof tool === 'string') {
         toolCommand = tool;
@@ -307,7 +307,7 @@ export function quotePowerShellArgument(value: string): string {
     return value.length === 0 ? "''" : `'${value.replace(/'/g, "''")}'`;
 }
 
-function buildPowerShellInvocation(command: string, args: string[], enforceUtf8Console: boolean): { script: string; display: string } {
+export function buildPowerShellInvocation(command: string, args: string[], enforceUtf8Console: boolean): { script: string; display: string } {
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
     const quotedExe = quotePowerShellArgument(executable);
     const quotedArgs = combinedArgs.map(arg => quotePowerShellArgument(arg));
@@ -317,7 +317,7 @@ function buildPowerShellInvocation(command: string, args: string[], enforceUtf8C
     return { script, display: invocation };
 }
 
-function encodePowerShellScript(script: string): string {
+export function encodePowerShellScript(script: string): string {
     return Buffer.from(script, 'utf16le').toString('base64');
 }
 
@@ -353,7 +353,7 @@ export function quotePosixArgument(value: string): string {
     return value.length === 0 ? "''" : `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-function buildPosixCommandLine(command: string, args: string[]): string {
+export function buildPosixCommandLine(command: string, args: string[]): string {
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
     const commandPart = /^[A-Za-z0-9_./-]+$/.test(executable) ? executable : quotePosixArgument(executable);
     const parts = [commandPart, ...combinedArgs.map(arg => quotePosixArgument(arg))];
@@ -936,7 +936,7 @@ export function parseTagInput(input: string | undefined): string[] | undefined {
     return parts.length > 0 ? parts : undefined;
 }
 
-function normalizeLineNumber(raw: unknown): number | undefined {
+export function normalizeLineNumber(raw: unknown): number | undefined {
     if (typeof raw === 'number' && Number.isFinite(raw)) {
         const value = Math.floor(raw);
         return value > 0 ? value : undefined;

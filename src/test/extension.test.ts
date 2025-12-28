@@ -16,6 +16,12 @@ import {
 	insertActionIntoDestination,
 	createGroupedTaskPresentationOptions,
 	addLinkEntry,
+	getCommandString,
+	getToolCommand,
+	buildPowerShellInvocation,
+	buildPosixCommandLine,
+	encodePowerShellScript,
+	normalizeLineNumber,
 } from '../extension';
 import { ActionItem } from '../schema';
 
@@ -1375,6 +1381,248 @@ suite('Extension Test Suite', () => {
 			const context = { features: { values: 'feature1,feature2' } };
 			const result = interpolatePipelineVariables(template, context);
 			assert.strictEqual(result, 'Selected: feature1,feature2');
+		});
+	});
+
+	suite('getCommandString', () => {
+		test('should return string command as-is', () => {
+			const command = 'echo Hello';
+			const result = getCommandString(command);
+			assert.strictEqual(result, 'echo Hello');
+		});
+
+		test('should select windows command on win32 platform', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'win32' });
+			const command = {
+				windows: 'dir',
+				macos: 'ls',
+				linux: 'ls'
+			};
+			const result = getCommandString(command);
+			assert.strictEqual(result, 'dir');
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+
+		test('should select macos command on darwin platform', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'darwin' });
+			const command = {
+				windows: 'dir',
+				macos: 'ls -la',
+				linux: 'ls'
+			};
+			const result = getCommandString(command);
+			assert.strictEqual(result, 'ls -la');
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+
+		test('should select linux command on linux platform', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'linux' });
+			const command = {
+				windows: 'dir',
+				macos: 'ls',
+				linux: 'ls -al'
+			};
+			const result = getCommandString(command);
+			assert.strictEqual(result, 'ls -al');
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+
+		test('should throw error for unsupported platform', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'darwin' });
+			const command = {
+				windows: 'dir',
+				linux: 'ls'
+			};
+			assert.throws(() => getCommandString(command), /Invalid or unsupported 'command'/);
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+
+		test('should throw error for invalid command type', () => {
+			assert.throws(() => getCommandString(null), /Invalid or unsupported 'command'/);
+			assert.throws(() => getCommandString(123), /Invalid or unsupported 'command'/);
+		});
+	});
+
+	suite('getToolCommand', () => {
+		test('should return string tool path as-is', () => {
+			const tool = '/usr/bin/7z';
+			const result = getToolCommand(tool);
+			assert.strictEqual(result, '/usr/bin/7z');
+		});
+
+		test('should quote tool path with spaces', () => {
+			const tool = 'C:\\Program Files\\7-Zip\\7z.exe';
+			const result = getToolCommand(tool);
+			assert.strictEqual(result, '"C:\\Program Files\\7-Zip\\7z.exe"');
+		});
+
+		test('should not double-quote already quoted path', () => {
+			const tool = '"C:\\Program Files\\7-Zip\\7z.exe"';
+			const result = getToolCommand(tool);
+			assert.strictEqual(result, '"C:\\Program Files\\7-Zip\\7z.exe"');
+		});
+
+		test('should select platform-specific tool path', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'darwin' });
+			const tool = {
+				windows: 'C:\\Program Files\\7-Zip\\7z.exe',
+				macos: '/opt/homebrew/bin/7z',
+				linux: '/usr/bin/7z'
+			};
+			const result = getToolCommand(tool);
+			assert.strictEqual(result, '/opt/homebrew/bin/7z');
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+
+		test('should throw error when platform-specific tool not found', () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, 'platform', { value: 'darwin' });
+			const tool = {
+				windows: 'C:\\Program Files\\7-Zip\\7z.exe',
+				linux: '/usr/bin/7z'
+			};
+			assert.throws(() => getToolCommand(tool), /No tool path specified for the current platform/);
+			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+	});
+
+	suite('buildPowerShellInvocation', () => {
+		test('should build basic PowerShell invocation', () => {
+			const result = buildPowerShellInvocation('echo', ['Hello'], false);
+			assert.strictEqual(result.display, "& 'echo' 'Hello'");
+			assert.ok(result.script.includes("& 'echo' 'Hello'"));
+		});
+
+		test('should escape single quotes in arguments', () => {
+			const result = buildPowerShellInvocation('echo', ["It's working"], false);
+			assert.strictEqual(result.display, "& 'echo' 'It''s working'");
+		});
+
+		test('should handle UTF-8 console enforcement', () => {
+			const result = buildPowerShellInvocation('python', ['script.py'], true);
+			assert.ok(result.script.includes('[Console]::OutputEncoding'));
+			assert.ok(result.script.includes('UTF8'));
+		});
+
+		test('should handle command with existing args', () => {
+			const result = buildPowerShellInvocation('git status', ['-v'], false);
+			assert.strictEqual(result.display, "& 'git' 'status' '-v'");
+		});
+
+		test('should handle empty args array', () => {
+			const result = buildPowerShellInvocation('pwd', [], false);
+			assert.strictEqual(result.display, "& 'pwd'");
+		});
+	});
+
+	suite('buildPosixCommandLine', () => {
+		test('should build basic POSIX command line', () => {
+			const result = buildPosixCommandLine('echo', ['Hello']);
+			assert.strictEqual(result, "echo 'Hello'");
+		});
+
+		test('should escape single quotes in arguments', () => {
+			const result = buildPosixCommandLine('echo', ["It's working"]);
+			assert.strictEqual(result, "echo 'It'\\''s working'");
+		});
+
+		test('should quote executable with special characters', () => {
+			const result = buildPosixCommandLine('my@cmd', ['arg']);
+			assert.strictEqual(result, "'my@cmd' 'arg'");
+		});
+
+		test('should not quote simple executable paths', () => {
+			const result = buildPosixCommandLine('/usr/bin/echo', ['test']);
+			assert.strictEqual(result, "/usr/bin/echo 'test'");
+		});
+
+		test('should handle command with existing args', () => {
+			const result = buildPosixCommandLine('git status', ['-v']);
+			assert.strictEqual(result, "git 'status' '-v'");
+		});
+
+		test('should handle multiple arguments', () => {
+			const result = buildPosixCommandLine('node', ['script.js', '--port', '3000']);
+			assert.strictEqual(result, "node 'script.js' '--port' '3000'");
+		});
+	});
+
+	suite('encodePowerShellScript', () => {
+		test('should encode PowerShell script to base64', () => {
+			const script = 'Write-Host "Hello"';
+			const result = encodePowerShellScript(script);
+			assert.ok(typeof result === 'string');
+			assert.ok(result.length > 0);
+			// Decode and verify
+			const decoded = Buffer.from(result, 'base64').toString('utf16le');
+			assert.strictEqual(decoded, script);
+		});
+
+		test('should handle empty script', () => {
+			const script = '';
+			const result = encodePowerShellScript(script);
+			assert.ok(typeof result === 'string');
+		});
+
+		test('should handle script with special characters', () => {
+			const script = "Write-Host 'It''s working' -ForegroundColor Green";
+			const result = encodePowerShellScript(script);
+			const decoded = Buffer.from(result, 'base64').toString('utf16le');
+			assert.strictEqual(decoded, script);
+		});
+	});
+
+	suite('normalizeLineNumber', () => {
+		test('should accept valid positive number', () => {
+			assert.strictEqual(normalizeLineNumber(10), 10);
+			assert.strictEqual(normalizeLineNumber(1), 1);
+			assert.strictEqual(normalizeLineNumber(999), 999);
+		});
+
+		test('should floor decimal numbers', () => {
+			assert.strictEqual(normalizeLineNumber(10.7), 10);
+			assert.strictEqual(normalizeLineNumber(1.2), 1);
+		});
+
+		test('should reject zero and negative numbers', () => {
+			assert.strictEqual(normalizeLineNumber(0), undefined);
+			assert.strictEqual(normalizeLineNumber(-1), undefined);
+			assert.strictEqual(normalizeLineNumber(-10), undefined);
+		});
+
+		test('should parse valid string numbers', () => {
+			assert.strictEqual(normalizeLineNumber('10'), 10);
+			assert.strictEqual(normalizeLineNumber('1'), 1);
+			assert.strictEqual(normalizeLineNumber('999'), 999);
+		});
+
+		test('should reject invalid string inputs', () => {
+			assert.strictEqual(normalizeLineNumber('abc'), undefined);
+			assert.strictEqual(normalizeLineNumber('0'), undefined);
+			assert.strictEqual(normalizeLineNumber('-5'), undefined);
+			assert.strictEqual(normalizeLineNumber(''), undefined);
+		});
+
+		test('should reject non-finite numbers', () => {
+			assert.strictEqual(normalizeLineNumber(Infinity), undefined);
+			assert.strictEqual(normalizeLineNumber(-Infinity), undefined);
+			assert.strictEqual(normalizeLineNumber(NaN), undefined);
+		});
+
+		test('should reject null and undefined', () => {
+			assert.strictEqual(normalizeLineNumber(null), undefined);
+			assert.strictEqual(normalizeLineNumber(undefined), undefined);
+		});
+
+		test('should reject other types', () => {
+			assert.strictEqual(normalizeLineNumber({}), undefined);
+			assert.strictEqual(normalizeLineNumber([]), undefined);
+			assert.strictEqual(normalizeLineNumber(true), undefined);
 		});
 	});
 });
