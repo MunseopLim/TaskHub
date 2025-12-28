@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -148,7 +148,7 @@
         {
           "id": "mainView.history",
           "name": "History",
-          "icon": "media/h_icon.svg",
+          "icon": "media/r_icon.svg",
           "when": "config.taskhub.history.showPanel"
         }
       ]

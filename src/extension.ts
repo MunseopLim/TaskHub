@@ -1364,8 +1364,14 @@ class HistoryItem extends vscode.TreeItem {
     constructor(private entry: HistoryEntry) {
         super(entry.actionTitle, vscode.TreeItemCollapsibleState.None);
 
-        const statusIcon = entry.status === 'success' ? '✅' : entry.status === 'failure' ? '❌' : '⏳';
-        this.label = `${statusIcon} ${entry.actionTitle}`;
+        // Set icon based on status using ThemeIcon (consistent with Action items)
+        if (entry.status === 'success') {
+            this.iconPath = new vscode.ThemeIcon('pass', new vscode.ThemeColor('charts.green'));
+        } else if (entry.status === 'failure') {
+            this.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('charts.red'));
+        } else {
+            this.iconPath = new vscode.ThemeIcon('history');
+        }
 
         // Set contextValue based on whether output exists
         this.contextValue = entry.output ? 'historyItemWithOutput' : 'historyItem';
