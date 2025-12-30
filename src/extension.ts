@@ -7,6 +7,7 @@ import { spawn } from 'child_process';
 import Ajv from 'ajv';
 import { ActionItem, Action as PipelineAction } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
+import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 
 
 function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
@@ -2497,6 +2498,16 @@ export function activate(context: vscode.ExtensionContext) {
     favoriteViewProvider.refresh();
     historyProvider.refresh();
     context.subscriptions.push(builtInLinkViewProvider.view, workspaceLinkViewProvider.view, favoriteViewProvider.view, historyProvider.view);
+
+    // Register hover provider for number base conversion in C/C++ files
+    const numberBaseHoverProvider = new NumberBaseHoverProvider();
+    context.subscriptions.push(
+        vscode.languages.registerHoverProvider(
+            ['c', 'cpp'],
+            numberBaseHoverProvider
+        )
+    );
+
     const mediaActionsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/actions.json'));
     mediaActionsWatcher.onDidChange(() => mainViewProvider.refresh());
     mediaActionsWatcher.onDidCreate(() => mainViewProvider.refresh());
