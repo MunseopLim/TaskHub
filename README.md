@@ -19,6 +19,7 @@
     12. [Multi-root 워크스페이스 지원](#12-multi-root-워크스페이스-지원)
     13. [쉬운 설정 관리](#13-쉬운-설정-관리)
     14. [액션 실행 히스토리](#14-액션-실행-히스토리)
+    15. [Number Base Hover (C/C++)](#15-number-base-hover-cc)
 2.  [설정](#설정)
 3.  [설치](#설치)
 4.  [사용법](#사용법)
@@ -584,6 +585,38 @@
 *   **자동 제한**: 히스토리는 설정된 최대 개수까지만 유지되며, 초과 시 가장 오래된 항목부터 자동으로 삭제됩니다 (기본값: 10개).
 *   **패널 표시/숨김**: 설정에서 히스토리 패널을 숨길 수 있으며, `TaskHub: Show History Panel` 명령으로 다시 표시할 수 있습니다.
 
+### 15. Number Base Hover (C/C++)
+
+C/C++ 파일 작업 시 숫자 값에 마우스를 올리면 다양한 진법(hex, decimal, binary)과 비트 정보를 자동으로 표시하는 기능입니다.
+
+**주요 기능:**
+*   **숫자 리터럴 지원**: 다양한 형식의 숫자 리터럴을 인식합니다:
+    *   16진수: `0xFF`, `0XFF`, `FFh`, `FFH`
+    *   2진수: `0b11111111`, `0B11111111`
+    *   10진수: `255`
+    *   숫자 구분자: `0xFF'FF'FF`, `1'000'000`
+*   **식별자 지원**: const 변수, enum 값, #define 매크로 등의 값도 자동으로 해석합니다:
+    *   `const int MASK = 0xFF;` - MASK에 hover 시 0xFF 값 표시
+    *   `enum Flags { FLAG_A = 0x01 };` - FLAG_A에 hover 시 0x01 값 표시
+    *   `#define MAX_SIZE 0x1000` - MAX_SIZE에 hover 시 0x1000 값 표시
+*   **전처리기 지시문 처리**: C/C++ Language Server와 통합되어 `#if`, `#else` 등 전처리기 지시문이 적용된 실제 값을 표시합니다
+*   **진법 변환 표시**: Hex, Dec, Bin 형식으로 값을 변환하여 표시
+*   **비트 정보 표시**:
+    *   32비트 값: 8개의 4비트 그룹으로 한 줄 표시
+    *   64비트 값: 16개의 4비트 그룹으로 두 줄 표시
+    *   비트 위치 레이블: 각 4비트 그룹의 LSB 위치 표시 (0, 4, 8, 12...)
+    *   Set bits 목록: 1로 설정된 모든 비트 위치 나열
+
+**사용 예시:**
+```cpp
+const int MASK_VALUE = 0xFF;        // Hover 시: Hex: 0xFF, Dec: 255, Bin: 0b11111111
+enum Status { READY = 0x01 };       // READY에 Hover 시: 0x01 정보 표시
+int value = MASK_VALUE;             // MASK_VALUE에 Hover 시: 0xFF 정보 표시
+```
+
+**설정:**
+*   `taskhub.hover.numberBase.enabled`: 이 기능을 활성화/비활성화합니다 (기본값: `true`)
+
 ## 설정
 
 | 설정 ID | 타입 | 기본값 | 설명 |
@@ -594,6 +627,7 @@
 | `taskhub.pipeline.windowsPowerShellEncoding` | `string` | `utf8` | Windows에서 PowerShell 출력 인코딩을 제어합니다. `utf8`은 UTF-8(코드 페이지 65001)을 사용하고, `system`은 현재 콘솔 코드 페이지를 유지합니다. UTF-8을 인식하지 못하는 레거시 도구에는 `system`을 사용하세요. |
 | `taskhub.history.maxItems` | `number` | `10` | 히스토리 패널에 유지할 최대 액션 실행 기록 개수입니다. 1에서 50 사이의 값을 설정할 수 있습니다. |
 | `taskhub.history.showPanel` | `boolean` | `true` | TaskHub 사이드바에서 히스토리 패널을 표시하거나 숨깁니다. |
+| `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ 파일에서 숫자 값에 대한 진법 변환 hover tooltip을 활성화합니다. 16진수, 2진수, 10진수 표현과 비트 정보를 표시합니다. |
 
 ## 설치
 

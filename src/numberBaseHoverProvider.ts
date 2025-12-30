@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
  * Hover provider that shows number base conversions for C/C++ numeric literals
  */
 export class NumberBaseHoverProvider implements vscode.HoverProvider {
+    private isProcessingHover: boolean = false;
 
     /**
      * Regex patterns for detecting different number formats
@@ -22,11 +23,16 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     /**
      * Provide hover information for numbers in the document
      */
-    provideHover(
+    async provideHover(
         document: vscode.TextDocument,
         position: vscode.Position,
         token: vscode.CancellationToken
-    ): vscode.ProviderResult<vscode.Hover> {
+    ): Promise<vscode.Hover | undefined> {
+        // Prevent infinite recursion when calling hover provider
+        if (this.isProcessingHover) {
+            return undefined;
+        }
+
         // Check if the feature is enabled
         const config = vscode.workspace.getConfiguration('taskhub.hover');
         const enabled = config.get('numberBase.enabled', true);
@@ -41,27 +47,246 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         // Try to find a number at the current position
         const result = this.findNumberAtPosition(lineText, charPosition);
-        if (!result) {
-            return undefined;
+        if (result) {
+            // Try to parse the number
+            const parsedNumber = this.parseNumber(result.text);
+            if (parsedNumber !== null) {
+                // Create range for the hover
+                const range = new vscode.Range(
+                    position.line,
+                    result.start,
+                    position.line,
+                    result.end
+                );
+
+                // Generate hover content
+                const hoverContent = this.generateHoverContent(parsedNumber, result.text);
+                return new vscode.Hover(hoverContent, range);
+            }
         }
 
-        // Try to parse the number
-        const parsedNumber = this.parseNumber(result.text);
-        if (parsedNumber === null) {
-            return undefined;
+        // If not a number literal, try to find identifier value
+        const identifierValue = await this.getIdentifierValue(document, position);
+        if (identifierValue !== null) {
+            const wordRange = document.getWordRangeAtPosition(position);
+            if (wordRange) {
+                const word = document.getText(wordRange);
+                const hoverContent = this.generateHoverContent(identifierValue, word);
+                return new vscode.Hover(hoverContent, wordRange);
+            }
         }
 
-        // Create range for the hover
-        const range = new vscode.Range(
-            position.line,
-            result.start,
-            position.line,
-            result.end
-        );
+        return undefined;
+    }
 
-        // Generate hover content
-        const hoverContent = this.generateHoverContent(parsedNumber, result.text);
-        return new vscode.Hover(hoverContent, range);
+    /**
+     * Get the numeric value of an identifier (const, enum, etc.) using LSP
+     * Returns the numeric value if found, null otherwise
+     */
+    private async getIdentifierValue(document: vscode.TextDocument, position: vscode.Position): Promise<number | null> {
+        try {
+            const wordRange = document.getWordRangeAtPosition(position);
+            if (!wordRange) {
+                return null;
+            }
+
+            const word = document.getText(wordRange);
+
+            // Use LSP to find the definition of the symbol at this position
+            const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
+                'vscode.executeDefinitionProvider',
+                document.uri,
+                position
+            );
+
+            if (!definitions || definitions.length === 0) {
+                return null;
+            }
+
+            // Get the first definition
+            const definition = definitions[0];
+
+            // Try to get hover information at the definition location
+            // This will give us the preprocessed value for enums
+            this.isProcessingHover = true;
+            try {
+                const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+                    'vscode.executeHoverProvider',
+                    definition.uri,
+                    definition.range.start
+                );
+
+                if (hovers && hovers.length > 0) {
+                    for (const hover of hovers) {
+                        for (const content of hover.contents) {
+                            const text = typeof content === 'string' ? content : content.value;
+
+                            // Try to extract enum value from hover text
+                            // Format: "(enum Test1) Test3_third = 1"
+                            const enumValueMatch = text.match(/=\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)/);
+                            if (enumValueMatch) {
+                                const valueStr = enumValueMatch[1];
+                                const value = this.parseNumber(valueStr);
+                                if (value !== null) {
+                                    return value;
+                                }
+                            }
+                        }
+                    }
+                }
+            } finally {
+                this.isProcessingHover = false;
+            }
+
+            // Fallback: Open the document containing the definition
+            const defDocument = await vscode.workspace.openTextDocument(definition.uri);
+
+            // Try to extract value from the definition line and surrounding context
+            const value = await this.extractValueFromDefinitionContext(defDocument, definition.range.start.line, word);
+
+            if (value !== null) {
+                return value;
+            }
+
+            return null;
+        } catch (error) {
+            // LSP might not be available or symbol not found
+            return null;
+        }
+    }
+
+    /**
+     * Extract value from definition considering surrounding context (for enums)
+     */
+    private async extractValueFromDefinitionContext(
+        document: vscode.TextDocument,
+        startLine: number,
+        symbolName: string
+    ): Promise<number | null> {
+        const defLine = document.lineAt(startLine);
+        const defText = defLine.text;
+
+        // Try to extract from the definition line itself
+        const directValue = this.extractValueFromLine(defText, symbolName);
+        if (directValue !== null) {
+            return directValue;
+        }
+
+        // Check if this is an enum declaration or enum member
+        // If it's an enum member, search upward for the enum declaration
+        let enumDeclLine = startLine;
+
+        // Search upward for enum declaration (max 100 lines up)
+        if (!defText.includes('enum')) {
+            // Search upward for enum keyword
+            for (let i = startLine; i >= Math.max(0, startLine - 100); i--) {
+                const line = document.lineAt(i);
+                const text = line.text;
+                if (text.includes('enum')) {
+                    enumDeclLine = i;
+                    break;
+                }
+                // Stop if we hit a closing brace (end of previous scope)
+                if (text.trim() === '};' || text.trim() === '}') {
+                    break;
+                }
+            }
+        }
+
+        // Try to extract enum value
+        if (enumDeclLine !== startLine || defText.includes('enum')) {
+            return await this.extractEnumValue(document, enumDeclLine, symbolName);
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract enum value with support for implicit values
+     * Handles: enum { A, B, C = 5, D }  where A=0, B=1, C=5, D=6
+     */
+    private async extractEnumValue(
+        document: vscode.TextDocument,
+        startLine: number,
+        symbolName: string
+    ): Promise<number | null> {
+        const maxLines = Math.min(startLine + 100, document.lineCount);
+        let currentValue = 0;
+        let inEnumBody = false;
+
+        for (let i = startLine; i < maxLines; i++) {
+            const line = document.lineAt(i);
+            const text = line.text.trim();
+
+            // Start of enum body
+            if (text.includes('{')) {
+                inEnumBody = true;
+                continue;
+            }
+
+            // End of enum body
+            if (text.includes('};')) {
+                break;
+            }
+
+            if (!inEnumBody) {
+                continue;
+            }
+
+            // Parse enum entries (can be multiple per line or comma-separated)
+            const entries = text.split(',').map(e => e.trim()).filter(e => e.length > 0);
+
+            for (const entry of entries) {
+                // Check if this entry has an explicit value: NAME = VALUE
+                const assignMatch = entry.match(/^\s*(\w+)\s*=\s*([0-9a-fA-FxXbB']+)/);
+                if (assignMatch) {
+                    const name = assignMatch[1];
+                    const value = this.parseNumber(assignMatch[2]);
+
+                    if (name === symbolName && value !== null) {
+                        return value;
+                    }
+
+                    if (value !== null) {
+                        currentValue = value + 1;  // Next implicit value
+                    }
+                } else {
+                    // No explicit value, use currentValue
+                    const nameMatch = entry.match(/^\s*(\w+)/);
+                    if (nameMatch) {
+                        const name = nameMatch[1];
+                        if (name === symbolName) {
+                            return currentValue;
+                        }
+                        currentValue++;  // Next implicit value
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract numeric value from a single line
+     * Supports: const int X = 0xFF; X = 0xFF; #define X 0xFF
+     */
+    private extractValueFromLine(text: string, symbolName?: string): number | null {
+        // Pattern for const/variable/enum: NAME = VALUE; or NAME = VALUE,
+        const assignPattern = /=\s*([0-9a-fA-FxXbB']+)\s*[;,]/;
+        const assignMatch = text.match(assignPattern);
+        if (assignMatch) {
+            return this.parseNumber(assignMatch[1]);
+        }
+
+        // Pattern for #define: #define NAME VALUE
+        const definePattern = /#define\s+\w+\s+([0-9a-fA-FxXbB']+)/;
+        const defineMatch = text.match(definePattern);
+        if (defineMatch) {
+            return this.parseNumber(defineMatch[1]);
+        }
+
+        return null;
     }
 
     /**

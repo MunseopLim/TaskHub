@@ -144,4 +144,46 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             assert.ok(result.includes('64-bit'));
         });
     });
+
+    suite('Value Extraction Tests', () => {
+        test('Extract value from const declaration', () => {
+            const result = (provider as any).extractValueFromLine('const int MASK = 0xFF;');
+            assert.strictEqual(result, 255);
+        });
+
+        test('Extract value from variable assignment', () => {
+            const result = (provider as any).extractValueFromLine('int value = 0x100;');
+            assert.strictEqual(result, 256);
+        });
+
+        test('Extract value from enum with comma', () => {
+            const result = (provider as any).extractValueFromLine('    FLAG_A = 0x01,');
+            assert.strictEqual(result, 1);
+        });
+
+        test('Extract value from #define', () => {
+            const result = (provider as any).extractValueFromLine('#define MAX_SIZE 0x1000');
+            assert.strictEqual(result, 4096);
+        });
+
+        test('Extract binary value from #define', () => {
+            const result = (provider as any).extractValueFromLine('#define BIT_MASK 0b11110000');
+            assert.strictEqual(result, 240);
+        });
+
+        test('Extract decimal value', () => {
+            const result = (provider as any).extractValueFromLine('const int COUNT = 255;');
+            assert.strictEqual(result, 255);
+        });
+
+        test('Return null for line without value', () => {
+            const result = (provider as any).extractValueFromLine('int someVariable;');
+            assert.strictEqual(result, null);
+        });
+
+        test('Return null for empty line', () => {
+            const result = (provider as any).extractValueFromLine('');
+            assert.strictEqual(result, null);
+        });
+    });
 });
