@@ -7,6 +7,9 @@ import {
     calculateBitMask,
     CompleteBitFieldInfo
 } from './sfrBitFieldParser';
+import { MacroExpander } from './macroExpander';
+import { RegisterDecoder, RegisterDefinition } from './registerDecoder';
+import { StructSizeCalculator } from './structSizeCalculator';
 
 /**
  * Hover provider that shows number base conversions for C/C++ numeric literals
@@ -58,6 +61,24 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         const bitFieldHover = await this.tryBitFieldHover(document, position);
         if (bitFieldHover) {
             return bitFieldHover;
+        }
+
+        // Try macro expansion
+        const macroHover = this.tryMacroExpansion(document, position);
+        if (macroHover) {
+            return macroHover;
+        }
+
+        // Try register value decoding
+        const registerHover = await this.tryRegisterValueDecoding(document, position);
+        if (registerHover) {
+            return registerHover;
+        }
+
+        // Try struct size information
+        const structSizeHover = this.tryStructSizeInfo(document, position);
+        if (structSizeHover) {
+            return structSizeHover;
         }
 
         // Try to find a number at the current position
@@ -481,6 +502,92 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     }
 
     /**
+     * Try to expand and show macro information
+     * Returns hover if current position is on a macro definition
+     */
+    private tryMacroExpansion(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): vscode.Hover | null {
+        // Get word at position
+        const wordRange = document.getWordRangeAtPosition(position);
+        if (!wordRange) {
+            return null;
+        }
+
+        const word = document.getText(wordRange);
+
+        // Check if word looks like a macro (uppercase or starts with uppercase)
+        if (!/^[A-Z_][A-Z0-9_]*$/.test(word)) {
+            return null; // Not a typical macro name pattern
+        }
+
+        // Parse all macros from document
+        const documentText = document.getText();
+        const macros = MacroExpander.parseMacroDefinitions(documentText);
+
+        // Check if this word is a defined macro
+        if (!macros.has(word)) {
+            return null; // Not a macro
+        }
+
+        // Expand the macro
+        const expander = new MacroExpander();
+        const result = expander.expandMacro(word, macros);
+
+        if (!result.success) {
+            return null; // Expansion failed
+        }
+
+        // Try to evaluate to a number
+        const numericValue = MacroExpander.evaluateToNumber(result.expandedValue);
+
+        // Only show hover if:
+        // 1. It expands to other macros (more than 1 step), OR
+        // 2. It evaluates to a numeric value
+        const hasExpansion = result.expansionSteps.length > 1;
+        const hasNumericValue = numericValue !== null;
+
+        if (!hasExpansion && !hasNumericValue) {
+            return null; // Not useful to show
+        }
+
+        // Numeric macro - show expansion and conversions
+        return new vscode.Hover(
+            this.generateMacroExpansionContent(word, result, numericValue),
+            wordRange
+        );
+    }
+
+    /**
+     * Generate hover content for macro expansion
+     */
+    private generateMacroExpansionContent(
+        macroName: string,
+        expansionResult: any,
+        numericValue: number | null
+    ): vscode.MarkdownString {
+        const md = new vscode.MarkdownString();
+        md.isTrusted = true;
+
+        md.appendMarkdown(`### Macro: ${macroName}\n\n`);
+
+        // Show conversions directly without expansion steps
+        if (numericValue !== null) {
+            md.appendMarkdown(`**Hex:** \`0x${numericValue.toString(16).toUpperCase()}\`\n\n`);
+            md.appendMarkdown(`**Dec:** \`${numericValue.toString(10)}\`\n\n`);
+            md.appendMarkdown(`**Bin:** \`0b${numericValue.toString(2)}\`\n\n`);
+
+            // Add bit position display for reasonable values
+            if (numericValue >= 0 && numericValue <= 0xFFFFFFFF) {
+                md.appendMarkdown(this.generateBitPositionDisplay(numericValue));
+            }
+        }
+
+        return md;
+    }
+
+    /**
      * Try to provide hover information for SFR bit field
      * Returns hover if current position is on a bit field declaration or usage
      */
@@ -715,6 +822,381 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         } catch (error) {
             return null;
         }
+    }
+
+    /**
+     * Try to decode register value if current position is on a register assignment
+     * Returns hover if the value can be decoded as a register
+     */
+    private async tryRegisterValueDecoding(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): Promise<vscode.Hover | null> {
+        const line = document.lineAt(position.line);
+        const lineText = line.text;
+        const charPosition = position.character;
+
+        // Find number at current position
+        const numberMatch = this.findNumberAtPosition(lineText, charPosition);
+        if (!numberMatch) {
+            return null;
+        }
+
+        // Parse the number value
+        const value = this.parseNumber(numberMatch.text);
+        if (value === null) {
+            return null;
+        }
+
+        // Try to find variable assignment pattern
+        // Patterns: Type varName = value; or varName = value; or object.member = value;
+        const beforeValue = lineText.substring(0, numberMatch.start).trim();
+
+        // Check if this looks like an assignment
+        if (!beforeValue.includes('=')) {
+            return null;
+        }
+
+        // Extract variable/member expression before '='
+        // Matches: varName or object.member or object.member.submember
+        const assignMatch = beforeValue.match(/([\w.]+)\s*=\s*$/);
+        if (!assignMatch) {
+            return null;
+        }
+
+        const fullExpression = assignMatch[1];
+
+        // Find the variable declaration or type on this line
+        const typeMatch = lineText.match(/(\w+)\s+([\w.]+)\s*=/);
+        let typeName: string | null = null;
+
+        if (typeMatch && typeMatch[2] === fullExpression) {
+            // Found type in same line: Type varName = value;
+            typeName = typeMatch[1];
+        } else {
+            // Try to use LSP hover to get type information
+            try {
+                // Position at the start of the expression (before '=')
+                const exprStart = beforeValue.lastIndexOf(fullExpression);
+                if (exprStart === -1) {
+                    return null;
+                }
+
+                // Get hover information to extract type
+                this.isProcessingHover = true;
+                const exprPos = new vscode.Position(position.line, exprStart + fullExpression.length - 1);
+
+                try {
+                    const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+                        'vscode.executeHoverProvider',
+                        document.uri,
+                        exprPos
+                    );
+
+                    if (hovers && hovers.length > 0) {
+                        for (const hover of hovers) {
+                            for (const content of hover.contents) {
+                                const text = typeof content === 'string' ? content : content.value;
+
+                                // Extract type from hover text
+                                // Format examples:
+                                // "Type dword"
+                                // "(member) RegTestInt::IntRegSts<volatile unsigned int>::dword"
+                                // "volatile unsigned int dword"
+
+                                // Try to extract the base type name
+                                // Look for struct/union/class name patterns
+                                const structMatch = text.match(/\b(struct|union|class)\s+(\w+)/);
+                                if (structMatch) {
+                                    typeName = structMatch[2];
+                                    break;
+                                }
+
+                                // For member variables, try to extract the containing type
+                                const memberMatch = text.match(/(\w+)::\w+<[^>]+>::(\w+)/);
+                                if (memberMatch) {
+                                    // This is a template union/struct, look for anonymous struct inside
+                                    typeName = memberMatch[1];
+                                    break;
+                                }
+                            }
+                            if (typeName) break;
+                        }
+                    }
+                } finally {
+                    this.isProcessingHover = false;
+                }
+
+                // Fallback: Try using definition provider
+                if (!typeName) {
+                    const varPosition = lineText.indexOf(fullExpression.split('.')[0]);
+                    if (varPosition !== -1) {
+                        const varPos = new vscode.Position(position.line, varPosition);
+                        const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
+                            'vscode.executeDefinitionProvider',
+                            document.uri,
+                            varPos
+                        );
+
+                        if (definitions && definitions.length > 0) {
+                            const defDoc = await vscode.workspace.openTextDocument(definitions[0].uri);
+                            const defLine = defDoc.lineAt(definitions[0].range.start.line);
+                            const defMatch = defLine.text.match(/(\w+)\s+(\w+)/);
+                            if (defMatch) {
+                                typeName = defMatch[1];
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                // LSP might not be available
+                return null;
+            }
+        }
+
+        if (!typeName) {
+            return null;
+        }
+
+        // Try to find the type definition using LSP
+        let registerDef: RegisterDefinition | null = null;
+
+        try {
+            // Find where this type is defined
+            const varPosition = lineText.indexOf(fullExpression.split('.')[0]);
+            if (varPosition !== -1) {
+                const varPos = new vscode.Position(position.line, varPosition);
+                const varDefinitions = await vscode.commands.executeCommand<vscode.Location[]>(
+                    'vscode.executeDefinitionProvider',
+                    document.uri,
+                    varPos
+                );
+
+                if (varDefinitions && varDefinitions.length > 0) {
+                    // Get the document where the variable is defined
+                    const varDefDoc = await vscode.workspace.openTextDocument(varDefinitions[0].uri);
+                    const varDefLine = varDefDoc.lineAt(varDefinitions[0].range.start.line);
+
+                    // Extract type name from definition line
+                    const typeMatch = varDefLine.text.match(/(\w+(?:<[^>]+>)?)\s+(\w+)/);
+                    if (typeMatch) {
+                        const fullTypeName = typeMatch[1];
+                        // Remove template parameters if any (e.g., "IntRegSts<volatile uint32_t>" -> "IntRegSts")
+                        const baseTypeName = fullTypeName.replace(/<.*>/, '');
+
+                        // Try to find type definition in the same document
+                        let typeDefDoc = varDefDoc;
+                        let typeDefLines: string[] = [];
+
+                        // First, try to find type definition using LSP
+                        const typePos = new vscode.Position(
+                            varDefinitions[0].range.start.line,
+                            varDefLine.text.indexOf(fullTypeName)
+                        );
+
+                        const typeDefinitions = await vscode.commands.executeCommand<vscode.Location[]>(
+                            'vscode.executeDefinitionProvider',
+                            varDefDoc.uri,
+                            typePos
+                        );
+
+                        if (typeDefinitions && typeDefinitions.length > 0) {
+                            // Type is defined in another file (header file)
+                            typeDefDoc = await vscode.workspace.openTextDocument(typeDefinitions[0].uri);
+                        }
+
+                        // Parse the document containing type definition
+                        for (let i = 0; i < typeDefDoc.lineCount; i++) {
+                            typeDefLines.push(typeDefDoc.getText(typeDefDoc.lineAt(i).range));
+                        }
+
+                        // Try to find struct definition first
+                        const structLine = RegisterDecoder.findStructDefinition(typeDefLines, baseTypeName);
+                        if (structLine !== -1) {
+                            registerDef = RegisterDecoder.parseRegisterFromStruct(typeDefLines, structLine, baseTypeName);
+                        } else {
+                            // Try to find union or class containing union
+                            const unionLine = RegisterDecoder.findUnionDefinition(typeDefLines, baseTypeName);
+                            if (unionLine !== -1) {
+                                registerDef = RegisterDecoder.parseRegisterFromUnion(typeDefLines, unionLine, baseTypeName);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            // If LSP approach fails, fallback to searching in current document
+        }
+
+        // Fallback: Search in current document if not found via LSP
+        if (!registerDef) {
+            const documentLines: string[] = [];
+            for (let i = 0; i < document.lineCount; i++) {
+                documentLines.push(document.getText(document.lineAt(i).range));
+            }
+
+            const structLine = RegisterDecoder.findStructDefinition(documentLines, typeName);
+            if (structLine !== -1) {
+                registerDef = RegisterDecoder.parseRegisterFromStruct(documentLines, structLine, typeName);
+            } else {
+                const unionLine = RegisterDecoder.findUnionDefinition(documentLines, typeName);
+                if (unionLine !== -1) {
+                    registerDef = RegisterDecoder.parseRegisterFromUnion(documentLines, unionLine, typeName);
+                }
+            }
+        }
+
+        if (!registerDef || registerDef.fields.length === 0) {
+            return null;
+        }
+
+        // Decode the register value
+        const decoder = new RegisterDecoder();
+        const result = decoder.decodeValue(value, registerDef);
+
+        if (!result.success) {
+            return null;
+        }
+
+        // Generate hover content
+        const range = new vscode.Range(
+            position.line,
+            numberMatch.start,
+            position.line,
+            numberMatch.end
+        );
+
+        return new vscode.Hover(
+            this.generateRegisterDecodingContent(result),
+            range
+        );
+    }
+
+    /**
+     * Generate hover content for register value decoding
+     */
+    private generateRegisterDecodingContent(result: any): vscode.MarkdownString {
+        const md = new vscode.MarkdownString();
+        md.isTrusted = true;
+
+        md.appendMarkdown(`### Register: ${result.registerName}\n\n`);
+        md.appendMarkdown(`**Value:** \`0x${result.registerValue.toString(16).toUpperCase()}\` `);
+        md.appendMarkdown(`(Dec: ${result.registerValue}, Bin: 0b${result.registerValue.toString(2)})\n\n`);
+
+        // Decoded fields table
+        md.appendMarkdown('---\n\n');
+        md.appendMarkdown('**Decoded Bit Fields:**\n\n');
+        md.appendMarkdown('| Bit | Field | Value | Hex | Bin | Description |\n');
+        md.appendMarkdown('|-----|-------|-------|-----|-----|-------------|\n');
+
+        for (const field of result.fields) {
+            const desc = field.description || '-';
+            const accessType = field.accessType ? `[${field.accessType}]` : '';
+            md.appendMarkdown(`| ${field.bitPosition} | **${field.name}** | ${field.decimal} | ${field.hex} | ${field.binary} | ${desc} ${accessType} |\n`);
+        }
+
+        return md;
+    }
+
+    /**
+     * Try to show struct size information when hovering over struct/class name
+     */
+    private tryStructSizeInfo(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): vscode.Hover | null {
+        const line = document.lineAt(position.line);
+        const lineText = line.text;
+
+        // Check if we're on a struct/class keyword or name
+        const wordRange = document.getWordRangeAtPosition(position);
+        if (!wordRange) {
+            return null;
+        }
+
+        const word = document.getText(wordRange);
+
+        // Check if line contains struct/class declaration
+        const structPattern = /\b(struct|class)\s+(\w+)/;
+        const match = lineText.match(structPattern);
+
+        let structName: string | null = null;
+
+        if (match) {
+            // Check if we're hovering over the keyword or the name
+            if (word === 'struct' || word === 'class' || word === match[2]) {
+                structName = match[2];
+            }
+        } else {
+            // Check if we're hovering over a type name (could be struct name)
+            // This is a guess - only show if it looks like a custom type (starts with uppercase)
+            if (/^[A-Z]\w*$/.test(word)) {
+                structName = word;
+            } else {
+                return null;
+            }
+        }
+
+        if (!structName) {
+            return null;
+        }
+
+        // Parse the document
+        const documentLines: string[] = [];
+        for (let i = 0; i < document.lineCount; i++) {
+            documentLines.push(document.getText(document.lineAt(i).range));
+        }
+
+        // Find struct definition
+        const structLine = StructSizeCalculator.findStructDefinition(documentLines, structName);
+        if (structLine === -1) {
+            return null;
+        }
+
+        // Calculate struct size
+        const calculator = new StructSizeCalculator();
+        const result = calculator.calculateStructSize(structName, documentLines, structLine);
+
+        if (!result.success || result.members.length === 0) {
+            return null;
+        }
+
+        return new vscode.Hover(
+            this.generateStructSizeContent(result),
+            wordRange
+        );
+    }
+
+    /**
+     * Generate hover content for struct size information
+     */
+    private generateStructSizeContent(result: any): vscode.MarkdownString {
+        const md = new vscode.MarkdownString();
+        md.isTrusted = true;
+
+        md.appendMarkdown(`### Struct: ${result.structName}\n\n`);
+        md.appendMarkdown(`**Total Size:** ${result.totalSize} bytes\n\n`);
+        md.appendMarkdown(`**Alignment:** ${result.alignment} bytes\n\n`);
+        md.appendMarkdown(`**Padding:** ${result.padding} bytes\n\n`);
+
+        // Members table
+        md.appendMarkdown('---\n\n');
+        md.appendMarkdown('**Members:**\n\n');
+        md.appendMarkdown('| Offset | Name | Type | Size | Alignment |\n');
+        md.appendMarkdown('|--------|------|------|------|-----------|');
+        md.appendMarkdown('\n');
+
+        for (const member of result.members) {
+            const typeDisplay = member.isArray
+                ? `${member.type}[${member.arraySize}]`
+                : member.type;
+            md.appendMarkdown(`| ${member.offset} | **${member.name}** | ${typeDisplay} | ${member.size} | ${member.alignment} |\n`);
+        }
+
+        md.appendMarkdown('\n');
+        md.appendMarkdown('*Hover calculated using default type sizes. Use `.vscode/taskhub_types.json` to customize.*\n');
+
+        return md;
     }
 
     /**
