@@ -1,7 +1,16 @@
 import * as vscode from 'vscode';
+import {
+    extractBitFieldInfo,
+    extractHierarchy,
+    formatHierarchy,
+    calculateValidRange,
+    calculateBitMask,
+    CompleteBitFieldInfo
+} from './sfrBitFieldParser';
 
 /**
  * Hover provider that shows number base conversions for C/C++ numeric literals
+ * and SFR bit field information
  */
 export class NumberBaseHoverProvider implements vscode.HoverProvider {
     private isProcessingHover: boolean = false;
@@ -44,6 +53,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         const line = document.lineAt(position.line);
         const lineText = line.text;
         const charPosition = position.character;
+
+        // First, try to detect SFR bit field
+        const bitFieldHover = await this.tryBitFieldHover(document, position);
+        if (bitFieldHover) {
+            return bitFieldHover;
+        }
 
         // Try to find a number at the current position
         const result = this.findNumberAtPosition(lineText, charPosition);
@@ -463,5 +478,296 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         }
 
         return result;
+    }
+
+    /**
+     * Try to provide hover information for SFR bit field
+     * Returns hover if current position is on a bit field declaration or usage
+     */
+    private async tryBitFieldHover(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): Promise<vscode.Hover | null> {
+        const line = document.lineAt(position.line);
+        const lineText = line.text;
+
+        // Get preceding line for comment detection
+        const precedingLine = position.line > 0 ? document.lineAt(position.line - 1).text : undefined;
+
+        // Try to extract bit field info from current line (declaration)
+        let bitFieldInfo = extractBitFieldInfo(lineText, precedingLine);
+
+        // If not found on current line, try to find definition using LSP
+        if (!bitFieldInfo || !bitFieldInfo.commentInfo) {
+            bitFieldInfo = await this.tryBitFieldFromDefinition(document, position);
+        }
+
+        if (!bitFieldInfo || !bitFieldInfo.commentInfo) {
+            return null;
+        }
+
+        // Check if cursor is on the field name
+        const wordRange = document.getWordRangeAtPosition(position);
+        if (!wordRange) {
+            return null;
+        }
+
+        const word = document.getText(wordRange);
+
+        if (word !== bitFieldInfo.fieldName) {
+            return null;
+        }
+
+        // Get all definition and declaration locations
+        const [definitions, declarations] = await Promise.all([
+            vscode.commands.executeCommand<vscode.Location[]>(
+                'vscode.executeDefinitionProvider',
+                document.uri,
+                position
+            ),
+            vscode.commands.executeCommand<vscode.Location[]>(
+                'vscode.executeDeclarationProvider',
+                document.uri,
+                position
+            )
+        ]);
+
+        // Combine and deduplicate locations
+        const allLocations: vscode.Location[] = [];
+        const locationSet = new Set<string>();
+
+        const addLocation = (loc: vscode.Location) => {
+            const key = `${loc.uri.toString()}:${loc.range.start.line}:${loc.range.start.character}`;
+            if (!locationSet.has(key)) {
+                locationSet.add(key);
+                allLocations.push(loc);
+            }
+        };
+
+        if (definitions) {
+            definitions.forEach(addLocation);
+        }
+        if (declarations) {
+            declarations.forEach(addLocation);
+        }
+
+        // If we found limited results, try workspace symbol search for more
+        if (allLocations.length <= 1 && word) {
+            const workspaceSymbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+                'vscode.executeWorkspaceSymbolProvider',
+                word
+            );
+
+            if (workspaceSymbols) {
+                // Filter for exact name match
+                const exactMatches = workspaceSymbols.filter(sym => sym.name === word);
+
+                // Add locations from workspace symbols
+                for (const symbol of exactMatches) {
+                    addLocation(symbol.location);
+                }
+            }
+        }
+
+        if (allLocations.length === 0) {
+            // No definitions found, use current location
+            const lines: string[] = [];
+            for (let i = 0; i < document.lineCount; i++) {
+                lines.push(document.getText(document.lineAt(i).range));
+            }
+            const scopes = extractHierarchy(lines, position.line);
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+            const filePath = workspaceFolder
+                ? vscode.workspace.asRelativePath(document.uri, false)
+                : document.uri.fsPath;
+
+            const hoverContent = this.generateBitFieldHoverContent(
+                bitFieldInfo,
+                scopes,
+                filePath,
+                position.line + 1
+            );
+            return new vscode.Hover(hoverContent, wordRange);
+        }
+
+        // Generate hover content for all definitions
+        const md = new vscode.MarkdownString();
+        md.isTrusted = true;
+
+        // Show count if multiple definitions
+        if (allLocations.length > 1) {
+            md.appendMarkdown(`*Multiple definitions found (${allLocations.length})*\n\n`);
+            md.appendMarkdown('---\n\n');
+        }
+
+        // Show first definition in full detail
+        const firstDefinition = allLocations[0];
+        const firstDocument = await vscode.workspace.openTextDocument(firstDefinition.uri);
+        const firstLine = firstDefinition.range.start.line;
+
+        // Extract hierarchy information from first document
+        const firstLines: string[] = [];
+        for (let j = 0; j < firstDocument.lineCount; j++) {
+            firstLines.push(firstDocument.getText(firstDocument.lineAt(j).range));
+        }
+        const firstScopes = extractHierarchy(firstLines, firstLine);
+
+        // Get file path relative to workspace
+        const firstWorkspaceFolder = vscode.workspace.getWorkspaceFolder(firstDocument.uri);
+        const firstFilePath = firstWorkspaceFolder
+            ? vscode.workspace.asRelativePath(firstDocument.uri, false)
+            : firstDocument.uri.fsPath;
+
+        // Generate and append first definition content
+        const firstContent = this.generateBitFieldHoverContent(
+            bitFieldInfo,
+            firstScopes,
+            firstFilePath,
+            firstLine + 1
+        );
+        md.appendMarkdown(firstContent.value);
+
+        // For remaining definitions, just show file paths
+        if (allLocations.length > 1) {
+            md.appendMarkdown('\n\n---\n\n');
+            md.appendMarkdown('**Additional definitions:**\n\n');
+
+            for (let i = 1; i < allLocations.length; i++) {
+                const definition = allLocations[i];
+                const targetDocument = await vscode.workspace.openTextDocument(definition.uri);
+                const targetLine = definition.range.start.line;
+
+                // Extract bit field info from this specific definition
+                const defLineText = targetDocument.lineAt(targetLine).text;
+                const precedingLineText = targetLine > 0
+                    ? targetDocument.lineAt(targetLine - 1).text
+                    : undefined;
+                const thisBitFieldInfo = extractBitFieldInfo(defLineText, precedingLineText);
+
+                // Extract hierarchy information from target document
+                const lines: string[] = [];
+                for (let j = 0; j < targetDocument.lineCount; j++) {
+                    lines.push(targetDocument.getText(targetDocument.lineAt(j).range));
+                }
+                const scopes = extractHierarchy(lines, targetLine);
+
+                // Get file path relative to workspace
+                const workspaceFolder = vscode.workspace.getWorkspaceFolder(targetDocument.uri);
+                const filePath = workspaceFolder
+                    ? vscode.workspace.asRelativePath(targetDocument.uri, false)
+                    : targetDocument.uri.fsPath;
+
+                const hierarchyName = formatHierarchy(scopes, bitFieldInfo.fieldName);
+
+                // Use the comment info from THIS definition, not the first one
+                const comment = thisBitFieldInfo?.commentInfo ?? bitFieldInfo.commentInfo!;
+
+                // Create clickable file link with line number
+                const fileLink = `[${filePath}:${targetLine + 1}](${definition.uri.toString()}#${targetLine + 1})`;
+                md.appendMarkdown(`- ${fileLink} - ${hierarchyName} [${comment.bitPosition}][${comment.accessType}]\n`);
+            }
+        }
+
+        return new vscode.Hover(md, wordRange);
+    }
+
+    /**
+     * Try to get bit field info from definition using LSP
+     */
+    private async tryBitFieldFromDefinition(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): Promise<CompleteBitFieldInfo | null> {
+        try {
+            // Get word at current position
+            const wordRange = document.getWordRangeAtPosition(position);
+            if (!wordRange) {
+                return null;
+            }
+
+            // Use LSP to find definition
+            const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
+                'vscode.executeDefinitionProvider',
+                document.uri,
+                position
+            );
+
+            if (!definitions || definitions.length === 0) {
+                return null;
+            }
+
+            // Get the first definition
+            const definition = definitions[0];
+
+            // Open the document containing the definition
+            const defDocument = await vscode.workspace.openTextDocument(definition.uri);
+            const defLine = defDocument.lineAt(definition.range.start.line);
+            const defLineText = defLine.text;
+
+            // Get preceding line for comment
+            const precedingLine = definition.range.start.line > 0
+                ? defDocument.lineAt(definition.range.start.line - 1).text
+                : undefined;
+
+            // Try to extract bit field info from definition line
+            const bitFieldInfo = extractBitFieldInfo(defLineText, precedingLine);
+            return bitFieldInfo;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    /**
+     * Generate hover content for SFR bit field
+     */
+    private generateBitFieldHoverContent(
+        bitFieldInfo: CompleteBitFieldInfo,
+        scopes: any[],
+        filePath: string,
+        lineNumber: number
+    ): vscode.MarkdownString {
+        const md = new vscode.MarkdownString();
+        md.isTrusted = true;
+
+        const comment = bitFieldInfo.commentInfo!;
+        const hierarchyName = formatHierarchy(scopes, bitFieldInfo.fieldName);
+
+        // Title with hierarchy
+        md.appendMarkdown(`### ${hierarchyName}\n\n`);
+
+        // Property table (left-aligned)
+        md.appendMarkdown('| Property | Value |\n');
+        md.appendMarkdown('|---|---|\n');
+        md.appendMarkdown(`| **Bit Position** | ${comment.bitPosition} |\n`);
+
+        // Add bit width for multi-bit fields
+        if (comment.bitWidth > 1) {
+            md.appendMarkdown(`| **Bit Width** | ${comment.bitWidth} bits |\n`);
+        }
+
+        md.appendMarkdown(`| **Access Type** | ${comment.accessType} |\n`);
+
+        // Reset value with conversions for multi-bit fields
+        if (comment.bitWidth > 1 && comment.resetValueNumeric !== null) {
+            const hex = '0x' + comment.resetValueNumeric.toString(16).toUpperCase();
+            const dec = comment.resetValueNumeric.toString(10);
+            const bin = '0b' + comment.resetValueNumeric.toString(2);
+            md.appendMarkdown(`| **Reset Value** | ${comment.resetValue} (Dec: ${dec}, Bin: ${bin}) |\n`);
+        } else {
+            md.appendMarkdown(`| **Reset Value** | ${comment.resetValue} |\n`);
+        }
+
+        // Bit mask (32-bit) - shows the value when all bits in this field are set to 1
+        const bitMask = calculateBitMask(comment.bitStart, comment.bitEnd);
+        const bitMaskHex = '0x' + bitMask.toString(16).toUpperCase().padStart(8, '0');
+        md.appendMarkdown(`| **Bit Mask** | ${bitMaskHex} |\n`);
+
+        // File location
+        md.appendMarkdown(`| **File** | ${filePath}:${lineNumber} |\n\n`);
+
+        // Description
+        md.appendMarkdown(`**Description:** ${comment.description}\n`);
+
+        return md;
     }
 }

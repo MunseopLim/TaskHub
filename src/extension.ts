@@ -2499,11 +2499,15 @@ export function activate(context: vscode.ExtensionContext) {
     historyProvider.refresh();
     context.subscriptions.push(builtInLinkViewProvider.view, workspaceLinkViewProvider.view, favoriteViewProvider.view, historyProvider.view);
 
-    // Register hover provider for number base conversion in C/C++ files
+    // Register hover provider for number base conversion and SFR bit fields in C/C++ files
     const numberBaseHoverProvider = new NumberBaseHoverProvider();
     context.subscriptions.push(
         vscode.languages.registerHoverProvider(
-            ['c', 'cpp'],
+            [
+                { scheme: 'file', language: 'c' },
+                { scheme: 'file', language: 'cpp' },
+                { scheme: 'file', pattern: '**/*.{h,hpp,hh,hxx,h++}' }
+            ],
             numberBaseHoverProvider
         )
     );
