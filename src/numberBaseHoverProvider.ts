@@ -920,7 +920,9 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                                     break;
                                 }
                             }
-                            if (typeName) break;
+                            if (typeName) {
+                                break;
+                            }
                         }
                     }
                 } finally {
