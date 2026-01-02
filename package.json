@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.24",
+  "version": "0.2.25",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -85,6 +85,11 @@
           "type": "boolean",
           "default": true,
           "description": "Enable number base conversion hover tooltip for C/C++ files. Shows binary, decimal, and hexadecimal representations when hovering over numeric literals."
+        },
+        "taskhub.experimental.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable experimental features. These features are under development and may change or be removed in future versions."
         }
       }
     },

@@ -20,6 +20,7 @@
     13. [쉬운 설정 관리](#13-쉬운-설정-관리)
     14. [액션 실행 히스토리](#14-액션-실행-히스토리)
     15. [Number Base Hover (C/C++)](#15-number-base-hover-cc)
+    16. [Experimental Features](#16-experimental-features)
 2.  [설정](#설정)
 3.  [설치](#설치)
 4.  [사용법](#사용법)
@@ -696,6 +697,45 @@ Additional definitions:
 **설정:**
 *   `taskhub.hover.numberBase.enabled`: Number Base Hover 및 SFR Bit Field Hover를 활성화/비활성화합니다 (기본값: `true`)
 
+### 16. Experimental Features
+
+TaskHub는 개발 중인 실험적 기능들을 위한 프레임워크를 제공합니다. 실험적 기능은 아직 완성되지 않았으며, 향후 버전에서 변경되거나 제거될 수 있습니다.
+
+**실험적 기능 추가 가이드:**
+
+새로운 실험적 기능을 추가하려면 다음 단계를 따르세요:
+
+1. **설정 추가** (`package.json`):
+   ```json
+   "taskhub.experimental.yourFeature.enabled": {
+     "type": "boolean",
+     "default": false,
+     "description": "Your feature description"
+   }
+   ```
+
+2. **뷰 추가** (필요한 경우, `package.json`):
+   ```json
+   {
+     "id": "mainView.yourFeature",
+     "name": "Your Feature (Experimental)",
+     "when": "config.taskhub.experimental.yourFeature.enabled"
+   }
+   ```
+
+3. **Provider 구현** (`extension.ts`):
+   - TreeDataProvider 클래스 작성
+   - activate 함수에서 등록
+
+4. **문서 업데이트**:
+   - README.md에 기능 설명 추가
+   - CONTRIBUTING.md에 개발 가이드 추가
+
+자세한 내용은 [CONTRIBUTING.md](CONTRIBUTING.md)를 참조하세요.
+
+**설정:**
+*   `taskhub.experimental.enabled`: 실험적 기능 전체를 활성화/비활성화합니다 (기본값: `false`)
+
 ## 설정
 
 | 설정 ID | 타입 | 기본값 | 설명 |
@@ -707,6 +747,7 @@ Additional definitions:
 | `taskhub.history.maxItems` | `number` | `10` | 히스토리 패널에 유지할 최대 액션 실행 기록 개수입니다. 1에서 50 사이의 값을 설정할 수 있습니다. |
 | `taskhub.history.showPanel` | `boolean` | `true` | TaskHub 사이드바에서 히스토리 패널을 표시하거나 숨깁니다. |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ 파일에서 숫자 값에 대한 진법 변환 hover tooltip을 활성화합니다. 16진수, 2진수, 10진수 표현과 비트 정보를 표시합니다. |
+| `taskhub.experimental.enabled` | `boolean` | `false` | 실험적 기능을 활성화합니다. 이러한 기능은 개발 중이며 향후 버전에서 변경되거나 제거될 수 있습니다. |
 
 ## 설치
 
