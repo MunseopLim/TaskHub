@@ -707,10 +707,10 @@ TaskHub는 개발 중인 실험적 기능들을 위한 프레임워크를 제공
 
 1. **설정 추가** (`package.json`):
    ```json
-   "taskhub.experimental.yourFeature.enabled": {
+   "taskhub.experimental.<featureName>.enabled": {
      "type": "boolean",
      "default": false,
-     "description": "Your feature description"
+     "markdownDescription": "**[Experimental]** Your feature description. ⚠️ This feature is experimental and may change in future versions."
    }
    ```
 
@@ -719,7 +719,7 @@ TaskHub는 개발 중인 실험적 기능들을 위한 프레임워크를 제공
    {
      "id": "mainView.yourFeature",
      "name": "Your Feature (Experimental)",
-     "when": "config.taskhub.experimental.yourFeature.enabled"
+     "when": "config.taskhub.experimental.<featureName>.enabled"
    }
    ```
 
@@ -733,8 +733,28 @@ TaskHub는 개발 중인 실험적 기능들을 위한 프레임워크를 제공
 
 자세한 내용은 [CONTRIBUTING.md](CONTRIBUTING.md)를 참조하세요.
 
-**설정:**
-*   `taskhub.experimental.enabled`: 실험적 기능 전체를 활성화/비활성화합니다 (기본값: `false`)
+#### 16.1. Bit Operation Hover
+
+C/C++ 코드에서 비트 연산의 결과를 hover tooltip으로 표시하는 기능입니다.
+
+**주요 기능:**
+- 비트 연산자 감지: `&=`, `|=`, `^=`, `<<=`, `>>=`, `~`, `&`, `|`, `^`, `<<`, `>>`
+- 연산 전후 값 비교 (Before/After)
+- 변경된 비트 위치 표시
+- Set/Cleared 비트 목록
+- 16진수, 10진수, 2진수 표현
+
+**현재 상태:**
+- ✅ 사용 가능
+
+**활성화 방법:**
+- VS Code 설정에서 `taskhub.experimental.bitOperationHover.enabled`를 `true`로 설정
+
+**사용 예시:**
+```c
+uint32_t value = 0x0F;
+value |= 0x80;  // Hover over '|=' to see: 0x0F → 0x8F
+```
 
 ## 설정
 
@@ -747,7 +767,7 @@ TaskHub는 개발 중인 실험적 기능들을 위한 프레임워크를 제공
 | `taskhub.history.maxItems` | `number` | `10` | 히스토리 패널에 유지할 최대 액션 실행 기록 개수입니다. 1에서 50 사이의 값을 설정할 수 있습니다. |
 | `taskhub.history.showPanel` | `boolean` | `true` | TaskHub 사이드바에서 히스토리 패널을 표시하거나 숨깁니다. |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ 파일에서 숫자 값에 대한 진법 변환 hover tooltip을 활성화합니다. 16진수, 2진수, 10진수 표현과 비트 정보를 표시합니다. |
-| `taskhub.experimental.enabled` | `boolean` | `false` | 실험적 기능을 활성화합니다. 이러한 기능은 개발 중이며 향후 버전에서 변경되거나 제거될 수 있습니다. |
+| `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적 기능]** C/C++ 파일에서 비트 연산의 결과를 hover tooltip으로 표시합니다. 변수 연산(`value |= 0x80`) 및 상수 표현식(`1U << 5`)을 지원합니다. |
 
 ## 설치
 

@@ -200,20 +200,30 @@ export class MacroExpander {
             // Remove whitespace
             let cleaned = expanded.trim();
 
-            // Handle simple hex: 0xABC
-            if (/^0[xX][0-9a-fA-F]+$/.test(cleaned)) {
-                return parseInt(cleaned, 16);
+            // Handle simple hex: 0xABC or 0xABCU
+            if (/^0[xX][0-9a-fA-F]+[ULul]*$/.test(cleaned)) {
+                // Remove suffix and parse
+                const numStr = cleaned.replace(/[ULul]+$/, '');
+                return parseInt(numStr, 16);
             }
 
-            // Handle simple binary: 0b1010
-            if (/^0[bB][01]+$/.test(cleaned)) {
-                return parseInt(cleaned.substring(2), 2);
+            // Handle simple binary: 0b1010 or 0b1010U
+            if (/^0[bB][01]+[ULul]*$/.test(cleaned)) {
+                // Remove suffix and parse
+                const numStr = cleaned.replace(/[ULul]+$/, '').substring(2);
+                return parseInt(numStr, 2);
             }
 
-            // Handle simple decimal
-            if (/^\d+$/.test(cleaned)) {
-                return parseInt(cleaned, 10);
+            // Handle simple decimal: 123 or 123U
+            if (/^\d+[ULul]*$/.test(cleaned)) {
+                // Remove suffix and parse
+                const numStr = cleaned.replace(/[ULul]+$/, '');
+                return parseInt(numStr, 10);
             }
+
+            // Remove integer suffixes (U, L, UL, ULL, LL, etc.) before evaluation
+            // This handles decimal, hex, and binary numbers with suffixes
+            cleaned = cleaned.replace(/\b(0[xX][0-9a-fA-F]+|0[bB][01]+|\d+)[ULul]+\b/g, '$1');
 
             // Convert hex numbers to decimal for evaluation
             cleaned = cleaned.replace(/0[xX][0-9a-fA-F]+/g, (match) => {

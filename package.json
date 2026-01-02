@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.25",
+  "version": "0.2.26",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -86,10 +86,10 @@
           "default": true,
           "description": "Enable number base conversion hover tooltip for C/C++ files. Shows binary, decimal, and hexadecimal representations when hovering over numeric literals."
         },
-        "taskhub.experimental.enabled": {
+        "taskhub.experimental.bitOperationHover.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Enable experimental features. These features are under development and may change or be removed in future versions."
+          "markdownDescription": "**[Experimental]** Show bit operation results in hover tooltips for C/C++ files.\n\nDisplays calculation results for:\n- Variable operations: `value |= 0x80` (shows Before/After)\n- Constant expressions: `1U << 5` (shows Left/Result)\n\n**Supported patterns:**\n- ✅ `value & 0xFF` (variable & literal)\n- ✅ `1U << 5` (constant expressions)\n- ❌ `a ^ b` (variable & variable - not supported)\n\n⚠️ This feature is experimental and may change in future versions."
         }
       }
     },

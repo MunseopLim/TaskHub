@@ -293,6 +293,43 @@ export function activate(context: vscode.ExtensionContext) {
 }
 ```
 
+### Real-World Example: Bit Operation Hover
+
+The **Bit Operation Hover** feature is a real implementation of an experimental feature in TaskHub. It demonstrates a hover provider pattern (instead of a TreeView pattern).
+
+**Key implementation points:**
+
+1. **Configuration** (`package.json`):
+   ```json
+   "taskhub.experimental.bitOperationHover.enabled": {
+     "type": "boolean",
+     "default": false,
+     "description": "Show bit operation results in hover tooltips..."
+   }
+   ```
+
+2. **No View Required**: This feature extends an existing hover provider instead of creating a new TreeView.
+
+3. **Integration**: Added to `NumberBaseHoverProvider.provideHover()`:
+   ```typescript
+   // Check if experimental features are enabled (master switch)
+   const experimentalConfig = vscode.workspace.getConfiguration('taskhub.experimental');
+   const experimentalEnabled = experimentalConfig.get('enabled', false);
+   const bitOpEnabled = experimentalConfig.get('bitOperationHover.enabled', false);
+
+   // Both master switch and feature-specific switch must be enabled
+   if (!experimentalEnabled || !bitOpEnabled) { return null; }
+
+   // Detect and process bit operations
+   const operation = detectBitOperation(lineText, charPosition);
+   ```
+
+4. **Testing**: 20 unit tests covering detection, calculation, and formatting.
+
+5. **Documentation**: Added to README.md section 16.1 with usage examples.
+
+This example shows that experimental features don't always need a TreeView - they can also extend existing functionality like hover providers, code actions, or commands.
+
 ### Graduation to Stable
 
 When an experimental feature is ready to become stable:

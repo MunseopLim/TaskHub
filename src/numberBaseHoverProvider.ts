@@ -81,6 +81,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return structSizeHover;
         }
 
+        // Try bit operation hover (experimental feature)
+        const bitOperationHover = await this.tryBitOperationHover(document, position);
+        if (bitOperationHover) {
+            return bitOperationHover;
+        }
+
         // Try to find a number at the current position
         const result = this.findNumberAtPosition(lineText, charPosition);
         if (result) {
@@ -1202,6 +1208,70 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     }
 
     /**
+     * Try to provide hover for bit operations (experimental feature)
+     */
+    private async tryBitOperationHover(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): Promise<vscode.Hover | null> {
+        // Check if bit operation hover feature is enabled
+        const bitOpEnabled = vscode.workspace.getConfiguration('taskhub.experimental').get('bitOperationHover.enabled', false);
+        if (!bitOpEnabled) {
+            return null;
+        }
+
+        const line = document.lineAt(position.line);
+        const lineText = line.text;
+        const charPosition = position.character;
+
+        // Detect bit operation at cursor position
+        const operation = detectBitOperation(lineText, charPosition);
+        if (!operation) {
+            return null;
+        }
+
+        // Try to get the current value of the variable (skip for constant expressions)
+        let beforeValue: number | undefined = undefined;
+
+        // For constant expressions, we don't need to look up the variable value
+        if (!operation.isConstant && operation.variable) {
+            // Try to find the variable definition and get its value
+            try {
+                const wordRange = new vscode.Range(
+                    position.line,
+                    lineText.indexOf(operation.variable),
+                    position.line,
+                    lineText.indexOf(operation.variable) + operation.variable.length
+                );
+
+                const variablePosition = new vscode.Position(position.line, lineText.indexOf(operation.variable));
+                const value = await this.getIdentifierValue(document, variablePosition);
+                if (value !== null) {
+                    beforeValue = value;
+                }
+            } catch (error) {
+                // If we can't get the value, continue without it
+            }
+        }
+
+        // Calculate the bit operation result
+        const result = calculateBitOperation(operation, beforeValue);
+
+        // Format the result as markdown
+        const markdown = formatBitOperationResult(result);
+
+        // Create range for the hover
+        const range = new vscode.Range(
+            position.line,
+            operation.start,
+            position.line,
+            operation.end
+        );
+
+        return new vscode.Hover(markdown, range);
+    }
+
+    /**
      * Generate hover content for SFR bit field
      */
     private generateBitFieldHoverContent(
@@ -1254,4 +1324,315 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         return md;
     }
+}
+
+// ============================================================================
+// Bit Operation Hover Support (Experimental)
+// ============================================================================
+
+/**
+ * Bit operation types
+ */
+export enum BitOperationType {
+    AND = '&',
+    OR = '|',
+    XOR = '^',
+    NOT = '~',
+    LEFT_SHIFT = '<<',
+    RIGHT_SHIFT = '>>',
+    AND_ASSIGN = '&=',
+    OR_ASSIGN = '|=',
+    XOR_ASSIGN = '^=',
+    LEFT_SHIFT_ASSIGN = '<<=',
+    RIGHT_SHIFT_ASSIGN = '>>=',
+}
+
+/**
+ * Parsed bit operation information
+ */
+export interface BitOperation {
+    /** The variable being operated on (undefined for constant expressions) */
+    variable?: string;
+    /** The operator */
+    operator: BitOperationType;
+    /** The operand value */
+    operand: number;
+    /** Whether this is an assignment operation */
+    isAssignment: boolean;
+    /** The full expression text */
+    expression: string;
+    /** Start position of the operation in the line */
+    start: number;
+    /** End position of the operation in the line */
+    end: number;
+    /** Whether this is a constant expression (e.g., 1U << 5) */
+    isConstant?: boolean;
+    /** Left operand for constant expressions */
+    leftOperand?: number;
+}
+
+/**
+ * Bit operation result
+ */
+export interface BitOperationResult {
+    /** Original operation */
+    operation: BitOperation;
+    /** Value before operation (if known) */
+    beforeValue?: number;
+    /** Value after operation */
+    afterValue: number;
+    /** List of changed bit positions */
+    changedBits: number[];
+    /** Bits that were set (0 → 1) */
+    setBits: number[];
+    /** Bits that were cleared (1 → 0) */
+    clearedBits: number[];
+}
+
+/**
+ * Detect bit operations in a line of code
+ * Supports: &, |, ^, ~, <<, >>, &=, |=, ^=, <<=, >>=
+ */
+export function detectBitOperation(line: string, cursorPosition: number): BitOperation | undefined {
+    // Patterns for different bit operations
+    // Note: Use negative lookbehind to avoid matching part of hex/binary literals or numeric suffixes
+    const patterns: Array<{
+        regex: RegExp;
+        isAssignment: boolean;
+        isNot?: boolean;
+        isConstant?: boolean;
+    }> = [
+        // Assignment operations: var &= value, var |= value, etc.
+        {
+            regex: /(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)\s*(&=|\|=|\^=|<<=|>>=)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)/g,
+            isAssignment: true
+        },
+        // Non-assignment operations: var & value, var | value, etc.
+        {
+            regex: /(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)\s*(&|\||\^|<<|>>)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)/g,
+            isAssignment: false
+        },
+        // NOT operation: ~var (only match identifiers, not numbers or hex literals or suffixes)
+        {
+            regex: /~\s*(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)/g,
+            isAssignment: false,
+            isNot: true
+        },
+        // Constant expressions: number & number, number | number, etc.
+        // Matches: 1U << 5, 0xFF & 0x0F, (1U << 5), etc.
+        {
+            regex: /\(?\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)[ULul]*\s*(&|\||\^|<<|>>)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)[ULul]*\s*\)?/g,
+            isAssignment: false,
+            isConstant: true
+        }
+    ];
+
+    for (const pattern of patterns) {
+        pattern.regex.lastIndex = 0; // Reset regex state
+        let match: RegExpExecArray | null;
+
+        while ((match = pattern.regex.exec(line)) !== null) {
+            const matchStart = match.index;
+            const matchEnd = match.index + match[0].length;
+
+            // Check if cursor is within this match
+            if (cursorPosition >= matchStart && cursorPosition <= matchEnd) {
+                if (pattern.isNot) {
+                    // NOT operation
+                    return {
+                        variable: match[1],
+                        operator: BitOperationType.NOT,
+                        operand: 0, // NOT doesn't have an operand
+                        isAssignment: false,
+                        expression: match[0],
+                        start: matchStart,
+                        end: matchEnd
+                    };
+                } else if (pattern.isConstant) {
+                    // Constant expression: number op number
+                    const leftStr = match[1].replace(/[ULul]+$/, ''); // Remove suffix
+                    const operator = match[2] as BitOperationType;
+                    const rightStr = match[3].replace(/[ULul]+$/, ''); // Remove suffix
+
+                    const leftOperand = parseNumberLiteral(leftStr);
+                    const operand = parseNumberLiteral(rightStr);
+
+                    if (leftOperand === undefined || operand === undefined) {
+                        continue;
+                    }
+
+                    return {
+                        operator,
+                        operand,
+                        leftOperand,
+                        isAssignment: false,
+                        isConstant: true,
+                        expression: match[0].trim(),
+                        start: matchStart,
+                        end: matchEnd
+                    };
+                } else {
+                    // Regular binary operation
+                    const variable = match[1];
+                    const operator = match[2] as BitOperationType;
+                    const operandStr = match[3];
+                    const operand = parseNumberLiteral(operandStr);
+
+                    if (operand === undefined) {
+                        continue;
+                    }
+
+                    return {
+                        variable,
+                        operator,
+                        operand,
+                        isAssignment: pattern.isAssignment,
+                        expression: match[0],
+                        start: matchStart,
+                        end: matchEnd
+                    };
+                }
+            }
+        }
+    }
+
+    return undefined;
+}
+
+/**
+ * Parse a number literal (hex, binary, or decimal)
+ */
+function parseNumberLiteral(str: string): number | undefined {
+    // Remove digit separators
+    str = str.replace(/'/g, '');
+
+    if (str.startsWith('0x') || str.startsWith('0X')) {
+        // Hexadecimal
+        return parseInt(str.slice(2), 16);
+    } else if (str.startsWith('0b') || str.startsWith('0B')) {
+        // Binary
+        return parseInt(str.slice(2), 2);
+    } else if (/^\d+$/.test(str)) {
+        // Decimal
+        return parseInt(str, 10);
+    }
+
+    return undefined;
+}
+
+/**
+ * Calculate bit operation result
+ */
+export function calculateBitOperation(
+    operation: BitOperation,
+    beforeValue?: number
+): BitOperationResult {
+    let afterValue: number;
+    let actualBeforeValue: number;
+
+    // For constant expressions, use leftOperand; otherwise use beforeValue
+    if (operation.isConstant && operation.leftOperand !== undefined) {
+        actualBeforeValue = operation.leftOperand;
+    } else {
+        actualBeforeValue = beforeValue ?? 0;
+    }
+
+    // Perform the operation
+    switch (operation.operator) {
+        case BitOperationType.AND:
+        case BitOperationType.AND_ASSIGN:
+            afterValue = actualBeforeValue & operation.operand;
+            break;
+        case BitOperationType.OR:
+        case BitOperationType.OR_ASSIGN:
+            afterValue = actualBeforeValue | operation.operand;
+            break;
+        case BitOperationType.XOR:
+        case BitOperationType.XOR_ASSIGN:
+            afterValue = actualBeforeValue ^ operation.operand;
+            break;
+        case BitOperationType.LEFT_SHIFT:
+        case BitOperationType.LEFT_SHIFT_ASSIGN:
+            afterValue = actualBeforeValue << operation.operand;
+            break;
+        case BitOperationType.RIGHT_SHIFT:
+        case BitOperationType.RIGHT_SHIFT_ASSIGN:
+            afterValue = actualBeforeValue >>> operation.operand; // Unsigned right shift
+            break;
+        case BitOperationType.NOT:
+            afterValue = ~actualBeforeValue;
+            break;
+        default:
+            afterValue = actualBeforeValue;
+    }
+
+    // Calculate changed bits
+    const changedBits: number[] = [];
+    const setBits: number[] = [];
+    const clearedBits: number[] = [];
+
+    // Compare up to 32 bits
+    for (let i = 0; i < 32; i++) {
+        const beforeBit = (actualBeforeValue >> i) & 1;
+        const afterBit = (afterValue >> i) & 1;
+
+        if (beforeBit !== afterBit) {
+            changedBits.push(i);
+            if (afterBit === 1) {
+                setBits.push(i);
+            } else {
+                clearedBits.push(i);
+            }
+        }
+    }
+
+    return {
+        operation,
+        beforeValue: operation.isConstant ? actualBeforeValue : beforeValue,
+        afterValue,
+        changedBits,
+        setBits,
+        clearedBits
+    };
+}
+
+/**
+ * Format bit operation result as markdown
+ */
+export function formatBitOperationResult(result: BitOperationResult): vscode.MarkdownString {
+    const md = new vscode.MarkdownString();
+    md.isTrusted = true;
+    md.supportHtml = true;
+
+    const { operation, beforeValue, afterValue } = result;
+
+    // Title - different for constant expressions
+    if (operation.isConstant) {
+        md.appendMarkdown(`### Constant Expression Result\n\n`);
+    } else {
+        md.appendMarkdown(`### Bit Operation Result\n\n`);
+    }
+
+    // Operation
+    md.appendMarkdown(`**Expression:** \`${operation.expression}\`\n\n`);
+
+    // Values table
+    md.appendMarkdown(`| | Hex | Dec | Bin |\n`);
+    md.appendMarkdown(`|---|---|---|---|\n`);
+
+    // For constant expressions, show both operands and result
+    if (operation.isConstant) {
+        if (beforeValue !== undefined) {
+            md.appendMarkdown(`| **Left** | \`0x${beforeValue.toString(16).toUpperCase().padStart(8, '0')}\` | ${beforeValue} | \`0b${beforeValue.toString(2).padStart(32, '0')}\` |\n`);
+        }
+        md.appendMarkdown(`| **Result** | \`0x${afterValue.toString(16).toUpperCase().padStart(8, '0')}\` | ${afterValue} | \`0b${afterValue.toString(2).padStart(32, '0')}\` |\n`);
+    } else {
+        // For variable operations, show before/after
+        if (beforeValue !== undefined) {
+            md.appendMarkdown(`| **Before** | \`0x${beforeValue.toString(16).toUpperCase().padStart(8, '0')}\` | ${beforeValue} | \`0b${beforeValue.toString(2).padStart(32, '0')}\` |\n`);
+        }
+        md.appendMarkdown(`| **After** | \`0x${afterValue.toString(16).toUpperCase().padStart(8, '0')}\` | ${afterValue} | \`0b${afterValue.toString(2).padStart(32, '0')}\` |\n`);
+    }
+
+    return md;
 }
