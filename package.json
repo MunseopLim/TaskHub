@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.26",
+  "version": "0.2.27",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -90,6 +90,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "**[Experimental]** Show bit operation results in hover tooltips for C/C++ files.\n\nDisplays calculation results for:\n- Variable operations: `value |= 0x80` (shows Before/After)\n- Constant expressions: `1U << 5` (shows Left/Result)\n\n**Supported patterns:**\n- ✅ `value & 0xFF` (variable & literal)\n- ✅ `1U << 5` (constant expressions)\n- ❌ `a ^ b` (variable & variable - not supported)\n\n⚠️ This feature is experimental and may change in future versions."
+        },
+        "taskhub.preset.selected": {
+          "type": "string",
+          "default": "none",
+          "markdownDescription": "Select a preset to automatically apply predefined actions.\n\n- **none**: Use only workspace actions\n- **example**: Example preset with Git and Build commands\n- Or enter a custom preset ID from extension or workspace `.vscode/presets/` folder\n\nPresets are merged with workspace `.vscode/actions.json` (workspace actions take priority)."
         }
       }
     },
@@ -265,6 +270,14 @@
       {
         "command": "taskhub.toggleHistoryPanel",
         "title": "TaskHub: Show History Panel"
+      },
+      {
+        "command": "taskhub.applyPreset",
+        "title": "TaskHub: Apply Preset"
+      },
+      {
+        "command": "taskhub.saveAsPreset",
+        "title": "TaskHub: Save as Preset"
       }
     ],
     "menus": {

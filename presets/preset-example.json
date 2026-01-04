@@ -1,0 +1,80 @@
+[
+  {
+    "id": "example.separator.git",
+    "title": "--- Git Operations ---",
+    "type": "separator"
+  },
+  {
+    "id": "example.git.status",
+    "title": "Git: Status",
+    "action": {
+      "description": "Show git status",
+      "tasks": [
+        {
+          "id": "status",
+          "type": "shell",
+          "command": "git status",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "example.git.pull",
+    "title": "Git: Pull",
+    "action": {
+      "description": "Pull latest changes",
+      "tasks": [
+        {
+          "id": "pull",
+          "type": "shell",
+          "command": "git pull",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "example.separator.build",
+    "title": "--- Build Operations ---",
+    "type": "separator"
+  },
+  {
+    "id": "example.build",
+    "title": "Build: Example",
+    "action": {
+      "description": "Example build command (customize for your project)",
+      "tasks": [
+        {
+          "id": "build",
+          "type": "shell",
+          "command": {
+            "windows": "echo Replace this with your Windows build command",
+            "macos": "echo 'Replace this with your macOS build command'",
+            "linux": "echo 'Replace this with your Linux build command'"
+          },
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "example.clean",
+    "title": "Clean: Example",
+    "action": {
+      "description": "Example clean command",
+      "tasks": [
+        {
+          "id": "clean",
+          "type": "shell",
+          "command": {
+            "windows": "echo Clean build artifacts here",
+            "macos": "echo 'Clean build artifacts here'",
+            "linux": "echo 'Clean build artifacts here'"
+          },
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  }
+]

@@ -1,5 +1,27 @@
 # Change Log
 
+## [0.2.27] - 2026-01-04
+
+### Added
+
+**Preset 기능**
+- 프로젝트 환경별 action 설정을 쉽게 공유하고 적용할 수 있는 Preset 시스템 추가
+- **Apply Preset** 명령어: 미리 정의된 preset을 워크스페이스에 적용
+  - Replace 모드: 기존 actions.json을 preset으로 교체
+  - Merge 모드: 기존 actions와 preset을 병합
+  - ID 충돌 시 3가지 해결 전략 제공 (Keep existing/Use preset/Keep both)
+- **Save as Preset** 명령어: 현재 actions를 preset으로 저장
+  - Workspace preset (`.vscode/presets/`): Git으로 팀원들과 공유 가능
+  - Extension preset (`presets/`): 확장 프로그램에 번들로 포함
+  - Custom location: 원하는 위치에 파일로 저장
+- Extension preset과 workspace preset 자동 발견 및 선택 가능
+- 예제 preset 파일 포함 (`presets/preset-example.json`)
+
+**활용 사례**
+- 팀 내 여러 환경(integration, hil 등) 간 action 설정 공유
+- 새 프로젝트 시작 시 빠른 초기 설정
+- 환경별 Git/빌드 명령어 템플릿 관리
+
 ## [0.2.26] - 2026-01-03
 
 ### First Public Release

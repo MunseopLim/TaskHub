@@ -155,10 +155,153 @@ export function createGroupedTaskPresentationOptions(actionKey: string, revealSe
     };
 }
 
+// ============================================================================
+// Preset Management
+// ============================================================================
+
+interface PresetInfo {
+    id: string;
+    name: string;
+    source: 'extension' | 'workspace';
+    filePath: string;
+    workspaceName?: string;
+}
+
+function discoverPresets(context: vscode.ExtensionContext): PresetInfo[] {
+    const presets: PresetInfo[] = [];
+
+    // Scan extension presets
+    const extPresetsDir = path.join(context.extensionPath, 'presets');
+    if (fs.existsSync(extPresetsDir)) {
+        const files = fs.readdirSync(extPresetsDir).filter(f => f.startsWith('preset-') && f.endsWith('.json'));
+        for (const file of files) {
+            const id = file.replace('preset-', '').replace('.json', '');
+            presets.push({
+                id,
+                name: id,
+                source: 'extension',
+                filePath: path.join(extPresetsDir, file)
+            });
+        }
+    }
+
+    // Scan workspace presets
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    for (const folder of workspaceFolders) {
+        const wsPresetsDir = path.join(folder.uri.fsPath, '.vscode', 'presets');
+        if (fs.existsSync(wsPresetsDir)) {
+            const files = fs.readdirSync(wsPresetsDir).filter(f => f.startsWith('preset-') && f.endsWith('.json'));
+            for (const file of files) {
+                const id = `${folder.name}:${file.replace('preset-', '').replace('.json', '')}`;
+                presets.push({
+                    id,
+                    name: `${folder.name}: ${file.replace('preset-', '').replace('.json', '')}`,
+                    source: 'workspace',
+                    workspaceName: folder.name,
+                    filePath: path.join(wsPresetsDir, file)
+                });
+            }
+        }
+    }
+
+    return presets;
+}
+
+function mergeActions(
+    existing: ActionItem[],
+    preset: ActionItem[],
+    strategy: 'keep-existing' | 'use-preset' | 'keep-both'
+): ActionItem[] {
+    if (strategy === 'keep-both') {
+        return [...existing, ...preset];
+    }
+
+    const existingIds = new Set<string>();
+
+    function collectIds(items: ActionItem[]) {
+        for (const item of items) {
+            existingIds.add(item.id);
+            if (item.children) {
+                collectIds(item.children);
+            }
+        }
+    }
+    collectIds(existing);
+
+    const filtered = preset.filter(item => !existingIds.has(item.id));
+
+    return strategy === 'keep-existing'
+        ? [...existing, ...filtered]
+        : [...filtered, ...existing];
+}
+
+function findConflictingIds(actions1: ActionItem[], actions2: ActionItem[]): string[] {
+    const ids1 = new Set<string>();
+
+    function collectIds(items: ActionItem[]) {
+        for (const item of items) {
+            ids1.add(item.id);
+            if (item.children) {
+                collectIds(item.children);
+            }
+        }
+    }
+    collectIds(actions1);
+
+    const conflicts: string[] = [];
+
+    function checkConflicts(items: ActionItem[]) {
+        for (const item of items) {
+            if (ids1.has(item.id)) {
+                conflicts.push(item.id);
+            }
+            if (item.children) {
+                checkConflicts(item.children);
+            }
+        }
+    }
+    checkConflicts(actions2);
+
+    return conflicts;
+}
+
+// ============================================================================
+// Actions Loading
+// ============================================================================
+
+function getSelectedPresetId(): string | null {
+    const config = vscode.workspace.getConfiguration('taskhub');
+    const selected = config.get<string>('preset.selected', 'none');
+    return selected === 'none' ? null : selected;
+}
+
 function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
     const extensionLabel = 'extension media/actions.json';
     const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
     const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
+
+    // Load selected preset from settings
+    const presetId = getSelectedPresetId();
+    let presetActions: ActionItem[] = [];
+    let presetLabel: string | null = null;
+
+    if (presetId) {
+        const presets = discoverPresets(context);
+        const preset = presets.find(p => p.id === presetId || p.name === presetId);
+
+        if (preset) {
+            try {
+                presetActions = loadAndValidateActions(preset.filePath, {
+                    sourceLabel: `preset: ${preset.name}`
+                });
+                presetLabel = `preset: ${preset.name}`;
+            } catch (error: any) {
+                outputChannel.appendLine(`[Preset Warning] Failed to load preset '${presetId}': ${error.message}`);
+            }
+        } else {
+            outputChannel.appendLine(`[Preset Warning] Preset '${presetId}' not found. Available presets: ${presets.map(p => p.id).join(', ')}`);
+        }
+    }
 
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
     const workspaceSources = workspaceFolders.map(folder => {
@@ -168,8 +311,29 @@ function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
         return { sourceLabel: workspaceLabel, actions, workspaceFolderPath: folder.uri.fsPath };
     });
 
+    // Merge with priority: workspace > preset > extension
+    let mergedActions = extensionActions;
+
+    // Apply preset (if any)
+    if (presetActions.length > 0) {
+        mergedActions = mergeActions(presetActions, mergedActions, 'keep-existing');
+    }
+
+    // Apply workspace actions (highest priority)
+    for (const wsSource of workspaceSources) {
+        if (wsSource.actions.length > 0) {
+            mergedActions = mergeActions(wsSource.actions, mergedActions, 'keep-existing');
+        }
+    }
+
+    // Build sources list for validation and workspace folder mapping
     const sources = [
         { sourceLabel: extensionLabel, actions: extensionActions, workspaceFolderPath: undefined as string | undefined },
+        ...(presetActions.length > 0 && presetLabel ? [{
+            sourceLabel: presetLabel,
+            actions: presetActions,
+            workspaceFolderPath: undefined as string | undefined
+        }] : []),
         ...workspaceSources
     ].filter(source => source.actions.length > 0);
 
@@ -178,7 +342,9 @@ function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
     }
 
     actionWorkspaceFolderMap.clear();
-    for (const source of sources) {
+
+    // Map actions to workspace folders (workspace actions have priority)
+    for (const source of [...workspaceSources].reverse()) {
         traverseActionItems(source.actions, (item) => {
             if (item.id) {
                 actionWorkspaceFolderMap.set(item.id, source.workspaceFolderPath);
@@ -186,7 +352,7 @@ function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
         });
     }
 
-    return sources.flatMap(source => source.actions);
+    return mergedActions;
 }
 
 export function findActionById(actions: ActionItem[], id: string): ActionItem | undefined {
@@ -3087,6 +3253,242 @@ export function activate(context: vscode.ExtensionContext) {
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openSettings', () => { vscode.commands.executeCommand('workbench.action.openSettings', '@ext:Munseop.taskhub'); }));
+
+    // ========================================================================
+    // Preset Commands
+    // ========================================================================
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.applyPreset', async () => {
+        try {
+            // Step 1: Select workspace folder
+            const folder = await pickWorkspaceFolderForCommand('Select workspace to apply preset to');
+            if (!folder) {
+                return;
+            }
+
+            const actionsPath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
+            const hasExisting = fs.existsSync(actionsPath);
+
+            // Step 2: Discover and select preset
+            const presets = discoverPresets(context);
+            if (presets.length === 0) {
+                vscode.window.showWarningMessage('No presets found. Create one with "Save as Preset".');
+                return;
+            }
+
+            const selected = await vscode.window.showQuickPick(
+                presets.map(p => ({
+                    label: p.name,
+                    description: p.source === 'extension' ? 'built-in' : `workspace: ${p.workspaceName}`,
+                    preset: p
+                })),
+                { placeHolder: 'Select a preset to apply' }
+            );
+
+            if (!selected) {
+                return;
+            }
+
+            // Step 3: Load preset
+            const presetActions = loadAndValidateActions(selected.preset.filePath, {
+                sourceLabel: `preset: ${selected.preset.name}`
+            });
+
+            // Step 4: Determine how to apply
+            let finalActions: ActionItem[];
+
+            if (!hasExisting) {
+                // No existing actions.json - create new
+                finalActions = presetActions;
+            } else {
+                // Existing actions.json - ask how to apply
+                const applyMode = await vscode.window.showQuickPick([
+                    { label: 'Replace', description: 'Replace existing actions with preset' },
+                    { label: 'Merge', description: 'Merge preset with existing actions' }
+                ], { placeHolder: 'How to apply preset?' });
+
+                if (!applyMode) {
+                    return;
+                }
+
+                if (applyMode.label === 'Replace') {
+                    finalActions = presetActions;
+                } else {
+                    // Merge: check for conflicts
+                    const existingActions = loadAndValidateActions(actionsPath, {
+                        sourceLabel: 'workspace'
+                    });
+                    const conflicts = findConflictingIds(existingActions, presetActions);
+
+                    let mergeStrategy: 'keep-existing' | 'use-preset' | 'keep-both';
+
+                    if (conflicts.length > 0) {
+                        const choice = await vscode.window.showQuickPick([
+                            {
+                                label: 'Keep existing',
+                                description: `Keep your ${conflicts.length} actions, add non-conflicting from preset`
+                            },
+                            {
+                                label: 'Use preset',
+                                description: `Use preset's ${conflicts.length} actions, keep non-conflicting from yours`
+                            },
+                            {
+                                label: 'Keep both',
+                                description: 'Keep all actions (duplicates allowed)'
+                            }
+                        ], {
+                            placeHolder: `Found ${conflicts.length} conflicting action IDs. How to resolve?`
+                        });
+
+                        if (!choice) {
+                            return;
+                        }
+
+                        mergeStrategy = choice.label === 'Keep existing'
+                            ? 'keep-existing'
+                            : choice.label === 'Use preset'
+                                ? 'use-preset'
+                                : 'keep-both';
+                    } else {
+                        mergeStrategy = 'keep-both';
+                    }
+
+                    finalActions = mergeActions(existingActions, presetActions, mergeStrategy);
+                }
+            }
+
+            // Step 5: Save
+            const vscodeDir = path.dirname(actionsPath);
+            fs.mkdirSync(vscodeDir, { recursive: true });
+            fs.writeFileSync(actionsPath, JSON.stringify(finalActions, null, 2) + '\n');
+
+            // Step 6: Refresh UI and notify
+            mainViewProvider.refresh();
+            const result = await vscode.window.showInformationMessage(
+                `✅ Preset "${selected.preset.name}" applied successfully!`,
+                'Open actions.json'
+            );
+
+            if (result === 'Open actions.json') {
+                const doc = await vscode.workspace.openTextDocument(actionsPath);
+                await vscode.window.showTextDocument(doc);
+            }
+
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to apply preset: ${error.message}`);
+            outputChannel.appendLine(`[Preset Error] ${error.message}`);
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.saveAsPreset', async () => {
+        try {
+            // Step 1: Select workspace folder
+            const folder = await pickWorkspaceFolderForCommand('Select workspace to save preset from');
+            if (!folder) {
+                return;
+            }
+
+            const actionsPath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
+            if (!fs.existsSync(actionsPath)) {
+                vscode.window.showErrorMessage('No actions.json found. Create actions first.');
+                return;
+            }
+
+            // Step 2: Load actions
+            const actions = loadAndValidateActions(actionsPath, {
+                sourceLabel: 'workspace'
+            });
+
+            // Step 3: Get preset ID
+            const presetId = await vscode.window.showInputBox({
+                prompt: 'Enter preset ID (e.g., integration, hil)',
+                placeHolder: 'integration',
+                validateInput: (value) => {
+                    if (!value || !/^[a-z0-9-_]+$/.test(value)) {
+                        return 'Use lowercase letters, numbers, hyphens, and underscores only';
+                    }
+                    return null;
+                }
+            });
+
+            if (!presetId) {
+                return;
+            }
+
+            // Step 4: Choose save location
+            const saveLocation = await vscode.window.showQuickPick([
+                { label: 'Workspace', description: 'Save to .vscode/presets/ (shared via Git)' },
+                { label: 'Extension', description: 'Save to extension presets/ folder' },
+                { label: 'Custom location', description: 'Choose a file location' }
+            ], { placeHolder: 'Where to save this preset?' });
+
+            if (!saveLocation) {
+                return;
+            }
+
+            const fileName = `preset-${presetId}.json`;
+            let targetPath: string;
+
+            if (saveLocation.label === 'Workspace') {
+                const presetsDir = path.join(folder.uri.fsPath, '.vscode', 'presets');
+                fs.mkdirSync(presetsDir, { recursive: true });
+                targetPath = path.join(presetsDir, fileName);
+            } else if (saveLocation.label === 'Extension') {
+                const presetsDir = path.join(context.extensionPath, 'presets');
+                fs.mkdirSync(presetsDir, { recursive: true });
+                targetPath = path.join(presetsDir, fileName);
+            } else {
+                const fileUri = await vscode.window.showSaveDialog({
+                    defaultUri: vscode.Uri.file(fileName),
+                    filters: { 'JSON': ['json'] }
+                });
+                if (!fileUri) {
+                    return;
+                }
+                targetPath = fileUri.fsPath;
+            }
+
+            // Step 5: Save
+            fs.writeFileSync(targetPath, JSON.stringify(actions, null, 2) + '\n');
+
+            // Step 6: Notify
+            const result = await vscode.window.showInformationMessage(
+                `✅ Preset saved: ${path.basename(targetPath)}`,
+                'Open', 'Reveal'
+            );
+
+            if (result === 'Open') {
+                const doc = await vscode.workspace.openTextDocument(targetPath);
+                await vscode.window.showTextDocument(doc);
+            } else if (result === 'Reveal') {
+                vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(targetPath));
+            }
+
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to save preset: ${error.message}`);
+            outputChannel.appendLine(`[Preset Error] ${error.message}`);
+        }
+    }));
+
+    // ========================================================================
+    // Preset Settings Listener
+    // ========================================================================
+
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(event => {
+            if (event.affectsConfiguration('taskhub.preset.selected')) {
+                const presetId = getSelectedPresetId();
+                mainViewProvider.refresh();
+                outputChannel.appendLine(`[Preset] Settings changed to: ${presetId || 'none'}`);
+
+                if (presetId) {
+                    vscode.window.showInformationMessage(`Preset "${presetId}" applied. Actions reloaded.`);
+                } else {
+                    vscode.window.showInformationMessage('Preset cleared. Using workspace actions only.');
+                }
+            }
+        })
+    );
 }
 
 export function deactivate() {}
