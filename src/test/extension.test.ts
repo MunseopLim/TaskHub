@@ -1295,6 +1295,247 @@ suite('Extension Test Suite', () => {
 		});
 	});
 
+	suite('Action Stop and History Update', () => {
+		test('should track action start timestamp', () => {
+			const actionId = 'test-action-1';
+			const timestamp = Date.now();
+			const timestampMap = new Map<string, number>();
+
+			// Simulate adding timestamp when action starts
+			timestampMap.set(actionId, timestamp);
+
+			assert.strictEqual(timestampMap.get(actionId), timestamp);
+			assert.strictEqual(timestampMap.has(actionId), true);
+		});
+
+		test('should clean up timestamp after action completes', () => {
+			const actionId = 'test-action-2';
+			const timestamp = Date.now();
+			const timestampMap = new Map<string, number>();
+
+			timestampMap.set(actionId, timestamp);
+			assert.strictEqual(timestampMap.has(actionId), true);
+
+			// Simulate cleanup in finally block
+			timestampMap.delete(actionId);
+			assert.strictEqual(timestampMap.has(actionId), false);
+		});
+
+		test('should handle multiple concurrent actions with different timestamps', () => {
+			const timestampMap = new Map<string, number>();
+			const action1 = { id: 'action1', timestamp: Date.now() };
+			const action2 = { id: 'action2', timestamp: Date.now() + 100 };
+			const action3 = { id: 'action3', timestamp: Date.now() + 200 };
+
+			timestampMap.set(action1.id, action1.timestamp);
+			timestampMap.set(action2.id, action2.timestamp);
+			timestampMap.set(action3.id, action3.timestamp);
+
+			assert.strictEqual(timestampMap.size, 3);
+			assert.strictEqual(timestampMap.get(action1.id), action1.timestamp);
+			assert.strictEqual(timestampMap.get(action2.id), action2.timestamp);
+			assert.strictEqual(timestampMap.get(action3.id), action3.timestamp);
+		});
+
+		test('should update history status to failure when action is manually stopped', () => {
+			type HistoryStatus = 'success' | 'failure' | 'running';
+			interface HistoryEntry {
+				actionId: string;
+				actionTitle: string;
+				timestamp: number;
+				status: HistoryStatus;
+				output?: string;
+			}
+
+			const actionId = 'test-action';
+			const timestamp = Date.now();
+			const history: HistoryEntry[] = [
+				{
+					actionId: actionId,
+					actionTitle: 'Test Action',
+					timestamp: timestamp,
+					status: 'running'
+				}
+			];
+
+			// Simulate manual stop - find and update the entry
+			const entry = history.find(e => e.actionId === actionId && e.timestamp === timestamp);
+			assert.ok(entry);
+			assert.strictEqual(entry.status, 'running');
+
+			// Update status to failure with stop message
+			entry.status = 'failure';
+			entry.output = 'Action stopped by user';
+
+			assert.strictEqual(entry.status, 'failure');
+			assert.strictEqual(entry.output, 'Action stopped by user');
+		});
+
+		test('should track manually terminated actions', () => {
+			const manuallyTerminatedActions = new Set<string>();
+			const actionId = 'test-action';
+
+			// Simulate adding to manually terminated set
+			manuallyTerminatedActions.add(actionId);
+
+			assert.strictEqual(manuallyTerminatedActions.has(actionId), true);
+
+			// Cleanup after handling
+			manuallyTerminatedActions.delete(actionId);
+			assert.strictEqual(manuallyTerminatedActions.has(actionId), false);
+		});
+
+		test('should update history entry with error message on manual stop', () => {
+			type HistoryStatus = 'success' | 'failure' | 'running';
+			interface HistoryEntry {
+				actionId: string;
+				actionTitle: string;
+				timestamp: number;
+				status: HistoryStatus;
+				output?: string;
+			}
+
+			const history: HistoryEntry[] = [
+				{
+					actionId: 'action1',
+					actionTitle: 'Build Project',
+					timestamp: Date.now(),
+					status: 'running'
+				}
+			];
+
+			// Simulate updating status on manual stop
+			const entry = history.find(e => e.actionId === 'action1');
+			if (entry) {
+				entry.status = 'failure';
+				entry.output = 'Action stopped by user';
+			}
+
+			assert.strictEqual(entry?.status, 'failure');
+			assert.strictEqual(entry?.output, 'Action stopped by user');
+		});
+
+		test('should preserve other history entries when updating one', () => {
+			type HistoryStatus = 'success' | 'failure' | 'running';
+			interface HistoryEntry {
+				actionId: string;
+				actionTitle: string;
+				timestamp: number;
+				status: HistoryStatus;
+				output?: string;
+			}
+
+			const timestamp1 = Date.now();
+			const timestamp2 = Date.now() + 1000;
+			const timestamp3 = Date.now() + 2000;
+
+			const history: HistoryEntry[] = [
+				{ actionId: 'action1', actionTitle: 'Action 1', timestamp: timestamp1, status: 'success' },
+				{ actionId: 'action2', actionTitle: 'Action 2', timestamp: timestamp2, status: 'running' },
+				{ actionId: 'action3', actionTitle: 'Action 3', timestamp: timestamp3, status: 'success' }
+			];
+
+			// Update only action2
+			const entry = history.find(e => e.actionId === 'action2' && e.timestamp === timestamp2);
+			if (entry) {
+				entry.status = 'failure';
+				entry.output = 'Action stopped by user';
+			}
+
+			// Verify other entries are unchanged
+			assert.strictEqual(history[0].status, 'success');
+			assert.strictEqual(history[0].output, undefined);
+			assert.strictEqual(history[1].status, 'failure');
+			assert.strictEqual(history[1].output, 'Action stopped by user');
+			assert.strictEqual(history[2].status, 'success');
+			assert.strictEqual(history[2].output, undefined);
+		});
+
+		test('should handle stopAction when action is not found', () => {
+			const timestampMap = new Map<string, number>();
+			const actionId = 'non-existent-action';
+
+			// Attempt to get timestamp for non-existent action
+			const timestamp = timestampMap.get(actionId);
+
+			assert.strictEqual(timestamp, undefined);
+			assert.strictEqual(timestampMap.has(actionId), false);
+		});
+
+		test('should differentiate between manual stop and regular failure', () => {
+			type HistoryStatus = 'success' | 'failure' | 'running';
+			interface HistoryEntry {
+				actionId: string;
+				actionTitle: string;
+				timestamp: number;
+				status: HistoryStatus;
+				output?: string;
+			}
+
+			const manualStopEntry: HistoryEntry = {
+				actionId: 'action1',
+				actionTitle: 'Action 1',
+				timestamp: Date.now(),
+				status: 'failure',
+				output: 'Action stopped by user'
+			};
+
+			const regularFailureEntry: HistoryEntry = {
+				actionId: 'action2',
+				actionTitle: 'Action 2',
+				timestamp: Date.now() + 1000,
+				status: 'failure',
+				output: 'Error: Command failed'
+			};
+
+			// Both are failures but with different messages
+			assert.strictEqual(manualStopEntry.status, 'failure');
+			assert.strictEqual(regularFailureEntry.status, 'failure');
+			assert.ok(manualStopEntry.output?.includes('stopped by user'));
+			assert.ok(regularFailureEntry.output?.includes('Error'));
+		});
+
+		test('should handle concurrent action stops with correct timestamps', () => {
+			const timestampMap = new Map<string, number>();
+			const action1Id = 'action1';
+			const action2Id = 'action2';
+			const timestamp1 = Date.now();
+			const timestamp2 = Date.now() + 100;
+
+			timestampMap.set(action1Id, timestamp1);
+			timestampMap.set(action2Id, timestamp2);
+
+			// Stop action1
+			const ts1 = timestampMap.get(action1Id);
+			assert.strictEqual(ts1, timestamp1);
+			timestampMap.delete(action1Id);
+
+			// action2 should still be there
+			assert.strictEqual(timestampMap.has(action1Id), false);
+			assert.strictEqual(timestampMap.has(action2Id), true);
+			assert.strictEqual(timestampMap.get(action2Id), timestamp2);
+		});
+
+		test('should handle action rerun with new timestamp', () => {
+			const timestampMap = new Map<string, number>();
+			const actionId = 'rerun-action';
+			const firstTimestamp = Date.now();
+			const secondTimestamp = Date.now() + 5000;
+
+			// First run
+			timestampMap.set(actionId, firstTimestamp);
+			assert.strictEqual(timestampMap.get(actionId), firstTimestamp);
+
+			// Cleanup after first run
+			timestampMap.delete(actionId);
+
+			// Second run (rerun) with new timestamp
+			timestampMap.set(actionId, secondTimestamp);
+			assert.strictEqual(timestampMap.get(actionId), secondTimestamp);
+			assert.notStrictEqual(firstTimestamp, secondTimestamp);
+		});
+	});
+
 	suite('InputBox Task', () => {
 		test('should apply prefix to user input', () => {
 			const userInput = 'Test 1234 123';

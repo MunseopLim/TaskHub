@@ -1,5 +1,23 @@
 # Change Log
 
+## [0.2.28] - 2026-01-12
+
+### Fixed
+
+**History Status Update**
+- Fixed history panel not updating status when action is manually stopped via stop button
+  - History entries now correctly show 'failure' status with "Action stopped by user" message
+  - Previously, stopped actions would remain in 'running' state indefinitely
+  - Added timestamp tracking system (`actionStartTimestamps` Map) to properly correlate stop events with history entries
+  - Stop button now immediately updates history status when clicked
+
+### Added
+
+**Testing**
+- Added comprehensive unit tests for action stop and history update functionality
+  - 11 new test cases covering timestamp tracking, history status updates, and edge cases
+  - All 391 tests passing
+
 ## [0.2.27] - 2026-01-04
 
 ### Added

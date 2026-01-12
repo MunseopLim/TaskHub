@@ -1004,6 +1004,7 @@ const outputChannel = vscode.window.createOutputChannel('TaskHub');
 const actionTerminals = new Map<string, vscode.Terminal>();
 const actionWorkspaceFolderMap = new Map<string, string | undefined>();
 const actionChildProcesses = new Map<string, Set<ReturnType<typeof spawn>>>();
+const actionStartTimestamps = new Map<string, number>();
 
 function terminateChildProcesses(actionId: string): boolean {
     const processes = actionChildProcesses.get(actionId);
@@ -1952,6 +1953,7 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
 
     // Add history entry
     const timestamp = Date.now();
+    actionStartTimestamps.set(id, timestamp);
     if (historyProvider) {
         historyProvider.addHistoryEntry({
             actionId: id,
@@ -1980,9 +1982,15 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
             }
 
             throw error;
+        } else {
+            // Action was manually stopped
+            if (historyProvider) {
+                historyProvider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user');
+            }
         }
     } finally {
         finalizeActionRun(id, showTaskStatus, mainViewProvider);
+        actionStartTimestamps.delete(id);
     }
 }
 
@@ -2783,6 +2791,12 @@ export function activate(context: vscode.ExtensionContext) {
         if (!stopped) {
             manuallyTerminatedActions.delete(id);
             vscode.window.showWarningMessage(`Could not find active task for '${actionItem.label}'.`);
+        } else {
+            // Update history status to failure when manually stopped
+            const timestamp = actionStartTimestamps.get(id);
+            if (historyProvider && timestamp) {
+                historyProvider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user');
+            }
         }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showVersion', () => { const packageJson = JSON.parse(fs.readFileSync(path.join(context.extensionPath, 'package.json'), 'utf-8')); vscode.window.showInformationMessage(`TaskHub Version: ${packageJson.version}`); }));
