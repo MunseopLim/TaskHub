@@ -1,5 +1,25 @@
 # Change Log
 
+## [0.2.29] - 2026-01-15
+
+### Enhanced
+
+**SFR Bit Field Hover - Access Type Description**
+- Access Type 약어에 대한 설명이 hover tooltip에 표시됩니다
+  - 예: `RW1C` → `RW1C (Write 1 to Clear)`
+- 지원되는 Access Type:
+  - `RO` (Read Only)
+  - `WO` (Write Only)
+  - `RW` (Read / Write)
+  - `RW1C` (Write 1 to Clear)
+  - `RW1S` (Write 1 to Set)
+  - `W1C` (Write 1 to Clear)
+  - `RWC` (Read / Write Clear)
+  - `RWS` (Sticky bit)
+
+### Testing
+- Added 12 unit tests for `getAccessTypeDescription` function
+
 ## [0.2.28] - 2026-01-12
 
 ### Fixed

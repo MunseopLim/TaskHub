@@ -6,6 +6,7 @@ import {
     extractBitFieldInfo,
     extractHierarchy,
     formatHierarchy,
+    getAccessTypeDescription,
     BitFieldInfo
 } from '../sfrBitFieldParser';
 
@@ -471,6 +472,68 @@ suite('SFR BitField Parser Test Suite', () => {
             ];
             const result = formatHierarchy(scopes, 'flag');
             assert.strictEqual(result, 'HW::Regs::Status::flag');
+        });
+    });
+
+    suite('Access Type Description Tests', () => {
+        test('Get description for RO', () => {
+            const result = getAccessTypeDescription('RO');
+            assert.strictEqual(result, 'RO (Read Only)');
+        });
+
+        test('Get description for WO', () => {
+            const result = getAccessTypeDescription('WO');
+            assert.strictEqual(result, 'WO (Write Only)');
+        });
+
+        test('Get description for RW', () => {
+            const result = getAccessTypeDescription('RW');
+            assert.strictEqual(result, 'RW (Read / Write)');
+        });
+
+        test('Get description for RW1C', () => {
+            const result = getAccessTypeDescription('RW1C');
+            assert.strictEqual(result, 'RW1C (Write 1 to Clear)');
+        });
+
+        test('Get description for RW1S', () => {
+            const result = getAccessTypeDescription('RW1S');
+            assert.strictEqual(result, 'RW1S (Write 1 to Set)');
+        });
+
+        test('Get description for W1C', () => {
+            const result = getAccessTypeDescription('W1C');
+            assert.strictEqual(result, 'W1C (Write 1 to Clear)');
+        });
+
+        test('Get description for RWC', () => {
+            const result = getAccessTypeDescription('RWC');
+            assert.strictEqual(result, 'RWC (Read / Write Clear)');
+        });
+
+        test('Get description for RWS', () => {
+            const result = getAccessTypeDescription('RWS');
+            assert.strictEqual(result, 'RWS (Sticky bit)');
+        });
+
+        test('Handle lowercase access type', () => {
+            const result = getAccessTypeDescription('rw1c');
+            assert.strictEqual(result, 'rw1c (Write 1 to Clear)');
+        });
+
+        test('Handle mixed case access type', () => {
+            const result = getAccessTypeDescription('Rw1C');
+            assert.strictEqual(result, 'Rw1C (Write 1 to Clear)');
+        });
+
+        test('Return original for unknown access type', () => {
+            const result = getAccessTypeDescription('UNKNOWN');
+            assert.strictEqual(result, 'UNKNOWN');
+        });
+
+        test('Return original for empty string', () => {
+            const result = getAccessTypeDescription('');
+            assert.strictEqual(result, '');
         });
     });
 });

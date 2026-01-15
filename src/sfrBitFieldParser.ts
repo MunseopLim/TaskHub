@@ -355,6 +355,32 @@ function findScopeDeclaration(lines: string[], lineNumber: number): ScopeInfo | 
 }
 
 /**
+ * Access type descriptions mapping
+ * Maps access type abbreviations to their full descriptions
+ */
+const ACCESS_TYPE_DESCRIPTIONS: Record<string, string> = {
+    'RO': 'Read Only',
+    'WO': 'Write Only',
+    'RW': 'Read / Write',
+    'RW1C': 'Write 1 to Clear',
+    'RW1S': 'Write 1 to Set',
+    'W1C': 'Write 1 to Clear',
+    'RWC': 'Read / Write Clear',
+    'RWS': 'Sticky bit',
+};
+
+/**
+ * Get the description for an access type abbreviation
+ * @param accessType The access type abbreviation (e.g., "RW1C", "RO")
+ * @returns Full description or the original string if not found
+ */
+export function getAccessTypeDescription(accessType: string): string {
+    const upperType = accessType.toUpperCase();
+    const description = ACCESS_TYPE_DESCRIPTIONS[upperType];
+    return description ? `${accessType} (${description})` : accessType;
+}
+
+/**
  * Format hierarchy as a qualified name (e.g., "RegTestInt::IntRegSts::int0_set")
  * @param scopes Array of scope info
  * @param fieldName The bit field name

@@ -5,6 +5,7 @@ import {
     formatHierarchy,
     calculateValidRange,
     calculateBitMask,
+    getAccessTypeDescription,
     CompleteBitFieldInfo
 } from './sfrBitFieldParser';
 import { MacroExpander } from './macroExpander';
@@ -1299,7 +1300,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             md.appendMarkdown(`| **Bit Width** | ${comment.bitWidth} bits |\n`);
         }
 
-        md.appendMarkdown(`| **Access Type** | ${comment.accessType} |\n`);
+        md.appendMarkdown(`| **Access Type** | ${getAccessTypeDescription(comment.accessType)} |\n`);
 
         // Reset value with conversions for multi-bit fields
         if (comment.bitWidth > 1 && comment.resetValueNumeric !== null) {

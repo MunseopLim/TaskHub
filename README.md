@@ -688,12 +688,19 @@ Additional definitions:
 ```
 
 **지원되는 접근 타입:**
-*   `RW`: Read/Write
-*   `RO`: Read Only
-*   `WO`: Write Only
-*   `RW1C`: Read/Write 1 to Clear
-*   `RW1S`: Read/Write 1 to Set
-*   등 (주석에 작성된 모든 타입 지원)
+
+| 타입 | 의미 |
+| --- | --- |
+| `RO` | Read Only |
+| `WO` | Write Only |
+| `RW` | Read / Write |
+| `RW1C` | Write 1 to Clear |
+| `RW1S` | Write 1 to Set |
+| `W1C` | Write 1 to Clear |
+| `RWC` | Read / Write Clear |
+| `RWS` | Sticky bit |
+
+hover 시 Access Type이 약어와 함께 설명이 표시됩니다 (예: `RW1C (Write 1 to Clear)`)
 
 **설정:**
 *   `taskhub.hover.numberBase.enabled`: Number Base Hover 및 SFR Bit Field Hover를 활성화/비활성화합니다 (기본값: `true`)
