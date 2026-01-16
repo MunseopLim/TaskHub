@@ -212,15 +212,13 @@ function mergeActions(
     preset: ActionItem[],
     strategy: 'keep-existing' | 'use-preset' | 'keep-both'
 ): ActionItem[] {
-    if (strategy === 'keep-both') {
-        return [...existing, ...preset];
-    }
-
     const existingIds = new Set<string>();
 
     function collectIds(items: ActionItem[]) {
         for (const item of items) {
-            existingIds.add(item.id);
+            if (item.id) {
+                existingIds.add(item.id);
+            }
             if (item.children) {
                 collectIds(item.children);
             }
@@ -228,19 +226,56 @@ function mergeActions(
     }
     collectIds(existing);
 
-    const filtered = preset.filter(item => !existingIds.has(item.id));
+    if (strategy === 'keep-both') {
+        // Filter out preset items with conflicting IDs to prevent validation failures
+        const filteredPreset = filterConflictingItems(preset, existingIds);
+        return [...existing, ...filteredPreset];
+    }
+
+    const filtered = preset.filter(item => !item.id || !existingIds.has(item.id));
 
     return strategy === 'keep-existing'
         ? [...existing, ...filtered]
         : [...filtered, ...existing];
 }
 
-function findConflictingIds(actions1: ActionItem[], actions2: ActionItem[]): string[] {
+/**
+ * Recursively filter out items with IDs that conflict with existing IDs
+ * @param items Items to filter
+ * @param existingIds Set of existing IDs to check against
+ * @returns Filtered items without conflicting IDs
+ */
+export function filterConflictingItems(items: ActionItem[], existingIds: Set<string>): ActionItem[] {
+    const result: ActionItem[] = [];
+
+    for (const item of items) {
+        // Skip items with conflicting IDs
+        if (item.id && existingIds.has(item.id)) {
+            continue;
+        }
+
+        // Clone the item to avoid mutating the original
+        const clonedItem: ActionItem = { ...item };
+
+        // Recursively filter children if present
+        if (clonedItem.children && clonedItem.children.length > 0) {
+            clonedItem.children = filterConflictingItems(clonedItem.children, existingIds);
+        }
+
+        result.push(clonedItem);
+    }
+
+    return result;
+}
+
+export function findConflictingIds(actions1: ActionItem[], actions2: ActionItem[]): string[] {
     const ids1 = new Set<string>();
 
     function collectIds(items: ActionItem[]) {
         for (const item of items) {
-            ids1.add(item.id);
+            if (item.id) {
+                ids1.add(item.id);
+            }
             if (item.children) {
                 collectIds(item.children);
             }
@@ -252,7 +287,7 @@ function findConflictingIds(actions1: ActionItem[], actions2: ActionItem[]): str
 
     function checkConflicts(items: ActionItem[]) {
         for (const item of items) {
-            if (ids1.has(item.id)) {
+            if (item.id && ids1.has(item.id)) {
                 conflicts.push(item.id);
             }
             if (item.children) {
@@ -2518,7 +2553,8 @@ function executeShellCommand(command: string, args: string[], cwd?: string, task
         for (const [key, value] of Object.entries(envOverrides)) {
             childEnv[key] = value;
         }
-        const workingDirectory = cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        // Use undefined instead of empty string to let Node.js use process.cwd() as fallback
+        const workingDirectory = cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined;
         let childProcess: ReturnType<typeof spawn>;
         let displayCommand: string;
 

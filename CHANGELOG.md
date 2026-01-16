@@ -1,5 +1,46 @@
 # Change Log
 
+## [0.2.30] - 2026-01-16
+
+### Fixed
+
+**Codex Code Review 기반 버그 수정**
+
+- **registerDecoder.ts**: 32비트 필드에서 비트 마스크 계산 오류 수정
+  - `extractFieldValue`에서 `bitWidth >= 32`일 때 `(1 << 32)`가 1로 wrap되는 JavaScript 비트 연산 한계 처리
+  - 입력 검증 추가 (`bitStart < 0` 또는 `bitEnd < bitStart` 체크)
+
+- **sfrBitFieldParser.ts**: `calculateBitMask` 함수 32비트 처리 오류 수정
+  - `bitEnd > 31` 또는 `bitStart < 0` 범위 검증 추가
+  - 전체 32비트 마스크 (`0xFFFFFFFF`) 올바르게 생성
+
+- **numberBaseHoverProvider.ts**: `extractValueFromLine`에서 잘못된 값 반환 방지
+  - `symbolName`이 주어졌을 때 해당 심볼의 값만 정확히 매칭하도록 수정
+  - 같은 줄에 여러 값이 있을 때 관련 없는 값 반환 문제 해결
+
+- **extension.ts**: 빈 `cwd` 문제 수정
+  - 워크스페이스 없이 실행 시 `cwd: ''`로 인한 `ENOENT` 에러 방지
+  - `undefined`로 설정하여 Node.js가 `process.cwd()` 사용하도록 변경
+
+- **extension.ts**: "Keep both" 프리셋 병합 시 중복 ID 문제 수정
+  - 기존: 단순 배열 병합으로 중복 ID 발생 → validation 실패로 전체 로딩 불가
+  - 수정: `filterConflictingItems` 함수로 충돌하는 ID를 가진 항목 자동 필터링
+  - `findConflictingIds`에 undefined 체크 추가
+
+### Enhanced
+
+**schema.ts 타입 안전성 개선**
+- `options?: any` → 구체적인 `OpenDialogOptions` 인터페이스로 변경
+- `inputs?: { [key: string]: string }` → `Record<string, string>`으로 단순화
+
+### Testing
+
+- `filterConflictingItems` 테스트 8개 추가
+  - 충돌 ID 필터링, 중첩 children 재귀 필터링, 원본 불변성 확인 등
+- `findConflictingIds` 테스트 6개 추가
+  - 기본 충돌 감지, 중첩 충돌, 다중 충돌 처리 등
+- 총 417개 테스트 통과 (기존 403개 + 신규 14개)
+
 ## [0.2.29] - 2026-01-15
 
 ### Enhanced

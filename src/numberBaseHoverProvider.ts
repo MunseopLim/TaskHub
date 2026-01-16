@@ -315,7 +315,27 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      * Supports: const int X = 0xFF; X = 0xFF; #define X 0xFF
      */
     private extractValueFromLine(text: string, symbolName?: string): number | null {
-        // Pattern for const/variable/enum: NAME = VALUE; or NAME = VALUE,
+        // If symbolName is provided, match it specifically to avoid returning wrong values
+        if (symbolName) {
+            // Pattern for const/variable/enum with specific symbol: symbolName = VALUE; or VALUE,
+            const escapedName = symbolName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const specificAssignPattern = new RegExp(`\\b${escapedName}\\s*=\\s*([0-9a-fA-FxXbB']+)\\s*[;,]`);
+            const specificMatch = text.match(specificAssignPattern);
+            if (specificMatch) {
+                return this.parseNumber(specificMatch[1]);
+            }
+
+            // Pattern for #define with specific symbol: #define symbolName VALUE
+            const specificDefinePattern = new RegExp(`#define\\s+${escapedName}\\s+([0-9a-fA-FxXbB']+)`);
+            const specificDefineMatch = text.match(specificDefinePattern);
+            if (specificDefineMatch) {
+                return this.parseNumber(specificDefineMatch[1]);
+            }
+
+            return null;
+        }
+
+        // Fallback: Pattern for const/variable/enum: NAME = VALUE; or NAME = VALUE,
         const assignPattern = /=\s*([0-9a-fA-FxXbB']+)\s*[;,]/;
         const assignMatch = text.match(assignPattern);
         if (assignMatch) {

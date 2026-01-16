@@ -39,7 +39,16 @@ export interface Task {
     revealTerminal?: 'always' | 'silent' | 'never';
 
     // Properties for 'fileDialog' and 'folderDialog'
-    options?: any; // Corresponds to vscode.OpenDialogOptions
+    // Corresponds to vscode.OpenDialogOptions - using partial interface for type safety
+    options?: {
+        canSelectMany?: boolean;
+        canSelectFolders?: boolean;
+        canSelectFiles?: boolean;
+        openLabel?: string;
+        defaultUri?: string;
+        filters?: Record<string, string[]>;
+        title?: string;
+    };
 
     // Properties for 'inputBox'
     prompt?: string;
@@ -59,7 +68,7 @@ export interface Task {
         macos?: string;
         linux?: string;
     };
-    inputs?: { [key: string]: string };
+    inputs?: Record<string, string>;
 
     // Properties for 'zip'
     source?: string | string[];

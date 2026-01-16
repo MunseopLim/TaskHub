@@ -136,11 +136,14 @@ export function calculateValidRange(bitWidth: number): { min: number; max: numbe
  * @returns 32-bit mask value
  */
 export function calculateBitMask(bitStart: number, bitEnd: number): number {
-    let mask = 0;
-    for (let i = bitStart; i <= bitEnd; i++) {
-        mask |= (1 << i);
+    // Validate input range (0-31 for 32-bit registers)
+    if (bitStart < 0 || bitEnd > 31 || bitStart > bitEnd) {
+        return 0;
     }
-    return mask >>> 0; // Convert to unsigned 32-bit
+    const bitWidth = bitEnd - bitStart + 1;
+    // Handle full 32-bit mask correctly (avoid 1 << 32 wrap issue)
+    const fieldMask = bitWidth >= 32 ? 0xFFFFFFFF : (1 << bitWidth) - 1;
+    return (fieldMask << bitStart) >>> 0; // Convert to unsigned 32-bit
 }
 
 /**

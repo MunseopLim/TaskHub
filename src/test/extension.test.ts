@@ -24,6 +24,8 @@ import {
 	normalizeLineNumber,
 	wrapCommandForOneShot,
 	createShellExecution,
+	filterConflictingItems,
+	findConflictingIds,
 } from '../extension';
 import { ActionItem } from '../schema';
 
@@ -1917,28 +1919,243 @@ suite('Extension Test Suite', () => {
 		test('should create PowerShell execution for Windows', () => {
 			const originalPlatform = process.platform;
 			Object.defineProperty(process, 'platform', { value: 'win32' });
-			
+
 			const options: vscode.ShellExecutionOptions = { cwd: 'C:\\' };
 			const result = createShellExecution('echo', ['hello'], options, true);
-			
+
 			assert.ok(result.shellExecution);
 			// Verify display command matches expected format
 			assert.ok(result.displayCommand.includes('echo'));
-			
+
 			Object.defineProperty(process, 'platform', { value: originalPlatform });
 		});
 
 		test('should create ShellExecution for POSIX', () => {
 			const originalPlatform = process.platform;
 			Object.defineProperty(process, 'platform', { value: 'darwin' });
-			
+
 			const options: vscode.ShellExecutionOptions = { cwd: '/tmp' };
 			const result = createShellExecution('ls', ['-la'], options, false);
-			
+
 			assert.ok(result.shellExecution);
 			assert.strictEqual(result.displayCommand, "ls '-la'");
-			
+
 			Object.defineProperty(process, 'platform', { value: originalPlatform });
+		});
+	});
+
+	suite('filterConflictingItems', () => {
+		test('should filter out items with conflicting IDs', () => {
+			const existingIds = new Set(['action1', 'action2']);
+			const items: ActionItem[] = [
+				{ id: 'action1', title: 'Conflicting Action' },
+				{ id: 'action3', title: 'Non-conflicting Action' }
+			];
+
+			const result = filterConflictingItems(items, existingIds);
+
+			assert.strictEqual(result.length, 1);
+			assert.strictEqual(result[0].id, 'action3');
+		});
+
+		test('should return all items when no conflicts', () => {
+			const existingIds = new Set(['other1', 'other2']);
+			const items: ActionItem[] = [
+				{ id: 'action1', title: 'Action 1' },
+				{ id: 'action2', title: 'Action 2' }
+			];
+
+			const result = filterConflictingItems(items, existingIds);
+
+			assert.strictEqual(result.length, 2);
+		});
+
+		test('should return empty array when all items conflict', () => {
+			const existingIds = new Set(['action1', 'action2']);
+			const items: ActionItem[] = [
+				{ id: 'action1', title: 'Action 1' },
+				{ id: 'action2', title: 'Action 2' }
+			];
+
+			const result = filterConflictingItems(items, existingIds);
+
+			assert.strictEqual(result.length, 0);
+		});
+
+		test('should recursively filter nested children with conflicting IDs', () => {
+			const existingIds = new Set(['nested-conflict']);
+			const items: ActionItem[] = [
+				{
+					id: 'folder1',
+					title: 'Folder',
+					type: 'folder',
+					children: [
+						{ id: 'nested-conflict', title: 'Conflicting Nested' },
+						{ id: 'nested-ok', title: 'OK Nested' }
+					]
+				}
+			];
+
+			const result = filterConflictingItems(items, existingIds);
+
+			assert.strictEqual(result.length, 1);
+			assert.strictEqual(result[0].id, 'folder1');
+			assert.strictEqual(result[0].children?.length, 1);
+			assert.strictEqual(result[0].children?.[0].id, 'nested-ok');
+		});
+
+		test('should filter parent folder if its ID conflicts', () => {
+			const existingIds = new Set(['folder1']);
+			const items: ActionItem[] = [
+				{
+					id: 'folder1',
+					title: 'Conflicting Folder',
+					type: 'folder',
+					children: [
+						{ id: 'child1', title: 'Child 1' }
+					]
+				}
+			];
+
+			const result = filterConflictingItems(items, existingIds);
+
+			assert.strictEqual(result.length, 0);
+		});
+
+		test('should not mutate original items', () => {
+			const existingIds = new Set(['nested-conflict']);
+			const originalChildren = [
+				{ id: 'nested-conflict', title: 'Conflicting' },
+				{ id: 'nested-ok', title: 'OK' }
+			];
+			const items: ActionItem[] = [
+				{
+					id: 'folder1',
+					title: 'Folder',
+					type: 'folder',
+					children: [...originalChildren]
+				}
+			];
+
+			filterConflictingItems(items, existingIds);
+
+			// Original should be unchanged
+			assert.strictEqual(items[0].children?.length, 2);
+		});
+
+		test('should handle empty items array', () => {
+			const existingIds = new Set(['action1']);
+			const result = filterConflictingItems([], existingIds);
+			assert.strictEqual(result.length, 0);
+		});
+
+		test('should handle empty existingIds set', () => {
+			const items: ActionItem[] = [
+				{ id: 'action1', title: 'Action 1' },
+				{ id: 'action2', title: 'Action 2' }
+			];
+
+			const result = filterConflictingItems(items, new Set());
+
+			assert.strictEqual(result.length, 2);
+		});
+	});
+
+	suite('findConflictingIds', () => {
+		test('should find conflicting IDs between two action arrays', () => {
+			const actions1: ActionItem[] = [
+				{ id: 'action1', title: 'Action 1' },
+				{ id: 'action2', title: 'Action 2' }
+			];
+			const actions2: ActionItem[] = [
+				{ id: 'action2', title: 'Duplicate Action 2' },
+				{ id: 'action3', title: 'Action 3' }
+			];
+
+			const conflicts = findConflictingIds(actions1, actions2);
+
+			assert.strictEqual(conflicts.length, 1);
+			assert.strictEqual(conflicts[0], 'action2');
+		});
+
+		test('should return empty array when no conflicts', () => {
+			const actions1: ActionItem[] = [
+				{ id: 'action1', title: 'Action 1' }
+			];
+			const actions2: ActionItem[] = [
+				{ id: 'action2', title: 'Action 2' }
+			];
+
+			const conflicts = findConflictingIds(actions1, actions2);
+
+			assert.strictEqual(conflicts.length, 0);
+		});
+
+		test('should find nested conflicting IDs', () => {
+			const actions1: ActionItem[] = [
+				{
+					id: 'folder1',
+					title: 'Folder',
+					type: 'folder',
+					children: [
+						{ id: 'nested-action', title: 'Nested Action' }
+					]
+				}
+			];
+			const actions2: ActionItem[] = [
+				{ id: 'nested-action', title: 'Conflicting Nested' }
+			];
+
+			const conflicts = findConflictingIds(actions1, actions2);
+
+			assert.strictEqual(conflicts.length, 1);
+			assert.strictEqual(conflicts[0], 'nested-action');
+		});
+
+		test('should find conflicts in nested children of second array', () => {
+			const actions1: ActionItem[] = [
+				{ id: 'action1', title: 'Action 1' }
+			];
+			const actions2: ActionItem[] = [
+				{
+					id: 'folder1',
+					title: 'Folder',
+					type: 'folder',
+					children: [
+						{ id: 'action1', title: 'Conflicting in child' }
+					]
+				}
+			];
+
+			const conflicts = findConflictingIds(actions1, actions2);
+
+			assert.strictEqual(conflicts.length, 1);
+			assert.strictEqual(conflicts[0], 'action1');
+		});
+
+		test('should handle multiple conflicts', () => {
+			const actions1: ActionItem[] = [
+				{ id: 'a', title: 'A' },
+				{ id: 'b', title: 'B' },
+				{ id: 'c', title: 'C' }
+			];
+			const actions2: ActionItem[] = [
+				{ id: 'a', title: 'Conflict A' },
+				{ id: 'b', title: 'Conflict B' },
+				{ id: 'd', title: 'D' }
+			];
+
+			const conflicts = findConflictingIds(actions1, actions2);
+
+			assert.strictEqual(conflicts.length, 2);
+			assert.ok(conflicts.includes('a'));
+			assert.ok(conflicts.includes('b'));
+		});
+
+		test('should handle empty arrays', () => {
+			assert.strictEqual(findConflictingIds([], []).length, 0);
+			assert.strictEqual(findConflictingIds([{ id: 'a', title: 'A' }], []).length, 0);
+			assert.strictEqual(findConflictingIds([], [{ id: 'a', title: 'A' }]).length, 0);
 		});
 	});
 });

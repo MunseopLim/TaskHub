@@ -141,8 +141,13 @@ export class RegisterDecoder {
      * @returns Extracted field value
      */
     private extractFieldValue(registerValue: number, bitStart: number, bitEnd: number): number {
+        // Validate input
+        if (bitStart < 0 || bitEnd < bitStart) {
+            return 0;
+        }
         const bitWidth = bitEnd - bitStart + 1;
-        const mask = (1 << bitWidth) - 1;
+        // Handle 32-bit fields correctly (1 << 32 wraps to 1 in JS)
+        const mask = bitWidth >= 32 ? 0xFFFFFFFF : (1 << bitWidth) - 1;
         return (registerValue >>> bitStart) & mask;
     }
 
