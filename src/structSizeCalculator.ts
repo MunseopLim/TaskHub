@@ -96,7 +96,35 @@ const DEFAULT_TYPE_CONFIG: TypeConfigFile = {
         'double': { size: 8, alignment: 8 },
 
         'void*': { size: 4, alignment: 4 },
-        'pointer': { size: 4, alignment: 4 }
+        'pointer': { size: 4, alignment: 4 },
+
+        // Windows types
+        'BYTE': { size: 1, alignment: 1 },
+        'CHAR': { size: 1, alignment: 1 },
+        'UCHAR': { size: 1, alignment: 1 },
+        'UINT8': { size: 1, alignment: 1 },
+        'INT8': { size: 1, alignment: 1 },
+        'BOOLEAN': { size: 1, alignment: 1 },
+
+        'WORD': { size: 2, alignment: 2 },
+        'SHORT': { size: 2, alignment: 2 },
+        'USHORT': { size: 2, alignment: 2 },
+        'UINT16': { size: 2, alignment: 2 },
+        'INT16': { size: 2, alignment: 2 },
+
+        'DWORD': { size: 4, alignment: 4 },
+        'LONG': { size: 4, alignment: 4 },
+        'ULONG': { size: 4, alignment: 4 },
+        'UINT32': { size: 4, alignment: 4 },
+        'INT32': { size: 4, alignment: 4 },
+        'BOOL': { size: 4, alignment: 4 },
+
+        'QWORD': { size: 8, alignment: 8 },
+        'LONGLONG': { size: 8, alignment: 8 },
+        'ULONGLONG': { size: 8, alignment: 8 },
+        'UINT64': { size: 8, alignment: 8 },
+        'INT64': { size: 8, alignment: 8 },
+        'DWORD64': { size: 8, alignment: 8 }
     },
     packingAlignment: 8  // Default to natural alignment
 };

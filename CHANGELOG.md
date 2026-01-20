@@ -1,5 +1,37 @@
 # Change Log
 
+## [0.2.31] - 2026-01-20
+
+### Fixed
+
+**Struct Size Calculator - Windows 타입 지원**
+- Windows 타입들의 크기가 올바르게 표시되지 않던 문제 수정
+  - 기존: `UINT16`, `UINT64` 등이 모두 기본값 4바이트로 표시됨
+  - 수정: 각 타입의 실제 크기로 표시
+
+### Added
+
+**Windows 타입 지원** (`structSizeCalculator.ts`)
+- 8비트: `BYTE`, `CHAR`, `UCHAR`, `UINT8`, `INT8`, `BOOLEAN`
+- 16비트: `WORD`, `SHORT`, `USHORT`, `UINT16`, `INT16`
+- 32비트: `DWORD`, `LONG`, `ULONG`, `UINT32`, `INT32`, `BOOL`
+- 64비트: `QWORD`, `LONGLONG`, `ULONGLONG`, `UINT64`, `INT64`, `DWORD64`
+
+**커스텀 타입 자동 등록** (`numberBaseHoverProvider.ts`)
+- 문서 내의 모든 struct/class 정의를 자동으로 파싱하여 등록
+- 중첩된 커스텀 타입(예: `Test32Class`를 멤버로 가진 구조체)의 크기가 올바르게 계산됨
+- 다중 패스 의존성 해결로 복잡한 타입 체인 지원
+- 중복 이름 및 forward declaration 처리
+
+### Testing
+
+- Windows Types 테스트 7개 추가
+  - `UINT8/UINT16`, `UINT32/UINT64`, `DWORD/QWORD`, `BYTE/WORD/DWORD` 등
+- Custom Type Registration 테스트 5개 추가
+  - `Test32Class`, `Test64Class`, 복잡한 Context 구조체
+  - 의존성 체인 테스트 (TypeA → TypeB → TypeC)
+- 총 429개 테스트 통과 (기존 417개 + 신규 12개)
+
 ## [0.2.30] - 2026-01-16
 
 ### Fixed

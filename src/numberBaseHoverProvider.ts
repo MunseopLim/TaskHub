@@ -1183,7 +1183,10 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         }
 
         // Calculate struct size
+        // First, register all struct/class definitions in the document
         const calculator = new StructSizeCalculator();
+        this.registerAllCustomTypes(calculator, documentLines);
+
         const result = calculator.calculateStructSize(structName, documentLines, structLine);
 
         if (!result.success || result.members.length === 0) {
@@ -1226,6 +1229,65 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         md.appendMarkdown('*Hover calculated using default type sizes. Use `.vscode/taskhub_types.json` to customize.*\n');
 
         return md;
+    }
+
+    /**
+     * Register all struct/class definitions in the document as custom types
+     * This enables correct size calculation for nested custom types
+     */
+    private registerAllCustomTypes(calculator: StructSizeCalculator, lines: string[]): void {
+        // Find all struct/class definitions
+        const structPattern = /\b(struct|class)\s+(\w+)/g;
+        const definitions: Array<{ name: string; line: number }> = [];
+        const seenNames = new Set<string>();
+
+        for (let i = 0; i < lines.length; i++) {
+            const matches = lines[i].matchAll(structPattern);
+            for (const match of matches) {
+                const name = match[2];
+                // Skip if already seen (avoid duplicates)
+                if (seenNames.has(name)) {
+                    continue;
+                }
+                // Skip forward declarations (no opening brace on same or next line)
+                const hasBody = lines[i].includes('{') ||
+                    (i + 1 < lines.length && lines[i + 1].includes('{'));
+                if (hasBody) {
+                    definitions.push({ name, line: i });
+                    seenNames.add(name);
+                }
+            }
+        }
+
+        // Sort by line number to handle dependencies (earlier definitions first)
+        definitions.sort((a, b) => a.line - b.line);
+
+        // Register each custom type with multiple passes to resolve dependencies
+        // This handles cases where type B uses type A, but A is defined after B
+        const maxPasses = 3;
+        const registered = new Set<string>();
+
+        for (let pass = 0; pass < maxPasses; pass++) {
+            let newRegistrations = 0;
+
+            for (const def of definitions) {
+                if (registered.has(def.name)) {
+                    continue;
+                }
+
+                const result = calculator.calculateStructSize(def.name, lines, def.line);
+                if (result.success) {
+                    calculator.registerCustomType(result);
+                    registered.add(def.name);
+                    newRegistrations++;
+                }
+            }
+
+            // If no new registrations in this pass, we're done
+            if (newRegistrations === 0) {
+                break;
+            }
+        }
     }
 
     /**

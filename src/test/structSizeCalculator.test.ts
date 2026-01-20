@@ -373,6 +373,350 @@ suite('StructSizeCalculator Test Suite', () => {
         });
     });
 
+    suite('Windows Types', () => {
+        test('Calculate size with UINT8 and UINT16', () => {
+            const lines = [
+                'struct WinTypesSmall {',
+                '    UINT8 a;',
+                '    UINT16 b;',
+                '    UINT8 c;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'WinTypesSmall');
+            const result = calculator.calculateStructSize('WinTypesSmall', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            // Layout: UINT8(1) + padding(1) + UINT16(2) + UINT8(1) + padding(1) = 6
+            assert.strictEqual(result.members[0].size, 1); // UINT8
+            assert.strictEqual(result.members[1].size, 2); // UINT16
+            assert.strictEqual(result.members[2].size, 1); // UINT8
+            assert.strictEqual(result.totalSize, 6);
+        });
+
+        test('Calculate size with UINT32 and UINT64', () => {
+            const lines = [
+                'struct WinTypesLarge {',
+                '    UINT32 a;',
+                '    UINT64 b;',
+                '    UINT32 c;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'WinTypesLarge');
+            const result = calculator.calculateStructSize('WinTypesLarge', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            // Layout: UINT32(4) + padding(4) + UINT64(8) + UINT32(4) + padding(4) = 24
+            assert.strictEqual(result.members[0].size, 4);  // UINT32
+            assert.strictEqual(result.members[1].size, 8);  // UINT64
+            assert.strictEqual(result.members[2].size, 4);  // UINT32
+            assert.strictEqual(result.totalSize, 24);
+        });
+
+        test('Calculate size with DWORD and QWORD', () => {
+            const lines = [
+                'struct DwordQword {',
+                '    DWORD a;',
+                '    QWORD b;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'DwordQword');
+            const result = calculator.calculateStructSize('DwordQword', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            // Layout: DWORD(4) + padding(4) + QWORD(8) = 16
+            assert.strictEqual(result.members[0].size, 4);  // DWORD
+            assert.strictEqual(result.members[1].size, 8);  // QWORD
+            assert.strictEqual(result.totalSize, 16);
+        });
+
+        test('Calculate size with BYTE, WORD, DWORD', () => {
+            const lines = [
+                'struct ByteWordDword {',
+                '    BYTE a;',
+                '    WORD b;',
+                '    DWORD c;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'ByteWordDword');
+            const result = calculator.calculateStructSize('ByteWordDword', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            // Layout: BYTE(1) + padding(1) + WORD(2) + DWORD(4) = 8
+            assert.strictEqual(result.members[0].size, 1);  // BYTE
+            assert.strictEqual(result.members[1].size, 2);  // WORD
+            assert.strictEqual(result.members[2].size, 4);  // DWORD
+            assert.strictEqual(result.totalSize, 8);
+        });
+
+        test('Calculate size with INT8, INT16, INT32, INT64', () => {
+            const lines = [
+                'struct SignedTypes {',
+                '    INT8 a;',
+                '    INT16 b;',
+                '    INT32 c;',
+                '    INT64 d;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'SignedTypes');
+            const result = calculator.calculateStructSize('SignedTypes', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members[0].size, 1);  // INT8
+            assert.strictEqual(result.members[1].size, 2);  // INT16
+            assert.strictEqual(result.members[2].size, 4);  // INT32
+            assert.strictEqual(result.members[3].size, 8);  // INT64
+        });
+
+        test('Calculate size with BOOL and BOOLEAN', () => {
+            const lines = [
+                'struct BoolTypes {',
+                '    BOOL a;',
+                '    BOOLEAN b;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'BoolTypes');
+            const result = calculator.calculateStructSize('BoolTypes', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            // BOOL is 4 bytes, BOOLEAN is 1 byte
+            assert.strictEqual(result.members[0].size, 4);  // BOOL
+            assert.strictEqual(result.members[1].size, 1);  // BOOLEAN
+        });
+
+        test('Calculate size with Windows types array', () => {
+            const lines = [
+                'struct WinArray {',
+                '    UINT32 values[10];',
+                '    UINT16 flags[4];',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'WinArray');
+            const result = calculator.calculateStructSize('WinArray', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members[0].size, 40);  // UINT32[10] = 4 * 10
+            assert.strictEqual(result.members[1].size, 8);   // UINT16[4] = 2 * 4
+            assert.strictEqual(result.totalSize, 48);
+        });
+    });
+
+    suite('Custom Type Registration', () => {
+        test('Register and use Test32Class', () => {
+            // Define Test32Class with UINT32 value
+            const test32Lines = [
+                'class Test32Class {',
+                '    UINT32 value;',
+                '};'
+            ];
+
+            const test32Line = StructSizeCalculator.findStructDefinition(test32Lines, 'Test32Class');
+            const test32Result = calculator.calculateStructSize('Test32Class', test32Lines, test32Line);
+            calculator.registerCustomType(test32Result);
+
+            assert.strictEqual(test32Result.success, true);
+            assert.strictEqual(test32Result.totalSize, 4);  // UINT32 = 4 bytes
+
+            // Use Test32Class in another struct
+            const contextLines = [
+                'struct Context {',
+                '    UINT16 a;',
+                '    Test32Class b;',
+                '};'
+            ];
+
+            const contextLine = StructSizeCalculator.findStructDefinition(contextLines, 'Context');
+            const contextResult = calculator.calculateStructSize('Context', contextLines, contextLine);
+
+            assert.strictEqual(contextResult.success, true);
+            // Layout: UINT16(2) + padding(2) + Test32Class(4) = 8
+            assert.strictEqual(contextResult.members[0].size, 2);  // UINT16
+            assert.strictEqual(contextResult.members[1].size, 4);  // Test32Class
+            assert.strictEqual(contextResult.totalSize, 8);
+        });
+
+        test('Register and use Test64Class', () => {
+            // Define Test64Class with UINT64 value
+            const test64Lines = [
+                'class Test64Class {',
+                '    UINT64 value;',
+                '};'
+            ];
+
+            const test64Line = StructSizeCalculator.findStructDefinition(test64Lines, 'Test64Class');
+            const test64Result = calculator.calculateStructSize('Test64Class', test64Lines, test64Line);
+            calculator.registerCustomType(test64Result);
+
+            assert.strictEqual(test64Result.success, true);
+            assert.strictEqual(test64Result.totalSize, 8);  // UINT64 = 8 bytes
+
+            // Use Test64Class in another struct
+            const contextLines = [
+                'struct Context {',
+                '    UINT16 a;',
+                '    Test64Class b;',
+                '};'
+            ];
+
+            const contextLine = StructSizeCalculator.findStructDefinition(contextLines, 'Context');
+            const contextResult = calculator.calculateStructSize('Context', contextLines, contextLine);
+
+            assert.strictEqual(contextResult.success, true);
+            // Layout: UINT16(2) + padding(6) + Test64Class(8) = 16
+            assert.strictEqual(contextResult.members[0].size, 2);  // UINT16
+            assert.strictEqual(contextResult.members[1].size, 8);  // Test64Class
+            assert.strictEqual(contextResult.totalSize, 16);
+        });
+
+        test('Complex Context struct with multiple Windows types', () => {
+            // Define Test32Class first
+            const test32Lines = [
+                'class Test32Class {',
+                '    UINT32 value;',
+                '};'
+            ];
+
+            const test32Line = StructSizeCalculator.findStructDefinition(test32Lines, 'Test32Class');
+            const test32Result = calculator.calculateStructSize('Test32Class', test32Lines, test32Line);
+            calculator.registerCustomType(test32Result);
+
+            // Define Context struct
+            const contextLines = [
+                'struct Context {',
+                '    UINT16 Aaaaa;',
+                '    UINT16 Bbbbb;',
+                '    UINT64 Ccccc;',
+                '    UINT64 Ddddd;',
+                '    Test32Class Eeeee;',
+                '    UINT32 Fffff[80];',
+                '};'
+            ];
+
+            const contextLine = StructSizeCalculator.findStructDefinition(contextLines, 'Context');
+            const contextResult = calculator.calculateStructSize('Context', contextLines, contextLine);
+
+            assert.strictEqual(contextResult.success, true);
+
+            // Verify member sizes
+            assert.strictEqual(contextResult.members[0].size, 2);   // UINT16 Aaaaa
+            assert.strictEqual(contextResult.members[1].size, 2);   // UINT16 Bbbbb
+            assert.strictEqual(contextResult.members[2].size, 8);   // UINT64 Ccccc
+            assert.strictEqual(contextResult.members[3].size, 8);   // UINT64 Ddddd
+            assert.strictEqual(contextResult.members[4].size, 4);   // Test32Class Eeeee
+            assert.strictEqual(contextResult.members[5].size, 320); // UINT32[80] = 4 * 80
+
+            // Layout:
+            // UINT16(2) at offset 0
+            // UINT16(2) at offset 2
+            // padding(4) to align UINT64
+            // UINT64(8) at offset 8
+            // UINT64(8) at offset 16
+            // Test32Class(4) at offset 24
+            // padding(4) (not needed since array alignment is 4)
+            // UINT32[80](320) at offset 28
+            // Total = 348 bytes
+        });
+
+        test('Dependency chain: TypeA -> TypeB -> TypeC', () => {
+            // TypeC is the base type (no dependencies)
+            const typeCLines = [
+                'struct TypeC {',
+                '    UINT32 value;',
+                '};'
+            ];
+            const typeCLine = StructSizeCalculator.findStructDefinition(typeCLines, 'TypeC');
+            const typeCResult = calculator.calculateStructSize('TypeC', typeCLines, typeCLine);
+            calculator.registerCustomType(typeCResult);
+
+            assert.strictEqual(typeCResult.success, true);
+            assert.strictEqual(typeCResult.totalSize, 4);
+
+            // TypeB depends on TypeC
+            const typeBLines = [
+                'struct TypeB {',
+                '    TypeC c;',
+                '    UINT16 flag;',
+                '};'
+            ];
+            const typeBLine = StructSizeCalculator.findStructDefinition(typeBLines, 'TypeB');
+            const typeBResult = calculator.calculateStructSize('TypeB', typeBLines, typeBLine);
+            calculator.registerCustomType(typeBResult);
+
+            assert.strictEqual(typeBResult.success, true);
+            // TypeC(4) + UINT16(2) + padding(2) = 8
+            assert.strictEqual(typeBResult.totalSize, 8);
+
+            // TypeA depends on TypeB
+            const typeALines = [
+                'struct TypeA {',
+                '    TypeB b;',
+                '    UINT64 data;',
+                '};'
+            ];
+            const typeALine = StructSizeCalculator.findStructDefinition(typeALines, 'TypeA');
+            const typeAResult = calculator.calculateStructSize('TypeA', typeALines, typeALine);
+
+            assert.strictEqual(typeAResult.success, true);
+            // TypeB(8) + UINT64(8) = 16
+            assert.strictEqual(typeAResult.totalSize, 16);
+            assert.strictEqual(typeAResult.members[0].size, 8);  // TypeB
+            assert.strictEqual(typeAResult.members[1].size, 8);  // UINT64
+        });
+
+        test('Multiple custom types in single document simulation', () => {
+            // Simulate registerAllCustomTypes behavior:
+            // Register types in order they appear in document
+
+            // First pass: register SmallType
+            const smallTypeLines = [
+                'struct SmallType {',
+                '    UINT8 a;',
+                '    UINT8 b;',
+                '};'
+            ];
+            const smallLine = StructSizeCalculator.findStructDefinition(smallTypeLines, 'SmallType');
+            const smallResult = calculator.calculateStructSize('SmallType', smallTypeLines, smallLine);
+            calculator.registerCustomType(smallResult);
+
+            assert.strictEqual(smallResult.totalSize, 2);  // 2 bytes
+
+            // Second: register MediumType that uses SmallType
+            const mediumTypeLines = [
+                'struct MediumType {',
+                '    SmallType small;',
+                '    UINT32 value;',
+                '};'
+            ];
+            const mediumLine = StructSizeCalculator.findStructDefinition(mediumTypeLines, 'MediumType');
+            const mediumResult = calculator.calculateStructSize('MediumType', mediumTypeLines, mediumLine);
+            calculator.registerCustomType(mediumResult);
+
+            // SmallType(2) + padding(2) + UINT32(4) = 8
+            assert.strictEqual(mediumResult.totalSize, 8);
+            assert.strictEqual(mediumResult.members[0].size, 2);  // SmallType correctly sized
+
+            // Third: register LargeType that uses MediumType
+            const largeTypeLines = [
+                'struct LargeType {',
+                '    MediumType medium;',
+                '    UINT64 timestamp;',
+                '};'
+            ];
+            const largeLine = StructSizeCalculator.findStructDefinition(largeTypeLines, 'LargeType');
+            const largeResult = calculator.calculateStructSize('LargeType', largeTypeLines, largeLine);
+
+            // MediumType(8) + UINT64(8) = 16
+            assert.strictEqual(largeResult.totalSize, 16);
+            assert.strictEqual(largeResult.members[0].size, 8);  // MediumType correctly sized
+        });
+    });
+
     suite('Real-world Examples', () => {
         test('Calculate typical register struct size', () => {
             const lines = [
