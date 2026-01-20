@@ -702,6 +702,104 @@ Additional definitions:
 
 hover 시 Access Type이 약어와 함께 설명이 표시됩니다 (예: `RW1C (Write 1 to Clear)`)
 
+#### 15.3. Struct Size Hover
+
+C/C++ 구조체/클래스 선언에 마우스를 올리면 전체 크기, 멤버별 오프셋, 패딩 정보를 자동으로 계산하여 표시합니다.
+
+**주요 기능:**
+*   **자동 크기 계산**: struct/class 키워드 또는 타입 이름에 hover 시 크기 정보 표시
+*   **멤버별 상세 정보**: 각 멤버의 오프셋, 크기, alignment 표시
+*   **패딩 계산**: 자동으로 패딩 바이트 계산
+*   **배열 지원**: `int values[10]` 같은 배열 멤버 크기 계산
+*   **커스텀 타입 지원**: 문서 내 정의된 struct/class를 자동으로 인식하여 중첩 타입 크기 계산
+
+**지원 타입:**
+*   **C 표준 타입**: `char`, `short`, `int`, `long`, `long long`, `float`, `double`
+*   **고정 크기 타입**: `int8_t`, `uint8_t`, `int16_t`, `uint16_t`, `int32_t`, `uint32_t`, `int64_t`, `uint64_t`
+*   **Windows 타입**: `BYTE`, `WORD`, `DWORD`, `QWORD`, `UINT8`, `UINT16`, `UINT32`, `UINT64`, `BOOL`, `BOOLEAN` 등
+*   **포인터**: `void*`, `int*` 등 (기본 4바이트)
+
+**사용 예시:**
+```cpp
+struct Context {
+    UINT16 Aaaaa;      // offset: 0, size: 2
+    UINT16 Bbbbb;      // offset: 2, size: 2
+    UINT64 Ccccc;      // offset: 8, size: 8 (padding 4 bytes)
+    UINT64 Ddddd;      // offset: 16, size: 8
+    UINT32 Fffff[80];  // offset: 24, size: 320
+};
+// Total: 344 bytes
+```
+
+**Hover 출력 예시:**
+```
+### Struct: Context
+
+**Total Size:** 344 bytes
+**Alignment:** 8 bytes
+**Padding:** 4 bytes
+
+---
+
+**Members:**
+
+| Offset | Name | Type | Size | Alignment |
+|--------|------|------|------|-----------|
+| 0 | **Aaaaa** | UINT16 | 2 | 2 |
+| 2 | **Bbbbb** | UINT16 | 2 | 2 |
+| 8 | **Ccccc** | UINT64 | 8 | 8 |
+| 16 | **Ddddd** | UINT64 | 8 | 8 |
+| 24 | **Fffff** | UINT32[80] | 320 | 4 |
+```
+
+#### 15.4. 커스텀 타입 설정 (taskhub_types.json)
+
+프로젝트별로 커스텀 타입의 크기와 alignment를 정의할 수 있습니다.
+
+**설정 파일 위치:** `.vscode/taskhub_types.json`
+
+**파일 형식:**
+```json
+{
+  "types": {
+    "HANDLE": { "size": 8, "alignment": 8 },
+    "PVOID": { "size": 8, "alignment": 8 },
+    "MyCustomType": { "size": 16, "alignment": 4 }
+  },
+  "packingAlignment": 8
+}
+```
+
+**속성 설명:**
+*   `types`: 타입별 크기와 alignment 정의
+    *   `size`: 타입의 크기 (바이트)
+    *   `alignment`: alignment 요구사항 (바이트)
+*   `packingAlignment`: 기본 struct packing alignment (1, 2, 4, 8). `1`로 설정하면 packed struct처럼 동작
+
+**사용 예시 - 64비트 포인터 환경:**
+```json
+{
+  "types": {
+    "HANDLE": { "size": 8, "alignment": 8 },
+    "PVOID": { "size": 8, "alignment": 8 },
+    "SIZE_T": { "size": 8, "alignment": 8 },
+    "ULONG_PTR": { "size": 8, "alignment": 8 }
+  },
+  "packingAlignment": 8
+}
+```
+
+**사용 예시 - Packed struct 환경:**
+```json
+{
+  "packingAlignment": 1
+}
+```
+
+**JSON 스키마 지원:**
+*   VS Code에서 자동 완성 및 유효성 검사 제공
+*   스키마: `schema/taskhub_types.schema.json`
+
 **설정:**
 *   `taskhub.hover.numberBase.enabled`: Number Base Hover 및 SFR Bit Field Hover를 활성화/비활성화합니다 (기본값: `true`)
 
@@ -908,9 +1006,10 @@ TaskHub/
 │       ├── numberBaseHoverProvider.test.ts # Hover 제공자 테스트 (92개 테스트)
 │       └── sfrBitFieldParser.test.ts      # SFR 파서 테스트 (39개 테스트)
 ├── schema/
-│   ├── actions.schema.json    # actions.json 스키마 및 검증
-│   ├── links.schema.json      # links.json 스키마 및 검증
-│   └── favorites.schema.json  # favorites.json 스키마 및 검증
+│   ├── actions.schema.json       # actions.json 스키마 및 검증
+│   ├── links.schema.json         # links.json 스키마 및 검증
+│   ├── favorites.schema.json     # favorites.json 스키마 및 검증
+│   └── taskhub_types.schema.json # taskhub_types.json 스키마 (커스텀 타입 설정)
 ├── media/
 │   ├── h_icon.svg            # 메인 뷰 아이콘
 │   ├── actions.json          # 기본 제공 액션 예제
@@ -919,7 +1018,8 @@ TaskHub/
 ├── .vscode/
 │   ├── actions.json          # 워크스페이스별 액션 (선택사항)
 │   ├── links.json            # 워크스페이스별 링크 (선택사항)
-│   └── favorites.json        # 워크스페이스별 즐겨찾기 (선택사항)
+│   ├── favorites.json        # 워크스페이스별 즐겨찾기 (선택사항)
+│   └── taskhub_types.json    # 커스텀 타입 크기 설정 (선택사항)
 ├── package.json              # 확장 메타데이터, 설정, 명령어, 뷰 정의
 └── README.md                 # 이 파일
 ```

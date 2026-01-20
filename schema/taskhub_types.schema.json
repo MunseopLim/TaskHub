@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TaskHub Type Configuration",
+  "description": "Custom type sizes and alignment for struct size calculation in hover tooltips.",
+  "type": "object",
+  "properties": {
+    "types": {
+      "type": "object",
+      "description": "Type definitions with size and alignment.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "size": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Size in bytes."
+          },
+          "alignment": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Alignment requirement in bytes."
+          }
+        },
+        "required": ["size", "alignment"]
+      },
+      "examples": [
+        {
+          "MyCustomType": { "size": 8, "alignment": 4 },
+          "HANDLE": { "size": 8, "alignment": 8 }
+        }
+      ]
+    },
+    "packingAlignment": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16,
+      "default": 8,
+      "description": "Default struct packing alignment (1, 2, 4, 8, 16). Use 1 for packed structs."
+    }
+  },
+  "examples": [
+    {
+      "types": {
+        "HANDLE": { "size": 8, "alignment": 8 },
+        "PVOID": { "size": 8, "alignment": 8 },
+        "SIZE_T": { "size": 8, "alignment": 8 }
+      },
+      "packingAlignment": 8
+    },
+    {
+      "types": {
+        "MyPackedStruct": { "size": 12, "alignment": 1 }
+      },
+      "packingAlignment": 1
+    }
+  ]
+}

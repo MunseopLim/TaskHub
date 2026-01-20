@@ -755,4 +755,121 @@ suite('StructSizeCalculator Test Suite', () => {
             assert.strictEqual(result.totalSize, 12);
         });
     });
+
+    suite('loadTypeConfig', () => {
+        test('Load custom type configuration', () => {
+            const configJson = {
+                types: {
+                    'HANDLE': { size: 8, alignment: 8 },
+                    'PVOID': { size: 8, alignment: 8 }
+                },
+                packingAlignment: 4
+            };
+
+            const config = StructSizeCalculator.loadTypeConfig(configJson);
+
+            assert.strictEqual(config.types['HANDLE'].size, 8);
+            assert.strictEqual(config.types['HANDLE'].alignment, 8);
+            assert.strictEqual(config.types['PVOID'].size, 8);
+            assert.strictEqual(config.packingAlignment, 4);
+        });
+
+        test('Use default types when config is empty', () => {
+            const configJson = {};
+
+            const config = StructSizeCalculator.loadTypeConfig(configJson);
+
+            // Should have default types
+            assert.ok(config.types);
+            assert.strictEqual(config.types['int'].size, 4);
+            assert.strictEqual(config.packingAlignment, 8);  // default
+        });
+
+        test('Calculate struct with custom type config', () => {
+            const configJson = {
+                types: {
+                    'HANDLE': { size: 8, alignment: 8 },
+                    'int': { size: 4, alignment: 4 }
+                },
+                packingAlignment: 8
+            };
+
+            const config = StructSizeCalculator.loadTypeConfig(configJson);
+            const customCalc = new StructSizeCalculator(config);
+
+            const lines = [
+                'struct HandleStruct {',
+                '    HANDLE handle;',
+                '    int value;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'HandleStruct');
+            const result = customCalc.calculateStructSize('HandleStruct', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            // HANDLE(8) + int(4) + padding(4) = 16
+            assert.strictEqual(result.members[0].size, 8);  // HANDLE
+            assert.strictEqual(result.members[1].size, 4);  // int
+            assert.strictEqual(result.totalSize, 16);
+        });
+
+        test('Custom packing alignment affects padding', () => {
+            const configJson = {
+                types: {
+                    'char': { size: 1, alignment: 1 },
+                    'int': { size: 4, alignment: 4 }
+                },
+                packingAlignment: 1  // Packed struct
+            };
+
+            const config = StructSizeCalculator.loadTypeConfig(configJson);
+            const packedCalc = new StructSizeCalculator(config);
+
+            const lines = [
+                'struct PackedStruct {',
+                '    char a;',
+                '    int b;',
+                '    char c;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'PackedStruct');
+            const result = packedCalc.calculateStructSize('PackedStruct', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            // With packing=1: char(1) + int(4) + char(1) = 6 (no padding)
+            assert.strictEqual(result.totalSize, 6);
+            assert.strictEqual(result.padding, 0);
+        });
+
+        test('Merge custom types with defaults', () => {
+            const configJson = {
+                types: {
+                    'MY_TYPE': { size: 16, alignment: 8 }
+                }
+            };
+
+            const config = StructSizeCalculator.loadTypeConfig(configJson);
+            const customCalc = new StructSizeCalculator(config);
+
+            // Custom type should work
+            const lines1 = [
+                'struct WithCustom {',
+                '    MY_TYPE custom;',
+                '};'
+            ];
+            const result1 = customCalc.calculateStructSize('WithCustom', lines1, 0);
+            assert.strictEqual(result1.members[0].size, 16);
+
+            // Default types should still work (from merged config)
+            const lines2 = [
+                'struct WithDefault {',
+                '    int value;',
+                '};'
+            ];
+            const result2 = customCalc.calculateStructSize('WithDefault', lines2, 0);
+            assert.strictEqual(result2.members[0].size, 4);
+        });
+    });
 });

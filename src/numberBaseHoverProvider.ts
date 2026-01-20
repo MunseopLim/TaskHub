@@ -1183,8 +1183,11 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         }
 
         // Calculate struct size
-        // First, register all struct/class definitions in the document
-        const calculator = new StructSizeCalculator();
+        // Load custom type configuration if available
+        const typeConfig = this.loadTypeConfig(document);
+        const calculator = new StructSizeCalculator(typeConfig);
+
+        // Register all struct/class definitions in the document
         this.registerAllCustomTypes(calculator, documentLines);
 
         const result = calculator.calculateStructSize(structName, documentLines, structLine);
@@ -1287,6 +1290,38 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             if (newRegistrations === 0) {
                 break;
             }
+        }
+    }
+
+    /**
+     * Load type configuration from .vscode/taskhub_types.json if it exists
+     * @param document The current document to determine workspace
+     * @returns TypeConfigFile or undefined if not found
+     */
+    private loadTypeConfig(document: vscode.TextDocument): import('./structSizeCalculator').TypeConfigFile | undefined {
+        try {
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+            if (!workspaceFolder) {
+                return undefined;
+            }
+
+            const configPath = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'taskhub_types.json');
+
+            // Check if file exists synchronously using fs
+            const fs = require('fs');
+            const configFilePath = configPath.fsPath;
+
+            if (!fs.existsSync(configFilePath)) {
+                return undefined;
+            }
+
+            const configContent = fs.readFileSync(configFilePath, 'utf8');
+            const configJson = JSON.parse(configContent);
+
+            return StructSizeCalculator.loadTypeConfig(configJson);
+        } catch {
+            // If any error occurs, just use default config
+            return undefined;
         }
     }
 

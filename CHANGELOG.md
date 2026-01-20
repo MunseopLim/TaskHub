@@ -23,6 +23,20 @@
 - 다중 패스 의존성 해결로 복잡한 타입 체인 지원
 - 중복 이름 및 forward declaration 처리
 
+**커스텀 타입 설정 파일 지원** (`.vscode/taskhub_types.json`)
+- 프로젝트별로 커스텀 타입 크기와 alignment를 정의할 수 있는 설정 파일 지원
+- JSON 스키마 자동 완성 및 유효성 검사 지원
+- 예시:
+  ```json
+  {
+    "types": {
+      "HANDLE": { "size": 8, "alignment": 8 },
+      "MyCustomType": { "size": 16, "alignment": 4 }
+    },
+    "packingAlignment": 8
+  }
+  ```
+
 ### Testing
 
 - Windows Types 테스트 7개 추가
