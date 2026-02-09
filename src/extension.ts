@@ -3541,4 +3541,12 @@ export function activate(context: vscode.ExtensionContext) {
     );
 }
 
-export function deactivate() {}
+export function deactivate() {
+    actionStates.clear();
+    activeTasks.clear();
+    manuallyTerminatedActions.clear();
+    actionTerminals.clear();
+    actionWorkspaceFolderMap.clear();
+    actionChildProcesses.clear();
+    actionStartTimestamps.clear();
+}

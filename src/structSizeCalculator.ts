@@ -188,16 +188,38 @@ export class StructSizeCalculator {
         const members: StructMember[] = [];
         let braceDepth = 0;
         let foundOpeningBrace = false;
+        let inBlockComment = false;
 
         for (let i = startLine; i < lines.length; i++) {
             const line = lines[i];
 
-            // Track braces
-            for (const char of line) {
-                if (char === '{') {
+            // Track braces, skipping braces inside string literals, char literals, and comments
+            for (let ci = 0; ci < line.length; ci++) {
+                const ch = line[ci];
+                if (inBlockComment) {
+                    if (ch === '*' && ci + 1 < line.length && line[ci + 1] === '/') {
+                        inBlockComment = false;
+                        ci++; // skip '/'
+                    }
+                    continue;
+                }
+                if (ch === '/' && ci + 1 < line.length) {
+                    if (line[ci + 1] === '/') { break; } // line comment - skip rest of line
+                    if (line[ci + 1] === '*') { inBlockComment = true; ci++; continue; }
+                }
+                if (ch === '"' || ch === '\'') {
+                    const quote = ch;
+                    ci++;
+                    while (ci < line.length && line[ci] !== quote) {
+                        if (line[ci] === '\\') { ci++; } // skip escaped char
+                        ci++;
+                    }
+                    continue;
+                }
+                if (ch === '{') {
                     braceDepth++;
                     foundOpeningBrace = true;
-                } else if (char === '}') {
+                } else if (ch === '}') {
                     braceDepth--;
                     if (braceDepth === 0 && foundOpeningBrace) {
                         // End of struct

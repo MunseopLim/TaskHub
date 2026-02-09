@@ -652,19 +652,31 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return null;
         }
 
-        // Get all definition and declaration locations
-        const [definitions, declarations] = await Promise.all([
-            vscode.commands.executeCommand<vscode.Location[]>(
-                'vscode.executeDefinitionProvider',
-                document.uri,
-                position
-            ),
-            vscode.commands.executeCommand<vscode.Location[]>(
-                'vscode.executeDeclarationProvider',
-                document.uri,
-                position
-            )
-        ]);
+        // Get all definition and declaration locations (with timeout to avoid infinite wait if LSP is unresponsive)
+        const lspTimeout = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('LSP request timed out')), 3000)
+        );
+        let definitions: vscode.Location[] | undefined;
+        let declarations: vscode.Location[] | undefined;
+        try {
+            [definitions, declarations] = await Promise.race([
+                Promise.all([
+                    vscode.commands.executeCommand<vscode.Location[]>(
+                        'vscode.executeDefinitionProvider',
+                        document.uri,
+                        position
+                    ),
+                    vscode.commands.executeCommand<vscode.Location[]>(
+                        'vscode.executeDeclarationProvider',
+                        document.uri,
+                        position
+                    )
+                ]),
+                lspTimeout
+            ]);
+        } catch {
+            return null;
+        }
 
         // Combine and deduplicate locations
         const allLocations: vscode.Location[] = [];
@@ -794,7 +806,10 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 const hierarchyName = formatHierarchy(scopes, bitFieldInfo.fieldName);
 
                 // Use the comment info from THIS definition, not the first one
-                const comment = thisBitFieldInfo?.commentInfo ?? bitFieldInfo.commentInfo!;
+                const comment = thisBitFieldInfo?.commentInfo ?? bitFieldInfo.commentInfo;
+                if (!comment) {
+                    continue;
+                }
 
                 // Create clickable file link with line number
                 const fileLink = `[${filePath}:${targetLine + 1}](${definition.uri.toString()}#${targetLine + 1})`;

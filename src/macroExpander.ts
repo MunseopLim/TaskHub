@@ -117,23 +117,25 @@ export class MacroExpander {
                 // Mark as expanding to prevent circular reference
                 this.expandingMacros.add(identifier);
 
-                // Recursively expand the macro value
-                const expandedMacro = this.expandRecursive(
-                    macroDef.value,
-                    macros,
-                    steps,
-                    depth + 1
-                );
+                try {
+                    // Recursively expand the macro value
+                    const expandedMacro = this.expandRecursive(
+                        macroDef.value,
+                        macros,
+                        steps,
+                        depth + 1
+                    );
 
-                // Replace in result
-                result = result.substring(0, startIndex) +
-                         expandedMacro +
-                         result.substring(startIndex + identifier.length);
+                    // Replace in result
+                    result = result.substring(0, startIndex) +
+                             expandedMacro +
+                             result.substring(startIndex + identifier.length);
 
-                hasExpansion = true;
-
-                // Unmark
-                this.expandingMacros.delete(identifier);
+                    hasExpansion = true;
+                } finally {
+                    // Unmark
+                    this.expandingMacros.delete(identifier);
+                }
             }
         }
 

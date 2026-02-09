@@ -1638,52 +1638,64 @@ suite('Extension Test Suite', () => {
 
 		test('should select windows command on win32 platform', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'win32' });
-			const command = {
-				windows: 'dir',
-				macos: 'ls',
-				linux: 'ls'
-			};
-			const result = getCommandString(command);
-			assert.strictEqual(result, 'dir');
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'win32' });
+				const command = {
+					windows: 'dir',
+					macos: 'ls',
+					linux: 'ls'
+				};
+				const result = getCommandString(command);
+				assert.strictEqual(result, 'dir');
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 
 		test('should select macos command on darwin platform', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'darwin' });
-			const command = {
-				windows: 'dir',
-				macos: 'ls -la',
-				linux: 'ls'
-			};
-			const result = getCommandString(command);
-			assert.strictEqual(result, 'ls -la');
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'darwin' });
+				const command = {
+					windows: 'dir',
+					macos: 'ls -la',
+					linux: 'ls'
+				};
+				const result = getCommandString(command);
+				assert.strictEqual(result, 'ls -la');
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 
 		test('should select linux command on linux platform', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'linux' });
-			const command = {
-				windows: 'dir',
-				macos: 'ls',
-				linux: 'ls -al'
-			};
-			const result = getCommandString(command);
-			assert.strictEqual(result, 'ls -al');
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'linux' });
+				const command = {
+					windows: 'dir',
+					macos: 'ls',
+					linux: 'ls -al'
+				};
+				const result = getCommandString(command);
+				assert.strictEqual(result, 'ls -al');
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 
 		test('should throw error for unsupported platform', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'darwin' });
-			const command = {
-				windows: 'dir',
-				linux: 'ls'
-			};
-			assert.throws(() => getCommandString(command), /Invalid or unsupported 'command'/);
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'darwin' });
+				const command = {
+					windows: 'dir',
+					linux: 'ls'
+				};
+				assert.throws(() => getCommandString(command), /Invalid or unsupported 'command'/);
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 
 		test('should throw error for invalid command type', () => {
@@ -1713,26 +1725,32 @@ suite('Extension Test Suite', () => {
 
 		test('should select platform-specific tool path', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'darwin' });
-			const tool = {
-				windows: 'C:\\Program Files\\7-Zip\\7z.exe',
-				macos: '/opt/homebrew/bin/7z',
-				linux: '/usr/bin/7z'
-			};
-			const result = getToolCommand(tool);
-			assert.strictEqual(result, '/opt/homebrew/bin/7z');
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'darwin' });
+				const tool = {
+					windows: 'C:\\Program Files\\7-Zip\\7z.exe',
+					macos: '/opt/homebrew/bin/7z',
+					linux: '/usr/bin/7z'
+				};
+				const result = getToolCommand(tool);
+				assert.strictEqual(result, '/opt/homebrew/bin/7z');
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 
 		test('should throw error when platform-specific tool not found', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'darwin' });
-			const tool = {
-				windows: 'C:\\Program Files\\7-Zip\\7z.exe',
-				linux: '/usr/bin/7z'
-			};
-			assert.throws(() => getToolCommand(tool), /No tool path specified for the current platform/);
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'darwin' });
+				const tool = {
+					windows: 'C:\\Program Files\\7-Zip\\7z.exe',
+					linux: '/usr/bin/7z'
+				};
+				assert.throws(() => getToolCommand(tool), /No tool path specified for the current platform/);
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 	});
 
@@ -1874,73 +1892,83 @@ suite('Extension Test Suite', () => {
 	suite('wrapCommandForOneShot', () => {
 		test('should wrap command for Windows PowerShell with UTF-8', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'win32' });
-			
-			const result = wrapCommandForOneShot('notepad', ['file.txt'], undefined, true);
-			
-			assert.strictEqual(result.isPowerShellScript, true);
-			assert.ok(result.commandLine.includes('Start-Process'));
-			assert.ok(result.commandLine.includes("-FilePath 'notepad'"));
-			assert.ok(result.commandLine.includes("-ArgumentList @('file.txt')"));
-			assert.ok(result.commandLine.includes('[Console]::OutputEncoding'));
-			
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'win32' });
+
+				const result = wrapCommandForOneShot('notepad', ['file.txt'], undefined, true);
+
+				assert.strictEqual(result.isPowerShellScript, true);
+				assert.ok(result.commandLine.includes('Start-Process'));
+				assert.ok(result.commandLine.includes("-FilePath 'notepad'"));
+				assert.ok(result.commandLine.includes("-ArgumentList @('file.txt')"));
+				assert.ok(result.commandLine.includes('[Console]::OutputEncoding'));
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 
 		test('should wrap command for Windows PowerShell without UTF-8', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'win32' });
-			
-			const result = wrapCommandForOneShot('notepad', [], 'C:\\cwd', false);
-			
-			assert.strictEqual(result.isPowerShellScript, true);
-			assert.ok(!result.commandLine.includes('[Console]::OutputEncoding'));
-			assert.ok(result.commandLine.includes("-WorkingDirectory 'C:\\cwd'"));
-			
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'win32' });
+
+				const result = wrapCommandForOneShot('notepad', [], 'C:\\cwd', false);
+
+				assert.strictEqual(result.isPowerShellScript, true);
+				assert.ok(!result.commandLine.includes('[Console]::OutputEncoding'));
+				assert.ok(result.commandLine.includes("-WorkingDirectory 'C:\\cwd'"));
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 
 		test('should wrap command for POSIX with nohup', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'linux' });
-			
-			const result = wrapCommandForOneShot('python', ['script.py'], undefined, false);
-			
-			assert.strictEqual(result.isPowerShellScript, false);
-			assert.ok(result.commandLine.startsWith('nohup python'));
-			assert.ok(result.commandLine.includes("'script.py'"));
-			assert.ok(result.commandLine.endsWith('>/dev/null 2>&1 &'));
-			
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'linux' });
+
+				const result = wrapCommandForOneShot('python', ['script.py'], undefined, false);
+
+				assert.strictEqual(result.isPowerShellScript, false);
+				assert.ok(result.commandLine.startsWith('nohup python'));
+				assert.ok(result.commandLine.includes("'script.py'"));
+				assert.ok(result.commandLine.endsWith('>/dev/null 2>&1 &'));
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 	});
 
 	suite('createShellExecution', () => {
 		test('should create PowerShell execution for Windows', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'win32' });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'win32' });
 
-			const options: vscode.ShellExecutionOptions = { cwd: 'C:\\' };
-			const result = createShellExecution('echo', ['hello'], options, true);
+				const options: vscode.ShellExecutionOptions = { cwd: 'C:\\' };
+				const result = createShellExecution('echo', ['hello'], options, true);
 
-			assert.ok(result.shellExecution);
-			// Verify display command matches expected format
-			assert.ok(result.displayCommand.includes('echo'));
-
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+				assert.ok(result.shellExecution);
+				// Verify display command matches expected format
+				assert.ok(result.displayCommand.includes('echo'));
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 
 		test('should create ShellExecution for POSIX', () => {
 			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', { value: 'darwin' });
+			try {
+				Object.defineProperty(process, 'platform', { value: 'darwin' });
 
-			const options: vscode.ShellExecutionOptions = { cwd: '/tmp' };
-			const result = createShellExecution('ls', ['-la'], options, false);
+				const options: vscode.ShellExecutionOptions = { cwd: '/tmp' };
+				const result = createShellExecution('ls', ['-la'], options, false);
 
-			assert.ok(result.shellExecution);
-			assert.strictEqual(result.displayCommand, "ls '-la'");
-
-			Object.defineProperty(process, 'platform', { value: originalPlatform });
+				assert.ok(result.shellExecution);
+				assert.strictEqual(result.displayCommand, "ls '-la'");
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
 		});
 	});
 
