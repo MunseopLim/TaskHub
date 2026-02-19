@@ -1139,6 +1139,28 @@ export function parseTagInput(input: string | undefined): string[] | undefined {
     return parts.length > 0 ? parts : undefined;
 }
 
+/**
+ * Returns a debounced handle with `run` and `cancel` methods.
+ * `run` delays execution of fn until delay ms have elapsed since the last call.
+ * `cancel` clears any pending timer so fn will not be invoked.
+ * Useful for batching rapid file-system events and clean watcher disposal.
+ */
+export function debounce(fn: () => void, delay: number): { run: () => void; cancel: () => void } {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return {
+        run: () => {
+            if (timer !== undefined) { clearTimeout(timer); }
+            timer = setTimeout(fn, delay);
+        },
+        cancel: () => {
+            if (timer !== undefined) {
+                clearTimeout(timer);
+                timer = undefined;
+            }
+        },
+    };
+}
+
 export function normalizeLineNumber(raw: unknown): number | undefined {
     if (typeof raw === 'number' && Number.isFinite(raw)) {
         const value = Math.floor(raw);
@@ -2636,6 +2658,7 @@ function executeShellCommand(command: string, args: string[], cwd?: string, task
 
 function registerWorkspaceFileWatchers(relativePath: string, callback: () => void): vscode.Disposable {
     const watchers: vscode.FileSystemWatcher[] = [];
+    const debouncedCallback = debounce(callback, 200);
 
     const resetWatchers = () => {
         while (watchers.length > 0) {
@@ -2645,9 +2668,9 @@ function registerWorkspaceFileWatchers(relativePath: string, callback: () => voi
         for (const folder of folders) {
             const pattern = new vscode.RelativePattern(folder, relativePath);
             const watcher = vscode.workspace.createFileSystemWatcher(pattern);
-            watcher.onDidChange(callback);
-            watcher.onDidCreate(callback);
-            watcher.onDidDelete(callback);
+            watcher.onDidChange(debouncedCallback.run);
+            watcher.onDidCreate(debouncedCallback.run);
+            watcher.onDidDelete(debouncedCallback.run);
             watchers.push(watcher);
         }
     };
@@ -2659,6 +2682,7 @@ function registerWorkspaceFileWatchers(relativePath: string, callback: () => voi
     });
 
     return new vscode.Disposable(() => {
+        debouncedCallback.cancel();
         workspaceSubscription.dispose();
         while (watchers.length > 0) {
             watchers.pop()?.dispose();
@@ -2723,15 +2747,17 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     const mediaActionsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/actions.json'));
-    mediaActionsWatcher.onDidChange(() => mainViewProvider.refresh());
-    mediaActionsWatcher.onDidCreate(() => mainViewProvider.refresh());
-    mediaActionsWatcher.onDidDelete(() => mainViewProvider.refresh());
-    context.subscriptions.push(mediaActionsWatcher);
+    const debouncedMediaActionsRefresh = debounce(() => mainViewProvider.refresh(), 200);
+    mediaActionsWatcher.onDidChange(debouncedMediaActionsRefresh.run);
+    mediaActionsWatcher.onDidCreate(debouncedMediaActionsRefresh.run);
+    mediaActionsWatcher.onDidDelete(debouncedMediaActionsRefresh.run);
+    context.subscriptions.push(new vscode.Disposable(() => { debouncedMediaActionsRefresh.cancel(); mediaActionsWatcher.dispose(); }));
     const mediaLinksWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/links.json'));
-    mediaLinksWatcher.onDidChange(() => builtInLinkViewProvider.refresh());
-    mediaLinksWatcher.onDidCreate(() => builtInLinkViewProvider.refresh());
-    mediaLinksWatcher.onDidDelete(() => builtInLinkViewProvider.refresh());
-    context.subscriptions.push(mediaLinksWatcher);
+    const debouncedMediaLinksRefresh = debounce(() => builtInLinkViewProvider.refresh(), 200);
+    mediaLinksWatcher.onDidChange(debouncedMediaLinksRefresh.run);
+    mediaLinksWatcher.onDidCreate(debouncedMediaLinksRefresh.run);
+    mediaLinksWatcher.onDidDelete(debouncedMediaLinksRefresh.run);
+    context.subscriptions.push(new vscode.Disposable(() => { debouncedMediaLinksRefresh.cancel(); mediaLinksWatcher.dispose(); }));
     const workspaceActionsWatchers = registerWorkspaceFileWatchers('.vscode/actions.json', () => mainViewProvider.refresh());
     const workspaceLinksWatchers = registerWorkspaceFileWatchers('.vscode/links.json', () => workspaceLinkViewProvider.refresh());
     const workspaceFavoritesWatchers = registerWorkspaceFileWatchers('.vscode/favorites.json', () => favoriteViewProvider.refresh());

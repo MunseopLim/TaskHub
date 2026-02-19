@@ -26,6 +26,7 @@ import {
 	createShellExecution,
 	filterConflictingItems,
 	findConflictingIds,
+	debounce,
 } from '../extension';
 import { ActionItem } from '../schema';
 
@@ -2184,6 +2185,54 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(findConflictingIds([], []).length, 0);
 			assert.strictEqual(findConflictingIds([{ id: 'a', title: 'A' }], []).length, 0);
 			assert.strictEqual(findConflictingIds([], [{ id: 'a', title: 'A' }]).length, 0);
+		});
+	});
+
+	suite('debounce', () => {
+		test('should call the function after the delay', (done) => {
+			let callCount = 0;
+			const debouncedFn = debounce(() => { callCount++; }, 30);
+			debouncedFn.run();
+			setTimeout(() => {
+				assert.strictEqual(callCount, 1);
+				done();
+			}, 80);
+		});
+
+		test('should batch rapid successive calls into one', (done) => {
+			let callCount = 0;
+			const debouncedFn = debounce(() => { callCount++; }, 30);
+			debouncedFn.run();
+			debouncedFn.run();
+			debouncedFn.run();
+			setTimeout(() => {
+				assert.strictEqual(callCount, 1);
+				done();
+			}, 80);
+		});
+
+		test('should fire again after the delay has elapsed', (done) => {
+			let callCount = 0;
+			const debouncedFn = debounce(() => { callCount++; }, 30);
+			debouncedFn.run();
+			setTimeout(() => {
+				debouncedFn.run();
+			}, 80);
+			setTimeout(() => {
+				assert.strictEqual(callCount, 2);
+				done();
+			}, 160);
+		});
+
+		test('cancel should prevent the pending timer from firing', (done) => {
+			let callCount = 0;
+			const debouncedFn = debounce(() => { callCount++; }, 60);
+			debouncedFn.run();
+			debouncedFn.cancel();
+			setTimeout(() => {
+				assert.strictEqual(callCount, 0, 'cancel should prevent the fn from being called');
+				done();
+			}, 120);
 		});
 	});
 });

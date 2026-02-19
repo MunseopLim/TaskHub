@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import {
     extractBitFieldInfo,
     extractHierarchy,
@@ -10,7 +11,13 @@ import {
 } from './sfrBitFieldParser';
 import { MacroExpander } from './macroExpander';
 import { RegisterDecoder, RegisterDefinition } from './registerDecoder';
-import { StructSizeCalculator } from './structSizeCalculator';
+import { StructSizeCalculator, TypeConfigFile } from './structSizeCalculator';
+
+/** Cache entry for type config loaded from taskhub_types.json */
+interface TypeConfigCacheEntry {
+    mtime: number;
+    config: TypeConfigFile | undefined;
+}
 
 /**
  * Hover provider that shows number base conversions for C/C++ numeric literals
@@ -18,6 +25,7 @@ import { StructSizeCalculator } from './structSizeCalculator';
  */
 export class NumberBaseHoverProvider implements vscode.HoverProvider {
     private isProcessingHover: boolean = false;
+    private readonly typeConfigCache = new Map<string, TypeConfigCacheEntry>();
 
     /**
      * Regex patterns for detecting different number formats
@@ -1313,29 +1321,34 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      * @param document The current document to determine workspace
      * @returns TypeConfigFile or undefined if not found
      */
-    private loadTypeConfig(document: vscode.TextDocument): import('./structSizeCalculator').TypeConfigFile | undefined {
+    private loadTypeConfig(document: vscode.TextDocument): TypeConfigFile | undefined {
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+        if (!workspaceFolder) {
+            return undefined;
+        }
+
+        const configFilePath = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'taskhub_types.json').fsPath;
+
+        // Short-circuit for absent-file cache before making any fs call
+        const existing = this.typeConfigCache.get(configFilePath);
+        if (existing && existing.mtime === -1) {
+            return undefined;
+        }
+
         try {
-            const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-            if (!workspaceFolder) {
-                return undefined;
-            }
-
-            const configPath = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'taskhub_types.json');
-
-            // Check if file exists synchronously using fs
-            const fs = require('fs');
-            const configFilePath = configPath.fsPath;
-
-            if (!fs.existsSync(configFilePath)) {
-                return undefined;
+            const stat = fs.statSync(configFilePath);
+            const mtime = stat.mtimeMs;
+            if (existing && existing.mtime === mtime) {
+                return existing.config;
             }
 
             const configContent = fs.readFileSync(configFilePath, 'utf8');
-            const configJson = JSON.parse(configContent);
-
-            return StructSizeCalculator.loadTypeConfig(configJson);
+            const config = StructSizeCalculator.loadTypeConfig(JSON.parse(configContent));
+            this.typeConfigCache.set(configFilePath, { mtime, config });
+            return config;
         } catch {
-            // If any error occurs, just use default config
+            // File does not exist or is unreadable — cache as absent to avoid repeated stat calls
+            this.typeConfigCache.set(configFilePath, { mtime: -1, config: undefined });
             return undefined;
         }
     }
@@ -1522,45 +1535,45 @@ export interface BitOperationResult {
     clearedBits: number[];
 }
 
+// Patterns for bit operation detection (module-level to avoid recompilation per hover call)
+// Note: Use negative lookbehind to avoid matching part of hex/binary literals or numeric suffixes
+const BIT_OPERATION_PATTERNS: Array<{
+    regex: RegExp;
+    isAssignment: boolean;
+    isNot?: boolean;
+    isConstant?: boolean;
+}> = [
+    // Assignment operations: var &= value, var |= value, etc.
+    {
+        regex: /(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)\s*(&=|\|=|\^=|<<=|>>=)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)/g,
+        isAssignment: true
+    },
+    // Non-assignment operations: var & value, var | value, etc.
+    {
+        regex: /(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)\s*(&|\||\^|<<|>>)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)/g,
+        isAssignment: false
+    },
+    // NOT operation: ~var (only match identifiers, not numbers or hex literals or suffixes)
+    {
+        regex: /~\s*(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)/g,
+        isAssignment: false,
+        isNot: true
+    },
+    // Constant expressions: number & number, number | number, etc.
+    // Matches: 1U << 5, 0xFF & 0x0F, (1U << 5), etc.
+    {
+        regex: /\(?\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)[ULul]*\s*(&|\||\^|<<|>>)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)[ULul]*\s*\)?/g,
+        isAssignment: false,
+        isConstant: true
+    }
+];
+
 /**
  * Detect bit operations in a line of code
  * Supports: &, |, ^, ~, <<, >>, &=, |=, ^=, <<=, >>=
  */
 export function detectBitOperation(line: string, cursorPosition: number): BitOperation | undefined {
-    // Patterns for different bit operations
-    // Note: Use negative lookbehind to avoid matching part of hex/binary literals or numeric suffixes
-    const patterns: Array<{
-        regex: RegExp;
-        isAssignment: boolean;
-        isNot?: boolean;
-        isConstant?: boolean;
-    }> = [
-        // Assignment operations: var &= value, var |= value, etc.
-        {
-            regex: /(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)\s*(&=|\|=|\^=|<<=|>>=)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)/g,
-            isAssignment: true
-        },
-        // Non-assignment operations: var & value, var | value, etc.
-        {
-            regex: /(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)\s*(&|\||\^|<<|>>)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)/g,
-            isAssignment: false
-        },
-        // NOT operation: ~var (only match identifiers, not numbers or hex literals or suffixes)
-        {
-            regex: /~\s*(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)/g,
-            isAssignment: false,
-            isNot: true
-        },
-        // Constant expressions: number & number, number | number, etc.
-        // Matches: 1U << 5, 0xFF & 0x0F, (1U << 5), etc.
-        {
-            regex: /\(?\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)[ULul]*\s*(&|\||\^|<<|>>)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)[ULul]*\s*\)?/g,
-            isAssignment: false,
-            isConstant: true
-        }
-    ];
-
-    for (const pattern of patterns) {
+    for (const pattern of BIT_OPERATION_PATTERNS) {
         pattern.regex.lastIndex = 0; // Reset regex state
         let match: RegExpExecArray | null;
 

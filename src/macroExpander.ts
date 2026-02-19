@@ -32,6 +32,8 @@ export interface MacroExpansionResult {
 /**
  * MacroExpander - recursively expands C/C++ preprocessor macros
  */
+const IDENTIFIER_PATTERN = /\b[A-Za-z_][A-Za-z0-9_]*\b/g;
+
 export class MacroExpander {
     private maxDepth = 50; // Prevent infinite recursion
     private expandingMacros: Set<string> = new Set();
@@ -92,13 +94,11 @@ export class MacroExpander {
             throw new Error('Maximum macro expansion depth exceeded');
         }
 
-        // Find all potential macro references (identifiers)
-        const identifierPattern = /\b[A-Za-z_][A-Za-z0-9_]*\b/g;
         let result = value;
         let hasExpansion = false;
 
         // Replace each identifier with its expansion if it's a macro
-        const matches = Array.from(value.matchAll(identifierPattern));
+        const matches = Array.from(value.matchAll(IDENTIFIER_PATTERN));
 
         // Process in reverse order to maintain positions
         for (let i = matches.length - 1; i >= 0; i--) {

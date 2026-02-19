@@ -298,6 +298,18 @@ export function extractHierarchy(lines: string[], startLine: number): ScopeInfo[
     return scopes;
 }
 
+// Patterns for class/struct/union/namespace declarations (module-level to avoid recompilation per call)
+// Match: class ClassName {
+// Match: struct StructName {
+// Match: union UnionName {
+// Match: template<...> class ClassName {
+const SCOPE_DECLARATION_PATTERNS = [
+    { type: 'class' as const, regex: /\bclass\s+(\w+)/g },
+    { type: 'struct' as const, regex: /\bstruct\s+(\w+)?/g }, // struct can be anonymous
+    { type: 'union' as const, regex: /\bunion\s+(\w+)?/g },   // union can be anonymous
+    { type: 'namespace' as const, regex: /\bnamespace\s+(\w+)/g },
+];
+
 /**
  * Find scope declaration (class/struct/union) around a given line
  * @param lines Array of document lines
@@ -317,17 +329,7 @@ function findScopeDeclaration(lines: string[], lineNumber: number): ScopeInfo | 
 
     const combinedText = relevantLines.join(' ');
 
-    // Patterns for class/struct/union declarations
-    // Match: class ClassName {
-    // Match: struct StructName {
-    // Match: union UnionName {
-    // Match: template<...> class ClassName {
-    const patterns = [
-        { type: 'class' as const, regex: /\bclass\s+(\w+)/g },
-        { type: 'struct' as const, regex: /\bstruct\s+(\w+)?/g }, // struct can be anonymous
-        { type: 'union' as const, regex: /\bunion\s+(\w+)?/g },   // union can be anonymous
-        { type: 'namespace' as const, regex: /\bnamespace\s+(\w+)/g },
-    ];
+    const patterns = SCOPE_DECLARATION_PATTERNS;
 
     // Find all matches and use the last (closest) one
     let lastMatch: { type: 'class' | 'struct' | 'union' | 'namespace'; name: string | null } | null = null;
