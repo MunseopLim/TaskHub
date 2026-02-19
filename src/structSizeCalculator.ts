@@ -356,7 +356,7 @@ export class StructSizeCalculator {
      */
     static loadTypeConfig(configJson: any): TypeConfigFile {
         return {
-            types: configJson.types || DEFAULT_TYPE_CONFIG.types,
+            types: { ...DEFAULT_TYPE_CONFIG.types, ...(configJson.types || {}) },
             packingAlignment: configJson.packingAlignment || DEFAULT_TYPE_CONFIG.packingAlignment
         };
     }

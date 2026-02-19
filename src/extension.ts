@@ -3054,7 +3054,9 @@ export function activate(context: vscode.ExtensionContext) {
             const line = normalizeLineNumber(f.line);
             const samePath = f.path === target.path;
             const sameLine = (line ?? null) === (targetLine ?? null);
-            return !(samePath && sameLine);
+            const sameTitle = f.title === target.title;
+            const sameGroup = (f.group ?? null) === (target.group ?? null);
+            return !(samePath && sameLine && sameTitle && sameGroup);
         });
         if (filtered.length === favorites.length) {
             return;
@@ -3384,7 +3386,7 @@ export function activate(context: vscode.ExtensionContext) {
                             },
                             {
                                 label: 'Keep both',
-                                description: 'Keep all actions (duplicates allowed)'
+                                description: 'Keep all actions (conflicting preset actions are dropped)'
                             }
                         ], {
                             placeHolder: `Found ${conflicts.length} conflicting action IDs. How to resolve?`
