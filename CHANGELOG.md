@@ -1,5 +1,84 @@
 # Change Log
 
+## [0.2.36] - 2026-03-18
+
+### Fixed
+
+**npm 취약점 해결 (0 vulnerabilities)**
+- `serialize-javascript` override 추가 (`6.0.2` → `^7.0.4`)
+  - mocha 내부 의존성의 RCE 취약점(GHSA-5c6j-r48x-rmvq) 해결
+- eslint, @typescript-eslint 등 devDependencies 마이너 업데이트
+
+### Removed
+
+- 불필요한 문서 파일 정리
+  - `vsc-extension-quickstart.md` (VS Code 템플릿 파일)
+  - `CODE_REVIEW_BY_CODEX.md` (1회성 리뷰 기록, 이미 반영 완료)
+
+## [0.2.35] - 2026-02-19
+
+### Enhanced
+
+**성능 개선 및 코드 리뷰 반영**
+- `debounce`를 `{ run, cancel }` API로 변경하고 watcher 해제 시 `cancel()` 호출
+- `loadTypeConfig`의 absent-file 캐시를 `statSync` 호출 전에 확인하도록 수정
+- regex/pattern 상수를 모듈 스코프로 호이스팅 (`macroExpander`, `sfrBitFieldParser`, `numberBaseHoverProvider`)
+- mtime 기반 type config 캐시 추가 (`NumberBaseHoverProvider`)
+
+### Fixed
+
+**npm 취약점 해결 (16 → 7)**
+- `npm-run-all`을 `npm-run-all2`로 교체
+- `minimatch`, `diff`에 overrides 적용하여 high/moderate 취약점 9개 해결
+
+### Testing
+- debounce 단위 테스트 및 cancel API 테스트 추가
+
+## [0.2.34] - 2026-02-19
+
+### Fixed
+
+**Codex 코드 리뷰 반영 (4건)**
+- `structSizeCalculator`: 커스텀 타입 설정 로드 시 기본 타입과 머지하도록 수정 (`||` → spread merge)
+- `registerDecoder`: union 파서의 중괄호 추적을 주석/문자열 인식 방식으로 개선
+- `extension`: 즐겨찾기 삭제 시 title+group까지 포함한 엄격한 식별자로 변경
+- `extension`: 'Keep both' UI 문구를 실제 동작과 일치하도록 수정
+
+### Enhanced
+
+**npm 의존성 업데이트**
+- `@typescript-eslint/eslint-plugin`: `^7.0.0` → `^8.0.0` (ESLint 10 호환)
+- `@typescript-eslint/parser`: `^6.15.0` → `^8.0.0` (ESLint 10 호환, 버전 통일)
+- `@vscode/test-cli`: `^0.0.11` → `^0.0.12`
+- `mocha`: `^5.0.5` → `^11.0.0` (minimist/minimatch/diff 취약점 해소)
+- `npm-run-all`: `^1.1.3` → `^4.1.5`
+
+## [0.2.33] - 2026-02-09
+
+### Fixed
+
+**코드 안정성 개선**
+- `macroExpander`: 순환 참조 감지 시 `expandingMacros` Set 정리 누락 수정 (try/finally)
+- `numberBaseHoverProvider`: non-null assertion 제거 및 안전한 null 체크 추가
+- `numberBaseHoverProvider`: LSP 요청에 3초 timeout 추가
+- `registerDecoder`/`structSizeCalculator`: 문자열/주석 내 중괄호 무시하도록 파싱 개선
+- `extension`: deactivate 시 글로벌 Map/Set 메모리 정리 추가
+
+### Testing
+- platform 변경 테스트에 try/finally 적용하여 복원 보장
+
+## [0.2.32] - 2026-01-20
+
+### Added
+
+**커스텀 타입 설정 파일 지원** (`.vscode/taskhub_types.json`)
+- 프로젝트별로 커스텀 타입 크기와 alignment를 정의할 수 있는 설정 파일 지원
+- JSON 스키마 자동 완성 및 유효성 검사 지원 (`taskhub_types.schema.json`)
+- `packingAlignment` 옵션으로 구조체 패킹 정렬 설정 가능
+
+### Testing
+- 커스텀 타입 설정 관련 테스트 추가
+
 ## [0.2.31] - 2026-01-20
 
 ### Fixed

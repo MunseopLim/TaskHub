@@ -957,6 +957,7 @@ Preset은 일반 `actions.json`과 동일한 형식을 사용합니다:
 | `taskhub.history.showPanel` | `boolean` | `true` | TaskHub 사이드바에서 히스토리 패널을 표시하거나 숨깁니다. |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ 파일에서 숫자 값에 대한 진법 변환 hover tooltip을 활성화합니다. 16진수, 2진수, 10진수 표현과 비트 정보를 표시합니다. |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적 기능]** C/C++ 파일에서 비트 연산의 결과를 hover tooltip으로 표시합니다. 변수 연산(`value |= 0x80`) 및 상수 표현식(`1U << 5`)을 지원합니다. |
+| `taskhub.preset.selected` | `string` | `none` | 자동으로 적용할 프리셋을 선택합니다. `none`은 워크스페이스 actions만 사용하고, `example`은 예제 프리셋을 적용합니다. 커스텀 프리셋 ID도 지정 가능합니다. |
 
 ## 설치
 
@@ -986,25 +987,23 @@ Preset은 일반 `actions.json`과 동일한 형식을 사용합니다:
 ```
 TaskHub/
 ├── src/
-│   ├── extension.ts                      # 메인 확장 파일 (2,900+ 줄)
-│   │                                      # - activate() 함수: 확장 초기화 및 등록
-│   │                                      # - Provider 클래스들: MainViewProvider, LinkViewProvider, FavoriteViewProvider, HistoryProvider
-│   │                                      # - 액션 실행 로직: executeAction(), executeSingleTask()
-│   │                                      # - 히스토리 관리: HistoryProvider (1386-1473줄)
-│   │                                      # - 명령어 핸들러: taskhub.* 명령어들
-│   ├── schema.ts                          # TypeScript 타입 정의
-│   ├── numberBaseHoverProvider.ts         # Number Base 및 SFR Bit Field Hover 제공자
-│   │                                      # - C/C++ 숫자 리터럴 진법 변환
-│   │                                      # - SFR 비트 필드 정보 표시
-│   │                                      # - LSP 통합 (정의 검색, 심볼 검색)
-│   ├── sfrBitFieldParser.ts               # SFR 비트 필드 파서
-│   │                                      # - 비트 필드 주석 파싱
-│   │                                      # - 계층 구조 추출
-│   │                                      # - 비트 마스크 계산
+│   ├── extension.ts                  # 메인 확장 파일
+│   │                                  # - activate() / deactivate()
+│   │                                  # - Provider: MainView, Link, Favorite, History
+│   │                                  # - 액션 실행: executeAction(), executeSingleTask()
+│   ├── schema.ts                      # TypeScript 타입 정의
+│   ├── numberBaseHoverProvider.ts     # Number Base / SFR Bit Field / Struct Size Hover
+│   ├── sfrBitFieldParser.ts           # SFR 비트 필드 파서
+│   ├── structSizeCalculator.ts        # 구조체 크기/레이아웃 계산
+│   ├── registerDecoder.ts             # 레지스터 비트 필드 디코더
+│   ├── macroExpander.ts               # C/C++ 매크로 전처리기
 │   └── test/
-│       ├── extension.test.ts              # 확장 유닛 테스트 (1,600+ 줄, 189개 테스트)
-│       ├── numberBaseHoverProvider.test.ts # Hover 제공자 테스트 (92개 테스트)
-│       └── sfrBitFieldParser.test.ts      # SFR 파서 테스트 (39개 테스트)
+│       ├── extension.test.ts              # 확장 유닛 테스트
+│       ├── numberBaseHoverProvider.test.ts # Hover 제공자 테스트
+│       ├── sfrBitFieldParser.test.ts      # SFR 파서 테스트
+│       ├── structSizeCalculator.test.ts   # 구조체 크기 계산 테스트
+│       ├── registerDecoder.test.ts        # 레지스터 디코더 테스트
+│       └── macroExpander.test.ts          # 매크로 확장 테스트
 ├── schema/
 │   ├── actions.schema.json       # actions.json 스키마 및 검증
 │   ├── links.schema.json         # links.json 스키마 및 검증
@@ -1015,12 +1014,16 @@ TaskHub/
 │   ├── actions.json          # 기본 제공 액션 예제
 │   ├── links.json            # 기본 제공 링크 예제
 │   └── *_example.json        # 각종 예제 파일들
+├── presets/
+│   └── preset-example.json   # 프리셋 예제 파일
 ├── .vscode/
 │   ├── actions.json          # 워크스페이스별 액션 (선택사항)
 │   ├── links.json            # 워크스페이스별 링크 (선택사항)
 │   ├── favorites.json        # 워크스페이스별 즐겨찾기 (선택사항)
 │   └── taskhub_types.json    # 커스텀 타입 크기 설정 (선택사항)
 ├── package.json              # 확장 메타데이터, 설정, 명령어, 뷰 정의
+├── CHANGELOG.md              # 변경 이력
+├── CONTRIBUTING.md           # 개발 가이드
 └── README.md                 # 이 파일
 ```
 
@@ -1030,33 +1033,29 @@ TaskHub/
 
 각 패널은 `vscode.TreeDataProvider`를 구현합니다:
 
-*   **MainViewProvider** (797-1094줄): 액션 버튼과 폴더 트리 관리
-*   **LinkViewProvider** (1099-1249줄): Built-in 및 Workspace 링크 관리
-*   **FavoriteViewProvider** (1251-1361줄): 즐겨찾기 파일 관리
-*   **HistoryProvider** (1386-1473줄): 액션 실행 히스토리 관리
-    *   `addHistoryEntry()`: 새 히스토리 추가
-    *   `updateHistoryStatus()`: 상태 업데이트 (running → success/failure)
-    *   `deleteHistoryItem()`: 개별 삭제
-    *   `clearAllHistory()`: 전체 삭제
-    *   `trimHistoryToMax()`: maxItems 초과 시 트리밍
+*   **MainViewProvider**: 액션 버튼과 폴더 트리 관리
+*   **LinkViewProvider**: Built-in 및 Workspace 링크 관리
+*   **FavoriteViewProvider**: 즐겨찾기 파일 관리
+*   **HistoryProvider**: 액션 실행 히스토리 관리
 
 #### 2. 액션 실행 파이프라인
 
-*   **executeAction()** (1761-1812줄): 메인 액션 실행 함수
-    *   히스토리 추적 통합 (historyProvider 옵션 파라미터)
-    *   실행 시작: `running` 상태로 히스토리 추가
-    *   성공 시: `success` 상태로 업데이트
-    *   실패 시: `failure` 상태로 업데이트, 에러 메시지 저장
-
-*   **executeSingleTask()** (1814줄~): 개별 태스크 실행
-    *   지원 태스크 타입: fileDialog, folderDialog, unzip, zip, stringManipulation, shell/command
-
+*   **executeAction()**: 메인 액션 실행 함수 (히스토리 추적 통합)
+*   **executeSingleTask()**: 개별 태스크 실행
+    *   지원 태스크 타입: fileDialog, folderDialog, unzip, zip, stringManipulation, inputBox, quickPick, shell/command
 *   **변수 치환**: `${변수명}` 형태의 변수를 실제 값으로 치환
+
+#### 2.1. C/C++ 분석 모듈
+
+*   **numberBaseHoverProvider.ts**: Number Base, SFR Bit Field, Struct Size Hover 통합 제공
+*   **sfrBitFieldParser.ts**: SFR 비트 필드 주석 파싱 및 계층 구조 추출
+*   **structSizeCalculator.ts**: 구조체/클래스 크기, 오프셋, 패딩 계산
+*   **registerDecoder.ts**: 레지스터 비트 필드 값 추출 및 디코딩
+*   **macroExpander.ts**: C/C++ 전처리기 매크로 확장 (`#define`, `#if`/`#else`)
 
 #### 3. 데이터 구조
 
 ```typescript
-// 히스토리 엔트리 (910-916줄)
 interface HistoryEntry {
     actionId: string;        // 액션 ID
     actionTitle: string;     // 액션 제목
@@ -1065,7 +1064,6 @@ interface HistoryEntry {
     output?: string;         // 출력 (실패 시 에러 메시지)
 }
 
-// 링크 엔트리 (892-898줄)
 interface LinkEntry {
     title: string;
     link: string;
@@ -1074,7 +1072,6 @@ interface LinkEntry {
     sourceFile?: string;
 }
 
-// 즐겨찾기 엔트리 (900-908줄)
 interface FavoriteEntry {
     title: string;
     path: string;
@@ -1099,14 +1096,14 @@ interface FavoriteEntry {
 ### 개발 시 주의사항
 
 1. **히스토리 기능 수정 시**:
-   *   `HistoryProvider` 클래스 수정 (extension.ts:1386-1473)
-   *   `executeAction()` 함수의 히스토리 추적 로직 확인 (extension.ts:1778-1806)
-   *   테스트 업데이트 (src/test/extension.test.ts:1036-1283)
+   *   `HistoryProvider` 클래스 수정 (`extension.ts`)
+   *   `executeAction()` 함수의 히스토리 추적 로직 확인
+   *   테스트 업데이트 (`src/test/extension.test.ts`)
 
 2. **새 패널 추가 시**:
    *   `package.json`의 `views` 섹션에 뷰 정의 추가
    *   `extension.ts`에 TreeDataProvider 클래스 구현
-   *   `activate()` 함수에서 등록 (2240-2377줄)
+   *   `activate()` 함수에서 등록
 
 3. **새 명령어 추가 시**:
    *   `package.json`의 `commands` 섹션에 명령어 정의
