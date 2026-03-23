@@ -191,7 +191,7 @@
 
 - `type` (string, **필수**): `folderDialog`로 설정해야 합니다.
 - `options` (object, *선택*): `vscode.OpenDialogOptions`와 동일한 옵션을 사용할 수 있습니다. (예: `openLabel`, `defaultUri`)
-- **실행 결과**: 다음 태스크에서 `${task_id.path}`(선택된 폴더의 절대 경로), `${task_id.name}`(폴더 이름) 등을 사용할 수 있습니다.
+- **실행 결과**: 다음 태스크에서 `${task_id.path}`(절대 경로), `${task_id.dir}`(부모 디렉토리), `${task_id.name}`(폴더 이름), `${task_id.fileNameOnly}`(확장자 제외 이름), `${task_id.fileExt}`(확장자) 등을 사용할 수 있습니다. `fileDialog`와 동일한 속성을 제공합니다.
 
 #### `zip` 태스크
 
@@ -367,11 +367,11 @@
 
 파이프라인 내에서, 이전 태스크의 결과는 `${task_id.property}` 형식으로 다음 태스크의 속성(예: `command`, `args`, `filePath` 등)에서 사용할 수 있습니다.
 
--   `fileDialog` 태스크 (`id: "select_file"`)의 결과 사용 예시:
+-   `fileDialog` / `folderDialog` 태스크 (`id: "select_file"`)의 결과 사용 예시:
     -   `${select_file.path}`: 전체 경로
-    -   `${select_file.dir}`: 디렉토리 경로
-    -   `${select_file.name}`: 파일명
-    -   `${select_file.fileNameOnly}`: 확장자를 제외한 파일명
+    -   `${select_file.dir}`: 부모 디렉토리 경로
+    -   `${select_file.name}`: 파일/폴더명
+    -   `${select_file.fileNameOnly}`: 확장자를 제외한 이름
     -   `${select_file.fileExt}`: 확장자
 -   `inputBox` 태스크 (`id: "input_name"`)의 결과 사용 예시:
     -   `${input_name.value}`: 입력된 값 (prefix/suffix 포함)

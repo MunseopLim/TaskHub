@@ -2353,21 +2353,25 @@ async function handleCommand(task: any, context: vscode.ExtensionContext, worksp
     return { output: commandOutput.trim() };
 }
 
+export function parsePathInfo(fullPath: string): { path: string, dir: string, name: string, fileNameOnly: string, fileExt: string } {
+    const baseName = path.basename(fullPath);
+    const extension = path.extname(baseName);
+    return { path: fullPath, dir: path.dirname(fullPath), name: baseName, fileNameOnly: path.basename(baseName, extension), fileExt: extension.startsWith('.') ? extension.substring(1) : extension };
+}
+
 async function handleFileDialog(task: any): Promise<{ path: string, dir: string, name: string, fileNameOnly: string, fileExt: string }> {
     const options: vscode.OpenDialogOptions = task.options || {};
     const fileUri = await vscode.window.showOpenDialog(options);
-    if (fileUri && fileUri[0]) {
-        const fullPath = fileUri[0].fsPath;
-        const extension = path.extname(fullPath);
-        return { path: fullPath, dir: path.dirname(fullPath), name: path.basename(fullPath), fileNameOnly: path.basename(fullPath, extension), fileExt: extension.startsWith('.') ? extension.substring(1) : extension };
-    } else { throw new Error('File selection was canceled.'); }
+    if (fileUri && fileUri[0]) { return parsePathInfo(fileUri[0].fsPath); }
+    else { throw new Error('File selection was canceled.'); }
 }
 
-async function handleFolderDialog(task: any): Promise<{ path: string, dir: string, name: string }> {
+async function handleFolderDialog(task: any): Promise<{ path: string, dir: string, name: string, fileNameOnly: string, fileExt: string }> {
     const options: vscode.OpenDialogOptions = task.options || {};
     options.canSelectFiles = false; options.canSelectFolders = true;
     const folderUri = await vscode.window.showOpenDialog(options);
-    if (folderUri && folderUri[0]) { return { path: folderUri[0].fsPath, dir: path.dirname(folderUri[0].fsPath), name: path.basename(folderUri[0].fsPath) }; }    else { throw new Error('Folder selection was canceled.'); }
+    if (folderUri && folderUri[0]) { return parsePathInfo(folderUri[0].fsPath); }
+    else { throw new Error('Folder selection was canceled.'); }
 }
 
 async function handleInputBox(task: any): Promise<{ value: string }> {

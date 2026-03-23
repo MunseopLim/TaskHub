@@ -27,6 +27,7 @@ import {
 	filterConflictingItems,
 	findConflictingIds,
 	debounce,
+	parsePathInfo,
 } from '../extension';
 import { ActionItem } from '../schema';
 
@@ -2233,6 +2234,47 @@ suite('Extension Test Suite', () => {
 				assert.strictEqual(callCount, 0, 'cancel should prevent the fn from being called');
 				done();
 			}, 120);
+		});
+	});
+
+	suite('parsePathInfo', () => {
+		test('should parse file path with extension', () => {
+			const result = parsePathInfo('/projects/my-app/config.json');
+			assert.strictEqual(result.path, '/projects/my-app/config.json');
+			assert.strictEqual(result.dir, '/projects/my-app');
+			assert.strictEqual(result.name, 'config.json');
+			assert.strictEqual(result.fileNameOnly, 'config');
+			assert.strictEqual(result.fileExt, 'json');
+		});
+
+		test('should parse folder path without extension', () => {
+			const result = parsePathInfo('/projects/my-app');
+			assert.strictEqual(result.path, '/projects/my-app');
+			assert.strictEqual(result.dir, '/projects');
+			assert.strictEqual(result.name, 'my-app');
+			assert.strictEqual(result.fileNameOnly, 'my-app');
+			assert.strictEqual(result.fileExt, '');
+		});
+
+		test('should parse folder path with dot in name', () => {
+			const result = parsePathInfo('/projects/my.app');
+			assert.strictEqual(result.name, 'my.app');
+			assert.strictEqual(result.fileNameOnly, 'my');
+			assert.strictEqual(result.fileExt, 'app');
+		});
+
+		test('should parse path with multiple dots', () => {
+			const result = parsePathInfo('/projects/archive.tar.gz');
+			assert.strictEqual(result.name, 'archive.tar.gz');
+			assert.strictEqual(result.fileNameOnly, 'archive.tar');
+			assert.strictEqual(result.fileExt, 'gz');
+		});
+
+		test('should handle dotfile (hidden file/folder)', () => {
+			const result = parsePathInfo('/projects/.config');
+			assert.strictEqual(result.name, '.config');
+			assert.strictEqual(result.fileNameOnly, '.config');
+			assert.strictEqual(result.fileExt, '');
 		});
 	});
 });
