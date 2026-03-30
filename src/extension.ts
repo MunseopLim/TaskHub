@@ -8,7 +8,7 @@ import Ajv from 'ajv';
 import { ActionItem, Action as PipelineAction } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
-import { openJsonEditor } from './jsonEditor';
+import { openJsonEditor, openJsonEditorFromUri } from './jsonEditor';
 
 
 function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
@@ -3573,6 +3573,7 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditor', () => openJsonEditor(context)));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditorFromUri', (uri?: vscode.Uri) => openJsonEditorFromUri(context, uri)));
 }
 
 export function deactivate() {

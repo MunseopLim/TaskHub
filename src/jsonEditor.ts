@@ -26,7 +26,23 @@ export async function openJsonEditor(context: vscode.ExtensionContext) {
         return;
     }
 
-    const filePath = fileUris[0].fsPath;
+    openJsonEditorWithPath(context, fileUris[0].fsPath);
+}
+
+export async function openJsonEditorFromUri(context: vscode.ExtensionContext, uri?: vscode.Uri) {
+    if (!uri) {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document.fileName.endsWith('.json')) {
+            uri = editor.document.uri;
+        } else {
+            return openJsonEditor(context);
+        }
+    }
+
+    openJsonEditorWithPath(context, uri.fsPath);
+}
+
+function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: string) {
     const fileName = filePath.split(/[\\/]/).pop() || 'JSON Editor';
 
     let jsonData: Record<string, unknown>;
@@ -215,9 +231,14 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
     td.actions-cell, th.actions-cell {
         width: 32px;
         text-align: center;
+        border: none;
+        padding: 4px 2px;
+        overflow: visible;
+        text-overflow: clip;
     }
     td.drag-handle, th.drag-handle {
         width: 28px;
+        border: none;
     }
     tr:hover { background: var(--hover-bg); }
 
@@ -378,9 +399,34 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
         showError('Failed to parse JSON data: ' + e.message);
         return;
     }
-    let sheets = Object.keys(data);
-    let activeSheet = sheets[0] || '';
+    let sheetMap = [];
+    let activeIdx = 0;
     let modified = false;
+
+    function buildSheetMap() {
+        sheetMap = [];
+        Object.keys(data).forEach(key => {
+            const val = data[key];
+            if (Array.isArray(val)) {
+                sheetMap.push({ label: key, path: [key] });
+            } else if (val && typeof val === 'object' && !Array.isArray(val)) {
+                Object.keys(val).forEach(subKey => {
+                    if (Array.isArray(val[subKey])) {
+                        sheetMap.push({ label: key + ' > ' + subKey, path: [key, subKey] });
+                    }
+                });
+            }
+        });
+    }
+    buildSheetMap();
+
+    function getActiveRows() {
+        const entry = sheetMap[activeIdx];
+        if (!entry) { return null; }
+        let ref = data;
+        for (const k of entry.path) { ref = ref[k]; }
+        return ref;
+    }
 
     function setModified(val) {
         modified = val;
@@ -390,11 +436,11 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
     function renderTabs() {
         const tabsEl = document.getElementById('tabs');
         tabsEl.innerHTML = '';
-        sheets.forEach(name => {
+        sheetMap.forEach((entry, idx) => {
             const tab = document.createElement('div');
-            tab.className = 'tab' + (name === activeSheet ? ' active' : '');
-            tab.textContent = name;
-            tab.onclick = () => { activeSheet = name; renderTabs(); renderTable(); };
+            tab.className = 'tab' + (idx === activeIdx ? ' active' : '');
+            tab.textContent = entry.label;
+            tab.onclick = () => { activeIdx = idx; renderTabs(); renderTable(); };
             tabsEl.appendChild(tab);
         });
     }
@@ -411,7 +457,7 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
 
     function renderTable() {
         const wrapper = document.getElementById('tableWrapper');
-        const rows = data[activeSheet];
+        const rows = getActiveRows();
         if (!rows || !Array.isArray(rows) || rows.length === 0) {
             wrapper.innerHTML = '<div class="empty-msg">No data. Click "+ Row" to add a row.</div>';
             return;
@@ -546,7 +592,7 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
                 const rowIdx = parseInt(td.dataset.row);
                 const col = td.dataset.col;
                 const idx = parseInt(btn.dataset.removeArr);
-                const arr = data[activeSheet][rowIdx][col];
+                const arr = getActiveRows()[rowIdx][col];
                 if (Array.isArray(arr)) {
                     arr.splice(idx, 1);
                     setModified(true);
@@ -562,7 +608,7 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
                 const td = btn.closest('td');
                 const rowIdx = parseInt(td.dataset.row);
                 const col = td.dataset.col;
-                const arr = data[activeSheet][rowIdx][col];
+                const arr = getActiveRows()[rowIdx][col];
                 if (Array.isArray(arr)) {
                     arr.push('');
                     setModified(true);
@@ -586,12 +632,12 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
                 if (!td) { return; }
                 const rowIdx = parseInt(td.dataset.row);
                 const col = td.dataset.col;
-                const val = data[activeSheet][rowIdx][col];
+                const val = getActiveRows()[rowIdx][col];
                 if (btn.dataset.convert === 'split') {
                     const str = String(val ?? '');
-                    data[activeSheet][rowIdx][col] = str.split(',').map(s => s.trim());
+                    getActiveRows()[rowIdx][col] = str.split(',').map(s => s.trim());
                 } else {
-                    data[activeSheet][rowIdx][col] = Array.isArray(val) ? val.join(', ') : String(val);
+                    getActiveRows()[rowIdx][col] = Array.isArray(val) ? val.join(', ') : String(val);
                 }
                 setModified(true);
                 renderTable();
@@ -602,7 +648,7 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
         document.querySelectorAll('[data-delete-row]').forEach(btn => {
             btn.addEventListener('click', () => {
                 const rowIdx = parseInt(btn.dataset.deleteRow);
-                data[activeSheet].splice(rowIdx, 1);
+                getActiveRows().splice(rowIdx, 1);
                 setModified(true);
                 renderTable();
             });
@@ -642,7 +688,7 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
                 e.preventDefault();
                 const targetIdx = parseInt(tr.dataset.dragRow);
                 if (dragSrcIdx === null || dragSrcIdx === targetIdx) { return; }
-                const rows = data[activeSheet];
+                const rows = getActiveRows();
                 const rect = tr.getBoundingClientRect();
                 const midY = rect.top + rect.height / 2;
                 const insertBefore = e.clientY < midY;
@@ -660,13 +706,13 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
         if (!td || !td.classList.contains('editing')) { return; }
         const rowIdx = parseInt(td.dataset.row);
         const col = td.dataset.col;
-        const oldVal = data[activeSheet][rowIdx][col];
+        const oldVal = getActiveRows()[rowIdx][col];
 
         if (Array.isArray(oldVal)) {
             const inputs = td.querySelectorAll('.cell-edit input[data-arr-idx]');
             const newArr = [];
             inputs.forEach(input => { newArr.push(input.value); });
-            data[activeSheet][rowIdx][col] = newArr;
+            getActiveRows()[rowIdx][col] = newArr;
             if (JSON.stringify(oldVal) !== JSON.stringify(newArr)) { setModified(true); }
         } else {
             const textarea = td.querySelector('.cell-edit textarea');
@@ -678,7 +724,7 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
                 newVal = parseValue(input.value);
             }
             if (oldVal !== newVal) {
-                data[activeSheet][rowIdx][col] = newVal;
+                getActiveRows()[rowIdx][col] = newVal;
                 setModified(true);
             }
         }
@@ -712,6 +758,8 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
 
     // Toolbar buttons
     document.getElementById('btnSave').addEventListener('click', () => {
+        const editingTd = document.querySelector('td.editing');
+        if (editingTd) { commitCell(editingTd); }
         vscode.postMessage({ command: 'save', data: data });
         setModified(false);
     });
@@ -721,7 +769,7 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
     });
 
     document.getElementById('btnAddRow').addEventListener('click', () => {
-        const rows = data[activeSheet];
+        const rows = getActiveRows();
         if (!rows || !Array.isArray(rows)) { return; }
         const template = {};
         if (rows.length > 0) {
@@ -741,6 +789,8 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
     document.addEventListener('keydown', (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key === 's') {
             e.preventDefault();
+            const editingTd = document.querySelector('td.editing');
+            if (editingTd) { commitCell(editingTd); }
             document.getElementById('btnSave').click();
         }
     });
@@ -750,8 +800,10 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
         const msg = event.data;
         if (msg.command === 'loadData') {
             data = msg.data;
-            sheets = Object.keys(data);
-            if (!sheets.includes(activeSheet)) { activeSheet = sheets[0] || ''; }
+            const oldLabel = sheetMap[activeIdx] ? sheetMap[activeIdx].label : '';
+            buildSheetMap();
+            const newIdx = sheetMap.findIndex(e => e.label === oldLabel);
+            activeIdx = newIdx >= 0 ? newIdx : 0;
             setModified(false);
             renderTabs();
             renderTable();
