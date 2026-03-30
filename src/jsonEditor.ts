@@ -1,0 +1,768 @@
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+
+let currentPanel: vscode.WebviewPanel | undefined;
+
+function detectIndent(text: string): string | number {
+    const match = text.match(/^[ \t]+/m);
+    if (!match) {
+        return 2;
+    }
+    const indent = match[0];
+    if (indent.includes('\t')) {
+        return '\t';
+    }
+    return indent.length;
+}
+
+export async function openJsonEditor(context: vscode.ExtensionContext) {
+    const fileUris = await vscode.window.showOpenDialog({
+        canSelectMany: false,
+        filters: { 'JSON Files': ['json'] },
+        openLabel: 'Open JSON File'
+    });
+
+    if (!fileUris || fileUris.length === 0) {
+        return;
+    }
+
+    const filePath = fileUris[0].fsPath;
+    const fileName = filePath.split(/[\\/]/).pop() || 'JSON Editor';
+
+    let jsonData: Record<string, unknown>;
+    let detectedIndent: string | number = 2;
+    try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        jsonData = JSON.parse(content);
+        detectedIndent = detectIndent(content);
+    } catch (error: any) {
+        vscode.window.showErrorMessage(`Failed to parse JSON: ${error.message}`);
+        return;
+    }
+
+    if (currentPanel) {
+        currentPanel.reveal(vscode.ViewColumn.One);
+    } else {
+        currentPanel = vscode.window.createWebviewPanel(
+            'taskhub.jsonEditor',
+            `JSON Editor: ${fileName}`,
+            vscode.ViewColumn.One,
+            {
+                enableScripts: true,
+                retainContextWhenHidden: true
+            }
+        );
+        currentPanel.onDidDispose(() => {
+            currentPanel = undefined;
+        });
+    }
+
+    currentPanel.title = `JSON Editor: ${fileName}`;
+    currentPanel.webview.html = getWebviewContent(jsonData, filePath);
+
+    currentPanel.webview.onDidReceiveMessage(
+        async (message) => {
+            switch (message.command) {
+                case 'save': {
+                    try {
+                        fs.writeFileSync(filePath, JSON.stringify(message.data, null, detectedIndent) + '\n', 'utf-8');
+                        vscode.window.showInformationMessage(`JSON saved: ${fileName}`);
+                    } catch (error: any) {
+                        vscode.window.showErrorMessage(`Failed to save: ${error.message}`);
+                    }
+                    break;
+                }
+                case 'reload': {
+                    try {
+                        const content = fs.readFileSync(filePath, 'utf-8');
+                        const data = JSON.parse(content);
+                        currentPanel?.webview.postMessage({ command: 'loadData', data });
+                    } catch (error: any) {
+                        vscode.window.showErrorMessage(`Failed to reload: ${error.message}`);
+                    }
+                    break;
+                }
+            }
+        },
+        undefined,
+        context.subscriptions
+    );
+}
+
+function getWebviewContent(data: Record<string, unknown>, filePath: string): string {
+    // Encode data as base64 to avoid any HTML/JS parsing issues with special characters
+    const jsonBase64 = Buffer.from(JSON.stringify(data), 'utf-8').toString('base64');
+    const escapedPath = filePath.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+    return /*html*/`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JSON Editor</title>
+<style>
+    :root {
+        --bg: var(--vscode-editor-background);
+        --fg: var(--vscode-editor-foreground);
+        --border: var(--vscode-panel-border, #444);
+        --input-bg: var(--vscode-input-background);
+        --input-fg: var(--vscode-input-foreground);
+        --input-border: var(--vscode-input-border, #444);
+        --btn-bg: var(--vscode-button-background);
+        --btn-fg: var(--vscode-button-foreground);
+        --btn-hover: var(--vscode-button-hoverBackground);
+        --tab-active-bg: var(--vscode-tab-activeBackground, var(--bg));
+        --tab-active-fg: var(--vscode-tab-activeForeground, var(--fg));
+        --tab-inactive-bg: var(--vscode-tab-inactiveBackground, transparent);
+        --tab-inactive-fg: var(--vscode-tab-inactiveForeground, #888);
+        --tab-border: var(--vscode-tab-activeBorderTop, var(--btn-bg));
+        --danger: var(--vscode-errorForeground, #f44);
+        --badge-bg: var(--vscode-badge-background, #444);
+        --badge-fg: var(--vscode-badge-foreground, #fff);
+        --hover-bg: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05));
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+        font-family: var(--vscode-font-family, sans-serif);
+        font-size: var(--vscode-font-size, 13px);
+        color: var(--fg);
+        background: var(--bg);
+        padding: 12px;
+    }
+    .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+    }
+    .toolbar .filepath {
+        flex: 1;
+        font-size: 11px;
+        opacity: 0.6;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    button {
+        background: var(--btn-bg);
+        color: var(--btn-fg);
+        border: none;
+        padding: 4px 12px;
+        cursor: pointer;
+        border-radius: 2px;
+        font-size: 12px;
+    }
+    button:hover { background: var(--btn-hover); }
+    button.danger { background: var(--danger); }
+    button.small {
+        padding: 2px 6px;
+        font-size: 11px;
+    }
+
+    .tabs {
+        display: flex;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 12px;
+    }
+    .tab {
+        padding: 6px 16px;
+        cursor: pointer;
+        border: none;
+        background: var(--tab-inactive-bg);
+        color: var(--tab-inactive-fg);
+        border-top: 2px solid transparent;
+        font-size: 13px;
+    }
+    .tab.active {
+        background: var(--tab-active-bg);
+        color: var(--tab-active-fg);
+        border-top-color: var(--tab-border);
+    }
+    .tab:hover:not(.active) {
+        background: var(--hover-bg);
+    }
+
+    .table-wrapper {
+        overflow-x: auto;
+    }
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+    }
+    th, td {
+        border: 1px solid var(--border);
+        padding: 4px 8px;
+        text-align: left;
+        vertical-align: top;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    th {
+        background: var(--hover-bg);
+        font-weight: 600;
+        position: sticky;
+        top: 0;
+        white-space: nowrap;
+    }
+    th.row-num, td.row-num {
+        width: 32px;
+        text-align: center;
+        color: var(--tab-inactive-fg);
+        font-size: 11px;
+    }
+    td.actions-cell, th.actions-cell {
+        width: 32px;
+        text-align: center;
+    }
+    td.drag-handle, th.drag-handle {
+        width: 28px;
+    }
+    tr:hover { background: var(--hover-bg); }
+
+    /* Drag and drop */
+    tr[draggable="true"] { cursor: grab; }
+    tr[draggable="true"]:active { cursor: grabbing; }
+    tr.dragging { opacity: 0.4; }
+    tr.drag-over-top { border-top: 2px solid var(--btn-bg); }
+    tr.drag-over-bottom { border-bottom: 2px solid var(--btn-bg); }
+    td.drag-handle {
+        text-align: center;
+        cursor: grab;
+        color: var(--tab-inactive-fg);
+        font-size: 14px;
+        user-select: none;
+    }
+    td.drag-handle:hover { color: var(--fg); }
+
+    /* Editable cell */
+    .cell-view {
+        cursor: pointer;
+        min-height: 20px;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+    .cell-view:hover {
+        outline: 1px solid var(--input-border);
+        outline-offset: -1px;
+    }
+    .cell-edit {
+        display: none;
+        width: 100%;
+    }
+    .cell-edit input, .cell-edit textarea {
+        width: 100%;
+        background: var(--input-bg);
+        color: var(--input-fg);
+        border: 1px solid var(--input-border);
+        padding: 2px 4px;
+        font-family: inherit;
+        font-size: inherit;
+        resize: vertical;
+    }
+    .cell-edit textarea {
+        min-height: 60px;
+    }
+    td.editing .cell-view { display: none; }
+    td.editing .cell-edit { display: block; }
+
+    /* Array tags */
+    .array-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        align-items: center;
+    }
+    .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        background: var(--badge-bg);
+        color: var(--badge-fg);
+        padding: 1px 6px;
+        border-radius: 10px;
+        font-size: 11px;
+        max-width: 200px;
+    }
+    .tag span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .tag .remove-tag {
+        cursor: pointer;
+        opacity: 0.7;
+        font-size: 13px;
+        line-height: 1;
+    }
+    .tag .remove-tag:hover { opacity: 1; }
+
+    .array-edit-area {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+    .array-edit-area .tag-row {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+    }
+    .array-edit-area input {
+        flex: 1;
+        background: var(--input-bg);
+        color: var(--input-fg);
+        border: 1px solid var(--input-border);
+        padding: 2px 4px;
+        font-family: inherit;
+        font-size: inherit;
+    }
+
+    .convert-btn {
+        display: inline-block;
+        background: var(--badge-bg);
+        color: var(--badge-fg);
+        border: none;
+        padding: 0 5px;
+        border-radius: 2px;
+        font-size: 10px;
+        cursor: pointer;
+        opacity: 0.7;
+        margin-left: 4px;
+        vertical-align: middle;
+    }
+    .convert-btn:hover { opacity: 1; background: var(--btn-bg); color: var(--btn-fg); }
+
+    .modified-indicator {
+        display: none;
+        color: var(--danger);
+        font-size: 11px;
+        font-weight: bold;
+    }
+    .modified-indicator.show { display: inline; }
+
+    .empty-msg {
+        padding: 20px;
+        text-align: center;
+        opacity: 0.5;
+    }
+</style>
+</head>
+<body>
+    <div class="toolbar">
+        <button id="btnSave" title="Save (Ctrl+S)">Save</button>
+        <button id="btnReload">Reload</button>
+        <button id="btnAddRow">+ Row</button>
+        <span class="modified-indicator" id="modifiedFlag">● Modified</span>
+        <span class="filepath" title="${escapedPath}">${escapedPath}</span>
+    </div>
+    <div class="tabs" id="tabs"></div>
+    <div class="table-wrapper" id="tableWrapper"></div>
+    <div id="errorMsg" style="color:var(--danger);padding:12px;display:none;"></div>
+
+<script>
+(function() {
+    const errorEl = document.getElementById('errorMsg');
+    function showError(msg) {
+        errorEl.style.display = 'block';
+        errorEl.textContent = msg;
+    }
+    window.onerror = function(msg, src, line, col, err) {
+        showError('JS Error: ' + msg + ' (line ' + line + ')');
+    };
+    const vscode = acquireVsCodeApi();
+    let data;
+    try {
+        data = JSON.parse(atob('${jsonBase64}'));
+    } catch(e) {
+        showError('Failed to parse JSON data: ' + e.message);
+        return;
+    }
+    let sheets = Object.keys(data);
+    let activeSheet = sheets[0] || '';
+    let modified = false;
+
+    function setModified(val) {
+        modified = val;
+        document.getElementById('modifiedFlag').classList.toggle('show', val);
+    }
+
+    function renderTabs() {
+        const tabsEl = document.getElementById('tabs');
+        tabsEl.innerHTML = '';
+        sheets.forEach(name => {
+            const tab = document.createElement('div');
+            tab.className = 'tab' + (name === activeSheet ? ' active' : '');
+            tab.textContent = name;
+            tab.onclick = () => { activeSheet = name; renderTabs(); renderTable(); };
+            tabsEl.appendChild(tab);
+        });
+    }
+
+    function getDisplayValue(val) {
+        if (val === null || val === undefined) { return ''; }
+        if (Array.isArray(val)) { return val; }
+        return String(val);
+    }
+
+    function detectMultiline(val) {
+        return typeof val === 'string' && val.includes('\\n');
+    }
+
+    function renderTable() {
+        const wrapper = document.getElementById('tableWrapper');
+        const rows = data[activeSheet];
+        if (!rows || !Array.isArray(rows) || rows.length === 0) {
+            wrapper.innerHTML = '<div class="empty-msg">No data. Click "+ Row" to add a row.</div>';
+            return;
+        }
+
+        const columns = [];
+        const seen = new Set();
+        rows.forEach(row => {
+            Object.keys(row).forEach(k => {
+                if (!seen.has(k)) { seen.add(k); columns.push(k); }
+            });
+        });
+
+        let html = '<table><thead><tr><th class="drag-handle"></th><th class="row-num">#</th>';
+        columns.forEach(col => { html += '<th>' + escapeHtml(col) + '</th>'; });
+        html += '<th class="actions-cell"></th></tr></thead><tbody>';
+
+        rows.forEach((row, rowIdx) => {
+            html += '<tr draggable="true" data-drag-row="' + rowIdx + '">';
+            html += '<td class="drag-handle" title="Drag to reorder">⠿</td>';
+            html += '<td class="row-num">' + (rowIdx + 1) + '</td>';
+            columns.forEach((col, colIdx) => {
+                const val = row[col];
+                const isArray = Array.isArray(val);
+                const isMultiline = detectMultiline(val);
+                html += '<td data-row="' + rowIdx + '" data-col="' + escapeAttr(col) + '">';
+                html += renderCellView(val, isArray, isMultiline);
+                html += renderCellEdit(val, isArray, isMultiline, rowIdx, col);
+                html += '</td>';
+            });
+            html += '<td class="actions-cell"><button class="small danger" data-delete-row="' + rowIdx + '" title="Delete row">✕</button></td>';
+            html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        wrapper.innerHTML = html;
+        attachCellEvents();
+    }
+
+    function renderCellView(val, isArray, isMultiline) {
+        if (isArray) {
+            let html = '<div class="cell-view"><div class="array-tags">';
+            val.forEach(item => {
+                html += '<span class="tag"><span>' + escapeHtml(String(item)) + '</span></span>';
+            });
+            html += '<button class="convert-btn" data-convert="join" title="Array → String (join with comma)">a→s</button>';
+            html += '</div></div>';
+            return html;
+        }
+        let html = '<div class="cell-view">' + escapeHtml(String(val ?? ''));
+        html += '<button class="convert-btn" data-convert="split" title="String → Array (split by comma)">s→a</button>';
+        html += '</div>';
+        return html;
+    }
+
+    function renderCellEdit(val, isArray, isMultiline, rowIdx, col) {
+        if (isArray) {
+            let html = '<div class="cell-edit"><div class="array-edit-area">';
+            val.forEach((item, i) => {
+                html += '<div class="tag-row">';
+                html += '<input type="text" value="' + escapeAttr(String(item)) + '" data-arr-idx="' + i + '">';
+                html += '<button class="small danger" data-remove-arr="' + i + '">✕</button>';
+                html += '</div>';
+            });
+            html += '<button class="small" data-add-arr="true">+ Add</button>';
+            html += '</div></div>';
+            return html;
+        }
+        if (isMultiline) {
+            return '<div class="cell-edit"><textarea>' + escapeHtml(String(val)) + '</textarea></div>';
+        }
+        return '<div class="cell-edit"><input type="text" value="' + escapeAttr(String(val ?? '')) + '"></div>';
+    }
+
+    function attachCellEvents() {
+        // Click to edit
+        document.querySelectorAll('td[data-row]').forEach(td => {
+            const view = td.querySelector('.cell-view');
+            if (!view) { return; }
+            view.addEventListener('click', () => {
+                // Close other editing cells
+                document.querySelectorAll('td.editing').forEach(other => {
+                    if (other !== td) { commitCell(other); }
+                });
+                td.classList.add('editing');
+                const input = td.querySelector('.cell-edit input, .cell-edit textarea');
+                if (input) { input.focus(); input.select && input.select(); }
+            });
+        });
+
+        // Blur / Enter to commit for simple inputs
+        document.querySelectorAll('.cell-edit input[type="text"]:not([data-arr-idx])').forEach(input => {
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { commitCell(input.closest('td')); }
+                if (e.key === 'Escape') { cancelCell(input.closest('td')); }
+            });
+            input.addEventListener('blur', (e) => {
+                const td = input.closest('td');
+                if (td && td.classList.contains('editing')) {
+                    setTimeout(() => { if (td.classList.contains('editing')) { commitCell(td); } }, 100);
+                }
+            });
+        });
+
+        // Textarea: Escape to cancel, Ctrl+Enter to commit
+        document.querySelectorAll('.cell-edit textarea').forEach(ta => {
+            ta.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && e.ctrlKey) { commitCell(ta.closest('td')); }
+                if (e.key === 'Escape') { cancelCell(ta.closest('td')); }
+            });
+            ta.addEventListener('blur', (e) => {
+                const td = ta.closest('td');
+                if (td && td.classList.contains('editing')) {
+                    setTimeout(() => { if (td.classList.contains('editing')) { commitCell(td); } }, 100);
+                }
+            });
+        });
+
+        // Array item inputs
+        document.querySelectorAll('.cell-edit input[data-arr-idx]').forEach(input => {
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { commitCell(input.closest('td')); }
+                if (e.key === 'Escape') { cancelCell(input.closest('td')); }
+            });
+        });
+
+        // Remove array item
+        document.querySelectorAll('[data-remove-arr]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const td = btn.closest('td');
+                const rowIdx = parseInt(td.dataset.row);
+                const col = td.dataset.col;
+                const idx = parseInt(btn.dataset.removeArr);
+                const arr = data[activeSheet][rowIdx][col];
+                if (Array.isArray(arr)) {
+                    arr.splice(idx, 1);
+                    setModified(true);
+                    renderTable();
+                }
+            });
+        });
+
+        // Add array item
+        document.querySelectorAll('[data-add-arr]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const td = btn.closest('td');
+                const rowIdx = parseInt(td.dataset.row);
+                const col = td.dataset.col;
+                const arr = data[activeSheet][rowIdx][col];
+                if (Array.isArray(arr)) {
+                    arr.push('');
+                    setModified(true);
+                    renderTable();
+                    // Focus last input
+                    const newTd = document.querySelector('td[data-row="' + rowIdx + '"][data-col="' + col + '"]');
+                    if (newTd) {
+                        newTd.classList.add('editing');
+                        const inputs = newTd.querySelectorAll('.cell-edit input[data-arr-idx]');
+                        if (inputs.length) { inputs[inputs.length - 1].focus(); }
+                    }
+                }
+            });
+        });
+
+        // Convert string <-> array
+        document.querySelectorAll('[data-convert]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const td = btn.closest('td[data-row]');
+                if (!td) { return; }
+                const rowIdx = parseInt(td.dataset.row);
+                const col = td.dataset.col;
+                const val = data[activeSheet][rowIdx][col];
+                if (btn.dataset.convert === 'split') {
+                    const str = String(val ?? '');
+                    data[activeSheet][rowIdx][col] = str.split(',').map(s => s.trim());
+                } else {
+                    data[activeSheet][rowIdx][col] = Array.isArray(val) ? val.join(', ') : String(val);
+                }
+                setModified(true);
+                renderTable();
+            });
+        });
+
+        // Delete row
+        document.querySelectorAll('[data-delete-row]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const rowIdx = parseInt(btn.dataset.deleteRow);
+                data[activeSheet].splice(rowIdx, 1);
+                setModified(true);
+                renderTable();
+            });
+        });
+
+        // Drag and drop reorder
+        let dragSrcIdx = null;
+        document.querySelectorAll('tr[data-drag-row]').forEach(tr => {
+            tr.addEventListener('dragstart', (e) => {
+                dragSrcIdx = parseInt(tr.dataset.dragRow);
+                tr.classList.add('dragging');
+                e.dataTransfer.effectAllowed = 'move';
+            });
+            tr.addEventListener('dragend', () => {
+                tr.classList.remove('dragging');
+                document.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach(el => {
+                    el.classList.remove('drag-over-top', 'drag-over-bottom');
+                });
+                dragSrcIdx = null;
+            });
+            tr.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                const rect = tr.getBoundingClientRect();
+                const midY = rect.top + rect.height / 2;
+                tr.classList.remove('drag-over-top', 'drag-over-bottom');
+                if (e.clientY < midY) {
+                    tr.classList.add('drag-over-top');
+                } else {
+                    tr.classList.add('drag-over-bottom');
+                }
+            });
+            tr.addEventListener('dragleave', () => {
+                tr.classList.remove('drag-over-top', 'drag-over-bottom');
+            });
+            tr.addEventListener('drop', (e) => {
+                e.preventDefault();
+                const targetIdx = parseInt(tr.dataset.dragRow);
+                if (dragSrcIdx === null || dragSrcIdx === targetIdx) { return; }
+                const rows = data[activeSheet];
+                const rect = tr.getBoundingClientRect();
+                const midY = rect.top + rect.height / 2;
+                const insertBefore = e.clientY < midY;
+                const item = rows.splice(dragSrcIdx, 1)[0];
+                let newIdx = insertBefore ? targetIdx : targetIdx + 1;
+                if (dragSrcIdx < targetIdx) { newIdx--; }
+                rows.splice(newIdx, 0, item);
+                setModified(true);
+                renderTable();
+            });
+        });
+    }
+
+    function commitCell(td) {
+        if (!td || !td.classList.contains('editing')) { return; }
+        const rowIdx = parseInt(td.dataset.row);
+        const col = td.dataset.col;
+        const oldVal = data[activeSheet][rowIdx][col];
+
+        if (Array.isArray(oldVal)) {
+            const inputs = td.querySelectorAll('.cell-edit input[data-arr-idx]');
+            const newArr = [];
+            inputs.forEach(input => { newArr.push(input.value); });
+            data[activeSheet][rowIdx][col] = newArr;
+            if (JSON.stringify(oldVal) !== JSON.stringify(newArr)) { setModified(true); }
+        } else {
+            const textarea = td.querySelector('.cell-edit textarea');
+            const input = td.querySelector('.cell-edit input');
+            let newVal;
+            if (textarea) {
+                newVal = textarea.value;
+            } else if (input) {
+                newVal = parseValue(input.value);
+            }
+            if (oldVal !== newVal) {
+                data[activeSheet][rowIdx][col] = newVal;
+                setModified(true);
+            }
+        }
+        td.classList.remove('editing');
+        renderTable();
+    }
+
+    function cancelCell(td) {
+        if (!td) { return; }
+        td.classList.remove('editing');
+        renderTable();
+    }
+
+    function parseValue(str) {
+        if (str === '') { return ''; }
+        if (str === 'null') { return null; }
+        if (str === 'true') { return true; }
+        if (str === 'false') { return false; }
+        const num = Number(str);
+        if (!isNaN(num) && str.trim() !== '') { return num; }
+        return str;
+    }
+
+    function escapeHtml(str) {
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function escapeAttr(str) {
+        return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // Toolbar buttons
+    document.getElementById('btnSave').addEventListener('click', () => {
+        vscode.postMessage({ command: 'save', data: data });
+        setModified(false);
+    });
+
+    document.getElementById('btnReload').addEventListener('click', () => {
+        vscode.postMessage({ command: 'reload' });
+    });
+
+    document.getElementById('btnAddRow').addEventListener('click', () => {
+        const rows = data[activeSheet];
+        if (!rows || !Array.isArray(rows)) { return; }
+        const template = {};
+        if (rows.length > 0) {
+            Object.keys(rows[0]).forEach(k => {
+                const sample = rows[0][k];
+                if (Array.isArray(sample)) { template[k] = []; }
+                else if (typeof sample === 'number') { template[k] = 0; }
+                else { template[k] = ''; }
+            });
+        }
+        rows.push(template);
+        setModified(true);
+        renderTable();
+    });
+
+    // Ctrl+S to save
+    document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            document.getElementById('btnSave').click();
+        }
+    });
+
+    // Messages from extension
+    window.addEventListener('message', (event) => {
+        const msg = event.data;
+        if (msg.command === 'loadData') {
+            data = msg.data;
+            sheets = Object.keys(data);
+            if (!sheets.includes(activeSheet)) { activeSheet = sheets[0] || ''; }
+            setModified(false);
+            renderTabs();
+            renderTable();
+        }
+    });
+
+    // Initial render
+    renderTabs();
+    renderTable();
+})();
+</script>
+</body>
+</html>`;
+}
