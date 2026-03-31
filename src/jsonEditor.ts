@@ -42,14 +42,34 @@ export async function openJsonEditorFromUri(context: vscode.ExtensionContext, ur
     openJsonEditorWithPath(context, uri.fsPath);
 }
 
+export const ROOT_ARRAY_KEY = '_rootArray';
+
+export function wrapIfArray(data: unknown): { wrapped: Record<string, unknown>; isRootArray: boolean } {
+    if (Array.isArray(data)) {
+        return { wrapped: { [ROOT_ARRAY_KEY]: data }, isRootArray: true };
+    }
+    return { wrapped: data as Record<string, unknown>, isRootArray: false };
+}
+
+export function unwrapIfRootArray(data: Record<string, unknown>, isRootArray: boolean): unknown {
+    if (isRootArray && ROOT_ARRAY_KEY in data) {
+        return data[ROOT_ARRAY_KEY];
+    }
+    return data;
+}
+
 function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: string) {
     const fileName = filePath.split(/[\\/]/).pop() || 'JSON Editor';
 
     let jsonData: Record<string, unknown>;
+    let isRootArray = false;
     let detectedIndent: string | number = 2;
     try {
         const content = fs.readFileSync(filePath, 'utf-8');
-        jsonData = JSON.parse(content);
+        const parsed = JSON.parse(content);
+        const result = wrapIfArray(parsed);
+        jsonData = result.wrapped;
+        isRootArray = result.isRootArray;
         detectedIndent = detectIndent(content);
     } catch (error: any) {
         vscode.window.showErrorMessage(`Failed to parse JSON: ${error.message}`);
@@ -81,7 +101,8 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
             switch (message.command) {
                 case 'save': {
                     try {
-                        fs.writeFileSync(filePath, JSON.stringify(message.data, null, detectedIndent) + '\n', 'utf-8');
+                        const saveData = unwrapIfRootArray(message.data, isRootArray);
+                        fs.writeFileSync(filePath, JSON.stringify(saveData, null, detectedIndent) + '\n', 'utf-8');
                         vscode.window.showInformationMessage(`JSON saved: ${fileName}`);
                     } catch (error: any) {
                         vscode.window.showErrorMessage(`Failed to save: ${error.message}`);
@@ -91,8 +112,10 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
                 case 'reload': {
                     try {
                         const content = fs.readFileSync(filePath, 'utf-8');
-                        const data = JSON.parse(content);
-                        currentPanel?.webview.postMessage({ command: 'loadData', data });
+                        const parsed = JSON.parse(content);
+                        const result = wrapIfArray(parsed);
+                        isRootArray = result.isRootArray;
+                        currentPanel?.webview.postMessage({ command: 'loadData', data: result.wrapped });
                     } catch (error: any) {
                         vscode.window.showErrorMessage(`Failed to reload: ${error.message}`);
                     }
@@ -367,6 +390,19 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
         text-align: center;
         opacity: 0.5;
     }
+    .cell-object {
+        font-family: var(--vscode-editor-font-family, monospace);
+        font-size: 11px;
+        opacity: 0.85;
+        cursor: pointer;
+    }
+    .cell-edit textarea.json-edit {
+        min-height: 120px;
+        font-family: var(--vscode-editor-font-family, monospace);
+        font-size: 11px;
+        white-space: pre;
+        tab-size: 2;
+    }
 </style>
 </head>
 <body>
@@ -436,10 +472,16 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
     function renderTabs() {
         const tabsEl = document.getElementById('tabs');
         tabsEl.innerHTML = '';
+        // Hide tabs if there's only one sheet (e.g., root array)
+        if (sheetMap.length <= 1) {
+            tabsEl.style.display = 'none';
+        } else {
+            tabsEl.style.display = '';
+        }
         sheetMap.forEach((entry, idx) => {
             const tab = document.createElement('div');
             tab.className = 'tab' + (idx === activeIdx ? ' active' : '');
-            tab.textContent = entry.label;
+            tab.textContent = entry.label === '_rootArray' ? 'Items' : entry.label;
             tab.onclick = () => { activeIdx = idx; renderTabs(); renderTable(); };
             tabsEl.appendChild(tab);
         });
@@ -497,24 +539,58 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
         attachCellEvents();
     }
 
+    function isPlainObject(val) {
+        return val !== null && typeof val === 'object' && !Array.isArray(val);
+    }
+
+    function hasOnlyPrimitives(arr) {
+        return arr.every(item => !isPlainObject(item) && !Array.isArray(item));
+    }
+
+    function summarizeObject(val) {
+        const keys = Object.keys(val);
+        if (keys.length === 0) { return '{ }'; }
+        const parts = keys.slice(0, 3).map(k => k);
+        return '{ ' + parts.join(', ') + (keys.length > 3 ? ', ...' : '') + ' }';
+    }
+
     function renderCellView(val, isArray, isMultiline) {
+        if (isPlainObject(val)) {
+            const json = JSON.stringify(val, null, 2);
+            return '<div class="cell-view cell-object" title="' + escapeAttr(json) + '">' + escapeHtml(summarizeObject(val)) + '</div>';
+        }
         if (isArray) {
+            const isPrimArr = hasOnlyPrimitives(val);
             let html = '<div class="cell-view"><div class="array-tags">';
             val.forEach(item => {
-                html += '<span class="tag"><span>' + escapeHtml(String(item)) + '</span></span>';
+                if (isPlainObject(item)) {
+                    html += '<span class="tag"><span>' + escapeHtml(summarizeObject(item)) + '</span></span>';
+                } else {
+                    html += '<span class="tag"><span>' + escapeHtml(String(item)) + '</span></span>';
+                }
             });
-            html += '<button class="convert-btn" data-convert="join" title="Array → String (join with comma)">a→s</button>';
+            if (isPrimArr) {
+                html += '<button class="convert-btn" data-convert="join" title="Array → String (join with comma)">a→s</button>';
+            }
             html += '</div></div>';
             return html;
         }
         let html = '<div class="cell-view">' + escapeHtml(String(val ?? ''));
-        html += '<button class="convert-btn" data-convert="split" title="String → Array (split by comma)">s→a</button>';
+        if (typeof val === 'string' && val.includes(',')) {
+            html += '<button class="convert-btn" data-convert="split" title="String → Array (split by comma)">s→a</button>';
+        }
         html += '</div>';
         return html;
     }
 
     function renderCellEdit(val, isArray, isMultiline, rowIdx, col) {
+        if (isPlainObject(val)) {
+            return '<div class="cell-edit"><textarea class="json-edit">' + escapeHtml(JSON.stringify(val, null, 2)) + '</textarea></div>';
+        }
         if (isArray) {
+            if (!hasOnlyPrimitives(val)) {
+                return '<div class="cell-edit"><textarea class="json-edit">' + escapeHtml(JSON.stringify(val, null, 2)) + '</textarea></div>';
+            }
             let html = '<div class="cell-edit"><div class="array-edit-area">';
             val.forEach((item, i) => {
                 html += '<div class="tag-row">';
@@ -709,23 +785,55 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
         const oldVal = getActiveRows()[rowIdx][col];
 
         if (Array.isArray(oldVal)) {
-            const inputs = td.querySelectorAll('.cell-edit input[data-arr-idx]');
-            const newArr = [];
-            inputs.forEach(input => { newArr.push(input.value); });
-            getActiveRows()[rowIdx][col] = newArr;
-            if (JSON.stringify(oldVal) !== JSON.stringify(newArr)) { setModified(true); }
-        } else {
-            const textarea = td.querySelector('.cell-edit textarea');
-            const input = td.querySelector('.cell-edit input');
-            let newVal;
-            if (textarea) {
-                newVal = textarea.value;
-            } else if (input) {
-                newVal = parseValue(input.value);
+            const jsonTextarea = td.querySelector('.cell-edit textarea.json-edit');
+            if (jsonTextarea) {
+                try {
+                    const newVal = JSON.parse(jsonTextarea.value);
+                    if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+                        getActiveRows()[rowIdx][col] = newVal;
+                        setModified(true);
+                    }
+                } catch (e) {
+                    showError('Invalid JSON in cell [' + col + ']: ' + e.message);
+                    return;
+                }
+            } else {
+                const inputs = td.querySelectorAll('.cell-edit input[data-arr-idx]');
+                const newArr = [];
+                inputs.forEach(input => { newArr.push(input.value); });
+                getActiveRows()[rowIdx][col] = newArr;
+                if (JSON.stringify(oldVal) !== JSON.stringify(newArr)) { setModified(true); }
             }
-            if (oldVal !== newVal) {
-                getActiveRows()[rowIdx][col] = newVal;
-                setModified(true);
+        } else {
+            const jsonTextarea = td.querySelector('.cell-edit textarea.json-edit');
+            if (jsonTextarea) {
+                try {
+                    const newVal = JSON.parse(jsonTextarea.value);
+                    if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+                        getActiveRows()[rowIdx][col] = newVal;
+                        setModified(true);
+                    }
+                } catch (e) {
+                    showError('Invalid JSON in cell [' + col + ']: ' + e.message);
+                    return; // Don't close editing on invalid JSON
+                }
+            } else {
+                const textarea = td.querySelector('.cell-edit textarea');
+                const input = td.querySelector('.cell-edit input');
+                let newVal;
+                if (textarea) {
+                    newVal = textarea.value;
+                } else if (input) {
+                    newVal = parseValue(input.value);
+                }
+                const oldEmpty = oldVal === undefined || oldVal === null || oldVal === '';
+                const newEmpty = newVal === undefined || newVal === null || newVal === '';
+                if (oldEmpty && newEmpty) {
+                    // No real change
+                } else if (oldVal !== newVal) {
+                    getActiveRows()[rowIdx][col] = newVal;
+                    setModified(true);
+                }
             }
         }
         td.classList.remove('editing');

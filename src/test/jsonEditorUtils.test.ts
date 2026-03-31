@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import { buildSheetMap, getRowsByPath, SheetEntry } from '../jsonEditorUtils';
+import { wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY } from '../jsonEditor';
 
 suite('JsonEditorUtils Test Suite', () => {
     suite('buildSheetMap', () => {
@@ -116,6 +117,80 @@ suite('JsonEditorUtils Test Suite', () => {
         test('deep invalid path returns null', () => {
             const rows = getRowsByPath(data, ['sheet2', 'nonexistent']);
             assert.strictEqual(rows, null);
+        });
+    });
+
+    suite('wrapIfArray', () => {
+        test('should wrap top-level array', () => {
+            const data = [{ id: 'a' }, { id: 'b' }];
+            const result = wrapIfArray(data);
+            assert.strictEqual(result.isRootArray, true);
+            assert.ok(ROOT_ARRAY_KEY in result.wrapped);
+            assert.deepStrictEqual(result.wrapped[ROOT_ARRAY_KEY], data);
+        });
+
+        test('should not wrap object', () => {
+            const data = { items: [1, 2, 3] };
+            const result = wrapIfArray(data);
+            assert.strictEqual(result.isRootArray, false);
+            assert.deepStrictEqual(result.wrapped, data);
+        });
+
+        test('should wrap empty array', () => {
+            const result = wrapIfArray([]);
+            assert.strictEqual(result.isRootArray, true);
+            assert.deepStrictEqual(result.wrapped[ROOT_ARRAY_KEY], []);
+        });
+
+        test('wrapped array works with buildSheetMap', () => {
+            const data = [{ id: 'action1', title: 'Test' }];
+            const { wrapped } = wrapIfArray(data);
+            const sheets = buildSheetMap(wrapped);
+            assert.strictEqual(sheets.length, 1);
+            assert.strictEqual(sheets[0].label, ROOT_ARRAY_KEY);
+            assert.deepStrictEqual(sheets[0].path, [ROOT_ARRAY_KEY]);
+        });
+
+        test('wrapped array rows accessible via getRowsByPath', () => {
+            const data = [{ id: 'a' }, { id: 'b' }];
+            const { wrapped } = wrapIfArray(data);
+            const rows = getRowsByPath(wrapped, [ROOT_ARRAY_KEY]);
+            assert.deepStrictEqual(rows, data);
+        });
+    });
+
+    suite('unwrapIfRootArray', () => {
+        test('should unwrap when isRootArray is true', () => {
+            const original = [{ id: 'a' }];
+            const wrapped = { [ROOT_ARRAY_KEY]: original };
+            const result = unwrapIfRootArray(wrapped, true);
+            assert.deepStrictEqual(result, original);
+        });
+
+        test('should return object as-is when isRootArray is false', () => {
+            const data = { items: [1, 2] };
+            const result = unwrapIfRootArray(data, false);
+            assert.deepStrictEqual(result, data);
+        });
+
+        test('should return object as-is when key is missing and isRootArray is true', () => {
+            const data = { other: 'value' };
+            const result = unwrapIfRootArray(data as any, true);
+            assert.deepStrictEqual(result, data);
+        });
+
+        test('round-trip: wrap then unwrap preserves original array', () => {
+            const original = [{ id: '1', title: 'A' }, { id: '2', title: 'B' }];
+            const { wrapped, isRootArray } = wrapIfArray(original);
+            const restored = unwrapIfRootArray(wrapped, isRootArray);
+            assert.deepStrictEqual(restored, original);
+        });
+
+        test('round-trip: wrap then unwrap preserves original object', () => {
+            const original = { links: [{ title: 'x', link: 'y' }] };
+            const { wrapped, isRootArray } = wrapIfArray(original);
+            const restored = unwrapIfRootArray(wrapped, isRootArray);
+            assert.deepStrictEqual(restored, original);
         });
     });
 });
