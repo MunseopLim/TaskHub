@@ -1,345 +1,191 @@
 # Contributing to TaskHub
 
-## Development Guidelines
+## 개발 환경 셋업
 
-### Pre-requisites
-- Node.js and npm installed
+### 요구사항
+- Node.js and npm
 - Visual Studio Code
 
-### Setup
+### 설치
 ```bash
 npm install
 ```
 
-### Development Workflow
+## 빌드 & 테스트
 
-#### Before Committing Changes
-Every time you finish working on a task, make sure to complete the following checklist:
-
-- [ ] **Run Unit Tests**
-  ```bash
-  npm test
-  ```
-  Ensure all tests pass before committing.
-
-- [ ] **Run Linter**
-  ```bash
-  npm run lint
-  ```
-  Fix any linting errors or warnings.
-
-- [ ] **Type Check**
-  ```bash
-  npm run check-types
-  ```
-  Ensure there are no TypeScript errors.
-
-- [ ] **Build the Extension**
-  ```bash
-  npm run package
-  ```
-  Verify the extension builds successfully.
-
-### Running All Checks at Once
-You can run all checks with the vscode:prepublish script:
 ```bash
-npm run vscode:prepublish
+npm run compile          # 타입 체크 + 린트 + esbuild 번들링
+npm run package          # 프로덕션 빌드 (minify 포함)
+npm run check-types      # TypeScript 타입 체크만
+npm run lint             # ESLint 검사 (src/)
+npm run test             # 유닛 테스트 실행 (vscode-test)
+npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 ```
 
-This will:
-1. Check types
-2. Run linter
-3. Build the extension in production mode
+### 커밋 전 체크리스트
 
-### Testing Locally
-To test your changes:
-1. Press F5 in VS Code to open a new Extension Development Host window
-2. Test your changes in the new window
+커밋 전 반드시 `npm run package`를 실행하여 다음이 모두 통과하는지 확인:
 
-### Building VSIX Package
-To create a VSIX package for distribution:
+- [ ] TypeScript 타입 체크
+- [ ] ESLint 검사
+- [ ] esbuild 번들링 (minify 포함)
+
+### 로컬 테스트
+
+1. VS Code에서 `F5` 키를 눌러 Extension Development Host 실행
+2. 새 창에서 변경사항 테스트
+
+### VSIX 패키지 빌드
+
 ```bash
 vsce package
 ```
 
-This will run all checks automatically and create a `.vsix` file.
+## 코드 스타일
 
-## Code Style
-- Follow the existing code style
-- Use meaningful variable and function names
-- Add comments for complex logic
-- Keep functions small and focused
+- TypeScript strict 모드, ES2022 타겟
+- 세미콜론 필수, `===` 사용
+- 중괄호 필수 (if/else/for 등)
+- camelCase (함수/변수), PascalCase (클래스/인터페이스)
+- 들여쓰기: 4 spaces
+- 문서 언어: 한국어 기본
+
+## 테스트 작성
+
+```typescript
+suite('ModuleName Test Suite', () => {
+    suite('Category', () => {
+        test('should do something', () => {
+            assert.strictEqual(result, expected);
+        });
+    });
+});
+```
+
+- 테스트 파일: `src/test/<module>.test.ts`
+- 프레임워크: Mocha + Chai (assert 스타일)
+- 테스트 설정: `.vscode-test.mjs`
 
 ## Pull Requests
-When submitting a pull request:
-1. Ensure all tests pass
-2. Ensure no linting errors
-3. Update documentation if needed
-4. Include a clear description of the changes
 
-## Adding Experimental Features
+1. 모든 테스트 통과 확인
+2. 린팅 에러 없음 확인
+3. 필요 시 문서 업데이트
+4. 변경사항에 대한 명확한 설명 포함
 
-Experimental features are a way to test new functionality before making it a stable part of TaskHub. These features can be changed or removed in future versions.
+## 커밋 메시지 형식
 
-### Guidelines for Experimental Features
+```
+[버전] 변경 설명
+```
 
-**When to use experimental features:**
-- The feature is still in active development
-- The API or behavior may change
-- User feedback is needed before stabilizing
-- The feature may be removed if not useful
+예시:
+- `[0.2.36] npm 취약점 해결 및 의존성 업데이트`
+- `[0.2.35] codex 코드 리뷰 반영 및 성능 개선`
 
-**When NOT to use experimental features:**
-- For bug fixes (these should go directly to stable)
-- For minor improvements to existing features
-- For critical functionality
+## 실험적 기능 추가 가이드
 
-### Step-by-Step Guide
+실험적 기능은 아직 안정화되지 않은 새로운 기능을 테스트하기 위한 프레임워크입니다.
 
-#### 1. Add Configuration Setting
+### 사용 기준
 
-In `package.json`, add your feature's configuration under `taskhub.experimental`:
+**실험적 기능으로 추가해야 하는 경우:**
+- 아직 개발 중인 기능
+- API/동작이 변경될 수 있는 기능
+- 사용자 피드백이 필요한 기능
+
+**실험적 기능으로 추가하지 않는 경우:**
+- 버그 수정
+- 기존 기능의 소규모 개선
+- 핵심 기능
+
+### 추가 절차
+
+#### 1. 설정 추가 (`package.json`)
 
 ```json
-"configuration": {
-  "properties": {
-    "taskhub.experimental.yourFeature.enabled": {
-      "type": "boolean",
-      "default": false,
-      "description": "Enable your experimental feature. Description of what it does."
-    }
-  }
+"taskhub.experimental.<featureName>.enabled": {
+    "type": "boolean",
+    "default": false,
+    "markdownDescription": "**[Experimental]** 기능 설명. ⚠️ This feature is experimental and may change in future versions."
 }
 ```
 
-#### 2. Add View (if needed)
+#### 2. 뷰 추가 (필요한 경우)
 
-If your feature requires a TreeView panel, add it to the `views` section in `package.json`:
-
-```json
-"views": {
-  "mainView": [
-    {
-      "id": "mainView.yourFeature",
-      "name": "Your Feature (Experimental)",
-      "icon": "media/icon.svg",
-      "when": "config.taskhub.experimental.yourFeature.enabled"
-    }
-  ]
-}
-```
-
-**Important:** Use the `when` clause to only show the view when the feature is enabled.
-
-#### 3. Implement Provider
-
-In `extension.ts`, create your TreeDataProvider or feature implementation:
-
-```typescript
-// Add after other providers
-class YourFeatureProvider implements vscode.TreeDataProvider<YourFeatureItem> {
-    private _onDidChangeTreeData: vscode.EventEmitter<YourFeatureItem | undefined | null | void> =
-        new vscode.EventEmitter<YourFeatureItem | undefined | null | void>();
-    readonly onDidChangeTreeData: vscode.Event<YourFeatureItem | undefined | null | void> =
-        this._onDidChangeTreeData.event;
-    public view: vscode.TreeView<YourFeatureItem> | undefined;
-
-    constructor(private context: vscode.ExtensionContext) {}
-
-    refresh(): void {
-        this._onDidChangeTreeData.fire();
-    }
-
-    getTreeItem(element: YourFeatureItem): vscode.TreeItem {
-        return element;
-    }
-
-    getChildren(element?: YourFeatureItem): Thenable<YourFeatureItem[]> {
-        // Implement your logic here
-        return Promise.resolve([]);
-    }
-}
-```
-
-#### 4. Register in activate()
-
-In the `activate()` function, register your provider:
-
-```typescript
-export function activate(context: vscode.ExtensionContext) {
-    // ... existing providers ...
-
-    // Check if experimental feature is enabled
-    const isYourFeatureEnabled = vscode.workspace.getConfiguration('taskhub.experimental')
-        .get<boolean>('yourFeature.enabled', false);
-
-    if (isYourFeatureEnabled) {
-        const yourFeatureProvider = new YourFeatureProvider(context);
-        yourFeatureProvider.view = vscode.window.createTreeView('mainView.yourFeature', {
-            treeDataProvider: yourFeatureProvider
-        });
-        yourFeatureProvider.refresh();
-        context.subscriptions.push(yourFeatureProvider.view);
-    }
-}
-```
-
-**Note:** The `when` clause in `package.json` automatically handles showing/hiding the view, but you may still want to check the config in code for additional logic.
-
-#### 5. Update Documentation
-
-**In README.md:**
-
-Update the "Experimental Features" section to describe your feature:
-
-```markdown
-#### 16.X. Your Feature Name
-
-Brief description of what your feature does.
-
-**주요 기능:**
-- Feature highlight 1
-- Feature highlight 2
-
-**현재 상태:**
-- 🚧 개발 중 / ✅ 사용 가능
-
-**활성화 방법:**
-Set `taskhub.experimental.yourFeature.enabled` to `true` in settings.
-```
-
-**In CONTRIBUTING.md:**
-
-Add any developer-specific notes about your feature in a subsection.
-
-#### 6. Testing
-
-Before submitting:
-
-- [ ] Test with feature enabled
-- [ ] Test with feature disabled
-- [ ] Test toggling the feature on/off
-- [ ] Verify view appears/disappears correctly
-- [ ] Add unit tests if applicable
-
-### Example: Minimal Experimental Feature
-
-Here's a complete minimal example:
-
-**package.json:**
 ```json
 {
-  "configuration": {
-    "properties": {
-      "taskhub.experimental.helloWorld.enabled": {
-        "type": "boolean",
-        "default": false,
-        "description": "Enable Hello World experimental feature"
-      }
-    }
-  },
-  "views": {
-    "mainView": [
-      {
-        "id": "mainView.helloWorld",
-        "name": "Hello World (Experimental)",
-        "when": "config.taskhub.experimental.helloWorld.enabled"
-      }
-    ]
-  }
+    "id": "mainView.<featureName>",
+    "name": "Feature Name (Experimental)",
+    "when": "config.taskhub.experimental.<featureName>.enabled"
 }
 ```
 
-**extension.ts:**
-```typescript
-class HelloWorldItem extends vscode.TreeItem {
-    constructor(label: string) {
-        super(label, vscode.TreeItemCollapsibleState.None);
-    }
-}
+#### 3. Provider 구현 (`extension.ts`)
 
-class HelloWorldProvider implements vscode.TreeDataProvider<HelloWorldItem> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<HelloWorldItem | undefined | null | void>();
+```typescript
+class YourFeatureProvider implements vscode.TreeDataProvider<YourItem> {
+    private _onDidChangeTreeData = new vscode.EventEmitter<YourItem | undefined | null | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-    public view: vscode.TreeView<HelloWorldItem> | undefined;
+    public view: vscode.TreeView<YourItem> | undefined;
 
     constructor(private context: vscode.ExtensionContext) {}
 
-    refresh(): void {
-        this._onDidChangeTreeData.fire();
-    }
-
-    getTreeItem(element: HelloWorldItem): vscode.TreeItem {
-        return element;
-    }
-
-    getChildren(): Thenable<HelloWorldItem[]> {
-        return Promise.resolve([
-            new HelloWorldItem('Hello'),
-            new HelloWorldItem('World')
-        ]);
-    }
-}
-
-export function activate(context: vscode.ExtensionContext) {
-    // ... other code ...
-
-    const helloWorldProvider = new HelloWorldProvider(context);
-    helloWorldProvider.view = vscode.window.createTreeView('mainView.helloWorld', {
-        treeDataProvider: helloWorldProvider
-    });
-    helloWorldProvider.refresh();
-    context.subscriptions.push(helloWorldProvider.view);
+    refresh(): void { this._onDidChangeTreeData.fire(); }
+    getTreeItem(element: YourItem): vscode.TreeItem { return element; }
+    getChildren(): Thenable<YourItem[]> { return Promise.resolve([]); }
 }
 ```
 
-### Real-World Example: Bit Operation Hover
+`activate()` 함수에서 조건부 등록:
 
-The **Bit Operation Hover** feature is a real implementation of an experimental feature in TaskHub. It demonstrates a hover provider pattern (instead of a TreeView pattern).
+```typescript
+const isEnabled = vscode.workspace.getConfiguration('taskhub.experimental')
+    .get<boolean>('featureName.enabled', false);
 
-**Key implementation points:**
+if (isEnabled) {
+    const provider = new YourFeatureProvider(context);
+    provider.view = vscode.window.createTreeView('mainView.featureName', {
+        treeDataProvider: provider
+    });
+    provider.refresh();
+    context.subscriptions.push(provider.view);
+}
+```
 
-1. **Configuration** (`package.json`):
-   ```json
-   "taskhub.experimental.bitOperationHover.enabled": {
-     "type": "boolean",
-     "default": false,
-     "description": "Show bit operation results in hover tooltips..."
-   }
-   ```
+> TreeView가 아닌 hover provider 등을 확장하는 패턴은 Bit Operation Hover 구현을 참고하세요.
 
-2. **No View Required**: This feature extends an existing hover provider instead of creating a new TreeView.
+#### 4. 문서 업데이트
 
-3. **Integration**: Added to `NumberBaseHoverProvider.provideHover()`:
-   ```typescript
-   // Check if experimental features are enabled (master switch)
-   const experimentalConfig = vscode.workspace.getConfiguration('taskhub.experimental');
-   const experimentalEnabled = experimentalConfig.get('enabled', false);
-   const bitOpEnabled = experimentalConfig.get('bitOperationHover.enabled', false);
+- `docs/features.md` 섹션 16에 기능 설명 추가
 
-   // Both master switch and feature-specific switch must be enabled
-   if (!experimentalEnabled || !bitOpEnabled) { return null; }
+#### 5. 테스트
 
-   // Detect and process bit operations
-   const operation = detectBitOperation(lineText, charPosition);
-   ```
+- [ ] 기능 활성화 상태에서 테스트
+- [ ] 기능 비활성화 상태에서 테스트
+- [ ] on/off 토글 테스트
+- [ ] 뷰 표시/숨김 동작 확인
+- [ ] 유닛 테스트 추가
 
-4. **Testing**: 20 unit tests covering detection, calculation, and formatting.
+### 안정화 (Graduation)
 
-5. **Documentation**: Added to README.md section 16.1 with usage examples.
+실험적 기능을 안정화할 때:
 
-This example shows that experimental features don't always need a TreeView - they can also extend existing functionality like hover providers, code actions, or commands.
+1. "Experimental" 태그 제거
+2. `taskhub.experimental.` 접두사 제거
+3. `when` 조건절 제거 (항상 표시)
+4. 문서 업데이트
+5. 기존 설정 사용자를 위한 마이그레이션 경로 고려
 
-### Graduation to Stable
+## npm overrides
 
-When an experimental feature is ready to become stable:
+보안 취약점 해결을 위해 다음 패키지에 override 적용 중:
+- `minimatch`: mocha/eslint 내부 의존성
+- `diff`: mocha 내부 의존성
+- `serialize-javascript`: mocha 내부 의존성 (RCE 취약점)
 
-1. Remove the "Experimental" tag from the feature name
-2. Remove `taskhub.experimental.` prefix from settings
-3. Remove the `when` clause (make it always available)
-4. Update all documentation
-5. Consider adding a migration path for users with old settings
+override 제거 전에 `npm audit`으로 취약점 상태 확인 필요.
 
-### Questions?
+## 프로젝트 아키텍처
 
-If you have questions about adding experimental features, please open an issue or discussion on GitHub.
+프로젝트 구조, 주요 컴포넌트, 데이터 구조에 대한 상세 설명은 [docs/architecture.md](docs/architecture.md)를 참조하세요.

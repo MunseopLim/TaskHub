@@ -80,7 +80,7 @@ Co-Authored-By 라인이나 `[claude]` 태그는 넣지 않는다.
 1. `package.json`에 `taskhub.experimental.<name>.enabled` 설정 추가 (default: false)
 2. 필요 시 `views`에 `"when": "config.taskhub.experimental.<name>.enabled"` 조건부 뷰 추가
 3. `activate()` 내에서 설정 확인 후 조건부 등록
-4. README.md 섹션 16에 문서화
+4. `docs/features.md` 섹션 16에 문서화
 
 현재 실험적 기능: Bit Operation Hover (`taskhub.experimental.bitOperationHover.enabled`)
 
@@ -108,3 +108,11 @@ suite('ModuleName Test Suite', () => {
 - 테스트 파일: `src/test/<module>.test.ts`
 - 프레임워크: Mocha + Chai (assert 스타일)
 - 테스트 설정: `.vscode-test.mjs`
+
+## 문서 구조
+
+- `README.md`: 사용자 대상 간결한 소개 (마켓플레이스 랜딩 페이지)
+- `docs/features.md`: 상세 기능 문서 (태스크 타입, JSON 예제, hover 기능 등)
+- `docs/architecture.md`: 프로젝트 구조, 주요 컴포넌트, 데이터 구조, 디버깅
+- `CONTRIBUTING.md`: 개발 환경 셋업, 빌드, 테스트, 실험적 기능 추가 가이드
+- `CHANGELOG.md`: 버전별 변경 이력
