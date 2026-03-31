@@ -36,6 +36,36 @@
       "maximum": 16,
       "default": 8,
       "description": "Default struct packing alignment (1, 2, 4, 8, 16). Use 1 for packed structs."
+    },
+    "memoryMap": {
+      "type": "object",
+      "description": "Memory map configuration for ELF/AXF memory visualization.",
+      "properties": {
+        "regions": {
+          "type": "array",
+          "description": "Memory regions (FLASH, RAM, etc.) with origin address and total size.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Region name (e.g., FLASH, RAM, DTCM, ITCM)."
+              },
+              "origin": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Start address of the memory region."
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Total size of the memory region in bytes."
+              }
+            },
+            "required": ["name", "origin", "size"]
+          }
+        }
+      }
     }
   },
   "examples": [

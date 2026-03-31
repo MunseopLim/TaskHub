@@ -1,5 +1,27 @@
 # Change Log
 
+## [0.2.42] - 2026-03-31
+
+### Added
+
+**Memory Map 시각화**
+- ARM `.axf`/`.elf` 바이너리의 메모리 사용량을 WebView에서 시각화
+- ELF32 바이너리 직접 파싱 (외부 도구 불필요)
+- Flash/RAM 사용률 바 차트, 섹션별 상세 정보 표시
+- `.vscode/taskhub_types.json`의 `memoryMap.regions`로 메모리 영역 크기 설정
+- GNU 링커 스크립트(`.ld`) 및 ARM Scatter File(`.sct`) 자동 파싱으로 메모리 영역 감지
+- Cortex-R/M 시리즈 지원 (Little/Big Endian)
+
+### Enhanced
+
+**JSON 에디터 개선**
+- 최상위 배열 형식(actions.json 등) 파일 지원
+- 중첩 객체를 JSON 텍스트로 편집 가능
+- 객체 배열 미리보기 개선 (`{ key1, key2, ... }` 형식)
+- 불필요한 변환 버튼(`s→a`, `a→s`) 제거
+- 빈 셀 클릭 시 잘못된 Modified 표시 버그 수정
+- 우클릭 메뉴에서 "TaskHub:" 접두사 제거
+
 ## [0.2.40] - 2026-03-31
 
 ### Added

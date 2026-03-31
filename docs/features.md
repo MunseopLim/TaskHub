@@ -23,6 +23,7 @@
 16. [Experimental Features](#16-experimental-features)
 17. [Preset 기능](#17-preset-기능)
 18. [액션 Import/Export](#18-액션-importexport)
+19. [Memory Map 시각화](#19-memory-map-시각화)
 
 ---
 
@@ -985,3 +986,83 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Import Actions"** 실행:
 **지원하는 Import 형식:**
 - `.taskhub` 파일 (TaskHub Export 형식)
 - `actions.json` 파일 (raw JSON 배열 형식)
+
+## 19. Memory Map 시각화
+
+ARM `.axf`/`.elf` 바이너리 파일을 파싱하여 메모리 사용량을 시각적으로 표시합니다. 임베디드 개발 시 Flash/RAM 사용량을 한눈에 파악할 수 있습니다.
+
+### 사용 방법
+
+Command Palette (Cmd+Shift+P)에서 **"TaskHub: Show Memory Map"** 실행:
+
+1. `.axf`, `.elf`, `.out` 파일을 선택합니다.
+2. 메모리 영역 설정이 없으면 링커 스크립트(`.ld`/`.sct`) 선택을 제안합니다.
+   - **Select linker script**: `.ld` 또는 `.sct` 파일에서 메모리 영역을 자동 파싱
+   - **Skip**: 섹션 목록만 표시
+3. ELF32 바이너리를 파싱하여 섹션 정보를 추출합니다.
+4. WebView 패널에서 메모리 사용량을 시각화합니다.
+
+### 표시 정보
+
+- **Flash/RAM 요약**: 코드(`.text`), 읽기 전용 데이터(`.rodata`), 초기화 데이터(`.data`), BSS(`.bss`) 크기
+- **메모리 영역별 사용률**: 설정된 메모리 영역에 대한 사용량 바 차트 (90% 이상: 빨강, 70% 이상: 주황, 기본: 초록)
+- **전체 섹션 목록**: 이름, 주소, 크기, 타입(CODE/DATA/RODATA/NOBITS)
+
+### 메모리 영역 설정
+
+`.vscode/taskhub_types.json`에 `memoryMap.regions`를 추가하면 영역별 사용률 바 차트가 표시됩니다:
+
+```json
+{
+  "memoryMap": {
+    "regions": [
+      { "name": "FLASH", "origin": 134217728, "size": 1048576 },
+      { "name": "RAM", "origin": 536870912, "size": 262144 }
+    ]
+  }
+}
+```
+
+- `origin`: 메모리 영역의 시작 주소 (10진수 또는 정수)
+- `size`: 메모리 영역의 총 크기 (바이트)
+
+Cortex-R/M 시리즈 모두 지원합니다 (ELF32, Little/Big Endian).
+
+### 링커 스크립트 자동 파싱
+
+`taskhub_types.json` 설정 대신 링커 스크립트 파일에서 메모리 영역을 자동으로 추출할 수 있습니다.
+
+**GNU Linker Script (`.ld`):**
+```
+MEMORY
+{
+    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 1M
+    RAM (rwx)   : ORIGIN = 0x20000000, LENGTH = 256K
+    DTCM (rwx)  : ORIGIN = 0x20010000, LENGTH = 64K
+}
+```
+
+**ARM Scatter File (`.sct`):**
+```
+LR_IROM1 0x08000000 0x00100000 {
+    ER_IROM1 0x08000000 0x00100000 {
+        *.o (RESET, +First)
+        .ANY (+RO)
+    }
+    RW_IRAM1 0x20000000 0x00040000 {
+        .ANY (+RW +ZI)
+    }
+}
+```
+
+**우선순위:** `taskhub_types.json`의 `memoryMap.regions` 설정이 있으면 링커 스크립트 선택을 건너뜁니다.
+
+### 지원 파일 형식
+
+| 확장자 | 설명 |
+| --- | --- |
+| `.axf` | ARM Executable Format |
+| `.elf` | ELF (Executable and Linkable Format) |
+| `.out` | GCC 기본 출력 파일 |
+| `.ld`, `.lds`, `.lcf` | GNU Linker Script |
+| `.sct` | ARM Scatter File |

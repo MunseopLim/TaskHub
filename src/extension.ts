@@ -9,6 +9,7 @@ import { ActionItem, Action as PipelineAction } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri } from './jsonEditor';
+import { showMemoryMap, MemoryMapConfig } from './memoryMapViewer';
 
 
 function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
@@ -3743,6 +3744,23 @@ export function activate(context: vscode.ExtensionContext) {
             msg += ` Skipped ${skipped.length} duplicate(s): ${skipped.join(', ')}`;
         }
         vscode.window.showInformationMessage(msg);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showMemoryMap', async () => {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        let memConfig: MemoryMapConfig | undefined;
+        if (workspaceFolder) {
+            const typesPath = path.join(workspaceFolder, '.vscode', 'taskhub_types.json');
+            if (fs.existsSync(typesPath)) {
+                try {
+                    const typesData = JSON.parse(fs.readFileSync(typesPath, 'utf-8'));
+                    if (typesData.memoryMap?.regions) {
+                        memConfig = { regions: typesData.memoryMap.regions };
+                    }
+                } catch { /* ignore parse errors */ }
+            }
+        }
+        await showMemoryMap(context, memConfig);
     }));
 }
 
