@@ -25,3 +25,6 @@ Thumbs.db
 
 # User-specific VS Code settings
 .vscode/settings.json
+
+# Claude Code local settings
+.claude/settings.local.json
