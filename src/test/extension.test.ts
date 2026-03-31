@@ -28,6 +28,10 @@ import {
 	findConflictingIds,
 	debounce,
 	parsePathInfo,
+	handleConfirm,
+	serializeExportData,
+	parseImportData,
+	mergeImportedActions,
 } from '../extension';
 import { ActionItem } from '../schema';
 
@@ -2275,6 +2279,194 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(result.name, '.config');
 			assert.strictEqual(result.fileNameOnly, '.config');
 			assert.strictEqual(result.fileExt, '');
+		});
+	});
+
+	suite('handleConfirm', () => {
+		test('should throw when user cancels (selects nothing)', async () => {
+			// showWarningMessage returns undefined when dismissed
+			const originalShowWarningMessage = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async () => undefined;
+			try {
+				await assert.rejects(
+					() => handleConfirm({ message: 'Continue?', confirmLabel: 'Yes', cancelLabel: 'No' }),
+					{ message: 'Action was canceled by user.' }
+				);
+			} finally {
+				(vscode.window as any).showWarningMessage = originalShowWarningMessage;
+			}
+		});
+
+		test('should throw when user selects cancel label', async () => {
+			const originalShowWarningMessage = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async () => 'No';
+			try {
+				await assert.rejects(
+					() => handleConfirm({ message: 'Continue?', confirmLabel: 'Yes', cancelLabel: 'No' }),
+					{ message: 'Action was canceled by user.' }
+				);
+			} finally {
+				(vscode.window as any).showWarningMessage = originalShowWarningMessage;
+			}
+		});
+
+		test('should return confirmed true when user confirms', async () => {
+			const originalShowWarningMessage = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async () => 'Yes';
+			try {
+				const result = await handleConfirm({ message: 'Continue?', confirmLabel: 'Yes', cancelLabel: 'No' });
+				assert.strictEqual(result.confirmed, 'true');
+			} finally {
+				(vscode.window as any).showWarningMessage = originalShowWarningMessage;
+			}
+		});
+
+		test('should use default labels when not specified', async () => {
+			const originalShowWarningMessage = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async () => 'Yes';
+			try {
+				const result = await handleConfirm({});
+				assert.strictEqual(result.confirmed, 'true');
+			} finally {
+				(vscode.window as any).showWarningMessage = originalShowWarningMessage;
+			}
+		});
+
+		test('should use custom confirm label', async () => {
+			const originalShowWarningMessage = vscode.window.showWarningMessage;
+			let capturedArgs: any[] = [];
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				capturedArgs = args;
+				return 'Proceed';
+			};
+			try {
+				const result = await handleConfirm({ message: 'Deploy?', confirmLabel: 'Proceed', cancelLabel: 'Abort' });
+				assert.strictEqual(result.confirmed, 'true');
+				assert.strictEqual(capturedArgs[0], 'Deploy?');
+				assert.strictEqual(capturedArgs[2], 'Proceed');
+				assert.strictEqual(capturedArgs[3], 'Abort');
+			} finally {
+				(vscode.window as any).showWarningMessage = originalShowWarningMessage;
+			}
+		});
+	});
+
+	suite('serializeExportData', () => {
+		test('should create valid export format', () => {
+			const actions: ActionItem[] = [
+				{ id: 'test.action', title: 'Test', action: { description: 'desc', tasks: [{ id: 't1', type: 'shell', command: 'echo hi' }] } }
+			];
+			const result = JSON.parse(serializeExportData(actions));
+			assert.strictEqual(result.version, 1);
+			assert.ok(result.exportedAt);
+			assert.strictEqual(result.actions.length, 1);
+			assert.strictEqual(result.actions[0].id, 'test.action');
+		});
+
+		test('should handle empty actions array', () => {
+			const result = JSON.parse(serializeExportData([]));
+			assert.strictEqual(result.version, 1);
+			assert.strictEqual(result.actions.length, 0);
+		});
+	});
+
+	suite('parseImportData', () => {
+		test('should parse TaskHub export format', () => {
+			const data = JSON.stringify({
+				version: 1,
+				exportedAt: '2026-01-01T00:00:00.000Z',
+				actions: [{ id: 'test.action', title: 'Test', action: { description: 'desc', tasks: [{ id: 't1', type: 'shell' }] } }]
+			});
+			const { actions, errors } = parseImportData(data);
+			assert.strictEqual(errors.length, 0);
+			assert.strictEqual(actions.length, 1);
+			assert.strictEqual(actions[0].id, 'test.action');
+		});
+
+		test('should parse raw actions.json array', () => {
+			const data = JSON.stringify([
+				{ id: 'raw.action', title: 'Raw', action: { description: 'desc', tasks: [{ id: 't1', type: 'shell' }] } }
+			]);
+			const { actions, errors } = parseImportData(data);
+			assert.strictEqual(errors.length, 0);
+			assert.strictEqual(actions.length, 1);
+		});
+
+		test('should return error for invalid JSON', () => {
+			const { actions, errors } = parseImportData('not json');
+			assert.strictEqual(actions.length, 0);
+			assert.strictEqual(errors.length, 1);
+			assert.ok(errors[0].includes('Invalid JSON'));
+		});
+
+		test('should return error for unsupported version', () => {
+			const data = JSON.stringify({ version: 99, actions: [] });
+			const { actions, errors } = parseImportData(data);
+			assert.strictEqual(actions.length, 0);
+			assert.ok(errors[0].includes('Unsupported export version'));
+		});
+
+		test('should return error for invalid structure', () => {
+			const data = JSON.stringify({ foo: 'bar' });
+			const { actions, errors } = parseImportData(data);
+			assert.strictEqual(actions.length, 0);
+			assert.strictEqual(errors.length, 1);
+		});
+
+		test('should return schema validation error for malformed actions', () => {
+			const data = JSON.stringify([{ notAnAction: true }]);
+			const { actions, errors } = parseImportData(data);
+			assert.strictEqual(actions.length, 0);
+			assert.ok(errors.length > 0);
+			assert.ok(errors[0].includes('Schema validation failed'));
+		});
+	});
+
+	suite('mergeImportedActions', () => {
+		test('should merge non-conflicting actions', () => {
+			const existing: ActionItem[] = [{ id: 'existing.1', title: 'Existing' }];
+			const imported: ActionItem[] = [{ id: 'imported.1', title: 'Imported' }];
+			const { merged, skipped } = mergeImportedActions(existing, imported);
+			assert.strictEqual(merged.length, 2);
+			assert.strictEqual(skipped.length, 0);
+		});
+
+		test('should skip duplicate ids', () => {
+			const existing: ActionItem[] = [{ id: 'action.1', title: 'Existing' }];
+			const imported: ActionItem[] = [
+				{ id: 'action.1', title: 'Duplicate' },
+				{ id: 'action.2', title: 'New' }
+			];
+			const { merged, skipped } = mergeImportedActions(existing, imported);
+			assert.strictEqual(merged.length, 2);
+			assert.strictEqual(skipped.length, 1);
+			assert.strictEqual(skipped[0], 'action.1');
+			assert.strictEqual(merged[1].id, 'action.2');
+		});
+
+		test('should detect duplicates in nested children', () => {
+			const existing: ActionItem[] = [{
+				id: 'folder.1', title: 'Folder', type: 'folder',
+				children: [{ id: 'nested.1', title: 'Nested' }]
+			}];
+			const imported: ActionItem[] = [{ id: 'nested.1', title: 'Duplicate Nested' }];
+			const { merged, skipped } = mergeImportedActions(existing, imported);
+			assert.strictEqual(skipped.length, 1);
+			assert.strictEqual(skipped[0], 'nested.1');
+		});
+
+		test('should handle empty existing actions', () => {
+			const imported: ActionItem[] = [{ id: 'new.1', title: 'New' }];
+			const { merged, skipped } = mergeImportedActions([], imported);
+			assert.strictEqual(merged.length, 1);
+			assert.strictEqual(skipped.length, 0);
+		});
+
+		test('should handle empty imported actions', () => {
+			const existing: ActionItem[] = [{ id: 'existing.1', title: 'Existing' }];
+			const { merged, skipped } = mergeImportedActions(existing, []);
+			assert.strictEqual(merged.length, 1);
+			assert.strictEqual(skipped.length, 0);
 		});
 	});
 });

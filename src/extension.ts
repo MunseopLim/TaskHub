@@ -2125,6 +2125,10 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
             const interpolatedInput = interpolatePipelineVariables(task.input || '', interpolationContext);
             result = await handleStringManipulation({ ...task, input: interpolatedInput });
             break;
+        case 'confirm':
+            const interpolatedMessage = task.message ? interpolatePipelineVariables(task.message, interpolationContext) : undefined;
+            result = await handleConfirm({ ...task, message: interpolatedMessage });
+            break;
         case 'command':
         case 'shell':
             let command: string | undefined;
@@ -2567,6 +2571,99 @@ export async function handleStringManipulation(task: any): Promise<{ output: str
             throw new Error(`Unsupported string manipulation function: ${func}`);
     }
     return { output };
+}
+
+export async function handleConfirm(task: any): Promise<{ confirmed: string }> {
+    const message = task.message || 'Are you sure you want to continue?';
+    const confirmLabel = task.confirmLabel || 'Yes';
+    const cancelLabel = task.cancelLabel || 'No';
+
+    const selected = await vscode.window.showWarningMessage(
+        message,
+        { modal: true },
+        confirmLabel,
+        cancelLabel
+    );
+
+    if (selected === confirmLabel) {
+        return { confirmed: 'true' };
+    }
+    throw new Error('Action was canceled by user.');
+}
+
+export interface TaskHubExportData {
+    version: number;
+    exportedAt: string;
+    actions: ActionItem[];
+}
+
+export function serializeExportData(actions: ActionItem[]): string {
+    const data: TaskHubExportData = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        actions
+    };
+    return JSON.stringify(data, null, 2);
+}
+
+export function parseImportData(content: string): { actions: ActionItem[]; errors: string[] } {
+    const errors: string[] = [];
+    let parsed: any;
+    try {
+        parsed = JSON.parse(content);
+    } catch {
+        return { actions: [], errors: ['Invalid JSON format.'] };
+    }
+
+    // Support both .taskhub format (with wrapper) and raw actions.json array
+    let rawActions: any;
+    if (Array.isArray(parsed)) {
+        rawActions = parsed;
+    } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.actions)) {
+        if (typeof parsed.version === 'number' && parsed.version > 1) {
+            errors.push(`Unsupported export version: ${parsed.version}. This version of TaskHub supports version 1.`);
+            return { actions: [], errors };
+        }
+        rawActions = parsed.actions;
+    } else {
+        return { actions: [], errors: ['File must contain a JSON array or a TaskHub export object with an "actions" array.'] };
+    }
+
+    // Validate using the schema
+    const ajv = new Ajv({ allErrors: true });
+    const validate = ajv.compile<ActionItem[]>(actionSchema);
+    if (!validate(rawActions)) {
+        const schemaErrors = validate.errors?.map(error =>
+            `  - path: '${error.instancePath}' - ${error.message}`
+        ).join('\n');
+        errors.push(`Schema validation failed:\n${schemaErrors}`);
+        return { actions: [], errors };
+    }
+
+    return { actions: rawActions, errors: [] };
+}
+
+export function mergeImportedActions(existing: ActionItem[], imported: ActionItem[]): { merged: ActionItem[]; skipped: string[] } {
+    const existingIds = new Set<string>();
+    const collectIds = (items: ActionItem[]) => {
+        for (const item of items) {
+            if (item.id) { existingIds.add(item.id); }
+            if (item.children) { collectIds(item.children); }
+        }
+    };
+    collectIds(existing);
+
+    const skipped: string[] = [];
+    const newActions: ActionItem[] = [];
+    for (const item of imported) {
+        if (item.id && existingIds.has(item.id)) {
+            skipped.push(item.id);
+        } else {
+            newActions.push(item);
+        }
+    }
+
+    return { merged: [...existing, ...newActions], skipped };
 }
 
 function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string): Promise<string> {
@@ -3574,6 +3671,79 @@ export function activate(context: vscode.ExtensionContext) {
     );
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditor', () => openJsonEditor(context)));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditorFromUri', (uri?: vscode.Uri) => openJsonEditorFromUri(context, uri)));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.exportActions', async () => {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceFolder) {
+            vscode.window.showErrorMessage('No workspace folder is open.');
+            return;
+        }
+        const actionsPath = path.join(workspaceFolder, '.vscode', 'actions.json');
+        if (!fs.existsSync(actionsPath)) {
+            vscode.window.showErrorMessage('No .vscode/actions.json found in the current workspace.');
+            return;
+        }
+        let actions: ActionItem[];
+        try {
+            actions = loadAndValidateActions(actionsPath, { sourceLabel: 'workspace' });
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Failed to load actions: ${e.message}`);
+            return;
+        }
+        const saveUri = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(path.join(workspaceFolder, 'actions.taskhub')),
+            filters: { 'TaskHub Export': ['taskhub'], 'JSON': ['json'] }
+        });
+        if (!saveUri) { return; }
+        const exportContent = serializeExportData(actions);
+        fs.writeFileSync(saveUri.fsPath, exportContent, 'utf-8');
+        vscode.window.showInformationMessage(`Exported ${actions.length} action(s) to ${path.basename(saveUri.fsPath)}`);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.importActions', async () => {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceFolder) {
+            vscode.window.showErrorMessage('No workspace folder is open.');
+            return;
+        }
+        const fileUri = await vscode.window.showOpenDialog({
+            canSelectMany: false,
+            filters: { 'TaskHub Export': ['taskhub', 'json'] }
+        });
+        if (!fileUri || fileUri.length === 0) { return; }
+        const content = fs.readFileSync(fileUri[0].fsPath, 'utf-8');
+        const { actions: importedActions, errors } = parseImportData(content);
+        if (errors.length > 0) {
+            vscode.window.showErrorMessage(`Import failed: ${errors.join('\n')}`);
+            return;
+        }
+        if (importedActions.length === 0) {
+            vscode.window.showWarningMessage('No actions found in the imported file.');
+            return;
+        }
+
+        const actionsPath = path.join(workspaceFolder, '.vscode', 'actions.json');
+        let existingActions: ActionItem[] = [];
+        if (fs.existsSync(actionsPath)) {
+            try {
+                existingActions = JSON.parse(fs.readFileSync(actionsPath, 'utf-8'));
+            } catch {
+                existingActions = [];
+            }
+        }
+
+        const { merged, skipped } = mergeImportedActions(existingActions, importedActions);
+        const vscodeDir = path.join(workspaceFolder, '.vscode');
+        if (!fs.existsSync(vscodeDir)) { fs.mkdirSync(vscodeDir, { recursive: true }); }
+        fs.writeFileSync(actionsPath, JSON.stringify(merged, null, 2), 'utf-8');
+
+        const addedCount = importedActions.length - skipped.length;
+        let msg = `Imported ${addedCount} action(s).`;
+        if (skipped.length > 0) {
+            msg += ` Skipped ${skipped.length} duplicate(s): ${skipped.join(', ')}`;
+        }
+        vscode.window.showInformationMessage(msg);
+    }));
 }
 
 export function deactivate() {

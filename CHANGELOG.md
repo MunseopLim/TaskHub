@@ -1,5 +1,22 @@
 # Change Log
 
+## [0.2.40] - 2026-03-31
+
+### Added
+
+**`confirm` 태스크 타입**
+- 파이프라인 실행 중 사용자 확인 대화상자를 표시하는 새 태스크 타입 추가
+- `message`, `confirmLabel`, `cancelLabel` 속성 지원
+- 변수 치환(`${...}`) 지원으로 동적 메시지 구성 가능
+- 취소 시 파이프라인 실행을 안전하게 중단
+
+**액션 Import/Export**
+- `TaskHub: Export Actions` 명령어로 워크스페이스 액션을 `.taskhub` 파일로 내보내기
+- `TaskHub: Import Actions` 명령어로 외부 파일에서 액션 가져오기
+- `.taskhub` 형식과 raw `actions.json` 배열 형식 모두 지원
+- 가져오기 시 ID 중복 검사 및 스키마 유효성 검증
+- 팀원 간 액션 공유, 백업, 프로젝트 간 이동에 활용
+
 ## [0.2.36] - 2026-03-18
 
 ### Fixed

@@ -71,7 +71,7 @@
         "type": {
           "type": "string",
           "description": "The type of the task to execute.",
-          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick"]
+          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "confirm"]
         },
         "command": {
           "oneOf": [
@@ -173,6 +173,18 @@
           "type": "boolean",
           "description": "If true, allows multiple selection (for 'quickPick' type). Results will be available as both 'value' (first selection) and 'values' (comma-separated list).",
           "default": false
+        },
+        "message": {
+          "type": "string",
+          "description": "The confirmation message to display (for 'confirm' type). Supports variable interpolation."
+        },
+        "confirmLabel": {
+          "type": "string",
+          "description": "Label for the confirm button (for 'confirm' type). Defaults to 'Yes'."
+        },
+        "cancelLabel": {
+          "type": "string",
+          "description": "Label for the cancel button (for 'confirm' type). Defaults to 'No'."
         },
         "tool": {
           "oneOf": [

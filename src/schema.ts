@@ -25,7 +25,7 @@ export interface Action {
  */
 export interface Task {
     id: string;
-    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick';
+    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick' | 'confirm';
 
     // Properties for 'shell' and 'command' types
     command?: string | {
@@ -61,6 +61,11 @@ export interface Task {
     // Properties for 'quickPick'
     items?: string[] | QuickPickItem[];
     canPickMany?: boolean;
+
+    // Properties for 'confirm'
+    message?: string;
+    confirmLabel?: string;
+    cancelLabel?: string;
 
     // Properties for 'unzip' and 'zip'
     tool?: string | {

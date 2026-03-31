@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.39",
+  "version": "0.2.40",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -292,7 +292,18 @@
       },
       {
         "command": "taskhub.openJsonEditorFromUri",
-        "title": "TaskHub: Open with JSON Editor"
+        "title": "Open with JSON Editor",
+        "category": "TaskHub"
+      },
+      {
+        "command": "taskhub.exportActions",
+        "title": "TaskHub: Export Actions",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "taskhub.importActions",
+        "title": "TaskHub: Import Actions",
+        "icon": "$(cloud-download)"
       }
     ],
     "menus": {

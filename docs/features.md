@@ -22,6 +22,7 @@
 15. [C/C++ Hover 기능](#15-cc-hover-기능)
 16. [Experimental Features](#16-experimental-features)
 17. [Preset 기능](#17-preset-기능)
+18. [액션 Import/Export](#18-액션-importexport)
 
 ---
 
@@ -359,6 +360,36 @@
 ```
 선택 결과: `${select_features.values}` = "authentication,logging"
 
+### `confirm` 태스크
+
+파이프라인 실행 중간에 사용자에게 확인 대화상자를 표시합니다. 위험한 작업(플래싱, 배포, 삭제 등) 전에 안전장치로 활용할 수 있습니다.
+
+-   `type` (string, **필수**): `confirm`으로 설정해야 합니다.
+-   `message` (string, *선택*, 기본값: `"Are you sure you want to continue?"`): 확인 대화상자에 표시될 메시지입니다. 변수 치환(`${...}`)을 지원합니다.
+-   `confirmLabel` (string, *선택*, 기본값: `"Yes"`): 확인 버튼의 레이블입니다.
+-   `cancelLabel` (string, *선택*, 기본값: `"No"`): 취소 버튼의 레이블입니다.
+-   **실행 결과**: 사용자가 확인을 선택하면 `${task_id.confirmed}` = `"true"`를 반환합니다. 취소를 선택하거나 대화상자를 닫으면 파이프라인 실행이 중단됩니다.
+
+**예시 1: 기본 확인**
+```json
+{
+  "id": "confirm_deploy",
+  "type": "confirm",
+  "message": "정말 배포하시겠습니까?"
+}
+```
+
+**예시 2: 커스텀 레이블과 변수 치환**
+```json
+{
+  "id": "confirm_flash",
+  "type": "confirm",
+  "message": "${select_device.value} 장치에 펌웨어를 플래싱합니다. 계속하시겠습니까?",
+  "confirmLabel": "플래싱 시작",
+  "cancelLabel": "취소"
+}
+```
+
 ### 변수 치환
 
 파이프라인 내에서, 이전 태스크의 결과는 `${task_id.property}` 형식으로 다음 태스크의 속성(예: `command`, `args`, `filePath` 등)에서 사용할 수 있습니다.
@@ -374,6 +405,8 @@
 -   `quickPick` 태스크 (`id: "select_env"`)의 결과 사용 예시:
     -   `${select_env.value}`: 선택된 항목 (단일 선택 또는 다중 선택의 첫 번째 항목)
     -   `${select_env.values}`: 선택된 모든 항목 (다중 선택 시 쉼표로 구분된 문자열)
+-   `confirm` 태스크 (`id: "confirm_task"`)의 결과 사용 예시:
+    -   `${confirm_task.confirmed}`: 확인 여부 (`"true"`)
 - `${zip_task.archivePath}`: `zip` 태스크가 생성한 아카이브 경로
 - `${unzip_task.outputDir}`: `unzip` 태스크가 추출한 폴더 경로
 - `${workspaceFolder}`: 현재 워크스페이스 폴더의 절대 경로
@@ -910,3 +943,45 @@ Preset은 일반 `actions.json`과 동일한 형식을 사용합니다:
 1. **팀 리드**: 환경별 preset 작성 → `.vscode/presets/` 저장 → Git commit
 2. **팀원들**: Git pull → "Apply Preset" 명령어로 원하는 환경 선택
 3. **개인화**: 필요한 경우 개인 actions 추가 (Merge 모드 사용)
+
+## 18. 액션 Import/Export
+
+워크스페이스의 액션을 파일로 내보내거나, 외부 파일에서 액션을 가져올 수 있습니다. 팀원 간 액션 공유, 백업, 프로젝트 간 이동에 유용합니다.
+
+### Export (내보내기)
+
+Command Palette (Cmd+Shift+P)에서 **"TaskHub: Export Actions"** 실행:
+
+1. 현재 워크스페이스의 `.vscode/actions.json`을 읽어옵니다.
+2. 저장할 파일 위치와 이름을 선택합니다 (`.taskhub` 또는 `.json` 형식).
+3. 메타데이터(버전, 내보낸 시간)와 함께 액션이 파일에 저장됩니다.
+
+**Export 파일 형식 (`.taskhub`):**
+```json
+{
+  "version": 1,
+  "exportedAt": "2026-03-31T12:00:00.000Z",
+  "actions": [
+    {
+      "id": "action.build",
+      "title": "Build Project",
+      "action": { ... }
+    }
+  ]
+}
+```
+
+### Import (가져오기)
+
+Command Palette (Cmd+Shift+P)에서 **"TaskHub: Import Actions"** 실행:
+
+1. 가져올 파일을 선택합니다 (`.taskhub` 또는 `.json` 형식).
+2. 파일의 스키마 유효성을 검사합니다.
+3. 기존 `.vscode/actions.json`과 병합합니다:
+   - ID가 중복되지 않는 액션만 추가됩니다.
+   - 중복된 ID는 건너뛰고, 건너뛴 항목을 알림으로 표시합니다.
+4. `.vscode` 폴더가 없으면 자동으로 생성합니다.
+
+**지원하는 Import 형식:**
+- `.taskhub` 파일 (TaskHub Export 형식)
+- `actions.json` 파일 (raw JSON 배열 형식)
