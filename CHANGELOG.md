@@ -1,13 +1,24 @@
 # Change Log
 
+## [0.2.45] - 2026-04-01
+
+### Enhanced
+
+**Memory Map UI 개선**
+- Overview 테이블: Used/Calc Used, Free/Calc Free 컬럼 분리로 링커 보고값과 계산값 명확히 구분
+- Region Details: Linker Free / Calc Free 구분 표시
+- `Ctrl+Shift+O`: section 대신 region 단위로 이동하도록 변경
+- Expand All / Collapse All 버튼 추가
+- Flash/RAM 요약 카드 제거 (Overview 테이블로 대체)
+
 ## [0.2.44] - 2026-04-01
 
 ### Added
 
 **Memory Map 검색 및 탐색 기능**
 - 키워드 검색: 섹션 이름, 주소, 타입으로 전체 테이블 필터링 (접힌 region 내부도 검색, 매치 시 자동 펼침)
-- `Ctrl+Shift+O` 심볼 검색: VS Code QuickPick으로 섹션 목록 표시 후 해당 위치로 스크롤
-- Region 요약 테이블: 상단에 각 region별 Base, Size, Used, Free, Usage 한눈에 표시
+- `Ctrl+Shift+O` 심볼 검색: VS Code QuickPick으로 region 목록 표시 후 해당 위치로 스크롤
+- Region 요약 테이블: 상단에 각 region별 Base, Max, Used, Free, Usage 한눈에 표시
 
 ### Enhanced
 

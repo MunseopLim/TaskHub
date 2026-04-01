@@ -174,8 +174,11 @@ function showPanel(
         fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport
     );
 
-    // Store symbols for Go to Symbol command
-    currentSymbols = sectionSummary.map(s => ({ name: s.name, addr: s.addr, type: s.type }));
+    // Store region symbols for Go to Symbol command
+    currentSymbols = memoryUsage.map(u => {
+        const origin = regions.find(r => r.name === u.region)?.origin ?? 0;
+        return { name: u.region, addr: origin, type: `${formatSize(u.used)} / ${formatSize(u.total)}` };
+    });
 }
 
 export async function goToSymbol() {
@@ -187,14 +190,14 @@ export async function goToSymbol() {
     }));
 
     const selected = await vscode.window.showQuickPick(items, {
-        placeHolder: 'Go to section...',
+        placeHolder: 'Go to region...',
         matchOnDescription: true,
     });
 
     if (selected) {
         currentPanel.reveal();
         currentPanel.webview.postMessage({
-            command: 'scrollToSection',
+            command: 'scrollToRegion',
             name: selected.label,
         });
     }
@@ -237,12 +240,14 @@ function getWebviewContent(
                 return `<tr${rowCls}><td>${esc(e.name)}</td><td class="num">${formatHex(e.addr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${String(e.size)}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`;
             }).join('');
 
+        const linkerFree = u.reportedUsed !== undefined ? u.total - u.reportedUsed : 0;
+        const calcFree = u.total - u.used;
         const linkerLine = u.reportedUsed !== undefined
-            ? `<div class="region-linker">Linker: Base=${formatHex(regionOrigin)} Size=${formatHex(u.reportedUsed)} (${formatSize(u.reportedUsed)}) Max=${formatHex(u.total)} (${formatSize(u.total)})</div>`
+            ? `<div class="region-linker">Linker: Base=${formatHex(regionOrigin)} Used=${formatHex(u.reportedUsed)} (${formatSize(u.reportedUsed)}) Max=${formatHex(u.total)} (${formatSize(u.total)}) Free: ${formatSize(linkerFree)}</div>`
             : '';
         const infoText = u.reportedUsed !== undefined
-            ? `Calc: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(freeTotal)}`
-            : `${formatHex(regionOrigin)} | ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(freeTotal)}`;
+            ? `Calc Used: ${formatSize(u.used)} (${pct.toFixed(1)}%) | Calc Free: ${formatSize(calcFree)}`
+            : `${formatHex(regionOrigin)} | ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(calcFree)}`;
 
         return `
         <div class="region-card">
@@ -266,26 +271,24 @@ function getWebviewContent(
 
     const regionOverviewRows = memoryUsage.map(u => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
-        const freeTotal = u.total - u.used;
+        const calcFree = u.total - u.used;
         const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warn)' : 'var(--ok)';
         const origin = regions.find(r => r.name === u.region)?.origin ?? 0;
-        const linkerSizeCell = hasLinkerData
-            ? `<td class="num">${u.reportedUsed !== undefined ? formatSize(u.reportedUsed) : '-'}</td>`
-            : '';
+        const linkerCells = hasLinkerData
+            ? `<td class="num">${u.reportedUsed !== undefined ? formatSize(u.reportedUsed) : '-'}</td><td class="num">${formatSize(u.used)}</td><td class="num">${u.reportedUsed !== undefined ? formatSize(u.total - u.reportedUsed) : '-'}</td><td class="num">${formatSize(calcFree)}</td>`
+            : `<td class="num">${formatSize(u.used)}</td><td class="num">${formatSize(calcFree)}</td>`;
         return `<tr>
             <td><strong>${esc(u.region)}</strong></td>
             <td class="num">${formatHex(origin)}</td>
             <td class="num">${formatSize(u.total)}</td>
-            ${linkerSizeCell}
-            <td class="num">${formatSize(u.used)}</td>
-            <td class="num">${formatSize(freeTotal)}</td>
+            ${linkerCells}
             <td class="num">${pct.toFixed(1)}%</td>
             <td><div class="mini-bar"><div class="mini-bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div></td>
         </tr>`;
     }).join('');
 
     const overviewHeaders = hasLinkerData
-        ? '<th>Region</th><th class="num">Base</th><th class="num">Max</th><th class="num">Linker Size</th><th class="num">Calc Used</th><th class="num">Free</th><th class="num">Usage</th><th></th>'
+        ? '<th>Region</th><th class="num">Base</th><th class="num">Max</th><th class="num">Used</th><th class="num">Calc Used</th><th class="num">Free</th><th class="num">Calc Free</th><th class="num">Usage</th><th></th>'
         : '<th>Region</th><th class="num">Address</th><th class="num">Size</th><th class="num">Used</th><th class="num">Free</th><th class="num">Usage</th><th></th>';
 
     const sectionTableRows = sectionSummary.map(s =>
@@ -521,23 +524,10 @@ function getWebviewContent(
         <span id="searchCount" class="search-count"></span>
     </div>
 
-    <div class="summary-row">
-        <div class="summary-card">
-            <div class="summary-label">Flash (Code + RO Data)</div>
-            <div class="summary-value">${formatSize(flashTotal)}</div>
-            <div class="summary-bytes">${flashTotal.toLocaleString()} bytes</div>
-        </div>
-        <div class="summary-card">
-            <div class="summary-label">RAM (Data + BSS)</div>
-            <div class="summary-value">${formatSize(ramTotal)}</div>
-            <div class="summary-bytes">${ramTotal.toLocaleString()} bytes</div>
-        </div>
-    </div>
-
     ${hasRegions ? `
         <div class="section-heading">Memory Regions</div>
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
-        <div class="section-heading">Region Details</div>
+        <div class="section-heading">Region Details <button onclick="foldAll(false)" title="Expand All">▼ Expand All</button> <button onclick="foldAll(true)" title="Collapse All">▶ Collapse All</button></div>
         ${usageBarsHtml}
     ` : `
         <div class="no-regions">
@@ -628,39 +618,34 @@ function getWebviewContent(
         searchCount.textContent = query ? matchCount + ' matches' : '';
     }
 
-    // --- Scroll to symbol (from extension Ctrl+Shift+O command) ---
+    // --- Expand All / Collapse All ---
+    window.foldAll = function(collapse) {
+        document.querySelectorAll('.region-card').forEach(card => {
+            const detail = card.querySelector('.region-detail');
+            const icon = card.querySelector('.fold-icon');
+            if (detail) { detail.style.display = collapse ? 'none' : ''; }
+            if (icon) { icon.textContent = collapse ? '▶' : '▼'; }
+        });
+    };
+
+    // --- Scroll to region (from extension Ctrl+Shift+O command) ---
     window.addEventListener('message', event => {
         const msg = event.data;
-        if (msg.command === 'scrollToSection') {
+        if (msg.command === 'scrollToRegion') {
             const name = msg.name;
-            // Search in All Sections table first
-            const allTable = document.getElementById('sectionTable');
-            if (allTable) {
-                for (const row of allTable.querySelectorAll('tbody tr')) {
-                    const cell = row.children[0];
-                    if (cell && cell.textContent.trim() === name) {
-                        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        row.classList.add('search-match');
-                        setTimeout(() => row.classList.remove('search-match'), 2500);
-                        return;
+            const cards = document.querySelectorAll('.region-card');
+            for (const card of cards) {
+                const strong = card.querySelector('.region-header strong');
+                if (strong && strong.textContent.trim() === name) {
+                    const detail = card.querySelector('.region-detail');
+                    const icon = card.querySelector('.fold-icon');
+                    if (detail && detail.style.display === 'none') {
+                        detail.style.display = '';
+                        if (icon) { icon.textContent = '▼'; }
                     }
-                }
-            }
-            // Fallback: search in region detail tables
-            for (const row of document.querySelectorAll('.section-table tbody tr')) {
-                if (row.textContent.includes(name)) {
-                    const regionCard = row.closest('.region-card');
-                    if (regionCard) {
-                        const detail = regionCard.querySelector('.region-detail');
-                        const icon = regionCard.querySelector('.fold-icon');
-                        if (detail && detail.style.display === 'none') {
-                            detail.style.display = '';
-                            if (icon) { icon.textContent = '▼'; }
-                        }
-                    }
-                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    row.classList.add('search-match');
-                    setTimeout(() => row.classList.remove('search-match'), 2500);
+                    card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
+                    setTimeout(() => card.style.outline = '', 2500);
                     return;
                 }
             }
