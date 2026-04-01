@@ -1,5 +1,27 @@
 # Change Log
 
+## [0.2.44] - 2026-04-01
+
+### Added
+
+**Memory Map 검색 및 탐색 기능**
+- 키워드 검색: 섹션 이름, 주소, 타입으로 전체 테이블 필터링 (접힌 region 내부도 검색, 매치 시 자동 펼침)
+- `Ctrl+Shift+O` 심볼 검색: VS Code QuickPick으로 섹션 목록 표시 후 해당 위치로 스크롤
+- Region 요약 테이블: 상단에 각 region별 Base, Size, Used, Free, Usage 한눈에 표시
+
+### Enhanced
+
+**Memory Map 표시 개선**
+- Region 폴딩: 기본 접힘 상태, 클릭으로 토글 (헤더 + 사용률 바는 항상 표시)
+- Linker/Calc 값 구분 표시: listing 파일의 Base, Size, Max 원본 값과 직접 계산한 Used, Free 값을 구분
+- Overview 테이블에 Linker Size / Calc Used 컬럼 분리 (listing 파일일 때)
+
+### Fixed
+
+**Listing 파일 메모리 사용량 계산 오류 수정**
+- 주소 범위 매칭 대신 execution region 소속 기반으로 계산하여 region 간 중복 집계 해소
+- 괄호 없는 엔트리(예: `Region$$Table`) 섹션 이름 추출 개선
+
 ## [0.2.43] - 2026-04-01
 
 ### Added

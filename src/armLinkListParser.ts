@@ -4,7 +4,7 @@
  * Supports ARM Compiler 5 (armcc) and ARM Compiler 6 (armclang) output formats.
  */
 
-import { MemoryRegion, ElfSection, SectionSummary } from './elfParser';
+import { MemoryRegion, ElfSection, SectionSummary, MemoryUsage } from './elfParser';
 
 export interface ArmLinkEntry {
     addr: number;
@@ -117,13 +117,27 @@ export function parseArmLinkList(content: string): ArmLinkListResult {
                 const rest = line.substring(entryMatch[0].length);
                 const objMatch = OBJ_SECTION_RE.exec(rest);
 
+                let object = '';
+                let section = '';
+                if (objMatch) {
+                    object = objMatch[1];
+                    section = objMatch[2];
+                } else {
+                    // Handle entries without parentheses (e.g., Region$$Table, .ARM.Collect$$...)
+                    const tokens = rest.trim().split(/\s+/);
+                    const lastToken = tokens[tokens.length - 1];
+                    if (lastToken && !/^\d+$/.test(lastToken) && !/^[-*]+$/.test(lastToken)) {
+                        section = lastToken;
+                    }
+                }
+
                 currentExecRegion.entries.push({
                     addr,
                     size: sz,
                     kind,
                     attr,
-                    object: objMatch ? objMatch[1] : '',
-                    section: objMatch ? objMatch[2] : '',
+                    object,
+                    section,
                 });
                 continue;
             }
@@ -229,4 +243,56 @@ export function toAggregatedSummary(result: ArmLinkListResult): SectionSummary[]
         size: g.totalSize,
         type: g.type,
     })).sort((a, b) => a.addr - b.addr);
+}
+
+/**
+ * Compute MemoryUsage directly from execution regions.
+ * Unlike computeMemoryUsage (address-range matching), this uses the listing's
+ * own region→entry association, avoiding cross-region miscounting when
+ * address ranges overlap.
+ */
+export function toMemoryUsage(result: ArmLinkListResult): MemoryUsage[] {
+    return result.execRegions
+        .filter(r => r.maxSize > 0)
+        .map(r => {
+            const sections = r.entries
+                .filter(e => e.size > 0)
+                .map(e => {
+                    const kindLower = e.kind.toLowerCase();
+                    return {
+                        name: e.section || e.object || `[${e.kind}]`,
+                        size: e.size,
+                        addr: e.addr,
+                        type: (e.attr === 'ZI' || kindLower === 'zero')
+                            ? 'NOBITS'
+                            : (kindLower === 'code' ? 'CODE' : (e.attr === 'RW' ? 'DATA' : 'RODATA')),
+                    };
+                });
+
+            const used = sections.reduce((sum, s) => sum + s.size, 0);
+
+            // Sort by address to compute free spaces
+            const addrSorted = [...sections].sort((a, b) => a.addr - b.addr);
+            const freeSpaces: { addr: number; size: number }[] = [];
+            let cursor = r.execBase;
+            for (const sec of addrSorted) {
+                if (sec.addr > cursor) {
+                    freeSpaces.push({ addr: cursor, size: sec.addr - cursor });
+                }
+                cursor = sec.addr + sec.size;
+            }
+            const regionEnd = r.execBase + r.maxSize;
+            if (cursor < regionEnd) {
+                freeSpaces.push({ addr: cursor, size: regionEnd - cursor });
+            }
+
+            return {
+                region: r.name,
+                used,
+                total: r.maxSize,
+                sections: [...sections].sort((a, b) => b.size - a.size),
+                freeSpaces,
+                reportedUsed: r.size,
+            };
+        });
 }

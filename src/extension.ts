@@ -9,7 +9,7 @@ import { ActionItem, Action as PipelineAction } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri } from './jsonEditor';
-import { showMemoryMap, MemoryMapConfig } from './memoryMapViewer';
+import { showMemoryMap, MemoryMapConfig, goToSymbol } from './memoryMapViewer';
 
 
 function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
@@ -3761,6 +3761,10 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }
         await showMemoryMap(context, memConfig);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.memoryMapGoToSymbol', () => {
+        goToSymbol();
     }));
 }
 

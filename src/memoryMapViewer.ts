@@ -2,9 +2,10 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { parseElf32, classifySections, computeMemoryUsage, summarizeSections, generateTextReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary } from './elfParser';
 import { parseLinkerFile } from './linkerScriptParser';
-import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary } from './armLinkListParser';
+import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 
 let currentPanel: vscode.WebviewPanel | undefined;
+let currentSymbols: { name: string; addr: number; type: string }[] = [];
 
 export interface MemoryMapConfig {
     regions?: MemoryRegion[];
@@ -130,7 +131,7 @@ function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: st
     const regions = toMemoryRegions(result);
     const { flash, ram } = classifySections(sections);
     const sectionSummary = toAggregatedSummary(result);
-    const memoryUsage = computeMemoryUsage(sections, regions);
+    const memoryUsage = toMemoryUsage(result);
     const flashTotal = flash.reduce((sum, s) => sum + s.size, 0);
     const ramTotal = ram.reduce((sum, s) => sum + s.size, 0);
     const textReport = generateTextReport(fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
@@ -158,7 +159,7 @@ function showPanel(
             vscode.ViewColumn.One,
             { enableScripts: true }
         );
-        currentPanel.onDidDispose(() => { currentPanel = undefined; });
+        currentPanel.onDidDispose(() => { currentPanel = undefined; currentSymbols = []; });
     }
 
     currentPanel.webview.onDidReceiveMessage(message => {
@@ -172,6 +173,31 @@ function showPanel(
     currentPanel.webview.html = getWebviewContent(
         fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport
     );
+
+    // Store symbols for Go to Symbol command
+    currentSymbols = sectionSummary.map(s => ({ name: s.name, addr: s.addr, type: s.type }));
+}
+
+export async function goToSymbol() {
+    if (!currentPanel || currentSymbols.length === 0) { return; }
+
+    const items = currentSymbols.map(s => ({
+        label: s.name,
+        description: `${formatHex(s.addr)} | ${s.type}`,
+    }));
+
+    const selected = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Go to section...',
+        matchOnDescription: true,
+    });
+
+    if (selected) {
+        currentPanel.reveal();
+        currentPanel.webview.postMessage({
+            command: 'scrollToSection',
+            name: selected.label,
+        });
+    }
 }
 
 function getWebviewContent(
@@ -211,19 +237,56 @@ function getWebviewContent(
                 return `<tr${rowCls}><td>${esc(e.name)}</td><td class="num">${formatHex(e.addr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${String(e.size)}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`;
             }).join('');
 
+        const linkerLine = u.reportedUsed !== undefined
+            ? `<div class="region-linker">Linker: Base=${formatHex(regionOrigin)} Size=${formatHex(u.reportedUsed)} (${formatSize(u.reportedUsed)}) Max=${formatHex(u.total)} (${formatSize(u.total)})</div>`
+            : '';
+        const infoText = u.reportedUsed !== undefined
+            ? `Calc: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(freeTotal)}`
+            : `${formatHex(regionOrigin)} | ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(freeTotal)}`;
+
         return `
         <div class="region-card">
-            <div class="region-header">
+            <div class="region-header" onclick="toggleRegion(this)">
+                <span class="fold-icon">▶</span>
                 <strong>${esc(u.region)}</strong>
-                <span class="region-info">${formatHex(regionOrigin)} | ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(freeTotal)}</span>
+                <span class="region-info">${infoText}</span>
             </div>
+            ${linkerLine}
             <div class="bar-bg"><div class="bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div>
-            ${allSegments.length > 0 ? `<div class="map-bar">${mapSegHtml}</div>` : ''}
-            ${allSegments.length > 0 ? `<table class="section-table"><thead><tr><th>Section</th><th class="num">Address</th><th class="num">Size</th><th class="num">Bytes</th><th>Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
+            <div class="region-detail" style="display:none">
+                ${allSegments.length > 0 ? `<div class="map-bar">${mapSegHtml}</div>` : ''}
+                ${allSegments.length > 0 ? `<table class="section-table"><thead><tr><th>Section</th><th class="num">Address</th><th class="num">Size</th><th class="num">Bytes</th><th>Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
+            </div>
         </div>`;
     }).join('');
 
     const hasRegions = memoryUsage.length > 0;
+
+    const hasLinkerData = memoryUsage.some(u => u.reportedUsed !== undefined);
+
+    const regionOverviewRows = memoryUsage.map(u => {
+        const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
+        const freeTotal = u.total - u.used;
+        const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warn)' : 'var(--ok)';
+        const origin = regions.find(r => r.name === u.region)?.origin ?? 0;
+        const linkerSizeCell = hasLinkerData
+            ? `<td class="num">${u.reportedUsed !== undefined ? formatSize(u.reportedUsed) : '-'}</td>`
+            : '';
+        return `<tr>
+            <td><strong>${esc(u.region)}</strong></td>
+            <td class="num">${formatHex(origin)}</td>
+            <td class="num">${formatSize(u.total)}</td>
+            ${linkerSizeCell}
+            <td class="num">${formatSize(u.used)}</td>
+            <td class="num">${formatSize(freeTotal)}</td>
+            <td class="num">${pct.toFixed(1)}%</td>
+            <td><div class="mini-bar"><div class="mini-bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div></td>
+        </tr>`;
+    }).join('');
+
+    const overviewHeaders = hasLinkerData
+        ? '<th>Region</th><th class="num">Base</th><th class="num">Max</th><th class="num">Linker Size</th><th class="num">Calc Used</th><th class="num">Free</th><th class="num">Usage</th><th></th>'
+        : '<th>Region</th><th class="num">Address</th><th class="num">Size</th><th class="num">Used</th><th class="num">Free</th><th class="num">Usage</th><th></th>';
 
     const sectionTableRows = sectionSummary.map(s =>
         `<tr>
@@ -384,6 +447,50 @@ function getWebviewContent(
     .seg-nobits { background: #607d8b; }
     .seg-free { background: rgba(128,128,128,0.15); }
     .free-row { opacity: 0.55; font-style: italic; }
+    .search-box {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 12px;
+    }
+    .search-box input {
+        flex: 1;
+        background: var(--vscode-input-background, #333);
+        color: var(--vscode-input-foreground, #fff);
+        border: 1px solid var(--vscode-input-border, #555);
+        padding: 4px 8px;
+        border-radius: 2px;
+        font-size: 12px;
+        outline: none;
+    }
+    .search-box input:focus { border-color: var(--vscode-focusBorder, #007acc); }
+    .search-count { font-size: 11px; opacity: 0.6; white-space: nowrap; }
+    .search-match { background: rgba(255, 213, 0, 0.15) !important; }
+    .region-header { cursor: pointer; }
+    .region-header:hover { opacity: 0.85; }
+    .fold-icon {
+        display: inline-block;
+        width: 16px;
+        font-size: 10px;
+    }
+    .region-detail { margin-top: 4px; }
+    .overview-table { margin-bottom: 12px; }
+    .overview-table td { padding: 4px 8px; }
+    .mini-bar {
+        width: 80px;
+        height: 10px;
+        background: var(--hover-bg);
+        border-radius: 2px;
+        overflow: hidden;
+        display: inline-block;
+    }
+    .mini-bar-fill { height: 100%; border-radius: 2px; }
+    .region-linker {
+        font-family: var(--vscode-editor-font-family, monospace);
+        font-size: 11px;
+        opacity: 0.6;
+        margin-bottom: 4px;
+    }
     .section-heading {
         font-size: 14px;
         font-weight: 600;
@@ -409,6 +516,11 @@ function getWebviewContent(
         <button id="btnCopy" title="Copy as text report">Copy Report</button>
     </div>
 
+    <div class="search-box">
+        <input id="searchInput" type="text" placeholder="Search sections... (name, address, type)">
+        <span id="searchCount" class="search-count"></span>
+    </div>
+
     <div class="summary-row">
         <div class="summary-card">
             <div class="summary-label">Flash (Code + RO Data)</div>
@@ -424,6 +536,8 @@ function getWebviewContent(
 
     ${hasRegions ? `
         <div class="section-heading">Memory Regions</div>
+        <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
+        <div class="section-heading">Region Details</div>
         ${usageBarsHtml}
     ` : `
         <div class="no-regions">
@@ -457,7 +571,103 @@ function getWebviewContent(
         vscode.postMessage({ command: 'copyReport', text: report });
     });
 
-    // Column sort
+    // --- Region fold/unfold ---
+    window.toggleRegion = function(header) {
+        const card = header.closest('.region-card');
+        const detail = card.querySelector('.region-detail');
+        const icon = header.querySelector('.fold-icon');
+        if (detail.style.display === 'none') {
+            detail.style.display = '';
+            icon.textContent = '▼';
+        } else {
+            detail.style.display = 'none';
+            icon.textContent = '▶';
+        }
+    };
+
+    // --- Keyword search ---
+    const searchInput = document.getElementById('searchInput');
+    const searchCount = document.getElementById('searchCount');
+    let searchTimeout;
+
+    searchInput.addEventListener('input', () => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(doSearch, 200);
+    });
+
+    function doSearch() {
+        const query = searchInput.value.trim().toLowerCase();
+        let matchCount = 0;
+
+        document.querySelectorAll('tbody tr').forEach(row => {
+            row.classList.remove('search-match');
+            if (!query) {
+                row.style.display = '';
+                return;
+            }
+            const text = row.textContent.toLowerCase();
+            if (text.includes(query)) {
+                row.style.display = '';
+                row.classList.add('search-match');
+                matchCount++;
+                // Auto-expand collapsed parent region
+                const regionCard = row.closest('.region-card');
+                if (regionCard) {
+                    const detail = regionCard.querySelector('.region-detail');
+                    const icon = regionCard.querySelector('.fold-icon');
+                    if (detail && detail.style.display === 'none') {
+                        detail.style.display = '';
+                        if (icon) { icon.textContent = '▼'; }
+                    }
+                }
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        searchCount.textContent = query ? matchCount + ' matches' : '';
+    }
+
+    // --- Scroll to symbol (from extension Ctrl+Shift+O command) ---
+    window.addEventListener('message', event => {
+        const msg = event.data;
+        if (msg.command === 'scrollToSection') {
+            const name = msg.name;
+            // Search in All Sections table first
+            const allTable = document.getElementById('sectionTable');
+            if (allTable) {
+                for (const row of allTable.querySelectorAll('tbody tr')) {
+                    const cell = row.children[0];
+                    if (cell && cell.textContent.trim() === name) {
+                        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        row.classList.add('search-match');
+                        setTimeout(() => row.classList.remove('search-match'), 2500);
+                        return;
+                    }
+                }
+            }
+            // Fallback: search in region detail tables
+            for (const row of document.querySelectorAll('.section-table tbody tr')) {
+                if (row.textContent.includes(name)) {
+                    const regionCard = row.closest('.region-card');
+                    if (regionCard) {
+                        const detail = regionCard.querySelector('.region-detail');
+                        const icon = regionCard.querySelector('.fold-icon');
+                        if (detail && detail.style.display === 'none') {
+                            detail.style.display = '';
+                            if (icon) { icon.textContent = '▼'; }
+                        }
+                    }
+                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    row.classList.add('search-match');
+                    setTimeout(() => row.classList.remove('search-match'), 2500);
+                    return;
+                }
+            }
+        }
+    });
+
+    // --- Column sort (All Sections table) ---
     const table = document.getElementById('sectionTable');
     const headers = table.querySelectorAll('th[data-sort]');
     let sortCol = null;
@@ -476,7 +686,6 @@ function getWebviewContent(
             rows.sort((a, b) => {
                 const aText = a.children[colIdx].textContent.trim();
                 const bText = b.children[colIdx].textContent.trim();
-                // Try numeric sort first
                 const aNum = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
                 const bNum = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
                 if (!isNaN(aNum) && !isNaN(bNum)) {
@@ -486,7 +695,6 @@ function getWebviewContent(
             });
 
             rows.forEach(row => tbody.appendChild(row));
-
             headers.forEach(h => h.textContent = h.textContent.replace(/ [▲▼]$/, ''));
             th.textContent += sortAsc ? ' ▲' : ' ▼';
         });

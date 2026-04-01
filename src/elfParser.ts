@@ -46,6 +46,8 @@ export interface MemoryUsage {
     total: number;
     sections: { name: string; size: number; addr: number; type: string }[];
     freeSpaces: { addr: number; size: number }[];
+    /** Linker-reported used size (includes PAD). Only set for listing files. */
+    reportedUsed?: number;
 }
 
 export interface ElfParseResult {

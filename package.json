@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.43",
+  "version": "0.2.44",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -301,6 +301,11 @@
         "category": "TaskHub"
       },
       {
+        "command": "taskhub.memoryMapGoToSymbol",
+        "title": "Memory Map: Go to Symbol",
+        "category": "TaskHub"
+      },
+      {
         "command": "taskhub.exportActions",
         "title": "TaskHub: Export Actions",
         "icon": "$(cloud-upload)"
@@ -309,6 +314,13 @@
         "command": "taskhub.importActions",
         "title": "TaskHub: Import Actions",
         "icon": "$(cloud-download)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "taskhub.memoryMapGoToSymbol",
+        "key": "ctrl+shift+o",
+        "when": "activeWebviewPanelId == 'taskhub.memoryMap'"
       }
     ],
     "menus": {
