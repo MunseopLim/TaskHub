@@ -951,11 +951,21 @@ Preset은 일반 `actions.json`과 동일한 형식을 사용합니다:
 
 ### Export (내보내기)
 
+#### 전체 내보내기
+
 Command Palette (Cmd+Shift+P)에서 **"TaskHub: Export Actions"** 실행:
 
 1. 현재 워크스페이스의 `.vscode/actions.json`을 읽어옵니다.
 2. 저장할 파일 위치와 이름을 선택합니다 (`.taskhub` 또는 `.json` 형식).
 3. 메타데이터(버전, 내보낸 시간)와 함께 액션이 파일에 저장됩니다.
+
+#### 개별 내보내기 (컨텍스트 메뉴)
+
+메인 패널에서 액션 또는 폴더를 **우클릭** → **"Export Action"** 선택:
+
+1. 선택한 액션 하나 또는 폴더(하위 항목 전체 포함)만 내보냅니다.
+2. 저장할 파일 위치와 이름을 선택합니다 (`.taskhub` 또는 `.json` 형식).
+3. 내보낸 항목 수가 알림으로 표시됩니다.
 
 **Export 파일 형식 (`.taskhub`):**
 ```json
@@ -974,7 +984,7 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Export Actions"** 실행:
 
 ### Import (가져오기)
 
-Command Palette (Cmd+Shift+P)에서 **"TaskHub: Import Actions"** 실행:
+Command Palette (Cmd+Shift+P)에서 **"TaskHub: Import Actions"** 실행하거나, 메인 패널 타이틀바의 **Import 아이콘** ($(cloud-download))을 클릭:
 
 1. 가져올 파일을 선택합니다 (`.taskhub` 또는 `.json` 형식).
 2. 파일의 스키마 유효성을 검사합니다.

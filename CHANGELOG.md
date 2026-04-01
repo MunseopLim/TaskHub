@@ -1,5 +1,17 @@
 # Change Log
 
+## [0.2.46] - 2026-04-01
+
+### Enhanced
+
+**액션 Import/Export UX 개선**
+- 메인 패널에서 액션/폴더 우클릭 → "Export Action" 컨텍스트 메뉴 추가 (개별 내보내기)
+- 메인 패널 타이틀바에 Import 아이콘 추가 (빠른 접근)
+- Import 후 메인 뷰 자동 새로고침
+
+### Testing
+- `countActionItems` 유닛 테스트 추가 (단일 액션, 폴더, 중첩 폴더, 빈 폴더)
+
 ## [0.2.45] - 2026-04-01
 
 ### Enhanced

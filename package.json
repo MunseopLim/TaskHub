@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.45",
+  "version": "0.2.46",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -314,6 +314,11 @@
         "command": "taskhub.importActions",
         "title": "TaskHub: Import Actions",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "taskhub.exportActionItem",
+        "title": "Export Action",
+        "icon": "$(cloud-upload)"
       }
     ],
     "keybindings": [
@@ -369,6 +374,11 @@
           "command": "taskhub.createAction",
           "when": "view == mainView.main",
           "group": "navigation@2"
+        },
+        {
+          "command": "taskhub.importActions",
+          "when": "view == mainView.main",
+          "group": "navigation@3"
         },
         {
           "command": "taskhub.clearAllHistory",
@@ -431,6 +441,16 @@
           "command": "taskhub.showExampleJsonQuickPick",
           "when": "view == mainView.main && viewItem == versionItem",
           "group": "inline"
+        },
+        {
+          "command": "taskhub.exportActionItem",
+          "when": "view == mainView.main && viewItem == action",
+          "group": "context@1"
+        },
+        {
+          "command": "taskhub.exportActionItem",
+          "when": "view == mainView.main && viewItem == folder",
+          "group": "context@1"
         },
         {
           "command": "taskhub.stopAction",

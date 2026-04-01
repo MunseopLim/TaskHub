@@ -392,6 +392,15 @@ function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
     return mergedActions;
 }
 
+export function countActionItems(item: ActionItem): number {
+    if (!item.children) { return 1; }
+    let count = 0;
+    for (const child of item.children) {
+        count += countActionItems(child);
+    }
+    return count;
+}
+
 export function findActionById(actions: ActionItem[], id: string): ActionItem | undefined {
     for (const action of actions) {
         if (action.id === id) {
@@ -1065,7 +1074,7 @@ class Folder extends vscode.TreeItem {
   constructor(public readonly label: string, children: any[], private readonly context: vscode.ExtensionContext, public readonly id?: string) {
     const isExpanded = context.workspaceState.get<boolean>(`folderState:${id}`);
     super(label, isExpanded ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed);
-    this.children = children; this.id = id; this.iconPath = new vscode.ThemeIcon('folder');
+    this.children = children; this.id = id; this.iconPath = new vscode.ThemeIcon('folder'); this.contextValue = 'folder';
   }
 }
 class Action extends vscode.TreeItem {
@@ -1091,6 +1100,7 @@ class Action extends vscode.TreeItem {
                 }
             } else { this.iconPath = new vscode.ThemeIcon('gear'); }
         } else { this.iconPath = new vscode.ThemeIcon('gear'); }
+        this.contextValue = 'action';
     }
   }
 }
@@ -3701,6 +3711,40 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage(`Exported ${actions.length} action(s) to ${path.basename(saveUri.fsPath)}`);
     }));
 
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.exportActionItem', async (treeItem?: Action | Folder) => {
+        if (!treeItem || !treeItem.id) {
+            vscode.window.showErrorMessage('No action or folder selected.');
+            return;
+        }
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceFolder) {
+            vscode.window.showErrorMessage('No workspace folder is open.');
+            return;
+        }
+        let allActions: ActionItem[];
+        try {
+            allActions = loadAllActions(context);
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Failed to load actions: ${e.message}`);
+            return;
+        }
+        const actionItem = findActionById(allActions, treeItem.id);
+        if (!actionItem) {
+            vscode.window.showErrorMessage(`Action '${treeItem.id}' not found.`);
+            return;
+        }
+        const defaultName = `${treeItem.id.replace(/[^a-zA-Z0-9._-]/g, '_')}.taskhub`;
+        const saveUri = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(path.join(workspaceFolder, defaultName)),
+            filters: { 'TaskHub Export': ['taskhub'], 'JSON': ['json'] }
+        });
+        if (!saveUri) { return; }
+        const exportContent = serializeExportData([actionItem]);
+        fs.writeFileSync(saveUri.fsPath, exportContent, 'utf-8');
+        const itemCount = actionItem.children ? countActionItems(actionItem) : 1;
+        vscode.window.showInformationMessage(`Exported '${actionItem.title}' (${itemCount} item(s)) to ${path.basename(saveUri.fsPath)}`);
+    }));
+
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.importActions', async () => {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (!workspaceFolder) {
@@ -3744,6 +3788,7 @@ export function activate(context: vscode.ExtensionContext) {
             msg += ` Skipped ${skipped.length} duplicate(s): ${skipped.join(', ')}`;
         }
         vscode.window.showInformationMessage(msg);
+        mainViewProvider.refresh();
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showMemoryMap', async () => {

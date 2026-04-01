@@ -32,6 +32,7 @@ import {
 	serializeExportData,
 	parseImportData,
 	mergeImportedActions,
+	countActionItems,
 } from '../extension';
 import { ActionItem } from '../schema';
 
@@ -2419,6 +2420,47 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(actions.length, 0);
 			assert.ok(errors.length > 0);
 			assert.ok(errors[0].includes('Schema validation failed'));
+		});
+	});
+
+	suite('countActionItems', () => {
+		test('should return 1 for a single action without children', () => {
+			const item: ActionItem = { id: 'single', title: 'Single Action' };
+			assert.strictEqual(countActionItems(item), 1);
+		});
+
+		test('should count children in a folder', () => {
+			const item: ActionItem = {
+				id: 'folder', title: 'Folder', type: 'folder',
+				children: [
+					{ id: 'child1', title: 'Child 1' },
+					{ id: 'child2', title: 'Child 2' },
+					{ id: 'child3', title: 'Child 3' }
+				]
+			};
+			assert.strictEqual(countActionItems(item), 3);
+		});
+
+		test('should count nested children recursively', () => {
+			const item: ActionItem = {
+				id: 'root', title: 'Root', type: 'folder',
+				children: [
+					{ id: 'child1', title: 'Child 1' },
+					{
+						id: 'subfolder', title: 'Sub', type: 'folder',
+						children: [
+							{ id: 'nested1', title: 'Nested 1' },
+							{ id: 'nested2', title: 'Nested 2' }
+						]
+					}
+				]
+			};
+			assert.strictEqual(countActionItems(item), 3);
+		});
+
+		test('should return 0 for folder with empty children', () => {
+			const item: ActionItem = { id: 'empty', title: 'Empty Folder', type: 'folder', children: [] };
+			assert.strictEqual(countActionItems(item), 0);
 		});
 	});
 
