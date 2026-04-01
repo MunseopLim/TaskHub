@@ -24,6 +24,7 @@
 17. [Preset 기능](#17-preset-기능)
 18. [액션 Import/Export](#18-액션-importexport)
 19. [Memory Map 시각화](#19-memory-map-시각화)
+20. [Hex Viewer](#20-hex-viewer)
 
 ---
 
@@ -1100,3 +1101,59 @@ LR_IROM1 0x08000000 0x00100000 {
 | `.ld`, `.lds`, `.lcf` | GNU Linker Script |
 | `.sct` | ARM Scatter File |
 | `.txt` | ARM Linker Listing (`armlink --list` 출력) |
+
+## 20. Hex Viewer
+
+펌웨어 이미지 파일(`.hex`, `.bin`, `.srec`)을 VS Code 내에서 Hex dump 형태로 열어볼 수 있는 뷰어입니다. Trace32의 `Data.dump`와 유사한 UX를 제공합니다.
+
+### 사용 방법
+
+Command Palette (Cmd+Shift+P)에서 **"TaskHub: Open Hex Viewer"** 실행:
+
+1. 파일을 선택합니다 (`.hex`, `.srec`, `.bin` 등).
+2. 포맷을 자동 감지하여 WebView 패널에서 Hex dump를 표시합니다.
+
+### 화면 구성
+
+| 영역 | 설명 |
+|------|------|
+| **헤더** | 파일명, 포맷 (Intel HEX/Motorola SREC/Binary), 크기, 주소 범위, Entry Point |
+| **툴바** | Unit 크기, Endian, Go to, Find, Copy |
+| **Address 컬럼** | 실제 메모리 주소 (Intel HEX의 Extended Address 반영) |
+| **Hex 컬럼** | 바이트 데이터를 Unit 크기에 맞춰 그룹핑하여 표시 |
+| **ASCII 컬럼** | 출력 가능 문자는 그대로, 나머지는 `.` 표시 |
+| **상태바** | 선택한 바이트의 Offset, Address, u8/u16/u32 해석 |
+
+### Unit 크기 옵션
+
+표시 단위를 1/2/4/8바이트 단위로 변경할 수 있습니다:
+
+| Unit | 표시 예시 | 용도 |
+|------|-----------|------|
+| **1 Byte** (기본) | `00 20 00 08` | 바이트 단위 분석 |
+| **2 Bytes** (16-bit) | `2000 0800` | 16-bit 레지스터, short 값 확인 |
+| **4 Bytes** (32-bit) | `00200008` | 32-bit 포인터, int 값 확인 |
+| **8 Bytes** (64-bit) | `0020000800000000` | 64-bit 값 확인 |
+
+Endian 설정 (Little-Endian/Big-Endian)에 따라 바이트 순서가 변경됩니다.
+
+### 검색 기능
+
+`Ctrl+F`로 Hex 바이트 패턴을 검색할 수 있습니다:
+- 검색 입력: `08 00 00 20` 형식
+- 매치 하이라이트 표시, Prev/Next로 이동
+
+### 기타 기능
+
+- **Go to**: 주소 입력으로 해당 위치로 즉시 스크롤
+- **복사** (`Ctrl+C`): 드래그 선택 후 복사 시 탭 없이 스페이스 구분으로 정리된 텍스트 복사
+- **Gap 표시**: Intel HEX/SREC에서 데이터가 없는 주소 영역은 회색으로 표시
+- **Shift+클릭**: 범위 선택
+
+### 지원 포맷
+
+| 포맷 | 확장자 | 특징 |
+|------|--------|------|
+| **Intel HEX** | `.hex`, `.ihex` | Extended Linear/Segment Address 지원, Entry Point 파싱 |
+| **Motorola SREC** | `.srec`, `.s19`, `.s28`, `.s37` | S1/S2/S3 (16/24/32-bit 주소), S7/S8/S9 Entry Point |
+| **Raw Binary** | `.bin`, `.dat` | 0x00000000부터 순차 표시 |

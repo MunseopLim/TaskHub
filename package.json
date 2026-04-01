@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.2.46",
+  "version": "0.2.47",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -319,6 +319,11 @@
         "command": "taskhub.exportActionItem",
         "title": "Export Action",
         "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "taskhub.showHexViewer",
+        "title": "Open Hex Viewer",
+        "category": "TaskHub"
       }
     ],
     "keybindings": [
@@ -468,7 +473,24 @@
           "group": "inline@2"
         }
       ]
-    }
+    },
+    "customEditors": [
+      {
+        "viewType": "taskhub.hexEditor",
+        "displayName": "TaskHub Hex Viewer",
+        "selector": [
+          { "filenamePattern": "*.hex" },
+          { "filenamePattern": "*.ihex" },
+          { "filenamePattern": "*.srec" },
+          { "filenamePattern": "*.s19" },
+          { "filenamePattern": "*.s28" },
+          { "filenamePattern": "*.s37" },
+          { "filenamePattern": "*.bin" },
+          { "filenamePattern": "*.dat" }
+        ],
+        "priority": "option"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run package",

@@ -1,5 +1,21 @@
 # Change Log
 
+## [0.2.47] - 2026-04-01
+
+### Added
+
+**Hex Viewer**
+- `TaskHub: Open Hex Viewer` 명령어로 펌웨어 이미지 파일을 Hex dump로 표시
+- Intel HEX (`.hex`), Motorola SREC (`.srec`, `.s19`), Raw Binary (`.bin`) 포맷 자동 감지
+- Unit 크기 옵션: 1/2/4/8바이트 단위로 표시 전환
+- Little-Endian / Big-Endian 전환
+- Hex 바이트 패턴 검색 (`Ctrl+F`), Go to Address
+- 바이트 선택 시 상태바에 u8/u16/u32 값 해석 표시
+- Gap 영역 (데이터 없는 주소) 회색 표시
+
+### Testing
+- `hexParser` 유닛 테스트 추가 (Intel HEX, SREC, Binary, toFlatArray, hasData)
+
 ## [0.2.46] - 2026-04-01
 
 ### Enhanced

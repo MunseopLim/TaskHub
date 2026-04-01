@@ -10,6 +10,7 @@ import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri } from './jsonEditor';
 import { showMemoryMap, MemoryMapConfig, goToSymbol } from './memoryMapViewer';
+import { showHexViewer, HexEditorProvider } from './hexViewer';
 
 
 function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
@@ -3811,6 +3812,16 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.memoryMapGoToSymbol', () => {
         goToSymbol();
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showHexViewer', async () => {
+        await showHexViewer(context);
+    }));
+
+    context.subscriptions.push(vscode.window.registerCustomEditorProvider(
+        'taskhub.hexEditor',
+        new HexEditorProvider(context),
+        { supportsMultipleEditorsPerDocument: true }
+    ));
 }
 
 export function deactivate() {
