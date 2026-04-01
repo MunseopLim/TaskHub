@@ -4,6 +4,7 @@ import {
     toMemoryRegions,
     toElfSections,
     toAggregatedSummary,
+    toMemoryUsage,
 } from '../armLinkListParser';
 
 // Sample ARM Compiler 6 listing (Exec base format)
@@ -285,6 +286,86 @@ suite('ArmLinkListParser Test Suite', () => {
                 assert.ok(summary[i].addr >= summary[i - 1].addr,
                     `${summary[i].name} (${summary[i].addr}) should come after ${summary[i - 1].name} (${summary[i - 1].addr})`);
             }
+        });
+    });
+
+    suite('toMemoryUsage', () => {
+        test('should compute used per region from own entries only', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            const usages = toMemoryUsage(result);
+
+            assert.strictEqual(usages.length, 2);
+
+            const flash = usages[0];
+            assert.strictEqual(flash.region, 'ER_IROM1');
+            assert.strictEqual(flash.total, 0x00080000);
+            // 0x100 + 0x40 + 0x400 + 0x100 = 0x640
+            assert.strictEqual(flash.used, 0x640);
+            assert.strictEqual(flash.sections.length, 4);
+
+            const ram = usages[1];
+            assert.strictEqual(ram.region, 'RW_IRAM1');
+            assert.strictEqual(ram.total, 0x00020000);
+            // 0x10 + 0x400 = 0x410
+            assert.strictEqual(ram.used, 0x410);
+            assert.strictEqual(ram.sections.length, 2);
+        });
+
+        test('should include reportedUsed from linker', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            const usages = toMemoryUsage(result);
+
+            assert.strictEqual(usages[0].reportedUsed, 0x640);
+            assert.strictEqual(usages[1].reportedUsed, 0x410);
+        });
+
+        test('should compute free spaces correctly', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            const usages = toMemoryUsage(result);
+
+            const flash = usages[0];
+            // Sections: 0x08000000-0x08000100, 0x08000100-0x08000140, 0x08000140-0x08000540, 0x08000540-0x08000640
+            // No gap between sections; free space at end: 0x08000640 to 0x08080000
+            assert.ok(flash.freeSpaces.length >= 1);
+            const tailFree = flash.freeSpaces[flash.freeSpaces.length - 1];
+            assert.strictEqual(tailFree.addr, 0x08000640);
+            assert.strictEqual(tailFree.size, 0x00080000 - 0x640);
+
+            const ram = usages[1];
+            // Sections: 0x20000000-0x20000010, 0x20000010-0x20000410
+            // Free at end: 0x20000410 to 0x20020000
+            const ramTailFree = ram.freeSpaces[ram.freeSpaces.length - 1];
+            assert.strictEqual(ramTailFree.addr, 0x20000410);
+            assert.strictEqual(ramTailFree.size, 0x00020000 - 0x410);
+        });
+
+        test('should not cross-count sections between regions', () => {
+            // AC5 sample has overlapping address ranges between regions
+            const result = parseArmLinkList(SAMPLE_AC5);
+            const usages = toMemoryUsage(result);
+
+            const flash = usages[0];
+            const ram = usages[1];
+
+            // Flash should only count its 3 entries, RAM only its 1 entry
+            assert.strictEqual(flash.sections.length, 3);
+            assert.strictEqual(ram.sections.length, 1);
+
+            // RAM used = 0x200 only (just .bss)
+            assert.strictEqual(ram.used, 0x200);
+        });
+
+        test('should filter out regions with maxSize 0', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            result.execRegions.push({
+                name: 'EMPTY',
+                execBase: 0,
+                size: 0,
+                maxSize: 0,
+                entries: [],
+            });
+            const usages = toMemoryUsage(result);
+            assert.strictEqual(usages.length, 2);
         });
     });
 });
