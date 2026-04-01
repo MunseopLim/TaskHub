@@ -995,17 +995,21 @@ ARM `.axf`/`.elf` 바이너리 파일을 파싱하여 메모리 사용량을 시
 
 Command Palette (Cmd+Shift+P)에서 **"TaskHub: Show Memory Map"** 실행:
 
-1. `.axf`, `.elf`, `.out` 파일을 선택합니다.
-2. 메모리 영역 설정이 없으면 링커 스크립트(`.ld`/`.sct`) 선택을 제안합니다.
-   - **Select linker script**: `.ld` 또는 `.sct` 파일에서 메모리 영역을 자동 파싱
-   - **Skip**: 섹션 목록만 표시
-3. ELF32 바이너리를 파싱하여 섹션 정보를 추출합니다.
+1. 입력 형식을 선택합니다:
+   - **AXF/ELF 파일**: ARM 실행 바이너리 직접 파싱
+   - **ARM Linker Listing**: `armlink --list` 출력 파일 파싱 (별도 링커 스크립트 불필요)
+2. **(AXF/ELF 선택 시)** `.axf`, `.elf`, `.out` 파일을 선택합니다.
+   - 메모리 영역 설정이 없으면 링커 스크립트(`.ld`/`.sct`) 선택을 제안합니다.
+3. **(ARM Linker Listing 선택 시)** `*_axf_link.txt` 등 armlink listing 파일을 선택합니다.
+   - Execution Region에서 메모리 영역 크기를 자동 추출합니다.
 4. WebView 패널에서 메모리 사용량을 시각화합니다.
 
 ### 표시 정보
 
 - **Flash/RAM 요약**: 코드(`.text`), 읽기 전용 데이터(`.rodata`), 초기화 데이터(`.data`), BSS(`.bss`) 크기
 - **메모리 영역별 사용률**: 설정된 메모리 영역에 대한 사용량 바 차트 (90% 이상: 빨강, 70% 이상: 주황, 기본: 초록)
+- **세그먼트 레이아웃 바**: 메모리 영역 내 섹션 배치를 색상 블록으로 시각화 (CODE: 파랑, RODATA: 보라, DATA: 주황, NOBITS: 회색, FREE: 투명)
+- **Free Space**: 메모리 영역 내 빈 공간 표시 (영역 헤더 및 테이블에 포함)
 - **전체 섹션 목록**: 이름, 주소, 크기, 타입(CODE/DATA/RODATA/NOBITS)
 
 ### 메모리 영역 설정
@@ -1057,6 +1061,16 @@ LR_IROM1 0x08000000 0x00100000 {
 
 **우선순위:** `taskhub_types.json`의 `memoryMap.regions` 설정이 있으면 링커 스크립트 선택을 건너뜁니다.
 
+### ARM Linker Listing 파싱
+
+`armlink --list` 옵션으로 생성되는 listing 파일(`*_axf_link.txt`)을 파싱합니다. ELF + 링커 스크립트 조합 없이 이 파일 하나로 메모리 맵 전체를 구성할 수 있습니다.
+
+- ARM Compiler 5 (armcc) 및 ARM Compiler 6 (armclang) 포맷 지원
+- Execution Region에서 시작 주소, 현재 크기, 최대 크기 추출
+- 섹션 엔트리별 주소, 크기, 타입, 소속 오브젝트 파일 추출
+- 동일 섹션 이름 자동 집계 (예: 여러 .o 파일의 `.text` → 하나로 합산)
+- Image Totals (RO/RW/ROM 크기) 파싱
+
 ### 지원 파일 형식
 
 | 확장자 | 설명 |
@@ -1066,3 +1080,4 @@ LR_IROM1 0x08000000 0x00100000 {
 | `.out` | GCC 기본 출력 파일 |
 | `.ld`, `.lds`, `.lcf` | GNU Linker Script |
 | `.sct` | ARM Scatter File |
+| `.txt` | ARM Linker Listing (`armlink --list` 출력) |

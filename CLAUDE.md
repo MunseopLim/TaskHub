@@ -13,7 +13,11 @@ npm run test             # 유닛 테스트 실행 (vscode-test)
 npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 ```
 
-커밋 전 반드시 `npm run package` 실행하여 타입 체크, 린트, 빌드가 모두 통과하는지 확인.
+커밋 전 반드시 다음을 확인:
+
+1. `npm run test` 실행하여 유닛 테스트 통과 확인
+2. `npm run package` 실행하여 타입 체크, 린트, 빌드가 모두 통과하는지 확인
+3. 기능 추가/변경 시 관련 문서 업데이트 (`CHANGELOG.md`, `docs/features.md`, `docs/architecture.md` 등)
 
 ## 프로젝트 구조
 
@@ -26,6 +30,10 @@ src/
 ├── structSizeCalculator.ts    # 구조체 크기/레이아웃 계산
 ├── registerDecoder.ts         # 레지스터 비트 필드 디코더
 ├── macroExpander.ts           # C/C++ 매크로 전처리기
+├── elfParser.ts               # ELF32 바이너리 파서
+├── linkerScriptParser.ts      # GNU/ARM 링커 스크립트 파서
+├── armLinkListParser.ts       # ARM Linker Listing 파서 (armlink --list)
+├── memoryMapViewer.ts         # Memory Map WebView 시각화
 └── test/                      # 모듈별 유닛 테스트 (Mocha + Chai)
 
 schema/   # JSON Schema 파일 (actions, links, favorites, taskhub_types)

@@ -17,13 +17,19 @@ TaskHub/
 │   ├── structSizeCalculator.ts        # 구조체 크기/레이아웃 계산
 │   ├── registerDecoder.ts             # 레지스터 비트 필드 디코더
 │   ├── macroExpander.ts               # C/C++ 매크로 전처리기
+│   ├── elfParser.ts                   # ELF32 바이너리 파서
+│   ├── linkerScriptParser.ts          # GNU/ARM 링커 스크립트 파서
+│   ├── armLinkListParser.ts           # ARM Linker Listing 파서 (armlink --list)
+│   ├── memoryMapViewer.ts             # Memory Map WebView 시각화
 │   └── test/
 │       ├── extension.test.ts              # 확장 유닛 테스트
 │       ├── numberBaseHoverProvider.test.ts # Hover 제공자 테스트
 │       ├── sfrBitFieldParser.test.ts      # SFR 파서 테스트
 │       ├── structSizeCalculator.test.ts   # 구조체 크기 계산 테스트
 │       ├── registerDecoder.test.ts        # 레지스터 디코더 테스트
-│       └── macroExpander.test.ts          # 매크로 확장 테스트
+│       ├── macroExpander.test.ts          # 매크로 확장 테스트
+│       ├── elfParser.test.ts              # ELF 파서 테스트
+│       └── armLinkListParser.test.ts      # ARM Linker Listing 파서 테스트
 ├── schema/
 │   ├── actions.schema.json       # actions.json 스키마 및 검증
 │   ├── links.schema.json         # links.json 스키마 및 검증

@@ -1,5 +1,28 @@
 # Change Log
 
+## [0.2.43] - 2026-04-01
+
+### Added
+
+**ARM Linker Listing 파서**
+- `armlink --list` 출력 파일(`*_axf_link.txt`) 파싱 지원
+- ARM Compiler 5 (armcc) / ARM Compiler 6 (armclang) 포맷 모두 지원
+- Execution Region에서 메모리 영역 크기 자동 추출 (별도 링커 스크립트 불필요)
+- 섹션별 집계 및 오브젝트 파일별 기여도 표시
+
+### Enhanced
+
+**Memory Map Free Space 표시**
+- 메모리 영역 내 빈 공간(Free Space) 시각화
+- 세그먼트 레이아웃 바: 섹션별 색상 블록 + Free Space 표시
+- 영역 카드 테이블에 Address, Type 컬럼 추가, 주소순 정렬
+- 영역 헤더에 Free 크기 표시
+- 텍스트 리포트에 Free Space 정보 포함
+
+**커밋 전 체크리스트 강화**
+- 유닛 테스트 실행 필수화 (CLAUDE.md, CONTRIBUTING.md)
+- 기능 변경 시 관련 문서 업데이트 가이드 추가
+
 ## [0.2.42] - 2026-03-31
 
 ### Added

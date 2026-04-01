@@ -286,7 +286,7 @@ suite('ELF Parser Test Suite', () => {
 
         test('should include memory region usage when provided', () => {
             const summary = [{ name: '.text', size: 100, addr: 0, endAddr: 100, type: 'CODE' }];
-            const usage = [{ region: 'FLASH', used: 100, total: 1000, sections: [{ name: '.text', size: 100 }] }];
+            const usage = [{ region: 'FLASH', used: 100, total: 1000, sections: [{ name: '.text', size: 100, addr: 0, type: 'CODE' }], freeSpaces: [{ addr: 100, size: 900 }] }];
             const report = generateTextReport('fw.elf', 0, 100, 0, summary, usage);
             assert.ok(report.includes('FLASH'));
             assert.ok(report.includes('10.0%'));

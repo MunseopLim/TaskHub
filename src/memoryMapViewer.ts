@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { parseElf32, classifySections, computeMemoryUsage, summarizeSections, generateTextReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary } from './elfParser';
 import { parseLinkerFile } from './linkerScriptParser';
+import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary } from './armLinkListParser';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
@@ -10,6 +11,23 @@ export interface MemoryMapConfig {
 }
 
 export async function showMemoryMap(context: vscode.ExtensionContext, config?: MemoryMapConfig) {
+    const inputType = await vscode.window.showQuickPick([
+        { label: 'AXF/ELF 파일', description: 'ARM 실행 바이너리 파싱' },
+        { label: 'ARM Linker Listing', description: 'armlink --list 출력 파일 파싱' },
+    ], { placeHolder: '입력 파일 형식 선택' });
+    if (!inputType) { return; }
+
+    if (inputType.label === 'ARM Linker Listing') {
+        const listUri = await vscode.window.showOpenDialog({
+            canSelectMany: false,
+            filters: { 'ARM Linker Listing': ['txt'] },
+            openLabel: 'Select Linker Listing'
+        });
+        if (!listUri || listUri.length === 0) { return; }
+        openMemoryMapFromListing(context, listUri[0].fsPath);
+        return;
+    }
+
     const fileUri = await vscode.window.showOpenDialog({
         canSelectMany: false,
         filters: { 'ARM Executable': ['axf', 'elf', 'out'] },
@@ -81,6 +99,56 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     const ramTotal = ram.reduce((sum, s) => sum + s.size, 0);
     const textReport = generateTextReport(fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
 
+    showPanel(context, fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport);
+}
+
+function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: string) {
+    const fileName = filePath.split(/[\\/]/).pop() || 'Memory Map';
+
+    let content: string;
+    try {
+        content = fs.readFileSync(filePath, 'utf-8');
+    } catch (e: any) {
+        vscode.window.showErrorMessage(`Failed to read file: ${e.message}`);
+        return;
+    }
+
+    let result;
+    try {
+        result = parseArmLinkList(content);
+    } catch (e: any) {
+        vscode.window.showErrorMessage(`Failed to parse listing: ${e.message}`);
+        return;
+    }
+
+    if (result.execRegions.length === 0) {
+        vscode.window.showWarningMessage('No execution regions found in listing file.');
+        return;
+    }
+
+    const sections = toElfSections(result);
+    const regions = toMemoryRegions(result);
+    const { flash, ram } = classifySections(sections);
+    const sectionSummary = toAggregatedSummary(result);
+    const memoryUsage = computeMemoryUsage(sections, regions);
+    const flashTotal = flash.reduce((sum, s) => sum + s.size, 0);
+    const ramTotal = ram.reduce((sum, s) => sum + s.size, 0);
+    const textReport = generateTextReport(fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
+
+    showPanel(context, fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport);
+}
+
+function showPanel(
+    context: vscode.ExtensionContext,
+    fileName: string,
+    entryPoint: number,
+    flashTotal: number,
+    ramTotal: number,
+    sectionSummary: SectionSummary[],
+    memoryUsage: MemoryUsage[],
+    regions: MemoryRegion[],
+    textReport: string
+) {
     if (currentPanel) {
         currentPanel.reveal(vscode.ViewColumn.One);
     } else {
@@ -119,17 +187,39 @@ function getWebviewContent(
     const usageBarsHtml = memoryUsage.map(u => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
         const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warn)' : 'var(--ok)';
-        const sectionRows = u.sections.map(s =>
-            `<tr><td>${esc(s.name)}</td><td class="num">${formatSize(s.size)}</td><td class="num">${String(s.size)}</td></tr>`
-        ).join('');
+        const freeTotal = u.total - u.used;
+        const regionOrigin = regions.find(r => r.name === u.region)?.origin ?? 0;
+
+        // Segmented memory layout bar (address-ordered)
+        const allSegments = [
+            ...u.sections.map(s => ({ name: s.name, size: s.size, addr: s.addr, type: s.type })),
+            ...u.freeSpaces.map(f => ({ name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE' })),
+        ].sort((a, b) => a.addr - b.addr);
+
+        const mapSegHtml = allSegments
+            .filter(e => e.size > 0)
+            .map(e => {
+                const cls = `seg-${e.type.toLowerCase()}`;
+                return `<div class="map-seg ${cls}" style="flex:${e.size}" title="${esc(e.name)} @ ${formatHex(e.addr)} (${formatSize(e.size)})"></div>`;
+            }).join('');
+
+        // Table rows (address-ordered, sections + free spaces)
+        const tableRows = allSegments
+            .filter(e => e.size > 0)
+            .map(e => {
+                const rowCls = e.type === 'FREE' ? ' class="free-row"' : '';
+                return `<tr${rowCls}><td>${esc(e.name)}</td><td class="num">${formatHex(e.addr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${String(e.size)}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`;
+            }).join('');
+
         return `
         <div class="region-card">
             <div class="region-header">
                 <strong>${esc(u.region)}</strong>
-                <span class="region-info">${formatHex(u.total > 0 ? regions.find(r => r.name === u.region)?.origin ?? 0 : 0)} | ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%)</span>
+                <span class="region-info">${formatHex(regionOrigin)} | ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(freeTotal)}</span>
             </div>
             <div class="bar-bg"><div class="bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div>
-            ${u.sections.length > 0 ? `<table class="section-table"><thead><tr><th>Section</th><th class="num">Size</th><th class="num">Bytes</th></tr></thead><tbody>${sectionRows}</tbody></table>` : ''}
+            ${allSegments.length > 0 ? `<div class="map-bar">${mapSegHtml}</div>` : ''}
+            ${allSegments.length > 0 ? `<table class="section-table"><thead><tr><th>Section</th><th class="num">Address</th><th class="num">Size</th><th class="num">Bytes</th><th>Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
         </div>`;
     }).join('');
 
@@ -272,6 +362,28 @@ function getWebviewContent(
     .type-data { background: #ff9800; }
     .type-rodata { background: #9c27b0; color: #fff; }
     .type-nobits { background: #607d8b; }
+    .type-free { background: #37474f; }
+    .map-bar {
+        display: flex;
+        height: 14px;
+        border-radius: 3px;
+        overflow: hidden;
+        margin-bottom: 8px;
+        background: var(--hover-bg);
+    }
+    .map-seg {
+        height: 100%;
+        min-width: 1px;
+        border-right: 1px solid var(--bg);
+    }
+    .map-seg:last-child { border-right: none; }
+    .map-seg:hover { opacity: 0.75; }
+    .seg-code { background: #2196f3; }
+    .seg-rodata { background: #9c27b0; }
+    .seg-data { background: #ff9800; }
+    .seg-nobits { background: #607d8b; }
+    .seg-free { background: rgba(128,128,128,0.15); }
+    .free-row { opacity: 0.55; font-style: italic; }
     .section-heading {
         font-size: 14px;
         font-weight: 600;

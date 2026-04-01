@@ -24,11 +24,18 @@ npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 
 ### 커밋 전 체크리스트
 
-커밋 전 반드시 `npm run package`를 실행하여 다음이 모두 통과하는지 확인:
+커밋 전 반드시 다음 항목을 확인:
 
-- [ ] TypeScript 타입 체크
-- [ ] ESLint 검사
-- [ ] esbuild 번들링 (minify 포함)
+1. **유닛 테스트 실행**: `npm run test`로 모든 테스트가 통과하는지 확인
+2. **프로덕션 빌드**: `npm run package`를 실행하여 다음이 모두 통과하는지 확인:
+   - [ ] TypeScript 타입 체크
+   - [ ] ESLint 검사
+   - [ ] esbuild 번들링 (minify 포함)
+3. **문서 업데이트**: 기능 추가/변경 시 관련 문서를 함께 업데이트
+   - `CHANGELOG.md`: 버전별 변경 이력 추가
+   - `docs/features.md`: 기능 설명 추가/수정
+   - `docs/architecture.md`: 구조 변경 시 반영
+   - `README.md`: 사용자에게 보이는 주요 변경 시 반영
 
 ### 로컬 테스트
 
