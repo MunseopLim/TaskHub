@@ -202,8 +202,9 @@ suite('HexParser Test Suite', () => {
             assert.strictEqual(result.byteCount, 4);
             assert.strictEqual(result.minAddress, 0);
             assert.strictEqual(result.maxAddress, 3);
-            assert.strictEqual(result.data.get(0), 0x00);
-            assert.strictEqual(result.data.get(3), 0x08);
+            assert.ok(result.rawBuffer);
+            assert.strictEqual(result.rawBuffer![0], 0x00);
+            assert.strictEqual(result.rawBuffer![3], 0x08);
         });
 
         test('should support base address', () => {
@@ -211,7 +212,8 @@ suite('HexParser Test Suite', () => {
             const result = parseBinary(buf, 0x08000000);
             assert.strictEqual(result.minAddress, 0x08000000);
             assert.strictEqual(result.maxAddress, 0x08000000);
-            assert.strictEqual(result.data.get(0x08000000), 0xFF);
+            assert.ok(result.rawBuffer);
+            assert.strictEqual(result.rawBuffer![0], 0xFF);
         });
 
         test('should handle empty buffer', () => {
@@ -274,9 +276,10 @@ suite('HexParser Test Suite', () => {
                 const result = parseFile(tmpFile);
                 assert.strictEqual(result.format, 'binary');
                 assert.strictEqual(result.byteCount, 8);
-                assert.strictEqual(result.data.get(0), 0x00);
-                assert.strictEqual(result.data.get(2), 0x02);
-                assert.strictEqual(result.data.get(3), 0x20);
+                assert.ok(result.rawBuffer);
+                assert.strictEqual(result.rawBuffer![0], 0x00);
+                assert.strictEqual(result.rawBuffer![2], 0x02);
+                assert.strictEqual(result.rawBuffer![3], 0x20);
             } finally {
                 fs.unlinkSync(tmpFile);
             }

@@ -1,6 +1,7 @@
 /**
  * Hex Viewer WebView panel for TaskHub.
  * Supports Intel HEX, Motorola SREC, and raw binary files.
+ * Uses virtual scrolling for large files.
  */
 import * as vscode from 'vscode';
 import * as fs from 'fs';
@@ -39,17 +40,23 @@ export function buildHexViewerHtml(fileName: string, result: HexParseResult): st
     const flatData = toFlatArray(result, result.minAddress, totalSize);
     const dataBase64 = Buffer.from(flatData).toString('base64');
 
-    const gapBitmap = new Uint8Array(Math.ceil(totalSize / 8));
-    for (let i = 0; i < totalSize; i++) {
-        if (result.data.has(result.minAddress + i)) {
-            gapBitmap[Math.floor(i / 8)] |= (1 << (i % 8));
+    let gapBase64 = '';
+    if (result.rawBuffer) {
+        // Binary format: all bytes have data, no gap bitmap needed
+        gapBase64 = '';
+    } else {
+        const gapBitmap = new Uint8Array(Math.ceil(totalSize / 8));
+        for (let i = 0; i < totalSize; i++) {
+            if (result.data.has(result.minAddress + i)) {
+                gapBitmap[Math.floor(i / 8)] |= (1 << (i % 8));
+            }
         }
+        gapBase64 = Buffer.from(gapBitmap).toString('base64');
     }
-    const gapBase64 = Buffer.from(gapBitmap).toString('base64');
 
     return getWebviewContent(
         fileName, result.format, result.minAddress, result.maxAddress,
-        result.byteCount, result.entryPoint, dataBase64, gapBase64
+        result.byteCount, result.entryPoint, dataBase64, gapBase64, !!result.rawBuffer
     );
 }
 
@@ -104,7 +111,8 @@ function getWebviewContent(
     byteCount: number,
     entryPoint: number | undefined,
     dataBase64: string,
-    gapBase64: string
+    gapBase64: string,
+    isBinaryFormat: boolean
 ): string {
     const formatLabel = format === 'intel' ? 'Intel HEX' : format === 'srec' ? 'Motorola SREC' : 'Binary';
     const entryStr = entryPoint !== undefined ? `0x${entryPoint.toString(16).toUpperCase().padStart(8, '0')}` : 'N/A';
@@ -185,13 +193,17 @@ function getWebviewContent(
     .find-bar input { width: 200px; }
     .find-bar .find-info { color: var(--addr-color); font-size: 0.85em; min-width: 100px; }
 
-    /* Hex content */
+    /* Hex content - virtual scrolling */
     .hex-container {
         flex: 1; overflow-y: auto; overflow-x: auto;
-        padding: 0;
+        padding: 0; position: relative;
+    }
+    .hex-scroll-spacer {
+        width: 1px;
     }
     .hex-table {
         border-collapse: collapse; width: max-content;
+        position: sticky; top: 0;
     }
     .hex-table thead th {
         position: sticky; top: 0; z-index: 2;
@@ -286,6 +298,7 @@ function getWebviewContent(
         <button id="findClose">✕</button>
     </div>
     <div class="hex-container" id="hexContainer">
+        <div class="hex-scroll-spacer" id="scrollSpacer"></div>
         <table class="hex-table" id="hexTable">
             <thead id="hexHead"></thead>
             <tbody id="hexBody"></tbody>
@@ -300,18 +313,24 @@ function getWebviewContent(
     const vscode = acquireVsCodeApi();
     const BASE_ADDR = ${minAddress};
     const TOTAL_SIZE = ${maxAddress - minAddress + 1};
+    const IS_BINARY = ${isBinaryFormat};
 
     // Decode data
     const raw = atob('${dataBase64}');
     const DATA = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) { DATA[i] = raw.charCodeAt(i); }
 
-    // Decode gap bitmap
-    const gapRaw = atob('${gapBase64}');
-    const GAP_BITMAP = new Uint8Array(gapRaw.length);
-    for (let i = 0; i < gapRaw.length; i++) { GAP_BITMAP[i] = gapRaw.charCodeAt(i); }
+    // Decode gap bitmap (empty for binary format)
+    let GAP_BITMAP = null;
+    ${gapBase64 ? `{
+        const gapRaw = atob('${gapBase64}');
+        GAP_BITMAP = new Uint8Array(gapRaw.length);
+        for (let i = 0; i < gapRaw.length; i++) { GAP_BITMAP[i] = gapRaw.charCodeAt(i); }
+    }` : ''}
 
     function hasData(offset) {
+        if (IS_BINARY) { return offset >= 0 && offset < TOTAL_SIZE; }
+        if (!GAP_BITMAP) { return false; }
         return (GAP_BITMAP[Math.floor(offset / 8)] & (1 << (offset % 8))) !== 0;
     }
 
@@ -323,10 +342,14 @@ function getWebviewContent(
     let findCurrentIdx = -1;
 
     const BYTES_PER_ROW = 16;
+    const ROW_HEIGHT = 20; // px, approximate height of one row
+    const BUFFER_ROWS = 20; // extra rows to render above/below viewport
 
     const hexContainer = document.getElementById('hexContainer');
+    const scrollSpacer = document.getElementById('scrollSpacer');
     const hexHead = document.getElementById('hexHead');
     const hexBody = document.getElementById('hexBody');
+    const hexTable = document.getElementById('hexTable');
     const statusBar = document.getElementById('statusBar');
     const unitSelect = document.getElementById('unitSize');
     const endianSelect = document.getElementById('endian');
@@ -334,6 +357,14 @@ function getWebviewContent(
     const findBar = document.getElementById('findBar');
     const findHexInput = document.getElementById('findHexInput');
     const findInfo = document.getElementById('findInfo');
+
+    const totalRowCount = Math.ceil(TOTAL_SIZE / BYTES_PER_ROW);
+
+    // Virtual scrolling state
+    let visibleStartRow = 0;
+    let visibleEndRow = 0;
+    let renderedStartRow = -1;
+    let renderedEndRow = -1;
 
     function readUnit(offset, size, le) {
         if (offset + size > TOTAL_SIZE) { return null; }
@@ -358,7 +389,6 @@ function getWebviewContent(
     function unitsPerRow() { return BYTES_PER_ROW / unitSize; }
 
     function groupEvery() {
-        // Group every 4 units when unitSize=1, every 2 when unitSize=2, every 1 when unitSize>=4
         if (unitSize === 1) { return 4; }
         if (unitSize === 2) { return 2; }
         return 1;
@@ -380,116 +410,164 @@ function getWebviewContent(
         hexHead.innerHTML = html;
     }
 
-    function buildBody() {
+    function buildRow(row) {
         const upr = unitsPerRow();
         const ge = groupEvery();
         const digits = unitHexDigits();
         const le = endian === 'little';
-        const rowCount = Math.ceil(TOTAL_SIZE / BYTES_PER_ROW);
+        const rowOffset = row * BYTES_PER_ROW;
+        const rowAddr = BASE_ADDR + rowOffset;
 
-        // Use DocumentFragment for performance
-        const frag = document.createDocumentFragment();
+        const tr = document.createElement('tr');
+        tr.className = 'hex-row';
+        tr.dataset.row = String(row);
 
-        for (let row = 0; row < rowCount; row++) {
-            const rowOffset = row * BYTES_PER_ROW;
-            const rowAddr = BASE_ADDR + rowOffset;
+        // Address cell
+        const addrTd = document.createElement('td');
+        addrTd.className = 'addr-cell';
+        addrTd.textContent = formatAddr(rowAddr);
+        tr.appendChild(addrTd);
 
-            const tr = document.createElement('tr');
-            tr.className = 'hex-row';
+        // Hex cells
+        for (let i = 0; i < upr; i++) {
+            if (i > 0 && i % ge === 0) {
+                const sepTd = document.createElement('td');
+                sepTd.className = 'group-sep-cell';
+                tr.appendChild(sepTd);
+            }
 
-            // Address cell
-            const addrTd = document.createElement('td');
-            addrTd.className = 'addr-cell';
-            addrTd.textContent = formatAddr(rowAddr);
-            tr.appendChild(addrTd);
+            const byteOffset = rowOffset + i * unitSize;
+            const td = document.createElement('td');
+            td.className = 'hex-cell';
 
-            // Hex cells
-            for (let i = 0; i < upr; i++) {
-                if (i > 0 && i % ge === 0) {
-                    const sepTd = document.createElement('td');
-                    sepTd.className = 'group-sep-cell';
-                    tr.appendChild(sepTd);
+            if (byteOffset + unitSize <= TOTAL_SIZE) {
+                const val = readUnit(byteOffset, unitSize, le);
+                td.textContent = val !== null ? formatHex(Number(val & BigInt('0x' + 'F'.repeat(digits))), digits) : '';
+                td.dataset.offset = String(byteOffset);
+
+                let isGap = true;
+                for (let b = 0; b < unitSize; b++) {
+                    if (hasData(byteOffset + b)) { isGap = false; break; }
                 }
+                if (isGap) { td.classList.add('gap'); }
+            } else {
+                td.textContent = ' '.repeat(digits);
+            }
+            tr.appendChild(td);
+        }
 
-                const byteOffset = rowOffset + i * unitSize;
-                const td = document.createElement('td');
-                td.className = 'hex-cell';
+        // ASCII separator
+        const sepTd = document.createElement('td');
+        sepTd.className = 'ascii-sep';
+        tr.appendChild(sepTd);
 
-                if (byteOffset + unitSize <= TOTAL_SIZE) {
-                    const val = readUnit(byteOffset, unitSize, le);
-                    td.textContent = val !== null ? formatHex(Number(val & BigInt('0x' + 'F'.repeat(digits))), digits) : '';
-                    td.dataset.offset = String(byteOffset);
-
-                    // Check if any byte in this unit is a gap
-                    let isGap = true;
-                    for (let b = 0; b < unitSize; b++) {
-                        if (hasData(byteOffset + b)) { isGap = false; break; }
-                    }
-                    if (isGap) { td.classList.add('gap'); }
+        // ASCII cell
+        const asciiTd = document.createElement('td');
+        asciiTd.className = 'ascii-cell';
+        let asciiText = '';
+        for (let b = 0; b < BYTES_PER_ROW; b++) {
+            const off = rowOffset + b;
+            if (off < TOTAL_SIZE) {
+                const byte = DATA[off];
+                if (!hasData(off)) {
+                    asciiText += '·';
+                } else if (byte >= 0x20 && byte <= 0x7e) {
+                    asciiText += String.fromCharCode(byte);
                 } else {
-                    td.textContent = ' '.repeat(digits);
-                }
-                tr.appendChild(td);
-            }
-
-            // ASCII separator
-            const sepTd = document.createElement('td');
-            sepTd.className = 'ascii-sep';
-            tr.appendChild(sepTd);
-
-            // ASCII cell
-            const asciiTd = document.createElement('td');
-            asciiTd.className = 'ascii-cell';
-            let asciiText = '';
-            for (let b = 0; b < BYTES_PER_ROW; b++) {
-                const off = rowOffset + b;
-                if (off < TOTAL_SIZE) {
-                    const byte = DATA[off];
-                    if (!hasData(off)) {
-                        asciiText += '·';
-                    } else if (byte >= 0x20 && byte <= 0x7e) {
-                        asciiText += String.fromCharCode(byte);
-                    } else {
-                        asciiText += '.';
-                    }
+                    asciiText += '.';
                 }
             }
-            asciiTd.textContent = asciiText;
-            asciiTd.dataset.rowOffset = String(rowOffset);
-            tr.appendChild(asciiTd);
+        }
+        asciiTd.textContent = asciiText;
+        asciiTd.dataset.rowOffset = String(rowOffset);
+        tr.appendChild(asciiTd);
 
+        return tr;
+    }
+
+    function calcVisibleRange() {
+        const scrollTop = hexContainer.scrollTop;
+        const clientHeight = hexContainer.clientHeight;
+        const headerHeight = hexHead.offsetHeight || 24;
+
+        const startRow = Math.max(0, Math.floor((scrollTop - headerHeight) / ROW_HEIGHT) - BUFFER_ROWS);
+        const endRow = Math.min(totalRowCount, Math.ceil((scrollTop - headerHeight + clientHeight) / ROW_HEIGHT) + BUFFER_ROWS);
+        return { startRow, endRow };
+    }
+
+    function renderVisibleRows() {
+        const { startRow, endRow } = calcVisibleRange();
+
+        if (startRow === renderedStartRow && endRow === renderedEndRow) { return; }
+
+        visibleStartRow = startRow;
+        visibleEndRow = endRow;
+
+        const frag = document.createDocumentFragment();
+        for (let row = startRow; row < endRow; row++) {
+            const tr = buildRow(row);
+            tr.style.position = 'absolute';
+            tr.style.top = (row * ROW_HEIGHT) + 'px';
+            tr.style.width = '100%';
             frag.appendChild(tr);
         }
 
         hexBody.innerHTML = '';
         hexBody.appendChild(frag);
+
+        renderedStartRow = startRow;
+        renderedEndRow = endRow;
+
+        applySelectionToVisible();
+        applyFindHighlightsToVisible();
+    }
+
+    function initVirtualScroll() {
+        const totalHeight = totalRowCount * ROW_HEIGHT + (hexHead.offsetHeight || 24);
+        scrollSpacer.style.height = totalHeight + 'px';
+        hexTable.style.position = 'sticky';
+        hexTable.style.top = '0';
+        hexBody.style.position = 'relative';
+        hexBody.style.height = (totalRowCount * ROW_HEIGHT) + 'px';
     }
 
     function render() {
         buildHeader();
-        buildBody();
-        updateSelection();
-        applyFindHighlights();
+        initVirtualScroll();
+        renderedStartRow = -1;
+        renderedEndRow = -1;
+        renderVisibleRows();
     }
 
-    function updateSelection() {
-        // Clear previous
-        document.querySelectorAll('.hex-cell.selected, .ascii-cell.selected').forEach(el => el.classList.remove('selected'));
+    let scrollRaf = 0;
+    hexContainer.addEventListener('scroll', () => {
+        if (scrollRaf) { return; }
+        scrollRaf = requestAnimationFrame(() => {
+            scrollRaf = 0;
+            renderVisibleRows();
+        });
+    });
 
+    function applySelectionToVisible() {
         if (selectedOffset < 0) { return; }
         const endOff = selectedEndOffset >= 0 ? selectedEndOffset : selectedOffset;
         const minOff = Math.min(selectedOffset, endOff);
         const maxOff = Math.max(selectedOffset, endOff);
 
-        document.querySelectorAll('.hex-cell[data-offset]').forEach(el => {
+        hexBody.querySelectorAll('.hex-cell[data-offset]').forEach(el => {
             const off = parseInt(el.dataset.offset, 10);
             if (off >= minOff && off <= maxOff) {
                 el.classList.add('selected');
             }
         });
+    }
 
-        // Update status bar
-        updateStatusBar(minOff, maxOff);
+    function updateSelection() {
+        document.querySelectorAll('.hex-cell.selected, .ascii-cell.selected').forEach(el => el.classList.remove('selected'));
+        if (selectedOffset < 0) { return; }
+        applySelectionToVisible();
+        const endOff = selectedEndOffset >= 0 ? selectedEndOffset : selectedOffset;
+        updateStatusBar(Math.min(selectedOffset, endOff), Math.max(selectedOffset, endOff));
     }
 
     function updateStatusBar(minOff, maxOff) {
@@ -550,6 +628,13 @@ function getWebviewContent(
     });
 
     // Go to address
+    function scrollToRow(rowIndex) {
+        const headerHeight = hexHead.offsetHeight || 24;
+        const targetTop = rowIndex * ROW_HEIGHT + headerHeight;
+        const containerHeight = hexContainer.clientHeight;
+        hexContainer.scrollTop = targetTop - containerHeight / 2;
+    }
+
     function goToAddress() {
         const val = gotoInput.value.trim();
         let addr = parseInt(val, 16);
@@ -558,17 +643,13 @@ function getWebviewContent(
         }
         if (isNaN(addr)) { return; }
         const offset = addr - BASE_ADDR;
-        if (offset < 0 || offset >= TOTAL_SIZE) {
-            return;
-        }
+        if (offset < 0 || offset >= TOTAL_SIZE) { return; }
         const rowIndex = Math.floor(offset / BYTES_PER_ROW);
-        const rows = hexBody.querySelectorAll('.hex-row');
-        if (rows[rowIndex]) {
-            rows[rowIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
-            selectedOffset = offset;
-            selectedEndOffset = offset;
-            updateSelection();
-        }
+        scrollToRow(rowIndex);
+        selectedOffset = offset;
+        selectedEndOffset = offset;
+        // renderVisibleRows will be triggered by scroll event
+        setTimeout(() => updateSelection(), 50);
     }
 
     document.getElementById('gotoBtn').addEventListener('click', goToAddress);
@@ -597,13 +678,10 @@ function getWebviewContent(
     function parseFindValue(input) {
         const clean = input.replace(/[^0-9a-fA-F]/g, '');
         if (clean.length === 0 || clean.length % 2 !== 0) { return null; }
-        // Parse as big-endian hex value, then convert to byte array respecting endian setting
         const bytes = [];
         for (let i = 0; i < clean.length; i += 2) {
             bytes.push(parseInt(clean.substring(i, i + 2), 16));
         }
-        // bytes is now big-endian (MSB first, as user typed)
-        // For little-endian memory, reverse the byte order
         if (endian === 'little') {
             bytes.reverse();
         }
@@ -636,7 +714,7 @@ function getWebviewContent(
         const bytes = getFindBytes();
         if (!bytes || bytes.length === 0) {
             findInfo.textContent = '';
-            applyFindHighlights();
+            applyFindHighlightsToVisible();
             return;
         }
         for (let i = 0; i <= TOTAL_SIZE - bytes.length; i++) {
@@ -653,25 +731,24 @@ function getWebviewContent(
         } else {
             findInfo.textContent = 'No matches';
         }
-        applyFindHighlights();
+        applyFindHighlightsToVisible();
     }
 
     function goToFindMatch() {
         if (findCurrentIdx < 0 || findCurrentIdx >= findMatches.length) { return; }
         const offset = findMatches[findCurrentIdx];
         const rowIndex = Math.floor(offset / BYTES_PER_ROW);
-        const rows = hexBody.querySelectorAll('.hex-row');
-        if (rows[rowIndex]) {
-            rows[rowIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
+        scrollToRow(rowIndex);
         selectedOffset = offset;
         selectedEndOffset = offset;
-        updateSelection();
         findInfo.textContent = (findCurrentIdx + 1) + ' / ' + findMatches.length;
-        applyFindHighlights();
+        setTimeout(() => {
+            updateSelection();
+            applyFindHighlightsToVisible();
+        }, 50);
     }
 
-    function applyFindHighlights() {
+    function applyFindHighlightsToVisible() {
         document.querySelectorAll('.hex-cell.find-highlight, .hex-cell.find-current').forEach(el => {
             el.classList.remove('find-highlight', 'find-current');
         });
@@ -680,20 +757,24 @@ function getWebviewContent(
         const bytes = getFindBytes();
         if (!bytes) { return; }
 
-        // Only highlight visible matches for performance
+        // Build sets only for visible range
+        const visStartOff = visibleStartRow * BYTES_PER_ROW;
+        const visEndOff = visibleEndRow * BYTES_PER_ROW;
+
         const matchSet = new Set();
         const currentSet = new Set();
         for (let mi = 0; mi < findMatches.length; mi++) {
+            const mOff = findMatches[mi];
+            if (mOff + bytes.length < visStartOff || mOff > visEndOff + BYTES_PER_ROW) { continue; }
             for (let j = 0; j < bytes.length; j++) {
-                const off = findMatches[mi] + j;
-                // Align to unit boundary
+                const off = mOff + j;
                 const unitOff = Math.floor(off / unitSize) * unitSize;
                 matchSet.add(unitOff);
                 if (mi === findCurrentIdx) { currentSet.add(unitOff); }
             }
         }
 
-        document.querySelectorAll('.hex-cell[data-offset]').forEach(el => {
+        hexBody.querySelectorAll('.hex-cell[data-offset]').forEach(el => {
             const off = parseInt(el.dataset.offset, 10);
             if (currentSet.has(off)) {
                 el.classList.add('find-current');
@@ -709,7 +790,7 @@ function getWebviewContent(
         findMatches = [];
         findCurrentIdx = -1;
         findInfo.textContent = '';
-        applyFindHighlights();
+        applyFindHighlightsToVisible();
     });
     findHexInput.addEventListener('input', doFind);
     document.getElementById('findMode').addEventListener('change', () => {
@@ -731,7 +812,6 @@ function getWebviewContent(
     function buildCopyText(minOff, maxOff) {
         const le = endian === 'little';
         const digits = unitHexDigits();
-        const upr = unitsPerRow();
         const parts = [];
         for (let off = minOff; off < maxOff && off < TOTAL_SIZE; off += unitSize) {
             const val = readUnit(off, unitSize, le);
@@ -742,9 +822,8 @@ function getWebviewContent(
         return parts.join(' ');
     }
 
-    // Intercept copy to format properly (no tabs)
+    // Intercept copy to format properly
     document.addEventListener('copy', (e) => {
-        // If hex cells are selected via click, use that range
         if (selectedOffset >= 0) {
             const endOff = selectedEndOffset >= 0 ? selectedEndOffset : selectedOffset;
             const minOff = Math.min(selectedOffset, endOff);
@@ -753,7 +832,6 @@ function getWebviewContent(
             e.preventDefault();
             return;
         }
-        // For browser text selection (drag), clean up the tab-separated output
         const sel = window.getSelection();
         if (sel && sel.toString().trim()) {
             const cleaned = sel.toString()

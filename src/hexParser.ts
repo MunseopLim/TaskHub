@@ -6,8 +6,10 @@ export type HexFormat = 'intel' | 'srec' | 'binary';
 
 export interface HexParseResult {
     format: HexFormat;
-    /** Sparse memory data: address → byte value */
+    /** Sparse memory data: address → byte value (used for HEX/SREC) */
     data: Map<number, number>;
+    /** Raw buffer for binary format (avoids Map overhead for large files) */
+    rawBuffer?: Uint8Array;
     /** Entry point address (if available) */
     entryPoint?: number;
     /** Minimum address in the data */
@@ -167,13 +169,17 @@ export function parseSrec(content: string): HexParseResult {
  * Parse raw binary data.
  */
 export function parseBinary(buffer: Buffer, baseAddress: number = 0): HexParseResult {
-    const data = new Map<number, number>();
-    for (let i = 0; i < buffer.length; i++) {
-        data.set(baseAddress + i, buffer[i]);
-    }
+    const rawBuffer = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     const minAddress = buffer.length > 0 ? baseAddress : 0;
     const maxAddress = buffer.length > 0 ? baseAddress + buffer.length - 1 : 0;
-    return { format: 'binary', data, minAddress, maxAddress, byteCount: buffer.length };
+    return {
+        format: 'binary',
+        data: new Map(),
+        rawBuffer,
+        minAddress,
+        maxAddress,
+        byteCount: buffer.length
+    };
 }
 
 /**
@@ -181,6 +187,17 @@ export function parseBinary(buffer: Buffer, baseAddress: number = 0): HexParseRe
  * Missing bytes are filled with fillByte (default 0xFF).
  */
 export function toFlatArray(result: HexParseResult, startAddress: number, length: number, fillByte: number = 0xFF): Uint8Array {
+    if (result.rawBuffer) {
+        const offset = startAddress - result.minAddress;
+        const safeOffset = Math.max(0, offset);
+        const safeEnd = Math.min(result.rawBuffer.length, offset + length);
+        const arr = new Uint8Array(length);
+        arr.fill(fillByte);
+        if (safeEnd > safeOffset) {
+            arr.set(result.rawBuffer.subarray(safeOffset, safeEnd), safeOffset - offset);
+        }
+        return arr;
+    }
     const arr = new Uint8Array(length);
     arr.fill(fillByte);
     for (let i = 0; i < length; i++) {
@@ -196,5 +213,9 @@ export function toFlatArray(result: HexParseResult, startAddress: number, length
  * Check if an address has data (not a gap).
  */
 export function hasData(result: HexParseResult, address: number): boolean {
+    if (result.rawBuffer) {
+        const offset = address - result.minAddress;
+        return offset >= 0 && offset < result.rawBuffer.length;
+    }
     return result.data.has(address);
 }
