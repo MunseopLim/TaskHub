@@ -226,6 +226,46 @@ suite('ELF Parser Test Suite', () => {
             assert.strictEqual(ram.sections[1].name, '.data');
         });
 
+        test('should compute free spaces between sections', () => {
+            const usages = computeMemoryUsage(sections, regions);
+            const flash = usages.find(u => u.region === 'FLASH')!;
+            // .text: 0x08000000-0x08001000, .rodata: 0x08001000-0x08001200 (contiguous)
+            // Free at end: 0x08001200 to 0x08100000
+            assert.strictEqual(flash.freeSpaces.length, 1);
+            assert.strictEqual(flash.freeSpaces[0].addr, 0x08001200);
+            assert.strictEqual(flash.freeSpaces[0].size, 0x100000 - 0x1200);
+        });
+
+        test('should filter out alignment padding (< 4 bytes) from freeSpaces', () => {
+            const paddedSections: ElfSection[] = [
+                { name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 0x101, isAlloc: true, isWrite: false, isExec: true, isNoBits: false },
+                { name: '.rodata', type: SHT_PROGBITS, flags: SHF_ALLOC, addr: 0x08000104, size: 0x100, isAlloc: true, isWrite: false, isExec: false, isNoBits: false },
+            ];
+            const rgn: MemoryRegion[] = [{ name: 'FLASH', origin: 0x08000000, size: 0x10000 }];
+            const usages = computeMemoryUsage(paddedSections, rgn);
+            const flash = usages[0];
+            // Gap between .text and .rodata is 3 bytes (0x08000101-0x08000104) → filtered out
+            // Only tail free (>= 4 bytes) should remain
+            for (const f of flash.freeSpaces) {
+                assert.ok(f.size >= 4, `freeSpace size ${f.size} should be >= 4`);
+            }
+        });
+
+        test('should handle overlapping sections without inflating free space', () => {
+            const overlapping: ElfSection[] = [
+                { name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 0x200, isAlloc: true, isWrite: false, isExec: true, isNoBits: false },
+                { name: '.text2', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000100, size: 0x80, isAlloc: true, isWrite: false, isExec: true, isNoBits: false },
+            ];
+            const rgn: MemoryRegion[] = [{ name: 'FLASH', origin: 0x08000000, size: 0x1000 }];
+            const usages = computeMemoryUsage(overlapping, rgn);
+            const flash = usages[0];
+            // .text ends at 0x200, .text2 ends at 0x180 (overlaps, cursor stays at 0x200)
+            // Free: 0x200 to 0x1000 = 0xE00
+            assert.strictEqual(flash.freeSpaces.length, 1);
+            assert.strictEqual(flash.freeSpaces[0].addr, 0x08000200);
+            assert.strictEqual(flash.freeSpaces[0].size, 0x1000 - 0x200);
+        });
+
         test('should return empty usage for non-matching region', () => {
             const otherRegion: MemoryRegion[] = [{ name: 'DTCM', origin: 0x30000000, size: 0x10000 }];
             const usages = computeMemoryUsage(sections, otherRegion);

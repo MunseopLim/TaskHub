@@ -1,5 +1,23 @@
 # Change Log
 
+## [0.2.51] - 2026-04-02
+
+### Fixed
+
+**Memory Map Free Space 계산 개선**
+- Free space 계산 버그 수정: 섹션 겹침 시 cursor 역행으로 free 영역이 부풀려지던 문제 해결
+- Alignment padding (1~3바이트) free space를 Calc Free 및 세그먼트 레이아웃 바에서 제외
+- Used 계산을 실제 점유 영역 기반으로 변경: 섹션 겹침/경계 초과 시에도 used + free ≤ max 보장
+
+### Enhanced
+
+**Memory Map 시각화 UX 개선**
+- AXF/ELF와 ARM Linker Listing 파싱 결과 화면 통일: Overview 테이블 컬럼 구조 및 Region 헤더 포맷 일관성 확보
+- Region 요약 테이블 row 클릭 시 해당 Region Details로 스크롤 및 자동 펼침
+- Region Details 내 섹션 테이블에 컬럼 정렬 기능 추가 (Section, Address, Size, Bytes, Type)
+- Region 이름 왼쪽 정렬로 변경
+- AXF/ELF 파싱 시 데이터 한계 안내 메시지 표시
+
 ## [0.2.50] - 2026-04-02
 
 ### Fixed

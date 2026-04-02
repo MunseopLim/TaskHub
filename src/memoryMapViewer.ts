@@ -241,16 +241,14 @@ function getWebviewContent(
             }).join('');
 
         const linkerFree = u.reportedUsed !== undefined ? u.total - u.reportedUsed : 0;
-        const calcFree = u.total - u.used;
+        const calcFree = u.freeSpaces.reduce((sum, f) => sum + f.size, 0);
         const linkerLine = u.reportedUsed !== undefined
             ? `<div class="region-linker">Linker: Base=${formatHex(regionOrigin)} Used=${formatHex(u.reportedUsed)} (${formatSize(u.reportedUsed)}) Max=${formatHex(u.total)} (${formatSize(u.total)}) Free: ${formatSize(linkerFree)}</div>`
             : '';
-        const infoText = u.reportedUsed !== undefined
-            ? `Calc Used: ${formatSize(u.used)} (${pct.toFixed(1)}%) | Calc Free: ${formatSize(calcFree)}`
-            : `${formatHex(regionOrigin)} | ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(calcFree)}`;
+        const infoText = `Used: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(calcFree)}`;
 
         return `
-        <div class="region-card">
+        <div class="region-card" id="region-${esc(u.region)}">
             <div class="region-header" onclick="toggleRegion(this)">
                 <span class="fold-icon">▶</span>
                 <strong>${esc(u.region)}</strong>
@@ -260,7 +258,7 @@ function getWebviewContent(
             <div class="bar-bg"><div class="bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div>
             <div class="region-detail" style="display:none">
                 ${allSegments.length > 0 ? `<div class="map-bar">${mapSegHtml}</div>` : ''}
-                ${allSegments.length > 0 ? `<table class="section-table"><thead><tr><th>Section</th><th class="num">Address</th><th class="num">Size</th><th class="num">Bytes</th><th>Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
+                ${allSegments.length > 0 ? `<table class="section-table sortable-table"><thead><tr><th data-sort="name">Section</th><th class="num" data-sort="addr">Address</th><th class="num" data-sort="size">Size</th><th class="num" data-sort="bytes">Bytes</th><th data-sort="type">Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
             </div>
         </div>`;
     }).join('');
@@ -271,25 +269,27 @@ function getWebviewContent(
 
     const regionOverviewRows = memoryUsage.map(u => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
-        const calcFree = u.total - u.used;
+        const calcFree = u.freeSpaces.reduce((sum, f) => sum + f.size, 0);
         const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warn)' : 'var(--ok)';
         const origin = regions.find(r => r.name === u.region)?.origin ?? 0;
-        const linkerCells = hasLinkerData
-            ? `<td class="num">${u.reportedUsed !== undefined ? formatSize(u.reportedUsed) : '-'}</td><td class="num">${formatSize(u.used)}</td><td class="num">${u.reportedUsed !== undefined ? formatSize(u.total - u.reportedUsed) : '-'}</td><td class="num">${formatSize(calcFree)}</td>`
-            : `<td class="num">${formatSize(u.used)}</td><td class="num">${formatSize(calcFree)}</td>`;
-        return `<tr>
+        const linkerUsed = u.reportedUsed !== undefined ? formatSize(u.reportedUsed) : '-';
+        const linkerFree = u.reportedUsed !== undefined ? formatSize(u.total - u.reportedUsed) : '-';
+        return `<tr class="overview-row" data-region="${esc(u.region)}">
             <td><strong>${esc(u.region)}</strong></td>
             <td class="num">${formatHex(origin)}</td>
             <td class="num">${formatSize(u.total)}</td>
-            ${linkerCells}
+            ${hasLinkerData ? `<td class="num">${linkerUsed}</td>` : ''}
+            <td class="num">${formatSize(u.used)}</td>
+            ${hasLinkerData ? `<td class="num">${linkerFree}</td>` : ''}
+            <td class="num">${formatSize(calcFree)}</td>
             <td class="num">${pct.toFixed(1)}%</td>
             <td><div class="mini-bar"><div class="mini-bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div></td>
         </tr>`;
     }).join('');
 
     const overviewHeaders = hasLinkerData
-        ? '<th>Region</th><th class="num">Base</th><th class="num">Max</th><th class="num">Used</th><th class="num">Calc Used</th><th class="num">Free</th><th class="num">Calc Free</th><th class="num">Usage</th><th></th>'
-        : '<th>Region</th><th class="num">Address</th><th class="num">Size</th><th class="num">Used</th><th class="num">Free</th><th class="num">Usage</th><th></th>';
+        ? '<th>Region</th><th class="num">Base</th><th class="num">Max</th><th class="num">Linker Used</th><th class="num">Calc Used</th><th class="num">Linker Free</th><th class="num">Calc Free</th><th class="num">Usage</th><th></th>'
+        : '<th>Region</th><th class="num">Base</th><th class="num">Max</th><th class="num">Used</th><th class="num">Free</th><th class="num">Usage</th><th></th>';
 
     const sectionTableRows = sectionSummary.map(s =>
         `<tr>
@@ -375,11 +375,13 @@ function getWebviewContent(
     }
     .region-header {
         display: flex;
-        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
         margin-bottom: 6px;
         font-size: 13px;
     }
     .region-info {
+        margin-left: auto;
         font-family: var(--vscode-editor-font-family, monospace);
         font-size: 12px;
     }
@@ -479,6 +481,7 @@ function getWebviewContent(
     .region-detail { margin-top: 4px; }
     .overview-table { margin-bottom: 12px; }
     .overview-table td { padding: 4px 8px; }
+    .overview-row { cursor: pointer; }
     .mini-bar {
         width: 80px;
         height: 10px;
@@ -508,6 +511,14 @@ function getWebviewContent(
         margin-bottom: 16px;
         line-height: 1.6;
     }
+    .info-note {
+        padding: 8px 12px;
+        border-left: 3px solid var(--vscode-editorInfo-foreground, #3794ff);
+        background: rgba(55, 148, 255, 0.06);
+        font-size: 12px;
+        opacity: 0.8;
+        margin-bottom: 12px;
+    }
 </style>
 </head>
 <body>
@@ -527,6 +538,7 @@ function getWebviewContent(
     ${hasRegions ? `
         <div class="section-heading">Memory Regions</div>
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
+        ${!hasLinkerData ? '<div class="info-note">AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.</div>' : ''}
         <div class="section-heading">Region Details <button onclick="foldAll(false)" title="Expand All">▼ Expand All</button> <button onclick="foldAll(true)" title="Collapse All">▶ Collapse All</button></div>
         ${usageBarsHtml}
     ` : `
@@ -538,7 +550,7 @@ function getWebviewContent(
     `}
 
     <div class="section-heading">All Sections (${sectionSummary.length})</div>
-    <table id="sectionTable">
+    <table id="sectionTable" class="sortable-table">
         <thead>
             <tr>
                 <th data-sort="name">Section</th>
@@ -628,6 +640,24 @@ function getWebviewContent(
         });
     };
 
+    // --- Overview row click → scroll to region card ---
+    document.querySelectorAll('.overview-row').forEach(row => {
+        row.addEventListener('click', () => {
+            const name = row.getAttribute('data-region');
+            const card = document.getElementById('region-' + name);
+            if (!card) { return; }
+            const detail = card.querySelector('.region-detail');
+            const icon = card.querySelector('.fold-icon');
+            if (detail && detail.style.display === 'none') {
+                detail.style.display = '';
+                if (icon) { icon.textContent = '▼'; }
+            }
+            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
+            setTimeout(() => card.style.outline = '', 2500);
+        });
+    });
+
     // --- Scroll to region (from extension Ctrl+Shift+O command) ---
     window.addEventListener('message', event => {
         const msg = event.data;
@@ -652,36 +682,37 @@ function getWebviewContent(
         }
     });
 
-    // --- Column sort (All Sections table) ---
-    const table = document.getElementById('sectionTable');
-    const headers = table.querySelectorAll('th[data-sort]');
-    let sortCol = null;
-    let sortAsc = true;
+    // --- Column sort (all sortable tables) ---
+    document.querySelectorAll('.sortable-table').forEach(tbl => {
+        const ths = tbl.querySelectorAll('th[data-sort]');
+        let sortCol = null;
+        let sortAsc = true;
 
-    headers.forEach(th => {
-        th.addEventListener('click', () => {
-            const col = th.dataset.sort;
-            if (sortCol === col) { sortAsc = !sortAsc; }
-            else { sortCol = col; sortAsc = true; }
+        ths.forEach(th => {
+            th.addEventListener('click', () => {
+                const col = th.dataset.sort;
+                if (sortCol === col) { sortAsc = !sortAsc; }
+                else { sortCol = col; sortAsc = true; }
 
-            const tbody = table.querySelector('tbody');
-            const rows = Array.from(tbody.querySelectorAll('tr'));
-            const colIdx = Array.from(th.parentElement.children).indexOf(th);
+                const tbody = tbl.querySelector('tbody');
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                const colIdx = Array.from(th.parentElement.children).indexOf(th);
 
-            rows.sort((a, b) => {
-                const aText = a.children[colIdx].textContent.trim();
-                const bText = b.children[colIdx].textContent.trim();
-                const aNum = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
-                const bNum = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
-                if (!isNaN(aNum) && !isNaN(bNum)) {
-                    return sortAsc ? aNum - bNum : bNum - aNum;
-                }
-                return sortAsc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+                rows.sort((a, b) => {
+                    const aText = a.children[colIdx].textContent.trim();
+                    const bText = b.children[colIdx].textContent.trim();
+                    const aNum = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
+                    const bNum = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
+                    if (!isNaN(aNum) && !isNaN(bNum)) {
+                        return sortAsc ? aNum - bNum : bNum - aNum;
+                    }
+                    return sortAsc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+                });
+
+                rows.forEach(row => tbody.appendChild(row));
+                ths.forEach(h => h.textContent = h.textContent.replace(/ [▲▼]$/, ''));
+                th.textContent += sortAsc ? ' ▲' : ' ▼';
             });
-
-            rows.forEach(row => tbody.appendChild(row));
-            headers.forEach(h => h.textContent = h.textContent.replace(/ [▲▼]$/, ''));
-            th.textContent += sortAsc ? ' ▲' : ' ▼';
         });
     });
 })();

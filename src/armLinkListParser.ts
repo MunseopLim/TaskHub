@@ -269,29 +269,31 @@ export function toMemoryUsage(result: ArmLinkListResult): MemoryUsage[] {
                     };
                 });
 
-            const used = sections.reduce((sum, s) => sum + s.size, 0);
-
             // Sort by address to compute free spaces
             const addrSorted = [...sections].sort((a, b) => a.addr - b.addr);
             const freeSpaces: { addr: number; size: number }[] = [];
             let cursor = r.execBase;
+            const regionEnd = r.execBase + r.maxSize;
             for (const sec of addrSorted) {
+                const secEnd = Math.min(sec.addr + sec.size, regionEnd);
                 if (sec.addr > cursor) {
                     freeSpaces.push({ addr: cursor, size: sec.addr - cursor });
                 }
-                cursor = sec.addr + sec.size;
+                cursor = Math.max(cursor, secEnd);
             }
-            const regionEnd = r.execBase + r.maxSize;
             if (cursor < regionEnd) {
                 freeSpaces.push({ addr: cursor, size: regionEnd - cursor });
             }
 
+            // Compute used from actual occupied span (handles overlapping sections)
+            const actualUsed = r.maxSize - freeSpaces.reduce((sum, f) => sum + f.size, 0);
+
             return {
                 region: r.name,
-                used,
+                used: Math.min(actualUsed, r.maxSize),
                 total: r.maxSize,
                 sections: [...sections].sort((a, b) => b.size - a.size),
-                freeSpaces,
+                freeSpaces: freeSpaces.filter(f => f.size >= 4),
                 reportedUsed: r.size,
             };
         });

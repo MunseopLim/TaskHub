@@ -339,6 +339,16 @@ suite('ArmLinkListParser Test Suite', () => {
             assert.strictEqual(ramTailFree.size, 0x00020000 - 0x410);
         });
 
+        test('should filter out alignment padding (< 4 bytes) from freeSpaces', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            const usages = toMemoryUsage(result);
+            for (const u of usages) {
+                for (const f of u.freeSpaces) {
+                    assert.ok(f.size >= 4, `freeSpace size ${f.size} in ${u.region} should be >= 4`);
+                }
+            }
+        });
+
         test('should not cross-count sections between regions', () => {
             // AC5 sample has overlapping address ranges between regions
             const result = parseArmLinkList(SAMPLE_AC5);

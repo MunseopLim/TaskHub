@@ -167,14 +167,12 @@ export function computeMemoryUsage(sections: ElfSection[], regions: MemoryRegion
     for (const region of regions) {
         const regionEnd = region.origin + region.size;
         const matchingSections: { name: string; size: number; addr: number; type: string }[] = [];
-        let used = 0;
 
         for (const sec of sections) {
             if (!sec.isAlloc || sec.size === 0) { continue; }
             if (sec.addr >= region.origin && sec.addr < regionEnd) {
                 const type = sec.isNoBits ? 'NOBITS' : (sec.isExec ? 'CODE' : (sec.isWrite ? 'DATA' : 'RODATA'));
                 matchingSections.push({ name: sec.name, size: sec.size, addr: sec.addr, type });
-                used += sec.size;
             }
         }
 
@@ -183,21 +181,25 @@ export function computeMemoryUsage(sections: ElfSection[], regions: MemoryRegion
         const freeSpaces: { addr: number; size: number }[] = [];
         let cursor = region.origin;
         for (const sec of addrSorted) {
+            const secEnd = Math.min(sec.addr + sec.size, regionEnd);
             if (sec.addr > cursor) {
                 freeSpaces.push({ addr: cursor, size: sec.addr - cursor });
             }
-            cursor = sec.addr + sec.size;
+            cursor = Math.max(cursor, secEnd);
         }
         if (cursor < regionEnd) {
             freeSpaces.push({ addr: cursor, size: regionEnd - cursor });
         }
 
+        // Compute used from actual occupied span (handles overlapping sections)
+        const actualUsed = region.size - freeSpaces.reduce((sum, f) => sum + f.size, 0);
+
         usages.push({
             region: region.name,
-            used,
+            used: Math.min(actualUsed, region.size),
             total: region.size,
             sections: matchingSections.sort((a, b) => b.size - a.size),
-            freeSpaces,
+            freeSpaces: freeSpaces.filter(f => f.size >= 4),
         });
     }
 
@@ -245,8 +247,9 @@ export function generateTextReport(
         lines.push('--- Memory Regions ---');
         for (const u of memoryUsage) {
             const pct = u.total > 0 ? (u.used / u.total * 100).toFixed(1) : '0.0';
-            const freePct = u.total > 0 ? ((u.total - u.used) / u.total * 100).toFixed(1) : '0.0';
-            lines.push(`${u.region}: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct}%) | Free: ${formatSize(u.total - u.used)} (${freePct}%)`);
+            const calcFree = u.freeSpaces.reduce((sum, f) => sum + f.size, 0);
+            const freePct = u.total > 0 ? (calcFree / u.total * 100).toFixed(1) : '0.0';
+            lines.push(`${u.region}: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct}%) | Free: ${formatSize(calcFree)} (${freePct}%)`);
             for (const s of u.sections) {
                 lines.push(`  ${s.name.padEnd(24)} ${formatSize(s.size).padStart(10)}`);
             }

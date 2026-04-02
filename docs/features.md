@@ -1021,7 +1021,7 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Show Memory Map"** 실행:
 - **Flash/RAM 요약**: 코드(`.text`), 읽기 전용 데이터(`.rodata`), 초기화 데이터(`.data`), BSS(`.bss`) 크기
 - **메모리 영역별 사용률**: 설정된 메모리 영역에 대한 사용량 바 차트 (90% 이상: 빨강, 70% 이상: 주황, 기본: 초록)
 - **세그먼트 레이아웃 바**: 메모리 영역 내 섹션 배치를 색상 블록으로 시각화 (CODE: 파랑, RODATA: 보라, DATA: 주황, NOBITS: 회색, FREE: 투명)
-- **Free Space**: 메모리 영역 내 빈 공간 표시 (영역 헤더 및 테이블에 포함)
+- **Free Space**: 메모리 영역 내 빈 공간 표시 (영역 헤더 및 테이블에 포함). Alignment padding (1~3바이트)은 의미 없는 공간으로 간주하여 Calc Free 및 세그먼트 레이아웃 바에서 제외
 - **Linker/Calc 구분 표시**: listing 파일의 경우 링커 보고값(Used, Free)과 계산값(Calc Used, Calc Free)을 Overview 테이블과 Region Details 양쪽에서 구분하여 표시
 - **전체 섹션 목록**: 이름, 주소, 크기, 타입(CODE/DATA/RODATA/NOBITS)
 
@@ -1029,8 +1029,10 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Show Memory Map"** 실행:
 
 - **키워드 검색**: 상단 검색창에서 섹션 이름, 주소, 타입으로 필터링. 접힌 region 내부도 검색되며 매치 시 자동으로 펼침
 - **Region 이동** (`Ctrl+Shift+O`): Memory Map 패널이 활성화된 상태에서 VS Code QuickPick으로 region 목록을 표시하고, 선택 시 해당 region으로 스크롤 및 펼침
+- **Region 요약 테이블 클릭**: 상단 Overview 테이블의 row 클릭 시 해당 Region Details로 스크롤 및 자동 펼침
 - **Region 폴딩**: 각 region 카드가 기본 접힘 상태로 표시되며, 클릭으로 토글 가능 (헤더 + 사용률 바는 항상 표시)
 - **Expand All / Collapse All**: Region Details 섹션에서 전체 region을 일괄 펼침/접기 가능
+- **섹션 테이블 정렬**: Region Details 및 All Sections 테이블에서 컬럼 헤더 클릭으로 오름차순/내림차순 정렬 (Section, Address, Size, Bytes, Type)
 
 ### 메모리 영역 설정
 
