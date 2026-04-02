@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import { t } from './i18n';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
@@ -74,15 +75,15 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
     try {
         stat = fs.statSync(filePath);
     } catch (e: any) {
-        vscode.window.showErrorMessage(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`);
+        vscode.window.showErrorMessage(t(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`, `Cannot read file (${fileName}): ${e.message}`));
         return;
     }
 
     if (stat.size > JSON_EDITOR_MAX_FILE_SIZE) {
-        vscode.window.showErrorMessage(
-            `파일 크기(${formatFileSize(stat.size)})가 JSON Editor 처리 한도(${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)})를 초과합니다. ` +
-            `대용량 JSON 파일은 텍스트 에디터에서 직접 편집해 주세요.`
-        );
+        vscode.window.showErrorMessage(t(
+            `파일 크기(${formatFileSize(stat.size)})가 JSON Editor 처리 한도(${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)})를 초과합니다. 대용량 JSON 파일은 텍스트 에디터에서 직접 편집해 주세요.`,
+            `File size (${formatFileSize(stat.size)}) exceeds the JSON Editor limit (${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)}). Please edit large JSON files directly in a text editor.`
+        ));
         return;
     }
 
@@ -93,7 +94,7 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
     try {
         content = fs.readFileSync(filePath, 'utf-8');
     } catch (error: any) {
-        vscode.window.showErrorMessage(`파일 읽기 실패 (${fileName}): ${error.message}`);
+        vscode.window.showErrorMessage(t(`파일 읽기 실패 (${fileName}): ${error.message}`, `Failed to read file (${fileName}): ${error.message}`));
         return;
     }
 
@@ -104,7 +105,7 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
         isRootArray = result.isRootArray;
         detectedIndent = detectIndent(content);
     } catch (error: any) {
-        vscode.window.showErrorMessage(`JSON 파싱 실패 (${fileName}): ${error.message}`);
+        vscode.window.showErrorMessage(t(`JSON 파싱 실패 (${fileName}): ${error.message}`, `Failed to parse JSON (${fileName}): ${error.message}`));
         return;
     }
 
@@ -135,9 +136,9 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
                     try {
                         const saveData = unwrapIfRootArray(message.data, isRootArray);
                         fs.writeFileSync(filePath, JSON.stringify(saveData, null, detectedIndent) + '\n', 'utf-8');
-                        vscode.window.showInformationMessage(`JSON 저장 완료: ${fileName}`);
+                        vscode.window.showInformationMessage(t(`JSON 저장 완료: ${fileName}`, `JSON saved: ${fileName}`));
                     } catch (error: any) {
-                        vscode.window.showErrorMessage(`JSON 저장 실패 (${fileName}): ${error.message}`);
+                        vscode.window.showErrorMessage(t(`JSON 저장 실패 (${fileName}): ${error.message}`, `Failed to save JSON (${fileName}): ${error.message}`));
                     }
                     break;
                 }
@@ -150,9 +151,12 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
                         currentPanel?.webview.postMessage({ command: 'loadData', data: result.wrapped });
                     } catch (error: any) {
                         if (error instanceof SyntaxError) {
-                            vscode.window.showErrorMessage(`JSON 파싱 실패 (${fileName}): 파일 내용이 올바른 JSON 형식이 아닙니다. ${error.message}`);
+                            vscode.window.showErrorMessage(t(
+                                `JSON 파싱 실패 (${fileName}): 파일 내용이 올바른 JSON 형식이 아닙니다. ${error.message}`,
+                                `Failed to parse JSON (${fileName}): file content is not valid JSON. ${error.message}`
+                            ));
                         } else {
-                            vscode.window.showErrorMessage(`파일 다시 읽기 실패 (${fileName}): ${error.message}`);
+                            vscode.window.showErrorMessage(t(`파일 다시 읽기 실패 (${fileName}): ${error.message}`, `Failed to reload file (${fileName}): ${error.message}`));
                         }
                     }
                     break;

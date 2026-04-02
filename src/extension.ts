@@ -11,6 +11,7 @@ import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri } from './jsonEditor';
 import { showMemoryMap, MemoryMapConfig, goToSymbol } from './memoryMapViewer';
 import { showHexViewer, HexEditorProvider } from './hexViewer';
+import { t } from './i18n';
 
 
 function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
@@ -602,20 +603,20 @@ type RevealPickItem = vscode.QuickPickItem & { value: 'always' | 'silent' | 'nev
 const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
     {
         id: 'single-shell',
-        label: 'Single Shell Command',
-        description: 'Run one shell command and stream its output to the shared terminal.',
-        defaultDescription: 'Run a shell command.',
+        label: t('단일 쉘 명령어', 'Single Shell Command'),
+        description: t('하나의 쉘 명령어를 실행하고 공유 터미널에 출력을 스트리밍합니다.', 'Run one shell command and stream its output to the shared terminal.'),
+        defaultDescription: t('쉘 명령어를 실행합니다.', 'Run a shell command.'),
         async build(baseInfo) {
             const usedTaskIds = new Set<string>();
             const taskId = await promptForTaskId(usedTaskIds, 'run');
             usedTaskIds.add(taskId);
             const command = await promptForRequiredInput({
-                prompt: 'Enter the shell command to execute',
+                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
                 placeHolder: 'e.g. npm run build'
             });
             const cwd = await promptForOptionalInput({
-                prompt: 'Working directory (optional)',
-                placeHolder: 'Leave empty to use the workspace root'
+                prompt: t('작업 디렉터리 (선택사항)', 'Working directory (optional)'),
+                placeHolder: t('비워두면 워크스페이스 루트를 사용합니다', 'Leave empty to use the workspace root')
             });
             const reveal = await promptForRevealSelection('always');
             const task: any = {
@@ -642,31 +643,31 @@ const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
     },
     {
         id: 'file-dialog-shell',
-        label: 'File Picker + Shell',
-        description: 'Ask the user to pick a file, then run a shell command that receives the selected path.',
-        defaultDescription: 'Pick a file and run a command with the selection.',
+        label: t('파일 선택 + 쉘', 'File Picker + Shell'),
+        description: t('사용자에게 파일을 선택하게 한 후, 선택된 경로를 받는 쉘 명령어를 실행합니다.', 'Ask the user to pick a file, then run a shell command that receives the selected path.'),
+        defaultDescription: t('파일을 선택하고 해당 파일로 명령어를 실행합니다.', 'Pick a file and run a command with the selection.'),
         async build(baseInfo) {
             const usedTaskIds = new Set<string>();
             const dialogTaskId = await promptForTaskId(usedTaskIds, 'selectFile');
             usedTaskIds.add(dialogTaskId);
             const openLabel = await promptForOptionalInput({
-                prompt: 'File picker button label (optional)',
-                placeHolder: 'Defaults to "Select file"'
+                prompt: t('파일 선택 버튼 레이블 (선택사항)', 'File picker button label (optional)'),
+                placeHolder: t('"파일 선택"이 기본값입니다', 'Defaults to "Select file"')
             });
             const shellTaskId = await promptForTaskId(usedTaskIds, 'run');
             usedTaskIds.add(shellTaskId);
             const defaultCommand = `echo Selected file: \${${dialogTaskId}.path}`;
             const command = await promptForRequiredInput({
-                prompt: 'Enter the shell command to execute',
+                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
                 value: defaultCommand,
-                placeHolder: `Use \${${dialogTaskId}.path} to reference the selected file`
+                placeHolder: t(`선택한 파일을 참조하려면 \${${dialogTaskId}.path}를 사용하세요`, `Use \${${dialogTaskId}.path} to reference the selected file`)
             });
             const reveal = await promptForRevealSelection('always');
             const fileTask: any = {
                 id: dialogTaskId,
                 type: 'fileDialog' as const,
                 options: {
-                    openLabel: openLabel || 'Select file'
+                    openLabel: openLabel || t('파일 선택', 'Select file')
                 }
             };
             const shellTask: any = {
@@ -734,7 +735,7 @@ async function promptForRequiredInput(options: { prompt: string; value?: string;
         validateInput: input => {
             const trimmed = input.trim();
             if (!trimmed) {
-                return 'Value is required.';
+                return t('값을 입력해야 합니다.', 'Value is required.');
             }
             return undefined;
         }
@@ -762,19 +763,19 @@ async function promptForOptionalInput(options: { prompt: string; value?: string;
 async function promptForActionId(existingIds: Set<string>): Promise<string> {
     const idPattern = /^[A-Za-z0-9._-]+$/;
     const result = await vscode.window.showInputBox({
-        prompt: 'Enter a unique action id',
+        prompt: t('고유한 액션 ID를 입력하세요', 'Enter a unique action id'),
         placeHolder: 'e.g. button.buildProject',
         ignoreFocusOut: true,
         validateInput: input => {
             const trimmed = input.trim();
             if (!trimmed) {
-                return 'Action id is required.';
+                return t('액션 ID는 필수입니다.', 'Action id is required.');
             }
             if (!idPattern.test(trimmed)) {
-                return 'Use letters, numbers, dots, underscores, or hyphens.';
+                return t('영문, 숫자, 점, 밑줄, 하이픈만 사용할 수 있습니다.', 'Use letters, numbers, dots, underscores, or hyphens.');
             }
             if (existingIds.has(trimmed)) {
-                return 'An action or folder with this id already exists.';
+                return t('이 ID를 가진 액션 또는 폴더가 이미 존재합니다.', 'An action or folder with this id already exists.');
             }
             return undefined;
         }
@@ -788,20 +789,20 @@ async function promptForActionId(existingIds: Set<string>): Promise<string> {
 async function promptForTaskId(usedTaskIds: Set<string>, suggestion: string): Promise<string> {
     const idPattern = /^[A-Za-z0-9._-]+$/;
     const result = await vscode.window.showInputBox({
-        prompt: 'Enter a task id',
+        prompt: t('태스크 ID를 입력하세요', 'Enter a task id'),
         value: suggestion,
-        placeHolder: 'Used to reference the task output in later steps',
+        placeHolder: t('이후 단계에서 태스크 출력을 참조하는 데 사용됩니다', 'Used to reference the task output in later steps'),
         ignoreFocusOut: true,
         validateInput: input => {
             const trimmed = input.trim();
             if (!trimmed) {
-                return 'Task id is required.';
+                return t('태스크 ID는 필수입니다.', 'Task id is required.');
             }
             if (!idPattern.test(trimmed)) {
-                return 'Use letters, numbers, dots, underscores, or hyphens.';
+                return t('영문, 숫자, 점, 밑줄, 하이픈만 사용할 수 있습니다.', 'Use letters, numbers, dots, underscores, or hyphens.');
             }
             if (usedTaskIds.has(trimmed)) {
-                return 'Task id already used in this action.';
+                return t('이 태스크 ID는 이미 이 액션에서 사용 중입니다.', 'Task id already used in this action.');
             }
             return undefined;
         }
@@ -815,23 +816,23 @@ async function promptForTaskId(usedTaskIds: Set<string>, suggestion: string): Pr
 async function promptForRevealSelection(defaultValue: 'always' | 'silent' | 'never'): Promise<'always' | 'silent' | 'never'> {
     const picks: RevealPickItem[] = [
         {
-            label: defaultValue === 'always' ? 'Always (default)' : 'Always',
-            description: 'Reveal the terminal when the task runs.',
+            label: defaultValue === 'always' ? t('항상 (기본값)', 'Always (default)') : t('항상', 'Always'),
+            description: t('태스크 실행 시 터미널을 표시합니다.', 'Reveal the terminal when the task runs.'),
             value: 'always'
         },
         {
-            label: defaultValue === 'silent' ? 'Silent (default)' : 'Silent',
-            description: 'Run without revealing unless the terminal is already visible.',
+            label: defaultValue === 'silent' ? t('조용히 (기본값)', 'Silent (default)') : t('조용히', 'Silent'),
+            description: t('터미널이 이미 보이지 않는 한 표시하지 않고 실행합니다.', 'Run without revealing unless the terminal is already visible.'),
             value: 'silent'
         },
         {
-            label: defaultValue === 'never' ? 'Never (default)' : 'Never',
-            description: 'Keep the terminal hidden while the task runs.',
+            label: defaultValue === 'never' ? t('표시 안 함 (기본값)', 'Never (default)') : t('표시 안 함', 'Never'),
+            description: t('태스크 실행 중 터미널을 숨긴 상태로 유지합니다.', 'Keep the terminal hidden while the task runs.'),
             value: 'never'
         }
     ];
     const selection = await vscode.window.showQuickPick(picks, {
-        placeHolder: 'Choose how the Task terminal should behave.',
+        placeHolder: t('태스크 터미널 동작 방식을 선택하세요.', 'Choose how the Task terminal should behave.'),
         ignoreFocusOut: true
     });
     if (!selection) {
@@ -844,19 +845,19 @@ async function collectBaseActionInfo(template: ActionTemplateDefinition, existin
     const id = await promptForActionId(existingIds);
     existingIds.add(id);
     const title = await promptForRequiredInput({
-        prompt: 'Enter the title displayed in TaskHub'
+        prompt: t('TaskHub에 표시될 제목을 입력하세요', 'Enter the title displayed in TaskHub')
     });
     const description = await promptForRequiredInput({
-        prompt: 'Enter a short description for this action',
+        prompt: t('이 액션에 대한 짧은 설명을 입력하세요', 'Enter a short description for this action'),
         value: template.defaultDescription
     });
     const successMessage = await promptForOptionalInput({
-        prompt: 'Success message (optional)',
-        placeHolder: 'Shown when all tasks succeed'
+        prompt: t('성공 메시지 (선택사항)', 'Success message (optional)'),
+        placeHolder: t('모든 태스크가 성공하면 표시됩니다', 'Shown when all tasks succeed')
     });
     const failMessage = await promptForOptionalInput({
-        prompt: 'Failure message (optional)',
-        placeHolder: 'Shown when any task fails'
+        prompt: t('실패 메시지 (선택사항)', 'Failure message (optional)'),
+        placeHolder: t('태스크가 실패하면 표시됩니다', 'Shown when any task fails')
     });
     return {
         id,
@@ -904,7 +905,7 @@ async function promptForActionTemplate(): Promise<ActionTemplateDefinition | und
         templateId: template.id
     }));
     const templatePick = await vscode.window.showQuickPick(templatePickItems, {
-        placeHolder: 'Select a starting template for the new action',
+        placeHolder: t('새 액션의 시작 템플릿을 선택하세요', 'Select a starting template for the new action'),
         ignoreFocusOut: true
     });
     if (!templatePick) {
@@ -912,7 +913,7 @@ async function promptForActionTemplate(): Promise<ActionTemplateDefinition | und
     }
     const template = ACTION_TEMPLATES.find(t => t.id === templatePick.templateId);
     if (!template) {
-        vscode.window.showErrorMessage('Selected template was not found.');
+        vscode.window.showErrorMessage(t('선택한 템플릿을 찾을 수 없습니다.', 'Selected template was not found.'));
         return undefined;
     }
     return template;
@@ -921,13 +922,13 @@ async function promptForActionTemplate(): Promise<ActionTemplateDefinition | und
 async function promptForActionDestination(workspaceActions: ActionItem[]): Promise<DestinationPickItem> {
     const destinationPickItems: DestinationPickItem[] = [
         {
-            label: '$(root-folder) Root (top level)',
-            description: 'Add at the top of actions.json'
+            label: t('$(root-folder) 루트 (최상위)', '$(root-folder) Root (top level)'),
+            description: t('actions.json 최상단에 추가', 'Add at the top of actions.json')
         },
         ...collectFolderDestinations(workspaceActions)
     ];
     const destination = await vscode.window.showQuickPick(destinationPickItems, {
-        placeHolder: 'Choose where to place the new action',
+        placeHolder: t('새 액션을 배치할 위치를 선택하세요', 'Choose where to place the new action'),
         ignoreFocusOut: true
     });
     if (!destination) {
@@ -954,9 +955,9 @@ function persistWorkspaceActions(workspaceFolder: string, workspaceActionsPath: 
 }
 
 async function handlePostCreationChoice(baseInfo: BaseActionInfo, workspaceActionsPath: string): Promise<void> {
-    const openOption = 'Open actions.json';
-    const runOption = 'Run now';
-    const choice = await vscode.window.showInformationMessage(`Action '${baseInfo.title}' was added to actions.json.`, openOption, runOption);
+    const openOption = t('actions.json 열기', 'Open actions.json');
+    const runOption = t('바로 실행', 'Run now');
+    const choice = await vscode.window.showInformationMessage(t(`'${baseInfo.title}' 액션이 actions.json에 추가되었습니다.`, `Action '${baseInfo.title}' was added to actions.json.`), openOption, runOption);
     if (choice === openOption) {
         const document = await vscode.workspace.openTextDocument(workspaceActionsPath);
         await vscode.window.showTextDocument(document, { preview: false });
@@ -966,7 +967,7 @@ async function handlePostCreationChoice(baseInfo: BaseActionInfo, workspaceActio
 }
 
 async function runActionCreationWizard(context: vscode.ExtensionContext, mainViewProvider: MainViewProvider): Promise<void> {
-    const targetFolder = await pickWorkspaceFolderForCommand('Select the workspace folder whose actions.json should be updated');
+    const targetFolder = await pickWorkspaceFolderForCommand(t('actions.json을 업데이트할 워크스페이스 폴더를 선택하세요', 'Select the workspace folder whose actions.json should be updated'));
     if (!targetFolder) {
         return;
     }
@@ -1004,7 +1005,7 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
         if (error instanceof WizardCancelledError) {
             return;
         }
-        vscode.window.showErrorMessage(`Failed to create a new action: ${(error as Error).message}`);
+        vscode.window.showErrorMessage(t(`새 액션 생성에 실패했습니다: ${(error as Error).message}`, `Failed to create a new action: ${(error as Error).message}`));
     }
 }
 
@@ -1269,7 +1270,7 @@ function loadFavoritesFromDisk(filePath: string, reportErrors: boolean, workspac
     } catch (error: any) {
         console.error(`Error parsing ${filePath}: ${error.message}`);
         if (reportErrors) {
-            vscode.window.showErrorMessage(`Error parsing ${path.basename(filePath)}: ${error.message}`);
+            vscode.window.showErrorMessage(t(`${path.basename(filePath)} 파싱 오류: ${error.message}`, `Error parsing ${path.basename(filePath)}: ${error.message}`));
         }
         return [];
     }
@@ -1302,7 +1303,7 @@ function loadLinksFromDisk(filePath: string, reportErrors: boolean): LinkEntry[]
     } catch (error: any) {
         console.error(`Error parsing ${filePath}: ${error.message}`);
         if (reportErrors) {
-            vscode.window.showErrorMessage(`Error parsing ${path.basename(filePath)}: ${error.message}`);
+            vscode.window.showErrorMessage(t(`${path.basename(filePath)} 파싱 오류: ${error.message}`, `Error parsing ${path.basename(filePath)}: ${error.message}`));
         }
         return [];
     }
@@ -1724,7 +1725,7 @@ type FavoriteQuickPickItem = vscode.QuickPickItem & { entry: FavoriteEntry };
 async function promptLinkSearch(linkViewProvider: LinkViewProvider): Promise<void> {
     const entries = linkViewProvider.getAllEntries();
     if (entries.length === 0) {
-        vscode.window.showInformationMessage('No links available in TaskHub.');
+        vscode.window.showInformationMessage(t('TaskHub에 사용 가능한 링크가 없습니다.', 'No links available in TaskHub.'));
         return;
     }
 
@@ -1745,7 +1746,7 @@ async function promptLinkSearch(linkViewProvider: LinkViewProvider): Promise<voi
     }));
 
     const pick = await vscode.window.showQuickPick(items, {
-        placeHolder: 'Search links by title, group, or tag',
+        placeHolder: t('제목, 그룹 또는 태그로 링크 검색', 'Search links by title, group, or tag'),
         matchOnDescription: true,
         matchOnDetail: true,
         ignoreFocusOut: true
@@ -1759,7 +1760,7 @@ async function promptLinkSearch(linkViewProvider: LinkViewProvider): Promise<voi
 async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, target?: Link): Promise<void> {
     const entries = linkViewProvider.getAllEntries().filter(entry => entry.sourceFile);
     if (entries.length === 0) {
-        vscode.window.showInformationMessage('No workspace links available to edit.');
+        vscode.window.showInformationMessage(t('편집할 워크스페이스 링크가 없습니다.', 'No workspace links available to edit.'));
         return;
     }
 
@@ -1774,7 +1775,7 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
             entry
         }));
         const pick = await vscode.window.showQuickPick(items, {
-            placeHolder: 'Select a workspace link to edit',
+            placeHolder: t('편집할 워크스페이스 링크를 선택하세요', 'Select a workspace link to edit'),
             matchOnDescription: true,
             matchOnDetail: true,
             ignoreFocusOut: true
@@ -1786,32 +1787,32 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
     }
 
     if (!entryToEdit?.sourceFile) {
-        vscode.window.showInformationMessage('This link is read-only and cannot be edited here.');
+        vscode.window.showInformationMessage(t('이 링크는 읽기 전용이며 여기서 편집할 수 없습니다.', 'This link is read-only and cannot be edited here.'));
         return;
     }
 
     const titleInput = await vscode.window.showInputBox({
-        prompt: 'Title for the link',
+        prompt: t('링크 제목', 'Title for the link'),
         value: entryToEdit.title,
         ignoreFocusOut: true,
-        validateInput: value => value.trim().length === 0 ? 'Enter a title' : null
+        validateInput: value => value.trim().length === 0 ? t('제목을 입력하세요', 'Enter a title') : null
     });
     if (!titleInput) {
         return;
     }
 
     const urlInput = await vscode.window.showInputBox({
-        prompt: 'URL to open',
+        prompt: t('열 URL', 'URL to open'),
         value: entryToEdit.link,
         ignoreFocusOut: true,
-        validateInput: value => value.trim().length === 0 ? 'Enter a URL' : null
+        validateInput: value => value.trim().length === 0 ? t('URL을 입력하세요', 'Enter a URL') : null
     });
     if (!urlInput) {
         return;
     }
 
     const groupInput = await vscode.window.showInputBox({
-        prompt: 'Group label (optional)',
+        prompt: t('그룹 레이블 (선택사항)', 'Group label (optional)'),
         value: entryToEdit.group ?? '',
         ignoreFocusOut: true
     });
@@ -1821,7 +1822,7 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
     const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
 
     const tagsInput = await vscode.window.showInputBox({
-        prompt: 'Tags (optional, comma-separated)',
+        prompt: t('태그 (선택사항, 쉼표로 구분)', 'Tags (optional, comma-separated)'),
         value: entryToEdit.tags?.join(', ') ?? '',
         ignoreFocusOut: true
     });
@@ -1835,13 +1836,13 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
     const links = loadLinksFromDisk(entryToEdit.sourceFile, true);
     const targetIndex = links.findIndex(link => link.title === entryToEdit.title && link.link === entryToEdit.link);
     if (targetIndex === -1) {
-        vscode.window.showInformationMessage('Could not find the selected link in links.json.');
+        vscode.window.showInformationMessage(t('links.json에서 선택한 링크를 찾을 수 없습니다.', 'Could not find the selected link in links.json.'));
         return;
     }
 
     const duplicate = links.some((link, index) => index !== targetIndex && link.title === trimmedTitle && link.link === trimmedUrl);
     if (duplicate) {
-        vscode.window.showInformationMessage('Another link with the same title and URL already exists.');
+        vscode.window.showInformationMessage(t('같은 제목과 URL을 가진 다른 링크가 이미 존재합니다.', 'Another link with the same title and URL already exists.'));
         return;
     }
 
@@ -1863,7 +1864,7 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
 async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider): Promise<void> {
     const entries = favoriteViewProvider.getAllEntries();
     if (entries.length === 0) {
-        vscode.window.showInformationMessage('No favorites stored in TaskHub.');
+        vscode.window.showInformationMessage(t('TaskHub에 저장된 즐겨찾기가 없습니다.', 'No favorites stored in TaskHub.'));
         return;
     }
 
@@ -1894,7 +1895,7 @@ async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider):
     });
 
     const pick = await vscode.window.showQuickPick(items, {
-        placeHolder: 'Search favorites by title, group, line, or tag',
+        placeHolder: t('제목, 그룹, 줄 번호 또는 태그로 즐겨찾기 검색', 'Search favorites by title, group, line, or tag'),
         matchOnDescription: true,
         matchOnDetail: true,
         ignoreFocusOut: true
@@ -1908,14 +1909,14 @@ async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider):
 async function promptFavoriteLineNumber(promptLabel: string, initialLine?: number): Promise<number | undefined | 'cancel'> {
     const input = await vscode.window.showInputBox({
         prompt: promptLabel,
-        placeHolder: 'Leave empty to open at the top of the file',
+        placeHolder: t('비워두면 파일 맨 위에서 엽니다', 'Leave empty to open at the top of the file'),
         value: initialLine !== undefined ? `${initialLine}` : undefined,
         ignoreFocusOut: true,
         validateInput: text => {
             if (text.trim().length === 0) {
                 return null;
             }
-            return normalizeLineNumber(text) ? null : 'Enter a positive line number';
+            return normalizeLineNumber(text) ? null : t('양수 줄 번호를 입력하세요', 'Enter a positive line number');
         }
     });
 
@@ -1929,7 +1930,7 @@ async function promptFavoriteLineNumber(promptLabel: string, initialLine?: numbe
 function resolveActionDefinition(actionItem: ActionItem): { action: PipelineAction; id: string } | undefined {
     const action = actionItem.action;
     if (!action || !action.tasks) {
-        vscode.window.showErrorMessage(`Action '${actionItem.title}' has no tasks to run.`);
+        vscode.window.showErrorMessage(t(`'${actionItem.title}' 액션에 실행할 태스크가 없습니다.`, `Action '${actionItem.title}' has no tasks to run.`));
         return undefined;
     }
     return { action, id: actionItem.id };
@@ -1942,7 +1943,7 @@ function markActionAsRunning(actionItem: ActionItem, id: string, showTaskStatus:
 
     const currentState = actionStates.get(id);
     if (currentState?.state === 'running') {
-        vscode.window.showInformationMessage(`Action '${actionItem.title}' is already running.`);
+        vscode.window.showInformationMessage(t(`'${actionItem.title}' 액션이 이미 실행 중입니다.`, `Action '${actionItem.title}' is already running.`));
         return false;
     }
 
@@ -1989,7 +1990,7 @@ function handleActionFailure(id: string, actionItem: ActionItem, action: Pipelin
     if (action.failMessage) {
         vscode.window.showErrorMessage(`${action.failMessage}: ${error.message}`);
     } else {
-        vscode.window.showErrorMessage(`Action '${actionItem.title}' failed: ${error.message}`);
+        vscode.window.showErrorMessage(t(`'${actionItem.title}' 액션 실패: ${error.message}`, `Action '${actionItem.title}' failed: ${error.message}`));
     }
 }
 
@@ -2177,7 +2178,7 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
                 if (task.isOneShot) {
                     executeStreamedTask(handlerTask, defaultWorkspace).catch(error => {
                         console.error(`One-shot task ${task.id} failed:`, error);
-                        vscode.window.showErrorMessage(`One-shot task '${task.id}' failed to start: ${error.message}`);
+                        vscode.window.showErrorMessage(t(`원샷 태스크 '${task.id}' 시작 실패: ${error.message}`, `One-shot task '${task.id}' failed to start: ${error.message}`));
                     });
                 } else {
                     await executeStreamedTask(handlerTask, defaultWorkspace);
@@ -2807,7 +2808,7 @@ function registerWorkspaceFileWatchers(relativePath: string, callback: () => voi
 async function pickWorkspaceFolderForCommand(placeHolder: string): Promise<vscode.WorkspaceFolder | undefined> {
     const folders = vscode.workspace.workspaceFolders;
     if (!folders || folders.length === 0) {
-        vscode.window.showErrorMessage('Open a workspace folder to use this feature.');
+        vscode.window.showErrorMessage(t('이 기능을 사용하려면 워크스페이스 폴더를 열어야 합니다.', 'Open a workspace folder to use this feature.'));
         return undefined;
     }
     if (folders.length === 1) {
@@ -2817,6 +2818,9 @@ async function pickWorkspaceFolderForCommand(placeHolder: string): Promise<vscod
 }
 
 export function activate(context: vscode.ExtensionContext) {
+    // DEBUG: i18n 로케일 확인 (문제 해결 후 제거)
+    console.log(`[TaskHub] vscode.env.language = "${vscode.env.language}"`);
+
     const terminalDisposable = vscode.window.onDidCloseTerminal(terminal => {
         for (const [key, actionTerminal] of actionTerminals.entries()) {
             if (actionTerminal === terminal) {
@@ -2897,11 +2901,11 @@ export function activate(context: vscode.ExtensionContext) {
                 editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
             }
         } catch (error: any) {
-            vscode.window.showErrorMessage(`Could not open file: ${error.message}`);
+            vscode.window.showErrorMessage(t(`파일을 열 수 없습니다: ${error.message}`, `Could not open file: ${error.message}`));
         }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openLink', (url: string) => { vscode.env.openExternal(vscode.Uri.parse(url)); }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', (item: Link) => { vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage('Link copied to clipboard.'); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', (item: Link) => { vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage(t('링크가 클립보드에 복사되었습니다.', 'Link copied to clipboard.')); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.goToLink', (item: Link) => { vscode.env.openExternal(vscode.Uri.parse(item.getLink())); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeAction', async (actionItem: Action) => {
         let allActions: ActionItem[];
@@ -2909,7 +2913,7 @@ export function activate(context: vscode.ExtensionContext) {
             allActions = loadAllActions(context);
         } catch (error: any) {
             console.error(error.message);
-            vscode.window.showErrorMessage(`Could not execute action: ${error.message}`);
+            vscode.window.showErrorMessage(t(`액션을 실행할 수 없습니다: ${error.message}`, `Could not execute action: ${error.message}`));
             return;
         }
 
@@ -2925,12 +2929,12 @@ export function activate(context: vscode.ExtensionContext) {
                 console.error(`Execution failed for action '${actionId}':`, error);
             }
         } else {
-            vscode.window.showErrorMessage(`Could not find action definition for ID '${actionId}'.`);
+            vscode.window.showErrorMessage(t(`ID '${actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${actionId}'.`));
         }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeActionById', async (args: { id: string }) => {
         if (!args || !args.id) {
-            vscode.window.showErrorMessage('Action ID is required for this command.');
+            vscode.window.showErrorMessage(t('이 명령어에는 액션 ID가 필요합니다.', 'Action ID is required for this command.'));
             return;
         }
         let allActions: ActionItem[];
@@ -2938,14 +2942,14 @@ export function activate(context: vscode.ExtensionContext) {
             allActions = loadAllActions(context);
         } catch (error: any) {
             console.error(error.message);
-            vscode.window.showErrorMessage(`Could not execute action by ID: ${error.message}`);
+            vscode.window.showErrorMessage(t(`ID로 액션을 실행할 수 없습니다: ${error.message}`, `Could not execute action by ID: ${error.message}`));
             return;
         }
         const actionItem = findActionById(allActions, args.id);
         if (actionItem && actionItem.action) {
             await executeAction(actionItem, context, mainViewProvider, historyProvider);
         } else {
-            vscode.window.showErrorMessage(`Action with ID '${args.id}' not found or it has no 'action' property.`);
+            vscode.window.showErrorMessage(t(`ID '${args.id}'인 액션을 찾을 수 없거나 'action' 속성이 없습니다.`, `Action with ID '${args.id}' not found or it has no 'action' property.`));
         }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
@@ -2966,7 +2970,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
         if (!stopped) {
             manuallyTerminatedActions.delete(id);
-            vscode.window.showWarningMessage(`Could not find active task for '${actionItem.label}'.`);
+            vscode.window.showWarningMessage(t(`'${actionItem.label}'에 대한 활성 태스크를 찾을 수 없습니다.`, `Could not find active task for '${actionItem.label}'.`));
         } else {
             // Update history status to failure when manually stopped
             const timestamp = actionStartTimestamps.get(id);
@@ -2975,10 +2979,10 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }
     }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showVersion', () => { const packageJson = JSON.parse(fs.readFileSync(path.join(context.extensionPath, 'package.json'), 'utf-8')); vscode.window.showInformationMessage(`TaskHub Version: ${packageJson.version}`); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showVersion', () => { const packageJson = JSON.parse(fs.readFileSync(path.join(context.extensionPath, 'package.json'), 'utf-8')); vscode.window.showInformationMessage(t(`TaskHub 버전: ${packageJson.version}`, `TaskHub Version: ${packageJson.version}`)); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showFilePicker', async (action: any) => { /* Obsolete */ }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.editFavorites', async () => {
-        const folder = await pickWorkspaceFolderForCommand('Select a workspace folder to edit favorites for');
+        const folder = await pickWorkspaceFolderForCommand(t('즐겨찾기를 편집할 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to edit favorites for'));
         if (!folder) {
             return;
         }
@@ -2988,7 +2992,7 @@ export function activate(context: vscode.ExtensionContext) {
         await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath)));
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.editLinks', async () => {
-        const folder = await pickWorkspaceFolderForCommand('Select a workspace folder to edit links for');
+        const folder = await pickWorkspaceFolderForCommand(t('링크를 편집할 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to edit links for'));
         if (!folder) {
             return;
         }
@@ -2998,7 +3002,7 @@ export function activate(context: vscode.ExtensionContext) {
         await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(filePath)));
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.editActions', async () => {
-        const folder = await pickWorkspaceFolderForCommand('Select a workspace folder to edit actions for');
+        const folder = await pickWorkspaceFolderForCommand(t('액션을 편집할 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to edit actions for'));
         if (!folder) {
             return;
         }
@@ -3014,33 +3018,33 @@ export function activate(context: vscode.ExtensionContext) {
         await promptWorkspaceLinkEdit(workspaceLinkViewProvider, item);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addLink', async () => {
-        const folder = await pickWorkspaceFolderForCommand('Select a workspace folder to add the link to');
+        const folder = await pickWorkspaceFolderForCommand(t('링크를 추가할 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to add the link to'));
         if (!folder) {
             return;
         }
 
         const title = await vscode.window.showInputBox({
-            prompt: 'Title for the link',
+            prompt: t('링크 제목', 'Title for the link'),
             placeHolder: 'e.g. Project Dashboard',
             ignoreFocusOut: true,
-            validateInput: value => value.trim().length === 0 ? 'Enter a title' : null
+            validateInput: value => value.trim().length === 0 ? t('제목을 입력하세요', 'Enter a title') : null
         });
         if (!title) {
             return;
         }
 
         const url = await vscode.window.showInputBox({
-            prompt: 'URL to open',
+            prompt: t('열 URL', 'URL to open'),
             placeHolder: 'https://example.com',
             ignoreFocusOut: true,
-            validateInput: value => value.trim().length === 0 ? 'Enter a URL' : null
+            validateInput: value => value.trim().length === 0 ? t('URL을 입력하세요', 'Enter a URL') : null
         });
         if (!url) {
             return;
         }
 
         const groupInput = await vscode.window.showInputBox({
-            prompt: 'Group label (optional)',
+            prompt: t('그룹 레이블 (선택사항)', 'Group label (optional)'),
             placeHolder: 'e.g. Documentation',
             ignoreFocusOut: true
         });
@@ -3050,7 +3054,7 @@ export function activate(context: vscode.ExtensionContext) {
         const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
 
         const tagsInput = await vscode.window.showInputBox({
-            prompt: 'Tags (optional, comma-separated)',
+            prompt: t('태그 (선택사항, 쉼표로 구분)', 'Tags (optional, comma-separated)'),
             placeHolder: 'e.g. docs, api',
             ignoreFocusOut: true
         });
@@ -3069,7 +3073,7 @@ export function activate(context: vscode.ExtensionContext) {
             sourceFile: linksPath
         });
         if (!added) {
-            vscode.window.showInformationMessage('This link already exists in links.json.');
+            vscode.window.showInformationMessage(t('이 링크는 links.json에 이미 존재합니다.', 'This link already exists in links.json.'));
             return;
         }
 
@@ -3090,7 +3094,7 @@ export function activate(context: vscode.ExtensionContext) {
         } else {
             fileUris = await vscode.window.showOpenDialog({
                 canSelectMany: true,
-                openLabel: 'Add to Favorites',
+                openLabel: t('즐겨찾기에 추가', 'Add to Favorites'),
                 defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri
             });
         }
@@ -3100,7 +3104,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const groupInput = await vscode.window.showInputBox({
-            prompt: 'Group label (optional)',
+            prompt: t('그룹 레이블 (선택사항)', 'Group label (optional)'),
             placeHolder: 'e.g. Backend Services',
             ignoreFocusOut: true
         });
@@ -3110,7 +3114,7 @@ export function activate(context: vscode.ExtensionContext) {
         const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
 
         const tagsInput = await vscode.window.showInputBox({
-            prompt: 'Tags (optional, comma-separated)',
+            prompt: t('태그 (선택사항, 쉼표로 구분)', 'Tags (optional, comma-separated)'),
             placeHolder: 'e.g. api, critical',
             ignoreFocusOut: true
         });
@@ -3124,7 +3128,7 @@ export function activate(context: vscode.ExtensionContext) {
         for (const fileUri of fileUris) {
             const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
             if (!workspaceFolder) {
-                vscode.window.showWarningMessage(`Skipping ${fileUri.fsPath} because it is not part of the current workspace.`);
+                vscode.window.showWarningMessage(t(`${fileUri.fsPath}은(는) 현재 워크스페이스에 포함되어 있지 않아 건너뜁니다.`, `Skipping ${fileUri.fsPath} because it is not part of the current workspace.`));
                 continue;
             }
             const favoritesPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'favorites.json');
@@ -3133,14 +3137,14 @@ export function activate(context: vscode.ExtensionContext) {
             }
             const favorites = favoritesByPath.get(favoritesPath)!;
             const title = await vscode.window.showInputBox({
-                prompt: `Enter a title for ${path.basename(fileUri.fsPath)}`,
+                prompt: t(`${path.basename(fileUri.fsPath)}의 제목을 입력하세요`, `Enter a title for ${path.basename(fileUri.fsPath)}`),
                 value: path.basename(fileUri.fsPath),
                 ignoreFocusOut: true
             });
             if (!title) {
                 continue;
             }
-            const line = await promptFavoriteLineNumber(`Line number for ${path.basename(fileUri.fsPath)} (optional)`);
+            const line = await promptFavoriteLineNumber(t(`${path.basename(fileUri.fsPath)}의 줄 번호 (선택사항)`, `Line number for ${path.basename(fileUri.fsPath)} (optional)`));
             if (line === 'cancel') {
                 return;
             }
@@ -3175,13 +3179,13 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteFavorite', async (item: Favorite) => {
-        const confirm = await vscode.window.showWarningMessage(`Are you sure you want to delete ${item.label}?`, { modal: true }, 'Yes');
+        const confirm = await vscode.window.showWarningMessage(t(`${item.label}을(를) 삭제하시겠습니까?`, `Are you sure you want to delete ${item.label}?`), { modal: true }, 'Yes');
         if (confirm !== 'Yes') {
             return;
         }
         const sourceFile = item.getSourceFile();
         if (!sourceFile) {
-            vscode.window.showInformationMessage('This favorite is read-only.');
+            vscode.window.showInformationMessage(t('이 즐겨찾기는 읽기 전용입니다.', 'This favorite is read-only.'));
             return;
         }
         if (!fs.existsSync(sourceFile)) {
@@ -3206,18 +3210,18 @@ export function activate(context: vscode.ExtensionContext) {
         favoriteViewProvider.refresh();
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteLink', async (item: Link) => {
-        const confirm = await vscode.window.showWarningMessage(`Are you sure you want to delete ${item.label}?`, { modal: true }, 'Yes');
+        const confirm = await vscode.window.showWarningMessage(t(`${item.label}을(를) 삭제하시겠습니까?`, `Are you sure you want to delete ${item.label}?`), { modal: true }, 'Yes');
         if (confirm !== 'Yes') {
             return;
         }
         const sourceFile = item.getEntry().sourceFile;
         if (!sourceFile) {
-            vscode.window.showInformationMessage('This link is provided by the extension and cannot be deleted here.');
+            vscode.window.showInformationMessage(t('이 링크는 확장 프로그램에서 제공하며 여기서 삭제할 수 없습니다.', 'This link is provided by the extension and cannot be deleted here.'));
             return;
         }
         const belongsToWorkspace = (vscode.workspace.workspaceFolders ?? []).some(folder => sourceFile.startsWith(folder.uri.fsPath + path.sep));
         if (!belongsToWorkspace) {
-            vscode.window.showInformationMessage('This link is provided by the extension and cannot be deleted here.');
+            vscode.window.showInformationMessage(t('이 링크는 확장 프로그램에서 제공하며 여기서 삭제할 수 없습니다.', 'This link is provided by the extension and cannot be deleted here.'));
             return;
         }
         if (!fs.existsSync(sourceFile)) {
@@ -3255,7 +3259,7 @@ export function activate(context: vscode.ExtensionContext) {
           exampleContent = fs.readFileSync(favoritesExamplePath, 'utf-8');
           break;
         default:
-          vscode.window.showErrorMessage(`Unknown JSON type: ${jsonType}`);
+          vscode.window.showErrorMessage(t(`알 수 없는 JSON 타입: ${jsonType}`, `Unknown JSON type: ${jsonType}`));
           return;
       }
 
@@ -3264,24 +3268,24 @@ export function activate(context: vscode.ExtensionContext) {
         language: 'jsonc' // Use jsonc for comments in examples
       });
       await vscode.window.showTextDocument(document, { preview: true });
-      vscode.window.showInformationMessage(`Example ${fileName} opened.`);
+      vscode.window.showInformationMessage(t(`예제 ${fileName}이(가) 열렸습니다.`, `Example ${fileName} opened.`));
 
     } catch (error: any) {
-      vscode.window.showErrorMessage(`Failed to open example ${fileName}: ${error.message}`);
+      vscode.window.showErrorMessage(t(`예제 ${fileName} 열기 실패: ${error.message}`, `Failed to open example ${fileName}: ${error.message}`));
     }
   });
     context.subscriptions.push(showExampleJsonCommand);
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showExampleJsonQuickPick', async () => { const pick = await vscode.window.showQuickPick([ { label: 'actions.json Example', description: 'Show example content for actions.json', type: 'actions' }, { label: 'links.json Example', description: 'Show example content for links.json', type: 'links' }, { label: 'favorites.json Example', description: 'Show example content for favorites.json', type: 'favorites' }, ], { placeHolder: 'Select which example JSON to display' }); if (pick) { vscode.commands.executeCommand('taskhub.showExampleJson', pick.type); } }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showExampleJsonQuickPick', async () => { const pick = await vscode.window.showQuickPick([ { label: t('actions.json 예제', 'actions.json Example'), description: t('actions.json 예제 내용 보기', 'Show example content for actions.json'), type: 'actions' }, { label: t('links.json 예제', 'links.json Example'), description: t('links.json 예제 내용 보기', 'Show example content for links.json'), type: 'links' }, { label: t('favorites.json 예제', 'favorites.json Example'), description: t('favorites.json 예제 내용 보기', 'Show example content for favorites.json'), type: 'favorites' }, ], { placeHolder: t('표시할 예제 JSON을 선택하세요', 'Select which example JSON to display') }); if (pick) { vscode.commands.executeCommand('taskhub.showExampleJson', pick.type); } }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addOpenFileToFavorites', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            vscode.window.showInformationMessage('No active editor found.');
+            vscode.window.showInformationMessage(t('활성 편집기를 찾을 수 없습니다.', 'No active editor found.'));
             return;
         }
 
         const filePath = editor.document.uri.fsPath;
         const title = await vscode.window.showInputBox({
-            prompt: `Enter a title for ${path.basename(filePath)}`,
+            prompt: t(`${path.basename(filePath)}의 제목을 입력하세요`, `Enter a title for ${path.basename(filePath)}`),
             value: path.basename(filePath),
             ignoreFocusOut: true
         });
@@ -3290,7 +3294,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const groupInput = await vscode.window.showInputBox({
-            prompt: 'Group label (optional)',
+            prompt: t('그룹 레이블 (선택사항)', 'Group label (optional)'),
             placeHolder: 'e.g. Documentation',
             ignoreFocusOut: true
         });
@@ -3300,7 +3304,7 @@ export function activate(context: vscode.ExtensionContext) {
         const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
 
         const tagsInput = await vscode.window.showInputBox({
-            prompt: 'Tags (optional, comma-separated)',
+            prompt: t('태그 (선택사항, 쉼표로 구분)', 'Tags (optional, comma-separated)'),
             placeHolder: 'e.g. notes, reference',
             ignoreFocusOut: true
         });
@@ -3309,14 +3313,14 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const tags = parseTagInput(tagsInput);
         const defaultLine = editor.selection.active.line + 1;
-        const line = await promptFavoriteLineNumber('Line number for this favorite (optional)', defaultLine);
+        const line = await promptFavoriteLineNumber(t('이 즐겨찾기의 줄 번호 (선택사항)', 'Line number for this favorite (optional)'), defaultLine);
         if (line === 'cancel') {
             return;
         }
 
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
         if (!workspaceFolder) {
-            vscode.window.showErrorMessage('The active file does not belong to an open workspace folder.');
+            vscode.window.showErrorMessage(t('활성 파일이 열린 워크스페이스 폴더에 속하지 않습니다.', 'The active file does not belong to an open workspace folder.'));
             return;
         }
         const favoritesPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'favorites.json');
@@ -3367,13 +3371,13 @@ export function activate(context: vscode.ExtensionContext) {
         actionStates.clear();
         mainViewProvider.refresh();
 
-        vscode.window.showInformationMessage('All TaskHub terminals have been closed.');
+        vscode.window.showInformationMessage(t('모든 TaskHub 터미널이 닫혔습니다.', 'All TaskHub terminals have been closed.'));
     }));
 
     // History commands
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.rerunFromHistory', async (entry: HistoryEntry) => {
         if (!entry || !entry.actionId) {
-            vscode.window.showErrorMessage('Invalid history entry.');
+            vscode.window.showErrorMessage(t('유효하지 않은 기록 항목입니다.', 'Invalid history entry.'));
             return;
         }
 
@@ -3382,7 +3386,7 @@ export function activate(context: vscode.ExtensionContext) {
             allActions = loadAllActions(context);
         } catch (error: any) {
             console.error(error.message);
-            vscode.window.showErrorMessage(`Could not execute action: ${error.message}`);
+            vscode.window.showErrorMessage(t(`액션을 실행할 수 없습니다: ${error.message}`, `Could not execute action: ${error.message}`));
             return;
         }
 
@@ -3394,14 +3398,14 @@ export function activate(context: vscode.ExtensionContext) {
                 console.error(`Execution failed for action '${entry.actionId}':`, error);
             }
         } else {
-            vscode.window.showErrorMessage(`Could not find action definition for ID '${entry.actionId}'.`);
+            vscode.window.showErrorMessage(t(`ID '${entry.actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${entry.actionId}'.`));
         }
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.viewHistoryOutput', async (item: HistoryItem) => {
         const entry = item.getEntry();
         if (!entry.output) {
-            vscode.window.showInformationMessage('No output available for this history item.');
+            vscode.window.showInformationMessage(t('이 기록 항목에 사용 가능한 출력이 없습니다.', 'No output available for this history item.'));
             return;
         }
 
@@ -3415,18 +3419,19 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteHistoryItem', async (item: HistoryItem) => {
         const entry = item.getEntry();
         historyProvider.deleteHistoryItem(entry);
-        vscode.window.showInformationMessage('History item deleted.');
+        vscode.window.showInformationMessage(t('기록 항목이 삭제되었습니다.', 'History item deleted.'));
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.clearAllHistory', async () => {
+        const clearAllLabel = t('모두 삭제', 'Clear All');
         const confirm = await vscode.window.showWarningMessage(
-            'Are you sure you want to clear all history?',
+            t('모든 기록을 삭제하시겠습니까?', 'Are you sure you want to clear all history?'),
             { modal: true },
-            'Clear All'
+            clearAllLabel
         );
-        if (confirm === 'Clear All') {
+        if (confirm === clearAllLabel) {
             historyProvider.clearAllHistory();
-            vscode.window.showInformationMessage('All history cleared.');
+            vscode.window.showInformationMessage(t('모든 기록이 삭제되었습니다.', 'All history cleared.'));
         }
     }));
 
@@ -3434,7 +3439,7 @@ export function activate(context: vscode.ExtensionContext) {
         const config = vscode.workspace.getConfiguration('taskhub.history');
         const currentValue = config.get<boolean>('showPanel', true);
         await config.update('showPanel', !currentValue, vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage(`History panel ${!currentValue ? 'shown' : 'hidden'}.`);
+        vscode.window.showInformationMessage(t(`기록 패널이 ${!currentValue ? '표시' : '숨김'}되었습니다.`, `History panel ${!currentValue ? 'shown' : 'hidden'}.`));
     }));
 
     // Watch for configuration changes
@@ -3453,7 +3458,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.applyPreset', async () => {
         try {
             // Step 1: Select workspace folder
-            const folder = await pickWorkspaceFolderForCommand('Select workspace to apply preset to');
+            const folder = await pickWorkspaceFolderForCommand(t('프리셋을 적용할 워크스페이스를 선택하세요', 'Select workspace to apply preset to'));
             if (!folder) {
                 return;
             }
@@ -3464,7 +3469,7 @@ export function activate(context: vscode.ExtensionContext) {
             // Step 2: Discover and select preset
             const presets = discoverPresets(context);
             if (presets.length === 0) {
-                vscode.window.showWarningMessage('No presets found. Create one with "Save as Preset".');
+                vscode.window.showWarningMessage(t('프리셋을 찾을 수 없습니다. "프리셋으로 저장"으로 생성하세요.', 'No presets found. Create one with "Save as Preset".'));
                 return;
             }
 
@@ -3474,7 +3479,7 @@ export function activate(context: vscode.ExtensionContext) {
                     description: p.source === 'extension' ? 'built-in' : `workspace: ${p.workspaceName}`,
                     preset: p
                 })),
-                { placeHolder: 'Select a preset to apply' }
+                { placeHolder: t('적용할 프리셋을 선택하세요', 'Select a preset to apply') }
             );
 
             if (!selected) {
@@ -3494,16 +3499,18 @@ export function activate(context: vscode.ExtensionContext) {
                 finalActions = presetActions;
             } else {
                 // Existing actions.json - ask how to apply
+                const replaceLabel = t('교체', 'Replace');
+                const mergeLabel = t('병합', 'Merge');
                 const applyMode = await vscode.window.showQuickPick([
-                    { label: 'Replace', description: 'Replace existing actions with preset' },
-                    { label: 'Merge', description: 'Merge preset with existing actions' }
-                ], { placeHolder: 'How to apply preset?' });
+                    { label: replaceLabel, description: t('기존 액션을 프리셋으로 교체', 'Replace existing actions with preset') },
+                    { label: mergeLabel, description: t('프리셋을 기존 액션과 병합', 'Merge preset with existing actions') }
+                ], { placeHolder: t('프리셋을 어떻게 적용할까요?', 'How to apply preset?') });
 
                 if (!applyMode) {
                     return;
                 }
 
-                if (applyMode.label === 'Replace') {
+                if (applyMode.label === replaceLabel) {
                     finalActions = presetActions;
                 } else {
                     // Merge: check for conflicts
@@ -3515,30 +3522,33 @@ export function activate(context: vscode.ExtensionContext) {
                     let mergeStrategy: 'keep-existing' | 'use-preset' | 'keep-both';
 
                     if (conflicts.length > 0) {
+                        const keepExistingLabel = t('기존 유지', 'Keep existing');
+                        const usePresetLabel = t('프리셋 사용', 'Use preset');
+                        const keepBothLabel = t('모두 유지', 'Keep both');
                         const choice = await vscode.window.showQuickPick([
                             {
-                                label: 'Keep existing',
-                                description: `Keep your ${conflicts.length} actions, add non-conflicting from preset`
+                                label: keepExistingLabel,
+                                description: t(`기존 ${conflicts.length}개 액션을 유지하고 프리셋에서 충돌하지 않는 항목 추가`, `Keep your ${conflicts.length} actions, add non-conflicting from preset`)
                             },
                             {
-                                label: 'Use preset',
-                                description: `Use preset's ${conflicts.length} actions, keep non-conflicting from yours`
+                                label: usePresetLabel,
+                                description: t(`프리셋의 ${conflicts.length}개 액션을 사용하고 충돌하지 않는 기존 항목 유지`, `Use preset's ${conflicts.length} actions, keep non-conflicting from yours`)
                             },
                             {
-                                label: 'Keep both',
-                                description: 'Keep all actions (conflicting preset actions are dropped)'
+                                label: keepBothLabel,
+                                description: t('모든 액션 유지 (충돌하는 프리셋 액션은 제외)', 'Keep all actions (conflicting preset actions are dropped)')
                             }
                         ], {
-                            placeHolder: `Found ${conflicts.length} conflicting action IDs. How to resolve?`
+                            placeHolder: t(`${conflicts.length}개의 충돌하는 액션 ID를 찾았습니다. 어떻게 해결할까요?`, `Found ${conflicts.length} conflicting action IDs. How to resolve?`)
                         });
 
                         if (!choice) {
                             return;
                         }
 
-                        mergeStrategy = choice.label === 'Keep existing'
+                        mergeStrategy = choice.label === keepExistingLabel
                             ? 'keep-existing'
-                            : choice.label === 'Use preset'
+                            : choice.label === usePresetLabel
                                 ? 'use-preset'
                                 : 'keep-both';
                     } else {
@@ -3556,18 +3566,19 @@ export function activate(context: vscode.ExtensionContext) {
 
             // Step 6: Refresh UI and notify
             mainViewProvider.refresh();
+            const openActionsLabel = t('actions.json 열기', 'Open actions.json');
             const result = await vscode.window.showInformationMessage(
-                `✅ Preset "${selected.preset.name}" applied successfully!`,
-                'Open actions.json'
+                t(`프리셋 "${selected.preset.name}"이(가) 성공적으로 적용되었습니다!`, `Preset "${selected.preset.name}" applied successfully!`),
+                openActionsLabel
             );
 
-            if (result === 'Open actions.json') {
+            if (result === openActionsLabel) {
                 const doc = await vscode.workspace.openTextDocument(actionsPath);
                 await vscode.window.showTextDocument(doc);
             }
 
         } catch (error: any) {
-            vscode.window.showErrorMessage(`Failed to apply preset: ${error.message}`);
+            vscode.window.showErrorMessage(t(`프리셋 적용 실패: ${error.message}`, `Failed to apply preset: ${error.message}`));
             outputChannel.appendLine(`[Preset Error] ${error.message}`);
         }
     }));
@@ -3575,14 +3586,14 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.saveAsPreset', async () => {
         try {
             // Step 1: Select workspace folder
-            const folder = await pickWorkspaceFolderForCommand('Select workspace to save preset from');
+            const folder = await pickWorkspaceFolderForCommand(t('프리셋을 저장할 워크스페이스를 선택하세요', 'Select workspace to save preset from'));
             if (!folder) {
                 return;
             }
 
             const actionsPath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
             if (!fs.existsSync(actionsPath)) {
-                vscode.window.showErrorMessage('No actions.json found. Create actions first.');
+                vscode.window.showErrorMessage(t('actions.json을 찾을 수 없습니다. 먼저 액션을 생성하세요.', 'No actions.json found. Create actions first.'));
                 return;
             }
 
@@ -3593,11 +3604,11 @@ export function activate(context: vscode.ExtensionContext) {
 
             // Step 3: Get preset ID
             const presetId = await vscode.window.showInputBox({
-                prompt: 'Enter preset ID (e.g., integration, hil)',
+                prompt: t('프리셋 ID를 입력하세요 (예: integration, hil)', 'Enter preset ID (e.g., integration, hil)'),
                 placeHolder: 'integration',
                 validateInput: (value) => {
                     if (!value || !/^[a-z0-9-_]+$/.test(value)) {
-                        return 'Use lowercase letters, numbers, hyphens, and underscores only';
+                        return t('소문자, 숫자, 하이픈, 밑줄만 사용할 수 있습니다', 'Use lowercase letters, numbers, hyphens, and underscores only');
                     }
                     return null;
                 }
@@ -3608,11 +3619,14 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
             // Step 4: Choose save location
+            const workspaceLabel = t('워크스페이스', 'Workspace');
+            const extensionLabel = t('확장 프로그램', 'Extension');
+            const customLabel = t('사용자 지정 위치', 'Custom location');
             const saveLocation = await vscode.window.showQuickPick([
-                { label: 'Workspace', description: 'Save to .vscode/presets/ (shared via Git)' },
-                { label: 'Extension', description: 'Save to extension presets/ folder' },
-                { label: 'Custom location', description: 'Choose a file location' }
-            ], { placeHolder: 'Where to save this preset?' });
+                { label: workspaceLabel, description: t('.vscode/presets/에 저장 (Git으로 공유)', 'Save to .vscode/presets/ (shared via Git)') },
+                { label: extensionLabel, description: t('확장 프로그램 presets/ 폴더에 저장', 'Save to extension presets/ folder') },
+                { label: customLabel, description: t('파일 위치 직접 선택', 'Choose a file location') }
+            ], { placeHolder: t('프리셋을 어디에 저장할까요?', 'Where to save this preset?') });
 
             if (!saveLocation) {
                 return;
@@ -3621,11 +3635,11 @@ export function activate(context: vscode.ExtensionContext) {
             const fileName = `preset-${presetId}.json`;
             let targetPath: string;
 
-            if (saveLocation.label === 'Workspace') {
+            if (saveLocation.label === workspaceLabel) {
                 const presetsDir = path.join(folder.uri.fsPath, '.vscode', 'presets');
                 fs.mkdirSync(presetsDir, { recursive: true });
                 targetPath = path.join(presetsDir, fileName);
-            } else if (saveLocation.label === 'Extension') {
+            } else if (saveLocation.label === extensionLabel) {
                 const presetsDir = path.join(context.extensionPath, 'presets');
                 fs.mkdirSync(presetsDir, { recursive: true });
                 targetPath = path.join(presetsDir, fileName);
@@ -3644,20 +3658,22 @@ export function activate(context: vscode.ExtensionContext) {
             fs.writeFileSync(targetPath, JSON.stringify(actions, null, 2) + '\n');
 
             // Step 6: Notify
+            const openLabel = t('열기', 'Open');
+            const revealLabel = t('탐색기에서 보기', 'Reveal');
             const result = await vscode.window.showInformationMessage(
-                `✅ Preset saved: ${path.basename(targetPath)}`,
-                'Open', 'Reveal'
+                t(`프리셋 저장됨: ${path.basename(targetPath)}`, `Preset saved: ${path.basename(targetPath)}`),
+                openLabel, revealLabel
             );
 
-            if (result === 'Open') {
+            if (result === openLabel) {
                 const doc = await vscode.workspace.openTextDocument(targetPath);
                 await vscode.window.showTextDocument(doc);
-            } else if (result === 'Reveal') {
+            } else if (result === revealLabel) {
                 vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(targetPath));
             }
 
         } catch (error: any) {
-            vscode.window.showErrorMessage(`Failed to save preset: ${error.message}`);
+            vscode.window.showErrorMessage(t(`프리셋 저장 실패: ${error.message}`, `Failed to save preset: ${error.message}`));
             outputChannel.appendLine(`[Preset Error] ${error.message}`);
         }
     }));
@@ -3674,9 +3690,9 @@ export function activate(context: vscode.ExtensionContext) {
                 outputChannel.appendLine(`[Preset] Settings changed to: ${presetId || 'none'}`);
 
                 if (presetId) {
-                    vscode.window.showInformationMessage(`Preset "${presetId}" applied. Actions reloaded.`);
+                    vscode.window.showInformationMessage(t(`프리셋 "${presetId}"이(가) 적용되었습니다. 액션이 다시 로드되었습니다.`, `Preset "${presetId}" applied. Actions reloaded.`));
                 } else {
-                    vscode.window.showInformationMessage('Preset cleared. Using workspace actions only.');
+                    vscode.window.showInformationMessage(t('프리셋이 해제되었습니다. 워크스페이스 액션만 사용합니다.', 'Preset cleared. Using workspace actions only.'));
                 }
             }
         })
@@ -3687,19 +3703,19 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.exportActions', async () => {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (!workspaceFolder) {
-            vscode.window.showErrorMessage('No workspace folder is open.');
+            vscode.window.showErrorMessage(t('열린 워크스페이스 폴더가 없습니다.', 'No workspace folder is open.'));
             return;
         }
         const actionsPath = path.join(workspaceFolder, '.vscode', 'actions.json');
         if (!fs.existsSync(actionsPath)) {
-            vscode.window.showErrorMessage('No .vscode/actions.json found in the current workspace.');
+            vscode.window.showErrorMessage(t('현재 워크스페이스에서 .vscode/actions.json을 찾을 수 없습니다.', 'No .vscode/actions.json found in the current workspace.'));
             return;
         }
         let actions: ActionItem[];
         try {
             actions = loadAndValidateActions(actionsPath, { sourceLabel: 'workspace' });
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Failed to load actions: ${e.message}`);
+            vscode.window.showErrorMessage(t(`액션 로드 실패: ${e.message}`, `Failed to load actions: ${e.message}`));
             return;
         }
         const saveUri = await vscode.window.showSaveDialog({
@@ -3709,29 +3725,29 @@ export function activate(context: vscode.ExtensionContext) {
         if (!saveUri) { return; }
         const exportContent = serializeExportData(actions);
         fs.writeFileSync(saveUri.fsPath, exportContent, 'utf-8');
-        vscode.window.showInformationMessage(`Exported ${actions.length} action(s) to ${path.basename(saveUri.fsPath)}`);
+        vscode.window.showInformationMessage(t(`${actions.length}개 액션을 ${path.basename(saveUri.fsPath)}로 내보냈습니다.`, `Exported ${actions.length} action(s) to ${path.basename(saveUri.fsPath)}`));
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.exportActionItem', async (treeItem?: Action | Folder) => {
         if (!treeItem || !treeItem.id) {
-            vscode.window.showErrorMessage('No action or folder selected.');
+            vscode.window.showErrorMessage(t('선택된 액션 또는 폴더가 없습니다.', 'No action or folder selected.'));
             return;
         }
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (!workspaceFolder) {
-            vscode.window.showErrorMessage('No workspace folder is open.');
+            vscode.window.showErrorMessage(t('열린 워크스페이스 폴더가 없습니다.', 'No workspace folder is open.'));
             return;
         }
         let allActions: ActionItem[];
         try {
             allActions = loadAllActions(context);
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Failed to load actions: ${e.message}`);
+            vscode.window.showErrorMessage(t(`액션 로드 실패: ${e.message}`, `Failed to load actions: ${e.message}`));
             return;
         }
         const actionItem = findActionById(allActions, treeItem.id);
         if (!actionItem) {
-            vscode.window.showErrorMessage(`Action '${treeItem.id}' not found.`);
+            vscode.window.showErrorMessage(t(`액션 '${treeItem.id}'을(를) 찾을 수 없습니다.`, `Action '${treeItem.id}' not found.`));
             return;
         }
         const defaultName = `${treeItem.id.replace(/[^a-zA-Z0-9._-]/g, '_')}.taskhub`;
@@ -3743,13 +3759,13 @@ export function activate(context: vscode.ExtensionContext) {
         const exportContent = serializeExportData([actionItem]);
         fs.writeFileSync(saveUri.fsPath, exportContent, 'utf-8');
         const itemCount = actionItem.children ? countActionItems(actionItem) : 1;
-        vscode.window.showInformationMessage(`Exported '${actionItem.title}' (${itemCount} item(s)) to ${path.basename(saveUri.fsPath)}`);
+        vscode.window.showInformationMessage(t(`'${actionItem.title}' (${itemCount}개 항목)을 ${path.basename(saveUri.fsPath)}로 내보냈습니다.`, `Exported '${actionItem.title}' (${itemCount} item(s)) to ${path.basename(saveUri.fsPath)}`));
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.importActions', async () => {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (!workspaceFolder) {
-            vscode.window.showErrorMessage('No workspace folder is open.');
+            vscode.window.showErrorMessage(t('열린 워크스페이스 폴더가 없습니다.', 'No workspace folder is open.'));
             return;
         }
         const fileUri = await vscode.window.showOpenDialog({
@@ -3760,11 +3776,11 @@ export function activate(context: vscode.ExtensionContext) {
         const content = fs.readFileSync(fileUri[0].fsPath, 'utf-8');
         const { actions: importedActions, errors } = parseImportData(content);
         if (errors.length > 0) {
-            vscode.window.showErrorMessage(`Import failed: ${errors.join('\n')}`);
+            vscode.window.showErrorMessage(t(`가져오기 실패: ${errors.join('\n')}`, `Import failed: ${errors.join('\n')}`));
             return;
         }
         if (importedActions.length === 0) {
-            vscode.window.showWarningMessage('No actions found in the imported file.');
+            vscode.window.showWarningMessage(t('가져온 파일에서 액션을 찾을 수 없습니다.', 'No actions found in the imported file.'));
             return;
         }
 
@@ -3784,9 +3800,9 @@ export function activate(context: vscode.ExtensionContext) {
         fs.writeFileSync(actionsPath, JSON.stringify(merged, null, 2), 'utf-8');
 
         const addedCount = importedActions.length - skipped.length;
-        let msg = `Imported ${addedCount} action(s).`;
+        let msg = t(`${addedCount}개 액션을 가져왔습니다.`, `Imported ${addedCount} action(s).`);
         if (skipped.length > 0) {
-            msg += ` Skipped ${skipped.length} duplicate(s): ${skipped.join(', ')}`;
+            msg += t(` ${skipped.length}개 중복 건너뜀: ${skipped.join(', ')}`, ` Skipped ${skipped.length} duplicate(s): ${skipped.join(', ')}`);
         }
         vscode.window.showInformationMessage(msg);
         mainViewProvider.refresh();

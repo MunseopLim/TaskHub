@@ -90,6 +90,20 @@ suite('ModuleName Test Suite', () => {
 - `[0.2.36] npm 취약점 해결 및 의존성 업데이트`
 - `[0.2.35] codex 코드 리뷰 반영 및 성능 개선`
 
+## 다국어 메시지 (i18n)
+
+사용자에게 보이는 모든 메시지는 `src/i18n.ts`의 `t(ko, en)` 함수로 감싸야 합니다.
+
+```typescript
+import { t } from './i18n';
+
+vscode.window.showErrorMessage(t('파일을 찾을 수 없습니다.', 'File not found.'));
+```
+
+- VS Code 언어가 한국어(`ko`)이면 한국어, 그 외에는 영어 표시
+- 패널 제목 등 짧은 영어 식별자와 사용자 설정값은 제외
+- 자세한 규칙은 `CLAUDE.md`의 "다국어 지원 (i18n)" 섹션 참조
+
 ## 실험적 기능 추가 가이드
 
 실험적 기능은 아직 안정화되지 않은 새로운 기능을 테스트하기 위한 프레임워크입니다.

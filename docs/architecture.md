@@ -11,6 +11,7 @@ TaskHub/
 │   │                                  # - activate() / deactivate()
 │   │                                  # - Provider: MainView, Link, Favorite, History
 │   │                                  # - 액션 실행: executeAction(), executeSingleTask()
+│   ├── i18n.ts                        # 다국어 지원 (한국어/영어, vscode.env.language 기반)
 │   ├── schema.ts                      # TypeScript 타입 정의
 │   ├── numberBaseHoverProvider.ts     # Number Base / SFR Bit Field / Struct Size Hover
 │   ├── sfrBitFieldParser.ts           # SFR 비트 필드 파서

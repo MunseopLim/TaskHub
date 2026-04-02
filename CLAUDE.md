@@ -24,6 +24,7 @@ npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 ```
 src/
 ├── extension.ts               # 메인 진입점 (activate/deactivate, Provider, 명령어 핸들러)
+├── i18n.ts                    # 다국어 지원 (한국어/영어 메시지 선택)
 ├── schema.ts                  # TypeScript 인터페이스 정의
 ├── numberBaseHoverProvider.ts # Number Base / SFR / Struct Size Hover 통합
 ├── sfrBitFieldParser.ts       # SFR 비트 필드 주석 파서
@@ -54,6 +55,53 @@ presets/  # 프리셋 예제
 - **네이밍**: camelCase (함수/변수), PascalCase (클래스/인터페이스)
 - **들여쓰기**: 4 spaces (탭 아님)
 - **문서 언어**: 한국어 기본 (README, CHANGELOG, 커밋 메시지)
+
+## 다국어 지원 (i18n)
+
+사용자에게 보이는 모든 메시지는 `src/i18n.ts`의 `t(ko, en)` 함수를 사용하여 한국어/영어 두 벌을 제공한다.
+
+- VS Code가 한국어(`ko`)로 설정된 경우 한국어 메시지를 표시하고, 그 외에는 영어를 표시
+- `vscode.env.language === 'ko'`로 판별
+
+### 적용 대상
+
+- `vscode.window.showErrorMessage`, `showWarningMessage`, `showInformationMessage`
+- `showQuickPick`, `showInputBox`의 `placeHolder`, `prompt`, `validateInput` 반환값
+- QuickPick 항목의 `label`, `description`
+- `showOpenDialog`의 `openLabel`
+
+### 적용 제외
+
+- 패널 제목 등 짧은 영어 식별자 (예: `Hex: ${fileName}`, `Memory Map: ${fileName}`)
+- 사용자 설정에서 가져오는 값 (`action.successMessage`, `task.placeHolder` 등)
+- 예시 형식 문자열 (`e.g. npm run build`, `https://example.com`)
+- 모달 확인 버튼 텍스트 (`'Yes'` 등 — VS Code가 반환값으로 사용)
+
+### 사용법
+
+```typescript
+import { t } from './i18n';
+
+// 단순 문자열
+vscode.window.showErrorMessage(t('파일을 찾을 수 없습니다.', 'File not found.'));
+
+// 템플릿 리터럴
+vscode.window.showErrorMessage(t(
+    `파싱 실패 (${fileName}): ${e.message}`,
+    `Failed to parse (${fileName}): ${e.message}`
+));
+
+// QuickPick label (비교가 필요한 경우 변수로 저장)
+const skipLabel = t('건너뛰기', 'Skip');
+const items = [{ label: skipLabel, description: t('섹션 정보만 표시', 'Show sections only') }];
+if (selected.label === skipLabel) { ... }
+```
+
+### 새 메시지 추가 시 규칙
+
+1. 하드코딩된 문자열 대신 반드시 `t(ko, en)` 사용
+2. 한국어가 먼저, 영어가 뒤에 위치
+3. QuickPick `label`이 이후 비교에 사용되면, `t()` 결과를 변수에 저장하여 비교에도 동일 변수 사용
 
 ## 커밋 메시지
 

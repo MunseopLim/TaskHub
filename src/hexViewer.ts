@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexParseResult } from './hexParser';
+import { t } from './i18n';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
@@ -39,15 +40,18 @@ export async function showHexViewer(context: vscode.ExtensionContext) {
     try {
         stat = fs.statSync(filePath);
     } catch (e: any) {
-        vscode.window.showErrorMessage(`파일을 읽을 수 없습니다: ${filePath}\n${e.message}`);
+        vscode.window.showErrorMessage(t(
+            `파일을 읽을 수 없습니다: ${filePath}\n${e.message}`,
+            `Cannot read file: ${filePath}\n${e.message}`
+        ));
         return;
     }
 
     if (stat.size > HEX_VIEWER_MAX_FILE_SIZE) {
-        vscode.window.showErrorMessage(
-            `파일 크기(${formatFileSize(stat.size)})가 Hex Viewer 처리 한도(${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)})를 초과합니다. ` +
-            `대용량 파일은 외부 Hex Editor를 사용해 주세요.`
-        );
+        vscode.window.showErrorMessage(t(
+            `파일 크기(${formatFileSize(stat.size)})가 Hex Viewer 처리 한도(${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)})를 초과합니다. 대용량 파일은 외부 Hex Editor를 사용해 주세요.`,
+            `File size (${formatFileSize(stat.size)}) exceeds the Hex Viewer limit (${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)}). Please use an external hex editor for large files.`
+        ));
         return;
     }
 
@@ -55,12 +59,18 @@ export async function showHexViewer(context: vscode.ExtensionContext) {
     try {
         result = parseFile(filePath);
     } catch (e: any) {
-        vscode.window.showErrorMessage(`파일 파싱 실패 (${fileName}): ${e.message}`);
+        vscode.window.showErrorMessage(t(
+            `파일 파싱 실패 (${fileName}): ${e.message}`,
+            `Failed to parse file (${fileName}): ${e.message}`
+        ));
         return;
     }
 
     if (result.byteCount === 0) {
-        vscode.window.showWarningMessage(`선택한 파일에 유효한 데이터가 없습니다: ${fileName}`);
+        vscode.window.showWarningMessage(t(
+            `선택한 파일에 유효한 데이터가 없습니다: ${fileName}`,
+            `No valid data found in the selected file: ${fileName}`
+        ));
         return;
     }
 
@@ -108,7 +118,7 @@ function setupWebviewMessageHandler(webview: vscode.Webview, disposables: vscode
     webview.onDidReceiveMessage(message => {
         if (message.command === 'copySelection') {
             vscode.env.clipboard.writeText(message.text);
-            vscode.window.showInformationMessage('Copied to clipboard.');
+            vscode.window.showInformationMessage(t('클립보드에 복사되었습니다.', 'Copied to clipboard.'));
         }
     }, undefined, disposables);
 }
@@ -911,14 +921,17 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         try {
             stat = fs.statSync(filePath);
         } catch (e: any) {
-            const msg = `파일을 읽을 수 없습니다: ${e.message}`;
+            const msg = t(`파일을 읽을 수 없습니다: ${e.message}`, `Cannot read file: ${e.message}`);
             webviewPanel.webview.html = `<html><body><p style="color:var(--vscode-errorForeground,#f44);padding:16px;">${msg}</p></body></html>`;
             vscode.window.showErrorMessage(msg);
             return;
         }
 
         if (stat.size > HEX_VIEWER_MAX_FILE_SIZE) {
-            const msg = `파일 크기(${formatFileSize(stat.size)})가 Hex Viewer 처리 한도(${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)})를 초과합니다. 대용량 파일은 외부 Hex Editor를 사용해 주세요.`;
+            const msg = t(
+                `파일 크기(${formatFileSize(stat.size)})가 Hex Viewer 처리 한도(${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)})를 초과합니다. 대용량 파일은 외부 Hex Editor를 사용해 주세요.`,
+                `File size (${formatFileSize(stat.size)}) exceeds the Hex Viewer limit (${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)}). Please use an external hex editor for large files.`
+            );
             webviewPanel.webview.html = `<html><body><p style="color:var(--vscode-errorForeground,#f44);padding:16px;">${msg}</p></body></html>`;
             vscode.window.showErrorMessage(msg);
             return;
@@ -928,14 +941,14 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         try {
             result = parseFile(filePath);
         } catch (e: any) {
-            const msg = `파일 파싱 실패 (${fileName}): ${e.message}`;
+            const msg = t(`파일 파싱 실패 (${fileName}): ${e.message}`, `Failed to parse file (${fileName}): ${e.message}`);
             webviewPanel.webview.html = `<html><body><p style="color:var(--vscode-errorForeground,#f44);padding:16px;">${msg}</p></body></html>`;
             vscode.window.showErrorMessage(msg);
             return;
         }
 
         if (result.byteCount === 0) {
-            const msg = `선택한 파일에 유효한 데이터가 없습니다: ${fileName}`;
+            const msg = t(`선택한 파일에 유효한 데이터가 없습니다: ${fileName}`, `No valid data found in the selected file: ${fileName}`);
             webviewPanel.webview.html = `<html><body><p style="padding:16px;opacity:0.7;">${msg}</p></body></html>`;
             vscode.window.showWarningMessage(msg);
             return;
