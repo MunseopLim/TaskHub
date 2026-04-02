@@ -3,6 +3,15 @@ import * as fs from 'fs';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
+/** JSON Editor에서 처리 가능한 최대 파일 크기 (10 MB) */
+const JSON_EDITOR_MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+function formatFileSize(bytes: number): string {
+    if (bytes < 1024) { return `${bytes} B`; }
+    if (bytes < 1024 * 1024) { return `${(bytes / 1024).toFixed(1)} KB`; }
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function detectIndent(text: string): string | number {
     const match = text.match(/^[ \t]+/m);
     if (!match) {
@@ -61,18 +70,41 @@ export function unwrapIfRootArray(data: Record<string, unknown>, isRootArray: bo
 function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: string) {
     const fileName = filePath.split(/[\\/]/).pop() || 'JSON Editor';
 
+    let stat: fs.Stats;
+    try {
+        stat = fs.statSync(filePath);
+    } catch (e: any) {
+        vscode.window.showErrorMessage(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`);
+        return;
+    }
+
+    if (stat.size > JSON_EDITOR_MAX_FILE_SIZE) {
+        vscode.window.showErrorMessage(
+            `파일 크기(${formatFileSize(stat.size)})가 JSON Editor 처리 한도(${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)})를 초과합니다. ` +
+            `대용량 JSON 파일은 텍스트 에디터에서 직접 편집해 주세요.`
+        );
+        return;
+    }
+
     let jsonData: Record<string, unknown>;
     let isRootArray = false;
     let detectedIndent: string | number = 2;
+    let content: string;
     try {
-        const content = fs.readFileSync(filePath, 'utf-8');
+        content = fs.readFileSync(filePath, 'utf-8');
+    } catch (error: any) {
+        vscode.window.showErrorMessage(`파일 읽기 실패 (${fileName}): ${error.message}`);
+        return;
+    }
+
+    try {
         const parsed = JSON.parse(content);
         const result = wrapIfArray(parsed);
         jsonData = result.wrapped;
         isRootArray = result.isRootArray;
         detectedIndent = detectIndent(content);
     } catch (error: any) {
-        vscode.window.showErrorMessage(`Failed to parse JSON: ${error.message}`);
+        vscode.window.showErrorMessage(`JSON 파싱 실패 (${fileName}): ${error.message}`);
         return;
     }
 
@@ -103,21 +135,25 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
                     try {
                         const saveData = unwrapIfRootArray(message.data, isRootArray);
                         fs.writeFileSync(filePath, JSON.stringify(saveData, null, detectedIndent) + '\n', 'utf-8');
-                        vscode.window.showInformationMessage(`JSON saved: ${fileName}`);
+                        vscode.window.showInformationMessage(`JSON 저장 완료: ${fileName}`);
                     } catch (error: any) {
-                        vscode.window.showErrorMessage(`Failed to save: ${error.message}`);
+                        vscode.window.showErrorMessage(`JSON 저장 실패 (${fileName}): ${error.message}`);
                     }
                     break;
                 }
                 case 'reload': {
                     try {
-                        const content = fs.readFileSync(filePath, 'utf-8');
-                        const parsed = JSON.parse(content);
+                        const reloadContent = fs.readFileSync(filePath, 'utf-8');
+                        const parsed = JSON.parse(reloadContent);
                         const result = wrapIfArray(parsed);
                         isRootArray = result.isRootArray;
                         currentPanel?.webview.postMessage({ command: 'loadData', data: result.wrapped });
                     } catch (error: any) {
-                        vscode.window.showErrorMessage(`Failed to reload: ${error.message}`);
+                        if (error instanceof SyntaxError) {
+                            vscode.window.showErrorMessage(`JSON 파싱 실패 (${fileName}): 파일 내용이 올바른 JSON 형식이 아닙니다. ${error.message}`);
+                        } else {
+                            vscode.window.showErrorMessage(`파일 다시 읽기 실패 (${fileName}): ${error.message}`);
+                        }
                     }
                     break;
                 }

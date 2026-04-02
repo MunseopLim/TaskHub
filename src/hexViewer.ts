@@ -10,6 +10,15 @@ import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexPa
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
+/** Hex Viewer에서 처리 가능한 최대 파일 크기 (50 MB) */
+const HEX_VIEWER_MAX_FILE_SIZE = 50 * 1024 * 1024;
+
+function formatFileSize(bytes: number): string {
+    if (bytes < 1024) { return `${bytes} B`; }
+    if (bytes < 1024 * 1024) { return `${(bytes / 1024).toFixed(1)} KB`; }
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export async function showHexViewer(context: vscode.ExtensionContext) {
     const fileUri = await vscode.window.showOpenDialog({
         canSelectMany: false,
@@ -25,10 +34,33 @@ export async function showHexViewer(context: vscode.ExtensionContext) {
 
     const filePath = fileUri[0].fsPath;
     const fileName = path.basename(filePath);
-    const result = parseFile(filePath);
+
+    let stat: fs.Stats;
+    try {
+        stat = fs.statSync(filePath);
+    } catch (e: any) {
+        vscode.window.showErrorMessage(`파일을 읽을 수 없습니다: ${filePath}\n${e.message}`);
+        return;
+    }
+
+    if (stat.size > HEX_VIEWER_MAX_FILE_SIZE) {
+        vscode.window.showErrorMessage(
+            `파일 크기(${formatFileSize(stat.size)})가 Hex Viewer 처리 한도(${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)})를 초과합니다. ` +
+            `대용량 파일은 외부 Hex Editor를 사용해 주세요.`
+        );
+        return;
+    }
+
+    let result: HexParseResult;
+    try {
+        result = parseFile(filePath);
+    } catch (e: any) {
+        vscode.window.showErrorMessage(`파일 파싱 실패 (${fileName}): ${e.message}`);
+        return;
+    }
 
     if (result.byteCount === 0) {
-        vscode.window.showWarningMessage('No data found in the selected file.');
+        vscode.window.showWarningMessage(`선택한 파일에 유효한 데이터가 없습니다: ${fileName}`);
         return;
     }
 
@@ -874,10 +906,38 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         webviewPanel.webview.options = { enableScripts: true };
         const filePath = document.uri.fsPath;
         const fileName = path.basename(filePath);
-        const result = parseFile(filePath);
+
+        let stat: fs.Stats;
+        try {
+            stat = fs.statSync(filePath);
+        } catch (e: any) {
+            const msg = `파일을 읽을 수 없습니다: ${e.message}`;
+            webviewPanel.webview.html = `<html><body><p style="color:var(--vscode-errorForeground,#f44);padding:16px;">${msg}</p></body></html>`;
+            vscode.window.showErrorMessage(msg);
+            return;
+        }
+
+        if (stat.size > HEX_VIEWER_MAX_FILE_SIZE) {
+            const msg = `파일 크기(${formatFileSize(stat.size)})가 Hex Viewer 처리 한도(${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)})를 초과합니다. 대용량 파일은 외부 Hex Editor를 사용해 주세요.`;
+            webviewPanel.webview.html = `<html><body><p style="color:var(--vscode-errorForeground,#f44);padding:16px;">${msg}</p></body></html>`;
+            vscode.window.showErrorMessage(msg);
+            return;
+        }
+
+        let result: HexParseResult;
+        try {
+            result = parseFile(filePath);
+        } catch (e: any) {
+            const msg = `파일 파싱 실패 (${fileName}): ${e.message}`;
+            webviewPanel.webview.html = `<html><body><p style="color:var(--vscode-errorForeground,#f44);padding:16px;">${msg}</p></body></html>`;
+            vscode.window.showErrorMessage(msg);
+            return;
+        }
 
         if (result.byteCount === 0) {
-            webviewPanel.webview.html = '<html><body><p>No data found in this file.</p></body></html>';
+            const msg = `선택한 파일에 유효한 데이터가 없습니다: ${fileName}`;
+            webviewPanel.webview.html = `<html><body><p style="padding:16px;opacity:0.7;">${msg}</p></body></html>`;
+            vscode.window.showWarningMessage(msg);
             return;
         }
 

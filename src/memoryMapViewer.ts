@@ -7,6 +7,15 @@ import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, 
 let currentPanel: vscode.WebviewPanel | undefined;
 let currentSymbols: { name: string; addr: number; type: string }[] = [];
 
+/** Memory Map에서 처리 가능한 최대 ELF/Listing 파일 크기 (100 MB) */
+const MEMORY_MAP_MAX_FILE_SIZE = 100 * 1024 * 1024;
+
+function formatFileSize(bytes: number): string {
+    if (bytes < 1024) { return `${bytes} B`; }
+    if (bytes < 1024 * 1024) { return `${(bytes / 1024).toFixed(1)} KB`; }
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export interface MemoryMapConfig {
     regions?: MemoryRegion[];
 }
@@ -60,10 +69,10 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
                     if (regions.length > 0) {
                         resolvedConfig = { regions };
                     } else {
-                        vscode.window.showWarningMessage('No memory regions found in linker script. Showing sections only.');
+                        vscode.window.showWarningMessage('링커 스크립트에서 MEMORY 영역을 찾을 수 없습니다. 섹션 정보만 표시합니다.');
                     }
                 } catch (e: any) {
-                    vscode.window.showWarningMessage(`Failed to parse linker script: ${e.message}`);
+                    vscode.window.showErrorMessage(`링커 스크립트 파싱 실패: ${e.message}`);
                 }
             }
         }
@@ -75,11 +84,31 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
 export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: string, config?: MemoryMapConfig) {
     const fileName = filePath.split(/[\\/]/).pop() || 'Memory Map';
 
+    let stat: fs.Stats;
+    try {
+        stat = fs.statSync(filePath);
+    } catch (e: any) {
+        vscode.window.showErrorMessage(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`);
+        return;
+    }
+
+    if (stat.size > MEMORY_MAP_MAX_FILE_SIZE) {
+        vscode.window.showErrorMessage(
+            `파일 크기(${formatFileSize(stat.size)})가 Memory Map 처리 한도(${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)})를 초과합니다.`
+        );
+        return;
+    }
+
     let buffer: Buffer;
     try {
         buffer = fs.readFileSync(filePath);
     } catch (e: any) {
-        vscode.window.showErrorMessage(`Failed to read file: ${e.message}`);
+        vscode.window.showErrorMessage(`파일 읽기 실패 (${fileName}): ${e.message}`);
+        return;
+    }
+
+    if (buffer.length < 16) {
+        vscode.window.showErrorMessage(`유효한 ELF 파일이 아닙니다 (${fileName}): 파일이 너무 작습니다 (${formatFileSize(buffer.length)}).`);
         return;
     }
 
@@ -87,7 +116,7 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     try {
         parseResult = parseElf32(buffer);
     } catch (e: any) {
-        vscode.window.showErrorMessage(`Failed to parse ELF: ${e.message}`);
+        vscode.window.showErrorMessage(`ELF 파싱 실패 (${fileName}): ${e.message}`);
         return;
     }
 
@@ -106,11 +135,31 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
 function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: string) {
     const fileName = filePath.split(/[\\/]/).pop() || 'Memory Map';
 
+    let stat: fs.Stats;
+    try {
+        stat = fs.statSync(filePath);
+    } catch (e: any) {
+        vscode.window.showErrorMessage(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`);
+        return;
+    }
+
+    if (stat.size > MEMORY_MAP_MAX_FILE_SIZE) {
+        vscode.window.showErrorMessage(
+            `파일 크기(${formatFileSize(stat.size)})가 Memory Map 처리 한도(${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)})를 초과합니다.`
+        );
+        return;
+    }
+
     let content: string;
     try {
         content = fs.readFileSync(filePath, 'utf-8');
     } catch (e: any) {
-        vscode.window.showErrorMessage(`Failed to read file: ${e.message}`);
+        vscode.window.showErrorMessage(`파일 읽기 실패 (${fileName}): ${e.message}`);
+        return;
+    }
+
+    if (content.trim().length === 0) {
+        vscode.window.showWarningMessage(`Listing 파일이 비어 있습니다: ${fileName}`);
         return;
     }
 
@@ -118,12 +167,12 @@ function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: st
     try {
         result = parseArmLinkList(content);
     } catch (e: any) {
-        vscode.window.showErrorMessage(`Failed to parse listing: ${e.message}`);
+        vscode.window.showErrorMessage(`Listing 파싱 실패 (${fileName}): ${e.message}`);
         return;
     }
 
     if (result.execRegions.length === 0) {
-        vscode.window.showWarningMessage('No execution regions found in listing file.');
+        vscode.window.showWarningMessage(`Execution Region을 찾을 수 없습니다 (${fileName}). ARM Linker Listing (armlink --list) 출력 파일인지 확인해 주세요.`);
         return;
     }
 
