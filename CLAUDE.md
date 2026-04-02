@@ -67,6 +67,8 @@ presets/  # 프리셋 예제
 
 Co-Authored-By 라인이나 `[claude]` 태그는 넣지 않는다.
 
+버전을 올릴 때 `package.json`과 `package-lock.json`의 버전을 반드시 함께 업데이트한다.
+
 ## 아키텍처 핵심
 
 ### extension.ts 구조
