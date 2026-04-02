@@ -1032,7 +1032,8 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Show Memory Map"** 실행:
 - **Region 요약 테이블 클릭**: 상단 Overview 테이블의 row 클릭 시 해당 Region Details로 스크롤 및 자동 펼침
 - **Region 폴딩**: 각 region 카드가 기본 접힘 상태로 표시되며, 클릭으로 토글 가능 (헤더 + 사용률 바는 항상 표시)
 - **Expand All / Collapse All**: Region Details 섹션에서 전체 region을 일괄 펼침/접기 가능
-- **섹션 테이블 정렬**: Region Details 및 All Sections 테이블에서 컬럼 헤더 클릭으로 오름차순/내림차순 정렬 (Section, Address, Size, Bytes, Type)
+- **섹션 테이블 정렬**: Region Details 및 All Sections 테이블에서 컬럼 헤더 클릭으로 오름차순/내림차순 정렬 (Section, Address, Size, Bytes, Type). Size 정렬 시 단위(B/KB/MB) 관계없이 실제 바이트 크기 기준 정렬
+- **맨 위로 이동**: 페이지 하단 스크롤 시 우하단에 floating ↑ 버튼 표시, 클릭 시 페이지 최상단으로 이동
 
 ### 메모리 영역 설정
 

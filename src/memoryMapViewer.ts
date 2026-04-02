@@ -258,7 +258,7 @@ function getWebviewContent(
             <div class="bar-bg"><div class="bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div>
             <div class="region-detail" style="display:none">
                 ${allSegments.length > 0 ? `<div class="map-bar">${mapSegHtml}</div>` : ''}
-                ${allSegments.length > 0 ? `<table class="section-table sortable-table"><thead><tr><th data-sort="name">Section</th><th class="num" data-sort="addr">Address</th><th class="num" data-sort="size">Size</th><th class="num" data-sort="bytes">Bytes</th><th data-sort="type">Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
+                ${allSegments.length > 0 ? `<table class="section-table sortable-table"><thead><tr><th data-sort="name">Section</th><th class="num" data-sort="addr">Address</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th data-sort="type">Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
             </div>
         </div>`;
     }).join('');
@@ -433,6 +433,7 @@ function getWebviewContent(
     .type-free { background: #37474f; }
     .map-bar {
         display: flex;
+        gap: 1px;
         height: 14px;
         border-radius: 3px;
         overflow: hidden;
@@ -441,10 +442,8 @@ function getWebviewContent(
     }
     .map-seg {
         height: 100%;
-        min-width: 1px;
-        border-right: 1px solid var(--bg);
+        min-width: 0;
     }
-    .map-seg:last-child { border-right: none; }
     .map-seg:hover { opacity: 0.75; }
     .seg-code { background: #2196f3; }
     .seg-rodata { background: #9c27b0; }
@@ -519,6 +518,28 @@ function getWebviewContent(
         opacity: 0.8;
         margin-bottom: 12px;
     }
+    .scroll-top {
+        position: fixed;
+        bottom: 16px;
+        right: 16px;
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: var(--btn-bg);
+        color: var(--btn-fg);
+        border: none;
+        cursor: pointer;
+        font-size: 16px;
+        line-height: 32px;
+        text-align: center;
+        opacity: 0;
+        transition: opacity 0.2s;
+        pointer-events: none;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        z-index: 100;
+    }
+    .scroll-top:hover { background: var(--btn-hover); }
+    .scroll-top.visible { opacity: 1; pointer-events: auto; }
 </style>
 </head>
 <body>
@@ -697,10 +718,14 @@ function getWebviewContent(
                 const tbody = tbl.querySelector('tbody');
                 const rows = Array.from(tbody.querySelectorAll('tr'));
                 const colIdx = Array.from(th.parentElement.children).indexOf(th);
+                const sortByCol = th.dataset.sortBy;
+                const valIdx = sortByCol
+                    ? Array.from(th.parentElement.children).indexOf(th.parentElement.querySelector('[data-sort="' + sortByCol + '"]'))
+                    : colIdx;
 
                 rows.sort((a, b) => {
-                    const aText = a.children[colIdx].textContent.trim();
-                    const bText = b.children[colIdx].textContent.trim();
+                    const aText = a.children[valIdx].textContent.trim();
+                    const bText = b.children[valIdx].textContent.trim();
                     const aNum = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
                     const bNum = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
                     if (!isNaN(aNum) && !isNaN(bNum)) {
@@ -715,8 +740,17 @@ function getWebviewContent(
             });
         });
     });
+    // --- Scroll to top button ---
+    const scrollBtn = document.getElementById('scrollTop');
+    window.addEventListener('scroll', () => {
+        scrollBtn.classList.toggle('visible', window.scrollY > 200);
+    });
+    scrollBtn.addEventListener('click', () => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
 })();
 </script>
+<button id="scrollTop" class="scroll-top" title="맨 위로">↑</button>
 </body>
 </html>`;
 }
