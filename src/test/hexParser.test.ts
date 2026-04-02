@@ -28,6 +28,12 @@ suite('HexParser Test Suite', () => {
         test('should detect binary for unknown text', () => {
             assert.strictEqual(detectFormat('just some random text'), 'binary');
         });
+
+        test('should not misdetect binary with S[0-9] in middle lines as SREC', () => {
+            // Binary data converted to string may contain lines starting with S followed by a digit
+            const binaryLikeText = 'random data here\nS3 looks like SREC but is not\nmore data';
+            assert.strictEqual(detectFormat(binaryLikeText), 'binary');
+        });
     });
 
     suite('parseIntelHex', () => {

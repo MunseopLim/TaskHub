@@ -29,7 +29,7 @@ export function detectFormat(content: string | Buffer): HexFormat {
     if (trimmed.startsWith(':')) {
         return 'intel';
     }
-    if (/^S[0-9]/m.test(trimmed)) {
+    if (/^S[0-9]/.test(trimmed)) {
         return 'srec';
     }
     return 'binary';
