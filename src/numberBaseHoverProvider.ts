@@ -1314,6 +1314,17 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 break;
             }
         }
+
+        // Fallback: register remaining unresolved structs with best-effort calculation
+        for (const def of definitions) {
+            if (!registered.has(def.name)) {
+                const result = calculator.calculateStructSize(def.name, lines, def.line);
+                if (result.totalSize > 0) {
+                    calculator.registerCustomType(result);
+                    registered.add(def.name);
+                }
+            }
+        }
     }
 
     /**

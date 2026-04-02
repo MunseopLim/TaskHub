@@ -7,6 +7,7 @@ import { t } from './i18n';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 let currentSymbols: { name: string; addr: number; type: string }[] = [];
+let currentMessageDisposable: vscode.Disposable | undefined;
 
 /** Memory Map에서 처리 가능한 최대 ELF/Listing 파일 크기 (100 MB) */
 const MEMORY_MAP_MAX_FILE_SIZE = 100 * 1024 * 1024;
@@ -217,15 +218,16 @@ function showPanel(
             vscode.ViewColumn.One,
             { enableScripts: true }
         );
-        currentPanel.onDidDispose(() => { currentPanel = undefined; currentSymbols = []; });
+        currentPanel.onDidDispose(() => { currentPanel = undefined; currentSymbols = []; currentMessageDisposable?.dispose(); currentMessageDisposable = undefined; });
     }
 
-    currentPanel.webview.onDidReceiveMessage(message => {
+    currentMessageDisposable?.dispose();
+    currentMessageDisposable = currentPanel.webview.onDidReceiveMessage(message => {
         if (message.command === 'copyReport') {
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.'));
         }
-    }, undefined, context.subscriptions);
+    });
 
     currentPanel.title = `Memory Map: ${fileName}`;
     currentPanel.webview.html = getWebviewContent(

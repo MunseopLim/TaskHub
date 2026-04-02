@@ -1,5 +1,36 @@
 # Change Log
 
+## [0.3.0] - 2026-04-02
+
+### Added
+
+**다국어 지원 (i18n)**
+- VS Code 언어 설정에 따라 한국어/영어 메시지 자동 전환
+- `src/i18n.ts` 모듈 추가: `t(ko, en)` 헬퍼 함수
+- 모든 Viewer 및 extension.ts의 사용자 대면 메시지 적용
+
+### Fixed
+
+**WebView 패널 메시지 핸들러 중복 등록**
+- JSON Editor, Hex Viewer, Memory Map에서 패널 재사용 시 이전 핸들러를 dispose 후 새로 등록하도록 수정
+- 다른 파일 저장 시 이전 파일에 덮어쓸 수 있던 버그 수정
+
+**프리셋 자동 적용 시 중복 ID 처리**
+- workspace/preset 간 중복 action ID가 있을 때 전체 로딩 실패 대신 경고 로그로 변경
+
+**구조체 크기 계산 개선**
+- `char *ptr;`, `int *p;` 스타일 포인터 멤버 파싱 지원
+- Forward reference 해결: 미등록 타입 참조 시 multi-pass로 재시도, 최종 fallback 처리
+
+**Import 검증 강화**
+- Import 파일 내부의 중복 action ID 사전 검증 추가
+
+### Enhanced
+
+**Viewer 에러 메시지 개선**
+- 파일 크기 제한 추가 (Hex Viewer: 50MB, Memory Map: 100MB, JSON Editor: 10MB)
+- 파싱 오류, 파일 읽기 실패 등 상세 에러 메시지 표시
+
 ## [0.2.52] - 2026-04-02
 
 ### Fixed

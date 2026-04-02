@@ -113,7 +113,7 @@ function validateUniqueActionIdsAcrossSources(sources: { sourceLabel: string; ac
 
     if (issues.length > 0) {
         const uniqueIssues = Array.from(new Set(issues));
-        throw new Error(`Duplicate action IDs detected across files:\n${uniqueIssues.map(issue => `  - ${issue}`).join('\n')}`);
+        outputChannel.appendLine(`[Warning] Duplicate action IDs across sources (higher-priority source wins):\n${uniqueIssues.map(issue => `  - ${issue}`).join('\n')}`);
     }
 }
 
@@ -2650,6 +2650,27 @@ export function parseImportData(content: string): { actions: ActionItem[]; error
             `  - path: '${error.instancePath}' - ${error.message}`
         ).join('\n');
         errors.push(`Schema validation failed:\n${schemaErrors}`);
+        return { actions: [], errors };
+    }
+
+    // Check for duplicate IDs within the imported file
+    const seenIds = new Set<string>();
+    const duplicateIds: string[] = [];
+    const collectDuplicates = (items: ActionItem[]) => {
+        for (const item of items) {
+            if (item.id) {
+                if (seenIds.has(item.id)) {
+                    duplicateIds.push(item.id);
+                } else {
+                    seenIds.add(item.id);
+                }
+            }
+            if (item.children) { collectDuplicates(item.children); }
+        }
+    };
+    collectDuplicates(rawActions);
+    if (duplicateIds.length > 0) {
+        errors.push(`Duplicate action IDs found in imported file: ${duplicateIds.join(', ')}`);
         return { actions: [], errors };
     }
 

@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import { t } from './i18n';
 
 let currentPanel: vscode.WebviewPanel | undefined;
+let currentMessageDisposable: vscode.Disposable | undefined;
 
 /** JSON Editor에서 처리 가능한 최대 파일 크기 (10 MB) */
 const JSON_EDITOR_MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -123,13 +124,16 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
         );
         currentPanel.onDidDispose(() => {
             currentPanel = undefined;
+            currentMessageDisposable?.dispose();
+            currentMessageDisposable = undefined;
         });
     }
 
     currentPanel.title = `JSON Editor: ${fileName}`;
     currentPanel.webview.html = getWebviewContent(jsonData, filePath);
 
-    currentPanel.webview.onDidReceiveMessage(
+    currentMessageDisposable?.dispose();
+    currentMessageDisposable = currentPanel.webview.onDidReceiveMessage(
         async (message) => {
             switch (message.command) {
                 case 'save': {
@@ -162,9 +166,7 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
                     break;
                 }
             }
-        },
-        undefined,
-        context.subscriptions
+        }
     );
 }
 

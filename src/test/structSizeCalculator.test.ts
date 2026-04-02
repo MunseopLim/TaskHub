@@ -181,6 +181,26 @@ suite('StructSizeCalculator Test Suite', () => {
             assert.strictEqual(result.members[1].size, 4);
             assert.strictEqual(result.members[2].size, 4);
         });
+
+        test('Calculate size with space-before-asterisk pointer style', () => {
+            const lines = [
+                'struct PtrStyles {',
+                '    char *ptr1;',
+                '    int *ptr2;',
+                '    char * ptr3;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'PtrStyles');
+            const result = calculator.calculateStructSize('PtrStyles', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.totalSize, 12);
+            assert.strictEqual(result.members.length, 3);
+            assert.strictEqual(result.members[0].size, 4);
+            assert.strictEqual(result.members[1].size, 4);
+            assert.strictEqual(result.members[2].size, 4);
+        });
     });
 
     suite('Type Qualifiers', () => {
@@ -714,6 +734,100 @@ suite('StructSizeCalculator Test Suite', () => {
             // MediumType(8) + UINT64(8) = 16
             assert.strictEqual(largeResult.totalSize, 16);
             assert.strictEqual(largeResult.members[0].size, 8);  // MediumType correctly sized
+        });
+    });
+
+    suite('Forward Reference Handling', () => {
+        test('should return success false when referencing unregistered type', () => {
+            const lines = [
+                'struct UsesUnknown {',
+                '    UnknownType field;',
+                '    int x;',
+                '};'
+            ];
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'UsesUnknown');
+            const result = calculator.calculateStructSize('UsesUnknown', lines, structLine);
+
+            assert.strictEqual(result.success, false);
+            assert.ok(result.totalSize > 0); // still calculates with default size
+        });
+
+        test('should succeed after registering the dependency type', () => {
+            // First register the dependency
+            const depLines = [
+                'struct DepType {',
+                '    uint8_t a;',
+                '    uint8_t b;',
+                '};'
+            ];
+            const depLine = StructSizeCalculator.findStructDefinition(depLines, 'DepType');
+            const depResult = calculator.calculateStructSize('DepType', depLines, depLine);
+            assert.strictEqual(depResult.success, true);
+            calculator.registerCustomType(depResult);
+
+            // Now the struct using DepType should succeed
+            const lines = [
+                'struct UsesDepType {',
+                '    DepType dep;',
+                '    int x;',
+                '};'
+            ];
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'UsesDepType');
+            const result = calculator.calculateStructSize('UsesDepType', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members[0].size, 2); // DepType = 2 bytes
+        });
+
+        test('multi-pass resolves forward references', () => {
+            // Simulate forward reference: StructA uses StructB, but B is defined later
+            const allLines = [
+                'struct StructA {',
+                '    StructB b;',
+                '    int x;',
+                '};',
+                'struct StructB {',
+                '    uint16_t val;',
+                '};'
+            ];
+
+            const definitions = [
+                { name: 'StructA', line: 0 },
+                { name: 'StructB', line: 4 }
+            ];
+
+            const registered = new Set<string>();
+            const maxPasses = 3;
+
+            for (let pass = 0; pass < maxPasses; pass++) {
+                let newRegistrations = 0;
+                for (const def of definitions) {
+                    if (registered.has(def.name)) { continue; }
+                    const result = calculator.calculateStructSize(def.name, allLines, def.line);
+                    if (result.success) {
+                        calculator.registerCustomType(result);
+                        registered.add(def.name);
+                        newRegistrations++;
+                    }
+                }
+                if (newRegistrations === 0) { break; }
+            }
+
+            // StructB should be registered in pass 1, StructA in pass 2
+            assert.ok(registered.has('StructB'));
+            assert.ok(registered.has('StructA'));
+
+            // Verify StructA has correct sizes
+            const verifyLines = [
+                'struct VerifyA {',
+                '    StructA a;',
+                '};'
+            ];
+            const verifyLine = StructSizeCalculator.findStructDefinition(verifyLines, 'VerifyA');
+            const verifyResult = calculator.calculateStructSize('VerifyA', verifyLines, verifyLine);
+            assert.strictEqual(verifyResult.success, true);
+            // StructB = 2 bytes, StructA = StructB(2) + pad(2) + int(4) = 8
+            assert.strictEqual(verifyResult.members[0].size, 8);
         });
     });
 

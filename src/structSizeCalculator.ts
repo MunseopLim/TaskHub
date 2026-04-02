@@ -234,11 +234,14 @@ export class StructSizeCalculator {
 
             // Parse member declaration
             // Pattern: Type memberName; or Type memberName[size];
-            const memberMatch = line.match(/^\s*([\w\s*]+?)\s+(\w+)(?:\[(\d+)\])?\s*;/);
+            // Also handles pointer styles: char *ptr; int *p; char* ptr; char * ptr;
+            const memberMatch = line.match(/^\s*([\w\s*]+?)\s+(\*?)(\w+)(?:\[(\d+)\])?\s*;/);
             if (memberMatch) {
-                const type = memberMatch[1].trim();
-                const name = memberMatch[2];
-                const arraySize = memberMatch[3] ? parseInt(memberMatch[3], 10) : undefined;
+                const typeBase = memberMatch[1].trim();
+                const ptrPrefix = memberMatch[2];
+                const type = ptrPrefix ? typeBase + ' *' : typeBase;
+                const name = memberMatch[3];
+                const arraySize = memberMatch[4] ? parseInt(memberMatch[4], 10) : undefined;
 
                 members.push({
                     name,
@@ -262,12 +265,16 @@ export class StructSizeCalculator {
         let currentOffset = 0;
         let structAlignment = 1;
         let totalPadding = 0;
+        let hasUnresolvedTypes = false;
 
         const packingAlignment = this.typeConfig.packingAlignment || 8;
 
         for (const member of members) {
             // Get type size and alignment
             const typeInfo = this.getTypeInfo(member.type);
+            if (!typeInfo.resolved) {
+                hasUnresolvedTypes = true;
+            }
 
             // Apply packing alignment limit
             const memberAlignment = Math.min(typeInfo.alignment, packingAlignment);
@@ -301,26 +308,28 @@ export class StructSizeCalculator {
             alignment: structAlignment,
             members,
             padding: totalPadding,
-            success: true
+            success: !hasUnresolvedTypes
         };
     }
 
     /**
      * Get type information (size and alignment)
      * Supports recursive lookup for custom types
+     * Returns resolved: false if the type is unknown (not built-in and not a registered custom type)
      */
-    private getTypeInfo(type: string): TypeConfig {
+    private getTypeInfo(type: string): TypeConfig & { resolved: boolean } {
         // Remove qualifiers
         const cleanType = type.replace(/\b(const|volatile|static|extern)\b/g, '').trim();
 
         // Check if it's a pointer
         if (cleanType.includes('*')) {
-            return this.typeConfig.types['pointer'] || { size: 4, alignment: 4 };
+            const info = this.typeConfig.types['pointer'] || { size: 4, alignment: 4 };
+            return { ...info, resolved: true };
         }
 
         // Check built-in types
         if (this.typeConfig.types[cleanType]) {
-            return this.typeConfig.types[cleanType];
+            return { ...this.typeConfig.types[cleanType], resolved: true };
         }
 
         // Check custom types (previously calculated structs)
@@ -328,12 +337,13 @@ export class StructSizeCalculator {
         if (customType) {
             return {
                 size: customType.totalSize,
-                alignment: customType.alignment
+                alignment: customType.alignment,
+                resolved: true
             };
         }
 
-        // Default: assume int-sized
-        return { size: 4, alignment: 4 };
+        // Default: assume int-sized but mark as unresolved
+        return { size: 4, alignment: 4, resolved: false };
     }
 
     /**

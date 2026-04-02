@@ -2421,6 +2421,42 @@ suite('Extension Test Suite', () => {
 			assert.ok(errors.length > 0);
 			assert.ok(errors[0].includes('Schema validation failed'));
 		});
+
+		test('should return error for duplicate action IDs within imported file', () => {
+			const data = JSON.stringify([
+				{ id: 'dup.action', title: 'First', action: { description: 'desc', tasks: [{ id: 't1', type: 'shell' }] } },
+				{ id: 'dup.action', title: 'Second', action: { description: 'desc', tasks: [{ id: 't2', type: 'shell' }] } }
+			]);
+			const { actions, errors } = parseImportData(data);
+			assert.strictEqual(actions.length, 0);
+			assert.strictEqual(errors.length, 1);
+			assert.ok(errors[0].includes('Duplicate action IDs'));
+			assert.ok(errors[0].includes('dup.action'));
+		});
+
+		test('should return error for duplicate IDs in nested children of imported file', () => {
+			const data = JSON.stringify([
+				{
+					id: 'folder1', title: 'Folder', children: [
+						{ id: 'nested.dup', title: 'Child1', action: { description: 'd', tasks: [{ id: 't1', type: 'shell' }] } }
+					]
+				},
+				{ id: 'nested.dup', title: 'TopLevel', action: { description: 'd', tasks: [{ id: 't2', type: 'shell' }] } }
+			]);
+			const { actions, errors } = parseImportData(data);
+			assert.strictEqual(actions.length, 0);
+			assert.ok(errors[0].includes('nested.dup'));
+		});
+
+		test('should accept imported file with unique IDs', () => {
+			const data = JSON.stringify([
+				{ id: 'action.a', title: 'A', action: { description: 'd', tasks: [{ id: 't1', type: 'shell' }] } },
+				{ id: 'action.b', title: 'B', action: { description: 'd', tasks: [{ id: 't2', type: 'shell' }] } }
+			]);
+			const { actions, errors } = parseImportData(data);
+			assert.strictEqual(errors.length, 0);
+			assert.strictEqual(actions.length, 2);
+		});
 	});
 
 	suite('countActionItems', () => {

@@ -10,6 +10,7 @@ import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexPa
 import { t } from './i18n';
 
 let currentPanel: vscode.WebviewPanel | undefined;
+let currentMessageDisposable: vscode.Disposable | undefined;
 
 /** Hex Viewer에서 처리 가능한 최대 파일 크기 (50 MB) */
 const HEX_VIEWER_MAX_FILE_SIZE = 50 * 1024 * 1024;
@@ -114,13 +115,14 @@ export function parseFile(filePath: string): HexParseResult {
     }
 }
 
-function setupWebviewMessageHandler(webview: vscode.Webview, disposables: vscode.Disposable[]) {
-    webview.onDidReceiveMessage(message => {
+function setupWebviewMessageHandler(webview: vscode.Webview) {
+    currentMessageDisposable?.dispose();
+    currentMessageDisposable = webview.onDidReceiveMessage(message => {
         if (message.command === 'copySelection') {
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('클립보드에 복사되었습니다.', 'Copied to clipboard.'));
         }
-    }, undefined, disposables);
+    });
 }
 
 function openPanel(context: vscode.ExtensionContext, fileName: string, result: HexParseResult) {
@@ -133,12 +135,12 @@ function openPanel(context: vscode.ExtensionContext, fileName: string, result: H
             vscode.ViewColumn.One,
             { enableScripts: true, retainContextWhenHidden: true }
         );
-        currentPanel.onDidDispose(() => { currentPanel = undefined; });
+        currentPanel.onDidDispose(() => { currentPanel = undefined; currentMessageDisposable?.dispose(); currentMessageDisposable = undefined; });
     }
 
     currentPanel.title = `Hex: ${fileName}`;
     currentPanel.webview.html = buildHexViewerHtml(fileName, result);
-    setupWebviewMessageHandler(currentPanel.webview, context.subscriptions);
+    setupWebviewMessageHandler(currentPanel.webview);
 }
 
 function esc(s: string): string {
@@ -955,6 +957,6 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         }
 
         webviewPanel.webview.html = buildHexViewerHtml(fileName, result);
-        setupWebviewMessageHandler(webviewPanel.webview, this.context.subscriptions);
+        setupWebviewMessageHandler(webviewPanel.webview);
     }
 }
