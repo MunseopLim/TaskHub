@@ -196,14 +196,10 @@ function getWebviewContent(
     /* Hex content - virtual scrolling */
     .hex-container {
         flex: 1; overflow-y: auto; overflow-x: auto;
-        padding: 0; position: relative;
-    }
-    .hex-scroll-spacer {
-        width: 1px;
+        padding: 0;
     }
     .hex-table {
         border-collapse: collapse; width: max-content;
-        position: sticky; top: 0;
     }
     .hex-table thead th {
         position: sticky; top: 0; z-index: 2;
@@ -298,7 +294,6 @@ function getWebviewContent(
         <button id="findClose">✕</button>
     </div>
     <div class="hex-container" id="hexContainer">
-        <div class="hex-scroll-spacer" id="scrollSpacer"></div>
         <table class="hex-table" id="hexTable">
             <thead id="hexHead"></thead>
             <tbody id="hexBody"></tbody>
@@ -346,10 +341,8 @@ function getWebviewContent(
     const BUFFER_ROWS = 20; // extra rows to render above/below viewport
 
     const hexContainer = document.getElementById('hexContainer');
-    const scrollSpacer = document.getElementById('scrollSpacer');
     const hexHead = document.getElementById('hexHead');
     const hexBody = document.getElementById('hexBody');
-    const hexTable = document.getElementById('hexTable');
     const statusBar = document.getElementById('statusBar');
     const unitSelect = document.getElementById('unitSize');
     const endianSelect = document.getElementById('endian');
@@ -488,10 +481,9 @@ function getWebviewContent(
     function calcVisibleRange() {
         const scrollTop = hexContainer.scrollTop;
         const clientHeight = hexContainer.clientHeight;
-        const headerHeight = hexHead.offsetHeight || 24;
 
-        const startRow = Math.max(0, Math.floor((scrollTop - headerHeight) / ROW_HEIGHT) - BUFFER_ROWS);
-        const endRow = Math.min(totalRowCount, Math.ceil((scrollTop - headerHeight + clientHeight) / ROW_HEIGHT) + BUFFER_ROWS);
+        const startRow = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_ROWS);
+        const endRow = Math.min(totalRowCount, Math.ceil((scrollTop + clientHeight) / ROW_HEIGHT) + BUFFER_ROWS);
         return { startRow, endRow };
     }
 
@@ -504,12 +496,33 @@ function getWebviewContent(
         visibleEndRow = endRow;
 
         const frag = document.createDocumentFragment();
+
+        // Top spacer row
+        if (startRow > 0) {
+            const topSpacer = document.createElement('tr');
+            const topTd = document.createElement('td');
+            topTd.style.height = (startRow * ROW_HEIGHT) + 'px';
+            topTd.style.padding = '0';
+            topTd.style.border = 'none';
+            topSpacer.appendChild(topTd);
+            frag.appendChild(topSpacer);
+        }
+
+        // Visible rows
         for (let row = startRow; row < endRow; row++) {
-            const tr = buildRow(row);
-            tr.style.position = 'absolute';
-            tr.style.top = (row * ROW_HEIGHT) + 'px';
-            tr.style.width = '100%';
-            frag.appendChild(tr);
+            frag.appendChild(buildRow(row));
+        }
+
+        // Bottom spacer row
+        const bottomRows = totalRowCount - endRow;
+        if (bottomRows > 0) {
+            const bottomSpacer = document.createElement('tr');
+            const bottomTd = document.createElement('td');
+            bottomTd.style.height = (bottomRows * ROW_HEIGHT) + 'px';
+            bottomTd.style.padding = '0';
+            bottomTd.style.border = 'none';
+            bottomSpacer.appendChild(bottomTd);
+            frag.appendChild(bottomSpacer);
         }
 
         hexBody.innerHTML = '';
@@ -522,18 +535,8 @@ function getWebviewContent(
         applyFindHighlightsToVisible();
     }
 
-    function initVirtualScroll() {
-        const totalHeight = totalRowCount * ROW_HEIGHT + (hexHead.offsetHeight || 24);
-        scrollSpacer.style.height = totalHeight + 'px';
-        hexTable.style.position = 'sticky';
-        hexTable.style.top = '0';
-        hexBody.style.position = 'relative';
-        hexBody.style.height = (totalRowCount * ROW_HEIGHT) + 'px';
-    }
-
     function render() {
         buildHeader();
-        initVirtualScroll();
         renderedStartRow = -1;
         renderedEndRow = -1;
         renderVisibleRows();
@@ -629,10 +632,9 @@ function getWebviewContent(
 
     // Go to address
     function scrollToRow(rowIndex) {
-        const headerHeight = hexHead.offsetHeight || 24;
-        const targetTop = rowIndex * ROW_HEIGHT + headerHeight;
+        const targetTop = rowIndex * ROW_HEIGHT;
         const containerHeight = hexContainer.clientHeight;
-        hexContainer.scrollTop = targetTop - containerHeight / 2;
+        hexContainer.scrollTop = Math.max(0, targetTop - containerHeight / 2);
     }
 
     function goToAddress() {

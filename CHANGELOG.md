@@ -1,12 +1,12 @@
 # Change Log
 
-## [0.2.49] - 2026-04-02
+## [0.2.50] - 2026-04-02
 
 ### Fixed
 
 **Hex Viewer 대용량 파일 지원**
 - 바이너리 파일 포맷 오감지 수정: SREC 정규식 multiline 플래그로 인해 대용량 바이너리가 SREC로 오인되는 버그 수정
-- Virtual scrolling 적용: 화면에 보이는 행만 렌더링하여 대용량 파일에서 WebView 응답 없음 문제 해결
+- Virtual scrolling 적용: 패딩 행(spacer tr) 방식으로 화면에 보이는 행만 렌더링하여 대용량 파일에서 WebView 응답 없음 문제 해결
 - 바이너리 파싱 최적화: Map 대신 Uint8Array 사용으로 16MB+ 파일의 Map 크기 초과 오류 해결
 
 ## [0.2.47] - 2026-04-01
