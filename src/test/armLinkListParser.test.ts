@@ -234,7 +234,7 @@ suite('ArmLinkListParser Test Suite', () => {
             const result = parseArmLinkList(SAMPLE_AC6);
             // Add a zero-size entry
             result.execRegions[0].entries.push({
-                addr: 0x08001000, size: 0, kind: 'Code', attr: 'RO', object: 'empty.o', section: '.text',
+                addr: 0x08001000, size: 0, kind: 'Code', attr: 'RO', object: 'empty.o', section: '.text', func: '',
             });
             const sections = toElfSections(result);
             assert.strictEqual(sections.length, 6); // zero-size not included
@@ -383,9 +383,10 @@ suite('ArmLinkListParser Test Suite', () => {
             const result = parseArmLinkList(SAMPLE_AC6);
             const usages = toMemoryUsage(result);
             const flash = usages[0];
-            const textEntry = flash.sections.find(s => s.name === '.text' && s.object === 'main.o');
-            assert.ok(textEntry, 'Should have .text entry with object=main.o');
-            assert.strictEqual(textEntry!.object, 'main.o');
+            // name now comes from entry.object (e.g., "main.o")
+            const mainEntry = flash.sections.find(s => s.name === 'main.o' && s.object === 'main.o');
+            assert.ok(mainEntry, 'Should have entry with name=main.o');
+            assert.strictEqual(mainEntry!.object, 'main.o');
         });
     });
 
@@ -428,6 +429,76 @@ suite('ArmLinkListParser Test Suite', () => {
             assert.strictEqual(startupObj.entries.length, 2);
             assert.ok(startupObj.entries.find(e => e.section === 'RESET'));
             assert.ok(startupObj.entries.find(e => e.section === '.text'));
+        });
+    });
+
+    suite('func extraction', () => {
+        test('should extract function name from section token with .text. prefix', () => {
+            const content = `
+    Execution Region ER_IROM1 (Exec base: 0x08000000, Size: 0x00000100, Max: 0x00040000, ABSOLUTE)
+
+    0x08000000   0x00000080   Code   RO         1    .text._ZN4Test8FuncNameEv    c_2.l(testfunc.o)
+    0x08000080   0x00000040   Code   RO         2    .text.main    main.o(.text)
+`;
+            const result = parseArmLinkList(content);
+            const entries = result.execRegions[0].entries;
+            assert.strictEqual(entries.length, 2);
+
+            // lib(obj.o) pattern: object = testfunc.o, func = _ZN4Test8FuncNameEv
+            assert.strictEqual(entries[0].object, 'testfunc.o');
+            assert.strictEqual(entries[0].func, '_ZN4Test8FuncNameEv');
+            assert.strictEqual(entries[0].section, '.text');
+
+            // object(.section) pattern: object = main.o, section = .text
+            assert.strictEqual(entries[1].object, 'main.o');
+            assert.strictEqual(entries[1].section, '.text');
+            assert.strictEqual(entries[1].func, 'main');
+        });
+
+        test('should extract function name from .rodata. prefix', () => {
+            const content = `
+    Execution Region ER_IROM1 (Exec base: 0x08000000, Size: 0x00000100, Max: 0x00040000, ABSOLUTE)
+
+    0x08000000   0x00000020   Data   RO         1    .rodata.myConst    main.o(.rodata)
+`;
+            const result = parseArmLinkList(content);
+            assert.strictEqual(result.execRegions[0].entries[0].func, 'myConst');
+        });
+
+        test('should return full token as func when no known prefix', () => {
+            const content = `
+    Execution Region ER_IROM1 (Exec base: 0x08000000, Size: 0x00000100, Max: 0x00040000, ABSOLUTE)
+
+    0x08000000   0x00000080   Code   RO         1    .mysection.SomeFunc    lib.a(custom.o)
+    0x08000080   0x00000080   Code   RO         2    custom_section    other.a(mod.o)
+`;
+            const result = parseArmLinkList(content);
+            // Unknown prefix → full token shown
+            assert.strictEqual(result.execRegions[0].entries[0].func, '.mysection.SomeFunc');
+            assert.strictEqual(result.execRegions[0].entries[1].func, 'custom_section');
+        });
+
+        test('should have empty func when no section token (object(.section) only)', () => {
+            const content = `
+    Execution Region ER_IROM1 (Exec base: 0x08000000, Size: 0x00000100, Max: 0x00040000, ABSOLUTE)
+
+    0x08000000   0x00000100   Code   RO         1    startup.o(RESET)
+`;
+            const result = parseArmLinkList(content);
+            assert.strictEqual(result.execRegions[0].entries[0].func, '');
+        });
+
+        test('should set name to object in toMemoryUsage', () => {
+            const content = `
+    Execution Region ER_IROM1 (Exec base: 0x08000000, Size: 0x00000100, Max: 0x00040000, ABSOLUTE)
+
+    0x08000000   0x00000080   Code   RO         1    .text._ZN4Test8FuncEv    c_2.l(testfunc.o)
+`;
+            const result = parseArmLinkList(content);
+            const usages = toMemoryUsage(result);
+            const entry = usages[0].sections[0];
+            assert.strictEqual(entry.name, 'testfunc.o');
+            assert.strictEqual(entry.func, '_ZN4Test8FuncEv');
         });
     });
 });

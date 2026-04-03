@@ -11,8 +11,9 @@ export interface ArmLinkEntry {
     size: number;
     kind: string;     // Code, Data, Zero
     attr: string;     // RO, RW, ZI
-    object: string;   // e.g., "main.o"
+    object: string;   // e.g., "main.o" or "lludiv5.o" (from lib(obj) pattern)
     section: string;  // e.g., ".text"
+    func: string;     // function/symbol name extracted from section token (e.g., "_ZN1TEST10Func")
 }
 
 export interface ArmLinkExecRegion {
@@ -44,6 +45,19 @@ const RO_TOTAL_RE = /Total\s+RO\s+Size[^0-9]*(\d+)\s*\(/i;
 const RW_TOTAL_RE = /Total\s+RW\s+Size[^0-9]*(\d+)\s*\(/i;
 const ROM_TOTAL_RE = /Total\s+ROM\s+Size[^0-9]*(\d+)\s*\(/i;
 const SEPARATOR_RE = /^={4,}\s*$/;
+
+/** Known section prefixes — strip these to extract function name */
+const SECTION_PREFIXES = ['.text.', '.rodata.', '.data.', '.bss.', '.constdata.', '.ARM.'];
+
+function extractFunc(sectionToken: string): string {
+    for (const prefix of SECTION_PREFIXES) {
+        if (sectionToken.startsWith(prefix)) {
+            return sectionToken.substring(prefix.length);
+        }
+    }
+    // No known prefix — return the whole token as-is
+    return sectionToken;
+}
 
 /**
  * Parse "Exec base: 0x..." or "Base: 0x..." style parameters from Execution Region header.
@@ -113,21 +127,55 @@ export function parseArmLinkList(content: string): ArmLinkListResult {
                 const kind = entryMatch[3];
                 const attr = entryMatch[4].toUpperCase();
 
-                // Extract object(section) from the rest of the line
+                // Extract idx, section token, and object(section) from the rest of the line
+                // Format: idx  sectionToken  library(object)
+                //   e.g.: 2899  .text._ZN1TEST10Func  c_2.l(lludiv5.o)
+                //   or:   2899  main.o(.text)
                 const rest = line.substring(entryMatch[0].length);
                 const objMatch = OBJ_SECTION_RE.exec(rest);
 
                 let object = '';
                 let section = '';
+                let func = '';
                 if (objMatch) {
-                    object = objMatch[1];
-                    section = objMatch[2];
+                    // lib(obj) pattern at end: e.g., "c_2.l(lludiv5.o)" or "main.o(.text)"
+                    const libOrObj = objMatch[1];    // "c_2.l" or "main.o"
+                    const inParen = objMatch[2];     // "lludiv5.o" or ".text"
+
+                    if (inParen.endsWith('.o')) {
+                        // library(object.o) pattern — object is inside parens
+                        object = inParen;
+                    } else {
+                        // object(.section) pattern — object is before parens
+                        object = libOrObj;
+                        section = inParen;
+                    }
+
+                    // Extract section token between idx and the lib(obj) part
+                    const beforeObj = rest.substring(0, objMatch.index).trim();
+                    const tokens = beforeObj.split(/\s+/);
+                    // tokens: [idx, sectionToken?] — skip numeric idx
+                    const sectionToken = tokens.find(t => !/^\d+$/.test(t) && t.length > 0);
+                    if (sectionToken) {
+                        if (!section) {
+                            // Take base section name from token prefix (e.g., ".text" from ".text._ZN...")
+                            for (const prefix of SECTION_PREFIXES) {
+                                if (sectionToken.startsWith(prefix.slice(0, -1))) {
+                                    section = prefix.slice(0, -1); // ".text"
+                                    break;
+                                }
+                            }
+                            if (!section) { section = sectionToken; }
+                        }
+                        func = extractFunc(sectionToken);
+                    }
                 } else {
                     // Handle entries without parentheses (e.g., Region$$Table, .ARM.Collect$$...)
                     const tokens = rest.trim().split(/\s+/);
                     const lastToken = tokens[tokens.length - 1];
                     if (lastToken && !/^\d+$/.test(lastToken) && !/^[-*]+$/.test(lastToken)) {
                         section = lastToken;
+                        func = extractFunc(lastToken);
                     }
                 }
 
@@ -138,6 +186,7 @@ export function parseArmLinkList(content: string): ArmLinkListResult {
                     attr,
                     object,
                     section,
+                    func,
                 });
                 continue;
             }
@@ -312,13 +361,14 @@ export function toMemoryUsage(result: ArmLinkListResult): MemoryUsage[] {
                 .map(e => {
                     const kindLower = e.kind.toLowerCase();
                     return {
-                        name: e.section || e.object || `[${e.kind}]`,
+                        name: e.object || e.section || `[${e.kind}]`,
                         size: e.size,
                         addr: e.addr,
                         type: (e.attr === 'ZI' || kindLower === 'zero')
                             ? 'NOBITS'
                             : (kindLower === 'code' ? 'CODE' : (e.attr === 'RW' ? 'DATA' : 'RODATA')),
                         object: e.object || undefined,
+                        func: e.func || undefined,
                     };
                 });
 

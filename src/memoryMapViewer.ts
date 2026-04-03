@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary } from './elfParser';
 import { parseLinkerFile } from './linkerScriptParser';
-import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage, toObjectSummary, ObjectSummary } from './armLinkListParser';
+import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 import { t } from './i18n';
 
 let currentPanel: vscode.WebviewPanel | undefined;
@@ -147,7 +147,7 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     const textReport = generateTextReport(fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
     const hasSymbols = symbols.length > 0;
 
-    showPanel(context, fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, undefined, hasSymbols);
+    showPanel(context, fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, hasSymbols);
 }
 
 function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: string) {
@@ -203,12 +203,11 @@ function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: st
     const { flash, ram } = classifySections(sections);
     const sectionSummary = toAggregatedSummary(result);
     const memoryUsage = toMemoryUsage(result);
-    const objectSummary = toObjectSummary(result);
     const flashTotal = flash.reduce((sum, s) => sum + s.size, 0);
     const ramTotal = ram.reduce((sum, s) => sum + s.size, 0);
     const textReport = generateTextReport(fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
 
-    showPanel(context, fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, objectSummary);
+    showPanel(context, fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport);
 }
 
 function showPanel(
@@ -221,7 +220,6 @@ function showPanel(
     memoryUsage: MemoryUsage[],
     regions: MemoryRegion[],
     textReport: string,
-    objectSummary?: ObjectSummary[],
     hasSymbols?: boolean
 ) {
     if (currentPanel) {
@@ -246,7 +244,7 @@ function showPanel(
 
     currentPanel.title = `Memory Map: ${fileName}`;
     currentPanel.webview.html = getWebviewContent(
-        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, objectSummary, hasSymbols
+        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, hasSymbols
     );
 
     // Store region symbols for Go to Symbol command
@@ -287,11 +285,8 @@ function getWebviewContent(
     memoryUsage: MemoryUsage[],
     regions: MemoryRegion[],
     textReport: string,
-    objectSummary?: ObjectSummary[],
     hasSymbols?: boolean
 ): string {
-    const isListing = objectSummary !== undefined;
-    const totalUsedSize = memoryUsage.reduce((sum, u) => sum + u.used, 0);
     const usageBarsHtml = memoryUsage.map(u => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
         const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warn)' : 'var(--ok)';
@@ -300,8 +295,8 @@ function getWebviewContent(
 
         // Segmented memory layout bar (address-ordered)
         const allSegments = [
-            ...u.sections.map(s => ({ name: s.name, size: s.size, addr: s.addr, type: s.type, object: s.object })),
-            ...u.freeSpaces.map(f => ({ name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', object: undefined as string | undefined })),
+            ...u.sections.map(s => ({ name: s.name, size: s.size, addr: s.addr, type: s.type, object: s.object, func: s.func })),
+            ...u.freeSpaces.map(f => ({ name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', object: undefined as string | undefined, func: undefined as string | undefined })),
         ].sort((a, b) => a.addr - b.addr);
 
         const mapSegHtml = allSegments
@@ -312,14 +307,14 @@ function getWebviewContent(
             }).join('');
 
         // Table rows (address-ordered, sections + free spaces)
-        // Include object column for listing/symbol data
-        const hasObjectInfo = u.sections.some(s => s.object);
+        // Include func column (toggle) for listing/symbol data
+        const hasFuncInfo = u.sections.some(s => s.func);
         const tableRows = allSegments
             .filter(e => e.size > 0)
             .map(e => {
                 const rowCls = e.type === 'FREE' ? ' class="free-row"' : '';
-                const objCell = hasObjectInfo ? `<td class="obj-cell">${esc((e as any).object || '')}</td>` : '';
-                return `<tr${rowCls}>${objCell}<td>${esc(e.name)}</td><td class="num">${formatHex(e.addr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${String(e.size)}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`;
+                const funcCell = hasFuncInfo ? `<td class="func-cell">${esc(e.func || '')}</td>` : '';
+                return `<tr${rowCls}><td>${esc(e.name)}</td>${funcCell}<td class="num">${formatHex(e.addr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${String(e.size)}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`;
             }).join('');
 
         const linkerFree = u.reportedUsed !== undefined ? u.total - u.reportedUsed : 0;
@@ -328,6 +323,35 @@ function getWebviewContent(
             ? `<div class="region-linker">Linker: Base=${formatHex(regionOrigin)} Used=${formatHex(u.reportedUsed)} (${formatSize(u.reportedUsed)}) Max=${formatHex(u.total)} (${formatSize(u.total)}) Free: ${formatSize(linkerFree)}</div>`
             : '';
         const infoText = `Used: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(calcFree)}`;
+
+        // Per-region object summary: group entries by object name within this region
+        const objGroups = new Map<string, { totalSize: number; codeSize: number; roSize: number; dataSize: number; bssSize: number }>();
+        for (const s of u.sections) {
+            const objName = s.name;
+            let g = objGroups.get(objName);
+            if (!g) { g = { totalSize: 0, codeSize: 0, roSize: 0, dataSize: 0, bssSize: 0 }; objGroups.set(objName, g); }
+            g.totalSize += s.size;
+            if (s.type === 'CODE') { g.codeSize += s.size; }
+            else if (s.type === 'RODATA') { g.roSize += s.size; }
+            else if (s.type === 'DATA') { g.dataSize += s.size; }
+            else if (s.type === 'NOBITS') { g.bssSize += s.size; }
+        }
+        const regionObjSummary = Array.from(objGroups).map(([name, g]) => ({ name, ...g })).sort((a, b) => b.totalSize - a.totalSize);
+        const regionUsed = u.used;
+        const objSummaryRows = regionObjSummary.map(o => {
+            const objPct = regionUsed > 0 ? (o.totalSize / regionUsed * 100).toFixed(1) : '0.0';
+            const barW = regionUsed > 0 ? Math.max(1, o.totalSize / regionUsed * 100) : 0;
+            const detailParts: string[] = [];
+            if (o.codeSize > 0) { detailParts.push(`Code: ${formatSize(o.codeSize)}`); }
+            if (o.roSize > 0) { detailParts.push(`RO: ${formatSize(o.roSize)}`); }
+            if (o.dataSize > 0) { detailParts.push(`RW: ${formatSize(o.dataSize)}`); }
+            if (o.bssSize > 0) { detailParts.push(`ZI: ${formatSize(o.bssSize)}`); }
+            return `<tr><td>${esc(o.name)}</td><td class="num">${formatSize(o.totalSize)}</td><td class="num">${o.totalSize}</td><td class="num">${objPct}%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:${barW}%;background:var(--ok)"></div></div></td><td class="obj-detail">${detailParts.join(' | ')}</td></tr>`;
+        }).join('');
+        const hasMultipleObjs = regionObjSummary.length > 1;
+        const objSummaryHtml = hasMultipleObjs
+            ? `<div class="obj-summary-heading">Object Summary (${regionObjSummary.length}) <button onclick="toggleObjDetail(this)" title="Toggle details">Details ▶</button></div><table class="obj-summary-table sortable-table"><thead><tr><th data-sort="name">Object</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th class="num" data-sort="pct">%</th><th></th><th class="obj-detail" data-sort="detail">Breakdown</th></tr></thead><tbody>${objSummaryRows}</tbody></table>`
+            : '';
 
         return `
         <div class="region-card" id="region-${esc(u.region)}">
@@ -339,15 +363,16 @@ function getWebviewContent(
             ${linkerLine}
             <div class="bar-bg"><div class="bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div>
             <div class="region-detail" style="display:none">
+                ${objSummaryHtml}
                 ${allSegments.length > 0 ? `<div class="map-bar">${mapSegHtml}</div>` : ''}
-                ${allSegments.length > 0 ? `<table class="section-table sortable-table"><thead><tr>${hasObjectInfo ? '<th data-sort="object" class="obj-cell">Object</th>' : ''}<th data-sort="name">Section</th><th class="num" data-sort="addr">Address</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th data-sort="type">Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
+                ${allSegments.length > 0 ? `<table class="section-table sortable-table"><thead><tr><th data-sort="name">Object</th>${hasFuncInfo ? '<th data-sort="func" class="func-cell">Function</th>' : ''}<th class="num" data-sort="addr">Address</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th data-sort="type">Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
             </div>
         </div>`;
     }).join('');
 
     const hasRegions = memoryUsage.length > 0;
     const hasLinkerData = memoryUsage.some(u => u.reportedUsed !== undefined);
-    const hasObjectData = memoryUsage.some(u => u.sections.some(s => s.object));
+    const hasFuncData = memoryUsage.some(u => u.sections.some(s => s.func));
 
     const regionOverviewRows = memoryUsage.map(u => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
@@ -622,10 +647,12 @@ function getWebviewContent(
     }
     .scroll-top:hover { background: var(--btn-hover); }
     .scroll-top.visible { opacity: 1; pointer-events: auto; }
-    .obj-cell { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-    .obj-cell.hidden { display: none; }
+    .func-cell { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+    .func-cell.hidden { display: none; }
     .obj-detail { font-size: 11px; opacity: 0.7; }
     .obj-detail.hidden { display: none; }
+    .obj-summary-heading { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+    .obj-summary-table { margin-bottom: 10px; }
 </style>
 </head>
 <body>
@@ -647,7 +674,7 @@ function getWebviewContent(
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
         ${!hasLinkerData && !hasSymbols ? '<div class="info-note">AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.</div>' : ''}
         ${hasSymbols ? '<div class="info-note">ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.</div>' : ''}
-        <div class="section-heading">Region Details <button onclick="foldAll(false)" title="Expand All">▼ Expand All</button> <button onclick="foldAll(true)" title="Collapse All">▶ Collapse All</button>${hasObjectData ? ' <button onclick="toggleObjCol()" title="Toggle Object column">Object ▶</button>' : ''}</div>
+        <div class="section-heading">Region Details <button onclick="foldAll(false)" title="Expand All">▼ Expand All</button> <button onclick="foldAll(true)" title="Collapse All">▶ Collapse All</button>${hasFuncData ? ' <button onclick="toggleFuncCol()" title="Toggle Function column">Function ▶</button>' : ''}</div>
         ${usageBarsHtml}
     ` : `
         <div class="no-regions">
@@ -656,22 +683,6 @@ function getWebviewContent(
             - Or add <code>memoryMap.regions</code> to <code>.vscode/taskhub_types.json</code>
         </div>
     `}
-
-    ${objectSummary && objectSummary.length > 0 ? (() => {
-        const objRows = objectSummary.map(o => {
-            const pct = totalUsedSize > 0 ? (o.totalSize / totalUsedSize * 100).toFixed(1) : '0.0';
-            const barW = totalUsedSize > 0 ? Math.max(1, o.totalSize / totalUsedSize * 100) : 0;
-            const detailParts: string[] = [];
-            if (o.codeSize > 0) { detailParts.push(`Code: ${formatSize(o.codeSize)}`); }
-            if (o.roSize > 0) { detailParts.push(`RO: ${formatSize(o.roSize)}`); }
-            if (o.dataSize > 0) { detailParts.push(`RW: ${formatSize(o.dataSize)}`); }
-            if (o.bssSize > 0) { detailParts.push(`ZI: ${formatSize(o.bssSize)}`); }
-            const funcList = o.entries.map(e => `${esc(e.section)} (${formatSize(e.size)}, ${esc(e.region)})`).join(', ');
-            return `<tr title="${esc(funcList)}"><td>${esc(o.object)}</td><td class="num">${formatSize(o.totalSize)}</td><td class="num">${o.totalSize}</td><td class="num">${pct}%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:${barW}%;background:var(--ok)"></div></div></td><td class="obj-detail">${detailParts.join(' | ')}</td></tr>`;
-        }).join('');
-        return `<div class="section-heading">Object Summary (${objectSummary.length}) <button onclick="toggleObjDetail()" title="Toggle details">Details ▶</button></div>
-        <table id="objectTable" class="sortable-table"><thead><tr><th data-sort="name">Object</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th class="num" data-sort="pct">%</th><th></th><th class="obj-detail" data-sort="detail">Breakdown</th></tr></thead><tbody>${objRows}</tbody></table>`;
-    })() : ''}
 
     <div class="section-heading">All Sections (${sectionSummary.length})</div>
     <table id="sectionTable" class="sortable-table">
@@ -843,26 +854,26 @@ function getWebviewContent(
             });
         });
     });
-    // --- Toggle Object column in region tables ---
-    let objColVisible = false;
-    window.toggleObjCol = function() {
-        objColVisible = !objColVisible;
-        document.querySelectorAll('.obj-cell').forEach(el => {
-            el.classList.toggle('hidden', !objColVisible);
+    // --- Toggle Function column in region tables ---
+    let funcColVisible = false;
+    window.toggleFuncCol = function() {
+        funcColVisible = !funcColVisible;
+        document.querySelectorAll('.func-cell').forEach(el => {
+            el.classList.toggle('hidden', !funcColVisible);
         });
     };
 
-    // --- Toggle detail column in object summary ---
-    let objDetailVisible = false;
-    window.toggleObjDetail = function() {
-        objDetailVisible = !objDetailVisible;
-        document.querySelectorAll('.obj-detail').forEach(el => {
-            el.classList.toggle('hidden', !objDetailVisible);
-        });
+    // --- Toggle detail column in per-region object summary ---
+    window.toggleObjDetail = function(btn) {
+        const card = btn.closest('.region-card');
+        if (!card) { return; }
+        const cells = card.querySelectorAll('.obj-detail');
+        const isHidden = cells.length > 0 && cells[0].classList.contains('hidden');
+        cells.forEach(el => el.classList.toggle('hidden', !isHidden));
     };
 
-    // Initialize: obj-cell hidden by default
-    document.querySelectorAll('.obj-cell').forEach(el => el.classList.add('hidden'));
+    // Initialize: func-cell hidden by default
+    document.querySelectorAll('.func-cell').forEach(el => el.classList.add('hidden'));
 
     // --- Scroll to top button ---
     const scrollBtn = document.getElementById('scrollTop');
