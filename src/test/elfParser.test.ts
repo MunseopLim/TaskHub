@@ -3,11 +3,15 @@ import {
     parseElf32,
     classifySections,
     computeMemoryUsage,
+    computeSymbolUsage,
+    autoDetectRegions,
     summarizeSections,
     generateTextReport,
     formatSize,
     formatHex,
     ElfSection,
+    ElfSymbol,
+    ElfSegment,
     MemoryRegion,
 } from '../elfParser';
 
@@ -362,6 +366,105 @@ suite('ELF Parser Test Suite', () => {
 
         test('should format small value', () => {
             assert.strictEqual(formatHex(0xFF), '0x000000FF');
+        });
+    });
+
+    suite('autoDetectRegions', () => {
+        test('should detect FLASH and RAM from PT_LOAD segments', () => {
+            const segments: ElfSegment[] = [
+                { type: 1, vaddr: 0x08000000, memsz: 0x1200, filesz: 0x1200, flags: 5, isRead: true, isWrite: false, isExec: true },
+                { type: 1, vaddr: 0x20000000, memsz: 0x500, filesz: 0x100, flags: 6, isRead: true, isWrite: true, isExec: false },
+            ];
+            const regions = autoDetectRegions(segments, []);
+            assert.strictEqual(regions.length, 2);
+            assert.strictEqual(regions[0].name, 'FLASH');
+            assert.strictEqual(regions[0].origin, 0x08000000);
+            assert.strictEqual(regions[0].size, 0x1200);
+            assert.strictEqual(regions[1].name, 'RAM');
+            assert.strictEqual(regions[1].origin, 0x20000000);
+            assert.strictEqual(regions[1].size, 0x500);
+        });
+
+        test('should return empty for no PT_LOAD segments', () => {
+            const segments: ElfSegment[] = [
+                { type: 2, vaddr: 0, memsz: 0, filesz: 0, flags: 0, isRead: false, isWrite: false, isExec: false },
+            ];
+            const regions = autoDetectRegions(segments, []);
+            assert.strictEqual(regions.length, 0);
+        });
+
+        test('should handle multiple flash regions', () => {
+            const segments: ElfSegment[] = [
+                { type: 1, vaddr: 0x08000000, memsz: 0x1000, filesz: 0x1000, flags: 5, isRead: true, isWrite: false, isExec: true },
+                { type: 1, vaddr: 0x08100000, memsz: 0x800, filesz: 0x800, flags: 4, isRead: true, isWrite: false, isExec: false },
+                { type: 1, vaddr: 0x20000000, memsz: 0x400, filesz: 0x100, flags: 6, isRead: true, isWrite: true, isExec: false },
+            ];
+            const regions = autoDetectRegions(segments, []);
+            assert.strictEqual(regions.length, 3);
+            assert.strictEqual(regions[0].name, 'FLASH');
+            assert.strictEqual(regions[1].name, 'FLASH_1');
+            assert.strictEqual(regions[2].name, 'RAM');
+        });
+    });
+
+    suite('computeSymbolUsage', () => {
+        const sections: ElfSection[] = [
+            { name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 0x200, isAlloc: true, isWrite: false, isExec: true, isNoBits: false },
+            { name: '.data', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_WRITE, addr: 0x20000000, size: 0x100, isAlloc: true, isWrite: true, isExec: false, isNoBits: false },
+        ];
+
+        const symbols: ElfSymbol[] = [
+            { name: 'main', addr: 0x08000000, size: 0x80, type: 'FUNC', sectionIndex: 1, binding: 'GLOBAL' },
+            { name: 'helper', addr: 0x08000080, size: 0x40, type: 'FUNC', sectionIndex: 1, binding: 'GLOBAL' },
+            { name: 'globalVar', addr: 0x20000000, size: 0x20, type: 'OBJECT', sectionIndex: 2, binding: 'GLOBAL' },
+        ];
+
+        const regions: MemoryRegion[] = [
+            { name: 'FLASH', origin: 0x08000000, size: 0x10000 },
+            { name: 'RAM', origin: 0x20000000, size: 0x5000 },
+        ];
+
+        test('should produce symbol-level entries', () => {
+            const usages = computeSymbolUsage(symbols, sections, regions);
+            assert.strictEqual(usages.length, 2);
+
+            const flash = usages.find(u => u.region === 'FLASH')!;
+            assert.ok(flash);
+            // Should have: main, helper, .text [other] (uncovered portion)
+            const mainEntry = flash.sections.find(s => s.name === 'main');
+            assert.ok(mainEntry);
+            assert.strictEqual(mainEntry!.size, 0x80);
+            assert.strictEqual(mainEntry!.type, 'CODE');
+
+            const helperEntry = flash.sections.find(s => s.name === 'helper');
+            assert.ok(helperEntry);
+            assert.strictEqual(helperEntry!.size, 0x40);
+        });
+
+        test('should include uncovered section portions as [other]', () => {
+            const usages = computeSymbolUsage(symbols, sections, regions);
+            const flash = usages.find(u => u.region === 'FLASH')!;
+            const otherEntry = flash.sections.find(s => s.name.includes('[other]'));
+            assert.ok(otherEntry, 'Should have [other] entry for uncovered .text bytes');
+            // .text size=0x200, covered by symbols = 0x80 + 0x40 = 0xC0, uncovered = 0x140
+            assert.strictEqual(otherEntry!.size, 0x200 - 0x80 - 0x40);
+        });
+
+        test('should compute free spaces correctly', () => {
+            const usages = computeSymbolUsage(symbols, sections, regions);
+            const flash = usages.find(u => u.region === 'FLASH')!;
+            // .text ends at 0x08000200, region ends at 0x08010000
+            const tailFree = flash.freeSpaces.find(f => f.addr === 0x08000200);
+            assert.ok(tailFree);
+            assert.strictEqual(tailFree!.size, 0x10000 - 0x200);
+        });
+
+        test('should fall back to computeMemoryUsage when no symbols', () => {
+            const usages = computeSymbolUsage([], sections, regions);
+            const flash = usages.find(u => u.region === 'FLASH')!;
+            // Should show section-level only
+            assert.ok(flash.sections.find(s => s.name === '.text'));
+            assert.ok(!flash.sections.find(s => s.name === 'main'));
         });
     });
 });

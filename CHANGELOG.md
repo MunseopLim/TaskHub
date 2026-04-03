@@ -1,5 +1,22 @@
 # Change Log
 
+## [0.3.1] - 2026-04-03
+
+### Enhanced
+
+**Memory Map: AXF/ELF 심볼 기반 상세 분석**
+- ELF 프로그램 헤더(PT_LOAD)로 메모리 리전 자동 감지 — 링커 스크립트 없이도 FLASH/RAM 영역 표시
+- ELF 심볼 테이블(.symtab) 파싱으로 함수/변수 단위 크기 분석
+- 링커 스크립트 없이 AXF 파일만으로도 리전별 사용량, Free Space 확인 가능
+
+**Memory Map: ARM Linker Listing 오브젝트별 요약**
+- Object Summary 섹션 추가: 오브젝트(.o) 파일별 총 크기 및 전체 대비 점유율(%) 표시
+- Code/RO/RW/ZI 분류별 크기 세부 표시 (Details 토글)
+
+**Memory Map: 리전 테이블 함수명 표시**
+- Region Details 테이블에 Object 컬럼 추가 (토글 버튼으로 표시/숨김)
+- ARM Linker Listing의 오브젝트명, ELF 심볼의 소속 섹션명 표시
+
 ## [0.3.0] - 2026-04-02
 
 ### Added

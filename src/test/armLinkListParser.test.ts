@@ -5,6 +5,7 @@ import {
     toElfSections,
     toAggregatedSummary,
     toMemoryUsage,
+    toObjectSummary,
 } from '../armLinkListParser';
 
 // Sample ARM Compiler 6 listing (Exec base format)
@@ -376,6 +377,57 @@ suite('ArmLinkListParser Test Suite', () => {
             });
             const usages = toMemoryUsage(result);
             assert.strictEqual(usages.length, 2);
+        });
+
+        test('should include object info in section entries', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            const usages = toMemoryUsage(result);
+            const flash = usages[0];
+            const textEntry = flash.sections.find(s => s.name === '.text' && s.object === 'main.o');
+            assert.ok(textEntry, 'Should have .text entry with object=main.o');
+            assert.strictEqual(textEntry!.object, 'main.o');
+        });
+    });
+
+    suite('toObjectSummary', () => {
+        test('should group entries by object name', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            const summary = toObjectSummary(result);
+
+            // main.o and startup.o
+            assert.strictEqual(summary.length, 2);
+        });
+
+        test('should sort by total size descending', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            const summary = toObjectSummary(result);
+
+            // main.o should be first (larger total)
+            assert.strictEqual(summary[0].object, 'main.o');
+            assert.ok(summary[0].totalSize > summary[1].totalSize);
+        });
+
+        test('should categorize sizes correctly for main.o', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            const summary = toObjectSummary(result);
+            const mainObj = summary.find(o => o.object === 'main.o')!;
+
+            // main.o: .text (Code 0x400), .constdata (Data RO 0x100), .data (Data RW 0x10), .bss (Zero ZI 0x400)
+            assert.strictEqual(mainObj.codeSize, 0x400);
+            assert.strictEqual(mainObj.roSize, 0x100);
+            assert.strictEqual(mainObj.dataSize, 0x10);
+            assert.strictEqual(mainObj.bssSize, 0x400);
+            assert.strictEqual(mainObj.totalSize, 0x400 + 0x100 + 0x10 + 0x400);
+        });
+
+        test('should include individual entries', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            const summary = toObjectSummary(result);
+            const startupObj = summary.find(o => o.object === 'startup.o')!;
+
+            assert.strictEqual(startupObj.entries.length, 2);
+            assert.ok(startupObj.entries.find(e => e.section === 'RESET'));
+            assert.ok(startupObj.entries.find(e => e.section === '.text'));
         });
     });
 });

@@ -1025,6 +1025,32 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Show Memory Map"** 실행:
 - **Linker/Calc 구분 표시**: listing 파일의 경우 링커 보고값(Used, Free)과 계산값(Calc Used, Calc Free)을 Overview 테이블과 Region Details 양쪽에서 구분하여 표시
 - **전체 섹션 목록**: 이름, 주소, 크기, 타입(CODE/DATA/RODATA/NOBITS)
 
+### AXF/ELF 심볼 기반 상세 분석
+
+AXF/ELF 파일에서 프로그램 헤더(PT_LOAD)와 심볼 테이블(.symtab)을 파싱하여 armlink listing에 근접한 수준의 상세 정보를 제공합니다:
+
+- **자동 리전 감지**: 링커 스크립트 없이도 ELF 프로그램 헤더의 PT_LOAD 세그먼트에서 FLASH/RAM 영역을 자동으로 감지
+- **함수/변수 단위 분석**: 심볼 테이블이 포함된 AXF 파일의 경우 함수(FUNC)와 전역 변수(OBJECT) 단위로 크기를 분석
+- **미할당 영역 표시**: 심볼로 커버되지 않는 섹션 부분은 `[other]`로 표시
+
+> **참고**: stripped 바이너리(심볼 테이블이 제거된 파일)에서는 섹션 단위 분석만 제공됩니다. 가능하면 디버그 심볼이 포함된 `.axf` 파일을 사용하세요.
+
+### Object Summary (ARM Linker Listing)
+
+ARM Linker Listing 파일에서 오브젝트(.o) 파일별로 메모리 사용량을 집계하여 표시합니다:
+
+- 각 오브젝트의 총 크기 및 전체 사용량 대비 점유율(%) 표시
+- Code/RO/RW/ZI 분류별 세부 크기 (Details 토글로 표시/숨김)
+- 크기순 내림차순 정렬로 가장 큰 오브젝트를 빠르게 파악
+
+### 함수명 표시 (Region Details)
+
+Region Details 테이블에서 Object 컬럼을 토글하여 각 엔트리의 소속 오브젝트 파일을 확인할 수 있습니다:
+
+- **ARM Linker Listing**: `main.o`, `startup.o` 등 오브젝트 파일명 표시
+- **AXF/ELF (심볼)**: 함수가 소속된 섹션명(`.text`, `.data` 등) 표시
+- "Object ▶" 버튼 클릭으로 Object 컬럼 표시/숨김 전환
+
 ### 검색 및 탐색
 
 - **키워드 검색**: 상단 검색창에서 섹션 이름, 주소, 타입으로 필터링. 접힌 region 내부도 검색되며 매치 시 자동으로 펼침
@@ -1092,6 +1118,8 @@ LR_IROM1 0x08000000 0x00100000 {
 - Execution Region에서 시작 주소, 현재 크기, 최대 크기 추출
 - 섹션 엔트리별 주소, 크기, 타입, 소속 오브젝트 파일 추출
 - 동일 섹션 이름 자동 집계 (예: 여러 .o 파일의 `.text` → 하나로 합산)
+- **Object Summary**: 오브젝트(.o) 파일별 총 크기 및 점유율(%) 집계
+- **함수명(Object) 표시**: Region Details 테이블에서 Object 컬럼 토글로 오브젝트명 확인
 - Image Totals (RO/RW/ROM 크기) 파싱
 
 ### 지원 파일 형식

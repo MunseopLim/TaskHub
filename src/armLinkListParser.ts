@@ -4,7 +4,7 @@
  * Supports ARM Compiler 5 (armcc) and ARM Compiler 6 (armclang) output formats.
  */
 
-import { MemoryRegion, ElfSection, SectionSummary, MemoryUsage } from './elfParser';
+import { MemoryRegion, ElfSection, SectionSummary, MemoryUsage, MemoryUsageEntry } from './elfParser';
 
 export interface ArmLinkEntry {
     addr: number;
@@ -246,6 +246,58 @@ export function toAggregatedSummary(result: ArmLinkListResult): SectionSummary[]
 }
 
 /**
+ * Object-level summary: groups all entries by object name across regions.
+ * Returns total size and percentage of given totalSize for each object.
+ */
+export interface ObjectSummary {
+    object: string;
+    totalSize: number;
+    codeSize: number;
+    dataSize: number;
+    roSize: number;
+    bssSize: number;
+    entries: { section: string; size: number; kind: string; region: string }[];
+}
+
+export function toObjectSummary(result: ArmLinkListResult): ObjectSummary[] {
+    const groups = new Map<string, ObjectSummary>();
+
+    for (const region of result.execRegions) {
+        for (const entry of region.entries) {
+            if (entry.size === 0) { continue; }
+            const objName = entry.object || entry.section || `[${entry.kind}]`;
+
+            let group = groups.get(objName);
+            if (!group) {
+                group = { object: objName, totalSize: 0, codeSize: 0, dataSize: 0, roSize: 0, bssSize: 0, entries: [] };
+                groups.set(objName, group);
+            }
+            group.totalSize += entry.size;
+
+            const kindLower = entry.kind.toLowerCase();
+            if (entry.attr === 'ZI' || kindLower === 'zero') {
+                group.bssSize += entry.size;
+            } else if (kindLower === 'code') {
+                group.codeSize += entry.size;
+            } else if (entry.attr === 'RW') {
+                group.dataSize += entry.size;
+            } else {
+                group.roSize += entry.size;
+            }
+
+            group.entries.push({
+                section: entry.section || `[${entry.kind}]`,
+                size: entry.size,
+                kind: entry.kind,
+                region: region.name,
+            });
+        }
+    }
+
+    return Array.from(groups.values()).sort((a, b) => b.totalSize - a.totalSize);
+}
+
+/**
  * Compute MemoryUsage directly from execution regions.
  * Unlike computeMemoryUsage (address-range matching), this uses the listing's
  * own region→entry association, avoiding cross-region miscounting when
@@ -255,7 +307,7 @@ export function toMemoryUsage(result: ArmLinkListResult): MemoryUsage[] {
     return result.execRegions
         .filter(r => r.maxSize > 0)
         .map(r => {
-            const sections = r.entries
+            const sections: MemoryUsageEntry[] = r.entries
                 .filter(e => e.size > 0)
                 .map(e => {
                     const kindLower = e.kind.toLowerCase();
@@ -266,6 +318,7 @@ export function toMemoryUsage(result: ArmLinkListResult): MemoryUsage[] {
                         type: (e.attr === 'ZI' || kindLower === 'zero')
                             ? 'NOBITS'
                             : (kindLower === 'code' ? 'CODE' : (e.attr === 'RW' ? 'DATA' : 'RODATA')),
+                        object: e.object || undefined,
                     };
                 });
 
