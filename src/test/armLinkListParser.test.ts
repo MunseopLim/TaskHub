@@ -475,7 +475,7 @@ suite('ArmLinkListParser Test Suite', () => {
             assert.strictEqual(result.execRegions[0].entries[0].func, 'myConst');
         });
 
-        test('should return full token as func when no known prefix', () => {
+        test('should extract func from unknown .section.func pattern, empty for plain token', () => {
             const content = `
     Execution Region ER_IROM1 (Exec base: 0x08000000, Size: 0x00000100, Max: 0x00040000, ABSOLUTE)
 
@@ -483,9 +483,10 @@ suite('ArmLinkListParser Test Suite', () => {
     0x08000080   0x00000080   Code   RO         2    custom_section    other.a(mod.o)
 `;
             const result = parseArmLinkList(content);
-            // Unknown prefix → full token shown
-            assert.strictEqual(result.execRegions[0].entries[0].func, '.mysection.SomeFunc');
-            assert.strictEqual(result.execRegions[0].entries[1].func, 'custom_section');
+            // Unknown .prefix.func → extract func after second dot
+            assert.strictEqual(result.execRegions[0].entries[0].func, 'SomeFunc');
+            // Plain token without dot prefix → no func
+            assert.strictEqual(result.execRegions[0].entries[1].func, '');
         });
 
         test('should have empty func when no section token (object(.section) only)', () => {

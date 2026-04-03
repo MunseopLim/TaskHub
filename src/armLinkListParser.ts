@@ -55,8 +55,15 @@ function extractFunc(sectionToken: string): string {
             return sectionToken.substring(prefix.length);
         }
     }
-    // No known prefix — return the whole token as-is
-    return sectionToken;
+    // Unknown prefix — try generic ".section.func" pattern
+    if (sectionToken.startsWith('.')) {
+        const secondDot = sectionToken.indexOf('.', 1);
+        if (secondDot > 0 && secondDot < sectionToken.length - 1) {
+            return sectionToken.substring(secondDot + 1);
+        }
+    }
+    // No function name to extract (plain section name or single-segment token)
+    return '';
 }
 
 /**

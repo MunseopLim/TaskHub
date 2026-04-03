@@ -1,5 +1,14 @@
 # Change Log
 
+## [0.3.4] - 2026-04-03
+
+### Fixed
+
+**Memory Map: Region 내 Section/Function/Object 중복 표시 수정**
+- Object Summary 상세 행에서 Section 컬럼이 Object 이름과 동일하게 표시되던 버그 수정 (section 필드 우선 표시로 변경)
+- ARM 링커 리스팅 파서에서 알 수 없는 prefix의 토큰이 section과 func에 동일하게 설정되던 버그 수정
+- `.mysection.FuncName` 형식의 미등록 prefix도 함수명 추출 지원 (두 번째 `.` 이후 추출)
+
 ## [0.3.3] - 2026-04-03
 
 ### Enhanced

@@ -335,7 +335,7 @@ function getWebviewContent(
             let g = objGroups.get(objName);
             if (!g) { g = { totalSize: 0, entries: [] }; objGroups.set(objName, g); }
             g.totalSize += s.size;
-            g.entries.push({ section: s.func || s.object || s.type, addr: s.addr, size: s.size, type: s.type });
+            g.entries.push({ section: s.func || s.section || s.type, addr: s.addr, size: s.size, type: s.type });
         }
         const regionObjSummary = Array.from(objGroups).map(([name, g]) => ({ name, ...g })).sort((a, b) => b.totalSize - a.totalSize);
         const regionUsed = u.used;
