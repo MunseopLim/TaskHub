@@ -388,6 +388,16 @@ suite('ArmLinkListParser Test Suite', () => {
             assert.ok(mainEntry, 'Should have entry with name=main.o');
             assert.strictEqual(mainEntry!.object, 'main.o');
         });
+
+        test('should include section name in entries', () => {
+            const result = parseArmLinkList(SAMPLE_AC6);
+            const usages = toMemoryUsage(result);
+            const flash = usages[0];
+            // .text section from main.o(.text)
+            const textEntry = flash.sections.find(s => s.name === 'main.o' && s.section === '.text');
+            assert.ok(textEntry, 'Should have entry with section=.text');
+            assert.strictEqual(textEntry!.section, '.text');
+        });
     });
 
     suite('toObjectSummary', () => {
@@ -488,7 +498,7 @@ suite('ArmLinkListParser Test Suite', () => {
             assert.strictEqual(result.execRegions[0].entries[0].func, '');
         });
 
-        test('should set name to object in toMemoryUsage', () => {
+        test('should set name to object and pass section in toMemoryUsage', () => {
             const content = `
     Execution Region ER_IROM1 (Exec base: 0x08000000, Size: 0x00000100, Max: 0x00040000, ABSOLUTE)
 
@@ -498,6 +508,7 @@ suite('ArmLinkListParser Test Suite', () => {
             const usages = toMemoryUsage(result);
             const entry = usages[0].sections[0];
             assert.strictEqual(entry.name, 'testfunc.o');
+            assert.strictEqual(entry.section, '.text');
             assert.strictEqual(entry.func, '_ZN4Test8FuncEv');
         });
     });

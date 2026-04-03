@@ -1,5 +1,23 @@
 # Change Log
 
+## [0.3.3] - 2026-04-03
+
+### Enhanced
+
+**Memory Map: Region Details UI 개선**
+- Region Details 테이블에 Section 컬럼 복원 (Function 토글로 Section/Function 함께 표시/숨김)
+- Region Details 테이블에 End Address 컬럼 복원
+- Object Summary를 그래프 바 아래로 이동, 기본 접힘 상태로 변경 (클릭으로 펼침/접기)
+- Object Summary Details 버튼: 오브젝트별 섹션 상세(Section, Address, End, Size, Type) 행 표시
+- Details 버튼 크기를 다른 버튼과 통일
+
+### Fixed
+
+**테이블 정렬 개선**
+- Size/Bytes/% 컬럼 첫 클릭 시 내림차순으로 정렬 (이후 토글)
+- Object Summary 상세 행이 정렬에 영향을 주지 않도록 수정
+- CSS로 숨긴 상세 행의 토글이 동작하지 않던 버그 수정 (getComputedStyle 사용)
+
 ## [0.3.2] - 2026-04-03
 
 ### Enhanced

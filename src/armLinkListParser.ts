@@ -368,6 +368,7 @@ export function toMemoryUsage(result: ArmLinkListResult): MemoryUsage[] {
                             ? 'NOBITS'
                             : (kindLower === 'code' ? 'CODE' : (e.attr === 'RW' ? 'DATA' : 'RODATA')),
                         object: e.object || undefined,
+                        section: e.section || undefined,
                         func: e.func || undefined,
                     };
                 });

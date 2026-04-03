@@ -62,6 +62,8 @@ export interface MemoryUsageEntry {
     type: string;
     /** Object/source file name (e.g., "main.o" for listing, section name for ELF symbols) */
     object?: string;
+    /** Section name (e.g., ".text", "RESET") */
+    section?: string;
     /** Function/symbol name extracted from section token (prefix stripped) */
     func?: string;
 }

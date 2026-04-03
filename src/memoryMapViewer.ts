@@ -295,8 +295,8 @@ function getWebviewContent(
 
         // Segmented memory layout bar (address-ordered)
         const allSegments = [
-            ...u.sections.map(s => ({ name: s.name, size: s.size, addr: s.addr, type: s.type, object: s.object, func: s.func })),
-            ...u.freeSpaces.map(f => ({ name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', object: undefined as string | undefined, func: undefined as string | undefined })),
+            ...u.sections.map(s => ({ name: s.name, size: s.size, addr: s.addr, type: s.type, object: s.object, section: s.section, func: s.func })),
+            ...u.freeSpaces.map(f => ({ name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', object: undefined as string | undefined, section: undefined as string | undefined, func: undefined as string | undefined })),
         ].sort((a, b) => a.addr - b.addr);
 
         const mapSegHtml = allSegments
@@ -308,13 +308,16 @@ function getWebviewContent(
 
         // Table rows (address-ordered, sections + free spaces)
         // Include func column (toggle) for listing/symbol data
+        const hasSectionInfo = u.sections.some(s => s.section);
         const hasFuncInfo = u.sections.some(s => s.func);
         const tableRows = allSegments
             .filter(e => e.size > 0)
             .map(e => {
                 const rowCls = e.type === 'FREE' ? ' class="free-row"' : '';
+                const sectionCell = hasSectionInfo ? `<td class="func-cell">${esc(e.section || '')}</td>` : '';
                 const funcCell = hasFuncInfo ? `<td class="func-cell">${esc(e.func || '')}</td>` : '';
-                return `<tr${rowCls}><td>${esc(e.name)}</td>${funcCell}<td class="num">${formatHex(e.addr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${String(e.size)}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`;
+                const endAddr = e.addr + e.size;
+                return `<tr${rowCls}><td>${esc(e.name)}</td>${sectionCell}${funcCell}<td class="num">${formatHex(e.addr)}</td><td class="num">${formatHex(endAddr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${String(e.size)}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`;
             }).join('');
 
         const linkerFree = u.reportedUsed !== undefined ? u.total - u.reportedUsed : 0;
@@ -325,32 +328,28 @@ function getWebviewContent(
         const infoText = `Used: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(calcFree)}`;
 
         // Per-region object summary: group entries by object name within this region
-        const objGroups = new Map<string, { totalSize: number; codeSize: number; roSize: number; dataSize: number; bssSize: number }>();
+        interface ObjGroup { totalSize: number; entries: { section: string; addr: number; size: number; type: string }[] }
+        const objGroups = new Map<string, ObjGroup>();
         for (const s of u.sections) {
             const objName = s.name;
             let g = objGroups.get(objName);
-            if (!g) { g = { totalSize: 0, codeSize: 0, roSize: 0, dataSize: 0, bssSize: 0 }; objGroups.set(objName, g); }
+            if (!g) { g = { totalSize: 0, entries: [] }; objGroups.set(objName, g); }
             g.totalSize += s.size;
-            if (s.type === 'CODE') { g.codeSize += s.size; }
-            else if (s.type === 'RODATA') { g.roSize += s.size; }
-            else if (s.type === 'DATA') { g.dataSize += s.size; }
-            else if (s.type === 'NOBITS') { g.bssSize += s.size; }
+            g.entries.push({ section: s.func || s.object || s.type, addr: s.addr, size: s.size, type: s.type });
         }
         const regionObjSummary = Array.from(objGroups).map(([name, g]) => ({ name, ...g })).sort((a, b) => b.totalSize - a.totalSize);
         const regionUsed = u.used;
         const objSummaryRows = regionObjSummary.map(o => {
             const objPct = regionUsed > 0 ? (o.totalSize / regionUsed * 100).toFixed(1) : '0.0';
             const barW = regionUsed > 0 ? Math.max(1, o.totalSize / regionUsed * 100) : 0;
-            const detailParts: string[] = [];
-            if (o.codeSize > 0) { detailParts.push(`Code: ${formatSize(o.codeSize)}`); }
-            if (o.roSize > 0) { detailParts.push(`RO: ${formatSize(o.roSize)}`); }
-            if (o.dataSize > 0) { detailParts.push(`RW: ${formatSize(o.dataSize)}`); }
-            if (o.bssSize > 0) { detailParts.push(`ZI: ${formatSize(o.bssSize)}`); }
-            return `<tr><td>${esc(o.name)}</td><td class="num">${formatSize(o.totalSize)}</td><td class="num">${o.totalSize}</td><td class="num">${objPct}%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:${barW}%;background:var(--ok)"></div></div></td><td class="obj-detail">${detailParts.join(' | ')}</td></tr>`;
+            const detailRows = o.entries.sort((a, b) => a.addr - b.addr).map(e =>
+                `<tr class="obj-detail-row"><td></td><td class="num">${esc(e.section)}</td><td class="num">${formatHex(e.addr)}</td><td class="num">${formatHex(e.addr + e.size)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${e.size}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`
+            ).join('');
+            return `<tr><td>${esc(o.name)}</td><td class="num" colspan="2"></td><td class="num"></td><td class="num">${formatSize(o.totalSize)}</td><td class="num">${o.totalSize}</td><td class="num">${objPct}%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:${barW}%;background:var(--ok)"></div></div></td></tr>${detailRows}`;
         }).join('');
         const hasMultipleObjs = regionObjSummary.length > 1;
         const objSummaryHtml = hasMultipleObjs
-            ? `<div class="obj-summary-heading">Object Summary (${regionObjSummary.length}) <button onclick="toggleObjDetail(this)" title="Toggle details">Details ▶</button></div><table class="obj-summary-table sortable-table"><thead><tr><th data-sort="name">Object</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th class="num" data-sort="pct">%</th><th></th><th class="obj-detail" data-sort="detail">Breakdown</th></tr></thead><tbody>${objSummaryRows}</tbody></table>`
+            ? `<div class="obj-summary-header" onclick="toggleObjSummary(this)"><span class="fold-icon">▶</span> Object Summary (${regionObjSummary.length}) <button onclick="event.stopPropagation();toggleObjDetailRows(this)" title="Toggle section details">Details ▶</button></div><div class="obj-summary-body" style="display:none"><table class="obj-summary-table sortable-table"><thead><tr><th data-sort="name">Object</th><th class="num">Section</th><th class="num">Address</th><th class="num">End</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th class="num" data-sort="pct">%</th><th></th></tr></thead><tbody>${objSummaryRows}</tbody></table></div>`
             : '';
 
         return `
@@ -363,9 +362,9 @@ function getWebviewContent(
             ${linkerLine}
             <div class="bar-bg"><div class="bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div>
             <div class="region-detail" style="display:none">
-                ${objSummaryHtml}
                 ${allSegments.length > 0 ? `<div class="map-bar">${mapSegHtml}</div>` : ''}
-                ${allSegments.length > 0 ? `<table class="section-table sortable-table"><thead><tr><th data-sort="name">Object</th>${hasFuncInfo ? '<th data-sort="func" class="func-cell">Function</th>' : ''}<th class="num" data-sort="addr">Address</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th data-sort="type">Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
+                ${objSummaryHtml}
+                ${allSegments.length > 0 ? `<table class="section-table sortable-table"><thead><tr><th data-sort="name">Object</th>${hasSectionInfo ? '<th data-sort="section" class="func-cell">Section</th>' : ''}${hasFuncInfo ? '<th data-sort="func" class="func-cell">Function</th>' : ''}<th class="num" data-sort="addr">Address</th><th class="num" data-sort="end">End</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th data-sort="type">Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
             </div>
         </div>`;
     }).join('');
@@ -649,9 +648,10 @@ function getWebviewContent(
     .scroll-top.visible { opacity: 1; pointer-events: auto; }
     .func-cell { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
     .func-cell.hidden { display: none; }
-    .obj-detail { font-size: 11px; opacity: 0.7; }
-    .obj-detail.hidden { display: none; }
-    .obj-summary-heading { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+    .obj-detail-row { display: none; font-size: 11px; opacity: 0.7; }
+    .obj-summary-header { font-size: 12px; font-weight: 600; margin-bottom: 4px; cursor: pointer; }
+    .obj-summary-header button { font-size: 11px; padding: 4px 10px; }
+    .obj-summary-header:hover { opacity: 0.85; }
     .obj-summary-table { margin-bottom: 10px; }
 </style>
 </head>
@@ -818,6 +818,9 @@ function getWebviewContent(
     });
 
     // --- Column sort (all sortable tables) ---
+    // Size/Bytes columns default to descending on first click
+    const descFirstCols = new Set(['size', 'bytes', 'pct']);
+
     document.querySelectorAll('.sortable-table').forEach(tbl => {
         const ths = tbl.querySelectorAll('th[data-sort]');
         let sortCol = null;
@@ -827,17 +830,18 @@ function getWebviewContent(
             th.addEventListener('click', () => {
                 const col = th.dataset.sort;
                 if (sortCol === col) { sortAsc = !sortAsc; }
-                else { sortCol = col; sortAsc = true; }
+                else { sortCol = col; sortAsc = !descFirstCols.has(col); }
 
                 const tbody = tbl.querySelector('tbody');
-                const rows = Array.from(tbody.querySelectorAll('tr'));
-                const colIdx = Array.from(th.parentElement.children).indexOf(th);
-                const sortByCol = th.dataset.sortBy;
-                const valIdx = sortByCol
-                    ? Array.from(th.parentElement.children).indexOf(th.parentElement.querySelector('[data-sort="' + sortByCol + '"]'))
-                    : colIdx;
+                const rows = Array.from(tbody.querySelectorAll('tr:not(.obj-detail-row)'));
+                // Find value column index using data-sort attribute match
+                const sortByCol = th.dataset.sortBy || col;
+                const allThs = Array.from(th.parentElement.children);
+                const targetTh = allThs.find(h => h.dataset && h.dataset.sort === sortByCol) || th;
+                const valIdx = allThs.indexOf(targetTh);
 
                 rows.sort((a, b) => {
+                    if (valIdx >= a.children.length || valIdx >= b.children.length) { return 0; }
                     const aText = a.children[valIdx].textContent.trim();
                     const bText = b.children[valIdx].textContent.trim();
                     const aNum = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
@@ -863,13 +867,29 @@ function getWebviewContent(
         });
     };
 
-    // --- Toggle detail column in per-region object summary ---
-    window.toggleObjDetail = function(btn) {
-        const card = btn.closest('.region-card');
-        if (!card) { return; }
-        const cells = card.querySelectorAll('.obj-detail');
-        const isHidden = cells.length > 0 && cells[0].classList.contains('hidden');
-        cells.forEach(el => el.classList.toggle('hidden', !isHidden));
+    // --- Toggle Object Summary fold ---
+    window.toggleObjSummary = function(header) {
+        const body = header.nextElementSibling;
+        const icon = header.querySelector('.fold-icon');
+        if (body && body.classList.contains('obj-summary-body')) {
+            if (body.style.display === 'none') {
+                body.style.display = '';
+                if (icon) { icon.textContent = '▼'; }
+            } else {
+                body.style.display = 'none';
+                if (icon) { icon.textContent = '▶'; }
+            }
+        }
+    };
+
+    // --- Toggle detail rows in per-region object summary ---
+    window.toggleObjDetailRows = function(btn) {
+        const body = btn.closest('.obj-summary-header')?.nextElementSibling;
+        if (!body) { return; }
+        const rows = body.querySelectorAll('.obj-detail-row');
+        // Check computed style since CSS sets display:none initially
+        const isHidden = rows.length > 0 && getComputedStyle(rows[0]).display === 'none';
+        rows.forEach(el => el.style.display = isHidden ? 'table-row' : 'none');
     };
 
     // Initialize: func-cell hidden by default
