@@ -1053,6 +1053,14 @@ Region Details 테이블에서 Function 컬럼을 토글하여 각 엔트리의 
 - 테이블 컬럼: **Object** | **Section** | **Function** | Address | End | Size | Bytes | Type
 - "Function ▶" 버튼 클릭으로 Section + Function 컬럼 함께 표시/숨김 전환
 
+### HTML 저장
+
+Memory Map 패널 상단의 **"Save HTML"** 버튼을 클릭하면, 현재 보이는 화면 그대로를 standalone HTML 파일로 저장할 수 있습니다:
+
+- 사용자가 펼치거나 접은 상태, 검색 필터 등 현재 DOM 상태가 그대로 반영됩니다
+- 저장된 HTML 파일은 VS Code 없이 일반 브라우저에서 열 수 있습니다
+- 팀원 공유, 리포트 보관, 오프라인 참조 용도로 활용할 수 있습니다
+
 ### 검색 및 탐색
 
 - **키워드 검색**: 상단 검색창에서 섹션 이름, 주소, 타입으로 필터링. 접힌 region 내부도 검색되며 매치 시 자동으로 펼침

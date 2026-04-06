@@ -235,10 +235,23 @@ function showPanel(
     }
 
     currentMessageDisposable?.dispose();
-    currentMessageDisposable = currentPanel.webview.onDidReceiveMessage(message => {
+    currentMessageDisposable = currentPanel.webview.onDidReceiveMessage(async message => {
         if (message.command === 'copyReport') {
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.'));
+        } else if (message.command === 'saveHtml') {
+            const uri = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(`${fileName.replace(/\.[^.]+$/, '')}_memory_map.html`),
+                filters: { 'HTML': ['html'] },
+            });
+            if (uri) {
+                // Remove VS Code API script calls and make standalone
+                let html = message.html as string;
+                html = html.replace(/const vscode = acquireVsCodeApi\(\);?\s*/g, '');
+                html = html.replace(/vscode\.postMessage\(\{[^}]*\}\);?\s*/g, '');
+                fs.writeFileSync(uri.fsPath, `<!DOCTYPE html>\n${html}`, 'utf-8');
+                vscode.window.showInformationMessage(t('HTML 파일이 저장되었습니다.', 'HTML file saved.'));
+            }
         }
     });
 
@@ -662,6 +675,7 @@ function getWebviewContent(
             <div class="subtitle">Entry Point: ${formatHex(entryPoint)}</div>
         </div>
         <button id="btnCopy" title="Copy as text report">Copy Report</button>
+        <button id="btnSaveHtml" title="Save as HTML file">Save HTML</button>
     </div>
 
     <div class="search-box">
@@ -706,6 +720,10 @@ function getWebviewContent(
 
     document.getElementById('btnCopy').addEventListener('click', () => {
         vscode.postMessage({ command: 'copyReport', text: report });
+    });
+
+    document.getElementById('btnSaveHtml').addEventListener('click', () => {
+        vscode.postMessage({ command: 'saveHtml', html: document.documentElement.outerHTML });
     });
 
     // --- Region fold/unfold ---
