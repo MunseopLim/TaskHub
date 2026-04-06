@@ -1029,7 +1029,7 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vsco
         versionItem.iconPath = new vscode.ThemeIcon('info');
         versionItem.tooltip = `Extension Version: ${packageJson.version}`;
         versionItem.contextValue = 'versionItem';
-        versionItem.command = { command: 'taskhub.showExampleJsonQuickPick', title: 'Show Example JSONs' };
+        versionItem.command = { command: 'taskhub.showChangelog', title: 'Show Changelog' };
         const items: (Action | Folder | vscode.TreeItem)[] = [versionItem, ...this.createActionItems(actionsJson)];
         return Promise.resolve(items);
     }
@@ -3001,6 +3001,15 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showVersion', () => { const packageJson = JSON.parse(fs.readFileSync(path.join(context.extensionPath, 'package.json'), 'utf-8')); vscode.window.showInformationMessage(t(`TaskHub 버전: ${packageJson.version}`, `TaskHub Version: ${packageJson.version}`)); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showChangelog', async () => {
+        const changelogPath = path.join(context.extensionPath, 'CHANGELOG.md');
+        if (fs.existsSync(changelogPath)) {
+            const doc = await vscode.workspace.openTextDocument(changelogPath);
+            await vscode.window.showTextDocument(doc, { preview: true });
+        } else {
+            vscode.window.showWarningMessage(t('CHANGELOG.md 파일을 찾을 수 없습니다.', 'CHANGELOG.md not found.'));
+        }
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showFilePicker', async (action: any) => { /* Obsolete */ }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.editFavorites', async () => {
         const folder = await pickWorkspaceFolderForCommand(t('즐겨찾기를 편집할 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to edit favorites for'));

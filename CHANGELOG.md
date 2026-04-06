@@ -1,5 +1,23 @@
 # Change Log
 
+## [0.3.6] - 2026-04-07
+
+### Enhanced
+
+**UI 개선: 버전 클릭 → Changelog, 예제 JSON 버튼 이동**
+- 메인 패널 버전 항목 클릭 시 CHANGELOG.md를 열도록 변경
+- 예제 JSON 보기 버튼을 패널 제목 표시줄의 전구(💡) 아이콘으로 이동하여 발견성 개선
+
+**예제 JSON 보강**
+- `command` 타입 예제 추가 (VS Code 빌트인 명령 실행)
+- `confirm` 타입 예제 추가 (확인 대화상자)
+- `shell` 타입에 `env`, `cwd`, `args` 속성 예제 추가
+- `fileDialog`의 모든 출력 변수 (`path`, `dir`, `name`, `fileNameOnly`, `fileExt`) 예제 추가
+- `folderDialog`에 `title` 옵션 예제 추가
+- `inputBox`의 `password` 속성 예제 추가
+- `stringManipulation`의 누락된 함수 5개 (`extension`, `stripExtension`, `toLowerCase`, `toUpperCase`, `trim`) 예제 추가
+- Complete Example에 `confirm` 단계 추가
+
 ## [0.3.5] - 2026-04-06
 
 ### Added

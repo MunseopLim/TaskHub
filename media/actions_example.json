@@ -14,6 +14,31 @@
     }
   },
   {
+    "id": "action.shell.advanced",
+    "title": "Shell: With Env, Cwd, Args",
+    "action": {
+      "description": "Demonstrate env, cwd, and args properties for shell tasks.",
+      "tasks": [
+        {
+          "id": "run_with_env",
+          "type": "shell",
+          "command": {
+            "windows": "echo %MY_VAR% & echo %BUILD_MODE%",
+            "macos": "echo $MY_VAR && echo $BUILD_MODE",
+            "linux": "echo $MY_VAR && echo $BUILD_MODE"
+          },
+          "args": ["--verbose"],
+          "cwd": "${workspaceFolder}",
+          "env": {
+            "MY_VAR": "hello",
+            "BUILD_MODE": "debug"
+          },
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
     "id": "action.pipeline.example",
     "title": "Pipeline: Select File & Save Output",
     "action": {
@@ -55,6 +80,75 @@
     }
   },
   {
+    "id": "action.command.vscode",
+    "title": "VS Code Command: Toggle Minimap",
+    "action": {
+      "description": "Execute a VS Code built-in command. 'command' type runs vscode commands directly.",
+      "tasks": [
+        {
+          "id": "toggle_minimap",
+          "type": "command",
+          "command": "editor.action.toggleMinimap"
+        }
+      ]
+    }
+  },
+  {
+    "id": "action.confirm.example",
+    "title": "Confirm: Dangerous Operation",
+    "action": {
+      "description": "Ask the user for confirmation before proceeding with a risky operation.",
+      "tasks": [
+        {
+          "id": "select_target",
+          "type": "folderDialog",
+          "options": {
+            "openLabel": "Select target folder",
+            "title": "Choose folder to clean"
+          }
+        },
+        {
+          "id": "confirm_delete",
+          "type": "confirm",
+          "message": "Are you sure you want to clean ${select_target.path}?",
+          "confirmLabel": "Clean",
+          "cancelLabel": "Abort"
+        },
+        {
+          "id": "do_clean",
+          "type": "shell",
+          "command": "echo Cleaning ${select_target.path} ...",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "action.filedialog.rich",
+    "title": "FileDialog: All Output Variables",
+    "action": {
+      "description": "Show all output variables from fileDialog: path, dir, name, fileNameOnly, fileExt.",
+      "tasks": [
+        {
+          "id": "pick_file",
+          "type": "fileDialog",
+          "options": {
+            "title": "Select any file",
+            "filters": {
+              "All Files": ["*"]
+            }
+          }
+        },
+        {
+          "id": "show_info",
+          "type": "shell",
+          "command": "echo path: ${pick_file.path} && echo dir: ${pick_file.dir} && echo name: ${pick_file.name} && echo nameOnly: ${pick_file.fileNameOnly} && echo ext: ${pick_file.fileExt}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
     "id": "action.zip.folder",
     "title": "Zip Folder And Confirm",
     "action": {
@@ -90,7 +184,7 @@
     "id": "action.string.manipulation",
     "title": "String Manipulation Helpers",
     "action": {
-      "description": "Select a file and run several string manipulation helpers on the path.",
+      "description": "Demonstrate all stringManipulation functions on a file path.",
       "tasks": [
         {
           "id": "select_for_string",
@@ -115,15 +209,39 @@
           "input": "${select_for_string.path}"
         },
         {
+          "id": "string_ext",
+          "type": "stringManipulation",
+          "function": "extension",
+          "input": "${select_for_string.path}"
+        },
+        {
+          "id": "string_stripped",
+          "type": "stringManipulation",
+          "function": "stripExtension",
+          "input": "${select_for_string.path}"
+        },
+        {
           "id": "string_upper_name",
           "type": "stringManipulation",
           "function": "toUpperCase",
           "input": "${string_clean_name.output}"
         },
         {
+          "id": "string_lower_name",
+          "type": "stringManipulation",
+          "function": "toLowerCase",
+          "input": "${string_clean_name.output}"
+        },
+        {
+          "id": "string_trimmed",
+          "type": "stringManipulation",
+          "function": "trim",
+          "input": "  ${string_clean_name.output}  "
+        },
+        {
           "id": "report_strings",
           "type": "shell",
-          "command": "echo Dir: ${string_dir.output} && echo File: ${string_filename.output} && echo Clean: ${string_clean_name.output} && echo Upper: ${string_upper_name.output}",
+          "command": "echo dirname: ${string_dir.output} && echo basename: ${string_filename.output} && echo nameOnly: ${string_clean_name.output} && echo extension: ${string_ext.output} && echo stripExt: ${string_stripped.output} && echo upper: ${string_upper_name.output} && echo lower: ${string_lower_name.output} && echo trimmed: [${string_trimmed.output}]",
           "revealTerminal": "always"
         }
       ]
@@ -217,6 +335,28 @@
           "id": "show_args",
           "type": "shell",
           "command": "echo Full command args: ${input_args.value}",
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "action.inputbox.password",
+    "title": "InputBox: Password Input",
+    "action": {
+      "description": "Prompt for a secret value with masked input.",
+      "tasks": [
+        {
+          "id": "input_secret",
+          "type": "inputBox",
+          "prompt": "Enter API key",
+          "placeHolder": "sk-...",
+          "password": true
+        },
+        {
+          "id": "use_secret",
+          "type": "shell",
+          "command": "echo API key received (length check only)",
           "revealTerminal": "always"
         }
       ]
@@ -336,6 +476,11 @@
               "description": "Production environment"
             }
           ]
+        },
+        {
+          "id": "confirm_run",
+          "type": "confirm",
+          "message": "Run ${select_script.name} in ${select_environment.value}?"
         },
         {
           "id": "input_port",

@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -243,7 +243,12 @@
       },
       {
         "command": "taskhub.showExampleJsonQuickPick",
-        "title": "Show Example JSON Quick Pick"
+        "title": "Show Example JSONs",
+        "icon": "$(lightbulb)"
+      },
+      {
+        "command": "taskhub.showChangelog",
+        "title": "Show Changelog"
       },
       {
         "command": "taskhub.terminateAllActions",
@@ -366,6 +371,11 @@
           "group": "navigation@3"
         },
         {
+          "command": "taskhub.showExampleJsonQuickPick",
+          "when": "view == mainView.main",
+          "group": "navigation@0"
+        },
+        {
           "command": "taskhub.editActions",
           "when": "view == mainView.main",
           "group": "navigation"
@@ -440,11 +450,6 @@
         {
           "command": "taskhub.deleteFavorite",
           "when": "view == mainView.favorite && viewItem == favoriteItem",
-          "group": "inline"
-        },
-        {
-          "command": "taskhub.showExampleJsonQuickPick",
-          "when": "view == mainView.main && viewItem == versionItem",
           "group": "inline"
         },
         {
