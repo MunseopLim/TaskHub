@@ -300,87 +300,79 @@ function getWebviewContent(
     textReport: string,
     hasSymbols?: boolean
 ): string {
-    const usageBarsHtml = memoryUsage.map(u => {
+    // Build JSON data for lazy WebView rendering
+    const regionJsonData = memoryUsage.map(u => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
         const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warn)' : 'var(--ok)';
-        const freeTotal = u.total - u.used;
         const regionOrigin = regions.find(r => r.name === u.region)?.origin ?? 0;
 
-        // Segmented memory layout bar (address-ordered)
         const allSegments = [
-            ...u.sections.map(s => ({ name: s.name, size: s.size, addr: s.addr, type: s.type, object: s.object, section: s.section, func: s.func })),
-            ...u.freeSpaces.map(f => ({ name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', object: undefined as string | undefined, section: undefined as string | undefined, func: undefined as string | undefined })),
-        ].sort((a, b) => a.addr - b.addr);
+            ...u.sections.map(s => ({ name: s.name, size: s.size, addr: s.addr, type: s.type, section: s.section || '', func: s.func || '' })),
+            ...u.freeSpaces.map(f => ({ name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', section: '', func: '' })),
+        ].sort((a, b) => a.addr - b.addr).filter(e => e.size > 0);
 
-        const mapSegHtml = allSegments
-            .filter(e => e.size > 0)
-            .map(e => {
-                const cls = `seg-${e.type.toLowerCase()}`;
-                return `<div class="map-seg ${cls}" style="flex:${e.size}" title="${esc(e.name)} @ ${formatHex(e.addr)} (${formatSize(e.size)})"></div>`;
-            }).join('');
-
-        // Table rows (address-ordered, sections + free spaces)
-        // Include func column (toggle) for listing/symbol data
         const hasSectionInfo = u.sections.some(s => s.section);
         const hasFuncInfo = u.sections.some(s => s.func);
-        const tableRows = allSegments
-            .filter(e => e.size > 0)
-            .map(e => {
-                const rowCls = e.type === 'FREE' ? ' class="free-row"' : '';
-                const sectionCell = hasSectionInfo ? `<td class="func-cell">${esc(e.section || '')}</td>` : '';
-                const funcCell = hasFuncInfo ? `<td class="func-cell">${esc(e.func || '')}</td>` : '';
-                const endAddr = e.size > 0 ? e.addr + e.size - 1 : e.addr;
-                return `<tr${rowCls}><td>${esc(e.name)}</td>${sectionCell}${funcCell}<td class="num">${formatHex(e.addr)}</td><td class="num">${formatHex(endAddr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${String(e.size)}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`;
-            }).join('');
 
-        const linkerFree = u.reportedUsed !== undefined ? u.total - u.reportedUsed : 0;
-        const calcFree = u.freeSpaces.reduce((sum, f) => sum + f.size, 0);
-        const linkerLine = u.reportedUsed !== undefined
-            ? `<div class="region-linker">Linker: Base=${formatHex(regionOrigin)} Used=${formatHex(u.reportedUsed)} (${formatSize(u.reportedUsed)}) Max=${formatHex(u.total)} (${formatSize(u.total)}) Free: ${formatSize(linkerFree)}</div>`
-            : '';
-        const infoText = `Used: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(calcFree)}`;
+        const mapSegHtml = allSegments.map(e => {
+            const cls = `seg-${e.type.toLowerCase()}`;
+            return `<div class="map-seg ${cls}" style="flex:${e.size}" title="${esc(e.name)} @ ${formatHex(e.addr)} (${formatSize(e.size)})"></div>`;
+        }).join('');
 
-        // Per-region object summary: group entries by object name within this region
+        const segments = allSegments.map(e => ({
+            n: e.name, s: e.section, f: e.func, a: e.addr,
+            ah: formatHex(e.addr), eh: formatHex(e.size > 0 ? e.addr + e.size - 1 : e.addr),
+            sz: e.size, ss: formatSize(e.size), t: e.type, fr: e.type === 'FREE'
+        }));
+
         interface ObjGroup { totalSize: number; entries: { section: string; addr: number; size: number; type: string }[] }
         const objGroups = new Map<string, ObjGroup>();
         for (const s of u.sections) {
-            const objName = s.name;
-            let g = objGroups.get(objName);
-            if (!g) { g = { totalSize: 0, entries: [] }; objGroups.set(objName, g); }
+            let g = objGroups.get(s.name);
+            if (!g) { g = { totalSize: 0, entries: [] }; objGroups.set(s.name, g); }
             g.totalSize += s.size;
             g.entries.push({ section: s.func || s.section || s.type, addr: s.addr, size: s.size, type: s.type });
         }
         const regionObjSummary = Array.from(objGroups).map(([name, g]) => ({ name, ...g })).sort((a, b) => b.totalSize - a.totalSize);
         const regionUsed = u.used;
-        const objSummaryRows = regionObjSummary.map(o => {
-            const objPct = regionUsed > 0 ? (o.totalSize / regionUsed * 100).toFixed(1) : '0.0';
-            const barW = regionUsed > 0 ? Math.max(1, o.totalSize / regionUsed * 100) : 0;
-            const detailRows = o.entries.sort((a, b) => a.addr - b.addr).map(e =>
-                `<tr class="obj-detail-row"><td></td><td class="num">${esc(e.section)}</td><td class="num">${formatHex(e.addr)}</td><td class="num">${formatHex(e.size > 0 ? e.addr + e.size - 1 : e.addr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${e.size}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`
-            ).join('');
-            return `<tr><td>${esc(o.name)}</td><td class="num" colspan="2"></td><td class="num"></td><td class="num">${formatSize(o.totalSize)}</td><td class="num">${o.totalSize}</td><td class="num">${objPct}%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:${barW}%;background:var(--ok)"></div></div></td></tr>${detailRows}`;
-        }).join('');
-        const hasMultipleObjs = regionObjSummary.length > 1;
-        const objSummaryHtml = hasMultipleObjs
-            ? `<div class="obj-summary-header" onclick="toggleObjSummary(this)"><span class="fold-icon">▶</span> Object Summary (${regionObjSummary.length}) <button onclick="event.stopPropagation();toggleObjDetailRows(this)" title="Toggle section details">Details ▶</button></div><div class="obj-summary-body" style="display:none"><table class="obj-summary-table sortable-table"><thead><tr><th data-sort="name">Object</th><th class="num">Section</th><th class="num">Address</th><th class="num">End</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th class="num" data-sort="pct">%</th><th></th></tr></thead><tbody>${objSummaryRows}</tbody></table></div>`
-            : '';
 
-        return `
-        <div class="region-card" id="region-${esc(u.region)}">
+        const objSummary = regionObjSummary.map(o => ({
+            n: o.name, ts: o.totalSize, tss: formatSize(o.totalSize),
+            p: regionUsed > 0 ? (o.totalSize / regionUsed * 100).toFixed(1) : '0.0',
+            bw: regionUsed > 0 ? Math.max(1, o.totalSize / regionUsed * 100) : 0,
+            entries: o.entries.sort((a, b) => a.addr - b.addr).map(e => ({
+                s: e.section, ah: formatHex(e.addr),
+                eh: formatHex(e.size > 0 ? e.addr + e.size - 1 : e.addr),
+                sz: e.size, ss: formatSize(e.size), t: e.type
+            }))
+        }));
+
+        const calcFree = u.freeSpaces.reduce((sum, f) => sum + f.size, 0);
+        const linkerFree = u.reportedUsed !== undefined ? u.total - u.reportedUsed : 0;
+
+        return {
+            name: u.region, pct, color, mapSegHtml,
+            infoText: `Used: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(calcFree)}`,
+            linkerLine: u.reportedUsed !== undefined
+                ? `Linker: Base=${formatHex(regionOrigin)} Used=${formatHex(u.reportedUsed)} (${formatSize(u.reportedUsed)}) Max=${formatHex(u.total)} (${formatSize(u.total)}) Free: ${formatSize(linkerFree)}`
+                : '',
+            segments, objSummary,
+            hsi: hasSectionInfo, hfi: hasFuncInfo, hmo: regionObjSummary.length > 1,
+        };
+    });
+
+    // Minimal region card HTML (details rendered lazily by JS)
+    const regionCardsHtml = regionJsonData.map((rd: any, idx: number) => `
+        <div class="region-card" id="region-${esc(rd.name)}" data-idx="${idx}">
             <div class="region-header" onclick="toggleRegion(this)">
                 <span class="fold-icon">▶</span>
-                <strong>${esc(u.region)}</strong>
-                <span class="region-info">${infoText}</span>
+                <strong>${esc(rd.name)}</strong>
+                <span class="region-info">${esc(rd.infoText)}</span>
             </div>
-            ${linkerLine}
-            <div class="bar-bg"><div class="bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div>
-            <div class="region-detail" style="display:none">
-                ${allSegments.length > 0 ? `<div class="map-bar">${mapSegHtml}</div>` : ''}
-                ${objSummaryHtml}
-                ${allSegments.length > 0 ? `<table class="section-table sortable-table"><thead><tr><th data-sort="name">Object</th>${hasSectionInfo ? '<th data-sort="section" class="func-cell">Section</th>' : ''}${hasFuncInfo ? '<th data-sort="func" class="func-cell">Function</th>' : ''}<th class="num" data-sort="addr">Address</th><th class="num" data-sort="end">End</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th data-sort="type">Type</th></tr></thead><tbody>${tableRows}</tbody></table>` : ''}
-            </div>
-        </div>`;
-    }).join('');
+            ${rd.linkerLine ? `<div class="region-linker">${esc(rd.linkerLine)}</div>` : ''}
+            <div class="bar-bg"><div class="bar-fill" style="width:${Math.min(rd.pct, 100)}%;background:${rd.color}"></div></div>
+            <div class="region-detail" style="display:none"></div>
+        </div>`).join('');
 
     const hasRegions = memoryUsage.length > 0;
     const hasLinkerData = memoryUsage.some(u => u.reportedUsed !== undefined);
@@ -649,8 +641,9 @@ function getWebviewContent(
         border: none;
         cursor: pointer;
         font-size: 16px;
-        line-height: 32px;
-        text-align: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         opacity: 0;
         transition: opacity 0.2s;
         pointer-events: none;
@@ -666,6 +659,9 @@ function getWebviewContent(
     .obj-summary-header button { font-size: 11px; padding: 4px 10px; }
     .obj-summary-header:hover { opacity: 0.85; }
     .obj-summary-table { margin-bottom: 10px; }
+    .vt-viewport { position: relative; }
+    .vt-viewport thead th { position: sticky; top: 0; z-index: 1; background: var(--bg); }
+    .vt-viewport table { margin-top: 0; }
 </style>
 </head>
 <body>
@@ -675,6 +671,7 @@ function getWebviewContent(
             <div class="subtitle">Entry Point: ${formatHex(entryPoint)}</div>
         </div>
         <button id="btnCopy" title="Copy as text report">Copy Report</button>
+        <span style="width:8px;display:inline-block"></span>
         <button id="btnSaveHtml" title="Save as HTML file">Save HTML</button>
     </div>
 
@@ -689,7 +686,7 @@ function getWebviewContent(
         ${!hasLinkerData && !hasSymbols ? '<div class="info-note">AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.</div>' : ''}
         ${hasSymbols ? '<div class="info-note">ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.</div>' : ''}
         <div class="section-heading">Region Details <button onclick="foldAll(false)" title="Expand All">▼ Expand All</button> <button onclick="foldAll(true)" title="Collapse All">▶ Collapse All</button>${hasFuncData ? ' <button onclick="toggleFuncCol()" title="Toggle Function column">Function ▶</button>' : ''}</div>
-        ${usageBarsHtml}
+        ${regionCardsHtml}
     ` : `
         <div class="no-regions">
             Memory region sizes not configured. To see usage bars, either:<br>
@@ -713,176 +710,362 @@ function getWebviewContent(
         <tbody>${sectionTableRows}</tbody>
     </table>
 
+<button id="scrollTop" class="scroll-top" title="맨 위로">↑</button>
+
 <script>
+const RD = ${JSON.stringify(regionJsonData)};
 (function() {
     const vscode = acquireVsCodeApi();
     const report = atob('${reportBase64}');
+    const VT_THRESH = 200, ROW_H = 24, BUFFER = 30, MAX_VP_H = 600;
+    const rendered = new Set();
+    const vtMap = new Map();
+    let funcVis = false, curQ = '';
 
-    document.getElementById('btnCopy').addEventListener('click', () => {
+    function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+    function rowHtml(e, hsi, hfi) {
+        const rc = e.fr ? ' class="free-row"' : '';
+        const sc = hsi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + esc(e.s) + '</td>' : '';
+        const fc = hfi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + esc(e.f) + '</td>' : '';
+        return '<tr' + rc + '><td>' + esc(e.n) + '</td>' + sc + fc + '<td class="num">' + e.ah + '</td><td class="num">' + e.eh + '</td><td class="num">' + e.ss + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + e.t + '</span></td></tr>';
+    }
+
+    function matchSeg(e, q) {
+        return (e.n + ' ' + e.s + ' ' + e.f + ' ' + e.ah + ' ' + e.ss + ' ' + e.t).toLowerCase().includes(q);
+    }
+
+    function renderDetail(idx) {
+        if (rendered.has(idx)) return;
+        rendered.add(idx);
+        const rd = RD[idx];
+        const card = document.querySelector('.region-card[data-idx="' + idx + '"]');
+        const detail = card.querySelector('.region-detail');
+        let h = '';
+
+        // Map bar
+        if (rd.segments.length > 0) {
+            h += '<div class="map-bar">' + rd.mapSegHtml + '</div>';
+        }
+
+        // Object summary
+        if (rd.hmo) {
+            const oRows = rd.objSummary.map(function(o) {
+                const dRows = o.entries.map(function(e) {
+                    return '<tr class="obj-detail-row"><td></td><td class="num">' + esc(e.s) + '</td><td class="num">' + e.ah + '</td><td class="num">' + e.eh + '</td><td class="num">' + e.ss + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + e.t + '</span></td></tr>';
+                }).join('');
+                return '<tr><td>' + esc(o.n) + '</td><td class="num" colspan="2"></td><td class="num"></td><td class="num">' + o.tss + '</td><td class="num">' + o.ts + '</td><td class="num">' + o.p + '%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:' + o.bw + '%;background:var(--ok)"></div></div></td></tr>' + dRows;
+            }).join('');
+            h += '<div class="obj-summary-header" onclick="toggleObjSummary(this)"><span class="fold-icon">\u25B6</span> Object Summary (' + rd.objSummary.length + ') <button onclick="event.stopPropagation();toggleObjDetailRows(this)" title="Toggle section details">Details \u25B6</button></div>';
+            h += '<div class="obj-summary-body" style="display:none"><table class="obj-summary-table sortable-table"><thead><tr><th data-sort="name">Object</th><th class="num">Section</th><th class="num">Address</th><th class="num">End</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th class="num" data-sort="pct">%</th><th></th></tr></thead><tbody>' + oRows + '</tbody></table></div>';
+        }
+
+        // Section table
+        if (rd.segments.length > 0) {
+            const thHtml = '<tr><th data-sort="name">Object</th>' +
+                (rd.hsi ? '<th data-sort="section" class="func-cell' + (funcVis ? '' : ' hidden') + '">Section</th>' : '') +
+                (rd.hfi ? '<th data-sort="func" class="func-cell' + (funcVis ? '' : ' hidden') + '">Function</th>' : '') +
+                '<th class="num" data-sort="addr">Address</th><th class="num" data-sort="end">End</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th data-sort="type">Type</th></tr>';
+
+            if (rd.segments.length > VT_THRESH) {
+                const vpH = Math.min(rd.segments.length * ROW_H, MAX_VP_H);
+                h += '<div class="vt-viewport" data-ridx="' + idx + '" style="max-height:' + vpH + 'px;overflow-y:auto"><table class="section-table"><thead>' + thHtml + '</thead><tbody></tbody></table></div>';
+            } else {
+                const data = curQ ? rd.segments.filter(function(e) { return matchSeg(e, curQ); }) : rd.segments;
+                h += '<table class="section-table sortable-table"><thead>' + thHtml + '</thead><tbody>' + data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi); }).join('') + '</tbody></table>';
+            }
+        }
+
+        detail.innerHTML = h;
+
+        // Initialize virtual table if needed
+        if (rd.segments.length > VT_THRESH) {
+            initVT(detail.querySelector('.vt-viewport'), idx);
+        }
+
+        // Initialize DOM-based sort on obj-summary sortable-tables
+        initSort(detail);
+    }
+
+    function initVT(vp, idx) {
+        const rd = RD[idx];
+        const vt = {
+            vp: vp, tb: vp.querySelector('tbody'),
+            data: rd.segments,
+            fd: curQ ? rd.segments.filter(function(e) { return matchSeg(e, curQ); }) : rd.segments,
+            cc: 5 + (rd.hsi ? 1 : 0) + (rd.hfi ? 1 : 0),
+            idx: idx, ls: -1, le: -1
+        };
+        vtMap.set(idx, vt);
+        vp.addEventListener('scroll', function() { requestAnimationFrame(function() { renderVT(vt); }); });
+        renderVT(vt);
+    }
+
+    function renderVT(vt) {
+        const st = vt.vp.scrollTop, vh = vt.vp.clientHeight, total = vt.fd.length;
+        const s = Math.max(0, Math.floor(st / ROW_H) - BUFFER);
+        const e = Math.min(total, Math.ceil((st + vh) / ROW_H) + BUFFER);
+        if (s === vt.ls && e === vt.le) return;
+        vt.ls = s; vt.le = e;
+        const rd = RD[vt.idx];
+        const topH = s * ROW_H, botH = Math.max(0, (total - e) * ROW_H);
+        let h = '';
+        if (topH > 0) h += '<tr class="vt-sp"><td colspan="' + vt.cc + '" style="height:' + topH + 'px;padding:0;border:0"></td></tr>';
+        for (let i = s; i < e; i++) h += rowHtml(vt.fd[i], rd.hsi, rd.hfi);
+        if (botH > 0) h += '<tr class="vt-sp"><td colspan="' + vt.cc + '" style="height:' + botH + 'px;padding:0;border:0"></td></tr>';
+        vt.tb.innerHTML = h;
+    }
+
+    // --- Copy / Save ---
+    document.getElementById('btnCopy').addEventListener('click', function() {
         vscode.postMessage({ command: 'copyReport', text: report });
     });
-
-    document.getElementById('btnSaveHtml').addEventListener('click', () => {
+    document.getElementById('btnSaveHtml').addEventListener('click', function() {
         vscode.postMessage({ command: 'saveHtml', html: document.documentElement.outerHTML });
     });
 
-    // --- Region fold/unfold ---
+    // --- Region fold/unfold with lazy rendering ---
     window.toggleRegion = function(header) {
         const card = header.closest('.region-card');
         const detail = card.querySelector('.region-detail');
         const icon = header.querySelector('.fold-icon');
+        const idx = parseInt(card.dataset.idx);
         if (detail.style.display === 'none') {
             detail.style.display = '';
-            icon.textContent = '▼';
+            icon.textContent = '\u25BC';
+            renderDetail(idx);
         } else {
             detail.style.display = 'none';
-            icon.textContent = '▶';
+            icon.textContent = '\u25B6';
         }
     };
 
-    // --- Keyword search ---
+    // --- Keyword search (data-driven for regions, DOM for static tables) ---
     const searchInput = document.getElementById('searchInput');
     const searchCount = document.getElementById('searchCount');
     let searchTimeout;
 
-    searchInput.addEventListener('input', () => {
+    searchInput.addEventListener('input', function() {
         clearTimeout(searchTimeout);
         searchTimeout = setTimeout(doSearch, 200);
     });
 
     function doSearch() {
-        const query = searchInput.value.trim().toLowerCase();
-        let matchCount = 0;
+        const q = searchInput.value.trim().toLowerCase();
+        curQ = q;
+        let mc = 0;
 
-        document.querySelectorAll('tbody tr').forEach(row => {
-            row.classList.remove('search-match');
-            if (!query) {
-                row.style.display = '';
-                return;
+        RD.forEach(function(rd, idx) {
+            const card = document.querySelector('.region-card[data-idx="' + idx + '"]');
+            let rm = 0;
+
+            if (q) {
+                rd.segments.forEach(function(seg) { if (matchSeg(seg, q)) rm++; });
+                mc += rm;
             }
+
+            // Update virtual tables
+            const vt = vtMap.get(idx);
+            if (vt) {
+                vt.fd = q ? vt.data.filter(function(e) { return matchSeg(e, q); }) : vt.data;
+                vt.vp.scrollTop = 0;
+                vt.ls = -1;
+                renderVT(vt);
+            } else if (rendered.has(idx)) {
+                // Non-virtual rendered table: re-render tbody from data
+                const tbody = card.querySelector('.section-table tbody');
+                if (tbody) {
+                    const data = q ? rd.segments.filter(function(e) { return matchSeg(e, q); }) : rd.segments;
+                    tbody.innerHTML = data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi); }).join('');
+                }
+            }
+
+            // Auto-expand matching regions
+            if (q && rm > 0) {
+                const detail = card.querySelector('.region-detail');
+                const icon = card.querySelector('.fold-icon');
+                if (detail && detail.style.display === 'none') {
+                    detail.style.display = '';
+                    if (icon) icon.textContent = '\u25BC';
+                    renderDetail(idx);
+                }
+            }
+        });
+
+        // Static tables (overview, all-sections)
+        document.querySelectorAll('#sectionTable tbody tr, .overview-table tbody tr').forEach(function(row) {
+            row.classList.remove('search-match');
+            if (!q) { row.style.display = ''; return; }
             const text = row.textContent.toLowerCase();
-            if (text.includes(query)) {
+            if (text.includes(q)) {
                 row.style.display = '';
                 row.classList.add('search-match');
-                matchCount++;
-                // Auto-expand collapsed parent region
-                const regionCard = row.closest('.region-card');
-                if (regionCard) {
-                    const detail = regionCard.querySelector('.region-detail');
-                    const icon = regionCard.querySelector('.fold-icon');
-                    if (detail && detail.style.display === 'none') {
-                        detail.style.display = '';
-                        if (icon) { icon.textContent = '▼'; }
-                    }
-                }
+                mc++;
             } else {
                 row.style.display = 'none';
             }
         });
 
-        searchCount.textContent = query ? matchCount + ' matches' : '';
+        searchCount.textContent = q ? mc + ' matches' : '';
     }
 
     // --- Expand All / Collapse All ---
     window.foldAll = function(collapse) {
-        document.querySelectorAll('.region-card').forEach(card => {
+        document.querySelectorAll('.region-card').forEach(function(card) {
             const detail = card.querySelector('.region-detail');
             const icon = card.querySelector('.fold-icon');
-            if (detail) { detail.style.display = collapse ? 'none' : ''; }
-            if (icon) { icon.textContent = collapse ? '▶' : '▼'; }
+            const idx = parseInt(card.dataset.idx);
+            if (detail) {
+                if (collapse) {
+                    detail.style.display = 'none';
+                } else {
+                    detail.style.display = '';
+                    renderDetail(idx);
+                }
+            }
+            if (icon) icon.textContent = collapse ? '\u25B6' : '\u25BC';
         });
     };
 
-    // --- Overview row click → scroll to region card ---
-    document.querySelectorAll('.overview-row').forEach(row => {
-        row.addEventListener('click', () => {
+    // --- Overview row click -> scroll to region card ---
+    document.querySelectorAll('.overview-row').forEach(function(row) {
+        row.addEventListener('click', function() {
             const name = row.getAttribute('data-region');
             const card = document.getElementById('region-' + name);
-            if (!card) { return; }
+            if (!card) return;
             const detail = card.querySelector('.region-detail');
             const icon = card.querySelector('.fold-icon');
+            const idx = parseInt(card.dataset.idx);
             if (detail && detail.style.display === 'none') {
                 detail.style.display = '';
-                if (icon) { icon.textContent = '▼'; }
+                if (icon) icon.textContent = '\u25BC';
+                renderDetail(idx);
             }
             card.scrollIntoView({ behavior: 'smooth', block: 'start' });
             card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
-            setTimeout(() => card.style.outline = '', 2500);
+            setTimeout(function() { card.style.outline = ''; }, 2500);
         });
     });
 
     // --- Scroll to region (from extension Ctrl+Shift+O command) ---
-    window.addEventListener('message', event => {
+    window.addEventListener('message', function(event) {
         const msg = event.data;
         if (msg.command === 'scrollToRegion') {
-            const name = msg.name;
             const cards = document.querySelectorAll('.region-card');
             for (const card of cards) {
                 const strong = card.querySelector('.region-header strong');
-                if (strong && strong.textContent.trim() === name) {
+                if (strong && strong.textContent.trim() === msg.name) {
                     const detail = card.querySelector('.region-detail');
                     const icon = card.querySelector('.fold-icon');
+                    const idx = parseInt(card.dataset.idx);
                     if (detail && detail.style.display === 'none') {
                         detail.style.display = '';
-                        if (icon) { icon.textContent = '▼'; }
+                        if (icon) icon.textContent = '\u25BC';
+                        renderDetail(idx);
                     }
                     card.scrollIntoView({ behavior: 'smooth', block: 'start' });
                     card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
-                    setTimeout(() => card.style.outline = '', 2500);
+                    setTimeout(function() { card.style.outline = ''; }, 2500);
                     return;
                 }
             }
         }
     });
 
-    // --- Column sort (all sortable tables) ---
-    // Size/Bytes columns default to descending on first click
-    const descFirstCols = new Set(['size', 'bytes', 'pct']);
-
-    document.querySelectorAll('.sortable-table').forEach(tbl => {
-        const ths = tbl.querySelectorAll('th[data-sort]');
-        let sortCol = null;
-        let sortAsc = true;
-
-        ths.forEach(th => {
-            th.addEventListener('click', () => {
-                const col = th.dataset.sort;
-                if (sortCol === col) { sortAsc = !sortAsc; }
-                else { sortCol = col; sortAsc = !descFirstCols.has(col); }
-
-                const tbody = tbl.querySelector('tbody');
-                const rows = Array.from(tbody.querySelectorAll('tr:not(.obj-detail-row)'));
-                // Find value column index using data-sort attribute match
-                const sortByCol = th.dataset.sortBy || col;
-                const allThs = Array.from(th.parentElement.children);
-                const targetTh = allThs.find(h => h.dataset && h.dataset.sort === sortByCol) || th;
-                const valIdx = allThs.indexOf(targetTh);
-
-                rows.sort((a, b) => {
-                    if (valIdx >= a.children.length || valIdx >= b.children.length) { return 0; }
-                    const aText = a.children[valIdx].textContent.trim();
-                    const bText = b.children[valIdx].textContent.trim();
-                    const aNum = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
-                    const bNum = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
-                    if (!isNaN(aNum) && !isNaN(bNum)) {
-                        return sortAsc ? aNum - bNum : bNum - aNum;
-                    }
-                    return sortAsc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+    // --- Column sort for sortable-table (obj summary, all-sections) ---
+    function initSort(root) {
+        const descFirst = new Set(['size', 'bytes', 'pct']);
+        root.querySelectorAll('.sortable-table').forEach(function(tbl) {
+            const ths = tbl.querySelectorAll('th[data-sort]');
+            let sortCol = null, sortAsc = true;
+            ths.forEach(function(th) {
+                th.addEventListener('click', function() {
+                    const col = th.dataset.sort;
+                    if (sortCol === col) sortAsc = !sortAsc;
+                    else { sortCol = col; sortAsc = !descFirst.has(col); }
+                    const tbody = tbl.querySelector('tbody');
+                    const rows = Array.from(tbody.querySelectorAll('tr:not(.obj-detail-row)'));
+                    const sortByCol = th.dataset.sortBy || col;
+                    const allThs = Array.from(th.parentElement.children);
+                    const targetTh = allThs.find(function(h) { return h.dataset && h.dataset.sort === sortByCol; }) || th;
+                    const valIdx = allThs.indexOf(targetTh);
+                    rows.sort(function(a, b) {
+                        if (valIdx >= a.children.length || valIdx >= b.children.length) return 0;
+                        const aT = a.children[valIdx].textContent.trim();
+                        const bT = b.children[valIdx].textContent.trim();
+                        const aN = parseFloat(aT.replace(/[^0-9.\-]/g, ''));
+                        const bN = parseFloat(bT.replace(/[^0-9.\-]/g, ''));
+                        if (!isNaN(aN) && !isNaN(bN)) return sortAsc ? aN - bN : bN - aN;
+                        return sortAsc ? aT.localeCompare(bT) : bT.localeCompare(aT);
+                    });
+                    rows.forEach(function(row) { tbody.appendChild(row); });
+                    ths.forEach(function(h) { h.textContent = h.textContent.replace(/ [\u25B2\u25BC]$/, ''); });
+                    th.textContent += sortAsc ? ' \u25B2' : ' \u25BC';
                 });
-
-                rows.forEach(row => tbody.appendChild(row));
-                ths.forEach(h => h.textContent = h.textContent.replace(/ [▲▼]$/, ''));
-                th.textContent += sortAsc ? ' ▲' : ' ▼';
             });
         });
-    });
-    // --- Toggle Function column in region tables ---
-    let funcColVisible = false;
-    window.toggleFuncCol = function() {
-        funcColVisible = !funcColVisible;
-        document.querySelectorAll('.func-cell').forEach(el => {
-            el.classList.toggle('hidden', !funcColVisible);
+    }
+
+    // --- Data-driven sort for region section tables (including virtual) ---
+    document.addEventListener('click', function(ev) {
+        const th = ev.target.closest && ev.target.closest('.region-card .section-table th[data-sort]');
+        if (!th || th.closest('.sortable-table')) return;
+
+        const card = th.closest('.region-card');
+        const idx = parseInt(card.dataset.idx);
+        const rd = RD[idx];
+        const sortByCol = th.dataset.sortBy || th.dataset.sort;
+
+        if (th._lastCol === sortByCol) { th._sortAsc = !th._sortAsc; }
+        else { th._lastCol = sortByCol; th._sortAsc = !(['size','bytes'].includes(sortByCol)); }
+        const asc = th._sortAsc;
+
+        rd.segments.sort(function(a, b) {
+            let av, bv;
+            switch(sortByCol) {
+                case 'name': av = a.n; bv = b.n; break;
+                case 'section': av = a.s; bv = b.s; break;
+                case 'func': av = a.f; bv = b.f; break;
+                case 'addr': av = a.a; bv = b.a; break;
+                case 'end': av = a.a + a.sz; bv = b.a + b.sz; break;
+                case 'bytes': case 'size': av = a.sz; bv = b.sz; break;
+                case 'type': av = a.t; bv = b.t; break;
+                default: return 0;
+            }
+            if (typeof av === 'number') return asc ? av - bv : bv - av;
+            return asc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
         });
+
+        const vt = vtMap.get(idx);
+        if (vt) {
+            vt.fd = curQ ? vt.data.filter(function(seg) { return matchSeg(seg, curQ); }) : vt.data;
+            vt.vp.scrollTop = 0;
+            vt.ls = -1;
+            renderVT(vt);
+        } else {
+            const tbody = card.querySelector('.section-table tbody');
+            if (tbody) {
+                const data = curQ ? rd.segments.filter(function(seg) { return matchSeg(seg, curQ); }) : rd.segments;
+                tbody.innerHTML = data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi); }).join('');
+            }
+        }
+
+        const ths = th.parentElement.querySelectorAll('th[data-sort]');
+        ths.forEach(function(h) { h.textContent = h.textContent.replace(/ [\u25B2\u25BC]$/, ''); });
+        th.textContent += asc ? ' \u25B2' : ' \u25BC';
+    });
+
+    // Initialize sort on static tables (overview, all-sections)
+    initSort(document);
+
+    // --- Toggle Function column ---
+    window.toggleFuncCol = function() {
+        funcVis = !funcVis;
+        document.querySelectorAll('.func-cell').forEach(function(el) {
+            el.classList.toggle('hidden', !funcVis);
+        });
+        // Re-render virtual tables to reflect column visibility
+        vtMap.forEach(function(vt) { vt.ls = -1; renderVT(vt); });
     };
 
     // --- Toggle Object Summary fold ---
@@ -892,10 +1075,10 @@ function getWebviewContent(
         if (body && body.classList.contains('obj-summary-body')) {
             if (body.style.display === 'none') {
                 body.style.display = '';
-                if (icon) { icon.textContent = '▼'; }
+                if (icon) { icon.textContent = '\u25BC'; }
             } else {
                 body.style.display = 'none';
-                if (icon) { icon.textContent = '▶'; }
+                if (icon) { icon.textContent = '\u25B6'; }
             }
         }
     };
@@ -905,25 +1088,20 @@ function getWebviewContent(
         const body = btn.closest('.obj-summary-header')?.nextElementSibling;
         if (!body) { return; }
         const rows = body.querySelectorAll('.obj-detail-row');
-        // Check computed style since CSS sets display:none initially
         const isHidden = rows.length > 0 && getComputedStyle(rows[0]).display === 'none';
-        rows.forEach(el => el.style.display = isHidden ? 'table-row' : 'none');
+        rows.forEach(function(el) { el.style.display = isHidden ? 'table-row' : 'none'; });
     };
-
-    // Initialize: func-cell hidden by default
-    document.querySelectorAll('.func-cell').forEach(el => el.classList.add('hidden'));
 
     // --- Scroll to top button ---
     const scrollBtn = document.getElementById('scrollTop');
-    window.addEventListener('scroll', () => {
+    window.addEventListener('scroll', function() {
         scrollBtn.classList.toggle('visible', window.scrollY > 200);
     });
-    scrollBtn.addEventListener('click', () => {
+    scrollBtn.addEventListener('click', function() {
         window.scrollTo({ top: 0, behavior: 'smooth' });
     });
 })();
 </script>
-<button id="scrollTop" class="scroll-top" title="맨 위로">↑</button>
 </body>
 </html>`;
 }

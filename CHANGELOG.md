@@ -1,5 +1,24 @@
 # Change Log
 
+## [0.3.8] - 2026-04-07
+
+### Improved
+
+**Memory Map: 대용량 Listing 성능 개선**
+- Region 상세 테이블을 Lazy Rendering 방식으로 변경: 펼칠 때만 DOM 생성
+- 200행 초과 테이블에 Virtual Scrolling 적용: 보이는 영역만 렌더링하여 스크롤 버벅임 해소
+- 검색/정렬을 JSON 데이터 기반으로 변경하여 DOM 전체 순회 제거
+
+### Fixed
+
+- 스크롤 맨 위로(↑) 버튼이 표시되지 않던 문제 수정 (DOM 순서 조정)
+- 맨 위로 버튼 화살표가 중앙 정렬되지 않던 문제 수정 (flexbox 적용)
+- Copy Report / Save HTML 버튼 간격 추가
+
+### Added
+
+- 대용량 ARM Linker Listing 예제 파일 추가 (`examples/sample_armlink_large.txt`, 1,935 엔트리)
+
 ## [0.3.7] - 2026-04-07
 
 ### Fixed
