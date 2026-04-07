@@ -1,5 +1,19 @@
 # Change Log
 
+## [0.3.9] - 2026-04-07
+
+### Improved
+
+**Memory Map: 다중 패널 지원**
+- 서로 다른 파일을 열면 각각 별도의 WebView 탭으로 표시 (기존: 1개만 열림)
+- 동일 파일명이라도 경로가 다르면 독립 패널로 열림
+- 같은 파일을 다시 열면 기존 패널을 재사용
+- Go to Symbol (`Ctrl+Shift+O`)은 마지막으로 활성화된 패널 기준으로 동작
+
+### Fixed
+
+- `tsconfig.json`에 `types: ["node", "mocha"]` 명시하여 IDE에서 `fs`, `Buffer` 타입 인식 오류 해결
+
 ## [0.3.8] - 2026-04-07
 
 ### Improved

@@ -5,9 +5,22 @@ import { parseLinkerFile } from './linkerScriptParser';
 import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 import { t } from './i18n';
 
-let currentPanel: vscode.WebviewPanel | undefined;
-let currentSymbols: { name: string; addr: number; type: string }[] = [];
-let currentMessageDisposable: vscode.Disposable | undefined;
+interface PanelState {
+    panel: vscode.WebviewPanel;
+    symbols: { name: string; addr: number; type: string }[];
+    messageDisposable?: vscode.Disposable;
+}
+
+const panels = new Map<string, PanelState>();
+let lastActivePanel: string | undefined;
+
+/** Panel registry – exported for testing */
+export const panelRegistry = {
+    has(filePath: string): boolean { return panels.has(filePath); },
+    size(): number { return panels.size; },
+    getLastActive(): string | undefined { return lastActivePanel; },
+    clear(): void { panels.clear(); lastActivePanel = undefined; },
+};
 
 /** Memory Map에서 처리 가능한 최대 ELF/Listing 파일 크기 (100 MB) */
 const MEMORY_MAP_MAX_FILE_SIZE = 100 * 1024 * 1024;
@@ -147,7 +160,7 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     const textReport = generateTextReport(fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
     const hasSymbols = symbols.length > 0;
 
-    showPanel(context, fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, hasSymbols);
+    showPanel(context, filePath, fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, hasSymbols);
 }
 
 function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: string) {
@@ -207,11 +220,12 @@ function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: st
     const ramTotal = ram.reduce((sum, s) => sum + s.size, 0);
     const textReport = generateTextReport(fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
 
-    showPanel(context, fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport);
+    showPanel(context, filePath, fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport);
 }
 
 function showPanel(
     context: vscode.ExtensionContext,
+    filePath: string,
     fileName: string,
     entryPoint: number,
     flashTotal: number,
@@ -222,20 +236,33 @@ function showPanel(
     textReport: string,
     hasSymbols?: boolean
 ) {
-    if (currentPanel) {
-        currentPanel.reveal(vscode.ViewColumn.One);
+    const existing = panels.get(filePath);
+    let panel: vscode.WebviewPanel;
+    if (existing) {
+        panel = existing.panel;
+        panel.reveal(vscode.ViewColumn.Active);
+        existing.messageDisposable?.dispose();
     } else {
-        currentPanel = vscode.window.createWebviewPanel(
+        panel = vscode.window.createWebviewPanel(
             'taskhub.memoryMap',
             `Memory Map: ${fileName}`,
-            vscode.ViewColumn.One,
+            vscode.ViewColumn.Active,
             { enableScripts: true }
         );
-        currentPanel.onDidDispose(() => { currentPanel = undefined; currentSymbols = []; currentMessageDisposable?.dispose(); currentMessageDisposable = undefined; });
+        panel.onDidDispose(() => {
+            const state = panels.get(filePath);
+            state?.messageDisposable?.dispose();
+            panels.delete(filePath);
+            if (lastActivePanel === filePath) { lastActivePanel = undefined; }
+        });
+        panel.onDidChangeViewState(() => {
+            if (panel.active) { lastActivePanel = filePath; }
+        });
     }
 
-    currentMessageDisposable?.dispose();
-    currentMessageDisposable = currentPanel.webview.onDidReceiveMessage(async message => {
+    lastActivePanel = filePath;
+    const state: PanelState = { panel, symbols: [], messageDisposable: undefined };
+    state.messageDisposable = panel.webview.onDidReceiveMessage(async (message: any) => {
         if (message.command === 'copyReport') {
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.'));
@@ -255,22 +282,24 @@ function showPanel(
         }
     });
 
-    currentPanel.title = `Memory Map: ${fileName}`;
-    currentPanel.webview.html = getWebviewContent(
+    panel.title = `Memory Map: ${fileName}`;
+    panel.webview.html = getWebviewContent(
         fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, hasSymbols
     );
 
     // Store region symbols for Go to Symbol command
-    currentSymbols = memoryUsage.map(u => {
+    state.symbols = memoryUsage.map(u => {
         const origin = regions.find(r => r.name === u.region)?.origin ?? 0;
         return { name: u.region, addr: origin, type: `${formatSize(u.used)} / ${formatSize(u.total)}` };
     });
+    panels.set(filePath, state);
 }
 
 export async function goToSymbol() {
-    if (!currentPanel || currentSymbols.length === 0) { return; }
+    const active = lastActivePanel ? panels.get(lastActivePanel) : undefined;
+    if (!active || active.symbols.length === 0) { return; }
 
-    const items = currentSymbols.map(s => ({
+    const items = active.symbols.map(s => ({
         label: s.name,
         description: `${formatHex(s.addr)} | ${s.type}`,
     }));
@@ -281,8 +310,8 @@ export async function goToSymbol() {
     });
 
     if (selected) {
-        currentPanel.reveal();
-        currentPanel.webview.postMessage({
+        active.panel.reveal();
+        active.panel.webview.postMessage({
             command: 'scrollToRegion',
             name: selected.label,
         });
