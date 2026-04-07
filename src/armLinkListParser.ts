@@ -177,10 +177,27 @@ export function parseArmLinkList(content: string): ArmLinkListResult {
                         func = extractFunc(sectionToken);
                     }
                 } else {
-                    // Handle entries without parentheses (e.g., Region$$Table, .ARM.Collect$$...)
+                    // Handle entries without parentheses
+                    // Format: idx  sectionToken  object.o   (e.g., 7957  .text._ZN...  TestMgr.o)
+                    // or:     idx  sectionName               (e.g., Region$$Table)
                     const tokens = rest.trim().split(/\s+/);
-                    const lastToken = tokens[tokens.length - 1];
-                    if (lastToken && !/^\d+$/.test(lastToken) && !/^[-*]+$/.test(lastToken)) {
+                    // Filter out numeric idx tokens
+                    const nonIdx = tokens.filter(t => !/^\d+$/.test(t) && !/^[-*]+$/.test(t) && t.length > 0);
+
+                    if (nonIdx.length >= 2 && nonIdx[nonIdx.length - 1].endsWith('.o')) {
+                        // "sectionToken  object.o" pattern — object is last, section token is before it
+                        object = nonIdx[nonIdx.length - 1];
+                        const sectionToken = nonIdx[nonIdx.length - 2];
+                        for (const prefix of SECTION_PREFIXES) {
+                            if (sectionToken.startsWith(prefix.slice(0, -1))) {
+                                section = prefix.slice(0, -1);
+                                break;
+                            }
+                        }
+                        if (!section) { section = sectionToken; }
+                        func = extractFunc(sectionToken);
+                    } else if (nonIdx.length >= 1) {
+                        const lastToken = nonIdx[nonIdx.length - 1];
                         section = lastToken;
                         func = extractFunc(lastToken);
                     }

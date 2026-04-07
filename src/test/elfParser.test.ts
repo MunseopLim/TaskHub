@@ -328,6 +328,16 @@ suite('ELF Parser Test Suite', () => {
             assert.ok(report.includes('4.0 KB'));
         });
 
+        test('should display End address as inclusive (addr + size - 1)', () => {
+            const summary = [
+                { name: '.text', size: 4096, addr: 0x08000000, endAddr: 0x08001000, type: 'CODE' },
+            ];
+            const report = generateTextReport('test.axf', 0x08000000, 4096, 0, summary, []);
+            // End should be 0x08000FFF (inclusive), not 0x08001000 (exclusive)
+            assert.ok(report.includes('0x08000FFF'), 'End address should be inclusive (0x08000FFF)');
+            assert.ok(!report.includes('0x08001000') || report.includes('0x08000000'), 'Should not show exclusive end as the End column');
+        });
+
         test('should include memory region usage when provided', () => {
             const summary = [{ name: '.text', size: 100, addr: 0, endAddr: 100, type: 'CODE' }];
             const usage = [{ region: 'FLASH', used: 100, total: 1000, sections: [{ name: '.text', size: 100, addr: 0, type: 'CODE' }], freeSpaces: [{ addr: 100, size: 900 }] }];

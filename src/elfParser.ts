@@ -575,7 +575,7 @@ export function generateTextReport(
     lines.push(`${'Section'.padEnd(24)} ${'Address'.padStart(12)} ${'End'.padStart(12)} ${'Size'.padStart(10)} ${'Bytes'.padStart(10)} Type`);
     for (const s of sectionSummary) {
         lines.push(
-            `${s.name.padEnd(24)} ${formatHex(s.addr).padStart(12)} ${formatHex(s.endAddr).padStart(12)} ${formatSize(s.size).padStart(10)} ${String(s.size).padStart(10)} ${s.type}`
+            `${s.name.padEnd(24)} ${formatHex(s.addr).padStart(12)} ${formatHex(s.size > 0 ? s.endAddr - 1 : s.endAddr).padStart(12)} ${formatSize(s.size).padStart(10)} ${String(s.size).padStart(10)} ${s.type}`
         );
     }
 

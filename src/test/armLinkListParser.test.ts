@@ -499,6 +499,59 @@ suite('ArmLinkListParser Test Suite', () => {
             assert.strictEqual(result.execRegions[0].entries[0].func, '');
         });
 
+        test('should extract function from entries without parentheses (object.o at end)', () => {
+            const content = `
+    Execution Region TEST_RO (Base: 0x00001000, Size: 0x00002000, Max: 0x00003000, ABSOLUTE)
+
+    0x00001000   0x00000004   Code   RO         7955    .text                           c_2.l(use_no_semi.o)
+    0x00001004   0x00000004   Code   RO         7957    .text._ZL16CheckTestFunctionEv  TestMgr.o
+    0x00001008   0x00000020   Data   RO         7960    .rodata.kConfigTable            Config.o
+`;
+            const result = parseArmLinkList(content);
+            const entries = result.execRegions[0].entries;
+            assert.strictEqual(entries.length, 3);
+
+            // First entry: lib(obj.o) pattern — no function in plain .text
+            assert.strictEqual(entries[0].object, 'use_no_semi.o');
+            assert.strictEqual(entries[0].section, '.text');
+            assert.strictEqual(entries[0].func, '');
+
+            // Second entry: .text._ZL16CheckTestFunctionEv TestMgr.o (no parens)
+            assert.strictEqual(entries[1].object, 'TestMgr.o');
+            assert.strictEqual(entries[1].section, '.text');
+            assert.strictEqual(entries[1].func, '_ZL16CheckTestFunctionEv');
+
+            // Third entry: .rodata.kConfigTable Config.o (no parens)
+            assert.strictEqual(entries[2].object, 'Config.o');
+            assert.strictEqual(entries[2].section, '.rodata');
+            assert.strictEqual(entries[2].func, 'kConfigTable');
+        });
+
+        test('should handle mixed parenthesized and non-parenthesized objects', () => {
+            const content = `
+    Execution Region ER_IROM1 (Exec base: 0x08000000, Size: 0x00000100, Max: 0x00040000, ABSOLUTE)
+
+    0x08000000   0x00000080   Code   RO         1    .text._ZN6Driver4InitEv       c_2.l(driver.o)
+    0x08000080   0x00000040   Code   RO         2    .text._ZN6Logger3LogEPKc      Logger.o
+    0x080000c0   0x00000020   Code   RO         3    .text                         main.o(.text)
+`;
+            const result = parseArmLinkList(content);
+            const entries = result.execRegions[0].entries;
+
+            // lib(obj.o) with function
+            assert.strictEqual(entries[0].object, 'driver.o');
+            assert.strictEqual(entries[0].func, '_ZN6Driver4InitEv');
+
+            // object.o without parens, with function
+            assert.strictEqual(entries[1].object, 'Logger.o');
+            assert.strictEqual(entries[1].func, '_ZN6Logger3LogEPKc');
+
+            // object(.section) without function
+            assert.strictEqual(entries[2].object, 'main.o');
+            assert.strictEqual(entries[2].section, '.text');
+            assert.strictEqual(entries[2].func, '');
+        });
+
         test('should set name to object and pass section in toMemoryUsage', () => {
             const content = `
     Execution Region ER_IROM1 (Exec base: 0x08000000, Size: 0x00000100, Max: 0x00040000, ABSOLUTE)

@@ -329,7 +329,7 @@ function getWebviewContent(
                 const rowCls = e.type === 'FREE' ? ' class="free-row"' : '';
                 const sectionCell = hasSectionInfo ? `<td class="func-cell">${esc(e.section || '')}</td>` : '';
                 const funcCell = hasFuncInfo ? `<td class="func-cell">${esc(e.func || '')}</td>` : '';
-                const endAddr = e.addr + e.size;
+                const endAddr = e.size > 0 ? e.addr + e.size - 1 : e.addr;
                 return `<tr${rowCls}><td>${esc(e.name)}</td>${sectionCell}${funcCell}<td class="num">${formatHex(e.addr)}</td><td class="num">${formatHex(endAddr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${String(e.size)}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`;
             }).join('');
 
@@ -356,7 +356,7 @@ function getWebviewContent(
             const objPct = regionUsed > 0 ? (o.totalSize / regionUsed * 100).toFixed(1) : '0.0';
             const barW = regionUsed > 0 ? Math.max(1, o.totalSize / regionUsed * 100) : 0;
             const detailRows = o.entries.sort((a, b) => a.addr - b.addr).map(e =>
-                `<tr class="obj-detail-row"><td></td><td class="num">${esc(e.section)}</td><td class="num">${formatHex(e.addr)}</td><td class="num">${formatHex(e.addr + e.size)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${e.size}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`
+                `<tr class="obj-detail-row"><td></td><td class="num">${esc(e.section)}</td><td class="num">${formatHex(e.addr)}</td><td class="num">${formatHex(e.size > 0 ? e.addr + e.size - 1 : e.addr)}</td><td class="num">${formatSize(e.size)}</td><td class="num">${e.size}</td><td><span class="type-badge type-${e.type.toLowerCase()}">${e.type}</span></td></tr>`
             ).join('');
             return `<tr><td>${esc(o.name)}</td><td class="num" colspan="2"></td><td class="num"></td><td class="num">${formatSize(o.totalSize)}</td><td class="num">${o.totalSize}</td><td class="num">${objPct}%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:${barW}%;background:var(--ok)"></div></div></td></tr>${detailRows}`;
         }).join('');
@@ -414,7 +414,7 @@ function getWebviewContent(
         `<tr>
             <td>${esc(s.name)}</td>
             <td class="num">${formatHex(s.addr)}</td>
-            <td class="num">${formatHex(s.endAddr)}</td>
+            <td class="num">${formatHex(s.size > 0 ? s.endAddr - 1 : s.endAddr)}</td>
             <td class="num">${formatSize(s.size)}</td>
             <td class="num">${s.size}</td>
             <td><span class="type-badge type-${s.type.toLowerCase()}">${s.type}</span></td>

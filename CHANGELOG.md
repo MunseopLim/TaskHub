@@ -1,5 +1,16 @@
 # Change Log
 
+## [0.3.7] - 2026-04-07
+
+### Fixed
+
+**Memory Map: ARM Linker Listing 함수명 추출 및 End 주소 표기 수정**
+- 괄호 없는 오브젝트 형식(`7957 .text._ZL16CheckTestFunctionEv TestMgr.o`) 파싱 시 함수명이 추출되지 않던 버그 수정
+  - 마지막 토큰이 `.o`인 경우 object로 인식하고, 그 앞의 섹션 토큰에서 함수명을 추출하도록 개선
+- End 주소를 exclusive(`addr + size`)에서 inclusive(`addr + size - 1`)로 변경
+  - 예: addr=0x1000, size=4 → End: ~~0x1004~~ → 0x1003
+  - Region Details, Object Summary, Section Summary, 텍스트 리포트 모두 반영
+
 ## [0.3.6] - 2026-04-07
 
 ### Enhanced
