@@ -921,46 +921,13 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
     }
 }
 
-class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vscode.TreeItem> {
-  private _onDidChangeTreeData: vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void> = new vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void>();
-  readonly onDidChangeTreeData: vscode.Event<Action | Folder | vscode.TreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
-  constructor(private context: vscode.ExtensionContext) {}  refresh(): void { this._onDidChangeTreeData.fire(); }  getTreeItem(element: Action | Folder | vscode.TreeItem): vscode.TreeItem { return element; }  getChildren(element?: Action | Folder | vscode.TreeItem): Thenable<(Action | Folder | vscode.TreeItem)[]> {
-    if (element) { 
-      if (element instanceof Folder) { return Promise.resolve(this.createActionItems(element.children)); }
-      return Promise.resolve([]);
-    } else { 
-        let actionsJson: ActionItem[] = [];
-        try {
-            actionsJson = loadAllActions(this.context);
-        } catch (error: any) {
-            vscode.window.showErrorMessage(t(
-                `액션을 불러오지 못했습니다: ${error.message}`,
-                `Failed to load actions: ${error.message}`
-            ));
-        }
-        const packageJsonPath = path.join(this.context.extensionPath, 'package.json');
-        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-        const versionItem = new vscode.TreeItem(packageJson.version);
-        versionItem.iconPath = new vscode.ThemeIcon('info');
-        versionItem.tooltip = `Extension Version: ${packageJson.version}`;
-        versionItem.contextValue = 'versionItem';
-        versionItem.command = { command: 'taskhub.showChangelog', title: 'Show Changelog' };
-        const items: (Action | Folder | vscode.TreeItem)[] = [versionItem, ...this.createActionItems(actionsJson)];
-        return Promise.resolve(items);
-    }
-  }
-  private createActionItems(items: ActionItem[]): (Action | Folder | vscode.TreeItem)[] {
-    const actionItems: (Action | Folder | vscode.TreeItem)[] = [];
-    items.forEach((item: ActionItem) => {
-      if (item.type === 'folder') { actionItems.push(new Folder(item.title, item.children || [], this.context, item.id)); } 
-      else if (item.type === 'separator') { const separatorItem = new vscode.TreeItem(item.title); separatorItem.collapsibleState = vscode.TreeItemCollapsibleState.None; separatorItem.contextValue = 'separator'; actionItems.push(separatorItem); }
-      else if (item.action) { actionItems.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id)); } 
-      else if (item.id) { console.warn(`Item '${item.title}' is not a valid folder, separator, or runnable action.`); const unknownItem = new vscode.TreeItem(item.title || 'Unknown Item'); unknownItem.tooltip = `Invalid item definition: ${item.id}`; actionItems.push(unknownItem); }
-    });
-    return actionItems;
-  }
-}
-const actionStates = new Map<string, { state: 'running' | 'success' | 'failure' }>();
+// MainViewProvider, Folder, Action classes live in ./providers/mainViewProvider.
+// They are re-exported below so existing callers (including tests) can keep
+// `import { ... } from './extension'` unchanged.
+import { MainViewProvider, Folder, Action } from './providers/mainViewProvider';
+import { actionStates } from './providers/actionStatus';
+export { MainViewProvider, Folder, Action };
+
 const activeTasks = new Map<string, vscode.TaskExecution>();
 const manuallyTerminatedActions = new Set<string>();
 const outputChannel = vscode.window.createOutputChannel('TaskHub');
@@ -985,41 +952,6 @@ function terminateChildProcesses(actionId: string): boolean {
     }
     actionChildProcesses.delete(actionId);
     return true;
-}
-class Folder extends vscode.TreeItem {
-  public children: any[];
-  constructor(public readonly label: string, children: any[], private readonly context: vscode.ExtensionContext, public readonly id?: string) {
-    const isExpanded = context.workspaceState.get<boolean>(`folderState:${id}`);
-    super(label, isExpanded ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed);
-    this.children = children; this.id = id; this.iconPath = new vscode.ThemeIcon('folder'); this.contextValue = 'folder';
-  }
-}
-class Action extends vscode.TreeItem {
-  constructor(public readonly label: string, public readonly action: import('./schema').Action, public readonly collapsibleState: vscode.TreeItemCollapsibleState, public readonly context: vscode.ExtensionContext, public readonly id?: string) {
-    super(label, collapsibleState);
-    this.command = { command: 'taskhub.executeAction', title: 'Execute Action', arguments: [this] };
-    this.tooltip = action.description;
-    const state = actionStates.get(this.id || '');
-    if (state) {
-      switch (state.state) {
-        case 'running': this.iconPath = new vscode.ThemeIcon('sync~spin'); this.contextValue = 'runningAction'; break;
-        case 'success': this.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.blue')); this.contextValue = 'succeededAction'; break;
-        case 'failure': this.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('charts.red')); this.contextValue = 'failedAction'; break;
-      }
-    } else {
-        if (action && action.tasks) {
-            if (action.tasks.length > 1) { this.iconPath = new vscode.ThemeIcon('debug-alt'); }
-            else if (action.tasks.length === 1) {
-                switch (action.tasks[0].type) {
-                    case 'shell': case 'command': this.iconPath = new vscode.ThemeIcon('terminal'); break;
-                    case 'fileDialog': case 'folderDialog': this.iconPath = new vscode.ThemeIcon('folder-opened'); break;
-                    default: this.iconPath = new vscode.ThemeIcon('gear'); break;
-                }
-            } else { this.iconPath = new vscode.ThemeIcon('gear'); }
-        } else { this.iconPath = new vscode.ThemeIcon('gear'); }
-        this.contextValue = 'action';
-    }
-  }
 }
 interface LinkEntry {
     title: string;
@@ -2781,7 +2713,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(terminalDisposable);
 
 
-    const mainViewProvider = new MainViewProvider(context);
+    const mainViewProvider = new MainViewProvider(context, () => loadAllActions(context));
     const builtInLinkViewProvider = new LinkViewProvider(context, 'builtin');
     const workspaceLinkViewProvider = new LinkViewProvider(context, 'workspace');
     const favoriteViewProvider = new FavoriteViewProvider(context);

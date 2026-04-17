@@ -1,5 +1,20 @@
 # Change Log
 
+## [0.3.18] - 2026-04-17
+
+### Changed
+
+**`extension.ts` 모듈 분리 2단계 — MainViewProvider 추출**
+- 신규 모듈 [src/providers/mainViewProvider.ts](src/providers/mainViewProvider.ts) 추가. `MainViewProvider`, `Folder`, `Action` 클래스를 이동.
+- 신규 모듈 [src/providers/actionStatus.ts](src/providers/actionStatus.ts) 추가. `Action` TreeItem과 `extension.ts`의 실행 엔진이 공유하는 `actionStates` 맵을 담아 순환 import를 방지.
+- `MainViewProvider` 생성자는 `loadActions: () => ActionItem[]` 콜백을 받도록 변경. 기존 `loadAllActions(context)` 연동은 `activate()`에서 `() => loadAllActions(context)`를 전달해 그대로 유지.
+- `extension.ts`는 `MainViewProvider`, `Folder`, `Action`, `actionStates`를 re-export하므로 기존 `import { ... } from './extension'` 호출부(테스트 포함)는 변경 없이 동작.
+- `extension.ts` 크기 3,809줄 → 3,741줄 (-68줄).
+
+### 테스트
+
+- 전체 **684개 테스트 통과**.
+
 ## [0.3.17] - 2026-04-17
 
 ### Changed
