@@ -3,8 +3,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { executeActionPipeline } from '../extension';
-import { Action as PipelineAction } from '../schema';
+import { executeAction, executeActionPipeline } from '../extension';
+import { actionStates } from '../providers/actionStatus';
+import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
+import { MainViewProvider } from '../providers/mainViewProvider';
+import { ActionItem, Action as PipelineAction } from '../schema';
 
 /**
  * Integration test scenarios for TaskHub pipelines.
@@ -26,6 +29,7 @@ suite('Pipeline integration', function () {
     });
 
     teardown(() => {
+        actionStates.clear();
         if (tempWorkspace && fs.existsSync(tempWorkspace)) {
             fs.rmSync(tempWorkspace, { recursive: true, force: true });
         }
@@ -773,6 +777,447 @@ suite('Pipeline integration', function () {
             assert.strictEqual(
                 fs.readFileSync(resultPath, 'utf8'),
                 'release=R1;raw=release=R1'
+            );
+        });
+    });
+
+    suite('Archive Task Pipeline', () => {
+        /**
+         * Write a fake 7z-compatible launcher that understands only the
+         * argument shapes our pipeline emits (`a <archive> <sources...>` and
+         * `x <archive> -o<destDir> -aoa`). The tool serializes a JSON manifest
+         * as the "archive" and round-trips it on extraction, so tests can
+         * assert end-to-end wiring without depending on a real 7z binary.
+         */
+        function writeFake7zLauncher(dir: string): string {
+            const jsPath = path.join(dir, 'fake7z.js');
+            fs.writeFileSync(jsPath, `const fs = require('fs');
+const path = require('path');
+const argv = process.argv.slice(2);
+const cmd = argv[0];
+try {
+    if (cmd === 'a') {
+        const archive = argv[1];
+        const sources = argv.slice(2);
+        fs.mkdirSync(path.dirname(archive), { recursive: true });
+        fs.writeFileSync(archive, JSON.stringify({ kind: 'fake7z-archive', sources: sources }));
+        process.stdout.write('archived ' + sources.length + ' sources');
+    } else if (cmd === 'x') {
+        const archive = argv[1];
+        const outArg = argv[2] || '';
+        const outDir = outArg.startsWith('-o') ? outArg.slice(2) : outArg;
+        const manifest = JSON.parse(fs.readFileSync(archive, 'utf8'));
+        fs.mkdirSync(outDir, { recursive: true });
+        fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+        process.stdout.write('extracted to ' + outDir);
+    } else {
+        process.stderr.write('unknown command: ' + cmd);
+        process.exit(2);
+    }
+} catch (e) {
+    process.stderr.write(String(e && e.message || e));
+    process.exit(3);
+}
+`);
+            if (process.platform === 'win32') {
+                const launcher = path.join(dir, 'fake7z.cmd');
+                fs.writeFileSync(launcher, `@echo off\r\nnode "${jsPath}" %*\r\n`);
+                return launcher;
+            }
+            const launcher = path.join(dir, 'fake7z.sh');
+            fs.writeFileSync(launcher, `#!/bin/sh\nexec node "${jsPath}" "$@"\n`);
+            fs.chmodSync(launcher, 0o755);
+            return launcher;
+        }
+
+        test('IT-024: zip → unzip 왕복으로 source manifest가 복원됨', async () => {
+            const launcher = writeFake7zLauncher(tempWorkspace);
+            const archivePath = path.join(tempWorkspace, 'artifacts', 'bundle.fake7z');
+            const extractDir = path.join(tempWorkspace, 'extracted');
+            const srcA = path.join(tempWorkspace, 'a.txt');
+            const srcB = path.join(tempWorkspace, 'b.txt');
+            fs.writeFileSync(srcA, 'alpha');
+            fs.writeFileSync(srcB, 'beta');
+
+            const action: PipelineAction = {
+                description: 'IT-024',
+                tasks: [
+                    {
+                        id: 'pack',
+                        type: 'zip',
+                        tool: launcher,
+                        archive: archivePath,
+                        source: [srcA, srcB]
+                    },
+                    {
+                        id: 'unpack',
+                        type: 'unzip',
+                        tool: launcher,
+                        archive: archivePath,
+                        destination: extractDir
+                    }
+                ]
+            };
+
+            await run(action);
+
+            assert.ok(fs.existsSync(archivePath), 'archive should be written');
+            const archiveJson = JSON.parse(fs.readFileSync(archivePath, 'utf8'));
+            assert.strictEqual(archiveJson.kind, 'fake7z-archive');
+            assert.deepStrictEqual(archiveJson.sources, [srcA, srcB]);
+
+            const manifestPath = path.join(extractDir, 'manifest.json');
+            assert.ok(fs.existsSync(manifestPath), 'manifest should be extracted');
+            const extracted = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            assert.deepStrictEqual(extracted.sources, [srcA, srcB]);
+        });
+
+        test('IT-025: zip 태스크가 tool 없이 실행되면 에러', async () => {
+            const action: PipelineAction = {
+                description: 'IT-025',
+                tasks: [
+                    {
+                        id: 'pack',
+                        type: 'zip',
+                        archive: path.join(tempWorkspace, 'nope.zip'),
+                        source: [path.join(tempWorkspace, 'missing.txt')]
+                    }
+                ]
+            };
+
+            await assert.rejects(
+                () => run(action),
+                /No tool path specified/
+            );
+        });
+    });
+
+    suite('Terminal Output Mode', () => {
+        test('IT-026: terminal mode는 터미널을 만들고 같은 actionId에서 재사용', async () => {
+            const originalCreateTerminal = vscode.window.createTerminal;
+            let createCount = 0;
+            const capturedText: string[] = [];
+            const fakeTerminal = {
+                name: 'fake',
+                exitStatus: undefined,
+                show: () => { /* no-op */ },
+                sendText: (text: string) => { capturedText.push(text); },
+                dispose: () => { /* no-op */ }
+            } as unknown as vscode.Terminal;
+            (vscode.window as any).createTerminal = (..._args: any[]) => {
+                createCount += 1;
+                return fakeTerminal;
+            };
+            // Unique id keeps us isolated from the module-level actionTerminals cache.
+            const actionId = `it026-${process.pid}-${Date.now()}`;
+            try {
+                const action: PipelineAction = {
+                    description: 'IT-026',
+                    tasks: [
+                        {
+                            id: 'seed',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'release=R9',
+                            passTheResultToNextTask: true,
+                            output: { capture: { name: 'release', regex: 'release=(\\S+)' } }
+                        },
+                        {
+                            id: 'firstPrint',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'raw-one',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'terminal', content: 'release=${seed.release}' }
+                        },
+                        {
+                            id: 'secondPrint',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'raw-two',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'terminal', content: 'again=${seed.release}' }
+                        }
+                    ]
+                };
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                await executeActionPipeline(
+                    action,
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    actionId,
+                    tempWorkspace,
+                    [tempWorkspace]
+                );
+
+                assert.strictEqual(createCount, 1, 'terminal should be created once and reused');
+                // Each terminal output writes a header line followed by the content line.
+                assert.strictEqual(capturedText.length, 4);
+                assert.ok(capturedText[0].includes('firstPrint'));
+                assert.strictEqual(capturedText[1], 'release=R9');
+                assert.ok(capturedText[2].includes('secondPrint'));
+                assert.strictEqual(capturedText[3], 'again=R9');
+            } finally {
+                (vscode.window as any).createTerminal = originalCreateTerminal;
+            }
+        });
+    });
+
+    suite('Action Lifecycle Messaging', () => {
+        function makeFakeContext(): vscode.ExtensionContext {
+            const workspaceState = new Map<string, unknown>();
+            return {
+                extensionPath: path.resolve(__dirname, '..', '..'),
+                subscriptions: [],
+                workspaceState: {
+                    get: <T>(key: string, def?: T) =>
+                        workspaceState.has(key) ? (workspaceState.get(key) as T) : def,
+                    update: (key: string, val: unknown) => {
+                        workspaceState.set(key, val);
+                        return Promise.resolve();
+                    },
+                    keys: () => Array.from(workspaceState.keys())
+                },
+                globalState: {
+                    get: <T>(_k: string, d?: T) => d,
+                    update: () => Promise.resolve(),
+                    keys: () => [],
+                    setKeysForSync: () => { /* no-op */ }
+                },
+                extensionMode: vscode.ExtensionMode.Test,
+                extension: { packageJSON: { version: '9.9.9-test' } }
+            } as unknown as vscode.ExtensionContext;
+        }
+
+        test('IT-027: 성공 경로에서 successMessage와 history success 기록', async () => {
+            const originalShowInfo = vscode.window.showInformationMessage;
+            const shownInfo: string[] = [];
+            (vscode.window as any).showInformationMessage = async (msg: string) => {
+                shownInfo.push(msg);
+                return undefined;
+            };
+            try {
+                const context = makeFakeContext();
+                const actionItem: ActionItem = {
+                    id: 'it027',
+                    title: 'IT-027 Lifecycle Success',
+                    action: {
+                        description: 'IT-027',
+                        successMessage: 'Build completed',
+                        tasks: [
+                            {
+                                id: 'stamp',
+                                type: 'stringManipulation',
+                                function: 'trim',
+                                input: 'done'
+                            }
+                        ]
+                    }
+                };
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                await executeAction(actionItem, context, mainView, history);
+
+                assert.ok(
+                    shownInfo.includes('Build completed'),
+                    `expected 'Build completed' among ${JSON.stringify(shownInfo)}`
+                );
+                const entries: HistoryEntry[] = history.getHistory();
+                assert.strictEqual(entries.length, 1);
+                assert.strictEqual(entries[0].actionId, 'it027');
+                assert.strictEqual(entries[0].status, 'success');
+                assert.strictEqual(actionStates.get('it027')?.state, 'success');
+            } finally {
+                (vscode.window as any).showInformationMessage = originalShowInfo;
+            }
+        });
+
+        test('IT-028: 실패 경로에서 failMessage와 history failure 기록', async () => {
+            const originalShowError = vscode.window.showErrorMessage;
+            const shownErrors: string[] = [];
+            (vscode.window as any).showErrorMessage = async (msg: string) => {
+                shownErrors.push(msg);
+                return undefined;
+            };
+            try {
+                const context = makeFakeContext();
+                const actionItem: ActionItem = {
+                    id: 'it028',
+                    title: 'IT-028 Lifecycle Failure',
+                    action: {
+                        description: 'IT-028',
+                        failMessage: 'Build broken',
+                        tasks: [
+                            {
+                                id: 'boom',
+                                type: 'stringManipulation',
+                                function: 'trim',
+                                input: 'x',
+                                passTheResultToNextTask: true,
+                                output: {
+                                    capture: { name: 'v', regex: '(' }
+                                }
+                            }
+                        ]
+                    }
+                };
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                await assert.rejects(
+                    () => executeAction(actionItem, context, mainView, history),
+                    /capture failed/
+                );
+
+                assert.ok(
+                    shownErrors.some(m => m.startsWith('Build broken: ')),
+                    `expected failMessage formatted error among ${JSON.stringify(shownErrors)}`
+                );
+                const entries: HistoryEntry[] = history.getHistory();
+                assert.strictEqual(entries.length, 1);
+                assert.strictEqual(entries[0].actionId, 'it028');
+                assert.strictEqual(entries[0].status, 'failure');
+                assert.ok(
+                    typeof entries[0].output === 'string' && entries[0].output.includes('capture failed'),
+                    `history output should include capture failure, got: ${entries[0].output}`
+                );
+                assert.strictEqual(actionStates.get('it028')?.state, 'failure');
+            } finally {
+                (vscode.window as any).showErrorMessage = originalShowError;
+            }
+        });
+    });
+
+    suite('Task Output Flow', () => {
+        test('IT-029: passTheResultToNextTask=false는 downstream에서 output을 보이지 않음', async () => {
+            const resultPath = path.join(tempWorkspace, 'it029.txt');
+            const action: PipelineAction = {
+                description: 'IT-029',
+                tasks: [
+                    {
+                        id: 'silent',
+                        type: 'shell',
+                        command: echoOneLine('released=R42'),
+                        passTheResultToNextTask: false
+                    },
+                    {
+                        id: 'probe',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'got=${silent.output};raw=${silent.raw}',
+                        passTheResultToNextTask: true,
+                        output: { mode: 'file', filePath: resultPath, overwrite: true }
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(
+                fs.readFileSync(resultPath, 'utf8'),
+                'got=${silent.output};raw=${silent.raw}'
+            );
+        });
+
+        test('IT-030: stringManipulation 경로 연산 전체 체인', async () => {
+            const resultPath = path.join(tempWorkspace, 'it030.txt');
+            const input = '/tmp/project/assets/logo.final.png';
+            const action: PipelineAction = {
+                description: 'IT-030',
+                tasks: [
+                    {
+                        id: 'base',
+                        type: 'stringManipulation',
+                        function: 'basename',
+                        input,
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'stem',
+                        type: 'stringManipulation',
+                        function: 'basenameWithoutExtension',
+                        input: '${base.output}',
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'stripped',
+                        type: 'stringManipulation',
+                        function: 'stripExtension',
+                        input,
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'dir',
+                        type: 'stringManipulation',
+                        function: 'dirname',
+                        input,
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'ext',
+                        type: 'stringManipulation',
+                        function: 'extension',
+                        input,
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'write',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: [
+                            'base=${base.output}',
+                            'stem=${stem.output}',
+                            'stripped=${stripped.output}',
+                            'dir=${dir.output}',
+                            'ext=${ext.output}'
+                        ].join('\n'),
+                        passTheResultToNextTask: true,
+                        output: { mode: 'file', filePath: resultPath, overwrite: true }
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(
+                fs.readFileSync(resultPath, 'utf8'),
+                [
+                    'base=logo.final.png',
+                    'stem=logo.final',
+                    'stripped=/tmp/project/assets/logo.final',
+                    'dir=/tmp/project/assets',
+                    'ext=png'
+                ].join('\n')
+            );
+        });
+    });
+
+    suite('Pipeline Error Handling', () => {
+        test('IT-031: 지원하지 않는 task type은 실행 시 에러', async () => {
+            const action = {
+                description: 'IT-031',
+                tasks: [
+                    {
+                        id: 'bogus',
+                        type: 'nonexistent-type'
+                    }
+                ]
+            } as unknown as PipelineAction;
+            await assert.rejects(
+                () => run(action),
+                /Unsupported task type: nonexistent-type/
+            );
+        });
+
+        test('IT-032: shell task에 command가 없으면 실행 시 에러', async () => {
+            const action = {
+                description: 'IT-032',
+                tasks: [
+                    {
+                        id: 'missing',
+                        type: 'shell'
+                    }
+                ]
+            } as unknown as PipelineAction;
+            await assert.rejects(
+                () => run(action),
+                /Task missing of type 'shell' requires a 'command'/
             );
         });
     });

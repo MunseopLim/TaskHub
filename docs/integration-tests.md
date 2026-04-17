@@ -72,6 +72,45 @@
 | IT-022 | FavoriteViewProvider workspace JSON lazy load | `.vscode/favorites.json` 로딩, line/tags normalization, workspaceFolder/sourceFile 보존, view title 갱신 |
 | IT-023 | MainViewProvider TreeItem 구성 | version/folder/separator/action TreeItem 구성, folder expanded state, action run-state icon/context 반영 |
 
+### Archive Task Pipeline
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-024 | zip → unzip 왕복 | `zip` 태스크가 tool 호출로 archive를 만들고, 다음 `unzip` 태스크가 같은 archive를 풀어 source 정보가 복원됨 |
+| IT-025 | zip 태스크의 tool 미지정 에러 | `tool` 없이 실행하면 `getToolCommand`의 "No tool path specified" 에러로 즉시 중단 |
+
+### Terminal Output Mode
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-026 | terminal mode 터미널 생성·재사용 | `output.mode: "terminal"`이 첫 호출에서 터미널을 만들고 같은 actionId의 다음 호출에선 재사용 + header/content 2라인 씩 기록 |
+
+### Action Lifecycle Messaging
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-027 | 성공 경로의 successMessage + history | `executeAction` 성공 후 `successMessage`가 `showInformationMessage`로 표시되고, HistoryProvider 기록이 running → success로 갱신 |
+| IT-028 | 실패 경로의 failMessage + history | 태스크 실패 후 `failMessage: <error>` 포맷이 `showErrorMessage`로 표시되고, HistoryProvider에 failure + output 메시지가 남음 |
+
+### Task Output Flow
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-029 | passTheResultToNextTask=false | 결과 전달이 꺼진 task의 `${task.output}`/`${task.*}`는 downstream에서 interpolation되지 않고 `${...}` 리터럴로 남음 |
+| IT-030 | stringManipulation 경로 연산 체인 | `basename`/`basenameWithoutExtension`/`stripExtension`/`dirname`/`extension` 다섯 연산이 한 파이프라인에서 교차 사용됨 |
+
+### Pipeline Error Handling
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-031 | 지원하지 않는 task type | `executeSingleTask` 기본 분기의 `Unsupported task type: <type>` 에러 |
+| IT-032 | shell 태스크 command 누락 | `command` 없이 `shell` 태스크 실행 시 `Task <id> of type 'shell' requires a 'command' property.` 에러 |
+
 ## 상세
 
 각 시나리오의 세부 태스크 구성·기대값은 테스트 파일의 주석과 `assert` 문을 정본으로 삼습니다. 이 문서는 의도·커버리지 맵이며, 구현 디테일은 코드에 둡니다.
@@ -167,6 +206,42 @@ confirm task에서 취소 라벨이 선택되면 pipeline이 reject되고 다음
 ### IT-023: MainViewProvider TreeItem 구성
 
 `loadActions` callback이 반환한 mixed action tree를 실제 `MainViewProvider`에 넣습니다. version item, expanded folder, separator, action item이 올바르게 만들어지고, `actionStates`에 저장된 success 상태가 action icon/contextValue로 반영되는지 확인합니다.
+
+### IT-024: zip → unzip 왕복으로 source manifest가 복원됨
+
+`getToolCommand`가 사용자 지정 tool을 실행하는지와 `handleZip`/`handleUnzip`이 같은 tool에 정해진 인자 셰이프(`a <archive> <src...>` / `x <archive> -o<destDir> -aoa`)로 호출하는지를 확인합니다. 테스트는 외부 7z 바이너리에 의존하지 않도록 node 기반의 가짜 tool (`fake7z.sh` 또는 `fake7z.cmd`)을 임시 workspace에 만들어 archive 자리에 JSON manifest를 기록하고, `unzip` 호출 시 같은 manifest를 꺼내 놓도록 합니다. 테스트는 archive 파일과 풀린 manifest 양쪽의 `sources` 배열이 원본 입력과 일치하는지 검증합니다.
+
+### IT-025: zip 태스크의 tool 미지정은 실행 시 에러
+
+`tool`을 아예 지정하지 않고 `zip` 태스크를 실행하면 `getToolCommand`가 첫 단계에서 `No tool path specified for the current platform (...)` 에러를 던지고 파이프라인이 즉시 중단되어야 합니다. archive 파일 경로·source 목록 같은 다른 검증보다 tool 해석이 먼저 수행된다는 현재 실행 순서를 고정합니다.
+
+### IT-026: terminal mode는 터미널을 만들고 같은 actionId에서 재사용
+
+`output.mode: "terminal"`은 내부 `actionTerminals` 캐시를 키로 사용하므로, 같은 actionId에서 연속 실행될 때 터미널이 한 번만 생성되고 이후에는 캐시된 인스턴스가 재사용되어야 합니다. 테스트에서는 `vscode.window.createTerminal`을 stub 처리하여 생성 횟수와 `sendText`에 전달된 header/content 2라인이 각 터미널 출력마다 정확한 순서로 기록되는지, 그리고 `output.content`가 upstream capture 결과와 올바르게 결합되는지 확인합니다. 테스트 간 캐시 간섭을 피하기 위해 actionId에는 pid·timestamp를 섞어 고유하게 만듭니다.
+
+### IT-027: 성공 경로에서 successMessage와 history 기록
+
+`executeAction`은 내부적으로 `executeActionPipeline`을 호출하고, 성공하면 `handleActionSuccess`가 `action.successMessage`를 `showInformationMessage`로 표시하고 `actionStates`를 `success`로 갱신하며, `HistoryProvider.updateHistoryStatus`로 history entry를 running → success로 이동시킵니다. 이 시나리오는 이 세 가지 부작용이 한 번의 실행에서 모두 일관되게 발생하는지를 고정합니다.
+
+### IT-028: 실패 경로에서 failMessage와 history failure 기록
+
+잘못된 capture regex로 실행 시점에 에러를 유도한 뒤, `handleActionFailure`가 `${failMessage}: ${error.message}` 포맷으로 `showErrorMessage`를 호출하고, `actionStates`가 `failure`로 바뀌며, history entry의 `status`가 `failure`·`output`에 원본 에러가 포함되는지 검증합니다. 에러 자체는 재던져지므로 호출자가 `assert.rejects`로 잡을 수 있어야 합니다.
+
+### IT-029: passTheResultToNextTask=false는 downstream output 접근을 차단
+
+`passTheResultToNextTask`를 끈 shell 태스크는 결과가 `{}`로 저장되어, downstream의 `${silent.output}` 같은 interpolation이 일치하는 키를 못 찾고 `${...}` 리터럴 그대로 남습니다. 이는 `interpolatePipelineVariables`가 미매칭 시 원본 `match`를 반환하는 현재 동작을 테스트에서 고정합니다. capture까지 같이 끊기는 이유(`result.output`이 없으므로 스킵)는 코드 주석 및 IT-005 설명을 참조합니다.
+
+### IT-030: stringManipulation 경로 연산 전체 체인
+
+`basename`/`basenameWithoutExtension`/`stripExtension`/`dirname`/`extension` 다섯 경로 함수가 한 파이프라인에서 서로의 결과나 같은 원본을 입력으로 받아 동작하는 것을 end-to-end로 고정합니다. 특히 `basenameWithoutExtension`은 확장자를 **마지막 `.`만** 제거한다는 점 (`logo.final.png` → `logo.final`) 과, `stripExtension`이 전체 경로를 보존한 채 확장자만 떼어낸다는 차이가 드러나도록 입력을 구성했습니다.
+
+### IT-031: 지원하지 않는 task type은 실행 시 에러
+
+알려지지 않은 `type` 문자열은 `executeSingleTask`의 `switch` 기본 분기에서 `Unsupported task type: <type>` 에러로 즉시 실패합니다. 스키마 validator를 우회해 실행기에 닿는 경로를 가정하므로 테스트에선 `PipelineAction`으로 강제 캐스팅합니다.
+
+### IT-032: shell 태스크의 command 누락은 실행 시 에러
+
+`command`가 없는 `shell` 태스크는 `executeSingleTask`가 interpolation 단계를 통과시키되 `!command` 검사에서 `Task <id> of type 'shell' requires a 'command' property.` 에러를 던집니다. 필수 필드 누락이 파이프라인 어느 지점에서 잡히는지 현재 동작을 고정합니다.
 
 ## 시나리오 추가 절차
 

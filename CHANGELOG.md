@@ -1,5 +1,26 @@
 # Change Log
 
+## [0.4.3] - 2026-04-17
+
+### 테스트 — Integration Test 시나리오 확장 (Archive / Terminal / Lifecycle / Error)
+
+- [docs/integration-tests.md](docs/integration-tests.md)의 시나리오 인덱스를 확장해 `Archive Task Pipeline`, `Terminal Output Mode`, `Action Lifecycle Messaging`, `Task Output Flow`, `Pipeline Error Handling` 그룹을 추가.
+- [src/test/pipelineIntegration.test.ts](src/test/pipelineIntegration.test.ts)에 IT-024~IT-032 시나리오 추가:
+  - `zip` → `unzip` 왕복에서 tool 호출 인자 셰이프가 실제로 동작하는지 node 기반 가짜 7z launcher로 검증하고, `tool` 누락 시 즉시 에러 나는 경로도 고정.
+  - `output.mode: "terminal"`이 같은 actionId에서 터미널을 재사용하고 header/content 2라인을 순서대로 기록하는지 `createTerminal` stub으로 검증.
+  - `executeAction`의 성공/실패 경로에서 `successMessage` / `failMessage` 표시, `actionStates` 전이, `HistoryProvider` entry running → success/failure 갱신이 한 실행에서 같이 동작하는지 검증 (이 목적을 위해 `executeAction`을 export).
+  - `passTheResultToNextTask: false`일 때 downstream interpolation에서 `${task.output}`가 리터럴로 남는 현재 동작을 고정.
+  - `basename`/`basenameWithoutExtension`/`stripExtension`/`dirname`/`extension` 다섯 `stringManipulation` 경로 함수가 한 파이프라인에서 교차 사용되는지 end-to-end 검증.
+  - 지원하지 않는 task type, `shell`의 `command` 누락 같은 설정 에러가 실행 시 어떤 메시지로 중단되는지 고정.
+
+### 내부
+
+- `src/extension.ts`의 `executeAction`을 export로 변경 — lifecycle/메시지/history 통합 테스트에서 단일 진입점으로 직접 호출 가능.
+
+### 테스트
+
+- 전체 **763개 테스트 통과**.
+
 ## [0.4.1] - 2026-04-17
 
 ### 테스트 — Integration Test 시나리오 확장

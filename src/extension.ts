@@ -1417,7 +1417,7 @@ function finalizeActionRun(id: string, showTaskStatus: boolean, mainViewProvider
     }
 }
 
-async function executeAction(actionItem: ActionItem, context: vscode.ExtensionContext, mainViewProvider: MainViewProvider, historyProvider?: HistoryProvider) {
+export async function executeAction(actionItem: ActionItem, context: vscode.ExtensionContext, mainViewProvider: MainViewProvider, historyProvider?: HistoryProvider) {
     const resolved = resolveActionDefinition(actionItem);
     if (!resolved) {
         return;
