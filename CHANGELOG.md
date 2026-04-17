@@ -1,5 +1,18 @@
 # Change Log
 
+## [0.3.20] - 2026-04-17
+
+### Changed
+
+**`extension.ts` 모듈 분리 2단계 — FavoriteViewProvider 추출**
+- 신규 모듈 [src/providers/favoriteViewProvider.ts](src/providers/favoriteViewProvider.ts) 추가. `FavoriteViewProvider`, `FavoriteGroup`, `Favorite`, `FavoriteEntry`, `FavoriteTreeNode`, `loadFavoritesFromDisk`를 이동.
+- `extension.ts`는 위 심볼들을 re-export하므로 기존 `import { ... } from './extension'` 호출부는 변경 없이 동작.
+- `extension.ts` 크기 3,567줄 → 3,376줄 (-191줄).
+
+### 테스트
+
+- 전체 **684개 테스트 통과**.
+
 ## [0.3.19] - 2026-04-17
 
 ### Changed
