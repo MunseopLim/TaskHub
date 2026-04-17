@@ -252,8 +252,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     }
 
     /**
-     * Extract enum value with support for implicit values
-     * Handles: enum { A, B, C = 5, D }  where A=0, B=1, C=5, D=6
+     * Extract enum value with support for implicit values and identifier references
+     * Handles: enum { A, B, C = 5, D, E = C, F = C - 1 }  → A=0, B=1, C=5, D=6, E=5, F=4
      */
     private async extractEnumValue(
         document: vscode.TextDocument,
@@ -262,10 +262,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     ): Promise<number | null> {
         let currentValue = 0;
         let inEnumBody = false;
+        const resolvedValues = new Map<string, number>();
 
         for (let i = startLine; i < document.lineCount; i++) {
             const line = document.lineAt(i);
-            const text = line.text.trim();
+            const rawText = line.text;
+            const text = this.stripInlineComments(rawText).trim();
 
             // Start of enum body
             if (!inEnumBody && text.includes('{')) {
@@ -286,34 +288,106 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             const entries = text.split(',').map(e => e.trim()).filter(e => e.length > 0);
 
             for (const entry of entries) {
-                // Check if this entry has an explicit value: NAME = VALUE
-                const assignMatch = entry.match(/^\s*(\w+)\s*=\s*([0-9a-fA-FxXbB']+)/);
-                if (assignMatch) {
-                    const name = assignMatch[1];
-                    const value = this.parseNumber(assignMatch[2]);
-
-                    if (name === symbolName && value !== null) {
-                        return value;
-                    }
-
-                    if (value !== null) {
-                        currentValue = value + 1;  // Next implicit value
-                    }
-                } else {
-                    // No explicit value, use currentValue
-                    const nameMatch = entry.match(/^\s*(\w+)/);
+                const eqIdx = entry.indexOf('=');
+                if (eqIdx > 0) {
+                    // Explicit assignment: NAME = EXPR
+                    const namePart = entry.substring(0, eqIdx).trim();
+                    const exprPart = entry.substring(eqIdx + 1).trim();
+                    const nameMatch = namePart.match(/^(\w+)$/);
                     if (nameMatch) {
                         const name = nameMatch[1];
-                        if (name === symbolName) {
-                            return currentValue;
+                        const value = this.evaluateEnumExpression(exprPart, resolvedValues);
+                        if (value !== null) {
+                            resolvedValues.set(name, value);
+                            currentValue = value + 1;
                         }
-                        currentValue++;  // Next implicit value
+                        if (name === symbolName) {
+                            return value;
+                        }
+                        continue;
                     }
+                }
+
+                // Implicit value: NAME
+                const nameMatch = entry.match(/^(\w+)/);
+                if (nameMatch) {
+                    const name = nameMatch[1];
+                    resolvedValues.set(name, currentValue);
+                    if (name === symbolName) {
+                        return currentValue;
+                    }
+                    currentValue++;
                 }
             }
         }
 
         return null;
+    }
+
+    /**
+     * Evaluate the RHS of an enum assignment.
+     * Supports numeric literals, identifier references to earlier enum members,
+     * and simple binary expressions (A op B) over + - * / | & ^ << >>.
+     */
+    private evaluateEnumExpression(
+        expr: string,
+        resolvedValues: Map<string, number>
+    ): number | null {
+        const trimmed = expr.trim();
+        if (trimmed.length === 0) {
+            return null;
+        }
+
+        // Strip a single enclosing pair of parentheses
+        if (trimmed.startsWith('(') && trimmed.endsWith(')')) {
+            return this.evaluateEnumExpression(trimmed.slice(1, -1), resolvedValues);
+        }
+
+        // Numeric literal (must be the entire token, not a prefix of a larger expression)
+        if (/^(0[xX][0-9a-fA-F']+|0[bB][01']+|[0-9a-fA-F][0-9a-fA-F']*[hH]|\d[\d']*)$/.test(trimmed)) {
+            const numValue = this.parseNumber(trimmed);
+            if (numValue !== null) {
+                return numValue;
+            }
+        }
+
+        // Bare identifier lookup
+        if (/^[A-Za-z_]\w*$/.test(trimmed)) {
+            const resolved = resolvedValues.get(trimmed);
+            return resolved !== undefined ? resolved : null;
+        }
+
+        // Simple binary arithmetic: A op B
+        const binaryMatch = trimmed.match(/^([\w']+)\s*(<<|>>|[+\-*\/|&^])\s*([\w']+)$/);
+        if (binaryMatch) {
+            const left = this.evaluateEnumExpression(binaryMatch[1], resolvedValues);
+            const right = this.evaluateEnumExpression(binaryMatch[3], resolvedValues);
+            if (left !== null && right !== null) {
+                switch (binaryMatch[2]) {
+                    case '+': return left + right;
+                    case '-': return left - right;
+                    case '*': return left * right;
+                    case '/': return right !== 0 ? Math.trunc(left / right) : null;
+                    case '|': return left | right;
+                    case '&': return left & right;
+                    case '^': return left ^ right;
+                    case '<<': return left << right;
+                    case '>>': return left >> right;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Strip inline line comments and single-line block comments from a line.
+     * Does not handle multi-line block comments.
+     */
+    private stripInlineComments(text: string): string {
+        return text
+            .replace(/\/\*.*?\*\//g, '')
+            .replace(/\/\/.*$/, '');
     }
 
     /**

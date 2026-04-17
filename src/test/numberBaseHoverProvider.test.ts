@@ -195,6 +195,144 @@ suite('NumberBaseHoverProvider Test Suite', () => {
         });
     });
 
+    suite('Enum Expression Evaluation Tests', () => {
+        test('Numeric literal', () => {
+            const map = new Map<string, number>();
+            const result = (provider as any).evaluateEnumExpression('42', map);
+            assert.strictEqual(result, 42);
+        });
+
+        test('Hex literal', () => {
+            const map = new Map<string, number>();
+            const result = (provider as any).evaluateEnumExpression('0xFF', map);
+            assert.strictEqual(result, 255);
+        });
+
+        test('Identifier reference resolves from map', () => {
+            const map = new Map<string, number>([['MAX', 290]]);
+            const result = (provider as any).evaluateEnumExpression('MAX', map);
+            assert.strictEqual(result, 290);
+        });
+
+        test('Identifier reference returns null when unresolved', () => {
+            const map = new Map<string, number>();
+            const result = (provider as any).evaluateEnumExpression('UNKNOWN', map);
+            assert.strictEqual(result, null);
+        });
+
+        test('Binary subtraction with identifier', () => {
+            const map = new Map<string, number>([['MAX', 290]]);
+            const result = (provider as any).evaluateEnumExpression('MAX - 1', map);
+            assert.strictEqual(result, 289);
+        });
+
+        test('Binary addition with identifier', () => {
+            const map = new Map<string, number>([['BASE', 10]]);
+            const result = (provider as any).evaluateEnumExpression('BASE + 5', map);
+            assert.strictEqual(result, 15);
+        });
+
+        test('Bitwise shift left', () => {
+            const map = new Map<string, number>();
+            const result = (provider as any).evaluateEnumExpression('1 << 4', map);
+            assert.strictEqual(result, 16);
+        });
+
+        test('Parenthesized expression', () => {
+            const map = new Map<string, number>([['X', 5]]);
+            const result = (provider as any).evaluateEnumExpression('(X + 3)', map);
+            assert.strictEqual(result, 8);
+        });
+    });
+
+    suite('Enum Value Extraction Tests', () => {
+        function makeDoc(lines: string[]): vscode.TextDocument {
+            return {
+                lineCount: lines.length,
+                lineAt: (i: number) => ({ text: lines[i] })
+            } as any as vscode.TextDocument;
+        }
+
+        test('Implicit values with first = 0', async () => {
+            const doc = makeDoc([
+                'enum Test',
+                '{',
+                '    A = 0,',
+                '    B,',
+                '    C,',
+                '};'
+            ]);
+            const result = await (provider as any).extractEnumValue(doc, 0, 'C');
+            assert.strictEqual(result, 2);
+        });
+
+        test('Handles 200+ implicit entries', async () => {
+            const lines = ['enum Big', '{', 'E_0 = 0,'];
+            for (let i = 1; i <= 250; i++) {
+                lines.push(`E_${i},`);
+            }
+            lines.push('};');
+            const doc = makeDoc(lines);
+            const result = await (provider as any).extractEnumValue(doc, 0, 'E_200');
+            assert.strictEqual(result, 200);
+        });
+
+        test('Identifier assignment: NAME = OTHER', async () => {
+            const doc = makeDoc([
+                'enum Test',
+                '{',
+                '    Test_0 = 0,',
+                '    Test_Max,',
+                '    Test_Invalid = Test_Max,',
+                '};'
+            ]);
+            const result = await (provider as any).extractEnumValue(doc, 0, 'Test_Invalid');
+            assert.strictEqual(result, 1);
+        });
+
+        test('Expression assignment: NAME = OTHER - 1', async () => {
+            const doc = makeDoc([
+                'enum Test',
+                '{',
+                '    Test_0 = 0,',
+                '    Test_A,',
+                '    Test_Max,',
+                '    Test_Dummy = Test_Max - 1,',
+                '};'
+            ]);
+            const result = await (provider as any).extractEnumValue(doc, 0, 'Test_Dummy');
+            assert.strictEqual(result, 1);
+        });
+
+        test('Inline line comment is ignored', async () => {
+            const doc = makeDoc([
+                'enum Test',
+                '{',
+                '    Test_0 = 0, // start',
+                '    Test_Max,   // 290th',
+                '    Test_Invalid = Test_Max, // alias',
+                '};'
+            ]);
+            const result = await (provider as any).extractEnumValue(doc, 0, 'Test_Invalid');
+            assert.strictEqual(result, 1);
+        });
+
+        test('Implicit value after explicit identifier assignment increments properly', async () => {
+            const doc = makeDoc([
+                'enum Test',
+                '{',
+                '    A = 10,',
+                '    B = A,',
+                '    C,',
+                '};'
+            ]);
+            const resultB = await (provider as any).extractEnumValue(doc, 0, 'B');
+            const resultC = await (provider as any).extractEnumValue(doc, 0, 'C');
+            assert.strictEqual(resultB, 10);
+            assert.strictEqual(resultC, 11);
+        });
+    });
+
     suite('SFR Bit Field Hover Tests', () => {
         test('Generate hover content for single bit field', () => {
             const bitFieldInfo: CompleteBitFieldInfo = {

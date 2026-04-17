@@ -1,5 +1,16 @@
 # Change Log
 
+## [0.3.11] - 2026-04-17
+
+### Fixed
+
+**Number Base Hover: enum 식별자/수식 기반 할당 해석 추가**
+- `NAME = OTHER` 형태 식별자 참조 할당 지원 (예: `Test_Invalid = Test_Max`)
+- `NAME = OTHER - 1`, `NAME = BASE + 5`, `NAME = 1 << 4` 등 단순 이항 수식 지원 (`+ - * / | & ^ << >>`)
+- 괄호 `( EXPR )` 1단계 지원
+- 라인 내 `// ...` 및 단일 라인 `/* ... */` 주석 제거하여 파싱 안정성 향상
+- 이전 버전에서는 식별자 RHS가 매치되지 않아 `Test_Invalid`, `Test_Dummy` 같은 항목이 `<error-constant>` 로 표시되던 문제 해결
+
 ## [0.3.10] - 2026-04-17
 
 ### Fixed
