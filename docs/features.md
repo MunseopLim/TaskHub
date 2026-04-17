@@ -52,6 +52,15 @@
     *   즐겨찾기 패널은 워크스페이스의 `.vscode/favorites.json`을 표시합니다.
     *   관련 JSON 파일이 수정, 생성 또는 삭제되면 해당 뷰는 자동으로 새로 고쳐집니다.
 
+### JSON Editor 커맨드
+
+Command Palette에서 `taskhub json`을 검색하면 두 개의 JSON Editor 커맨드가 표시됩니다. 용도가 다르므로 상황에 맞게 선택하세요.
+
+| 커맨드 | 동작 | 사용 시점 |
+| --- | --- | --- |
+| **TaskHub: Open JSON Editor** (`taskhub.openJsonEditor`) | 파일 선택 대화상자를 띄워 임의의 JSON 파일을 고른 뒤 JSON Editor로 엽니다. 활성 에디터와 무관하게 항상 동일하게 동작합니다. | Command Palette에서 임의의 JSON 파일을 바로 열고 싶을 때 |
+| **TaskHub: Open with JSON Editor** (`taskhub.openJsonEditorFromUri`) | URI 인자를 받는 컨텍스트 커맨드입니다. 에디터/탐색기/SCM 컨텍스트 메뉴의 *Open with JSON Editor* 항목에서 대상 파일을 전달받아 엽니다. Command Palette에서 인자 없이 실행하면 현재 활성 에디터가 `.json` 파일일 때 그 파일을 열고, 그 외에는 *Open JSON Editor* 동작으로 폴백해 파일 선택 대화상자를 띄웁니다. | `.json` 파일을 연 상태에서 빠르게 JSON Editor로 전환하거나, 탐색기/에디터 우클릭 메뉴에서 호출할 때 |
+
 ## 4. 링크 패널 (Built-in / Workspace)
 
 이제 링크는 두 개의 별도 패널로 나뉩니다.
