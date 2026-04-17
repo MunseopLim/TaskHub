@@ -1,5 +1,19 @@
 # Change Log
 
+## [0.3.21] - 2026-04-17
+
+### Changed
+
+**`extension.ts` 모듈 분리 2단계 — HistoryProvider 추출 (완료)**
+- 신규 모듈 [src/providers/historyProvider.ts](src/providers/historyProvider.ts) 추가. `HistoryProvider`, `HistoryItem`, `HistoryEntry`를 이동.
+- `extension.ts`는 위 심볼들을 re-export하므로 기존 `import { ... } from './extension'` 호출부는 변경 없이 동작.
+- `extension.ts` 크기 3,376줄 → 3,262줄 (-114줄).
+- 2단계 전체 결과: `extension.ts` 3,809줄 → 3,262줄 (-547줄 / -14.4%). 4개의 TreeDataProvider 및 관련 유틸리티가 [src/providers/](src/providers/) 하위로 이동.
+
+### 테스트
+
+- 전체 **684개 테스트 통과**.
+
 ## [0.3.20] - 2026-04-17
 
 ### Changed
