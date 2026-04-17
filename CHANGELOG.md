@@ -1,5 +1,15 @@
 # Change Log
 
+## [0.3.16] - 2026-04-17
+
+### Improved
+
+**Hover 경로에서 동기 파일 IO 제거**
+- `NumberBaseHoverProvider.loadTypeConfig`가 `fs.statSync`/`fs.readFileSync`/`fs.realpathSync`에서 `fs.promises.*` 비동기 API로 전환.
+- `tryStructSizeInfo`가 `async`로 승격되고 `provideHoverImpl`에서 `await`로 호출.
+- 네트워크 드라이브/FUSE 마운트 등 느린 스토리지에서도 hover 호출이 extension host 이벤트 루프를 블로킹하지 않음.
+- LRU 캐시/`withLspTimeout`/`activeHoverCalls` 재진입 가드는 그대로 유지.
+
 ## [0.3.15] - 2026-04-17
 
 ### Improved

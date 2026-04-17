@@ -147,8 +147,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return registerHover;
         }
 
-        // Try struct size information
-        const structSizeHover = this.tryStructSizeInfo(document, position);
+        // Try struct size information (async: may read taskhub_types.json from disk)
+        const structSizeHover = await this.tryStructSizeInfo(document, position);
         if (structSizeHover) {
             return structSizeHover;
         }
@@ -1299,12 +1299,15 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     }
 
     /**
-     * Try to show struct size information when hovering over struct/class name
+     * Try to show struct size information when hovering over struct/class name.
+     *
+     * Async because `loadTypeConfig` now uses `fs.promises` to avoid blocking
+     * the extension host on slow/remote storage.
      */
-    private tryStructSizeInfo(
+    private async tryStructSizeInfo(
         document: vscode.TextDocument,
         position: vscode.Position
-    ): vscode.Hover | null {
+    ): Promise<vscode.Hover | null> {
         const line = document.lineAt(position.line);
         const lineText = line.text;
 
@@ -1354,8 +1357,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         }
 
         // Calculate struct size
-        // Load custom type configuration if available
-        const typeConfig = this.loadTypeConfig(document);
+        // Load custom type configuration if available (async fs I/O under the hood)
+        const typeConfig = await this.loadTypeConfig(document);
         const calculator = new StructSizeCalculator(typeConfig);
 
         // Register all struct/class definitions in the document
@@ -1476,11 +1479,16 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     }
 
     /**
-     * Load type configuration from .vscode/taskhub_types.json if it exists
+     * Load type configuration from .vscode/taskhub_types.json if it exists.
+     *
+     * Uses `fs.promises` to avoid blocking the extension host on slow or remote
+     * filesystems (network drives, FUSE mounts). All calls are still bounded by
+     * `withLspTimeout`/hover cancellation upstream.
+     *
      * @param document The current document to determine workspace
      * @returns TypeConfigFile or undefined if not found
      */
-    private loadTypeConfig(document: vscode.TextDocument): TypeConfigFile | undefined {
+    private async loadTypeConfig(document: vscode.TextDocument): Promise<TypeConfigFile | undefined> {
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
         if (!workspaceFolder) {
             return undefined;
@@ -1490,7 +1498,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         // Normalize path (resolve symlinks) to avoid caching duplicates for the same real file.
         let configFilePath: string;
         try {
-            configFilePath = fs.realpathSync(rawPath);
+            configFilePath = await fs.promises.realpath(rawPath);
         } catch {
             configFilePath = rawPath;
         }
@@ -1505,7 +1513,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         }
 
         try {
-            const stat = fs.statSync(configFilePath);
+            const stat = await fs.promises.stat(configFilePath);
             const mtime = stat.mtimeMs;
             if (existing && existing.mtime === mtime) {
                 this.typeConfigCache.delete(configFilePath);
@@ -1513,7 +1521,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 return existing.config;
             }
 
-            const configContent = fs.readFileSync(configFilePath, 'utf8');
+            const configContent = await fs.promises.readFile(configFilePath, 'utf8');
             const config = StructSizeCalculator.loadTypeConfig(JSON.parse(configContent));
             this.setCache(configFilePath, { mtime, config });
             return config;
