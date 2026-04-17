@@ -12,7 +12,19 @@ coverage/
 .nyc_output/
 
 # VS Code specific
+.vscode/
 .vscode-test/
+
+# JetBrains IDE local settings
+.idea/
+
+# Local assistant settings
+.claude/
+
+# Environment/local configuration
+.env
+.env.*
+!.env.example
 
 # Log files
 *.log
@@ -24,8 +36,5 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
-# User-specific VS Code settings
-.vscode/settings.json
-
-# Claude Code local settings
-.claude/settings.local.json
+# Local TaskHub action output
+test_output.txt
