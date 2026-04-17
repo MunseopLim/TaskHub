@@ -1,5 +1,20 @@
 # Change Log
 
+## [0.3.17] - 2026-04-17
+
+### Changed
+
+**`extension.ts` 순수 유틸리티 함수 분리 (1단계)**
+- 신규 모듈 [src/pipelineUtils.ts](src/pipelineUtils.ts) 추가. vscode API 의존성이 없는 13개 함수/상수를 이동:
+  `INTERPOLATED_VALUE_MAX_LENGTH`, `resolveWithinWorkspace`, `sanitizeInterpolatedValue`, `interpolatePipelineVariables`, `getCommandString`, `getToolCommand`, `tokenizeCommandLine`, `mergeCommandAndArgs`, `quotePowerShellArgument`, `buildPowerShellInvocation`, `encodePowerShellScript`, `quotePosixArgument`, `buildPosixCommandLine`.
+- `extension.ts`는 이들을 import → re-export하므로 기존 `import { ... } from '../extension'` 호출부(테스트 포함)는 변경 없이 동작.
+- `extension.ts` 크기 3,967줄 → 3,809줄 (-158줄). 모듈 분리의 첫 단계로, 남은 TreeDataProvider/task handler/command 등록 분리는 별도 PR에서 진행 예정.
+
+### 테스트
+
+- `src/test/pipelineUtils.test.ts` 신설: `../pipelineUtils`에서 직접 import하여 vscode 모듈에 대한 숨겨진 의존성이 없음을 보장하는 13개 스모크 테스트.
+- 전체 **684개 테스트 통과**.
+
 ## [0.3.16] - 2026-04-17
 
 ### Improved

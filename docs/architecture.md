@@ -11,6 +11,10 @@ TaskHub/
 │   │                                  # - activate() / deactivate()
 │   │                                  # - Provider: MainView, Link, Favorite, History
 │   │                                  # - 액션 실행: executeAction(), executeSingleTask()
+│   │                                  # - pipelineUtils의 순수 헬퍼를 re-export (기존 import 호환)
+│   ├── pipelineUtils.ts               # 순수 유틸리티 (vscode 의존 없음)
+│   │                                  # - 변수 치환/sanitize, workspace 경로 검증
+│   │                                  # - 쉘 토큰화 + POSIX/PowerShell 인자 quoting
 │   ├── i18n.ts                        # 다국어 지원 (한국어/영어, vscode.env.language 기반)
 │   ├── schema.ts                      # TypeScript 타입 정의
 │   ├── numberBaseHoverProvider.ts     # Number Base / SFR Bit Field / Struct Size Hover
@@ -24,6 +28,8 @@ TaskHub/
 │   ├── memoryMapViewer.ts             # Memory Map WebView 시각화
 │   └── test/
 │       ├── extension.test.ts              # 확장 유닛 테스트
+│       ├── pipelineUtils.test.ts           # 순수 유틸리티 모듈 독립 import 스모크 테스트
+│       ├── i18n.test.ts                    # i18n t() 헬퍼 테스트
 │       ├── numberBaseHoverProvider.test.ts # Hover 제공자 테스트
 │       ├── sfrBitFieldParser.test.ts      # SFR 파서 테스트
 │       ├── structSizeCalculator.test.ts   # 구조체 크기 계산 테스트
