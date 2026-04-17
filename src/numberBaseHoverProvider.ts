@@ -227,10 +227,9 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         // If it's an enum member, search upward for the enum declaration
         let enumDeclLine = startLine;
 
-        // Search upward for enum declaration (max 100 lines up)
+        // Search upward for enum declaration, bounded by scope boundaries
         if (!defText.includes('enum')) {
-            // Search upward for enum keyword
-            for (let i = startLine; i >= Math.max(0, startLine - 100); i--) {
+            for (let i = startLine; i >= 0; i--) {
                 const line = document.lineAt(i);
                 const text = line.text;
                 if (text.includes('enum')) {
@@ -261,22 +260,21 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         startLine: number,
         symbolName: string
     ): Promise<number | null> {
-        const maxLines = Math.min(startLine + 100, document.lineCount);
         let currentValue = 0;
         let inEnumBody = false;
 
-        for (let i = startLine; i < maxLines; i++) {
+        for (let i = startLine; i < document.lineCount; i++) {
             const line = document.lineAt(i);
             const text = line.text.trim();
 
             // Start of enum body
-            if (text.includes('{')) {
+            if (!inEnumBody && text.includes('{')) {
                 inEnumBody = true;
                 continue;
             }
 
-            // End of enum body
-            if (text.includes('};')) {
+            // End of enum body (support both `};` and bare `}`)
+            if (inEnumBody && text.includes('}')) {
                 break;
             }
 

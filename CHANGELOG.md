@@ -1,5 +1,15 @@
 # Change Log
 
+## [0.3.10] - 2026-04-17
+
+### Fixed
+
+**Number Base Hover: 대형 enum 암묵값 추출 실패 해결**
+- C/C++ IntelliSense가 90번째 근처부터 `<error-constant>` 를 반환하는 문제에 대한 TaskHub 폴백 강화
+- `extractEnumValue` 의 100줄 고정 스캔 제한 제거 → enum 본문의 닫는 `}` 까지 끝까지 스캔
+- enum 선언 상향 탐색의 100줄 제한 제거 → 스코프 경계(`}` / `};`)까지 탐색
+- 항목이 수백 개인 enum에서도 암묵값(A=0, B, C, ...) 표시 정상 동작
+
 ## [0.3.9] - 2026-04-07
 
 ### Improved
