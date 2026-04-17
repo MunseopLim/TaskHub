@@ -73,6 +73,9 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem> {
     getChildren(element?: HistoryItem): Thenable<HistoryItem[]> {
         if (!element) {
             const history = this.getHistory();
+            // Refresh the view title (count) lazily — activation no longer
+            // calls refresh(), so we update here on the first render.
+            this.updateTitle();
             return Promise.resolve(history.map(entry => new HistoryItem(entry)));
         }
         return Promise.resolve([]);

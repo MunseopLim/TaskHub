@@ -13,8 +13,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
 import { ActionItem, Action as PipelineAction } from '../schema';
 import { t } from '../i18n';
 import { actionStates } from './actionStatus';
@@ -128,11 +126,10 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
                 `Failed to load actions: ${error.message}`
             ));
         }
-        const packageJsonPath = path.join(this.context.extensionPath, 'package.json');
-        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-        const versionItem = new vscode.TreeItem(packageJson.version);
+        const version = this.context.extension.packageJSON.version;
+        const versionItem = new vscode.TreeItem(version);
         versionItem.iconPath = new vscode.ThemeIcon('info');
-        versionItem.tooltip = `Extension Version: ${packageJson.version}`;
+        versionItem.tooltip = `Extension Version: ${version}`;
         versionItem.contextValue = 'versionItem';
         versionItem.command = { command: 'taskhub.showChangelog', title: 'Show Changelog' };
         const items: (Action | Folder | vscode.TreeItem)[] = [versionItem, ...this.createActionItems(actionsJson)];

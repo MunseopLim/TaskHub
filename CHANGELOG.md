@@ -1,5 +1,59 @@
 # Change Log
 
+## [0.3.22] - 2026-04-17
+
+### 성능 — 확장 활성화(activation) 경량화
+
+이번 버전은 확장이 처음 활성화될 때 실행되는 작업을 줄여 **로딩 체감 시간을 단축**하는 데 초점을 맞췄습니다.
+
+**활성화 트리거 명시 (hover 관련 동작 이슈 해결)**
+- [package.json](package.json)에 `activationEvents`로 `onLanguage:c`, `onLanguage:cpp` 추가.
+- 기존에는 VS Code 시작 후 사용자가 **H 아이콘(사이드바)** 을 눌러 TaskHub 뷰를 연 뒤에야 확장이 활성화되어, C/C++ 파일을 열어도 **NumberBase / SFR hover가 동작하지 않는** 문제가 있었음.
+- 이제 C/C++ 파일을 여는 것만으로도 확장이 활성화되어 hover가 정상 동작함.
+
+**Ajv 스키마 검증기 모듈 레벨 캐시**
+- `actions.json` 스키마를 `Ajv.compile()`로 생성하는 비용을 **매 호출마다** 치르던 것을 제거. 첫 호출 시 한 번만 컴파일하고 재사용 ([extension.ts](src/extension.ts)).
+- 영향: `loadAllActions()`, `parseImportData()` 등 액션을 읽는 모든 경로.
+
+**`loadAllActions()` 결과 캐시 + watcher 기반 invalidation**
+- 액션 트리 렌더링·액션 실행·export 등에서 반복적으로 호출되던 `loadAllActions()`가 이제 캐시된 결과를 반환.
+- 캐시는 다음 시점에만 무효화됨:
+  - `.vscode/actions.json` 변경 (파일 watcher)
+  - `media/actions.json` 변경 (개발 모드 한정)
+  - `taskhub.preset.selected` 설정 변경
+  - 액션 생성 wizard / 프리셋 적용 / import 등 쓰기 동작 직후
+- 외부 사용을 위해 `invalidateActionsCache()`를 export.
+
+**Provider 생성자의 동기 JSON 로드 제거 + activate()의 eager refresh 제거**
+- [LinkViewProvider](src/providers/linkViewProvider.ts)·[FavoriteViewProvider](src/providers/favoriteViewProvider.ts) 생성자가 즉시 JSON을 읽던 동작을 제거.
+- 추가로 activate() 초반의 즉시 `refresh()` 4건(링크·즐겨찾기·히스토리·내장 링크)을 제거하여, **사이드바를 한 번도 열지 않는 경우 JSON을 전혀 읽지 않도록** 함. 이로써 `onLanguage:c` / `onLanguage:cpp` 활성화 경로가 실제로 경량화됨.
+- 각 Provider에 `loaded: boolean` 플래그를 도입. `ensureCache()`가 "빈 배열 = 미로드"로 착각해 매번 재읽기하던 미묘한 버그도 함께 해결.
+- 첫 `getChildren()` 호출 시점에 `updateTitle()`도 수행하여, 사이드바를 열었을 때 뷰 타이틀 카운트가 즉시 표시됨.
+
+**프리셋 저장 후 액션 캐시 무효화 누락 수정**
+- `taskhub.saveAsPreset` 커맨드가 파일을 덮어쓴 뒤에도 `invalidateActionsCache()`를 호출하지 않아, 현재 선택된 프리셋을 저장해 덮어쓴 경우 이후 액션 실행/뷰 갱신이 이전 프리셋 내용을 보는 문제가 있었음. 저장 직후 캐시를 무효화하고 Main 뷰를 새로고침하도록 수정.
+
+**`package.json` 반복 디스크 읽기 제거**
+- [MainViewProvider.getChildren()](src/providers/mainViewProvider.ts)이 렌더링할 때마다 `package.json`을 `readFileSync`로 읽던 부분을 제거.
+- `taskhub.showVersion` 커맨드도 동일하게 수정.
+- 이제 VS Code가 제공하는 `context.extension.packageJSON.version`을 사용.
+
+**번들된 `media/*.json` watcher는 개발 모드 전용**
+- 설치된 확장의 `media/actions.json`, `media/links.json`은 런타임에 바뀌지 않으므로, 프로덕션에서는 `FileSystemWatcher` 두 개를 더 이상 만들지 않음.
+- 개발 시(`ExtensionMode.Development`)에만 watcher 등록.
+
+**기타 정리**
+- activate() 초입의 디버그 `console.log` 제거.
+
+### 테스트
+
+- 신규 테스트 12개 추가.
+  - `getActionsValidator` 모듈 레벨 캐시 / 유효·무효 입력 검증.
+  - `invalidateActionsCache` 함수 시그니처 / 반복 호출.
+  - Provider의 `loaded` 플래그 + `cachedEntries/cachedFavorites` 초기값 검증 (회귀 방지: 생성자가 eager load를 다시 추가해도 `loaded=false` 검사에서 실패).
+  - `refresh()` 및 `getChildren()`의 지연 로드 경로 전이.
+- 전체 **696개 테스트 통과**.
+
 ## [0.3.21] - 2026-04-17
 
 ### Changed

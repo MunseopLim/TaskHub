@@ -141,6 +141,45 @@ interface FavoriteEntry {
 }
 ```
 
+## 활성화(Activation)
+
+TaskHub 확장은 다음 상황에서 활성화된다:
+
+* `package.json`의 `activationEvents`에 지정된 이벤트가 발생:
+  * `onLanguage:c` — C 소스 파일 열림
+  * `onLanguage:cpp` — C++ 소스 파일 열림
+* `contributes.views`의 `mainView.*` 트리가 보이게 됨 (H 아이콘 클릭) — 암시적 활성화.
+* `contributes.commands`에 정의된 커맨드 호출 — 암시적 활성화.
+* `contributes.customEditors`의 대상 파일(`*.hex`, `*.bin`, …) 열림 — 암시적 활성화.
+
+C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어 `vscode.languages.registerHoverProvider(...)`가 실행되어야 하므로, 활성화 이벤트에 언어를 명시한다.
+
+### 활성화 비용 최적화
+
+`activate()`는 가능한 한 가볍게 유지한다. 다음 두 가지 패턴이 반복 비용의 주범이므로 항상 캐싱한다:
+
+1. **Ajv 스키마 검증기 (`getActionsValidator`)**
+   * `actions.json` 스키마 컴파일은 모듈 레벨에서 싱글톤으로 관리.
+   * `loadAndValidateActions()`, `parseImportData()` 등 모든 호출 경로에서 동일 인스턴스를 재사용.
+
+2. **`loadAllActions()` 결과 캐시**
+   * 캐시 변수는 모듈 스코프(`cachedAllActions`).
+   * `invalidateActionsCache()`로만 무효화:
+     * `.vscode/actions.json` 파일 watcher 콜백.
+     * `taskhub.preset.selected` 설정 변경 핸들러.
+     * 쓰기 동작(액션 생성 wizard, 프리셋 적용, import) 직후.
+   * 트리 렌더링 때마다 JSON을 다시 파싱하지 않도록 해 UI 응답성을 유지.
+
+또한 Provider 생성자에서 동기 JSON 로드를 수행하면 중복 로드 + activation 경로 가중이 발생하므로, 생성자는 **필드 초기화만** 수행한다. activate()에서도 `builtInLinkViewProvider.refresh()` 등 초기 `refresh()`를 호출하지 않는다. 실제 로드는:
+
+* 첫 `getChildren()` — 사이드바(H 아이콘)가 열리는 시점.
+* 파일 watcher 콜백에서의 `refresh()` — `.vscode/links.json` 등 변경 시.
+* 쓰기 동작 직후의 명시적 `refresh()` — 워크스페이스 쓰기 명령에서 호출.
+
+이 때 각 Provider의 `loaded: boolean` 플래그가 "한 번도 로드하지 않음"과 "로드했지만 비어 있음"을 구분한다. `ensureCache()`는 `!this.loaded`일 때만 실제 JSON을 읽고, 첫 로드 직후 `updateTitle()`을 호출하여 뷰 타이틀의 "(N)" 카운트를 갱신한다.
+
+번들된 `media/*.json`은 런타임에 바뀌지 않으므로 해당 FileSystemWatcher는 `context.extensionMode === ExtensionMode.Development`일 때만 등록한다.
+
 ## 설정 및 저장소
 
 *   **workspaceState**: 히스토리 데이터 저장 (VS Code API)

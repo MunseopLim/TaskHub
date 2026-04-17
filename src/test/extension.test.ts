@@ -35,7 +35,11 @@ import {
 	parseImportData,
 	mergeImportedActions,
 	countActionItems,
+	getActionsValidator,
+	invalidateActionsCache,
 } from '../extension';
+import { LinkViewProvider } from '../providers/linkViewProvider';
+import { FavoriteViewProvider } from '../providers/favoriteViewProvider';
 import * as os from 'os';
 import * as path from 'path';
 import { ActionItem } from '../schema';
@@ -2635,6 +2639,139 @@ suite('Extension Test Suite', () => {
 			const { merged, skipped } = mergeImportedActions(existing, []);
 			assert.strictEqual(merged.length, 1);
 			assert.strictEqual(skipped.length, 0);
+		});
+	});
+
+	suite('getActionsValidator (module-level cache)', () => {
+		test('returns the same compiled validator on repeated calls', () => {
+			const first = getActionsValidator();
+			const second = getActionsValidator();
+			assert.strictEqual(first, second, 'Ajv validator should be cached and reused');
+		});
+
+		test('returned validator correctly validates a well-formed action array', () => {
+			const validate = getActionsValidator();
+			const sample: ActionItem[] = [
+				{
+					id: 'root.hello',
+					title: 'Hello',
+					action: {
+						description: 'say hi',
+						tasks: [{ id: 'say', type: 'shell', command: 'echo hi' }]
+					}
+				}
+			];
+			const ok = validate(sample);
+			assert.strictEqual(ok, true, `Expected valid actions to pass; errors: ${JSON.stringify(validate.errors)}`);
+		});
+
+		test('returned validator rejects malformed input', () => {
+			const validate = getActionsValidator();
+			// Missing `title` is required by the schema.
+			const bad: any = [{ id: 'broken', action: { tasks: [] } }];
+			const ok = validate(bad);
+			assert.strictEqual(ok, false, 'Expected malformed actions to be rejected');
+		});
+	});
+
+	suite('invalidateActionsCache', () => {
+		test('is a callable function returning undefined', () => {
+			assert.strictEqual(typeof invalidateActionsCache, 'function');
+			assert.strictEqual(invalidateActionsCache(), undefined);
+		});
+
+		test('can be called multiple times without throwing', () => {
+			assert.doesNotThrow(() => {
+				invalidateActionsCache();
+				invalidateActionsCache();
+				invalidateActionsCache();
+			});
+		});
+	});
+
+	suite('Provider constructors (deferred load)', () => {
+		// Build a minimal stub ExtensionContext for constructor tests.
+		const makeStubContext = (): vscode.ExtensionContext => {
+			const nowhere = path.join(os.tmpdir(), `taskhub-nonexistent-${Date.now()}`);
+			return {
+				extensionPath: nowhere,
+				subscriptions: [],
+				workspaceState: {
+					get: () => undefined,
+					update: () => Promise.resolve(),
+					keys: () => []
+				},
+				globalState: {
+					get: () => undefined,
+					update: () => Promise.resolve(),
+					keys: () => [],
+					setKeysForSync: () => {}
+				},
+				extensionMode: 1,
+				extension: { packageJSON: { version: '0.0.0-test' } }
+			} as unknown as vscode.ExtensionContext;
+		};
+
+		// These tests assert the providers' observable `loaded` flag directly.
+		// Node's `fs` module on this runtime exposes its members as
+		// non-configurable getters, which blocks a traditional monkey-patch spy.
+		// The `loaded` flag was introduced specifically so regressions that
+		// reintroduce eager JSON reads in the constructor (e.g. `this.cachedX =
+		// this.loadX()`) are detected: the flag stays `false` until a load path
+		// actually runs.
+
+		test('LinkViewProvider (builtin) leaves loaded=false and cachedEntries=[] after construction', () => {
+			const provider = new LinkViewProvider(makeStubContext(), 'builtin') as any;
+			assert.strictEqual(provider.loaded, false, 'loaded flag must be false — constructor must not perform a load');
+			assert.deepStrictEqual(provider.cachedEntries, [], 'cachedEntries must be the initial empty array');
+		});
+
+		test('LinkViewProvider (workspace) leaves loaded=false and cachedEntries=[] after construction', () => {
+			const provider = new LinkViewProvider(makeStubContext(), 'workspace') as any;
+			assert.strictEqual(provider.loaded, false);
+			assert.deepStrictEqual(provider.cachedEntries, []);
+		});
+
+		test('FavoriteViewProvider leaves loaded=false and cachedFavorites=[] after construction', () => {
+			const provider = new FavoriteViewProvider(makeStubContext()) as any;
+			assert.strictEqual(provider.loaded, false);
+			assert.deepStrictEqual(provider.cachedFavorites, []);
+		});
+
+		test('LinkViewProvider.refresh() transitions loaded to true and triggers the load path', () => {
+			const provider = new LinkViewProvider(makeStubContext(), 'workspace') as any;
+			assert.strictEqual(provider.loaded, false);
+			provider.refresh();
+			assert.strictEqual(provider.loaded, true, 'refresh() must set loaded=true so subsequent ensureCache() calls are cheap');
+		});
+
+		test('FavoriteViewProvider.refresh() transitions loaded to true and triggers the load path', () => {
+			const provider = new FavoriteViewProvider(makeStubContext()) as any;
+			assert.strictEqual(provider.loaded, false);
+			provider.refresh();
+			assert.strictEqual(provider.loaded, true);
+		});
+
+		test('LinkViewProvider.getChildren() lazily loads on first call, becomes no-op on repeat', async () => {
+			const provider = new LinkViewProvider(makeStubContext(), 'workspace') as any;
+			assert.strictEqual(provider.loaded, false);
+			const first = await provider.getChildren();
+			assert.strictEqual(provider.loaded, true, 'first getChildren() call must trigger the lazy load');
+			assert.strictEqual(first.length, 0);
+			const second = await provider.getChildren();
+			assert.strictEqual(provider.loaded, true, 'second getChildren() call must keep loaded=true');
+			assert.strictEqual(second.length, 0);
+		});
+
+		test('FavoriteViewProvider.getChildren() lazily loads on first call, becomes no-op on repeat', async () => {
+			const provider = new FavoriteViewProvider(makeStubContext()) as any;
+			assert.strictEqual(provider.loaded, false);
+			const first = await provider.getChildren();
+			assert.strictEqual(provider.loaded, true);
+			assert.strictEqual(first.length, 0);
+			const second = await provider.getChildren();
+			assert.strictEqual(provider.loaded, true);
+			assert.strictEqual(second.length, 0);
 		});
 	});
 });

@@ -129,13 +129,19 @@ export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTre
     readonly onDidChangeTreeData: vscode.Event<FavoriteTreeNode | undefined | null | void> = this._onDidChangeTreeData.event;
     public view: vscode.TreeView<FavoriteTreeNode> | undefined;
     private cachedFavorites: FavoriteEntry[] = [];
+    // Distinguish "never loaded" from "loaded but empty" so ensureCache() does
+    // not keep re-reading the JSON when the user genuinely has zero favorites.
+    private loaded = false;
 
     constructor(private context: vscode.ExtensionContext) {
-        this.cachedFavorites = this.loadFavorites();
+        // No disk I/O in the constructor. The first refresh() (e.g. from a file
+        // watcher) or the first getChildren() call (when the view becomes
+        // visible) performs the load — see ensureCache().
     }
 
     refresh(): void {
         this.cachedFavorites = this.loadFavorites();
+        this.loaded = true;
         this._onDidChangeTreeData.fire();
         this.updateTitle();
     }
@@ -157,8 +163,12 @@ export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTre
     }
 
     private ensureCache(): void {
-        if (this.cachedFavorites.length === 0) {
+        if (!this.loaded) {
             this.cachedFavorites = this.loadFavorites();
+            this.loaded = true;
+            // First lazy load: also update the view title so that the "(N)"
+            // count appears as soon as the user opens the sidebar.
+            this.updateTitle();
         }
     }
 

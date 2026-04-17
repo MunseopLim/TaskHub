@@ -96,13 +96,19 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
     readonly onDidChangeTreeData: vscode.Event<LinkTreeNode | undefined | null | void> = this._onDidChangeTreeData.event;
     public view: vscode.TreeView<LinkTreeNode> | undefined;
     private cachedEntries: LinkEntry[] = [];
+    // Distinguish "never loaded" from "loaded but empty" so ensureCache() does
+    // not keep re-reading the JSON when the user genuinely has zero links.
+    private loaded = false;
 
     constructor(private context: vscode.ExtensionContext, private readonly mode: 'builtin' | 'workspace') {
-        this.cachedEntries = this.loadLinks();
+        // No disk I/O in the constructor. The first refresh() (e.g. from a file
+        // watcher) or the first getChildren() call (when the view becomes
+        // visible) performs the load — see ensureCache().
     }
 
     refresh(): void {
         this.cachedEntries = this.loadLinks();
+        this.loaded = true;
         this._onDidChangeTreeData.fire();
         this.updateTitle();
     }
@@ -131,8 +137,12 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
     }
 
     private ensureCache(): void {
-        if (this.cachedEntries.length === 0) {
+        if (!this.loaded) {
             this.cachedEntries = this.loadLinks();
+            this.loaded = true;
+            // First lazy load: also update the view title so that the "(N)"
+            // count appears as soon as the user opens the sidebar.
+            this.updateTitle();
         }
     }
 

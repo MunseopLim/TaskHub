@@ -13,11 +13,21 @@ import { showMemoryMap, MemoryMapConfig, goToSymbol } from './memoryMapViewer';
 import { showHexViewer, HexEditorProvider } from './hexViewer';
 import { t } from './i18n';
 
+// Compile the actions JSON-schema validator once and reuse it. Re-compiling on
+// every load path (activation + every view refresh + every executeAction) was
+// a noticeable chunk of the activation cost.
+let cachedActionsValidator: import('ajv').ValidateFunction<ActionItem[]> | undefined;
+export function getActionsValidator(): import('ajv').ValidateFunction<ActionItem[]> {
+    if (!cachedActionsValidator) {
+        const ajv = new Ajv({ allErrors: true });
+        cachedActionsValidator = ajv.compile<ActionItem[]>(actionSchema);
+    }
+    return cachedActionsValidator;
+}
 
 function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
     if (!fs.existsSync(filePath)) { return []; }
-    const ajv = new Ajv({ allErrors: true });
-    const validate = ajv.compile<ActionItem[]>(actionSchema);
+    const validate = getActionsValidator();
     let fileContent: string;
     try { fileContent = fs.readFileSync(filePath, 'utf-8'); } catch (e: any) { throw new Error(`Error reading file ${filePath}: ${e.message}`); }
     let parsedJson: any;
@@ -314,7 +324,24 @@ function getSelectedPresetId(): string | null {
     return selected === 'none' ? null : selected;
 }
 
+// Cached result of the last loadAllActions() call. Invalidated by
+// invalidateActionsCache() whenever workspace/preset/config changes fire.
+let cachedAllActions: ActionItem[] | undefined;
+
+export function invalidateActionsCache(): void {
+    cachedAllActions = undefined;
+}
+
 function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
+    if (cachedAllActions) {
+        return cachedAllActions;
+    }
+    const result = loadAllActionsUncached(context);
+    cachedAllActions = result;
+    return result;
+}
+
+function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] {
     const extensionLabel = 'extension media/actions.json';
     const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
     const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
@@ -911,6 +938,7 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
 
         insertActionIntoDestination(sources.workspaceActions, destination, newAction);
         persistWorkspaceActions(targetFolder.uri.fsPath, sources.workspaceActionsPath, sources.workspaceActions);
+        invalidateActionsCache();
         mainViewProvider.refresh();
         await handlePostCreationChoice(baseInfo, sources.workspaceActionsPath);
     } catch (error) {
@@ -2017,9 +2045,8 @@ export function parseImportData(content: string): { actions: ActionItem[]; error
         return { actions: [], errors: ['File must contain a JSON array or a TaskHub export object with an "actions" array.'] };
     }
 
-    // Validate using the schema
-    const ajv = new Ajv({ allErrors: true });
-    const validate = ajv.compile<ActionItem[]>(actionSchema);
+    // Validate using the shared cached schema compiler.
+    const validate = getActionsValidator();
     if (!validate(rawActions)) {
         const schemaErrors = validate.errors?.map(error =>
             `  - path: '${error.instancePath}' - ${error.message}`
@@ -2220,9 +2247,6 @@ async function pickWorkspaceFolderForCommand(placeHolder: string): Promise<vscod
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    // DEBUG: i18n 로케일 확인 (문제 해결 후 제거)
-    console.log(`[TaskHub] vscode.env.language = "${vscode.env.language}"`);
-
     const terminalDisposable = vscode.window.onDidCloseTerminal(terminal => {
         for (const [key, actionTerminal] of actionTerminals.entries()) {
             if (actionTerminal === terminal) {
@@ -2247,10 +2271,10 @@ export function activate(context: vscode.ExtensionContext) {
     workspaceLinkViewProvider.view = vscode.window.createTreeView('mainView.linkWorkspace', { treeDataProvider: workspaceLinkViewProvider });
     favoriteViewProvider.view = vscode.window.createTreeView('mainView.favorite', { treeDataProvider: favoriteViewProvider });
     historyProvider.view = vscode.window.createTreeView('mainView.history', { treeDataProvider: historyProvider });
-    builtInLinkViewProvider.refresh();
-    workspaceLinkViewProvider.refresh();
-    favoriteViewProvider.refresh();
-    historyProvider.refresh();
+    // Intentionally NOT calling refresh() here. Tree providers now load lazily
+    // on first getChildren() (i.e. when the TaskHub sidebar is first opened),
+    // so activation triggered by onLanguage:c / onLanguage:cpp stays cheap and
+    // does not drag in JSON reads for links/favorites/history.
     context.subscriptions.push(builtInLinkViewProvider.view, workspaceLinkViewProvider.view, favoriteViewProvider.view, historyProvider.view);
 
     // Register hover provider for number base conversion and SFR bit fields in C/C++ files
@@ -2266,19 +2290,23 @@ export function activate(context: vscode.ExtensionContext) {
         )
     );
 
-    const mediaActionsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/actions.json'));
-    const debouncedMediaActionsRefresh = debounce(() => mainViewProvider.refresh(), 200);
-    mediaActionsWatcher.onDidChange(debouncedMediaActionsRefresh.run);
-    mediaActionsWatcher.onDidCreate(debouncedMediaActionsRefresh.run);
-    mediaActionsWatcher.onDidDelete(debouncedMediaActionsRefresh.run);
-    context.subscriptions.push(new vscode.Disposable(() => { debouncedMediaActionsRefresh.cancel(); mediaActionsWatcher.dispose(); }));
-    const mediaLinksWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/links.json'));
-    const debouncedMediaLinksRefresh = debounce(() => builtInLinkViewProvider.refresh(), 200);
-    mediaLinksWatcher.onDidChange(debouncedMediaLinksRefresh.run);
-    mediaLinksWatcher.onDidCreate(debouncedMediaLinksRefresh.run);
-    mediaLinksWatcher.onDidDelete(debouncedMediaLinksRefresh.run);
-    context.subscriptions.push(new vscode.Disposable(() => { debouncedMediaLinksRefresh.cancel(); mediaLinksWatcher.dispose(); }));
-    const workspaceActionsWatchers = registerWorkspaceFileWatchers('.vscode/actions.json', () => mainViewProvider.refresh());
+    // Bundled media/*.json files inside the installed extension cannot change
+    // at runtime for end users, so we only watch them during development.
+    if (context.extensionMode === vscode.ExtensionMode.Development) {
+        const mediaActionsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/actions.json'));
+        const debouncedMediaActionsRefresh = debounce(() => { invalidateActionsCache(); mainViewProvider.refresh(); }, 200);
+        mediaActionsWatcher.onDidChange(debouncedMediaActionsRefresh.run);
+        mediaActionsWatcher.onDidCreate(debouncedMediaActionsRefresh.run);
+        mediaActionsWatcher.onDidDelete(debouncedMediaActionsRefresh.run);
+        context.subscriptions.push(new vscode.Disposable(() => { debouncedMediaActionsRefresh.cancel(); mediaActionsWatcher.dispose(); }));
+        const mediaLinksWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/links.json'));
+        const debouncedMediaLinksRefresh = debounce(() => builtInLinkViewProvider.refresh(), 200);
+        mediaLinksWatcher.onDidChange(debouncedMediaLinksRefresh.run);
+        mediaLinksWatcher.onDidCreate(debouncedMediaLinksRefresh.run);
+        mediaLinksWatcher.onDidDelete(debouncedMediaLinksRefresh.run);
+        context.subscriptions.push(new vscode.Disposable(() => { debouncedMediaLinksRefresh.cancel(); mediaLinksWatcher.dispose(); }));
+    }
+    const workspaceActionsWatchers = registerWorkspaceFileWatchers('.vscode/actions.json', () => { invalidateActionsCache(); mainViewProvider.refresh(); });
     const workspaceLinksWatchers = registerWorkspaceFileWatchers('.vscode/links.json', () => workspaceLinkViewProvider.refresh());
     const workspaceFavoritesWatchers = registerWorkspaceFileWatchers('.vscode/favorites.json', () => favoriteViewProvider.refresh());
     context.subscriptions.push(workspaceActionsWatchers, workspaceLinksWatchers, workspaceFavoritesWatchers);
@@ -2381,7 +2409,10 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }
     }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showVersion', () => { const packageJson = JSON.parse(fs.readFileSync(path.join(context.extensionPath, 'package.json'), 'utf-8')); vscode.window.showInformationMessage(t(`TaskHub 버전: ${packageJson.version}`, `TaskHub Version: ${packageJson.version}`)); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showVersion', () => {
+        const version = context.extension.packageJSON.version;
+        vscode.window.showInformationMessage(t(`TaskHub 버전: ${version}`, `TaskHub Version: ${version}`));
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showChangelog', async () => {
         const changelogPath = path.join(context.extensionPath, 'CHANGELOG.md');
         if (fs.existsSync(changelogPath)) {
@@ -2976,6 +3007,7 @@ export function activate(context: vscode.ExtensionContext) {
             fs.writeFileSync(actionsPath, JSON.stringify(finalActions, null, 2) + '\n');
 
             // Step 6: Refresh UI and notify
+            invalidateActionsCache();
             mainViewProvider.refresh();
             const openActionsLabel = t('actions.json 열기', 'Open actions.json');
             const result = await vscode.window.showInformationMessage(
@@ -3068,6 +3100,12 @@ export function activate(context: vscode.ExtensionContext) {
             // Step 5: Save
             fs.writeFileSync(targetPath, JSON.stringify(actions, null, 2) + '\n');
 
+            // If the newly-written preset happens to be the currently selected
+            // one (or could become so on reload), drop the cached merged action
+            // list so downstream callers see the fresh file.
+            invalidateActionsCache();
+            mainViewProvider.refresh();
+
             // Step 6: Notify
             const openLabel = t('열기', 'Open');
             const revealLabel = t('탐색기에서 보기', 'Reveal');
@@ -3097,6 +3135,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.workspace.onDidChangeConfiguration(event => {
             if (event.affectsConfiguration('taskhub.preset.selected')) {
                 const presetId = getSelectedPresetId();
+                invalidateActionsCache();
                 mainViewProvider.refresh();
                 outputChannel.appendLine(`[Preset] Settings changed to: ${presetId || 'none'}`);
 
@@ -3216,6 +3255,7 @@ export function activate(context: vscode.ExtensionContext) {
             msg += t(` ${skipped.length}개 중복 건너뜀: ${skipped.join(', ')}`, ` Skipped ${skipped.length} duplicate(s): ${skipped.join(', ')}`);
         }
         vscode.window.showInformationMessage(msg);
+        invalidateActionsCache();
         mainViewProvider.refresh();
     }));
 
