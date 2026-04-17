@@ -283,7 +283,7 @@
       "properties": {
         "mode": {
           "type": "string",
-          "description": "Defines how to handle the task's output.",
+          "description": "Defines how to handle the task's output. Optional when only 'capture' is used.",
           "enum": ["editor", "terminal", "file"]
         },
         "language": {
@@ -305,9 +305,52 @@
           ],
           "description": "If true, overwrite the target when mode is 'file'. Defaults to false. Can be a boolean or a string variable (e.g., '${someVar}') that evaluates to 'true'.",
           "default": false
+        },
+        "capture": {
+          "oneOf": [
+            { "$ref": "#/definitions/OutputCapture" },
+            {
+              "type": "array",
+              "items": { "$ref": "#/definitions/OutputCapture" }
+            }
+          ],
+          "description": "Extract named variables from the task's string output. Each rule adds a `${task_id.<name>}` variable for downstream tasks. Only applies when the task returns a string output (shell/command with `passTheResultToNextTask: true`, or `stringManipulation`)."
+        }
+      }
+    },
+    "OutputCapture": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "Variable name to expose as ${task_id.<name>}. Must be a valid identifier and must not shadow built-in keys (output, path, value, etc.)."
+        },
+        "regex": {
+          "type": "string",
+          "description": "Regex pattern matched against the task output. If it matches, the specified capture group (default 1) is used."
+        },
+        "group": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Capture group index for `regex`. Defaults to 1. Use 0 to get the full match.",
+          "default": 1
+        },
+        "flags": {
+          "type": "string",
+          "description": "Optional regex flags (e.g., 'm' for multiline, 'i' for case-insensitive)."
+        },
+        "line": {
+          "type": "integer",
+          "description": "Select one line by 0-based index. Negative values count from the end (-1 = last line). Ignored if `regex` is also provided."
+        },
+        "trim": {
+          "type": "boolean",
+          "description": "If true, apply trim() to the selected value.",
+          "default": false
         }
       },
-      "required": ["mode"]
+      "required": ["name"]
     }
   }
 }

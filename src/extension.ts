@@ -12,6 +12,7 @@ import { openJsonEditor, openJsonEditorFromUri } from './jsonEditor';
 import { showMemoryMap, MemoryMapConfig, goToSymbol } from './memoryMapViewer';
 import { showHexViewer, HexEditorProvider } from './hexViewer';
 import { t } from './i18n';
+import { buildPreviewReport } from './previewRun';
 
 // Compile the actions JSON-schema validator once and reuse it. Re-compiling on
 // every load path (activation + every view refresh + every executeAction) was
@@ -453,6 +454,7 @@ import {
     resolveWithinWorkspace,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
+    applyOutputCapture,
     getCommandString,
     getToolCommand,
     tokenizeCommandLine,
@@ -468,6 +470,7 @@ export {
     resolveWithinWorkspace,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
+    applyOutputCapture,
     getCommandString,
     getToolCommand,
     tokenizeCommandLine,
@@ -959,6 +962,13 @@ export { MainViewProvider, Folder, Action };
 const activeTasks = new Map<string, vscode.TaskExecution>();
 const manuallyTerminatedActions = new Set<string>();
 const outputChannel = vscode.window.createOutputChannel('TaskHub');
+let previewOutputChannel: vscode.OutputChannel | undefined;
+function getPreviewOutputChannel(): vscode.OutputChannel {
+    if (!previewOutputChannel) {
+        previewOutputChannel = vscode.window.createOutputChannel('TaskHub Preview');
+    }
+    return previewOutputChannel;
+}
 const actionTerminals = new Map<string, vscode.Terminal>();
 const actionWorkspaceFolderMap = new Map<string, string | undefined>();
 const actionChildProcesses = new Map<string, Set<ReturnType<typeof spawn>>>();
@@ -1360,10 +1370,16 @@ function logActionStart(showVerboseLogs: boolean, title: string, description?: s
     }
 }
 
-async function runActionTasks(action: PipelineAction, context: vscode.ExtensionContext, id: string, workspaceFolderPath?: string): Promise<void> {
+export async function executeActionPipeline(
+    action: PipelineAction,
+    context: vscode.ExtensionContext,
+    id: string,
+    workspaceFolderPath?: string,
+    workspaceRoots?: string[]
+): Promise<void> {
     const stepResults: Record<string, unknown> = {};
     for (const task of action.tasks) {
-        const result = await executeSingleTask(task, stepResults, context, id, workspaceFolderPath);
+        const result = await executeSingleTask(task, stepResults, context, id, workspaceFolderPath, workspaceRoots);
         stepResults[task.id] = result;
     }
 }
@@ -1431,7 +1447,7 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
     }
 
     try {
-        await runActionTasks(action, context, id, actionWorkspaceFolder);
+        await executeActionPipeline(action, context, id, actionWorkspaceFolder);
         handleActionSuccess(id, action, showTaskStatus);
 
         // Update history to success
@@ -1461,7 +1477,14 @@ async function executeAction(actionItem: ActionItem, context: vscode.ExtensionCo
     }
 }
 
-async function executeSingleTask(task: import('./schema').Task, allResults: any, context: vscode.ExtensionContext, actionId: string, workspaceFolderPath?: string): Promise<any> {
+async function executeSingleTask(
+    task: import('./schema').Task,
+    allResults: any,
+    context: vscode.ExtensionContext,
+    actionId: string,
+    workspaceFolderPath?: string,
+    workspaceRoots?: string[]
+): Promise<any> {
     const defaultWorkspace = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const interpolationContext = { ...allResults, workspaceFolder: defaultWorkspace, extensionPath: context.extensionPath };
     let result: any;
@@ -1586,6 +1609,30 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
             throw new Error(`Unsupported task type: ${task.type}`);
     }
 
+    // Apply capture rules (if any) to derive named variables from a string
+    // output. Capture only makes sense when the result carries a string
+    // `output` property (shell/command with `passTheResultToNextTask: true`,
+    // or `stringManipulation`). In all other cases we silently skip — a
+    // warning is surfaced through the output channel in verbose mode.
+    if (task.output && task.output.capture) {
+        if (result && typeof result.output === 'string') {
+            try {
+                const captured = applyOutputCapture(result.output, task.output.capture);
+                result = { ...result, ...captured };
+            } catch (error: any) {
+                throw new Error(`Task '${task.id}' capture failed: ${error.message}`);
+            }
+        } else {
+            const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+            if (showVerboseLogs) {
+                outputChannel.appendLine(
+                    `[Warning] Task '${task.id}' has 'output.capture' but no string output is available. ` +
+                    `For 'shell'/'command' tasks, set 'passTheResultToNextTask': true.`
+                );
+            }
+        }
+    }
+
     if (task.passTheResultToNextTask && task.output) {
         const outputContent = task.output.content ? interpolatePipelineVariables(task.output.content, interpolationContext) : (typeof result?.output === 'string' ? result.output : JSON.stringify(result, null, 2));
 
@@ -1613,7 +1660,7 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
                 if (!interpolatedOutput.filePath) { throw new Error(`Task '${task.id}' has output mode 'file' but 'filePath' is not defined.`); }
                 const safeOutputPath = resolveWithinWorkspace(
                     interpolatedOutput.filePath,
-                    getWorkspaceRoots(),
+                    workspaceRoots ?? getWorkspaceRoots(),
                     defaultWorkspace
                 );
                 const dir = path.dirname(safeOutputPath);
@@ -2381,6 +2428,39 @@ export function activate(context: vscode.ExtensionContext) {
         } else {
             vscode.window.showErrorMessage(t(`ID '${args.id}'인 액션을 찾을 수 없거나 'action' 속성이 없습니다.`, `Action with ID '${args.id}' not found or it has no 'action' property.`));
         }
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.previewAction', async (actionItem: Action) => {
+        let allActions: ActionItem[];
+        try {
+            allActions = loadAllActions(context);
+        } catch (error: any) {
+            console.error(error.message);
+            vscode.window.showErrorMessage(t(`액션을 미리 볼 수 없습니다: ${error.message}`, `Could not preview action: ${error.message}`));
+            return;
+        }
+        const actionId = actionItem?.id;
+        if (!actionId) {
+            vscode.window.showWarningMessage(t('미리 보려는 액션을 선택하세요.', 'Select an action to preview.'));
+            return;
+        }
+        const fullActionItem = findActionById(allActions, actionId);
+        if (!fullActionItem || !fullActionItem.action) {
+            vscode.window.showErrorMessage(t(
+                `ID '${actionId}'에 대한 액션 정의를 찾을 수 없습니다.`,
+                `Could not find action definition for ID '${actionId}'.`
+            ));
+            return;
+        }
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const report = buildPreviewReport(fullActionItem, {
+            workspaceFolder,
+            extensionPath: context.extensionPath,
+            workspaceRoots: getWorkspaceRoots(),
+        });
+        const channel = getPreviewOutputChannel();
+        channel.appendLine(report);
+        channel.appendLine('');
+        channel.show(true);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
         const id = actionItem.id || actionItem.label;

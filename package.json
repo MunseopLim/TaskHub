@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.3.22",
+  "version": "0.4.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
@@ -188,6 +188,12 @@
       {
         "command": "taskhub.executeAction",
         "title": "Execute Action"
+      },
+      {
+        "command": "taskhub.previewAction",
+        "title": "Preview Run (Dry-run)",
+        "category": "TaskHub",
+        "icon": "$(eye)"
       },
       {
         "command": "taskhub.stopAction",
@@ -455,6 +461,21 @@
           "command": "taskhub.deleteFavorite",
           "when": "view == mainView.favorite && viewItem == favoriteItem",
           "group": "inline"
+        },
+        {
+          "command": "taskhub.previewAction",
+          "when": "view == mainView.main && viewItem == action",
+          "group": "context@0"
+        },
+        {
+          "command": "taskhub.previewAction",
+          "when": "view == mainView.main && viewItem == succeededAction",
+          "group": "context@0"
+        },
+        {
+          "command": "taskhub.previewAction",
+          "when": "view == mainView.main && viewItem == failedAction",
+          "group": "context@0"
         },
         {
           "command": "taskhub.exportActionItem",

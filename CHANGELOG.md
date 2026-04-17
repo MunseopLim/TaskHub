@@ -1,5 +1,35 @@
 # Change Log
 
+## [0.4.0] - 2026-04-17
+
+### 기능 — Shell 출력 Parser + 파이프라인 Dry-run
+
+**Output Parser (`output.capture`)**
+- `shell`/`command`/`stringManipulation` 태스크의 문자열 출력에서 정규식 또는 라인 인덱스로 **원하는 값만 뽑아 변수화** 가능.
+- 기존 `${id.output}`은 그대로 유지되며, 캡처된 값은 `${id.<name>}`으로 파생 변수로 추가됨 (옵트인, 비파괴).
+- 지원: `regex`(+ `group`, `flags`), `line`(음수 인덱스로 끝에서부터), `trim`, 여러 규칙을 배열로 선언.
+- 예약어(`output`, `path`, `value` 등)·중복 이름·잘못된 정규식은 즉시 에러.
+- shell/command는 `passTheResultToNextTask: true`가 필요 (미설정 시 verbose 로그에 경고).
+
+**Preview Run (Dry-run)**
+- 액션 우클릭 → **Preview Run (Dry-run)** 또는 Command Palette: `TaskHub: Preview Run (Dry-run)`.
+- 실행하지 않고 각 태스크의 command/cwd/env, `output.filePath` 해석값, 캡처 규칙, 워크스페이스 외부 쓰기 여부, 미해결 `${...}` 변수를 `TaskHub Preview` 출력 채널에 표시.
+- 상류 태스크 결과는 `<fileDialog:id:path>` 같은 placeholder로 시뮬레이션되어 변수 연결을 눈으로 확인 가능.
+
+**구현 세부**
+- `applyOutputCapture()`: [src/pipelineUtils.ts](src/pipelineUtils.ts)에 추가된 순수 함수 (유닛 테스트 17개).
+- `buildPreviewReport()`: [src/previewRun.ts](src/previewRun.ts)에 추가된 순수 함수 (유닛 테스트 10개).
+- `executeSingleTask`는 태스크 실행 후 `output.capture`가 있으면 결과 객체에 캡처된 키를 merge.
+- `Output.mode`를 선택적 필드로 변경 — `capture`만 사용하는 경우 `mode` 생략 가능.
+
+**Preview Run 개선**
+- `output.mode: "file"`에서 `overwrite`가 생략된 경우 `overwrite: false (default — write fails if target already exists)` 문구를 명시적으로 표시해, 덮어쓰기 실패 예상 시나리오가 한눈에 보이도록 함.
+- `overwrite`가 문자열(`"${var}"`)로 선언되면 preview에서도 interpolate해 실제 truthy/falsy 결과를 함께 표시.
+
+**Integration Test 시나리오 문서화**
+- [docs/integration-tests.md](docs/integration-tests.md) 추가 — `IT-XXX` 네이밍 규칙, 시나리오 표, 추가 절차 수록.
+- Output Capture 그룹 8개 시나리오 추가: 정규식 단일/배열 capture, line 인덱스, stringManipulation capture, capture miss, filePath interpolation, 예약어/잘못된 정규식 에러 경로. 실행: `npm run test` → 732 passing.
+
 ## [0.3.22] - 2026-04-17
 
 ### 성능 — 확장 활성화(activation) 경량화

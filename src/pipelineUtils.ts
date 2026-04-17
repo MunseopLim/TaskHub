@@ -15,9 +15,90 @@
  */
 
 import * as path from 'path';
+import type { OutputCapture } from './schema';
 
 /** Maximum allowed length of a single interpolated value. */
 export const INTERPOLATED_VALUE_MAX_LENGTH = 32 * 1024;
+
+/** Reserved capture names that would shadow built-in task result properties. */
+const RESERVED_CAPTURE_NAMES = new Set([
+    'output', 'outputDir', 'path', 'dir', 'name', 'fileNameOnly', 'fileExt',
+    'value', 'values', 'archivePath', 'confirmed'
+]);
+
+/**
+ * Apply one or more capture rules to a task's string output and return a map
+ * of `{ name: value }` pairs to be merged into the task's result object.
+ *
+ * This is a pure function — no I/O, no `vscode` dependency — so it can be
+ * unit-tested directly. Silently skips rules whose selector does not match
+ * and throws only on configuration errors (e.g. missing `name`, invalid
+ * regex, reserved name, duplicate name).
+ */
+export function applyOutputCapture(
+    output: string,
+    capture: OutputCapture | OutputCapture[] | undefined
+): Record<string, string> {
+    if (!capture) { return {}; }
+    const rules = Array.isArray(capture) ? capture : [capture];
+    const results: Record<string, string> = {};
+
+    for (const rule of rules) {
+        if (!rule || typeof rule !== 'object') {
+            throw new Error('Each capture rule must be an object.');
+        }
+        const name = rule.name;
+        if (typeof name !== 'string' || name.length === 0) {
+            throw new Error("Capture rule is missing a non-empty 'name'.");
+        }
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+            throw new Error(`Capture name '${name}' must match /^[A-Za-z_][A-Za-z0-9_]*$/.`);
+        }
+        if (RESERVED_CAPTURE_NAMES.has(name)) {
+            throw new Error(`Capture name '${name}' is reserved and cannot be used.`);
+        }
+        if (Object.prototype.hasOwnProperty.call(results, name)) {
+            throw new Error(`Duplicate capture name '${name}'.`);
+        }
+
+        let selected: string | undefined;
+
+        if (typeof rule.regex === 'string' && rule.regex.length > 0) {
+            let re: RegExp;
+            try {
+                re = new RegExp(rule.regex, rule.flags ?? '');
+            } catch (e: any) {
+                throw new Error(`Capture '${name}' has invalid regex: ${e.message}`);
+            }
+            const m = output.match(re);
+            if (m) {
+                // Default group: 1 if the pattern has capture groups, otherwise 0
+                // (full match). Explicit out-of-range group is silently skipped.
+                const defaultGroup = m.length > 1 ? 1 : 0;
+                const group = rule.group ?? defaultGroup;
+                if (group < 0 || group >= m.length) {
+                    selected = undefined;
+                } else {
+                    selected = m[group];
+                }
+            }
+        } else if (typeof rule.line === 'number' && Number.isInteger(rule.line)) {
+            const lines = output.split(/\r?\n/);
+            const idx = rule.line < 0 ? lines.length + rule.line : rule.line;
+            if (idx >= 0 && idx < lines.length) {
+                selected = lines[idx];
+            }
+        } else {
+            selected = output;
+        }
+
+        if (selected === undefined) { continue; }
+        if (rule.trim) { selected = selected.trim(); }
+        results[name] = selected;
+    }
+
+    return results;
+}
 
 /**
  * Resolve `targetPath` and ensure it lands inside one of the provided workspace roots.

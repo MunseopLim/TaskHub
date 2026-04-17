@@ -15,6 +15,7 @@ import {
     encodePowerShellScript,
     getCommandString,
     getToolCommand,
+    applyOutputCapture,
 } from '../pipelineUtils';
 
 /**
@@ -91,5 +92,118 @@ suite('pipelineUtils — direct-import smoke suite', () => {
     test('getToolCommand quotes paths containing spaces', () => {
         const out = getToolCommand('C:/Program Files/Tool/bin.exe');
         assert.strictEqual(out, '"C:/Program Files/Tool/bin.exe"');
+    });
+});
+
+suite('applyOutputCapture', () => {
+    test('returns empty object when capture is undefined', () => {
+        assert.deepStrictEqual(applyOutputCapture('anything', undefined), {});
+    });
+
+    test('regex: extracts default capture group 1', () => {
+        const out = applyOutputCapture('commit abc1234\n', { name: 'sha', regex: 'commit ([a-f0-9]+)' });
+        assert.deepStrictEqual(out, { sha: 'abc1234' });
+    });
+
+    test('regex: explicit group 0 returns full match', () => {
+        const out = applyOutputCapture('value=42', { name: 'whole', regex: 'value=(\\d+)', group: 0 });
+        assert.deepStrictEqual(out, { whole: 'value=42' });
+    });
+
+    test('regex: miss produces no entry', () => {
+        const out = applyOutputCapture('nothing interesting', { name: 'v', regex: '^v(\\d+)' });
+        assert.deepStrictEqual(out, {});
+    });
+
+    test('regex: out-of-range group is skipped silently', () => {
+        const out = applyOutputCapture('hello', { name: 'v', regex: 'hello', group: 5 });
+        assert.deepStrictEqual(out, {});
+    });
+
+    test('regex: invalid pattern throws with task-friendly message', () => {
+        assert.throws(
+            () => applyOutputCapture('x', { name: 'v', regex: '(' }),
+            /Capture 'v' has invalid regex/
+        );
+    });
+
+    test('regex: flags are honored', () => {
+        const out = applyOutputCapture('line1\nMATCH\nline3', {
+            name: 'pick', regex: 'match', flags: 'i'
+        });
+        assert.deepStrictEqual(out, { pick: 'MATCH' });
+    });
+
+    test('line: positive index selects by 0-based line', () => {
+        const out = applyOutputCapture('a\nb\nc', { name: 'second', line: 1 });
+        assert.deepStrictEqual(out, { second: 'b' });
+    });
+
+    test('line: negative index counts from end', () => {
+        const out = applyOutputCapture('a\nb\nc', { name: 'last', line: -1 });
+        assert.deepStrictEqual(out, { last: 'c' });
+    });
+
+    test('line: out-of-range index is skipped', () => {
+        assert.deepStrictEqual(applyOutputCapture('a\nb', { name: 'v', line: 99 }), {});
+        assert.deepStrictEqual(applyOutputCapture('a\nb', { name: 'v', line: -99 }), {});
+    });
+
+    test('no selector: uses full output', () => {
+        assert.deepStrictEqual(
+            applyOutputCapture('raw', { name: 'all' }),
+            { all: 'raw' }
+        );
+    });
+
+    test('trim: applies after selection', () => {
+        const out = applyOutputCapture('  hi  \n', { name: 'v', trim: true });
+        assert.deepStrictEqual(out, { v: 'hi' });
+    });
+
+    test('trim: works with regex selection', () => {
+        const out = applyOutputCapture('ver: [ 1.2.3 ]', {
+            name: 'v', regex: '\\[(.+)\\]', trim: true
+        });
+        assert.deepStrictEqual(out, { v: '1.2.3' });
+    });
+
+    test('array: applies multiple rules', () => {
+        const out = applyOutputCapture('commit abc123\nAuthor: Jane\n', [
+            { name: 'sha', regex: 'commit ([a-f0-9]+)' },
+            { name: 'author', regex: 'Author: (.+)', trim: true }
+        ]);
+        assert.deepStrictEqual(out, { sha: 'abc123', author: 'Jane' });
+    });
+
+    test('missing name throws', () => {
+        assert.throws(
+            () => applyOutputCapture('x', { name: '' } as any),
+            /missing a non-empty 'name'/
+        );
+    });
+
+    test('invalid name throws', () => {
+        assert.throws(
+            () => applyOutputCapture('x', { name: '1bad' } as any),
+            /Capture name '1bad' must match/
+        );
+    });
+
+    test('reserved name throws', () => {
+        assert.throws(
+            () => applyOutputCapture('x', { name: 'output' }),
+            /Capture name 'output' is reserved/
+        );
+    });
+
+    test('duplicate name throws', () => {
+        assert.throws(
+            () => applyOutputCapture('hello', [
+                { name: 'v', regex: 'hello' },
+                { name: 'v', regex: '.' }
+            ]),
+            /Duplicate capture name 'v'/
+        );
     });
 });
