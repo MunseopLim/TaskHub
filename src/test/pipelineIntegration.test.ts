@@ -307,4 +307,311 @@ suite('Pipeline integration', function () {
             );
         });
     });
+
+    suite('Command Execution + Workspace Safety', () => {
+        test('IT-009: command args/cwd/env interpolation이 함께 동작', async () => {
+            const workDir = path.join(tempWorkspace, 'work dir');
+            fs.mkdirSync(workDir);
+            const resultPath = path.join(tempWorkspace, 'it009.txt');
+            const action: PipelineAction = {
+                description: 'IT-009',
+                tasks: [
+                    {
+                        id: 'discover',
+                        type: 'shell',
+                        command: echoOneLine('target=release'),
+                        passTheResultToNextTask: true,
+                        output: { capture: { name: 'target', regex: 'target=(\\S+)' } }
+                    },
+                    {
+                        id: 'nodeTask',
+                        type: 'shell',
+                        command: 'node',
+                        args: [
+                            '-e',
+                            "const path=require('path'); process.stdout.write([path.basename(process.cwd()), process.env.TASKHUB_TARGET, process.env.TASKHUB_FLAG].join('|'));"
+                        ],
+                        cwd: workDir,
+                        env: {
+                            TASKHUB_TARGET: '${discover.target}',
+                            TASKHUB_FLAG: 'flag-${discover.target}'
+                        },
+                        passTheResultToNextTask: true,
+                        output: { mode: 'file', filePath: resultPath, overwrite: true }
+                    }
+                ]
+            };
+
+            await run(action);
+
+            assert.strictEqual(
+                fs.readFileSync(resultPath, 'utf8'),
+                'work dir|release|flag-release'
+            );
+        });
+
+        test('IT-010: workspace 밖 file output은 거부', async () => {
+            const outside = path.join(os.tmpdir(), `taskhub-outside-${process.pid}-${Date.now()}.txt`);
+            const action: PipelineAction = {
+                description: 'IT-010',
+                tasks: [{
+                    id: 'writeOutside',
+                    type: 'stringManipulation',
+                    function: 'trim',
+                    input: 'nope',
+                    passTheResultToNextTask: true,
+                    output: { mode: 'file', filePath: outside, overwrite: true }
+                }]
+            };
+
+            await assert.rejects(
+                () => run(action),
+                /outside the current workspace/
+            );
+            assert.strictEqual(fs.existsSync(outside), false);
+        });
+
+        test('IT-011: 기존 파일은 overwrite 없이는 덮어쓰지 않음', async () => {
+            const resultPath = path.join(tempWorkspace, 'existing.txt');
+            fs.writeFileSync(resultPath, 'old');
+            const action: PipelineAction = {
+                description: 'IT-011',
+                tasks: [{
+                    id: 'writeExisting',
+                    type: 'stringManipulation',
+                    function: 'trim',
+                    input: 'new',
+                    passTheResultToNextTask: true,
+                    output: { mode: 'file', filePath: resultPath }
+                }]
+            };
+
+            await assert.rejects(
+                () => run(action),
+                /attempted to write/
+            );
+            assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'old');
+        });
+
+        test('IT-012: overwrite 문자열 변수는 boolean으로 평가됨', async () => {
+            const resultPath = path.join(tempWorkspace, 'overwrite.txt');
+            fs.writeFileSync(resultPath, 'old');
+            const action: PipelineAction = {
+                description: 'IT-012',
+                tasks: [
+                    {
+                        id: 'allow',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'TRUE',
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'write',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'new',
+                        passTheResultToNextTask: true,
+                        output: {
+                            mode: 'file',
+                            filePath: resultPath,
+                            overwrite: '${allow.output}'
+                        }
+                    }
+                ]
+            };
+
+            await run(action);
+
+            assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'new');
+        });
+
+        test('IT-013: 실패한 shell task는 downstream 실행을 중단', async () => {
+            const markerPath = path.join(tempWorkspace, 'should-not-exist.txt');
+            const action: PipelineAction = {
+                description: 'IT-013',
+                tasks: [
+                    {
+                        id: 'fail',
+                        type: 'shell',
+                        command: 'node',
+                        args: ['-e', 'process.stderr.write("boom"); process.exit(7);'],
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'after',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'should not run',
+                        passTheResultToNextTask: true,
+                        output: { mode: 'file', filePath: markerPath, overwrite: true }
+                    }
+                ]
+            };
+
+            await assert.rejects(
+                () => run(action),
+                /boom/
+            );
+            assert.strictEqual(fs.existsSync(markerPath), false);
+        });
+
+        test('IT-014: relative filePath는 workspace 기준으로 해석', async () => {
+            const action: PipelineAction = {
+                description: 'IT-014',
+                tasks: [{
+                    id: 'writeRelative',
+                    type: 'stringManipulation',
+                    function: 'trim',
+                    input: 'relative-output',
+                    passTheResultToNextTask: true,
+                    output: {
+                        mode: 'file',
+                        filePath: path.join('nested', 'out.txt'),
+                        overwrite: true
+                    }
+                }]
+            };
+
+            await run(action);
+
+            assert.strictEqual(
+                fs.readFileSync(path.join(tempWorkspace, 'nested', 'out.txt'), 'utf8'),
+                'relative-output'
+            );
+        });
+    });
+
+    suite('Interactive Task Pipeline', () => {
+        test('IT-015: quickPick 결과가 inputBox prefix/prompt와 downstream에 전달', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const originalShowInputBox = vscode.window.showInputBox;
+            const resultPath = path.join(tempWorkspace, 'it015.txt');
+            try {
+                (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) => {
+                    return items.find(item => item.label === 'prod');
+                };
+                (vscode.window as any).showInputBox = async (options: vscode.InputBoxOptions) => {
+                    assert.strictEqual(options.prompt, 'Deploy to prod');
+                    return 'deploy';
+                };
+
+                const action: PipelineAction = {
+                    description: 'IT-015',
+                    tasks: [
+                        {
+                            id: 'env',
+                            type: 'quickPick',
+                            items: [
+                                { label: 'dev', description: 'Development' },
+                                { label: 'prod', description: 'Production' }
+                            ]
+                        },
+                        {
+                            id: 'target',
+                            type: 'inputBox',
+                            prompt: 'Deploy to ${env.value}',
+                            prefix: '${env.value}:',
+                            suffix: ':done'
+                        },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'target=${target.value}',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: resultPath, overwrite: true }
+                        }
+                    ]
+                };
+
+                await run(action);
+
+                assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'target=prod:deploy:done');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+                (vscode.window as any).showInputBox = originalShowInputBox;
+            }
+        });
+
+        test('IT-016: quickPick 다중 선택 value/values가 downstream에 전달', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const resultPath = path.join(tempWorkspace, 'it016.txt');
+            try {
+                (vscode.window as any).showQuickPick = async (
+                    items: vscode.QuickPickItem[],
+                    options: vscode.QuickPickOptions
+                ) => {
+                    assert.strictEqual(options.canPickMany, true);
+                    return [items[0], items[2]];
+                };
+
+                const action: PipelineAction = {
+                    description: 'IT-016',
+                    tasks: [
+                        {
+                            id: 'features',
+                            type: 'quickPick',
+                            items: ['feature-a', 'feature-b', 'feature-c'],
+                            canPickMany: true
+                        },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'first=${features.value};all=${features.values}',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: resultPath, overwrite: true }
+                        }
+                    ]
+                };
+
+                await run(action);
+
+                assert.strictEqual(
+                    fs.readFileSync(resultPath, 'utf8'),
+                    'first=feature-a;all=feature-a,feature-c'
+                );
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+            }
+        });
+
+        test('IT-017: confirm 취소는 pipeline을 중단', async () => {
+            const originalShowWarningMessage = vscode.window.showWarningMessage;
+            const markerPath = path.join(tempWorkspace, 'confirm-should-not-run.txt');
+            try {
+                (vscode.window as any).showWarningMessage = async () => 'No';
+
+                const action: PipelineAction = {
+                    description: 'IT-017',
+                    tasks: [
+                        {
+                            id: 'confirm',
+                            type: 'confirm',
+                            message: 'Continue?',
+                            confirmLabel: 'Proceed',
+                            cancelLabel: 'No'
+                        },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'confirmed=${confirm.confirmed}',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: markerPath, overwrite: true }
+                        }
+                    ]
+                };
+
+                await assert.rejects(
+                    () => run(action),
+                    /canceled/
+                );
+                assert.strictEqual(fs.existsSync(markerPath), false);
+            } finally {
+                (vscode.window as any).showWarningMessage = originalShowWarningMessage;
+            }
+        });
+    });
 });

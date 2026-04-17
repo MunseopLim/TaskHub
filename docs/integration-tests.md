@@ -33,6 +33,27 @@
 | IT-007 | 예약된 capture name은 실행 시 에러 | 설정 오류 실패 경로 (`Task '<id>' capture failed: ...`) |
 | IT-008 | 잘못된 정규식은 실행 시 에러 | 설정 오류 실패 경로 |
 
+### Command Execution + Workspace Safety
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-009 | command args/cwd/env interpolation | upstream capture가 `env`에 치환되고, `cwd`와 args가 실제 child process 실행에 반영됨 |
+| IT-010 | workspace 밖 file output 거부 | `resolveWithinWorkspace` 보안 경계가 pipeline file output에서도 적용됨 |
+| IT-011 | overwrite 없는 기존 파일 쓰기 거부 | 기존 파일 보호 동작과 실패 메시지 |
+| IT-012 | `overwrite` 문자열 변수 평가 | `${task.output}` 형태의 문자열 boolean이 `true`로 평가되어 overwrite 허용 |
+| IT-013 | 실패한 shell task가 downstream 중단 | 실패 exit code/stderr가 reject되고 이후 task가 실행되지 않음 |
+| IT-014 | relative `filePath` 해석 | 상대 경로 output이 action workspace 기준으로 생성됨 |
+
+### Interactive Task Pipeline
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-015 | quickPick → inputBox → file output | quickPick 결과가 inputBox prompt/prefix와 downstream interpolation에 전달됨 |
+| IT-016 | quickPick 다중 선택 | `value`와 `values`가 downstream에서 각각 사용 가능 |
+| IT-017 | confirm 취소 중단 | 사용자가 취소한 confirm task가 pipeline을 중단하고 이후 task를 실행하지 않음 |
+
 ## 상세
 
 각 시나리오의 세부 태스크 구성·기대값은 테스트 파일의 주석과 `assert` 문을 정본으로 삼습니다. 이 문서는 의도·커버리지 맵이며, 구현 디테일은 코드에 둡니다.
@@ -68,6 +89,42 @@ shell capture로 얻은 파생 변수(`name`)를 같은 태스크의 `output.fil
 ### IT-008: 잘못된 정규식은 실행 시 에러
 
 `regex: "("` 같이 파싱 불가능한 패턴은 `new RegExp()` 호출 단계에서 즉시 에러를 던지고, 실행이 중단됩니다.
+
+### IT-009: command args/cwd/env interpolation
+
+첫 task가 `target=release`를 capture하고, 다음 `node` task가 `cwd`, `args`, `env`를 모두 사용해 child process로 실행됩니다. `env` 값에는 `${discover.target}`를 넣어 실제 실행 환경 변수로 전달되는지 확인합니다.
+
+### IT-010: workspace 밖 file output 거부
+
+`output.mode: "file"`의 대상 경로가 테스트 workspace 밖이면 `resolveWithinWorkspace`가 거부해야 합니다. 이 시나리오는 pipeline의 파일 쓰기가 단위 유틸리티와 동일한 보안 경계를 따르는지 확인합니다.
+
+### IT-011: overwrite 없는 기존 파일 쓰기 거부
+
+기존 파일이 있을 때 `overwrite: true`가 없으면 pipeline은 실패해야 하고, 기존 파일 내용은 유지되어야 합니다.
+
+### IT-012: `overwrite` 문자열 변수 평가
+
+앞선 task의 출력이 `"TRUE"`일 때 다음 task의 `output.overwrite: "${allow.output}"`이 boolean `true`로 해석되는지 확인합니다. 대소문자는 무시합니다.
+
+### IT-013: 실패한 shell task가 downstream 중단
+
+`node -e`로 stderr를 쓰고 non-zero exit code로 종료하는 task를 실행합니다. 이후 파일 쓰기 task가 실행되지 않아야 하며, reject 메시지에는 stderr가 포함되어야 합니다.
+
+### IT-014: relative `filePath` 해석
+
+`output.filePath`가 `nested/out.txt` 같은 상대 경로이면 action workspace 기준으로 해석되어 workspace 내부에 파일이 생성되어야 합니다.
+
+### IT-015: quickPick → inputBox → file output
+
+테스트에서 VS Code UI API를 stub 처리해 quickPick 선택값을 만든 뒤, 그 값을 inputBox의 prompt/prefix에서 사용합니다. 최종 파일은 `${target.value}`가 올바르게 조합된 값을 받는지 검증합니다.
+
+### IT-016: quickPick 다중 선택
+
+`canPickMany: true`인 quickPick 결과가 `${features.value}`에는 첫 번째 선택, `${features.values}`에는 쉼표로 연결된 전체 선택으로 노출되는지 확인합니다.
+
+### IT-017: confirm 취소 중단
+
+confirm task에서 취소 라벨이 선택되면 pipeline이 reject되고 다음 task가 실행되지 않아야 합니다.
 
 ## 시나리오 추가 절차
 

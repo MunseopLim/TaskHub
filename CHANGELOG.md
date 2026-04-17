@@ -1,5 +1,21 @@
 # Change Log
 
+## [0.4.1] - 2026-04-17
+
+### 테스트 — Integration Test 시나리오 확장
+
+- [docs/integration-tests.md](docs/integration-tests.md)의 시나리오 인덱스를 확장해 `Command Execution + Workspace Safety`, `Interactive Task Pipeline` 그룹을 추가.
+- [src/test/pipelineIntegration.test.ts](src/test/pipelineIntegration.test.ts)에 IT-009~IT-017 시나리오 추가:
+  - `args` / `cwd` / `env` interpolation이 실제 child process 실행에 반영되는지 검증.
+  - workspace 밖 파일 출력 거부, 기존 파일 overwrite 보호, 문자열 기반 `overwrite` 평가 검증.
+  - 실패한 shell task가 downstream 실행을 중단하는지 검증.
+  - 상대 `output.filePath`가 action workspace 기준으로 해석되는지 검증.
+  - `quickPick`, `inputBox`, `confirm` 등 interactive task가 파이프라인 변수 전달 및 취소 흐름과 함께 동작하는지 검증.
+
+### 테스트
+
+- 전체 **748개 테스트 통과**.
+
 ## [0.4.0] - 2026-04-17
 
 ### 기능 — Shell 출력 Parser + 파이프라인 Dry-run
