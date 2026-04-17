@@ -106,7 +106,17 @@ export interface ElfParseResult {
     segments: ElfSegment[];
 }
 
+const ELF32_HEADER_SIZE = 52;
+const ELF32_SH_ENTRY_MIN = 40;
+const ELF_MAX_ENTRIES = 65535;
+
 export function parseElf32(buffer: Buffer): ElfParseResult {
+    if (!buffer || buffer.length < ELF32_HEADER_SIZE) {
+        throw new Error(
+            `ELF file is too small (got ${buffer?.length ?? 0} bytes, need at least ${ELF32_HEADER_SIZE}).`
+        );
+    }
+
     // Validate ELF magic
     for (let i = 0; i < 4; i++) {
         if (buffer[i] !== ELF_MAGIC[i]) {
@@ -127,10 +137,18 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
     }
     const isLittleEndian = dataEncoding === ELFDATA2LSB;
 
-    const read16 = (offset: number): number =>
-        isLittleEndian ? buffer.readUInt16LE(offset) : buffer.readUInt16BE(offset);
-    const read32 = (offset: number): number =>
-        isLittleEndian ? buffer.readUInt32LE(offset) : buffer.readUInt32BE(offset);
+    const read16 = (offset: number): number => {
+        if (offset < 0 || offset + 2 > buffer.length) {
+            throw new Error(`ELF read out of bounds at offset 0x${offset.toString(16)} (read16).`);
+        }
+        return isLittleEndian ? buffer.readUInt16LE(offset) : buffer.readUInt16BE(offset);
+    };
+    const read32 = (offset: number): number => {
+        if (offset < 0 || offset + 4 > buffer.length) {
+            throw new Error(`ELF read out of bounds at offset 0x${offset.toString(16)} (read32).`);
+        }
+        return isLittleEndian ? buffer.readUInt32LE(offset) : buffer.readUInt32BE(offset);
+    };
 
     // ELF32 header fields
     const entryPoint = read32(24);
@@ -145,10 +163,26 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
     if (shOff === 0 || shNum === 0) {
         throw new Error('ELF file has no section headers.');
     }
+    if (shEntSize < ELF32_SH_ENTRY_MIN) {
+        throw new Error(`ELF section header entry size (${shEntSize}) is too small.`);
+    }
+    if (shNum > ELF_MAX_ENTRIES || phNum > ELF_MAX_ENTRIES) {
+        throw new Error(`ELF reports too many table entries (shNum=${shNum}, phNum=${phNum}).`);
+    }
+    const shTableEnd = shOff + shNum * shEntSize;
+    if (shTableEnd > buffer.length) {
+        throw new Error('ELF section header table exceeds file size.');
+    }
+    if (shStrNdx >= shNum) {
+        throw new Error(`ELF section name string table index (${shStrNdx}) is out of range.`);
+    }
 
     // Read section name string table
     const strTabOffset = read32(shOff + shStrNdx * shEntSize + 16);
     const strTabSize = read32(shOff + shStrNdx * shEntSize + 20);
+    if (strTabOffset + strTabSize > buffer.length) {
+        throw new Error('ELF section name string table exceeds file size.');
+    }
 
     const readStringFrom = (tabOffset: number, tabSize: number, nameOffset: number): string => {
         const start = tabOffset + nameOffset;

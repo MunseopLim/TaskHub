@@ -214,6 +214,18 @@ const int x = 5;
             assert.strictEqual(result, 256);
         });
 
+        test('Shift count is clamped to avoid overflow', () => {
+            // Prior code performed `Math.pow(2, 9999)` which becomes Infinity.
+            // The clamped version must return a finite number (possibly null, never NaN/Infinity).
+            const result = MacroExpander.evaluateToNumber('1 << 9999');
+            assert.ok(result === null || Number.isFinite(result), `expected finite or null, got ${result}`);
+        });
+
+        test('Very long expressions are rejected', () => {
+            const result = MacroExpander.evaluateToNumber('(1)' + ' + 0'.repeat(5000));
+            assert.strictEqual(result, null);
+        });
+
         test('Evaluate OR expression', () => {
             const result = MacroExpander.evaluateToNumber('0x01 | 0x02');
             assert.strictEqual(result, 3);

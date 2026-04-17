@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary } from './elfParser';
 import { parseLinkerFile } from './linkerScriptParser';
 import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
@@ -284,7 +285,7 @@ function showPanel(
 
     panel.title = `Memory Map: ${fileName}`;
     panel.webview.html = getWebviewContent(
-        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, hasSymbols
+        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, hasSymbols, panel.webview
     );
 
     // Store region symbols for Go to Symbol command
@@ -318,6 +319,11 @@ export async function goToSymbol() {
     }
 }
 
+function generateMemoryMapNonce(): string {
+    // CSP nonces are a security control; use a CSPRNG, not Math.random().
+    return crypto.randomBytes(16).toString('base64');
+}
+
 function getWebviewContent(
     fileName: string,
     entryPoint: number,
@@ -327,8 +333,12 @@ function getWebviewContent(
     memoryUsage: MemoryUsage[],
     regions: MemoryRegion[],
     textReport: string,
-    hasSymbols?: boolean
+    hasSymbols?: boolean,
+    webview?: vscode.Webview
 ): string {
+    const nonce = generateMemoryMapNonce();
+    const cspSource = webview?.cspSource ?? 'vscode-webview:';
+    const csp = `default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${cspSource};`;
     // Build JSON data for lazy WebView rendering
     const regionJsonData = memoryUsage.map(u => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
@@ -390,10 +400,12 @@ function getWebviewContent(
         };
     });
 
-    // Minimal region card HTML (details rendered lazily by JS)
+    // Minimal region card HTML (details rendered lazily by JS).
+    // Click handlers are attached via delegation in the nonced <script> block below
+    // so the CSP does not need to allow inline event attributes.
     const regionCardsHtml = regionJsonData.map((rd: any, idx: number) => `
         <div class="region-card" id="region-${esc(rd.name)}" data-idx="${idx}">
-            <div class="region-header" onclick="toggleRegion(this)">
+            <div class="region-header" data-action="toggle-region">
                 <span class="fold-icon">▶</span>
                 <strong>${esc(rd.name)}</strong>
                 <span class="region-info">${esc(rd.infoText)}</span>
@@ -448,6 +460,7 @@ function getWebviewContent(
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Memory Map</title>
 <style>
@@ -714,7 +727,7 @@ function getWebviewContent(
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
         ${!hasLinkerData && !hasSymbols ? '<div class="info-note">AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.</div>' : ''}
         ${hasSymbols ? '<div class="info-note">ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.</div>' : ''}
-        <div class="section-heading">Region Details <button onclick="foldAll(false)" title="Expand All">▼ Expand All</button> <button onclick="foldAll(true)" title="Collapse All">▶ Collapse All</button>${hasFuncData ? ' <button onclick="toggleFuncCol()" title="Toggle Function column">Function ▶</button>' : ''}</div>
+        <div class="section-heading">Region Details <button data-action="expand-all" title="Expand All">▼ Expand All</button> <button data-action="collapse-all" title="Collapse All">▶ Collapse All</button>${hasFuncData ? ' <button data-action="toggle-func-col" title="Toggle Function column">Function ▶</button>' : ''}</div>
         ${regionCardsHtml}
     ` : `
         <div class="no-regions">
@@ -741,7 +754,7 @@ function getWebviewContent(
 
 <button id="scrollTop" class="scroll-top" title="맨 위로">↑</button>
 
-<script>
+<script nonce="${nonce}">
 const RD = ${JSON.stringify(regionJsonData)};
 (function() {
     const vscode = acquireVsCodeApi();
@@ -785,7 +798,7 @@ const RD = ${JSON.stringify(regionJsonData)};
                 }).join('');
                 return '<tr><td>' + esc(o.n) + '</td><td class="num" colspan="2"></td><td class="num"></td><td class="num">' + o.tss + '</td><td class="num">' + o.ts + '</td><td class="num">' + o.p + '%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:' + o.bw + '%;background:var(--ok)"></div></div></td></tr>' + dRows;
             }).join('');
-            h += '<div class="obj-summary-header" onclick="toggleObjSummary(this)"><span class="fold-icon">\u25B6</span> Object Summary (' + rd.objSummary.length + ') <button onclick="event.stopPropagation();toggleObjDetailRows(this)" title="Toggle section details">Details \u25B6</button></div>';
+            h += '<div class="obj-summary-header" data-action="toggle-obj-summary"><span class="fold-icon">\u25B6</span> Object Summary (' + rd.objSummary.length + ') <button data-action="toggle-obj-detail-rows" title="Toggle section details">Details \u25B6</button></div>';
             h += '<div class="obj-summary-body" style="display:none"><table class="obj-summary-table sortable-table"><thead><tr><th data-sort="name">Object</th><th class="num">Section</th><th class="num">Address</th><th class="num">End</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th class="num" data-sort="pct">%</th><th></th></tr></thead><tbody>' + oRows + '</tbody></table></div>';
         }
 
@@ -873,6 +886,10 @@ const RD = ${JSON.stringify(regionJsonData)};
     const searchInput = document.getElementById('searchInput');
     const searchCount = document.getElementById('searchCount');
     let searchTimeout;
+    // Incremental filter cache: when the new query extends the previous one,
+    // we only have to filter the previous result set, not the full dataset.
+    // lastSearch.fd[idx] holds the last filtered segments array per region index.
+    let lastSearch = { q: '', fd: null };
 
     searchInput.addEventListener('input', function() {
         clearTimeout(searchTimeout);
@@ -883,29 +900,33 @@ const RD = ${JSON.stringify(regionJsonData)};
         const q = searchInput.value.trim().toLowerCase();
         curQ = q;
         let mc = 0;
+        const canExtend = q && lastSearch.q && q.length > lastSearch.q.length && q.indexOf(lastSearch.q) === 0 && lastSearch.fd;
+        const nextFd = [];
 
         RD.forEach(function(rd, idx) {
             const card = document.querySelector('.region-card[data-idx="' + idx + '"]');
             let rm = 0;
 
+            const src = canExtend ? lastSearch.fd[idx] : rd.segments;
+            const filtered = q ? src.filter(function(seg) { return matchSeg(seg, q); }) : rd.segments;
+            nextFd[idx] = filtered;
             if (q) {
-                rd.segments.forEach(function(seg) { if (matchSeg(seg, q)) rm++; });
+                rm = filtered.length;
                 mc += rm;
             }
 
             // Update virtual tables
             const vt = vtMap.get(idx);
             if (vt) {
-                vt.fd = q ? vt.data.filter(function(e) { return matchSeg(e, q); }) : vt.data;
+                vt.fd = filtered;
                 vt.vp.scrollTop = 0;
                 vt.ls = -1;
                 renderVT(vt);
             } else if (rendered.has(idx)) {
-                // Non-virtual rendered table: re-render tbody from data
+                // Non-virtual rendered table: re-render tbody from data (reuse filtered array above)
                 const tbody = card.querySelector('.section-table tbody');
                 if (tbody) {
-                    const data = q ? rd.segments.filter(function(e) { return matchSeg(e, q); }) : rd.segments;
-                    tbody.innerHTML = data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi); }).join('');
+                    tbody.innerHTML = filtered.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi); }).join('');
                 }
             }
 
@@ -936,6 +957,7 @@ const RD = ${JSON.stringify(regionJsonData)};
         });
 
         searchCount.textContent = q ? mc + ' matches' : '';
+        lastSearch = { q: q, fd: nextFd };
     }
 
     // --- Expand All / Collapse All ---
@@ -1128,6 +1150,36 @@ const RD = ${JSON.stringify(regionJsonData)};
     });
     scrollBtn.addEventListener('click', function() {
         window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+
+    // --- Delegated click handlers (replaces inline onclick for CSP compliance) ---
+    document.addEventListener('click', function(ev) {
+        const target = ev.target;
+        if (!target || target.nodeType !== 1) { return; }
+        const actionEl = target.closest('[data-action]');
+        if (!actionEl) { return; }
+        const action = actionEl.getAttribute('data-action');
+        switch (action) {
+            case 'toggle-region':
+                window.toggleRegion(actionEl);
+                break;
+            case 'expand-all':
+                window.foldAll(false);
+                break;
+            case 'collapse-all':
+                window.foldAll(true);
+                break;
+            case 'toggle-func-col':
+                window.toggleFuncCol();
+                break;
+            case 'toggle-obj-summary':
+                window.toggleObjSummary(actionEl);
+                break;
+            case 'toggle-obj-detail-rows':
+                ev.stopPropagation();
+                window.toggleObjDetailRows(actionEl);
+                break;
+        }
     });
 })();
 </script>

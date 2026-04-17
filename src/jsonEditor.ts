@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { t } from './i18n';
 
 let currentPanel: vscode.WebviewPanel | undefined;
@@ -130,7 +131,7 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
     }
 
     currentPanel.title = `JSON Editor: ${fileName}`;
-    currentPanel.webview.html = getWebviewContent(jsonData, filePath);
+    currentPanel.webview.html = getWebviewContent(jsonData, filePath, currentPanel.webview);
 
     currentMessageDisposable?.dispose();
     currentMessageDisposable = currentPanel.webview.onDidReceiveMessage(
@@ -170,15 +171,23 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
     );
 }
 
-function getWebviewContent(data: Record<string, unknown>, filePath: string): string {
+function generateNonce(): string {
+    // CSP nonces are a security control; use a CSPRNG, not Math.random().
+    return crypto.randomBytes(16).toString('base64');
+}
+
+function getWebviewContent(data: Record<string, unknown>, filePath: string, webview: vscode.Webview): string {
     // Encode data as base64 to avoid any HTML/JS parsing issues with special characters
     const jsonBase64 = Buffer.from(JSON.stringify(data), 'utf-8').toString('base64');
     const escapedPath = filePath.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const nonce = generateNonce();
+    const csp = `default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};`;
 
     return /*html*/`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JSON Editor</title>
 <style>
@@ -459,7 +468,7 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string): str
     <div class="table-wrapper" id="tableWrapper"></div>
     <div id="errorMsg" style="color:var(--danger);padding:12px;display:none;"></div>
 
-<script>
+<script nonce="${nonce}">
 (function() {
     const errorEl = document.getElementById('errorMsg');
     function showError(msg) {

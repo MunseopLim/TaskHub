@@ -346,5 +346,38 @@ suite('HexParser Test Suite', () => {
             assert.ok(html.includes('Intel HEX'));
             assert.ok(html.includes('fw.hex'));
         });
+
+        test('should include CSP and nonce in generated HTML', () => {
+            const result = parseIntelHex([
+                ':020000040800F2',
+                ':0400000000200008D4',
+                ':00000001FF'
+            ].join('\n'));
+            const html = buildHexViewerHtml('fw.hex', result);
+            assert.ok(html.includes('Content-Security-Policy'), 'missing CSP meta');
+            // Base64 nonce from 16 random bytes: 22 chars of [A-Za-z0-9+/] plus 2 '=' pad.
+            assert.ok(/<script nonce="[A-Za-z0-9+/]{22}=="/.test(html), 'missing script nonce');
+        });
+    });
+
+    suite('defensive limits', () => {
+        test('parseIntelHex should ignore data records with invalid byteCount', () => {
+            // byteCount field 'ZZ' is NaN; the record must be skipped without throwing.
+            const result = parseIntelHex(':ZZ000000000000\n:00000001FF');
+            assert.strictEqual(result.byteCount, 0);
+        });
+
+        test('buildHexViewerHtml rejects sparse files with a huge address span', () => {
+            // Two data bytes at very different addresses: passes the byteCount cap
+            // but would require allocating a multi-GB flat buffer without the span cap.
+            const result = {
+                format: 'intel' as const,
+                data: new Map<number, number>([[0, 0xAA], [0x20000000, 0xBB]]),
+                minAddress: 0,
+                maxAddress: 0x20000000,
+                byteCount: 2,
+            };
+            assert.throws(() => buildHexViewerHtml('sparse.hex', result), /display limit/);
+        });
     });
 });

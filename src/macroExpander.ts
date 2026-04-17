@@ -238,16 +238,19 @@ export class MacroExpander {
             });
 
             // Try to evaluate expressions with operators
-            // For safety, only allow specific characters
+            // For safety, only allow specific characters, and bound length to avoid ReDoS/huge eval payloads.
+            if (cleaned.length > 4096) { return null; }
             const safeExpression = /^[\d\s+\-*/<>|&^()]+$/;
             if (safeExpression.test(cleaned)) {
-                // Replace shift operators with multiplication/division
-                // Handle both with and without surrounding whitespace
+                // Replace shift operators with multiplication/division; clamp shift count to 63 bits
+                // to match C semantics for 64-bit integers and avoid Math.pow overflow surprises.
                 cleaned = cleaned.replace(/(\d+)\s*<<\s*(\d+)/g, (_, num, shift) => {
-                    return (parseInt(num) * Math.pow(2, parseInt(shift))).toString();
+                    const s = Math.min(63, Math.max(0, parseInt(shift, 10) || 0));
+                    return (parseInt(num, 10) * Math.pow(2, s)).toString();
                 });
                 cleaned = cleaned.replace(/(\d+)\s*>>\s*(\d+)/g, (_, num, shift) => {
-                    return Math.floor(parseInt(num) / Math.pow(2, parseInt(shift))).toString();
+                    const s = Math.min(63, Math.max(0, parseInt(shift, 10) || 0));
+                    return Math.floor(parseInt(num, 10) / Math.pow(2, s)).toString();
                 });
 
                 // Use Function constructor for safe evaluation

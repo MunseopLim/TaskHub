@@ -19,13 +19,56 @@ interface TypeConfigCacheEntry {
     config: TypeConfigFile | undefined;
 }
 
+/** Maximum number of taskhub_types.json files cached across workspaces. */
+const TYPE_CONFIG_CACHE_MAX = 16;
+
+/** Maximum wall-clock time for any LSP command invoked from hover. */
+const LSP_TIMEOUT_MS = 3000;
+
+/**
+ * Race a promise against a timer and the hover cancellation token.
+ * Returns undefined when the LSP call does not complete in time or the user moves the cursor.
+ */
+function withLspTimeout<T>(
+    call: Thenable<T>,
+    token?: vscode.CancellationToken,
+    timeoutMs: number = LSP_TIMEOUT_MS
+): Promise<T | undefined> {
+    return new Promise<T | undefined>(resolve => {
+        let settled = false;
+        const finish = (value: T | undefined) => {
+            if (settled) { return; }
+            settled = true;
+            resolve(value);
+        };
+        const timer = setTimeout(() => finish(undefined), timeoutMs);
+        const onCancel = token?.onCancellationRequested(() => finish(undefined));
+        Promise.resolve(call).then(
+            (value) => { clearTimeout(timer); onCancel?.dispose(); finish(value); },
+            () => { clearTimeout(timer); onCancel?.dispose(); finish(undefined); }
+        );
+    });
+}
+
 /**
  * Hover provider that shows number base conversions for C/C++ numeric literals
  * and SFR bit field information
  */
 export class NumberBaseHoverProvider implements vscode.HoverProvider {
-    private isProcessingHover: boolean = false;
+    /** Guard against pathological lines (minified/generated) that make regex matching slow. */
+    public static readonly MAX_LINE_LENGTH = 10_000;
+
+    /**
+     * Active LSP hover invocations keyed by `${uri}:${line}:${char}`.
+     * Prevents re-entry when our own hover provider triggers `executeHoverProvider`
+     * at the same position and avoids races when the cursor moves quickly.
+     */
+    private readonly activeHoverCalls = new Set<string>();
     private readonly typeConfigCache = new Map<string, TypeConfigCacheEntry>();
+
+    private hoverKey(uri: vscode.Uri, position: vscode.Position): string {
+        return `${uri.toString()}:${position.line}:${position.character}`;
+    }
 
     /**
      * Regex patterns for detecting different number formats
@@ -49,10 +92,24 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         position: vscode.Position,
         token: vscode.CancellationToken
     ): Promise<vscode.Hover | undefined> {
-        // Prevent infinite recursion when calling hover provider
-        if (this.isProcessingHover) {
+        // Prevent re-entry at the same document position (hover provider recursion guard).
+        const key = this.hoverKey(document.uri, position);
+        if (this.activeHoverCalls.has(key)) {
             return undefined;
         }
+        this.activeHoverCalls.add(key);
+        try {
+            return await this.provideHoverImpl(document, position, token);
+        } finally {
+            this.activeHoverCalls.delete(key);
+        }
+    }
+
+    private async provideHoverImpl(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        token: vscode.CancellationToken
+    ): Promise<vscode.Hover | undefined> {
 
         // Check if the feature is enabled
         const config = vscode.workspace.getConfiguration('taskhub.hover');
@@ -65,6 +122,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         const line = document.lineAt(position.line);
         const lineText = line.text;
         const charPosition = position.character;
+
+        // Guard against extremely long lines (minified sources, generated code).
+        // Regex matching on 50k+ char lines causes visible hover stalls.
+        if (lineText.length > NumberBaseHoverProvider.MAX_LINE_LENGTH) {
+            return undefined;
+        }
 
         // First, try to detect SFR bit field
         const bitFieldHover = await this.tryBitFieldHover(document, position);
@@ -144,10 +207,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             const word = document.getText(wordRange);
 
             // Use LSP to find the definition of the symbol at this position
-            const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
-                'vscode.executeDefinitionProvider',
-                document.uri,
-                position
+            const definitions = await withLspTimeout(
+                vscode.commands.executeCommand<vscode.Location[]>(
+                    'vscode.executeDefinitionProvider',
+                    document.uri,
+                    position
+                )
             );
 
             if (!definitions || definitions.length === 0) {
@@ -157,14 +222,16 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             // Get the first definition
             const definition = definitions[0];
 
-            // Try to get hover information at the definition location
-            // This will give us the preprocessed value for enums
-            this.isProcessingHover = true;
-            try {
-                const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
-                    'vscode.executeHoverProvider',
-                    definition.uri,
-                    definition.range.start
+            // Try to get hover information at the definition location.
+            // Re-entry at the same position is already blocked by the hoverKey guard in provideHover,
+            // so no extra flag is required here.
+            {
+                const hovers = await withLspTimeout(
+                    vscode.commands.executeCommand<vscode.Hover[]>(
+                        'vscode.executeHoverProvider',
+                        definition.uri,
+                        definition.range.start
+                    )
                 );
 
                 if (hovers && hovers.length > 0) {
@@ -185,8 +252,6 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                         }
                     }
                 }
-            } finally {
-                this.isProcessingHover = false;
             }
 
             // Fallback: Open the document containing the definition
@@ -779,9 +844,11 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         // If we found limited results, try workspace symbol search for more
         if (allLocations.length <= 1 && word) {
-            const workspaceSymbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
-                'vscode.executeWorkspaceSymbolProvider',
-                word
+            const workspaceSymbols = await withLspTimeout(
+                vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+                    'vscode.executeWorkspaceSymbolProvider',
+                    word
+                )
             );
 
             if (workspaceSymbols) {
@@ -914,11 +981,13 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 return null;
             }
 
-            // Use LSP to find definition
-            const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
-                'vscode.executeDefinitionProvider',
-                document.uri,
-                position
+            // Use LSP to find definition (guarded by a short timeout to avoid UI stalls)
+            const definitions = await withLspTimeout(
+                vscode.commands.executeCommand<vscode.Location[]>(
+                    'vscode.executeDefinitionProvider',
+                    document.uri,
+                    position
+                )
             );
 
             if (!definitions || definitions.length === 0) {
@@ -1005,14 +1074,17 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 }
 
                 // Get hover information to extract type
-                this.isProcessingHover = true;
+                // Re-entry guard is handled at provideHover level (activeHoverCalls);
+                // we still bound the wait to keep the UI responsive.
                 const exprPos = new vscode.Position(position.line, exprStart + fullExpression.length - 1);
 
-                try {
-                    const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
-                        'vscode.executeHoverProvider',
-                        document.uri,
-                        exprPos
+                {
+                    const hovers = await withLspTimeout(
+                        vscode.commands.executeCommand<vscode.Hover[]>(
+                            'vscode.executeHoverProvider',
+                            document.uri,
+                            exprPos
+                        )
                     );
 
                     if (hovers && hovers.length > 0) {
@@ -1047,8 +1119,6 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                             }
                         }
                     }
-                } finally {
-                    this.isProcessingHover = false;
                 }
 
                 // Fallback: Try using definition provider
@@ -1056,10 +1126,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                     const varPosition = lineText.indexOf(fullExpression.split('.')[0]);
                     if (varPosition !== -1) {
                         const varPos = new vscode.Position(position.line, varPosition);
-                        const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
-                            'vscode.executeDefinitionProvider',
-                            document.uri,
-                            varPos
+                        const definitions = await withLspTimeout(
+                            vscode.commands.executeCommand<vscode.Location[]>(
+                                'vscode.executeDefinitionProvider',
+                                document.uri,
+                                varPos
+                            )
                         );
 
                         if (definitions && definitions.length > 0) {
@@ -1090,10 +1162,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             const varPosition = lineText.indexOf(fullExpression.split('.')[0]);
             if (varPosition !== -1) {
                 const varPos = new vscode.Position(position.line, varPosition);
-                const varDefinitions = await vscode.commands.executeCommand<vscode.Location[]>(
-                    'vscode.executeDefinitionProvider',
-                    document.uri,
-                    varPos
+                const varDefinitions = await withLspTimeout(
+                    vscode.commands.executeCommand<vscode.Location[]>(
+                        'vscode.executeDefinitionProvider',
+                        document.uri,
+                        varPos
+                    )
                 );
 
                 if (varDefinitions && varDefinitions.length > 0) {
@@ -1118,10 +1192,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                             varDefLine.text.indexOf(fullTypeName)
                         );
 
-                        const typeDefinitions = await vscode.commands.executeCommand<vscode.Location[]>(
-                            'vscode.executeDefinitionProvider',
-                            varDefDoc.uri,
-                            typePos
+                        const typeDefinitions = await withLspTimeout(
+                            vscode.commands.executeCommand<vscode.Location[]>(
+                                'vscode.executeDefinitionProvider',
+                                varDefDoc.uri,
+                                typePos
+                            )
                         );
 
                         if (typeDefinitions && typeDefinitions.length > 0) {
@@ -1410,11 +1486,21 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return undefined;
         }
 
-        const configFilePath = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'taskhub_types.json').fsPath;
+        const rawPath = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'taskhub_types.json').fsPath;
+        // Normalize path (resolve symlinks) to avoid caching duplicates for the same real file.
+        let configFilePath: string;
+        try {
+            configFilePath = fs.realpathSync(rawPath);
+        } catch {
+            configFilePath = rawPath;
+        }
 
         // Short-circuit for absent-file cache before making any fs call
         const existing = this.typeConfigCache.get(configFilePath);
         if (existing && existing.mtime === -1) {
+            // Touch LRU ordering
+            this.typeConfigCache.delete(configFilePath);
+            this.typeConfigCache.set(configFilePath, existing);
             return undefined;
         }
 
@@ -1422,17 +1508,35 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             const stat = fs.statSync(configFilePath);
             const mtime = stat.mtimeMs;
             if (existing && existing.mtime === mtime) {
+                this.typeConfigCache.delete(configFilePath);
+                this.typeConfigCache.set(configFilePath, existing);
                 return existing.config;
             }
 
             const configContent = fs.readFileSync(configFilePath, 'utf8');
             const config = StructSizeCalculator.loadTypeConfig(JSON.parse(configContent));
-            this.typeConfigCache.set(configFilePath, { mtime, config });
+            this.setCache(configFilePath, { mtime, config });
             return config;
         } catch {
-            // File does not exist or is unreadable — cache as absent to avoid repeated stat calls
-            this.typeConfigCache.set(configFilePath, { mtime: -1, config: undefined });
+            // File does not exist or is unreadable — cache as absent to avoid repeated stat calls.
+            // Prefer the last-known-good config when parse fails transiently.
+            if (existing && existing.config) {
+                return existing.config;
+            }
+            this.setCache(configFilePath, { mtime: -1, config: undefined });
             return undefined;
+        }
+    }
+
+    private setCache(key: string, entry: TypeConfigCacheEntry): void {
+        if (this.typeConfigCache.has(key)) {
+            this.typeConfigCache.delete(key);
+        }
+        this.typeConfigCache.set(key, entry);
+        while (this.typeConfigCache.size > TYPE_CONFIG_CACHE_MAX) {
+            const oldest = this.typeConfigCache.keys().next().value;
+            if (oldest === undefined) { break; }
+            this.typeConfigCache.delete(oldest);
         }
     }
 

@@ -350,6 +350,8 @@ export class StructSizeCalculator {
      * Calculate padding needed to align to given alignment
      */
     private calculatePadding(currentOffset: number, alignment: number): number {
+        // Guard against zero/negative alignment from misconfigured types (modulo 0 → NaN/hang).
+        if (!Number.isFinite(alignment) || alignment <= 0) { return 0; }
         const remainder = currentOffset % alignment;
         return remainder === 0 ? 0 : alignment - remainder;
     }

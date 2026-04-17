@@ -130,7 +130,10 @@ suite('ELF Parser Test Suite', () => {
         });
 
         test('should throw for non-ELF file', () => {
-            const buf = Buffer.from('Not an ELF file');
+            // Use a buffer larger than the ELF header size so the size-guard does not
+            // short-circuit before the magic-number check runs.
+            const buf = Buffer.alloc(64);
+            buf.write('Not an ELF file', 0);
             assert.throws(() => parseElf32(buf), /invalid magic number/);
         });
 
@@ -475,6 +478,18 @@ suite('ELF Parser Test Suite', () => {
             // Should show section-level only
             assert.ok(flash.sections.find(s => s.name === '.text'));
             assert.ok(!flash.sections.find(s => s.name === 'main'));
+        });
+    });
+
+    suite('defensive header validation', () => {
+        test('should reject a buffer that is too small for the ELF header', () => {
+            assert.throws(() => parseElf32(Buffer.alloc(10)), /too small/);
+        });
+
+        test('should reject a buffer whose magic bytes are wrong', () => {
+            const buf = Buffer.alloc(64);
+            buf[0] = 0x00; buf[1] = 0x00; buf[2] = 0x00; buf[3] = 0x00;
+            assert.throws(() => parseElf32(buf), /valid ELF/);
         });
     });
 });

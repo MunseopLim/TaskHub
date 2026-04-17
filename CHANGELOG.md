@@ -1,5 +1,76 @@
 # Change Log
 
+## [0.3.13] - 2026-04-17
+
+### Fixed (2차 리뷰 반영)
+
+- **Memory Map 컨트롤 CSP 호환성**
+  - Region 확장/접기, Expand All/Collapse All, Function 컬럼 토글, Object Summary 컨트롤이 인라인 `onclick`으로 연결되어 있어 v0.3.12의 CSP(`script-src 'nonce-…'`)에서 차단되던 문제 수정.
+  - 모든 인라인 핸들러를 제거하고 `data-action` 속성 + nonce 스크립트 내 위임(delegated) 클릭 리스너로 전환.
+- **HEX/SREC sparse 주소 범위 보호**
+  - `hexParser`의 엔트리 수 cap은 통과하지만 극단적으로 떨어진 두 주소(예: 0, 0x20000000)만 포함된 파일이 멀티-GB `flat/gap buffer`를 강제 할당하는 문제 수정.
+  - `buildHexViewerHtml`에 `HEX_VIEWER_MAX_SPAN = 128 MB` 상한 및 명시적 에러 메시지 추가. openPanel/HexEditorProvider 두 진입점 모두 try/catch로 안전 처리.
+- **상대 `output.filePath`의 워크스페이스 기준 resolve**
+  - `resolveWithinWorkspace(targetPath, roots, baseDir?)` 시그니처에 `baseDir` 추가. 상대 경로는 `process.cwd()`가 아니라 태스크의 워크스페이스 폴더(`defaultWorkspace`) 기준으로 resolve됨.
+  - 기존 `"filePath": "report.txt"` 같은 설정이 VS Code 실행 cwd에 따라 예측 불가하게 작동하던 회귀를 차단.
+  - 회귀 테스트 4종 추가 (상대 경로/서브 경로/`..` 탈출/baseDir 생략 시 첫 루트 fallback).
+- **CSP nonce 생성기를 CSPRNG로 전환**
+  - `hexViewer`, `jsonEditor`, `memoryMapViewer` 세 곳의 nonce를 `Math.random()` 기반에서 `crypto.randomBytes(16).toString('base64')`로 교체.
+
+### 테스트
+
+- `resolveWithinWorkspace` 상대 경로 관련 회귀 테스트 4종 추가.
+- `buildHexViewerHtml` sparse 범위 거부 테스트 추가.
+- 전체 **662개 테스트 통과**.
+
+## [0.3.12] - 2026-04-17
+
+### Security
+
+**파이프라인 변수 치환 강화 (`interpolatePipelineVariables`)**
+- 치환 값의 null 바이트(`\0`) 삽입을 차단 (쉘 인자 조기 종료 방지)
+- 치환 값 최대 길이 32KB 제한 (메모리/명령 길이 보호)
+- 오브젝트/배열은 치환 대신 placeholder 원형 유지 (`${...}` 그대로)
+- `sanitizeInterpolatedValue` 함수 export로 단위 테스트 가능
+
+**작업 출력 파일의 경로 탈출 방지**
+- Task output mode `file`에서 사용자 JSON 및 `${var}` 치환 결과를 쓰기 전에 워크스페이스 루트 내부인지 검증
+- `resolveWithinWorkspace(targetPath, roots)` 추가 — path.resolve 후 path.relative 검사
+- 워크스페이스 외부로 향하는 경로는 거부
+
+### 성능/견고성 (파서)
+
+- `elfParser`: ELF32 헤더 최소 크기(52B) 사전 가드, `read16`/`read32` 범위 검증, section header 테이블 초과 검증, `shStrNdx` 범위 검증
+- `hexParser`: Intel HEX/SREC에 `HEX_MAX_BYTE_ENTRIES`(100M) 상한 및 레코드당 최대 255바이트 제한 추가 — 악의적 파일로 인한 메모리 폭주 방지
+- `macroExpander`: shift 카운트를 0–63 범위로 clamp, 4KB를 초과하는 수식은 null 반환
+- `structSizeCalculator`: `calculatePadding`에서 alignment=0/음수일 때 무한 루프 방지 (0 리턴)
+
+### 성능/안정성 (Hover)
+
+- `NumberBaseHoverProvider`: 모든 LSP 명령(`executeDefinitionProvider`, `executeHoverProvider`, `executeWorkspaceSymbolProvider`)을 공통 `withLspTimeout(3s)`로 래핑 — UI 프리징 방지
+- 재귀 방지 플래그 `isProcessingHover`를 `activeHoverCalls: Set<string>`(uri+position 기준)으로 재설계 — 다중 hover 이벤트 경합 제거
+- 10,000자를 초과하는 라인은 hover 스킵 (정규식 ReDoS/성능 보호)
+- `taskhub_types.json` 캐시에 LRU 한도(16개) + `fs.realpath` 정규화 + 파싱 실패 시 마지막 정상 설정 재사용
+
+### 성능/안정성 (WebView)
+
+- `hexViewer`, `jsonEditor`, `memoryMapViewer` 3개 WebView 전체에 **CSP(Content-Security-Policy) + nonce 기반 스크립트** 도입
+  - `default-src 'none'; script-src 'nonce-<...>'; style-src <cspSource> 'unsafe-inline'; img-src <cspSource> data:; font-src <cspSource>;`
+  - 외부 리소스/인라인 스크립트 주입 경로 차단
+- `hexViewer`의 에러 HTML 출력에서 파일명·메시지 삽입을 `escapeHtml`(=`esc`) 경유로 전환 (XSS 방어)
+- Memory Map 검색: 이전 쿼리가 새 쿼리의 접두사인 경우 필터 결과 재사용 (증분 검색)
+- Workspace folder 변경 핸들러에 150ms debounce 추가 — 짧은 시간 내 다중 이벤트로 watcher 중복/누수 방지
+
+### 테스트
+
+- `interpolatePipelineVariables` 및 `sanitizeInterpolatedValue`에 null byte/길이 제한/타입 검증 테스트 추가
+- `resolveWithinWorkspace` 다중 루트·traversal·null byte 케이스 테스트 추가
+- `elfParser`에 too-small 버퍼 / 잘못된 매직 넘버 방어 테스트 추가
+- `hexParser`에 CSP+nonce 출력 검증 및 잘못된 byteCount 무시 테스트 추가
+- `structSizeCalculator`에 alignment=0 regression 테스트 추가
+- `macroExpander`에 shift clamp 및 초대형 수식 테스트 추가
+- **전체 657개 테스트 통과**
+
 ## [0.3.11] - 2026-04-17
 
 ### Fixed

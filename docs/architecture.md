@@ -185,3 +185,31 @@ interface FavoriteEntry {
 *   breakpoint 설정 가능
 *   Console 로그: `Developer: Toggle Developer Tools`
 *   Output 패널: "TaskHub" 채널에서 로그 확인
+
+## 보안 가드
+
+TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, 위험한 입력에 대해 다음 방어 계층을 유지한다:
+
+1.  **변수 치환(`interpolatePipelineVariables`) 입력 정화**
+    *   `sanitizeInterpolatedValue(value)`에서 null 바이트(`\0`)를 거부하고 32KB 길이 상한을 강제한다.
+    *   object/array 값은 치환 대신 placeholder를 그대로 유지한다 (`${id.prop}` 원형).
+2.  **파일 경로 검증(`resolveWithinWorkspace`)**
+    *   Task output mode가 `file`일 때, 치환 결과를 `path.resolve` → `path.relative(root, resolved)` 순으로 검사해 워크스페이스 루트 외부 쓰기를 거부한다.
+    *   상대 경로(`"report.txt"`, `"build/out.log"` 등)는 `process.cwd()`가 아니라 실행 중인 액션의 워크스페이스 폴더(`defaultWorkspace`) 기준으로 resolve한다. 이를 위해 `resolveWithinWorkspace(targetPath, roots, baseDir)` 시그니처의 3번째 인자로 액션 워크스페이스를 전달한다.
+3.  **쉘 인자 이스케이프**
+    *   POSIX: `quotePosixArgument`가 각 인자를 싱글쿼트로 감싸고 내부 싱글쿼트는 `'\''`로 이스케이프.
+    *   Windows: `buildPowerShellInvocation`이 `quotePowerShellArgument`로 각 인자를 싱글쿼트로 감싸고 PowerShell `-EncodedCommand`로 전달.
+4.  **WebView 보안**
+    *   모든 WebView(HexViewer, JSON Editor, Memory Map)는 `Content-Security-Policy` 메타 태그를 포함한다.
+    *   `script-src`는 패널마다 새로 생성되는 16바이트 nonce만 허용한다. nonce는 `crypto.randomBytes(16).toString('base64')`(CSPRNG)로 생성되며, 인라인 스크립트 전부에 동일 nonce를 부여한다.
+    *   CSP가 인라인 이벤트 핸들러를 차단하므로, 모든 UI 컨트롤은 `data-action` 속성을 달고 nonce 스크립트 내부의 위임(delegated) 리스너에서 처리한다. 새 버튼/컨트롤을 추가할 때 절대 `onclick="..."` 형태를 쓰지 말 것.
+    *   에러/정보 HTML 출력은 `escapeHtml` 경유를 강제한다.
+5.  **파서 입력 한도**
+    *   ELF32: 헤더 최소 크기/섹션 테이블/string table 범위를 선검증.
+    *   Intel HEX/SREC: 레코드당 최대 255바이트, 누적 `HEX_MAX_BYTE_ENTRIES` 초과 시 throw.
+    *   Hex Viewer 렌더링: `HEX_VIEWER_MAX_SPAN = 128 MB`. 주소 범위가 이를 초과하면(sparse 파일) 렌더링 거부.
+    *   Macro 전처리: shift 카운트 0–63 clamp, 수식 길이 4KB 제한.
+6.  **Hover 타임아웃**
+    *   `withLspTimeout(promise, token, 3000)`으로 모든 LSP 호출을 감싼다. `activeHoverCalls: Set<string>`이 동일 위치 재진입을 막는다.
+
+보안 관련 변경 시 관련 유닛 테스트(`src/test/extension.test.ts`의 `sanitizeInterpolatedValue`, `resolveWithinWorkspace`, 파서별 `defensive` suite)를 함께 갱신한다.

@@ -985,5 +985,22 @@ suite('StructSizeCalculator Test Suite', () => {
             const result2 = customCalc.calculateStructSize('WithDefault', lines2, 0);
             assert.strictEqual(result2.members[0].size, 4);
         });
+
+        test('should not hang when a custom type declares zero alignment', () => {
+            // Guard against the padding-modulo-0 regression.
+            const config = StructSizeCalculator.loadTypeConfig({
+                types: { Zero: { size: 4, alignment: 0 } }
+            });
+            const calc = new StructSizeCalculator(config);
+            const lines = [
+                'struct S {',
+                '    Zero a;',
+                '    int b;',
+                '};'
+            ];
+            const result = calc.calculateStructSize('S', lines, 0);
+            assert.strictEqual(result.success, true);
+            assert.ok(Number.isFinite(result.totalSize));
+        });
     });
 });

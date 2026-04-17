@@ -418,6 +418,72 @@ export function findActionById(actions: ActionItem[], id: string): ActionItem | 
     return undefined;
 }
 
+const INTERPOLATED_VALUE_MAX_LENGTH = 32 * 1024;
+
+export function resolveWithinWorkspace(
+    targetPath: string,
+    workspaceRoots: string[],
+    baseDir?: string
+): string {
+    if (!targetPath || typeof targetPath !== 'string') {
+        throw new Error('A file path is required.');
+    }
+    if (/\x00/.test(targetPath)) {
+        throw new Error('File path contains a null byte, which is not allowed.');
+    }
+    const normalizedRoots = workspaceRoots
+        .filter(root => typeof root === 'string' && root.length > 0)
+        .map(root => path.resolve(root));
+    if (normalizedRoots.length === 0) {
+        throw new Error('No workspace folder is available to validate the path.');
+    }
+    // Relative paths must resolve against the action's workspace, NOT process.cwd().
+    // Configs with "filePath": "report.txt" would otherwise land in an arbitrary
+    // directory determined by how VS Code was launched.
+    let resolved: string;
+    if (path.isAbsolute(targetPath)) {
+        resolved = path.resolve(targetPath);
+    } else {
+        const base = baseDir && baseDir.length > 0 ? path.resolve(baseDir) : normalizedRoots[0];
+        resolved = path.resolve(base, targetPath);
+    }
+    const isInside = normalizedRoots.some(root => {
+        const rel = path.relative(root, resolved);
+        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    });
+    if (!isInside) {
+        throw new Error(
+            `Refusing to access '${resolved}' because it is outside the current workspace folder(s).`
+        );
+    }
+    return resolved;
+}
+
+function getWorkspaceRoots(): string[] {
+    return (vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath);
+}
+
+export function sanitizeInterpolatedValue(value: unknown): string | undefined {
+    if (value === undefined || value === null) { return undefined; }
+    let stringValue: string;
+    if (typeof value === 'string') {
+        stringValue = value;
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+        stringValue = String(value);
+    } else {
+        return undefined;
+    }
+    if (stringValue.length > INTERPOLATED_VALUE_MAX_LENGTH) {
+        throw new Error(
+            `Interpolated value exceeds maximum length (${INTERPOLATED_VALUE_MAX_LENGTH} chars).`
+        );
+    }
+    if (/\x00/.test(stringValue)) {
+        throw new Error('Interpolated value contains a null byte, which is not allowed.');
+    }
+    return stringValue;
+}
+
 export function interpolatePipelineVariables(template: string, context: any): string {
     if (typeof template !== 'string') { return template; }
     const regex = /\${([^}]+)}/g;
@@ -430,7 +496,8 @@ export function interpolatePipelineVariables(template: string, context: any): st
         else if (context[stepId] && context[stepId].output !== undefined) { foundValue = context[stepId].output; }
         else if (context[stepId] && context[stepId].outputDir !== undefined) { foundValue = context[stepId].outputDir; }
         else if (context[expression] !== undefined) { foundValue = context[expression]; }
-        if (foundValue !== undefined) { return foundValue; }
+        const sanitized = sanitizeInterpolatedValue(foundValue);
+        if (sanitized !== undefined) { return sanitized; }
         return match;
     });
 }
@@ -2215,12 +2282,17 @@ async function executeSingleTask(task: import('./schema').Task, allResults: any,
                 break;
             case 'file':
                 if (!interpolatedOutput.filePath) { throw new Error(`Task '${task.id}' has output mode 'file' but 'filePath' is not defined.`); }
-                const dir = path.dirname(interpolatedOutput.filePath);
+                const safeOutputPath = resolveWithinWorkspace(
+                    interpolatedOutput.filePath,
+                    getWorkspaceRoots(),
+                    defaultWorkspace
+                );
+                const dir = path.dirname(safeOutputPath);
                 if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
-                if (interpolatedOutput.overwrite !== true && fs.existsSync(interpolatedOutput.filePath)) {
-                    throw new Error(`Task '${task.id}' attempted to write to '${interpolatedOutput.filePath}', but the file already exists. Set 'overwrite': true to replace it.`);
+                if (interpolatedOutput.overwrite !== true && fs.existsSync(safeOutputPath)) {
+                    throw new Error(`Task '${task.id}' attempted to write to '${safeOutputPath}', but the file already exists. Set 'overwrite': true to replace it.`);
                 }
-                fs.writeFileSync(interpolatedOutput.filePath, interpolatedOutput.content);
+                fs.writeFileSync(safeOutputPath, interpolatedOutput.content);
                 break;
             case 'terminal':
                 {
@@ -2797,6 +2869,7 @@ function registerWorkspaceFileWatchers(relativePath: string, callback: () => voi
     const debouncedCallback = debounce(callback, 200);
 
     const resetWatchers = () => {
+        // Dispose existing watchers *before* creating new ones to prevent overlap/leak
         while (watchers.length > 0) {
             watchers.pop()?.dispose();
         }
@@ -2811,14 +2884,19 @@ function registerWorkspaceFileWatchers(relativePath: string, callback: () => voi
         }
     };
 
-    resetWatchers();
-    const workspaceSubscription = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    // Collapse rapid workspace-folder changes into a single reset.
+    // VS Code emits multiple events when adding/removing several folders at once.
+    const debouncedReset = debounce(() => {
         resetWatchers();
         callback();
-    });
+    }, 150);
+
+    resetWatchers();
+    const workspaceSubscription = vscode.workspace.onDidChangeWorkspaceFolders(debouncedReset.run);
 
     return new vscode.Disposable(() => {
         debouncedCallback.cancel();
+        debouncedReset.cancel();
         workspaceSubscription.dispose();
         while (watchers.length > 0) {
             watchers.pop()?.dispose();

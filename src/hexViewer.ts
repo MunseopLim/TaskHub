@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexParseResult } from './hexParser';
 import { t } from './i18n';
 
@@ -78,8 +79,36 @@ export async function showHexViewer(context: vscode.ExtensionContext) {
     openPanel(context, fileName, result);
 }
 
-export function buildHexViewerHtml(fileName: string, result: HexParseResult): string {
+function generateHexNonce(): string {
+    // CSP nonces are a security control; use a CSPRNG, not Math.random().
+    return crypto.randomBytes(16).toString('base64');
+}
+
+function buildErrorHtml(webview: vscode.Webview, message: string, tone: 'error' | 'info' = 'error'): string {
+    const nonce = generateHexNonce();
+    const csp = `default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+    const style = tone === 'error'
+        ? 'color:var(--vscode-errorForeground,#f44);padding:16px;'
+        : 'padding:16px;opacity:0.7;';
+    return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"></head><body><p style="${style}">${esc(message)}</p></body></html>`;
+}
+
+/**
+ * Maximum address span (inclusive) the Hex Viewer is willing to render.
+ * A sparse file with two bytes far apart — e.g. 0x00000000 and 0xFFFFFFFF — passes
+ * the per-entry cap in `hexParser` because data.size is small, but would otherwise
+ * force a multi-gigabyte flat array + gap bitmap here. Cap at 128 MB of display span.
+ */
+export const HEX_VIEWER_MAX_SPAN = 128 * 1024 * 1024;
+
+export function buildHexViewerHtml(fileName: string, result: HexParseResult, webview?: vscode.Webview): string {
     const totalSize = result.maxAddress - result.minAddress + 1;
+    if (!Number.isFinite(totalSize) || totalSize < 0 || totalSize > HEX_VIEWER_MAX_SPAN) {
+        throw new Error(
+            `Hex Viewer address span (${totalSize} bytes) exceeds the display limit (${HEX_VIEWER_MAX_SPAN}).`
+            + ` This usually means the file declares a very small number of bytes at widely separated addresses.`
+        );
+    }
     const flatData = toFlatArray(result, result.minAddress, totalSize);
     const dataBase64 = Buffer.from(flatData).toString('base64');
 
@@ -99,7 +128,7 @@ export function buildHexViewerHtml(fileName: string, result: HexParseResult): st
 
     return getWebviewContent(
         fileName, result.format, result.minAddress, result.maxAddress,
-        result.byteCount, result.entryPoint, dataBase64, gapBase64, !!result.rawBuffer
+        result.byteCount, result.entryPoint, dataBase64, gapBase64, !!result.rawBuffer, webview
     );
 }
 
@@ -139,7 +168,17 @@ function openPanel(context: vscode.ExtensionContext, fileName: string, result: H
     }
 
     currentPanel.title = `Hex: ${fileName}`;
-    currentPanel.webview.html = buildHexViewerHtml(fileName, result);
+    try {
+        currentPanel.webview.html = buildHexViewerHtml(fileName, result, currentPanel.webview);
+    } catch (e: any) {
+        const msg = t(
+            `Hex Viewer 렌더링 실패 (${fileName}): ${e.message}`,
+            `Failed to render Hex Viewer (${fileName}): ${e.message}`
+        );
+        currentPanel.webview.html = buildErrorHtml(currentPanel.webview, msg, 'error');
+        vscode.window.showErrorMessage(msg);
+        return;
+    }
     setupWebviewMessageHandler(currentPanel.webview);
 }
 
@@ -156,15 +195,20 @@ function getWebviewContent(
     entryPoint: number | undefined,
     dataBase64: string,
     gapBase64: string,
-    isBinaryFormat: boolean
+    isBinaryFormat: boolean,
+    webview?: vscode.Webview
 ): string {
     const formatLabel = format === 'intel' ? 'Intel HEX' : format === 'srec' ? 'Motorola SREC' : 'Binary';
     const entryStr = entryPoint !== undefined ? `0x${entryPoint.toString(16).toUpperCase().padStart(8, '0')}` : 'N/A';
+    const nonce = generateHexNonce();
+    const cspSource = webview?.cspSource ?? 'vscode-webview:';
+    const csp = `default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${cspSource};`;
 
     return /*html*/`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Hex Viewer</title>
 <style>
@@ -347,7 +391,7 @@ function getWebviewContent(
         <span>Click a byte to inspect</span>
     </div>
 
-<script>
+<script nonce="${nonce}">
 (function() {
     const vscode = acquireVsCodeApi();
     const BASE_ADDR = ${minAddress};
@@ -924,7 +968,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             stat = fs.statSync(filePath);
         } catch (e: any) {
             const msg = t(`파일을 읽을 수 없습니다: ${e.message}`, `Cannot read file: ${e.message}`);
-            webviewPanel.webview.html = `<html><body><p style="color:var(--vscode-errorForeground,#f44);padding:16px;">${msg}</p></body></html>`;
+            webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
             vscode.window.showErrorMessage(msg);
             return;
         }
@@ -934,7 +978,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 `파일 크기(${formatFileSize(stat.size)})가 Hex Viewer 처리 한도(${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)})를 초과합니다. 대용량 파일은 외부 Hex Editor를 사용해 주세요.`,
                 `File size (${formatFileSize(stat.size)}) exceeds the Hex Viewer limit (${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)}). Please use an external hex editor for large files.`
             );
-            webviewPanel.webview.html = `<html><body><p style="color:var(--vscode-errorForeground,#f44);padding:16px;">${msg}</p></body></html>`;
+            webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
             vscode.window.showErrorMessage(msg);
             return;
         }
@@ -944,19 +988,29 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             result = parseFile(filePath);
         } catch (e: any) {
             const msg = t(`파일 파싱 실패 (${fileName}): ${e.message}`, `Failed to parse file (${fileName}): ${e.message}`);
-            webviewPanel.webview.html = `<html><body><p style="color:var(--vscode-errorForeground,#f44);padding:16px;">${msg}</p></body></html>`;
+            webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
             vscode.window.showErrorMessage(msg);
             return;
         }
 
         if (result.byteCount === 0) {
             const msg = t(`선택한 파일에 유효한 데이터가 없습니다: ${fileName}`, `No valid data found in the selected file: ${fileName}`);
-            webviewPanel.webview.html = `<html><body><p style="padding:16px;opacity:0.7;">${msg}</p></body></html>`;
+            webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'info');
             vscode.window.showWarningMessage(msg);
             return;
         }
 
-        webviewPanel.webview.html = buildHexViewerHtml(fileName, result);
+        try {
+            webviewPanel.webview.html = buildHexViewerHtml(fileName, result, webviewPanel.webview);
+        } catch (e: any) {
+            const msg = t(
+                `Hex Viewer 렌더링 실패 (${fileName}): ${e.message}`,
+                `Failed to render Hex Viewer (${fileName}): ${e.message}`
+            );
+            webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
+            vscode.window.showErrorMessage(msg);
+            return;
+        }
         setupWebviewMessageHandler(webviewPanel.webview);
     }
 }

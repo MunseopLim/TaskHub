@@ -4,6 +4,11 @@
 
 export type HexFormat = 'intel' | 'srec' | 'binary';
 
+/** Maximum number of byte entries accepted by the parsers to prevent memory exhaustion. */
+export const HEX_MAX_BYTE_ENTRIES = 100 * 1024 * 1024; // 100M entries ~ ~1.6 GB Map worst case; practical cap for UI use.
+/** Maximum bytes per single record (Intel HEX data field is 1 byte → 255; SREC is 253). Guards malformed input. */
+const HEX_MAX_RECORD_BYTES = 255;
+
 export interface HexParseResult {
     format: HexFormat;
     /** Sparse memory data: address → byte value (used for HEX/SREC) */
@@ -68,6 +73,9 @@ export function parseIntelHex(content: string): HexParseResult {
 
         switch (recordType) {
             case 0x00: { // Data record
+                if (!Number.isFinite(byteCount) || byteCount < 0 || byteCount > HEX_MAX_RECORD_BYTES) {
+                    continue;
+                }
                 const fullAddress = baseAddress + address;
                 for (let i = 0; i < byteCount; i++) {
                     const byte = parseInt(line.substring(9 + i * 2, 11 + i * 2), 16);
@@ -75,6 +83,11 @@ export function parseIntelHex(content: string): HexParseResult {
                     data.set(addr, byte);
                     if (addr < minAddress) { minAddress = addr; }
                     if (addr > maxAddress) { maxAddress = addr; }
+                    if (data.size > HEX_MAX_BYTE_ENTRIES) {
+                        throw new Error(
+                            `Intel HEX payload exceeds ${HEX_MAX_BYTE_ENTRIES} byte entries; refusing to load.`
+                        );
+                    }
                 }
                 break;
             }
@@ -150,6 +163,9 @@ export function parseSrec(content: string): HexParseResult {
         const address = parseInt(line.substring(4, 4 + addressBytes * 2), 16);
         const dataStart = 4 + addressBytes * 2;
         const dataByteCount = byteCount - addressBytes - 1; // -1 for checksum
+        if (!Number.isFinite(dataByteCount) || dataByteCount < 0 || dataByteCount > HEX_MAX_RECORD_BYTES) {
+            continue;
+        }
 
         for (let i = 0; i < dataByteCount; i++) {
             const byte = parseInt(line.substring(dataStart + i * 2, dataStart + i * 2 + 2), 16);
@@ -157,6 +173,11 @@ export function parseSrec(content: string): HexParseResult {
             data.set(addr, byte);
             if (addr < minAddress) { minAddress = addr; }
             if (addr > maxAddress) { maxAddress = addr; }
+            if (data.size > HEX_MAX_BYTE_ENTRIES) {
+                throw new Error(
+                    `SREC payload exceeds ${HEX_MAX_BYTE_ENTRIES} byte entries; refusing to load.`
+                );
+            }
         }
     }
 

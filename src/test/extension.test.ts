@@ -2,6 +2,8 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import {
 	interpolatePipelineVariables,
+	sanitizeInterpolatedValue,
+	resolveWithinWorkspace,
 	normalizeTags,
 	parseTagInput,
 	serializeFavorites,
@@ -34,6 +36,8 @@ import {
 	mergeImportedActions,
 	countActionItems,
 } from '../extension';
+import * as os from 'os';
+import * as path from 'path';
 import { ActionItem } from '../schema';
 
 suite('Extension Test Suite', () => {
@@ -155,11 +159,13 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(result, 'Status: true');
 		});
 
-		test('should handle null values', () => {
+		test('should leave the placeholder when the resolved value is null', () => {
+			// sanitizeInterpolatedValue now refuses null to avoid injecting "null"
+			// strings into shell commands; the placeholder remains untouched instead.
 			const template = 'Value: ${task1.data}';
 			const context = { task1: { data: null } };
 			const result = interpolatePipelineVariables(template, context);
-			assert.strictEqual(result, 'Value: null');
+			assert.strictEqual(result, 'Value: ${task1.data}');
 		});
 
 		test('should handle undefined values in context', () => {
@@ -195,6 +201,90 @@ suite('Extension Test Suite', () => {
 			const context = { name: 'World' };
 			const result = interpolatePipelineVariables(template, context);
 			assert.strictEqual(result, 'Hello World');
+		});
+
+		test('should reject interpolated values containing a null byte', () => {
+			const template = 'echo ${payload}';
+			const context = { payload: 'safe\x00danger' };
+			assert.throws(() => interpolatePipelineVariables(template, context), /null byte/);
+		});
+
+		test('should reject interpolated values exceeding the maximum length', () => {
+			const huge = 'a'.repeat(40 * 1024);
+			const template = 'echo ${payload}';
+			const context = { payload: huge };
+			assert.throws(() => interpolatePipelineVariables(template, context), /maximum length/);
+		});
+
+		test('should coerce numbers and booleans but skip objects', () => {
+			const template = '${count} ${flag} ${obj}';
+			const context = { count: 42, flag: true, obj: { a: 1 } };
+			const result = interpolatePipelineVariables(template, context);
+			assert.strictEqual(result, '42 true ${obj}');
+		});
+	});
+
+	suite('sanitizeInterpolatedValue', () => {
+		test('accepts plain strings', () => {
+			assert.strictEqual(sanitizeInterpolatedValue('hello'), 'hello');
+		});
+		test('returns undefined for null/undefined/objects', () => {
+			assert.strictEqual(sanitizeInterpolatedValue(undefined), undefined);
+			assert.strictEqual(sanitizeInterpolatedValue(null), undefined);
+			assert.strictEqual(sanitizeInterpolatedValue({ a: 1 }), undefined);
+			assert.strictEqual(sanitizeInterpolatedValue([1, 2]), undefined);
+		});
+		test('rejects strings with null byte', () => {
+			assert.throws(() => sanitizeInterpolatedValue('x\x00y'), /null byte/);
+		});
+	});
+
+	suite('resolveWithinWorkspace', () => {
+		const root = path.resolve(os.tmpdir(), 'taskhub-test-root');
+		test('accepts paths inside workspace', () => {
+			const inside = path.join(root, 'nested', 'file.txt');
+			const resolved = resolveWithinWorkspace(inside, [root]);
+			assert.strictEqual(resolved, inside);
+		});
+		test('accepts the root itself', () => {
+			const resolved = resolveWithinWorkspace(root, [root]);
+			assert.strictEqual(resolved, root);
+		});
+		test('rejects parent-directory traversal', () => {
+			const escape = path.join(root, '..', 'other', 'secret.txt');
+			assert.throws(() => resolveWithinWorkspace(escape, [root]), /outside/);
+		});
+		test('rejects paths with null bytes', () => {
+			assert.throws(() => resolveWithinWorkspace('/tmp/foo\x00bar', [root]), /null byte/);
+		});
+		test('rejects when no workspace is provided', () => {
+			assert.throws(() => resolveWithinWorkspace('/tmp/foo', []), /No workspace/);
+		});
+		test('accepts path under any of multiple roots', () => {
+			const other = path.resolve(os.tmpdir(), 'taskhub-test-other');
+			const inside = path.join(other, 'a.txt');
+			const resolved = resolveWithinWorkspace(inside, [root, other]);
+			assert.strictEqual(resolved, inside);
+		});
+		test('resolves relative paths against the baseDir (action workspace)', () => {
+			// Regression: previously used process.cwd() as the base, which made
+			// "report.txt" land in an unpredictable directory.
+			const resolved = resolveWithinWorkspace('report.txt', [root], root);
+			assert.strictEqual(resolved, path.join(root, 'report.txt'));
+		});
+		test('resolves relative subpaths against the baseDir', () => {
+			const resolved = resolveWithinWorkspace('build/out/report.txt', [root], root);
+			assert.strictEqual(resolved, path.join(root, 'build', 'out', 'report.txt'));
+		});
+		test('rejects relative paths that escape the root via ..', () => {
+			assert.throws(
+				() => resolveWithinWorkspace('../secret.txt', [root], root),
+				/outside/
+			);
+		});
+		test('falls back to the first workspace root when no baseDir is provided', () => {
+			const resolved = resolveWithinWorkspace('report.txt', [root]);
+			assert.strictEqual(resolved, path.join(root, 'report.txt'));
 		});
 	});
 
