@@ -1,5 +1,19 @@
 # Change Log
 
+## [0.3.19] - 2026-04-17
+
+### Changed
+
+**`extension.ts` 모듈 분리 2단계 — LinkViewProvider 추출**
+- 신규 모듈 [src/providers/linkViewProvider.ts](src/providers/linkViewProvider.ts) 추가. `LinkViewProvider`, `LinkGroup`, `Link`, `LinkEntry`, `LinkTreeNode`, `loadLinksFromDisk`를 이동.
+- 신규 모듈 [src/providers/normalization.ts](src/providers/normalization.ts) 추가. `extension.ts`와 Provider 간의 순환 import를 막기 위해 `normalizeTags`, `normalizeLineNumber`를 이곳으로 이동.
+- `extension.ts`는 위 심볼들을 re-export하므로 기존 `import { ... } from './extension'` 호출부(테스트 포함)는 변경 없이 동작.
+- `extension.ts` 크기 3,741줄 → 3,567줄 (-174줄).
+
+### 테스트
+
+- 전체 **684개 테스트 통과**.
+
 ## [0.3.18] - 2026-04-17
 
 ### Changed
