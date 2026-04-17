@@ -152,11 +152,17 @@ export class RegisterDecoder {
     }
 
     /**
-     * Parse a register definition from struct definition lines
+     * Parse a register definition from struct definition lines.
+     *
+     * Error contract:
+     *   - Never throws. Malformed input yields `null` (no usable bit field data).
+     *   - `null` also signals "struct has no annotated bit fields" — callers cannot
+     *     tell the two apart. For richer diagnostics, inspect the source manually.
+     *
      * @param lines Array of source code lines
      * @param structLineNumber Line number where struct starts
      * @param structName Struct name to parse
-     * @returns Register definition or null if parsing failed
+     * @returns Register definition or null if no bit fields were discovered.
      */
     static parseRegisterFromStruct(
         lines: string[],

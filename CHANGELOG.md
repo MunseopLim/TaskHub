@@ -1,5 +1,23 @@
 # Change Log
 
+## [0.3.15] - 2026-04-17
+
+### Improved
+
+**파서 에러 처리 계약 명확화**
+- `linkerScriptParser.ts`의 모듈-레벨 주석에 에러 처리 계약(throw 안 함, malformed → 빈 배열) 명시.
+- 새로운 `parseLinkerFileWithDiagnostics(content, filePath): { regions, warnings[] }` 함수 추가. 기존 `parseLinkerFile`은 유지하되, "왜 빈 결과인가?"를 알고 싶은 호출자는 diagnostics 버전을 사용할 수 있음. 경고 케이스:
+  - 빈 입력
+  - `.ld` 파일에 `MEMORY { ... }` 블록 없음
+  - `MEMORY` 블록은 있으나 region 라인이 매칭되지 않음
+  - `.sct` 파일에 execution region 없음 (load region만 있음)
+- `registerDecoder.ts`의 `parseRegisterFromStruct` JSDoc 강화: `null`이 "파싱 실패"인지 "bit field가 없음"인지 구별 불가하다는 한계를 명시.
+
+### 테스트
+
+- `parseLinkerFileWithDiagnostics`에 대한 5개 시나리오 테스트 추가 (empty/no MEMORY/empty block/no exec region/정상 매칭).
+- 전체 **671개 테스트 통과**.
+
 ## [0.3.14] - 2026-04-17
 
 ### Fixed

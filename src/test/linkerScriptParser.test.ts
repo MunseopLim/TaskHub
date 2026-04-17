@@ -4,6 +4,7 @@ import {
     parseLinkerScript,
     parseScatterFile,
     parseLinkerFile,
+    parseLinkerFileWithDiagnostics,
 } from '../linkerScriptParser';
 
 suite('Linker Script Parser Test Suite', () => {
@@ -282,6 +283,51 @@ MEMORY { FLASH (rx) : ORIGIN = 0x00000000, LENGTH = 2M }
 `;
             const regions = parseLinkerFile(content, 'linker.lcf');
             assert.strictEqual(regions.length, 1);
+        });
+    });
+
+    suite('parseLinkerFileWithDiagnostics', () => {
+        test('warns when input is empty', () => {
+            const result = parseLinkerFileWithDiagnostics('', '/path/to/link.ld');
+            assert.strictEqual(result.regions.length, 0);
+            assert.strictEqual(result.warnings.length, 1);
+            assert.match(result.warnings[0], /empty/i);
+        });
+
+        test('warns when .ld file has no MEMORY block', () => {
+            const result = parseLinkerFileWithDiagnostics(
+                'SECTIONS { .text : { *(.text) } }',
+                '/path/to/link.ld'
+            );
+            assert.strictEqual(result.regions.length, 0);
+            assert.ok(result.warnings.some(w => /MEMORY/.test(w)));
+        });
+
+        test('warns when MEMORY block has no matching region lines', () => {
+            const result = parseLinkerFileWithDiagnostics(
+                'MEMORY { /* empty */ }',
+                '/path/to/link.ld'
+            );
+            assert.strictEqual(result.regions.length, 0);
+            assert.ok(result.warnings.some(w => /no region lines/i.test(w)));
+        });
+
+        test('warns when .sct file has no execution regions', () => {
+            const result = parseLinkerFileWithDiagnostics(
+                'LR_IROM1 0x08000000 0x00100000 {\n}\n',
+                '/path/to/file.sct'
+            );
+            assert.strictEqual(result.regions.length, 0);
+            assert.ok(result.warnings.some(w => /execution regions/i.test(w)));
+        });
+
+        test('returns no warnings when regions are found', () => {
+            const result = parseLinkerFileWithDiagnostics(
+                'MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 1M }',
+                '/path/to/link.ld'
+            );
+            assert.strictEqual(result.regions.length, 1);
+            assert.strictEqual(result.warnings.length, 0);
         });
     });
 });

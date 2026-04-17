@@ -1,9 +1,25 @@
 /**
  * Parser for GNU linker scripts (.ld) and ARM scatter files (.sct).
  * Extracts memory region definitions (name, origin, size).
+ *
+ * Error contract:
+ *   - Parse helpers never throw for malformed input; they return an empty
+ *     region list instead. Callers that need to distinguish "no matches" from
+ *     "structurally invalid" should use {@link parseLinkerFileWithDiagnostics}.
+ *   - `parseSizeValue` returns `null` for unparseable input rather than NaN.
  */
 
 import { MemoryRegion } from './elfParser';
+
+/**
+ * Result shape for diagnostic-aware parsing.
+ * `warnings` is a list of human-readable messages. An empty `warnings` array means
+ * the parser did not detect anything suspicious about the input.
+ */
+export interface LinkerParseResult {
+    regions: MemoryRegion[];
+    warnings: string[];
+}
 
 /**
  * Parse a size string with optional K/M suffix.
@@ -113,6 +129,10 @@ export function parseScatterFile(content: string): MemoryRegion[] {
 
 /**
  * Auto-detect file type and parse accordingly.
+ *
+ * Returns an empty array when no regions can be extracted. Use
+ * {@link parseLinkerFileWithDiagnostics} to also obtain warnings that explain
+ * why the result might be empty.
  */
 export function parseLinkerFile(content: string, filePath: string): MemoryRegion[] {
     const lower = filePath.toLowerCase();
@@ -121,4 +141,43 @@ export function parseLinkerFile(content: string, filePath: string): MemoryRegion
     }
     // Default to linker script (.ld, .lds, etc.)
     return parseLinkerScript(content);
+}
+
+/**
+ * Same as {@link parseLinkerFile} but also reports warnings about the input.
+ *
+ * Emitted warnings cover the common "why did I get zero regions?" cases:
+ *   - empty input
+ *   - `.ld` file without a `MEMORY { ... }` block
+ *   - `.sct` file without any execution regions below a load region
+ */
+export function parseLinkerFileWithDiagnostics(
+    content: string,
+    filePath: string
+): LinkerParseResult {
+    const warnings: string[] = [];
+    if (!content || content.trim().length === 0) {
+        warnings.push('Linker script is empty.');
+        return { regions: [], warnings };
+    }
+
+    const lower = filePath.toLowerCase();
+    const isScatter = lower.endsWith('.sct');
+    const regions = isScatter ? parseScatterFile(content) : parseLinkerScript(content);
+
+    if (regions.length === 0) {
+        if (isScatter) {
+            warnings.push(
+                'No execution regions found in scatter file. Expected "NAME 0xADDR 0xSIZE { ... }" lines nested inside a load region.'
+            );
+        } else if (!/MEMORY\s*\{/.test(content)) {
+            warnings.push('Linker script contains no MEMORY { ... } block.');
+        } else {
+            warnings.push(
+                'MEMORY block found but no region lines matched "NAME (attrs) : ORIGIN = ..., LENGTH = ...".'
+            );
+        }
+    }
+
+    return { regions, warnings };
 }
