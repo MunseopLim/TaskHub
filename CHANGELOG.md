@@ -1,5 +1,20 @@
 # Change Log
 
+## [0.3.14] - 2026-04-17
+
+### Fixed
+
+**i18n 누락 보정**
+- `loadWizardActionSources` 실패 시 `error.message` 원문만 노출되던 에러 다이얼로그를 "액션 소스를 불러오지 못했습니다" 컨텍스트 prefix와 함께 한국어/영어 이중화 ([extension.ts:1046](src/extension.ts#L1046)).
+- `loadAllActions` 실패 케이스에도 동일한 방식으로 컨텍스트 prefix + i18n 적용 ([extension.ts:1091](src/extension.ts#L1091)).
+- `handleConfirm`의 기본 confirm 메시지("Are you sure you want to continue?")를 한국어 로캘에서 "계속 진행하시겠습니까?"로 표시. `task.message`가 주어지면 기존대로 사용자 값을 그대로 사용 (CLAUDE.md의 i18n 예외 규칙 준수).
+- `numberBaseHoverProvider`의 Hex/Dec/Bin/Alignment 등 짧은 기술 식별자는 CLAUDE.md 예외 조항("패널 제목 등 짧은 영어 식별자")에 해당하므로 영어 유지.
+
+### 테스트
+
+- `src/test/i18n.test.ts` 신설: `t()` 함수의 반환 분기, 템플릿 리터럴 보존, 빈 문자열 처리 4개 케이스.
+- 전체 **666개 테스트 통과**.
+
 ## [0.3.13] - 2026-04-17
 
 ### Fixed (2차 리뷰 반영)

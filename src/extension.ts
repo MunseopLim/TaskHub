@@ -1043,7 +1043,10 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
     try {
         sources = loadWizardActionSources(context, targetFolder);
     } catch (error: any) {
-        vscode.window.showErrorMessage(error.message);
+        vscode.window.showErrorMessage(t(
+            `액션 소스를 불러오지 못했습니다: ${error.message}`,
+            `Failed to load action sources: ${error.message}`
+        ));
         return;
     }
 
@@ -1088,7 +1091,10 @@ class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vsco
         try {
             actionsJson = loadAllActions(this.context);
         } catch (error: any) {
-            vscode.window.showErrorMessage(error.message);
+            vscode.window.showErrorMessage(t(
+                `액션을 불러오지 못했습니다: ${error.message}`,
+                `Failed to load actions: ${error.message}`
+            ));
         }
         const packageJsonPath = path.join(this.context.extensionPath, 'package.json');
         const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
@@ -2659,7 +2665,9 @@ export async function handleStringManipulation(task: any): Promise<{ output: str
 }
 
 export async function handleConfirm(task: any): Promise<{ confirmed: string }> {
-    const message = task.message || 'Are you sure you want to continue?';
+    // Defaults are localized; `task.message`/`task.confirmLabel`/`task.cancelLabel`
+    // are user-provided strings from the JSON config and are therefore NOT wrapped with t().
+    const message = task.message || t('계속 진행하시겠습니까?', 'Are you sure you want to continue?');
     const confirmLabel = task.confirmLabel || 'Yes';
     const cancelLabel = task.cancelLabel || 'No';
 
