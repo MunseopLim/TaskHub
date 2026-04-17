@@ -5,6 +5,7 @@
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
   "version": "0.4.3",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/munseoplim/TaskHub.git"
