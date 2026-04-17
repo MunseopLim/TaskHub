@@ -133,7 +133,10 @@ export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTre
     // not keep re-reading the JSON when the user genuinely has zero favorites.
     private loaded = false;
 
-    constructor(private context: vscode.ExtensionContext) {
+    constructor(
+        private context: vscode.ExtensionContext,
+        private readonly getWorkspaceFolders: () => readonly vscode.WorkspaceFolder[] = () => vscode.workspace.workspaceFolders ?? []
+    ) {
         // No disk I/O in the constructor. The first refresh() (e.g. from a file
         // watcher) or the first getChildren() call (when the view becomes
         // visible) performs the load — see ensureCache().
@@ -154,7 +157,7 @@ export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTre
 
     private loadFavorites(): FavoriteEntry[] {
         const entries: FavoriteEntry[] = [];
-        const folders = vscode.workspace.workspaceFolders ?? [];
+        const folders = this.getWorkspaceFolders();
         for (const folder of folders) {
             const favoritesPath = path.join(folder.uri.fsPath, '.vscode', 'favorites.json');
             entries.push(...loadFavoritesFromDisk(favoritesPath, true, folder.uri.fsPath));

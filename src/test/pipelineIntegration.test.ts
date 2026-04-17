@@ -614,4 +614,166 @@ suite('Pipeline integration', function () {
             }
         });
     });
+
+    suite('Dialog + Output Mode Pipeline', () => {
+        test('IT-018: fileDialog → folderDialog → stringManipulation → 파일 쓰기', async () => {
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            const sourceDir = path.join(tempWorkspace, 'src');
+            const outputDir = path.join(tempWorkspace, 'artifacts');
+            const pickedFile = path.join(sourceDir, 'firmware.hex');
+            fs.mkdirSync(sourceDir, { recursive: true });
+            fs.mkdirSync(outputDir, { recursive: true });
+            fs.writeFileSync(pickedFile, ':00000001FF\n');
+
+            try {
+                (vscode.window as any).showOpenDialog = async (options: vscode.OpenDialogOptions) => {
+                    if (options.canSelectFolders) {
+                        assert.strictEqual(options.canSelectFiles, false);
+                        assert.strictEqual(options.title, 'Pick output folder');
+                        return [vscode.Uri.file(outputDir)];
+                    }
+                    assert.strictEqual(options.openLabel, 'Pick HEX');
+                    return [vscode.Uri.file(pickedFile)];
+                };
+
+                const action: PipelineAction = {
+                    description: 'IT-018',
+                    tasks: [
+                        {
+                            id: 'file',
+                            type: 'fileDialog',
+                            options: {
+                                canSelectFiles: true,
+                                openLabel: 'Pick HEX'
+                            }
+                        },
+                        {
+                            id: 'folder',
+                            type: 'folderDialog',
+                            options: {
+                                title: 'Pick output folder'
+                            }
+                        },
+                        {
+                            id: 'base',
+                            type: 'stringManipulation',
+                            function: 'basenameWithoutExtension',
+                            input: '${file.name}',
+                            passTheResultToNextTask: true
+                        },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: [
+                                'base=${base.output}',
+                                'fileNameOnly=${file.fileNameOnly}',
+                                'ext=${file.fileExt}',
+                                'fileDir=${file.dir}',
+                                'folder=${folder.path}'
+                            ].join('\n'),
+                            passTheResultToNextTask: true,
+                            output: {
+                                mode: 'file',
+                                filePath: path.join('dialog', 'selection.txt'),
+                                overwrite: true
+                            }
+                        }
+                    ]
+                };
+
+                await run(action);
+
+                assert.strictEqual(
+                    fs.readFileSync(path.join(tempWorkspace, 'dialog', 'selection.txt'), 'utf8'),
+                    [
+                        'base=firmware',
+                        'fileNameOnly=firmware',
+                        'ext=hex',
+                        `fileDir=${sourceDir}`,
+                        `folder=${outputDir}`
+                    ].join('\n')
+                );
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
+        test('IT-019: editor output mode는 language와 content interpolation을 적용', async () => {
+            const action: PipelineAction = {
+                description: 'IT-019',
+                tasks: [
+                    {
+                        id: 'raw',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: '  alpha  ',
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'render',
+                        type: 'stringManipulation',
+                        function: 'toUpperCase',
+                        input: '${raw.output}',
+                        passTheResultToNextTask: true,
+                        output: {
+                            mode: 'editor',
+                            language: 'markdown',
+                            content: '# ${raw.output}'
+                        }
+                    }
+                ]
+            };
+
+            await run(action);
+
+            const activeEditor = vscode.window.activeTextEditor;
+            assert.ok(activeEditor, 'expected output editor to be opened');
+            assert.strictEqual(activeEditor.document.getText(), '# alpha');
+            assert.strictEqual(activeEditor.document.languageId, 'markdown');
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        });
+
+        test('IT-020: command task의 platform command와 output.content override가 함께 동작', async () => {
+            const resultPath = path.join(tempWorkspace, 'it020.txt');
+            const action: PipelineAction = {
+                description: 'IT-020',
+                tasks: [
+                    {
+                        id: 'seed',
+                        type: 'shell',
+                        command: echoOneLine('release=R1'),
+                        passTheResultToNextTask: true,
+                        output: {
+                            capture: { name: 'release', regex: 'release=(\\S+)' }
+                        }
+                    },
+                    {
+                        id: 'cmd',
+                        type: 'command',
+                        command: {
+                            windows: 'node',
+                            macos: 'node',
+                            linux: 'node'
+                        },
+                        args: ['-e', 'process.stdout.write("stdout-that-should-not-be-written");'],
+                        passTheResultToNextTask: true,
+                        output: {
+                            mode: 'file',
+                            filePath: resultPath,
+                            content: 'release=${seed.release};raw=${seed.output}',
+                            overwrite: true
+                        }
+                    }
+                ]
+            };
+
+            await run(action);
+
+            assert.strictEqual(
+                fs.readFileSync(resultPath, 'utf8'),
+                'release=R1;raw=release=R1'
+            );
+        });
+    });
 });

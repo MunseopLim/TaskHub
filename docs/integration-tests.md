@@ -54,6 +54,24 @@
 | IT-016 | quickPick 다중 선택 | `value`와 `values`가 downstream에서 각각 사용 가능 |
 | IT-017 | confirm 취소 중단 | 사용자가 취소한 confirm task가 pipeline을 중단하고 이후 task를 실행하지 않음 |
 
+### Dialog + Output Mode Pipeline
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-018 | fileDialog → folderDialog → stringManipulation → 파일 쓰기 | VS Code dialog 결과의 `path/name/fileExt/dir`가 downstream에서 조합되고 상대 output path가 workspace 기준으로 생성됨 |
+| IT-019 | editor output mode | `output.mode: "editor"`가 language와 `output.content` interpolation을 적용해 실제 editor 문서를 엶 |
+| IT-020 | command task + platform command + output.content override | `type: "command"`의 OS별 command 선택, args 실행, 이전 task 변수 기반 `output.content` override가 함께 동작 |
+
+### View Provider Integration
+파일: [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-021 | LinkViewProvider workspace JSON lazy load | `.vscode/links.json` 로딩, group 정렬, link 정렬, tag/sourceFile 보존, view title 갱신 |
+| IT-022 | FavoriteViewProvider workspace JSON lazy load | `.vscode/favorites.json` 로딩, line/tags normalization, workspaceFolder/sourceFile 보존, view title 갱신 |
+| IT-023 | MainViewProvider TreeItem 구성 | version/folder/separator/action TreeItem 구성, folder expanded state, action run-state icon/context 반영 |
+
 ## 상세
 
 각 시나리오의 세부 태스크 구성·기대값은 테스트 파일의 주석과 `assert` 문을 정본으로 삼습니다. 이 문서는 의도·커버리지 맵이며, 구현 디테일은 코드에 둡니다.
@@ -125,6 +143,30 @@ shell capture로 얻은 파생 변수(`name`)를 같은 태스크의 `output.fil
 ### IT-017: confirm 취소 중단
 
 confirm task에서 취소 라벨이 선택되면 pipeline이 reject되고 다음 task가 실행되지 않아야 합니다.
+
+### IT-018: fileDialog → folderDialog → stringManipulation → 파일 쓰기
+
+테스트에서 `showOpenDialog`를 stub 처리해 파일 선택과 폴더 선택을 순서대로 반환합니다. `fileDialog`가 만든 `path`, `dir`, `name`, `fileNameOnly`, `fileExt`와 `folderDialog`가 만든 `path`가 다음 task의 interpolation에 노출되고, 마지막 file output은 상대 경로를 workspace 기준으로 해석해야 합니다.
+
+### IT-019: editor output mode
+
+`stringManipulation` 결과를 만든 뒤 다음 task의 `output.mode: "editor"`가 untitled editor 문서를 실제로 엽니다. 이때 `output.language`가 문서 언어로 적용되고, `output.content`는 이전 task 결과를 기준으로 interpolation됩니다. 같은 task의 새 output은 아직 interpolation context에 없다는 현재 실행 순서도 간접적으로 고정합니다.
+
+### IT-020: command task + platform command + output.content override
+
+`type: "command"`가 `shell`과 같은 capture/파일 출력 경로를 공유하되, `command` object에서 현재 OS용 명령을 선택하는지 확인합니다. child process stdout은 존재하지만 `output.content`가 지정되어 있으므로 파일에는 이전 task에서 capture한 값만 기록되어야 합니다.
+
+### IT-021: LinkViewProvider workspace JSON lazy load
+
+임시 workspace folder source를 provider에 주입한 뒤 `.vscode/links.json`을 읽습니다. 생성자에서는 읽지 않고 `getChildren()` 시점에 lazy load되어야 하며, group node가 먼저 정렬되고 group 내부 link도 제목순으로 정렬됩니다. tag normalization, `sourceFile`, view title count도 함께 검증합니다.
+
+### IT-022: FavoriteViewProvider workspace JSON lazy load
+
+임시 workspace의 `.vscode/favorites.json`을 통해 favorites provider가 workspace folder source와 연결되는지 확인합니다. line number는 정수 양수로 normalization되고, tag trimming, `workspaceFolder`, `sourceFile`, group/ungrouped node 구성과 view title count가 보존되어야 합니다.
+
+### IT-023: MainViewProvider TreeItem 구성
+
+`loadActions` callback이 반환한 mixed action tree를 실제 `MainViewProvider`에 넣습니다. version item, expanded folder, separator, action item이 올바르게 만들어지고, `actionStates`에 저장된 success 상태가 action icon/contextValue로 반영되는지 확인합니다.
 
 ## 시나리오 추가 절차
 

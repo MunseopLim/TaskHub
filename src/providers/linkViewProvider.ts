@@ -100,7 +100,11 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
     // not keep re-reading the JSON when the user genuinely has zero links.
     private loaded = false;
 
-    constructor(private context: vscode.ExtensionContext, private readonly mode: 'builtin' | 'workspace') {
+    constructor(
+        private context: vscode.ExtensionContext,
+        private readonly mode: 'builtin' | 'workspace',
+        private readonly getWorkspaceFolders: () => readonly vscode.WorkspaceFolder[] = () => vscode.workspace.workspaceFolders ?? []
+    ) {
         // No disk I/O in the constructor. The first refresh() (e.g. from a file
         // watcher) or the first getChildren() call (when the view becomes
         // visible) performs the load — see ensureCache().
@@ -127,7 +131,7 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
             const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
             results.push(...loadLinksFromDisk(mediaJsonPath, false));
         } else {
-            const folders = vscode.workspace.workspaceFolders ?? [];
+            const folders = this.getWorkspaceFolders();
             for (const folder of folders) {
                 const workspaceLinksPath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
                 results.push(...loadLinksFromDisk(workspaceLinksPath, true));
