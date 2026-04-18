@@ -452,6 +452,8 @@ export function findActionById(actions: ActionItem[], id: string): ActionItem | 
 import {
     INTERPOLATED_VALUE_MAX_LENGTH,
     resolveWithinWorkspace,
+    resolveFavoriteFilePath,
+    validateLinkScheme,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
     applyOutputCapture,
@@ -484,6 +486,32 @@ export {
 
 function getWorkspaceRoots(): string[] {
     return (vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath);
+}
+
+async function openExternalLinkSafely(rawUrl: unknown): Promise<void> {
+    const result = validateLinkScheme(rawUrl);
+    if (!result.ok) {
+        if (result.reason === 'scheme') {
+            const blockedScheme = result.scheme;
+            vscode.window.showErrorMessage(t(
+                `허용되지 않은 URL scheme '${blockedScheme}'. http/https/mailto만 지원합니다.`,
+                `URL scheme '${blockedScheme}' is not allowed. Only http/https/mailto are supported.`
+            ));
+        } else if (result.reason === 'empty') {
+            vscode.window.showErrorMessage(t('링크 URL이 비어 있습니다.', 'Link URL is empty.'));
+        } else {
+            vscode.window.showErrorMessage(t('올바르지 않은 URL 형식입니다.', 'Invalid URL format.'));
+        }
+        return;
+    }
+    let uri: vscode.Uri;
+    try {
+        uri = vscode.Uri.parse(result.url, true);
+    } catch {
+        vscode.window.showErrorMessage(t('올바르지 않은 URL 형식입니다.', 'Invalid URL format.'));
+        return;
+    }
+    await vscode.env.openExternal(uri);
 }
 
 function resolveExecutionSettings(customEnv?: Record<string, string>): { envOverrides: Record<string, string>; useUtf8Console: boolean } {
@@ -2367,7 +2395,21 @@ export function activate(context: vscode.ExtensionContext) {
                 || vscode.workspace.getWorkspaceFolder(vscode.Uri.file(target.path))?.uri.fsPath
                 || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
                 || '';
-            const resolvedPath = target.path.replace('${workspaceFolder}', workspaceFolderPath || '');
+            const workspaceRoots = getWorkspaceRoots();
+            if (workspaceRoots.length === 0) {
+                vscode.window.showErrorMessage(t('즐겨찾기 파일을 열 워크스페이스가 없습니다.', 'No workspace is open to resolve the favorite file.'));
+                return;
+            }
+            let resolvedPath: string;
+            try {
+                resolvedPath = resolveFavoriteFilePath(target.path, workspaceFolderPath, workspaceRoots);
+            } catch {
+                vscode.window.showErrorMessage(t(
+                    `즐겨찾기 파일이 워크스페이스 밖에 있어 열 수 없습니다: ${target.path}`,
+                    `Favorite file is outside the workspace and cannot be opened: ${target.path}`
+                ));
+                return;
+            }
             const uri = vscode.Uri.file(resolvedPath);
             const document = await vscode.workspace.openTextDocument(uri);
             const editor = await vscode.window.showTextDocument(document);
@@ -2381,9 +2423,9 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage(t(`파일을 열 수 없습니다: ${error.message}`, `Could not open file: ${error.message}`));
         }
     }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openLink', (url: string) => { vscode.env.openExternal(vscode.Uri.parse(url)); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openLink', async (url: string) => { await openExternalLinkSafely(url); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', (item: Link) => { vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage(t('링크가 클립보드에 복사되었습니다.', 'Link copied to clipboard.')); }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.goToLink', (item: Link) => { vscode.env.openExternal(vscode.Uri.parse(item.getLink())); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.goToLink', async (item: Link) => { await openExternalLinkSafely(item.getLink()); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeAction', async (actionItem: Action) => {
         let allActions: ActionItem[];
         try {

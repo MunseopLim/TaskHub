@@ -1,25 +1,5 @@
 [
   {
-    "id": "defaultButton.showEnv",
-    "title": "Show Environment Variables",
-    "action": {
-      "description": "Print the current environment variables in a terminal.",
-      "tasks": [
-        {
-          "id": "show_env_task",
-          "type": "shell",
-          "command": {
-            "windows": "powershell -Command Get-ChildItem Env:",
-            "linux": "printenv",
-            "macos": "printenv"
-          },
-          "passTheResultToNextTask": false,
-          "revealTerminal": "always"
-        }
-      ]
-    }
-  },
-  {
     "id": "defaultButton.showProjectDir",
     "title": "Open Current Project Directory",
     "action": {

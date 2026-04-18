@@ -1,5 +1,19 @@
 # Change Log
 
+## [0.4.4] - 2026-04-19
+
+### 보안 — 신뢰 경계 강화
+
+- **Hover MarkdownString `isTrusted` 제거** — [src/numberBaseHoverProvider.ts](src/numberBaseHoverProvider.ts) 내 7개 hover 생성 경로에서 `md.isTrusted = true` 를 모두 제거. 소스 주석·SFR 설명·struct 멤버 이름 등 파일 유래 문자열이 markdown 에 그대로 들어가던 상황에서, 악성 주석이 `command:` URI 링크를 심어 VS Code 명령 실행으로 이어질 수 있는 경로를 차단.
+- **외부 링크 URL scheme allowlist** — [src/pipelineUtils.ts](src/pipelineUtils.ts) 에 `validateLinkScheme()` 순수 함수 추가, `http`/`https`/`mailto` 만 허용하도록 제한. `taskhub.openLink` / `taskhub.goToLink` 가 이 검증을 거치도록 [src/extension.ts](src/extension.ts) 리팩터 — `command:`, `file:`, `vscode:`, `javascript:` 등 다른 scheme 은 에러 메시지 후 거부.
+- **Favorite 파일 경로 워크스페이스 경계 검사** — `taskhub.openFavoriteFile` 이 [src/pipelineUtils.ts](src/pipelineUtils.ts) 의 신규 `resolveFavoriteFilePath()` 를 경유하도록 변경. `${workspaceFolder}/../secret.txt` 같은 traversal, 워크스페이스 밖 절대 경로, null byte 는 `resolveWithinWorkspace()` 로 reject.
+- **기본 제공 `Show Environment Variables` action 제거** — [media/actions.json](media/actions.json) 에서 `printenv` / `Get-ChildItem Env:` 를 터미널에 그대로 출력하던 기본 버튼을 삭제. 화면 공유·로그 공유 상황에서 토큰·credential 유출 위험 감소.
+- **Workspace Trust 명시** — [package.json](package.json) 에 `capabilities.untrustedWorkspaces: { "supported": false }` 추가. 신뢰할 수 없는 워크스페이스에서는 확장이 비활성으로 고정되어, 악성 `.vscode/actions.json` 이 shell 실행으로 이어지는 경로를 VS Code 레벨에서 차단.
+
+### 테스트
+
+- `validateLinkScheme` 14개, `resolveFavoriteFilePath` 6개, 총 **20개 테스트 추가** ([src/test/pipelineUtils.test.ts](src/test/pipelineUtils.test.ts)). 전체 **783개 테스트 통과**.
+
 ## [0.4.3] - 2026-04-17
 
 ### 테스트 — Integration Test 시나리오 확장 (Archive / Terminal / Lifecycle / Error)

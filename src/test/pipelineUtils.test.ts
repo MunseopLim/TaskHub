@@ -6,6 +6,9 @@ import {
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
     resolveWithinWorkspace,
+    resolveFavoriteFilePath,
+    validateLinkScheme,
+    ALLOWED_LINK_SCHEMES,
     tokenizeCommandLine,
     mergeCommandAndArgs,
     quotePosixArgument,
@@ -204,6 +207,165 @@ suite('applyOutputCapture', () => {
                 { name: 'v', regex: '.' }
             ]),
             /Duplicate capture name 'v'/
+        );
+    });
+});
+
+suite('validateLinkScheme', () => {
+    test('allowlist contains exactly http, https, mailto', () => {
+        assert.deepStrictEqual(
+            [...ALLOWED_LINK_SCHEMES].sort(),
+            ['http', 'https', 'mailto']
+        );
+    });
+
+    test('accepts https URLs', () => {
+        const result = validateLinkScheme('https://example.com/path?q=1');
+        assert.strictEqual(result.ok, true);
+        if (result.ok) {
+            assert.strictEqual(result.scheme, 'https');
+            assert.strictEqual(result.url, 'https://example.com/path?q=1');
+        }
+    });
+
+    test('accepts http URLs', () => {
+        const result = validateLinkScheme('http://example.com');
+        assert.strictEqual(result.ok, true);
+    });
+
+    test('accepts mailto URLs', () => {
+        const result = validateLinkScheme('mailto:user@example.com');
+        assert.strictEqual(result.ok, true);
+        if (result.ok) {
+            assert.strictEqual(result.scheme, 'mailto');
+        }
+    });
+
+    test('scheme comparison is case-insensitive', () => {
+        const result = validateLinkScheme('HTTPS://EXAMPLE.COM');
+        assert.strictEqual(result.ok, true);
+        if (result.ok) {
+            assert.strictEqual(result.scheme, 'https');
+        }
+    });
+
+    test('rejects command: URIs', () => {
+        const result = validateLinkScheme('command:workbench.action.terminal.sendSequence');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok) {
+            assert.strictEqual(result.reason, 'scheme');
+            if (result.reason === 'scheme') {
+                assert.strictEqual(result.scheme, 'command');
+            }
+        }
+    });
+
+    test('rejects file: URIs', () => {
+        const result = validateLinkScheme('file:///etc/passwd');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok && result.reason === 'scheme') {
+            assert.strictEqual(result.scheme, 'file');
+        }
+    });
+
+    test('rejects vscode: URIs', () => {
+        const result = validateLinkScheme('vscode://some.extension/path');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok && result.reason === 'scheme') {
+            assert.strictEqual(result.scheme, 'vscode');
+        }
+    });
+
+    test('rejects javascript: URIs', () => {
+        const result = validateLinkScheme('javascript:alert(1)');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok && result.reason === 'scheme') {
+            assert.strictEqual(result.scheme, 'javascript');
+        }
+    });
+
+    test('rejects empty string', () => {
+        const result = validateLinkScheme('');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok) {
+            assert.strictEqual(result.reason, 'empty');
+        }
+    });
+
+    test('rejects whitespace-only string', () => {
+        const result = validateLinkScheme('   ');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok) {
+            assert.strictEqual(result.reason, 'empty');
+        }
+    });
+
+    test('rejects non-string inputs', () => {
+        for (const value of [undefined, null, 42, {}, []]) {
+            const result = validateLinkScheme(value);
+            assert.strictEqual(result.ok, false, `expected reject for ${JSON.stringify(value)}`);
+            if (!result.ok) {
+                assert.strictEqual(result.reason, 'empty');
+            }
+        }
+    });
+
+    test('rejects strings with no scheme delimiter', () => {
+        const result = validateLinkScheme('example.com/path');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok) {
+            assert.strictEqual(result.reason, 'invalid');
+        }
+    });
+
+    test('rejects protocol-relative URLs', () => {
+        const result = validateLinkScheme('//example.com');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok) {
+            assert.strictEqual(result.reason, 'invalid');
+        }
+    });
+});
+
+suite('resolveFavoriteFilePath', () => {
+    const root = path.resolve(os.tmpdir(), 'taskhub-favorite-test');
+
+    test('resolves ${workspaceFolder} placeholder to absolute path inside workspace', () => {
+        const resolved = resolveFavoriteFilePath('${workspaceFolder}/src/file.ts', root, [root]);
+        assert.strictEqual(resolved, path.join(root, 'src/file.ts'));
+    });
+
+    test('resolves plain relative path against the workspace folder', () => {
+        const resolved = resolveFavoriteFilePath('docs/README.md', root, [root]);
+        assert.strictEqual(resolved, path.join(root, 'docs/README.md'));
+    });
+
+    test('rejects parent-directory traversal via ${workspaceFolder}', () => {
+        assert.throws(
+            () => resolveFavoriteFilePath('${workspaceFolder}/../secret.txt', root, [root]),
+            /outside/
+        );
+    });
+
+    test('rejects absolute path outside workspace roots', () => {
+        const outside = path.resolve(os.tmpdir(), 'some-other-dir', 'file.txt');
+        assert.throws(
+            () => resolveFavoriteFilePath(outside, root, [root]),
+            /outside/
+        );
+    });
+
+    test('rejects plain relative path that escapes workspace', () => {
+        assert.throws(
+            () => resolveFavoriteFilePath('../../etc/passwd', root, [root]),
+            /outside/
+        );
+    });
+
+    test('rejects null-byte injection in favorite path', () => {
+        assert.throws(
+            () => resolveFavoriteFilePath('file\x00.txt', root, [root]),
+            /null byte/
         );
     });
 });

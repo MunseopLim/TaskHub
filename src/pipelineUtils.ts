@@ -350,3 +350,51 @@ export function buildPosixCommandLine(command: string, args: string[]): string {
     const parts = [commandPart, ...combinedArgs.map(arg => quotePosixArgument(arg))];
     return parts.join(' ');
 }
+
+/**
+ * Scheme allowlist for external link opening. `command:` / `file:` / `vscode:`
+ * and arbitrary custom schemes are rejected so a malicious links.json cannot
+ * invoke VS Code commands or launch OS-registered handlers.
+ */
+export const ALLOWED_LINK_SCHEMES: ReadonlySet<string> = new Set(['http', 'https', 'mailto']);
+
+export type LinkSchemeValidation =
+    | { ok: true; scheme: string; url: string }
+    | { ok: false; reason: 'empty' | 'invalid' }
+    | { ok: false; reason: 'scheme'; scheme: string };
+
+/**
+ * Validate a raw URL string against {@link ALLOWED_LINK_SCHEMES}. Kept free of
+ * any `vscode` dependency so it can be unit-tested directly.
+ */
+export function validateLinkScheme(rawUrl: unknown): LinkSchemeValidation {
+    if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
+        return { ok: false, reason: 'empty' };
+    }
+    // RFC 3986 scheme: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+    const match = /^([a-zA-Z][a-zA-Z0-9+\-.]*):/.exec(rawUrl);
+    if (!match) {
+        return { ok: false, reason: 'invalid' };
+    }
+    const scheme = match[1].toLowerCase();
+    if (!ALLOWED_LINK_SCHEMES.has(scheme)) {
+        return { ok: false, reason: 'scheme', scheme };
+    }
+    return { ok: true, scheme, url: rawUrl };
+}
+
+/**
+ * Resolve a favorite entry's path to an absolute path that is guaranteed to
+ * live inside one of the current workspace roots. Throws (via
+ * {@link resolveWithinWorkspace}) when the path escapes the workspace — even
+ * if the user hand-crafted `.vscode/favorites.json` with `../` traversal or
+ * an absolute path to elsewhere on disk.
+ */
+export function resolveFavoriteFilePath(
+    rawPath: string,
+    workspaceFolderPath: string,
+    workspaceRoots: string[]
+): string {
+    const interpolated = rawPath.replace('${workspaceFolder}', workspaceFolderPath || '');
+    return resolveWithinWorkspace(interpolated, workspaceRoots, workspaceFolderPath || undefined);
+}

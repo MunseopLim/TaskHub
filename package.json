@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,6 +17,12 @@
     "Other"
   ],
   "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "TaskHub는 워크스페이스의 .vscode/actions.json 으로부터 shell/command 태스크를 실행할 수 있으므로, 신뢰할 수 없는 워크스페이스에서는 비활성화됩니다. TaskHub can execute shell/command tasks defined in a workspace's .vscode/actions.json, so it is disabled in untrusted workspaces."
+    }
+  },
   "activationEvents": [
     "onLanguage:c",
     "onLanguage:cpp"

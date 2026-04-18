@@ -586,7 +586,6 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      */
     private generateHoverContent(value: number, original: string): vscode.MarkdownString {
         const md = new vscode.MarkdownString();
-        md.isTrusted = true;
 
         // Show conversions
         md.appendMarkdown(`**Hex:** \`0x${value.toString(16).toUpperCase()}\`\n\n`);
@@ -740,7 +739,6 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         numericValue: number | null
     ): vscode.MarkdownString {
         const md = new vscode.MarkdownString();
-        md.isTrusted = true;
 
         md.appendMarkdown(`### Macro: ${macroName}\n\n`);
 
@@ -885,7 +883,6 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         // Generate hover content for all definitions
         const md = new vscode.MarkdownString();
-        md.isTrusted = true;
 
         // Show count if multiple definitions
         if (allLocations.length > 1) {
@@ -1277,7 +1274,6 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      */
     private generateRegisterDecodingContent(result: any): vscode.MarkdownString {
         const md = new vscode.MarkdownString();
-        md.isTrusted = true;
 
         md.appendMarkdown(`### Register: ${result.registerName}\n\n`);
         md.appendMarkdown(`**Value:** \`0x${result.registerValue.toString(16).toUpperCase()}\` `);
@@ -1381,7 +1377,6 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      */
     private generateStructSizeContent(result: any): vscode.MarkdownString {
         const md = new vscode.MarkdownString();
-        md.isTrusted = true;
 
         md.appendMarkdown(`### Struct: ${result.structName}\n\n`);
         md.appendMarkdown(`**Total Size:** ${result.totalSize} bytes\n\n`);
@@ -1622,7 +1617,6 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         lineNumber: number
     ): vscode.MarkdownString {
         const md = new vscode.MarkdownString();
-        md.isTrusted = true;
 
         const comment = bitFieldInfo.commentInfo!;
         const hierarchyName = formatHierarchy(scopes, bitFieldInfo.fieldName);
@@ -1942,7 +1936,6 @@ export function calculateBitOperation(
  */
 export function formatBitOperationResult(result: BitOperationResult): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
-    md.isTrusted = true;
     md.supportHtml = true;
 
     const { operation, beforeValue, afterValue } = result;
