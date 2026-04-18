@@ -53,15 +53,7 @@
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | [실험적] 비트 연산 hover 활성화 |
 | `taskhub.preset.selected` | `string` | `none` | 자동 적용할 프리셋 선택 |
 
-## 설치
-
-### Marketplace에서 설치
-
-VS Code 확장 마켓플레이스에서 `TaskHub`를 검색하거나 아래 링크에서 설치합니다.
-
-https://marketplace.visualstudio.com/items?itemName=Munseop.taskhub
-
-### VSIX 파일로 수동 설치
+## 설치 (VSIX 파일로 수동 설치)
 
 1. [Releases](https://github.com/munseoplim/TaskHub/releases) 페이지에서 최신 `.vsix` 파일 다운로드
 2. VS Code에서 `Ctrl+Shift+P` (macOS: `Cmd+Shift+P`) → `Extensions: Install from VSIX...` 선택
