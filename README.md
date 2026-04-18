@@ -55,10 +55,19 @@
 
 ## 설치
 
-1. 이 저장소를 클론합니다.
-2. VS Code에서 프로젝트를 엽니다.
-3. 터미널에서 `npm install`을 실행합니다.
-4. `F5` 키를 눌러 새 확장 개발 호스트 창에서 확장 프로그램을 실행합니다.
+### Marketplace에서 설치
+
+VS Code 확장 마켓플레이스에서 `TaskHub`를 검색하거나 아래 링크에서 설치합니다.
+
+https://marketplace.visualstudio.com/items?itemName=Munseop.taskhub
+
+### VSIX 파일로 수동 설치
+
+1. [Releases](https://github.com/munseoplim/TaskHub/releases) 페이지에서 최신 `.vsix` 파일 다운로드
+2. VS Code에서 `Ctrl+Shift+P` (macOS: `Cmd+Shift+P`) → `Extensions: Install from VSIX...` 선택
+3. 다운로드한 `.vsix` 파일 지정
+
+> 직접 빌드하거나 프로젝트에 기여하려면 [CONTRIBUTING.md](CONTRIBUTING.md)를 참조하세요.
 
 ## 사용법
 

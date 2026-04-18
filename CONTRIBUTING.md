@@ -39,14 +39,37 @@ npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 
 ### 로컬 테스트
 
-1. VS Code에서 `F5` 키를 눌러 Extension Development Host 실행
-2. 새 창에서 변경사항 테스트
+Extension Development Host로 실행하려면 로컬에 `.vscode/launch.json`을 직접 생성합니다. (저장소에는 커밋되지 않습니다 — 개인별 설정이기 때문에 `.gitignore`에 포함되어 있습니다.)
 
-### VSIX 패키지 빌드
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Extension",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+            "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+            "preLaunchTask": "${defaultBuildTask}"
+        }
+    ]
+}
+```
+
+이후 절차:
+
+1. `npm run watch`로 빌드 watch 모드 실행 (또는 `npm run compile`로 일회성 빌드)
+2. VS Code에서 `F5` 키를 눌러 Extension Development Host 실행
+3. 새 창에서 변경사항 테스트
+
+### VSIX 패키지 빌드 및 설치
 
 ```bash
-vsce package
+vsce package            # TaskHub-<version>.vsix 생성
 ```
+
+생성된 `.vsix` 파일은 VS Code `Extensions: Install from VSIX...` 명령으로 설치해 실제 설치 환경과 동일하게 검증할 수 있습니다.
 
 ## 코드 스타일
 
