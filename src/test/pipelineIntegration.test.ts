@@ -581,6 +581,76 @@ suite('Pipeline integration', function () {
             }
         });
 
+        test('IT-033: envPick lists process.env names and passes selection downstream', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const originalEnv = process.env.TASKHUB_ENVPICK_SENTINEL;
+            const resultPath = path.join(tempWorkspace, 'it033.txt');
+            try {
+                process.env.TASKHUB_ENVPICK_SENTINEL = 'marker';
+                let seenItems: readonly vscode.QuickPickItem[] = [];
+                (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) => {
+                    seenItems = items;
+                    return items.find(i => i.label === 'TASKHUB_ENVPICK_SENTINEL');
+                };
+
+                const action: PipelineAction = {
+                    description: 'IT-033',
+                    tasks: [
+                        { id: 'pick', type: 'envPick', placeHolder: 'pick one' },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'name=${pick.value}',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: resultPath, overwrite: true }
+                        }
+                    ]
+                };
+
+                await run(action);
+
+                assert.ok(seenItems.length > 0, 'envPick should present at least one env var');
+                const labels = seenItems.map(i => i.label);
+                assert.ok(labels.includes('TASKHUB_ENVPICK_SENTINEL'), 'sentinel var should appear');
+                const sorted = [...labels].sort();
+                assert.deepStrictEqual(labels, sorted, 'env names should be sorted');
+                assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'name=TASKHUB_ENVPICK_SENTINEL');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+                if (originalEnv === undefined) { delete process.env.TASKHUB_ENVPICK_SENTINEL; }
+                else { process.env.TASKHUB_ENVPICK_SENTINEL = originalEnv; }
+            }
+        });
+
+        test('IT-034: envPick cancellation aborts the pipeline', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const markerPath = path.join(tempWorkspace, 'envpick-should-not-run.txt');
+            try {
+                (vscode.window as any).showQuickPick = async () => undefined;
+
+                const action: PipelineAction = {
+                    description: 'IT-034',
+                    tasks: [
+                        { id: 'pick', type: 'envPick' },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'ran=true',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: markerPath, overwrite: true }
+                        }
+                    ]
+                };
+
+                await assert.rejects(() => run(action));
+                assert.ok(!fs.existsSync(markerPath), 'downstream task must not run after cancellation');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+            }
+        });
+
         test('IT-017: confirm 취소는 pipeline을 중단', async () => {
             const originalShowWarningMessage = vscode.window.showWarningMessage;
             const markerPath = path.join(tempWorkspace, 'confirm-should-not-run.txt');

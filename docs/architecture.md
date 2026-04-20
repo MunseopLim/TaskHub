@@ -83,7 +83,7 @@ TaskHub/
 
 *   **executeAction()**: 메인 액션 실행 함수 (히스토리 추적 통합)
 *   **executeSingleTask()**: 개별 태스크 실행
-    *   지원 태스크 타입: fileDialog, folderDialog, unzip, zip, stringManipulation, inputBox, quickPick, shell/command
+    *   지원 태스크 타입: fileDialog, folderDialog, unzip, zip, stringManipulation, inputBox, quickPick, envPick, confirm, shell/command
 *   **변수 치환**: `${task_id.property}` 형식으로 파이프라인 간 데이터 전달
 *   **파일 감시**: debounce({ run, cancel }) 패턴으로 JSON 변경 감지
 

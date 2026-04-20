@@ -71,7 +71,7 @@
         "type": {
           "type": "string",
           "description": "The type of the task to execute.",
-          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "confirm"]
+          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "envPick", "confirm"]
         },
         "command": {
           "oneOf": [

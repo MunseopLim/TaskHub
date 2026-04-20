@@ -1585,6 +1585,13 @@ async function executeSingleTask(
             const interpolatedInput = interpolatePipelineVariables(task.input || '', interpolationContext);
             result = await handleStringManipulation({ ...task, input: interpolatedInput });
             break;
+        case 'envPick':
+            const interpolatedEnvPickTask = {
+                ...task,
+                placeHolder: task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined
+            };
+            result = await handleEnvPick(interpolatedEnvPickTask);
+            break;
         case 'confirm':
             const interpolatedMessage = task.message ? interpolatePipelineVariables(task.message, interpolationContext) : undefined;
             result = await handleConfirm({ ...task, message: interpolatedMessage });
@@ -1925,6 +1932,27 @@ async function handleQuickPick(task: any): Promise<{ value: string; values?: str
             throw new Error('Quick pick selection was canceled.');
         }
     }
+}
+
+async function handleEnvPick(task: any): Promise<{ value: string }> {
+    const names = Object.keys(process.env).sort();
+    if (names.length === 0) {
+        throw new Error(`Task '${task.id}' of type 'envPick' found no environment variables.`);
+    }
+
+    const items: vscode.QuickPickItem[] = names.map(name => ({ label: name }));
+    const selected = await vscode.window.showQuickPick(items, {
+        placeHolder: task.placeHolder || t(
+            '환경변수 이름을 선택하세요',
+            'Select an environment variable name'
+        )
+    });
+
+    if (!selected) {
+        throw new Error('Environment variable selection was canceled.');
+    }
+
+    return { value: selected.label };
 }
 
 async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: string, actionId?: string): Promise<{ outputDir: string }> {

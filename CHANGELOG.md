@@ -1,5 +1,25 @@
 # Change Log
 
+## [0.4.5] - 2026-04-20
+
+### 기능 — 환경변수 보기 기본 액션 복구
+
+- **신규 task type `envPick`** — [src/extension.ts](src/extension.ts) 에 `handleEnvPick` 추가. `process.env` 의 모든 이름을 정렬한 뒤 VS Code QuickPick 으로 노출하고, 선택된 이름을 `{ value }` 로 반환 (quickPick 과 동일 shape). 값은 picker 에 노출하지 않아 이름만으로 안전하게 탐색 가능. [src/schema.ts](src/schema.ts), [schema/actions.schema.json](schema/actions.schema.json) 의 task `type` enum 에 `envPick` 추가.
+- **기본 액션 `Show Environment Variable` 복구** — [media/actions.json](media/actions.json) 에 추가. `envPick` 으로 전체 목록에서 선택 → `printenv NAME` / `cmd /c echo %NAME%` 로 **선택된 한 변수의 값만** 터미널에 출력. 0.4.4 에서 제거했던 전체 덤프 방식(`printenv` / `Get-ChildItem Env:`) 대신 의도한 변수 하나만 노출되므로 화면·로그 공유 상황의 credential 유출 위험은 유지.
+- **기본 액션 `Show Environment Variable by Name` 추가** — [media/actions.json](media/actions.json) 에 `inputBox` 기반 액션 추가. ARM 툴체인 경로 등 목록에 없는 프로젝트 고유 변수명을 직접 입력해 값 확인 가능.
+
+### 문서
+
+- [docs/features.md](docs/features.md) 에 `envPick` 태스크 섹션 추가.
+- [docs/architecture.md](docs/architecture.md) `executeSingleTask` 지원 태스크 타입 목록에 `envPick`, `confirm` 반영.
+- [docs/integration-tests.md](docs/integration-tests.md) Interactive Task Pipeline 에 IT-033 / IT-034 추가.
+
+### 테스트
+
+- IT-033: `envPick` 이 `process.env` 전체 이름을 정렬해 노출하고, 선택된 이름이 downstream interpolation 으로 전달되는지 검증.
+- IT-034: `envPick` 취소 시 파이프라인이 reject 되고 이후 task 가 실행되지 않는지 검증.
+- 전체 **785개 테스트 통과**.
+
 ## [0.4.4] - 2026-04-19
 
 ### 보안 — 신뢰 경계 강화

@@ -53,6 +53,8 @@
 | IT-015 | quickPick → inputBox → file output | quickPick 결과가 inputBox prompt/prefix와 downstream interpolation에 전달됨 |
 | IT-016 | quickPick 다중 선택 | `value`와 `values`가 downstream에서 각각 사용 가능 |
 | IT-017 | confirm 취소 중단 | 사용자가 취소한 confirm task가 pipeline을 중단하고 이후 task를 실행하지 않음 |
+| IT-033 | envPick 목록 노출·선택 전달 | `process.env` 의 모든 이름이 정렬되어 QuickPick 에 나오고, 선택된 이름이 downstream 에 전달됨 |
+| IT-034 | envPick 취소 중단 | 사용자가 취소한 envPick task 가 pipeline 을 중단하고 이후 task 를 실행하지 않음 |
 
 ### Dialog + Output Mode Pipeline
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
@@ -182,6 +184,14 @@ shell capture로 얻은 파생 변수(`name`)를 같은 태스크의 `output.fil
 ### IT-017: confirm 취소 중단
 
 confirm task에서 취소 라벨이 선택되면 pipeline이 reject되고 다음 task가 실행되지 않아야 합니다.
+
+### IT-033: envPick 목록 노출·선택 전달
+
+`showQuickPick` 을 stub 처리해 `envPick` 이 실제로 어떤 items 를 넘기는지 가로챕니다. 테스트용 sentinel 환경변수를 설정한 뒤, `Object.keys(process.env)` 가 알파벳 순서로 정렬되어 items 로 전달되고 sentinel 이름이 그 안에 포함되는지 확인합니다. 선택된 이름은 `${pick.value}` 로 downstream `stringManipulation` 태스크에 전달되어 파일로 기록되어야 합니다.
+
+### IT-034: envPick 취소 중단
+
+`showQuickPick` 을 `undefined` 반환으로 stub 처리해 사용자가 취소한 상황을 모사합니다. `envPick` 핸들러가 "canceled" 에러를 던져 파이프라인이 reject 되고, 이후 `stringManipulation` 태스크가 만들 예정이던 파일이 실제로는 생성되지 않는지 확인합니다.
 
 ### IT-018: fileDialog → folderDialog → stringManipulation → 파일 쓰기
 

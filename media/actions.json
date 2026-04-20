@@ -1,5 +1,56 @@
 [
   {
+    "id": "defaultButton.showEnv",
+    "title": "Show Environment Variable",
+    "action": {
+      "description": "Pick an environment variable from the full list and print only its value.",
+      "tasks": [
+        {
+          "id": "env_pick",
+          "type": "envPick",
+          "placeHolder": "Type to filter, then select an environment variable"
+        },
+        {
+          "id": "show_env_value",
+          "type": "shell",
+          "command": {
+            "windows": "cmd /c echo %${env_pick.value}%",
+            "macos": "printenv ${env_pick.value}",
+            "linux": "printenv ${env_pick.value}"
+          },
+          "passTheResultToNextTask": false,
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
+    "id": "defaultButton.showEnvByName",
+    "title": "Show Environment Variable by Name",
+    "action": {
+      "description": "Type an environment variable name (e.g. ARM toolchain paths) and print only its value.",
+      "tasks": [
+        {
+          "id": "input_env_name",
+          "type": "inputBox",
+          "prompt": "Enter environment variable name",
+          "placeHolder": "e.g. ARM_TOOLCHAIN, GCC_ARM_PATH, ARMCC_DIR"
+        },
+        {
+          "id": "show_env_value",
+          "type": "shell",
+          "command": {
+            "windows": "cmd /c echo %${input_env_name.value}%",
+            "macos": "printenv ${input_env_name.value}",
+            "linux": "printenv ${input_env_name.value}"
+          },
+          "passTheResultToNextTask": false,
+          "revealTerminal": "always"
+        }
+      ]
+    }
+  },
+  {
     "id": "defaultButton.showProjectDir",
     "title": "Open Current Project Directory",
     "action": {
