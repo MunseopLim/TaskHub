@@ -289,4 +289,71 @@ suite('buildPreviewReport', () => {
         const report = buildPreviewReport(item, baseOptions());
         assert.match(report, /all \$\{\.\.\.\} references resolve/);
     });
+
+    suite('zip/unzip built-in engine preview', () => {
+        test('zip task without tool reports built-in engine', () => {
+            const item: ActionItem = {
+                id: 'a.zip.builtin',
+                title: 'Built-in zip',
+                action: {
+                    description: 'bundled engine',
+                    tasks: [
+                        {
+                            id: 'pack',
+                            type: 'zip',
+                            archive: '${workspaceFolder}/out.zip',
+                            source: ['${workspaceFolder}/a.txt']
+                        }
+                    ]
+                }
+            };
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /tool: \(built-in engine — \.zip only\)/);
+            assert.match(report, /archive:\s+.*out\.zip/);
+        });
+
+        test('unzip task without tool reports built-in engine', () => {
+            const item: ActionItem = {
+                id: 'a.unzip.builtin',
+                title: 'Built-in unzip',
+                action: {
+                    description: 'bundled engine',
+                    tasks: [
+                        {
+                            id: 'unpack',
+                            type: 'unzip',
+                            archive: '${workspaceFolder}/in.zip',
+                            destination: '${workspaceFolder}/extracted'
+                        }
+                    ]
+                }
+            };
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /tool: \(built-in engine — \.zip only\)/);
+            assert.match(report, /archive:\s+.*in\.zip/);
+            assert.match(report, /destination:\s+.*extracted/);
+        });
+
+        test('zip task with tool still shows tool path', () => {
+            const item: ActionItem = {
+                id: 'a.zip.external',
+                title: 'External zip',
+                action: {
+                    description: '7z tool',
+                    tasks: [
+                        {
+                            id: 'pack',
+                            type: 'zip',
+                            tool: '/usr/local/bin/7z',
+                            archive: '${workspaceFolder}/out.7z',
+                            source: ['${workspaceFolder}/a.txt']
+                        }
+                    ]
+                }
+            };
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /tool: \/usr\/local\/bin\/7z/);
+            assert.doesNotMatch(report, /built-in engine/);
+        });
+    });
 });

@@ -202,7 +202,7 @@
               }
             }
           ],
-          "description": "Path to the tool executable. Can be a direct string or an OS-specific object. Required for 'zip' and 'unzip' types."
+          "description": "Path to the tool executable. Can be a direct string or an OS-specific object. Optional for 'zip' and 'unzip' types: if omitted, the built-in zip engine is used (.zip archives only). Specify a tool (e.g. 7z path) for other formats."
         },
         "inputs": {
           "type": "object",
@@ -264,19 +264,7 @@
           "default": false
         }
       },
-      "required": ["id", "type"],
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "type": { "enum": ["zip", "unzip"] }
-            }
-          },
-          "then": {
-            "required": ["tool"]
-          }
-        }
-      ]
+      "required": ["id", "type"]
     },
     "Output": {
       "type": "object",

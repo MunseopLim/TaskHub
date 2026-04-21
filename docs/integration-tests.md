@@ -79,8 +79,12 @@
 
 | ID | 제목 | 핵심 검증 |
 | --- | --- | --- |
-| IT-024 | zip → unzip 왕복 | `zip` 태스크가 tool 호출로 archive를 만들고, 다음 `unzip` 태스크가 같은 archive를 풀어 source 정보가 복원됨 |
-| IT-025 | zip 태스크의 tool 미지정 에러 | `tool` 없이 실행하면 `getToolCommand`의 "No tool path specified" 에러로 즉시 중단 |
+| IT-024 | zip → unzip 왕복 (외부 tool) | `zip` 태스크가 tool 호출로 archive를 만들고, 다음 `unzip` 태스크가 같은 archive를 풀어 source 정보가 복원됨 |
+| IT-025 | 빌트인 엔진은 .zip이 아닌 아카이브를 거부 | `tool`을 생략하고 `.7z` 등 비-zip 확장자를 넘기면 "Built-in engine only supports .zip archives" 에러로 즉시 중단 |
+| IT-035 | 빌트인 zip → 빌트인 unzip 왕복 | `tool`을 생략하면 번들 내장 엔진으로 .zip을 만들고 다시 풀어 원본 파일 내용이 그대로 복원됨 |
+| IT-036 | 빌트인 zip 디렉터리 재귀 포함 | 디렉터리 source는 basename을 최상위 폴더로 유지한 채 하위 파일까지 재귀적으로 아카이브에 포함됨 |
+| IT-037 | 빌트인 unzip zip-slip 방어 | 엔트리 이름이 대상 디렉터리를 벗어나도록 조작된 악성 아카이브는 추출 전에 거부되고, 대상 밖 경로에는 어떤 파일도 생성되지 않음 |
+| IT-038 | 빌트인 엔진 pipeline 변수 치환 | `archive`에 `${task_id.output}` 같은 변수 참조가 섞여 있어도 외부 tool 경로와 동일하게 치환되어 예상 경로에 아카이브가 생성됨 |
 
 ### Terminal Output Mode
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
@@ -221,9 +225,25 @@ confirm task에서 취소 라벨이 선택되면 pipeline이 reject되고 다음
 
 `getToolCommand`가 사용자 지정 tool을 실행하는지와 `handleZip`/`handleUnzip`이 같은 tool에 정해진 인자 셰이프(`a <archive> <src...>` / `x <archive> -o<destDir> -aoa`)로 호출하는지를 확인합니다. 테스트는 외부 7z 바이너리에 의존하지 않도록 node 기반의 가짜 tool (`fake7z.sh` 또는 `fake7z.cmd`)을 임시 workspace에 만들어 archive 자리에 JSON manifest를 기록하고, `unzip` 호출 시 같은 manifest를 꺼내 놓도록 합니다. 테스트는 archive 파일과 풀린 manifest 양쪽의 `sources` 배열이 원본 입력과 일치하는지 검증합니다.
 
-### IT-025: zip 태스크의 tool 미지정은 실행 시 에러
+### IT-025: 빌트인 엔진은 .zip이 아닌 아카이브를 거부
 
-`tool`을 아예 지정하지 않고 `zip` 태스크를 실행하면 `getToolCommand`가 첫 단계에서 `No tool path specified for the current platform (...)` 에러를 던지고 파이프라인이 즉시 중단되어야 합니다. archive 파일 경로·source 목록 같은 다른 검증보다 tool 해석이 먼저 수행된다는 현재 실행 순서를 고정합니다.
+`tool`을 생략했을 때 내장 zip 엔진이 사용되며, 이 엔진은 `.zip` 확장자만 지원한다는 계약을 고정합니다. `archive`가 `.7z`이면 파이프라인은 "Built-in engine only supports .zip archives" 에러로 즉시 중단되어야 합니다. 이 메시지는 사용자가 다른 포맷이 필요할 때 `tool`을 명시하도록 유도합니다.
+
+### IT-035: 빌트인 zip → 빌트인 unzip 왕복
+
+`tool` 없이 번들 내장 엔진(`adm-zip`)을 사용해 두 파일을 `.zip`으로 묶고 다시 해제했을 때, 추출된 파일 내용이 원본과 바이트 단위로 일치하는지 확인합니다. 실제 시스템에 zip CLI가 없어도 파이프라인이 동작한다는 것을 보장합니다.
+
+### IT-036: 빌트인 zip에 디렉터리 source가 재귀적으로 포함됨
+
+디렉터리 경로를 `source`로 주면 `addLocalFolder`가 basename을 최상위 폴더로 두고 하위 파일까지 재귀적으로 아카이브에 추가합니다. 테스트는 중첩 서브폴더 안의 파일이 해제 후에도 동일한 디렉터리 구조로 복원되는지 확인합니다.
+
+### IT-037: 빌트인 unzip은 zip-slip 경로 탈출을 차단
+
+악성 아카이브가 `../outside.txt` 같은 엔트리 이름으로 대상 디렉터리 밖에 파일을 쓰려고 시도할 때, `extractZipArchive`는 추출 전에 모든 엔트리의 해석된 경로가 대상 디렉터리 안에 있는지 검증하고 벗어나면 "Blocked path traversal" 에러를 던집니다. 테스트는 (1) 파이프라인이 실패하는지, (2) 대상 밖 경로에 실제 파일이 생성되지 않는지 둘 다 확인합니다. adm-zip이 `addFile` 시점에 `../`를 자동 정리하므로, 테스트는 `entryName`을 사후 수정하여 실제 공격자 기법을 모사합니다.
+
+### IT-038: 빌트인 엔진으로 pipeline 변수 치환이 적용됨
+
+내장 엔진 경로에서도 기존 외부 tool 경로와 동일한 `interpolatePipelineVariables`가 적용되는지 확인합니다. 이전 `stringManipulation` 태스크의 `output`을 `${name.output}`으로 참조해 `archive` 경로를 구성하고, 실제로 치환된 경로(`bundle.zip`)에 파일이 생성되는지 검증합니다.
 
 ### IT-026: terminal mode는 터미널을 만들고 같은 actionId에서 재사용
 

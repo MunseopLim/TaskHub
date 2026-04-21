@@ -1,5 +1,30 @@
 # Change Log
 
+## [0.4.6] - 2026-04-21
+
+### 기능 — zip/unzip 내장 엔진 추가
+
+- **`tool` 필드가 선택 사항으로 변경** — `zip`/`unzip` 태스크에서 `tool`을 생략하면 번들 내장 엔진(`adm-zip`, 순수 JS, MIT)이 `.zip` 아카이브를 처리합니다. 사용자 시스템에 7-Zip 등 외부 CLI가 없어도 기본 zip 동작이 가능. `tool`을 지정하면 기존처럼 해당 CLI를 `a/x` 인자 셰이프로 호출 (하위 호환 유지). [src/archiveUtils.ts](src/archiveUtils.ts) 신규, [src/extension.ts](src/extension.ts) `handleZip`/`handleUnzip` 분기 추가.
+- **Zip-slip 방어** — 내장 unzip은 추출 전에 모든 엔트리의 해석된 경로가 대상 디렉터리 안에 있는지 검증하고, `../` 등으로 탈출을 시도하면 "Blocked path traversal" 에러로 중단.
+- **`.zip` 외 확장자는 tool 필요** — 내장 엔진은 `.zip`만 지원. `.7z`·`.rar` 등을 사용하려면 `tool`을 명시하도록 명확한 에러 메시지로 안내.
+- **Preview(Dry-run) 개선** — [src/previewRun.ts](src/previewRun.ts) 에서 `tool` 생략 시 "`tool: (built-in engine — .zip only)`" 로 표시.
+- **JSON Schema 업데이트** — [schema/actions.schema.json](schema/actions.schema.json) 에서 zip/unzip의 `tool` required 제약 제거, 설명을 내장/외부 엔진 양쪽에 맞게 수정.
+
+### 문서
+
+- [docs/features.md](docs/features.md) zip/unzip 섹션을 내장 엔진 기준으로 재작성, 외부 tool 예시는 별도로 유지.
+- [docs/integration-tests.md](docs/integration-tests.md) IT-025 의미 업데이트 + IT-035~038 신규 항목 추가.
+
+### 테스트
+
+- IT-025: 빌트인 엔진이 `.7z` 등 비-zip 확장자를 거부하는지 검증 (이전 "tool 미지정 에러" 케이스를 새 의미로 재작성).
+- IT-035: 빌트인 zip ↔ 빌트인 unzip 왕복 후 파일 내용이 일치.
+- IT-036: 디렉터리 source가 basename을 유지하며 재귀적으로 압축.
+- IT-037: zip-slip 공격 아카이브가 추출 전에 거부되고 대상 밖에 파일이 생성되지 않음.
+- IT-038: 내장 엔진 경로에서도 `${task_id.output}` 변수 치환이 적용됨.
+- buildPreviewReport 에 내장 엔진 표기/외부 tool 경로 표기 분기 검증 3개 추가.
+- 전체 **792개 테스트 통과**.
+
 ## [0.4.5] - 2026-04-20
 
 ### 기능 — 환경변수 보기 기본 액션 복구

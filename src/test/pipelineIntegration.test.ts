@@ -942,14 +942,14 @@ try {
             assert.deepStrictEqual(extracted.sources, [srcA, srcB]);
         });
 
-        test('IT-025: zip 태스크가 tool 없이 실행되면 에러', async () => {
+        test('IT-025: 빌트인 엔진은 .zip이 아닌 아카이브를 거부', async () => {
             const action: PipelineAction = {
                 description: 'IT-025',
                 tasks: [
                     {
                         id: 'pack',
                         type: 'zip',
-                        archive: path.join(tempWorkspace, 'nope.zip'),
+                        archive: path.join(tempWorkspace, 'nope.7z'),
                         source: [path.join(tempWorkspace, 'missing.txt')]
                     }
                 ]
@@ -957,8 +957,137 @@ try {
 
             await assert.rejects(
                 () => run(action),
-                /No tool path specified/
+                /Built-in engine only supports \.zip archives/
             );
+        });
+
+        test('IT-035: 빌트인 zip → 빌트인 unzip 왕복', async () => {
+            const archivePath = path.join(tempWorkspace, 'out', 'bundle.zip');
+            const extractDir = path.join(tempWorkspace, 'extracted');
+            const srcA = path.join(tempWorkspace, 'a.txt');
+            const srcB = path.join(tempWorkspace, 'b.txt');
+            fs.writeFileSync(srcA, 'alpha-content');
+            fs.writeFileSync(srcB, 'beta-content');
+
+            const action: PipelineAction = {
+                description: 'IT-035',
+                tasks: [
+                    {
+                        id: 'pack',
+                        type: 'zip',
+                        archive: archivePath,
+                        source: [srcA, srcB]
+                    },
+                    {
+                        id: 'unpack',
+                        type: 'unzip',
+                        archive: archivePath,
+                        destination: extractDir
+                    }
+                ]
+            };
+
+            await run(action);
+
+            assert.ok(fs.existsSync(archivePath), 'archive should be written');
+            assert.strictEqual(
+                fs.readFileSync(path.join(extractDir, 'a.txt'), 'utf8'),
+                'alpha-content'
+            );
+            assert.strictEqual(
+                fs.readFileSync(path.join(extractDir, 'b.txt'), 'utf8'),
+                'beta-content'
+            );
+        });
+
+        test('IT-036: 빌트인 zip에 디렉터리 source가 재귀적으로 포함됨', async () => {
+            const archivePath = path.join(tempWorkspace, 'pkg.zip');
+            const extractDir = path.join(tempWorkspace, 'out');
+            const srcDir = path.join(tempWorkspace, 'src');
+            const nested = path.join(srcDir, 'sub');
+            fs.mkdirSync(nested, { recursive: true });
+            fs.writeFileSync(path.join(srcDir, 'root.txt'), 'root');
+            fs.writeFileSync(path.join(nested, 'leaf.txt'), 'leaf');
+
+            const action: PipelineAction = {
+                description: 'IT-036',
+                tasks: [
+                    { id: 'pack', type: 'zip', archive: archivePath, source: [srcDir] },
+                    { id: 'unpack', type: 'unzip', archive: archivePath, destination: extractDir }
+                ]
+            };
+
+            await run(action);
+
+            assert.strictEqual(fs.readFileSync(path.join(extractDir, 'src', 'root.txt'), 'utf8'), 'root');
+            assert.strictEqual(fs.readFileSync(path.join(extractDir, 'src', 'sub', 'leaf.txt'), 'utf8'), 'leaf');
+        });
+
+        test('IT-037: 빌트인 unzip은 zip-slip 경로 탈출을 차단', async () => {
+            const AdmZip = require('adm-zip');
+            const archivePath = path.join(tempWorkspace, 'evil.zip');
+            const zip = new AdmZip();
+            // `addFile('../outside.txt', ...)` is sanitized by adm-zip at add time,
+            // so we add a normal entry and then rewrite its stored name to an
+            // escape path — this is how real attackers craft zip-slip archives.
+            zip.addFile('placeholder.txt', Buffer.from('malicious payload'));
+            zip.getEntries()[0].entryName = '../outside.txt';
+            zip.writeZip(archivePath);
+
+            const extractDir = path.join(tempWorkspace, 'extract');
+            const action: PipelineAction = {
+                description: 'IT-037',
+                tasks: [
+                    {
+                        id: 'unpack',
+                        type: 'unzip',
+                        archive: archivePath,
+                        destination: extractDir
+                    }
+                ]
+            };
+
+            await assert.rejects(
+                () => run(action),
+                /Blocked path traversal/
+            );
+
+            // Confirm the escape target was not written outside the destination.
+            assert.strictEqual(
+                fs.existsSync(path.join(tempWorkspace, 'outside.txt')),
+                false,
+                'entry outside destination must not be created'
+            );
+        });
+
+        test('IT-038: 빌트인 엔진으로 pipeline 변수 치환이 적용됨', async () => {
+            const srcDir = path.join(tempWorkspace, 'payload');
+            fs.mkdirSync(srcDir, { recursive: true });
+            fs.writeFileSync(path.join(srcDir, 'note.txt'), 'hello');
+
+            const action: PipelineAction = {
+                description: 'IT-038',
+                tasks: [
+                    {
+                        id: 'name',
+                        type: 'stringManipulation',
+                        function: 'toLowerCase',
+                        input: 'BUNDLE',
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'pack',
+                        type: 'zip',
+                        archive: '${workspaceFolder}/${name.output}.zip',
+                        source: [srcDir]
+                    }
+                ]
+            };
+
+            await run(action);
+
+            const expected = path.join(tempWorkspace, 'bundle.zip');
+            assert.ok(fs.existsSync(expected), `expected archive at ${expected}`);
         });
     });
 

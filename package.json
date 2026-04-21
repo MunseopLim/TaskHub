@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -516,14 +516,30 @@
         "viewType": "taskhub.hexEditor",
         "displayName": "TaskHub Hex Viewer",
         "selector": [
-          { "filenamePattern": "*.hex" },
-          { "filenamePattern": "*.ihex" },
-          { "filenamePattern": "*.srec" },
-          { "filenamePattern": "*.s19" },
-          { "filenamePattern": "*.s28" },
-          { "filenamePattern": "*.s37" },
-          { "filenamePattern": "*.bin" },
-          { "filenamePattern": "*.dat" }
+          {
+            "filenamePattern": "*.hex"
+          },
+          {
+            "filenamePattern": "*.ihex"
+          },
+          {
+            "filenamePattern": "*.srec"
+          },
+          {
+            "filenamePattern": "*.s19"
+          },
+          {
+            "filenamePattern": "*.s28"
+          },
+          {
+            "filenamePattern": "*.s37"
+          },
+          {
+            "filenamePattern": "*.bin"
+          },
+          {
+            "filenamePattern": "*.dat"
+          }
         ],
         "priority": "option"
       }
@@ -544,6 +560,7 @@
     "test": "vscode-test"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/chai": "^5.2.2",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
@@ -564,5 +581,8 @@
     "minimatch": "^10.2.1",
     "diff": "^8.0.3",
     "serialize-javascript": "^7.0.4"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.17"
   }
 }

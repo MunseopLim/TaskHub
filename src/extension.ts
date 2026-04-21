@@ -13,6 +13,7 @@ import { showMemoryMap, MemoryMapConfig, goToSymbol } from './memoryMapViewer';
 import { showHexViewer, HexEditorProvider } from './hexViewer';
 import { t } from './i18n';
 import { buildPreviewReport } from './previewRun';
+import { createZipArchive, extractZipArchive } from './archiveUtils';
 
 // Compile the actions JSON-schema validator once and reuse it. Re-compiling on
 // every load path (activation + every view refresh + every executeAction) was
@@ -1996,6 +1997,21 @@ async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: str
         outputDir = path.dirname(archivePath);
     }
 
+    // When `tool` is omitted, use the bundled zip engine. Only .zip archives
+    // are supported by the built-in path; anything else requires an explicit
+    // tool (e.g. 7z) since adm-zip cannot read those formats.
+    if (task.tool === undefined || task.tool === null) {
+        if (path.extname(archivePath).toLowerCase() !== '.zip') {
+            throw new Error(`Built-in engine only supports .zip archives. For '${path.basename(archivePath)}', specify a 'tool' (e.g. 7z).`);
+        }
+        try {
+            await extractZipArchive(archivePath, outputDir);
+            return { outputDir: outputDir };
+        } catch (error: any) {
+            throw new Error(`Failed to unzip file: ${error.message}`);
+        }
+    }
+
     const toolCommand = getToolCommand(task.tool);
     const args = ['x', archivePath, `-o${outputDir}`, '-aoa'];
     try {
@@ -2008,8 +2024,7 @@ async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: str
 
 async function handleZip(task: import('./schema').Task, allResults: any, workspaceFolderPath?: string, actionId?: string): Promise<{ archivePath: string }> {
     const interpolationContext = { ...allResults, workspaceFolder: workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '' };
-    
-    const toolCommand = getToolCommand(task.tool);
+
     const archive = task.archive ? interpolatePipelineVariables(task.archive, interpolationContext) : undefined;
     if (!archive) { throw new Error(`Zip task '${task.id}' is missing the 'archive' property.`); }
 
@@ -2024,6 +2039,21 @@ async function handleZip(task: import('./schema').Task, allResults: any, workspa
         throw new Error(`Zip task '${task.id}' has no 'source' files or directories specified.`);
     }
 
+    // When `tool` is omitted, use the bundled zip engine. Only .zip output is
+    // supported; other formats still require an external tool.
+    if (task.tool === undefined || task.tool === null) {
+        if (path.extname(archive).toLowerCase() !== '.zip') {
+            throw new Error(`Built-in engine only supports .zip archives. For '${path.basename(archive)}', specify a 'tool' (e.g. 7z).`);
+        }
+        try {
+            await createZipArchive(archive, sourcePaths);
+            return { archivePath: archive };
+        } catch (error: any) {
+            throw new Error(`Failed to zip files for task '${task.id}': ${error.message}`);
+        }
+    }
+
+    const toolCommand = getToolCommand(task.tool);
     const args = ['a', archive, ...sourcePaths];
     let envOverrides: Record<string, string> | undefined;
     if (task.env && typeof task.env === 'object') {

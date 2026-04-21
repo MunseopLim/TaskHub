@@ -278,7 +278,11 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 })();
                 const archive = task.archive ? interpolatePipelineVariables(task.archive, interpolationContext) : undefined;
                 const destination = task.destination ? interpolatePipelineVariables(task.destination, interpolationContext) : undefined;
-                lines.push(`  tool: ${typeof tool === 'string' ? tool : JSON.stringify(tool)}`);
+                if (tool === undefined || tool === null) {
+                    lines.push(`  tool: (built-in engine — .zip only)`);
+                } else {
+                    lines.push(`  tool: ${typeof tool === 'string' ? tool : JSON.stringify(tool)}`);
+                }
                 if (archive) { lines.push(`  archive:     ${archive}`); }
                 if (destination) { lines.push(`  destination: ${destination}`); }
                 if (task.inputs) {
