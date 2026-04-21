@@ -55,7 +55,7 @@
 
 ## 설치 (VSIX 파일로 수동 설치)
 
-1. [Releases](https://github.com/munseoplim/TaskHub/releases) 페이지에서 최신 `.vsix` 파일 다운로드
+1. [Releases](https://github.com/MunseopLim/TaskHub/releases) 페이지에서 최신 `.vsix` 파일 다운로드
 2. VS Code에서 `Ctrl+Shift+P` (macOS: `Cmd+Shift+P`) → `Extensions: Install from VSIX...` 선택
 3. 다운로드한 `.vsix` 파일 지정
 

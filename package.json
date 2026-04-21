@@ -8,7 +8,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/munseoplim/TaskHub.git"
+    "url": "https://github.com/MunseopLim/TaskHub.git"
   },
   "engines": {
     "vscode": "^1.75.0"
