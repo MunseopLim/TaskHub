@@ -1,5 +1,5 @@
 /**
- * Main view TreeDataProvider and its supporting TreeItems (Folder, Action).
+ * Actions view TreeDataProvider and its supporting TreeItems (Folder, Action).
  *
  * Extracted from `extension.ts` (phase 2 module split). `extension.ts` still
  * owns the full action-loading pipeline (`loadAllActions`), so this module

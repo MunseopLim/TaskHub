@@ -1,5 +1,12 @@
 # Change Log
 
+## [0.4.8] - 2026-04-22
+
+### 변경 — 메인 패널 이름을 "Actions"로 변경
+
+- [package.json](package.json) `mainView.main` 뷰의 표시 이름을 `Main` → `Actions` 로 변경. 내부 뷰 ID(`mainView.main`)와 클래스(`MainViewProvider`)는 사용자 settings/keybindings 호환성 위해 유지.
+- 관련 문서에서 "메인 패널" 을 "Actions 패널" 로 일괄 갱신 ([README.md](README.md), [docs/features.md](docs/features.md)). TaskHub 활동 표시줄 컨테이너(`mainView`)를 가리키던 "메인 뷰" 는 그대로 유지.
+
 ## [0.4.7] - 2026-04-22
 
 ### 변경 — 기본 제공 링크 정비

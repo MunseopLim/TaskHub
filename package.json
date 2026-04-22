@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -65,7 +65,7 @@
         "taskhub.showTaskStatus": {
           "type": "boolean",
           "default": true,
-          "description": "Show status indicators (running, success, failure) for actions in the Main view."
+          "description": "Show status indicators (running, success, failure) for actions in the Actions view."
         },
         "taskhub.pipeline.showVerboseLogs": {
           "type": "boolean",
@@ -128,7 +128,7 @@
       "mainView": [
         {
           "id": "mainView.main",
-          "name": "Main",
+          "name": "Actions",
           "icon": "media/m_icon.svg"
         },
         {
