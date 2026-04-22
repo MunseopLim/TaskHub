@@ -1,5 +1,13 @@
 # Change Log
 
+## [0.4.9] - 2026-04-22
+
+### 문서 — README 스크린샷 섹션 추가
+
+- [README.md](README.md) 에 "스크린샷" 섹션 신설. 사이드바 / Memory Map / Number Base Hover / Register Decoder Hover / SFR Bit Field Hover / JSON Editor / Hex Viewer 총 7개 기능을 이미지로 소개.
+- [docs/images/](docs/images/) 디렉터리 추가 (문서 전용 리소스, `media/` 확장 리소스와 분리).
+- [examples/sample_binary.bin](examples/sample_binary.bin) Hex Viewer 데모용 1 KB 샘플 바이너리 추가. 헤더(TASKHUB 매직) / ASCII 설명 / 문자열 테이블 / 0x00~0xFF 카운터 / 구조체 레코드 / 0xAA55 패턴 / 알파벳 필러로 구성되어 ASCII 컬럼과 16진 컬럼 모두 볼거리가 있도록 배치.
+
 ## [0.4.8] - 2026-04-22
 
 ### 변경 — 메인 패널 이름을 "Actions"로 변경

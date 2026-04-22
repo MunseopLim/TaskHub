@@ -39,6 +39,58 @@
 
 > 각 기능의 상세 설명, JSON 예제, hover 출력 예시 등은 [docs/features.md](docs/features.md)를 참조하세요.
 
+## 스크린샷
+
+### 사이드바
+
+활동 표시줄의 'H' 아이콘을 클릭하면 Actions / Built-in Links / Workspace Links / Favorite Files / History 패널이 한 뷰에 통합되어 표시됩니다.
+
+![TaskHub 사이드바](docs/images/sidebar-overview.png)
+
+### Memory Map 시각화
+
+ARM Linker Listing(`armlink --list`) 또는 GNU ld 링커 스크립트 출력을 파싱해 메모리 리전별 사용량, 섹션 목록, 함수별 분포를 한눈에 보여줍니다.
+
+![Memory Map - ARM Linker 예제](docs/images/memory-map-armlink.png)
+
+### C/C++ Number Base Hover
+
+숫자 리터럴 위에 마우스를 올리면 Hex / Dec / Bin 변환과 32-bit 비트 맵, set bit 목록을 즉시 확인할 수 있습니다.
+
+![Number Base Hover - 0b11111111 예제](docs/images/hover-number-base.png)
+
+### C/C++ Register Decoder Hover
+
+레지스터에 대입하는 리터럴 값 위에 마우스를 올리면 레지스터 이름과 비트 필드별 값/설명이 표로 디코딩돼 보입니다.
+
+![Register Decoder Hover - IntRegSts 예제](docs/images/hover-register-decode.png)
+
+### C/C++ SFR Bit Field Hover
+
+비트 필드 심볼 위에 마우스를 올리면 Bit Position / Width / Access Type / Reset Value / Bit Mask 가 표로 요약됩니다.
+
+![SFR Bit Field Hover - int_field_0 예제](docs/images/hover-sfr-bit-field.png)
+
+### JSON Editor
+
+JSON 배열/객체를 스프레드시트 형태로 편집할 수 있는 뷰어입니다. 시트 탭 전환, 행 추가/삭제/드래그, 셀 타입 변환(`s→a`, `a→s` 등) 을 지원합니다.
+
+![JSON Editor - test.json 예제](docs/images/json-editor.png)
+
+### Hex Viewer
+
+바이너리 파일을 주소/16진/ASCII 3단 구조로 표시합니다. Unit(1/2/4/8 Byte), Endian, Go-to, Find 지원.
+
+![Hex Viewer - sample_binary.bin 예제](docs/images/hex-viewer.png)
+
+<!--
+### 기능 이름
+
+한 줄 설명.
+
+![캡션](docs/images/파일명.png)
+-->
+
 ## 설정
 
 | 설정 ID | 타입 | 기본값 | 설명 |
