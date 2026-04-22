@@ -1,5 +1,25 @@
 # Change Log
 
+## [0.4.10] - 2026-04-22
+
+### 개선 — 삭제된 파일을 가리키는 즐겨찾기 UX
+
+- [src/extension.ts](src/extension.ts) `taskhub.openFavoriteFile` 에서 해석된 경로에 파일이 없으면 장문의 VS Code 원본 에러 대신 "즐겨찾기 파일을 찾을 수 없습니다: `<path>`" 한 줄과 **"즐겨찾기에서 제거"** 버튼을 제공. 버튼 클릭 시 `sourceFile` 의 favorites.json 에서 해당 항목만 제거하고 뷰 새로고침. Search Favorites 와 tree view 클릭 모두 동일 핸들러라 양쪽에 적용됨.
+- [src/providers/favoriteViewProvider.ts](src/providers/favoriteViewProvider.ts) 에 `removeFavoriteByIdentity(favorites, target)` 순수 함수 추출. `taskhub.deleteFavorite` 와 새 stale-file 제거 경로가 동일한 식별 기준(path + line + title + group)을 공유하도록 DRY.
+
+### 테스트
+
+- IT-039 ~ IT-042 4 개 추가 ([src/test/viewProviderIntegration.test.ts](src/test/viewProviderIntegration.test.ts))
+  - IT-039: 존재하지 않는 파일을 가리키는 항목만 제거되고 나머지는 group/tags 포함 원본 보존
+  - IT-040: path+title 같고 line 다른 두 항목 중 target 만 제거
+  - IT-041: 매칭 없는 target 은 no-op
+  - IT-042: group 이 다르면 별개 항목으로 취급
+- 전체 **846개 테스트 통과**.
+
+### 문서
+
+- [docs/integration-tests.md](docs/integration-tests.md) View Provider Integration 표에 IT-039 ~ IT-042 추가.
+
 ## [0.4.9] - 2026-04-22
 
 ### 문서 — README 스크린샷 섹션 추가

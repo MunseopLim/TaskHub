@@ -78,6 +78,24 @@ export class Favorite extends vscode.TreeItem {
     }
 }
 
+/**
+ * Return a new favorites list with the entry that identity-matches `target`
+ * removed. "Identity" = same path + line (normalized) + title + group. Used
+ * both by explicit delete and by the "file not found → remove from favorites"
+ * affordance so both paths stay consistent.
+ */
+export function removeFavoriteByIdentity(favorites: FavoriteEntry[], target: FavoriteEntry): FavoriteEntry[] {
+    const targetLine = normalizeLineNumber(target.line);
+    return favorites.filter(f => {
+        const line = normalizeLineNumber(f.line);
+        const samePath = f.path === target.path;
+        const sameLine = (line ?? null) === (targetLine ?? null);
+        const sameTitle = f.title === target.title;
+        const sameGroup = (f.group ?? null) === (target.group ?? null);
+        return !(samePath && sameLine && sameTitle && sameGroup);
+    });
+}
+
 export function loadFavoritesFromDisk(filePath: string, reportErrors: boolean, workspaceFolderPath?: string): FavoriteEntry[] {
     if (!fs.existsSync(filePath)) {
         return [];

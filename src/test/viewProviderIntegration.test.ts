@@ -4,7 +4,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { actionStates } from '../providers/actionStatus';
-import { Favorite, FavoriteGroup, FavoriteViewProvider } from '../providers/favoriteViewProvider';
+import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteViewProvider, loadFavoritesFromDisk, removeFavoriteByIdentity } from '../providers/favoriteViewProvider';
+import { serializeFavorites } from '../extension';
 import { Link, LinkGroup, LinkViewProvider } from '../providers/linkViewProvider';
 import { Action, Folder, MainViewProvider } from '../providers/mainViewProvider';
 import { ActionItem } from '../schema';
@@ -193,5 +194,82 @@ suite('View provider integration', function () {
         assert.strictEqual(folderChildren[0].contextValue, 'action');
         assert.strictEqual((folderChildren[0].iconPath as vscode.ThemeIcon).id, 'debug-alt');
         assert.strictEqual((folderChildren[0] as Action).command?.command, 'taskhub.executeAction');
+    });
+
+    suite('removeFavoriteByIdentity (stale favorite removal)', () => {
+        test('IT-039: 존재하지 않는 파일을 가리키는 항목만 제거되고 나머지는 원본 순서/내용 보존', async () => {
+            const workspace = createWorkspace();
+            const favoritesPath = path.join(workspace, '.vscode', 'favorites.json');
+            fs.writeFileSync(path.join(workspace, 'exists.md'), 'hello');
+            fs.writeFileSync(favoritesPath, JSON.stringify([
+                { title: 'Readme', path: '${workspaceFolder}/exists.md', group: 'Docs' },
+                { title: 'Missing', path: '${workspaceFolder}/scripts/missing.sh', group: 'Scripts' },
+                { title: 'Example', path: '${workspaceFolder}/example.cfg', tags: ['cfg'] }
+            ], null, 2));
+
+            const favorites = loadFavoritesFromDisk(favoritesPath, true, workspace);
+            assert.strictEqual(favorites.length, 3);
+            const stale = favorites.find(f => f.title === 'Missing')!;
+
+            const filtered = removeFavoriteByIdentity(favorites, stale);
+
+            assert.strictEqual(filtered.length, 2);
+            fs.writeFileSync(favoritesPath, JSON.stringify(serializeFavorites(filtered), null, 2) + '\n');
+
+            const reloaded = JSON.parse(fs.readFileSync(favoritesPath, 'utf-8'));
+            assert.deepStrictEqual(reloaded.map((f: any) => f.title), ['Readme', 'Example']);
+            assert.strictEqual(reloaded[0].group, 'Docs');
+            assert.deepStrictEqual(reloaded[1].tags, ['cfg']);
+        });
+
+        test('IT-040: path + title 이 같지만 line 이 다른 두 항목 중 target 만 제거', () => {
+            const workspace = createWorkspace();
+            const favoritesPath = path.join(workspace, '.vscode', 'favorites.json');
+            const commonPath = path.join(workspace, 'src', 'main.c');
+            fs.writeFileSync(favoritesPath, JSON.stringify([
+                { title: 'Init', path: commonPath, line: 10 },
+                { title: 'Init', path: commonPath, line: 42 }
+            ], null, 2));
+
+            const favorites = loadFavoritesFromDisk(favoritesPath, true, workspace);
+            const target: FavoriteEntry = favorites.find(f => f.line === 42)!;
+            const filtered = removeFavoriteByIdentity(favorites, target);
+
+            assert.strictEqual(filtered.length, 1);
+            assert.strictEqual(filtered[0].line, 10);
+        });
+
+        test('IT-041: 존재하지 않는 target 은 no-op (길이/내용 변화 없음)', () => {
+            const workspace = createWorkspace();
+            const favoritesPath = path.join(workspace, '.vscode', 'favorites.json');
+            fs.writeFileSync(favoritesPath, JSON.stringify([
+                { title: 'Readme', path: '${workspaceFolder}/exists.md' }
+            ], null, 2));
+
+            const favorites = loadFavoritesFromDisk(favoritesPath, true, workspace);
+            const ghost: FavoriteEntry = { title: 'Ghost', path: '${workspaceFolder}/nope.md' };
+
+            const filtered = removeFavoriteByIdentity(favorites, ghost);
+
+            assert.strictEqual(filtered.length, favorites.length);
+            assert.strictEqual(filtered[0].title, 'Readme');
+        });
+
+        test('IT-042: 같은 path·title 이어도 group 이 다르면 보존', () => {
+            const workspace = createWorkspace();
+            const favoritesPath = path.join(workspace, '.vscode', 'favorites.json');
+            const commonPath = path.join(workspace, 'config.toml');
+            fs.writeFileSync(favoritesPath, JSON.stringify([
+                { title: 'Config', path: commonPath, group: 'Dev' },
+                { title: 'Config', path: commonPath, group: 'Prod' }
+            ], null, 2));
+
+            const favorites = loadFavoritesFromDisk(favoritesPath, true, workspace);
+            const devTarget = favorites.find(f => f.group === 'Dev')!;
+            const filtered = removeFavoriteByIdentity(favorites, devTarget);
+
+            assert.strictEqual(filtered.length, 1);
+            assert.strictEqual(filtered[0].group, 'Prod');
+        });
     });
 });

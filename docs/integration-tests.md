@@ -73,6 +73,10 @@
 | IT-021 | LinkViewProvider workspace JSON lazy load | `.vscode/links.json` 로딩, group 정렬, link 정렬, tag/sourceFile 보존, view title 갱신 |
 | IT-022 | FavoriteViewProvider workspace JSON lazy load | `.vscode/favorites.json` 로딩, line/tags normalization, workspaceFolder/sourceFile 보존, view title 갱신 |
 | IT-023 | MainViewProvider TreeItem 구성 | version/folder/separator/action TreeItem 구성, folder expanded state, action run-state icon/context 반영 |
+| IT-039 | stale favorite 제거 — disk 반영 | `removeFavoriteByIdentity` 로 하나만 제거 후 `serializeFavorites` 직렬화·재로드 시 나머지 항목의 순서·group·tags 보존 |
+| IT-040 | 동일 path·title, 다른 line 구분 | 같은 파일의 서로 다른 줄 북마크가 `line` 을 기준으로 정확히 하나만 제거됨 |
+| IT-041 | 매칭 없는 target 은 no-op | 식별자 4종 중 하나라도 어긋나는 target 은 기존 리스트를 그대로 반환 |
+| IT-042 | 동일 path·title, 다른 group 구분 | `group` 이 다르면 별개 항목으로 취급되어 target 만 제거 |
 
 ### Archive Task Pipeline
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)

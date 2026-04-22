@@ -1050,6 +1050,7 @@ import {
     Favorite,
     FavoriteViewProvider,
     loadFavoritesFromDisk,
+    removeFavoriteByIdentity,
 } from './providers/favoriteViewProvider';
 export {
     FavoriteEntry,
@@ -1058,6 +1059,7 @@ export {
     Favorite,
     FavoriteViewProvider,
     loadFavoritesFromDisk,
+    removeFavoriteByIdentity,
 };
 
 // HistoryEntry, HistoryItem, HistoryProvider now live in
@@ -2468,6 +2470,26 @@ export function activate(context: vscode.ExtensionContext) {
                 ));
                 return;
             }
+            if (!fs.existsSync(resolvedPath)) {
+                const removeLabel = t('즐겨찾기에서 제거', 'Remove from Favorites');
+                const choice = await vscode.window.showErrorMessage(
+                    t(
+                        `즐겨찾기 파일을 찾을 수 없습니다: ${target.path}`,
+                        `Favorite file not found: ${target.path}`
+                    ),
+                    removeLabel
+                );
+                if (choice === removeLabel && target.sourceFile && fs.existsSync(target.sourceFile)) {
+                    const favorites = loadFavoritesFromDisk(target.sourceFile, true, target.workspaceFolder);
+                    const filtered = removeFavoriteByIdentity(favorites, target);
+                    if (filtered.length !== favorites.length) {
+                        const serialized = serializeFavorites(filtered);
+                        fs.writeFileSync(target.sourceFile, JSON.stringify(serialized, null, 2) + '\n');
+                        favoriteViewProvider.refresh();
+                    }
+                }
+                return;
+            }
             const uri = vscode.Uri.file(resolvedPath);
             const document = await vscode.workspace.openTextDocument(uri);
             const editor = await vscode.window.showTextDocument(document);
@@ -2814,16 +2836,8 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
         const target = item.getEntry();
-        const targetLine = normalizeLineNumber(target.line);
         const favorites = loadFavoritesFromDisk(sourceFile, true, target.workspaceFolder);
-        const filtered = favorites.filter(f => {
-            const line = normalizeLineNumber(f.line);
-            const samePath = f.path === target.path;
-            const sameLine = (line ?? null) === (targetLine ?? null);
-            const sameTitle = f.title === target.title;
-            const sameGroup = (f.group ?? null) === (target.group ?? null);
-            return !(samePath && sameLine && sameTitle && sameGroup);
-        });
+        const filtered = removeFavoriteByIdentity(favorites, target);
         if (filtered.length === favorites.length) {
             return;
         }
