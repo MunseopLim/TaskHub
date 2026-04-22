@@ -121,6 +121,44 @@
 | IT-031 | 지원하지 않는 task type | `executeSingleTask` 기본 분기의 `Unsupported task type: <type>` 에러 |
 | IT-032 | shell 태스크 command 누락 | `command` 없이 `shell` 태스크 실행 시 `Task <id> of type 'shell' requires a 'command' property.` 에러 |
 
+### writeFile / appendFile
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-043 | writeFile 변수 치환 | `${task.output}` 치환된 content가 그대로 파일로 저장되고, 상위 디렉터리가 자동 생성됨 |
+| IT-044 | writeFile workspace escape 거부 | `../escape.txt` 같은 워크스페이스 외부 경로는 `outside the current workspace` 에러로 거부됨 |
+| IT-045 | overwrite=false는 기존 파일 보호 | 대상 파일이 이미 존재하면 `refused to overwrite` 에러로 즉시 중단되고 원본 내용 보존 |
+| IT-046 | overwrite 기본값=true | overwrite 미지정 시 기존 파일을 덮어씀 |
+| IT-047 | mkdirs 기본값=true | 깊이 3단계 이상의 누락된 상위 디렉터리도 자동 생성됨 |
+| IT-048 | mkdirs=false는 부재 디렉터리 거부 | 상위 디렉터리가 없을 때 `parent directory does not exist` 에러 |
+| IT-049 | EOL 정규화 (lf, crlf) | CRLF 입력을 lf로, LF 입력을 crlf로 정규화하며 CRCRLF로 doubling되지 않음 |
+| IT-050 | utf8bom 인코딩 | 파일 선두에 정확히 0xEF 0xBB 0xBF가 기록되고 그 뒤에 UTF-8 본문 |
+| IT-051 | appendFile 기본 이어쓰기 | 기존 파일 끝에 content가 추가됨 |
+| IT-052 | appendFile + utf8bom 신규 파일 | 대상이 없으면 첫 append에 BOM이 추가됨 |
+| IT-053 | appendFile + utf8bom 기존 파일 | 기존 파일 중간에 BOM이 삽입되지 않음 |
+| IT-054 | `${task.path}` downstream 참조 | writeFile 결과의 path 변수가 다음 stringManipulation 입력으로 그대로 들어감 |
+| IT-055 | path 누락 즉시 에러 | `requires a non-empty 'path' property` 에러 |
+| IT-056 | content 누락 즉시 에러 | `requires a 'content' property` 에러 |
+
+### continueOnError
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-057 | 실패 task 다음으로 흐름 진행 | `continueOnError: true`인 실패 task가 throw하지 않고 다음 task가 정상 실행 |
+| IT-058 | skip된 task의 변수는 unresolved literal | 결과가 `{}`로 저장되어 downstream의 `${skipped.path}`가 리터럴로 남음 |
+| IT-059 | 기본값(false)은 첫 실패에서 중단 | 옵션 없이 실패 시 기존처럼 throw하고 다음 task는 실행되지 않음 |
+
+### timeoutSeconds
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-060 | shell 프로세스 timeout 종료 | `sleep 10` 같은 장기 프로세스가 0.5초 budget을 넘기면 `timed out after 0.5s` 에러로 즉시 종료 (실제로 10초 기다리지 않음) |
+| IT-061 | 충분한 budget은 정상 완료 | 30초 budget 내에 끝나는 writeFile은 timeout 발동 없이 결과 저장 |
+| IT-062 | timeout + continueOnError 조합 | timeout으로 실패해도 continueOnError가 true면 다음 task가 실행됨 |
+
 ## 상세
 
 각 시나리오의 세부 태스크 구성·기대값은 테스트 파일의 주석과 `assert` 문을 정본으로 삼습니다. 이 문서는 의도·커버리지 맵이며, 구현 디테일은 코드에 둡니다.

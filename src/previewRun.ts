@@ -72,6 +72,9 @@ function simulateTaskResult(task: Task): SimulatedResult {
         case 'shell':
         case 'command':
             return { output: placeholder(task.type, task.id, 'stdout') };
+        case 'writeFile':
+        case 'appendFile':
+            return { path: placeholder(task.type, task.id, 'path') };
         default:
             return {};
     }
@@ -298,8 +301,47 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 interpolated.push(input);
                 break;
             }
+            case 'writeFile':
+            case 'appendFile': {
+                const rawPath = task.path ? interpolatePipelineVariables(task.path, interpolationContext) : '(missing)';
+                const content = task.content !== undefined ? interpolatePipelineVariables(task.content, interpolationContext) : '(missing)';
+                lines.push(`  path:    ${rawPath}`);
+                if (task.path && !UNRESOLVED_VAR_RE.test(rawPath)) {
+                    UNRESOLVED_VAR_RE.lastIndex = 0;
+                    const { resolved, outsideWorkspace } = resolveFilePathForPreview(
+                        rawPath,
+                        options.workspaceFolder,
+                        options.workspaceRoots
+                    );
+                    lines.push(`    → resolves to: ${resolved}`);
+                    if (outsideWorkspace) {
+                        lines.push(`    ⚠️  OUTSIDE WORKSPACE — execution will be refused`);
+                    }
+                }
+                UNRESOLVED_VAR_RE.lastIndex = 0;
+                const contentDisplay = content.length > 120
+                    ? `${content.slice(0, 120)}… (${content.length} chars)`
+                    : content;
+                lines.push(`  content: ${JSON.stringify(contentDisplay)}`);
+                if (task.encoding) { lines.push(`  encoding: ${task.encoding}`); }
+                if (task.eol) { lines.push(`  eol: ${task.eol}`); }
+                if (task.type === 'writeFile') {
+                    const overwriteEffective = task.overwrite !== false;
+                    lines.push(`  overwrite: ${overwriteEffective}${task.overwrite === undefined ? ' (default)' : ''}`);
+                }
+                if (task.mkdirs === false) { lines.push(`  mkdirs: false (parent dir must already exist)`); }
+                interpolated.push(rawPath, content);
+                break;
+            }
             default:
                 lines.push(`  (unknown task type — no preview)`);
+        }
+
+        if (typeof task.timeoutSeconds === 'number' && task.timeoutSeconds > 0) {
+            lines.push(`  timeoutSeconds: ${task.timeoutSeconds}`);
+        }
+        if (task.continueOnError) {
+            lines.push(`  continueOnError: true (failures won't stop the pipeline)`);
         }
 
         if (task.output) {

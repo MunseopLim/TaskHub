@@ -467,6 +467,9 @@ import {
     encodePowerShellScript,
     quotePosixArgument,
     buildPosixCommandLine,
+    normalizeEol,
+    encodeFileContent,
+    withTaskTimeout,
 } from './pipelineUtils';
 export {
     INTERPOLATED_VALUE_MAX_LENGTH,
@@ -483,6 +486,9 @@ export {
     encodePowerShellScript,
     quotePosixArgument,
     buildPosixCommandLine,
+    normalizeEol,
+    encodeFileContent,
+    withTaskTimeout,
 };
 
 function getWorkspaceRoots(): string[] {
@@ -1410,7 +1416,35 @@ export async function executeActionPipeline(
 ): Promise<void> {
     const stepResults: Record<string, unknown> = {};
     for (const task of action.tasks) {
-        const result = await executeSingleTask(task, stepResults, context, id, workspaceFolderPath, workspaceRoots);
+        let result: unknown;
+        try {
+            const taskRun = executeSingleTask(task, stepResults, context, id, workspaceFolderPath, workspaceRoots);
+            // On timeout, kill any running child processes and terminate the
+            // active vscode Task (best effort — dialogs can't be forcibly
+            // closed, but the outer promise still rejects).
+            result = await withTaskTimeout(taskRun, task.timeoutSeconds, task.id, () => {
+                terminateChildProcesses(id);
+                const exec = activeTasks.get(id);
+                if (exec) {
+                    try { exec.terminate(); } catch { /* ignore */ }
+                }
+            });
+        } catch (error) {
+            if (task.continueOnError) {
+                const message = error instanceof Error ? error.message : String(error);
+                const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+                if (showVerboseLogs) {
+                    outputChannel.appendLine(`[WARN] Task '${task.id}' failed but 'continueOnError' is true — continuing: ${message}`);
+                }
+                // Store an empty object so downstream `${task.*}` references
+                // cleanly fall through to the "unmatched → literal" path in
+                // interpolatePipelineVariables, matching stream-mode shell
+                // task behaviour.
+                stepResults[task.id] = {};
+                continue;
+            }
+            throw error;
+        }
         stepResults[task.id] = result;
     }
 }
@@ -1598,6 +1632,16 @@ async function executeSingleTask(
         case 'confirm':
             const interpolatedMessage = task.message ? interpolatePipelineVariables(task.message, interpolationContext) : undefined;
             result = await handleConfirm({ ...task, message: interpolatedMessage });
+            break;
+        case 'writeFile':
+        case 'appendFile':
+            result = await handleWriteFile(
+                task,
+                interpolationContext,
+                workspaceRoots ?? getWorkspaceRoots(),
+                defaultWorkspace,
+                task.type === 'appendFile'
+            );
             break;
         case 'command':
         case 'shell':
@@ -1956,6 +2000,55 @@ async function handleEnvPick(task: any): Promise<{ value: string }> {
     }
 
     return { value: selected.label };
+}
+
+async function handleWriteFile(
+    task: import('./schema').Task,
+    interpolationContext: any,
+    workspaceRoots: string[],
+    defaultWorkspace: string,
+    append: boolean
+): Promise<{ path: string }> {
+    if (typeof task.path !== 'string' || task.path.length === 0) {
+        throw new Error(`Task '${task.id}' of type '${task.type}' requires a non-empty 'path' property.`);
+    }
+    if (typeof task.content !== 'string') {
+        throw new Error(`Task '${task.id}' of type '${task.type}' requires a 'content' property (string).`);
+    }
+
+    const rawPath = interpolatePipelineVariables(task.path, interpolationContext);
+    const content = interpolatePipelineVariables(task.content, interpolationContext);
+    const safePath = resolveWithinWorkspace(rawPath, workspaceRoots, defaultWorkspace);
+
+    const mkdirs = task.mkdirs !== false;
+    const dir = path.dirname(safePath);
+    if (!fs.existsSync(dir)) {
+        if (mkdirs) {
+            fs.mkdirSync(dir, { recursive: true });
+        } else {
+            throw new Error(`Task '${task.id}' cannot write to '${safePath}': parent directory does not exist and 'mkdirs' is false.`);
+        }
+    }
+
+    const targetExists = fs.existsSync(safePath);
+    if (!append && task.overwrite === false && targetExists) {
+        throw new Error(`Task '${task.id}' refused to overwrite existing file '${safePath}' (overwrite: false).`);
+    }
+
+    const normalized = normalizeEol(content, task.eol);
+    // For appendFile on an existing file, suppress the BOM — planting a BOM
+    // mid-file would corrupt the stream for UTF-8-aware readers. A fresh
+    // appendFile (target absent) still gets the BOM when requested.
+    const includeBom = !(append && targetExists);
+    const buffer = encodeFileContent(normalized, task.encoding, includeBom);
+
+    if (append) {
+        fs.appendFileSync(safePath, buffer);
+    } else {
+        fs.writeFileSync(safePath, buffer);
+    }
+
+    return { path: safePath };
 }
 
 async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: string, actionId?: string): Promise<{ outputDir: string }> {

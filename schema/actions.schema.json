@@ -71,7 +71,7 @@
         "type": {
           "type": "string",
           "description": "The type of the task to execute.",
-          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "envPick", "confirm"]
+          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "envPick", "confirm", "writeFile", "appendFile"]
         },
         "command": {
           "oneOf": [
@@ -261,6 +261,46 @@
         "isOneShot": {
           "type": "boolean",
           "description": "If true, the task is considered successful as soon as it starts. Useful for non-terminating processes like GUI applications. Only works when `passTheResultToNextTask` is false.",
+          "default": false
+        },
+        "path": {
+          "type": "string",
+          "description": "Destination path for 'writeFile' / 'appendFile' tasks. Supports variable interpolation. Relative paths resolve against the action's workspace folder and must stay inside it."
+        },
+        "content": {
+          "type": "string",
+          "description": "Content to write for 'writeFile' / 'appendFile' tasks. Supports variable interpolation."
+        },
+        "encoding": {
+          "type": "string",
+          "enum": ["utf8", "utf8bom", "ascii"],
+          "description": "File encoding for 'writeFile' / 'appendFile' tasks. Defaults to 'utf8'. 'utf8bom' prefixes a BOM (on appendFile, only when the target file does not already exist). 'ascii' replaces non-ASCII characters with '?'.",
+          "default": "utf8"
+        },
+        "eol": {
+          "type": "string",
+          "enum": ["lf", "crlf", "keep"],
+          "description": "Line-ending normalization for 'writeFile' / 'appendFile' tasks. Defaults to 'keep'.",
+          "default": "keep"
+        },
+        "overwrite": {
+          "type": "boolean",
+          "description": "For 'writeFile': if false, the task fails when the target file already exists. Defaults to true. Ignored for 'appendFile'.",
+          "default": true
+        },
+        "mkdirs": {
+          "type": "boolean",
+          "description": "For 'writeFile' / 'appendFile': if true (default), missing parent directories are created automatically. If false, the task fails when the parent directory is missing.",
+          "default": true
+        },
+        "timeoutSeconds": {
+          "type": "number",
+          "description": "Task-level timeout in seconds. If the task does not complete within this budget, it is canceled and the pipeline fails with a timeout error (subject to 'continueOnError'). 0 or omitted disables the timeout. Applies to every task type, including interactive ones.",
+          "minimum": 0
+        },
+        "continueOnError": {
+          "type": "boolean",
+          "description": "If true, the pipeline continues to the next task when this task fails (including timeouts and user-canceled dialogs). The failing task's result becomes empty ({}). Defaults to false.",
           "default": false
         }
       },

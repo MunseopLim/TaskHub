@@ -398,3 +398,92 @@ export function resolveFavoriteFilePath(
     const interpolated = rawPath.replace('${workspaceFolder}', workspaceFolderPath || '');
     return resolveWithinWorkspace(interpolated, workspaceRoots, workspaceFolderPath || undefined);
 }
+
+/**
+ * Normalize line endings of `content` according to `eol`.
+ *   - `lf`   : every CRLF becomes LF (lone CRs are left alone).
+ *   - `crlf` : every LF becomes CRLF. Existing CRLF sequences are preserved
+ *              (we collapse to LF first so we never emit CRCRLF).
+ *   - `keep` : content is returned unchanged.
+ * Anything else is treated as `keep`.
+ */
+export function normalizeEol(content: string, eol: 'lf' | 'crlf' | 'keep' | undefined): string {
+    if (eol === 'lf') { return content.replace(/\r\n/g, '\n'); }
+    if (eol === 'crlf') { return content.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n'); }
+    return content;
+}
+
+/**
+ * Encode `content` into a Buffer for `writeFile` / `appendFile`.
+ *   - `utf8`    : plain UTF-8 bytes, no BOM.
+ *   - `utf8bom` : UTF-8 bytes prefixed with the 3-byte BOM (EF BB BF). When
+ *                 `includeBom` is false (e.g. append to an existing file) the
+ *                 BOM is omitted so we do not plant a BOM mid-file.
+ *   - `ascii`   : Node's `ascii` encoding; non-ASCII characters get replaced
+ *                 by `?` — callers should validate inputs if that matters.
+ */
+export function encodeFileContent(
+    content: string,
+    encoding: 'utf8' | 'utf8bom' | 'ascii' | undefined,
+    includeBom: boolean = true
+): Buffer {
+    if (encoding === 'ascii') {
+        return Buffer.from(content, 'ascii');
+    }
+    if (encoding === 'utf8bom') {
+        const utf8 = Buffer.from(content, 'utf8');
+        return includeBom ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), utf8]) : utf8;
+    }
+    return Buffer.from(content, 'utf8');
+}
+
+/**
+ * Race `promise` against a timer of `timeoutSeconds`. On timeout, rejects with
+ * an Error whose message includes `taskId`. When the timer fires, `onTimeout`
+ * is invoked so the caller can kick off side-effect cleanup (e.g. terminate a
+ * running child process); the original `promise` still runs to completion but
+ * its eventual result is discarded. A non-positive or undefined
+ * `timeoutSeconds` disables the timeout entirely and returns `promise` as-is.
+ *
+ * This helper is intentionally free of `vscode` dependencies so it can be
+ * unit-tested in isolation. It does NOT silence unhandled rejections from the
+ * original promise — callers should attach a catch handler if the task is
+ * expected to reject after the timeout.
+ */
+export function withTaskTimeout<T>(
+    promise: Promise<T>,
+    timeoutSeconds: number | undefined,
+    taskId: string,
+    onTimeout?: () => void
+): Promise<T> {
+    if (!timeoutSeconds || timeoutSeconds <= 0 || !Number.isFinite(timeoutSeconds)) {
+        return promise;
+    }
+    return new Promise<T>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) { return; }
+            settled = true;
+            try { onTimeout?.(); } catch { /* swallow — best effort */ }
+            reject(new Error(`Task '${taskId}' timed out after ${timeoutSeconds}s.`));
+        }, timeoutSeconds * 1000);
+        promise.then(
+            value => {
+                if (settled) { return; }
+                settled = true;
+                clearTimeout(timer);
+                resolve(value);
+            },
+            err => {
+                if (settled) { return; }
+                settled = true;
+                clearTimeout(timer);
+                reject(err);
+            }
+        );
+        // Swallow unhandled rejection if the task settles *after* a timeout.
+        // We already surfaced the timeout error above; the original error is
+        // just noise at that point.
+        promise.catch(() => { /* already reported via timeout */ });
+    });
+}

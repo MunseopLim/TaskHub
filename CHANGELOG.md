@@ -1,5 +1,29 @@
 # Change Log
 
+## [0.4.12] - 2026-04-22
+
+### 추가 — Action 워크플로우 옵션 3종 (writeFile/appendFile, timeoutSeconds, continueOnError)
+
+- **새 task 타입 `writeFile` / `appendFile`** ([src/extension.ts](src/extension.ts)). 문자열 콘텐츠를 파일로 쓰거나 이어 붙입니다. 기존에 `shell + echo > file`로 우회하던 패턴을 일급으로 대체. OS 분기·셸 이스케이프 없이 동작하고 워크스페이스 외부 경로는 거부됩니다. 옵션: `path`, `content`, `encoding`(`utf8`/`utf8bom`/`ascii`), `eol`(`lf`/`crlf`/`keep`), `overwrite`, `mkdirs`. 결과는 `${task.path}`로 downstream에서 참조 가능. `appendFile + utf8bom`은 기존 파일 중간에 BOM이 끼이지 않도록, 대상이 존재하지 않을 때에만 BOM을 추가합니다.
+- **Task-level 옵션 `timeoutSeconds`** ([src/extension.ts](src/extension.ts) `executeActionPipeline`, [src/pipelineUtils.ts](src/pipelineUtils.ts) `withTaskTimeout`). 모든 task 타입에 공통 적용. budget 초과 시 timeout 에러로 종료하며, shell/command task의 경우 실행 중인 자식 프로세스를 best-effort로 terminate (`actionChildProcesses` + `activeTasks` 활용). `0`이거나 omit이면 비활성.
+- **Task-level 옵션 `continueOnError`** ([src/extension.ts](src/extension.ts) `executeActionPipeline`). `true`이면 task 실패가 파이프라인 전체를 중단시키지 않고 다음 task로 진행. 실패한 task의 결과는 `{}`로 저장되어 downstream의 `${task.*}` 참조는 리터럴로 남음 (스트림 모드 shell task와 동일한 시맨틱).
+
+### 헬퍼 / 인프라
+
+- [src/pipelineUtils.ts](src/pipelineUtils.ts)에 `normalizeEol(content, eol)`, `encodeFileContent(content, encoding, includeBom)`, `withTaskTimeout(promise, timeoutSeconds, taskId, onTimeout)` 추가. `vscode` 의존성 없는 순수 함수로 unit-testable.
+- [src/previewRun.ts](src/previewRun.ts)가 `writeFile`/`appendFile` task의 path resolve / content preview / workspace boundary 경고를 표시. `timeoutSeconds`/`continueOnError`는 모든 task에 공통 라인으로 출력.
+- [schema/actions.schema.json](schema/actions.schema.json)에 신규 task 타입과 6개 옵션 등록.
+
+### 테스트 — 44건 추가, 총 890개 통과
+
+- 단위 테스트 ([src/test/pipelineUtils.test.ts](src/test/pipelineUtils.test.ts)) 22건: `normalizeEol` 6, `encodeFileContent` 6, `withTaskTimeout` 10 (race/cancel/no-op/swallowed-rejection 등).
+- 통합 테스트 ([src/test/pipelineIntegration.test.ts](src/test/pipelineIntegration.test.ts)) IT-043 ~ IT-062 22건: writeFile/appendFile 14, continueOnError 3, timeoutSeconds 3 (실제 `sleep 10` 프로세스가 0.5초 budget으로 종료되는지까지 확인).
+
+### 문서
+
+- [docs/features.md](docs/features.md) §5에 `writeFile`/`appendFile` 섹션 + Task-level 옵션 (`timeoutSeconds`/`continueOnError`) 섹션 신설. 변수 치환 표에 `${task.path}` 추가.
+- [docs/integration-tests.md](docs/integration-tests.md)에 writeFile/appendFile, continueOnError, timeoutSeconds 3개 표 추가 (IT-043 ~ IT-062).
+
 ## [0.4.11] - 2026-04-22
 
 ### 문서 — README 사이드바 스크린샷 크기 조정

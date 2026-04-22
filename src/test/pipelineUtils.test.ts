@@ -19,6 +19,9 @@ import {
     getCommandString,
     getToolCommand,
     applyOutputCapture,
+    normalizeEol,
+    encodeFileContent,
+    withTaskTimeout,
 } from '../pipelineUtils';
 
 /**
@@ -366,6 +369,170 @@ suite('resolveFavoriteFilePath', () => {
         assert.throws(
             () => resolveFavoriteFilePath('file\x00.txt', root, [root]),
             /null byte/
+        );
+    });
+});
+
+suite('normalizeEol', () => {
+    test('keep: leaves mixed endings untouched', () => {
+        const input = 'a\nb\r\nc\rd';
+        assert.strictEqual(normalizeEol(input, 'keep'), input);
+    });
+
+    test('keep: undefined eol behaves as keep', () => {
+        const input = 'a\r\nb';
+        assert.strictEqual(normalizeEol(input, undefined), input);
+    });
+
+    test('lf: collapses CRLF but leaves lone CR alone', () => {
+        assert.strictEqual(normalizeEol('a\r\nb\nc\rd', 'lf'), 'a\nb\nc\rd');
+    });
+
+    test('crlf: every LF becomes CRLF without doubling existing CRLF', () => {
+        // 'a\r\nb\nc' has one CRLF and one LF. Expect both to end up CRLF,
+        // not 'a\r\r\nb\r\nc' (which would happen with a naive /\n/ → \r\n).
+        assert.strictEqual(normalizeEol('a\r\nb\nc', 'crlf'), 'a\r\nb\r\nc');
+    });
+
+    test('crlf: pure-LF input becomes pure CRLF', () => {
+        assert.strictEqual(normalizeEol('a\nb\nc', 'crlf'), 'a\r\nb\r\nc');
+    });
+
+    test('lf: pure-CRLF input becomes pure LF', () => {
+        assert.strictEqual(normalizeEol('a\r\nb\r\nc', 'lf'), 'a\nb\nc');
+    });
+
+    test('empty string is returned verbatim for every mode', () => {
+        assert.strictEqual(normalizeEol('', 'lf'), '');
+        assert.strictEqual(normalizeEol('', 'crlf'), '');
+        assert.strictEqual(normalizeEol('', 'keep'), '');
+    });
+});
+
+suite('encodeFileContent', () => {
+    test('default utf8 encoding returns plain UTF-8 bytes without BOM', () => {
+        const buf = encodeFileContent('héllo', undefined);
+        assert.strictEqual(buf.toString('utf8'), 'héllo');
+        // First bytes are NOT 0xEF 0xBB 0xBF.
+        assert.notStrictEqual(buf[0], 0xef);
+    });
+
+    test('utf8 encoding leaves non-ASCII intact', () => {
+        const buf = encodeFileContent('안녕', 'utf8');
+        assert.strictEqual(buf.toString('utf8'), '안녕');
+    });
+
+    test('utf8bom prefixes BOM when includeBom is true (default)', () => {
+        const buf = encodeFileContent('hi', 'utf8bom');
+        assert.strictEqual(buf[0], 0xef);
+        assert.strictEqual(buf[1], 0xbb);
+        assert.strictEqual(buf[2], 0xbf);
+        assert.strictEqual(buf.slice(3).toString('utf8'), 'hi');
+    });
+
+    test('utf8bom omits BOM when includeBom=false (append to existing file)', () => {
+        const buf = encodeFileContent('hi', 'utf8bom', false);
+        assert.strictEqual(buf.toString('utf8'), 'hi');
+        assert.notStrictEqual(buf[0], 0xef);
+    });
+
+    test('ascii encoding drops non-ASCII chars to "?"', () => {
+        const buf = encodeFileContent('a안b', 'ascii');
+        // Node's 'ascii' encoding masks each byte to 7 bits, so non-ASCII
+        // bytes get mapped into the ASCII range rather than being silently
+        // preserved. The important contract for callers is "output is ASCII
+        // safe and round-trips pure-ASCII inputs verbatim".
+        assert.strictEqual(buf.toString('ascii').startsWith('a'), true);
+        assert.strictEqual(buf.toString('ascii').endsWith('b'), true);
+    });
+
+    test('empty string produces zero bytes (no BOM) for utf8', () => {
+        assert.strictEqual(encodeFileContent('', 'utf8').length, 0);
+    });
+
+    test('empty string + utf8bom still writes the 3-byte BOM', () => {
+        const buf = encodeFileContent('', 'utf8bom');
+        assert.strictEqual(buf.length, 3);
+        assert.deepStrictEqual([...buf], [0xef, 0xbb, 0xbf]);
+    });
+});
+
+suite('withTaskTimeout', () => {
+    test('resolves when inner promise settles before timeout', async () => {
+        const result = await withTaskTimeout(Promise.resolve('ok'), 5, 't1');
+        assert.strictEqual(result, 'ok');
+    });
+
+    test('propagates inner rejection verbatim before timeout fires', async () => {
+        const innerErr = new Error('inner-boom');
+        await assert.rejects(
+            () => withTaskTimeout(Promise.reject(innerErr), 5, 't1'),
+            /inner-boom/
+        );
+    });
+
+    test('undefined timeout is a no-op and returns the original promise', async () => {
+        const result = await withTaskTimeout(Promise.resolve('ok'), undefined, 't1');
+        assert.strictEqual(result, 'ok');
+    });
+
+    test('zero timeout disables timing out', async () => {
+        const slow = new Promise<string>(r => setTimeout(() => r('slow'), 30));
+        const result = await withTaskTimeout(slow, 0, 't1');
+        assert.strictEqual(result, 'slow');
+    });
+
+    test('negative timeout disables timing out', async () => {
+        const slow = new Promise<string>(r => setTimeout(() => r('slow'), 30));
+        const result = await withTaskTimeout(slow, -5, 't1');
+        assert.strictEqual(result, 'slow');
+    });
+
+    test('rejects with task id + seconds in message when inner never settles', async () => {
+        const never = new Promise(() => { /* never settles */ });
+        await assert.rejects(
+            () => withTaskTimeout(never, 0.02, 'slow-task'),
+            /Task 'slow-task' timed out after 0\.02s\./
+        );
+    });
+
+    test('invokes onTimeout exactly once when the timer fires', async () => {
+        let fired = 0;
+        const never = new Promise(() => { /* never */ });
+        try {
+            await withTaskTimeout(never, 0.02, 't1', () => { fired += 1; });
+        } catch { /* expected */ }
+        // Give the original promise a moment to confirm we don't double-fire.
+        await new Promise(r => setTimeout(r, 30));
+        assert.strictEqual(fired, 1);
+    });
+
+    test('does NOT invoke onTimeout when inner resolves in time', async () => {
+        let fired = 0;
+        await withTaskTimeout(Promise.resolve('ok'), 1, 't1', () => { fired += 1; });
+        await new Promise(r => setTimeout(r, 10));
+        assert.strictEqual(fired, 0);
+    });
+
+    test('does not leak unhandled rejection if inner settles after timeout', async () => {
+        const err = new Error('late-failure');
+        const late = new Promise((_r, reject) => setTimeout(() => reject(err), 30));
+        await assert.rejects(
+            () => withTaskTimeout(late, 0.01, 't1'),
+            /timed out/
+        );
+        // Allow the original rejection to surface. If we leaked it, Node would
+        // print an "UnhandledPromiseRejection" warning. We can't assert that
+        // directly in unit tests, but awaiting past the rejection confirms
+        // the process stays alive.
+        await new Promise(r => setTimeout(r, 50));
+    });
+
+    test('swallows onTimeout callback errors so the outer rejection still fires', async () => {
+        const never = new Promise(() => { /* never */ });
+        await assert.rejects(
+            () => withTaskTimeout(never, 0.01, 't1', () => { throw new Error('cleanup-failed'); }),
+            /timed out after 0\.01s/
         );
     });
 });

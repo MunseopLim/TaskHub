@@ -25,7 +25,7 @@ export interface Action {
  */
 export interface Task {
     id: string;
-    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick' | 'envPick' | 'confirm';
+    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick' | 'envPick' | 'confirm' | 'writeFile' | 'appendFile';
 
     // Properties for 'shell' and 'command' types
     command?: string | {
@@ -86,12 +86,66 @@ export interface Task {
     function?: string;
     input?: string;
 
+    // Properties for 'writeFile' and 'appendFile'
+    /**
+     * Destination file path for `writeFile` / `appendFile`. Supports variable
+     * interpolation. Relative paths resolve against the action's workspace
+     * folder. Paths outside the workspace are rejected.
+     */
+    path?: string;
+    /**
+     * Content to write for `writeFile` / `appendFile`. Supports variable
+     * interpolation. May be empty (""), but must be a string.
+     */
+    content?: string;
+    /**
+     * File encoding for `writeFile` / `appendFile`. Defaults to `utf8`.
+     *  - `utf8`: UTF-8 without BOM.
+     *  - `utf8bom`: UTF-8 with leading BOM (on `appendFile` the BOM is only
+     *    added when the target file does not already exist).
+     *  - `ascii`: 7-bit ASCII; non-ASCII characters are replaced by `?`.
+     */
+    encoding?: 'utf8' | 'utf8bom' | 'ascii';
+    /**
+     * Line-ending normalization for `writeFile` / `appendFile`. Defaults to
+     * `keep` (pass content through unchanged).
+     */
+    eol?: 'lf' | 'crlf' | 'keep';
+    /**
+     * For `writeFile`: if false, the task fails when the target file already
+     * exists. Defaults to true. Ignored for `appendFile`.
+     */
+    overwrite?: boolean;
+    /**
+     * For `writeFile` / `appendFile`: if true (default), missing parent
+     * directories are created automatically. If false, the task fails when
+     * the parent directory does not exist.
+     */
+    mkdirs?: boolean;
+
     // Output handling
     output?: Output;
 
     // Execution behavior
     passTheResultToNextTask?: boolean;
     isOneShot?: boolean;
+
+    /**
+     * Task-level timeout in seconds. If the task does not complete within
+     * `timeoutSeconds`, it is canceled and the pipeline fails with a timeout
+     * error (subject to `continueOnError`). Running shell processes for the
+     * action are terminated on a best-effort basis. A value of 0 or omitted
+     * means no timeout. Applies to every task type, including interactive
+     * ones (dialog, inputBox, quickPick, confirm, envPick).
+     */
+    timeoutSeconds?: number;
+    /**
+     * If true, the pipeline continues to the next task when this task fails
+     * (including timeouts and user-canceled dialogs). The failing task's
+     * result becomes `{}`, so downstream `${task.output}`-style references
+     * to the skipped task remain unresolved literals. Defaults to false.
+     */
+    continueOnError?: boolean;
 }
 
 /**

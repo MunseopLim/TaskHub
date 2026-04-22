@@ -1420,4 +1420,432 @@ try {
             );
         });
     });
+
+    suite('writeFile / appendFile', () => {
+        test('IT-043: writeFile은 변수 치환된 content를 정확히 기록한다', async () => {
+            const target = path.join(tempWorkspace, 'reports', 'version.txt');
+            const action: PipelineAction = {
+                description: 'IT-043',
+                tasks: [
+                    {
+                        id: 'tag',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: '  v1.2.3  ',
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'write',
+                        type: 'writeFile',
+                        path: 'reports/version.txt',
+                        content: 'release=${tag.output}\nbuilt=ok\n'
+                    }
+                ]
+            };
+            await run(action);
+            assert.ok(fs.existsSync(target), 'target file should exist');
+            assert.strictEqual(
+                fs.readFileSync(target, 'utf8'),
+                'release=v1.2.3\nbuilt=ok\n'
+            );
+        });
+
+        test('IT-044: writeFile은 워크스페이스 외부 경로를 거부한다', async () => {
+            const action: PipelineAction = {
+                description: 'IT-044',
+                tasks: [
+                    {
+                        id: 'escape',
+                        type: 'writeFile',
+                        path: '../escape.txt',
+                        content: 'nope'
+                    }
+                ]
+            };
+            await assert.rejects(() => run(action), /outside the current workspace/);
+        });
+
+        test('IT-045: writeFile + overwrite=false는 기존 파일을 덮어쓰지 않고 실패한다', async () => {
+            const target = path.join(tempWorkspace, 'lock.txt');
+            fs.writeFileSync(target, 'original');
+            const action: PipelineAction = {
+                description: 'IT-045',
+                tasks: [
+                    {
+                        id: 'no-clobber',
+                        type: 'writeFile',
+                        path: 'lock.txt',
+                        content: 'replaced',
+                        overwrite: false
+                    }
+                ]
+            };
+            await assert.rejects(() => run(action), /refused to overwrite/);
+            assert.strictEqual(fs.readFileSync(target, 'utf8'), 'original');
+        });
+
+        test('IT-046: writeFile + overwrite=true(기본값)는 기존 파일을 덮어쓴다', async () => {
+            const target = path.join(tempWorkspace, 'replace.txt');
+            fs.writeFileSync(target, 'old');
+            const action: PipelineAction = {
+                description: 'IT-046',
+                tasks: [
+                    {
+                        id: 'clobber',
+                        type: 'writeFile',
+                        path: 'replace.txt',
+                        content: 'new'
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(fs.readFileSync(target, 'utf8'), 'new');
+        });
+
+        test('IT-047: writeFile은 mkdirs=true(기본값)일 때 상위 디렉터리를 자동 생성한다', async () => {
+            const target = path.join(tempWorkspace, 'a', 'b', 'c', 'leaf.txt');
+            const action: PipelineAction = {
+                description: 'IT-047',
+                tasks: [
+                    {
+                        id: 'deep',
+                        type: 'writeFile',
+                        path: 'a/b/c/leaf.txt',
+                        content: 'x'
+                    }
+                ]
+            };
+            await run(action);
+            assert.ok(fs.existsSync(target));
+        });
+
+        test('IT-048: writeFile + mkdirs=false는 상위 디렉터리가 없으면 실패한다', async () => {
+            const action: PipelineAction = {
+                description: 'IT-048',
+                tasks: [
+                    {
+                        id: 'strict',
+                        type: 'writeFile',
+                        path: 'no/such/dir/file.txt',
+                        content: 'x',
+                        mkdirs: false
+                    }
+                ]
+            };
+            await assert.rejects(() => run(action), /parent directory does not exist/);
+        });
+
+        test('IT-049: writeFile은 EOL 정규화를 적용한다 (lf, crlf)', async () => {
+            const lfPath = path.join(tempWorkspace, 'eol-lf.txt');
+            const crlfPath = path.join(tempWorkspace, 'eol-crlf.txt');
+            const action: PipelineAction = {
+                description: 'IT-049',
+                tasks: [
+                    {
+                        id: 'lf',
+                        type: 'writeFile',
+                        path: 'eol-lf.txt',
+                        content: 'a\r\nb\r\nc',
+                        eol: 'lf'
+                    },
+                    {
+                        id: 'crlf',
+                        type: 'writeFile',
+                        path: 'eol-crlf.txt',
+                        content: 'a\nb\nc',
+                        eol: 'crlf'
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(fs.readFileSync(lfPath, 'utf8'), 'a\nb\nc');
+            assert.strictEqual(fs.readFileSync(crlfPath, 'utf8'), 'a\r\nb\r\nc');
+        });
+
+        test('IT-050: writeFile + utf8bom은 BOM(0xEF 0xBB 0xBF)을 선두에 기록한다', async () => {
+            const target = path.join(tempWorkspace, 'with-bom.txt');
+            const action: PipelineAction = {
+                description: 'IT-050',
+                tasks: [
+                    {
+                        id: 'bom',
+                        type: 'writeFile',
+                        path: 'with-bom.txt',
+                        content: 'hi',
+                        encoding: 'utf8bom'
+                    }
+                ]
+            };
+            await run(action);
+            const buf = fs.readFileSync(target);
+            assert.strictEqual(buf[0], 0xef);
+            assert.strictEqual(buf[1], 0xbb);
+            assert.strictEqual(buf[2], 0xbf);
+            assert.strictEqual(buf.slice(3).toString('utf8'), 'hi');
+        });
+
+        test('IT-051: appendFile은 기존 파일에 이어서 쓴다', async () => {
+            const target = path.join(tempWorkspace, 'log.txt');
+            fs.writeFileSync(target, 'line1\n');
+            const action: PipelineAction = {
+                description: 'IT-051',
+                tasks: [
+                    {
+                        id: 'add',
+                        type: 'appendFile',
+                        path: 'log.txt',
+                        content: 'line2\n'
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(fs.readFileSync(target, 'utf8'), 'line1\nline2\n');
+        });
+
+        test('IT-052: appendFile은 파일이 없으면 새 파일을 만든다 (utf8bom 포함)', async () => {
+            const target = path.join(tempWorkspace, 'fresh-log.txt');
+            const action: PipelineAction = {
+                description: 'IT-052',
+                tasks: [
+                    {
+                        id: 'first',
+                        type: 'appendFile',
+                        path: 'fresh-log.txt',
+                        content: 'header',
+                        encoding: 'utf8bom'
+                    }
+                ]
+            };
+            await run(action);
+            const buf = fs.readFileSync(target);
+            assert.strictEqual(buf[0], 0xef, 'first appendFile to a missing file should plant BOM');
+            assert.strictEqual(buf.slice(3).toString('utf8'), 'header');
+        });
+
+        test('IT-053: appendFile + utf8bom은 기존 파일 중간에 BOM을 삽입하지 않는다', async () => {
+            const target = path.join(tempWorkspace, 'no-mid-bom.txt');
+            fs.writeFileSync(target, 'pre');
+            const action: PipelineAction = {
+                description: 'IT-053',
+                tasks: [
+                    {
+                        id: 'append',
+                        type: 'appendFile',
+                        path: 'no-mid-bom.txt',
+                        content: 'post',
+                        encoding: 'utf8bom'
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(fs.readFileSync(target, 'utf8'), 'prepost');
+        });
+
+        test('IT-054: writeFile 결과 ${task.path}는 downstream에서 사용 가능', async () => {
+            const action: PipelineAction = {
+                description: 'IT-054',
+                tasks: [
+                    {
+                        id: 'write',
+                        type: 'writeFile',
+                        path: 'output.json',
+                        content: '{"ok":true}'
+                    },
+                    {
+                        id: 'rename',
+                        type: 'stringManipulation',
+                        function: 'basename',
+                        input: '${write.path}',
+                        passTheResultToNextTask: true,
+                        output: { mode: 'file', filePath: 'name.txt', overwrite: true }
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(
+                fs.readFileSync(path.join(tempWorkspace, 'name.txt'), 'utf8'),
+                'output.json'
+            );
+        });
+
+        test('IT-055: writeFile은 path 누락 시 즉시 에러', async () => {
+            const action = {
+                description: 'IT-055',
+                tasks: [
+                    { id: 'broken', type: 'writeFile', content: 'x' }
+                ]
+            } as unknown as PipelineAction;
+            await assert.rejects(() => run(action), /requires a non-empty 'path' property/);
+        });
+
+        test('IT-056: writeFile은 content 누락 시 즉시 에러', async () => {
+            const action = {
+                description: 'IT-056',
+                tasks: [
+                    { id: 'broken', type: 'writeFile', path: 'x.txt' }
+                ]
+            } as unknown as PipelineAction;
+            await assert.rejects(() => run(action), /requires a 'content' property/);
+        });
+    });
+
+    suite('continueOnError', () => {
+        test('IT-057: 실패한 task에 continueOnError=true이면 다음 task 실행', async () => {
+            const target = path.join(tempWorkspace, 'after.txt');
+            const action: PipelineAction = {
+                description: 'IT-057',
+                tasks: [
+                    {
+                        id: 'oops',
+                        type: 'writeFile',
+                        path: '../escape.txt', // workspace escape → fail
+                        content: 'nope',
+                        continueOnError: true
+                    },
+                    {
+                        id: 'after',
+                        type: 'writeFile',
+                        path: 'after.txt',
+                        content: 'survived'
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(fs.readFileSync(target, 'utf8'), 'survived');
+        });
+
+        test('IT-058: continueOnError로 스킵된 task의 ${task.path}는 unresolved literal로 남는다', async () => {
+            const target = path.join(tempWorkspace, 'downstream.txt');
+            const action: PipelineAction = {
+                description: 'IT-058',
+                tasks: [
+                    {
+                        id: 'skipped',
+                        type: 'writeFile',
+                        path: '../bad.txt',
+                        content: 'x',
+                        continueOnError: true
+                    },
+                    {
+                        id: 'downstream',
+                        type: 'writeFile',
+                        path: 'downstream.txt',
+                        content: 'ref=${skipped.path}'
+                    }
+                ]
+            };
+            await run(action);
+            // The skipped task's result is `{}`, so the literal `${skipped.path}`
+            // survives interpolation.
+            assert.strictEqual(
+                fs.readFileSync(target, 'utf8'),
+                'ref=${skipped.path}'
+            );
+        });
+
+        test('IT-059: continueOnError가 false(기본값)이면 첫 실패에서 중단', async () => {
+            const target = path.join(tempWorkspace, 'never.txt');
+            const action: PipelineAction = {
+                description: 'IT-059',
+                tasks: [
+                    {
+                        id: 'oops',
+                        type: 'writeFile',
+                        path: '../escape.txt',
+                        content: 'x'
+                    },
+                    {
+                        id: 'never',
+                        type: 'writeFile',
+                        path: 'never.txt',
+                        content: 'should-not-run'
+                    }
+                ]
+            };
+            await assert.rejects(() => run(action), /outside the current workspace/);
+            assert.ok(!fs.existsSync(target), 'second task should never have executed');
+        });
+    });
+
+    suite('timeoutSeconds', () => {
+        // We exercise timeoutSeconds against a real long-running shell process
+        // (sleep / Start-Sleep). writeFile-only pipelines wouldn't work here
+        // because the handler's body is synchronous (fs.writeFileSync), and
+        // microtasks beat the setTimeout macrotask, so the race is rigged.
+        function sleepCmd(seconds: number) {
+            return {
+                windows: `powershell -NoProfile -Command "Start-Sleep -Seconds ${seconds}"`,
+                macos: `sleep ${seconds}`,
+                linux: `sleep ${seconds}`,
+            };
+        }
+
+        test('IT-060: 짧은 timeoutSeconds는 실행 중인 shell process를 종료시킨다', async function () {
+            this.timeout(10000);
+            const action: PipelineAction = {
+                description: 'IT-060',
+                tasks: [
+                    {
+                        id: 'slow',
+                        type: 'shell',
+                        command: sleepCmd(10),
+                        passTheResultToNextTask: true,
+                        timeoutSeconds: 0.5
+                    }
+                ]
+            };
+            const start = Date.now();
+            await assert.rejects(() => run(action), /timed out after 0\.5s/);
+            const elapsed = Date.now() - start;
+            // Should be terminated quickly — well under the 10-second sleep.
+            assert.ok(
+                elapsed < 5000,
+                `expected to terminate quickly, took ${elapsed}ms`
+            );
+        });
+
+        test('IT-061: 충분한 timeoutSeconds는 task를 정상 완료시킨다', async () => {
+            const target = path.join(tempWorkspace, 'within-budget.txt');
+            const action: PipelineAction = {
+                description: 'IT-061',
+                tasks: [
+                    {
+                        id: 'fast',
+                        type: 'writeFile',
+                        path: 'within-budget.txt',
+                        content: 'done',
+                        timeoutSeconds: 30
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(fs.readFileSync(target, 'utf8'), 'done');
+        });
+
+        test('IT-062: timeout + continueOnError이면 다음 task가 실행된다', async function () {
+            this.timeout(10000);
+            const target = path.join(tempWorkspace, 'after-timeout.txt');
+            const action: PipelineAction = {
+                description: 'IT-062',
+                tasks: [
+                    {
+                        id: 'slow',
+                        type: 'shell',
+                        command: sleepCmd(10),
+                        passTheResultToNextTask: true,
+                        timeoutSeconds: 0.5,
+                        continueOnError: true
+                    },
+                    {
+                        id: 'after',
+                        type: 'writeFile',
+                        path: 'after-timeout.txt',
+                        content: 'survived'
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(fs.readFileSync(target, 'utf8'), 'survived');
+        });
+    });
 });
