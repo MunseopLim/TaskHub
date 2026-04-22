@@ -45,7 +45,8 @@
 
 활동 표시줄의 'H' 아이콘을 클릭하면 Actions / Built-in Links / Workspace Links / Favorite Files / History 패널이 한 뷰에 통합되어 표시됩니다.
 
-![TaskHub 사이드바](docs/images/sidebar-overview.png)
+<img src="docs/images/sidebar-overview.png" alt="TaskHub 사이드바" width="300">
+
 
 ### Memory Map 시각화
 

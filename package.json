@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.4.10",
+  "version": "0.4.11",
   "license": "MIT",
   "repository": {
     "type": "git",
