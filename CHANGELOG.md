@@ -1,5 +1,11 @@
 # Change Log
 
+## [0.4.7] - 2026-04-22
+
+### 변경 — 기본 제공 링크 정비
+
+- [media/links.json](media/links.json) Built-in Links 에서 "VS Code Docs" 를 제거하고 "Claude"(https://claude.ai/)와 "GitHub"(https://github.com) 를 추가.
+
 ## [0.4.6] - 2026-04-21
 
 ### 기능 — zip/unzip 내장 엔진 추가

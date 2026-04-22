@@ -4,7 +4,11 @@
     "link": "https://www.google.com"
   },
   {
-    "title": "VS Code Docs",
-    "link": "https://code.visualstudio.com/docs"
+    "title": "Claude",
+    "link": "https://claude.ai/"
+  },
+  {
+    "title": "GitHub",
+    "link": "https://github.com"
   }
 ]
