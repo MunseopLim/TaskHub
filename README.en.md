@@ -140,25 +140,7 @@ To build from source or contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Configuration
 
-<details>
-<summary><b>All configuration options</b></summary>
-
-<br>
-
-| Setting ID | Type | Default | Description |
-| --- | --- | --- | --- |
-| `taskhub.showTaskStatus` | `boolean` | `true` | Enable action status icons and completion popups |
-| `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | Show verbose logs during pipeline execution |
-| `taskhub.pipeline.pythonIoEncoding` | `string` | `utf-8` | Value of the `PYTHONIOENCODING` environment variable |
-| `taskhub.pipeline.windowsPowerShellEncoding` | `string` | `utf8` | PowerShell output encoding on Windows |
-| `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` | Max captured stdout/stderr size in capture mode (1–1024 MB; process is killed with an explicit error when exceeded) |
-| `taskhub.history.maxItems` | `number` | `10` | Max history entries (1-50) |
-| `taskhub.history.showPanel` | `boolean` | `true` | Show the History panel |
-| `taskhub.hover.numberBase.enabled` | `boolean` | `true` | Enable Number Base / SFR hover |
-| `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | [Experimental] Enable bit-operation hover |
-| `taskhub.preset.selected` | `string` | `none` | Preset to auto-apply |
-
-</details>
+Open `File > Preferences > Settings` in VS Code and search for **"TaskHub"** to adjust every setting through the UI. The single source of truth for each setting's type, default, range, related feature and "how to add a new setting" checklist lives in [docs/features.md §21 Settings Reference](docs/features.md#21-설정-레퍼런스) (Korean).
 
 ---
 

@@ -140,25 +140,7 @@
 
 ## 설정
 
-<details>
-<summary><b>설정 옵션 전체 보기</b></summary>
-
-<br>
-
-| 설정 ID | 타입 | 기본값 | 설명 |
-| --- | --- | --- | --- |
-| `taskhub.showTaskStatus` | `boolean` | `true` | 액션 상태 아이콘 및 완료 팝업 알림 활성화 |
-| `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | 파이프라인 실행 시 상세 로그 표시 |
-| `taskhub.pipeline.pythonIoEncoding` | `string` | `utf-8` | `PYTHONIOENCODING` 환경 변수 값 |
-| `taskhub.pipeline.windowsPowerShellEncoding` | `string` | `utf8` | Windows PowerShell 출력 인코딩 |
-| `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` | 캡처 모드 stdout/stderr 누적 한도 (1-1024 MB, 초과 시 프로세스 종료 후 실패) |
-| `taskhub.history.maxItems` | `number` | `10` | 히스토리 최대 개수 (1-50) |
-| `taskhub.history.showPanel` | `boolean` | `true` | 히스토리 패널 표시 여부 |
-| `taskhub.hover.numberBase.enabled` | `boolean` | `true` | Number Base / SFR Hover 활성화 |
-| `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | [실험적] 비트 연산 hover 활성화 |
-| `taskhub.preset.selected` | `string` | `none` | 자동 적용할 프리셋 선택 |
-
-</details>
+VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전체 설정을 UI로 조정할 수 있습니다. 각 설정의 타입·기본값·범위·관련 기능과 새 설정 추가 절차는 [docs/features.md §21 설정 레퍼런스](docs/features.md#21-설정-레퍼런스)에서 단일 출처로 관리됩니다.
 
 ---
 

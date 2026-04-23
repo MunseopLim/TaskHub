@@ -25,6 +25,7 @@
 18. [액션 Import/Export](#18-액션-importexport)
 19. [Memory Map 시각화](#19-memory-map-시각화)
 20. [Hex Viewer](#20-hex-viewer)
+21. [설정 레퍼런스](#21-설정-레퍼런스)
 
 ---
 
@@ -1485,3 +1486,38 @@ Virtual scrolling을 사용하여 화면에 보이는 행만 렌더링합니다.
 | **Intel HEX** | `.hex`, `.ihex` | Extended Linear/Segment Address 지원, Entry Point 파싱 |
 | **Motorola SREC** | `.srec`, `.s19`, `.s28`, `.s37` | S1/S2/S3 (16/24/32-bit 주소), S7/S8/S9 Entry Point |
 | **Raw Binary** | `.bin`, `.dat` | 0x00000000부터 순차 표시 |
+
+---
+
+## 21. 설정 레퍼런스
+
+TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설정의 **단일 출처** 입니다. 원본은 [package.json](../package.json)이며, 이 표는 그 내용을 그대로 한국어 설명과 함께 정리해 둔 것입니다. README는 이 섹션을 가리키는 포인터만 유지합니다.
+
+설정을 수정하려면 VS Code에서 `File > Preferences > Settings` → "TaskHub"로 검색하거나, 워크스페이스 `.vscode/settings.json`에 직접 키를 추가하세요.
+
+### 21.1. 전체 설정 표
+
+| 설정 ID | 타입 | 기본값 (범위) | 요약 | 관련 기능 |
+| --- | --- | --- | --- | --- |
+| `taskhub.showTaskStatus` | `boolean` | `true` | Actions 뷰의 실행 상태 아이콘(running/success/failure) 및 완료 팝업 표시 여부. `false`여도 동시 실행 가드는 그대로 동작한다. | [§5 Actions 패널](#5-actions-패널-mainviewmain), [§14 히스토리](#14-액션-실행-히스토리) |
+| `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | 파이프라인 실행 시 TaskHub OutputChannel에 상세 명령/STDOUT/STDERR/exit code를 출력. 디버깅에만 켤 것. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
+| `taskhub.pipeline.pythonIoEncoding` | `string` | `"utf-8"` | TaskHub가 실행하는 모든 명령의 `PYTHONIOENCODING` 환경변수 값. 빈 문자열이면 강제 설정 안 함. `utf-8:ignore` 같은 값도 가능. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
+| `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell 출력 인코딩. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
+| `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` (1–1024) | 캡처 모드(`passTheResultToNextTask: true`)에서 누적되는 stdout/stderr 총 크기 상한(MB). 초과 시 프로세스를 종료하고 명확한 에러로 실패. | [§5 Output Capture](#output-capture) |
+| `taskhub.history.maxItems` | `number` | `10` (1–50) | 저장되는 액션 실행 히스토리 최대 개수. 초과분은 오래된 순으로 자동 제거. | [§14 히스토리](#14-액션-실행-히스토리) |
+| `taskhub.history.showPanel` | `boolean` | `true` | 사이드바의 History 패널 표시 여부. `false`면 뷰 자체가 감춰지지만 기록은 그대로 유지된다. | [§14 히스토리](#14-액션-실행-히스토리) |
+| `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ 숫자 리터럴·식별자 위 Number Base / SFR Bit Field / Struct Size Hover 전체 토글. | [§15 C/C++ Hover](#15-cc-hover-기능) |
+| `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |
+| `taskhub.preset.selected` | `string` | `"none"` | 자동 적용할 프리셋 ID. `"none"`이면 워크스페이스 액션만 사용. 확장 내장 또는 워크스페이스 `.vscode/presets/` 내 프리셋 ID를 입력. | [§17 Preset](#17-preset-기능) |
+
+### 21.2. 설정 추가 체크리스트
+
+새 설정을 도입할 때는 **아래 모든 항목을 같은 PR에서** 갱신해 drift를 막아야 합니다.
+
+1. [package.json](../package.json) `contributes.configuration.properties`에 키·타입·기본값·(필요 시) min/max·`description` 또는 `markdownDescription` 추가.
+2. 위 §21.1 표에 한 행 추가 — 관련 기능 섹션으로의 링크 필수.
+3. 기능의 소개 섹션(해당 §N) 본문에서 **자연스러운 맥락**으로 한 번 언급. 전체 스펙은 반복하지 말고 "자세한 옵션은 §21 참조"로 충분.
+4. [CHANGELOG.md](../CHANGELOG.md) 해당 릴리스 항목에 새 설정 명기.
+5. (선택) 동작 경계(min/max, 예외 경로)에 대한 유닛 테스트 추가.
+
+README의 설정 안내는 이 §21을 가리키는 짧은 포인터만 유지하며 복제하지 않습니다.
