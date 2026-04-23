@@ -14,8 +14,7 @@ coverage/**
 esbuild.js
 CLAUDE.md
 scripts/**
-test_*.cpp
-test_*.h
+examples/**
 *.vsix
 .env
 .env.*

@@ -1,5 +1,26 @@
 # Change Log
 
+## [0.4.13] - 2026-04-23
+
+### 정리 — 프로젝트 루트 hover 샘플을 `examples/`로 이동
+
+- 프로젝트 루트에 흩어져 있던 `test_macro_expansion.h`, `test_numbers.cpp`, `test_phase2.cpp`, `test_register_decoder.h`, `test_sfr_bitfields.h` 5개 hover 샘플을 [examples/](examples/)로 이동. 실제 코드·유닛 테스트에서 참조되지 않고 수동 hover 시연용으로만 쓰이던 파일들이라 기존 예제(`bit_operations_example.*`, `sample_armlink*.txt`, `sample_binary.bin`)와 같은 위치로 통합.
+- `test_phase2.cpp`는 내용이 const/enum/#define 식별자에 대한 Number Base Hover 시연이어서 [examples/test_const_enum_define.cpp](examples/test_const_enum_define.cpp)로 rename. `git mv`로 히스토리 보존.
+- [.vscodeignore](.vscodeignore) 정비: 루트 `test_*.cpp`/`test_*.h` 패턴이 더 이상 매치되지 않으므로 제거하고, `examples/**`를 추가하여 `bit_operations_example.*`·`sample_*` 포함 모든 시연용 자산을 VSIX 배포물에서 제외 (개발 전용 리포지토리 자산).
+
+### 문서 — README 리디자인 + 영문 README 추가
+
+- [README.md](README.md) Level 1 리디자인:
+  - 상단 tagline + 언어 선택 줄(`한국어 · English`) 추가
+  - 목차(TOC) 6개 섹션으로 네비게이션 제공
+  - 기능 소개를 4개 카테고리(워크플로우 / 사이드바 패널 / C/C++ Hover / 뷰어)로 재분류하고 `**제목** — 설명` 형식 통일
+  - 스크린샷 재구성: 워크플로우 3-column 그리드(사이드바 / 액션 실행 / History), C/C++ Hover 2x2 그리드(Number Base / Register Decoder / SFR / Macro Expansion)
+  - 설치 섹션을 스크린샷 직후로 승격
+  - 설정 테이블을 `<details>` 접기 블록으로 전환
+- [README.en.md](README.en.md) 신규 — 한국어판과 동일 구조의 영문 README. 상단 언어 선택 줄에서 상호 링크.
+- 스크린샷 추가 ([docs/images/](docs/images/)): `actions-running.png`(액션 실행 중 상태), `history-panel.png`(실행 기록 성공/실패 아이콘), `hover-macro-expansion.png`(매크로 최종 확장 표시). README 기능 목록에 Macro Expansion Hover, Register Decoder Hover를 bullet으로 명시적 추가.
+- [examples/README.md](examples/README.md) 재작성 — Bit Operation Hover 단일 주제였던 기존 구조를 폴더 실제 내용 전체(Number Base / SFR / Register Decoder / Macro Expansion Hover + Bit Operation + Memory Map + Hex Viewer)를 다루는 문서로 재정리. 파일→기능 매핑 표와 [docs/features.md](docs/features.md) 링크 포함.
+
 ## [0.4.12] - 2026-04-22
 
 ### 추가 — Action 워크플로우 옵션 3종 (writeFile/appendFile, timeoutSeconds, continueOnError)
