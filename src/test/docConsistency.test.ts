@@ -204,4 +204,84 @@ suite('Documentation Consistency', () => {
             }
         });
     });
+
+    // =====================================================================
+    // 5. architecture.md 에 개별 설정 키가 '나열' 수준으로 재출현하지 않는지
+    //    (설정 단일 출처는 features.md §21. architecture.md 는 포인터만 유지)
+    // =====================================================================
+    suite('architecture.md does not re-embed the taskhub.* settings list', () => {
+        test('architecture.md references at most 3 real configuration keys (illustrative mentions only)', () => {
+            // 과거 drift 패턴: "configuration: VS Code 설정" 블록에 history 설정만
+            // 2개 나열 → 새 설정이 추가될 때 여기가 drift. 이 테스트는 실제
+            // package.json 에 정의된 configuration key 만을 대상으로 (workspaceState
+            // key 같은 `taskhub.actionHistory` 는 제외) 개수를 세고, 3건까지만 허용.
+            // 4건 이상이면 누군가 "나열 섹션"을 다시 만들고 있다는 신호.
+            const pkg = JSON.parse(readRepoFile('package.json'));
+            const realConfigKeys = new Set<string>(
+                Object.keys(pkg?.contributes?.configuration?.properties ?? {})
+                    .filter(k => k.startsWith('taskhub.'))
+            );
+
+            const body = readRepoFile('docs/architecture.md');
+            const keyRe = /`(taskhub\.[A-Za-z0-9_.]+)`/g;
+            const hits = new Set<string>();
+            let m: RegExpExecArray | null;
+            while ((m = keyRe.exec(body)) !== null) {
+                if (realConfigKeys.has(m[1])) {
+                    hits.add(m[1]);
+                }
+            }
+
+            const matches = Array.from(hits).sort();
+            assert.ok(
+                matches.length <= 3,
+                `docs/architecture.md references ${matches.length} real configuration keys ` +
+                `(${matches.join(', ')}); move the list to features.md §21 and keep only short illustrative references here.`
+            );
+        });
+    });
+
+    // =====================================================================
+    // 6. Task.type union (schema.ts) ↔ architecture.md 에 나열된 지원 태스크
+    //    타입 목록이 일치하는지 (`writeFile`/`appendFile` 누락 재발 방어)
+    // =====================================================================
+    suite('architecture.md task type list ↔ schema.ts Task.type union', () => {
+        test('every Task.type member appears in architecture.md supported task list', () => {
+            const schema = readRepoFile('src/schema.ts');
+            // Find the Task.type union line and extract each single-quoted member.
+            const typeLineMatch = schema.match(/type:\s*(?:'[^']+'\s*\|\s*)+'[^']+'/);
+            assert.ok(typeLineMatch, 'Could not find Task.type union in src/schema.ts');
+            const memberRe = /'([A-Za-z]+)'/g;
+            const members = new Set<string>();
+            let m: RegExpExecArray | null;
+            while ((m = memberRe.exec(typeLineMatch![0])) !== null) {
+                members.add(m[1]);
+            }
+            assert.ok(members.size > 0, 'No Task.type members extracted');
+
+            const arch = readRepoFile('docs/architecture.md');
+            // Grab the "지원 태스크 타입" line(s) and the surrounding bullet, so
+            // we match both backticked and plain list variants.
+            const supportedBlock = arch.match(/지원 태스크 타입[\s\S]{0,400}/);
+            assert.ok(supportedBlock, 'Could not locate "지원 태스크 타입" block in architecture.md');
+            const blockText = supportedBlock![0];
+
+            const missing: string[] = [];
+            for (const type of members) {
+                // Accept `shell`, 'shell', or bare `shell/command` notation.
+                const found = blockText.includes('`' + type + '`')
+                    || blockText.includes(`'${type}'`)
+                    || new RegExp(`\\b${type}\\b`).test(blockText);
+                if (!found) {
+                    missing.push(type);
+                }
+            }
+
+            assert.deepStrictEqual(
+                missing,
+                [],
+                `Task.type members listed in schema.ts but missing from architecture.md "지원 태스크 타입" block:\n  ${missing.join('\n  ')}`
+            );
+        });
+    });
 });
