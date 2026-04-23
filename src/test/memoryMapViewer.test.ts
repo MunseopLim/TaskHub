@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as vscode from 'vscode';
-import { openMemoryMapPanel, panelRegistry } from '../memoryMapViewer';
+import { openMemoryMapPanel, panelRegistry, MEMORY_MAP_MAX_FILE_SIZE } from '../memoryMapViewer';
 
 /**
  * Build a minimal ELF32 little-endian binary for testing.
@@ -128,5 +128,70 @@ suite('Memory Map Viewer Test Suite', () => {
         openMemoryMapPanel(ctx, file2);
 
         assert.strictEqual(panelRegistry.getLastActive(), file2, 'last active should be file2');
+    });
+
+    suite('openMemoryMapPanel failure paths', () => {
+        // Each failure test asserts that the panel was not created and the
+        // registry wasn't touched. The user-visible error is routed through
+        // vscode.window.showErrorMessage, which the test host swallows.
+
+        test('non-existent file: panel is not created', () => {
+            const missing = path.join(tmpDir, 'taskhub-test', 'missing', 'does-not-exist.axf');
+            const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+            openMemoryMapPanel(ctx, missing);
+            assert.strictEqual(panelRegistry.has(missing), false);
+            assert.strictEqual(panelRegistry.size(), 0);
+        });
+
+        test('file one byte over MEMORY_MAP_MAX_FILE_SIZE: panel is not created', () => {
+            // Create a sparse file just above the limit. truncate allocates no
+            // real blocks on APFS / ext4, so this stays fast and low-disk.
+            const dir = path.join(tmpDir, 'taskhub-test', 'oversize');
+            fs.mkdirSync(dir, { recursive: true });
+            const oversize = path.join(dir, 'too-big.axf');
+            const fd = fs.openSync(oversize, 'w');
+            try {
+                fs.ftruncateSync(fd, MEMORY_MAP_MAX_FILE_SIZE + 1);
+            } finally {
+                fs.closeSync(fd);
+            }
+            tmpFiles.push(oversize);
+            const stat = fs.statSync(oversize);
+            assert.strictEqual(stat.size, MEMORY_MAP_MAX_FILE_SIZE + 1, 'sparse-file size boundary setup');
+
+            const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+            openMemoryMapPanel(ctx, oversize);
+            assert.strictEqual(panelRegistry.has(oversize), false);
+            assert.strictEqual(panelRegistry.size(), 0);
+        });
+
+        test('file smaller than ELF header (<16 bytes): panel is not created', () => {
+            const dir = path.join(tmpDir, 'taskhub-test', 'tooSmall');
+            fs.mkdirSync(dir, { recursive: true });
+            const tooSmall = path.join(dir, 'tiny.axf');
+            fs.writeFileSync(tooSmall, Buffer.alloc(15, 0));
+            tmpFiles.push(tooSmall);
+
+            const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+            openMemoryMapPanel(ctx, tooSmall);
+            assert.strictEqual(panelRegistry.has(tooSmall), false);
+            assert.strictEqual(panelRegistry.size(), 0);
+        });
+
+        test('buffer with wrong ELF magic: panel is not created (parseElf32 throws)', () => {
+            const dir = path.join(tmpDir, 'taskhub-test', 'badMagic');
+            fs.mkdirSync(dir, { recursive: true });
+            const badMagic = path.join(dir, 'bad.axf');
+            // 64 bytes, but the first 4 are not 0x7F 'E' 'L' 'F', so parseElf32 rejects.
+            const buf = Buffer.alloc(64, 0);
+            buf[0] = 0xFF; buf[1] = 0xFF; buf[2] = 0xFF; buf[3] = 0xFF;
+            fs.writeFileSync(badMagic, buf);
+            tmpFiles.push(badMagic);
+
+            const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+            openMemoryMapPanel(ctx, badMagic);
+            assert.strictEqual(panelRegistry.has(badMagic), false);
+            assert.strictEqual(panelRegistry.size(), 0);
+        });
     });
 });

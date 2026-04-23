@@ -8,7 +8,7 @@ import {
     toFlatArray,
     hasData,
 } from '../hexParser';
-import { parseFile, buildHexViewerHtml } from '../hexViewer';
+import { parseFile, buildHexViewerHtml, assertWithinHexViewerSpan, HEX_VIEWER_MAX_SPAN } from '../hexViewer';
 
 suite('HexParser Test Suite', () => {
 
@@ -378,6 +378,33 @@ suite('HexParser Test Suite', () => {
                 byteCount: 2,
             };
             assert.throws(() => buildHexViewerHtml('sparse.hex', result), /display limit/);
+        });
+
+        // --- HEX_VIEWER_MAX_SPAN off-by-one boundary (pure guard) ----------
+        // Guard is `totalSize > HEX_VIEWER_MAX_SPAN` so a span exactly at the
+        // limit must be accepted, and a span one byte larger must throw. We
+        // exercise the extracted pure helper rather than buildHexViewerHtml
+        // so the success case does not allocate the 128 MB flat buffer the
+        // real renderer would create.
+        test('assertWithinHexViewerSpan accepts a span exactly at HEX_VIEWER_MAX_SPAN', () => {
+            assert.doesNotThrow(() => assertWithinHexViewerSpan(HEX_VIEWER_MAX_SPAN));
+        });
+
+        test('assertWithinHexViewerSpan accepts a span one byte below the limit', () => {
+            assert.doesNotThrow(() => assertWithinHexViewerSpan(HEX_VIEWER_MAX_SPAN - 1));
+        });
+
+        test('assertWithinHexViewerSpan rejects a span one byte above the limit', () => {
+            assert.throws(
+                () => assertWithinHexViewerSpan(HEX_VIEWER_MAX_SPAN + 1),
+                /display limit/
+            );
+        });
+
+        test('assertWithinHexViewerSpan rejects non-finite / negative spans', () => {
+            assert.throws(() => assertWithinHexViewerSpan(Number.NaN), /display limit/);
+            assert.throws(() => assertWithinHexViewerSpan(Number.POSITIVE_INFINITY), /display limit/);
+            assert.throws(() => assertWithinHexViewerSpan(-1), /display limit/);
         });
     });
 });

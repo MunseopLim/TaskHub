@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
     INTERPOLATED_VALUE_MAX_LENGTH,
+    wouldExceedCaptureLimit,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
     resolveWithinWorkspace,
@@ -101,6 +102,52 @@ suite('pipelineUtils — direct-import smoke suite', () => {
     });
 });
 
+suite('sanitizeInterpolatedValue — length boundary', () => {
+    // The guard is `stringValue.length > INTERPOLATED_VALUE_MAX_LENGTH`, so
+    // values at exactly the limit must still be accepted. These tests pin
+    // that off-by-one so a future edit to `>=` is caught immediately.
+    test('accepts a value exactly at INTERPOLATED_VALUE_MAX_LENGTH - 1', () => {
+        const s = 'a'.repeat(INTERPOLATED_VALUE_MAX_LENGTH - 1);
+        assert.strictEqual(sanitizeInterpolatedValue(s)?.length, INTERPOLATED_VALUE_MAX_LENGTH - 1);
+    });
+
+    test('accepts a value exactly at INTERPOLATED_VALUE_MAX_LENGTH', () => {
+        const s = 'a'.repeat(INTERPOLATED_VALUE_MAX_LENGTH);
+        assert.strictEqual(sanitizeInterpolatedValue(s)?.length, INTERPOLATED_VALUE_MAX_LENGTH);
+    });
+
+    test('rejects a value exactly at INTERPOLATED_VALUE_MAX_LENGTH + 1', () => {
+        const s = 'a'.repeat(INTERPOLATED_VALUE_MAX_LENGTH + 1);
+        assert.throws(() => sanitizeInterpolatedValue(s), /maximum length/);
+    });
+});
+
+suite('wouldExceedCaptureLimit — capture cap boundary', () => {
+    // Guard in executeShellCommand(): `currentBytes + chunkBytes > limitBytes`.
+    // Extracted as a pure predicate so we can pin the boundary without
+    // spawning a real subprocess.
+    test('returns false when total equals the limit (inclusive ceiling)', () => {
+        assert.strictEqual(wouldExceedCaptureLimit(500, 500, 1000), false);
+    });
+
+    test('returns false when total is below the limit', () => {
+        assert.strictEqual(wouldExceedCaptureLimit(500, 499, 1000), false);
+    });
+
+    test('returns true when total is exactly one byte over the limit', () => {
+        assert.strictEqual(wouldExceedCaptureLimit(500, 501, 1000), true);
+    });
+
+    test('handles a zero-byte chunk at exactly the limit', () => {
+        assert.strictEqual(wouldExceedCaptureLimit(1000, 0, 1000), false);
+    });
+
+    test('handles a single chunk that alone exceeds an empty buffer', () => {
+        assert.strictEqual(wouldExceedCaptureLimit(0, 1001, 1000), true);
+        assert.strictEqual(wouldExceedCaptureLimit(0, 1000, 1000), false);
+    });
+});
+
 suite('applyOutputCapture', () => {
     test('returns empty object when capture is undefined', () => {
         assert.deepStrictEqual(applyOutputCapture('anything', undefined), {});
@@ -123,6 +170,25 @@ suite('applyOutputCapture', () => {
 
     test('regex: out-of-range group is skipped silently', () => {
         const out = applyOutputCapture('hello', { name: 'v', regex: 'hello', group: 5 });
+        assert.deepStrictEqual(out, {});
+    });
+
+    // --- regex group boundary tests ---------------------------------------
+    // Guard: `if (group < 0 || group >= m.length) { selected = undefined; }`.
+    // With `/^(a)(b)(c)$/` matching "abc" the Match array is ['abc','a','b','c']
+    // so m.length === 4 and the valid group range is [0, 3].
+    test('regex: group = m.length - 1 (last valid index) selects the last group', () => {
+        const out = applyOutputCapture('abc', { name: 'v', regex: '^(a)(b)(c)$', group: 3 });
+        assert.deepStrictEqual(out, { v: 'c' });
+    });
+
+    test('regex: group = m.length (first invalid index) is skipped', () => {
+        const out = applyOutputCapture('abc', { name: 'v', regex: '^(a)(b)(c)$', group: 4 });
+        assert.deepStrictEqual(out, {});
+    });
+
+    test('regex: negative group (-1) is treated as out-of-range and skipped', () => {
+        const out = applyOutputCapture('abc', { name: 'v', regex: '^(a)(b)(c)$', group: -1 });
         assert.deepStrictEqual(out, {});
     });
 
@@ -153,6 +219,33 @@ suite('applyOutputCapture', () => {
     test('line: out-of-range index is skipped', () => {
         assert.deepStrictEqual(applyOutputCapture('a\nb', { name: 'v', line: 99 }), {});
         assert.deepStrictEqual(applyOutputCapture('a\nb', { name: 'v', line: -99 }), {});
+    });
+
+    // --- line index boundary tests ----------------------------------------
+    // Resolution: idx = line < 0 ? lines.length + line : line; then selected
+    // only if `0 <= idx < lines.length`. With "a\nb\nc" we get three lines so
+    // lines.length === 3 and the valid idx range is [0, 2]. For negatives the
+    // valid `rule.line` range is [-3, -1].
+    test('line: lines.length - 1 (last positive valid index) selects the last line', () => {
+        const out = applyOutputCapture('a\nb\nc', { name: 'v', line: 2 });
+        assert.deepStrictEqual(out, { v: 'c' });
+    });
+
+    test('line: lines.length (first positive invalid index) is skipped', () => {
+        const out = applyOutputCapture('a\nb\nc', { name: 'v', line: 3 });
+        assert.deepStrictEqual(out, {});
+    });
+
+    test('line: -lines.length (most-negative valid index) selects the first line', () => {
+        // line = -3 → idx = 3 + (-3) = 0 → 'a'
+        const out = applyOutputCapture('a\nb\nc', { name: 'v', line: -3 });
+        assert.deepStrictEqual(out, { v: 'a' });
+    });
+
+    test('line: -lines.length - 1 (first negative invalid index) is skipped', () => {
+        // line = -4 → idx = 3 + (-4) = -1 → skipped
+        const out = applyOutputCapture('a\nb\nc', { name: 'v', line: -4 });
+        assert.deepStrictEqual(out, {});
     });
 
     test('no selector: uses full output', () => {

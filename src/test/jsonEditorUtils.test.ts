@@ -1,5 +1,7 @@
 import * as assert from 'assert';
-import { buildSheetMap, getRowsByPath, SheetEntry } from '../jsonEditorUtils';
+import * as fs from 'fs';
+import * as path from 'path';
+import { buildSheetMap, getRowsByPath, SheetEntry, parseValue, coerceEditedCellValue } from '../jsonEditorUtils';
 import { wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY } from '../jsonEditor';
 
 suite('JsonEditorUtils Test Suite', () => {
@@ -191,6 +193,108 @@ suite('JsonEditorUtils Test Suite', () => {
             const { wrapped, isRootArray } = wrapIfArray(original);
             const restored = unwrapIfRootArray(wrapped, isRootArray);
             assert.deepStrictEqual(restored, original);
+        });
+    });
+
+    suite('coerceEditedCellValue (string type preservation)', () => {
+        test('keeps a leading-zero numeric string as a string when original was a string', () => {
+            // Regression: before the fix, editing "00123" committed the value as
+            // the number 123 and lost the leading zeros.
+            assert.strictEqual(coerceEditedCellValue('00123', 'original'), '00123');
+        });
+
+        test('keeps the literal "true" / "false" / "null" as strings when original was a string', () => {
+            assert.strictEqual(coerceEditedCellValue('true', ''), 'true');
+            assert.strictEqual(coerceEditedCellValue('false', ''), 'false');
+            assert.strictEqual(coerceEditedCellValue('null', ''), 'null');
+        });
+
+        test('still coerces values when the original cell was a number', () => {
+            assert.strictEqual(coerceEditedCellValue('42', 7), 42);
+        });
+
+        test('still coerces values when the original cell was a boolean', () => {
+            assert.strictEqual(coerceEditedCellValue('false', true), false);
+        });
+
+        test('parseValue behaves as the documented coercion', () => {
+            assert.strictEqual(parseValue(''), '');
+            assert.strictEqual(parseValue('null'), null);
+            assert.strictEqual(parseValue('true'), true);
+            assert.strictEqual(parseValue('false'), false);
+            assert.strictEqual(parseValue('42'), 42);
+            assert.strictEqual(parseValue('hello'), 'hello');
+        });
+    });
+
+    /**
+     * The TaskHub JSON Editor webview ships its JS as a string template inside
+     * `getWebviewContent()` in src/jsonEditor.ts. The host-side tests above
+     * only exercise the mirror copy in src/jsonEditorUtils.ts, so a silent
+     * drift between the two would pass CI while breaking the real editor.
+     *
+     * These smoke tests pin two things:
+     *   1. The mirror's documentation keeps listing every webview function
+     *      it claims to mirror (someone removing a reference should fail
+     *      the test instead of losing it silently).
+     *   2. The webview's `parseValue`, when extracted and evaluated in
+     *      isolation, produces identical results to the mirror's `parseValue`
+     *      across a fixture of tricky inputs.
+     */
+    suite('webview ↔ jsonEditorUtils mirror synchronization', () => {
+        // src/ is the rootDir; compiled tests live in out/test/ so the source
+        // tree is reached via ../../src/ from this file at runtime.
+        const srcDir = path.resolve(__dirname, '..', '..', 'src');
+        const editorSource = fs.readFileSync(path.join(srcDir, 'jsonEditor.ts'), 'utf-8');
+        const mirrorSource = fs.readFileSync(path.join(srcDir, 'jsonEditorUtils.ts'), 'utf-8');
+
+        test('mirror header references every synchronization target by name', () => {
+            for (const name of ['buildSheetMap', 'getActiveRows', 'parseValue', 'commitCell']) {
+                assert.ok(
+                    mirrorSource.includes(name),
+                    `mirror header must mention "${name}" so drift is visible`
+                );
+            }
+        });
+
+        test('webview source still defines parseValue and the string-preservation branch', () => {
+            // Catches the case where someone rewrites the webview but forgets
+            // to keep the string-type-preservation branch that the mirror
+            // tests above rely on.
+            assert.ok(
+                /function\s+parseValue\s*\(\s*str\s*\)/.test(editorSource),
+                'webview template must still define parseValue(str)'
+            );
+            assert.ok(
+                /typeof\s+oldVal\s*===\s*'string'\s*\?\s*input\.value\s*:\s*parseValue\(/.test(editorSource),
+                'webview commitCell must still preserve string type via parseValue bypass'
+            );
+        });
+
+        test('webview parseValue behaves identically to the mirror parseValue', () => {
+            // Extract the webview's parseValue text and re-evaluate it in an
+            // isolated Function scope, then compare its output to the mirror
+            // across a fixture that covers every branch of the coercion.
+            const match = editorSource.match(/function parseValue\(str\) \{([\s\S]*?)\n    \}/);
+            assert.ok(match, 'could not locate the webview parseValue function body');
+            const webviewParseValue = new Function('str', match![1]) as (s: string) => unknown;
+
+            const fixtures: string[] = [
+                '', 'null', 'true', 'false',
+                '0', '42', '-3.14', '00123',
+                ' ', '   ', 'hello', 'NaN',
+                '1e10', '0xFF', '  42  '
+            ];
+            for (const input of fixtures) {
+                const fromWebview = webviewParseValue(input);
+                const fromMirror = parseValue(input);
+                assert.deepStrictEqual(
+                    fromWebview,
+                    fromMirror,
+                    `parseValue drift for input ${JSON.stringify(input)}: ` +
+                    `webview=${JSON.stringify(fromWebview)}, mirror=${JSON.stringify(fromMirror)}`
+                );
+            }
         });
     });
 });

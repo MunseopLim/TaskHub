@@ -1120,4 +1120,36 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             assert.ok(markdown.value.includes('0x00000080'));
         });
     });
+
+    suite('MAX_LINE_LENGTH guard — boundary (pure predicate)', () => {
+        // provideHover() bails out with `lineText.length > MAX_LINE_LENGTH`.
+        // The check is isolated in NumberBaseHoverProvider.isLineTooLongForHover()
+        // so that the inclusive-ceiling boundary can be pinned without mocking
+        // the full vscode.TextDocument surface (getWordRangeAtPosition, getText,
+        // LSP commands) that the downstream hover pipeline touches.
+        const MAX = NumberBaseHoverProvider.MAX_LINE_LENGTH;
+
+        test('MAX_LINE_LENGTH is the documented 10_000-character cap', () => {
+            assert.strictEqual(MAX, 10_000);
+        });
+
+        test('line length = MAX_LINE_LENGTH - 1 is allowed (below the limit)', () => {
+            const line = 'a'.repeat(MAX - 1);
+            assert.strictEqual(NumberBaseHoverProvider.isLineTooLongForHover(line), false);
+        });
+
+        test('line length exactly at MAX_LINE_LENGTH is allowed (inclusive ceiling)', () => {
+            const line = 'a'.repeat(MAX);
+            assert.strictEqual(NumberBaseHoverProvider.isLineTooLongForHover(line), false);
+        });
+
+        test('line length = MAX_LINE_LENGTH + 1 is rejected (one char over the limit)', () => {
+            const line = 'a'.repeat(MAX + 1);
+            assert.strictEqual(NumberBaseHoverProvider.isLineTooLongForHover(line), true);
+        });
+
+        test('empty line is allowed', () => {
+            assert.strictEqual(NumberBaseHoverProvider.isLineTooLongForHover(''), false);
+        });
+    });
 });

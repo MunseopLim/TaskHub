@@ -26,6 +26,10 @@ import {
 	createShellExecution,
 	filterConflictingItems,
 	findConflictingIds,
+	mergeActions,
+	toWorkspaceRelativePath,
+	executeShellCommand,
+	__testHook_hasManuallyTerminated,
 	debounce,
 	parsePathInfo,
 	handleConfirm,
@@ -39,6 +43,7 @@ import {
 import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
 import { LinkViewProvider } from '../providers/linkViewProvider';
 import { FavoriteViewProvider } from '../providers/favoriteViewProvider';
+import { HistoryProvider, HistoryEntry } from '../providers/historyProvider';
 import * as os from 'os';
 import * as path from 'path';
 import { ActionItem } from '../schema';
@@ -1184,457 +1189,218 @@ suite('Extension Test Suite', () => {
 			return new MockExtensionContext() as unknown as vscode.ExtensionContext;
 		}
 
-		// We need to import HistoryProvider for testing, but it's not exported
-		// So we'll test through the public API (commands) or export it for testing
-		// For now, let's test the history entry structure and behavior
+		// These tests exercise the real HistoryProvider class (from
+		// ../providers/historyProvider) with a MockMemento-backed
+		// ExtensionContext, so addHistoryEntry / updateHistoryStatus /
+		// deleteHistoryItem / clearAllHistory / trimHistoryToMax regressions
+		// are actually caught here. An earlier revision of this file
+		// simulated the lifecycle with local Maps/arrays, which meant those
+		// tests only exercised JavaScript collection semantics.
 
-		test('should create valid history entry structure', () => {
-			const entry = {
-				actionId: 'test.action',
-				actionTitle: 'Test Action',
-				timestamp: Date.now(),
-				status: 'success' as const
+		function makeEntry(
+			actionId: string,
+			status: HistoryEntry['status'] = 'success',
+			timestamp: number = Date.now(),
+			output?: string
+		): HistoryEntry {
+			const entry: HistoryEntry = {
+				actionId,
+				actionTitle: `Title for ${actionId}`,
+				timestamp,
+				status,
 			};
-
-			assert.strictEqual(entry.actionId, 'test.action');
-			assert.strictEqual(entry.actionTitle, 'Test Action');
-			assert.ok(entry.timestamp > 0);
-			assert.strictEqual(entry.status, 'success');
-		});
-
-		test('should handle history entry with output', () => {
-			const entry = {
-				actionId: 'test.action',
-				actionTitle: 'Test Action',
-				timestamp: Date.now(),
-				status: 'failure' as const,
-				output: 'Error: Something went wrong'
-			};
-
-			assert.ok(entry.output);
-			assert.strictEqual(entry.output, 'Error: Something went wrong');
-		});
-
-		test('should handle all status types', () => {
-			const statuses: Array<'success' | 'failure' | 'running'> = ['success', 'failure', 'running'];
-
-			for (const status of statuses) {
-				const entry = {
-					actionId: 'test.action',
-					actionTitle: 'Test Action',
-					timestamp: Date.now(),
-					status: status
-				};
-
-				assert.strictEqual(entry.status, status);
+			if (output !== undefined) {
+				entry.output = output;
 			}
-		});
+			return entry;
+		}
 
-		test('should maintain history order (newest first)', () => {
-			const entries = [
-				{ actionId: 'action1', actionTitle: 'Action 1', timestamp: 1000, status: 'success' as const },
-				{ actionId: 'action2', actionTitle: 'Action 2', timestamp: 2000, status: 'success' as const },
-				{ actionId: 'action3', actionTitle: 'Action 3', timestamp: 3000, status: 'success' as const }
-			];
-
-			// Verify newest is first
-			assert.ok(entries[0].timestamp < entries[1].timestamp);
-			assert.ok(entries[1].timestamp < entries[2].timestamp);
-		});
-
-		test('should limit history to maxItems', () => {
-			const maxItems = 10;
-			const entries = [];
-
-			// Add more than maxItems
-			for (let i = 0; i < 15; i++) {
-				entries.push({
-					actionId: `action${i}`,
-					actionTitle: `Action ${i}`,
-					timestamp: Date.now() + i,
-					status: 'success' as const
-				});
+		async function withHistoryMaxItems<T>(max: number, fn: () => T | Promise<T>): Promise<T> {
+			const cfg = vscode.workspace.getConfiguration('taskhub.history');
+			const prev = cfg.get('maxItems');
+			await cfg.update('maxItems', max, vscode.ConfigurationTarget.Global);
+			try {
+				return await fn();
+			} finally {
+				await cfg.update('maxItems', prev, vscode.ConfigurationTarget.Global);
 			}
+		}
 
-			// Simulate trimming
-			const trimmed = entries.slice(0, maxItems);
-
-			assert.strictEqual(trimmed.length, maxItems);
+		test('addHistoryEntry unshifts entries so newest comes first', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('first', 'success', 1000));
+			provider.addHistoryEntry(makeEntry('second', 'success', 2000));
+			provider.addHistoryEntry(makeEntry('third', 'success', 3000));
+			const history = provider.getHistory();
+			assert.deepStrictEqual(
+				history.map(e => e.actionId),
+				['third', 'second', 'first']
+			);
 		});
 
-		test('should find and update history entry by actionId and timestamp', () => {
-			const timestamp = Date.now();
-			const entries: Array<{
-				actionId: string;
-				actionTitle: string;
-				timestamp: number;
-				status: 'success' | 'failure' | 'running';
-			}> = [
-				{ actionId: 'action1', actionTitle: 'Action 1', timestamp: timestamp, status: 'running' },
-				{ actionId: 'action2', actionTitle: 'Action 2', timestamp: timestamp + 1000, status: 'success' }
-			];
-
-			// Find the entry
-			const entry = entries.find(e => e.actionId === 'action1' && e.timestamp === timestamp);
-
-			assert.ok(entry);
-			assert.strictEqual(entry!.status, 'running');
-
-			// Update it
-			entry!.status = 'success';
-			assert.strictEqual(entry!.status, 'success');
+		test('addHistoryEntry persists through workspaceState so getHistory round-trips', () => {
+			const ctx = createMockContext();
+			const p1 = new HistoryProvider(ctx);
+			p1.addHistoryEntry(makeEntry('persist', 'success', 42));
+			// A second provider bound to the same context should see the entry.
+			const p2 = new HistoryProvider(ctx);
+			const history = p2.getHistory();
+			assert.strictEqual(history.length, 1);
+			assert.strictEqual(history[0].actionId, 'persist');
+			assert.strictEqual(history[0].timestamp, 42);
 		});
 
-		test('should delete history entry by actionId and timestamp', () => {
-			const timestamp = Date.now();
-			const entries = [
-				{ actionId: 'action1', actionTitle: 'Action 1', timestamp: timestamp, status: 'success' as const },
-				{ actionId: 'action2', actionTitle: 'Action 2', timestamp: timestamp + 1000, status: 'success' as const }
-			];
-
-			// Find and delete
-			const index = entries.findIndex(e => e.actionId === 'action1' && e.timestamp === timestamp);
-			assert.ok(index !== -1);
-
-			entries.splice(index, 1);
-			assert.strictEqual(entries.length, 1);
-			assert.strictEqual(entries[0].actionId, 'action2');
-		});
-
-		test('should clear all history', () => {
-			const entries = [
-				{ actionId: 'action1', actionTitle: 'Action 1', timestamp: Date.now(), status: 'success' as const },
-				{ actionId: 'action2', actionTitle: 'Action 2', timestamp: Date.now() + 1000, status: 'success' as const }
-			];
-
-			// Clear
-			entries.length = 0;
-			assert.strictEqual(entries.length, 0);
-		});
-
-		test('should handle duplicate action IDs with different timestamps', () => {
-			const timestamp1 = Date.now();
-			const timestamp2 = Date.now() + 1000;
-
-			const entries = [
-				{ actionId: 'action1', actionTitle: 'Action 1', timestamp: timestamp1, status: 'success' as const },
-				{ actionId: 'action1', actionTitle: 'Action 1', timestamp: timestamp2, status: 'success' as const }
-			];
-
-			// Both entries should exist
-			assert.strictEqual(entries.length, 2);
-			assert.strictEqual(entries[0].actionId, entries[1].actionId);
-			assert.notStrictEqual(entries[0].timestamp, entries[1].timestamp);
-		});
-
-		test('should handle history entry with empty output', () => {
-			const entry = {
-				actionId: 'test.action',
-				actionTitle: 'Test Action',
-				timestamp: Date.now(),
-				status: 'success' as const,
-				output: ''
-			};
-
-			assert.strictEqual(entry.output, '');
-		});
-
-		test('should handle history entry with multiline output', () => {
-			const entry = {
-				actionId: 'test.action',
-				actionTitle: 'Test Action',
-				timestamp: Date.now(),
-				status: 'failure' as const,
-				output: 'Error: Line 1\nError: Line 2\nError: Line 3'
-			};
-
-			assert.ok(entry.output.includes('\n'));
-			assert.strictEqual(entry.output.split('\n').length, 3);
-		});
-
-		test('should trim history when maxItems is reduced', () => {
-			const oldMax = 10;
-			const newMax = 5;
-
-			const entries = [];
-			for (let i = 0; i < oldMax; i++) {
-				entries.push({
-					actionId: `action${i}`,
-					actionTitle: `Action ${i}`,
-					timestamp: Date.now() + i,
-					status: 'success' as const
-				});
-			}
-
-			assert.strictEqual(entries.length, oldMax);
-
-			// Trim to new max
-			if (entries.length > newMax) {
-				entries.splice(newMax);
-			}
-
-			assert.strictEqual(entries.length, newMax);
-		});
-
-		test('should preserve history when maxItems is increased', () => {
-			const oldMax = 5;
-			const newMax = 10;
-
-			const entries = [];
-			for (let i = 0; i < oldMax; i++) {
-				entries.push({
-					actionId: `action${i}`,
-					actionTitle: `Action ${i}`,
-					timestamp: Date.now() + i,
-					status: 'success' as const
-				});
-			}
-
-			assert.strictEqual(entries.length, oldMax);
-
-			// No trimming needed when increasing max
-			assert.strictEqual(entries.length, oldMax);
-		});
-	});
-
-	suite('Action Stop and History Update', () => {
-		test('should track action start timestamp', () => {
-			const actionId = 'test-action-1';
-			const timestamp = Date.now();
-			const timestampMap = new Map<string, number>();
-
-			// Simulate adding timestamp when action starts
-			timestampMap.set(actionId, timestamp);
-
-			assert.strictEqual(timestampMap.get(actionId), timestamp);
-			assert.strictEqual(timestampMap.has(actionId), true);
-		});
-
-		test('should clean up timestamp after action completes', () => {
-			const actionId = 'test-action-2';
-			const timestamp = Date.now();
-			const timestampMap = new Map<string, number>();
-
-			timestampMap.set(actionId, timestamp);
-			assert.strictEqual(timestampMap.has(actionId), true);
-
-			// Simulate cleanup in finally block
-			timestampMap.delete(actionId);
-			assert.strictEqual(timestampMap.has(actionId), false);
-		});
-
-		test('should handle multiple concurrent actions with different timestamps', () => {
-			const timestampMap = new Map<string, number>();
-			const action1 = { id: 'action1', timestamp: Date.now() };
-			const action2 = { id: 'action2', timestamp: Date.now() + 100 };
-			const action3 = { id: 'action3', timestamp: Date.now() + 200 };
-
-			timestampMap.set(action1.id, action1.timestamp);
-			timestampMap.set(action2.id, action2.timestamp);
-			timestampMap.set(action3.id, action3.timestamp);
-
-			assert.strictEqual(timestampMap.size, 3);
-			assert.strictEqual(timestampMap.get(action1.id), action1.timestamp);
-			assert.strictEqual(timestampMap.get(action2.id), action2.timestamp);
-			assert.strictEqual(timestampMap.get(action3.id), action3.timestamp);
-		});
-
-		test('should update history status to failure when action is manually stopped', () => {
-			type HistoryStatus = 'success' | 'failure' | 'running';
-			interface HistoryEntry {
-				actionId: string;
-				actionTitle: string;
-				timestamp: number;
-				status: HistoryStatus;
-				output?: string;
-			}
-
-			const actionId = 'test-action';
-			const timestamp = Date.now();
-			const history: HistoryEntry[] = [
-				{
-					actionId: actionId,
-					actionTitle: 'Test Action',
-					timestamp: timestamp,
-					status: 'running'
+		test('addHistoryEntry trims the oldest entries once maxItems is exceeded', async () => {
+			await withHistoryMaxItems(3, () => {
+				const provider = new HistoryProvider(createMockContext());
+				for (let i = 0; i < 5; i++) {
+					provider.addHistoryEntry(makeEntry(`a${i}`, 'success', 1000 + i));
 				}
-			];
+				const history = provider.getHistory();
+				// After the 5th add, newest-first ordering keeps only a4/a3/a2.
+				assert.deepStrictEqual(
+					history.map(e => e.actionId),
+					['a4', 'a3', 'a2']
+				);
+			});
+		});
 
-			// Simulate manual stop - find and update the entry
-			const entry = history.find(e => e.actionId === actionId && e.timestamp === timestamp);
-			assert.ok(entry);
-			assert.strictEqual(entry.status, 'running');
+		test('updateHistoryStatus mutates an entry matched by (actionId, timestamp)', () => {
+			const provider = new HistoryProvider(createMockContext());
+			const timestamp = 123;
+			provider.addHistoryEntry(makeEntry('target', 'running', timestamp));
+			provider.addHistoryEntry(makeEntry('target', 'running', timestamp + 10));
 
-			// Update status to failure with stop message
-			entry.status = 'failure';
-			entry.output = 'Action stopped by user';
+			provider.updateHistoryStatus('target', timestamp, 'failure', 'boom');
 
+			const history = provider.getHistory();
+			const updated = history.find(e => e.timestamp === timestamp);
+			const untouched = history.find(e => e.timestamp === timestamp + 10);
+			assert.ok(updated);
+			assert.ok(untouched);
+			assert.strictEqual(updated!.status, 'failure');
+			assert.strictEqual(updated!.output, 'boom');
+			assert.strictEqual(untouched!.status, 'running');
+			assert.strictEqual(untouched!.output, undefined);
+		});
+
+		test('updateHistoryStatus on an unknown (actionId, timestamp) is a silent no-op', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('only', 'success', 1));
+			provider.updateHistoryStatus('missing', 999, 'failure', 'should-not-write');
+			const history = provider.getHistory();
+			assert.strictEqual(history.length, 1);
+			assert.strictEqual(history[0].actionId, 'only');
+			assert.strictEqual(history[0].status, 'success');
+			assert.strictEqual(history[0].output, undefined);
+		});
+
+		test('updateHistoryStatus preserves existing output when called without an output arg', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('a', 'running', 1, 'preexisting-output'));
+			provider.updateHistoryStatus('a', 1, 'success');
+			const entry = provider.getHistory()[0];
+			assert.strictEqual(entry.status, 'success');
+			assert.strictEqual(entry.output, 'preexisting-output');
+		});
+
+		test('manual-stop flow: running → failure with "Action stopped by user" message', () => {
+			// The stop-action command in extension.ts routes through
+			// updateHistoryStatus(actionId, timestamp, 'failure', 'Action stopped by user').
+			// This test pins that contract against the real class.
+			const provider = new HistoryProvider(createMockContext());
+			const ts = 555;
+			provider.addHistoryEntry(makeEntry('build', 'running', ts));
+			provider.updateHistoryStatus('build', ts, 'failure', 'Action stopped by user');
+			const entry = provider.getHistory()[0];
 			assert.strictEqual(entry.status, 'failure');
 			assert.strictEqual(entry.output, 'Action stopped by user');
 		});
 
-		test('should track manually terminated actions', () => {
-			const manuallyTerminatedActions = new Set<string>();
-			const actionId = 'test-action';
-
-			// Simulate adding to manually terminated set
-			manuallyTerminatedActions.add(actionId);
-
-			assert.strictEqual(manuallyTerminatedActions.has(actionId), true);
-
-			// Cleanup after handling
-			manuallyTerminatedActions.delete(actionId);
-			assert.strictEqual(manuallyTerminatedActions.has(actionId), false);
+		test('rerun flow: re-adding with a new timestamp yields two distinct entries', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('rerun', 'success', 100));
+			provider.addHistoryEntry(makeEntry('rerun', 'success', 200));
+			const history = provider.getHistory();
+			assert.strictEqual(history.length, 2);
+			assert.strictEqual(history[0].timestamp, 200);
+			assert.strictEqual(history[1].timestamp, 100);
 		});
 
-		test('should update history entry with error message on manual stop', () => {
-			type HistoryStatus = 'success' | 'failure' | 'running';
-			interface HistoryEntry {
-				actionId: string;
-				actionTitle: string;
-				timestamp: number;
-				status: HistoryStatus;
-				output?: string;
-			}
+		test('deleteHistoryItem removes only the matching (actionId, timestamp) entry', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('a', 'success', 1));
+			provider.addHistoryEntry(makeEntry('a', 'success', 2));
+			provider.addHistoryEntry(makeEntry('b', 'success', 3));
+			provider.deleteHistoryItem(makeEntry('a', 'success', 1));
+			const history = provider.getHistory();
+			assert.deepStrictEqual(
+				history.map(e => `${e.actionId}:${e.timestamp}`).sort(),
+				['a:2', 'b:3']
+			);
+		});
 
-			const history: HistoryEntry[] = [
-				{
-					actionId: 'action1',
-					actionTitle: 'Build Project',
-					timestamp: Date.now(),
-					status: 'running'
+		test('deleteHistoryItem with no matching entry leaves history untouched', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('a', 'success', 1));
+			provider.deleteHistoryItem(makeEntry('a', 'success', 999));
+			assert.strictEqual(provider.getHistory().length, 1);
+		});
+
+		test('clearAllHistory empties the persisted store', () => {
+			const ctx = createMockContext();
+			const provider = new HistoryProvider(ctx);
+			provider.addHistoryEntry(makeEntry('a'));
+			provider.addHistoryEntry(makeEntry('b'));
+			provider.clearAllHistory();
+			assert.deepStrictEqual(provider.getHistory(), []);
+			// A second provider on the same context must see the cleared state too.
+			assert.deepStrictEqual(new HistoryProvider(ctx).getHistory(), []);
+		});
+
+		test('trimHistoryToMax shrinks over-length history to the current maxItems setting', async () => {
+			const ctx = createMockContext();
+			await withHistoryMaxItems(50, () => {
+				const provider = new HistoryProvider(ctx);
+				for (let i = 0; i < 8; i++) {
+					provider.addHistoryEntry(makeEntry(`x${i}`, 'success', 1000 + i));
 				}
-			];
-
-			// Simulate updating status on manual stop
-			const entry = history.find(e => e.actionId === 'action1');
-			if (entry) {
-				entry.status = 'failure';
-				entry.output = 'Action stopped by user';
-			}
-
-			assert.strictEqual(entry?.status, 'failure');
-			assert.strictEqual(entry?.output, 'Action stopped by user');
+			});
+			// Lower maxItems, then trim. We expect only the first 4 newest
+			// entries to remain (history is ordered newest-first).
+			await withHistoryMaxItems(4, () => {
+				const provider = new HistoryProvider(ctx);
+				provider.trimHistoryToMax();
+				const history = provider.getHistory();
+				assert.strictEqual(history.length, 4);
+				assert.deepStrictEqual(
+					history.map(e => e.actionId),
+					['x7', 'x6', 'x5', 'x4']
+				);
+			});
 		});
 
-		test('should preserve other history entries when updating one', () => {
-			type HistoryStatus = 'success' | 'failure' | 'running';
-			interface HistoryEntry {
-				actionId: string;
-				actionTitle: string;
-				timestamp: number;
-				status: HistoryStatus;
-				output?: string;
-			}
-
-			const timestamp1 = Date.now();
-			const timestamp2 = Date.now() + 1000;
-			const timestamp3 = Date.now() + 2000;
-
-			const history: HistoryEntry[] = [
-				{ actionId: 'action1', actionTitle: 'Action 1', timestamp: timestamp1, status: 'success' },
-				{ actionId: 'action2', actionTitle: 'Action 2', timestamp: timestamp2, status: 'running' },
-				{ actionId: 'action3', actionTitle: 'Action 3', timestamp: timestamp3, status: 'success' }
-			];
-
-			// Update only action2
-			const entry = history.find(e => e.actionId === 'action2' && e.timestamp === timestamp2);
-			if (entry) {
-				entry.status = 'failure';
-				entry.output = 'Action stopped by user';
-			}
-
-			// Verify other entries are unchanged
-			assert.strictEqual(history[0].status, 'success');
-			assert.strictEqual(history[0].output, undefined);
-			assert.strictEqual(history[1].status, 'failure');
-			assert.strictEqual(history[1].output, 'Action stopped by user');
-			assert.strictEqual(history[2].status, 'success');
-			assert.strictEqual(history[2].output, undefined);
+		test('trimHistoryToMax is a no-op when history.length <= maxItems', async () => {
+			const ctx = createMockContext();
+			await withHistoryMaxItems(10, () => {
+				const provider = new HistoryProvider(ctx);
+				provider.addHistoryEntry(makeEntry('a', 'success', 1));
+				provider.addHistoryEntry(makeEntry('b', 'success', 2));
+				provider.trimHistoryToMax();
+				assert.strictEqual(provider.getHistory().length, 2);
+			});
 		});
 
-		test('should handle stopAction when action is not found', () => {
-			const timestampMap = new Map<string, number>();
-			const actionId = 'non-existent-action';
-
-			// Attempt to get timestamp for non-existent action
-			const timestamp = timestampMap.get(actionId);
-
-			assert.strictEqual(timestamp, undefined);
-			assert.strictEqual(timestampMap.has(actionId), false);
-		});
-
-		test('should differentiate between manual stop and regular failure', () => {
-			type HistoryStatus = 'success' | 'failure' | 'running';
-			interface HistoryEntry {
-				actionId: string;
-				actionTitle: string;
-				timestamp: number;
-				status: HistoryStatus;
-				output?: string;
-			}
-
-			const manualStopEntry: HistoryEntry = {
-				actionId: 'action1',
-				actionTitle: 'Action 1',
-				timestamp: Date.now(),
-				status: 'failure',
-				output: 'Action stopped by user'
-			};
-
-			const regularFailureEntry: HistoryEntry = {
-				actionId: 'action2',
-				actionTitle: 'Action 2',
-				timestamp: Date.now() + 1000,
-				status: 'failure',
-				output: 'Error: Command failed'
-			};
-
-			// Both are failures but with different messages
-			assert.strictEqual(manualStopEntry.status, 'failure');
-			assert.strictEqual(regularFailureEntry.status, 'failure');
-			assert.ok(manualStopEntry.output?.includes('stopped by user'));
-			assert.ok(regularFailureEntry.output?.includes('Error'));
-		});
-
-		test('should handle concurrent action stops with correct timestamps', () => {
-			const timestampMap = new Map<string, number>();
-			const action1Id = 'action1';
-			const action2Id = 'action2';
-			const timestamp1 = Date.now();
-			const timestamp2 = Date.now() + 100;
-
-			timestampMap.set(action1Id, timestamp1);
-			timestampMap.set(action2Id, timestamp2);
-
-			// Stop action1
-			const ts1 = timestampMap.get(action1Id);
-			assert.strictEqual(ts1, timestamp1);
-			timestampMap.delete(action1Id);
-
-			// action2 should still be there
-			assert.strictEqual(timestampMap.has(action1Id), false);
-			assert.strictEqual(timestampMap.has(action2Id), true);
-			assert.strictEqual(timestampMap.get(action2Id), timestamp2);
-		});
-
-		test('should handle action rerun with new timestamp', () => {
-			const timestampMap = new Map<string, number>();
-			const actionId = 'rerun-action';
-			const firstTimestamp = Date.now();
-			const secondTimestamp = Date.now() + 5000;
-
-			// First run
-			timestampMap.set(actionId, firstTimestamp);
-			assert.strictEqual(timestampMap.get(actionId), firstTimestamp);
-
-			// Cleanup after first run
-			timestampMap.delete(actionId);
-
-			// Second run (rerun) with new timestamp
-			timestampMap.set(actionId, secondTimestamp);
-			assert.strictEqual(timestampMap.get(actionId), secondTimestamp);
-			assert.notStrictEqual(firstTimestamp, secondTimestamp);
+		test('getChildren returns one HistoryItem per entry, carrying the rerun command', async () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('run-me', 'success', 1));
+			const items = await provider.getChildren();
+			assert.strictEqual(items.length, 1);
+			const item = items[0];
+			// TreeItem label comes from actionTitle in the entry.
+			assert.strictEqual(item.label, 'Title for run-me');
+			assert.strictEqual(item.command?.command, 'taskhub.rerunFromHistory');
+			assert.strictEqual(item.getEntry().actionId, 'run-me');
 		});
 	});
 
@@ -2523,7 +2289,7 @@ suite('Extension Test Suite', () => {
 			const { actions, errors } = parseImportData(data);
 			assert.strictEqual(actions.length, 0);
 			assert.strictEqual(errors.length, 1);
-			assert.ok(errors[0].includes('Duplicate action IDs'));
+			assert.ok(errors[0].includes('Duplicate action id'));
 			assert.ok(errors[0].includes('dup.action'));
 		});
 
@@ -2539,6 +2305,29 @@ suite('Extension Test Suite', () => {
 			const { actions, errors } = parseImportData(data);
 			assert.strictEqual(actions.length, 0);
 			assert.ok(errors[0].includes('nested.dup'));
+		});
+
+		test('should reject imported file with duplicate task IDs inside a single action', () => {
+			// Regression: previously import only checked duplicate action IDs, so an
+			// action with duplicate task IDs could pass import validation and then
+			// break normal action loading on the next read from disk.
+			const data = JSON.stringify([
+				{
+					id: 'action.dup-task',
+					title: 'Dup Task',
+					action: {
+						description: 'd',
+						tasks: [
+							{ id: 'step', type: 'shell', command: 'echo 1' },
+							{ id: 'step', type: 'shell', command: 'echo 2' }
+						]
+					}
+				}
+			]);
+			const { actions, errors } = parseImportData(data);
+			assert.strictEqual(actions.length, 0);
+			assert.ok(errors.length > 0);
+			assert.ok(errors[0].includes('duplicate task id'), `expected duplicate task id message, got: ${errors[0]}`);
 		});
 
 		test('should accept imported file with unique IDs', () => {
@@ -2663,6 +2452,119 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(merged.length, 1);
 			assert.strictEqual(skipped.length, 0);
 		});
+	});
+
+	suite('mergeActions (preset merge strategies)', () => {
+		const existing: ActionItem[] = [
+			{ id: 'shared', title: 'Existing Shared' },
+			{ id: 'only-existing', title: 'Only Existing' }
+		];
+		const preset: ActionItem[] = [
+			{ id: 'shared', title: 'Preset Shared' },
+			{ id: 'only-preset', title: 'Only Preset' }
+		];
+
+		test('keep-existing: preset wins for unique IDs only, existing kept on conflict', () => {
+			const merged = mergeActions(existing, preset, 'keep-existing');
+			const byId = new Map(merged.map(a => [a.id, a]));
+			assert.strictEqual(byId.get('shared')?.title, 'Existing Shared');
+			assert.ok(byId.has('only-preset'));
+			assert.ok(byId.has('only-existing'));
+		});
+
+		test('use-preset: conflicting preset action actually wins (regression)', () => {
+			// Regression for the bug where the "Use preset" QuickPick option
+			// silently behaved like "Keep existing" because mergeActions always
+			// filtered preset items by existing IDs.
+			const merged = mergeActions(existing, preset, 'use-preset');
+			const byId = new Map(merged.map(a => [a.id, a]));
+			assert.strictEqual(
+				byId.get('shared')?.title,
+				'Preset Shared',
+				'preset entry must win when strategy is use-preset'
+			);
+			assert.ok(byId.has('only-preset'));
+			assert.ok(byId.has('only-existing'));
+		});
+
+		test('keep-both: existing and preset coexist, with preset conflicts dropped', () => {
+			const merged = mergeActions(existing, preset, 'keep-both');
+			const byId = new Map(merged.map(a => [a.id, a]));
+			assert.strictEqual(byId.get('shared')?.title, 'Existing Shared');
+			assert.ok(byId.has('only-preset'));
+			assert.ok(byId.has('only-existing'));
+		});
+	});
+
+	suite('toWorkspaceRelativePath', () => {
+		test('converts a file inside the workspace to ${workspaceFolder} form', () => {
+			const root = path.resolve('/tmp/taskhub-ws');
+			const file = path.join(root, 'src', 'index.ts');
+			assert.strictEqual(
+				toWorkspaceRelativePath(file, root),
+				'${workspaceFolder}/src/index.ts'
+			);
+		});
+
+		test('leaves paths outside the workspace as absolute', () => {
+			const root = path.resolve('/tmp/taskhub-ws');
+			const outside = path.resolve('/tmp/elsewhere/file.ts');
+			assert.strictEqual(toWorkspaceRelativePath(outside, root), outside);
+		});
+
+		test('returns raw path when workspaceFolder is missing', () => {
+			const file = path.resolve('/tmp/anything/file.ts');
+			assert.strictEqual(toWorkspaceRelativePath(file, undefined), file);
+		});
+	});
+
+	suite('executeShellCommand: capture overflow is a normal failure', () => {
+		// POSIX-only — the underlying `sh -c 'yes | head -c ...'` is cross-shell
+		// awkward on Windows and the overflow logic itself is identical.
+		(process.platform === 'win32' ? test.skip : test)(
+			'rejects with the overflow message AND does not mark the action as manually terminated',
+			async function () {
+				this.timeout(15_000);
+				const cfg = vscode.workspace.getConfiguration('taskhub');
+				const prevLimit = cfg.get('pipeline.outputCaptureLimitMb');
+				await cfg.update('pipeline.outputCaptureLimitMb', 1, vscode.ConfigurationTarget.Global);
+				try {
+					const actionKey = `test.capture-overflow.${Date.now()}`;
+					// `yes | head -c 3000000` reliably emits 3 MB then exits;
+					// well above the 1 MB cap set above.
+					let caught: Error | undefined;
+					try {
+						await executeShellCommand(
+							'sh',
+							['-c', 'yes | head -c 3000000'],
+							undefined,
+							undefined,
+							undefined,
+							actionKey
+						);
+					} catch (e) {
+						caught = e as Error;
+					}
+					assert.ok(caught, 'executeShellCommand should reject when the capture cap is exceeded');
+					assert.ok(
+						/Captured output exceeded|캡처된 출력이/.test(caught!.message),
+						`expected overflow-specific error message, got: ${caught!.message}`
+					);
+					// Regression: previously the overflow path added to
+					// manuallyTerminatedActions, which caused executeAction()
+					// to record the failure as "Action stopped by user"
+					// instead of the real error. Verify we don't do that
+					// anymore.
+					assert.strictEqual(
+						__testHook_hasManuallyTerminated(actionKey),
+						false,
+						'capture overflow must not be classified as a user-initiated manual termination'
+					);
+				} finally {
+					await cfg.update('pipeline.outputCaptureLimitMb', prevLimit, vscode.ConfigurationTarget.Global);
+				}
+			}
+		);
 	});
 
 	suite('getActionsValidator (module-level cache)', () => {

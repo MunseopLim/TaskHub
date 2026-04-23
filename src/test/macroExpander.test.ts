@@ -226,6 +226,40 @@ const int x = 5;
             assert.strictEqual(result, null);
         });
 
+        // --- 4096-length boundary -----------------------------------------
+        // MacroExpander.evaluateToNumber bails with `cleaned.length > 4096`
+        // as a ReDoS / huge-eval guard. The method trims leading/trailing
+        // whitespace first (`cleaned = expanded.trim()`), so the inputs
+        // below use only non-whitespace at each end to make the boundary
+        // exact. The expressions `1+1+1+...+1` and `1 +1+1+...+1` do not
+        // hit any of the simple-pattern early returns, pass the
+        // safe-character regex, and survive hex/binary rewriting unchanged —
+        // so length(cleaned) === length(input.trim()).
+        test('expression at length 4095 evaluates (below the limit)', () => {
+            // "1" (len 1) + "+1" * 2047 (len 4094) = 4095 chars, value 2048
+            const expr = '1' + '+1'.repeat(2047);
+            assert.strictEqual(expr.length, 4095);
+            const result = MacroExpander.evaluateToNumber(expr);
+            assert.strictEqual(result, 2048);
+        });
+
+        test('expression exactly at the 4096 length limit still evaluates', () => {
+            // "1 " (len 2) + "+1" * 2047 (len 4094) = 4096 chars, value 2048
+            const expr = '1 ' + '+1'.repeat(2047);
+            assert.strictEqual(expr.length, 4096);
+            const result = MacroExpander.evaluateToNumber(expr);
+            assert.strictEqual(result, 2048);
+        });
+
+        test('expression at length 4097 is rejected (one char over the limit)', () => {
+            // "1" + "+1" * 2048 (len 4096) = 4097 chars — no surrounding
+            // whitespace, so cleaned.length === 4097 after trim().
+            const expr = '1' + '+1'.repeat(2048);
+            assert.strictEqual(expr.length, 4097);
+            const result = MacroExpander.evaluateToNumber(expr);
+            assert.strictEqual(result, null);
+        });
+
         test('Evaluate OR expression', () => {
             const result = MacroExpander.evaluateToNumber('0x01 | 0x02');
             assert.strictEqual(result, 3);
