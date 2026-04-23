@@ -55,7 +55,9 @@ TaskHub/
 │   └── preset-example.json   # 프리셋 예제 파일
 ├── docs/
 │   ├── features.md           # 상세 기능 문서
-│   └── architecture.md       # 이 파일
+│   ├── architecture.md       # 이 파일
+│   ├── roadmap.md            # 향후 기능 로드맵 + 완료 항목
+│   └── integration-tests.md  # IT-xxx 통합 테스트 대장
 ├── .vscode/
 │   ├── actions.json          # 워크스페이스별 액션 (선택사항)
 │   ├── links.json            # 워크스페이스별 링크 (선택사항)
@@ -212,23 +214,26 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 ## 개발 시 주의사항
 
 1. **히스토리 기능 수정 시**:
-   *   `HistoryProvider` 클래스 수정 (`extension.ts`)
-   *   `executeAction()` 함수의 히스토리 추적 로직 확인
-   *   테스트 업데이트 (`src/test/extension.test.ts`)
+   *   `HistoryProvider` 클래스 ([src/providers/historyProvider.ts](../src/providers/historyProvider.ts)) 및 persistence key(`taskhub.actionHistory`) 영향 확인
+   *   [src/extension.ts](../src/extension.ts) `executeAction()` 의 히스토리 추적 호출 순서(`addHistoryEntry` → `updateHistoryStatus`) 유지
+   *   `src/test/extension.test.ts`의 `HistoryProvider` suite는 실제 클래스 인스턴스를 검증하므로 함께 갱신
 
 2. **새 패널 추가 시**:
    *   `package.json`의 `views` 섹션에 뷰 정의 추가
-   *   `extension.ts`에 TreeDataProvider 클래스 구현
-   *   `activate()` 함수에서 등록
+   *   TreeDataProvider는 `src/providers/<featureName>Provider.ts` 모듈로 분리해 구현
+   *   [src/extension.ts](../src/extension.ts) `activate()`에서 import 후 인스턴스화/등록
+   *   컨텍스트 전용 명령은 `package.json`의 `menus.commandPalette`에서 `"when": "false"` 로 팔레트에서 숨김
 
 3. **새 명령어 추가 시**:
    *   `package.json`의 `commands` 섹션에 명령어 정의
    *   `activate()` 함수에서 명령어 핸들러 등록
    *   필요 시 `menus` 섹션에서 UI 위치 지정
+   *   인자 없이 호출 불가능한 명령은 `menus.commandPalette`에 `when:false`로 등록
 
 4. **스키마 수정 시**:
    *   `schema/*.schema.json` 파일 업데이트
-   *   JSON 검증 로직 확인
+   *   JSON 검증 로직 확인 (`loadAndValidateActions` / `parseImportData`)
+   *   `getActionsValidator()` 캐시는 자동으로 재사용되므로 별도 조치 불필요
 
 ## 디버깅
 

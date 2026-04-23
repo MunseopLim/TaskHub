@@ -1,5 +1,9 @@
 # Contributing to TaskHub
 
+이 문서는 TaskHub에 기여할 때의 **개발자 워크플로우**(환경 셋업·빌드/테스트·로컬 실행·실험적 기능 추가·PR·npm overrides)를 다룹니다.
+
+프로젝트 구조·주요 컴포넌트·데이터 구조·활성화·보안은 [docs/architecture.md](docs/architecture.md)에, 코딩 컨벤션·i18n 규칙·커밋 메시지 형식은 [CLAUDE.md](CLAUDE.md)에 있습니다. 중복 서술 대신 해당 문서를 참조하세요.
+
 ## 개발 환경 셋업
 
 ### 요구사항
@@ -73,12 +77,7 @@ vsce package            # TaskHub-<version>.vsix 생성
 
 ## 코드 스타일
 
-- TypeScript strict 모드, ES2022 타겟
-- 세미콜론 필수, `===` 사용
-- 중괄호 필수 (if/else/for 등)
-- camelCase (함수/변수), PascalCase (클래스/인터페이스)
-- 들여쓰기: 4 spaces
-- 문서 언어: 한국어 기본
+코딩 컨벤션(TypeScript strict, 세미콜론, `===`, 들여쓰기 등)은 [CLAUDE.md](CLAUDE.md#코딩-컨벤션)에서 단일 출처로 관리합니다. 기여 시 해당 규칙을 따라주세요.
 
 ## 테스트 작성
 
@@ -105,27 +104,11 @@ suite('ModuleName Test Suite', () => {
 
 ## 커밋 메시지 형식
 
-```
-[버전] 변경 설명
-```
-
-예시:
-- `[0.2.36] npm 취약점 해결 및 의존성 업데이트`
-- `[0.2.35] codex 코드 리뷰 반영 및 성능 개선`
+커밋 메시지 규칙(`[버전] 변경 설명`, 테스트/문서-only 예외 포함)은 [CLAUDE.md](CLAUDE.md#커밋-메시지)에서 관리합니다. 기여 시 해당 형식을 따라주세요.
 
 ## 다국어 메시지 (i18n)
 
-사용자에게 보이는 모든 메시지는 `src/i18n.ts`의 `t(ko, en)` 함수로 감싸야 합니다.
-
-```typescript
-import { t } from './i18n';
-
-vscode.window.showErrorMessage(t('파일을 찾을 수 없습니다.', 'File not found.'));
-```
-
-- VS Code 언어가 한국어(`ko`)이면 한국어, 그 외에는 영어 표시
-- 패널 제목 등 짧은 영어 식별자와 사용자 설정값은 제외
-- 자세한 규칙은 `CLAUDE.md`의 "다국어 지원 (i18n)" 섹션 참조
+사용자에게 보이는 모든 메시지는 `t(ko, en)`으로 감싸야 합니다. 적용 대상/제외/사용법 등 자세한 규칙은 [CLAUDE.md](CLAUDE.md#다국어-지원-i18n) "다국어 지원 (i18n)" 섹션에서 관리합니다.
 
 ## 실험적 기능 추가 가이드
 

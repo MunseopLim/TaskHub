@@ -167,8 +167,10 @@ To build from source or contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 | Doc | Description |
 |------|------|
 | [docs/features.md](docs/features.md) | Detailed feature docs (task types, JSON examples, hover features) |
-| [docs/architecture.md](docs/architecture.md) | Project structure, key components, data structures |
+| [docs/architecture.md](docs/architecture.md) | Project structure, key components, data structures, security |
+| [docs/roadmap.md](docs/roadmap.md) | Future roadmap + already-shipped items |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, build, test, and contribution guide |
+| [CLAUDE.md](CLAUDE.md) | AI-agent rules (coding conventions, i18n, commit format) |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |
 | [examples/README.md](examples/README.md) | Demo files for each feature |
 

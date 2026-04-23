@@ -167,8 +167,10 @@
 | 문서 | 설명 |
 |------|------|
 | [docs/features.md](docs/features.md) | 상세 기능 문서 (태스크 타입, JSON 예제, hover 기능 등) |
-| [docs/architecture.md](docs/architecture.md) | 프로젝트 구조, 주요 컴포넌트, 데이터 구조 |
+| [docs/architecture.md](docs/architecture.md) | 프로젝트 구조, 주요 컴포넌트, 데이터 구조, 보안 |
+| [docs/roadmap.md](docs/roadmap.md) | 향후 기능 로드맵 + 이미 구현된 항목 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 개발 환경 셋업, 빌드, 테스트, 기여 가이드 |
+| [CLAUDE.md](CLAUDE.md) | AI 에이전트 규칙 (코딩 컨벤션, i18n, 커밋 형식) |
 | [CHANGELOG.md](CHANGELOG.md) | 버전별 변경 이력 |
 | [examples/README.md](examples/README.md) | 각 기능 시연용 예제 파일 설명 |
 
