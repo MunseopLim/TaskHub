@@ -101,14 +101,25 @@ function buildErrorHtml(webview: vscode.Webview, message: string, tone: 'error' 
  */
 export const HEX_VIEWER_MAX_SPAN = 128 * 1024 * 1024;
 
-export function buildHexViewerHtml(fileName: string, result: HexParseResult, webview?: vscode.Webview): string {
-    const totalSize = result.maxAddress - result.minAddress + 1;
+/**
+ * Pure guard that throws when the requested address span would exceed
+ * `HEX_VIEWER_MAX_SPAN`. Pulled out of `buildHexViewerHtml` so the boundary
+ * (`totalSize > HEX_VIEWER_MAX_SPAN`) can be covered by unit tests without
+ * allocating the 128 MB flat buffer + bitmap the renderer would otherwise
+ * build for a successful span of that size.
+ */
+export function assertWithinHexViewerSpan(totalSize: number): void {
     if (!Number.isFinite(totalSize) || totalSize < 0 || totalSize > HEX_VIEWER_MAX_SPAN) {
         throw new Error(
             `Hex Viewer address span (${totalSize} bytes) exceeds the display limit (${HEX_VIEWER_MAX_SPAN}).`
             + ` This usually means the file declares a very small number of bytes at widely separated addresses.`
         );
     }
+}
+
+export function buildHexViewerHtml(fileName: string, result: HexParseResult, webview?: vscode.Webview): string {
+    const totalSize = result.maxAddress - result.minAddress + 1;
+    assertWithinHexViewerSpan(totalSize);
     const flatData = toFlatArray(result, result.minAddress, totalSize);
     const dataBase64 = Buffer.from(flatData).toString('base64');
 

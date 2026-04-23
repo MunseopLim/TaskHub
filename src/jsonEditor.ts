@@ -89,11 +89,20 @@ export function unwrapIfRootArray(data: Record<string, unknown>, isRootArray: bo
 async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: string) {
     const fileName = filePath.split(/[\\/]/).pop() || 'JSON Editor';
 
-    if (currentPanel && currentFilePath && currentFilePath !== filePath) {
-        const prevFileName = currentFilePath.split(/[\\/]/).pop() || 'JSON Editor';
-        if (!(await confirmDiscardIfDirty(prevFileName))) {
-            currentPanel.reveal(vscode.ViewColumn.One);
-            return;
+    if (currentPanel && currentFilePath) {
+        if (currentFilePath !== filePath) {
+            const prevFileName = currentFilePath.split(/[\\/]/).pop() || 'JSON Editor';
+            if (!(await confirmDiscardIfDirty(prevFileName))) {
+                currentPanel.reveal(vscode.ViewColumn.One);
+                return;
+            }
+        } else if (currentIsDirty) {
+            // Reopening the same file while dirty — confirm before we overwrite
+            // the webview state with a fresh read from disk.
+            if (!(await confirmDiscardIfDirty(fileName))) {
+                currentPanel.reveal(vscode.ViewColumn.One);
+                return;
+            }
         }
     }
 
@@ -920,7 +929,10 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
                 if (textarea) {
                     newVal = textarea.value;
                 } else if (input) {
-                    newVal = parseValue(input.value);
+                    // Preserve string type when the original cell was a string,
+                    // so values like "00123", "true", "false", or "null" are not
+                    // silently coerced to number/boolean/null on save.
+                    newVal = typeof oldVal === 'string' ? input.value : parseValue(input.value);
                 }
                 const oldEmpty = oldVal === undefined || oldVal === null || oldVal === '';
                 const newEmpty = newVal === undefined || newVal === null || newVal === '';
@@ -942,6 +954,9 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
         renderTable();
     }
 
+    // Type-coercing input parser used only when the original cell had a
+    // non-string primitive type. For string cells we keep the raw string to
+    // avoid data loss (see commitCell above).
     function parseValue(str) {
         if (str === '') { return ''; }
         if (str === 'null') { return null; }

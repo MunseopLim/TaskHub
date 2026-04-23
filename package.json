@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.4.17",
+  "version": "0.4.18",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -85,6 +85,13 @@
           ],
           "default": "utf8",
           "description": "Controls how TaskHub configures PowerShell output on Windows. Use `system` to keep the current console code page for legacy tools that do not recognise UTF-8 (code page 65001)."
+        },
+        "taskhub.pipeline.outputCaptureLimitMb": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 1024,
+          "markdownDescription": "Maximum size (in megabytes) of command stdout/stderr captured into memory during a TaskHub action. When a command exceeds this limit it is terminated with an error to protect the VS Code extension host from OOM. Raise this value for pipelines that intentionally emit large logs, or redirect the output with `> file` to bypass capture."
         },
         "taskhub.history.maxItems": {
           "type": "number",
@@ -210,10 +217,6 @@
       {
         "command": "taskhub.showVersion",
         "title": "Show Extension Version"
-      },
-      {
-        "command": "taskhub.showFilePicker",
-        "title": "Select and Run File"
       },
       {
         "command": "taskhub.openFavoriteFile",
@@ -356,6 +359,24 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        { "command": "taskhub.openLink", "when": "false" },
+        { "command": "taskhub.copyLink", "when": "false" },
+        { "command": "taskhub.goToLink", "when": "false" },
+        { "command": "taskhub.executeAction", "when": "false" },
+        { "command": "taskhub.previewAction", "when": "false" },
+        { "command": "taskhub.stopAction", "when": "false" },
+        { "command": "taskhub.editWorkspaceLink", "when": "false" },
+        { "command": "taskhub.deleteFavorite", "when": "false" },
+        { "command": "taskhub.deleteLink", "when": "false" },
+        { "command": "taskhub.openFavoriteFile", "when": "false" },
+        { "command": "taskhub.rerunFromHistory", "when": "false" },
+        { "command": "taskhub.viewHistoryOutput", "when": "false" },
+        { "command": "taskhub.deleteHistoryItem", "when": "false" },
+        { "command": "taskhub.exportActionItem", "when": "false" },
+        { "command": "taskhub.showExampleJson", "when": "false" },
+        { "command": "taskhub.memoryMapGoToSymbol", "when": "false" }
+      ],
       "view/title": [
         {
           "command": "taskhub.searchFavorites",

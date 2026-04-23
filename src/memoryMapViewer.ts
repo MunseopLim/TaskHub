@@ -23,8 +23,8 @@ export const panelRegistry = {
     clear(): void { panels.clear(); lastActivePanel = undefined; },
 };
 
-/** Memory Map에서 처리 가능한 최대 ELF/Listing 파일 크기 (100 MB) */
-const MEMORY_MAP_MAX_FILE_SIZE = 100 * 1024 * 1024;
+/** Memory Map에서 처리 가능한 최대 ELF/Listing 파일 크기 (100 MB). Exported so tests can pin the boundary. */
+export const MEMORY_MAP_MAX_FILE_SIZE = 100 * 1024 * 1024;
 
 function formatFileSize(bytes: number): string {
     if (bytes < 1024) { return `${bytes} B`; }

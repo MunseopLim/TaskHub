@@ -1,5 +1,54 @@
 # Change Log
 
+## [0.4.18] - 2026-04-24
+
+### 수정 — 외부 리뷰 지적 11건 + 2차 리뷰 3건 + 3차 리뷰(경계값) 4건 + 4차 리뷰(테스트 품질) 5건 반영
+
+#### 4차 리뷰: 테스트 품질 보강 (시뮬레이션 제거 / 경계값 확장 / 구현 미스매치 방어)
+- **HistoryProvider 시뮬레이션 테스트 450줄을 실제 클래스 테스트로 교체**: [src/test/extension.test.ts](src/test/extension.test.ts)의 `HistoryProvider` 및 `Action Stop and History Update` 스위트가 그동안 로컬 `Map`/배열로 JavaScript 컬렉션 동작만 검증해 `addHistoryEntry`/`updateHistoryStatus`/`deleteHistoryItem`/`clearAllHistory`/`trimHistoryToMax` 회귀를 전혀 잡지 못하던 상태였다. `MockMemento` 기반 `ExtensionContext`로 [src/providers/historyProvider.ts](src/providers/historyProvider.ts)의 실제 인스턴스를 만들어 15개 케이스로 재작성. unshift 순서·`maxItems` 트리밍·workspaceState 라운드트립·`(actionId, timestamp)` 매칭·manual-stop/rerun 플로우를 모두 실제 API로 검증.
+- **NumberBase `MAX_LINE_LENGTH` (10,000) 경계 테스트**: [src/numberBaseHoverProvider.ts](src/numberBaseHoverProvider.ts)에서 `lineText.length > MAX_LINE_LENGTH` 조건을 순수 predicate `NumberBaseHoverProvider.isLineTooLongForHover(lineText)`로 추출. 9999/10000/10001/빈 문자열/상수값 확인의 5개 경계 테스트 추가. 전체 hover 파이프라인(LSP, `getWordRangeAtPosition`)을 mock 없이 off-by-one만 명확히 검증.
+- **MacroExpander 4096 길이 제한 경계 테스트**: [src/macroExpander.ts](src/macroExpander.ts) `evaluateToNumber`의 `cleaned.length > 4096` guard에 대한 4095/4096/4097 정확한 경계 검증 3개 추가. trim에 영향받지 않도록 입력 좌우에 공백을 두지 않도록 구성.
+- **JSON Editor webview ↔ mirror 동기화 스모크 테스트**: webview JS가 문자열 템플릿(`getWebviewContent`)으로 내재되어 있어 [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts) 미러와의 drift가 CI에서 보이지 않던 문제. `src/jsonEditor.ts`에서 `parseValue` 본문을 regex로 추출·`new Function`으로 재평가한 뒤 미러의 `parseValue`와 `''`/`'null'`/`'true'`/`'00123'`/`'1e10'`/`'0xFF'` 등 15개 fixture에서 결과를 비교. commitCell의 문자열 타입 보존 분기가 webview에 여전히 존재하는지도 텍스트 수준에서 확인.
+- **Memory Map Viewer 실패 경로 테스트**: [src/test/memoryMapViewer.test.ts](src/test/memoryMapViewer.test.ts)가 panel registry 3케이스만 검증하던 것을 실패 경로 4종 추가(존재하지 않는 파일 / `MEMORY_MAP_MAX_FILE_SIZE + 1` sparse 파일 / 16바이트 미만 / 잘못된 ELF magic). 각 케이스에서 `panelRegistry`가 건드려지지 않음을 확인해 "조용히 실패" 회귀를 방어. `MEMORY_MAP_MAX_FILE_SIZE`를 export해 boundary를 정확히 pin.
+
+**테스트**: 신규 30케이스 추가, 시뮬레이션 스위트 25케이스 제거 → 874 → 879 passing.
+
+#### 3차 리뷰: 경계값 테스트 보강 (off-by-one 회귀 방어)
+
+#### 3차 리뷰: 경계값 테스트 보강 (off-by-one 회귀 방어)
+- **캡처 한도 경계 테스트**: `executeShellCommand`의 조건 `capturedBytes + chunkBytes > captureLimitBytes`를 순수 함수 `wouldExceedCaptureLimit(current, chunk, limit)`로 [src/pipelineUtils.ts](src/pipelineUtils.ts)에 추출. `limit-1` / `limit` / `limit+1` / 0-byte chunk / 단일 chunk 등 5개 boundary 테스트를 [src/test/pipelineUtils.test.ts](src/test/pipelineUtils.test.ts)에 추가. `>`를 실수로 `>=`로 바꾸는 회귀를 즉시 포착.
+- **`INTERPOLATED_VALUE_MAX_LENGTH` 경계 테스트**: 기존에는 40KB 초과 1건만 확인했으나 이제 32KB-1 / 32KB / 32KB+1 세 boundary를 명시적으로 검증.
+- **`applyOutputCapture` group/line boundary 테스트**: 기존 `group: 0` / `5`, `line: 99` / `-99` 수준을 넘어서 `group: m.length-1`(성공) / `m.length`(실패) / `-1`(실패), `line: lines.length-1`(성공) / `lines.length`(실패) / `-lines.length`(성공) / `-lines.length-1`(실패)까지 7개 boundary 테스트 추가.
+- **`HEX_VIEWER_MAX_SPAN` 경계 테스트**: [src/hexViewer.ts](src/hexViewer.ts)에서 span 체크 로직을 순수 함수 `assertWithinHexViewerSpan(totalSize)`로 추출. 128MB 정확히 일치(성공) / -1(성공) / +1(실패) / NaN / Infinity / 음수를 검증. 128MB flat buffer를 실제로 할당하지 않고 경계만 검증하도록 분리.
+
+**테스트**: 신규 19케이스 추가 (855 → 874 passing).
+
+#### 2차 리뷰 후속 수정
+- **캡처 한도 초과를 "사용자 수동 중단"으로 오분류하던 문제**: [src/extension.ts](src/extension.ts) `executeShellCommand`가 출력 한도 초과 시 `manuallyTerminatedActions.add()`를 호출한 뒤 reject하여, 상위 `executeAction`이 실제 에러 대신 "Action stopped by user"로 히스토리에 기록하던 문제. 이제 overflow는 프로세스 kill만 수행하고, 정상적인 실패 경로를 통해 실제 에러 메시지와 함께 기록된다. 회귀 테스트 신규 추가.
+- **Import 시 기존 `actions.json`의 TaskHub 스키마 검증 누락**: "JSON 배열이지만 스키마/추가 검증에는 실패하는 상태"의 파일이 그대로 병합/저장되어 다음 로드에서 깨지던 경계 케이스 수정. 이제 `JSON.parse + Array.isArray` 대신 `loadAndValidateActions()`를 통해 **정상 로드 파이프라인과 동일한 검증**(스키마 + 중복 task ID 등)을 먼저 통과시킨 뒤에만 병합하며, 실패 시 백업 다이얼로그로 안전하게 대응한다.
+- **`taskhub.openJsonEditorFromUri` 팔레트 노출 복원**: 이 명령은 인자 없이 호출해도 활성 JSON 파일 또는 파일 선택 fallback이 있어 context-only가 아니다. 문서의 "두 개의 JSON Editor 커맨드" 설명과 일치하도록 `commandPalette` 숨김 목록에서 제외.
+
+#### High (데이터 손실 / 신뢰 손상)
+
+#### High (데이터 손실 / 신뢰 손상)
+- **Import: 손상된 `actions.json` 덮어쓰기 방지**: [src/extension.ts](src/extension.ts) `taskhub.importActions`가 기존 파일 파싱에 실패하면 `existingActions = []`로 리셋 후 가져온 액션만 저장해 사용자가 직접 만든 액션이 조용히 사라지던 문제 수정. 이제 파싱 실패 시 "손상된 파일 백업 후 계속 / 취소" 모달을 띄우고, 사용자 동의가 있을 때만 `actions.json.bak`로 백업한 뒤 진행한다. **UX 변경**: 기존에는 알림 없이 파일이 덮어씌워졌으나, 이제는 명시적 동의가 필요하며 원본이 `.bak`로 보존된다.
+- **Preset merge "Use preset"이 실제로 프리셋을 사용하지 않던 버그**: [src/extension.ts](src/extension.ts) `mergeActions()`가 strategy와 무관하게 `preset.filter(... !existingIds.has(id))`로 프리셋을 걸러 "use-preset"을 골라도 충돌 프리셋 액션이 항상 드롭되던 문제. 이제 `use-preset`은 역방향(existing에서 conflicting 항목 제거)으로 병합한다. `keep-existing`은 기존과 동일 의미를 유지하도록 내부 구현만 정리. **UX 변경**: QuickPick "프리셋 우선" 선택이 이제 설명대로 작동한다.
+
+#### Medium (상태 무결성 / 명령 오동작)
+- **Import 시 duplicate task ID 검증 추가**: [src/extension.ts](src/extension.ts) `parseImportData`가 기존에는 스키마 + 액션 ID 중복만 검사해, 한 액션 내부에 같은 `task.id`가 중복된 파일을 통과시켜 다음 `loadAllActions`에서 전체 로드가 실패하던 문제. 이제 정상 로드 경로와 동일한 `performAdditionalActionValidation`을 재사용한다.
+- **Command Palette에서 context-only 명령 숨김**: [package.json](package.json) `menus.commandPalette` 섹션을 새로 추가해 인자 없이 호출하면 throw 가능한 `taskhub.copyLink`, `goToLink`, `executeAction`, `stopAction` 등 컨텍스트 전용 명령을 `when: false`로 모두 숨김 처리.
+- **`showTaskStatus=false`일 때 중복 실행 가드 비활성화 문제**: [src/extension.ts](src/extension.ts) `markActionAsRunning`이 `showTaskStatus=false`면 즉시 `return true`하여 동일 ID의 `activeTasks` 충돌을 허용하던 문제. 이제 가드는 항상 동작하고 설정은 뷰 리프레시에만 영향을 준다. `actionStates`도 항상 업데이트해 다음 실행에서 상태 판정이 정확하다.
+- **Shell 커맨드 stdout/stderr 캡처 제한**: [src/extension.ts](src/extension.ts) `executeShellCommand`가 출력을 무제한 누적해 대용량 로그 발생 시 extension host OOM 위험이 있었다. 새 설정 `taskhub.pipeline.outputCaptureLimitMb` (기본 10MB, 1~1024MB)를 도입하고 초과 시 프로세스를 종료하며 명시적 에러를 던진다.
+
+#### UX / 일관성
+- **JSON Editor — string 타입 보존**: [src/jsonEditor.ts](src/jsonEditor.ts) 셀 편집 시 `parseValue()`가 `"00123"`을 `123`, `"true"`를 `true`, `"null"`을 `null`로 조용히 변환해 데이터 무결성이 깨지던 문제. 원본 셀이 문자열이면 입력값을 그대로 문자열로 저장한다. 새 유닛 테스트는 [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts)의 미러 `coerceEditedCellValue`로 검증.
+- **JSON Editor — dirty 상태에서 같은 파일 재오픈 시 확인**: 같은 경로의 파일을 다시 열 때 discard 확인이 스킵되어 미저장 내용이 사라지던 문제. 이제 동일 파일 재오픈 시에도 dirty면 확인 다이얼로그가 표시된다.
+- **Favorites 경로 이식성**: `taskhub.addFavoriteFile` / `taskhub.addOpenFileToFavorites`가 파일의 절대경로를 그대로 저장해 `.vscode/favorites.json`이 다른 머신에서 열리지 않던 문제. 워크스페이스 내부 파일은 자동으로 `${workspaceFolder}/...` 형태(POSIX 슬래시 정규화)로 저장되어 예제/스키마와 일치.
+- **Obsolete `Select and Run File` 명령 제거**: 빈 핸들러만 남아 있던 `taskhub.showFilePicker` 명령을 `package.json`과 `extension.ts`에서 완전 제거.
+- **`exportActions` 멀티-루트 일관성**: 항상 `workspaceFolders[0]`을 쓰던 것을 `pickWorkspaceFolderForCommand`로 교체해 `importActions` / `editActions` / `editLinks` 등과 동일한 플로우로 통일.
+
+**테스트 (1차)**: 신규 케이스 8종 추가 (`mergeActions` 3, `toWorkspaceRelativePath` 3, import duplicate-task-id 1, `coerceEditedCellValue` 5).
+
 ## [0.4.17] - 2026-04-23
 
 ### 수정 — 리뷰에서 지적된 가져오기/JSON Editor/멀티 루트 경계 버그 3종

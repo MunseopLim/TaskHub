@@ -223,36 +223,41 @@ function discoverPresets(context: vscode.ExtensionContext): PresetInfo[] {
     return presets;
 }
 
-function mergeActions(
+export function mergeActions(
     existing: ActionItem[],
     preset: ActionItem[],
     strategy: 'keep-existing' | 'use-preset' | 'keep-both'
 ): ActionItem[] {
-    const existingIds = new Set<string>();
-
-    function collectIds(items: ActionItem[]) {
+    const collectIds = (items: ActionItem[], target: Set<string>) => {
         for (const item of items) {
             if (item.id) {
-                existingIds.add(item.id);
+                target.add(item.id);
             }
             if (item.children) {
-                collectIds(item.children);
+                collectIds(item.children, target);
             }
         }
-    }
-    collectIds(existing);
+    };
+
+    const existingIds = new Set<string>();
+    collectIds(existing, existingIds);
 
     if (strategy === 'keep-both') {
-        // Filter out preset items with conflicting IDs to prevent validation failures
+        // Drop preset items whose IDs conflict with existing to prevent validation failures.
         const filteredPreset = filterConflictingItems(preset, existingIds);
         return [...existing, ...filteredPreset];
     }
 
-    const filtered = preset.filter(item => !item.id || !existingIds.has(item.id));
+    if (strategy === 'keep-existing') {
+        const filteredPreset = filterConflictingItems(preset, existingIds);
+        return [...existing, ...filteredPreset];
+    }
 
-    return strategy === 'keep-existing'
-        ? [...existing, ...filtered]
-        : [...filtered, ...existing];
+    // strategy === 'use-preset' — preset wins on conflicts, so drop conflicting items from existing.
+    const presetIds = new Set<string>();
+    collectIds(preset, presetIds);
+    const filteredExisting = filterConflictingItems(existing, presetIds);
+    return [...preset, ...filteredExisting];
 }
 
 /**
@@ -452,8 +457,10 @@ export function findActionById(actions: ActionItem[], id: string): ActionItem | 
 // importing them from './extension' unchanged.
 import {
     INTERPOLATED_VALUE_MAX_LENGTH,
+    wouldExceedCaptureLimit,
     resolveWithinWorkspace,
     resolveFavoriteFilePath,
+    toWorkspaceRelativePath,
     validateLinkScheme,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
@@ -473,7 +480,9 @@ import {
 } from './pipelineUtils';
 export {
     INTERPOLATED_VALUE_MAX_LENGTH,
+    wouldExceedCaptureLimit,
     resolveWithinWorkspace,
+    toWorkspaceRelativePath,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
     applyOutputCapture,
@@ -1342,10 +1351,9 @@ function resolveActionDefinition(actionItem: ActionItem): { action: PipelineActi
 }
 
 function markActionAsRunning(actionItem: ActionItem, id: string, showTaskStatus: boolean, mainViewProvider: MainViewProvider): boolean {
-    if (!showTaskStatus) {
-        return true;
-    }
-
+    // The duplicate-run guard is intentionally independent of `showTaskStatus`,
+    // which only controls visual state indicators in the tree. Running the same
+    // action concurrently would collide in activeTasks and is always wrong.
     const currentState = actionStates.get(id);
     if (currentState?.state === 'running') {
         vscode.window.showInformationMessage(t(`'${actionItem.title}' 액션이 이미 실행 중입니다.`, `Action '${actionItem.title}' is already running.`));
@@ -1353,7 +1361,9 @@ function markActionAsRunning(actionItem: ActionItem, id: string, showTaskStatus:
     }
 
     actionStates.set(id, { state: 'running' });
-    mainViewProvider.refresh();
+    if (showTaskStatus) {
+        mainViewProvider.refresh();
+    }
     return true;
 }
 
@@ -1412,20 +1422,19 @@ export async function executeActionPipeline(
 }
 
 function handleActionSuccess(id: string, action: PipelineAction, showTaskStatus: boolean): void {
-    if (!showTaskStatus) {
-        return;
-    }
+    // State transitions are always tracked so that the duplicate-run guard in
+    // markActionAsRunning() stays accurate regardless of the `showTaskStatus` setting.
     actionStates.set(id, { state: 'success' });
-    if (action.successMessage) {
+    if (showTaskStatus && action.successMessage) {
         vscode.window.showInformationMessage(action.successMessage);
     }
 }
 
 function handleActionFailure(id: string, actionItem: ActionItem, action: PipelineAction, error: Error, showTaskStatus: boolean): void {
+    actionStates.set(id, { state: 'failure' });
     if (!showTaskStatus) {
         return;
     }
-    actionStates.set(id, { state: 'failure' });
     if (action.failMessage) {
         vscode.window.showErrorMessage(`${action.failMessage}: ${error.message}`);
     } else {
@@ -2246,24 +2255,13 @@ export function parseImportData(content: string): { actions: ActionItem[]; error
         return { actions: [], errors };
     }
 
-    // Check for duplicate IDs within the imported file
-    const seenIds = new Set<string>();
-    const duplicateIds: string[] = [];
-    const collectDuplicates = (items: ActionItem[]) => {
-        for (const item of items) {
-            if (item.id) {
-                if (seenIds.has(item.id)) {
-                    duplicateIds.push(item.id);
-                } else {
-                    seenIds.add(item.id);
-                }
-            }
-            if (item.children) { collectDuplicates(item.children); }
-        }
-    };
-    collectDuplicates(rawActions);
-    if (duplicateIds.length > 0) {
-        errors.push(`Duplicate action IDs found in imported file: ${duplicateIds.join(', ')}`);
+    // Apply the same additional validation used when loading actions from disk,
+    // so imported files cannot pass schema validation and then break action loading
+    // (e.g. duplicate action IDs or duplicate task IDs inside a single action).
+    try {
+        performAdditionalActionValidation(rawActions, { sourceLabel: 'imported file', filePath: '<import>' });
+    } catch (e: any) {
+        errors.push(e.message);
         return { actions: [], errors };
     }
 
@@ -2304,9 +2302,24 @@ export function mergeImportedActions(existing: ActionItem[], imported: ActionIte
     return { merged: [...existing, ...newActions], skipped };
 }
 
-function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string): Promise<string> {
+const DEFAULT_CAPTURE_LIMIT_MB = 10;
+const CAPTURE_LIMIT_MIN_MB = 1;
+const CAPTURE_LIMIT_MAX_MB = 1024;
+
+function getCaptureLimitBytes(): number {
+    const configured = vscode.workspace.getConfiguration('taskhub').get<number>('pipeline.outputCaptureLimitMb', DEFAULT_CAPTURE_LIMIT_MB);
+    const clamped = Math.min(Math.max(Number(configured) || DEFAULT_CAPTURE_LIMIT_MB, CAPTURE_LIMIT_MIN_MB), CAPTURE_LIMIT_MAX_MB);
+    return clamped * 1024 * 1024;
+}
+
+export function __testHook_hasManuallyTerminated(id: string): boolean {
+    return manuallyTerminatedActions.has(id);
+}
+
+export function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string): Promise<string> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+    const captureLimitBytes = getCaptureLimitBytes();
 
     return new Promise((resolve, reject) => {
 
@@ -2364,27 +2377,47 @@ function executeShellCommand(command: string, args: string[], cwd?: string, task
 
 
         let stdout = '';
-
         let stderr = '';
+        let capturedBytes = 0;
+        let captureOverflowed = false;
 
-        
+        const appendCapture = (target: 'stdout' | 'stderr', chunk: string) => {
+            if (captureOverflowed) { return; }
+            const chunkBytes = Buffer.byteLength(chunk, 'utf8');
+            if (wouldExceedCaptureLimit(capturedBytes, chunkBytes, captureLimitBytes)) {
+                // Mark overflow but do NOT add to manuallyTerminatedActions —
+                // this is an action *failure*, not a user-initiated stop. The
+                // close handler below converts this into a rejected promise so
+                // executeAction() reports it through the normal failure path
+                // (history 'failure' with the real error message, not
+                // "Action stopped by user").
+                captureOverflowed = true;
+                try { childProcess.kill(); } catch { /* already exited */ }
+                return;
+            }
+            capturedBytes += chunkBytes;
+            if (target === 'stdout') { stdout += chunk; } else { stderr += chunk; }
+        };
 
         childProcess.stdout?.setEncoding('utf8');
-
         childProcess.stderr?.setEncoding('utf8');
 
-
-
-        childProcess.stdout?.on('data', (data) => { stdout += data; });
-
-        childProcess.stderr?.on('data', (data) => { stderr += data; });
-
-
+        childProcess.stdout?.on('data', (data) => { appendCapture('stdout', typeof data === 'string' ? data : String(data)); });
+        childProcess.stderr?.on('data', (data) => { appendCapture('stderr', typeof data === 'string' ? data : String(data)); });
 
         childProcess.on('close', (code) => {
             cleanupChildTracking();
 
             if (showVerboseLogs) { outputChannel.appendLine(`[INFO] STDOUT: ${stdout}`); outputChannel.appendLine(`[INFO] STDERR: ${stderr}`); outputChannel.appendLine(`[INFO] Command finished with exit code ${code}.`); }
+
+            if (captureOverflowed) {
+                const limitMb = Math.round(captureLimitBytes / (1024 * 1024));
+                reject(new Error(t(
+                    `캡처된 출력이 ${limitMb}MB 한도를 초과하여 명령을 중단했습니다. \`taskhub.pipeline.outputCaptureLimitMb\` 설정을 높이거나 파이프에 '> file' 리다이렉션을 사용하세요.`,
+                    `Captured output exceeded the ${limitMb} MB limit and the command was aborted. Raise \`taskhub.pipeline.outputCaptureLimitMb\` or redirect output with '> file'.`
+                )));
+                return;
+            }
 
             if (code === 0) { resolve(stdout); } else { reject(new Error(stderr || `Command failed with exit code ${code}`)); }
 
@@ -2694,7 +2727,6 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showWarningMessage(t('CHANGELOG.md 파일을 찾을 수 없습니다.', 'CHANGELOG.md not found.'));
         }
     }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showFilePicker', async (action: any) => { /* Obsolete */ }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.editFavorites', async () => {
         const folder = await pickWorkspaceFolderForCommand(t('즐겨찾기를 편집할 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to edit favorites for'));
         if (!folder) {
@@ -2864,7 +2896,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
             const favorite: FavoriteEntry = {
                 title,
-                path: fileUri.fsPath,
+                path: toWorkspaceRelativePath(fileUri.fsPath, workspaceFolder.uri.fsPath),
                 sourceFile: favoritesPath,
                 workspaceFolder: workspaceFolder.uri.fsPath
             };
@@ -3033,7 +3065,7 @@ export function activate(context: vscode.ExtensionContext) {
         const favorites = loadFavoritesFromDisk(favoritesPath, true, workspaceFolder.uri.fsPath);
         const favorite: FavoriteEntry = {
             title,
-            path: filePath,
+            path: toWorkspaceRelativePath(filePath, workspaceFolder.uri.fsPath),
             sourceFile: favoritesPath,
             workspaceFolder: workspaceFolder.uri.fsPath
         };
@@ -3416,11 +3448,11 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditorFromUri', (uri?: vscode.Uri) => openJsonEditorFromUri(context, uri)));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.exportActions', async () => {
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!workspaceFolder) {
-            vscode.window.showErrorMessage(t('열린 워크스페이스 폴더가 없습니다.', 'No workspace folder is open.'));
-            return;
-        }
+        const folder = await pickWorkspaceFolderForCommand(
+            t('내보낼 액션이 있는 워크스페이스 폴더를 선택하세요', 'Select the workspace folder to export actions from')
+        );
+        if (!folder) { return; }
+        const workspaceFolder = folder.uri.fsPath;
         const actionsPath = path.join(workspaceFolder, '.vscode', 'actions.json');
         if (!fs.existsSync(actionsPath)) {
             vscode.window.showErrorMessage(t('현재 워크스페이스에서 .vscode/actions.json을 찾을 수 없습니다.', 'No .vscode/actions.json found in the current workspace.'));
@@ -3503,9 +3535,53 @@ export function activate(context: vscode.ExtensionContext) {
         const actionsPath = path.join(workspaceFolder, '.vscode', 'actions.json');
         let existingActions: ActionItem[] = [];
         if (fs.existsSync(actionsPath)) {
+            let existingContent: string;
             try {
-                existingActions = JSON.parse(fs.readFileSync(actionsPath, 'utf-8'));
-            } catch {
+                existingContent = fs.readFileSync(actionsPath, 'utf-8');
+            } catch (e: any) {
+                vscode.window.showErrorMessage(t(
+                    `기존 actions.json을 읽을 수 없어 가져오기를 중단합니다: ${e.message}`,
+                    `Import aborted: cannot read existing actions.json: ${e.message}`
+                ));
+                return;
+            }
+            // Validate the existing actions.json through the full normal-load
+            // pipeline (schema + additional validation such as duplicate task
+            // IDs). An array that only parses as JSON but fails TaskHub's
+            // schema would otherwise be merged as-is, re-saved, and then break
+            // the next load — exactly the "silent data-loss" class the import
+            // guard is meant to prevent.
+            let existingInvalidReason: string | undefined;
+            try {
+                existingActions = loadAndValidateActions(actionsPath, { sourceLabel: 'workspace' });
+            } catch (e: any) {
+                existingInvalidReason = e.message;
+            }
+            if (existingInvalidReason) {
+                const backupPath = `${actionsPath}.bak`;
+                const backupLabel = t('손상된 파일 백업 후 계속', 'Back up corrupt file and continue');
+                const cancelLabel = t('취소', 'Cancel');
+                const choice = await vscode.window.showWarningMessage(
+                    t(
+                        `기존 actions.json이 유효하지 않아 가져오기를 안전하게 진행할 수 없습니다 (${existingInvalidReason}). 원본을 ${path.basename(backupPath)}로 백업하고 가져온 액션만 저장할까요?`,
+                        `The existing actions.json is invalid, so import cannot proceed safely (${existingInvalidReason}). Back up the original to ${path.basename(backupPath)} and save only the imported actions?`
+                    ),
+                    { modal: true },
+                    backupLabel,
+                    cancelLabel
+                );
+                if (choice !== backupLabel) {
+                    return;
+                }
+                try {
+                    fs.writeFileSync(backupPath, existingContent, 'utf-8');
+                } catch (backupErr: any) {
+                    vscode.window.showErrorMessage(t(
+                        `백업 파일 작성에 실패하여 가져오기를 중단합니다: ${backupErr.message}`,
+                        `Import aborted: failed to write backup file: ${backupErr.message}`
+                    ));
+                    return;
+                }
                 existingActions = [];
             }
         }

@@ -20,6 +20,19 @@ import type { OutputCapture } from './schema';
 /** Maximum allowed length of a single interpolated value. */
 export const INTERPOLATED_VALUE_MAX_LENGTH = 32 * 1024;
 
+/**
+ * Predicate used by `executeShellCommand` to decide whether a newly arrived
+ * chunk would push the total captured output past the user-configured limit.
+ *
+ * Pulled out as a standalone helper so that the off-by-one boundary
+ * (`currentBytes + chunkBytes > limitBytes`) can be exercised by unit tests
+ * without spawning a real subprocess. Keeping it pure also guards against an
+ * accidental `>=` → `>` / `>` → `>=` swap during future edits.
+ */
+export function wouldExceedCaptureLimit(currentBytes: number, chunkBytes: number, limitBytes: number): boolean {
+    return currentBytes + chunkBytes > limitBytes;
+}
+
 /** Reserved capture names that would shadow built-in task result properties. */
 const RESERVED_CAPTURE_NAMES = new Set([
     'output', 'outputDir', 'path', 'dir', 'name', 'fileNameOnly', 'fileExt',
@@ -397,6 +410,35 @@ export function resolveFavoriteFilePath(
 ): string {
     const interpolated = rawPath.replace('${workspaceFolder}', workspaceFolderPath || '');
     return resolveWithinWorkspace(interpolated, workspaceRoots, workspaceFolderPath || undefined);
+}
+
+/**
+ * Convert an absolute file path to a `${workspaceFolder}`-relative form when
+ * the file lives inside the given workspace root. Returns the original path
+ * otherwise. Used so that favorites / links stored in `.vscode/*.json` stay
+ * portable across machines (the schema already documents this as the
+ * preferred form; see favorites_example.json).
+ *
+ * Output always uses POSIX-style separators (`/`) to keep the serialized
+ * JSON stable across Windows/macOS/Linux collaborators.
+ */
+export function toWorkspaceRelativePath(absolutePath: string, workspaceFolderPath: string | undefined): string {
+    if (typeof absolutePath !== 'string' || absolutePath.length === 0) {
+        return absolutePath;
+    }
+    if (!workspaceFolderPath) {
+        return absolutePath;
+    }
+    const normalizedRoot = path.resolve(workspaceFolderPath);
+    const normalizedTarget = path.resolve(absolutePath);
+    const rel = path.relative(normalizedRoot, normalizedTarget);
+    if (rel === '' ) {
+        return '${workspaceFolder}';
+    }
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        return absolutePath;
+    }
+    return '${workspaceFolder}/' + rel.split(path.sep).join('/');
 }
 
 /**

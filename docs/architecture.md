@@ -15,6 +15,7 @@ TaskHub/
 │   ├── pipelineUtils.ts               # 순수 유틸리티 (vscode 의존 없음)
 │   │                                  # - 변수 치환/sanitize, workspace 경로 검증
 │   │                                  # - 쉘 토큰화 + POSIX/PowerShell 인자 quoting
+│   │                                  # - toWorkspaceRelativePath(): 절대경로 → ${workspaceFolder} 정규화
 │   ├── i18n.ts                        # 다국어 지원 (한국어/영어, vscode.env.language 기반)
 │   ├── schema.ts                      # TypeScript 타입 정의
 │   ├── numberBaseHoverProvider.ts     # Number Base / SFR Bit Field / Struct Size Hover

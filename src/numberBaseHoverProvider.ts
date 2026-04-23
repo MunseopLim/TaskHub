@@ -59,6 +59,16 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     public static readonly MAX_LINE_LENGTH = 10_000;
 
     /**
+     * Pure predicate equivalent to the in-line check
+     * `lineText.length > MAX_LINE_LENGTH` used in provideHoverImpl(). Extracted
+     * so unit tests can pin the off-by-one boundary without mocking the whole
+     * vscode.TextDocument surface that the full hover pipeline touches.
+     */
+    public static isLineTooLongForHover(lineText: string): boolean {
+        return lineText.length > NumberBaseHoverProvider.MAX_LINE_LENGTH;
+    }
+
+    /**
      * Active LSP hover invocations keyed by `${uri}:${line}:${char}`.
      * Prevents re-entry when our own hover provider triggers `executeHoverProvider`
      * at the same position and avoids races when the cursor moves quickly.
@@ -125,7 +135,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         // Guard against extremely long lines (minified sources, generated code).
         // Regex matching on 50k+ char lines causes visible hover stalls.
-        if (lineText.length > NumberBaseHoverProvider.MAX_LINE_LENGTH) {
+        if (NumberBaseHoverProvider.isLineTooLongForHover(lineText)) {
             return undefined;
         }
 
