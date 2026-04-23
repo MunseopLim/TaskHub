@@ -59,9 +59,12 @@ Type field_name : bit_width; // [bit_pos][ACCESS_TYPE][reset_val] Description
 
 ### 활성화
 
-VSCode 설정에서 활성화 필요:
+Number Base Hover 파이프라인 위에 얹혀 동작하므로 VSCode 설정에서 **두 항목이 모두 `true`** 여야 합니다:
 
+- `taskhub.hover.numberBase.enabled` = `true` (기본값)
 - `taskhub.experimental.bitOperationHover.enabled` = `true`
+
+자세한 설정 설명은 [features.md §21](../docs/features.md#21-설정-레퍼런스) 참조.
 
 ### 예제 파일
 

@@ -85,13 +85,13 @@ TaskHub/
 *   **FavoriteViewProvider** ([providers/favoriteViewProvider.ts](../src/providers/favoriteViewProvider.ts)): 즐겨찾기 파일 관리
 *   **HistoryProvider** ([providers/historyProvider.ts](../src/providers/historyProvider.ts)): 액션 실행 히스토리 관리 (`workspaceState` 백엔드)
 
-`extension.ts`는 위 모듈에서 클래스를 import해 `activate()`에서 인스턴스를 만들고, 기존 호출자의 호환성을 위해 동일 이름으로 re-export합니다.
+`extension.ts`는 위 모듈에서 클래스를 import해 `activate()`에서 인스턴스를 만듭니다. 기존 호출자(테스트 포함)의 호환성을 위해 `MainViewProvider`, `Folder`, `Action` 세 심볼만 `extension.ts`에서 re-export됩니다. `LinkViewProvider`, `FavoriteViewProvider`, `HistoryProvider` 및 각 엔트리/아이템 타입은 re-export되지 않으므로 **외부/테스트 코드는 `./providers/...`에서 직접 import** 해야 합니다.
 
 ### 2. 액션 실행 파이프라인
 
 *   **executeAction()**: 메인 액션 실행 함수 (히스토리 추적 통합)
 *   **executeSingleTask()**: 개별 태스크 실행
-    *   지원 태스크 타입: fileDialog, folderDialog, unzip, zip, stringManipulation, inputBox, quickPick, envPick, confirm, shell/command
+    *   지원 태스크 타입 (`Task.type` union, [src/schema.ts](../src/schema.ts) 참조): `shell`, `command`, `fileDialog`, `folderDialog`, `unzip`, `zip`, `stringManipulation`, `inputBox`, `quickPick`, `envPick`, `confirm`, `writeFile`, `appendFile`
 *   **변수 치환**: `${task_id.property}` 형식으로 파이프라인 간 데이터 전달
 *   **파일 감시**: debounce({ run, cancel }) 패턴으로 JSON 변경 감지
 
@@ -104,7 +104,7 @@ TaskHub/
 | `sfrBitFieldParser.ts` | SFR 비트 필드 주석 파싱 및 계층 구조 추출 |
 | `structSizeCalculator.ts` | 구조체/클래스 크기, 오프셋, 패딩 계산 |
 | `registerDecoder.ts` | 레지스터 비트 필드 값 추출 및 디코딩 |
-| `macroExpander.ts` | C/C++ 전처리기 매크로 확장 (`#define`, `#if`/`#else`) |
+| `macroExpander.ts` | C/C++ `#define` 매크로 확장. 현재 활성 문서 전체에서 `#define` 라인만 수집해 재귀 치환하고, 수식은 `evaluateToNumber()`(safe 문자집합 + 4096자 한도)로 계산한다. `#if`/`#else` 전처리나 include 체인 추적은 범위 밖. |
 
 **LSP 통합:** `vscode.commands.executeCommand('vscode.executeDefinitionProvider', ...)` 사용
 **캐시:** mtime 기반 캐시로 `taskhub_types.json` 설정 로드 최적화
@@ -188,15 +188,13 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 
 번들된 `media/*.json`은 런타임에 바뀌지 않으므로 해당 FileSystemWatcher는 `context.extensionMode === ExtensionMode.Development`일 때만 등록한다.
 
-## 설정 및 저장소
+## 저장소 (Persistence)
 
 *   **workspaceState**: 히스토리 데이터 저장 (VS Code API)
     *   키: `'taskhub.actionHistory'`
-    *   값: `HistoryEntry[]` 배열
+    *   값: `HistoryEntry[]` 배열 — 구조는 위 "데이터 구조" 섹션 참조.
 
-*   **configuration**: VS Code 설정
-    *   `taskhub.history.maxItems`: 히스토리 최대 개수 (1-50, 기본값: 10)
-    *   `taskhub.history.showPanel`: 패널 표시 여부 (기본값: true)
+TaskHub가 VS Code에 등록하는 모든 `contributes.configuration.*` 설정은 [docs/features.md §21 설정 레퍼런스](./features.md#21-설정-레퍼런스)에서 단일 출처로 관리합니다. 이 문서에서 개별 설정 키를 나열하지 않는 이유는 양쪽을 같이 갱신하지 못해 drift가 반복되던 과거 사례 때문입니다 (자동 검증은 `src/test/docConsistency.test.ts` 참조).
 
 ## 실험적 기능 패턴
 
