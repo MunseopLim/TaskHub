@@ -1020,7 +1020,8 @@ function terminateChildProcesses(actionId: string): boolean {
                 child.kill();
             }
         } catch (error) {
-            console.error(`Failed to terminate child process for action '${actionId}':`, error);
+            const msg = error instanceof Error ? error.message : String(error);
+            outputChannel.appendLine(`[ERROR] Failed to terminate child process for action '${actionId}': ${msg}`);
         }
     }
     actionChildProcesses.delete(actionId);
@@ -1678,8 +1679,9 @@ async function executeSingleTask(
             } else {
                 if (task.isOneShot) {
                     executeStreamedTask(handlerTask, defaultWorkspace).catch(error => {
-                        console.error(`One-shot task ${task.id} failed:`, error);
-                        vscode.window.showErrorMessage(t(`원샷 태스크 '${task.id}' 시작 실패: ${error.message}`, `One-shot task '${task.id}' failed to start: ${error.message}`));
+                        const msg = error instanceof Error ? error.message : String(error);
+                        outputChannel.appendLine(`[ERROR] One-shot task ${task.id} failed: ${msg}`);
+                        vscode.window.showErrorMessage(t(`원샷 태스크 '${task.id}' 시작 실패: ${msg}`, `One-shot task '${task.id}' failed to start: ${msg}`));
                     });
                 } else {
                     await executeStreamedTask(handlerTask, defaultWorkspace);
@@ -2604,7 +2606,7 @@ export function activate(context: vscode.ExtensionContext) {
         try {
             allActions = loadAllActions(context);
         } catch (error: any) {
-            console.error(error.message);
+            outputChannel.appendLine(`[ERROR] ${error.message}`);
             vscode.window.showErrorMessage(t(`액션을 실행할 수 없습니다: ${error.message}`, `Could not execute action: ${error.message}`));
             return;
         }
@@ -2618,7 +2620,8 @@ export function activate(context: vscode.ExtensionContext) {
             try {
                 await executeAction(fullActionItem, context, mainViewProvider, historyProvider);
             } catch (error) {
-                console.error(`Execution failed for action '${actionId}':`, error);
+                const msg = error instanceof Error ? error.message : String(error);
+                outputChannel.appendLine(`[ERROR] Execution failed for action '${actionId}': ${msg}`);
             }
         } else {
             vscode.window.showErrorMessage(t(`ID '${actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${actionId}'.`));
@@ -2633,7 +2636,7 @@ export function activate(context: vscode.ExtensionContext) {
         try {
             allActions = loadAllActions(context);
         } catch (error: any) {
-            console.error(error.message);
+            outputChannel.appendLine(`[ERROR] ${error.message}`);
             vscode.window.showErrorMessage(t(`ID로 액션을 실행할 수 없습니다: ${error.message}`, `Could not execute action by ID: ${error.message}`));
             return;
         }
@@ -2649,7 +2652,7 @@ export function activate(context: vscode.ExtensionContext) {
         try {
             allActions = loadAllActions(context);
         } catch (error: any) {
-            console.error(error.message);
+            outputChannel.appendLine(`[ERROR] ${error.message}`);
             vscode.window.showErrorMessage(t(`액션을 미리 볼 수 없습니다: ${error.message}`, `Could not preview action: ${error.message}`));
             return;
         }
@@ -3114,7 +3117,7 @@ export function activate(context: vscode.ExtensionContext) {
         try {
             allActions = loadAllActions(context);
         } catch (error: any) {
-            console.error(error.message);
+            outputChannel.appendLine(`[ERROR] ${error.message}`);
             vscode.window.showErrorMessage(t(`액션을 실행할 수 없습니다: ${error.message}`, `Could not execute action: ${error.message}`));
             return;
         }
@@ -3124,7 +3127,8 @@ export function activate(context: vscode.ExtensionContext) {
             try {
                 await executeAction(fullActionItem, context, mainViewProvider, historyProvider);
             } catch (error) {
-                console.error(`Execution failed for action '${entry.actionId}':`, error);
+                const msg = error instanceof Error ? error.message : String(error);
+                outputChannel.appendLine(`[ERROR] Execution failed for action '${entry.actionId}': ${msg}`);
             }
         } else {
             vscode.window.showErrorMessage(t(`ID '${entry.actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${entry.actionId}'.`));

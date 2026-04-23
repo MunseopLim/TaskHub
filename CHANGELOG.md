@@ -1,5 +1,13 @@
 # Change Log
 
+## [0.4.15] - 2026-04-23
+
+### 정리 — `console.error` 로그를 OutputChannel로 통일
+
+- [src/extension.ts](src/extension.ts) 의 8개 `console.error` 호출을 기존 `TaskHub` OutputChannel(`outputChannel.appendLine('[ERROR] ...')`)로 전환. 기존에는 에러가 Extension Host 콘솔로만 빠져 일반 사용자가 버그 리포트 시 재현하기 어려웠는데, 이제는 다른 `[INFO]/[WARN]` 로그와 같은 채널에서 확인 가능.
+- 대상: `terminateChildProcesses`(자식 프로세스 종료 실패), one-shot task 시작 실패, `taskhub.executeAction`/`taskhub.executeActionById`/`taskhub.previewAction`/`taskhub.rerunFromHistory` 의 `loadAllActions` 실패 및 `executeAction` 예외.
+- `error instanceof Error ? error.message : String(error)` 패턴으로 non-Error throw 대비.
+
 ## [0.4.14] - 2026-04-23
 
 ### 정리 — jsonEditor webview JS ↔ jsonEditorUtils 미러 동기화 주석
