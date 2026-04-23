@@ -35,11 +35,24 @@ npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
    - [ ] TypeScript 타입 체크
    - [ ] ESLint 검사
    - [ ] esbuild 번들링 (minify 포함)
-3. **문서 업데이트**: 기능 추가/변경 시 관련 문서를 함께 업데이트
-   - `CHANGELOG.md`: 버전별 변경 이력 추가
-   - `docs/features.md`: 기능 설명 추가/수정
-   - `docs/architecture.md`: 구조 변경 시 반영
-   - `README.md`: 사용자에게 보이는 주요 변경 시 반영
+3. **변경 유형별 문서 동반 갱신**: 아래 [변경 유형별 체크리스트](#변경-유형별-체크리스트)를 참고해 한 PR 안에서 관련 문서가 모두 같이 갱신되었는지 확인.
+
+### 변경 유형별 체크리스트
+
+같은 사실이 여러 문서에 복제되어 drift가 발생하지 않도록, 변경 유형별로 함께 갱신해야 하는 대상을 아래 표로 고정합니다. 새 항목을 추가하거나 기존 항목을 변경할 때는 **같은 PR**에서 해당 행의 모든 대상을 반영하세요.
+
+| 변경 유형 | 동반 갱신 대상 (모두 같은 PR) |
+| --- | --- |
+| **새 설정** 추가 / 기본값·범위 변경 | [package.json](package.json) `contributes.configuration` (원본) · [docs/features.md §21 설정 레퍼런스](docs/features.md#21-설정-레퍼런스) 표 한 행 · 관련 기능 섹션에서 자연스러운 맥락으로 1회 언급 · [CHANGELOG.md](CHANGELOG.md) |
+| **새 명령** 추가 / 인자 요구사항 변경 | [package.json](package.json) `contributes.commands` · 인자 없이 안전히 호출할 수 없는 명령은 `menus.commandPalette` 에 `{"command":"…","when":"false"}` 추가 · [docs/features.md](docs/features.md) 기능 섹션에서 진입점 설명 (컨텍스트 전용이면 "Command Palette" 언급 금지) · [CHANGELOG.md](CHANGELOG.md) |
+| **`src/` 파일** 추가·이동·삭제 | [docs/architecture.md](docs/architecture.md) 프로젝트 구조 트리 (§프로젝트 구조) · 필요 시 주요 컴포넌트/데이터 구조 섹션 · 분리되는 모듈이 TreeDataProvider면 `src/providers/` 규약 준수 |
+| **features.md 섹션 번호** 변경 (§N 또는 §N.M) | [examples/README.md](examples/README.md)의 `features.md §…` 참조 업데이트 · features.md 자체 TOC · 다른 문서에서 해당 번호를 인용하고 있지 않은지 `grep -rn '§15\.5'` 방식으로 확인 |
+| **사용자에게 보이는 문자열** 추가 | `src/i18n.ts`의 `t(ko, en)` 헬퍼 사용 ([CLAUDE.md 다국어 지원](CLAUDE.md#다국어-지원-i18n) 참조) |
+| **실험적 기능** 추가 / 안정화(graduation) | 본 문서 [실험적 기능 추가 가이드](#실험적-기능-추가-가이드) 전체 절차 · [docs/features.md §16](docs/features.md#16-experimental-features) |
+| **보안 가드** (파서 한도·CSP·경로 검증) 변경 | [docs/architecture.md 보안 가드](docs/architecture.md#보안-가드) · 관련 유닛 테스트 (`defensive limits` 등) |
+| **공용 커밋 메시지 형식**이 필요한 PR | 버전 bump 동반 시 [package.json](package.json) + [package-lock.json](package-lock.json) 같이 올림. 테스트/문서-only는 버전 유지. 자세한 형식은 [CLAUDE.md 커밋 메시지](CLAUDE.md#커밋-메시지). |
+
+`src/test/docConsistency.test.ts`가 위 표의 일부(설정 키 정합성·팔레트 정책·§번호 참조 유효성)를 자동 검증하므로, 항목을 빠뜨리면 CI에서 실패합니다. 테스트가 잡지 못하는 범주(예: `examples/README.md` 문장 서술)는 사람 리뷰에서 보조 확인이 필요합니다.
 
 ### 로컬 테스트
 
