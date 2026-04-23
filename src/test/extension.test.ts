@@ -2626,6 +2626,30 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(skipped[0], 'nested.1');
 		});
 
+		test('should skip imported folder whose nested child collides with existing', () => {
+			const existing: ActionItem[] = [{ id: 'nested.1', title: 'Existing' }];
+			const imported: ActionItem[] = [{
+				id: 'folder.1', title: 'Imported Folder', type: 'folder',
+				children: [{ id: 'nested.1', title: 'Duplicate' }]
+			}];
+			const { merged, skipped } = mergeImportedActions(existing, imported);
+			assert.strictEqual(merged.length, 1, 'imported folder must not be merged when its nested child collides');
+			assert.ok(skipped.includes('nested.1'), 'nested conflicting id should be reported as skipped');
+			assert.strictEqual(merged[0].id, 'nested.1');
+		});
+
+		test('should merge imported folder with unique nested children', () => {
+			const existing: ActionItem[] = [{ id: 'a', title: 'A' }];
+			const imported: ActionItem[] = [{
+				id: 'folder.1', title: 'Imported Folder', type: 'folder',
+				children: [{ id: 'b', title: 'B' }, { id: 'c', title: 'C' }]
+			}];
+			const { merged, skipped } = mergeImportedActions(existing, imported);
+			assert.strictEqual(skipped.length, 0);
+			assert.strictEqual(merged.length, 2);
+			assert.strictEqual(merged[1].id, 'folder.1');
+		});
+
 		test('should handle empty existing actions', () => {
 			const imported: ActionItem[] = [{ id: 'new.1', title: 'New' }];
 			const { merged, skipped } = mergeImportedActions([], imported);

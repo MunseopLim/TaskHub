@@ -1,5 +1,15 @@
 # Change Log
 
+## [0.4.17] - 2026-04-23
+
+### 수정 — 리뷰에서 지적된 가져오기/JSON Editor/멀티 루트 경계 버그 3종
+
+- **Import 중복 ID 검사 확장**: [src/extension.ts](src/extension.ts) `mergeImportedActions`가 기존에는 가져올 액션의 최상위 `item.id`만 검사해 폴더 내부 자식 ID가 이미 존재하는 액션과 충돌해도 그대로 `actions.json`에 기록되어 다음 로드에서 "duplicate action IDs" 에러로 워크스페이스 설정이 깨질 수 있었다. 이제 가져올 각 최상위 항목의 모든 하위 ID를 재귀 수집해 충돌이 하나라도 있으면 해당 top-level 항목 전체를 skip한다. **UX 변경**: 기존에 "가져오기 성공" 후 다음 로드에서 깨지던 파일은 이제 즉시 skip 알림이 표시된다(원래 버그 상태 노출).
+- **JSON Editor dirty 상태 동기화**: [src/jsonEditor.ts](src/jsonEditor.ts) 전역 패널을 재사용하며 새 파일을 열 때 수정사항이 있어도 HTML을 그냥 덮어써 편집 내용이 조용히 사라질 수 있었던 문제 수정. webview가 `setModified`에서 host로 상태 변경을 통보하도록 하고, host는 (1) 같은 패널에 다른 파일을 열 때 dirty면 확인 다이얼로그 표시, (2) Reload 버튼 클릭 시 dirty면 확인, (3) Save는 파일 쓰기 성공 후에야 `saveResult`를 webview에 반환해 modified 플래그를 내리도록 변경. **UX 변경**: Reload/다른 파일 열기 시 수정사항이 있으면 "변경사항 버리기" 확인 다이얼로그가 새로 뜨며, 저장 실패 시 modified 표시가 유지된다.
+- **멀티 루트에서 액션별 워크스페이스 올바르게 선택**: `previewAction`이 `${workspaceFolder}`를 항상 `workspaceFolders[0]`로 계산하던 것을 `actionWorkspaceFolderMap`에서 해당 액션의 실제 소속 폴더로 해결하도록 수정. `exportActionItem`의 저장 기본 경로도 같은 방식으로 보정. `importActions`는 기존 `edit actions` 등과 동일하게 `pickWorkspaceFolderForCommand` 피커 사용. `showMemoryMap`은 루트가 2개 이상이고 `taskhub_types.json`이 2곳 이상일 때만 피커가 뜨도록 절충. **UX 변경**: 단일 루트 사용자는 동일. 멀티 루트 사용자는 import에서 새로 피커가 뜬다(기존 다른 명령과의 일관성 회복).
+
+모두 이전 동작과 달라지는 부분이 있어 리뷰어 권고대로 명시적으로 알린다. 테스트: 842 passing (`mergeImportedActions` nested-conflict 2 케이스 추가).
+
 ## [0.4.16] - 2026-04-23
 
 ### 정리 — provider 재-export shim 제거 + unused import 정리

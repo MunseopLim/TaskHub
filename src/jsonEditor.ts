@@ -5,6 +5,22 @@ import { t } from './i18n';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 let currentMessageDisposable: vscode.Disposable | undefined;
+let currentIsDirty = false;
+let currentFilePath: string | undefined;
+
+async function confirmDiscardIfDirty(fileName: string): Promise<boolean> {
+    if (!currentIsDirty) { return true; }
+    const discardLabel = t('변경사항 버리기', 'Discard changes');
+    const choice = await vscode.window.showWarningMessage(
+        t(
+            `${fileName}에 저장하지 않은 변경사항이 있습니다. 계속하시겠습니까?`,
+            `${fileName} has unsaved changes. Continue?`
+        ),
+        { modal: true },
+        discardLabel
+    );
+    return choice === discardLabel;
+}
 
 /** JSON Editor에서 처리 가능한 최대 파일 크기 (10 MB) */
 const JSON_EDITOR_MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -38,7 +54,7 @@ export async function openJsonEditor(context: vscode.ExtensionContext) {
         return;
     }
 
-    openJsonEditorWithPath(context, fileUris[0].fsPath);
+    await openJsonEditorWithPath(context, fileUris[0].fsPath);
 }
 
 export async function openJsonEditorFromUri(context: vscode.ExtensionContext, uri?: vscode.Uri) {
@@ -51,7 +67,7 @@ export async function openJsonEditorFromUri(context: vscode.ExtensionContext, ur
         }
     }
 
-    openJsonEditorWithPath(context, uri.fsPath);
+    await openJsonEditorWithPath(context, uri.fsPath);
 }
 
 export const ROOT_ARRAY_KEY = '_rootArray';
@@ -70,8 +86,16 @@ export function unwrapIfRootArray(data: Record<string, unknown>, isRootArray: bo
     return data;
 }
 
-function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: string) {
+async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: string) {
     const fileName = filePath.split(/[\\/]/).pop() || 'JSON Editor';
+
+    if (currentPanel && currentFilePath && currentFilePath !== filePath) {
+        const prevFileName = currentFilePath.split(/[\\/]/).pop() || 'JSON Editor';
+        if (!(await confirmDiscardIfDirty(prevFileName))) {
+            currentPanel.reveal(vscode.ViewColumn.One);
+            return;
+        }
+    }
 
     let stat: fs.Stats;
     try {
@@ -127,32 +151,47 @@ function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: stri
             currentPanel = undefined;
             currentMessageDisposable?.dispose();
             currentMessageDisposable = undefined;
+            currentIsDirty = false;
+            currentFilePath = undefined;
         });
     }
 
     currentPanel.title = `JSON Editor: ${fileName}`;
     currentPanel.webview.html = getWebviewContent(jsonData, filePath, currentPanel.webview);
+    currentIsDirty = false;
+    currentFilePath = filePath;
 
     currentMessageDisposable?.dispose();
     currentMessageDisposable = currentPanel.webview.onDidReceiveMessage(
         async (message) => {
             switch (message.command) {
+                case 'modified': {
+                    currentIsDirty = Boolean(message.value);
+                    break;
+                }
                 case 'save': {
                     try {
                         const saveData = unwrapIfRootArray(message.data, isRootArray);
                         fs.writeFileSync(filePath, JSON.stringify(saveData, null, detectedIndent) + '\n', 'utf-8');
+                        currentIsDirty = false;
+                        currentPanel?.webview.postMessage({ command: 'saveResult', success: true });
                         vscode.window.showInformationMessage(t(`JSON 저장 완료: ${fileName}`, `JSON saved: ${fileName}`));
                     } catch (error: any) {
+                        currentPanel?.webview.postMessage({ command: 'saveResult', success: false });
                         vscode.window.showErrorMessage(t(`JSON 저장 실패 (${fileName}): ${error.message}`, `Failed to save JSON (${fileName}): ${error.message}`));
                     }
                     break;
                 }
                 case 'reload': {
+                    if (!(await confirmDiscardIfDirty(fileName))) {
+                        break;
+                    }
                     try {
                         const reloadContent = fs.readFileSync(filePath, 'utf-8');
                         const parsed = JSON.parse(reloadContent);
                         const result = wrapIfArray(parsed);
                         isRootArray = result.isRootArray;
+                        currentIsDirty = false;
                         currentPanel?.webview.postMessage({ command: 'loadData', data: result.wrapped });
                     } catch (error: any) {
                         if (error instanceof SyntaxError) {
@@ -518,8 +557,12 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
     }
 
     function setModified(val) {
-        modified = val;
-        document.getElementById('modifiedFlag').classList.toggle('show', val);
+        const next = Boolean(val);
+        if (modified !== next) {
+            modified = next;
+            vscode.postMessage({ command: 'modified', value: next });
+        }
+        document.getElementById('modifiedFlag').classList.toggle('show', next);
     }
 
     function renderTabs() {
@@ -922,7 +965,7 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
         const editingTd = document.querySelector('td.editing');
         if (editingTd) { commitCell(editingTd); }
         vscode.postMessage({ command: 'save', data: data });
-        setModified(false);
+        // modified flag is cleared only after host confirms successful write (see 'saveResult')
     });
 
     document.getElementById('btnReload').addEventListener('click', () => {
@@ -968,6 +1011,8 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
             setModified(false);
             renderTabs();
             renderTable();
+        } else if (msg.command === 'saveResult') {
+            if (msg.success) { setModified(false); }
         }
     });
 

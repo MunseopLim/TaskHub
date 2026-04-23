@@ -2280,13 +2280,24 @@ export function mergeImportedActions(existing: ActionItem[], imported: ActionIte
     };
     collectIds(existing);
 
+    const gatherIds = (item: ActionItem, ids: string[]) => {
+        if (item.id) { ids.push(item.id); }
+        if (item.children) {
+            for (const child of item.children) { gatherIds(child, ids); }
+        }
+    };
+
     const skipped: string[] = [];
     const newActions: ActionItem[] = [];
     for (const item of imported) {
-        if (item.id && existingIds.has(item.id)) {
-            skipped.push(item.id);
+        const ids: string[] = [];
+        gatherIds(item, ids);
+        const conflicts = ids.filter(id => existingIds.has(id));
+        if (conflicts.length > 0) {
+            skipped.push(...conflicts);
         } else {
             newActions.push(item);
+            for (const id of ids) { existingIds.add(id); }
         }
     }
 
@@ -2630,7 +2641,9 @@ export function activate(context: vscode.ExtensionContext) {
             ));
             return;
         }
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspaceFolder = actionWorkspaceFolderMap.get(actionId)
+            ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+            ?? '';
         const report = buildPreviewReport(fullActionItem, {
             workspaceFolder,
             extensionPath: context.extensionPath,
@@ -3435,7 +3448,8 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage(t('선택된 액션 또는 폴더가 없습니다.', 'No action or folder selected.'));
             return;
         }
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const workspaceFolder = actionWorkspaceFolderMap.get(treeItem.id)
+            ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (!workspaceFolder) {
             vscode.window.showErrorMessage(t('열린 워크스페이스 폴더가 없습니다.', 'No workspace folder is open.'));
             return;
@@ -3465,11 +3479,11 @@ export function activate(context: vscode.ExtensionContext) {
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.importActions', async () => {
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!workspaceFolder) {
-            vscode.window.showErrorMessage(t('열린 워크스페이스 폴더가 없습니다.', 'No workspace folder is open.'));
-            return;
-        }
+        const targetFolder = await pickWorkspaceFolderForCommand(
+            t('액션을 가져올 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to import actions into')
+        );
+        if (!targetFolder) { return; }
+        const workspaceFolder = targetFolder.uri.fsPath;
         const fileUri = await vscode.window.showOpenDialog({
             canSelectMany: false,
             filters: { 'TaskHub Export': ['taskhub', 'json'] }
@@ -3512,7 +3526,24 @@ export function activate(context: vscode.ExtensionContext) {
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showMemoryMap', async () => {
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        let workspaceFolder: string | undefined;
+        if (folders.length === 1) {
+            workspaceFolder = folders[0].uri.fsPath;
+        } else if (folders.length > 1) {
+            const foldersWithConfig = folders.filter(f =>
+                fs.existsSync(path.join(f.uri.fsPath, '.vscode', 'taskhub_types.json'))
+            );
+            if (foldersWithConfig.length === 1) {
+                workspaceFolder = foldersWithConfig[0].uri.fsPath;
+            } else {
+                const picked = await pickWorkspaceFolderForCommand(
+                    t('메모리 맵을 볼 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to view the memory map for')
+                );
+                workspaceFolder = picked?.uri.fsPath;
+                if (folders.length > 1 && !workspaceFolder) { return; }
+            }
+        }
         let memConfig: MemoryMapConfig | undefined;
         if (workspaceFolder) {
             const typesPath = path.join(workspaceFolder, '.vscode', 'taskhub_types.json');
