@@ -1,5 +1,12 @@
 # Change Log
 
+## [0.4.14] - 2026-04-23
+
+### 정리 — jsonEditor webview JS ↔ jsonEditorUtils 미러 동기화 주석
+
+- [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts) 상단에 "webview JS의 테스트용 미러" 주석 추가. `buildSheetMap`/`getRowsByPath`는 [src/jsonEditor.ts](src/jsonEditor.ts)의 webview HTML 내부 JS 문자열에서 동일 로직으로 복제되어 있는데, 프로덕션 코드는 webview 내부 JS 문자열을 사용하므로 `jsonEditorUtils.ts`를 import하지 못한다. 두 복제본이 말없이 어긋날 위험을 줄이기 위해 양쪽에 상호 참조 주석을 추가했다.
+- [src/jsonEditor.ts](src/jsonEditor.ts)의 webview JS `buildSheetMap` 블록 앞에도 "src/jsonEditorUtils.ts 와 동일해야 한다"는 주석 추가.
+
 ## [0.4.13] - 2026-04-23
 
 ### 정리 — 프로젝트 루트 hover 샘플을 `examples/`로 이동

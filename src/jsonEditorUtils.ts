@@ -1,3 +1,9 @@
+/**
+ * webview JS(jsonEditor.ts의 getWebviewContent 내부 `buildSheetMap`/`getActiveRows`)의
+ * 테스트용 미러. 프로덕션 코드는 webview 내부 JS 문자열을 사용하므로 이 파일을 import하지
+ * 못한다. 로직을 변경할 때는 반드시 jsonEditor.ts의 동일 함수도 함께 수정해야 한다.
+ * (동기화 대상: jsonEditor.ts의 buildSheetMap / getActiveRows)
+ */
 export interface SheetEntry {
     label: string;
     path: string[];

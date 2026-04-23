@@ -490,6 +490,8 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
     let activeIdx = 0;
     let modified = false;
 
+    // NOTE: 아래 buildSheetMap / getActiveRows 로직은 src/jsonEditorUtils.ts 의
+    // buildSheetMap / getRowsByPath 와 동일해야 한다. 한쪽만 수정하지 말 것.
     function buildSheetMap() {
         sheetMap = [];
         Object.keys(data).forEach(key => {
