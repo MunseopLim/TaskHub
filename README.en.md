@@ -151,6 +151,7 @@ To build from source or contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 | `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | Show verbose logs during pipeline execution |
 | `taskhub.pipeline.pythonIoEncoding` | `string` | `utf-8` | Value of the `PYTHONIOENCODING` environment variable |
 | `taskhub.pipeline.windowsPowerShellEncoding` | `string` | `utf8` | PowerShell output encoding on Windows |
+| `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` | Max captured stdout/stderr size in capture mode (1–1024 MB; process is killed with an explicit error when exceeded) |
 | `taskhub.history.maxItems` | `number` | `10` | Max history entries (1-50) |
 | `taskhub.history.showPanel` | `boolean` | `true` | Show the History panel |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | Enable Number Base / SFR hover |

@@ -11,8 +11,8 @@
 | [test_numbers.cpp](test_numbers.cpp) | Number Base Hover (숫자 리터럴) | features.md §15.1 |
 | [test_const_enum_define.cpp](test_const_enum_define.cpp) | Number Base Hover (const / enum / #define 식별자) | features.md §15.1 |
 | [test_sfr_bitfields.h](test_sfr_bitfields.h) | SFR Bit Field Hover | features.md §15.2 |
-| [test_register_decoder.h](test_register_decoder.h) | Register Value Decoder Hover | features.md §15.x |
-| [test_macro_expansion.h](test_macro_expansion.h) | Macro Expansion Hover | features.md §15.x |
+| [test_register_decoder.h](test_register_decoder.h) | Register Value Decoder Hover | features.md §15.5 |
+| [test_macro_expansion.h](test_macro_expansion.h) | Macro Expansion Hover | features.md §15.6 |
 | [bit_operations_example.h](bit_operations_example.h), [bit_operations_example.cpp](bit_operations_example.cpp) | Bit Operation Hover (Experimental) | features.md §16.1 |
 | [sample_armlink.txt](sample_armlink.txt), [sample_armlink_large.txt](sample_armlink_large.txt) | Memory Map Viewer (ARM linker list) | features.md §19 |
 | [sample_binary.bin](sample_binary.bin) | Hex Viewer | features.md §20 |
@@ -95,7 +95,7 @@ ARM linker listing 파일을 Memory Map 뷰어로 시각화합니다.
 - **[sample_armlink.txt](sample_armlink.txt)** — 기본 크기 샘플
 - **[sample_armlink_large.txt](sample_armlink_large.txt)** — 많은 섹션을 포함한 대용량 샘플
 
-사용법: 파일 열기 → 명령 팔레트 → `TaskHub: Open Memory Map`.
+사용법: 명령 팔레트 → `TaskHub: Show Memory Map`.
 
 ## Hex Viewer
 

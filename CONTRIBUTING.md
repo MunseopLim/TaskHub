@@ -165,7 +165,9 @@ vscode.window.showErrorMessage(t('파일을 찾을 수 없습니다.', 'File not
 }
 ```
 
-#### 3. Provider 구현 (`extension.ts`)
+#### 3. Provider 구현 (`src/providers/<featureName>Provider.ts`)
+
+> 기존 4종(`mainViewProvider` / `linkViewProvider` / `favoriteViewProvider` / `historyProvider`)은 `src/providers/`에 분리되어 있습니다. 새 provider도 같은 디렉터리에 모듈 단위로 두고, `extension.ts`는 `activate()`에서 `import` 한 뒤 인스턴스화만 담당합니다.
 
 ```typescript
 class YourFeatureProvider implements vscode.TreeDataProvider<YourItem> {

@@ -7,37 +7,40 @@
 ```
 TaskHub/
 ├── src/
-│   ├── extension.ts                  # 메인 확장 파일
-│   │                                  # - activate() / deactivate()
-│   │                                  # - Provider: MainView, Link, Favorite, History
+│   ├── extension.ts                  # 메인 진입점 (activate/deactivate, 명령어 핸들러)
+│   │                                  # - TreeDataProvider 4종 인스턴스는 src/providers/에서 import
 │   │                                  # - 액션 실행: executeAction(), executeSingleTask()
-│   │                                  # - pipelineUtils의 순수 헬퍼를 re-export (기존 import 호환)
+│   │                                  # - pipelineUtils / providers의 헬퍼를 re-export (기존 import 호환)
+│   ├── providers/                     # TreeDataProvider 분리 모듈 (Phase 2 split)
+│   │   ├── mainViewProvider.ts        # Actions 패널 (폴더 트리)
+│   │   ├── linkViewProvider.ts        # Built-in / Workspace 링크 패널
+│   │   ├── favoriteViewProvider.ts    # 즐겨찾기 패널
+│   │   ├── historyProvider.ts         # 액션 실행 히스토리 패널
+│   │   ├── actionStatus.ts            # 액션 실행 상태(actionStates) 관리
+│   │   └── normalization.ts           # tags / line 번호 정규화 헬퍼
 │   ├── pipelineUtils.ts               # 순수 유틸리티 (vscode 의존 없음)
 │   │                                  # - 변수 치환/sanitize, workspace 경로 검증
 │   │                                  # - 쉘 토큰화 + POSIX/PowerShell 인자 quoting
 │   │                                  # - toWorkspaceRelativePath(): 절대경로 → ${workspaceFolder} 정규화
+│   │                                  # - wouldExceedCaptureLimit(): 캡처 한도 off-by-one guard
+│   ├── previewRun.ts                  # Preview Run (Dry-run) 리포트 생성
+│   ├── jsonEditor.ts                  # JSON Editor WebView (시트/행 편집)
+│   ├── jsonEditorUtils.ts             # jsonEditor.ts webview JS의 테스트용 pure mirror
+│   ├── hexViewer.ts                   # Hex Viewer WebView (assertWithinHexViewerSpan 포함)
+│   ├── hexParser.ts                   # Intel HEX / SREC / Binary 파서
+│   ├── archiveUtils.ts                # zip/unzip 내장 엔진
 │   ├── i18n.ts                        # 다국어 지원 (한국어/영어, vscode.env.language 기반)
 │   ├── schema.ts                      # TypeScript 타입 정의
 │   ├── numberBaseHoverProvider.ts     # Number Base / SFR Bit Field / Struct Size Hover
 │   ├── sfrBitFieldParser.ts           # SFR 비트 필드 파서
 │   ├── structSizeCalculator.ts        # 구조체 크기/레이아웃 계산
 │   ├── registerDecoder.ts             # 레지스터 비트 필드 디코더
-│   ├── macroExpander.ts               # C/C++ 매크로 전처리기
+│   ├── macroExpander.ts               # C/C++ 매크로 전처리기 (4096자 ReDoS guard)
 │   ├── elfParser.ts                   # ELF32 바이너리 파서
 │   ├── linkerScriptParser.ts          # GNU/ARM 링커 스크립트 파서
 │   ├── armLinkListParser.ts           # ARM Linker Listing 파서 (armlink --list)
 │   ├── memoryMapViewer.ts             # Memory Map WebView 시각화
-│   └── test/
-│       ├── extension.test.ts              # 확장 유닛 테스트
-│       ├── pipelineUtils.test.ts           # 순수 유틸리티 모듈 독립 import 스모크 테스트
-│       ├── i18n.test.ts                    # i18n t() 헬퍼 테스트
-│       ├── numberBaseHoverProvider.test.ts # Hover 제공자 테스트
-│       ├── sfrBitFieldParser.test.ts      # SFR 파서 테스트
-│       ├── structSizeCalculator.test.ts   # 구조체 크기 계산 테스트
-│       ├── registerDecoder.test.ts        # 레지스터 디코더 테스트
-│       ├── macroExpander.test.ts          # 매크로 확장 테스트
-│       ├── elfParser.test.ts              # ELF 파서 테스트
-│       └── armLinkListParser.test.ts      # ARM Linker Listing 파서 테스트
+│   └── test/                          # Mocha + Chai 유닛 테스트 (모듈별 *.test.ts)
 ├── schema/
 │   ├── actions.schema.json       # actions.json 스키마 및 검증
 │   ├── links.schema.json         # links.json 스키마 및 검증
@@ -71,14 +74,16 @@ TaskHub/
 
 ## 주요 컴포넌트
 
-### 1. TreeDataProvider (extension.ts)
+### 1. TreeDataProvider (`src/providers/`)
 
-각 패널은 `vscode.TreeDataProvider`를 구현합니다:
+각 패널은 `vscode.TreeDataProvider`를 구현하며, 독립 모듈로 분리되어 있습니다:
 
-*   **MainViewProvider**: 액션 버튼과 폴더 트리 관리
-*   **LinkViewProvider**: Built-in 및 Workspace 링크 관리
-*   **FavoriteViewProvider**: 즐겨찾기 파일 관리
-*   **HistoryProvider**: 액션 실행 히스토리 관리
+*   **MainViewProvider** ([providers/mainViewProvider.ts](../src/providers/mainViewProvider.ts)): 액션 버튼과 폴더 트리 관리
+*   **LinkViewProvider** ([providers/linkViewProvider.ts](../src/providers/linkViewProvider.ts)): Built-in 및 Workspace 링크 관리
+*   **FavoriteViewProvider** ([providers/favoriteViewProvider.ts](../src/providers/favoriteViewProvider.ts)): 즐겨찾기 파일 관리
+*   **HistoryProvider** ([providers/historyProvider.ts](../src/providers/historyProvider.ts)): 액션 실행 히스토리 관리 (`workspaceState` 백엔드)
+
+`extension.ts`는 위 모듈에서 클래스를 import해 `activate()`에서 인스턴스를 만들고, 기존 호출자의 호환성을 위해 동일 이름으로 re-export합니다.
 
 ### 2. 액션 실행 파이프라인
 

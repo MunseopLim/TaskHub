@@ -23,14 +23,29 @@ npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 
 ```
 src/
-├── extension.ts               # 메인 진입점 (activate/deactivate, Provider, 명령어 핸들러)
+├── extension.ts               # 메인 진입점 (activate/deactivate, 명령어 핸들러)
+│                              # providers/ 및 pipelineUtils 모듈을 re-export
+├── providers/                 # TreeDataProvider 4종 + 공용 헬퍼 (분리 모듈)
+│   ├── mainViewProvider.ts    # Actions 패널
+│   ├── linkViewProvider.ts    # Built-in / Workspace 링크 패널
+│   ├── favoriteViewProvider.ts# 즐겨찾기 패널
+│   ├── historyProvider.ts     # 히스토리 패널 (workspaceState 백엔드)
+│   ├── actionStatus.ts        # 액션 실행 상태(actionStates) 관리
+│   └── normalization.ts       # tags / 줄 번호 정규화
+├── pipelineUtils.ts           # 순수 유틸 (vscode 의존 없음) — 변수 치환/quoting/길이 guard
+├── previewRun.ts              # Preview Run (Dry-run) 리포트 생성
+├── jsonEditor.ts              # JSON Editor WebView (시트/행 편집)
+├── jsonEditorUtils.ts         # jsonEditor.ts webview JS의 테스트용 pure mirror
+├── hexViewer.ts               # Hex Viewer WebView
+├── hexParser.ts               # Intel HEX / SREC / Binary 파서
+├── archiveUtils.ts            # zip/unzip 내장 엔진
 ├── i18n.ts                    # 다국어 지원 (한국어/영어 메시지 선택)
 ├── schema.ts                  # TypeScript 인터페이스 정의
 ├── numberBaseHoverProvider.ts # Number Base / SFR / Struct Size Hover 통합
 ├── sfrBitFieldParser.ts       # SFR 비트 필드 주석 파서
 ├── structSizeCalculator.ts    # 구조체 크기/레이아웃 계산
 ├── registerDecoder.ts         # 레지스터 비트 필드 디코더
-├── macroExpander.ts           # C/C++ 매크로 전처리기
+├── macroExpander.ts           # C/C++ 매크로 전처리기 (4096자 ReDoS guard)
 ├── elfParser.ts               # ELF32 바이너리 파서
 ├── linkerScriptParser.ts      # GNU/ARM 링커 스크립트 파서
 ├── armLinkListParser.ts       # ARM Linker Listing 파서 (armlink --list)
