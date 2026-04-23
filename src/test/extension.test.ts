@@ -4,7 +4,6 @@ import {
 	interpolatePipelineVariables,
 	sanitizeInterpolatedValue,
 	resolveWithinWorkspace,
-	normalizeTags,
 	parseTagInput,
 	serializeFavorites,
 	serializeLinks,
@@ -23,7 +22,6 @@ import {
 	buildPowerShellInvocation,
 	buildPosixCommandLine,
 	encodePowerShellScript,
-	normalizeLineNumber,
 	wrapCommandForOneShot,
 	createShellExecution,
 	filterConflictingItems,
@@ -38,6 +36,7 @@ import {
 	getActionsValidator,
 	invalidateActionsCache,
 } from '../extension';
+import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
 import { LinkViewProvider } from '../providers/linkViewProvider';
 import { FavoriteViewProvider } from '../providers/favoriteViewProvider';
 import * as os from 'os';

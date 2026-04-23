@@ -1,5 +1,13 @@
 # Change Log
 
+## [0.4.16] - 2026-04-23
+
+### 정리 — provider 재-export shim 제거 + unused import 정리
+
+- [src/extension.ts](src/extension.ts) 상단에 있던 "이제 `./providers/...` 에 있으며 기존 호출자 호환을 위해 re-export한다" 는 3블록 + normalizeTags/normalizeLineNumber 재-export를 제거. providers 분리 마이그레이션의 잔재로, 실제로 extension.ts를 경유해 import하던 테스트는 [src/test/extension.test.ts](src/test/extension.test.ts) 의 `normalizeTags`/`normalizeLineNumber` 2개뿐이어서 이 테스트만 `from '../providers/normalization'` 로 직접 redirect.
+- 같은 기회에 extension.ts 에서 실제 사용되지 않던 `LinkTreeNode`, `LinkGroup`, `FavoriteTreeNode`, `FavoriteGroup`, `normalizeTags` import를 제거. 총 약 60줄 감소.
+- 참고: TreeDataProvider 4종(`MainViewProvider`/`LinkViewProvider`/`FavoriteViewProvider`/`HistoryProvider`)은 이미 이전 리팩터링에서 `src/providers/` 로 분리 완료된 상태. 이번 변경은 그 마이그레이션의 호환 shim을 걷어내는 마무리 정리.
+
 ## [0.4.15] - 2026-04-23
 
 ### 정리 — `console.error` 로그를 OutputChannel로 통일

@@ -1027,67 +1027,28 @@ function terminateChildProcesses(actionId: string): boolean {
     actionChildProcesses.delete(actionId);
     return true;
 }
-// LinkEntry, LinkViewProvider, LinkGroup, Link, loadLinksFromDisk now live in
-// ./providers/linkViewProvider. Re-exported below so existing callers keep
-// working.
 import {
     LinkEntry,
-    LinkTreeNode,
-    LinkGroup,
     Link,
     LinkViewProvider,
     loadLinksFromDisk,
 } from './providers/linkViewProvider';
-export {
-    LinkEntry,
-    LinkTreeNode,
-    LinkGroup,
-    Link,
-    LinkViewProvider,
-    loadLinksFromDisk,
-};
 
-// FavoriteEntry, FavoriteViewProvider, FavoriteGroup, Favorite,
-// loadFavoritesFromDisk now live in ./providers/favoriteViewProvider.
-// Re-exported so existing callers (including tests) keep working.
 import {
     FavoriteEntry,
-    FavoriteTreeNode,
-    FavoriteGroup,
     Favorite,
     FavoriteViewProvider,
     loadFavoritesFromDisk,
     removeFavoriteByIdentity,
 } from './providers/favoriteViewProvider';
-export {
-    FavoriteEntry,
-    FavoriteTreeNode,
-    FavoriteGroup,
-    Favorite,
-    FavoriteViewProvider,
-    loadFavoritesFromDisk,
-    removeFavoriteByIdentity,
-};
 
-// HistoryEntry, HistoryItem, HistoryProvider now live in
-// ./providers/historyProvider. Re-exported below so existing callers
-// (including tests) keep working.
 import {
     HistoryEntry,
     HistoryItem,
     HistoryProvider,
 } from './providers/historyProvider';
-export {
-    HistoryEntry,
-    HistoryItem,
-    HistoryProvider,
-};
 
-// normalizeTags / normalizeLineNumber now live in ./providers/normalization
-// and are re-exported so that existing `import { ... } from './extension'`
-// callers (including tests) keep working unchanged.
-import { normalizeTags, normalizeLineNumber } from './providers/normalization';
-export { normalizeTags, normalizeLineNumber };
+import { normalizeLineNumber } from './providers/normalization';
 
 export function parseTagInput(input: string | undefined): string[] | undefined {
     if (!input) {
