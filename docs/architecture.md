@@ -10,7 +10,9 @@ TaskHub/
 │   ├── extension.ts                  # 메인 진입점 (activate/deactivate, 명령어 핸들러)
 │   │                                  # - TreeDataProvider 4종 인스턴스는 src/providers/에서 import
 │   │                                  # - 액션 실행: executeAction(), executeSingleTask()
-│   │                                  # - pipelineUtils / providers의 헬퍼를 re-export (기존 import 호환)
+│   │                                  # - 재-export 범위는 제한적: 일부 pipelineUtils 헬퍼 +
+│   │                                  #   MainViewProvider / Folder / Action 3개 심볼만 (기존 import 호환용)
+│   │                                  #   상세는 §주요 컴포넌트 > 1. TreeDataProvider 참조
 │   ├── providers/                     # TreeDataProvider 분리 모듈 (Phase 2 split)
 │   │   ├── mainViewProvider.ts        # Actions 패널 (폴더 트리)
 │   │   ├── linkViewProvider.ts        # Built-in / Workspace 링크 패널
