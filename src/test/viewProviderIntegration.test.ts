@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { actionStates } from '../providers/actionStatus';
 import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteViewProvider, loadFavoritesFromDisk, removeFavoriteByIdentity } from '../providers/favoriteViewProvider';
-import { serializeFavorites } from '../extension';
+import { buildActionCommandId, serializeFavorites, syncActionCommandsFromActions } from '../extension';
 import { Link, LinkGroup, LinkViewProvider } from '../providers/linkViewProvider';
 import { Action, Folder, MainViewProvider } from '../providers/mainViewProvider';
 import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
@@ -342,6 +342,133 @@ suite('View provider integration', function () {
         const buildItem = roots[1] as Action;
         assert.strictEqual(buildItem.description, undefined,
             'Action TreeItem must not render a last-run badge — that lives on HistoryItem');
+    });
+
+    suite('syncActionCommands (TODO §2.1 v1 — dynamic command registration)', () => {
+        // Pins TODO §2.1 v1: every action with an id is exposed as a
+        // `taskhub.runAction.<id>` VS Code command so users can bind a key
+        // from the native Keyboard Shortcuts UI. Folder/separator entries
+        // intentionally have no command — they aren't runnable.
+        //
+        // Uses an isolated registry per test so we don't disturb the live
+        // command registrations the activated extension owns.
+        let testRegistry: Map<string, vscode.Disposable>;
+        setup(() => {
+            testRegistry = new Map<string, vscode.Disposable>();
+        });
+        teardown(() => {
+            for (const disposable of testRegistry.values()) {
+                disposable.dispose();
+            }
+            testRegistry.clear();
+        });
+
+        async function listRegisteredTestCommands(): Promise<string[]> {
+            const all = await vscode.commands.getCommands(true);
+            const ours = new Set(testRegistry.keys());
+            return all.filter(c => ours.has(c));
+        }
+
+        test('IT-083: 액션마다 taskhub.runAction.<id>가 등록되고 folder/separator는 등록되지 않는다', async () => {
+            const actions: ActionItem[] = [
+                {
+                    id: 'fw',
+                    title: 'Firmware',
+                    type: 'folder',
+                    children: [
+                        {
+                            id: 'fw.build',
+                            title: 'Build',
+                            action: { description: 'Build', tasks: [{ id: 'compile', type: 'shell', command: 'echo' }] }
+                        }
+                    ]
+                },
+                { id: 'sep', title: '---', type: 'separator' },
+                {
+                    id: 'flash',
+                    title: 'Flash',
+                    action: { description: 'Flash', tasks: [{ id: 'run', type: 'shell', command: 'echo' }] }
+                }
+            ];
+
+            syncActionCommandsFromActions(actions, testRegistry);
+
+            const registered = await listRegisteredTestCommands();
+            assert.ok(registered.includes('taskhub.runAction.fw.build'),
+                `expected fw.build command, got: ${registered.join(', ')}`);
+            assert.ok(registered.includes('taskhub.runAction.flash'),
+                `expected flash command, got: ${registered.join(', ')}`);
+            // Folder + separator have ids but no `action` — must not register.
+            assert.ok(!testRegistry.has('taskhub.runAction.fw'),
+                'folder must not be registered as a runnable command');
+            assert.ok(!testRegistry.has('taskhub.runAction.sep'),
+                'separator must not be registered as a runnable command');
+        });
+
+        test('IT-084: 액션이 actions.json에서 제거되면 해당 커맨드 등록은 dispose된다', async () => {
+            const initial: ActionItem[] = [
+                { id: 'a', title: 'A', action: { description: 'A', tasks: [{ id: 't', type: 'shell', command: 'echo' }] } },
+                { id: 'b', title: 'B', action: { description: 'B', tasks: [{ id: 't', type: 'shell', command: 'echo' }] } }
+            ];
+            syncActionCommandsFromActions(initial, testRegistry);
+            assert.ok(testRegistry.has('taskhub.runAction.a'));
+            assert.ok(testRegistry.has('taskhub.runAction.b'));
+
+            // Remove 'b' and re-sync.
+            const reduced: ActionItem[] = [initial[0]];
+            syncActionCommandsFromActions(reduced, testRegistry);
+
+            const after = await listRegisteredTestCommands();
+            assert.ok(after.includes('taskhub.runAction.a'),
+                'surviving action keeps its command');
+            assert.ok(!testRegistry.has('taskhub.runAction.b'),
+                'removed action must dispose its command registration');
+        });
+
+        test('IT-085: 액션 id를 변경하면 옛 커맨드는 dispose되고 새 커맨드가 등록된다', async () => {
+            syncActionCommandsFromActions([
+                { id: 'old.id', title: 'Old', action: { description: 'X', tasks: [{ id: 't', type: 'shell', command: 'echo' }] } }
+            ], testRegistry);
+            assert.ok(testRegistry.has('taskhub.runAction.old.id'));
+
+            // Same action, fresh id.
+            syncActionCommandsFromActions([
+                { id: 'new.id', title: 'New', action: { description: 'X', tasks: [{ id: 't', type: 'shell', command: 'echo' }] } }
+            ], testRegistry);
+
+            assert.ok(!testRegistry.has('taskhub.runAction.old.id'),
+                'old id must be disposed');
+            assert.ok(testRegistry.has('taskhub.runAction.new.id'),
+                'new id must be registered');
+            // Stable count: rename should not leak entries.
+            assert.strictEqual(testRegistry.size, 1,
+                'rename must not leak entries in the registry');
+        });
+
+        test('IT-086: command id 스킴은 bijective percent-encoding이며 동적 등록 / assignShortcut 양쪽이 같은 도출을 사용한다', () => {
+            // The dynamic registration in `syncActionCommandsFromActions` and
+            // the `taskhub.assignShortcut` handler both route through
+            // `buildActionCommandId`. Pinning the contract here catches any
+            // future drift (prefix rename, encoding change) before it
+            // breaks user keybindings already saved against the old id.
+            //
+            // Common case — safe alphabet ids round-trip unchanged so user
+            // keybindings.json reads naturally:
+            assert.strictEqual(buildActionCommandId('fw.build'), 'taskhub.runAction.fw.build');
+            assert.strictEqual(buildActionCommandId('flash'), 'taskhub.runAction.flash');
+            assert.strictEqual(buildActionCommandId('default-button_v2'), 'taskhub.runAction.default-button_v2');
+            // Unsafe chars — encoded as %HH so distinct ids stay distinct.
+            // This is the load-bearing property: `a/b` and `a:b` MUST NOT
+            // collide, otherwise Assign Shortcut would let the wrong action
+            // run. (See 1차 리뷰 follow-up in CHANGELOG 0.4.23.)
+            assert.strictEqual(buildActionCommandId('weird id'), 'taskhub.runAction.weird%20id');
+            assert.strictEqual(buildActionCommandId('a/b'), 'taskhub.runAction.a%2Fb');
+            assert.strictEqual(buildActionCommandId('a:b'), 'taskhub.runAction.a%3Ab');
+            assert.notStrictEqual(buildActionCommandId('a/b'), buildActionCommandId('a:b'),
+                'distinct unsafe ids must produce distinct command ids');
+            // `%` itself is encoded so the scheme is unambiguously reversible.
+            assert.strictEqual(buildActionCommandId('a%b'), 'taskhub.runAction.a%25b');
+        });
     });
 
     suite('removeFavoriteByIdentity (stale favorite removal)', () => {

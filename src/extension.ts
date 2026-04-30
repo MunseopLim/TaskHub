@@ -339,6 +339,112 @@ export function invalidateActionsCache(): void {
     cachedAllActions = undefined;
 }
 
+// Dynamic command registrations keyed by action id. Each entry exposes the
+// action as `taskhub.runAction.<encoded id>` so users can bind a key to it
+// from VS Code's Keyboard Shortcuts UI. Mutated only by `syncActionCommands`.
+const actionCommandRegistrations = new Map<string, vscode.Disposable>();
+
+// Encodes an action id into the suffix of its `taskhub.runAction.<...>`
+// command. The mapping is *bijective*: distinct ids always produce distinct
+// command ids. This matters because action ids may legally contain spaces,
+// slashes, colons, and Unicode (the schema only requires `string`), and a
+// lossy sanitizer (e.g. `[^A-Za-z0-9_.-]/g → _`) would silently collapse
+// `a/b` and `a:b` onto the same command — letting "Assign Shortcut" run the
+// wrong action when both exist.
+//
+// Strategy: keep the safe alphabet `[A-Za-z0-9_.-]` (which is also what VS
+// Code's Keyboard Shortcuts UI displays cleanly), and percent-encode every
+// other byte of the id's UTF-8 representation as `%HH` (uppercase hex). `%`
+// itself is encoded too, so the scheme is unambiguously reversible.
+//
+// For the common case of dotted/underscore/hyphen ids (e.g. `fw.build`,
+// `defaultButton.showEnv`) this leaves the suffix untouched, so users see
+// readable command ids in keybindings.json and the search box.
+export function buildActionCommandId(actionId: string): string {
+    const safe = /[A-Za-z0-9_.-]/;
+    let suffix = '';
+    const bytes = Buffer.from(actionId, 'utf-8');
+    for (const b of bytes) {
+        const ch = String.fromCharCode(b);
+        if (b < 128 && safe.test(ch)) {
+            suffix += ch;
+        } else {
+            suffix += '%' + b.toString(16).toUpperCase().padStart(2, '0');
+        }
+    }
+    return `taskhub.runAction.${suffix}`;
+}
+
+// Diff-syncs `actionCommandRegistrations` against the current `actions.json`
+// tree. Called from every site that already invalidates the actions cache.
+// Failure mode: if `loadAllActions` throws (e.g. mid-edit save with invalid
+// JSON) we deliberately leave existing registrations untouched so previously
+// bound user keybindings keep working until the file becomes valid again.
+export function syncActionCommands(context: vscode.ExtensionContext): void {
+    let allActions: ActionItem[];
+    try {
+        allActions = loadAllActions(context);
+    } catch {
+        return;
+    }
+    syncActionCommandsFromActions(allActions);
+}
+
+// Test seam: same diff-sync logic without the `loadAllActions` (and therefore
+// without the workspace + media JSON I/O), so unit tests can exercise the
+// register/dispose path against a literal `ActionItem[]` instead of staging
+// real workspace folders. Production code paths go through the wrapper above.
+//
+// `registry` is parameterized so test suites can pass their own Map and avoid
+// stomping on the activated extension's registrations (which live in the
+// default module-level map). Default callers always use the module map.
+export function syncActionCommandsFromActions(
+    allActions: ActionItem[],
+    registry: Map<string, vscode.Disposable> = actionCommandRegistrations
+): void {
+    const desired = new Map<string, string>(); // command id -> action id
+    traverseActionItems(allActions, (item) => {
+        if (!item.id || !item.action) { return; }
+        const commandId = buildActionCommandId(item.id);
+        // Action ids are already guaranteed globally unique by
+        // `validateUniqueActionIdsAcrossSources`, and `buildActionCommandId`
+        // is bijective, so we should never see a duplicate command id here.
+        // The `set` call is therefore safe; no skip / warning path needed.
+        desired.set(commandId, item.id);
+    });
+
+    // Dispose registrations whose command id is no longer desired.
+    for (const [commandId, disposable] of registry) {
+        if (!desired.has(commandId)) {
+            disposable.dispose();
+            registry.delete(commandId);
+        }
+    }
+    // Register any newly desired command ids.
+    for (const [commandId, actionId] of desired) {
+        if (registry.has(commandId)) { continue; }
+        const disposable = vscode.commands.registerCommand(commandId, () =>
+            vscode.commands.executeCommand('taskhub.executeActionById', { id: actionId })
+        );
+        registry.set(commandId, disposable);
+    }
+}
+
+export function disposeAllActionCommands(): void {
+    for (const disposable of actionCommandRegistrations.values()) {
+        disposable.dispose();
+    }
+    actionCommandRegistrations.clear();
+}
+
+// Combines the three steps every actions.json change site needs: drop the
+// cache, re-sync dynamic command registrations, refresh the tree.
+function refreshActionsAndCommands(context: vscode.ExtensionContext, mainViewProvider: MainViewProvider): void {
+    invalidateActionsCache();
+    syncActionCommands(context);
+    mainViewProvider.refresh();
+}
+
 function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
     if (cachedAllActions) {
         return cachedAllActions;
@@ -989,8 +1095,7 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
 
         insertActionIntoDestination(sources.workspaceActions, destination, newAction);
         persistWorkspaceActions(targetFolder.uri.fsPath, sources.workspaceActionsPath, sources.workspaceActions);
-        invalidateActionsCache();
-        mainViewProvider.refresh();
+        refreshActionsAndCommands(context, mainViewProvider);
         await handlePostCreationChoice(baseInfo, sources.workspaceActionsPath);
     } catch (error) {
         if (error instanceof WizardCancelledError) {
@@ -2921,6 +3026,14 @@ export function activate(context: vscode.ExtensionContext) {
 
 
     const mainViewProvider = new MainViewProvider(context, () => loadAllActions(context));
+    // Register `taskhub.runAction.<id>` commands at activation so the user's
+    // `keybindings.json` resolves to live commands as soon as the extension
+    // loads. Cost: one `loadAllActions` JSON pass — comparable to the lazy
+    // first `getChildren` call the TreeView would do anyway. Single context
+    // subscription disposes every entry on deactivate, regardless of partial
+    // state in the map.
+    syncActionCommands(context);
+    context.subscriptions.push(new vscode.Disposable(() => disposeAllActionCommands()));
     const builtInLinkViewProvider = new LinkViewProvider(context, 'builtin');
     const workspaceLinkViewProvider = new LinkViewProvider(context, 'workspace');
     const favoriteViewProvider = new FavoriteViewProvider(context);
@@ -2970,7 +3083,7 @@ export function activate(context: vscode.ExtensionContext) {
     // at runtime for end users, so we only watch them during development.
     if (context.extensionMode === vscode.ExtensionMode.Development) {
         const mediaActionsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/actions.json'));
-        const debouncedMediaActionsRefresh = debounce(() => { invalidateActionsCache(); mainViewProvider.refresh(); }, 200);
+        const debouncedMediaActionsRefresh = debounce(() => refreshActionsAndCommands(context, mainViewProvider), 200);
         mediaActionsWatcher.onDidChange(debouncedMediaActionsRefresh.run);
         mediaActionsWatcher.onDidCreate(debouncedMediaActionsRefresh.run);
         mediaActionsWatcher.onDidDelete(debouncedMediaActionsRefresh.run);
@@ -2982,7 +3095,7 @@ export function activate(context: vscode.ExtensionContext) {
         mediaLinksWatcher.onDidDelete(debouncedMediaLinksRefresh.run);
         context.subscriptions.push(new vscode.Disposable(() => { debouncedMediaLinksRefresh.cancel(); mediaLinksWatcher.dispose(); }));
     }
-    const workspaceActionsWatchers = registerWorkspaceFileWatchers('.vscode/actions.json', () => { invalidateActionsCache(); mainViewProvider.refresh(); });
+    const workspaceActionsWatchers = registerWorkspaceFileWatchers('.vscode/actions.json', () => refreshActionsAndCommands(context, mainViewProvider));
     const workspaceLinksWatchers = registerWorkspaceFileWatchers('.vscode/links.json', () => workspaceLinkViewProvider.refresh());
     const workspaceFavoritesWatchers = registerWorkspaceFileWatchers('.vscode/favorites.json', () => favoriteViewProvider.refresh());
     context.subscriptions.push(workspaceActionsWatchers, workspaceLinksWatchers, workspaceFavoritesWatchers);
@@ -3088,10 +3201,34 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const actionItem = findActionById(allActions, args.id);
         if (actionItem && actionItem.action) {
-            await executeAction(actionItem, context, mainViewProvider, historyProvider);
+            // Mirror `taskhub.executeAction`'s catch (line ~3162): pipeline
+            // failures already surface via `handleActionFailure`'s user
+            // notification — re-throwing here would let VS Code show a
+            // second generic "command failed" toast on top of it. The
+            // keybinding entry point goes through this command, so the
+            // catch is essential for that path.
+            try {
+                await executeAction(actionItem, context, mainViewProvider, historyProvider);
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                outputChannel.appendLine(`[ERROR] Execution failed for action '${args.id}': ${msg}`);
+            }
         } else {
             vscode.window.showErrorMessage(t(`ID '${args.id}'인 액션을 찾을 수 없거나 'action' 속성이 없습니다.`, `Action with ID '${args.id}' not found or it has no 'action' property.`));
         }
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.assignShortcut', async (actionItem: Action) => {
+        const actionId = actionItem?.id;
+        if (!actionId) {
+            vscode.window.showWarningMessage(t('이 액션에는 ID가 없어 단축키를 지정할 수 없습니다.', 'This action has no id; cannot assign a shortcut.'));
+            return;
+        }
+        const commandId = buildActionCommandId(actionId);
+        // The string argument is consumed by VS Code's Keyboard Shortcuts UI
+        // as a search-box prefilter, so the user lands directly on the row
+        // for this action's command. We never write to keybindings.json
+        // ourselves — the user assigns the key in the native UI.
+        await vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', commandId);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.previewAction', async (actionItem: Action) => {
         let allActions: ActionItem[];
@@ -3782,8 +3919,7 @@ export function activate(context: vscode.ExtensionContext) {
             fs.writeFileSync(actionsPath, JSON.stringify(finalActions, null, 2) + '\n');
 
             // Step 6: Refresh UI and notify
-            invalidateActionsCache();
-            mainViewProvider.refresh();
+            refreshActionsAndCommands(context, mainViewProvider);
             const openActionsLabel = t('actions.json 열기', 'Open actions.json');
             const result = await vscode.window.showInformationMessage(
                 t(`프리셋 "${selected.preset.name}"이(가) 성공적으로 적용되었습니다!`, `Preset "${selected.preset.name}" applied successfully!`),
@@ -3878,8 +4014,7 @@ export function activate(context: vscode.ExtensionContext) {
             // If the newly-written preset happens to be the currently selected
             // one (or could become so on reload), drop the cached merged action
             // list so downstream callers see the fresh file.
-            invalidateActionsCache();
-            mainViewProvider.refresh();
+            refreshActionsAndCommands(context, mainViewProvider);
 
             // Step 6: Notify
             const openLabel = t('열기', 'Open');
@@ -3910,8 +4045,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.workspace.onDidChangeConfiguration(event => {
             if (event.affectsConfiguration('taskhub.preset.selected')) {
                 const presetId = getSelectedPresetId();
-                invalidateActionsCache();
-                mainViewProvider.refresh();
+                refreshActionsAndCommands(context, mainViewProvider);
                 outputChannel.appendLine(`[Preset] Settings changed to: ${presetId || 'none'}`);
 
                 if (presetId) {
@@ -4075,8 +4209,7 @@ export function activate(context: vscode.ExtensionContext) {
             msg += t(` ${skipped.length}개 중복 건너뜀: ${skipped.join(', ')}`, ` Skipped ${skipped.length} duplicate(s): ${skipped.join(', ')}`);
         }
         vscode.window.showInformationMessage(msg);
-        invalidateActionsCache();
-        mainViewProvider.refresh();
+        refreshActionsAndCommands(context, mainViewProvider);
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showMemoryMap', async () => {

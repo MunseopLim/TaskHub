@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.4.22",
+  "version": "0.4.23",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -24,6 +24,7 @@
     }
   },
   "activationEvents": [
+    "onStartupFinished",
     "onLanguage:c",
     "onLanguage:cpp"
   ],
@@ -351,6 +352,11 @@
         "icon": "$(cloud-upload)"
       },
       {
+        "command": "taskhub.assignShortcut",
+        "title": "Assign Shortcut",
+        "category": "TaskHub"
+      },
+      {
         "command": "taskhub.showHexViewer",
         "title": "Open Hex Viewer",
         "category": "TaskHub"
@@ -380,6 +386,7 @@
         { "command": "taskhub.viewHistoryOutput", "when": "false" },
         { "command": "taskhub.deleteHistoryItem", "when": "false" },
         { "command": "taskhub.exportActionItem", "when": "false" },
+        { "command": "taskhub.assignShortcut", "when": "false" },
         { "command": "taskhub.showExampleJson", "when": "false" },
         { "command": "taskhub.memoryMapGoToSymbol", "when": "false" }
       ],
@@ -520,6 +527,21 @@
           "command": "taskhub.exportActionItem",
           "when": "view == mainView.main && viewItem == folder",
           "group": "context@1"
+        },
+        {
+          "command": "taskhub.assignShortcut",
+          "when": "view == mainView.main && viewItem == action",
+          "group": "context@2"
+        },
+        {
+          "command": "taskhub.assignShortcut",
+          "when": "view == mainView.main && viewItem == succeededAction",
+          "group": "context@2"
+        },
+        {
+          "command": "taskhub.assignShortcut",
+          "when": "view == mainView.main && viewItem == failedAction",
+          "group": "context@2"
         },
         {
           "command": "taskhub.stopAction",

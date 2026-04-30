@@ -95,6 +95,16 @@ Command Palette에서 `taskhub json`을 검색하면 두 개의 JSON Editor 커�
 - 액션이 종료되면(`success`/`failure`/manual stop) 진행 표시는 자동으로 사라지고, 상태 아이콘(✓/✗)만 남습니다.
 - `continueOnError: true`로 스킵된 task는 인덱스만 진행되며 별도 표시는 없습니다 — task 완료/실패 자체는 History 패널에서 회고 가능합니다.
 
+### 액션에 단축키 할당
+
+`id`가 지정된 모든 액션은 자동으로 `taskhub.runAction.<id>` VS Code 커맨드로 노출됩니다. 따라서 사용자는 키바인딩으로 직접 액션을 실행할 수 있습니다.
+
+- **권장 사용법**: Actions 패널에서 액션을 우클릭 → **Assign Shortcut** → VS Code의 Keyboard Shortcuts UI가 해당 액션의 커맨드 ID로 미리 필터링되어 열립니다. 사용자는 거기서 평소처럼 키를 입력해 등록합니다.
+- 확장이 사용자 `keybindings.json`을 직접 수정하지 않으므로, 키 충돌·`when` 절·플랫폼별 키 차이는 모두 VS Code 기본 UI에서 다룰 수 있습니다.
+- `actions.json`이 변경되면 추가/삭제된 액션에 맞춰 동적 커맨드도 즉시 동기화됩니다 (`syncActionCommands`). 액션이 사라져도 사용자가 등록한 키바인딩 항목은 `keybindings.json`에 남지만, 해당 커맨드가 없으면 VS Code가 조용히 무시하므로 무해합니다.
+- `id`가 없는 폴더·구분선·액션은 등록 대상이 아닙니다.
+- 커맨드 ID 도출은 단일 함수(`buildActionCommandId`)에 있으며 **bijective percent-encoding**을 사용합니다. `[A-Za-z0-9_.-]` 문자는 그대로 유지되어 일반적인 ID(`fw.build`, `defaultButton.showEnv`)는 keybindings.json에서 자연스럽게 보입니다. 그 외 문자(공백, `/`, `:`, 한글 등)는 UTF-8 바이트별로 `%HH`로 인코딩되므로 distinct ID가 distinct 커맨드 ID로 매핑되어 collision이 구조적으로 발생하지 않습니다.
+
 ### 기본 구조
 
 `actions.json` 파일은 최상위에 객체 배열을 가집니다. 각 객체는 다음 중 하나일 수 있습니다.

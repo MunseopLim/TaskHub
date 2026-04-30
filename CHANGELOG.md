@@ -29,6 +29,35 @@
 =====================================================================
 -->
 
+## [0.4.23] - 2026-05-01
+
+### 추가 — 액션별 키바인딩 1급 지원 v1 (TODO §2.1, Phase 1+2)
+
+#### High (UX impact — Actions 패널 클릭이 유일한 진입점이던 한계 해소)
+- **`id`가 있는 모든 액션을 `taskhub.runAction.<id>` VS Code 커맨드로 자동 노출**: 사용자는 자신의 `keybindings.json`에서 액션 id에 키를 매핑하는 것만으로 어디서든 액션을 실행할 수 있습니다. tasks.json 대비 가장 큰 약점이었던 "키 한 방"을 해소.
+- **Actions 패널 우클릭 → "Assign Shortcut"**: 클릭 시 VS Code의 Keyboard Shortcuts UI가 해당 액션의 커맨드 id로 미리 필터링되어 열리고, 사용자는 평소처럼 키를 입력해 등록합니다. 확장이 사용자 `keybindings.json`을 직접 수정하지 않으므로 충돌·`when` 절·플랫폼별 차이는 모두 VS Code 기본 UI에서 다룰 수 있고, 자동 동기화로 인한 데이터 손실 위험도 없음.
+
+#### 내부 구조
+- **`syncActionCommands` diff-sync**: 활성화 시 1회 + `actions.json` / preset / 워크스페이스 watcher 등 cache invalidation 지점마다 `refreshActionsAndCommands(context, mainViewProvider)`가 invalidate → sync → refresh 3단계를 수행. `Map<commandId, Disposable>` 비교로 추가/제거된 항목만 register/dispose. ([src/extension.ts](src/extension.ts))
+- **Parse error 시 등록 보존**: `loadAllActions`가 throw하면 (mid-edit save 등) 기존 등록을 그대로 유지 — 사용자 키바인딩이 일시적 invalid JSON 때문에 끊기지 않게 함.
+- **단일 도출 함수 `buildActionCommandId`**: 동적 등록과 `assignShortcut` 핸들러가 같은 함수를 공유. 향후 sanitization 변경 시 한 곳만 바꾸면 양쪽이 자동 일치 — stale 키바인딩 위험을 구조적으로 제거.
+- **Test seam**: `syncActionCommandsFromActions(actions, registry?)`는 `loadAllActions` 우회 + 격리 registry 주입을 허용해 활성화된 확장의 실제 등록과 충돌 없이 단위 검증 가능.
+
+#### 의도적 제외 (v1.5 / v2로 분리)
+- **현재 바인딩된 단축키 표시**: 동적 커맨드는 `package.json` 정적 `contributes.keybindings`에 없으므로 `keybindings.json`을 jsonc로 직접 읽어야 함. 비용·복잡도가 v1보다 한 단계 높아 v1.5로 분리.
+- **`actions.json`의 선언형 `keybinding` 필드 + `Sync Keybindings` 커맨드**: stale entry 처리 UX(자동 정리는 데이터 손실 위험)가 큰 작업이라 v2로 분리. v1은 사용자가 직접 VS Code UI에서 키를 등록하는 경로만 제공.
+
+#### High — 1차 리뷰 후속 수정 (fresh window에서 키바인딩 미작동)
+- **`onStartupFinished` activation event 추가** ([package.json](package.json:26)): 동적 커맨드는 `contributes.commands`에 없어서 VS Code의 `onCommand:<id>` 자동 활성화가 작동하지 않습니다. C/C++ 파일이나 TaskHub 사이드바를 먼저 열지 않으면, 사용자가 `keybindings.json`에 등록한 키를 눌러도 확장이 활성화되지 않아 커맨드를 찾지 못하는 회귀가 있었음. `onStartupFinished`는 워크벤치 복원 후(블로킹 없이) 활성화를 보장 — v1의 핵심 가치 "키 한 방"이 fresh window 첫 키 입력에서도 작동하도록 함.
+
+#### Medium — 1차 리뷰 후속 수정 (id sanitizer collision로 인한 wrong-action 실행)
+- **`buildActionCommandId`를 bijective percent-encoding으로 교체** ([src/extension.ts](src/extension.ts:351)): 초기 구현은 `[^A-Za-z0-9_.-]/g → _`로 lossy하게 sanitize했고, 이 방식에서는 `a/b`와 `a:b`처럼 distinct ID가 같은 command id `a_b`로 collapse되어 `Assign Shortcut`이 양쪽 액션을 같은 키바인딩 entry에 묶는 문제가 있었음. **스키마 패턴 강제 안 — 이미 사용자 `actions.json`에 들어있을 수 있는 ID(`Build Firmware`, `flash:prod`, 한글 등)를 patch 버전에서 schema-fail로 만드는 건 panel을 빈 상태로 만드는 더 큰 회귀임 (2차 리뷰 지적).** 대신 안전 알파벳은 그대로 두고 그 외 바이트만 `%HH`로 인코딩 — `fw.build` 같은 일반 ID는 출력 변화 없음, 그 외 ID는 distinct → distinct 보장. `%` 자체도 인코딩되어 unambiguously reversible. 회귀 가드: `IT-086` (`fw.build` round-trip + `a/b`·`a:b` distinct + `%` self-encoding).
+
+#### Medium — 1차 리뷰 후속 수정 (키바인딩 경로의 이중 에러 알림)
+- **`taskhub.executeActionById`에 pipeline 실패 catch 추가** ([src/extension.ts](src/extension.ts:3171)): 클릭 경로 `taskhub.executeAction`은 `executeAction` 실패를 catch해서 outputChannel에만 기록하는데, 키바인딩이 통하는 `executeActionById`는 `await executeAction(...)`를 그대로 노출해 reject됐음. `handleActionFailure`가 이미 사용자 메시지를 띄운 뒤 throw하므로, 키바인딩 실행에서는 VS Code의 generic "command failed" 토스트가 그 위에 한 번 더 뜨는 회귀가 있었음. 클릭 경로와 동일한 catch로 통일.
+
+**테스트**: 신규 4케이스 (IT-083 등록 / IT-084 dispose / IT-085 rename / IT-086 command id bijective encoding).
+
 ## [0.4.22] - 2026-05-01
 
 ### 추가 — Problem Matcher / 진단 통합 (TODO §3.1)

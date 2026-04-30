@@ -97,6 +97,16 @@ TaskHub/
 *   **변수 치환**: `${task_id.property}` 형식으로 파이프라인 간 데이터 전달
 *   **파일 감시**: debounce({ run, cancel }) 패턴으로 JSON 변경 감지
 
+### 2.1. 동적 커맨드 등록 (`syncActionCommands`)
+
+`actions.json`의 모든 액션은 `taskhub.runAction.<sanitized id>` 형태의 VS Code 커맨드로 노출되어, 사용자가 키바인딩을 직접 매핑할 수 있다 (자세한 사용자 흐름은 [features.md "액션에 단축키 할당"](./features.md#액션에-단축키-할당) 참조).
+
+* **저장소**: `Map<commandId, vscode.Disposable>` (모듈 스코프 `actionCommandRegistrations`).
+* **Diff sync**: 활성화 시 1회 + `actions.json` / preset / 워크스페이스 watcher 등 cache invalidation 지점마다 `refreshActionsAndCommands(context, mainViewProvider)`를 호출 → `loadAllActions` → 추가/제거된 항목만 register/dispose.
+* **Parse error 시 동작**: `loadAllActions`가 throw하면 (mid-edit 저장 등) 기존 등록을 그대로 유지한다. 사용자 키바인딩이 일시적 invalid JSON 때문에 끊기는 것을 방지하기 위함.
+* **Deactivate**: `disposeAllActionCommands()`가 `context.subscriptions`로 등록되어 있어 partial state와 무관하게 일괄 dispose된다.
+* **Test seam**: `syncActionCommandsFromActions(actions, registry?)`는 `loadAllActions`를 거치지 않는 하위 함수로, 테스트가 격리된 registry를 넘겨 실제 활성화 등록과 충돌 없이 동작 검증할 수 있게 한다.
+
 ### 3. C/C++ Hover 모듈
 
 `numberBaseHoverProvider.ts`가 진입점 (HoverProvider 구현)이며, 내부적으로 다음 모듈을 호출합니다:
@@ -158,13 +168,14 @@ interface FavoriteEntry {
 TaskHub 확장은 다음 상황에서 활성화된다:
 
 * `package.json`의 `activationEvents`에 지정된 이벤트가 발생:
+  * `onStartupFinished` — 워크벤치 복원이 끝난 시점(블로킹 없이). 동적으로 등록되는 `taskhub.runAction.<id>` 커맨드는 `contributes.commands`에 없어서 VS Code의 `onCommand:<id>` 자동 활성화가 작동하지 않으므로, 사용자가 `keybindings.json`에 매핑한 키를 fresh window에서도 작동시키려면 활성화가 워크벤치 시작 직후에 일어나야 한다.
   * `onLanguage:c` — C 소스 파일 열림
   * `onLanguage:cpp` — C++ 소스 파일 열림
 * `contributes.views`의 `mainView.*` 트리가 보이게 됨 (H 아이콘 클릭) — 암시적 활성화.
 * `contributes.commands`에 정의된 커맨드 호출 — 암시적 활성화.
 * `contributes.customEditors`의 대상 파일(`*.hex`, `*.bin`, …) 열림 — 암시적 활성화.
 
-C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어 `vscode.languages.registerHoverProvider(...)`가 실행되어야 하므로, 활성화 이벤트에 언어를 명시한다.
+C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어 `vscode.languages.registerHoverProvider(...)`가 실행되어야 하므로, 활성화 이벤트에 언어를 명시한다 (`onStartupFinished`도 같은 보장을 주지만, 명시 유지로 의도를 분명히 둔다).
 
 ### 활성화 비용 최적화
 

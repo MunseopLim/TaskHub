@@ -77,6 +77,10 @@
 | IT-040 | 동일 path·title, 다른 line 구분 | 같은 파일의 서로 다른 줄 북마크가 `line` 을 기준으로 정확히 하나만 제거됨 |
 | IT-041 | 매칭 없는 target 은 no-op | 식별자 4종 중 하나라도 어긋나는 target 은 기존 리스트를 그대로 반환 |
 | IT-042 | 동일 path·title, 다른 group 구분 | `group` 이 다르면 별개 항목으로 취급되어 target 만 제거 |
+| IT-083 | 액션마다 `taskhub.runAction.<id>` 동적 등록 | `syncActionCommandsFromActions`가 action에는 커맨드를 등록하고 folder/separator(액션 정의 없음)에는 등록하지 않는다 |
+| IT-084 | 액션 제거 시 커맨드 dispose | 두 액션을 등록한 뒤 하나를 빼고 다시 sync 하면 사라진 액션의 등록만 disposed되고 살아남은 등록은 그대로 |
+| IT-085 | 액션 id 변경은 옛 등록 dispose + 새 등록 register | `old.id` → `new.id` 변경 후 registry size가 1로 유지되어 leak 없음 |
+| IT-086 | command id 스킴 = bijective percent-encoding | `buildActionCommandId`가 `taskhub.runAction.<id>` 프리픽스를 유지하면서 `[A-Za-z0-9_.-]`는 그대로, 그 외 UTF-8 바이트는 `%HH`로 인코딩. 안전 ID는 round-trip 무변화 + 불안전 ID(`a/b` vs `a:b`)는 distinct 출력으로 collision 차단. `%` 자체도 인코딩되어 reversible. 1차 리뷰 후속 수정의 핵심 회귀 가드 |
 
 ### Archive Task Pipeline
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
