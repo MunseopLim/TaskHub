@@ -8,6 +8,7 @@ import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteViewProvider, loadFavor
 import { serializeFavorites } from '../extension';
 import { Link, LinkGroup, LinkViewProvider } from '../providers/linkViewProvider';
 import { Action, Folder, MainViewProvider } from '../providers/mainViewProvider';
+import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
 import { ActionItem } from '../schema';
 
 /**
@@ -194,6 +195,64 @@ suite('View provider integration', function () {
         assert.strictEqual(folderChildren[0].contextValue, 'action');
         assert.strictEqual((folderChildren[0].iconPath as vscode.ThemeIcon).id, 'debug-alt');
         assert.strictEqual((folderChildren[0] as Action).command?.command, 'taskhub.executeAction');
+    });
+
+    test('IT-068: HistoryItem.description에 status + 시각 + 소요 시간 배지가 노출됨', async () => {
+        // Pins TODO §5.4 (History panel placement): each rendered
+        // HistoryItem carries a "last run" badge in its description slot.
+        // Actions panel intentionally has no equivalent badge — the
+        // user-facing "did it run today?" question is answered on the
+        // history surface, where the data naturally lives.
+        const ctx = makeContext();
+        const provider = new HistoryProvider(ctx);
+        const now = Date.now();
+        // newest-first via repeated addHistoryEntry (which unshifts).
+        provider.addHistoryEntry({ actionId: 'old', actionTitle: 'Old', timestamp: now - 7_200_000, status: 'failure', output: 'boom' });
+        provider.updateHistoryStatus('old', now - 7_200_000, 'failure', 'boom', 99);
+        provider.addHistoryEntry({ actionId: 'flash', actionTitle: 'Flash', timestamp: now - 30_000, status: 'running' });
+        provider.updateHistoryStatus('flash', now - 30_000, 'failure', 'broken', 45);
+        provider.addHistoryEntry({ actionId: 'build', actionTitle: 'Build', timestamp: now - 60_000, status: 'running' });
+        provider.updateHistoryStatus('build', now - 60_000, 'success', undefined, 1234);
+        // Still-running entry — must NOT carry a badge.
+        provider.addHistoryEntry({ actionId: 'live', actionTitle: 'Live', timestamp: now - 1_000, status: 'running' });
+
+        const items = await provider.getChildren();
+        const byId = new Map(items.map(i => [i.getEntry().actionId, i]));
+
+        const buildItem = byId.get('build')!;
+        assert.ok(typeof buildItem.description === 'string', 'build should have a description badge');
+        assert.ok((buildItem.description as string).startsWith('✓'), `expected ✓ prefix, got ${buildItem.description}`);
+        assert.ok((buildItem.description as string).includes('1.2s'), `expected duration "1.2s" in ${buildItem.description}`);
+
+        const flashItem = byId.get('flash')!;
+        assert.ok(typeof flashItem.description === 'string', 'flash should have a description badge');
+        assert.ok((flashItem.description as string).startsWith('✗'), `expected ✗ prefix, got ${flashItem.description}`);
+        assert.ok((flashItem.description as string).includes('45ms'), `expected duration "45ms" in ${flashItem.description}`);
+
+        // Running entry: spinner-equivalent iconPath only, no description.
+        const liveItem = byId.get('live')!;
+        assert.strictEqual(liveItem.description, undefined);
+    });
+
+    test('IT-068b: MainViewProvider가 history를 더 이상 읽지 않아 Action TreeItem에는 배지가 없다 (회귀 가드)', async () => {
+        // Symmetric assertion to IT-068: badges live exclusively on the
+        // History panel now. If a future refactor accidentally re-adds
+        // a description on Action TreeItem (e.g. "오늘 빌드 됐었지?"
+        // request reverts the move), this test catches it before it
+        // ships.
+        const context = makeContext();
+        const actions: ActionItem[] = [
+            {
+                id: 'build',
+                title: 'Build',
+                action: { description: 'Build', tasks: [{ id: 'compile', type: 'shell', command: 'echo' }] }
+            }
+        ];
+        const provider = new MainViewProvider(context, () => actions);
+        const roots = await provider.getChildren();
+        const buildItem = roots[1] as Action;
+        assert.strictEqual(buildItem.description, undefined,
+            'Action TreeItem must not render a last-run badge — that lives on HistoryItem');
     });
 
     suite('removeFavoriteByIdentity (stale favorite removal)', () => {

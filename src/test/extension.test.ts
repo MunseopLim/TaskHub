@@ -44,7 +44,14 @@ import {
 import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
 import { LinkViewProvider } from '../providers/linkViewProvider';
 import { FavoriteViewProvider } from '../providers/favoriteViewProvider';
-import { HistoryProvider, HistoryEntry } from '../providers/historyProvider';
+import {
+	HistoryProvider,
+	HistoryEntry,
+	formatDuration,
+	formatHistoryTimestamp,
+	formatLastRunBadge,
+	startHistoryAutoRefresh,
+} from '../providers/historyProvider';
 import * as os from 'os';
 import * as path from 'path';
 import { ActionItem } from '../schema';
@@ -1149,6 +1156,152 @@ suite('Extension Test Suite', () => {
 		});
 	});
 
+	suite('formatDuration', () => {
+		// Pure formatter — pin the unit boundaries used by the action-card
+		// badge. If a future refactor changes the breakpoints (e.g. switches
+		// to "ms / s / min / hour" thresholds) these tests will tell us.
+		test('sub-second values round to whole milliseconds', () => {
+			assert.strictEqual(formatDuration(0), '0ms');
+			assert.strictEqual(formatDuration(1), '1ms');
+			assert.strictEqual(formatDuration(999), '999ms');
+			assert.strictEqual(formatDuration(123.4), '123ms');
+			assert.strictEqual(formatDuration(123.6), '124ms');
+		});
+
+		test('values from 1s up to 60s use "N.Ns" (truncated, never rounds up to 60.0s)', () => {
+			assert.strictEqual(formatDuration(1000), '1.0s');
+			assert.strictEqual(formatDuration(1234), '1.2s');
+			// Truncation (not rounding) — 59999ms must not display as
+			// "60.0s" because the next branch (≥60_000ms) renders that as "1m".
+			assert.strictEqual(formatDuration(59999), '59.9s');
+		});
+
+		test('values from 1min up to 60min use "Nm" or "Nm Ms"', () => {
+			assert.strictEqual(formatDuration(60_000), '1m');
+			assert.strictEqual(formatDuration(75_000), '1m 15s');
+			assert.strictEqual(formatDuration(3_599_000), '59m 59s');
+		});
+
+		test('values from 1h use "Hh" or "Hh Mm"', () => {
+			assert.strictEqual(formatDuration(3_600_000), '1h');
+			assert.strictEqual(formatDuration(3_900_000), '1h 5m');
+			assert.strictEqual(formatDuration(7_200_000), '2h');
+		});
+
+		test('non-finite or negative inputs collapse to "0ms"', () => {
+			assert.strictEqual(formatDuration(-5), '0ms');
+			assert.strictEqual(formatDuration(NaN), '0ms');
+			assert.strictEqual(formatDuration(Infinity), '0ms');
+		});
+	});
+
+	suite('formatHistoryTimestamp', () => {
+		// `now` is injected into the formatter so these tests are
+		// deterministic regardless of when CI runs.
+		const now = new Date(2026, 3, 30, 14, 30, 0).getTime(); // 2026-04-30 14:30
+
+		test('same calendar day shows HH:mm only', () => {
+			const ts = new Date(2026, 3, 30, 9, 5, 0).getTime();
+			assert.strictEqual(formatHistoryTimestamp(ts, now, 'ko'), '09:05');
+			assert.strictEqual(formatHistoryTimestamp(ts, now, 'en'), '09:05');
+		});
+
+		test('previous day uses locale-specific "yesterday" prefix', () => {
+			const ts = new Date(2026, 3, 29, 18, 0, 0).getTime();
+			assert.strictEqual(formatHistoryTimestamp(ts, now, 'ko'), '어제 18:00');
+			assert.strictEqual(formatHistoryTimestamp(ts, now, 'en'), 'Yest 18:00');
+		});
+
+		test('older dates show MM/DD', () => {
+			const ts = new Date(2026, 2, 15, 23, 59, 0).getTime();
+			assert.strictEqual(formatHistoryTimestamp(ts, now, 'ko'), '03/15');
+		});
+
+		test('month/year boundary still resolves "yesterday" correctly', () => {
+			const newYearNow = new Date(2026, 0, 1, 10, 0, 0).getTime();
+			const newYearEve = new Date(2025, 11, 31, 23, 30, 0).getTime();
+			assert.strictEqual(formatHistoryTimestamp(newYearEve, newYearNow, 'ko'), '어제 23:30');
+		});
+	});
+
+	suite('formatLastRunBadge', () => {
+		const now = new Date(2026, 3, 30, 14, 30, 0).getTime();
+
+		function entry(partial: Partial<HistoryEntry>): HistoryEntry {
+			return {
+				actionId: 'a',
+				actionTitle: 'A',
+				timestamp: new Date(2026, 3, 30, 12, 0, 0).getTime(),
+				status: 'success',
+				...partial
+			};
+		}
+
+		test('returns undefined when no entry is provided', () => {
+			assert.strictEqual(formatLastRunBadge(undefined, now, 'ko'), undefined);
+		});
+
+		test('returns undefined for entries still running (icon shows spinner instead)', () => {
+			assert.strictEqual(formatLastRunBadge(entry({ status: 'running' }), now, 'ko'), undefined);
+		});
+
+		test('success entry with duration → "✓ HH:mm · duration"', () => {
+			const e = entry({ status: 'success', durationMs: 1234 });
+			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '✓ 12:00 · 1.2s');
+		});
+
+		test('failure entry with duration → "✗ HH:mm · duration"', () => {
+			const e = entry({ status: 'failure', durationMs: 45 });
+			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '✗ 12:00 · 45ms');
+		});
+
+		test('entry without durationMs (legacy or partial) omits the duration suffix', () => {
+			const e = entry({ status: 'success' });
+			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '✓ 12:00');
+		});
+
+		test('negative durationMs (clock-skew leak) renders as "0ms" rather than being dropped', () => {
+			// `executeAction` clamps durationMs with Math.max(0, ...) at
+			// write time, but the badge formatter is the safety net. If a
+			// negative value reaches it (legacy entry, hypothetical buggy
+			// writer), we'd rather show "ran instantly" than silently hide
+			// the duration as the previous `>= 0` guard did.
+			const e = entry({ status: 'success', durationMs: -5 });
+			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '✓ 12:00 · 0ms');
+		});
+
+		test('entry from yesterday composes both prefix and duration', () => {
+			const e = entry({
+				status: 'failure',
+				timestamp: new Date(2026, 3, 29, 9, 0, 0).getTime(),
+				durationMs: 2500
+			});
+			assert.strictEqual(formatLastRunBadge(e, now, 'en'), '✗ Yest 09:00 · 2.5s');
+		});
+	});
+
+	suite('startHistoryAutoRefresh', () => {
+		// Pins the periodic-refresh wiring that keeps the History panel
+		// badge fresh across midnight (TreeItem.description doesn't
+		// auto-refresh, so without this hook a session left open would
+		// keep showing yesterday's "23:30" forever).
+
+		test('fires refresh() on every interval and stops cleanly on dispose', async () => {
+			let count = 0;
+			const fakeProvider = { refresh: () => { count++; } };
+			const disposable = startHistoryAutoRefresh(fakeProvider, 30); // 30ms
+			// Wait long enough for ~3 ticks to fire.
+			await new Promise(r => setTimeout(r, 110));
+			disposable.dispose();
+			const afterDispose = count;
+			// Anything ≥ 2 proves the timer fires repeatedly.
+			assert.ok(afterDispose >= 2, `expected at least 2 refresh calls, got ${afterDispose}`);
+			// Now wait again — count must NOT keep growing after dispose.
+			await new Promise(r => setTimeout(r, 80));
+			assert.strictEqual(count, afterDispose, 'dispose() must clear the interval');
+		});
+	});
+
 	suite('shouldRecordTaskInput', () => {
 		// Pins which task types contribute to history `inputs` for replay
 		// (and which are deliberately excluded — `password: true` opts out).
@@ -1335,6 +1488,33 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(history[0].actionId, 'only');
 			assert.strictEqual(history[0].status, 'success');
 			assert.strictEqual(history[0].output, undefined);
+		});
+
+		test('updateHistoryStatus persists durationMs on terminal transition and round-trips', () => {
+			const ctx = createMockContext();
+			const p1 = new HistoryProvider(ctx);
+			const ts = 100;
+			p1.addHistoryEntry(makeEntry('timed', 'running', ts));
+			p1.updateHistoryStatus('timed', ts, 'success', undefined, 1234);
+			// In-memory check.
+			assert.strictEqual(p1.getHistory()[0].durationMs, 1234);
+			// And it survives a fresh provider on the same workspaceState.
+			const p2 = new HistoryProvider(ctx);
+			assert.strictEqual(p2.getHistory()[0].durationMs, 1234);
+		});
+
+		test('updateHistoryStatus without durationMs leaves an existing duration alone', () => {
+			const provider = new HistoryProvider(createMockContext());
+			const ts = 200;
+			provider.addHistoryEntry(makeEntry('preserve', 'running', ts));
+			provider.updateHistoryStatus('preserve', ts, 'success', undefined, 500);
+			// Subsequent update without durationMs (e.g., a status fixup) must
+			// not erase the previously recorded duration.
+			provider.updateHistoryStatus('preserve', ts, 'failure', 'late error');
+			const entry = provider.getHistory()[0];
+			assert.strictEqual(entry.durationMs, 500);
+			assert.strictEqual(entry.status, 'failure');
+			assert.strictEqual(entry.output, 'late error');
 		});
 
 		test('updateHistoryStatus preserves existing output when called without an output arg', () => {

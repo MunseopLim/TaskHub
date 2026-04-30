@@ -1055,6 +1055,7 @@ import {
     HistoryEntry,
     HistoryItem,
     HistoryProvider,
+    startHistoryAutoRefresh,
 } from './providers/historyProvider';
 
 import { normalizeLineNumber } from './providers/normalization';
@@ -1564,9 +1565,14 @@ export async function executeAction(
         });
         handleActionSuccess(id, action, showTaskStatus);
 
-        // Update history to success
+        // Update history to success — `Math.max(0, ...)` defends against
+        // wall-clock skew (NTP backward correction) producing a negative
+        // duration that would persist into workspaceState. Display-side
+        // also handles negatives (formatDuration → "0ms"), but clamping
+        // here keeps the stored data clean for any future consumer.
         if (historyProvider) {
-            historyProvider.updateHistoryStatus(id, timestamp, 'success');
+            const durationMs = Math.max(0, Date.now() - timestamp);
+            historyProvider.updateHistoryStatus(id, timestamp, 'success', undefined, durationMs);
             historyProvider.setHistoryInputs(id, timestamp, recordInputs);
         }
     } catch (error: any) {
@@ -1576,7 +1582,8 @@ export async function executeAction(
             // Update history to failure
             if (historyProvider) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                historyProvider.updateHistoryStatus(id, timestamp, 'failure', errorMessage);
+                const durationMs = Math.max(0, Date.now() - timestamp);
+                historyProvider.updateHistoryStatus(id, timestamp, 'failure', errorMessage, durationMs);
                 // Persist whatever inputs were captured before the failure
                 // — partial replay is still useful when a later task fails.
                 historyProvider.setHistoryInputs(id, timestamp, recordInputs);
@@ -1586,7 +1593,8 @@ export async function executeAction(
         } else {
             // Action was manually stopped
             if (historyProvider) {
-                historyProvider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user');
+                const durationMs = Math.max(0, Date.now() - timestamp);
+                historyProvider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user', durationMs);
                 historyProvider.setHistoryInputs(id, timestamp, recordInputs);
             }
         }
@@ -2608,6 +2616,20 @@ export function activate(context: vscode.ExtensionContext) {
     // does not drag in JSON reads for links/favorites/history.
     context.subscriptions.push(builtInLinkViewProvider.view, workspaceLinkViewProvider.view, favoriteViewProvider.view, historyProvider.view);
 
+    // History last-run badges contain a relative-day reference
+    // (`HH:mm` / `어제 HH:mm` / `MM/DD`) and TreeItem.description does not
+    // auto-refresh, so a session that spans midnight would otherwise keep
+    // showing yesterday's `23:30` as today's. Two complementary refresh
+    // hooks fix that:
+    //   1. Hourly background tick — covers users who keep the History
+    //      panel visible 24/7.
+    //   2. onDidChangeVisibility — covers users who switch sidebar views
+    //      and come back; ensures fresh time the moment they look.
+    context.subscriptions.push(startHistoryAutoRefresh(historyProvider, 60 * 60 * 1000));
+    context.subscriptions.push(historyProvider.view.onDidChangeVisibility(e => {
+        if (e.visible) { historyProvider.refresh(); }
+    }));
+
     // Register hover provider for number base conversion and SFR bit fields in C/C++ files
     const numberBaseHoverProvider = new NumberBaseHoverProvider();
     context.subscriptions.push(
@@ -2806,7 +2828,8 @@ export function activate(context: vscode.ExtensionContext) {
             // Update history status to failure when manually stopped
             const timestamp = actionStartTimestamps.get(id);
             if (historyProvider && timestamp) {
-                historyProvider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user');
+                const durationMs = Math.max(0, Date.now() - timestamp);
+                historyProvider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user', durationMs);
             }
         }
     }));

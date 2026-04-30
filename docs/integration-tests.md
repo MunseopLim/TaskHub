@@ -115,6 +115,15 @@
 | IT-065 | `password: true` inputBox는 inputs에 저장되지 않음 | 비밀번호 task의 입력값은 `recordInputs`에 누적되지 않으며, history entry 직렬화에 비밀 문자열이 포함되지 않음 |
 | IT-066 | 재실행 시에도 인터랙티브 task의 output 후처리가 실행됨 | preset이 type-specific dispatch를 우회하더라도 공통 후처리(capture + `passTheResultToNextTask` output 처리)는 그대로 실행되어 `output.mode: 'file'` 등이 정상 작동 |
 
+### Last-run 배지 (TODO §5.4)
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-067 | executeAction은 success/failure 모두 durationMs를 기록 | success 경로와 capture 실패로 reject되는 failure 경로 모두에서 `HistoryEntry.durationMs`가 비음수 정수로 저장됨 |
+| IT-068 | HistoryItem.description에 status + 시각 + 소요 시간 배지가 노출 | 종료된 entry는 `✓/✗ 시각 · 소요시간` 형태로 description이 채워지고, 진행 중(`running`) entry는 description이 비어 있음 (스피너 아이콘이 신호 역할) |
+| IT-068b | Action TreeItem에는 last-run 배지가 없다 | History 패널로 이동한 배지가 실수로 Actions 패널에 다시 추가되는 회귀를 가드 |
+
 ### Task Output Flow
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
 
@@ -340,6 +349,18 @@ confirm task에서 취소 라벨이 선택되면 pipeline이 reject되고 다음
 ### IT-066: 재실행 시에도 인터랙티브 task의 output 후처리가 실행됨
 
 `executeSingleTask`는 `presetResult`가 있으면 type-specific dispatch만 우회하고, 공통 후처리(capture + `passTheResultToNextTask && output` 블록)는 정상 경로와 동일하게 실행합니다. 이 시나리오는 `inputBox`에 `output: { mode: 'file', content: 'post-processing fired' }`을 단독으로 둔 액션을 `presetInputs`로 재실행하여, 다이얼로그는 열리지 않으면서도 파일이 정확히 기록되는지 검증합니다. 초기 구현은 preset 경로가 `executeSingleTask` 자체를 우회하는 형태였고, 이때 `output.mode: 'file'` 같은 후처리가 조용히 스킵되는 회귀가 있었습니다 — 이 테스트가 그 회귀를 직접 차단합니다. (참고: task의 `output.content`는 *해당 task 자신*의 결과를 참조할 수 없습니다 — `interpolationContext`가 task 시작 *전*에 구축되기 때문이며, 이는 정상 경로에서도 동일합니다. 그래서 본 테스트는 정적 content 문자열을 사용합니다.)
+
+### IT-067: executeAction은 success/failure 모두 history entry에 durationMs를 기록
+
+`executeAction`은 종료 시점에 `Date.now() - timestamp`로 계산한 wall-clock 소요시간을 `updateHistoryStatus`의 5번째 인자로 넘겨 `HistoryEntry.durationMs`에 저장합니다. 이 시나리오는 (a) 단순 stringManipulation 성공 경로, (b) capture regex 실패로 reject되는 실패 경로 두 가지에 대해 entry의 `status`가 각각 `success`/`failure`로 기록되고 `durationMs`가 number이며 비음수임을 검증합니다. 비음수 검사는 wall-clock 단조성에 의존하지 않도록 방어적으로 둡니다 (NTP 보정 등 극단 케이스에서도 0 이상이 보장됨).
+
+### IT-068: HistoryItem.description에 status + 시각 + 소요 시간 배지가 노출
+
+배지는 액션 카드(Actions 패널)가 아니라 History 패널에 위치합니다 — 시각·소요 시간 데이터는 `HistoryEntry` 자체의 속성이고, 같은 정보를 두 표면에 두지 않는 게 fitness 좋다고 판단했습니다. `HistoryItem` 생성자가 `formatLastRunBadge(entry, Date.now(), lang)`로 `description`을 채우며, 종료된(`success`/`failure`) entry만 배지를 가집니다. 본 시나리오는 (a) 성공/실패 entry가 각각 `✓`/`✗` 접두로 표현되는지, (b) duration 문자열(`1.2s`/`45ms`)이 포함되는지, (c) 진행 중(`running`) entry는 description이 `undefined`로 비어 있는지 세 가지를 확인합니다. 시각 포맷 분기는 `formatHistoryTimestamp` 단위 테스트에서 별도로 검증합니다.
+
+### IT-068b: Action TreeItem에는 last-run 배지가 없다 (회귀 가드)
+
+IT-068의 대칭 가드입니다. 이전 구현은 `MainViewProvider`가 `loadHistory` 콜백을 받아 `Action` TreeItem.description에 배지를 그렸으나, 같은 정보가 두 표면에 분산되는 게 디자인적으로 약하다고 판단해 History 패널로 일원화했습니다. 본 테스트는 `Action` TreeItem.description이 항상 `undefined`임을 명시적으로 고정해, 향후 "오늘 빌드 됐었지?" 류 요구로 누군가 재차 Actions 패널에 배지를 붙이는 회귀를 PR 단계에서 차단합니다.
 
 ## 시나리오 추가 절차
 

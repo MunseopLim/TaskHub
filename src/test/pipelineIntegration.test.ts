@@ -1418,6 +1418,64 @@ try {
             }
         });
 
+        test('IT-067: executeAction은 success/failure 모두 history entry에 durationMs를 기록한다', async () => {
+            // Pins TODO §5.4 scope: every terminal transition surfaced by
+            // `executeAction` must include a non-negative duration so each
+            // HistoryItem can render "✓ 14:30 · 1.2s" badges in its
+            // description slot. Actions panel intentionally does NOT
+            // render this badge — see IT-068b.
+            const originalShowError = vscode.window.showErrorMessage;
+            (vscode.window as any).showErrorMessage = async () => undefined;
+            try {
+                const context = makeFakeContext();
+
+                // Success path
+                const okItem: ActionItem = {
+                    id: 'it067-ok',
+                    title: 'IT-067 ok',
+                    action: {
+                        description: 'IT-067 ok',
+                        tasks: [{ id: 't', type: 'stringManipulation', function: 'trim', input: 'x' }]
+                    }
+                };
+                const okHistory = new HistoryProvider(context);
+                const okMain = new MainViewProvider(context, () => [okItem]);
+                await executeAction(okItem, context, okMain, okHistory);
+                const okEntry = okHistory.getHistory()[0];
+                assert.strictEqual(okEntry.status, 'success');
+                assert.strictEqual(typeof okEntry.durationMs, 'number',
+                    'success entry must record durationMs');
+                assert.ok(okEntry.durationMs! >= 0, `non-negative duration expected, got ${okEntry.durationMs}`);
+
+                // Failure path (capture failure → executeAction rethrows)
+                const failItem: ActionItem = {
+                    id: 'it067-fail',
+                    title: 'IT-067 fail',
+                    action: {
+                        description: 'IT-067 fail',
+                        tasks: [{
+                            id: 'boom',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'x',
+                            passTheResultToNextTask: true,
+                            output: { capture: { name: 'v', regex: '(' } }
+                        }]
+                    }
+                };
+                const failHistory = new HistoryProvider(context);
+                const failMain = new MainViewProvider(context, () => [failItem]);
+                await assert.rejects(() => executeAction(failItem, context, failMain, failHistory));
+                const failEntry = failHistory.getHistory()[0];
+                assert.strictEqual(failEntry.status, 'failure');
+                assert.strictEqual(typeof failEntry.durationMs, 'number',
+                    'failure entry must record durationMs');
+                assert.ok(failEntry.durationMs! >= 0, `non-negative duration expected, got ${failEntry.durationMs}`);
+            } finally {
+                (vscode.window as any).showErrorMessage = originalShowError;
+            }
+        });
+
         test('IT-066: 재실행 시에도 인터랙티브 task의 output.mode=file 후처리가 실행됨', async () => {
             // Regression guard for the silent skip the reviewer flagged: when
             // a preset short-circuited the type-specific dispatch, the

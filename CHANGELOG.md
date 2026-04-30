@@ -29,6 +29,28 @@
 =====================================================================
 -->
 
+## [0.4.20] - 2026-04-30
+
+### 추가 — History 패널의 "Last run" 배지 (TODO §5.4 일부)
+
+#### Medium (UX 개선 / 데이터 모델 확장)
+- **History 항목에 시각 + 소요 시간 배지 표시**: 각 `HistoryItem`의 `description`에 `✓ 14:30 · 1.2s` / `✗ 어제 09:15 · 45ms` 형태로 상태·실행 시각·소요 시간이 노출됩니다. 확장 재시작 후에도 그대로 남아 "오늘 빌드 됐었지?"류 질문에 한눈에 답이 됩니다. 진행 중(`running`) entry는 배지 대신 상태 아이콘만 표시. 시각 표기는 같은 날 `HH:mm`, 어제 `어제 HH:mm`/`Yest HH:mm`, 그 이전 `MM/DD`. 소요 시간 표기는 `Nms` / `N.Ns` (truncated, "60.0s" 회피) / `Nm Ms` / `Hh Mm`. ([src/providers/historyProvider.ts](src/providers/historyProvider.ts))
+- **배지 위치는 History 패널 단일**: 시각·소요 시간 데이터는 `HistoryEntry` 자체의 속성이므로 그 데이터가 있는 표면에서만 보여줍니다. Actions 패널의 `Action` TreeItem에는 의도적으로 같은 배지를 두지 않습니다 — 같은 정보를 두 표면에 분산하는 디자인이 약하다고 판단. 회귀 가드는 `IT-068b`로 명시 고정.
+- **데이터 모델 확장**: `HistoryEntry.durationMs?: number` 추가. `executeAction`이 `success`/`failure`/manual-stop 모든 종료 경로에서 `Math.max(0, Date.now() - timestamp)`로 계산해 `updateHistoryStatus`의 5번째 인자로 전달 (clock-skew 음수가 `workspaceState`에 들어가지 않게 clamp). 이전 릴리스 entry는 `durationMs`가 없어 배지에 시각만 표시됨 (호환).
+
+#### 내부 구조
+- **순수 포맷터 export**: `formatDuration(ms)` / `formatHistoryTimestamp(ts, now, lang)` / `formatLastRunBadge(entry, now, lang)`을 [src/providers/historyProvider.ts](src/providers/historyProvider.ts)에서 export. 모두 `now`를 인자로 받아 결정적이며 vscode 의존이 없으므로 단위 테스트로 경계값을 직접 고정.
+- **`HistoryItem` 생성자에서 description 채움**: `vscode.env.language` 기반 `lang` 결정 후 `formatLastRunBadge`로 description 설정. 진행 중 entry는 `undefined` 반환 → description 비움.
+- **`updateHistoryStatus` 시그니처 확장**: 옵셔널 5번째 인자 `durationMs?: number` 추가. 미전달 시 기존 entry의 `durationMs`는 보존됨 (회귀 검출: `updateHistoryStatus without durationMs leaves an existing duration alone` 테스트).
+- **`formatLastRunBadge`의 음수 방어**: `executeAction` 측 `Math.max` clamp가 1차 방어, 표시 측 가드를 `>= 0`에서 `!== undefined`로 완화해 `formatDuration`의 `<0 → "0ms"` 분기가 실제로 작동 (이전에는 dead code). "시간 표시 누락"보다 "0ms 표시"가 정확한 시그널.
+- **자정 경계 stale 방지**: `TreeItem.description`은 자동 갱신되지 않아 자정을 넘긴 세션에서 어제 23:30 항목이 오늘 자정 이후에도 "23:30"으로 남는 케이스가 있었음. `startHistoryAutoRefresh(provider, 60*60*1000)` 시간당 tick + `historyProvider.view.onDidChangeVisibility` 갱신 두 hook을 [src/extension.ts](src/extension.ts)에서 등록해, 켜둔 채 24시간을 넘겨도 다음 시간 tick(또는 패널 재진입) 시점에 배지가 자동 정정됨. 패널이 hidden일 때 tick은 단지 `onDidChangeTreeData` 이벤트만 발생시키고 실제 `getChildren`은 visible 시점에만 호출되므로 비용은 무시할 수준.
+
+#### 범위 한정 (TODO 5.4)
+- 본 릴리스는 TODO §5.4의 두 항목 중 **"마지막 실행 결과 배지: ✓/✗ + 소요 시간"**만 구현합니다. **"빈도 기반 자동 정렬 또는 사용자 지정 핀"**은 의도적으로 제외 — 정렬·핀은 정책 결정이 더 큰 작업이므로 별도 PR에서 다룹니다.
+- 같은 title을 가진 액션이 폴더 두 개에 있을 때 HistoryItem label이 둘 다 동일하게 보이는 disambiguation 문제는 인지하고 있으나 본 PR 범위 외 — `formatActionPath` 활용 여부와 함께 후속에서 처리 예정.
+
+**테스트**: 신규 21케이스 추가 (단위 18: `formatDuration` 5경계 + `formatHistoryTimestamp` 4경계 + `formatLastRunBadge` 7분기(음수 durationMs → "0ms" 포함) + `durationMs` round-trip 2 + `startHistoryAutoRefresh` interval 동작·dispose 1; 통합 3: IT-067 success/failure durationMs 기록, IT-068 HistoryItem 배지 노출, IT-068b Actions 패널 배지 부재 회귀 가드). 전체 920 passing.
+
 ## [0.4.19] - 2026-04-30
 
 ### 추가 — 히스토리 입력값 캡처 및 "Re-run with Saved Inputs" 재실행
