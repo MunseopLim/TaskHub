@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.4.18",
+  "version": "0.4.19",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -284,6 +284,11 @@
         "title": "Re-run Action"
       },
       {
+        "command": "taskhub.rerunFromHistoryWithInputs",
+        "title": "Re-run with Saved Inputs",
+        "icon": "$(run-all)"
+      },
+      {
         "command": "taskhub.viewHistoryOutput",
         "title": "View Output",
         "icon": "$(output)"
@@ -371,6 +376,7 @@
         { "command": "taskhub.deleteLink", "when": "false" },
         { "command": "taskhub.openFavoriteFile", "when": "false" },
         { "command": "taskhub.rerunFromHistory", "when": "false" },
+        { "command": "taskhub.rerunFromHistoryWithInputs", "when": "false" },
         { "command": "taskhub.viewHistoryOutput", "when": "false" },
         { "command": "taskhub.deleteHistoryItem", "when": "false" },
         { "command": "taskhub.exportActionItem", "when": "false" },
@@ -521,14 +527,19 @@
           "group": "inline"
         },
         {
-          "command": "taskhub.viewHistoryOutput",
-          "when": "view == mainView.history && viewItem == historyItemWithOutput",
+          "command": "taskhub.rerunFromHistoryWithInputs",
+          "when": "view == mainView.history && (viewItem == historyItemWithInputs || viewItem == historyItemWithOutputAndInputs)",
           "group": "inline@1"
         },
         {
-          "command": "taskhub.deleteHistoryItem",
-          "when": "view == mainView.history && (viewItem == historyItem || viewItem == historyItemWithOutput)",
+          "command": "taskhub.viewHistoryOutput",
+          "when": "view == mainView.history && (viewItem == historyItemWithOutput || viewItem == historyItemWithOutputAndInputs)",
           "group": "inline@2"
+        },
+        {
+          "command": "taskhub.deleteHistoryItem",
+          "when": "view == mainView.history && (viewItem == historyItem || viewItem == historyItemWithOutput || viewItem == historyItemWithInputs || viewItem == historyItemWithOutputAndInputs)",
+          "group": "inline@3"
         }
       ]
     },

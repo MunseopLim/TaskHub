@@ -1287,6 +1287,244 @@ try {
         });
     });
 
+    suite('History Input Replay', () => {
+        // These tests pin TODO §5.3: capturing interactive task results into
+        // the history entry's `inputs` map and replaying them on rerun so
+        // dialogs do not reopen. The accumulator is mutated in-place by the
+        // pipeline; the lifecycle wrapper (`executeAction`) is what attaches
+        // it to the history entry, so we cover both layers.
+        function makeFakeContext(): vscode.ExtensionContext {
+            const workspaceState = new Map<string, unknown>();
+            return {
+                extensionPath: path.resolve(__dirname, '..', '..'),
+                subscriptions: [],
+                workspaceState: {
+                    get: <T>(key: string, def?: T) =>
+                        workspaceState.has(key) ? (workspaceState.get(key) as T) : def,
+                    update: (key: string, val: unknown) => {
+                        workspaceState.set(key, val);
+                        return Promise.resolve();
+                    },
+                    keys: () => Array.from(workspaceState.keys())
+                },
+                globalState: {
+                    get: <T>(_k: string, d?: T) => d,
+                    update: () => Promise.resolve(),
+                    keys: () => [],
+                    setKeysForSync: () => { /* no-op */ }
+                },
+                extensionMode: vscode.ExtensionMode.Test,
+                extension: { packageJSON: { version: '9.9.9-test' } }
+            } as unknown as vscode.ExtensionContext;
+        }
+
+        test('IT-063: 인터랙티브 task 결과가 history entry.inputs에 누적', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const originalShowInputBox = vscode.window.showInputBox;
+            try {
+                (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) =>
+                    items.find(i => i.label === 'staging');
+                (vscode.window as any).showInputBox = async () => 'release-1';
+
+                const context = makeFakeContext();
+                const actionItem: ActionItem = {
+                    id: 'it043',
+                    title: 'IT-063 Capture Inputs',
+                    action: {
+                        description: 'IT-063',
+                        tasks: [
+                            { id: 'env', type: 'quickPick', items: ['dev', 'staging', 'prod'] },
+                            { id: 'tag', type: 'inputBox', prompt: 'tag' },
+                            // shell task is non-interactive — must NOT appear in inputs
+                            {
+                                id: 'noop',
+                                type: 'stringManipulation',
+                                function: 'trim',
+                                input: '${env.value}-${tag.value}'
+                            }
+                        ]
+                    }
+                };
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                await executeAction(actionItem, context, mainView, history);
+
+                const entries: HistoryEntry[] = history.getHistory();
+                assert.strictEqual(entries.length, 1);
+                assert.deepStrictEqual(entries[0].inputs, {
+                    env: { value: 'staging' },
+                    tag: { value: 'release-1' }
+                });
+                // Non-interactive task id is absent.
+                assert.ok(!(entries[0].inputs as any).noop);
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+                (vscode.window as any).showInputBox = originalShowInputBox;
+            }
+        });
+
+        test('IT-064: presetInputs로 재실행하면 다이얼로그를 열지 않고 저장값을 사용', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const originalShowInputBox = vscode.window.showInputBox;
+            const resultPath = path.join(tempWorkspace, 'it044.txt');
+            let dialogOpened = 0;
+            try {
+                (vscode.window as any).showQuickPick = async () => {
+                    dialogOpened++;
+                    throw new Error('quickPick must not open during replay');
+                };
+                (vscode.window as any).showInputBox = async () => {
+                    dialogOpened++;
+                    throw new Error('inputBox must not open during replay');
+                };
+
+                const action: PipelineAction = {
+                    description: 'IT-064',
+                    tasks: [
+                        { id: 'env', type: 'quickPick', items: ['dev', 'prod'] },
+                        { id: 'tag', type: 'inputBox', prompt: 'tag' },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'env=${env.value};tag=${tag.value}',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: resultPath, overwrite: true }
+                        }
+                    ]
+                };
+
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                await executeActionPipeline(
+                    action,
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it044',
+                    tempWorkspace,
+                    [tempWorkspace],
+                    {
+                        presetInputs: {
+                            env: { value: 'prod' },
+                            tag: { value: 'r-2' }
+                        }
+                    }
+                );
+
+                assert.strictEqual(dialogOpened, 0, 'no dialog should open when presetInputs supplies the values');
+                assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'env=prod;tag=r-2');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+                (vscode.window as any).showInputBox = originalShowInputBox;
+            }
+        });
+
+        test('IT-066: 재실행 시에도 인터랙티브 task의 output.mode=file 후처리가 실행됨', async () => {
+            // Regression guard for the silent skip the reviewer flagged: when
+            // a preset short-circuited the type-specific dispatch, the
+            // shared `passTheResultToNextTask && output` block was never
+            // reached, so an inputBox/quickPick task with
+            // `output: { mode: 'file' }` would write the file on a normal
+            // run but not on replay. We inject a saved value via
+            // presetInputs and assert the output file is still produced.
+            const originalShowInputBox = vscode.window.showInputBox;
+            const resultPath = path.join(tempWorkspace, 'it066.txt');
+            try {
+                (vscode.window as any).showInputBox = async () => {
+                    throw new Error('inputBox must not open during replay');
+                };
+
+                // The inputBox task carries a static `output.content` so we
+                // can assert the post-processing block fired without
+                // depending on self-referential interpolation (a task's own
+                // result is not available to its own `output.content` —
+                // interpolationContext is built before the handler runs,
+                // both for normal flow and replay).
+                const action: PipelineAction = {
+                    description: 'IT-066',
+                    tasks: [
+                        {
+                            id: 'tag',
+                            type: 'inputBox',
+                            prompt: 'tag',
+                            passTheResultToNextTask: true,
+                            output: {
+                                mode: 'file',
+                                filePath: resultPath,
+                                content: 'post-processing fired',
+                                overwrite: true
+                            }
+                        }
+                    ]
+                };
+
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                await executeActionPipeline(
+                    action,
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it066',
+                    tempWorkspace,
+                    [tempWorkspace],
+                    {
+                        presetInputs: { tag: { value: 'replayed' } }
+                    }
+                );
+
+                // Before the fix, executeSingleTask was bypassed entirely
+                // when presetInputs short-circuited an interactive task —
+                // the file write block never ran, so this assertion would
+                // fail with "no such file" on replay.
+                assert.ok(fs.existsSync(resultPath), 'output.mode=file post-processing must fire on replay');
+                assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'post-processing fired');
+            } finally {
+                (vscode.window as any).showInputBox = originalShowInputBox;
+            }
+        });
+
+        test('IT-065: inputBox password=true는 entry.inputs에 저장되지 않는다', async () => {
+            const originalShowInputBox = vscode.window.showInputBox;
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            try {
+                (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) =>
+                    items.find(i => i.label === 'visible');
+                (vscode.window as any).showInputBox = async (opts: vscode.InputBoxOptions) => {
+                    // Both prompts run; password one returns a secret.
+                    return opts.password ? 'topsecret' : 'public-tag';
+                };
+
+                const context = makeFakeContext();
+                const actionItem: ActionItem = {
+                    id: 'it045',
+                    title: 'IT-065 Password Excluded',
+                    action: {
+                        description: 'IT-065',
+                        tasks: [
+                            { id: 'env', type: 'quickPick', items: ['visible', 'other'] },
+                            { id: 'token', type: 'inputBox', prompt: 'token', password: true },
+                            { id: 'tag', type: 'inputBox', prompt: 'tag' }
+                        ]
+                    }
+                };
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                await executeAction(actionItem, context, mainView, history);
+
+                const entry: HistoryEntry = history.getHistory()[0];
+                assert.deepStrictEqual(entry.inputs, {
+                    env: { value: 'visible' },
+                    tag: { value: 'public-tag' }
+                });
+                assert.ok(!(entry.inputs as any).token, 'password input must not be persisted');
+                // Sanity: no field anywhere contains the secret literal.
+                const serialized = JSON.stringify(entry);
+                assert.ok(!serialized.includes('topsecret'), 'secret leaked into history entry');
+            } finally {
+                (vscode.window as any).showInputBox = originalShowInputBox;
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+            }
+        });
+    });
+
     suite('Task Output Flow', () => {
         test('IT-029: passTheResultToNextTask=false는 downstream에서 output을 보이지 않음', async () => {
             const resultPath = path.join(tempWorkspace, 'it029.txt');

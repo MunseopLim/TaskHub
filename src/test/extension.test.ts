@@ -39,6 +39,7 @@ import {
 	countActionItems,
 	getActionsValidator,
 	invalidateActionsCache,
+	shouldRecordTaskInput,
 } from '../extension';
 import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
 import { LinkViewProvider } from '../providers/linkViewProvider';
@@ -1148,6 +1149,47 @@ suite('Extension Test Suite', () => {
 		});
 	});
 
+	suite('shouldRecordTaskInput', () => {
+		// Pins which task types contribute to history `inputs` for replay
+		// (and which are deliberately excluded — `password: true` opts out).
+		test('returns true for interactive task types', () => {
+			const types = ['inputBox', 'quickPick', 'envPick', 'fileDialog', 'folderDialog', 'confirm'] as const;
+			for (const type of types) {
+				assert.strictEqual(
+					shouldRecordTaskInput({ id: 't', type } as any),
+					true,
+					`expected ${type} to be recorded`
+				);
+			}
+		});
+
+		test('returns false for non-interactive task types', () => {
+			const types = ['shell', 'command', 'unzip', 'zip', 'stringManipulation', 'writeFile', 'appendFile'] as const;
+			for (const type of types) {
+				assert.strictEqual(
+					shouldRecordTaskInput({ id: 't', type } as any),
+					false,
+					`expected ${type} NOT to be recorded`
+				);
+			}
+		});
+
+		test('inputBox with password: true is excluded from recording', () => {
+			assert.strictEqual(
+				shouldRecordTaskInput({ id: 't', type: 'inputBox', password: true } as any),
+				false
+			);
+			assert.strictEqual(
+				shouldRecordTaskInput({ id: 't', type: 'inputBox', password: false } as any),
+				true
+			);
+			assert.strictEqual(
+				shouldRecordTaskInput({ id: 't', type: 'inputBox' } as any),
+				true
+			);
+		});
+	});
+
 	suite('HistoryProvider', () => {
 		// Mock ExtensionContext for testing
 		class MockMemento implements vscode.Memento {
@@ -1315,6 +1357,79 @@ suite('Extension Test Suite', () => {
 			const entry = provider.getHistory()[0];
 			assert.strictEqual(entry.status, 'failure');
 			assert.strictEqual(entry.output, 'Action stopped by user');
+		});
+
+		test('setHistoryInputs attaches an inputs map to a matched (actionId, timestamp) entry', () => {
+			const provider = new HistoryProvider(createMockContext());
+			const ts = 7777;
+			provider.addHistoryEntry(makeEntry('with-inputs', 'success', ts));
+			provider.setHistoryInputs('with-inputs', ts, {
+				pickEnv: { value: 'prod' },
+				askName: { value: 'release' }
+			});
+			const entry = provider.getHistory()[0];
+			assert.deepStrictEqual(entry.inputs, {
+				pickEnv: { value: 'prod' },
+				askName: { value: 'release' }
+			});
+			// Other fields untouched.
+			assert.strictEqual(entry.actionId, 'with-inputs');
+			assert.strictEqual(entry.status, 'success');
+		});
+
+		test('setHistoryInputs with an empty object clears the field rather than persisting noise', () => {
+			const provider = new HistoryProvider(createMockContext());
+			const ts = 10;
+			provider.addHistoryEntry(makeEntry('empty', 'success', ts));
+			// First seed inputs so we can prove the second call clears them.
+			provider.setHistoryInputs('empty', ts, { pick: { value: 'a' } });
+			assert.ok(provider.getHistory()[0].inputs);
+			provider.setHistoryInputs('empty', ts, {});
+			assert.strictEqual(provider.getHistory()[0].inputs, undefined);
+		});
+
+		test('setHistoryInputs on an unknown (actionId, timestamp) is a silent no-op', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('only', 'success', 1));
+			provider.setHistoryInputs('missing', 999, { pick: { value: 'x' } });
+			const history = provider.getHistory();
+			assert.strictEqual(history.length, 1);
+			assert.strictEqual(history[0].inputs, undefined);
+		});
+
+		test('inputs field round-trips through workspaceState across HistoryProvider instances', () => {
+			const ctx = createMockContext();
+			const p1 = new HistoryProvider(ctx);
+			const ts = 42;
+			p1.addHistoryEntry(makeEntry('persist-inputs', 'success', ts));
+			p1.setHistoryInputs('persist-inputs', ts, {
+				file: { path: '/abs/x.bin', name: 'x.bin' },
+				flag: { value: '--release' }
+			});
+			const p2 = new HistoryProvider(ctx);
+			const entry = p2.getHistory()[0];
+			assert.deepStrictEqual(entry.inputs, {
+				file: { path: '/abs/x.bin', name: 'x.bin' },
+				flag: { value: '--release' }
+			});
+		});
+
+		test('HistoryItem contextValue distinguishes inputs / output / both / neither', async () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('plain', 'success', 1));
+			provider.addHistoryEntry(makeEntry('out-only', 'failure', 2, 'boom'));
+			provider.addHistoryEntry(makeEntry('in-only', 'success', 3));
+			provider.setHistoryInputs('in-only', 3, { pick: { value: 'p' } });
+			provider.addHistoryEntry(makeEntry('both', 'failure', 4, 'broke'));
+			provider.setHistoryInputs('both', 4, { pick: { value: 'p' } });
+
+			const items = await provider.getChildren();
+			// Newest-first ordering: both / in-only / out-only / plain.
+			const byActionId = new Map(items.map(i => [i.getEntry().actionId, i]));
+			assert.strictEqual(byActionId.get('plain')?.contextValue, 'historyItem');
+			assert.strictEqual(byActionId.get('out-only')?.contextValue, 'historyItemWithOutput');
+			assert.strictEqual(byActionId.get('in-only')?.contextValue, 'historyItemWithInputs');
+			assert.strictEqual(byActionId.get('both')?.contextValue, 'historyItemWithOutputAndInputs');
 		});
 
 		test('rerun flow: re-adding with a new timestamp yields two distinct entries', () => {

@@ -15,6 +15,16 @@ export interface HistoryEntry {
     timestamp: number;
     status: 'success' | 'failure' | 'running';
     output?: string;
+    /**
+     * Per-task captured input values from interactive tasks (inputBox /
+     * quickPick / envPick / fileDialog / folderDialog / confirm), keyed by
+     * task id. Replay-with-saved-inputs (`taskhub.rerunFromHistoryWithInputs`)
+     * uses these values as preset task results so the dialogs are skipped.
+     * Absent for entries written before this field existed and for actions
+     * that have no interactive tasks. `password: true` inputBoxes are
+     * deliberately omitted to avoid persisting secrets.
+     */
+    inputs?: Record<string, unknown>;
 }
 
 export class HistoryItem extends vscode.TreeItem {
@@ -29,7 +39,16 @@ export class HistoryItem extends vscode.TreeItem {
             this.iconPath = new vscode.ThemeIcon('history');
         }
 
-        this.contextValue = entry.output ? 'historyItemWithOutput' : 'historyItem';
+        const hasInputs = !!(entry.inputs && Object.keys(entry.inputs).length > 0);
+        if (entry.output && hasInputs) {
+            this.contextValue = 'historyItemWithOutputAndInputs';
+        } else if (entry.output) {
+            this.contextValue = 'historyItemWithOutput';
+        } else if (hasInputs) {
+            this.contextValue = 'historyItemWithInputs';
+        } else {
+            this.contextValue = 'historyItem';
+        }
 
         const date = new Date(entry.timestamp);
         this.tooltip = `Executed at: ${date.toLocaleString()}`;
@@ -110,6 +129,29 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem> {
             this.context.workspaceState.update(this.historyKey, history);
             this.refresh();
         }
+    }
+
+    /**
+     * Attach captured task inputs to an existing entry matched by
+     * `(actionId, timestamp)`. An empty `inputs` object (no interactive
+     * tasks ran) clears the field rather than persisting a noise entry, so
+     * the rerun-with-inputs context menu only shows up when there is
+     * something to replay. Unknown `(actionId, timestamp)` is a silent
+     * no-op (mirrors `updateHistoryStatus`).
+     */
+    setHistoryInputs(actionId: string, timestamp: number, inputs: Record<string, unknown>): void {
+        const history = this.getHistory();
+        const entry = history.find(e => e.actionId === actionId && e.timestamp === timestamp);
+        if (!entry) {
+            return;
+        }
+        if (Object.keys(inputs).length === 0) {
+            delete entry.inputs;
+        } else {
+            entry.inputs = inputs;
+        }
+        this.context.workspaceState.update(this.historyKey, history);
+        this.refresh();
     }
 
     deleteHistoryItem(entry: HistoryEntry): void {

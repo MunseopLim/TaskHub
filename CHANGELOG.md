@@ -29,6 +29,31 @@
 =====================================================================
 -->
 
+## [0.4.19] - 2026-04-30
+
+### 추가 — 히스토리 입력값 캡처 및 "Re-run with Saved Inputs" 재실행
+
+#### Medium (UX 개선 / 데이터 모델 확장)
+- **인터랙티브 task 입력값을 히스토리에 자동 저장**: 액션 실행 중 사용자가 응답한 `inputBox` / `quickPick` / `envPick` / `fileDialog` / `folderDialog` / `confirm` task의 결과가 task id를 키로 해당 history entry의 신규 `inputs` 필드에 누적되어 `workspaceState`에 영속화됩니다. 비인터랙티브 task(shell, stringManipulation 등)는 영향 없음. 데이터 모델 변경: `HistoryEntry.inputs?: Record<string, unknown>` ([src/providers/historyProvider.ts](src/providers/historyProvider.ts)).
+- **신규 명령 `taskhub.rerunFromHistoryWithInputs`**: 히스토리 항목 옆에 새로 표시되는 ▶ 인라인 아이콘으로 호출되며, 저장된 입력값을 그대로 task 결과로 주입해 다이얼로그를 다시 띄우지 않고 액션을 재실행합니다. 같은 task id에 저장값이 없는 새 인터랙티브 task만 정상적으로 다이얼로그를 띄웁니다. 기존 클릭 재실행(`taskhub.rerunFromHistory`)은 그대로 유지되어 항상 다이얼로그를 다시 엽니다.
+- **`HistoryItem.contextValue` 확장**: 입력값 보유 여부를 반영해 `historyItem` / `historyItemWithOutput` / `historyItemWithInputs` / `historyItemWithOutputAndInputs` 네 가지로 분기되어 메뉴 표시 조건이 정확히 매칭됩니다.
+
+#### Medium — 1차 리뷰 후속 수정 (replay 후처리 누락 회귀 차단)
+- **재실행 시에도 인터랙티브 task의 공통 후처리가 실행되도록 수정**: 초기 구현은 `presetInputs`가 매칭되면 `executeActionPipeline` 루프에서 `executeSingleTask`를 통째로 우회했으나, 이 경로는 `executeSingleTask` 끝의 capture + `passTheResultToNextTask && output` 후처리 블록까지 함께 건너뛰는 부작용이 있었습니다. 그 결과 `inputBox`/`quickPick` 같은 인터랙티브 task가 `output: { mode: 'file' }`을 함께 가지면 일반 실행은 파일을 쓰지만 saved-input 재실행은 조용히 스킵되는 회귀가 있었습니다. `executeSingleTask`에 옵셔널 `presetResult` 파라미터를 추가해 type-specific dispatch만 스킵하고 공통 후처리는 그대로 통과하도록 정리. 회귀 검출은 `IT-066`이 `output.mode: 'file'`을 가진 단일 인터랙티브 task의 replay 시 파일 생성을 직접 검증합니다.
+
+#### High (보안)
+- **비밀번호 입력은 히스토리에 저장되지 않음**: `inputBox` task의 `"password": true`가 설정된 경우 해당 결과는 `shouldRecordTaskInput`에서 명시적으로 제외되어 `workspaceState`에 도달하지 않습니다. 회귀 검출은 `IT-065` 테스트에서 entry 직렬화에 비밀 문자열이 섞이지 않음을 negative assertion으로 고정합니다.
+
+#### 내부 구조
+- **`executeActionPipeline` 옵션 인자 추가**: 신규 `PipelineExecutionOptions { presetInputs?, recordInputs? }` 파라미터를 통해 외부 호출자가 입력값을 주입하거나 누적할 수 있습니다. 기존 호출자(테스트 포함)는 변경 불필요 — 옵션은 모두 옵셔널.
+- **`executeAction` 시그니처 확장**: 옵셔널 다섯 번째 인자 `presetInputs?: Record<string, unknown>` 추가. 호출자가 명시적으로 넘기지 않으면 종전과 동일하게 다이얼로그를 띄움.
+- **새 export**: `shouldRecordTaskInput(task)` (인터랙티브 + 비-password 판별 헬퍼), `PipelineExecutionOptions`.
+
+#### 범위 한정 (TODO 5.3 일부)
+- 본 릴리스는 TODO §5.3에서 제안한 두 모드 중 **"그대로 재실행"**만 구현합니다. **"수정해서 실행"**(저장값을 다이얼로그 기본값으로 prefill 후 사용자 편집)은 후속 작업으로 분리되어 [TODO.md](TODO.md) §5.3에 별도로 추적됩니다.
+
+**테스트**: 신규 12케이스 추가 (단위 8: `shouldRecordTaskInput` 3, `setHistoryInputs` 라운드트립·clear·no-op·contextValue 5; 통합 4: IT-063 캡처 누적, IT-064 presetInputs 재실행, IT-065 비밀번호 제외, IT-066 replay 후처리 회귀). 전체 898 passing.
+
 ## [0.4.18] - 2026-04-24
 
 ### 수정 — 외부 리뷰 지적 11건 + 2차 리뷰 3건 + 3차 리뷰(경계값) 4건 + 4차 리뷰(테스트 품질) 5건 반영

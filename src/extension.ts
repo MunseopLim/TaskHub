@@ -1379,18 +1379,80 @@ function logActionStart(showVerboseLogs: boolean, title: string, description?: s
     }
 }
 
+/**
+ * Optional pipeline-execution side channels for replay/record support.
+ *
+ *   - `presetInputs`: when a key matches a task id, the matching interactive
+ *     task (inputBox / quickPick / envPick / fileDialog / folderDialog /
+ *     confirm) is short-circuited and the saved value becomes its result —
+ *     no dialog is opened. Other task types ignore this map. Used by
+ *     `taskhub.rerunFromHistoryWithInputs`.
+ *   - `recordInputs`: when provided, the pipeline writes the result of every
+ *     interactive task into this object keyed by task id. The caller can
+ *     then attach the accumulated inputs to a history entry. `inputBox`
+ *     with `password: true` is deliberately omitted to avoid persisting
+ *     secrets. The accumulator is mutated in place even if the pipeline
+ *     fails midway, so partial runs still surface their captured inputs.
+ */
+export interface PipelineExecutionOptions {
+    presetInputs?: Record<string, unknown>;
+    recordInputs?: Record<string, unknown>;
+}
+
+const INTERACTIVE_TASK_TYPES: ReadonlySet<string> = new Set([
+    'inputBox',
+    'quickPick',
+    'envPick',
+    'fileDialog',
+    'folderDialog',
+    'confirm',
+]);
+
+/**
+ * Returns true when a task's result should be saved into `recordInputs` for
+ * replay. `inputBox` with `password: true` opts out, so secret prompts never
+ * reach `workspaceState`.
+ */
+export function shouldRecordTaskInput(task: import('./schema').Task): boolean {
+    if (!INTERACTIVE_TASK_TYPES.has(task.type)) {
+        return false;
+    }
+    if (task.type === 'inputBox' && task.password === true) {
+        return false;
+    }
+    return true;
+}
+
 export async function executeActionPipeline(
     action: PipelineAction,
     context: vscode.ExtensionContext,
     id: string,
     workspaceFolderPath?: string,
-    workspaceRoots?: string[]
+    workspaceRoots?: string[],
+    options?: PipelineExecutionOptions
 ): Promise<void> {
     const stepResults: Record<string, unknown> = {};
+    const presetInputs = options?.presetInputs;
+    const recordInputs = options?.recordInputs;
     for (const task of action.tasks) {
         let result: unknown;
         try {
-            const taskRun = executeSingleTask(task, stepResults, context, id, workspaceFolderPath, workspaceRoots);
+            const usePreset =
+                !!presetInputs &&
+                INTERACTIVE_TASK_TYPES.has(task.type) &&
+                Object.prototype.hasOwnProperty.call(presetInputs, task.id);
+            // Preset values are passed as `presetResult` so that
+            // `executeSingleTask`'s shared post-processing (capture +
+            // `passTheResultToNextTask` output) still runs on replay.
+            const taskRun: Promise<unknown> = executeSingleTask(
+                task,
+                stepResults,
+                context,
+                id,
+                workspaceFolderPath,
+                workspaceRoots,
+                usePreset ? presetInputs![task.id] : undefined
+            );
             // On timeout, kill any running child processes and terminate the
             // active vscode Task (best effort — dialogs can't be forcibly
             // closed, but the outer promise still rejects).
@@ -1418,6 +1480,9 @@ export async function executeActionPipeline(
             throw error;
         }
         stepResults[task.id] = result;
+        if (recordInputs && shouldRecordTaskInput(task)) {
+            recordInputs[task.id] = result;
+        }
     }
 }
 
@@ -1453,7 +1518,13 @@ function finalizeActionRun(id: string, showTaskStatus: boolean, mainViewProvider
     }
 }
 
-export async function executeAction(actionItem: ActionItem, context: vscode.ExtensionContext, mainViewProvider: MainViewProvider, historyProvider?: HistoryProvider) {
+export async function executeAction(
+    actionItem: ActionItem,
+    context: vscode.ExtensionContext,
+    mainViewProvider: MainViewProvider,
+    historyProvider?: HistoryProvider,
+    presetInputs?: Record<string, unknown>
+) {
     const resolved = resolveActionDefinition(actionItem);
     if (!resolved) {
         return;
@@ -1482,13 +1553,21 @@ export async function executeAction(actionItem: ActionItem, context: vscode.Exte
         });
     }
 
+    // Accumulator for interactive task inputs — attached to the history
+    // entry below so a later "Re-run with saved inputs" can replay them.
+    const recordInputs: Record<string, unknown> = {};
+
     try {
-        await executeActionPipeline(action, context, id, actionWorkspaceFolder);
+        await executeActionPipeline(action, context, id, actionWorkspaceFolder, undefined, {
+            presetInputs,
+            recordInputs
+        });
         handleActionSuccess(id, action, showTaskStatus);
 
         // Update history to success
         if (historyProvider) {
             historyProvider.updateHistoryStatus(id, timestamp, 'success');
+            historyProvider.setHistoryInputs(id, timestamp, recordInputs);
         }
     } catch (error: any) {
         if (!manuallyTerminatedActions.has(id)) {
@@ -1498,6 +1577,9 @@ export async function executeAction(actionItem: ActionItem, context: vscode.Exte
             if (historyProvider) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
                 historyProvider.updateHistoryStatus(id, timestamp, 'failure', errorMessage);
+                // Persist whatever inputs were captured before the failure
+                // — partial replay is still useful when a later task fails.
+                historyProvider.setHistoryInputs(id, timestamp, recordInputs);
             }
 
             throw error;
@@ -1505,6 +1587,7 @@ export async function executeAction(actionItem: ActionItem, context: vscode.Exte
             // Action was manually stopped
             if (historyProvider) {
                 historyProvider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user');
+                historyProvider.setHistoryInputs(id, timestamp, recordInputs);
             }
         }
     } finally {
@@ -1519,13 +1602,26 @@ async function executeSingleTask(
     context: vscode.ExtensionContext,
     actionId: string,
     workspaceFolderPath?: string,
-    workspaceRoots?: string[]
+    workspaceRoots?: string[],
+    presetResult?: unknown
 ): Promise<any> {
     const defaultWorkspace = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const interpolationContext = { ...allResults, workspaceFolder: defaultWorkspace, extensionPath: context.extensionPath };
     let result: any;
 
-    switch (task.type) {
+    // Replay path: when a saved input is provided for this task (only honored
+    // for interactive types — see INTERACTIVE_TASK_TYPES), skip the
+    // type-specific dispatch and use the saved value as the raw result. The
+    // shared post-processing block below (capture + `passTheResultToNextTask`
+    // output handling) still runs, so an interactive task with
+    // `output: { mode: 'file' }` writes its file on replay just like on a
+    // normal run.
+    const usingPresetResult = presetResult !== undefined && INTERACTIVE_TASK_TYPES.has(task.type);
+    if (usingPresetResult) {
+        result = presetResult;
+    }
+
+    if (!usingPresetResult) { switch (task.type) {
         case 'fileDialog':
             result = await handleFileDialog(task);
             break;
@@ -1661,7 +1757,7 @@ async function executeSingleTask(
             break;
         default:
             throw new Error(`Unsupported task type: ${task.type}`);
-    }
+    } }
 
     // Apply capture rules (if any) to derive named variables from a string
     // output. Capture only makes sense when the result carries a string
@@ -3138,6 +3234,42 @@ export function activate(context: vscode.ExtensionContext) {
             }
         } else {
             vscode.window.showErrorMessage(t(`ID '${entry.actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${entry.actionId}'.`));
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.rerunFromHistoryWithInputs', async (item: HistoryItem) => {
+        const entry = item?.getEntry?.();
+        if (!entry || !entry.actionId) {
+            vscode.window.showErrorMessage(t('유효하지 않은 기록 항목입니다.', 'Invalid history entry.'));
+            return;
+        }
+        if (!entry.inputs || Object.keys(entry.inputs).length === 0) {
+            vscode.window.showInformationMessage(t(
+                '이 기록 항목에는 저장된 입력값이 없습니다.',
+                'No saved inputs are available for this history entry.'
+            ));
+            return;
+        }
+
+        let allActions: ActionItem[];
+        try {
+            allActions = loadAllActions(context);
+        } catch (error: any) {
+            outputChannel.appendLine(`[ERROR] ${error.message}`);
+            vscode.window.showErrorMessage(t(`액션을 실행할 수 없습니다: ${error.message}`, `Could not execute action: ${error.message}`));
+            return;
+        }
+
+        const fullActionItem = findActionById(allActions, entry.actionId);
+        if (!fullActionItem) {
+            vscode.window.showErrorMessage(t(`ID '${entry.actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${entry.actionId}'.`));
+            return;
+        }
+        try {
+            await executeAction(fullActionItem, context, mainViewProvider, historyProvider, entry.inputs);
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            outputChannel.appendLine(`[ERROR] Execution failed for action '${entry.actionId}' (with saved inputs): ${msg}`);
         }
     }));
 

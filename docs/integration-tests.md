@@ -105,6 +105,16 @@
 | IT-027 | 성공 경로의 successMessage + history | `executeAction` 성공 후 `successMessage`가 `showInformationMessage`로 표시되고, HistoryProvider 기록이 running → success로 갱신 |
 | IT-028 | 실패 경로의 failMessage + history | 태스크 실패 후 `failMessage: <error>` 포맷이 `showErrorMessage`로 표시되고, HistoryProvider에 failure + output 메시지가 남음 |
 
+### History Input Replay
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-063 | 인터랙티브 task 결과가 history entry.inputs에 누적 | `executeAction`이 `inputBox`/`quickPick` 등 인터랙티브 task 결과를 task id를 키로 entry.inputs에 모으고, 비인터랙티브 task는 포함하지 않음 |
+| IT-064 | presetInputs로 재실행하면 다이얼로그를 열지 않음 | `executeActionPipeline`에 `presetInputs`를 넘기면 매칭되는 task id의 핸들러가 스킵되고 저장된 값이 그대로 result로 사용되어 downstream interpolation이 동작 |
+| IT-065 | `password: true` inputBox는 inputs에 저장되지 않음 | 비밀번호 task의 입력값은 `recordInputs`에 누적되지 않으며, history entry 직렬화에 비밀 문자열이 포함되지 않음 |
+| IT-066 | 재실행 시에도 인터랙티브 task의 output 후처리가 실행됨 | preset이 type-specific dispatch를 우회하더라도 공통 후처리(capture + `passTheResultToNextTask` output 처리)는 그대로 실행되어 `output.mode: 'file'` 등이 정상 작동 |
+
 ### Task Output Flow
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
 
@@ -314,6 +324,22 @@ confirm task에서 취소 라벨이 선택되면 pipeline이 reject되고 다음
 ### IT-032: shell 태스크의 command 누락은 실행 시 에러
 
 `command`가 없는 `shell` 태스크는 `executeSingleTask`가 interpolation 단계를 통과시키되 `!command` 검사에서 `Task <id> of type 'shell' requires a 'command' property.` 에러를 던집니다. 필수 필드 누락이 파이프라인 어느 지점에서 잡히는지 현재 동작을 고정합니다.
+
+### IT-063: 인터랙티브 task 결과가 history entry.inputs에 누적
+
+`executeAction`은 내부적으로 `recordInputs` 누적 객체를 만들어 `executeActionPipeline`에 전달하고, `shouldRecordTaskInput`을 통과하는 task(`inputBox`/`quickPick`/`envPick`/`fileDialog`/`folderDialog`/`confirm`) 결과를 task id 키로 모은 뒤, 성공·실패 모든 종료 경로에서 `HistoryProvider.setHistoryInputs`로 history entry에 부착합니다. 이 시나리오는 `quickPick` + `inputBox` + `stringManipulation` 조합에서 인터랙티브 두 task만 entry.inputs에 들어가고, `stringManipulation`은 들어가지 않음을 확인합니다.
+
+### IT-064: presetInputs로 재실행하면 다이얼로그를 열지 않고 저장값을 사용
+
+`executeActionPipeline`에 `{ presetInputs: { <taskId>: <savedResult> } }`를 넘기면, 매칭되는 인터랙티브 task의 핸들러는 호출되지 않고 `presetInputs[taskId]`가 그대로 task result로 사용됩니다. 테스트는 `showQuickPick`·`showInputBox`를 throw하도록 monkey patch해 다이얼로그가 열리지 않음을 강제 검증하며, downstream `stringManipulation`이 저장된 값을 interpolation해 정상적으로 파일까지 쓰는지 확인합니다.
+
+### IT-065: `password: true` inputBox는 entry.inputs에 저장되지 않는다
+
+`shouldRecordTaskInput`이 `password: true`인 `inputBox` task에서 `false`를 반환하므로, 비밀번호 입력은 `recordInputs`에 누적되지 않고 history entry.inputs에도 들어가지 않습니다. 테스트는 비밀번호 + 일반 inputBox + quickPick을 한 액션에 섞어, 일반 입력은 모두 저장되고 비밀번호 task id만 빠지는지를 확인합니다. 또한 entry 직렬화에 비밀 문자열이 포함되지 않는 negative assertion도 함께 둡니다.
+
+### IT-066: 재실행 시에도 인터랙티브 task의 output 후처리가 실행됨
+
+`executeSingleTask`는 `presetResult`가 있으면 type-specific dispatch만 우회하고, 공통 후처리(capture + `passTheResultToNextTask && output` 블록)는 정상 경로와 동일하게 실행합니다. 이 시나리오는 `inputBox`에 `output: { mode: 'file', content: 'post-processing fired' }`을 단독으로 둔 액션을 `presetInputs`로 재실행하여, 다이얼로그는 열리지 않으면서도 파일이 정확히 기록되는지 검증합니다. 초기 구현은 preset 경로가 `executeSingleTask` 자체를 우회하는 형태였고, 이때 `output.mode: 'file'` 같은 후처리가 조용히 스킵되는 회귀가 있었습니다 — 이 테스트가 그 회귀를 직접 차단합니다. (참고: task의 `output.content`는 *해당 task 자신*의 결과를 참조할 수 없습니다 — `interpolationContext`가 task 시작 *전*에 구축되기 때문이며, 이는 정상 경로에서도 동일합니다. 그래서 본 테스트는 정적 content 문자열을 사용합니다.)
 
 ## 시나리오 추가 절차
 
