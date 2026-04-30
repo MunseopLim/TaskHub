@@ -51,6 +51,15 @@ export class Action extends vscode.TreeItem {
                 case 'running':
                     this.iconPath = new vscode.ThemeIcon('sync~spin');
                     this.contextValue = 'runningAction';
+                    // "지금 어디" in-flight hint — only meaningful for
+                    // multi-task actions (single-task `1/1 · X` would be
+                    // pure noise). The History panel covers retrospective
+                    // info ("when ran / how long"); this description slot
+                    // is exclusively for live progress and is cleared by
+                    // `finalizeActionRun` once the action terminates.
+                    if (state.progress && state.progress.total > 1) {
+                        this.description = `${state.progress.index}/${state.progress.total} · ${state.progress.taskId}`;
+                    }
                     break;
                 case 'success':
                     this.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.blue'));

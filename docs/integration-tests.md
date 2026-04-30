@@ -124,6 +124,21 @@
 | IT-068 | HistoryItem.description에 status + 시각 + 소요 시간 배지가 노출 | 종료된 entry는 `✓/✗ 시각 · 소요시간` 형태로 description이 채워지고, 진행 중(`running`) entry는 description이 비어 있음 (스피너 아이콘이 신호 역할) |
 | IT-068b | Action TreeItem에는 last-run 배지가 없다 | History 패널로 이동한 배지가 실수로 Actions 패널에 다시 추가되는 회귀를 가드 |
 
+### Task 진행률 (TODO §5.2)
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-069/070/071/073/074/074b), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-072/072b/072c)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-069 | 모든 task 성공 시 running → success 쌍이 순서대로 발사 | `executeActionPipeline`의 `onTaskTransition`이 task별로 `running` 후 `success` 두 이벤트를 1-based index와 total로 정확히 emit |
+| IT-070 | continueOnError 실패 task는 skipped, 나머지는 success | `continueOnError: true`로 capture가 실패해도 `skipped` transition만 발사하고 다음 task가 정상 실행 |
+| IT-071 | 실패 task(continueOnError 없음) 후 파이프라인 중단 | `failure` transition 발사 후 throw — 이후 task는 어떤 transition도 발사하지 않음 |
+| IT-072 | 멀티 task 액션 running 시 progress description 노출 | `actionStates.progress`가 채워진 멀티 task 액션은 `2/3 · taskId` 형태 description 렌더 |
+| IT-072b | 단일 task 액션은 progress description을 채우지 않음 | `total === 1`이면 description undefined — `1/1` 노이즈 회피 |
+| IT-072c | progress 없는 running 상태에서도 description은 비어 있음 | `actionStates.state === 'running'`이지만 `progress`가 없을 때 description 비어 있음 (legacy/manual 분기 방어) |
+| IT-073 | executeAction 종료 후 actionStates.progress 비움 | `finalizeActionRun`이 mid-run progress를 clear해 종료 후 description이 잔존하지 않음 |
+| IT-074 | throwing onTaskTransition은 success 경로 결과를 바꾸지 않음 | 4개 transition(`running`/`success`) 모두에서 콜백이 throw해도 파이프라인이 정상 resolve. `emitTransition` helper의 try/catch 격리 회귀 가드 |
+| IT-074b | throwing onTaskTransition은 failure 경로의 원본 에러를 가리지 않음 | failure transition에서 콜백이 throw해도 reject되는 에러는 task의 원본 에러(`'capture failed'`)이지 콜백 에러(`'callback boom'`)가 아님 |
+
 ### Task Output Flow
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
 
@@ -360,7 +375,43 @@ confirm task에서 취소 라벨이 선택되면 pipeline이 reject되고 다음
 
 ### IT-068b: Action TreeItem에는 last-run 배지가 없다 (회귀 가드)
 
-IT-068의 대칭 가드입니다. 이전 구현은 `MainViewProvider`가 `loadHistory` 콜백을 받아 `Action` TreeItem.description에 배지를 그렸으나, 같은 정보가 두 표면에 분산되는 게 디자인적으로 약하다고 판단해 History 패널로 일원화했습니다. 본 테스트는 `Action` TreeItem.description이 항상 `undefined`임을 명시적으로 고정해, 향후 "오늘 빌드 됐었지?" 류 요구로 누군가 재차 Actions 패널에 배지를 붙이는 회귀를 PR 단계에서 차단합니다.
+IT-068의 대칭 가드입니다. 이전 구현은 `MainViewProvider`가 `loadHistory` 콜백을 받아 `Action` TreeItem.description에 배지를 그렸으나, 같은 정보가 두 표면에 분산되는 게 디자인적으로 약하다고 판단해 History 패널로 일원화했습니다. 본 테스트는 `Action` TreeItem.description이 항상 `undefined`임을 명시적으로 고정해, 향후 "오늘 빌드 됐었지?" 류 요구로 누군가 재차 Actions 패널에 배지를 붙이는 회귀를 PR 단계에서 차단합니다. (단, 액션이 *실행 중*일 때 진행 정보(`2/3 · taskId`)는 description에 노출됨 — 이는 회고가 아닌 진행 정보라 별개. IT-072 참조.)
+
+### IT-069: task transition 이벤트가 running → success 쌍으로 발사
+
+`executeActionPipeline`은 각 task 시작 직전 `running`을, 성공 종료 직후 `success` transition을 발사합니다. 본 시나리오는 3-task 액션에서 정확히 6개 이벤트가 `[a:running, a:success, b:running, b:success, c:running, c:success]` 순서로 발사되는지를 `deepStrictEqual`로 고정합니다. 1-based `index`와 일관된 `total`(action.tasks.length)이 모든 이벤트에 동일하게 들어가는지도 함께 검증해, `2/3 · taskId` 같은 description 렌더의 입력 시그널을 stable하게 유지합니다.
+
+### IT-070: continueOnError 실패 task는 skipped transition
+
+실패 task에 `continueOnError: true`가 설정되어 있으면 `executeActionPipeline`은 throw 대신 `skipped` transition을 발사하고 다음 task로 이동합니다. 본 시나리오는 capture 실패(`regex: '('`)로 의도적으로 fail시킨 가운데 task에서 `skipped` transition만 발사되고 그 앞뒤 task는 정상 `running`/`success` 쌍을 발사함을 확인합니다.
+
+### IT-071: 실패 task 이후 파이프라인 중단
+
+`continueOnError`가 없는 실패 task는 `failure` transition을 발사한 직후 throw되어 파이프라인이 중단됩니다. 본 시나리오는 3-task 액션의 가운데 task가 fail할 때 `[ok:running, ok:success, fail:running, fail:failure]`까지만 이벤트가 발사되고 마지막 task는 어떤 이벤트도 emit되지 않음을 확인합니다.
+
+### IT-072: 멀티 task running 시 Action description에 progress 노출
+
+`actionStates.progress`(`{ index, total, taskId }`)가 채워진 running 상태의 멀티 task 액션은 `Action` TreeItem.description에 `2/3 · link` 형태의 진행 표시를 렌더합니다. 본 시나리오는 `progress: { index: 2, total: 3, taskId: 'link' }`를 직접 set한 뒤 description이 정확한 문자열이 되는지를 확인합니다. (transition → progress 갱신 → refresh 흐름의 와이어링 자체는 IT-073에서 검증.)
+
+### IT-072b: 단일 task 액션은 description을 채우지 않음
+
+`total === 1`인 액션은 progress가 채워져 있어도 description이 `undefined`로 유지됩니다 — `1/1 · taskId`는 사용자에게 무의미한 노이즈이므로 의도적으로 렌더하지 않습니다.
+
+### IT-072c: progress 없는 running 상태에서 description은 비어 있음
+
+`actionStates.state === 'running'`이지만 `progress` 필드가 없는 경우(legacy 분기 또는 외부에서 partial하게 설정된 경우) description은 `undefined`를 유지합니다. 부분적으로 채워진 state로 인해 의도하지 않은 description 렌더가 발생하지 않도록 방어.
+
+### IT-073: 종료 후 actionStates.progress가 자동 정리됨
+
+`finalizeActionRun`은 액션이 success/failure 어느 쪽으로든 종료될 때 `actionStates`의 `progress` 필드를 비워, 다음 렌더 사이클에 description이 잔존하지 않도록 합니다. 본 시나리오는 멀티 task 액션을 `executeAction`으로 실행 후 `actionStates.get(id).progress`가 `undefined`가 되었음을 확인합니다 (`state` 자체는 `success`로 유지 — last-run 아이콘이 보존되어야 하므로).
+
+### IT-074: throwing onTaskTransition은 success 경로의 결과를 바꾸지 않는다
+
+진행률 콜백은 side channel입니다 — 버그 있는 UI hook이 정상 task를 실패로 둔갑시켜서는 안 됩니다. 1차 리뷰 Medium 지적: 이전 구현은 `running`/`success`/`failure`/`skipped` 4 callsite에서 콜백을 직접 호출해 `success` 콜백이 throw하면 파이프라인이 reject되는 회귀가 가능했습니다. 본 시나리오는 매 transition마다 throw하는 콜백을 주입한 채 2-task 정상 액션을 실행하고, 파이프라인이 정상 resolve하며 4개 transition (`a:running`/`a:success`/`b:running`/`b:success`)이 모두 시도되었음을 확인합니다 (`emitTransition` helper의 try/catch 격리 회귀 가드).
+
+### IT-074b: throwing onTaskTransition은 failure 경로의 원본 에러를 가리지 않는다
+
+실제 task가 fail하는 동시에 transition 콜백도 failure 이벤트에서 throw할 때, reject되는 에러는 task의 *원본* 에러여야 합니다 — 콜백 에러로 가려지면 `history.output`이 잘못된 원인을 가리키게 됩니다. 본 시나리오는 capture regex가 잘못된 task에 매 콜백마다 `'callback boom'`을 던지는 콜백을 붙이고, `assert.rejects`가 `/capture failed/`(원본 에러)에 매칭되는지를 확인합니다.
 
 ## 시나리오 추가 절차
 

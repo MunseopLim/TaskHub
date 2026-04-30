@@ -1394,10 +1394,25 @@ function logActionStart(showVerboseLogs: boolean, title: string, description?: s
  *     with `password: true` is deliberately omitted to avoid persisting
  *     secrets. The accumulator is mutated in place even if the pipeline
  *     fails midway, so partial runs still surface their captured inputs.
+ *   - `onTaskTransition`: per-task lifecycle callback used to surface
+ *     "지금 어디" progress on the Actions panel. Fires on `running`
+ *     before each task starts, then on the matching terminal state
+ *     (`success` / `failure` / `skipped`). `index` is 1-based.
  */
 export interface PipelineExecutionOptions {
     presetInputs?: Record<string, unknown>;
     recordInputs?: Record<string, unknown>;
+    onTaskTransition?: (event: TaskTransitionEvent) => void;
+}
+
+export interface TaskTransitionEvent {
+    taskId: string;
+    /** 1-based position of this task in the action's tasks array. */
+    index: number;
+    /** Total number of tasks in the action. */
+    total: number;
+    /** `running` fires before each task starts; the others fire after it ends. */
+    state: 'running' | 'success' | 'failure' | 'skipped';
 }
 
 const INTERACTIVE_TASK_TYPES: ReadonlySet<string> = new Set([
@@ -1435,9 +1450,33 @@ export async function executeActionPipeline(
     const stepResults: Record<string, unknown> = {};
     const presetInputs = options?.presetInputs;
     const recordInputs = options?.recordInputs;
-    for (const task of action.tasks) {
+    const onTaskTransition = options?.onTaskTransition;
+    const total = action.tasks.length;
+    for (let i = 0; i < action.tasks.length; i++) {
+        const task = action.tasks[i];
+        const transitionBase = { taskId: task.id, index: i + 1, total };
+        // Side-channel callback for progress UI. A throwing callback must
+        // never alter the pipeline's success/failure outcome — the
+        // pipeline's job is to run tasks, not to depend on a UI hook
+        // succeeding. We swallow + log instead. This applies to all four
+        // transition states (`running` / `success` / `failure` /
+        // `skipped`); regression guard: IT-074 / IT-074b.
+        const emitTransition = (state: TaskTransitionEvent['state']) => {
+            if (!onTaskTransition) {
+                return;
+            }
+            try {
+                onTaskTransition({ ...transitionBase, state });
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                outputChannel.appendLine(
+                    `[WARN] onTaskTransition callback threw for task '${task.id}' (${state}): ${msg}`
+                );
+            }
+        };
         let result: unknown;
         try {
+            emitTransition('running');
             const usePreset =
                 !!presetInputs &&
                 INTERACTIVE_TASK_TYPES.has(task.type) &&
@@ -1471,6 +1510,7 @@ export async function executeActionPipeline(
                 if (showVerboseLogs) {
                     outputChannel.appendLine(`[WARN] Task '${task.id}' failed but 'continueOnError' is true — continuing: ${message}`);
                 }
+                emitTransition('skipped');
                 // Store an empty object so downstream `${task.*}` references
                 // cleanly fall through to the "unmatched → literal" path in
                 // interpolatePipelineVariables, matching stream-mode shell
@@ -1478,8 +1518,10 @@ export async function executeActionPipeline(
                 stepResults[task.id] = {};
                 continue;
             }
+            emitTransition('failure');
             throw error;
         }
+        emitTransition('success');
         stepResults[task.id] = result;
         if (recordInputs && shouldRecordTaskInput(task)) {
             recordInputs[task.id] = result;
@@ -1513,6 +1555,15 @@ function finalizeActionRun(id: string, showTaskStatus: boolean, mainViewProvider
     if (manuallyTerminatedActions.has(id)) {
         actionStates.delete(id);
         manuallyTerminatedActions.delete(id);
+    } else {
+        // Action ran to completion (success / failure). Clear the
+        // mid-run progress hint so the description doesn't keep
+        // showing "2/3 · link" after the action terminates — the
+        // iconPath (✓/✗) is the appropriate post-run signal.
+        const state = actionStates.get(id);
+        if (state && state.progress) {
+            actionStates.set(id, { state: state.state });
+        }
     }
     if (showTaskStatus) {
         mainViewProvider.refresh();
@@ -1561,7 +1612,30 @@ export async function executeAction(
     try {
         await executeActionPipeline(action, context, id, actionWorkspaceFolder, undefined, {
             presetInputs,
-            recordInputs
+            recordInputs,
+            // Surface "지금 어디" progress on the Actions panel. We only
+            // mutate the existing actionStates entry (markActionAsRunning
+            // already set state='running') and refresh the tree.
+            // Single-task actions intentionally skip the description so
+            // "1/1" noise never shows up — see Action TreeItem render
+            // logic.
+            onTaskTransition: (event) => {
+                if (!showTaskStatus) {
+                    return;
+                }
+                if (event.state !== 'running') {
+                    return;
+                }
+                const current = actionStates.get(id);
+                if (!current) {
+                    return;
+                }
+                actionStates.set(id, {
+                    state: current.state,
+                    progress: { index: event.index, total: event.total, taskId: event.taskId }
+                });
+                mainViewProvider.refresh();
+            }
         });
         handleActionSuccess(id, action, showTaskStatus);
 

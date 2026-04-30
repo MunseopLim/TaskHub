@@ -29,6 +29,26 @@
 =====================================================================
 -->
 
+## [0.4.21] - 2026-04-30
+
+### 추가 — 멀티 task 액션 진행 표시 (TODO §5.2 일부)
+
+#### Medium (UX 개선)
+- **실행 중 액션 카드에 "지금 어디" 진행 표시**: 멀티 task 액션이 실행 중일 때 라벨 옆에 `2/3 · link` 형태로 현재 task 위치와 id를 노출합니다 — "task1 끝났는지, 어디서 막혔는지" 알기 위해 터미널을 직접 안 봐도 되도록. 단일 task 액션은 의도적으로 비워둠(`1/1`은 노이즈). 액션 종료 시 자동으로 사라짐. ([src/providers/mainViewProvider.ts](src/providers/mainViewProvider.ts), [src/providers/actionStatus.ts](src/providers/actionStatus.ts))
+
+#### 내부 구조
+- **Pipeline transition 이벤트 도입**: `PipelineExecutionOptions.onTaskTransition` 콜백 추가. `executeActionPipeline`이 각 task에 대해 `running` → 종료 transition (`success`/`failure`/`skipped`) 4종을 1-based `{ taskId, index, total, state }` 형태로 발사. `executeAction`이 이를 받아 `actionStates.progress`를 갱신하고 `mainViewProvider.refresh()`를 호출. 외부 호출자(테스트 등)는 옵션 미전달 시 기존 동작 그대로 — backward compatible.
+- **`actionStates` 모델 확장**: `{ state, progress?: { index, total, taskId } }`. progress는 mid-run 전용 — `finalizeActionRun`이 종료 시 자동 clear.
+- **회고 정보 vs 진행 정보 분리 명문화**: [docs/architecture.md](docs/architecture.md) "개발 시 주의사항" §2에 정책 추가. 회고(시각·소요 시간)는 `HistoryItem.description`에만, 진행(현재 어디)은 `Action TreeItem.description`에만. 두 surface의 역할이 섞이지 않도록 회귀 가드 4종(IT-068b/072/072b/072c) 명시.
+
+#### 범위 한정 (TODO §5.2)
+- 본 릴리스는 TODO §5.2의 두 항목 중 **"단계별 진행 인디케이터"**만 구현합니다. **"단계 클릭 시 해당 task의 터미널/출력으로 점프"**는 의도적으로 제외 — VS Code 터미널 패널이 이미 항상 접근 가능해 추가 클릭 단계의 ergonomics 가치가 낮고, Action TreeItem을 펼쳐지는 트리로 만들면 기존 폴더(`Folder`)와 시각적 충돌 발생. Option B로의 전환 가능성은 향후 사용자 피드백으로 판단.
+
+#### Medium — 1차 리뷰 후속 수정 (콜백 격리)
+- **`onTaskTransition` 콜백을 try/catch로 격리**: 진행률 표시는 side channel이므로 콜백이 throw해도 파이프라인의 success/failure 의미가 바뀌면 안 됨. 이전 구현은 `success`/`failure`/`skipped`/`running` 4 callsite에서 직접 호출해, 예컨대 `success` 콜백이 throw하면 정상 task가 실패로 기록되는 회귀가 가능했음. `executeActionPipeline` 내부의 `emitTransition` helper에서 try/catch로 감싸 outputChannel에 `[WARN]`만 남기고 호출자에는 throw하지 않도록 수정. 회귀 가드: `IT-074` (success 경로에서 모든 콜백 throw해도 파이프라인 정상 완료), `IT-074b` (failure 경로에서 콜백 throw해도 task 원본 에러가 그대로 reject — `'callback boom'`이 아니라 `'capture failed'`).
+
+**테스트**: 신규 9케이스 추가 (통합 9: IT-069 정상 시퀀스, IT-070 skipped, IT-071 failure 후 중단, IT-072 progress description 렌더, IT-072b 단일 task noise 회피, IT-072c partial state 방어, IT-073 finalize 자동 clear, IT-074 throwing 콜백 success 경로 격리, IT-074b throwing 콜백 failure 경로 원본 에러 보존). 전체 929 passing.
+
 ## [0.4.20] - 2026-04-30
 
 ### 추가 — History 패널의 "Last run" 배지 (TODO §5.4 일부)

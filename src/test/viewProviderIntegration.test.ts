@@ -234,6 +234,95 @@ suite('View provider integration', function () {
         assert.strictEqual(liveItem.description, undefined);
     });
 
+    test('IT-072: 멀티 task 액션이 running일 때 Action TreeItem.description에 progress 표시', async () => {
+        // Pins TODO §5.2: while a multi-task action is running, the
+        // Action TreeItem renders `index/total · taskId` so the user can
+        // tell "지금 어디" without opening the terminal. After the action
+        // terminates, finalizeActionRun clears `progress` and the
+        // description goes back to undefined (covered by IT-072b below).
+        const context = makeContext();
+        const actions: ActionItem[] = [
+            {
+                id: 'multi',
+                title: 'Multi',
+                action: {
+                    description: 'multi',
+                    tasks: [
+                        { id: 'compile', type: 'shell', command: 'echo' },
+                        { id: 'link', type: 'shell', command: 'echo' },
+                        { id: 'package', type: 'shell', command: 'echo' }
+                    ]
+                }
+            }
+        ];
+        actionStates.set('multi', {
+            state: 'running',
+            progress: { index: 2, total: 3, taskId: 'link' }
+        });
+
+        const provider = new MainViewProvider(context, () => actions);
+        const roots = await provider.getChildren();
+        const multiItem = roots[1] as Action;
+
+        assert.strictEqual(multiItem.contextValue, 'runningAction');
+        assert.strictEqual(multiItem.description, '2/3 · link');
+    });
+
+    test('IT-072b: 단일 task 액션은 running이어도 progress description을 채우지 않는다', async () => {
+        // `1/1 · taskId` is pure noise — single-task pipelines have no
+        // "지금 어디" question to answer.
+        const context = makeContext();
+        const actions: ActionItem[] = [
+            {
+                id: 'solo',
+                title: 'Solo',
+                action: {
+                    description: 'solo',
+                    tasks: [{ id: 'run', type: 'shell', command: 'echo' }]
+                }
+            }
+        ];
+        actionStates.set('solo', {
+            state: 'running',
+            progress: { index: 1, total: 1, taskId: 'run' }
+        });
+
+        const provider = new MainViewProvider(context, () => actions);
+        const roots = await provider.getChildren();
+        const soloItem = roots[1] as Action;
+
+        assert.strictEqual(soloItem.contextValue, 'runningAction');
+        assert.strictEqual(soloItem.description, undefined,
+            'single-task action must not render the 1/1 progress noise');
+    });
+
+    test('IT-072c: progress가 없는 running 상태(legacy/manual)에서도 description은 비어 있다', async () => {
+        // Defends against partially-populated actionStates from older
+        // code paths that set state but skipped progress.
+        const context = makeContext();
+        const actions: ActionItem[] = [
+            {
+                id: 'partial',
+                title: 'Partial',
+                action: {
+                    description: 'partial',
+                    tasks: [
+                        { id: 'a', type: 'shell', command: 'echo' },
+                        { id: 'b', type: 'shell', command: 'echo' }
+                    ]
+                }
+            }
+        ];
+        actionStates.set('partial', { state: 'running' });
+
+        const provider = new MainViewProvider(context, () => actions);
+        const roots = await provider.getChildren();
+        const item = roots[1] as Action;
+
+        assert.strictEqual(item.contextValue, 'runningAction');
+        assert.strictEqual(item.description, undefined);
+    });
+
     test('IT-068b: MainViewProvider가 history를 더 이상 읽지 않아 Action TreeItem에는 배지가 없다 (회귀 가드)', async () => {
         // Symmetric assertion to IT-068: badges live exclusively on the
         // History panel now. If a future refactor accidentally re-adds

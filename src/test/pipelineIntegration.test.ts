@@ -1418,6 +1418,34 @@ try {
             }
         });
 
+        test('IT-073: executeAction이 종료 후 actionStates.progress를 비운다', async () => {
+            // The progress hint is mid-run only — finalizeActionRun must
+            // clear it so a freshly-completed action doesn't keep showing
+            // "2/3 · link" forever.
+            const context = makeFakeContext();
+            const actionItem: ActionItem = {
+                id: 'it073',
+                title: 'IT-073',
+                action: {
+                    description: 'IT-073',
+                    tasks: [
+                        { id: 'a', type: 'stringManipulation', function: 'trim', input: 'a' },
+                        { id: 'b', type: 'stringManipulation', function: 'trim', input: 'b' }
+                    ]
+                }
+            };
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            await executeAction(actionItem, context, mainView, history);
+
+            const finalState = actionStates.get('it073');
+            assert.ok(finalState, 'state entry should remain so future runs see last status');
+            assert.strictEqual(finalState!.state, 'success');
+            assert.strictEqual(finalState!.progress, undefined,
+                'progress must be cleared by finalizeActionRun once the action terminates');
+        });
+
         test('IT-067: executeAction은 success/failure 모두 history entry에 durationMs를 기록한다', async () => {
             // Pins TODO §5.4 scope: every terminal transition surfaced by
             // `executeAction` must include a non-negative duration so each
@@ -1580,6 +1608,206 @@ try {
                 (vscode.window as any).showInputBox = originalShowInputBox;
                 (vscode.window as any).showQuickPick = originalShowQuickPick;
             }
+        });
+    });
+
+    suite('Task Transition Events', () => {
+        // Pins TODO §5.4 → 5.2 progression: each task in the pipeline
+        // surfaces a `running` transition before it starts and a matching
+        // terminal transition (`success` / `failure` / `skipped`) after.
+        // The Actions panel reads these to render `2/3 · taskId` progress
+        // hints. Tests below capture the full event sequence per scenario.
+
+        test('IT-069: 모든 task 성공 시 running → success 쌍이 순서대로 발사', async () => {
+            const events: import('../extension').TaskTransitionEvent[] = [];
+            const action: PipelineAction = {
+                description: 'IT-069',
+                tasks: [
+                    { id: 'a', type: 'stringManipulation', function: 'trim', input: ' a ' },
+                    { id: 'b', type: 'stringManipulation', function: 'trim', input: ' b ' },
+                    { id: 'c', type: 'stringManipulation', function: 'trim', input: ' c ' }
+                ]
+            };
+
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it069',
+                tempWorkspace,
+                [tempWorkspace],
+                { onTaskTransition: e => events.push(e) }
+            );
+
+            assert.deepStrictEqual(
+                events,
+                [
+                    { taskId: 'a', index: 1, total: 3, state: 'running' },
+                    { taskId: 'a', index: 1, total: 3, state: 'success' },
+                    { taskId: 'b', index: 2, total: 3, state: 'running' },
+                    { taskId: 'b', index: 2, total: 3, state: 'success' },
+                    { taskId: 'c', index: 3, total: 3, state: 'running' },
+                    { taskId: 'c', index: 3, total: 3, state: 'success' }
+                ]
+            );
+        });
+
+        test('IT-070: continueOnError로 실패한 task는 skipped, 정상 task는 success', async () => {
+            const events: import('../extension').TaskTransitionEvent[] = [];
+            const action: PipelineAction = {
+                description: 'IT-070',
+                tasks: [
+                    { id: 'first', type: 'stringManipulation', function: 'trim', input: 'a' },
+                    {
+                        id: 'boom',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'x',
+                        passTheResultToNextTask: true,
+                        output: { capture: { name: 'v', regex: '(' } },
+                        continueOnError: true
+                    },
+                    { id: 'after', type: 'stringManipulation', function: 'trim', input: 'b' }
+                ]
+            };
+
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it070',
+                tempWorkspace,
+                [tempWorkspace],
+                { onTaskTransition: e => events.push(e) }
+            );
+
+            assert.deepStrictEqual(
+                events,
+                [
+                    { taskId: 'first', index: 1, total: 3, state: 'running' },
+                    { taskId: 'first', index: 1, total: 3, state: 'success' },
+                    { taskId: 'boom', index: 2, total: 3, state: 'running' },
+                    { taskId: 'boom', index: 2, total: 3, state: 'skipped' },
+                    { taskId: 'after', index: 3, total: 3, state: 'running' },
+                    { taskId: 'after', index: 3, total: 3, state: 'success' }
+                ]
+            );
+        });
+
+        test('IT-074: throwing onTaskTransition은 success 경로의 결과를 바꾸지 않는다', async () => {
+            // The progress callback is a side channel — a buggy or slow
+            // UI hook must NOT cause a successful task to be reported
+            // as failed. Reviewer Medium finding: previously the callback
+            // was invoked directly so a throw on the `success` transition
+            // would propagate up and reject the whole pipeline.
+            const seen: string[] = [];
+            const throwing = (e: import('../extension').TaskTransitionEvent) => {
+                seen.push(`${e.taskId}:${e.state}`);
+                throw new Error(`forced ${e.state}`);
+            };
+
+            const action: PipelineAction = {
+                description: 'IT-074',
+                tasks: [
+                    { id: 'a', type: 'stringManipulation', function: 'trim', input: 'a' },
+                    { id: 'b', type: 'stringManipulation', function: 'trim', input: 'b' }
+                ]
+            };
+
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            // Must resolve cleanly despite every callback throwing.
+            await executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it074',
+                tempWorkspace,
+                [tempWorkspace],
+                { onTaskTransition: throwing }
+            );
+
+            // All transitions still attempted (helper swallowed each throw)
+            assert.deepStrictEqual(seen, [
+                'a:running', 'a:success',
+                'b:running', 'b:success'
+            ]);
+        });
+
+        test('IT-074b: throwing onTaskTransition은 failure 경로의 원본 에러를 가리지 않는다', async () => {
+            // When a real task fails AND the transition callback also
+            // throws on the failure event, the rejection must carry the
+            // task's original error — not "callback boom". Otherwise
+            // history.output would point at the wrong cause.
+            const action: PipelineAction = {
+                description: 'IT-074b',
+                tasks: [
+                    {
+                        id: 'fail',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'x',
+                        passTheResultToNextTask: true,
+                        output: { capture: { name: 'v', regex: '(' } }
+                    }
+                ]
+            };
+
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await assert.rejects(
+                () => executeActionPipeline(
+                    action,
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it074b',
+                    tempWorkspace,
+                    [tempWorkspace],
+                    {
+                        onTaskTransition: () => {
+                            throw new Error('callback boom');
+                        }
+                    }
+                ),
+                /capture failed/  // task's original error, NOT 'callback boom'
+            );
+        });
+
+        test('IT-071: 실패 task(continueOnError 없음)는 failure 이벤트 후 파이프라인 중단', async () => {
+            const events: import('../extension').TaskTransitionEvent[] = [];
+            const action: PipelineAction = {
+                description: 'IT-071',
+                tasks: [
+                    { id: 'ok', type: 'stringManipulation', function: 'trim', input: 'a' },
+                    {
+                        id: 'fail',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'x',
+                        passTheResultToNextTask: true,
+                        output: { capture: { name: 'v', regex: '(' } }
+                    },
+                    { id: 'never', type: 'stringManipulation', function: 'trim', input: 'b' }
+                ]
+            };
+
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await assert.rejects(() => executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it071',
+                tempWorkspace,
+                [tempWorkspace],
+                { onTaskTransition: e => events.push(e) }
+            ));
+
+            assert.deepStrictEqual(
+                events,
+                [
+                    { taskId: 'ok', index: 1, total: 3, state: 'running' },
+                    { taskId: 'ok', index: 1, total: 3, state: 'success' },
+                    { taskId: 'fail', index: 2, total: 3, state: 'running' },
+                    { taskId: 'fail', index: 2, total: 3, state: 'failure' }
+                    // 'never' task must NOT emit any transition — pipeline
+                    // bails on failure when continueOnError is unset.
+                ]
+            );
         });
     });
 
