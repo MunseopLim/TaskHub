@@ -186,7 +186,67 @@ export interface Output {
      * shell/command tasks.
      */
     capture?: OutputCapture | OutputCapture[];
+
+    /**
+     * Optional matcher(s) that scan the task's string output for compiler
+     * errors / warnings and surface them in the VS Code Problems panel.
+     * Each entry can be either an inline `DiagnosticPattern` object or a
+     * preset shorthand string (e.g. `"$gcc"`, `"$tsc"`). Only applies to
+     * task types that return a string output (shell, command,
+     * stringManipulation) and requires `passTheResultToNextTask: true`
+     * for shell/command tasks — same constraint as `capture`. Diagnostics
+     * are scoped to the action: a re-run clears the action's previous
+     * diagnostics before emitting new ones.
+     */
+    diagnostics?: DiagnosticConfig;
 }
+
+/**
+ * One matcher rule that converts shell output lines into VS Code diagnostics.
+ * The `pattern` is a regex applied per output line (with the `g` flag implicitly
+ * removed — we iterate lines ourselves). Numeric fields are 1-based capture
+ * group indices that select which group provides the file path / line number /
+ * etc.
+ *
+ * Severity handling: when `severity` is set, the matched group's text is
+ * normalized via `normalizeSeverity` (case-insensitive, supports `error` /
+ * `warning` / `info` / `hint` / `note` / `fatal`). Unrecognized text falls
+ * back to `defaultSeverity` (or `error` if absent).
+ */
+export interface DiagnosticPattern {
+    /** Regex pattern matched against each output line. */
+    pattern: string;
+    /** Optional regex flags (e.g. `"i"` for case-insensitive, `"m"` for multiline). The `g` flag is silently stripped — the engine iterates output lines on its own and `g` would interfere with `String.prototype.match` group capture. */
+    flags?: string;
+    /** 1-based capture group index for the file path. Required. */
+    file: number;
+    /** 1-based capture group index for the (1-based) line number. Required. */
+    line: number;
+    /** 1-based capture group index for the column number. Optional. */
+    column?: number;
+    /** 1-based capture group index for the end-line number. Optional. */
+    endLine?: number;
+    /** 1-based capture group index for the end-column number. Optional. */
+    endColumn?: number;
+    /** 1-based capture group index for the severity text. Optional. */
+    severity?: number;
+    /** 1-based capture group index for the message text. Required. */
+    message: number;
+    /** Severity to use when `severity` group is missing or unrecognized. Defaults to `error`. */
+    defaultSeverity?: 'error' | 'warning' | 'info' | 'hint';
+    /** Label shown next to the message in Problems panel. Defaults to `taskhub`. */
+    source?: string;
+}
+
+/**
+ * `output.diagnostics` accepts a single matcher, an array of matchers, a
+ * preset shorthand string (e.g. `"$gcc"`), or an array mixing inline
+ * matchers and preset strings.
+ */
+export type DiagnosticConfig =
+    | DiagnosticPattern
+    | string
+    | Array<DiagnosticPattern | string>;
 
 /**
  * A single capture rule that derives a named variable from a task's string output.

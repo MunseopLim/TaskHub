@@ -25,6 +25,7 @@
 - **Action Creation Wizard** — Build new actions through an interactive UI, no manual JSON editing required
 - **Presets** — Share per-environment action configurations with your team
 - **Run History** — Track success/failure status with one-click re-run
+- **Problem Matcher** — Surface compiler errors / warnings from build output in the Problems panel (built-in `$gcc` / `$tsc` presets or custom regex)
 
 ### Sidebar Panels
 - **Actions** — Action buttons in tree grouping, with search and filtering
@@ -67,11 +68,15 @@
     </td>
     <td align="center" width="33%">
       <b>Run History</b><br>
-      <sub>Success/failure log with quick re-run</sub><br>
+      <sub>Success/failure log with time · duration badges and quick re-run</sub><br>
       <img src="docs/images/history-panel.png" alt="History panel" width="260">
     </td>
   </tr>
 </table>
+
+**Problem Matcher** — Build-task output is parsed via regex matchers and surfaced as VS Code Problems entries. Click to jump to the file/line, F8 to cycle, red squigglies in the editor. Built-in `$gcc` / `$tsc` presets plus arbitrary custom patterns are supported.
+
+![Problem Matcher — build diagnostics in the Problems panel](docs/images/problem-matcher.png)
 
 ### C/C++ Hover
 

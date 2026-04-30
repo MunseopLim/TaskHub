@@ -1811,6 +1811,415 @@ try {
         });
     });
 
+    suite('Problem Matcher / Diagnostics', () => {
+        // Pins TODO §3.1: shell task output is parsed by configured matcher
+        // patterns, and the resulting diagnostics show up in the VS Code
+        // Problems panel via `vscode.languages.getDiagnostics(uri)`.
+
+        function makeFakeContextForDiagnostics(): vscode.ExtensionContext {
+            const workspaceState = new Map<string, unknown>();
+            return {
+                extensionPath: path.resolve(__dirname, '..', '..'),
+                subscriptions: [],
+                workspaceState: {
+                    get: <T>(key: string, def?: T) =>
+                        workspaceState.has(key) ? (workspaceState.get(key) as T) : def,
+                    update: (key: string, val: unknown) => {
+                        workspaceState.set(key, val);
+                        return Promise.resolve();
+                    },
+                    keys: () => Array.from(workspaceState.keys())
+                },
+                globalState: {
+                    get: <T>(_k: string, d?: T) => d,
+                    update: () => Promise.resolve(),
+                    keys: () => [],
+                    setKeysForSync: () => { /* no-op */ }
+                },
+                extensionMode: vscode.ExtensionMode.Test,
+                extension: { packageJSON: { version: '9.9.9-test' } }
+            } as unknown as vscode.ExtensionContext;
+        }
+
+        /** Emit a multi-line gcc-style stdout via `node -e`, then capture it. */
+        function gccStyleAction(actionId: string, lines: string[], opts?: { cwd?: string }): ActionItem {
+            return {
+                id: actionId,
+                title: actionId,
+                action: {
+                    description: actionId,
+                    tasks: [{
+                        id: 'compile',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        args: nodeMultilineArgs(lines),
+                        cwd: opts?.cwd,
+                        passTheResultToNextTask: true,
+                        output: { diagnostics: '$gcc' }
+                    }]
+                }
+            };
+        }
+
+        test('IT-075: shell task의 $gcc 매처가 Problems 패널에 진단을 등록', async () => {
+            // Create real files in tempWorkspace so resolved URIs point at
+            // existing inodes — VS Code Problems UI doesn't care, but it
+            // makes the test more lifelike.
+            const mainCAbsPath = path.join(tempWorkspace, 'src', 'main.c');
+            fs.mkdirSync(path.dirname(mainCAbsPath), { recursive: true });
+            fs.writeFileSync(mainCAbsPath, 'int main() { return 0; }\n');
+
+            const ctx = makeFakeContextForDiagnostics();
+            const item = gccStyleAction('it075', [
+                `${mainCAbsPath}:42:5: error: 'foo' undeclared`,
+                `${mainCAbsPath}:73:12: warning: unused variable 'tmp'`
+            ], { cwd: tempWorkspace });
+            const history = new HistoryProvider(ctx);
+            const mainView = new MainViewProvider(ctx, () => [item]);
+
+            await executeAction(item, ctx, mainView, history);
+
+            const uri = vscode.Uri.file(mainCAbsPath);
+            const diags = vscode.languages.getDiagnostics(uri);
+            // Filter to ONLY the diagnostics owned by this action (other
+            // tests in the same VS Code session may have left their own).
+            const taskhubDiags = diags.filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(taskhubDiags.length, 2,
+                `expected 2 diagnostics on ${uri.fsPath}, got ${taskhubDiags.length}`);
+
+            const errorDiag = taskhubDiags.find(d => d.severity === vscode.DiagnosticSeverity.Error);
+            assert.ok(errorDiag);
+            assert.strictEqual(errorDiag!.range.start.line, 41);   // 42 - 1 (0-based)
+            assert.strictEqual(errorDiag!.range.start.character, 4); // 5 - 1
+            assert.ok(errorDiag!.message.includes("'foo' undeclared"));
+
+            const warnDiag = taskhubDiags.find(d => d.severity === vscode.DiagnosticSeverity.Warning);
+            assert.ok(warnDiag);
+            assert.strictEqual(warnDiag!.range.start.line, 72);
+        });
+
+        test('IT-076: 같은 액션 재실행 시 이전 진단이 자동 clear', async () => {
+            const mainCAbsPath = path.join(tempWorkspace, 'src', 'rerun.c');
+            fs.mkdirSync(path.dirname(mainCAbsPath), { recursive: true });
+            fs.writeFileSync(mainCAbsPath, 'int main(){}');
+
+            const ctx = makeFakeContextForDiagnostics();
+            const history = new HistoryProvider(ctx);
+
+            // First run: produce one error
+            const failItem = gccStyleAction('it076', [
+                `${mainCAbsPath}:10:1: error: oops`
+            ], { cwd: tempWorkspace });
+            const mainView1 = new MainViewProvider(ctx, () => [failItem]);
+            await executeAction(failItem, ctx, mainView1, history);
+
+            const uri = vscode.Uri.file(mainCAbsPath);
+            const before = vscode.languages.getDiagnostics(uri).filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(before.length, 1, 'first run should produce 1 diagnostic');
+
+            // Second run: produce zero errors — collection should clear.
+            const cleanItem = gccStyleAction('it076', [
+                'build complete (no errors)'
+            ], { cwd: tempWorkspace });
+            const mainView2 = new MainViewProvider(ctx, () => [cleanItem]);
+            await executeAction(cleanItem, ctx, mainView2, history);
+
+            const after = vscode.languages.getDiagnostics(uri).filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(after.length, 0,
+                `second clean run must clear the prior diagnostic, got ${after.length}: ${JSON.stringify(after.map(d => d.message))}`);
+        });
+
+        test('IT-077: 상대 경로 진단은 task의 cwd 기준으로 절대 경로 해석', async () => {
+            // Create file at <tempWorkspace>/sub/relpath.c
+            const subDir = path.join(tempWorkspace, 'sub');
+            fs.mkdirSync(subDir, { recursive: true });
+            const relFile = path.join(subDir, 'relpath.c');
+            fs.writeFileSync(relFile, '');
+
+            const ctx = makeFakeContextForDiagnostics();
+            // Compiler emits a *relative* path "relpath.c" with cwd set to subDir.
+            // Must resolve to <tempWorkspace>/sub/relpath.c, NOT <tempWorkspace>/relpath.c.
+            const item = gccStyleAction('it077', [
+                'relpath.c:7:3: error: relative-path test'
+            ], { cwd: subDir });
+            const history = new HistoryProvider(ctx);
+            const mainView = new MainViewProvider(ctx, () => [item]);
+
+            await executeAction(item, ctx, mainView, history);
+
+            const expectedUri = vscode.Uri.file(relFile);
+            const diags = vscode.languages.getDiagnostics(expectedUri).filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(diags.length, 1,
+                `expected diagnostic at ${expectedUri.fsPath}, got ${diags.length}`);
+
+            // And NOT at the wrong (workspace-root) path.
+            const wrongUri = vscode.Uri.file(path.join(tempWorkspace, 'relpath.c'));
+            const wrongDiags = vscode.languages.getDiagnostics(wrongUri).filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(wrongDiags.length, 0,
+                'relative path must not resolve against the workspace root when task.cwd is set');
+        });
+
+        test('IT-079: gcc 같은 non-zero exit 빌드 실패에서도 진단이 등록되어야 한다 (1차 리뷰 High)', async () => {
+            // 가장 흔한 빌드 실패 케이스: 컴파일러가 stderr에 진단을 쓰고
+            // exit code 1로 종료. 이전 구현은 `await handleCommand`가 throw
+            // 되면 그 자리에서 catch가 못 잡아 post-processing 진단 블록까지
+            // 도달 못 했음 — 정작 진단이 가장 필요한 케이스를 놓쳤음. 이제는
+            // ShellCommandError가 stdout/stderr를 보존하고, shell/command
+            // 분기의 try/catch가 매처를 적용한 뒤 원본 에러를 re-throw 한다.
+            const targetFile = path.join(tempWorkspace, 'broken.c');
+            fs.writeFileSync(targetFile, 'int main() { return undefined; }\n');
+
+            const ctx = makeFakeContextForDiagnostics();
+            // node로 stderr에 gcc-style 출력을 찍고 exit code 1로 종료.
+            const errorScript = `
+                process.stderr.write(${JSON.stringify(`${targetFile}:1:14: error: 'undefined' undeclared\n`)});
+                process.exit(1);
+            `.trim();
+            const item: ActionItem = {
+                id: 'it079',
+                title: 'IT-079',
+                action: {
+                    description: 'IT-079',
+                    failMessage: 'IT-079 failed',
+                    tasks: [{
+                        id: 'failing-build',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        args: ['-e', errorScript],
+                        cwd: tempWorkspace,
+                        passTheResultToNextTask: true,
+                        output: { diagnostics: '$gcc' }
+                    }]
+                }
+            };
+            const history = new HistoryProvider(ctx);
+            const mainView = new MainViewProvider(ctx, () => [item]);
+
+            // executeAction은 실패를 throw하지만, 실패하기 전에 진단은 등록되어야 함.
+            // showErrorMessage 모킹해 spurious dialog 방지.
+            const originalShowError = vscode.window.showErrorMessage;
+            (vscode.window as any).showErrorMessage = async () => undefined;
+            try {
+                await assert.rejects(() => executeAction(item, ctx, mainView, history));
+            } finally {
+                (vscode.window as any).showErrorMessage = originalShowError;
+            }
+
+            // history도 failure로 기록되어야 함 — 원본 의미 보존 확인.
+            const entries = history.getHistory();
+            assert.strictEqual(entries.length, 1);
+            assert.strictEqual(entries[0].status, 'failure',
+                'task의 non-zero exit는 그대로 action failure로 기록되어야 함');
+
+            // 진단은 등록되어야 함 — 핵심 회귀 가드.
+            const uri = vscode.Uri.file(targetFile);
+            const diags = vscode.languages.getDiagnostics(uri).filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(diags.length, 1,
+                `non-zero exit 후에도 진단이 등록되어야 함 — got ${diags.length}`);
+            assert.strictEqual(diags[0].severity, vscode.DiagnosticSeverity.Error);
+            assert.ok(diags[0].message.includes("'undefined' undeclared"));
+        });
+
+        test('IT-081: exit 0 빌드가 stderr에 warning을 쓰면 진단이 등록된다 (2차 리뷰 Medium)', async () => {
+            // gcc/clang이 warning만 있을 때 흔한 패턴: exit 0으로 정상 종료
+            // 하면서도 stderr에 진단을 출력. 초기 구현은 성공 경로에서
+            // executeShellCommand가 stdout만 resolve해서 stderr가 매처에
+            // 닿지 않았음 — IT-079(failure 경로)와의 비대칭. 이제는
+            // executeShellCommand가 {stdout, stderr} 튜플을 resolve하고
+            // handleCommand가 둘 다 result로 노출, post-processing 진단
+            // 블록이 두 스트림을 합쳐 매처에 통과시킴.
+            const targetFile = path.join(tempWorkspace, 'warn.c');
+            fs.writeFileSync(targetFile, 'int x;\n');
+
+            const ctx = makeFakeContextForDiagnostics();
+            // node로 stdout에는 빌드 OK, stderr에는 gcc-style warning을
+            // 찍고 exit 0으로 정상 종료.
+            const successWithWarningScript = `
+                process.stdout.write('compile finished');
+                process.stderr.write(${JSON.stringify(`${targetFile}:1:5: warning: unused variable 'x' [-Wunused-variable]\n`)});
+                process.exit(0);
+            `.trim();
+            const item: ActionItem = {
+                id: 'it081',
+                title: 'IT-081',
+                action: {
+                    description: 'IT-081',
+                    tasks: [{
+                        id: 'build-with-warn',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        args: ['-e', successWithWarningScript],
+                        cwd: tempWorkspace,
+                        passTheResultToNextTask: true,
+                        output: { diagnostics: '$gcc' }
+                    }]
+                }
+            };
+            const history = new HistoryProvider(ctx);
+            const mainView = new MainViewProvider(ctx, () => [item]);
+
+            await executeAction(item, ctx, mainView, history);
+
+            // action은 성공으로 기록 (exit 0이므로).
+            const entries = history.getHistory();
+            assert.strictEqual(entries.length, 1);
+            assert.strictEqual(entries[0].status, 'success');
+
+            // 진단은 stderr에서 추출되어 등록되어야 함 — 핵심 회귀 가드.
+            const uri = vscode.Uri.file(targetFile);
+            const diags = vscode.languages.getDiagnostics(uri).filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(diags.length, 1,
+                `exit 0 + stderr warning에서 진단이 등록되어야 함 — got ${diags.length}`);
+            assert.strictEqual(diags[0].severity, vscode.DiagnosticSeverity.Warning);
+            assert.ok(diags[0].message.includes("unused variable 'x'"));
+        });
+
+        test('IT-082: 같은 액션의 여러 task가 같은 파일에 진단을 내면 모두 보존 (3차 리뷰 Medium)', async () => {
+            // collection.set(uri, ...)는 해당 URI의 기존 entry 전체를
+            // *replace*하는 의미이므로, 같은 액션 안에서 두 번째 task가
+            // 같은 파일에 진단을 내면 첫 번째 task의 진단이 덮여 사라짐.
+            // applyDiagnosticsToCollection이 collection.get(uri)을 먼저
+            // 읽어 merge한 뒤 set 하도록 수정. 액션 시작의 clear는 이전
+            // run의 진단만 비우므로, 이번 run에서 누적된 sibling 진단은
+            // 그대로 보존됨.
+            const targetFile = path.join(tempWorkspace, 'shared.c');
+            fs.writeFileSync(targetFile, '');
+
+            const ctx = makeFakeContextForDiagnostics();
+            const item: ActionItem = {
+                id: 'it082',
+                title: 'IT-082',
+                action: {
+                    description: 'IT-082',
+                    tasks: [
+                        {
+                            id: 'compile',
+                            type: 'command',
+                            command: { windows: 'node', macos: 'node', linux: 'node' },
+                            args: nodeMultilineArgs([`${targetFile}:42:5: warning: from compile task`]),
+                            cwd: tempWorkspace,
+                            passTheResultToNextTask: true,
+                            output: { diagnostics: '$gcc' }
+                        },
+                        {
+                            id: 'lint',
+                            type: 'command',
+                            command: { windows: 'node', macos: 'node', linux: 'node' },
+                            args: nodeMultilineArgs([`${targetFile}:73:12: error: from lint task`]),
+                            cwd: tempWorkspace,
+                            passTheResultToNextTask: true,
+                            output: { diagnostics: '$gcc' }
+                        }
+                    ]
+                }
+            };
+            const history = new HistoryProvider(ctx);
+            const mainView = new MainViewProvider(ctx, () => [item]);
+
+            await executeAction(item, ctx, mainView, history);
+
+            const uri = vscode.Uri.file(targetFile);
+            const diags = vscode.languages.getDiagnostics(uri).filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(diags.length, 2,
+                `compile + lint 두 task의 진단이 모두 보존되어야 함 — got ${diags.length}: ${JSON.stringify(diags.map(d => d.message))}`);
+
+            const warning = diags.find(d => d.severity === vscode.DiagnosticSeverity.Warning);
+            const error = diags.find(d => d.severity === vscode.DiagnosticSeverity.Error);
+            assert.ok(warning, 'compile task의 warning이 보존되어야 함');
+            assert.ok(warning!.message.includes('from compile task'));
+            assert.ok(error, 'lint task의 error가 보존되어야 함');
+            assert.ok(error!.message.includes('from lint task'));
+        });
+
+        test('IT-080: 진단 cwd는 interpolated된 cwd를 사용한다 (1차 리뷰 Medium)', async () => {
+            // task.cwd에 ${workspaceFolder} 같은 변수가 들어가면 실제 명령은
+            // interpolated된 경로에서 실행됨. 진단의 상대 경로 해석도 같은
+            // (interpolated된) 경로 기준이어야 한다 — 이전 구현은 raw task.cwd
+            // 를 그대로 읽어 잘못된 위치로 resolve 됐음.
+            //
+            // 이 테스트는 executeActionPipeline을 직접 호출 — executeAction은
+            // workspaceFolder를 actionWorkspaceFolderMap을 통해 받는데 그
+            // map은 모듈 private이라 테스트에서 명시적으로 주입할 수 없음.
+            const subDir = path.join(tempWorkspace, 'subdir');
+            fs.mkdirSync(subDir, { recursive: true });
+            const relFile = path.join(subDir, 'interp.c');
+            fs.writeFileSync(relFile, '');
+
+            const action: PipelineAction = {
+                description: 'IT-080',
+                tasks: [{
+                    id: 'compile',
+                    type: 'command',
+                    command: { windows: 'node', macos: 'node', linux: 'node' },
+                    args: nodeMultilineArgs(['interp.c:5:1: error: interpolation test']),
+                    // 변수 치환을 통해 cwd를 동적으로 결정 — pipeline 내부에서
+                    // ${workspaceFolder}는 호출 시 전달한 workspaceFolderPath
+                    // (= tempWorkspace)로 resolve.
+                    cwd: '${workspaceFolder}/subdir',
+                    passTheResultToNextTask: true,
+                    output: { diagnostics: '$gcc' }
+                }]
+            };
+
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it080',
+                tempWorkspace,
+                [tempWorkspace]
+            );
+
+            // 정확한 위치(<workspace>/subdir/interp.c)에 진단 등록 — interpolated
+            // cwd(<tempWorkspace>/subdir)가 상대 경로 'interp.c'의 base가 됨.
+            const correctUri = vscode.Uri.file(relFile);
+            const correctDiags = vscode.languages.getDiagnostics(correctUri).filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(correctDiags.length, 1,
+                `interpolated cwd(${subDir}) 기준으로 진단이 등록되어야 함`);
+
+            // 잘못된 workspace 루트에는 등록 안 됨.
+            const wrongUri = vscode.Uri.file(path.join(tempWorkspace, 'interp.c'));
+            const wrongDiags = vscode.languages.getDiagnostics(wrongUri).filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(wrongDiags.length, 0,
+                'raw task.cwd("${workspaceFolder}/subdir")가 그대로 사용되면 안 됨 (interpolated 경로여야 함)');
+        });
+
+        test('IT-078: passTheResultToNextTask: false에서는 진단 emission이 silent skip', async () => {
+            // The shell stream path doesn't capture output, so diagnostics
+            // can't be parsed. Should be a silent skip (verbose log warning
+            // only) — no crash, no spurious diagnostics.
+            const noEmitFile = path.join(tempWorkspace, 'never.c');
+            fs.writeFileSync(noEmitFile, '');
+
+            const ctx = makeFakeContextForDiagnostics();
+            const item: ActionItem = {
+                id: 'it078',
+                title: 'IT-078',
+                action: {
+                    description: 'IT-078',
+                    tasks: [{
+                        id: 'streamed',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        args: nodeMultilineArgs([`${noEmitFile}:1:1: error: should-not-appear`]),
+                        cwd: tempWorkspace,
+                        passTheResultToNextTask: false,                  // streamed, not captured
+                        output: { diagnostics: '$gcc' } as any           // diagnostics declared but unreachable
+                    }]
+                }
+            };
+            const history = new HistoryProvider(ctx);
+            const mainView = new MainViewProvider(ctx, () => [item]);
+
+            await executeAction(item, ctx, mainView, history);
+
+            const uri = vscode.Uri.file(noEmitFile);
+            const diags = vscode.languages.getDiagnostics(uri).filter(d => d.source && d.source.startsWith('gcc'));
+            assert.strictEqual(diags.length, 0,
+                'streamed task must not produce diagnostics — silent skip');
+        });
+    });
+
     suite('Task Output Flow', () => {
         test('IT-029: passTheResultToNextTask=false는 downstream에서 output을 보이지 않음', async () => {
             const resultPath = path.join(tempWorkspace, 'it029.txt');

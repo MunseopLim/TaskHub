@@ -139,6 +139,20 @@
 | IT-074 | throwing onTaskTransition은 success 경로 결과를 바꾸지 않음 | 4개 transition(`running`/`success`) 모두에서 콜백이 throw해도 파이프라인이 정상 resolve. `emitTransition` helper의 try/catch 격리 회귀 가드 |
 | IT-074b | throwing onTaskTransition은 failure 경로의 원본 에러를 가리지 않음 | failure transition에서 콜백이 throw해도 reject되는 에러는 task의 원본 에러(`'capture failed'`)이지 콜백 에러(`'callback boom'`)가 아님 |
 
+### Problem Matcher / 진단 통합 (TODO §3.1)
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-075/076/077/078/079/080/081/082). 단위 테스트는 [src/test/diagnosticMatcher.test.ts](../src/test/diagnosticMatcher.test.ts).
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-075 | `$gcc` 매처가 stdout을 파싱해 Problems 패널에 진단 등록 | shell task의 `output.diagnostics: "$gcc"`가 file/line/col/severity/message를 정확히 추출하고 `vscode.languages.getDiagnostics(uri)`에 노출 |
+| IT-076 | 같은 액션 재실행 시 이전 진단 자동 clear | `executeAction` 시작 시 `clearActionDiagnostics`가 호출되어, 첫 실행에서 등록된 진단이 두 번째 깨끗한 실행으로 모두 제거됨 |
+| IT-077 | 상대 경로는 task `cwd` 기준으로 해석 | 컴파일러가 `relpath.c`처럼 상대 경로를 출력해도 `cwd: subDir`이 설정된 task에서는 정확히 `subDir/relpath.c`로 진단이 등록되고, workspace 루트로 잘못 해석되지 않음 |
+| IT-078 | `passTheResultToNextTask: false`에서 진단 emission이 silent skip | 스트림 모드는 stdout이 캡처되지 않아 매칭할 출력이 없으므로 진단을 등록하지 않음 (verbose 로그 경고만 — 다른 동작에 영향 없음) |
+| IT-079 | non-zero exit 빌드 실패에서도 진단 등록 (1차 리뷰 High) | gcc/clang 등이 stderr에 진단을 쓰고 exit code 1로 종료하는 정상 빌드 실패 케이스. `ShellCommandError`가 stdout/stderr를 보존해 매처가 적용된 뒤 원본 에러가 re-throw — action은 failure로 기록되면서 진단도 함께 등록 |
+| IT-080 | 진단 cwd는 interpolated된 cwd 사용 (1차 리뷰 Medium) | `cwd: "${workspaceFolder}/subdir"` 같이 변수가 들어간 경로의 task에서, 상대 경로 진단이 *interpolated된* 경로 기준으로 resolve되어 정확한 위치에 등록 — raw task.cwd 문자열을 그대로 쓰면 안 됨 |
+| IT-081 | exit 0 + stderr warning에서도 진단 등록 (2차 리뷰 Medium) | gcc/clang이 warning만 있을 때 흔한 패턴(exit 0 + stderr 출력). `executeShellCommand`가 성공 경로에서도 `{stdout, stderr}` 튜플로 resolve하고, post-processing 진단 블록이 둘을 합쳐 매처에 통과 — IT-079(failure 경로)와의 비대칭 해소 |
+| IT-082 | 같은 액션의 여러 task가 같은 파일에 진단을 내면 모두 보존 (3차 리뷰 Medium) | `collection.set(uri, ...)`은 해당 URI의 기존 entry를 *replace*하는 의미라 sibling task가 같은 파일에 진단 내면 앞 task가 덮였음. `collection.get(uri)`로 먼저 읽어 concat 후 set하도록 수정. 액션 시작 시 clear는 이전 run에만 적용되므로 같은 run의 누적은 보존 |
+
 ### Task Output Flow
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
 
@@ -412,6 +426,51 @@ IT-068의 대칭 가드입니다. 이전 구현은 `MainViewProvider`가 `loadHi
 ### IT-074b: throwing onTaskTransition은 failure 경로의 원본 에러를 가리지 않는다
 
 실제 task가 fail하는 동시에 transition 콜백도 failure 이벤트에서 throw할 때, reject되는 에러는 task의 *원본* 에러여야 합니다 — 콜백 에러로 가려지면 `history.output`이 잘못된 원인을 가리키게 됩니다. 본 시나리오는 capture regex가 잘못된 task에 매 콜백마다 `'callback boom'`을 던지는 콜백을 붙이고, `assert.rejects`가 `/capture failed/`(원본 에러)에 매칭되는지를 확인합니다.
+
+### IT-075: shell task의 $gcc 매처가 Problems 패널에 진단을 등록
+
+`output.diagnostics: "$gcc"`가 설정된 shell/command task의 stdout이 `$gcc` 프리셋 정규식으로 파싱되어 `vscode.Diagnostic` 객체가 만들어지고 액션별 `DiagnosticCollection`에 등록됩니다. 본 시나리오는 `path:42:5: error: 'foo' undeclared` + `path:73:12: warning: ...` 형태의 두 줄을 출력하는 task를 실행하고, `vscode.languages.getDiagnostics(uri)`로 두 진단이 정확한 (line, column, severity, message)로 노출되는지 확인합니다. 0-based line/column 변환(VS Code Range)도 함께 검증.
+
+### IT-076: 같은 액션 재실행 시 이전 진단 자동 clear
+
+`executeAction` 시작 시 `clearActionDiagnostics(actionId)`가 호출되어 그 액션의 이전 진단이 모두 비워집니다. 본 시나리오는 (a) 첫 실행에서 1개 진단을 등록하고, (b) 두 번째 실행에서는 같은 actionId로 진단을 발생시키지 않는 깨끗한 출력을 produce하여, 두 번째 실행 후 `getDiagnostics(uri)`가 빈 배열임을 확인합니다. 이로써 "에러 fix → 다시 빌드 → 옛 에러 잔존" 회귀를 차단.
+
+### IT-077: 상대 경로 진단은 task cwd 기준으로 해석
+
+컴파일러가 `relpath.c`처럼 상대 경로로 에러를 출력할 때, task의 `cwd`가 설정되어 있으면 그 디렉터리 기준으로 절대 경로가 결정됩니다. 본 시나리오는 `<tempWorkspace>/sub/`을 cwd로 설정한 task가 `relpath.c:7:3: error: ...`을 출력하면, 진단이 `<tempWorkspace>/sub/relpath.c`에 등록되고 잘못된 위치(`<tempWorkspace>/relpath.c`)에는 등록되지 않음을 양방향으로 확인합니다.
+
+### IT-078: passTheResultToNextTask: false에서 진단 emission은 silent skip
+
+스트림 모드(`passTheResultToNextTask: false`)는 stdout이 capture되지 않아 매칭할 출력 문자열 자체가 없습니다. 이 경우 `output.diagnostics`가 선언되어 있어도 진단은 등록되지 않고 verbose 로그에 경고만 남습니다 — capture와 동일한 정책. 본 시나리오는 진단이 발생할 만한 에러 메시지를 stream으로 흘리고, `getDiagnostics(uri)`가 빈 배열임(silent skip)을 확인합니다.
+
+### IT-079: non-zero exit 빌드 실패에서도 진단이 등록되어야 한다
+
+가장 흔한 빌드 실패 패턴: 컴파일러가 stderr에 `path:line:col: error: ...`를 쓰고 exit code 1로 종료. 이전 구현은 `await handleCommand(...)`가 throw되면 그대로 catch에서 잡혀 post-processing 진단 블록까지 도달하지 못해, **정작 진단이 가장 필요한 케이스에서 진단이 안 떴음**. 1차 리뷰 High로 발견되어 다음과 같이 고쳤습니다:
+
+1. `ShellCommandError` 클래스 도입 — `stdout`/`stderr`/`exitCode`를 에러에 보존
+2. shell/command 분기에 try/catch 추가 — `ShellCommandError`이고 `output.diagnostics`가 선언된 경우, 캡처된 출력에 매처 적용 후 원본 에러 re-throw
+
+본 시나리오는 node로 stderr에 gcc-style 진단을 찍고 exit 1로 종료하는 task를 실행해 (a) action이 failure로 기록되며 (원본 의미 보존) (b) 진단이 정상적으로 Problems 패널에 등록됨을 확인합니다. 진단 적용 자체가 throw해도 원본 빌드 실패 메시지를 가리지 않도록 inner try/catch도 함께 검증.
+
+### IT-080: 진단 cwd는 interpolated된 cwd를 사용한다
+
+`task.cwd`에 `${workspaceFolder}` 같은 변수가 들어가면 **실제 명령 실행에는 interpolated된 경로**가 쓰이지만, 1차 리뷰 Medium 이전에는 진단의 상대 경로 해석이 *raw* `task.cwd`를 다시 읽어 잘못된 위치로 resolve됐습니다. 이제 `interpolatedCwd`가 함수 스코프로 lift되어 실행 cwd와 동일한 값이 진단 해석에도 사용됩니다. 본 시나리오는 `cwd: "${workspaceFolder}/subdir"` task에서 상대 경로 `interp.c` 진단이 정확히 `<workspace>/subdir/interp.c`에 등록되고, raw 문자열로 해석된 잘못된 위치에는 등록되지 않음을 양방향으로 확인합니다. `executeActionPipeline`을 직접 호출 (executeAction의 actionWorkspaceFolderMap이 모듈 private이라 테스트에서 명시 주입 불가).
+
+### IT-081: exit 0 + stderr warning에서도 진단이 등록되어야 한다
+
+gcc/clang이 warning만 있을 때 가장 흔한 패턴: `compile finished` 같은 stdout과 함께 stderr에 `warning: ...`을 찍고 exit 0으로 정상 종료. 2차 리뷰 Medium 이전에는 `executeShellCommand`가 성공 경로에서 stdout만 resolve해서 stderr가 매처에 닿지 않았습니다 — IT-079(failure 경로)와의 비대칭. 다음과 같이 고쳤습니다:
+
+1. `executeShellCommand`의 반환 타입을 `Promise<{stdout, stderr}>`로 변경 (실패 경로의 `ShellCommandError.stdout/stderr`와 대칭)
+2. `handleCommand`가 `{output: stdout, stderr}`를 반환 — `output`은 historical meaning(=stdout) 그대로라 `output.capture` / `${task.output}` 의미는 보존
+3. 진단 post-processing 블록에서 `combineStdoutStderrForDiagnostics(result.output, result.stderr)`로 두 스트림을 매처에 통과 (실패 경로도 동일 헬퍼 사용해 일관성 확보)
+
+본 시나리오는 node로 stdout `'compile finished'` + stderr `warn.c:1:5: warning: ...` + exit 0인 task를 실행해 (a) action이 success로 기록 (b) `vscode.DiagnosticSeverity.Warning`으로 진단 등록 두 가지를 검증합니다.
+
+### IT-082: 같은 액션의 여러 task가 같은 파일에 진단을 내면 모두 보존된다
+
+VS Code `DiagnosticCollection.set(uri, ...)`은 해당 URI의 기존 entry 전체를 **replace**하는 의미입니다. 따라서 sibling task가 같은 파일에 진단을 내면 앞 task의 contribution이 덮여 사라지는 회귀가 있었습니다. 3차 리뷰 Medium으로 발견되어 `applyDiagnosticsToCollection`이 set 직전에 `collection.get(uri)`로 현재 entry를 읽고 concat하도록 수정했습니다 — 액션 시작 시 `clearActionDiagnostics`는 *이전 run*의 진단만 비우므로, 이번 run에서 누적된 sibling 진단은 그대로 보존됩니다.
+
+본 시나리오는 한 액션에 두 개의 command task를 두고 (a) `compile` task가 `shared.c:42:5: warning: ...`을, (b) `lint` task가 `shared.c:73:12: error: ...`을 각각 stdout으로 출력합니다. 액션 종료 후 `vscode.languages.getDiagnostics(uri)`가 두 진단을 모두 반환하며, 각각 `Warning`/`Error` severity로 구분되고 메시지에 source task의 이름이 포함되는지 확인합니다.
 
 ## 시나리오 추가 절차
 

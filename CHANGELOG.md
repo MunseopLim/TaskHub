@@ -29,6 +29,50 @@
 =====================================================================
 -->
 
+## [0.4.22] - 2026-05-01
+
+### 추가 — Problem Matcher / 진단 통합 (TODO §3.1)
+
+#### High (UX impact — 빌드 task 사용자에게 매 사이클 시간 절약)
+- **shell/command task 출력을 Problems 패널 진단으로 자동 변환**: `output.diagnostics`에 `"$gcc"` 같은 프리셋 또는 커스텀 정규식 패턴을 지정하면, task stdout의 컴파일러 에러·경고가 자동으로 `vscode.Diagnostic` 객체로 변환되어 Problems 패널과 에디터 빨간 squiggly로 노출됩니다. 사용자는 Problems 항목 클릭 → 해당 file:line:col로 즉시 점프, F8로 다음 에러 순환 가능. tasks.json `problemMatcher`의 핵심 가치 흡수.
+- **내장 프리셋**: `$gcc` (gcc / clang / arm-none-eabi-gcc 호환), `$tsc` (TypeScript Compiler). 추가 toolchain은 사용자가 커스텀 패턴으로 정의 가능 (`pattern` + 1-based 캡처 그룹 인덱스).
+- **상대 경로 자동 해석**: 컴파일러가 `src/main.c`처럼 상대 경로로 출력해도 task의 `cwd` 기준으로 절대 경로 변환. 임베디드 toolchain 출력에 친화적.
+- **액션별 격리 + 자동 clear**: 같은 액션 재실행 시 이전 진단이 자동 정리되어 "에러 fix → 다시 빌드 → 옛 에러 잔존" 회귀 차단. 다른 액션의 진단은 영향받지 않음.
+
+#### 데이터 모델
+- **신규 `output.diagnostics: DiagnosticConfig`**: `DiagnosticPattern` 객체, 프리셋 string(`"$gcc"`), 또는 둘의 배열 형태 모두 지원. `pattern` + `file`/`line`/`message` 필수, `column`/`endLine`/`endColumn`/`severity`/`defaultSeverity`/`source` 선택. `actions.schema.json`에도 정의 추가되어 JSON Editor / ajv 검증에서 즉시 자동완성·검증 가능.
+- **동작 조건은 `output.capture`와 동일**: shell/command는 `passTheResultToNextTask: true` 필요 (스트림 모드는 stdout 캡처 안 됨). stringManipulation은 항상 가능.
+
+#### 내부 구조
+- **`src/diagnosticMatcher.ts` 새 모듈**: 순수 함수 `applyDiagnosticMatchers(output, config)` — vscode 의존 없음, 단위 테스트로 직접 경계 고정. `DIAGNOSTIC_PRESETS` 레지스트리에 새 toolchain 추가는 한 줄 entry.
+- **per-action `DiagnosticCollection` 라이프사이클**: `actionDiagnosticCollections: Map<actionId, DiagnosticCollection>`이 lazy 생성. `executeAction` 시작 시 `clearActionDiagnostics(id)`로 해당 액션 항목만 비움. `deactivate()`에서 모든 컬렉션 dispose.
+- **VS Code Diagnostic 객체 변환**: `applyDiagnosticsToCollection`이 ParsedDiagnostic → `vscode.Diagnostic`(0-based Range)로 변환하고 URI별로 그룹화해 한 번에 set.
+
+#### High — 1차 리뷰 후속 수정 (실패 빌드에서 진단 누락)
+- **non-zero exit 빌드 실패에서도 진단 등록**: 초기 구현은 `await handleCommand(...)`가 throw되면 post-processing 블록까지 도달 못 해, **gcc/clang이 stderr에 진단을 쓰고 exit 1로 종료하는 가장 흔한 빌드 실패 케이스**가 Problems 패널에 안 뜨는 회귀가 있었음. 신규 `ShellCommandError`(stdout/stderr/exitCode 보존) + shell/command 분기의 try/catch 래핑으로 매처를 적용한 뒤 원본 에러 re-throw. action은 여전히 failure로 기록되고 history.output에 원본 stderr가 들어감. 회귀 가드: `IT-079`. (테스트는 node로 stderr에 gcc 출력 찍고 exit 1 — 실제 컴파일러 시뮬레이션.)
+
+#### Medium — 1차 리뷰 후속 수정 (진단 cwd가 interpolated 안 된 경로 사용)
+- **상대 경로 진단이 interpolated cwd 기준으로 해석되도록 수정**: `task.cwd: "${workspaceFolder}/subdir"` 같이 변수가 들어간 경로의 task에서 실제 명령은 interpolated된 cwd로 실행됐지만, 진단의 상대 경로 해석은 raw `task.cwd` 문자열을 다시 읽어 잘못된 위치로 resolve됐음. `interpolatedCwd`를 `executeSingleTask` 함수 스코프로 lift해 실행과 진단이 동일한 cwd를 보도록 정리. `cwdForTaskOutput` 헬퍼 제거. 회귀 가드: `IT-080`.
+
+#### Low — 1차 리뷰 후속 수정 (`g` flag 문서 정합성)
+- `flags` 필드 설명을 [src/schema.ts](src/schema.ts) / [schema/actions.schema.json](schema/actions.schema.json) / [docs/features.md](docs/features.md) 세 곳 모두 "**`g` flag는 silently 제거**"로 통일. 이전엔 일부에서 "automatically added"로 표기되어 사용자 혼동 여지가 있었음.
+
+#### Medium — 2차 리뷰 후속 수정 (성공 경로의 stderr 누락)
+- **exit 0 + stderr warning 케이스에서도 진단 등록**: 1차 리뷰에서 실패 경로(`ShellCommandError`)는 stdout/stderr 둘 다 보존했지만 성공 경로는 여전히 stdout만 매처에 통과시키고 있어 비대칭. gcc/clang이 warning만 있을 때 흔한 "exit 0 + stderr 출력" 패턴이 Problems 패널에 안 뜨는 회귀가 있었음. 다음과 같이 정리:
+  - `executeShellCommand` 반환 타입을 `Promise<string>` → `Promise<{ stdout, stderr }>`로 변경 — 실패 경로의 `ShellCommandError.stdout/stderr`와 대칭
+  - `handleCommand`가 `{ output, stderr }`를 반환. `output`은 historical meaning(=stdout) 그대로라 `output.capture` / `${task.output}` 의미는 완벽 보존 — `result.stderr`는 진단 매칭 전용으로만 노출
+  - `combineStdoutStderrForDiagnostics(stdout, stderr)` 헬퍼로 success/failure 두 경로 모두 동일한 결합 규칙 사용 (빈 스트림은 leading/trailing newline 안 만듦)
+- 회귀 가드: `IT-081` (exit 0 + stderr warning + `output.diagnostics: "$gcc"` → action success로 기록되면서 진단도 Warning severity로 등록)
+
+#### Medium — 3차 리뷰 후속 수정 (sibling task 진단이 덮어쓰임)
+- **같은 액션의 여러 task가 같은 파일에 진단을 내면 모두 보존**: VS Code `DiagnosticCollection.set(uri, ...)`은 해당 URI의 기존 entry 전체를 *replace*하는 의미라, 액션의 두 번째 task가 같은 파일에 진단을 내면 첫 번째 task의 contribution이 덮여 사라지는 회귀가 있었음. `applyDiagnosticsToCollection`이 set 직전 `collection.get(uri)`로 현재 entry를 읽어 concat 후 set하도록 수정 — 액션 시작 `clearActionDiagnostics`는 이전 run에만 적용되므로 같은 run의 sibling 진단은 그대로 누적. 회귀 가드: `IT-082` (한 액션의 compile + lint task가 같은 파일에 각각 warning/error를 내고 둘 다 보존되는지 확인).
+
+#### 범위 한정 (TODO §3.1)
+- **v1: batched mode only**: 진단은 task 종료 후 stdout 전체를 한 번에 파싱해 등록합니다. 5분짜리 빌드의 에러는 빌드 끝나야 보입니다. **streaming mode (실시간 진단)** 는 v2 — `executeStreamedTask`에 output tee 인프라 추가가 필요한 별도 작업이라 분리.
+- **다중 라인 매칭은 미지원**: 한 진단이 여러 라인에 걸쳐 표현되는 형태(gcc note 후속 라인 등)는 v1에선 라인별 독립 매칭. v2 또는 v3에서 검토.
+
+**테스트**: 신규 32케이스 추가 (단위 24: `normalizeSeverity` 3, `resolveDiagnosticMatcher` 4, `$gcc` preset 5, `$tsc` preset 1, multi-pattern + array config 3, 에러 경로 3, 방어 처리 2, 폴백 severity 3; 통합 8: IT-075 기본 등록, IT-076 재실행 자동 clear, IT-077 상대 경로 cwd 기준 해석, IT-078 스트림 모드 silent skip, IT-079 non-zero exit 진단 회귀 가드, IT-080 interpolated cwd 회귀 가드, IT-081 exit 0 + stderr 진단 회귀 가드, IT-082 sibling task 진단 merge 회귀 가드). 전체 961 passing.
+
 ## [0.4.21] - 2026-04-30
 
 ### 추가 — 멀티 task 액션 진행 표시 (TODO §5.2 일부)

@@ -343,8 +343,83 @@
             }
           ],
           "description": "Extract named variables from the task's string output. Each rule adds a `${task_id.<name>}` variable for downstream tasks. Only applies when the task returns a string output (shell/command with `passTheResultToNextTask: true`, or `stringManipulation`)."
+        },
+        "diagnostics": {
+          "oneOf": [
+            { "$ref": "#/definitions/DiagnosticPattern" },
+            { "type": "string", "description": "Built-in matcher preset, e.g. '$gcc' or '$tsc'." },
+            {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  { "$ref": "#/definitions/DiagnosticPattern" },
+                  { "type": "string" }
+                ]
+              }
+            }
+          ],
+          "description": "Scan the task's string output for compiler errors/warnings and surface them in the Problems panel. Same constraint as `capture` — requires a string-producing task (shell/command with `passTheResultToNextTask: true`, or `stringManipulation`). Use a preset shorthand like `\"$gcc\"` or define a custom `DiagnosticPattern`."
         }
       }
+    },
+    "DiagnosticPattern": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Regex pattern matched against each output line."
+        },
+        "flags": {
+          "type": "string",
+          "description": "Optional regex flags (e.g. 'i' for case-insensitive, 'm' for multiline). The `g` flag is silently stripped — the matcher iterates lines on its own."
+        },
+        "file": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based capture group index for the file path. Relative paths resolve against the task's cwd."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based capture group index for the (1-based) line number."
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based capture group index for the column number. Optional."
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based capture group index for the end-line number. Optional."
+        },
+        "endColumn": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based capture group index for the end-column number. Optional."
+        },
+        "severity": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based capture group index for severity text (error/warning/info/hint/note/fatal). Optional."
+        },
+        "message": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based capture group index for the message text. Required."
+        },
+        "defaultSeverity": {
+          "type": "string",
+          "enum": ["error", "warning", "info", "hint"],
+          "description": "Severity to use when the severity group is missing or unrecognized. Defaults to 'error'.",
+          "default": "error"
+        },
+        "source": {
+          "type": "string",
+          "description": "Label shown next to the message in the Problems panel. Defaults to 'taskhub'."
+        }
+      },
+      "required": ["pattern", "file", "line", "message"]
     },
     "OutputCapture": {
       "type": "object",

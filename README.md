@@ -25,6 +25,7 @@
 - **액션 생성 마법사** — 대화형 UI로 코드 작성 없이 액션 생성
 - **Preset** — 팀원들과 action 설정 공유
 - **실행 히스토리** — 성공/실패 추적, 빠른 재실행
+- **Problem Matcher** — 빌드 출력의 컴파일러 에러·경고를 Problems 패널에 자동 표시 (gcc / TypeScript 프리셋 또는 커스텀 정규식)
 
 ### 사이드바 패널
 - **Actions** — 액션 버튼과 폴더 트리, 검색/그룹화
@@ -67,11 +68,15 @@
     </td>
     <td align="center" width="33%">
       <b>실행 히스토리</b><br>
-      <sub>성공/실패 기록과 빠른 재실행</sub><br>
+      <sub>성공/실패 기록 + 시각·소요 시간 배지, 빠른 재실행</sub><br>
       <img src="docs/images/history-panel.png" alt="History 패널" width="260">
     </td>
   </tr>
 </table>
+
+**Problem Matcher** — 빌드 task 출력의 컴파일러 에러·경고를 정규식으로 추출해 VS Code Problems 패널에 자동 등록. 클릭으로 파일·라인 점프, F8로 다음 진단 순환, 에디터의 빨간 squiggly까지 표시. `$gcc` / `$tsc` 내장 프리셋과 커스텀 정규식 모두 지원.
+
+![Problem Matcher - 빌드 진단을 Problems 패널에 표시](docs/images/problem-matcher.png)
 
 ### C/C++ Hover
 

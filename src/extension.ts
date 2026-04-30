@@ -478,6 +478,10 @@ import {
     encodeFileContent,
     withTaskTimeout,
 } from './pipelineUtils';
+import {
+    applyDiagnosticMatchers,
+    type ParsedDiagnostic,
+} from './diagnosticMatcher';
 export {
     INTERPOLATED_VALUE_MAX_LENGTH,
     wouldExceedCaptureLimit,
@@ -1017,6 +1021,147 @@ const actionTerminals = new Map<string, vscode.Terminal>();
 const actionWorkspaceFolderMap = new Map<string, string | undefined>();
 const actionChildProcesses = new Map<string, Set<ReturnType<typeof spawn>>>();
 const actionStartTimestamps = new Map<string, number>();
+
+/**
+ * Error thrown by `executeShellCommand` when the spawned process exits
+ * with a non-zero code. Carries the captured `stdout` / `stderr` strings
+ * so callers (notably `executeSingleTask` for `output.diagnostics`) can
+ * still parse compiler errors out of a *failed* build — the case where
+ * Problems-panel navigation matters most. The `message` mirrors the
+ * historical reject value (stderr or a synthetic "exit code N") so
+ * existing failure-message UX (history.output, action failure toast) is
+ * preserved verbatim.
+ */
+export class ShellCommandError extends Error {
+    constructor(
+        message: string,
+        public readonly stdout: string,
+        public readonly stderr: string,
+        public readonly exitCode: number | null
+    ) {
+        super(message);
+        this.name = 'ShellCommandError';
+    }
+}
+
+/**
+ * Per-action `DiagnosticCollection` registry. Each action owns its own
+ * collection so a re-run can clear *its* diagnostics without disturbing
+ * unrelated actions that happen to surface diagnostics for the same file.
+ * The collection is created lazily on first emission and reused across
+ * re-runs. Disposed in `deactivate()` (per-collection dispose) so language
+ * features release their underlying resources.
+ */
+const actionDiagnosticCollections = new Map<string, vscode.DiagnosticCollection>();
+
+function getOrCreateActionDiagnostics(actionId: string): vscode.DiagnosticCollection {
+    let col = actionDiagnosticCollections.get(actionId);
+    if (!col) {
+        col = vscode.languages.createDiagnosticCollection(`taskhub:${actionId}`);
+        actionDiagnosticCollections.set(actionId, col);
+    }
+    return col;
+}
+
+/**
+ * Clear all diagnostics this action previously emitted. Called at the
+ * start of every action run so stale errors from a prior failing build
+ * don't linger after the user fixes them and re-runs.
+ */
+function clearActionDiagnostics(actionId: string): void {
+    actionDiagnosticCollections.get(actionId)?.clear();
+}
+
+/**
+ * Combine stdout and stderr into a single string for diagnostic matching.
+ * Empty fields are skipped (no leading/trailing newline) so per-line
+ * regexes don't see spurious blank lines. Used by both the success path
+ * (in the post-processing block) and the failure path (in the
+ * `ShellCommandError` catch) so warnings and errors get the same
+ * treatment regardless of which stream the toolchain wrote them on.
+ */
+function combineStdoutStderrForDiagnostics(stdout: string, stderr: string): string {
+    if (!stdout) {
+        return stderr;
+    }
+    if (!stderr) {
+        return stdout;
+    }
+    return stdout + '\n' + stderr;
+}
+
+function severityToVscode(s: ParsedDiagnostic['severity']): vscode.DiagnosticSeverity {
+    switch (s) {
+        case 'error':   return vscode.DiagnosticSeverity.Error;
+        case 'warning': return vscode.DiagnosticSeverity.Warning;
+        case 'info':    return vscode.DiagnosticSeverity.Information;
+        case 'hint':    return vscode.DiagnosticSeverity.Hint;
+    }
+}
+
+/**
+ * Resolve a (possibly relative) path from compiler output into an absolute
+ * URI suitable for `DiagnosticCollection.set(uri, ...)`. Relative paths
+ * resolve against the task's cwd so the same action works regardless of
+ * where VS Code was launched.
+ */
+function resolveDiagnosticUri(file: string, baseCwd: string): vscode.Uri {
+    const abs = path.isAbsolute(file) ? file : path.resolve(baseCwd, file);
+    return vscode.Uri.file(abs);
+}
+
+/**
+ * Convert `ParsedDiagnostic` records into `vscode.Diagnostic` objects and
+ * push them to the action's collection grouped by URI. Multiple records
+ * for the same file are coalesced into a single `set(uri, [...])` call so
+ * VS Code does one render per file.
+ *
+ * Pure function in spirit — extension-side glue between the deterministic
+ * matcher and the VS Code Diagnostic API. Throws on configuration errors
+ * (invalid regex / unknown preset / missing required group) bubbled up
+ * from `applyDiagnosticMatchers`.
+ */
+function applyDiagnosticsToCollection(
+    output: string,
+    config: import('./schema').DiagnosticConfig,
+    task: any,
+    actionId: string,
+    baseCwd: string
+): void {
+    const parsed = applyDiagnosticMatchers(output, config);
+    if (parsed.length === 0) {
+        return;
+    }
+    const collection = getOrCreateActionDiagnostics(actionId);
+    const byUri = new Map<string, vscode.Diagnostic[]>();
+    for (const d of parsed) {
+        const uri = resolveDiagnosticUri(d.file, baseCwd);
+        const startLine = Math.max(0, d.line - 1);
+        const startCol = Math.max(0, (d.column ?? 1) - 1);
+        const endLine = d.endLine !== undefined ? Math.max(0, d.endLine - 1) : startLine;
+        const endCol = d.endColumn !== undefined ? Math.max(0, d.endColumn - 1) : startCol + 1;
+        const range = new vscode.Range(startLine, startCol, endLine, endCol);
+        const diag = new vscode.Diagnostic(range, d.message, severityToVscode(d.severity));
+        diag.source = d.source ?? `taskhub:${task.id}`;
+        const list = byUri.get(uri.toString()) ?? [];
+        list.push(diag);
+        byUri.set(uri.toString(), list);
+    }
+    // Group writes per URI. `collection.set(uri, ...)` REPLACES all existing
+    // entries for that URI within this collection, so a later task that
+    // emits diagnostics for the same file would overwrite an earlier
+    // task's contribution within the same action run. To keep both, we
+    // read the current entries via `collection.get(uri)` and concat
+    // before writing. The action-start `clearActionDiagnostics(id)`
+    // already wiped any prior-run state, so anything we read here was
+    // emitted earlier in the *current* run by a sibling task — exactly
+    // what we want to preserve. Regression guard: IT-082.
+    for (const [uriStr, diags] of byUri) {
+        const uri = vscode.Uri.parse(uriStr);
+        const existing = collection.get(uri) ?? [];
+        collection.set(uri, [...existing, ...diags]);
+    }
+}
 
 function terminateChildProcesses(actionId: string): boolean {
     const processes = actionChildProcesses.get(actionId);
@@ -1590,6 +1735,12 @@ export async function executeAction(
         return;
     }
 
+    // Clear diagnostics this action emitted on a previous run so stale
+    // compiler errors / warnings don't linger in the Problems panel. New
+    // diagnostics from this run are emitted by `output.diagnostics` matchers
+    // inside `executeSingleTask`.
+    clearActionDiagnostics(id);
+
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     logActionStart(showVerboseLogs, actionItem.title, action.description);
 
@@ -1690,6 +1841,11 @@ async function executeSingleTask(
     const defaultWorkspace = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const interpolationContext = { ...allResults, workspaceFolder: defaultWorkspace, extensionPath: context.extensionPath };
     let result: any;
+    // Captured by the shell/command branch after `${workspaceFolder}` etc.
+    // are resolved. Used by the diagnostic post-processing so relative
+    // paths in compiler output resolve against the SAME directory the
+    // command actually ran in (regression: previously read raw `task.cwd`).
+    let interpolatedCwd: string | undefined;
 
     // Replay path: when a saved input is provided for this task (only honored
     // for interactive types — see INTERACTIVE_TASK_TYPES), skip the
@@ -1808,7 +1964,7 @@ async function executeSingleTask(
             }
 
             const args = task.args ? task.args.map(arg => interpolatePipelineVariables(arg, interpolationContext)) : [];
-            const cwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined;
+            interpolatedCwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined;
             let env: Record<string, string> | undefined;
             if (task.env && typeof task.env === 'object') {
                 env = {};
@@ -1819,11 +1975,40 @@ async function executeSingleTask(
                 }
             }
 
-            if (!command) { throw new Error(`Task ${task.id} of type '${task.type}' requires a 'command' property.`); }            
-            const handlerTask = { ...task, command, args, cwd, env, actionId };
+            if (!command) { throw new Error(`Task ${task.id} of type '${task.type}' requires a 'command' property.`); }
+            const handlerTask = { ...task, command, args, cwd: interpolatedCwd, env, actionId };
 
             if (task.passTheResultToNextTask) {
-                result = await handleCommand(handlerTask, context, defaultWorkspace);
+                try {
+                    result = await handleCommand(handlerTask, context, defaultWorkspace);
+                } catch (err) {
+                    // Real-world gcc/clang reject with non-zero exit AND
+                    // emit diagnostics on stderr. Apply matchers to the
+                    // captured output before re-throwing so the user gets
+                    // Problems navigation even on a failed build — the
+                    // case where they need it most. Without this branch the
+                    // post-processing block below is unreachable on failure
+                    // (regression caught by IT-079).
+                    if (err instanceof ShellCommandError && task.output?.diagnostics) {
+                        const failedOutput = combineStdoutStderrForDiagnostics(err.stdout, err.stderr);
+                        try {
+                            applyDiagnosticsToCollection(
+                                failedOutput,
+                                task.output.diagnostics,
+                                task,
+                                actionId,
+                                interpolatedCwd ?? defaultWorkspace
+                            );
+                        } catch (diagErr) {
+                            // Don't mask the original failure — log only.
+                            const msg = diagErr instanceof Error ? diagErr.message : String(diagErr);
+                            outputChannel.appendLine(
+                                `[Warning] Task '${task.id}' diagnostic emission on failure itself failed: ${msg}`
+                            );
+                        }
+                    }
+                    throw err;
+                }
             } else {
                 if (task.isOneShot) {
                     executeStreamedTask(handlerTask, defaultWorkspace).catch(error => {
@@ -1859,6 +2044,45 @@ async function executeSingleTask(
             if (showVerboseLogs) {
                 outputChannel.appendLine(
                     `[Warning] Task '${task.id}' has 'output.capture' but no string output is available. ` +
+                    `For 'shell'/'command' tasks, set 'passTheResultToNextTask': true.`
+                );
+            }
+        }
+    }
+
+    // Apply `output.diagnostics` matchers — same string-output constraint as
+    // `capture` (shell/command tasks must set `passTheResultToNextTask: true`,
+    // stringManipulation always returns a string). Resulting `ParsedDiagnostic`
+    // records are converted to `vscode.Diagnostic` objects here (where we
+    // can resolve relative paths against the task's cwd) and pushed to the
+    // action's per-action collection.
+    if (task.output && task.output.diagnostics) {
+        if (result && typeof result.output === 'string') {
+            try {
+                // shell/command tasks expose stderr alongside stdout via
+                // `result.stderr`; toolchains routinely write warnings to
+                // stderr while exiting 0, so we match across both streams
+                // (regression: IT-081). Other task types (stringManipulation)
+                // have no stderr — `?? ''` collapses to stdout-only.
+                const combined = combineStdoutStderrForDiagnostics(
+                    result.output,
+                    typeof result.stderr === 'string' ? result.stderr : ''
+                );
+                applyDiagnosticsToCollection(
+                    combined,
+                    task.output.diagnostics,
+                    task,
+                    actionId,
+                    interpolatedCwd ?? defaultWorkspace
+                );
+            } catch (error: any) {
+                throw new Error(`Task '${task.id}' diagnostics failed: ${error.message}`);
+            }
+        } else {
+            const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+            if (showVerboseLogs) {
+                outputChannel.appendLine(
+                    `[Warning] Task '${task.id}' has 'output.diagnostics' but no string output is available. ` +
                     `For 'shell'/'command' tasks, set 'passTheResultToNextTask': true.`
                 );
             }
@@ -2044,11 +2268,17 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
     });
 }
 
-async function handleCommand(task: any, context: vscode.ExtensionContext, workspaceFolderPath?: string): Promise<{ output: string }> {
+async function handleCommand(task: any, context: vscode.ExtensionContext, workspaceFolderPath?: string): Promise<{ output: string; stderr: string }> {
     const { args, cwd } = task;
     const command = getCommandString(task.command);
-    const commandOutput = await executeShellCommand(command, args || [], cwd, task.env, workspaceFolderPath, task.actionId);
-    return { output: commandOutput.trim() };
+    const captured = await executeShellCommand(command, args || [], cwd, task.env, workspaceFolderPath, task.actionId);
+    // `output` keeps its historical meaning (= stdout only) so existing
+    // `output.capture` rules and `${task.output}` interpolation behave
+    // exactly as before. `stderr` is exposed alongside so the diagnostic
+    // post-processing block can match warning lines that the toolchain
+    // emitted on stderr while still exiting 0 (gcc/clang are common
+    // examples — regression caught by IT-081).
+    return { output: captured.stdout.trim(), stderr: captured.stderr.trim() };
 }
 
 export function parsePathInfo(fullPath: string): { path: string, dir: string, name: string, fileNameOnly: string, fileExt: string } {
@@ -2494,7 +2724,15 @@ export function __testHook_hasManuallyTerminated(id: string): boolean {
     return manuallyTerminatedActions.has(id);
 }
 
-export function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string): Promise<string> {
+/**
+ * Spawn a shell command and capture both stdout AND stderr. On success
+ * (exit 0) resolves with `{ stdout, stderr }` so callers that need stderr
+ * (notably `output.diagnostics` for warnings) can access it; on failure
+ * rejects with `ShellCommandError` carrying the same fields plus the
+ * exit code. Callers that only care about stdout should read `.stdout`
+ * from the resolved value.
+ */
+export function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string): Promise<{ stdout: string; stderr: string }> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     const captureLimitBytes = getCaptureLimitBytes();
@@ -2597,8 +2835,19 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
                 return;
             }
 
-            if (code === 0) { resolve(stdout); } else { reject(new Error(stderr || `Command failed with exit code ${code}`)); }
-
+            if (code === 0) {
+                resolve({ stdout, stderr });
+            } else {
+                // Carry the captured stdout/stderr on the error so callers
+                // can still parse diagnostics out of the failed build (gcc /
+                // clang emit errors on stderr AND exit non-zero).
+                reject(new ShellCommandError(
+                    stderr || `Command failed with exit code ${code}`,
+                    stdout,
+                    stderr,
+                    code
+                ));
+            }
         });
 
         childProcess.on('error', (err) => { cleanupChildTracking(); if (showVerboseLogs) { outputChannel.appendLine(`[ERROR] Failed to start command: ${err.message}`); } reject(err); });
@@ -3887,4 +4136,10 @@ export function deactivate() {
     actionWorkspaceFolderMap.clear();
     actionChildProcesses.clear();
     actionStartTimestamps.clear();
+    // Dispose per-action diagnostic collections so VS Code releases the
+    // underlying resources cleanly.
+    for (const col of actionDiagnosticCollections.values()) {
+        col.dispose();
+    }
+    actionDiagnosticCollections.clear();
 }
