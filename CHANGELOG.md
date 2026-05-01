@@ -29,6 +29,33 @@
 =====================================================================
 -->
 
+## [0.4.24] - 2026-05-01
+
+### 추가 — Markdown / HTML 우클릭 프리뷰·브라우저 열기 (TaskHub: Open Markdown Preview / Open HTML in Default Browser)
+
+#### UX (Source Control diff에서 프리뷰/브라우저로 1-클릭 점프 경로 부재 해소)
+- **`.md` / `.markdown` 우클릭 → "TaskHub: Open Markdown Preview"**: VS Code 내장 `markdown.showPreviewToSide`에 위임해 옆 컬럼에 렌더링된 프리뷰를 띄웁니다. SCM 변경 파일 컨텍스트에서도 동일한 메뉴가 노출되어, diff 텍스트가 아닌 렌더된 형태를 즉시 볼 수 있습니다.
+- **`.html` / `.htm` 우클릭 → "TaskHub: Open HTML in Default Browser"**: `vscode.env.openExternal`로 OS 기본 브라우저에 즉시 띄웁니다.
+
+#### 메뉴 노출 위치
+- 두 명령 모두 `explorer/context`, `editor/title/context`, `scm/resourceState/context` 세 surface에 모두 등록 (총 2 × 3 = 6 메뉴 항목). 명령 ID는 그대로 Command Palette 및 사용자 `keybindings.json`에서 사용 가능.
+
+#### High — 1차 리뷰 후속 수정 (SCM 컨텍스트 메뉴가 잘못된 파일을 열 수 있던 문제)
+- **menu surface별 1번째 인자 모양이 다른 점을 정규화 (`coerceToUri`)**: `scm/resourceState/context`는 `SourceControlResourceState`(`{ resourceUri: Uri }`) 를, 멀티 셀렉트 시 그 배열을 첫 인자로 넘깁니다. 초기 구현은 `instanceof vscode.Uri`만 통과시켰기 때문에 SCM에서 우클릭하면 1번째 인자가 거부되고 활성 에디터로 폴백 — 사용자가 SCM에서 **변경된 README.md**를 우클릭해도 현재 열려 있는 **다른 .md 파일**이 프리뷰되는 회귀가 있었음. 핸들러 진입부에 `coerceToUri(arg: unknown)` 정규화기를 두어 `Uri`, `SourceControlResourceState`, 그 배열, 혼합 배열을 모두 처리하고 활성 에디터 폴백은 정규화 결과가 `undefined`일 때만 동작하도록 분기. 명령 등록도 `(arg?: unknown)`으로 변경.
+
+#### Medium — 1차 리뷰 후속 수정 (Simple Browser 명령 정리)
+- **`taskhub.openHtmlInSimpleBrowser` 제거**: 초기 설계에 포함됐던 `simpleBrowser.show` 위임 명령은 webview iframe + CSP 제약상 `file://` 로컬 HTML의 CSS·이미지·스크립트 로딩이 보장되지 않아 "보이긴 하는데 깨진" 결과가 나오기 쉽습니다. 동작 못 하는 명령을 메뉴에 두는 것이 더 나쁘다고 판단해 명령·메뉴(3 surface)·테스트·문서를 모두 제거했습니다. VS Code 내부에서 HTML을 안전히 보고 싶다면 `localResourceRoots` 등을 직접 다루는 자체 `WebviewPanel` 구현이 필요하며, 이는 별도 PR로 분리.
+
+#### High — 2차 사용자 피드백 후속 수정 (SCM 컨텍스트 메뉴 visibility)
+- **Source Control 메뉴는 설정 토글로 제어**: VS Code의 `scm/resourceState/context`는 `resourceExtname` / `resourceFilename` / `resourceLangId`를 안정적으로 제공하지 않아, 기본 SCM 뷰에서 `.md` / `.html`에만 메뉴를 노출하는 방식은 불가능합니다. 대신 `taskhub.preview.showSourceControlContextMenu`(기본값 `true`) 설정을 추가해 SCM preview/browser 메뉴 전체를 켜고 끌 수 있게 했습니다. 켜져 있으면 대상 확장자 외 파일에도 메뉴가 보일 수 있지만, 실행 시 핸들러가 실제 URI 확장자를 다시 검증해 잘못 여는 동작은 차단합니다.
+- Explorer / editor title surface는 계속 `resourceFilename =~ /\.(md|markdown)$/i` / `resourceFilename =~ /\.(html|htm)$/i` 조건으로 대상 확장자에만 메뉴를 노출합니다.
+
+#### 내부 구조
+- **`src/previewOpener.ts`**: 모든 VS Code 호출을 `PreviewOpenerDeps` 인터페이스로 주입받아, 단위 테스트가 실제 VS Code 명령을 발생시키지 않고도 ① 위임 경로(어떤 명령에 어떤 인자를 넘기는지) ② 에러 경로(미지원 확장자, 활성 에디터 부재) ③ SCM 인자 모양 처리(단일·멀티·혼합 배열)를 모두 검증합니다.
+- 대상 URI 해석 순서: ① `coerceToUri`가 정규화 → 매칭 확장자면 사용, 미매칭이면 에러로 종료 → ② 정규화 결과가 없으면 활성 에디터(매칭 확장자일 때) → ③ 그 외 한·영 에러 메시지 출력 후 종료.
+
+**테스트**: 신규 25 케이스 ([src/test/previewOpener.test.ts](src/test/previewOpener.test.ts)) — 확장자 매칭 헬퍼 6, `coerceToUri` 정규화 6, 핸들러 위임·SCM 모양 수용·폴백·에러 경로 9, 라이브 확장에 대한 통합 검증(명령 등록 + package.json 메뉴 매트릭스 2 × 3 정합성 + SCM `when` 절이 `taskhub.preview.showSourceControlContextMenu` 한 가지로만 게이트되는지의 `IT-PRV-004` 보강) 4.
+
 ## [0.4.23] - 2026-05-01
 
 ### 추가 — 액션별 키바인딩 1급 지원 v1 (TODO §2.1, Phase 1+2)

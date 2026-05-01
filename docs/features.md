@@ -26,6 +26,7 @@
 19. [Memory Map 시각화](#19-memory-map-시각화)
 20. [Hex Viewer](#20-hex-viewer)
 21. [설정 레퍼런스](#21-설정-레퍼런스)
+22. [Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기)
 
 ---
 
@@ -1627,6 +1628,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 | `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` (1–1024) | 캡처 모드(`passTheResultToNextTask: true`)에서 누적되는 stdout/stderr 총 크기 상한(MB). 초과 시 프로세스를 종료하고 명확한 에러로 실패. | [§5 Output Capture](#output-capture) |
 | `taskhub.history.maxItems` | `number` | `10` (1–50) | 저장되는 액션 실행 히스토리 최대 개수. 초과분은 오래된 순으로 자동 제거. | [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.history.showPanel` | `boolean` | `true` | 사이드바의 History 패널 표시 여부. `false`면 뷰 자체가 감춰지지만 기록은 그대로 유지된다. | [§14 히스토리](#14-액션-실행-히스토리) |
+| `taskhub.preview.showSourceControlContextMenu` | `boolean` | `true` | Source Control 변경 파일 우클릭 메뉴에 TaskHub 프리뷰/브라우저 열기 항목을 표시할지 여부. VS Code SCM 메뉴는 확장자 context key를 안정적으로 제공하지 않으므로 켜져 있으면 대상 확장자 외 파일에도 항목이 보일 수 있으며, 실제 실행은 핸들러가 확장자로 재검증한다. | [§22 Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |
 | `taskhub.preset.selected` | `string` | `"none"` | 자동 적용할 프리셋 ID. `"none"`이면 워크스페이스 액션만 사용. 확장 내장 또는 워크스페이스 `.vscode/presets/` 내 프리셋 ID를 입력. | [§17 Preset](#17-preset-기능) |
@@ -1642,3 +1644,49 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 5. (선택) 동작 경계(min/max, 예외 경로)에 대한 유닛 테스트 추가.
 
 README의 설정 안내는 이 §21을 가리키는 짧은 포인터만 유지하며 복제하지 않습니다.
+
+---
+
+## 22. Markdown / HTML 우클릭 열기
+
+VS Code의 소스 컨트롤·탐색기·에디터 탭에서 마크다운 / HTML 파일을 우클릭해 곧바로 렌더링된 형태로 열기 위한 컨텍스트 메뉴 항목입니다. 기본적으로 SCM diff 뷰는 텍스트 비교만 보여주기 때문에 별도의 클릭 한 번 없이 프리뷰로 점프하는 경로가 없었고, 그 빈자리를 메우는 단순한 어댑터입니다.
+
+### 22.1. 적용 범위
+
+| 확장자 | 메뉴 항목 | 동작 |
+| --- | --- | --- |
+| `.md`, `.markdown` | **TaskHub: Open Markdown Preview** | VS Code 내장 명령 `markdown.showPreviewToSide`에 위임 — 옆 컬럼에 렌더링된 프리뷰. |
+| `.html`, `.htm` | **TaskHub: Open HTML in Default Browser** | `vscode.env.openExternal`로 OS 기본 브라우저에서 열기. |
+
+대소문자는 가리지 않습니다(`README.MD` / `INDEX.HTML` 모두 매칭). 위 외 확장자(`.svg`, `.mmd` 등)는 의도적으로 제외 — VS Code가 이미 자동 렌더하거나(SVG) 외부 익스텐션이 필요한 경우(Mermaid)이기 때문에 단순 어댑터로 끼워넣을 가치가 적습니다.
+
+**Simple Browser 미지원 (의도)**: 초기 설계에서는 `simpleBrowser.show`로 VS Code 내부 webview에 HTML을 띄우는 명령도 함께 제공했으나, Simple Browser는 webview iframe 구조 + CSP 제약 때문에 `file://` 로컬 HTML의 CSS·이미지·스크립트 로딩이 사실상 보장되지 않습니다. "보이긴 하는데 깨진" 결과가 나오는 명령을 메뉴에 두는 것이 더 나쁘다고 판단해 정리했습니다. VS Code 내부에서 HTML을 안전히 보고 싶다면 자체 `WebviewPanel`로 파일을 읽어 렌더하는 별도 기능이 필요하며, 현재 범위에는 포함하지 않습니다.
+
+### 22.2. 컨텍스트 메뉴 노출 위치
+
+세 곳 모두에서 동일한 항목이 보입니다.
+
+- **Explorer** (`explorer/context`) — 파일 탐색기에서 우클릭.
+- **Editor 탭** (`editor/title/context`) — 현재 열려 있는 탭 우클릭.
+- **Source Control** (`scm/resourceState/context`) — 변경된 파일 우클릭. SCM에서 직접 프리뷰로 점프할 수 있게 한 것이 이 기능을 만든 1차 동기. 단, VS Code SCM 메뉴는 `resourceExtname` / `resourceFilename` / `resourceLangId`를 안정적으로 제공하지 않으므로 확장자별 메뉴 노출은 불가합니다. 대신 `taskhub.preview.showSourceControlContextMenu` 설정으로 SCM 메뉴 전체를 켜고 끌 수 있고, 실행 시에는 핸들러가 실제 URI 확장자를 다시 검증합니다.
+
+명령 ID는 각각 `taskhub.openMarkdownPreview`, `taskhub.openHtmlInBrowser`로, Command Palette 및 키보드 단축키 등록(`keybindings.json`)에도 그대로 사용할 수 있습니다.
+
+### 22.3. URI 해석 규칙
+
+각 메뉴 surface가 명령에 넘기는 첫 번째 인자의 모양이 다르기 때문에, 핸들러 진입 직후 `coerceToUri()`가 모두 `Uri`로 정규화합니다.
+
+| Surface | 1번째 인자 모양 |
+| --- | --- |
+| `explorer/context` | `Uri` (단일) 또는 `Uri[]` (멀티 셀렉트) |
+| `editor/title/context` | `Uri` |
+| `scm/resourceState/context` | `SourceControlResourceState` (`{ resourceUri: Uri, ... }`) 또는 그 배열 |
+| Command Palette / 프로그래매틱 | `undefined` 또는 임의 |
+
+정규화 후 다음 순서로 대상 URI를 결정합니다.
+
+1. 정규화된 `Uri`가 있고 대상 확장자에 매칭되면 — 그 URI를 사용.
+2. 정규화된 `Uri`가 없거나 활성 에디터로 폴백하는 경우 — 활성 에디터의 문서 URI가 대상 확장자에 매칭되면 사용.
+3. 그 외 — 한국어/영어 에러 메시지("마크다운 파일이 아닙니다." / "HTML 파일이 아닙니다.")를 출력하고 종료.
+
+대상 URI 정규화·결정 로직과 핸들러는 [src/previewOpener.ts](../src/previewOpener.ts)에 모여 있고, 모든 VS Code API 호출은 의존성 주입 가능한 구조여서 단위 테스트가 실제 VS Code 명령을 호출하지 않고도 위임 경로 + SCM 인자 모양 처리 + 폴백 경로를 검증합니다([src/test/previewOpener.test.ts](../src/test/previewOpener.test.ts)).

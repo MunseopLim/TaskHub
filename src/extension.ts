@@ -9,6 +9,7 @@ import { ActionItem, Action as PipelineAction } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri } from './jsonEditor';
+import { openMarkdownPreview, openHtmlInBrowser } from './previewOpener';
 import { showMemoryMap, MemoryMapConfig, goToSymbol } from './memoryMapViewer';
 import { showHexViewer, HexEditorProvider } from './hexViewer';
 import { t } from './i18n';
@@ -4058,6 +4059,11 @@ export function activate(context: vscode.ExtensionContext) {
     );
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditor', () => openJsonEditor(context)));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditorFromUri', (uri?: vscode.Uri) => openJsonEditorFromUri(context, uri)));
+    // Context-menu surfaces (explorer, editor/title, scm/resourceState) each
+    // pass a different first-arg shape; coerceToUri() inside the handlers
+    // normalizes them, so we accept `unknown` here.
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openMarkdownPreview', (arg?: unknown) => openMarkdownPreview(arg)));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openHtmlInBrowser', (arg?: unknown) => openHtmlInBrowser(arg)));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.exportActions', async () => {
         const folder = await pickWorkspaceFolderForCommand(

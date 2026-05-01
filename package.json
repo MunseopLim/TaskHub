@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.4.23",
+  "version": "0.4.24",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -105,6 +105,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show or hide the History panel in the TaskHub sidebar."
+        },
+        "taskhub.preview.showSourceControlContextMenu": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show TaskHub preview/browser actions in the Source Control resource context menu. VS Code does not reliably expose file-extension context keys for SCM resources, so these menu items may appear for all changed files; TaskHub still validates the file extension before opening."
         },
         "taskhub.hover.numberBase.enabled": {
           "type": "boolean",
@@ -360,6 +365,16 @@
         "command": "taskhub.showHexViewer",
         "title": "Open Hex Viewer",
         "category": "TaskHub"
+      },
+      {
+        "command": "taskhub.openMarkdownPreview",
+        "title": "Open Markdown Preview",
+        "category": "TaskHub"
+      },
+      {
+        "command": "taskhub.openHtmlInBrowser",
+        "title": "Open HTML in Default Browser",
+        "category": "TaskHub"
       }
     ],
     "keybindings": [
@@ -468,6 +483,28 @@
           "command": "taskhub.openJsonEditorFromUri",
           "when": "resourceExtname == .json",
           "group": "navigation"
+        },
+        {
+          "command": "taskhub.openMarkdownPreview",
+          "when": "resourceFilename =~ /\\.(md|markdown)$/i",
+          "group": "navigation@10"
+        },
+        {
+          "command": "taskhub.openHtmlInBrowser",
+          "when": "resourceFilename =~ /\\.(html|htm)$/i",
+          "group": "navigation@10"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "taskhub.openMarkdownPreview",
+          "when": "resourceFilename =~ /\\.(md|markdown)$/i",
+          "group": "navigation@10"
+        },
+        {
+          "command": "taskhub.openHtmlInBrowser",
+          "when": "resourceFilename =~ /\\.(html|htm)$/i",
+          "group": "navigation@10"
         }
       ],
       "scm/resourceState/context": [
@@ -475,6 +512,16 @@
           "command": "taskhub.openJsonEditorFromUri",
           "when": "resourceExtname == .json",
           "group": "navigation"
+        },
+        {
+          "command": "taskhub.openMarkdownPreview",
+          "when": "config.taskhub.preview.showSourceControlContextMenu",
+          "group": "navigation@10"
+        },
+        {
+          "command": "taskhub.openHtmlInBrowser",
+          "when": "config.taskhub.preview.showSourceControlContextMenu",
+          "group": "navigation@10"
         }
       ],
       "view/item/context": [
