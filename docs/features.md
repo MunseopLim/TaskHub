@@ -577,12 +577,16 @@ Command Palette에서 `taskhub json`을 검색하면 두 개의 JSON Editor 커�
 
 ### `envPick` 태스크
 
-현재 확장 호스트 프로세스의 `process.env` 에 존재하는 **모든 환경변수 이름**을 정렬해 QuickPick 으로 보여주고, 사용자가 고른 이름을 다음 태스크로 전달합니다. 값은 picker 에 노출하지 않으므로 이름만으로 안전하게 탐색할 수 있습니다.
+사용자 셸이 실제로 노출하는 **환경변수 이름**만을 정렬해 QuickPick 으로 보여주고, 사용자가 고른 이름을 다음 태스크로 전달합니다. 값은 picker 에 노출하지 않으므로 이름만으로 안전하게 탐색할 수 있습니다.
 
 -   `type` (string, **필수**): `envPick` 으로 설정해야 합니다.
 -   `placeHolder` (string, *선택*): QuickPick 에 표시될 안내 문구. 생략 시 기본 문구 ("Select an environment variable name" / "환경변수 이름을 선택하세요") 사용.
 -   **실행 결과**: `${task_id.value}` — 선택된 환경변수의 **이름**. 값은 반환하지 않으므로 `printenv ${task_id.value}` 등 후속 `shell` 태스크에서 값을 조회합니다.
 -   취소 시 파이프라인이 중단됩니다.
+
+**셸 환경 필터링**: 첫 호출 시 사용자의 기본 로그인 셸 (`$SHELL -l -c env`, Windows 는 `cmd /c set`) 을 한 번 실행해서 실제 노출되는 변수 목록을 캐시한 뒤, `process.env` 의 키 중 그 목록에 포함된 것만 picker 에 표시합니다. VS Code / Electron 이 확장 호스트 프로세스에 주입하는 `VSCODE_*`, `ELECTRON_RUN_AS_NODE` 같은 변수들은 후속 `printenv` 셸 태스크에서 보이지 않으므로 자동 제외됩니다. probe 호출 자체에도 sanitize 된 env 만 넘겨 확장 호스트 변수가 자식 프로세스로 새는 것을 막고, 호출부에서 `VSCODE_*`/`ELECTRON_*` prefix 와 알려진 Electron 전용 이름들의 hardcoded blocklist 를 한 번 더 적용합니다 (belt-and-suspenders). 셸 호출이 5초 안에 끝나지 않거나 실패하면 fallback 으로 blocklist 만 사용합니다.
+
+> **기준**: 필터 기준은 "**VS Code 가 task 로 spawn 한 셸 터미널에서 보이는 env**" 입니다 (사용자 보고 버그가 `revealTerminal: 'always'` 인 셸 task 의 `printenv` 실패였기 때문). `passTheResultToNextTask` 경로에서 사용되는 `executeShellCommand` 는 내부적으로 `process.env` 전체를 자식에 넘기므로 (확장 host 변수 포함), 이론상 picker 에서 가려진 변수도 그 경로에서는 읽을 수 있습니다. 다만 실제 envPick 사용 패턴은 거의 모두 "사용자가 셸에서 설정한 변수를 고른다" 이므로 picker 노출 기준은 더 엄격한 (a) 쪽으로 맞춰 일관된 UX 를 제공합니다.
 
 **예시: 선택 후 값 출력 (기본 제공 액션과 동일)**
 ```json

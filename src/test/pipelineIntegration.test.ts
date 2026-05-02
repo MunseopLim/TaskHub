@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { executeAction, executeActionPipeline } from '../extension';
+import { executeAction, executeActionPipeline, __testHook_resetShellEnvNamesCache } from '../extension';
 import { actionStates } from '../providers/actionStatus';
 import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
 import { MainViewProvider } from '../providers/mainViewProvider';
@@ -581,12 +581,22 @@ suite('Pipeline integration', function () {
             }
         });
 
-        test('IT-033: envPick lists process.env names and passes selection downstream', async () => {
+        test('IT-033: envPick lists shell-accessible names and passes selection downstream', async () => {
             const originalShowQuickPick = vscode.window.showQuickPick;
             const originalEnv = process.env.TASKHUB_ENVPICK_SENTINEL;
             const resultPath = path.join(tempWorkspace, 'it033.txt');
             try {
                 process.env.TASKHUB_ENVPICK_SENTINEL = 'marker';
+                process.env.VSCODE_TEST_EXTHOST_ONLY = 'should-be-filtered';
+                // Stub the shell-env cache so the sentinel is treated as
+                // shell-accessible. The VSCODE_*-prefixed var is intentionally
+                // excluded to verify exthost-only names get filtered out.
+                __testHook_resetShellEnvNamesCache(new Set([
+                    'TASKHUB_ENVPICK_SENTINEL',
+                    'PATH',
+                    'HOME'
+                ]));
+
                 let seenItems: readonly vscode.QuickPickItem[] = [];
                 (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) => {
                     seenItems = items;
@@ -613,6 +623,8 @@ suite('Pipeline integration', function () {
                 assert.ok(seenItems.length > 0, 'envPick should present at least one env var');
                 const labels = seenItems.map(i => i.label);
                 assert.ok(labels.includes('TASKHUB_ENVPICK_SENTINEL'), 'sentinel var should appear');
+                assert.ok(!labels.includes('VSCODE_TEST_EXTHOST_ONLY'),
+                    'extension-host-only vars (not in shell env) must be filtered out');
                 const sorted = [...labels].sort();
                 assert.deepStrictEqual(labels, sorted, 'env names should be sorted');
                 assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'name=TASKHUB_ENVPICK_SENTINEL');
@@ -620,6 +632,59 @@ suite('Pipeline integration', function () {
                 (vscode.window as any).showQuickPick = originalShowQuickPick;
                 if (originalEnv === undefined) { delete process.env.TASKHUB_ENVPICK_SENTINEL; }
                 else { process.env.TASKHUB_ENVPICK_SENTINEL = originalEnv; }
+                delete process.env.VSCODE_TEST_EXTHOST_ONLY;
+                __testHook_resetShellEnvNamesCache();
+            }
+        });
+
+        test('IT-033b: envPick real probe filters extension-host-only vars (no stub)', async function () {
+            // 실제 getShellAccessibleEnvNames() 를 호출해서, 확장 호스트의
+            // process.env 에 들어 있는 VSCODE_*-prefixed leak marker 가
+            // picker 에 노출되지 않는지 회귀 검증한다. spawn() 의 기본 env
+            // 상속을 막지 않으면 marker 가 그대로 probe 셸로 새어 들어가
+            // `env` 출력에 포함되고 필터를 통과하게 된다.
+            this.timeout(15000);
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const leakName = 'VSCODE_TASKHUB_PROBE_LEAK_MARKER';
+            const userVarName = 'TASKHUB_PROBE_USER_MARKER';
+            const originalLeak = process.env[leakName];
+            const originalUser = process.env[userVarName];
+            try {
+                process.env[leakName] = 'should-be-filtered';
+                process.env[userVarName] = 'should-pass-through';
+                __testHook_resetShellEnvNamesCache();   // force real probe
+
+                let seenItems: readonly vscode.QuickPickItem[] = [];
+                (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) => {
+                    seenItems = items;
+                    // cancel — we only care about the items shown
+                    return undefined;
+                };
+
+                const action: PipelineAction = {
+                    description: 'IT-033b',
+                    tasks: [{ id: 'pick', type: 'envPick' }]
+                };
+
+                await assert.rejects(() => run(action));
+
+                const labels = seenItems.map(i => i.label);
+                assert.ok(seenItems.length > 0, 'real probe should yield at least one env var');
+                assert.ok(!labels.includes(leakName),
+                    `VSCODE_*-prefixed leak marker must not appear in picker even when set in process.env (got: ${labels.filter(l => l.includes('TASKHUB_PROBE')).join(',') || '<none>'})`);
+                // sanity — non-VSCODE-prefixed marker should be visible
+                // (only when probe succeeded; if probe fell back to blocklist,
+                // user-set vars in process.env still pass through since they're
+                // not in the blocklist).
+                assert.ok(labels.includes(userVarName),
+                    'user-set non-blocked var should still appear in picker');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+                if (originalLeak === undefined) { delete process.env[leakName]; }
+                else { process.env[leakName] = originalLeak; }
+                if (originalUser === undefined) { delete process.env[userVarName]; }
+                else { process.env[userVarName] = originalUser; }
+                __testHook_resetShellEnvNamesCache();
             }
         });
 
@@ -627,6 +692,7 @@ suite('Pipeline integration', function () {
             const originalShowQuickPick = vscode.window.showQuickPick;
             const markerPath = path.join(tempWorkspace, 'envpick-should-not-run.txt');
             try {
+                __testHook_resetShellEnvNamesCache(new Set(['PATH', 'HOME']));
                 (vscode.window as any).showQuickPick = async () => undefined;
 
                 const action: PipelineAction = {
@@ -648,6 +714,7 @@ suite('Pipeline integration', function () {
                 assert.ok(!fs.existsSync(markerPath), 'downstream task must not run after cancellation');
             } finally {
                 (vscode.window as any).showQuickPick = originalShowQuickPick;
+                __testHook_resetShellEnvNamesCache();
             }
         });
 

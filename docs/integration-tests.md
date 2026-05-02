@@ -53,7 +53,7 @@
 | IT-015 | quickPick → inputBox → file output | quickPick 결과가 inputBox prompt/prefix와 downstream interpolation에 전달됨 |
 | IT-016 | quickPick 다중 선택 | `value`와 `values`가 downstream에서 각각 사용 가능 |
 | IT-017 | confirm 취소 중단 | 사용자가 취소한 confirm task가 pipeline을 중단하고 이후 task를 실행하지 않음 |
-| IT-033 | envPick 목록 노출·선택 전달 | `process.env` 의 모든 이름이 정렬되어 QuickPick 에 나오고, 선택된 이름이 downstream 에 전달됨 |
+| IT-033 | envPick 목록 노출·선택 전달 | 사용자 셸이 노출하는 이름만 정렬되어 QuickPick 에 나오고 (`VSCODE_*` 등 확장 호스트 전용 변수는 필터링), 선택된 이름이 downstream 에 전달됨 |
 | IT-034 | envPick 취소 중단 | 사용자가 취소한 envPick task 가 pipeline 을 중단하고 이후 task 를 실행하지 않음 |
 
 ### Dialog + Output Mode Pipeline
@@ -285,7 +285,7 @@ confirm task에서 취소 라벨이 선택되면 pipeline이 reject되고 다음
 
 ### IT-033: envPick 목록 노출·선택 전달
 
-`showQuickPick` 을 stub 처리해 `envPick` 이 실제로 어떤 items 를 넘기는지 가로챕니다. 테스트용 sentinel 환경변수를 설정한 뒤, `Object.keys(process.env)` 가 알파벳 순서로 정렬되어 items 로 전달되고 sentinel 이름이 그 안에 포함되는지 확인합니다. 선택된 이름은 `${pick.value}` 로 downstream `stringManipulation` 태스크에 전달되어 파일로 기록되어야 합니다.
+`showQuickPick` 을 stub 처리해 `envPick` 이 실제로 어떤 items 를 넘기는지 가로챕니다. `__testHook_resetShellEnvNamesCache` 로 셸 환경 캐시를 sentinel 변수만 포함하도록 미리 채운 뒤, sentinel 과 `VSCODE_*` prefix 의 가짜 변수를 `process.env` 에 모두 설정합니다. picker 에 전달된 items 가 알파벳 순서로 정렬되고 (1) sentinel 이름은 포함되어야 하며 (2) `VSCODE_*` 가짜 변수는 셸 환경에 없으므로 필터링되어 보이지 않아야 합니다. 선택된 이름은 `${pick.value}` 로 downstream `stringManipulation` 태스크에 전달되어 파일로 기록되어야 합니다.
 
 ### IT-034: envPick 취소 중단
 

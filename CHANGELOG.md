@@ -29,6 +29,18 @@
 =====================================================================
 -->
 
+## [0.4.25] - 2026-05-02
+
+### 수정 — `envPick` 가 셸이 보지 못하는 변수까지 노출해서 후속 `printenv` 가 실패하던 문제
+
+#### Medium (사용자 혼란 / 액션 오동작)
+- **`envPick` 셸 환경 필터링**: 기존엔 `Object.keys(process.env)` 전체를 picker 에 노출했음. 그런데 VS Code / Electron 이 확장 호스트 프로세스에 주입하는 `VSCODE_*`, `ELECTRON_RUN_AS_NODE` 같은 변수들은 후속 셸 태스크가 spawn 하는 로그인 셸 (`zsh -l`) 환경에는 존재하지 않아, 사용자가 그것들을 고르면 `printenv VARNAME` 이 종료 코드 1로 실패하고 VS Code 가 "failed to launch" 라는 오해 소지 있는 메시지를 띄웠습니다 (기본 제공 액션 "Show Environment Variable" 에서 재현). 이제 `envPick` 첫 호출 시 사용자 셸 (`$SHELL -l -c env`, Windows 는 `cmd /c set`) 을 한 번 실행해 실제 노출되는 이름 목록을 캐시하고, `process.env` 의 키 중 그 목록에 포함된 것만 picker 에 표시합니다. 셸 호출이 5초 안에 끝나지 않거나 실패하면 fallback 으로 `VSCODE_*` / `ELECTRON_*` prefix 와 알려진 Electron 전용 이름들만 차단하는 hardcoded blocklist 를 사용합니다. 참조: [src/extension.ts](src/extension.ts) `getShellAccessibleEnvNames()`, `handleEnvPick()`.
+
+#### High — 1차 리뷰 후속 수정 (probe 가 확장 호스트 env 를 상속해서 필터가 무력화되던 문제)
+- **probe spawn 시 env sanitize**: 초기 구현은 `spawn(shell, args, { stdio: [...] })` 처럼 호출해 Node.js 의 기본 env 상속 동작이 적용됐습니다. 그 결과 확장 호스트가 들고 있던 `VSCODE_*` / `ELECTRON_*` 가 그대로 probe 셸 (`zsh -l -c env`) 의 환경에 들어가고 `env` 출력에 포함돼, 필터의 `shellNames.has(n)` 이 그대로 통과시켜 picker 에 노출되는 회귀가 있었습니다 (`VSCODE_TEST_EXTHOST_LEAK=foo zsh -l -c env` 가 로컬에서 그대로 출력되는 것으로 재현). 이제 probe 호출 직전에 `process.env` 를 순회하며 `isExtensionHostOnlyEnvName(key)` 를 통과하는 변수만 모은 sanitize 된 env 객체를 만들어 `spawn(..., { env: probeEnv })` 로 명시 전달합니다. 추가로 호출부(`handleEnvPick`) 에서 `shellNames.has(n) && !isExtensionHostOnlyEnvName(n)` 조합을 항상 적용해, probe 가 어떤 이유로든 오염되더라도 hardcoded blocklist 가 마지막 방어선 역할을 합니다 (belt-and-suspenders).
+
+**테스트**: 신규 1 케이스 (IT-033b) — 캐시 stub 없이 실제 `getShellAccessibleEnvNames()` 를 호출해서, `process.env` 에 심어둔 `VSCODE_TASKHUB_PROBE_LEAK_MARKER` 가 picker 에 노출되지 않는지 검증 (probe 가 env 를 상속하는 회귀를 잡음). 동시에 `TASKHUB_PROBE_USER_MARKER` 같은 일반 사용자 변수는 그대로 통과하는지도 확인. IT-033 갱신 — `__testHook_resetShellEnvNamesCache` 로 캐시를 stub 해 sentinel 변수만 셸에 있는 상황을 모사하고, `process.env` 에 함께 심어둔 `VSCODE_TEST_EXTHOST_ONLY` 가 picker 에서 제외되는지 검증.
+
 ## [0.4.24] - 2026-05-01
 
 ### 추가 — Markdown / HTML 우클릭 프리뷰·브라우저 열기 (TaskHub: Open Markdown Preview / Open HTML in Default Browser)

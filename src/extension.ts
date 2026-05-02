@@ -2467,8 +2467,139 @@ async function handleQuickPick(task: any): Promise<{ value: string; values?: str
     }
 }
 
+// VS Code / Electron 가 확장 호스트 프로세스에 주입하는 환경변수들의 prefix.
+// 이 변수들은 사용자 셸 (`zsh -l`, `cmd.exe`) 환경에는 보통 존재하지 않으므로
+// envPick 의 후속 셸 태스크에서 `printenv` 하면 실패한다. 폴백 필터로 사용.
+const EXTHOST_ONLY_ENV_PREFIXES = ['VSCODE_', 'ELECTRON_'];
+const EXTHOST_ONLY_ENV_NAMES = new Set([
+    'APPLICATION_INSIGHTS_NO_DIAGNOSTIC_CHANNEL',
+    'CHROME_DESKTOP',
+    'GIO_LAUNCHED_DESKTOP_FILE',
+    'GIO_LAUNCHED_DESKTOP_FILE_PID',
+    'ORIGINAL_XDG_CURRENT_DESKTOP'
+]);
+
+function isExtensionHostOnlyEnvName(name: string): boolean {
+    if (EXTHOST_ONLY_ENV_NAMES.has(name)) { return true; }
+    return EXTHOST_ONLY_ENV_PREFIXES.some(p => name.startsWith(p));
+}
+
+let cachedShellEnvNamesPromise: Promise<Set<string> | null> | null = null;
+
+export function __testHook_resetShellEnvNamesCache(override?: Set<string> | null): void {
+    if (override === undefined) {
+        cachedShellEnvNamesPromise = null;
+    } else {
+        cachedShellEnvNamesPromise = Promise.resolve(override);
+    }
+}
+
+/**
+ * Spawn the user's default login shell (or `cmd.exe` on Windows) and capture
+ * the list of environment variable names it actually exposes. Used by
+ * `envPick` to avoid showing extension-host-only vars (e.g. `VSCODE_*`,
+ * `ELECTRON_RUN_AS_NODE`) that would fail when the downstream `printenv`
+ * shell task tries to read them. Result is cached for the extension host
+ * lifetime; returns null on timeout / spawn failure so the caller can fall
+ * back to a hardcoded blocklist.
+ */
+function getShellAccessibleEnvNames(): Promise<Set<string> | null> {
+    if (cachedShellEnvNamesPromise) {
+        return cachedShellEnvNamesPromise;
+    }
+    cachedShellEnvNamesPromise = new Promise<Set<string> | null>((resolve) => {
+        const isWindows = process.platform === 'win32';
+        const shell = isWindows ? 'cmd.exe' : (process.env.SHELL || '/bin/sh');
+        const args = isWindows ? ['/c', 'set'] : ['-l', '-c', 'env'];
+
+        // 핵심: spawn 의 기본 env 상속을 막아야 한다. 그렇게 두면 확장 호스트가
+        // 들고 있는 VSCODE_* / ELECTRON_* 변수가 probe 셸로 새어 들어가서
+        // `env` 출력에 포함되고, 결과적으로 "셸이 본다" 로 잘못 분류된다.
+        // 그래서 probe 에 넘기는 env 에서 알려진 확장 호스트 전용 이름들을
+        // 미리 제거한다. 이 sanitize 만으로는 VS Code 가 task runner 안에서
+        // 추가로 거르는 변수들을 100% 재현할 수 없으므로, 호출부에서
+        // hardcoded blocklist 를 한 번 더 적용한다 (belt-and-suspenders).
+        const probeEnv: NodeJS.ProcessEnv = {};
+        for (const [key, value] of Object.entries(process.env)) {
+            if (value !== undefined && !isExtensionHostOnlyEnvName(key)) {
+                probeEnv[key] = value;
+            }
+        }
+
+        let child: ReturnType<typeof spawn>;
+        try {
+            child = spawn(shell, args, {
+                stdio: ['ignore', 'pipe', 'ignore'],
+                env: probeEnv
+            });
+        } catch {
+            resolve(null);
+            return;
+        }
+
+        let stdout = '';
+        let settled = false;
+        const finish = (value: Set<string> | null) => {
+            if (settled) { return; }
+            settled = true;
+            resolve(value);
+        };
+
+        const timer = setTimeout(() => {
+            try { child.kill(); } catch { /* ignore */ }
+            finish(null);
+        }, 5000);
+
+        child.stdout?.on('data', (chunk: Buffer) => {
+            stdout += chunk.toString('utf8');
+            // 1MB 이상이면 비정상으로 간주하고 중단
+            if (stdout.length > 1024 * 1024) {
+                try { child.kill(); } catch { /* ignore */ }
+                clearTimeout(timer);
+                finish(null);
+            }
+        });
+        child.on('error', () => {
+            clearTimeout(timer);
+            finish(null);
+        });
+        child.on('exit', (code) => {
+            clearTimeout(timer);
+            if (code !== 0) {
+                finish(null);
+                return;
+            }
+            const names = new Set<string>();
+            for (const rawLine of stdout.split(/\r?\n/)) {
+                const eq = rawLine.indexOf('=');
+                if (eq > 0) {
+                    names.add(rawLine.slice(0, eq));
+                }
+            }
+            finish(names.size > 0 ? names : null);
+        });
+    });
+    return cachedShellEnvNamesPromise;
+}
+
 async function handleEnvPick(task: any): Promise<{ value: string }> {
-    const names = Object.keys(process.env).sort();
+    const allNames = Object.keys(process.env);
+    const shellNames = await getShellAccessibleEnvNames();
+
+    let names: string[];
+    if (shellNames) {
+        // 셸이 실제로 보는 변수만 노출. 확장 호스트가 동적으로 추가했지만
+        // 셸에는 없는 변수(VSCODE_*, ELECTRON_RUN_AS_NODE 등)를 자동 제외.
+        // probe 의 env sanitize 만으로는 VS Code task runner 가 추가로
+        // 거르는 변수를 완벽 재현할 수 없으므로 blocklist 도 함께 적용한다.
+        names = allNames
+            .filter(n => shellNames.has(n) && !isExtensionHostOnlyEnvName(n))
+            .sort();
+    } else {
+        // 셸 호출 실패 시 fallback: 알려진 확장 호스트 전용 prefix 만 차단.
+        names = allNames.filter(n => !isExtensionHostOnlyEnvName(n)).sort();
+    }
+
     if (names.length === 0) {
         throw new Error(`Task '${task.id}' of type 'envPick' found no environment variables.`);
     }
