@@ -1,6 +1,8 @@
 # TaskHub 기능 로드맵 (TODO)
 
-향후 추가를 검토 중인 기능 목록입니다. 우선순위는 구현 크기, 기존 자산 재사용, 사용자 체감 가치를 종합해 정했습니다.
+향후 추가를 검토 중인 **임베디드 / 펌웨어 도구** 기능 목록입니다. 우선순위는 구현 크기, 기존 자산 재사용, 사용자 체감 가치를 종합해 정했습니다.
+
+> 액션 시스템 / 파이프라인 / UX 관련 항목은 [../TODO.md](../TODO.md) 참조 — 두 문서는 범위가 다릅니다.
 
 ## 이미 구현된 항목
 
@@ -11,23 +13,28 @@
 | Output Parser (`output.capture` 규칙) | 0.3.x부터 제공. regex/line/group/flags/trim 지원, 다중 규칙 허용 | [docs/features.md §5 "Output Capture"](./features.md#output-capture) |
 | 파이프라인 Preview Run (Dry-run) | 0.3.x부터 제공. 액션 우클릭 → Preview Run, 변수 해석·워크스페이스 외부 쓰기 경고·미해결 `${...}` 요약 | [docs/features.md §5 "Preview Run (Dry-run)"](./features.md#preview-run-dry-run) |
 | Task-level `timeoutSeconds` / `continueOnError` | 0.3.x부터 제공 | [docs/features.md §5 "Task-level 옵션"](./features.md#task-level-옵션-timeoutseconds--continueonerror) |
+| Problem Matcher (`output.diagnostics`) | 0.4.22부터 제공. regex/file/line/severity 그룹, 다중 매처, VS Code Problems 패널 통합 | [docs/features.md](./features.md) `output.diagnostics` 섹션 |
 
-조건부 실행 자체는 남은 TODO에 유지합니다 — 아래 `when` / `retry`는 아직 미구현.
+조건부 실행 (`when` / `retry` / `onFailure`)은 액션 시스템 영역이라 [../TODO.md](../TODO.md) §4.1로 이관했습니다.
 
 ## 우선순위 요약
 
 | 순위 | 기능 | 근거 | 구현 크기 |
 | --- | --- | --- | --- |
 | 1 | Memory Map Diff / Budget Check | 파서/WebView 기반이 이미 있음. 임베디드 정체성 강화 | 중 |
-| 2 | 조건부 실행 (`when`) / Retry | Output Parser·Dry-run·`timeoutSeconds`는 이미 구현. 남은 흐름 제어만 보강 | 중 |
-| 3 | Hex Viewer Checksum / Compare | 작고 빠른 개선. 펌웨어 검증 실사용 | 소 |
-| 4 | Problem Matcher (빌드 에러 파싱) | 빌드 피드백 루프 단축 | 소~중 |
-| 5 | CMSIS-SVD 기반 Register/SFR Hover | 벤더 헤더 없는 프로젝트에서 차별점 | 대 |
-| 6 | ELF Symbol Navigator | #1의 전제이자 단독 가치도 있음 | 소 |
-| 7 | 병렬 실행 / Task DAG | 멀티 타겟 빌드 사용자에 한정적 | 중 |
-| 8 | Serial / Target Console | 체감 크지만 구현 범위 큼, 기존 확장과 경쟁 | 대 |
+| 2 | Hex Viewer Checksum / Compare | 작고 빠른 개선. 펌웨어 검증 실사용 | 소 |
+| 3 | CMSIS-SVD 기반 Register/SFR Hover | 벤더 헤더 없는 프로젝트에서 차별점 | 대 |
+| 4 | ELF Symbol Navigator | #1의 전제이자 단독 가치도 있음 | 소 |
+| 5 | 병렬 실행 / Task DAG | 멀티 타겟 빌드 사용자에 한정적 | 중 |
+| 6 | TaskHub Doctor / Action Lint | Preview Run 인프라 재사용. 시스템 신뢰도 직격 | 소~중 |
+| 7 | Named Input Profiles | TODO.md §5.3 잔여작업의 큰 그림. 임베디드 워크플로 fitness 강함 | 중 |
+| 8 | Action Run Report | History 패널 자연 확장. 출력 로그 영속화와 페어 | 중 |
+| 9 | 출력 로그 영속화 + 회전 | 작은 비용. Action Run Report에 흡수 가능 | 소 |
+| 10 | Quick Action Palette | §2.1 Phase 1 인프라 재사용. 선언형 keybinding 우회 | 소 |
+| 11 | 백그라운드 완료 알림 + 소요 시간 | 데이터 재활용, UI만 추가. 임베디드 빌드 즉시 통지 | 소 |
+| 12 | 동일 title 폴더 disambiguation | TODO.md §5.4 잔여. 단독 처리 가능한 작은 PR | 소 |
 
-**권장 시작 순서**: Memory Map Diff(1) → 조건부 실행(2).
+**권장 시작 순서**: Memory Map Diff(1) → Hex Viewer Checksum(2). 6~12는 액션 시스템 / UX 영역으로 TODO.md 이관 후보 — 검토 후 분배.
 
 ---
 
@@ -51,26 +58,7 @@
 - 기반 파서: AXF/ELF, armlink listing, 링커 스크립트 (이미 존재)
 - 관련 문서: [docs/features.md](./features.md) 섹션 19
 
-## 2. 조건부 실행 (`when`) / Retry
-
-`timeoutSeconds`, `continueOnError`는 이미 구현되어 있으므로 남은 두 필드만 TODO로 유지합니다.
-
-```json
-{
-  "id": "flash",
-  "type": "shell",
-  "command": "pyocd flash firmware.hex",
-  "when": "${build.exitCode} == 0",
-  "retry": 2
-}
-```
-
-- 초기 `when`은 단순 truthy / string compare로 시작 (표현식 엔진 금지).
-- Output Parser가 제공하는 파생 변수(`${task_id.<name>}`)로 조건을 구성.
-- 추후 AND/OR 조합 정도까지 확장.
-- 관련 코드: [src/extension.ts](../src/extension.ts) `executeActionPipeline`, [src/schema.ts](../src/schema.ts) `Task` 인터페이스.
-
-## 3. Hex Viewer Checksum / Compare
+## 2. Hex Viewer Checksum / Compare
 
 Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 
@@ -81,18 +69,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - Intel HEX ↔ BIN 변환
 - 관련 문서: [docs/features.md](./features.md) 섹션 20
 
-## 4. Problem Matcher (빌드 에러 파싱)
-
-`shell` 태스크 출력을 파싱해 VS Code Problems 패널로 전달.
-
-```json
-{ "type": "shell", "command": "make all", "problemMatcher": "gcc" }
-```
-
-- 기본 제공 매처: `gcc`, `armcc`, `iar`, `clang`
-- 사용자 정의 매처 지원 (regex + file/line/severity 그룹)
-
-## 5. CMSIS-SVD 기반 Register/SFR Hover
+## 3. CMSIS-SVD 기반 Register/SFR Hover
 
 `.svd` 파일을 읽어 peripheral/register/field 정보를 hover로 제공.
 
@@ -102,7 +79,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - Command Palette: `Decode Register Value`
 - 관련 문서: [docs/features.md](./features.md) 섹션 15
 
-## 6. ELF Symbol Navigator
+## 4. ELF Symbol Navigator
 
 기존 [src/elfParser.ts](../src/elfParser.ts)를 활용한 심볼 검색/점프 UX.
 
@@ -110,7 +87,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - Memory Map과 양방향 점프
 - #1 Memory Map Diff의 전제 조건
 
-## 7. 병렬 실행 / Task DAG
+## 5. 병렬 실행 / Task DAG
 
 ```json
 { "id": "buildA", "type": "shell", "command": "..." },
@@ -121,22 +98,99 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - 멀티 타겟, 멀티 MCU 프로젝트 대상
 - 순차 실행 기본값 유지 (하위 호환)
 
-## 8. Serial / Target Console
+## 6. TaskHub Doctor / Action Lint
 
-펌웨어 Flash 후 타겟 로그 확인을 파이프라인 안에서.
+전체 `actions.json`을 일괄 진단해 깨진 액션을 빠르게 식별.
+
+- 검사 항목:
+  - 미해결 변수 (`${...}` 리터럴이 해석 후에도 남는 경우)
+  - 중복 액션 id / 동일 액션 내 task id 충돌
+  - 존재하지 않는 tool / 경로 (`type: tool` 호출 대상)
+  - capture / diagnostics regex 컴파일 오류, group 인덱스 부적합
+  - 순환 `dependsOn`
+  - `vscodeTask`가 가리키는 label이 `.vscode/tasks.json`에 부재
+  - workspace 외부 쓰기 경로 (Preview Run의 경고 재사용)
+- 출력: VS Code Problems 패널 (`actions.json` 위치 기반 진단) 또는 전용 webview 보고서
+- 인프라 재사용: Preview Run의 변수 해석기 / ajv 스키마 / capture·diagnostics 검증 그대로
+- 커맨드: `TaskHub: Lint Actions`, `TaskHub: Doctor`
+- **이유**: 1.2 tasks.json Import 이후 들어온 사용자의 첫 마찰점이 "왜 안 돼?". 단일 액션 Preview Run으로는 전체 점검 부족 — 시스템 신뢰도 직격.
+- 영역: 액션 시스템 (TODO.md 후보)
+
+## 7. Named Input Profiles
+
+인터랙티브 task(`inputBox` / `quickPick` / `envPick` 등)의 응답값 조합을 이름 붙여 저장 → 선택만으로 재실행.
 
 ```json
-{ "type": "serial", "port": "/dev/tty.usbmodem", "baud": 115200, "logFilter": "^\\[ERR\\]" }
+{
+  "id": "fw.flash",
+  "tasks": [...],
+  "profiles": {
+    "stm32f4-release": { "board": "stm32f4", "build": "release", "port": "/dev/tty.usbmodem01" },
+    "stm32f7-debug":   { "board": "stm32f7", "build": "debug",   "port": "/dev/tty.usbmodem02" }
+  }
+}
 ```
 
-- Flash → 자동 시리얼 모니터 연동
-- 로그 필터/저장
-- 주의: 기존 Serial Monitor 확장과 경쟁 범위 확인 필요
+- TODO.md §5.3 잔여작업("수정해서 실행")의 더 큰 그림. 히스토리 기반 재실행은 마지막 한 번이 기본 — profile은 *반복* 사용 케이스 정확히 적중.
+- 명령:
+  - `TaskHub: Run Action with Profile…` → quickPick으로 profile 선택
+  - `TaskHub: Save Last Inputs as Profile…` → 히스토리 기반 이름 부여
+- 비밀번호(`password: true`)는 §5.3과 동일하게 저장 제외.
+- 임베디드 워크플로 (`board=... + build=... + port=...`)와 fitness 강함.
+- 영역: 액션 시스템 (TODO.md 후보)
+
+## 8. Action Run Report
+
+실행 후 파이프라인 단위 요약 보고서.
+
+- 항목: task별 소요 시간, exit code, 캡처된 변수, 생성/수정된 파일, diagnostics 개수, 출력 로그 링크
+- 표시: History 패널 entry 클릭 → webview 또는 출력 채널 보고서
+- 아래 D(출력 로그 영속화)와 페어로 작동 — 보고서가 로그 파일로 링크
+- TODO.md §5.4 last-run 배지가 1줄 요약이라면 이건 풀 보고서.
+- 영역: 액션 시스템 / UX (TODO.md 후보)
+
+## 9. 출력 로그 영속화 + 회전
+
+액션 실행 출력을 워크스페이스에 자동 저장.
+
+- 경로: `<workspace>/.taskhub/logs/<actionId>/<timestamp>.log`
+- 회전: N개 또는 X일 (settings)
+- C(Action Run Report)에 흡수 가능 — 단독 가치는 "진단 받은 뒤 이전 실행 로그 비교"
+- Output Channel은 휘발성이라 디버깅·회고 시 한계 명확
+- 영역: 액션 시스템 / UX (TODO.md 후보, C와 묶을지 분리할지 결정 필요)
+
+## 10. Quick Action Palette
+
+`taskhub.runAnyAction` 단일 커맨드 → fuzzy finder로 모든 액션 검색·실행.
+
+- 폴더 / 별칭 prefix 매칭, 최근 사용 우선
+- 이미 `taskhub.runAction.<id>` 동적 등록되어 있어 재활용 가능 (TODO.md §2.1 Phase 1 인프라)
+- TODO.md §2.1 v1.5/v2(선언형 keybinding) 보류 상태에서 우회 경로 — `keybindings.json` stale 처리 비용 없이 가치의 80%
+- 트레이드오프: 키 한 방은 아니지만 "팔레트 + 두세 글자"로 근육 기억 빠르게 정착
+- 영역: 액션 시스템 / UX (TODO.md 후보)
+
+## 11. 백그라운드 완료 알림 + 소요 시간
+
+설정 임계치(예: 10초) 넘는 액션 종료 시 OS notification + statusbar 잠깐 깜빡.
+
+- 임베디드 빌드 / 플래시 같은 분 단위 작업에서 VS Code 다른 창 보고 있어도 결과 즉시 인지
+- TODO.md §5.4 last-run 배지가 *사후 회고*라면 이건 *즉시 통지* — 데이터 재활용, UI만 추가
+- 비용 작음 (settings 임계치 + `vscode.window.showInformationMessage` / statusbar 토글)
+- 영역: 액션 시스템 / UX (TODO.md 후보)
+
+## 12. 동일 title 폴더 disambiguation (TODO.md §5.4 잔여)
+
+History 패널의 `Firmware/Build` + `Bootloader/Build` label 충돌 해소.
+
+- 이미 `formatActionPath` 헬퍼 있음. HistoryItem label에 적용하면 끝.
+- 작은 PR 단위, 단독 처리 가능. 굳이 로드맵에 둘 필요 없는 잔여작업이지만 같이 검토.
+- 영역: UX (TODO.md 후보)
 
 ---
 
 ## 메모
 
 - 원본 논의: 현재 강점(Memory Map, Hex Viewer, C/C++ Hover, 파이프라인)을 더 쓸모 있게 만드는 방향이 "새 영역 확장"보다 우선.
-- 구현 순서 설계 원칙: 간판 기능(1) → 흐름 제어 마감(2) → 세부 도구(3~8).
-- 이번 릴리스에서 완료된 항목(Output Parser / Preview Run / timeoutSeconds / continueOnError)은 상단 "이미 구현된 항목" 표 참조.
+- 구현 순서 설계 원칙: 간판 기능(1) → 임베디드 세부 도구(2~5) → 액션 시스템 후보(6~12, 다수는 [../TODO.md](../TODO.md) 이관 가능). 흐름 제어(`when` / `retry` / `onFailure`)는 [../TODO.md](../TODO.md) §4.1로 이관.
+- §1 Memory Map Diff와 §2 Hex Viewer Checksum이 "빌드 산출물 비교" / "CRC·range export"를 흡수하므로 중복 후보는 별도로 두지 않습니다.
+- 이번 릴리스에서 완료된 항목(Output Parser / Preview Run / timeoutSeconds / continueOnError / Problem Matcher)은 상단 "이미 구현된 항목" 표 참조.
