@@ -23,18 +23,17 @@
 | 순위 | 기능 | 근거 | 구현 크기 |
 | --- | --- | --- | --- |
 | 1 | Memory Map Diff / Budget Check | 파서/WebView 기반이 이미 있음. 임베디드 정체성 강화 | 중 |
-| 2 | Hex Viewer Checksum / Compare | 작고 빠른 개선. 펌웨어 검증 실사용 | 소 |
-| 3 | CMSIS-SVD 기반 Register/SFR Hover | 벤더 헤더 없는 프로젝트에서 차별점 | 대 |
-| 4 | ELF Symbol Navigator | #1의 전제이자 단독 가치도 있음 | 소 |
-| 5 | 병렬 실행 / Task DAG | 멀티 타겟 빌드 사용자에 한정적 | 중 |
-| 6 | TaskHub Doctor / Action Lint | Preview Run 인프라 재사용. 시스템 신뢰도 직격 | 소~중 |
-| 7 | Named Input Profiles | TODO.md §5.3 잔여작업의 큰 그림. 임베디드 워크플로 fitness 강함 | 중 |
-| 8 | Action Run Report | History 패널 자연 확장. 출력 로그 영속화와 페어 | 중 |
-| 9 | 출력 로그 영속화 + 회전 | 작은 비용. Action Run Report에 흡수 가능 | 소 |
-| 10 | Quick Action Palette | §2.1 Phase 1 인프라 재사용. 선언형 keybinding 우회 | 소 |
-| 11 | 백그라운드 완료 알림 + 소요 시간 | 데이터 재활용, UI만 추가. 임베디드 빌드 즉시 통지 | 소 |
+| 2 | CMSIS-SVD 기반 Register/SFR Hover | 벤더 헤더 없는 프로젝트에서 차별점 | 대 |
+| 3 | ELF Symbol Navigator | #1의 전제이자 단독 가치도 있음 | 소 |
+| 4 | 병렬 실행 / Task DAG | 멀티 타겟 빌드 사용자에 한정적 | 중 |
+| 5 | TaskHub Doctor / Action Lint | Preview Run 인프라 재사용. 시스템 신뢰도 직격 | 소~중 |
+| 6 | Named Input Profiles | TODO.md §5.3 잔여작업의 큰 그림. 임베디드 워크플로 fitness 강함 | 중 |
+| 7 | Action Run Report | History 패널 자연 확장. 출력 로그 영속화와 페어 | 중 |
+| 8 | 출력 로그 영속화 + 회전 | 작은 비용. Action Run Report에 흡수 가능 | 소 |
+| 9 | Quick Action Palette | §2.1 Phase 1 인프라 재사용. 선언형 keybinding 우회 | 소 |
+| 10 | 백그라운드 완료 알림 + 소요 시간 | 데이터 재활용, UI만 추가. 임베디드 빌드 즉시 통지 | 소 |
 
-**권장 시작 순서**: Memory Map Diff(1) → Hex Viewer Checksum(2). 6~11은 액션 시스템 / UX 영역으로 TODO.md 이관 후보 — 검토 후 분배.
+**권장 시작 순서**: Memory Map Diff(1) → ELF Symbol Navigator(3). 5~10은 액션 시스템 / UX 영역으로 TODO.md 이관 후보 — 검토 후 분배.
 
 ---
 
@@ -58,18 +57,7 @@
 - 기반 파서: AXF/ELF, armlink listing, 링커 스크립트 (이미 존재)
 - 관련 문서: [docs/features.md](./features.md) 섹션 19
 
-## 2. Hex Viewer Checksum / Compare
-
-Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
-
-- 선택 영역 CRC32, CRC16-CCITT, SHA256
-- 선택 영역 binary export
-- 두 HEX/SREC/BIN 파일 diff
-- address range 추출
-- Intel HEX ↔ BIN 변환
-- 관련 문서: [docs/features.md](./features.md) 섹션 20
-
-## 3. CMSIS-SVD 기반 Register/SFR Hover
+## 2. CMSIS-SVD 기반 Register/SFR Hover
 
 `.svd` 파일을 읽어 peripheral/register/field 정보를 hover로 제공.
 
@@ -79,7 +67,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - Command Palette: `Decode Register Value`
 - 관련 문서: [docs/features.md](./features.md) 섹션 15
 
-## 4. ELF Symbol Navigator
+## 3. ELF Symbol Navigator
 
 기존 [src/elfParser.ts](../src/elfParser.ts)를 활용한 심볼 검색/점프 UX.
 
@@ -87,7 +75,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - Memory Map과 양방향 점프
 - #1 Memory Map Diff의 전제 조건
 
-## 5. 병렬 실행 / Task DAG
+## 4. 병렬 실행 / Task DAG
 
 ```json
 { "id": "buildA", "type": "shell", "command": "..." },
@@ -98,7 +86,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - 멀티 타겟, 멀티 MCU 프로젝트 대상
 - 순차 실행 기본값 유지 (하위 호환)
 
-## 6. TaskHub Doctor / Action Lint
+## 5. TaskHub Doctor / Action Lint
 
 전체 `actions.json`을 일괄 진단해 깨진 액션을 빠르게 식별.
 
@@ -116,7 +104,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - **이유**: 1.2 tasks.json Import 이후 들어온 사용자의 첫 마찰점이 "왜 안 돼?". 단일 액션 Preview Run으로는 전체 점검 부족 — 시스템 신뢰도 직격.
 - 영역: 액션 시스템 (TODO.md 후보)
 
-## 7. Named Input Profiles
+## 6. Named Input Profiles
 
 인터랙티브 task(`inputBox` / `quickPick` / `envPick` 등)의 응답값 조합을 이름 붙여 저장 → 선택만으로 재실행.
 
@@ -139,7 +127,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - 임베디드 워크플로 (`board=... + build=... + port=...`)와 fitness 강함.
 - 영역: 액션 시스템 (TODO.md 후보)
 
-## 8. Action Run Report
+## 7. Action Run Report
 
 실행 후 파이프라인 단위 요약 보고서.
 
@@ -149,7 +137,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - TODO.md §5.4 last-run 배지가 1줄 요약이라면 이건 풀 보고서.
 - 영역: 액션 시스템 / UX (TODO.md 후보)
 
-## 9. 출력 로그 영속화 + 회전
+## 8. 출력 로그 영속화 + 회전
 
 액션 실행 출력을 워크스페이스에 자동 저장.
 
@@ -159,7 +147,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - Output Channel은 휘발성이라 디버깅·회고 시 한계 명확
 - 영역: 액션 시스템 / UX (TODO.md 후보, C와 묶을지 분리할지 결정 필요)
 
-## 10. Quick Action Palette
+## 9. Quick Action Palette
 
 `taskhub.runAnyAction` 단일 커맨드 → fuzzy finder로 모든 액션 검색·실행.
 
@@ -169,7 +157,7 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - 트레이드오프: 키 한 방은 아니지만 "팔레트 + 두세 글자"로 근육 기억 빠르게 정착
 - 영역: 액션 시스템 / UX (TODO.md 후보)
 
-## 11. 백그라운드 완료 알림 + 소요 시간
+## 10. 백그라운드 완료 알림 + 소요 시간
 
 설정 임계치(예: 10초) 넘는 액션 종료 시 OS notification + statusbar 잠깐 깜빡.
 
@@ -182,7 +170,6 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 
 ## 메모
 
-- 원본 논의: 현재 강점(Memory Map, Hex Viewer, C/C++ Hover, 파이프라인)을 더 쓸모 있게 만드는 방향이 "새 영역 확장"보다 우선.
-- 구현 순서 설계 원칙: 간판 기능(1) → 임베디드 세부 도구(2~5) → 액션 시스템 후보(6~11, 다수는 [../TODO.md](../TODO.md) 이관 가능). 흐름 제어(`when` / `retry` / `onFailure`)는 [../TODO.md](../TODO.md) §4.1로 이관.
-- §1 Memory Map Diff와 §2 Hex Viewer Checksum이 "빌드 산출물 비교" / "CRC·range export"를 흡수하므로 중복 후보는 별도로 두지 않습니다.
+- 원본 논의: 현재 강점(Memory Map, C/C++ Hover, 파이프라인)을 더 쓸모 있게 만드는 방향이 "새 영역 확장"보다 우선.
+- 구현 순서 설계 원칙: 간판 기능(1) → 임베디드 세부 도구(2~4) → 액션 시스템 후보(5~10, 다수는 [../TODO.md](../TODO.md) 이관 가능). 흐름 제어(`when` / `retry` / `onFailure`)는 [../TODO.md](../TODO.md) §4.1로 이관.
 - 이번 릴리스에서 완료된 항목(Output Parser / Preview Run / timeoutSeconds / continueOnError / Problem Matcher)은 상단 "이미 구현된 항목" 표 참조.
