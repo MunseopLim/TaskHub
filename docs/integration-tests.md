@@ -157,6 +157,17 @@
 | IT-081 | exit 0 + stderr warning에서도 진단 등록 (2차 리뷰 Medium) | gcc/clang이 warning만 있을 때 흔한 패턴(exit 0 + stderr 출력). `executeShellCommand`가 성공 경로에서도 `{stdout, stderr}` 튜플로 resolve하고, post-processing 진단 블록이 둘을 합쳐 매처에 통과 — IT-079(failure 경로)와의 비대칭 해소 |
 | IT-082 | 같은 액션의 여러 task가 같은 파일에 진단을 내면 모두 보존 (3차 리뷰 Medium) | `collection.set(uri, ...)`은 해당 URI의 기존 entry를 *replace*하는 의미라 sibling task가 같은 파일에 진단 내면 앞 task가 덮였음. `collection.get(uri)`로 먼저 읽어 concat 후 set하도록 수정. 액션 시작 시 clear는 이전 run에만 적용되므로 같은 run의 누적은 보존 |
 
+### History label disambiguation (TODO §5.4 잔여)
+파일: [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-087 | 같은 title이 두 폴더에 있을 때 풀 경로로 disambiguate | `Firmware/Build` + `Bootloader/Build`가 history에 동시 존재 → 두 `HistoryItem` 라벨이 각각 `Firmware > Build` / `Bootloader > Build`로 스왑. 비충돌 entry는 짧은 title 유지 |
+| IT-087b | 같은 actionId의 반복 실행은 충돌로 치지 않음 | `actionId`가 동일한 entry가 여러 개 있어도 distinct id 카운트가 1이므로 라벨은 짧은 title 그대로 — 흔한 재실행에서 노이즈 회피 |
+| IT-087c | 레거시 entry(actionPath 부재)는 충돌 시 `Title (actionId)`로 폴백 | actionPath가 없는 기존 entry는 path 를 못 그리지만 distinct-id 불변은 유지 — `Build (old)` 형태로 actionId 를 붙여 같이 있는 신규 colliding entry(`Firmware > Build`)와 구별 |
+| IT-087d | distinct actionId가 같은 actionPath를 가지면 `(actionId)` suffix로 disambiguate | step 1 의 path swap 만으로는 `Firmware > Build` 가 두 row 에 모두 남아 시각적 구별 불가. 2-pass 가드가 같은 path-joined 라벨에 distinct id 가 둘 이상일 때 모든 멤버에 `(<actionId>)` 를 붙이고, 툴팁의 path 줄도 동일한 disambiguated 텍스트로 채움 |
+| IT-087e | 두 root-level 액션이 같은 title을 가지면 `Title (actionId)`로 disambiguate | root entry 의 `actionPath` 는 `['Build']` 한 원소뿐이라 breadcrumb swap 으로는 의미 있는 신호가 안 나옴. step 1 의 path-less collision 폴백이 `Build (root.build.a)` 형태로 actionId 를 붙여 두 row 를 구별. 툴팁의 path 줄도 동일하게 갱신 |
+
 ### Task Output Flow
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
 

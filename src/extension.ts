@@ -559,6 +559,33 @@ export function findActionById(actions: ActionItem[], id: string): ActionItem | 
     return undefined;
 }
 
+/**
+ * Locate an action by id and return its breadcrumb path (folder titles +
+ * action title). Used at history-write time so HistoryItem labels can
+ * disambiguate `Firmware/Build` from `Bootloader/Build` when the bare
+ * title collides. Returns `undefined` when the id is not found anywhere
+ * in the tree (caller falls back to the bare action title).
+ */
+export function findActionPathById(actions: ActionItem[], id: string): string[] | undefined {
+    const walk = (items: ActionItem[], breadcrumbs: string[]): string[] | undefined => {
+        for (const item of items) {
+            const label = item.title || item.id || '(unnamed)';
+            const currentParts = [...breadcrumbs, label];
+            if (item.id === id) {
+                return currentParts;
+            }
+            if (item.children && item.children.length > 0) {
+                const found = walk(item.children, currentParts);
+                if (found) {
+                    return found;
+                }
+            }
+        }
+        return undefined;
+    };
+    return walk(actions, []);
+}
+
 // Pure utilities (no vscode dependency) live in ./pipelineUtils.
 // They are re-exported so that existing callers — including unit tests — can keep
 // importing them from './extension' unchanged.
@@ -1826,7 +1853,8 @@ export async function executeAction(
     context: vscode.ExtensionContext,
     mainViewProvider: MainViewProvider,
     historyProvider?: HistoryProvider,
-    presetInputs?: Record<string, unknown>
+    presetInputs?: Record<string, unknown>,
+    actionPathParts?: string[]
 ) {
     const resolved = resolveActionDefinition(actionItem);
     if (!resolved) {
@@ -1854,11 +1882,29 @@ export async function executeAction(
     const timestamp = Date.now();
     actionStartTimestamps.set(id, timestamp);
     if (historyProvider) {
+        // Resolve breadcrumb path so HistoryItem can disambiguate same-title
+        // actions in different folders. Caller-supplied `actionPathParts`
+        // wins (cheap when caller already iterated the action tree); the
+        // fallback re-loads the action tree once. Both branches may yield
+        // `undefined` for actions sitting at the root — that's fine, the
+        // History panel only adds the prefix when there's an actual title
+        // collision so root-level actions render bare either way.
+        let resolvedPath = actionPathParts;
+        if (!resolvedPath) {
+            try {
+                resolvedPath = findActionPathById(loadAllActions(context), id);
+            } catch {
+                // loadAllActions can throw on validation errors. Disambiguation
+                // is a nice-to-have — never block execution over it.
+                resolvedPath = undefined;
+            }
+        }
         historyProvider.addHistoryEntry({
             actionId: id,
             actionTitle: actionItem.title,
             timestamp: timestamp,
-            status: 'running'
+            status: 'running',
+            actionPath: resolvedPath
         });
     }
 
@@ -3308,8 +3354,9 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const fullActionItem = findActionById(allActions, actionId);
         if (fullActionItem) {
+            const pathParts = findActionPathById(allActions, actionId);
             try {
-                await executeAction(fullActionItem, context, mainViewProvider, historyProvider);
+                await executeAction(fullActionItem, context, mainViewProvider, historyProvider, undefined, pathParts);
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 outputChannel.appendLine(`[ERROR] Execution failed for action '${actionId}': ${msg}`);
@@ -3333,6 +3380,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const actionItem = findActionById(allActions, args.id);
         if (actionItem && actionItem.action) {
+            const pathParts = findActionPathById(allActions, args.id);
             // Mirror `taskhub.executeAction`'s catch (line ~3162): pipeline
             // failures already surface via `handleActionFailure`'s user
             // notification — re-throwing here would let VS Code show a
@@ -3340,7 +3388,7 @@ export function activate(context: vscode.ExtensionContext) {
             // keybinding entry point goes through this command, so the
             // catch is essential for that path.
             try {
-                await executeAction(actionItem, context, mainViewProvider, historyProvider);
+                await executeAction(actionItem, context, mainViewProvider, historyProvider, undefined, pathParts);
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 outputChannel.appendLine(`[ERROR] Execution failed for action '${args.id}': ${msg}`);
@@ -3841,8 +3889,9 @@ export function activate(context: vscode.ExtensionContext) {
 
         const fullActionItem = findActionById(allActions, entry.actionId);
         if (fullActionItem) {
+            const pathParts = findActionPathById(allActions, entry.actionId);
             try {
-                await executeAction(fullActionItem, context, mainViewProvider, historyProvider);
+                await executeAction(fullActionItem, context, mainViewProvider, historyProvider, undefined, pathParts);
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 outputChannel.appendLine(`[ERROR] Execution failed for action '${entry.actionId}': ${msg}`);
@@ -3880,8 +3929,9 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage(t(`ID '${entry.actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${entry.actionId}'.`));
             return;
         }
+        const pathParts = findActionPathById(allActions, entry.actionId);
         try {
-            await executeAction(fullActionItem, context, mainViewProvider, historyProvider, entry.inputs);
+            await executeAction(fullActionItem, context, mainViewProvider, historyProvider, entry.inputs, pathParts);
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             outputChannel.appendLine(`[ERROR] Execution failed for action '${entry.actionId}' (with saved inputs): ${msg}`);

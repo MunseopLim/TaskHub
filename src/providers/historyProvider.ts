@@ -32,6 +32,21 @@ export interface HistoryEntry {
      * Used to render the "last run" badge on each `HistoryItem`.
      */
     durationMs?: number;
+    /**
+     * Full breadcrumb path (folder titles + action title) at the moment of
+     * execution. Used to disambiguate `HistoryItem` labels when two actions
+     * share the same title (e.g. `Firmware/Build` vs `Bootloader/Build`,
+     * or two root-level `Build` actions). Frozen at write time so
+     * renaming/deleting the action later doesn't corrupt history. Absent
+     * for legacy entries (written before this field existed) and for
+     * entries written when the action couldn't be located in the loaded
+     * tree. Root-level actions are stored as a single-element path
+     * (`['Build']`); the breadcrumb swap requires length > 1, so root
+     * entries fall through to `computeDisambiguatedHistoryLabels`'s
+     * `Title (actionId)` collision-fallback when their bare title clashes
+     * with another action.
+     */
+    actionPath?: string[];
 }
 
 /**
@@ -139,6 +154,95 @@ export function formatLastRunBadge(
 }
 
 /**
+ * Compute a display label per history entry, swapping in the full
+ * breadcrumb path (`Firmware > Build`) for entries whose bare title
+ * collides with a different action elsewhere in the history.
+ *
+ * Collision is "two distinct actionIds share the same actionTitle" — the
+ * same action run repeatedly does NOT count, so `Build` stays bare when
+ * there's only one Build in the panel even if it ran ten times.
+ *
+ * On collision, the resolution depends on what's recorded for the entry:
+ *   - **Folder + title path available** (`actionPath.length > 1`): swap
+ *     to `Firmware > Build`. This is the common, informative case.
+ *   - **No usable path** (root-level action whose stored path is just
+ *     the title, or a legacy entry that lacks the field entirely):
+ *     fall back to `Build (actionId)`. The id suffix is the only signal
+ *     left when the breadcrumb itself can't disambiguate.
+ *
+ * After the path swap, a SECOND pass guards against distinct actionIds
+ * that ended up with identical path-joined labels — possible when the
+ * action tree has duplicate folder structures, or when a legacy entry
+ * stored a path that now matches a renamed action's current path. Such
+ * entries get an `(actionId)` suffix so the panel never shows two
+ * visually identical rows that point at different actions. Same-id
+ * repeated runs sharing the same path do NOT get the suffix.
+ *
+ * Invariant: distinct actionIds in the history never share a final
+ * display label (label is either undefined, in which case
+ * `HistoryItem` falls back to the bare title — only safe when the
+ * bare title is itself unambiguous, or carries enough disambiguation
+ * to identify which action this row belongs to).
+ *
+ * Returned array is index-aligned with `history` so callers can pass
+ * `labels[i]` straight to the corresponding `HistoryItem` constructor.
+ */
+export function computeDisambiguatedHistoryLabels(history: HistoryEntry[]): (string | undefined)[] {
+    // Step 1: title-based collision → swap in full breadcrumb path, or
+    // fall back to `Title (actionId)` when there's no usable path.
+    const titleToActionIds = new Map<string, Set<string>>();
+    for (const entry of history) {
+        let set = titleToActionIds.get(entry.actionTitle);
+        if (!set) {
+            set = new Set();
+            titleToActionIds.set(entry.actionTitle, set);
+        }
+        set.add(entry.actionId);
+    }
+    const pathLabels: (string | undefined)[] = history.map(entry => {
+        const collides = (titleToActionIds.get(entry.actionTitle)?.size ?? 0) > 1;
+        if (!collides) {
+            return undefined;  // HistoryItem falls back to entry.actionTitle
+        }
+        if (entry.actionPath && entry.actionPath.length > 1) {
+            return entry.actionPath.join(' > ');
+        }
+        // Title collision but no usable path (root-level action, or
+        // legacy entry without actionPath). The breadcrumb can't help —
+        // attach actionId so distinct ids never share a row label.
+        return `${entry.actionTitle} (${entry.actionId})`;
+    });
+
+    // Step 2: path-based collision → append `(actionId)` suffix when two
+    // distinct actionIds resolve to the same path-joined label. Step 1's
+    // `Title (actionId)` fallback is already id-tagged, so it never
+    // participates in further collisions here.
+    const labelToActionIds = new Map<string, Set<string>>();
+    for (let i = 0; i < pathLabels.length; i++) {
+        const label = pathLabels[i];
+        if (!label) {
+            continue;
+        }
+        let set = labelToActionIds.get(label);
+        if (!set) {
+            set = new Set();
+            labelToActionIds.set(label, set);
+        }
+        set.add(history[i].actionId);
+    }
+    return pathLabels.map((label, i) => {
+        if (!label) {
+            return undefined;
+        }
+        const ids = labelToActionIds.get(label);
+        if (ids && ids.size > 1) {
+            return `${label} (${history[i].actionId})`;
+        }
+        return label;
+    });
+}
+
+/**
  * Periodic auto-refresh for the history view so badges that contain a
  * relative-day reference (`HH:mm` → `어제 HH:mm` → `MM/DD`) don't go stale
  * when VS Code stays open across midnight.
@@ -163,8 +267,12 @@ export function startHistoryAutoRefresh(
 }
 
 export class HistoryItem extends vscode.TreeItem {
-    constructor(private entry: HistoryEntry) {
-        super(entry.actionTitle, vscode.TreeItemCollapsibleState.None);
+    constructor(private entry: HistoryEntry, displayLabel?: string) {
+        // `displayLabel` is supplied by `HistoryProvider.getChildren` when a
+        // same-title collision is detected across history; otherwise it falls
+        // back to the bare action title so root-level / non-colliding entries
+        // stay terse.
+        super(displayLabel ?? entry.actionTitle, vscode.TreeItemCollapsibleState.None);
 
         if (entry.status === 'success') {
             this.iconPath = new vscode.ThemeIcon('pass', new vscode.ThemeColor('charts.green'));
@@ -186,7 +294,19 @@ export class HistoryItem extends vscode.TreeItem {
         }
 
         const date = new Date(entry.timestamp);
-        this.tooltip = `Executed at: ${date.toLocaleString()}`;
+        // Surface the full breadcrumb in the tooltip whenever it's available
+        // so users can confirm "which Build did I run?" even when the label
+        // shows the bare title (no collision detected). When the panel has
+        // already disambiguated this entry (path collision → `(actionId)`
+        // suffix), prefer the disambiguated text so the tooltip's first
+        // line matches the row label exactly.
+        const pathSource = displayLabel ?? (
+            entry.actionPath && entry.actionPath.length > 1
+                ? entry.actionPath.join(' > ')
+                : undefined
+        );
+        const pathLine = pathSource ? `${pathSource}\n` : '';
+        this.tooltip = `${pathLine}Executed at: ${date.toLocaleString()}`;
 
         // Last-run badge: status + when + how-long, rendered in the
         // muted TreeItem.description slot next to actionTitle. The
@@ -241,7 +361,8 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem> {
             // Refresh the view title (count) lazily — activation no longer
             // calls refresh(), so we update here on the first render.
             this.updateTitle();
-            return Promise.resolve(history.map(entry => new HistoryItem(entry)));
+            const labels = computeDisambiguatedHistoryLabels(history);
+            return Promise.resolve(history.map((entry, idx) => new HistoryItem(entry, labels[idx])));
         }
         return Promise.resolve([]);
     }

@@ -234,6 +234,178 @@ suite('View provider integration', function () {
         assert.strictEqual(liveItem.description, undefined);
     });
 
+    test('IT-087: 같은 title 액션이 두 폴더에 있을 때 HistoryItem 라벨이 풀 경로로 disambiguate', async () => {
+        // Pins TODO §5.4 잔여작업: when `Firmware/Build` and `Bootloader/Build`
+        // both appear in history, both labels swap to `Firmware > Build` /
+        // `Bootloader > Build` so the user can tell them apart. A non-colliding
+        // entry alongside them keeps its bare title.
+        const ctx = makeContext();
+        const provider = new HistoryProvider(ctx);
+        provider.addHistoryEntry({
+            actionId: 'fw.build',
+            actionTitle: 'Build',
+            timestamp: 1,
+            status: 'success',
+            actionPath: ['Firmware', 'Build']
+        });
+        provider.addHistoryEntry({
+            actionId: 'bl.build',
+            actionTitle: 'Build',
+            timestamp: 2,
+            status: 'success',
+            actionPath: ['Bootloader', 'Build']
+        });
+        provider.addHistoryEntry({
+            actionId: 'fw.flash',
+            actionTitle: 'Flash',
+            timestamp: 3,
+            status: 'success',
+            actionPath: ['Firmware', 'Flash']
+        });
+
+        const items = await provider.getChildren();
+        const byId = new Map(items.map(i => [i.getEntry().actionId, i]));
+
+        // Both colliding entries get the breadcrumb prefix...
+        assert.strictEqual(labelOf(byId.get('fw.build')!), 'Firmware > Build');
+        assert.strictEqual(labelOf(byId.get('bl.build')!), 'Bootloader > Build');
+        // ...but the unique-title entry stays bare.
+        assert.strictEqual(labelOf(byId.get('fw.flash')!), 'Flash');
+    });
+
+    test('IT-087b: 같은 액션을 여러 번 실행해도 disambiguation은 발동하지 않음', async () => {
+        // Repeated runs of the SAME actionId share the title trivially —
+        // disambiguating them would be pure noise. Only distinct actionIds
+        // sharing a title constitutes a collision.
+        const ctx = makeContext();
+        const provider = new HistoryProvider(ctx);
+        provider.addHistoryEntry({
+            actionId: 'fw.build',
+            actionTitle: 'Build',
+            timestamp: 1,
+            status: 'success',
+            actionPath: ['Firmware', 'Build']
+        });
+        provider.addHistoryEntry({
+            actionId: 'fw.build',
+            actionTitle: 'Build',
+            timestamp: 2,
+            status: 'failure',
+            actionPath: ['Firmware', 'Build']
+        });
+
+        const items = await provider.getChildren();
+        for (const item of items) {
+            assert.strictEqual(labelOf(item), 'Build');
+        }
+    });
+
+    test('IT-087d: 두 액션이 같은 actionPath를 가지면 라벨/툴팁 모두 (id) suffix로 disambiguate', async () => {
+        // 동일 폴더 구조가 두 군데 존재(또는 rename 후 legacy entry)일 때,
+        // path까지 동일한 entry 두 개가 history에 들어옴. step 1 만으로는
+        // 둘 다 "Firmware > Build"로 남아 구분 불가 → step 2가 actionId
+        // suffix를 붙여 라벨과 툴팁 모두 일관되게 disambiguate.
+        const ctx = makeContext();
+        const provider = new HistoryProvider(ctx);
+        provider.addHistoryEntry({
+            actionId: 'fw1.build',
+            actionTitle: 'Build',
+            timestamp: 1,
+            status: 'success',
+            actionPath: ['Firmware', 'Build']
+        });
+        provider.addHistoryEntry({
+            actionId: 'fw2.build',
+            actionTitle: 'Build',
+            timestamp: 2,
+            status: 'success',
+            actionPath: ['Firmware', 'Build']
+        });
+
+        const items = await provider.getChildren();
+        const byId = new Map(items.map(i => [i.getEntry().actionId, i]));
+
+        const item1 = byId.get('fw1.build')!;
+        const item2 = byId.get('fw2.build')!;
+        assert.strictEqual(labelOf(item1), 'Firmware > Build (fw1.build)');
+        assert.strictEqual(labelOf(item2), 'Firmware > Build (fw2.build)');
+
+        // 툴팁의 첫 줄도 disambiguated 라벨과 일치해야 함 — 두 row가 시각적으로
+        // 구분되는데 hover 시 둘 다 "Firmware > Build"로 보이면 가드가 무의미.
+        assert.ok(typeof item1.tooltip === 'string', 'tooltip should be a string');
+        assert.ok((item1.tooltip as string).startsWith('Firmware > Build (fw1.build)\n'),
+            `expected tooltip to lead with disambiguated label, got: ${item1.tooltip}`);
+        assert.ok((item2.tooltip as string).startsWith('Firmware > Build (fw2.build)\n'),
+            `expected tooltip to lead with disambiguated label, got: ${item2.tooltip}`);
+    });
+
+    test('IT-087c: 레거시 entry(actionPath 부재)는 충돌 시 `Title (actionId)`로 폴백', async () => {
+        // Entries persisted before the actionPath field existed lack the
+        // breadcrumb data. They can't render the path, but the
+        // distinct-id invariant still holds — append actionId so the row
+        // is visually distinct from the colliding new entry.
+        const ctx = makeContext();
+        const provider = new HistoryProvider(ctx);
+        provider.addHistoryEntry({
+            actionId: 'old',
+            actionTitle: 'Build',
+            timestamp: 1,
+            status: 'success'
+            // no actionPath
+        });
+        provider.addHistoryEntry({
+            actionId: 'new',
+            actionTitle: 'Build',
+            timestamp: 2,
+            status: 'success',
+            actionPath: ['Firmware', 'Build']
+        });
+
+        const items = await provider.getChildren();
+        const byId = new Map(items.map(i => [i.getEntry().actionId, i]));
+        assert.strictEqual(labelOf(byId.get('old')!), 'Build (old)');
+        assert.strictEqual(labelOf(byId.get('new')!), 'Firmware > Build');
+    });
+
+    test('IT-087e: 두 root-level 액션이 같은 title을 가지면 라벨/툴팁 모두 (actionId) suffix로 disambiguate', async () => {
+        // Pure root-level collision — neither entry has a usable
+        // breadcrumb, so the id suffix is the only signal. Without this
+        // fallback both rows would render as bare "Build" and look
+        // identical, breaking the distinct-id invariant.
+        const ctx = makeContext();
+        const provider = new HistoryProvider(ctx);
+        provider.addHistoryEntry({
+            actionId: 'root.build.a',
+            actionTitle: 'Build',
+            timestamp: 1,
+            status: 'success',
+            actionPath: ['Build']
+        });
+        provider.addHistoryEntry({
+            actionId: 'root.build.b',
+            actionTitle: 'Build',
+            timestamp: 2,
+            status: 'success',
+            actionPath: ['Build']
+        });
+
+        const items = await provider.getChildren();
+        const byId = new Map(items.map(i => [i.getEntry().actionId, i]));
+
+        const itemA = byId.get('root.build.a')!;
+        const itemB = byId.get('root.build.b')!;
+        assert.strictEqual(labelOf(itemA), 'Build (root.build.a)');
+        assert.strictEqual(labelOf(itemB), 'Build (root.build.b)');
+
+        // Tooltip path line tracks the disambiguated label so hover also
+        // distinguishes the two rows.
+        assert.ok(typeof itemA.tooltip === 'string', 'tooltip should be a string');
+        assert.ok((itemA.tooltip as string).startsWith('Build (root.build.a)\n'),
+            `expected tooltip to lead with disambiguated label, got: ${itemA.tooltip}`);
+        assert.ok((itemB.tooltip as string).startsWith('Build (root.build.b)\n'),
+            `expected tooltip to lead with disambiguated label, got: ${itemB.tooltip}`);
+    });
+
     test('IT-072: 멀티 task 액션이 running일 때 Action TreeItem.description에 progress 표시', async () => {
         // Pins TODO §5.2: while a multi-task action is running, the
         // Action TreeItem renders `index/total · taskId` so the user can

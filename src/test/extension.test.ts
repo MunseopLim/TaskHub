@@ -14,6 +14,7 @@ import {
 	mergeCommandAndArgs,
 	handleStringManipulation,
 	findActionById,
+	findActionPathById,
 	insertActionIntoDestination,
 	createGroupedTaskPresentationOptions,
 	addLinkEntry,
@@ -51,6 +52,7 @@ import {
 	formatHistoryTimestamp,
 	formatLastRunBadge,
 	startHistoryAutoRefresh,
+	computeDisambiguatedHistoryLabels,
 } from '../providers/historyProvider';
 import * as os from 'os';
 import * as path from 'path';
@@ -969,6 +971,205 @@ suite('Extension Test Suite', () => {
 		test('should return undefined when id is not found', () => {
 			const result = findActionById(sampleActions, 'missing');
 			assert.strictEqual(result, undefined);
+		});
+	});
+
+	suite('findActionPathById', () => {
+		// Pins TODO §5.4 disambiguation: HistoryEntry.actionPath is built from
+		// this helper at execute-time so HistoryItem labels can swap in the
+		// folder breadcrumb when same-title actions collide. Path includes
+		// the action's own title at the end.
+		const tree: ActionItem[] = [
+			{
+				id: 'root-build',
+				title: 'Build',
+				action: { description: '', tasks: [] }
+			},
+			{
+				id: 'fw',
+				title: 'Firmware',
+				children: [
+					{
+						id: 'fw-build',
+						title: 'Build',
+						action: { description: '', tasks: [] }
+					},
+					{
+						id: 'fw-sub',
+						title: 'Sub',
+						children: [
+							{
+								id: 'fw-sub-build',
+								title: 'Build',
+								action: { description: '', tasks: [] }
+							}
+						]
+					}
+				]
+			}
+		];
+
+		test('returns single-element path for root-level action', () => {
+			assert.deepStrictEqual(findActionPathById(tree, 'root-build'), ['Build']);
+		});
+
+		test('returns folder + title path for nested action', () => {
+			assert.deepStrictEqual(findActionPathById(tree, 'fw-build'), ['Firmware', 'Build']);
+		});
+
+		test('returns full chain for deeply nested action', () => {
+			assert.deepStrictEqual(findActionPathById(tree, 'fw-sub-build'), ['Firmware', 'Sub', 'Build']);
+		});
+
+		test('returns undefined for missing id', () => {
+			assert.strictEqual(findActionPathById(tree, 'nope'), undefined);
+		});
+
+		test('returns folder path when id matches a folder itself', () => {
+			assert.deepStrictEqual(findActionPathById(tree, 'fw'), ['Firmware']);
+		});
+	});
+
+	suite('computeDisambiguatedHistoryLabels', () => {
+		// Pins TODO §5.4 disambiguation: label swap only fires when two
+		// distinct actionIds share the same actionTitle. Same actionId
+		// repeated (re-runs) is NOT a collision — that's the common case
+		// and must stay terse.
+		function entry(partial: Partial<HistoryEntry> & Pick<HistoryEntry, 'actionId' | 'actionTitle'>): HistoryEntry {
+			return {
+				timestamp: 0,
+				status: 'success',
+				...partial
+			};
+		}
+
+		test('no collision → all labels undefined (HistoryItem falls back to title)', () => {
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'a', actionTitle: 'Build', actionPath: ['Firmware', 'Build'] }),
+				entry({ actionId: 'b', actionTitle: 'Flash', actionPath: ['Firmware', 'Flash'] })
+			]);
+			assert.deepStrictEqual(labels, [undefined, undefined]);
+		});
+
+		test('repeated runs of same action do not count as collision', () => {
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'a', actionTitle: 'Build', actionPath: ['Firmware', 'Build'], timestamp: 3 }),
+				entry({ actionId: 'a', actionTitle: 'Build', actionPath: ['Firmware', 'Build'], timestamp: 2 }),
+				entry({ actionId: 'a', actionTitle: 'Build', actionPath: ['Firmware', 'Build'], timestamp: 1 })
+			]);
+			assert.deepStrictEqual(labels, [undefined, undefined, undefined]);
+		});
+
+		test('collision → both colliding entries get full breadcrumb', () => {
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'fw', actionTitle: 'Build', actionPath: ['Firmware', 'Build'] }),
+				entry({ actionId: 'bl', actionTitle: 'Build', actionPath: ['Bootloader', 'Build'] })
+			]);
+			assert.deepStrictEqual(labels, ['Firmware > Build', 'Bootloader > Build']);
+		});
+
+		test('collision affects only entries that share the title', () => {
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'fw', actionTitle: 'Build', actionPath: ['Firmware', 'Build'] }),
+				entry({ actionId: 'bl', actionTitle: 'Build', actionPath: ['Bootloader', 'Build'] }),
+				entry({ actionId: 'flash', actionTitle: 'Flash', actionPath: ['Firmware', 'Flash'] })
+			]);
+			assert.deepStrictEqual(labels, ['Firmware > Build', 'Bootloader > Build', undefined]);
+		});
+
+		test('legacy entry (no actionPath) on collision falls back to `Title (actionId)`', () => {
+			// Without recorded path data the breadcrumb can't help, but the
+			// distinct-id invariant still holds: append actionId so the
+			// legacy row is visually distinct from the colliding one.
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'fw', actionTitle: 'Build' }),
+				entry({ actionId: 'bl', actionTitle: 'Build', actionPath: ['Bootloader', 'Build'] })
+			]);
+			assert.deepStrictEqual(labels, ['Build (fw)', 'Bootloader > Build']);
+		});
+
+		test('root-level action (actionPath of length 1) on collision falls back to `Title (actionId)`', () => {
+			// A root action's path is just [title] — joining yields the
+			// title back, providing zero disambiguation. Use the id suffix
+			// instead so the row is distinct from the nested colliding entry.
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'root', actionTitle: 'Build', actionPath: ['Build'] }),
+				entry({ actionId: 'fw', actionTitle: 'Build', actionPath: ['Firmware', 'Build'] })
+			]);
+			assert.deepStrictEqual(labels, ['Build (root)', 'Firmware > Build']);
+		});
+
+		test('empty input → empty output', () => {
+			assert.deepStrictEqual(computeDisambiguatedHistoryLabels([]), []);
+		});
+
+		test('two distinct actionIds with the same actionPath → both get (id) suffix', () => {
+			// Possible when the action tree contains a duplicated folder
+			// structure (two `Firmware` folders both holding `Build`), or
+			// when a legacy entry's stored path matches a renamed action's
+			// current path. Step 1 alone would leave both rows as
+			// "Firmware > Build" with no way to tell them apart — step 2
+			// must append the actionId to both.
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'fw1.build', actionTitle: 'Build', actionPath: ['Firmware', 'Build'] }),
+				entry({ actionId: 'fw2.build', actionTitle: 'Build', actionPath: ['Firmware', 'Build'] })
+			]);
+			assert.deepStrictEqual(labels, [
+				'Firmware > Build (fw1.build)',
+				'Firmware > Build (fw2.build)'
+			]);
+		});
+
+		test('same actionId repeated with same path is NOT a path collision', () => {
+			// Even though two entries share the same path, they share the
+			// same actionId — that's just re-runs of one action. Step 2
+			// requires distinct actionIds, so no suffix is added.
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'fw.build', actionTitle: 'Build', actionPath: ['Firmware', 'Build'], timestamp: 2 }),
+				entry({ actionId: 'fw.build', actionTitle: 'Build', actionPath: ['Firmware', 'Build'], timestamp: 1 }),
+				entry({ actionId: 'bl.build', actionTitle: 'Build', actionPath: ['Bootloader', 'Build'] })
+			]);
+			assert.deepStrictEqual(labels, [
+				'Firmware > Build',
+				'Firmware > Build',
+				'Bootloader > Build'
+			]);
+		});
+
+		test('mixed: two share path, one has unique path → only the shared pair gets suffix', () => {
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'fw1', actionTitle: 'Build', actionPath: ['Firmware', 'Build'] }),
+				entry({ actionId: 'fw2', actionTitle: 'Build', actionPath: ['Firmware', 'Build'] }),
+				entry({ actionId: 'bl', actionTitle: 'Build', actionPath: ['Bootloader', 'Build'] })
+			]);
+			assert.deepStrictEqual(labels, [
+				'Firmware > Build (fw1)',
+				'Firmware > Build (fw2)',
+				'Bootloader > Build'
+			]);
+		});
+
+		test('two root-level actions with same title → both get `Title (actionId)`', () => {
+			// Pure root-level collision — neither has a usable breadcrumb,
+			// so the id suffix is the only disambiguation available. The
+			// distinct-id invariant must still hold.
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'root.build.a', actionTitle: 'Build', actionPath: ['Build'] }),
+				entry({ actionId: 'root.build.b', actionTitle: 'Build', actionPath: ['Build'] })
+			]);
+			assert.deepStrictEqual(labels, ['Build (root.build.a)', 'Build (root.build.b)']);
+		});
+
+		test('root-level repeated runs of same actionId stay bare even when title appears elsewhere', () => {
+			// titleToActionIds size for 'Build' = 1 only because root.a
+			// appears twice (same id). No collision detected → label
+			// undefined → bare title. The unique 'Flash' row is unaffected.
+			const labels = computeDisambiguatedHistoryLabels([
+				entry({ actionId: 'root.a', actionTitle: 'Build', actionPath: ['Build'], timestamp: 2 }),
+				entry({ actionId: 'root.a', actionTitle: 'Build', actionPath: ['Build'], timestamp: 1 }),
+				entry({ actionId: 'flash', actionTitle: 'Flash', actionPath: ['Flash'] })
+			]);
+			assert.deepStrictEqual(labels, [undefined, undefined, undefined]);
 		});
 	});
 

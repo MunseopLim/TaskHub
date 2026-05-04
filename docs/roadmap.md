@@ -14,6 +14,7 @@
 | 파이프라인 Preview Run (Dry-run) | 0.3.x부터 제공. 액션 우클릭 → Preview Run, 변수 해석·워크스페이스 외부 쓰기 경고·미해결 `${...}` 요약 | [docs/features.md §5 "Preview Run (Dry-run)"](./features.md#preview-run-dry-run) |
 | Task-level `timeoutSeconds` / `continueOnError` | 0.3.x부터 제공 | [docs/features.md §5 "Task-level 옵션"](./features.md#task-level-옵션-timeoutseconds--continueonerror) |
 | Problem Matcher (`output.diagnostics`) | 0.4.22부터 제공. regex/file/line/severity 그룹, 다중 매처, VS Code Problems 패널 통합 | [docs/features.md](./features.md) `output.diagnostics` 섹션 |
+| 같은 title 폴더 액션 disambiguation (이전 §12) | 0.4.26부터 제공. History 패널이 같은 title 충돌 시에만 라벨을 풀 경로(`Firmware > Build`)로 스왑, 반복 실행은 충돌로 안 침. 풀 경로는 툴팁에도 항상 노출 | [src/providers/historyProvider.ts](../src/providers/historyProvider.ts) `computeDisambiguatedHistoryLabels` |
 
 조건부 실행 (`when` / `retry` / `onFailure`)은 액션 시스템 영역이라 [../TODO.md](../TODO.md) §4.1로 이관했습니다.
 
@@ -32,9 +33,8 @@
 | 9 | 출력 로그 영속화 + 회전 | 작은 비용. Action Run Report에 흡수 가능 | 소 |
 | 10 | Quick Action Palette | §2.1 Phase 1 인프라 재사용. 선언형 keybinding 우회 | 소 |
 | 11 | 백그라운드 완료 알림 + 소요 시간 | 데이터 재활용, UI만 추가. 임베디드 빌드 즉시 통지 | 소 |
-| 12 | 동일 title 폴더 disambiguation | TODO.md §5.4 잔여. 단독 처리 가능한 작은 PR | 소 |
 
-**권장 시작 순서**: Memory Map Diff(1) → Hex Viewer Checksum(2). 6~12는 액션 시스템 / UX 영역으로 TODO.md 이관 후보 — 검토 후 분배.
+**권장 시작 순서**: Memory Map Diff(1) → Hex Viewer Checksum(2). 6~11은 액션 시스템 / UX 영역으로 TODO.md 이관 후보 — 검토 후 분배.
 
 ---
 
@@ -178,19 +178,11 @@ Hex Viewer 선택 영역에 대한 작고 자주 쓰일 도구들.
 - 비용 작음 (settings 임계치 + `vscode.window.showInformationMessage` / statusbar 토글)
 - 영역: 액션 시스템 / UX (TODO.md 후보)
 
-## 12. 동일 title 폴더 disambiguation (TODO.md §5.4 잔여)
-
-History 패널의 `Firmware/Build` + `Bootloader/Build` label 충돌 해소.
-
-- 이미 `formatActionPath` 헬퍼 있음. HistoryItem label에 적용하면 끝.
-- 작은 PR 단위, 단독 처리 가능. 굳이 로드맵에 둘 필요 없는 잔여작업이지만 같이 검토.
-- 영역: UX (TODO.md 후보)
-
 ---
 
 ## 메모
 
 - 원본 논의: 현재 강점(Memory Map, Hex Viewer, C/C++ Hover, 파이프라인)을 더 쓸모 있게 만드는 방향이 "새 영역 확장"보다 우선.
-- 구현 순서 설계 원칙: 간판 기능(1) → 임베디드 세부 도구(2~5) → 액션 시스템 후보(6~12, 다수는 [../TODO.md](../TODO.md) 이관 가능). 흐름 제어(`when` / `retry` / `onFailure`)는 [../TODO.md](../TODO.md) §4.1로 이관.
+- 구현 순서 설계 원칙: 간판 기능(1) → 임베디드 세부 도구(2~5) → 액션 시스템 후보(6~11, 다수는 [../TODO.md](../TODO.md) 이관 가능). 흐름 제어(`when` / `retry` / `onFailure`)는 [../TODO.md](../TODO.md) §4.1로 이관.
 - §1 Memory Map Diff와 §2 Hex Viewer Checksum이 "빌드 산출물 비교" / "CRC·range export"를 흡수하므로 중복 후보는 별도로 두지 않습니다.
 - 이번 릴리스에서 완료된 항목(Output Parser / Preview Run / timeoutSeconds / continueOnError / Problem Matcher)은 상단 "이미 구현된 항목" 표 참조.

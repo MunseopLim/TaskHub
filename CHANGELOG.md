@@ -29,6 +29,22 @@
 =====================================================================
 -->
 
+## [0.4.26] - 2026-05-04
+
+### 추가 — 같은 title 폴더 액션 disambiguation (TODO §5.4 잔여작업)
+
+#### UX (History 패널 식별)
+- **충돌 시에만 풀 경로로 표시**: `Firmware/Build` 와 `Bootloader/Build` 처럼 두 폴더에 같은 title 액션이 있어 history 에 둘 다 등장할 때, 두 `HistoryItem` 의 라벨이 각각 `Firmware > Build` / `Bootloader > Build` 로 자동 전환됩니다. 같은 title 충돌이 없으면(또는 같은 actionId 의 반복 실행) 라벨은 그대로 짧은 형태(`Build`)를 유지 — 노이즈 없음. 풀 경로는 항상 툴팁에도 노출됩니다. 참조: [src/providers/historyProvider.ts](src/providers/historyProvider.ts) `computeDisambiguatedHistoryLabels`, [src/extension.ts](src/extension.ts) `findActionPathById`.
+- **저장 시점 freeze**: `HistoryEntry.actionPath` 를 액션 실행 시점에 굳혀 저장하므로, 이후 액션을 리네임하거나 삭제해도 history 의 식별 경로는 변하지 않습니다. 레거시 entry(이 필드가 없는 기존 데이터)는 안전하게 짧은 라벨로 폴백합니다.
+
+#### Low — 1차 리뷰 후속 수정 (path 까지 같은 액션 두 개를 구분 못 하던 문제)
+- **distinct actionId + 같은 actionPath → `(actionId)` suffix**: 액션 트리에 동일한 폴더 구조가 중복되거나(예: `Firmware/Build` 가 두 군데), 과거 rename 으로 legacy entry 의 path 가 다른 액션의 현재 path 와 일치하면, step 1 의 path swap 만으로는 두 row 가 모두 `Firmware > Build` 로 남아 시각적으로 구별 불가했습니다. `computeDisambiguatedHistoryLabels` 에 2-pass 가드를 추가해, 같은 path-joined 라벨에 distinct actionId 가 둘 이상 매핑되면 모든 멤버에 `(<actionId>)` suffix 를 붙입니다 (`Firmware > Build (fw1.build)` / `Firmware > Build (fw2.build)`). 같은 actionId 의 반복 실행은 distinct id 카운트가 1 이라 suffix 없음 — 회귀 가드 `IT-087b` 그대로 유지. 툴팁의 path 줄도 동일한 disambiguated 텍스트를 사용해, hover 시에도 두 row 가 구별됩니다.
+
+#### Low — 2차 리뷰 후속 수정 (root-level / legacy entry 충돌도 distinct-id 불변 보장)
+- **path 가 없는 충돌도 `Title (actionId)` 로 폴백**: 이전 버전은 step 1 에서 `actionPath.length > 1` 인 경우에만 라벨을 생성하고, root-level 액션(`actionPath = ['Build']`) 이나 legacy entry(필드 부재) 가 같은 title 로 충돌하면 둘 다 bare `Build` 로 남아 구별 불가했습니다. 이제 title collision 이 감지되면 usable path 가 없는 entry 도 `Build (root.build.a)` 형태로 actionId 를 붙여 폴백합니다. **불변**: distinct actionId 는 panel 에서 라벨을 절대 공유하지 않음. 회귀 가드: `IT-087e` (두 root-level `Build` → 라벨·툴팁 모두 `Build (<id>)`), `IT-087c` 갱신 (legacy entry 충돌 시 `Build (old)` 로 폴백). 단위 4종 추가: legacy fallback / root fallback / pure root collision / root 반복은 collision 아님.
+
+**테스트**: 신규 21 케이스 — `findActionPathById` 단위 5종, `computeDisambiguatedHistoryLabels` 단위 12종 (no-collision / 반복 / 충돌 / 부분 충돌 / legacy fallback / root fallback / 빈 입력 / path-collision suffix 3종 / pure root collision / root 반복은 collision 아님), 통합 IT-087·IT-087b·IT-087c·IT-087d·IT-087e.
+
 ## [0.4.25] - 2026-05-02
 
 ### 수정 — `envPick` 가 셸이 보지 못하는 변수까지 노출해서 후속 `printenv` 가 실패하던 문제
