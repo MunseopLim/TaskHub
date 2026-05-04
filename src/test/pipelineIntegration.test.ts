@@ -1355,7 +1355,7 @@ try {
     });
 
     suite('History Input Replay', () => {
-        // These tests pin TODO §5.3: capturing interactive task results into
+        // These tests pin history input replay: capturing interactive task results into
         // the history entry's `inputs` map and replaying them on rerun so
         // dialogs do not reopen. The accumulator is mutated in-place by the
         // pipeline; the lifecycle wrapper (`executeAction`) is what attaches
@@ -1514,7 +1514,7 @@ try {
         });
 
         test('IT-067: executeAction은 success/failure 모두 history entry에 durationMs를 기록한다', async () => {
-            // Pins TODO §5.4 scope: every terminal transition surfaced by
+            // Pins last-run badge data scope: every terminal transition surfaced by
             // `executeAction` must include a non-negative duration so each
             // HistoryItem can render "✓ 14:30 · 1.2s" badges in its
             // description slot. Actions panel intentionally does NOT
@@ -1679,7 +1679,7 @@ try {
     });
 
     suite('Task Transition Events', () => {
-        // Pins TODO §5.4 → 5.2 progression: each task in the pipeline
+        // Pins task transition emission: each task in the pipeline
         // surfaces a `running` transition before it starts and a matching
         // terminal transition (`success` / `failure` / `skipped`) after.
         // The Actions panel reads these to render `2/3 · taskId` progress
@@ -1879,7 +1879,7 @@ try {
     });
 
     suite('Problem Matcher / Diagnostics', () => {
-        // Pins TODO §3.1: shell task output is parsed by configured matcher
+        // Pins problem matcher diagnostics: shell task output is parsed by configured matcher
         // patterns, and the resulting diagnostics show up in the VS Code
         // Problems panel via `vscode.languages.getDiagnostics(uri)`.
 

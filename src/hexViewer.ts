@@ -117,6 +117,105 @@ export function assertWithinHexViewerSpan(totalSize: number): void {
     }
 }
 
+/**
+ * 가상 스크롤 컨테이너의 단일 element 높이 cap (Chromium ~33,554,400 px).
+ * 50MB 파일은 row*ROW_HEIGHT = ~65M px 가 필요해 cap 에 걸려 후반부 row 로 점프가 막힌다.
+ * 30M px 는 안전 마진을 두고 cap 미만으로 잡은 값.
+ */
+export const HEX_VIEWER_SAFE_MAX_HEIGHT = 30_000_000;
+
+/**
+ * 전체 가상 컨텐츠 높이 (rowCount * ROW_HEIGHT) 가 `safeMaxHeight` 를 넘으면 1 미만의 비율을
+ * 돌려준다. webview 는 이 비율로 spacer height 와 scrollTop ↔ row 매핑을 모두 축소해
+ * 브라우저 cap 안에 들어오게 한다. 작은 파일은 1 그대로.
+ */
+export function computeHexViewerScrollScale(totalContentHeight: number, safeMaxHeight: number): number {
+    if (!Number.isFinite(totalContentHeight) || totalContentHeight <= 0) {
+        return 1;
+    }
+    if (!Number.isFinite(safeMaxHeight) || safeMaxHeight <= 0) {
+        return 1;
+    }
+    if (totalContentHeight <= safeMaxHeight) {
+        return 1;
+    }
+    return safeMaxHeight / totalContentHeight;
+}
+
+/**
+ * 4-byte/8-byte unit 모드에서 hex-cell 의 `data-offset` 은 unit-aligned (0, 4, 8, …) 만
+ * 가지므로, 사용자가 unaligned offset (예: Goto 0x123) 으로 selection 한 경우 단순한
+ * `cellOffset === selectedOffset` 비교로는 셀이 매칭되지 않는다. 셀의 byte range
+ * `[cellOffset, cellOffset + unitSize - 1]` 와 selection range `[selMin, selMax]` 가
+ * 겹치는지 판정한다.
+ */
+export function hexCellOverlapsSelection(
+    cellOffset: number,
+    unitSize: number,
+    selMin: number,
+    selMax: number
+): boolean {
+    const cellEnd = cellOffset + unitSize - 1;
+    return cellEnd >= selMin && cellOffset <= selMax;
+}
+
+/**
+ * Hex Viewer "Go to" 입력 파싱 결과.
+ *
+ * - `ok`: 입력이 유효하고 표시 범위 안에 들어옴.
+ * - `invalid-format`: 10진수 / 16진수 (`0x...`, `...h`) 어느 쪽으로도 해석 못 함, 또는
+ *   `Number.MAX_SAFE_INTEGER` 를 넘어 정밀도 손실 가능. 비어있는 입력도 여기로 분류된다.
+ * - `out-of-range`: 형식은 맞지만 파일의 마지막 offset (= `totalSize - 1`) 을 벗어남.
+ *   `maxOffset` 은 마지막 byte offset, `maxAddress` 는 그 절대주소.
+ */
+export type HexViewerGoToParseResult =
+    | { kind: 'ok'; offset: number }
+    | { kind: 'invalid-format' }
+    | { kind: 'out-of-range'; maxOffset: number; maxAddress: number };
+
+/**
+ * Parse a Hex Viewer "Go to" input.
+ *
+ * - `0x...` / `...h` are treated as absolute hexadecimal addresses.
+ * - bare digits are decimal. They are first accepted as an absolute address
+ *   when that falls inside the rendered range, otherwise as a file offset.
+ */
+export function parseHexViewerGoToOffset(input: string, baseAddress: number, totalSize: number): HexViewerGoToParseResult {
+    const value = input.trim().replace(/_/g, '');
+    if (!Number.isFinite(baseAddress) || !Number.isFinite(totalSize) || totalSize <= 0) {
+        return { kind: 'invalid-format' };
+    }
+    if (!value) {
+        return { kind: 'invalid-format' };
+    }
+
+    let parsed: number;
+    let allowOffsetFallback = false;
+    if (/^0x[0-9a-f]+$/i.test(value)) {
+        parsed = Number.parseInt(value.slice(2), 16);
+    } else if (/^[0-9a-f]+h$/i.test(value)) {
+        parsed = Number.parseInt(value.slice(0, -1), 16);
+    } else if (/^[0-9]+$/.test(value)) {
+        parsed = Number.parseInt(value, 10);
+        allowOffsetFallback = true;
+    } else {
+        return { kind: 'invalid-format' };
+    }
+
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+        return { kind: 'invalid-format' };
+    }
+
+    const absoluteOffset = parsed - baseAddress;
+    if (absoluteOffset >= 0 && absoluteOffset < totalSize) {
+        return { kind: 'ok', offset: absoluteOffset };
+    }
+    if (allowOffsetFallback && parsed < totalSize) {
+        return { kind: 'ok', offset: parsed };
+    }
+    return { kind: 'out-of-range', maxOffset: totalSize - 1, maxAddress: baseAddress + totalSize - 1 };
+}
+
 export function buildHexViewerHtml(fileName: string, result: HexParseResult, webview?: vscode.Webview): string {
     const totalSize = result.maxAddress - result.minAddress + 1;
     assertWithinHexViewerSpan(totalSize);
@@ -161,6 +260,27 @@ function setupWebviewMessageHandler(webview: vscode.Webview) {
         if (message.command === 'copySelection') {
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('클립보드에 복사되었습니다.', 'Copied to clipboard.'));
+            return;
+        }
+        if (message.command === 'gotoError') {
+            const rawInput = typeof message.input === 'string' ? message.input : '';
+            // notification 에 표시할 입력값은 길이를 제한해 UI 가 무너지지 않도록 한다.
+            const inputPreview = rawInput.length > 64 ? rawInput.slice(0, 64) + '…' : rawInput;
+            if (message.reason === 'invalid-format') {
+                vscode.window.showErrorMessage(t(
+                    `Go to: 입력 형식이 올바르지 않습니다. 10진수(예: 1024) 또는 16진수(예: 0x400, 400h) 만 허용됩니다. (입력값: "${inputPreview}")`,
+                    `Go to: invalid input format. Use decimal (e.g. 1024) or hex (e.g. 0x400, 400h). (got: "${inputPreview}")`
+                ));
+            } else if (message.reason === 'out-of-range') {
+                const maxOffset = typeof message.maxOffset === 'number' ? message.maxOffset : 0;
+                const maxAddress = typeof message.maxAddress === 'number' ? message.maxAddress : maxOffset;
+                const maxOffsetHex = '0x' + maxOffset.toString(16).toUpperCase();
+                const maxAddressHex = '0x' + maxAddress.toString(16).toUpperCase();
+                vscode.window.showErrorMessage(t(
+                    `Go to: 입력값이 파일 범위를 벗어납니다. 마지막 offset: ${maxOffset} (${maxOffsetHex}), 마지막 주소: ${maxAddressHex}. (입력값: "${inputPreview}")`,
+                    `Go to: input is past the end of file. Last offset: ${maxOffset} (${maxOffsetHex}), last address: ${maxAddressHex}. (got: "${inputPreview}")`
+                ));
+            }
         }
     });
 }
@@ -375,7 +495,7 @@ function getWebviewContent(
         </select>
         <div class="sep"></div>
         <label>Go to:</label>
-        <input type="text" id="gotoInput" class="goto-input" placeholder="0x08000000">
+        <input type="text" id="gotoInput" class="goto-input" placeholder="0x08000000 / 1024" title="0x... or ...h: hex address. Bare digits: decimal (absolute address inside range, otherwise file offset).">
         <button id="gotoBtn">Go</button>
         <div class="sep"></div>
         <button id="findBtn">Find (Ctrl+F)</button>
@@ -438,6 +558,9 @@ function getWebviewContent(
     const BYTES_PER_ROW = 16;
     const ROW_HEIGHT = 20; // px, approximate height of one row
     const BUFFER_ROWS = 20; // extra rows to render above/below viewport
+    // 브라우저 single-element max height (~33M px) 를 안전하게 피하기 위한 cap.
+    // 큰 파일에서는 spacer height 와 scrollTop↔row 매핑을 이 비율로 축소한다.
+    const SAFE_MAX_HEIGHT = ${HEX_VIEWER_SAFE_MAX_HEIGHT};
 
     const hexContainer = document.getElementById('hexContainer');
     const hexHead = document.getElementById('hexHead');
@@ -451,6 +574,18 @@ function getWebviewContent(
     const findInfo = document.getElementById('findInfo');
 
     const totalRowCount = Math.ceil(TOTAL_SIZE / BYTES_PER_ROW);
+
+    // 가상 스크롤 좌표계 — 큰 파일에서는 scaled space, 작은 파일에서는 1:1 (real space).
+    const totalContentHeight = totalRowCount * ROW_HEIGHT;
+    const scrollScale = totalContentHeight > SAFE_MAX_HEIGHT && SAFE_MAX_HEIGHT > 0
+        ? SAFE_MAX_HEIGHT / totalContentHeight
+        : 1;
+    const scaledRowHeight = ROW_HEIGHT * scrollScale;
+    function rowToScrollTop(rowIndex) { return rowIndex * scaledRowHeight; }
+    function scrollTopToRow(scrollTop) {
+        if (scaledRowHeight <= 0) { return 0; }
+        return Math.floor(scrollTop / scaledRowHeight);
+    }
 
     // Virtual scrolling state
     let visibleStartRow = 0;
@@ -580,9 +715,14 @@ function getWebviewContent(
     function calcVisibleRange() {
         const scrollTop = hexContainer.scrollTop;
         const clientHeight = hexContainer.clientHeight;
-
-        const startRow = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_ROWS);
-        const endRow = Math.min(totalRowCount, Math.ceil((scrollTop + clientHeight) / ROW_HEIGHT) + BUFFER_ROWS);
+        // scaled space → real row 변환. visible row 갯수는 viewport 의 실제 픽셀
+        // (clientHeight) 에 맞춰 ROW_HEIGHT 단위로 잡는다 — scaled 일 때 viewport 가
+        // scaled space 에서 cover 하는 row 갯수가 늘어나도, DOM 에 그릴 rows 는
+        // 실제 화면에 들어오는 만큼만으로 충분.
+        const topRow = scrollTopToRow(scrollTop);
+        const visibleRowsInViewport = Math.ceil(clientHeight / ROW_HEIGHT);
+        const startRow = Math.max(0, topRow - BUFFER_ROWS);
+        const endRow = Math.min(totalRowCount, topRow + visibleRowsInViewport + BUFFER_ROWS);
         return { startRow, endRow };
     }
 
@@ -596,11 +736,11 @@ function getWebviewContent(
 
         const frag = document.createDocumentFragment();
 
-        // Top spacer row
+        // Top spacer row — scaled space (scrollScale=1 인 작은 파일에서는 real space 와 동일).
         if (startRow > 0) {
             const topSpacer = document.createElement('tr');
             const topTd = document.createElement('td');
-            topTd.style.height = (startRow * ROW_HEIGHT) + 'px';
+            topTd.style.height = (startRow * scaledRowHeight) + 'px';
             topTd.style.padding = '0';
             topTd.style.border = 'none';
             topSpacer.appendChild(topTd);
@@ -612,12 +752,12 @@ function getWebviewContent(
             frag.appendChild(buildRow(row));
         }
 
-        // Bottom spacer row
+        // Bottom spacer row — scaled space.
         const bottomRows = totalRowCount - endRow;
         if (bottomRows > 0) {
             const bottomSpacer = document.createElement('tr');
             const bottomTd = document.createElement('td');
-            bottomTd.style.height = (bottomRows * ROW_HEIGHT) + 'px';
+            bottomTd.style.height = (bottomRows * scaledRowHeight) + 'px';
             bottomTd.style.padding = '0';
             bottomTd.style.border = 'none';
             bottomSpacer.appendChild(bottomTd);
@@ -656,9 +796,13 @@ function getWebviewContent(
         const minOff = Math.min(selectedOffset, endOff);
         const maxOff = Math.max(selectedOffset, endOff);
 
+        // unit > 1 일 때 셀의 data-offset 은 unit-aligned 이고 셀 하나가 unitSize bytes 를
+        // 표현하므로, [cellOffset, cellOffset+unitSize-1] vs [minOff, maxOff] overlap 판정.
+        // hexCellOverlapsSelection (TS export) 와 동일 로직 — 단위 테스트로 보증됨.
         hexBody.querySelectorAll('.hex-cell[data-offset]').forEach(el => {
             const off = parseInt(el.dataset.offset, 10);
-            if (off >= minOff && off <= maxOff) {
+            const cellEnd = off + unitSize - 1;
+            if (cellEnd >= minOff && off <= maxOff) {
                 el.classList.add('selected');
             }
         });
@@ -731,31 +875,68 @@ function getWebviewContent(
 
     // Go to address
     function scrollToRow(rowIndex) {
-        const targetTop = rowIndex * ROW_HEIGHT;
+        // scaled space 의 좌표로 환산해 scrollTop 을 잡는다 (작은 파일은 scale=1 이라 그대로).
+        const targetTop = rowToScrollTop(rowIndex);
         const containerHeight = hexContainer.clientHeight;
         hexContainer.scrollTop = Math.max(0, targetTop - containerHeight / 2);
+        renderVisibleRows();
     }
 
-    function goToAddress() {
-        const val = gotoInput.value.trim();
-        let addr = parseInt(val, 16);
-        if (val.startsWith('0x') || val.startsWith('0X')) {
-            addr = parseInt(val.substring(2), 16);
-        }
-        if (isNaN(addr)) { return; }
-        const offset = addr - BASE_ADDR;
-        if (offset < 0 || offset >= TOTAL_SIZE) { return; }
+    function jumpToOffset(offset) {
+        if (typeof offset !== 'number' || offset < 0 || offset >= TOTAL_SIZE) { return; }
         const rowIndex = Math.floor(offset / BYTES_PER_ROW);
-        scrollToRow(rowIndex);
         selectedOffset = offset;
         selectedEndOffset = offset;
-        // renderVisibleRows will be triggered by scroll event
-        setTimeout(() => updateSelection(), 50);
+        // scrollToRow 가 scrollTop 을 중앙으로 맞추고 renderVisibleRows() 까지 호출한다.
+        scrollToRow(rowIndex);
+        // 다음 frame: scrollIntoView 로 미세 보정(block: 'nearest' 라 이미 중앙인 row 는 안 움직임) →
+        // 그 결과 scroll 위치 변화를 반영해 마지막에 render/select/highlight 를 한 번 더 실행.
+        requestAnimationFrame(() => {
+            // unit-aligned 좌표만 cell 의 data-offset 으로 존재 — Goto 0x123 + 4-byte unit 처럼
+            // unaligned 입력일 때 그 byte 를 포함하는 셀(0x120) 을 찾도록 정렬해서 조회한다.
+            const alignedOffset = Math.floor(offset / unitSize) * unitSize;
+            const cell = hexBody.querySelector('.hex-cell[data-offset="' + alignedOffset + '"]');
+            if (cell && typeof cell.scrollIntoView === 'function') {
+                cell.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            }
+            renderVisibleRows();
+            updateSelection();
+            applyFindHighlightsToVisible();
+        });
+    }
+
+    // src/hexViewer.ts 의 parseHexViewerGoToOffset 를 그대로 주입해 단일 출처를 유지한다.
+    // (TS 함수가 외부 식별자에 의존하지 않는 self-contained pure 함수라는 전제를 깨면 webview 가 깨진다.)
+    const parseGoToOffset = (${parseHexViewerGoToOffset.toString()});
+
+    function goToAddress() {
+        const rawInput = gotoInput.value;
+        // 빈 입력은 사용자가 의도하지 않은 키누름일 수 있어 silent 무시 — 오류는 띄우지 않는다.
+        if (!rawInput.trim()) { return; }
+        const result = parseGoToOffset(rawInput, BASE_ADDR, TOTAL_SIZE);
+        if (result.kind === 'ok') {
+            jumpToOffset(result.offset);
+            return;
+        }
+        if (result.kind === 'invalid-format') {
+            vscode.postMessage({ command: 'gotoError', reason: 'invalid-format', input: rawInput });
+        } else if (result.kind === 'out-of-range') {
+            vscode.postMessage({
+                command: 'gotoError',
+                reason: 'out-of-range',
+                input: rawInput,
+                maxOffset: result.maxOffset,
+                maxAddress: result.maxAddress
+            });
+        }
     }
 
     document.getElementById('gotoBtn').addEventListener('click', goToAddress);
     gotoInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { goToAddress(); }
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            goToAddress();
+        }
     });
 
     // Find
@@ -838,15 +1019,8 @@ function getWebviewContent(
     function goToFindMatch() {
         if (findCurrentIdx < 0 || findCurrentIdx >= findMatches.length) { return; }
         const offset = findMatches[findCurrentIdx];
-        const rowIndex = Math.floor(offset / BYTES_PER_ROW);
-        scrollToRow(rowIndex);
-        selectedOffset = offset;
-        selectedEndOffset = offset;
         findInfo.textContent = (findCurrentIdx + 1) + ' / ' + findMatches.length;
-        setTimeout(() => {
-            updateSelection();
-            applyFindHighlightsToVisible();
-        }, 50);
+        jumpToOffset(offset);
     }
 
     function applyFindHighlightsToVisible() {

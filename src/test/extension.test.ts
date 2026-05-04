@@ -975,7 +975,7 @@ suite('Extension Test Suite', () => {
 	});
 
 	suite('findActionPathById', () => {
-		// Pins TODO §5.4 disambiguation: HistoryEntry.actionPath is built from
+		// Pins history label disambiguation: HistoryEntry.actionPath is built from
 		// this helper at execute-time so HistoryItem labels can swap in the
 		// folder breadcrumb when same-title actions collide. Path includes
 		// the action's own title at the end.
@@ -1031,7 +1031,7 @@ suite('Extension Test Suite', () => {
 	});
 
 	suite('computeDisambiguatedHistoryLabels', () => {
-		// Pins TODO §5.4 disambiguation: label swap only fires when two
+		// Pins history label disambiguation: label swap only fires when two
 		// distinct actionIds share the same actionTitle. Same actionId
 		// repeated (re-runs) is NOT a collision — that's the common case
 		// and must stay terse.

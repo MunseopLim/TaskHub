@@ -8,7 +8,16 @@ import {
     toFlatArray,
     hasData,
 } from '../hexParser';
-import { parseFile, buildHexViewerHtml, assertWithinHexViewerSpan, HEX_VIEWER_MAX_SPAN } from '../hexViewer';
+import {
+    parseFile,
+    buildHexViewerHtml,
+    assertWithinHexViewerSpan,
+    HEX_VIEWER_MAX_SPAN,
+    parseHexViewerGoToOffset,
+    computeHexViewerScrollScale,
+    HEX_VIEWER_SAFE_MAX_HEIGHT,
+    hexCellOverlapsSelection,
+} from '../hexViewer';
 
 suite('HexParser Test Suite', () => {
 
@@ -357,6 +366,372 @@ suite('HexParser Test Suite', () => {
             assert.ok(html.includes('Content-Security-Policy'), 'missing CSP meta');
             // Base64 nonce from 16 random bytes: 22 chars of [A-Za-z0-9+/] plus 2 '=' pad.
             assert.ok(/<script nonce="[A-Za-z0-9+/]{22}=="/.test(html), 'missing script nonce');
+        });
+    });
+
+    suite('parseHexViewerGoToOffset', () => {
+        test('treats bare digits as decimal offsets for binary files', () => {
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('26214400', 0, 50 * 1024 * 1024),
+                { kind: 'ok', offset: 26214400 }
+            );
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('26222592', 0, 50 * 1024 * 1024),
+                { kind: 'ok', offset: 26222592 }
+            );
+        });
+
+        test('treats 0x-prefixed values as hexadecimal absolute addresses', () => {
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('0x08000010', 0x08000000, 1024),
+                { kind: 'ok', offset: 0x10 }
+            );
+        });
+
+        test('accepts decimal absolute addresses when they fall inside the rendered range', () => {
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset(String(0x08000010), 0x08000000, 1024),
+                { kind: 'ok', offset: 0x10 }
+            );
+        });
+
+        test('falls back to decimal offset when a bare decimal is not an in-range absolute address', () => {
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('16', 0x08000000, 1024),
+                { kind: 'ok', offset: 16 }
+            );
+        });
+
+        test('treats h-suffix values as hexadecimal absolute addresses', () => {
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('100h', 0, 1024),
+                { kind: 'ok', offset: 0x100 }
+            );
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('8000010h', 0x08000000, 1024),
+                { kind: 'ok', offset: 0x10 }
+            );
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('FFh', 0, 1024),
+                { kind: 'ok', offset: 0xFF }
+            );
+        });
+
+        test('strips underscore digit separators before parsing', () => {
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('26_214_400', 0, 50 * 1024 * 1024),
+                { kind: 'ok', offset: 26214400 }
+            );
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('0x0800_0010', 0x08000000, 1024),
+                { kind: 'ok', offset: 0x10 }
+            );
+        });
+
+        test('reports invalid-format for malformed inputs', () => {
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('not-an-offset', 0, 1024),
+                { kind: 'invalid-format' }
+            );
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('0xZZ', 0, 1024),
+                { kind: 'invalid-format' }
+            );
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('-1', 0, 1024),
+                { kind: 'invalid-format' }
+            );
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('12.5', 0, 1024),
+                { kind: 'invalid-format' }
+            );
+        });
+
+        test('reports invalid-format for empty or whitespace-only input', () => {
+            assert.deepStrictEqual(parseHexViewerGoToOffset('', 0, 1024), { kind: 'invalid-format' });
+            assert.deepStrictEqual(parseHexViewerGoToOffset('   ', 0, 1024), { kind: 'invalid-format' });
+            assert.deepStrictEqual(parseHexViewerGoToOffset('\t\n', 0, 1024), { kind: 'invalid-format' });
+        });
+
+        test('reports invalid-format for values past Number.MAX_SAFE_INTEGER', () => {
+            // 0x20000000000000 == 2^53, just past Number.MAX_SAFE_INTEGER (2^53 - 1).
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('0x20000000000000', 0, 1024),
+                { kind: 'invalid-format' }
+            );
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('9007199254740993', 0, 1024),
+                { kind: 'invalid-format' }
+            );
+        });
+
+        test('reports invalid-format when totalSize is non-positive or non-finite', () => {
+            assert.deepStrictEqual(parseHexViewerGoToOffset('0', 0, 0), { kind: 'invalid-format' });
+            assert.deepStrictEqual(parseHexViewerGoToOffset('0', 0, -1), { kind: 'invalid-format' });
+            assert.deepStrictEqual(parseHexViewerGoToOffset('0', 0, Number.NaN), { kind: 'invalid-format' });
+        });
+
+        test('reports out-of-range with last offset & last absolute address (binary, base=0)', () => {
+            const totalSize = 50 * 1024 * 1024;
+            // 마지막 byte offset 직후 (totalSize 그대로) → out-of-range.
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('52428800', 0, totalSize),
+                { kind: 'out-of-range', maxOffset: totalSize - 1, maxAddress: totalSize - 1 }
+            );
+            // 한참 큰 값.
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('999999999', 0, totalSize),
+                { kind: 'out-of-range', maxOffset: totalSize - 1, maxAddress: totalSize - 1 }
+            );
+            // hex 표기도 동일하게.
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('0x10000000', 0, totalSize),
+                { kind: 'out-of-range', maxOffset: totalSize - 1, maxAddress: totalSize - 1 }
+            );
+        });
+
+        test('reports out-of-range with absolute base address for hex files', () => {
+            // 0x08000000 ~ 0x080003FF (totalSize 1024).
+            const base = 0x08000000;
+            const totalSize = 1024;
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('0x08000400', base, totalSize),
+                { kind: 'out-of-range', maxOffset: totalSize - 1, maxAddress: base + totalSize - 1 }
+            );
+            // bare decimal 이 absolute 도 offset 도 모두 범위 밖.
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset('5000', base, totalSize),
+                { kind: 'out-of-range', maxOffset: totalSize - 1, maxAddress: base + totalSize - 1 }
+            );
+        });
+
+        test('boundary: last byte is ok, just-past-last is out-of-range', () => {
+            const totalSize = 1024;
+            // offset = totalSize - 1: 마지막 byte. ok.
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset(String(totalSize - 1), 0, totalSize),
+                { kind: 'ok', offset: totalSize - 1 }
+            );
+            // offset = totalSize: 첫 out-of-range.
+            assert.deepStrictEqual(
+                parseHexViewerGoToOffset(String(totalSize), 0, totalSize),
+                { kind: 'out-of-range', maxOffset: totalSize - 1, maxAddress: totalSize - 1 }
+            );
+        });
+
+        test('webview HTML 에 주입된 파서 본문이 동일하게 동작한다 (단일 출처 보증)', () => {
+            // buildHexViewerHtml 은 parseHexViewerGoToOffset.toString() 을 webview 스크립트에
+            // 인라인 주입한다. 본 테스트는 minify 후에도 함수가 self-contained 하게 살아남는지
+            // 단위 테스트 단계에서 검증한다 (TS unit-test 빌드는 minify 가 꺼져 있지만, 추출된
+            // 함수 본문을 직접 eval 해 호출 가능 여부 자체를 보증).
+            const result = parseIntelHex([
+                ':020000040800F2',
+                ':0400000000200008D4',
+                ':00000001FF'
+            ].join('\n'));
+            const html = buildHexViewerHtml('fw.hex', result);
+            const match = html.match(/parseGoToOffset\s*=\s*\((function[\s\S]+?\})\)/);
+            assert.ok(match, 'webview HTML 에 parseGoToOffset 주입이 보이지 않음');
+            type ParserFn = (
+                input: string,
+                baseAddress: number,
+                totalSize: number
+            ) => { kind: 'ok'; offset: number }
+                | { kind: 'invalid-format' }
+                | { kind: 'out-of-range'; maxOffset: number; maxAddress: number };
+            const injected = eval('(' + match[1] + ')') as ParserFn;
+            assert.deepStrictEqual(injected('26214400', 0, 50 * 1024 * 1024), { kind: 'ok', offset: 26214400 });
+            assert.deepStrictEqual(injected('0x08000010', 0x08000000, 1024), { kind: 'ok', offset: 0x10 });
+            assert.deepStrictEqual(injected('100h', 0, 1024), { kind: 'ok', offset: 0x100 });
+            assert.deepStrictEqual(injected('not-an-offset', 0, 1024), { kind: 'invalid-format' });
+            assert.deepStrictEqual(
+                injected('99999999', 0, 1024),
+                { kind: 'out-of-range', maxOffset: 1023, maxAddress: 1023 }
+            );
+        });
+    });
+
+    suite('computeHexViewerScrollScale', () => {
+        const ROW_HEIGHT = 20;
+        const BYTES_PER_ROW = 16;
+
+        test('returns 1 when content fits inside the safe max', () => {
+            // 1MB binary: 65,536 rows * 20 = 1.31M px → 한도 한참 밑이라 scale=1.
+            const totalContentHeight = Math.ceil((1 * 1024 * 1024) / BYTES_PER_ROW) * ROW_HEIGHT;
+            assert.strictEqual(computeHexViewerScrollScale(totalContentHeight, HEX_VIEWER_SAFE_MAX_HEIGHT), 1);
+        });
+
+        test('returns < 1 when content exceeds the safe max (50MB binary)', () => {
+            // 50MB: 3,276,800 rows * 20 = 65,536,000 px → cap (33M) 초과 → 축소 필요.
+            const totalRowCount = Math.ceil((50 * 1024 * 1024) / BYTES_PER_ROW);
+            const totalContentHeight = totalRowCount * ROW_HEIGHT;
+            const scale = computeHexViewerScrollScale(totalContentHeight, HEX_VIEWER_SAFE_MAX_HEIGHT);
+            assert.ok(scale < 1, 'scale 은 1 미만이어야 함');
+            assert.ok(scale > 0, 'scale 은 양수여야 함');
+            // scaledTotalHeight 가 SAFE_MAX 와 (부동소수점 오차 범위 내에서) 일치해야 한다.
+            const scaledTotal = totalContentHeight * scale;
+            assert.ok(
+                Math.abs(scaledTotal - HEX_VIEWER_SAFE_MAX_HEIGHT) < 1,
+                `scaledTotal ${scaledTotal} 가 SAFE_MAX ${HEX_VIEWER_SAFE_MAX_HEIGHT} 와 거의 일치해야 함`
+            );
+        });
+
+        test('축소 후 scrollHeight 가 브라우저 single-element cap 미만 (50MB 기준)', () => {
+            // Chromium ~33,554,400 px. 안전 마진 보고 33M 미만이면 OK.
+            const totalRowCount = Math.ceil((50 * 1024 * 1024) / BYTES_PER_ROW);
+            const totalContentHeight = totalRowCount * ROW_HEIGHT;
+            const scale = computeHexViewerScrollScale(totalContentHeight, HEX_VIEWER_SAFE_MAX_HEIGHT);
+            assert.ok(totalContentHeight * scale < 33_000_000, 'scaled height 가 cap 미만이어야 함');
+        });
+
+        test('축소 후 scrollHeight 가 cap 미만 (HEX_VIEWER_MAX_SPAN = 128MB 한계)', () => {
+            // Hex Viewer 가 허용하는 최대 span 까지 cap 안에 들어와야 한다.
+            const totalRowCount = Math.ceil(HEX_VIEWER_MAX_SPAN / BYTES_PER_ROW);
+            const totalContentHeight = totalRowCount * ROW_HEIGHT;
+            const scale = computeHexViewerScrollScale(totalContentHeight, HEX_VIEWER_SAFE_MAX_HEIGHT);
+            assert.ok(totalContentHeight * scale <= HEX_VIEWER_SAFE_MAX_HEIGHT);
+            assert.ok(totalContentHeight * scale < 33_000_000);
+        });
+
+        test('50MB 파일의 중앙 row(검색 marker 위치)가 cap 안에서 도달 가능', () => {
+            // marker 가 offset 26,214,400 (= 50MB/2) 에 있다. 이 row 의 scaled scrollTop 은
+            // SAFE_MAX_HEIGHT 의 거의 정확히 중간에 위치해야 한다.
+            const totalRowCount = Math.ceil((50 * 1024 * 1024) / BYTES_PER_ROW);
+            const totalContentHeight = totalRowCount * ROW_HEIGHT;
+            const scale = computeHexViewerScrollScale(totalContentHeight, HEX_VIEWER_SAFE_MAX_HEIGHT);
+            const scaledRowHeight = ROW_HEIGHT * scale;
+            const markerOffset = 26214400;
+            const markerRow = Math.floor(markerOffset / BYTES_PER_ROW);
+            const markerScrollTop = markerRow * scaledRowHeight;
+            assert.ok(
+                markerScrollTop > 0 && markerScrollTop < HEX_VIEWER_SAFE_MAX_HEIGHT,
+                `markerScrollTop=${markerScrollTop} 는 0 < x < ${HEX_VIEWER_SAFE_MAX_HEIGHT} 사이여야 함`
+            );
+            // 추가: 정확히 중앙 부근 (±5%) 에 있는지.
+            const expected = HEX_VIEWER_SAFE_MAX_HEIGHT / 2;
+            const tolerance = HEX_VIEWER_SAFE_MAX_HEIGHT * 0.05;
+            assert.ok(
+                Math.abs(markerScrollTop - expected) < tolerance,
+                `markerScrollTop ${markerScrollTop} 이 중앙 ${expected} 부근에 있어야 함 (±${tolerance})`
+            );
+        });
+
+        test('마지막 row 도 cap 미만의 scrollTop 으로 도달 가능 (50MB)', () => {
+            const totalRowCount = Math.ceil((50 * 1024 * 1024) / BYTES_PER_ROW);
+            const totalContentHeight = totalRowCount * ROW_HEIGHT;
+            const scale = computeHexViewerScrollScale(totalContentHeight, HEX_VIEWER_SAFE_MAX_HEIGHT);
+            const scaledRowHeight = ROW_HEIGHT * scale;
+            const lastRow = totalRowCount - 1;
+            const lastScrollTop = lastRow * scaledRowHeight;
+            assert.ok(
+                lastScrollTop < HEX_VIEWER_SAFE_MAX_HEIGHT,
+                `lastScrollTop ${lastScrollTop} 가 SAFE_MAX ${HEX_VIEWER_SAFE_MAX_HEIGHT} 미만이어야 함`
+            );
+        });
+
+        test('round-trip: rowToScrollTop → scrollTopToRow 가 ±1 row 안에서 복원된다', () => {
+            // 부동소수점 오차로 ±1 row 의 차이는 허용. visible 영역에 BUFFER_ROWS=20 마진이
+            // 있으므로 ±1 정도는 사용자 경험에 영향이 없다.
+            const totalRowCount = Math.ceil((50 * 1024 * 1024) / BYTES_PER_ROW);
+            const totalContentHeight = totalRowCount * ROW_HEIGHT;
+            const scale = computeHexViewerScrollScale(totalContentHeight, HEX_VIEWER_SAFE_MAX_HEIGHT);
+            const scaledRowHeight = ROW_HEIGHT * scale;
+            const samples = [0, 1, 100, 65535, 1638400, totalRowCount - 1];
+            for (const row of samples) {
+                const scrollTop = row * scaledRowHeight;
+                const recovered = Math.floor(scrollTop / scaledRowHeight);
+                assert.ok(
+                    Math.abs(recovered - row) <= 1,
+                    `row ${row} round-trip 오차가 너무 큼 (recovered=${recovered})`
+                );
+            }
+        });
+
+        test('비정상 입력은 1 을 반환 (defensive)', () => {
+            assert.strictEqual(computeHexViewerScrollScale(0, HEX_VIEWER_SAFE_MAX_HEIGHT), 1);
+            assert.strictEqual(computeHexViewerScrollScale(-1, HEX_VIEWER_SAFE_MAX_HEIGHT), 1);
+            assert.strictEqual(computeHexViewerScrollScale(Number.NaN, HEX_VIEWER_SAFE_MAX_HEIGHT), 1);
+            assert.strictEqual(computeHexViewerScrollScale(1000, 0), 1);
+            assert.strictEqual(computeHexViewerScrollScale(1000, -1), 1);
+            assert.strictEqual(computeHexViewerScrollScale(1000, Number.NaN), 1);
+        });
+    });
+
+    suite('hexCellOverlapsSelection', () => {
+        test('unit=1: 단일 byte selection 은 정확히 그 byte 셀만 매칭', () => {
+            // unit=1 이면 셀 = byte 한 개. 기존 동작과 동일해야 한다 (회귀 방지).
+            assert.strictEqual(hexCellOverlapsSelection(0x123, 1, 0x123, 0x123), true);
+            assert.strictEqual(hexCellOverlapsSelection(0x122, 1, 0x123, 0x123), false);
+            assert.strictEqual(hexCellOverlapsSelection(0x124, 1, 0x123, 0x123), false);
+        });
+
+        test('unit=4 + Goto 0x123 (unaligned): 0x120 셀이 매칭, 0x124 셀은 안 됨', () => {
+            // 핵심 회귀 케이스 — 4-byte 모드에서 Goto 0x123 이 시각적으로 안 보였던 버그.
+            // 0x120 셀의 byte range 는 [0x120, 0x123] → 0x123 포함.
+            assert.strictEqual(hexCellOverlapsSelection(0x120, 4, 0x123, 0x123), true);
+            // 0x124 셀의 byte range 는 [0x124, 0x127] → 0x123 미포함.
+            assert.strictEqual(hexCellOverlapsSelection(0x124, 4, 0x123, 0x123), false);
+            assert.strictEqual(hexCellOverlapsSelection(0x11C, 4, 0x123, 0x123), false);
+        });
+
+        test('unit=4: aligned offset Goto/click 은 그 셀만 매칭 (인접 셀 영향 없음)', () => {
+            // 0x120 selection 은 0x120 셀만 매칭, 0x11C/0x124 는 미매칭.
+            assert.strictEqual(hexCellOverlapsSelection(0x120, 4, 0x120, 0x120), true);
+            assert.strictEqual(hexCellOverlapsSelection(0x11C, 4, 0x120, 0x120), false);
+            assert.strictEqual(hexCellOverlapsSelection(0x124, 4, 0x120, 0x120), false);
+        });
+
+        test('unit=4 + 다중 byte selection: 셀의 byte range 와 겹치는 모든 셀 매칭', () => {
+            // selection [0x122, 0x125] 은 셀 0x120 (range 0x120-0x123) 과 셀 0x124 (range 0x124-0x127) 모두와 겹침.
+            assert.strictEqual(hexCellOverlapsSelection(0x120, 4, 0x122, 0x125), true);
+            assert.strictEqual(hexCellOverlapsSelection(0x124, 4, 0x122, 0x125), true);
+            assert.strictEqual(hexCellOverlapsSelection(0x128, 4, 0x122, 0x125), false);
+            assert.strictEqual(hexCellOverlapsSelection(0x11C, 4, 0x122, 0x125), false);
+        });
+
+        test('unit=8 + Goto unaligned: 8-byte 셀의 byte range 와 겹침 판정', () => {
+            // 0x120 셀 (8-byte): range [0x120, 0x127]. 0x125 입력 → 매칭.
+            assert.strictEqual(hexCellOverlapsSelection(0x120, 8, 0x125, 0x125), true);
+            assert.strictEqual(hexCellOverlapsSelection(0x128, 8, 0x125, 0x125), false);
+            assert.strictEqual(hexCellOverlapsSelection(0x118, 8, 0x125, 0x125), false);
+        });
+
+        test('unit=2 경계: 셀 끝 byte 와 셀 시작 byte 도 정확히 판정', () => {
+            // 셀 0x10 (range [0x10, 0x11]): 0x10 매칭, 0x11 매칭, 0x12 미매칭, 0x0F 미매칭.
+            assert.strictEqual(hexCellOverlapsSelection(0x10, 2, 0x10, 0x10), true);
+            assert.strictEqual(hexCellOverlapsSelection(0x10, 2, 0x11, 0x11), true);
+            assert.strictEqual(hexCellOverlapsSelection(0x10, 2, 0x12, 0x12), false);
+            assert.strictEqual(hexCellOverlapsSelection(0x10, 2, 0x0F, 0x0F), false);
+        });
+
+        test('shift-click 범위 selection 은 unit > 1 에서도 click 흐름과 호환', () => {
+            // click 흐름: selectedOffset/EndOffset 는 항상 unit-aligned. 0x100 ~ 0x130 범위.
+            // 0x110 / 0x12C 셀 모두 매칭, 0x100 / 0x130 셀도 매칭, 0xFC / 0x134 는 미매칭.
+            assert.strictEqual(hexCellOverlapsSelection(0x100, 4, 0x100, 0x130), true);
+            assert.strictEqual(hexCellOverlapsSelection(0x110, 4, 0x100, 0x130), true);
+            assert.strictEqual(hexCellOverlapsSelection(0x12C, 4, 0x100, 0x130), true);
+            assert.strictEqual(hexCellOverlapsSelection(0x130, 4, 0x100, 0x130), true);
+            assert.strictEqual(hexCellOverlapsSelection(0xFC, 4, 0x100, 0x130), false);
+            assert.strictEqual(hexCellOverlapsSelection(0x134, 4, 0x100, 0x130), false);
+        });
+
+        test('webview HTML 의 selection 비교가 helper 와 동일한 분기를 사용한다 (회귀 방지)', () => {
+            // applySelectionToVisible 안에 inline 으로 같은 overlap 비교가 들어 있는지 정적 검사.
+            // 두 곳 동기화가 깨지면 4-byte unit + Goto unaligned 회귀가 다시 발생할 수 있음.
+            const result = parseIntelHex([
+                ':020000040800F2',
+                ':0400000000200008D4',
+                ':00000001FF'
+            ].join('\n'));
+            const html = buildHexViewerHtml('fw.hex', result);
+            assert.ok(
+                html.includes('cellEnd >= minOff && off <= maxOff'),
+                'webview 의 applySelectionToVisible 이 overlap 비교를 사용해야 함'
+            );
+            assert.ok(
+                /Math\.floor\(offset\s*\/\s*unitSize\)\s*\*\s*unitSize/.test(html),
+                'jumpToOffset 의 cell querySelector 가 unit-aligned 로 보정되어야 함'
+            );
         });
     });
 

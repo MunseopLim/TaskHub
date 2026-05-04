@@ -198,7 +198,7 @@ suite('View provider integration', function () {
     });
 
     test('IT-068: HistoryItem.description에 status + 시각 + 소요 시간 배지가 노출됨', async () => {
-        // Pins TODO §5.4 (History panel placement): each rendered
+        // Pins last-run badge placement: each rendered
         // HistoryItem carries a "last run" badge in its description slot.
         // Actions panel intentionally has no equivalent badge — the
         // user-facing "did it run today?" question is answered on the
@@ -235,7 +235,7 @@ suite('View provider integration', function () {
     });
 
     test('IT-087: 같은 title 액션이 두 폴더에 있을 때 HistoryItem 라벨이 풀 경로로 disambiguate', async () => {
-        // Pins TODO §5.4 잔여작업: when `Firmware/Build` and `Bootloader/Build`
+        // Pins history label disambiguation: when `Firmware/Build` and `Bootloader/Build`
         // both appear in history, both labels swap to `Firmware > Build` /
         // `Bootloader > Build` so the user can tell them apart. A non-colliding
         // entry alongside them keeps its bare title.
@@ -407,7 +407,7 @@ suite('View provider integration', function () {
     });
 
     test('IT-072: 멀티 task 액션이 running일 때 Action TreeItem.description에 progress 표시', async () => {
-        // Pins TODO §5.2: while a multi-task action is running, the
+        // Pins multi-task progress indicator: while a multi-task action is running, the
         // Action TreeItem renders `index/total · taskId` so the user can
         // tell "지금 어디" without opening the terminal. After the action
         // terminates, finalizeActionRun clears `progress` and the
@@ -516,8 +516,8 @@ suite('View provider integration', function () {
             'Action TreeItem must not render a last-run badge — that lives on HistoryItem');
     });
 
-    suite('syncActionCommands (TODO §2.1 v1 — dynamic command registration)', () => {
-        // Pins TODO §2.1 v1: every action with an id is exposed as a
+    suite('syncActionCommands (dynamic command registration)', () => {
+        // Pins dynamic command registration: every action with an id is exposed as a
         // `taskhub.runAction.<id>` VS Code command so users can bind a key
         // from the native Keyboard Shortcuts UI. Folder/separator entries
         // intentionally have no command — they aren't runnable.

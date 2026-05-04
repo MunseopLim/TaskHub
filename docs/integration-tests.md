@@ -119,7 +119,7 @@
 | IT-065 | `password: true` inputBox는 inputs에 저장되지 않음 | 비밀번호 task의 입력값은 `recordInputs`에 누적되지 않으며, history entry 직렬화에 비밀 문자열이 포함되지 않음 |
 | IT-066 | 재실행 시에도 인터랙티브 task의 output 후처리가 실행됨 | preset이 type-specific dispatch를 우회하더라도 공통 후처리(capture + `passTheResultToNextTask` output 처리)는 그대로 실행되어 `output.mode: 'file'` 등이 정상 작동 |
 
-### Last-run 배지 (TODO §5.4)
+### Last-run 배지
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)
 
 | ID | 제목 | 핵심 검증 |
@@ -128,7 +128,7 @@
 | IT-068 | HistoryItem.description에 status + 시각 + 소요 시간 배지가 노출 | 종료된 entry는 `✓/✗ 시각 · 소요시간` 형태로 description이 채워지고, 진행 중(`running`) entry는 description이 비어 있음 (스피너 아이콘이 신호 역할) |
 | IT-068b | Action TreeItem에는 last-run 배지가 없다 | History 패널로 이동한 배지가 실수로 Actions 패널에 다시 추가되는 회귀를 가드 |
 
-### Task 진행률 (TODO §5.2)
+### Task 진행률
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-069/070/071/073/074/074b), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-072/072b/072c)
 
 | ID | 제목 | 핵심 검증 |
@@ -143,7 +143,7 @@
 | IT-074 | throwing onTaskTransition은 success 경로 결과를 바꾸지 않음 | 4개 transition(`running`/`success`) 모두에서 콜백이 throw해도 파이프라인이 정상 resolve. `emitTransition` helper의 try/catch 격리 회귀 가드 |
 | IT-074b | throwing onTaskTransition은 failure 경로의 원본 에러를 가리지 않음 | failure transition에서 콜백이 throw해도 reject되는 에러는 task의 원본 에러(`'capture failed'`)이지 콜백 에러(`'callback boom'`)가 아님 |
 
-### Problem Matcher / 진단 통합 (TODO §3.1)
+### Problem Matcher / 진단 통합
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-075/076/077/078/079/080/081/082). 단위 테스트는 [src/test/diagnosticMatcher.test.ts](../src/test/diagnosticMatcher.test.ts).
 
 | ID | 제목 | 핵심 검증 |
@@ -157,7 +157,7 @@
 | IT-081 | exit 0 + stderr warning에서도 진단 등록 (2차 리뷰 Medium) | gcc/clang이 warning만 있을 때 흔한 패턴(exit 0 + stderr 출력). `executeShellCommand`가 성공 경로에서도 `{stdout, stderr}` 튜플로 resolve하고, post-processing 진단 블록이 둘을 합쳐 매처에 통과 — IT-079(failure 경로)와의 비대칭 해소 |
 | IT-082 | 같은 액션의 여러 task가 같은 파일에 진단을 내면 모두 보존 (3차 리뷰 Medium) | `collection.set(uri, ...)`은 해당 URI의 기존 entry를 *replace*하는 의미라 sibling task가 같은 파일에 진단 내면 앞 task가 덮였음. `collection.get(uri)`로 먼저 읽어 concat 후 set하도록 수정. 액션 시작 시 clear는 이전 run에만 적용되므로 같은 run의 누적은 보존 |
 
-### History label disambiguation (TODO §5.4 잔여)
+### History label disambiguation
 파일: [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts)
 
 | ID | 제목 | 핵심 검증 |

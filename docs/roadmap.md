@@ -2,8 +2,6 @@
 
 향후 추가를 검토 중인 **임베디드 / 펌웨어 도구** 기능 목록입니다. 우선순위는 구현 크기, 기존 자산 재사용, 사용자 체감 가치를 종합해 정했습니다.
 
-> 액션 시스템 / 파이프라인 / UX 관련 항목은 [../TODO.md](../TODO.md) 참조 — 두 문서는 범위가 다릅니다.
-
 ## 이미 구현된 항목
 
 다음은 이전 로드맵에 남아 있었으나 현재 릴리스에 포함되어 TODO에서 제외합니다. 실제 사용법은 `docs/features.md` 해당 섹션 참조.
@@ -16,8 +14,6 @@
 | Problem Matcher (`output.diagnostics`) | 0.4.22부터 제공. regex/file/line/severity 그룹, 다중 매처, VS Code Problems 패널 통합 | [docs/features.md](./features.md) `output.diagnostics` 섹션 |
 | 같은 title 폴더 액션 disambiguation (이전 §12) | 0.4.26부터 제공. History 패널이 같은 title 충돌 시에만 라벨을 풀 경로(`Firmware > Build`)로 스왑, 반복 실행은 충돌로 안 침. 풀 경로는 툴팁에도 항상 노출 | [src/providers/historyProvider.ts](../src/providers/historyProvider.ts) `computeDisambiguatedHistoryLabels` |
 
-조건부 실행 (`when` / `retry` / `onFailure`)은 액션 시스템 영역이라 [../TODO.md](../TODO.md) §4.1로 이관했습니다.
-
 ## 우선순위 요약
 
 | 순위 | 기능 | 근거 | 구현 크기 |
@@ -27,13 +23,13 @@
 | 3 | ELF Symbol Navigator | #1의 전제이자 단독 가치도 있음 | 소 |
 | 4 | 병렬 실행 / Task DAG | 멀티 타겟 빌드 사용자에 한정적 | 중 |
 | 5 | TaskHub Doctor / Action Lint | Preview Run 인프라 재사용. 시스템 신뢰도 직격 | 소~중 |
-| 6 | Named Input Profiles | TODO.md §5.3 잔여작업의 큰 그림. 임베디드 워크플로 fitness 강함 | 중 |
+| 6 | Named Input Profiles | 인터랙티브 입력 재실행("수정해서 실행")의 더 큰 그림. 임베디드 워크플로 fitness 강함 | 중 |
 | 7 | Action Run Report | History 패널 자연 확장. 출력 로그 영속화와 페어 | 중 |
 | 8 | 출력 로그 영속화 + 회전 | 작은 비용. Action Run Report에 흡수 가능 | 소 |
-| 9 | Quick Action Palette | §2.1 Phase 1 인프라 재사용. 선언형 keybinding 우회 | 소 |
+| 9 | Quick Action Palette | 액션 동적 등록 인프라 재사용. 선언형 keybinding 우회 | 소 |
 | 10 | 백그라운드 완료 알림 + 소요 시간 | 데이터 재활용, UI만 추가. 임베디드 빌드 즉시 통지 | 소 |
 
-**권장 시작 순서**: Memory Map Diff(1) → ELF Symbol Navigator(3). 5~10은 액션 시스템 / UX 영역으로 TODO.md 이관 후보 — 검토 후 분배.
+**권장 시작 순서**: Memory Map Diff(1) → ELF Symbol Navigator(3). 5~10은 액션 시스템 / UX 영역.
 
 ---
 
@@ -102,7 +98,7 @@
 - 인프라 재사용: Preview Run의 변수 해석기 / ajv 스키마 / capture·diagnostics 검증 그대로
 - 커맨드: `TaskHub: Lint Actions`, `TaskHub: Doctor`
 - **이유**: 1.2 tasks.json Import 이후 들어온 사용자의 첫 마찰점이 "왜 안 돼?". 단일 액션 Preview Run으로는 전체 점검 부족 — 시스템 신뢰도 직격.
-- 영역: 액션 시스템 (TODO.md 후보)
+- 영역: 액션 시스템
 
 ## 6. Named Input Profiles
 
@@ -119,13 +115,13 @@
 }
 ```
 
-- TODO.md §5.3 잔여작업("수정해서 실행")의 더 큰 그림. 히스토리 기반 재실행은 마지막 한 번이 기본 — profile은 *반복* 사용 케이스 정확히 적중.
+- 히스토리 기반 "수정해서 실행"이 마지막 한 번 재실행이라면, profile은 *반복* 사용 케이스 정확히 적중.
 - 명령:
   - `TaskHub: Run Action with Profile…` → quickPick으로 profile 선택
   - `TaskHub: Save Last Inputs as Profile…` → 히스토리 기반 이름 부여
-- 비밀번호(`password: true`)는 §5.3과 동일하게 저장 제외.
+- 비밀번호(`password: true`)는 히스토리 저장 정책과 동일하게 profile 저장 제외.
 - 임베디드 워크플로 (`board=... + build=... + port=...`)와 fitness 강함.
-- 영역: 액션 시스템 (TODO.md 후보)
+- 영역: 액션 시스템
 
 ## 7. Action Run Report
 
@@ -134,8 +130,8 @@
 - 항목: task별 소요 시간, exit code, 캡처된 변수, 생성/수정된 파일, diagnostics 개수, 출력 로그 링크
 - 표시: History 패널 entry 클릭 → webview 또는 출력 채널 보고서
 - 아래 D(출력 로그 영속화)와 페어로 작동 — 보고서가 로그 파일로 링크
-- TODO.md §5.4 last-run 배지가 1줄 요약이라면 이건 풀 보고서.
-- 영역: 액션 시스템 / UX (TODO.md 후보)
+- History 패널의 last-run 배지가 1줄 요약이라면 이건 풀 보고서.
+- 영역: 액션 시스템 / UX
 
 ## 8. 출력 로그 영속화 + 회전
 
@@ -145,31 +141,31 @@
 - 회전: N개 또는 X일 (settings)
 - C(Action Run Report)에 흡수 가능 — 단독 가치는 "진단 받은 뒤 이전 실행 로그 비교"
 - Output Channel은 휘발성이라 디버깅·회고 시 한계 명확
-- 영역: 액션 시스템 / UX (TODO.md 후보, C와 묶을지 분리할지 결정 필요)
+- 영역: 액션 시스템 / UX (Action Run Report와 묶을지 분리할지 결정 필요)
 
 ## 9. Quick Action Palette
 
 `taskhub.runAnyAction` 단일 커맨드 → fuzzy finder로 모든 액션 검색·실행.
 
 - 폴더 / 별칭 prefix 매칭, 최근 사용 우선
-- 이미 `taskhub.runAction.<id>` 동적 등록되어 있어 재활용 가능 (TODO.md §2.1 Phase 1 인프라)
-- TODO.md §2.1 v1.5/v2(선언형 keybinding) 보류 상태에서 우회 경로 — `keybindings.json` stale 처리 비용 없이 가치의 80%
+- 이미 `taskhub.runAction.<id>` 동적 등록되어 있어 재활용 가능
+- 선언형 keybinding 도입 보류 상태에서의 우회 경로 — `keybindings.json` stale 처리 비용 없이 가치의 80%
 - 트레이드오프: 키 한 방은 아니지만 "팔레트 + 두세 글자"로 근육 기억 빠르게 정착
-- 영역: 액션 시스템 / UX (TODO.md 후보)
+- 영역: 액션 시스템 / UX
 
 ## 10. 백그라운드 완료 알림 + 소요 시간
 
 설정 임계치(예: 10초) 넘는 액션 종료 시 OS notification + statusbar 잠깐 깜빡.
 
 - 임베디드 빌드 / 플래시 같은 분 단위 작업에서 VS Code 다른 창 보고 있어도 결과 즉시 인지
-- TODO.md §5.4 last-run 배지가 *사후 회고*라면 이건 *즉시 통지* — 데이터 재활용, UI만 추가
+- History 패널의 last-run 배지가 *사후 회고*라면 이건 *즉시 통지* — 데이터 재활용, UI만 추가
 - 비용 작음 (settings 임계치 + `vscode.window.showInformationMessage` / statusbar 토글)
-- 영역: 액션 시스템 / UX (TODO.md 후보)
+- 영역: 액션 시스템 / UX
 
 ---
 
 ## 메모
 
 - 원본 논의: 현재 강점(Memory Map, C/C++ Hover, 파이프라인)을 더 쓸모 있게 만드는 방향이 "새 영역 확장"보다 우선.
-- 구현 순서 설계 원칙: 간판 기능(1) → 임베디드 세부 도구(2~4) → 액션 시스템 후보(5~10, 다수는 [../TODO.md](../TODO.md) 이관 가능). 흐름 제어(`when` / `retry` / `onFailure`)는 [../TODO.md](../TODO.md) §4.1로 이관.
+- 구현 순서 설계 원칙: 간판 기능(1) → 임베디드 세부 도구(2~4) → 액션 시스템 / UX 후보(5~10).
 - 이번 릴리스에서 완료된 항목(Output Parser / Preview Run / timeoutSeconds / continueOnError / Problem Matcher)은 상단 "이미 구현된 항목" 표 참조.

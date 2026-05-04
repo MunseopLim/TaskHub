@@ -38,3 +38,6 @@ Thumbs.db
 
 # Local TaskHub action output
 test_output.txt
+
+# Hex Viewer 재현용 대용량 픽스처 (추적되는 픽스처는 examples/sample_binary.bin)
+examples/sample_binary_*mb.bin

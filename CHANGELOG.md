@@ -31,7 +31,7 @@
 
 ## [0.4.26] - 2026-05-04
 
-### 추가 — 같은 title 폴더 액션 disambiguation (TODO §5.4 잔여작업)
+### 추가 — 같은 title 폴더 액션 disambiguation
 
 #### UX (History 패널 식별)
 - **충돌 시에만 풀 경로로 표시**: `Firmware/Build` 와 `Bootloader/Build` 처럼 두 폴더에 같은 title 액션이 있어 history 에 둘 다 등장할 때, 두 `HistoryItem` 의 라벨이 각각 `Firmware > Build` / `Bootloader > Build` 로 자동 전환됩니다. 같은 title 충돌이 없으면(또는 같은 actionId 의 반복 실행) 라벨은 그대로 짧은 형태(`Build`)를 유지 — 노이즈 없음. 풀 경로는 항상 툴팁에도 노출됩니다. 참조: [src/providers/historyProvider.ts](src/providers/historyProvider.ts) `computeDisambiguatedHistoryLabels`, [src/extension.ts](src/extension.ts) `findActionPathById`.
@@ -86,7 +86,7 @@
 
 ## [0.4.23] - 2026-05-01
 
-### 추가 — 액션별 키바인딩 1급 지원 v1 (TODO §2.1, Phase 1+2)
+### 추가 — 액션별 키바인딩 1급 지원 v1
 
 #### High (UX impact — Actions 패널 클릭이 유일한 진입점이던 한계 해소)
 - **`id`가 있는 모든 액션을 `taskhub.runAction.<id>` VS Code 커맨드로 자동 노출**: 사용자는 자신의 `keybindings.json`에서 액션 id에 키를 매핑하는 것만으로 어디서든 액션을 실행할 수 있습니다. tasks.json 대비 가장 큰 약점이었던 "키 한 방"을 해소.
@@ -115,7 +115,7 @@
 
 ## [0.4.22] - 2026-05-01
 
-### 추가 — Problem Matcher / 진단 통합 (TODO §3.1)
+### 추가 — Problem Matcher / 진단 통합
 
 #### High (UX impact — 빌드 task 사용자에게 매 사이클 시간 절약)
 - **shell/command task 출력을 Problems 패널 진단으로 자동 변환**: `output.diagnostics`에 `"$gcc"` 같은 프리셋 또는 커스텀 정규식 패턴을 지정하면, task stdout의 컴파일러 에러·경고가 자동으로 `vscode.Diagnostic` 객체로 변환되어 Problems 패널과 에디터 빨간 squiggly로 노출됩니다. 사용자는 Problems 항목 클릭 → 해당 file:line:col로 즉시 점프, F8로 다음 에러 순환 가능. tasks.json `problemMatcher`의 핵심 가치 흡수.
@@ -151,7 +151,7 @@
 #### Medium — 3차 리뷰 후속 수정 (sibling task 진단이 덮어쓰임)
 - **같은 액션의 여러 task가 같은 파일에 진단을 내면 모두 보존**: VS Code `DiagnosticCollection.set(uri, ...)`은 해당 URI의 기존 entry 전체를 *replace*하는 의미라, 액션의 두 번째 task가 같은 파일에 진단을 내면 첫 번째 task의 contribution이 덮여 사라지는 회귀가 있었음. `applyDiagnosticsToCollection`이 set 직전 `collection.get(uri)`로 현재 entry를 읽어 concat 후 set하도록 수정 — 액션 시작 `clearActionDiagnostics`는 이전 run에만 적용되므로 같은 run의 sibling 진단은 그대로 누적. 회귀 가드: `IT-082` (한 액션의 compile + lint task가 같은 파일에 각각 warning/error를 내고 둘 다 보존되는지 확인).
 
-#### 범위 한정 (TODO §3.1)
+#### 범위 한정 (Problem Matcher 1차 범위)
 - **v1: batched mode only**: 진단은 task 종료 후 stdout 전체를 한 번에 파싱해 등록합니다. 5분짜리 빌드의 에러는 빌드 끝나야 보입니다. **streaming mode (실시간 진단)** 는 v2 — `executeStreamedTask`에 output tee 인프라 추가가 필요한 별도 작업이라 분리.
 - **다중 라인 매칭은 미지원**: 한 진단이 여러 라인에 걸쳐 표현되는 형태(gcc note 후속 라인 등)는 v1에선 라인별 독립 매칭. v2 또는 v3에서 검토.
 
@@ -159,7 +159,7 @@
 
 ## [0.4.21] - 2026-04-30
 
-### 추가 — 멀티 task 액션 진행 표시 (TODO §5.2 일부)
+### 추가 — 멀티 task 액션 진행 표시
 
 #### Medium (UX 개선)
 - **실행 중 액션 카드에 "지금 어디" 진행 표시**: 멀티 task 액션이 실행 중일 때 라벨 옆에 `2/3 · link` 형태로 현재 task 위치와 id를 노출합니다 — "task1 끝났는지, 어디서 막혔는지" 알기 위해 터미널을 직접 안 봐도 되도록. 단일 task 액션은 의도적으로 비워둠(`1/1`은 노이즈). 액션 종료 시 자동으로 사라짐. ([src/providers/mainViewProvider.ts](src/providers/mainViewProvider.ts), [src/providers/actionStatus.ts](src/providers/actionStatus.ts))
@@ -169,8 +169,8 @@
 - **`actionStates` 모델 확장**: `{ state, progress?: { index, total, taskId } }`. progress는 mid-run 전용 — `finalizeActionRun`이 종료 시 자동 clear.
 - **회고 정보 vs 진행 정보 분리 명문화**: [docs/architecture.md](docs/architecture.md) "개발 시 주의사항" §2에 정책 추가. 회고(시각·소요 시간)는 `HistoryItem.description`에만, 진행(현재 어디)은 `Action TreeItem.description`에만. 두 surface의 역할이 섞이지 않도록 회귀 가드 4종(IT-068b/072/072b/072c) 명시.
 
-#### 범위 한정 (TODO §5.2)
-- 본 릴리스는 TODO §5.2의 두 항목 중 **"단계별 진행 인디케이터"**만 구현합니다. **"단계 클릭 시 해당 task의 터미널/출력으로 점프"**는 의도적으로 제외 — VS Code 터미널 패널이 이미 항상 접근 가능해 추가 클릭 단계의 ergonomics 가치가 낮고, Action TreeItem을 펼쳐지는 트리로 만들면 기존 폴더(`Folder`)와 시각적 충돌 발생. Option B로의 전환 가능성은 향후 사용자 피드백으로 판단.
+#### 범위 한정
+- 본 릴리스는 두 항목 중 **"단계별 진행 인디케이터"**만 구현합니다. **"단계 클릭 시 해당 task의 터미널/출력으로 점프"**는 의도적으로 제외 — VS Code 터미널 패널이 이미 항상 접근 가능해 추가 클릭 단계의 ergonomics 가치가 낮고, Action TreeItem을 펼쳐지는 트리로 만들면 기존 폴더(`Folder`)와 시각적 충돌 발생. Option B로의 전환 가능성은 향후 사용자 피드백으로 판단.
 
 #### Medium — 1차 리뷰 후속 수정 (콜백 격리)
 - **`onTaskTransition` 콜백을 try/catch로 격리**: 진행률 표시는 side channel이므로 콜백이 throw해도 파이프라인의 success/failure 의미가 바뀌면 안 됨. 이전 구현은 `success`/`failure`/`skipped`/`running` 4 callsite에서 직접 호출해, 예컨대 `success` 콜백이 throw하면 정상 task가 실패로 기록되는 회귀가 가능했음. `executeActionPipeline` 내부의 `emitTransition` helper에서 try/catch로 감싸 outputChannel에 `[WARN]`만 남기고 호출자에는 throw하지 않도록 수정. 회귀 가드: `IT-074` (success 경로에서 모든 콜백 throw해도 파이프라인 정상 완료), `IT-074b` (failure 경로에서 콜백 throw해도 task 원본 에러가 그대로 reject — `'callback boom'`이 아니라 `'capture failed'`).
@@ -179,7 +179,7 @@
 
 ## [0.4.20] - 2026-04-30
 
-### 추가 — History 패널의 "Last run" 배지 (TODO §5.4 일부)
+### 추가 — History 패널의 "Last run" 배지
 
 #### Medium (UX 개선 / 데이터 모델 확장)
 - **History 항목에 시각 + 소요 시간 배지 표시**: 각 `HistoryItem`의 `description`에 `✓ 14:30 · 1.2s` / `✗ 어제 09:15 · 45ms` 형태로 상태·실행 시각·소요 시간이 노출됩니다. 확장 재시작 후에도 그대로 남아 "오늘 빌드 됐었지?"류 질문에 한눈에 답이 됩니다. 진행 중(`running`) entry는 배지 대신 상태 아이콘만 표시. 시각 표기는 같은 날 `HH:mm`, 어제 `어제 HH:mm`/`Yest HH:mm`, 그 이전 `MM/DD`. 소요 시간 표기는 `Nms` / `N.Ns` (truncated, "60.0s" 회피) / `Nm Ms` / `Hh Mm`. ([src/providers/historyProvider.ts](src/providers/historyProvider.ts))
@@ -193,8 +193,8 @@
 - **`formatLastRunBadge`의 음수 방어**: `executeAction` 측 `Math.max` clamp가 1차 방어, 표시 측 가드를 `>= 0`에서 `!== undefined`로 완화해 `formatDuration`의 `<0 → "0ms"` 분기가 실제로 작동 (이전에는 dead code). "시간 표시 누락"보다 "0ms 표시"가 정확한 시그널.
 - **자정 경계 stale 방지**: `TreeItem.description`은 자동 갱신되지 않아 자정을 넘긴 세션에서 어제 23:30 항목이 오늘 자정 이후에도 "23:30"으로 남는 케이스가 있었음. `startHistoryAutoRefresh(provider, 60*60*1000)` 시간당 tick + `historyProvider.view.onDidChangeVisibility` 갱신 두 hook을 [src/extension.ts](src/extension.ts)에서 등록해, 켜둔 채 24시간을 넘겨도 다음 시간 tick(또는 패널 재진입) 시점에 배지가 자동 정정됨. 패널이 hidden일 때 tick은 단지 `onDidChangeTreeData` 이벤트만 발생시키고 실제 `getChildren`은 visible 시점에만 호출되므로 비용은 무시할 수준.
 
-#### 범위 한정 (TODO 5.4)
-- 본 릴리스는 TODO §5.4의 두 항목 중 **"마지막 실행 결과 배지: ✓/✗ + 소요 시간"**만 구현합니다. **"빈도 기반 자동 정렬 또는 사용자 지정 핀"**은 의도적으로 제외 — 정렬·핀은 정책 결정이 더 큰 작업이므로 별도 PR에서 다룹니다.
+#### 범위 한정
+- 본 릴리스는 두 항목 중 **"마지막 실행 결과 배지: ✓/✗ + 소요 시간"**만 구현합니다. **"빈도 기반 자동 정렬 또는 사용자 지정 핀"**은 의도적으로 제외 — 정렬·핀은 정책 결정이 더 큰 작업이므로 별도 PR에서 다룹니다.
 - 같은 title을 가진 액션이 폴더 두 개에 있을 때 HistoryItem label이 둘 다 동일하게 보이는 disambiguation 문제는 인지하고 있으나 본 PR 범위 외 — `formatActionPath` 활용 여부와 함께 후속에서 처리 예정.
 
 **테스트**: 신규 21케이스 추가 (단위 18: `formatDuration` 5경계 + `formatHistoryTimestamp` 4경계 + `formatLastRunBadge` 7분기(음수 durationMs → "0ms" 포함) + `durationMs` round-trip 2 + `startHistoryAutoRefresh` interval 동작·dispose 1; 통합 3: IT-067 success/failure durationMs 기록, IT-068 HistoryItem 배지 노출, IT-068b Actions 패널 배지 부재 회귀 가드). 전체 920 passing.
@@ -219,8 +219,8 @@
 - **`executeAction` 시그니처 확장**: 옵셔널 다섯 번째 인자 `presetInputs?: Record<string, unknown>` 추가. 호출자가 명시적으로 넘기지 않으면 종전과 동일하게 다이얼로그를 띄움.
 - **새 export**: `shouldRecordTaskInput(task)` (인터랙티브 + 비-password 판별 헬퍼), `PipelineExecutionOptions`.
 
-#### 범위 한정 (TODO 5.3 일부)
-- 본 릴리스는 TODO §5.3에서 제안한 두 모드 중 **"그대로 재실행"**만 구현합니다. **"수정해서 실행"**(저장값을 다이얼로그 기본값으로 prefill 후 사용자 편집)은 후속 작업으로 분리되어 [TODO.md](TODO.md) §5.3에 별도로 추적됩니다.
+#### 범위 한정
+- 본 릴리스는 두 모드 중 **"그대로 재실행"**만 구현합니다. **"수정해서 실행"**(저장값을 다이얼로그 기본값으로 prefill 후 사용자 편집)은 후속 작업으로 분리되어 있습니다.
 
 **테스트**: 신규 12케이스 추가 (단위 8: `shouldRecordTaskInput` 3, `setHistoryInputs` 라운드트립·clear·no-op·contextValue 5; 통합 4: IT-063 캡처 누적, IT-064 presetInputs 재실행, IT-065 비밀번호 제외, IT-066 replay 후처리 회귀). 전체 898 passing.
 
