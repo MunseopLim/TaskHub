@@ -63,6 +63,20 @@ Command Palette에서 `taskhub json`을 검색하면 두 개의 JSON Editor 커�
 | **TaskHub: Open JSON Editor** (`taskhub.openJsonEditor`) | 파일 선택 대화상자를 띄워 임의의 JSON 파일을 고른 뒤 JSON Editor로 엽니다. 활성 에디터와 무관하게 항상 동일하게 동작합니다. | Command Palette에서 임의의 JSON 파일을 바로 열고 싶을 때 |
 | **TaskHub: Open with JSON Editor** (`taskhub.openJsonEditorFromUri`) | URI 인자를 받는 컨텍스트 커맨드입니다. 에디터/탐색기/SCM 컨텍스트 메뉴의 *Open with JSON Editor* 항목에서 대상 파일을 전달받아 엽니다. Command Palette에서 인자 없이 실행하면 현재 활성 에디터가 `.json` 파일일 때 그 파일을 열고, 그 외에는 *Open JSON Editor* 동작으로 폴백해 파일 선택 대화상자를 띄웁니다. | `.json` 파일을 연 상태에서 빠르게 JSON Editor로 전환하거나, 탐색기/에디터 우클릭 메뉴에서 호출할 때 |
 
+#### 데이터 보호
+
+JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디스크에 기록되는 시나리오를 다음 네 가지 메커니즘으로 막습니다.
+
+- **Invalid 셀 저장 차단**: object/array를 JSON으로 직접 편집하는 셀에서 파싱이 실패하면 Save / Ctrl+S 가 진행되지 않습니다. 해당 셀은 편집 상태가 유지되고 에러 메시지가 표시되어, "잘못된 입력이 그대로 저장됐다"가 아니라 "사용자가 고치고 다시 저장"하는 흐름이 됩니다.
+- **Undo / Redo (`Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y`, 툴바 ↶ ↷)**: 셀 commit, 행 추가/삭제, 드래그 정렬, string ↔ array 변환, 태그 추가/삭제 단위로 메모리 스냅샷을 쌓습니다. 20 step / 16 MB 중 먼저 도달하는 cap 으로 가장 오래된 항목부터 정리. 셀 편집 중에는 단축키가 동작하지 않아 브라우저 input 의 기본 undo 가 우선합니다.
+- **Dirty-close 복구**: 미저장 변경이 있는 상태로 패널을 닫아도 워크스페이스 상태에 wrapped data 스냅샷이 남습니다. 같은 파일을 다시 열 때 디스크 mtime + size fingerprint 가 캡처 시점과 일치하면 *복구하시겠습니까?* 다이얼로그가 뜨고, 외부에서 파일이 변경됐다면 (mtime 변경 또는 mtime 보존 + size 변경) 스냅샷은 자동 폐기됩니다. 자동 복원이 아닌 명시적 프롬프트 — 의도적으로 닫은 변경이 원치 않게 되살아나지 않습니다. mtime 과 size 가 모두 같은 채로 내용만 바뀌는 외부 변경(예: 같은 길이로 in-place 패치)은 감지하지 못한다는 한계가 있어, 외부 변경이 의심되면 사용자가 *다시 읽기* 로 명시적 동기화를 트리거하는 것이 안전합니다. **복구 대상은 parse 가능한 셀 단위 변경과 commit 된 mutation** 입니다 — object/array 셀을 JSON textarea 로 직접 편집하는 도중 mid-edit invalid JSON 상태에서 패널을 닫으면 그 raw text 자체는 보존되지 않고 (parse 실패라 snapshot 대상에서 제외됩니다), 대신 dirty 표시가 유지되어 외부 변경 *Reload/Keep* 모달이나 다른 파일 열기 시 *변경사항 버리기* confirm 으로 silent discard 만 차단합니다.
+- **외부 변경 감지**: 파일이 외부(예: `git checkout`)에서 수정되면 감시자가 이를 감지합니다. dirty 가 아니면 자동으로 다시 읽고 상태바에 알리며, dirty 라면 *다시 읽기 / 현재 편집 유지* 모달을 띄워 사용자가 결정합니다. JSON Editor 자신이 막 쓴 변경은 mtime + size fingerprint 가 모두 일치할 때만 무시되므로, 외부 도구가 mtime 을 보존한 채 내용을 바꾸는 경우(`touch -r`, 일부 sync 도구) 도 외부 변경으로 처리됩니다.
+
+#### 기타 단축키
+
+- `Ctrl+S` (macOS `Cmd+S`): 저장. 편집 중 셀이 있으면 commit 을 시도하고 실패 시 저장을 중단합니다.
+- `Ctrl+F` (macOS `Cmd+F`): VS Code 기본 찾기 위젯으로 현재 보이는 셀 값/헤더를 검색합니다.
+
 ## 4. 링크 패널 (Built-in / Workspace)
 
 이제 링크는 두 개의 별도 패널로 나뉩니다.

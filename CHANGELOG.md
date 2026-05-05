@@ -29,6 +29,269 @@
 =====================================================================
 -->
 
+## [0.4.30] - 2026-05-05
+
+### 추가 — JSON Editor 데이터 보호 (저장 차단 / Undo / 외부 변경 / 복구)
+
+이 에디터는 "편하게 수정"보다 **"수정한 걸 믿고 저장할 수 있음"** 이 먼저라는 판단 아래, 사용자가 입력한 변경이 조용히 사라지거나 stale 상태로 디스크에 기록되는 시나리오를 한 릴리스에서 함께 잡았다.
+
+#### High (데이터 손실 차단)
+
+- **invalid JSON 셀 편집 중 저장 시 stale data가 기록되던 문제**: object/array JSON 셀이 invalid 상태에서 Save / Ctrl+S 를 누르면, `commitCell`이 파싱 실패로 조용히 early return 했음에도 webview 가 그대로 `vscode.postMessage({ command: 'save' })` 를 보내 호스트가 **이전 값**을 디스크에 저장했고 modified 표시까지 내려갔다. 사용자는 자기 입력이 저장됐다고 믿지만 실제로는 잃었다. `commitCell` 시그니처를 `boolean` 반환으로 바꾸고, Save / Ctrl+S / 다른 셀로의 click-to-edit 모두 false 반환 시 후속 동작을 중단하도록 가드. invalid 셀은 editing 상태 그대로 유지되며 에러 메시지가 보존된다. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `commitCell`/`saveAction`.
+- **dirty 상태 패널 닫힘 시 미저장 변경 복구 경로 부재**: WebView Panel 은 close veto 가 약해 사용자가 X 버튼으로 탭을 닫으면 unsaved 편집이 그대로 사라졌다. 이제 commit / mutation 마다 webview 가 `'snapshot'` 메시지로 현재 wrapped data를 호스트에 전송하고, 호스트는 300ms 디바운스로 `workspaceState`(키 `taskhub.jsonEditor.recovery`)에 `{data, isRootArray, fileMtimeMs, fileSize?, capturedAt}` 형태로 기록한다. 다음 번 같은 파일을 열 때 디스크 mtime + size fingerprint 가 캡처 시점과 일치하면 "이전 세션의 미저장 변경사항이 있습니다. 복구하시겠습니까?" 다이얼로그를 띄우고, 외부에서 파일이 변경됐다면(mtime 변경 또는 mtime 보존 + size 변경) 자동으로 폐기한다. 옛 엔트리(`fileSize` 없음) 나 stat 실패로 현재 size 를 모를 때는 mtime-only 폴백. mtime + size 모두 같은 채 내용만 바뀌는 외부 변경(같은 길이 in-place 패치 등)은 감지하지 못하는 한계가 남아 있어, 의심되면 사용자가 *다시 읽기* 로 명시적 동기화를 트리거하는 흐름이다. 자동 복원이 아니라 **명시적 프롬프트**라 의도적으로 닫은 사용자가 원치 않게 살아나는 사고를 막는다. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `offerRecoveryIfAny`, [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts) `shouldOfferRecovery`.
+- **JSON Editor가 열린 상태에서 외부 변경(git checkout 등)이 보이지 않던 문제**: 이전에는 메모리 사본이 stale 한 채로 그 위에서 편집하다가 저장하면 외부 변경이 그대로 덮어써졌다. `vscode.workspace.createFileSystemWatcher(RelativePattern)` 으로 대상 파일을 감시하고, JSON Editor 자신이 막 쓴 변경(`currentLastWriteMtime` + `currentLastWriteSize` 모두 일치)은 무시. mtime 만으로는 mtime 보존형 외부 변경(`touch -r`, 일부 sync 도구) 이 self-write 로 오인되므로 size 도 함께 본다. dirty 상태에서 외부 변경이 감지되면 "다시 읽기 / 현재 편집 유지" 모달을 띄우고, dirty 가 아니면 자동으로 다시 읽으면서 상태바에 알림을 띄운다. 파일이 외부에서 삭제된 경우는 경고 메시지로 알린다.
+
+#### Medium (편집 신뢰성)
+
+- **Undo / Redo 신설 (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, 툴바 ↶ ↷ 버튼)**: 셀 commit 성공·행 추가/삭제·드래그 정렬·string↔array 변환·태그 추가/삭제 7가지 mutation 단위로 webview 메모리 히스토리에 `JSON.stringify(data)` 스냅샷을 push 한다. **20 step / 16 MB 중 먼저 도달하는 cap** 으로 가장 오래된 스냅샷부터 evict. 셀 편집 중(`td.editing` 존재) 에는 undo/redo 가 동작하지 않아 브라우저 input 의 기본 undo 가 우선 — 한 글자 지우려다 직전 행 삭제가 되돌려지는 사고를 방지. modified 플래그는 `lastSavedSnapshot` 과 현재 인덱스 비교로 정확하게 갱신된다(undo 로 저장 시점 데이터와 동일해지면 자동으로 깨끗한 상태로). 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `pushHistory`/`undo`/`redo`.
+
+#### UX / 일관성
+
+- **WebView Panel 에 `enableFindWidget: true`**: Ctrl+F (macOS Cmd+F) 로 VS Code 기본 찾기 위젯이 동작해 현재 보이는 DOM 텍스트(셀 값, 컬럼 헤더, 태그 등)를 즉시 검색할 수 있다. 행 필터의 대체재는 아니지만 비용 0 으로 즉시 체감되는 개선이다. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `createWebviewPanel` 옵션.
+
+#### 회귀 가드 (drift 방지)
+
+webview JS 가 문자열 템플릿으로 박혀 있어 한쪽만 수정해도 CI 가 통과하던 문제를 줄이려고 mirror sync 테스트를 두텁게 했다. 새로 추가된 가드:
+
+- `commitCell` 가 invalid-JSON 분기마다 `return false` 를 보존하고 함수 끝이 `return true` 로 끝나는지
+- `saveAction` 이 `if (editingTd && !commitCell(editingTd)) { return; }` 패턴으로 진입 차단을 하는지
+- `undo()` / `redo()` 가 `td.editing` 가드를 가지고 있는지
+- 7가지 mutation marker(`data-remove-arr`, `data-add-arr`, `data-convert`, `data-delete-row`, `dragSrcIdx`, `btnAddRow`, `commitCell`) 각각 동일 핸들러 안에서 `pushHistory()` 를 호출하는지
+
+참조: [src/test/jsonEditorUtils.test.ts](src/test/jsonEditorUtils.test.ts) `webview ↔ jsonEditorUtils mirror synchronization` suite.
+
+### 수정 — 코드 리뷰 후속 (debounce / stale row index / recovery baseline)
+
+위 안전성 패치를 처음 들어간 직후 5건의 follow-up 이슈가 코드 리뷰에서 식별돼 같은 릴리스에 묶었다. 모두 데이터 손실/오염으로 직결되거나, 사용자 의도와 어긋나는 경로였다.
+
+#### High (실제 데이터 손실 가능)
+
+- **debounce 창 안에 닫힐 때 pending snapshot 유실**: webview 가 mutation 시 host 로 보낸 snapshot 은 300ms 디바운스로 workspaceState 에 기록되는데, 그 창 안에 사용자가 패널을 X 로 닫으면 dispose 핸들러가 timer 를 cancel 하면서 `currentPendingSnapshot` 을 그대로 버렸다. "edit → 즉시 close" 경로에서 가장 최근 변경이 복구되지 않았다. host 측에 `flushPendingSnapshot()` 클로저를 모듈-레벨로 올리고(`currentFlushPendingSnapshot`), dispose 가 reset 보다 먼저 그것을 호출해 in-flight 변경을 동기적으로 flush. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `flushPendingSnapshot`, dispose 핸들러.
+- **셀 편집 중 다른 행 삭제/드래그 시 stale row index commit**: blur 핸들러가 100ms 뒤 `commitCell(td)` 를 지연 실행하는데, 그 사이 사용자가 `[data-delete-row]` 클릭이나 row drag 로 배열을 즉시 mutate + rerender 하면 detach 된 td 의 `dataset.row` 가 stale 인덱스를 들고 있다가 새 배열의 엉뚱한 행에 값을 쓰거나 길이를 넘으면 `getActiveRows()[rowIdx][col]` 이 `undefined[col]` 로 던졌다. row-shifting 핸들러(`data-delete-row`, `dragstart`, `btnAddRow`) 에 공통 가드 `commitActiveCellOrAbort()` 를 추가 — invalid commit 이면 mutation 자체를 중단한다. defense in depth 로 blur timeout 도 `td.isConnected` 체크를 더해 detach 된 td 의 지연 commit 을 차단. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `commitActiveCellOrAbort`/blur timeout `isConnected` guard.
+- **외부 변경 Keep + close + reopen 시 편집본 폐기**: dirty 상태에서 외부 변경이 감지돼 *현재 편집 유지* 를 골라도 watcher 가 그냥 return 했고, 이후 snapshot 은 여전히 OLD `baselineMtimeMs` 로 저장됐다. reopen 때 디스크 mtime 은 NEW 라 `shouldOfferRecovery()` 가 stale 로 판정해 자동 폐기 — 사용자가 명시적으로 Keep 을 골랐는데 편집본이 사라졌다. Keep 분기에서 `baselineMtimeMs`/`currentLastWriteMtime` 을 NEW mtime 으로 갱신하고, 마지막으로 받은 snapshot 이 있으면 즉시 새 mtime 으로 recovery entry 를 다시 써 "Keep + 즉시 close" 경로도 보존되게 한다. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) watcher Keep 분기.
+
+#### Medium (UX 노이즈 / modified 표시 불일치)
+
+- **Undo 로 saved 상태에 도달했는데 recovery 가 다시 생기는 노이즈**: `restoreFromHistoryIndex()` 가 `setModified(false)` 직후 항상 `'snapshot'` 을 보냈고, host 는 `modified=false` 처리에서 recovery 를 비웠다가 곧이은 `'snapshot'` 으로 clean 상태를 다시 기록했다. 결과적으로 `edit → undo to saved → close → reopen` 경로에서 의미 없는 *복구하시겠습니까?* 프롬프트가 떴다. snapshot 송신을 `dirtyNow` 분기 안으로 이동. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) webview `restoreFromHistoryIndex`/`resetHistoryToCurrent`.
+- **복구 데이터를 webview 가 clean baseline 으로 잡는 일관성 깨짐**: host 는 `currentIsDirty = true` 로 두지만, 초기 `resetHistoryToCurrent()` 가 복구된 데이터를 그대로 `lastSavedSnapshot` 으로 잡아 Modified 표시가 안 떴고, 이후 사용자가 편집했다가 undo 로 복구 상태로 돌아오면 host 에 `modified=false` 가 가서 — 아직 디스크에 저장되지 않은 — 복구 내용의 recovery 가 지워질 수 있었다. host 가 `getWebviewContent(data, savedData, ...)` 에 디스크 데이터를 별도로 함께 넘기고, webview 는 base64 두 개를 디코드해 `savedSnapshot` 을 saved baseline 으로, 복구 데이터를 dirty current 로 분리. `resetHistoryToCurrent()` 는 둘이 다르면 자동으로 modified=true. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `getWebviewContent` 시그니처 / webview `savedSnapshot` 디코드 / `resetHistoryToCurrent`.
+
+#### 회귀 가드 추가
+
+- 새 mirror sync 테스트 4종: row-shifting 핸들러의 `commitActiveCellOrAbort()` 가드, blur timeout 의 `td.isConnected` 체크, `restoreFromHistoryIndex` 가 `dirtyNow` 분기 안에서만 snapshot 송신, `resetHistoryToCurrent` 가 `savedSnapshot !== undefined` 일 때 그것을 baseline 으로 사용.
+- 새 host contract 테스트 2종: dispose 핸들러가 `currentFlushPendingSnapshot` → `clearSnapshotTimer` 순서로 호출, watcher Keep 분기가 `baselineMtimeMs` 갱신 + `writeSnapshotEntry(currentLastReceivedSnapshot)` 즉시 호출.
+- 새 host state round-trip 테스트 2종(in-memory `workspaceState` double): 단일 파일 entry write/read/clear, 여러 파일 동시 entry 보존.
+
+### 수정 — 2차 리뷰 후속 (primitive array 입력 유실 / discard 후 stale recovery / 수동 revert / save vs snapshot race)
+
+#### High (실제 데이터 손실 가능)
+
+- **primitive array 셀에서 태그 입력 후 +Add/✕ 누르면 입력값 유실**: tag 입력은 DOM input 에만 존재하고 data 에는 commit 되지 않은 상태에서 `+ Add` 또는 `✕` 핸들러가 직접 `arr.push/splice` + `renderTable` 을 실행하면 detach 된 td 는 1차 보완에서 추가한 `td.isConnected` 가드 때문에 지연 commit 도 스킵돼 사용자 입력이 그대로 사라졌다. webview JS 에 `syncEditingArrayCellToData(td)` 헬퍼를 도입 — `arr.length = 0; for (v of newArr) arr.push(v)` 패턴으로 *원본 배열 reference 를 유지* 하면서 input value 를 in-place 반영 — 하고, 두 핸들러가 mutation 직전에 호출하도록 변경. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `syncEditingArrayCellToData`/`data-remove-arr`/`data-add-arr` 핸들러.
+- **명시적 *변경사항 버리기* 후에도 recovery 가 다시 제안되던 문제**: `confirmDiscardIfDirty()` 가 통과해도 host 가 이전 파일의 pending snapshot 과 workspaceState recovery 엔트리를 비우지 않아, 같은 파일 dirty reopen 시 곧이은 `offerRecoveryIfAny()` 가 *방금 버린 변경* 을 다시 *복구하시겠습니까?* 로 제안하는 모순적인 UX 가 발생했다. opener 의 두 confirmDiscardIfDirty 분기 모두에 `discardPriorRecoveryIfAny()` 호출을 추가 — `currentSnapshotTimer` cancel + `currentPendingSnapshot`/`currentLastReceivedSnapshot` 비움 + `setRecoveryEntry(null)`. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `discardPriorRecoveryIfAny`.
+- **save vs in-flight snapshot 의 read-modify-write race**: 디바운스 timer 가 fire 된 직후 save 가 들어오면, 두 `setRecoveryEntry` 호출이 `await context.workspaceState.update(...)` 사이에 interleave 되어 둘 다 같은 baseline map 을 읽고 last-write-wins 가 발생할 수 있다. 의도와 반대 결과(save 가 비운 entry 를 stale snapshot 이 부활) 가능. 모든 update 를 단일 promise chain 으로 직렬화하는 `RecoveryStore` 를 [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts) 에 `makeRecoveryStore(state, key)` 팩토리로 분리해 host 가 사용. 단위테스트가 `MinimalWorkspaceState` 더블로 실제 race 시나리오(gated update + interleaved set)를 functional 하게 검증한다.
+
+#### Medium (UX 일관성 / dirty 표시 정확성)
+
+- **수동 revert(`foo→bar→foo`) 시 modified 가 풀리지 않던 문제**: 일반 commit / row / array mutation 핸들러가 `setModified(true)` + `pushHistory()` 를 무조건 호출해, 데이터가 saved baseline 과 같아져도 Modified 표시가 남고 recovery snapshot 도 기록됐다. dirty / snapshot 결정을 `pushHistory()` 한 곳에 중앙화 — `snap !== lastSavedSnapshot` 으로 `dirtyNow` 계산해 `setModified(dirtyNow)` 호출 + dirty 일 때만 `'snapshot'` postMessage 송신. 모든 mutation 핸들러에서 `setModified(true)` 직접 호출을 제거. 같은 정책이 `restoreFromHistoryIndex()` / `resetHistoryToCurrent()` 에도 적용되어 undo / 복구 boot 가 saved 상태와 일치하면 recovery 노이즈가 발생하지 않는다. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `pushHistory`.
+
+#### 회귀 가드 추가
+
+- **functional**: `makeRecoveryStore` round-trip(set/get/clear), 다중 파일 coexistence, gated interleaved updates 직렬화 검증, 개별 update rejection 후에도 chain 진행 — in-memory `MinimalWorkspaceState` 더블 위에서 actual store 동작 테스트.
+- **regex 회귀 가드**: discard 분기 양쪽에서 `discardPriorRecoveryIfAny` 호출 / `setRecoveryEntry` 가 `RecoveryStore.set` 으로 라우팅 / `pushHistory` 가 `dirtyNow` 비교 + 분기 안에서만 snapshot 송신 / mutation 사이트들에서 `setModified(true)` 직접 호출 제거 / `syncEditingArrayCellToData` 가 in-place(`arr.length = 0; arr.push(v)`) 갱신 / add/remove 핸들러가 mutation 전에 sync 호출.
+
+**Test gap 정직 명시**: 실제 DOM 이벤트 순서(blur 100ms timeout 과 click handler interleave), webview 내 detach 타이밍, 그리고 host-webview message ordering 은 mock harness 없이 단위테스트가 어렵다. 회귀 가드는 source regex + `MinimalWorkspaceState` functional test 조합으로 두텁게 했지만, 통합 시나리오는 수동 검증이 필요하다.
+
+### 수정 — 3차 리뷰 후속 (탭/Reload 미커밋 입력 유실 / async flush vs sync get / RecoveryStore in-place mutation)
+
+#### High (실제 데이터 손실 가능)
+
+- **탭 전환 / Reload 직전에 활성 셀의 미커밋 입력이 유실되던 문제**: blur 100ms timeout 의 `isConnected` 가드는 row-level mutation 의 stale 인덱스 사고는 막아주지만, 사용자의 입력 자체는 commit 되지 않은 채 detach 된다. 탭 클릭은 즉시 `renderTable()` 로 DOM 을 갈아치우고, Reload 는 host 로 메시지를 직접 보내므로 — 둘 다 detach → blur skip 경로에 빠진다. tab.onclick 과 Reload 클릭 핸들러가 mutation 직전에 `commitActiveCellOrAbort()` 를 호출하도록 변경. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) tab.onclick / btnReload 핸들러.
+- **panel close 시 미커밋 입력 복구 부재 → draft snapshot 도입**: 사용자가 commit 전에 패널을 X 로 닫으면 input.value 는 어디에도 기록되지 않아 reopen 시 복구가 불가능했다. 모든 `.cell-edit input/textarea` 에 `input` 이벤트 리스너를 달아 keystroke 마다 `sendDraftSnapshot()` 을 호출 — `data` 의 deep clone 위에 input 값을 적용해 host 로 송신, host 는 workspaceState recovery 엔트리를 즉시 갱신한다. **data 자체는 mutate 하지 않는다** (commitCell 의 `typeof oldVal === 'string' ? raw : parseValue(raw)` 타입 보존이 깨져 숫자 셀이 무성하게 문자열로 강제 변환되는 사고를 막기 위함). JSON-edit textarea 는 partial JSON 이 invalid 라 sync 에서 제외. 참조: [src/jsonEditor.ts](src/jsonEditor.ts) `sendDraftSnapshot` / cell-edit input listener.
+
+#### Medium (race / leak)
+
+- **dispose 비동기 flush 와 sync `RecoveryStore.get()` 의 race**: dispose 핸들러는 `void currentFlushPendingSnapshot?.()` 로 fire-and-forget 호출이고, 이전 `RecoveryStore.get()` 은 `state.get()` 으로 workspaceState 를 직접 읽었다. 사용자가 close → 즉시 같은 파일 reopen 하면 `offerRecoveryIfAny()` 가 아직 persist 되지 않은 in-flight write 를 보지 못해 recovery prompt 를 놓치는 race 가 열려 있었다. `RecoveryStore` 를 **synchronous shadow map + async persist chain** 패턴으로 재구성: `set()` 은 shadow 를 동기적으로 mutate 한 뒤 chain 에 update 를 enqueue 하고, `get()` 은 shadow 를 본다. flush 트리거는 그대로 fire-and-forget 이지만 shadow 가 즉시 갱신되므로 reopen 의 동기 read 가 in-flight write 를 본다. 참조: [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts) `makeRecoveryStore`.
+- **`RecoveryStore.set()` 의 in-place state mutation**: 이전 구현은 `state.get()` 이 돌려준 map 을 직접 `map[k] = v` / `delete map[k]` 한 뒤 `update()` 를 await 했다. Memento 가 reference 를 그대로 돌려주는 구현(다수 그렇다)에서는 update 실패 전에도 in-memory state 가 새는 leak 이 있었다. 새 store 는 `update()` 에 항상 shadow 의 *clone* (`{ ...shadow }`) 을 넘겨 외부에서 받은 map 을 mutate 해도 store 내부와 격리되도록 했다. 참조: [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts) `set` 의 `const snapshot = { ...shadow }`.
+
+#### 회귀 가드 추가
+
+- **functional**: `RecoveryStore.get()` 이 미해결 update 직후에도 in-flight 값을 반환(영원히 resolve 하지 않는 update 약속으로 검증), `set()` 이 update 로 받은 map 의 외부 mutation 으로 shadow 가 오염되지 않음, update 실패해도 shadow 는 그 세션 동안 entry 보존.
+- **regex**: tab.onclick 이 `commitActiveCellOrAbort` 를 `activeIdx` 변경보다 먼저 호출 / Reload 클릭 핸들러가 `commitActiveCellOrAbort` → `postMessage('reload')` 순서 / cell-edit input listener 가 `sendDraftSnapshot` 호출 / `sendDraftSnapshot` 이 deep clone 위에서 작업하고 json-edit 을 제외.
+
+**Test gap 정직 명시**: panel close 자체의 race(close → 매우 짧은 시간 내 reopen, 마이크로초 단위) 와 webview JS 의 실제 keystroke 타이밍은 mock harness 없이는 단위테스트가 어렵다. shadow 메커니즘과 회귀 가드 조합으로 race window 를 닫았지만 통합 시나리오는 수동 검증이 필요하다.
+
+### 수정 — 4차 리뷰 후속 (draft recovery 데이터 손상)
+
+3차에서 도입한 draft snapshot 자체가 세 가지 데이터 손상 케이스를 안고 있었다. 모두 *복구 후 저장* 경로에서만 표면화되므로 동일한 릴리스 안에서 같이 잡았다.
+
+#### High (실제 데이터 손실 / 타입 손상)
+
+- **primitive 셀의 미커밋 draft 가 number/boolean/null 을 string 으로 변환**: `sendDraftSnapshot()` 이 plain input 분기에서 무조건 `input.value` (string) 를 넣었는데, 같은 셀의 commit 경로([src/jsonEditor.ts](src/jsonEditor.ts) `commitCell`) 는 `typeof oldVal === 'string' ? raw : parseValue(raw)` 로 타입을 보존한다. 비대칭 때문에 사용자가 숫자 `2` 를 `3` 으로 입력하고 commit 전에 패널을 닫은 뒤 복구 후 저장하면 디스크에 `"3"` (string) 이 기록됐다 — 사용자는 알아차리기 어렵고, 한 번 string 으로 굳으면 같은 키로 들어오는 다른 행도 도미노로 string 이 된다. boolean 의 `true→false`, null 셀의 `null` 도 동일.
+- **object/array 셀의 유효한 미커밋 JSON draft 가 복구되지 않음**: `<textarea class="json-edit">` 는 sendDraftSnapshot 진입부에서 일괄 `return` 으로 제외되어 partial JSON 의 invalid 케이스를 피했지만, 사용자가 valid JSON 까지 입력해 둔 상태에서 Ctrl+Enter 없이 패널을 닫으면 그 입력이 어디에도 남지 않았다.
+
+위 두 건을 한 번에 잡으려고 webview 의 `sendDraftSnapshot` 핵심 로직을 [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts) 의 `buildDraftSnapshot()` 으로 추출 — webview 는 IIFE 라 외부 모듈을 import 못 하지만, mirror 정책 그대로 동일 본체를 양쪽에 두고 단위테스트는 mirror 쪽에서 직접 호출. plain 분기는 `coerceEditedCellValue` 와 동일한 타입 보존, json-edit 분기는 `JSON.parse(raw)` 가 성공할 때만 parsed 값을 적용 (실패 시 이전 valid draft 가 유지되도록 `skip`).
+
+#### Medium (UX 노이즈)
+
+- **원래 값으로 되돌린 clean draft 가 recovery prompt 를 만듦**: `foo → bar → foo` 처럼 입력만 되돌리고 commit 없이 닫으면, 마지막 keystroke 의 snapshot 이 lastSavedSnapshot 과 비교되지 않고 그대로 host 에 기록되어 다음 reopen 에 의미 없는 *복구하시겠습니까?* 프롬프트가 떴다. `pushHistory()` 에는 이미 같은 가드가 있었지만 draft 경로만 빠져 있던 비대칭. `buildDraftSnapshot()` 이 `JSON.stringify(draft) === lastSavedSnapshot` 비교 후 `clean` 결과를 돌려주면 `sendDraftSnapshot` 이 `setModified(false)` 로 host 의 recovery 엔트리를 비운다. modified 가 이미 false 면 setModified 가 메시지를 송신하지 않으므로 (조건적 게이트), false→false 의 불필요한 트래픽도 없다.
+
+#### 회귀 가드
+
+- **functional**: `buildDraftSnapshot` 단위테스트 16종 — number/boolean/null/string 타입 보존, json-edit valid array/object 캡처, json-edit invalid 시 skip, 동일 baseline 으로 revert 시 clean, baseline 과 다를 때는 snapshot, array item arrIdx 적용, invalid arrIdx/row/path/col → skip, snapshot 과 json-edit 모두 입력 data 를 mutate 하지 않음.
+- **regex (mirror sync)**: webview 의 `sendDraftSnapshot` 이 `buildDraftSnapshot` 에 위임하고 결과 분기(`snapshot` postMessage / `clean` 시 setModified(false)) 를 보존, webview `buildDraftSnapshot` 본체에 deep clone / 타입 보존 / json-edit `JSON.parse` / clean revert 비교가 모두 살아 있음, mirror 헤더에 `sendDraftSnapshot` 이 명시됨.
+
+### 수정 — 5차 리뷰 후속 (draft snapshot dirty 동기화 누락 / convert 핸들러 commit 가드 누락)
+
+4차 도입 후 한 차례 더 들어온 리뷰에서 두 건의 데이터 손실 시나리오를 식별. 모두 같은 릴리스에 묶었다.
+
+#### High (실제 데이터 손실 가능)
+
+- **`sendDraftSnapshot()` snapshot 분기가 host 의 dirty 플래그를 못 잡음**: 4차에서 도입한 draft snapshot 송신은 host 에 recovery 엔트리는 만들지만 `'modified'` 메시지를 보내지 않아 host 의 `currentIsDirty` 가 false 로 머문다. 그 사이 외부에서 파일이 변경되면 [src/jsonEditor.ts](src/jsonEditor.ts) watcher 가 dirty=false 로 보고 *Reload/Keep* 모달 없이 자동 reload 분기로 빠져 `setRecoveryEntry(null)` 로 recovery 까지 비워, 사용자의 미커밋 입력이 모달 한 번 없이 사라졌다. 같은 누락 때문에 `foo→bar→foo` clean revert 시 `setModified(false)` 도 `if (modified !== next)` 에서 no-op 이 되어 host 의 stale recovery 엔트리가 비워지지 않았다 (4차 Finding 3 의 의도와 정반대 결과). snapshot 분기에서 `setModified(true)` 를 postMessage 직전에 호출하도록 수정. 이로써 첫 keystroke 가 즉시 dirty 표시를 켜고, 이후 clean revert 의 `setModified(false)` 는 항상 host 까지 메시지가 전달된다.
+- **`data-convert` (s↔a) 핸들러에 `commitActiveCellOrAbort()` 가드 부재**: convert 는 cell 의 타입을 바꿔 `renderTable()` 로 모든 td 를 갈아치우는데, 다른 셀이 편집 중인 상태에서 convert 클릭 → blur 의 100ms 지연 commit 은 `td.isConnected` 가드로 skip 되어 사용자의 미커밋 입력이 사라졌다. 동일한 가드 패턴(`if (!commitActiveCellOrAbort()) { return; }`) 을 mutation 전에 추가해 tab/Reload/delete-row/drag/btnAddRow 와 같은 정책으로 통일. 회귀 가드 가이드(rerender 를 트리거하는 모든 핸들러는 commit 부터)도 명문화했다.
+
+#### 회귀 가드
+
+- `sendDraftSnapshot` 의 snapshot 분기가 `setModified(true) → postMessage('snapshot')` 순서로 호출하는지 regex 가드 추가. 한쪽만 살아 있으면 위 두 시나리오 중 한쪽이 부활한다.
+- 기존 `row-shifting mutations call commitActiveCellOrAbort first` 가드 배열에 `data-convert` 추가 — convert 는 row 시프트가 아니지만 renderTable 로 다른 셀을 detach 하므로 같은 정책이 필요하다는 점이 이번에 드러나, 가드 코멘트도 "renderTable 을 호출하는 모든 핸들러" 로 일반화.
+
+### 수정 — 6차 리뷰 후속 (json-edit invalid mid-edit 시 dirty 플래그 누락)
+
+5차에서 snapshot 분기에 `setModified(true)` 를 추가했지만, **`buildDraftSnapshot()` 이 `skip` 을 반환하는 경로** 가 별도로 남아 있었다. 가장 흔한 skip 케이스는 object/array 셀의 `<textarea class="json-edit">` 가 mid-edit invalid JSON 인 상황 — 사용자는 키스트로크 단위로 입력 중인데 매 keystroke 마다 `JSON.parse(rawInputValue)` 가 실패해 `skip` 으로 빠진다. `sendDraftSnapshot` 의 5차 코드는 `skip` 에서 아무 것도 하지 않아 `modified` 가 false 로 머물고, 결과적으로:
+
+- 외부 파일 변경 시 watcher 가 dirty=false 로 보고 자동 reload 분기로 빠져 미커밋 입력이 모달 한 번 없이 폐기 ([src/jsonEditor.ts](src/jsonEditor.ts) 외부 변경 watcher / 자동 reload).
+- 다른 JSON 파일을 열 때 `confirmDiscardIfDirty()` 가 silent pass 되어 같은 입력이 폐기 ([src/jsonEditor.ts](src/jsonEditor.ts) `openJsonEditorWithPath` 의 다른 파일 분기).
+
+#### High (실제 데이터 손실 가능)
+
+- **`sendDraftSnapshot()` 의 skip 분기에서도 `setModified(true)` 호출**: 활성 셀의 `td.editing` 가드를 통과한 시점에 사용자는 이미 입력을 들고 있다. invalid JSON 이라 recovery snapshot 은 쓸 수 없어도, dirty 표시는 켜야 reload/switch 보호가 동작한다. 명시적으로 `result.kind === 'skip'` 분기에서 `setModified(true)` 를 호출. 모든 keystroke 마다 호출되지만 setModified 는 modified 변수가 false → true 로 전이될 때만 메시지를 보내므로 추가 트래픽 없음. recovery snapshot 자체는 여전히 valid JSON 이 들어와야 비로소 갱신된다 — invalid raw text 의 보존은 별개 이슈로 의도적으로 범위 제외.
+
+#### 회귀 가드
+
+- `sendDraftSnapshot` 의 skip 분기가 `setModified(true)` 를 호출하는지 regex 가드 추가. 한쪽이 빠지면 위 두 시나리오가 부활한다.
+
+### 수정 — 7차 리뷰 후속 (Escape cancel 이 host draft / dirty 상태 미정리)
+
+3차에서 도입된 draft snapshot 인프라가 `cancelCell()` 과는 따로 굴러다녔다. 입력 중 keystroke 마다 `sendDraftSnapshot()` 이 host 의 recovery 엔트리에 draft 를 쓰고 `modified=true` 를 남기는데, 사용자가 `Escape` 로 편집을 취소해도 [src/jsonEditor.ts](src/jsonEditor.ts) `cancelCell()` 은 `td.editing` 클래스만 제거하고 host 상태에는 손대지 않았다. 결과:
+
+#### Medium (UX 노이즈 / 데이터 신뢰)
+
+- **명시적 `Escape` 로 취소한 입력이 reopen 시 *복구하시겠습니까?* 로 되살아남**: cancelCell 이 host 의 `'modified'` / `'snapshot'` 메시지를 보내지 않아 workspaceState 의 recovery 엔트리에 cancelled draft 가 그대로 남고, 패널을 닫고 다시 열면 사용자가 명시적으로 버린 입력이 복구 후보로 제안됐다.
+- **취소 후 `data` 는 saved 와 같은데 modified 표시만 남는 false positive**: snapshot 분기와 skip 분기 모두 `setModified(true)` 를 호출하도록 6차에서 정리했는데, cancel 은 그 dirty 표시를 끄지 않아 *수정됨* 표시가 잔존하고 다른 파일을 열 때 confirm 다이얼로그가 불필요하게 뜨곤 했다.
+
+`cancelCell()` 에 `pushHistory` / `restoreFromHistoryIndex` / `resetHistoryToCurrent` 와 동일한 정책을 적용 — `snapshotData() !== lastSavedSnapshot` 비교로 `dirtyNow` 를 계산해 `setModified(dirtyNow)` 를 호출, dirty 일 때만 현재 `data` 의 snapshot 을 host 에 송신. 이로써 두 시나리오가 모두 닫힌다:
+
+1. 취소된 입력이 유일한 미커밋 변경이었다 → `dirtyNow=false` → `setModified(false)` 가 host 까지 가서 recovery 엔트리를 비운다.
+2. 다른 커밋된 변경이 남아 있다 → `dirtyNow=true` → cancelled draft 가 들어 있던 host 의 recovery 엔트리를 *현재 data* 로 덮어써 정합 유지.
+
+#### 회귀 가드
+
+- `cancelCell` 본체에 `dirtyNow = snap !== lastSavedSnapshot` 비교, `setModified(dirtyNow)` 호출, `dirtyNow` 분기 안에서만 정확히 한 번 `'snapshot'` postMessage 가 일어나는지 4종의 regex 가드 추가. 분기 밖 snapshot 호출이 새로 생기면 `setModified(false)` 가 비운 recovery 가 곧바로 다시 채워져 의도가 깨진다.
+
+### 수정 — 8차 리뷰 후속 (recovery clear 시 host snapshot cache 누수 → Keep 분기에서 stale draft 부활)
+
+3·4차에서 도입된 host 의 `currentLastReceivedSnapshot` 은 외부 변경 watcher 의 *Keep current edits* 분기 ([src/jsonEditor.ts](src/jsonEditor.ts) Keep 분기) 가 사용자의 마지막 입력을 새 mtime 으로 recovery 엔트리에 즉시 다시 쓰기 위한 캐시였는데, 그 캐시를 비우는 사이트가 일부만 있었다 (`discardPriorRecoveryIfAny`, `onDidDispose`). 이로 인해:
+
+#### Medium (UX 노이즈 / 데이터 신뢰)
+
+- **취소·저장·reload·자동 reload 후 mid-edit invalid 상태에서 외부 변경 → Keep 시 stale draft 부활**: 4개 host 사이트 (`case 'modified'` 의 modified=false 분기, `case 'save'`, `case 'reload'`, watcher 자동 reload) 가 모두 workspaceState 의 recovery 엔트리는 비웠지만 `currentLastReceivedSnapshot` 은 그대로 남겼다. 이후 사용자가 다시 편집을 시작해 json-edit textarea 에서 mid-edit invalid JSON 상태가 되면 `sendDraftSnapshot()` 은 `skip → setModified(true)` 만 일으켜 `'snapshot'` 메시지를 보내지 않는다 (6차에서 의도한 동작). host 의 `currentLastReceivedSnapshot` 은 *이전 사이클의 stale 값* 인 채로 dirty 만 다시 true 가 된다. 이 시점에 외부 변경이 들어오고 사용자가 *Keep current edits* 를 선택하면, watcher Keep 분기가 `currentLastReceivedSnapshot !== undefined` 만 보고 stale snapshot 을 새 mtime 으로 recovery 에 다시 쓴다 — 결국 사용자가 **명시적으로 cancel/save/reload 한 입력** 이 다음 reopen 에서 *복구하시겠습니까?* 로 부활한다.
+
+4개 host 사이트 각각에 `currentLastReceivedSnapshot = undefined;` 라인을 `setRecoveryEntry(context, filePath, null)` 직전에 추가해 cache 와 disk recovery 의 lifecycle 을 일치시켰다. `discardPriorRecoveryIfAny`/`onDidDispose` 가 이미 같은 패턴이라 일관성도 회복.
+
+`offerRecoveryIfAny` 안의 두 추가 `setRecoveryEntry(null)` 호출 (stale entry 폐기 / 사용자 *Discard* 선택) 은 panel 셋업 *이전* 에 실행되므로 `currentLastReceivedSnapshot` 은 그 시점에 이미 undefined — `discardPriorRecoveryIfAny` 또는 직전 `onDidDispose` 가 클리어한 상태. 추가 클리어가 무해하지만 의도를 좁게 가져가려고 검증 대상에서 제외.
+
+#### 회귀 가드
+
+- `case 'modified'` (modified=false 분기), `case 'save'` 성공 분기, `case 'reload'` 성공 분기, watcher 자동 reload 분기 — 4개 사이트 각각이 `setRecoveryEntry(...null)` 와 `currentLastReceivedSnapshot = undefined` 를 같은 분기 안에 *둘 다* 가지고 있는지 source regex 가드 1종 추가. `setRecoveryEntry(...null)` 는 sanity check 로 같이 검증해, regex anchor 가 깨졌을 때 즉시 알림.
+
+### 수정 — 9차 리뷰 후속 (atomic replace 미감지 / RelativePattern glob false positive / 빈 문자열 key skip / 문서 부정확)
+
+#### High (실제 데이터 손실 가능)
+
+- **외부 도구의 atomic replace / delete+create 갱신을 감지하지 못해 stale data 로 외부 변경을 덮어쓰는 경로**: 외부 도구가 `rename(temp, target)` 으로 atomic 하게 파일을 교체하거나 delete + create 시퀀스로 갱신하면 [src/jsonEditor.ts](src/jsonEditor.ts) `createFileSystemWatcher(... ignoreCreateEvents=true ...)` 로 인해 `onDidChange` 가 발화하지 않고 `onDidCreate` 만 들어오는데, 핸들러가 없어 reload/Keep 분기를 못 탔다. clean editor 가 stale data 를 들고 있다가 사용자가 저장하면 외부 변경이 silent 하게 덮어쓰였다. `ignoreCreateEvents` 를 false 로 바꾸고 `onDidCreate` 를 `onDidChange` 와 동일한 `handleExternalChange` 핸들러에 라우팅. 동시에 `onDidDelete` 는 250ms grace period 후 `fs.statSync` 로 파일 존재를 재확인하도록 변경 — atomic replace 의 delete + create 시퀀스에서 사용자가 *file deleted* 경고와 *file changed externally* prompt 를 연속으로 보지 않도록.
+
+#### Medium (false positive / silent skip)
+
+- **`RelativePattern` glob meta-char 미escape + fsPath 미검증**: 파일명에 `*`, `?`, `[`, `{`, `}` 가 들어 있으면 watcher 가 target 을 못 보거나 sibling 을 target 변경으로 오인할 수 있었다. (1) basename 의 glob meta-char 를 character-class 로 escape (`*` → `[*]` 등; `]` 는 class 밖에서 literal 이라 별도 escape 불필요), (2) `handleExternalChange` 콜백에서 `path.normalize(changedUri.fsPath) !== path.normalize(filePath)` 체크로 false positive 를 한 번 더 차단.
+- **빈 문자열 column key (`""`) 가 draft snapshot 에서 부당 skip**: [src/jsonEditor.ts](src/jsonEditor.ts) webview 와 [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts) mirror 양쪽의 `buildDraftSnapshot` 이 `!col` falsy 검사로 column 유효성을 확인했는데, JSON 은 `{"": "value"}` 처럼 빈 문자열 key 를 허용하므로 해당 셀을 commit 전 패널을 닫으면 dirty 표시만 켜지고 draft recovery 가 남지 않아 미커밋 입력을 잃었다. `typeof col !== 'string'` 으로 변경 — undefined/null 은 여전히 skip, 빈 문자열은 정상 처리.
+
+#### Docs
+
+- **dirty-close 복구 한계 명시**: [docs/features.md](docs/features.md) §3 데이터 보호의 *Dirty-close 복구* 항목이 모든 미저장 변경을 복구하는 것처럼 읽혔다. 실제 동작은 *parse 가능한 셀 단위 변경과 commit 된 mutation* 만 복구되며, object/array 셀의 JSON textarea 가 mid-edit invalid 상태에서 패널이 닫히면 raw text 자체는 보존되지 않고 dirty 표시 → 외부 변경/파일 전환 confirm 으로 silent discard 만 차단된다는 사실을 추가.
+
+#### 회귀 가드
+
+- **functional**: `buildDraftSnapshot` 이 빈 문자열 col 에서 snapshot 결과를 돌려주고 (`{"": "updated"}` 적용), undefined col 에서는 skip 인지 단위테스트 2종.
+- **regex**: (1) basename glob escape 패턴 (`/[*?[{}]/g` 치환) 보존, (2) 콜백의 `path.normalize(changedUri.fsPath)` 비교 보존, (3) `createFileSystemWatcher` 가 ignoreCreateEvents=false, (4) `onDidChange` 와 `onDidCreate` 둘 다 `handleExternalChange` 같은 참조에 라우팅, (5) `onDidDelete` 안에 `setTimeout` + `fs.statSync(filePath)` 패턴, (6) webview `buildDraftSnapshot` 본체에 `typeof col !== 'string'` 보존 + `!col` 검사 부재.
+
+### 수정 — 10차 리뷰 후속 (Keep 후 webview baseline 미갱신으로 외부 변경 silent overwrite / glob brace escape 한계)
+
+#### High (실제 데이터 손실 가능)
+
+- **외부 변경 *Keep current edits* 후 webview 의 lastSavedSnapshot 이 옛 디스크 baseline 으로 머물러 silent overwrite**: 9차에서 도입한 `handleExternalChange` 의 Keep 분기가 host 의 `baselineMtimeMs` 와 `currentLastWriteMtime` 만 갱신하고 webview 의 saved baseline 은 그대로 두었다. 시나리오: file `A` 열기 → 사용자 edit `B` (modified=true, recovery=B) → 외부에서 디스크가 `C` 로 변경 → user *Keep* 선택 → host baseline 이 mtime_C 로 갱신, webview 의 `lastSavedSnapshot` 은 여전히 `JSON.stringify(A)` → 사용자가 undo 또는 수동 revert 로 `A` 까지 돌리면 [src/jsonEditor.ts](src/jsonEditor.ts) `pushHistory` 의 `dirtyNow = snap !== lastSavedSnapshot` 비교가 `A === A` 로 보고 `setModified(false)` 송신 → host 가 recovery 엔트리를 비우고 `currentIsDirty=false` → 다음 save 가 *디스크의 외부 변경 `C` 를 silent 하게 `A` 로 덮어쓴다*. Keep 분기에서 디스크를 다시 읽어 `setSavedBaseline` postMessage 로 webview 의 baseline 을 새 디스크 content 로 갱신하도록 변경. webview 의 message 핸들러는 `loadData` 와 달리 user data 는 건드리지 않고 `lastSavedSnapshot` 만 갱신 + `pushHistory` 와 동일한 정책으로 dirty 재평가 (`setModified(dirtyNow)` + dirty 분기 안에서만 snapshot 송신). 디스크 read 가 실패하면 (watcher fire 와 read 사이의 race) 사용자에게 경고 메시지를 띄워 *저장 전 외부 변경 재확인* 을 안내 — best effort.
+
+#### Medium (false negative — 파일명 brace 매치 실패)
+
+- **glob brace escape 가 minimatch 의 brace 확장과 안전 호환되지 않음**: 9차에서 추가한 `path.basename(filePath).replace(/[*?[{}]/g, m => '[' + m + ']')` escape 는 `{` `}` 를 character class 로 감싸지만 (`a{b,c}.json` → `a[{]b,c[}].json`), 일부 minimatch 구현에서는 이 패턴이 원본 파일명과 매치되지 않아 watcher 가 target 을 못 보는 false negative 가 발생한다. 9차의 regex 가드는 escape 코드 *모양* 만 확인했지 실제 매치 동작은 검증하지 못했다 (단위테스트로 minimatch 동작을 검증하는 것은 VS Code API 의 내부 구현 의존성이 높아 가성비가 낮다). 대신 더 단순한 대안을 채택: directory 의 모든 파일을 보는 `*` 패턴 + 콜백의 `path.normalize(changedUri.fsPath)` fsPath gate. 사이드이펙트는 같은 디렉터리의 다른 파일 변경이 콜백을 깨우는 것뿐 — fsPath 비교는 O(1) 라 비용이 작고, 모든 special character (brace 포함) 가 자동 처리된다. 한계: minimatch 의 default `dot:false` 로 `.foo.json` 같은 dotfile 은 패턴이 안 잡힐 수 있지만, 사용자가 수동 reload 로 우회 가능하므로 수용. 9차의 escape 가 부활하지 않도록 negative regex 가드도 함께 추가.
+
+#### 회귀 가드
+
+- watcher 가 `new vscode.RelativePattern(vscode.Uri.file(path.dirname(filePath)), '*')` 형태의 directory-wide 패턴을 사용하는지, 9차의 basename escape 정규식이 부활하지 않았는지, fsPath path.normalize 비교가 보존되는지 — regex 3건.
+- Keep 분기가 `fs.readFileSync(filePath, 'utf-8')` 로 디스크를 다시 읽고 `setSavedBaseline` postMessage 를 보내는지 — regex 2건.
+- webview 의 `setSavedBaseline` 핸들러가 (1) `lastSavedSnapshot = JSON.stringify(msg.data)` 갱신, (2) `dirtyNow = snapshotData() !== lastSavedSnapshot` 재계산, (3) `setModified(dirtyNow)`, (4) `dirtyNow` 분기 *안* 에서만 `'snapshot'` postMessage — pushHistory / cancelCell 와 동일 정책 — regex 4건.
+
+### 수정 — 11차 리뷰 후속 (Keep 의 isRootArray 클로버 / parse-fail 시 recovery 미도달)
+
+10차에서 Keep 분기에 `setSavedBaseline` 메시지를 도입하면서 두 가지 추가 데이터 손실 경로가 생겼다. 둘 다 *Keep current edits* 가 의도한 "사용자 편집 보존" 약속을 깨는 시나리오.
+
+#### High (실제 데이터 손실 가능)
+
+- **Keep 분기가 host 의 `isRootArray` 를 외부 디스크 shape 로 덮어씌움**: 10차 코드의 `isRootArray = newWrapped.isRootArray;` 라인이, 사용자가 root array `[1,2,3]` 을 편집하던 도중 외부에서 디스크가 object `{"x":1}` 로 바뀐 뒤 *Keep* 을 누르면 host 의 `isRootArray=false` 로 덮어쓰였다. 이후 save 시 [unwrapIfRootArray](src/jsonEditor.ts) 가 array 를 unwrap 하지 못해 디스크에 `{"_rootArray":[1,2,3]}` object 형태로 기록되거나, recovery 엔트리도 `isRootArray:false` 로 저장되어 reopen 후 save 에서 같은 손상 재현. Keep 은 user data 를 안 바꾸므로 host 의 `isRootArray` 도 그대로 둬야 한다 — 라인 한 줄 제거.
+- **외부 변경 후 Keep → 디스크가 invalid JSON 으로 깨진 상태에서 패널을 닫고 reopen 시 recovery 도달 불가**: 10차의 Keep 분기는 디스크 read 실패 시 경고만 내고 진행 + recovery 엔트리는 새 mtime 으로 저장된다. 그러나 reopen 시 [openJsonEditorWithPath](src/jsonEditor.ts) 가 `JSON.parse` 실패 → 에러 + early return → `offerRecoveryIfAny` 에 도달하지 못해 사용자가 명시적으로 *Keep* 한 미저장 변경이 영원히 잠긴다. 일반 parse 실패 catch 안에서 offerRecoveryIfAny 를 먼저 호출하도록 변경 — 매칭 recovery (mtime 일치) 가 있으면 사용자에게 복구 제안, 거절 시에만 parse 에러로 빠진다. 디스크에 valid baseline 이 없으므로 webview 의 `savedDataForWebview` 는 빈 객체 sentinel `{}` 로 보내 dirty=true 로 시작 → 사용자가 의식적으로 save 또는 다른 결정을 내리도록 유도. 부수 효과로 reopen-loop (parse 실패 → 복구 → 닫으면 recovery 잔존 → 또 parse 실패) 도 save 한 번으로 끊긴다.
+
+#### 회귀 가드
+
+- Keep 분기 본체에 `isRootArray = newWrapped.isRootArray` 패턴이 *없음* (negative regex), 그러나 `wrapIfArray(newDiskParsed)` 호출은 *있음* (positive regex) — host 변수는 그대로 두고 webview 에 보낼 wrapped form 만 만든다는 의도 보존.
+- `openJsonEditorWithPath` 의 `JSON.parse` catch 블록 안에 `offerRecoveryIfAny(...)` 호출이 있고, 그 결과가 null 일 때만 *JSON 파싱 실패* 메시지 후 return 하는 패턴 — regex 2건.
+
+### 수정 — 12차 리뷰 후속 (Keep parse-fail dirty 누수 / stat·size early-return 이 recovery 우회)
+
+10·11차에서 *Keep* 후 baseline 갱신과 parse-fail 시 recovery fallback 을 도입했지만, 같은 분기에 두 가지 추가 결함이 남아 있었다.
+
+#### High (실제 데이터 손실 가능)
+
+- **Keep 후 새 디스크 baseline parse 실패 시 webview 의 dirty 가 옛 baseline 으로 풀릴 수 있음**: 10차에서 추가한 Keep 분기의 try-catch 가 baseline 갱신에 실패하면 경고만 띄우고 `setSavedBaseline` 송신은 건너뛰었다. webview 의 `lastSavedSnapshot` 은 *옛* 디스크 baseline 으로 남아, 사용자가 undo / 수동 revert 로 그 옛 데이터에 도달할 때 `pushHistory` 의 dirty 비교가 false 로 떨어져 host 가 recovery 를 비우고, 다음 save 가 invalid 디스크를 silent 하게 덮어쓴다. catch 블록에서도 `setSavedBaseline` 을 빈 객체 `{}` sentinel 로 송신하도록 수정 — 어떤 user data 도 sentinel 과 같지 않으므로 항상 dirty 유지. (사용자 데이터가 우연히 `{}` 인 극단적 케이스만 dirty=false, 그 경우 손실 위험도 없으므로 수용.)
+- **`stat` 실패 / 파일 크기 초과 / 파일 읽기 실패 early-return 이 recovery 를 우회**: 11차의 parse-fail recovery fallback 은 추가됐지만 stat 실패 / 파일 크기 초과 / 읽기 실패 세 경로는 여전히 `offerRecoveryIfAny` 도달 전에 `showErrorMessage` + return 했다. 시나리오: dirty editor 닫은 뒤 대상 파일이 외부에서 삭제됐거나 10MB 초과로 바뀌면, workspaceState 에 recovery 가 있어도 복구 프롬프트 자체에 도달하지 못해 사용자의 미저장 변경이 영구 잠금. 4 가지 disk-step 실패 (stat / size / read / parse) 를 *단일 earlyError 객체* 로 캡쳐하고 마지막에 한 곳에서 `getRecoveryEntry` 로 entry 존재만 먼저 확인 후 `offerRecoveryIfAny` 로 prompt — entry 가 없을 때만 captured error 표시 + return. stat 실패의 경우 currentFileMtimeMs 를 알 수 없으므로 entry 의 own mtime 을 그대로 써서 `shouldOfferRecovery` 가 "캡처 이후 외부 변경 없음" 으로 보고 제안하도록 (파일이 사라진 케이스의 적절한 의미). disk-fail fallback 분기는 webview 의 `savedDataForWebview` 로 빈 객체 sentinel `{}` 을 보내 dirty=true 로 시작 → 사용자가 save 로 디스크를 명시적으로 복구하거나 의식적으로 다른 결정을 내리도록.
+
+#### 회귀 가드
+
+- Keep 분기 catch 블록에 `setSavedBaseline` + `data: {}` 패턴 보존 — regex 1건.
+- `openJsonEditorWithPath` 본체에 `earlyError = {` 할당이 4 회 이상 (stat / size / read / parse 4 단계가 각각 캡쳐) — count regex.
+- `if (earlyError) {` 블록 안에 `getRecoveryEntry(context, filePath)` + `offerRecoveryIfAny(` 호출 + `if (!fallback)` 후에만 `showErrorMessage(earlyError.msg)` + return — 통합 fallback 구조 보존.
+- disk-fail fallback 분기에 `savedDataForWebview = {}` sentinel 패턴 보존.
+- 4 개의 개별 `showErrorMessage(...); return;` 패턴이 부활하지 않도록 negative count regex (≤ 1, 통합 earlyError 분기 자신은 허용).
+
+### 수정 — 13차 리뷰 후속 (`{}` sentinel 충돌 / auto-reload parse-fail mtime 누수 / reload 경로 size guard 부재)
+
+12차에서 disk-fail / Keep parse-fail 시 `{}` 객체 sentinel 로 webview 를 dirty 유지시키려 했지만, 사용자가 실제로 빈 객체 `{}` 를 편집 중일 때 dirty=false 로 충돌하는 데이터 손실 케이스가 있었다. 또한 외부 변경 auto-reload 의 parse 실패 catch 와 reload 경로 전반의 size guard 도 누락 상태.
+
+#### High (실제 데이터 손실 가능)
+
+- **`{}` 객체를 baseline-unknown sentinel 로 사용 → 사용자의 빈 객체 편집과 충돌**: 12차의 `savedDataForWebview = {}` (open disk-fail fallback) 와 `setSavedBaseline data: {}` (Keep parse-fail catch) 두 곳 모두, webview 가 `lastSavedSnapshot = JSON.stringify({}) = '{}'` 로 baseline 을 잡았다. 사용자의 data 가 우연히 (또는 실제 의도대로) 빈 객체면 `dirtyNow = ('{}' !== '{}') = false` → setModified(false) → host 가 recovery 비움 → 다음 save 가 invalid 디스크/사라진 파일을 silent 하게 빈 객체로 덮어쓰거나 미저장 변경을 잃는다. *어떤 user data 의 JSON.stringify 결과와도 같을 수 없는* 값을 sentinel 로 써야 한다. webview 에 `BASELINE_UNKNOWN_SENTINEL = ''` (빈 문자열) 을 도입 — `JSON.stringify(data)` 는 어떤 valid 객체 입력에 대해서도 절대 빈 문자열을 만들지 못하므로 안전한 sentinel. host 는 `getWebviewContent` 에 `baselineUnknown: boolean` 파라미터를 추가해 부팅 시 sentinel 을 반영하고, post-boot 의 신호로 `markBaselineUnknown` 메시지를 신설 (Keep 분기가 사용). 12차의 `savedDataForWebview = {}` / `setSavedBaseline data: {}` 패턴은 모두 제거.
+- **clean editor 에서 외부 파일이 invalid JSON 으로 바뀌면 auto-reload catch 가 baseline mtime 을 갱신하지 않아 이후 recovery 가 stale 로 폐기**: 12차 시점의 watcher catch 는 단순 `showWarningMessage` 만 했다. 시나리오: clean editor + 외부에서 디스크 깨짐 → auto-reload parse 실패 → `baselineMtimeMs` 는 옛 mtime 그대로 → 이후 user 편집의 recovery 가 옛 mtime 으로 stamp → 패널 close + reopen 시 `stat.mtimeMs` (새 mtime) 와 안 맞아 `shouldOfferRecovery` 가 stale 로 폐기 → 사용자의 미저장 변경 영구 잠금. catch 에서 `baselineMtimeMs = changedStat.mtimeMs`, `currentLastWriteMtime = changedStat.mtimeMs`, `currentIsDirty = true`, `markBaselineUnknown` postMessage 로 webview baseline 도 sentinel 전환 — parse 실패도 외부 변경 버전으로 인정해 mtime 을 갱신하고 webview 를 dirty=true 로 유지.
+
+#### Medium (자원 보호)
+
+- **manual reload / external auto-reload 에 size guard 부재**: open 경로에는 10MB 제한이 있지만 [src/jsonEditor.ts](src/jsonEditor.ts) 의 `case 'reload'` 와 watcher auto-reload 는 size 체크 없이 곧장 `readFileSync` + `JSON.parse` 를 실행했다. 외부에서 파일이 거대 JSON 으로 바뀌면 처리 한도를 우회하고 메모리를 크게 잡아먹는다. `case 'reload'` 에는 사이즈 초과 시 에러 + break, watcher auto-reload 에는 동일 size guard 후 (사이즈 초과면 reload 포기 + invalid-JSON catch 와 동일 정책으로 mtime 갱신 + markBaselineUnknown). 양쪽 모두 `JSON_EDITOR_MAX_FILE_SIZE` 와 `formatFileSize` 를 일관되게 사용.
+
+#### 회귀 가드
+
+- Keep 분기 catch 가 `markBaselineUnknown` postMessage 를 보내고 옛 `data: {}` 패턴이 부활하지 않았는지 — positive + negative regex.
+- webview `BASELINE_UNKNOWN_SENTINEL = ''` 상수 + `markBaselineUnknown` 핸들러 본체 (`lastSavedSnapshot = BASELINE_UNKNOWN_SENTINEL` + `setModified(true)`) 보존.
+- open 의 disk-fail fallback 이 `baselineUnknownForWebview = true` 플래그를 사용하고 옛 `savedDataForWebview = {}` 가 부활하지 않았는지, `getWebviewContent` 호출에 새 인수 전달.
+- `case 'reload'` 와 watcher auto-reload 둘 다 `JSON_EDITOR_MAX_FILE_SIZE` size guard 적용.
+- watcher auto-reload catch 가 `baselineMtimeMs = changedStat.mtimeMs` 갱신 + `markBaselineUnknown` postMessage 보존.
+
+**테스트**: 신규 79종(1차 17 + 2차 10 + 3차 6 + 4차 17 + 7차 cancelCell host reconciliation 1 + 8차 host recovery cache lifecycle 1 + 9차 watcher robustness/empty-key 6 + 10차 Keep baseline 2 + 11차 Keep isRootArray & parse-fail recovery 2 + 12차 unified disk-fail fallback 2 + 13차 baselineUnknown signal & reload size guard 4: Keep markBaselineUnknown 1 / webview sentinel + handler 1 / disk-fail fallback baselineUnknownForWebview 1 / reload size guard 1 / auto-reload catch state update 1 + 14차 Keep race / reload failure / size fingerprint 9: shouldOfferRecovery size mismatch + match + legacy fallback + size-unknown fallback 4 / Keep post-prompt re-stat 1 / manual Reload failure handler 1 / writeSnapshotEntry size stamp 1 / watcher self-write suppression mtime+size 1 / currentLastWriteSize paired declaration 1; 12차의 Keep `data:{}` 가드는 markBaselineUnknown 가드로 교체되어 +0 로 통합, 14차에서 기존 Keep baseline 가드는 `postPromptStat` 으로 갱신), 5·6차는 기존 가드 강화로 추가 케이스 0, 최종 1149 passing.
+
 ## [0.4.29] - 2026-05-05
 
 ### 수정 / 추가 — Memory Map 리포트 개선 + WebView 임베딩 보안 / Region Details UX 정리

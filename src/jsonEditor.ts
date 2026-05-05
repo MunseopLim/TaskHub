@@ -1,12 +1,139 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as path from 'path';
 import * as crypto from 'crypto';
 import { t } from './i18n';
+import { shouldOfferRecovery, RecoveryEntry, RecoveryStore, makeRecoveryStore } from './jsonEditorUtils';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 let currentMessageDisposable: vscode.Disposable | undefined;
 let currentIsDirty = false;
 let currentFilePath: string | undefined;
+let currentFileWatcher: vscode.FileSystemWatcher | undefined;
+let currentSnapshotTimer: NodeJS.Timeout | undefined;
+let currentPendingSnapshot: unknown | undefined;
+/**
+ * webview가 가장 최근에 보낸 'snapshot' 페이로드. 패널 dispose 시 pending
+ * snapshot을 flush하거나, 외부 변경 Keep 분기에서 새 mtime으로 즉시
+ * recovery 엔트리를 갱신할 때 쓰인다.
+ */
+let currentLastReceivedSnapshot: unknown | undefined;
+/**
+ * 활성 패널의 pending snapshot을 디스크(workspaceState)로 즉시 flush하는
+ * 클로저. 매 `openJsonEditorWithPath` 호출 때 재바인딩되며, 패널 dispose
+ * 핸들러에서 호출해 debounce 창 안에 닫혀도 최신 변경이 유실되지 않게 한다.
+ */
+let currentFlushPendingSnapshot: (() => Promise<void>) | undefined;
+/**
+ * `fs.statSync(file).mtimeMs` of the on-disk file at the moment of the last
+ * write performed by JSON Editor itself. Used by the file watcher to suppress
+ * the change event we triggered ourselves.
+ *
+ * `currentLastWriteSize`는 같은 시점의 `stat.size`. mtime 만으로 suppress 하면
+ * 외부 도구가 mtime 을 보존한 채 (예: `touch -r`, sync 도구) 내용을 바꿨을 때
+ * watcher event 가 와도 "내가 쓴 변경" 으로 오인해 무시한다. 그러면 사용자는
+ * stale data 위에서 편집하게 되고, 닫을 때 recovery 가 옛 baseline size 로
+ * stamp 되어 reopen 시 size mismatch 로 폐기 — 편집본 손실. mtime+size 가
+ * 모두 일치할 때만 suppress 한다.
+ */
+let currentLastWriteMtime: number | undefined;
+let currentLastWriteSize: number | undefined;
+
+const RECOVERY_STATE_KEY = 'taskhub.jsonEditor.recovery';
+const SNAPSHOT_DEBOUNCE_MS = 300;
+
+/**
+ * 단일 모듈 인스턴스 — recovery 엔트리 update 를 단일 promise chain 으로
+ * 직렬화해 save 와 in-flight snapshot write 의 read-modify-write race 를 닫는다.
+ * 첫 호출 시에 lazy 생성되므로 비활성화 시 메모리에 머무르지 않는다.
+ */
+let recoveryStoreInstance: RecoveryStore | undefined;
+function getRecoveryStore(context: vscode.ExtensionContext): RecoveryStore {
+    if (!recoveryStoreInstance) {
+        recoveryStoreInstance = makeRecoveryStore(context.workspaceState, RECOVERY_STATE_KEY);
+    }
+    return recoveryStoreInstance;
+}
+
+function getRecoveryEntry(context: vscode.ExtensionContext, filePath: string): RecoveryEntry | undefined {
+    return getRecoveryStore(context).get(filePath);
+}
+
+function setRecoveryEntry(
+    context: vscode.ExtensionContext,
+    filePath: string,
+    entry: RecoveryEntry | null
+): Promise<void> {
+    return getRecoveryStore(context).set(filePath, entry);
+}
+
+function clearSnapshotTimer(): void {
+    if (currentSnapshotTimer) {
+        clearTimeout(currentSnapshotTimer);
+        currentSnapshotTimer = undefined;
+    }
+    currentPendingSnapshot = undefined;
+}
+
+/**
+ * 사용자가 명시적으로 *변경사항 버리기* 를 선택해 confirmDiscardIfDirty 를
+ * 통과시킨 직후 호출. 이전 파일에 대한 pending snapshot, 호스트 측 메모리
+ * 캐시, 그리고 workspaceState 의 recovery 엔트리를 함께 비워, 이어지는
+ * `offerRecoveryIfAny()` 가 방금 버린 변경을 다시 제안하지 않게 한다.
+ */
+async function discardPriorRecoveryIfAny(
+    context: vscode.ExtensionContext,
+    filePath: string | undefined
+): Promise<void> {
+    if (!filePath) { return; }
+    if (currentSnapshotTimer) {
+        clearTimeout(currentSnapshotTimer);
+        currentSnapshotTimer = undefined;
+    }
+    currentPendingSnapshot = undefined;
+    currentLastReceivedSnapshot = undefined;
+    await setRecoveryEntry(context, filePath, null);
+}
+
+function disposeFileWatcher(): void {
+    currentFileWatcher?.dispose();
+    currentFileWatcher = undefined;
+}
+
+/**
+ * Dirty 상태에서 파일을 닫았을 때를 대비한 복구 스냅샷이 있으면 사용자에게
+ * 복구 여부를 묻는다. 파일이 외부에서 변경된 경우(스냅샷 기록 시점의 mtime과
+ * 현재 파일 mtime이 다른 경우) 스냅샷은 자동으로 폐기한다.
+ */
+async function offerRecoveryIfAny(
+    context: vscode.ExtensionContext,
+    filePath: string,
+    fileMtimeMs: number,
+    fileSize?: number
+): Promise<RecoveryEntry | null> {
+    const entry = getRecoveryEntry(context, filePath);
+    if (!entry) { return null; }
+    if (!shouldOfferRecovery(entry, fileMtimeMs, fileSize)) {
+        await setRecoveryEntry(context, filePath, null);
+        return null;
+    }
+    const fileName = path.basename(filePath);
+    const recoverLabel = t('복구', 'Recover');
+    const discardLabel = t('버리기', 'Discard');
+    const choice = await vscode.window.showInformationMessage(
+        t(
+            `${fileName}에 이전 세션의 미저장 변경사항이 있습니다. 복구하시겠습니까?`,
+            `${fileName} has unsaved changes from a previous session. Recover them?`
+        ),
+        recoverLabel,
+        discardLabel
+    );
+    if (choice === recoverLabel) {
+        return entry;
+    }
+    await setRecoveryEntry(context, filePath, null);
+    return null;
+}
 
 async function confirmDiscardIfDirty(fileName: string): Promise<boolean> {
     if (!currentIsDirty) { return true; }
@@ -91,10 +218,18 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
 
     if (currentPanel && currentFilePath) {
         if (currentFilePath !== filePath) {
+            const wasDirty = currentIsDirty;
             const prevFileName = currentFilePath.split(/[\\/]/).pop() || 'JSON Editor';
             if (!(await confirmDiscardIfDirty(prevFileName))) {
                 currentPanel.reveal(vscode.ViewColumn.One);
                 return;
+            }
+            // 사용자가 *변경사항 버리기* 를 선택했다 → 이전 파일의 recovery
+            // 엔트리와 in-flight snapshot 을 정리. 이렇게 하지 않으면 나중에
+            // 그 파일을 다시 열었을 때 방금 버린 변경이 *복구 프롬프트* 로
+            // 되살아난다.
+            if (wasDirty) {
+                await discardPriorRecoveryIfAny(context, currentFilePath);
             }
         } else if (currentIsDirty) {
             // Reopening the same file while dirty — confirm before we overwrite
@@ -103,45 +238,134 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                 currentPanel.reveal(vscode.ViewColumn.One);
                 return;
             }
+            // 같은 파일 dirty reopen 에서도 동일하게 정리한다. 그래야 곧이은
+            // offerRecoveryIfAny() 가 디스크와 일치하는 (방금 사용자가 버리려고
+            // 했던) snapshot 을 다시 제안하지 않는다.
+            await discardPriorRecoveryIfAny(context, currentFilePath);
         }
     }
 
-    let stat: fs.Stats;
+    // 디스크 단계 (stat / size / read / parse) 의 어떤 실패든 earlyError 에 캡쳐.
+    // 마지막에 매칭 recovery 가 있으면 그것으로 fallback — 옛 dirty close 의
+    // 미저장 변경이 외부 사고 (파일 삭제 / 사이즈 폭증 / invalid JSON 등) 로
+    // 영구히 잠기지 않도록 모든 early-return 을 단일 fallback 으로 라우팅한다.
+    let earlyError: { msg: string; mtimeForRecovery: number | undefined } | null = null;
+
+    let stat: fs.Stats | undefined;
     try {
         stat = fs.statSync(filePath);
     } catch (e: any) {
-        vscode.window.showErrorMessage(t(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`, `Cannot read file (${fileName}): ${e.message}`));
-        return;
+        earlyError = {
+            msg: t(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`, `Cannot read file (${fileName}): ${e.message}`),
+            // stat 실패 — currentFileMtimeMs 를 알 수 없다. recovery 의 own
+            // mtime 을 그대로 쓰면 shouldOfferRecovery 가 "캡처 이후 외부 변경
+            // 없음" 으로 보고 제안한다 (파일이 사라진 케이스에 적절한 의미).
+            mtimeForRecovery: undefined
+        };
     }
 
-    if (stat.size > JSON_EDITOR_MAX_FILE_SIZE) {
-        vscode.window.showErrorMessage(t(
-            `파일 크기(${formatFileSize(stat.size)})가 JSON Editor 처리 한도(${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)})를 초과합니다. 대용량 JSON 파일은 텍스트 에디터에서 직접 편집해 주세요.`,
-            `File size (${formatFileSize(stat.size)}) exceeds the JSON Editor limit (${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)}). Please edit large JSON files directly in a text editor.`
-        ));
-        return;
+    if (!earlyError && stat && stat.size > JSON_EDITOR_MAX_FILE_SIZE) {
+        earlyError = {
+            msg: t(
+                `파일 크기(${formatFileSize(stat.size)})가 JSON Editor 처리 한도(${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)})를 초과합니다. 대용량 JSON 파일은 텍스트 에디터에서 직접 편집해 주세요.`,
+                `File size (${formatFileSize(stat.size)}) exceeds the JSON Editor limit (${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)}). Please edit large JSON files directly in a text editor.`
+            ),
+            mtimeForRecovery: stat.mtimeMs
+        };
     }
 
-    let jsonData: Record<string, unknown>;
+    let jsonData!: Record<string, unknown>;
     let isRootArray = false;
     let detectedIndent: string | number = 2;
-    let content: string;
-    try {
-        content = fs.readFileSync(filePath, 'utf-8');
-    } catch (error: any) {
-        vscode.window.showErrorMessage(t(`파일 읽기 실패 (${fileName}): ${error.message}`, `Failed to read file (${fileName}): ${error.message}`));
-        return;
+    let content: string | undefined;
+    if (!earlyError) {
+        try {
+            content = fs.readFileSync(filePath, 'utf-8');
+        } catch (error: any) {
+            earlyError = {
+                msg: t(`파일 읽기 실패 (${fileName}): ${error.message}`, `Failed to read file (${fileName}): ${error.message}`),
+                mtimeForRecovery: stat!.mtimeMs
+            };
+        }
     }
 
-    try {
-        const parsed = JSON.parse(content);
-        const result = wrapIfArray(parsed);
-        jsonData = result.wrapped;
-        isRootArray = result.isRootArray;
-        detectedIndent = detectIndent(content);
-    } catch (error: any) {
-        vscode.window.showErrorMessage(t(`JSON 파싱 실패 (${fileName}): ${error.message}`, `Failed to parse JSON (${fileName}): ${error.message}`));
-        return;
+    let parseSucceeded = false;
+    let diskDataIfValid: Record<string, unknown> | undefined;
+    if (!earlyError && content !== undefined) {
+        try {
+            const parsed = JSON.parse(content);
+            const result = wrapIfArray(parsed);
+            jsonData = result.wrapped;
+            isRootArray = result.isRootArray;
+            detectedIndent = detectIndent(content);
+            diskDataIfValid = jsonData;
+            parseSucceeded = true;
+        } catch (error: any) {
+            earlyError = {
+                msg: t(`JSON 파싱 실패 (${fileName}): ${error.message}`, `Failed to parse JSON (${fileName}): ${error.message}`),
+                mtimeForRecovery: stat!.mtimeMs
+            };
+        }
+    }
+
+    // 외부 변경 감지 시 비교에 쓸 mtime — fallback 분기에서는 recovery 의
+    // own mtime 또는 stat 으로부터 채운다.
+    let baselineMtimeMs: number;
+    // mtime 보존형 외부 변경(예: `touch -r`, 일부 sync 도구)을 잡기 위한 보조
+    // fingerprint. recovery entry 와 함께 보관해 reopen 에서 size 가 바뀌었으면
+    // mtime 이 같아도 stale 로 폐기한다. 디스크가 유효할 때만 채워진다.
+    let baselineFileSize: number | undefined;
+    let recovered: RecoveryEntry | null = null;
+    let savedDataForWebview: Record<string, unknown> | undefined;
+    // 디스크에 valid baseline 이 없는 disk-fail 경로면 webview 가 빈 문자열
+    // sentinel 로 lastSavedSnapshot 을 잡아 항상 dirty 유지하도록 플래그를 켠다.
+    // (이전에는 disk-fail fallback 에 빈 객체 sentinel 을 디스크 데이터로 보냈
+    // 지만, 사용자가 실제로 빈 객체를 편집 중일 때 dirty=false 로 충돌하는
+    // 데이터 손실 케이스가 있어 명시적 baseline-unknown 신호로 교체.)
+    let baselineUnknownForWebview = false;
+
+    if (earlyError) {
+        // 디스크 단계 실패 — 매칭 recovery 가 있으면 사용자에게 제안.
+        // getRecoveryEntry 로 entry 존재만 먼저 확인하고, 있으면 mtime 결정 후
+        // offerRecoveryIfAny 로 prompt. (entry 가 없으면 prompt 도 띄우지 않고
+        // 곧장 error 로 빠진다.)
+        const entry = getRecoveryEntry(context, filePath);
+        let fallback: RecoveryEntry | null = null;
+        if (entry) {
+            const mtime = earlyError.mtimeForRecovery ?? entry.fileMtimeMs;
+            // size: stat 이 있으면 그것을 기준으로, 없으면 entry 의 own size 를
+            // 그대로 흘려 size 검사가 spurious mismatch 를 일으키지 않게 한다.
+            const sizeForRecovery = stat ? stat.size : entry.fileSize;
+            fallback = await offerRecoveryIfAny(context, filePath, mtime, sizeForRecovery);
+        }
+        if (!fallback) {
+            vscode.window.showErrorMessage(earlyError.msg);
+            return;
+        }
+        jsonData = fallback.data as Record<string, unknown>;
+        isRootArray = fallback.isRootArray;
+        recovered = fallback;
+        // 디스크에 valid baseline 이 없다 → webview 부팅 시 sentinel 로 baseline
+        // unknown 표시. dirty=true 로 시작 → 사용자가 save 로 디스크를
+        // 명시적으로 복구하거나 의식적으로 다른 결정을 내리게 된다.
+        baselineUnknownForWebview = true;
+        savedDataForWebview = undefined;
+        // baselineMtimeMs: stat 가 있으면 그것을, 없으면 (파일 삭제) recovery
+        // 의 own mtime 을 사용해 watcher / shouldOfferRecovery 가 일관된 값을
+        // 본다.
+        baselineMtimeMs = stat ? stat.mtimeMs : fallback.fileMtimeMs;
+        baselineFileSize = stat ? stat.size : fallback.fileSize;
+    } else {
+        // 정상 경로: 디스크 데이터가 있고, 이전 세션 dirty close 의 recovery 가
+        // 있으면 prompt.
+        baselineMtimeMs = stat!.mtimeMs;
+        baselineFileSize = stat!.size;
+        recovered = await offerRecoveryIfAny(context, filePath, baselineMtimeMs, baselineFileSize);
+        if (recovered) {
+            jsonData = recovered.data as Record<string, unknown>;
+            isRootArray = recovered.isRootArray;
+        }
+        savedDataForWebview = recovered ? diskDataIfValid : undefined;
     }
 
     if (currentPanel) {
@@ -153,22 +377,71 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             vscode.ViewColumn.One,
             {
                 enableScripts: true,
+                enableFindWidget: true,
                 retainContextWhenHidden: true
             }
         );
         currentPanel.onDidDispose(() => {
+            // Pending snapshot이 디바운스 창(300ms) 안에 머무는 동안 사용자가
+            // 패널을 닫으면 timeout이 cancel되며 데이터가 유실될 수 있다.
+            // 'edit → 즉시 X' 경로에서도 복구가 가능하도록 dispose 직전에
+            // 동기적으로 flush 트리거. 실제 workspaceState.update는 비동기지만
+            // VS Code가 호스트 종료 전 in-flight update를 기다린다.
+            void currentFlushPendingSnapshot?.();
             currentPanel = undefined;
             currentMessageDisposable?.dispose();
             currentMessageDisposable = undefined;
             currentIsDirty = false;
             currentFilePath = undefined;
+            currentFlushPendingSnapshot = undefined;
+            currentLastReceivedSnapshot = undefined;
+            disposeFileWatcher();
+            clearSnapshotTimer();
         });
     }
 
     currentPanel.title = `JSON Editor: ${fileName}`;
-    currentPanel.webview.html = getWebviewContent(jsonData, filePath, currentPanel.webview);
-    currentIsDirty = false;
+    currentPanel.webview.html = getWebviewContent(jsonData, savedDataForWebview, filePath, currentPanel.webview, baselineUnknownForWebview);
+    currentIsDirty = Boolean(recovered);
     currentFilePath = filePath;
+    currentLastWriteMtime = baselineMtimeMs;
+    currentLastWriteSize = baselineFileSize;
+    clearSnapshotTimer();
+
+    // 스냅샷 디바운스: 편집 중 webview가 보내는 'snapshot' 메시지를 모아 마지막
+    // 값만 workspaceState에 기록한다. flushNow는 패널 dispose / 외부 변경 Keep
+    // 분기에서 즉시 기록을 강제할 때 사용된다.
+    const writeSnapshotEntry = (data: unknown): Promise<void> => {
+        const entry: RecoveryEntry = {
+            data,
+            isRootArray,
+            fileMtimeMs: baselineMtimeMs,
+            fileSize: baselineFileSize,
+            capturedAt: Date.now()
+        };
+        return Promise.resolve(setRecoveryEntry(context, filePath, entry));
+    };
+    const flushPendingSnapshot = async (): Promise<void> => {
+        if (currentSnapshotTimer) {
+            clearTimeout(currentSnapshotTimer);
+            currentSnapshotTimer = undefined;
+        }
+        if (currentPendingSnapshot === undefined) { return; }
+        const snapshot = currentPendingSnapshot;
+        currentPendingSnapshot = undefined;
+        await writeSnapshotEntry(snapshot);
+    };
+    currentFlushPendingSnapshot = flushPendingSnapshot;
+    const scheduleSnapshotWrite = (snapshot: unknown) => {
+        currentPendingSnapshot = snapshot;
+        if (currentSnapshotTimer) { clearTimeout(currentSnapshotTimer); }
+        currentSnapshotTimer = setTimeout(() => {
+            const pending = currentPendingSnapshot;
+            currentPendingSnapshot = undefined;
+            currentSnapshotTimer = undefined;
+            void writeSnapshotEntry(pending);
+        }, SNAPSHOT_DEBOUNCE_MS);
+    };
 
     currentMessageDisposable?.dispose();
     currentMessageDisposable = currentPanel.webview.onDidReceiveMessage(
@@ -176,13 +449,39 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             switch (message.command) {
                 case 'modified': {
                     currentIsDirty = Boolean(message.value);
+                    if (!currentIsDirty) {
+                        clearSnapshotTimer();
+                        // recovery 엔트리를 비울 때는 마지막으로 받은 snapshot
+                        // 캐시도 함께 비워야 한다. 그렇지 않으면 이후 사용자가
+                        // json-edit invalid mid-edit 으로 dirty 만 다시 켜진
+                        // 상태에서 외부 변경 *Keep current edits* 분기가
+                        // currentLastReceivedSnapshot 의 stale 값을 새 mtime 으로
+                        // recovery 에 써, cancelled draft 가 reopen 에서 부활한다.
+                        currentLastReceivedSnapshot = undefined;
+                        await setRecoveryEntry(context, filePath, null);
+                    }
+                    break;
+                }
+                case 'snapshot': {
+                    currentLastReceivedSnapshot = message.data;
+                    scheduleSnapshotWrite(message.data);
                     break;
                 }
                 case 'save': {
                     try {
                         const saveData = unwrapIfRootArray(message.data, isRootArray);
                         fs.writeFileSync(filePath, JSON.stringify(saveData, null, detectedIndent) + '\n', 'utf-8');
+                        const written = fs.statSync(filePath);
+                        currentLastWriteMtime = written.mtimeMs;
+                        currentLastWriteSize = written.size;
+                        baselineMtimeMs = written.mtimeMs;
+                        baselineFileSize = written.size;
                         currentIsDirty = false;
+                        clearSnapshotTimer();
+                        // recovery clear 시 last-received cache 도 함께 비움
+                        // (자세한 사유는 case 'modified' 의 같은 라인 주석 참조).
+                        currentLastReceivedSnapshot = undefined;
+                        await setRecoveryEntry(context, filePath, null);
                         currentPanel?.webview.postMessage({ command: 'saveResult', success: true });
                         vscode.window.showInformationMessage(t(`JSON 저장 완료: ${fileName}`, `JSON saved: ${fileName}`));
                     } catch (error: any) {
@@ -195,14 +494,69 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     if (!(await confirmDiscardIfDirty(fileName))) {
                         break;
                     }
+                    // 실패 경로 헬퍼: 디스크 baseline 갱신 + webview baseline-unknown 으로
+                    // dirty 전환. 옛 baselineMtimeMs 그대로 두면, 이후 사용자 편집의 recovery
+                    // 가 옛 mtime 으로 stamp 되어 reopen 시 stale 로 폐기되거나, webview 의
+                    // lastSavedSnapshot 이 옛 valid disk 데이터로 남아 사용자가 그것에 도달할
+                    // 때 dirty=false 로 풀려 같은 데이터 손실 패턴이 발생한다. watcher 의
+                    // auto-reload 실패 경로와 동일한 처치.
+                    const handleReloadFailure = (statForBaseline?: fs.Stats) => {
+                        if (statForBaseline) {
+                            baselineMtimeMs = statForBaseline.mtimeMs;
+                            baselineFileSize = statForBaseline.size;
+                            currentLastWriteMtime = statForBaseline.mtimeMs;
+                            currentLastWriteSize = statForBaseline.size;
+                        }
+                        currentIsDirty = true;
+                        currentPanel?.webview.postMessage({ command: 'markBaselineUnknown' });
+                    };
+                    // open 경로에 있는 size guard 와 동일하게 reload 도 디스크
+                    // 사이즈를 확인. 외부에서 파일이 10MB 초과로 바뀌면
+                    // readFileSync 가 메모리를 크게 잡아먹는다.
+                    let preReadStat: fs.Stats | undefined;
+                    try {
+                        preReadStat = fs.statSync(filePath);
+                        if (preReadStat.size > JSON_EDITOR_MAX_FILE_SIZE) {
+                            handleReloadFailure(preReadStat);
+                            vscode.window.showErrorMessage(t(
+                                `파일 크기(${formatFileSize(preReadStat.size)})가 JSON Editor 처리 한도(${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)})를 초과합니다. 다시 읽기를 중단합니다.`,
+                                `File size (${formatFileSize(preReadStat.size)}) exceeds the JSON Editor limit (${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)}). Aborting reload.`
+                            ));
+                            break;
+                        }
+                    } catch {
+                        // stat 실패는 곧이은 readFileSync 도 실패할 것 — 같은 catch
+                        // 에서 처리되므로 여기서는 별도 메시지 없이 통과.
+                    }
                     try {
                         const reloadContent = fs.readFileSync(filePath, 'utf-8');
                         const parsed = JSON.parse(reloadContent);
                         const result = wrapIfArray(parsed);
                         isRootArray = result.isRootArray;
+                        const reloadedStat = fs.statSync(filePath);
+                        baselineMtimeMs = reloadedStat.mtimeMs;
+                        baselineFileSize = reloadedStat.size;
+                        currentLastWriteMtime = reloadedStat.mtimeMs;
+                        currentLastWriteSize = reloadedStat.size;
                         currentIsDirty = false;
+                        clearSnapshotTimer();
+                        // recovery clear 시 last-received cache 도 함께 비움
+                        // (자세한 사유는 case 'modified' 의 같은 라인 주석 참조).
+                        currentLastReceivedSnapshot = undefined;
+                        await setRecoveryEntry(context, filePath, null);
                         currentPanel?.webview.postMessage({ command: 'loadData', data: result.wrapped });
                     } catch (error: any) {
+                        // 실패 경로에서는 fresh stat 으로 baseline 을 갱신해야 한다 —
+                        // preReadStat 은 readFileSync 직전의 값이지만, 실제 실패 시점에 디스크
+                        // 가 또 변했을 수 있다. fresh stat 이 실패(파일 사라짐)하면 preReadStat
+                        // 으로 폴백, 그것도 없으면 baseline 갱신 없이 dirty 만 켠다.
+                        let postFailStat: fs.Stats | undefined;
+                        try {
+                            postFailStat = fs.statSync(filePath);
+                        } catch {
+                            postFailStat = preReadStat;
+                        }
+                        handleReloadFailure(postFailStat);
                         if (error instanceof SyntaxError) {
                             vscode.window.showErrorMessage(t(
                                 `JSON 파싱 실패 (${fileName}): 파일 내용이 올바른 JSON 형식이 아닙니다. ${error.message}`,
@@ -217,6 +571,223 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             }
         }
     );
+
+    // 외부 파일 변경 감시. 우리가 직접 쓴 변경은 mtime으로 식별해 무시한다.
+    disposeFileWatcher();
+    // RelativePattern 의 basename glob 은 minimatch 의 brace 확장 (`{a,b}` →
+    // `a` 또는 `b`) 때문에, 파일명에 `{` `}` 가 들어 있으면 어떤 escape 도
+    // 안전하게 동작하지 않는다 (예: `a{b,c}.json` 의 brace 를 character class
+    // 로 escape 한 `a[{]b,c[}].json` 도 일부 minimatch 구현에서는 매치 실패).
+    // 따라서 directory 의 모든 파일을 보는 `*` 패턴을 쓰고, 콜백에서 fsPath 비교로
+    // target 만 골라낸다. 사이드이펙트는 같은 디렉터리의 다른 파일 변경이 콜백을
+    // 깨우는 것뿐 — fsPath 비교는 O(1) 라 비용이 작다.
+    //
+    // 한계: minimatch 의 default `dot:false` 로 `.foo.json` 같은 dotfile 은
+    // 패턴이 안 잡힐 수 있지만, JSON 편집 대상이 dotfile 인 경우는 드물고
+    // 사용자가 수동 reload 로 우회 가능하다.
+    const watchPattern = new vscode.RelativePattern(
+        vscode.Uri.file(path.dirname(filePath)),
+        '*'
+    );
+    currentFileWatcher = vscode.workspace.createFileSystemWatcher(
+        watchPattern,
+        false,  // ignoreCreateEvents — atomic replace(temp → rename target)에서
+                // delete + create 로 들어오는 외부 변경을 감지해야 stale data
+                // 로 사용자가 무심코 외부 변경을 덮는 사고를 막는다.
+        false,  // ignoreChangeEvents
+        false   // ignoreDeleteEvents
+    );
+    // 파일명 normalization 으로 false positive (sibling 매치) 한 번 더 차단.
+    const targetFsPath = path.normalize(filePath);
+    const handleExternalChange = async (changedUri: vscode.Uri) => {
+        if (currentFilePath !== filePath) { return; }
+        if (path.normalize(changedUri.fsPath) !== targetFsPath) { return; }
+        let changedStat: fs.Stats;
+        try {
+            changedStat = fs.statSync(changedUri.fsPath);
+        } catch {
+            return;
+        }
+        // JSON Editor가 방금 쓴 변경이면 무시. mtime 만으로는 mtime 보존형 외부
+        // 변경 (예: `touch -r`, 일부 sync 도구) 이 self-write 로 오인되므로,
+        // currentLastWriteSize 가 알려져 있고 changedStat.size 와 다르면
+        // suppression 을 통과시켜 외부 변경 처리 경로로 흐르게 한다.
+        if (currentLastWriteMtime !== undefined &&
+            Math.abs(changedStat.mtimeMs - currentLastWriteMtime) < 1 &&
+            (currentLastWriteSize === undefined || changedStat.size === currentLastWriteSize)) {
+            return;
+        }
+        if (currentIsDirty) {
+            const reloadLabel = t('다시 읽기 (변경사항 버리기)', 'Reload (discard edits)');
+            const keepLabel = t('현재 편집 유지', 'Keep current edits');
+            const choice = await vscode.window.showWarningMessage(
+                t(
+                    `${fileName} 파일이 외부에서 변경되었습니다. 다시 읽어들이면 현재 편집 내용이 손실됩니다.`,
+                    `${fileName} was changed externally. Reloading will discard your current edits.`
+                ),
+                reloadLabel,
+                keepLabel
+            );
+            if (choice !== reloadLabel) {
+                // 사용자가 Keep을 선택했다. 디스크는 이제 새 외부 버전이지만
+                // 사용자는 자기 편집을 유지하기로 했으므로 baselineMtime을 외부
+                // 변경 후의 값으로 갱신해 둬야, 이후 close → reopen 시
+                // shouldOfferRecovery가 stale로 폐기되지 않는다. 또한 webview가
+                // 마지막으로 보낸 스냅샷이 있다면 새 mtime으로 즉시 recovery
+                // 엔트리를 다시 써, 사용자가 즉시 닫는 경로에서도 편집이
+                // 보존되게 한다.
+                //
+                // prompt 가 떠 있는 동안 파일이 한 번 더 외부에서 변경됐을 수
+                // 있어, prompt 응답 직후 fresh stat 으로 mtime/size 를 다시
+                // 잡는다. 그렇지 않으면 baseline/recovery 가 옛 mtime 으로
+                // 남아 reopen 시 shouldOfferRecovery 가 stale 로 폐기해 사용자
+                // 의 명시적 Keep 이 무시된다. fresh stat 이 실패(파일 사라짐)
+                // 하면 changedStat 으로 폴백.
+                let postPromptStat: fs.Stats;
+                try {
+                    postPromptStat = fs.statSync(filePath);
+                } catch {
+                    postPromptStat = changedStat;
+                }
+                baselineMtimeMs = postPromptStat.mtimeMs;
+                baselineFileSize = postPromptStat.size;
+                currentLastWriteMtime = postPromptStat.mtimeMs;
+                currentLastWriteSize = postPromptStat.size;
+                // webview 의 lastSavedSnapshot 도 새 디스크 content 로 갱신해야
+                // dirty 비교가 디스크 reality 를 반영한다. 이걸 안 하면 사용자가
+                // edit B 후 외부에서 C 로 변경 → Keep → undo 로 옛 baseline A 로
+                // 돌아갈 때 webview 가 dirty=false 로 판단 → host 가 recovery 를
+                // 비움 → 다음 save 가 *디스크의 외부 변경 C* 를 silent 하게 A 로
+                // 덮어쓴다.
+                //
+                // 단, host 의 `isRootArray` 는 webview 가 들고 있는 **사용자
+                // 편집본** 의 root shape 를 가리킨다 — Keep 은 user data 를
+                // 안 바꾸므로 이것도 그대로 둔다. 외부 디스크가 array → object
+                // 로 shape 가 바뀐 경우, 사용자가 array 형태 편집을 유지하는데
+                // host 의 isRootArray 를 false 로 덮어쓰면 다음 save 에서
+                // unwrapIfRootArray 가 array 를 unwrap 하지 못해 디스크에
+                // `{"_rootArray":[...]}` object 로 저장된다.
+                try {
+                    const newDiskContent = fs.readFileSync(filePath, 'utf-8');
+                    const newDiskParsed = JSON.parse(newDiskContent);
+                    const newWrapped = wrapIfArray(newDiskParsed);
+                    currentPanel?.webview.postMessage({
+                        command: 'setSavedBaseline',
+                        data: newWrapped.wrapped
+                    });
+                } catch (e: any) {
+                    // 디스크 read/parse 실패 (외부에서 invalid JSON 으로 깨졌거나
+                    // 사라진 경우). 경고를 띄우되 webview 의 lastSavedSnapshot 이
+                    // *옛* baseline 으로 남으면 안 된다 — 사용자가 undo / 수동
+                    // revert 로 그 옛 데이터에 도달할 때 dirty 가 false 로 풀려
+                    // host 가 recovery 를 비우고, 다음 save 가 invalid 디스크를
+                    // silent 하게 덮어쓴다. markBaselineUnknown 으로 webview 가
+                    // sentinel (빈 문자열 — JSON.stringify 결과와 절대 같지 않음)
+                    // 을 baseline 으로 잡아 항상 dirty 유지. (이전에 데이터로
+                    // `{}` 객체를 보냈을 때는 사용자가 실제로 빈 객체를 편집
+                    // 중일 때 충돌했음.)
+                    vscode.window.showWarningMessage(t(
+                        `${fileName}: Keep 후 saved baseline 갱신 실패. 저장 전 외부 변경을 재확인해 주세요. (${e.message})`,
+                        `${fileName}: failed to refresh saved baseline after Keep. Re-verify external changes before saving. (${e.message})`
+                    ));
+                    currentPanel?.webview.postMessage({ command: 'markBaselineUnknown' });
+                }
+                if (currentLastReceivedSnapshot !== undefined) {
+                    if (currentSnapshotTimer) {
+                        clearTimeout(currentSnapshotTimer);
+                        currentSnapshotTimer = undefined;
+                    }
+                    currentPendingSnapshot = undefined;
+                    await writeSnapshotEntry(currentLastReceivedSnapshot);
+                }
+                return;
+            }
+        }
+        // open 경로의 size guard 와 동일하게, 외부 변경으로 파일이 10MB 초과로
+        // 바뀐 경우 readFileSync 가 메모리를 크게 잡아먹지 않도록 사이즈 체크.
+        // 사이즈 초과면 자동 reload 를 포기하되, parse-fail 과 동일한 정책으로
+        // baseline mtime 을 갱신하고 webview 를 baseline-unknown 으로 dirty 전환
+        // — 사용자가 의식적으로 save 또는 다른 결정을 내리도록.
+        if (changedStat.size > JSON_EDITOR_MAX_FILE_SIZE) {
+            baselineMtimeMs = changedStat.mtimeMs;
+            baselineFileSize = changedStat.size;
+            currentLastWriteMtime = changedStat.mtimeMs;
+            currentLastWriteSize = changedStat.size;
+            currentIsDirty = true;
+            currentPanel?.webview.postMessage({ command: 'markBaselineUnknown' });
+            vscode.window.showWarningMessage(t(
+                `${fileName}: 외부 변경 후 파일 크기(${formatFileSize(changedStat.size)})가 JSON Editor 처리 한도(${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)})를 초과해 자동 다시 읽기를 중단했습니다.`,
+                `${fileName}: external file size (${formatFileSize(changedStat.size)}) now exceeds the JSON Editor limit (${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)}); auto-reload aborted.`
+            ));
+            return;
+        }
+        try {
+            const reloadContent = fs.readFileSync(filePath, 'utf-8');
+            const parsed = JSON.parse(reloadContent);
+            const result = wrapIfArray(parsed);
+            isRootArray = result.isRootArray;
+            baselineMtimeMs = changedStat.mtimeMs;
+            baselineFileSize = changedStat.size;
+            currentLastWriteMtime = changedStat.mtimeMs;
+            currentLastWriteSize = changedStat.size;
+            currentIsDirty = false;
+            clearSnapshotTimer();
+            // recovery clear 시 last-received cache 도 함께 비움 (사유는
+            // case 'modified' 의 같은 라인 주석 참조).
+            currentLastReceivedSnapshot = undefined;
+            await setRecoveryEntry(context, filePath, null);
+            currentPanel?.webview.postMessage({ command: 'loadData', data: result.wrapped });
+            if (!currentIsDirty) {
+                vscode.window.setStatusBarMessage(
+                    t('JSON Editor: 외부 변경을 자동으로 다시 읽음', 'JSON Editor: auto-reloaded external change'),
+                    3000
+                );
+            }
+        } catch (e: any) {
+            // 외부에서 디스크가 invalid JSON 등으로 깨졌다. 경고만 띄우고
+            // baseline 을 옛 mtime 그대로 두면 (1) 이후 user 편집의 recovery
+            // 가 옛 mtime 으로 stamp 되어, reopen 시 stat.mtimeMs (새 mtime) 와
+            // 안 맞아 stale 로 폐기되고, (2) webview 의 lastSavedSnapshot 은
+            // 옛 valid disk 데이터라 user 가 그것에 도달하면 dirty=false 로
+            // 풀려 같은 문제가 발생한다. parse 실패도 외부 변경 버전으로
+            // 인정해 mtime 을 갱신하고, webview 는 baseline-unknown 으로 dirty
+            // 전환 — 사용자의 다음 save 가 invalid 디스크를 명시적으로 복구.
+            baselineMtimeMs = changedStat.mtimeMs;
+            baselineFileSize = changedStat.size;
+            currentLastWriteMtime = changedStat.mtimeMs;
+            currentLastWriteSize = changedStat.size;
+            currentIsDirty = true;
+            currentPanel?.webview.postMessage({ command: 'markBaselineUnknown' });
+            vscode.window.showWarningMessage(t(
+                `외부 변경 감지 후 다시 읽기 실패 (${fileName}): ${e.message}`,
+                `Failed to reload after external change (${fileName}): ${e.message}`
+            ));
+        }
+    };
+    currentFileWatcher.onDidChange(handleExternalChange);
+    // atomic replace (rename(temp, target)) 또는 외부 도구가 delete + create 로
+    // 갱신하는 경우, change 이벤트가 안 오고 create 만 온다. 같은 핸들러에 라우팅.
+    currentFileWatcher.onDidCreate(handleExternalChange);
+    currentFileWatcher.onDidDelete(() => {
+        if (currentFilePath !== filePath) { return; }
+        // atomic replace 의 delete + create 시퀀스에서는 곧이은 onDidCreate 가
+        // 알맞은 reload prompt 를 띄운다. 여기서 곧바로 경고를 띄우면 사용자가
+        // 같은 파일에 대해 두 번의 모달을 보게 되므로, 짧은 grace period 후
+        // 파일이 정말로 사라졌는지 확인하고 그때만 경고한다.
+        setTimeout(() => {
+            if (currentFilePath !== filePath) { return; }
+            try {
+                fs.statSync(filePath);
+                // 파일이 다시 생겨 있다 — atomic replace 였으므로 무시한다.
+                return;
+            } catch {
+                vscode.window.showWarningMessage(t(
+                    `${fileName} 파일이 삭제되었습니다. 저장하면 같은 경로에 다시 만들어집니다.`,
+                    `${fileName} was deleted. Saving will recreate it at the same path.`
+                ));
+            }
+        }, 250);
+    });
 }
 
 function generateNonce(): string {
@@ -224,9 +795,27 @@ function generateNonce(): string {
     return crypto.randomBytes(16).toString('base64');
 }
 
-function getWebviewContent(data: Record<string, unknown>, filePath: string, webview: vscode.Webview): string {
-    // Encode data as base64 to avoid any HTML/JS parsing issues with special characters
+function getWebviewContent(
+    data: Record<string, unknown>,
+    savedData: Record<string, unknown> | undefined,
+    filePath: string,
+    webview: vscode.Webview,
+    /**
+     * Disk 에 valid baseline 이 없는 경우 (parse fail / size exceeded / read fail
+     * 후 recovery fallback) true 로 보낸다. webview 는 lastSavedSnapshot 을 빈
+     * 문자열 sentinel 로 잡아 *어떤* user data 의 JSON.stringify 결과와도 같지
+     * 않게 → 항상 dirty 유지. (이전에는 `{}` 객체를 sentinel 로 썼지만 사용자
+     * 데이터가 우연히 `{}` 일 때 dirty=false 가 되어 충돌했다.)
+     */
+    baselineUnknown: boolean = false
+): string {
+    // Encode data as base64 to avoid any HTML/JS parsing issues with special characters.
+    // savedData가 주어지면(=복구 경로) webview의 saved baseline은 디스크 데이터로
+    // 잡혀 modified 표시와 undo 동작이 올바르게 처리된다.
     const jsonBase64 = Buffer.from(JSON.stringify(data), 'utf-8').toString('base64');
+    const savedBase64 = savedData !== undefined
+        ? Buffer.from(JSON.stringify(savedData), 'utf-8').toString('base64')
+        : '';
     const escapedPath = filePath.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const nonce = generateNonce();
     const csp = `default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};`;
@@ -292,6 +881,11 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
         font-size: 12px;
     }
     button:hover { background: var(--btn-hover); }
+    button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+    button:disabled:hover { background: var(--btn-bg); }
     button.danger { background: var(--danger); }
     button.small {
         padding: 2px 6px;
@@ -508,6 +1102,8 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
     <div class="toolbar">
         <button id="btnSave" title="Save (Ctrl+S)">Save</button>
         <button id="btnReload">Reload</button>
+        <button id="btnUndo" title="Undo (Ctrl+Z)" disabled>↶</button>
+        <button id="btnRedo" title="Redo (Ctrl+Shift+Z / Ctrl+Y)" disabled>↷</button>
         <button id="btnAddRow">+ Row</button>
         <span class="modified-indicator" id="modifiedFlag">● Modified</span>
         <span class="filepath" title="${escapedPath}">${escapedPath}</span>
@@ -534,9 +1130,183 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
         showError('Failed to parse JSON data: ' + e.message);
         return;
     }
+    // host 가 disk-baseline-unknown 으로 부팅한 경우 (parse fail / size exceeded /
+    // read fail 후 recovery fallback). lastSavedSnapshot 으로 빈 문자열 sentinel
+    // 을 사용 — JSON.stringify 의 결과는 valid JSON 이라 절대 빈 문자열일 수
+    // 없으므로, 어떤 user data 와도 같지 않아 항상 dirty 유지. (이전에 빈 객체
+    // 를 sentinel 로 썼지만 사용자가 실제로 빈 객체를 편집 중일 때 dirty=false
+    // 가 되어 recovery 가 비워지는 충돌이 있었다.)
+    const BASELINE_UNKNOWN_SENTINEL = '';
+    const baselineUnknown = ${baselineUnknown ? 'true' : 'false'};
+    // 복구 경로에서 host가 디스크 데이터를 별도로 함께 보내면 그것을
+    // saved baseline으로 사용한다. 복구가 아니면 빈 문자열 → 초기 데이터
+    // 자체가 baseline이라는 신호.
+    let savedSnapshot;
+    try {
+        const sb = '${savedBase64}';
+        if (sb.length > 0) {
+            savedSnapshot = JSON.stringify(JSON.parse(atob(sb)));
+        }
+    } catch(e) {
+        showError('Failed to parse saved snapshot: ' + e.message);
+    }
+    // baselineUnknown 이 true 면 위 savedSnapshot 결정을 override 하고 sentinel 로
+    // 잡는다. resetHistoryToCurrent 가 lastSavedSnapshot 을 sentinel 로 세팅 →
+    // 어떤 data 도 sentinel 과 같지 않아 dirty=true 로 시작.
+    if (baselineUnknown) {
+        savedSnapshot = BASELINE_UNKNOWN_SENTINEL;
+    }
     let sheetMap = [];
     let activeIdx = 0;
     let modified = false;
+
+    // Undo/Redo 스냅샷 스택. 각 항목은 JSON.stringify(data) 결과 문자열.
+    // - cap: 20 step / 16 MB 중 먼저 도달하는 쪽에서 가장 오래된 항목부터 evict
+    // - 푸시 시점: cell commit 성공, addRow, deleteRow, drag drop, convert,
+    //   array tag 추가/삭제 — 즉 사용자가 인지하는 한 번의 편집 단위마다 1개
+    // - 편집 중 셀이 있을 때(td.editing 존재) Ctrl+Z/Y는 동작하지 않음:
+    //   브라우저 기본 input undo가 우선
+    const HISTORY_MAX_STEPS = 20;
+    const HISTORY_MAX_BYTES = 16 * 1024 * 1024;
+    let historyStack = [];
+    let historyIndex = -1;
+    let lastSavedSnapshot = null;
+
+    function snapshotData() { return JSON.stringify(data); }
+
+    function evictHistoryToCap() {
+        let totalBytes = 0;
+        for (const s of historyStack) { totalBytes += s.length; }
+        while ((historyStack.length > HISTORY_MAX_STEPS || totalBytes > HISTORY_MAX_BYTES) &&
+               historyStack.length > 1) {
+            const dropped = historyStack.shift();
+            totalBytes -= dropped.length;
+            historyIndex--;
+        }
+    }
+
+    function pushHistory() {
+        const snap = snapshotData();
+        // redo 분기 폐기
+        if (historyIndex < historyStack.length - 1) {
+            historyStack = historyStack.slice(0, historyIndex + 1);
+        }
+        historyStack.push(snap);
+        historyIndex = historyStack.length - 1;
+        evictHistoryToCap();
+        updateUndoRedoButtons();
+        // 데이터가 saved baseline과 동일해지면 dirty 해제(수동 revert: foo→bar→foo
+        // 같은 케이스). dirty가 풀렸을 때는 snapshot을 보내지 않아 host가 비운
+        // recovery 엔트리를 곧바로 clean 데이터로 다시 쓰는 것을 막는다. dirty와
+        // snapshot 송신은 이 한 곳에서 결정되며, 개별 mutation 핸들러는
+        // setModified를 직접 호출하지 않는다.
+        const dirtyNow = snap !== lastSavedSnapshot;
+        setModified(dirtyNow);
+        if (dirtyNow) {
+            vscode.postMessage({ command: 'snapshot', data: data });
+        }
+    }
+
+    /**
+     * 초기 boot 또는 loadData(reload/외부 변경) 직후 history를 현재 데이터를
+     * 기준으로 새로 시작한다. host가 별도로 'savedSnapshot'(디스크 데이터)을
+     * 같이 보낸 경우(=복구 경로) 그것을 saved baseline으로 잡아 modified 표시와
+     * undo 비교가 올바르게 동작한다. 그 외에는 현재 데이터 = 디스크 데이터로
+     * 간주.
+     */
+    function resetHistoryToCurrent() {
+        const current = snapshotData();
+        historyStack = [current];
+        historyIndex = 0;
+        lastSavedSnapshot = savedSnapshot !== undefined ? savedSnapshot : current;
+        const dirtyNow = current !== lastSavedSnapshot;
+        setModified(dirtyNow);
+        updateUndoRedoButtons();
+        if (dirtyNow) {
+            // 복구 데이터로 boot한 경우 host 쪽 recovery entry를 그대로 유지
+            // 하면서 mtime/data를 최신화하기 위해 한 번 보낸다.
+            vscode.postMessage({ command: 'snapshot', data: data });
+        }
+    }
+
+    function updateUndoRedoButtons() {
+        const undoBtn = document.getElementById('btnUndo');
+        const redoBtn = document.getElementById('btnRedo');
+        if (undoBtn) { undoBtn.disabled = historyIndex <= 0; }
+        if (redoBtn) { redoBtn.disabled = historyIndex >= historyStack.length - 1; }
+    }
+
+    function restoreFromHistoryIndex(idx) {
+        if (idx < 0 || idx >= historyStack.length) { return; }
+        try {
+            data = JSON.parse(historyStack[idx]);
+        } catch (e) {
+            showError('History restore failed: ' + e.message);
+            return;
+        }
+        historyIndex = idx;
+        buildSheetMap();
+        if (activeIdx >= sheetMap.length) { activeIdx = 0; }
+        renderTabs();
+        renderTable();
+        const dirtyNow = historyStack[idx] !== lastSavedSnapshot;
+        setModified(dirtyNow);
+        updateUndoRedoButtons();
+        // saved 상태로 undo 한 경우 host가 modified=false 처리에서 recovery
+        // 엔트리를 이미 비웠으므로 clean snapshot을 다시 보내면 안 된다(그러면
+        // host가 즉시 clean 상태를 recovery로 쓰게 되어 다음 reopen에서
+        // 의미 없는 복구 프롬프트가 뜬다).
+        if (dirtyNow) {
+            vscode.postMessage({ command: 'snapshot', data: data });
+        }
+    }
+
+    function undo() {
+        if (document.querySelector('td.editing')) { return; }
+        if (historyIndex <= 0) { return; }
+        restoreFromHistoryIndex(historyIndex - 1);
+    }
+
+    function redo() {
+        if (document.querySelector('td.editing')) { return; }
+        if (historyIndex >= historyStack.length - 1) { return; }
+        restoreFromHistoryIndex(historyIndex + 1);
+    }
+
+    // 행 인덱스를 변경시키는 mutation(행 삭제, 드래그 정렬, 행 추가) 직전에
+    // 호출한다. 활성 편집 셀이 있으면 commit을 시도하고, invalid JSON 등으로
+    // commit이 거부되면 false를 돌려 호출자가 mutation을 중단하게 한다.
+    //
+    // 이 가드가 없으면: blur 100ms timeout이 commit을 지연 실행하는 동안 사용자가
+    // 다른 행을 삭제/드래그하면, 지연 commit이 stale td.dataset.row 로 새로
+    // 정렬된 배열의 엉뚱한 행에 값을 쓰거나, 인덱스가 새 길이를 넘어
+    // undefined 접근으로 터질 수 있다.
+    function commitActiveCellOrAbort() {
+        const editingTd = document.querySelector('td.editing');
+        if (!editingTd) { return true; }
+        return commitCell(editingTd);
+    }
+
+    // primitive array 셀에서 편집 중인 input[data-arr-idx] 값을 data 의 같은
+    // arr 자리(in-place)에 반영해, 후속 mutation(태그 추가/삭제) 직전에 사용자가
+    // 마지막으로 입력한 값이 유실되지 않도록 한다. arr 참조 자체는 보존하므로
+    // getActiveRows()[rowIdx][col] 가 그대로 가리키고, 이후 splice/push 가 옳게
+    // 동작한다. inputs 가 0 개면 (편집 중이 아닌 경우) 직접 arr 만 돌려준다.
+    function syncEditingArrayCellToData(td) {
+        if (!td) { return null; }
+        const rowIdx = parseInt(td.dataset.row);
+        const col = td.dataset.col;
+        const arr = getActiveRows()[rowIdx][col];
+        if (!Array.isArray(arr)) { return null; }
+        const inputs = td.querySelectorAll('.cell-edit input[data-arr-idx]');
+        if (inputs.length > 0) {
+            const newArr = [];
+            inputs.forEach(input => { newArr.push(input.value); });
+            arr.length = 0;
+            for (const v of newArr) { arr.push(v); }
+        }
+        return arr;
+    }
 
     // NOTE: 아래 buildSheetMap / getActiveRows 로직은 src/jsonEditorUtils.ts 의
     // buildSheetMap / getRowsByPath 와 동일해야 한다. 한쪽만 수정하지 말 것.
@@ -587,7 +1357,15 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
             const tab = document.createElement('div');
             tab.className = 'tab' + (idx === activeIdx ? ' active' : '');
             tab.textContent = entry.label === '_rootArray' ? 'Items' : entry.label;
-            tab.onclick = () => { activeIdx = idx; renderTabs(); renderTable(); };
+            tab.onclick = () => {
+                // 탭 전환은 즉시 renderTable로 DOM을 갈아치워 활성 셀의 td를
+                // detach시킨다. 가드 없이 들어가면 blur 100ms timeout이
+                // isConnected에 막혀 commit이 스킵돼 입력이 유실된다.
+                if (!commitActiveCellOrAbort()) { return; }
+                activeIdx = idx;
+                renderTabs();
+                renderTable();
+            };
             tabsEl.appendChild(tab);
         });
     }
@@ -713,16 +1491,160 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
         return '<div class="cell-edit"><input type="text" value="' + escapeAttr(String(val ?? '')) + '"></div>';
     }
 
+    // 활성 편집 셀에서 사용자가 타이핑 중일 때, input.value를 data 의 클론에
+    // 적용한 *draft snapshot* 을 host로 송신한다. host는 이 스냅샷을
+    // workspaceState recovery 엔트리에 기록하므로, 사용자가 commit 전에
+    // 패널을 강제로 닫더라도 reopen 시 마지막 키스트로크까지 복구할 수 있다.
+    //
+    // 핵심 로직(타입 보존 / JSON-edit valid 캡처 / clean revert 인식)은
+    // jsonEditorUtils.ts 의 buildDraftSnapshot 과 동일하며, 단위테스트는 그쪽에
+    // 있다. webview 는 IIFE 로 외부 모듈을 import 할 수 없어 동일 로직을 여기에
+    // 인라인으로 둔다 — 한쪽만 수정하면 mirror sync regex 가드가 실패한다.
+    //
+    // 세 가지 invariant:
+    //   1) plain (non-array) 셀은 commitCell 과 동일하게 oldVal 의 타입을 보고
+    //      raw 또는 parseValue(raw) 를 적용. 그렇지 않으면 숫자/불리언/null 셀의
+    //      미커밋 draft 가 string 으로 굳어 복구 후 저장 시 디스크에 string 이
+    //      기록된다.
+    //   2) json-edit textarea 는 raw 가 valid JSON 일 때만 parsed 값을 적용,
+    //      invalid 면 skip (이전 valid draft 가 남는다).
+    //   3) draft 가 lastSavedSnapshot 과 같으면 clean → setModified(false) 로
+    //      host 가 recovery 엔트리를 비우게 한다(의미 없는 복구 프롬프트 차단).
+    function buildDraftSnapshot(args) {
+        const data = args.data;
+        const sheetPath = args.sheetPath;
+        const rowIdx = args.rowIdx;
+        const col = args.col;
+        const rawInputValue = args.rawInputValue;
+        const arrIdx = args.arrIdx;
+        const isJsonEdit = args.isJsonEdit;
+        const lastSavedSnapshot = args.lastSavedSnapshot;
+
+        if (!data || typeof data !== 'object') { return { kind: 'skip' }; }
+        // col 은 string 타입만 검증 — JSON 은 빈 문자열 key 도 허용하므로 falsy
+        // 검사로는 안 된다. typeof 로 string 인지 확인 (mirror 와 동일 정책).
+        if (!Array.isArray(sheetPath) || typeof col !== 'string') { return { kind: 'skip' }; }
+        if (typeof rowIdx !== 'number' || Number.isNaN(rowIdx) || rowIdx < 0) { return { kind: 'skip' }; }
+
+        let draft;
+        try {
+            draft = JSON.parse(JSON.stringify(data));
+        } catch (e) {
+            return { kind: 'skip' };
+        }
+
+        let ref = draft;
+        for (let i = 0; i < sheetPath.length; i++) {
+            if (!ref || typeof ref !== 'object' || Array.isArray(ref)) { return { kind: 'skip' }; }
+            ref = ref[sheetPath[i]];
+        }
+        if (!Array.isArray(ref)) { return { kind: 'skip' }; }
+        const row = ref[rowIdx];
+        if (!row || typeof row !== 'object' || Array.isArray(row)) { return { kind: 'skip' }; }
+        const oldVal = row[col];
+
+        if (typeof arrIdx === 'number' && !Number.isNaN(arrIdx)) {
+            const arr = row[col];
+            if (!Array.isArray(arr) || arrIdx < 0 || arrIdx >= arr.length) { return { kind: 'skip' }; }
+            arr[arrIdx] = rawInputValue;
+        } else if (isJsonEdit) {
+            let parsed;
+            try {
+                parsed = JSON.parse(rawInputValue);
+            } catch (e) {
+                return { kind: 'skip' };
+            }
+            row[col] = parsed;
+        } else {
+            row[col] = (typeof oldVal === 'string') ? rawInputValue : parseValue(rawInputValue);
+        }
+
+        if (lastSavedSnapshot !== null && lastSavedSnapshot !== undefined) {
+            if (JSON.stringify(draft) === lastSavedSnapshot) {
+                return { kind: 'clean' };
+            }
+        }
+        return { kind: 'snapshot', data: draft };
+    }
+
+    // 활성 셀의 input/textarea 입력 이벤트 핸들러가 호출.
+    //
+    // - snapshot 결과: host 가 in-flight 미커밋 입력을 인지하도록 setModified(true)
+    //   를 먼저 호출 (host 의 currentIsDirty 가 true 가 되어야 외부 파일 변경
+    //   watcher 가 자동 reload 로 미커밋 입력을 폐기하지 않고 모달을 띄운다).
+    //   그 다음 host 의 workspaceState recovery 엔트리를 snapshot 으로 갱신.
+    // - clean 결과: 사용자가 입력값을 saved baseline 으로 되돌렸다는 뜻 →
+    //   setModified(false) 로 host 가 recovery 엔트리를 비우게 한다. snapshot
+    //   분기에서 setModified(true) 를 먼저 호출했기 때문에 이 false 전이는 항상
+    //   메시지로 송신된다 (setModified 는 modified 변수의 변화에만 송신).
+    // - skip 결과: 이전 draft 는 갱신하지 않지만 setModified(true) 는 호출. 가장
+    //   흔한 skip 케이스는 json-edit textarea 의 mid-edit invalid JSON 인데,
+    //   사용자는 활성 셀에 미커밋 입력을 들고 있는 상태이다. dirty 플래그를
+    //   켜지 않으면 host 의 currentIsDirty 가 false 로 머물러 외부 변경이
+    //   자동 reload 로 빠지거나(미커밋 입력 폐기) 다른 파일을 열 때
+    //   confirmDiscardIfDirty 가 silent pass 되어 입력이 사라진다. recovery
+    //   snapshot 자체는 invalid 라 쓸 수 없지만, dirty 표시로 reload/switch
+    //   보호는 걸 수 있다.
+    function sendDraftSnapshot(input) {
+        if (!input) { return; }
+        const td = input.closest && input.closest('td');
+        if (!td || !td.classList.contains('editing')) { return; }
+        const rowIdx = parseInt(td.dataset.row);
+        const col = td.dataset.col;
+        const sheetEntry = sheetMap[activeIdx];
+        if (!sheetEntry) { return; }
+        const isJsonEdit = !!(input.classList && input.classList.contains('json-edit'));
+        const arrIdxAttr = input.dataset ? input.dataset.arrIdx : undefined;
+        let arrIdx;
+        if (arrIdxAttr !== undefined) {
+            const parsedArrIdx = parseInt(arrIdxAttr);
+            if (Number.isNaN(parsedArrIdx)) { return; }
+            arrIdx = parsedArrIdx;
+        }
+
+        const result = buildDraftSnapshot({
+            data: data,
+            sheetPath: sheetEntry.path,
+            rowIdx: rowIdx,
+            col: col,
+            rawInputValue: input.value,
+            arrIdx: arrIdx,
+            isJsonEdit: isJsonEdit,
+            lastSavedSnapshot: lastSavedSnapshot
+        });
+        if (result.kind === 'snapshot') {
+            setModified(true);
+            vscode.postMessage({ command: 'snapshot', data: result.data });
+        } else if (result.kind === 'clean') {
+            setModified(false);
+        } else if (result.kind === 'skip') {
+            setModified(true);
+        }
+    }
+
     function attachCellEvents() {
         // Click to edit
         document.querySelectorAll('td[data-row]').forEach(td => {
             const view = td.querySelector('.cell-view');
             if (!view) { return; }
             view.addEventListener('click', () => {
-                // Close other editing cells
+                // Close other editing cells. invalid JSON 등으로 commit이
+                // 거부되면 그 셀은 editing 상태로 남으며, 새 셀로의 진입을
+                // 막아 두 셀이 동시에 편집 상태가 되는 것을 방지한다.
+                let allCommitted = true;
                 document.querySelectorAll('td.editing').forEach(other => {
-                    if (other !== td) { commitCell(other); }
+                    if (other !== td) {
+                        if (!commitCell(other)) { allCommitted = false; }
+                    }
                 });
+                if (!allCommitted) {
+                    const failing = document.querySelector('td.editing');
+                    if (failing) {
+                        const failingInput = failing.querySelector('.cell-edit input, .cell-edit textarea');
+                        if (failingInput) { failingInput.focus(); }
+                    }
+                    return;
+                }
                 td.classList.add('editing');
                 const input = td.querySelector('.cell-edit input, .cell-edit textarea');
                 if (input) { input.focus(); input.select && input.select(); }
@@ -738,7 +1660,14 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
             input.addEventListener('blur', (e) => {
                 const td = input.closest('td');
                 if (td && td.classList.contains('editing')) {
-                    setTimeout(() => { if (td.classList.contains('editing')) { commitCell(td); } }, 100);
+                    // td.isConnected: 다른 핸들러가 renderTable로 DOM을 갈아치우면
+                    // 이 td는 detach된다. detach된 td에 commit하면 stale 인덱스로
+                    // 엉뚱한 행에 쓸 수 있어 방어가 필요하다.
+                    setTimeout(() => {
+                        if (td.isConnected && td.classList.contains('editing')) {
+                            commitCell(td);
+                        }
+                    }, 100);
                 }
             });
         });
@@ -752,7 +1681,11 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
             ta.addEventListener('blur', (e) => {
                 const td = ta.closest('td');
                 if (td && td.classList.contains('editing')) {
-                    setTimeout(() => { if (td.classList.contains('editing')) { commitCell(td); } }, 100);
+                    setTimeout(() => {
+                        if (td.isConnected && td.classList.contains('editing')) {
+                            commitCell(td);
+                        }
+                    }, 100);
                 }
             });
         });
@@ -765,20 +1698,28 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
             });
         });
 
+        // Draft snapshot 송신 — 사용자가 commit 전에 탭 전환/Reload/패널 close
+        // 등으로 input이 detach 되어도 host의 recovery 엔트리에 마지막 입력이
+        // 남아 reopen 시 복구할 수 있게 한다. JSON-edit textarea는 partial JSON
+        // 이 invalid 라 sendDraftSnapshot 내부에서 제외된다.
+        document.querySelectorAll('.cell-edit input, .cell-edit textarea').forEach(el => {
+            el.addEventListener('input', () => sendDraftSnapshot(el));
+        });
+
         // Remove array item
         document.querySelectorAll('[data-remove-arr]').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const td = btn.closest('td');
-                const rowIdx = parseInt(td.dataset.row);
-                const col = td.dataset.col;
+                // 편집 중인 input들의 latest value를 data로 sync한 뒤 splice.
+                // 이렇게 하지 않으면 사용자가 한 input을 수정하다가 다른 태그의 ✕를
+                // 누른 순간 입력값이 data에도 history에도 들어가지 못한 채 사라진다.
+                const arr = syncEditingArrayCellToData(td);
+                if (!arr) { return; }
                 const idx = parseInt(btn.dataset.removeArr);
-                const arr = getActiveRows()[rowIdx][col];
-                if (Array.isArray(arr)) {
-                    arr.splice(idx, 1);
-                    setModified(true);
-                    renderTable();
-                }
+                arr.splice(idx, 1);
+                pushHistory();
+                renderTable();
             });
         });
 
@@ -789,18 +1730,18 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
                 const td = btn.closest('td');
                 const rowIdx = parseInt(td.dataset.row);
                 const col = td.dataset.col;
-                const arr = getActiveRows()[rowIdx][col];
-                if (Array.isArray(arr)) {
-                    arr.push('');
-                    setModified(true);
-                    renderTable();
-                    // Focus last input
-                    const newTd = document.querySelector('td[data-row="' + rowIdx + '"][data-col="' + col + '"]');
-                    if (newTd) {
-                        newTd.classList.add('editing');
-                        const inputs = newTd.querySelectorAll('.cell-edit input[data-arr-idx]');
-                        if (inputs.length) { inputs[inputs.length - 1].focus(); }
-                    }
+                // sync first — 입력 중이던 태그 값이 사라지지 않도록.
+                const arr = syncEditingArrayCellToData(td);
+                if (!arr) { return; }
+                arr.push('');
+                pushHistory();
+                renderTable();
+                // Focus last input
+                const newTd = document.querySelector('td[data-row="' + rowIdx + '"][data-col="' + col + '"]');
+                if (newTd) {
+                    newTd.classList.add('editing');
+                    const inputs = newTd.querySelectorAll('.cell-edit input[data-arr-idx]');
+                    if (inputs.length) { inputs[inputs.length - 1].focus(); }
                 }
             });
         });
@@ -809,6 +1750,11 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
         document.querySelectorAll('[data-convert]').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
+                // 다른 셀이 편집 중이면 먼저 commit. convert 는 cell 의 타입을
+                // 바꾸기 때문에 renderTable 로 모든 td 를 갈아치우는데, blur 의
+                // 100ms 지연 commit 은 detach 된 td 의 isConnected 가드로 skip
+                // 되므로 — 이 가드가 없으면 사용자의 미커밋 입력이 사라진다.
+                if (!commitActiveCellOrAbort()) { return; }
                 const td = btn.closest('td[data-row]');
                 if (!td) { return; }
                 const rowIdx = parseInt(td.dataset.row);
@@ -820,7 +1766,7 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
                 } else {
                     getActiveRows()[rowIdx][col] = Array.isArray(val) ? val.join(', ') : String(val);
                 }
-                setModified(true);
+                pushHistory();
                 renderTable();
             });
         });
@@ -828,9 +1774,12 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
         // Delete row
         document.querySelectorAll('[data-delete-row]').forEach(btn => {
             btn.addEventListener('click', () => {
+                // 다른 셀이 편집 중이면 먼저 commit. invalid JSON 으로 거부되면
+                // 행 삭제도 중단해 stale 인덱스로 잘못된 행에 쓰는 사고를 막는다.
+                if (!commitActiveCellOrAbort()) { return; }
                 const rowIdx = parseInt(btn.dataset.deleteRow);
                 getActiveRows().splice(rowIdx, 1);
-                setModified(true);
+                pushHistory();
                 renderTable();
             });
         });
@@ -839,6 +1788,10 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
         let dragSrcIdx = null;
         document.querySelectorAll('tr[data-drag-row]').forEach(tr => {
             tr.addEventListener('dragstart', (e) => {
+                if (!commitActiveCellOrAbort()) {
+                    e.preventDefault();
+                    return;
+                }
                 dragSrcIdx = parseInt(tr.dataset.dragRow);
                 tr.classList.add('dragging');
                 e.dataTransfer.effectAllowed = 'move';
@@ -877,17 +1830,26 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
                 let newIdx = insertBefore ? targetIdx : targetIdx + 1;
                 if (dragSrcIdx < targetIdx) { newIdx--; }
                 rows.splice(newIdx, 0, item);
-                setModified(true);
+                pushHistory();
                 renderTable();
             });
         });
     }
 
+    /**
+     * 편집 중 셀의 입력값을 data에 반영한다.
+     * @returns true 면 commit 성공(실제 변경 여부와 무관), false 면 invalid
+     *   JSON 등으로 commit이 거부되어 td.editing 상태가 유지됨.
+     *   호출자(Save, Ctrl+S, click-to-edit)는 false 반환 시 후속 동작을
+     *   중단해야 데이터가 stale 상태로 저장되거나 두 셀이 동시에 편집
+     *   상태가 되는 것을 방지할 수 있다.
+     */
     function commitCell(td) {
-        if (!td || !td.classList.contains('editing')) { return; }
+        if (!td || !td.classList.contains('editing')) { return true; }
         const rowIdx = parseInt(td.dataset.row);
         const col = td.dataset.col;
         const oldVal = getActiveRows()[rowIdx][col];
+        let changed = false;
 
         if (Array.isArray(oldVal)) {
             const jsonTextarea = td.querySelector('.cell-edit textarea.json-edit');
@@ -896,18 +1858,20 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
                     const newVal = JSON.parse(jsonTextarea.value);
                     if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
                         getActiveRows()[rowIdx][col] = newVal;
-                        setModified(true);
+                        changed = true;
                     }
                 } catch (e) {
                     showError('Invalid JSON in cell [' + col + ']: ' + e.message);
-                    return;
+                    return false;
                 }
             } else {
                 const inputs = td.querySelectorAll('.cell-edit input[data-arr-idx]');
                 const newArr = [];
                 inputs.forEach(input => { newArr.push(input.value); });
-                getActiveRows()[rowIdx][col] = newArr;
-                if (JSON.stringify(oldVal) !== JSON.stringify(newArr)) { setModified(true); }
+                if (JSON.stringify(oldVal) !== JSON.stringify(newArr)) {
+                    getActiveRows()[rowIdx][col] = newArr;
+                    changed = true;
+                }
             }
         } else {
             const jsonTextarea = td.querySelector('.cell-edit textarea.json-edit');
@@ -916,11 +1880,11 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
                     const newVal = JSON.parse(jsonTextarea.value);
                     if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
                         getActiveRows()[rowIdx][col] = newVal;
-                        setModified(true);
+                        changed = true;
                     }
                 } catch (e) {
                     showError('Invalid JSON in cell [' + col + ']: ' + e.message);
-                    return; // Don't close editing on invalid JSON
+                    return false; // Don't close editing on invalid JSON
                 }
             } else {
                 const textarea = td.querySelector('.cell-edit textarea');
@@ -940,18 +1904,38 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
                     // No real change
                 } else if (oldVal !== newVal) {
                     getActiveRows()[rowIdx][col] = newVal;
-                    setModified(true);
+                    changed = true;
                 }
             }
         }
         td.classList.remove('editing');
+        if (changed) {
+            pushHistory();
+        }
         renderTable();
+        return true;
     }
 
     function cancelCell(td) {
         if (!td) { return; }
         td.classList.remove('editing');
         renderTable();
+        // 사용자가 명시적으로 입력을 취소했다. 입력 중 매 keystroke 마다
+        // sendDraftSnapshot 이 host 에 보낸 draft snapshot / dirty 표시는 여기서
+        // 정리해야 한다. 그렇지 않으면 (1) 패널을 닫고 reopen 시 사용자가
+        // cancel 한 입력이 "복구하시겠습니까?" 로 되살아나거나, (2) data 는
+        // saved baseline 과 같은데 modified 표시만 남는 false positive 가 생긴다.
+        //
+        // pushHistory / restoreFromHistoryIndex 와 동일한 정책: 현재 data 가
+        // saved 와 같으면 setModified(false) 로 host 가 recovery 를 비우게
+        // 하고, 다른 커밋된 변경이 남아 있으면 dirty 는 유지하되 host 의
+        // recovery 를 cancelled draft 가 아닌 현재 data 로 덮어쓴다.
+        const snap = snapshotData();
+        const dirtyNow = snap !== lastSavedSnapshot;
+        setModified(dirtyNow);
+        if (dirtyNow) {
+            vscode.postMessage({ command: 'snapshot', data: data });
+        }
     }
 
     // Type-coercing input parser used only when the original cell had a
@@ -975,19 +1959,33 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
         return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
-    // Toolbar buttons
-    document.getElementById('btnSave').addEventListener('click', () => {
+    // 편집 중 셀이 있다면 commit을 먼저 시도하고, invalid JSON 등으로 commit이
+    // 실패하면 save를 진행하지 않는다. 그래야 stale data가 디스크에 기록되거나
+    // 사용자의 미저장 입력이 조용히 사라지는 사고가 발생하지 않는다.
+    function saveAction() {
         const editingTd = document.querySelector('td.editing');
-        if (editingTd) { commitCell(editingTd); }
+        if (editingTd && !commitCell(editingTd)) { return; }
         vscode.postMessage({ command: 'save', data: data });
         // modified flag is cleared only after host confirms successful write (see 'saveResult')
-    });
+    }
+
+    document.getElementById('btnSave').addEventListener('click', saveAction);
 
     document.getElementById('btnReload').addEventListener('click', () => {
+        // Reload도 host의 confirmDiscardIfDirty를 거치지만, 활성 셀의 미커밋
+        // 입력은 아직 data에 들어가지 않아 dirty 판정 자체가 거짓일 수 있다.
+        // 먼저 commit을 시도해 입력을 보존하고, invalid이면 reload를 중단한다.
+        if (!commitActiveCellOrAbort()) { return; }
         vscode.postMessage({ command: 'reload' });
     });
 
+    document.getElementById('btnUndo').addEventListener('click', undo);
+    document.getElementById('btnRedo').addEventListener('click', redo);
+
     document.getElementById('btnAddRow').addEventListener('click', () => {
+        // 행 추가는 인덱스를 시프트시키지 않지만, 일관성과 사용자 의도(편집 중인
+        // 셀의 변경을 잃지 않음)를 위해 같은 가드를 적용한다.
+        if (!commitActiveCellOrAbort()) { return; }
         const rows = getActiveRows();
         if (!rows || !Array.isArray(rows)) { return; }
         const template = {};
@@ -1000,17 +1998,28 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
             });
         }
         rows.push(template);
-        setModified(true);
+        pushHistory();
         renderTable();
     });
 
-    // Ctrl+S to save
+    // Ctrl+S / Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z
     document.addEventListener('keydown', (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        const mod = e.ctrlKey || e.metaKey;
+        if (!mod) { return; }
+        const key = (e.key || '').toLowerCase();
+        if (key === 's') {
             e.preventDefault();
-            const editingTd = document.querySelector('td.editing');
-            if (editingTd) { commitCell(editingTd); }
-            document.getElementById('btnSave').click();
+            saveAction();
+            return;
+        }
+        // Undo/Redo는 셀 편집 중일 때 브라우저 input 기본 undo에 양보한다.
+        if (document.querySelector('td.editing')) { return; }
+        if (key === 'z' && !e.shiftKey) {
+            e.preventDefault();
+            undo();
+        } else if ((key === 'z' && e.shiftKey) || key === 'y') {
+            e.preventDefault();
+            redo();
         }
     });
 
@@ -1023,17 +2032,50 @@ function getWebviewContent(data: Record<string, unknown>, filePath: string, webv
             buildSheetMap();
             const newIdx = sheetMap.findIndex(e => e.label === oldLabel);
             activeIdx = newIdx >= 0 ? newIdx : 0;
-            setModified(false);
             renderTabs();
             renderTable();
+            // 외부 변경/리로드 모두 새 디스크 데이터 = 현재 데이터 → 별도
+            // savedSnapshot 없이 현재 상태를 baseline으로 잡는다.
+            savedSnapshot = undefined;
+            resetHistoryToCurrent();
         } else if (msg.command === 'saveResult') {
-            if (msg.success) { setModified(false); }
+            if (msg.success) {
+                setModified(false);
+                lastSavedSnapshot = snapshotData();
+                updateUndoRedoButtons();
+            }
+        } else if (msg.command === 'setSavedBaseline') {
+            // 외부 변경 *Keep current edits* 분기에서 host 가 새 디스크 content
+            // 를 알려준다. user 의 data 는 그대로 두고 lastSavedSnapshot 만 새
+            // 디스크 baseline 으로 갱신. dirty 비교가 디스크 reality 를 반영하게
+            // 되어, 이후 undo / 수동 revert 로 옛 baseline 데이터에 도달해도
+            // dirty 가 false 로 떨어지지 않는다 (디스크 ≠ user data 라 여전히
+            // 미저장 상태). pushHistory 와 동일한 정책으로 setModified + 분기
+            // 안 snapshot 송신.
+            lastSavedSnapshot = JSON.stringify(msg.data);
+            const dirtyNow = snapshotData() !== lastSavedSnapshot;
+            setModified(dirtyNow);
+            if (dirtyNow) {
+                vscode.postMessage({ command: 'snapshot', data: data });
+            }
+        } else if (msg.command === 'markBaselineUnknown') {
+            // 디스크가 invalid / 사라짐 / 사이즈 초과 등으로 host 가 valid
+            // baseline 을 모를 때. lastSavedSnapshot 을 빈 문자열 sentinel 로
+            // 잡아 (JSON.stringify(data) 는 항상 valid JSON 이라 빈 문자열일
+            // 수 없음 → 항상 dirty), 사용자가 save 로 디스크를 명시적으로
+            // 복구하거나 의식적으로 다른 결정을 내리도록 유도. 이전에 데이터로
+            // 빈 객체를 보냈을 때는 사용자가 실제로 빈 객체를 편집 중일 때
+            // dirty=false 가 되어 recovery 가 비워지는 충돌이 있었다.
+            lastSavedSnapshot = BASELINE_UNKNOWN_SENTINEL;
+            setModified(true);
+            vscode.postMessage({ command: 'snapshot', data: data });
         }
     });
 
-    // Initial render
+    // Initial render & baseline history
     renderTabs();
     renderTable();
+    resetHistoryToCurrent();
 })();
 </script>
 </body>
