@@ -150,20 +150,9 @@ To build from source or contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Configuration
 
-Open `File > Preferences > Settings` in VS Code and search for **"TaskHub"** to adjust every setting through the UI.
+Open `File > Preferences > Settings` in VS Code and search for **"TaskHub"** to browse every setting in a categorized UI. The two dials users tweak most often are `taskhub.runAnyAction.recentLimit` (number of items in the *Recently used* section of Quick Action Palette) and `taskhub.history.maxItems` (how many runs the History panel keeps).
 
-### Frequently tuned settings (highlights)
-
-| Setting | Purpose |
-| --- | --- |
-| `taskhub.runAnyAction.recentLimit` | Number of items shown in the *Recently used* section of Quick Action Palette (`0` hides the section) |
-| `taskhub.history.maxItems` | Maximum number of action runs kept in the History panel |
-| `taskhub.history.showPanel` | Show/hide the History panel itself (records are preserved either way) |
-| `taskhub.pipeline.outputCaptureLimitMb` | Cap on accumulated stdout/stderr (MB) when `passTheResultToNextTask` is on |
-| `taskhub.experimental.bitOperationHover.enabled` | C/C++ bit-operation Before/After hover (experimental) |
-| `taskhub.preset.selected` | Preset ID to apply automatically |
-
-The full list — types, defaults, ranges, related features, and the "how to add a new setting" checklist — is the single source of truth in [docs/features.md §21 Settings Reference](docs/features.md#21-설정-레퍼런스) (Korean). The table above is a curated pointer to the dials users tweak most often.
+The full list — keys, types, defaults, ranges, related features, and the "how to add a new setting" checklist — is the single source of truth in [docs/features.md §21 Settings Reference](docs/features.md#21-설정-레퍼런스) (Korean).
 
 ---
 

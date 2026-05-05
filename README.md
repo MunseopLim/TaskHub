@@ -150,20 +150,9 @@
 
 ## 설정
 
-VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전체 설정을 UI로 조정할 수 있습니다.
+VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전체 설정을 분류별 UI로 조정할 수 있습니다. 가장 자주 손대는 항목은 `taskhub.runAnyAction.recentLimit`(Quick Action Palette의 *Recently used* 노출 개수)와 `taskhub.history.maxItems`(History 패널 보관 개수)입니다.
 
-### 자주 조정하는 설정 (하이라이트)
-
-| 설정 | 용도 |
-| --- | --- |
-| `taskhub.runAnyAction.recentLimit` | Quick Action Palette의 *Recently used* 노출 개수 (`0`이면 섹션 숨김) |
-| `taskhub.history.maxItems` | 사이드바 History 패널이 보관할 실행 기록 개수 |
-| `taskhub.history.showPanel` | History 패널 자체의 표시/숨김 (기록은 유지) |
-| `taskhub.pipeline.outputCaptureLimitMb` | 캡처 모드(`passTheResultToNextTask`) stdout/stderr 누적 상한(MB) |
-| `taskhub.experimental.bitOperationHover.enabled` | C/C++ 비트 연산식 Before/After hover (실험적) |
-| `taskhub.preset.selected` | 자동 적용할 프리셋 ID |
-
-각 설정의 타입·기본값·범위·관련 기능과 새 설정 추가 절차는 [docs/features.md §21 설정 레퍼런스](docs/features.md#21-설정-레퍼런스)에서 단일 출처로 관리됩니다 — 이 표는 그중 사용자가 가장 자주 손대는 항목만 추린 포인터입니다.
+전체 키·타입·기본값·범위·관련 기능과 새 설정 추가 절차는 [docs/features.md §21 설정 레퍼런스](docs/features.md#21-설정-레퍼런스)에서 단일 출처로 관리됩니다.
 
 ---
 
