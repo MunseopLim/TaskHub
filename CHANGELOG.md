@@ -29,6 +29,26 @@
 =====================================================================
 -->
 
+## [0.4.29] - 2026-05-05
+
+### 수정 / 추가 — Memory Map 리포트 개선 + WebView 임베딩 보안 / Region Details UX 정리
+
+#### High (XSS 잠재 위험 / 데이터 손상 / 잘못된 정보)
+- **WebView script 임베딩에서 `</script>` 인젝션 차단**: `Copy Report`, `Copy Full Dump`, 그리고 region/section 데이터를 담는 `RD` 변수가 모두 `<script>` 안에 직접 박힙니다. JSON.stringify만으로는 JS 파서 경계만 안전해질 뿐, HTML 파서는 `</script>` 텍스트를 보면 즉시 스크립트를 종료합니다. 사용자 통제 가능한 입력(파일 경로, 파일명, region/section 이름)에 `</script>`가 들어가면 임의 inline `<script>` 실행이 가능했음. 표준 패턴 `JSON.stringify(value).replace(/</g, '\\u003c')`을 헬퍼 `escapeForScript`로 추출해 세 임베딩 모두 통과시킴 — JS 파서는 `<`를 `<`로 디코드해 의미 보존, HTML 파서는 6글자 텍스트로 보아 패턴 형성 안 됨. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `escapeForScript`.
+- **`atob()` UTF-8 mojibake로 클립보드 깨짐**: 기존 webview는 base64를 `atob()`로 디코드해 string으로 만들었는데, atob은 binary string(각 char가 한 바이트)을 반환합니다. 새 요약 보고서가 포함하는 `—`(em dash)와 `≥`(ge) 같은 multi-byte UTF-8 문자가 `â`, `â¥`로 깨져 클립보드에 들어갔습니다. base64 + atob 파이프라인을 `JSON.stringify` 임베딩으로 전환 — Unicode 무손실. 동일 helper에서 `<` escape까지 한 번에 처리. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `escapeForScript`, [src/test/elfParser.test.ts](src/test/elfParser.test.ts) UTF-8 round-trip 테스트.
+- **Memory Regions 표의 `Base` 컬럼이 region origin이 아니라 가장 큰 섹션 주소**: `computeMemoryUsage` / `computeSymbolUsage`가 `sections`를 size 내림차순으로 정렬해 반환하므로, 새 요약 보고서가 `u.sections[0].addr`를 origin으로 사용하던 게 잘못된 주소를 노출했습니다. `generateSummaryReport`에 `regions: MemoryRegion[]` 인자를 추가해 `originByName` Map으로 정확한 origin lookup. 참조: [src/elfParser.ts](src/elfParser.ts) `generateSummaryReport`.
+
+#### Medium (Region Details 토글 라벨이 실제 동작과 어긋남)
+- **개별 펼침 경로 3곳에서 `▼ Expand All` 라벨 동기화 누락**: 단일 토글 버튼은 DOM 상태(펼친 region 존재 여부)에 따라 `▼ Expand All` ↔ `▶ Collapse All`을 자동 전환하는데, `toggleRegion` 외의 자동 펼침 경로 — (1) 검색 키워드로 매치된 region 자동 펼침, (2) Overview 표 row 클릭, (3) `Ctrl+Shift+O` (`scrollToRegion` 메시지) — 가 `syncToggleAllLabel()`을 호출하지 않아 라벨이 stale 상태로 남았습니다. 예: 전체 접힘 상태에서 Overview row 클릭 → region은 펼쳐졌는데 버튼은 여전히 `▼ Expand All`로 보이고, 클릭하면 실제로는 전체 접기가 실행됨. 세 경로 모두에 `if (window.syncToggleAllLabel) window.syncToggleAllLabel();` 한 줄씩 추가. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts).
+
+#### UX / 일관성
+- **Region Details의 `Expand All` / `Collapse All` 두 버튼 → 단일 토글 버튼**: 라벨이 다음 클릭이 수행할 동작을 반영. 개별 region을 수동으로 펼치거나 접어도 동기화되어 항상 정확한 액션을 안내. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `toggleAll`, `syncToggleAllLabel`.
+- **`Copy Report` 보고서 형식 큐레이션 + `Copy Full Dump` 버튼 분리**: 기존 보고서는 region별 모든 섹션 + All Sections 표를 통째로 출력해 sample_armlink_large.txt 기준 ~820줄. 새 `Copy Report`는 markdown 표 형식의 50줄 요약(헤더, Memory Regions 표, region별 Top 5 섹션 + 가장 큰 free hole, Highlights 섹션 — 가장 큰 섹션, 가장 큰 free hole, ≥80% 포화 region 경고). 형식이 markdown이라 GitHub 이슈/PR, Slack, Notion에 그대로 붙여 넣어도 정렬이 깨지지 않음. 기존 dump가 필요한 사용자(grep / diff / 회귀 비교)는 `Copy Full Dump` 버튼으로 종전 동작 그대로 사용. 참조: [src/elfParser.ts](src/elfParser.ts) `generateSummaryReport`, [docs/features.md](docs/features.md) "리포트 복사".
+- **WebView에서 `Ctrl/Cmd+F` 단축키로 검색창 포커스**: 기존에는 keydown 핸들러가 없어 webview 내부에서 단축키가 묻혔음. 이제 어디서 누르든 검색창에 focus + 기존 입력이 있으면 전체 선택(바로 덮어쓰기). `Ctrl/Cmd+Shift+F`(VS Code "Find in Files")는 `!shiftKey && !altKey` 가드로 통과시켜 전역 단축키 보존. `Esc`는 검색창 안에서만 동작 — 1차 누름은 검색어 비우고 필터 즉시 리셋, 2차 누름은 blur. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts).
+- **Memory Map 스크린샷 갱신**: 단일 토글 버튼 + 두 복사 버튼이 보이는 새 화면으로 교체 — README.md / README.en.md 두 곳에서 같은 경로 참조. 참조: [docs/images/memory-map-armlink.png](docs/images/memory-map-armlink.png).
+
+**테스트**: 신규 13 케이스 — `generateSummaryReport` 7종(헤더 출력 / Memory Regions 표 / Top-N 절단 + `+ N more` / 커스텀 topN / Highlights(가장 큰 섹션·hole·포화 경고 묶음) / usage 없을 때 블록 생략 / 50섹션도 <40줄 컴팩트성 + monospace 패딩 없음), 회귀 가드 6종(**Memory Regions Base가 origin 출력 (largest section addr 아님)**, **UTF-8 출력 보존**, **JS 임베딩 round-trip**, **`<` escape — string 페이로드**, **`<` escape — RD object 페이로드**, **end-to-end: section 이름 with `</script>`가 보고서 임베딩 거쳐도 안전**). 최종 1074 passing.
+
 ## [0.4.28] - 2026-05-05
 
 ### 추가 — Quick Action Palette (`TaskHub: Run Any Action…`) + `recentLimit` 설정

@@ -1463,6 +1463,13 @@ Region Details 테이블에서 Function 컬럼을 토글하여 각 엔트리의 
 - 테이블 컬럼: **Object** | **Section** | **Function** | Address | End | Size | Bytes | Type
 - "Function ▶" 버튼 클릭으로 Section + Function 컬럼 함께 표시/숨김 전환
 
+### 리포트 복사
+
+Memory Map 패널 상단에 **두 개의 복사 버튼**이 있습니다 — 의도가 "공유용 요약"인지 "원시 데이터 dump"인지에 따라 골라 사용합니다.
+
+- **"Copy Report"** — 큐레이션된 markdown 요약(약 50줄). 헤더(파일명/경로/Entry Point/생성 시각), Memory Regions 표, region별 Top 5 섹션 + 가장 큰 free hole, 그리고 Highlights(가장 큰 섹션·가장 큰 free hole·≥80% 포화 region 경고). 형식은 markdown 표라 GitHub 이슈/PR, Slack, Notion에 그대로 붙여 넣어도 정렬이 깨지지 않습니다.
+- **"Copy Full Dump"** — region별 모든 섹션 + 전체 섹션 표(Address/End/Size/Bytes/Type)를 monospace 텍스트로 그대로 복사. grep / diff / 회귀 비교가 필요할 때 사용. 대용량 listing 파일은 수백~수천 줄에 이를 수 있습니다.
+
 ### HTML 저장
 
 Memory Map 패널 상단의 **"Save HTML"** 버튼을 클릭하면, 현재 보이는 화면 그대로를 standalone HTML 파일로 저장할 수 있습니다:
@@ -1481,12 +1488,12 @@ Memory Map 패널 상단의 **"Save HTML"** 버튼을 클릭하면, 현재 보�
 
 ### 검색 및 탐색
 
-- **키워드 검색**: 상단 검색창에서 섹션 이름, 주소, 타입으로 필터링. 접힌 region 내부도 검색되며 매치 시 자동으로 펼침
+- **키워드 검색**: 상단 검색창에서 섹션 이름, 주소, 타입으로 필터링. 접힌 region 내부도 검색되며 매치 시 자동으로 펼침. `Ctrl/Cmd+F`로 검색창에 포커스(기존 입력은 전체 선택), `Esc`로 검색어 초기화 후 다시 한 번 누르면 포커스 해제
 - **다중 패널**: 서로 다른 파일을 열면 각각 별도 탭으로 표시됩니다. 동일 파일명이라도 경로가 다르면 독립 패널로 열리며, 같은 파일을 다시 열면 기존 패널을 재사용합니다.
 - **Region 이동** (`Ctrl+Shift+O`): Memory Map 패널이 활성화된 상태에서 VS Code QuickPick으로 region 목록을 표시하고, 선택 시 해당 region으로 스크롤 및 펼침 (마지막으로 활성화된 패널 기준)
 - **Region 요약 테이블 클릭**: 상단 Overview 테이블의 row 클릭 시 해당 Region Details로 스크롤 및 자동 펼침
 - **Region 폴딩**: 각 region 카드가 기본 접힘 상태로 표시되며, 클릭으로 토글 가능 (헤더 + 사용률 바는 항상 표시)
-- **Expand All / Collapse All**: Region Details 섹션에서 전체 region을 일괄 펼침/접기 가능
+- **Expand/Collapse All 토글**: Region Details 섹션 헤더의 단일 버튼으로 전체 region을 일괄 펼침/접기. 라벨은 현재 상태에 따라 `▼ Expand All` ↔ `▶ Collapse All`로 자동 전환되며, 개별 region을 수동으로 펼치거나 접어도 다음 클릭이 수행할 동작에 맞게 동기화된다.
 - **섹션 테이블 정렬**: Region Details 및 All Sections 테이블에서 컬럼 헤더 클릭으로 오름차순/내림차순 정렬. Size/Bytes/% 컬럼은 첫 클릭 시 내림차순. Size 정렬 시 단위(B/KB/MB) 관계없이 실제 바이트 크기 기준 정렬
 - **맨 위로 이동**: 페이지 하단 스크롤 시 우하단에 floating ↑ 버튼 표시, 클릭 시 페이지 최상단으로 이동
 

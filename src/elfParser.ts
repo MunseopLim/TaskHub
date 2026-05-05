@@ -616,6 +616,125 @@ export function generateTextReport(
     return lines.join('\n');
 }
 
+/**
+ * Markdown summary report. Designed to be useful when pasted into PRs / issues /
+ * Slack / Notion: ~50 lines for a 410-section file, formatting independent of
+ * monospace fonts. The full per-section dump is available via generateTextReport.
+ */
+export function generateSummaryReport(
+    fileName: string,
+    filePath: string,
+    entryPoint: number,
+    flashTotal: number,
+    ramTotal: number,
+    sectionSummary: SectionSummary[],
+    memoryUsage: MemoryUsage[],
+    regions: MemoryRegion[],
+    options?: { topN?: number; generatedAt?: Date }
+): string {
+    const topN = options?.topN ?? 5;
+    const now = options?.generatedAt ?? new Date();
+    // Local-time ISO-ish: "2026-05-05 12:34:56" — round-trippable for humans
+    // without a timezone surprise on paste.
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    const ts = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ` +
+        `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+
+    const lines: string[] = [];
+    lines.push(`# Memory Map: ${fileName}`);
+    lines.push('');
+    lines.push(`- **Source**: \`${filePath}\``);
+    lines.push(`- **Entry Point**: ${formatHex(entryPoint)}`);
+    lines.push(`- **Generated**: ${ts}`);
+    lines.push('');
+    lines.push('## Totals');
+    lines.push('');
+    if (memoryUsage.length > 0) {
+        lines.push(`- Flash (Code + RO Data): ${formatSize(flashTotal)}`);
+        lines.push(`- RAM (Data + BSS): ${formatSize(ramTotal)}`);
+    }
+    lines.push(`- Sections: ${sectionSummary.length}`);
+    lines.push('');
+
+    if (memoryUsage.length > 0) {
+        lines.push('## Memory Regions');
+        lines.push('');
+        lines.push('| Region | Base | Max | Used | Free | Usage |');
+        lines.push('|---|---|---|---|---|---|');
+        // Look up region origins from the authoritative regions array.
+        // u.sections is sorted by size desc (see computeMemoryUsage / computeSymbolUsage),
+        // so u.sections[0].addr is "largest section", NOT region base.
+        const originByName = new Map(regions.map(r => [r.name, r.origin]));
+        for (const u of memoryUsage) {
+            const calcFree = u.freeSpaces.reduce((sum, f) => sum + f.size, 0);
+            const pct = u.total > 0 ? (u.used / u.total * 100).toFixed(1) + '%' : '—';
+            const origin = originByName.get(u.region) ?? 0;
+            lines.push(`| ${u.region} | ${formatHex(origin)} | ${formatSize(u.total)} | ${formatSize(u.used)} | ${formatSize(calcFree)} | ${pct} |`);
+        }
+        lines.push('');
+
+        lines.push('## Top Sections per Region');
+        lines.push('');
+        for (const u of memoryUsage) {
+            const calcFree = u.freeSpaces.reduce((sum, f) => sum + f.size, 0);
+            const pct = u.total > 0 ? (u.used / u.total * 100).toFixed(1) + '%' : '—';
+            lines.push(`### ${u.region} — ${formatSize(u.used)} / ${formatSize(u.total)} (${pct})`);
+            lines.push('');
+            const sorted = [...u.sections].sort((a, b) => b.size - a.size);
+            const top = sorted.slice(0, topN);
+            const rest = sorted.slice(topN);
+            if (top.length === 0) {
+                lines.push('_No sections._');
+            } else {
+                lines.push('| Section | Address | Size |');
+                lines.push('|---|---|---|');
+                for (const s of top) {
+                    lines.push(`| ${s.name} | ${formatHex(s.addr)} | ${formatSize(s.size)} |`);
+                }
+                if (rest.length > 0) {
+                    const restSize = rest.reduce((sum, s) => sum + s.size, 0);
+                    lines.push('');
+                    lines.push(`_+ ${rest.length} more sections, ${formatSize(restSize)} total._`);
+                }
+            }
+            if (u.freeSpaces.length > 0) {
+                const largestHole = u.freeSpaces.reduce((m, f) => f.size > m.size ? f : m);
+                lines.push('');
+                lines.push(`Free: ${formatSize(calcFree)} total — largest hole ${formatSize(largestHole.size)} @ ${formatHex(largestHole.addr)}`);
+            }
+            lines.push('');
+        }
+
+        // Highlights: at-a-glance signals that a reader might miss in the per-region tables.
+        lines.push('## Highlights');
+        lines.push('');
+        let largestSec: { name: string; size: number; region: string } | null = null;
+        let largestHoleAcross: { size: number; addr: number; region: string } | null = null;
+        for (const u of memoryUsage) {
+            for (const s of u.sections) {
+                if (!largestSec || s.size > largestSec.size) { largestSec = { name: s.name, size: s.size, region: u.region }; }
+            }
+            for (const f of u.freeSpaces) {
+                if (!largestHoleAcross || f.size > largestHoleAcross.size) { largestHoleAcross = { size: f.size, addr: f.addr, region: u.region }; }
+            }
+        }
+        if (largestSec) {
+            lines.push(`- Largest section: **${largestSec.name}** (${formatSize(largestSec.size)}) in ${largestSec.region}`);
+        }
+        if (largestHoleAcross) {
+            lines.push(`- Largest free hole: ${formatSize(largestHoleAcross.size)} @ ${formatHex(largestHoleAcross.addr)} in ${largestHoleAcross.region}`);
+        }
+        // Region-saturation heads-up — anything ≥80% used is worth flagging.
+        const saturated = memoryUsage.filter(u => u.total > 0 && (u.used / u.total) >= 0.8);
+        if (saturated.length > 0) {
+            const labels = saturated.map(u => `${u.region} (${(u.used / u.total * 100).toFixed(1)}%)`).join(', ');
+            lines.push(`- Saturated regions (≥80%): ${labels}`);
+        }
+    }
+
+    return lines.join('\n');
+}
+
 export function formatSize(bytes: number): string {
     if (bytes < 1024) { return `${bytes} B`; }
     if (bytes < 1024 * 1024) { return `${(bytes / 1024).toFixed(1)} KB`; }

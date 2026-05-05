@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary } from './elfParser';
+import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, generateSummaryReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary } from './elfParser';
 import { parseLinkerFile } from './linkerScriptParser';
 import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 import { t } from './i18n';
@@ -159,9 +159,10 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     const flashTotal = flash.reduce((sum, s) => sum + s.size, 0);
     const ramTotal = ram.reduce((sum, s) => sum + s.size, 0);
     const textReport = generateTextReport(fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
+    const summaryReport = generateSummaryReport(fileName, filePath, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions);
     const hasSymbols = symbols.length > 0;
 
-    showPanel(context, filePath, fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, hasSymbols);
+    showPanel(context, filePath, fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, summaryReport, hasSymbols);
 }
 
 function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: string) {
@@ -220,8 +221,9 @@ function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: st
     const flashTotal = flash.reduce((sum, s) => sum + s.size, 0);
     const ramTotal = ram.reduce((sum, s) => sum + s.size, 0);
     const textReport = generateTextReport(fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
+    const summaryReport = generateSummaryReport(fileName, filePath, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions);
 
-    showPanel(context, filePath, fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport);
+    showPanel(context, filePath, fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, summaryReport);
 }
 
 function showPanel(
@@ -235,6 +237,7 @@ function showPanel(
     memoryUsage: MemoryUsage[],
     regions: MemoryRegion[],
     textReport: string,
+    summaryReport: string,
     hasSymbols?: boolean
 ) {
     const existing = panels.get(filePath);
@@ -285,7 +288,7 @@ function showPanel(
 
     panel.title = `Memory Map: ${fileName}`;
     panel.webview.html = getWebviewContent(
-        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, hasSymbols, panel.webview
+        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, summaryReport, hasSymbols, panel.webview
     );
 
     // Store region symbols for Go to Symbol command
@@ -333,6 +336,7 @@ function getWebviewContent(
     memoryUsage: MemoryUsage[],
     regions: MemoryRegion[],
     textReport: string,
+    summaryReport: string,
     hasSymbols?: boolean,
     webview?: vscode.Webview
 ): string {
@@ -454,7 +458,23 @@ function getWebviewContent(
         </tr>`
     ).join('');
 
-    const reportBase64 = Buffer.from(textReport, 'utf-8').toString('base64');
+    // Inject reports as JSON-encoded JS string literals.
+    //   1. JSON.stringify handles all JS escaping (quotes, backslashes,
+    //      control chars, line separators) and preserves Unicode losslessly —
+    //      avoids the atob() mojibake we previously hit on "—" / "≥".
+    //   2. .replace(/</g, '\\u003c') prevents HTML-parser early script
+    //      termination if user-controlled input (filename, file path, region
+    //      or section names) ever contains "</script>". The JS parser still
+    //      decodes < back to "<", but the HTML parser doesn't see it.
+    // Accepts any JSON-serializable value (string OR object). Strings come out
+    // as JS string literals; objects/arrays as object/array literals. Both end
+    // up safely embeddable inside <script>...</script> because every "<" is
+    // escaped to "<" — the JS parser still rebuilds the original value,
+    // but the HTML parser cannot see "</script>" in the payload.
+    const escapeForScript = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
+    const reportJsLiteral = escapeForScript(textReport);
+    const summaryJsLiteral = escapeForScript(summaryReport);
+    const regionDataJsLiteral = escapeForScript(regionJsonData);
 
     return /*html*/`<!DOCTYPE html>
 <html lang="en">
@@ -712,7 +732,9 @@ function getWebviewContent(
             <h2>${esc(fileName)}</h2>
             <div class="subtitle">Entry Point: ${formatHex(entryPoint)}</div>
         </div>
-        <button id="btnCopy" title="Copy as text report">Copy Report</button>
+        <button id="btnCopy" title="Copy summary report (markdown, ~50 lines)">Copy Report</button>
+        <span style="width:8px;display:inline-block"></span>
+        <button id="btnCopyFull" title="Copy full text dump (every section)">Copy Full Dump</button>
         <span style="width:8px;display:inline-block"></span>
         <button id="btnSaveHtml" title="Save as HTML file">Save HTML</button>
     </div>
@@ -727,7 +749,7 @@ function getWebviewContent(
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
         ${!hasLinkerData && !hasSymbols ? '<div class="info-note">AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.</div>' : ''}
         ${hasSymbols ? '<div class="info-note">ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.</div>' : ''}
-        <div class="section-heading">Region Details <button data-action="expand-all" title="Expand All">▼ Expand All</button> <button data-action="collapse-all" title="Collapse All">▶ Collapse All</button>${hasFuncData ? ' <button data-action="toggle-func-col" title="Toggle Function column">Function ▶</button>' : ''}</div>
+        <div class="section-heading">Region Details <button data-action="toggle-all" id="toggleAllBtn" title="Expand All">▼ Expand All</button>${hasFuncData ? ' <button data-action="toggle-func-col" title="Toggle Function column">Function ▶</button>' : ''}</div>
         ${regionCardsHtml}
     ` : `
         <div class="no-regions">
@@ -755,10 +777,11 @@ function getWebviewContent(
 <button id="scrollTop" class="scroll-top" title="맨 위로">↑</button>
 
 <script nonce="${nonce}">
-const RD = ${JSON.stringify(regionJsonData)};
+const RD = ${regionDataJsLiteral};
 (function() {
     const vscode = acquireVsCodeApi();
-    const report = atob('${reportBase64}');
+    const report = ${reportJsLiteral};
+    const summary = ${summaryJsLiteral};
     const VT_THRESH = 200, ROW_H = 24, BUFFER = 30, MAX_VP_H = 600;
     const rendered = new Set();
     const vtMap = new Map();
@@ -859,7 +882,13 @@ const RD = ${JSON.stringify(regionJsonData)};
     }
 
     // --- Copy / Save ---
+    // Copy Report = curated markdown summary (regions, top sections, highlights).
+    // Copy Full Dump = legacy monospace text with every section. Both go through
+    // the same message so the extension can show one toast for either.
     document.getElementById('btnCopy').addEventListener('click', function() {
+        vscode.postMessage({ command: 'copyReport', text: summary });
+    });
+    document.getElementById('btnCopyFull').addEventListener('click', function() {
         vscode.postMessage({ command: 'copyReport', text: report });
     });
     document.getElementById('btnSaveHtml').addEventListener('click', function() {
@@ -880,6 +909,34 @@ const RD = ${JSON.stringify(regionJsonData)};
             detail.style.display = 'none';
             icon.textContent = '\u25B6';
         }
+        window.syncToggleAllLabel();
+    };
+
+    // --- Toggle-All button label reflects the next action: if any region is
+    // expanded, clicking will collapse all; otherwise it will expand all.
+    window.syncToggleAllLabel = function() {
+        const btn = document.getElementById('toggleAllBtn');
+        if (!btn) return;
+        let anyExpanded = false;
+        document.querySelectorAll('.region-card .region-detail').forEach(function(detail) {
+            if (detail.style.display !== 'none') anyExpanded = true;
+        });
+        if (anyExpanded) {
+            btn.textContent = '\u25B6 Collapse All';
+            btn.setAttribute('title', 'Collapse All');
+        } else {
+            btn.textContent = '\u25BC Expand All';
+            btn.setAttribute('title', 'Expand All');
+        }
+    };
+
+    window.toggleAll = function() {
+        let anyExpanded = false;
+        document.querySelectorAll('.region-card .region-detail').forEach(function(detail) {
+            if (detail.style.display !== 'none') anyExpanded = true;
+        });
+        window.foldAll(anyExpanded);
+        window.syncToggleAllLabel();
     };
 
     // --- Keyword search (data-driven for regions, DOM for static tables) ---
@@ -894,6 +951,27 @@ const RD = ${JSON.stringify(regionJsonData)};
     searchInput.addEventListener('input', function() {
         clearTimeout(searchTimeout);
         searchTimeout = setTimeout(doSearch, 200);
+    });
+
+    // Ctrl/Cmd+F → focus + select search input. Esc inside the input clears
+    // the query (and resets the search) on first press, blurs on second.
+    document.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && typeof e.key === 'string' && e.key.toLowerCase() === 'f') {
+            e.preventDefault();
+            searchInput.focus();
+            searchInput.select();
+            return;
+        }
+        if (e.key === 'Escape' && document.activeElement === searchInput) {
+            if (searchInput.value !== '') {
+                e.preventDefault();
+                searchInput.value = '';
+                clearTimeout(searchTimeout);
+                doSearch();
+            } else {
+                searchInput.blur();
+            }
+        }
     });
 
     function doSearch() {
@@ -958,6 +1036,7 @@ const RD = ${JSON.stringify(regionJsonData)};
 
         searchCount.textContent = q ? mc + ' matches' : '';
         lastSearch = { q: q, fd: nextFd };
+        if (window.syncToggleAllLabel) window.syncToggleAllLabel();
     }
 
     // --- Expand All / Collapse All ---
@@ -991,6 +1070,7 @@ const RD = ${JSON.stringify(regionJsonData)};
                 detail.style.display = '';
                 if (icon) icon.textContent = '\u25BC';
                 renderDetail(idx);
+                if (window.syncToggleAllLabel) window.syncToggleAllLabel();
             }
             card.scrollIntoView({ behavior: 'smooth', block: 'start' });
             card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
@@ -1013,6 +1093,7 @@ const RD = ${JSON.stringify(regionJsonData)};
                         detail.style.display = '';
                         if (icon) icon.textContent = '\u25BC';
                         renderDetail(idx);
+                        if (window.syncToggleAllLabel) window.syncToggleAllLabel();
                     }
                     card.scrollIntoView({ behavior: 'smooth', block: 'start' });
                     card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
@@ -1163,11 +1244,8 @@ const RD = ${JSON.stringify(regionJsonData)};
             case 'toggle-region':
                 window.toggleRegion(actionEl);
                 break;
-            case 'expand-all':
-                window.foldAll(false);
-                break;
-            case 'collapse-all':
-                window.foldAll(true);
+            case 'toggle-all':
+                window.toggleAll();
                 break;
             case 'toggle-func-col':
                 window.toggleFuncCol();
