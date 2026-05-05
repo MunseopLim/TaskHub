@@ -25,6 +25,7 @@
 - **Action Creation Wizard** — Build new actions through an interactive UI, no manual JSON editing required
 - **Presets** — Share per-environment action configurations with your team
 - **Run History** — Track success/failure status with one-click re-run
+- **Quick Action Palette** — Fuzzy-search and run any action through the single `TaskHub: Run Any Action…` command. Recently used items appear at the top (count is configurable)
 - **Problem Matcher** — Surface compiler errors / warnings from build output in the Problems panel (built-in `$gcc` / `$tsc` presets or custom regex)
 
 ### Sidebar Panels
@@ -73,6 +74,10 @@
     </td>
   </tr>
 </table>
+
+**Quick Action Palette** — A single `TaskHub: Run Any Action…` command fuzzy-searches and runs every action. Recently used items collect in the top *Recently used* section, and the rest is a flat list that also matches against the folder breadcrumb. The visible count is controlled by `taskhub.runAnyAction.recentLimit`.
+
+![Quick Action Palette — recently used actions plus full fuzzy search](docs/images/quick-action-palette.png)
 
 **Problem Matcher** — Build-task output is parsed via regex matchers and surfaced as VS Code Problems entries. Click to jump to the file/line, F8 to cycle, red squigglies in the editor. Built-in `$gcc` / `$tsc` presets plus arbitrary custom patterns are supported.
 
@@ -145,7 +150,20 @@ To build from source or contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Configuration
 
-Open `File > Preferences > Settings` in VS Code and search for **"TaskHub"** to adjust every setting through the UI. The single source of truth for each setting's type, default, range, related feature and "how to add a new setting" checklist lives in [docs/features.md §21 Settings Reference](docs/features.md#21-설정-레퍼런스) (Korean).
+Open `File > Preferences > Settings` in VS Code and search for **"TaskHub"** to adjust every setting through the UI.
+
+### Frequently tuned settings (highlights)
+
+| Setting | Purpose |
+| --- | --- |
+| `taskhub.runAnyAction.recentLimit` | Number of items shown in the *Recently used* section of Quick Action Palette (`0` hides the section) |
+| `taskhub.history.maxItems` | Maximum number of action runs kept in the History panel |
+| `taskhub.history.showPanel` | Show/hide the History panel itself (records are preserved either way) |
+| `taskhub.pipeline.outputCaptureLimitMb` | Cap on accumulated stdout/stderr (MB) when `passTheResultToNextTask` is on |
+| `taskhub.experimental.bitOperationHover.enabled` | C/C++ bit-operation Before/After hover (experimental) |
+| `taskhub.preset.selected` | Preset ID to apply automatically |
+
+The full list — types, defaults, ranges, related features, and the "how to add a new setting" checklist — is the single source of truth in [docs/features.md §21 Settings Reference](docs/features.md#21-설정-레퍼런스) (Korean). The table above is a curated pointer to the dials users tweak most often.
 
 ---
 

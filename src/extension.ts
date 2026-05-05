@@ -438,6 +438,198 @@ export function disposeAllActionCommands(): void {
     actionCommandRegistrations.clear();
 }
 
+// Pure data shape for `taskhub.runAnyAction`'s QuickPick. Kept separate from
+// `vscode.QuickPickItem` so the build/MRU helpers can be unit-tested without a
+// running VS Code host.
+export interface RunAnyActionPick {
+    actionId: string;
+    title: string;
+    folderPath: string; // breadcrumb without the leaf title, joined by ' / '
+    recent: boolean;    // true if entry came from the MRU section
+}
+
+// Pure description of one QuickPick row in the palette. The handler converts
+// `kind: 'separator'` to `vscode.QuickPickItemKind.Separator` and the rest to
+// regular items; keeping the structure pure lets us pin separator suppression
+// (recentLimit=0 ⇒ no leading heading) without a running VS Code host.
+export interface RunAnyPaletteItem {
+    kind: 'separator' | 'pick';
+    label: string;
+    description?: string;
+    actionId?: string;             // present only when kind === 'pick'
+    section: 'recent' | 'rest';
+}
+
+export const RUN_ANY_ACTION_MRU_KEY = 'taskhub.runAnyAction.mru';
+// Default for `taskhub.runAnyAction.recentLimit`. The setting (1–20) overrides
+// this at runtime; the constant is also the cap upper bound used by tests and
+// by `updateRunAnyActionMru` callers that don't pass an explicit max.
+export const RUN_ANY_ACTION_MRU_DEFAULT_LIMIT = 5;
+export const RUN_ANY_ACTION_MRU_MAX_LIMIT = 20;
+
+// Flatten the action tree into pick entries, splitting them into the recently
+// used section (MRU id order) and the remainder (tree order). MRU ids that no
+// longer resolve to a runnable action are dropped silently — surfacing a stale
+// entry would let a user "execute" something that doesn't exist anymore.
+//
+// Folder/separator items have no `action`, so they are skipped: the palette is
+// for *running* things, not navigating the tree.
+//
+// `recentLimit` caps the recent section *after* stale filtering. The order
+// matters: filtering before slicing keeps the user's last N runnable actions
+// visible even when storage has accumulated stale ids at the front (e.g. user
+// deleted several actions). Slicing first would let a head full of stale ids
+// crowd the valid recent ones out of the cap entirely. `recentLimit <= 0`
+// disables the section.
+export function buildRunAnyActionPicks(
+    actions: ActionItem[],
+    mru: readonly string[],
+    recentLimit: number = RUN_ANY_ACTION_MRU_DEFAULT_LIMIT
+): { recent: RunAnyActionPick[]; rest: RunAnyActionPick[] } {
+    const all = new Map<string, RunAnyActionPick>();
+    traverseActionItems(actions, (item, pathParts) => {
+        if (!item.id || !item.action) { return; }
+        // pathParts ends with the leaf title; the folder path is the prefix.
+        const folderPath = pathParts.slice(0, -1).join(' / ');
+        all.set(item.id, {
+            actionId: item.id,
+            title: item.title || item.id,
+            folderPath,
+            recent: false
+        });
+    });
+
+    const recent: RunAnyActionPick[] = [];
+    const seen = new Set<string>();
+    if (recentLimit > 0) {
+        for (const id of mru) {
+            if (recent.length >= recentLimit) { break; }
+            if (seen.has(id)) { continue; }
+            const pick = all.get(id);
+            if (!pick) { continue; }
+            seen.add(id);
+            recent.push({ ...pick, recent: true });
+        }
+    }
+
+    const rest: RunAnyActionPick[] = [];
+    for (const [id, pick] of all) {
+        if (seen.has(id)) { continue; }
+        rest.push(pick);
+    }
+
+    return { recent, rest };
+}
+
+// Move `actionId` to the front of the MRU list, dedupe, and cap at `max`.
+// Used after a successful palette selection. Pure for testability.
+//
+// `max <= 0` collapses the list to empty — letting the user disable the
+// "Recently used" section entirely via setting without a special-case branch
+// at the call site.
+export function updateRunAnyActionMru(
+    current: readonly string[],
+    actionId: string,
+    max: number = RUN_ANY_ACTION_MRU_DEFAULT_LIMIT
+): string[] {
+    if (max <= 0) {
+        return [];
+    }
+    const next = [actionId, ...current.filter(id => id !== actionId)];
+    if (next.length > max) {
+        next.length = max;
+    }
+    return next;
+}
+
+// What the palette command should do next, based on a load attempt + stored
+// MRU + the current `recentLimit` setting. Splitting this from the handler
+// lets us pin the broken-actions.json path (load throws → user-facing error,
+// no palette opens) without spinning up VS Code's QuickPick or workspace I/O.
+export type RunAnyActionOutcome =
+    | { kind: 'load-error'; errorMessage: string }
+    | { kind: 'empty' }
+    | { kind: 'show-palette'; items: RunAnyPaletteItem[]; limit: number; recentIds: string[] };
+
+// Compute the palette outcome. Pure (no VS Code calls) — the handler converts
+// the outcome into UI: `load-error` → showErrorMessage + log, `empty` →
+// showInformationMessage, `show-palette` → showQuickPick. `recentIds` is
+// returned alongside the items so the write-side MRU update bases on the
+// already filtered+capped list, not on raw stored ids (review feedback P2).
+export function planRunAnyAction(
+    loadActions: () => ActionItem[],
+    storedMru: readonly string[],
+    rawLimitSetting: number | undefined,
+    labels: { recent: string; rest: string }
+): RunAnyActionOutcome {
+    let allActions: ActionItem[];
+    try {
+        allActions = loadActions();
+    } catch (error: any) {
+        // Broken actions.json (JSON parse / schema validation) bubbles up as
+        // an Error from `loadAndValidateActions`. Surface its message so the
+        // user knows which file failed and why — empty palettes are worse.
+        return { kind: 'load-error', errorMessage: error?.message ?? String(error) };
+    }
+
+    // Defensive clamp: settings.json could be hand-edited past the schema
+    // bounds (0–20). NaN / undefined fall back to the default.
+    const rawLimit = rawLimitSetting ?? RUN_ANY_ACTION_MRU_DEFAULT_LIMIT;
+    const limit = Math.max(0, Math.min(
+        RUN_ANY_ACTION_MRU_MAX_LIMIT,
+        Number.isFinite(rawLimit) ? Math.floor(rawLimit) : RUN_ANY_ACTION_MRU_DEFAULT_LIMIT
+    ));
+
+    const { recent, rest } = buildRunAnyActionPicks(allActions, storedMru, limit);
+    if (recent.length === 0 && rest.length === 0) {
+        return { kind: 'empty' };
+    }
+
+    const items = buildRunAnyActionPaletteItems(recent, rest, labels);
+    const recentIds = recent.map(p => p.actionId);
+    return { kind: 'show-palette', items, limit, recentIds };
+}
+
+// Assemble the ordered palette rows from the recent/rest split. The "All
+// actions" separator is intentionally suppressed when `recent` is empty: with
+// no Recently used section above, a leading separator would render as a
+// heading with nothing to disambiguate from — and contradict the docs claim
+// that `recentLimit=0` collapses the palette to a single flat list.
+export function buildRunAnyActionPaletteItems(
+    recent: readonly RunAnyActionPick[],
+    rest: readonly RunAnyActionPick[],
+    labels: { recent: string; rest: string }
+): RunAnyPaletteItem[] {
+    const items: RunAnyPaletteItem[] = [];
+    if (recent.length > 0) {
+        items.push({ kind: 'separator', label: labels.recent, section: 'recent' });
+        for (const pick of recent) {
+            items.push({
+                kind: 'pick',
+                label: pick.title,
+                description: pick.folderPath || undefined,
+                actionId: pick.actionId,
+                section: 'recent'
+            });
+        }
+    }
+    if (rest.length > 0) {
+        if (recent.length > 0) {
+            items.push({ kind: 'separator', label: labels.rest, section: 'rest' });
+        }
+        for (const pick of rest) {
+            items.push({
+                kind: 'pick',
+                label: pick.title,
+                description: pick.folderPath || undefined,
+                actionId: pick.actionId,
+                section: 'rest'
+            });
+        }
+    }
+    return items;
+}
+
 // Combines the three steps every actions.json change site needs: drop the
 // cache, re-sync dynamic command registrations, refresh the tree.
 function refreshActionsAndCommands(context: vscode.ExtensionContext, mainViewProvider: MainViewProvider): void {
@@ -3396,6 +3588,56 @@ export function activate(context: vscode.ExtensionContext) {
         } else {
             vscode.window.showErrorMessage(t(`ID '${args.id}'인 액션을 찾을 수 없거나 'action' 속성이 없습니다.`, `Action with ID '${args.id}' not found or it has no 'action' property.`));
         }
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.runAnyAction', async () => {
+        const rawLimit = vscode.workspace.getConfiguration()
+            .get<number>('taskhub.runAnyAction.recentLimit', RUN_ANY_ACTION_MRU_DEFAULT_LIMIT);
+        const stored = context.globalState.get<string[]>(RUN_ANY_ACTION_MRU_KEY, []) ?? [];
+        const outcome = planRunAnyAction(
+            () => loadAllActions(context),
+            stored,
+            rawLimit,
+            { recent: t('최근 실행', 'Recently used'), rest: t('모든 액션', 'All actions') }
+        );
+
+        if (outcome.kind === 'load-error') {
+            // Broken actions.json — same surface as the tree view's load
+            // failure: error toast + Output channel entry. Empty palettes
+            // would silently hide the problem.
+            outputChannel.appendLine(`[ERROR] ${outcome.errorMessage}`);
+            vscode.window.showErrorMessage(t(
+                `액션 목록을 불러올 수 없습니다: ${outcome.errorMessage}`,
+                `Could not load actions: ${outcome.errorMessage}`
+            ));
+            return;
+        }
+
+        if (outcome.kind === 'empty') {
+            vscode.window.showInformationMessage(t(
+                '실행 가능한 액션이 없습니다.',
+                'No runnable actions found.'
+            ));
+            return;
+        }
+
+        type RunAnyPickItem = vscode.QuickPickItem & { actionId?: string };
+        const items: RunAnyPickItem[] = outcome.items.map(p => p.kind === 'separator'
+            ? { label: p.label, kind: vscode.QuickPickItemKind.Separator }
+            : { label: p.label, description: p.description, actionId: p.actionId });
+
+        const selection = await vscode.window.showQuickPick(items, {
+            placeHolder: t('실행할 액션을 검색하세요…', 'Search for an action to run…'),
+            matchOnDescription: true,
+            ignoreFocusOut: false
+        });
+        if (!selection || !selection.actionId) {
+            return;
+        }
+
+        const nextMru = updateRunAnyActionMru(outcome.recentIds, selection.actionId, outcome.limit);
+        await context.globalState.update(RUN_ANY_ACTION_MRU_KEY, nextMru);
+
+        await vscode.commands.executeCommand('taskhub.executeActionById', { id: selection.actionId });
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.assignShortcut', async (actionItem: Action) => {
         const actionId = actionItem?.id;

@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { actionStates } from '../providers/actionStatus';
 import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteViewProvider, loadFavoritesFromDisk, removeFavoriteByIdentity } from '../providers/favoriteViewProvider';
-import { buildActionCommandId, serializeFavorites, syncActionCommandsFromActions } from '../extension';
+import { buildActionCommandId, buildRunAnyActionPaletteItems, buildRunAnyActionPicks, planRunAnyAction, serializeFavorites, syncActionCommandsFromActions, updateRunAnyActionMru, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT } from '../extension';
 import { Link, LinkGroup, LinkViewProvider } from '../providers/linkViewProvider';
 import { Action, Folder, MainViewProvider } from '../providers/mainViewProvider';
 import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
@@ -640,6 +640,287 @@ suite('View provider integration', function () {
                 'distinct unsafe ids must produce distinct command ids');
             // `%` itself is encoded so the scheme is unambiguously reversible.
             assert.strictEqual(buildActionCommandId('a%b'), 'taskhub.runAction.a%25b');
+        });
+    });
+
+    suite('runAnyAction palette (build picks + MRU)', () => {
+        // The palette is the single-command entry point for fuzzy-finding any
+        // action (#9 on docs/roadmap.md). The handler is wired to VS Code's
+        // QuickPick UI, but the *data* shaping is pure: pinning these helpers
+        // keeps the visible behavior — recently-used on top, stale ids hidden,
+        // folders/separators excluded — independent of UI changes.
+
+        const sampleActions: ActionItem[] = [
+            {
+                id: 'fw',
+                title: 'Firmware',
+                type: 'folder',
+                children: [
+                    {
+                        id: 'fw.build',
+                        title: 'Build',
+                        action: { description: 'Build', tasks: [{ id: 't', type: 'shell', command: 'echo' }] }
+                    },
+                    {
+                        id: 'fw.flash',
+                        title: 'Flash',
+                        action: { description: 'Flash', tasks: [{ id: 't', type: 'shell', command: 'echo' }] }
+                    }
+                ]
+            },
+            { id: 'sep', title: '---', type: 'separator' },
+            {
+                id: 'top',
+                title: 'Top-level Action',
+                action: { description: 'Top', tasks: [{ id: 't', type: 'shell', command: 'echo' }] }
+            }
+        ];
+
+        test('IT-088: folder/separator는 picks에서 제외되고 runnable action만 평면화된다', () => {
+            const { recent, rest } = buildRunAnyActionPicks(sampleActions, []);
+            assert.strictEqual(recent.length, 0, 'no MRU → recent section empty');
+            const ids = rest.map(p => p.actionId).sort();
+            assert.deepStrictEqual(ids, ['fw.build', 'fw.flash', 'top'],
+                'folder (fw) and separator (sep) must not appear; only items with .action are runnable');
+        });
+
+        test('IT-089: folderPath는 leaf 제외 breadcrumb 이고 root level은 빈 문자열', () => {
+            const { rest } = buildRunAnyActionPicks(sampleActions, []);
+            const byId = new Map(rest.map(p => [p.actionId, p]));
+            assert.strictEqual(byId.get('fw.build')!.folderPath, 'Firmware',
+                'nested action shows parent folder breadcrumb');
+            assert.strictEqual(byId.get('top')!.folderPath, '',
+                'root-level action has empty folder path');
+        });
+
+        test('IT-090: MRU 순서대로 recent 섹션이 채워지고 rest 에서는 제외된다', () => {
+            const { recent, rest } = buildRunAnyActionPicks(sampleActions, ['top', 'fw.build']);
+            assert.deepStrictEqual(recent.map(p => p.actionId), ['top', 'fw.build'],
+                'recent preserves MRU order, not tree order');
+            assert.ok(recent.every(p => p.recent === true), 'recent picks must carry recent: true');
+            assert.deepStrictEqual(rest.map(p => p.actionId), ['fw.flash'],
+                'rest excludes anything already in recent');
+        });
+
+        test('IT-091: stale MRU 엔트리(삭제된 액션 / 폴더 id)는 조용히 누락된다', () => {
+            // 'gone' was deleted from actions.json; 'fw' is a folder id (no .action).
+            // Either would surface "execute something that does not exist" in the
+            // palette if not filtered out at display time.
+            const { recent, rest } = buildRunAnyActionPicks(sampleActions, ['gone', 'fw', 'fw.build']);
+            assert.deepStrictEqual(recent.map(p => p.actionId), ['fw.build'],
+                'stale + folder ids are dropped; only resolvable runnable ids remain');
+            assert.deepStrictEqual(rest.map(p => p.actionId).sort(), ['fw.flash', 'top']);
+        });
+
+        test('IT-092: MRU 내부 중복은 첫 등장만 유지된다', () => {
+            const { recent } = buildRunAnyActionPicks(sampleActions, ['top', 'fw.build', 'top']);
+            assert.deepStrictEqual(recent.map(p => p.actionId), ['top', 'fw.build'],
+                'duplicate MRU entry must collapse to its first occurrence');
+        });
+
+        test('IT-093: updateRunAnyActionMru — 신규 id는 맨 앞에 추가된다', () => {
+            const next = updateRunAnyActionMru([], 'fw.build');
+            assert.deepStrictEqual(next, ['fw.build']);
+        });
+
+        test('IT-094: updateRunAnyActionMru — 기존 id는 맨 앞으로 이동하고 중복은 제거된다', () => {
+            const next = updateRunAnyActionMru(['a', 'b', 'c'], 'b');
+            assert.deepStrictEqual(next, ['b', 'a', 'c'],
+                'most-recent moves to front; relative order of others preserved');
+        });
+
+        test('IT-095: updateRunAnyActionMru — 기본 cap 을 넘으면 가장 오래된 항목이 잘린다', () => {
+            // Saturate well past the default so the cap path is exercised
+            // regardless of what the default is set to (5 today, may change).
+            const oversized = Array.from({ length: RUN_ANY_ACTION_MRU_DEFAULT_LIMIT + 5 }, (_, i) => `id${i}`);
+            const next = updateRunAnyActionMru(oversized, 'new');
+            assert.strictEqual(next.length, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT,
+                `MRU must cap at default (${RUN_ANY_ACTION_MRU_DEFAULT_LIMIT}) when no explicit max passed`);
+            assert.strictEqual(next[0], 'new', 'newest entry sits at the head');
+            assert.ok(!next.includes(oversized[oversized.length - 1]),
+                'oldest entry is dropped past the cap');
+        });
+
+        test('IT-096: updateRunAnyActionMru — 명시적 max 인자가 default 를 override 한다', () => {
+            // The setting `taskhub.runAnyAction.recentLimit` is wired through
+            // by passing `max` explicitly at the call site. Pinning that the
+            // explicit value overrides the default — otherwise narrowing the
+            // setting from 5 → 3 would leak old entries past the user's choice.
+            const next = updateRunAnyActionMru(['a', 'b', 'c', 'd'], 'new', 3);
+            assert.deepStrictEqual(next, ['new', 'a', 'b'],
+                'explicit max=3 must trim to 3, not the default');
+        });
+
+        test('IT-097: updateRunAnyActionMru — max=0 은 빈 배열을 반환한다 (recent 섹션 비활성)', () => {
+            // Setting recentLimit=0 disables the "Recently used" section.
+            // The pure helper has to honor that without producing a singleton
+            // — otherwise the next palette open would still show one item.
+            const next = updateRunAnyActionMru(['a', 'b'], 'new', 0);
+            assert.deepStrictEqual(next, [],
+                'max=0 must return [] so recentLimit=0 fully disables the section');
+        });
+
+        test('IT-098: stale id가 MRU 앞쪽을 채워도 valid 항목이 limit에 그대로 들어온다 (review P2)', () => {
+            // Regression for the "slice-then-filter" bug: storage was
+            // `[deleted×5, valid1, valid2]` with limit=5 → recent ended up [].
+            // The fix filters stale ids first, *then* takes the limit, so the
+            // user's last N runnable actions stay visible even after they
+            // delete several actions in a row. Without this guarantee, the
+            // palette's "Recently used" section silently empties out.
+            const mru = ['gone1', 'gone2', 'gone3', 'gone4', 'gone5', 'fw.build', 'top'];
+            const { recent } = buildRunAnyActionPicks(sampleActions, mru, 5);
+            assert.deepStrictEqual(recent.map(p => p.actionId), ['fw.build', 'top'],
+                'stale ids must be filtered before applying limit; valid ids must not be crowded out');
+        });
+
+        test('IT-099: buildRunAnyActionPicks — 명시적 recentLimit이 default를 override 하고 limit=0이면 recent 비활성', () => {
+            // Two assertions in one: explicit limit narrowing, and limit=0
+            // disabling the section entirely. Both pin the wiring used by the
+            // `taskhub.runAnyAction.recentLimit` setting.
+            const picks2 = buildRunAnyActionPicks(sampleActions, ['top', 'fw.build', 'fw.flash'], 2);
+            assert.deepStrictEqual(picks2.recent.map(p => p.actionId), ['top', 'fw.build'],
+                'explicit recentLimit=2 must trim to first 2 valid recent ids');
+            assert.deepStrictEqual(picks2.rest.map(p => p.actionId), ['fw.flash'],
+                'items past the limit fall through to rest, not recent');
+
+            const picks0 = buildRunAnyActionPicks(sampleActions, ['top', 'fw.build'], 0);
+            assert.strictEqual(picks0.recent.length, 0,
+                'recentLimit=0 must produce no recent picks regardless of MRU contents');
+            assert.strictEqual(picks0.rest.length, 3,
+                'recentLimit=0 must route every runnable action into rest');
+        });
+
+        test('IT-100: buildRunAnyActionPaletteItems — recent 가 비어있으면 leading "All actions" separator 가 생기지 않는다 (review P3)', () => {
+            // Regression for the leading-separator bug. With recentLimit=0 the
+            // palette should be a single flat list (per docs); the prior code
+            // emitted an "All actions" separator at the top with nothing
+            // before it to disambiguate from.
+            const { recent, rest } = buildRunAnyActionPicks(sampleActions, [], 0);
+            const items = buildRunAnyActionPaletteItems(recent, rest, {
+                recent: 'Recently used',
+                rest: 'All actions'
+            });
+            const separators = items.filter(i => i.kind === 'separator');
+            assert.strictEqual(separators.length, 0,
+                'with no recent picks the palette must render as a flat list — no leading "All actions" heading');
+            assert.ok(items.every(i => i.kind === 'pick' && i.section === 'rest'),
+                'all rendered rows must be runnable picks routed via the rest section');
+        });
+
+        test('IT-102: planRunAnyAction — actions.json broken (loader throws) → load-error outcome 으로 라우팅된다', () => {
+            // Regression for the "broken actions.json" UX question. The
+            // command must NOT swallow the error and show an empty palette;
+            // it has to surface the loader's message so the user can see
+            // which file failed and why. Mirrors what `loadAndValidateActions`
+            // throws on JSON parse / schema-validation failure.
+            const fakeError = new Error('Error parsing JSON in actions.json: Unexpected token } at position 42');
+            const outcome = planRunAnyAction(
+                () => { throw fakeError; },
+                ['top'],
+                5,
+                { recent: 'Recently used', rest: 'All actions' }
+            );
+            assert.strictEqual(outcome.kind, 'load-error',
+                'loader throws must produce a load-error outcome — never silently fall through to empty/show-palette');
+            if (outcome.kind === 'load-error') {
+                assert.match(outcome.errorMessage, /Error parsing JSON/,
+                    'errorMessage must propagate the loader error so the toast can name the failure');
+                assert.match(outcome.errorMessage, /position 42/,
+                    'parser error detail (position) must reach the user-facing message');
+            }
+        });
+
+        test('IT-103: planRunAnyAction — actions.json validation 실패도 load-error 로 묶인다 (schema/JSON 구분 없이 동일 surface)', () => {
+            // The handler treats schema-validation failures the same as JSON
+            // parse failures: both routed through showErrorMessage. Pinning
+            // that the helper does not branch on error subtype keeps the
+            // surface consistent for users (they always get a single toast).
+            const outcome = planRunAnyAction(
+                () => { throw new Error("Validation failed for actions.json:\n  - path: '/0/title' - message: must be string"); },
+                [],
+                5,
+                { recent: 'R', rest: 'A' }
+            );
+            assert.strictEqual(outcome.kind, 'load-error');
+            if (outcome.kind === 'load-error') {
+                assert.match(outcome.errorMessage, /Validation failed/);
+            }
+        });
+
+        test('IT-104: planRunAnyAction — loader 가 빈 배열을 반환하면 empty outcome (info 토스트로 라우팅)', () => {
+            // Distinct from load-error: actions.json is missing/empty but
+            // *valid*, so we want the friendlier "no runnable actions" toast,
+            // not a scary error. The split is what lets the handler pick the
+            // right vscode.window.show* call.
+            const outcome = planRunAnyAction(() => [], ['stale'], 5, { recent: 'R', rest: 'A' });
+            assert.strictEqual(outcome.kind, 'empty',
+                'no actions loaded → empty outcome, NOT load-error');
+        });
+
+        test('IT-105: planRunAnyAction — happy path: items + recentIds + limit 가 핸들러로 전달된다', () => {
+            // The handler relies on the helper to compute (a) the rendered
+            // QuickPickItem plan, (b) the recentIds used as the MRU write base
+            // (review feedback P2), and (c) the clamped limit. Pin all three.
+            const outcome = planRunAnyAction(
+                () => sampleActions,
+                ['top', 'fw.build'],
+                3,
+                { recent: 'Recently used', rest: 'All actions' }
+            );
+            assert.strictEqual(outcome.kind, 'show-palette');
+            if (outcome.kind === 'show-palette') {
+                assert.strictEqual(outcome.limit, 3, 'setting value passes through after clamp');
+                assert.deepStrictEqual(outcome.recentIds, ['top', 'fw.build'],
+                    'recentIds must be the displayed (filtered + capped) list, not raw stored MRU');
+                // Plan starts with the Recently used separator, then the
+                // recent picks, then the All actions separator + rest picks.
+                assert.strictEqual(outcome.items[0].kind, 'separator');
+                assert.strictEqual(outcome.items[0].label, 'Recently used');
+            }
+        });
+
+        test('IT-106: planRunAnyAction — out-of-range setting 은 [0, MAX_LIMIT] 으로 클램프되고 NaN/undefined 는 default 로 폴백', () => {
+            // Defensive: settings.json can be hand-edited past the schema's
+            // 0–20 bounds, and `getConfiguration().get()` returns whatever is
+            // there. The clamp prevents the pure helper from emitting a
+            // 999-entry recent section or a negative slice that crashes.
+            const tooHigh = planRunAnyAction(() => sampleActions, ['top', 'fw.build', 'fw.flash'], 999, { recent: 'R', rest: 'A' });
+            if (tooHigh.kind !== 'show-palette') { assert.fail('expected show-palette'); }
+            assert.ok(tooHigh.limit <= 20,
+                'over-max setting must clamp down to MAX_LIMIT (20)');
+
+            const negative = planRunAnyAction(() => sampleActions, ['top'], -5, { recent: 'R', rest: 'A' });
+            if (negative.kind !== 'show-palette') { assert.fail('expected show-palette'); }
+            assert.strictEqual(negative.limit, 0,
+                'negative setting clamps to 0 (= recent section disabled)');
+            assert.strictEqual(negative.recentIds.length, 0,
+                'limit=0 must produce no recentIds');
+
+            const nanish = planRunAnyAction(() => sampleActions, ['top'], NaN, { recent: 'R', rest: 'A' });
+            if (nanish.kind !== 'show-palette') { assert.fail('expected show-palette'); }
+            assert.strictEqual(nanish.limit, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT,
+                'NaN falls back to the default rather than producing 0/NaN-driven slicing');
+        });
+
+        test('IT-107: buildRunAnyActionPaletteItems — recent 와 rest 가 모두 있으면 두 separator 가 정확한 순서로 들어간다', () => {
+            // Pinning the "happy path" so a future refactor of section order
+            // / labels is caught immediately. The Recently used heading must
+            // sit at index 0 and the All actions heading must precede the
+            // first non-recent pick.
+            const { recent, rest } = buildRunAnyActionPicks(sampleActions, ['top'], 5);
+            const items = buildRunAnyActionPaletteItems(recent, rest, {
+                recent: 'Recently used',
+                rest: 'All actions'
+            });
+            assert.strictEqual(items[0].kind, 'separator');
+            assert.strictEqual(items[0].label, 'Recently used');
+            assert.strictEqual(items[0].section, 'recent');
+
+            const restSeparatorIdx = items.findIndex(i => i.kind === 'separator' && i.section === 'rest');
+            assert.ok(restSeparatorIdx > 0, 'rest separator must come after the recent section');
+            assert.strictEqual(items[restSeparatorIdx].label, 'All actions');
+            assert.ok(items.slice(restSeparatorIdx + 1).every(i => i.kind === 'pick' && i.section === 'rest'),
+                'every row after the rest separator must be a rest pick');
         });
     });
 

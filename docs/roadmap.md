@@ -13,6 +13,7 @@
 | Task-level `timeoutSeconds` / `continueOnError` | 0.3.x부터 제공 | [docs/features.md §5 "Task-level 옵션"](./features.md#task-level-옵션-timeoutseconds--continueonerror) |
 | Problem Matcher (`output.diagnostics`) | 0.4.22부터 제공. regex/file/line/severity 그룹, 다중 매처, VS Code Problems 패널 통합 | [docs/features.md](./features.md) `output.diagnostics` 섹션 |
 | 같은 title 폴더 액션 disambiguation (이전 §12) | 0.4.26부터 제공. History 패널이 같은 title 충돌 시에만 라벨을 풀 경로(`Firmware > Build`)로 스왑, 반복 실행은 충돌로 안 침. 풀 경로는 툴팁에도 항상 노출 | [src/providers/historyProvider.ts](../src/providers/historyProvider.ts) `computeDisambiguatedHistoryLabels` |
+| Quick Action Palette (이전 §9) | 0.4.28부터 제공. `TaskHub: Run Any Action…` 단일 커맨드로 모든 액션 fuzzy 검색·실행. 최근 사용 액션은 상위 섹션에 노출, MRU는 액션 ID로 저장(이름 변경 무관)·표시 시점에 stale 항목 필터 | [src/extension.ts](../src/extension.ts) `taskhub.runAnyAction`, `buildRunAnyActionPicks`, `updateRunAnyActionMru` |
 
 ## 우선순위 요약
 
@@ -26,10 +27,9 @@
 | 6 | Named Input Profiles | 인터랙티브 입력 재실행("수정해서 실행")의 더 큰 그림. 임베디드 워크플로 fitness 강함 | 중 |
 | 7 | Action Run Report | History 패널 자연 확장. 출력 로그 영속화와 페어 | 중 |
 | 8 | 출력 로그 영속화 + 회전 | 작은 비용. Action Run Report에 흡수 가능 | 소 |
-| 9 | Quick Action Palette | 액션 동적 등록 인프라 재사용. 선언형 keybinding 우회 | 소 |
-| 10 | 백그라운드 완료 알림 + 소요 시간 | 데이터 재활용, UI만 추가. 임베디드 빌드 즉시 통지 | 소 |
+| 9 | 백그라운드 완료 알림 + 소요 시간 | 데이터 재활용, UI만 추가. 임베디드 빌드 즉시 통지 | 소 |
 
-**권장 시작 순서**: Memory Map Diff(1) → ELF Symbol Navigator(3). 5~10은 액션 시스템 / UX 영역.
+**권장 시작 순서**: Memory Map Diff(1) → ELF Symbol Navigator(3). 5~9는 액션 시스템 / UX 영역.
 
 ---
 
@@ -143,17 +143,7 @@
 - Output Channel은 휘발성이라 디버깅·회고 시 한계 명확
 - 영역: 액션 시스템 / UX (Action Run Report와 묶을지 분리할지 결정 필요)
 
-## 9. Quick Action Palette
-
-`taskhub.runAnyAction` 단일 커맨드 → fuzzy finder로 모든 액션 검색·실행.
-
-- 폴더 / 별칭 prefix 매칭, 최근 사용 우선
-- 이미 `taskhub.runAction.<id>` 동적 등록되어 있어 재활용 가능
-- 선언형 keybinding 도입 보류 상태에서의 우회 경로 — `keybindings.json` stale 처리 비용 없이 가치의 80%
-- 트레이드오프: 키 한 방은 아니지만 "팔레트 + 두세 글자"로 근육 기억 빠르게 정착
-- 영역: 액션 시스템 / UX
-
-## 10. 백그라운드 완료 알림 + 소요 시간
+## 9. 백그라운드 완료 알림 + 소요 시간
 
 설정 임계치(예: 10초) 넘는 액션 종료 시 OS notification + statusbar 잠깐 깜빡.
 
@@ -167,5 +157,5 @@
 ## 메모
 
 - 원본 논의: 현재 강점(Memory Map, C/C++ Hover, 파이프라인)을 더 쓸모 있게 만드는 방향이 "새 영역 확장"보다 우선.
-- 구현 순서 설계 원칙: 간판 기능(1) → 임베디드 세부 도구(2~4) → 액션 시스템 / UX 후보(5~10).
+- 구현 순서 설계 원칙: 간판 기능(1) → 임베디드 세부 도구(2~4) → 액션 시스템 / UX 후보(5~9).
 - 이번 릴리스에서 완료된 항목(Output Parser / Preview Run / timeoutSeconds / continueOnError / Problem Matcher)은 상단 "이미 구현된 항목" 표 참조.

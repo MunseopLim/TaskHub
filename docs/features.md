@@ -106,6 +106,15 @@ Command Palette에서 `taskhub json`을 검색하면 두 개의 JSON Editor 커�
 - `id`가 없는 폴더·구분선·액션은 등록 대상이 아닙니다.
 - 커맨드 ID 도출은 단일 함수(`buildActionCommandId`)에 있으며 **bijective percent-encoding**을 사용합니다. `[A-Za-z0-9_.-]` 문자는 그대로 유지되어 일반적인 ID(`fw.build`, `defaultButton.showEnv`)는 keybindings.json에서 자연스럽게 보입니다. 그 외 문자(공백, `/`, `:`, 한글 등)는 UTF-8 바이트별로 `%HH`로 인코딩되므로 distinct ID가 distinct 커맨드 ID로 매핑되어 collision이 구조적으로 발생하지 않습니다.
 
+### Quick Action Palette (`TaskHub: Run Any Action…`)
+
+액션마다 단축키를 등록하지 않고도 **단일 커맨드 + 두세 글자**로 어떤 액션이든 실행할 수 있습니다. Command Palette(`Cmd/Ctrl+Shift+P`)에서 `TaskHub: Run Any Action…`을 호출하거나, `taskhub.runAnyAction` 한 명령에만 키바인딩을 걸어 두면 됩니다.
+
+- **모든 runnable 액션이 한 리스트로 평면화**: 폴더·구분선은 노출되지 않습니다. 검색 시 `matchOnDescription`으로 폴더 breadcrumb(예: `Firmware`)도 매칭 면에 포함되어, `fw build` 처럼 부모 폴더 + 액션명 조합으로도 좁혀집니다.
+- **최근 사용 액션이 위 섹션 (`Recently used`) 에 표시**: `globalState`(`taskhub.runAnyAction.mru`)에 액션 ID로 저장되며 (label 이 아니라 ID — 액션 이름 변경에 영향받지 않음), 가장 최근에 실행한 항목이 맨 위에 옵니다. 표시 개수는 `taskhub.runAnyAction.recentLimit` 설정으로 제어 (기본 5, 범위 0–20, `0`이면 섹션 비활성). 자세한 옵션은 §21 참조.
+- **stale MRU 항목은 표시 시점에 필터링**: 액션이 삭제되었거나 폴더 ID 가 우연히 MRU에 들어 있어도, 매번 팔레트가 열릴 때 현재 액션 트리에 존재하는 runnable ID 만 추려서 노출합니다 — "더 이상 존재하지 않는 항목을 선택하는 경로" 자체를 차단합니다.
+- 키 한 방으로 액션 하나를 직접 실행하고 싶다면 위 "액션에 단축키 할당" 절의 `taskhub.runAction.<id>` 동적 커맨드를 사용하세요. 두 경로는 같은 실행 인프라를 공유합니다.
+
 ### 기본 구조
 
 `actions.json` 파일은 최상위에 객체 배열을 가집니다. 각 객체는 다음 중 하나일 수 있습니다.
@@ -1631,6 +1640,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 | `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell 출력 인코딩. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` (1–1024) | 캡처 모드(`passTheResultToNextTask: true`)에서 누적되는 stdout/stderr 총 크기 상한(MB). 초과 시 프로세스를 종료하고 명확한 에러로 실패. | [§5 Output Capture](#output-capture) |
 | `taskhub.history.maxItems` | `number` | `10` (1–50) | 저장되는 액션 실행 히스토리 최대 개수. 초과분은 오래된 순으로 자동 제거. | [§14 히스토리](#14-액션-실행-히스토리) |
+| `taskhub.runAnyAction.recentLimit` | `number` | `5` (0–20) | `TaskHub: Run Any Action…` 팔레트의 *Recently used* 섹션에 표시할 최대 개수. `0`이면 섹션 자체가 숨겨진다. 표시 시점에 stale 항목(삭제된 액션)을 걸러내므로 실제 보이는 개수는 이 값 이하가 될 수 있다. | [§5 Quick Action Palette](#5-actions-패널-mainviewmain) |
 | `taskhub.history.showPanel` | `boolean` | `true` | 사이드바의 History 패널 표시 여부. `false`면 뷰 자체가 감춰지지만 기록은 그대로 유지된다. | [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.preview.showSourceControlContextMenu` | `boolean` | `true` | Source Control 변경 파일 우클릭 메뉴에 TaskHub 프리뷰/브라우저 열기 항목을 표시할지 여부. VS Code SCM 메뉴는 확장자 context key를 안정적으로 제공하지 않으므로 켜져 있으면 대상 확장자 외 파일에도 항목이 보일 수 있으며, 실제 실행은 핸들러가 확장자로 재검증한다. | [§22 Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
@@ -1647,7 +1657,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 4. [CHANGELOG.md](../CHANGELOG.md) 해당 릴리스 항목에 새 설정 명기.
 5. (선택) 동작 경계(min/max, 예외 경로)에 대한 유닛 테스트 추가.
 
-README의 설정 안내는 이 §21을 가리키는 짧은 포인터만 유지하며 복제하지 않습니다.
+README([README.md](../README.md) / [README.en.md](../README.en.md))는 사용자가 자주 손대는 5–6개 설정만 **이름 + 한 줄 용도**의 하이라이트 표로 노출합니다. 타입·기본값·범위 같은 사실은 그쪽에 복제하지 않으므로(이름만으로는 단일 출처가 깨지지 않음), 새 설정을 추가하거나 기본값을 바꿀 때 README 표를 동시에 고칠 필요는 없습니다 — 다만 새 설정이 *자주 조정될 만한 사용자 노출 다이얼*이라면 README 하이라이트에 한 행 더 넣을지 검토하세요.
 
 ---
 

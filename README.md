@@ -25,6 +25,7 @@
 - **액션 생성 마법사** — 대화형 UI로 코드 작성 없이 액션 생성
 - **Preset** — 팀원들과 action 설정 공유
 - **실행 히스토리** — 성공/실패 추적, 빠른 재실행
+- **Quick Action Palette** — `TaskHub: Run Any Action…` 단일 커맨드로 모든 액션을 fuzzy 검색·실행. 최근 사용 항목을 상위에 표시 (개수는 설정에서 조정)
 - **Problem Matcher** — 빌드 출력의 컴파일러 에러·경고를 Problems 패널에 자동 표시 (gcc / TypeScript 프리셋 또는 커스텀 정규식)
 
 ### 사이드바 패널
@@ -73,6 +74,10 @@
     </td>
   </tr>
 </table>
+
+**Quick Action Palette** — `TaskHub: Run Any Action…` 한 커맨드로 모든 액션을 fuzzy 검색·실행. 최근 사용 항목은 상단 *Recently used* 섹션에 모이고, 그 아래는 폴더 breadcrumb까지 매칭되는 전체 액션 리스트. 노출 개수는 `taskhub.runAnyAction.recentLimit`로 조정.
+
+![Quick Action Palette - 최근 사용 액션과 전체 액션 fuzzy 검색](docs/images/quick-action-palette.png)
 
 **Problem Matcher** — 빌드 task 출력의 컴파일러 에러·경고를 정규식으로 추출해 VS Code Problems 패널에 자동 등록. 클릭으로 파일·라인 점프, F8로 다음 진단 순환, 에디터의 빨간 squiggly까지 표시. `$gcc` / `$tsc` 내장 프리셋과 커스텀 정규식 모두 지원.
 
@@ -145,7 +150,20 @@
 
 ## 설정
 
-VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전체 설정을 UI로 조정할 수 있습니다. 각 설정의 타입·기본값·범위·관련 기능과 새 설정 추가 절차는 [docs/features.md §21 설정 레퍼런스](docs/features.md#21-설정-레퍼런스)에서 단일 출처로 관리됩니다.
+VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전체 설정을 UI로 조정할 수 있습니다.
+
+### 자주 조정하는 설정 (하이라이트)
+
+| 설정 | 용도 |
+| --- | --- |
+| `taskhub.runAnyAction.recentLimit` | Quick Action Palette의 *Recently used* 노출 개수 (`0`이면 섹션 숨김) |
+| `taskhub.history.maxItems` | 사이드바 History 패널이 보관할 실행 기록 개수 |
+| `taskhub.history.showPanel` | History 패널 자체의 표시/숨김 (기록은 유지) |
+| `taskhub.pipeline.outputCaptureLimitMb` | 캡처 모드(`passTheResultToNextTask`) stdout/stderr 누적 상한(MB) |
+| `taskhub.experimental.bitOperationHover.enabled` | C/C++ 비트 연산식 Before/After hover (실험적) |
+| `taskhub.preset.selected` | 자동 적용할 프리셋 ID |
+
+각 설정의 타입·기본값·범위·관련 기능과 새 설정 추가 절차는 [docs/features.md §21 설정 레퍼런스](docs/features.md#21-설정-레퍼런스)에서 단일 출처로 관리됩니다 — 이 표는 그중 사용자가 가장 자주 손대는 항목만 추린 포인터입니다.
 
 ---
 

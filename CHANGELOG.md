@@ -29,6 +29,28 @@
 =====================================================================
 -->
 
+## [0.4.28] - 2026-05-05
+
+### 추가 — Quick Action Palette (`TaskHub: Run Any Action…`) + `recentLimit` 설정
+
+#### UX (액션 시스템 / 키바인딩 우회 경로)
+- **단일 커맨드로 모든 액션을 fuzzy 검색·실행**: `taskhub.runAnyAction` 명령을 추가했습니다. Command Palette에서 `TaskHub: Run Any Action…` 또는 사용자가 이 한 명령에만 키를 바인딩해두면, 트리에 등록된 모든 runnable 액션이 한 QuickPick 리스트로 펼쳐져 두세 글자만 쳐서 실행할 수 있습니다. 폴더 / 별칭 prefix 매칭은 `matchOnDescription: true`로 폴더 breadcrumb까지 검색 면에 포함되어 자동 처리됩니다. 액션마다 `keybindings.json` 에 매핑하지 않아도 "팔레트 + 두세 글자" 근육 기억으로 가치의 80%를 회수하는 우회 경로 — 로드맵 §9 참조: [docs/roadmap.md](docs/roadmap.md). 참조: [src/extension.ts](src/extension.ts) `taskhub.runAnyAction`, `buildRunAnyActionPicks`.
+- **최근 사용 액션이 위 섹션에 표시**: 마지막으로 실행한 액션은 `globalState`(`taskhub.runAnyAction.mru`)에 액션 ID로 저장되며 (label 이 아니라 ID 로 저장 — 액션 이름 변경에 영향받지 않게), 다음 팔레트 호출 시 `Recently used` separator 아래 가장 위에 노출됩니다.
+- **`taskhub.runAnyAction.recentLimit` 설정** (기본 5, 범위 0–20): 노출되는 최근 사용 항목 개수를 사용자가 조정. `0`으로 두면 *Recently used* 섹션 자체가 사라지고 모든 액션이 단일 리스트로만 보입니다. 사용자가 설정을 줄였을 때(예: 5 → 3)도 다음 팔레트 호출에서 즉시 반영되도록 **읽기 시점 + 쓰기 시점 양쪽**에서 슬라이스 — 저장된 stale 잔여물이 화면에 새지 않습니다.
+- **stale MRU 항목은 표시 시점에 필터링**: 사용자가 액션을 삭제하거나 폴더 ID 가 우연히 MRU에 들어가도, 매번 팔레트가 열릴 때 현재 액션 트리에 존재하는 runnable ID 만 추려서 노출합니다 — "실행 시점이 아니라 표시 시점에 필터" 라는 의도적 설계: 더 이상 존재하지 않는 항목을 사용자가 선택하는 경로 자체를 차단합니다.
+- **folder / separator 항목은 평면화에서 제외**: `taskhub.runAction.<id>` 동적 등록과 같은 규칙(item에 `.action` 속성이 있어야 runnable) 을 재사용 — 트리 탐색용 폴더는 팔레트에 등장하지 않습니다.
+
+#### Medium — 1차 리뷰 후속 수정 (P2: stale-then-slice 로 valid 최근 항목이 매장되던 문제)
+- **`buildRunAnyActionPicks` 가 stale 필터를 limit 보다 먼저 적용**: 초기 구현은 핸들러에서 `stored.slice(0, limit)` 으로 먼저 자른 뒤 `buildRunAnyActionPicks` 안에서 stale 을 걸렀습니다. 그 결과 저장값이 `[deleted×5, valid1, valid2]` 이고 limit=5 면 앞쪽 5개가 모두 삭제된 액션이라 recent 가 0개로 끝나는 회귀가 있었음 ("최대 N개의 최근 runnable" 의도와 어긋남). 이제 `buildRunAnyActionPicks(actions, mru, recentLimit)` 가 stale id 를 먼저 걸러낸 뒤 limit 을 적용합니다 — 사용자가 액션 여러 개를 연속으로 삭제해도 다음 N개의 valid 한 최근 액션이 그대로 보입니다. 핸들러도 `stored` 를 그대로 넘기도록 변경. 또한 selection 후 storage 업데이트의 base 를 `stored` 가 아니라 `recent.map(p => p.actionId)` 로 바꿔, stale id 가 다음 selection 시점에 storage 에서도 자동으로 청소되도록 했습니다.
+
+#### Low — 1차 리뷰 후속 수정 (P3: `recentLimit=0` 일 때 leading separator 가 남던 문제)
+- **`buildRunAnyActionPaletteItems` 가 recent 가 비어있을 때 "All actions" separator 를 생략**: 문서는 `recentLimit=0` 이면 단일 flat 리스트로 보인다고 했지만, 핸들러는 `rest.length > 0` 이면 무조건 separator 를 뽑아 위에 비교 대상이 없는 leading heading 이 생겼습니다. QuickPick 아이템 어셈블리를 순수 helper 로 추출하고, recent 가 있을 때만 rest separator 를 emit 하도록 변경 — 이로 P3 도 단위 테스트로 고정 가능해졌습니다.
+
+#### Low — 회귀 가드 (broken actions.json 시 팔레트가 어떻게 동작하는지 단위 테스트로 고정)
+- **`planRunAnyAction` 순수 outcome helper 추출**: 핸들러 본문의 "load → 분기 → UI" 흐름을 순수 helper 로 추출했습니다 (`{kind: 'load-error' | 'empty' | 'show-palette', ...}` discriminated union 반환). 핸들러는 outcome.kind 별로 `showErrorMessage` / `showInformationMessage` / `showQuickPick` 만 호출하는 얇은 어댑터가 됩니다. 이 분리 덕분에 "actions.json 이 깨진 경우 팔레트가 빈 채로 열리지 않고 에러 토스트가 뜨는가" 라는 사용자 우려를 단위 테스트로 직접 핀 가능해졌습니다 — JSON parse 실패, schema validation 실패, 빈 액션 배열, out-of-range setting clamp(NaN/음수/초과값) 모두 helper 단에서 검증.
+
+**테스트**: 신규 19 케이스 — `buildRunAnyActionPicks` 7종 (folder/separator 제외 / breadcrumb folderPath / MRU 순서 / stale 필터 / MRU 내부 중복 / **stale-at-front 가 limit 잡아먹지 않음 (P2)** / 명시적 limit override + limit=0 비활성), `updateRunAnyActionMru` 5종 (신규 prepend / 기존 이동 + dedupe / 기본 cap / 명시적 max override / `max=0` 비활성), `buildRunAnyActionPaletteItems` 2종 (**recent=[] 일 때 leading separator 없음 (P3)** / 둘 다 있을 때 separator 순서), `planRunAnyAction` 5종 (**broken JSON parse → load-error**, **schema validation 실패 → load-error**, 빈 배열 → empty, happy path items+recentIds+limit, out-of-range setting clamp). 통합 IT-088~IT-107. 최종 1062 passing.
+
 ## [0.4.26] - 2026-05-04
 
 ### 추가 — 같은 title 폴더 액션 disambiguation
