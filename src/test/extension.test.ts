@@ -16,6 +16,8 @@ import {
 	findActionById,
 	findActionPathById,
 	insertActionIntoDestination,
+	buildDestinationPickItems,
+	deriveActionIdFromTitle,
 	createGroupedTaskPresentationOptions,
 	addLinkEntry,
 	getCommandString,
@@ -1212,6 +1214,77 @@ suite('Extension Test Suite', () => {
 			assert.ok(folder.children);
 			assert.strictEqual(folder.children?.length, 1);
 			assert.strictEqual(folder.children?.[0], newAction);
+		});
+	});
+
+	suite('buildDestinationPickItems (Create Action wizard)', () => {
+		test('returns Root only when actions.json has no folders so the wizard can skip the prompt', () => {
+			const items = buildDestinationPickItems([]);
+			assert.strictEqual(items.length, 1, 'flat actions.json should yield a single Root item');
+			assert.strictEqual(items[0].folderRef, undefined);
+		});
+
+		test('Root description matches the actual append-to-end behavior, not "top of file"', () => {
+			// Regression guard for the v0.4.31 fix: previously the description
+			// claimed "top of actions.json" but `insertActionIntoDestination`
+			// pushes to the end. Description now describes the *level*.
+			const items = buildDestinationPickItems([]);
+			const root = items[0];
+			assert.ok(root.description, 'Root item must have a description');
+			assert.ok(
+				!/최상단|top of/i.test(root.description!),
+				`Root description should not claim "top of file" position; got: ${root.description}`
+			);
+		});
+
+		test('lists each folder under Root with its full path label', () => {
+			const folder: ActionItem = {
+				id: 'tools',
+				title: 'Tools',
+				type: 'folder',
+				children: [
+					{ id: 'tools.nested', title: 'Nested', type: 'folder', children: [] }
+				]
+			};
+			const items = buildDestinationPickItems([folder]);
+			assert.strictEqual(items.length, 3, 'Root + Tools + Tools/Nested');
+			assert.strictEqual(items[1].folderRef?.id, 'tools');
+			assert.strictEqual(items[2].folderRef?.id, 'tools.nested');
+			assert.ok(items[2].label.includes('Tools'), 'nested folder label should carry the parent path');
+		});
+	});
+
+	suite('deriveActionIdFromTitle', () => {
+		test('produces a kebab slug that matches the actions.json id pattern', () => {
+			const idPattern = /^[A-Za-z0-9._-]+$/;
+			const id = deriveActionIdFromTitle('Build Project', new Set());
+			assert.strictEqual(id, 'build-project');
+			assert.ok(idPattern.test(id));
+		});
+
+		test('falls back to "action" when the title has no alphanumerics', () => {
+			assert.strictEqual(deriveActionIdFromTitle('   ', new Set()), 'action');
+			assert.strictEqual(deriveActionIdFromTitle('!!!', new Set()), 'action');
+		});
+
+		test('appends -2, -3, ... when the slug already exists', () => {
+			const existing = new Set(['build-project']);
+			assert.strictEqual(deriveActionIdFromTitle('Build Project', existing), 'build-project-2');
+
+			existing.add('build-project-2');
+			assert.strictEqual(deriveActionIdFromTitle('Build Project', existing), 'build-project-3');
+		});
+
+		test('strips leading/trailing punctuation and collapses runs', () => {
+			assert.strictEqual(deriveActionIdFromTitle('  -- Hello, World!! --  ', new Set()), 'hello-world');
+		});
+
+		test('passes the validator regex even for unicode-heavy titles', () => {
+			// Korean / emoji / accented characters all collapse to hyphens, so
+			// the resulting id still satisfies [A-Za-z0-9._-].
+			const idPattern = /^[A-Za-z0-9._-]+$/;
+			assert.ok(idPattern.test(deriveActionIdFromTitle('한글 빌드', new Set())));
+			assert.ok(idPattern.test(deriveActionIdFromTitle('Café ☕', new Set())));
 		});
 	});
 

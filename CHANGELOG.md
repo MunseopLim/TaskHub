@@ -29,6 +29,29 @@
 =====================================================================
 -->
 
+## [0.4.31] - 2026-05-05
+
+### 변경 — Create Action 마법사 UX 정리 (코드 리뷰 4건 반영)
+
+`TaskHub: Create Action` 흐름이 사용자가 하려는 핵심("이름과 명령어 입력")보다 내부 식별자(`action id` / `task id`)와 토스트 문구(success/fail message) 같은 부수 항목을 먼저 묻고 있었다. 처음 액션 하나 만들 때 8~10개의 단발 prompt 가 줄줄이 떠 흐름이 무거웠다. 두 차례 리뷰에서 같은 결론(P2 4건 + P3 1건)으로 모인 항목을 한 릴리스로 묶어 반영한다.
+
+#### Medium (설명/동작 불일치)
+
+- **루트 destination 항목 설명이 실제 삽입 위치와 달랐다**: Quick Pick 의 루트 항목은 "actions.json 최상단에 추가 / Add at the top of actions.json"라고 표시하지만 `insertActionIntoDestination` 은 `workspaceActions.push(newAction)` 으로 배열 끝에 추가했다. 사용자는 *최상단*을 기대하는데 실제로는 리스트 끝에 만들어져 트리에서 못 찾는 사고가 가능했다. 동작은 기존 테스트(`should push new action to root when destination has no folderRef`)가 보장하는 *append* 가 맞는 의도이므로, 설명을 *위치*가 아니라 *레벨* — "폴더 밖 최상위에 추가 / Add at top level (outside folders)" — 로 교정. 회귀 가드로 description 에 `최상단`/`top of` 가 다시 들어가지 못하게 단언하는 unit test 를 추가. 참조: [src/extension.ts](src/extension.ts) `buildDestinationPickItems`.
+
+#### UX / 일관성
+
+- **prompt 순서 재배치 — 핵심 입력에 빨리 도달**: 기존 흐름 `id → title → description → success → fail → destination → taskId → command → cwd → reveal` 을 `template → title → 핵심 입력(쉘 명령어 한 줄, File Picker + Shell 은 `${selectFile.path}` 가 prefill 된 동일 prompt) → destination(폴더 있을 때만) → 저장 + post-creation` 으로 압축. `action id` 는 제목에서 자동 도출(`deriveActionIdFromTitle`: 소문자 슬러그, 충돌 시 `-2`/`-3` suffix), `task id` 는 `run`/`selectFile` 로 하드코딩, `description` 은 템플릿 default 사용, file picker `openLabel` / `cwd` / `revealTerminal` / `successMessage` / `failMessage` 는 omit (`always` reveal 과 메시지 없음이 default 동작과 동일, `openLabel` default 는 *파일 선택* / *Select file*). 첫 사용 경로가 3-4 prompt 로 줄고, 더 손보고 싶으면 post-creation 의 *actions.json 열기* 로 즉시 점프. 참조: [src/extension.ts](src/extension.ts) `runActionCreationWizard`/`ACTION_TEMPLATES`/`deriveActionIdFromTitle`.
+- **destination 단일 옵션 prompt 자동 skip**: actions.json 에 `type: 'folder'` 항목이 하나도 없으면 위치 선택 Quick Pick 은 *Root* 한 항목만 띄우는 의미 없는 단계가 됐다. `buildDestinationPickItems().length === 1` 일 때 prompt 자체를 건너뛰고 root 로 곧장 진행. 참조: [src/extension.ts](src/extension.ts) `promptForActionDestination`.
+- **깨진 actions.json 에 *actions.json 열기* 복구 경로 제공**: 기존에는 `loadWizardActionSources` 가 throw 하면 *액션 소스를 불러오지 못했습니다* 토스트만 띄우고 끝났다. 이제 같은 토스트에 *actions.json 열기* 액션 버튼을 함께 두어, 파싱 실패/스키마 위반으로 마법사가 진입조차 안 될 때도 사용자가 그 자리에서 파일을 열어 고칠 수 있다. 참조: [src/extension.ts](src/extension.ts) `runActionCreationWizard` catch 분기.
+- **post-creation 토스트에 *추가 설정* 안내 한 줄 추가**: 마법사가 `cwd`/`revealTerminal`/`successMessage`/`failMessage` (그리고 file-dialog 템플릿의 `openLabel`)를 묻지 않고 default 로 채우는 만큼, 그런 옵션이 *존재한다는 사실 자체*를 모르는 사용자가 생긴다. 생성 직후 토스트 본문을 `'X' 액션이 actions.json에 추가되었습니다. cwd, revealTerminal, 성공/실패 메시지 등 추가 설정이 필요하면 actions.json을 편집하세요.` 로 확장 — 같은 토스트의 *actions.json 열기* 버튼이 그 진입점을 그대로 제공한다. 참조: [src/extension.ts](src/extension.ts) `handlePostCreationChoice`.
+
+#### 문서
+
+- features.md §8 *액션 생성 마법사* 절을 새 흐름(템플릿 → 제목 → 핵심 입력 → destination[있을 때만] → 자동 저장)에 맞게 다시 작성. 자동 도출되는 ID, omit 되는 부수 옵션, 깨진 actions.json 복구 경로를 명시. 참조: [docs/features.md](docs/features.md).
+
+**테스트**: 신규 8 케이스 (`buildDestinationPickItems` 3종 + `deriveActionIdFromTitle` 5종), 최종 1157 passing.
+
 ## [0.4.30] - 2026-05-05
 
 ### 추가 — JSON Editor 데이터 보호 (저장 차단 / Undo / 외부 변경 / 복구)

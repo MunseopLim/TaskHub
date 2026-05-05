@@ -894,24 +894,27 @@ class WizardCancelledError extends Error {
     }
 }
 
-interface BaseActionInfo {
-    id: string;
-    title: string;
-    description: string;
-    successMessage?: string;
-    failMessage?: string;
-}
-
 interface ActionTemplateDefinition {
     id: string;
     label: string;
     description: string;
-    defaultDescription?: string;
-    build(baseInfo: BaseActionInfo): Promise<PipelineAction>;
+    /** Used as the `description` field of the auto-built PipelineAction. */
+    defaultDescription: string;
+    /**
+     * Prompts the user for the *minimum* template-specific inputs only —
+     * currently a single shell command for both bundled templates (the
+     * File Picker + Shell variant just prefills `${selectFile.path}` into
+     * the command). Task ids, cwd, revealTerminal, the file picker's
+     * `openLabel`, and success/fail messages are intentionally not
+     * prompted here — they default to safe values and the user can edit
+     * them in actions.json afterwards. This mirrors the wizard's "ask for
+     * what's essential, default the rest" goal so first-time creation is
+     * 3-4 prompts instead of 8-10.
+     */
+    promptForTasks(): Promise<any[]>;
 }
 
 type DestinationPickItem = vscode.QuickPickItem & { folderRef?: ActionItem };
-type RevealPickItem = vscode.QuickPickItem & { value: 'always' | 'silent' | 'never' };
 
 const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
     {
@@ -919,39 +922,16 @@ const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
         label: t('단일 쉘 명령어', 'Single Shell Command'),
         description: t('하나의 쉘 명령어를 실행하고 공유 터미널에 출력을 스트리밍합니다.', 'Run one shell command and stream its output to the shared terminal.'),
         defaultDescription: t('쉘 명령어를 실행합니다.', 'Run a shell command.'),
-        async build(baseInfo) {
-            const usedTaskIds = new Set<string>();
-            const taskId = await promptForTaskId(usedTaskIds, 'run');
-            usedTaskIds.add(taskId);
+        async promptForTasks() {
             const command = await promptForRequiredInput({
                 prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
                 placeHolder: 'e.g. npm run build'
             });
-            const cwd = await promptForOptionalInput({
-                prompt: t('작업 디렉터리 (선택사항)', 'Working directory (optional)'),
-                placeHolder: t('비워두면 워크스페이스 루트를 사용합니다', 'Leave empty to use the workspace root')
-            });
-            const reveal = await promptForRevealSelection('always');
-            const task: any = {
-                id: taskId,
+            return [{
+                id: 'run',
                 type: 'shell' as const,
-                command,
-                revealTerminal: reveal
-            };
-            if (cwd) {
-                task.cwd = cwd;
-            }
-            const action: PipelineAction = {
-                description: baseInfo.description,
-                tasks: [task]
-            };
-            if (baseInfo.successMessage) {
-                action.successMessage = baseInfo.successMessage;
-            }
-            if (baseInfo.failMessage) {
-                action.failMessage = baseInfo.failMessage;
-            }
-            return action;
+                command
+            }];
         }
     },
     {
@@ -959,47 +939,29 @@ const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
         label: t('파일 선택 + 쉘', 'File Picker + Shell'),
         description: t('사용자에게 파일을 선택하게 한 후, 선택된 경로를 받는 쉘 명령어를 실행합니다.', 'Ask the user to pick a file, then run a shell command that receives the selected path.'),
         defaultDescription: t('파일을 선택하고 해당 파일로 명령어를 실행합니다.', 'Pick a file and run a command with the selection.'),
-        async build(baseInfo) {
-            const usedTaskIds = new Set<string>();
-            const dialogTaskId = await promptForTaskId(usedTaskIds, 'selectFile');
-            usedTaskIds.add(dialogTaskId);
-            const openLabel = await promptForOptionalInput({
-                prompt: t('파일 선택 버튼 레이블 (선택사항)', 'File picker button label (optional)'),
-                placeHolder: t('"파일 선택"이 기본값입니다', 'Defaults to "Select file"')
-            });
-            const shellTaskId = await promptForTaskId(usedTaskIds, 'run');
-            usedTaskIds.add(shellTaskId);
+        async promptForTasks() {
+            const dialogTaskId = 'selectFile';
+            const shellTaskId = 'run';
             const defaultCommand = `echo Selected file: \${${dialogTaskId}.path}`;
             const command = await promptForRequiredInput({
                 prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
                 value: defaultCommand,
                 placeHolder: t(`선택한 파일을 참조하려면 \${${dialogTaskId}.path}를 사용하세요`, `Use \${${dialogTaskId}.path} to reference the selected file`)
             });
-            const reveal = await promptForRevealSelection('always');
-            const fileTask: any = {
-                id: dialogTaskId,
-                type: 'fileDialog' as const,
-                options: {
-                    openLabel: openLabel || t('파일 선택', 'Select file')
+            return [
+                {
+                    id: dialogTaskId,
+                    type: 'fileDialog' as const,
+                    options: {
+                        openLabel: t('파일 선택', 'Select file')
+                    }
+                },
+                {
+                    id: shellTaskId,
+                    type: 'shell' as const,
+                    command
                 }
-            };
-            const shellTask: any = {
-                id: shellTaskId,
-                type: 'shell' as const,
-                command,
-                revealTerminal: reveal
-            };
-            const action: PipelineAction = {
-                description: baseInfo.description,
-                tasks: [fileTask, shellTask]
-            };
-            if (baseInfo.successMessage) {
-                action.successMessage = baseInfo.successMessage;
-            }
-            if (baseInfo.failMessage) {
-                action.failMessage = baseInfo.failMessage;
-            }
-            return action;
+            ];
         }
     }
 ];
@@ -1073,112 +1035,28 @@ async function promptForOptionalInput(options: { prompt: string; value?: string;
     return trimmed.length > 0 ? trimmed : undefined;
 }
 
-async function promptForActionId(existingIds: Set<string>): Promise<string> {
-    const idPattern = /^[A-Za-z0-9._-]+$/;
-    const result = await vscode.window.showInputBox({
-        prompt: t('고유한 액션 ID를 입력하세요', 'Enter a unique action id'),
-        placeHolder: 'e.g. button.buildProject',
-        ignoreFocusOut: true,
-        validateInput: input => {
-            const trimmed = input.trim();
-            if (!trimmed) {
-                return t('액션 ID는 필수입니다.', 'Action id is required.');
-            }
-            if (!idPattern.test(trimmed)) {
-                return t('영문, 숫자, 점, 밑줄, 하이픈만 사용할 수 있습니다.', 'Use letters, numbers, dots, underscores, or hyphens.');
-            }
-            if (existingIds.has(trimmed)) {
-                return t('이 ID를 가진 액션 또는 폴더가 이미 존재합니다.', 'An action or folder with this id already exists.');
-            }
-            return undefined;
-        }
-    });
-    if (result === undefined) {
-        throw new WizardCancelledError();
+/**
+ * Derive a valid action id from a human-readable title. The id only needs to
+ * match `[A-Za-z0-9._-]+` (the actions.json validator) and be unique within
+ * the existing id pool, so we lower-case the title and collapse runs of
+ * non-alphanumerics into a single hyphen. On collision we append `-2`,
+ * `-3`, … so two actions sharing a title can co-exist. This replaces the
+ * old "ask the user for an id first" prompt so the wizard's first user
+ * input is the human-meaningful title; the machine id is computed.
+ */
+export function deriveActionIdFromTitle(title: string, existingIds: Set<string>): string {
+    const slug = title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const base = slug.length > 0 ? slug : 'action';
+    if (!existingIds.has(base)) {
+        return base;
     }
-    return result.trim();
-}
-
-async function promptForTaskId(usedTaskIds: Set<string>, suggestion: string): Promise<string> {
-    const idPattern = /^[A-Za-z0-9._-]+$/;
-    const result = await vscode.window.showInputBox({
-        prompt: t('태스크 ID를 입력하세요', 'Enter a task id'),
-        value: suggestion,
-        placeHolder: t('이후 단계에서 태스크 출력을 참조하는 데 사용됩니다', 'Used to reference the task output in later steps'),
-        ignoreFocusOut: true,
-        validateInput: input => {
-            const trimmed = input.trim();
-            if (!trimmed) {
-                return t('태스크 ID는 필수입니다.', 'Task id is required.');
-            }
-            if (!idPattern.test(trimmed)) {
-                return t('영문, 숫자, 점, 밑줄, 하이픈만 사용할 수 있습니다.', 'Use letters, numbers, dots, underscores, or hyphens.');
-            }
-            if (usedTaskIds.has(trimmed)) {
-                return t('이 태스크 ID는 이미 이 액션에서 사용 중입니다.', 'Task id already used in this action.');
-            }
-            return undefined;
+    for (let i = 2; i < 10000; i++) {
+        const candidate = `${base}-${i}`;
+        if (!existingIds.has(candidate)) {
+            return candidate;
         }
-    });
-    if (result === undefined) {
-        throw new WizardCancelledError();
     }
-    return result.trim();
-}
-
-async function promptForRevealSelection(defaultValue: 'always' | 'silent' | 'never'): Promise<'always' | 'silent' | 'never'> {
-    const picks: RevealPickItem[] = [
-        {
-            label: defaultValue === 'always' ? t('항상 (기본값)', 'Always (default)') : t('항상', 'Always'),
-            description: t('태스크 실행 시 터미널을 표시합니다.', 'Reveal the terminal when the task runs.'),
-            value: 'always'
-        },
-        {
-            label: defaultValue === 'silent' ? t('조용히 (기본값)', 'Silent (default)') : t('조용히', 'Silent'),
-            description: t('터미널이 이미 보이지 않는 한 표시하지 않고 실행합니다.', 'Run without revealing unless the terminal is already visible.'),
-            value: 'silent'
-        },
-        {
-            label: defaultValue === 'never' ? t('표시 안 함 (기본값)', 'Never (default)') : t('표시 안 함', 'Never'),
-            description: t('태스크 실행 중 터미널을 숨긴 상태로 유지합니다.', 'Keep the terminal hidden while the task runs.'),
-            value: 'never'
-        }
-    ];
-    const selection = await vscode.window.showQuickPick(picks, {
-        placeHolder: t('태스크 터미널 동작 방식을 선택하세요.', 'Choose how the Task terminal should behave.'),
-        ignoreFocusOut: true
-    });
-    if (!selection) {
-        throw new WizardCancelledError();
-    }
-    return selection.value;
-}
-
-async function collectBaseActionInfo(template: ActionTemplateDefinition, existingIds: Set<string>): Promise<BaseActionInfo> {
-    const id = await promptForActionId(existingIds);
-    existingIds.add(id);
-    const title = await promptForRequiredInput({
-        prompt: t('TaskHub에 표시될 제목을 입력하세요', 'Enter the title displayed in TaskHub')
-    });
-    const description = await promptForRequiredInput({
-        prompt: t('이 액션에 대한 짧은 설명을 입력하세요', 'Enter a short description for this action'),
-        value: template.defaultDescription
-    });
-    const successMessage = await promptForOptionalInput({
-        prompt: t('성공 메시지 (선택사항)', 'Success message (optional)'),
-        placeHolder: t('모든 태스크가 성공하면 표시됩니다', 'Shown when all tasks succeed')
-    });
-    const failMessage = await promptForOptionalInput({
-        prompt: t('실패 메시지 (선택사항)', 'Failure message (optional)'),
-        placeHolder: t('태스크가 실패하면 표시됩니다', 'Shown when any task fails')
-    });
-    return {
-        id,
-        title,
-        description,
-        successMessage,
-        failMessage
-    };
+    return `${base}-${Date.now()}`;
 }
 
 function loadWizardActionSources(context: vscode.ExtensionContext, workspaceFolder: vscode.WorkspaceFolder): WizardActionSources {
@@ -1232,14 +1110,31 @@ async function promptForActionTemplate(): Promise<ActionTemplateDefinition | und
     return template;
 }
 
-async function promptForActionDestination(workspaceActions: ActionItem[]): Promise<DestinationPickItem> {
-    const destinationPickItems: DestinationPickItem[] = [
+/**
+ * Build the destination QuickPick. The "Root" item's description was
+ * previously "Add at the top of actions.json", but `insertActionIntoDestination`
+ * actually appends to the end of `workspaceActions`. The mismatch is fixed
+ * here by describing the *level* (top-level, outside folders) rather than
+ * the *position* in the file. When the actions.json has no folders, the
+ * picker would show only this single Root item — we skip the prompt
+ * entirely in that case so the wizard doesn't make the user click through
+ * a one-option menu.
+ */
+export function buildDestinationPickItems(workspaceActions: ActionItem[]): DestinationPickItem[] {
+    return [
         {
             label: t('$(root-folder) 루트 (최상위)', '$(root-folder) Root (top level)'),
-            description: t('actions.json 최상단에 추가', 'Add at the top of actions.json')
+            description: t('폴더 밖 최상위에 추가', 'Add at top level (outside folders)')
         },
         ...collectFolderDestinations(workspaceActions)
     ];
+}
+
+async function promptForActionDestination(workspaceActions: ActionItem[]): Promise<DestinationPickItem> {
+    const destinationPickItems = buildDestinationPickItems(workspaceActions);
+    if (destinationPickItems.length === 1) {
+        return destinationPickItems[0];
+    }
     const destination = await vscode.window.showQuickPick(destinationPickItems, {
         placeHolder: t('새 액션을 배치할 위치를 선택하세요', 'Choose where to place the new action'),
         ignoreFocusOut: true
@@ -1267,32 +1162,73 @@ function persistWorkspaceActions(workspaceFolder: string, workspaceActionsPath: 
     fs.writeFileSync(workspaceActionsPath, JSON.stringify(workspaceActions, null, 2) + '\n');
 }
 
-async function handlePostCreationChoice(baseInfo: BaseActionInfo, workspaceActionsPath: string): Promise<void> {
+async function handlePostCreationChoice(created: { id: string; title: string }, workspaceActionsPath: string): Promise<void> {
     const openOption = t('actions.json 열기', 'Open actions.json');
     const runOption = t('바로 실행', 'Run now');
-    const choice = await vscode.window.showInformationMessage(t(`'${baseInfo.title}' 액션이 actions.json에 추가되었습니다.`, `Action '${baseInfo.title}' was added to actions.json.`), openOption, runOption);
+    // The wizard skips cwd / revealTerminal / success·fail messages (and the
+    // file picker's openLabel for the file-dialog template) to keep the
+    // first-time path short. Surface their existence here so users who
+    // didn't know those options exist still discover them — the *Open
+    // actions.json* button is the entry point for actually setting them.
+    const choice = await vscode.window.showInformationMessage(
+        t(
+            `'${created.title}' 액션이 actions.json에 추가되었습니다. cwd, revealTerminal, 성공/실패 메시지 등 추가 설정이 필요하면 actions.json을 편집하세요.`,
+            `Action '${created.title}' was added to actions.json. Edit it to configure additional options like cwd, revealTerminal, or success/fail messages.`
+        ),
+        openOption,
+        runOption
+    );
     if (choice === openOption) {
         const document = await vscode.workspace.openTextDocument(workspaceActionsPath);
         await vscode.window.showTextDocument(document, { preview: false });
     } else if (choice === runOption) {
-        vscode.commands.executeCommand('taskhub.executeActionById', { id: baseInfo.id });
+        vscode.commands.executeCommand('taskhub.executeActionById', { id: created.id });
     }
 }
 
+/**
+ * Action creation wizard. Re-ordered so the user reaches the *essential*
+ * input (the shell command / file picker) as fast as possible:
+ *
+ *   1. Pick workspace folder (auto-skipped if there's only one)
+ *   2. Pick template
+ *   3. Title
+ *   4. Template-specific prompts — a single shell command for both bundled
+ *      templates (File Picker + Shell prefills `${selectFile.path}`)
+ *   5. Pick destination (auto-skipped if no folders exist in actions.json)
+ *   6. Save + post-creation choice (Open actions.json / Run now)
+ *
+ * Action id, task ids, description, success/fail message, cwd, terminal
+ * reveal mode are all auto-filled to safe defaults — power users can edit
+ * them via "Open actions.json" right after creation. This trims the
+ * first-run path from ~10 prompts to 3-4. Broken `.vscode/actions.json`
+ * surfaces an error toast with an explicit "Open actions.json" recovery
+ * action so the user has a next step instead of a dead-end notification.
+ */
 async function runActionCreationWizard(context: vscode.ExtensionContext, mainViewProvider: MainViewProvider): Promise<void> {
     const targetFolder = await pickWorkspaceFolderForCommand(t('actions.json을 업데이트할 워크스페이스 폴더를 선택하세요', 'Select the workspace folder whose actions.json should be updated'));
     if (!targetFolder) {
         return;
     }
 
+    const workspaceActionsPath = path.join(targetFolder.uri.fsPath, '.vscode', 'actions.json');
+
     let sources: WizardActionSources;
     try {
         sources = loadWizardActionSources(context, targetFolder);
     } catch (error: any) {
-        vscode.window.showErrorMessage(t(
-            `액션 소스를 불러오지 못했습니다: ${error.message}`,
-            `Failed to load action sources: ${error.message}`
-        ));
+        const openLabel = t('actions.json 열기', 'Open actions.json');
+        const choice = await vscode.window.showErrorMessage(
+            t(
+                `액션 소스를 불러오지 못했습니다: ${error.message}`,
+                `Failed to load action sources: ${error.message}`
+            ),
+            openLabel
+        );
+        if (choice === openLabel && fs.existsSync(workspaceActionsPath)) {
+            const document = await vscode.workspace.openTextDocument(workspaceActionsPath);
+            await vscode.window.showTextDocument(document, { preview: false });
+        }
         return;
     }
 
@@ -1301,22 +1237,31 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
         return;
     }
 
-    const existingIds = collectActionIds([...sources.bundledActions, ...sources.workspaceActions]);
-
     try {
-        const baseInfo = await collectBaseActionInfo(template, existingIds);
+        const title = await promptForRequiredInput({
+            prompt: t('TaskHub에 표시될 제목을 입력하세요', 'Enter the title displayed in TaskHub'),
+            placeHolder: 'e.g. Build Project'
+        });
+        const tasks = await template.promptForTasks();
+
+        const existingIds = collectActionIds([...sources.bundledActions, ...sources.workspaceActions]);
+        const id = deriveActionIdFromTitle(title, existingIds);
+
         const destination = await promptForActionDestination(sources.workspaceActions);
-        const actionDefinition = await template.build(baseInfo);
+
         const newAction: ActionItem = {
-            id: baseInfo.id,
-            title: baseInfo.title,
-            action: actionDefinition
+            id,
+            title,
+            action: {
+                description: template.defaultDescription,
+                tasks
+            }
         };
 
         insertActionIntoDestination(sources.workspaceActions, destination, newAction);
         persistWorkspaceActions(targetFolder.uri.fsPath, sources.workspaceActionsPath, sources.workspaceActions);
         refreshActionsAndCommands(context, mainViewProvider);
-        await handlePostCreationChoice(baseInfo, sources.workspaceActionsPath);
+        await handlePostCreationChoice({ id, title }, sources.workspaceActionsPath);
     } catch (error) {
         if (error instanceof WizardCancelledError) {
             return;
