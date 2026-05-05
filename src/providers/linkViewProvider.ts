@@ -58,37 +58,75 @@ export class Link extends vscode.TreeItem {
     }
 }
 
+/**
+ * Tree-side loader. On parse failure: log + (optionally) toast + return `[]`.
+ * Forgiving by design — tree rendering must keep working with stale/empty
+ * results instead of refusing to render. Write-side callers (add/delete/edit
+ * commands) MUST use {@link readLinksFromDisk} instead so a corrupt file
+ * does not silently get overwritten with a synthetic 1-entry array.
+ */
 export function loadLinksFromDisk(filePath: string, reportErrors: boolean): LinkEntry[] {
+    const result = readLinksFromDisk(filePath);
+    if (result.ok) {
+        return result.entries;
+    }
+    console.error(`Error parsing ${filePath}: ${result.error}`);
+    if (reportErrors) {
+        vscode.window.showErrorMessage(t(
+            `${path.basename(filePath)} 파싱 오류: ${result.error}`,
+            `Error parsing ${path.basename(filePath)}: ${result.error}`
+        ));
+    }
+    return [];
+}
+
+export type LinksLoadResult =
+    | { ok: true; entries: LinkEntry[] }
+    | { ok: false; error: string };
+
+/**
+ * Write-safe loader: returns a tagged result that distinguishes `[]` (file
+ * missing or empty array) from a parse failure. Add/delete/edit commands
+ * call this so they can refuse to overwrite a corrupt links.json — the
+ * old `loadLinksFromDisk` returned `[]` on parse failure, which the
+ * write paths could not tell apart from "no entries yet" and would happily
+ * append a single new entry on top, destroying the original content. Now
+ * the caller can show a recovery toast (with an *Open links.json* button)
+ * and abort instead. Vscode-free for unit-testability.
+ */
+export function readLinksFromDisk(filePath: string): LinksLoadResult {
     if (!fs.existsSync(filePath)) {
-        return [];
+        return { ok: true, entries: [] };
     }
-
+    let raw: string;
     try {
-        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        if (!Array.isArray(parsed)) {
-            return [];
-        }
-
-        return parsed.reduce<LinkEntry[]>((acc, item) => {
-            if (item && typeof item.title === 'string' && typeof item.link === 'string') {
-                const entry: LinkEntry = {
-                    title: item.title,
-                    link: item.link,
-                    group: typeof item.group === 'string' && item.group.trim().length > 0 ? item.group.trim() : undefined,
-                    tags: normalizeTags(item.tags),
-                    sourceFile: filePath
-                };
-                acc.push(entry);
-            }
-            return acc;
-        }, []);
+        raw = fs.readFileSync(filePath, 'utf-8');
     } catch (error: any) {
-        console.error(`Error parsing ${filePath}: ${error.message}`);
-        if (reportErrors) {
-            vscode.window.showErrorMessage(t(`${path.basename(filePath)} 파싱 오류: ${error.message}`, `Error parsing ${path.basename(filePath)}: ${error.message}`));
-        }
-        return [];
+        return { ok: false, error: error.message };
     }
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (error: any) {
+        return { ok: false, error: error.message };
+    }
+    if (!Array.isArray(parsed)) {
+        return { ok: false, error: 'Top-level value must be an array.' };
+    }
+    const entries: LinkEntry[] = [];
+    for (const item of parsed) {
+        if (item && typeof (item as any).title === 'string' && typeof (item as any).link === 'string') {
+            const cast = item as any;
+            entries.push({
+                title: cast.title,
+                link: cast.link,
+                group: typeof cast.group === 'string' && cast.group.trim().length > 0 ? cast.group.trim() : undefined,
+                tags: normalizeTags(cast.tags),
+                sourceFile: filePath
+            });
+        }
+    }
+    return { ok: true, entries };
 }
 
 export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {

@@ -18,6 +18,7 @@ import {
 	insertActionIntoDestination,
 	buildDestinationPickItems,
 	deriveActionIdFromTitle,
+	deriveLinkTitleFromUrl,
 	createGroupedTaskPresentationOptions,
 	addLinkEntry,
 	getCommandString,
@@ -45,8 +46,8 @@ import {
 	shouldRecordTaskInput,
 } from '../extension';
 import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
-import { LinkViewProvider } from '../providers/linkViewProvider';
-import { FavoriteViewProvider } from '../providers/favoriteViewProvider';
+import { LinkViewProvider, readLinksFromDisk } from '../providers/linkViewProvider';
+import { FavoriteViewProvider, readFavoritesFromDisk } from '../providers/favoriteViewProvider';
 import {
 	HistoryProvider,
 	HistoryEntry,
@@ -58,6 +59,7 @@ import {
 } from '../providers/historyProvider';
 import * as os from 'os';
 import * as path from 'path';
+import * as fs from 'fs';
 import { ActionItem } from '../schema';
 
 suite('Extension Test Suite', () => {
@@ -1251,6 +1253,116 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(items[1].folderRef?.id, 'tools');
 			assert.strictEqual(items[2].folderRef?.id, 'tools.nested');
 			assert.ok(items[2].label.includes('Tools'), 'nested folder label should carry the parent path');
+		});
+	});
+
+	suite('deriveLinkTitleFromUrl', () => {
+		test('returns the host without leading "www."', () => {
+			assert.strictEqual(deriveLinkTitleFromUrl('https://www.github.com/user/repo'), 'github.com');
+			assert.strictEqual(deriveLinkTitleFromUrl('https://example.org/path?q=1'), 'example.org');
+		});
+
+		test('keeps non-www subdomains intact', () => {
+			assert.strictEqual(deriveLinkTitleFromUrl('https://api.example.com/v1'), 'api.example.com');
+		});
+
+		test('falls back to the trimmed input when URL parsing fails', () => {
+			// The save-time validateLinkUrlForSave (scheme allowlist +
+			// WHATWG `new URL()` parse) blocks unparseable URLs from
+			// being persisted — `validateLinkScheme` alone would let bare
+			// `https://` through, which is exactly the v0.4.32 fix. The
+			// title prompt still needs *some* non-empty default while the
+			// user is mid-typing, so this fallback exists.
+			assert.strictEqual(deriveLinkTitleFromUrl('not a url'), 'not a url');
+			assert.strictEqual(deriveLinkTitleFromUrl('  https://valid.com  '), 'valid.com');
+		});
+
+		test('returns empty string for empty input so the prompt stays empty', () => {
+			assert.strictEqual(deriveLinkTitleFromUrl(''), '');
+			assert.strictEqual(deriveLinkTitleFromUrl('   '), '');
+		});
+
+		test('handles mailto and other allowed schemes', () => {
+			// `new URL('mailto:foo@bar')` has empty host; we fall back to the
+			// raw string so the user sees something meaningful.
+			assert.strictEqual(deriveLinkTitleFromUrl('mailto:foo@bar.com'), 'mailto:foo@bar.com');
+		});
+	});
+
+	suite('readLinksFromDisk / readFavoritesFromDisk (P1 data-loss guard)', () => {
+		// These loaders distinguish "file missing or empty" from "parse
+		// failure" so the add/delete/edit commands can refuse to overwrite
+		// a corrupt JSON file with a synthetic 1-entry array. Without this
+		// guard, the v0.4.31 actions.json fix would not extend to the
+		// links/favorites side.
+		let tempDir: string;
+
+		setup(() => {
+			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-loader-'));
+		});
+
+		teardown(() => {
+			try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+		});
+
+		test('readLinksFromDisk returns ok with empty entries when the file does not exist', () => {
+			const result = readLinksFromDisk(path.join(tempDir, 'never-created.json'));
+			assert.strictEqual(result.ok, true);
+			if (result.ok) { assert.deepStrictEqual(result.entries, []); }
+		});
+
+		test('readLinksFromDisk returns ok:false on JSON syntax error so write commands can refuse to save', () => {
+			const filePath = path.join(tempDir, 'broken.json');
+			fs.writeFileSync(filePath, '{ not really json');
+			const result = readLinksFromDisk(filePath);
+			assert.strictEqual(result.ok, false);
+			if (!result.ok) { assert.ok(result.error.length > 0, 'error message should not be empty'); }
+		});
+
+		test('readLinksFromDisk returns ok:false when the top-level value is not an array', () => {
+			const filePath = path.join(tempDir, 'not-array.json');
+			fs.writeFileSync(filePath, '{"title": "x", "link": "https://x"}');
+			const result = readLinksFromDisk(filePath);
+			assert.strictEqual(result.ok, false);
+			if (!result.ok) { assert.match(result.error, /array/i); }
+		});
+
+		test('readLinksFromDisk returns parsed entries when the file is valid', () => {
+			const filePath = path.join(tempDir, 'valid.json');
+			fs.writeFileSync(filePath, JSON.stringify([
+				{ title: 'GitHub', link: 'https://github.com', group: 'Dev', tags: ['vcs'] },
+				{ title: 'Bad', link: 42 }   // schema-mismatch entries are silently skipped
+			]));
+			const result = readLinksFromDisk(filePath);
+			assert.strictEqual(result.ok, true);
+			if (result.ok) {
+				assert.strictEqual(result.entries.length, 1);
+				assert.strictEqual(result.entries[0].title, 'GitHub');
+				assert.strictEqual(result.entries[0].group, 'Dev');
+			}
+		});
+
+		test('readFavoritesFromDisk returns ok:false on parse failure (mirrors links loader contract)', () => {
+			const filePath = path.join(tempDir, 'broken-favs.json');
+			fs.writeFileSync(filePath, '[ { "title": "ok", ');   // truncated
+			const result = readFavoritesFromDisk(filePath);
+			assert.strictEqual(result.ok, false);
+		});
+
+		test('readFavoritesFromDisk parses valid entries and applies workspaceFolder when supplied', () => {
+			const filePath = path.join(tempDir, 'valid-favs.json');
+			fs.writeFileSync(filePath, JSON.stringify([
+				{ title: 'README', path: 'README.md', line: 5 }
+			]));
+			const result = readFavoritesFromDisk(filePath, '/some/workspace');
+			assert.strictEqual(result.ok, true);
+			if (result.ok) {
+				assert.strictEqual(result.entries.length, 1);
+				assert.strictEqual(result.entries[0].path, 'README.md');
+				assert.strictEqual(result.entries[0].line, 5);
+				assert.strictEqual(result.entries[0].workspaceFolder, '/some/workspace');
+				assert.strictEqual(result.entries[0].sourceFile, filePath);
+			}
 		});
 	});
 

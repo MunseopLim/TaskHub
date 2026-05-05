@@ -396,6 +396,55 @@ export function validateLinkScheme(rawUrl: unknown): LinkSchemeValidation {
     return { ok: true, scheme, url: rawUrl };
 }
 
+export type LinkUrlSaveValidation =
+    | { ok: true }
+    | { ok: false; reason: 'empty' | 'invalid' }
+    | { ok: false; reason: 'scheme'; scheme: string };
+
+/**
+ * Save-time URL gate used by both `taskhub.addLink` and the workspace link
+ * edit flow. Combines two checks:
+ *
+ *   1. {@link validateLinkScheme} — only http/https/mailto are allowed.
+ *   2. WHATWG `new URL()` parsing — catches inputs that the regex-only
+ *      scheme check would let through, notably bare scheme-only strings
+ *      like `https://` / `http://` and an unterminated IPv6 literal like
+ *      `https://[invalidIPv6`. Without (2) the prior v0.4.32 patch claimed
+ *      to block "format errors" but in practice those strings still
+ *      slipped past the InputBox validator and the user got an "Invalid
+ *      URL format" toast at click time instead.
+ *
+ * Known WHATWG limitations the gate does *not* catch (so callers still
+ * have a click-time fail-safe via `vscode.Uri.parse(..., true)`):
+ *
+ *   - `https:///path` — WHATWG normalizes consecutive slashes after the
+ *     scheme, so this becomes `https://path/` (host = 'path', pathname =
+ *     '/'). The user's intent ("hostless URL with /path") is silently
+ *     reinterpreted into a request to the host literally named `path`.
+ *     The gate accepts the input because `new URL()` does not throw.
+ *   - `mailto:` (empty), `mailto:not-an-email` — `new URL` does not
+ *     validate the local-part / domain. Accepted; the mail client will
+ *     reject on send.
+ *
+ * Returns a tagged result so the caller can localize messages itself —
+ * keeping this function vscode-free preserves the unit-test seam.
+ */
+export function validateLinkUrlForSave(rawUrl: unknown): LinkUrlSaveValidation {
+    const scheme = validateLinkScheme(rawUrl);
+    if (!scheme.ok) {
+        if (scheme.reason === 'scheme') {
+            return { ok: false, reason: 'scheme', scheme: scheme.scheme };
+        }
+        return { ok: false, reason: scheme.reason };
+    }
+    try {
+        new URL(scheme.url);
+    } catch {
+        return { ok: false, reason: 'invalid' };
+    }
+    return { ok: true };
+}
+
 /**
  * Resolve a favorite entry's path to an absolute path that is guaranteed to
  * live inside one of the current workspace roots. Throws (via

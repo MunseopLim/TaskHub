@@ -788,6 +788,7 @@ import {
     resolveFavoriteFilePath,
     toWorkspaceRelativePath,
     validateLinkScheme,
+    validateLinkUrlForSave,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
     applyOutputCapture,
@@ -1456,6 +1457,7 @@ import {
     Link,
     LinkViewProvider,
     loadLinksFromDisk,
+    readLinksFromDisk,
 } from './providers/linkViewProvider';
 
 import {
@@ -1463,6 +1465,7 @@ import {
     Favorite,
     FavoriteViewProvider,
     loadFavoritesFromDisk,
+    readFavoritesFromDisk,
     removeFavoriteByIdentity,
 } from './providers/favoriteViewProvider';
 
@@ -1547,6 +1550,60 @@ export function addLinkEntry(entries: LinkEntry[], newEntry: LinkEntry): { entri
     }
     const normalized: LinkEntry = { ...newEntry, title: trimmedTitle, link: trimmedLink };
     return { entries: [...entries, normalized], added: true };
+}
+
+/**
+ * Localize a {@link validateLinkUrlForSave} result into the message string
+ * expected by `vscode.InputBox.validateInput` (`null` = pass, otherwise
+ * shown red under the input). Shared by `taskhub.addLink` and the
+ * workspace link edit flow so Add and Edit go through the *same* save-time
+ * gate — previously Add blocked unsupported schemes while Edit only
+ * checked non-empty, and Add's "format check" was actually scheme-only so
+ * `https://` slipped through to the click-time error toast.
+ */
+function linkUrlValidateInputMessage(input: string): string | null {
+    const trimmed = input.trim();
+    if (trimmed.length === 0) {
+        return t('URL을 입력하세요', 'Enter a URL');
+    }
+    const result = validateLinkUrlForSave(trimmed);
+    if (result.ok) {
+        return null;
+    }
+    if (result.reason === 'scheme') {
+        return t(
+            `허용되지 않은 URL scheme '${result.scheme}'. http/https/mailto만 지원합니다.`,
+            `URL scheme '${result.scheme}' is not allowed. Only http/https/mailto are supported.`
+        );
+    }
+    return t('올바르지 않은 URL 형식입니다.', 'Invalid URL format.');
+}
+
+/**
+ * Derive a human-friendly default title from a URL. Used as the prefilled
+ * value for the "title for the link" prompt so the user can hit Enter to
+ * accept (e.g. "github.com") instead of typing a label from scratch.
+ *
+ * Strategy: prefer the URL's host (`new URL(...).host`); strip a leading
+ * `www.` for readability. If parsing fails (e.g. user typed a non-URL
+ * string in the URL prompt — that case will be blocked by save-time
+ * `validateLinkUrlForSave`, but we still need a non-empty default while
+ * the user is mid-typing), fall back to the trimmed input itself.
+ */
+export function deriveLinkTitleFromUrl(rawUrl: string): string {
+    const trimmed = rawUrl.trim();
+    if (trimmed.length === 0) {
+        return '';
+    }
+    try {
+        const host = new URL(trimmed).host;
+        if (host.length > 0) {
+            return host.replace(/^www\./i, '');
+        }
+    } catch {
+        // fall through
+    }
+    return trimmed;
 }
 
 type LinkQuickPickItem = vscode.QuickPickItem & { entry: LinkEntry };
@@ -1635,7 +1692,11 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
         prompt: t('열 URL', 'URL to open'),
         value: entryToEdit.link,
         ignoreFocusOut: true,
-        validateInput: value => value.trim().length === 0 ? t('URL을 입력하세요', 'Enter a URL') : null
+        // Same save-time gate as taskhub.addLink (v0.4.32 follow-up):
+        // scheme allowlist + WHATWG URL parse. Edit was previously
+        // checking only non-empty so `javascript:` / `file:` / `https://`
+        // could be saved here even though Add blocked them.
+        validateInput: linkUrlValidateInputMessage
     });
     if (!urlInput) {
         return;
@@ -1663,7 +1724,23 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
 
     const trimmedTitle = titleInput.trim();
     const trimmedUrl = urlInput.trim();
-    const links = loadLinksFromDisk(entryToEdit.sourceFile, true);
+    const loadResult = readLinksFromDisk(entryToEdit.sourceFile);
+    if (!loadResult.ok) {
+        const openLabel = t('links.json 열기', 'Open links.json');
+        const choice = await vscode.window.showErrorMessage(
+            t(
+                `links.json 파싱에 실패해 변경 사항을 저장할 수 없습니다: ${loadResult.error}`,
+                `Cannot save — failed to parse links.json: ${loadResult.error}`
+            ),
+            openLabel
+        );
+        if (choice === openLabel && fs.existsSync(entryToEdit.sourceFile)) {
+            const document = await vscode.workspace.openTextDocument(entryToEdit.sourceFile);
+            await vscode.window.showTextDocument(document, { preview: false });
+        }
+        return;
+    }
+    const links = loadResult.entries;
     const targetIndex = links.findIndex(link => link.title === entryToEdit.title && link.link === entryToEdit.link);
     if (targetIndex === -1) {
         vscode.window.showInformationMessage(t('links.json에서 선택한 링크를 찾을 수 없습니다.', 'Could not find the selected link in links.json.'));
@@ -3449,12 +3526,28 @@ export function activate(context: vscode.ExtensionContext) {
                     removeLabel
                 );
                 if (choice === removeLabel && target.sourceFile && fs.existsSync(target.sourceFile)) {
-                    const favorites = loadFavoritesFromDisk(target.sourceFile, true, target.workspaceFolder);
-                    const filtered = removeFavoriteByIdentity(favorites, target);
-                    if (filtered.length !== favorites.length) {
-                        const serialized = serializeFavorites(filtered);
-                        fs.writeFileSync(target.sourceFile, JSON.stringify(serialized, null, 2) + '\n');
-                        favoriteViewProvider.refresh();
+                    const sourceFile = target.sourceFile;
+                    const loadResult = readFavoritesFromDisk(sourceFile, target.workspaceFolder);
+                    if (!loadResult.ok) {
+                        const openLabel = t('favorites.json 열기', 'Open favorites.json');
+                        const repairChoice = await vscode.window.showErrorMessage(
+                            t(
+                                `favorites.json 파싱에 실패해 항목을 제거할 수 없습니다: ${loadResult.error}`,
+                                `Could not remove the entry — failed to parse favorites.json: ${loadResult.error}`
+                            ),
+                            openLabel
+                        );
+                        if (repairChoice === openLabel) {
+                            const document = await vscode.workspace.openTextDocument(sourceFile);
+                            await vscode.window.showTextDocument(document, { preview: false });
+                        }
+                    } else {
+                        const filtered = removeFavoriteByIdentity(loadResult.entries, target);
+                        if (filtered.length !== loadResult.entries.length) {
+                            const serialized = serializeFavorites(filtered);
+                            fs.writeFileSync(sourceFile, JSON.stringify(serialized, null, 2) + '\n');
+                            favoriteViewProvider.refresh();
+                        }
                     }
                 }
                 return;
@@ -3710,13 +3803,32 @@ export function activate(context: vscode.ExtensionContext) {
         await promptWorkspaceLinkEdit(workspaceLinkViewProvider, item);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addLink', async () => {
+        // Simplified flow (v0.4.32): URL → title (host-default) → save.
+        // Group / tags are no longer prompted — the post-creation toast
+        // points the user at *links.json 열기* if they want to add metadata.
+        // Save-time scheme validation is wired in here so a typo (e.g.
+        // `localhost:3000` without scheme) is caught immediately, not at
+        // first click as before. Broken links.json refuses to save and
+        // shows an *Open links.json* recovery button instead of silently
+        // overwriting the corrupt file with a single-entry array.
         const folder = await pickWorkspaceFolderForCommand(t('링크를 추가할 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to add the link to'));
         if (!folder) {
             return;
         }
 
+        const url = await vscode.window.showInputBox({
+            prompt: t('열 URL', 'URL to open'),
+            placeHolder: 'https://example.com',
+            ignoreFocusOut: true,
+            validateInput: linkUrlValidateInputMessage
+        });
+        if (!url) {
+            return;
+        }
+
         const title = await vscode.window.showInputBox({
             prompt: t('링크 제목', 'Title for the link'),
+            value: deriveLinkTitleFromUrl(url),
             placeHolder: 'e.g. Project Dashboard',
             ignoreFocusOut: true,
             validateInput: value => value.trim().length === 0 ? t('제목을 입력하세요', 'Enter a title') : null
@@ -3725,47 +3837,39 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        const url = await vscode.window.showInputBox({
-            prompt: t('열 URL', 'URL to open'),
-            placeHolder: 'https://example.com',
-            ignoreFocusOut: true,
-            validateInput: value => value.trim().length === 0 ? t('URL을 입력하세요', 'Enter a URL') : null
-        });
-        if (!url) {
-            return;
-        }
-
-        const groupInput = await vscode.window.showInputBox({
-            prompt: t('그룹 레이블 (선택사항)', 'Group label (optional)'),
-            placeHolder: 'e.g. Documentation',
-            ignoreFocusOut: true
-        });
-        if (groupInput === undefined) {
-            return;
-        }
-        const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
-
-        const tagsInput = await vscode.window.showInputBox({
-            prompt: t('태그 (선택사항, 쉼표로 구분)', 'Tags (optional, comma-separated)'),
-            placeHolder: 'e.g. docs, api',
-            ignoreFocusOut: true
-        });
-        if (tagsInput === undefined) {
-            return;
-        }
-        const tags = parseTagInput(tagsInput);
-
         const linksPath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
-        const links = loadLinksFromDisk(linksPath, true);
-        const { entries: updatedLinks, added } = addLinkEntry(links, {
+        const loadResult = readLinksFromDisk(linksPath);
+        if (!loadResult.ok) {
+            const openLabel = t('links.json 열기', 'Open links.json');
+            const choice = await vscode.window.showErrorMessage(
+                t(
+                    `links.json 파싱에 실패해 변경 사항을 저장할 수 없습니다: ${loadResult.error}`,
+                    `Cannot save — failed to parse links.json: ${loadResult.error}`
+                ),
+                openLabel
+            );
+            if (choice === openLabel && fs.existsSync(linksPath)) {
+                const document = await vscode.workspace.openTextDocument(linksPath);
+                await vscode.window.showTextDocument(document, { preview: false });
+            }
+            return;
+        }
+
+        const { entries: updatedLinks, added } = addLinkEntry(loadResult.entries, {
             title,
             link: url,
-            group,
-            tags,
             sourceFile: linksPath
         });
         if (!added) {
-            vscode.window.showInformationMessage(t('이 링크는 links.json에 이미 존재합니다.', 'This link already exists in links.json.'));
+            const openLabel = t('links.json 열기', 'Open links.json');
+            const choice = await vscode.window.showInformationMessage(
+                t('이 링크는 links.json에 이미 존재합니다.', 'This link already exists in links.json.'),
+                openLabel
+            );
+            if (choice === openLabel && fs.existsSync(linksPath)) {
+                const document = await vscode.workspace.openTextDocument(linksPath);
+                await vscode.window.showTextDocument(document, { preview: false });
+            }
             return;
         }
 
@@ -3775,19 +3879,43 @@ export function activate(context: vscode.ExtensionContext) {
         }
         fs.writeFileSync(linksPath, JSON.stringify(serialized, null, 2) + '\n');
         workspaceLinkViewProvider.refresh();
+
+        const openLabel = t('links.json 열기', 'Open links.json');
+        const choice = await vscode.window.showInformationMessage(
+            t(
+                `'${title}' 링크가 links.json에 추가되었습니다. 그룹/태그 등 추가 설정이 필요하면 links.json을 편집하세요.`,
+                `Link '${title}' was added to links.json. Edit it to configure group, tags, or other metadata.`
+            ),
+            openLabel
+        );
+        if (choice === openLabel) {
+            const document = await vscode.workspace.openTextDocument(linksPath);
+            await vscode.window.showTextDocument(document, { preview: false });
+        }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.searchFavorites', async () => {
         await promptFavoriteSearch(favoriteViewProvider);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addFavoriteFile', async (uri?: vscode.Uri) => {
+        // Simplified flow (v0.4.32): pick files → save with basename as
+        // title and relative path. No per-file title / line / group / tag
+        // prompts — the post-creation toast points the user at
+        // *favorites.json 열기* if they want to add metadata afterwards.
+        // The dialog's defaultUri now follows the active editor's
+        // workspace folder when present (instead of always folder[0]) so
+        // multi-root users land in the folder they're working in.
         let fileUris: vscode.Uri[] | undefined;
         if (uri) {
             fileUris = [uri];
         } else {
+            const activeEditor = vscode.window.activeTextEditor;
+            const activeFolder = activeEditor
+                ? vscode.workspace.getWorkspaceFolder(activeEditor.document.uri)
+                : undefined;
             fileUris = await vscode.window.showOpenDialog({
                 canSelectMany: true,
                 openLabel: t('즐겨찾기에 추가', 'Add to Favorites'),
-                defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri
+                defaultUri: activeFolder?.uri ?? vscode.workspace.workspaceFolders?.[0]?.uri
             });
         }
 
@@ -3795,67 +3923,45 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        const groupInput = await vscode.window.showInputBox({
-            prompt: t('그룹 레이블 (선택사항)', 'Group label (optional)'),
-            placeHolder: 'e.g. Backend Services',
-            ignoreFocusOut: true
-        });
-        if (groupInput === undefined) {
-            return;
-        }
-        const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
-
-        const tagsInput = await vscode.window.showInputBox({
-            prompt: t('태그 (선택사항, 쉼표로 구분)', 'Tags (optional, comma-separated)'),
-            placeHolder: 'e.g. api, critical',
-            ignoreFocusOut: true
-        });
-        if (tagsInput === undefined) {
-            return;
-        }
-        const defaultTags = parseTagInput(tagsInput);
-
         const favoritesByPath = new Map<string, FavoriteEntry[]>();
+        const failedLoads = new Map<string, string>();
+        let addedCount = 0;
+        let skippedCount = 0;
+        let lastFavoritesPath: string | undefined;
 
         for (const fileUri of fileUris) {
             const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
             if (!workspaceFolder) {
-                vscode.window.showWarningMessage(t(`${fileUri.fsPath}은(는) 현재 워크스페이스에 포함되어 있지 않아 건너뜁니다.`, `Skipping ${fileUri.fsPath} because it is not part of the current workspace.`));
+                vscode.window.showWarningMessage(t(
+                    `${fileUri.fsPath}은(는) 현재 워크스페이스에 포함되어 있지 않아 건너뜁니다.`,
+                    `Skipping ${fileUri.fsPath} because it is not part of the current workspace.`
+                ));
+                skippedCount++;
                 continue;
             }
             const favoritesPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'favorites.json');
-            if (!favoritesByPath.has(favoritesPath)) {
-                favoritesByPath.set(favoritesPath, loadFavoritesFromDisk(favoritesPath, true, workspaceFolder.uri.fsPath));
-            }
-            const favorites = favoritesByPath.get(favoritesPath)!;
-            const title = await vscode.window.showInputBox({
-                prompt: t(`${path.basename(fileUri.fsPath)}의 제목을 입력하세요`, `Enter a title for ${path.basename(fileUri.fsPath)}`),
-                value: path.basename(fileUri.fsPath),
-                ignoreFocusOut: true
-            });
-            if (!title) {
+            if (failedLoads.has(favoritesPath)) {
+                skippedCount++;
                 continue;
             }
-            const line = await promptFavoriteLineNumber(t(`${path.basename(fileUri.fsPath)}의 줄 번호 (선택사항)`, `Line number for ${path.basename(fileUri.fsPath)} (optional)`));
-            if (line === 'cancel') {
-                return;
+            if (!favoritesByPath.has(favoritesPath)) {
+                const loadResult = readFavoritesFromDisk(favoritesPath, workspaceFolder.uri.fsPath);
+                if (!loadResult.ok) {
+                    failedLoads.set(favoritesPath, loadResult.error);
+                    skippedCount++;
+                    continue;
+                }
+                favoritesByPath.set(favoritesPath, loadResult.entries);
             }
-            const favorite: FavoriteEntry = {
-                title,
+            const favorites = favoritesByPath.get(favoritesPath)!;
+            favorites.push({
+                title: path.basename(fileUri.fsPath),
                 path: toWorkspaceRelativePath(fileUri.fsPath, workspaceFolder.uri.fsPath),
                 sourceFile: favoritesPath,
                 workspaceFolder: workspaceFolder.uri.fsPath
-            };
-            if (group) {
-                favorite.group = group;
-            }
-            if (defaultTags) {
-                favorite.tags = defaultTags;
-            }
-            if (line !== undefined) {
-                favorite.line = line;
-            }
-            favorites.push(favorite);
+            });
+            addedCount++;
+            lastFavoritesPath = favoritesPath;
         }
 
         for (const [favoritesPath, favorites] of favoritesByPath.entries()) {
@@ -3868,6 +3974,43 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (favoritesByPath.size > 0) {
             favoriteViewProvider.refresh();
+        }
+
+        // Recovery surface for any favorites.json that failed to parse —
+        // we refused to write to it (P1 data-loss fix), so let the user
+        // inspect/fix it here. One toast per broken path so the surface
+        // matches the granularity of the failure.
+        for (const [failedPath, errorMessage] of failedLoads.entries()) {
+            const openLabel = t('favorites.json 열기', 'Open favorites.json');
+            const choice = await vscode.window.showErrorMessage(
+                t(
+                    `${path.basename(failedPath)} 파싱에 실패해 일부 즐겨찾기를 저장하지 못했습니다: ${errorMessage}`,
+                    `Could not save some favorites — failed to parse ${path.basename(failedPath)}: ${errorMessage}`
+                ),
+                openLabel
+            );
+            if (choice === openLabel && fs.existsSync(failedPath)) {
+                const document = await vscode.workspace.openTextDocument(failedPath);
+                await vscode.window.showTextDocument(document, { preview: false });
+            }
+        }
+
+        if (addedCount > 0) {
+            const summary = skippedCount > 0
+                ? t(
+                    `${addedCount}개의 즐겨찾기가 favorites.json에 추가되었습니다 (${skippedCount}개 건너뜀). 제목/그룹/태그/줄 번호 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
+                    `Added ${addedCount} favorite(s) to favorites.json (${skippedCount} skipped). Edit favorites.json to configure title, group, tags, or line number.`
+                )
+                : t(
+                    `${addedCount}개의 즐겨찾기가 favorites.json에 추가되었습니다. 제목/그룹/태그/줄 번호 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
+                    `Added ${addedCount} favorite(s) to favorites.json. Edit favorites.json to configure title, group, tags, or line number.`
+                );
+            const openLabel = t('favorites.json 열기', 'Open favorites.json');
+            const choice = await vscode.window.showInformationMessage(summary, openLabel);
+            if (choice === openLabel && lastFavoritesPath && fs.existsSync(lastFavoritesPath)) {
+                const document = await vscode.workspace.openTextDocument(lastFavoritesPath);
+                await vscode.window.showTextDocument(document, { preview: false });
+            }
         }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteFavorite', async (item: Favorite) => {
@@ -3884,9 +4027,24 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
         const target = item.getEntry();
-        const favorites = loadFavoritesFromDisk(sourceFile, true, target.workspaceFolder);
-        const filtered = removeFavoriteByIdentity(favorites, target);
-        if (filtered.length === favorites.length) {
+        const loadResult = readFavoritesFromDisk(sourceFile, target.workspaceFolder);
+        if (!loadResult.ok) {
+            const openLabel = t('favorites.json 열기', 'Open favorites.json');
+            const choice = await vscode.window.showErrorMessage(
+                t(
+                    `favorites.json 파싱에 실패해 항목을 삭제할 수 없습니다: ${loadResult.error}`,
+                    `Cannot delete — failed to parse favorites.json: ${loadResult.error}`
+                ),
+                openLabel
+            );
+            if (choice === openLabel) {
+                const document = await vscode.workspace.openTextDocument(sourceFile);
+                await vscode.window.showTextDocument(document, { preview: false });
+            }
+            return;
+        }
+        const filtered = removeFavoriteByIdentity(loadResult.entries, target);
+        if (filtered.length === loadResult.entries.length) {
             return;
         }
         const serialized = serializeFavorites(filtered);
@@ -3912,7 +4070,23 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
         const target = item.getEntry();
-        const links = loadLinksFromDisk(sourceFile, true);
+        const loadResult = readLinksFromDisk(sourceFile);
+        if (!loadResult.ok) {
+            const openLabel = t('links.json 열기', 'Open links.json');
+            const choice = await vscode.window.showErrorMessage(
+                t(
+                    `links.json 파싱에 실패해 항목을 삭제할 수 없습니다: ${loadResult.error}`,
+                    `Cannot delete — failed to parse links.json: ${loadResult.error}`
+                ),
+                openLabel
+            );
+            if (choice === openLabel) {
+                const document = await vscode.workspace.openTextDocument(sourceFile);
+                await vscode.window.showTextDocument(document, { preview: false });
+            }
+            return;
+        }
+        const links = loadResult.entries;
         const filtered = links.filter(link => !(link.title === target.title && link.link === target.link));
         if (filtered.length === links.length) {
             return;
@@ -3961,44 +4135,15 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(showExampleJsonCommand);
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showExampleJsonQuickPick', async () => { const pick = await vscode.window.showQuickPick([ { label: t('actions.json 예제', 'actions.json Example'), description: t('actions.json 예제 내용 보기', 'Show example content for actions.json'), type: 'actions' }, { label: t('links.json 예제', 'links.json Example'), description: t('links.json 예제 내용 보기', 'Show example content for links.json'), type: 'links' }, { label: t('favorites.json 예제', 'favorites.json Example'), description: t('favorites.json 예제 내용 보기', 'Show example content for favorites.json'), type: 'favorites' }, ], { placeHolder: t('표시할 예제 JSON을 선택하세요', 'Select which example JSON to display') }); if (pick) { vscode.commands.executeCommand('taskhub.showExampleJson', pick.type); } }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addOpenFileToFavorites', async () => {
+        // Simplified flow (v0.4.32): zero prompts. The user clicked the
+        // *Add Open File to Favorites* button → save THIS file at the
+        // current cursor line with basename as title. Group / tags /
+        // custom title go in via the post-creation toast's *Open
+        // favorites.json* button. Broken favorites.json refuses to save
+        // and shows the same recovery surface.
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             vscode.window.showInformationMessage(t('활성 편집기를 찾을 수 없습니다.', 'No active editor found.'));
-            return;
-        }
-
-        const filePath = editor.document.uri.fsPath;
-        const title = await vscode.window.showInputBox({
-            prompt: t(`${path.basename(filePath)}의 제목을 입력하세요`, `Enter a title for ${path.basename(filePath)}`),
-            value: path.basename(filePath),
-            ignoreFocusOut: true
-        });
-        if (!title) {
-            return;
-        }
-
-        const groupInput = await vscode.window.showInputBox({
-            prompt: t('그룹 레이블 (선택사항)', 'Group label (optional)'),
-            placeHolder: 'e.g. Documentation',
-            ignoreFocusOut: true
-        });
-        if (groupInput === undefined) {
-            return;
-        }
-        const group = groupInput.trim().length > 0 ? groupInput.trim() : undefined;
-
-        const tagsInput = await vscode.window.showInputBox({
-            prompt: t('태그 (선택사항, 쉼표로 구분)', 'Tags (optional, comma-separated)'),
-            placeHolder: 'e.g. notes, reference',
-            ignoreFocusOut: true
-        });
-        if (tagsInput === undefined) {
-            return;
-        }
-        const tags = parseTagInput(tagsInput);
-        const defaultLine = editor.selection.active.line + 1;
-        const line = await promptFavoriteLineNumber(t('이 즐겨찾기의 줄 번호 (선택사항)', 'Line number for this favorite (optional)'), defaultLine);
-        if (line === 'cancel') {
             return;
         }
 
@@ -4007,24 +4152,36 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage(t('활성 파일이 열린 워크스페이스 폴더에 속하지 않습니다.', 'The active file does not belong to an open workspace folder.'));
             return;
         }
+
+        const filePath = editor.document.uri.fsPath;
         const favoritesPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'favorites.json');
-        const favorites = loadFavoritesFromDisk(favoritesPath, true, workspaceFolder.uri.fsPath);
+        const loadResult = readFavoritesFromDisk(favoritesPath, workspaceFolder.uri.fsPath);
+        if (!loadResult.ok) {
+            const openLabel = t('favorites.json 열기', 'Open favorites.json');
+            const choice = await vscode.window.showErrorMessage(
+                t(
+                    `favorites.json 파싱에 실패해 변경 사항을 저장할 수 없습니다: ${loadResult.error}`,
+                    `Cannot save — failed to parse favorites.json: ${loadResult.error}`
+                ),
+                openLabel
+            );
+            if (choice === openLabel && fs.existsSync(favoritesPath)) {
+                const document = await vscode.workspace.openTextDocument(favoritesPath);
+                await vscode.window.showTextDocument(document, { preview: false });
+            }
+            return;
+        }
+
+        const title = path.basename(filePath);
+        const line = editor.selection.active.line + 1;
         const favorite: FavoriteEntry = {
             title,
             path: toWorkspaceRelativePath(filePath, workspaceFolder.uri.fsPath),
+            line,
             sourceFile: favoritesPath,
             workspaceFolder: workspaceFolder.uri.fsPath
         };
-        if (group) {
-            favorite.group = group;
-        }
-        if (tags) {
-            favorite.tags = tags;
-        }
-        if (line !== undefined) {
-            favorite.line = line;
-        }
-        favorites.push(favorite);
+        const favorites = [...loadResult.entries, favorite];
 
         const serialized = serializeFavorites(favorites);
         if (!fs.existsSync(path.dirname(favoritesPath))) {
@@ -4032,6 +4189,19 @@ export function activate(context: vscode.ExtensionContext) {
         }
         fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
         favoriteViewProvider.refresh();
+
+        const openLabel = t('favorites.json 열기', 'Open favorites.json');
+        const choice = await vscode.window.showInformationMessage(
+            t(
+                `'${title}' (줄 ${line})가 favorites.json에 추가되었습니다. 제목/그룹/태그 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
+                `'${title}' (line ${line}) was added to favorites.json. Edit favorites.json to configure title, group, or tags.`
+            ),
+            openLabel
+        );
+        if (choice === openLabel) {
+            const document = await vscode.workspace.openTextDocument(favoritesPath);
+            await vscode.window.showTextDocument(document, { preview: false });
+        }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.terminateAllActions', async () => {
         // Flag and terminate all running actions

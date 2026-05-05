@@ -96,50 +96,83 @@ export function removeFavoriteByIdentity(favorites: FavoriteEntry[], target: Fav
     });
 }
 
+/**
+ * Tree-side loader. Mirrors {@link loadLinksFromDisk}'s forgiving contract:
+ * on parse failure, log + (optionally) toast + return `[]` so the tree
+ * keeps rendering. Write-side callers MUST use {@link readFavoritesFromDisk}
+ * instead — see the equivalent rationale on the link side.
+ */
 export function loadFavoritesFromDisk(filePath: string, reportErrors: boolean, workspaceFolderPath?: string): FavoriteEntry[] {
+    const result = readFavoritesFromDisk(filePath, workspaceFolderPath);
+    if (result.ok) {
+        return result.entries;
+    }
+    console.error(`Error parsing ${filePath}: ${result.error}`);
+    if (reportErrors) {
+        vscode.window.showErrorMessage(t(
+            `${path.basename(filePath)} 파싱 오류: ${result.error}`,
+            `Error parsing ${path.basename(filePath)}: ${result.error}`
+        ));
+    }
+    return [];
+}
+
+export type FavoritesLoadResult =
+    | { ok: true; entries: FavoriteEntry[] }
+    | { ok: false; error: string };
+
+/**
+ * Write-safe loader. See {@link readLinksFromDisk} for the rationale —
+ * tagged result distinguishes "no entries" from "parse failure" so add /
+ * delete / edit commands can refuse to overwrite a corrupt favorites.json.
+ */
+export function readFavoritesFromDisk(filePath: string, workspaceFolderPath?: string): FavoritesLoadResult {
     if (!fs.existsSync(filePath)) {
-        return [];
+        return { ok: true, entries: [] };
     }
-
+    let raw: string;
     try {
-        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        if (!Array.isArray(parsed)) {
-            return [];
-        }
-
-        return parsed.reduce<FavoriteEntry[]>((acc, item) => {
-            if (item && typeof item.title === 'string' && typeof item.path === 'string') {
-                const entry: FavoriteEntry = {
-                    title: item.title,
-                    path: item.path
-                };
-                const line = normalizeLineNumber(item.line);
-                if (line !== undefined) {
-                    entry.line = line;
-                }
-                const group = typeof item.group === 'string' ? item.group.trim() : '';
-                if (group.length > 0) {
-                    entry.group = group;
-                }
-                const tags = normalizeTags(item.tags);
-                if (tags) {
-                    entry.tags = tags;
-                }
-                entry.sourceFile = filePath;
-                if (workspaceFolderPath) {
-                    entry.workspaceFolder = workspaceFolderPath;
-                }
-                acc.push(entry);
-            }
-            return acc;
-        }, []);
+        raw = fs.readFileSync(filePath, 'utf-8');
     } catch (error: any) {
-        console.error(`Error parsing ${filePath}: ${error.message}`);
-        if (reportErrors) {
-            vscode.window.showErrorMessage(t(`${path.basename(filePath)} 파싱 오류: ${error.message}`, `Error parsing ${path.basename(filePath)}: ${error.message}`));
-        }
-        return [];
+        return { ok: false, error: error.message };
     }
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (error: any) {
+        return { ok: false, error: error.message };
+    }
+    if (!Array.isArray(parsed)) {
+        return { ok: false, error: 'Top-level value must be an array.' };
+    }
+    const entries: FavoriteEntry[] = [];
+    for (const item of parsed) {
+        if (item && typeof (item as any).title === 'string' && typeof (item as any).path === 'string') {
+            const cast = item as any;
+            const entry: FavoriteEntry = {
+                title: cast.title,
+                path: cast.path
+            };
+            const line = normalizeLineNumber(cast.line);
+            if (line !== undefined) {
+                entry.line = line;
+            }
+            const group = typeof cast.group === 'string' ? cast.group.trim() : '';
+            if (group.length > 0) {
+                entry.group = group;
+            }
+            const tags = normalizeTags(cast.tags);
+            if (tags) {
+                entry.tags = tags;
+            }
+            entry.sourceFile = filePath;
+            if (workspaceFolderPath) {
+                entry.workspaceFolder = workspaceFolderPath;
+            }
+            entries.push(entry);
+        }
+    }
+    return { ok: true, entries };
 }
 
 export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTreeNode> {

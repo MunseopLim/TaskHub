@@ -9,6 +9,7 @@ import {
     resolveWithinWorkspace,
     resolveFavoriteFilePath,
     validateLinkScheme,
+    validateLinkUrlForSave,
     ALLOWED_LINK_SCHEMES,
     tokenizeCommandLine,
     mergeCommandAndArgs,
@@ -416,6 +417,90 @@ suite('validateLinkScheme', () => {
 
     test('rejects protocol-relative URLs', () => {
         const result = validateLinkScheme('//example.com');
+        assert.strictEqual(result.ok, false);
+        if (!result.ok) {
+            assert.strictEqual(result.reason, 'invalid');
+        }
+    });
+});
+
+suite('validateLinkUrlForSave', () => {
+    test('accepts well-formed http/https URLs', () => {
+        for (const url of ['http://example.com', 'https://example.com/path?q=1', 'https://api.example.com:8443/v2']) {
+            const result = validateLinkUrlForSave(url);
+            assert.strictEqual(result.ok, true, `expected ok for ${url}`);
+        }
+    });
+
+    test('accepts mailto URLs', () => {
+        const result = validateLinkUrlForSave('mailto:user@example.com');
+        assert.strictEqual(result.ok, true);
+    });
+
+    test('rejects scheme-only inputs that the regex-only check missed (P2 fix)', () => {
+        // These are inputs that pass `validateLinkScheme` (because the
+        // `^scheme:` regex matches) but fail `new URL()` parsing. Without
+        // the WHATWG-URL gate the v0.4.32 patch promised "format errors
+        // are blocked at input time" but actually only blocked scheme
+        // errors — `https://` slipped through to a click-time toast.
+        // Note: WHATWG silently normalizes `new URL('https:///path')` to
+        // `https://path/` (host = 'path', pathname = '/'), so we do *not*
+        // catch that one — the user's intent gets quietly reinterpreted
+        // rather than rejected, and the click-time `vscode.Uri.parse`
+        // remains the final fail-safe. The common typos we DO catch here
+        // are the bare `https://` / `http://` and an unterminated IPv6
+        // literal.
+        for (const malformed of ['https://', 'http://', 'https://[unclosed-ipv6']) {
+            const result = validateLinkUrlForSave(malformed);
+            assert.strictEqual(result.ok, false, `expected reject for ${malformed}`);
+            if (!result.ok) {
+                assert.strictEqual(result.reason, 'invalid', `wrong reason for ${malformed}`);
+            }
+        }
+    });
+
+    test('documents WHATWG normalization quirk: https:///path becomes https://path/', () => {
+        // Regression guard for the doc claim above. If a future Node /
+        // ECMA URL parser stops normalizing slashes here, this test
+        // fails and we revisit both the comment in this suite and the
+        // CHANGELOG / features.md note.
+        const url = new URL('https:///path');
+        assert.strictEqual(url.host, 'path');
+        assert.strictEqual(url.pathname, '/');
+        // And consequently `validateLinkUrlForSave` returns ok — the
+        // gate intentionally accepts it.
+        assert.strictEqual(validateLinkUrlForSave('https:///path').ok, true);
+    });
+
+    test('rejects disallowed schemes with the scheme name in the result', () => {
+        for (const [url, expectedScheme] of [
+            ['javascript:alert(1)', 'javascript'],
+            ['file:///etc/passwd', 'file'],
+            ['vscode://ext.id/path', 'vscode'],
+            ['command:workbench.action.x', 'command'],
+        ] as const) {
+            const result = validateLinkUrlForSave(url);
+            assert.strictEqual(result.ok, false, `expected reject for ${url}`);
+            if (!result.ok && result.reason === 'scheme') {
+                assert.strictEqual(result.scheme, expectedScheme);
+            } else {
+                assert.fail(`expected scheme reason for ${url}, got ${JSON.stringify(result)}`);
+            }
+        }
+    });
+
+    test('rejects empty / whitespace inputs with reason "empty"', () => {
+        for (const value of ['', '   ', '\t']) {
+            const result = validateLinkUrlForSave(value);
+            assert.strictEqual(result.ok, false);
+            if (!result.ok) {
+                assert.strictEqual(result.reason, 'empty');
+            }
+        }
+    });
+
+    test('rejects strings with no scheme delimiter as "invalid"', () => {
+        const result = validateLinkUrlForSave('example.com/path');
         assert.strictEqual(result.ok, false);
         if (!result.ok) {
             assert.strictEqual(result.reason, 'invalid');

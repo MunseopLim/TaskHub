@@ -29,6 +29,29 @@
 =====================================================================
 -->
 
+## [0.4.32] - 2026-05-05
+
+### 변경 — Add Link / Add Favorite UX 정리 + broken JSON 데이터 손실 차단 (코드 리뷰 4건 반영)
+
+`Add Link`, `Add File to Favorites`, `Add Open File to Favorites` 세 명령에 0.4.31의 Create Action 마법사 정리(자동 default + post-creation 토스트 + broken-JSON 회복 경로)를 같은 결로 적용했다. 그 와중에 발견된 P1 데이터 유실 버그 — 깨진 links/favorites.json 을 add 명령이 *조용히 덮어쓰는* — 도 같은 릴리스에서 잡았다.
+
+#### High (실제 데이터 유실 차단)
+
+- **깨진 `links.json` / `favorites.json` 이 add/delete/edit 시 신규 1개 항목으로 덮어써지던 문제**: `loadLinksFromDisk` / `loadFavoritesFromDisk` 가 parse 실패 시 에러 토스트만 띄우고 `[]` 를 반환했다. add 명령은 그 빈 배열에 신규 항목을 push 하고 `fs.writeFileSync` 로 디스크를 덮어써 *기존 항목 전체가 사라졌다*. 사용자는 에러 토스트를 봤지만 add 가 성공한 것으로 인식 — 트리 새로고침 시 1개만 남은 모습이 보일 뿐이었다. 동일 패턴이 delete/edit/cleanup 경로에도 있었다. 트리 렌더링은 forgiving 한 [] fallback 이 옳지만 write 경로는 그러면 안 된다는 판단으로 두 provider 에 `read{Links,Favorites}FromDisk` 를 별도로 추가 — `{ ok: true, entries } | { ok: false, error }` tagged result 를 돌려준다. 모든 write 경로(addLink / addFavoriteFile / addOpenFileToFavorites + deleteLink / deleteFavorite + favorites cleanup + workspace link edit) 가 새 함수를 사용해 `!ok` 면 *X.json 열기* 버튼이 달린 에러 토스트로 회복 경로를 제공하고 저장은 거부한다. 0.4.31 의 broken-actions.json 보호 패턴이 links / favorites 쪽으로 확장된 셈이다. 참조: [src/providers/linkViewProvider.ts](src/providers/linkViewProvider.ts) `readLinksFromDisk`, [src/providers/favoriteViewProvider.ts](src/providers/favoriteViewProvider.ts) `readFavoritesFromDisk`.
+
+#### UX / 일관성
+
+- **Add Link / Edit Workspace Link 흐름 압축 + 동일한 save-time URL 게이트**: Add 의 기존 *folder pick → title → URL → group → tags → save* (4 prompt) 를 *folder pick → URL → title* (2 prompt) 로 줄였다. URL prompt 의 `validateInput` 은 `validateLinkUrlForSave` (scheme allowlist + WHATWG `new URL()` parse) 를 거치도록 했다. 두 단계가 모두 필요한 이유: 단순 scheme 검사는 `^scheme:` 정규식만 보기 때문에 `https://` 같은 scheme-only 입력이 통과해 *클릭 시점에야* 에러 토스트로 실패했다. `new URL()` parse 를 추가해 그 케이스를 입력 단계에서 잡는다. 같은 게이트를 *workspace link 편집* prompt 에도 적용 — Add 는 막고 Edit 는 통과하던 비대칭(`javascript:`/`file:` 같은 scheme 으로 기존 항목을 덮어쓸 수 있던 문제)도 함께 해소. title 은 URL 의 host(`new URL(url).host` 에서 `www.` 접두사 제거)로 prefilled 되어 Enter 한 번이면 `github.com` 같은 의미 있는 라벨이 들어간다. group / tags 는 묻지 않고 default `undefined` — *그룹/태그 등 추가 설정이 필요하면 links.json 을 편집하세요* 안내 + *links.json 열기* 버튼이 post-creation 토스트로 그 자리를 메운다. 중복 탐지 시에도 *links.json 열기* 버튼을 제공해 사용자가 흔적을 잃지 않게 한다. 참조: [src/extension.ts](src/extension.ts) `taskhub.addLink` / `promptWorkspaceLinkEdit` / `linkUrlValidateInputMessage`, [src/pipelineUtils.ts](src/pipelineUtils.ts) `validateLinkUrlForSave`. WHATWG parse 의 한계도 명시한다: `https:///path` 같은 입력은 WHATWG 가 슬래시를 정규화해 `https://path/` (host = `path`, pathname = `/`) 로 조용히 해석되어 게이트를 통과한다 — 사용자 의도와 다르게 host 가 바뀌어 저장될 수 있어 click 시점의 `vscode.Uri.parse` 가 최종 fail-safe 로 남는다.
+- **Add File to Favorites 흐름 압축 — 다중 파일 선택 후 zero prompt**: 기존 *group → tags → 파일별 title → 파일별 line number* (5+2N prompt) 를 파일 다이얼로그 한 번 + 즉시 저장 으로 단축. 선택한 파일들은 *title = basename, path = 워크스페이스 상대경로* 로 한 번에 기록된다. 다이얼로그의 `defaultUri` 도 multi-root 환경에서 *활성 편집기의 워크스페이스 폴더* 를 우선 사용하도록 바꿔, 매번 `workspaceFolders[0]` 에서 시작하던 비직관적 동작을 고쳤다. 워크스페이스 밖 파일이 섞여 있으면 그 파일만 건너뛰고 *N개 추가됨 (M개 건너뜀)* 결과 요약을 토스트로 보여주며, 어느 `favorites.json` 이 깨져 있으면 그 폴더 분량만 저장 거부 + 별도 회복 토스트 — 다른 폴더의 정상 저장은 계속 진행된다. 그 결과 line prompt 의 *Esc=전체 abort* 와 title prompt 의 *Esc=이 파일만 skip* 비일관성도 자연스럽게 사라졌다(prompt 자체가 없으므로). 참조: [src/extension.ts](src/extension.ts) `taskhub.addFavoriteFile`.
+- **Add Open File to Favorites 흐름 압축 — 0 prompt**: *title → group → tags → line number* (4 prompt) 를 모두 제거. 활성 편집기의 파일과 현재 커서 위치(`editor.selection.active.line + 1`)로 즉시 저장하고 post-creation 토스트로 결과를 알린다. 그 결과 *컨텍스트 메뉴 클릭 → 토스트* 단일 동작으로 끝나며, 추가 메타데이터는 토스트의 *favorites.json 열기* 로 다듬는다. 참조: [src/extension.ts](src/extension.ts) `taskhub.addOpenFileToFavorites`.
+- **add 명령 전반에 post-creation 토스트 도입**: 기존 add 명령들은 disk write 후 트리 refresh 만 하고 사일런트로 끝났다. Action 마법사 0.4.31 패턴을 따라 *'X' 가 추가되었습니다. 그룹/태그 등 추가 설정이 필요하면 ... 편집하세요* + 해당 JSON 파일 열기 버튼을 두어 (a) 어느 파일에 어떤 항목이 들어갔는지 시각적 확인, (b) default 로 채워진 부수 옵션을 다듬는 진입점, (c) multi-file 결과 요약(*N개 추가됨 / M개 건너뜀*) 을 동시에 제공한다.
+
+#### 문서
+
+- features.md §4 *워크스페이스 링크 패널* / §6 *즐겨찾기 패널* 의 추가 흐름 설명을 새 동작에 맞게 다시 작성. 자동 default(URL host → title), 0-prompt 즉시 저장, multi-root 다이얼로그 default 변경, broken-JSON 회복 경로를 명시. 참조: [docs/features.md](docs/features.md).
+
+**테스트**: 신규 18 케이스 (`deriveLinkTitleFromUrl` 5종, `readLinksFromDisk` / `readFavoritesFromDisk` tagged-result 6종, `validateLinkUrlForSave` 6종, WHATWG `https:///path` 정규화 회귀 가드 1종), 최종 1175 passing.
+
 ## [0.4.31] - 2026-05-05
 
 ### 변경 — Create Action 마법사 UX 정리 (코드 리뷰 4건 반영)
