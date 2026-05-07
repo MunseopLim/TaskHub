@@ -21,6 +21,10 @@ import {
 	deriveLinkTitleFromUrl,
 	createGroupedTaskPresentationOptions,
 	addLinkEntry,
+	addFavoriteEntry,
+	confirmDeleteHistoryItem,
+	confirmApplyPresetBackup,
+	confirmSavePresetOverwrite,
 	getCommandString,
 	getToolCommand,
 	buildPowerShellInvocation,
@@ -1539,6 +1543,264 @@ suite('Extension Test Suite', () => {
 			const { entries, added } = addLinkEntry([], { title: '  Trim  ', link: '  https://trim.com  ', tags: ['tag'] } as any);
 			assert.strictEqual(added, true);
 			assert.deepStrictEqual(entries[0], { title: 'Trim', link: 'https://trim.com', tags: ['tag'] });
+		});
+	});
+
+	suite('addFavoriteEntry', () => {
+		// Mirrors `removeFavoriteByIdentity` (path + line + title + group)
+		// so a fresh Add followed by Delete on the same row stays
+		// symmetric. Without this guard, multi-file Add would create N
+		// copies and Delete would sweep all of them in one click.
+		test('should add a new unique favorite', () => {
+			const existing = [
+				{ title: 'A', path: '${workspaceFolder}/a.ts' }
+			];
+			const { entries, added } = addFavoriteEntry(existing as any, {
+				title: 'B',
+				path: '${workspaceFolder}/b.ts'
+			} as any);
+			assert.strictEqual(added, true);
+			assert.notStrictEqual(entries, existing);
+			assert.strictEqual(entries.length, 2);
+		});
+
+		test('should detect duplicate when path + title match (no line)', () => {
+			const existing = [
+				{ title: 'A', path: '${workspaceFolder}/a.ts' }
+			];
+			const { entries, added } = addFavoriteEntry(existing as any, {
+				title: 'A',
+				path: '${workspaceFolder}/a.ts'
+			} as any);
+			assert.strictEqual(added, false);
+			assert.strictEqual(entries, existing);
+			assert.strictEqual(entries.length, 1);
+		});
+
+		test('should detect duplicate when line numbers match', () => {
+			const existing = [
+				{ title: 'A', path: '${workspaceFolder}/a.ts', line: 10 }
+			];
+			const { entries, added } = addFavoriteEntry(existing as any, {
+				title: 'A',
+				path: '${workspaceFolder}/a.ts',
+				line: 10
+			} as any);
+			assert.strictEqual(added, false);
+			assert.strictEqual(entries.length, 1);
+		});
+
+		test('should treat different lines as different entries', () => {
+			const existing = [
+				{ title: 'A', path: '${workspaceFolder}/a.ts', line: 10 }
+			];
+			const { entries, added } = addFavoriteEntry(existing as any, {
+				title: 'A',
+				path: '${workspaceFolder}/a.ts',
+				line: 20
+			} as any);
+			assert.strictEqual(added, true);
+			assert.strictEqual(entries.length, 2);
+		});
+
+		test('should treat different groups as different entries', () => {
+			const existing = [
+				{ title: 'A', path: '${workspaceFolder}/a.ts', group: 'Docs' }
+			];
+			const { entries, added } = addFavoriteEntry(existing as any, {
+				title: 'A',
+				path: '${workspaceFolder}/a.ts',
+				group: 'Build'
+			} as any);
+			assert.strictEqual(added, true);
+			assert.strictEqual(entries.length, 2);
+		});
+
+		test('should treat undefined and explicit-undefined group as the same', () => {
+			// Identity matches `removeFavoriteByIdentity` which also folds
+			// `group: undefined` and missing `group` together — keeps the
+			// reverse pair (Add → Delete) symmetric.
+			const existing = [
+				{ title: 'A', path: '${workspaceFolder}/a.ts' }
+			];
+			const { entries, added } = addFavoriteEntry(existing as any, {
+				title: 'A',
+				path: '${workspaceFolder}/a.ts',
+				group: undefined
+			} as any);
+			assert.strictEqual(added, false);
+			assert.strictEqual(entries.length, 1);
+		});
+	});
+
+	suite('confirmDeleteHistoryItem', () => {
+		// Pin the *only-explicit-Yes-deletes* contract. Mirrors
+		// `handleConfirm` style — monkey-patch `showWarningMessage` so the
+		// helper can be exercised without an interactive runner.
+		test('returns false when user cancels (modal dismissed)', async () => {
+			const original = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async () => undefined;
+			try {
+				assert.strictEqual(await confirmDeleteHistoryItem('Build'), false);
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('returns true only when user clicks Yes', async () => {
+			const original = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async () => 'Yes';
+			try {
+				assert.strictEqual(await confirmDeleteHistoryItem('Build'), true);
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('shows modal warning with action title in the message', async () => {
+			// If a future refactor drops the modal flag, the row would be
+			// deleted on a non-modal toast click — guard the modal contract.
+			const original = vscode.window.showWarningMessage;
+			let captured: any[] = [];
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				captured = args;
+				return undefined;
+			};
+			try {
+				await confirmDeleteHistoryItem('My Action');
+				const message = captured[0];
+				const options = captured[1];
+				assert.ok(typeof message === 'string' && message.includes('My Action'),
+					'message should embed the action title');
+				assert.strictEqual(options?.modal, true, 'must use modal warning');
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+	});
+
+	suite('confirmApplyPresetBackup', () => {
+		test('returns "cancel" when user dismisses', async () => {
+			const original = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async () => undefined;
+			try {
+				const result = await confirmApplyPresetBackup('/tmp/actions.json', 'parse error');
+				assert.strictEqual(result, 'cancel');
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('returns "cancel" when user picks the cancel label', async () => {
+			// The cancel button is the localized label, not undefined —
+			// users who explicitly bail out should match the dismiss path.
+			const original = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async (_msg: any, _opts: any, ..._labels: any[]) => {
+				return _labels.find((l: string) => l.includes('취소') || l.includes('Cancel'));
+			};
+			try {
+				const result = await confirmApplyPresetBackup('/tmp/actions.json', 'invalid');
+				assert.strictEqual(result, 'cancel');
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('returns "backup" when user clicks the backup label', async () => {
+			const original = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async (_msg: any, _opts: any, ..._labels: any[]) => {
+				return _labels.find((l: string) => l.includes('백업') || l.includes('Back up'));
+			};
+			try {
+				const result = await confirmApplyPresetBackup('/tmp/actions.json', 'invalid');
+				assert.strictEqual(result, 'backup');
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('embeds .bak filename and reason in the prompt', async () => {
+			// Pin that the modal tells the user (a) WHY the file is rejected
+			// and (b) WHERE the backup will land — without these, the
+			// confirm becomes a generic "are you sure?" the user can't
+			// reason about.
+			const original = vscode.window.showWarningMessage;
+			let captured: any[] = [];
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				captured = args;
+				return undefined;
+			};
+			try {
+				await confirmApplyPresetBackup('/work/.vscode/actions.json', 'unexpected token');
+				const message = captured[0];
+				const options = captured[1];
+				assert.ok(message.includes('actions.json.bak'), 'message should name the backup file');
+				assert.ok(message.includes('unexpected token'), 'message should embed the reason');
+				assert.strictEqual(options?.modal, true, 'must use modal warning');
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+	});
+
+	suite('confirmSavePresetOverwrite', () => {
+		test('returns "cancel" when user dismisses', async () => {
+			const original = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async () => undefined;
+			try {
+				const result = await confirmSavePresetOverwrite('/tmp/preset-foo.json');
+				assert.strictEqual(result, 'cancel');
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('returns "overwrite" when user picks Overwrite', async () => {
+			const original = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async (_msg: any, _opts: any, ...labels: any[]) => {
+				return labels.find((l: string) => l.includes('덮어쓰기') || l === 'Overwrite');
+			};
+			try {
+				const result = await confirmSavePresetOverwrite('/tmp/preset-foo.json');
+				assert.strictEqual(result, 'overwrite');
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('returns "open-existing" when user picks Open existing file', async () => {
+			const original = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async (_msg: any, _opts: any, ...labels: any[]) => {
+				return labels.find((l: string) => l.includes('기존 파일 열기') || l === 'Open existing file');
+			};
+			try {
+				const result = await confirmSavePresetOverwrite('/tmp/preset-foo.json');
+				assert.strictEqual(result, 'open-existing');
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('embeds the basename of targetPath in the prompt', async () => {
+			// Pin that the user sees WHICH preset id collides — important
+			// when they triggered the command from a different folder than
+			// they expected.
+			const original = vscode.window.showWarningMessage;
+			let captured: any[] = [];
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				captured = args;
+				return undefined;
+			};
+			try {
+				await confirmSavePresetOverwrite('/work/.vscode/presets/preset-integration.json');
+				const message = captured[0];
+				const options = captured[1];
+				assert.ok(message.includes('preset-integration.json'),
+					'message should embed basename of target path');
+				assert.strictEqual(options?.modal, true, 'must use modal warning');
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
 		});
 	});
 

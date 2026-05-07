@@ -1553,6 +1553,118 @@ export function addLinkEntry(entries: LinkEntry[], newEntry: LinkEntry): { entri
 }
 
 /**
+ * Modal confirm for `taskhub.deleteHistoryItem`. Returns true only when the
+ * user explicitly clicked 'Yes'; Cancel / Esc / dismiss all map to false.
+ *
+ * Extracted so the prompt copy and the *only-explicit-Yes-deletes* contract
+ * can be verified without booting the full registerCommand wrapper. The
+ * confirm exists because `Delete Favorite` / `Delete Link` / `Clear All
+ * History` all guard with a modal — single-row history delete was the only
+ * outlier and a single click on the inline trash icon would silently lose
+ * a row otherwise.
+ */
+export async function confirmDeleteHistoryItem(actionTitle: string): Promise<boolean> {
+    const confirm = await vscode.window.showWarningMessage(
+        t(
+            `'${actionTitle}' 기록 항목을 삭제하시겠습니까?`,
+            `Are you sure you want to delete the '${actionTitle}' history item?`
+        ),
+        { modal: true },
+        'Yes'
+    );
+    return confirm === 'Yes';
+}
+
+export type ApplyPresetBackupChoice = 'backup' | 'cancel';
+
+/**
+ * Modal warning shown by `taskhub.applyPreset` when the existing
+ * `actions.json` fails JSON parse / schema validation. Returns 'backup'
+ * only when the user explicitly clicked the *backup* label; everything
+ * else (Cancel, Esc, dismiss) maps to 'cancel'. The caller is responsible
+ * for the actual `.bak` write — keeping disk I/O out of this helper makes
+ * it pure-prompt and so unit-testable via the same monkey-patch pattern as
+ * `handleConfirm`.
+ */
+export async function confirmApplyPresetBackup(
+    actionsPath: string,
+    invalidReason: string
+): Promise<ApplyPresetBackupChoice> {
+    const backupPath = `${actionsPath}.bak`;
+    const backupLabel = t('손상된 파일 백업 후 계속', 'Back up corrupt file and continue');
+    const cancelLabel = t('취소', 'Cancel');
+    const choice = await vscode.window.showWarningMessage(
+        t(
+            `기존 actions.json이 유효하지 않아 프리셋 적용을 안전하게 진행할 수 없습니다 (${invalidReason}). 원본을 ${path.basename(backupPath)}로 백업하고 계속할까요?`,
+            `The existing actions.json is invalid, so applying the preset cannot proceed safely (${invalidReason}). Back up the original to ${path.basename(backupPath)} and continue?`
+        ),
+        { modal: true },
+        backupLabel,
+        cancelLabel
+    );
+    return choice === backupLabel ? 'backup' : 'cancel';
+}
+
+export type SavePresetOverwriteChoice = 'overwrite' | 'open-existing' | 'cancel';
+
+/**
+ * Modal warning shown by `taskhub.saveAsPreset` when a preset file at
+ * `targetPath` already exists in the Workspace / Extension save locations
+ * (the Custom location uses `showSaveDialog`, which delegates the
+ * overwrite prompt to the OS — that branch never calls this helper).
+ * Returns a tagged choice so the caller can branch on overwrite vs.
+ * opening the existing file vs. cancel without re-parsing label strings.
+ */
+export async function confirmSavePresetOverwrite(targetPath: string): Promise<SavePresetOverwriteChoice> {
+    const overwriteLabel = t('덮어쓰기', 'Overwrite');
+    const openExistingLabel = t('기존 파일 열기', 'Open existing file');
+    const choice = await vscode.window.showWarningMessage(
+        t(
+            `프리셋 ${path.basename(targetPath)}이(가) 이미 존재합니다. 어떻게 할까요?`,
+            `Preset ${path.basename(targetPath)} already exists. What would you like to do?`
+        ),
+        { modal: true },
+        overwriteLabel,
+        openExistingLabel
+    );
+    if (choice === overwriteLabel) {
+        return 'overwrite';
+    }
+    if (choice === openExistingLabel) {
+        return 'open-existing';
+    }
+    return 'cancel';
+}
+
+/**
+ * Add a favorite entry while rejecting duplicates. Identity matches
+ * {@link removeFavoriteByIdentity} (path + line + title + group) so a fresh
+ * Add followed by Delete on the same row is symmetric — without this
+ * guard, the multi-file Add path would create N copies on repeated drops
+ * and Delete would then sweep them all in a single click, surprising the
+ * user. Mirrors {@link addLinkEntry}'s tagged result so call sites can
+ * surface the duplicate via a *favorites.json 열기* recovery toast.
+ */
+export function addFavoriteEntry(
+    entries: FavoriteEntry[],
+    newEntry: FavoriteEntry
+): { entries: FavoriteEntry[]; added: boolean } {
+    const targetLine = normalizeLineNumber(newEntry.line);
+    const duplicate = entries.some(f => {
+        const line = normalizeLineNumber(f.line);
+        const samePath = f.path === newEntry.path;
+        const sameLine = (line ?? null) === (targetLine ?? null);
+        const sameTitle = f.title === newEntry.title;
+        const sameGroup = (f.group ?? null) === (newEntry.group ?? null);
+        return samePath && sameLine && sameTitle && sameGroup;
+    });
+    if (duplicate) {
+        return { entries, added: false };
+    }
+    return { entries: [...entries, newEntry], added: true };
+}
+
+/**
  * Localize a {@link validateLinkUrlForSave} result into the message string
  * expected by `vscode.InputBox.validateInput` (`null` = pass, otherwise
  * shown red under the input). Shared by `taskhub.addLink` and the
@@ -3925,8 +4037,10 @@ export function activate(context: vscode.ExtensionContext) {
 
         const favoritesByPath = new Map<string, FavoriteEntry[]>();
         const failedLoads = new Map<string, string>();
+        const pathsWithAdditions = new Set<string>();
         let addedCount = 0;
         let skippedCount = 0;
+        let duplicateCount = 0;
         let lastFavoritesPath: string | undefined;
 
         for (const fileUri of fileUris) {
@@ -3954,17 +4068,32 @@ export function activate(context: vscode.ExtensionContext) {
                 favoritesByPath.set(favoritesPath, loadResult.entries);
             }
             const favorites = favoritesByPath.get(favoritesPath)!;
-            favorites.push({
+            const { entries: updatedFavorites, added } = addFavoriteEntry(favorites, {
                 title: path.basename(fileUri.fsPath),
                 path: toWorkspaceRelativePath(fileUri.fsPath, workspaceFolder.uri.fsPath),
                 sourceFile: favoritesPath,
                 workspaceFolder: workspaceFolder.uri.fsPath
             });
+            if (!added) {
+                duplicateCount++;
+                continue;
+            }
+            // Replace the cached array so subsequent dups in the same batch
+            // see the new entry too — `addFavoriteEntry` returns a new array
+            // rather than mutating, mirroring `addLinkEntry`.
+            favoritesByPath.set(favoritesPath, updatedFavorites);
+            pathsWithAdditions.add(favoritesPath);
             addedCount++;
             lastFavoritesPath = favoritesPath;
         }
 
-        for (const [favoritesPath, favorites] of favoritesByPath.entries()) {
+        // Only rewrite favorites.json files that actually grew. Without
+        // this guard, an all-duplicate drop would still re-serialize each
+        // touched file (no content change but unnecessary disk churn +
+        // mtime bump that would also trigger a JSON Editor *external
+        // change* prompt for an unrelated open editor — see 0.4.30).
+        for (const favoritesPath of pathsWithAdditions) {
+            const favorites = favoritesByPath.get(favoritesPath)!;
             const serialized = serializeFavorites(favorites);
             if (!fs.existsSync(path.dirname(favoritesPath))) {
                 fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
@@ -3972,7 +4101,7 @@ export function activate(context: vscode.ExtensionContext) {
             fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
         }
 
-        if (favoritesByPath.size > 0) {
+        if (pathsWithAdditions.size > 0) {
             favoriteViewProvider.refresh();
         }
 
@@ -3996,19 +4125,51 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         if (addedCount > 0) {
-            const summary = skippedCount > 0
-                ? t(
-                    `${addedCount}개의 즐겨찾기가 favorites.json에 추가되었습니다 (${skippedCount}개 건너뜀). 제목/그룹/태그/줄 번호 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
-                    `Added ${addedCount} favorite(s) to favorites.json (${skippedCount} skipped). Edit favorites.json to configure title, group, tags, or line number.`
-                )
-                : t(
-                    `${addedCount}개의 즐겨찾기가 favorites.json에 추가되었습니다. 제목/그룹/태그/줄 번호 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
-                    `Added ${addedCount} favorite(s) to favorites.json. Edit favorites.json to configure title, group, tags, or line number.`
-                );
+            // Combine skipped (workspace mismatch / broken parse) and
+            // duplicate counts into a single tail clause so the toast does
+            // not need to grow another line for each new failure mode.
+            const tailKo: string[] = [];
+            const tailEn: string[] = [];
+            if (duplicateCount > 0) {
+                tailKo.push(`${duplicateCount}개 중복 건너뜀`);
+                tailEn.push(`${duplicateCount} duplicate(s) skipped`);
+            }
+            if (skippedCount > 0) {
+                tailKo.push(`${skippedCount}개 건너뜀`);
+                tailEn.push(`${skippedCount} skipped`);
+            }
+            const tail = tailKo.length > 0
+                ? t(` (${tailKo.join(', ')})`, ` (${tailEn.join(', ')})`)
+                : '';
+            const summary = t(
+                `${addedCount}개의 즐겨찾기가 favorites.json에 추가되었습니다${tail}. 제목/그룹/태그/줄 번호 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
+                `Added ${addedCount} favorite(s) to favorites.json${tail}. Edit favorites.json to configure title, group, tags, or line number.`
+            );
             const openLabel = t('favorites.json 열기', 'Open favorites.json');
             const choice = await vscode.window.showInformationMessage(summary, openLabel);
             if (choice === openLabel && lastFavoritesPath && fs.existsSync(lastFavoritesPath)) {
                 const document = await vscode.workspace.openTextDocument(lastFavoritesPath);
+                await vscode.window.showTextDocument(document, { preview: false });
+            }
+        } else if (duplicateCount > 0) {
+            // No new entries written — the user dropped only files that
+            // were already favorited. Surface this as the same recovery
+            // path the link side uses (*links.json 열기*) so they can
+            // verify or remove the existing rows.
+            const openLabel = t('favorites.json 열기', 'Open favorites.json');
+            const summary = duplicateCount === 1
+                ? t(
+                    '이 즐겨찾기는 favorites.json에 이미 존재합니다.',
+                    'This favorite already exists in favorites.json.'
+                )
+                : t(
+                    `${duplicateCount}개의 즐겨찾기가 이미 favorites.json에 존재합니다.`,
+                    `${duplicateCount} favorites already exist in favorites.json.`
+                );
+            const lastDuplicatePath = lastFavoritesPath ?? Array.from(favoritesByPath.keys())[0];
+            const choice = await vscode.window.showInformationMessage(summary, openLabel);
+            if (choice === openLabel && lastDuplicatePath && fs.existsSync(lastDuplicatePath)) {
+                const document = await vscode.workspace.openTextDocument(lastDuplicatePath);
                 await vscode.window.showTextDocument(document, { preview: false });
             }
         }
@@ -4181,16 +4342,35 @@ export function activate(context: vscode.ExtensionContext) {
             sourceFile: favoritesPath,
             workspaceFolder: workspaceFolder.uri.fsPath
         };
-        const favorites = [...loadResult.entries, favorite];
+        const { entries: updatedFavorites, added } = addFavoriteEntry(loadResult.entries, favorite);
+        const openLabel = t('favorites.json 열기', 'Open favorites.json');
 
-        const serialized = serializeFavorites(favorites);
+        if (!added) {
+            // Same line of the same file already favorited. Mirror the
+            // Add Link duplicate path so the user gets a recovery toast
+            // instead of a confusing "saved" message followed by the row
+            // not appearing twice in the tree.
+            const choice = await vscode.window.showInformationMessage(
+                t(
+                    `'${title}' (줄 ${line})는 favorites.json에 이미 존재합니다.`,
+                    `'${title}' (line ${line}) already exists in favorites.json.`
+                ),
+                openLabel
+            );
+            if (choice === openLabel && fs.existsSync(favoritesPath)) {
+                const document = await vscode.workspace.openTextDocument(favoritesPath);
+                await vscode.window.showTextDocument(document, { preview: false });
+            }
+            return;
+        }
+
+        const serialized = serializeFavorites(updatedFavorites);
         if (!fs.existsSync(path.dirname(favoritesPath))) {
             fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
         }
         fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
         favoriteViewProvider.refresh();
 
-        const openLabel = t('favorites.json 열기', 'Open favorites.json');
         const choice = await vscode.window.showInformationMessage(
             t(
                 `'${title}' (줄 ${line})가 favorites.json에 추가되었습니다. 제목/그룹/태그 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
@@ -4311,6 +4491,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteHistoryItem', async (item: HistoryItem) => {
         const entry = item.getEntry();
+        if (!await confirmDeleteHistoryItem(entry.actionTitle)) {
+            return;
+        }
         historyProvider.deleteHistoryItem(entry);
         vscode.window.showInformationMessage(t('기록 항목이 삭제되었습니다.', 'History item deleted.'));
     }));
@@ -4391,7 +4574,49 @@ export function activate(context: vscode.ExtensionContext) {
                 // No existing actions.json - create new
                 finalActions = presetActions;
             } else {
-                // Existing actions.json - ask how to apply
+                // Pre-flight: validate existing actions.json *before* the
+                // Replace/Merge prompt so a broken file is surfaced once and
+                // the same .bak guard covers both branches. Previously the
+                // Replace path went straight to write — silently overwriting
+                // a broken file with no backup — and the Merge path threw a
+                // generic "프리셋 적용 실패" toast from `loadAndValidateActions`.
+                // Mirrors the importActions guard so users have a uniform
+                // recovery affordance.
+                let existingActions: ActionItem[] = [];
+                let existingContent: string;
+                try {
+                    existingContent = fs.readFileSync(actionsPath, 'utf-8');
+                } catch (e: any) {
+                    vscode.window.showErrorMessage(t(
+                        `기존 actions.json을 읽을 수 없어 프리셋 적용을 중단합니다: ${e.message}`,
+                        `Apply preset aborted: cannot read existing actions.json: ${e.message}`
+                    ));
+                    return;
+                }
+                let existingInvalidReason: string | undefined;
+                try {
+                    existingActions = loadAndValidateActions(actionsPath, { sourceLabel: 'workspace' });
+                } catch (e: any) {
+                    existingInvalidReason = e.message;
+                }
+                if (existingInvalidReason) {
+                    const choice = await confirmApplyPresetBackup(actionsPath, existingInvalidReason);
+                    if (choice !== 'backup') {
+                        return;
+                    }
+                    const backupPath = `${actionsPath}.bak`;
+                    try {
+                        fs.writeFileSync(backupPath, existingContent, 'utf-8');
+                    } catch (backupErr: any) {
+                        vscode.window.showErrorMessage(t(
+                            `백업 파일 작성에 실패하여 프리셋 적용을 중단합니다: ${backupErr.message}`,
+                            `Apply preset aborted: failed to write backup file: ${backupErr.message}`
+                        ));
+                        return;
+                    }
+                    existingActions = [];
+                }
+
                 const replaceLabel = t('교체', 'Replace');
                 const mergeLabel = t('병합', 'Merge');
                 const applyMode = await vscode.window.showQuickPick([
@@ -4406,10 +4631,9 @@ export function activate(context: vscode.ExtensionContext) {
                 if (applyMode.label === replaceLabel) {
                     finalActions = presetActions;
                 } else {
-                    // Merge: check for conflicts
-                    const existingActions = loadAndValidateActions(actionsPath, {
-                        sourceLabel: 'workspace'
-                    });
+                    // Merge: check for conflicts. `existingActions` is the
+                    // pre-flight result above — re-loading would just throw
+                    // again on the same broken file we already backed up.
                     const conflicts = findConflictingIds(existingActions, presetActions);
 
                     let mergeStrategy: 'keep-existing' | 'use-preset' | 'keep-both';
@@ -4527,6 +4751,14 @@ export function activate(context: vscode.ExtensionContext) {
 
             const fileName = `preset-${presetId}.json`;
             let targetPath: string;
+            // Whether the chosen save location *already* asked the user to
+            // confirm overwrite. The Custom branch uses `showSaveDialog`,
+            // which delegates the overwrite prompt to the OS file picker;
+            // the Workspace / Extension branches construct `targetPath`
+            // deterministically from `presetId` and so need an explicit
+            // confirm — without it, picking the same id twice silently
+            // overwrote the prior preset.
+            let overwriteAlreadyConfirmed = false;
 
             if (saveLocation.label === workspaceLabel) {
                 const presetsDir = path.join(folder.uri.fsPath, '.vscode', 'presets');
@@ -4545,6 +4777,19 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
                 targetPath = fileUri.fsPath;
+                overwriteAlreadyConfirmed = true;
+            }
+
+            if (!overwriteAlreadyConfirmed && fs.existsSync(targetPath)) {
+                const choice = await confirmSavePresetOverwrite(targetPath);
+                if (choice === 'open-existing') {
+                    const doc = await vscode.workspace.openTextDocument(targetPath);
+                    await vscode.window.showTextDocument(doc);
+                    return;
+                }
+                if (choice !== 'overwrite') {
+                    return;
+                }
             }
 
             // Step 5: Save

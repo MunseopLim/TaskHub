@@ -29,6 +29,30 @@
 =====================================================================
 -->
 
+## [0.4.33] - 2026-05-07
+
+### 변경 — 액션/즐겨찾기 데이터 보호 (코드 리뷰 4건 반영)
+
+0.4.30~0.4.32 의 broken-JSON 보호 / 흐름 압축 / 확인 누락 차단 패턴을 같은 결로 남아 있던 4 곳에 적용한다. 모두 *깨진 파일을 무방비로 덮어쓰기* / *한 클릭 회복 불가* 카테고리라 한 릴리스로 묶었다.
+
+#### High (실제 데이터 유실 차단)
+
+- **`Apply Preset` 의 `Replace` 경로가 깨진 actions.json 을 검증/백업 없이 덮어쓰던 문제**: `hasExisting` 은 `fs.existsSync` 만 보고, `Replace` 분기는 `loadAndValidateActions` 를 호출하지 않은 채 `finalActions = presetActions` 로 넘어가 바로 `fs.writeFileSync` 했다. 같은 명령의 `Merge` 분기는 `loadAndValidateActions` 가 throw 해서 *프리셋 적용 실패* 로 끝나 — 같은 명령 내부에서도 보호 수준이 비대칭이었다. 0.4.32 의 broken-JSON write 차단과 `Import Actions` 의 `.bak` 백업 패턴을 한 곳으로 합쳐, `Replace`/`Merge` 분기 *공통* 의 사전 검증 단계를 두었다. existing actions.json 이 invalid 면 `손상된 파일 백업 후 계속 / 취소` modal 을 띄우고, 사용자가 백업을 선택하면 `actions.json.bak` 으로 원본을 옮긴 뒤 `existingActions = []` 로 진행한다(`Replace` 는 그대로 preset, `Merge` 는 빈 배열에 preset merge 되어 효과가 같다). `Merge` 분기에서 `loadAndValidateActions` 를 한 번 더 호출하던 부분도 사전 검증 결과를 재사용해 같은 파일을 두 번 읽지 않는다. 참조: [src/extension.ts](src/extension.ts) `taskhub.applyPreset`.
+
+#### Medium (상태 무결성 / 명령 오동작)
+
+- **`Add Favorite File` / `Add Open File to Favorites` 가 동일 항목을 중복 저장하던 문제**: `Add Link` 는 `addLinkEntry` 에서 *title + link* 일치 시 `{ added: false }` 로 반환하고 *links.json 열기* 회복 토스트를 띄우는데, favorite 쪽은 `[...entries, newEntry]` 로 무조건 push 했다. `removeFavoriteByIdentity` 가 *path + line + title + group* 일치하는 모든 행을 한 번에 제거하는 구조라, 중복이 쌓인 후 Delete 를 누르면 의도치 않게 다중 삭제가 발생하는 비대칭이었다. 신규 export `addFavoriteEntry` 를 두어 동일한 identity (path + line + title + group, undefined 와 missing 을 같은 키로 fold) 로 duplicate 를 차단하고, `addFavoriteFile` (다중 파일 다이얼로그) 의 결과 토스트는 *N개 추가됨 (M개 중복 건너뜀, K개 건너뜀)* 으로 합쳐 표시한다. 모든 파일이 중복이면 *이 즐겨찾기는 favorites.json 에 이미 존재합니다* + *favorites.json 열기* 버튼만 띄우고 disk write 자체를 생략 — 변경 없는 파일을 다시 직렬화해 mtime 만 튀게 하던 부수 동작도 같이 사라져, 0.4.30 JSON Editor 의 *external change* prompt 가 무관한 편집기에서 뜨던 잠재 문제도 막힌다. `Add Open File to Favorites` 도 같은 helper 를 거쳐, 같은 라인을 두 번 추가하면 *'name' (줄 N) 는 favorites.json 에 이미 존재합니다* 회복 토스트로 끝낸다. 참조: [src/extension.ts](src/extension.ts) `addFavoriteEntry` / `taskhub.addFavoriteFile` / `taskhub.addOpenFileToFavorites`.
+
+- **`Save as Preset` 이 같은 ID 의 기존 preset 을 확인 없이 덮어쓰던 문제**: `presetId` 입력 후 *Workspace / Extension / Custom* 중 첫 두 위치는 `${dir}/preset-${presetId}.json` 으로 경로를 결정 후 바로 `fs.writeFileSync` 했다. *Custom* 분기는 `showSaveDialog` 가 OS 레벨 덮어쓰기 confirm 을 자동 제공해 보호되어 있어, 같은 명령 안에서도 위치별 보호 수준이 달랐다. 두 분기에 명시적 modal 가드를 추가 — 기존 파일이 있으면 *덮어쓰기 / 기존 파일 열기 / 취소* 3 분기로 묻고, *기존 파일 열기* 를 고르면 해당 파일을 편집기에서 열고 명령을 종료한다. 사용자가 prompt 만 채우다 새 preset 인지 update 인지 분간 못 한 채 기존 작업이 사라지던 케이스 차단. 참조: [src/extension.ts](src/extension.ts) `taskhub.saveAsPreset`.
+
+- **`Delete History Item` 이 confirm 없이 즉시 삭제되던 문제**: `Delete Favorite` / `Delete Link` / `Clear All History` 는 모두 modal 경고로 보호되는데 단일 history 항목만 inline 휴지통 클릭 한 번에 즉시 사라졌다. 같은 카테고리 내부의 비대칭이라 modal `'X' 기록 항목을 삭제하시겠습니까?` 를 추가 — actionTitle 을 본문에 노출해 같은 액션이 여러 번 실행된 패널에서도 행을 식별할 수 있게 했다. 참조: [src/extension.ts](src/extension.ts) `taskhub.deleteHistoryItem`.
+
+#### 문서
+
+- features.md §6 *즐겨찾기 패널* / §14 *액션 실행 히스토리* / §17 *Preset 기능* 의 추가·삭제·덮어쓰기 흐름과 데이터 보호 동작을 새 가드에 맞게 갱신. §17 *Keep both* 분기의 *모든 actions 유지 (중복 허용)* 표현은 실제 동작(`mergeActions` 의 `filterConflictingItems`)과 어긋나 *충돌하지 않는 preset 항목만 추가* 로 정정. §6 의 *모든 파일이 중복* 안내도 단·복수 분기(1개 / N개) 가 모두 있다는 사실을 반영하도록 표현 완화. 참조: [docs/features.md](docs/features.md).
+
+**테스트**: 신규 17 케이스. (a) `addFavoriteEntry` 6종 — unique add / dup by path+title / dup by line / different lines / different groups / undefined-vs-missing group fold. (b) prompt 가드 회귀 11종 — `confirmDeleteHistoryItem` 3종 (cancel / Yes / modal+title 포함 검증), `confirmApplyPresetBackup` 4종 (cancel dismiss / cancel label / backup label / .bak 파일명·reason 본문 포함 검증), `confirmSavePresetOverwrite` 4종 (cancel dismiss / overwrite / open-existing / basename 본문 포함 검증). 헬퍼는 `extension.ts` 에서 export 되어 있으며, 호출처(`taskhub.deleteHistoryItem` / `taskhub.applyPreset` / `taskhub.saveAsPreset`) 도 같은 헬퍼를 거치도록 정리해 prompt 문구·modal 플래그·반환값 매핑이 한 자리에 모이게 했다.
+
 ## [0.4.32] - 2026-05-05
 
 ### 변경 — Add Link / Add Favorite UX 정리 + broken JSON 데이터 손실 차단 (코드 리뷰 4건 반영)
