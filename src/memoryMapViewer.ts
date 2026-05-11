@@ -648,8 +648,10 @@ function getWebviewContent(
         outline: none;
     }
     .search-box input:focus { border-color: var(--vscode-focusBorder, #007acc); }
-    .search-count { font-size: 11px; opacity: 0.7; white-space: nowrap; }
+    .search-count { font-size: 11px; opacity: 0.7; white-space: nowrap; min-width: 3.5em; text-align: right; }
     .search-count.no-match { color: var(--danger); opacity: 1; }
+    .search-box button.nav-btn { padding: 2px 7px; line-height: 1.3; font-size: 10px; }
+    .search-box button.nav-btn:disabled { opacity: 0.4; cursor: default; }
     .search-match { background: rgba(255, 213, 0, 0.12) !important; }
     mark.sm-hl {
         background: var(--vscode-editor-findMatchHighlightBackground, rgba(255, 213, 0, 0.5));
@@ -657,6 +659,9 @@ function getWebviewContent(
         border-radius: 2px;
         padding: 0 1px;
     }
+    tr.current-match { background: var(--vscode-list-activeSelectionBackground, rgba(255, 170, 0, 0.22)) !important; }
+    tr.current-match td:first-child { box-shadow: inset 3px 0 0 var(--vscode-focusBorder, #007acc); }
+    tr.current-match mark.sm-hl { background: var(--vscode-editor-findMatchBackground, #d18616); color: var(--vscode-editor-foreground, inherit); }
     .region-header { cursor: pointer; }
     .region-header:hover { opacity: 0.85; }
     .fold-icon {
@@ -756,6 +761,8 @@ function getWebviewContent(
     <div class="search-box">
         <input id="searchInput" type="text" placeholder="Search... (object, section, function, address, size, type)">
         <span id="searchCount" class="search-count"></span>
+        <button id="searchPrev" class="nav-btn" title="Previous match (Shift+Enter)" disabled>◀</button>
+        <button id="searchNext" class="nav-btn" title="Next match (Enter)" disabled>▶</button>
     </div>
 
     ${hasRegions ? `
@@ -763,7 +770,7 @@ function getWebviewContent(
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
         ${!hasLinkerData && !hasSymbols ? '<div class="info-note">AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.</div>' : ''}
         ${hasSymbols ? '<div class="info-note">ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.</div>' : ''}
-        <div class="section-heading">Region Details <button data-action="toggle-all" id="toggleAllBtn" title="Expand All">▼ Expand All</button>${hasFuncData ? ' <button data-action="toggle-func-col" title="Toggle Function column">Function ▶</button>' : ''}</div>
+        <div class="section-heading">Region Details<span id="regMatchInfo"></span> <button data-action="toggle-all" id="toggleAllBtn" title="Expand All">▼ Expand All</button>${hasFuncData ? ' <button data-action="toggle-func-col" title="Toggle Function column">Function ▶</button>' : ''}</div>
         ${regionCardsHtml}
     ` : `
         <div class="no-regions">
@@ -773,7 +780,7 @@ function getWebviewContent(
         </div>
     `}
 
-    <div class="section-heading">All Sections (${sectionSummary.length})</div>
+    <div class="section-heading">All Sections (<span id="allSecCount">${sectionSummary.length}</span>)</div>
     <table id="sectionTable" class="sortable-table">
         <thead>
             <tr>
@@ -800,7 +807,12 @@ const RD = ${regionDataJsLiteral};
     const rendered = new Set();
     const vtMap = new Map();
     const staticOrig = new WeakMap();   // original innerHTML of static-table rows we've highlighted, for restore
+    const secTotal = ${sectionSummary.length};   // total rows in the All Sections table (for the "X / N" heading)
     let funcVis = false, curQ = '', searchAutoFunc = false, funcUserOverride = false;
+    // Ordered match list for ◀/▶ navigation. Entries are either { k:'el', el:<tr> }
+    // (a live row) or { k:'vt', vi:regionIdx, r:rowIndex } (a row in a virtual
+    // table that may not be in the DOM yet — resolved by scrolling the viewport).
+    let matchList = [], curMatch = -1, currentMatchEl = null;
 
     function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -1003,6 +1015,10 @@ const RD = ${regionDataJsLiteral};
     // --- Keyword search (data-driven for regions, DOM for static tables) ---
     const searchInput = document.getElementById('searchInput');
     const searchCount = document.getElementById('searchCount');
+    const searchPrev = document.getElementById('searchPrev');
+    const searchNext = document.getElementById('searchNext');
+    const allSecCount = document.getElementById('allSecCount');
+    const regMatchInfo = document.getElementById('regMatchInfo');
     let searchTimeout;
     // Incremental filter cache: when the new query extends the previous one,
     // we only have to filter the previous result set, not the full dataset.
@@ -1013,14 +1029,22 @@ const RD = ${regionDataJsLiteral};
         clearTimeout(searchTimeout);
         searchTimeout = setTimeout(doSearch, 200);
     });
+    searchPrev.addEventListener('click', function() { goToMatch(-1); });
+    searchNext.addEventListener('click', function() { goToMatch(1); });
 
     // Ctrl/Cmd+F → focus + select search input. Esc inside the input clears
     // the query (and resets the search) on first press, blurs on second.
+    // Enter / Shift+Enter step through matches.
     document.addEventListener('keydown', function(e) {
         if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && typeof e.key === 'string' && e.key.toLowerCase() === 'f') {
             e.preventDefault();
             searchInput.focus();
             searchInput.select();
+            return;
+        }
+        if (e.key === 'Enter' && document.activeElement === searchInput) {
+            e.preventDefault();
+            goToMatch(e.shiftKey ? -1 : 1);
             return;
         }
         if (e.key === 'Escape' && document.activeElement === searchInput) {
@@ -1035,10 +1059,135 @@ const RD = ${regionDataJsLiteral};
         }
     });
 
+    // --- Match navigation (◀ ▶ / Enter / Shift+Enter) ---
+    function updateNavUI() {
+        const has = matchList.length > 0;
+        searchPrev.disabled = !has;
+        searchNext.disabled = !has;
+        if (!curQ) {
+            searchCount.textContent = '';
+            searchCount.classList.remove('no-match');
+        } else if (!has) {
+            searchCount.textContent = 'No matches';
+            searchCount.classList.add('no-match');
+        } else {
+            searchCount.classList.remove('no-match');
+            searchCount.textContent = (curMatch + 1) + ' / ' + matchList.length;
+        }
+    }
+
+    function matchInView(el) {
+        const r = el.getBoundingClientRect();
+        const vh = window.innerHeight || document.documentElement.clientHeight;
+        return r.top >= 64 && r.bottom <= vh;
+    }
+
+    // Make sure region #idx is expanded (a matchList row may live inside a
+    // .region-detail the user collapsed after the search; navigating to it must
+    // re-open the region or the row would be hidden). No-op when already open.
+    function ensureRegionExpanded(idx) {
+        const card = document.querySelector('.region-card[data-idx="' + idx + '"]');
+        if (!card) { return; }
+        const detail = card.querySelector('.region-detail');
+        if (detail && detail.style.display === 'none') {
+            detail.style.display = '';
+            const icon = card.querySelector('.fold-icon');
+            if (icon) { icon.textContent = '▼'; }
+            renderDetail(idx);
+            if (window.syncToggleAllLabel) { window.syncToggleAllLabel(); }
+        }
+    }
+
+    // Reveal match #i: clear the previous current-match, expand its region if
+    // collapsed, resolve the target row (scrolling a virtual table's viewport if
+    // the row isn't rendered yet), mark it current, and scroll the page to it.
+    // force = always center; otherwise only scroll when the row isn't already
+    // comfortably on screen.
+    function revealMatch(i, force) {
+        if (currentMatchEl) { currentMatchEl.classList.remove('current-match'); currentMatchEl = null; }
+        const m = matchList[i];
+        if (!m) { updateNavUI(); return; }
+        let el;
+        if (m.k === 'el') {
+            el = m.el;
+            const rc = el && el.closest && el.closest('.region-card');
+            if (rc && rc.dataset && rc.dataset.idx) { ensureRegionExpanded(parseInt(rc.dataset.idx)); }
+        } else {
+            ensureRegionExpanded(m.vi);   // expand first so the viewport has a real clientHeight
+            const vt = vtMap.get(m.vi);
+            if (!vt) { updateNavUI(); return; }
+            const maxTop = Math.max(0, vt.fd.length * ROW_H - vt.vp.clientHeight);
+            vt.vp.scrollTop = Math.min(maxTop, Math.max(0, (m.r + 0.5) * ROW_H - vt.vp.clientHeight / 2));
+            vt.ls = -1;
+            renderVT(vt);
+            el = vt.tb.querySelectorAll('tr:not(.vt-sp)')[m.r - vt.ls];
+        }
+        if (!el) { updateNavUI(); return; }
+        el.classList.add('current-match');
+        currentMatchEl = el;
+        if (m.k === 'el') {
+            if (force || !matchInView(el)) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+        } else {
+            // el lives inside a nested-scroll viewport we already positioned; scroll only the page.
+            const r = el.getBoundingClientRect();
+            const vh = window.innerHeight || document.documentElement.clientHeight;
+            if (force || r.top < 64 || r.bottom > vh) {
+                window.scrollTo({ top: Math.max(0, window.scrollY + r.top + r.height / 2 - vh / 2), behavior: 'smooth' });
+            }
+        }
+        updateNavUI();
+    }
+
+    function goToMatch(delta) {
+        if (matchList.length === 0) { return; }
+        curMatch = (curMatch + delta + matchList.length) % matchList.length;
+        revealMatch(curMatch, true);
+    }
+
+    // Rebuild matchList from the current (post-render) DOM + virtual-table state.
+    // Document order: overview rows → region cards (in order) → All Sections rows.
+    // Virtual-table regions contribute logical { vt } entries (one per filtered
+    // row) since most of those rows aren't in the DOM at any given moment.
+    function rebuildMatchList(q) {
+        matchList = [];
+        if (!q) { return; }
+        document.querySelectorAll('.overview-table tbody tr.search-match').forEach(function(tr) { matchList.push({ k: 'el', el: tr }); });
+        RD.forEach(function(rd, idx) {
+            const card = document.querySelector('.region-card[data-idx="' + idx + '"]');
+            if (!card || card.style.display === 'none') { return; }
+            const vt = vtMap.get(idx);
+            if (vt) {
+                for (let i = 0; i < vt.fd.length; i++) { matchList.push({ k: 'vt', vi: idx, r: i }); }
+            } else {
+                const tbody = card.querySelector('.section-table tbody');
+                if (tbody) { tbody.querySelectorAll('tr').forEach(function(tr) { matchList.push({ k: 'el', el: tr }); }); }
+            }
+        });
+        document.querySelectorAll('#sectionTable tbody tr.search-match').forEach(function(tr) { matchList.push({ k: 'el', el: tr }); });
+    }
+
+    // Re-sync match navigation after a column sort reordered (or, for virtual
+    // tables, re-rendered) rows behind matchList's back: stale <tr> references
+    // and wrong document order would make ◀/▶ jump to the wrong place. Mirrors
+    // the tail of doSearch — rebuild, jump to the first match, refresh the count.
+    function resyncAfterReflow() {
+        if (!curQ) { return; }
+        document.querySelectorAll('.current-match').forEach(function(el) { el.classList.remove('current-match'); });
+        currentMatchEl = null;
+        rebuildMatchList(curQ);
+        curMatch = matchList.length > 0 ? 0 : -1;
+        updateNavUI();
+        if (curMatch === 0) { revealMatch(0, false); }
+    }
+
     function doSearch() {
         const q = searchInput.value.trim().toLowerCase();
         curQ = q;
-        let mc = 0, mr = 0;   // total matches, regions containing a match
+        let mr = 0;   // regions containing a match
+
+        // Drop any stale current-match emphasis; matchList is rebuilt below.
+        document.querySelectorAll('.current-match').forEach(function(el) { el.classList.remove('current-match'); });
+        currentMatchEl = null;
 
         // matchSeg() also searches the Section/Function columns, but those live
         // inside .func-cell which is hidden by default — so a function-only query
@@ -1074,10 +1223,10 @@ const RD = ${regionDataJsLiteral};
             const src = canExtend ? lastSearch.fd[idx] : rd.segments;
             const filtered = q ? src.filter(function(seg) { return matchSeg(seg, q); }) : rd.segments;
             nextFd[idx] = filtered;
-            if (q) {
-                rm = filtered.length;
-                mc += rm;
-            }
+            if (q) { rm = filtered.length; }
+
+            // Hide region cards with no match while a search is active.
+            if (card) { card.style.display = (q && rm === 0) ? 'none' : ''; }
 
             // Update virtual tables
             const vt = vtMap.get(idx);
@@ -1122,38 +1271,29 @@ const RD = ${regionDataJsLiteral};
                 row.classList.add('search-match');
                 if (!staticOrig.has(row)) staticOrig.set(row, row.innerHTML);
                 markTextNodes(row, q);
-                mc++;
             } else {
                 row.style.display = 'none';
             }
         });
 
-        if (!q) {
-            searchCount.textContent = '';
-            searchCount.classList.remove('no-match');
-        } else if (mc === 0) {
-            searchCount.textContent = 'No matches';
-            searchCount.classList.add('no-match');
-        } else {
-            searchCount.classList.remove('no-match');
-            searchCount.textContent = mc + (mc > 1 ? ' matches' : ' match') +
-                (mr > 0 ? ' in ' + mr + (mr > 1 ? ' regions' : ' region') : '');
-        }
         lastSearch = { q: q, fd: nextFd };
         if (window.syncToggleAllLabel) window.syncToggleAllLabel();
 
-        // Bring the first match into view (unless it is already on screen below
-        // the sticky search bar). Picks the earliest match in document order.
-        if (q && mc > 0) {
-            const first = document.querySelector('.region-card mark.sm-hl, #sectionTable tbody tr.search-match, .overview-table tbody tr.search-match');
-            if (first) {
-                const r = first.getBoundingClientRect();
-                const vh = window.innerHeight || document.documentElement.clientHeight;
-                if (r.top < 64 || r.bottom > vh) {
-                    first.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-            }
+        // Heading match counts.
+        if (allSecCount) {
+            allSecCount.textContent = q
+                ? (document.querySelectorAll('#sectionTable tbody tr.search-match').length + ' / ' + secTotal)
+                : String(secTotal);
         }
+        if (regMatchInfo) {
+            regMatchInfo.textContent = q ? (' — ' + mr + (mr === 1 ? ' region' : ' regions') + ' matched') : '';
+        }
+
+        // Rebuild the navigable match list and jump to the first match.
+        rebuildMatchList(q);
+        curMatch = matchList.length > 0 ? 0 : -1;
+        updateNavUI();
+        if (curMatch === 0) { revealMatch(0, false); }
     }
 
     // --- Expand All / Collapse All ---
@@ -1250,6 +1390,8 @@ const RD = ${regionDataJsLiteral};
                     rows.forEach(function(row) { tbody.appendChild(row); });
                     ths.forEach(function(h) { h.textContent = h.textContent.replace(/ [\u25B2\u25BC]$/, ''); });
                     th.textContent += sortAsc ? ' \u25B2' : ' \u25BC';
+                    // All Sections and non-virtual region tables feed matchList; keep nav in sync.
+                    if (tbl.id === 'sectionTable' || tbl.classList.contains('section-table')) { resyncAfterReflow(); }
                 });
             });
         });
@@ -1302,6 +1444,7 @@ const RD = ${regionDataJsLiteral};
         const ths = th.parentElement.querySelectorAll('th[data-sort]');
         ths.forEach(function(h) { h.textContent = h.textContent.replace(/ [\u25B2\u25BC]$/, ''); });
         th.textContent += asc ? ' \u25B2' : ' \u25BC';
+        resyncAfterReflow();   // a region section table feeds matchList; resync nav after re-render
     });
 
     // Initialize sort on static tables (overview, all-sections)

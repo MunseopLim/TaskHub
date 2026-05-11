@@ -137,7 +137,7 @@ suite('Memory Map Viewer Test Suite', () => {
         // can't silently disappear (a broken template literal would also drop
         // the whole <script>, failing these assertions).
 
-        test('search box is sticky and a match-highlight style is present', () => {
+        test('search box is sticky, has match-nav controls, and a match-highlight style', () => {
             const file = createTempElf('search-ux-a', 'fw.axf');
             const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
             openMemoryMapPanel(ctx, file);
@@ -145,20 +145,27 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.ok(html, 'panel HTML should be available');
             assert.ok(/\.search-box\s*\{[^}]*position:\s*sticky/.test(html!), '.search-box should be position: sticky');
             assert.ok(html!.includes('mark.sm-hl'), 'mark.sm-hl highlight style should be present');
+            assert.ok(html!.includes('tr.current-match'), 'current-match style should be present');
             assert.ok(html!.includes('.search-count.no-match'), 'no-match count style should be present');
+            assert.ok(html!.includes('id="searchPrev"') && html!.includes('id="searchNext"'), 'prev/next match buttons should be present');
+            assert.ok(html!.includes('id="allSecCount"'), 'All Sections heading should carry a match-count span');
             assert.ok(/placeholder="Search\.\.\..*function.*"/.test(html!), 'search placeholder should mention the function column');
         });
 
-        test('webview script exposes highlight + auto-scroll search helpers', () => {
+        test('webview script exposes the highlight + match-navigation helpers', () => {
             const file = createTempElf('search-ux-b', 'fw.axf');
             const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
             openMemoryMapPanel(ctx, file);
             const html = panelRegistry.getHtml(file)!;
             assert.ok(html.includes('function hl(text)'), 'hl() escape+highlight helper should be present');
             assert.ok(html.includes('function markTextNodes('), 'markTextNodes() helper should be present');
-            assert.ok(html.includes("scrollIntoView({ behavior: 'smooth', block: 'center' })"), 'first-match auto-scroll should be present');
+            assert.ok(html.includes('function goToMatch(') && html.includes('function revealMatch('), 'match-navigation helpers should be present');
+            assert.ok(html.includes('rebuildMatchList'), 'match list should be rebuilt on each search');
+            assert.ok(html.includes('resyncAfterReflow'), 'a column sort should re-sync match navigation');
+            assert.ok(html.includes('ensureRegionExpanded'), 'navigating to a match should re-open a collapsed region');
+            assert.ok(html.includes("scrollIntoView({ behavior: 'smooth', block: 'center' })"), 'navigating should center the match');
             assert.ok(html.includes("'No matches'"), 'empty-result message should be present');
-            assert.ok(html.includes("' in '"), 'match count should append the matching-region count');
+            assert.ok(html.includes("(curMatch + 1) + ' / ' + matchList.length"), 'count should show the current/total position');
             assert.ok(html.includes('searchAutoFunc'), 'search should auto-reveal the hidden func/section columns');
             assert.ok(html.includes('funcUserOverride'), 'a manual func-column toggle during search should suppress re-auto-reveal');
         });

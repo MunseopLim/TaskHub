@@ -29,6 +29,26 @@
 =====================================================================
 -->
 
+## [0.4.35] - 2026-05-11
+
+### 변경 — Memory Map 검색 매치 네비게이션 + 비매치 region 카드 숨김
+
+0.4.34 의 검색 가시성 개선(매치 하이라이트 / sticky / 첫 매치 스크롤)에 이어, 브라우저 "찾기" 와 같은 매치 이동(◀▶/Enter)과 검색 시 페이지가 *결과 중심* 으로 접히는 동작을 추가한다.
+
+#### UX
+
+- **매치 네비게이션**: 검색창 오른쪽에 `◀ ▶` 버튼과 `3 / 17` 위치 카운터. `Enter` = 다음, `Shift+Enter` = 이전, 양 끝에서 순환. 이동 시 해당 행을 `scrollIntoView({ block: 'center' })` 로 가운데에 두고 "현재 매치" 에 진한 강조(`--vscode-list-activeSelectionBackground` 배경 + 왼쪽 accent border + 그 행의 `<mark>` 는 `--vscode-editor-findMatchBackground`). 검색 직후 첫 매치가 자동 선택된다. 가상 스크롤(>200행) region 의 매치도 — 대부분 DOM 에 없으므로 — 논리 인덱스로 추적해, 이동 시 뷰포트를 해당 행으로 스크롤한 뒤 행을 해석한다. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `rebuildMatchList` / `revealMatch` / `goToMatch` / `updateNavUI`.
+- **검색 시 비매치 region 카드 숨김 + 헤딩 매치 수**: 검색 중 매치가 0개인 `.region-card` 는 `display:none` 으로 접어 매치 사이의 노이즈를 없앤다. `All Sections (12 / 540)`, `Region Details — 2 regions matched` 처럼 헤딩에 매치/전체 수를 표기. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `doSearch` (`allSecCount` / `regMatchInfo`).
+- **카운트 문구 정리**: 0.4.34 의 `27 matches in 4 regions` 는 네비게이션 카운터 `3 / 17` 로 대체(리전 수는 위 "Region Details" 헤딩으로, All Sections 매치 수는 그 헤딩으로 이전). 결과 없음은 그대로 경고색 `No matches`. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `updateNavUI`.
+- **정렬 후 매치 네비게이션 재동기화**: matchList 는 현재 DOM 행 참조(또는 가상 테이블의 행 인덱스)를 담는데, 컬럼 정렬은 그 행들을 재배치(가상 테이블은 재렌더)한다. 정렬 후 ◀▶/Enter 가 옛 순서·detached 행을 잡지 않도록, 검색 활성 상태에서 All Sections / region section 테이블을 정렬하면 `resyncAfterReflow()` 가 matchList 를 다시 만들고 `curMatch` 를 첫 매치로 재설정한 뒤 카운트를 갱신한다(검색과 무관한 obj-summary 정렬은 건드리지 않음). 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `resyncAfterReflow` / `initSort` / 데이터 기반 region 정렬 핸들러.
+- **접힌 region 의 매치로 이동 시 자동 펼침**: 검색 후 사용자가 매치 있는 region 을 접거나 `Collapse All` 을 누르면 matchList 항목은 여전히 숨겨진 `.region-detail` 안의 행을 가리킨다. ◀▶/Enter 로 그 매치로 이동할 때 `revealMatch()` 가 대상 행의 region 이 접혀 있으면 먼저 펼친 뒤(`ensureRegionExpanded()` — display 복원 + fold 아이콘·Expand/Collapse All 라벨 동기화, 가상 테이블은 펼친 후 `clientHeight` 가 잡힌 상태에서 뷰포트를 스크롤) 행을 해석한다. 카운터만 움직이고 화면엔 안 나타나던 문제 해소. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `ensureRegionExpanded` / `revealMatch`.
+
+#### 문서
+
+- features.md §19 *검색 및 탐색* 의 키워드 검색 항목을 새 동작(매치 네비게이션 / 비매치 카드 숨김 / 헤딩 매치 수 / 카운터 형식)에 맞게 갱신. 참조: [docs/features.md](docs/features.md).
+
+**테스트**: 기존 webview-HTML 스모크 케이스 2종을 새 동작에 맞게 갱신 — `tr.current-match` 스타일 / `searchPrev`·`searchNext` 버튼 / `allSecCount` 헤딩 span / `goToMatch`·`revealMatch`·`rebuildMatchList`·`resyncAfterReflow`·`ensureRegionExpanded` 헬퍼 / `(curMatch + 1) + ' / ' + matchList.length` 카운터 형식 포함 여부 확인. 최종 1194 passing.
+
 ## [0.4.34] - 2026-05-11
 
 ### 변경 — Memory Map 검색 결과 가시성 개선
