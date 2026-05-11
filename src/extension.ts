@@ -10,8 +10,15 @@ import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri } from './jsonEditor';
 import { openMarkdownPreview, openHtmlInBrowser } from './previewOpener';
-import { showMemoryMap, MemoryMapConfig, goToSymbol } from './memoryMapViewer';
-import { showHexViewer, HexEditorProvider } from './hexViewer';
+import {
+    showMemoryMap,
+    MemoryMapConfig,
+    MemoryMapOpenHistory,
+    goToSymbol,
+    openMemoryMapPanel,
+    openMemoryMapFromListing,
+} from './memoryMapViewer';
+import { showHexViewer, HexEditorProvider, HexViewerOpenHistory, openHexViewerFile } from './hexViewer';
 import { t } from './i18n';
 import { buildPreviewReport } from './previewRun';
 import { createZipArchive, extractZipArchive } from './archiveUtils';
@@ -1470,13 +1477,81 @@ import {
 } from './providers/favoriteViewProvider';
 
 import {
+    createToolHistoryEntry,
     HistoryEntry,
     HistoryItem,
     HistoryProvider,
+    isToolHistoryEntry,
     startHistoryAutoRefresh,
 } from './providers/historyProvider';
 
 import { normalizeLineNumber } from './providers/normalization';
+
+function cloneMemoryMapHistoryConfig(config?: MemoryMapConfig): MemoryMapConfig | undefined {
+    if (!config?.regions || config.regions.length === 0) {
+        return undefined;
+    }
+    return {
+        regions: config.regions.map(region => ({
+            name: region.name,
+            origin: region.origin,
+            size: region.size,
+        })),
+    };
+}
+
+function recordMemoryMapHistory(historyProvider: HistoryProvider, entry: MemoryMapOpenHistory): void {
+    historyProvider.addHistoryEntry(createToolHistoryEntry({
+        kind: 'memoryMap',
+        filePath: entry.filePath,
+        fileName: entry.fileName,
+        memoryMapInputType: entry.inputType,
+        memoryMapConfig: cloneMemoryMapHistoryConfig(entry.config),
+    }));
+}
+
+function recordHexViewerHistory(historyProvider: HistoryProvider, entry: HexViewerOpenHistory): void {
+    historyProvider.addHistoryEntry(createToolHistoryEntry({
+        kind: 'hexEditor',
+        filePath: entry.filePath,
+        fileName: entry.fileName,
+    }));
+}
+
+async function openToolHistoryEntry(
+    context: vscode.ExtensionContext,
+    historyProvider: HistoryProvider,
+    entry: HistoryEntry
+): Promise<void> {
+    if (!isToolHistoryEntry(entry)) {
+        vscode.window.showErrorMessage(t('유효하지 않은 기록 항목입니다.', 'Invalid history entry.'));
+        return;
+    }
+
+    const tool = entry.tool;
+    if (tool.kind === 'memoryMap') {
+        const inputType = tool.memoryMapInputType ?? 'elf';
+        const opened = inputType === 'listing'
+            ? openMemoryMapFromListing(context, tool.filePath)
+            : openMemoryMapPanel(context, tool.filePath, tool.memoryMapConfig);
+        if (opened) {
+            recordMemoryMapHistory(historyProvider, {
+                filePath: tool.filePath,
+                fileName: tool.fileName,
+                inputType,
+                config: tool.memoryMapConfig,
+            });
+        }
+        return;
+    }
+
+    if (openHexViewerFile(context, tool.filePath)) {
+        recordHexViewerHistory(historyProvider, {
+            filePath: tool.filePath,
+            fileName: tool.fileName,
+        });
+    }
+}
 
 export function parseTagInput(input: string | undefined): string[] | undefined {
     if (!input) {
@@ -4409,9 +4484,25 @@ export function activate(context: vscode.ExtensionContext) {
     }));
 
     // History commands
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openToolFromHistory', async (itemOrEntry: HistoryItem | HistoryEntry | undefined) => {
+        const maybeItem = itemOrEntry as HistoryItem | undefined;
+        const entry = typeof maybeItem?.getEntry === 'function'
+            ? maybeItem.getEntry()
+            : itemOrEntry as HistoryEntry | undefined;
+        if (!entry) {
+            vscode.window.showErrorMessage(t('유효하지 않은 기록 항목입니다.', 'Invalid history entry.'));
+            return;
+        }
+        await openToolHistoryEntry(context, historyProvider, entry);
+    }));
+
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.rerunFromHistory', async (entry: HistoryEntry) => {
         if (!entry || !entry.actionId) {
             vscode.window.showErrorMessage(t('유효하지 않은 기록 항목입니다.', 'Invalid history entry.'));
+            return;
+        }
+        if (isToolHistoryEntry(entry)) {
+            await openToolHistoryEntry(context, historyProvider, entry);
             return;
         }
 
@@ -5032,7 +5123,7 @@ export function activate(context: vscode.ExtensionContext) {
                 } catch { /* ignore parse errors */ }
             }
         }
-        await showMemoryMap(context, memConfig);
+        await showMemoryMap(context, memConfig, entry => recordMemoryMapHistory(historyProvider, entry));
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.memoryMapGoToSymbol', () => {
@@ -5040,12 +5131,12 @@ export function activate(context: vscode.ExtensionContext) {
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showHexViewer', async () => {
-        await showHexViewer(context);
+        await showHexViewer(context, entry => recordHexViewerHistory(historyProvider, entry));
     }));
 
     context.subscriptions.push(vscode.window.registerCustomEditorProvider(
         'taskhub.hexEditor',
-        new HexEditorProvider(context),
+        new HexEditorProvider(context, entry => recordHexViewerHistory(historyProvider, entry)),
         { supportsMultipleEditorsPerDocument: true }
     ));
 }

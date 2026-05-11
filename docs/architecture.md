@@ -85,7 +85,7 @@ TaskHub/
 *   **MainViewProvider** ([providers/mainViewProvider.ts](../src/providers/mainViewProvider.ts)): 액션 버튼과 폴더 트리 관리
 *   **LinkViewProvider** ([providers/linkViewProvider.ts](../src/providers/linkViewProvider.ts)): Built-in 및 Workspace 링크 관리
 *   **FavoriteViewProvider** ([providers/favoriteViewProvider.ts](../src/providers/favoriteViewProvider.ts)): 즐겨찾기 파일 관리
-*   **HistoryProvider** ([providers/historyProvider.ts](../src/providers/historyProvider.ts)): 액션 실행 히스토리 관리 (`workspaceState` 백엔드)
+*   **HistoryProvider** ([providers/historyProvider.ts](../src/providers/historyProvider.ts)): 액션 실행 및 TaskHub 도구 열람 히스토리 관리 (`workspaceState` 백엔드)
 
 `extension.ts`는 위 모듈에서 클래스를 import해 `activate()`에서 인스턴스를 만듭니다. 기존 호출자(테스트 포함)의 호환성을 위해 `MainViewProvider`, `Folder`, `Action` 세 심볼만 `extension.ts`에서 re-export됩니다. `LinkViewProvider`, `FavoriteViewProvider`, `HistoryProvider` 및 각 엔트리/아이템 타입은 re-export되지 않으므로 **외부/테스트 코드는 `./providers/...`에서 직접 import** 해야 합니다.
 
@@ -127,11 +127,19 @@ TaskHub/
 
 ```typescript
 interface HistoryEntry {
+    entryType?: 'action' | 'tool';  // 레거시 항목은 생략되며 action으로 취급
     actionId: string;        // 액션 ID
     actionTitle: string;     // 액션 제목
     timestamp: number;       // 실행 시간 (Unix timestamp)
     status: 'success' | 'failure' | 'running';  // 실행 상태
     output?: string;         // 출력 (실패 시 에러 메시지)
+    tool?: {
+        kind: 'memoryMap' | 'hexEditor';
+        filePath: string;
+        fileName: string;
+        memoryMapInputType?: 'elf' | 'listing';
+        memoryMapConfig?: { regions?: { name: string; origin: number; size: number }[] };
+    };
     inputs?: Record<string, unknown>;  // 인터랙티브 task 결과 (task id → result). "Re-run with Saved Inputs" 재실행 시 다이얼로그를 건너뛰는 용도. `inputBox`의 `password: true`는 보안상 항상 제외된다. 자세한 동작은 [docs/features.md §14](./features.md#14-액션-실행-히스토리) 참조.
     durationMs?: number;     // 실행 소요 시간(ms). running → success/failure 전이 시점에 `Math.max(0, Date.now() - timestamp)`로 기록 (clock-skew 음수 방어 — `executeAction` 4개 종료 경로 모두 동일). History 패널 HistoryItem의 "last run" 배지(`description`) 렌더에 사용 (자세한 동작은 [docs/features.md §14](./features.md#14-액션-실행-히스토리) 참조).
 }
@@ -231,6 +239,7 @@ TaskHub가 VS Code에 등록하는 모든 `contributes.configuration.*` 설정�
    *   [src/extension.ts](../src/extension.ts) `executeAction()` 의 히스토리 추적 호출 순서(`addHistoryEntry` → `updateHistoryStatus(..., durationMs)` → `setHistoryInputs`) 유지. 종료 시 `Math.max(0, Date.now() - timestamp)`로 계산한 `durationMs`를 `updateHistoryStatus`의 5번째 인자로 전달해야 HistoryItem last-run 배지가 표시된다 (회귀 시 `IT-067`로 검출). 입력값 캡처는 `executeActionPipeline`의 `recordInputs` 옵션을 통해 누적되며, `password: true` `inputBox`는 `shouldRecordTaskInput`에서 명시적으로 제외된다 (회귀 시 `IT-065`로 검출).
    *   `HistoryItem`은 생성자에서 `formatLastRunBadge(entry, Date.now(), lang)`을 통해 `description`을 채운다. 배지는 History 패널에만 노출되며, Actions 패널의 `Action` TreeItem에는 의도적으로 last-run 정보를 두지 않는다 (회귀 시 `IT-068b` 가드로 검출).
    *   `HistoryItem.description`은 `Date.now()`를 생성자 시점에 캡처하므로 자정 경계를 넘기면 "오늘 23:30"이 다음 날에도 그대로 남는 stale 케이스가 발생한다. 이를 막기 위해 `startHistoryAutoRefresh`(시간당 background tick) + `historyProvider.view.onDidChangeVisibility`(패널 재진입 시 즉시 갱신) 두 hook이 [src/extension.ts](../src/extension.ts) `activate()`에서 등록된다 — 새 history 변형 경로를 추가할 때 이 두 hook은 건드릴 필요 없다.
+   *   히스토리에는 액션 실행 외에 **TaskHub 도구 열람 기록**(Memory Map / Hex Editor)도 같은 `taskhub.actionHistory` 키에 누적된다. tool 엔트리는 `entryType === 'tool'` 판별자 + `tool` 메타데이터를 갖고, `createToolHistoryEntry`([src/providers/historyProvider.ts](../src/providers/historyProvider.ts))로 생성되며, viewer 모듈([src/memoryMapViewer.ts](../src/memoryMapViewer.ts) / [src/hexViewer.ts](../src/hexViewer.ts))은 `HistoryProvider`를 직접 import하지 않고 `recordHistory` 콜백만 주입받는다(레이어 분리). 패널이 실제로 열린 경우에만(`openMemoryMapPanel` / `openHexViewerFile`의 `boolean` 반환) 기록한다. tool 엔트리는 `actionId`에 합성 식별자(`taskhub.tool.<kind>:<inputType>:<filePath>`)를 담아 `computeDisambiguatedHistoryLabels`를 그대로 재사용하고, `HistoryItem`이 클릭 시 `taskhub.rerunFromHistory` 대신 `taskhub.openToolFromHistory`로 분기한다 (`taskhub.rerunFromHistory` 핸들러는 tool 엔트리를 받으면 `openToolFromHistory`로 위임). 회귀 가드: `createToolHistoryEntry` 메타데이터 저장 / tool-row 가 `openToolFromHistory` 명령을 갖는지 검증하는 단위 테스트(`src/test/extension.test.ts`).
 
 2. **Action TreeItem `description` 슬롯 사용 정책**:
    *   **회고 정보(시각·소요 시간) ≠ 진행 정보(현재 어디)**. 회고 정보는 `HistoryEntry`의 속성이므로 [HistoryItem.description](../src/providers/historyProvider.ts) 단일 표면에서만 렌더한다 (회귀 가드: `IT-068b`).

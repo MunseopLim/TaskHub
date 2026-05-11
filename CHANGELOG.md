@@ -29,6 +29,22 @@
 =====================================================================
 -->
 
+## [0.4.36] - 2026-05-12
+
+### 추가 — History에 Memory Map / Hex Editor 열람 기록
+
+History 패널이 액션 실행만 추적하던 것에서, TaskHub 도구(Memory Map / Hex Editor) 열람 기록까지 함께 남기도록 확장한다. 새 저장소 키를 만들지 않고 기존 `HistoryEntry`에 `entryType` 판별자 + `tool` 메타데이터를 더해 같은 패널·persistence를 재사용한다.
+
+#### UX
+
+- **도구 열람 이력 저장**: `TaskHub: Show Memory Map`으로 연 ELF/AXF/ARM Linker Listing과 `TaskHub: Open Hex Viewer` 또는 `taskhub.hexEditor` custom editor로 연 Hex/Binary 파일을 History 패널에 함께 기록한다. 도구 이력 row(`graph` / `file-binary` 아이콘)를 클릭하면 저장된 파일 경로로 해당 뷰어를 다시 열고, 다시 열기도 최신 이력으로 추가된다. Memory Map은 ELF/listing 입력 종류와 당시 사용한 region 설정을 함께 보존해, 다시 열 때 링커 스크립트 선택 다이얼로그를 건너뛴다. 파싱 실패·크기 초과 등 패널이 열리지 않은 경우에는 기록하지 않는다. 참조: [src/providers/historyProvider.ts](src/providers/historyProvider.ts), [src/extension.ts](src/extension.ts), [src/memoryMapViewer.ts](src/memoryMapViewer.ts), [src/hexViewer.ts](src/hexViewer.ts).
+
+#### 문서
+
+- features.md §14와 architecture.md의 `HistoryEntry` 구조 설명을 action/tool 공용 히스토리 모델에 맞게 갱신. 참조: [docs/features.md](docs/features.md), [docs/architecture.md](docs/architecture.md).
+
+**테스트**: 신규 2 케이스 — `createToolHistoryEntry`의 Memory Map 메타데이터 저장과 tool history row가 `taskhub.openToolFromHistory`를 호출하는지 검증. 최종 1196 passing.
+
 ## [0.4.35] - 2026-05-11
 
 ### 변경 — Memory Map 검색 매치 네비게이션 + 비매치 region 카드 숨김

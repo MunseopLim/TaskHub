@@ -55,6 +55,8 @@ import { FavoriteViewProvider, readFavoritesFromDisk } from '../providers/favori
 import {
 	HistoryProvider,
 	HistoryEntry,
+	createToolHistoryEntry,
+	isToolHistoryEntry,
 	formatDuration,
 	formatHistoryTimestamp,
 	formatLastRunBadge,
@@ -2332,6 +2334,44 @@ suite('Extension Test Suite', () => {
 				provider.trimHistoryToMax();
 				assert.strictEqual(provider.getHistory().length, 2);
 			});
+		});
+
+		test('createToolHistoryEntry stores Memory Map metadata in the shared history shape', () => {
+			const entry = createToolHistoryEntry({
+				kind: 'memoryMap',
+				filePath: '/workspace/build/app.axf',
+				timestamp: 1234,
+				memoryMapInputType: 'elf',
+				memoryMapConfig: {
+					regions: [{ name: 'FLASH', origin: 0x08000000, size: 1024 }]
+				}
+			});
+			assert.strictEqual(entry.entryType, 'tool');
+			assert.strictEqual(entry.actionTitle, 'Memory Map: app.axf');
+			assert.strictEqual(entry.status, 'success');
+			assert.ok(isToolHistoryEntry(entry));
+			assert.strictEqual(entry.tool.filePath, '/workspace/build/app.axf');
+			assert.strictEqual(entry.tool.memoryMapInputType, 'elf');
+			assert.deepStrictEqual(entry.tool.memoryMapConfig?.regions, [
+				{ name: 'FLASH', origin: 0x08000000, size: 1024 }
+			]);
+		});
+
+		test('tool history rows open the tool instead of rerunning an action', async () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(createToolHistoryEntry({
+				kind: 'hexEditor',
+				filePath: '/workspace/image.hex',
+				timestamp: 55
+			}));
+
+			const items = await provider.getChildren();
+			assert.strictEqual(items.length, 1);
+			const item = items[0];
+			assert.strictEqual(item.label, 'Hex Editor: image.hex');
+			assert.strictEqual(item.contextValue, 'historyItem');
+			assert.strictEqual(item.command?.command, 'taskhub.openToolFromHistory');
+			assert.ok(isToolHistoryEntry(item.getEntry()));
 		});
 
 		test('getChildren returns one HistoryItem per entry, carrying the rerun command', async () => {

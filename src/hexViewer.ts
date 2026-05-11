@@ -16,13 +16,20 @@ let currentMessageDisposable: vscode.Disposable | undefined;
 /** Hex Viewer에서 처리 가능한 최대 파일 크기 (50 MB) */
 const HEX_VIEWER_MAX_FILE_SIZE = 50 * 1024 * 1024;
 
+export interface HexViewerOpenHistory {
+    filePath: string;
+    fileName: string;
+}
+
+export type HexViewerHistoryRecorder = (entry: HexViewerOpenHistory) => void;
+
 function formatFileSize(bytes: number): string {
     if (bytes < 1024) { return `${bytes} B`; }
     if (bytes < 1024 * 1024) { return `${(bytes / 1024).toFixed(1)} KB`; }
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export async function showHexViewer(context: vscode.ExtensionContext) {
+export async function showHexViewer(context: vscode.ExtensionContext, recordHistory?: HexViewerHistoryRecorder) {
     const fileUri = await vscode.window.showOpenDialog({
         canSelectMany: false,
         filters: {
@@ -36,6 +43,12 @@ export async function showHexViewer(context: vscode.ExtensionContext) {
     if (!fileUri || fileUri.length === 0) { return; }
 
     const filePath = fileUri[0].fsPath;
+    if (openHexViewerFile(context, filePath)) {
+        recordHistory?.({ filePath, fileName: path.basename(filePath) });
+    }
+}
+
+export function openHexViewerFile(context: vscode.ExtensionContext, filePath: string): boolean {
     const fileName = path.basename(filePath);
 
     let stat: fs.Stats;
@@ -46,7 +59,7 @@ export async function showHexViewer(context: vscode.ExtensionContext) {
             `파일을 읽을 수 없습니다: ${filePath}\n${e.message}`,
             `Cannot read file: ${filePath}\n${e.message}`
         ));
-        return;
+        return false;
     }
 
     if (stat.size > HEX_VIEWER_MAX_FILE_SIZE) {
@@ -54,7 +67,7 @@ export async function showHexViewer(context: vscode.ExtensionContext) {
             `파일 크기(${formatFileSize(stat.size)})가 Hex Viewer 처리 한도(${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)})를 초과합니다. 대용량 파일은 외부 Hex Editor를 사용해 주세요.`,
             `File size (${formatFileSize(stat.size)}) exceeds the Hex Viewer limit (${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)}). Please use an external hex editor for large files.`
         ));
-        return;
+        return false;
     }
 
     let result: HexParseResult;
@@ -65,7 +78,7 @@ export async function showHexViewer(context: vscode.ExtensionContext) {
             `파일 파싱 실패 (${fileName}): ${e.message}`,
             `Failed to parse file (${fileName}): ${e.message}`
         ));
-        return;
+        return false;
     }
 
     if (result.byteCount === 0) {
@@ -73,10 +86,10 @@ export async function showHexViewer(context: vscode.ExtensionContext) {
             `선택한 파일에 유효한 데이터가 없습니다: ${fileName}`,
             `No valid data found in the selected file: ${fileName}`
         ));
-        return;
+        return false;
     }
 
-    openPanel(context, fileName, result);
+    return openPanel(context, fileName, result);
 }
 
 function generateHexNonce(): string {
@@ -285,7 +298,7 @@ function setupWebviewMessageHandler(webview: vscode.Webview) {
     });
 }
 
-function openPanel(context: vscode.ExtensionContext, fileName: string, result: HexParseResult) {
+function openPanel(context: vscode.ExtensionContext, fileName: string, result: HexParseResult): boolean {
     if (currentPanel) {
         currentPanel.reveal(vscode.ViewColumn.One);
     } else {
@@ -308,9 +321,10 @@ function openPanel(context: vscode.ExtensionContext, fileName: string, result: H
         );
         currentPanel.webview.html = buildErrorHtml(currentPanel.webview, msg, 'error');
         vscode.window.showErrorMessage(msg);
-        return;
+        return false;
     }
     setupWebviewMessageHandler(currentPanel.webview);
+    return true;
 }
 
 function esc(s: string): string {
@@ -1134,7 +1148,7 @@ function getWebviewContent(
 }
 
 export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
-    constructor(private context: vscode.ExtensionContext) {}
+    constructor(private context: vscode.ExtensionContext, private recordHistory?: HexViewerHistoryRecorder) {}
 
     openCustomDocument(uri: vscode.Uri): vscode.CustomDocument {
         return { uri, dispose() {} };
@@ -1197,5 +1211,6 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             return;
         }
         setupWebviewMessageHandler(webviewPanel.webview);
+        this.recordHistory?.({ filePath, fileName });
     }
 }

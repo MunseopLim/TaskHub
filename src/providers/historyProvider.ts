@@ -9,12 +9,46 @@
 
 import * as vscode from 'vscode';
 
+export type HistoryEntryType = 'action' | 'tool';
+export type HistoryToolKind = 'memoryMap' | 'hexEditor';
+export type MemoryMapHistoryInputType = 'elf' | 'listing';
+
+export interface HistoryToolMemoryRegion {
+    name: string;
+    origin: number;
+    size: number;
+}
+
+export interface HistoryToolMetadata {
+    kind: HistoryToolKind;
+    filePath: string;
+    fileName: string;
+    memoryMapInputType?: MemoryMapHistoryInputType;
+    memoryMapConfig?: { regions?: HistoryToolMemoryRegion[] };
+}
+
+export interface ToolHistoryEntryOptions {
+    kind: HistoryToolKind;
+    filePath: string;
+    fileName?: string;
+    timestamp?: number;
+    memoryMapInputType?: MemoryMapHistoryInputType;
+    memoryMapConfig?: { regions?: HistoryToolMemoryRegion[] };
+}
+
 export interface HistoryEntry {
+    /**
+     * Legacy entries omit this field and are treated as action entries.
+     * Tool entries reuse the same History panel persistence but open a
+     * viewer/editor instead of rerunning an action.
+     */
+    entryType?: HistoryEntryType;
     actionId: string;
     actionTitle: string;
     timestamp: number;
     status: 'success' | 'failure' | 'running';
     output?: string;
+    tool?: HistoryToolMetadata;
     /**
      * Per-task captured input values from interactive tasks (inputBox /
      * quickPick / envPick / fileDialog / folderDialog / confirm), keyed by
@@ -47,6 +81,38 @@ export interface HistoryEntry {
      * with another action.
      */
     actionPath?: string[];
+}
+
+export function isToolHistoryEntry(entry: HistoryEntry | undefined): entry is HistoryEntry & { entryType: 'tool'; tool: HistoryToolMetadata } {
+    return entry?.entryType === 'tool' && !!entry.tool;
+}
+
+function toolDisplayName(kind: HistoryToolKind): string {
+    return kind === 'memoryMap' ? 'Memory Map' : 'Hex Editor';
+}
+
+function basename(filePath: string): string {
+    return filePath.split(/[\\/]/).pop() || filePath;
+}
+
+export function createToolHistoryEntry(options: ToolHistoryEntryOptions): HistoryEntry {
+    const fileName = options.fileName || basename(options.filePath);
+    const label = toolDisplayName(options.kind);
+    return {
+        entryType: 'tool',
+        actionId: `taskhub.tool.${options.kind}:${options.memoryMapInputType ?? 'file'}:${options.filePath}`,
+        actionTitle: `${label}: ${fileName}`,
+        timestamp: options.timestamp ?? Date.now(),
+        status: 'success',
+        actionPath: [label, options.filePath],
+        tool: {
+            kind: options.kind,
+            filePath: options.filePath,
+            fileName,
+            memoryMapInputType: options.memoryMapInputType,
+            memoryMapConfig: options.memoryMapConfig,
+        },
+    };
 }
 
 /**
@@ -274,7 +340,12 @@ export class HistoryItem extends vscode.TreeItem {
         // stay terse.
         super(displayLabel ?? entry.actionTitle, vscode.TreeItemCollapsibleState.None);
 
-        if (entry.status === 'success') {
+        const isToolEntry = isToolHistoryEntry(entry);
+        if (isToolEntry && entry.tool.kind === 'memoryMap') {
+            this.iconPath = new vscode.ThemeIcon('graph');
+        } else if (isToolEntry && entry.tool.kind === 'hexEditor') {
+            this.iconPath = new vscode.ThemeIcon('file-binary');
+        } else if (entry.status === 'success') {
             this.iconPath = new vscode.ThemeIcon('pass', new vscode.ThemeColor('charts.green'));
         } else if (entry.status === 'failure') {
             this.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('charts.red'));
@@ -300,13 +371,15 @@ export class HistoryItem extends vscode.TreeItem {
         // already disambiguated this entry (path collision → `(actionId)`
         // suffix), prefer the disambiguated text so the tooltip's first
         // line matches the row label exactly.
-        const pathSource = displayLabel ?? (
-            entry.actionPath && entry.actionPath.length > 1
-                ? entry.actionPath.join(' > ')
-                : undefined
-        );
+        const pathSource = isToolEntry
+            ? (displayLabel ?? entry.tool.filePath)
+            : displayLabel ?? (
+                entry.actionPath && entry.actionPath.length > 1
+                    ? entry.actionPath.join(' > ')
+                    : undefined
+            );
         const pathLine = pathSource ? `${pathSource}\n` : '';
-        this.tooltip = `${pathLine}Executed at: ${date.toLocaleString()}`;
+        this.tooltip = `${pathLine}${isToolEntry ? 'Opened' : 'Executed'} at: ${date.toLocaleString()}`;
 
         // Last-run badge: status + when + how-long, rendered in the
         // muted TreeItem.description slot next to actionTitle. The
@@ -319,11 +392,17 @@ export class HistoryItem extends vscode.TreeItem {
             this.description = badge;
         }
 
-        this.command = {
-            command: 'taskhub.rerunFromHistory',
-            title: 'Re-run Action',
-            arguments: [this.entry]
-        };
+        this.command = isToolEntry
+            ? {
+                command: 'taskhub.openToolFromHistory',
+                title: 'Open',
+                arguments: [this.entry]
+            }
+            : {
+                command: 'taskhub.rerunFromHistory',
+                title: 'Re-run Action',
+                arguments: [this.entry]
+            };
     }
 
     getEntry(): HistoryEntry {
