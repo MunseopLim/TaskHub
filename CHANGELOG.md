@@ -29,6 +29,27 @@
 =====================================================================
 -->
 
+## [0.4.34] - 2026-05-11
+
+### 변경 — Memory Map 검색 결과 가시성 개선
+
+Memory Map 패널에서 클래스명/심볼명을 검색하면 "N matches" 카운트만 나오고 *그 매치가 화면 어디에 있는지* 알기 어렵던 문제를 해결한다. 검색 동작(필터링·자동 펼침) 자체는 그대로 두고, 결과를 눈으로 찾는 비용만 낮췄다.
+
+#### UX
+
+- **매치 텍스트 하이라이트**: Region Details 테이블(가상 스크롤 포함)과 All Sections / Overview 테이블 모두에서 검색어와 일치하는 부분 문자열을 `<mark class="sm-hl">`(에디터 찾기 강조색 `--vscode-editor-findMatchHighlightBackground`)으로 칠한다. 행 단위 배경 틴트(`.search-match`)만 있던 정적 테이블에도 글자 단위 강조가 추가됐다. 정적 테이블은 서버 렌더 HTML이라 원본 `innerHTML`을 캐시한 뒤 텍스트 노드를 순회해 `<mark>`를 끼우고, 검색어가 바뀌거나 비워지면 원본으로 복원한다. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `hl` / `markTextNodes` / `rowHtml`.
+- **검색창 상단 고정**: 검색 박스를 `position: sticky; top: 0`으로 고정해, 결과를 보러 아래로 스크롤해도 입력창과 매치 카운트가 항상 보인다. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `.search-box`.
+- **첫 매치로 자동 스크롤**: 검색 후 문서 순서상 가장 앞선 매치가 화면 밖(고정 검색바 뒤 포함)에 있으면 `scrollIntoView({ block: 'center' })`로 가져온다. 이미 보이는 위치면 스크롤하지 않는다. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `doSearch`.
+- **카운트 문구 보강**: `27 matches` → `27 matches in 4 regions`(단·복수 분기), 결과 없음은 빈 문자열 대신 경고색 `No matches`로 표시. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `doSearch` / `.search-count`.
+- **검색 시 Section/Function 컬럼 자동 표시**: `matchSeg()` 는 Section/Function 토큰도 검색하는데 그 두 컬럼(`.func-cell`)은 기본 숨김이라, 함수명으로 검색하면 `<mark>` 가 보이지 않는 셀 안에 생기고 `scrollIntoView` 대상이 크기 0짜리 노드가 되어 *"첫 매치 스크롤 + 보이는 하이라이트"* 가 동작하지 않던 문제. 검색이 활성화되면 두 컬럼을 펼치고(`searchAutoFunc`), 검색어를 비우면 우리가 펼친 만큼만 다시 접는다. 검색 도중 사용자가 `Function ▶/▼` 버튼으로 직접 접/펼치면 `funcUserOverride` 로 기억해 그 검색 세션이 끝날 때까지 다음 입력 이벤트의 자동 펼침이 끼어들지 않는다(검색어가 비워지면 override 도 해제 — 다음 검색은 다시 자동 펼침). 겸사겸사 토글 버튼 라벨이 상태와 무관하게 항상 `Function ▶` 로 고정돼 있던 기존 버그도 `▶`↔`▼` 동기화로 수정. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `doSearch` / `toggleFuncCol` / `syncFuncBtn`.
+- **검색창 placeholder 갱신**: `Search sections... (name, address, type)` → `Search... (object, section, function, address, size, type)` — 실제 검색 대상 필드와 일치. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts).
+
+#### 문서
+
+- features.md §19 *검색 및 탐색* 의 키워드 검색 항목을 새 동작(매치 하이라이트 / 상단 고정 / 첫 매치 스크롤 / 매치 수·리전 수 표시)에 맞게 갱신. 참조: [docs/features.md](docs/features.md).
+
+**테스트**: 신규 2 케이스 — 생성된 webview HTML 에 (a) `.search-box { position: sticky }` / `mark.sm-hl` / `.search-count.no-match` 스타일 + `function` 을 언급하는 placeholder, (b) `hl()` · `markTextNodes()` 헬퍼 · 첫 매치 `scrollIntoView` · `No matches` 문구 · `' in '` 리전 수 접미사 · `searchAutoFunc`(검색 시 func 컬럼 자동 표시)가 포함되는지 확인 (`panelRegistry.getHtml` 신규 export). 검색 하이라이트·스크롤 자체는 webview DOM 동작이라 확장 호스트에서 직접 검증 불가 — 깨진 템플릿 리터럴로 `<script>` 가 통째로 누락되는 회귀는 잡힌다. 최종 1194 passing.
+
 ## [0.4.33] - 2026-05-07
 
 ### 변경 — 액션/즐겨찾기 데이터 보호 (코드 리뷰 4건 반영)

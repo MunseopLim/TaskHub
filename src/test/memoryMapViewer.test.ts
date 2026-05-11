@@ -130,6 +130,40 @@ suite('Memory Map Viewer Test Suite', () => {
         assert.strictEqual(panelRegistry.getLastActive(), file2, 'last active should be file2');
     });
 
+    suite('webview HTML — search UX', () => {
+        // The search highlighting / sticky bar / auto-scroll behaviour lives in
+        // the webview's inline CSS+JS, which isn't reachable from the extension
+        // host. These tests pin the generated HTML so the helpers and styles
+        // can't silently disappear (a broken template literal would also drop
+        // the whole <script>, failing these assertions).
+
+        test('search box is sticky and a match-highlight style is present', () => {
+            const file = createTempElf('search-ux-a', 'fw.axf');
+            const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+            openMemoryMapPanel(ctx, file);
+            const html = panelRegistry.getHtml(file);
+            assert.ok(html, 'panel HTML should be available');
+            assert.ok(/\.search-box\s*\{[^}]*position:\s*sticky/.test(html!), '.search-box should be position: sticky');
+            assert.ok(html!.includes('mark.sm-hl'), 'mark.sm-hl highlight style should be present');
+            assert.ok(html!.includes('.search-count.no-match'), 'no-match count style should be present');
+            assert.ok(/placeholder="Search\.\.\..*function.*"/.test(html!), 'search placeholder should mention the function column');
+        });
+
+        test('webview script exposes highlight + auto-scroll search helpers', () => {
+            const file = createTempElf('search-ux-b', 'fw.axf');
+            const ctx = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+            openMemoryMapPanel(ctx, file);
+            const html = panelRegistry.getHtml(file)!;
+            assert.ok(html.includes('function hl(text)'), 'hl() escape+highlight helper should be present');
+            assert.ok(html.includes('function markTextNodes('), 'markTextNodes() helper should be present');
+            assert.ok(html.includes("scrollIntoView({ behavior: 'smooth', block: 'center' })"), 'first-match auto-scroll should be present');
+            assert.ok(html.includes("'No matches'"), 'empty-result message should be present');
+            assert.ok(html.includes("' in '"), 'match count should append the matching-region count');
+            assert.ok(html.includes('searchAutoFunc'), 'search should auto-reveal the hidden func/section columns');
+            assert.ok(html.includes('funcUserOverride'), 'a manual func-column toggle during search should suppress re-auto-reveal');
+        });
+    });
+
     suite('openMemoryMapPanel failure paths', () => {
         // Each failure test asserts that the panel was not created and the
         // registry wasn't touched. The user-visible error is routed through

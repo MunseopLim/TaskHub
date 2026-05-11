@@ -20,6 +20,7 @@ export const panelRegistry = {
     has(filePath: string): boolean { return panels.has(filePath); },
     size(): number { return panels.size; },
     getLastActive(): string | undefined { return lastActivePanel; },
+    getHtml(filePath: string): string | undefined { return panels.get(filePath)?.panel.webview.html; },
     clear(): void { panels.clear(); lastActivePanel = undefined; },
 };
 
@@ -625,10 +626,16 @@ function getWebviewContent(
     .seg-free { background: rgba(128,128,128,0.15); }
     .free-row { opacity: 0.55; font-style: italic; }
     .search-box {
+        position: sticky;
+        top: 0;
+        z-index: 20;
         display: flex;
         align-items: center;
         gap: 8px;
-        margin-bottom: 12px;
+        padding: 10px 0;
+        margin-bottom: 8px;
+        background: var(--bg);
+        border-bottom: 1px solid var(--border);
     }
     .search-box input {
         flex: 1;
@@ -641,8 +648,15 @@ function getWebviewContent(
         outline: none;
     }
     .search-box input:focus { border-color: var(--vscode-focusBorder, #007acc); }
-    .search-count { font-size: 11px; opacity: 0.6; white-space: nowrap; }
-    .search-match { background: rgba(255, 213, 0, 0.15) !important; }
+    .search-count { font-size: 11px; opacity: 0.7; white-space: nowrap; }
+    .search-count.no-match { color: var(--danger); opacity: 1; }
+    .search-match { background: rgba(255, 213, 0, 0.12) !important; }
+    mark.sm-hl {
+        background: var(--vscode-editor-findMatchHighlightBackground, rgba(255, 213, 0, 0.5));
+        color: inherit;
+        border-radius: 2px;
+        padding: 0 1px;
+    }
     .region-header { cursor: pointer; }
     .region-header:hover { opacity: 0.85; }
     .fold-icon {
@@ -740,7 +754,7 @@ function getWebviewContent(
     </div>
 
     <div class="search-box">
-        <input id="searchInput" type="text" placeholder="Search sections... (name, address, type)">
+        <input id="searchInput" type="text" placeholder="Search... (object, section, function, address, size, type)">
         <span id="searchCount" class="search-count"></span>
     </div>
 
@@ -785,15 +799,62 @@ const RD = ${regionDataJsLiteral};
     const VT_THRESH = 200, ROW_H = 24, BUFFER = 30, MAX_VP_H = 600;
     const rendered = new Set();
     const vtMap = new Map();
-    let funcVis = false, curQ = '';
+    const staticOrig = new WeakMap();   // original innerHTML of static-table rows we've highlighted, for restore
+    let funcVis = false, curQ = '', searchAutoFunc = false, funcUserOverride = false;
 
     function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+    // HTML-escape the text, wrapping every occurrence of the current search
+    // query (curQ, already lowercased) in a mark element for visual highlight.
+    // Operates on the raw string so the escaping stays correct regardless of
+    // what the query contains. Returns esc(text) verbatim when no query is set.
+    function hl(text) {
+        text = (text == null) ? '' : String(text);
+        if (!curQ) return esc(text);
+        const lower = text.toLowerCase();
+        if (lower.indexOf(curQ) === -1) return esc(text);
+        let i = 0, pos, out = '';
+        while ((pos = lower.indexOf(curQ, i)) !== -1) {
+            out += esc(text.slice(i, pos)) + '<mark class="sm-hl">' + esc(text.slice(pos, pos + curQ.length)) + '</mark>';
+            i = pos + curQ.length;
+        }
+        return out + esc(text.slice(i));
+    }
+
+    // Highlight occurrences of q in the live text nodes under the given node by
+    // wrapping them in a mark.sm-hl element. Used for the server-rendered static
+    // tables (overview, all-sections), where we can't simply re-run rowHtml.
+    // Callers cache the row's original innerHTML beforehand so it can be restored.
+    function markTextNodes(node, q) {
+        const kids = node.childNodes;
+        for (let i = kids.length - 1; i >= 0; i--) {
+            const c = kids[i];
+            if (c.nodeType === 3) {
+                const txt = c.nodeValue, lower = txt.toLowerCase();
+                if (lower.indexOf(q) === -1) { continue; }
+                const frag = document.createDocumentFragment();
+                let idx = 0, pos;
+                while ((pos = lower.indexOf(q, idx)) !== -1) {
+                    if (pos > idx) { frag.appendChild(document.createTextNode(txt.slice(idx, pos))); }
+                    const m = document.createElement('mark');
+                    m.className = 'sm-hl';
+                    m.textContent = txt.slice(pos, pos + q.length);
+                    frag.appendChild(m);
+                    idx = pos + q.length;
+                }
+                if (idx < txt.length) { frag.appendChild(document.createTextNode(txt.slice(idx))); }
+                node.replaceChild(frag, c);
+            } else if (c.nodeType === 1 && c.nodeName !== 'MARK') {
+                markTextNodes(c, q);
+            }
+        }
+    }
+
     function rowHtml(e, hsi, hfi) {
         const rc = e.fr ? ' class="free-row"' : '';
-        const sc = hsi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + esc(e.s) + '</td>' : '';
-        const fc = hfi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + esc(e.f) + '</td>' : '';
-        return '<tr' + rc + '><td>' + esc(e.n) + '</td>' + sc + fc + '<td class="num">' + e.ah + '</td><td class="num">' + e.eh + '</td><td class="num">' + e.ss + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + e.t + '</span></td></tr>';
+        const sc = hsi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.s) + '</td>' : '';
+        const fc = hfi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.f) + '</td>' : '';
+        return '<tr' + rc + '><td>' + hl(e.n) + '</td>' + sc + fc + '<td class="num">' + hl(e.ah) + '</td><td class="num">' + e.eh + '</td><td class="num">' + hl(e.ss) + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + hl(e.t) + '</span></td></tr>';
     }
 
     function matchSeg(e, q) {
@@ -977,7 +1038,32 @@ const RD = ${regionDataJsLiteral};
     function doSearch() {
         const q = searchInput.value.trim().toLowerCase();
         curQ = q;
-        let mc = 0;
+        let mc = 0, mr = 0;   // total matches, regions containing a match
+
+        // matchSeg() also searches the Section/Function columns, but those live
+        // inside .func-cell which is hidden by default — so a function-only query
+        // would highlight an invisible <mark> and the scroll target would be a
+        // zero-size node. Reveal those columns while a search is active, unless
+        // the user explicitly toggled them off during this search session
+        // (funcUserOverride). When the query is cleared we undo our own
+        // auto-reveal and forget the override so the next search starts fresh.
+        if (q) {
+            if (!funcVis && !funcUserOverride) {
+                funcVis = true;
+                searchAutoFunc = true;
+                document.querySelectorAll('.func-cell').forEach(function(el) { el.classList.remove('hidden'); });
+                syncFuncBtn();
+            }
+        } else {
+            if (searchAutoFunc) {
+                funcVis = false;
+                searchAutoFunc = false;
+                document.querySelectorAll('.func-cell').forEach(function(el) { el.classList.add('hidden'); });
+                syncFuncBtn();
+            }
+            funcUserOverride = false;
+        }
+
         const canExtend = q && lastSearch.q && q.length > lastSearch.q.length && q.indexOf(lastSearch.q) === 0 && lastSearch.fd;
         const nextFd = [];
 
@@ -1010,6 +1096,7 @@ const RD = ${regionDataJsLiteral};
 
             // Auto-expand matching regions
             if (q && rm > 0) {
+                mr++;
                 const detail = card.querySelector('.region-detail');
                 const icon = card.querySelector('.fold-icon');
                 if (detail && detail.style.display === 'none') {
@@ -1020,23 +1107,53 @@ const RD = ${regionDataJsLiteral};
             }
         });
 
-        // Static tables (overview, all-sections)
+        // Static tables (overview, all-sections): hide non-matches, highlight matches.
         document.querySelectorAll('#sectionTable tbody tr, .overview-table tbody tr').forEach(function(row) {
-            row.classList.remove('search-match');
+            // Undo a previous highlight first (only rows we touched carry the class).
+            if (row.classList.contains('search-match')) {
+                row.classList.remove('search-match');
+                const orig = staticOrig.get(row);
+                if (orig !== undefined) row.innerHTML = orig;
+            }
             if (!q) { row.style.display = ''; return; }
             const text = row.textContent.toLowerCase();
-            if (text.includes(q)) {
+            if (text.indexOf(q) !== -1) {
                 row.style.display = '';
                 row.classList.add('search-match');
+                if (!staticOrig.has(row)) staticOrig.set(row, row.innerHTML);
+                markTextNodes(row, q);
                 mc++;
             } else {
                 row.style.display = 'none';
             }
         });
 
-        searchCount.textContent = q ? mc + ' matches' : '';
+        if (!q) {
+            searchCount.textContent = '';
+            searchCount.classList.remove('no-match');
+        } else if (mc === 0) {
+            searchCount.textContent = 'No matches';
+            searchCount.classList.add('no-match');
+        } else {
+            searchCount.classList.remove('no-match');
+            searchCount.textContent = mc + (mc > 1 ? ' matches' : ' match') +
+                (mr > 0 ? ' in ' + mr + (mr > 1 ? ' regions' : ' region') : '');
+        }
         lastSearch = { q: q, fd: nextFd };
         if (window.syncToggleAllLabel) window.syncToggleAllLabel();
+
+        // Bring the first match into view (unless it is already on screen below
+        // the sticky search bar). Picks the earliest match in document order.
+        if (q && mc > 0) {
+            const first = document.querySelector('.region-card mark.sm-hl, #sectionTable tbody tr.search-match, .overview-table tbody tr.search-match');
+            if (first) {
+                const r = first.getBoundingClientRect();
+                const vh = window.innerHeight || document.documentElement.clientHeight;
+                if (r.top < 64 || r.bottom > vh) {
+                    first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }
+        }
     }
 
     // --- Expand All / Collapse All ---
@@ -1191,11 +1308,18 @@ const RD = ${regionDataJsLiteral};
     initSort(document);
 
     // --- Toggle Function column ---
+    function syncFuncBtn() {
+        const fb = document.querySelector('[data-action="toggle-func-col"]');
+        if (fb) { fb.textContent = funcVis ? 'Function ▼' : 'Function ▶'; }
+    }
     window.toggleFuncCol = function() {
         funcVis = !funcVis;
+        searchAutoFunc = false;                  // current state is now user-chosen, not search-driven
+        if (curQ) { funcUserOverride = true; }   // ...and it overrides the search auto-reveal until the query is cleared
         document.querySelectorAll('.func-cell').forEach(function(el) {
             el.classList.toggle('hidden', !funcVis);
         });
+        syncFuncBtn();
         // Re-render virtual tables to reflect column visibility
         vtMap.forEach(function(vt) { vt.ls = -1; renderVT(vt); });
     };
