@@ -447,7 +447,7 @@ export function windowsCommandIsDirectlyLaunchable(
         for (const ext of WINDOWS_DIRECT_LAUNCH_EXTENSIONS) {
             const candidate = hasSeparator
                 ? executable + ext
-                : (dir ? path.join(dir, executable + ext) : executable + ext);
+                : (dir ? path.win32.join(dir, executable + ext) : executable + ext);
             if (isFile(candidate)) {
                 return true;
             }

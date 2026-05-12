@@ -29,6 +29,14 @@
 =====================================================================
 -->
 
+## [0.4.39] - 2026-05-12
+
+### 수정 — `windowsCommandIsDirectlyLaunchable` PATH 후보 경로 조합을 `path.win32` 기준으로
+
+이 함수는 Windows 의미론(`PATH`를 `;`로 분리, `\` 구분자)을 다루는데, PATH 디렉터리와 실행 파일명을 합칠 때 `path.join`을 써서 호출 OS의 구분자(macOS에서는 `/`)를 끼워 넣어 후보 경로가 어긋났다. `path.win32.join`으로 바꿔 실행 OS와 무관하게 동작하도록 한다. 실제 Windows에서는 동작 변화 없음(`path.join === path.win32.join`). 참조: [src/pipelineUtils.ts](src/pipelineUtils.ts).
+
+**테스트**: 최종 1257 passing.
+
 ## [0.4.38] - 2026-05-12
 
 ### 수정 — Windows 셸/스크립트 task 인자 인용 + 크로스플랫폼 테스트 보강
