@@ -8,6 +8,7 @@ import {
 	serializeFavorites,
 	serializeLinks,
 	quotePowerShellArgument,
+	quoteWindowsCommandLineArgument,
 	quotePosixArgument,
 	tokenizeCommandLine,
 	formatActionPath,
@@ -28,6 +29,8 @@ import {
 	getCommandString,
 	getToolCommand,
 	buildPowerShellInvocation,
+	buildNativeCommandInvocation,
+	windowsCommandIsDirectlyLaunchable,
 	buildPosixCommandLine,
 	encodePowerShellScript,
 	wrapCommandForOneShot,
@@ -530,6 +533,35 @@ suite('Extension Test Suite', () => {
 		test('should handle string with spaces', () => {
 			const result = quotePowerShellArgument('hello world');
 			assert.strictEqual(result, "'hello world'");
+		});
+	});
+
+	suite('Windows native command helpers', () => {
+		test('quoteWindowsCommandLineArgument preserves embedded quotes', () => {
+			assert.strictEqual(
+				quoteWindowsCommandLineArgument('process.stdout.write("ok")'),
+				'"process.stdout.write(\\"ok\\")"'
+			);
+		});
+
+		test('buildNativeCommandInvocation keeps argv boundaries', () => {
+			const result = buildNativeCommandInvocation('node', ['-e', 'process.stdout.write("ok")']);
+			assert.strictEqual(result.executable, 'node');
+			assert.deepStrictEqual(result.args, ['-e', 'process.stdout.write("ok")']);
+		});
+
+		test('windowsCommandIsDirectlyLaunchable: explicit .exe/.com is launchable, scripts/shims/builtins are not', () => {
+			const lookup = {
+				env: { PATH: 'C:\\bin;C:\\tools' },
+				isFile: (p: string) => p === 'C:\\bin\\node.exe' || p === 'C:\\tools\\git.exe',
+			};
+			assert.strictEqual(windowsCommandIsDirectlyLaunchable('node', ['-e', 'x'], lookup), true);   // resolves to node.exe
+			assert.strictEqual(windowsCommandIsDirectlyLaunchable('git status', [], lookup), true);       // resolves to git.exe
+			assert.strictEqual(windowsCommandIsDirectlyLaunchable('npm test', [], lookup), false);        // only npm.cmd would exist
+			assert.strictEqual(windowsCommandIsDirectlyLaunchable('node.exe', ['-e', 'x'], lookup), true); // explicit ext, no lookup
+			assert.strictEqual(windowsCommandIsDirectlyLaunchable('C:\\tools\\7z.exe', ['a'], lookup), true);
+			assert.strictEqual(windowsCommandIsDirectlyLaunchable('build.cmd', [], lookup), false);       // script shim
+			assert.strictEqual(windowsCommandIsDirectlyLaunchable('echo hi', [], lookup), false);         // shell builtin/alias
 		});
 	});
 
@@ -2761,32 +2793,63 @@ suite('Extension Test Suite', () => {
 	});
 
 	suite('wrapCommandForOneShot', () => {
-		test('should wrap command for Windows PowerShell with UTF-8', () => {
+		test('should wrap a directly-launchable Windows command with ProcessStartInfo and UTF-8', () => {
 			const originalPlatform = process.platform;
 			try {
 				Object.defineProperty(process, 'platform', { value: 'win32' });
 
-				const result = wrapCommandForOneShot('notepad', ['file.txt'], undefined, true);
+				const result = wrapCommandForOneShot('notepad.exe', ['file.txt'], undefined, true);
 
 				assert.strictEqual(result.isPowerShellScript, true);
-				assert.ok(result.commandLine.includes('Start-Process'));
-				assert.ok(result.commandLine.includes("-FilePath 'notepad'"));
-				assert.ok(result.commandLine.includes("-ArgumentList @('file.txt')"));
+				assert.ok(result.commandLine.includes('System.Diagnostics.ProcessStartInfo'));
+				assert.ok(result.commandLine.includes("$psi.FileName = 'notepad.exe'"));
+				assert.ok(result.commandLine.includes("$psi.Arguments = 'file.txt'"));
 				assert.ok(result.commandLine.includes('[Console]::OutputEncoding'));
 			} finally {
 				Object.defineProperty(process, 'platform', { value: originalPlatform });
 			}
 		});
 
-		test('should wrap command for Windows PowerShell without UTF-8', () => {
+		test('should wrap a directly-launchable Windows command without UTF-8 and with cwd', () => {
 			const originalPlatform = process.platform;
 			try {
 				Object.defineProperty(process, 'platform', { value: 'win32' });
 
-				const result = wrapCommandForOneShot('notepad', [], 'C:\\cwd', false);
+				const result = wrapCommandForOneShot('notepad.exe', [], 'C:\\cwd', false);
 
 				assert.strictEqual(result.isPowerShellScript, true);
 				assert.ok(!result.commandLine.includes('[Console]::OutputEncoding'));
+				assert.ok(result.commandLine.includes("$psi.WorkingDirectory = 'C:\\cwd'"));
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
+		});
+
+		test('should preserve embedded double quotes for directly-launchable Windows one-shot args', () => {
+			const originalPlatform = process.platform;
+			try {
+				Object.defineProperty(process, 'platform', { value: 'win32' });
+
+				const result = wrapCommandForOneShot('node.exe', ['-e', 'process.stdout.write("ok")'], undefined, false);
+
+				assert.ok(result.commandLine.includes('$psi.Arguments ='));
+				assert.ok(result.commandLine.includes('process.stdout.write(\\"ok\\")'));
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
+		});
+
+		test('should use Start-Process for a Windows shim/script one-shot command (PATHEXT/association resolution)', () => {
+			const originalPlatform = process.platform;
+			try {
+				Object.defineProperty(process, 'platform', { value: 'win32' });
+
+				const result = wrapCommandForOneShot('deploy.cmd', ['--prod'], 'C:\\cwd', false);
+
+				assert.strictEqual(result.isPowerShellScript, true);
+				assert.ok(!result.commandLine.includes('ProcessStartInfo'));
+				assert.ok(result.commandLine.includes("Start-Process -FilePath 'deploy.cmd'"));
+				assert.ok(result.commandLine.includes("-ArgumentList @('--prod')"));
 				assert.ok(result.commandLine.includes("-WorkingDirectory 'C:\\cwd'"));
 			} finally {
 				Object.defineProperty(process, 'platform', { value: originalPlatform });
@@ -2811,7 +2874,23 @@ suite('Extension Test Suite', () => {
 	});
 
 	suite('createShellExecution', () => {
-		test('should create PowerShell execution for Windows', () => {
+		test('should create native ProcessExecution for a directly-launchable Windows command', () => {
+			const originalPlatform = process.platform;
+			try {
+				Object.defineProperty(process, 'platform', { value: 'win32' });
+
+				const options: vscode.ShellExecutionOptions = { cwd: 'C:\\' };
+				const result = createShellExecution('node.exe', ['-e', 'process.stdout.write("hello")'], options, true);
+
+				assert.ok(result.shellExecution);
+				assert.strictEqual(result.usesNativeExecution, true);
+				assert.ok(result.displayCommand.includes('process.stdout.write(\\"hello\\")'));
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
+		});
+
+		test('should keep Windows shell builtins on PowerShell execution', () => {
 			const originalPlatform = process.platform;
 			try {
 				Object.defineProperty(process, 'platform', { value: 'win32' });
@@ -2820,7 +2899,7 @@ suite('Extension Test Suite', () => {
 				const result = createShellExecution('echo', ['hello'], options, true);
 
 				assert.ok(result.shellExecution);
-				// Verify display command matches expected format
+				assert.strictEqual(result.usesNativeExecution, undefined);
 				assert.ok(result.displayCommand.includes('echo'));
 			} finally {
 				Object.defineProperty(process, 'platform', { value: originalPlatform });

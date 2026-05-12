@@ -15,6 +15,7 @@
  */
 
 import * as path from 'path';
+import * as fs from 'fs';
 import type { OutputCapture } from './schema';
 
 /** Maximum allowed length of a single interpolated value. */
@@ -321,6 +322,153 @@ export function mergeCommandAndArgs(command: string, extraArgs: string[]): { exe
  */
 export function quotePowerShellArgument(value: string): string {
     return value.length === 0 ? "''" : `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Quote one Windows process argument using the CommandLineToArgvW-compatible
+ * backslash / double-quote rules. This is for APIs that accept one command-line
+ * string (for example ProcessStartInfo.Arguments), not for PowerShell parsing.
+ */
+export function quoteWindowsCommandLineArgument(value: string): string {
+    if (value.length > 0 && !/[\s"]/u.test(value)) {
+        return value;
+    }
+    let result = '"';
+    let backslashes = 0;
+    for (const char of value) {
+        if (char === '\\') {
+            backslashes++;
+            continue;
+        }
+        if (char === '"') {
+            result += '\\'.repeat(backslashes * 2 + 1);
+            result += '"';
+            backslashes = 0;
+            continue;
+        }
+        if (backslashes > 0) {
+            result += '\\'.repeat(backslashes);
+            backslashes = 0;
+        }
+        result += char;
+    }
+    if (backslashes > 0) {
+        result += '\\'.repeat(backslashes * 2);
+    }
+    result += '"';
+    return result;
+}
+
+function displayCommandPart(value: string): string {
+    return /^[A-Za-z0-9_./\\:-]+$/.test(value)
+        ? value
+        : quoteWindowsCommandLineArgument(value);
+}
+
+// cmd.exe builtins / common PowerShell aliases that have no backing `.exe` —
+// these must stay on the PowerShell path (`& 'echo' ...` resolves the alias).
+const WINDOWS_SHELL_COMMANDS = new Set([
+    'cat', 'cd', 'chdir', 'cls', 'copy', 'cp', 'del', 'dir', 'echo', 'erase',
+    'ls', 'md', 'mkdir', 'move', 'mv', 'popd', 'pushd', 'pwd', 'rd', 'ren',
+    'rename', 'rm', 'rmdir', 'set', 'sleep', 'start', 'type'
+]);
+
+// Extensions the OS process loader can start directly (`spawn(file)` without a
+// shell). `.cmd` / `.bat` / `.ps1` / `.js` / `.py` / … are scripts or shims
+// that need a shell or interpreter, so those stay on the PowerShell path.
+const WINDOWS_DIRECT_LAUNCH_EXTENSIONS = ['.exe', '.com'];
+
+/**
+ * Injectable filesystem/environment view used by {@link windowsCommandIsDirectlyLaunchable}
+ * so PATH resolution can be unit-tested deterministically.
+ */
+export interface WindowsExecutableLookup {
+    env: NodeJS.ProcessEnv;
+    isFile: (filePath: string) => boolean;
+}
+
+const defaultWindowsExecutableLookup: WindowsExecutableLookup = {
+    env: process.env,
+    isFile: (filePath: string): boolean => {
+        try {
+            return fs.statSync(filePath).isFile();
+        } catch {
+            return false;
+        }
+    },
+};
+
+/**
+ * Whether a Windows command can be launched as a native process
+ * (`spawn(file, argvArray)` / `vscode.ProcessExecution`) instead of going
+ * through PowerShell. Native launch is preferred because the argv array is
+ * passed straight to the child, side-stepping Windows PowerShell 5.1's legacy
+ * quote-mangling for arguments containing `"`.
+ *
+ *   - explicit `.exe` / `.com` extension                → yes (no lookup)
+ *   - explicit other extension (`.cmd`, `.bat`, `.ps1`,
+ *     `.js`, …)                                          → no  (scripts/shims)
+ *   - shell builtin / alias (`echo`, `dir`, `cd`, …)     → no
+ *   - extensionless name: search PATH for `name.exe` /
+ *     `name.com` (also checks `name` when it carries a
+ *     path separator)                                    → yes iff found
+ *
+ * A name that exists only as a `.cmd` shim (`npm` → `npm.cmd`, also `npx` /
+ * `pnpm` / `yarn`) therefore stays on the PowerShell path, where `&` performs
+ * the PATHEXT resolution. The lookup is only invoked on Windows (the POSIX path
+ * uses `sh -c`), so its cost is Windows-only and runs once per task launch.
+ *
+ * `lookup` may override `env` and/or `isFile`; whatever isn't supplied falls
+ * back to `process.env` / a real `fs.statSync`. Callers MUST pass the **task's
+ * effective env** (`{ ...process.env, ...envOverrides }` — i.e. the same env the
+ * child will run with) so a `PATH` extended via `task.env.PATH` is honoured here
+ * too; otherwise a toolchain `.exe` could be misjudged and routed through
+ * PowerShell (re-triggering the very quote bug this avoids).
+ */
+export function windowsCommandIsDirectlyLaunchable(
+    command: string,
+    args: string[] = [],
+    lookup: Partial<WindowsExecutableLookup> = {}
+): boolean {
+    const env = lookup.env ?? defaultWindowsExecutableLookup.env;
+    const isFile = lookup.isFile ?? defaultWindowsExecutableLookup.isFile;
+    const { executable } = mergeCommandAndArgs(command, args);
+    const base = (executable.split(/[\\/]/).pop() || executable).toLowerCase();
+    const dotIndex = base.lastIndexOf('.');
+    if (dotIndex > 0) {
+        return WINDOWS_DIRECT_LAUNCH_EXTENSIONS.includes(base.slice(dotIndex));
+    }
+    if (WINDOWS_SHELL_COMMANDS.has(base)) {
+        return false;
+    }
+    const hasSeparator = /[\\/]/.test(executable);
+    const searchDirs = hasSeparator ? [''] : (env.PATH ?? env.Path ?? '').split(';');
+    for (const dir of searchDirs) {
+        for (const ext of WINDOWS_DIRECT_LAUNCH_EXTENSIONS) {
+            const candidate = hasSeparator
+                ? executable + ext
+                : (dir ? path.join(dir, executable + ext) : executable + ext);
+            if (isFile(candidate)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+export interface NativeCommandInvocation {
+    executable: string;
+    args: string[];
+    display: string;
+}
+
+export function buildNativeCommandInvocation(command: string, args: string[]): NativeCommandInvocation {
+    const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
+    return {
+        executable,
+        args: combinedArgs,
+        display: [executable, ...combinedArgs].map(displayCommandPart).join(' '),
+    };
 }
 
 /**

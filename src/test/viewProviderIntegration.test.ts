@@ -11,6 +11,12 @@ import { Action, Folder, MainViewProvider } from '../providers/mainViewProvider'
 import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
 import { ActionItem } from '../schema';
 
+function normalizeWindowsPathForAssert(value: string): string {
+    return process.platform === 'win32'
+        ? value.replace(/\b([a-z]):\\/g, (_match, drive: string) => `${drive.toUpperCase()}:\\`)
+        : value;
+}
+
 /**
  * Integration tests for TreeDataProviders backed by VS Code workspace state
  * and workspace JSON files. Scenario index lives in docs/integration-tests.md.
@@ -99,7 +105,10 @@ suite('View provider integration', function () {
 
         const groupChildren = await provider.getChildren(roots[0]);
         assert.deepStrictEqual(groupChildren.map(item => labelOf(item)), ['Alpha', 'Zeta']);
-        assert.strictEqual((groupChildren[0] as Link).getEntry().sourceFile, linksPath);
+        assert.strictEqual(
+            normalizeWindowsPathForAssert((groupChildren[0] as Link).getEntry().sourceFile ?? ''),
+            normalizeWindowsPathForAssert(linksPath)
+        );
         assert.deepStrictEqual((groupChildren[0] as Link).getEntry().tags, ['stable']);
         assert.strictEqual(provider.getAllEntries().length, 3);
     });
@@ -134,8 +143,14 @@ suite('View provider integration', function () {
         assert.strictEqual(alpha.getLine(), 1);
         assert.ok(String(alpha.description).includes('line 1'));
         assert.ok(String(alpha.description).includes('a'));
-        assert.strictEqual(alpha.getEntry().sourceFile, favoritesPath);
-        assert.strictEqual(alpha.getEntry().workspaceFolder, workspace);
+        assert.strictEqual(
+            normalizeWindowsPathForAssert(alpha.getEntry().sourceFile ?? ''),
+            normalizeWindowsPathForAssert(favoritesPath)
+        );
+        assert.strictEqual(
+            normalizeWindowsPathForAssert(alpha.getEntry().workspaceFolder ?? ''),
+            normalizeWindowsPathForAssert(workspace)
+        );
         assert.strictEqual(provider.getAllEntries().length, 3);
     });
 

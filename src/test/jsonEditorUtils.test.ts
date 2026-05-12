@@ -4,6 +4,10 @@ import * as path from 'path';
 import { buildSheetMap, getRowsByPath, SheetEntry, parseValue, coerceEditedCellValue, shouldOfferRecovery, RecoveryEntry, makeRecoveryStore, MinimalWorkspaceState, buildDraftSnapshot, DraftSnapshotInput } from '../jsonEditorUtils';
 import { wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY } from '../jsonEditor';
 
+function readSourceForRegex(filePath: string): string {
+    return fs.readFileSync(filePath, 'utf-8').replace(/\r\n/g, '\n');
+}
+
 suite('JsonEditorUtils Test Suite', () => {
     suite('buildSheetMap', () => {
         test('flat array sheets', () => {
@@ -589,8 +593,8 @@ suite('JsonEditorUtils Test Suite', () => {
         // src/ is the rootDir; compiled tests live in out/test/ so the source
         // tree is reached via ../../src/ from this file at runtime.
         const srcDir = path.resolve(__dirname, '..', '..', 'src');
-        const editorSource = fs.readFileSync(path.join(srcDir, 'jsonEditor.ts'), 'utf-8');
-        const mirrorSource = fs.readFileSync(path.join(srcDir, 'jsonEditorUtils.ts'), 'utf-8');
+        const editorSource = readSourceForRegex(path.join(srcDir, 'jsonEditor.ts'));
+        const mirrorSource = readSourceForRegex(path.join(srcDir, 'jsonEditorUtils.ts'));
 
         test('mirror header references every synchronization target by name', () => {
             for (const name of ['buildSheetMap', 'getActiveRows', 'parseValue', 'commitCell', 'sendDraftSnapshot']) {
@@ -1378,7 +1382,7 @@ suite('JsonEditorUtils Test Suite', () => {
 
     suite('host: recovery & watcher contract', () => {
         const srcDir = path.resolve(__dirname, '..', '..', 'src');
-        const editorSource = fs.readFileSync(path.join(srcDir, 'jsonEditor.ts'), 'utf-8');
+        const editorSource = readSourceForRegex(path.join(srcDir, 'jsonEditor.ts'));
 
         test('panel dispose flushes pending snapshot before reset', () => {
             // 회귀 가드: P1-1. dispose 핸들러가 currentFlushPendingSnapshot을
@@ -1581,7 +1585,7 @@ suite('JsonEditorUtils Test Suite', () => {
 
     suite('webview: review round 2 contracts', () => {
         const srcDir = path.resolve(__dirname, '..', '..', 'src');
-        const editorSource = fs.readFileSync(path.join(srcDir, 'jsonEditor.ts'), 'utf-8');
+        const editorSource = readSourceForRegex(path.join(srcDir, 'jsonEditor.ts'));
 
         test('primitive-array add/remove handlers sync editing input values into data first', () => {
             // 회귀 가드: P1. 사용자가 input[data-arr-idx] 를 수정한 뒤

@@ -24,6 +24,12 @@ suite('Pipeline integration', function () {
 
     let tempWorkspace: string;
 
+    function normalizeWindowsPathForAssert(value: string): string {
+        return process.platform === 'win32'
+            ? value.replace(/\b([a-z]):\\/g, (_match, drive: string) => `${drive.toUpperCase()}:\\`)
+            : value;
+    }
+
     setup(() => {
         tempWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-pipeline-workspace-'));
     });
@@ -31,7 +37,15 @@ suite('Pipeline integration', function () {
     teardown(() => {
         actionStates.clear();
         if (tempWorkspace && fs.existsSync(tempWorkspace)) {
-            fs.rmSync(tempWorkspace, { recursive: true, force: true });
+            // On Windows a just-killed child process can briefly keep a handle
+            // on its working directory; rmSync then fails with EBUSY. Retry a
+            // few times, then fall back to best-effort: a leftover temp dir
+            // under os.tmpdir() is harmless and must not fail the suite.
+            try {
+                fs.rmSync(tempWorkspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+            } catch (err: any) {
+                console.warn(`teardown: could not remove ${tempWorkspace} (${err?.code ?? err?.message ?? err}); leaving for OS temp cleanup`);
+            }
         }
     });
 
@@ -826,14 +840,14 @@ suite('Pipeline integration', function () {
                 await run(action);
 
                 assert.strictEqual(
-                    fs.readFileSync(path.join(tempWorkspace, 'dialog', 'selection.txt'), 'utf8'),
-                    [
+                    normalizeWindowsPathForAssert(fs.readFileSync(path.join(tempWorkspace, 'dialog', 'selection.txt'), 'utf8')),
+                    normalizeWindowsPathForAssert([
                         'base=firmware',
                         'fileNameOnly=firmware',
                         'ext=hex',
                         `fileDir=${sourceDir}`,
                         `folder=${outputDir}`
-                    ].join('\n')
+                    ].join('\n'))
                 );
             } finally {
                 (vscode.window as any).showOpenDialog = originalShowOpenDialog;

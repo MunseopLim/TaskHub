@@ -804,7 +804,10 @@ import {
     tokenizeCommandLine,
     mergeCommandAndArgs,
     quotePowerShellArgument,
+    quoteWindowsCommandLineArgument,
     buildPowerShellInvocation,
+    buildNativeCommandInvocation,
+    windowsCommandIsDirectlyLaunchable,
     encodePowerShellScript,
     quotePosixArgument,
     buildPosixCommandLine,
@@ -829,7 +832,10 @@ export {
     tokenizeCommandLine,
     mergeCommandAndArgs,
     quotePowerShellArgument,
+    quoteWindowsCommandLineArgument,
     buildPowerShellInvocation,
+    buildNativeCommandInvocation,
+    windowsCommandIsDirectlyLaunchable,
     encodePowerShellScript,
     quotePosixArgument,
     buildPosixCommandLine,
@@ -2711,8 +2717,31 @@ async function executeSingleTask(
     return result;
 }
 
-export function createShellExecution(command: string, args: string[], options: vscode.ShellExecutionOptions, useUtf8Console: boolean): { shellExecution: vscode.ShellExecution; displayCommand: string } {
+function toProcessExecutionOptions(options: vscode.ShellExecutionOptions): vscode.ProcessExecutionOptions {
+    const processOptions: vscode.ProcessExecutionOptions = {};
+    if (options.cwd !== undefined) {
+        processOptions.cwd = options.cwd;
+    }
+    if (options.env !== undefined) {
+        processOptions.env = options.env;
+    }
+    return processOptions;
+}
+
+export function createShellExecution(command: string, args: string[], options: vscode.ShellExecutionOptions, useUtf8Console: boolean): { shellExecution: vscode.ShellExecution | vscode.ProcessExecution; displayCommand: string; usesNativeExecution?: boolean } {
     if (process.platform === 'win32') {
+        // VS Code merges `options.env` onto the parent environment for the
+        // spawned task, so the child's effective PATH is `options.env.PATH ??
+        // process.env.PATH` — judge launchability against that.
+        const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) };
+        if (windowsCommandIsDirectlyLaunchable(command, args, { env: effectiveEnv })) {
+            const native = buildNativeCommandInvocation(command, args);
+            return {
+                shellExecution: new vscode.ProcessExecution(native.executable, native.args, toProcessExecutionOptions(options)),
+                displayCommand: native.display,
+                usesNativeExecution: true
+            };
+        }
         const invocation = buildPowerShellInvocation(command, args, useUtf8Console);
         const encoded = encodePowerShellScript(invocation.script);
         return {
@@ -2728,14 +2757,37 @@ export function createShellExecution(command: string, args: string[], options: v
     };
 }
 
-export function wrapCommandForOneShot(command: string, args: string[], cwd: string | undefined, useUtf8Console: boolean): { commandLine: string; displayCommand: string; isPowerShellScript: boolean } {
+export function wrapCommandForOneShot(command: string, args: string[], cwd: string | undefined, useUtf8Console: boolean, env: NodeJS.ProcessEnv = process.env): { commandLine: string; displayCommand: string; isPowerShellScript: boolean } {
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
     if (process.platform === 'win32') {
+        const utf8Prefix = useUtf8Console ? "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n" : '';
+        if (windowsCommandIsDirectlyLaunchable(command, args, { env })) {
+            // Directly-launchable executable: start it via ProcessStartInfo with
+            // UseShellExecute=$false so we control arg quoting precisely
+            // (CommandLineToArgvW rules), preserving embedded `"`.
+            const argLine = combinedArgs.map(arg => quoteWindowsCommandLineArgument(arg)).join(' ');
+            const lines = [
+                '$psi = New-Object System.Diagnostics.ProcessStartInfo',
+                `$psi.FileName = ${quotePowerShellArgument(executable)}`,
+                `$psi.UseShellExecute = $false`,
+            ];
+            if (argLine.length > 0) {
+                lines.push(`$psi.Arguments = ${quotePowerShellArgument(argLine)}`);
+            }
+            if (cwd) {
+                lines.push(`$psi.WorkingDirectory = ${quotePowerShellArgument(cwd)}`);
+            }
+            lines.push('[System.Diagnostics.Process]::Start($psi) | Out-Null');
+            const script = `${utf8Prefix}${lines.join('\n')}`;
+            return { commandLine: script, displayCommand: script, isPowerShellScript: true };
+        }
+        // Shims (`npm` → `npm.cmd`), scripts (`.js`), and shell builtins can't be
+        // started via UseShellExecute=$false — use Start-Process, which resolves
+        // PATHEXT / file associations the way a shell would.
         const filePath = quotePowerShellArgument(executable);
         const argList = combinedArgs.map(arg => quotePowerShellArgument(arg));
         const argumentListPart = argList.length > 0 ? ` -ArgumentList @(${argList.join(', ')})` : '';
         const workingDirectoryPart = cwd ? ` -WorkingDirectory ${quotePowerShellArgument(cwd)}` : '';
-        const utf8Prefix = useUtf8Console ? "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n" : '';
         const script = `${utf8Prefix}Start-Process -FilePath ${filePath}${argumentListPart}${workingDirectoryPart}`;
         return { commandLine: script, displayCommand: script, isPowerShellScript: true };
     }
@@ -2762,11 +2814,15 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
 
     const taskArgs = args || [];
 
-    let shellExecution: vscode.ShellExecution;
+    let shellExecution: vscode.ShellExecution | vscode.ProcessExecution;
     let displayCommand: string;
 
     if (isOneShot) {
-        const wrapped = wrapCommandForOneShot(command, taskArgs, options.cwd, useUtf8Console);
+        // Effective env the one-shot child runs with (VS Code merges options.env
+        // onto the parent env) — used so `task.env.PATH` extensions are honoured
+        // when judging launchability.
+        const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...envOverrides };
+        const wrapped = wrapCommandForOneShot(command, taskArgs, options.cwd, useUtf8Console, effectiveEnv);
         if (wrapped.isPowerShellScript) {
             const encoded = encodePowerShellScript(wrapped.commandLine);
             shellExecution = new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options);
@@ -3444,50 +3500,30 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
         // Use undefined instead of empty string to let Node.js use process.cwd() as fallback
         const workingDirectory = cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined;
         let childProcess: ReturnType<typeof spawn>;
-        let displayCommand: string;
+        let displayCommand = '';
+        let settled = false;
 
-        if (process.platform === 'win32') {
-            const invocation = buildPowerShellInvocation(command, args || [], useUtf8Console);
-            const encoded = encodePowerShellScript(invocation.script);
-            displayCommand = invocation.display;
-            childProcess = spawn('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], {
-                cwd: workingDirectory,
-                env: childEnv
-            });
-        } else {
-            const commandLine = buildPosixCommandLine(command, args || []);
-            displayCommand = commandLine;
-            childProcess = spawn(commandLine, [], {
-                cwd: workingDirectory,
-                env: childEnv,
-                shell: true
-            });
-        }
-
-        if (actionKey) {
+        const trackChildProcess = () => {
+            if (!actionKey) {
+                return;
+            }
             const processes = actionChildProcesses.get(actionKey) ?? new Set<ReturnType<typeof spawn>>();
             processes.add(childProcess);
             actionChildProcesses.set(actionKey, processes);
-        }
+        };
 
-        const cleanupChildTracking = () => {
+        const cleanupChildTracking = (target: ReturnType<typeof spawn>) => {
             if (!actionKey) {
                 return;
             }
             const processes = actionChildProcesses.get(actionKey);
             if (processes) {
-                processes.delete(childProcess);
+                processes.delete(target);
                 if (processes.size === 0) {
                     actionChildProcesses.delete(actionKey);
                 }
             }
         };
-
-
-
-        if (showVerboseLogs) { outputChannel.appendLine(`[INFO] Executing command: ${displayCommand} in ${workingDirectory}`); }
-
-
 
         let stdout = '';
         let stderr = '';
@@ -3512,42 +3548,112 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
             if (target === 'stdout') { stdout += chunk; } else { stderr += chunk; }
         };
 
-        childProcess.stdout?.setEncoding('utf8');
-        childProcess.stderr?.setEncoding('utf8');
-
-        childProcess.stdout?.on('data', (data) => { appendCapture('stdout', typeof data === 'string' ? data : String(data)); });
-        childProcess.stderr?.on('data', (data) => { appendCapture('stderr', typeof data === 'string' ? data : String(data)); });
-
-        childProcess.on('close', (code) => {
-            cleanupChildTracking();
-
-            if (showVerboseLogs) { outputChannel.appendLine(`[INFO] STDOUT: ${stdout}`); outputChannel.appendLine(`[INFO] STDERR: ${stderr}`); outputChannel.appendLine(`[INFO] Command finished with exit code ${code}.`); }
-
-            if (captureOverflowed) {
-                const limitMb = Math.round(captureLimitBytes / (1024 * 1024));
-                reject(new Error(t(
-                    `캡처된 출력이 ${limitMb}MB 한도를 초과하여 명령을 중단했습니다. \`taskhub.pipeline.outputCaptureLimitMb\` 설정을 높이거나 파이프에 '> file' 리다이렉션을 사용하세요.`,
-                    `Captured output exceeded the ${limitMb} MB limit and the command was aborted. Raise \`taskhub.pipeline.outputCaptureLimitMb\` or redirect output with '> file'.`
-                )));
-                return;
+        const startPowerShellFallback = (reason?: Error) => {
+            const invocation = buildPowerShellInvocation(command, args || [], useUtf8Console);
+            const encoded = encodePowerShellScript(invocation.script);
+            displayCommand = invocation.display;
+            if (showVerboseLogs && reason) {
+                outputChannel.appendLine(`[WARN] Native Windows process start failed (${reason.message}); retrying through PowerShell.`);
             }
+            childProcess = spawn('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], {
+                cwd: workingDirectory,
+                env: childEnv
+            });
+            attachChildHandlers(false);
+        };
 
-            if (code === 0) {
-                resolve({ stdout, stderr });
-            } else {
-                // Carry the captured stdout/stderr on the error so callers
-                // can still parse diagnostics out of the failed build (gcc /
-                // clang emit errors on stderr AND exit non-zero).
-                reject(new ShellCommandError(
-                    stderr || `Command failed with exit code ${code}`,
-                    stdout,
-                    stderr,
-                    code
-                ));
-            }
-        });
+        const attachChildHandlers = (allowPowerShellFallback: boolean) => {
+            const attachedChild = childProcess;
+            trackChildProcess();
+            if (showVerboseLogs) { outputChannel.appendLine(`[INFO] Executing command: ${displayCommand} in ${workingDirectory}`); }
 
-        childProcess.on('error', (err) => { cleanupChildTracking(); if (showVerboseLogs) { outputChannel.appendLine(`[ERROR] Failed to start command: ${err.message}`); } reject(err); });
+            attachedChild.stdout?.setEncoding('utf8');
+            attachedChild.stderr?.setEncoding('utf8');
+
+            attachedChild.stdout?.on('data', (data) => { appendCapture('stdout', typeof data === 'string' ? data : String(data)); });
+            attachedChild.stderr?.on('data', (data) => { appendCapture('stderr', typeof data === 'string' ? data : String(data)); });
+
+            attachedChild.on('close', (code) => {
+                cleanupChildTracking(attachedChild);
+                if (attachedChild !== childProcess || settled) {
+                    return;
+                }
+
+                if (showVerboseLogs) { outputChannel.appendLine(`[INFO] STDOUT: ${stdout}`); outputChannel.appendLine(`[INFO] STDERR: ${stderr}`); outputChannel.appendLine(`[INFO] Command finished with exit code ${code}.`); }
+
+                if (captureOverflowed) {
+                    settled = true;
+                    const limitMb = Math.round(captureLimitBytes / (1024 * 1024));
+                    reject(new Error(t(
+                        `캡처된 출력이 ${limitMb}MB 한도를 초과하여 명령을 중단했습니다. \`taskhub.pipeline.outputCaptureLimitMb\` 설정을 높이거나 파이프에 '> file' 리다이렉션을 사용하세요.`,
+                        `Captured output exceeded the ${limitMb} MB limit and the command was aborted. Raise \`taskhub.pipeline.outputCaptureLimitMb\` or redirect output with '> file'.`
+                    )));
+                    return;
+                }
+
+                settled = true;
+                if (code === 0) {
+                    resolve({ stdout, stderr });
+                } else {
+                    // Carry the captured stdout/stderr on the error so callers
+                    // can still parse diagnostics out of the failed build (gcc /
+                    // clang emit errors on stderr AND exit non-zero).
+                    reject(new ShellCommandError(
+                        stderr || `Command failed with exit code ${code}`,
+                        stdout,
+                        stderr,
+                        code
+                    ));
+                }
+            });
+
+            attachedChild.on('error', (err) => {
+                cleanupChildTracking(attachedChild);
+                if (attachedChild !== childProcess || settled) {
+                    return;
+                }
+                // Native `spawn(file, args)` on Windows can only launch real
+                // executables. A `.cmd` / `.bat` shim surfaces as EINVAL (Node's
+                // CVE-2024-27980 guard), an extensionless name that only exists
+                // as `name.cmd` surfaces as ENOENT, and a script file (`.js`,
+                // `.ps1`, …) or permission quirk surfaces as EINVAL / EACCES.
+                // For any of these, retry through PowerShell, which resolves the
+                // command the way a shell would.
+                const errCode = (err as NodeJS.ErrnoException).code;
+                if (allowPowerShellFallback && (errCode === 'ENOENT' || errCode === 'EINVAL' || errCode === 'EACCES')) {
+                    stdout = '';
+                    stderr = '';
+                    capturedBytes = 0;
+                    captureOverflowed = false;
+                    startPowerShellFallback(err);
+                    return;
+                }
+                settled = true;
+                if (showVerboseLogs) { outputChannel.appendLine(`[ERROR] Failed to start command: ${err.message}`); }
+                reject(err);
+            });
+        };
+
+        if (process.platform === 'win32' && windowsCommandIsDirectlyLaunchable(command, args || [], { env: childEnv })) {
+            const native = buildNativeCommandInvocation(command, args || []);
+            displayCommand = native.display;
+            childProcess = spawn(native.executable, native.args, {
+                cwd: workingDirectory,
+                env: childEnv
+            });
+            attachChildHandlers(true);
+        } else if (process.platform === 'win32') {
+            startPowerShellFallback();
+        } else {
+            const commandLine = buildPosixCommandLine(command, args || []);
+            displayCommand = commandLine;
+            childProcess = spawn(commandLine, [], {
+                cwd: workingDirectory,
+                env: childEnv,
+                shell: true
+            });
+            attachChildHandlers(false);
+        }
 
     });
 

@@ -22,7 +22,7 @@ TaskHub/
 │   │   └── normalization.ts           # tags / line 번호 정규화 헬퍼
 │   ├── pipelineUtils.ts               # 순수 유틸리티 (vscode 의존 없음)
 │   │                                  # - 변수 치환/sanitize, workspace 경로 검증
-│   │                                  # - 쉘 토큰화 + POSIX/PowerShell 인자 quoting
+│   │                                  # - 쉘 토큰화 + POSIX/PowerShell/Windows native 인자 quoting
 │   │                                  # - toWorkspaceRelativePath(): 절대경로 → ${workspaceFolder} 정규화
 │   │                                  # - wouldExceedCaptureLimit(): 캡처 한도 off-by-one guard
 │   ├── previewRun.ts                  # Preview Run (Dry-run) 리포트 생성
@@ -287,9 +287,11 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
 2.  **파일 경로 검증(`resolveWithinWorkspace`)**
     *   Task output mode가 `file`일 때, 치환 결과를 `path.resolve` → `path.relative(root, resolved)` 순으로 검사해 워크스페이스 루트 외부 쓰기를 거부한다.
     *   상대 경로(`"report.txt"`, `"build/out.log"` 등)는 `process.cwd()`가 아니라 실행 중인 액션의 워크스페이스 폴더(`defaultWorkspace`) 기준으로 resolve한다. 이를 위해 `resolveWithinWorkspace(targetPath, roots, baseDir)` 시그니처의 3번째 인자로 액션 워크스페이스를 전달한다.
-3.  **쉘 인자 이스케이프**
-    *   POSIX: `quotePosixArgument`가 각 인자를 싱글쿼트로 감싸고 내부 싱글쿼트는 `'\''`로 이스케이프.
-    *   Windows: `buildPowerShellInvocation`이 `quotePowerShellArgument`로 각 인자를 싱글쿼트로 감싸고 PowerShell `-EncodedCommand`로 전달.
+3.  **쉘 인자 이스케이프 / 실행 경로 선택**
+    *   POSIX: `buildPosixCommandLine`이 `quotePosixArgument`로 각 인자를 싱글쿼트로 감싸고(내부 싱글쿼트는 `'\''`) `sh -c`로 실행.
+    *   Windows — **실행 경로 판별**: `windowsCommandIsDirectlyLaunchable(command, args, { env })`가 실행 파일이 셸 없이 OS 프로세스 로더로 바로 띄울 수 있는지 판단한다 — 명시적 `.exe`/`.com` 확장자거나, 확장자 없는 이름이면 `PATH`(+ `.exe`/`.com`)로 해석해 찾으면 true. `.cmd`/`.bat`/`.ps1`/`.js` 같은 스크립트·shim(`npm`/`npx`/`pnpm`/`yarn` 등, 실제로는 `*.cmd`), 셸 빌트인/별칭(`echo`, `dir`, `cd`, …)은 false. PATH 해석은 호출자가 넘긴 **task의 실제 실행 env**(`{ ...process.env, ...envOverrides }` — `executeShellCommand`의 `childEnv`, `createShellExecution`의 `options.env` 병합, `prepareTaskExecution`의 one-shot env)를 기준으로 하므로 `task.env.PATH`로 추가한 toolchain bin도 반영된다.
+    *   Windows — **native 경로**(true일 때): `executeShellCommand`는 `spawn(file, argvArray)`(셸 없이), VS Code Task 경로(`createShellExecution`)는 `vscode.ProcessExecution`, one-shot(`isOneShot`)은 `ProcessStartInfo`(`UseShellExecute=$false`, `Arguments`는 `quoteWindowsCommandLineArgument`로 CommandLineToArgvW 규칙에 맞춰 escape)로 실행. 인자를 argv 배열/escape된 문자열로 직접 넘겨 **Windows PowerShell 5.1의 native-command 인자 큐오팅 버그**(`"` 가 사라지는 문제)를 우회한다.
+    *   Windows — **PowerShell 경로**(false일 때): `buildPowerShellInvocation`이 `quotePowerShellArgument`로 각 인자를 싱글쿼트로 감싸 PowerShell `-EncodedCommand`로 전달(또는 one-shot은 `Start-Process -FilePath … -ArgumentList @(…)` — PATHEXT/파일 연결을 셸처럼 해석). 추가로, native `spawn`이 `ENOENT`/`EINVAL`/`EACCES`로 실패하면 `executeShellCommand`(캡처 모드)는 같은 명령을 PowerShell 경로로 한 번 더 재시도한다 — `windowsCommandIsDirectlyLaunchable`의 PATH 해석과 실제 spawn 사이의 race·cwd-상대 경로 차이 등에 대한 안전망이며, 스트림/one-shot 경로에는 이 재시도가 없다.
 4.  **WebView 보안**
     *   모든 WebView(HexViewer, JSON Editor, Memory Map)는 `Content-Security-Policy` 메타 태그를 포함한다.
     *   `script-src`는 패널마다 새로 생성되는 16바이트 nonce만 허용한다. nonce는 `crypto.randomBytes(16).toString('base64')`(CSPRNG)로 생성되며, 인라인 스크립트 전부에 동일 nonce를 부여한다.

@@ -15,8 +15,11 @@ import {
     mergeCommandAndArgs,
     quotePosixArgument,
     quotePowerShellArgument,
+    quoteWindowsCommandLineArgument,
     buildPosixCommandLine,
     buildPowerShellInvocation,
+    buildNativeCommandInvocation,
+    windowsCommandIsDirectlyLaunchable,
     encodePowerShellScript,
     getCommandString,
     getToolCommand,
@@ -74,6 +77,15 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         assert.strictEqual(quotePowerShellArgument("it's"), "'it''s'");
     });
 
+    test('Windows command-line quoting preserves embedded double quotes for native argv fallback paths', () => {
+        assert.strictEqual(
+            quoteWindowsCommandLineArgument('process.stdout.write("ok")'),
+            '"process.stdout.write(\\"ok\\")"'
+        );
+        assert.strictEqual(quoteWindowsCommandLineArgument('plain'), 'plain');
+        assert.strictEqual(quoteWindowsCommandLineArgument(''), '""');
+    });
+
     test('buildPosixCommandLine quotes args but leaves safe executable names bare', () => {
         const line = buildPosixCommandLine('echo', ['hello', '; rm']);
         assert.ok(line.startsWith('echo '), `unexpected line: ${line}`);
@@ -85,6 +97,37 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         const { script, display } = buildPowerShellInvocation('echo', ['hi'], false);
         assert.ok(display.startsWith('& '));
         assert.strictEqual(script, display);
+    });
+
+    test('buildNativeCommandInvocation preserves native argument boundaries', () => {
+        const invocation = buildNativeCommandInvocation('node', ['-e', 'process.stdout.write("ok")']);
+        assert.strictEqual(invocation.executable, 'node');
+        assert.deepStrictEqual(invocation.args, ['-e', 'process.stdout.write("ok")']);
+        assert.ok(invocation.display.includes('process.stdout.write(\\"ok\\")'));
+    });
+
+    test('windowsCommandIsDirectlyLaunchable resolves PATH, rejects shims/scripts/builtins', () => {
+        const lookup = {
+            env: { PATH: 'C:\\Windows\\System32;C:\\node;C:\\git' },
+            isFile: (p: string) =>
+                p === 'C:\\node\\node.exe' ||
+                p === 'C:\\git\\git.exe' ||
+                p === 'C:\\Windows\\System32\\cmd.exe',
+        };
+        // extensionless names resolved against the (fake) PATH
+        assert.strictEqual(windowsCommandIsDirectlyLaunchable('node', ['-e', 'x'], lookup), true);
+        assert.strictEqual(windowsCommandIsDirectlyLaunchable('cmd /c echo hi', [], lookup), true);
+        assert.strictEqual(windowsCommandIsDirectlyLaunchable('git status', [], lookup), true);
+        // npm/npx/pnpm only exist as `.cmd` shims → stay on PowerShell
+        assert.strictEqual(windowsCommandIsDirectlyLaunchable('npm test', [], lookup), false);
+        // explicit extensions: .exe/.com launchable, scripts/shims not (no lookup)
+        assert.strictEqual(windowsCommandIsDirectlyLaunchable('node.exe', ['-e', 'x'], lookup), true);
+        assert.strictEqual(windowsCommandIsDirectlyLaunchable('C:\\tools\\7z.exe', ['a'], lookup), true);
+        assert.strictEqual(windowsCommandIsDirectlyLaunchable('build.cmd', [], lookup), false);
+        assert.strictEqual(windowsCommandIsDirectlyLaunchable('tool.bat', [], lookup), false);
+        // shell builtins / aliases
+        assert.strictEqual(windowsCommandIsDirectlyLaunchable('echo hi', [], lookup), false);
+        assert.strictEqual(windowsCommandIsDirectlyLaunchable('dir', [], lookup), false);
     });
 
     test('encodePowerShellScript returns UTF-16 LE base64', () => {

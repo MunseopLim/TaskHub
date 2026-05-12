@@ -29,6 +29,26 @@
 =====================================================================
 -->
 
+## [0.4.38] - 2026-05-12
+
+### 수정 — Windows 셸/스크립트 task 인자 인용 + 크로스플랫폼 테스트 보강
+
+Windows에서 `shell`/`command` task가 인자 안에 `"` 를 포함하면(예: `node -e "process.stdout.write(...)"`) Windows PowerShell 5.1의 native-command 인자 전달 버그로 따옴표가 사라져 명령이 깨지던 문제를 수정한다. macOS/Linux에는 영향이 없으며(`sh -c` 경로), 그래서 그동안 macOS 테스트에서는 드러나지 않았다.
+
+#### 동작 변경
+
+- **Windows 실행 경로 판별 (`windowsCommandIsDirectlyLaunchable`)**: 실행 파일이 셸 없이 OS 프로세스 로더로 바로 띄울 수 있는지 — 명시적 `.exe`/`.com`이거나, 확장자 없는 이름이면 `PATH`(+`.exe`/`.com`)로 해석해 찾으면 — 판별한다. 해당하면 `executeShellCommand`는 `spawn(file, argvArray)`(셸 없이), VS Code Task/스트림 경로(`createShellExecution`)는 `vscode.ProcessExecution`, one-shot(`isOneShot`)은 `ProcessStartInfo`(`UseShellExecute=$false`, `Arguments`는 CommandLineToArgvW 규칙으로 escape)로 실행해 인자(특히 `"` 포함)를 그대로 전달한다. `.cmd`/`.bat`/`.ps1`/`.js` 스크립트, `npm`/`npx`/`pnpm`/`yarn` 같은 `.cmd` shim, 셸 빌트인/별칭(`echo`, `dir`, `cd`, …)은 기존대로 PowerShell 경로(또는 one-shot은 `Start-Process … -ArgumentList @(…)`)를 쓴다. 캡처 모드에서는 추가로, native `spawn`이 `ENOENT`/`EINVAL`/`EACCES`로 실패하면 같은 명령을 PowerShell 경로로 한 번 더 재시도하는 안전망이 있다(스트림/one-shot 경로에는 이 재시도 없음). 판별 시 PATH는 task의 실제 실행 env(`{ ...process.env, ...task.env override }`)를 기준으로 본다 — `task.env.PATH`로 toolchain bin을 추가한 경우 그 `.exe`도 올바르게 native로 인식된다. 참조: [src/pipelineUtils.ts](src/pipelineUtils.ts) (`windowsCommandIsDirectlyLaunchable` / `buildNativeCommandInvocation` / `quoteWindowsCommandLineArgument`), [src/extension.ts](src/extension.ts) (`createShellExecution` / `executeShellCommand` / `wrapCommandForOneShot`).
+- **one-shot task(Windows)**: 직접 실행 가능한 명령은 `Start-Process` 대신 `ProcessStartInfo`(`UseShellExecute=$false`, CommandLineToArgvW escape)로 띄워 인자 인용을 정확히 제어한다. shim/스크립트/빌트인은 PATHEXT·파일 연결 해석을 위해 기존 `Start-Process -FilePath … -ArgumentList @(…)` 형태를 유지한다.
+
+#### 문서
+
+- architecture.md "쉘 인자 이스케이프 / 실행 경로 선택" 항목과 features.md §5 스트림 모드 설명을 새 동작에 맞게 갱신. 참조: [docs/architecture.md](docs/architecture.md), [docs/features.md](docs/features.md).
+
+#### 테스트
+
+- Windows 한정으로 실패하던 16건을 해소: PowerShell 인자 깨짐(≈11건)은 위 동작 변경으로, 소스 정규식 검사 테스트의 CRLF 글자수 오차는 줄바꿈 정규화로([src/test/jsonEditorUtils.test.ts](src/test/jsonEditorUtils.test.ts)), 드라이브 레터 대소문자(`c:\` vs `C:\`)는 비교 정규화로([src/test/viewProviderIntegration.test.ts](src/test/viewProviderIntegration.test.ts), [src/test/pipelineIntegration.test.ts](src/test/pipelineIntegration.test.ts)), timeout-kill 직후 temp dir 잠금은 teardown 재시도 + best-effort 처리로 수정.
+- 신규 단위 테스트: `quoteWindowsCommandLineArgument` / `buildNativeCommandInvocation` / `windowsCommandIsDirectlyLaunchable`(PATH 해석 포함, lookup 주입으로 결정적) 동작 + `createShellExecution`·`wrapCommandForOneShot`의 native 경로 및 `Start-Process` shim 폴백. 최종 1206 passing / 1 pending(Windows에서 의도적 skip — POSIX 전용 capture-overflow 테스트).
+
 ## [0.4.37] - 2026-05-12
 
 ### 추가 — History에 JSON Editor 열람 기록
