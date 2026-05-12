@@ -8,7 +8,7 @@ import Ajv from 'ajv';
 import { ActionItem, Action as PipelineAction } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
-import { openJsonEditor, openJsonEditorFromUri } from './jsonEditor';
+import { openJsonEditor, openJsonEditorFromUri, openJsonEditorFile, JsonEditorOpenHistory } from './jsonEditor';
 import { openMarkdownPreview, openHtmlInBrowser } from './previewOpener';
 import {
     showMemoryMap,
@@ -1518,6 +1518,14 @@ function recordHexViewerHistory(historyProvider: HistoryProvider, entry: HexView
     }));
 }
 
+function recordJsonEditorHistory(historyProvider: HistoryProvider, entry: JsonEditorOpenHistory): void {
+    historyProvider.addHistoryEntry(createToolHistoryEntry({
+        kind: 'jsonEditor',
+        filePath: entry.filePath,
+        fileName: entry.fileName,
+    }));
+}
+
 async function openToolHistoryEntry(
     context: vscode.ExtensionContext,
     historyProvider: HistoryProvider,
@@ -1542,6 +1550,11 @@ async function openToolHistoryEntry(
                 config: tool.memoryMapConfig,
             });
         }
+        return;
+    }
+
+    if (tool.kind === 'jsonEditor') {
+        await openJsonEditorFile(context, tool.filePath, entry => recordJsonEditorHistory(historyProvider, entry));
         return;
     }
 
@@ -4931,8 +4944,8 @@ export function activate(context: vscode.ExtensionContext) {
             }
         })
     );
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditor', () => openJsonEditor(context)));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditorFromUri', (uri?: vscode.Uri) => openJsonEditorFromUri(context, uri)));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditor', () => openJsonEditor(context, entry => recordJsonEditorHistory(historyProvider, entry))));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openJsonEditorFromUri', (arg?: unknown) => openJsonEditorFromUri(context, arg, entry => recordJsonEditorHistory(historyProvider, entry))));
     // Context-menu surfaces (explorer, editor/title, scm/resourceState) each
     // pass a different first-arg shape; coerceToUri() inside the handlers
     // normalizes them, so we accept `unknown` here.

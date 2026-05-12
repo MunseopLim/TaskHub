@@ -10,7 +10,7 @@
 import * as vscode from 'vscode';
 
 export type HistoryEntryType = 'action' | 'tool';
-export type HistoryToolKind = 'memoryMap' | 'hexEditor';
+export type HistoryToolKind = 'memoryMap' | 'hexEditor' | 'jsonEditor';
 export type MemoryMapHistoryInputType = 'elf' | 'listing';
 
 export interface HistoryToolMemoryRegion {
@@ -88,7 +88,11 @@ export function isToolHistoryEntry(entry: HistoryEntry | undefined): entry is Hi
 }
 
 function toolDisplayName(kind: HistoryToolKind): string {
-    return kind === 'memoryMap' ? 'Memory Map' : 'Hex Editor';
+    switch (kind) {
+        case 'memoryMap': return 'Memory Map';
+        case 'hexEditor': return 'Hex Editor';
+        case 'jsonEditor': return 'JSON Editor';
+    }
 }
 
 function basename(filePath: string): string {
@@ -345,6 +349,8 @@ export class HistoryItem extends vscode.TreeItem {
             this.iconPath = new vscode.ThemeIcon('graph');
         } else if (isToolEntry && entry.tool.kind === 'hexEditor') {
             this.iconPath = new vscode.ThemeIcon('file-binary');
+        } else if (isToolEntry && entry.tool.kind === 'jsonEditor') {
+            this.iconPath = new vscode.ThemeIcon('json');
         } else if (entry.status === 'success') {
             this.iconPath = new vscode.ThemeIcon('pass', new vscode.ThemeColor('charts.green'));
         } else if (entry.status === 'failure') {

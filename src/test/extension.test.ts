@@ -2374,6 +2374,28 @@ suite('Extension Test Suite', () => {
 			assert.ok(isToolHistoryEntry(item.getEntry()));
 		});
 
+		test('createToolHistoryEntry builds a JSON Editor tool entry that opens via openToolFromHistory', async () => {
+			const provider = new HistoryProvider(createMockContext());
+			const entry = createToolHistoryEntry({
+				kind: 'jsonEditor',
+				filePath: '/workspace/config/settings.json',
+				timestamp: 99
+			});
+			assert.strictEqual(entry.entryType, 'tool');
+			assert.strictEqual(entry.actionTitle, 'JSON Editor: settings.json');
+			assert.strictEqual(entry.status, 'success');
+			assert.ok(isToolHistoryEntry(entry));
+			assert.strictEqual(entry.tool.kind, 'jsonEditor');
+			assert.strictEqual(entry.tool.filePath, '/workspace/config/settings.json');
+			assert.strictEqual(entry.tool.memoryMapInputType, undefined);
+
+			provider.addHistoryEntry(entry);
+			const items = await provider.getChildren();
+			assert.strictEqual(items.length, 1);
+			assert.strictEqual(items[0].label, 'JSON Editor: settings.json');
+			assert.strictEqual(items[0].command?.command, 'taskhub.openToolFromHistory');
+		});
+
 		test('getChildren returns one HistoryItem per entry, carrying the rerun command', async () => {
 			const provider = new HistoryProvider(createMockContext());
 			provider.addHistoryEntry(makeEntry('run-me', 'success', 1));

@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { t } from './i18n';
+import { coerceToUri } from './previewOpener';
 import { shouldOfferRecovery, RecoveryEntry, RecoveryStore, makeRecoveryStore } from './jsonEditorUtils';
 
 let currentPanel: vscode.WebviewPanel | undefined;
@@ -152,6 +153,13 @@ async function confirmDiscardIfDirty(fileName: string): Promise<boolean> {
 /** JSON Editor에서 처리 가능한 최대 파일 크기 (10 MB) */
 const JSON_EDITOR_MAX_FILE_SIZE = 10 * 1024 * 1024;
 
+export interface JsonEditorOpenHistory {
+    filePath: string;
+    fileName: string;
+}
+
+export type JsonEditorHistoryRecorder = (entry: JsonEditorOpenHistory) => void;
+
 function formatFileSize(bytes: number): string {
     if (bytes < 1024) { return `${bytes} B`; }
     if (bytes < 1024 * 1024) { return `${(bytes / 1024).toFixed(1)} KB`; }
@@ -170,7 +178,7 @@ function detectIndent(text: string): string | number {
     return indent.length;
 }
 
-export async function openJsonEditor(context: vscode.ExtensionContext) {
+export async function openJsonEditor(context: vscode.ExtensionContext, recordHistory?: JsonEditorHistoryRecorder) {
     const fileUris = await vscode.window.showOpenDialog({
         canSelectMany: false,
         filters: { 'JSON Files': ['json'] },
@@ -181,20 +189,41 @@ export async function openJsonEditor(context: vscode.ExtensionContext) {
         return;
     }
 
-    await openJsonEditorWithPath(context, fileUris[0].fsPath);
+    const filePath = fileUris[0].fsPath;
+    if (await openJsonEditorWithPath(context, filePath)) {
+        recordHistory?.({ filePath, fileName: path.basename(filePath) });
+    }
 }
 
-export async function openJsonEditorFromUri(context: vscode.ExtensionContext, uri?: vscode.Uri) {
+export async function openJsonEditorFromUri(context: vscode.ExtensionContext, arg?: unknown, recordHistory?: JsonEditorHistoryRecorder) {
+    // VS Code가 컨텍스트 메뉴 표면별로 다른 형태를 넘긴다: explorer/editor는
+    // `Uri`(혹은 `Uri[]`), scm/resourceState는 `{ resourceUri: Uri }`. previewOpener
+    // 와 동일하게 `coerceToUri`로 정규화해 SCM 메뉴에서 `uri.fsPath`가 undefined가
+    // 되어 터지는 것을 막는다.
+    let uri = coerceToUri(arg);
     if (!uri) {
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.fileName.endsWith('.json')) {
             uri = editor.document.uri;
         } else {
-            return openJsonEditor(context);
+            return openJsonEditor(context, recordHistory);
         }
     }
 
-    await openJsonEditorWithPath(context, uri.fsPath);
+    const filePath = uri.fsPath;
+    if (await openJsonEditorWithPath(context, filePath)) {
+        recordHistory?.({ filePath, fileName: path.basename(filePath) });
+    }
+}
+
+/**
+ * 히스토리에서 저장된 경로로 JSON Editor를 다시 연다. `taskhub.openToolFromHistory`
+ * 핸들러가 사용하며, 패널이 실제로 열린 경우에만 새 히스토리 엔트리를 기록한다.
+ */
+export async function openJsonEditorFile(context: vscode.ExtensionContext, filePath: string, recordHistory?: JsonEditorHistoryRecorder) {
+    if (await openJsonEditorWithPath(context, filePath)) {
+        recordHistory?.({ filePath, fileName: path.basename(filePath) });
+    }
 }
 
 export const ROOT_ARRAY_KEY = '_rootArray';
@@ -213,7 +242,7 @@ export function unwrapIfRootArray(data: Record<string, unknown>, isRootArray: bo
     return data;
 }
 
-async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: string) {
+async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath: string): Promise<boolean> {
     const fileName = filePath.split(/[\\/]/).pop() || 'JSON Editor';
 
     if (currentPanel && currentFilePath) {
@@ -222,7 +251,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             const prevFileName = currentFilePath.split(/[\\/]/).pop() || 'JSON Editor';
             if (!(await confirmDiscardIfDirty(prevFileName))) {
                 currentPanel.reveal(vscode.ViewColumn.One);
-                return;
+                return false;
             }
             // 사용자가 *변경사항 버리기* 를 선택했다 → 이전 파일의 recovery
             // 엔트리와 in-flight snapshot 을 정리. 이렇게 하지 않으면 나중에
@@ -236,7 +265,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             // the webview state with a fresh read from disk.
             if (!(await confirmDiscardIfDirty(fileName))) {
                 currentPanel.reveal(vscode.ViewColumn.One);
-                return;
+                return false;
             }
             // 같은 파일 dirty reopen 에서도 동일하게 정리한다. 그래야 곧이은
             // offerRecoveryIfAny() 가 디스크와 일치하는 (방금 사용자가 버리려고
@@ -340,7 +369,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         }
         if (!fallback) {
             vscode.window.showErrorMessage(earlyError.msg);
-            return;
+            return false;
         }
         jsonData = fallback.data as Record<string, unknown>;
         isRootArray = fallback.isRootArray;
@@ -788,6 +817,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             }
         }, 250);
     });
+    return true;
 }
 
 function generateNonce(): string {

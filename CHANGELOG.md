@@ -29,6 +29,26 @@
 =====================================================================
 -->
 
+## [0.4.37] - 2026-05-12
+
+### 추가 — History에 JSON Editor 열람 기록
+
+[0.4.36]에서 도입한 도구 열람 히스토리에 JSON Editor를 추가한다. 이전 커밋에서 누락된 것을 보완하는 것으로, Memory Map / Hex Editor와 동일한 `entryType === 'tool'` 모델·`recordHistory` 콜백 패턴을 그대로 사용한다.
+
+#### UX
+
+- **JSON Editor 열람 이력 저장**: `TaskHub: Open JSON Editor`, 컨텍스트 메뉴(`taskhub.openJsonEditorFromUri`), 그리고 History row 다시 열기로 JSON Editor 패널을 성공적으로 열면 History 패널에 기록한다(`json` 아이콘으로 구분). row를 클릭하면 저장된 경로로 다시 열고, 다시 열기도 최신 이력으로 추가된다. 파일을 못 찾거나 파싱 실패·크기 초과 등으로 패널이 열리지 않은 경우, 또는 dirty 상태에서 변경사항 버리기를 취소한 경우에는 기록하지 않는다(`openJsonEditorWithPath`가 `boolean` 반환). 참조: [src/jsonEditor.ts](src/jsonEditor.ts), [src/providers/historyProvider.ts](src/providers/historyProvider.ts), [src/extension.ts](src/extension.ts).
+
+### 수정 — JSON Editor 컨텍스트 메뉴 인자 정규화
+
+`taskhub.openJsonEditorFromUri`가 SCM(`scm/resourceState/context`) 메뉴에서 호출될 때 VS Code가 `Uri`가 아닌 `SourceControlResourceState`(`{ resourceUri: Uri }`)를 넘겨, 기존 코드의 `uri.fsPath`가 `undefined`가 되며 `openJsonEditorWithPath`에서 터지던 문제를 수정한다. previewOpener의 `coerceToUri()`를 재사용해 `Uri` / `Uri[]` / `{ resourceUri }` 형태를 모두 정규화한다. 참조: [src/jsonEditor.ts](src/jsonEditor.ts), [src/previewOpener.ts](src/previewOpener.ts).
+
+#### 문서
+
+- features.md §14 / architecture.md의 `HistoryEntry` 구조·도구 히스토리 노트에 JSON Editor를 반영. 참조: [docs/features.md](docs/features.md), [docs/architecture.md](docs/architecture.md).
+
+**테스트**: 신규 1 케이스 — `createToolHistoryEntry`의 JSON Editor tool 엔트리 생성과 row가 `taskhub.openToolFromHistory`를 호출하는지 검증.
+
 ## [0.4.36] - 2026-05-12
 
 ### 추가 — History에 Memory Map / Hex Editor 열람 기록

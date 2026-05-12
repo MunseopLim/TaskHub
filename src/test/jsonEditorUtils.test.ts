@@ -1551,6 +1551,32 @@ suite('JsonEditorUtils Test Suite', () => {
                 'setRecoveryEntry must delegate to RecoveryStore.set'
             );
         });
+
+        test('openJsonEditorFromUri normalizes the menu argument through coerceToUri', () => {
+            // 회귀 가드: taskhub.openJsonEditorFromUri 는 explorer/editor/scm 메뉴에
+            // 노출돼 있어 VS Code 가 `Uri` 외에 `SourceControlResourceState`
+            // (`{ resourceUri: Uri }`) 형태도 넘긴다. 첫 인자를 그대로 `Uri` 로
+            // 취급하면 SCM 메뉴에서 `uri.fsPath` 가 undefined → openJsonEditorWithPath
+            // 의 `filePath.split(...)` 에서 터진다. previewOpener 의 coerceToUri 로
+            // 정규화해야 한다.
+            assert.ok(
+                /import\s*\{[^}]*\bcoerceToUri\b[^}]*\}\s*from\s*['"]\.\/previewOpener['"]/.test(editorSource),
+                'jsonEditor.ts must import coerceToUri from ./previewOpener'
+            );
+            const fnMatch = editorSource.match(/export async function openJsonEditorFromUri\([\s\S]*?\n\}/);
+            assert.ok(fnMatch, 'could not locate openJsonEditorFromUri body');
+            const body = fnMatch![0];
+            assert.ok(
+                /\bcoerceToUri\s*\(/.test(body),
+                'openJsonEditorFromUri must run its first argument through coerceToUri(...)'
+            );
+            // 인자 시그니처가 `unknown` 이어야 좁은 `vscode.Uri` 타입 가정으로
+            // 회귀하지 않는다 (extension.ts 의 명령 람다도 raw 인자를 그대로 넘긴다).
+            assert.ok(
+                /openJsonEditorFromUri\(\s*context:\s*vscode\.ExtensionContext\s*,\s*\w+\??\s*:\s*unknown/.test(body),
+                'openJsonEditorFromUri must accept the raw menu argument typed as unknown, not vscode.Uri'
+            );
+        });
     });
 
     suite('webview: review round 2 contracts', () => {
