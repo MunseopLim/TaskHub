@@ -27,7 +27,7 @@ export interface PreviewOptions {
     workspaceRoots: string[];
 }
 
-interface SimulatedResult {
+export interface SimulatedResult {
     [key: string]: string;
 }
 
@@ -35,15 +35,15 @@ interface SimulatedResult {
  * Placeholder value for a key in a simulated task result. Kept in a distinct
  * shape (`<type:taskId:key>`) so a human reader can spot them in the report.
  */
-function placeholder(type: string, id: string, key?: string): string {
+export function placeholder(type: string, id: string, key?: string): string {
     return key ? `<${type}:${id}:${key}>` : `<${type}:${id}>`;
 }
 
 /**
  * Build a best-effort simulated result for a single task, used only to feed
- * downstream tasks' interpolation context during preview.
+ * downstream tasks' interpolation context during preview / Doctor lint.
  */
-function simulateTaskResult(task: Task): SimulatedResult {
+export function simulateTaskResult(task: Task): SimulatedResult {
     switch (task.type) {
         case 'fileDialog':
         case 'folderDialog':
@@ -81,9 +81,9 @@ function simulateTaskResult(task: Task): SimulatedResult {
 }
 
 /** Regex to find ${...} references that survived interpolation. */
-const UNRESOLVED_VAR_RE = /\$\{[^}]+\}/g;
+export const UNRESOLVED_VAR_RE = /\$\{[^}]+\}/g;
 
-function findUnresolved(values: (string | undefined)[]): string[] {
+export function findUnresolved(values: (string | undefined)[]): string[] {
     const seen = new Set<string>();
     for (const v of values) {
         if (typeof v !== 'string') { continue; }
@@ -105,7 +105,7 @@ function formatCaptureRule(rule: OutputCapture): string {
     return `{ ${parts.join(', ')} }`;
 }
 
-function isInsideWorkspace(resolved: string, workspaceRoots: string[]): boolean {
+export function isInsideWorkspace(resolved: string, workspaceRoots: string[]): boolean {
     const normalized = path.resolve(resolved);
     return workspaceRoots.some(root => {
         const rel = path.relative(path.resolve(root), normalized);
@@ -113,7 +113,7 @@ function isInsideWorkspace(resolved: string, workspaceRoots: string[]): boolean 
     });
 }
 
-function resolveFilePathForPreview(
+export function resolveFilePathForPreview(
     filePath: string,
     baseDir: string,
     workspaceRoots: string[]

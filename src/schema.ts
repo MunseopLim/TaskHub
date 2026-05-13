@@ -146,6 +146,16 @@ export interface Task {
      * to the skipped task remain unresolved literals. Defaults to false.
      */
     continueOnError?: boolean;
+
+    /**
+     * IDs of earlier tasks (within the same action) that must complete
+     * before this task. Currently *declarative only* — the runtime still
+     * executes tasks sequentially in array order and ignores `dependsOn` at
+     * execution time. The field is consumed by TaskHub Doctor to detect
+     * cycles and missing references; full DAG / parallel scheduling lands
+     * with roadmap §4 ("Parallel Execution / Task DAG").
+     */
+    dependsOn?: string[];
 }
 
 /**

@@ -29,6 +29,32 @@
 =====================================================================
 -->
 
+## [0.4.40] - 2026-05-13
+
+### 추가 — TaskHub Doctor (Action Lint)
+
+`TaskHub: Doctor — Lint Actions` 단일 커맨드로 모든 `actions.json` 소스(번들 + 선택된 preset + 워크스페이스별 `.vscode/actions.json`)를 한 번에 정적 분석해 VS Code Problems 패널에 게시한다. Preview Run([docs/features.md](docs/features.md) §5)이 *한 액션*의 실행 시뮬레이션이라면 Doctor는 *모든 소스*의 건강검진 — 1.2 tasks.json Import 이후 들어온 사용자의 첫 마찰점("왜 안 돼?")을 액션을 실제 실행하기 전에 짚기 위해 도입한다. 진단 컬렉션은 `taskhub-doctor` source로 분리되어 있어 액션 실행 중 Problem Matcher가 만들어내는 진단(`taskhub:<actionId>`)과 섞이지 않는다. 참조: [src/doctor.ts](src/doctor.ts), [src/extension.ts](src/extension.ts) `taskhub.doctor`, [docs/features.md §23](docs/features.md#23-taskhub-doctor-action-lint).
+
+#### 검사 항목 (7종)
+
+- **JSON 파싱 실패** (`json.parse`): JS 엔진이 보고한 오프셋을 라인/컬럼으로 환산.
+- **JSON 스키마 위반** (`schema.*`): 기존 AJV validator([src/extension.ts](src/extension.ts) `getActionsValidator`)를 그대로 재사용. `keyword`에 따라 `schema.required` / `schema.enum` / `schema.additionalProperties` 등으로 코드 세분화. JSON Pointer를 라인/컬럼으로 매핑하는 자체 워커(`locateJsonPointer`)가 해당 노드까지 추적.
+- **중복 id** (`duplicate.action.id` / `duplicate.task.id`): 한 소스 내부의 액션 id 충돌, 한 액션 내부의 task id 충돌. 기존 `performAdditionalActionValidation`이 throw 하던 케이스를 finding으로 변환.
+- **regex 컴파일** (`capture.regex` / `diagnostics.regex`) + **group 인덱스 부적합** (`capture.group` / `diagnostics.group`): `output.capture` / `output.diagnostics`의 패턴을 `new RegExp()`로 시도하고, group 인덱스가 capture group 개수를 벗어나면 경고. `g` 플래그는 런타임과 동일하게 사전 제거 후 검사.
+- **capture 이름 검증** (`capture.reserved` / `capture.duplicate`): `output.capture.name`이 `applyOutputCapture`의 reserved 집합(`output`/`path`/`value`/`values`/`outputDir`/`dir`/`name`/`fileNameOnly`/`fileExt`/`archivePath`/`confirmed`, [src/pipelineUtils.ts](src/pipelineUtils.ts) 참조)과 충돌하거나, 같은 task 안에서 중복으로 정의된 경우 보고. 스키마는 이름 패턴(`^[A-Za-z_]…`)만 검사하므로 둘 다 schema를 통과한 뒤 런타임에서 throw 하던 경로 — 이제 Doctor가 사전에 잡는다.
+- **알 수 없는 diagnostics preset** (`diagnostics.preset`): `"$gcc"` / `"$tsc"` 같은 단축 문자열이 미등록이거나 `$` 누락.
+- **미해결 변수** (`variable.unresolved`): Preview Run과 동일한 simulation 컨텍스트(`simulateTaskResult` + `interpolatePipelineVariables`)에서 치환 후에도 남는 `${…}` 가 있으면 경고. 런타임에 리터럴로 통과되어 거의 항상 버그.
+- **워크스페이스 외부 쓰기** (`path.outside-workspace`): `writeFile.path` / `appendFile.path` / `output.filePath`의 해석 결과가 워크스페이스 밖이면 오류. 변수 치환 후에도 `${…}`가 남은 경우는 안전 결정 불가로 건너뜀.
+- **dependsOn cycle / missing / self** (`dependsOn.cycle` / `dependsOn.missing` / `dependsOn.self`): task 간 의존성 그래프의 순환, 존재하지 않는 task id 참조, 자기 자신 참조. **주의**: 이번 릴리스에서 `task.dependsOn` 필드는 *선언적*으로만 추가됐다 — 런타임은 여전히 배열 순서대로 순차 실행하며 `dependsOn`을 무시한다. 진짜 DAG/병렬 실행은 로드맵 §4("Parallel Execution / Task DAG")로 미루되, Doctor 검사를 먼저 들여서 그 본 작업이 도착할 때 `actions.json`이 문법적으로 준비되어 있도록 한다.
+
+#### 영향
+
+- **새 커맨드**: `taskhub.doctor` (`TaskHub: Doctor — Lint Actions`). Command Palette만 노출, 컨텍스트 메뉴 없음.
+- **schema 추가**: `Task.dependsOn: string[]` ([schema/actions.schema.json](schema/actions.schema.json), [src/schema.ts](src/schema.ts)). 기존 액션 파일에 영향 없음 — optional 필드, 런타임 무시.
+- **`src/previewRun.ts` 일부 헬퍼 export 전환**: `simulateTaskResult` / `findUnresolved` / `isInsideWorkspace` / `placeholder` / `UNRESOLVED_VAR_RE`를 Doctor가 재사용. 동작 변경은 없으며 기존 호출자는 그대로.
+
+**테스트**: 신규 22종(Doctor), 최종 1229 passing.
+
 ## [0.4.39] - 2026-05-12
 
 ### 수정 — `windowsCommandIsDirectlyLaunchable` PATH 후보 경로 조합을 `path.win32` 기준으로

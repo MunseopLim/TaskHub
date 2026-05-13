@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.4.39",
+  "version": "0.4.40",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -221,6 +221,12 @@
         "title": "Preview Run (Dry-run)",
         "category": "TaskHub",
         "icon": "$(eye)"
+      },
+      {
+        "command": "taskhub.doctor",
+        "title": "Doctor — Lint Actions",
+        "category": "TaskHub",
+        "icon": "$(checklist)"
       },
       {
         "command": "taskhub.stopAction",

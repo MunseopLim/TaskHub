@@ -302,6 +302,11 @@
           "type": "boolean",
           "description": "If true, the pipeline continues to the next task when this task fails (including timeouts and user-canceled dialogs). The failing task's result becomes empty ({}). Defaults to false.",
           "default": false
+        },
+        "dependsOn": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "IDs of earlier tasks (within the same action) that this task depends on. Currently declarative only — the runtime still executes tasks in array order. TaskHub Doctor uses this to detect cycles and missing references. Full DAG / parallel scheduling lands with the upcoming Parallel Execution feature."
         }
       },
       "required": ["id", "type"]

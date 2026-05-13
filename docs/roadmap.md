@@ -14,6 +14,7 @@
 | Problem Matcher (`output.diagnostics`) | 0.4.22부터 제공. regex/file/line/severity 그룹, 다중 매처, VS Code Problems 패널 통합 | [docs/features.md](./features.md) `output.diagnostics` 섹션 |
 | 같은 title 폴더 액션 disambiguation (이전 §12) | 0.4.26부터 제공. History 패널이 같은 title 충돌 시에만 라벨을 풀 경로(`Firmware > Build`)로 스왑, 반복 실행은 충돌로 안 침. 풀 경로는 툴팁에도 항상 노출 | [src/providers/historyProvider.ts](../src/providers/historyProvider.ts) `computeDisambiguatedHistoryLabels` |
 | Quick Action Palette (이전 §9) | 0.4.28부터 제공. `TaskHub: Run Any Action…` 단일 커맨드로 모든 액션 fuzzy 검색·실행. 최근 사용 액션은 상위 섹션에 노출, MRU는 액션 ID로 저장(이름 변경 무관)·표시 시점에 stale 항목 필터 | [src/extension.ts](../src/extension.ts) `taskhub.runAnyAction`, `buildRunAnyActionPicks`, `updateRunAnyActionMru` |
+| TaskHub Doctor / Action Lint (이전 §5) | 0.4.40부터 제공. `TaskHub: Doctor — Lint Actions` 커맨드가 모든 `actions.json` 소스를 한 번에 정적 분석해 Problems 패널에 게시 (스키마/regex/미해결 변수/외부 쓰기/중복 id/capture group/dependsOn cycle 7종 검사) | [docs/features.md §23](./features.md#23-taskhub-doctor-action-lint), [src/doctor.ts](../src/doctor.ts) |
 
 ## 우선순위 요약
 
@@ -22,14 +23,15 @@
 | 1 | Memory Map Diff / Budget Check | 파서/WebView 기반이 이미 있음. 임베디드 정체성 강화 | 중 |
 | 2 | CMSIS-SVD 기반 Register/SFR Hover | 벤더 헤더 없는 프로젝트에서 차별점 | 대 |
 | 3 | ELF Symbol Navigator | #1의 전제이자 단독 가치도 있음 | 소 |
-| 4 | 병렬 실행 / Task DAG | 멀티 타겟 빌드 사용자에 한정적 | 중 |
-| 5 | TaskHub Doctor / Action Lint | Preview Run 인프라 재사용. 시스템 신뢰도 직격 | 소~중 |
+| 4 | 병렬 실행 / Task DAG | 멀티 타겟 빌드 사용자에 한정적. Doctor가 이미 `dependsOn` cycle/missing을 검사 — 본 작업은 런타임 스케줄러 추가 | 중 |
 | 6 | Named Input Profiles | 인터랙티브 입력 재실행("수정해서 실행")의 더 큰 그림. 임베디드 워크플로 fitness 강함 | 중 |
 | 7 | Action Run Report | History 패널 자연 확장. 출력 로그 영속화와 페어 | 중 |
 | 8 | 출력 로그 영속화 + 회전 | 작은 비용. Action Run Report에 흡수 가능 | 소 |
 | 9 | 백그라운드 완료 알림 + 소요 시간 | 데이터 재활용, UI만 추가. 임베디드 빌드 즉시 통지 | 소 |
 
-**권장 시작 순서**: Memory Map Diff(1) → ELF Symbol Navigator(3). 5~9는 액션 시스템 / UX 영역.
+> 순위 5(TaskHub Doctor / Action Lint)는 0.4.40 릴리스에 포함되었습니다 — 상단 "이미 구현된 항목" 표 / [docs/features.md §23](./features.md#23-taskhub-doctor-action-lint) 참조.
+
+**권장 시작 순서**: Memory Map Diff(1) → ELF Symbol Navigator(3). 6~9는 액션 시스템 / UX 영역.
 
 ---
 
@@ -82,23 +84,9 @@
 - 멀티 타겟, 멀티 MCU 프로젝트 대상
 - 순차 실행 기본값 유지 (하위 호환)
 
-## 5. TaskHub Doctor / Action Lint
+## 5. TaskHub Doctor / Action Lint  *(0.4.40에 구현됨)*
 
-전체 `actions.json`을 일괄 진단해 깨진 액션을 빠르게 식별.
-
-- 검사 항목:
-  - 미해결 변수 (`${...}` 리터럴이 해석 후에도 남는 경우)
-  - 중복 액션 id / 동일 액션 내 task id 충돌
-  - 존재하지 않는 tool / 경로 (`type: tool` 호출 대상)
-  - capture / diagnostics regex 컴파일 오류, group 인덱스 부적합
-  - 순환 `dependsOn`
-  - `vscodeTask`가 가리키는 label이 `.vscode/tasks.json`에 부재
-  - workspace 외부 쓰기 경로 (Preview Run의 경고 재사용)
-- 출력: VS Code Problems 패널 (`actions.json` 위치 기반 진단) 또는 전용 webview 보고서
-- 인프라 재사용: Preview Run의 변수 해석기 / ajv 스키마 / capture·diagnostics 검증 그대로
-- 커맨드: `TaskHub: Lint Actions`, `TaskHub: Doctor`
-- **이유**: 1.2 tasks.json Import 이후 들어온 사용자의 첫 마찰점이 "왜 안 돼?". 단일 액션 Preview Run으로는 전체 점검 부족 — 시스템 신뢰도 직격.
-- 영역: 액션 시스템
+0.4.40 릴리스로 들어왔습니다. 상세는 [docs/features.md §23](./features.md#23-taskhub-doctor-action-lint) 참조. 현재 범위에 포함된 검사: 스키마 위반, regex 컴파일(capture/diagnostics), capture/diagnostics group 인덱스, 중복 액션·task id, 미해결 `${…}` 변수, 워크스페이스 외부 쓰기, `dependsOn` self/missing/cycle. 보류된 항목: `type: 'tool'` 경로 존재, `vscodeTask` label 매칭 — 두 기능 모두 스키마에 정식 진입한 뒤에 Doctor 검사로 추가.
 
 ## 6. Named Input Profiles
 

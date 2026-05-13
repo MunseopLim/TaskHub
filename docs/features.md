@@ -27,6 +27,7 @@
 20. [Hex Viewer](#20-hex-viewer)
 21. [설정 레퍼런스](#21-설정-레퍼런스)
 22. [Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기)
+23. [TaskHub Doctor (Action Lint)](#23-taskhub-doctor-action-lint)
 
 ---
 
@@ -1740,3 +1741,50 @@ VS Code의 소스 컨트롤·탐색기·에디터 탭에서 마크다운 / HTML 
 3. 그 외 — 한국어/영어 에러 메시지("마크다운 파일이 아닙니다." / "HTML 파일이 아닙니다.")를 출력하고 종료.
 
 대상 URI 정규화·결정 로직과 핸들러는 [src/previewOpener.ts](../src/previewOpener.ts)에 모여 있고, 모든 VS Code API 호출은 의존성 주입 가능한 구조여서 단위 테스트가 실제 VS Code 명령을 호출하지 않고도 위임 경로 + SCM 인자 모양 처리 + 폴백 경로를 검증합니다([src/test/previewOpener.test.ts](../src/test/previewOpener.test.ts)).
+
+---
+
+## 23. TaskHub Doctor (Action Lint)
+
+`actions.json` 전체를 한 번에 정적 분석해 깨진 액션을 빠르게 찾아내는 진단 도구입니다. Preview Run([§5 "Preview Run"](#preview-run-dry-run))이 *한 액션*의 실행 시뮬레이션이라면, Doctor는 *모든 소스*(`media/actions.json` + 선택된 preset + 워크스페이스별 `.vscode/actions.json`)의 건강검진을 한 번에 돌립니다. 결과는 VS Code Problems 패널에 게시되며, 각 항목을 클릭하면 해당 액션이 정의된 라인으로 점프합니다.
+
+### 23.1. 실행 방법
+
+Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 됩니다. 별도 인자/선택 없이 현재 로드된 모든 `actions.json` 소스를 한 번에 점검합니다. 발견된 문제가 없으면 정보 토스트로 알리고, 문제가 있으면 경고 토스트와 함께 **Problems 열기** 버튼을 제시합니다.
+
+진단 컬렉션은 `taskhub-doctor` 라는 별도 source로 게시되며, 액션 실행 중 Problem Matcher가 만들어내는 진단(`taskhub:<actionId>`)과 분리되어 있습니다 — Doctor 재실행은 자기 결과만 지우고, 빌드 실행 결과는 건드리지 않습니다.
+
+### 23.2. 검사 항목
+
+| 코드 | 심각도 | 설명 |
+| --- | --- | --- |
+| `json.parse` | error | JSON 파서가 실패한 경우. 위치는 JS 엔진이 보고한 오프셋을 라인/컬럼으로 환산. |
+| `schema.*` | error | AJV 스키마 위반. `keyword`에 따라 코드가 `schema.required` / `schema.enum` / `schema.additionalProperties` 등으로 세분화. 메시지는 위반된 JSON Pointer(`/0/action/tasks/1/output`)와 함께 표시되며, 가능한 한 해당 라인을 가리킵니다. |
+| `duplicate.action.id` | error | 같은 파일 안에서 같은 action `id`가 두 번 이상 정의됨. |
+| `duplicate.task.id` | error | 한 액션의 `tasks[]` 배열에 같은 task `id`가 두 번 이상 등장. |
+| `capture.regex` | error | `output.capture.regex`가 `new RegExp()` 컴파일에 실패. |
+| `capture.group` | warning | `output.capture.group` 인덱스가 regex의 capture group 개수를 벗어남. |
+| `capture.reserved` | error | `output.capture.name`이 reserved 집합(`output`/`path`/`value` 등 task 결과 빌트인 키)과 충돌. 스키마는 이름 패턴만 검사하므로 schema-pass 후 런타임에서 throw 하던 케이스를 Doctor가 사전에 잡음. |
+| `capture.duplicate` | error | 같은 task 안에서 `output.capture.name`이 두 번 이상 정의됨. |
+| `diagnostics.regex` | error | `output.diagnostics.pattern`이 컴파일 실패. `g` 플래그는 런타임과 동일하게 사전 제거된 뒤 검사. |
+| `diagnostics.group` | warning | `file`/`line`/`message` 등의 그룹 인덱스가 regex가 정의한 capture group 수보다 큼. |
+| `diagnostics.preset` | error | `"$gcc"` / `"$tsc"` 같은 preset 단축 문자열이 알 수 없는 이름이거나 `$` 없이 적힘. |
+| `variable.unresolved` | warning | Preview Run과 동일한 simulation 컨텍스트에서 변수 치환 후에도 남는 `${…}` 가 있음. 런타임에는 리터럴로 전달되므로 의도된 placeholder가 아니면 거의 항상 버그. |
+| `path.outside-workspace` | error | `writeFile` / `appendFile` / `output.filePath`의 해석 결과가 워크스페이스 밖. 런타임이 실행을 거부할 경로. (변수 치환 후에도 `${…}`가 남은 경우는 검사를 건너뜀 — 안전 결정 불가) |
+| `dependsOn.self` | error | task의 `dependsOn`에 자기 자신이 포함됨. |
+| `dependsOn.missing` | error | `dependsOn`이 같은 액션에 존재하지 않는 task id를 가리킴. |
+| `dependsOn.cycle` | error | task 간 `dependsOn` 그래프에 순환이 있음. 출력 메시지에 순환 경로 포함. |
+
+### 23.3. `dependsOn`에 대한 주의
+
+`task.dependsOn`은 현재 **선언적**으로만 존재합니다 — 스키마와 Doctor가 이 필드를 인식하지만, 런타임 엔진은 여전히 배열 순서대로 task를 순차 실행하며 `dependsOn`을 무시합니다. 즉 Doctor에서 cycle/missing이 보고된 액션도 *실행은 일단 됩니다*. 진짜 DAG / 병렬 실행은 [docs/roadmap.md](./roadmap.md) §4("Parallel Execution / Task DAG")의 본 작업으로 들어옵니다. Doctor가 먼저 들어온 이유는 그 본 작업이 도착할 때 `actions.json`이 *문법적으로* 준비되어 있도록 사용자가 미리 적어 둘 수 있게 해주려는 의도입니다.
+
+### 23.4. 동작상 한계
+
+- **메시지의 위치 정밀도**: AJV 에러는 JSON Pointer를 라인/컬럼으로 매핑하는 자체 워커(`src/doctor.ts` `locateJsonPointer`)가 처리합니다. 워커가 path를 따라가지 못하면 *가장 깊이 들어간 지점*으로 폴백하므로, 가끔 정확한 노드 대신 그 부모 라인이 표시될 수 있습니다. 그래도 점프 위치는 항상 해당 액션 내부.
+- **`type: 'tool'` 경로 / `vscodeTask` label 매칭**은 현 범위에 없습니다. 두 기능 모두 actions 스키마에 아직 정식 진입하지 않았으며, 들어오는 시점에 Doctor 검사 항목으로 추가될 예정.
+- **워크스페이스 외부 경로 검사는 실제 fs 접근 없이** path normalization만으로 판정합니다. 심볼릭 링크/`..` 트릭은 런타임 가드(`resolveWithinWorkspace`, [src/pipelineUtils.ts](../src/pipelineUtils.ts))가 최종적으로 막습니다.
+
+### 23.5. 구현 메모
+
+핵심 분석 로직은 `vscode`에 의존하지 않는 순수 모듈([src/doctor.ts](../src/doctor.ts))에 있고, 익스텐션 레이어는 (1) 워크스페이스/preset/번들 actions.json을 모두 모아 `DoctorInput[]`을 만들고 (2) 결과 `DoctorFinding[]`을 `vscode.Diagnostic`으로 변환해 publish 하는 두 역할만 합니다. AJV validator는 함수 파라미터로 주입되므로 같은 검사를 단위 테스트에서 그대로 돌릴 수 있습니다 — `src/test/doctor.test.ts`가 22개 케이스로 모든 finding code를 커버합니다.

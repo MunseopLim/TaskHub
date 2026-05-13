@@ -21,6 +21,7 @@ import {
 import { showHexViewer, HexEditorProvider, HexViewerOpenHistory, openHexViewerFile } from './hexViewer';
 import { t } from './i18n';
 import { buildPreviewReport } from './previewRun';
+import { runDoctor, DoctorFinding, DoctorInput } from './doctor';
 import { createZipArchive, extractZipArchive } from './archiveUtils';
 
 // Compile the actions JSON-schema validator once and reuse it. Re-compiling on
@@ -734,6 +735,100 @@ function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] 
     return mergedActions;
 }
 
+/**
+ * Gather every actions.json source TaskHub would normally merge (bundled,
+ * selected preset, every workspace folder) so {@link runDoctor} can lint
+ * them without going through {@link loadAllActions} — the latter throws on
+ * the first schema violation, which is the very case Doctor exists to
+ * surface. Missing files are skipped silently.
+ */
+function collectDoctorInputs(context: vscode.ExtensionContext): DoctorInput[] {
+    const inputs: DoctorInput[] = [];
+    const workspaceRoots = getWorkspaceRoots();
+
+    const tryRead = (filePath: string): string | undefined => {
+        if (!fs.existsSync(filePath)) {
+            return undefined;
+        }
+        try {
+            return fs.readFileSync(filePath, 'utf-8');
+        } catch (e: any) {
+            outputChannel.appendLine(`[Doctor] Failed to read ${filePath}: ${e?.message ?? e}`);
+            return undefined;
+        }
+    };
+
+    const bundledPath = path.join(context.extensionPath, 'media', 'actions.json');
+    const bundledText = tryRead(bundledPath);
+    if (bundledText !== undefined) {
+        inputs.push({
+            filePath: bundledPath,
+            sourceLabel: 'extension media/actions.json',
+            rawText: bundledText,
+            workspaceRoots,
+            extensionPath: context.extensionPath,
+        });
+    }
+
+    const presetId = getSelectedPresetId();
+    if (presetId) {
+        const preset = discoverPresets(context).find(p => p.id === presetId || p.name === presetId);
+        if (preset) {
+            const presetText = tryRead(preset.filePath);
+            if (presetText !== undefined) {
+                inputs.push({
+                    filePath: preset.filePath,
+                    sourceLabel: `preset: ${preset.name}`,
+                    rawText: presetText,
+                    workspaceRoots,
+                    extensionPath: context.extensionPath,
+                });
+            }
+        }
+    }
+
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    for (const folder of workspaceFolders) {
+        const wsActionsPath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
+        const text = tryRead(wsActionsPath);
+        if (text === undefined) {
+            continue;
+        }
+        inputs.push({
+            filePath: wsActionsPath,
+            sourceLabel: `${folder.name}:.vscode/actions.json`,
+            rawText: text,
+            workspaceFolder: folder.uri.fsPath,
+            workspaceRoots,
+            extensionPath: context.extensionPath,
+        });
+    }
+
+    return inputs;
+}
+
+function publishDoctorDiagnostics(findings: DoctorFinding[]): void {
+    const collection = getDoctorDiagnosticCollection();
+    collection.clear();
+    const byFile = new Map<string, vscode.Diagnostic[]>();
+    for (const f of findings) {
+        const start = new vscode.Position(Math.max(0, f.range.startLine - 1), Math.max(0, f.range.startColumn - 1));
+        const end = new vscode.Position(Math.max(0, f.range.endLine - 1), Math.max(0, f.range.endColumn - 1));
+        const severity = f.severity === 'error'
+            ? vscode.DiagnosticSeverity.Error
+            : (f.severity === 'warning' ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Information);
+        const diag = new vscode.Diagnostic(new vscode.Range(start, end), f.message, severity);
+        diag.code = f.code;
+        diag.source = 'TaskHub Doctor';
+        const arr = byFile.get(f.filePath) ?? [];
+        arr.push(diag);
+        byFile.set(f.filePath, arr);
+    }
+    for (const [filePath, diags] of byFile) {
+        collection.set(vscode.Uri.file(filePath), diags);
+    }
+}
+
 export function countActionItems(item: ActionItem): number {
     if (!item.children) { return 1; }
     let count = 0;
@@ -1337,6 +1432,20 @@ export class ShellCommandError extends Error {
  * features release their underlying resources.
  */
 const actionDiagnosticCollections = new Map<string, vscode.DiagnosticCollection>();
+
+/**
+ * Shared `DiagnosticCollection` for TaskHub Doctor (`taskhub.doctor`).
+ * Kept separate from per-action collections so a Doctor re-run can clear
+ * its own findings without disturbing diagnostics emitted by a running
+ * action's Problem Matcher.
+ */
+let doctorDiagnosticCollection: vscode.DiagnosticCollection | undefined;
+function getDoctorDiagnosticCollection(): vscode.DiagnosticCollection {
+    if (!doctorDiagnosticCollection) {
+        doctorDiagnosticCollection = vscode.languages.createDiagnosticCollection('taskhub-doctor');
+    }
+    return doctorDiagnosticCollection;
+}
 
 function getOrCreateActionDiagnostics(actionId: string): vscode.DiagnosticCollection {
     let col = actionDiagnosticCollections.get(actionId);
@@ -4031,6 +4140,42 @@ export function activate(context: vscode.ExtensionContext) {
         channel.appendLine('');
         channel.show(true);
     }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.doctor', async () => {
+        const inputs: DoctorInput[] = collectDoctorInputs(context);
+        if (inputs.length === 0) {
+            vscode.window.showInformationMessage(t(
+                'TaskHub Doctor: 점검할 actions.json 소스를 찾을 수 없습니다.',
+                'TaskHub Doctor: no actions.json sources were found to lint.'
+            ));
+            return;
+        }
+        const validator = getActionsValidator() as unknown as (data: unknown) => boolean;
+        // AJV's ValidateFunction exposes `.errors` as a property on the
+        // function object; cast through unknown to satisfy DoctorValidator.
+        const findings = runDoctor(inputs, validator as any);
+        publishDoctorDiagnostics(findings);
+
+        const errorCount = findings.filter(f => f.severity === 'error').length;
+        const warningCount = findings.filter(f => f.severity === 'warning').length;
+        if (findings.length === 0) {
+            vscode.window.showInformationMessage(t(
+                `TaskHub Doctor: ${inputs.length}개 소스 점검 완료 — 문제 없음.`,
+                `TaskHub Doctor: scanned ${inputs.length} source(s) — no issues found.`
+            ));
+        } else {
+            const action = await vscode.window.showWarningMessage(
+                t(
+                    `TaskHub Doctor: ${findings.length}개 문제 발견 (오류 ${errorCount}, 경고 ${warningCount}). Problems 패널 확인.`,
+                    `TaskHub Doctor: ${findings.length} issue(s) found (errors: ${errorCount}, warnings: ${warningCount}). See the Problems panel.`
+                ),
+                t('Problems 열기', 'Open Problems')
+            );
+            if (action) {
+                await vscode.commands.executeCommand('workbench.actions.view.problems');
+            }
+        }
+        outputChannel.appendLine(`[Doctor] scanned ${inputs.length} source(s); ${findings.length} finding(s) (errors=${errorCount}, warnings=${warningCount}).`);
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
         const id = actionItem.id || actionItem.label;
         if (!id) {
@@ -5274,4 +5419,6 @@ export function deactivate() {
         col.dispose();
     }
     actionDiagnosticCollections.clear();
+    doctorDiagnosticCollection?.dispose();
+    doctorDiagnosticCollection = undefined;
 }
