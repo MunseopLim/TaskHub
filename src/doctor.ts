@@ -27,7 +27,7 @@
  */
 
 import type { ActionItem, Task, OutputCapture, DiagnosticPattern } from './schema';
-import { interpolatePipelineVariables } from './pipelineUtils';
+import { interpolatePipelineVariables, RESERVED_CAPTURE_NAMES } from './pipelineUtils';
 import {
     simulateTaskResult,
     findUnresolved,
@@ -85,19 +85,6 @@ export interface DoctorValidator {
 }
 
 const DEFAULT_RANGE = { startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 };
-
-/**
- * Mirror of the `RESERVED_CAPTURE_NAMES` set in `pipelineUtils.ts`. Capture
- * rules whose `name` matches one of these would shadow a built-in task
- * result key (`output`, `path`, …), and `applyOutputCapture` throws at
- * runtime. Keep the two lists in sync if either grows. Duplicated here on
- * purpose so doctor.ts does not depend on a non-exported symbol from
- * pipelineUtils.ts.
- */
-const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
-    'output', 'outputDir', 'path', 'dir', 'name', 'fileNameOnly', 'fileExt',
-    'value', 'values', 'archivePath', 'confirmed'
-]);
 
 export function runDoctor(inputs: DoctorInput[], validator: DoctorValidator): DoctorFinding[] {
     const findings: DoctorFinding[] = [];
@@ -512,10 +499,6 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                     continue;
                 }
 
-                // `RESERVED_CAPTURE_NAMES` in pipelineUtils.ts. Doctor keeps
-                // its own copy so this module stays free of pipelineUtils
-                // private symbols; keep the two lists in sync if either
-                // grows.
                 if (typeof rule.name === 'string') {
                     if (RESERVED_CAPTURE_NAMES.has(rule.name)) {
                         findings.push({

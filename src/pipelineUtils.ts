@@ -34,8 +34,13 @@ export function wouldExceedCaptureLimit(currentBytes: number, chunkBytes: number
     return currentBytes + chunkBytes > limitBytes;
 }
 
-/** Reserved capture names that would shadow built-in task result properties. */
-const RESERVED_CAPTURE_NAMES = new Set([
+/**
+ * Reserved capture names that would shadow built-in task result properties.
+ * Exported so Doctor (`src/doctor.ts`) can validate `output.capture.name`
+ * against the *same* list the runtime uses — keeping the two in sync
+ * automatically instead of through a mirror copy.
+ */
+export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
     'output', 'outputDir', 'path', 'dir', 'name', 'fileNameOnly', 'fileExt',
     'value', 'values', 'archivePath', 'confirmed'
 ]);
