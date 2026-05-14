@@ -21,9 +21,8 @@
 
 | 순위 | 기능 | 근거 | 구현 크기 |
 | --- | --- | --- | --- |
-| 1 | Memory Map Diff / Budget Check | 파서/WebView 기반이 이미 있음. 임베디드 정체성 강화 | 중 |
 | 2 | CMSIS-SVD 기반 Register/SFR Hover | 벤더 헤더 없는 프로젝트에서 차별점 | 대 |
-| 3 | ELF Symbol Navigator | #1의 전제이자 단독 가치도 있음 | 소 |
+| 3 | ELF Symbol Navigator | 기존 ELF 파서를 활용한 검색/점프 UX. 단독 가치 있음 | 소 |
 | 6 | Named Input Profiles | 인터랙티브 입력 재실행("수정해서 실행")의 더 큰 그림. 임베디드 워크플로 fitness 강함 | 중 |
 | 7 | Action Run Report | History 패널 자연 확장. 출력 로그 영속화와 페어 | 중 |
 | 8 | 출력 로그 영속화 + 회전 | 작은 비용. Action Run Report에 흡수 가능 | 소 |
@@ -31,7 +30,7 @@
 
 > 순위 4(병렬 실행 / Task DAG)와 5(TaskHub Doctor / Action Lint)는 각각 0.4.41 / 0.4.40 릴리스에 포함되었습니다 — 상단 "이미 구현된 항목" 표 참조.
 
-**권장 시작 순서**: Memory Map Diff(1) → ELF Symbol Navigator(3). 6~9는 액션 시스템 / UX 영역.
+**권장 시작 순서**: CMSIS-SVD 기반 Register/SFR Hover(2) → ELF Symbol Navigator(3). 6~9는 액션 시스템 / UX 영역.
 
 ---
 
@@ -57,26 +56,6 @@
 
 ---
 
-## 1. Memory Map Diff / Budget Check
-
-이전 빌드 대비 Flash/RAM 증감, region/symbol/object별 예산 초과 여부 확인.
-
-```json
-{
-  "memoryMap": {
-    "budgets": [
-      { "region": "FLASH", "maxUsed": "900KB" },
-      { "region": "RAM", "maxUsed": "180KB" }
-    ]
-  }
-}
-```
-
-- 커맨드: `TaskHub: Compare Memory Maps`, `TaskHub: Check Memory Budget`
-- 또는 액션 태스크 타입으로 통합
-- 기반 파서: AXF/ELF, armlink listing, 링커 스크립트 (이미 존재)
-- 관련 문서: [docs/features.md](./features.md) 섹션 19
-
 ## 2. CMSIS-SVD 기반 Register/SFR Hover
 
 `.svd` 파일을 읽어 peripheral/register/field 정보를 hover로 제공.
@@ -93,7 +72,6 @@
 
 - 심볼 이름 검색 → 주소/크기/섹션/hex dump
 - Memory Map과 양방향 점프
-- #1 Memory Map Diff의 전제 조건
 
 ## 4. 병렬 실행 / Task DAG  *(0.4.41에 구현됨)*
 
@@ -160,5 +138,5 @@
 ## 메모
 
 - 원본 논의: 현재 강점(Memory Map, C/C++ Hover, 파이프라인)을 더 쓸모 있게 만드는 방향이 "새 영역 확장"보다 우선.
-- 구현 순서 설계 원칙: 간판 기능(1) → 임베디드 세부 도구(2~4) → 액션 시스템 / UX 후보(5~9).
+- 구현 순서 설계 원칙: 임베디드 세부 도구(2~3) → 액션 시스템 / UX 후보(6~9).
 - 이번 릴리스에서 완료된 항목(Output Parser / Preview Run / timeoutSeconds / continueOnError / Problem Matcher)은 상단 "이미 구현된 항목" 표 참조.
