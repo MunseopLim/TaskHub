@@ -29,6 +29,113 @@
 =====================================================================
 -->
 
+## [0.5.0] - 2026-05-14
+
+### 추가 / 수정 — 병렬 실행 / Task DAG 정식 릴리스 (0.4.41~0.4.44 통합 + 코드 리뷰 반영)
+
+0.4.41 도입한 `parallel: true` opt-in 병렬 실행과 후속 0.4.42~0.4.44 픽스를 단일 0.5.0 릴리스로 묶고, 병렬 도입 이후 발견된 다중 라운드 코드 리뷰 지적을 모두 반영. 사용자 영향 정리:
+
+#### 추가 (병렬 실행 / Task DAG)
+
+- **`task.parallel: true` opt-in 병렬 실행**: `dependsOn` + `${taskId.x}` 자동 추론으로 DAG를 구성, `taskhub.pipeline.maxParallelTasks`(기본 4, 1~32)로 동시 실행 한도 제어. 기본은 직렬 그대로. 참조: [src/pipelineUtils.ts](src/pipelineUtils.ts) `buildTaskGraph` / `TaskScheduler`, [src/extension.ts](src/extension.ts) `executeActionPipeline`, [docs/features.md §24](docs/features.md#24-병렬-실행--task-dag).
+- **사전 검증**: `validateTaskGraph`가 액션 진입 시 self-dep / missing-dep / 순환을 즉시 실패로 거부. Doctor가 같은 검사를 lint 시점에 적용([src/doctor.ts](src/doctor.ts) `dependsOn.cycle` / `.missing` / `.self` / `parallel.interactive`).
+- **Multi-track Actions 패널**: 동시에 실행 중인 task가 여러 개여도 모두 progress 라벨에 표시(`2 running · A, B` / `3 running · A, B + 1`). 단일 실행은 task의 실제 declaration index를 사용해 out-of-order 완료에서 misnumber 안 함. 참조: [src/providers/actionStatus.ts](src/providers/actionStatus.ts), [src/providers/mainViewProvider.ts](src/providers/mainViewProvider.ts) `formatProgressDescription`.
+- **Preview Run graph 검증**: `buildTaskGraph` + `validateTaskGraph` 결과를 Preview에 표기, 사이클/missing-dep가 있으면 summary가 "action would FAIL at start" 분기. 사용자 typo `${alreadyRan.typoKey}`도 별도 `findTypoRefs`로 검출(런타임 `.output` fallback이 가려버리는 케이스). 참조: [src/previewRun.ts](src/previewRun.ts) `findTypoRefs` / `buildPreviewReport`.
+
+#### 수정 (코드 리뷰 반영 — 정확성)
+
+- **Platform-aware dependency inference**: `command` / `tool`의 per-platform `{windows, macos, linux}` 객체에서 *active platform 분기만* 스캔. 이전엔 union을 봤기 때문에 cross-platform 액션이 false-positive cycle로 거부될 수 있었음. 참조: [src/pipelineUtils.ts](src/pipelineUtils.ts) `projectActivePlatformBranches`, `inferTaskDependencies({ platform })`.
+- **Reserved-head 분리 정확도**: `RESERVED_VARIABLE_HEADS = {workspaceFolder, extensionPath}`와 `RESERVED_HEAD_PREFIXES = ['env:', 'input:']`로 분리. 이전 `head.includes(':')` 광범위 필터는 `id: 'build:fw'` 같은 합법 colon task id의 자동 의존성을 떨어뜨려 parallel consumer가 producer를 race할 위험이 있었음.
+- **DAG inputs bare-id**: `unzip`의 `inputs.archive` / `.file` / `.destination`은 `${...}` 없이 raw task id로 참조되는데 `inferTaskDependencies`가 이를 놓쳐, `parallel: true` unzip이 선행 zip을 기다리지 않을 수 있었음. 모든 task의 `inputs` 값을 valid task id와 매칭해 dep으로 추가.
+- **Doctor / Preview forward-only toleration**: 이미 시뮬레이션된 task에 대한 ref는 더 이상 suppress하지 않음 — `${alreadyRan.typoKey}` typo를 다시 찾아냄. 참조: [src/doctor.ts](src/doctor.ts) `analyzeActionTasks` `forwardTaskIds`.
+- **다중 실패 `AggregateError`**: 한 액션의 두 개 이상 task가 동시에 실패하면 모든 cause를 `AggregateError`로 묶어 throw — 메시지에 모든 task id 요약, `error.errors`에 개별 cause 보존. 단일 실패는 원본 Error 그대로(back-compat).
+- **`InFlightOutcome` discriminated union**: scheduler 결과 타입을 `success` / `skipped` / `failed`로 좁혀 `!` non-null assertion 제거.
+- **`parallelActions` refcount**: `Set<string>` → `Map<string, number>`로 전환 + `enterParallelAction` / `exitParallelAction` / `isParallelActionActive` 헬퍼. future-proofing.
+
+#### 변경 (런타임 시맨틱)
+
+- **`task.dependsOn` honored**: 0.4.40까지는 선언적이었으나 이번부터 실제 실행 순서를 결정. cycle/missing/self는 즉시 실패(이전엔 무시되고 배열 순서로 실행).
+- **활성 task 자료구조 재구조화**: `activeTasks` / `actionChildProcesses`가 `Map<actionId, Map<taskId, ...>>`로 바뀌어 task 단위 timeout/stop이 가능. 사용자 "Stop"은 여전히 액션 전체 종료.
+- **출력 격리**: `parallel: true` task가 하나라도 있으면 streamed task terminal group과 `output.mode: 'terminal'` 키가 `actionId:taskId`로 분리. 직렬 액션은 영향 없음.
+- **Interactive task + parallel**: prompt mutex로 다이얼로그 직렬화 보장. Doctor가 `parallel.interactive` warning.
+- **verbose 로그 prefix**: `executeShellCommand`가 verbose 로그 라인마다 `[task:${taskId}] ` prefix를 붙여 두 task의 close 블록이 섞여도 식별 가능. multi-line stdout/stderr/CRLF/CR/LF 모두 처리.
+
+#### 테스트 / 문서
+
+- 신규 90+ 테스트(graph 유틸 + scheduler + mutex + Doctor warning + output 격리 + AggregateError + platform projection + reserved heads + Preview cycle/missing/typo + IT-076..079 end-to-end). 최종 1331 passing, 1 pending.
+- `HistoryProvider`에 `getMaxItems` 옵션 주입 — 테스트가 글로벌 config를 건드리지 않고 maxItems를 결정.
+- `docs/features.md` §24 병렬 실행 문서 + §23.3 dependsOn/parallel 런타임 동작 + fileDialog/folderDialog 서브섹션.
+
+## [0.4.44] - 2026-05-14
+
+### 수정 — 0.4.43 코드 리뷰 반영 (DAG inputs 의존성 + Actions 패널 progress 라벨 정확도)
+
+0.4.43 multi-track 표시 변경에 대한 리뷰에서 짚힌 두 건을 즉시 보정.
+
+#### Medium (스케줄러 정확성)
+
+- **`task.inputs` bare-id 참조도 자동 의존성 추론에 포함**: `handleUnzip`이 `task.inputs.archive` / `inputs.file` / `inputs.destination`을 `allResults[id]`로 직접 조회하지만 `inferTaskDependencies`는 `${id.x}` 형태만 head로 추출해서 이 bare-id 경로가 DAG에 빠져 있었다. 결과로 `parallel: true`인 unzip이 선행 zip을 기다리지 않고 시작해 "requires an archive path"로 실패할 수 있는 시퀀스가 있었다. 이제 모든 task 타입의 `inputs` 값을 동등하게 검사해 valid task id와 일치하는 항목만 dep로 추가(자기 자신은 제외, 비 task id 문자열은 무시). 참조: [src/pipelineUtils.ts](src/pipelineUtils.ts) `inferTaskDependencies`.
+
+#### Medium (UI 정확성)
+
+- **Actions 패널 single-running 라벨이 task의 실제 declaration index를 사용**: 0.4.43 렌더는 `${completed+1}/${total} · ${id}` 형태로 표시했는데, 병렬 실행에서 task 2가 먼저 끝나고 task 1이 아직 running인 경우 `2/3 · A`로 표시되는 misnumber가 발생했다(A는 task 1인데도 "2"로 보임). `ActionProgress.running`을 `{ taskId, index }[]` 형태로 확장해 `onTaskTransition`이 `event.index`를 같이 저장하고, 렌더는 `running[0].index`를 사용해 task의 실제 position을 표시. 참조: [src/providers/actionStatus.ts](src/providers/actionStatus.ts) `RunningTaskEntry`, [src/extension.ts](src/extension.ts) `onTaskTransition`, [src/providers/mainViewProvider.ts](src/providers/mainViewProvider.ts) `formatProgressDescription`.
+
+**테스트**: 신규 5종(inferTaskDependencies inputs 3건 / buildTaskGraph 회귀 1건 / formatProgressDescription P3 회귀 1건), 픽스처 마이그레이션 4건(`running` 엔트리 shape 갱신), 최종 1314 passing.
+
+## [0.4.43] - 2026-05-14
+
+### 변경 — 병렬 실행 액션의 동시 진행 task를 다중 라벨로 표시
+
+0.4.41 병렬 실행 후속의 마지막 잔여 항목(로드맵 §0.4.41 후속 C). 0.4.41까지는 `onTaskTransition`이 `running` 이벤트마다 `actionStates.progress`를 덮어써 두 개 이상의 task가 동시에 실행 중일 때도 Actions 패널에는 "마지막으로 시작된 task" 하나만 표시됐다. 데이터 모델은 동시 transition을 모두 받고 있었지만 UI가 single-track이라 사용자 입장에서는 나머지 task가 묻혔다.
+
+#### UX / 일관성
+
+- **`ActionProgress` shape 확장**: `{ index, total, taskId }` → `{ total, completed, running: string[] }`. `running`은 시작 시각 순으로 정렬된 task id 목록 — 직렬 실행이면 길이 ≤ 1, 병렬 실행이면 동시에 여러 개. 참조: [src/providers/actionStatus.ts](src/providers/actionStatus.ts).
+- **`onTaskTransition` 풀 lifecycle 처리**: `running` 이벤트뿐 아니라 `success`/`failure`/`skipped` terminal 이벤트도 받아 `running` 목록에서 task를 제거하고 `completed`를 증가. 동시 transition이 모두 progress에 반영된다. 참조: [src/extension.ts](src/extension.ts) `executeAction`의 `onTaskTransition` 콜백.
+- **TreeItem 렌더 분기** (`formatProgressDescription` export): running.length에 따라 1개는 `2/3 · link`(기존 직렬 호환), 2개는 `2 running · A, B`, 3개+는 `4 running · A, B + 2`(overflow), 0개+completed>0(직렬 transition 사이 gap)은 `1/3` compact form. 단일 task 액션(total=1)은 description 미표시 정책 유지 — `1/1 · X` 노이즈 없음. 참조: [src/providers/mainViewProvider.ts](src/providers/mainViewProvider.ts) `formatProgressDescription`.
+
+**테스트**: 신규 8종(TreeItem 멀티트랙 통합 IT-072d/e + `formatProgressDescription` 단위 6종), 기존 픽스처 마이그레이션 2건(IT-072 / IT-072b 새 shape으로 갱신), 최종 1309 passing.
+
+## [0.4.42] - 2026-05-14
+
+### 수정 — 0.4.41 병렬 실행 후속 잔여 (verbose log task id prefix + Doctor/Preview future task 참조)
+
+0.4.41 병렬 실행 릴리스 직후 코드 리뷰에서 짚힌 잔여 항목 두 가지를 정리한다. 로드맵 §0.4.41 후속 작업의 B(verbose 로그 식별성)와 A(c)안(Doctor/Preview Run의 forward task ref false positive).
+
+#### Medium (디버깅 식별성)
+
+- **verbose 로그 task id prefix**: `executeShellCommand`의 verbose OutputChannel 로그 5개 사이트(WARN PowerShell fallback / INFO Executing / INFO STDOUT/STDERR/finished / ERROR Failed to start)에 `[task:${taskId}] ` prefix가 붙는다. 두 병렬 task의 close 블록이 연달아 찍힐 때 어느 task 결과인지 즉시 식별 가능. multiline `stdout`/`stderr`도 모든 continuation line이 prefix를 받으며, split은 `\r\n` / 단독 `\r` / 단독 `\n` 모두 처리(`foo\rbar` 형태의 progress 로그도 분리). `taskKey` 없는 legacy caller는 기존 unprefixed 포맷 유지. 참조: [src/extension.ts](src/extension.ts) `executeShellCommand` `appendVerboseLine`.
+
+#### Medium (lint 정확성)
+
+- **Doctor / Preview Run의 forward task ref false positive 차단**: 같은 액션 안에서 배열 순서상 뒤에 선언된 task를 `${id.x}`로 참조하는 정상 패턴 (예: `parallel: true`로 `A`가 `${B.output}` 참조, 런타임은 자동 의존성 추론으로 `B → A` 순서로 실행)이 Doctor에서는 `variable.unresolved` warning, Preview Run에서는 "unresolved variables" 보고로 잘못 잡히던 것을 수정. `findUnresolved`에 optional `toleratedHeads` 인자를 추가, 호출자가 같은 액션의 valid task id set을 전달하면 그 head를 가진 참조는 결과에서 제외. 트레이드오프: head가 valid task id이면 capture/result 키 typo(`${A.typoKey}`)는 보고되지 않는다 — 진짜 graph-aware 시뮬레이션(`buildTaskGraph` + topo 정렬)은 로드맵 후속 A(b)로 보류. 참조: [src/previewRun.ts](src/previewRun.ts) `findUnresolved` `extractRefHead`, [src/doctor.ts](src/doctor.ts) `analyzeActionTasks`.
+
+**테스트**: 신규 4종(Doctor forward-ref 통과 / unknown-head fail, Preview Run forward-ref 통과 / unknown-head fail), 최종 1301 passing.
+
+## [0.4.41] - 2026-05-14
+
+### 추가 — 병렬 실행 / Task DAG
+
+`task.parallel: true` opt-in으로 한 액션 안의 task를 의존성 기반 DAG로 실행한다 — 로드맵 §4. 기본은 변함 없이 순차이며 (`parallel`이 없으면 이전 *모든* task에 암묵 의존하는 sync barrier), `parallel: true`만 그 barrier에서 빠져나와 `dependsOn` + `${taskId.x}` 자동 추론 의존성만 기다린다. 멀티 타겟 빌드(stm32f4/f7 동시 빌드 후 패키지)처럼 의존성이 명확한 워크플로에서 wall-clock 시간이 줄어든다. 참조: [docs/features.md §24](docs/features.md#24-병렬-실행--task-dag), [src/pipelineUtils.ts](src/pipelineUtils.ts), [src/extension.ts](src/extension.ts) `executeActionPipeline`.
+
+#### 시맨틱 / 안전장치
+
+- **사전 검증**: `validateTaskGraph`가 액션 진입 시 self-dep / missing-dep / 그래프 cycle을 즉시 실패로 거부. Doctor가 lint 시점에 같은 검사를 미리 적용([src/doctor.ts](src/doctor.ts) `dependsOn.cycle` / `dependsOn.missing` / `dependsOn.self`).
+- **자동 의존성 추론**: task의 string 필드(`command` / `args` / `env` / `cwd` / `output.*` / interactive prompt)에 `${taskId.x}` 참조가 있으면 자동으로 의존성으로 잡힘. `dependsOn`을 빼먹어도 출력을 참조하는 task가 먼저 실행되는 사고가 없다.
+- **실패 격리**: 일반 실패는 새 task 스케줄링을 멈추되 이미 실행 중인 sibling은 완료까지 대기. `continueOnError: true`는 결과를 `{}`로 전파하던 기존 시맨틱 그대로. timeout은 액션 전체가 아니라 그 task만 종료.
+- **출력 격리**: 액션이 `parallel: true`를 하나라도 가지면 그 액션의 streamed task terminal group과 `output.mode: 'terminal'` 터미널 키가 `actionId:taskId` 단위로 분리되어 두 빌드의 출력이 한 터미널에 섞이지 않는다. 기존 직렬 액션은 영향 없음.
+- **Interactive task**: `inputBox`/`quickPick`/`envPick`/`confirm`/`fileDialog`/`folderDialog`에 `parallel: true`가 붙으면 Doctor가 `parallel.interactive` warning을 보고하고, 런타임은 prompt mutex로 다이얼로그를 강제 직렬화 (modal 두 개가 동시에 뜨는 일 없음).
+
+#### 영향
+
+- **새 schema 필드**: `Task.parallel: boolean` ([schema/actions.schema.json](schema/actions.schema.json), [src/schema.ts](src/schema.ts)). 기존 액션 파일에 영향 없음 — optional, 기본 false.
+- **새 설정**: `taskhub.pipeline.maxParallelTasks` (정수, 기본 4, 범위 1~32). 임베디드 빌드의 RAM 부담을 고려한 보수적 기본값. `1`로 두면 완전 순차 강제.
+- **`task.dependsOn`이 런타임에서 honored**됨: 기존 0.4.40 릴리스에서는 선언적이었으나 이번부터 실제 실행 순서를 결정. cycle/missing/self가 있는 액션은 즉시 실패 (이전엔 무시되고 배열 순서로 실행됐음 — Doctor가 이미 보고하던 케이스라 *행동 변화이지 회귀가 아님*).
+- **`activeTasks` / `actionChildProcesses` 데이터 구조**가 `Map<actionId, Map<taskId, ...>>`로 재구조화되어 task 단위 timeout/stop이 가능. 사용자 "Stop" 커맨드는 여전히 액션 전체를 죽이지만 내부적으로는 task 단위 정리.
+- **Preview Run**: 헤더에 `[parallel]` 마커를 붙여 실제 런타임이 어떤 task를 동시에 시작할 수 있는지 표시. 시뮬레이션 순서는 그대로 (declaration order).
+
+**테스트**: 신규 67종 (graph 유틸 + scheduler + mutex + Doctor warning + output 격리), 최종 1296 passing.
+
 ## [0.4.40] - 2026-05-13
 
 ### 추가 — TaskHub Doctor (Action Lint)

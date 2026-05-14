@@ -306,7 +306,12 @@
         "dependsOn": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "IDs of earlier tasks (within the same action) that this task depends on. Currently declarative only — the runtime still executes tasks in array order. TaskHub Doctor uses this to detect cycles and missing references. Full DAG / parallel scheduling lands with the upcoming Parallel Execution feature."
+          "description": "IDs of earlier tasks (within the same action) that must complete before this task. Combined with 'parallel' and auto-inferred dependencies from ${taskId.x} variable references to build the runtime task graph. TaskHub Doctor flags cycles, missing references, and self-dependencies."
+        },
+        "parallel": {
+          "type": "boolean",
+          "description": "If true, this task is exempt from the implicit 'wait for every preceding task in the array' barrier and may run concurrently with its siblings. It still waits for any task listed in 'dependsOn' and any task whose output it references via ${taskId.x} (auto-inferred). Note: 'parallel: true' is not fire-and-forget — a later task without 'parallel: true' is a sync barrier and waits for this task to finish. Interactive task types are flagged by TaskHub Doctor when 'parallel: true' because the runtime serializes their prompts via a UI mutex. Defaults to false.",
+          "default": false
         }
       },
       "required": ["id", "type"]

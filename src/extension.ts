@@ -156,7 +156,24 @@ interface TaskExecutionSetup {
     cwd: string;
 }
 
-export function createGroupedTaskPresentationOptions(actionKey: string, revealSetting?: 'always' | 'silent' | 'never'): GroupableTaskPresentationOptions {
+export interface GroupedTaskPresentationOptionsExtra {
+    /** Task id used to split the shared-terminal group when isolating parallel tasks. */
+    taskId?: string;
+    /**
+     * If true, the action this task belongs to contains at least one
+     * `parallel: true` task; the executor isolates terminal groups
+     * per-task so concurrent streamed builds don't interleave in a
+     * single VS Code terminal. Sequential actions keep the historical
+     * shared-terminal grouping for backward compatibility.
+     */
+    isParallel?: boolean;
+}
+
+export function createGroupedTaskPresentationOptions(
+    actionKey: string,
+    revealSetting?: 'always' | 'silent' | 'never',
+    extra?: GroupedTaskPresentationOptionsExtra
+): GroupableTaskPresentationOptions {
     const revealPreference = revealSetting ?? 'always';
     let revealKind: vscode.TaskRevealKind;
     switch (revealPreference) {
@@ -171,12 +188,17 @@ export function createGroupedTaskPresentationOptions(actionKey: string, revealSe
             revealKind = vscode.TaskRevealKind.Always;
             break;
     }
+    const splitGroup =
+        extra?.isParallel === true &&
+        typeof extra.taskId === 'string' &&
+        extra.taskId.length > 0;
+    const group = splitGroup ? `${actionKey}:${extra!.taskId}` : actionKey;
     return {
         reveal: revealKind,
         panel: vscode.TaskPanelKind.Shared,
         showReuseMessage: true,
         clear: false,
-        group: actionKey
+        group
     };
 }
 
@@ -909,6 +931,23 @@ import {
     normalizeEol,
     encodeFileContent,
     withTaskTimeout,
+    extractVariableHeads,
+    inferTaskDependencies,
+    buildTaskGraph,
+    detectGraphCycle,
+    validateTaskGraph,
+    formatGraphIssue,
+    actionUsesParallelTasks,
+    withInteractivePromptLock,
+    INTERACTIVE_TASK_TYPES,
+    TaskScheduler,
+} from './pipelineUtils';
+import type {
+    TaskGraph,
+    TaskGraphNode,
+    TaskGraphBuildOptions,
+    TaskGraphIssue,
+    TaskSchedulerOptions,
 } from './pipelineUtils';
 import {
     applyDiagnosticMatchers,
@@ -937,6 +976,21 @@ export {
     normalizeEol,
     encodeFileContent,
     withTaskTimeout,
+    extractVariableHeads,
+    inferTaskDependencies,
+    buildTaskGraph,
+    detectGraphCycle,
+    validateTaskGraph,
+    formatGraphIssue,
+    actionUsesParallelTasks,
+    TaskScheduler,
+};
+export type {
+    TaskGraph,
+    TaskGraphNode,
+    TaskGraphBuildOptions,
+    TaskGraphIssue,
+    TaskSchedulerOptions,
 };
 
 function getWorkspaceRoots(): string[] {
@@ -1386,7 +1440,13 @@ import { MainViewProvider, Folder, Action } from './providers/mainViewProvider';
 import { actionStates } from './providers/actionStatus';
 export { MainViewProvider, Folder, Action };
 
-const activeTasks = new Map<string, vscode.TaskExecution>();
+// Per-action, per-task tracking. Both maps are keyed by actionId at the
+// outer layer and taskId at the inner layer so parallel tasks (roadmap §4)
+// can be timed-out / stopped independently without affecting siblings.
+// Legacy spawn callers that don't carry a taskId use the empty string '' as
+// a sentinel slot — task ids are required non-empty by the schema, so no
+// real task collides with it.
+const activeTasks = new Map<string, Map<string, vscode.TaskExecution>>();
 const manuallyTerminatedActions = new Set<string>();
 const outputChannel = vscode.window.createOutputChannel('TaskHub');
 let previewOutputChannel: vscode.OutputChannel | undefined;
@@ -1398,7 +1458,66 @@ function getPreviewOutputChannel(): vscode.OutputChannel {
 }
 const actionTerminals = new Map<string, vscode.Terminal>();
 const actionWorkspaceFolderMap = new Map<string, string | undefined>();
-const actionChildProcesses = new Map<string, Set<ReturnType<typeof spawn>>>();
+
+// Refcount of in-flight parallel-capable runs per actionId. While the
+// count is > 0, the executor isolates streamed-task terminal groups
+// and `output.mode: 'terminal'` terminal keys per-task so concurrent
+// task output does not interleave. Sequential actions are not tracked
+// and keep the historical shared-terminal grouping (backward compat).
+//
+// A refcount (rather than `Set<string>`) future-proofs against any
+// scenario where the same actionId could enter `executeActionPipeline`
+// re-entrantly: today the duplicate-run guard in `markActionAsRunning`
+// prevents that, but if a future code path bypasses the guard (e.g. a
+// nested re-run), an inner `finally` must not strip the outer caller's
+// membership.
+const parallelActionRefs = new Map<string, number>();
+
+function enterParallelAction(id: string): void {
+    parallelActionRefs.set(id, (parallelActionRefs.get(id) ?? 0) + 1);
+}
+
+function exitParallelAction(id: string): void {
+    const current = parallelActionRefs.get(id) ?? 0;
+    if (current <= 1) {
+        parallelActionRefs.delete(id);
+    } else {
+        parallelActionRefs.set(id, current - 1);
+    }
+}
+
+function isParallelActionActive(id: string): boolean {
+    return parallelActionRefs.has(id);
+}
+
+const actionChildProcesses = new Map<string, Map<string, Set<ReturnType<typeof spawn>>>>();
+
+function setActiveTaskExecution(actionId: string, taskId: string, execution: vscode.TaskExecution): void {
+    if (!taskId) {
+        // Defensive guard: schema enforces non-empty `task.id`, and the only
+        // call site already pre-checks `task.id`. An empty taskId here would
+        // collide with the legacy '' sentinel used by `actionChildProcesses`
+        // for unrelated callers — fail loudly instead of corrupting state.
+        throw new Error(`setActiveTaskExecution called with empty taskId for action '${actionId}'.`);
+    }
+    let perAction = activeTasks.get(actionId);
+    if (!perAction) {
+        perAction = new Map();
+        activeTasks.set(actionId, perAction);
+    }
+    perAction.set(taskId, execution);
+}
+
+function deleteActiveTaskExecution(actionId: string, taskId: string): void {
+    const perAction = activeTasks.get(actionId);
+    if (!perAction) { return; }
+    perAction.delete(taskId);
+    if (perAction.size === 0) { activeTasks.delete(actionId); }
+}
+
+function getActiveTaskExecution(actionId: string, taskId: string): vscode.TaskExecution | undefined {
+    return activeTasks.get(actionId)?.get(taskId);
+}
 const actionStartTimestamps = new Map<string, number>();
 
 /**
@@ -1556,23 +1675,40 @@ function applyDiagnosticsToCollection(
     }
 }
 
-function terminateChildProcesses(actionId: string): boolean {
-    const processes = actionChildProcesses.get(actionId);
-    if (!processes || processes.size === 0) {
+function terminateChildProcesses(actionId: string, taskId?: string): boolean {
+    const perAction = actionChildProcesses.get(actionId);
+    if (!perAction || perAction.size === 0) {
         return false;
     }
-    for (const child of processes) {
-        try {
-            if (!child.killed) {
-                child.kill();
+
+    const killSet = (set: Set<ReturnType<typeof spawn>>, label: string): boolean => {
+        if (set.size === 0) { return false; }
+        for (const child of set) {
+            try {
+                if (!child.killed) { child.kill(); }
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                outputChannel.appendLine(`[ERROR] Failed to terminate child process for ${label}: ${msg}`);
             }
-        } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            outputChannel.appendLine(`[ERROR] Failed to terminate child process for action '${actionId}': ${msg}`);
         }
+        return true;
+    };
+
+    if (taskId !== undefined) {
+        const set = perAction.get(taskId);
+        if (!set) { return false; }
+        const killed = killSet(set, `action '${actionId}' task '${taskId}'`);
+        perAction.delete(taskId);
+        if (perAction.size === 0) { actionChildProcesses.delete(actionId); }
+        return killed;
+    }
+
+    let terminatedAny = false;
+    for (const [tid, set] of perAction) {
+        if (killSet(set, `action '${actionId}' task '${tid}'`)) { terminatedAny = true; }
     }
     actionChildProcesses.delete(actionId);
-    return true;
+    return terminatedAny;
 }
 import {
     LinkEntry,
@@ -2222,14 +2358,10 @@ export interface TaskTransitionEvent {
     state: 'running' | 'success' | 'failure' | 'skipped';
 }
 
-const INTERACTIVE_TASK_TYPES: ReadonlySet<string> = new Set([
-    'inputBox',
-    'quickPick',
-    'envPick',
-    'fileDialog',
-    'folderDialog',
-    'confirm',
-]);
+// INTERACTIVE_TASK_TYPES lives in pipelineUtils as the single source of
+// truth shared between the runtime (this file) and the linter
+// (`src/doctor.ts`). Imported above with the other `pipelineUtils`
+// re-exports.
 
 /**
  * Returns true when a task's result should be saved into `recordInputs` for
@@ -2246,6 +2378,27 @@ export function shouldRecordTaskInput(task: import('./schema').Task): boolean {
     return true;
 }
 
+// `formatGraphIssue` lives in pipelineUtils so previewRun.ts shares
+// the exact phrasing with the runtime executor.
+
+function resolveMaxParallelTasks(): number {
+    const cfg = vscode.workspace.getConfiguration('taskhub');
+    const raw = cfg.get<number>('pipeline.maxParallelTasks', 4);
+    const value = typeof raw === 'number' && Number.isFinite(raw) ? Math.floor(raw) : 4;
+    return Math.max(1, Math.min(32, value));
+}
+
+type InFlightOutcome =
+    | { taskId: string; kind: 'success'; result: unknown }
+    | { taskId: string; kind: 'skipped'; error: Error }
+    | { taskId: string; kind: 'failed'; error: Error };
+
+// `withInteractivePromptLock` lives in pipelineUtils as a pure async
+// primitive so the serialization can be unit-tested without booting
+// vscode. The executor below acquires the lock before entering any
+// `INTERACTIVE_TASK_TYPES` task so parallel pipelines never show
+// concurrent modal UI.
+
 export async function executeActionPipeline(
     action: PipelineAction,
     context: vscode.ExtensionContext,
@@ -2259,80 +2412,188 @@ export async function executeActionPipeline(
     const recordInputs = options?.recordInputs;
     const onTaskTransition = options?.onTaskTransition;
     const total = action.tasks.length;
-    for (let i = 0; i < action.tasks.length; i++) {
-        const task = action.tasks[i];
-        const transitionBase = { taskId: task.id, index: i + 1, total };
-        // Side-channel callback for progress UI. A throwing callback must
-        // never alter the pipeline's success/failure outcome — the
-        // pipeline's job is to run tasks, not to depend on a UI hook
-        // succeeding. We swallow + log instead. This applies to all four
-        // transition states (`running` / `success` / `failure` /
-        // `skipped`); regression guard: IT-074 / IT-074b.
-        const emitTransition = (state: TaskTransitionEvent['state']) => {
-            if (!onTaskTransition) {
-                return;
+
+    // Build + validate the task graph. Issues (cycle / missing / self
+    // dep) become a clean pipeline failure rather than a runtime
+    // deadlock on a never-completing dependency.
+    const graph = buildTaskGraph(action.tasks);
+    const issues = validateTaskGraph(action.tasks, graph);
+    if (issues.length > 0) {
+        const lines = issues.map(formatGraphIssue).map(m => `  - ${m}`).join('\n');
+        throw new Error(`Action '${id}' has invalid task graph:\n${lines}`);
+    }
+
+    const maxConcurrency = resolveMaxParallelTasks();
+    const scheduler = new TaskScheduler(graph, { maxConcurrency });
+    // Mark the action as parallel-capable while it runs so that the
+    // streamed-task terminal grouping and `output.mode: 'terminal'`
+    // terminal keys split per-task. Removed in the `finally` below
+    // so a subsequent re-run starts from a clean slate.
+    const isParallelAction = actionUsesParallelTasks(action);
+    if (isParallelAction) { enterParallelAction(id); }
+
+    // Side-channel callback for progress UI. A throwing callback must
+    // never alter the pipeline's success/failure outcome — the
+    // pipeline's job is to run tasks, not to depend on a UI hook
+    // succeeding. Regression guard: IT-074 / IT-074b.
+    const emitTransition = (
+        taskId: string,
+        state: TaskTransitionEvent['state']
+    ): void => {
+        if (!onTaskTransition) { return; }
+        const node = graph.nodes.get(taskId);
+        const index = node ? node.index + 1 : 0;
+        try {
+            onTaskTransition({ taskId, index, total, state });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            outputChannel.appendLine(
+                `[WARN] onTaskTransition callback threw for task '${taskId}' (${state}): ${msg}`
+            );
+        }
+    };
+
+    const taskById = new Map<string, import('./schema').Task>();
+    for (const t of action.tasks) { taskById.set(t.id, t); }
+
+    const inFlight = new Map<string, Promise<InFlightOutcome>>();
+    // Collect every failure so multi-failure runs (two parallel builds
+    // failing simultaneously) surface every cause rather than silently
+    // dropping the second through verbose-only logging. Single failures
+    // throw the original error unchanged (preserving stack + `instanceof`
+    // equality for callers like `handleActionFailure`); multi-failures
+    // are wrapped in an AggregateError with a one-line summary so the
+    // user sees every failed task at a glance.
+    const failures: { taskId: string; error: Error }[] = [];
+
+    const launchTask = (taskId: string): Promise<InFlightOutcome> => {
+        const task = taskById.get(taskId)!;
+        scheduler.markStarted(taskId);
+        emitTransition(taskId, 'running');
+
+        const usePreset =
+            !!presetInputs &&
+            INTERACTIVE_TASK_TYPES.has(task.type) &&
+            Object.prototype.hasOwnProperty.call(presetInputs, taskId);
+        const isInteractive = INTERACTIVE_TASK_TYPES.has(task.type);
+        const presetValue = usePreset ? presetInputs![taskId] : undefined;
+        // Preset values flow through `presetResult` so that
+        // `executeSingleTask`'s shared post-processing (capture +
+        // `passTheResultToNextTask` output) still runs on replay.
+        //
+        // Interactive tasks bind the prompt mutex around
+        // `executeSingleTask` itself — *not* around the
+        // `withTaskTimeout` wrapper — so that a fired timeout reports
+        // the failure to the pipeline without releasing the lock. VS
+        // Code modal dialogs can't be programmatically dismissed: if
+        // we released the mutex on timeout, the next interactive task
+        // could open a second dialog on top of the still-visible
+        // first one. Holding the lock until the original dialog
+        // promise settles keeps the "no two concurrent prompts"
+        // guarantee even across a timed-out task.
+        const startTask = (): Promise<unknown> => executeSingleTask(
+            task,
+            stepResults,
+            context,
+            id,
+            workspaceFolderPath,
+            workspaceRoots,
+            presetValue
+        );
+        const underlying: Promise<unknown> = isInteractive
+            ? withInteractivePromptLock(startTask)
+            : startTask();
+        // On timeout, kill only this task's child processes and
+        // terminate its streamed vscode Task slot. Sibling tasks
+        // running in parallel keep going; the failure policy below
+        // decides whether the action as a whole aborts.
+        const wrapped = withTaskTimeout(underlying, task.timeoutSeconds, taskId, () => {
+            terminateChildProcesses(id, taskId);
+            const exec = getActiveTaskExecution(id, taskId);
+            if (exec) {
+                try { exec.terminate(); } catch { /* ignore */ }
             }
-            try {
-                onTaskTransition({ ...transitionBase, state });
-            } catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
+        });
+
+        return wrapped.then(
+            (result): InFlightOutcome => ({ taskId, kind: 'success', result }),
+            (error): InFlightOutcome => {
+                const e = error instanceof Error ? error : new Error(String(error));
+                return task.continueOnError
+                    ? { taskId, kind: 'skipped', error: e }
+                    : { taskId, kind: 'failed', error: e };
+            }
+        );
+    };
+
+    try {
+    // Main scheduling loop. Each iteration: (1) launch every newly
+    // ready task subject to `maxConcurrency`; (2) await the next
+    // outcome via `Promise.race`; (3) update scheduler state and
+    // stepResults. Continues until the scheduler reports finished —
+    // either every task settled, or a hard failure aborted new
+    // scheduling and all in-flight tasks have drained.
+    while (!scheduler.isFinished()) {
+        if (!scheduler.isAborted()) {
+            for (const tid of scheduler.nextReady()) {
+                inFlight.set(tid, launchTask(tid));
+            }
+        }
+
+        if (inFlight.size === 0) {
+            // Validator should have caught any case where this is
+            // reachable. Fail loudly rather than infinite-loop.
+            throw new Error(`Pipeline scheduler stalled in action '${id}'.`);
+        }
+
+        const outcome = await Promise.race(inFlight.values());
+        inFlight.delete(outcome.taskId);
+
+        if (outcome.kind === 'success') {
+            scheduler.markCompleted(outcome.taskId);
+            stepResults[outcome.taskId] = outcome.result;
+            if (recordInputs) {
+                const t = taskById.get(outcome.taskId);
+                if (t && shouldRecordTaskInput(t)) {
+                    recordInputs[outcome.taskId] = outcome.result;
+                }
+            }
+            emitTransition(outcome.taskId, 'success');
+        } else if (outcome.kind === 'skipped') {
+            const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+            if (showVerboseLogs) {
                 outputChannel.appendLine(
-                    `[WARN] onTaskTransition callback threw for task '${task.id}' (${state}): ${msg}`
+                    `[WARN] Task '${outcome.taskId}' failed but 'continueOnError' is true — continuing: ${outcome.error.message}`
                 );
             }
-        };
-        let result: unknown;
-        try {
-            emitTransition('running');
-            const usePreset =
-                !!presetInputs &&
-                INTERACTIVE_TASK_TYPES.has(task.type) &&
-                Object.prototype.hasOwnProperty.call(presetInputs, task.id);
-            // Preset values are passed as `presetResult` so that
-            // `executeSingleTask`'s shared post-processing (capture +
-            // `passTheResultToNextTask` output) still runs on replay.
-            const taskRun: Promise<unknown> = executeSingleTask(
-                task,
-                stepResults,
-                context,
-                id,
-                workspaceFolderPath,
-                workspaceRoots,
-                usePreset ? presetInputs![task.id] : undefined
-            );
-            // On timeout, kill any running child processes and terminate the
-            // active vscode Task (best effort — dialogs can't be forcibly
-            // closed, but the outer promise still rejects).
-            result = await withTaskTimeout(taskRun, task.timeoutSeconds, task.id, () => {
-                terminateChildProcesses(id);
-                const exec = activeTasks.get(id);
-                if (exec) {
-                    try { exec.terminate(); } catch { /* ignore */ }
-                }
-            });
-        } catch (error) {
-            if (task.continueOnError) {
-                const message = error instanceof Error ? error.message : String(error);
-                const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
-                if (showVerboseLogs) {
-                    outputChannel.appendLine(`[WARN] Task '${task.id}' failed but 'continueOnError' is true — continuing: ${message}`);
-                }
-                emitTransition('skipped');
-                // Store an empty object so downstream `${task.*}` references
-                // cleanly fall through to the "unmatched → literal" path in
-                // interpolatePipelineVariables, matching stream-mode shell
-                // task behaviour.
-                stepResults[task.id] = {};
-                continue;
-            }
-            emitTransition('failure');
-            throw error;
+            // Empty object matches the sequential behavior so downstream
+            // `${task.*}` references fall through to the "unmatched →
+            // literal" path in `interpolatePipelineVariables`.
+            stepResults[outcome.taskId] = {};
+            scheduler.markCompleted(outcome.taskId);
+            emitTransition(outcome.taskId, 'skipped');
+        } else {
+            scheduler.markFailed(outcome.taskId);
+            emitTransition(outcome.taskId, 'failure');
+            failures.push({ taskId: outcome.taskId, error: outcome.error });
         }
-        emitTransition('success');
-        stepResults[task.id] = result;
-        if (recordInputs && shouldRecordTaskInput(task)) {
-            recordInputs[task.id] = result;
-        }
+    }
+
+    if (failures.length === 1) {
+        // Single failure — throw the original error unchanged so the
+        // existing error.message / stack / `instanceof` checks in
+        // `handleActionFailure` and test assertions keep working.
+        throw failures[0].error;
+    }
+    if (failures.length > 1) {
+        const summary = failures.map(f => `${f.taskId}: ${f.error.message}`).join('; ');
+        throw new AggregateError(
+            failures.map(f => f.error),
+            `Action '${id}' had ${failures.length} task failures — ${summary}`
+        );
+    }
+    } finally {
+        if (isParallelAction) { exitParallelAction(id); }
     }
 }
 
@@ -2451,20 +2712,36 @@ export async function executeAction(
             // Single-task actions intentionally skip the description so
             // "1/1" noise never shows up — see Action TreeItem render
             // logic.
+            //
+            // Multi-track update (0.4.43): running events push the task
+            // into `progress.running`; terminal events (success/failure/
+            // skipped) pop it back out and bump `completed`. Parallel
+            // pipelines see multiple ids in flight at once — the tree
+            // renderer picks the right format per running.length.
             onTaskTransition: (event) => {
                 if (!showTaskStatus) {
-                    return;
-                }
-                if (event.state !== 'running') {
                     return;
                 }
                 const current = actionStates.get(id);
                 if (!current) {
                     return;
                 }
+                const previous = current.progress;
+                const total = event.total > 0 ? event.total : (previous?.total ?? 0);
+                const running = previous ? [...previous.running] : [];
+                let completed = previous?.completed ?? 0;
+                if (event.state === 'running') {
+                    if (!running.some(entry => entry.taskId === event.taskId)) {
+                        running.push({ taskId: event.taskId, index: event.index });
+                    }
+                } else {
+                    const at = running.findIndex(entry => entry.taskId === event.taskId);
+                    if (at !== -1) { running.splice(at, 1); }
+                    completed++;
+                }
                 actionStates.set(id, {
                     state: current.state,
-                    progress: { index: event.index, total: event.total, taskId: event.taskId }
+                    progress: { total, completed, running }
                 });
                 mainViewProvider.refresh();
             }
@@ -2809,7 +3086,14 @@ async function executeSingleTask(
                 break;
             case 'terminal':
                 {
-                    const terminalKey = actionId || 'default';
+                    // Sequential actions share one TaskHub terminal per
+                    // actionId so consecutive tasks reuse it (backward
+                    // compat). Parallel actions split per-task so two
+                    // concurrent `output.mode: 'terminal'` tasks do not
+                    // dump into the same terminal.
+                    const actionKey = actionId || 'default';
+                    const useTaskKey = isParallelActionActive(actionKey) && typeof task.id === 'string' && task.id.length > 0;
+                    const terminalKey = useTaskKey ? `${actionKey}:${task.id}` : actionKey;
                     let terminal = actionTerminals.get(terminalKey);
                     if (!terminal || terminal.exitStatus) {
                         terminal = vscode.window.createTerminal(`TaskHub: ${terminalKey}`);
@@ -2950,7 +3234,11 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
     const taskDefinition: vscode.TaskDefinition = { type: 'shell', actionId: actionKey };
     const taskName = `TaskHub: ${actionKey}`;
     const vsCodeTask = new vscode.Task(taskDefinition, vscode.TaskScope.Workspace, taskName, 'taskhub', shellExecution);
-    vsCodeTask.presentationOptions = createGroupedTaskPresentationOptions(actionKey, revealTerminal);
+    vsCodeTask.presentationOptions = createGroupedTaskPresentationOptions(
+        actionKey,
+        revealTerminal,
+        { taskId: task.id, isParallel: isParallelActionActive(actionKey) }
+    );
 
     return {
         vsCodeTask,
@@ -2975,6 +3263,9 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
         const disposable = vscode.tasks.onDidEndTaskProcess(e => {
             if (taskExecution && e.execution === taskExecution) {
                 disposable.dispose();
+                if (task.actionId && task.id) {
+                    deleteActiveTaskExecution(task.actionId, task.id);
+                }
                 if (e.exitCode === 0) {
                     resolve();
                 } else {
@@ -2989,8 +3280,8 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
                 outputChannel.appendLine(`[INFO] Executing task via vscode.tasks: ${displayCommand} in ${cwd}`);
             }
             taskExecution = await vscode.tasks.executeTask(vsCodeTask);
-            if (task.actionId && taskExecution) {
-                activeTasks.set(task.actionId, taskExecution);
+            if (task.actionId && task.id && taskExecution) {
+                setActiveTaskExecution(task.actionId, task.id, taskExecution);
             }
         } catch (error) {
             disposable.dispose();
@@ -3002,7 +3293,7 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
 async function handleCommand(task: any, context: vscode.ExtensionContext, workspaceFolderPath?: string): Promise<{ output: string; stderr: string }> {
     const { args, cwd } = task;
     const command = getCommandString(task.command);
-    const captured = await executeShellCommand(command, args || [], cwd, task.env, workspaceFolderPath, task.actionId);
+    const captured = await executeShellCommand(command, args || [], cwd, task.env, workspaceFolderPath, task.actionId, task.id);
     // `output` keeps its historical meaning (= stdout only) so existing
     // `output.capture` rules and `${task.output}` interpolation behave
     // exactly as before. `stderr` is exposed alongside so the diagnostic
@@ -3352,7 +3643,7 @@ async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: str
     const toolCommand = getToolCommand(task.tool);
     const args = ['x', archivePath, `-o${outputDir}`, '-aoa'];
     try {
-        await executeShellCommand(toolCommand, args, undefined, task.env, workspaceFolderPath, actionId);
+        await executeShellCommand(toolCommand, args, undefined, task.env, workspaceFolderPath, actionId, task.id);
         return { outputDir: outputDir };
     } catch (error: any) {
         throw new Error(`Failed to unzip file: ${error.message}`);
@@ -3408,7 +3699,8 @@ async function handleZip(task: import('./schema').Task, allResults: any, workspa
             task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
             envOverrides,
             workspaceFolderPath,
-            actionId
+            actionId,
+            task.id
         );
         return { archivePath: archive };
     } catch (error: any) {
@@ -3594,7 +3886,7 @@ export function __testHook_hasManuallyTerminated(id: string): boolean {
  * exit code. Callers that only care about stdout should read `.stdout`
  * from the resolved value.
  */
-export function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string): Promise<{ stdout: string; stderr: string }> {
+export function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string, taskKey?: string): Promise<{ stdout: string; stderr: string }> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     const captureLimitBytes = getCaptureLimitBytes();
@@ -3612,23 +3904,62 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
         let displayCommand = '';
         let settled = false;
 
-        const trackChildProcess = () => {
-            if (!actionKey) {
+        // taskKey is empty-string for legacy callers that only carry an
+        // actionKey (e.g. tests). Real callers from `executeSingleTask`
+        // always pass `task.id`, so the per-task bucket gets used and
+        // `terminateChildProcesses(actionId, taskId)` can target just
+        // this task's children without affecting siblings.
+        const effectiveTaskKey = taskKey ?? '';
+        // Prefix verbose log lines with the task id so parallel runs are
+        // distinguishable in the OutputChannel. Legacy callers (no taskKey)
+        // keep the unprefixed format to avoid churn in existing log tooling.
+        // Multiline stdout/stderr is split so every continuation line carries
+        // the prefix — otherwise only the first line is identifiable when two
+        // tasks' output blocks land back-to-back.
+        const taskLogPrefix = effectiveTaskKey ? `[task:${effectiveTaskKey}] ` : '';
+        const appendVerboseLine = (line: string) => {
+            if (!line.includes('\n') && !line.includes('\r')) {
+                outputChannel.appendLine(`${taskLogPrefix}${line}`);
                 return;
             }
-            const processes = actionChildProcesses.get(actionKey) ?? new Set<ReturnType<typeof spawn>>();
-            processes.add(childProcess);
-            actionChildProcesses.set(actionKey, processes);
+            // Split on every line break form: `\r\n` (Windows) is matched
+            // before a bare `\r` so a CRLF pair is consumed once, and bare
+            // `\r` (terminal progress lines like `foo\rbar`) gets prefixed
+            // too — otherwise progress output stays as one prefix-less blob.
+            const parts = line.split(/\r\n|\r|\n/);
+            if (parts.length > 0 && parts[parts.length - 1] === '') {
+                parts.pop();
+            }
+            for (const part of parts) {
+                outputChannel.appendLine(`${taskLogPrefix}${part}`);
+            }
+        };
+
+        const trackChildProcess = () => {
+            if (!actionKey) { return; }
+            let perAction = actionChildProcesses.get(actionKey);
+            if (!perAction) {
+                perAction = new Map();
+                actionChildProcesses.set(actionKey, perAction);
+            }
+            let set = perAction.get(effectiveTaskKey);
+            if (!set) {
+                set = new Set<ReturnType<typeof spawn>>();
+                perAction.set(effectiveTaskKey, set);
+            }
+            set.add(childProcess);
         };
 
         const cleanupChildTracking = (target: ReturnType<typeof spawn>) => {
-            if (!actionKey) {
-                return;
-            }
-            const processes = actionChildProcesses.get(actionKey);
-            if (processes) {
-                processes.delete(target);
-                if (processes.size === 0) {
+            if (!actionKey) { return; }
+            const perAction = actionChildProcesses.get(actionKey);
+            if (!perAction) { return; }
+            const set = perAction.get(effectiveTaskKey);
+            if (!set) { return; }
+            set.delete(target);
+            if (set.size === 0) {
+                perAction.delete(effectiveTaskKey);
+                if (perAction.size === 0) {
                     actionChildProcesses.delete(actionKey);
                 }
             }
@@ -3662,7 +3993,7 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
             const encoded = encodePowerShellScript(invocation.script);
             displayCommand = invocation.display;
             if (showVerboseLogs && reason) {
-                outputChannel.appendLine(`[WARN] Native Windows process start failed (${reason.message}); retrying through PowerShell.`);
+                appendVerboseLine(`[WARN] Native Windows process start failed (${reason.message}); retrying through PowerShell.`);
             }
             childProcess = spawn('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], {
                 cwd: workingDirectory,
@@ -3674,7 +4005,7 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
         const attachChildHandlers = (allowPowerShellFallback: boolean) => {
             const attachedChild = childProcess;
             trackChildProcess();
-            if (showVerboseLogs) { outputChannel.appendLine(`[INFO] Executing command: ${displayCommand} in ${workingDirectory}`); }
+            if (showVerboseLogs) { appendVerboseLine(`[INFO] Executing command: ${displayCommand} in ${workingDirectory}`); }
 
             attachedChild.stdout?.setEncoding('utf8');
             attachedChild.stderr?.setEncoding('utf8');
@@ -3688,7 +4019,7 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
                     return;
                 }
 
-                if (showVerboseLogs) { outputChannel.appendLine(`[INFO] STDOUT: ${stdout}`); outputChannel.appendLine(`[INFO] STDERR: ${stderr}`); outputChannel.appendLine(`[INFO] Command finished with exit code ${code}.`); }
+                if (showVerboseLogs) { appendVerboseLine(`[INFO] STDOUT: ${stdout}`); appendVerboseLine(`[INFO] STDERR: ${stderr}`); appendVerboseLine(`[INFO] Command finished with exit code ${code}.`); }
 
                 if (captureOverflowed) {
                     settled = true;
@@ -3738,7 +4069,7 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
                     return;
                 }
                 settled = true;
-                if (showVerboseLogs) { outputChannel.appendLine(`[ERROR] Failed to start command: ${err.message}`); }
+                if (showVerboseLogs) { appendVerboseLine(`[ERROR] Failed to start command: ${err.message}`); }
                 reject(err);
             });
         };
@@ -4182,10 +4513,12 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
         let stopped = false;
-        const task = activeTasks.get(id);
-        if (task) {
+        const perAction = activeTasks.get(id);
+        if (perAction && perAction.size > 0) {
             manuallyTerminatedActions.add(id);
-            task.terminate();
+            for (const exec of perAction.values()) {
+                try { exec.terminate(); } catch { /* ignore */ }
+            }
             stopped = true;
         }
         if (terminateChildProcesses(id)) {
@@ -4724,9 +5057,11 @@ export function activate(context: vscode.ExtensionContext) {
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.terminateAllActions', async () => {
         // Flag and terminate all running actions
-        for (const [actionId, execution] of activeTasks.entries()) {
+        for (const [actionId, perAction] of activeTasks.entries()) {
             manuallyTerminatedActions.add(actionId);
-            execution.terminate();
+            for (const exec of perAction.values()) {
+                try { exec.terminate(); } catch { /* ignore */ }
+            }
         }
         for (const actionId of Array.from(actionChildProcesses.keys())) {
             manuallyTerminatedActions.add(actionId);

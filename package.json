@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.4.40",
+  "version": "0.5.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -93,6 +93,13 @@
           "minimum": 1,
           "maximum": 1024,
           "markdownDescription": "Maximum size (in megabytes) of command stdout/stderr captured into memory during a TaskHub action. When a command exceeds this limit it is terminated with an error to protect the VS Code extension host from OOM. Raise this value for pipelines that intentionally emit large logs, or redirect the output with `> file` to bypass capture."
+        },
+        "taskhub.pipeline.maxParallelTasks": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 32,
+          "markdownDescription": "Maximum number of tasks that may run concurrently within a single action. Only tasks marked `parallel: true` are exempt from the implicit \"wait for every preceding task\" barrier; once exempt they still wait for their explicit `dependsOn` and any `${taskId.x}` auto-inferred dependencies before starting. Tasks without `parallel: true` always act as sync barriers regardless of `dependsOn`. The default `4` is conservative because embedded builds (linker / LTO stages) can each consume gigabytes of RAM — raise this on machines with more resources, or lower to `1` to force fully sequential execution."
         },
         "taskhub.history.maxItems": {
           "type": "number",

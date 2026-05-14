@@ -16,7 +16,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
-import type { OutputCapture } from './schema';
+import type { OutputCapture, Task } from './schema';
 
 /** Maximum allowed length of a single interpolated value. */
 export const INTERPOLATED_VALUE_MAX_LENGTH = 32 * 1024;
@@ -43,6 +43,23 @@ export function wouldExceedCaptureLimit(currentBytes: number, chunkBytes: number
 export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
     'output', 'outputDir', 'path', 'dir', 'name', 'fileNameOnly', 'fileExt',
     'value', 'values', 'archivePath', 'confirmed'
+]);
+
+/**
+ * Task types whose execution shows VS Code modal / quick-pick UI
+ * (`inputBox`, `quickPick`, `envPick`, `confirm`, `fileDialog`,
+ * `folderDialog`). The runtime serializes these via a prompt mutex
+ * when running in a parallel pipeline so two dialogs never race;
+ * Doctor warns when one is set to `parallel: true`. Centralized here
+ * so the executor and the linter agree on the boundary.
+ */
+export const INTERACTIVE_TASK_TYPES: ReadonlySet<string> = new Set([
+    'inputBox',
+    'quickPick',
+    'envPick',
+    'fileDialog',
+    'folderDialog',
+    'confirm',
 ]);
 
 /**
@@ -216,6 +233,562 @@ export function interpolatePipelineVariables(template: string, context: any): st
         if (sanitized !== undefined) { return sanitized; }
         return match;
     });
+}
+
+// ============================================================================
+// Task graph utilities (roadmap §4 — Parallel Execution / Task DAG)
+//
+// These helpers are pure (no `vscode`, no I/O) so the scheduler decisions
+// can be tested independently of the executor. The runtime scheduler in
+// `extension.ts` consumes `buildTaskGraph` + `TaskScheduler`; TaskHub
+// Doctor can later reuse `inferTaskDependencies` for an info-level
+// "implicit dep" warning.
+// ============================================================================
+
+/**
+ * Extract the head identifier from every `${...}` reference in `text`.
+ * For `${buildA.output}` returns `"buildA"`. The pattern mirrors
+ * `interpolatePipelineVariables`, so what the runtime substitutes and
+ * what the graph treats as a dependency stay in sync automatically.
+ */
+export function extractVariableHeads(text: string): string[] {
+    if (typeof text !== 'string' || text.length === 0) { return []; }
+    const heads: string[] = [];
+    const re = /\${([^}]+)}/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+        const expr = m[1];
+        if (!expr) { continue; }
+        const head = expr.split('.')[0].trim();
+        if (head.length > 0) { heads.push(head); }
+    }
+    return heads;
+}
+
+// `output.capture` and `output.diagnostics` contain regex patterns
+// rather than interpolated text — skip those subtrees during the
+// string walk so a `${...}` literal inside a regex is not mistaken
+// for a task reference.
+const TASK_INFER_SKIP_KEYS: ReadonlySet<string> = new Set(['capture', 'diagnostics']);
+
+/**
+ * Variable heads that are reserved by the runtime's interpolation
+ * context and therefore must NOT be auto-inferred as task dependencies,
+ * even if a task happens to be named the same. Without this filter, a
+ * task named `workspaceFolder` would steal every `${workspaceFolder}`
+ * reference and could create false-positive cycles (sequential task
+ * after such a task auto-inferring it as a dep while the task itself
+ * was barriered against the rest of the action).
+ *
+ * Colon-prefixed namespaces (`env:VAR`, `input:foo`) are handled
+ * separately in `inferTaskDependencies` because `extractVariableHeads`
+ * preserves the colon in the head.
+ */
+const RESERVED_VARIABLE_HEADS: ReadonlySet<string> = new Set([
+    'workspaceFolder',
+    'extensionPath',
+]);
+
+/**
+ * Variable head prefixes reserved by VS Code-style namespaced
+ * built-ins. References whose head starts with one of these are
+ * skipped during dependency inference, even if a same-named task
+ * happens to exist. Intentionally specific (NOT a blanket
+ * `head.includes(':')`) — the schema does not forbid colons in task
+ * ids, so a user-defined `id: 'build:fw'` referenced via
+ * `${build:fw.output}` must still be auto-inferred as a dep.
+ * Otherwise a `parallel: true` consumer would race its producer.
+ */
+const RESERVED_HEAD_PREFIXES: ReadonlyArray<string> = ['env:', 'input:'];
+
+/** Task object keys whose value can be a per-platform `{windows,macos,linux}` object. */
+const PLATFORM_BRANCH_KEYS: ReadonlySet<string> = new Set(['command', 'tool']);
+
+function pickPlatformBranch(
+    obj: Record<string, unknown>,
+    platform: NodeJS.Platform
+): unknown {
+    if (platform === 'win32') { return obj.windows; }
+    if (platform === 'darwin') { return obj.macos; }
+    if (platform === 'linux') { return obj.linux; }
+    return undefined;
+}
+
+/**
+ * Return a shallow projection of `task` where each platform-branched
+ * field (currently `command` / `tool`) is replaced by the value of the
+ * active platform's branch — mirroring what `getCommandString` /
+ * `getToolCommand` actually execute. Non-active branches are dropped,
+ * so a `${A.output}` reference that only appears in (say) the linux
+ * branch is no longer scanned on Windows. Without this projection, a
+ * cross-platform action with each platform referring to a different
+ * sibling could trip `validateTaskGraph` on a cycle that doesn't exist
+ * for the current platform.
+ *
+ * The projection is shallow on purpose: only top-level `command` /
+ * `tool` are platform-branched in the schema, so we don't recurse into
+ * sub-objects (e.g. `output.*` fields are not platform-keyed).
+ */
+function projectActivePlatformBranches(task: unknown, platform: NodeJS.Platform): unknown {
+    if (!task || typeof task !== 'object' || Array.isArray(task)) { return task; }
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(task as Record<string, unknown>)) {
+        if (PLATFORM_BRANCH_KEYS.has(k) && v && typeof v === 'object' && !Array.isArray(v)) {
+            const branch = pickPlatformBranch(v as Record<string, unknown>, platform);
+            // `undefined` (no entry for this platform) drops the field
+            // from the inference view — there is no command/tool to run
+            // on this platform, so no string refs to scan.
+            if (branch !== undefined) { result[k] = branch; }
+        } else {
+            result[k] = v;
+        }
+    }
+    return result;
+}
+
+function* walkStrings(value: unknown, skipKeys: ReadonlySet<string>): Generator<string> {
+    if (typeof value === 'string') { yield value; return; }
+    if (value === null || typeof value !== 'object') { return; }
+    if (Array.isArray(value)) {
+        for (const item of value) { yield* walkStrings(item, skipKeys); }
+        return;
+    }
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        if (skipKeys.has(k)) { continue; }
+        yield* walkStrings(v, skipKeys);
+    }
+}
+
+export interface InferTaskDependenciesOptions {
+    /**
+     * Platform used to resolve `command` / `tool` per-platform branches.
+     * Defaults to `process.platform`. Tests can override to assert
+     * deterministic per-platform inference.
+     */
+    platform?: NodeJS.Platform;
+}
+
+/**
+ * Infer dependencies for a task from `${taskId.x}` references in its
+ * interpolatable string fields. Returns the set of task ids (subset of
+ * `validTaskIds`) that this task references. Self-references are
+ * excluded.
+ *
+ * Filtered out *before* the `validTaskIds` lookup:
+ *  - `RESERVED_VARIABLE_HEADS` (`workspaceFolder`, `extensionPath`) —
+ *    these are runtime built-ins; if a task happens to share the name,
+ *    we must not redirect the built-in reference into a fake dep.
+ *  - Heads starting with `RESERVED_HEAD_PREFIXES` (`env:`, `input:`) —
+ *    VS Code-style namespaced built-ins. The check is on the prefix,
+ *    NOT on whether the head merely contains a colon: the schema does
+ *    not forbid colons in task ids, so a user-defined id like
+ *    `build:fw` referenced via `${build:fw.output}` must still be
+ *    auto-inferred as a dep. A blanket `head.includes(':')` filter
+ *    would silently drop that dep and let parallel consumers race
+ *    their producer.
+ *
+ * Platform-aware scan: `command` and `tool` may be `{windows, macos,
+ * linux}` objects, but the runtime only executes the active branch.
+ * The inference walk uses the active branch only, so a `${A.output}`
+ * sitting in a non-current platform branch is not mistaken for a real
+ * dependency. This avoids cross-platform false-positive cycles where
+ * each platform separately resolves to a valid DAG but the union does
+ * not.
+ *
+ * The scan walks all string-valued leaves of the projected task except
+ * subtrees keyed by `capture` / `diagnostics`.
+ *
+ * Bare-id refs in `task.inputs`: `handleUnzip` reads `task.inputs.archive`
+ * / `inputs.file` / `inputs.destination` as raw task ids (no `${...}`
+ * wrapping) and looks them up in `allResults`. Without inferring those,
+ * a `parallel: true` unzip following a zip can be scheduled before the
+ * zip populates `allResults`, causing "requires an archive path" at
+ * runtime. We inspect every `inputs` value across task types — matching
+ * by `validTaskIds` keeps unrelated strings (paths, format names, …)
+ * from being misread as deps. `inputs` is not platform-branched, so
+ * the projection does not affect this path.
+ */
+export function inferTaskDependencies(
+    task: Task,
+    validTaskIds: ReadonlySet<string>,
+    options: InferTaskDependenciesOptions = {}
+): Set<string> {
+    const deps = new Set<string>();
+    if (!task || typeof task !== 'object') { return deps; }
+    const platform = options.platform ?? process.platform;
+    const projected = projectActivePlatformBranches(task, platform);
+    for (const str of walkStrings(projected, TASK_INFER_SKIP_KEYS)) {
+        for (const head of extractVariableHeads(str)) {
+            if (head === task.id) { continue; }
+            if (RESERVED_VARIABLE_HEADS.has(head)) { continue; }
+            if (RESERVED_HEAD_PREFIXES.some(p => head.startsWith(p))) { continue; }
+            if (validTaskIds.has(head)) { deps.add(head); }
+        }
+    }
+    const inputs = (task as unknown as { inputs?: unknown }).inputs;
+    if (inputs && typeof inputs === 'object') {
+        for (const value of Object.values(inputs as Record<string, unknown>)) {
+            if (typeof value !== 'string') { continue; }
+            if (value === task.id) { continue; }
+            if (validTaskIds.has(value)) { deps.add(value); }
+        }
+    }
+    return deps;
+}
+
+/**
+ * A node in the runtime task graph. `allDeps` is the union of
+ * explicit `dependsOn`, dependencies inferred from variable
+ * references, and the implicit "all previous tasks" barrier applied
+ * when `parallel` is false/omitted (Option 2 semantics — `parallel`
+ * is opt-in concurrency, not opt-out ordering).
+ */
+export interface TaskGraphNode {
+    id: string;
+    index: number;
+    parallel: boolean;
+    explicitDeps: ReadonlySet<string>;
+    inferredDeps: ReadonlySet<string>;
+    barrierDeps: ReadonlySet<string>;
+    allDeps: ReadonlySet<string>;
+}
+
+export interface TaskGraph {
+    nodes: ReadonlyMap<string, TaskGraphNode>;
+    order: readonly string[];
+}
+
+export interface TaskGraphBuildOptions {
+    /**
+     * If true, `dependsOn` entries that reference a missing task id
+     * are silently dropped from the node's `explicitDeps` set
+     * instead of being preserved. Used by Preview Run / linter
+     * paths where the graph is built tolerantly; the executor
+     * leaves this false so a runtime mismatch surfaces clearly.
+     */
+    dropMissingDeps?: boolean;
+    /**
+     * Platform forwarded to `inferTaskDependencies` so that
+     * platform-branched fields (`command` / `tool`) only contribute
+     * dependencies from the active branch. Defaults to
+     * `process.platform`. Tests set this explicitly to assert
+     * deterministic per-platform behavior.
+     */
+    platform?: NodeJS.Platform;
+}
+
+export function buildTaskGraph(
+    tasks: ReadonlyArray<Task>,
+    options: TaskGraphBuildOptions = {}
+): TaskGraph {
+    const validIds = new Set<string>();
+    for (const t of tasks) {
+        if (t && typeof t.id === 'string') { validIds.add(t.id); }
+    }
+
+    const nodes = new Map<string, TaskGraphNode>();
+    const order: string[] = [];
+    const previousIds: string[] = [];
+
+    for (let i = 0; i < tasks.length; i++) {
+        const task = tasks[i];
+        if (!task || typeof task.id !== 'string') { continue; }
+        const id = task.id;
+        const parallel = task.parallel === true;
+
+        const explicit = new Set<string>();
+        for (const dep of task.dependsOn ?? []) {
+            if (typeof dep !== 'string' || dep === id) { continue; }
+            if (options.dropMissingDeps && !validIds.has(dep)) { continue; }
+            explicit.add(dep);
+        }
+
+        const inferred = inferTaskDependencies(task, validIds, { platform: options.platform });
+
+        const barrier = new Set<string>();
+        if (!parallel) {
+            for (const prev of previousIds) { barrier.add(prev); }
+        }
+
+        const all = new Set<string>([...explicit, ...inferred, ...barrier]);
+        all.delete(id);
+
+        nodes.set(id, {
+            id,
+            index: i,
+            parallel,
+            explicitDeps: explicit,
+            inferredDeps: inferred,
+            barrierDeps: barrier,
+            allDeps: all,
+        });
+        order.push(id);
+        previousIds.push(id);
+    }
+
+    return { nodes, order };
+}
+
+/**
+ * Promise-chain mutex that serializes entry into interactive task
+ * handlers (modal dialogs, quick-picks) so two `parallel: true`
+ * interactive tasks cannot show modal UI concurrently. Each caller's
+ * `fn` runs only after the previous holder's promise settles — a
+ * failing holder doesn't poison the chain because we swallow the
+ * rejection on the wait side; rejections of `fn` itself still
+ * propagate out to the caller. Sequential pipelines never contend.
+ *
+ * Scope: the chain is module-global, so two *different* actions
+ * running concurrently with `parallel: true` interactive tasks also
+ * serialize their prompts across actions. This is intentional —
+ * VS Code only renders one modal dialog at a time, so cross-action
+ * serialization matches the platform's actual constraint.
+ *
+ * Invariant: the lock is held until `fn()`'s returned promise
+ * settles, *regardless* of what the caller does with the Promise
+ * this function returns. Callers that wrap our return value in a
+ * separate timeout race (e.g. `withTaskTimeout`) do not release the
+ * lock when the outer race rejects — only the underlying `fn`
+ * settling does. This matters because VS Code modal dialogs can't
+ * be programmatically dismissed: releasing on outer timeout would
+ * let the next interactive task open a second dialog on top of the
+ * still-visible first one.
+ */
+let interactivePromptChain: Promise<void> = Promise.resolve();
+export function withInteractivePromptLock<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = interactivePromptChain;
+    let release!: () => void;
+    interactivePromptChain = new Promise<void>(resolve => { release = resolve; });
+    return previous
+        .catch(() => { /* previous holder's failure must not poison the chain */ })
+        .then(fn)
+        .finally(() => { release(); });
+}
+
+/**
+ * True when an action contains at least one task marked
+ * `parallel: true`. The executor uses this to decide whether to
+ * isolate streamed-task terminal groups and `output.mode: 'terminal'`
+ * terminal keys per-task; sequential actions keep the historical
+ * shared-terminal behavior.
+ */
+export function actionUsesParallelTasks(action: { tasks: ReadonlyArray<Task> }): boolean {
+    if (!action || !Array.isArray(action.tasks)) { return false; }
+    for (const t of action.tasks) {
+        if (t && t.parallel === true) { return true; }
+    }
+    return false;
+}
+
+/**
+ * Issues that make a `TaskGraph` unsafe to execute. Surfaced by
+ * `validateTaskGraph`; the runtime turns them into a clear pipeline
+ * failure instead of waiting on a dependency that will never
+ * complete.
+ *
+ * - `self-dependency`: a task lists itself in `dependsOn`.
+ *   `buildTaskGraph` already drops the entry so the in-memory graph
+ *   stays sound, but the original config is still wrong and the
+ *   user should hear about it.
+ * - `missing-dependency`: a `dependsOn` entry references a task id
+ *   that doesn't exist in the same action. `buildTaskGraph` preserves
+ *   the entry in `explicitDeps` so the executor can deadlock-detect
+ *   here instead of stalling silently.
+ * - `cycle`: a directed cycle in the union of explicit / inferred /
+ *   barrier dependencies. Includes auto-inferred deps so two tasks
+ *   that reference each other's output are caught.
+ */
+export type TaskGraphIssue =
+    | { kind: 'self-dependency'; taskId: string }
+    | { kind: 'missing-dependency'; taskId: string; missingId: string }
+    | { kind: 'cycle'; cycle: string[] };
+
+/**
+ * Returns every reason the graph is unsafe to execute, in a fixed
+ * order: self-deps and missing-deps in declaration order, then a
+ * single cycle if one exists. Empty array means the graph is a DAG
+ * with no dangling references. Pure — callers pass it the same
+ * `tasks` array used to build the graph.
+ */
+export function validateTaskGraph(tasks: ReadonlyArray<Task>, graph: TaskGraph): TaskGraphIssue[] {
+    const issues: TaskGraphIssue[] = [];
+    const validIds = new Set<string>();
+    for (const t of tasks) {
+        if (t && typeof t.id === 'string') { validIds.add(t.id); }
+    }
+
+    for (const task of tasks) {
+        if (!task || typeof task.id !== 'string') { continue; }
+        if (!Array.isArray(task.dependsOn)) { continue; }
+        for (const dep of task.dependsOn) {
+            if (typeof dep !== 'string') { continue; }
+            if (dep === task.id) {
+                issues.push({ kind: 'self-dependency', taskId: task.id });
+                continue;
+            }
+            if (!validIds.has(dep)) {
+                issues.push({ kind: 'missing-dependency', taskId: task.id, missingId: dep });
+            }
+        }
+    }
+
+    const cycle = detectGraphCycle(graph);
+    if (cycle) { issues.push({ kind: 'cycle', cycle }); }
+    return issues;
+}
+
+/**
+ * Single-source human-readable formatter for `TaskGraphIssue` so the
+ * runtime executor (`extension.ts`) and Preview Run share one
+ * phrasing. Doctor uses its own per-issue formatting (because it needs
+ * to prefix with the action id), but the underlying classification
+ * comes from the same `validateTaskGraph` call.
+ */
+export function formatGraphIssue(issue: TaskGraphIssue): string {
+    switch (issue.kind) {
+        case 'self-dependency':
+            return `task '${issue.taskId}' depends on itself`;
+        case 'missing-dependency':
+            return `task '${issue.taskId}' depends on unknown task '${issue.missingId}'`;
+        case 'cycle':
+            return `dependency cycle: ${issue.cycle.join(' -> ')}`;
+    }
+}
+
+/**
+ * Detect cycles in the graph. Returns null if the graph is a DAG,
+ * or a sample cycle (sequence of node ids that loops back on itself)
+ * if a cycle exists. Uses three-color DFS for parity with
+ * `src/doctor.ts` `dependsOn.cycle` so the runtime and the linter
+ * agree on cycle structure.
+ */
+export function detectGraphCycle(graph: TaskGraph): string[] | null {
+    const WHITE = 0, GRAY = 1, BLACK = 2;
+    const color = new Map<string, number>();
+    for (const id of graph.nodes.keys()) { color.set(id, WHITE); }
+    const stack: string[] = [];
+    let found: string[] | null = null;
+
+    const visit = (id: string): void => {
+        if (found) { return; }
+        const state = color.get(id) ?? WHITE;
+        if (state === BLACK) { return; }
+        if (state === GRAY) {
+            const idx = stack.indexOf(id);
+            // `idx < 0` should be unreachable: GRAY means we entered the
+            // node and pushed it onto `stack` higher up in the DFS, so
+            // the id MUST be present. The `[id, id]` fallback is a
+            // defensive escape — if it ever fires, the resulting "A -> A"
+            // message is unmistakable enough to flag the broken invariant.
+            found = idx >= 0 ? [...stack.slice(idx), id] : [id, id];
+            return;
+        }
+        color.set(id, GRAY);
+        stack.push(id);
+        for (const next of graph.nodes.get(id)?.allDeps ?? []) { visit(next); }
+        stack.pop();
+        color.set(id, BLACK);
+    };
+    for (const id of graph.nodes.keys()) {
+        if (found) { break; }
+        if ((color.get(id) ?? WHITE) === WHITE) { visit(id); }
+    }
+    return found;
+}
+
+export interface TaskSchedulerOptions {
+    maxConcurrency: number;
+}
+
+/**
+ * Stateful scheduler for executing a `TaskGraph` with bounded
+ * concurrency. Pure (no I/O / `vscode` deps) so the scheduling
+ * decisions can be unit-tested independently of the executor.
+ *
+ * Lifecycle:
+ *   1. `nextReady()` returns the next batch of task ids that may
+ *      start immediately, capped at `maxConcurrency - running`.
+ *      Returned in original declaration order for determinism.
+ *   2. Caller `markStarted(id)` before spawning, then on completion
+ *      either `markCompleted(id)` (success OR continueOnError skip
+ *      — both unblock dependents per existing pipeline behavior)
+ *      or `markFailed(id)` (stops new scheduling; in-flight tasks
+ *      must still be awaited by the caller).
+ *   3. Loop while `isFinished()` is false.
+ */
+export class TaskScheduler {
+    private readonly graph: TaskGraph;
+    private readonly maxConcurrency: number;
+    private readonly remainingDeps = new Map<string, Set<string>>();
+    private readonly status = new Map<string, 'pending' | 'running' | 'done' | 'failed'>();
+    private running = 0;
+    private aborted = false;
+
+    constructor(graph: TaskGraph, options: TaskSchedulerOptions) {
+        if (!Number.isFinite(options.maxConcurrency) || options.maxConcurrency < 1) {
+            throw new Error(`maxConcurrency must be >= 1, got ${options.maxConcurrency}`);
+        }
+        this.graph = graph;
+        this.maxConcurrency = Math.floor(options.maxConcurrency);
+        for (const [id, node] of graph.nodes) {
+            this.remainingDeps.set(id, new Set(node.allDeps));
+            this.status.set(id, 'pending');
+        }
+    }
+
+    nextReady(): string[] {
+        if (this.aborted) { return []; }
+        const slots = this.maxConcurrency - this.running;
+        if (slots <= 0) { return []; }
+        const ready: string[] = [];
+        for (const id of this.graph.order) {
+            if (ready.length >= slots) { break; }
+            if (this.status.get(id) !== 'pending') { continue; }
+            const remaining = this.remainingDeps.get(id);
+            if (remaining && remaining.size === 0) { ready.push(id); }
+        }
+        return ready;
+    }
+
+    markStarted(id: string): void {
+        const current = this.status.get(id);
+        if (current !== 'pending') {
+            throw new Error(`Cannot start task '${id}' from status '${current ?? 'unknown'}'.`);
+        }
+        this.status.set(id, 'running');
+        this.running++;
+    }
+
+    markCompleted(id: string): void {
+        const current = this.status.get(id);
+        if (current !== 'running') {
+            throw new Error(`Cannot complete task '${id}' from status '${current ?? 'unknown'}'.`);
+        }
+        this.status.set(id, 'done');
+        this.running--;
+        for (const deps of this.remainingDeps.values()) { deps.delete(id); }
+    }
+
+    markFailed(id: string): void {
+        const current = this.status.get(id);
+        if (current !== 'running') {
+            throw new Error(`Cannot fail task '${id}' from status '${current ?? 'unknown'}'.`);
+        }
+        this.status.set(id, 'failed');
+        this.running--;
+        this.aborted = true;
+    }
+
+    runningCount(): number { return this.running; }
+    isAborted(): boolean { return this.aborted; }
+
+    isFinished(): boolean {
+        if (this.aborted) { return this.running === 0; }
+        for (const s of this.status.values()) {
+            if (s === 'pending' || s === 'running') { return false; }
+        }
+        return true;
+    }
 }
 
 /**

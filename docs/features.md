@@ -398,13 +398,34 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 
 내장 엔진은 아카이브 엔트리 이름을 검증하여 대상 디렉터리를 벗어나는 경로(zip-slip)를 거부합니다.
 
+### `fileDialog` 태스크
+
+사용자에게 파일 선택 대화상자(`vscode.window.showOpenDialog`)를 표시하고 선택된 파일 경로의 구성 요소를 다음 태스크가 참조할 수 있는 키로 노출합니다. 사용자가 대화상자를 취소하면 태스크가 `File selection was canceled.` 오류로 실패하며, 파이프라인은 중단됩니다(취소를 허용하려면 task에 `continueOnError: true`).
+
+- `type` (string, **필수**): `fileDialog`로 설정해야 합니다.
+- `options` (object, *선택*): VS Code의 [`OpenDialogOptions`](https://code.visualstudio.com/api/references/vscode-api#OpenDialogOptions)가 그대로 전달됩니다. 별도로 덮어쓰지 않으므로 사용자가 제공한 값이 기본 동작을 결정합니다. 자주 쓰는 키:
+    - `openLabel` (string): "Open" 버튼 라벨 (예: `"Select firmware ELF"`).
+    - `title` (string): 다이얼로그 제목.
+    - `defaultUri` (string, URI 형식): 다이얼로그가 처음 열릴 위치.
+    - `filters` (object): 확장자 필터 (예: `{ "Firmware": ["elf", "bin", "hex"] }`).
+    - `canSelectMany` (boolean, 기본 false): 다중 선택 허용. **주의**: 현재 첫 번째 선택값만 task 결과로 노출되므로 다중 선택은 권장하지 않습니다.
+    - `canSelectFiles` / `canSelectFolders` (boolean): 기본값(파일만 선택 가능) 그대로 두면 됩니다. 폴더 전용 다이얼로그가 필요하면 `fileDialog` 대신 `folderDialog`를 사용하세요.
+- **실행 결과**: 선택된 파일 경로를 분해해 다음 태스크가 참조할 수 있도록 합니다.
+    - `${task_id.path}` — 절대 경로 (예: `C:/proj/build/app.elf`)
+    - `${task_id.dir}` — 부모 디렉터리 (예: `C:/proj/build`)
+    - `${task_id.name}` — 파일명(확장자 포함, 예: `app.elf`)
+    - `${task_id.fileNameOnly}` — 확장자를 제외한 파일명 (예: `app`)
+    - `${task_id.fileExt}` — 확장자(앞의 `.` 제외, 예: `elf`)
+
 ### `folderDialog` 태스크
 
-사용자에게 폴더 선택 대화상자를 표시합니다.
+사용자에게 폴더 선택 대화상자를 표시합니다. 내부적으로 `vscode.window.showOpenDialog`를 호출하면서 `canSelectFiles=false`, `canSelectFolders=true`를 강제로 적용하므로, `options`에 다른 값을 지정해도 폴더 선택 모드는 항상 유지됩니다. 사용자가 대화상자를 취소하면 `Folder selection was canceled.` 오류로 실패합니다(`continueOnError: true`로 무시 가능).
 
 - `type` (string, **필수**): `folderDialog`로 설정해야 합니다.
-- `options` (object, *선택*): `vscode.OpenDialogOptions`와 동일한 옵션을 사용할 수 있습니다. (예: `openLabel`, `defaultUri`)
-- **실행 결과**: 다음 태스크에서 `${task_id.path}`(절대 경로), `${task_id.dir}`(부모 디렉토리), `${task_id.name}`(폴더 이름), `${task_id.fileNameOnly}`(확장자 제외 이름), `${task_id.fileExt}`(확장자) 등을 사용할 수 있습니다. `fileDialog`와 동일한 속성을 제공합니다.
+- `options` (object, *선택*): `OpenDialogOptions`와 동일하지만 `canSelectFiles` / `canSelectFolders`는 위와 같이 강제됩니다. 그 외 `openLabel`, `title`, `defaultUri`는 그대로 적용됩니다.
+- **실행 결과**: `fileDialog`와 동일한 키 셋(`path` / `dir` / `name` / `fileNameOnly` / `fileExt`)을 제공합니다. 단, 폴더에는 확장자가 없는 것이 일반적이므로 보통 `fileNameOnly === name`이고 `fileExt`는 빈 문자열입니다.
+    - 예: 사용자가 `C:/proj/build`를 선택한 경우 — `path=C:/proj/build`, `dir=C:/proj`, `name=build`, `fileNameOnly=build`, `fileExt=""` (빈 문자열).
+    - 폴더 이름에 `.`이 포함된 경우(예: `release.v1`)는 `node:path`의 `extname` 규칙을 그대로 따라 `fileNameOnly=release`, `fileExt=v1`이 됩니다 — 보통 의도하지 않은 결과이므로 폴더에서는 `${task_id.path}` 또는 `${task_id.name}`을 사용하는 것이 안전합니다.
 
 ### `zip` 태스크
 
@@ -1676,6 +1697,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 | `taskhub.pipeline.pythonIoEncoding` | `string` | `"utf-8"` | TaskHub가 실행하는 모든 명령의 `PYTHONIOENCODING` 환경변수 값. 빈 문자열이면 강제 설정 안 함. `utf-8:ignore` 같은 값도 가능. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell 출력 인코딩. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` (1–1024) | 캡처 모드(`passTheResultToNextTask: true`)에서 누적되는 stdout/stderr 총 크기 상한(MB). 초과 시 프로세스를 종료하고 명확한 에러로 실패. | [§5 Output Capture](#output-capture) |
+| `taskhub.pipeline.maxParallelTasks` | `integer` | `4` (1–32) | 한 액션 안에서 동시에 실행될 수 있는 task 최대 개수. `parallel: true`가 붙은 task만 "이전 모든 task를 기다림" barrier에서 빠지며, barrier에서 빠진 뒤에도 명시적 `dependsOn`과 `${taskId.x}` 자동 추론 의존성은 그대로 기다린다. `parallel: true`가 없는 task는 `dependsOn` 유무와 무관하게 sync barrier로 동작. 기본 4는 임베디드 빌드(linker/LTO)의 메모리 부담을 고려한 보수적 값 — 자원 여유가 있는 머신에서는 늘리고, 완전 순차로 강제하려면 `1`로 설정. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
 | `taskhub.history.maxItems` | `number` | `10` (1–50) | 저장되는 액션 실행 히스토리 최대 개수. 초과분은 오래된 순으로 자동 제거. | [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.runAnyAction.recentLimit` | `number` | `5` (0–20) | `TaskHub: Run Any Action…` 팔레트의 *Recently used* 섹션에 표시할 최대 개수. `0`이면 섹션 자체가 숨겨진다. 표시 시점에 stale 항목(삭제된 액션)을 걸러내므로 실제 보이는 개수는 이 값 이하가 될 수 있다. | [§5 Quick Action Palette](#5-actions-패널-mainviewmain) |
 | `taskhub.history.showPanel` | `boolean` | `true` | 사이드바의 History 패널 표시 여부. `false`면 뷰 자체가 감춰지지만 기록은 그대로 유지된다. | [§14 히스토리](#14-액션-실행-히스토리) |
@@ -1774,10 +1796,11 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `dependsOn.self` | error | task의 `dependsOn`에 자기 자신이 포함됨. |
 | `dependsOn.missing` | error | `dependsOn`이 같은 액션에 존재하지 않는 task id를 가리킴. |
 | `dependsOn.cycle` | error | task 간 `dependsOn` 그래프에 순환이 있음. 출력 메시지에 순환 경로 포함. |
+| `parallel.interactive` | warning | `inputBox` / `quickPick` / `envPick` / `confirm` / `fileDialog` / `folderDialog` 같은 interactive task에 `parallel: true`가 붙음. 런타임은 prompt mutex로 다이얼로그를 강제 직렬화하므로 병렬 표시는 *post-prompt* 처리에만 적용되며, 사실상 효과가 없는 경우가 대부분. |
 
-### 23.3. `dependsOn`에 대한 주의
+### 23.3. `dependsOn` / `parallel` 런타임 동작
 
-`task.dependsOn`은 현재 **선언적**으로만 존재합니다 — 스키마와 Doctor가 이 필드를 인식하지만, 런타임 엔진은 여전히 배열 순서대로 task를 순차 실행하며 `dependsOn`을 무시합니다. 즉 Doctor에서 cycle/missing이 보고된 액션도 *실행은 일단 됩니다*. 진짜 DAG / 병렬 실행은 [docs/roadmap.md](./roadmap.md) §4("Parallel Execution / Task DAG")의 본 작업으로 들어옵니다. Doctor가 먼저 들어온 이유는 그 본 작업이 도착할 때 `actions.json`이 *문법적으로* 준비되어 있도록 사용자가 미리 적어 둘 수 있게 해주려는 의도입니다.
+`task.dependsOn`은 이제 런타임에서도 honored됩니다 — `parallel`과 함께 task graph를 구성해 DAG로 실행됩니다. 자세한 시맨틱은 [§24 병렬 실행 / Task DAG](#24-병렬-실행--task-dag) 참고. Doctor와 런타임은 **같은 `buildTaskGraph` + `detectGraphCycle`**을 공유하므로 cycle 검사는 단일 출처입니다 (`${taskId.x}` 자동 추론 의존성으로 만들어진 cycle도 양쪽에서 동일하게 잡힘). self/missing 검사는 doctor와 런타임이 각자의 사용자-facing 메시지를 제공하지만, 거부되는 입력은 같습니다.
 
 ### 23.4. 동작상 한계
 
@@ -1788,3 +1811,94 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 ### 23.5. 구현 메모
 
 핵심 분석 로직은 `vscode`에 의존하지 않는 순수 모듈([src/doctor.ts](../src/doctor.ts))에 있고, 익스텐션 레이어는 (1) 워크스페이스/preset/번들 actions.json을 모두 모아 `DoctorInput[]`을 만들고 (2) 결과 `DoctorFinding[]`을 `vscode.Diagnostic`으로 변환해 publish 하는 두 역할만 합니다. AJV validator는 함수 파라미터로 주입되므로 같은 검사를 단위 테스트에서 그대로 돌릴 수 있습니다 — `src/test/doctor.test.ts`가 22개 케이스로 모든 finding code를 커버합니다.
+
+## 24. 병렬 실행 / Task DAG
+
+한 액션 안의 task들을 의존성에 따라 병렬로 실행합니다. **기본은 여전히 순차** — `parallel: true`를 명시한 task만 동시 실행 풀에 들어갑니다. 기존 직렬 액션의 동작은 변하지 않습니다.
+
+### 24.1. 시맨틱 한 줄 요약
+
+```text
+parallel false/omitted = 이전 *모든* task에 암묵 의존 (sync barrier)
+parallel true          = explicit dependsOn + ${taskId.x} 자동 의존성만 기다림
+```
+
+`parallel: true`는 **detached가 아닙니다.** 뒤따르는 `parallel: false` task는 여전히 sync barrier로 동작해 그 task를 기다립니다. 진짜 fire-and-forget이 필요하면 별도 액션으로 분리하세요.
+
+### 24.2. 예시
+
+```json
+{
+  "id": "fw.matrix",
+  "title": "Build all targets",
+  "action": {
+    "description": "stm32f4 / stm32f7 build를 병렬, 끝나면 합쳐서 패키지",
+    "tasks": [
+      { "id": "buildF4", "type": "shell", "command": "make TARGET=f4" },
+      { "id": "buildF7", "type": "shell", "command": "make TARGET=f7", "parallel": true },
+      {
+        "id": "package",
+        "type": "shell",
+        "command": "scripts/pack.sh build/f4.bin build/f7.bin",
+        "dependsOn": ["buildF4", "buildF7"]
+      }
+    ]
+  }
+}
+```
+
+- `buildF4`와 `buildF7`은 동시에 시작 (`buildF7`이 `parallel: true`라 직전 task의 barrier에서 빠짐).
+- `package`는 `parallel`이 없으므로 두 빌드를 모두 기다림. `dependsOn`을 명시했지만, 이 패턴은 `parallel: false` 기본의 barrier 규칙으로도 자동으로 만족되므로 — 명시한 이유는 "이 task가 두 빌드의 산출물을 합친다"는 의도를 코드에서 읽히게 하기 위함.
+- 한 빌드가 `continueOnError: true`였다면 실패해도 `package`까지 진행되며, 실패한 빌드의 결과는 `{}`로 전파.
+
+> **출력 캡처가 필요할 때만**: shell task의 stdout을 `${buildF4.output}`처럼 다음 task 변수로 쓰려면 `passTheResultToNextTask: true`를 함께 두거나 `output.capture` 규칙으로 명시적으로 캡처해야 한다 ([§5 Output Capture](#output-capture) 참조). 그렇게 캡처된 변수를 다음 task가 참조하면 *자동 추론된 의존성*이 잡혀 `dependsOn`을 생략해도 같은 순서가 강제된다.
+
+### 24.3. 자동 의존성 추론
+
+task의 string 필드(`command`, `args`, `env` 값, `cwd`, `output.filePath`, `output.content`, 인터랙티브 prompt 등)에 `${taskId.x}` 형태의 참조가 있으면 그 `taskId`는 자동으로 의존성으로 잡힙니다. 이렇게 해야:
+
+- `parallel: true`를 붙였더라도 출력을 참조하는 task가 먼저 실행되는 사고를 막을 수 있고,
+- `dependsOn`을 잊어도 정확한 순서가 유지됩니다.
+
+`${workspaceFolder}` / `${extensionPath}` 같은 reserved 이름과 `${env:BAR}` / `${input:foo}` 같은 reserved prefix(`env:`, `input:`)는 자동 추론에서 제외됩니다 — 같은 이름의 task가 존재하더라도 이 reference는 task가 아니라 빌트인으로 간주되어 가짜 의존성/사이클을 만들지 않습니다. `output.capture[].regex` / `output.diagnostics[].regex` 안의 `${…}` 리터럴도 정규식 패턴이지 변수 참조가 아니므로 제외.
+
+> **현재 한계**: `${workspaceFolder}` / `${extensionPath}`는 런타임에 실제 경로로 치환되지만, `${env:VAR}` / `${input:foo}`는 *예약은 되어 있지만 아직 치환되지는 않습니다* — interpolation 단계를 통과해서 셸에 리터럴로 전달됩니다(대부분의 셸은 이를 그대로 인쇄). VS Code 빌트인과의 동일성은 향후 작업이며, 현재 권장은 `task.env.VAR`로 명시 주입하는 패턴입니다. reserved prefix는 그래프 정확성을 위한 안전장치이며 task id를 `env:` / `input:`로 시작하지 마세요.
+
+### 24.4. 실패 정책
+
+- **일반 실패** (`continueOnError: false`, 기본): 새 task 스케줄링을 멈추고, 이미 실행 중인 sibling은 완료까지 기다린 뒤 액션 실패로 처리. 단일 실패는 원본 Error 그대로 throw해서 기존 메시지/스택/`instanceof` 체크 호환성을 유지. 두 개 이상의 task가 동시에 실패하면 모든 cause를 묶어 `AggregateError`로 throw — 메시지는 `Action '<id>' had N task failures — taskA: ..., taskB: ...` 요약이며, 개별 cause는 `error.errors`에 보존되어 두 빌드 동시 실패 같은 사례에서 두 번째 cause가 묻히지 않습니다.
+- **continueOnError 실패**: 결과를 `{}`로 저장하고 dependents 실행을 허용. 직렬 모드와 동일.
+- **timeout**: task 단위로 그 task의 child process / 스트림 터미널만 종료. sibling은 영향 없음.
+- **사용자 Stop**: 액션 전체를 죽이며, 해당 액션의 모든 task의 child process / 스트림 터미널을 정리.
+
+### 24.5. 동시 실행 한도
+
+`taskhub.pipeline.maxParallelTasks` 설정으로 한 액션 안에서 동시에 돌 수 있는 task 수를 제한합니다 — 기본 **4**, 범위 1~32. 임베디드 빌드의 linker / LTO 단계는 GB 단위의 RAM을 먹는 경우가 흔해서 코어 수 자동값(`os.cpus().length`)보다 보수적인 4로 시작합니다. 자원 여유가 있는 머신에서는 늘리고, 완전 순차 강제하려면 1로 설정하면 됩니다.
+
+### 24.6. 출력 격리
+
+액션 안에 `parallel: true` task가 하나라도 있으면 그 액션의 출력 채널을 task별로 분리합니다 — 두 빌드의 컴파일러 에러가 같은 터미널에 섞이지 않게 하기 위함:
+
+- **streamed shell task**: VS Code Task terminal group이 `actionId:taskId` 단위로 갈라져 task마다 별도 터미널이 열림.
+- **`output.mode: "terminal"`**: TaskHub 터미널 키가 `actionId:taskId`로 분리.
+- **`spawn` 캡처 task**: 캡처 자체는 process별이라 섞일 일이 없음 — 별도 격리 불필요.
+
+기존의 직렬 액션은 영향받지 않습니다 (`parallel: true` 없으면 출력이 한 터미널을 공유하던 기존 동작 유지).
+
+### 24.7. Interactive task와 `parallel: true`
+
+`inputBox` / `quickPick` / `envPick` / `confirm` / `fileDialog` / `folderDialog`에 `parallel: true`를 붙이면 Doctor가 `parallel.interactive` warning을 보고합니다. 런타임은 그 task의 실행을 거부하진 않고, 대신 **prompt mutex**로 다이얼로그를 강제 직렬화합니다 — 즉 modal 두 개가 동시에 뜨는 일은 없으며, 사실상 그 task의 "병렬" 부분은 post-prompt 처리(capture 등)에만 적용됩니다. 대부분의 경우 `parallel: true`를 빼는 게 의도와 가깝습니다.
+
+### 24.8. 그래프 검증
+
+액션 진입 시 `validateTaskGraph`가 다음 조건을 거부하고 액션을 즉시 실패시킵니다:
+
+- `dependsOn`이 자기 자신을 가리킴 (self-dependency)
+- `dependsOn`이 같은 액션에 없는 task id를 가리킴 (missing-dependency)
+- explicit / inferred / barrier 의존성 union에 순환이 있음 (cycle)
+
+Doctor는 같은 `buildTaskGraph` + `detectGraphCycle` 헬퍼를 공유하므로 cycle 거부 조건이 런타임과 정확히 일치합니다. self/missing은 Doctor가 별도 메시지(액션 id 접두사 포함)로 보고하지만 거부되는 입력 집합은 같습니다.
+
+### 24.9. 구현 메모
+
+핵심 로직은 [src/pipelineUtils.ts](../src/pipelineUtils.ts)의 `buildTaskGraph` / `inferTaskDependencies` / `validateTaskGraph` / `TaskScheduler` / `withInteractivePromptLock`에 모여 있고, 모두 `vscode`에 의존하지 않는 순수 함수입니다. 실제 task 실행은 [src/extension.ts](../src/extension.ts) `executeActionPipeline`이 graph + scheduler를 소비하면서 `executeSingleTask`를 launching하는 형태로 짜여 있습니다. 단위 테스트는 [src/test/taskGraph.test.ts](../src/test/taskGraph.test.ts)가 graph 구성·자동 추론·cycle·scheduler lifecycle을, [src/test/pipelineUtils.test.ts](../src/test/pipelineUtils.test.ts)가 prompt mutex serialization을, [src/test/doctor.test.ts](../src/test/doctor.test.ts)가 `parallel.interactive` warning을 커버합니다.

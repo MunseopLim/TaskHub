@@ -1890,6 +1890,326 @@ try {
                 ]
             );
         });
+
+        test('IT-075: parallel 다중 실패는 AggregateError로 묶여 모든 cause를 노출', async () => {
+            // Two parallel tasks both fail (bad capture regex). The pipeline
+            // must throw an AggregateError that carries every cause, not
+            // just the first — pre-fix the second failure was only logged
+            // via verbose so the user couldn't tell why the second build
+            // had also broken. Single-failure callers still see the
+            // original error unchanged (covered by IT-074b / IT-071).
+            const action: PipelineAction = {
+                description: 'IT-075',
+                tasks: [
+                    {
+                        id: 'failA',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'x',
+                        parallel: true,
+                        passTheResultToNextTask: true,
+                        output: { capture: { name: 'va', regex: '(' } }
+                    },
+                    {
+                        id: 'failB',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'y',
+                        parallel: true,
+                        passTheResultToNextTask: true,
+                        output: { capture: { name: 'vb', regex: '(' } }
+                    }
+                ]
+            };
+
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            const err: unknown = await executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it075',
+                tempWorkspace,
+                [tempWorkspace]
+            ).then(
+                () => { throw new Error('expected pipeline to reject for multi-failure'); },
+                (e: unknown) => e
+            );
+
+            assert.ok(err instanceof Error, 'expected an Error');
+            assert.ok(
+                err instanceof AggregateError,
+                'multi-failure must throw AggregateError, got ' + (err as Error).constructor.name
+            );
+            const agg = err as AggregateError;
+            // Both task ids are mentioned in the summary message.
+            assert.match(agg.message, /failA/);
+            assert.match(agg.message, /failB/);
+            assert.match(agg.message, /it075/);
+            // Both causes are preserved on .errors so callers can drill in.
+            assert.strictEqual(agg.errors.length, 2);
+            for (const cause of agg.errors) {
+                assert.ok(cause instanceof Error);
+            }
+        });
+    });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Parallel execution end-to-end coverage. Pre-existing parallel tests
+    // were scheduler unit tests + sync stringManipulation failure cases —
+    // none exercised concurrent in-flight scheduling, the maxParallelTasks=1
+    // escape hatch, ${producer.output} auto-dep wait, or in-flight drain
+    // after a sibling failure. These IT-076..079
+    // pin those behaviors against the real scheduler + spawned processes.
+    // ─────────────────────────────────────────────────────────────────────
+    suite('Parallel Execution (end-to-end)', function () {
+        // Each of these spawns a `node -e` process that sleeps; raise the
+        // suite-level timeout so a slow CI box still has headroom.
+        this.timeout(30000);
+
+        /**
+         * Returns a node script that sleeps `ms` milliseconds, prints a
+         * unique sentinel, then exits 0. The sentinel lets us anchor
+         * downstream `${producer.output}` references in capture tests.
+         */
+        function sleepAndPrint(ms: number, sentinel: string): string[] {
+            return [
+                '-e',
+                `setTimeout(() => process.stdout.write(${JSON.stringify(sentinel)}), ${ms})`
+            ];
+        }
+
+        async function withMaxParallelTasks<T>(value: number, body: () => Promise<T>): Promise<T> {
+            const cfg = vscode.workspace.getConfiguration('taskhub');
+            const previous = cfg.get<number>('pipeline.maxParallelTasks');
+            await cfg.update('pipeline.maxParallelTasks', value, vscode.ConfigurationTarget.Global);
+            try {
+                return await body();
+            } finally {
+                await cfg.update('pipeline.maxParallelTasks', previous, vscode.ConfigurationTarget.Global);
+            }
+        }
+
+        test('IT-076: parallel commands both enter in-flight before any terminal event', async () => {
+            // Wall-clock thresholds are noisy on Windows process launch.
+            // The scheduler invariant is stricter and cheaper to assert:
+            // both ready parallel tasks must emit `running` before either
+            // task emits a terminal transition.
+            const sleepMs = 800;
+            const events: import('../extension').TaskTransitionEvent[] = [];
+            const action: PipelineAction = {
+                description: 'IT-076',
+                tasks: [
+                    {
+                        id: 'a',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        args: sleepAndPrint(sleepMs, 'A-done'),
+                        parallel: true
+                    },
+                    {
+                        id: 'b',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        args: sleepAndPrint(sleepMs, 'B-done'),
+                        parallel: true
+                    }
+                ]
+            };
+
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await withMaxParallelTasks(4, () => executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it076',
+                tempWorkspace,
+                [tempWorkspace],
+                { onTaskTransition: e => events.push(e) }
+            ));
+
+            const firstTerminalIndex = events.findIndex(e => e.state !== 'running');
+            const aRunningIndex = events.findIndex(e => e.taskId === 'a' && e.state === 'running');
+            const bRunningIndex = events.findIndex(e => e.taskId === 'b' && e.state === 'running');
+            const summary = events.map(e => `${e.taskId}:${e.state}`).join(', ');
+            assert.ok(firstTerminalIndex !== -1, `expected terminal transitions, got ${summary}`);
+            assert.ok(aRunningIndex !== -1, `expected a:running, got ${summary}`);
+            assert.ok(bRunningIndex !== -1, `expected b:running, got ${summary}`);
+            assert.ok(
+                aRunningIndex < firstTerminalIndex && bRunningIndex < firstTerminalIndex,
+                `parallel tasks should both be in-flight before completion; got ${summary}`
+            );
+        });
+
+        test('IT-077: maxParallelTasks=1 설정 시 parallel: true도 직렬화', async () => {
+            // The user knob `taskhub.pipeline.maxParallelTasks` lets a
+            // resource-constrained machine force fully sequential
+            // execution even when tasks opt into `parallel: true`. The
+            // scheduler caps concurrency at 1, so two 600ms sleepers
+            // should add up to roughly 1200ms instead of overlapping.
+            const cfg = vscode.workspace.getConfiguration('taskhub');
+            const previous = cfg.get<number>('pipeline.maxParallelTasks');
+            await cfg.update('pipeline.maxParallelTasks', 1, vscode.ConfigurationTarget.Global);
+            try {
+                const sleepMs = 600;
+                const action: PipelineAction = {
+                    description: 'IT-077',
+                    tasks: [
+                        {
+                            id: 'a', type: 'command',
+                            command: { windows: 'node', macos: 'node', linux: 'node' },
+                            args: sleepAndPrint(sleepMs, 'A-done'),
+                            parallel: true
+                        },
+                        {
+                            id: 'b', type: 'command',
+                            command: { windows: 'node', macos: 'node', linux: 'node' },
+                            args: sleepAndPrint(sleepMs, 'B-done'),
+                            parallel: true
+                        }
+                    ]
+                };
+                const startedAt = Date.now();
+                await run(action, 'it077');
+                const elapsed = Date.now() - startedAt;
+
+                assert.ok(
+                    elapsed >= sleepMs * 2 - 200,
+                    `maxParallelTasks=1 should serialize; got ${elapsed}ms (expected ≥ ${sleepMs * 2 - 200}ms)`
+                );
+            } finally {
+                await cfg.update('pipeline.maxParallelTasks', previous, vscode.ConfigurationTarget.Global);
+            }
+        });
+
+        test('IT-078: ${producer.output} auto-dep makes consumer wait for producer', async () => {
+            // `consumer` is parallel: true with a `${producer.output}`
+            // ref; auto-inference must add producer as a dep so the
+            // consumer cannot start while producer is still sleeping.
+            // We assert both the transition order and the substituted
+            // value that the consumer echoes into a file.
+            const resultPath = path.join(tempWorkspace, 'it078.txt');
+            const events: import('../extension').TaskTransitionEvent[] = [];
+            const action: PipelineAction = {
+                description: 'IT-078',
+                tasks: [
+                    {
+                        id: 'producer',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        args: sleepAndPrint(500, 'PROD-OK'),
+                        parallel: true,
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'consumer',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        // Echo the producer's stdout so the test can
+                        // verify the value was actually substituted.
+                        args: ['-e', 'process.stdout.write(process.argv[1])', '${producer.output}'],
+                        parallel: true,
+                        passTheResultToNextTask: true
+                    },
+                    {
+                        id: 'verify',
+                        type: 'writeFile',
+                        path: resultPath,
+                        content: '${consumer.output}'
+                    }
+                ]
+            };
+
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it078',
+                tempWorkspace,
+                [tempWorkspace],
+                { onTaskTransition: e => events.push(e) }
+            );
+
+            assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'PROD-OK');
+            const producerSuccessIndex = events.findIndex(e => e.taskId === 'producer' && e.state === 'success');
+            const consumerRunningIndex = events.findIndex(e => e.taskId === 'consumer' && e.state === 'running');
+            const summary = events.map(e => `${e.taskId}:${e.state}`).join(', ');
+            assert.ok(producerSuccessIndex !== -1, `expected producer:success, got ${summary}`);
+            assert.ok(consumerRunningIndex !== -1, `expected consumer:running, got ${summary}`);
+            assert.ok(
+                producerSuccessIndex < consumerRunningIndex,
+                `consumer must wait for producer output before starting; got ${summary}`
+            );
+        });
+
+        test('IT-079: failed sibling still waits for every in-flight sibling to drain', async () => {
+            // Three parallel tasks: `quickFail` fails fast (~100ms),
+            // `slow` runs ~700ms, `medium` runs ~400ms. After quickFail
+            // aborts new scheduling, every in-flight sibling must be
+            // awaited; the pipeline cannot resolve until they drain.
+            // We assert the elapsed time is at least slow's duration —
+            // pre-fix a buggy abort path could have rejected as soon as
+            // quickFail threw, leaving the two siblings dangling.
+            const slowMs = 700;
+            const events: import('../extension').TaskTransitionEvent[] = [];
+            const action: PipelineAction = {
+                description: 'IT-079',
+                tasks: [
+                    {
+                        id: 'quickFail',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        // Exit 1 quickly so it becomes the abort trigger.
+                        args: ['-e', 'setTimeout(() => process.exit(1), 100)'],
+                        parallel: true
+                    },
+                    {
+                        id: 'slow',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        args: sleepAndPrint(slowMs, 'SLOW-OK'),
+                        parallel: true
+                    },
+                    {
+                        id: 'medium',
+                        type: 'command',
+                        command: { windows: 'node', macos: 'node', linux: 'node' },
+                        args: sleepAndPrint(400, 'MED-OK'),
+                        parallel: true
+                    }
+                ]
+            };
+
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            let elapsed = 0;
+            const err: unknown = await withMaxParallelTasks(4, async () => {
+                const startedAt = Date.now();
+                const caught = await executeActionPipeline(
+                    action,
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it079',
+                    tempWorkspace,
+                    [tempWorkspace],
+                    { onTaskTransition: e => events.push(e) }
+                ).then(() => null, (e: unknown) => e);
+                elapsed = Date.now() - startedAt;
+                return caught;
+            });
+
+            assert.ok(err instanceof Error, 'pipeline must reject when a non-continueOnError task fails');
+            assert.ok(
+                elapsed >= slowMs - 100,
+                `pipeline must drain in-flight siblings; rejected after ${elapsed}ms but slow needs ~${slowMs}ms`
+            );
+
+            // Every started task must emit a terminal event — we
+            // expect 3 running + at least 1 failure + ≥ 1 success/failure
+            // for each of slow & medium (timing-dependent which terminal
+            // state exactly, but they must NOT remain in `running`).
+            const terminalCount = events.filter(e =>
+                e.state === 'success' || e.state === 'failure' || e.state === 'skipped'
+            ).length;
+            const runningCount = events.filter(e => e.state === 'running').length;
+            assert.strictEqual(terminalCount, runningCount,
+                `every running task must reach a terminal state; running=${runningCount} terminal=${terminalCount}`);
+        });
     });
 
     suite('Problem Matcher / Diagnostics', () => {

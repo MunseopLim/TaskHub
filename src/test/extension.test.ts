@@ -1451,6 +1451,33 @@ suite('Extension Test Suite', () => {
 			const options = createGroupedTaskPresentationOptions('action-1', 'silent');
 			assert.strictEqual(options.reveal, vscode.TaskRevealKind.Silent);
 		});
+
+		test('keeps action-wide group when isParallel is false (backward compat)', () => {
+			const options = createGroupedTaskPresentationOptions(
+				'action-1',
+				'always',
+				{ taskId: 'build', isParallel: false }
+			);
+			assert.strictEqual(options.group, 'action-1');
+		});
+
+		test('keeps action-wide group when taskId is missing even if isParallel', () => {
+			const options = createGroupedTaskPresentationOptions(
+				'action-1',
+				'always',
+				{ isParallel: true }
+			);
+			assert.strictEqual(options.group, 'action-1');
+		});
+
+		test('splits group to actionId:taskId when isParallel and taskId are both present', () => {
+			const options = createGroupedTaskPresentationOptions(
+				'action-1',
+				'always',
+				{ taskId: 'buildA', isParallel: true }
+			);
+			assert.strictEqual(options.group, 'action-1:buildA');
+		});
 	});
 
 	suite('serializeFavorites - edge cases', () => {
@@ -2092,15 +2119,11 @@ suite('Extension Test Suite', () => {
 			return entry;
 		}
 
-		async function withHistoryMaxItems<T>(max: number, fn: () => T | Promise<T>): Promise<T> {
-			const cfg = vscode.workspace.getConfiguration('taskhub.history');
-			const prev = cfg.get('maxItems');
-			await cfg.update('maxItems', max, vscode.ConfigurationTarget.Global);
-			try {
-				return await fn();
-			} finally {
-				await cfg.update('maxItems', prev, vscode.ConfigurationTarget.Global);
-			}
+		function createHistoryProvider(maxItems?: number, context: vscode.ExtensionContext = createMockContext()): HistoryProvider {
+			return new HistoryProvider(
+				context,
+				maxItems === undefined ? undefined : { getMaxItems: () => maxItems }
+			);
 		}
 
 		test('addHistoryEntry unshifts entries so newest comes first', () => {
@@ -2128,18 +2151,16 @@ suite('Extension Test Suite', () => {
 		});
 
 		test('addHistoryEntry trims the oldest entries once maxItems is exceeded', async () => {
-			await withHistoryMaxItems(3, () => {
-				const provider = new HistoryProvider(createMockContext());
-				for (let i = 0; i < 5; i++) {
-					provider.addHistoryEntry(makeEntry(`a${i}`, 'success', 1000 + i));
-				}
-				const history = provider.getHistory();
-				// After the 5th add, newest-first ordering keeps only a4/a3/a2.
-				assert.deepStrictEqual(
-					history.map(e => e.actionId),
-					['a4', 'a3', 'a2']
-				);
-			});
+			const provider = createHistoryProvider(3);
+			for (let i = 0; i < 5; i++) {
+				provider.addHistoryEntry(makeEntry(`a${i}`, 'success', 1000 + i));
+			}
+			const history = provider.getHistory();
+			// After the 5th add, newest-first ordering keeps only a4/a3/a2.
+			assert.deepStrictEqual(
+				history.map(e => e.actionId),
+				['a4', 'a3', 'a2']
+			);
 		});
 
 		test('updateHistoryStatus mutates an entry matched by (actionId, timestamp)', () => {
@@ -2337,35 +2358,29 @@ suite('Extension Test Suite', () => {
 
 		test('trimHistoryToMax shrinks over-length history to the current maxItems setting', async () => {
 			const ctx = createMockContext();
-			await withHistoryMaxItems(50, () => {
-				const provider = new HistoryProvider(ctx);
-				for (let i = 0; i < 8; i++) {
-					provider.addHistoryEntry(makeEntry(`x${i}`, 'success', 1000 + i));
-				}
-			});
+			const seedProvider = createHistoryProvider(50, ctx);
+			for (let i = 0; i < 8; i++) {
+				seedProvider.addHistoryEntry(makeEntry(`x${i}`, 'success', 1000 + i));
+			}
 			// Lower maxItems, then trim. We expect only the first 4 newest
 			// entries to remain (history is ordered newest-first).
-			await withHistoryMaxItems(4, () => {
-				const provider = new HistoryProvider(ctx);
-				provider.trimHistoryToMax();
-				const history = provider.getHistory();
-				assert.strictEqual(history.length, 4);
-				assert.deepStrictEqual(
-					history.map(e => e.actionId),
-					['x7', 'x6', 'x5', 'x4']
-				);
-			});
+			const trimProvider = createHistoryProvider(4, ctx);
+			trimProvider.trimHistoryToMax();
+			const history = trimProvider.getHistory();
+			assert.strictEqual(history.length, 4);
+			assert.deepStrictEqual(
+				history.map(e => e.actionId),
+				['x7', 'x6', 'x5', 'x4']
+			);
 		});
 
 		test('trimHistoryToMax is a no-op when history.length <= maxItems', async () => {
 			const ctx = createMockContext();
-			await withHistoryMaxItems(10, () => {
-				const provider = new HistoryProvider(ctx);
-				provider.addHistoryEntry(makeEntry('a', 'success', 1));
-				provider.addHistoryEntry(makeEntry('b', 'success', 2));
-				provider.trimHistoryToMax();
-				assert.strictEqual(provider.getHistory().length, 2);
-			});
+			const provider = createHistoryProvider(10, ctx);
+			provider.addHistoryEntry(makeEntry('a', 'success', 1));
+			provider.addHistoryEntry(makeEntry('b', 'success', 2));
+			provider.trimHistoryToMax();
+			assert.strictEqual(provider.getHistory().length, 2);
 		});
 
 		test('createToolHistoryEntry stores Memory Map metadata in the shared history shape', () => {

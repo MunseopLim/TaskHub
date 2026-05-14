@@ -290,6 +290,110 @@ suite('buildPreviewReport', () => {
         assert.match(report, /all \$\{\.\.\.\} references resolve/);
     });
 
+    test('does not flag forward reference to a later task in the same action', () => {
+        // Auto-inferred dep flips the runtime order to B → A; the linear
+        // simulation must not raise a spurious "unresolved" for ${B.output}.
+        // Both tasks must be `parallel: true` so the runtime can actually
+        // reorder — pre-fix this fixture had B sequential, which produces
+        // a real cycle (A→B inferred + B→A barrier) the runtime rejects.
+        const item: ActionItem = {
+            id: 'a.fwdref',
+            title: 'forward ref',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'A', type: 'shell', command: 'echo ${B.output}', parallel: true } as any,
+                    { id: 'B', type: 'shell', command: 'make build', parallel: true } as any,
+                ]
+            }
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.doesNotMatch(report, /unresolved variables/i,
+            `forward task ref should not be reported as unresolved; got: ${report}`);
+        assert.doesNotMatch(report, /Graph issues/i,
+            `valid forward-ref must not raise graph issues; got: ${report}`);
+        assert.match(report, /all \$\{\.\.\.\} references resolve/);
+    });
+
+    test('reports cycle when parallel forward-ref + sequential barrier form a cycle', () => {
+        // A is parallel and references B's output (A.inferredDeps={B}).
+        // B is sequential after A so B.barrierDeps={A}. Union → cycle.
+        // Pre-fix the linear simulator showed this as "all resolved" by
+        // tolerating every forward ref; runtime would refuse to schedule.
+        const item: ActionItem = {
+            id: 'a.cycle.parallel-vs-barrier',
+            title: 'parallel-barrier cycle',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'A', type: 'shell', command: 'echo ${B.output}', parallel: true } as any,
+                    { id: 'B', type: 'shell', command: 'make build' } as any,
+                ]
+            }
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.match(report, /Graph issues/);
+        assert.match(report, /dependency cycle/);
+        assert.match(report, /Summary: action would FAIL at start/);
+    });
+
+    test('reports missing-dependency from `dependsOn` referencing an unknown task', () => {
+        const item: ActionItem = {
+            id: 'a.missingdep',
+            title: 'missing dep',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'A', type: 'shell', command: 'make', dependsOn: ['ghost'] } as any,
+                ]
+            }
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.match(report, /Graph issues/);
+        assert.match(report, /unknown task 'ghost'/);
+    });
+
+    test('still flags ${alreadyRan.typoKey} after the producer has been simulated', () => {
+        // `producer` runs first and exposes `output` / `outputDir`.
+        // `consumer` references `${producer.typoKey}` which is NOT a
+        // captured / built-in result key — pre-fix the head check
+        // suppressed every `${producer.*}` ref because `producer` was a
+        // valid task id, masking the typo. Post-fix `producer` is no
+        // longer in the forward-id set by the time `consumer` runs, so
+        // the typo surfaces as unresolved.
+        const item: ActionItem = {
+            id: 'a.typo.aftersim',
+            title: 'typo after sim',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'producer', type: 'shell', command: 'make build', passTheResultToNextTask: true } as any,
+                    { id: 'consumer', type: 'shell', command: 'echo ${producer.typoKey}' } as any,
+                ]
+            }
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.match(report, /unresolved/i);
+        assert.match(report, /\$\{producer\.typoKey\}/);
+    });
+
+    test('still flags unresolved when head is not a task id in this action', () => {
+        const item: ActionItem = {
+            id: 'a.unknownhead',
+            title: 'unknown head',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'A', type: 'shell', command: 'echo ${notATask.output}' } as any,
+                    { id: 'B', type: 'shell', command: 'make build' } as any,
+                ]
+            }
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.match(report, /unresolved/i);
+        assert.match(report, /\$\{notATask\.output\}/);
+    });
+
     suite('zip/unzip built-in engine preview', () => {
         test('zip task without tool reports built-in engine', () => {
             const item: ActionItem = {

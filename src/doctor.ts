@@ -27,7 +27,13 @@
  */
 
 import type { ActionItem, Task, OutputCapture, DiagnosticPattern } from './schema';
-import { interpolatePipelineVariables, RESERVED_CAPTURE_NAMES } from './pipelineUtils';
+import {
+    interpolatePipelineVariables,
+    RESERVED_CAPTURE_NAMES,
+    INTERACTIVE_TASK_TYPES,
+    buildTaskGraph,
+    detectGraphCycle,
+} from './pipelineUtils';
 import {
     simulateTaskResult,
     findUnresolved,
@@ -127,6 +133,7 @@ function analyzeFile(input: DoctorInput, validator: DoctorValidator): DoctorFind
     findings.push(...checkRegexAndCaptureGroups(parsed, input));
     findings.push(...checkUnresolvedAndOutsideWrites(parsed, input));
     findings.push(...checkDependsOn(parsed, input));
+    findings.push(...checkParallelInteractive(parsed, input));
 
     return findings;
 }
@@ -660,6 +667,24 @@ function analyzeActionTasks(
     // produces.
     const baseDir = input.workspaceFolder ?? input.workspaceRoots[0] ?? '';
 
+    // Doctor walks tasks in declaration order, but the runtime scheduler
+    // honors `${id.x}` even when the referenced task appears later in the
+    // array (auto-inferred dep flips the run order). Collect every valid
+    // task id upfront so we can compute per-iteration "forward task ids"
+    // (those not yet simulated into `allResults`) and tolerate refs to
+    // them — that was the pre-0.4.42 false positive flagged in the
+    // parallel-execution review.
+    //
+    // Toleration is *forward-only* on purpose: ids already in
+    // `allResults` are kept un-tolerated so a `${alreadyRan.typoKey}`
+    // typo against an existing capture/result key still surfaces as
+    // `variable.unresolved`. Pre-fix this used the full task-id set
+    // and silently swallowed those typos.
+    const knownTaskIds = new Set<string>();
+    for (const t of tasks) {
+        if (t && typeof t.id === 'string') { knownTaskIds.add(t.id); }
+    }
+
     for (const task of tasks) {
         if (!task || typeof task.id !== 'string') {
             continue;
@@ -727,7 +752,13 @@ function analyzeActionTasks(
         // output.filePath
         const resolvedOutputPath = visitString(task.output?.filePath);
 
-        const unresolved = findUnresolved(interpolated);
+        const forwardTaskIds = new Set<string>();
+        for (const id of knownTaskIds) {
+            if (!Object.prototype.hasOwnProperty.call(allResults, id)) {
+                forwardTaskIds.add(id);
+            }
+        }
+        const unresolved = findUnresolved(interpolated, forwardTaskIds);
         if (unresolved.length > 0) {
             findings.push({
                 filePath: input.filePath,
@@ -806,6 +837,11 @@ function analyzeDependsOn(
     input: DoctorInput,
     findings: DoctorFinding[]
 ): void {
+    // self / missing are reported against the *literal* dependsOn field
+    // (a user-authored mistake at that spot). Cycle detection delegates
+    // to the runtime's graph builder so that cycles created through
+    // auto-inferred `${taskId.x}` deps are caught at lint time too — the
+    // runtime and Doctor share one cycle definition (single source).
     const validIds = new Set<string>();
     for (const t of tasks) {
         if (t && typeof t.id === 'string') {
@@ -813,16 +849,12 @@ function analyzeDependsOn(
         }
     }
 
-    const graph = new Map<string, string[]>();
     for (const task of tasks) {
         if (!task || typeof task.id !== 'string' || !Array.isArray(task.dependsOn)) {
             continue;
         }
-        const deps: string[] = [];
         for (const dep of task.dependsOn) {
-            if (typeof dep !== 'string') {
-                continue;
-            }
+            if (typeof dep !== 'string') { continue; }
             if (dep === task.id) {
                 findings.push({
                     filePath: input.filePath,
@@ -843,57 +875,47 @@ function analyzeDependsOn(
                     code: 'dependsOn.missing',
                     message: `Task '${item.id}.${task.id}' depends on unknown task id '${dep}'.`,
                 });
-                continue;
             }
-            deps.push(dep);
         }
-        graph.set(task.id, deps);
     }
 
-    // Cycle detection via DFS with three-color marks.
-    const WHITE = 0, GRAY = 1, BLACK = 2;
-    const color = new Map<string, number>();
-    const reportedCycle = new Set<string>();
-    for (const id of graph.keys()) {
-        color.set(id, WHITE);
+    const graph = buildTaskGraph(tasks);
+    const cycle = detectGraphCycle(graph);
+    if (cycle) {
+        findings.push({
+            filePath: input.filePath,
+            sourceLabel: input.sourceLabel,
+            range: findIdLine(input.rawText, cycle[0]),
+            severity: 'error',
+            code: 'dependsOn.cycle',
+            message: `Task dependency cycle in action '${item.id}' (includes auto-inferred deps from \${id.x} references): ${cycle.join(' -> ')}.`,
+        });
     }
-    const stack: string[] = [];
+}
 
-    const visit = (id: string): void => {
-        const state = color.get(id) ?? WHITE;
-        if (state === BLACK) {
-            return;
-        }
-        if (state === GRAY) {
-            const idx = stack.indexOf(id);
-            const cycle = idx >= 0 ? [...stack.slice(idx), id] : [id, id];
-            const key = [...cycle].sort().join('->');
-            if (!reportedCycle.has(key)) {
-                reportedCycle.add(key);
-                findings.push({
-                    filePath: input.filePath,
-                    sourceLabel: input.sourceLabel,
-                    range: findIdLine(input.rawText, id),
-                    severity: 'error',
-                    code: 'dependsOn.cycle',
-                    message: `Task dependency cycle in action '${item.id}': ${cycle.join(' -> ')}.`,
-                });
-            }
-            return;
-        }
-        color.set(id, GRAY);
-        stack.push(id);
-        for (const next of graph.get(id) ?? []) {
-            visit(next);
-        }
-        stack.pop();
-        color.set(id, BLACK);
-    };
-    for (const id of graph.keys()) {
-        if ((color.get(id) ?? WHITE) === WHITE) {
-            visit(id);
-        }
-    }
+/**
+ * Flags interactive task types (`inputBox`, `quickPick`, etc.) marked
+ * `parallel: true`. The runtime still executes them but serializes
+ * their prompts via a UI mutex — opting them into the parallel pool
+ * doesn't actually buy concurrency for the dialog itself, only for
+ * the post-prompt processing. Warning, not error, because the
+ * configuration runs correctly; this is best-practice guidance.
+ */
+function checkParallelInteractive(actions: ActionItem[], input: DoctorInput): DoctorFinding[] {
+    const findings: DoctorFinding[] = [];
+    forEachTask(actions, (item, task) => {
+        if (task.parallel !== true) { return; }
+        if (!INTERACTIVE_TASK_TYPES.has(task.type)) { return; }
+        findings.push({
+            filePath: input.filePath,
+            sourceLabel: input.sourceLabel,
+            range: findIdLine(input.rawText, task.id),
+            severity: 'warning',
+            code: 'parallel.interactive',
+            message: `Task '${item.id}.${task.id}' is '${task.type}' with 'parallel: true', but interactive prompts are serialized at runtime via a UI mutex — concurrent execution does not apply to the dialog itself. Remove 'parallel: true' or move the interactive prompt out of the parallel pool.`,
+        });
+    });
+    return findings;
 }
 
 function forEachTask(

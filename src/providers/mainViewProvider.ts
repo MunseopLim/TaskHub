@@ -15,7 +15,40 @@
 import * as vscode from 'vscode';
 import { ActionItem, Action as PipelineAction } from '../schema';
 import { t } from '../i18n';
-import { actionStates } from './actionStatus';
+import { actionStates, ActionProgress } from './actionStatus';
+
+/**
+ * Render the in-flight progress hint shown on a running Action TreeItem.
+ * Exported so unit tests can pin the format without spinning up a tree.
+ *
+ *   - 1 task running  → `${index}/${total} · ${taskId}` (uses the task's
+ *                        actual declaration position, so parallel runs
+ *                        with out-of-order completion still label the
+ *                        in-flight task correctly)
+ *   - 2 tasks running → `${n} running · ${a}, ${b}`
+ *   - 3+ running      → `${n} running · ${a}, ${b} + ${n-2}`
+ *   - 0 running       → `${completed}/${total}` (transient gap between
+ *                        sequential tasks; parallel pipelines rarely hit
+ *                        this since something is usually in flight)
+ *
+ * Returns `undefined` when the progress is too thin to be useful — the
+ * caller treats `undefined` as "no description".
+ */
+export function formatProgressDescription(progress: ActionProgress): string | undefined {
+    const { total, completed, running } = progress;
+    if (total <= 1) { return undefined; }
+    if (running.length === 0) {
+        if (completed <= 0) { return undefined; }
+        return `${completed}/${total}`;
+    }
+    if (running.length === 1) {
+        return `${running[0].index}/${total} · ${running[0].taskId}`;
+    }
+    if (running.length === 2) {
+        return `${running.length} running · ${running[0].taskId}, ${running[1].taskId}`;
+    }
+    return `${running.length} running · ${running[0].taskId}, ${running[1].taskId} + ${running.length - 2}`;
+}
 
 export class Folder extends vscode.TreeItem {
     public children: any[];
@@ -57,8 +90,15 @@ export class Action extends vscode.TreeItem {
                     // info ("when ran / how long"); this description slot
                     // is exclusively for live progress and is cleared by
                     // `finalizeActionRun` once the action terminates.
+                    //
+                    // Sequential pipelines see at most one task running at
+                    // a time → renders as the legacy `2/3 · link`.
+                    // Parallel pipelines may have multiple in flight →
+                    // switch to `2 running · A, B` (or `+ N` when more
+                    // than two are active) so the description fits in
+                    // the tree row without truncating.
                     if (state.progress && state.progress.total > 1) {
-                        this.description = `${state.progress.index}/${state.progress.total} · ${state.progress.taskId}`;
+                        this.description = formatProgressDescription(state.progress);
                     }
                     break;
                 case 'success':

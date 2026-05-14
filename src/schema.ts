@@ -149,13 +149,34 @@ export interface Task {
 
     /**
      * IDs of earlier tasks (within the same action) that must complete
-     * before this task. Currently *declarative only* — the runtime still
-     * executes tasks sequentially in array order and ignores `dependsOn` at
-     * execution time. The field is consumed by TaskHub Doctor to detect
-     * cycles and missing references; full DAG / parallel scheduling lands
-     * with roadmap §4 ("Parallel Execution / Task DAG").
+     * before this task. Combined with `parallel` and auto-inferred
+     * dependencies from `${taskId.x}` variable references to build the
+     * runtime task graph. TaskHub Doctor flags cycles, missing
+     * references, and self-dependencies.
      */
     dependsOn?: string[];
+
+    /**
+     * If true, this task is exempt from the implicit "wait for every
+     * preceding task in the array" barrier and may run concurrently
+     * with its siblings. It still waits for any task listed in
+     * `dependsOn` and any task whose output it references via
+     * `${taskId.x}` (auto-inferred). Defaults to false.
+     *
+     * `parallel: true` is *not* fire-and-forget. A later task with
+     * `parallel: false` (or omitted) is a sync barrier and still
+     * waits for this task to finish — sequential ordering is the
+     * default and `parallel` only opts a task out of the implicit
+     * "wait for everything before me" rule. For detached execution
+     * put the work in a separate action.
+     *
+     * Interactive task types (`inputBox`, `quickPick`, `envPick`,
+     * `confirm`, `fileDialog`, `folderDialog`) are flagged by TaskHub
+     * Doctor when set to `parallel: true`; the runtime still
+     * executes them but serializes their prompts via a UI mutex so
+     * two modal dialogs never race.
+     */
+    parallel?: boolean;
 }
 
 /**

@@ -7,7 +7,7 @@ import { actionStates } from '../providers/actionStatus';
 import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteViewProvider, loadFavoritesFromDisk, removeFavoriteByIdentity } from '../providers/favoriteViewProvider';
 import { buildActionCommandId, buildRunAnyActionPaletteItems, buildRunAnyActionPicks, planRunAnyAction, serializeFavorites, syncActionCommandsFromActions, updateRunAnyActionMru, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT } from '../extension';
 import { Link, LinkGroup, LinkViewProvider } from '../providers/linkViewProvider';
-import { Action, Folder, MainViewProvider } from '../providers/mainViewProvider';
+import { Action, Folder, MainViewProvider, formatProgressDescription } from '../providers/mainViewProvider';
 import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
 import { ActionItem } from '../schema';
 
@@ -444,7 +444,7 @@ suite('View provider integration', function () {
         ];
         actionStates.set('multi', {
             state: 'running',
-            progress: { index: 2, total: 3, taskId: 'link' }
+            progress: { total: 3, completed: 1, running: [{ taskId: 'link', index: 2 }] }
         });
 
         const provider = new MainViewProvider(context, () => actions);
@@ -471,7 +471,7 @@ suite('View provider integration', function () {
         ];
         actionStates.set('solo', {
             state: 'running',
-            progress: { index: 1, total: 1, taskId: 'run' }
+            progress: { total: 1, completed: 0, running: [{ taskId: 'run', index: 1 }] }
         });
 
         const provider = new MainViewProvider(context, () => actions);
@@ -508,6 +508,162 @@ suite('View provider integration', function () {
 
         assert.strictEqual(item.contextValue, 'runningAction');
         assert.strictEqual(item.description, undefined);
+    });
+
+    test('IT-072d: 두 개 이상 task가 동시 running이면 multi-track 라벨로 표시한다', async () => {
+        // Parallel pipelines: the legacy `2/3 · taskId` collapses to "last
+        // started" only — useless when both are in flight. Multi-track
+        // renders `2 running · A, B` so the user can see both.
+        const context = makeContext();
+        const actions: ActionItem[] = [
+            {
+                id: 'par2',
+                title: 'Par2',
+                action: {
+                    description: 'par2',
+                    tasks: [
+                        { id: 'A', type: 'shell', command: 'echo', parallel: true },
+                        { id: 'B', type: 'shell', command: 'echo', parallel: true },
+                        { id: 'tail', type: 'shell', command: 'echo' }
+                    ]
+                }
+            }
+        ];
+        actionStates.set('par2', {
+            state: 'running',
+            progress: { total: 3, completed: 0, running: [{ taskId: 'A', index: 1 }, { taskId: 'B', index: 2 }] }
+        });
+
+        const provider = new MainViewProvider(context, () => actions);
+        const roots = await provider.getChildren();
+        const item = roots[1] as Action;
+
+        assert.strictEqual(item.contextValue, 'runningAction');
+        assert.strictEqual(item.description, '2 running · A, B');
+    });
+
+    test('IT-072e: 3개 이상 동시 running은 + N overflow 표기로 자른다', async () => {
+        // Description slot is short — list at most two names and offload
+        // the rest into `+ N`. Without this cap a wide parallel pool
+        // (say 4 builds) would push the rest of the row off-screen.
+        const context = makeContext();
+        const actions: ActionItem[] = [
+            {
+                id: 'par4',
+                title: 'Par4',
+                action: {
+                    description: 'par4',
+                    tasks: [
+                        { id: 'A', type: 'shell', command: 'echo', parallel: true },
+                        { id: 'B', type: 'shell', command: 'echo', parallel: true },
+                        { id: 'C', type: 'shell', command: 'echo', parallel: true },
+                        { id: 'D', type: 'shell', command: 'echo', parallel: true }
+                    ]
+                }
+            }
+        ];
+        actionStates.set('par4', {
+            state: 'running',
+            progress: {
+                total: 4,
+                completed: 0,
+                running: [
+                    { taskId: 'A', index: 1 },
+                    { taskId: 'B', index: 2 },
+                    { taskId: 'C', index: 3 },
+                    { taskId: 'D', index: 4 }
+                ]
+            }
+        });
+
+        const provider = new MainViewProvider(context, () => actions);
+        const roots = await provider.getChildren();
+        const item = roots[1] as Action;
+
+        assert.strictEqual(item.contextValue, 'runningAction');
+        assert.strictEqual(item.description, '4 running · A, B + 2');
+    });
+
+    suite('formatProgressDescription (multi-track render rules)', () => {
+        test('single-task action returns undefined (no 1/1 noise)', () => {
+            assert.strictEqual(
+                formatProgressDescription({ total: 1, completed: 0, running: [{ taskId: 'only', index: 1 }] }),
+                undefined
+            );
+        });
+
+        test('one task running uses its declaration index, not completed+1', () => {
+            // The legacy "2/3 · link" form was driven by `completed+1`,
+            // which lies under parallel out-of-order completion. The
+            // running entry carries the real position now.
+            assert.strictEqual(
+                formatProgressDescription({ total: 3, completed: 1, running: [{ taskId: 'link', index: 2 }] }),
+                '2/3 · link'
+            );
+        });
+
+        test('two tasks running renders `n running · A, B`', () => {
+            assert.strictEqual(
+                formatProgressDescription({
+                    total: 3,
+                    completed: 0,
+                    running: [{ taskId: 'A', index: 1 }, { taskId: 'B', index: 2 }]
+                }),
+                '2 running · A, B'
+            );
+        });
+
+        test('three or more running renders overflow `+ N`', () => {
+            assert.strictEqual(
+                formatProgressDescription({
+                    total: 5,
+                    completed: 0,
+                    running: [
+                        { taskId: 'A', index: 1 },
+                        { taskId: 'B', index: 2 },
+                        { taskId: 'C', index: 3 },
+                        { taskId: 'D', index: 4 }
+                    ]
+                }),
+                '4 running · A, B + 2'
+            );
+        });
+
+        test('zero running mid-pipeline shows compact `done/total`', () => {
+            // Brief snapshot between sequential tasks: nothing in flight
+            // but some already completed. Showing the running-task name
+            // would be a stale lie; showing nothing flickers — `1/3` is
+            // the honest middle.
+            assert.strictEqual(
+                formatProgressDescription({ total: 3, completed: 1, running: [] }),
+                '1/3'
+            );
+        });
+
+        test('zero running with zero completed returns undefined', () => {
+            // Pipeline hasn't emitted any transitions yet — no signal to
+            // render. Falling back to "0/N" would be noise the first frame.
+            assert.strictEqual(
+                formatProgressDescription({ total: 3, completed: 0, running: [] }),
+                undefined
+            );
+        });
+
+        test('parallel out-of-order completion: task 1 still running after task 2 finished labels as `1/N · A` not `2/N · A`', () => {
+            // Pre-0.4.44 regression: render used `${completed+1}/${total}`
+            // and would print `2/3 · A` even though A is the first task —
+            // misleading when B happened to finish first. The fix stores
+            // the declaration index on each running entry, so the running
+            // task's actual position is what shows.
+            assert.strictEqual(
+                formatProgressDescription({
+                    total: 3,
+                    completed: 1,
+                    running: [{ taskId: 'A', index: 1 }]
+                }),
+                '1/3 · A'
+            );
+        });
     });
 
     test('IT-068b: MainViewProvider가 history를 더 이상 읽지 않아 Action TreeItem에는 배지가 없다 (회귀 가드)', async () => {

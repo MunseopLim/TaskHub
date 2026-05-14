@@ -17,15 +17,31 @@ export type ActionRunState = 'running' | 'success' | 'failure';
  * Per-action progress within a multi-task pipeline. Only populated while
  * `state === 'running'` and the pipeline has more than one task; cleared
  * by `finalizeActionRun` so the description doesn't go stale after the
- * action terminates. `index` is 1-based (current task position),
- * `total` is the action's task count, and `taskId` is the id of the
- * task currently executing — used to render the "지금 어디" hint
- * `2/3 · link` in the Action TreeItem description.
+ * action terminates.
+ *
+ * Multi-track design: `running` is the list of tasks currently in flight,
+ * ordered by start time. Each entry carries the task's 1-based declaration
+ * position (`index`) alongside its id so the single-running render form
+ * (`2/3 · link`) reports the task's real position — *not* `completed + 1`,
+ * which can lie under out-of-order parallel completions (e.g. task 1 still
+ * running while task 2 already finished would otherwise render `2/3 · 1`).
+ *
+ * Sequential pipelines keep at most one entry (renders as `2/3 · link`);
+ * parallel pipelines can hold multiple simultaneously and render as
+ * `2 running · A, B` or `3 running · A, B + 1` when the list overflows
+ * two names. `total` is the action's task count and `completed` counts
+ * every terminal transition (success / failure / skipped) emitted so far.
  */
-export interface ActionProgress {
-    index: number;
-    total: number;
+export interface RunningTaskEntry {
     taskId: string;
+    /** 1-based position in the action's `tasks` array. */
+    index: number;
+}
+
+export interface ActionProgress {
+    total: number;
+    completed: number;
+    running: RunningTaskEntry[];
 }
 
 export const actionStates = new Map<string, {

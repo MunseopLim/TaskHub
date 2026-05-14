@@ -15,6 +15,7 @@
 | 같은 title 폴더 액션 disambiguation (이전 §12) | 0.4.26부터 제공. History 패널이 같은 title 충돌 시에만 라벨을 풀 경로(`Firmware > Build`)로 스왑, 반복 실행은 충돌로 안 침. 풀 경로는 툴팁에도 항상 노출 | [src/providers/historyProvider.ts](../src/providers/historyProvider.ts) `computeDisambiguatedHistoryLabels` |
 | Quick Action Palette (이전 §9) | 0.4.28부터 제공. `TaskHub: Run Any Action…` 단일 커맨드로 모든 액션 fuzzy 검색·실행. 최근 사용 액션은 상위 섹션에 노출, MRU는 액션 ID로 저장(이름 변경 무관)·표시 시점에 stale 항목 필터 | [src/extension.ts](../src/extension.ts) `taskhub.runAnyAction`, `buildRunAnyActionPicks`, `updateRunAnyActionMru` |
 | TaskHub Doctor / Action Lint (이전 §5) | 0.4.40부터 제공. `TaskHub: Doctor — Lint Actions` 커맨드가 모든 `actions.json` 소스를 한 번에 정적 분석해 Problems 패널에 게시 (스키마/regex/미해결 변수/외부 쓰기/중복 id/capture group/dependsOn cycle 7종 검사) | [docs/features.md §23](./features.md#23-taskhub-doctor-action-lint), [src/doctor.ts](../src/doctor.ts) |
+| 병렬 실행 / Task DAG (이전 §4) | 0.4.41부터 제공. `parallel: true` opt-in + `dependsOn` 런타임 honoring + `${taskId.x}` 자동 의존성 추론 + 사이클/missing/self 검증 + task 단위 timeout/stop + 출력 격리 (streamed terminal group / output.mode terminal 키 분리) + interactive prompt mutex + `taskhub.pipeline.maxParallelTasks` 설정. 기존 직렬 액션은 동작 변화 없음 | [docs/features.md §24](./features.md#24-병렬-실행--task-dag) |
 
 ## 우선순위 요약
 
@@ -23,15 +24,36 @@
 | 1 | Memory Map Diff / Budget Check | 파서/WebView 기반이 이미 있음. 임베디드 정체성 강화 | 중 |
 | 2 | CMSIS-SVD 기반 Register/SFR Hover | 벤더 헤더 없는 프로젝트에서 차별점 | 대 |
 | 3 | ELF Symbol Navigator | #1의 전제이자 단독 가치도 있음 | 소 |
-| 4 | 병렬 실행 / Task DAG | 멀티 타겟 빌드 사용자에 한정적. Doctor가 이미 `dependsOn` cycle/missing을 검사 — 본 작업은 런타임 스케줄러 추가 | 중 |
 | 6 | Named Input Profiles | 인터랙티브 입력 재실행("수정해서 실행")의 더 큰 그림. 임베디드 워크플로 fitness 강함 | 중 |
 | 7 | Action Run Report | History 패널 자연 확장. 출력 로그 영속화와 페어 | 중 |
 | 8 | 출력 로그 영속화 + 회전 | 작은 비용. Action Run Report에 흡수 가능 | 소 |
 | 9 | 백그라운드 완료 알림 + 소요 시간 | 데이터 재활용, UI만 추가. 임베디드 빌드 즉시 통지 | 소 |
 
-> 순위 5(TaskHub Doctor / Action Lint)는 0.4.40 릴리스에 포함되었습니다 — 상단 "이미 구현된 항목" 표 / [docs/features.md §23](./features.md#23-taskhub-doctor-action-lint) 참조.
+> 순위 4(병렬 실행 / Task DAG)와 5(TaskHub Doctor / Action Lint)는 각각 0.4.41 / 0.4.40 릴리스에 포함되었습니다 — 상단 "이미 구현된 항목" 표 참조.
 
 **권장 시작 순서**: Memory Map Diff(1) → ELF Symbol Navigator(3). 6~9는 액션 시스템 / UX 영역.
+
+---
+
+## 0.4.41 후속 작업 (병렬 실행 / Task DAG)
+
+0.4.41에서 MVP 합의 범위를 다 닫았지만, 리뷰에서 짚인 잔여 항목들. B와 A(c)안은 0.4.42, C는 0.4.43에 들어갔고, 남은 미해결 항목은 A(b)안 하나다 — 우선순위 낮음.
+
+### A. Doctor / Preview Run의 full graph-aware 시뮬레이션 *(Medium, future enhancement)*
+
+0.4.42에서 (c)안 — `findUnresolved`가 같은 액션의 valid task id를 tolerated head로 받아 forward ref false positive를 차단 — 을 적용해 정상 패턴은 더 이상 `variable.unresolved`로 잡히지 않는다. 트레이드오프: head가 valid task id이면 capture/result 키 typo (예: `${A.typoKey}` where `A`는 valid이지만 `typoKey`는 없음)도 함께 묻힌다.
+
+진짜 graph-aware 시뮬레이션 ((b)안: `buildTaskGraph` + 토폴로지 정렬로 시뮬레이션 순서를 결정해 런타임과 동일하게 동작)은 필요해질 때 별도 작업으로 진행. 코드량 크고 영향 범위 넓어 우선순위는 낮음.
+
+영향 파일: [src/previewRun.ts](../src/previewRun.ts) `buildPreviewReport` loop, [src/doctor.ts](../src/doctor.ts) `analyzeActionTasks`.
+
+### B. spawn 경로 verbose OutputChannel 로그의 task id prefix  *(0.4.42에 구현됨)*
+
+`executeShellCommand` 내부 5개 verbose 로그 사이트가 `[task:${taskId}] ` prefix를 받도록 정리. multiline `stdout`/`stderr`도 모든 continuation line이 prefix를 가지며 split은 `\r\n`/`\r`/`\n`을 모두 인식. `taskKey` 없는 legacy caller는 기존 unprefixed 포맷 유지. 참조: [src/extension.ts](../src/extension.ts) `executeShellCommand` `appendVerboseLine`.
+
+### C. Actions 패널에서 동시 진행 task 다중 표시  *(0.4.43에 구현됨)*
+
+`ActionProgress`를 `{ total, completed, running: string[] }`로 확장하고 `onTaskTransition`이 4가지 transition 상태를 모두 받도록 정리. TreeItem 렌더(`formatProgressDescription`)가 running 개수에 따라 1개는 `2/3 · link`(기존 호환), 2개는 `2 running · A, B`, 3개+는 `4 running · A, B + 2` overflow 표기, 0개+completed>0인 transition 사이 gap은 `1/3` compact form. 참조: [src/providers/actionStatus.ts](../src/providers/actionStatus.ts), [src/providers/mainViewProvider.ts](../src/providers/mainViewProvider.ts) `formatProgressDescription`, [src/extension.ts](../src/extension.ts) `onTaskTransition`.
 
 ---
 
@@ -73,16 +95,9 @@
 - Memory Map과 양방향 점프
 - #1 Memory Map Diff의 전제 조건
 
-## 4. 병렬 실행 / Task DAG
+## 4. 병렬 실행 / Task DAG  *(0.4.41에 구현됨)*
 
-```json
-{ "id": "buildA", "type": "shell", "command": "..." },
-{ "id": "buildB", "type": "shell", "command": "...", "parallel": true },
-{ "id": "merge",  "dependsOn": ["buildA", "buildB"] }
-```
-
-- 멀티 타겟, 멀티 MCU 프로젝트 대상
-- 순차 실행 기본값 유지 (하위 호환)
+0.4.41 릴리스로 들어왔습니다. 상세는 [docs/features.md §24](./features.md#24-병렬-실행--task-dag) 참조. 핵심: `parallel: true` opt-in, 자동 의존성 추론(`${taskId.x}`), `validateTaskGraph` 사전 검증, task 단위 timeout/stop, 병렬 액션의 출력 격리, interactive task의 prompt mutex, `taskhub.pipeline.maxParallelTasks` 설정 (기본 4, 범위 1~32).
 
 ## 5. TaskHub Doctor / Action Lint  *(0.4.40에 구현됨)*
 

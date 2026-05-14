@@ -422,7 +422,10 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem> {
     public view: vscode.TreeView<HistoryItem> | undefined;
     private historyKey = 'taskhub.actionHistory';
 
-    constructor(private context: vscode.ExtensionContext) {}
+    constructor(
+        private context: vscode.ExtensionContext,
+        private readonly options: { getMaxItems?: () => number } = {}
+    ) {}
 
     refresh(): void {
         this._onDidChangeTreeData.fire();
@@ -456,8 +459,13 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem> {
         return this.context.workspaceState.get<HistoryEntry[]>(this.historyKey, []);
     }
 
+    private getMaxItems(): number {
+        return this.options.getMaxItems?.()
+            ?? vscode.workspace.getConfiguration('taskhub.history').get<number>('maxItems', 10);
+    }
+
     addHistoryEntry(entry: HistoryEntry): void {
-        const maxItems = vscode.workspace.getConfiguration('taskhub.history').get<number>('maxItems', 10);
+        const maxItems = this.getMaxItems();
         const history = this.getHistory();
 
         history.unshift(entry);
@@ -531,7 +539,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem> {
     }
 
     trimHistoryToMax(): void {
-        const maxItems = vscode.workspace.getConfiguration('taskhub.history').get<number>('maxItems', 10);
+        const maxItems = this.getMaxItems();
         const history = this.getHistory();
         if (history.length > maxItems) {
             history.splice(maxItems);

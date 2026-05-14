@@ -217,6 +217,83 @@ suite('Doctor', () => {
             `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
     });
 
+    test('does not flag a forward reference to a later task in the same action', () => {
+        // The runtime's auto-inferred dep flips B → A at execution time, so
+        // Doctor must not emit a `variable.unresolved` for the legitimate
+        // `${B.output}` reference even though Doctor itself walks tasks in
+        // declaration order. Both tasks must be `parallel: true`; with B
+        // sequential, B.barrierDeps={A} pairs with A.inferredDeps={B} into
+        // a real cycle that `dependsOn.cycle` would (correctly) flag.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.fwdref',
+                title: 'forward ref',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'A', type: 'shell', command: 'echo ${B.output}', parallel: true },
+                        { id: 'B', type: 'shell', command: 'make build', parallel: true }
+                    ]
+                }
+            }
+        ])], v);
+        const unresolved = findings.filter(f => f.code === 'variable.unresolved');
+        assert.deepStrictEqual(unresolved, [],
+            `forward task ref should not raise unresolved; got ${unresolved.map(f => f.message).join(' | ')}`);
+        const cycles = findings.filter(f => f.code === 'dependsOn.cycle');
+        assert.deepStrictEqual(cycles, [],
+            `valid forward-ref DAG must not raise dependsOn.cycle; got ${cycles.map(f => f.message).join(' | ')}`);
+    });
+
+    test('flags ${past.typoKey} on a task type whose simulated result lacks output/outputDir fallback', () => {
+        // For task types like fileDialog (no `output` / `outputDir` keys
+        // in the simulated result), `${past.typoKey}` survives
+        // interpolation. Pre-fix Doctor's `findUnresolved` was given the
+        // full set of action task ids as `toleratedHeads` so the typo's
+        // head matched and was suppressed. Post-fix toleration covers
+        // only forward (not-yet-simulated) task ids, so past-task typos
+        // surface as `variable.unresolved`.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.past-typo',
+                title: 'past typo',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'pick', type: 'fileDialog' },
+                        { id: 'use', type: 'shell', command: 'echo ${pick.typoKey}' }
+                    ]
+                }
+            }
+        ])], v);
+        const unresolved = findings.filter(f => f.code === 'variable.unresolved');
+        assert.ok(unresolved.length > 0,
+            `expected variable.unresolved for past-task typo, got ${codes(findings).join(',')}`);
+        assert.ok(unresolved.some(f => /\$\{pick\.typoKey\}/.test(f.message)),
+            `expected the typoed reference in the message; got ${unresolved.map(f => f.message).join(' | ')}`);
+    });
+
+    test('still flags unresolved when the head is not a sibling task id', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.unknownhead',
+                title: 'unknown head',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'A', type: 'shell', command: 'echo ${notATask.value}' },
+                        { id: 'B', type: 'shell', command: 'make build' }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `expected variable.unresolved for unknown head, got ${codes(findings).join(',')}`);
+    });
+
     test('flags writeFile path outside the workspace', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([
@@ -302,6 +379,68 @@ suite('Doctor', () => {
         ])], v);
         assert.ok(findings.some(f => f.code === 'dependsOn.missing'),
             `expected dependsOn.missing, got ${codes(findings).join(',')}`);
+    });
+
+    test('flags parallel: true on an interactive task (parallel.interactive)', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.interactive-par',
+                title: 'par',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'name?', parallel: true },
+                        { id: 'echo', type: 'shell', command: 'echo ${ask.value}' }
+                    ]
+                }
+            }
+        ])], v);
+        const hit = findings.find(f => f.code === 'parallel.interactive');
+        assert.ok(hit, `expected parallel.interactive, got ${codes(findings).join(',')}`);
+        assert.strictEqual(hit!.severity, 'warning');
+    });
+
+    test('flags dependsOn cycle introduced solely by ${taskId.x} auto-inference', () => {
+        // No explicit dependsOn — the cycle exists only because A and B
+        // each reference the other's output. Pre-refactor Doctor missed
+        // this; the runtime would still reject via validateTaskGraph, so
+        // Doctor must agree.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.inferred-cycle',
+                title: 'inferred',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'A', type: 'shell', command: 'echo ${B.output}', parallel: true },
+                        { id: 'B', type: 'shell', command: 'echo ${A.output}', parallel: true }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'dependsOn.cycle'),
+            `expected dependsOn.cycle from inferred deps, got ${codes(findings).join(',')}`);
+    });
+
+    test('does NOT flag parallel: true on shell tasks', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.shell-par',
+                title: 'par',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'a', type: 'shell', command: 'echo a' },
+                        { id: 'b', type: 'shell', command: 'echo b', parallel: true }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(!findings.some(f => f.code === 'parallel.interactive'),
+            `expected no parallel.interactive on shell tasks, got ${codes(findings).join(',')}`);
     });
 
     test('does NOT flag a valid linear dependsOn chain', () => {

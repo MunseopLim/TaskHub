@@ -18,6 +18,8 @@ import type { Action, ActionItem, Task, OutputCapture } from './schema';
 import {
     interpolatePipelineVariables,
     getCommandString,
+    buildTaskGraph,
+    validateTaskGraph,
 } from './pipelineUtils';
 
 export interface PreviewOptions {
@@ -83,13 +85,101 @@ export function simulateTaskResult(task: Task): SimulatedResult {
 /** Regex to find ${...} references that survived interpolation. */
 export const UNRESOLVED_VAR_RE = /\$\{[^}]+\}/g;
 
-export function findUnresolved(values: (string | undefined)[]): string[] {
+/**
+ * Walk raw (pre-interpolation) string leaves of a task and report
+ * `${id.key}` references that point at an already-simulated task but
+ * a key the task did not produce. The runtime's
+ * `interpolatePipelineVariables` silently falls back to `.output`
+ * when the requested property is missing, which masks typos like
+ * `${producer.typoKey}` in post-interpolation strings — so
+ * `findUnresolved` alone cannot catch them. This pass runs *before*
+ * the fallback would fire and surfaces the original `${...}` literal
+ * so the user sees the exact typo to fix.
+ *
+ * `task.output.capture` and `task.output.diagnostics` subtrees are
+ * skipped — their `${...}` literals are regex content, not refs.
+ */
+export function findTypoRefs(
+    task: Task,
+    allResults: Record<string, SimulatedResult>,
+    selfId: string
+): string[] {
+    const found = new Set<string>();
+    const visit = (value: unknown): void => {
+        if (typeof value === 'string') {
+            for (const m of value.matchAll(/\$\{([^}]+)\}/g)) {
+                const expr = m[1];
+                const dotIdx = expr.indexOf('.');
+                if (dotIdx === -1) { continue; } // bare `${id}` short-form
+                const head = expr.slice(0, dotIdx).trim();
+                const key = expr.slice(dotIdx + 1).trim();
+                if (head === selfId || key === '') { continue; }
+                const result = allResults[head];
+                if (!result) { continue; } // forward ref / built-in / unknown
+                if (!Object.prototype.hasOwnProperty.call(result, key)) {
+                    found.add(m[0]);
+                }
+            }
+            return;
+        }
+        if (value === null || typeof value !== 'object') { return; }
+        if (Array.isArray(value)) {
+            for (const item of value) { visit(item); }
+            return;
+        }
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+            if (k === 'capture' || k === 'diagnostics' || k === 'dependsOn') { continue; }
+            visit(v);
+        }
+    };
+    visit(task);
+    return Array.from(found);
+}
+
+/**
+ * Pull the head identifier out of a matched `${expr}` literal. Mirrors
+ * `interpolatePipelineVariables`'s split on `.` so the same head the
+ * runtime would look up in the context is what we test for tolerance.
+ * Returns `''` if the match is malformed.
+ */
+function extractRefHead(match: string): string {
+    if (!match.startsWith('${') || !match.endsWith('}') || match.length < 4) {
+        return '';
+    }
+    const expr = match.slice(2, -1);
+    const dotIdx = expr.indexOf('.');
+    return (dotIdx === -1 ? expr : expr.slice(0, dotIdx)).trim();
+}
+
+/**
+ * Collect every `${...}` reference that survived interpolation across the
+ * given values. When `toleratedHeads` is provided, references whose head
+ * (the `id` in `${id.key}`) belongs to that set are suppressed — used by
+ * Doctor and Preview Run to silence *future-task* false positives where a
+ * task in declaration order references a sibling that's only present in
+ * the simulated context after it. The runtime's graph scheduler honors
+ * the real dep, so the warning was misleading.
+ *
+ * Caller responsibility: pass ONLY the forward task ids (those not yet
+ * simulated / not yet in `allResults`). If you also pass already-executed
+ * ids, you suppress `${alreadyRan.typoKey}` style typos: at that point
+ * the runtime has a real result for `alreadyRan`, the typoed key is
+ * genuinely missing, and the user should hear about it. Doctor /
+ * Preview compute `forwardTaskIds` per iteration to honor this.
+ */
+export function findUnresolved(
+    values: (string | undefined)[],
+    toleratedHeads?: ReadonlySet<string>
+): string[] {
     const seen = new Set<string>();
     for (const v of values) {
         if (typeof v !== 'string') { continue; }
         const matches = v.match(UNRESOLVED_VAR_RE);
         if (matches) {
-            for (const m of matches) { seen.add(m); }
+            for (const m of matches) {
+                if (toleratedHeads && toleratedHeads.has(extractRefHead(m))) { continue; }
+                seen.add(m);
+            }
         }
     }
     return Array.from(seen);
@@ -171,6 +261,46 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
     const allResults: Record<string, SimulatedResult> = {};
     const totalUnresolved = new Set<string>();
 
+    // Surface graph issues (cycle / missing dep / self dep) up front so
+    // Preview Run reflects what the runtime would refuse to schedule.
+    // Without this, a cycle like A(parallel)→B + B(barrier)→A could
+    // simulate cleanly under the linear walk and report "all resolved",
+    // while `executeActionPipeline` would throw at the first task.
+    // `dropMissingDeps: true` keeps the rest of the report renderable
+    // even when one entry references an unknown id — the issue list
+    // still calls it out.
+    const previewGraph = buildTaskGraph(action.tasks, { dropMissingDeps: true });
+    const graphIssues = validateTaskGraph(action.tasks, previewGraph);
+    if (graphIssues.length > 0) {
+        lines.push('Graph issues — runtime would reject this action:');
+        for (const issue of graphIssues) {
+            switch (issue.kind) {
+                case 'self-dependency':
+                    lines.push(`  ✗ task '${issue.taskId}' depends on itself`);
+                    break;
+                case 'missing-dependency':
+                    lines.push(`  ✗ task '${issue.taskId}' depends on unknown task '${issue.missingId}'`);
+                    break;
+                case 'cycle':
+                    lines.push(`  ✗ dependency cycle: ${issue.cycle.join(' → ')}`);
+                    break;
+            }
+        }
+        lines.push('');
+    }
+
+    // Forward task ids: ids declared *after* the current iteration in
+    // declaration order. The runtime's auto-inference may reorder a
+    // declared-later task to run first, so referencing one shouldn't
+    // be flagged as unresolved during this linear walk. Updated each
+    // loop iteration as `allResults` grows; never includes tasks that
+    // have already been simulated, so `${alreadyRan.typoKey}` keeps
+    // being reported.
+    const knownTaskIds = new Set<string>();
+    for (const t of action.tasks) {
+        if (t && typeof t.id === 'string') { knownTaskIds.add(t.id); }
+    }
+
     for (let i = 0; i < action.tasks.length; i++) {
         const task = action.tasks[i];
         const interpolationContext: any = {
@@ -179,8 +309,14 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
             extensionPath: options.extensionPath,
         };
 
+        // Preview Run simulates tasks in declaration order even though the
+        // runtime may schedule `parallel: true` tasks concurrently. The
+        // `[parallel]` marker tells the reader which steps the executor
+        // can launch alongside their siblings (still subject to
+        // `dependsOn` and `${taskId.x}` auto-inferred deps).
+        const parallelMarker = task.parallel === true ? ' [parallel]' : '';
         lines.push('───────────────────────────────────────────────────────────────────');
-        lines.push(`[${i + 1}/${action.tasks.length}] ${task.id}  (type: ${task.type})`);
+        lines.push(`[${i + 1}/${action.tasks.length}] ${task.id}  (type: ${task.type})${parallelMarker}`);
         lines.push('───────────────────────────────────────────────────────────────────');
 
         const interpolated: (string | undefined)[] = [];
@@ -394,10 +530,26 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
             }
         }
 
-        const unresolved = findUnresolved(interpolated);
-        if (unresolved.length > 0) {
-            lines.push(`  unresolved variables: ${unresolved.join(', ')}`);
-            for (const u of unresolved) { totalUnresolved.add(u); }
+        const forwardTaskIds = new Set<string>();
+        for (const id of knownTaskIds) {
+            if (!Object.prototype.hasOwnProperty.call(allResults, id)) {
+                forwardTaskIds.add(id);
+            }
+        }
+        // Two complementary passes:
+        //  1. `findUnresolved` on POST-interpolation strings catches refs to
+        //     unknown heads (`${notATask.x}`) and forward refs whose head is
+        //     not (yet) tolerated.
+        //  2. `findTypoRefs` walks PRE-interpolation strings to catch typos
+        //     against ALREADY-simulated tasks — these are masked from pass (1)
+        //     because `interpolatePipelineVariables` silently falls back to
+        //     `.output` when the requested property is missing.
+        const unresolved = findUnresolved(interpolated, forwardTaskIds);
+        const typos = findTypoRefs(task, allResults, task.id);
+        const merged = Array.from(new Set([...unresolved, ...typos]));
+        if (merged.length > 0) {
+            lines.push(`  unresolved variables: ${merged.join(', ')}`);
+            for (const u of merged) { totalUnresolved.add(u); }
         }
 
         const sim = simulateTaskResult(task);
@@ -415,7 +567,12 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
     }
 
     lines.push('═══════════════════════════════════════════════════════════════════');
-    if (totalUnresolved.size > 0) {
+    if (graphIssues.length > 0) {
+        // Graph issues are listed in detail at the top — repeat the
+        // headline here so a user scanning only the summary doesn't
+        // miss that the action would never start.
+        lines.push(`Summary: action would FAIL at start — ${graphIssues.length} graph issue(s) above.`);
+    } else if (totalUnresolved.size > 0) {
         lines.push(`Summary: ${totalUnresolved.size} unresolved variable(s) — fix before running:`);
         for (const u of totalUnresolved) {
             lines.push(`  - ${u}`);

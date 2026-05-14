@@ -27,6 +27,7 @@ import {
     normalizeEol,
     encodeFileContent,
     withTaskTimeout,
+    withInteractivePromptLock,
 } from '../pipelineUtils';
 
 /**
@@ -755,5 +756,91 @@ suite('withTaskTimeout', () => {
             () => withTaskTimeout(never, 0.01, 't1', () => { throw new Error('cleanup-failed'); }),
             /timed out after 0\.01s/
         );
+    });
+});
+
+suite('withInteractivePromptLock — serializes concurrent dialog runs', () => {
+    test('runs serially even when callers fire in parallel', async () => {
+        const events: string[] = [];
+        const makeTask = (label: string, ms: number) => async () => {
+            events.push(`start:${label}`);
+            await new Promise(r => setTimeout(r, ms));
+            events.push(`end:${label}`);
+            return label;
+        };
+        // Fire three "dialogs" simultaneously; the lock must serialize
+        // them so we never see two starts back-to-back.
+        const results = await Promise.all([
+            withInteractivePromptLock(makeTask('A', 10)),
+            withInteractivePromptLock(makeTask('B', 5)),
+            withInteractivePromptLock(makeTask('C', 1)),
+        ]);
+        assert.deepStrictEqual(results, ['A', 'B', 'C']);
+        assert.deepStrictEqual(events, [
+            'start:A', 'end:A',
+            'start:B', 'end:B',
+            'start:C', 'end:C',
+        ]);
+    });
+
+    test('a holder rejection does not poison the chain', async () => {
+        const events: string[] = [];
+        const first = withInteractivePromptLock(async () => {
+            events.push('first');
+            throw new Error('boom');
+        });
+        const second = withInteractivePromptLock(async () => {
+            events.push('second');
+            return 'ok';
+        });
+        await assert.rejects(() => first, /boom/);
+        const r = await second;
+        assert.strictEqual(r, 'ok');
+        assert.deepStrictEqual(events, ['first', 'second']);
+    });
+
+    test('propagates fn rejection to its own caller only', async () => {
+        const first = withInteractivePromptLock(async () => { throw new Error('first-failed'); });
+        const second = withInteractivePromptLock(async () => 42);
+        await assert.rejects(() => first, /first-failed/);
+        assert.strictEqual(await second, 42);
+    });
+
+    test('lock stays held until fn settles even if caller abandons the returned Promise', async () => {
+        // Simulates the executor's interactive timeout: the caller wraps
+        // our return value in `Promise.race` against a timeout. The
+        // outer race may reject while `fn`'s dialog is still showing —
+        // the next interactive task must NOT be able to open its dialog
+        // until the original `fn`'s promise actually settles.
+        let releaseDialog!: (value: string) => void;
+        const dialog = new Promise<string>(resolve => { releaseDialog = resolve; });
+        let secondStarted = false;
+
+        const first = withInteractivePromptLock(() => dialog);
+        // Caller "abandons" the first promise via timeout-style race;
+        // attach a no-op catch so the unhandled rejection guard doesn't
+        // trip when we don't await first directly.
+        first.catch(() => { /* swallowed by caller */ });
+        const racedFirst = Promise.race([
+            first,
+            new Promise<string>((_, reject) => setTimeout(() => reject(new Error('outer-timeout')), 5))
+        ]);
+        await assert.rejects(() => racedFirst, /outer-timeout/);
+
+        // Second caller queues up; its `fn` must not run yet.
+        const second = withInteractivePromptLock(async () => { secondStarted = true; return 'B'; });
+
+        // Give microtasks several turns — second must still be blocked.
+        for (let i = 0; i < 5; i++) {
+            await new Promise(r => setTimeout(r, 1));
+        }
+        assert.strictEqual(secondStarted, false,
+            'second interactive task started while first dialog was still pending');
+
+        // Now settle the underlying dialog; second should be released.
+        releaseDialog('A');
+        assert.strictEqual(await second, 'B');
+        assert.strictEqual(secondStarted, true);
+        assert.strictEqual(await first, 'A');
     });
 });
