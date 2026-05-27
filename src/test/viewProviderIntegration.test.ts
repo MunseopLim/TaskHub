@@ -8,7 +8,7 @@ import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteViewProvider, loadFavor
 import { buildActionCommandId, buildRunAnyActionPaletteItems, buildRunAnyActionPicks, planRunAnyAction, serializeFavorites, syncActionCommandsFromActions, updateRunAnyActionMru, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT } from '../extension';
 import { Link, LinkGroup, LinkViewProvider } from '../providers/linkViewProvider';
 import { Action, Folder, MainViewProvider, formatProgressDescription } from '../providers/mainViewProvider';
-import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
+import { HistoryProvider } from '../providers/historyProvider';
 import { ActionItem } from '../schema';
 
 function normalizeWindowsPathForAssert(value: string): string {
@@ -212,12 +212,18 @@ suite('View provider integration', function () {
         assert.strictEqual((folderChildren[0] as Action).command?.command, 'taskhub.executeAction');
     });
 
-    test('IT-068: HistoryItem.description에 status + 시각 + 소요 시간 배지가 노출됨', async () => {
-        // Pins last-run badge placement: each rendered
-        // HistoryItem carries a "last run" badge in its description slot.
-        // Actions panel intentionally has no equivalent badge — the
-        // user-facing "did it run today?" question is answered on the
-        // history surface, where the data naturally lives.
+    test('IT-068: HistoryItem.description에 시각 + 소요 시간 배지가 노출되고, 상태는 아이콘 / aria 라벨로 표시됨', async () => {
+        // Pins last-run badge placement: each rendered HistoryItem carries
+        // a "last run" badge in its description slot. Actions panel
+        // intentionally has no equivalent badge — the user-facing "did it
+        // run today?" question is answered on the history surface, where
+        // the data naturally lives.
+        //
+        // Status (success/failure) is conveyed by the colored iconPath
+        // (`pass`/`error`) for sighted users and by
+        // `accessibilityInformation.label` (status word + time + duration)
+        // for screen readers; the badge text carries time + duration with
+        // no ✓/✗ prefix so the same signal isn't doubled up on the row.
         const ctx = makeContext();
         const provider = new HistoryProvider(ctx);
         const now = Date.now();
@@ -236,17 +242,35 @@ suite('View provider integration', function () {
 
         const buildItem = byId.get('build')!;
         assert.ok(typeof buildItem.description === 'string', 'build should have a description badge');
-        assert.ok((buildItem.description as string).startsWith('✓'), `expected ✓ prefix, got ${buildItem.description}`);
+        assert.ok(!(buildItem.description as string).includes('✓'), `badge must not duplicate the icon's status, got ${buildItem.description}`);
+        assert.ok(!(buildItem.description as string).includes('✗'), `badge must not duplicate the icon's status, got ${buildItem.description}`);
         assert.ok((buildItem.description as string).includes('1.2s'), `expected duration "1.2s" in ${buildItem.description}`);
+        assert.strictEqual((buildItem.iconPath as vscode.ThemeIcon).id, 'pass');
+        // Screen-reader parity: status word must appear in aria label
+        // even though the visible badge drops the ✓ glyph.
+        const buildAria = buildItem.accessibilityInformation?.label ?? '';
+        assert.ok(/성공|succeeded/.test(buildAria), `aria label should carry the success word, got "${buildAria}"`);
+        assert.ok(buildAria.includes('1.2s'), `aria label should include duration, got "${buildAria}"`);
+        assert.ok(!buildAria.includes('✓') && !buildAria.includes('✗'), `aria label should be glyph-free, got "${buildAria}"`);
 
         const flashItem = byId.get('flash')!;
         assert.ok(typeof flashItem.description === 'string', 'flash should have a description badge');
-        assert.ok((flashItem.description as string).startsWith('✗'), `expected ✗ prefix, got ${flashItem.description}`);
+        assert.ok(!(flashItem.description as string).includes('✓'), `badge must not duplicate the icon's status, got ${flashItem.description}`);
+        assert.ok(!(flashItem.description as string).includes('✗'), `badge must not duplicate the icon's status, got ${flashItem.description}`);
         assert.ok((flashItem.description as string).includes('45ms'), `expected duration "45ms" in ${flashItem.description}`);
+        assert.strictEqual((flashItem.iconPath as vscode.ThemeIcon).id, 'error');
+        const flashAria = flashItem.accessibilityInformation?.label ?? '';
+        assert.ok(/실패|failed/.test(flashAria), `aria label should carry the failure word, got "${flashAria}"`);
+        assert.ok(flashAria.includes('45ms'), `aria label should include duration, got "${flashAria}"`);
+        assert.ok(!flashAria.includes('✓') && !flashAria.includes('✗'), `aria label should be glyph-free, got "${flashAria}"`);
 
-        // Running entry: spinner-equivalent iconPath only, no description.
+        // Running entry: no visible description, but the aria label
+        // must still announce the running state so screen-reader users
+        // aren't left in silence while the entry is mid-run.
         const liveItem = byId.get('live')!;
         assert.strictEqual(liveItem.description, undefined);
+        const liveAria = liveItem.accessibilityInformation?.label ?? '';
+        assert.ok(/실행 중|running/.test(liveAria), `aria label should carry the running word, got "${liveAria}"`);
     });
 
     test('IT-087: 같은 title 액션이 두 폴더에 있을 때 HistoryItem 라벨이 풀 경로로 disambiguate', async () => {

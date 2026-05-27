@@ -125,7 +125,7 @@
 | ID | 제목 | 핵심 검증 |
 | --- | --- | --- |
 | IT-067 | executeAction은 success/failure 모두 durationMs를 기록 | success 경로와 capture 실패로 reject되는 failure 경로 모두에서 `HistoryEntry.durationMs`가 비음수 정수로 저장됨 |
-| IT-068 | HistoryItem.description에 status + 시각 + 소요 시간 배지가 노출 | 종료된 entry는 `✓/✗ 시각 · 소요시간` 형태로 description이 채워지고, 진행 중(`running`) entry는 description이 비어 있음 (스피너 아이콘이 신호 역할) |
+| IT-068 | HistoryItem.description에 시각 + 소요 시간 배지가 노출되고, 상태는 아이콘/aria 라벨로 표시 | 종료된 entry는 `시각 · 소요시간` 형태로 description이 채워지고(상태 글리프 없음), 색 아이콘 `pass`/`error`가 status를 시각적으로 전달하며, `accessibilityInformation.label`이 status 단어를 텍스트로 포함해 스크린 리더 패리티를 유지. 진행 중(`running`) entry는 description은 비어 있어도 aria 라벨에 "실행 중"/"running"이 들어감 |
 | IT-068b | Action TreeItem에는 last-run 배지가 없다 | History 패널로 이동한 배지가 실수로 Actions 패널에 다시 추가되는 회귀를 가드 |
 
 ### Task 진행률
@@ -398,9 +398,9 @@ confirm task에서 취소 라벨이 선택되면 pipeline이 reject되고 다음
 
 `executeAction`은 종료 시점에 `Date.now() - timestamp`로 계산한 wall-clock 소요시간을 `updateHistoryStatus`의 5번째 인자로 넘겨 `HistoryEntry.durationMs`에 저장합니다. 이 시나리오는 (a) 단순 stringManipulation 성공 경로, (b) capture regex 실패로 reject되는 실패 경로 두 가지에 대해 entry의 `status`가 각각 `success`/`failure`로 기록되고 `durationMs`가 number이며 비음수임을 검증합니다. 비음수 검사는 wall-clock 단조성에 의존하지 않도록 방어적으로 둡니다 (NTP 보정 등 극단 케이스에서도 0 이상이 보장됨).
 
-### IT-068: HistoryItem.description에 status + 시각 + 소요 시간 배지가 노출
+### IT-068: HistoryItem.description에 시각 + 소요 시간 배지가 노출되고, 상태는 아이콘 / aria 라벨로 표시
 
-배지는 액션 카드(Actions 패널)가 아니라 History 패널에 위치합니다 — 시각·소요 시간 데이터는 `HistoryEntry` 자체의 속성이고, 같은 정보를 두 표면에 두지 않는 게 fitness 좋다고 판단했습니다. `HistoryItem` 생성자가 `formatLastRunBadge(entry, Date.now(), lang)`로 `description`을 채우며, 종료된(`success`/`failure`) entry만 배지를 가집니다. 본 시나리오는 (a) 성공/실패 entry가 각각 `✓`/`✗` 접두로 표현되는지, (b) duration 문자열(`1.2s`/`45ms`)이 포함되는지, (c) 진행 중(`running`) entry는 description이 `undefined`로 비어 있는지 세 가지를 확인합니다. 시각 포맷 분기는 `formatHistoryTimestamp` 단위 테스트에서 별도로 검증합니다.
+배지는 액션 카드(Actions 패널)가 아니라 History 패널에 위치합니다 — 시각·소요 시간 데이터는 `HistoryEntry` 자체의 속성이고, 같은 정보를 두 표면에 두지 않는 게 fitness 좋다고 판단했습니다. `HistoryItem` 생성자가 `formatLastRunBadge(entry, Date.now(), lang)`로 `description`을 채우며, 종료된(`success`/`failure`) entry만 배지를 가집니다. 성공/실패 상태는 위쪽의 색 아이콘(녹색 `pass` / 빨간 `error`)이 시각적으로, `accessibilityInformation.label`이 텍스트(`성공/실패/실행 중` ↔ `succeeded/failed/running`)로 전달하며 배지 텍스트에는 `✓`/`✗`를 넣지 않습니다 — 같은 신호를 한 행에 두 번 그리지 않으면서도 스크린 리더 패리티는 유지하기 위함입니다. 본 시나리오는 (a) 성공/실패 entry의 description에 `✓`/`✗` 접두가 *없는지*, (b) duration 문자열(`1.2s`/`45ms`)이 description에 포함되는지, (c) iconPath가 status에 맞게 `pass`/`error`로 매핑되는지, (d) `accessibilityInformation.label`이 status 단어 + duration을 텍스트로 포함하고 글리프는 없는지, (e) 진행 중(`running`) entry는 description은 `undefined`로 비어 있어도 aria 라벨에는 "실행 중"/"running"이 들어가는지 다섯 가지를 확인합니다. 시각 포맷 분기와 aria 라벨 분기는 각각 `formatHistoryTimestamp` / `buildHistoryItemAriaLabel` 단위 테스트에서 별도로 검증합니다.
 
 ### IT-068b: Action TreeItem에는 last-run 배지가 없다 (회귀 가드)
 

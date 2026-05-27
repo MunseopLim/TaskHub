@@ -196,10 +196,14 @@ export function formatHistoryTimestamp(timestamp: number, now: number, lang: 'ko
  *   - no entry available
  *   - entry is still `running` (the iconPath spinner is louder than text)
  *
+ * Status (success/failure) is conveyed by the colored TreeItem icon
+ * (`pass`/`error`); the badge carries only time + duration to avoid
+ * doubling up the same signal in two places.
+ *
  * Sample outputs (lang='ko'):
- *   - "✓ 14:30 · 1.2s"
- *   - "✗ 어제 09:15 · 45ms"
- *   - "✓ 12/15"  (older entry without a recorded duration)
+ *   - "14:30 · 1.2s"
+ *   - "어제 09:15 · 45ms"
+ *   - "12/15"  (older entry without a recorded duration)
  *
  * `executeAction` clamps `durationMs` with `Math.max(0, ...)` at write time
  * so a clock-skew negative never reaches storage, but if one slips through
@@ -215,12 +219,49 @@ export function formatLastRunBadge(
     if (!entry || entry.status === 'running') {
         return undefined;
     }
-    const status = entry.status === 'success' ? '✓' : '✗';
     const timeText = formatHistoryTimestamp(entry.timestamp, now, lang);
     if (entry.durationMs !== undefined) {
-        return `${status} ${timeText} · ${formatDuration(entry.durationMs)}`;
+        return `${timeText} · ${formatDuration(entry.durationMs)}`;
     }
-    return `${status} ${timeText}`;
+    return timeText;
+}
+
+/**
+ * Build the ARIA label for a `HistoryItem`. The visible row uses
+ * `iconPath` (color) for status and `description` for time + duration,
+ * neither of which a screen reader can resolve into a status word — so
+ * the accessibility label folds the status back in as text:
+ *
+ *   ko: "Build, 성공, 14:30 · 1.2s"     en: "Build, succeeded, 14:30 · 1.2s"
+ *   ko: "Build, 실행 중, 14:30"          en: "Build, running, 14:30"
+ *
+ * Tool entries (Memory Map / Hex / JSON viewer) always carry
+ * `status: 'success'` because they record an "opened" event, not a
+ * pass/fail run; their aria label says "opened" rather than "succeeded"
+ * so screen readers don't announce a misleading verdict.
+ *
+ * Pure (no vscode dependency) so unit tests can pin `now` and `lang`.
+ */
+export function buildHistoryItemAriaLabel(
+    entry: HistoryEntry,
+    displayLabel: string,
+    now: number,
+    lang: 'ko' | 'en' = 'ko'
+): string {
+    const timeText = formatHistoryTimestamp(entry.timestamp, now, lang);
+    if (isToolHistoryEntry(entry)) {
+        const opened = lang === 'ko' ? '열림' : 'opened';
+        return `${displayLabel}, ${opened} ${timeText}`;
+    }
+    const statusWord = entry.status === 'success'
+        ? (lang === 'ko' ? '성공' : 'succeeded')
+        : entry.status === 'failure'
+            ? (lang === 'ko' ? '실패' : 'failed')
+            : (lang === 'ko' ? '실행 중' : 'running');
+    const durationPart = entry.durationMs !== undefined
+        ? ` · ${formatDuration(entry.durationMs)}`
+        : '';
+    return `${displayLabel}, ${statusWord}, ${timeText}${durationPart}`;
 }
 
 /**
@@ -387,16 +428,28 @@ export class HistoryItem extends vscode.TreeItem {
         const pathLine = pathSource ? `${pathSource}\n` : '';
         this.tooltip = `${pathLine}${isToolEntry ? 'Opened' : 'Executed'} at: ${date.toLocaleString()}`;
 
-        // Last-run badge: status + when + how-long, rendered in the
-        // muted TreeItem.description slot next to actionTitle. The
-        // tooltip above carries the full timestamp; description is the
-        // glance form. Running entries return `undefined` so the
-        // spinner-equivalent iconPath above is the only signal.
+        // Last-run badge: time + how-long, rendered in the muted
+        // TreeItem.description slot next to actionTitle. Status is
+        // conveyed by `iconPath` above (green pass / red error), so the
+        // badge text deliberately omits a ✓/✗ prefix — same signal on
+        // one row twice was noisy. The tooltip carries the full
+        // timestamp; description is the glance form. Running entries
+        // return `undefined` so the spinner-equivalent iconPath above
+        // is the only visible signal.
+        //
+        // accessibilityInformation.label folds the status word back in
+        // as text so screen readers — which can't resolve icon color
+        // into "succeeded" / "failed" — still receive parity with what
+        // sighted users see.
         const lang: 'ko' | 'en' = vscode.env.language === 'ko' ? 'ko' : 'en';
-        const badge = formatLastRunBadge(entry, Date.now(), lang);
+        const now = Date.now();
+        const badge = formatLastRunBadge(entry, now, lang);
         if (badge) {
             this.description = badge;
         }
+        this.accessibilityInformation = {
+            label: buildHistoryItemAriaLabel(entry, displayLabel ?? entry.actionTitle, now, lang)
+        };
 
         this.command = isToolEntry
             ? {

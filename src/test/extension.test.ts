@@ -63,6 +63,7 @@ import {
 	formatDuration,
 	formatHistoryTimestamp,
 	formatLastRunBadge,
+	buildHistoryItemAriaLabel,
 	startHistoryAutoRefresh,
 	computeDisambiguatedHistoryLabels,
 } from '../providers/historyProvider';
@@ -1954,19 +1955,19 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(formatLastRunBadge(entry({ status: 'running' }), now, 'ko'), undefined);
 		});
 
-		test('success entry with duration → "✓ HH:mm · duration"', () => {
+		test('success entry with duration → "HH:mm · duration" (status conveyed by icon)', () => {
 			const e = entry({ status: 'success', durationMs: 1234 });
-			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '✓ 12:00 · 1.2s');
+			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '12:00 · 1.2s');
 		});
 
-		test('failure entry with duration → "✗ HH:mm · duration"', () => {
+		test('failure entry with duration → "HH:mm · duration" (status conveyed by icon)', () => {
 			const e = entry({ status: 'failure', durationMs: 45 });
-			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '✗ 12:00 · 45ms');
+			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '12:00 · 45ms');
 		});
 
 		test('entry without durationMs (legacy or partial) omits the duration suffix', () => {
 			const e = entry({ status: 'success' });
-			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '✓ 12:00');
+			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '12:00');
 		});
 
 		test('negative durationMs (clock-skew leak) renders as "0ms" rather than being dropped', () => {
@@ -1976,16 +1977,122 @@ suite('Extension Test Suite', () => {
 			// writer), we'd rather show "ran instantly" than silently hide
 			// the duration as the previous `>= 0` guard did.
 			const e = entry({ status: 'success', durationMs: -5 });
-			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '✓ 12:00 · 0ms');
+			assert.strictEqual(formatLastRunBadge(e, now, 'ko'), '12:00 · 0ms');
 		});
 
-		test('entry from yesterday composes both prefix and duration', () => {
+		test('entry from yesterday composes timestamp and duration', () => {
 			const e = entry({
 				status: 'failure',
 				timestamp: new Date(2026, 3, 29, 9, 0, 0).getTime(),
 				durationMs: 2500
 			});
-			assert.strictEqual(formatLastRunBadge(e, now, 'en'), '✗ Yest 09:00 · 2.5s');
+			assert.strictEqual(formatLastRunBadge(e, now, 'en'), 'Yest 09:00 · 2.5s');
+		});
+
+		test('badge never embeds the status glyph (covered by icon + aria label)', () => {
+			// Regression guard for 0.5.1: the visible badge intentionally
+			// omits ✓/✗ so the row doesn't carry the same signal twice
+			// (icon already encodes status). Screen reader parity is
+			// restored via `buildHistoryItemAriaLabel`; see that suite.
+			for (const status of ['success', 'failure'] as const) {
+				for (const durationMs of [undefined, 1234] as const) {
+					const badge = formatLastRunBadge(
+						entry({ status, durationMs }),
+						now,
+						'ko'
+					);
+					assert.ok(badge && !badge.includes('✓') && !badge.includes('✗'),
+						`badge "${badge}" must not embed a status glyph`);
+				}
+			}
+		});
+	});
+
+	suite('buildHistoryItemAriaLabel', () => {
+		// Pins the screen-reader story for 0.5.1: the visible HistoryItem
+		// row conveys status via `iconPath` color only (no ✓/✗ in
+		// description), so the aria label has to fold the status word
+		// back in as text. These tests keep that contract from regressing
+		// silently if someone later tweaks the badge formatter.
+		const now = new Date(2026, 3, 30, 14, 30, 0).getTime();
+
+		function entry(partial: Partial<HistoryEntry>): HistoryEntry {
+			return {
+				actionId: 'a',
+				actionTitle: 'Build',
+				timestamp: new Date(2026, 3, 30, 12, 0, 0).getTime(),
+				status: 'success',
+				...partial
+			};
+		}
+
+		test('success → "{label}, 성공, HH:mm · duration"', () => {
+			const e = entry({ status: 'success', durationMs: 1234 });
+			assert.strictEqual(
+				buildHistoryItemAriaLabel(e, 'Build', now, 'ko'),
+				'Build, 성공, 12:00 · 1.2s'
+			);
+		});
+
+		test('failure → "{label}, 실패, HH:mm · duration"', () => {
+			const e = entry({ status: 'failure', durationMs: 45 });
+			assert.strictEqual(
+				buildHistoryItemAriaLabel(e, 'Build', now, 'ko'),
+				'Build, 실패, 12:00 · 45ms'
+			);
+		});
+
+		test('running entry still gets a label (icon spinner alone is silent for screen readers)', () => {
+			const e = entry({ status: 'running' });
+			assert.strictEqual(
+				buildHistoryItemAriaLabel(e, 'Build', now, 'ko'),
+				'Build, 실행 중, 12:00'
+			);
+		});
+
+		test('English locale uses succeeded/failed/running words', () => {
+			assert.strictEqual(
+				buildHistoryItemAriaLabel(entry({ status: 'success', durationMs: 2500 }), 'Build', now, 'en'),
+				'Build, succeeded, 12:00 · 2.5s'
+			);
+			assert.strictEqual(
+				buildHistoryItemAriaLabel(entry({ status: 'failure' }), 'Build', now, 'en'),
+				'Build, failed, 12:00'
+			);
+			assert.strictEqual(
+				buildHistoryItemAriaLabel(entry({ status: 'running' }), 'Build', now, 'en'),
+				'Build, running, 12:00'
+			);
+		});
+
+		test('tool entries say "opened" rather than "succeeded"', () => {
+			// Tool entries always carry status='success' because they
+			// record an "opened" event, not a pass/fail run. A screen
+			// reader announcing "succeeded" would be misleading there.
+			const toolEntry = createToolHistoryEntry({
+				kind: 'memoryMap',
+				filePath: '/tmp/foo.elf',
+				timestamp: new Date(2026, 3, 30, 12, 0, 0).getTime(),
+			});
+			assert.strictEqual(
+				buildHistoryItemAriaLabel(toolEntry, 'Memory Map: foo.elf', now, 'ko'),
+				'Memory Map: foo.elf, 열림 12:00'
+			);
+			assert.strictEqual(
+				buildHistoryItemAriaLabel(toolEntry, 'Memory Map: foo.elf', now, 'en'),
+				'Memory Map: foo.elf, opened 12:00'
+			);
+		});
+
+		test('uses the supplied displayLabel (disambiguated breadcrumb), not entry.actionTitle', () => {
+			// HistoryProvider passes the disambiguated label (e.g.
+			// "Firmware > Build") into HistoryItem; aria label must
+			// mirror that so the announced row matches the visible row.
+			const e = entry({ status: 'success', actionTitle: 'Build', durationMs: 100 });
+			assert.strictEqual(
+				buildHistoryItemAriaLabel(e, 'Firmware > Build', now, 'ko'),
+				'Firmware > Build, 성공, 12:00 · 100ms'
+			);
 		});
 	});
 

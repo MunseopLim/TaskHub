@@ -29,6 +29,20 @@
 =====================================================================
 -->
 
+## [0.5.1] - 2026-05-27
+
+### 변경 — History 항목의 상태 표시 중복 정리 + 접근성 보강
+
+#### UX / 일관성
+
+- **History 배지에서 `✓`/`✗` 접두 제거**: 각 `HistoryItem`은 이미 status에 따라 색 아이콘(녹색 `pass` / 빨간 `error`)을 그리고 있는데, 0.4.x에서 추가한 last-run 배지(`formatLastRunBadge`)가 같은 상태를 텍스트 접두로 한 번 더 표시해 한 행에 동일 신호가 두 번 노출되고 있었음. 배지 텍스트는 시각·소요 시간만 담당하도록 단순화: `14:30 · 1.2s` / `어제 09:15 · 45ms` / `12/15`. 진행 중(`running`) 항목은 여전히 description 없이 아이콘만으로 표시. 참조: [src/providers/historyProvider.ts](src/providers/historyProvider.ts) `formatLastRunBadge` / `HistoryItem`.
+
+#### 접근성
+
+- **`HistoryItem.accessibilityInformation.label`로 스크린 리더 패리티 유지**: 위 변경으로 시각적 status가 아이콘 색에만 남게 되어 스크린 리더/텍스트 접근에서는 성공/실패를 분간할 수 없는 회귀가 생길 수 있었음. 각 항목에 `Build, 성공, 14:30 · 1.2s` / `Build, 실행 중, 14:30` 형태의 aria 라벨을 부여해 status 단어를 텍스트로 안내. 다국어 분기(`성공/실패/실행 중` ↔ `succeeded/failed/running`)와 tool 엔트리는 `열림/opened`로 표기해 "성공" 오안내를 피함. 새 순수 헬퍼 `buildHistoryItemAriaLabel(entry, displayLabel, now, lang)`을 export해 단위 테스트로 분기 고정. 참조: [src/providers/historyProvider.ts](src/providers/historyProvider.ts) `buildHistoryItemAriaLabel` / `HistoryItem`.
+
+**테스트**: 단위 신규 7 케이스 (`formatLastRunBadge` 글리프 부재 가드 1 + `buildHistoryItemAriaLabel` 분기 6) + 기존 `formatLastRunBadge` 단위 6 케이스 갱신 + 통합 IT-068 (`✓`/`✗` 부재 + iconPath status 매핑 + aria 라벨 status 단어) 확장.
+
 ## [0.5.0] - 2026-05-14
 
 ### 추가 / 수정 — 병렬 실행 / Task DAG 정식 릴리스 (0.4.41~0.4.44 통합 + 코드 리뷰 반영)

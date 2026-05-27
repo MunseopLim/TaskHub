@@ -1530,9 +1530,10 @@ try {
         test('IT-067: executeAction은 success/failure 모두 history entry에 durationMs를 기록한다', async () => {
             // Pins last-run badge data scope: every terminal transition surfaced by
             // `executeAction` must include a non-negative duration so each
-            // HistoryItem can render "✓ 14:30 · 1.2s" badges in its
-            // description slot. Actions panel intentionally does NOT
-            // render this badge — see IT-068b.
+            // HistoryItem can render "14:30 · 1.2s" badges in its
+            // description slot (status is conveyed by the icon, not the
+            // badge text). Actions panel intentionally does NOT render
+            // this badge — see IT-068b.
             const originalShowError = vscode.window.showErrorMessage;
             (vscode.window as any).showErrorMessage = async () => undefined;
             try {
