@@ -8,7 +8,7 @@
 1.  [사용자 지정 메인 뷰](#1-사용자-지정-메인-뷰)
 2.  [사용자 지정 아이콘](#2-사용자-지정-아이콘)
 3.  [JSON 설정 파일](#3-json-설정-파일)
-4.  [링크 패널 (Built-in / Workspace)](#4-링크-패널-built-in--workspace)
+4.  [링크 패널 (Workspace Links)](#4-링크-패널-workspace-links)
 5.  [Actions 패널 (`mainView.main`)](#5-actions-패널-mainviewmain)
 6.  [즐겨찾기 패널 (`mainView.favorite`)](#6-즐겨찾기-패널-mainviewfavorite)
 7.  [확장 프로그램 버전 표시](#7-확장-프로그램-버전-표시)
@@ -33,10 +33,9 @@
 
 ## 1. 사용자 지정 메인 뷰
 
-이 확장 프로그램은 VS Code 활동 표시줄에 'H' 아이콘으로 식별되는 사용자 지정 뷰 컨테이너를 도입합니다. 이 메인 뷰(`mainView`)는 다섯 개의 하위 뷰를 호스팅합니다:
+이 확장 프로그램은 VS Code 활동 표시줄에 'H' 아이콘으로 식별되는 사용자 지정 뷰 컨테이너를 도입합니다. 이 메인 뷰(`mainView`)는 네 개의 하위 뷰를 호스팅합니다:
 
 *   **Actions 패널 (`mainView.main`)**: 다양한 액션 버튼과 정보를 포함하며, 'M' 아이콘으로 식별됩니다.
-*   **Built-in 링크 패널 (`mainView.linkBuiltin`)**: 확장에서 기본 제공하는 링크를 표시하며, 'L' 아이콘으로 식별됩니다. 읽기 전용입니다.
 *   **워크스페이스 링크 패널 (`mainView.linkWorkspace`)**: 현재 워크스페이스에 정의된 링크를 표시하며, 'L' 아이콘으로 식별됩니다.
 *   **즐겨찾기 패널 (`mainView.favorite`)**: 구성 가능한 즐겨찾는 파일 목록을 표시하며, 'F' 아이콘으로 식별됩니다.
 *   **히스토리 패널 (`mainView.history`)**: 최근 실행한 액션들의 기록을 추적하고 관리하며, 'R' 아이콘으로 식별됩니다.
@@ -51,7 +50,7 @@
 
 *   **파일 로드 우선순위**:
     *   Actions 패널은 `media/actions.json`과 워크스페이스의 `.vscode/actions.json`을 병합하여 표시합니다.
-    *   링크 패널은 두 개로 나뉩니다: Built-in은 `media/links.json`만 표시하고, 워크스페이스 링크 패널은 워크스페이스의 `.vscode/links.json`만 표시합니다.
+    *   링크 패널은 워크스페이스의 `.vscode/links.json`만 표시합니다.
     *   즐겨찾기 패널은 워크스페이스의 `.vscode/favorites.json`을 표시합니다.
     *   관련 JSON 파일이 수정, 생성 또는 삭제되면 해당 뷰는 자동으로 새로 고쳐집니다.
 
@@ -78,11 +77,8 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 - `Ctrl+S` (macOS `Cmd+S`): 저장. 편집 중 셀이 있으면 commit 을 시도하고 실패 시 저장을 중단합니다.
 - `Ctrl+F` (macOS `Cmd+F`): VS Code 기본 찾기 위젯으로 현재 보이는 셀 값/헤더를 검색합니다.
 
-## 4. 링크 패널 (Built-in / Workspace)
+## 4. 링크 패널 (Workspace Links)
 
-이제 링크는 두 개의 별도 패널로 나뉩니다.
-
-*   **Built-in 링크 (`mainView.linkBuiltin`)**: `media/links.json`에 정의된 기본 링크를 표시합니다. 읽기 전용이며, 복사/열기만 가능합니다.
 *   **워크스페이스 링크 (`mainView.linkWorkspace`)**: 워크스페이스의 `.vscode/links.json`에 정의된 링크를 표시합니다. 제목에는 링크의 총 개수가 표시됩니다 (예: "Workspace Links (5)").
 
 **주요 기능:**
@@ -90,8 +86,8 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 *   **인라인 액션**: 각 링크 항목에 마우스를 올리면 다음 인라인 아이콘들이 표시됩니다:
     *   복사 아이콘: URL을 클립보드에 복사
     *   브라우저 아이콘: 브라우저에서 열기
-    *   연필 아이콘 (워크스페이스 링크만): 링크 편집
-    *   휴지통 아이콘 (워크스페이스 링크만): 링크 삭제
+    *   연필 아이콘: 링크 편집
+    *   휴지통 아이콘: 링크 삭제
 *   **링크 추가 / 편집**: 뷰 상단의 + 버튼은 *URL → 제목(URL의 host로 자동 채워짐, Enter로 그대로 사용) → 저장* (2 prompt). URL prompt 는 `validateLinkUrlForSave` 게이트를 거치며 ① scheme allowlist (http / https / mailto 만 허용 — `javascript:` / `file:` / `vscode:` 같은 schemes 는 입력 단계에서 빨간 줄로 차단), ② WHATWG `new URL()` parse (스킴만 붙은 `https://` 같은 입력도 입력 단계에서 차단)를 한 번에 적용합니다. 같은 게이트가 워크스페이스 링크 *편집* prompt 에도 적용되어 Add 와 Edit 의 검증이 대칭입니다. 그룹/태그는 묻지 않으며, 저장 직후 알림의 *links.json 열기* 버튼으로 곧장 편집기에 점프해 다듬을 수 있습니다. `links.json`이 파싱 실패면 마법사가 저장을 거부하고 *links.json 열기* 버튼이 달린 에러 알림으로 회복 경로를 제공합니다 (이전 버전은 깨진 파일을 신규 1개 항목으로 덮어써서 기존 데이터가 유실됐습니다). WHATWG parse 의 한계상 `https:///path` 같은 입력은 슬래시가 정규화되어 `https://path/` (host = `path`) 로 조용히 해석되며 게이트는 통과합니다 — 사용자 의도와 다르게 host 가 바뀐 상태로 저장될 수 있어, click 시점의 `vscode.Uri.parse` 가 최종 fail-safe 입니다.
 *   **검색**: 돋보기 아이콘을 클릭하여 링크를 빠르게 검색할 수 있습니다.
 *   **파일 편집**: 연필 버튼을 클릭하여 `links.json` 파일을 직접 편집할 수 있습니다.

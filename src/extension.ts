@@ -4172,15 +4172,13 @@ export function activate(context: vscode.ExtensionContext) {
     // state in the map.
     syncActionCommands(context);
     context.subscriptions.push(new vscode.Disposable(() => disposeAllActionCommands()));
-    const builtInLinkViewProvider = new LinkViewProvider(context, 'builtin');
-    const workspaceLinkViewProvider = new LinkViewProvider(context, 'workspace');
+    const workspaceLinkViewProvider = new LinkViewProvider();
     const favoriteViewProvider = new FavoriteViewProvider(context);
     const historyProvider = new HistoryProvider(context);
     const mainView = vscode.window.createTreeView('mainView.main', { treeDataProvider: mainViewProvider });
     context.subscriptions.push(mainView);
     mainView.onDidExpandElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, true); } });
     mainView.onDidCollapseElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, false); } });
-    builtInLinkViewProvider.view = vscode.window.createTreeView('mainView.linkBuiltin', { treeDataProvider: builtInLinkViewProvider });
     workspaceLinkViewProvider.view = vscode.window.createTreeView('mainView.linkWorkspace', { treeDataProvider: workspaceLinkViewProvider });
     favoriteViewProvider.view = vscode.window.createTreeView('mainView.favorite', { treeDataProvider: favoriteViewProvider });
     historyProvider.view = vscode.window.createTreeView('mainView.history', { treeDataProvider: historyProvider });
@@ -4188,7 +4186,7 @@ export function activate(context: vscode.ExtensionContext) {
     // on first getChildren() (i.e. when the TaskHub sidebar is first opened),
     // so activation triggered by onLanguage:c / onLanguage:cpp stays cheap and
     // does not drag in JSON reads for links/favorites/history.
-    context.subscriptions.push(builtInLinkViewProvider.view, workspaceLinkViewProvider.view, favoriteViewProvider.view, historyProvider.view);
+    context.subscriptions.push(workspaceLinkViewProvider.view, favoriteViewProvider.view, historyProvider.view);
 
     // History last-run badges contain a relative-day reference
     // (`HH:mm` / `어제 HH:mm` / `MM/DD`) and TreeItem.description does not
@@ -4226,12 +4224,6 @@ export function activate(context: vscode.ExtensionContext) {
         mediaActionsWatcher.onDidCreate(debouncedMediaActionsRefresh.run);
         mediaActionsWatcher.onDidDelete(debouncedMediaActionsRefresh.run);
         context.subscriptions.push(new vscode.Disposable(() => { debouncedMediaActionsRefresh.cancel(); mediaActionsWatcher.dispose(); }));
-        const mediaLinksWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(context.extensionPath, 'media/links.json'));
-        const debouncedMediaLinksRefresh = debounce(() => builtInLinkViewProvider.refresh(), 200);
-        mediaLinksWatcher.onDidChange(debouncedMediaLinksRefresh.run);
-        mediaLinksWatcher.onDidCreate(debouncedMediaLinksRefresh.run);
-        mediaLinksWatcher.onDidDelete(debouncedMediaLinksRefresh.run);
-        context.subscriptions.push(new vscode.Disposable(() => { debouncedMediaLinksRefresh.cancel(); mediaLinksWatcher.dispose(); }));
     }
     const workspaceActionsWatchers = registerWorkspaceFileWatchers('.vscode/actions.json', () => refreshActionsAndCommands(context, mainViewProvider));
     const workspaceLinksWatchers = registerWorkspaceFileWatchers('.vscode/links.json', () => workspaceLinkViewProvider.refresh());

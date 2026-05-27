@@ -139,8 +139,6 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
     private loaded = false;
 
     constructor(
-        private context: vscode.ExtensionContext,
-        private readonly mode: 'builtin' | 'workspace',
         private readonly getWorkspaceFolders: () => readonly vscode.WorkspaceFolder[] = () => vscode.workspace.workspaceFolders ?? []
     ) {
         // No disk I/O in the constructor. The first refresh() (e.g. from a file
@@ -158,22 +156,16 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
     private updateTitle(): void {
         if (this.view) {
             const count = this.cachedEntries.length;
-            const label = this.mode === 'builtin' ? 'Built-in Links' : 'Workspace Links';
-            this.view.title = `${label} (${count})`;
+            this.view.title = `Workspace Links (${count})`;
         }
     }
 
     private loadLinks(): LinkEntry[] {
         const results: LinkEntry[] = [];
-        if (this.mode === 'builtin') {
-            const mediaJsonPath = path.join(this.context.extensionPath, 'media', 'links.json');
-            results.push(...loadLinksFromDisk(mediaJsonPath, false));
-        } else {
-            const folders = this.getWorkspaceFolders();
-            for (const folder of folders) {
-                const workspaceLinksPath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
-                results.push(...loadLinksFromDisk(workspaceLinksPath, true));
-            }
+        const folders = this.getWorkspaceFolders();
+        for (const folder of folders) {
+            const workspaceLinksPath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
+            results.push(...loadLinksFromDisk(workspaceLinksPath, true));
         }
         return results;
     }

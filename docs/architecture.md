@@ -15,7 +15,7 @@ TaskHub/
 │   │                                  #   상세는 §주요 컴포넌트 > 1. TreeDataProvider 참조
 │   ├── providers/                     # TreeDataProvider 분리 모듈 (Phase 2 split)
 │   │   ├── mainViewProvider.ts        # Actions 패널 (폴더 트리)
-│   │   ├── linkViewProvider.ts        # Built-in / Workspace 링크 패널
+│   │   ├── linkViewProvider.ts        # 워크스페이스 링크 패널 (.vscode/links.json)
 │   │   ├── favoriteViewProvider.ts    # 즐겨찾기 패널
 │   │   ├── historyProvider.ts         # 액션 실행 히스토리 패널
 │   │   ├── actionStatus.ts            # 액션 실행 상태(actionStates) + 멀티 task 진행률(progress) 관리
@@ -51,8 +51,7 @@ TaskHub/
 ├── media/
 │   ├── h_icon.svg            # 메인 뷰 아이콘
 │   ├── actions.json          # 기본 제공 액션 예제
-│   ├── links.json            # 기본 제공 링크 예제
-│   └── *_example.json        # 각종 예제 파일들
+│   └── *_example.json        # 각종 예제 파일들 (links_example.json 등)
 ├── presets/
 │   └── preset-example.json   # 프리셋 예제 파일
 ├── docs/
@@ -201,7 +200,7 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
      * 쓰기 동작(액션 생성 wizard, 프리셋 적용, import) 직후.
    * 트리 렌더링 때마다 JSON을 다시 파싱하지 않도록 해 UI 응답성을 유지.
 
-또한 Provider 생성자에서 동기 JSON 로드를 수행하면 중복 로드 + activation 경로 가중이 발생하므로, 생성자는 **필드 초기화만** 수행한다. activate()에서도 `builtInLinkViewProvider.refresh()` 등 초기 `refresh()`를 호출하지 않는다. 실제 로드는:
+또한 Provider 생성자에서 동기 JSON 로드를 수행하면 중복 로드 + activation 경로 가중이 발생하므로, 생성자는 **필드 초기화만** 수행한다. activate()에서도 `workspaceLinkViewProvider.refresh()` 등 초기 `refresh()`를 호출하지 않는다. 실제 로드는:
 
 * 첫 `getChildren()` — 사이드바(H 아이콘)가 열리는 시점.
 * 파일 watcher 콜백에서의 `refresh()` — `.vscode/links.json` 등 변경 시.

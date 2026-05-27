@@ -3851,16 +3851,10 @@ suite('Extension Test Suite', () => {
 		// this.loadX()`) are detected: the flag stays `false` until a load path
 		// actually runs.
 
-		test('LinkViewProvider (builtin) leaves loaded=false and cachedEntries=[] after construction', () => {
-			const provider = new LinkViewProvider(makeStubContext(), 'builtin') as any;
+		test('LinkViewProvider leaves loaded=false and cachedEntries=[] after construction', () => {
+			const provider = new LinkViewProvider() as any;
 			assert.strictEqual(provider.loaded, false, 'loaded flag must be false — constructor must not perform a load');
 			assert.deepStrictEqual(provider.cachedEntries, [], 'cachedEntries must be the initial empty array');
-		});
-
-		test('LinkViewProvider (workspace) leaves loaded=false and cachedEntries=[] after construction', () => {
-			const provider = new LinkViewProvider(makeStubContext(), 'workspace') as any;
-			assert.strictEqual(provider.loaded, false);
-			assert.deepStrictEqual(provider.cachedEntries, []);
 		});
 
 		test('FavoriteViewProvider leaves loaded=false and cachedFavorites=[] after construction', () => {
@@ -3870,7 +3864,7 @@ suite('Extension Test Suite', () => {
 		});
 
 		test('LinkViewProvider.refresh() transitions loaded to true and triggers the load path', () => {
-			const provider = new LinkViewProvider(makeStubContext(), 'workspace') as any;
+			const provider = new LinkViewProvider() as any;
 			assert.strictEqual(provider.loaded, false);
 			provider.refresh();
 			assert.strictEqual(provider.loaded, true, 'refresh() must set loaded=true so subsequent ensureCache() calls are cheap');
@@ -3884,7 +3878,7 @@ suite('Extension Test Suite', () => {
 		});
 
 		test('LinkViewProvider.getChildren() lazily loads on first call, becomes no-op on repeat', async () => {
-			const provider = new LinkViewProvider(makeStubContext(), 'workspace') as any;
+			const provider = new LinkViewProvider() as any;
 			assert.strictEqual(provider.loaded, false);
 			const first = await provider.getChildren();
 			assert.strictEqual(provider.loaded, true, 'first getChildren() call must trigger the lazy load');

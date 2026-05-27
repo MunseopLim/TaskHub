@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -41,7 +41,6 @@
       {
         "fileMatch": [
           "/.vscode/links.json",
-          "/media/links.json",
           "/media/links_example.json"
         ],
         "url": "./schema/links.schema.json"
@@ -157,11 +156,6 @@
           "id": "mainView.main",
           "name": "Actions",
           "icon": "media/m_icon.svg"
-        },
-        {
-          "id": "mainView.linkBuiltin",
-          "name": "Built-in Links",
-          "icon": "media/l_icon.svg"
         },
         {
           "id": "mainView.linkWorkspace",
@@ -551,12 +545,12 @@
       "view/item/context": [
         {
           "command": "taskhub.copyLink",
-          "when": "(view == mainView.linkWorkspace || view == mainView.linkBuiltin) && viewItem == linkItem",
+          "when": "view == mainView.linkWorkspace && viewItem == linkItem",
           "group": "inline"
         },
         {
           "command": "taskhub.goToLink",
-          "when": "(view == mainView.linkWorkspace || view == mainView.linkBuiltin) && viewItem == linkItem",
+          "when": "view == mainView.linkWorkspace && viewItem == linkItem",
           "group": "inline"
         },
         {

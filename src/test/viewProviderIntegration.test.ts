@@ -88,7 +88,7 @@ suite('View provider integration', function () {
             { title: 'Loose', link: 'https://loose.example', tags: [' misc '] }
         ], null, 2));
 
-        const provider = new LinkViewProvider(makeContext(), 'workspace', () => [makeWorkspaceFolder(workspace)]);
+        const provider = new LinkViewProvider(() => [makeWorkspaceFolder(workspace)]);
         provider.view = { title: 'Workspace Links' } as vscode.TreeView<any>;
 
         const roots = await provider.getChildren();

@@ -29,6 +29,19 @@
 =====================================================================
 -->
 
+## [0.5.2] - 2026-05-28
+
+### 변경 — Built-in Links 패널 제거 + 단일 워크스페이스 링크 뷰로 일원화
+
+#### 호환성 깨짐 (Breaking)
+
+- **Built-in Links 패널(`mainView.linkBuiltin`) 제거**: 두 개로 나뉘어 있던 링크 패널을 워크스페이스 링크(`mainView.linkWorkspace`) 하나로 통합. 번들 `media/links.json`은 더 이상 로드되지 않으며 패키지에서도 삭제됐다. 그동안 `media/links.json`에 직접 추가해 사용하던 항목이 있다면 워크스페이스의 `.vscode/links.json`으로 옮겨 두어야 한다 (확장 디렉터리는 업그레이드 시 새 VSIX로 교체되므로 자동 마이그레이션은 제공하지 않는다). 참조: [src/providers/linkViewProvider.ts](src/providers/linkViewProvider.ts), [src/extension.ts](src/extension.ts).
+- **`LinkViewProvider` 시그니처 변경**: `mode`/`context` 파라미터 제거 → 인자 없이 `new LinkViewProvider()`로 생성하며 workspace 폴더에서만 로드한다. 외부 소비자가 없으므로 사용자 영향은 없음.
+
+#### 정리
+
+- jsonValidation 매핑에서 `/media/links.json` 항목 제거, 메뉴 `when` 조건에서 `view == mainView.linkBuiltin` 분기 제거, dev 모드 전용 `media/links.json` FileSystemWatcher 제거. [media/links_example.json](media/links_example.json)은 *Show Example JSONs* 명령에서 계속 사용되므로 유지.
+
 ## [0.5.1] - 2026-05-27
 
 ### 변경 — History 항목의 상태 표시 중복 정리 + 접근성 보강

@@ -30,7 +30,7 @@
 
 ### Sidebar Panels
 - **Actions** — Action buttons in tree grouping, with search and filtering
-- **Links** — Built-in / Workspace link management
+- **Links** — Workspace link management driven by `.vscode/links.json`
 - **Favorites** — Frequently-used files with line-number bookmarks
 - **History** — Execution log with status indicators
 
