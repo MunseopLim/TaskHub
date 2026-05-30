@@ -41,6 +41,16 @@ export interface StructMember {
     isArray?: boolean;
     /** Array size if applicable */
     arraySize?: number;
+    /** Whether this member is a C/C++ bit-field */
+    isBitField?: boolean;
+    /** Bit-field width when isBitField is true */
+    bitWidth?: number;
+    /** Whether this bit-field has no declarator name */
+    isAnonymousBitField?: boolean;
+    /** Precomputed size for anonymous nested struct/union members */
+    fixedSize?: number;
+    /** Precomputed alignment for anonymous nested struct/union members */
+    fixedAlignment?: number;
 }
 
 /**
@@ -62,6 +72,8 @@ export interface StructSizeResult {
     /** Error message if failed */
     error?: string;
 }
+
+type AggregateKind = 'struct' | 'class' | 'union';
 
 /**
  * Default type configurations for common C/C++ types
@@ -153,6 +165,18 @@ export class StructSizeCalculator {
         startLine: number
     ): StructSizeResult {
         try {
+            if (startLine < 0 || startLine >= lines.length) {
+                return {
+                    structName,
+                    totalSize: 0,
+                    alignment: 1,
+                    members: [],
+                    padding: 0,
+                    success: false,
+                    error: 'Struct definition not found'
+                };
+            }
+            const aggregateKind = this.getAggregateKind(lines[startLine]);
             const members = this.parseStructMembers(lines, startLine);
 
             if (members.length === 0) {
@@ -167,7 +191,9 @@ export class StructSizeCalculator {
                 };
             }
 
-            return this.calculateLayout(structName, members);
+            return aggregateKind === 'union'
+                ? this.calculateUnionLayout(structName, members)
+                : this.calculateLayout(structName, members);
         } catch (error) {
             return {
                 structName,
@@ -185,77 +211,311 @@ export class StructSizeCalculator {
      * Parse struct members from source code
      */
     private parseStructMembers(lines: string[], startLine: number): StructMember[] {
-        const members: StructMember[] = [];
-        let braceDepth = 0;
+        const body = this.extractAggregateBody(lines, startLine);
+        if (body === null) {
+            return [];
+        }
+        return this.parseMemberStatements(body);
+    }
+
+    private extractAggregateBody(lines: string[], startLine: number): string | null {
         let foundOpeningBrace = false;
+        let braceDepth = 0;
+        let body = '';
         let inBlockComment = false;
 
         for (let i = startLine; i < lines.length; i++) {
             const line = lines[i];
+            let inString: '"' | '\'' | null = null;
 
-            // Track braces, skipping braces inside string literals, char literals, and comments
             for (let ci = 0; ci < line.length; ci++) {
                 const ch = line[ci];
+                const next = ci + 1 < line.length ? line[ci + 1] : '';
+
                 if (inBlockComment) {
-                    if (ch === '*' && ci + 1 < line.length && line[ci + 1] === '/') {
+                    if (ch === '*' && next === '/') {
                         inBlockComment = false;
-                        ci++; // skip '/'
-                    }
-                    continue;
-                }
-                if (ch === '/' && ci + 1 < line.length) {
-                    if (line[ci + 1] === '/') { break; } // line comment - skip rest of line
-                    if (line[ci + 1] === '*') { inBlockComment = true; ci++; continue; }
-                }
-                if (ch === '"' || ch === '\'') {
-                    const quote = ch;
-                    ci++;
-                    while (ci < line.length && line[ci] !== quote) {
-                        if (line[ci] === '\\') { ci++; } // skip escaped char
                         ci++;
                     }
                     continue;
                 }
+                if (inString) {
+                    if (foundOpeningBrace && braceDepth > 0) { body += ch; }
+                    if (ch === '\\') {
+                        ci++;
+                        if (foundOpeningBrace && braceDepth > 0 && ci < line.length) { body += line[ci]; }
+                        continue;
+                    }
+                    if (ch === inString) { inString = null; }
+                    continue;
+                }
+                if (ch === '/' && next === '/') {
+                    break;
+                }
+                if (ch === '/' && next === '*') {
+                    inBlockComment = true;
+                    ci++;
+                    continue;
+                }
+                if (ch === '"' || ch === '\'') {
+                    inString = ch;
+                    if (foundOpeningBrace && braceDepth > 0) { body += ch; }
+                    continue;
+                }
                 if (ch === '{') {
-                    braceDepth++;
+                    if (foundOpeningBrace && braceDepth > 0) { body += ch; }
                     foundOpeningBrace = true;
-                } else if (ch === '}') {
+                    braceDepth++;
+                    continue;
+                }
+                if (ch === '}') {
                     braceDepth--;
                     if (braceDepth === 0 && foundOpeningBrace) {
-                        // End of struct
-                        return members;
+                        return body;
                     }
+                    if (foundOpeningBrace && braceDepth > 0) { body += ch; }
+                    continue;
+                }
+                if (foundOpeningBrace && braceDepth > 0) {
+                    body += ch;
                 }
             }
-
-            if (!foundOpeningBrace || braceDepth === 0) {
-                continue;
-            }
-
-            // Parse member declaration
-            // Pattern: Type memberName; or Type memberName[size];
-            // Also handles pointer styles: char *ptr; int *p; char* ptr; char * ptr;
-            const memberMatch = line.match(/^\s*([\w\s*]+?)\s+(\*?)(\w+)(?:\[(\d+)\])?\s*;/);
-            if (memberMatch) {
-                const typeBase = memberMatch[1].trim();
-                const ptrPrefix = memberMatch[2];
-                const type = ptrPrefix ? typeBase + ' *' : typeBase;
-                const name = memberMatch[3];
-                const arraySize = memberMatch[4] ? parseInt(memberMatch[4], 10) : undefined;
-
-                members.push({
-                    name,
-                    type,
-                    offset: 0,  // Will be calculated
-                    size: 0,    // Will be calculated
-                    alignment: 0,  // Will be calculated
-                    isArray: arraySize !== undefined,
-                    arraySize
-                });
+            if (foundOpeningBrace && braceDepth > 0) {
+                body += '\n';
             }
         }
 
+        return null;
+    }
+
+    private parseMemberStatements(body: string): StructMember[] {
+        const members: StructMember[] = [];
+        for (const statement of this.splitTopLevelStatements(body)) {
+            const trimmed = statement.trim();
+            if (!trimmed || /^(public|private|protected)\s*:$/u.test(trimmed)) {
+                continue;
+            }
+            if (this.parseAnonymousAggregateMember(trimmed, members)) {
+                continue;
+            }
+            this.parseDeclarationStatement(trimmed, members);
+        }
         return members;
+    }
+
+    private splitTopLevelStatements(body: string): string[] {
+        const statements: string[] = [];
+        let current = '';
+        let braceDepth = 0;
+        let bracketDepth = 0;
+        let inString: '"' | '\'' | null = null;
+
+        for (let i = 0; i < body.length; i++) {
+            const ch = body[i];
+            current += ch;
+
+            if (inString) {
+                if (ch === '\\') {
+                    i++;
+                    if (i < body.length) { current += body[i]; }
+                    continue;
+                }
+                if (ch === inString) { inString = null; }
+                continue;
+            }
+            if (ch === '"' || ch === '\'') {
+                inString = ch;
+            } else if (ch === '{') {
+                braceDepth++;
+            } else if (ch === '}') {
+                braceDepth = Math.max(0, braceDepth - 1);
+            } else if (ch === '[') {
+                bracketDepth++;
+            } else if (ch === ']') {
+                bracketDepth = Math.max(0, bracketDepth - 1);
+            } else if (ch === ';' && braceDepth === 0 && bracketDepth === 0) {
+                statements.push(current.slice(0, -1));
+                current = '';
+            }
+        }
+        if (current.trim()) {
+            statements.push(current);
+        }
+        return statements;
+    }
+
+    private parseAnonymousAggregateMember(statement: string, members: StructMember[]): boolean {
+        const aggregateMatch = statement.match(/^\s*(struct|union)\b/u);
+        if (!aggregateMatch || !statement.includes('{')) {
+            return false;
+        }
+        const openIdx = statement.indexOf('{');
+        const closeIdx = this.findMatchingBraceInText(statement, openIdx);
+        if (closeIdx < 0) {
+            return false;
+        }
+        const tail = statement.slice(closeIdx + 1).trim();
+        const kind = aggregateMatch[1] as AggregateKind;
+        const nestedBody = statement.slice(openIdx + 1, closeIdx);
+        const nestedMembers = this.parseMemberStatements(nestedBody);
+        if (nestedMembers.length === 0) {
+            return false;
+        }
+
+        // Resolve the declarator after the closing brace:
+        //   `} name;` / `} name[2];` → named nested member
+        //   `};`                     → C11 anonymous struct/union member. gcc/clang
+        //                              lay it out as a sub-object at the parent's
+        //                              next slot (same size/alignment as a named
+        //                              nested member); only the field NAMES are
+        //                              injected for access, which does not affect
+        //                              sizeof. Without this branch the whole block
+        //                              was dropped, undersizing the struct.
+        let nestedName: string;
+        let arraySize: number | undefined;
+        if (tail === '') {
+            nestedName = `<anonymous ${kind}>`;
+            arraySize = undefined;
+        } else {
+            const memberMatch = tail.match(/^(\w+)(?:\[(0[xX][\da-fA-F]+|\d+)\])?$/u);
+            if (!memberMatch) {
+                return false;
+            }
+            nestedName = memberMatch[1];
+            arraySize = this.parseArraySize(memberMatch[2]);
+        }
+
+        const nestedResult = kind === 'union'
+            ? this.calculateUnionLayout(nestedName, nestedMembers)
+            : this.calculateLayout(nestedName, nestedMembers);
+        members.push({
+            name: nestedName,
+            type: `anonymous ${kind}`,
+            offset: 0,
+            size: 0,
+            alignment: 0,
+            isArray: arraySize !== undefined,
+            arraySize,
+            fixedSize: nestedResult.totalSize,
+            fixedAlignment: nestedResult.alignment
+        });
+        return true;
+    }
+
+    private findMatchingBraceInText(text: string, openIdx: number): number {
+        let depth = 0;
+        let inString: '"' | '\'' | null = null;
+        for (let i = openIdx; i < text.length; i++) {
+            const ch = text[i];
+            if (inString) {
+                if (ch === '\\') { i++; continue; }
+                if (ch === inString) { inString = null; }
+                continue;
+            }
+            if (ch === '"' || ch === '\'') {
+                inString = ch;
+            } else if (ch === '{') {
+                depth++;
+            } else if (ch === '}') {
+                depth--;
+                if (depth === 0) { return i; }
+            }
+        }
+        return -1;
+    }
+
+    private parseDeclarationStatement(statement: string, members: StructMember[]): void {
+        if (/[{}]/u.test(statement) || /^\s*(typedef|using)\b/u.test(statement)) {
+            return;
+        }
+        const declarators = this.splitTopLevelCommas(statement);
+        let baseType: string | undefined;
+
+        for (let i = 0; i < declarators.length; i++) {
+            const part = declarators[i].trim();
+            if (!part) { continue; }
+            let declarator = part;
+            if (i === 0) {
+                const first = part.match(/^([\w\s*]+?)\s+((?:\*?\s*\w+(?:\s*\[(?:0[xX][\da-fA-F]+|\d+)\])?(?:\s*:\s*\d+)?)|(?:\s*:\s*\d+))$/u);
+                if (!first) { return; }
+                baseType = first[1].trim();
+                declarator = first[2].trim();
+            }
+            if (!baseType) { return; }
+            const parsed = this.parseDeclarator(baseType, declarator);
+            if (parsed) {
+                members.push(parsed);
+            }
+        }
+    }
+
+    /**
+     * Parse a C array-dimension token, accepting both decimal (`16`) and
+     * hexadecimal (`0x10`) sizes — the latter is common in embedded buffers
+     * such as `uint8_t buf[0x100];`. Returns undefined for missing/invalid sizes.
+     */
+    private parseArraySize(text: string | undefined): number | undefined {
+        if (text === undefined || text === '') {
+            return undefined;
+        }
+        const n = Number(text);
+        return Number.isInteger(n) && n >= 0 ? n : undefined;
+    }
+
+    private splitTopLevelCommas(statement: string): string[] {
+        const parts: string[] = [];
+        let current = '';
+        let bracketDepth = 0;
+        for (const ch of statement) {
+            if (ch === '[') { bracketDepth++; }
+            if (ch === ']') { bracketDepth = Math.max(0, bracketDepth - 1); }
+            if (ch === ',' && bracketDepth === 0) {
+                parts.push(current);
+                current = '';
+            } else {
+                current += ch;
+            }
+        }
+        parts.push(current);
+        return parts;
+    }
+
+    private parseDeclarator(baseType: string, declarator: string): StructMember | null {
+        const unnamedBitField = declarator.match(/^:\s*(\d+)$/u);
+        if (unnamedBitField) {
+            const bitWidth = parseInt(unnamedBitField[1], 10);
+            return {
+                name: `<anonymous:${bitWidth}>`,
+                type: baseType,
+                offset: 0,
+                size: 0,
+                alignment: 0,
+                isBitField: true,
+                isAnonymousBitField: true,
+                bitWidth
+            };
+        }
+
+        const match = declarator.match(/^(\*?)\s*(\w+)(?:\s*\[(0[xX][\da-fA-F]+|\d+)\])?(?:\s*:\s*(\d+))?$/u);
+        if (!match) {
+            return null;
+        }
+        const ptrPrefix = match[1];
+        const name = match[2];
+        const arraySize = this.parseArraySize(match[3]);
+        const bitWidth = match[4] ? parseInt(match[4], 10) : undefined;
+        const type = ptrPrefix ? `${baseType} *` : baseType;
+        return {
+            name,
+            type,
+            offset: 0,
+            size: 0,
+            alignment: 0,
+            isArray: arraySize !== undefined,
+            arraySize,
+            isBitField: bitWidth !== undefined,
+            bitWidth
+        };
     }
 
     /**
@@ -266,12 +526,22 @@ export class StructSizeCalculator {
         let structAlignment = 1;
         let totalPadding = 0;
         let hasUnresolvedTypes = false;
+        let activeBitField:
+            | { type: string; storageOffset: number; storageSize: number; storageBits: number; alignment: number; usedBits: number }
+            | undefined;
 
         const packingAlignment = this.typeConfig.packingAlignment || 8;
 
+        const flushBitField = () => {
+            if (activeBitField) {
+                currentOffset = activeBitField.storageOffset + activeBitField.storageSize;
+                activeBitField = undefined;
+            }
+        };
+
         for (const member of members) {
             // Get type size and alignment
-            const typeInfo = this.getTypeInfo(member.type);
+            const typeInfo = this.getMemberTypeInfo(member);
             if (!typeInfo.resolved) {
                 hasUnresolvedTypes = true;
             }
@@ -282,6 +552,47 @@ export class StructSizeCalculator {
 
             // Update struct alignment (max of all member alignments)
             structAlignment = Math.max(structAlignment, memberAlignment);
+
+            if (member.isBitField) {
+                const bitWidth = member.bitWidth ?? 0;
+                const storageSize = typeInfo.size;
+                const storageBits = Math.max(1, storageSize * 8);
+                if (member.isAnonymousBitField && bitWidth === 0) {
+                    flushBitField();
+                    const padding = this.calculatePadding(currentOffset, memberAlignment);
+                    totalPadding += padding;
+                    currentOffset += padding;
+                    member.offset = currentOffset;
+                    member.size = 0;
+                    member.alignment = memberAlignment;
+                    continue;
+                }
+                const needsNewStorage = !activeBitField
+                    || activeBitField.type !== member.type
+                    || activeBitField.usedBits + bitWidth > activeBitField.storageBits;
+                if (needsNewStorage) {
+                    flushBitField();
+                    const padding = this.calculatePadding(currentOffset, memberAlignment);
+                    totalPadding += padding;
+                    currentOffset += padding;
+                    activeBitField = {
+                        type: member.type,
+                        storageOffset: currentOffset,
+                        storageSize,
+                        storageBits,
+                        alignment: memberAlignment,
+                        usedBits: 0
+                    };
+                }
+                const bitField = activeBitField!;
+                member.offset = bitField.storageOffset;
+                member.size = storageSize;
+                member.alignment = memberAlignment;
+                bitField.usedBits += bitWidth;
+                continue;
+            }
+
+            flushBitField();
 
             // Add padding before this member
             const padding = this.calculatePadding(currentOffset, memberAlignment);
@@ -296,6 +607,8 @@ export class StructSizeCalculator {
             // Move to next position
             currentOffset += memberSize;
         }
+
+        flushBitField();
 
         // Add trailing padding to align struct size to struct alignment
         const trailingPadding = this.calculatePadding(currentOffset, structAlignment);
@@ -312,6 +625,44 @@ export class StructSizeCalculator {
         };
     }
 
+    private calculateUnionLayout(structName: string, members: StructMember[]): StructSizeResult {
+        let maxSize = 0;
+        let unionAlignment = 1;
+        let hasUnresolvedTypes = false;
+        const packingAlignment = this.typeConfig.packingAlignment || 8;
+
+        for (const member of members) {
+            const typeInfo = this.getMemberTypeInfo(member);
+            if (!typeInfo.resolved) {
+                hasUnresolvedTypes = true;
+            }
+            const memberAlignment = Math.min(typeInfo.alignment, packingAlignment);
+            const memberSize = typeInfo.size * (member.arraySize || 1);
+            unionAlignment = Math.max(unionAlignment, memberAlignment);
+            maxSize = Math.max(maxSize, memberSize);
+            member.offset = 0;
+            member.size = memberSize;
+            member.alignment = memberAlignment;
+        }
+
+        const trailingPadding = this.calculatePadding(maxSize, unionAlignment);
+        return {
+            structName,
+            totalSize: maxSize + trailingPadding,
+            alignment: unionAlignment,
+            members,
+            padding: trailingPadding,
+            success: !hasUnresolvedTypes
+        };
+    }
+
+    private getMemberTypeInfo(member: StructMember): TypeConfig & { resolved: boolean } {
+        if (typeof member.fixedSize === 'number' && typeof member.fixedAlignment === 'number') {
+            return { size: member.fixedSize, alignment: member.fixedAlignment, resolved: true };
+        }
+        return this.getTypeInfo(member.type);
+    }
+
     /**
      * Get type information (size and alignment)
      * Supports recursive lookup for custom types
@@ -319,7 +670,10 @@ export class StructSizeCalculator {
      */
     private getTypeInfo(type: string): TypeConfig & { resolved: boolean } {
         // Remove qualifiers
-        const cleanType = type.replace(/\b(const|volatile|static|extern)\b/g, '').trim();
+        const cleanType = type
+            .replace(/\b(const|volatile|static|extern)\b/g, '')
+            .replace(/\b(struct|class|union)\s+/g, '')
+            .trim();
 
         // Check if it's a pointer
         if (cleanType.includes('*')) {
@@ -377,7 +731,7 @@ export class StructSizeCalculator {
      * Find struct definition in source code
      */
     static findStructDefinition(lines: string[], structName: string): number {
-        const pattern = new RegExp(`\\b(struct|class)\\s+${structName}\\b`);
+        const pattern = new RegExp(`\\b(struct|class|union)\\s+${structName}\\b`);
 
         for (let i = 0; i < lines.length; i++) {
             if (pattern.test(lines[i])) {
@@ -386,5 +740,10 @@ export class StructSizeCalculator {
         }
 
         return -1;
+    }
+
+    private getAggregateKind(line: string): AggregateKind {
+        const match = line.match(/\b(struct|class|union)\b/u);
+        return (match?.[1] as AggregateKind | undefined) ?? 'struct';
     }
 }

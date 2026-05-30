@@ -175,7 +175,7 @@ export function readFavoritesFromDisk(filePath: string, workspaceFolderPath?: st
     return { ok: true, entries };
 }
 
-export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTreeNode> {
+export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTreeNode>, vscode.Disposable {
     private _onDidChangeTreeData: vscode.EventEmitter<FavoriteTreeNode | undefined | null | void> = new vscode.EventEmitter<FavoriteTreeNode | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<FavoriteTreeNode | undefined | null | void> = this._onDidChangeTreeData.event;
     public view: vscode.TreeView<FavoriteTreeNode> | undefined;
@@ -198,6 +198,10 @@ export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTre
         this.loaded = true;
         this._onDidChangeTreeData.fire();
         this.updateTitle();
+    }
+
+    dispose(): void {
+        this._onDidChangeTreeData.dispose();
     }
 
     private updateTitle(): void {

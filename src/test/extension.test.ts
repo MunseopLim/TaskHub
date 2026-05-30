@@ -22,6 +22,7 @@ import {
 	deriveLinkTitleFromUrl,
 	createGroupedTaskPresentationOptions,
 	addLinkEntry,
+	removeLinkByIdentity,
 	addFavoriteEntry,
 	confirmDeleteHistoryItem,
 	confirmApplyPresetBackup,
@@ -1605,6 +1606,20 @@ suite('Extension Test Suite', () => {
 			const { entries, added } = addLinkEntry([], { title: '  Trim  ', link: '  https://trim.com  ', tags: ['tag'] } as any);
 			assert.strictEqual(added, true);
 			assert.deepStrictEqual(entries[0], { title: 'Trim', link: 'https://trim.com', tags: ['tag'] });
+		});
+
+		test('should remove only one matching link identity', () => {
+			const entries = [
+				{ title: 'Link', link: 'https://example.com' },
+				{ title: 'Link', link: 'https://example.com' },
+				{ title: 'Link', link: 'https://example.com', group: 'Docs' }
+			];
+			const result = removeLinkByIdentity(entries as any, entries[0] as any);
+			assert.strictEqual(result.length, 2);
+			assert.deepStrictEqual(result, [
+				{ title: 'Link', link: 'https://example.com' },
+				{ title: 'Link', link: 'https://example.com', group: 'Docs' }
+			]);
 		});
 	});
 

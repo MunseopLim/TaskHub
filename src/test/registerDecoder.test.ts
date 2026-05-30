@@ -73,6 +73,28 @@ suite('RegisterDecoder Test Suite', () => {
             assert.strictEqual(result.fields[0].bitPosition, '7:4');
         });
 
+        test('Extract full 32-bit field as unsigned', () => {
+            const definition: RegisterDefinition = {
+                name: 'FULL_REG',
+                totalBits: 32,
+                fields: [
+                    {
+                        name: 'VALUE',
+                        bitStart: 0,
+                        bitEnd: 31,
+                        bitWidth: 32
+                    }
+                ]
+            };
+
+            const result = decoder.decodeValue(0x80000001, definition);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.fields[0].value, 0x80000001);
+            assert.strictEqual(result.fields[0].hex, '0x80000001');
+            assert.strictEqual(result.fields[0].decimal, '2147483649');
+        });
+
         test('Extract field with specific value', () => {
             const definition: RegisterDefinition = {
                 name: 'TEST_REG',

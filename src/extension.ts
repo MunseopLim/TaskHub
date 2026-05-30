@@ -839,7 +839,7 @@ function publishDoctorDiagnostics(findings: DoctorFinding[]): void {
         const severity = f.severity === 'error'
             ? vscode.DiagnosticSeverity.Error
             : (f.severity === 'warning' ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Information);
-        const diag = new vscode.Diagnostic(new vscode.Range(start, end), f.message, severity);
+        const diag = new vscode.Diagnostic(new vscode.Range(start, end), t(f.messageKo ?? f.message, f.message), severity);
         diag.code = f.code;
         diag.source = 'TaskHub Doctor';
         const arr = byFile.get(f.filePath) ?? [];
@@ -1889,6 +1889,25 @@ export function addLinkEntry(entries: LinkEntry[], newEntry: LinkEntry): { entri
     }
     const normalized: LinkEntry = { ...newEntry, title: trimmedTitle, link: trimmedLink };
     return { entries: [...entries, normalized], added: true };
+}
+
+export function removeLinkByIdentity(entries: LinkEntry[], target: LinkEntry): LinkEntry[] {
+    let removed = false;
+    const targetTags = JSON.stringify(target.tags ?? []);
+    return entries.filter(entry => {
+        if (removed) {
+            return true;
+        }
+        const sameTitle = entry.title === target.title;
+        const sameLink = entry.link === target.link;
+        const sameGroup = (entry.group ?? null) === (target.group ?? null);
+        const sameTags = JSON.stringify(entry.tags ?? []) === targetTags;
+        if (sameTitle && sameLink && sameGroup && sameTags) {
+            removed = true;
+            return false;
+        }
+        return true;
+    });
 }
 
 /**
@@ -4175,10 +4194,23 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceLinkViewProvider = new LinkViewProvider();
     const favoriteViewProvider = new FavoriteViewProvider(context);
     const historyProvider = new HistoryProvider(context);
+    context.subscriptions.push(
+        mainViewProvider,
+        workspaceLinkViewProvider,
+        favoriteViewProvider,
+        historyProvider,
+        outputChannel,
+        new vscode.Disposable(() => {
+            previewOutputChannel?.dispose();
+            previewOutputChannel = undefined;
+        })
+    );
     const mainView = vscode.window.createTreeView('mainView.main', { treeDataProvider: mainViewProvider });
     context.subscriptions.push(mainView);
-    mainView.onDidExpandElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, true); } });
-    mainView.onDidCollapseElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, false); } });
+    context.subscriptions.push(
+        mainView.onDidExpandElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, true); } }),
+        mainView.onDidCollapseElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, false); } })
+    );
     workspaceLinkViewProvider.view = vscode.window.createTreeView('mainView.linkWorkspace', { treeDataProvider: workspaceLinkViewProvider });
     favoriteViewProvider.view = vscode.window.createTreeView('mainView.favorite', { treeDataProvider: favoriteViewProvider });
     historyProvider.view = vscode.window.createTreeView('mainView.history', { treeDataProvider: historyProvider });
@@ -4304,7 +4336,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openLink', async (url: string) => { await openExternalLinkSafely(url); }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', (item: Link) => { vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage(t('링크가 클립보드에 복사되었습니다.', 'Link copied to clipboard.')); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', async (item: Link) => { await vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage(t('링크가 클립보드에 복사되었습니다.', 'Link copied to clipboard.')); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.goToLink', async (item: Link) => { await openExternalLinkSafely(item.getLink()); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeAction', async (actionItem: Action) => {
         let allActions: ActionItem[];
@@ -4912,7 +4944,7 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
         const links = loadResult.entries;
-        const filtered = links.filter(link => !(link.title === target.title && link.link === target.link));
+        const filtered = removeLinkByIdentity(links, target);
         if (filtered.length === links.length) {
             return;
         }
@@ -5699,7 +5731,7 @@ export function activate(context: vscode.ExtensionContext) {
                     t('메모리 맵을 볼 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to view the memory map for')
                 );
                 workspaceFolder = picked?.uri.fsPath;
-                if (folders.length > 1 && !workspaceFolder) { return; }
+                if (!workspaceFolder) { return; }
             }
         }
         let memConfig: MemoryMapConfig | undefined;
@@ -5748,4 +5780,7 @@ export function deactivate() {
     actionDiagnosticCollections.clear();
     doctorDiagnosticCollection?.dispose();
     doctorDiagnosticCollection = undefined;
+    outputChannel.dispose();
+    previewOutputChannel?.dispose();
+    previewOutputChannel = undefined;
 }

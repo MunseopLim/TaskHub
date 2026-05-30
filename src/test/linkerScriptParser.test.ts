@@ -244,6 +244,63 @@ LR_IROM1 0x08000000 0x00100000 {
             assert.strictEqual(regions.length, 1);
             assert.strictEqual(regions[0].name, 'ER_IROM1');
         });
+
+        test('should keep execution region with same name as load region', () => {
+            const content = `
+SAME 0x08000000 0x00100000 {
+    SAME +0 0x00010000 {
+        .ANY (+RO)
+    }
+}
+`;
+            const regions = parseScatterFile(content);
+            assert.strictEqual(regions.length, 1);
+            assert.strictEqual(regions[0].name, 'SAME');
+            assert.strictEqual(regions[0].origin, 0x08000000);
+            assert.strictEqual(regions[0].size, 0x00010000);
+        });
+
+        test('should skip symbolic scatter sizes instead of misclassifying load regions', () => {
+            const content = `
+LR 0x08000000 0x00100000 {
+    ER_SYM +0 ImageLimit(ER_SYM) {
+        .ANY (+RO)
+    }
+    ER_OK 0x20000000 +0 {
+        .ANY (+RW)
+    }
+}
+`;
+            const regions = parseScatterFile(content);
+            assert.deepStrictEqual(regions, [{ name: 'ER_OK', origin: 0x20000000, size: 0 }]);
+        });
+
+        test('should skip +offset execution region when the load origin is symbolic', () => {
+            // The load region origin is a symbol, so the absolute address of a
+            // '+offset' execution region cannot be resolved — the region must be
+            // skipped rather than leaking the raw offset (0x10) as an absolute.
+            const content = `
+LR_SYM SymStart 0x100000 {
+    ER +0x10 0x1000 {
+        .ANY (+RO)
+    }
+}
+`;
+            const regions = parseScatterFile(content);
+            assert.deepStrictEqual(regions, []);
+        });
+
+        test('should resolve +offset execution region against a numeric load origin', () => {
+            const content = `
+LR 0x08000000 0x100000 {
+    ER +0x10 0x1000 {
+        .ANY (+RO)
+    }
+}
+`;
+            const regions = parseScatterFile(content);
+            assert.deepStrictEqual(regions, [{ name: 'ER', origin: 0x08000010, size: 0x1000 }]);
+        });
     });
 
     suite('parseLinkerFile', () => {

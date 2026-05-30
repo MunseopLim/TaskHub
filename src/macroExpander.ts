@@ -160,7 +160,7 @@ export class MacroExpander {
             const trimmed = line.trim();
 
             // Skip non-define lines
-            if (!trimmed.startsWith('#define')) {
+            if (!/^#define(?:\s|$)/.test(trimmed)) {
                 continue;
             }
 
@@ -253,7 +253,7 @@ export class MacroExpander {
                     return Math.floor(parseInt(num, 10) / Math.pow(2, s)).toString();
                 });
 
-                // Use Function constructor for safe evaluation
+                // The expression has already passed a strict numeric/operator whitelist above.
                 const result = new Function(`return ${cleaned}`)();
                 if (typeof result === 'number' && !isNaN(result)) {
                     return Math.floor(result);

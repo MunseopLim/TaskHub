@@ -203,6 +203,11 @@ suite('applyOutputCapture', () => {
         assert.deepStrictEqual(out, { sha: 'abc1234' });
     });
 
+    test('regex: strips global flag before matching', () => {
+        const out = applyOutputCapture('commit abc1234\n', { name: 'sha', regex: 'commit ([a-f0-9]+)', flags: 'g' });
+        assert.deepStrictEqual(out, { sha: 'abc1234' });
+    });
+
     test('regex: explicit group 0 returns full match', () => {
         const out = applyOutputCapture('value=42', { name: 'whole', regex: 'value=(\\d+)', group: 0 });
         assert.deepStrictEqual(out, { whole: 'value=42' });

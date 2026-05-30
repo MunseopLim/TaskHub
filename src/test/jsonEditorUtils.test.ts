@@ -227,6 +227,8 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.strictEqual(parseValue('true'), true);
             assert.strictEqual(parseValue('false'), false);
             assert.strictEqual(parseValue('42'), 42);
+            assert.strictEqual(parseValue('Infinity'), 'Infinity');
+            assert.strictEqual(parseValue('-Infinity'), '-Infinity');
             assert.strictEqual(parseValue('hello'), 'hello');
         });
     });
@@ -671,7 +673,7 @@ suite('JsonEditorUtils Test Suite', () => {
             const fixtures: string[] = [
                 '', 'null', 'true', 'false',
                 '0', '42', '-3.14', '00123',
-                ' ', '   ', 'hello', 'NaN',
+                ' ', '   ', 'hello', 'NaN', 'Infinity', '-Infinity',
                 '1e10', '0xFF', '  42  '
             ];
             for (const input of fixtures) {

@@ -110,6 +110,203 @@ suite('StructSizeCalculator Test Suite', () => {
         });
     });
 
+    suite('C aggregate edge cases', () => {
+        test('Calculate size with packed bit fields', () => {
+            const lines = [
+                'struct BitFields {',
+                '    uint32_t flags : 3;',
+                '    uint32_t mode : 5;',
+                '    uint8_t tail;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'BitFields');
+            const result = calculator.calculateStructSize('BitFields', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members.length, 3);
+            assert.strictEqual(result.members[0].offset, 0);
+            assert.strictEqual(result.members[1].offset, 0);
+            assert.strictEqual(result.members[2].offset, 4);
+            assert.strictEqual(result.totalSize, 8);
+        });
+
+        test('Zero-width anonymous bit fields force a new storage unit', () => {
+            const lines = [
+                'struct ZeroWidthBitFields {',
+                '    uint32_t flags : 3;',
+                '    uint32_t : 0;',
+                '    uint32_t mode : 4;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'ZeroWidthBitFields');
+            const result = calculator.calculateStructSize('ZeroWidthBitFields', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members.length, 3);
+            assert.strictEqual(result.members[0].offset, 0);
+            assert.strictEqual(result.members[1].offset, 4);
+            assert.strictEqual(result.members[1].size, 0);
+            assert.strictEqual(result.members[2].offset, 4);
+            assert.strictEqual(result.totalSize, 8);
+        });
+
+        test('Zero-width anonymous bit fields work inside comma declarators', () => {
+            const lines = [
+                'struct CommaZeroWidthBitFields {',
+                '    uint32_t flags : 3, : 0, mode : 4;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'CommaZeroWidthBitFields');
+            const result = calculator.calculateStructSize('CommaZeroWidthBitFields', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.deepStrictEqual(result.members.map(m => m.offset), [0, 4, 4]);
+            assert.strictEqual(result.totalSize, 8);
+        });
+
+        test('Calculate union size as the max member size', () => {
+            const lines = [
+                'union Value {',
+                '    uint32_t word;',
+                '    uint8_t bytes[4];',
+                '    uint16_t half;',
+                '};'
+            ];
+
+            const unionLine = StructSizeCalculator.findStructDefinition(lines, 'Value');
+            const result = calculator.calculateStructSize('Value', lines, unionLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.totalSize, 4);
+            assert.strictEqual(result.alignment, 4);
+            assert.deepStrictEqual(result.members.map(m => m.offset), [0, 0, 0]);
+        });
+
+        test('Calculate size with anonymous nested union member', () => {
+            const lines = [
+                'struct Packet {',
+                '    uint8_t tag;',
+                '    union {',
+                '        uint32_t word;',
+                '        uint8_t bytes[4];',
+                '    } payload;',
+                '    uint16_t crc;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'Packet');
+            const result = calculator.calculateStructSize('Packet', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members.length, 3);
+            assert.strictEqual(result.members[1].name, 'payload');
+            assert.strictEqual(result.members[1].offset, 4);
+            assert.strictEqual(result.members[1].size, 4);
+            assert.strictEqual(result.members[2].offset, 8);
+            assert.strictEqual(result.totalSize, 12);
+        });
+
+        test('Parse one-line multiple declarators', () => {
+            const lines = [
+                'struct MultiDecl {',
+                '    int a, b;',
+                '    char c;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'MultiDecl');
+            const result = calculator.calculateStructSize('MultiDecl', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.deepStrictEqual(result.members.map(m => m.name), ['a', 'b', 'c']);
+            assert.strictEqual(result.totalSize, 12);
+        });
+
+        test('Anonymous (unnamed) nested struct member is laid out as a sub-object', () => {
+            // C11 anonymous struct: gcc/clang sizeof === 12 (sub-object block),
+            // not 8. Regression guard — the block must not be dropped.
+            const lines = [
+                'struct AnonStruct {',
+                '    uint32_t x;',
+                '    struct {',
+                '        uint16_t a;',
+                '        uint16_t b;',
+                '    };',
+                '    uint32_t y;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'AnonStruct');
+            const result = calculator.calculateStructSize('AnonStruct', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members.length, 3);
+            assert.deepStrictEqual(result.members.map(m => m.offset), [0, 4, 8]);
+            assert.strictEqual(result.members[1].size, 4);
+            assert.strictEqual(result.totalSize, 12);
+        });
+
+        test('Anonymous (unnamed) nested union member overlaps, not concatenates', () => {
+            const lines = [
+                'struct AnonUnion {',
+                '    uint8_t tag;',
+                '    union {',
+                '        uint32_t w;',
+                '        uint8_t bytes[4];',
+                '    };',
+                '    uint16_t c;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'AnonUnion');
+            const result = calculator.calculateStructSize('AnonUnion', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members.length, 3);
+            assert.deepStrictEqual(result.members.map(m => m.offset), [0, 4, 8]);
+            assert.strictEqual(result.members[1].size, 4);
+            assert.strictEqual(result.totalSize, 12);
+        });
+
+        test('Hexadecimal array sizes are parsed', () => {
+            const lines = [
+                'struct HexArray {',
+                '    uint8_t buf[0x100];',
+                '    uint32_t len;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'HexArray');
+            const result = calculator.calculateStructSize('HexArray', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members[0].arraySize, 0x100);
+            assert.strictEqual(result.members[0].size, 0x100);
+            assert.strictEqual(result.members[1].offset, 0x100);
+            assert.strictEqual(result.totalSize, 0x104);
+        });
+
+        test('Hexadecimal array size works in a multi-declarator line', () => {
+            const lines = [
+                'struct HexMulti {',
+                '    int a[0x10], b;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'HexMulti');
+            const result = calculator.calculateStructSize('HexMulti', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.deepStrictEqual(result.members.map(m => m.name), ['a', 'b']);
+            assert.strictEqual(result.members[0].arraySize, 16);
+            assert.strictEqual(result.members[1].offset, 64);
+            assert.strictEqual(result.totalSize, 68);
+        });
+    });
+
     suite('Padding Calculation', () => {
         test('Calculate padding for struct alignment', () => {
             const lines = [

@@ -284,7 +284,8 @@ export type DiagnosticConfig =
  *
  * Selector precedence (first matching wins):
  *   1. `regex`  — match against the output and take capture `group` (default 1).
- *                 If `flags` is provided, it is passed to the RegExp constructor.
+ *                 If `flags` is provided, it is passed to the RegExp constructor
+ *                 after stripping `g` so capture groups remain available.
  *   2. `line`   — select one line by 0-based index. Negative values count from
  *                 the end (`-1` = last line).
  *   3. neither  — use the full output as-is.

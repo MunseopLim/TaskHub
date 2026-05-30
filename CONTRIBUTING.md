@@ -83,7 +83,7 @@ Extension Development Host로 실행하려면 로컬에 `.vscode/launch.json`을
 ### VSIX 패키지 빌드 및 설치
 
 ```bash
-vsce package            # TaskHub-<version>.vsix 생성
+npx @vscode/vsce package # TaskHub-<version>.vsix 생성
 ```
 
 생성된 `.vsix` 파일은 VS Code `Extensions: Install from VSIX...` 명령으로 설치해 실제 설치 환경과 동일하게 검증할 수 있습니다.

@@ -562,6 +562,14 @@ function getWebviewContent(
         return (GAP_BITMAP[Math.floor(offset / 8)] & (1 << (offset % 8))) !== 0;
     }
 
+    function hasDataRange(offset, size) {
+        if (offset < 0 || offset + size > TOTAL_SIZE) { return false; }
+        for (let i = 0; i < size; i++) {
+            if (!hasData(offset + i)) { return false; }
+        }
+        return true;
+    }
+
     let unitSize = 1;
     let endian = 'little';
     let selectedOffset = -1;
@@ -834,24 +842,30 @@ function getWebviewContent(
         const le = endian === 'little';
         const addr = BASE_ADDR + minOff;
         const selSize = maxOff - minOff + unitSize;
+        const dataSpan = Math.min(selSize, Math.max(0, TOTAL_SIZE - minOff));
+        const selectionHasData = dataSpan > 0 && hasDataRange(minOff, dataSpan);
         let html = '<span>Offset: 0x' + formatHex(minOff, 8) + '</span>';
         html += '<span>Address: ' + formatAddr(addr) + '</span>';
 
-        if (selSize === 1) {
-            const b = DATA[minOff];
-            html += '<span>Value: 0x' + formatHex(b, 2) + ' (' + b + ')</span>';
-        }
-        if (selSize >= 1) {
-            const u8 = DATA[minOff];
-            html += '<span>u8: ' + u8 + '</span>';
-        }
-        if (selSize >= 2 && minOff + 2 <= TOTAL_SIZE) {
-            const v = Number(readUnit(minOff, 2, le));
-            html += '<span>u16: 0x' + formatHex(v, 4) + ' (' + v + ')</span>';
-        }
-        if (selSize >= 4 && minOff + 4 <= TOTAL_SIZE) {
-            const v = Number(readUnit(minOff, 4, le));
-            html += '<span>u32: 0x' + formatHex(v, 8) + ' (' + v + ')</span>';
+        if (!selectionHasData) {
+            html += '<span>Value: no data</span>';
+        } else {
+            if (selSize === 1) {
+                const b = DATA[minOff];
+                html += '<span>Value: 0x' + formatHex(b, 2) + ' (' + b + ')</span>';
+            }
+            if (selSize >= 1 && hasDataRange(minOff, 1)) {
+                const u8 = DATA[minOff];
+                html += '<span>u8: ' + u8 + '</span>';
+            }
+            if (selSize >= 2 && minOff + 2 <= TOTAL_SIZE && hasDataRange(minOff, 2)) {
+                const v = Number(readUnit(minOff, 2, le));
+                html += '<span>u16: 0x' + formatHex(v, 4) + ' (' + v + ')</span>';
+            }
+            if (selSize >= 4 && minOff + 4 <= TOTAL_SIZE && hasDataRange(minOff, 4)) {
+                const v = Number(readUnit(minOff, 4, le));
+                html += '<span>u32: 0x' + formatHex(v, 8) + ' (' + v + ')</span>';
+            }
         }
         if (selSize > unitSize) {
             html += '<span>Selected: ' + selSize + ' bytes</span>';

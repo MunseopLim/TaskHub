@@ -1006,6 +1006,24 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             assert.strictEqual(result.afterValue, 4096); // 1 << 12 = 0x1000
         });
 
+        test('should calculate large shifts without JavaScript mod-32 wrapping', () => {
+            const operation: BitOperation = {
+                operator: BitOperationType.LEFT_SHIFT,
+                operand: 40,
+                leftOperand: 1,
+                isAssignment: false,
+                isConstant: true,
+                expression: '1 << 40',
+                start: 0,
+                end: 7
+            };
+
+            const result = calculateBitOperation(operation);
+
+            assert.strictEqual(result.beforeValue, 1);
+            assert.strictEqual(result.afterValue, Math.pow(2, 40));
+        });
+
         test('should calculate constant AND: 0xFF & 0x0F', () => {
             const operation: BitOperation = {
                 operator: BitOperationType.AND,

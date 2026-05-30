@@ -441,7 +441,7 @@ export class HistoryItem extends vscode.TreeItem {
         // as text so screen readers — which can't resolve icon color
         // into "succeeded" / "failed" — still receive parity with what
         // sighted users see.
-        const lang: 'ko' | 'en' = vscode.env.language === 'ko' ? 'ko' : 'en';
+        const lang: 'ko' | 'en' = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
         const now = Date.now();
         const badge = formatLastRunBadge(entry, now, lang);
         if (badge) {
@@ -469,7 +469,7 @@ export class HistoryItem extends vscode.TreeItem {
     }
 }
 
-export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem> {
+export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vscode.Disposable {
     private _onDidChangeTreeData: vscode.EventEmitter<HistoryItem | undefined | null | void> = new vscode.EventEmitter<HistoryItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<HistoryItem | undefined | null | void> = this._onDidChangeTreeData.event;
     public view: vscode.TreeView<HistoryItem> | undefined;
@@ -483,6 +483,10 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem> {
     refresh(): void {
         this._onDidChangeTreeData.fire();
         this.updateTitle();
+    }
+
+    dispose(): void {
+        this._onDidChangeTreeData.dispose();
     }
 
     private updateTitle(): void {

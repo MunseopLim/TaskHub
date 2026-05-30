@@ -365,6 +365,7 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 결과는 `TaskHub Preview` 출력 채널에 표시되며 다음을 포함합니다:
 
 - 각 태스크의 해석된 `command` / `args` / `cwd` / `env`
+- `parallel: true` 태스크 헤더의 `[parallel]` 마커
 - `output.filePath`의 해석값과 **워크스페이스 외부 쓰기 경고**
 - 선언된 `capture` 규칙 목록 (downstream에서 참조되는 변수명 표시)
 - 상류 태스크 결과는 `<fileDialog:id:path>` 같은 placeholder로 시뮬레이션되어 변수 연결 확인 가능
@@ -1018,7 +1019,7 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
     *   휴지통 아이콘: 개별 히스토리 항목을 삭제합니다 (v0.4.33부터 modal 확인 대화상자 표시 — `Delete Favorite` / `Delete Link`와 같은 보호 수준).
 *   **전체 히스토리 삭제**: 패널 제목 표시줄의 버튼을 클릭하여 모든 히스토리를 한 번에 삭제할 수 있습니다 (확인 대화상자 표시).
 *   **자동 제한**: 히스토리는 설정된 최대 개수까지만 유지되며, 초과 시 가장 오래된 항목부터 자동으로 삭제됩니다 (기본값: 10개).
-*   **패널 표시/숨김**: 설정에서 히스토리 패널을 숨길 수 있으며, `TaskHub: Show History Panel` 명령으로 다시 표시할 수 있습니다.
+*   **패널 표시/숨김**: 설정에서 히스토리 패널을 숨길 수 있으며, `TaskHub: Toggle History Panel` 명령으로 표시/숨김을 전환할 수 있습니다.
 
 ## 15. C/C++ Hover 기능
 
@@ -1806,7 +1807,7 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 
 ### 23.5. 구현 메모
 
-핵심 분석 로직은 `vscode`에 의존하지 않는 순수 모듈([src/doctor.ts](../src/doctor.ts))에 있고, 익스텐션 레이어는 (1) 워크스페이스/preset/번들 actions.json을 모두 모아 `DoctorInput[]`을 만들고 (2) 결과 `DoctorFinding[]`을 `vscode.Diagnostic`으로 변환해 publish 하는 두 역할만 합니다. AJV validator는 함수 파라미터로 주입되므로 같은 검사를 단위 테스트에서 그대로 돌릴 수 있습니다 — `src/test/doctor.test.ts`가 22개 케이스로 모든 finding code를 커버합니다.
+핵심 분석 로직은 `vscode`에 의존하지 않는 순수 모듈([src/doctor.ts](../src/doctor.ts))에 있고, 익스텐션 레이어는 (1) 워크스페이스/preset/번들 actions.json을 모두 모아 `DoctorInput[]`을 만들고 (2) 결과 `DoctorFinding[]`을 `vscode.Diagnostic`으로 변환해 publish 하는 두 역할만 합니다. AJV validator는 함수 파라미터로 주입되므로 같은 검사를 단위 테스트에서 그대로 돌릴 수 있습니다 — `src/test/doctor.test.ts`가 모든 finding code를 커버합니다.
 
 ## 24. 병렬 실행 / Task DAG
 

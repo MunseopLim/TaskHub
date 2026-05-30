@@ -102,7 +102,8 @@ export function applyOutputCapture(
         if (typeof rule.regex === 'string' && rule.regex.length > 0) {
             let re: RegExp;
             try {
-                re = new RegExp(rule.regex, rule.flags ?? '');
+                const flags = (rule.flags ?? '').replace(/g/g, '');
+                re = new RegExp(rule.regex, flags);
             } catch (e: any) {
                 throw new Error(`Capture '${name}' has invalid regex: ${e.message}`);
             }

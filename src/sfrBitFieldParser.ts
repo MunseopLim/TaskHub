@@ -270,10 +270,11 @@ export interface ScopeInfo {
 export function extractHierarchy(lines: string[], startLine: number): ScopeInfo[] {
     const scopes: ScopeInfo[] = [];
     let braceDepth = 0; // Track brace depth as we scan backward
+    const scanLines = sanitizeLinesForScopeScan(lines);
 
     // Scan backward from startLine
     for (let i = startLine; i >= 0; i--) {
-        const line = lines[i];
+        const line = scanLines[i];
 
         // When scanning backward, we need to process characters in reverse order too
         for (let j = line.length - 1; j >= 0; j--) {
@@ -284,7 +285,7 @@ export function extractHierarchy(lines: string[], startLine: number): ScopeInfo[
                 if (braceDepth === 0) {
                     // Found opening brace at current scope level
                     // This is a scope boundary, find its declaration
-                    const scopeInfo = findScopeDeclaration(lines, i);
+                    const scopeInfo = findScopeDeclaration(scanLines, i);
                     if (scopeInfo) {
                         scopes.unshift(scopeInfo); // Add to beginning (outermost first)
                     }
@@ -296,6 +297,58 @@ export function extractHierarchy(lines: string[], startLine: number): ScopeInfo[
     }
 
     return scopes;
+}
+
+function sanitizeLinesForScopeScan(lines: string[]): string[] {
+    const sanitized: string[] = [];
+    let inBlockComment = false;
+    for (const line of lines) {
+        let out = '';
+        let inString: '"' | '\'' | null = null;
+        for (let i = 0; i < line.length; i++) {
+            const ch = line[i];
+            const next = i + 1 < line.length ? line[i + 1] : '';
+            if (inBlockComment) {
+                if (ch === '*' && next === '/') {
+                    inBlockComment = false;
+                    out += '  ';
+                    i++;
+                } else {
+                    out += ' ';
+                }
+                continue;
+            }
+            if (inString) {
+                if (ch === '\\') {
+                    out += ' ';
+                    i++;
+                    if (i < line.length) { out += ' '; }
+                    continue;
+                }
+                if (ch === inString) { inString = null; }
+                out += ' ';
+                continue;
+            }
+            if (ch === '/' && next === '/') {
+                out += ' '.repeat(line.length - i);
+                break;
+            }
+            if (ch === '/' && next === '*') {
+                inBlockComment = true;
+                out += '  ';
+                i++;
+                continue;
+            }
+            if (ch === '"' || ch === '\'') {
+                inString = ch;
+                out += ' ';
+                continue;
+            }
+            out += ch;
+        }
+        sanitized.push(out);
+    }
+    return sanitized;
 }
 
 // Patterns for class/struct/union/namespace declarations (module-level to avoid recompilation per call)

@@ -173,7 +173,7 @@ export function parseValue(str: string): unknown {
     if (str === 'true') { return true; }
     if (str === 'false') { return false; }
     const num = Number(str);
-    if (!isNaN(num) && str.trim() !== '') { return num; }
+    if (Number.isFinite(num) && str.trim() !== '') { return num; }
     return str;
 }
 

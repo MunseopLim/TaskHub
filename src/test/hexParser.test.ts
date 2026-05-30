@@ -733,12 +733,37 @@ suite('HexParser Test Suite', () => {
                 'jumpToOffset 의 cell querySelector 가 unit-aligned 로 보정되어야 함'
             );
         });
+
+        test('webview HTML 의 status bar 가 gap bitmap 을 확인한다', () => {
+            const result = parseIntelHex([
+                ':01000000AA55',
+                ':01000200BB42',
+                ':00000001FF'
+            ].join('\n'));
+            const html = buildHexViewerHtml('sparse.hex', result);
+            assert.ok(html.includes('function hasDataRange(offset, size)'));
+            assert.ok(html.includes('Value: no data'));
+            assert.ok(html.includes('hasDataRange(minOff, 2)'));
+            assert.ok(html.includes('hasDataRange(minOff, 4)'));
+        });
     });
 
     suite('defensive limits', () => {
         test('parseIntelHex should ignore data records with invalid byteCount', () => {
             // byteCount field 'ZZ' is NaN; the record must be skipped without throwing.
             const result = parseIntelHex(':ZZ000000000000\n:00000001FF');
+            assert.strictEqual(result.byteCount, 0);
+        });
+
+        test('parseIntelHex should ignore truncated records before reading checksum as data', () => {
+            // Declares two data bytes but only contains the checksum byte.
+            const result = parseIntelHex(':02000000FE\n:00000001FF');
+            assert.strictEqual(result.byteCount, 0);
+        });
+
+        test('parseSrec should ignore truncated records before reading checksum as data', () => {
+            // Declares one data byte but only contains address + checksum.
+            const result = parseSrec('S1040000FB');
             assert.strictEqual(result.byteCount, 0);
         });
 

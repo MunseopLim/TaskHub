@@ -37,6 +37,7 @@ import {
 import {
     simulateTaskResult,
     findUnresolved,
+    findTypoRefs,
     isInsideWorkspace,
     placeholder,
     UNRESOLVED_VAR_RE,
@@ -56,6 +57,7 @@ export interface DoctorFinding {
     severity: 'error' | 'warning' | 'info';
     code: string;
     message: string;
+    messageKo?: string;
 }
 
 export interface DoctorInput {
@@ -114,6 +116,7 @@ function analyzeFile(input: DoctorInput, validator: DoctorValidator): DoctorFind
             severity: 'error',
             code: 'json.parse',
             message: `Invalid JSON: ${e.message ?? String(e)}`,
+            messageKo: `JSON 파싱 실패: ${e.message ?? String(e)}`,
         });
         return findings;
     }
@@ -195,6 +198,7 @@ function ajvErrorToFinding(
         severity: 'error',
         code: `schema.${err.keyword ?? 'invalid'}`,
         message: `Schema: ${pathDisplay} — ${detail}`,
+        messageKo: `스키마 위반: ${pathDisplay} — ${detail}`,
     };
 }
 
@@ -426,14 +430,18 @@ function skipToTopLevelComma(text: string, from: number, closeCh: string): numbe
  * source — used by checks where we know the offending action/task by id
  * but cannot afford a full pointer walk. Falls back to {1,1} on miss.
  */
-function findIdLine(text: string, id: string): DoctorFinding['range'] {
+function findIdLine(text: string, id: string, occurrence = 0): DoctorFinding['range'] {
     const escaped = id.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
-    const re = new RegExp(`"id"\\s*:\\s*"${escaped}"`);
-    const m = re.exec(text);
-    if (!m) {
-        return { ...DEFAULT_RANGE };
+    const re = new RegExp(`"id"\\s*:\\s*"${escaped}"`, 'g');
+    let m: RegExpExecArray | null;
+    let seen = 0;
+    while ((m = re.exec(text)) !== null) {
+        if (seen === occurrence) {
+            return offsetToRange(text, m.index);
+        }
+        seen++;
     }
-    return offsetToRange(text, m.index);
+    return { ...DEFAULT_RANGE };
 }
 
 function checkDuplicateIds(actions: ActionItem[], input: DoctorInput): DoctorFinding[] {
@@ -448,10 +456,11 @@ function checkDuplicateIds(actions: ActionItem[], input: DoctorInput): DoctorFin
                     findings.push({
                         filePath: input.filePath,
                         sourceLabel: input.sourceLabel,
-                        range: findIdLine(input.rawText, item.id),
+                        range: findIdLine(input.rawText, item.id, count),
                         severity: 'error',
                         code: 'duplicate.action.id',
                         message: `Duplicate action id '${item.id}' — every action in a single source must have a unique id.`,
+                        messageKo: `중복 action id '${item.id}' — 하나의 소스 안에서 모든 action id는 고유해야 합니다.`,
                     });
                 }
                 seenActionIds.set(item.id, count + 1);
@@ -468,10 +477,11 @@ function checkDuplicateIds(actions: ActionItem[], input: DoctorInput): DoctorFin
                         findings.push({
                             filePath: input.filePath,
                             sourceLabel: input.sourceLabel,
-                            range: findIdLine(input.rawText, task.id),
+                            range: findIdLine(input.rawText, task.id, count),
                             severity: 'error',
                             code: 'duplicate.task.id',
                             message: `Action '${item.id ?? '(unknown)'}' has duplicate task id '${task.id}'.`,
+                            messageKo: `Action '${item.id ?? '(unknown)'}'에 중복 task id '${task.id}'가 있습니다.`,
                         });
                     }
                     taskIds.set(task.id, count + 1);
@@ -515,6 +525,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                             severity: 'error',
                             code: 'capture.reserved',
                             message: `Capture name '${rule.name}' in task '${item.id}.${task.id}' is reserved (it would shadow the built-in task result key). Pick a different name.`,
+                            messageKo: `Task '${item.id}.${task.id}'의 capture name '${rule.name}'은 예약어입니다. 기본 task 결과 키를 가리므로 다른 이름을 사용하세요.`,
                         });
                     } else if (seenNames.has(rule.name)) {
                         findings.push({
@@ -524,6 +535,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                             severity: 'error',
                             code: 'capture.duplicate',
                             message: `Duplicate capture name '${rule.name}' in task '${item.id}.${task.id}'. Each capture in one task must have a unique name.`,
+                            messageKo: `Task '${item.id}.${task.id}'에 중복 capture name '${rule.name}'이 있습니다. 한 task 안의 capture 이름은 고유해야 합니다.`,
                         });
                     } else {
                         seenNames.add(rule.name);
@@ -535,7 +547,8 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                 }
                 let re: RegExp;
                 try {
-                    re = new RegExp(rule.regex, rule.flags ?? '');
+                    const flags = (rule.flags ?? '').replace(/g/g, '');
+                    re = new RegExp(rule.regex, flags);
                 } catch (e: any) {
                     findings.push({
                         filePath: input.filePath,
@@ -544,6 +557,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                         severity: 'error',
                         code: 'capture.regex',
                         message: `Task '${item.id}.${task.id}' capture '${rule.name}' has invalid regex: ${e.message ?? e}`,
+                        messageKo: `Task '${item.id}.${task.id}' capture '${rule.name}'의 정규식이 올바르지 않습니다: ${e.message ?? e}`,
                     });
                     continue;
                 }
@@ -552,7 +566,8 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                 // for the compiled regex. Cheap probe: an always-empty
                 // match exposes the capture count via `m.length - 1`.
                 if (typeof rule.group === 'number') {
-                    const probe = new RegExp(`(?:${rule.regex})|(?=)`, rule.flags ?? '').exec('');
+                    const flags = (rule.flags ?? '').replace(/g/g, '');
+                    const probe = new RegExp(`(?:${rule.regex})|(?=)`, flags).exec('');
                     const groupCount = probe ? probe.length - 1 : 0;
                     if (rule.group < 0 || rule.group > groupCount) {
                         findings.push({
@@ -562,6 +577,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                             severity: 'warning',
                             code: 'capture.group',
                             message: `Capture '${rule.name}' in task '${item.id}.${task.id}' refers to group ${rule.group}, but the regex defines ${groupCount} capture group(s).`,
+                            messageKo: `Task '${item.id}.${task.id}'의 capture '${rule.name}'이 그룹 ${rule.group}을 참조하지만, 정규식에는 capture group이 ${groupCount}개만 있습니다.`,
                         });
                     }
                 }
@@ -582,6 +598,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                         severity: 'error',
                         code: 'diagnostics.preset',
                         message: `Task '${item.id}.${task.id}' diagnostics: ${e.message ?? e}`,
+                        messageKo: `Task '${item.id}.${task.id}' diagnostics 설정 오류: ${e.message ?? e}`,
                     });
                     continue;
                 }
@@ -613,6 +630,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                                 severity: 'warning',
                                 code: 'diagnostics.group',
                                 message: `Task '${item.id}.${task.id}' diagnostics: '${String(field)}' refers to group ${value}, but the regex defines ${groupCount} capture group(s).`,
+                                messageKo: `Task '${item.id}.${task.id}' diagnostics의 '${String(field)}'가 그룹 ${value}을 참조하지만, 정규식에는 capture group이 ${groupCount}개만 있습니다.`,
                             });
                         }
                     }
@@ -625,6 +643,7 @@ function checkRegexAndCaptureGroups(actions: ActionItem[], input: DoctorInput): 
                         severity: 'error',
                         code: 'diagnostics.regex',
                         message: `Task '${item.id}.${task.id}' diagnostics has invalid regex: ${e.message ?? e}`,
+                        messageKo: `Task '${item.id}.${task.id}' diagnostics 정규식이 올바르지 않습니다: ${e.message ?? e}`,
                     });
                 }
             }
@@ -759,14 +778,17 @@ function analyzeActionTasks(
             }
         }
         const unresolved = findUnresolved(interpolated, forwardTaskIds);
-        if (unresolved.length > 0) {
+        const typos = findTypoRefs(task, allResults, task.id);
+        const merged = Array.from(new Set([...unresolved, ...typos]));
+        if (merged.length > 0) {
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
                 range: findIdLine(input.rawText, task.id),
                 severity: 'warning',
                 code: 'variable.unresolved',
-                message: `Task '${item.id}.${task.id}' has unresolved variable(s) under simulated inputs: ${unresolved.join(', ')}. At runtime these pass through as literal '\${…}'.`,
+                message: `Task '${item.id}.${task.id}' has unresolved variable(s) under simulated inputs: ${merged.join(', ')}. At runtime these pass through as literal '\${…}'.`,
+                messageKo: `Task '${item.id}.${task.id}'에 시뮬레이션 입력으로 해석되지 않는 변수 참조가 있습니다: ${merged.join(', ')}. 런타임에서는 리터럴 '\${…}'로 전달됩니다.`,
             });
         }
 
@@ -796,6 +818,7 @@ function analyzeActionTasks(
                     severity: 'error',
                     code: 'path.outside-workspace',
                     message: `Task '${item.id}.${task.id}' ${kind} resolves to '${resolved}', outside the workspace. The runtime will refuse to write here.`,
+                    messageKo: `Task '${item.id}.${task.id}'의 ${kind}가 워크스페이스 밖 '${resolved}'로 해석됩니다. 런타임은 이 위치 쓰기를 거부합니다.`,
                 });
             }
         }
@@ -863,6 +886,7 @@ function analyzeDependsOn(
                     severity: 'error',
                     code: 'dependsOn.self',
                     message: `Task '${item.id}.${task.id}' depends on itself.`,
+                    messageKo: `Task '${item.id}.${task.id}'가 자기 자신에 의존합니다.`,
                 });
                 continue;
             }
@@ -874,6 +898,7 @@ function analyzeDependsOn(
                     severity: 'error',
                     code: 'dependsOn.missing',
                     message: `Task '${item.id}.${task.id}' depends on unknown task id '${dep}'.`,
+                    messageKo: `Task '${item.id}.${task.id}'가 존재하지 않는 task id '${dep}'에 의존합니다.`,
                 });
             }
         }
@@ -889,6 +914,7 @@ function analyzeDependsOn(
             severity: 'error',
             code: 'dependsOn.cycle',
             message: `Task dependency cycle in action '${item.id}' (includes auto-inferred deps from \${id.x} references): ${cycle.join(' -> ')}.`,
+            messageKo: `Action '${item.id}'에 task 의존성 순환이 있습니다(\${id.x} 참조에서 자동 추론된 의존성 포함): ${cycle.join(' -> ')}.`,
         });
     }
 }
@@ -913,6 +939,7 @@ function checkParallelInteractive(actions: ActionItem[], input: DoctorInput): Do
             severity: 'warning',
             code: 'parallel.interactive',
             message: `Task '${item.id}.${task.id}' is '${task.type}' with 'parallel: true', but interactive prompts are serialized at runtime via a UI mutex — concurrent execution does not apply to the dialog itself. Remove 'parallel: true' or move the interactive prompt out of the parallel pool.`,
+            messageKo: `Task '${item.id}.${task.id}'는 '${task.type}' 타입인데 'parallel: true'가 설정되어 있습니다. 런타임은 UI mutex로 interactive prompt를 직렬화하므로 대화상자 자체에는 병렬 실행이 적용되지 않습니다. 'parallel: true'를 제거하거나 interactive prompt를 병렬 구간 밖으로 옮기세요.`,
         });
     });
     return findings;

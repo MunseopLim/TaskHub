@@ -29,6 +29,43 @@
 =====================================================================
 -->
 
+## [0.6.0] - 2026-05-30
+
+### 수정 / 추가 — 전체 코드 리뷰 반영 (호버 정확성 · 파싱 견고성 · i18n · UX)
+
+#### High (데이터 손실 / 신뢰 손상)
+
+- **레지스터 디코더 32비트 필드 부호 오류**: `[31:0]` 전체 필드의 최상위 비트가 셋이면 `&` 연산이 부호 있는 32비트로 떨어져 호버에 음수(`0x-7FFFFFFF`)로 노출되던 문제. `>>> 0` 정규화로 unsigned 값을 표시. 참조: [src/registerDecoder.ts](src/registerDecoder.ts).
+- **구조체 크기 계산 — 비트필드 / union / 익명 중첩 / 16진 배열**: `uint32_t flags : 3;` 비트필드, `union`(max가 아닌 합으로 계산되던 것), 익명 중첩 struct·union 멤버, `buf[0x100]` 같은 16진 배열 크기가 누락·오계산되어 잘못된 `sizeof`를 표시하던 문제를 GCC/clang 시맨틱에 맞게 재작성. C11 익명(이름 없는) 멤버는 sub-object 블록으로 배치. 참조: [src/structSizeCalculator.ts](src/structSizeCalculator.ts).
+- **JSON Editor 숫자 손실**: `Infinity` / `-Infinity` 입력이 저장 라운드트립에서 `null`로 사라지던 것 → 문자열로 보존. 저장 데이터 누락 시 `'undefined'`가 디스크에 기록되던 경로 차단. 참조: [src/jsonEditor.ts](src/jsonEditor.ts), [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts).
+
+#### Medium (정확성 / 견고성)
+
+- **비트 시프트 호버 32비트 wrap**: `1 << 40`이 JS mod-32 규칙으로 256으로 표시되던 것 → `Math.pow(2, n)` 기반으로 실제 값 계산, `macroExpander`와 일치. 비트 위치 표시 임계값도 `MAX_SAFE_INTEGER`로 통일. 참조: [src/numberBaseHoverProvider.ts](src/numberBaseHoverProvider.ts).
+- **HEX / SREC 파싱 견고성**: 선언 byteCount 대비 라인 길이를 검증하지 않아 잘린 레코드의 NaN 바이트가 뷰에 섞이던 문제. 길이·체크섬·바이트 단위 가드 추가. 참조: [src/hexParser.ts](src/hexParser.ts).
+- **ELF 파싱 경계 검증**: `phEntSize` 최소 크기, `symtabLink` 섹션 범위, 문자열 테이블 오프셋의 파일 크기 초과를 검증해 손상 ELF에서 throw. 참조: [src/elfParser.ts](src/elfParser.ts).
+- **스캐터 파일 파싱**: 16진수 없는 실행 영역(`+0`)·동명 로드/실행 영역이 누락·오분류되던 문제 수정. base를 알 수 없는 심볼릭 로드 영역의 `+offset`은 raw 값을 절대주소로 노출하지 않고 생략. 참조: [src/linkerScriptParser.ts](src/linkerScriptParser.ts).
+- **출력 캡처 정규식 `g` 플래그**: `output.capture` 런타임 경로가 `g` 플래그를 제거하지 않아 캡처 그룹 대신 매치 배열을 반환하던 문제. 참조: [src/pipelineUtils.ts](src/pipelineUtils.ts).
+- **Preview Run / Doctor 일관성**: `envPick` 태스크가 Preview에서 거짓 unresolved 경고·`(unknown task type)`로 표시되던 것 수정. Doctor가 `.output` 폴백 producer의 오타 참조를 잡아내고, 중복 id 진단이 정확한 위치를 가리킴. 참조: [src/previewRun.ts](src/previewRun.ts), [src/doctor.ts](src/doctor.ts).
+- **HTML 저장 침묵 실패**: 메모리 맵 HTML 저장 실패가 미처리 예외로 조용히 사라지던 것 → try/catch + 안내 메시지. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts).
+- **매크로 접두 오인식**: `#defineFOO`가 `#define`으로 통과되던 것 차단. 참조: [src/macroExpander.ts](src/macroExpander.ts).
+- **SFR 스코프 스캔**: 문자열/주석 안의 중괄호를 무시하지 않아 스코프 감지가 어긋나던 backward brace 스캔 보강. 참조: [src/sfrBitFieldParser.ts](src/sfrBitFieldParser.ts).
+
+#### UX / 일관성
+
+- **Hex 상태바 gap 표시**: 데이터 없는 오프셋에서 fill 바이트를 실제 값처럼 보여주던 것 → `Value: no data`로 명확화. 참조: [src/hexViewer.ts](src/hexViewer.ts).
+- **링크 삭제 정확성**: 제목·URL이 같은 중복 링크 중 다른 항목까지 삭제될 수 있던 것 → 정체성(title/link/group/tags) 일치 항목 하나만 삭제. 참조: [src/extension.ts](src/extension.ts) `removeLinkByIdentity`.
+- **액션 로드 실패 토스트 스팸 억제**: 파일 감시 연속 발화 시 동일 에러 토스트가 누적되던 것 → 동일 메시지는 1회만. 참조: [src/providers/mainViewProvider.ts](src/providers/mainViewProvider.ts).
+- **명령 이름 정정**: `TaskHub: Show History Panel` → `Toggle History Panel`(실제 토글 동작과 일치). 참조: [package.json](package.json).
+- **i18n 보강**: Doctor 진단 메시지(Problems 패널)·파일 열기 다이얼로그 라벨·메모리 맵 안내 문구를 한국어/영어 두 벌로 제공. 히스토리 배지 로케일 판별을 `startsWith('ko')`로 통일해 `ko-KR`에서도 한국어 표시. Preview에 `[parallel]` 마커 노출. 참조: [src/doctor.ts](src/doctor.ts), [src/memoryMapViewer.ts](src/memoryMapViewer.ts), [src/providers/historyProvider.ts](src/providers/historyProvider.ts).
+- **자원 정리**: TreeDataProvider 4종 및 출력 채널을 `context.subscriptions`/`deactivate`에서 dispose. 클립보드 복사를 `await` 후 성공 토스트. 참조: [src/extension.ts](src/extension.ts).
+
+#### 문서
+
+- `docs/architecture.md` 모듈 트리에 `doctor.ts`·`previewOpener.ts`·`diagnosticMatcher.ts` 추가, Built-in 링크 잔재 및 아이콘 설명 정정, Task DAG 항목 반영. `CLAUDE.md` i18n 판별 규칙(`startsWith`), `CONTRIBUTING.md` VSIX 절차(`npx @vscode/vsce`), `examples/README.md` 중복 산문 제거(매핑 표만 유지).
+
+**테스트**: 신규 26 케이스, 최종 1364 passing.
+
 ## [0.5.2] - 2026-05-28
 
 ### 변경 — Built-in Links 패널 제거 + 단일 워크스페이스 링크 뷰로 일원화
@@ -169,7 +206,7 @@
 
 `TaskHub: Doctor — Lint Actions` 단일 커맨드로 모든 `actions.json` 소스(번들 + 선택된 preset + 워크스페이스별 `.vscode/actions.json`)를 한 번에 정적 분석해 VS Code Problems 패널에 게시한다. Preview Run([docs/features.md](docs/features.md) §5)이 *한 액션*의 실행 시뮬레이션이라면 Doctor는 *모든 소스*의 건강검진 — 1.2 tasks.json Import 이후 들어온 사용자의 첫 마찰점("왜 안 돼?")을 액션을 실제 실행하기 전에 짚기 위해 도입한다. 진단 컬렉션은 `taskhub-doctor` source로 분리되어 있어 액션 실행 중 Problem Matcher가 만들어내는 진단(`taskhub:<actionId>`)과 섞이지 않는다. 참조: [src/doctor.ts](src/doctor.ts), [src/extension.ts](src/extension.ts) `taskhub.doctor`, [docs/features.md §23](docs/features.md#23-taskhub-doctor-action-lint).
 
-#### 검사 항목 (7종)
+#### 검사 항목 (9종)
 
 - **JSON 파싱 실패** (`json.parse`): JS 엔진이 보고한 오프셋을 라인/컬럼으로 환산.
 - **JSON 스키마 위반** (`schema.*`): 기존 AJV validator([src/extension.ts](src/extension.ts) `getActionsValidator`)를 그대로 재사용. `keyword`에 따라 `schema.required` / `schema.enum` / `schema.additionalProperties` 등으로 코드 세분화. JSON Pointer를 라인/컬럼으로 매핑하는 자체 워커(`locateJsonPointer`)가 해당 노드까지 추적.

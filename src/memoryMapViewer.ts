@@ -57,7 +57,7 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
         const listUri = await vscode.window.showOpenDialog({
             canSelectMany: false,
             filters: { 'ARM Linker Listing': ['txt'] },
-            openLabel: 'Select Linker Listing'
+            openLabel: t('Linker Listing 선택', 'Select Linker Listing')
         });
         if (!listUri || listUri.length === 0) { return; }
         const filePath = listUri[0].fsPath;
@@ -74,7 +74,7 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
     const fileUri = await vscode.window.showOpenDialog({
         canSelectMany: false,
         filters: { 'ARM Executable': ['axf', 'elf', 'out'] },
-        openLabel: 'Select AXF/ELF file'
+        openLabel: t('AXF/ELF 파일 선택', 'Select AXF/ELF file')
     });
     if (!fileUri || fileUri.length === 0) { return; }
 
@@ -93,7 +93,7 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
             const linkerUri = await vscode.window.showOpenDialog({
                 canSelectMany: false,
                 filters: { 'Linker Script': ['ld', 'lds', 'lcf', 'sct'] },
-                openLabel: 'Select Linker Script'
+                openLabel: t('링커 스크립트 선택', 'Select Linker Script')
             });
             if (linkerUri && linkerUri.length > 0) {
                 try {
@@ -303,12 +303,19 @@ function showPanel(
                 filters: { 'HTML': ['html'] },
             });
             if (uri) {
-                // Remove VS Code API script calls and make standalone
-                let html = message.html as string;
-                html = html.replace(/const vscode = acquireVsCodeApi\(\);?\s*/g, '');
-                html = html.replace(/vscode\.postMessage\(\{[^}]*\}\);?\s*/g, '');
-                fs.writeFileSync(uri.fsPath, `<!DOCTYPE html>\n${html}`, 'utf-8');
-                vscode.window.showInformationMessage(t('HTML 파일이 저장되었습니다.', 'HTML file saved.'));
+                try {
+                    // Remove VS Code API script calls and make standalone
+                    let html = typeof message.html === 'string' ? message.html : '';
+                    html = html.replace(/const vscode = acquireVsCodeApi\(\);?\s*/g, '');
+                    html = html.replace(/vscode\.postMessage\(\{[^}]*\}\);?\s*/g, '');
+                    fs.writeFileSync(uri.fsPath, `<!DOCTYPE html>\n${html}`, 'utf-8');
+                    vscode.window.showInformationMessage(t('HTML 파일이 저장되었습니다.', 'HTML file saved.'));
+                } catch (e: any) {
+                    vscode.window.showErrorMessage(t(
+                        `HTML 파일 저장 실패: ${e.message}`,
+                        `Failed to save HTML file: ${e.message}`
+                    ));
+                }
             }
         }
     });
@@ -794,15 +801,15 @@ function getWebviewContent(
     ${hasRegions ? `
         <div class="section-heading">Memory Regions</div>
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
-        ${!hasLinkerData && !hasSymbols ? '<div class="info-note">AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.</div>' : ''}
-        ${hasSymbols ? '<div class="info-note">ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.</div>' : ''}
+        ${!hasLinkerData && !hasSymbols ? `<div class="info-note">${t('AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.', 'AXF/ELF files provide section-level information only. Use an ARM Linker Listing file for object-level analysis and linker-reported values.')}</div>` : ''}
+        ${hasSymbols ? `<div class="info-note">${t('ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.', 'Function and variable details are extracted from the ELF symbol table. Program-header based automatic region detection was applied.')}</div>` : ''}
         <div class="section-heading">Region Details<span id="regMatchInfo"></span> <button data-action="toggle-all" id="toggleAllBtn" title="Expand All">▼ Expand All</button>${hasFuncData ? ' <button data-action="toggle-func-col" title="Toggle Function column">Function ▶</button>' : ''}</div>
         ${regionCardsHtml}
     ` : `
         <div class="no-regions">
-            Memory region sizes not configured. To see usage bars, either:<br>
-            - Run this command again and select a linker script (.ld / .sct)<br>
-            - Or add <code>memoryMap.regions</code> to <code>.vscode/taskhub_types.json</code>
+            ${t('메모리 영역 크기가 설정되지 않았습니다. 사용량 막대를 보려면:', 'Memory region sizes are not configured. To see usage bars:')}<br>
+            - ${t('이 명령을 다시 실행하고 링커 스크립트(.ld / .sct)를 선택하세요', 'Run this command again and select a linker script (.ld / .sct)')}<br>
+            - ${t('또는', 'Or add')} <code>memoryMap.regions</code> ${t('설정을', 'to')} <code>.vscode/taskhub_types.json</code>${t('에 추가하세요', '')}
         </div>
     `}
 

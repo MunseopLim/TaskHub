@@ -107,6 +107,7 @@ export interface ElfParseResult {
 }
 
 const ELF32_HEADER_SIZE = 52;
+const ELF32_PH_ENTRY_MIN = 32;
 const ELF32_SH_ENTRY_MIN = 40;
 const ELF_MAX_ENTRIES = 65535;
 
@@ -162,6 +163,9 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
 
     if (shOff === 0 || shNum === 0) {
         throw new Error('ELF file has no section headers.');
+    }
+    if (phNum > 0 && phEntSize < ELF32_PH_ENTRY_MIN) {
+        throw new Error(`ELF program header entry size (${phEntSize}) is too small.`);
     }
     if (shEntSize < ELF32_SH_ENTRY_MIN) {
         throw new Error(`ELF section header entry size (${shEntSize}) is too small.`);
@@ -266,9 +270,15 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
         const symEntSize = read32(symBase + 36);
 
         // Get the linked string table
+        if (symtabLink >= shNum) {
+            throw new Error(`ELF symbol table linked string table index (${symtabLink}) is out of range.`);
+        }
         const strtabBase = shOff + symtabLink * shEntSize;
         const symStrTabOffset = read32(strtabBase + 16);
         const symStrTabSize = read32(strtabBase + 20);
+        if (symStrTabOffset + symStrTabSize > buffer.length) {
+            throw new Error('ELF symbol string table exceeds file size.');
+        }
 
         if (symEntSize > 0) {
             const numSyms = Math.floor(symSize / symEntSize);

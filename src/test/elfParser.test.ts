@@ -138,6 +138,26 @@ suite('ELF Parser Test Suite', () => {
             assert.throws(() => parseElf32(buf), /invalid magic number/);
         });
 
+        test('should reject too-small program header entry size', () => {
+            const buf = buildMinimalElf32([
+                { name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 32 },
+            ]);
+            buf.writeUInt32LE(52, 28); // e_phoff
+            buf.writeUInt16LE(16, 42); // e_phentsize
+            buf.writeUInt16LE(1, 44);  // e_phnum
+            assert.throws(() => parseElf32(buf), /program header entry size .* too small/);
+        });
+
+        test('should reject symtab link outside section table', () => {
+            const buf = buildMinimalElf32([
+                { name: '.symtab', type: 2, flags: 0, addr: 0, size: 0 },
+            ]);
+            const shOff = buf.readUInt32LE(32);
+            const symtabBase = shOff + 40;
+            buf.writeUInt32LE(999, symtabBase + 24); // sh_link
+            assert.throws(() => parseElf32(buf), /linked string table index .* out of range/);
+        });
+
         test('should throw for ELF64', () => {
             const buf = buildMinimalElf32([]);
             buf[4] = 2; // ELFCLASS64

@@ -123,6 +123,24 @@ suite('buildPreviewReport', () => {
         assert.doesNotMatch(report.split('Summary:')[1], /\$\{pick/);
     });
 
+    test('envPick value flows to downstream via simulated placeholder', () => {
+        const item: ActionItem = {
+            id: 'a.env',
+            title: 'T',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'pickEnv', type: 'envPick', placeHolder: 'pick env' },
+                    { id: 'run', type: 'shell', command: 'echo ${pickEnv.value}' }
+                ]
+            }
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.match(report, /placeHolder: pick env/);
+        assert.match(report, /echo <envPick:pickEnv:value>/);
+        assert.doesNotMatch(report.split('Summary:')[1], /\$\{pickEnv/);
+    });
+
     test('lists capture rules and references downstream', () => {
         const item: ActionItem = {
             id: 'a.6',

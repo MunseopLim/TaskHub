@@ -27,7 +27,7 @@ export interface LinkerParseResult {
  */
 export function parseSizeValue(value: string): number | null {
     const trimmed = value.trim();
-    const suffixMatch = trimmed.match(/^(0x[\da-fA-F]+|\d+)\s*([KkMm]?)$/);
+    const suffixMatch = trimmed.match(/^\+?(0x[\da-fA-F]+|\d+)\s*([KkMm]?)$/);
     if (!suffixMatch) { return null; }
 
     let num: number;
@@ -98,29 +98,50 @@ export function parseScatterFile(content: string): MemoryRegion[] {
     const regions: MemoryRegion[] = [];
     const seen = new Set<string>();
 
-    // Strategy: first find load regions (top-level, not indented), then
-    // find execution regions (indented) inside each load region's braces.
-    // Load region pattern: starts at line beginning (no leading whitespace)
-    // NAME 0xADDR 0xSIZE {
-    const loadRegionRegex = /^(\w+)\s+0x[\da-fA-F]+\s+0x[\da-fA-F]+\s*\{/gm;
-    const loadRegionNames = new Set<string>();
-    let lrMatch;
-    while ((lrMatch = loadRegionRegex.exec(content)) !== null) {
-        loadRegionNames.add(lrMatch[1]);
-    }
+    let braceDepth = 0;
+    let currentLoadOrigin: number | null = null;
+    const regionRegex = /^\s*(\w+)\s+(\+?(?:0x[\da-fA-F]+|\d+)|[A-Za-z_]\w*)\s+(\+?(?:0x[\da-fA-F]+|\d+)(?:[KkMm])?|[A-Za-z_][\w$()]*)(?:\s+[^{}]*)?\s*\{/u;
 
-    // Match all regions with: NAME 0xADDR 0xSIZE {
-    const allRegionRegex = /(\w+)\s+(0x[\da-fA-F]+)\s+(0x[\da-fA-F]+)\s*\{/gm;
-    let match;
-    while ((match = allRegionRegex.exec(content)) !== null) {
-        const name = match[1];
-        // Skip load regions (top-level)
-        if (loadRegionNames.has(name)) { continue; }
-        const origin = parseSizeValue(match[2]);
-        const size = parseSizeValue(match[3]);
-        if (origin !== null && size !== null && !seen.has(name)) {
-            seen.add(name);
-            regions.push({ name, origin, size });
+    for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.replace(/;.*/, '');
+        const depthBefore = braceDepth;
+        const match = line.match(regionRegex);
+        if (match) {
+            const name = match[1];
+            let origin = parseSizeValue(match[2]);
+            const size = parseSizeValue(match[3]);
+
+            if (match[2].startsWith('+')) {
+                // '+offset' origins are relative to the enclosing load region.
+                // If that base is unknown (e.g. a symbolic load origin), the
+                // absolute address cannot be resolved — mark it unknown so the
+                // region is skipped instead of leaking the raw offset as if it
+                // were an absolute address.
+                const relative = parseSizeValue(match[2]);
+                origin = (currentLoadOrigin === null || relative === null)
+                    ? null
+                    : currentLoadOrigin + relative;
+            }
+
+            if (depthBefore === 0) {
+                currentLoadOrigin = origin;
+            } else if (origin !== null && size !== null) {
+                if (!seen.has(name)) {
+                    seen.add(name);
+                    regions.push({ name, origin, size });
+                }
+            }
+        }
+
+        for (const ch of line) {
+            if (ch === '{') {
+                braceDepth++;
+            } else if (ch === '}') {
+                braceDepth = Math.max(0, braceDepth - 1);
+                if (braceDepth === 0) {
+                    currentLoadOrigin = null;
+                }
+            }
         }
     }
 

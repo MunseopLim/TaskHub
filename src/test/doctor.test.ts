@@ -275,6 +275,26 @@ suite('Doctor', () => {
             `expected the typoed reference in the message; got ${unresolved.map(f => f.message).join(' | ')}`);
     });
 
+    test('flags ${past.typoKey} even when interpolation falls back to output', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.output-fallback-typo',
+                title: 'output fallback typo',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'build', type: 'shell', command: 'make' },
+                        { id: 'use', type: 'shell', command: 'echo ${build.typoKey}' }
+                    ]
+                }
+            }
+        ])], v);
+        const unresolved = findings.filter(f => f.code === 'variable.unresolved');
+        assert.ok(unresolved.some(f => /\$\{build\.typoKey\}/.test(f.message)),
+            `expected the typoed shell output reference in the message; got ${unresolved.map(f => f.message).join(' | ')}`);
+    });
+
     test('still flags unresolved when the head is not a sibling task id', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([

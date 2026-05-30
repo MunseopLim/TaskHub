@@ -26,6 +26,9 @@ TaskHub/
 │   │                                  # - toWorkspaceRelativePath(): 절대경로 → ${workspaceFolder} 정규화
 │   │                                  # - wouldExceedCaptureLimit(): 캡처 한도 off-by-one guard
 │   ├── previewRun.ts                  # Preview Run (Dry-run) 리포트 생성
+│   ├── previewOpener.ts               # preview/browser 열기 명령 헬퍼
+│   ├── doctor.ts                      # actions.json 정적 분석(Doctor) 순수 모듈
+│   ├── diagnosticMatcher.ts           # shell 출력 → VS Code Diagnostic 매칭 순수 모듈
 │   ├── jsonEditor.ts                  # JSON Editor WebView (시트/행 편집)
 │   ├── jsonEditorUtils.ts             # jsonEditor.ts webview JS의 테스트용 pure mirror
 │   ├── hexViewer.ts                   # Hex Viewer WebView (assertWithinHexViewerSpan 포함)
@@ -49,7 +52,8 @@ TaskHub/
 │   ├── favorites.schema.json     # favorites.json 스키마 및 검증
 │   └── taskhub_types.schema.json # taskhub_types.json 스키마 (커스텀 타입 설정)
 ├── media/
-│   ├── h_icon.svg            # 메인 뷰 아이콘
+│   ├── h_icon.svg            # Activity Bar 컨테이너 아이콘
+│   ├── m_icon.svg            # Actions 뷰 아이콘
 │   ├── actions.json          # 기본 제공 액션 예제
 │   └── *_example.json        # 각종 예제 파일들 (links_example.json 등)
 ├── presets/
@@ -82,7 +86,7 @@ TaskHub/
 각 패널은 `vscode.TreeDataProvider`를 구현하며, 독립 모듈로 분리되어 있습니다:
 
 *   **MainViewProvider** ([providers/mainViewProvider.ts](../src/providers/mainViewProvider.ts)): 액션 버튼과 폴더 트리 관리
-*   **LinkViewProvider** ([providers/linkViewProvider.ts](../src/providers/linkViewProvider.ts)): Built-in 및 Workspace 링크 관리
+*   **LinkViewProvider** ([providers/linkViewProvider.ts](../src/providers/linkViewProvider.ts)): Workspace 링크 관리
 *   **FavoriteViewProvider** ([providers/favoriteViewProvider.ts](../src/providers/favoriteViewProvider.ts)): 즐겨찾기 파일 관리
 *   **HistoryProvider** ([providers/historyProvider.ts](../src/providers/historyProvider.ts)): 액션 실행 및 TaskHub 도구 열람 히스토리 관리 (`workspaceState` 백엔드)
 
@@ -94,6 +98,7 @@ TaskHub/
 *   **executeSingleTask()**: 개별 태스크 실행
     *   지원 태스크 타입 (`Task.type` union, [src/schema.ts](../src/schema.ts) 참조): `shell`, `command`, `fileDialog`, `folderDialog`, `unzip`, `zip`, `stringManipulation`, `inputBox`, `quickPick`, `envPick`, `confirm`, `writeFile`, `appendFile`
 *   **변수 치환**: `${task_id.property}` 형식으로 파이프라인 간 데이터 전달
+*   **Task DAG**: `dependsOn` 및 `${taskId.x}` 자동 추론 의존성으로 그래프를 구성하며, `parallel: true` 태스크는 sync barrier에서 빠져 동시 실행 풀에 들어간다. 상세 시맨틱은 [features.md §24 병렬 실행 / Task DAG](./features.md#24-병렬-실행--task-dag) 참조.
 *   **파일 감시**: debounce({ run, cancel }) 패턴으로 JSON 변경 감지
 
 ### 2.1. 동적 커맨드 등록 (`syncActionCommands`)

@@ -148,7 +148,7 @@ export class RegisterDecoder {
         const bitWidth = bitEnd - bitStart + 1;
         // Handle 32-bit fields correctly (1 << 32 wraps to 1 in JS)
         const mask = bitWidth >= 32 ? 0xFFFFFFFF : (1 << bitWidth) - 1;
-        return (registerValue >>> bitStart) & mask;
+        return ((registerValue >>> bitStart) & mask) >>> 0;
     }
 
     /**

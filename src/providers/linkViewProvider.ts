@@ -129,7 +129,7 @@ export function readLinksFromDisk(filePath: string): LinksLoadResult {
     return { ok: true, entries };
 }
 
-export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
+export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode>, vscode.Disposable {
     private _onDidChangeTreeData: vscode.EventEmitter<LinkTreeNode | undefined | null | void> = new vscode.EventEmitter<LinkTreeNode | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<LinkTreeNode | undefined | null | void> = this._onDidChangeTreeData.event;
     public view: vscode.TreeView<LinkTreeNode> | undefined;
@@ -151,6 +151,10 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode> {
         this.loaded = true;
         this._onDidChangeTreeData.fire();
         this.updateTitle();
+    }
+
+    dispose(): void {
+        this._onDidChangeTreeData.dispose();
     }
 
     private updateTitle(): void {

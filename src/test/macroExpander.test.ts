@@ -191,6 +191,15 @@ const int x = 5;
             assert.strictEqual(macros.size, 1);
             assert.ok(macros.has('REAL_MACRO'));
         });
+
+        test('Ignore #define prefix without delimiter', () => {
+            const text = '#defineFOO 0xFF\n#define REAL_MACRO 0x01';
+            const macros = MacroExpander.parseMacroDefinitions(text);
+
+            assert.strictEqual(macros.size, 1);
+            assert.ok(!macros.has('FOO'));
+            assert.strictEqual(macros.get('REAL_MACRO')?.value, '0x01');
+        });
     });
 
     suite('Numeric Evaluation', () => {

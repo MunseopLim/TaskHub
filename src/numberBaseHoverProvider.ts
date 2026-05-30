@@ -446,8 +446,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                     case '|': return left | right;
                     case '&': return left & right;
                     case '^': return left ^ right;
-                    case '<<': return left << right;
-                    case '>>': return left >> right;
+                    case '<<': return shiftLeftNumber(left, right);
+                    case '>>': return shiftRightNumber(left, right);
                 }
             }
         }
@@ -759,7 +759,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             md.appendMarkdown(`**Bin:** \`0b${numericValue.toString(2)}\`\n\n`);
 
             // Add bit position display for reasonable values
-            if (numericValue >= 0 && numericValue <= 0xFFFFFFFF) {
+            if (numericValue >= 0 && numericValue <= Number.MAX_SAFE_INTEGER) {
                 md.appendMarkdown(this.generateBitPositionDisplay(numericValue));
             }
         }
@@ -1734,6 +1734,18 @@ export interface BitOperationResult {
     clearedBits: number[];
 }
 
+function normalizeShiftAmount(operand: number): number {
+    return Math.min(63, Math.max(0, Math.trunc(operand) || 0));
+}
+
+function shiftLeftNumber(value: number, operand: number): number {
+    return Math.floor(value * Math.pow(2, normalizeShiftAmount(operand)));
+}
+
+function shiftRightNumber(value: number, operand: number): number {
+    return Math.floor(value / Math.pow(2, normalizeShiftAmount(operand)));
+}
+
 // Patterns for bit operation detection (module-level to avoid recompilation per hover call)
 // Note: Use negative lookbehind to avoid matching part of hex/binary literals or numeric suffixes
 const BIT_OPERATION_PATTERNS: Array<{
@@ -1898,11 +1910,11 @@ export function calculateBitOperation(
             break;
         case BitOperationType.LEFT_SHIFT:
         case BitOperationType.LEFT_SHIFT_ASSIGN:
-            afterValue = actualBeforeValue << operation.operand;
+            afterValue = shiftLeftNumber(actualBeforeValue, operation.operand);
             break;
         case BitOperationType.RIGHT_SHIFT:
         case BitOperationType.RIGHT_SHIFT_ASSIGN:
-            afterValue = actualBeforeValue >>> operation.operand; // Unsigned right shift
+            afterValue = shiftRightNumber(actualBeforeValue, operation.operand);
             break;
         case BitOperationType.NOT:
             afterValue = ~actualBeforeValue;
@@ -1946,7 +1958,6 @@ export function calculateBitOperation(
  */
 export function formatBitOperationResult(result: BitOperationResult): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
-    md.supportHtml = true;
 
     const { operation, beforeValue, afterValue } = result;
 

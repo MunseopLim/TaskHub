@@ -56,29 +56,42 @@ export function parseIntelHex(content: string): HexParseResult {
     for (const rawLine of lines) {
         const line = rawLine.trim();
         if (!line || !line.startsWith(':')) { continue; }
+        if (line.length < 11) { continue; }
 
         const byteCount = parseInt(line.substring(1, 3), 16);
         const address = parseInt(line.substring(3, 7), 16);
         const recordType = parseInt(line.substring(7, 9), 16);
+        if (!Number.isFinite(byteCount) || byteCount < 0 || byteCount > HEX_MAX_RECORD_BYTES) {
+            continue;
+        }
+        const expectedLength = 11 + byteCount * 2;
+        if (line.length < expectedLength) {
+            continue;
+        }
 
         // Validate checksum
         let sum = 0;
-        for (let i = 1; i < line.length - 2; i += 2) {
-            sum += parseInt(line.substring(i, i + 2), 16);
+        let validBytes = true;
+        for (let i = 1; i < expectedLength - 2; i += 2) {
+            const byte = parseInt(line.substring(i, i + 2), 16);
+            if (!Number.isFinite(byte)) {
+                validBytes = false;
+                break;
+            }
+            sum += byte;
         }
-        const checksum = parseInt(line.substring(line.length - 2), 16);
-        if (((sum + checksum) & 0xFF) !== 0) {
+        if (!validBytes) { continue; }
+        const checksum = parseInt(line.substring(expectedLength - 2, expectedLength), 16);
+        if (!Number.isFinite(checksum) || ((sum + checksum) & 0xFF) !== 0) {
             continue; // Skip invalid lines
         }
 
         switch (recordType) {
             case 0x00: { // Data record
-                if (!Number.isFinite(byteCount) || byteCount < 0 || byteCount > HEX_MAX_RECORD_BYTES) {
-                    continue;
-                }
                 const fullAddress = baseAddress + address;
                 for (let i = 0; i < byteCount; i++) {
                     const byte = parseInt(line.substring(9 + i * 2, 11 + i * 2), 16);
+                    if (!Number.isFinite(byte)) { continue; }
                     const addr = fullAddress + i;
                     data.set(addr, byte);
                     if (addr < minAddress) { minAddress = addr; }
@@ -127,17 +140,30 @@ export function parseSrec(content: string): HexParseResult {
     for (const rawLine of lines) {
         const line = rawLine.trim();
         if (!line || !line.startsWith('S')) { continue; }
+        if (line.length < 4) { continue; }
 
         const type = parseInt(line[1], 10);
         const byteCount = parseInt(line.substring(2, 4), 16);
+        if (!Number.isFinite(type) || !Number.isFinite(byteCount)) { continue; }
+        const expectedLength = 4 + byteCount * 2;
+        if (line.length < expectedLength) {
+            continue;
+        }
 
         // Validate checksum
         let sum = 0;
-        for (let i = 2; i < line.length - 2; i += 2) {
-            sum += parseInt(line.substring(i, i + 2), 16);
+        let validBytes = true;
+        for (let i = 2; i < expectedLength - 2; i += 2) {
+            const byte = parseInt(line.substring(i, i + 2), 16);
+            if (!Number.isFinite(byte)) {
+                validBytes = false;
+                break;
+            }
+            sum += byte;
         }
-        const checksum = parseInt(line.substring(line.length - 2), 16);
-        if (((sum + checksum) & 0xFF) !== 0xFF) {
+        if (!validBytes) { continue; }
+        const checksum = parseInt(line.substring(expectedLength - 2, expectedLength), 16);
+        if (!Number.isFinite(checksum) || ((sum + checksum) & 0xFF) !== 0xFF) {
             continue;
         }
 
@@ -169,6 +195,7 @@ export function parseSrec(content: string): HexParseResult {
 
         for (let i = 0; i < dataByteCount; i++) {
             const byte = parseInt(line.substring(dataStart + i * 2, dataStart + i * 2 + 2), 16);
+            if (!Number.isFinite(byte)) { continue; }
             const addr = address + i;
             data.set(addr, byte);
             if (addr < minAddress) { minAddress = addr; }

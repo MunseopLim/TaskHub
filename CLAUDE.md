@@ -32,7 +32,7 @@ TaskHub는 VS Code 확장 프로그램으로, 반복적인 개발 작업 자동�
 사용자에게 보이는 모든 메시지는 `src/i18n.ts`의 `t(ko, en)` 함수를 사용하여 한국어/영어 두 벌을 제공한다.
 
 - VS Code가 한국어(`ko`)로 설정된 경우 한국어 메시지를 표시하고, 그 외에는 영어를 표시
-- `vscode.env.language === 'ko'`로 판별
+- `vscode.env.language.startsWith('ko')`로 판별
 
 ### 적용 대상
 

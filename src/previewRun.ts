@@ -63,6 +63,8 @@ export function simulateTaskResult(task: Task): SimulatedResult {
                 value: placeholder('quickPick', task.id, 'value'),
                 values: placeholder('quickPick', task.id, 'values'),
             };
+        case 'envPick':
+            return { value: placeholder('envPick', task.id, 'value') };
         case 'unzip':
             return { outputDir: placeholder('unzip', task.id, 'outputDir') };
         case 'zip':
@@ -389,6 +391,13 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 }
                 if (placeHolder) { lines.push(`  placeHolder: ${placeHolder}`); }
                 if (task.canPickMany) { lines.push(`  canPickMany: true`); }
+                interpolated.push(placeHolder);
+                break;
+            }
+            case 'envPick': {
+                const placeHolder = task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined;
+                if (placeHolder) { lines.push(`  placeHolder: ${placeHolder}`); }
+                lines.push(`  (user will pick an environment variable at runtime)`);
                 interpolated.push(placeHolder);
                 break;
             }

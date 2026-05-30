@@ -139,11 +139,12 @@ export class Action extends vscode.TreeItem {
     }
 }
 
-export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vscode.TreeItem> {
+export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vscode.TreeItem>, vscode.Disposable {
     private _onDidChangeTreeData: vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void> =
         new vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<Action | Folder | vscode.TreeItem | undefined | null | void> =
         this._onDidChangeTreeData.event;
+    private lastLoadErrorMessage: string | undefined;
 
     constructor(
         private context: vscode.ExtensionContext,
@@ -152,6 +153,10 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
 
     refresh(): void {
         this._onDidChangeTreeData.fire();
+    }
+
+    dispose(): void {
+        this._onDidChangeTreeData.dispose();
     }
 
     getTreeItem(element: Action | Folder | vscode.TreeItem): vscode.TreeItem {
@@ -169,11 +174,16 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
         let actionsJson: ActionItem[] = [];
         try {
             actionsJson = this.loadActions();
+            this.lastLoadErrorMessage = undefined;
         } catch (error: any) {
-            vscode.window.showErrorMessage(t(
-                `액션을 불러오지 못했습니다: ${error.message}`,
-                `Failed to load actions: ${error.message}`
-            ));
+            const message = error?.message ?? String(error);
+            if (message !== this.lastLoadErrorMessage) {
+                this.lastLoadErrorMessage = message;
+                vscode.window.showErrorMessage(t(
+                    `액션을 불러오지 못했습니다: ${message}`,
+                    `Failed to load actions: ${message}`
+                ));
+            }
         }
         const version = this.context.extension.packageJSON.version;
         const versionItem = new vscode.TreeItem(version);

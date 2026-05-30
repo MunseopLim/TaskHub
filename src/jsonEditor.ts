@@ -76,6 +76,24 @@ function clearSnapshotTimer(): void {
     currentPendingSnapshot = undefined;
 }
 
+function showMissingSaveDataError(fileName: string): void {
+    vscode.window.showErrorMessage(t(
+        `${fileName}: 저장할 데이터가 없어 저장을 중단했습니다.`,
+        `${fileName}: save was aborted because no JSON data was provided.`
+    ));
+}
+
+function showSaveSuccess(fileName: string): void {
+    vscode.window.showInformationMessage(t(`JSON 저장 완료: ${fileName}`, `JSON saved: ${fileName}`));
+}
+
+function showSaveFailure(fileName: string, error: any): void {
+    vscode.window.showErrorMessage(t(
+        `JSON 저장 실패 (${fileName}): ${error.message}`,
+        `Failed to save JSON (${fileName}): ${error.message}`
+    ));
+}
+
 /**
  * 사용자가 명시적으로 *변경사항 버리기* 를 선택해 confirmDiscardIfDirty 를
  * 통과시킨 직후 호출. 이전 파일에 대한 pending snapshot, 호스트 측 메모리
@@ -182,7 +200,7 @@ export async function openJsonEditor(context: vscode.ExtensionContext, recordHis
     const fileUris = await vscode.window.showOpenDialog({
         canSelectMany: false,
         filters: { 'JSON Files': ['json'] },
-        openLabel: 'Open JSON File'
+        openLabel: t('JSON 파일 열기', 'Open JSON File')
     });
 
     if (!fileUris || fileUris.length === 0) {
@@ -475,6 +493,9 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     currentMessageDisposable?.dispose();
     currentMessageDisposable = currentPanel.webview.onDidReceiveMessage(
         async (message) => {
+            if (!message || typeof message !== 'object' || typeof message.command !== 'string') {
+                return;
+            }
             switch (message.command) {
                 case 'modified': {
                     currentIsDirty = Boolean(message.value);
@@ -497,6 +518,10 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     break;
                 }
                 case 'save': {
+                    if (!Object.hasOwn(message, 'data')) {
+                        showMissingSaveDataError(fileName);
+                        return;
+                    }
                     try {
                         const saveData = unwrapIfRootArray(message.data, isRootArray);
                         fs.writeFileSync(filePath, JSON.stringify(saveData, null, detectedIndent) + '\n', 'utf-8');
@@ -507,15 +532,13 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                         baselineFileSize = written.size;
                         currentIsDirty = false;
                         clearSnapshotTimer();
-                        // recovery clear 시 last-received cache 도 함께 비움
-                        // (자세한 사유는 case 'modified' 의 같은 라인 주석 참조).
                         currentLastReceivedSnapshot = undefined;
                         await setRecoveryEntry(context, filePath, null);
                         currentPanel?.webview.postMessage({ command: 'saveResult', success: true });
-                        vscode.window.showInformationMessage(t(`JSON 저장 완료: ${fileName}`, `JSON saved: ${fileName}`));
+                        showSaveSuccess(fileName);
                     } catch (error: any) {
                         currentPanel?.webview.postMessage({ command: 'saveResult', success: false });
-                        vscode.window.showErrorMessage(t(`JSON 저장 실패 (${fileName}): ${error.message}`, `Failed to save JSON (${fileName}): ${error.message}`));
+                        showSaveFailure(fileName, error);
                     }
                     break;
                 }
@@ -716,7 +739,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     // `{}` 객체를 보냈을 때는 사용자가 실제로 빈 객체를 편집
                     // 중일 때 충돌했음.)
                     vscode.window.showWarningMessage(t(
-                        `${fileName}: Keep 후 saved baseline 갱신 실패. 저장 전 외부 변경을 재확인해 주세요. (${e.message})`,
+                        `${fileName}: 현재 편집 유지 후 saved baseline 갱신 실패. 저장 전 외부 변경을 재확인해 주세요. (${e.message})`,
                         `${fileName}: failed to refresh saved baseline after Keep. Re-verify external changes before saving. (${e.message})`
                     ));
                     currentPanel?.webview.postMessage({ command: 'markBaselineUnknown' });
@@ -1977,7 +2000,7 @@ function getWebviewContent(
         if (str === 'true') { return true; }
         if (str === 'false') { return false; }
         const num = Number(str);
-        if (!isNaN(num) && str.trim() !== '') { return num; }
+        if (Number.isFinite(num) && str.trim() !== '') { return num; }
         return str;
     }
 
@@ -2056,6 +2079,7 @@ function getWebviewContent(
     // Messages from extension
     window.addEventListener('message', (event) => {
         const msg = event.data;
+        if (!msg || typeof msg !== 'object' || typeof msg.command !== 'string') { return; }
         if (msg.command === 'loadData') {
             data = msg.data;
             const oldLabel = sheetMap[activeIdx] ? sheetMap[activeIdx].label : '';
