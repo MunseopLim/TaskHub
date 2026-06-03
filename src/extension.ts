@@ -2868,12 +2868,28 @@ async function executeSingleTask(
                     };
                 }
             });
+            // Resolve `itemsFromCommand` (string or OS-specific object) to a
+            // single interpolated command string, mirroring the shell branch.
+            let interpolatedItemsFromCommand: string | undefined;
+            if (typeof task.itemsFromCommand === 'string') {
+                interpolatedItemsFromCommand = interpolatePipelineVariables(task.itemsFromCommand, interpolationContext);
+            } else if (task.itemsFromCommand && typeof task.itemsFromCommand === 'object') {
+                const cmdObj = JSON.parse(JSON.stringify(task.itemsFromCommand));
+                for (const os in cmdObj) {
+                    if (Object.prototype.hasOwnProperty.call(cmdObj, os)) {
+                        cmdObj[os] = interpolatePipelineVariables(cmdObj[os], interpolationContext);
+                    }
+                }
+                interpolatedItemsFromCommand = getCommandString(cmdObj);
+            }
             const interpolatedQuickPickTask = {
                 ...task,
                 items: interpolatedItems,
+                itemsFromCommand: interpolatedItemsFromCommand,
+                cwd: task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
                 placeHolder: task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined
             };
-            result = await handleQuickPick(interpolatedQuickPickTask);
+            result = await handleQuickPick(interpolatedQuickPickTask, defaultWorkspace);
             break;
         case 'unzip':
             const interpolatedUnzipTask: any = { ...task };
@@ -3344,12 +3360,55 @@ async function handleFolderDialog(task: any): Promise<{ path: string, dir: strin
 }
 
 async function handleInputBox(task: any): Promise<{ value: string }> {
+    // `extractPattern`: derive the prefilled default from the (already
+    // interpolated) `value` — e.g. pull a Jira key out of a branch name. On a
+    // match use capture group 1 if present, else the whole match; on no match
+    // (or an invalid regex) prefill empty so the user types fresh.
+    let initialValue = task.value;
+    if (typeof task.extractPattern === 'string' && task.extractPattern.length > 0) {
+        // Extraction was requested: default the prefill to empty so a raw,
+        // unsuitable value (e.g. a full branch name) never lands in the box.
+        // Only a successful match overrides it. An invalid pattern also stays
+        // empty — matching the documented behavior.
+        initialValue = '';
+        let extractRe: RegExp | undefined;
+        try {
+            extractRe = new RegExp(task.extractPattern);
+        } catch {
+            extractRe = undefined;
+        }
+        if (extractRe && typeof task.value === 'string') {
+            const match = task.value.match(extractRe);
+            if (match) {
+                initialValue = match[1] !== undefined ? match[1] : match[0];
+            }
+        }
+    }
+
     const options: vscode.InputBoxOptions = {
         prompt: task.prompt,
-        value: task.value,
+        value: initialValue,
         placeHolder: task.placeHolder,
         password: task.password || false
     };
+
+    // `validatePattern`: reject non-matching input live. An invalid regex is
+    // ignored (no validation) so a bad pattern never blocks input entirely.
+    if (typeof task.validatePattern === 'string' && task.validatePattern.length > 0) {
+        let validateRe: RegExp | undefined;
+        try {
+            validateRe = new RegExp(task.validatePattern);
+        } catch {
+            validateRe = undefined;
+        }
+        if (validateRe) {
+            const invalidMessage = typeof task.validateMessage === 'string' && task.validateMessage.length > 0
+                ? task.validateMessage
+                : t('입력 형식이 올바르지 않습니다.', 'Input does not match the required format.');
+            options.validateInput = (input: string) => (validateRe!.test(input) ? undefined : invalidMessage);
+        }
+    }
+
     const userInput = await vscode.window.showInputBox(options);
     if (userInput !== undefined) {
         const prefix = task.prefix || '';
@@ -3361,10 +3420,122 @@ async function handleInputBox(task: any): Promise<{ value: string }> {
     }
 }
 
-async function handleQuickPick(task: any): Promise<{ value: string; values?: string }> {
-    if (!task.items || !Array.isArray(task.items) || task.items.length === 0) {
-        throw new Error(`Task '${task.id}' of type 'quickPick' requires a non-empty 'items' array.`);
+/**
+ * Run a shell command and return its stdout split into trimmed, non-empty
+ * lines. Used by `quickPick`'s `itemsFromCommand` to populate the pick list
+ * dynamically (e.g. from `git for-each-ref ... refs/remotes/origin`). Spawns
+ * the user's login shell so PATH-resolved tools like `git` are found, mirroring
+ * the `envPick` probe. Rejects on non-zero exit, spawn error, timeout, or
+ * oversized output.
+ */
+function runCommandCaptureLines(command: string, cwd: string | undefined, timeoutMs = 15000): Promise<string[]> {
+    return new Promise<string[]>((resolve, reject) => {
+        const isWindows = process.platform === 'win32';
+        const shell = isWindows ? 'cmd.exe' : (process.env.SHELL || '/bin/sh');
+        const args = isWindows ? ['/c', command] : ['-l', '-c', command];
+
+        let child: ReturnType<typeof spawn>;
+        try {
+            child = spawn(shell, args, {
+                cwd: cwd && cwd.length > 0 ? cwd : undefined,
+                stdio: ['ignore', 'pipe', 'pipe']
+            });
+        } catch (e: any) {
+            reject(e instanceof Error ? e : new Error(String(e)));
+            return;
+        }
+
+        let stdout = '';
+        let stderr = '';
+        let settled = false;
+        const finish = (fn: () => void) => {
+            if (settled) { return; }
+            settled = true;
+            fn();
+        };
+
+        const timer = setTimeout(() => {
+            try { child.kill(); } catch { /* ignore */ }
+            finish(() => reject(new Error(t('명령 실행이 시간 내에 완료되지 않았습니다.', 'Command timed out.'))));
+        }, timeoutMs);
+
+        // Cap stdout+stderr *combined*: a failing command can spew unbounded
+        // stderr, and at the quickPick stage that would balloon extension-host
+        // memory. Kill once either stream pushes the total past the limit.
+        const MAX_CAPTURE_BYTES = 1024 * 1024;
+        const enforceCaptureLimit = () => {
+            if (Buffer.byteLength(stdout, 'utf8') + Buffer.byteLength(stderr, 'utf8') > MAX_CAPTURE_BYTES) {
+                try { child.kill(); } catch { /* ignore */ }
+                clearTimeout(timer);
+                finish(() => reject(new Error(t('명령 출력이 너무 큽니다.', 'Command output is too large.'))));
+            }
+        };
+        child.stdout?.on('data', (chunk: Buffer) => {
+            stdout += chunk.toString('utf8');
+            enforceCaptureLimit();
+        });
+        child.stderr?.on('data', (chunk: Buffer) => {
+            stderr += chunk.toString('utf8');
+            enforceCaptureLimit();
+        });
+        child.on('error', (e: Error) => {
+            clearTimeout(timer);
+            finish(() => reject(e));
+        });
+        // Resolve on `close`, not `exit`: `exit` can fire before the stdout
+        // stream has flushed its final chunk, dropping the last line for large
+        // or slow output. `close` fires only after all stdio streams are done.
+        child.on('close', (code: number | null) => {
+            clearTimeout(timer);
+            if (code !== 0) {
+                const detail = stderr.trim() || `exit code ${code}`;
+                finish(() => reject(new Error(detail)));
+                return;
+            }
+            const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+            finish(() => resolve(lines));
+        });
+    });
+}
+
+async function handleQuickPick(task: any, defaultWorkspace?: string): Promise<{ value: string; values?: string }> {
+    // When `itemsFromCommand` is set, build the pick list from the command's
+    // stdout (one item per non-empty line). The command is already interpolated
+    // and reduced to a single OS-specific string by the dispatcher.
+    let pickItems: any = task.items;
+    if (typeof task.itemsFromCommand === 'string' && task.itemsFromCommand.length > 0) {
+        const runCwd = task.cwd || defaultWorkspace || '(none)';
+        let lines: string[];
+        try {
+            lines = await runCommandCaptureLines(task.itemsFromCommand, task.cwd || defaultWorkspace);
+        } catch (e: any) {
+            const message = e instanceof Error ? e.message : String(e);
+            throw new Error(t(
+                `Task '${task.id}'의 'itemsFromCommand' 실행에 실패했습니다 (cwd: ${runCwd}): ${message}`,
+                `Task '${task.id}' failed to run 'itemsFromCommand' (cwd: ${runCwd}): ${message}`
+            ));
+        }
+        const excludeList = Array.isArray(task.itemsExclude)
+            ? task.itemsExclude
+            : (typeof task.itemsExclude === 'string' ? [task.itemsExclude] : []);
+        const exclude = new Set(excludeList.map((s: any) => String(s).trim()));
+        pickItems = lines.filter(line => !exclude.has(line));
+        if (pickItems.length === 0) {
+            // Include cwd and the raw line count so an empty pick list is
+            // debuggable: most often the command ran in a folder without the
+            // expected refs (e.g. no `origin` remote-tracking branches), or
+            // everything was filtered out by `itemsExclude`.
+            throw new Error(t(
+                `Task '${task.id}'의 'itemsFromCommand'가 선택할 항목을 반환하지 않았습니다 (cwd: ${runCwd}, 출력 ${lines.length}줄, 제외 후 0개).`,
+                `Task '${task.id}' got no items from 'itemsFromCommand' (cwd: ${runCwd}, ${lines.length} line(s) before exclude, 0 after).`
+            ));
+        }
     }
+
+    if (!pickItems || !Array.isArray(pickItems) || pickItems.length === 0) {
+        throw new Error(`Task '${task.id}' of type 'quickPick' requires a non-empty 'items' array or an 'itemsFromCommand'.`);
+    }
+    task = { ...task, items: pickItems };
 
     const options: vscode.QuickPickOptions = {
         placeHolder: task.placeHolder,

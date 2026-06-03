@@ -57,10 +57,52 @@ export interface Task {
     password?: boolean;
     prefix?: string;
     suffix?: string;
+    /**
+     * For `inputBox`: a regex (RegExp source) the user input must match.
+     * While the input box is open, non-matching text is rejected live and
+     * `validateMessage` (or a generic fallback) is shown. An invalid
+     * `validatePattern` is ignored (no validation applied). Useful for
+     * enforcing formats like a Jira ticket key (`^[A-Z][A-Z0-9]+-\\d+$`).
+     */
+    validatePattern?: string;
+    /**
+     * For `inputBox`: the message shown under the input box when the value
+     * fails `validatePattern`. Defaults to a generic "invalid format" string.
+     */
+    validateMessage?: string;
+    /**
+     * For `inputBox`: a regex (RegExp source) applied to the interpolated
+     * `value` to derive the prefilled default. If capture group 1 is present
+     * it is used; otherwise the whole match is used. If the pattern does not
+     * match (or is invalid), the prefill is left empty so the user types
+     * fresh. Useful for extracting a Jira ticket key from a branch name like
+     * `feature/ABCTEST-123-foo` (`[A-Z][A-Z0-9]+-\\d+`). `prefix`/`suffix`
+     * are still applied to the final user input.
+     */
+    extractPattern?: string;
 
     // Properties for 'quickPick'
     items?: string[] | QuickPickItem[];
     canPickMany?: boolean;
+    /**
+     * For `quickPick`: a shell command whose stdout becomes the pick list —
+     * each non-empty line (trimmed) is one item. Runs in `cwd` (or the
+     * action's workspace folder) via the user's login shell. Supports
+     * variable interpolation and the same OS-specific object form as
+     * `command`. When present, `items` is ignored. Example: populate origin
+     * branches with `git for-each-ref --format='%(refname:short)' refs/remotes/origin`.
+     */
+    itemsFromCommand?: string | {
+        windows?: string;
+        macos?: string;
+        linux?: string;
+    };
+    /**
+     * For `quickPick` with `itemsFromCommand`: exact line(s) to drop from the
+     * command output (e.g. `origin/HEAD`). Accepts a single string or an
+     * array. Ignored when `itemsFromCommand` is not set.
+     */
+    itemsExclude?: string | string[];
 
     // Properties for 'confirm'
     message?: string;

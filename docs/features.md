@@ -525,6 +525,9 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 -   `password` (boolean, *선택*, 기본값: `false`): `true`로 설정하면 입력값이 마스킹됩니다 (비밀번호 입력용).
 -   `prefix` (string, *선택*): 사용자 입력 앞에 자동으로 추가될 텍스트입니다. 최종값은 `prefix + 사용자입력 + suffix`가 됩니다.
 -   `suffix` (string, *선택*): 사용자 입력 뒤에 자동으로 추가될 텍스트입니다.
+-   `validatePattern` (string, *선택*): 입력값이 만족해야 하는 정규식(RegExp source)입니다. 입력 도중 형식이 맞지 않으면 실시간으로 거부되고 `validateMessage`(없으면 기본 문구)가 표시됩니다. 잘못된 정규식은 무시됩니다(검증 미적용). 예: Jira 티켓 키 `^[A-Z][A-Z0-9]+-\\d+$`.
+-   `validateMessage` (string, *선택*): `validatePattern` 검증 실패 시 표시할 메시지입니다. 생략 시 기본 문구를 사용합니다.
+-   `extractPattern` (string, *선택*): 보간된 `value`에 적용해 기본값을 추출하는 정규식입니다. 캡처 그룹 1이 있으면 그 값을, 없으면 전체 매치를 사용합니다. 매치가 없으면 빈 값으로 두어 사용자가 새로 입력하게 합니다. `prefix`/`suffix`는 최종 입력값에 그대로 적용됩니다. 예: 브랜치 이름 `feature/ABCTEST-123-foo`에서 Jira 키 추출 `[A-Z][A-Z0-9]+-\\d+`.
 -   **실행 결과**: 입력된 값(prefix/suffix 포함)은 `${task_id.value}`로 접근합니다.
 
 **예시 1: 간단한 입력**
@@ -565,9 +568,11 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 미리 정의된 옵션 목록에서 사용자가 선택할 수 있습니다. 환경 선택, 빌드 타입 선택 등에 유용합니다.
 
 -   `type` (string, **필수**): `quickPick`으로 설정해야 합니다.
--   `items` (array, **필수**): 선택 가능한 항목 목록입니다. 문자열 배열 또는 객체 배열을 사용할 수 있습니다.
+-   `items` (array, **조건부 필수**): 선택 가능한 항목 목록입니다. 문자열 배열 또는 객체 배열을 사용할 수 있습니다. `itemsFromCommand`를 지정하면 생략 가능하며, 이때 `items`는 무시됩니다.
     -   문자열 배열: `["dev", "staging", "production"]`
     -   객체 배열: `[{"label": "dev", "description": "개발 환경", "detail": "상세 설명"}]`
+-   `itemsFromCommand` (string | OS별 객체, *선택*): stdout 출력을 선택 목록으로 채우는 셸 명령입니다. 각 비어 있지 않은 줄(trim 후)이 하나의 항목이 됩니다. `cwd`(없으면 워크스페이스 폴더)에서 로그인 셸로 실행되며, 변수 보간과 `command`와 동일한 OS별 객체 형태를 지원합니다. 지정 시 `items`는 무시됩니다(정적 `items`로 폴백하지 않습니다). OS별 객체를 줄 경우 `command`와 동일하게 **현재 플랫폼 branch가 없으면 오류**가 나므로 실행할 플랫폼을 모두 정의하세요. 예: `git for-each-ref --format='%(refname:short)' refs/remotes/origin`으로 origin 브랜치 목록 채우기.
+-   `itemsExclude` (string | string[], *선택*): `itemsFromCommand` 출력에서 제외할 정확한 줄(예: `origin/HEAD`). `itemsFromCommand`가 없으면 무시됩니다.
 -   `placeHolder` (string, *선택*): Quick Pick에 표시될 플레이스홀더 텍스트입니다.
 -   `canPickMany` (boolean, *선택*, 기본값: `false`): `true`로 설정하면 다중 선택이 가능합니다.
 -   **실행 결과**:
@@ -616,6 +621,95 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 }
 ```
 선택 결과: `${select_features.values}` = "authentication,logging"
+
+**예시 4: origin 브랜치 + Jira 티켓으로 CI 실행**
+
+`itemsFromCommand`로 origin 브랜치를 동적으로 채우고, 선택한 브랜치에서 Jira 키를 자동 추출해 입력값 기본으로 채운 뒤, 두 값을 CI 스크립트 파라미터로 넘기는 흐름입니다.
+
+```json
+{
+  "tasks": [
+    {
+      "id": "fetch",
+      "type": "shell",
+      "command": "git fetch --prune"
+    },
+    {
+      "id": "pick_branch",
+      "type": "quickPick",
+      "placeHolder": "CI에서 테스트할 origin 브랜치 선택",
+      "itemsFromCommand": "git for-each-ref --format='%(refname:short)' refs/remotes/origin --sort=-committerdate",
+      "itemsExclude": ["origin", "origin/HEAD"]
+    },
+    {
+      "id": "pick_ticket",
+      "type": "inputBox",
+      "prompt": "Jira 티켓 번호",
+      "placeHolder": "예: ABCTEST-123",
+      "value": "${pick_branch.value}",
+      "extractPattern": "[A-Z][A-Z0-9]+-\\d+",
+      "validatePattern": "^[A-Z][A-Z0-9]+-\\d+$",
+      "validateMessage": "형식: 프로젝트키-숫자 (예: ABCTEST-123)"
+    },
+    {
+      "id": "run_ci",
+      "type": "shell",
+      "command": "./trigger-ci.sh",
+      "args": ["--branch", "${pick_branch.value}", "--ticket", "${pick_ticket.value}"]
+    }
+  ]
+}
+```
+
+`pick_branch.value`가 `origin/feature/ABCTEST-123-foo`이면 `pick_ticket`의 기본값은 `ABCTEST-123`으로 채워져 엔터만 누르면 됩니다.
+
+> **참고 (symbolic HEAD)**: `git for-each-ref ... %(refname:short)`는 `refs/remotes/origin/HEAD`를 `origin/HEAD`가 아니라 **`origin`** 으로 축약해 출력합니다. 그래서 `itemsExclude`에는 `origin`과 `origin/HEAD`를 함께 넣어야 가짜 브랜치 `origin`이 목록에 남지 않습니다. (또는 명령 단에서 symbolic ref를 걸러도 됩니다.)
+
+> **보안 (값 전달은 `args`로)**: 원격 브랜치 이름은 완전히 신뢰할 수 없고 셸 메타문자가 포함될 수 있습니다. 선택한 값을 `command` 문자열에 직접 끼워 넣으면 명령 주입 표면이 되므로, 위 예시처럼 `command`(실행 파일)와 `args`(인자 배열)를 분리해 전달하세요. TaskHub는 `args` 각 항목을 OS별 규칙으로 quoting합니다. 같은 이유로 `${pick_ticket.value}` 같은 사용자 입력값도 `args`로 넘기는 것이 안전합니다.
+
+**예시 5: 로컬 브랜치 + Jira 티켓 (origin 불필요)**
+
+원격(origin) 존재 여부를 확인하지 않고 **로컬 브랜치**만 고르고 싶다면 `refs/remotes/origin` 대신 `refs/heads`를 사용합니다. 로컬 브랜치는 `%(refname:short)`가 `origin/` 접두사 없이 `main`·`feature/ABCTEST-123-foo`처럼 출력하므로 `itemsExclude`(symbolic HEAD 제거)도 필요 없습니다. 아래는 선택한 값을 터미널에 출력해 동작을 확인하는 액션입니다.
+
+```json
+{
+  "id": "testButton.ciBranchTicket",
+  "title": "Test: CI Branch + Jira Ticket Params",
+  "action": {
+    "description": "로컬 브랜치를 골라 Jira 티켓을 입력받고 두 값을 파라미터로 출력합니다.",
+    "tasks": [
+      {
+        "id": "pick_branch",
+        "type": "quickPick",
+        "placeHolder": "테스트할 로컬 브랜치 선택",
+        "itemsFromCommand": "git for-each-ref --format='%(refname:short)' refs/heads --sort=-committerdate"
+      },
+      {
+        "id": "pick_ticket",
+        "type": "inputBox",
+        "prompt": "Jira 티켓 번호",
+        "placeHolder": "예: ABCTEST-123",
+        "value": "${pick_branch.value}",
+        "extractPattern": "[A-Z][A-Z0-9]+-\\d+",
+        "validatePattern": "^[A-Z][A-Z0-9]+-\\d+$",
+        "validateMessage": "형식: 프로젝트키-숫자 (예: ABCTEST-123)"
+      },
+      {
+        "id": "show_params",
+        "type": "shell",
+        "command": {
+          "windows": "cmd /c echo branch=${pick_branch.value} ticket=${pick_ticket.value}",
+          "macos": "printf 'branch=%s\\nticket=%s\\n' '${pick_branch.value}' '${pick_ticket.value}'",
+          "linux": "printf 'branch=%s\\nticket=%s\\n' '${pick_branch.value}' '${pick_ticket.value}'"
+        },
+        "revealTerminal": "always"
+      }
+    ]
+  }
+}
+```
+
+> **참고**: `itemsFromCommand`는 `cwd`(없으면 워크스페이스 폴더)에서 실행됩니다. 결과가 0줄이면 "got no items …" 오류가 나며, 에러 메시지에 실행 `cwd`와 출력 줄 수가 포함되므로 잘못된 폴더에서 실행됐는지 바로 확인할 수 있습니다. 위 `show_params`는 동작 확인용이라 값을 명령 문자열에 직접 넣었지만, 실제 CI 스크립트에 넘길 땐 예시 4처럼 `args`로 전달하세요.
 
 ### `envPick` 태스크
 

@@ -595,6 +595,115 @@ suite('Pipeline integration', function () {
             }
         });
 
+        test('IT-108: quickPick itemsFromCommand populates list, itemsExclude filters, selection flows downstream', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const resultPath = path.join(tempWorkspace, 'it108.txt');
+            // The command reads this file from the workspace cwd. The bare
+            // `origin` line mimics how `git for-each-ref %(refname:short)`
+            // shortens the symbolic refs/remotes/origin/HEAD — so itemsExclude
+            // must drop both `origin` and `origin/HEAD` (array form).
+            fs.writeFileSync(
+                path.join(tempWorkspace, 'branches.txt'),
+                'origin\norigin/main\norigin/dev\norigin/HEAD\n'
+            );
+            let seenItems: readonly vscode.QuickPickItem[] = [];
+            try {
+                (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) => {
+                    seenItems = items;
+                    return items.find(i => i.label === 'origin/dev');
+                };
+
+                const action: PipelineAction = {
+                    description: 'IT-108',
+                    tasks: [
+                        {
+                            id: 'branch',
+                            type: 'quickPick',
+                            placeHolder: 'pick branch',
+                            itemsFromCommand: {
+                                macos: 'cat branches.txt',
+                                linux: 'cat branches.txt',
+                                windows: 'type branches.txt'
+                            },
+                            itemsExclude: ['origin', 'origin/HEAD']
+                        },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'branch=${branch.value}',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: resultPath, overwrite: true }
+                        }
+                    ]
+                };
+
+                await run(action);
+
+                const labels = seenItems.map(i => i.label);
+                assert.deepStrictEqual(labels, ['origin/main', 'origin/dev'],
+                    'itemsFromCommand lines become items and itemsExclude drops origin/HEAD');
+                assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'branch=origin/dev');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+            }
+        });
+
+        test('IT-109: inputBox extractPattern prefills default and validatePattern guards input', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const originalShowInputBox = vscode.window.showInputBox;
+            const resultPath = path.join(tempWorkspace, 'it109.txt');
+            try {
+                (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) =>
+                    items.find(i => i.label === 'origin/feature/ABCTEST-123-foo');
+                (vscode.window as any).showInputBox = async (options: vscode.InputBoxOptions) => {
+                    // extractPattern pulled the Jira key out of the branch name.
+                    assert.strictEqual(options.value, 'ABCTEST-123');
+                    // validatePattern rejects malformed keys and accepts good ones.
+                    assert.ok(options.validateInput, 'validateInput should be set');
+                    assert.strictEqual(await options.validateInput!('ABCTEST-123'), undefined);
+                    assert.ok(await options.validateInput!('not a ticket'),
+                        'malformed ticket should return an error message');
+                    return options.value;
+                };
+
+                const action: PipelineAction = {
+                    description: 'IT-109',
+                    tasks: [
+                        {
+                            id: 'branch',
+                            type: 'quickPick',
+                            items: ['origin/main', 'origin/feature/ABCTEST-123-foo']
+                        },
+                        {
+                            id: 'ticket',
+                            type: 'inputBox',
+                            prompt: 'Jira ticket',
+                            value: '${branch.value}',
+                            extractPattern: '[A-Z][A-Z0-9]+-\\d+',
+                            validatePattern: '^[A-Z][A-Z0-9]+-\\d+$',
+                            validateMessage: 'bad ticket'
+                        },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'ticket=${ticket.value}',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: resultPath, overwrite: true }
+                        }
+                    ]
+                };
+
+                await run(action);
+
+                assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'ticket=ABCTEST-123');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+                (vscode.window as any).showInputBox = originalShowInputBox;
+            }
+        });
+
         test('IT-033: envPick lists shell-accessible names and passes selection downstream', async () => {
             const originalShowQuickPick = vscode.window.showQuickPick;
             const originalEnv = process.env.TASKHUB_ENVPICK_SENTINEL;

@@ -52,6 +52,8 @@
 | --- | --- | --- |
 | IT-015 | quickPick → inputBox → file output | quickPick 결과가 inputBox prompt/prefix와 downstream interpolation에 전달됨 |
 | IT-016 | quickPick 다중 선택 | `value`와 `values`가 downstream에서 각각 사용 가능 |
+| IT-108 | quickPick `itemsFromCommand` + `itemsExclude` | 셸 명령 stdout의 각 비어 있지 않은 줄이 항목이 되고, `itemsExclude`가 지정 줄(`origin/HEAD`)을 제거하며, 선택값이 downstream에 전달됨 |
+| IT-109 | inputBox `extractPattern` + `validatePattern` | 보간된 `value`(브랜치 이름)에서 Jira 키를 추출해 기본값으로 채우고, `validateInput`이 잘못된 형식은 거부·정상 형식은 통과시킴 |
 | IT-017 | confirm 취소 중단 | 사용자가 취소한 confirm task가 pipeline을 중단하고 이후 task를 실행하지 않음 |
 | IT-033 | envPick 목록 노출·선택 전달 | 사용자 셸이 노출하는 이름만 정렬되어 QuickPick 에 나오고 (`VSCODE_*` 등 확장 호스트 전용 변수는 필터링), 선택된 이름이 downstream 에 전달됨 |
 | IT-034 | envPick 취소 중단 | 사용자가 취소한 envPick task 가 pipeline 을 중단하고 이후 task 를 실행하지 않음 |

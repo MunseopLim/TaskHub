@@ -141,6 +141,46 @@ suite('buildPreviewReport', () => {
         assert.doesNotMatch(report.split('Summary:')[1], /\$\{pickEnv/);
     });
 
+    test('quickPick itemsFromCommand is rendered and interpolated (string form)', () => {
+        const item: ActionItem = {
+            id: 'a.ifc',
+            title: 'T',
+            action: {
+                description: 'x',
+                tasks: [{
+                    id: 'branch',
+                    type: 'quickPick',
+                    itemsFromCommand: 'git for-each-ref ${workspaceFolder}'
+                } as any]
+            }
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.match(report, /itemsFromCommand: git for-each-ref/);
+        // ${workspaceFolder} inside itemsFromCommand must be interpolated.
+        assert.ok(report.includes(`git for-each-ref ${WS}`), `expected resolved path, got: ${report}`);
+        assert.match(report, /items will be populated from this command/);
+        // The static items(N) listing must not appear for a dynamic source.
+        assert.doesNotMatch(report, /items \(\d+\):/);
+    });
+
+    test('quickPick itemsFromCommand surfaces unresolved variables in summary', () => {
+        const item: ActionItem = {
+            id: 'a.ifc2',
+            title: 'T',
+            action: {
+                description: 'x',
+                tasks: [{
+                    id: 'branch',
+                    type: 'quickPick',
+                    itemsFromCommand: 'list ${missing.value}'
+                } as any]
+            }
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.match(report, /unresolved/i);
+        assert.match(report, /\$\{missing\.value\}/);
+    });
+
     test('lists capture rules and references downstream', () => {
         const item: ActionItem = {
             id: 'a.6',

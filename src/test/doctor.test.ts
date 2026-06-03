@@ -198,6 +198,45 @@ suite('Doctor', () => {
             `expected variable.unresolved, got ${codes(findings).join(',')}`);
     });
 
+    test('flags unresolved ${...} inside quickPick itemsFromCommand', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.ifc',
+                title: 'ifc',
+                action: {
+                    description: 'd',
+                    tasks: [{ id: 'branch', type: 'quickPick', itemsFromCommand: 'list ${typo.value}' }]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `expected variable.unresolved from itemsFromCommand, got ${codes(findings).join(',')}`);
+    });
+
+    test('does not flag stale ${...} in quickPick `items` when itemsFromCommand is set', () => {
+        // Runtime ignores `items` once itemsFromCommand populates the list, so
+        // a leftover ${typo.value} in `items` must not raise variable.unresolved.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.ifc-stale',
+                title: 'ifc-stale',
+                action: {
+                    description: 'd',
+                    tasks: [{
+                        id: 'branch',
+                        type: 'quickPick',
+                        items: ['${typo.value}'],
+                        itemsFromCommand: 'git for-each-ref'
+                    }]
+                }
+            }
+        ])], v);
+        assert.strictEqual(findings.filter(f => f.code === 'variable.unresolved').length, 0,
+            `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
+    });
+
     test('does not flag a fully-resolved upstream reference', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([

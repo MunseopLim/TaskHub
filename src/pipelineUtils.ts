@@ -303,7 +303,7 @@ const RESERVED_VARIABLE_HEADS: ReadonlySet<string> = new Set([
 const RESERVED_HEAD_PREFIXES: ReadonlyArray<string> = ['env:', 'input:'];
 
 /** Task object keys whose value can be a per-platform `{windows,macos,linux}` object. */
-const PLATFORM_BRANCH_KEYS: ReadonlySet<string> = new Set(['command', 'tool']);
+const PLATFORM_BRANCH_KEYS: ReadonlySet<string> = new Set(['command', 'tool', 'itemsFromCommand']);
 
 function pickPlatformBranch(
     obj: Record<string, unknown>,
@@ -317,7 +317,7 @@ function pickPlatformBranch(
 
 /**
  * Return a shallow projection of `task` where each platform-branched
- * field (currently `command` / `tool`) is replaced by the value of the
+ * field (currently `command` / `tool` / `itemsFromCommand`) is replaced by the value of the
  * active platform's branch — mirroring what `getCommandString` /
  * `getToolCommand` actually execute. Non-active branches are dropped,
  * so a `${A.output}` reference that only appears in (say) the linux
@@ -327,8 +327,9 @@ function pickPlatformBranch(
  * for the current platform.
  *
  * The projection is shallow on purpose: only top-level `command` /
- * `tool` are platform-branched in the schema, so we don't recurse into
- * sub-objects (e.g. `output.*` fields are not platform-keyed).
+ * `tool` / `itemsFromCommand` are platform-branched in the schema, so we
+ * don't recurse into sub-objects (e.g. `output.*` fields are not
+ * platform-keyed).
  */
 function projectActivePlatformBranches(task: unknown, platform: NodeJS.Platform): unknown {
     if (!task || typeof task !== 'object' || Array.isArray(task)) { return task; }
@@ -343,6 +344,19 @@ function projectActivePlatformBranches(task: unknown, platform: NodeJS.Platform)
         } else {
             result[k] = v;
         }
+    }
+    // When `itemsFromCommand` is present, static `items` never executes at
+    // runtime: either the command populates the pick list (items ignored), or
+    // — for a per-platform object with no branch for the active platform — the
+    // dispatcher's `getCommandString` throws, same as `command` (there is NO
+    // fallback to static `items`). Either way `items` is dead, so drop it from
+    // the inference view so stale `${...}` refs in `items` can't fabricate
+    // deps/cycles. Checked against the *original* task, not the projected one,
+    // because the object form may have just been projected away above.
+    const ifc = (task as Record<string, unknown>).itemsFromCommand;
+    const hasItemsFromCommand = typeof ifc === 'string' ? ifc.length > 0 : (!!ifc && typeof ifc === 'object');
+    if (hasItemsFromCommand) {
+        delete result.items;
     }
     return result;
 }

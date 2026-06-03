@@ -111,6 +111,65 @@ suite('inferTaskDependencies — auto-inference from ${taskId.x}', () => {
         );
     });
 
+    test('platform-branched `itemsFromCommand` object: only the active branch is scanned', () => {
+        const task = mkTask({
+            id: 'D',
+            type: 'quickPick',
+            itemsFromCommand: { windows: '${A.output}', macos: '${B.output}', linux: '${C.output}' },
+        } as any);
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(task, validIds, { platform: 'win32' })],
+            ['A']
+        );
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(task, validIds, { platform: 'darwin' })],
+            ['B']
+        );
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(task, validIds, { platform: 'linux' })],
+            ['C']
+        );
+    });
+
+    test('quickPick with itemsFromCommand ignores static `items` in inference', () => {
+        // Runtime overwrites the pick list with command output, so a stale
+        // ${A.output} left in `items` must not become a dep. The ref inside
+        // itemsFromCommand (${B.output}) still counts.
+        const task = mkTask({
+            id: 'D',
+            type: 'quickPick',
+            items: ['${A.output}'],
+            itemsFromCommand: 'list ${B.output}',
+        } as any);
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(task, validIds)],
+            ['B']
+        );
+    });
+
+    test('quickPick drops `items` even when itemsFromCommand lacks a branch for the platform', () => {
+        // itemsFromCommand present (object) → static items never executes: on
+        // win32 the command runs (items ignored); on linux the dispatcher's
+        // getCommandString throws (no linux branch, no fallback to items).
+        // Either way `items` is dead, so its ${A.output} must never be a dep.
+        const task = mkTask({
+            id: 'D',
+            type: 'quickPick',
+            items: ['${A.output}'],
+            itemsFromCommand: { windows: 'list ${B.output}' },
+        } as any);
+        // linux: items dropped, windows branch not active → no deps at all.
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(task, validIds, { platform: 'linux' })],
+            []
+        );
+        // win32: items dropped, windows branch active → only ${B.output}.
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(task, validIds, { platform: 'win32' })],
+            ['B']
+        );
+    });
+
     test('platform branch missing for current platform is dropped from inference', () => {
         // Only `windows` defined → on linux, no inference contribution
         // (the runtime would also throw at execution time, but the graph

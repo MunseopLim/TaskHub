@@ -753,7 +753,22 @@ function analyzeActionTasks(
         } else if (typeof task.source === 'string') {
             visitString(task.source);
         }
-        if (Array.isArray(task.items)) {
+        // quickPick itemsFromCommand (string or per-platform object) — runtime
+        // interpolates it just like `command`, so its ${...} refs must count
+        // toward variable.unresolved too. When it is present the runtime
+        // ignores static `items` (handleQuickPick overwrites the pick list),
+        // so scanning the stale `items` here would raise a false
+        // variable.unresolved for refs that never execute.
+        const ifc = (task as any).itemsFromCommand;
+        const hasItemsFromCommand = typeof ifc === 'string' ? ifc.length > 0 : !!ifc;
+        if (typeof ifc === 'string') {
+            visitString(ifc);
+        } else if (ifc && typeof ifc === 'object') {
+            for (const v of Object.values(ifc)) {
+                visitString(v as any);
+            }
+        }
+        if (!hasItemsFromCommand && Array.isArray(task.items)) {
             for (const it of task.items) {
                 if (typeof it === 'string') {
                     visitString(it);

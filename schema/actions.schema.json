@@ -137,6 +137,18 @@
           "type": "string",
           "description": "Text to append to the user input (for 'inputBox' type). The final value will be: prefix + userInput + suffix"
         },
+        "validatePattern": {
+          "type": "string",
+          "description": "For 'inputBox': a regex the user input must match. Non-matching text is rejected live with 'validateMessage'. An invalid pattern is ignored. e.g. '^[A-Z][A-Z0-9]+-\\\\d+$' for a Jira ticket key."
+        },
+        "validateMessage": {
+          "type": "string",
+          "description": "For 'inputBox': message shown when the value fails 'validatePattern'. Defaults to a generic 'invalid format' message."
+        },
+        "extractPattern": {
+          "type": "string",
+          "description": "For 'inputBox': a regex applied to the interpolated 'value' to derive the prefilled default. Uses capture group 1 if present, else the whole match; no match prefills empty. e.g. extract a Jira key from a branch name with '[A-Z][A-Z0-9]+-\\\\d+'."
+        },
         "items": {
           "oneOf": [
             {
@@ -173,6 +185,27 @@
           "type": "boolean",
           "description": "If true, allows multiple selection (for 'quickPick' type). Results will be available as both 'value' (first selection) and 'values' (comma-separated list).",
           "default": false
+        },
+        "itemsFromCommand": {
+          "oneOf": [
+            { "type": "string" },
+            {
+              "type": "object",
+              "properties": {
+                "windows": { "type": "string" },
+                "macos": { "type": "string" },
+                "linux": { "type": "string" }
+              }
+            }
+          ],
+          "description": "For 'quickPick': a shell command whose stdout becomes the pick list (one item per non-empty, trimmed line). Runs in 'cwd' (or the workspace folder) via the login shell. Supports interpolation and the OS-specific object form. When set, 'items' is ignored. e.g. 'git for-each-ref --format=%(refname:short) refs/remotes/origin' to list origin branches."
+        },
+        "itemsExclude": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ],
+          "description": "For 'quickPick' with 'itemsFromCommand': exact line(s) to drop from the command output (e.g. 'origin/HEAD'). Ignored when 'itemsFromCommand' is not set."
         },
         "message": {
           "type": "string",

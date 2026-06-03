@@ -29,6 +29,25 @@
 =====================================================================
 -->
 
+## [0.6.1] - 2026-06-03
+
+### 추가 — quickPick 동적 항목 · inputBox 검증/추출 (CI/CD 브랜치·Jira 티켓 워크플로)
+
+#### 추가 (기능)
+
+- **quickPick `itemsFromCommand`**: 셸 명령 stdout의 각 비어 있지 않은 줄을 선택 항목으로 채운다. `cwd`(없으면 워크스페이스 폴더)에서 로그인 셸로 실행되며 변수 보간과 `command`와 동일한 OS별 객체 형태를 지원한다. origin 브랜치 목록을 `git for-each-ref ... refs/remotes/origin`으로 동적으로 채우는 등에 사용. 동반 옵션 `itemsExclude`로 출력에서 특정 줄(예: `origin/HEAD`)을 제거. 참조: [src/extension.ts](src/extension.ts), [src/schema.ts](src/schema.ts).
+- **inputBox `validatePattern` / `validateMessage`**: 입력값이 만족해야 하는 정규식을 지정하면 입력 도중 형식 위반을 실시간 거부하고 메시지를 표시한다. 잘못된 정규식은 무시(검증 미적용). Jira 티켓 키(`^[A-Z][A-Z0-9]+-\d+$`) 등 형식 강제에 사용. 참조: [src/extension.ts](src/extension.ts).
+- **inputBox `extractPattern`**: 보간된 `value`에 정규식을 적용해 기본값을 추출한다(캡처 그룹 1 우선, 없으면 전체 매치, 매치 없으면 빈 값). 브랜치 이름 `feature/ABCTEST-123-foo`에서 티켓 키를 뽑아 입력 기본값으로 채우는 데 사용. 참조: [src/extension.ts](src/extension.ts).
+
+#### 도구 정합성 (Preview / Doctor / 그래프)
+
+- **Preview / Doctor가 `itemsFromCommand` 인식**: Preview Run은 동적 quickPick을 `items (0)` 대신 보간된 명령·cwd와 함께 표시하고, Doctor는 `itemsFromCommand` 안의 `${...}`도 `variable.unresolved` 검사에 포함한다. 의존성 추론도 OS별 branch projection에 `itemsFromCommand`를 포함해 현재 플랫폼에서 실행하지 않는 branch의 ref로 false cycle이 생기지 않는다. 참조: [src/previewRun.ts](src/previewRun.ts), [src/doctor.ts](src/doctor.ts), [src/pipelineUtils.ts](src/pipelineUtils.ts).
+- **무시되는 `items`는 검사 제외**: `itemsFromCommand`가 있으면 정적 `items`는 실행되지 않는다 — 명령이 목록을 채우거나, OS별 객체에 현재 플랫폼 branch가 없으면 `command`와 동일하게 오류가 난다(`items`로 폴백 없음). 어느 경우든 `items`는 죽은 값이므로 의존성 추론과 Doctor 모두 `items`에 남은 stale `${...}`를 검사에서 제외한다. 참조: [src/pipelineUtils.ts](src/pipelineUtils.ts), [src/doctor.ts](src/doctor.ts).
+- **`runCommandCaptureLines` 출력 처리**: child process의 `exit` 대신 `close` 이벤트에서 stdout을 확정해 마지막 줄 유실을 방지. stdout+stderr **합산** 1MB 상한으로 실패 명령의 stderr 폭주에 따른 메모리 증가를 차단. `extractPattern`은 잘못된 정규식일 때도 문서대로 빈 값으로 prefill. 참조: [src/extension.ts](src/extension.ts).
+- **문서 (값 전달·HEAD 필터)**: CI 예제가 선택값을 `command` 문자열에 끼우지 않고 quoting되는 `args`로 넘기도록 수정(명령 주입 표면 제거). `git for-each-ref %(refname:short)`가 symbolic HEAD를 `origin`으로 축약하는 점을 반영해 `itemsExclude: ["origin", "origin/HEAD"]` 권장. 참조: [docs/features.md](docs/features.md).
+
+**테스트**: 신규 9 케이스(IT-108 itemsFromCommand+itemsExclude, IT-109 extractPattern+validatePattern, taskGraph projection·items 제외·branch 없을 때 items 유지, Preview 2건, Doctor 2건).
+
 ## [0.6.0] - 2026-05-30
 
 ### 수정 / 추가 — 전체 코드 리뷰 반영 (호버 정확성 · 파싱 견고성 · i18n · UX)

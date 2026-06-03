@@ -377,16 +377,41 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 break;
             }
             case 'quickPick': {
-                const items = Array.isArray(task.items) ? task.items : [];
                 const placeHolder = task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined;
-                lines.push(`  items (${items.length}):`);
-                for (const it of items) {
-                    if (typeof it === 'string') {
-                        lines.push(`    - ${interpolatePipelineVariables(it, interpolationContext)}`);
-                    } else if (it && typeof it === 'object') {
-                        const label = it.label ? interpolatePipelineVariables(it.label, interpolationContext) : '(missing label)';
-                        const desc = it.description ? interpolatePipelineVariables(it.description, interpolationContext) : '';
-                        lines.push(`    - ${label}${desc ? `  (${desc})` : ''}`);
+                // Dynamic source: items come from a command's stdout at runtime.
+                // Resolve it like `command` (string or per-platform object) so
+                // its ${...} refs are surfaced in the interpolation check.
+                let itemsFromCommand: string | undefined;
+                if (typeof task.itemsFromCommand === 'string') {
+                    itemsFromCommand = interpolatePipelineVariables(task.itemsFromCommand, interpolationContext);
+                } else if (task.itemsFromCommand && typeof task.itemsFromCommand === 'object') {
+                    const cloned: any = JSON.parse(JSON.stringify(task.itemsFromCommand));
+                    for (const os of Object.keys(cloned)) {
+                        cloned[os] = interpolatePipelineVariables(cloned[os], interpolationContext);
+                    }
+                    try {
+                        itemsFromCommand = getCommandString(cloned);
+                    } catch {
+                        itemsFromCommand = '(no command for current platform)';
+                    }
+                }
+                if (itemsFromCommand !== undefined) {
+                    const cwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : '(defaults to workspace folder)';
+                    lines.push(`  itemsFromCommand: ${itemsFromCommand}`);
+                    lines.push(`  cwd:     ${cwd}`);
+                    lines.push(`  (items will be populated from this command's output at runtime)`);
+                    interpolated.push(itemsFromCommand, cwd);
+                } else {
+                    const items = Array.isArray(task.items) ? task.items : [];
+                    lines.push(`  items (${items.length}):`);
+                    for (const it of items) {
+                        if (typeof it === 'string') {
+                            lines.push(`    - ${interpolatePipelineVariables(it, interpolationContext)}`);
+                        } else if (it && typeof it === 'object') {
+                            const label = it.label ? interpolatePipelineVariables(it.label, interpolationContext) : '(missing label)';
+                            const desc = it.description ? interpolatePipelineVariables(it.description, interpolationContext) : '';
+                            lines.push(`    - ${label}${desc ? `  (${desc})` : ''}`);
+                        }
                     }
                 }
                 if (placeHolder) { lines.push(`  placeHolder: ${placeHolder}`); }
