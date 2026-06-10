@@ -643,4 +643,117 @@ suite('Doctor', () => {
         assert.ok(schemaFinding!.range.startLine > 1,
             `expected position past line 1, got ${schemaFinding!.range.startLine}`);
     });
+
+    suite('output.not-captured / output.ignored (M9)', () => {
+        // 런타임은 shell/command에서 passTheResultToNextTask가 falsy면 빈
+        // 결과를 넘긴다(출력 스트리밍·capture 생략). 이전 시뮬레이션은
+        // 무조건 output을 만들어 가장 흔한 설정 실수를 검출하지 못했다.
+
+        test('flags ${A.output} when A does not pass its result (dedicated code, no duplicate unresolved)', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([
+                {
+                    id: 'a.m9',
+                    title: 'X',
+                    action: {
+                        description: 'd',
+                        tasks: [
+                            { id: 'build', type: 'shell', command: 'make all' },
+                            { id: 'deploy', type: 'shell', command: 'deploy ${build.output}', passTheResultToNextTask: true }
+                        ]
+                    }
+                }
+            ])], v);
+            const targeted = findings.filter(f => f.code === 'output.not-captured');
+            assert.strictEqual(targeted.length, 1);
+            assert.strictEqual(targeted[0].severity, 'warning');
+            assert.ok(targeted[0].message.includes("'build'"));
+            assert.ok(targeted[0].messageKo?.includes('passTheResultToNextTask'));
+            // 전용 경고로 대체 — 같은 참조를 variable.unresolved 로 중복 보고하지 않는다
+            assert.ok(!codes(findings).includes('variable.unresolved'));
+        });
+
+        test('flags forward reference to an uncaptured task', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([
+                {
+                    id: 'a.m9fwd',
+                    title: 'X',
+                    action: {
+                        description: 'd',
+                        tasks: [
+                            { id: 'use', type: 'shell', command: 'echo ${later.output}', passTheResultToNextTask: true },
+                            { id: 'later', type: 'shell', command: 'make' }
+                        ]
+                    }
+                }
+            ])], v);
+            assert.ok(codes(findings).includes('output.not-captured'),
+                `expected output.not-captured, got: ${codes(findings).join(', ')}`);
+        });
+
+        test('does not flag when the producer passes its result', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([
+                {
+                    id: 'a.m9ok',
+                    title: 'X',
+                    action: {
+                        description: 'd',
+                        tasks: [
+                            { id: 'build', type: 'shell', command: 'make all', passTheResultToNextTask: true },
+                            { id: 'deploy', type: 'shell', command: 'deploy ${build.output}', passTheResultToNextTask: true }
+                        ]
+                    }
+                }
+            ])], v);
+            assert.deepStrictEqual(findings, []);
+        });
+
+        test('warns when output mode/capture/diagnostics are dead without passTheResultToNextTask', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([
+                {
+                    id: 'a.m9dead',
+                    title: 'X',
+                    action: {
+                        description: 'd',
+                        tasks: [
+                            {
+                                id: 'build', type: 'shell', command: 'make all',
+                                output: { mode: 'editor', capture: { name: 'ver', regex: 'v(\\d+)' } }
+                            }
+                        ]
+                    }
+                }
+            ])], v);
+            const ignored = findings.filter(f => f.code === 'output.ignored');
+            assert.strictEqual(ignored.length, 1);
+            assert.ok(ignored[0].message.includes("mode: 'editor'"));
+            assert.ok(ignored[0].message.includes('capture'));
+        });
+
+        test('capture-name refs of an uncaptured task are flagged', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([
+                {
+                    id: 'a.m9cap',
+                    title: 'X',
+                    action: {
+                        description: 'd',
+                        tasks: [
+                            {
+                                id: 'build', type: 'shell', command: 'make all',
+                                output: { capture: { name: 'ver', regex: 'v(\\d+)' } }
+                            },
+                            { id: 'tag', type: 'shell', command: 'git tag ${build.ver}', passTheResultToNextTask: true }
+                        ]
+                    }
+                }
+            ])], v);
+            const found = codes(findings);
+            assert.ok(found.includes('output.not-captured'), `expected output.not-captured, got: ${found.join(', ')}`);
+            assert.ok(found.includes('output.ignored'), `expected output.ignored, got: ${found.join(', ')}`);
+        });
+    });
 });

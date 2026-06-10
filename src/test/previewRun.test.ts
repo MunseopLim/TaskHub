@@ -354,6 +354,8 @@ suite('buildPreviewReport', () => {
         // Both tasks must be `parallel: true` so the runtime can actually
         // reorder — pre-fix this fixture had B sequential, which produces
         // a real cycle (A→B inferred + B→A barrier) the runtime rejects.
+        // B must capture its output (passTheResultToNextTask: true) — without
+        // it the M9 check correctly flags ${B.output} as never captured.
         const item: ActionItem = {
             id: 'a.fwdref',
             title: 'forward ref',
@@ -361,7 +363,7 @@ suite('buildPreviewReport', () => {
                 description: 'x',
                 tasks: [
                     { id: 'A', type: 'shell', command: 'echo ${B.output}', parallel: true } as any,
-                    { id: 'B', type: 'shell', command: 'make build', parallel: true } as any,
+                    { id: 'B', type: 'shell', command: 'make build', parallel: true, passTheResultToNextTask: true } as any,
                 ]
             }
         };
@@ -516,6 +518,81 @@ suite('buildPreviewReport', () => {
             const report = buildPreviewReport(item, baseOptions());
             assert.match(report, /tool: \/usr\/local\/bin\/7z/);
             assert.doesNotMatch(report, /built-in engine/);
+        });
+    });
+
+    suite('uncaptured output refs (M9 회귀 가드)', () => {
+        // 런타임은 shell/command에서 passTheResultToNextTask가 falsy면 빈
+        // 결과를 넘기므로 `${id.output}`이 리터럴로 셸에 들어간다. 이전
+        // 시뮬레이션은 무조건 output을 만들어 이 실수를 검출하지 못했다.
+
+        test('flags ${A.output} when A does not pass its result', () => {
+            const item: ActionItem = {
+                id: 'a.m9',
+                title: 'uncaptured',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'build', type: 'shell', command: 'make all' },
+                        { id: 'deploy', type: 'shell', command: 'deploy ${build.output}', passTheResultToNextTask: true }
+                    ]
+                }
+            };
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /\$\{build\.output\}.*'build' does not set 'passTheResultToNextTask'/);
+            assert.match(report, /fix before running/);
+        });
+
+        test('flags forward reference to an uncaptured task', () => {
+            const item: ActionItem = {
+                id: 'a.m9fwd',
+                title: 'forward uncaptured',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'use', type: 'shell', command: 'echo ${later.output}', passTheResultToNextTask: true },
+                        { id: 'later', type: 'shell', command: 'make' }
+                    ]
+                }
+            };
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /\$\{later\.output\}.*'later' does not set 'passTheResultToNextTask'/);
+        });
+
+        test('does not flag when the producer passes its result', () => {
+            const item: ActionItem = {
+                id: 'a.m9ok',
+                title: 'captured',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'build', type: 'shell', command: 'make all', passTheResultToNextTask: true },
+                        { id: 'deploy', type: 'shell', command: 'deploy ${build.output}', passTheResultToNextTask: true }
+                    ]
+                }
+            };
+            const report = buildPreviewReport(item, baseOptions());
+            assert.doesNotMatch(report, /does not set 'passTheResultToNextTask'/);
+            assert.doesNotMatch(report, /unresolved variables/);
+        });
+
+        test('capture-name refs of an uncaptured task are flagged too', () => {
+            const item: ActionItem = {
+                id: 'a.m9cap',
+                title: 'capture skipped',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        {
+                            id: 'build', type: 'shell', command: 'make all',
+                            output: { capture: { name: 'ver', regex: 'v(\\d+)' } }
+                        },
+                        { id: 'tag', type: 'shell', command: 'git tag ${build.ver}', passTheResultToNextTask: true }
+                    ]
+                }
+            };
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /\$\{build\.ver\}.*'build' does not set 'passTheResultToNextTask'/);
         });
     });
 });

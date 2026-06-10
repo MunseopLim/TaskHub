@@ -1883,6 +1883,8 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `diagnostics.group` | warning | `file`/`line`/`message` 등의 그룹 인덱스가 regex가 정의한 capture group 수보다 큼. |
 | `diagnostics.preset` | error | `"$gcc"` / `"$tsc"` 같은 preset 단축 문자열이 알 수 없는 이름이거나 `$` 없이 적힘. |
 | `variable.unresolved` | warning | Preview Run과 동일한 simulation 컨텍스트에서 변수 치환 후에도 남는 `${…}` 가 있음. 런타임에는 리터럴로 전달되므로 의도된 placeholder가 아니면 거의 항상 버그. |
+| `output.not-captured` | warning | `${A.output}`(또는 A의 capture 이름)을 참조하지만 shell/command 태스크 A에 `passTheResultToNextTask: true`가 없음. 런타임은 출력을 스트리밍만 하고 빈 결과를 넘기므로 참조가 리터럴로 남음 — 가장 흔한 설정 실수. 선언 순서와 무관하게(전방 참조 포함) 검출. |
+| `output.ignored` | warning | shell/command 태스크에 `output.mode`/`capture`/`diagnostics`가 정의되어 있지만 `passTheResultToNextTask: true`가 없음. 런타임이 조용히 무시하는 죽은 설정. |
 | `path.outside-workspace` | error | `writeFile` / `appendFile` / `output.filePath`의 해석 결과가 워크스페이스 밖. 런타임이 실행을 거부할 경로. (변수 치환 후에도 `${…}`가 남은 경우는 검사를 건너뜀 — 안전 결정 불가) |
 | `dependsOn.self` | error | task의 `dependsOn`에 자기 자신이 포함됨. |
 | `dependsOn.missing` | error | `dependsOn`이 같은 액션에 존재하지 않는 task id를 가리킴. |

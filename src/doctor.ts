@@ -38,6 +38,7 @@ import {
     simulateTaskResult,
     findUnresolved,
     findTypoRefs,
+    findUncapturedOutputRefs,
     isInsideWorkspace,
     placeholder,
     UNRESOLVED_VAR_RE,
@@ -700,8 +701,12 @@ function analyzeActionTasks(
     // `variable.unresolved`. Pre-fix this used the full task-id set
     // and silently swallowed those typos.
     const knownTaskIds = new Set<string>();
+    const tasksById = new Map<string, Task>();
     for (const t of tasks) {
-        if (t && typeof t.id === 'string') { knownTaskIds.add(t.id); }
+        if (t && typeof t.id === 'string') {
+            knownTaskIds.add(t.id);
+            tasksById.set(t.id, t);
+        }
     }
 
     for (const task of tasks) {
@@ -794,7 +799,10 @@ function analyzeActionTasks(
         }
         const unresolved = findUnresolved(interpolated, forwardTaskIds);
         const typos = findTypoRefs(task, allResults, task.id);
-        const merged = Array.from(new Set([...unresolved, ...typos]));
+        // 미캡처 shell/command 출력 참조는 전용 경고(output.not-captured)로
+        // 따로 보고 — 일반 unresolved 목록에서 제외해 중복을 막는다(M9).
+        const uncaptured = findUncapturedOutputRefs(task, tasksById, task.id);
+        const merged = Array.from(new Set([...unresolved, ...typos])).filter(r => !uncaptured.has(r));
         if (merged.length > 0) {
             findings.push({
                 filePath: input.filePath,
@@ -805,6 +813,39 @@ function analyzeActionTasks(
                 message: `Task '${item.id}.${task.id}' has unresolved variable(s) under simulated inputs: ${merged.join(', ')}. At runtime these pass through as literal '\${…}'.`,
                 messageKo: `Task '${item.id}.${task.id}'에 시뮬레이션 입력으로 해석되지 않는 변수 참조가 있습니다: ${merged.join(', ')}. 런타임에서는 리터럴 '\${…}'로 전달됩니다.`,
             });
+        }
+        if (uncaptured.size > 0) {
+            const refs = Array.from(uncaptured.keys()).join(', ');
+            const heads = Array.from(new Set(uncaptured.values())).map(h => `'${h}'`).join(', ');
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: findIdLine(input.rawText, task.id),
+                severity: 'warning',
+                code: 'output.not-captured',
+                message: `Task '${item.id}.${task.id}' references ${refs}, but task ${heads} does not set 'passTheResultToNextTask': true — its output is streamed, not captured, so the reference passes through as a literal '\${…}'.`,
+                messageKo: `Task '${item.id}.${task.id}'가 ${refs}를 참조하지만, ${heads} 태스크에 'passTheResultToNextTask': true가 없어 출력이 캡처되지 않습니다. 참조는 리터럴 '\${…}'로 전달됩니다.`,
+            });
+        }
+
+        // shell/command에서 passTheResultToNextTask 없이 정의된 output
+        // mode/capture/diagnostics는 런타임이 조용히 무시한다(M9).
+        if ((task.type === 'shell' || task.type === 'command') && !task.passTheResultToNextTask && task.output) {
+            const dead: string[] = [];
+            if (task.output.mode) { dead.push(`mode: '${task.output.mode}'`); }
+            if (task.output.capture) { dead.push('capture'); }
+            if (task.output.diagnostics) { dead.push('diagnostics'); }
+            if (dead.length > 0) {
+                findings.push({
+                    filePath: input.filePath,
+                    sourceLabel: input.sourceLabel,
+                    range: findIdLine(input.rawText, task.id),
+                    severity: 'warning',
+                    code: 'output.ignored',
+                    message: `Task '${item.id}.${task.id}' defines output ${dead.join(', ')} but does not set 'passTheResultToNextTask': true — for 'shell'/'command' tasks the runtime silently ignores them.`,
+                    messageKo: `Task '${item.id}.${task.id}'에 output ${dead.join(', ')}가 정의되어 있지만 'passTheResultToNextTask': true가 없습니다 — 'shell'/'command' 태스크에서 런타임이 조용히 무시합니다.`,
+                });
+            }
         }
 
         // Outside-workspace write checks. Skip when the resolved string
@@ -838,9 +879,12 @@ function analyzeActionTasks(
             }
         }
 
-        // Seed downstream context.
+        // Seed downstream context. 런타임은 shell/command에서
+        // passTheResultToNextTask가 falsy면 capture도 건너뛴다(M9).
         const sim = simulateTaskResult(task);
-        if (task.output?.capture) {
+        const captureSkippedAtRuntime =
+            (task.type === 'shell' || task.type === 'command') && !task.passTheResultToNextTask;
+        if (task.output?.capture && !captureSkippedAtRuntime) {
             const rules = Array.isArray(task.output.capture) ? task.output.capture : [task.output.capture];
             for (const r of rules) {
                 if (r && typeof r.name === 'string') {

@@ -75,7 +75,13 @@ export function simulateTaskResult(task: Task): SimulatedResult {
             return { confirmed: 'true' };
         case 'shell':
         case 'command':
-            return { output: placeholder(task.type, task.id, 'stdout') };
+            // 런타임(executeSingleTask)은 passTheResultToNextTask가 falsy면
+            // 출력을 스트리밍만 하고 빈 결과를 넘긴다. 시뮬레이션이 무조건
+            // output을 만들면 다운스트림 `${id.output}` 참조가 늘 해석되는
+            // 것처럼 보여 가장 흔한 설정 실수를 놓친다(M9).
+            return task.passTheResultToNextTask
+                ? { output: placeholder(task.type, task.id, 'stdout') }
+                : {};
         case 'writeFile':
         case 'appendFile':
             return { path: placeholder(task.type, task.id, 'path') };
@@ -107,20 +113,35 @@ export function findTypoRefs(
     selfId: string
 ): string[] {
     const found = new Set<string>();
+    visitTaskRefs(task, (literal, head, key) => {
+        if (head === selfId || key === '') { return; }
+        const result = allResults[head];
+        if (!result) { return; } // forward ref / built-in / unknown
+        if (!Object.prototype.hasOwnProperty.call(result, key)) {
+            found.add(literal);
+        }
+    });
+    return Array.from(found);
+}
+
+/**
+ * Walk a task's raw (pre-interpolation) string leaves and invoke `onRef` for
+ * every dotted `${head.key}` reference. Bare `${id}` short-forms are skipped.
+ * `task.output.capture` / `task.output.diagnostics` / `dependsOn` subtrees
+ * are skipped — their `${...}` literals are regex content, not refs.
+ * Shared traversal for `findTypoRefs` / `findUncapturedOutputRefs`.
+ */
+function visitTaskRefs(
+    task: Task,
+    onRef: (literal: string, head: string, key: string) => void
+): void {
     const visit = (value: unknown): void => {
         if (typeof value === 'string') {
             for (const m of value.matchAll(/\$\{([^}]+)\}/g)) {
                 const expr = m[1];
                 const dotIdx = expr.indexOf('.');
                 if (dotIdx === -1) { continue; } // bare `${id}` short-form
-                const head = expr.slice(0, dotIdx).trim();
-                const key = expr.slice(dotIdx + 1).trim();
-                if (head === selfId || key === '') { continue; }
-                const result = allResults[head];
-                if (!result) { continue; } // forward ref / built-in / unknown
-                if (!Object.prototype.hasOwnProperty.call(result, key)) {
-                    found.add(m[0]);
-                }
+                onRef(m[0], expr.slice(0, dotIdx).trim(), expr.slice(dotIdx + 1).trim());
             }
             return;
         }
@@ -135,7 +156,43 @@ export function findTypoRefs(
         }
     };
     visit(task);
-    return Array.from(found);
+}
+
+/**
+ * Find `${head.key}` references whose head is a shell/command task that does
+ * NOT set `passTheResultToNextTask: true` (M9). 런타임에서 그런 태스크는
+ * 출력을 터미널로 스트리밍만 하고 빈 결과를 넘기므로 `.output`도 capture
+ * 이름도 존재하지 않아 참조가 리터럴 '${…}'로 셸에 들어간다 — 가장 흔한
+ * 파이프라인 설정 실수. 선언 순서와 무관하게(전방 참조 포함) 검출한다.
+ *
+ * `.output`과 head 태스크의 capture 이름 참조만 보고한다 — 그 외 키는
+ * findTypoRefs / findUnresolved 몫.
+ *
+ * @returns ref literal → head task id
+ */
+export function findUncapturedOutputRefs(
+    task: Task,
+    tasksById: Map<string, Task>,
+    selfId: string
+): Map<string, string> {
+    const found = new Map<string, string>();
+    visitTaskRefs(task, (literal, head, key) => {
+        if (head === selfId || key === '') { return; }
+        const headTask = tasksById.get(head);
+        if (!headTask || (headTask.type !== 'shell' && headTask.type !== 'command')) { return; }
+        if (headTask.passTheResultToNextTask) { return; }
+        const captureNames = new Set<string>();
+        if (headTask.output?.capture) {
+            const rules = Array.isArray(headTask.output.capture) ? headTask.output.capture : [headTask.output.capture];
+            for (const r of rules) {
+                if (r && typeof r.name === 'string') { captureNames.add(r.name); }
+            }
+        }
+        if (key === 'output' || captureNames.has(key)) {
+            found.set(literal, head);
+        }
+    });
+    return found;
 }
 
 /**
@@ -299,8 +356,12 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
     // have already been simulated, so `${alreadyRan.typoKey}` keeps
     // being reported.
     const knownTaskIds = new Set<string>();
+    const tasksById = new Map<string, Task>();
     for (const t of action.tasks) {
-        if (t && typeof t.id === 'string') { knownTaskIds.add(t.id); }
+        if (t && typeof t.id === 'string') {
+            knownTaskIds.add(t.id);
+            tasksById.set(t.id, t);
+        }
     }
 
     for (let i = 0; i < action.tasks.length; i++) {
@@ -580,14 +641,25 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         //     `.output` when the requested property is missing.
         const unresolved = findUnresolved(interpolated, forwardTaskIds);
         const typos = findTypoRefs(task, allResults, task.id);
-        const merged = Array.from(new Set([...unresolved, ...typos]));
+        // 미캡처 shell/command 출력 참조는 전용 경고로 따로 표시 — 일반
+        // unresolved 목록에서 제외해 중복 보고를 막는다(M9).
+        const uncaptured = findUncapturedOutputRefs(task, tasksById, task.id);
+        const merged = Array.from(new Set([...unresolved, ...typos])).filter(r => !uncaptured.has(r));
         if (merged.length > 0) {
             lines.push(`  unresolved variables: ${merged.join(', ')}`);
             for (const u of merged) { totalUnresolved.add(u); }
         }
+        for (const [ref, head] of uncaptured) {
+            lines.push(`  ⚠️  ${ref} — task '${head}' does not set 'passTheResultToNextTask': true, so its output is not captured and this stays a literal at runtime`);
+            totalUnresolved.add(ref);
+        }
 
         const sim = simulateTaskResult(task);
-        if (task.output?.capture) {
+        // 런타임은 shell/command에서 passTheResultToNextTask가 falsy면
+        // capture도 건너뛴다 — 시뮬레이션 컨텍스트도 동일하게(M9).
+        const captureSkippedAtRuntime =
+            (task.type === 'shell' || task.type === 'command') && !task.passTheResultToNextTask;
+        if (task.output?.capture && !captureSkippedAtRuntime) {
             const rules = Array.isArray(task.output.capture) ? task.output.capture : [task.output.capture];
             for (const r of rules) {
                 if (r && typeof r.name === 'string') {
