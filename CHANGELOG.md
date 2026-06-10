@@ -29,6 +29,96 @@
 =====================================================================
 -->
 
+## [0.6.9] - 2026-06-10
+
+### 수정 — Preview/Doctor 워크스페이스 판정을 런타임 규칙과 완전 일치 (0.6.8 후속)
+
+#### Medium (도구 정합성)
+
+- **심링크 escape 거짓 음성**: 0.6.8에서 런타임 `resolveWithinWorkspace`는 realpath 정규화로 심링크 escape를 거부하게 됐지만, Preview/Doctor의 `isInsideWorkspace`는 어휘적 비교만 유지해 같은 경로가 Preview에서 안전해 보이다가 런타임에서 거부되는 불일치가 생겼다. 판정 술어(`isInsideWorkspaceRoots`)를 [src/pipelineUtils.ts](src/pipelineUtils.ts)로 추출해 런타임·Preview·Doctor가 공유. 참조: [src/previewRun.ts](src/previewRun.ts), [src/doctor.ts](src/doctor.ts).
+- **null byte·빈 경로 가드**: 런타임은 null byte 경로를 거부하지만 공유 술어에는 해당 가드가 빠져 `a\u0000b.txt` 같은 경로가 같은 방식으로 어긋났다. null byte·빈 경로 가드를 술어에 추가해 런타임의 모든 거부 규칙(입력 가드, 빈 루트, Windows 예약 디바이스명, realpath 격리)과 패리티 확보. 참조: [src/pipelineUtils.ts](src/pipelineUtils.ts).
+
+**테스트**: 신규 3 케이스(Preview/Doctor 심링크 escape, 런타임 거부 규칙 전수 대조), 최종 1,408 passing.
+
+## [0.6.8] - 2026-06-10
+
+### 수정 — 워크스페이스 격리 강화 · Hex Find/호버 성능 (전수 리뷰 M10~M12)
+
+#### High (보안 경계)
+
+- **워크스페이스 격리 심링크 우회 차단**: `resolveWithinWorkspace`가 어휘적 경로 비교만 수행해 워크스페이스 내부의 외부 지향 심링크/정션으로 격리가 우회되던 문제. realpath 정규화(미존재 대상은 가장 깊은 존재 조상 기준) 후 판정하고, Windows 예약 디바이스 이름(`CON`, `NUL`, `COM1`…)을 거부. 참조: [src/pipelineUtils.ts](src/pipelineUtils.ts).
+
+#### Medium (성능)
+
+- **Hex Viewer Find 디바운스 + 매치 상한**: 키 입력마다 전체 데이터를 선형 스캔해 대용량 파일에서 웹뷰가 멈추던 문제 → 250ms 디바운스, 매치 상한 10,000건(`10,000+` 표시). 참조: [src/hexViewer.ts](src/hexViewer.ts).
+- **호버 파이프라인 순서·캐시**: 비용 0인 숫자 리터럴 검사보다 LSP 왕복(최대 3초)을 먼저 수행하던 순서를 교정하고, 비식별자 단어의 LSP 진입을 사전 차단. 매크로 테이블·문서 라인 배열을 `document.version` 키로 캐시해 수만 줄 SFR 헤더에서의 호버 지연 완화. 참조: [src/numberBaseHoverProvider.ts](src/numberBaseHoverProvider.ts).
+
+**테스트**: 신규 1 케이스(심링크 우회), 최종 1,405 passing.
+
+## [0.6.7] - 2026-06-10
+
+### 수정 — Hex Viewer 핸들러 cross-talk · 호버 정규식 경계 (전수 리뷰 M7~M8)
+
+#### Medium
+
+- **Hex Viewer 메시지 핸들러 cross-talk**: standalone 패널과 Custom Editor가 모듈 전역 disposable 하나를 공유해, 한쪽을 열면 다른 쪽의 Copy/Goto 메시지 핸들러가 끊기던 문제. Custom Editor는 인스턴스별 disposable로 분리. 참조: [src/hexViewer.ts](src/hexViewer.ts).
+- **호버 숫자 정규식 경계**: `\b`/`(?!\w)` 누락으로 `Foo123h` 식별자 내부의 `123h`, 잘못된 리터럴 `0x12g3`의 `0x12`에 부분 매치되던 문제. 참조: [src/numberBaseHoverProvider.ts](src/numberBaseHoverProvider.ts).
+
+**테스트**: 신규 4 케이스, 최종 1,404 passing.
+
+## [0.6.6] - 2026-06-10
+
+### 수정 — 64-bit 값 표시 정확성 (전수 리뷰 M5~M6)
+
+#### High (조용히 틀린 값)
+
+- **Hex Viewer 8-byte unit 정밀도**: 표시/복사 직전 `Number()` 변환으로 2^53 초과 값(`FF*8` 등)이 깨지던 문제 → BigInt 그대로 포맷. 참조: [src/hexViewer.ts](src/hexViewer.ts).
+- **호버 64-bit 리터럴 진법 변환**: `parseInt` 기반이라 `0xFFFFFFFFFFFFFFFF` 호버에 `0x10000000000000000` 등 틀린 값이 표시되던 문제 → BigInt 파싱(`parseNumberExact`) 경로 추가, 2^53 초과 값도 64-bit 비트 테이블 표시. 참조: [src/numberBaseHoverProvider.ts](src/numberBaseHoverProvider.ts).
+
+**테스트**: 신규 5 케이스, 최종 1,400 passing.
+
+## [0.6.5] - 2026-06-10
+
+### 수정 — Doctor/Preview 거짓 음성 (전수 리뷰 M9)
+
+#### Medium (도구 정합성)
+
+- **미캡처 출력 참조 검출**: 시뮬레이션이 shell/command에 무조건 `output`을 만들어, 런타임에서는 `passTheResultToNextTask`가 없으면 `${A.output}`이 리터럴로 셸에 들어가는 가장 흔한 설정 실수를 Doctor/Preview 둘 다 놓치던 문제. 시뮬레이션을 런타임과 일치시키고(capture 생략 포함), Doctor에 `output.not-captured`(전방 참조 포함)·`output.ignored`(죽은 output mode/capture/diagnostics) 경고 2종 추가. 참조: [src/previewRun.ts](src/previewRun.ts), [src/doctor.ts](src/doctor.ts), [docs/features.md](docs/features.md).
+
+**테스트**: 신규 9 케이스, 최종 1,395 passing.
+
+## [0.6.4] - 2026-06-10
+
+### 수정 — 파서 "조용히 틀린 값" 3종 (전수 리뷰 M2~M4)
+
+#### High (조용히 틀린 값)
+
+- **Intel HEX ELA 부호 오버플로**: `<< 16`이 32비트 부호 있는 시프트라 ELA ≥ 0x8000(STM32 QSPI 0x90000000, PIC32 kseg 등)의 데이터가 음수 주소로 저장되어 주소 범위·뷰어 렌더링이 깨지던 문제 → 곱셈으로 교체. 참조: [src/hexParser.ts](src/hexParser.ts).
+- **레지스터 bit 32 이상 필드 디코딩**: JS 시프트 카운트 `& 31` 처리로 `[35:32]` 필드가 하위 `[3:0]` 값을 그럴듯하게 보여주던 문제 → BigInt 경로 추가. 참조: [src/registerDecoder.ts](src/registerDecoder.ts).
+- **struct 멤버 조용한 누락**: 다차원 배열(`int matrix[2][3]`)·함수 포인터(`void (*cb)(int)`)·매크로 차원(`buf[SIZE]`)이 매칭 실패로 통째로 빠진 채 `success: true`로 보고되던 문제. 다차원 배열·함수 포인터는 지원하고, 해석 불가 선언은 `success: false` + 에러로 명시 보고. 참조: [src/structSizeCalculator.ts](src/structSizeCalculator.ts).
+
+**테스트**: 신규 9 케이스, 최종 1,386 passing.
+
+## [0.6.3] - 2026-06-10
+
+### 수정 — `output.mode: "terminal"` 임의 명령 실행 위험 (전수 리뷰 M1)
+
+#### High (보안)
+
+- **출력 본문이 셸에서 실행되던 문제**: 실제 셸 터미널에 `sendText`로 본문을 보내 개행이 Enter로 해석되어 마지막 줄을 제외한 모든 줄이 실행되던 문제(빌드 출력에 `del ...` 줄이 있으면 실제 실행됨). 셸 없는 읽기 전용 Pseudoterminal로 교체 — 표시 UX는 동일하나 본문이 명령으로 해석되지 않음. 참조: [src/extension.ts](src/extension.ts), [docs/features.md](docs/features.md).
+
+**테스트**: IT-026을 pty 기반 검증으로 갱신, 최종 1,377 passing.
+
+## [0.6.2] - 2026-06-10
+
+### 수정 — JSON Editor 유니코드 데이터 영구 손상 (전수 리뷰 C1)
+
+#### High (데이터 손실)
+
+- **atob() mojibake**: 웹뷰가 `JSON.parse(atob(...))`로 데이터를 복원할 때 `atob()`의 latin1 디코딩으로 한글·멀티바이트 문자(`—`, `≥` 등)가 깨지고, 셀 하나만 수정해 저장해도 깨진 전체 데이터가 디스크에 기록되어 영구 손상되던 문제. memoryMapViewer에서 확립한 `escapeForScript`(JSON 리터럴 직접 주입) 패턴으로 교체, saved baseline 경로 포함. 참조: [src/jsonEditor.ts](src/jsonEditor.ts).
+
+**테스트**: 신규 4 케이스(유니코드 round-trip), 최종 1,377 passing.
+
 ## [0.6.1] - 2026-06-03
 
 ### 추가 — quickPick 동적 항목 · inputBox 검증/추출 (CI/CD 브랜치·Jira 티켓 워크플로)

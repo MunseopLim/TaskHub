@@ -20,6 +20,7 @@ import {
     getCommandString,
     buildTaskGraph,
     validateTaskGraph,
+    isInsideWorkspaceRoots,
 } from './pipelineUtils';
 
 export interface PreviewOptions {
@@ -254,12 +255,14 @@ function formatCaptureRule(rule: OutputCapture): string {
     return `{ ${parts.join(', ')} }`;
 }
 
+/**
+ * 런타임 `resolveWithinWorkspace`와 동일한 규칙(realpath 정규화, Windows
+ * 예약 디바이스명)으로 판정하는 dry-run. 어휘적 비교만 쓰면 워크스페이스
+ * 내부의 외부 지향 심링크 경로가 Preview/Doctor에서 안전해 보이다가
+ * 런타임에서 거부되는 거짓 음성이 생긴다 (M10 후속).
+ */
 export function isInsideWorkspace(resolved: string, workspaceRoots: string[]): boolean {
-    const normalized = path.resolve(resolved);
-    return workspaceRoots.some(root => {
-        const rel = path.relative(path.resolve(root), normalized);
-        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-    });
+    return isInsideWorkspaceRoots(resolved, workspaceRoots);
 }
 
 export function resolveFilePathForPreview(

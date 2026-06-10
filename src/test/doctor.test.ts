@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import Ajv from 'ajv';
@@ -642,6 +643,42 @@ suite('Doctor', () => {
         // Should land deeper than line 1 — the `action` object starts on line 5.
         assert.ok(schemaFinding!.range.startLine > 1,
             `expected position past line 1, got ${schemaFinding!.range.startLine}`);
+    });
+
+    suite('path.outside-workspace symlink escape (M10 후속)', () => {
+        test('writeFile through an outward symlink raises path.outside-workspace', function () {
+            // 런타임 resolveWithinWorkspace는 realpath 정규화로 거부하는 경로를
+            // Doctor가 어휘적 비교로 통과시키던 거짓 음성 회귀 가드.
+            if (process.platform === 'win32') { this.skip(); }
+            const base = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-doctor-m10-'));
+            try {
+                const root = path.join(base, 'ws');
+                const outside = path.join(base, 'outside');
+                fs.mkdirSync(root, { recursive: true });
+                fs.mkdirSync(outside, { recursive: true });
+                fs.symlinkSync(outside, path.join(root, 'escape'));
+
+                const v = compileValidator();
+                const findings = runDoctor([makeInput([
+                    {
+                        id: 'a.m10',
+                        title: 'X',
+                        action: {
+                            description: 'd',
+                            tasks: [
+                                { id: 'w', type: 'writeFile', path: 'escape/x.txt', content: 'hi' }
+                            ]
+                        }
+                    }
+                ], { workspaceFolder: root, workspaceRoots: [root] })], v);
+                assert.ok(
+                    codes(findings).includes('path.outside-workspace'),
+                    `expected path.outside-workspace, got: ${codes(findings).join(', ')}`
+                );
+            } finally {
+                fs.rmSync(base, { recursive: true, force: true });
+            }
+        });
     });
 
     suite('output.not-captured / output.ignored (M9)', () => {

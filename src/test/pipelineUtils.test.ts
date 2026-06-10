@@ -8,6 +8,7 @@ import {
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
     resolveWithinWorkspace,
+    isInsideWorkspaceRoots,
     resolveFavoriteFilePath,
     validateLinkScheme,
     validateLinkUrlForSave,
@@ -55,6 +56,24 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         const root = path.resolve(os.tmpdir(), 'pipelineUtils-smoke');
         const p = path.join(root, 'a.txt');
         assert.strictEqual(resolveWithinWorkspace(p, [root]), p);
+    });
+
+    test('isInsideWorkspaceRoots mirrors every runtime rejection rule (P3 회귀 가드)', () => {
+        // dry-run 술어가 런타임(resolveWithinWorkspace)의 거부 규칙을 하나라도
+        // 빠뜨리면, 그 경로가 Preview/Doctor에서 안전해 보이다가 런타임에서
+        // 거부되는 거짓 음성이 생긴다. null byte가 그 사례였다.
+        const root = path.resolve(os.tmpdir(), 'pipelineUtils-smoke');
+        const nullBytePath = path.join(root, 'a\u0000b.txt');
+
+        assert.strictEqual(isInsideWorkspaceRoots(nullBytePath, [root]), false);
+        assert.throws(() => resolveWithinWorkspace(nullBytePath, [root]), /null byte/);
+
+        // 빈 경로·빈 루트도 런타임과 동일하게 거부
+        assert.strictEqual(isInsideWorkspaceRoots('', [root]), false);
+        assert.strictEqual(isInsideWorkspaceRoots(path.join(root, 'a.txt'), []), false);
+
+        // 정상 경로는 계속 허용
+        assert.strictEqual(isInsideWorkspaceRoots(path.join(root, 'a.txt'), [root]), true);
     });
 
     test('resolveWithinWorkspace rejects symlink escape (M10 회귀 가드)', function () {

@@ -225,18 +225,45 @@ export function resolveWithinWorkspace(
             }
         }
     }
-    const canonicalResolved = canonicalizeForContainment(resolved);
-    const isInside = normalizedRoots.some(root => {
-        const canonicalRoot = canonicalizeForContainment(root);
-        const rel = path.relative(canonicalRoot, canonicalResolved);
-        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-    });
-    if (!isInside) {
+    if (!isInsideWorkspaceRoots(resolved, normalizedRoots)) {
         throw new Error(
             `Refusing to access '${resolved}' because it is outside the current workspace folder(s).`
         );
     }
     return resolved;
+}
+
+/**
+ * `resolveWithinWorkspace`의 수용 여부 판정만 떼어낸 dry-run 술어. Preview와
+ * Doctor가 런타임과 동일한 규칙(null byte·빈 경로 거부, realpath 정규화,
+ * Windows 예약 디바이스명)으로 검사하도록 공유한다 — 규칙이 하나라도 빠지면
+ * 그 경로가 Preview에서 안전해 보이다가 런타임에서 거부되는 거짓 음성이 생긴다.
+ */
+export function isInsideWorkspaceRoots(resolvedPath: string, workspaceRoots: string[]): boolean {
+    // 런타임(resolveWithinWorkspace 상단 가드)이 무조건 거부하는 입력
+    if (!resolvedPath || typeof resolvedPath !== 'string' || /\x00/.test(resolvedPath)) {
+        return false;
+    }
+    const normalizedRoots = workspaceRoots
+        .filter(root => typeof root === 'string' && root.length > 0)
+        .map(root => path.resolve(root));
+    if (normalizedRoots.length === 0) {
+        return false;
+    }
+    const resolved = path.resolve(resolvedPath);
+    if (process.platform === 'win32') {
+        for (const segment of resolved.split(path.sep)) {
+            if (WINDOWS_RESERVED_NAME_RE.test(segment)) {
+                return false;
+            }
+        }
+    }
+    const canonicalResolved = canonicalizeForContainment(resolved);
+    return normalizedRoots.some(root => {
+        const canonicalRoot = canonicalizeForContainment(root);
+        const rel = path.relative(canonicalRoot, canonicalResolved);
+        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    });
 }
 
 /**

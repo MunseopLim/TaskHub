@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { buildPreviewReport } from '../previewRun';
@@ -518,6 +519,42 @@ suite('buildPreviewReport', () => {
             const report = buildPreviewReport(item, baseOptions());
             assert.match(report, /tool: \/usr\/local\/bin\/7z/);
             assert.doesNotMatch(report, /built-in engine/);
+        });
+    });
+
+    suite('symlink escape detection (M10 후속 회귀 가드)', () => {
+        test('writeFile through an outward symlink is flagged OUTSIDE WORKSPACE', function () {
+            // 런타임 resolveWithinWorkspace는 realpath 정규화로 심링크 escape를
+            // 거부하는데, Preview가 어휘적 비교만 쓰면 같은 경로가 안전해
+            // 보이다가 런타임에서 실패한다 — 판정 규칙을 공유해야 한다.
+            if (process.platform === 'win32') { this.skip(); }
+            const base = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-preview-m10-'));
+            try {
+                const root = path.join(base, 'ws');
+                const outside = path.join(base, 'outside');
+                fs.mkdirSync(root, { recursive: true });
+                fs.mkdirSync(outside, { recursive: true });
+                fs.symlinkSync(outside, path.join(root, 'escape'));
+
+                const item: ActionItem = {
+                    id: 'a.m10',
+                    title: 'symlink escape',
+                    action: {
+                        description: 'x',
+                        tasks: [
+                            { id: 'w', type: 'writeFile', path: 'escape/x.txt', content: 'hi' }
+                        ]
+                    }
+                };
+                const report = buildPreviewReport(item, {
+                    workspaceFolder: root,
+                    extensionPath: '/ext',
+                    workspaceRoots: [root],
+                });
+                assert.match(report, /OUTSIDE WORKSPACE/);
+            } finally {
+                fs.rmSync(base, { recursive: true, force: true });
+            }
         });
     });
 
