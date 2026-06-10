@@ -9,7 +9,7 @@ import {
     getAccessTypeDescription,
     CompleteBitFieldInfo
 } from './sfrBitFieldParser';
-import { MacroExpander } from './macroExpander';
+import { MacroExpander, MacroDefinition } from './macroExpander';
 import { RegisterDecoder, RegisterDefinition } from './registerDecoder';
 import { StructSizeCalculator, TypeConfigFile } from './structSizeCalculator';
 
@@ -74,6 +74,38 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      * at the same position and avoids races when the cursor moves quickly.
      */
     private readonly activeHoverCalls = new Set<string>();
+
+    // M12 성능 캐시 — 같은 문서 버전이면 호버마다 전체 텍스트를 다시
+    // 파싱/복사하지 않는다 (수만 줄 SFR 헤더에서 호버 지연의 주범).
+    private macroTableCache: { uri: string; version: number; macros: Map<string, MacroDefinition> } | undefined;
+    private documentLinesCache: { uri: string; version: number; lines: string[] } | undefined;
+
+    /**
+     * 문서 전체 라인 배열 (document.version 키 캐시). 반환 배열은 캐시와
+     * 공유되므로 호출자는 읽기 전용으로만 사용해야 한다.
+     */
+    private getDocumentLines(document: vscode.TextDocument): string[] {
+        const uri = document.uri.toString();
+        const cached = this.documentLinesCache;
+        if (cached && cached.uri === uri && cached.version === document.version) {
+            return cached.lines;
+        }
+        const lines = document.getText().split(/\r?\n/);
+        this.documentLinesCache = { uri, version: document.version, lines };
+        return lines;
+    }
+
+    /** 문서의 #define 매크로 테이블 (document.version 키 캐시). */
+    private getMacroTable(document: vscode.TextDocument): Map<string, MacroDefinition> {
+        const uri = document.uri.toString();
+        const cached = this.macroTableCache;
+        if (cached && cached.uri === uri && cached.version === document.version) {
+            return cached.macros;
+        }
+        const macros = MacroExpander.parseMacroDefinitions(document.getText());
+        this.macroTableCache = { uri, version: document.version, macros };
+        return macros;
+    }
     private readonly typeConfigCache = new Map<string, TypeConfigCacheEntry>();
 
     private hoverKey(uri: vscode.Uri, position: vscode.Position): string {
@@ -139,39 +171,23 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return undefined;
         }
 
-        // First, try to detect SFR bit field
-        const bitFieldHover = await this.tryBitFieldHover(document, position);
-        if (bitFieldHover) {
-            return bitFieldHover;
-        }
-
-        // Try macro expansion
-        const macroHover = this.tryMacroExpansion(document, position);
-        if (macroHover) {
-            return macroHover;
-        }
-
-        // Try register value decoding
-        const registerHover = await this.tryRegisterValueDecoding(document, position);
-        if (registerHover) {
-            return registerHover;
-        }
-
-        // Try struct size information (async: may read taskhub_types.json from disk)
-        const structSizeHover = await this.tryStructSizeInfo(document, position);
-        if (structSizeHover) {
-            return structSizeHover;
-        }
-
-        // Try bit operation hover (experimental feature)
-        const bitOperationHover = await this.tryBitOperationHover(document, position);
-        if (bitOperationHover) {
-            return bitOperationHover;
-        }
-
-        // Try to find a number at the current position
+        // M12: 숫자 리터럴 검사(정규식 한 줄, 비용 ~0)를 최우선으로. 숫자
+        // 위에서는 식별자 기반 경로(비트필드 LSP 왕복 최대 3초, 매크로 테이블
+        // 전체 파싱, struct 크기)가 매치될 수 없으므로 전부 건너뛴다.
         const result = this.findNumberAtPosition(lineText, charPosition);
         if (result) {
+            // 레지스터 할당(REG = 0x123;)의 디코딩 호버가 일반 진법 변환보다 우선
+            const registerHover = await this.tryRegisterValueDecoding(document, position);
+            if (registerHover) {
+                return registerHover;
+            }
+
+            // Try bit operation hover (experimental feature)
+            const numberBitOperationHover = await this.tryBitOperationHover(document, position);
+            if (numberBitOperationHover) {
+                return numberBitOperationHover;
+            }
+
             // Try to parse the number (exact: 2^53 초과 64-bit 리터럴은 BigInt)
             const parsedNumber = this.parseNumberExact(result.text);
             if (parsedNumber !== null) {
@@ -187,6 +203,31 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 const hoverContent = this.generateHoverContent(parsedNumber, result.text);
                 return new vscode.Hover(hoverContent, range);
             }
+            // 숫자처럼 보이지만 파싱 불가 — 식별자 경로로 폴백
+        }
+
+        // First, try to detect SFR bit field
+        const bitFieldHover = await this.tryBitFieldHover(document, position);
+        if (bitFieldHover) {
+            return bitFieldHover;
+        }
+
+        // Try macro expansion
+        const macroHover = this.tryMacroExpansion(document, position);
+        if (macroHover) {
+            return macroHover;
+        }
+
+        // Try struct size information (async: may read taskhub_types.json from disk)
+        const structSizeHover = await this.tryStructSizeInfo(document, position);
+        if (structSizeHover) {
+            return structSizeHover;
+        }
+
+        // Try bit operation hover (experimental feature)
+        const bitOperationHover = await this.tryBitOperationHover(document, position);
+        if (bitOperationHover) {
+            return bitOperationHover;
         }
 
         // If not a number literal, try to find identifier value
@@ -733,9 +774,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return null; // Not a typical macro name pattern
         }
 
-        // Parse all macros from document
-        const documentText = document.getText();
-        const macros = MacroExpander.parseMacroDefinitions(documentText);
+        // Parse all macros from document (M12: document.version 키 캐시)
+        const macros = this.getMacroTable(document);
 
         // Check if this word is a defined macro
         if (!macros.has(word)) {
@@ -901,11 +941,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         }
 
         if (allLocations.length === 0) {
-            // No definitions found, use current location
-            const lines: string[] = [];
-            for (let i = 0; i < document.lineCount; i++) {
-                lines.push(document.getText(document.lineAt(i).range));
-            }
+            // No definitions found, use current location (read-only shared cache)
+            const lines = this.getDocumentLines(document);
             const scopes = extractHierarchy(lines, position.line);
             const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
             const filePath = workspaceFolder
@@ -1015,6 +1052,13 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             // Get word at current position
             const wordRange = document.getWordRangeAtPosition(position);
             if (!wordRange) {
+                return null;
+            }
+
+            // 비트필드 가능성 사전 필터(M12): C 식별자가 아니면 정의 위치를
+            // 조회할 이유가 없다 — LSP 왕복을 건너뛴다.
+            const word = document.getText(wordRange);
+            if (!/^[A-Za-z_]\w*$/.test(word)) {
                 return null;
             }
 
@@ -1267,10 +1311,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         // Fallback: Search in current document if not found via LSP
         if (!registerDef) {
-            const documentLines: string[] = [];
-            for (let i = 0; i < document.lineCount; i++) {
-                documentLines.push(document.getText(document.lineAt(i).range));
-            }
+            const documentLines = this.getDocumentLines(document);
 
             const structLine = RegisterDecoder.findStructDefinition(documentLines, typeName);
             if (structLine !== -1) {
@@ -1380,11 +1421,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return null;
         }
 
-        // Parse the document
-        const documentLines: string[] = [];
-        for (let i = 0; i < document.lineCount; i++) {
-            documentLines.push(document.getText(document.lineAt(i).range));
-        }
+        // Parse the document (read-only shared cache)
+        const documentLines = this.getDocumentLines(document);
 
         // Find struct definition
         const structLine = StructSizeCalculator.findStructDefinition(documentLines, structName);

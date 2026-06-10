@@ -138,6 +138,36 @@ export function applyOutputCapture(
 }
 
 /**
+ * Windows 예약 디바이스 이름. 경로 세그먼트로 등장하면 (확장자가 붙어도)
+ * 파일이 아니라 디바이스로 해석된다 — `CON`, `NUL.txt` 등.
+ */
+const WINDOWS_RESERVED_NAME_RE = /^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\.|$)/i;
+
+/**
+ * Canonicalize `p` for containment checks: resolve symlinks on the deepest
+ * EXISTING ancestor, then re-append the not-yet-existing remainder. The
+ * target itself may not exist (about to be written), so a plain realpath
+ * would throw — walk up instead.
+ */
+function canonicalizeForContainment(p: string): string {
+    let existing = p;
+    const tail: string[] = [];
+    while (!fs.existsSync(existing)) {
+        const parent = path.dirname(existing);
+        if (parent === existing) { break; } // filesystem root
+        tail.unshift(path.basename(existing));
+        existing = parent;
+    }
+    let canonical: string;
+    try {
+        canonical = fs.realpathSync.native(existing);
+    } catch {
+        canonical = existing; // 권한 등으로 실패 시 어휘적 경로 유지
+    }
+    return tail.length > 0 ? path.join(canonical, ...tail) : canonical;
+}
+
+/**
  * Resolve `targetPath` and ensure it lands inside one of the provided workspace roots.
  *
  * Security contract:
@@ -146,7 +176,18 @@ export function applyOutputCapture(
  *     workspace folder) — NOT `process.cwd()`. This keeps behaviour stable
  *     regardless of how VS Code was launched.
  *   - The final resolved path must be inside at least one `workspaceRoots`
- *     entry, otherwise throws.
+ *     entry, otherwise throws. Containment is judged on symlink-resolved
+ *     (realpath) canonical paths, so a symlink/junction inside the workspace
+ *     that points outside cannot bypass the check (M10).
+ *   - On Windows, reserved device names (`CON`, `NUL`, `COM1`…) in any path
+ *     segment are rejected.
+ *
+ * Known limits: the realpath check is check-time (TOCTOU) — a symlink swapped
+ * in after validation but before the write is not detected. 8.3 short names
+ * are normalized by `realpathSync.native` only for existing path components.
+ *
+ * @returns The lexically resolved path (not the canonical one) — callers
+ *          write through the path the user configured.
  */
 export function resolveWithinWorkspace(
     targetPath: string,
@@ -175,8 +216,19 @@ export function resolveWithinWorkspace(
         const base = baseDir && baseDir.length > 0 ? path.resolve(baseDir) : normalizedRoots[0];
         resolved = path.resolve(base, targetPath);
     }
+    if (process.platform === 'win32') {
+        for (const segment of resolved.split(path.sep)) {
+            if (WINDOWS_RESERVED_NAME_RE.test(segment)) {
+                throw new Error(
+                    `Refusing to access '${resolved}' because it contains the reserved device name '${segment}'.`
+                );
+            }
+        }
+    }
+    const canonicalResolved = canonicalizeForContainment(resolved);
     const isInside = normalizedRoots.some(root => {
-        const rel = path.relative(root, resolved);
+        const canonicalRoot = canonicalizeForContainment(root);
+        const rel = path.relative(canonicalRoot, canonicalResolved);
         return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
     });
     if (!isInside) {

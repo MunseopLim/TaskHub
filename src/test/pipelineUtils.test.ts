@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
@@ -54,6 +55,34 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         const root = path.resolve(os.tmpdir(), 'pipelineUtils-smoke');
         const p = path.join(root, 'a.txt');
         assert.strictEqual(resolveWithinWorkspace(p, [root]), p);
+    });
+
+    test('resolveWithinWorkspace rejects symlink escape (M10 회귀 가드)', function () {
+        // 어휘적(path.relative) 비교만으로는 워크스페이스 내부의 외부 지향
+        // 심링크로 격리가 우회됐다 — realpath 정규화 후 판정해야 한다.
+        if (process.platform === 'win32') { this.skip(); }
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-m10-'));
+        try {
+            const root = path.join(base, 'ws');
+            const outside = path.join(base, 'outside');
+            fs.mkdirSync(root, { recursive: true });
+            fs.mkdirSync(outside, { recursive: true });
+            fs.symlinkSync(outside, path.join(root, 'escape'));
+
+            assert.throws(
+                () => resolveWithinWorkspace(path.join(root, 'escape', 'a.txt'), [root]),
+                /outside the current workspace/
+            );
+
+            // 워크스페이스 내부를 가리키는 심링크는 계속 허용된다
+            const insideDir = path.join(root, 'sub');
+            fs.mkdirSync(insideDir);
+            fs.symlinkSync(insideDir, path.join(root, 'inlink'));
+            const ok = resolveWithinWorkspace(path.join(root, 'inlink', 'b.txt'), [root]);
+            assert.ok(ok.endsWith('b.txt'));
+        } finally {
+            fs.rmSync(base, { recursive: true, force: true });
+        }
     });
 
     test('tokenizeCommandLine handles quoted segments', () => {

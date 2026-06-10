@@ -1030,6 +1030,16 @@ function getWebviewContent(
         return parseFindBytes(findHexInput.value);
     }
 
+    // 매치 수 상한 — 무제한 수집은 한 바이트 패턴 검색 등에서 수백만 개의
+    // 매치를 만들고 하이라이트 루프까지 함께 무너뜨린다(M11).
+    const FIND_MAX_MATCHES = 10000;
+
+    function findCountLabel() {
+        return findMatches.length >= FIND_MAX_MATCHES
+            ? FIND_MAX_MATCHES.toLocaleString() + '+'
+            : String(findMatches.length);
+    }
+
     function doFind() {
         findMatches = [];
         findCurrentIdx = -1;
@@ -1044,11 +1054,13 @@ function getWebviewContent(
             for (let j = 0; j < bytes.length; j++) {
                 if (DATA[i + j] !== bytes[j]) { match = false; break; }
             }
-            if (match) { findMatches.push(i); }
+            if (match) {
+                findMatches.push(i);
+                if (findMatches.length >= FIND_MAX_MATCHES) { break; }
+            }
         }
         if (findMatches.length > 0) {
             findCurrentIdx = 0;
-            findInfo.textContent = '1 / ' + findMatches.length;
             goToFindMatch();
         } else {
             findInfo.textContent = 'No matches';
@@ -1059,7 +1071,7 @@ function getWebviewContent(
     function goToFindMatch() {
         if (findCurrentIdx < 0 || findCurrentIdx >= findMatches.length) { return; }
         const offset = findMatches[findCurrentIdx];
-        findInfo.textContent = (findCurrentIdx + 1) + ' / ' + findMatches.length;
+        findInfo.textContent = (findCurrentIdx + 1) + ' / ' + findCountLabel();
         jumpToOffset(offset);
     }
 
@@ -1107,7 +1119,13 @@ function getWebviewContent(
         findInfo.textContent = '';
         applyFindHighlightsToVisible();
     });
-    findHexInput.addEventListener('input', doFind);
+    // 키 입력마다 전체 데이터를 스캔하면 대용량 파일에서 웹뷰가 수 초씩
+    // 멈춘다(M11) — memoryMapViewer의 searchTimeout 패턴과 동일한 디바운스.
+    let findDebounceTimer;
+    findHexInput.addEventListener('input', () => {
+        clearTimeout(findDebounceTimer);
+        findDebounceTimer = setTimeout(doFind, 250);
+    });
     document.getElementById('findMode').addEventListener('change', () => {
         const mode = document.getElementById('findMode').value;
         findHexInput.placeholder = mode === 'ascii' ? 'Hello' : mode === 'value' ? '20020000' : '00 00 02 20';
