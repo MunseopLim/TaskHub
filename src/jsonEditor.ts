@@ -848,7 +848,8 @@ function generateNonce(): string {
     return crypto.randomBytes(16).toString('base64');
 }
 
-function getWebviewContent(
+// export 는 테스트(jsonEditorUtils.test.ts의 유니코드 round-trip 가드)용.
+export function getWebviewContent(
     data: Record<string, unknown>,
     savedData: Record<string, unknown> | undefined,
     filePath: string,
@@ -862,13 +863,16 @@ function getWebviewContent(
      */
     baselineUnknown: boolean = false
 ): string {
-    // Encode data as base64 to avoid any HTML/JS parsing issues with special characters.
+    // Inject data as escaped JS literals (memoryMapViewer escapeForScript 패턴).
+    // 이전의 base64 + atob() 경로는 atob()가 latin1 디코딩이라 멀티바이트 문자
+    // (한글, "—", "≥" 등)가 mojibake 되고, Save 시 깨진 데이터가 그대로 디스크에
+    // 기록되어 영구 손상됐다. JSON.stringify는 유니코드를 무손실 보존하며,
+    // "<"를 유니코드 이스케이프(backslash-u003c)로 바꿔 "</script>" HTML 조기 종료를 막는다.
     // savedData가 주어지면(=복구 경로) webview의 saved baseline은 디스크 데이터로
     // 잡혀 modified 표시와 undo 동작이 올바르게 처리된다.
-    const jsonBase64 = Buffer.from(JSON.stringify(data), 'utf-8').toString('base64');
-    const savedBase64 = savedData !== undefined
-        ? Buffer.from(JSON.stringify(savedData), 'utf-8').toString('base64')
-        : '';
+    const escapeForScript = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
+    const jsonLiteral = escapeForScript(data);
+    const savedLiteral = savedData !== undefined ? escapeForScript(savedData) : 'undefined';
     const escapedPath = filePath.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const nonce = generateNonce();
     const csp = `default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};`;
@@ -1176,13 +1180,7 @@ function getWebviewContent(
         showError('JS Error: ' + msg + ' (line ' + line + ')');
     };
     const vscode = acquireVsCodeApi();
-    let data;
-    try {
-        data = JSON.parse(atob('${jsonBase64}'));
-    } catch(e) {
-        showError('Failed to parse JSON data: ' + e.message);
-        return;
-    }
+    let data = ${jsonLiteral};
     // host 가 disk-baseline-unknown 으로 부팅한 경우 (parse fail / size exceeded /
     // read fail 후 recovery fallback). lastSavedSnapshot 으로 빈 문자열 sentinel
     // 을 사용 — JSON.stringify 의 결과는 valid JSON 이라 절대 빈 문자열일 수
@@ -1195,13 +1193,9 @@ function getWebviewContent(
     // saved baseline으로 사용한다. 복구가 아니면 빈 문자열 → 초기 데이터
     // 자체가 baseline이라는 신호.
     let savedSnapshot;
-    try {
-        const sb = '${savedBase64}';
-        if (sb.length > 0) {
-            savedSnapshot = JSON.stringify(JSON.parse(atob(sb)));
-        }
-    } catch(e) {
-        showError('Failed to parse saved snapshot: ' + e.message);
+    const savedInit = ${savedLiteral};
+    if (savedInit !== undefined) {
+        savedSnapshot = JSON.stringify(savedInit);
     }
     // baselineUnknown 이 true 면 위 savedSnapshot 결정을 override 하고 sentinel 로
     // 잡는다. resetHistoryToCurrent 가 lastSavedSnapshot 을 sentinel 로 세팅 →

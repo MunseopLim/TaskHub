@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import { buildSheetMap, getRowsByPath, SheetEntry, parseValue, coerceEditedCellValue, shouldOfferRecovery, RecoveryEntry, makeRecoveryStore, MinimalWorkspaceState, buildDraftSnapshot, DraftSnapshotInput } from '../jsonEditorUtils';
-import { wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY } from '../jsonEditor';
+import { wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY, getWebviewContent } from '../jsonEditor';
 
 function readSourceForRegex(filePath: string): string {
     return fs.readFileSync(filePath, 'utf-8').replace(/\r\n/g, '\n');
@@ -1772,6 +1772,60 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.ok(
                 /for\s*\([\s\S]*?of\s+newArr\s*\)[\s\S]*?arr\.push\(/.test(body),
                 'syncEditingArrayCellToData must repopulate arr via push so the original reference is preserved'
+            );
+        });
+    });
+
+    suite('getWebviewContent unicode round-trip (C1 회귀 가드)', () => {
+        // 회귀 가드: 이전의 base64 + atob() 디코딩은 atob()가 latin1이라 멀티바이트
+        // 문자(한글, "—", "≥")가 mojibake 된 채 JSON.parse 가 "성공"해 조용히
+        // 손상됐고, Save 시 깨진 데이터가 디스크에 영구 기록됐다. 데이터는
+        // escapeForScript(JSON.stringify + "<" 이스케이프) JS 리터럴로 주입돼야 한다.
+        const fakeWebview = { cspSource: 'https://test.invalid' } as unknown as import('vscode').Webview;
+        const unicodeData: Record<string, unknown> = {
+            '한글키': '한글-—≥',
+            nested: { value: 'em dash — and ≥ and 𐍈' },
+            arr: ['α', 'β', '🎯'],
+        };
+
+        // escapeForScript 출력은 < 이스케이프를 포함한 valid JSON 이므로
+        // 추출한 리터럴을 JSON.parse 로 바로 복원할 수 있다.
+        function extractJsLiteral(html: string, pattern: RegExp): unknown {
+            const m = html.match(pattern);
+            assert.ok(m, 'could not locate injected literal: ' + pattern);
+            return JSON.parse(m![1]);
+        }
+
+        test('data literal preserves multi-byte characters losslessly', () => {
+            const html = getWebviewContent(unicodeData, undefined, '/tmp/t.json', fakeWebview);
+            const roundTripped = extractJsLiteral(html, /let data = (.*);/);
+            assert.deepStrictEqual(roundTripped, unicodeData);
+            // savedData 미지정 시 baseline 신호는 undefined 유지
+            assert.ok(/const savedInit = undefined;/.test(html), 'savedInit must stay undefined without savedData');
+        });
+
+        test('savedData literal preserves multi-byte characters losslessly', () => {
+            const saved: Record<string, unknown> = { '키': '값—≥한글' };
+            const html = getWebviewContent(unicodeData, saved, '/tmp/t.json', fakeWebview);
+            const roundTripped = extractJsLiteral(html, /const savedInit = (.*);/);
+            assert.deepStrictEqual(roundTripped, saved);
+        });
+
+        test('injected literals cannot terminate the script block early', () => {
+            const payload = { k: '</scr' + 'ipt><img src=x>' };
+            const html = getWebviewContent(payload, undefined, '/t.json', fakeWebview);
+            const m = html.match(/let data = (.*);/);
+            assert.ok(m, 'could not locate injected data literal');
+            assert.ok(!m![1].includes('</scr' + 'ipt>'), 'literal must escape "<" so the HTML parser cannot see a closing script tag');
+            assert.deepStrictEqual(JSON.parse(m![1]), payload);
+        });
+
+        test('webview no longer decodes injected data via JSON.parse(atob(...))', () => {
+            const srcDir = path.resolve(__dirname, '..', '..', 'src');
+            const editorSource = readSourceForRegex(path.join(srcDir, 'jsonEditor.ts'));
+            assert.ok(
+                !/JSON\.parse\(atob\(/.test(editorSource),
+                'jsonEditor must not decode webview data with atob() — it is latin1 and mojibakes multi-byte chars'
             );
         });
     });

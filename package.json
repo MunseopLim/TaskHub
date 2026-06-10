@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -404,24 +404,78 @@
     ],
     "menus": {
       "commandPalette": [
-        { "command": "taskhub.openLink", "when": "false" },
-        { "command": "taskhub.copyLink", "when": "false" },
-        { "command": "taskhub.goToLink", "when": "false" },
-        { "command": "taskhub.executeAction", "when": "false" },
-        { "command": "taskhub.previewAction", "when": "false" },
-        { "command": "taskhub.stopAction", "when": "false" },
-        { "command": "taskhub.editWorkspaceLink", "when": "false" },
-        { "command": "taskhub.deleteFavorite", "when": "false" },
-        { "command": "taskhub.deleteLink", "when": "false" },
-        { "command": "taskhub.openFavoriteFile", "when": "false" },
-        { "command": "taskhub.rerunFromHistory", "when": "false" },
-        { "command": "taskhub.rerunFromHistoryWithInputs", "when": "false" },
-        { "command": "taskhub.viewHistoryOutput", "when": "false" },
-        { "command": "taskhub.deleteHistoryItem", "when": "false" },
-        { "command": "taskhub.exportActionItem", "when": "false" },
-        { "command": "taskhub.assignShortcut", "when": "false" },
-        { "command": "taskhub.showExampleJson", "when": "false" },
-        { "command": "taskhub.memoryMapGoToSymbol", "when": "false" }
+        {
+          "command": "taskhub.openLink",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.copyLink",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.goToLink",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.executeAction",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.previewAction",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.stopAction",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.editWorkspaceLink",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.deleteFavorite",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.deleteLink",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.openFavoriteFile",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.rerunFromHistory",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.rerunFromHistoryWithInputs",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.viewHistoryOutput",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.deleteHistoryItem",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.exportActionItem",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.assignShortcut",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.showExampleJson",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.memoryMapGoToSymbol",
+          "when": "false"
+        }
       ],
       "view/title": [
         {
