@@ -512,14 +512,16 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      * Returns the text and its start/end positions, or null if not found
      */
     private findNumberAtPosition(text: string, position: number): { text: string; start: number; end: number } | null {
-        // Define all number patterns with global flag to find all matches
+        // Define all number patterns with global flag to find all matches.
+        // \b/(?!\w) 경계가 없으면 식별자 일부(`Foo123h`의 `123h`)나 잘못된
+        // 리터럴의 앞부분(`0x12g3`의 `0x12`)에 부분 매치된다(M8).
         const numberPatterns = [
             // Hexadecimal with 0x prefix (must come before decimal)
-            { regex: /0[xX][0-9a-fA-F']+/g, priority: 1 },
+            { regex: /\b0[xX][0-9a-fA-F']+(?!\w)/g, priority: 1 },
             // Binary with 0b prefix (must come before decimal)
-            { regex: /0[bB][01']+/g, priority: 1 },
+            { regex: /\b0[bB][01']+(?!\w)/g, priority: 1 },
             // Hexadecimal with h suffix
-            { regex: /[0-9a-fA-F][0-9a-fA-F']*[hH]/g, priority: 2 },
+            { regex: /\b[0-9a-fA-F][0-9a-fA-F']*[hH]\b/g, priority: 2 },
             // Decimal numbers (lowest priority to avoid matching parts of hex)
             { regex: /\b\d[\d']*/g, priority: 3 },
         ];

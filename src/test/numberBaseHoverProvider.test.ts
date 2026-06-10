@@ -150,6 +150,30 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             const result = (provider as any).findNumberAtPosition('int x = value;', 8);
             assert.strictEqual(result, null);
         });
+
+        test('does not match h-suffix digits inside an identifier (M8 회귀 가드)', () => {
+            // 이전 h-suffix 정규식은 \b가 없어 `Foo123h`의 `123h`에 매치됐다.
+            const result = (provider as any).findNumberAtPosition('int Foo123h = 1;', 8);
+            assert.strictEqual(result, null);
+        });
+
+        test('does not partially match invalid hex literal (M8 회귀 가드)', () => {
+            // `0x12g3`에서 `0x12`까지 부분 매치되던 문제 — (?!\w) lookahead로 거부.
+            const result = (provider as any).findNumberAtPosition('int x = 0x12g3;', 10);
+            assert.strictEqual(result, null);
+        });
+
+        test('does not partially match invalid binary literal (M8 회귀 가드)', () => {
+            // `0b12`에서 `0b1`까지 부분 매치되던 문제.
+            const result = (provider as any).findNumberAtPosition('int b = 0b12;', 9);
+            assert.strictEqual(result, null);
+        });
+
+        test('still matches a valid h-suffix literal at word boundaries', () => {
+            const result = (provider as any).findNumberAtPosition('mov a, 0FFh;', 8);
+            assert.notStrictEqual(result, null);
+            assert.strictEqual(result.text, '0FFh');
+        });
     });
 
     suite('Bit Position Tests', () => {

@@ -11,6 +11,10 @@ import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexPa
 import { t } from './i18n';
 
 let currentPanel: vscode.WebviewPanel | undefined;
+// standalone 패널(단일 인스턴스) 전용 메시지 disposable. Custom Editor
+// (HexEditorProvider)는 인스턴스가 여러 개일 수 있으므로 resolveCustomEditor
+// 지역에서 자체 관리한다 — 전역 하나를 공유하면 패널/에디터를 오갈 때
+// 남의 핸들러를 dispose 해 메시지가 끊겼다(M7).
 let currentMessageDisposable: vscode.Disposable | undefined;
 
 /** Hex Viewer에서 처리 가능한 최대 파일 크기 (50 MB) */
@@ -267,9 +271,13 @@ export function parseFile(filePath: string): HexParseResult {
     }
 }
 
-function setupWebviewMessageHandler(webview: vscode.Webview) {
-    currentMessageDisposable?.dispose();
-    currentMessageDisposable = webview.onDidReceiveMessage(message => {
+/**
+ * 호스트 측 메시지 핸들러를 구독하고 disposable을 돌려준다. 호출자가
+ * webview/panel 단위로 수명을 관리한다 (standalone 패널은 모듈 전역 1개,
+ * custom editor는 resolveCustomEditor 지역 + onDidDispose).
+ */
+function setupWebviewMessageHandler(webview: vscode.Webview): vscode.Disposable {
+    return webview.onDidReceiveMessage(message => {
         if (message.command === 'copySelection') {
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('클립보드에 복사되었습니다.', 'Copied to clipboard.'));
@@ -323,7 +331,9 @@ function openPanel(context: vscode.ExtensionContext, fileName: string, result: H
         vscode.window.showErrorMessage(msg);
         return false;
     }
-    setupWebviewMessageHandler(currentPanel.webview);
+    // 같은 패널에 새 파일을 열 때 이전 구독이 남지 않도록 교체
+    currentMessageDisposable?.dispose();
+    currentMessageDisposable = setupWebviewMessageHandler(currentPanel.webview);
     return true;
 }
 
@@ -1227,7 +1237,10 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             vscode.window.showErrorMessage(msg);
             return;
         }
-        setupWebviewMessageHandler(webviewPanel.webview);
+        // 에디터 인스턴스별 disposable — 전역 공유 시 다른 패널/에디터의
+        // 핸들러를 dispose 하는 cross-talk이 있었다(M7).
+        const messageDisposable = setupWebviewMessageHandler(webviewPanel.webview);
+        webviewPanel.onDidDispose(() => messageDisposable.dispose());
         this.recordHistory?.({ filePath, fileName });
     }
 }
