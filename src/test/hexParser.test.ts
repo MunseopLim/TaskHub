@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
 import * as path from 'path';
 import {
     detectFormat,
@@ -828,6 +829,19 @@ suite('HexParser Test Suite', () => {
             assert.throws(() => assertWithinHexViewerSpan(Number.NaN), /display limit/);
             assert.throws(() => assertWithinHexViewerSpan(Number.POSITIVE_INFINITY), /display limit/);
             assert.throws(() => assertWithinHexViewerSpan(-1), /display limit/);
+        });
+    });
+
+    suite('hexViewer webview source guards (M5 회귀 가드)', () => {
+        test('unit values are formatted as BigInt, not via Number()', () => {
+            // 8-byte unit에서 readUnit()의 BigInt를 Number()로 변환하면 2^53
+            // 초과 값(FF*8 등)의 표시·복사가 깨진다. formatHex에 BigInt를
+            // 그대로 넘겨야 한다 (toString(16)은 BigInt에서도 동작).
+            const src = fs.readFileSync(path.resolve(__dirname, '..', '..', 'src', 'hexViewer.ts'), 'utf-8');
+            assert.ok(
+                !/formatHex\(Number\(/.test(src),
+                'hexViewer must not route unit values through Number() before formatHex'
+            );
         });
     });
 });

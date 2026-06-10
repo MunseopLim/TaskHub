@@ -691,7 +691,9 @@ function getWebviewContent(
 
             if (byteOffset + unitSize <= TOTAL_SIZE) {
                 const val = readUnit(byteOffset, unitSize, le);
-                td.textContent = val !== null ? formatHex(Number(val & BigInt('0x' + 'F'.repeat(digits))), digits) : '';
+                // BigInt 그대로 포맷 — Number() 변환은 8-byte unit에서 2^53
+                // 초과 값의 정밀도를 깨뜨린다(M5). toString(16)은 BigInt에서도 동작.
+                td.textContent = val !== null ? formatHex(val & BigInt('0x' + 'F'.repeat(digits)), digits) : '';
                 td.dataset.offset = String(byteOffset);
 
                 let isGap = true;
@@ -1119,7 +1121,8 @@ function getWebviewContent(
         for (let off = minOff; off < maxOff && off < TOTAL_SIZE; off += unitSize) {
             const val = readUnit(off, unitSize, le);
             if (val !== null) {
-                parts.push(formatHex(Number(val & BigInt('0x' + 'F'.repeat(digits))), digits));
+                // BigInt 그대로 포맷 — Number() 변환은 2^53 초과 값을 깨뜨린다(M5)
+                parts.push(formatHex(val & BigInt('0x' + 'F'.repeat(digits)), digits));
             }
         }
         return parts.join(' ');

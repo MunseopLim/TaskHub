@@ -89,6 +89,38 @@ suite('NumberBaseHoverProvider Test Suite', () => {
         });
     });
 
+    suite('Exact 64-bit Parsing & Display (M6 회귀 가드)', () => {
+        // parseNumber는 parseInt 기반이라 2^53 초과 64-bit 리터럴의 진법
+        // 변환값이 틀리게 표시됐다 (0xFFFFFFFFFFFFFFFF → 0x10000000000000000).
+
+        test('parseNumberExact keeps plain number within 2^53', () => {
+            assert.strictEqual((provider as any).parseNumberExact('0xFF'), 255);
+            assert.strictEqual((provider as any).parseNumberExact('FFh'), 255);
+            assert.strictEqual((provider as any).parseNumberExact('0b1111'), 15);
+            assert.strictEqual((provider as any).parseNumberExact('255'), 255);
+        });
+
+        test('parseNumberExact returns exact BigInt above 2^53', () => {
+            assert.strictEqual((provider as any).parseNumberExact('0xFFFFFFFFFFFFFFFF'), 0xFFFFFFFFFFFFFFFFn);
+            assert.strictEqual((provider as any).parseNumberExact('0xFFFF\'FFFF\'FFFF\'FFFF'), 0xFFFFFFFFFFFFFFFFn);
+            assert.strictEqual((provider as any).parseNumberExact('18446744073709551615'), 18446744073709551615n);
+        });
+
+        test('parseNumberExact returns null for invalid input', () => {
+            assert.strictEqual((provider as any).parseNumberExact('invalid'), null);
+            assert.strictEqual((provider as any).parseNumberExact(''), null);
+        });
+
+        test('hover content shows exact conversions for 0xFFFFFFFFFFFFFFFF', () => {
+            const md = (provider as any).generateHoverContent(0xFFFFFFFFFFFFFFFFn, '0xFFFFFFFFFFFFFFFF');
+            const text: string = md.value;
+            assert.ok(text.includes('0xFFFFFFFFFFFFFFFF'), `hex must be exact: ${text}`);
+            assert.ok(text.includes('18446744073709551615'), `dec must be exact: ${text}`);
+            assert.ok(!text.includes('0x10000000000000000'), 'parseInt 기반 2^64 오표시 금지');
+            assert.ok(text.includes('Bit Information (64-bit)'), '64-bit 비트 테이블 표시');
+        });
+    });
+
     suite('Number Detection Tests', () => {
         test('Find hex number at position', () => {
             const result = (provider as any).findNumberAtPosition('int x = 0xFF;', 8);

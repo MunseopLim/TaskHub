@@ -172,8 +172,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         // Try to find a number at the current position
         const result = this.findNumberAtPosition(lineText, charPosition);
         if (result) {
-            // Try to parse the number
-            const parsedNumber = this.parseNumber(result.text);
+            // Try to parse the number (exact: 2^53 초과 64-bit 리터럴은 BigInt)
+            const parsedNumber = this.parseNumberExact(result.text);
             if (parsedNumber !== null) {
                 // Create range for the hover
                 const range = new vscode.Range(
@@ -592,19 +592,47 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     }
 
     /**
+     * Parse a number literal preserving exactness (M6). `parseNumber`는
+     * parseInt 기반이라 2^53 초과 64-bit 리터럴(`0xFFFFFFFFFFFFFFFF` 등)의
+     * 진법 변환값이 틀리게 표시됐다. MAX_SAFE_INTEGER 이하는 기존과 동일하게
+     * number를, 초과는 BigInt를 반환한다.
+     */
+    private parseNumberExact(text: string): number | bigint | null {
+        const cleanText = text.replace(/'/g, ''); // C++14 digit separators
+        let big: bigint;
+        try {
+            if (this.patterns.hex0x.test(text) || this.patterns.binary.test(text)) {
+                big = BigInt(cleanText); // BigInt()는 0x/0X/0b/0B 접두사를 그대로 지원
+            } else if (this.patterns.hexH.test(text)) {
+                big = BigInt('0x' + cleanText.slice(0, -1)); // h/H 접미사 제거
+            } else if (this.patterns.decimal.test(text)) {
+                big = BigInt(cleanText);
+            } else {
+                return null;
+            }
+        } catch {
+            return null;
+        }
+        return big <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(big) : big;
+    }
+
+    /**
      * Generate Markdown formatted hover content showing the number in different bases
      */
-    private generateHoverContent(value: number, original: string): vscode.MarkdownString {
+    private generateHoverContent(value: number | bigint, original: string): vscode.MarkdownString {
         const md = new vscode.MarkdownString();
 
-        // Show conversions
+        // Show conversions — toString(radix)는 number/bigint 모두에서 정확 (M6)
         md.appendMarkdown(`**Hex:** \`0x${value.toString(16).toUpperCase()}\`\n\n`);
         md.appendMarkdown(`**Dec:** \`${value.toString(10)}\`\n\n`);
         md.appendMarkdown(`**Bin:** \`0b${value.toString(2)}\`\n\n`);
 
-        // Add bit position display for all valid positive integers
-        // JavaScript can safely represent integers up to Number.MAX_SAFE_INTEGER (2^53 - 1)
-        if (value >= 0 && value <= Number.MAX_SAFE_INTEGER) {
+        // Add bit position display for valid positive integers.
+        // number는 MAX_SAFE_INTEGER(2^53-1)까지, bigint는 64-bit까지 표시.
+        const inBitRange = typeof value === 'bigint'
+            ? value >= 0n && value <= 0xFFFFFFFFFFFFFFFFn
+            : value >= 0 && value <= Number.MAX_SAFE_INTEGER;
+        if (inBitRange) {
             md.appendMarkdown(this.generateBitPositionDisplay(value));
         }
 
@@ -616,8 +644,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      * - 32-bit values: displayed as one row
      * - 64-bit values: displayed as two 32-bit rows
      */
-    private generateBitPositionDisplay(value: number): string {
-        // Determine if this is a 64-bit value
+    private generateBitPositionDisplay(value: number | bigint): string {
+        // Determine if this is a 64-bit value (BigInt/number 혼합 비교는 안전)
         const is64Bit = value > 0xFFFFFFFF;
         const bitWidth = is64Bit ? 64 : 32;
         const binary = value.toString(2).padStart(bitWidth, '0');
