@@ -117,6 +117,45 @@ suite('RegisterDecoder Test Suite', () => {
             assert.strictEqual(result.fields[0].binary, '0b0101');
             assert.strictEqual(result.fields[0].decimal, '5');
         });
+
+        test('Extract field above bit 31 (M3 회귀 가드)', () => {
+            // 이전 구현은 `registerValue >>> bitStart`의 시프트 카운트가 & 31
+            // 처리되어 [35:32] 필드가 하위 [3:0] 값을 그대로 보여줬다.
+            const definition: RegisterDefinition = {
+                name: 'TEST_REG64',
+                totalBits: 36,
+                fields: [
+                    { name: 'HI', bitStart: 32, bitEnd: 35, bitWidth: 4 },
+                    { name: 'LO', bitStart: 0, bitEnd: 3, bitWidth: 4 }
+                ]
+            };
+
+            // 0x5_0000_000A: bits [35:32] = 0x5, bits [3:0] = 0xA
+            const result = decoder.decodeValue(0x50000000A, definition);
+
+            assert.strictEqual(result.success, true);
+            const hi = result.fields.find(f => f.name === 'HI');
+            const lo = result.fields.find(f => f.name === 'LO');
+            assert.strictEqual(hi?.value, 0x5);
+            assert.strictEqual(hi?.hex, '0x5');
+            assert.strictEqual(lo?.value, 0xA);
+        });
+
+        test('Extract field spanning the bit-31 boundary', () => {
+            const definition: RegisterDefinition = {
+                name: 'TEST_REG64',
+                totalBits: 40,
+                fields: [
+                    { name: 'SPAN', bitStart: 28, bitEnd: 35, bitWidth: 8 }
+                ]
+            };
+
+            // bits [35:28] = 0xA5
+            const result = decoder.decodeValue(0xA5 * 0x10000000, definition);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.fields[0].value, 0xA5);
+        });
     });
 
     suite('Multiple Bit Fields', () => {

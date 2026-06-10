@@ -114,7 +114,10 @@ export function parseIntelHex(content: string): HexParseResult {
                     parseInt(line.substring(13, 17), 16);
                 break;
             case 0x04: // Extended Linear Address
-                baseAddress = parseInt(line.substring(9, 13), 16) << 16;
+                // `<< 16`은 32비트 부호 있는 결과라 ELA ≥ 0x8000(0x80000000 이상
+                // 주소 — STM32 QSPI 0x90000000, PIC32 kseg 등)이 음수가 된다.
+                // 곱셈은 부호 없는 53비트 정수 범위에서 안전.
+                baseAddress = parseInt(line.substring(9, 13), 16) * 0x10000;
                 break;
             case 0x05: // Start Linear Address
                 entryPoint = parseInt(line.substring(9, 17), 16);

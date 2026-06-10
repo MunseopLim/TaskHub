@@ -90,6 +90,29 @@ suite('HexParser Test Suite', () => {
             assert.strictEqual(result.data.get(0x08000003), 0x08);
         });
 
+        test('should handle ELA >= 0x8000 without sign overflow (upper-half addresses)', () => {
+            // M2 회귀 가드: `parseInt(...) << 16`은 32비트 부호 있는 시프트라
+            // ELA ≥ 0x8000(예: STM32 QSPI 0x90000000)이 음수 베이스가 되어
+            // minAddress/maxAddress/toFlatArray가 전부 깨졌다.
+            // 체크섬: ELA 02+00+00+04+90+00=0x96 → 0x6A,
+            //         data 01+00+00+00+AA=0xAB → 0x55,
+            //         ELA 02+00+00+04+FF+FF=0x204 → 0xFC,
+            //         data 01+00+10+00+BB=0xCC → 0x34
+            const lines = [
+                ':0200000490006A',   // ELA: 0x9000 → base 0x90000000
+                ':01000000AA55',     // 1 byte (0xAA) at 0x90000000
+                ':02000004FFFFFC',   // ELA: 0xFFFF → base 0xFFFF0000
+                ':01001000BB34',     // 1 byte (0xBB) at 0xFFFF0010
+                ':00000001FF'
+            ].join('\n');
+
+            const result = parseIntelHex(lines);
+            assert.strictEqual(result.minAddress, 0x90000000);
+            assert.strictEqual(result.maxAddress, 0xFFFF0010);
+            assert.strictEqual(result.data.get(0x90000000), 0xAA);
+            assert.strictEqual(result.data.get(0xFFFF0010), 0xBB);
+        });
+
         test('should parse Start Linear Address (entry point)', () => {
             const lines = [
                 ':0400000508000000EF',  // Start Linear Address: 0x08000000 (incorrect checksum, will be skipped)

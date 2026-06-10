@@ -590,6 +590,110 @@ suite('StructSizeCalculator Test Suite', () => {
         });
     });
 
+    suite('Multi-dim Arrays & Unparsed Declarations (M4 회귀 가드)', () => {
+        // 이전 구현은 다차원 배열·매크로 차원·함수 포인터 선언이 정규식에
+        // 매칭되지 않으면 문장 전체를 조용히 누락하고 success: true 로
+        // 보고해 사용자가 잘못된 sizeof를 신뢰하게 했다.
+
+        test('multi-dimensional array uses the dimension product', () => {
+            const lines = [
+                'struct Matrix {',
+                '    int matrix[2][3];',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'Matrix');
+            const result = calculator.calculateStructSize('Matrix', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members.length, 1);
+            assert.strictEqual(result.members[0].arraySize, 6);
+            assert.strictEqual(result.totalSize, 24); // 2 * 3 * 4 bytes
+        });
+
+        test('3-D array with hex dimension', () => {
+            const lines = [
+                'struct Cube {',
+                '    uint8_t c[2][0x10][4];',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'Cube');
+            const result = calculator.calculateStructSize('Cube', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members[0].arraySize, 2 * 16 * 4);
+            assert.strictEqual(result.totalSize, 128);
+        });
+
+        test('identifier (macro) array dimension fails explicitly instead of silently dropping', () => {
+            const lines = [
+                'struct Buf {',
+                '    uint32_t header;',
+                '    uint8_t buf[SIZE];',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'Buf');
+            const result = calculator.calculateStructSize('Buf', lines, structLine);
+
+            assert.strictEqual(result.success, false);
+            assert.ok(result.error?.includes('buf[SIZE]'), `error should name the unparsed declaration: ${result.error}`);
+            // 부분 결과는 유지된다 — 파싱된 멤버는 그대로 보고
+            assert.ok(result.members.some(m => m.name === 'header'));
+        });
+
+        test('function pointer member is sized as a pointer', () => {
+            const lines = [
+                'struct Callbacks {',
+                '    void (*cb)(int);',
+                '    int id;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'Callbacks');
+            const result = calculator.calculateStructSize('Callbacks', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members.length, 2);
+            assert.strictEqual(result.members[0].name, 'cb');
+            assert.strictEqual(result.members[0].size, 4); // 기본 설정 pointer = 4 bytes
+            assert.strictEqual(result.totalSize, 8);
+        });
+
+        test('array of function pointers multiplies by element count', () => {
+            const lines = [
+                'struct Table {',
+                '    void (*cbs[4])(int, char);',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'Table');
+            const result = calculator.calculateStructSize('Table', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members[0].arraySize, 4);
+            assert.strictEqual(result.totalSize, 16);
+        });
+
+        test('C++ method declarations do not trigger unparsed failure', () => {
+            const lines = [
+                'class Widget {',
+                '    int value;',
+                '    void method();',
+                '    int compute(int x) const;',
+                '};'
+            ];
+
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'Widget');
+            const result = calculator.calculateStructSize('Widget', lines, structLine);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.members.length, 1);
+            assert.strictEqual(result.totalSize, 4);
+        });
+    });
+
     suite('Windows Types', () => {
         test('Calculate size with UINT8 and UINT16', () => {
             const lines = [

@@ -76,6 +76,16 @@ export interface StructSizeResult {
 type AggregateKind = 'struct' | 'class' | 'union';
 
 /**
+ * 멤버 파싱 결과. `unparsed`는 선언자 매칭에 실패해 레이아웃에서 빠진 선언문
+ * 원문 — 하나라도 있으면 sizeof가 "그럴듯한 오답"이 되므로 success: false 로
+ * 전파해야 한다 (M4).
+ */
+interface ParsedMembers {
+    members: StructMember[];
+    unparsed: string[];
+}
+
+/**
  * Default type configurations for common C/C++ types
  */
 const DEFAULT_TYPE_CONFIG: TypeConfigFile = {
@@ -177,7 +187,7 @@ export class StructSizeCalculator {
                 };
             }
             const aggregateKind = this.getAggregateKind(lines[startLine]);
-            const members = this.parseStructMembers(lines, startLine);
+            const { members, unparsed } = this.parseStructMembers(lines, startLine);
 
             if (members.length === 0) {
                 return {
@@ -187,13 +197,22 @@ export class StructSizeCalculator {
                     members: [],
                     padding: 0,
                     success: false,
-                    error: 'No members found in struct'
+                    error: unparsed.length > 0
+                        ? `Unparsed member declaration(s): ${unparsed.join('; ')}`
+                        : 'No members found in struct'
                 };
             }
 
-            return aggregateKind === 'union'
+            const result = aggregateKind === 'union'
                 ? this.calculateUnionLayout(structName, members)
                 : this.calculateLayout(structName, members);
+            if (unparsed.length > 0) {
+                // 일부 멤버가 누락된 레이아웃은 신뢰할 수 없다 — 부분 결과는
+                // 유지하되 success: false 로 보고해 오답 신뢰를 막는다.
+                result.success = false;
+                result.error = `Unparsed member declaration(s): ${unparsed.join('; ')}`;
+            }
+            return result;
         } catch (error) {
             return {
                 structName,
@@ -210,10 +229,10 @@ export class StructSizeCalculator {
     /**
      * Parse struct members from source code
      */
-    private parseStructMembers(lines: string[], startLine: number): StructMember[] {
+    private parseStructMembers(lines: string[], startLine: number): ParsedMembers {
         const body = this.extractAggregateBody(lines, startLine);
         if (body === null) {
-            return [];
+            return { members: [], unparsed: [] };
         }
         return this.parseMemberStatements(body);
     }
@@ -288,19 +307,20 @@ export class StructSizeCalculator {
         return null;
     }
 
-    private parseMemberStatements(body: string): StructMember[] {
+    private parseMemberStatements(body: string): ParsedMembers {
         const members: StructMember[] = [];
+        const unparsed: string[] = [];
         for (const statement of this.splitTopLevelStatements(body)) {
             const trimmed = statement.trim();
             if (!trimmed || /^(public|private|protected)\s*:$/u.test(trimmed)) {
                 continue;
             }
-            if (this.parseAnonymousAggregateMember(trimmed, members)) {
+            if (this.parseAnonymousAggregateMember(trimmed, members, unparsed)) {
                 continue;
             }
-            this.parseDeclarationStatement(trimmed, members);
+            this.parseDeclarationStatement(trimmed, members, unparsed);
         }
-        return members;
+        return { members, unparsed };
     }
 
     private splitTopLevelStatements(body: string): string[] {
@@ -344,7 +364,7 @@ export class StructSizeCalculator {
         return statements;
     }
 
-    private parseAnonymousAggregateMember(statement: string, members: StructMember[]): boolean {
+    private parseAnonymousAggregateMember(statement: string, members: StructMember[], unparsed: string[]): boolean {
         const aggregateMatch = statement.match(/^\s*(struct|union)\b/u);
         if (!aggregateMatch || !statement.includes('{')) {
             return false;
@@ -357,10 +377,13 @@ export class StructSizeCalculator {
         const tail = statement.slice(closeIdx + 1).trim();
         const kind = aggregateMatch[1] as AggregateKind;
         const nestedBody = statement.slice(openIdx + 1, closeIdx);
-        const nestedMembers = this.parseMemberStatements(nestedBody);
+        const nested = this.parseMemberStatements(nestedBody);
+        const nestedMembers = nested.members;
         if (nestedMembers.length === 0) {
             return false;
         }
+        // 중첩 본문에서 누락된 선언이 있으면 부모 결과도 신뢰할 수 없다.
+        unparsed.push(...nested.unparsed);
 
         // Resolve the declarator after the closing brace:
         //   `} name;` / `} name[2];` → named nested member
@@ -377,12 +400,12 @@ export class StructSizeCalculator {
             nestedName = `<anonymous ${kind}>`;
             arraySize = undefined;
         } else {
-            const memberMatch = tail.match(/^(\w+)(?:\[(0[xX][\da-fA-F]+|\d+)\])?$/u);
+            const memberMatch = tail.match(/^(\w+)((?:\s*\[\s*(?:0[xX][\da-fA-F]+|\d+)\s*\])*)$/u);
             if (!memberMatch) {
                 return false;
             }
             nestedName = memberMatch[1];
-            arraySize = this.parseArraySize(memberMatch[2]);
+            arraySize = this.parseArrayDimensions(memberMatch[2]);
         }
 
         const nestedResult = kind === 'union'
@@ -424,8 +447,34 @@ export class StructSizeCalculator {
         return -1;
     }
 
-    private parseDeclarationStatement(statement: string, members: StructMember[]): void {
-        if (/[{}]/u.test(statement) || /^\s*(typedef|using)\b/u.test(statement)) {
+    private parseDeclarationStatement(statement: string, members: StructMember[], unparsed: string[]): void {
+        if (/^\s*(typedef|using)\b/u.test(statement)) {
+            return;
+        }
+        if (/[{}]/u.test(statement)) {
+            // 중괄호가 남아 있으면 인라인 메서드 본문(C++ class — sizeof에 기여
+            // 안 함)이거나 parseAnonymousAggregateMember가 이미 시도한 중첩
+            // 집합체다. 어느 쪽도 여기서 다룰 데이터 멤버가 아니다.
+            return;
+        }
+        // 함수 포인터 멤버는 포인터 크기의 데이터 멤버다:
+        //   `void (*cb)(int)` / 배열형 `void (*cbs[4])(int)`
+        const fnPtr = statement.match(/^[\w\s*]+?\(\s*\*\s*(\w+)\s*((?:\[\s*(?:0[xX][\da-fA-F]+|\d+)\s*\])*)\s*\)\s*\([^()]*\)\s*$/u);
+        if (fnPtr) {
+            const arraySize = this.parseArrayDimensions(fnPtr[2]);
+            members.push({
+                name: fnPtr[1],
+                type: 'pointer',
+                offset: 0,
+                size: 0,
+                alignment: 0,
+                isArray: arraySize !== undefined,
+                arraySize
+            });
+            return;
+        }
+        if (/[()]/u.test(statement)) {
+            // 함수 포인터가 아닌 괄호 = 메서드 선언/프로토타입 — sizeof에 기여 안 함
             return;
         }
         const declarators = this.splitTopLevelCommas(statement);
@@ -436,15 +485,26 @@ export class StructSizeCalculator {
             if (!part) { continue; }
             let declarator = part;
             if (i === 0) {
-                const first = part.match(/^([\w\s*]+?)\s+((?:\*?\s*\w+(?:\s*\[(?:0[xX][\da-fA-F]+|\d+)\])?(?:\s*:\s*\d+)?)|(?:\s*:\s*\d+))$/u);
-                if (!first) { return; }
+                const first = part.match(/^([\w\s*]+?)\s+((?:\*?\s*\w+(?:\s*\[\s*(?:0[xX][\da-fA-F]+|\d+)\s*\])*(?:\s*:\s*\d+)?)|(?:\s*:\s*\d+))$/u);
+                if (!first) {
+                    // 매크로/식별자 배열 차원(`buf[SIZE]`) 등 해석 불가 선언.
+                    // 조용히 누락하면 sizeof가 그럴듯한 오답이 되므로(M4)
+                    // 명시적으로 실패를 전파한다.
+                    unparsed.push(statement.trim());
+                    return;
+                }
                 baseType = first[1].trim();
                 declarator = first[2].trim();
             }
-            if (!baseType) { return; }
+            if (!baseType) {
+                unparsed.push(statement.trim());
+                return;
+            }
             const parsed = this.parseDeclarator(baseType, declarator);
             if (parsed) {
                 members.push(parsed);
+            } else {
+                unparsed.push(part);
             }
         }
     }
@@ -460,6 +520,26 @@ export class StructSizeCalculator {
         }
         const n = Number(text);
         return Number.isInteger(n) && n >= 0 ? n : undefined;
+    }
+
+    /**
+     * Parse zero or more numeric array dimensions (`[2][3]`, `[0x10]`) into a
+     * flat element count (dimension product). Returns undefined when the text
+     * has no dimensions (scalar declarator).
+     */
+    private parseArrayDimensions(text: string | undefined): number | undefined {
+        if (!text) {
+            return undefined;
+        }
+        let product: number | undefined;
+        for (const m of text.matchAll(/\[\s*(0[xX][\da-fA-F]+|\d+)\s*\]/gu)) {
+            const n = this.parseArraySize(m[1]);
+            if (n === undefined) {
+                return undefined;
+            }
+            product = (product ?? 1) * n;
+        }
+        return product;
     }
 
     private splitTopLevelCommas(statement: string): string[] {
@@ -496,13 +576,13 @@ export class StructSizeCalculator {
             };
         }
 
-        const match = declarator.match(/^(\*?)\s*(\w+)(?:\s*\[(0[xX][\da-fA-F]+|\d+)\])?(?:\s*:\s*(\d+))?$/u);
+        const match = declarator.match(/^(\*?)\s*(\w+)((?:\s*\[\s*(?:0[xX][\da-fA-F]+|\d+)\s*\])*)(?:\s*:\s*(\d+))?$/u);
         if (!match) {
             return null;
         }
         const ptrPrefix = match[1];
         const name = match[2];
-        const arraySize = this.parseArraySize(match[3]);
+        const arraySize = this.parseArrayDimensions(match[3]);
         const bitWidth = match[4] ? parseInt(match[4], 10) : undefined;
         const type = ptrPrefix ? `${baseType} *` : baseType;
         return {

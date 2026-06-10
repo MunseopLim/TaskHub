@@ -146,6 +146,15 @@ export class RegisterDecoder {
             return 0;
         }
         const bitWidth = bitEnd - bitStart + 1;
+        if (bitEnd >= 32) {
+            // JS 32비트 비트 연산은 시프트 카운트를 & 31 처리해 [35:32] 필드가
+            // 하위 [3:0] 값을 그럴듯하게 보여줬다(M3). bit 32 이상에 걸치는
+            // 필드는 BigInt 경로로 추출한다. (registerValue가 2^53을 넘으면
+            // Number 정밀도가 이미 깨진 입력이므로 여기서는 다루지 않는다.)
+            const big = BigInt(Math.trunc(registerValue));
+            const extracted = (big >> BigInt(bitStart)) & ((1n << BigInt(bitWidth)) - 1n);
+            return Number(extracted);
+        }
         // Handle 32-bit fields correctly (1 << 32 wraps to 1 in JS)
         const mask = bitWidth >= 32 ? 0xFFFFFFFF : (1 << bitWidth) - 1;
         return ((registerValue >>> bitStart) & mask) >>> 0;
