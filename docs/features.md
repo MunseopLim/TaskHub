@@ -217,7 +217,7 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
     -   `"mode": "editor"`: 새 에디터 탭에 결과를 표시합니다.
     -   `"mode": "file"`: 지정된 파일에 결과를 저장합니다. (`filePath`, `overwrite` 속성 사용)
         -   `overwrite` (boolean | string, *선택*, 기본값: `false`): `true`로 설정하면 기존 파일을 덮어씁니다. `false`이거나 생략하면 파일이 이미 존재할 때 실행이 실패합니다. 문자열로 지정하면 변수 치환(예: `"${someVar}"`)을 사용할 수 있으며, 치환된 값이 `"true"`(대소문자 무시)이면 덮어쓰기가 활성화됩니다.
-    -   `"mode": "terminal"`: 액션 ID별로 재사용되는 Task 패널(`TaskHub: <액션 ID>`)에 결과를 붙여넣습니다.
+    -   `"mode": "terminal"`: 액션 ID별로 재사용되는 **읽기 전용 터미널**(`TaskHub: <액션 ID>`)에 결과를 표시합니다. 셸이 없는 출력 전용 터미널이므로 결과 본문이 명령으로 실행되지 않습니다.
     -   `"capture"` (object | array, *선택*): 태스크 출력 문자열에서 **원하는 값만 뽑아 파생 변수**를 만듭니다. 자세한 내용은 아래 [Output Capture](#output-capture) 섹션 참고.
     -   `"diagnostics"` (object | string | array, *선택*): 출력에서 컴파일러 에러·경고를 정규식으로 추출해 VS Code **Problems 패널에 진단**으로 표시. 자세한 내용은 아래 [Output Diagnostics](#output-diagnostics-problems-패널-통합) 섹션 참고.
 

@@ -1290,11 +1290,19 @@ try {
                 name: 'fake',
                 exitStatus: undefined,
                 show: () => { /* no-op */ },
-                sendText: (text: string) => { capturedText.push(text); },
                 dispose: () => { /* no-op */ }
             } as unknown as vscode.Terminal;
-            (vscode.window as any).createTerminal = (..._args: any[]) => {
+            (vscode.window as any).createTerminal = (options: vscode.ExtensionTerminalOptions) => {
                 createCount += 1;
+                // M1 회귀 가드: output.mode 'terminal'은 셸 없는 읽기 전용
+                // Pseudoterminal로 열려야 한다. 실제 셸 터미널에 sendText로
+                // 본문을 보내면 개행이 Enter로 해석되어 임의 라인이 실행된다.
+                assert.ok(
+                    options && typeof options === 'object' && 'pty' in options,
+                    'output terminal must be created with a pseudoterminal (no shell)'
+                );
+                options.pty.onDidWrite!((text: string) => capturedText.push(text));
+                options.pty.open(undefined);
                 return fakeTerminal;
             };
             // Unique id keeps us isolated from the module-level actionTerminals cache.

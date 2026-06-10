@@ -1456,7 +1456,49 @@ function getPreviewOutputChannel(): vscode.OutputChannel {
     }
     return previewOutputChannel;
 }
-const actionTerminals = new Map<string, vscode.Terminal>();
+// `output.mode: 'terminal'`용 읽기 전용 터미널 핸들. 실제 셸 터미널에
+// sendText()로 본문을 보내면 본문 속 개행이 Enter로 해석되어 임의 라인이
+// 셸에서 실행될 수 있으므로(예: 빌드 출력의 `del ...` 라인), 셸 없는
+// Pseudoterminal에 출력만 렌더링한다.
+interface OutputTerminalHandle {
+    terminal: vscode.Terminal;
+    write: (text: string) => void;
+}
+
+function createReadonlyOutputTerminal(name: string): OutputTerminalHandle {
+    const writeEmitter = new vscode.EventEmitter<string>();
+    // pty.open()은 createTerminal 직후가 아니라 터미널 UI가 붙은 뒤 비동기로
+    // 호출된다. open 이전의 write는 유실되므로 버퍼링했다가 open 시 flush.
+    let opened = false;
+    let pending = '';
+    const pty: vscode.Pseudoterminal = {
+        onDidWrite: writeEmitter.event,
+        open: () => {
+            opened = true;
+            if (pending.length > 0) {
+                writeEmitter.fire(pending);
+                pending = '';
+            }
+        },
+        close: () => {
+            writeEmitter.dispose();
+        }
+        // handleInput 미구현 → 사용자 입력이 어디에도 전달되지 않는 읽기 전용 터미널
+    };
+    const terminal = vscode.window.createTerminal({ name, pty });
+    const write = (text: string) => {
+        // xterm은 LF만으로는 캐리지 리턴하지 않으므로 CRLF로 정규화
+        const normalized = text.replace(/\r?\n/g, '\r\n');
+        if (opened) {
+            writeEmitter.fire(normalized);
+        } else {
+            pending += normalized;
+        }
+    };
+    return { terminal, write };
+}
+
+const actionTerminals = new Map<string, OutputTerminalHandle>();
 const actionWorkspaceFolderMap = new Map<string, string | undefined>();
 
 // Refcount of in-flight parallel-capable runs per actionId. While the
@@ -3129,15 +3171,14 @@ async function executeSingleTask(
                     const actionKey = actionId || 'default';
                     const useTaskKey = isParallelActionActive(actionKey) && typeof task.id === 'string' && task.id.length > 0;
                     const terminalKey = useTaskKey ? `${actionKey}:${task.id}` : actionKey;
-                    let terminal = actionTerminals.get(terminalKey);
-                    if (!terminal || terminal.exitStatus) {
-                        terminal = vscode.window.createTerminal(`TaskHub: ${terminalKey}`);
-                        actionTerminals.set(terminalKey, terminal);
+                    let handle = actionTerminals.get(terminalKey);
+                    if (!handle || handle.terminal.exitStatus) {
+                        handle = createReadonlyOutputTerminal(`TaskHub: ${terminalKey}`);
+                        actionTerminals.set(terminalKey, handle);
                     }
-                    terminal.show();
-                    const header = `\n# ----- Output for task: ${task.id} ----- #\n`;
-                    terminal.sendText(header, false);
-                    terminal.sendText(interpolatedOutput.content, false);
+                    handle.terminal.show();
+                    handle.write(`\n# ----- Output for task: ${task.id} ----- #\n`);
+                    handle.write(interpolatedOutput.content);
                 }
                 break;
         }
@@ -4344,7 +4385,7 @@ async function pickWorkspaceFolderForCommand(placeHolder: string): Promise<vscod
 export function activate(context: vscode.ExtensionContext) {
     const terminalDisposable = vscode.window.onDidCloseTerminal(terminal => {
         for (const [key, actionTerminal] of actionTerminals.entries()) {
-            if (actionTerminal === terminal) {
+            if (actionTerminal.terminal === terminal) {
                 actionTerminals.delete(key);
                 break;
             }
