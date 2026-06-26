@@ -52,6 +52,7 @@ import {
 	getActionsValidator,
 	invalidateActionsCache,
 	shouldRecordTaskInput,
+	formatExecutedCommandsDocument,
 } from '../extension';
 import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
 import { LinkViewProvider, readLinksFromDisk } from '../providers/linkViewProvider';
@@ -2432,9 +2433,139 @@ suite('Extension Test Suite', () => {
 			// Newest-first ordering: both / in-only / out-only / plain.
 			const byActionId = new Map(items.map(i => [i.getEntry().actionId, i]));
 			assert.strictEqual(byActionId.get('plain')?.contextValue, 'historyItem');
-			assert.strictEqual(byActionId.get('out-only')?.contextValue, 'historyItemWithOutput');
-			assert.strictEqual(byActionId.get('in-only')?.contextValue, 'historyItemWithInputs');
-			assert.strictEqual(byActionId.get('both')?.contextValue, 'historyItemWithOutputAndInputs');
+			assert.strictEqual(byActionId.get('out-only')?.contextValue, 'historyItem.output');
+			assert.strictEqual(byActionId.get('in-only')?.contextValue, 'historyItem.inputs');
+			assert.strictEqual(byActionId.get('both')?.contextValue, 'historyItem.inputs.output');
+		});
+
+		test('setHistoryCommands adds the .commands flag to contextValue and clears it when empty', async () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('cmd', 'success', 1));
+			provider.setHistoryCommands('cmd', 1, { build: 'gcc -o app main.c' });
+
+			let items = await provider.getChildren();
+			assert.strictEqual(items[0].contextValue, 'historyItem.commands');
+			assert.deepStrictEqual(items[0].getEntry().commands, { build: 'gcc -o app main.c' });
+
+			// Empty map clears the field so the affordance disappears.
+			provider.setHistoryCommands('cmd', 1, {});
+			items = await provider.getChildren();
+			assert.strictEqual(items[0].contextValue, 'historyItem');
+			assert.strictEqual(items[0].getEntry().commands, undefined);
+		});
+
+		test('inputs + output + commands compose into a single dotted contextValue', async () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('all', 'success', 1, 'log output'));
+			provider.setHistoryInputs('all', 1, { pick: { value: 'p' } });
+			provider.setHistoryCommands('all', 1, { run: 'echo hi' });
+
+			const items = await provider.getChildren();
+			assert.strictEqual(items[0].contextValue, 'historyItem.inputs.output.commands');
+		});
+
+		test('contextValue: inputs+commands (no output) and output+commands (no inputs) compose correctly', async () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('in-cmd', 'success', 1));
+			provider.setHistoryInputs('in-cmd', 1, { pick: { value: 'p' } });
+			provider.setHistoryCommands('in-cmd', 1, { run: 'echo a' });
+
+			provider.addHistoryEntry(makeEntry('out-cmd', 'failure', 2, 'boom'));
+			provider.setHistoryCommands('out-cmd', 2, { run: 'echo b' });
+
+			const byId = new Map((await provider.getChildren()).map(i => [i.getEntry().actionId, i]));
+			assert.strictEqual(byId.get('in-cmd')?.contextValue, 'historyItem.inputs.commands');
+			assert.strictEqual(byId.get('out-cmd')?.contextValue, 'historyItem.output.commands');
+		});
+
+		test('setHistoryCommands on an unknown (actionId, timestamp) is a silent no-op', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('present', 'success', 1));
+			// Neither a wrong id nor a wrong timestamp should mutate anything.
+			provider.setHistoryCommands('absent', 1, { run: 'echo x' });
+			provider.setHistoryCommands('present', 999, { run: 'echo x' });
+			const history = provider.getHistory();
+			assert.strictEqual(history.length, 1);
+			assert.strictEqual(history[0].commands, undefined);
+		});
+
+		test('setHistoryCommands targets the entry matched by (actionId, timestamp), not just actionId', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('rerun', 'success', 100));
+			provider.addHistoryEntry(makeEntry('rerun', 'success', 200));
+			provider.setHistoryCommands('rerun', 100, { run: 'old' });
+
+			const history = provider.getHistory();
+			const older = history.find(e => e.timestamp === 100);
+			const newer = history.find(e => e.timestamp === 200);
+			assert.deepStrictEqual(older?.commands, { run: 'old' });
+			assert.strictEqual(newer?.commands, undefined);
+		});
+
+		test('setHistoryCommands overwrites previously recorded commands', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('over', 'success', 1));
+			provider.setHistoryCommands('over', 1, { a: 'first' });
+			provider.setHistoryCommands('over', 1, { b: 'second' });
+			assert.deepStrictEqual(provider.getHistory()[0].commands, { b: 'second' });
+		});
+
+		test('commands field round-trips through workspaceState across HistoryProvider instances', () => {
+			const ctx = createMockContext();
+			const p1 = new HistoryProvider(ctx);
+			const ts = 77;
+			p1.addHistoryEntry(makeEntry('persist-commands', 'success', ts));
+			p1.setHistoryCommands('persist-commands', ts, {
+				build: 'gcc -O2 -o app main.c',
+				run: 'app --verbose'
+			});
+			const p2 = new HistoryProvider(ctx);
+			assert.deepStrictEqual(p2.getHistory()[0].commands, {
+				build: 'gcc -O2 -o app main.c',
+				run: 'app --verbose'
+			});
+		});
+
+		suite('formatExecutedCommandsDocument', () => {
+			function entryWithCommands(commands?: Record<string, string>): HistoryEntry {
+				const e = makeEntry('fmt', 'success', 1700000000000);
+				if (commands) { e.commands = commands; }
+				return e;
+			}
+
+			test('returns null when the entry has no commands field', () => {
+				assert.strictEqual(formatExecutedCommandsDocument(entryWithCommands()), null);
+			});
+
+			test('returns null when commands is an empty object', () => {
+				assert.strictEqual(formatExecutedCommandsDocument(entryWithCommands({})), null);
+			});
+
+			test('single command: header carries the action title and the [taskId] section holds the command', () => {
+				const content = formatExecutedCommandsDocument(entryWithCommands({ build: 'gcc -o app main.c' }))!;
+				assert.ok(content !== null);
+				// Header is locale-dependent (t(ko, en)); the action title is in
+				// both variants, so assert on that rather than the keyword.
+				assert.ok(content.includes('Title for fmt'), `header should contain the action title, got:\n${content}`);
+				assert.ok(content.includes('[build]\ngcc -o app main.c'), `body should hold the [taskId] section, got:\n${content}`);
+			});
+
+			test('multiple commands: one section per task, in insertion order, blank-line separated', () => {
+				const content = formatExecutedCommandsDocument(entryWithCommands({
+					build: 'gcc -o app main.c',
+					deploy: 'scp app server:/opt'
+				}))!;
+				assert.ok(content.includes('[build]\ngcc -o app main.c'));
+				assert.ok(content.includes('[deploy]\nscp app server:/opt'));
+				assert.ok(
+					content.indexOf('[build]') < content.indexOf('[deploy]'),
+					'sections must preserve insertion order'
+				);
+				assert.ok(
+					content.includes('main.c\n\n[deploy]'),
+					'sections must be separated by a blank line'
+				);
+			});
 		});
 
 		test('rerun flow: re-adding with a new timestamp yields two distinct entries', () => {

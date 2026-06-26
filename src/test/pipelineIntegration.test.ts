@@ -1616,6 +1616,272 @@ try {
             }
         });
 
+        test('IT-110: recordCommands에 ${...} 치환이 끝난 실행 명령줄이 task별로 기록된다', async () => {
+            // The picked directory flows from an interactive folderDialog
+            // (here supplied via presetInputs) into the command's args. The
+            // recorded command must contain the resolved path so "실행한
+            // 명령 보기" can show exactly what ran without re-prompting.
+            const picked = path.join(tempWorkspace, 'picked-dir');
+            const action: PipelineAction = {
+                description: 'IT-110',
+                tasks: [
+                    { id: 'dir', type: 'folderDialog' },
+                    {
+                        id: 'build',
+                        type: 'shell',
+                        command: 'node',
+                        args: ['-e', 'process.exit(0)', '${dir.path}'],
+                        passTheResultToNextTask: true
+                    }
+                ]
+            };
+
+            const recordCommands: Record<string, string> = {};
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it110',
+                tempWorkspace,
+                [tempWorkspace],
+                {
+                    presetInputs: { dir: { path: picked, dir: tempWorkspace, name: 'picked-dir', fileNameOnly: 'picked-dir', fileExt: '' } },
+                    recordCommands
+                }
+            );
+
+            assert.ok(recordCommands['build'], 'command/shell task must be recorded');
+            assert.ok(
+                recordCommands['build'].includes(picked),
+                `recorded command should contain the resolved picked dir, got: ${recordCommands['build']}`
+            );
+            assert.ok(
+                !Object.prototype.hasOwnProperty.call(recordCommands, 'dir'),
+                'interactive (non-command) task must not be recorded as a command'
+            );
+        });
+
+        test('IT-111: executeAction이 실행한 명령줄을 history entry.commands에 영속화한다', async () => {
+            const context = makeFakeContext();
+            const actionItem: ActionItem = {
+                id: 'it111',
+                title: 'IT-111',
+                action: {
+                    description: 'IT-111',
+                    tasks: [{
+                        id: 'run',
+                        type: 'shell',
+                        command: 'node',
+                        args: ['-e', 'process.exit(0)', 'marker-arg'],
+                        passTheResultToNextTask: true
+                    }]
+                }
+            };
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            await executeAction(actionItem, context, mainView, history);
+
+            const entry = history.getHistory()[0];
+            assert.strictEqual(entry.status, 'success');
+            assert.ok(entry.commands, 'history entry must carry recorded commands');
+            assert.ok(entry.commands!['run'], 'the shell task must be recorded under its task id');
+            assert.ok(
+                entry.commands!['run'].includes('node') && entry.commands!['run'].includes('marker-arg'),
+                `recorded command should contain the command and its args, got: ${entry.commands!['run']}`
+            );
+        });
+
+        test('IT-112: 저장된 folderDialog 입력으로 재실행하면 dir 다이얼로그를 다시 열지 않고 선택값을 재사용한다', async () => {
+            // The user's exact scenario: a history rerun must reuse the
+            // previously picked directory instead of re-prompting. The 5th
+            // `executeAction` arg here is precisely what
+            // `taskhub.rerunFromHistory` now forwards from `entry.inputs`
+            // (it used to pass `undefined`, which forced the dialog open —
+            // the regression this guards against).
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            let dialogOpened = 0;
+            const context = makeFakeContext();
+            const picked = path.join(tempWorkspace, 'saved-dir');
+            try {
+                (vscode.window as any).showOpenDialog = async () => {
+                    dialogOpened++;
+                    // Return a deliberately wrong path so a regression that
+                    // re-opens the dialog would surface as a content mismatch
+                    // too, not just the counter.
+                    return [vscode.Uri.file(path.join(tempWorkspace, 'WRONG-dir'))];
+                };
+
+                const actionItem: ActionItem = {
+                    id: 'it112',
+                    title: 'IT-112',
+                    action: {
+                        description: 'IT-112',
+                        tasks: [
+                            { id: 'dir', type: 'folderDialog' },
+                            {
+                                id: 'use',
+                                type: 'shell',
+                                command: 'node',
+                                args: ['-e', 'process.exit(0)', '${dir.path}'],
+                                passTheResultToNextTask: true
+                            }
+                        ]
+                    }
+                };
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                const savedInputs = {
+                    dir: { path: picked, dir: tempWorkspace, name: 'saved-dir', fileNameOnly: 'saved-dir', fileExt: '' }
+                };
+                await executeAction(actionItem, context, mainView, history, savedInputs);
+
+                assert.strictEqual(dialogOpened, 0, 'folder dialog must not reopen when saved inputs are supplied');
+                const entry = history.getHistory()[0];
+                assert.strictEqual(entry.status, 'success');
+                assert.ok(
+                    entry.commands!['use'].includes(picked),
+                    `command must use the saved dir, got: ${entry.commands!['use']}`
+                );
+                assert.ok(
+                    !entry.commands!['use'].includes('WRONG-dir'),
+                    'the re-prompted (wrong) dir must never reach the command'
+                );
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
+        test('IT-113: 여러 command/shell task가 각자의 id로 모두 기록된다 (command 타입 포함)', async () => {
+            const action: PipelineAction = {
+                description: 'IT-113',
+                tasks: [
+                    { id: 'first', type: 'shell', command: 'node', args: ['-e', 'process.exit(0)', 'ARG-A'], passTheResultToNextTask: true },
+                    { id: 'second', type: 'command', command: 'node', args: ['-e', 'process.exit(0)', 'ARG-B'], passTheResultToNextTask: true }
+                ]
+            };
+            const recordCommands: Record<string, string> = {};
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it113',
+                tempWorkspace,
+                [tempWorkspace],
+                { recordCommands }
+            );
+            assert.strictEqual(Object.keys(recordCommands).length, 2, 'both command-bearing tasks must be recorded');
+            assert.ok(recordCommands['first'].includes('ARG-A'), `got: ${recordCommands['first']}`);
+            assert.ok(recordCommands['second'].includes('ARG-B'), `got: ${recordCommands['second']}`);
+        });
+
+        test('IT-114: command/shell task가 없으면 executeAction이 history entry.commands를 남기지 않는다', async () => {
+            // Guards the "no spurious terminal icon" promise: a pure
+            // stringManipulation action must not advertise a command view.
+            const context = makeFakeContext();
+            const actionItem: ActionItem = {
+                id: 'it114',
+                title: 'IT-114',
+                action: {
+                    description: 'IT-114',
+                    tasks: [{ id: 't', type: 'stringManipulation', function: 'trim', input: '  x  ' }]
+                }
+            };
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            await executeAction(actionItem, context, mainView, history);
+
+            const entry = history.getHistory()[0];
+            assert.strictEqual(entry.status, 'success');
+            assert.strictEqual(entry.commands, undefined, 'no command/shell task ran → commands field must stay absent');
+        });
+
+        test('IT-115: command task가 실패해도 실행한 명령줄은 기록되고 failure 경로에서 영속화된다', async () => {
+            // Recording happens before execution, so a non-zero exit must not
+            // lose the command. The failure persistence path must also flush
+            // it to the history entry.
+            const originalShowError = vscode.window.showErrorMessage;
+            (vscode.window as any).showErrorMessage = async () => undefined;
+            try {
+                const context = makeFakeContext();
+                const actionItem: ActionItem = {
+                    id: 'it115',
+                    title: 'IT-115',
+                    action: {
+                        description: 'IT-115',
+                        tasks: [{
+                            id: 'boom',
+                            type: 'shell',
+                            command: 'node',
+                            args: ['-e', 'process.exit(3)', 'FAIL-MARKER'],
+                            passTheResultToNextTask: true
+                        }]
+                    }
+                };
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                await assert.rejects(() => executeAction(actionItem, context, mainView, history));
+
+                const entry = history.getHistory()[0];
+                assert.strictEqual(entry.status, 'failure');
+                assert.ok(entry.commands, 'commands must survive the failure path');
+                assert.ok(
+                    entry.commands!['boom'].includes('FAIL-MARKER'),
+                    `failed task's command must still be recorded, got: ${entry.commands!['boom']}`
+                );
+            } finally {
+                (vscode.window as any).showErrorMessage = originalShowError;
+            }
+        });
+
+        test('IT-116: 저장된 입력이 없으면 folderDialog가 정상적으로 열린다 (IT-112 대조군)', async () => {
+            // Without this, IT-112's `dialogOpened === 0` could pass even if
+            // the dialog were unconditionally suppressed. Here, with no preset,
+            // the dialog must open exactly once and its pick must flow through.
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            let dialogOpened = 0;
+            const context = makeFakeContext();
+            const chosen = path.join(tempWorkspace, 'fresh-dir');
+            try {
+                (vscode.window as any).showOpenDialog = async () => {
+                    dialogOpened++;
+                    return [vscode.Uri.file(chosen)];
+                };
+                const actionItem: ActionItem = {
+                    id: 'it116',
+                    title: 'IT-116',
+                    action: {
+                        description: 'IT-116',
+                        tasks: [
+                            { id: 'dir', type: 'folderDialog' },
+                            {
+                                id: 'use',
+                                type: 'shell',
+                                command: 'node',
+                                args: ['-e', 'process.exit(0)', '${dir.path}'],
+                                passTheResultToNextTask: true
+                            }
+                        ]
+                    }
+                };
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                await executeAction(actionItem, context, mainView, history); // no presetInputs
+
+                assert.strictEqual(dialogOpened, 1, 'dialog must open exactly once when no saved input is supplied');
+                assert.ok(
+                    history.getHistory()[0].commands!['use'].includes('fresh-dir'),
+                    'the freshly picked dir must flow into the recorded command'
+                );
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
         test('IT-073: executeAction이 종료 후 actionStates.progress를 비운다', async () => {
             // The progress hint is mid-run only — finalizeActionRun must
             // clear it so a freshly-completed action doesn't keep showing

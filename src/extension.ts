@@ -2398,6 +2398,10 @@ function logActionStart(showVerboseLogs: boolean, title: string, description?: s
  *     with `password: true` is deliberately omitted to avoid persisting
  *     secrets. The accumulator is mutated in place even if the pipeline
  *     fails midway, so partial runs still surface their captured inputs.
+ *   - `recordCommands`: when provided, each `command` / `shell` task writes
+ *     its resolved (post-interpolation) command line into this object keyed
+ *     by task id, so the caller can attach "what actually ran" to a history
+ *     entry. Mutated in place so partial runs still surface their commands.
  *   - `onTaskTransition`: per-task lifecycle callback used to surface
  *     "지금 어디" progress on the Actions panel. Fires on `running`
  *     before each task starts, then on the matching terminal state
@@ -2406,6 +2410,7 @@ function logActionStart(showVerboseLogs: boolean, title: string, description?: s
 export interface PipelineExecutionOptions {
     presetInputs?: Record<string, unknown>;
     recordInputs?: Record<string, unknown>;
+    recordCommands?: Record<string, string>;
     onTaskTransition?: (event: TaskTransitionEvent) => void;
 }
 
@@ -2471,6 +2476,7 @@ export async function executeActionPipeline(
     const stepResults: Record<string, unknown> = {};
     const presetInputs = options?.presetInputs;
     const recordInputs = options?.recordInputs;
+    const recordCommands = options?.recordCommands;
     const onTaskTransition = options?.onTaskTransition;
     const total = action.tasks.length;
 
@@ -2559,7 +2565,8 @@ export async function executeActionPipeline(
             id,
             workspaceFolderPath,
             workspaceRoots,
-            presetValue
+            presetValue,
+            recordCommands
         );
         const underlying: Promise<unknown> = isInteractive
             ? withInteractivePromptLock(startTask)
@@ -2763,10 +2770,15 @@ export async function executeAction(
     // entry below so a later "Re-run with saved inputs" can replay them.
     const recordInputs: Record<string, unknown> = {};
 
+    // Accumulator for resolved command lines — attached to the history entry
+    // below so "실행한 명령 보기" can show what ran without re-executing.
+    const recordCommands: Record<string, string> = {};
+
     try {
         await executeActionPipeline(action, context, id, actionWorkspaceFolder, undefined, {
             presetInputs,
             recordInputs,
+            recordCommands,
             // Surface "지금 어디" progress on the Actions panel. We only
             // mutate the existing actionStates entry (markActionAsRunning
             // already set state='running') and refresh the tree.
@@ -2818,6 +2830,7 @@ export async function executeAction(
             const durationMs = Math.max(0, Date.now() - timestamp);
             historyProvider.updateHistoryStatus(id, timestamp, 'success', undefined, durationMs);
             historyProvider.setHistoryInputs(id, timestamp, recordInputs);
+            historyProvider.setHistoryCommands(id, timestamp, recordCommands);
         }
     } catch (error: any) {
         if (!manuallyTerminatedActions.has(id)) {
@@ -2831,6 +2844,7 @@ export async function executeAction(
                 // Persist whatever inputs were captured before the failure
                 // — partial replay is still useful when a later task fails.
                 historyProvider.setHistoryInputs(id, timestamp, recordInputs);
+                historyProvider.setHistoryCommands(id, timestamp, recordCommands);
             }
 
             throw error;
@@ -2840,6 +2854,7 @@ export async function executeAction(
                 const durationMs = Math.max(0, Date.now() - timestamp);
                 historyProvider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user', durationMs);
                 historyProvider.setHistoryInputs(id, timestamp, recordInputs);
+                historyProvider.setHistoryCommands(id, timestamp, recordCommands);
             }
         }
     } finally {
@@ -2855,7 +2870,8 @@ async function executeSingleTask(
     actionId: string,
     workspaceFolderPath?: string,
     workspaceRoots?: string[],
-    presetResult?: unknown
+    presetResult?: unknown,
+    recordCommands?: Record<string, string>
 ): Promise<any> {
     const defaultWorkspace = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const interpolationContext = { ...allResults, workspaceFolder: defaultWorkspace, extensionPath: context.extensionPath };
@@ -3011,6 +3027,13 @@ async function executeSingleTask(
             }
 
             if (!command) { throw new Error(`Task ${task.id} of type '${task.type}' requires a 'command' property.`); }
+            // Record the resolved command line (post-interpolation) so history
+            // can show exactly what ran — including the dir picked from a
+            // dialog — without re-executing. Uses the native-invocation display
+            // form (`exe arg arg`) for readability across platforms.
+            if (recordCommands) {
+                recordCommands[task.id] = buildNativeCommandInvocation(command, args).display;
+            }
             const handlerTask = { ...task, command, args, cwd: interpolatedCwd, env, actionId };
 
             if (task.passTheResultToNextTask) {
@@ -4382,6 +4405,27 @@ async function pickWorkspaceFolderForCommand(placeHolder: string): Promise<vscod
     return vscode.window.showWorkspaceFolderPick({ placeHolder });
 }
 
+/**
+ * Build the read-only document shown by `taskhub.viewHistoryCommand` — a
+ * header (action title + run time) followed by one `[taskId]` section per
+ * recorded command, in insertion order. Pure so the formatting is
+ * unit-testable. Returns `null` when the entry has no recorded commands, so
+ * the caller can surface the "nothing to show" notice instead.
+ */
+export function formatExecutedCommandsDocument(entry: HistoryEntry): string | null {
+    if (!entry.commands || Object.keys(entry.commands).length === 0) {
+        return null;
+    }
+    const header = t(
+        `# 실행한 명령 — ${entry.actionTitle}\n# ${new Date(entry.timestamp).toLocaleString()}\n`,
+        `# Executed commands — ${entry.actionTitle}\n# ${new Date(entry.timestamp).toLocaleString()}\n`
+    );
+    const body = Object.entries(entry.commands)
+        .map(([taskId, command]) => `[${taskId}]\n${command}`)
+        .join('\n\n');
+    return `${header}\n${body}\n`;
+}
+
 export function activate(context: vscode.ExtensionContext) {
     const terminalDisposable = vscode.window.onDidCloseTerminal(terminal => {
         for (const [key, actionTerminal] of actionTerminals.entries()) {
@@ -5354,7 +5398,10 @@ export function activate(context: vscode.ExtensionContext) {
         if (fullActionItem) {
             const pathParts = findActionPathById(allActions, entry.actionId);
             try {
-                await executeAction(fullActionItem, context, mainViewProvider, historyProvider, undefined, pathParts);
+                // 기본 클릭 재실행은 직전에 선택한 입력(예: dir 선택 dialog 결과)을
+                // 그대로 재사용한다. presetInputs는 taskId가 일치하는 interactive
+                // task에만 적용되므로, 저장된 입력이 없으면 평소처럼 다시 묻는다.
+                await executeAction(fullActionItem, context, mainViewProvider, historyProvider, entry.inputs, pathParts);
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 outputChannel.appendLine(`[ERROR] Execution failed for action '${entry.actionId}': ${msg}`);
@@ -5411,6 +5458,24 @@ export function activate(context: vscode.ExtensionContext) {
         const doc = await vscode.workspace.openTextDocument({
             content: entry.output,
             language: 'text'
+        });
+        await vscode.window.showTextDocument(doc);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.viewHistoryCommand', async (item: HistoryItem) => {
+        const entry = item?.getEntry?.();
+        const content = entry ? formatExecutedCommandsDocument(entry) : null;
+        if (!content) {
+            vscode.window.showInformationMessage(t(
+                '이 기록 항목에는 실행한 명령 정보가 없습니다.',
+                'No executed command is recorded for this history item.'
+            ));
+            return;
+        }
+
+        const doc = await vscode.workspace.openTextDocument({
+            content,
+            language: 'shellscript'
         });
         await vscode.window.showTextDocument(doc);
     }));

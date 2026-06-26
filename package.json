@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -314,6 +314,11 @@
         "icon": "$(output)"
       },
       {
+        "command": "taskhub.viewHistoryCommand",
+        "title": "View Executed Command",
+        "icon": "$(terminal)"
+      },
+      {
         "command": "taskhub.deleteHistoryItem",
         "title": "Delete History Item",
         "icon": "$(trash)"
@@ -454,6 +459,10 @@
         },
         {
           "command": "taskhub.viewHistoryOutput",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.viewHistoryCommand",
           "when": "false"
         },
         {
@@ -669,18 +678,23 @@
         },
         {
           "command": "taskhub.rerunFromHistoryWithInputs",
-          "when": "view == mainView.history && (viewItem == historyItemWithInputs || viewItem == historyItemWithOutputAndInputs)",
+          "when": "view == mainView.history && viewItem =~ /\\.inputs\\b/",
           "group": "inline@1"
         },
         {
-          "command": "taskhub.viewHistoryOutput",
-          "when": "view == mainView.history && (viewItem == historyItemWithOutput || viewItem == historyItemWithOutputAndInputs)",
+          "command": "taskhub.viewHistoryCommand",
+          "when": "view == mainView.history && viewItem =~ /\\.commands\\b/",
           "group": "inline@2"
         },
         {
-          "command": "taskhub.deleteHistoryItem",
-          "when": "view == mainView.history && (viewItem == historyItem || viewItem == historyItemWithOutput || viewItem == historyItemWithInputs || viewItem == historyItemWithOutputAndInputs)",
+          "command": "taskhub.viewHistoryOutput",
+          "when": "view == mainView.history && viewItem =~ /\\.output\\b/",
           "group": "inline@3"
+        },
+        {
+          "command": "taskhub.deleteHistoryItem",
+          "when": "view == mainView.history && viewItem =~ /^historyItem/",
+          "group": "inline@4"
         }
       ]
     },
@@ -739,13 +753,13 @@
     "@types/vscode": "^1.75.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
-    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.0.0",
     "ajv": "^8.17.1",
     "esbuild": "^0.28.0",
     "eslint": "^10.0.0",
     "mocha": "^11.0.0",
-    "npm-run-all2": "^9.0.1",
+    "npm-run-all2": "^8.0.4",
     "typescript": "^6.0.3"
   },
   "overrides": {

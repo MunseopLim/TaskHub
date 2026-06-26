@@ -29,6 +29,25 @@
 =====================================================================
 -->
 
+## [0.6.10] - 2026-06-27
+
+### 추가 / 변경 — History 실행 명령 보기 · 저장된 입력 재사용 · 의존성 엔진 정합
+
+#### 추가 (History)
+
+- **실행한 명령 보기 (View Executed Command)**: `command` / `shell` task가 실제로 실행한 명령줄을 `${...}` 치환(선택한 디렉터리 등 포함)이 끝난 상태로 히스토리에 함께 기록한다. 명령이 기록된 항목의 터미널 아이콘을 누르면 **재실행 없이** task ID별 명령줄을 읽기 전용 문서로 확인할 수 있다(출력 보기와 별개 — 결과가 아니라 실행한 명령 자체). 문서 생성 로직은 순수 함수 `formatExecutedCommandsDocument`로 분리. 참조: [src/extension.ts](src/extension.ts), [src/providers/historyProvider.ts](src/providers/historyProvider.ts).
+  - `HistoryEntry`에 `commands` 필드와 `setHistoryCommands()` 추가, contextValue를 조합형 토큰(`historyItem.inputs.output.commands`)으로 재설계해 메뉴 `when` 절이 정규식으로 각 capability를 독립 매칭하도록 변경.
+
+#### 변경 (UX)
+
+- **History 기본 클릭 재실행이 저장된 입력을 재사용**: 히스토리 항목을 클릭해 재실행하면 직전에 선택한 입력(예: `folderDialog`로 고른 디렉터리)을 그대로 재사용하고 다이얼로그를 다시 띄우지 않는다. 이전에는 기본 클릭이 항상 다이얼로그를 재프롬프트했다(저장값 재사용은 별도 인라인 버튼에서만 가능). 입력을 새로 고르려면 원본 액션을 실행한다. 참조: [src/extension.ts](src/extension.ts).
+
+#### 수정 (의존성 / 엔진)
+
+- **EBADENGINE 경고 해소**: `npm-run-all2`가 v9(Node `>=22.22.2` 요구)로 설치돼 현재 런타임(Node 22.20.0)과 어긋나 npm-run-all2와 하위 의존성에서 EBADENGINE 경고가 연쇄 발생했다. v9의 `latest` 태그는 구버전 Node를 지원하는 v8 라인이므로 `^8.0.4`로 고정(이 패키지는 `watch` 스크립트 한 곳에서만 사용). `@vscode/test-cli`는 `^0.0.15`로 갱신. `@types/node`는 런타임 Node 22와 맞춰 `22.x` 유지.
+
+**테스트**: 신규 13 케이스(commands 기록·영속화·실패 경로, contextValue 조합, `formatExecutedCommandsDocument`, folderDialog 재사용/대조군), 최종 1,436 passing.
+
 ## [0.6.9] - 2026-06-10
 
 ### 수정 — Preview/Doctor 워크스페이스 판정을 런타임 규칙과 완전 일치 (0.6.8 후속)

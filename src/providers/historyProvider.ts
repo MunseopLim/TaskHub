@@ -60,6 +60,15 @@ export interface HistoryEntry {
      */
     inputs?: Record<string, unknown>;
     /**
+     * Per-task resolved command lines for `command` / `shell` tasks, keyed by
+     * task id. Captured at execution time AFTER `${...}` interpolation, so the
+     * stored string is exactly what ran — including the directory the user
+     * picked from a dialog. Used by `taskhub.viewHistoryCommand` to show the
+     * command without re-running it. Absent for entries written before this
+     * field existed and for actions with no command/shell tasks.
+     */
+    commands?: Record<string, string>;
+    /**
      * Wall-clock execution time in milliseconds. Set when the entry
      * transitions from `running` to a terminal status. Absent for entries
      * still in flight and for entries written before this field existed.
@@ -400,16 +409,17 @@ export class HistoryItem extends vscode.TreeItem {
             this.iconPath = new vscode.ThemeIcon('history');
         }
 
+        // Composable flag suffixes (`.inputs` / `.output` / `.commands`) so
+        // menu `when` clauses can match each capability independently with a
+        // regex (`viewItem =~ /\.commands\b/`) instead of enumerating every
+        // 2^3 combination as a distinct contextValue string.
         const hasInputs = !!(entry.inputs && Object.keys(entry.inputs).length > 0);
-        if (entry.output && hasInputs) {
-            this.contextValue = 'historyItemWithOutputAndInputs';
-        } else if (entry.output) {
-            this.contextValue = 'historyItemWithOutput';
-        } else if (hasInputs) {
-            this.contextValue = 'historyItemWithInputs';
-        } else {
-            this.contextValue = 'historyItem';
-        }
+        const hasCommands = !!(entry.commands && Object.keys(entry.commands).length > 0);
+        const flags: string[] = [];
+        if (hasInputs) { flags.push('inputs'); }
+        if (entry.output) { flags.push('output'); }
+        if (hasCommands) { flags.push('commands'); }
+        this.contextValue = flags.length > 0 ? `historyItem.${flags.join('.')}` : 'historyItem';
 
         const date = new Date(entry.timestamp);
         // Surface the full breadcrumb in the tooltip whenever it's available
@@ -575,6 +585,28 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
             delete entry.inputs;
         } else {
             entry.inputs = inputs;
+        }
+        this.context.workspaceState.update(this.historyKey, history);
+        this.refresh();
+    }
+
+    /**
+     * Attach resolved command lines to an existing entry matched by
+     * `(actionId, timestamp)`. Empty input (no command/shell tasks ran)
+     * clears the field so the "view command" affordance only appears when
+     * there is something to show. Unknown `(actionId, timestamp)` is a silent
+     * no-op (mirrors `setHistoryInputs`).
+     */
+    setHistoryCommands(actionId: string, timestamp: number, commands: Record<string, string>): void {
+        const history = this.getHistory();
+        const entry = history.find(e => e.actionId === actionId && e.timestamp === timestamp);
+        if (!entry) {
+            return;
+        }
+        if (Object.keys(commands).length === 0) {
+            delete entry.commands;
+        } else {
+            entry.commands = commands;
         }
         this.context.workspaceState.update(this.historyKey, history);
         this.refresh();
