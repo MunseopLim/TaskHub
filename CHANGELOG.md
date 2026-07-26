@@ -29,6 +29,26 @@
 =====================================================================
 -->
 
+## [0.6.15] - 2026-07-26
+
+### 추가 / 변경 — 빈 상태 안내와 제목 표시줄 정리 (UX 리뷰 4/6, 전반부)
+
+#### 추가 (UX)
+
+- **빈 상태 안내(`viewsWelcome`)**: Actions / Workspace Links / Favorite Files 패널이 비어 있을 때 아무것도 없는 회색 영역 대신 다음 단계를 제안한다. 폴더를 열지 않은 상태에는 *Open Folder* 를, 폴더는 열렸지만 액션이 없으면 *Create Action* / *Browse Examples* / *Import Actions…* 를 노출한다. 0.6.14에서 번들 예제가 자동으로 감춰지기 시작했으므로 그 자리를 메우는 안내가 함께 필요했다.
+
+#### 변경 (UX)
+
+- **확장 버전 행을 트리에서 뷰 제목 옆으로 이동**: 버전은 목록 첫 줄을 상시 차지했고 — 더 중요하게 — 그 행 때문에 **트리가 절대 비지 않아 welcome 뷰가 구조적으로 뜰 수 없었다**. 이제 `Actions 0.6.15`처럼 제목 옆 muted 텍스트로 표시하고, CHANGELOG는 제목 표시줄 `…` 메뉴에서 연다. 참조: [src/providers/mainViewProvider.ts](src/providers/mainViewProvider.ts), [src/extension.ts](src/extension.ts).
+- **제목 표시줄 아이콘 5개 → 3개**: *Create Action* / *Edit actions.json* / *Stop All Actions*(실행 중에만)만 아이콘으로 남기고 예제 보기 · Import · Export · 터미널 닫기 · Changelog는 `…` 오버플로 메뉴로 옮겼다.
+  - 원 리뷰는 *생성* 하나만 남기라고 제안했으나, `actions.json` 편집은 기존 프로젝트에서 매일 쓰는 경로라 아이콘으로 유지했다. 나머지(예제·Import)는 대개 프로젝트당 한 번 쓰는 온보딩 동작이다.
+
+#### 수정
+
+- **`actions.json` 로드 실패가 "액션 없음"으로 보이던 문제**: 파싱/스키마 오류 시 토스트만 띄우고 트리는 사실상 비워, 새 welcome 뷰와 결합하면 액션 200개짜리 파일을 가진 사용자에게 *첫 액션을 만드세요* 가 뜰 수 있었다. 이제 실패 이유를 단 에러 행을 표시하고, 클릭하면 해당 파일이 열린다.
+
+**테스트**: 신규 9 케이스([src/test/emptyState.test.ts](src/test/emptyState.test.ts) — 빈 트리/버전 행 부재/로드 실패 행/복구, manifest의 welcome 명령 실재성·폴더 미개방 분기·아이콘 개수 상한), 기존 IT-023 및 progress 계열 6종의 인덱스 갱신, 최종 1516 passing.
+
 ## [0.6.14] - 2026-07-26
 
 ### 변경 — 번들 예제 액션을 내 프로젝트 목록에서 분리 (UX 리뷰 3/6)

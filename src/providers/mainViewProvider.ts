@@ -172,10 +172,12 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
         }
 
         let actionsJson: ActionItem[] = [];
+        let loadFailed = false;
         try {
             actionsJson = this.loadActions();
             this.lastLoadErrorMessage = undefined;
         } catch (error: any) {
+            loadFailed = true;
             const message = error?.message ?? String(error);
             if (message !== this.lastLoadErrorMessage) {
                 this.lastLoadErrorMessage = message;
@@ -185,14 +187,29 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
                 ));
             }
         }
-        const version = this.context.extension.packageJSON.version;
-        const versionItem = new vscode.TreeItem(version);
-        versionItem.iconPath = new vscode.ThemeIcon('info');
-        versionItem.tooltip = `Extension Version: ${version}`;
-        versionItem.contextValue = 'versionItem';
-        versionItem.command = { command: 'taskhub.showChangelog', title: 'Show Changelog' };
-        const items: (Action | Folder | vscode.TreeItem)[] = [versionItem, ...this.createActionItems(actionsJson)];
-        return Promise.resolve(items);
+
+        // A broken actions.json must not render as "no actions yet": the
+        // `viewsWelcome` CTA ("create your first action") only appears when
+        // this provider yields *nothing*, and telling a user with a
+        // 200-action file to create their first one is worse than useless.
+        // An explicit error row keeps the tree non-empty and puts the reason
+        // one click away.
+        if (loadFailed) {
+            const errorItem = new vscode.TreeItem(t('액션을 불러오지 못했습니다', 'Failed to load actions'));
+            errorItem.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('charts.red'));
+            errorItem.description = this.lastLoadErrorMessage;
+            errorItem.tooltip = this.lastLoadErrorMessage;
+            errorItem.contextValue = 'actionsLoadError';
+            errorItem.command = { command: 'taskhub.editActions', title: 'Open actions.json' };
+            return Promise.resolve([errorItem]);
+        }
+
+        // The extension version used to sit here as the first row. It now
+        // lives in the view's `description` slot (next to the "Actions"
+        // title) — a permanent row cost the list its top line and, more
+        // importantly, made the tree never empty, which suppressed the
+        // welcome view entirely.
+        return Promise.resolve(this.createActionItems(actionsJson));
     }
 
     private createActionItems(items: ActionItem[]): (Action | Folder | vscode.TreeItem)[] {

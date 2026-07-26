@@ -154,7 +154,7 @@ suite('View provider integration', function () {
         assert.strictEqual(provider.getAllEntries().length, 3);
     });
 
-    test('IT-023: MainViewProvider는 version/folder/separator/action TreeItem을 상태와 함께 구성', async () => {
+    test('IT-023: MainViewProvider는 folder/separator/action TreeItem을 상태와 함께 구성', async () => {
         const workspaceState = new Map<string, unknown>([['folderState:fw', true]]);
         const context = makeContext({ workspaceState, version: '1.2.3-test' });
         const actions: ActionItem[] = [
@@ -191,19 +191,23 @@ suite('View provider integration', function () {
         const provider = new MainViewProvider(context, () => actions);
         const roots = await provider.getChildren();
 
-        assert.strictEqual(roots.length, 4);
-        assert.strictEqual(labelOf(roots[0]), '1.2.3-test');
-        assert.strictEqual(roots[0].contextValue, 'versionItem');
-        assert.ok(roots[1] instanceof Folder);
-        assert.strictEqual(labelOf(roots[1]), 'Firmware');
-        assert.strictEqual(roots[1].collapsibleState, vscode.TreeItemCollapsibleState.Expanded);
-        assert.strictEqual(roots[2].contextValue, 'separator');
-        assert.ok(roots[3] instanceof Action);
-        assert.strictEqual(labelOf(roots[3]), 'Flash');
-        assert.strictEqual(roots[3].contextValue, 'succeededAction');
-        assert.strictEqual((roots[3].iconPath as vscode.ThemeIcon).id, 'check');
+        // 0.6.15: 버전 행이 트리에서 빠지고 뷰 description으로 이동했다.
+        // 트리가 액션만 담아야 viewsWelcome(빈 상태 CTA)이 뜰 수 있다.
+        assert.strictEqual(roots.length, 3);
+        assert.strictEqual(
+            roots.some(item => labelOf(item) === '1.2.3-test'), false,
+            '버전 행이 트리에 남아 있으면 트리가 절대 비지 않아 welcome CTA가 억제된다'
+        );
+        assert.ok(roots[0] instanceof Folder);
+        assert.strictEqual(labelOf(roots[0]), 'Firmware');
+        assert.strictEqual(roots[0].collapsibleState, vscode.TreeItemCollapsibleState.Expanded);
+        assert.strictEqual(roots[1].contextValue, 'separator');
+        assert.ok(roots[2] instanceof Action);
+        assert.strictEqual(labelOf(roots[2]), 'Flash');
+        assert.strictEqual(roots[2].contextValue, 'succeededAction');
+        assert.strictEqual((roots[2].iconPath as vscode.ThemeIcon).id, 'check');
 
-        const folderChildren = await provider.getChildren(roots[1]);
+        const folderChildren = await provider.getChildren(roots[0]);
         assert.strictEqual(folderChildren.length, 1);
         assert.ok(folderChildren[0] instanceof Action);
         assert.strictEqual(labelOf(folderChildren[0]), 'Build');
@@ -473,7 +477,7 @@ suite('View provider integration', function () {
 
         const provider = new MainViewProvider(context, () => actions);
         const roots = await provider.getChildren();
-        const multiItem = roots[1] as Action;
+        const multiItem = roots[0] as Action;
 
         assert.strictEqual(multiItem.contextValue, 'runningAction');
         assert.strictEqual(multiItem.description, '2/3 · link');
@@ -500,7 +504,7 @@ suite('View provider integration', function () {
 
         const provider = new MainViewProvider(context, () => actions);
         const roots = await provider.getChildren();
-        const soloItem = roots[1] as Action;
+        const soloItem = roots[0] as Action;
 
         assert.strictEqual(soloItem.contextValue, 'runningAction');
         assert.strictEqual(soloItem.description, undefined,
@@ -528,7 +532,7 @@ suite('View provider integration', function () {
 
         const provider = new MainViewProvider(context, () => actions);
         const roots = await provider.getChildren();
-        const item = roots[1] as Action;
+        const item = roots[0] as Action;
 
         assert.strictEqual(item.contextValue, 'runningAction');
         assert.strictEqual(item.description, undefined);
@@ -560,7 +564,7 @@ suite('View provider integration', function () {
 
         const provider = new MainViewProvider(context, () => actions);
         const roots = await provider.getChildren();
-        const item = roots[1] as Action;
+        const item = roots[0] as Action;
 
         assert.strictEqual(item.contextValue, 'runningAction');
         assert.strictEqual(item.description, '2 running · A, B');
@@ -602,7 +606,7 @@ suite('View provider integration', function () {
 
         const provider = new MainViewProvider(context, () => actions);
         const roots = await provider.getChildren();
-        const item = roots[1] as Action;
+        const item = roots[0] as Action;
 
         assert.strictEqual(item.contextValue, 'runningAction');
         assert.strictEqual(item.description, '4 running · A, B + 2');
@@ -706,7 +710,7 @@ suite('View provider integration', function () {
         ];
         const provider = new MainViewProvider(context, () => actions);
         const roots = await provider.getChildren();
-        const buildItem = roots[1] as Action;
+        const buildItem = roots[0] as Action;
         assert.strictEqual(buildItem.description, undefined,
             'Action TreeItem must not render a last-run badge — that lives on HistoryItem');
     });

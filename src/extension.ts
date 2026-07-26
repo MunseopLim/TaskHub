@@ -4620,6 +4620,10 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
     const mainView = vscode.window.createTreeView('mainView.main', { treeDataProvider: mainViewProvider });
+    // Version moved out of the tree (it used to be the first row, which kept
+    // the tree permanently non-empty and so suppressed the welcome view).
+    // The description slot renders it muted next to the "Actions" title.
+    mainView.description = context.extension.packageJSON.version;
     context.subscriptions.push(mainView);
     context.subscriptions.push(
         mainView.onDidExpandElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, true); } }),

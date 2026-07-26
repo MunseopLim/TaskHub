@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.14",
+  "version": "0.6.15",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -195,6 +195,28 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "mainView.main",
+        "when": "workbenchState == empty",
+        "contents": "TaskHub runs actions defined per project.\n[Open Folder](command:vscode.openFolder)\nOnce a folder is open you can create actions in its .vscode/actions.json."
+      },
+      {
+        "view": "mainView.main",
+        "when": "workbenchState != empty",
+        "contents": "No actions yet.\n[Create Action](command:taskhub.createAction)\nOr start from a sample and edit it by hand:\n[Browse Examples](command:taskhub.showExampleJsonQuickPick)\n[Import Actions…](command:taskhub.importActions)"
+      },
+      {
+        "view": "mainView.linkWorkspace",
+        "when": "workbenchState != empty",
+        "contents": "No workspace links yet.\nLinks are shortcuts to docs, dashboards, or issue trackers, stored in .vscode/links.json.\n[Add Link](command:taskhub.addLink)"
+      },
+      {
+        "view": "mainView.favorite",
+        "when": "workbenchState != empty",
+        "contents": "No favorite files yet.\nPin files you keep coming back to — right-click a file in the Explorer, or add one here.\n[Add File to Favorites](command:taskhub.addFavoriteFile)"
+      }
+    ],
     "commands": [
       {
         "command": "taskhub.openLink",
@@ -552,34 +574,44 @@
           "group": "navigation@3"
         },
         {
-          "command": "taskhub.showExampleJsonQuickPick",
+          "command": "taskhub.createAction",
           "when": "view == mainView.main",
-          "group": "navigation@0"
+          "group": "navigation@1"
         },
         {
           "command": "taskhub.editActions",
           "when": "view == mainView.main",
-          "group": "navigation"
+          "group": "navigation@2"
         },
         {
           "command": "taskhub.stopAllActions",
           "when": "view == mainView.main && taskhub.hasRunningActions",
-          "group": "navigation@1"
+          "group": "navigation@3"
         },
         {
-          "command": "taskhub.closeAllTerminals",
+          "command": "taskhub.showExampleJsonQuickPick",
           "when": "view == mainView.main",
           "group": "9_taskhub@1"
         },
         {
-          "command": "taskhub.createAction",
-          "when": "view == mainView.main",
-          "group": "navigation@2"
-        },
-        {
           "command": "taskhub.importActions",
           "when": "view == mainView.main",
-          "group": "navigation@3"
+          "group": "9_taskhub@2"
+        },
+        {
+          "command": "taskhub.exportActions",
+          "when": "view == mainView.main",
+          "group": "9_taskhub@3"
+        },
+        {
+          "command": "taskhub.closeAllTerminals",
+          "when": "view == mainView.main",
+          "group": "9_taskhub@4"
+        },
+        {
+          "command": "taskhub.showChangelog",
+          "when": "view == mainView.main",
+          "group": "9_taskhub@5"
         },
         {
           "command": "taskhub.clearAllHistory",
