@@ -850,6 +850,41 @@ function generateNonce(): string {
 }
 
 // export 는 테스트(jsonEditorUtils.test.ts의 유니코드 round-trip 가드)용.
+/**
+ * Every user-facing string the JSON Editor webview renders.
+ *
+ * The webview is plain HTML built in the extension host, so the host resolves
+ * the locale once with `t()` and injects the resolved bundle — the webview
+ * script never sees a hardcoded English label. Split out (and exported) so a
+ * test can assert both locales stay complete as strings are added.
+ */
+export function buildJsonEditorStrings(): Record<string, string> {
+    return {
+        save: t('저장', 'Save'),
+        saveTitle: t('저장 (Ctrl+S)', 'Save (Ctrl+S)'),
+        reload: t('다시 불러오기', 'Reload'),
+        undo: t('실행 취소 (Ctrl+Z)', 'Undo (Ctrl+Z)'),
+        redo: t('다시 실행 (Ctrl+Shift+Z / Ctrl+Y)', 'Redo (Ctrl+Shift+Z / Ctrl+Y)'),
+        addRow: t('행 추가', 'Add Row'),
+        modified: t('● 수정됨', '● Modified'),
+        filePath: t('파일 경로', 'File path'),
+        rootArrayTab: t('항목', 'Items'),
+        emptyMessage: t('데이터가 없습니다. "행 추가"를 눌러 추가하세요.', 'No data. Click "Add Row" to add a row.'),
+        rowNumberHeader: t('행 번호', 'Row number'),
+        reorderHeader: t('순서 변경', 'Reorder'),
+        actionsHeader: t('작업', 'Actions'),
+        // {n} is substituted in the webview so the label names the row.
+        moveRow: t('{n}번 행 이동 (Alt+위/아래)', 'Move row {n} (Alt+Up/Down)'),
+        deleteRow: t('{n}번 행 삭제', 'Delete row {n}'),
+        joinToString: t('배열 → 문자열 (쉼표로 연결)', 'Array → String (join with comma)'),
+        splitToArray: t('문자열 → 배열 (쉼표로 분리)', 'String → Array (split by comma)'),
+        invalidJsonInCell: t('셀 [{col}]의 JSON이 올바르지 않습니다: {message}', 'Invalid JSON in cell [{col}]: {message}'),
+        historyRestoreFailed: t('편집 기록 복원에 실패했습니다: {message}', 'History restore failed: {message}'),
+        scriptError: t('스크립트 오류: {message} ({line}번째 줄)', 'JS Error: {message} (line {line})'),
+        rowMoved: t('{n}번 위치로 이동했습니다.', 'Moved to position {n}.'),
+    };
+}
+
 export function getWebviewContent(
     data: Record<string, unknown>,
     savedData: Record<string, unknown> | undefined,
@@ -873,13 +908,19 @@ export function getWebviewContent(
     // 잡혀 modified 표시와 undo 동작이 올바르게 처리된다.
     const escapeForScript = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
     const jsonLiteral = escapeForScript(data);
+    const strings = buildJsonEditorStrings();
+    const stringsLiteral = escapeForScript(strings);
+    const htmlLang = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
+    // Static markup interpolates these, so escape for attribute/text context.
+    const esc = (value: string) => value
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const savedLiteral = savedData !== undefined ? escapeForScript(savedData) : 'undefined';
     const escapedPath = filePath.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const nonce = generateNonce();
     const csp = `default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};`;
 
     return /*html*/`<!DOCTYPE html>
-<html lang="en">
+<html lang="${htmlLang}">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
@@ -1030,6 +1071,34 @@ export function getWebviewContent(
         user-select: none;
     }
     td.drag-handle:hover { color: var(--fg); }
+    /* The grip is a real <button> so it can take keyboard focus (Alt+Up/Down
+       reorder), but it must keep looking like the plain glyph it replaced. */
+    button.drag-grip {
+        background: none;
+        border: none;
+        padding: 0;
+        color: inherit;
+        font: inherit;
+        cursor: grab;
+    }
+    button.drag-grip:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder, var(--btn-bg));
+        outline-offset: 1px;
+    }
+
+    /* Visible to screen readers only — column names for icon-only headers
+       and the live region that announces row moves. */
+    .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
 
     /* Editable cell */
     .cell-view {
@@ -1158,27 +1227,40 @@ export function getWebviewContent(
 </head>
 <body>
     <div class="toolbar">
-        <button id="btnSave" title="Save (Ctrl+S)">Save</button>
-        <button id="btnReload">Reload</button>
-        <button id="btnUndo" title="Undo (Ctrl+Z)" disabled>↶</button>
-        <button id="btnRedo" title="Redo (Ctrl+Shift+Z / Ctrl+Y)" disabled>↷</button>
-        <button id="btnAddRow">+ Row</button>
-        <span class="modified-indicator" id="modifiedFlag">● Modified</span>
-        <span class="filepath" title="${escapedPath}">${escapedPath}</span>
+        <button id="btnSave" title="${esc(strings.saveTitle)}">${esc(strings.save)}</button>
+        <button id="btnReload">${esc(strings.reload)}</button>
+        <button id="btnUndo" title="${esc(strings.undo)}" aria-label="${esc(strings.undo)}" disabled>↶</button>
+        <button id="btnRedo" title="${esc(strings.redo)}" aria-label="${esc(strings.redo)}" disabled>↷</button>
+        <button id="btnAddRow">+ ${esc(strings.addRow)}</button>
+        <span class="modified-indicator" id="modifiedFlag" role="status" aria-live="polite">${esc(strings.modified)}</span>
+        <span class="filepath" title="${escapedPath}" aria-label="${esc(strings.filePath)}: ${escapedPath}">${escapedPath}</span>
     </div>
-    <div class="tabs" id="tabs"></div>
+    <div class="tabs" id="tabs" role="tablist"></div>
     <div class="table-wrapper" id="tableWrapper"></div>
-    <div id="errorMsg" style="color:var(--danger);padding:12px;display:none;"></div>
+    <div id="errorMsg" role="alert" style="color:var(--danger);padding:12px;display:none;"></div>
+    <div id="srStatus" class="sr-only" role="status" aria-live="polite"></div>
 
 <script nonce="${nonce}">
 (function() {
+    // Locale-resolved labels injected by the host (buildJsonEditorStrings).
+    // \`fmt\` fills {placeholders} so word order can differ per language.
+    const S = ${stringsLiteral};
+    function fmt(template, values) {
+        return String(template).replace(/\\{(\\w+)\\}/g, (match, key) =>
+            Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match);
+    }
     const errorEl = document.getElementById('errorMsg');
+    const srStatusEl = document.getElementById('srStatus');
     function showError(msg) {
         errorEl.style.display = 'block';
         errorEl.textContent = msg;
     }
+    /** Announce a transient change (row moved, …) to screen readers only. */
+    function announce(msg) {
+        srStatusEl.textContent = msg;
+    }
     window.onerror = function(msg, src, line, col, err) {
-        showError('JS Error: ' + msg + ' (line ' + line + ')');
+        showError(fmt(S.scriptError, { message: msg, line: line }));
     };
     const vscode = acquireVsCodeApi();
     let data = ${jsonLiteral};
@@ -1289,7 +1371,7 @@ export function getWebviewContent(
         try {
             data = JSON.parse(historyStack[idx]);
         } catch (e) {
-            showError('History restore failed: ' + e.message);
+            showError(fmt(S.historyRestoreFailed, { message: e.message }));
             return;
         }
         historyIndex = idx;
@@ -1404,7 +1486,16 @@ export function getWebviewContent(
         sheetMap.forEach((entry, idx) => {
             const tab = document.createElement('div');
             tab.className = 'tab' + (idx === activeIdx ? ' active' : '');
-            tab.textContent = entry.label === '_rootArray' ? 'Items' : entry.label;
+            tab.textContent = entry.label === '_rootArray' ? S.rootArrayTab : entry.label;
+            tab.setAttribute('role', 'tab');
+            tab.setAttribute('aria-selected', idx === activeIdx ? 'true' : 'false');
+            tab.tabIndex = 0;
+            tab.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    tab.click();
+                }
+            });
             tab.onclick = () => {
                 // 탭 전환은 즉시 renderTable로 DOM을 갈아치워 활성 셀의 td를
                 // detach시킨다. 가드 없이 들어가면 blur 100ms timeout이
@@ -1432,7 +1523,7 @@ export function getWebviewContent(
         const wrapper = document.getElementById('tableWrapper');
         const rows = getActiveRows();
         if (!rows || !Array.isArray(rows) || rows.length === 0) {
-            wrapper.innerHTML = '<div class="empty-msg">No data. Click "+ Row" to add a row.</div>';
+            wrapper.innerHTML = '<div class="empty-msg">' + escapeHtml(S.emptyMessage) + '</div>';
             return;
         }
 
@@ -1444,13 +1535,23 @@ export function getWebviewContent(
             });
         });
 
-        let html = '<table><thead><tr><th class="drag-handle"></th><th class="row-num">#</th>';
-        columns.forEach(col => { html += '<th>' + escapeHtml(col) + '</th>'; });
-        html += '<th class="actions-cell"></th></tr></thead><tbody>';
+        let html = '<table><thead><tr>';
+        html += '<th class="drag-handle" scope="col"><span class="sr-only">' + escapeHtml(S.reorderHeader) + '</span></th>';
+        html += '<th class="row-num" scope="col"><span class="sr-only">' + escapeHtml(S.rowNumberHeader) + '</span>#</th>';
+        columns.forEach(col => { html += '<th scope="col">' + escapeHtml(col) + '</th>'; });
+        html += '<th class="actions-cell" scope="col"><span class="sr-only">' + escapeHtml(S.actionsHeader) + '</span></th>';
+        html += '</tr></thead><tbody>';
 
         rows.forEach((row, rowIdx) => {
+            const rowLabel = fmt(S.moveRow, { n: rowIdx + 1 });
             html += '<tr draggable="true" data-drag-row="' + rowIdx + '">';
-            html += '<td class="drag-handle" title="Drag to reorder">⠿</td>';
+            // The handle is a real button so the reorder affordance is
+            // reachable by keyboard (Alt+Up/Down) — dragging was mouse-only.
+            // draggable="true" on the button keeps the pointer path intact:
+            // browsers don't start an ancestor's drag from an interactive
+            // control, and dragstart bubbles up to the row's handler.
+            html += '<td class="drag-handle"><button type="button" class="drag-grip" draggable="true" data-move-row="' + rowIdx
+                + '" title="' + escapeAttr(rowLabel) + '" aria-label="' + escapeAttr(rowLabel) + '">⠿</button></td>';
             html += '<td class="row-num">' + (rowIdx + 1) + '</td>';
             columns.forEach((col, colIdx) => {
                 const val = row[col];
@@ -1461,7 +1562,9 @@ export function getWebviewContent(
                 html += renderCellEdit(val, isArray, isMultiline, rowIdx, col);
                 html += '</td>';
             });
-            html += '<td class="actions-cell"><button class="small danger" data-delete-row="' + rowIdx + '" title="Delete row">✕</button></td>';
+            const deleteLabel = fmt(S.deleteRow, { n: rowIdx + 1 });
+            html += '<td class="actions-cell"><button class="small danger" data-delete-row="' + rowIdx
+                + '" title="' + escapeAttr(deleteLabel) + '" aria-label="' + escapeAttr(deleteLabel) + '">✕</button></td>';
             html += '</tr>';
         });
 
@@ -1501,14 +1604,16 @@ export function getWebviewContent(
                 }
             });
             if (isPrimArr) {
-                html += '<button class="convert-btn" data-convert="join" title="Array → String (join with comma)">a→s</button>';
+                html += '<button class="convert-btn" data-convert="join" title="' + escapeAttr(S.joinToString)
+                    + '" aria-label="' + escapeAttr(S.joinToString) + '">a→s</button>';
             }
             html += '</div></div>';
             return html;
         }
         let html = '<div class="cell-view">' + escapeHtml(String(val ?? ''));
         if (typeof val === 'string' && val.includes(',')) {
-            html += '<button class="convert-btn" data-convert="split" title="String → Array (split by comma)">s→a</button>';
+            html += '<button class="convert-btn" data-convert="split" title="' + escapeAttr(S.splitToArray)
+                + '" aria-label="' + escapeAttr(S.splitToArray) + '">s→a</button>';
         }
         html += '</div>';
         return html;
@@ -1832,6 +1937,31 @@ export function getWebviewContent(
             });
         });
 
+        // Keyboard reorder — Alt+Up/Down on the row grip, matching VS Code's
+        // "move line" chord. Drag and drop below covers the pointer case; a
+        // keyboard user previously had no way to reorder rows at all.
+        document.querySelectorAll('button[data-move-row]').forEach(grip => {
+            grip.addEventListener('keydown', (e) => {
+                if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) { return; }
+                e.preventDefault();
+                if (!commitActiveCellOrAbort()) { return; }
+                const rows = getActiveRows();
+                const from = parseInt(grip.dataset.moveRow);
+                const to = e.key === 'ArrowUp' ? from - 1 : from + 1;
+                if (to < 0 || to >= rows.length) { return; }
+                const item = rows.splice(from, 1)[0];
+                rows.splice(to, 0, item);
+                pushHistory();
+                renderTable();
+                // Re-rendering replaces the DOM, so follow the row the user
+                // is moving — otherwise focus falls back to <body> and the
+                // next Alt+Arrow goes nowhere.
+                const moved = document.querySelector('button[data-move-row="' + to + '"]');
+                if (moved) { moved.focus(); }
+                announce(fmt(S.rowMoved, { n: to + 1 }));
+            });
+        });
+
         // Drag and drop reorder
         let dragSrcIdx = null;
         document.querySelectorAll('tr[data-drag-row]').forEach(tr => {
@@ -1909,7 +2039,7 @@ export function getWebviewContent(
                         changed = true;
                     }
                 } catch (e) {
-                    showError('Invalid JSON in cell [' + col + ']: ' + e.message);
+                    showError(fmt(S.invalidJsonInCell, { col: col, message: e.message }));
                     return false;
                 }
             } else {
@@ -1931,7 +2061,7 @@ export function getWebviewContent(
                         changed = true;
                     }
                 } catch (e) {
-                    showError('Invalid JSON in cell [' + col + ']: ' + e.message);
+                    showError(fmt(S.invalidJsonInCell, { col: col, message: e.message }));
                     return false; // Don't close editing on invalid JSON
                 }
             } else {
