@@ -1439,7 +1439,7 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
 // They are re-exported below so existing callers (including tests) can keep
 // `import { ... } from './extension'` unchanged.
 import { MainViewProvider, Folder, Action } from './providers/mainViewProvider';
-import { actionStates } from './providers/actionStatus';
+import { actionStates, ActionProgress, ActionRunState } from './providers/actionStatus';
 export { MainViewProvider, Folder, Action };
 
 // Per-action, per-task tracking. Both maps are keyed by actionId at the
@@ -2370,6 +2370,7 @@ function markActionAsRunning(actionItem: ActionItem, id: string, showTaskStatus:
     }
 
     actionStates.set(id, { state: 'running' });
+    syncRunningActionsContext();
     if (showTaskStatus) {
         mainViewProvider.refresh();
     }
@@ -2690,6 +2691,102 @@ function handleActionFailure(id: string, actionItem: ActionItem, action: Pipelin
     }
 }
 
+/**
+ * Ids of actions currently in flight. Single source for both the
+ * `taskhub.hasRunningActions` context key (which gates the *Stop All
+ * Actions* title-bar button) and the stop-all target list, so the button
+ * can never be visible with nothing to stop.
+ *
+ * Deliberately independent of `taskhub.showTaskStatus`: that setting hides
+ * status *icons*, but a user who turned icons off still needs a way to stop
+ * a runaway build.
+ */
+export function collectRunningActionIds(
+    states: ReadonlyMap<string, { state: ActionRunState; progress?: ActionProgress }> = actionStates
+): string[] {
+    const ids: string[] = [];
+    for (const [id, value] of states) {
+        if (value.state === 'running') { ids.push(id); }
+    }
+    return ids;
+}
+
+/** Max action titles listed in the stop-all confirmation before collapsing to a count. */
+export const STOP_ALL_CONFIRM_TITLE_LIMIT = 5;
+
+/**
+ * Body text for the stop-all confirmation. The user clicked a bulk
+ * destructive button, so the dialog names *what* is about to die rather
+ * than asking an abstract "are you sure?" — a forgotten long-running build
+ * in the list is exactly the case this guard exists for.
+ *
+ * Long lists collapse after `STOP_ALL_CONFIRM_TITLE_LIMIT` entries so the
+ * modal can't grow past the screen.
+ */
+export function formatStopAllConfirmMessage(titles: readonly string[], lang: 'ko' | 'en' = 'ko'): string {
+    const shown = titles.slice(0, STOP_ALL_CONFIRM_TITLE_LIMIT);
+    const overflow = titles.length - shown.length;
+    const lines = shown.map(title => `· ${title}`);
+    if (overflow > 0) {
+        lines.push(lang === 'ko' ? `· 외 ${overflow}개` : `· and ${overflow} more`);
+    }
+    const header = lang === 'ko'
+        ? `실행 중인 액션 ${titles.length}개를 중지할까요?`
+        : `Stop ${titles.length} running action(s)?`;
+    return `${header}\n\n${lines.join('\n')}`;
+}
+
+/**
+ * Push the running/idle state into a `when`-clause context key. Fire and
+ * forget: `setContext` is a UI hint, and a failure must never break the
+ * execution path that called us.
+ */
+function syncRunningActionsContext(): void {
+    void vscode.commands.executeCommand(
+        'setContext',
+        'taskhub.hasRunningActions',
+        collectRunningActionIds().length > 0
+    );
+}
+
+/**
+ * Terminate one action's tasks and child processes. Shared by
+ * `taskhub.stopAction` (single row) and `taskhub.stopAllActions` (bulk) so
+ * both paths mark `manuallyTerminatedActions` identically — that flag is
+ * what tells `executeAction`'s catch to skip the failure toast.
+ */
+function stopRunningAction(id: string): boolean {
+    let stopped = false;
+    const perAction = activeTasks.get(id);
+    if (perAction && perAction.size > 0) {
+        manuallyTerminatedActions.add(id);
+        for (const exec of perAction.values()) {
+            try { exec.terminate(); } catch { /* ignore */ }
+        }
+        stopped = true;
+    }
+    if (terminateChildProcesses(id)) {
+        manuallyTerminatedActions.add(id);
+        stopped = true;
+    }
+    return stopped;
+}
+
+/**
+ * Close out the history entry of a manually stopped action.
+ *
+ * `executeAction` skips its own history finalize for manually terminated
+ * ids (the failure there isn't the action's fault), so without this the
+ * entry would stay `running` forever — a permanent spinner in the History
+ * panel and a permanent "실행 중" badge in the Run Any Action palette.
+ */
+function recordManualStopInHistory(provider: HistoryProvider | undefined, id: string): void {
+    const timestamp = actionStartTimestamps.get(id);
+    if (!provider || !timestamp) { return; }
+    const durationMs = Math.max(0, Date.now() - timestamp);
+    provider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user', durationMs);
+}
+
 function finalizeActionRun(id: string, showTaskStatus: boolean, mainViewProvider: MainViewProvider): void {
     activeTasks.delete(id);
     if (manuallyTerminatedActions.has(id)) {
@@ -2705,6 +2802,7 @@ function finalizeActionRun(id: string, showTaskStatus: boolean, mainViewProvider
             actionStates.set(id, { state: state.state });
         }
     }
+    syncRunningActionsContext();
     if (showTaskStatus) {
         mainViewProvider.refresh();
     }
@@ -4443,6 +4541,9 @@ export function activate(context: vscode.ExtensionContext) {
     if (context.globalState.get(RUN_ANY_ACTION_MRU_KEY) !== undefined) {
         void context.globalState.update(RUN_ANY_ACTION_MRU_KEY, undefined);
     }
+    // Publish the initial (idle) value so the *Stop All Actions* button is
+    // hidden from the first render rather than on the first state change.
+    syncRunningActionsContext();
     const terminalDisposable = vscode.window.onDidCloseTerminal(terminal => {
         for (const [key, actionTerminal] of actionTerminals.entries()) {
             if (actionTerminal.terminal === terminal) {
@@ -4822,30 +4923,13 @@ export function activate(context: vscode.ExtensionContext) {
         if (!id) {
             return;
         }
-        let stopped = false;
-        const perAction = activeTasks.get(id);
-        if (perAction && perAction.size > 0) {
-            manuallyTerminatedActions.add(id);
-            for (const exec of perAction.values()) {
-                try { exec.terminate(); } catch { /* ignore */ }
-            }
-            stopped = true;
-        }
-        if (terminateChildProcesses(id)) {
-            manuallyTerminatedActions.add(id);
-            stopped = true;
-        }
-        if (!stopped) {
+        if (!stopRunningAction(id)) {
             manuallyTerminatedActions.delete(id);
             vscode.window.showWarningMessage(t(`'${actionItem.label}'에 대한 활성 태스크를 찾을 수 없습니다.`, `Could not find active task for '${actionItem.label}'.`));
-        } else {
-            // Update history status to failure when manually stopped
-            const timestamp = actionStartTimestamps.get(id);
-            if (historyProvider && timestamp) {
-                const durationMs = Math.max(0, Date.now() - timestamp);
-                historyProvider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user', durationMs);
-            }
+            return;
         }
+        recordManualStopInHistory(historyProvider, id);
+        syncRunningActionsContext();
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showVersion', () => {
         const version = context.extension.packageJSON.version;
@@ -5361,31 +5445,113 @@ export function activate(context: vscode.ExtensionContext) {
             await vscode.window.showTextDocument(document, { preview: false });
         }
     }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.terminateAllActions', async () => {
-        // Flag and terminate all running actions
-        for (const [actionId, perAction] of activeTasks.entries()) {
-            manuallyTerminatedActions.add(actionId);
-            for (const exec of perAction.values()) {
-                try { exec.terminate(); } catch { /* ignore */ }
-            }
-        }
-        for (const actionId of Array.from(actionChildProcesses.keys())) {
-            manuallyTerminatedActions.add(actionId);
-            terminateChildProcesses(actionId);
+    /**
+     * Stop every running action — and *only* that. Closing terminals was
+     * folded into the old `terminateAllActions`, which meant the user lost
+     * the output they were reading as the price of stopping a build.
+     * Terminals now have their own command.
+     */
+    const stopAllRunningActions = async (): Promise<void> => {
+        const runningIds = collectRunningActionIds();
+        // Child processes can outlive their action's `running` state in edge
+        // cases (task finished, spawned process lingering), so union the two
+        // sources rather than trusting the state map alone.
+        const targetIds = Array.from(new Set([
+            ...runningIds,
+            ...activeTasks.keys(),
+            ...actionChildProcesses.keys(),
+        ]));
+
+        if (targetIds.length === 0) {
+            vscode.window.showInformationMessage(t('실행 중인 액션이 없습니다.', 'No actions are running.'));
+            return;
         }
 
-        // Close all terminals associated with the extension
-        vscode.window.terminals.forEach(terminal => {
-            if (terminal.name.startsWith('TaskHub: ')) {
-                terminal.dispose();
-            }
-        });
+        let allActions: ActionItem[] = [];
+        try {
+            allActions = loadAllActions(context);
+        } catch {
+            // actions.json may have broken mid-run; fall back to raw ids
+            // rather than refusing to stop anything.
+        }
+        const titleOf = (id: string) => findActionById(allActions, id)?.title || id;
+        const titles = targetIds.map(titleOf);
 
-        // Clear all visual states and refresh
-        actionStates.clear();
+        if (targetIds.length > 1) {
+            const stopLabel = t('중지', 'Stop');
+            const choice = await vscode.window.showWarningMessage(
+                formatStopAllConfirmMessage(titles, vscode.env.language.startsWith('ko') ? 'ko' : 'en'),
+                { modal: true },
+                stopLabel
+            );
+            if (choice !== stopLabel) {
+                return;
+            }
+        }
+
+        const stoppedIds: string[] = [];
+        for (const id of targetIds) {
+            if (stopRunningAction(id)) {
+                recordManualStopInHistory(historyProvider, id);
+                stoppedIds.push(id);
+            }
+        }
+
+        // Only the stopped ids are cleared: a wholesale `actionStates.clear()`
+        // (the old behaviour) also wiped the ✓/✗ result icons of actions that
+        // had already finished, which the user had not asked to forget.
+        for (const id of stoppedIds) {
+            actionStates.delete(id);
+            manuallyTerminatedActions.delete(id);
+        }
+        syncRunningActionsContext();
         mainViewProvider.refresh();
 
-        vscode.window.showInformationMessage(t('모든 TaskHub 터미널이 닫혔습니다.', 'All TaskHub terminals have been closed.'));
+        if (stoppedIds.length === 1) {
+            vscode.window.showInformationMessage(t(
+                `'${titleOf(stoppedIds[0])}' 실행을 중지했습니다.`,
+                `Stopped '${titleOf(stoppedIds[0])}'.`
+            ));
+        } else if (stoppedIds.length > 1) {
+            vscode.window.showInformationMessage(t(
+                `액션 ${stoppedIds.length}개를 중지했습니다.`,
+                `Stopped ${stoppedIds.length} actions.`
+            ));
+        } else {
+            vscode.window.showWarningMessage(t(
+                '중지할 활성 태스크를 찾지 못했습니다.',
+                'No active tasks could be stopped.'
+            ));
+        }
+    };
+
+    const closeAllTaskHubTerminals = (): number => {
+        const terminals = vscode.window.terminals.filter(terminal => terminal.name.startsWith('TaskHub: '));
+        terminals.forEach(terminal => terminal.dispose());
+        return terminals.length;
+    };
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAllActions', stopAllRunningActions));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.closeAllTerminals', () => {
+        const closed = closeAllTaskHubTerminals();
+        if (closed === 0) {
+            vscode.window.showInformationMessage(t('닫을 TaskHub 터미널이 없습니다.', 'No TaskHub terminals to close.'));
+            return;
+        }
+        vscode.window.showInformationMessage(t(
+            `TaskHub 터미널 ${closed}개를 닫았습니다.`,
+            `Closed ${closed} TaskHub terminal(s).`
+        ));
+    }));
+
+    // Deprecated compat alias for the pre-0.6.13 combined behaviour (stop
+    // everything + close terminals). Kept registered so existing user
+    // `keybindings.json` entries keep working; hidden from the palette and
+    // the view title bar, where the two split commands took over.
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.terminateAllActions', async () => {
+        await stopAllRunningActions();
+        closeAllTaskHubTerminals();
     }));
 
     // History commands

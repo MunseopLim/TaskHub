@@ -29,6 +29,26 @@
 =====================================================================
 -->
 
+## [0.6.13] - 2026-07-26
+
+### 변경 / 수정 — 실행 중지와 터미널 닫기 분리 (UX 리뷰 2/6)
+
+#### UX / 일관성
+
+- **종료 버튼이 실행 중일 때만 보인다**: Actions 제목 표시줄의 사각형 버튼은 실행 중인 액션이 하나도 없어도 항상 노출됐다. 새 context key `taskhub.hasRunningActions`를 실행 상태 전이(`markActionAsRunning` / `finalizeActionRun` / 중지 명령)마다 갱신해 조건부로 노출한다. 설정 `taskhub.showTaskStatus`와는 무관하게 동작한다 — 상태 아이콘을 꺼 둔 사용자도 폭주하는 빌드를 멈출 수단은 필요하다. 참조: [src/extension.ts](src/extension.ts) `collectRunningActionIds`.
+- **`실행 중지`와 `터미널 닫기`를 별도 명령으로 분리**: 기존 `taskhub.terminateAllActions`는 액션을 중지하면서 `TaskHub: ` 터미널을 전부 닫아, 결과를 읽고 있던 터미널까지 사라졌다.
+  - `taskhub.stopAllActions` (제목 표시줄 아이콘): 실행 중인 액션만 중지. 터미널은 그대로 둔다.
+  - `taskhub.closeAllTerminals` (제목 표시줄 `…` 메뉴 / Command Palette): TaskHub 터미널만 닫는다. 실행에는 영향 없음.
+  - `taskhub.terminateAllActions`는 기존 `keybindings.json` 호환을 위해 **등록만 유지**하고(중지 후 터미널 닫기) 메뉴·팔레트에서는 숨겼다.
+- **중지 대상과 개수를 먼저 보여준다**: 중지할 액션이 2개 이상이면 이름을 나열한 modal로 확인을 받는다(5개까지 나열, 나머지는 "외 N개"). 잊고 있던 장시간 빌드를 실수로 죽이는 경우를 막는다.
+
+#### 수정
+
+- **일괄 중지된 액션의 히스토리가 `실행 중`으로 남던 문제**: `executeAction`은 수동 종료된 id의 히스토리 마감을 건너뛰는데, 개별 중지(`taskhub.stopAction`)만 이를 보완하고 일괄 종료는 하지 않았다. 그 결과 History 패널에 스피너가 영구히 남고, Run Any Action 팔레트의 최근 실행 배지도 계속 `실행 중`으로 표시됐다. 이제 두 경로가 같은 `recordManualStopInHistory`를 쓴다.
+- **일괄 중지가 완료된 액션의 결과 아이콘까지 지우던 문제**: 예전 구현은 `actionStates.clear()`로 전체를 비워, 중지와 무관하게 이미 끝난 액션의 ✓/✗ 표시도 사라졌다. 이제 실제로 중지된 id만 정리한다.
+
+**테스트**: 신규 12 케이스([src/test/stopActions.test.ts](src/test/stopActions.test.ts) — 실행 목록 계산, 확인 문구 접기/로케일, manifest의 `when` 절·메뉴 배치 회귀 가드), 최종 1499 passing.
+
 ## [0.6.12] - 2026-07-26
 
 ### 변경 — Run Any Action의 *Recently used*를 History에서 유도 (UX 리뷰 1/6)

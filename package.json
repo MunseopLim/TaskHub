@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.12",
+  "version": "0.6.13",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -296,6 +296,16 @@
         "title": "Show Changelog"
       },
       {
+        "command": "taskhub.stopAllActions",
+        "title": "Stop All Actions",
+        "icon": "$(primitive-square)"
+      },
+      {
+        "command": "taskhub.closeAllTerminals",
+        "title": "Close TaskHub Terminals",
+        "icon": "$(terminal)"
+      },
+      {
         "command": "taskhub.terminateAllActions",
         "title": "Terminate All Actions",
         "icon": "$(primitive-square)"
@@ -415,6 +425,10 @@
     "menus": {
       "commandPalette": [
         {
+          "command": "taskhub.terminateAllActions",
+          "when": "false"
+        },
+        {
           "command": "taskhub.openLink",
           "when": "false"
         },
@@ -533,9 +547,14 @@
           "group": "navigation"
         },
         {
-          "command": "taskhub.terminateAllActions",
-          "when": "view == mainView.main",
+          "command": "taskhub.stopAllActions",
+          "when": "view == mainView.main && taskhub.hasRunningActions",
           "group": "navigation@1"
+        },
+        {
+          "command": "taskhub.closeAllTerminals",
+          "when": "view == mainView.main",
+          "group": "9_taskhub@1"
         },
         {
           "command": "taskhub.createAction",
