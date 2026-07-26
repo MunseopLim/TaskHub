@@ -6055,6 +6055,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration(event => {
+            if (event.affectsConfiguration('taskhub.showTaskStatus')) {
+                // Status icons are rendered per row from this setting, so the
+                // tree has to redraw for the change to take effect at all —
+                // otherwise it only applied to rows drawn after the next
+                // unrelated refresh.
+                mainViewProvider.refresh();
+            }
             if (event.affectsConfiguration('taskhub.builtinActions')) {
                 // The merged list gains/loses the bundled examples — the
                 // cached action tree and the dynamic `taskhub.runAction.<id>`

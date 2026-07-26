@@ -67,19 +67,66 @@ export class Folder extends vscode.TreeItem {
     }
 }
 
+/**
+ * The icon an action carries when no run status is being shown — derived
+ * from what the action *is* (pipeline / shell / dialog / other) rather than
+ * from how it last ran. Used both before the first run and whenever
+ * `taskhub.showTaskStatus` is off.
+ */
+function defaultActionIcon(action: PipelineAction | undefined): vscode.ThemeIcon {
+    if (!action || !action.tasks || action.tasks.length === 0) {
+        return new vscode.ThemeIcon('gear');
+    }
+    if (action.tasks.length > 1) {
+        return new vscode.ThemeIcon('debug-alt');
+    }
+    switch (action.tasks[0].type) {
+        case 'shell':
+        case 'command':
+            return new vscode.ThemeIcon('terminal');
+        case 'fileDialog':
+        case 'folderDialog':
+            return new vscode.ThemeIcon('folder-opened');
+        default:
+            return new vscode.ThemeIcon('gear');
+    }
+}
+
 export class Action extends vscode.TreeItem {
     constructor(
         public readonly label: string,
         public readonly action: PipelineAction,
         public readonly collapsibleState: vscode.TreeItemCollapsibleState,
         public readonly context: vscode.ExtensionContext,
-        public readonly id?: string
+        public readonly id?: string,
+        /**
+         * Whether run status (spinner / ✓ / ✗ icons and the in-flight
+         * progress hint) may be rendered — i.e. `taskhub.showTaskStatus`.
+         * The provider reads the setting once per render pass and passes it
+         * down; defaults to `true` so direct constructions keep the old
+         * behaviour.
+         *
+         * Note this gates *appearance only*. `contextValue` still reflects
+         * the real run state below, because it drives capabilities rather
+         * than looks: with status icons off, a running action must still
+         * offer its inline Stop button.
+         */
+        showTaskStatus: boolean = true
     ) {
         super(label, collapsibleState);
         this.command = { command: 'taskhub.executeAction', title: 'Execute Action', arguments: [this] };
         this.tooltip = action.description;
         const state = actionStates.get(this.id || '');
-        if (state) {
+        if (state && !showTaskStatus) {
+            // Status display is off: keep the capability marker, drop every
+            // visual trace of the run. Previously the icons came back on any
+            // refresh triggered from elsewhere (folder expand, file watcher),
+            // so the setting only appeared to work until the next redraw.
+            this.contextValue = state.state === 'running'
+                ? 'runningAction'
+                : state.state === 'success' ? 'succeededAction' : 'failedAction';
+            this.iconPath = defaultActionIcon(action);
+        } else if (state) {
             switch (state.state) {
                 case 'running':
                     this.iconPath = new vscode.ThemeIcon('sync~spin');
@@ -111,29 +158,7 @@ export class Action extends vscode.TreeItem {
                     break;
             }
         } else {
-            if (action && action.tasks) {
-                if (action.tasks.length > 1) {
-                    this.iconPath = new vscode.ThemeIcon('debug-alt');
-                } else if (action.tasks.length === 1) {
-                    switch (action.tasks[0].type) {
-                        case 'shell':
-                        case 'command':
-                            this.iconPath = new vscode.ThemeIcon('terminal');
-                            break;
-                        case 'fileDialog':
-                        case 'folderDialog':
-                            this.iconPath = new vscode.ThemeIcon('folder-opened');
-                            break;
-                        default:
-                            this.iconPath = new vscode.ThemeIcon('gear');
-                            break;
-                    }
-                } else {
-                    this.iconPath = new vscode.ThemeIcon('gear');
-                }
-            } else {
-                this.iconPath = new vscode.ThemeIcon('gear');
-            }
+            this.iconPath = defaultActionIcon(action);
             this.contextValue = 'action';
         }
     }
@@ -212,8 +237,18 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
         return Promise.resolve(this.createActionItems(actionsJson));
     }
 
+    /**
+     * `taskhub.showTaskStatus`, read once per render pass rather than once
+     * per row. Every construction path for `Action` funnels through
+     * `createActionItems`, so this is the single gate for status appearance.
+     */
+    private isStatusVisible(): boolean {
+        return vscode.workspace.getConfiguration('taskhub').get<boolean>('showTaskStatus', true) !== false;
+    }
+
     private createActionItems(items: ActionItem[]): (Action | Folder | vscode.TreeItem)[] {
         const actionItems: (Action | Folder | vscode.TreeItem)[] = [];
+        const showTaskStatus = this.isStatusVisible();
         items.forEach((item: ActionItem) => {
             if (item.type === 'folder') {
                 actionItems.push(new Folder(item.title, item.children || [], this.context, item.id));
@@ -223,7 +258,7 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
                 separatorItem.contextValue = 'separator';
                 actionItems.push(separatorItem);
             } else if (item.action) {
-                actionItems.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id));
+                actionItems.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id, showTaskStatus));
             } else if (item.id) {
                 console.warn(`Item '${item.title}' is not a valid folder, separator, or runnable action.`);
                 const unknownItem = new vscode.TreeItem(item.title || 'Unknown Item');

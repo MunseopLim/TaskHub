@@ -29,6 +29,22 @@
 =====================================================================
 -->
 
+## [0.6.16] - 2026-07-26
+
+### 수정 — `showTaskStatus=false`가 재렌더에도 유지되도록 (UX 리뷰 5/6)
+
+#### 수정
+
+- **꺼 둔 상태 아이콘이 트리를 다시 그릴 때마다 되살아나던 문제**: 설정은 실행 직후의 `mainViewProvider.refresh()` 호출만 억제했을 뿐, `Action` TreeItem은 설정을 보지 않고 `actionStates`에서 아이콘·진행률을 그렸다. 폴더를 접었다 펴거나 파일 워처가 트리를 갱신하면 상태 표시가 그대로 돌아왔다. 이제 provider가 렌더 패스마다 설정을 한 번 읽어 각 행에 전달한다. 참조: [src/providers/mainViewProvider.ts](src/providers/mainViewProvider.ts).
+- **설정을 바꿔도 즉시 반영되지 않던 문제**: `taskhub.showTaskStatus` 변경 시 트리를 새로 그린다. 이전에는 다른 이유로 refresh가 일어날 때까지 이전 모습이 남았다.
+
+#### 설계 메모
+
+- 가려지는 것은 **겉모습(`iconPath` / `description`)뿐**이고 `contextValue`는 실제 실행 상태를 유지한다. 상태 표시를 껐다고 실행 중인 액션의 인라인 *중지* 버튼이 사라지면 안 되기 때문 — 0.6.13에서 *Stop All Actions* 노출을 이 설정과 독립시킨 것과 같은 판단이다. 원 리뷰는 "실행 중복 방지 상태와 화면 표시 상태를 분리하라"고 제안했으나 그 분리는 [extension.ts](src/extension.ts) `markActionAsRunning`에 이미 주석까지 달려 구현되어 있었고, 실제 결함은 렌더 게이트 누락이었다.
+- 아이콘 선택 로직이 두 갈래(상태 있음 / 없음)로 중복돼 있던 것을 `defaultActionIcon()` 하나로 합쳤다.
+
+**테스트**: 신규 8 케이스([src/test/showTaskStatus.test.ts](src/test/showTaskStatus.test.ts) — off/on × running/success/failure 렌더, contextValue 보존, 인자 생략 시 기본값, 실제 설정을 켠 provider 배선과 재렌더 안정성), 최종 1524 passing.
+
 ## [0.6.15] - 2026-07-26
 
 ### 추가 / 변경 — 빈 상태 안내와 제목 표시줄 정리 (UX 리뷰 4/6, 전반부)

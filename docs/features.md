@@ -135,6 +135,7 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 여러 task로 구성된 액션이 실행 중일 때, 액션 라벨 옆에 현재 진행 중인 task가 표시됩니다.
 
 - 형식: `2/3 · link` — 전체 3개 task 중 2번째 task `link`가 현재 실행 중.
+- `taskhub.showTaskStatus: false`면 상태 아이콘과 함께 이 진행 표시도 나오지 않습니다. 다만 **가려지는 것은 겉모습뿐**이라, 실행 중인 액션의 인라인 *중지* 버튼과 제목 표시줄의 *Stop All Actions* 는 그대로 동작합니다 (0.6.16부터 — 이전에는 트리가 다시 그려질 때마다 꺼 둔 아이콘이 되살아났습니다).
 - 단일 task 액션은 진행 표시를 노출하지 않습니다 (`1/1`은 노이즈).
 - 액션이 종료되면(`success`/`failure`/manual stop) 진행 표시는 자동으로 사라지고, 상태 아이콘(✓/✗)만 남습니다.
 - `continueOnError: true`로 스킵된 task는 인덱스만 진행되며 별도 표시는 없습니다 — task 완료/실패 자체는 History 패널에서 회고 가능합니다.
@@ -1826,7 +1827,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 
 | 설정 ID | 타입 | 기본값 (범위) | 요약 | 관련 기능 |
 | --- | --- | --- | --- | --- |
-| `taskhub.showTaskStatus` | `boolean` | `true` | Actions 뷰의 실행 상태 아이콘(running/success/failure) 및 완료 팝업 표시 여부. `false`여도 동시 실행 가드는 그대로 동작한다. | [§5 Actions 패널](#5-actions-패널-mainviewmain), [§14 히스토리](#14-액션-실행-히스토리) |
+| `taskhub.showTaskStatus` | `boolean` | `true` | Actions 뷰의 실행 상태 아이콘(running/success/failure)·진행률 표시 및 완료 팝업 표시 여부. `false`여도 동시 실행 가드, 인라인 *중지* 버튼, *Stop All Actions* 노출은 그대로 동작한다 — 가려지는 것은 겉모습뿐이다. | [§5 Actions 패널](#5-actions-패널-mainviewmain), [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | 파이프라인 실행 시 TaskHub OutputChannel에 상세 명령/STDOUT/STDERR/exit code를 출력. 디버깅에만 켤 것. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.pythonIoEncoding` | `string` | `"utf-8"` | TaskHub가 실행하는 모든 명령의 `PYTHONIOENCODING` 환경변수 값. 빈 문자열이면 강제 설정 안 함. `utf-8:ignore` 같은 값도 가능. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell 출력 인코딩. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
