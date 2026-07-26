@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as path from 'path';
 import * as crypto from 'crypto';
 import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, generateSummaryReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary } from './elfParser';
 import { parseLinkerFile } from './linkerScriptParser';
 import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 import { t } from './i18n';
+import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
 
 interface PanelState {
     panel: vscode.WebviewPanel;
@@ -54,7 +56,7 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
     if (!inputType) { return; }
 
     if (inputType.label === 'ARM Linker Listing') {
-        const listUri = await vscode.window.showOpenDialog({
+        const listUri = await showOpenDialogWithMemory(DIALOG_SCOPE.memoryMapListing, {
             canSelectMany: false,
             filters: { 'ARM Linker Listing': ['txt'] },
             openLabel: t('Linker Listing 선택', 'Select Linker Listing')
@@ -71,7 +73,7 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
         return;
     }
 
-    const fileUri = await vscode.window.showOpenDialog({
+    const fileUri = await showOpenDialogWithMemory(DIALOG_SCOPE.memoryMapBinary, {
         canSelectMany: false,
         filters: { 'ARM Executable': ['axf', 'elf', 'out'] },
         openLabel: t('AXF/ELF 파일 선택', 'Select AXF/ELF file')
@@ -90,7 +92,7 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
         );
 
         if (linkerChoice && linkerChoice.label !== t('건너뛰기', 'Skip')) {
-            const linkerUri = await vscode.window.showOpenDialog({
+            const linkerUri = await showOpenDialogWithMemory(DIALOG_SCOPE.memoryMapLinkerScript, {
                 canSelectMany: false,
                 filters: { 'Linker Script': ['ld', 'lds', 'lcf', 'sct'] },
                 openLabel: t('링커 스크립트 선택', 'Select Linker Script')
@@ -298,10 +300,11 @@ function showPanel(
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.'));
         } else if (message.command === 'saveHtml') {
-            const uri = await vscode.window.showSaveDialog({
-                defaultUri: vscode.Uri.file(`${fileName.replace(/\.[^.]+$/, '')}_memory_map.html`),
-                filters: { 'HTML': ['html'] },
-            });
+            const uri = await showSaveDialogWithMemory(
+                DIALOG_SCOPE.memoryMapExport,
+                `${fileName.replace(/\.[^.]+$/, '')}_memory_map.html`,
+                { filters: { 'HTML': ['html'] }, defaultDir: path.dirname(filePath) }
+            );
             if (uri) {
                 try {
                     // Remove VS Code API script calls and make standalone

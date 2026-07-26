@@ -28,6 +28,8 @@
 21. [설정 레퍼런스](#21-설정-레퍼런스)
 22. [Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기)
 23. [TaskHub Doctor (Action Lint)](#23-taskhub-doctor-action-lint)
+24. [병렬 실행 / Task DAG](#24-병렬-실행--task-dag)
+25. [파일/폴더 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억)
 
 ---
 
@@ -1795,6 +1797,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 | `taskhub.runAnyAction.recentLimit` | `number` | `5` (0–20) | `TaskHub: Run Any Action…` 팔레트의 *Recently used* 섹션에 표시할 최대 개수. `0`이면 섹션 자체가 숨겨진다. 표시 시점에 stale 항목(삭제된 액션)을 걸러내므로 실제 보이는 개수는 이 값 이하가 될 수 있다. | [§5 Quick Action Palette](#5-actions-패널-mainviewmain) |
 | `taskhub.history.showPanel` | `boolean` | `true` | 사이드바의 History 패널 표시 여부. `false`면 뷰 자체가 감춰지지만 기록은 그대로 유지된다. | [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.preview.showSourceControlContextMenu` | `boolean` | `true` | Source Control 변경 파일 우클릭 메뉴에 TaskHub 프리뷰/브라우저 열기 항목을 표시할지 여부. VS Code SCM 메뉴는 확장자 context key를 안정적으로 제공하지 않으므로 켜져 있으면 대상 확장자 외 파일에도 항목이 보일 수 있으며, 실제 실행은 핸들러가 확장자로 재검증한다. | [§22 Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기) |
+| `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. `false`면 VS Code 자체의 최근 경로(창·확장 공유)를 그대로 쓴다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |
 | `taskhub.preset.selected` | `string` | `"none"` | 자동 적용할 프리셋 ID. `"none"`이면 워크스페이스 액션만 사용. 확장 내장 또는 워크스페이스 `.vscode/presets/` 내 프리셋 ID를 입력. | [§17 Preset](#17-preset-기능) |
@@ -1997,3 +2000,34 @@ Doctor는 같은 `buildTaskGraph` + `detectGraphCycle` 헬퍼를 공유하므로
 ### 24.9. 구현 메모
 
 핵심 로직은 [src/pipelineUtils.ts](../src/pipelineUtils.ts)의 `buildTaskGraph` / `inferTaskDependencies` / `validateTaskGraph` / `TaskScheduler` / `withInteractivePromptLock`에 모여 있고, 모두 `vscode`에 의존하지 않는 순수 함수입니다. 실제 task 실행은 [src/extension.ts](../src/extension.ts) `executeActionPipeline`이 graph + scheduler를 소비하면서 `executeSingleTask`를 launching하는 형태로 짜여 있습니다. 단위 테스트는 [src/test/taskGraph.test.ts](../src/test/taskGraph.test.ts)가 graph 구성·자동 추론·cycle·scheduler lifecycle을, [src/test/pipelineUtils.test.ts](../src/test/pipelineUtils.test.ts)가 prompt mutex serialization을, [src/test/doctor.test.ts](../src/test/doctor.test.ts)가 `parallel.interactive` warning을 커버합니다.
+
+---
+
+## 25. 파일/폴더 다이얼로그 위치 기억
+
+TaskHub가 여는 모든 파일/폴더 선택 다이얼로그는 **같은 용도로 마지막에 사용한 위치**에서 열립니다. VS Code는 `defaultUri`를 주지 않은 다이얼로그를 자신의 전역 최근 경로에서 여는데, 그 값은 창(workspace)과 확장 프로그램을 가리지 않고 공유되므로 Hex Viewer 열기가 방금 다른 프로젝트에서 편집하던 파일 폴더에서 열리는 식의 부자연스러운 동작이 나옵니다. 구현은 [src/dialogMemory.ts](../src/dialogMemory.ts)에 모여 있습니다.
+
+### 25.1. 시작 위치 결정 순서
+
+1. 호출자(또는 액션 JSON의 `options.defaultUri`)가 명시한 위치 — 실제로 존재할 때만.
+2. 같은 용도(scope)로 마지막에 선택했던 디렉터리.
+3. 활성 에디터가 속한 워크스페이스 폴더, 없으면 첫 워크스페이스 폴더.
+4. 위 후보가 모두 없으면 `defaultUri` 없이 — VS Code 기본 동작.
+
+기억된 경로는 열 때마다 존재 여부를 확인하므로, 폴더를 지우거나 옮겼으면 조용히 다음 후보로 내려갑니다.
+
+저장은 workspace 상태와 global 상태 양쪽에 하며 읽을 때 workspace를 우선합니다. 프로젝트별로 다른 위치를 기억하되, 새 프로젝트에서 처음 여는 다이얼로그는 다른 창에서 쓰던 같은 용도의 위치를 물려받습니다.
+
+### 25.2. 기억 단위 (scope)
+
+용도가 다른 다이얼로그는 위치를 공유하지 않습니다. Hex Viewer / JSON Editor / Memory Map(ELF·Linker Listing·링커 스크립트·HTML 저장) / 즐겨찾기 추가 / 액션 Import·Export / Preset 저장이 각각 독립적으로 기억됩니다.
+
+`fileDialog` / `folderDialog` 태스크([§5](#5-actions-패널-mainviewmain))는 **액션 id + 태스크 id 단위**로 기억합니다. 한 액션 안에서 "펌웨어 파일 고르기"와 "출력 폴더 고르기"를 연달아 하더라도 서로의 위치를 덮어쓰지 않습니다.
+
+폴더 선택 다이얼로그는 고른 폴더 *자체* 를(같은 출력 폴더를 반복해 고르는 경우가 많으므로), 파일 선택은 고른 파일이 있던 폴더를 기억합니다. 취소하면 아무것도 갱신하지 않습니다.
+
+### 25.3. 끄기
+
+`taskhub.dialog.rememberLastLocation`을 `false`로 두면 저장도 복원도 하지 않고 VS Code 기본 동작으로 돌아갑니다 ([§21 설정 레퍼런스](#21-설정-레퍼런스)).
+
+> **참고**: 액션 JSON의 `options.defaultUri`는 문자열로 작성하지만 VS Code API는 `Uri`를 요구하므로, TaskHub가 파일 경로로 해석해 승격시킵니다 (`scheme://` 형태만 URI로 파싱하므로 `C:\proj\build` 같은 Windows 경로가 드라이브 문자를 scheme으로 오인당하지 않습니다).

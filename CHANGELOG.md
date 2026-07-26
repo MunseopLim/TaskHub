@@ -29,6 +29,29 @@
 =====================================================================
 -->
 
+## [0.6.11] - 2026-07-26
+
+### 추가 / 변경 — 파일·폴더 다이얼로그가 마지막 위치를 기억
+
+#### UX / 일관성
+
+- **다이얼로그 위치 기억**: TaskHub가 여는 모든 파일/폴더 선택 다이얼로그가 **같은 용도로 마지막에 사용한 위치**에서 열린다. 이전에는 `defaultUri`를 주지 않아 VS Code의 전역 최근 경로(창·확장 프로그램 공유)에서 열렸고, 그 결과 Hex Viewer 열기가 방금 다른 프로젝트에서 편집하던 폴더에서 시작하는 일이 있었다. 시작 위치는 `호출자 지정 → 같은 scope의 마지막 위치 → 활성 에디터의 워크스페이스 폴더 → 첫 워크스페이스 폴더` 순으로 정해지며, 기억된 폴더가 삭제됐으면 조용히 다음 후보로 내려간다. 참조: [src/dialogMemory.ts](src/dialogMemory.ts).
+  - 용도별로 분리 기억: Hex Viewer / JSON Editor / Memory Map(ELF·Listing·링커 스크립트·HTML 저장) / 즐겨찾기 추가 / 액션 Import·Export / Preset 저장. `fileDialog`·`folderDialog` 태스크는 **액션 id + 태스크 id 단위**로 기억해, 한 액션 안의 "펌웨어 파일 고르기"와 "출력 폴더 고르기"가 서로의 위치를 덮어쓰지 않는다.
+  - 저장 다이얼로그는 폴더만 기억하고 파일명은 호출부의 제안값을 유지한다 — 같은 종류의 산출물을 늘 같은 폴더로 내보내는 흐름에서 매번 폴더를 다시 찾아가지 않는다.
+  - 폴더 선택은 고른 폴더 자체를, 파일 선택은 고른 파일의 상위 폴더를 기억한다. 취소하면 갱신하지 않는다. workspace 상태와 global 상태 양쪽에 저장하고 읽을 때 workspace를 우선하므로, 프로젝트별로 위치가 갈리되 새 프로젝트의 첫 다이얼로그는 다른 창에서 쓰던 위치를 물려받는다.
+- **새 설정 `taskhub.dialog.rememberLastLocation`** (기본 `true`): `false`로 두면 저장도 복원도 하지 않고 VS Code 기본 동작으로 되돌아간다. 자세한 내용은 [docs/features.md §25](docs/features.md).
+
+#### 수정
+
+- **`fileDialog` / `folderDialog` 태스크의 `options.defaultUri`가 실제로 적용됨**: 액션 JSON에는 문자열로 쓰지만 VS Code API는 `Uri`를 요구해 그동안 조용히 무시되고 있었다. 이제 파일 경로로 해석해 승격시킨다. `scheme://` 형태만 URI로 파싱하므로 `C:\proj\build` 같은 Windows 경로가 드라이브 문자를 scheme으로 오인당하지 않는다. 참조: [src/extension.ts](src/extension.ts).
+- **`folderDialog`가 `task.options`를 직접 변형하던 문제**: `canSelectFiles` / `canSelectFolders`를 원본 객체에 써넣는 대신 복사본에 적용한다.
+
+#### 의존성
+
+- `adm-zip` `0.5.17` → `0.6.0` (Node 엔진 요구사항 `>=12.0` → `>=14.0`).
+
+**테스트**: 신규 32 케이스([src/test/dialogMemory.test.ts](src/test/dialogMemory.test.ts) — 시작 위치 우선순위, 선택 결과 기억, scope 분리, 설정 off, 실제 Memento/디스크 경로), 최종 1472 passing.
+
 ## [0.6.10] - 2026-06-27
 
 ### 추가 / 변경 — History 실행 명령 보기 · 저장된 입력 재사용 · 의존성 엔진 정합

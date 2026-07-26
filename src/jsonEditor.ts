@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import { t } from './i18n';
 import { coerceToUri } from './previewOpener';
 import { shouldOfferRecovery, RecoveryEntry, RecoveryStore, makeRecoveryStore } from './jsonEditorUtils';
+import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 let currentMessageDisposable: vscode.Disposable | undefined;
@@ -197,7 +198,7 @@ function detectIndent(text: string): string | number {
 }
 
 export async function openJsonEditor(context: vscode.ExtensionContext, recordHistory?: JsonEditorHistoryRecorder) {
-    const fileUris = await vscode.window.showOpenDialog({
+    const fileUris = await showOpenDialogWithMemory(DIALOG_SCOPE.jsonEditor, {
         canSelectMany: false,
         filters: { 'JSON Files': ['json'] },
         openLabel: t('JSON 파일 열기', 'Open JSON File')

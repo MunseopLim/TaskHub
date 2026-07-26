@@ -9,6 +9,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexParseResult } from './hexParser';
 import { t } from './i18n';
+import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 // standalone 패널(단일 인스턴스) 전용 메시지 disposable. Custom Editor
@@ -34,7 +35,7 @@ function formatFileSize(bytes: number): string {
 }
 
 export async function showHexViewer(context: vscode.ExtensionContext, recordHistory?: HexViewerHistoryRecorder) {
-    const fileUri = await vscode.window.showOpenDialog({
+    const fileUri = await showOpenDialogWithMemory(DIALOG_SCOPE.hexViewer, {
         canSelectMany: false,
         filters: {
             'Supported Files': ['hex', 'ihex', 'srec', 's19', 's28', 's37', 'bin', 'dat'],

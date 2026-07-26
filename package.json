@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.10",
+  "version": "0.6.11",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -123,6 +123,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Show TaskHub preview/browser actions in the Source Control resource context menu. VS Code does not reliably expose file-extension context keys for SCM resources, so these menu items may appear for all changed files; TaskHub still validates the file extension before opening."
+        },
+        "taskhub.dialog.rememberLastLocation": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Reopen TaskHub file/folder dialogs at the location last used for the same purpose (Hex Viewer, JSON Editor, Memory Map, export/import, each `fileDialog`/`folderDialog` task, ...). When off, dialogs use VS Code's own last-used path, which is shared across windows and extensions."
         },
         "taskhub.hover.numberBase.enabled": {
           "type": "boolean",
@@ -768,6 +773,9 @@
     "serialize-javascript": "^7.0.4"
   },
   "dependencies": {
-    "adm-zip": "^0.5.17"
+    "adm-zip": "^0.6.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
   }
 }

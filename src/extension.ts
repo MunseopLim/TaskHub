@@ -23,6 +23,7 @@ import { t } from './i18n';
 import { buildPreviewReport } from './previewRun';
 import { runDoctor, DoctorFinding, DoctorInput } from './doctor';
 import { createZipArchive, extractZipArchive } from './archiveUtils';
+import { DIALOG_SCOPE, coerceDefaultUri, initDialogMemory, showOpenDialogWithMemory, showSaveDialogWithMemory, taskDialogScope } from './dialogMemory';
 
 // Compile the actions JSON-schema validator once and reuse it. Re-compiling on
 // every load path (activation + every view refresh + every executeAction) was
@@ -3409,16 +3410,19 @@ export function parsePathInfo(fullPath: string): { path: string, dir: string, na
 }
 
 async function handleFileDialog(task: any): Promise<{ path: string, dir: string, name: string, fileNameOnly: string, fileExt: string }> {
-    const options: vscode.OpenDialogOptions = task.options || {};
-    const fileUri = await vscode.window.showOpenDialog(options);
+    // `defaultUri`는 액션 JSON에서 문자열로 오므로 Uri로 승격한다 — 그대로
+    // 넘기면 VS Code가 무시해 다이얼로그가 엉뚱한 위치에서 열린다. 명시하지
+    // 않았다면 이 태스크가 마지막으로 고른 폴더에서 연다.
+    const options: vscode.OpenDialogOptions = { ...(task.options || {}), defaultUri: coerceDefaultUri(task.options?.defaultUri) };
+    const fileUri = await showOpenDialogWithMemory(taskDialogScope('file', task), options);
     if (fileUri && fileUri[0]) { return parsePathInfo(fileUri[0].fsPath); }
     else { throw new Error('File selection was canceled.'); }
 }
 
 async function handleFolderDialog(task: any): Promise<{ path: string, dir: string, name: string, fileNameOnly: string, fileExt: string }> {
-    const options: vscode.OpenDialogOptions = task.options || {};
+    const options: vscode.OpenDialogOptions = { ...(task.options || {}), defaultUri: coerceDefaultUri(task.options?.defaultUri) };
     options.canSelectFiles = false; options.canSelectFolders = true;
-    const folderUri = await vscode.window.showOpenDialog(options);
+    const folderUri = await showOpenDialogWithMemory(taskDialogScope('folder', task), options);
     if (folderUri && folderUri[0]) { return parsePathInfo(folderUri[0].fsPath); }
     else { throw new Error('Folder selection was canceled.'); }
 }
@@ -4427,6 +4431,10 @@ export function formatExecutedCommandsDocument(entry: HistoryEntry): string | nu
 }
 
 export function activate(context: vscode.ExtensionContext) {
+    // 파일/폴더 다이얼로그의 마지막 위치 저장소. 등록 전에 열린 다이얼로그는
+    // 기억 없이 워크스페이스 폴더에서 열리므로 activate 최상단에서 연결한다.
+    initDialogMemory(context);
+    context.subscriptions.push(new vscode.Disposable(() => initDialogMemory(undefined)));
     const terminalDisposable = vscode.window.onDidCloseTerminal(terminal => {
         for (const [key, actionTerminal] of actionTerminals.entries()) {
             if (actionTerminal.terminal === terminal) {
@@ -4965,21 +4973,17 @@ export function activate(context: vscode.ExtensionContext) {
         // title and relative path. No per-file title / line / group / tag
         // prompts — the post-creation toast points the user at
         // *favorites.json 열기* if they want to add metadata afterwards.
-        // The dialog's defaultUri now follows the active editor's
-        // workspace folder when present (instead of always folder[0]) so
-        // multi-root users land in the folder they're working in.
+        // The dialog opens at the folder the user last added favorites from;
+        // on the first use it falls back to the active editor's workspace
+        // folder (instead of always folder[0]) so multi-root users land in
+        // the folder they're working in.
         let fileUris: vscode.Uri[] | undefined;
         if (uri) {
             fileUris = [uri];
         } else {
-            const activeEditor = vscode.window.activeTextEditor;
-            const activeFolder = activeEditor
-                ? vscode.workspace.getWorkspaceFolder(activeEditor.document.uri)
-                : undefined;
-            fileUris = await vscode.window.showOpenDialog({
+            fileUris = await showOpenDialogWithMemory(DIALOG_SCOPE.favoriteFile, {
                 canSelectMany: true,
-                openLabel: t('즐겨찾기에 추가', 'Add to Favorites'),
-                defaultUri: activeFolder?.uri ?? vscode.workspace.workspaceFolders?.[0]?.uri
+                openLabel: t('즐겨찾기에 추가', 'Add to Favorites')
             });
         }
 
@@ -5760,9 +5764,9 @@ export function activate(context: vscode.ExtensionContext) {
                 fs.mkdirSync(presetsDir, { recursive: true });
                 targetPath = path.join(presetsDir, fileName);
             } else {
-                const fileUri = await vscode.window.showSaveDialog({
-                    defaultUri: vscode.Uri.file(fileName),
-                    filters: { 'JSON': ['json'] }
+                const fileUri = await showSaveDialogWithMemory(DIALOG_SCOPE.presetSave, fileName, {
+                    filters: { 'JSON': ['json'] },
+                    defaultDir: folder.uri.fsPath
                 });
                 if (!fileUri) {
                     return;
@@ -5857,9 +5861,9 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage(t(`액션 로드 실패: ${e.message}`, `Failed to load actions: ${e.message}`));
             return;
         }
-        const saveUri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(path.join(workspaceFolder, 'actions.taskhub')),
-            filters: { 'TaskHub Export': ['taskhub'], 'JSON': ['json'] }
+        const saveUri = await showSaveDialogWithMemory(DIALOG_SCOPE.actionsExport, 'actions.taskhub', {
+            filters: { 'TaskHub Export': ['taskhub'], 'JSON': ['json'] },
+            defaultDir: workspaceFolder
         });
         if (!saveUri) { return; }
         const exportContent = serializeExportData(actions);
@@ -5891,9 +5895,9 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
         const defaultName = `${treeItem.id.replace(/[^a-zA-Z0-9._-]/g, '_')}.taskhub`;
-        const saveUri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(path.join(workspaceFolder, defaultName)),
-            filters: { 'TaskHub Export': ['taskhub'], 'JSON': ['json'] }
+        const saveUri = await showSaveDialogWithMemory(DIALOG_SCOPE.actionsExport, defaultName, {
+            filters: { 'TaskHub Export': ['taskhub'], 'JSON': ['json'] },
+            defaultDir: workspaceFolder
         });
         if (!saveUri) { return; }
         const exportContent = serializeExportData([actionItem]);
@@ -5908,7 +5912,7 @@ export function activate(context: vscode.ExtensionContext) {
         );
         if (!targetFolder) { return; }
         const workspaceFolder = targetFolder.uri.fsPath;
-        const fileUri = await vscode.window.showOpenDialog({
+        const fileUri = await showOpenDialogWithMemory(DIALOG_SCOPE.actionsImport, {
             canSelectMany: false,
             filters: { 'TaskHub Export': ['taskhub', 'json'] }
         });
