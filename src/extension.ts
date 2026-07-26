@@ -3513,11 +3513,16 @@ async function executeSingleTask(
     }
 
     if (!usingPresetResult) { switch (task.type) {
+        // `actionId` rides along so the dialog's remembered location is scoped
+        // per action, not just per task id — the shell branch does the same a
+        // few cases below. Without it every action that reuses a task id (the
+        // wizard templates all emit `selectFile` / `selectFolder`) would share
+        // one remembered folder.
         case 'fileDialog':
-            result = await handleFileDialog(task);
+            result = await handleFileDialog({ ...task, actionId });
             break;
         case 'folderDialog':
-            result = await handleFolderDialog(task);
+            result = await handleFolderDialog({ ...task, actionId });
             break;
         case 'inputBox':
             // Interpolate prompt, value, placeHolder, prefix, suffix

@@ -489,6 +489,15 @@ VS Code `DiagnosticCollection.set(uri, ...)`은 해당 URI의 기존 entry 전�
 
 본 시나리오는 한 액션에 두 개의 command task를 두고 (a) `compile` task가 `shared.c:42:5: warning: ...`을, (b) `lint` task가 `shared.c:73:12: error: ...`을 각각 stdout으로 출력합니다. 액션 종료 후 `vscode.languages.getDiagnostics(uri)`가 두 진단을 모두 반환하며, 각각 `Warning`/`Error` severity로 구분되고 메시지에 source task의 이름이 포함되는지 확인합니다.
 
+### IT-117 / IT-118: 다이얼로그 위치 기억의 scope 분리
+
+[§25 다이얼로그 위치 기억](./features.md#25-파일폴더-다이얼로그-위치-기억)은 `fileDialog` / `folderDialog` 태스크의 마지막 위치를 **액션 id + 태스크 id** 단위로 기억한다고 규정합니다. 그러나 0.6.11~0.6.22의 실행기는 `actionId`를 별도 인자로 받으면서 dialog 분기에는 원본 task만 넘겨, 실제 키가 `task.fileDialog:/pick`처럼 액션 부분이 빈 채로 만들어졌습니다. 0.6.17에서 마법사 템플릿이 `selectFile` / `selectFolder`라는 고정 task id를 쓰기 시작하면서, 마법사로 만든 서로 다른 액션들이 한 위치를 공유하는 결과가 됐습니다.
+
+- **IT-117**: 같은 task id(`pick`)를 가진 액션 A/B를 각각 다른 폴더에서 고르게 한 뒤 A를 다시 실행합니다. A의 다이얼로그 `defaultUri`가 B가 고른 폴더가 아니라 A가 마지막으로 쓰던 폴더여야 합니다. 배선이 빠지면 이 단언이 깨집니다(수정 전 실패 확인 완료).
+- **IT-118**: 한 액션 안의 `fileDialog`(`selectFile`)와 `folderDialog`(`selectFolder`)가 서로의 위치를 덮지 않는지 확인합니다. 파일 쪽은 고른 파일의 상위 폴더를, 폴더 쪽은 고른 폴더 자체를 기억한다는 규칙도 함께 고정합니다.
+
+두 시나리오 모두 `initDialogMemory()`로 in-memory 컨텍스트를 주입합니다 — 번들(`dist/`)과 테스트(`out/`)는 별도 모듈 인스턴스라 활성화 시점의 저장소가 테스트에서 보이지 않습니다.
+
 ## 시나리오 추가 절차
 
 1. 새 기능의 integration 측면이 생기면 이 문서의 "시나리오 그룹" 표에 먼저 한 줄 요약을 추가합니다.

@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { executeAction, executeActionPipeline, __testHook_resetShellEnvNamesCache } from '../extension';
+import { initDialogMemory } from '../dialogMemory';
 import { actionStates } from '../providers/actionStatus';
 import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
 import { MainViewProvider } from '../providers/mainViewProvider';
@@ -59,6 +60,25 @@ suite('Pipeline integration', function () {
             tempWorkspace,
             [tempWorkspace]
         );
+    }
+
+    /**
+     * In-memory context for the dialog-location store. The bundled extension
+     * (`dist/`) and this test file (`out/`) are separate module instances, so
+     * the host's `initDialogMemory(context)` from activation is not visible
+     * here — tests that exercise remembered locations install their own.
+     */
+    function makeDialogMemoryContext(): vscode.ExtensionContext {
+        const makeMemento = (store: Map<string, unknown>) => ({
+            keys: () => Array.from(store.keys()),
+            get: <T>(key: string, defaultValue?: T) => (store.has(key) ? store.get(key) as T : defaultValue),
+            update: (key: string, value: unknown) => { store.set(key, value); return Promise.resolve(); },
+            setKeysForSync: () => undefined,
+        });
+        return {
+            workspaceState: makeMemento(new Map()),
+            globalState: makeMemento(new Map()),
+        } as unknown as vscode.ExtensionContext;
     }
 
     /** Cross-platform printf of a single line (no trailing newline). */
@@ -1879,6 +1899,103 @@ try {
                 );
             } finally {
                 (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
+        test('IT-117: 같은 task id를 쓰는 서로 다른 액션이 다이얼로그 위치를 공유하지 않는다', async () => {
+            // 0.6.11이 다이얼로그 위치를 "액션 id + 태스크 id" 단위로 기억한다고
+            // 문서화했지만, 실행기는 `actionId`를 별도 인자로 받으면서 dialog
+            // 분기에는 원본 task만 넘겨 scope가 `task.fileDialog:/pick`이 됐다.
+            // 0.6.17에서 마법사 템플릿이 selectFile / selectFolder라는 고정 id를
+            // 쓰기 시작하면서, 마법사로 만든 액션들끼리 위치가 섞였다.
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            const previousContext = initDialogMemory(makeDialogMemoryContext());
+            const dirA = path.join(tempWorkspace, 'proj-a');
+            const dirB = path.join(tempWorkspace, 'proj-b');
+            fs.mkdirSync(dirA, { recursive: true });
+            fs.mkdirSync(dirB, { recursive: true });
+            fs.writeFileSync(path.join(dirA, 'a.hex'), 'a');
+            fs.writeFileSync(path.join(dirB, 'b.hex'), 'b');
+
+            const seenDefaults: Array<string | undefined> = [];
+            try {
+                let nextPick = path.join(dirA, 'a.hex');
+                (vscode.window as any).showOpenDialog = async (options: vscode.OpenDialogOptions) => {
+                    seenDefaults.push(options.defaultUri?.fsPath);
+                    return [vscode.Uri.file(nextPick)];
+                };
+
+                const pickAction = (id: string): PipelineAction => ({
+                    description: id,
+                    tasks: [{ id: 'pick', type: 'fileDialog' }],
+                });
+
+                // 액션 A는 proj-a에서, 액션 B는 proj-b에서 파일을 고른다.
+                await run(pickAction('act.a'), 'act.a');
+                nextPick = path.join(dirB, 'b.hex');
+                await run(pickAction('act.b'), 'act.b');
+
+                // 다시 A를 실행하면 A가 마지막으로 쓰던 proj-a에서 열려야 한다.
+                seenDefaults.length = 0;
+                nextPick = path.join(dirA, 'a.hex');
+                await run(pickAction('act.a'), 'act.a');
+
+                assert.strictEqual(seenDefaults.length, 1);
+                assert.strictEqual(
+                    normalizeWindowsPathForAssert(seenDefaults[0] ?? ''),
+                    normalizeWindowsPathForAssert(dirA),
+                    'B가 고른 위치가 A로 새어 들어오면 액션별 scope 배선이 빠진 것'
+                );
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+                initDialogMemory(previousContext);
+            }
+        });
+
+        test('IT-118: 같은 액션 안의 file / folder 다이얼로그도 위치를 공유하지 않는다', async () => {
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            const previousContext = initDialogMemory(makeDialogMemoryContext());
+            const fileDir = path.join(tempWorkspace, 'src-dir');
+            const outDir = path.join(tempWorkspace, 'out-dir');
+            fs.mkdirSync(fileDir, { recursive: true });
+            fs.mkdirSync(outDir, { recursive: true });
+            fs.writeFileSync(path.join(fileDir, 'fw.hex'), 'x');
+
+            const seenDefaults: Array<{ folder: boolean; dir: string | undefined }> = [];
+            try {
+                (vscode.window as any).showOpenDialog = async (options: vscode.OpenDialogOptions) => {
+                    const isFolder = options.canSelectFolders === true && options.canSelectFiles !== true;
+                    seenDefaults.push({ folder: isFolder, dir: options.defaultUri?.fsPath });
+                    return [vscode.Uri.file(isFolder ? outDir : path.join(fileDir, 'fw.hex'))];
+                };
+
+                const action: PipelineAction = {
+                    description: 'IT-118',
+                    tasks: [
+                        { id: 'selectFile', type: 'fileDialog' },
+                        { id: 'selectFolder', type: 'folderDialog' },
+                    ],
+                };
+                await run(action, 'act.mixed');
+
+                seenDefaults.length = 0;
+                await run(action, 'act.mixed');
+
+                const filePrompt = seenDefaults.find(entry => !entry.folder);
+                const folderPrompt = seenDefaults.find(entry => entry.folder);
+                assert.strictEqual(
+                    normalizeWindowsPathForAssert(filePrompt?.dir ?? ''),
+                    normalizeWindowsPathForAssert(fileDir),
+                    '파일 다이얼로그는 직전에 파일을 고른 폴더에서 열려야 한다'
+                );
+                assert.strictEqual(
+                    normalizeWindowsPathForAssert(folderPrompt?.dir ?? ''),
+                    normalizeWindowsPathForAssert(outDir),
+                    '폴더 다이얼로그는 직전에 고른 폴더 자체에서 열려야 한다'
+                );
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+                initDialogMemory(previousContext);
             }
         });
 
