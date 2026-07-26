@@ -29,6 +29,25 @@
 =====================================================================
 -->
 
+## [0.6.20] - 2026-07-26
+
+### 변경 — Hex Viewer 웹뷰 지역화 · 접근성 (UX 리뷰 6/6, 2/3)
+
+#### 변경 (지역화)
+
+- **Hex Viewer 웹뷰 문자열이 VS Code 언어 설정을 따른다**: 헤더(`Format` / `Size` / `Range` / `Entry`), 툴바(`Unit` / `Endian` / `Go to` / `Go` / `Find`), 찾기 바, 상태 표시줄(`Address` / `Value` / `no data` / `Selected: N bytes`), `No matches`. 0.6.19의 JSON Editor와 동일하게 호스트가 번들을 주입하는 방식이며 `<html lang>`도 맞춘다. 참조: [src/hexViewer.ts](src/hexViewer.ts) `buildHexViewerStrings`.
+  - `Little-Endian` / `ASCII` / `u8` 같은 짧은 기술 식별자와 예시 입력값(`0x08000000 / 1024`, `20020000`)은 프로젝트 i18n 규칙대로 번역 대상에서 제외했다.
+
+#### 추가 (접근성)
+
+- **폼 라벨 연결**: `Unit:` / `Endian:` / `Go to:` 는 `for` 없이 떠 있는 `<label>`이라 스크린리더에서 컨트롤과 묶이지 않았다 — 사용자는 "콤보 상자"라는 것만 듣고 무엇을 고르는지 알 수 없었다. 이제 `for`/`id`로 연결된다. 테스트가 *for 없는 label이 하나도 남지 않았는지* 검사한다.
+- **placeholder만 있던 컨트롤에 `aria-label`**: 찾기 입력과 찾기 방식 select. placeholder는 접근 가능한 이름이 아니고 입력을 시작하면 사라진다.
+- **아이콘 전용 버튼에 `aria-label`**: `◀` / `▶` / `✕`.
+- **live region**: 찾기 결과 개수(`3 / 128`, `결과 없음`)와 바이트 검사 결과가 `role="status"` + `aria-live="polite"`로 노출된다. 이전에는 조용히 바뀌어 검색 성패를 알 수 없었다.
+- **표 구조**: 열 머리글에 `scope="col"`, 시각적 구분용 빈 열에는 `aria-hidden="true"` — 빈 칸을 읽느라 표 탐색이 길어지지 않게.
+
+**테스트**: 신규 15 케이스([src/test/hexViewerWebviewA11y.test.ts](src/test/hexViewerWebviewA11y.test.ts) — 번들 완전성·`S.*` 참조 대조, `for` 연결과 고아 label 부재, aria-label·live region, 표 scope/aria-hidden, 기술 식별자 비번역 확인), 기존 hexParser 테스트 1건을 문구 대신 동작 기준으로 갱신, 최종 1586 passing.
+
 ## [0.6.19] - 2026-07-26
 
 ### 추가 / 변경 — JSON Editor 웹뷰 지역화 · 접근성 (UX 리뷰 6/6, 1/3)

@@ -342,6 +342,51 @@ function esc(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/**
+ * Every user-facing string the Hex Viewer webview renders, resolved once in
+ * the extension host. Same contract as the JSON Editor bundle: the webview
+ * script never holds an English literal, and `{placeholder}` tokens let word
+ * order differ per language. Exported for the completeness test.
+ *
+ * Deliberately absent: example inputs (`20020000`, `Hello`) and short
+ * technical identifiers (`u8`, `ASCII`, `Little-Endian`) — per the project's
+ * i18n rules those stay as-is in both locales.
+ */
+export function buildHexViewerStrings(): Record<string, string> {
+    return {
+        formatLabel: t('형식', 'Format'),
+        sizeLabel: t('크기', 'Size'),
+        bytesUnit: t('바이트', 'bytes'),
+        rangeLabel: t('범위', 'Range'),
+        entryLabel: t('진입점', 'Entry'),
+        unitLabel: t('단위', 'Unit'),
+        unit1: t('1 바이트', '1 Byte'),
+        unit2: t('2 바이트 (16비트)', '2 Bytes (16-bit)'),
+        unit4: t('4 바이트 (32비트)', '4 Bytes (32-bit)'),
+        unit8: t('8 바이트 (64비트)', '8 Bytes (64-bit)'),
+        endianLabel: t('엔디안', 'Endian'),
+        gotoLabel: t('이동', 'Go to'),
+        gotoTitle: t(
+            '0x... 또는 ...h: 16진 주소. 숫자만 입력하면 10진수 — 범위 안이면 절대 주소, 아니면 파일 오프셋입니다.',
+            '0x... or ...h: hex address. Bare digits: decimal (absolute address inside range, otherwise file offset).'
+        ),
+        gotoButton: t('이동', 'Go'),
+        findButton: t('찾기 (Ctrl+F)', 'Find (Ctrl+F)'),
+        findModeLabel: t('찾기 방식', 'Search mode'),
+        findInputLabel: t('찾을 내용', 'Search term'),
+        findPrev: t('이전 결과', 'Previous match'),
+        findNext: t('다음 결과', 'Next match'),
+        findClose: t('찾기 닫기', 'Close find'),
+        findNoMatches: t('결과 없음', 'No matches'),
+        addressHeader: t('주소', 'Address'),
+        statusHint: t('바이트를 클릭하면 값을 확인할 수 있습니다', 'Click a byte to inspect'),
+        statusAddress: t('주소', 'Address'),
+        statusValue: t('값', 'Value'),
+        statusNoData: t('데이터 없음', 'no data'),
+        statusSelected: t('선택 {n} 바이트', 'Selected: {n} bytes'),
+    };
+}
+
 function getWebviewContent(
     fileName: string,
     format: string,
@@ -356,12 +401,15 @@ function getWebviewContent(
 ): string {
     const formatLabel = format === 'intel' ? 'Intel HEX' : format === 'srec' ? 'Motorola SREC' : 'Binary';
     const entryStr = entryPoint !== undefined ? `0x${entryPoint.toString(16).toUpperCase().padStart(8, '0')}` : 'N/A';
+    const S = buildHexViewerStrings();
+    const stringsLiteral = JSON.stringify(S).replace(/</g, '\\u003c');
+    const htmlLang = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
     const nonce = generateHexNonce();
     const cspSource = webview?.cspSource ?? 'vscode-webview:';
     const csp = `default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${cspSource};`;
 
     return /*html*/`<!DOCTYPE html>
-<html lang="en">
+<html lang="${htmlLang}">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
@@ -499,43 +547,43 @@ function getWebviewContent(
     <div class="header">
         <div class="file-info">
             <span class="file-name">${esc(fileName)}</span>
-            <span class="meta">Format: ${formatLabel}</span>
-            <span class="meta">Size: ${byteCount.toLocaleString()} bytes</span>
-            <span class="meta">Range: 0x${minAddress.toString(16).toUpperCase().padStart(8, '0')} – 0x${maxAddress.toString(16).toUpperCase().padStart(8, '0')}</span>
-            <span class="meta">Entry: ${entryStr}</span>
+            <span class="meta">${esc(S.formatLabel)}: ${formatLabel}</span>
+            <span class="meta">${esc(S.sizeLabel)}: ${byteCount.toLocaleString()} ${esc(S.bytesUnit)}</span>
+            <span class="meta">${esc(S.rangeLabel)}: 0x${minAddress.toString(16).toUpperCase().padStart(8, '0')} – 0x${maxAddress.toString(16).toUpperCase().padStart(8, '0')}</span>
+            <span class="meta">${esc(S.entryLabel)}: ${entryStr}</span>
         </div>
     </div>
     <div class="toolbar">
-        <label>Unit:</label>
+        <label for="unitSize">${esc(S.unitLabel)}:</label>
         <select id="unitSize">
-            <option value="1" selected>1 Byte</option>
-            <option value="2">2 Bytes (16-bit)</option>
-            <option value="4">4 Bytes (32-bit)</option>
-            <option value="8">8 Bytes (64-bit)</option>
+            <option value="1" selected>${esc(S.unit1)}</option>
+            <option value="2">${esc(S.unit2)}</option>
+            <option value="4">${esc(S.unit4)}</option>
+            <option value="8">${esc(S.unit8)}</option>
         </select>
-        <label>Endian:</label>
+        <label for="endian">${esc(S.endianLabel)}:</label>
         <select id="endian">
             <option value="little" selected>Little-Endian</option>
             <option value="big">Big-Endian</option>
         </select>
         <div class="sep"></div>
-        <label>Go to:</label>
-        <input type="text" id="gotoInput" class="goto-input" placeholder="0x08000000 / 1024" title="0x... or ...h: hex address. Bare digits: decimal (absolute address inside range, otherwise file offset).">
-        <button id="gotoBtn">Go</button>
+        <label for="gotoInput">${esc(S.gotoLabel)}:</label>
+        <input type="text" id="gotoInput" class="goto-input" placeholder="0x08000000 / 1024" title="${esc(S.gotoTitle)}">
+        <button id="gotoBtn">${esc(S.gotoButton)}</button>
         <div class="sep"></div>
-        <button id="findBtn">Find (Ctrl+F)</button>
+        <button id="findBtn">${esc(S.findButton)}</button>
     </div>
     <div class="find-bar" id="findBar">
-        <select id="findMode">
+        <select id="findMode" aria-label="${esc(S.findModeLabel)}">
             <option value="bytes">Bytes</option>
             <option value="value" selected>Value</option>
             <option value="ascii">ASCII</option>
         </select>
-        <input type="text" id="findHexInput" placeholder="20020000">
-        <button id="findPrev">◀ Prev</button>
-        <button id="findNext">Next ▶</button>
-        <span class="find-info" id="findInfo"></span>
-        <button id="findClose">✕</button>
+        <input type="text" id="findHexInput" placeholder="20020000" aria-label="${esc(S.findInputLabel)}">
+        <button id="findPrev" aria-label="${esc(S.findPrev)}" title="${esc(S.findPrev)}">◀</button>
+        <button id="findNext" aria-label="${esc(S.findNext)}" title="${esc(S.findNext)}">▶</button>
+        <span class="find-info" id="findInfo" role="status" aria-live="polite"></span>
+        <button id="findClose" aria-label="${esc(S.findClose)}" title="${esc(S.findClose)}">✕</button>
     </div>
     <div class="hex-container" id="hexContainer">
         <table class="hex-table" id="hexTable">
@@ -543,13 +591,19 @@ function getWebviewContent(
             <tbody id="hexBody"></tbody>
         </table>
     </div>
-    <div class="status-bar" id="statusBar">
-        <span>Click a byte to inspect</span>
+    <div class="status-bar" id="statusBar" role="status" aria-live="polite">
+        <span>${esc(S.statusHint)}</span>
     </div>
 
 <script nonce="${nonce}">
 (function() {
     const vscode = acquireVsCodeApi();
+    // Locale-resolved labels from the host (buildHexViewerStrings).
+    const S = ${stringsLiteral};
+    function fmt(template, values) {
+        return String(template).replace(/\\{(\\w+)\\}/g, (match, key) =>
+            Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match);
+    }
     const BASE_ADDR = ${minAddress};
     const TOTAL_SIZE = ${maxAddress - minAddress + 1};
     const IS_BINARY = ${isBinaryFormat};
@@ -657,16 +711,16 @@ function getWebviewContent(
     function buildHeader() {
         const upr = unitsPerRow();
         const ge = groupEvery();
-        let html = '<tr><th class="addr-header">Address</th>';
+        let html = '<tr><th class="addr-header" scope="col">' + S.addressHeader + '</th>';
         for (let i = 0; i < upr; i++) {
             if (i > 0 && i % ge === 0) {
-                html += '<th class="group-sep"></th>';
+                html += '<th class="group-sep" aria-hidden="true"></th>';
             }
             const offsetLabel = formatHex(i * unitSize, 2);
-            html += '<th>' + offsetLabel + '</th>';
+            html += '<th scope="col">' + offsetLabel + '</th>';
         }
-        html += '<th class="ascii-sep"></th>';
-        html += '<th class="ascii-header">ASCII</th></tr>';
+        html += '<th class="ascii-sep" aria-hidden="true"></th>';
+        html += '<th class="ascii-header" scope="col">ASCII</th></tr>';
         hexHead.innerHTML = html;
     }
 
@@ -858,14 +912,14 @@ function getWebviewContent(
         const dataSpan = Math.min(selSize, Math.max(0, TOTAL_SIZE - minOff));
         const selectionHasData = dataSpan > 0 && hasDataRange(minOff, dataSpan);
         let html = '<span>Offset: 0x' + formatHex(minOff, 8) + '</span>';
-        html += '<span>Address: ' + formatAddr(addr) + '</span>';
+        html += '<span>' + S.statusAddress + ': ' + formatAddr(addr) + '</span>';
 
         if (!selectionHasData) {
-            html += '<span>Value: no data</span>';
+            html += '<span>' + S.statusValue + ': ' + S.statusNoData + '</span>';
         } else {
             if (selSize === 1) {
                 const b = DATA[minOff];
-                html += '<span>Value: 0x' + formatHex(b, 2) + ' (' + b + ')</span>';
+                html += '<span>' + S.statusValue + ': 0x' + formatHex(b, 2) + ' (' + b + ')</span>';
             }
             if (selSize >= 1 && hasDataRange(minOff, 1)) {
                 const u8 = DATA[minOff];
@@ -881,7 +935,7 @@ function getWebviewContent(
             }
         }
         if (selSize > unitSize) {
-            html += '<span>Selected: ' + selSize + ' bytes</span>';
+            html += '<span>' + fmt(S.statusSelected, { n: selSize }) + '</span>';
         }
         statusBar.innerHTML = html;
     }
@@ -1064,7 +1118,7 @@ function getWebviewContent(
             findCurrentIdx = 0;
             goToFindMatch();
         } else {
-            findInfo.textContent = 'No matches';
+            findInfo.textContent = S.findNoMatches;
         }
         applyFindHighlightsToVisible();
     }

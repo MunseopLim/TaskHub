@@ -766,7 +766,10 @@ suite('HexParser Test Suite', () => {
             ].join('\n'));
             const html = buildHexViewerHtml('sparse.hex', result);
             assert.ok(html.includes('function hasDataRange(offset, size)'));
-            assert.ok(html.includes('Value: no data'));
+            // 0.6.20: "Value: no data" 문자열이 로케일 번들(S.statusNoData)로
+            // 옮겨졌다. 검증 대상은 문구가 아니라 gap 구간에서 no-data 상태를
+            // 렌더한다는 사실이다.
+            assert.ok(html.includes('S.statusNoData'), 'gap 구간에서 no-data 상태를 표시해야 함');
             assert.ok(html.includes('hasDataRange(minOff, 2)'));
             assert.ok(html.includes('hasDataRange(minOff, 4)'));
         });
