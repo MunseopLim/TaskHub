@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.23",
+  "version": "0.6.24",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -132,12 +132,12 @@
             "never"
           ],
           "enumDescriptions": [
-            "Show the bundled example actions only while the workspace has no actions of its own (no .vscode/actions.json entries and no preset applied).",
+            "Keep the bundled examples out of the action list; the empty-state view offers a 'Browse Examples' button instead.",
             "Always merge the bundled example actions into the list (behavior before 0.6.14).",
-            "Never show the bundled example actions."
+            "Keep them out of the list and hide the 'Browse Examples' button from the empty-state view too."
           ],
           "default": "auto",
-          "markdownDescription": "Controls whether TaskHub's bundled example actions (`defaultButton.*` from the extension's `media/actions.json`) appear in the Actions view. With `auto` they serve as onboarding in an empty project and disappear as soon as the project defines its own actions."
+          "markdownDescription": "Controls whether TaskHub's bundled example actions (`defaultButton.*` from the extension's `media/actions.json`) appear in the Actions view. `auto` (default) keeps them out of your project's action list — the empty-state view links to them instead, so an empty Actions panel offers 'Create Action' rather than two demo buttons."
         },
         "taskhub.dialog.rememberLastLocation": {
           "type": "boolean",
@@ -203,8 +203,13 @@
       },
       {
         "view": "mainView.main",
-        "when": "workbenchState != empty",
+        "when": "workbenchState != empty && config.taskhub.builtinActions != never",
         "contents": "No actions yet.\n[Create Action](command:taskhub.createAction)\nOr start from a sample and edit it by hand:\n[Browse Examples](command:taskhub.showExampleJsonQuickPick)\n[Import Actions…](command:taskhub.importActions)"
+      },
+      {
+        "view": "mainView.main",
+        "when": "workbenchState != empty && config.taskhub.builtinActions == never",
+        "contents": "No actions yet.\n[Create Action](command:taskhub.createAction)\n[Import Actions…](command:taskhub.importActions)"
       },
       {
         "view": "mainView.linkWorkspace",

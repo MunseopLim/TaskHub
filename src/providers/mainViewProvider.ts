@@ -198,11 +198,15 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
 
         let actionsJson: ActionItem[] = [];
         let loadFailed = false;
+        let failedPath: string | undefined;
         try {
             actionsJson = this.loadActions();
             this.lastLoadErrorMessage = undefined;
         } catch (error: any) {
             loadFailed = true;
+            failedPath = typeof error?.filePath === 'string' && error.filePath.length > 0 && error.filePath !== '<import>'
+                ? error.filePath
+                : undefined;
             const message = error?.message ?? String(error);
             if (message !== this.lastLoadErrorMessage) {
                 this.lastLoadErrorMessage = message;
@@ -225,7 +229,14 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
             errorItem.description = this.lastLoadErrorMessage;
             errorItem.tooltip = this.lastLoadErrorMessage;
             errorItem.contextValue = 'actionsLoadError';
-            errorItem.command = { command: 'taskhub.editActions', title: 'Open actions.json' };
+            // Open the file that actually failed. `taskhub.editActions`
+            // re-asks which workspace folder to edit, so in a multi-root
+            // setup it could open a healthy file and leave the broken one
+            // hidden; fall back to it only when the error carries no path
+            // (e.g. a cross-source duplicate-id check).
+            errorItem.command = failedPath
+                ? { command: 'vscode.open', title: 'Open actions.json', arguments: [vscode.Uri.file(failedPath)] }
+                : { command: 'taskhub.editActions', title: 'Open actions.json' };
             return Promise.resolve([errorItem]);
         }
 

@@ -37,14 +37,38 @@ export function getActionsValidator(): import('ajv').ValidateFunction<ActionItem
     return cachedActionsValidator;
 }
 
+/**
+ * Error carrying the file that actually failed to load.
+ *
+ * The Actions view renders a "failed to load" row whose click target used to
+ * be the generic `taskhub.editActions` command — which re-asks which
+ * workspace folder to edit, so in a multi-root setup it could open a
+ * perfectly healthy file while the broken one stayed hidden. Attaching the
+ * path lets the row open the offending file directly.
+ */
+export interface ActionsLoadError extends Error {
+    filePath?: string;
+}
+
+export function getActionsLoadErrorPath(error: unknown): string | undefined {
+    const filePath = (error as ActionsLoadError | undefined)?.filePath;
+    return typeof filePath === 'string' && filePath.length > 0 ? filePath : undefined;
+}
+
+function actionsLoadError(filePath: string, message: string): ActionsLoadError {
+    const error = new Error(message) as ActionsLoadError;
+    error.filePath = filePath;
+    return error;
+}
+
 function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
     if (!fs.existsSync(filePath)) { return []; }
     const validate = getActionsValidator();
     let fileContent: string;
-    try { fileContent = fs.readFileSync(filePath, 'utf-8'); } catch (e: any) { throw new Error(`Error reading file ${filePath}: ${e.message}`); }
+    try { fileContent = fs.readFileSync(filePath, 'utf-8'); } catch (e: any) { throw actionsLoadError(filePath, `Error reading file ${filePath}: ${e.message}`); }
     let parsedJson: any;
-    try { parsedJson = JSON.parse(fileContent); } catch (e: any) { throw new Error(`Error parsing JSON in ${path.basename(filePath)}: ${e.message}`); }
-    if (validate(parsedJson)) { const sourceLabel = options?.sourceLabel ?? filePath; performAdditionalActionValidation(parsedJson, { sourceLabel, filePath }); return parsedJson; } else { const errors = validate.errors?.map(error => `  - path: '${error.instancePath}' - message: ${error.message}`).join('\n'); throw new Error(`Validation failed for ${path.basename(filePath)}:\n${errors}`); }
+    try { parsedJson = JSON.parse(fileContent); } catch (e: any) { throw actionsLoadError(filePath, `Error parsing JSON in ${path.basename(filePath)}: ${e.message}`); }
+    if (validate(parsedJson)) { const sourceLabel = options?.sourceLabel ?? filePath; performAdditionalActionValidation(parsedJson, { sourceLabel, filePath }); return parsedJson; } else { const errors = validate.errors?.map(error => `  - path: '${error.instancePath}' - message: ${error.message}`).join('\n'); throw actionsLoadError(filePath, `Validation failed for ${path.basename(filePath)}:\n${errors}`); }
 }
 
 interface ActionValidationContext {
@@ -99,7 +123,10 @@ function performAdditionalActionValidation(actions: ActionItem[], context: Actio
 
     if (issues.length > 0) {
         const uniqueIssues = Array.from(new Set(issues));
-        throw new Error(`Additional validation failed for ${context.sourceLabel}:\n${uniqueIssues.map(issue => `  - ${issue}`).join('\n')}`);
+        throw actionsLoadError(
+            context.filePath,
+            `Additional validation failed for ${context.sourceLabel}:\n${uniqueIssues.map(issue => `  - ${issue}`).join('\n')}`
+        );
     }
 }
 
@@ -688,20 +715,29 @@ export type BuiltinActionsMode = 'auto' | 'always' | 'never';
  * Historically they were merged unconditionally, so every project — however
  * complete its own `actions.json` — carried TaskHub's demo buttons in the
  * middle of its real build/flash actions, with no way to turn them off.
- * The examples earn their place while a project has nothing of its own
- * (they double as onboarding), and get out of the way the moment the user
- * has content: `auto` hides them as soon as a workspace `actions.json` or a
- * selected preset contributes anything.
  *
- * Pure so the three-way decision is unit-testable without a workspace.
+ * 0.6.14 made `auto` inject them while the project had nothing of its own,
+ * on the theory that they double as onboarding. 0.6.15 then added the
+ * `viewsWelcome` CTA — which VS Code only renders when the tree yields
+ * *nothing*. The two collided: in exactly the empty-project state where the
+ * CTA earns its keep, the injected examples kept the tree non-empty and
+ * suppressed it. Since the CTA itself offers a *Browse Examples* button,
+ * the examples lose nothing by staying out of the list, and the user gets
+ * an actionable next step instead of two demo buttons.
+ *
+ * So `auto` no longer injects. It still differs from `never`: `auto` shows
+ * the *Browse Examples* button in the CTA (see `viewsWelcome` in
+ * package.json), `never` hides even that. `always` keeps the pre-0.6.14
+ * behaviour for anyone who actually used the demo buttons.
+ *
+ * `sources` no longer affects the outcome but stays in the signature: the
+ * caller has the information, and a future mode may need it again.
  */
 export function shouldIncludeBuiltinActions(
     mode: BuiltinActionsMode,
-    sources: { hasWorkspaceActions: boolean; hasPresetActions: boolean }
+    _sources: { hasWorkspaceActions: boolean; hasPresetActions: boolean }
 ): boolean {
-    if (mode === 'always') { return true; }
-    if (mode === 'never') { return false; }
-    return !sources.hasWorkspaceActions && !sources.hasPresetActions;
+    return mode === 'always';
 }
 
 function getBuiltinActionsMode(): BuiltinActionsMode {

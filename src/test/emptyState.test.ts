@@ -81,6 +81,34 @@ suite('빈 상태 안내 (viewsWelcome)', () => {
                 '클릭하면 문제의 파일로 갈 수 있어야 한다');
         });
 
+        test('에러가 실패한 파일 경로를 담고 있으면 그 파일을 연다 (0.6.24)', async () => {
+            // 멀티루트에서 `taskhub.editActions`는 어느 폴더를 편집할지 다시
+            // 묻기 때문에, 멀쩡한 파일을 열고 정작 깨진 파일은 감출 수 있다.
+            const brokenPath = process.platform === 'win32' ? 'C:\\proj-b\\.vscode\\actions.json' : '/proj-b/.vscode/actions.json';
+            const provider = new MainViewProvider(makeContext(), () => {
+                const error = new Error('Error parsing JSON in actions.json: Unexpected token }') as Error & { filePath?: string };
+                error.filePath = brokenPath;
+                throw error;
+            });
+
+            const row = (await provider.getChildren())[0];
+            assert.strictEqual(row.command?.command, 'vscode.open');
+            const target = row.command?.arguments?.[0] as vscode.Uri;
+            assert.strictEqual(
+                target.fsPath.toLowerCase(),
+                vscode.Uri.file(brokenPath).fsPath.toLowerCase(),
+                '실패한 파일이 아닌 다른 파일을 열면 사용자는 원인을 찾지 못한다'
+            );
+        });
+
+        test('경로 없는 에러(소스 간 중복 id 등)는 기존 명령으로 폴백한다', async () => {
+            const provider = new MainViewProvider(makeContext(), () => {
+                throw new Error('Additional validation failed for workspace: duplicate id');
+            });
+            const row = (await provider.getChildren())[0];
+            assert.strictEqual(row.command?.command, 'taskhub.editActions');
+        });
+
         test('로드가 복구되면 에러 행도 사라진다', async () => {
             let broken = true;
             const provider = new MainViewProvider(makeContext(), () => {
