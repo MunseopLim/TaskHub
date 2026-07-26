@@ -51,10 +51,26 @@
 이 확장 프로그램은 `actions.json`, `links.json`, 그리고 `favorites.json` 파일을 사용하여 뷰의 내용을 구성합니다.
 
 *   **파일 로드 우선순위**:
-    *   Actions 패널은 `media/actions.json`과 워크스페이스의 `.vscode/actions.json`을 병합하여 표시합니다.
+    *   Actions 패널은 워크스페이스의 `.vscode/actions.json`, 선택한 프리셋, 확장에 번들된 예제(`media/actions.json`)를 병합하여 표시합니다. 자세한 규칙은 아래 [액션 소스와 병합 우선순위](#액션-소스와-병합-우선순위) 참조.
     *   링크 패널은 워크스페이스의 `.vscode/links.json`만 표시합니다.
     *   즐겨찾기 패널은 워크스페이스의 `.vscode/favorites.json`을 표시합니다.
     *   관련 JSON 파일이 수정, 생성 또는 삭제되면 해당 뷰는 자동으로 새로 고쳐집니다.
+
+### 액션 소스와 병합 우선순위
+
+Actions 패널의 목록은 세 종류의 소스를 병합해 만듭니다. 같은 `id`가 겹치면 **워크스페이스 > 프리셋 > 번들 예제** 순으로 우선합니다.
+
+| 소스 | 위치 | 언제 보이나 |
+| --- | --- | --- |
+| 워크스페이스 액션 | 각 워크스페이스 폴더의 `.vscode/actions.json` | 항상 (멀티루트면 폴더별로 모두) |
+| 프리셋 | 확장 `presets/` 또는 워크스페이스 `.vscode/presets/` | `taskhub.preset.selected`로 선택했을 때 ([§17](#17-preset-기능)) |
+| 번들 예제 (`defaultButton.*`) | 확장의 `media/actions.json` | `taskhub.builtinActions` 설정에 따름 (기본 `auto`) |
+
+**번들 예제의 `auto` 동작 (0.6.14부터)**: 워크스페이스 액션도 프리셋도 없는 동안에만 표시되고, 프로젝트가 자기 액션을 갖는 순간 목록에서 빠집니다. 예제는 처음 써 보는 사용자를 위한 것이지 작업 목록의 상주 항목이 아니기 때문입니다. 0.6.14 이전에는 조건 없이 병합되어 모든 프로젝트에 데모 버튼이 섞였고 끄는 방법도 없었습니다.
+
+- 항상 보고 싶다면 `taskhub.builtinActions: "always"` (이전 동작), 온보딩에서도 감추려면 `"never"`.
+- 예제가 숨겨진 상태에서는 id 충돌 검사 대상에서도 빠집니다 — 즉 자기 액션에 `defaultButton.showEnv` 같은 id를 써도 충돌로 막히지 않습니다.
+- 예제 정의 자체를 보고 싶다면 제목 표시줄의 *Show Example JSON* 을 사용하세요.
 
 ### JSON Editor 커맨드
 
@@ -96,7 +112,7 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 
 ## 5. Actions 패널 (`mainView.main`)
 
-이 패널은 `media/actions.json` (그리고 `.vscode/actions.json`이 있다면 추가된 내용)에 정의된 다양한 구성 가능한 액션을 제공합니다. 새로운 스키마는 '태스크(Task)'라는 통일된 개념을 중심으로 설계되어, 간단한 명령어부터 여러 단계를 거치는 복잡한 파이프라인까지 일관된 방식으로 정의할 수 있습니다.
+이 패널은 워크스페이스의 `.vscode/actions.json`(그리고 선택한 프리셋 / 조건에 따라 번들 예제 — [§3 액션 소스와 병합 우선순위](#액션-소스와-병합-우선순위) 참조)에 정의된 다양한 구성 가능한 액션을 제공합니다. 새로운 스키마는 '태스크(Task)'라는 통일된 개념을 중심으로 설계되어, 간단한 명령어부터 여러 단계를 거치는 복잡한 파이프라인까지 일관된 방식으로 정의할 수 있습니다.
 
 > 마지막 실행 시각·소요 시간 같은 회고 정보는 [§14 액션 실행 히스토리](#14-액션-실행-히스토리)에서 확인합니다 — Actions 패널은 "지금 무엇을 실행할지"에만 집중합니다.
 
@@ -1806,6 +1822,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 | `taskhub.runAnyAction.recentLimit` | `number` | `5` (0–20) | `TaskHub: Run Any Action…` 팔레트의 *Recently used* 섹션에 표시할 최대 개수. `0`이면 섹션 자체가 숨겨진다. 목록은 히스토리에서 유도되므로 `taskhub.history.maxItems`가 상한으로 작용하고, 표시 시점에 stale 항목(삭제된 액션)을 걸러내므로 실제 보이는 개수는 이 값 이하가 될 수 있다. | [§5 Quick Action Palette](#5-actions-패널-mainviewmain) |
 | `taskhub.history.showPanel` | `boolean` | `true` | 사이드바의 History 패널 표시 여부. `false`면 뷰 자체가 감춰지지만 기록은 그대로 유지된다. | [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.preview.showSourceControlContextMenu` | `boolean` | `true` | Source Control 변경 파일 우클릭 메뉴에 TaskHub 프리뷰/브라우저 열기 항목을 표시할지 여부. VS Code SCM 메뉴는 확장자 context key를 안정적으로 제공하지 않으므로 켜져 있으면 대상 확장자 외 파일에도 항목이 보일 수 있으며, 실제 실행은 핸들러가 확장자로 재검증한다. | [§22 Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기) |
+| `taskhub.builtinActions` | `"auto"` \| `"always"` \| `"never"` | `"auto"` | 확장에 번들된 예제 액션(`defaultButton.*`)을 Actions 목록에 병합할지. `auto`는 워크스페이스 액션도 프리셋도 없는 동안에만 보여주고, 프로젝트가 자기 액션을 갖는 순간 감춘다. `always`는 0.6.14 이전 동작. | [§3 액션 소스와 병합](#액션-소스와-병합-우선순위) |
 | `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. `false`면 VS Code 자체의 최근 경로(창·확장 공유)를 그대로 쓴다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |

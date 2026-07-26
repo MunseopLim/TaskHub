@@ -679,10 +679,38 @@ function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
     return result;
 }
 
+export type BuiltinActionsMode = 'auto' | 'always' | 'never';
+
+/**
+ * Whether the extension's bundled example actions (`media/actions.json`,
+ * the `defaultButton.*` entries) join the merged list.
+ *
+ * Historically they were merged unconditionally, so every project — however
+ * complete its own `actions.json` — carried TaskHub's demo buttons in the
+ * middle of its real build/flash actions, with no way to turn them off.
+ * The examples earn their place while a project has nothing of its own
+ * (they double as onboarding), and get out of the way the moment the user
+ * has content: `auto` hides them as soon as a workspace `actions.json` or a
+ * selected preset contributes anything.
+ *
+ * Pure so the three-way decision is unit-testable without a workspace.
+ */
+export function shouldIncludeBuiltinActions(
+    mode: BuiltinActionsMode,
+    sources: { hasWorkspaceActions: boolean; hasPresetActions: boolean }
+): boolean {
+    if (mode === 'always') { return true; }
+    if (mode === 'never') { return false; }
+    return !sources.hasWorkspaceActions && !sources.hasPresetActions;
+}
+
+function getBuiltinActionsMode(): BuiltinActionsMode {
+    const raw = vscode.workspace.getConfiguration('taskhub').get<string>('builtinActions', 'auto');
+    return raw === 'always' || raw === 'never' ? raw : 'auto';
+}
+
 function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] {
     const extensionLabel = 'extension media/actions.json';
-    const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
-    const extensionActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
 
     // Load selected preset from settings
     const presetId = getSelectedPresetId();
@@ -714,6 +742,19 @@ function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] 
         const actions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
         return { sourceLabel: workspaceLabel, actions, workspaceFolderPath: folder.uri.fsPath };
     });
+
+    // Bundled examples are read only when they will actually be shown: an
+    // excluded source must not contribute id-collision errors either (a user
+    // action named `defaultButton.showEnv` is their business once the demo
+    // buttons are hidden).
+    const includeBuiltin = shouldIncludeBuiltinActions(getBuiltinActionsMode(), {
+        hasWorkspaceActions: workspaceSources.some(source => source.actions.length > 0),
+        hasPresetActions: presetActions.length > 0,
+    });
+    const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
+    const extensionActions = includeBuiltin
+        ? loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel })
+        : [];
 
     // Merge with priority: workspace > preset > extension
     let mergedActions = extensionActions;
@@ -6010,6 +6051,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration(event => {
+            if (event.affectsConfiguration('taskhub.builtinActions')) {
+                // The merged list gains/loses the bundled examples — the
+                // cached action tree and the dynamic `taskhub.runAction.<id>`
+                // registrations both have to follow.
+                refreshActionsAndCommands(context, mainViewProvider);
+            }
             if (event.affectsConfiguration('taskhub.preset.selected')) {
                 const presetId = getSelectedPresetId();
                 refreshActionsAndCommands(context, mainViewProvider);

@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.13",
+  "version": "0.6.14",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -123,6 +123,21 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Show TaskHub preview/browser actions in the Source Control resource context menu. VS Code does not reliably expose file-extension context keys for SCM resources, so these menu items may appear for all changed files; TaskHub still validates the file extension before opening."
+        },
+        "taskhub.builtinActions": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "always",
+            "never"
+          ],
+          "enumDescriptions": [
+            "Show the bundled example actions only while the workspace has no actions of its own (no .vscode/actions.json entries and no preset applied).",
+            "Always merge the bundled example actions into the list (behavior before 0.6.14).",
+            "Never show the bundled example actions."
+          ],
+          "default": "auto",
+          "markdownDescription": "Controls whether TaskHub's bundled example actions (`defaultButton.*` from the extension's `media/actions.json`) appear in the Actions view. With `auto` they serve as onboarding in an empty project and disappear as soon as the project defines its own actions."
         },
         "taskhub.dialog.rememberLastLocation": {
           "type": "boolean",

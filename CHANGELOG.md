@@ -29,6 +29,23 @@
 =====================================================================
 -->
 
+## [0.6.14] - 2026-07-26
+
+### 변경 — 번들 예제 액션을 내 프로젝트 목록에서 분리 (UX 리뷰 3/6)
+
+#### UX / 일관성
+
+- **확장에 번들된 예제 액션(`defaultButton.*`)이 더 이상 모든 프로젝트에 상주하지 않는다**: [media/actions.json](media/actions.json)의 데모 액션은 조건 없이 병합되어, 자기 `actions.json`을 갖춘 프로젝트에서도 Build/Flash 사이에 *Show Environment Variable* 같은 항목이 섞였고 끄는 수단도 없었다. 새 설정 `taskhub.builtinActions` (기본 `auto`)가 이를 가른다. 참조: [src/extension.ts](src/extension.ts) `shouldIncludeBuiltinActions`.
+  - `auto`: 워크스페이스 액션도 프리셋도 없는 동안에만 표시 — 예제는 온보딩 역할을 하고, 프로젝트가 자기 액션을 갖는 순간 비켜난다.
+  - `always`: 0.6.14 이전 동작 (무조건 병합). `never`: 빈 프로젝트에서도 감춤.
+  - 예제가 숨겨지면 **id 충돌 검사 대상에서도 빠진다** — 자기 액션에 `defaultButton.showEnv` 같은 id를 써도 더 이상 막히지 않는다. 파일 읽기 자체를 건너뛴다.
+  - 설정을 바꾸면 액션 캐시와 동적 `taskhub.runAction.<id>` 등록이 즉시 갱신된다.
+- 문서: [docs/features.md §3](docs/features.md)에 *액션 소스와 병합 우선순위* 절을 추가해 워크스페이스 / 프리셋 / 번들 예제 세 소스와 우선순위를 한 곳에 정리했다.
+
+> **리뷰 원안과의 차이**: 원 리뷰는 액션마다 `Workspace · firmware` / `Preset · stm32` / `Built-in` 출처 배지를 붙이자고 제안했다. 그러나 사용자가 신경 써야 할 것은 자기 프로젝트뿐이고, 실제 문제는 "출처를 모른다"가 아니라 **"내가 넣지 않은 항목이 목록에 있다"** 였다. 라벨을 붙여 계속 인지시키는 대신 원인을 제거하는 쪽을 택했다. 멀티루트 구분은 배지가 아니라 VS Code Explorer와 같은 **폴더 단위 그룹핑**으로 별도 처리 예정.
+
+**테스트**: 신규 9 케이스([src/test/builtinActions.test.ts](src/test/builtinActions.test.ts) — 3-way 모드 × 소스 조합 결정표, manifest enum/기본값, 번들 파일 존재), 최종 1508 passing.
+
 ## [0.6.13] - 2026-07-26
 
 ### 변경 / 수정 — 실행 중지와 터미널 닫기 분리 (UX 리뷰 2/6)
