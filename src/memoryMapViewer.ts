@@ -364,6 +364,62 @@ function generateMemoryMapNonce(): string {
     return crypto.randomBytes(16).toString('base64');
 }
 
+/**
+ * Memory Map webview UI strings, resolved in the extension host.
+ *
+ * Scope note: the **report bodies** (`generateTextReport` /
+ * `generateSummaryReport`, reachable via *Copy Report* / *Copy Full Dump*)
+ * stay English on purpose. Those are artifacts users paste into issues,
+ * commit messages, and docs shared with others, where a stable English
+ * wording is worth more than matching the editor's UI language. Only the
+ * surrounding chrome is localized.
+ *
+ * Region / section / type names come from the binary and are never
+ * translated.
+ */
+export function buildMemoryMapStrings(): Record<string, string> {
+    return {
+        entryPoint: t('진입점', 'Entry Point'),
+        copyReport: t('리포트 복사', 'Copy Report'),
+        copyReportTitle: t('요약 리포트 복사 (마크다운, 약 50줄)', 'Copy summary report (markdown, ~50 lines)'),
+        copyFullDump: t('전체 덤프 복사', 'Copy Full Dump'),
+        copyFullDumpTitle: t('전체 텍스트 덤프 복사 (모든 섹션)', 'Copy full text dump (every section)'),
+        saveHtml: t('HTML 저장', 'Save HTML'),
+        saveHtmlTitle: t('HTML 파일로 저장', 'Save as HTML file'),
+        searchPlaceholder: t('검색… (오브젝트, 섹션, 함수, 주소, 크기, 타입)', 'Search... (object, section, function, address, size, type)'),
+        searchLabel: t('검색', 'Search'),
+        searchPrev: t('이전 결과 (Shift+Enter)', 'Previous match (Shift+Enter)'),
+        searchNext: t('다음 결과 (Enter)', 'Next match (Enter)'),
+        memoryRegions: t('메모리 영역', 'Memory Regions'),
+        regionDetails: t('영역 상세', 'Region Details'),
+        expandAll: t('모두 펼치기', 'Expand All'),
+        collapseAll: t('모두 접기', 'Collapse All'),
+        toggleFunctionColumn: t('Function 열 표시 전환', 'Toggle Function column'),
+        allSections: t('전체 섹션', 'All Sections'),
+        scrollTop: t('맨 위로', 'Back to top'),
+        colRegion: t('영역', 'Region'),
+        colBase: t('시작', 'Base'),
+        colMax: t('최대', 'Max'),
+        colUsed: t('사용', 'Used'),
+        colFree: t('여유', 'Free'),
+        colLinkerUsed: t('Linker 사용', 'Linker Used'),
+        colCalcUsed: t('계산 사용', 'Calc Used'),
+        colLinkerFree: t('Linker 여유', 'Linker Free'),
+        colCalcFree: t('계산 여유', 'Calc Free'),
+        colUsage: t('사용률', 'Usage'),
+        colSection: t('섹션', 'Section'),
+        colAddress: t('주소', 'Address'),
+        colEnd: t('끝', 'End'),
+        colSize: t('크기', 'Size'),
+        colBytes: t('바이트', 'Bytes'),
+        colType: t('타입', 'Type'),
+        // {region}/{percent}/{used}/{total} filled in the webview.
+        usageBarLabel: t('{region} 사용률 {percent}% ({used} / {total})', '{region} usage {percent}% ({used} of {total})'),
+        sortAscending: t('오름차순 정렬', 'Sort ascending'),
+        sortDescending: t('내림차순 정렬', 'Sort descending'),
+    };
+}
+
 function getWebviewContent(
     fileName: string,
     entryPoint: number,
@@ -380,6 +436,9 @@ function getWebviewContent(
     const nonce = generateMemoryMapNonce();
     const cspSource = webview?.cspSource ?? 'vscode-webview:';
     const csp = `default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${cspSource};`;
+    const S = buildMemoryMapStrings();
+    const stringsLiteral = JSON.stringify(S).replace(/</g, '\\u003c');
+    const htmlLang = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
     // Build JSON data for lazy WebView rendering
     const regionJsonData = memoryUsage.map(u => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
@@ -432,7 +491,7 @@ function getWebviewContent(
 
         return {
             name: u.region, pct, color, mapSegHtml,
-            infoText: `Used: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | Free: ${formatSize(calcFree)}`,
+            infoText: `${S.colUsed}: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | ${S.colFree}: ${formatSize(calcFree)}`,
             linkerLine: u.reportedUsed !== undefined
                 ? `Linker: Base=${formatHex(regionOrigin)} Used=${formatHex(u.reportedUsed)} (${formatSize(u.reportedUsed)}) Max=${formatHex(u.total)} (${formatSize(u.total)}) Free: ${formatSize(linkerFree)}`
                 : '',
@@ -452,7 +511,9 @@ function getWebviewContent(
                 <span class="region-info">${esc(rd.infoText)}</span>
             </div>
             ${rd.linkerLine ? `<div class="region-linker">${esc(rd.linkerLine)}</div>` : ''}
-            <div class="bar-bg"><div class="bar-fill" style="width:${Math.min(rd.pct, 100)}%;background:${rd.color}"></div></div>
+            <!-- The same numbers are already spelled out in .region-info above,
+                 so the bar is decorative: announcing it twice adds nothing. -->
+            <div class="bar-bg" aria-hidden="true"><div class="bar-fill" style="width:${Math.min(rd.pct, 100)}%;background:${rd.color}"></div></div>
             <div class="region-detail" style="display:none"></div>
         </div>`).join('');
 
@@ -476,13 +537,14 @@ function getWebviewContent(
             ${hasLinkerData ? `<td class="num">${linkerFree}</td>` : ''}
             <td class="num">${formatSize(calcFree)}</td>
             <td class="num">${pct.toFixed(1)}%</td>
-            <td><div class="mini-bar"><div class="mini-bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div></td>
+            <td aria-hidden="true"><div class="mini-bar"><div class="mini-bar-fill" style="width:${Math.min(pct, 100)}%;background:${color}"></div></div></td>
         </tr>`;
     }).join('');
 
+    const col = (label: string, numeric = true) => `<th class="${numeric ? 'num' : ''}" scope="col">${esc(label)}</th>`;
     const overviewHeaders = hasLinkerData
-        ? '<th>Region</th><th class="num">Base</th><th class="num">Max</th><th class="num">Linker Used</th><th class="num">Calc Used</th><th class="num">Linker Free</th><th class="num">Calc Free</th><th class="num">Usage</th><th></th>'
-        : '<th>Region</th><th class="num">Base</th><th class="num">Max</th><th class="num">Used</th><th class="num">Free</th><th class="num">Usage</th><th></th>';
+        ? `${col(S.colRegion, false)}${col(S.colBase)}${col(S.colMax)}${col(S.colLinkerUsed)}${col(S.colCalcUsed)}${col(S.colLinkerFree)}${col(S.colCalcFree)}${col(S.colUsage)}<th aria-hidden="true"></th>`
+        : `${col(S.colRegion, false)}${col(S.colBase)}${col(S.colMax)}${col(S.colUsed)}${col(S.colFree)}${col(S.colUsage)}<th aria-hidden="true"></th>`;
 
     const sectionTableRows = sectionSummary.map(s =>
         `<tr>
@@ -514,7 +576,7 @@ function getWebviewContent(
     const regionDataJsLiteral = escapeForScript(regionJsonData);
 
     return /*html*/`<!DOCTYPE html>
-<html lang="en">
+<html lang="${htmlLang}">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
@@ -785,28 +847,28 @@ function getWebviewContent(
     <div class="header-row">
         <div class="header-left">
             <h2>${esc(fileName)}</h2>
-            <div class="subtitle">Entry Point: ${formatHex(entryPoint)}</div>
+            <div class="subtitle">${esc(S.entryPoint)}: ${formatHex(entryPoint)}</div>
         </div>
-        <button id="btnCopy" title="Copy summary report (markdown, ~50 lines)">Copy Report</button>
+        <button id="btnCopy" title="${esc(S.copyReportTitle)}">${esc(S.copyReport)}</button>
         <span style="width:8px;display:inline-block"></span>
-        <button id="btnCopyFull" title="Copy full text dump (every section)">Copy Full Dump</button>
+        <button id="btnCopyFull" title="${esc(S.copyFullDumpTitle)}">${esc(S.copyFullDump)}</button>
         <span style="width:8px;display:inline-block"></span>
-        <button id="btnSaveHtml" title="Save as HTML file">Save HTML</button>
+        <button id="btnSaveHtml" title="${esc(S.saveHtmlTitle)}">${esc(S.saveHtml)}</button>
     </div>
 
     <div class="search-box">
-        <input id="searchInput" type="text" placeholder="Search... (object, section, function, address, size, type)">
-        <span id="searchCount" class="search-count"></span>
-        <button id="searchPrev" class="nav-btn" title="Previous match (Shift+Enter)" disabled>◀</button>
-        <button id="searchNext" class="nav-btn" title="Next match (Enter)" disabled>▶</button>
+        <input id="searchInput" type="text" placeholder="${esc(S.searchPlaceholder)}" aria-label="${esc(S.searchLabel)}">
+        <span id="searchCount" class="search-count" role="status" aria-live="polite"></span>
+        <button id="searchPrev" class="nav-btn" title="${esc(S.searchPrev)}" aria-label="${esc(S.searchPrev)}" disabled>◀</button>
+        <button id="searchNext" class="nav-btn" title="${esc(S.searchNext)}" aria-label="${esc(S.searchNext)}" disabled>▶</button>
     </div>
 
     ${hasRegions ? `
-        <div class="section-heading">Memory Regions</div>
+        <div class="section-heading">${esc(S.memoryRegions)}</div>
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
         ${!hasLinkerData && !hasSymbols ? `<div class="info-note">${t('AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.', 'AXF/ELF files provide section-level information only. Use an ARM Linker Listing file for object-level analysis and linker-reported values.')}</div>` : ''}
         ${hasSymbols ? `<div class="info-note">${t('ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.', 'Function and variable details are extracted from the ELF symbol table. Program-header based automatic region detection was applied.')}</div>` : ''}
-        <div class="section-heading">Region Details<span id="regMatchInfo"></span> <button data-action="toggle-all" id="toggleAllBtn" title="Expand All">▼ Expand All</button>${hasFuncData ? ' <button data-action="toggle-func-col" title="Toggle Function column">Function ▶</button>' : ''}</div>
+        <div class="section-heading">${esc(S.regionDetails)}<span id="regMatchInfo" role="status" aria-live="polite"></span> <button data-action="toggle-all" id="toggleAllBtn" title="${esc(S.expandAll)}" aria-expanded="false">▼ ${esc(S.expandAll)}</button>${hasFuncData ? ` <button data-action="toggle-func-col" title="${esc(S.toggleFunctionColumn)}" aria-label="${esc(S.toggleFunctionColumn)}">Function ▶</button>` : ''}</div>
         ${regionCardsHtml}
     ` : `
         <div class="no-regions">
@@ -816,27 +878,30 @@ function getWebviewContent(
         </div>
     `}
 
-    <div class="section-heading">All Sections (<span id="allSecCount">${sectionSummary.length}</span>)</div>
+    <div class="section-heading">${esc(S.allSections)} (<span id="allSecCount">${sectionSummary.length}</span>)</div>
     <table id="sectionTable" class="sortable-table">
         <thead>
             <tr>
-                <th data-sort="name">Section</th>
-                <th class="num" data-sort="addr">Address</th>
-                <th class="num" data-sort="endAddr">End</th>
-                <th class="num" data-sort="size">Size</th>
-                <th class="num" data-sort="bytes">Bytes</th>
-                <th data-sort="type">Type</th>
+                <th data-sort="name" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colSection)}</th>
+                <th class="num" data-sort="addr" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colAddress)}</th>
+                <th class="num" data-sort="endAddr" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colEnd)}</th>
+                <th class="num" data-sort="size" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colSize)}</th>
+                <th class="num" data-sort="bytes" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colBytes)}</th>
+                <th data-sort="type" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colType)}</th>
             </tr>
         </thead>
         <tbody>${sectionTableRows}</tbody>
     </table>
 
-<button id="scrollTop" class="scroll-top" title="맨 위로">↑</button>
+<button id="scrollTop" class="scroll-top" title="${esc(S.scrollTop)}" aria-label="${esc(S.scrollTop)}">↑</button>
 
 <script nonce="${nonce}">
 const RD = ${regionDataJsLiteral};
 (function() {
     const vscode = acquireVsCodeApi();
+    // Locale-resolved UI labels from the host (buildMemoryMapStrings).
+    // Report bodies below stay English by design — they are shared artifacts.
+    const S = ${stringsLiteral};
     const report = ${reportJsLiteral};
     const summary = ${summaryJsLiteral};
     const VT_THRESH = 200, ROW_H = 24, BUFFER = 30, MAX_VP_H = 600;
@@ -1031,11 +1096,13 @@ const RD = ${regionDataJsLiteral};
             if (detail.style.display !== 'none') anyExpanded = true;
         });
         if (anyExpanded) {
-            btn.textContent = '\u25B6 Collapse All';
-            btn.setAttribute('title', 'Collapse All');
+            btn.textContent = '\u25B6 ' + S.collapseAll;
+            btn.setAttribute('title', S.collapseAll);
+            btn.setAttribute('aria-expanded', 'true');
         } else {
-            btn.textContent = '\u25BC Expand All';
-            btn.setAttribute('title', 'Expand All');
+            btn.textContent = '\u25BC ' + S.expandAll;
+            btn.setAttribute('title', S.expandAll);
+            btn.setAttribute('aria-expanded', 'false');
         }
     };
 
@@ -1404,6 +1471,14 @@ const RD = ${regionDataJsLiteral};
             const ths = tbl.querySelectorAll('th[data-sort]');
             let sortCol = null, sortAsc = true;
             ths.forEach(function(th) {
+                // Sorting was pointer-only. Headers carry tabindex in the
+                // markup, so Enter/Space now triggers the same handler.
+                th.addEventListener('keydown', function(ev) {
+                    if (ev.key === 'Enter' || ev.key === ' ') {
+                        ev.preventDefault();
+                        th.click();
+                    }
+                });
                 th.addEventListener('click', function() {
                     const col = th.dataset.sort;
                     if (sortCol === col) sortAsc = !sortAsc;
@@ -1424,8 +1499,15 @@ const RD = ${regionDataJsLiteral};
                         return sortAsc ? aT.localeCompare(bT) : bT.localeCompare(aT);
                     });
                     rows.forEach(function(row) { tbody.appendChild(row); });
-                    ths.forEach(function(h) { h.textContent = h.textContent.replace(/ [\u25B2\u25BC]$/, ''); });
+                    ths.forEach(function(h) {
+                        h.textContent = h.textContent.replace(/ [\u25B2\u25BC]$/, '');
+                        // aria-sort is what a screen reader announces; the
+                        // \u25B2/\u25BC glyph alone conveys nothing to it.
+                        h.setAttribute('aria-sort', 'none');
+                    });
                     th.textContent += sortAsc ? ' \u25B2' : ' \u25BC';
+                    th.setAttribute('aria-sort', sortAsc ? 'ascending' : 'descending');
+                    th.setAttribute('title', sortAsc ? S.sortDescending : S.sortAscending);
                     // All Sections and non-virtual region tables feed matchList; keep nav in sync.
                     if (tbl.id === 'sectionTable' || tbl.classList.contains('section-table')) { resyncAfterReflow(); }
                 });

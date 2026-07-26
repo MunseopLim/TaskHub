@@ -29,6 +29,29 @@
 =====================================================================
 -->
 
+## [0.6.21] - 2026-07-26
+
+### 변경 — Memory Map 웹뷰 지역화 · 접근성 (UX 리뷰 6/6 완료)
+
+#### 변경 (지역화)
+
+- **Memory Map 웹뷰 UI가 VS Code 언어 설정을 따른다**: 헤더(`Entry Point`), 버튼(`Copy Report` / `Copy Full Dump` / `Save HTML`), 검색, 섹션 제목(`Memory Regions` / `Region Details` / `All Sections`), 개요·섹션 표의 열 이름, *모두 펼치기/접기*. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts) `buildMemoryMapStrings`.
+  - **리포트 본문은 영어로 유지한다**: *Copy Report* / *Copy Full Dump* 산출물은 이슈·커밋 메시지·문서에 붙여 남과 공유하는 물건이라, 편집기 언어를 따라가는 것보다 문구가 안정적인 편이 낫다고 판단했다. 지역화 범위는 그것을 둘러싼 UI로 한정한다.
+  - 반대 방향의 결함도 함께 정리: *맨 위로* 버튼 title이 **한국어로 하드코딩**돼 영어 사용자에게도 한국어가 보였다.
+
+#### 추가 (접근성)
+
+- **열 정렬을 키보드로**: All Sections 표의 머리글이 클릭 전용이었다. `tabindex`로 포커스를 받고 Enter/Space로 같은 정렬을 실행한다.
+- **`aria-sort` 갱신**: 정렬 방향을 ▲/▼ 글리프로만 표시해, 스크린리더는 어떤 열로 어떤 방향 정렬됐는지 알 수 없었다. 정렬 시 대상 열은 `ascending`/`descending`, 나머지 열은 `none`으로 갱신하고 title도 다음 동작을 안내하도록 바꾼다.
+- **live region**: 검색 결과 개수와 영역 매치 정보가 `role="status"` + `aria-live="polite"`.
+- **`aria-label`**: 아이콘 전용 버튼 `◀` / `▶` / `↑`, 검색 입력, Function 열 토글.
+- **`aria-expanded`**: *모두 펼치기 / 모두 접기* 버튼이 현재 상태를 노출한다.
+- **중복 낭독 제거**: 사용량 막대(`bar-bg`, 개요 표의 `mini-bar`)는 같은 수치가 이미 텍스트로 있으므로 `aria-hidden`. 표의 시각적 구분용 빈 열도 마찬가지.
+
+**테스트**: 신규 15 케이스([src/test/memoryMapWebviewA11y.test.ts](src/test/memoryMapWebviewA11y.test.ts) — 실제 ELF 픽스처로 패널을 열어 렌더된 HTML을 검사. 번들 완전성·`S.*` 참조 대조, 지역화 범위(UI는 번역 / 리포트 본문은 영어 유지 / 하드코딩 한국어 부재), aria-sort·키보드 정렬·live region·aria-expanded·막대 aria-hidden), 최종 1601 passing.
+
+> 웹뷰 3종(JSON Editor 0.6.19, Hex Viewer 0.6.20, Memory Map 0.6.21) 모두 같은 방식 — 호스트가 로케일을 해석해 문자열 번들을 주입하고, 각 웹뷰 테스트가 `S.*` 참조와 번들의 정합을 자동 대조한다. `package.nls.json`(명령·설정 제목 지역화)은 별도 과제로 남겨 둔다.
+
 ## [0.6.20] - 2026-07-26
 
 ### 변경 — Hex Viewer 웹뷰 지역화 · 접근성 (UX 리뷰 6/6, 2/3)
