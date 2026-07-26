@@ -878,6 +878,8 @@ export function buildJsonEditorStrings(): Record<string, string> {
         deleteRow: t('{n}번 행 삭제', 'Delete row {n}'),
         joinToString: t('배열 → 문자열 (쉼표로 연결)', 'Array → String (join with comma)'),
         splitToArray: t('문자열 → 배열 (쉼표로 분리)', 'String → Array (split by comma)'),
+        addArrayItem: t('항목 추가', 'Add item'),
+        removeArrayItem: t('{n}번째 항목 삭제', 'Remove item {n}'),
         invalidJsonInCell: t('셀 [{col}]의 JSON이 올바르지 않습니다: {message}', 'Invalid JSON in cell [{col}]: {message}'),
         historyRestoreFailed: t('편집 기록 복원에 실패했습니다: {message}', 'History restore failed: {message}'),
         scriptError: t('스크립트 오류: {message} ({line}번째 줄)', 'JS Error: {message} (line {line})'),
@@ -1631,10 +1633,13 @@ export function getWebviewContent(
             val.forEach((item, i) => {
                 html += '<div class="tag-row">';
                 html += '<input type="text" value="' + escapeAttr(String(item)) + '" data-arr-idx="' + i + '">';
-                html += '<button class="small danger" data-remove-arr="' + i + '">✕</button>';
+                const removeLabel = fmt(S.removeArrayItem, { n: i + 1 });
+                html += '<button class="small danger" data-remove-arr="' + i
+                    + '" title="' + escapeAttr(removeLabel) + '" aria-label="' + escapeAttr(removeLabel) + '">✕</button>';
                 html += '</div>';
             });
-            html += '<button class="small" data-add-arr="true">+ Add</button>';
+            html += '<button class="small" data-add-arr="true" aria-label="' + escapeAttr(S.addArrayItem) + '">+ '
+                + escapeHtml(S.addArrayItem) + '</button>';
             html += '</div></div>';
             return html;
         }

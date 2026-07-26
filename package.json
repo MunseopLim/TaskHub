@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.25",
+  "version": "0.6.26",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -65,7 +65,7 @@
         "taskhub.showTaskStatus": {
           "type": "boolean",
           "default": true,
-          "description": "Show status indicators (running, success, failure) for actions in the Actions view."
+          "markdownDescription": "Show run feedback for actions: status icons and progress in the Actions view, plus the completion notifications. Turning this off **also silences failure notifications** (including an action's own `failMessage`) — check the History panel or the TaskHub output channel instead. Stopping actions is unaffected: the inline stop button and *Stop All Actions* stay available."
         },
         "taskhub.pipeline.showVerboseLogs": {
           "type": "boolean",

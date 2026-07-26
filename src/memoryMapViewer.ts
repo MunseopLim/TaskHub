@@ -417,6 +417,13 @@ export function buildMemoryMapStrings(): Record<string, string> {
         usageBarLabel: t('{region} 사용률 {percent}% ({used} / {total})', '{region} usage {percent}% ({used} of {total})'),
         sortAscending: t('오름차순 정렬', 'Sort ascending'),
         sortDescending: t('내림차순 정렬', 'Sort descending'),
+        objectSummary: t('오브젝트 요약', 'Object Summary'),
+        toggleObjectDetails: t('섹션 상세 표시 전환', 'Toggle section details'),
+        details: t('상세', 'Details'),
+        colObject: t('오브젝트', 'Object'),
+        colFunction: t('함수', 'Function'),
+        colPercent: t('비율', 'Percent'),
+        noMatches: t('결과 없음', 'No matches'),
     };
 }
 
@@ -995,16 +1002,28 @@ const RD = ${regionDataJsLiteral};
                 }).join('');
                 return '<tr><td>' + esc(o.n) + '</td><td class="num" colspan="2"></td><td class="num"></td><td class="num">' + o.tss + '</td><td class="num">' + o.ts + '</td><td class="num">' + o.p + '%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:' + o.bw + '%;background:var(--ok)"></div></div></td></tr>' + dRows;
             }).join('');
-            h += '<div class="obj-summary-header" data-action="toggle-obj-summary"><span class="fold-icon">\u25B6</span> Object Summary (' + rd.objSummary.length + ') <button data-action="toggle-obj-detail-rows" title="Toggle section details">Details \u25B6</button></div>';
-            h += '<div class="obj-summary-body" style="display:none"><table class="obj-summary-table sortable-table"><thead><tr><th data-sort="name">Object</th><th class="num">Section</th><th class="num">Address</th><th class="num">End</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th class="num" data-sort="pct">%</th><th></th></tr></thead><tbody>' + oRows + '</tbody></table></div>';
+            h += '<div class="obj-summary-header" data-action="toggle-obj-summary"><span class="fold-icon">\u25B6</span> ' + S.objectSummary + ' (' + rd.objSummary.length + ') <button data-action="toggle-obj-detail-rows" title="' + S.toggleObjectDetails + '" aria-label="' + S.toggleObjectDetails + '">' + S.details + ' \u25B6</button></div>';
+            h += '<div class="obj-summary-body" style="display:none"><table class="obj-summary-table sortable-table"><thead><tr>'
+                + '<th data-sort="name" scope="col">' + S.colObject + '</th>'
+                + '<th class="num" scope="col">' + S.colSection + '</th>'
+                + '<th class="num" scope="col">' + S.colAddress + '</th>'
+                + '<th class="num" scope="col">' + S.colEnd + '</th>'
+                + '<th class="num" data-sort="size" data-sort-by="bytes" scope="col">' + S.colSize + '</th>'
+                + '<th class="num" data-sort="bytes" scope="col">' + S.colBytes + '</th>'
+                + '<th class="num" data-sort="pct" scope="col">' + S.colPercent + '</th>'
+                + '<th aria-hidden="true"></th></tr></thead><tbody>' + oRows + '</tbody></table></div>';
         }
 
         // Section table
         if (rd.segments.length > 0) {
-            const thHtml = '<tr><th data-sort="name">Object</th>' +
-                (rd.hsi ? '<th data-sort="section" class="func-cell' + (funcVis ? '' : ' hidden') + '">Section</th>' : '') +
-                (rd.hfi ? '<th data-sort="func" class="func-cell' + (funcVis ? '' : ' hidden') + '">Function</th>' : '') +
-                '<th class="num" data-sort="addr">Address</th><th class="num" data-sort="end">End</th><th class="num" data-sort="size" data-sort-by="bytes">Size</th><th class="num" data-sort="bytes">Bytes</th><th data-sort="type">Type</th></tr>';
+            const thHtml = '<tr><th data-sort="name" scope="col">' + S.colObject + '</th>' +
+                (rd.hsi ? '<th data-sort="section" scope="col" class="func-cell' + (funcVis ? '' : ' hidden') + '">' + S.colSection + '</th>' : '') +
+                (rd.hfi ? '<th data-sort="func" scope="col" class="func-cell' + (funcVis ? '' : ' hidden') + '">' + S.colFunction + '</th>' : '') +
+                '<th class="num" data-sort="addr" scope="col">' + S.colAddress + '</th>'
+                + '<th class="num" data-sort="end" scope="col">' + S.colEnd + '</th>'
+                + '<th class="num" data-sort="size" data-sort-by="bytes" scope="col">' + S.colSize + '</th>'
+                + '<th class="num" data-sort="bytes" scope="col">' + S.colBytes + '</th>'
+                + '<th data-sort="type" scope="col">' + S.colType + '</th></tr>';
 
             if (rd.segments.length > VT_THRESH) {
                 const vpH = Math.min(rd.segments.length * ROW_H, MAX_VP_H);
@@ -1171,7 +1190,7 @@ const RD = ${regionDataJsLiteral};
             searchCount.textContent = '';
             searchCount.classList.remove('no-match');
         } else if (!has) {
-            searchCount.textContent = 'No matches';
+            searchCount.textContent = S.noMatches;
             searchCount.classList.add('no-match');
         } else {
             searchCount.classList.remove('no-match');
@@ -1502,8 +1521,11 @@ const RD = ${regionDataJsLiteral};
                     ths.forEach(function(h) {
                         h.textContent = h.textContent.replace(/ [\u25B2\u25BC]$/, '');
                         // aria-sort is what a screen reader announces; the
-                        // \u25B2/\u25BC glyph alone conveys nothing to it.
+                        // \u25B2/\u25BC glyph alone conveys nothing to it. The title
+                        // resets with it \u2014 a column that is no longer sorted
+                        // must not keep advertising "sort descending".
                         h.setAttribute('aria-sort', 'none');
+                        h.setAttribute('title', S.sortAscending);
                     });
                     th.textContent += sortAsc ? ' \u25B2' : ' \u25BC';
                     th.setAttribute('aria-sort', sortAsc ? 'ascending' : 'descending');

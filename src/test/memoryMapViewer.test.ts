@@ -164,7 +164,9 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.ok(html.includes('resyncAfterReflow'), 'a column sort should re-sync match navigation');
             assert.ok(html.includes('ensureRegionExpanded'), 'navigating to a match should re-open a collapsed region');
             assert.ok(html.includes("scrollIntoView({ behavior: 'smooth', block: 'center' })"), 'navigating should center the match');
-            assert.ok(html.includes("'No matches'"), 'empty-result message should be present');
+            // 0.6.26: 문구가 로케일 번들(S.noMatches)로 옮겨졌다. 검증 대상은
+            // 문구 자체가 아니라 "결과 없음 상태를 표시한다"는 사실이다.
+            assert.ok(html.includes('S.noMatches'), 'empty-result message should be present');
             assert.ok(html.includes("(curMatch + 1) + ' / ' + matchList.length"), 'count should show the current/total position');
             assert.ok(html.includes('searchAutoFunc'), 'search should auto-reveal the hidden func/section columns');
             assert.ok(html.includes('funcUserOverride'), 'a manual func-column toggle during search should suppress re-auto-reveal');

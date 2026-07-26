@@ -373,6 +373,8 @@ export function buildHexViewerStrings(): Record<string, string> {
         gotoButton: t('이동', 'Go'),
         findButton: t('찾기 (Ctrl+F)', 'Find (Ctrl+F)'),
         findModeLabel: t('찾기 방식', 'Search mode'),
+        findModeBytes: t('바이트열', 'Bytes'),
+        findModeValue: t('값', 'Value'),
         findInputLabel: t('찾을 내용', 'Search term'),
         findPrev: t('이전 결과', 'Previous match'),
         findNext: t('다음 결과', 'Next match'),
@@ -575,8 +577,8 @@ function getWebviewContent(
     </div>
     <div class="find-bar" id="findBar">
         <select id="findMode" aria-label="${esc(S.findModeLabel)}">
-            <option value="bytes">Bytes</option>
-            <option value="value" selected>Value</option>
+            <option value="bytes">${esc(S.findModeBytes)}</option>
+            <option value="value" selected>${esc(S.findModeValue)}</option>
             <option value="ascii">ASCII</option>
         </select>
         <input type="text" id="findHexInput" placeholder="20020000" aria-label="${esc(S.findInputLabel)}">
