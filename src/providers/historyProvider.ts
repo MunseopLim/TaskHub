@@ -236,6 +236,65 @@ export function formatLastRunBadge(
 }
 
 /**
+ * Collapse the history into "the most recent run of each action", newest
+ * first. This is the single source of truth for *recency* across TaskHub:
+ * the History panel renders every run, and `taskhub.runAnyAction`'s
+ * "Recently used" section is derived from the same list, so an action run
+ * from the tree, a keybinding, a history re-run, or the palette itself all
+ * feed one ordering.
+ *
+ * Relies on `HistoryProvider.addHistoryEntry` unshifting (newest first) —
+ * the same invariant the History panel already renders on, so no sort here.
+ *
+ * Tool entries (Memory Map / Hex / JSON viewer) are skipped: they record an
+ * "opened file" event, not a runnable action, and their synthetic
+ * `taskhub.tool.*` ids never resolve against the action tree.
+ *
+ * `running` entries are kept — an action still in flight is unambiguously
+ * recent, and the caller renders it as such.
+ */
+export function deriveRecentActionRuns(history: readonly HistoryEntry[]): HistoryEntry[] {
+    const seen = new Set<string>();
+    const runs: HistoryEntry[] = [];
+    for (const entry of history) {
+        if (!entry || !entry.actionId) { continue; }
+        if (isToolHistoryEntry(entry)) { continue; }
+        if (seen.has(entry.actionId)) { continue; }
+        seen.add(entry.actionId);
+        runs.push(entry);
+    }
+    return runs;
+}
+
+/**
+ * The `detail` line shown under a "Recently used" row in the Run Any Action
+ * palette. Unlike the History panel — where a colored icon carries
+ * success/failure — the palette row has no status icon, so the failure case
+ * folds the word in as text; success stays icon-free-but-unambiguous by
+ * omission, matching how `formatLastRunBadge` reads in the tree.
+ *
+ *   success  → "14:30 · 1.2s"
+ *   failure  → "실패 · 14:30 · 1.2s" / "Failed · 14:30 · 1.2s"
+ *   running  → "실행 중" / "Running"
+ */
+export function formatRecentRunDetail(
+    entry: HistoryEntry | undefined,
+    now: number,
+    lang: 'ko' | 'en' = 'ko'
+): string | undefined {
+    if (!entry) { return undefined; }
+    if (entry.status === 'running') {
+        return lang === 'ko' ? '실행 중' : 'Running';
+    }
+    const badge = formatLastRunBadge(entry, now, lang);
+    if (!badge) { return undefined; }
+    if (entry.status === 'failure') {
+        return `${lang === 'ko' ? '실패' : 'Failed'} · ${badge}`;
+    }
+    return badge;
+}
+
+/**
  * Build the ARIA label for a `HistoryItem`. The visible row uses
  * `iconPath` (color) for status and `description` for time + duration,
  * neither of which a screen reader can resolve into a status word — so

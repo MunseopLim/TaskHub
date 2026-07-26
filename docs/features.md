@@ -124,8 +124,11 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 액션마다 단축키를 등록하지 않고도 **단일 커맨드 + 두세 글자**로 어떤 액션이든 실행할 수 있습니다. Command Palette(`Cmd/Ctrl+Shift+P`)에서 `TaskHub: Run Any Action…`을 호출하거나, `taskhub.runAnyAction` 한 명령에만 키바인딩을 걸어 두면 됩니다.
 
 - **모든 runnable 액션이 한 리스트로 평면화**: 폴더·구분선은 노출되지 않습니다. 검색 시 `matchOnDescription`으로 폴더 breadcrumb(예: `Firmware`)도 매칭 면에 포함되어, `fw build` 처럼 부모 폴더 + 액션명 조합으로도 좁혀집니다.
-- **최근 사용 액션이 위 섹션 (`Recently used`) 에 표시**: `globalState`(`taskhub.runAnyAction.mru`)에 액션 ID로 저장되며 (label 이 아니라 ID — 액션 이름 변경에 영향받지 않음), 가장 최근에 실행한 항목이 맨 위에 옵니다. 표시 개수는 `taskhub.runAnyAction.recentLimit` 설정으로 제어 (기본 5, 범위 0–20, `0`이면 섹션 비활성). 자세한 옵션은 §21 참조.
-- **stale MRU 항목은 표시 시점에 필터링**: 액션이 삭제되었거나 폴더 ID 가 우연히 MRU에 들어 있어도, 매번 팔레트가 열릴 때 현재 액션 트리에 존재하는 runnable ID 만 추려서 노출합니다 — "더 이상 존재하지 않는 항목을 선택하는 경로" 자체를 차단합니다.
+- **최근 실행 액션이 위 섹션 (`Recently used`) 에 표시**: 목록은 **[§14 히스토리](#14-액션-실행-히스토리)에서 유도**됩니다 (0.6.12부터). 팔레트로 고른 실행뿐 아니라 왼쪽 트리 클릭, 키바인딩(`taskhub.runAction.<id>`), History 재실행이 모두 같은 순서에 반영되며, 같은 액션의 반복 실행은 가장 최근 기록 하나로 접힙니다. 히스토리는 워크스페이스 단위로 저장되므로 다른 프로젝트의 액션 ID가 섞이지 않습니다. 표시 개수는 `taskhub.runAnyAction.recentLimit` 설정으로 제어 (기본 5, 범위 0–20, `0`이면 섹션 비활성). 자세한 옵션은 §21 참조.
+    - 히스토리 보관량(`taskhub.history.maxItems`, 기본 10)이 상한으로 작용합니다 — 그보다 큰 `recentLimit`을 지정하면 보관된 기록만큼만 표시됩니다.
+    - 최근 행에는 **마지막 실행 정보**가 둘째 줄로 붙습니다: `14:30 · 1.2s`, 실패였다면 `실패 · 14:30 · 1.2s`, 아직 실행 중이면 `실행 중`. 폴더 breadcrumb은 검색 대상(`matchOnDescription`)으로 남겨 두기 위해 첫째 줄에 그대로 유지됩니다.
+    - Memory Map / Hex / JSON Editor 열람 기록은 실행 가능한 액션이 아니므로 최근 섹션에 섞이지 않습니다.
+- **stale 항목은 표시 시점에 필터링**: 액션이 삭제되었거나 폴더 ID 가 우연히 기록에 들어 있어도, 매번 팔레트가 열릴 때 현재 액션 트리에 존재하는 runnable ID 만 추려서 노출합니다 — "더 이상 존재하지 않는 항목을 선택하는 경로" 자체를 차단합니다.
 - 키 한 방으로 액션 하나를 직접 실행하고 싶다면 위 "액션에 단축키 할당" 절의 `taskhub.runAction.<id>` 동적 커맨드를 사용하세요. 두 경로는 같은 실행 인프라를 공유합니다.
 
 ### 기본 구조
@@ -1794,7 +1797,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 | `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` (1–1024) | 캡처 모드(`passTheResultToNextTask: true`)에서 누적되는 stdout/stderr 총 크기 상한(MB). 초과 시 프로세스를 종료하고 명확한 에러로 실패. | [§5 Output Capture](#output-capture) |
 | `taskhub.pipeline.maxParallelTasks` | `integer` | `4` (1–32) | 한 액션 안에서 동시에 실행될 수 있는 task 최대 개수. `parallel: true`가 붙은 task만 "이전 모든 task를 기다림" barrier에서 빠지며, barrier에서 빠진 뒤에도 명시적 `dependsOn`과 `${taskId.x}` 자동 추론 의존성은 그대로 기다린다. `parallel: true`가 없는 task는 `dependsOn` 유무와 무관하게 sync barrier로 동작. 기본 4는 임베디드 빌드(linker/LTO)의 메모리 부담을 고려한 보수적 값 — 자원 여유가 있는 머신에서는 늘리고, 완전 순차로 강제하려면 `1`로 설정. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
 | `taskhub.history.maxItems` | `number` | `10` (1–50) | 저장되는 액션 실행 히스토리 최대 개수. 초과분은 오래된 순으로 자동 제거. | [§14 히스토리](#14-액션-실행-히스토리) |
-| `taskhub.runAnyAction.recentLimit` | `number` | `5` (0–20) | `TaskHub: Run Any Action…` 팔레트의 *Recently used* 섹션에 표시할 최대 개수. `0`이면 섹션 자체가 숨겨진다. 표시 시점에 stale 항목(삭제된 액션)을 걸러내므로 실제 보이는 개수는 이 값 이하가 될 수 있다. | [§5 Quick Action Palette](#5-actions-패널-mainviewmain) |
+| `taskhub.runAnyAction.recentLimit` | `number` | `5` (0–20) | `TaskHub: Run Any Action…` 팔레트의 *Recently used* 섹션에 표시할 최대 개수. `0`이면 섹션 자체가 숨겨진다. 목록은 히스토리에서 유도되므로 `taskhub.history.maxItems`가 상한으로 작용하고, 표시 시점에 stale 항목(삭제된 액션)을 걸러내므로 실제 보이는 개수는 이 값 이하가 될 수 있다. | [§5 Quick Action Palette](#5-actions-패널-mainviewmain) |
 | `taskhub.history.showPanel` | `boolean` | `true` | 사이드바의 History 패널 표시 여부. `false`면 뷰 자체가 감춰지지만 기록은 그대로 유지된다. | [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.preview.showSourceControlContextMenu` | `boolean` | `true` | Source Control 변경 파일 우클릭 메뉴에 TaskHub 프리뷰/브라우저 열기 항목을 표시할지 여부. VS Code SCM 메뉴는 확장자 context key를 안정적으로 제공하지 않으므로 켜져 있으면 대상 확장자 외 파일에도 항목이 보일 수 있으며, 실제 실행은 핸들러가 확장자로 재검증한다. | [§22 Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기) |
 | `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. `false`면 VS Code 자체의 최근 경로(창·확장 공유)를 그대로 쓴다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |

@@ -29,6 +29,21 @@
 =====================================================================
 -->
 
+## [0.6.12] - 2026-07-26
+
+### 변경 — Run Any Action의 *Recently used*를 History에서 유도 (UX 리뷰 1/6)
+
+#### UX / 일관성
+
+- **팔레트의 "최근 실행"이 실제 최근 실행을 반영한다**: `TaskHub: Run Any Action…`은 그동안 팔레트에서 고른 항목만 자체 MRU 목록(`globalState`의 `taskhub.runAnyAction.mru`)에 기록했다. 그래서 왼쪽 트리에서 열 번 실행한 액션이 *Recently used*에 뜨지 않았고, 팔레트를 쓰지 않는 사용자에게는 섹션이 영원히 비어 있었다. 이제 목록을 **History에서 유도**하므로 트리 클릭 / 키바인딩(`taskhub.runAction.<id>`) / History 재실행 / 팔레트 선택이 하나의 순서로 합쳐진다. 참조: [src/providers/historyProvider.ts](src/providers/historyProvider.ts) `deriveRecentActionRuns`, [src/extension.ts](src/extension.ts) `taskhub.runAnyAction`.
+  - **프로젝트 간 누수 해소**: 옛 MRU는 `globalState`(전역)에 액션 ID만 저장해, 다른 프로젝트에서 실행한 것과 같은 ID가 이 프로젝트의 *최근 실행*처럼 보일 수 있었다. History는 `workspaceState`(워크스페이스 단위)이므로 구조적으로 섞이지 않는다.
+  - **마지막 실행 정보 표시**: 최근 행 둘째 줄에 `14:30 · 1.2s`, 실패면 `실패 · 14:30 · 1.2s`, 진행 중이면 `실행 중`이 붙는다. 폴더 breadcrumb은 첫째 줄에 그대로 둬 `matchOnDescription` 검색이 오염되지 않는다.
+  - 같은 액션의 반복 실행은 가장 최근 기록 하나로 접히고, Memory Map / Hex / JSON Editor 열람 기록(tool 항목)은 실행 가능한 액션이 아니므로 최근 섹션에서 제외된다. 삭제된 액션 필터링은 종전과 동일.
+  - 히스토리 보관량(`taskhub.history.maxItems`, 기본 10)이 `recentLimit`의 실질 상한으로 작용한다 — 문서에 명시.
+  - 은퇴한 `taskhub.runAnyAction.mru` 전역 키는 활성화 시 1회 정리한다. `updateRunAnyActionMru` 헬퍼와 그 테스트(IT-093 ~ IT-097)는 제거.
+
+**테스트**: 신규 20 케이스([src/test/runAnyActionRecents.test.ts](src/test/runAnyActionRecents.test.ts) — 유도 순서·중복 접힘·tool 제외·detail 포맷·History→팔레트 종단 경로), 제거 5 케이스, 최종 1487 passing.
+
 ## [0.6.11] - 2026-07-26
 
 ### 추가 / 변경 — 파일·폴더 다이얼로그가 마지막 위치를 기억

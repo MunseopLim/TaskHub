@@ -487,10 +487,20 @@ export interface RunAnyPaletteItem {
     kind: 'separator' | 'pick';
     label: string;
     description?: string;
+    /** Second line — carries the last-run badge on "Recently used" rows. */
+    detail?: string;
     actionId?: string;             // present only when kind === 'pick'
     section: 'recent' | 'rest';
 }
 
+/**
+ * Orphaned `globalState` key from the palette's own MRU list, which was
+ * replaced by History-derived recency (see `deriveRecentActionRuns`). The
+ * old list was global (leaking action ids across projects) and only ever
+ * written when the user picked *from the palette*, so it disagreed with
+ * every other way of running an action. Activation clears the key once so
+ * the stale array doesn't sit in global storage forever.
+ */
 export const RUN_ANY_ACTION_MRU_KEY = 'taskhub.runAnyAction.mru';
 // Default for `taskhub.runAnyAction.recentLimit`. The setting (1–20) overrides
 // this at runtime; the constant is also the cap upper bound used by tests and
@@ -552,31 +562,11 @@ export function buildRunAnyActionPicks(
     return { recent, rest };
 }
 
-// Move `actionId` to the front of the MRU list, dedupe, and cap at `max`.
-// Used after a successful palette selection. Pure for testability.
-//
-// `max <= 0` collapses the list to empty — letting the user disable the
-// "Recently used" section entirely via setting without a special-case branch
-// at the call site.
-export function updateRunAnyActionMru(
-    current: readonly string[],
-    actionId: string,
-    max: number = RUN_ANY_ACTION_MRU_DEFAULT_LIMIT
-): string[] {
-    if (max <= 0) {
-        return [];
-    }
-    const next = [actionId, ...current.filter(id => id !== actionId)];
-    if (next.length > max) {
-        next.length = max;
-    }
-    return next;
-}
-
-// What the palette command should do next, based on a load attempt + stored
-// MRU + the current `recentLimit` setting. Splitting this from the handler
-// lets us pin the broken-actions.json path (load throws → user-facing error,
-// no palette opens) without spinning up VS Code's QuickPick or workspace I/O.
+// What the palette command should do next, based on a load attempt + the
+// History-derived recent ids + the current `recentLimit` setting. Splitting
+// this from the handler lets us pin the broken-actions.json path (load throws
+// → user-facing error, no palette opens) without spinning up VS Code's
+// QuickPick or workspace I/O.
 export type RunAnyActionOutcome =
     | { kind: 'load-error'; errorMessage: string }
     | { kind: 'empty' }
@@ -585,13 +575,19 @@ export type RunAnyActionOutcome =
 // Compute the palette outcome. Pure (no VS Code calls) — the handler converts
 // the outcome into UI: `load-error` → showErrorMessage + log, `empty` →
 // showInformationMessage, `show-palette` → showQuickPick. `recentIds` is
-// returned alongside the items so the write-side MRU update bases on the
-// already filtered+capped list, not on raw stored ids (review feedback P2).
+// returned alongside the items so callers see the already filtered+capped
+// list rather than the raw recency input.
+//
+// `recentDetails` maps action id → last-run badge ("14:30 · 1.2s"). Passing it
+// is optional so the pure tests can exercise ordering without a clock; the
+// handler always supplies it from the same History entries that produced
+// `recentIds`.
 export function planRunAnyAction(
     loadActions: () => ActionItem[],
-    storedMru: readonly string[],
+    recentActionIds: readonly string[],
     rawLimitSetting: number | undefined,
-    labels: { recent: string; rest: string }
+    labels: { recent: string; rest: string },
+    recentDetails?: ReadonlyMap<string, string>
 ): RunAnyActionOutcome {
     let allActions: ActionItem[];
     try {
@@ -611,12 +607,12 @@ export function planRunAnyAction(
         Number.isFinite(rawLimit) ? Math.floor(rawLimit) : RUN_ANY_ACTION_MRU_DEFAULT_LIMIT
     ));
 
-    const { recent, rest } = buildRunAnyActionPicks(allActions, storedMru, limit);
+    const { recent, rest } = buildRunAnyActionPicks(allActions, recentActionIds, limit);
     if (recent.length === 0 && rest.length === 0) {
         return { kind: 'empty' };
     }
 
-    const items = buildRunAnyActionPaletteItems(recent, rest, labels);
+    const items = buildRunAnyActionPaletteItems(recent, rest, labels, recentDetails);
     const recentIds = recent.map(p => p.actionId);
     return { kind: 'show-palette', items, limit, recentIds };
 }
@@ -629,7 +625,8 @@ export function planRunAnyAction(
 export function buildRunAnyActionPaletteItems(
     recent: readonly RunAnyActionPick[],
     rest: readonly RunAnyActionPick[],
-    labels: { recent: string; rest: string }
+    labels: { recent: string; rest: string },
+    recentDetails?: ReadonlyMap<string, string>
 ): RunAnyPaletteItem[] {
     const items: RunAnyPaletteItem[] = [];
     if (recent.length > 0) {
@@ -639,6 +636,10 @@ export function buildRunAnyActionPaletteItems(
                 kind: 'pick',
                 label: pick.title,
                 description: pick.folderPath || undefined,
+                // The badge goes on `detail` rather than into `description`
+                // so that `matchOnDescription` keeps matching folder paths
+                // only — typing "3" shouldn't hit every action run 3분 전.
+                detail: recentDetails?.get(pick.actionId),
                 actionId: pick.actionId,
                 section: 'recent'
             });
@@ -1772,6 +1773,8 @@ import {
 
 import {
     createToolHistoryEntry,
+    deriveRecentActionRuns,
+    formatRecentRunDetail,
     HistoryEntry,
     HistoryItem,
     HistoryProvider,
@@ -4435,6 +4438,11 @@ export function activate(context: vscode.ExtensionContext) {
     // 기억 없이 워크스페이스 폴더에서 열리므로 activate 최상단에서 연결한다.
     initDialogMemory(context);
     context.subscriptions.push(new vscode.Disposable(() => initDialogMemory(undefined)));
+    // One-shot cleanup of the palette's retired private MRU list. `undefined`
+    // removes the key; on an install that never had it this is a no-op.
+    if (context.globalState.get(RUN_ANY_ACTION_MRU_KEY) !== undefined) {
+        void context.globalState.update(RUN_ANY_ACTION_MRU_KEY, undefined);
+    }
     const terminalDisposable = vscode.window.onDidCloseTerminal(terminal => {
         for (const [key, actionTerminal] of actionTerminals.entries()) {
             if (actionTerminal.terminal === terminal) {
@@ -4664,12 +4672,27 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.runAnyAction', async () => {
         const rawLimit = vscode.workspace.getConfiguration()
             .get<number>('taskhub.runAnyAction.recentLimit', RUN_ANY_ACTION_MRU_DEFAULT_LIMIT);
-        const stored = context.globalState.get<string[]>(RUN_ANY_ACTION_MRU_KEY, []) ?? [];
+        // Recency comes from the History panel, not from a palette-private
+        // list: running an action from the tree, a keybinding, or a history
+        // re-run all land here. History is workspace-scoped, so the recent
+        // section no longer leaks action ids between projects either.
+        //
+        // Ceiling note: History keeps at most `taskhub.history.maxItems`
+        // entries, so a recentLimit larger than that simply shows fewer rows.
+        const lang: 'ko' | 'en' = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
+        const now = Date.now();
+        const recentRuns = deriveRecentActionRuns(historyProvider.getHistory());
+        const recentDetails = new Map<string, string>();
+        for (const run of recentRuns) {
+            const detail = formatRecentRunDetail(run, now, lang);
+            if (detail) { recentDetails.set(run.actionId, detail); }
+        }
         const outcome = planRunAnyAction(
             () => loadAllActions(context),
-            stored,
+            recentRuns.map(run => run.actionId),
             rawLimit,
-            { recent: t('최근 실행', 'Recently used'), rest: t('모든 액션', 'All actions') }
+            { recent: t('최근 실행', 'Recently used'), rest: t('모든 액션', 'All actions') },
+            recentDetails
         );
 
         if (outcome.kind === 'load-error') {
@@ -4695,7 +4718,7 @@ export function activate(context: vscode.ExtensionContext) {
         type RunAnyPickItem = vscode.QuickPickItem & { actionId?: string };
         const items: RunAnyPickItem[] = outcome.items.map(p => p.kind === 'separator'
             ? { label: p.label, kind: vscode.QuickPickItemKind.Separator }
-            : { label: p.label, description: p.description, actionId: p.actionId });
+            : { label: p.label, description: p.description, detail: p.detail, actionId: p.actionId });
 
         const selection = await vscode.window.showQuickPick(items, {
             placeHolder: t('실행할 액션을 검색하세요…', 'Search for an action to run…'),
@@ -4706,9 +4729,8 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        const nextMru = updateRunAnyActionMru(outcome.recentIds, selection.actionId, outcome.limit);
-        await context.globalState.update(RUN_ANY_ACTION_MRU_KEY, nextMru);
-
+        // No MRU write: `executeActionById` → `executeAction` records the run
+        // in History, which is what the recent section reads on next open.
         await vscode.commands.executeCommand('taskhub.executeActionById', { id: selection.actionId });
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.assignShortcut', async (actionItem: Action) => {

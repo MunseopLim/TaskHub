@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { actionStates } from '../providers/actionStatus';
 import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteViewProvider, loadFavoritesFromDisk, removeFavoriteByIdentity } from '../providers/favoriteViewProvider';
-import { buildActionCommandId, buildRunAnyActionPaletteItems, buildRunAnyActionPicks, planRunAnyAction, serializeFavorites, syncActionCommandsFromActions, updateRunAnyActionMru, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT } from '../extension';
+import { buildActionCommandId, buildRunAnyActionPaletteItems, buildRunAnyActionPicks, planRunAnyAction, serializeFavorites, syncActionCommandsFromActions, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT } from '../extension';
 import { Link, LinkGroup, LinkViewProvider } from '../providers/linkViewProvider';
 import { Action, Folder, MainViewProvider, formatProgressDescription } from '../providers/mainViewProvider';
 import { HistoryProvider } from '../providers/historyProvider';
@@ -913,47 +913,10 @@ suite('View provider integration', function () {
                 'duplicate MRU entry must collapse to its first occurrence');
         });
 
-        test('IT-093: updateRunAnyActionMru — 신규 id는 맨 앞에 추가된다', () => {
-            const next = updateRunAnyActionMru([], 'fw.build');
-            assert.deepStrictEqual(next, ['fw.build']);
-        });
-
-        test('IT-094: updateRunAnyActionMru — 기존 id는 맨 앞으로 이동하고 중복은 제거된다', () => {
-            const next = updateRunAnyActionMru(['a', 'b', 'c'], 'b');
-            assert.deepStrictEqual(next, ['b', 'a', 'c'],
-                'most-recent moves to front; relative order of others preserved');
-        });
-
-        test('IT-095: updateRunAnyActionMru — 기본 cap 을 넘으면 가장 오래된 항목이 잘린다', () => {
-            // Saturate well past the default so the cap path is exercised
-            // regardless of what the default is set to (5 today, may change).
-            const oversized = Array.from({ length: RUN_ANY_ACTION_MRU_DEFAULT_LIMIT + 5 }, (_, i) => `id${i}`);
-            const next = updateRunAnyActionMru(oversized, 'new');
-            assert.strictEqual(next.length, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT,
-                `MRU must cap at default (${RUN_ANY_ACTION_MRU_DEFAULT_LIMIT}) when no explicit max passed`);
-            assert.strictEqual(next[0], 'new', 'newest entry sits at the head');
-            assert.ok(!next.includes(oversized[oversized.length - 1]),
-                'oldest entry is dropped past the cap');
-        });
-
-        test('IT-096: updateRunAnyActionMru — 명시적 max 인자가 default 를 override 한다', () => {
-            // The setting `taskhub.runAnyAction.recentLimit` is wired through
-            // by passing `max` explicitly at the call site. Pinning that the
-            // explicit value overrides the default — otherwise narrowing the
-            // setting from 5 → 3 would leak old entries past the user's choice.
-            const next = updateRunAnyActionMru(['a', 'b', 'c', 'd'], 'new', 3);
-            assert.deepStrictEqual(next, ['new', 'a', 'b'],
-                'explicit max=3 must trim to 3, not the default');
-        });
-
-        test('IT-097: updateRunAnyActionMru — max=0 은 빈 배열을 반환한다 (recent 섹션 비활성)', () => {
-            // Setting recentLimit=0 disables the "Recently used" section.
-            // The pure helper has to honor that without producing a singleton
-            // — otherwise the next palette open would still show one item.
-            const next = updateRunAnyActionMru(['a', 'b'], 'new', 0);
-            assert.deepStrictEqual(next, [],
-                'max=0 must return [] so recentLimit=0 fully disables the section');
-        });
+        // IT-093 ~ IT-097 (updateRunAnyActionMru) removed in 0.6.12: the
+        // palette no longer keeps a private MRU list. Recency now comes from
+        // the History panel — see the "Run Any Action ↔ History 연동" suite
+        // in runAnyActionRecents.test.ts.
 
         test('IT-098: stale id가 MRU 앞쪽을 채워도 valid 항목이 limit에 그대로 들어온다 (review P2)', () => {
             // Regression for the "slice-then-filter" bug: storage was
