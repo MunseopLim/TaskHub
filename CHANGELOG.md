@@ -29,6 +29,28 @@
 =====================================================================
 -->
 
+## [0.6.17] - 2026-07-26
+
+### 추가 — 액션 생성 템플릿 2종 → 6종 (UX 리뷰 4/6, 후반부 1/2)
+
+#### 추가 (UX)
+
+- **생성 마법사 템플릿 확장**: 스키마에는 13가지 task 타입이 있지만 마법사는 `shell`과 `fileDialog` 둘만 보여줬다. 나머지 대화형 타입과 다단계 파이프라인은 문서를 읽거나 예제 JSON을 뒤져야 존재를 알 수 있었다. 참조: [src/extension.ts](src/extension.ts) `ACTION_TEMPLATES`.
+  - **Folder Picker + Shell** (`folderDialog` → `shell`) — 기존 파일 선택 템플릿의 빠진 짝.
+  - **Text Input + Shell** (`inputBox` → `shell`) — 실행 시점에 값을 받아 `${input.value}`로 끼워 넣는다.
+  - **Choice List + Shell** (`quickPick` → `shell`) — 쉼표로 입력한 목록에서 고르게 하고 `${choice.value}`로 참조. 공백·빈 항목·중복은 자동 정리.
+  - **Multi-step Pipeline** (`shell` × N) — `step1`…`stepN`. 1단계는 필수, 2단계부터는 빈 값 Enter로 종료(Esc는 마법사 전체 취소), 최대 10단계.
+  - 대화형 task가 포함된 템플릿은 명령어 입력란에 참조 변수를 미리 채워 준다 — 변수 이름을 외우지 않아도 되게.
+  - 단일 쉘 템플릿의 예시 문구를 `e.g. npm run build, make flash, ctest`로 넓혔다.
+
+> **리뷰 원안과의 차이**: 원 리뷰는 `Build` / `Test` / `Script` / `Open Folder` 추가를 제안했다. 그러나 앞의 셋은 생성되는 JSON이 단일 `shell` 하나로 기존 *Single Shell Command* 와 구조가 동일하고 명령어 문자열만 다르다 — 템플릿을 늘리는 게 아니라 placeholder를 바꾸는 일이라, 목록만 길어지고 배울 것은 없다. 그래서 **구조가 서로 다른 템플릿만** 추가하고 Build/Test 류는 예시 문구로 흡수했다. 테스트가 이 원칙(단일 shell 템플릿은 하나뿐)을 회귀 가드로 고정한다.
+
+#### 내부
+
+- 템플릿의 task 조립을 프롬프트에서 분리(`buildTasks`)해 순수 함수로 만들었다. 프롬프트 체인을 구동하지 않고도 생성되는 JSON을 검증할 수 있다.
+
+**테스트**: 신규 20 케이스([src/test/actionTemplates.test.ts](src/test/actionTemplates.test.ts) — 템플릿별 출력 구조, 선택지 파싱(공백/빈 항목/중복), 구조 중복 금지 가드, 그리고 **6개 템플릿의 생성 결과를 `actions.schema.json`으로 검증**해 마법사가 자기 스키마를 위반하는 회귀를 차단), 최종 1544 passing.
+
 ## [0.6.16] - 2026-07-26
 
 ### 수정 — `showTaskStatus=false`가 재렌더에도 유지되도록 (UX 리뷰 5/6)

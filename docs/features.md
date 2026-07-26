@@ -1076,11 +1076,22 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 흐름은 "꼭 필요한 것만 묻고 나머지는 기본값으로 채운 뒤 사용자가 actions.json을 열어 다듬을 수 있게" 두는 방향으로 정리되어 있습니다.
 
 1.  **워크스페이스 폴더 선택**: 워크스페이스 폴더가 하나뿐이면 자동으로 그것이 사용되며, 여러 폴더를 연 경우에만 선택지가 표시됩니다.
-2.  **템플릿 선택**: 두 가지 중 하나를 고릅니다.
-    *   **Single Shell Command**: 단일 셸 명령어를 실행하는 간단한 액션.
-    *   **File Picker + Shell**: 파일 선택 대화상자를 먼저 띄우고, 선택된 파일 경로를 받아 셸 명령어를 실행.
+2.  **템플릿 선택**: 여섯 가지 중 하나를 고릅니다 (0.6.17부터 확장). 각 템플릿은 **생성되는 구조가 서로 다릅니다** — 명령어 문자열만 바뀌는 변형(Build / Test 등)은 넣지 않고 명령어 입력란의 예시 문구로 대신합니다.
+
+    | 템플릿 | 생성되는 task | 노출하는 개념 |
+    | --- | --- | --- |
+    | **Single Shell Command** | `shell` | 기본 |
+    | **File Picker + Shell** | `fileDialog` → `shell` | 대화형 입력 + `${selectFile.path}` |
+    | **Folder Picker + Shell** | `folderDialog` → `shell` | `${selectFolder.path}` |
+    | **Text Input + Shell** | `inputBox` → `shell` | 실행 시점 값 입력 + `${input.value}` |
+    | **Choice List + Shell** | `quickPick` → `shell` | 고정 목록 선택 + `${choice.value}` |
+    | **Multi-step Pipeline** | `shell` × N (`step1`…`stepN`) | 순차 실행 (앞 단계 실패 시 중단) |
+
+    Multi-step Pipeline은 1단계를 필수로 받고, 2단계부터는 **빈 값으로 Enter를 누르면 거기서 끝납니다** (Esc는 마법사 전체 취소). 단계 수는 최대 10개로 제한되며, 그보다 긴 파이프라인은 actions.json에서 직접 작성하는 편이 낫습니다.
+
+    선택지 목록은 쉼표로 구분해 입력하며(`stm32f4, stm32f7, nrf52`) 공백·빈 항목·중복은 자동으로 정리됩니다.
 3.  **제목 입력**: TaskHub 트리에 보일 사람용 제목 한 줄. **액션 ID는 이 제목에서 자동 도출**됩니다 (소문자 + 비영숫자를 하이픈으로 압축, 같은 ID가 있으면 `-2`, `-3` 형태로 충돌 회피). 직접 ID를 수정하고 싶으면 생성 후 actions.json에서 바꾸면 됩니다.
-4.  **템플릿 핵심 입력**: Single Shell은 명령어 한 줄. File Picker + Shell은 명령어 한 줄(기본값 `echo Selected file: ${selectFile.path}`로 prefilled). 작업 디렉터리(cwd), 터미널 reveal 모드, 성공/실패 메시지 같은 부수 옵션은 묻지 않고 기본값(`always` reveal, 메시지 없음)으로 채워집니다.
+4.  **템플릿 핵심 입력**: 템플릿마다 1~2개 질문만 받습니다. 대화형 task가 포함된 템플릿은 명령어 입력란에 참조 변수가 미리 채워져 나옵니다(예: `echo Selected file: ${selectFile.path}`, `echo ${input.value}`) — 변수 이름을 외우지 않아도 되도록. 작업 디렉터리(cwd), 터미널 reveal 모드, 성공/실패 메시지 같은 부수 옵션은 묻지 않고 기본값(`always` reveal, 메시지 없음)으로 채워집니다.
 5.  **저장 위치 선택**: actions.json에 폴더(`type: 'folder'` 항목)가 있을 때만 위치 선택 Quick Pick이 뜹니다. 폴더가 하나도 없는 평탄한 actions.json이면 이 단계는 자동으로 건너뜁니다. 루트(폴더 밖)는 actions.json 배열 끝에 추가됩니다.
 6.  **자동 저장 + 후속 액션**: 생성된 액션은 워크스페이스의 `.vscode/actions.json`에 즉시 기록되며 Actions 패널이 갱신됩니다. 알림 본문은 *"'X' 액션이 actions.json에 추가되었습니다. cwd, revealTerminal, 성공/실패 메시지 등 추가 설정이 필요하면 actions.json을 편집하세요."* 형태로, 마법사가 묻지 않고 default 로 채운 부수 옵션이 존재한다는 사실을 사용자에게 알려줍니다. 알림의 *actions.json 열기* / *바로 실행* 버튼으로 곧바로 편집기에 점프하거나 액션을 시험 실행할 수 있습니다.
 

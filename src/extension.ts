@@ -1100,44 +1100,71 @@ class WizardCancelledError extends Error {
     }
 }
 
-interface ActionTemplateDefinition {
+export interface ActionTemplateDefinition {
     id: string;
     label: string;
     description: string;
     /** Used as the `description` field of the auto-built PipelineAction. */
     defaultDescription: string;
     /**
-     * Prompts the user for the *minimum* template-specific inputs only —
-     * currently a single shell command for both bundled templates (the
-     * File Picker + Shell variant just prefills `${selectFile.path}` into
-     * the command). Task ids, cwd, revealTerminal, the file picker's
-     * `openLabel`, and success/fail messages are intentionally not
-     * prompted here — they default to safe values and the user can edit
-     * them in actions.json afterwards. This mirrors the wizard's "ask for
-     * what's essential, default the rest" goal so first-time creation is
-     * 3-4 prompts instead of 8-10.
+     * Assembles the task array from already-collected answers. Pure — no
+     * VS Code calls — so the emitted JSON shape can be pinned by unit tests
+     * without driving the prompt chain.
+     */
+    buildTasks(inputs: any): any[];
+    /**
+     * Prompts the user for the *minimum* template-specific inputs only, then
+     * hands them to `buildTasks`. Task ids, cwd, revealTerminal, dialog
+     * `openLabel`s, and success/fail messages are intentionally not prompted
+     * here — they default to safe values and the user can edit them in
+     * actions.json afterwards. This mirrors the wizard's "ask for what's
+     * essential, default the rest" goal so first-time creation is 3-4
+     * prompts instead of 8-10.
      */
     promptForTasks(): Promise<any[]>;
 }
 
+/**
+ * Upper bound on the steps the multi-step template will collect. The loop
+ * ends when the user submits an empty command; the cap is only a guard
+ * against an accidental endless prompt chain. Longer pipelines are a
+ * job for the JSON editor, not a wizard.
+ */
+export const MAX_PIPELINE_TEMPLATE_STEPS = 10;
+
 type DestinationPickItem = vscode.QuickPickItem & { folderRef?: ActionItem };
 
-const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
+/**
+ * Wizard starting points, ordered simplest first.
+ *
+ * Every template here produces a *structurally different* action. Variants
+ * that would differ only by the command string (a "Build" template next to
+ * a "Test" template, both emitting one `shell` task) are deliberately absent
+ * — they would pad the picker without teaching anything, and the command
+ * placeholder already carries those examples. What the list is really for is
+ * exposing the interactive task types (`fileDialog` / `folderDialog` /
+ * `inputBox` / `quickPick`) and multi-task pipelines, which a first-time
+ * user has no other way to discover short of reading the docs.
+ */
+export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
     {
         id: 'single-shell',
         label: t('단일 쉘 명령어', 'Single Shell Command'),
         description: t('하나의 쉘 명령어를 실행하고 공유 터미널에 출력을 스트리밍합니다.', 'Run one shell command and stream its output to the shared terminal.'),
         defaultDescription: t('쉘 명령어를 실행합니다.', 'Run a shell command.'),
-        async promptForTasks() {
-            const command = await promptForRequiredInput({
-                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
-                placeHolder: 'e.g. npm run build'
-            });
+        buildTasks({ command }: { command: string }) {
             return [{
                 id: 'run',
                 type: 'shell' as const,
                 command
             }];
+        },
+        async promptForTasks() {
+            const command = await promptForRequiredInput({
+                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
+                placeHolder: 'e.g. npm run build, make flash, ctest'
+            });
+            return this.buildTasks({ command });
         }
     },
     {
@@ -1145,32 +1172,183 @@ const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
         label: t('파일 선택 + 쉘', 'File Picker + Shell'),
         description: t('사용자에게 파일을 선택하게 한 후, 선택된 경로를 받는 쉘 명령어를 실행합니다.', 'Ask the user to pick a file, then run a shell command that receives the selected path.'),
         defaultDescription: t('파일을 선택하고 해당 파일로 명령어를 실행합니다.', 'Pick a file and run a command with the selection.'),
-        async promptForTasks() {
-            const dialogTaskId = 'selectFile';
-            const shellTaskId = 'run';
-            const defaultCommand = `echo Selected file: \${${dialogTaskId}.path}`;
-            const command = await promptForRequiredInput({
-                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
-                value: defaultCommand,
-                placeHolder: t(`선택한 파일을 참조하려면 \${${dialogTaskId}.path}를 사용하세요`, `Use \${${dialogTaskId}.path} to reference the selected file`)
-            });
+        buildTasks({ command }: { command: string }) {
             return [
                 {
-                    id: dialogTaskId,
+                    id: 'selectFile',
                     type: 'fileDialog' as const,
                     options: {
                         openLabel: t('파일 선택', 'Select file')
                     }
                 },
                 {
-                    id: shellTaskId,
+                    id: 'run',
                     type: 'shell' as const,
                     command
                 }
             ];
+        },
+        async promptForTasks() {
+            const command = await promptForRequiredInput({
+                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
+                value: 'echo Selected file: ${selectFile.path}',
+                placeHolder: t('선택한 파일을 참조하려면 ${selectFile.path}를 사용하세요', 'Use ${selectFile.path} to reference the selected file')
+            });
+            return this.buildTasks({ command });
+        }
+    },
+    {
+        id: 'folder-dialog-shell',
+        label: t('폴더 선택 + 쉘', 'Folder Picker + Shell'),
+        description: t('사용자에게 폴더를 선택하게 한 후, 선택된 경로를 받는 쉘 명령어를 실행합니다.', 'Ask the user to pick a folder, then run a shell command that receives the selected path.'),
+        defaultDescription: t('폴더를 선택하고 해당 폴더로 명령어를 실행합니다.', 'Pick a folder and run a command with the selection.'),
+        buildTasks({ command }: { command: string }) {
+            return [
+                {
+                    id: 'selectFolder',
+                    type: 'folderDialog' as const,
+                    options: {
+                        openLabel: t('폴더 선택', 'Select folder')
+                    }
+                },
+                {
+                    id: 'run',
+                    type: 'shell' as const,
+                    command
+                }
+            ];
+        },
+        async promptForTasks() {
+            const command = await promptForRequiredInput({
+                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
+                value: 'echo Selected folder: ${selectFolder.path}',
+                placeHolder: t('선택한 폴더를 참조하려면 ${selectFolder.path}를 사용하세요', 'Use ${selectFolder.path} to reference the selected folder')
+            });
+            return this.buildTasks({ command });
+        }
+    },
+    {
+        id: 'input-box-shell',
+        label: t('값 입력 + 쉘', 'Text Input + Shell'),
+        description: t('실행 전에 값을 입력받아 명령어에 끼워 넣습니다 (예: 버전 태그, 대상 이름).', 'Ask for a value before running and splice it into the command (e.g. a version tag or target name).'),
+        defaultDescription: t('입력받은 값으로 명령어를 실행합니다.', 'Run a command with a value entered at run time.'),
+        buildTasks({ inputPrompt, command }: { inputPrompt: string; command: string }) {
+            return [
+                {
+                    id: 'input',
+                    type: 'inputBox' as const,
+                    prompt: inputPrompt
+                },
+                {
+                    id: 'run',
+                    type: 'shell' as const,
+                    command
+                }
+            ];
+        },
+        async promptForTasks() {
+            const inputPrompt = await promptForRequiredInput({
+                prompt: t('실행 시 사용자에게 무엇을 물어볼까요?', 'What should the user be asked for at run time?'),
+                placeHolder: t('예: 릴리스 태그를 입력하세요', 'e.g. Enter the release tag')
+            });
+            const command = await promptForRequiredInput({
+                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
+                value: 'echo ${input.value}',
+                placeHolder: t('입력값을 참조하려면 ${input.value}를 사용하세요', 'Use ${input.value} to reference the entered value')
+            });
+            return this.buildTasks({ inputPrompt, command });
+        }
+    },
+    {
+        id: 'quick-pick-shell',
+        label: t('선택지 + 쉘', 'Choice List + Shell'),
+        description: t('미리 정한 목록에서 하나를 고르게 한 뒤 명령어를 실행합니다 (예: 타겟 보드).', 'Let the user pick from a fixed list, then run a command (e.g. a target board).'),
+        defaultDescription: t('선택한 항목으로 명령어를 실행합니다.', 'Run a command with the selected item.'),
+        buildTasks({ items, command }: { items: string[]; command: string }) {
+            return [
+                {
+                    id: 'choice',
+                    type: 'quickPick' as const,
+                    items,
+                    placeHolder: t('항목을 선택하세요', 'Select an item')
+                },
+                {
+                    id: 'run',
+                    type: 'shell' as const,
+                    command
+                }
+            ];
+        },
+        async promptForTasks() {
+            const raw = await promptForRequiredInput({
+                prompt: t('선택지를 쉼표로 구분해 입력하세요', 'Enter the choices, separated by commas'),
+                placeHolder: 'e.g. stm32f4, stm32f7, nrf52'
+            });
+            const items = parseTemplateChoiceList(raw);
+            if (items.length === 0) {
+                throw new Error(t('선택지를 하나 이상 입력해야 합니다.', 'At least one choice is required.'));
+            }
+            const command = await promptForRequiredInput({
+                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
+                value: 'echo ${choice.value}',
+                placeHolder: t('선택한 항목을 참조하려면 ${choice.value}를 사용하세요', 'Use ${choice.value} to reference the selected item')
+            });
+            return this.buildTasks({ items, command });
+        }
+    },
+    {
+        id: 'multi-step-shell',
+        label: t('다단계 파이프라인', 'Multi-step Pipeline'),
+        description: t('여러 쉘 명령어를 순서대로 실행합니다. 앞 단계가 실패하면 뒤 단계는 실행되지 않습니다.', 'Run several shell commands in order. A failing step stops the ones after it.'),
+        defaultDescription: t('여러 단계를 순서대로 실행합니다.', 'Run several steps in order.'),
+        buildTasks({ commands }: { commands: string[] }) {
+            return commands.map((command, index) => ({
+                id: `step${index + 1}`,
+                type: 'shell' as const,
+                command
+            }));
+        },
+        async promptForTasks() {
+            const commands: string[] = [];
+            while (commands.length < MAX_PIPELINE_TEMPLATE_STEPS) {
+                const step = commands.length + 1;
+                // Step 1 is required; from step 2 on, an empty submit ends the
+                // chain (Escape still cancels the whole wizard).
+                const command = step === 1
+                    ? await promptForRequiredInput({
+                        prompt: t(`${step}단계 명령어를 입력하세요`, `Enter the command for step ${step}`),
+                        placeHolder: 'e.g. make clean'
+                    })
+                    : await promptForOptionalInput({
+                        prompt: t(`${step}단계 명령어 (비워 두면 완료)`, `Command for step ${step} (leave empty to finish)`),
+                        placeHolder: t('비워 두고 Enter를 누르면 여기까지 저장합니다', 'Press Enter on an empty box to stop here')
+                    });
+                if (!command) {
+                    break;
+                }
+                commands.push(command);
+            }
+            return this.buildTasks({ commands });
         }
     }
 ];
+
+/**
+ * Split the comma-separated answer of the choice-list template into
+ * `quickPick` items: trim each entry, drop empties (trailing comma, double
+ * comma) and duplicates while keeping the order the user typed.
+ */
+export function parseTemplateChoiceList(raw: string): string[] {
+    const seen = new Set<string>();
+    const items: string[] = [];
+    for (const part of raw.split(',')) {
+        const trimmed = part.trim();
+        if (!trimmed || seen.has(trimmed)) { continue; }
+        seen.add(trimmed);
+        items.push(trimmed);
+    }
+    return items;
+}
 
 function collectActionIds(items: ActionItem[]): Set<string> {
     const ids = new Set<string>();
@@ -1227,6 +1405,12 @@ async function promptForRequiredInput(options: { prompt: string; value?: string;
     return result.trim();
 }
 
+/**
+ * Prompt whose empty submit is a valid "nothing more" answer (returns
+ * `undefined`) rather than a validation error. Escape still throws
+ * `WizardCancelledError`, so "done" and "cancelled" stay distinguishable —
+ * the multi-step template relies on that split to end its chain.
+ */
 async function promptForOptionalInput(options: { prompt: string; value?: string; placeHolder?: string }): Promise<string | undefined> {
     const result = await vscode.window.showInputBox({
         prompt: options.prompt,
