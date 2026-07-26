@@ -29,6 +29,19 @@
 =====================================================================
 -->
 
+## [0.6.22] - 2026-07-27
+
+### 수정 — 일괄 중지의 비동기 경합 (코드 리뷰 1/6, High)
+
+#### High (0.6.13 회귀)
+
+- **일괄 중지가 수동 종료 플래그를 너무 일찍 지우던 문제**: `taskhub.stopAllActions`가 `terminate()` 직후 `manuallyTerminatedActions`에서 대상 id를 동기적으로 삭제했다. 태스크 종료는 **비동기로** 도착하므로, 그때 실행되는 [executeAction](src/extension.ts)의 catch가 플래그를 보지 못해 사용자 요청 중지를 일반 실패로 처리했다. 개별 중지(`taskhub.stopAction`)는 플래그를 `finalizeActionRun`이 소비하도록 남기는데, 일괄 경로만 그 계약을 어겼다.
+  - 증상 셋: **불필요한 실패 토스트**, 방금 기록한 **`Action stopped by user`가 종료 오류 메시지로 덮임**(0.6.13에서 고쳤다고 명시한 바로 그 문제가 일괄 경로에서 되살아남), **✗ 아이콘 잔존**.
+  - 수정은 삭제 한 줄 제거에 그치지 않고 오케스트레이션을 `runStopAllActions()`로 분리했다. 이 함수의 의존성 표면(`StopAllActionsDeps`)에는 **플래그를 조작할 수단 자체가 없어**, 같은 회귀를 다시 만들 수 없다. 플래그 소유권은 `finalizeActionRun` 하나로 유지된다.
+- **취소해도 터미널이 닫히던 문제**: 호환 명령 `taskhub.terminateAllActions`가 중지 확인 창을 취소한 뒤에도 터미널을 닫았다. `runStopAllActions`가 `'cancelled'`를 돌려주고, 호환 명령은 그때 아무것도 하지 않는다.
+
+**테스트**: 신규 9 케이스([src/test/stopActions.test.ts](src/test/stopActions.test.ts) — 대상 없음/1개/다수 분기, 취소 시 무중지·트리 미갱신·취소 결과 반환, 전부 실패 시 `failed`와 히스토리 미기록, 일부 실패 시 성공분만 기록, 그리고 **의존성 표면에 플래그 조작 수단이 없음을 고정하는 회귀 봉쇄 테스트**), 최종 1610 passing.
+
 ## [0.6.21] - 2026-07-26
 
 ### 변경 — Memory Map 웹뷰 지역화 · 접근성 (UX 리뷰 6/6 완료)
