@@ -1546,10 +1546,220 @@ export function insertActionIntoDestination(workspaceActions: ActionItem[], dest
     }
 }
 
+/** Max rows the pre-save review lists before collapsing to a count. */
+export const WIZARD_REVIEW_LIST_LIMIT = 8;
+
+/**
+ * Findings introduced by the pending action, i.e. present in `after` beyond
+ * what `before` already had.
+ *
+ * Doctor lints a whole file, so running it on the prospective content would
+ * also surface problems the user's existing actions already had — blaming
+ * the new action for them turns the review step into noise. Matching is by
+ * (code, message) with multiplicity, not by source range: inserting an
+ * action shifts every later line, so ranges of untouched findings change
+ * even though the findings themselves did not.
+ */
+export function diffDoctorFindings(before: DoctorFinding[], after: DoctorFinding[]): DoctorFinding[] {
+    const remaining = new Map<string, number>();
+    for (const finding of before) {
+        const key = `${finding.code}|${finding.message}`;
+        remaining.set(key, (remaining.get(key) ?? 0) + 1);
+    }
+    const introduced: DoctorFinding[] = [];
+    for (const finding of after) {
+        const key = `${finding.code}|${finding.message}`;
+        const count = remaining.get(key) ?? 0;
+        if (count > 0) {
+            remaining.set(key, count - 1);
+            continue;
+        }
+        introduced.push(finding);
+    }
+    return introduced;
+}
+
+function describeTaskLine(task: any, index: number): string {
+    const id = typeof task?.id === 'string' ? task.id : `#${index + 1}`;
+    const type = typeof task?.type === 'string' ? task.type : '?';
+    const command = typeof task?.command === 'string'
+        ? task.command
+        : typeof task?.prompt === 'string'
+            ? task.prompt
+            : Array.isArray(task?.items)
+                ? task.items.join(', ')
+                : '';
+    const suffix = command ? ` — ${command}` : '';
+    return `${index + 1}. ${id} (${type})${suffix}`;
+}
+
+function formatFindingLine(finding: DoctorFinding, lang: 'ko' | 'en'): string {
+    const message = lang === 'ko' ? (finding.messageKo ?? finding.message) : finding.message;
+    const mark = finding.severity === 'error' ? '✗' : finding.severity === 'warning' ? '⚠' : 'ℹ';
+    return `${mark} [${finding.code}] ${message}`;
+}
+
+function collapseList(lines: string[], limit: number, lang: 'ko' | 'en'): string[] {
+    if (lines.length <= limit) { return lines; }
+    const shown = lines.slice(0, limit);
+    const overflow = lines.length - limit;
+    shown.push(lang === 'ko' ? `… 외 ${overflow}개` : `… and ${overflow} more`);
+    return shown;
+}
+
+/**
+ * Body of the pre-save confirmation modal.
+ *
+ * The wizard used to write straight to disk once the last prompt was
+ * answered, which hid two things worth a glance: the **derived action id**
+ * (it becomes the `taskhub.runAction.<id>` command name that lands in the
+ * user's keybindings.json, and renaming it later breaks those bindings) and
+ * any problem the new action introduces. Pure so both are pinned by tests.
+ */
+export function buildWizardReviewDetail(
+    action: ActionItem,
+    destinationLabel: string,
+    findings: DoctorFinding[],
+    lang: 'ko' | 'en' = 'ko'
+): string {
+    const tasks: any[] = action.action?.tasks ?? [];
+    const lines: string[] = [
+        lang === 'ko' ? `ID: ${action.id}` : `Id: ${action.id}`,
+        lang === 'ko' ? `위치: ${destinationLabel}` : `Location: ${destinationLabel}`,
+        '',
+        lang === 'ko' ? `Task ${tasks.length}개` : `${tasks.length} task(s)`,
+        ...collapseList(tasks.map(describeTaskLine), WIZARD_REVIEW_LIST_LIMIT, lang),
+    ];
+
+    if (findings.length > 0) {
+        const errors = findings.filter(f => f.severity === 'error').length;
+        const warnings = findings.filter(f => f.severity === 'warning').length;
+        lines.push('');
+        lines.push(lang === 'ko'
+            ? `점검 결과 — 오류 ${errors}건, 경고 ${warnings}건`
+            : `Checks — ${errors} error(s), ${warnings} warning(s)`);
+        lines.push(...collapseList(findings.map(f => formatFindingLine(f, lang)), WIZARD_REVIEW_LIST_LIMIT, lang));
+    }
+
+    return lines.join('\n');
+}
+
+/**
+ * Full text opened in an untitled document when the user asks to inspect the
+ * pending action. Carries what the modal cannot hold: the exact JSON that
+ * will be written and the complete Preview Run simulation.
+ */
+export function buildWizardReviewDocument(
+    action: ActionItem,
+    findings: DoctorFinding[],
+    previewReport: string,
+    lang: 'ko' | 'en' = 'ko'
+): string {
+    const sections: string[] = [];
+    sections.push(lang === 'ko'
+        ? `// 저장 예정 액션 — '${action.title}' (${action.id})\n// 이 문서는 미리보기입니다. 닫아도 저장에는 영향이 없습니다.`
+        : `// Pending action — '${action.title}' (${action.id})\n// This document is a preview; closing it does not affect saving.`);
+    sections.push(JSON.stringify(action, null, 2));
+
+    if (findings.length > 0) {
+        sections.push([
+            lang === 'ko' ? '// ── 점검 결과 ──' : '// ── Checks ──',
+            ...findings.map(f => `// ${formatFindingLine(f, lang)}`),
+        ].join('\n'));
+    }
+
+    sections.push(previewReport);
+    return sections.join('\n\n');
+}
+
 function persistWorkspaceActions(workspaceFolder: string, workspaceActionsPath: string, workspaceActions: ActionItem[]): void {
     const vscodeDir = path.join(workspaceFolder, '.vscode');
     fs.mkdirSync(vscodeDir, { recursive: true });
     fs.writeFileSync(workspaceActionsPath, JSON.stringify(workspaceActions, null, 2) + '\n');
+}
+
+/**
+ * Pre-save review. Runs the same two checkers the user can invoke manually
+ * — Doctor and Preview Run — against the *prospective* file and reports only
+ * what the new action introduces. Returns `true` when the user confirms.
+ *
+ * Doctor needs the whole file (id collisions are cross-action), so it lints
+ * the serialized prospective array and diffs against the current one.
+ */
+async function confirmWizardAction(input: {
+    action: ActionItem;
+    destinationLabel: string;
+    prospectiveActions: ActionItem[];
+    workspaceActionsPath: string;
+    workspaceFolder: string;
+    extensionPath: string;
+}): Promise<boolean> {
+    const lang: 'ko' | 'en' = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
+    const workspaceRoots = getWorkspaceRoots();
+    const prospectiveText = JSON.stringify(input.prospectiveActions, null, 2) + '\n';
+
+    let introduced: DoctorFinding[] = [];
+    try {
+        const validator = getActionsValidator() as unknown as (data: unknown) => boolean;
+        const doctorInput = (rawText: string): DoctorInput => ({
+            filePath: input.workspaceActionsPath,
+            sourceLabel: 'workspace',
+            rawText,
+            workspaceFolder: input.workspaceFolder,
+            workspaceRoots,
+            extensionPath: input.extensionPath,
+        });
+        const existingText = fs.existsSync(input.workspaceActionsPath)
+            ? fs.readFileSync(input.workspaceActionsPath, 'utf-8')
+            : '[]';
+        const before = runDoctor([doctorInput(existingText)], validator as any);
+        const after = runDoctor([doctorInput(prospectiveText)], validator as any);
+        introduced = diffDoctorFindings(before, after);
+    } catch (error: any) {
+        // A checker crash must not block creation — the wizard's job is to
+        // write the action, and the review is advisory.
+        outputChannel.appendLine(`[Wizard] Doctor check skipped: ${error?.message ?? error}`);
+    }
+
+    const saveLabel = t('저장', 'Save');
+    const inspectLabel = t('자세히 보기', 'Inspect');
+
+    // Loop so "Inspect" can open the document and come back to the same
+    // decision instead of silently ending the wizard.
+    for (;;) {
+        const choice = await vscode.window.showInformationMessage(
+            t(`'${input.action.title}' 액션을 저장할까요?`, `Save the action '${input.action.title}'?`),
+            {
+                modal: true,
+                detail: buildWizardReviewDetail(input.action, input.destinationLabel, introduced, lang),
+            },
+            saveLabel,
+            inspectLabel
+        );
+
+        if (choice === saveLabel) {
+            return true;
+        }
+        if (choice !== inspectLabel) {
+            return false;
+        }
+
+        let previewReport: string;
+        try {
+            previewReport = buildPreviewReport(input.action, {
+                workspaceFolder: input.workspaceFolder,
+                extensionPath: input.extensionPath,
+                workspaceRoots,
+            });
+        } catch (error: any) {
+            previewReport = `(preview unavailable: ${error?.message ?? error})`;
+        }
+        const document = await vscode.workspace.openTextDocument({
+            content: buildWizardReviewDocument(input.action, introduced, previewReport, lang),
+            language: 'jsonc',
+        });
+        await vscode.window.showTextDocument(document, { preview: true });
+    }
 }
 
 async function handlePostCreationChoice(created: { id: string; title: string }, workspaceActionsPath: string): Promise<void> {
@@ -1649,6 +1859,22 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
         };
 
         insertActionIntoDestination(sources.workspaceActions, destination, newAction);
+
+        // Last gate before touching disk. `insertActionIntoDestination`
+        // mutates the in-memory array only, so bailing out here leaves the
+        // file untouched.
+        const confirmed = await confirmWizardAction({
+            action: newAction,
+            destinationLabel: destination.label,
+            prospectiveActions: sources.workspaceActions,
+            workspaceActionsPath: sources.workspaceActionsPath,
+            workspaceFolder: targetFolder.uri.fsPath,
+            extensionPath: context.extensionPath,
+        });
+        if (!confirmed) {
+            return;
+        }
+
         persistWorkspaceActions(targetFolder.uri.fsPath, sources.workspaceActionsPath, sources.workspaceActions);
         refreshActionsAndCommands(context, mainViewProvider);
         await handlePostCreationChoice({ id, title }, sources.workspaceActionsPath);
