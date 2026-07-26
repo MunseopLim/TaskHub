@@ -19,6 +19,8 @@ import {
 	insertActionIntoDestination,
 	buildDestinationPickItems,
 	deriveActionIdFromTitle,
+	buildActionCommandId,
+	validateActionIdInput,
 	deriveLinkTitleFromUrl,
 	createGroupedTaskPresentationOptions,
 	addLinkEntry,
@@ -1432,12 +1434,56 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(deriveActionIdFromTitle('  -- Hello, World!! --  ', new Set()), 'hello-world');
 		});
 
-		test('passes the validator regex even for unicode-heavy titles', () => {
-			// Korean / emoji / accented characters all collapse to hyphens, so
-			// the resulting id still satisfies [A-Za-z0-9._-].
-			const idPattern = /^[A-Za-z0-9._-]+$/;
-			assert.ok(idPattern.test(deriveActionIdFromTitle('한글 빌드', new Set())));
-			assert.ok(idPattern.test(deriveActionIdFromTitle('Café ☕', new Set())));
+		test('0.6.25: 유니코드 문자를 보존한다', () => {
+			// 이전에는 [^a-z0-9]로 잘라내 한글 제목이 전부 'action', 'action-2'가
+			// 됐다. actions.json / Doctor 메시지 / dependsOn 어디서도 어떤
+			// 액션인지 알 수 없는 id다.
+			assert.strictEqual(deriveActionIdFromTitle('한글 빌드', new Set()), '한글-빌드');
+			assert.strictEqual(deriveActionIdFromTitle('Café ☕', new Set()), 'café');
+			assert.strictEqual(deriveActionIdFromTitle('펌웨어 v2 빌드', new Set()), '펌웨어-v2-빌드');
+		});
+
+		test('0.6.25: 유니코드 id도 유효한 커맨드 id로 인코딩된다', () => {
+			// 스키마는 id에 패턴 제약이 없고 런타임 검증은 중복만 본다. 유일한
+			// 하위 제약은 keybindings.json에 들어가는 커맨드 id인데,
+			// buildActionCommandId가 non-ASCII 바이트를 percent-encoding 한다.
+			const id = deriveActionIdFromTitle('한글 빌드', new Set());
+			const commandId = buildActionCommandId(id);
+			assert.ok(/^taskhub\.runAction\.[A-Za-z0-9._%-]+$/.test(commandId), commandId);
+			assert.notStrictEqual(commandId, buildActionCommandId(deriveActionIdFromTitle('다른 빌드', new Set())),
+				'서로 다른 id는 서로 다른 커맨드 id로 매핑돼야 한다');
+		});
+
+		test('문자·숫자가 전혀 없는 제목은 여전히 기본값으로 폴백한다', () => {
+			assert.strictEqual(deriveActionIdFromTitle('!!!', new Set()), 'action');
+			assert.strictEqual(deriveActionIdFromTitle('☕☕', new Set()), 'action');
+		});
+	});
+
+	suite('validateActionIdInput (저장 전 확인의 ID 편집)', () => {
+		test('빈 값과 공백만 있는 값은 거부한다', () => {
+			assert.ok(validateActionIdInput('', new Set()));
+			assert.ok(validateActionIdInput('   ', new Set()));
+		});
+
+		test('공백이 포함된 id는 거부한다', () => {
+			// dependsOn 목록이나 로그 한 줄에 들어갔을 때 읽을 수 없다.
+			assert.ok(validateActionIdInput('fw build', new Set()));
+		});
+
+		test('이미 쓰이는 id는 거부한다', () => {
+			const message = validateActionIdInput('fw.build', new Set(['fw.build']));
+			assert.ok(message && message.includes('fw.build'), message);
+		});
+
+		test('유니코드 id는 허용한다 (스키마에 패턴 제약이 없다)', () => {
+			assert.strictEqual(validateActionIdInput('펌웨어-빌드', new Set()), undefined);
+			assert.strictEqual(validateActionIdInput('fw.build-2', new Set(['fw.build'])), undefined);
+		});
+
+		test('앞뒤 공백은 잘라낸 뒤 판정한다', () => {
+			assert.ok(validateActionIdInput('  fw.build  ', new Set(['fw.build'])), '트림 후 중복이면 거부');
+			assert.strictEqual(validateActionIdInput('  fw.new  ', new Set(['fw.build'])), undefined);
 		});
 	});
 

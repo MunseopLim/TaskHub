@@ -1471,7 +1471,17 @@ async function promptForOptionalInput(options: { prompt: string; value?: string;
  * input is the human-meaningful title; the machine id is computed.
  */
 export function deriveActionIdFromTitle(title: string, existingIds: Set<string>): string {
-    const slug = title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    // Unicode letters/digits survive (`\p{L}\p{N}`), so a Korean or accented
+    // title yields a meaningful id instead of collapsing to `action`,
+    // `action-2`, … — which is what an ASCII-only class produced, leaving
+    // every non-Latin project with numbered placeholder ids in actions.json,
+    // Doctor messages and `dependsOn` references.
+    //
+    // Nothing downstream requires ASCII: the schema puts no pattern on `id`,
+    // runtime validation only checks uniqueness, and `buildActionCommandId`
+    // percent-encodes every non-`[A-Za-z0-9_.-]` byte, so the keybinding
+    // command id stays valid (just encoded) for any input.
+    const slug = title.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
     const base = slug.length > 0 ? slug : 'action';
     if (!existingIds.has(base)) {
         return base;
@@ -1584,6 +1594,30 @@ export function insertActionIntoDestination(workspaceActions: ActionItem[], dest
 
 /** Max rows the pre-save review lists before collapsing to a count. */
 export const WIZARD_REVIEW_LIST_LIMIT = 8;
+
+/**
+ * Validate an action id typed into the pre-save review's *Change id* prompt.
+ * Returns an error message, or `undefined` when the value is acceptable.
+ *
+ * Deliberately permissive about the character set — the schema puts no
+ * pattern on `id` and `buildActionCommandId` encodes anything — but rejects
+ * what actually breaks: emptiness, surrounding/embedded whitespace (ids show
+ * up in `dependsOn` lists and log lines where a space is unreadable), and
+ * collisions with an id that already exists.
+ */
+export function validateActionIdInput(value: string, existingIds: Set<string>): string | undefined {
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return t('ID를 입력해야 합니다.', 'An id is required.');
+    }
+    if (/\s/.test(trimmed)) {
+        return t('ID에는 공백을 쓸 수 없습니다.', 'An id cannot contain whitespace.');
+    }
+    if (existingIds.has(trimmed)) {
+        return t(`이미 '${trimmed}' ID를 쓰는 액션이 있습니다.`, `An action with the id '${trimmed}' already exists.`);
+    }
+    return undefined;
+}
 
 /**
  * Findings introduced by the pending action, i.e. present in `after` beyond
@@ -1729,38 +1763,45 @@ async function confirmWizardAction(input: {
     workspaceActionsPath: string;
     workspaceFolder: string;
     extensionPath: string;
+    /** Ids already in use, excluding the pending action itself. */
+    existingIds: Set<string>;
 }): Promise<boolean> {
     const lang: 'ko' | 'en' = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
     const workspaceRoots = getWorkspaceRoots();
-    const prospectiveText = JSON.stringify(input.prospectiveActions, null, 2) + '\n';
 
-    let introduced: DoctorFinding[] = [];
-    try {
-        const validator = getActionsValidator() as unknown as (data: unknown) => boolean;
-        const doctorInput = (rawText: string): DoctorInput => ({
-            filePath: input.workspaceActionsPath,
-            sourceLabel: 'workspace',
-            rawText,
-            workspaceFolder: input.workspaceFolder,
-            workspaceRoots,
-            extensionPath: input.extensionPath,
-        });
-        const existingText = fs.existsSync(input.workspaceActionsPath)
-            ? fs.readFileSync(input.workspaceActionsPath, 'utf-8')
-            : '[]';
-        const before = runDoctor([doctorInput(existingText)], validator as any);
-        const after = runDoctor([doctorInput(prospectiveText)], validator as any);
-        introduced = diffDoctorFindings(before, after);
-    } catch (error: any) {
-        // A checker crash must not block creation — the wizard's job is to
-        // write the action, and the review is advisory.
-        outputChannel.appendLine(`[Wizard] Doctor check skipped: ${error?.message ?? error}`);
-    }
+    // Recomputed whenever the id changes: `id.duplicate` and friends depend
+    // on it, so a stale finding list would describe the previous id.
+    const collectFindings = (): DoctorFinding[] => {
+        try {
+            const validator = getActionsValidator() as unknown as (data: unknown) => boolean;
+            const doctorInput = (rawText: string): DoctorInput => ({
+                filePath: input.workspaceActionsPath,
+                sourceLabel: 'workspace',
+                rawText,
+                workspaceFolder: input.workspaceFolder,
+                workspaceRoots,
+                extensionPath: input.extensionPath,
+            });
+            const existingText = fs.existsSync(input.workspaceActionsPath)
+                ? fs.readFileSync(input.workspaceActionsPath, 'utf-8')
+                : '[]';
+            const before = runDoctor([doctorInput(existingText)], validator as any);
+            const after = runDoctor([doctorInput(JSON.stringify(input.prospectiveActions, null, 2) + '\n')], validator as any);
+            return diffDoctorFindings(before, after);
+        } catch (error: any) {
+            // A checker crash must not block creation — the wizard's job is
+            // to write the action, and the review is advisory.
+            outputChannel.appendLine(`[Wizard] Doctor check skipped: ${error?.message ?? error}`);
+            return [];
+        }
+    };
 
+    let introduced = collectFindings();
     const saveLabel = t('저장', 'Save');
     const inspectLabel = t('자세히 보기', 'Inspect');
+    const editIdLabel = t('ID 변경', 'Change id');
 
-    // Loop so "Inspect" can open the document and come back to the same
+    // Loop so "Inspect" / "Change id" can act and come back to the same
     // decision instead of silently ending the wizard.
     for (;;) {
         const choice = await vscode.window.showInformationMessage(
@@ -1770,11 +1811,30 @@ async function confirmWizardAction(input: {
                 detail: buildWizardReviewDetail(input.action, input.destinationLabel, introduced, lang),
             },
             saveLabel,
+            editIdLabel,
             inspectLabel
         );
 
         if (choice === saveLabel) {
             return true;
+        }
+        if (choice === editIdLabel) {
+            // The id becomes the `taskhub.runAction.<id>` command name and is
+            // referenced by `dependsOn`; renaming it after the fact silently
+            // breaks user keybindings, so this is the cheap moment to fix it.
+            const edited = await vscode.window.showInputBox({
+                prompt: t('액션 ID를 입력하세요', 'Enter the action id'),
+                value: input.action.id,
+                ignoreFocusOut: true,
+                validateInput: (value) => validateActionIdInput(value, input.existingIds),
+            });
+            if (edited !== undefined) {
+                // Mutates the object already inserted into `prospectiveActions`,
+                // so the serialized preview and Doctor rerun both see the new id.
+                input.action.id = edited.trim();
+                introduced = collectFindings();
+            }
+            continue;
         }
         if (choice !== inspectLabel) {
             return false;
@@ -1906,6 +1966,7 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
             workspaceActionsPath: sources.workspaceActionsPath,
             workspaceFolder: targetFolder.uri.fsPath,
             extensionPath: context.extensionPath,
+            existingIds,
         });
         if (!confirmed) {
             return;
