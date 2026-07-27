@@ -20,57 +20,45 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 suite('내장 예제 액션 노출 정책', () => {
 
     suite('shouldIncludeBuiltinActions', () => {
-        const empty = { hasWorkspaceActions: false, hasPresetActions: false };
-        const withWorkspace = { hasWorkspaceActions: true, hasPresetActions: false };
-        const withPreset = { hasWorkspaceActions: false, hasPresetActions: true };
-        const withBoth = { hasWorkspaceActions: true, hasPresetActions: true };
+        // 0.6.32: 판단이 모드 하나에만 달려 있다는 사실을 시그니처가 드러낸다.
+        // 이전에는 hasWorkspaceActions / hasPresetActions도 받았는데(0.6.14의
+        // auto가 참조했다), 0.6.24에서 auto가 그것들을 보지 않게 된 뒤에도
+        // "나중에 필요할지 몰라" 남아 있었다. 읽는 사람에게는 그 입력이 결과에
+        // 영향을 준다는 잘못된 신호였고, 호출부는 쓰지 않을 값을 계산했다.
 
         // 0.6.24: auto의 의미가 바뀌었다. 0.6.14의 auto는 "프로젝트가 비었을
         // 때 예제를 트리에 넣는다"였지만, 그 주입이 0.6.15의 빈 화면 CTA를
         // 무력화했다 — VS Code는 트리가 완전히 비어야 welcome을 띄운다.
         // 이제 auto는 트리에 넣지 않고, CTA의 'Browse Examples' 버튼이 예제
         // 접근을 담당한다.
-        test('auto: 빈 프로젝트에서도 예제를 트리에 넣지 않는다 (CTA가 대신함)', () => {
-            assert.strictEqual(shouldIncludeBuiltinActions('auto', empty), false,
+        test('auto: 예제를 트리에 넣지 않는다 (CTA가 대신함)', () => {
+            assert.strictEqual(shouldIncludeBuiltinActions('auto'), false,
                 '예제가 주입되면 트리가 비지 않아 Create Action CTA가 뜰 수 없다');
         });
 
-        test('auto: 자기 액션이 있는 프로젝트에서도 당연히 넣지 않는다', () => {
-            assert.strictEqual(shouldIncludeBuiltinActions('auto', withWorkspace), false);
-            assert.strictEqual(shouldIncludeBuiltinActions('auto', withPreset), false);
-            assert.strictEqual(shouldIncludeBuiltinActions('auto', withBoth), false);
-        });
-
         test('always: 0.6.14 이전 동작 — 무조건 병합', () => {
-            assert.strictEqual(shouldIncludeBuiltinActions('always', empty), true);
-            assert.strictEqual(shouldIncludeBuiltinActions('always', withBoth), true);
+            assert.strictEqual(shouldIncludeBuiltinActions('always'), true);
         });
 
-        test('never: 빈 프로젝트에서도 보여주지 않는다', () => {
-            assert.strictEqual(shouldIncludeBuiltinActions('never', empty), false);
-            assert.strictEqual(shouldIncludeBuiltinActions('never', withBoth), false);
+        test('never: 보여주지 않는다', () => {
+            assert.strictEqual(shouldIncludeBuiltinActions('never'), false);
         });
 
         test('auto와 never는 트리 주입 여부에서 같고, CTA 노출로만 갈린다', () => {
             // 두 값의 차이는 viewsWelcome의 when 절이 담당한다 (아래 manifest
             // 스위트에서 고정). 주입 로직에서는 동일해야 한다.
-            for (const combo of [empty, withWorkspace, withPreset, withBoth]) {
-                assert.strictEqual(
-                    shouldIncludeBuiltinActions('auto', combo),
-                    shouldIncludeBuiltinActions('never', combo)
-                );
-            }
+            assert.strictEqual(
+                shouldIncludeBuiltinActions('auto'),
+                shouldIncludeBuiltinActions('never')
+            );
         });
 
-        test('세 모드 모두 hasWorkspaceActions/hasPresetActions 조합에 대해 결정적이다', () => {
+        test('세 모드 모두 결정적이다', () => {
             const modes: BuiltinActionsMode[] = ['auto', 'always', 'never'];
-            const combos = [empty, withWorkspace, withPreset, withBoth];
             for (const mode of modes) {
-                for (const combo of combos) {
-                    const first = shouldIncludeBuiltinActions(mode, combo);
-                    assert.strictEqual(shouldIncludeBuiltinActions(mode, combo), first,
-                        `${mode}/${JSON.stringify(combo)} 결과가 호출마다 달라지면 캐시와 어긋난다`);
-                }
+                const first = shouldIncludeBuiltinActions(mode);
+                assert.strictEqual(shouldIncludeBuiltinActions(mode), first,
+                    `${mode} 결과가 호출마다 달라지면 캐시와 어긋난다`);
             }
         });
     });

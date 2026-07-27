@@ -53,6 +53,22 @@
 
 **테스트**: 신규 9 케이스 — IT-119~IT-122(마법사 종단 흐름, 이 범위 최초로 `taskhub.createAction` 명령 자체를 끝까지 실행한다) + 웹뷰 탐지기 5종(로케일별 렌더 3종 분화, 마스킹 회귀 가드, 로케일 고정 전제 검증). 최종 1634 passing.
 
+## [0.6.32] - 2026-07-27
+
+### 수정 — 마법사와 트리 목록이 서로 다른 "이미 쓰인 ID"를 보던 문제 (코드 리뷰 7/7)
+
+#### Medium (조용한 그림자)
+
+- **마법사가 액션 소스의 일부만 보고 있었다**: `loadWizardActionSources`는 대상 폴더의 `.vscode/actions.json`과 번들 예제만 읽었다. 선택된 **프리셋**과 **다른 워크스페이스 폴더**는 아예 보지 않았으므로, 그쪽과 같은 id를 가진 액션을 그대로 만들어 저장할 수 있었다. 이 충돌은 **오류로 드러나지 않는다** — 교차 소스 중복은 출력 채널 경고일 뿐이고 `mergeActions`가 우선순위로 조용히 해소한다. 결과는 둘 중 하나가 그림자에 가려지는 것이고, `taskhub.runAction.<id>`가 어느 쪽을 실행할지는 순회 순서에 달린다. 반대 방향 문제도 있었다: `taskhub.builtinActions`가 예제를 숨겨도 마법사는 늘 번들을 읽어 그 id를 예약했으므로, 목록에 없는 액션 때문에 불필요한 `-2` 접미사가 붙었다.
+- **두 경로가 같은 resolver를 쓴다**: 트리 로더와 마법사가 각자 "무엇이 살아 있는가"를 답하던 것을 `collectEffectiveActionSources()` 하나로 모았다. 번들 노출 여부(`builtinActions`), 프리셋 로드, 워크스페이스 폴더 열거가 한 곳에서 결정된다. 참조: [src/extension.ts](src/extension.ts).
+- **도달 불가능한 `try/catch` 제거**: 마법사가 `validateUniqueActionIdsAcrossSources`를 `try { … } catch { throw error; }`로 감싸고 있었다. 이 함수는 던지지 않고 출력 채널에 경고만 남기므로 catch에 닿을 수 없다. 이 죽은 코드가 코드 리뷰 두 번을 오도해, 양쪽 모두 "마법사가 중복 id에서 하드 실패한다"고 잘못 결론냈다.
+
+#### 정리
+
+- **`shouldIncludeBuiltinActions`의 죽은 인자 제거**: 판단은 모드 하나로만 이뤄지는데 `hasWorkspaceActions` / `hasPresetActions`를 계속 받고 있었다 (0.6.14의 `auto`가 참조했고, 0.6.24에서 보지 않게 된 뒤에도 "나중에 필요할지 몰라" 남았다). 읽는 사람에게 그 입력이 결과에 영향을 준다는 잘못된 신호였고, 호출부는 쓰지 않을 값을 계산했다.
+
+**테스트**: 신규 11 케이스([src/test/wizardSources.test.ts](src/test/wizardSources.test.ts) — 소스 병합, 중첩 폴더, 프리셋·형제 폴더와의 충돌 회피, 숨겨진 번들이 id를 예약하지 않음, 수동 ID 입력도 같은 범위 확인). 그중 3종은 **호출부 배선**(`wizardTakenActionIds`의 두 인자)을 겨냥한다 — 순수 함수만 검사하면 마법사가 `otherSources`를 다시 빠뜨려도 전부 통과하는데, 결함이 있던 자리가 정확히 그 인자였기 때문이다. 되돌려서 3종이 실패하는 것을 확인했다. 기존 `shouldIncludeBuiltinActions` 테스트는 시그니처 변경에 맞춰 갱신. 최종 1691 passing.
+
 ## [0.6.31] - 2026-07-27
 
 ### 수정 — 웹뷰 3종의 클릭 전용 인터랙션과 남은 리뷰 항목 (코드 리뷰 7/7)

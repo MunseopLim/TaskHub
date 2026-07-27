@@ -171,8 +171,14 @@ interface GroupableTaskPresentationOptions extends vscode.TaskPresentationOption
 }
 
 interface WizardActionSources {
+    /** The target folder's own array — mutated in place, then written back. */
     workspaceActions: ActionItem[];
-    bundledActions: ActionItem[];
+    /**
+     * Every *other* live source (bundled examples when shown, the selected
+     * preset, other workspace folders). Only their ids matter to the wizard:
+     * a new action must not collide with them.
+     */
+    otherSources: ActionSource[];
     workspaceActionsPath: string;
     workspaceFolder: vscode.WorkspaceFolder;
 }
@@ -730,13 +736,14 @@ export type BuiltinActionsMode = 'auto' | 'always' | 'never';
  * package.json), `never` hides even that. `always` keeps the pre-0.6.14
  * behaviour for anyone who actually used the demo buttons.
  *
- * `sources` no longer affects the outcome but stays in the signature: the
- * caller has the information, and a future mode may need it again.
+ * The decision therefore depends on the mode alone. An earlier signature
+ * also took the other sources (`hasWorkspaceActions` / `hasPresetActions`)
+ * because `auto` used to consult them; it was kept "in case a future mode
+ * needs it again", which only signalled to readers that those inputs still
+ * mattered — and made the caller compute them for nothing. Removed; add it
+ * back with a real use if one appears.
  */
-export function shouldIncludeBuiltinActions(
-    mode: BuiltinActionsMode,
-    _sources: { hasWorkspaceActions: boolean; hasPresetActions: boolean }
-): boolean {
+export function shouldIncludeBuiltinActions(mode: BuiltinActionsMode): boolean {
     return mode === 'always';
 }
 
@@ -745,24 +752,63 @@ function getBuiltinActionsMode(): BuiltinActionsMode {
     return raw === 'always' || raw === 'never' ? raw : 'auto';
 }
 
-function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] {
+/** One actions.json source that contributes to the merged list. */
+interface ActionSource {
+    sourceLabel: string;
+    actions: ActionItem[];
+    /** Only set for workspace-folder sources. */
+    workspaceFolderPath?: string;
+}
+
+/**
+ * Everything that ends up in the merged action list, split by origin.
+ *
+ * This is the **single definition of "what is actually live"**. Before it
+ * existed, the tree loader and the creation wizard each answered that
+ * question their own way and disagreed: the wizard always read the bundled
+ * examples (even when `taskhub.builtinActions` hid them, so their ids stayed
+ * reserved for no reason) and never looked at the selected preset or at the
+ * *other* workspace folders — so it would happily mint an id that a preset
+ * already used. Nothing failed loudly, because cross-source duplicates are
+ * only a warning; the new action simply got shadowed by, or shadowed, the
+ * other one, and `taskhub.runAction.<id>` could fire the wrong action.
+ */
+interface EffectiveActionSources {
+    /** Empty when `taskhub.builtinActions` keeps the examples out. */
+    bundled: ActionSource;
+    /** Absent when no preset is selected, or the selected one failed to load. */
+    preset?: ActionSource;
+    /** One per workspace folder, in workspace order. */
+    workspaces: (ActionSource & { workspaceFolderPath: string })[];
+}
+
+/**
+ * Resolve the sources above. Ordered lowest-priority first (bundled →
+ * preset → workspace), matching how `loadAllActionsUncached` merges them.
+ *
+ * Throws whatever `loadAndValidateActions` throws for a *workspace* file —
+ * a broken `.vscode/actions.json` must surface, and both callers want that.
+ * A broken preset or bundled file only warns: neither is the user's to fix
+ * from here, and losing them shouldn't block the workspace's own actions.
+ */
+function collectEffectiveActionSources(context: vscode.ExtensionContext): EffectiveActionSources {
     const extensionLabel = 'extension media/actions.json';
 
     // Load selected preset from settings
     const presetId = getSelectedPresetId();
-    let presetActions: ActionItem[] = [];
-    let presetLabel: string | null = null;
+    let preset: ActionSource | undefined;
 
     if (presetId) {
         const presets = discoverPresets(context);
-        const preset = presets.find(p => p.id === presetId || p.name === presetId);
+        const found = presets.find(p => p.id === presetId || p.name === presetId);
 
-        if (preset) {
+        if (found) {
             try {
-                presetActions = loadAndValidateActions(preset.filePath, {
-                    sourceLabel: `preset: ${preset.name}`
-                });
-                presetLabel = `preset: ${preset.name}`;
+                const sourceLabel = `preset: ${found.name}`;
+                preset = {
+                    sourceLabel,
+                    actions: loadAndValidateActions(found.filePath, { sourceLabel }),
+                };
             } catch (error: any) {
                 outputChannel.appendLine(`[Preset Warning] Failed to load preset '${presetId}': ${error.message}`);
             }
@@ -772,25 +818,44 @@ function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] 
     }
 
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
-    const workspaceSources = workspaceFolders.map(folder => {
+    const workspaces = workspaceFolders.map(folder => {
         const workspaceJsonPath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
-        const workspaceLabel = `${folder.name}:.vscode/actions.json`;
-        const actions = loadAndValidateActions(workspaceJsonPath, { sourceLabel: workspaceLabel });
-        return { sourceLabel: workspaceLabel, actions, workspaceFolderPath: folder.uri.fsPath };
+        const sourceLabel = `${folder.name}:.vscode/actions.json`;
+        return {
+            sourceLabel,
+            actions: loadAndValidateActions(workspaceJsonPath, { sourceLabel }),
+            workspaceFolderPath: folder.uri.fsPath,
+        };
     });
 
     // Bundled examples are read only when they will actually be shown: an
     // excluded source must not contribute id-collision errors either (a user
     // action named `defaultButton.showEnv` is their business once the demo
     // buttons are hidden).
-    const includeBuiltin = shouldIncludeBuiltinActions(getBuiltinActionsMode(), {
-        hasWorkspaceActions: workspaceSources.some(source => source.actions.length > 0),
-        hasPresetActions: presetActions.length > 0,
-    });
     const mediaJsonPath = path.join(context.extensionPath, 'media', 'actions.json');
-    const extensionActions = includeBuiltin
-        ? loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel })
-        : [];
+    let bundledActions: ActionItem[] = [];
+    if (shouldIncludeBuiltinActions(getBuiltinActionsMode())) {
+        try {
+            bundledActions = loadAndValidateActions(mediaJsonPath, { sourceLabel: extensionLabel });
+        } catch (error: any) {
+            outputChannel.appendLine(`[Builtin Warning] Failed to load bundled examples: ${error.message}`);
+        }
+    }
+
+    return { bundled: { sourceLabel: extensionLabel, actions: bundledActions }, preset, workspaces };
+}
+
+/** Every source in merge order, dropping the empty ones. */
+function orderedActionSources(sources: EffectiveActionSources): ActionSource[] {
+    return [sources.bundled, ...(sources.preset ? [sources.preset] : []), ...sources.workspaces]
+        .filter(source => source.actions.length > 0);
+}
+
+function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] {
+    const effective = collectEffectiveActionSources(context);
+    const extensionActions = effective.bundled.actions;
+    const presetActions = effective.preset?.actions ?? [];
+    const workspaceSources = effective.workspaces;
 
     // Merge with priority: workspace > preset > extension
     let mergedActions = extensionActions;
@@ -807,17 +872,7 @@ function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] 
         }
     }
 
-    // Build sources list for validation and workspace folder mapping
-    const sources = [
-        { sourceLabel: extensionLabel, actions: extensionActions, workspaceFolderPath: undefined as string | undefined },
-        ...(presetActions.length > 0 && presetLabel ? [{
-            sourceLabel: presetLabel,
-            actions: presetActions,
-            workspaceFolderPath: undefined as string | undefined
-        }] : []),
-        ...workspaceSources
-    ].filter(source => source.actions.length > 0);
-
+    const sources = orderedActionSources(effective);
     if (sources.length > 1) {
         validateUniqueActionIdsAcrossSources(sources.map(({ sourceLabel, actions }) => ({ sourceLabel, actions })));
     }
@@ -1495,34 +1550,70 @@ export function deriveActionIdFromTitle(title: string, existingIds: Set<string>)
     return `${base}-${Date.now()}`;
 }
 
+/**
+ * Ids that are already live anywhere in the merged list, so the wizard can
+ * avoid minting a duplicate.
+ *
+ * "Anywhere" is the point. Until 0.6.32 the wizard only looked at the target
+ * folder's own file plus the bundled examples, which was wrong in both
+ * directions: it reserved bundled ids even when `taskhub.builtinActions`
+ * hides them, and it ignored the selected preset and every *other* workspace
+ * folder. A collision with those didn't fail loudly — cross-source
+ * duplicates are only a warning in the output channel — it just meant the
+ * new action shadowed (or was shadowed by) the other one, and
+ * `taskhub.runAction.<id>` could fire whichever the traversal reached first.
+ */
+export function collectTakenActionIds(sources: readonly { actions: ActionItem[] }[]): Set<string> {
+    return collectActionIds(sources.flatMap(source => source.actions));
+}
+
+/**
+ * The id set the wizard checks against: the target folder's own actions plus
+ * every other live source.
+ *
+ * Both halves matter and they fail differently. A duplicate *inside* the
+ * target file is a hard load error the user sees immediately; a duplicate
+ * *across* sources is only an output-channel warning, so it slips through
+ * and quietly shadows one of the two actions.
+ *
+ * Split out from the wizard body so the wiring itself is testable — the two
+ * arguments are exactly what 0.6.31 and earlier got wrong, and a pure test
+ * of `collectTakenActionIds` alone would not notice them being dropped.
+ */
+export function wizardTakenActionIds(sources: {
+    workspaceActions: ActionItem[];
+    otherSources: readonly { actions: ActionItem[] }[];
+}): Set<string> {
+    return collectTakenActionIds([
+        { actions: sources.workspaceActions },
+        ...sources.otherSources,
+    ]);
+}
+
 function loadWizardActionSources(context: vscode.ExtensionContext, workspaceFolder: vscode.WorkspaceFolder): WizardActionSources {
     const workspaceActionsPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'actions.json');
-    let workspaceActions: ActionItem[] = [];
-    const workspaceLabel = `${workspaceFolder.name}:.vscode/actions.json`;
+
+    // Same resolver the tree loader uses, so "what already exists" cannot
+    // drift between the two views again.
+    let effective: EffectiveActionSources;
     try {
-        workspaceActions = loadAndValidateActions(workspaceActionsPath, { sourceLabel: workspaceLabel });
+        effective = collectEffectiveActionSources(context);
     } catch (error: any) {
         throw new Error(`Could not load ${workspaceActionsPath}: ${error.message}`);
     }
 
-    let bundledActions: ActionItem[] = [];
-    try {
-        const bundledPath = path.join(context.extensionPath, 'media', 'actions.json');
-        bundledActions = loadAndValidateActions(bundledPath, { sourceLabel: 'extension media/actions.json' });
-    } catch (error) {
-        bundledActions = [];
-    }
+    // The target folder's array is the one the wizard mutates and writes
+    // back, so it must be the *same object* the resolver produced — building
+    // a second copy would let the two disagree about what is being saved.
+    const target = effective.workspaces.find(source => source.workspaceFolderPath === workspaceFolder.uri.fsPath);
+    const workspaceActions = target?.actions ?? [];
 
-    try {
-        validateUniqueActionIdsAcrossSources([
-            { sourceLabel: 'extension media/actions.json', actions: bundledActions },
-            { sourceLabel: workspaceLabel, actions: workspaceActions }
-        ]);
-    } catch (error: any) {
-        throw error;
-    }
-
-    return { workspaceActions, bundledActions, workspaceActionsPath, workspaceFolder };
+    return {
+        workspaceActions,
+        otherSources: orderedActionSources(effective).filter(source => source !== target),
+        workspaceActionsPath,
+        workspaceFolder,
+    };
 }
 
 async function promptForActionTemplate(): Promise<ActionTemplateDefinition | undefined> {
@@ -1987,7 +2078,7 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
         });
         const tasks = await template.promptForTasks();
 
-        const existingIds = collectActionIds([...sources.bundledActions, ...sources.workspaceActions]);
+        const existingIds = wizardTakenActionIds(sources);
 
         const destination = await promptForActionDestination(sources.workspaceActions);
 
