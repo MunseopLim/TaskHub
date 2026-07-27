@@ -4,12 +4,14 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import {
+    DIALOG_MEMORY_MAX_ENTRIES,
     DIALOG_SCOPE,
     DialogMemoryDeps,
     coerceDefaultUri,
     defaultDialogMemoryDeps,
     directoryToRemember,
     initDialogMemory,
+    pruneDialogLocations,
     showOpenDialogWithMemory,
     showSaveDialogWithMemory,
     taskDialogScope,
@@ -550,7 +552,13 @@ suite('dialogMemory', () => {
             return {
                 keys: () => Array.from(store.keys()),
                 get: <T>(key: string, defaultValue?: T) => (store.has(key) ? store.get(key) as T : defaultValue),
-                update: (key: string, value: unknown) => { store.set(key, value); return Promise.resolve(); },
+                update: (key: string, value: unknown) => {
+                    // 실제 Memento는 `undefined`를 **삭제**로 다룬다. 가짜가
+                    // 값을 그대로 넣어 두면 키가 남아, 마이그레이션이 옛 키를
+                    // 지우는지 검사할 수 없다.
+                    if (value === undefined) { store.delete(key); } else { store.set(key, value); }
+                    return Promise.resolve();
+                },
                 setKeysForSync: () => undefined,
             } as unknown as vscode.Memento;
         }
@@ -570,22 +578,27 @@ suite('dialogMemory', () => {
             fs.rmSync(tempRoot, { recursive: true, force: true });
         });
 
+        /** 0.6.33부터의 저장 형식: scope → { dir, at } 맵 하나. */
+        const STATE_KEY = 'taskhub.dialogLocations';
+        const locationsIn = (store: Map<string, unknown>) =>
+            (store.get(STATE_KEY) ?? {}) as Record<string, { dir: string; at: number }>;
+
         test('remember는 workspaceState와 globalState 양쪽에 기록한다', async () => {
             const deps = defaultDialogMemoryDeps();
             deps.remember('scope.a', tempRoot);
             // update는 비동기 chain이므로 microtask 한 바퀴를 돌린다.
             await Promise.resolve();
 
-            assert.strictEqual(workspaceStore.get('dialogLocation:scope.a'), tempRoot);
-            assert.strictEqual(globalStore.get('dialogLocation:scope.a'), tempRoot);
+            assert.strictEqual(locationsIn(workspaceStore)['scope.a']?.dir, tempRoot);
+            assert.strictEqual(locationsIn(globalStore)['scope.a']?.dir, tempRoot);
         });
 
         test('recall은 workspaceState를 우선하고 없으면 globalState로 내려간다', () => {
             const deps = defaultDialogMemoryDeps();
-            globalStore.set('dialogLocation:scope.b', dir('from-global'));
+            globalStore.set(STATE_KEY, { 'scope.b': { dir: dir('from-global'), at: 1 } });
             assert.strictEqual(deps.recall('scope.b'), dir('from-global'));
 
-            workspaceStore.set('dialogLocation:scope.b', dir('from-workspace'));
+            workspaceStore.set(STATE_KEY, { 'scope.b': { dir: dir('from-workspace'), at: 1 } });
             assert.strictEqual(deps.recall('scope.b'), dir('from-workspace'));
         });
 
@@ -609,17 +622,131 @@ suite('dialogMemory', () => {
             await config.update('dialog.rememberLastLocation', false, vscode.ConfigurationTarget.Global);
             try {
                 const deps = defaultDialogMemoryDeps();
-                globalStore.set('dialogLocation:scope.c', tempRoot);
+                globalStore.set(STATE_KEY, { 'scope.c': { dir: tempRoot, at: 1 } });
 
                 assert.strictEqual(deps.recall('scope.c'), undefined, '설정이 꺼지면 저장된 값을 무시한다');
 
                 deps.remember('scope.d', tempRoot);
                 await Promise.resolve();
-                assert.strictEqual(workspaceStore.has('dialogLocation:scope.d'), false);
-                assert.strictEqual(globalStore.has('dialogLocation:scope.d'), false);
+                assert.ok(!locationsIn(workspaceStore)['scope.d']);
+                assert.ok(!locationsIn(globalStore)['scope.d']);
             } finally {
                 await config.update('dialog.rememberLastLocation', undefined, vscode.ConfigurationTarget.Global);
             }
+        });
+
+        /**
+         * 저장소 무한 증가 차단 (0.6.33).
+         *
+         * `taskDialogScope`는 액션 id + 태스크 id로 scope를 만든다. 액션 이름을
+         * 바꾸거나 지울 때마다 옛 scope가 남는데, scope당 키 하나였던 옛 형식은
+         * 정리 경로가 없어 **globalState에 영구히 쌓였다**. 0.6.23의 키 형식
+         * 변경으로 이미 한 세대가 고아가 됐다.
+         *
+         * "현재 워크스페이스의 액션 id와 대조해 지운다"는 접근은 쓰지 않았다 —
+         * globalState는 창 사이에 공유되므로 지금 열린 프로젝트에 없는 scope가
+         * 곧 죽은 scope인 것은 아니고, 그 방식은 다른 프로젝트가 물려받아 쓰는
+         * 위치를 지운다. 총량만 제한한다.
+         */
+        suite('저장소 크기 제한과 마이그레이션', () => {
+
+            test('상한을 넘으면 오래 전에 기록된 것부터 버린다', () => {
+                const map: Record<string, { dir: string; at: number }> = {};
+                for (let i = 0; i < DIALOG_MEMORY_MAX_ENTRIES + 10; i++) {
+                    map[`scope-${i}`] = { dir: dir(`d${i}`), at: i };
+                }
+
+                const pruned = pruneDialogLocations(map);
+
+                assert.strictEqual(Object.keys(pruned).length, DIALOG_MEMORY_MAX_ENTRIES);
+                assert.ok(pruned[`scope-${DIALOG_MEMORY_MAX_ENTRIES + 9}`], '최신 항목이 남아야 한다');
+                assert.ok(!pruned['scope-0'], '가장 오래된 항목이 남아 있다');
+            });
+
+            test('상한 이하면 손대지 않는다 (같은 객체를 그대로 돌려준다)', () => {
+                const map = { a: { dir: dir('a'), at: 1 } };
+                assert.strictEqual(pruneDialogLocations(map), map);
+            });
+
+            test('at이 같으면 scope 이름으로 갈라 결과가 결정적이다', () => {
+                const map = {
+                    b: { dir: dir('b'), at: 5 },
+                    a: { dir: dir('a'), at: 5 },
+                    c: { dir: dir('c'), at: 5 },
+                };
+                const first = Object.keys(pruneDialogLocations(map, 2)).sort();
+                const second = Object.keys(pruneDialogLocations(map, 2)).sort();
+                assert.deepStrictEqual(first, second);
+                assert.deepStrictEqual(first, ['a', 'b']);
+            });
+
+            test('remember가 상한을 유지한다', async () => {
+                const deps = defaultDialogMemoryDeps();
+                const seed: Record<string, { dir: string; at: number }> = {};
+                for (let i = 0; i < DIALOG_MEMORY_MAX_ENTRIES; i++) {
+                    seed[`old-${i}`] = { dir: dir(`old${i}`), at: i };
+                }
+                globalStore.set(STATE_KEY, seed);
+                workspaceStore.set(STATE_KEY, { ...seed });
+
+                deps.remember('brand-new', tempRoot);
+                await Promise.resolve();
+
+                const stored = locationsIn(globalStore);
+                assert.strictEqual(Object.keys(stored).length, DIALOG_MEMORY_MAX_ENTRIES,
+                    '기록할 때마다 상한을 지키지 않으면 저장소가 무한히 자란다');
+                assert.strictEqual(stored['brand-new']?.dir, tempRoot);
+                assert.ok(!stored['old-0'], '가장 오래된 항목이 밀려나야 한다');
+            });
+
+            test('옛 형식의 키를 흡수하고 지운다', () => {
+                globalStore.set('dialogLocation:hexViewer', dir('legacy-hex'));
+                globalStore.set('dialogLocation:task.fileDialog:/pick', dir('legacy-orphan'));
+
+                // initDialogMemory가 마이그레이션을 돌린다.
+                initDialogMemory({
+                    workspaceState: makeMemento(workspaceStore),
+                    globalState: makeMemento(globalStore),
+                } as unknown as vscode.ExtensionContext);
+
+                assert.strictEqual(locationsIn(globalStore)['hexViewer']?.dir, dir('legacy-hex'),
+                    '흡수하지 않으면 사용자가 쓰던 위치가 사라진다');
+                assert.ok(!globalStore.has('dialogLocation:hexViewer'), '옛 키가 남았다');
+                assert.ok(!globalStore.has('dialogLocation:task.fileDialog:/pick'),
+                    '0.6.23 이전의 빈 액션 id 고아 키도 함께 지워져야 한다');
+            });
+
+            test('마이그레이션은 멱등하고 새 형식을 덮어쓰지 않는다', () => {
+                globalStore.set(STATE_KEY, { hexViewer: { dir: dir('current'), at: 99 } });
+                globalStore.set('dialogLocation:hexViewer', dir('stale-legacy'));
+
+                const rerun = () => initDialogMemory({
+                    workspaceState: makeMemento(workspaceStore),
+                    globalState: makeMemento(globalStore),
+                } as unknown as vscode.ExtensionContext);
+                rerun();
+                rerun();
+
+                assert.strictEqual(locationsIn(globalStore)['hexViewer']?.dir, dir('current'),
+                    '새 형식에 이미 값이 있으면 그쪽이 최신이다');
+            });
+
+            test('옛 키가 없으면 아무것도 쓰지 않는다', () => {
+                initDialogMemory({
+                    workspaceState: makeMemento(workspaceStore),
+                    globalState: makeMemento(globalStore),
+                } as unknown as vscode.ExtensionContext);
+
+                assert.ok(!globalStore.has(STATE_KEY),
+                    '깨끗한 설치에서 빈 맵을 만들어 두면 마이그레이션이 매번 돈 것처럼 보인다');
+            });
+
+            test('손상된 저장 값은 무시하고 넘어간다', () => {
+                globalStore.set(STATE_KEY, { good: { dir: dir('ok'), at: 1 }, bad: 'not-an-object', worse: { at: 5 } });
+                assert.strictEqual(defaultDialogMemoryDeps().recall('good'), dir('ok'));
+                assert.strictEqual(defaultDialogMemoryDeps().recall('bad'), undefined);
+                assert.strictEqual(defaultDialogMemoryDeps().recall('worse'), undefined);
+            });
         });
 
         test('컨텍스트가 없으면 조용히 무시한다 (activate 이전 호출)', () => {

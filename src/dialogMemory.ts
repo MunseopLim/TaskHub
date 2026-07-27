@@ -21,7 +21,56 @@ import * as path from 'path';
  * 다른 창에서 쓰던 같은 용도의 위치를 물려받도록(globalState) 하기 위함이다.
  */
 
-const STATE_PREFIX = 'dialogLocation:';
+/**
+ * 0.6.11~0.6.32 의 저장 형식: scope 하나당 키 하나 (`dialogLocation:<scope>`).
+ *
+ * `fileDialog` / `folderDialog` 태스크의 scope 는 액션 id 와 태스크 id 로
+ * 만들어지므로(`taskDialogScope`), 액션 이름을 바꾸거나 지울 때마다 옛 키가
+ * 남았다. 정리 경로가 없어 **globalState 에 영구히 쌓였고**, 0.6.23 의 키 형식
+ * 변경(액션 id 가 빠져 있던 버그 수정)으로 이미 한 세대가 고아가 됐다.
+ *
+ * 마이그레이션 대상으로만 남긴다. {@link migrateLegacyDialogLocations} 참조.
+ */
+const LEGACY_STATE_PREFIX = 'dialogLocation:';
+
+/** 현재 저장 형식: scope → 위치를 담은 맵 하나. */
+const STATE_KEY = 'taskhub.dialogLocations';
+
+/**
+ * 맵에 담아 둘 scope 최대 개수.
+ *
+ * 고정 scope 는 10개 남짓이고 나머지는 `fileDialog` / `folderDialog` 태스크
+ * 단위로 생긴다. 100개면 실제 사용에서 넘길 일이 거의 없으면서, 액션을
+ * 반복해서 만들고 지우는 프로젝트에서도 저장소가 무한히 자라지 않는다.
+ */
+export const DIALOG_MEMORY_MAX_ENTRIES = 100;
+
+interface DialogLocationEntry {
+    /** 기억된 디렉터리. */
+    dir: string;
+    /** 마지막으로 **기록된** 시각 (ms). 축출 순서를 정한다. */
+    at: number;
+}
+
+type DialogLocationMap = Record<string, DialogLocationEntry>;
+
+/**
+ * 오래된 항목부터 버려 `max` 개로 줄인다.
+ *
+ * 기준은 "마지막 접근"이 아니라 **"마지막 기록"**이다. `remember` 는 사용자가
+ * 실제로 무언가를 고른 직후에만 불리므로 둘이 사실상 같고, 읽을 때마다 쓰기를
+ * 일으키지 않아도 된다 — 다이얼로그를 열 때마다 globalState 를 갱신하는 것은
+ * 얻는 것에 비해 비싸다.
+ *
+ * 순수 함수로 둬서 축출 순서를 시계 없이 검증할 수 있다.
+ */
+export function pruneDialogLocations(map: DialogLocationMap, max: number = DIALOG_MEMORY_MAX_ENTRIES): DialogLocationMap {
+    const entries = Object.entries(map);
+    if (entries.length <= max) { return map; }
+    // `at` 이 같으면 scope 이름으로 갈라 결과가 결정적이게 한다.
+    entries.sort((a, b) => (b[1].at - a[1].at) || a[0].localeCompare(b[0]));
+    return Object.fromEntries(entries.slice(0, max));
+}
 
 /** 다이얼로그 용도 식별자. 같은 값을 쓰는 다이얼로그끼리만 위치를 공유한다. */
 export const DIALOG_SCOPE = {
@@ -56,7 +105,48 @@ let memoryContext: vscode.ExtensionContext | undefined;
 export function initDialogMemory(context: vscode.ExtensionContext | undefined): vscode.ExtensionContext | undefined {
     const previous = memoryContext;
     memoryContext = context;
+    if (context) {
+        migrateLegacyDialogLocations(context.workspaceState);
+        migrateLegacyDialogLocations(context.globalState);
+    }
     return previous;
+}
+
+/**
+ * scope 당 키 하나였던 옛 형식을 맵 하나로 흡수하고 옛 키를 지운다.
+ *
+ * **한 번만 도는 작업이 아니라 멱등해야 한다** — 활성화마다 불리고, 옛 키가
+ * 하나도 없으면 아무것도 하지 않는다.
+ *
+ * 흡수한 항목의 `at` 은 `0` 이다. 옛 형식에 시각이 없어 복원할 수 없고, 축출이
+ * 필요해지면 **이번 세션에서 실제로 쓴 것보다 먼저** 버리는 편이 맞다.
+ *
+ * 리뷰에서 나온 대안 — "현재 워크스페이스의 액션 id 와 대조해 고아 키를
+ * 지운다" — 은 쓰지 않았다. globalState 는 창 사이에 공유되므로, 지금 열린
+ * 프로젝트에 없는 scope 가 곧 죽은 scope 인 것은 아니다. 그 방식은 다른
+ * 프로젝트가 물려받아 쓰는 위치를 지워, 이 모듈이 의도한 "다른 창에서 쓰던
+ * 위치를 이어받는다"는 동작을 깨뜨린다. 대신 총량만 제한한다.
+ */
+function migrateLegacyDialogLocations(memento: vscode.Memento): void {
+    let legacyKeys: readonly string[];
+    try {
+        legacyKeys = memento.keys().filter(key => key.startsWith(LEGACY_STATE_PREFIX));
+    } catch {
+        return;   // keys() 미지원 환경(구버전 API)에서는 조용히 넘어간다.
+    }
+    if (legacyKeys.length === 0) { return; }
+
+    const map = readLocationMap(memento);
+    for (const key of legacyKeys) {
+        const scope = key.slice(LEGACY_STATE_PREFIX.length);
+        const dir = memento.get<unknown>(key);
+        // 새 형식에 이미 값이 있으면 그쪽이 최신이다 — 덮어쓰지 않는다.
+        if (typeof dir === 'string' && dir.length > 0 && !map[scope]) {
+            map[scope] = { dir, at: 0 };
+        }
+        void Promise.resolve(memento.update(key, undefined)).then(undefined, () => undefined);
+    }
+    writeLocationMap(memento, pruneDialogLocations(map));
 }
 
 function isMemoryEnabled(): boolean {
@@ -85,19 +175,41 @@ export interface DialogMemoryDeps {
     isEnabled(): boolean;
 }
 
+function readLocationMap(memento: vscode.Memento): DialogLocationMap {
+    const raw = memento.get<unknown>(STATE_KEY);
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { return {}; }
+    // 저장소가 손상됐거나 형식이 바뀐 경우를 걸러 낸다 — 잘못된 항목 하나로
+    // 다이얼로그가 실패하지 않도록.
+    const map: DialogLocationMap = {};
+    for (const [scope, value] of Object.entries(raw as Record<string, unknown>)) {
+        if (!value || typeof value !== 'object') { continue; }
+        const { dir, at } = value as Partial<DialogLocationEntry>;
+        if (typeof dir === 'string' && dir.length > 0) {
+            map[scope] = { dir, at: typeof at === 'number' ? at : 0 };
+        }
+    }
+    return map;
+}
+
+/** 저장 실패(저장소 손상 등)로 다이얼로그 흐름이 깨지지 않도록 삼킨다. */
+function writeLocationMap(memento: vscode.Memento, map: DialogLocationMap): void {
+    void Promise.resolve(memento.update(STATE_KEY, map)).then(undefined, () => undefined);
+}
+
 function defaultRecall(scope: string): string | undefined {
     if (!memoryContext || !isMemoryEnabled()) { return undefined; }
-    const key = STATE_PREFIX + scope;
-    return memoryContext.workspaceState.get<string>(key)
-        ?? memoryContext.globalState.get<string>(key);
+    return readLocationMap(memoryContext.workspaceState)[scope]?.dir
+        ?? readLocationMap(memoryContext.globalState)[scope]?.dir;
 }
 
 function defaultRemember(scope: string, dir: string): void {
     if (!memoryContext || !isMemoryEnabled()) { return; }
-    const key = STATE_PREFIX + scope;
-    // 저장 실패(예: 저장소 손상)로 다이얼로그 흐름이 깨지지 않도록 삼킨다.
-    void Promise.resolve(memoryContext.workspaceState.update(key, dir)).then(undefined, () => undefined);
-    void Promise.resolve(memoryContext.globalState.update(key, dir)).then(undefined, () => undefined);
+    const at = Date.now();
+    for (const memento of [memoryContext.workspaceState, memoryContext.globalState]) {
+        const map = readLocationMap(memento);
+        map[scope] = { dir, at };
+        writeLocationMap(memento, pruneDialogLocations(map));
+    }
 }
 
 function defaultWorkspaceFallbackDir(): string | undefined {
