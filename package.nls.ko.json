@@ -1,17 +1,14 @@
 {
   "_comment": "한국어 manifest 문자열. 키는 package.nls.json과 1:1로 맞춘다 — 빠진 키는 VS Code가 기본(영어) 번들로 폴백하므로 조용히 영어가 섞인다. 키 정합성은 packageNls.test.ts가 검사한다.",
-
   "view.actions": "액션",
   "view.links": "워크스페이스 링크",
   "view.favorites": "즐겨찾는 파일",
   "view.history": "실행 기록",
-
   "welcome.noFolder": "TaskHub는 프로젝트마다 정의된 액션을 실행합니다.\n[폴더 열기](command:vscode.openFolder)\n폴더를 열면 그 폴더의 .vscode/actions.json에 액션을 만들 수 있습니다.",
   "welcome.noActions": "아직 액션이 없습니다.\n[액션 만들기](command:taskhub.createAction)\n또는 예제에서 시작해 직접 편집하세요:\n[예제 둘러보기](command:taskhub.showExampleJsonQuickPick)\n[액션 가져오기…](command:taskhub.importActions)",
   "welcome.noActionsNoExamples": "아직 액션이 없습니다.\n[액션 만들기](command:taskhub.createAction)\n[액션 가져오기…](command:taskhub.importActions)",
   "welcome.noLinks": "아직 워크스페이스 링크가 없습니다.\n링크는 문서·대시보드·이슈 트래커로 가는 바로가기이며 .vscode/links.json에 저장됩니다.\n[링크 추가](command:taskhub.addLink)",
   "welcome.noFavorites": "아직 즐겨찾는 파일이 없습니다.\n자주 여는 파일을 고정해 두세요 — 탐색기에서 파일을 우클릭하거나 여기서 추가할 수 있습니다.\n[파일을 즐겨찾기에 추가](command:taskhub.addFavoriteFile)",
-
   "cmd.openLink": "링크 열기",
   "cmd.copyLink": "링크 복사",
   "cmd.goToLink": "링크로 이동",
@@ -61,7 +58,6 @@
   "cmd.showHexViewer": "Hex Viewer 열기",
   "cmd.openMarkdownPreview": "Markdown 미리 보기 열기",
   "cmd.openHtmlInBrowser": "기본 브라우저에서 HTML 열기",
-
   "setting.showTaskStatus": "액션의 실행 피드백을 표시합니다: 액션 뷰의 상태 아이콘·진행률과 완료 알림. 이 설정을 끄면 **실패 알림도 함께 사라집니다** (액션이 지정한 `failMessage` 포함) — 대신 실행 기록 패널이나 TaskHub 출력 채널을 확인하세요. 중지 기능은 영향받지 않습니다: 인라인 중지 버튼과 *모든 액션 중지*는 그대로 쓸 수 있습니다.",
   "setting.showVerboseLogs": "켜면 파이프라인 실행 시 출력 패널에 상세 로그를 표시합니다. 기본값에서는 최소한의 상태 메시지만 표시합니다.",
   "setting.pythonIoEncoding": "TaskHub가 실행하는 명령의 `PYTHONIOENCODING` 환경 변수에 지정할 값입니다. 인코딩을 강제하지 않으려면 빈 문자열로 두고, 호환이 필요하면 `utf-8:ignore` 같은 값을 지정하세요.",
@@ -76,7 +72,7 @@
   "setting.builtinActions.auto": "번들 예제를 액션 목록에서 제외합니다. 대신 빈 상태 화면에 '예제 둘러보기' 버튼을 제공합니다.",
   "setting.builtinActions.always": "번들 예제 액션을 항상 목록에 병합합니다 (0.6.14 이전 동작).",
   "setting.builtinActions.never": "목록에서 제외하고, 빈 상태 화면의 '예제 둘러보기' 버튼까지 숨깁니다.",
-  "setting.rememberLastLocation": "TaskHub의 파일/폴더 대화상자를 같은 용도로 마지막에 사용한 위치에서 다시 엽니다 (Hex Viewer, JSON Editor, Memory Map, 내보내기/가져오기, 각 `fileDialog`/`folderDialog` 태스크 등). 끄면 TaskHub가 시작 위치를 일절 지정하지 않아, 창과 확장 프로그램이 공유하는 VS Code 자체의 최근 경로가 쓰입니다. 액션 JSON에 적어 둔 `defaultUri`는 켜든 끄든 그대로 존중합니다.",
+  "setting.rememberLastLocation": "TaskHub의 파일/폴더 대화상자를 같은 용도로 마지막에 사용한 위치에서 다시 엽니다 (Hex Viewer, JSON Editor, Memory Map, 내보내기/가져오기, 각 `fileDialog`/`folderDialog` 태스크 등). 끄면 TaskHub가 시작 위치를 일절 지정하지 않고 VS Code에 맡깁니다 — VS Code의 기본 규칙과 `files.dialog.defaultPath` 설정이 적용됩니다. 이때 저장 대화상자는 제안 파일명도 함께 사라집니다 — VS Code에는 폴더를 지정하지 않고 이름만 제안하는 수단이 없습니다. 액션 JSON에 적어 둔 `defaultUri`는 켜든 끄든 그대로 존중합니다.",
   "setting.hoverNumberBase": "C/C++ 파일에서 진법 변환 호버 툴팁을 활성화합니다. 숫자 리터럴 위에 마우스를 올리면 2진수·10진수·16진수 표현을 표시합니다.",
   "setting.bitOperationHover": "**[실험적]** C/C++ 파일에서 비트 연산 결과를 호버 툴팁에 표시합니다.\n\n다음 경우의 계산 결과를 보여줍니다:\n- 변수 연산: `value |= 0x80` (Before/After 표시)\n- 상수 표현식: `1U << 5` (Left/Result 표시)\n\n**지원하는 형태:**\n- ✅ `value & 0xFF` (변수 & 리터럴)\n- ✅ `1U << 5` (상수 표현식)\n- ❌ `a ^ b` (변수 & 변수 — 지원하지 않음)\n\n⚠️ 실험적 기능이므로 이후 버전에서 동작이 바뀔 수 있습니다.",
   "setting.presetSelected": "미리 정의된 액션을 자동으로 적용할 프리셋을 선택합니다.\n\n- **none**: 워크스페이스 액션만 사용\n- **example**: Git·빌드 명령이 담긴 예제 프리셋\n- 또는 확장 프로그램이나 워크스페이스 `.vscode/presets/` 폴더의 사용자 정의 프리셋 ID를 직접 입력\n\n프리셋은 워크스페이스 `.vscode/actions.json`과 병합되며, 워크스페이스 액션이 우선합니다."

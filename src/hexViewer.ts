@@ -526,6 +526,9 @@ function getWebviewContent(
         min-width: 22px;
     }
     .hex-cell.gap { color: var(--gap-color); }
+    /* 파일 끝에서 unit 을 다 채우지 못한 셀. 값은 정확하되 자리수가 짧으므로
+       흐리게 표시해 "여기가 끝" 임을 알린다. */
+    .hex-cell.partial-unit { opacity: 0.75; font-style: italic; }
     .hex-cell.selected { background: var(--select); border-radius: 2px; }
     .hex-cell.find-highlight { background: var(--vscode-editor-findMatchHighlightBackground, #ea5c0055); border-radius: 2px; }
     .hex-cell.find-current { background: var(--vscode-editor-findMatchBackground, #515c6a); border-radius: 2px; }
@@ -702,6 +705,11 @@ function getWebviewContent(
         return val;
     }
 
+    /** 이 offset 에서 파일 끝까지 남은 바이트 수 (unit 보다 작을 수 있다). */
+    function unitBytesAt(offset) {
+        return Math.max(0, Math.min(unitSize, TOTAL_SIZE - offset));
+    }
+
     function formatHex(val, digits) {
         return val.toString(16).toUpperCase().padStart(digits, '0');
     }
@@ -766,15 +774,30 @@ function getWebviewContent(
             const td = document.createElement('td');
             td.className = 'hex-cell';
 
-            if (byteOffset + unitSize <= TOTAL_SIZE) {
-                const val = readUnit(byteOffset, unitSize, le);
+            // 파일 끝의 **불완전한 unit 도 렌더**한다. 예전에는 완전한 unit
+            // 에만 셀을 만들어, 18바이트 파일의 4-byte 모드에서 offset 16 이
+            // 화면에 없었다. 그 결과 Go to / Find / 키보드가 존재하지 않는
+            // 셀을 가리켰고, 이를 clamp 로 막으면 이번엔 요청한 주소를 조용히
+            // 다른 주소로 바꾸게 된다. 표현할 수 있는 것을 표현하는 편이
+            // 어느 쪽보다 정직하다.
+            const availableBytes = unitBytesAt(byteOffset);
+            if (availableBytes > 0) {
+                // 남은 바이트만으로 읽는다. 완전한 unit 이면 종전과 동일.
+                const val = readUnit(byteOffset, availableBytes, le);
+                const shownDigits = availableBytes * 2;
                 // BigInt 그대로 포맷 — Number() 변환은 8-byte unit에서 2^53
                 // 초과 값의 정밀도를 깨뜨린다(M5). toString(16)은 BigInt에서도 동작.
-                td.textContent = val !== null ? formatHex(val & BigInt('0x' + 'F'.repeat(digits)), digits) : '';
+                const text = val !== null
+                    ? formatHex(val & BigInt('0x' + 'F'.repeat(shownDigits)), shownDigits)
+                    : '';
+                // 자리수를 unit 폭에 맞춰 앞을 비운다 — 열 정렬이 흐트러지지
+                // 않으면서 "여기는 unit 이 덜 찼다"가 눈에 보인다.
+                td.textContent = text.padStart(digits, ' ');
                 td.dataset.offset = String(byteOffset);
+                if (availableBytes < unitSize) { td.classList.add('partial-unit'); }
 
                 let isGap = true;
-                for (let b = 0; b < unitSize; b++) {
+                for (let b = 0; b < availableBytes; b++) {
                     if (hasData(byteOffset + b)) { isGap = false; break; }
                 }
                 if (isGap) { td.classList.add('gap'); }
@@ -920,8 +943,11 @@ function getWebviewContent(
     function updateStatusBar(minOff, maxOff) {
         const le = endian === 'little';
         const addr = BASE_ADDR + minOff;
-        const selSize = maxOff - minOff + unitSize;
-        const dataSpan = Math.min(selSize, Math.max(0, TOTAL_SIZE - minOff));
+        // 마지막 unit 은 덜 찼을 수 있으므로 파일 끝을 넘겨 세지 않는다.
+        // 더하기 unitSize 로 고정하면 18바이트 파일에서 "선택 20 바이트" 처럼
+        // 실제 파일보다 큰 값이 표시됐다.
+        const selSize = Math.min(maxOff - minOff + unitSize, Math.max(0, TOTAL_SIZE - minOff));
+        const dataSpan = selSize;
         const selectionHasData = dataSpan > 0 && hasDataRange(minOff, dataSpan);
         let html = '<span>' + S.statusOffset + ': 0x' + formatHex(minOff, 8) + '</span>';
         html += '<span>' + S.statusAddress + ': ' + formatAddr(addr) + '</span>';
@@ -990,13 +1016,9 @@ function getWebviewContent(
         }
         e.preventDefault();
 
-        // 이동 가능한 마지막 offset은 마지막 **완전한** unit의 시작이다.
-        // 렌더는 byteOffset + unitSize <= TOTAL_SIZE인 셀에만 data-offset을
-        // 붙이므로, 파일 끝의 불완전한 unit(18바이트 파일의 4-byte 모드에서
-        // offset 16)은 화면에 셀이 없다 — 마지막 바이트 기준으로 정렬하면
-        // 존재하지 않는 셀을 선택해 상태 표시줄만 바뀌고 선택 표시는 사라진다.
+        // 경계는 jumpToOffset 과 같은 규칙을 쓴다 (lastSelectableOffset).
         // 파일이 unit 하나보다 작으면 고를 수 있는 셀 자체가 없다.
-        const lastUnitStart = Math.floor((TOTAL_SIZE - unitSize) / unitSize) * unitSize;
+        const lastUnitStart = lastSelectableOffset();
         if (lastUnitStart < 0) { return; }
 
         // 아직 아무것도 고르지 않았으면 첫 바이트에서 시작한다.
@@ -1052,8 +1074,27 @@ function getWebviewContent(
         renderVisibleRows();
     }
 
+    /**
+     * 선택 가능한 마지막 offset — 마지막 unit 셀의 시작.
+     *
+     * 이제 불완전한 unit 도 렌더하므로(unitBytesAt 참조) 파일 안의 모든
+     * unit 경계에 셀이 존재한다. 따라서 이 값은 "화면에 없는 곳"을 걸러내는
+     * 용도가 아니라, 키보드 이동이 파일 끝을 넘지 않게 하는 상한일 뿐이다.
+     *
+     * 0.6.36 초안에서는 여기서 **마지막 완전한 unit** 을 돌려주고
+     * jumpToOffset 이 입력을 그 값으로 clamp 했는데, 그러면 "Go to 17" 이
+     * 조용히 12 로 바뀌고 Find 도 같은 함수를 타므로 끝부분 검색 결과가 엉뚱한
+     * 위치를 가리켰다 — 존재하지 않는 셀을 고르는 것보다 나쁜 동작이었다.
+     */
+    function lastSelectableOffset() {
+        if (TOTAL_SIZE <= 0) { return -1; }
+        return Math.floor((TOTAL_SIZE - 1) / unitSize) * unitSize;
+    }
+
     function jumpToOffset(offset) {
         if (typeof offset !== 'number' || offset < 0 || offset >= TOTAL_SIZE) { return; }
+        // 요청한 주소를 바꾸지 않는다. 파일 안의 주소면 그 주소를 담은 unit
+        // 셀이 반드시 존재하므로(불완전한 unit 도 렌더된다) 정렬만 하면 된다.
         const rowIndex = Math.floor(offset / BYTES_PER_ROW);
         selectedOffset = offset;
         selectedEndOffset = offset;
@@ -1277,10 +1318,16 @@ function getWebviewContent(
         const digits = unitHexDigits();
         const parts = [];
         for (let off = minOff; off < maxOff && off < TOTAL_SIZE; off += unitSize) {
-            const val = readUnit(off, unitSize, le);
+            // 남은 바이트만 읽는다. 완전한 unit 을 고집하면 파일 끝의 1~7
+            // 바이트가 readUnit 의 null 로 빠져 **복사 결과에서 통째로
+            // 사라졌다** — 화면에는 보이는데 복사하면 없는 상태였다.
+            const available = unitBytesAt(off);
+            if (available <= 0) { break; }
+            const val = readUnit(off, available, le);
             if (val !== null) {
+                const shownDigits = available * 2;
                 // BigInt 그대로 포맷 — Number() 변환은 2^53 초과 값을 깨뜨린다(M5)
-                parts.push(formatHex(val & BigInt('0x' + 'F'.repeat(digits)), digits));
+                parts.push(formatHex(val & BigInt('0x' + 'F'.repeat(shownDigits)), shownDigits));
             }
         }
         return parts.join(' ');

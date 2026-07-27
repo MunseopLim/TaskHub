@@ -83,6 +83,35 @@ suite('manifest 지역화 (package.nls)', () => {
         }
     });
 
+    /**
+     * 설정 설명이 실제 동작과 어긋나면 조용히 잘못된 기대를 만든다 (0.6.36).
+     *
+     * `rememberLastLocation` 설명은 0.6.11부터 "창과 확장이 공유하는 VS Code
+     * 최근 경로를 쓴다"고 적혀 있었는데 사실이 아니다. VS Code 는 `defaultUri`
+     * 가 없으면 자체 `defaultFilePath()` — 활성 편집기 파일 → 워크스페이스
+     * 폴더 → 홈 — 로 채운다. 전역 최근 경로가 아니다.
+     */
+    suite('설정 설명과 실제 동작', () => {
+        const key = 'setting.rememberLastLocation';
+
+        test('전역 최근 경로를 쓴다고 주장하지 않는다', () => {
+            for (const [lang, bundle] of [['en', en], ['ko', ko]] as const) {
+                const text = String(bundle[key] ?? '');
+                assert.ok(text.length > 0, `${lang}: 설명이 비어 있다`);
+                assert.ok(
+                    !/last-used path|최근 경로가 쓰입니다|공유하는 VS Code 자체의 최근 경로/.test(text),
+                    `${lang}: VS Code 는 전역 최근 경로가 아니라 활성 편집기/워크스페이스 기준으로 위치를 정한다:\n${text}`
+                );
+            }
+        });
+
+        test('저장 대화상자의 파일명 소실을 설정 설명에서 알린다', () => {
+            // 깊은 문서에만 적으면 설정 UI 에서 끄는 사용자는 알 수 없다.
+            assert.ok(/save dialogs? then lose/i.test(String(en[key])), `en: ${en[key]}`);
+            assert.ok(/제안 파일명도 함께 사라집니다/.test(String(ko[key])), `ko: ${ko[key]}`);
+        });
+    });
+
     test('참조된 command 링크가 실제로 등록된 명령이다', () => {
         const manifest = JSON.parse(manifestText);
         const declared = new Set<string>(manifest.contributes.commands.map((c: any) => c.command));

@@ -1,17 +1,14 @@
 {
   "_comment": "Default (English) manifest strings. Korean lives in package.nls.ko.json. VS Code substitutes %key% throughout package.json at load time; source strings must stay here rather than inline so the two locales cannot drift apart silently.",
-
   "view.actions": "Actions",
   "view.links": "Workspace Links",
   "view.favorites": "Favorite Files",
   "view.history": "History",
-
   "welcome.noFolder": "TaskHub runs actions defined per project.\n[Open Folder](command:vscode.openFolder)\nOnce a folder is open you can create actions in its .vscode/actions.json.",
   "welcome.noActions": "No actions yet.\n[Create Action](command:taskhub.createAction)\nOr start from a sample and edit it by hand:\n[Browse Examples](command:taskhub.showExampleJsonQuickPick)\n[Import Actions…](command:taskhub.importActions)",
   "welcome.noActionsNoExamples": "No actions yet.\n[Create Action](command:taskhub.createAction)\n[Import Actions…](command:taskhub.importActions)",
   "welcome.noLinks": "No workspace links yet.\nLinks are shortcuts to docs, dashboards, or issue trackers, stored in .vscode/links.json.\n[Add Link](command:taskhub.addLink)",
   "welcome.noFavorites": "No favorite files yet.\nPin files you keep coming back to — right-click a file in the Explorer, or add one here.\n[Add File to Favorites](command:taskhub.addFavoriteFile)",
-
   "cmd.openLink": "Open Link",
   "cmd.copyLink": "Copy Link",
   "cmd.goToLink": "Go to Link",
@@ -61,7 +58,6 @@
   "cmd.showHexViewer": "Open Hex Viewer",
   "cmd.openMarkdownPreview": "Open Markdown Preview",
   "cmd.openHtmlInBrowser": "Open HTML in Default Browser",
-
   "setting.showTaskStatus": "Show run feedback for actions: status icons and progress in the Actions view, plus the completion notifications. Turning this off **also silences failure notifications** (including an action's own `failMessage`) — check the History panel or the TaskHub output channel instead. Stopping actions is unaffected: the inline stop button and *Stop All Actions* stay available.",
   "setting.showVerboseLogs": "If true, shows detailed logs in the output panel when executing a pipeline. By default, only minimal status messages are shown.",
   "setting.pythonIoEncoding": "Value to assign to the `PYTHONIOENCODING` environment variable for commands launched by TaskHub. Set to an empty string to avoid forcing an encoding or provide values such as `utf-8:ignore` for compatibility.",
@@ -76,7 +72,7 @@
   "setting.builtinActions.auto": "Keep the bundled examples out of the action list; the empty-state view offers a 'Browse Examples' button instead.",
   "setting.builtinActions.always": "Always merge the bundled example actions into the list (behavior before 0.6.14).",
   "setting.builtinActions.never": "Keep them out of the list and hide the 'Browse Examples' button from the empty-state view too.",
-  "setting.rememberLastLocation": "Reopen TaskHub file/folder dialogs at the location last used for the same purpose (Hex Viewer, JSON Editor, Memory Map, export/import, each `fileDialog`/`folderDialog` task, ...). When off, TaskHub picks no starting location at all — VS Code's own last-used path takes over, which is shared across windows and extensions. A `defaultUri` written into an action's JSON is still honoured either way.",
+  "setting.rememberLastLocation": "Reopen TaskHub file/folder dialogs at the location last used for the same purpose (Hex Viewer, JSON Editor, Memory Map, export/import, each `fileDialog`/`folderDialog` task, ...). When off, TaskHub picks no starting location at all and leaves it to VS Code, which applies its own default rules and the `files.dialog.defaultPath` setting. Note that save dialogs then lose their suggested file name too — VS Code offers no way to propose a name without also proposing a folder. A `defaultUri` written into an action JSON is still honoured either way.",
   "setting.hoverNumberBase": "Enable number base conversion hover tooltip for C/C++ files. Shows binary, decimal, and hexadecimal representations when hovering over numeric literals.",
   "setting.bitOperationHover": "**[Experimental]** Show bit operation results in hover tooltips for C/C++ files.\n\nDisplays calculation results for:\n- Variable operations: `value |= 0x80` (shows Before/After)\n- Constant expressions: `1U << 5` (shows Left/Result)\n\n**Supported patterns:**\n- ✅ `value & 0xFF` (variable & literal)\n- ✅ `1U << 5` (constant expressions)\n- ❌ `a ^ b` (variable & variable - not supported)\n\n⚠️ This feature is experimental and may change in future versions.",
   "setting.presetSelected": "Select a preset to automatically apply predefined actions.\n\n- **none**: Use only workspace actions\n- **example**: Example preset with Git and Build commands\n- Or enter a custom preset ID from extension or workspace `.vscode/presets/` folder\n\nPresets are merged with workspace `.vscode/actions.json` (workspace actions take priority)."

@@ -2479,6 +2479,93 @@ function applyDiagnosticsToCollection(
     }
 }
 
+/**
+ * spawn 한 프로세스와 **그 자손까지** 종료한다.
+ *
+ * `child.kill()` 은 우리가 띄운 셸 래퍼(`cmd.exe /c …`, `sh -l -c …`)만
+ * 죽인다. Windows 의 `TerminateProcess` 는 트리를 따라가지 않으므로 래퍼가
+ * 사라진 뒤에도 그 아래 실제 명령이 고아로 남아 계속 돈다. POSIX 도 자식이
+ * 다른 프로세스 그룹을 만들었으면 마찬가지다.
+ *
+ * Windows 는 `taskkill /T /F` 로 트리를 지우고, POSIX 는 프로세스 그룹 전체에
+ * 시그널을 보낸다(`process.kill(-pid)`). 어느 쪽이든 실패하면 최소한 래퍼는
+ * 죽도록 `child.kill()` 로 폴백한다 — 아무것도 안 죽는 것보다 낫다.
+ */
+export function killProcessTree(child: ReturnType<typeof spawn>): Promise<boolean> {
+    // `child.killed` 로 미리 빠져나가지 않는다 — 그 값은 "죽었다"가 아니라
+    // "시그널을 보냈다"는 뜻이다. 출력 상한 같은 다른 경로가 먼저
+    // `child.kill()` 을 불렀다면 래퍼에만 시그널이 갔을 뿐 자손은 그대로이므로,
+    // 트리 종료는 여전히 필요하다.
+    if (!child || typeof child.pid !== 'number') {
+        try { child?.kill(); } catch { /* ignore */ }
+        return Promise.resolve(false);
+    }
+    const pid = child.pid;
+
+    // 실제 종료를 기다린다. `taskkill` 이 성공했다고 보고해도 프로세스가
+    // 즉시 사라지는 것은 아니고, 호출부(취소 경로)는 종료를 확인한 뒤
+    // reject 해야 "중지했는데 아직 돌더라" 를 만들지 않는다.
+    const exited = new Promise<void>(resolve => {
+        if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
+        child.once('close', () => resolve());
+        child.once('exit', () => resolve());
+    });
+    const fallbackKill = () => { try { child.kill('SIGKILL'); } catch { /* ignore */ } };
+
+    const requested = new Promise<boolean>(resolve => {
+        if (process.platform === 'win32') {
+            let tk: ReturnType<typeof spawn>;
+            try {
+                tk = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+            } catch {
+                fallbackKill();
+                resolve(false);
+                return;
+            }
+            tk.on('error', () => { fallbackKill(); resolve(false); });
+            // exit code 를 확인한다. `taskkill` 이 정상 실행되고도 실패하는
+            // 경우(권한 부족, 이미 종료됨 등)가 있는데 예전에는 `error`
+            // 이벤트만 봐서 그 실패가 조용히 묻혔다.
+            tk.on('close', (code) => {
+                if (code !== 0) {
+                    outputChannel.appendLine(`[WARN] taskkill /T /F on pid ${pid} exited with ${code}; falling back to direct kill.`);
+                    fallbackKill();
+                    resolve(false);
+                    return;
+                }
+                resolve(true);
+            });
+        } else {
+            try {
+                // `detached: true` 로 띄운 자식은 pid 가 곧 프로세스 그룹 id 다.
+                process.kill(-pid, 'SIGKILL');
+                resolve(true);
+            } catch {
+                // 그룹이 없다(detached 누락 등) — 최소한 래퍼는 죽인다.
+                fallbackKill();
+                resolve(false);
+            }
+        }
+    });
+
+    // 상한은 **전체**를 덮어야 한다. 예전에는 `requested` 가 끝난 *뒤에야*
+    // 2초 race 로 들어가서, `taskkill` 자체가 멈추면(디스크 IO 지연, 권한
+    // 프롬프트 등) 이 함수와 그것을 기다리는 취소 처리가 무한정 걸렸다.
+    const deadline = new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), 2000));
+    const whole = requested.then(async (treeKilled) => {
+        await exited;
+        return treeKilled;
+    });
+    return Promise.race([whole, deadline]).then(result => {
+        if (result === 'timeout') {
+            outputChannel.appendLine(`[WARN] Process tree termination for pid ${pid} did not confirm within 2s; continuing.`);
+            fallbackKill();
+            return false;
+        }
+        return result;
+    });
+}
+
 function terminateChildProcesses(actionId: string, taskId?: string): boolean {
     const perAction = actionChildProcesses.get(actionId);
     if (!perAction || perAction.size === 0) {
@@ -2489,21 +2576,45 @@ function terminateChildProcesses(actionId: string, taskId?: string): boolean {
         if (set.size === 0) { return false; }
         for (const child of set) {
             try {
-                if (!child.killed) { child.kill(); }
+                // 트리 종료 — 셸 래퍼만 죽이면 그 아래 빌드/플래시 명령이
+                // 고아로 남아 계속 돈다 (0.6.36 이전의 동작).
+                //
+                // `child.killed` 로 건너뛰지 않는다: 그 값은 "시그널 전송됨"일
+                // 뿐이라, 다른 경로가 래퍼에만 kill 을 보낸 상태에서도 자손은
+                // 살아 있을 수 있다.
+                //
+                // 이 함수는 동기 계약(호출부가 boolean 을 즉시 쓴다)이라
+                // 완료를 기다리지 않는다. 대신 **종료가 확인된 뒤에**
+                // registry 에서 뺀다 — 곧바로 지우면 종료가 실패하거나 늦은
+                // 프로세스를 *Stop All* 로 다시 찾을 수 없고, 이전 프로세스가
+                // 살아 있는 채로 같은 액션을 재실행하게 된다.
+                void killProcessTree(child)
+                    .then(() => { set.delete(child); })
+                    .catch(() => { set.delete(child); });
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 outputChannel.appendLine(`[ERROR] Failed to terminate child process for ${label}: ${msg}`);
+                set.delete(child);
             }
         }
         return true;
+    };
+
+    // registry 는 `killSet` 이 프로세스별 종료를 확인하며 비운다. 여기서
+    // 통째로 지우면 아직 살아 있는 프로세스를 추적할 방법이 사라진다.
+    // 비워진 슬롯만 정리한다.
+    const sweepEmpty = () => {
+        for (const [tid, set] of Array.from(perAction)) {
+            if (set.size === 0) { perAction.delete(tid); }
+        }
+        if (perAction.size === 0) { actionChildProcesses.delete(actionId); }
     };
 
     if (taskId !== undefined) {
         const set = perAction.get(taskId);
         if (!set) { return false; }
         const killed = killSet(set, `action '${actionId}' task '${taskId}'`);
-        perAction.delete(taskId);
-        if (perAction.size === 0) { actionChildProcesses.delete(actionId); }
+        sweepEmpty();
         return killed;
     }
 
@@ -2511,7 +2622,7 @@ function terminateChildProcesses(actionId: string, taskId?: string): boolean {
     for (const [tid, set] of perAction) {
         if (killSet(set, `action '${actionId}' task '${tid}'`)) { terminatedAny = true; }
     }
-    actionChildProcesses.delete(actionId);
+    sweepEmpty();
     return terminatedAny;
 }
 import {
@@ -3327,16 +3438,24 @@ export async function executeActionPipeline(
         // first one. Holding the lock until the original dialog
         // promise settles keeps the "no two concurrent prompts"
         // guarantee even across a timed-out task.
-        const startTask = (): Promise<unknown> => executeSingleTask(
-            task,
-            stepResults,
-            context,
-            id,
-            workspaceFolderPath,
-            workspaceRoots,
-            presetValue,
-            recordCommands
-        );
+        const startTask = (): Promise<unknown> => {
+            // 대기열을 빠져나온 시점에 다시 확인한다. 인터랙티브 태스크는
+            // 프롬프트 뮤텍스 뒤에 줄을 서므로, 앞 액션의 대화상자가 열려 있는
+            // 동안 이 액션이 중지될 수 있다. 여기서 안 막으면 이미 중지된
+            // 액션의 modal 이 한참 뒤에 새로 뜨고, itemsFromCommand 라면
+            // 취소된 명령을 잠깐이라도 실행하게 된다.
+            throwIfActionCancelled(id);
+            return executeSingleTask(
+                task,
+                stepResults,
+                context,
+                id,
+                workspaceFolderPath,
+                workspaceRoots,
+                presetValue,
+                recordCommands
+            );
+        };
         const underlying: Promise<unknown> = isInteractive
             ? withInteractivePromptLock(startTask)
             : startTask();
@@ -3356,6 +3475,15 @@ export async function executeActionPipeline(
             (result): InFlightOutcome => ({ taskId, kind: 'success', result }),
             (error): InFlightOutcome => {
                 const e = error instanceof Error ? error : new Error(String(error));
+                // 사용자 중지는 `continueOnError` 보다 우선한다. 그 설정의 뜻은
+                // "이 태스크가 실패해도 나머지는 계속"이지 "사용자가 멈추라고
+                // 해도 계속"이 아니다. 구분하지 않으면 중지가 `skipped` 로
+                // 바뀌어 뒤 태스크가 실행되고, 액션이 성공으로 마감되면서
+                // 방금 기록한 "Action stopped by user" 를 덮는다 — 0.6.29 와
+                // 0.6.35 가 고친 증상이 이 설정 한 줄로 되살아나던 경로다.
+                if (isActionCancelled(id)) {
+                    return { taskId, kind: 'failed', error: e };
+                }
                 return task.continueOnError
                     ? { taskId, kind: 'skipped', error: e }
                     : { taskId, kind: 'failed', error: e };
@@ -4480,6 +4608,14 @@ async function handleInputBox(task: any, token?: vscode.CancellationToken): Prom
  */
 export function runCommandCaptureLines(command: string, cwd: string | undefined, timeoutMs = 15000, token?: vscode.CancellationToken): Promise<string[]> {
     return new Promise<string[]>((resolve, reject) => {
+        // spawn **전에** 검사한다. 이미 중지된 액션의 항목 생성 명령을 잠깐이라도
+        // 실행하면 안 된다 — 사용자가 취소한 임의 명령이 부수 효과를 남길 수 있다.
+        // (예전에는 spawn 뒤에 확인해, 죽이기 전까지 명령이 돌았다.)
+        if (token?.isCancellationRequested) {
+            reject(new Error('Quick pick selection was canceled.'));
+            return;
+        }
+
         const isWindows = process.platform === 'win32';
         const shell = isWindows ? 'cmd.exe' : (process.env.SHELL || '/bin/sh');
         const args = isWindows ? ['/c', command] : ['-l', '-c', command];
@@ -4488,7 +4624,10 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
         try {
             child = spawn(shell, args, {
                 cwd: cwd && cwd.length > 0 ? cwd : undefined,
-                stdio: ['ignore', 'pipe', 'pipe']
+                stdio: ['ignore', 'pipe', 'pipe'],
+                // POSIX 에서 자기 프로세스 그룹을 갖게 해, 취소 시 그룹 전체에
+                // 시그널을 보낼 수 있게 한다 (killProcessTree 참조).
+                detached: !isWindows
             });
         } catch (e: any) {
             reject(e instanceof Error ? e : new Error(String(e)));
@@ -4504,9 +4643,31 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
             fn();
         };
 
+        // 우리가 죽인 경우의 사유. 트리를 종료하면 `close` 가 비정상 종료
+        // 코드와 함께 먼저 도착하는데, 그대로 두면 "exit code 1" 이 사용자
+        // 눈에 보이는 오류가 되어 취소·timeout 이라는 진짜 이유를 덮는다.
+        let abortReason: Error | undefined;
+        const abortWith = (reason: Error) => {
+            // **동기 가드**. `killProcessTree` 는 비동기라 종료가 확정되기까지
+            // stdout/stderr 이벤트가 계속 들어오는데, 가드가 없으면 출력 상한
+            // 검사가 chunk 마다 다시 abort 를 불러 `taskkill` 프로세스·Promise·
+            // 리스너·2초 타이머가 폭증한다 — OOM 을 막으려는 코드가 OOM 을
+            // 만드는 셈이다. 첫 abort 만 통과시킨다.
+            if (abortReason) { return; }
+            abortReason = reason;
+            clearTimeout(timer);
+            cancelSub?.dispose();
+            // 종료를 **기다린 뒤** reject 한다. 기다리지 않으면 호출부는
+            // "중지됨"을 받았는데 명령은 아직 돌고 있는 상태가 된다.
+            void killProcessTree(child).then(() => finish(() => reject(reason)));
+        };
+
+        // 셸 래퍼가 아니라 그 아래 실제 명령까지 죽여야 한다 — 세 종료 경로
+        // (취소 / timeout / 출력 상한) 모두 `abortWith` 를 거친다. 예전에는
+        // 전부 child.kill() 이라 Windows 에서 래퍼만 사라지고 명령이 고아로
+        // 남았다.
         const timer = setTimeout(() => {
-            try { child.kill(); } catch { /* ignore */ }
-            finish(() => reject(new Error(t('명령 실행이 시간 내에 완료되지 않았습니다.', 'Command timed out.'))));
+            abortWith(new Error(t('명령 실행이 시간 내에 완료되지 않았습니다.', 'Command timed out.')));
         }, timeoutMs);
 
         // *Stop Action* 은 이 spawn 을 activeTasks 로도 child-process registry
@@ -4515,15 +4676,8 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
         // 이게 없으면 중지를 눌러도 프로세스가 timeout(기본 15초)까지 돌며
         // 그동안 중지가 무반응으로 보인다.
         const cancelSub = token?.onCancellationRequested(() => {
-            clearTimeout(timer);
-            try { child.kill(); } catch { /* ignore */ }
-            finish(() => reject(new Error('Quick pick selection was canceled.')));
+            abortWith(new Error('Quick pick selection was canceled.'));
         });
-        if (token?.isCancellationRequested) {
-            clearTimeout(timer);
-            try { child.kill(); } catch { /* ignore */ }
-            finish(() => reject(new Error('Quick pick selection was canceled.')));
-        }
 
         // Cap stdout+stderr *combined*: a failing command can spew unbounded
         // stderr, and at the quickPick stage that would balloon extension-host
@@ -4531,16 +4685,19 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
         const MAX_CAPTURE_BYTES = 1024 * 1024;
         const enforceCaptureLimit = () => {
             if (Buffer.byteLength(stdout, 'utf8') + Buffer.byteLength(stderr, 'utf8') > MAX_CAPTURE_BYTES) {
-                try { child.kill(); } catch { /* ignore */ }
-                clearTimeout(timer);
-                finish(() => reject(new Error(t('명령 출력이 너무 큽니다.', 'Command output is too large.'))));
+                abortWith(new Error(t('명령 출력이 너무 큽니다.', 'Command output is too large.')));
             }
         };
+        // abort 이후의 chunk 는 **버린다**. 종료가 확정되기 전까지 파이프에
+        // 남아 있던 출력이 계속 도착하는데, 그걸 계속 이어 붙이면 상한을
+        // 넘긴 뒤에도 메모리가 자란다 — 상한의 의미가 없어진다.
         child.stdout?.on('data', (chunk: Buffer) => {
+            if (abortReason) { return; }
             stdout += chunk.toString('utf8');
             enforceCaptureLimit();
         });
         child.stderr?.on('data', (chunk: Buffer) => {
+            if (abortReason) { return; }
             stderr += chunk.toString('utf8');
             enforceCaptureLimit();
         });
@@ -4555,6 +4712,15 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
         child.on('close', (code: number | null) => {
             clearTimeout(timer);
             cancelSub?.dispose();
+            // 우리가 죽여서 닫힌 것이면 그 사유가 우선이다. 트리 종료 뒤에는
+            // `close` 가 비정상 코드로 먼저 도착하는데, 그대로 두면 사용자가
+            // "exit code 1" 을 보게 되어 취소·timeout 이라는 진짜 이유가
+            // 묻힌다 (`abortWith` 의 reject 는 `finish` 가 한 번만 통과시킨다).
+            if (abortReason) {
+                const reason = abortReason;
+                finish(() => reject(reason));
+                return;
+            }
             if (code !== 0) {
                 const detail = stderr.trim() || `exit code ${code}`;
                 finish(() => reject(new Error(detail)));
@@ -4706,7 +4872,11 @@ function getShellAccessibleEnvNames(): Promise<Set<string> | null> {
         try {
             child = spawn(shell, args, {
                 stdio: ['ignore', 'pipe', 'ignore'],
-                env: probeEnv
+                env: probeEnv,
+                // POSIX 에서 자기 프로세스 그룹을 갖게 해, 중단 시 그룹 전체를
+                // 종료할 수 있게 한다. 로그인 셸(`-l`)은 프로필 스크립트가
+                // 자손을 띄울 수 있어 래퍼만 죽이면 그것들이 남는다.
+                detached: !isWindows
             });
         } catch {
             resolve(null);
@@ -4722,17 +4892,23 @@ function getShellAccessibleEnvNames(): Promise<Set<string> | null> {
         };
 
         const timer = setTimeout(() => {
-            try { child.kill(); } catch { /* ignore */ }
             finish(null);
+            // 트리 종료 — 로그인 셸이 띄운 자손까지 정리한다.
+            void killProcessTree(child);
         }, 5000);
 
+        // `settled` 는 resolve 를 한 번만 하도록 막을 뿐, **리스너를 멈추지는
+        // 않는다**. 가드가 없으면 상한을 넘겨 중단한 뒤에도 파이프에 남은
+        // 출력이 계속 이어 붙어 상한이 사실상 없는 것과 같았다.
         child.stdout?.on('data', (chunk: Buffer) => {
+            if (settled) { return; }
             stdout += chunk.toString('utf8');
             // 1MB 이상이면 비정상으로 간주하고 중단
             if (stdout.length > 1024 * 1024) {
-                try { child.kill(); } catch { /* ignore */ }
                 clearTimeout(timer);
                 finish(null);
+                stdout = '';   // 더 이상 쓰지 않는다 — 즉시 회수되게 놓아준다
+                void killProcessTree(child);
             }
         });
         child.on('error', () => {
@@ -4760,7 +4936,22 @@ function getShellAccessibleEnvNames(): Promise<Set<string> | null> {
 
 async function handleEnvPick(task: any, token?: vscode.CancellationToken): Promise<{ value: string }> {
     const allNames = Object.keys(process.env);
-    const shellNames = await getShellAccessibleEnvNames();
+    // 셸 probe 는 최대 5초가 걸리는데 결과가 확장 호스트 수명 동안 캐시되므로
+    // 죽이면 안 된다 — 다음 envPick 이 다시 5초를 문다. 대신 토큰과 race 해서
+    // **이 액션만** 즉시 빠져나온다. probe 는 백그라운드에서 계속 돌아 캐시를
+    // 채운다. 이 구간을 놓치면 중지 후에도 최대 5초 뒤에 목록이 새로 뜬다.
+    const shellNames = await Promise.race([
+        getShellAccessibleEnvNames(),
+        new Promise<null>((_, rejectRace) => {
+            if (!token) { return; }
+            if (token.isCancellationRequested) {
+                rejectRace(new Error('Environment variable selection was canceled.'));
+                return;
+            }
+            token.onCancellationRequested(() =>
+                rejectRace(new Error('Environment variable selection was canceled.')));
+        })
+    ]);
 
     let names: string[];
     if (shellNames) {
@@ -5244,7 +5435,10 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
                 // (history 'failure' with the real error message, not
                 // "Action stopped by user").
                 captureOverflowed = true;
-                try { childProcess.kill(); } catch { /* already exited */ }
+                // 트리를 종료한다. 래퍼만 죽이면 무한히 뿜던 자손이 stdout
+                // 파이프를 계속 붙잡아 `close` 가 오지 않고, 액션이 영영
+                // 끝나지 않는다 — OOM 은 막았지만 그보다 나쁜 상태가 된다.
+                void killProcessTree(childProcess);
                 return;
             }
             capturedBytes += chunkBytes;
@@ -5340,6 +5534,8 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
         if (process.platform === 'win32' && windowsCommandIsDirectlyLaunchable(command, args || [], { env: childEnv })) {
             const native = buildNativeCommandInvocation(command, args || []);
             displayCommand = native.display;
+            // Windows 는 `taskkill /T` 가 pid 로 트리를 잡으므로 detached 가
+            // 필요 없다 (POSIX 만 프로세스 그룹이 필요하다).
             childProcess = spawn(native.executable, native.args, {
                 cwd: workingDirectory,
                 env: childEnv
@@ -5353,7 +5549,13 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
             childProcess = spawn(commandLine, [], {
                 cwd: workingDirectory,
                 env: childEnv,
-                shell: true
+                shell: true,
+                // 자기 프로세스 그룹을 갖게 해야 중지가 셸 아래의 실제 명령까지
+                // 죽인다 (killProcessTree 의 `process.kill(-pid)`). 이게 없으면
+                // 그룹 종료가 ESRCH 로 실패하고 래퍼만 죽어, 컴파일러·플래셔
+                // 같은 자손이 계속 돈다 — Linux/macOS 에서 중지가 사실상
+                // 동작하지 않던 원인이다.
+                detached: true
             });
             attachChildHandlers(false);
         }

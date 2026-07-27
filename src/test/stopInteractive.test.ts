@@ -1,4 +1,7 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { ActionItem } from '../schema';
 import {
@@ -336,32 +339,315 @@ suite('대화형 태스크 대기 중 중지', () => {
             // 항목 생성 spawn은 activeTasks에도 child-process registry에도
             // 없어서, 토큰이 없으면 중지 후에도 timeout(기본 15초)까지 돌며
             // 그동안 중지가 무반응으로 보였다.
+            // `node -e "…"` 는 Windows `cmd /c` 에서 따옴표가 뭉개져 즉시
+            // 끝난다 — 그러면 "취소가 끝냈는가" 가 아니라 "명령이 스스로
+            // 끝났는가" 를 재게 된다. 스크립트 파일 헬퍼를 쓴다.
+            const { command, cwd, cleanup } = makeMarkerScript('stop-latency', 10000);
             const cts = new vscode.CancellationTokenSource();
-            // node는 테스트 환경 PATH에 반드시 있다 — 10초짜리 명령을 걸고
-            // 100ms 뒤 취소해, timeout이 아니라 취소가 끝냈음을 시간으로 가른다.
-            const longCommand = 'node -e "setTimeout(function(){}, 10000)"';
             const started = Date.now();
+            try {
+                const run = runCommandCaptureLines(command, cwd, 15000, cts.token);
+                setTimeout(() => cts.cancel(), 200);
 
-            const run = runCommandCaptureLines(longCommand, undefined, 15000, cts.token);
-            setTimeout(() => cts.cancel(), 100);
-
-            await assert.rejects(run, /canceled/i, '취소가 거부로 이어져야 파이프라인이 중단된다');
-            const elapsed = Date.now() - started;
-            assert.ok(
-                elapsed < 5000,
-                `취소 후 ${elapsed}ms — 명령 완료(10s)나 timeout(15s)을 기다렸다는 뜻이다`
-            );
-            cts.dispose();
+                await assert.rejects(run, /canceled/i, '취소가 거부로 이어져야 파이프라인이 중단된다');
+                const elapsed = Date.now() - started;
+                assert.ok(
+                    elapsed < 5000,
+                    `취소 후 ${elapsed}ms — 명령 완료(10s)나 timeout(15s)을 기다렸다는 뜻이다`
+                );
+            } finally {
+                cts.dispose();
+                cleanup();
+            }
         });
 
-        test('IT-129: 이미 취소된 토큰이면 명령을 시작하자마자 끝낸다', async () => {
+        test('IT-129: 이미 취소된 토큰이면 명령을 spawn조차 하지 않는다', async () => {
+            // 0.6.35는 spawn *뒤에* 취소를 확인해, 이미 중지된 액션의 명령이
+            // 죽기 전까지 잠깐 실행됐다 — 사용자가 취소한 임의 명령이 부수
+            // 효과를 남길 수 있다. 실행 흔적이 남는 명령으로 확인한다.
+            const { command, cwd, marker, cleanup } = makeMarkerScript('spawn-guard', 0);
             const cts = new vscode.CancellationTokenSource();
             cts.cancel();
-            await assert.rejects(
-                runCommandCaptureLines('node -e "setTimeout(function(){}, 10000)"', undefined, 15000, cts.token),
-                /canceled/i
-            );
-            cts.dispose();
+            try {
+                await assert.rejects(
+                    runCommandCaptureLines(command, cwd, 15000, cts.token),
+                    /canceled/i
+                );
+                // 명령이 돌았다면 파일이 생긴다. 비동기 spawn이라 여유를 준다.
+                await new Promise(resolve => setTimeout(resolve, 500));
+                assert.ok(
+                    !fs.existsSync(marker),
+                    '이미 취소된 상태인데 명령이 실행돼 부수 효과를 남겼다'
+                );
+            } finally {
+                cts.dispose();
+                cleanup();
+            }
+        });
+    });
+
+    /**
+     * "N ms 뒤 marker 파일을 쓰는" node 스크립트를 임시 파일로 만들고, 그것을
+     * 실행하는 셸 명령을 돌려준다.
+     *
+     * `node -e "..."` 를 쓰면 Windows `cmd /c` 가 안쪽 따옴표를 뭉개 명령이
+     * 곧바로 끝나 버린다 — 그러면 "취소가 죽였는가"를 검증하려던 테스트가
+     * 실은 "명령이 스스로 끝났는가"를 보게 된다(실제로 처음 작성했을 때
+     * 이렇게 헛돌았다). 경로와 지연을 스크립트 안에 박아 명령줄을
+     * `node "<script>"` 한 토큰으로 줄인다.
+     */
+    function makeMarkerScript(label: string, delayMs: number): {
+        command: string; cwd: string; marker: string; startedMarker: string; cleanup: () => void;
+    } {
+        const stamp = `${process.pid}-${Date.now()}-${label}`;
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-killtest-'));
+        const marker = path.join(dir, `${stamp}.txt`);
+        // 시작 즉시 남기는 마커. 고정 sleep 대신 이걸 폴링해 "명령이 실제로
+        // 떴다"를 확인한 뒤 중지한다 — 느린 CI 에서 아직 뜨지도 않은 프로세스를
+        // 죽이고 "잘 죽었다"고 결론내는 것을 막는다.
+        const startedMarker = path.join(dir, `${stamp}.started`);
+        const scriptName = `${stamp}.js`;
+        fs.writeFileSync(
+            path.join(dir, scriptName),
+            `require('fs').writeFileSync(${JSON.stringify(startedMarker)}, 'started');\n` +
+            `setTimeout(function () {\n` +
+            `  require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran');\n` +
+            `}, ${delayMs});\n`
+        );
+        // 명령줄에 따옴표를 넣지 않는다. `spawn('cmd.exe', ['/c', cmd])` 는 cmd
+        // 문자열에 공백이 있으면 Node 가 통째로 한 번 더 인용하므로, 안쪽
+        // 따옴표가 중첩돼 경로가 그대로 파일명이 돼 버린다(처음 작성 때 실제로
+        // "Cannot find module '...\"C:\\...\"'" 로 실패했다). 스크립트가 있는
+        // 폴더를 cwd 로 주고 파일명만 넘겨 공백 자체를 없앤다.
+        return {
+            command: `node ${scriptName}`,
+            cwd: dir,
+            marker,
+            startedMarker,
+            cleanup: () => {
+                try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+            },
+        };
+    }
+
+    /** 파일이 생길 때까지 폴링. 고정 sleep 대신 실제 상태를 기다린다. */
+    async function waitForFile(file: string, timeoutMs: number): Promise<boolean> {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (fs.existsSync(file)) { return true; }
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        return false;
+    }
+
+    /**
+     * 중지가 파이프라인 전체를 확실히 끝내는가 (0.6.36).
+     *
+     * 0.6.29/0.6.35는 "프롬프트가 열려 있는 순간"만 다뤘고, 그 앞뒤 두 곳을
+     * 놓쳤다 — 오류 처리 이후(`continueOnError`)와 대기열 진입 이전이다.
+     */
+    suite('중지가 continueOnError·대기열보다 우선한다 (0.6.36)', () => {
+
+        test('IT-132: 중지가 셸 래퍼뿐 아니라 그 아래 실제 명령까지 죽인다', async function () {
+            this.timeout(30000);
+            // child.kill()은 우리가 띄운 cmd.exe / sh 래퍼만 죽인다. Windows의
+            // TerminateProcess는 트리를 따라가지 않으므로 래퍼가 사라져도 그
+            // 아래 명령이 고아로 남아 계속 돈다.
+            //
+            // 자손이 살아 있으면 파일을 만드는 명령으로 확인한다: 취소 후
+            // 충분히 기다렸는데 파일이 없어야 트리가 죽은 것이다.
+            const { command, cwd, marker, startedMarker, cleanup } = makeMarkerScript('tree-kill', 1500);
+            const cts = new vscode.CancellationTokenSource();
+            try {
+                const run = runCommandCaptureLines(command, cwd, 20000, cts.token);
+                // 고정 sleep 대신 started 마커를 기다린다 — 느린 CI 에서
+                // 아직 뜨지도 않은 프로세스를 죽이고 "잘 죽었다"고 결론내면
+                // false positive 가 된다.
+                assert.ok(
+                    await waitForFile(startedMarker, 10000),
+                    '명령이 시작되지 않았다 — 테스트 전제가 깨졌다'
+                );
+                cts.cancel();
+                await assert.rejects(run, /canceled/i);
+
+                // 자손의 타이머(1.5s)를 충분히 넘겨 기다린다.
+                await new Promise(resolve => setTimeout(resolve, 2500));
+                assert.ok(
+                    !fs.existsSync(marker),
+                    '셸 래퍼만 죽고 실제 명령이 살아남아 작업을 끝냈다 — 프로세스 트리를 종료해야 한다'
+                );
+            } finally {
+                cts.dispose();
+                cleanup();
+            }
+        });
+
+        test('IT-133: 실제 shell 액션을 중지하면 자손 프로세스도 죽는다', async function () {
+            this.timeout(40000);
+            // IT-132 는 `runCommandCaptureLines`(항목 생성 명령)만 본다. 실제
+            // 액션의 shell/command 실행은 **다른 spawn 지점**이고, POSIX 에서는
+            // `detached` 가 없으면 `process.kill(-pid)` 가 ESRCH 로 실패해
+            // 래퍼만 죽는다 — 컴파일러·플래셔 같은 자손이 계속 도는 상태였다.
+            // 이 테스트가 그 경로를 직접 지난다.
+            //
+            // **Windows 한계**: 확인해 보니 Windows 는 래퍼(PowerShell/cmd)를
+            // 죽이면 콘솔을 공유하는 자손도 함께 사라져, 트리 종료를 되돌려도
+            // 이 테스트가 통과한다. 즉 여기서 판별력이 나오는 것은 POSIX 뿐이며
+            // (이 수정이 겨냥한 곳도 거기다), Windows 에서는 "중지 후 자손이
+            // 남지 않는다"는 사후 조건만 확인하는 셈이다. Linux/macOS CI 에서
+            // 돌리면 `detached` 누락을 실제로 잡는다.
+            // 스크립트 **하나**로 둔다. `&&` 로 두 명령을 이으면 셸이 그것을
+            // 어떻게 실행하느냐(직접 실행 / PowerShell 폴백)에 따라 프로세스
+            // 구조가 달라져, 무엇이 자손인지 흐려진다. 한 스크립트가 시작
+            // 마커를 즉시 남기고 2.5초 뒤 생존 마커를 남기면 셸 래퍼 → node
+            // 관계가 명확하다.
+            const script = makeMarkerScript('action-tree', 2500);
+            const context = makeContext();
+            const actionItem: ActionItem = {
+                id: 'stop-shell-tree',
+                title: 'Stop shell tree',
+                action: {
+                    description: 'shell wrapper spawns a node descendant',
+                    // 리다이렉트를 붙여 **셸을 반드시 거치게** 한다. Windows 는
+                    // `node script.js` 처럼 메타문자가 없으면 셸 없이 exe 를
+                    // 직접 띄우므로 래퍼가 없고, 그러면 "래퍼만 죽였는가"를
+                    // 가릴 수 없다(실제로 이 형태로는 되돌려도 통과했다).
+                    tasks: [{
+                        id: 'run',
+                        type: 'shell',
+                        command: `${script.command} > ${process.platform === 'win32' ? 'NUL' : '/dev/null'}`,
+                        cwd: script.cwd,
+                    }],
+                },
+            } as unknown as ActionItem;
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            try {
+                const run = executeAction(actionItem, context, mainView, history);
+
+                assert.ok(
+                    await waitForFile(script.startedMarker, 10000),
+                    '명령이 시작되지 않았다 — 테스트 전제가 깨졌다'
+                );
+
+                assert.strictEqual(stopRunningAction('stop-shell-tree'), true);
+                await settleWithin(run, 10000, 'IT-133');
+
+                // 자손의 타이머(2.5s)를 충분히 넘겨 기다린다.
+                await new Promise(resolve => setTimeout(resolve, 3500));
+                assert.ok(
+                    !fs.existsSync(script.marker),
+                    '중지했는데 자손이 살아남아 작업을 끝냈다 — 셸 래퍼만 죽었다'
+                );
+            } finally {
+                script.cleanup();
+            }
+        });
+
+        test('IT-130: continueOnError가 사용자 중지를 삼키지 않는다', async function () {
+            this.timeout(20000);
+            const stub = stubTokenAwareInputBox();
+            const context = makeContext();
+            const actionItem: ActionItem = {
+                id: 'stop-continue',
+                title: 'Stop vs continueOnError',
+                action: {
+                    description: 'interactive task tolerates failure',
+                    // 태스크를 **하나만** 둔다. 뒤에 태스크가 있으면 대기열
+                    // 진입 검사(IT-131의 수정)가 먼저 막아 버려 이 결함이
+                    // 가려진다 — 실제로 처음엔 2개짜리로 짰다가 수정을
+                    // 되돌려도 통과하는 것을 보고 알아챘다. 마지막(=유일한)
+                    // 태스크가 `skipped`로 바뀌면 파이프라인에 실패가 하나도
+                    // 남지 않아 액션이 **성공**으로 마감되고, 그 성공 기록이
+                    // 방금 쓴 "Action stopped by user"를 덮는다.
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'value?', continueOnError: true },
+                    ],
+                },
+            } as unknown as ActionItem;
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            try {
+                const run = executeAction(actionItem, context, mainView, history);
+                await new Promise(resolve => setTimeout(resolve, 50));
+                assert.ok(stub.sawToken());
+
+                assert.strictEqual(stopRunningAction('stop-continue'), true);
+                await settleWithin(run, 3000, 'IT-130');
+
+                const entries = history.getHistory();
+                assert.strictEqual(entries.length, 1);
+                assert.strictEqual(
+                    entries[0].status,
+                    'failure',
+                    'continueOnError가 중지를 skipped로 바꾸면 뒤 태스크가 실행되고 성공 기록이 중지 기록을 덮는다'
+                );
+                assert.ok(
+                    !actionStates.has('stop-continue'),
+                    '중지된 액션은 상태 맵에서 지워져야 한다'
+                );
+            } finally {
+                stub.restore();
+            }
+        });
+
+        test('IT-131: 중지된 액션은 대기열을 빠져나올 때 프롬프트를 열지 않는다', async function () {
+            this.timeout(20000);
+            // 프롬프트 뮤텍스 뒤에 줄을 선 태스크가 대상이다. 첫 태스크가
+            // 대기하는 동안 중지하면, 두 번째 인터랙티브 태스크는 실행 자체가
+            // 없어야 한다 — 예전에는 앞 프롬프트가 끝난 뒤 새 대화상자가 떴다.
+            const original = vscode.window.showInputBox;
+            let promptCount = 0;
+            (vscode.window as any).showInputBox = (_o: any, token?: vscode.CancellationToken) => {
+                promptCount++;
+                return new Promise<string | undefined>(resolve => {
+                    if (!token) { resolve(undefined); return; }
+                    if (token.isCancellationRequested) { resolve(undefined); return; }
+                    token.onCancellationRequested(() => resolve(undefined));
+                });
+            };
+            const context = makeContext();
+            const actionItem: ActionItem = {
+                id: 'stop-queued',
+                title: 'Stop queued prompt',
+                action: {
+                    description: 'two interactive tasks contending for the prompt lock',
+                    // **병렬**이어야 대기열이 실제로 생긴다. 순차로 두면 첫
+                    // 태스크가 실패한 시점에 스케줄러가 뒤 태스크를 아예
+                    // 띄우지 않으므로, 대기열 검사가 없어도 두 번째 프롬프트가
+                    // 안 뜬다 — 처음 그렇게 짰다가 수정을 되돌려도 통과하는
+                    // 것을 보고 알아챘다.
+                    //
+                    // 병렬이면 둘 다 launch 되고, 인터랙티브 태스크는 프롬프트
+                    // 뮤텍스를 잡으므로 두 번째는 락 뒤에 줄을 선다. 중지로 첫
+                    // 프롬프트가 닫혀 락이 풀리는 순간이 문제의 구간이다.
+                    tasks: [
+                        { id: 'first', type: 'inputBox', prompt: 'one?', parallel: true },
+                        { id: 'second', type: 'inputBox', prompt: 'two?', parallel: true },
+                    ],
+                },
+            } as unknown as ActionItem;
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            try {
+                const run = executeAction(actionItem, context, mainView, history);
+                await new Promise(resolve => setTimeout(resolve, 50));
+                assert.strictEqual(promptCount, 1, '첫 프롬프트가 열려 있어야 한다');
+
+                stopRunningAction('stop-queued');
+                await settleWithin(run, 3000, 'IT-131');
+
+                assert.strictEqual(
+                    promptCount,
+                    1,
+                    '중지 후 두 번째 프롬프트가 열렸다 — 대기열을 빠져나올 때 취소를 확인하지 않는다'
+                );
+            } finally {
+                (vscode.window as any).showInputBox = original;
+            }
         });
     });
 });

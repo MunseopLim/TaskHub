@@ -160,6 +160,54 @@ suite('Object Summary 정렬', () => {
             );
         });
 
+        /**
+         * 0.6.34는 Object Summary만 속성 기반으로 옮겼고, 나머지 정렬 가능한
+         * 표는 셀 텍스트 폴백에 남아 있었다 (0.6.36에서 처리).
+         *
+         * 폴백 파서는 숫자가 아닌 문자를 지우므로 표시 형식이 순서를 뒤집는다.
+         *
+         *   - `0x0000F000` → `0`    (F 소실)   vs `0x00001000` → `1000`
+         *   - `1.2 KB`     → `1.2`             vs `900 B`      → `900`
+         *
+         * 즉 주소 정렬과 단위가 바뀌는 크기 정렬이 실제 순서와 반대가 된다.
+         */
+        test('All Sections 행이 원본 정렬값을 들고 있다 (0.6.36)', () => {
+            const row = html.match(/<tr data-sort-name="[^"]*" data-sort-addr="[^"]*"[^>]*>/);
+            assert.ok(row, 'All Sections 행에 정렬 속성이 없다 — 셀 텍스트 폴백은 hex·단위에서 순서가 뒤집힌다');
+            for (const attr of ['data-sort-addr=', 'data-sort-endaddr=', 'data-sort-size=', 'data-sort-bytes=', 'data-sort-type=']) {
+                assert.ok(row![0].includes(attr), `${attr}가 없다: ${row![0]}`);
+            }
+            // 주소는 표시용 hex(0x…)가 아니라 10진 원본이어야 한다.
+            const addr = /data-sort-addr="(\d+)"/.exec(row![0]);
+            assert.ok(addr, `주소가 10진 원본이 아니다: ${row![0]}`);
+        });
+
+        test('속성 키가 헤더의 data-sort 값과 일치한다', () => {
+            // 이름이 어긋나면 getAttribute가 못 찾아 조용히 셀 텍스트로 되돌아간다.
+            const headerKeys = Array.from(html.matchAll(/id="sectionTable"[\s\S]*?<\/thead>/g))
+                .flatMap(m => Array.from(m[0].matchAll(/data-sort="(\w+)"/g)).map(x => x[1]));
+            assert.ok(headerKeys.length >= 6, `헤더 키를 찾지 못했다: ${headerKeys}`);
+            const row = html.match(/<tr data-sort-name="[^>]*>/)![0];
+            for (const key of headerKeys) {
+                assert.ok(
+                    row.toLowerCase().includes(`data-sort-${key.toLowerCase()}=`),
+                    `헤더 키 '${key}'에 대응하는 행 속성이 없다 — 이 열은 셀 텍스트로 폴백한다`
+                );
+            }
+        });
+
+        test('region 상세 행도 원본 값을 싣는다 (행 수에 따라 경로가 갈리지 않도록)', () => {
+            // 이 표는 200행 초과면 rd.segments를 직접 정렬하고, 그 아래면
+            // sortable-table로 렌더돼 공용 정렬기가 셀 텍스트를 읽었다 —
+            // 같은 표가 크기에 따라 다르게 동작했다.
+            assert.ok(
+                /data-sort-name="' \+ esc\(e\.n\)/.test(html),
+                'rowHtml이 정렬 속성을 붙이지 않는다'
+            );
+            assert.ok(/data-sort-addr="' \+ e\.a\b/.test(html), '주소가 원본 숫자가 아니다');
+            assert.ok(/data-sort-size="' \+ e\.sz\b/.test(html), '크기가 원본 바이트가 아니다');
+        });
+
         test('속성 값은 문자 제거 없이 Number()로 읽는다 (지수 표기 보존)', () => {
             // 정규식 정리는 "1.2 KB" 같은 표시용 텍스트에만 필요하다. 원본
             // 속성에 적용하면 아주 작은 퍼센트의 지수 표기(9e-7)에서 e가

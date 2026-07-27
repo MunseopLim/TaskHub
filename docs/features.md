@@ -1817,6 +1817,8 @@ LR_IROM1 0x08000000 0x00100000 {
 >
 > **0.6.31부터**: 바이트 선택을 키보드로 할 수 있습니다. 표 전체가 하나의 tab stop이고(행이 가상 스크롤로 만들어졌다 사라지므로 셀마다 `tabindex`를 줄 수 없습니다), 진입 후 **화살표**로 이동, **PageUp/PageDown**으로 16행씩, **Home/End**로 처음/끝, **Shift+화살표**로 범위를 넓힙니다. 조작법은 표의 `aria-label`이 안내합니다.
 
+> **파일 끝의 불완전한 unit (0.6.36부터)**: 2/4/8-byte unit 모드에서 파일 길이가 unit의 배수가 아니면 마지막 셀은 남은 바이트만 담습니다 (예: 18바이트 파일 + 4-byte 모드 → offset 16에 2바이트). 그 셀도 **정상적으로 표시되며**(자리수가 짧고 흐리게 렌더됩니다) 선택·Go to·Find 대상이 됩니다. 0.6.35 이전에는 이 셀을 아예 그리지 않아 키보드·Go to가 존재하지 않는 위치를 가리켰고, 0.6.36 초안에서 이를 clamp로 막았더니 **Go to 17이 조용히 12로 바뀌는** 더 나쁜 동작이 됐습니다 — Find도 같은 경로를 쓰므로 끝부분 검색 결과가 엉뚱한 곳을 가리켰습니다. 표현할 수 있는 것을 그대로 표현하는 쪽으로 정리했습니다.
+
 펌웨어 이미지 파일(`.hex`, `.bin`, `.srec`)을 VS Code 내에서 Hex dump 형태로 열어볼 수 있는 뷰어입니다. Trace32의 `Data.dump`와 유사한 UX를 제공합니다.
 
 ### 사용 방법
@@ -1898,7 +1900,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 | `taskhub.history.showPanel` | `boolean` | `true` | 사이드바의 History 패널 표시 여부. `false`면 뷰 자체가 감춰지지만 기록은 그대로 유지된다. | [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.preview.showSourceControlContextMenu` | `boolean` | `true` | Source Control 변경 파일 우클릭 메뉴에 TaskHub 프리뷰/브라우저 열기 항목을 표시할지 여부. VS Code SCM 메뉴는 확장자 context key를 안정적으로 제공하지 않으므로 켜져 있으면 대상 확장자 외 파일에도 항목이 보일 수 있으며, 실제 실행은 핸들러가 확장자로 재검증한다. | [§22 Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기) |
 | `taskhub.builtinActions` | `"auto"` \| `"always"` \| `"never"` | `"auto"` | 확장에 번들된 예제 액션(`defaultButton.*`)을 Actions 목록에 병합할지. `auto`는 목록에 넣지 않고 빈 상태 CTA의 *Browse Examples* 로만 안내, `never`는 그 버튼까지 숨김, `always`는 0.6.14 이전처럼 목록에 병합. | [§3 액션 소스와 병합](#액션-소스와-병합-우선순위) |
-| `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. `false`면 TaskHub가 시작 위치를 **일절 지정하지 않아** VS Code 자체의 최근 경로(창·확장 공유)가 쓰인다. 액션 JSON의 `options.defaultUri`는 어느 쪽이든 존중한다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
+| `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. `false`면 TaskHub가 시작 위치를 **일절 지정하지 않고** VS Code의 기본 규칙과 `files.dialog.defaultPath` 설정에 맡긴다. 저장 다이얼로그는 제안 파일명도 함께 사라진다. 액션 JSON의 `options.defaultUri`는 어느 쪽이든 존중한다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |
 | `taskhub.preset.selected` | `string` | `"none"` | 자동 적용할 프리셋 ID. `"none"`이면 워크스페이스 액션만 사용. 확장 내장 또는 워크스페이스 `.vscode/presets/` 내 프리셋 ID를 입력. | [§17 Preset](#17-preset-기능) |
@@ -2106,7 +2108,7 @@ Doctor는 같은 `buildTaskGraph` + `detectGraphCycle` 헬퍼를 공유하므로
 
 ## 25. 파일/폴더 다이얼로그 위치 기억
 
-TaskHub가 여는 모든 파일/폴더 선택 다이얼로그는 **같은 용도로 마지막에 사용한 위치**에서 열립니다. VS Code는 `defaultUri`를 주지 않은 다이얼로그를 자신의 전역 최근 경로에서 여는데, 그 값은 창(workspace)과 확장 프로그램을 가리지 않고 공유되므로 Hex Viewer 열기가 방금 다른 프로젝트에서 편집하던 파일 폴더에서 열리는 식의 부자연스러운 동작이 나옵니다. 구현은 [src/dialogMemory.ts](../src/dialogMemory.ts)에 모여 있습니다.
+TaskHub가 여는 모든 파일/폴더 선택 다이얼로그는 **같은 용도로 마지막에 사용한 위치**에서 열립니다. `defaultUri`를 주지 않으면 VS Code가 자체 기본 규칙(대체로 최근 활성 파일 → 워크스페이스 루트, `files.dialog.defaultPath` 설정이 있으면 그쪽 우선)으로 위치를 정하는데, 그 기준은 TaskHub의 용도 구분과 무관하므로 Hex Viewer 열기가 방금 편집하던 소스 파일 폴더에서 열리는 식의 부자연스러운 동작이 나옵니다. 구현은 [src/dialogMemory.ts](../src/dialogMemory.ts)에 모여 있습니다.
 
 ### 25.1. 시작 위치 결정 순서
 
@@ -2133,11 +2135,15 @@ TaskHub가 여는 모든 파일/폴더 선택 다이얼로그는 **같은 용도
 
 ### 25.3. 끄기
 
-`taskhub.dialog.rememberLastLocation`을 `false`로 두면 저장도 복원도 하지 않고 VS Code 기본 동작으로 돌아갑니다 ([§21 설정 레퍼런스](#21-설정-레퍼런스)). 구체적으로는 위 우선순위 표 전체가 꺼져 **TaskHub가 `defaultUri`를 지정하지 않으며**, 그 결과 VS Code가 자기 최근 경로에서 대화상자를 엽니다. 예외는 두 가지입니다.
+`taskhub.dialog.rememberLastLocation`을 `false`로 두면 저장도 복원도 하지 않습니다 ([§21 설정 레퍼런스](#21-설정-레퍼런스)). 구체적으로는 위 우선순위 표 전체가 꺼져 **TaskHub가 `defaultUri`를 지정하지 않으며**, 시작 위치 결정을 VS Code에 맡깁니다.
+
+**VS Code가 그때 하는 일**: `defaultUri`가 없으면 VS Code가 자체 기본 규칙으로 위치를 정합니다 — 대체로 최근 활성 파일, 그다음 워크스페이스 루트를 따르며 `files.dialog.defaultPath` 설정이 있으면 그쪽이 우선합니다. **"창과 확장 프로그램이 공유하는 전역 최근 경로"가 아닙니다** (0.6.11~0.6.35의 설명이 그렇게 잘못 적혀 있었습니다). 정확한 순서는 VS Code 내부 구현이라 버전에 따라 달라질 수 있으므로 여기서 못박지 않습니다 — TaskHub 관점에서 보장하는 것은 "우리가 지정하지 않는다" 하나입니다.
+
+예외는 두 가지입니다.
 
 *   액션 JSON에 적어 둔 `options.defaultUri`는 그대로 존중합니다 — TaskHub의 추측이 아니라 액션 작성자의 명시적 지시이기 때문입니다.
 *   저장 대화상자도 `defaultUri`를 지정하지 않으며, 이때 **제안 파일명도 함께 사라집니다** (0.6.35부터). VS Code API는 파일명만 제안하는 수단이 없어(`defaultUri` 하나뿐), 0.6.30~0.6.34처럼 파일명만 담은 상대 경로 Uri를 넘기면 파일시스템 루트를 지정하는 셈이 됩니다 — 설정 약속과 어긋나는 쪽이 파일명 제안보다 더 나쁩니다.
 
-> 0.6.11~0.6.29에서는 이 설정이 `recall`/`remember` 안쪽에서만 확인돼, 꺼도 워크스페이스 폴더 폴백이 그대로 적용됐습니다. TaskHub가 여전히 `defaultUri`를 지정하고 있었으므로 "VS Code 자체의 최근 경로"는 실제로 쓰인 적이 없습니다. 0.6.30에서 구현을 설명에 맞췄습니다.
+> 0.6.11~0.6.29에서는 이 설정이 `recall`/`remember` 안쪽에서만 확인돼, 꺼도 워크스페이스 폴더 폴백이 그대로 적용됐습니다. TaskHub가 여전히 `defaultUri`를 지정하고 있었으므로 VS Code의 자체 규칙은 실제로 쓰인 적이 없습니다. 0.6.30에서 구현을 고쳤고, 0.6.36에서 그 규칙이 무엇인지 정확히 적었습니다.
 
 > **참고**: 액션 JSON의 `options.defaultUri`는 문자열로 작성하지만 VS Code API는 `Uri`를 요구하므로, TaskHub가 파일 경로로 해석해 승격시킵니다 (`scheme://` 형태만 URI로 파싱하므로 `C:\proj\build` 같은 Windows 경로가 드라이브 문자를 scheme으로 오인당하지 않습니다).

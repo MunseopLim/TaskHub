@@ -568,8 +568,16 @@ function getWebviewContent(
         ? `${col(S.colRegion, false)}${col(S.colBase)}${col(S.colMax)}${col(S.colLinkerUsed)}${col(S.colCalcUsed)}${col(S.colLinkerFree)}${col(S.colCalcFree)}${col(S.colUsage)}<th aria-hidden="true"></th>`
         : `${col(S.colRegion, false)}${col(S.colBase)}${col(S.colMax)}${col(S.colUsed)}${col(S.colFree)}${col(S.colUsage)}<th aria-hidden="true"></th>`;
 
+    // 정렬값을 행 속성으로 싣는다. 헤더 키(name / addr / endAddr / size /
+    // bytes / type)와 이름을 맞춰야 정렬기가 찾는다.
+    //
+    // 셀 텍스트로 정렬하면 표시 형식 때문에 순서가 뒤집힌다: 폴백 파서가
+    // 숫자가 아닌 문자를 지우므로 `0x0000F000` → `0`(F 소실), `0x00001000`
+    // → `1000` 이 되어 주소 정렬이 무너지고, `1.2 KB` → `1.2` vs `900 B`
+    // → `900` 처럼 단위가 다른 크기도 역전된다. 0.6.34 가 Object Summary 만
+    // 속성 기반으로 옮겼고 이 표는 남아 있었다.
     const sectionTableRows = sectionSummary.map(s =>
-        `<tr>
+        `<tr data-sort-name="${esc(s.name)}" data-sort-addr="${s.addr}" data-sort-endaddr="${s.size > 0 ? s.endAddr - 1 : s.endAddr}" data-sort-size="${s.size}" data-sort-bytes="${s.size}" data-sort-type="${esc(s.type)}">
             <td>${esc(s.name)}</td>
             <td class="num">${formatHex(s.addr)}</td>
             <td class="num">${formatHex(s.size > 0 ? s.endAddr - 1 : s.endAddr)}</td>
@@ -1019,7 +1027,20 @@ const RD = ${regionDataJsLiteral};
         const rc = e.fr ? ' class="free-row"' : '';
         const sc = hsi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.s) + '</td>' : '';
         const fc = hfi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.f) + '</td>' : '';
-        return '<tr' + rc + '><td>' + hl(e.n) + '</td>' + sc + fc + '<td class="num">' + hl(e.ah) + '</td><td class="num">' + e.eh + '</td><td class="num">' + hl(e.ss) + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + hl(e.t) + '</span></td></tr>';
+        // 정렬값 원본. 이 표는 행 수에 따라 정렬 경로가 갈린다 — 가상 스크롤
+        // (200행 초과)이면 rd.segments 를 직접 정렬하지만, 그 아래면
+        // sortable-table 로 렌더돼 공용 정렬기가 셀 텍스트를 읽었다. 같은 표가
+        // 크기에 따라 다르게 동작하던 셈이라, 속성으로 양쪽을 맞춘다.
+        // 헤더 키(name/section/func/addr/end/size/bytes/type)와 이름을 맞춘다.
+        const sv = ' data-sort-name="' + esc(e.n) + '"'
+            + ' data-sort-section="' + esc(e.s) + '"'
+            + ' data-sort-func="' + esc(e.f) + '"'
+            + ' data-sort-addr="' + e.a + '"'
+            + ' data-sort-end="' + (e.sz > 0 ? e.a + e.sz - 1 : e.a) + '"'
+            + ' data-sort-size="' + e.sz + '"'
+            + ' data-sort-bytes="' + e.sz + '"'
+            + ' data-sort-type="' + esc(e.t) + '"';
+        return '<tr' + rc + sv + '><td>' + hl(e.n) + '</td>' + sc + fc + '<td class="num">' + hl(e.ah) + '</td><td class="num">' + e.eh + '</td><td class="num">' + hl(e.ss) + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + hl(e.t) + '</span></td></tr>';
     }
 
     function matchSeg(e, q) {
@@ -1641,9 +1662,15 @@ const RD = ${regionDataJsLiteral};
         const rd = RD[idx];
         const sortByCol = th.dataset.sortBy || th.dataset.sort;
 
-        if (th._lastCol === sortByCol) { th._sortAsc = !th._sortAsc; }
-        else { th._lastCol = sortByCol; th._sortAsc = !(['size','bytes'].includes(sortByCol)); }
-        const asc = th._sortAsc;
+        // 방향 상태를 **표(카드) 단위**로 둔다. 예전에는 헤더마다 th._sortAsc
+        // 를 따로 들고 있어서, 같은 표가 행 수에 따라 다르게 동작했다:
+        // 200행 이하면 sortable-table 경로가 테이블 하나의 sortCol 을 쓰므로
+        // Name → Address → Name 이 Name 오름차순으로 재시작하는데, 200행
+        // 초과면 이 경로가 각 헤더의 옛 상태를 기억해 Name 이 내림차순으로
+        // 뒤집혔다. 두 경로가 같은 규칙(열이 바뀌면 방향 초기화)을 쓴다.
+        if (card._sortCol === sortByCol) { card._sortAsc = !card._sortAsc; }
+        else { card._sortCol = sortByCol; card._sortAsc = !(['size','bytes'].includes(sortByCol)); }
+        const asc = card._sortAsc;
 
         rd.segments.sort(function(a, b) {
             let av, bv;
