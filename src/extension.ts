@@ -2039,6 +2039,72 @@ export { MainViewProvider, Folder, Action };
 // real task collides with it.
 const activeTasks = new Map<string, Map<string, vscode.TaskExecution>>();
 const manuallyTerminatedActions = new Set<string>();
+
+/**
+ * Per-action cancellation, keyed by action id.
+ *
+ * `activeTasks` and `actionChildProcesses` only cover work that has a process
+ * behind it. An action sitting on an `inputBox` / `quickPick` / `fileDialog`
+ * prompt has neither, yet it is unambiguously *running* — the tree shows the
+ * spinner and offers the inline stop button. Stop then found nothing to
+ * terminate and told the user *"활성 태스크를 찾을 수 없습니다"* while the
+ * prompt stayed on screen: a stop button that does not stop.
+ *
+ * The token is handed to `showInputBox` / `showQuickPick`, which VS Code
+ * dismisses on cancellation, so those prompts really do close. Native file
+ * dialogs take no token and cannot be dismissed programmatically; for them
+ * the cancellation is *recorded* and the pipeline aborts as soon as the
+ * dialog returns, instead of marching on through the rest of the tasks.
+ */
+const actionCancellations = new Map<string, vscode.CancellationTokenSource>();
+
+/**
+ * Start (or restart) the cancellation scope for an action run. Any source
+ * left over from a previous run is disposed so a stale cancelled token can
+ * never make a fresh run abort immediately.
+ */
+function beginActionCancellation(id: string): void {
+    actionCancellations.get(id)?.dispose();
+    actionCancellations.set(id, new vscode.CancellationTokenSource());
+}
+
+function endActionCancellation(id: string): void {
+    actionCancellations.get(id)?.dispose();
+    actionCancellations.delete(id);
+}
+
+/** The running action's token, or `undefined` when it has no live scope. */
+function actionCancellationToken(id: string): vscode.CancellationToken | undefined {
+    return actionCancellations.get(id)?.token;
+}
+
+/**
+ * Whether a stop was requested for this action. Checked after every await on
+ * something that cannot itself be cancelled (native dialogs), so the run ends
+ * at the next safe point rather than continuing to the following task.
+ */
+export function isActionCancelled(id: string, sources: ReadonlyMap<string, vscode.CancellationTokenSource> = actionCancellations): boolean {
+    return sources.get(id)?.token.isCancellationRequested === true;
+}
+
+/** Raised when a run ends because the user pressed stop, not because it failed. */
+export class ActionStoppedError extends Error {
+    constructor() {
+        super('Action stopped by user');
+        this.name = 'ActionStoppedError';
+    }
+}
+
+/**
+ * Abort the run if a stop was requested. Called after awaiting anything that
+ * cannot carry a cancellation token itself — currently the native file/folder
+ * dialogs.
+ */
+function throwIfActionCancelled(id: string): void {
+    if (isActionCancelled(id)) {
+        throw new ActionStoppedError();
+    }
+}
 const outputChannel = vscode.window.createOutputChannel('TaskHub');
 let previewOutputChannel: vscode.OutputChannel | undefined;
 function getPreviewOutputChannel(): vscode.OutputChannel {
@@ -2959,6 +3025,10 @@ function markActionAsRunning(actionItem: ActionItem, id: string, showTaskStatus:
     }
 
     actionStates.set(id, { state: 'running' });
+    // Opened here rather than at the first prompt: the stop button becomes
+    // visible the moment the state flips to `running`, so the scope it acts
+    // on has to exist from that same moment.
+    beginActionCancellation(id);
     syncRunningActionsContext();
     if (showTaskStatus) {
         mainViewProvider.refresh();
@@ -3325,7 +3395,7 @@ export function formatStopAllConfirmMessage(titles: readonly string[], lang: 'ko
     return `${header}\n\n${lines.join('\n')}`;
 }
 
-export type StopAllOutcome = 'none' | 'cancelled' | 'stopped' | 'failed';
+export type StopAllOutcome = 'none' | 'cancelled' | 'stopped' | 'failed' | 'already-finished';
 
 /**
  * Everything {@link runStopAllActions} is allowed to touch.
@@ -3385,7 +3455,17 @@ export async function runStopAllActions(deps: StopAllActionsDeps): Promise<StopA
     }
     deps.afterStop();
 
-    const outcome: StopAllOutcome = stopped.length > 0 ? 'stopped' : 'failed';
+    // Nothing stopped has two very different causes. The targets may have
+    // finished on their own while the confirmation modal was up — a benign
+    // race, and warning "no active tasks could be stopped" for it reads like
+    // something went wrong. Re-collecting distinguishes them: an empty list
+    // now means they simply ended.
+    let outcome: StopAllOutcome;
+    if (stopped.length > 0) {
+        outcome = 'stopped';
+    } else {
+        outcome = deps.collectTargets().length === 0 ? 'already-finished' : 'failed';
+    }
     deps.report(outcome, stopped.map(id => deps.titleOf(id)));
     return outcome;
 }
@@ -3408,8 +3488,14 @@ function syncRunningActionsContext(): void {
  * `taskhub.stopAction` (single row) and `taskhub.stopAllActions` (bulk) so
  * both paths mark `manuallyTerminatedActions` identically — that flag is
  * what tells `executeAction`'s catch to skip the failure toast.
+ *
+ * Exported for tests: the bundled extension (`dist/`) and the compiled tests
+ * (`out/`) are separate module instances, so driving this through
+ * `vscode.commands.executeCommand` would act on the *bundle's* registries
+ * while the test's `executeAction` populated the test module's. Calling it
+ * directly keeps both sides in one instance.
  */
-function stopRunningAction(id: string): boolean {
+export function stopRunningAction(id: string): boolean {
     let stopped = false;
     const perAction = activeTasks.get(id);
     if (perAction && perAction.size > 0) {
@@ -3421,6 +3507,17 @@ function stopRunningAction(id: string): boolean {
     }
     if (terminateChildProcesses(id)) {
         manuallyTerminatedActions.add(id);
+        stopped = true;
+    }
+    // An action waiting on a prompt has no task and no child process, so the
+    // two branches above find nothing — yet it is running and the user asked
+    // it to stop. Cancelling the token dismisses `inputBox` / `quickPick`
+    // outright; for a native file dialog it records the request so the run
+    // aborts the moment the dialog returns.
+    const cancellation = actionCancellations.get(id);
+    if (cancellation && !cancellation.token.isCancellationRequested) {
+        manuallyTerminatedActions.add(id);
+        cancellation.cancel();
         stopped = true;
     }
     return stopped;
@@ -3443,6 +3540,10 @@ function recordManualStopInHistory(provider: HistoryProvider | undefined, id: st
 
 function finalizeActionRun(id: string, showTaskStatus: boolean, mainViewProvider: MainViewProvider): void {
     activeTasks.delete(id);
+    // Owned by the run, so it dies with the run. Leaving a cancelled source
+    // behind would make the *next* run of the same action abort on its first
+    // token check.
+    endActionCancellation(id);
     if (manuallyTerminatedActions.has(id)) {
         actionStates.delete(id);
         manuallyTerminatedActions.delete(id);
@@ -3656,11 +3757,18 @@ async function executeSingleTask(
         // few cases below. Without it every action that reuses a task id (the
         // wizard templates all emit `selectFile` / `selectFolder`) would share
         // one remembered folder.
+        // Native OS dialogs take no CancellationToken and cannot be dismissed
+        // from here, so a stop pressed while one is open can only take effect
+        // once it returns. `throwIfActionCancelled` is that follow-up: without
+        // it the run would pick a file the user no longer wants and carry on
+        // into the remaining tasks.
         case 'fileDialog':
             result = await handleFileDialog({ ...task, actionId });
+            throwIfActionCancelled(actionId);
             break;
         case 'folderDialog':
             result = await handleFolderDialog({ ...task, actionId });
+            throwIfActionCancelled(actionId);
             break;
         case 'inputBox':
             // Interpolate prompt, value, placeHolder, prefix, suffix
@@ -3672,7 +3780,7 @@ async function executeSingleTask(
                 prefix: task.prefix ? interpolatePipelineVariables(task.prefix, interpolationContext) : undefined,
                 suffix: task.suffix ? interpolatePipelineVariables(task.suffix, interpolationContext) : undefined
             };
-            result = await handleInputBox(interpolatedTask);
+            result = await handleInputBox(interpolatedTask, actionCancellationToken(actionId));
             break;
         case 'quickPick':
             // Interpolate items if they're strings or contain interpolatable properties
@@ -3708,7 +3816,7 @@ async function executeSingleTask(
                 cwd: task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
                 placeHolder: task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined
             };
-            result = await handleQuickPick(interpolatedQuickPickTask, defaultWorkspace);
+            result = await handleQuickPick(interpolatedQuickPickTask, defaultWorkspace, actionCancellationToken(actionId));
             break;
         case 'unzip':
             const interpolatedUnzipTask: any = { ...task };
@@ -4187,7 +4295,7 @@ async function handleFolderDialog(task: any): Promise<{ path: string, dir: strin
     else { throw new Error('Folder selection was canceled.'); }
 }
 
-async function handleInputBox(task: any): Promise<{ value: string }> {
+async function handleInputBox(task: any, token?: vscode.CancellationToken): Promise<{ value: string }> {
     // `extractPattern`: derive the prefilled default from the (already
     // interpolated) `value` — e.g. pull a Jira key out of a branch name. On a
     // match use capture group 1 if present, else the whole match; on no match
@@ -4237,7 +4345,10 @@ async function handleInputBox(task: any): Promise<{ value: string }> {
         }
     }
 
-    const userInput = await vscode.window.showInputBox(options);
+    // The token is what makes *Stop Action* work while this box is open —
+    // VS Code dismisses the prompt and resolves `undefined`, which falls into
+    // the existing cancel branch below.
+    const userInput = await vscode.window.showInputBox(options, token);
     if (userInput !== undefined) {
         const prefix = task.prefix || '';
         const suffix = task.suffix || '';
@@ -4326,7 +4437,7 @@ function runCommandCaptureLines(command: string, cwd: string | undefined, timeou
     });
 }
 
-async function handleQuickPick(task: any, defaultWorkspace?: string): Promise<{ value: string; values?: string }> {
+async function handleQuickPick(task: any, defaultWorkspace?: string, token?: vscode.CancellationToken): Promise<{ value: string; values?: string }> {
     // When `itemsFromCommand` is set, build the pick list from the command's
     // stdout (one item per non-empty line). The command is already interpolated
     // and reduced to a single OS-specific string by the dispatcher.
@@ -4383,8 +4494,10 @@ async function handleQuickPick(task: any, defaultWorkspace?: string): Promise<{ 
         }
     });
 
+    // As with `handleInputBox`, the token is what lets *Stop Action* dismiss
+    // an open pick list instead of leaving it on screen.
     if (task.canPickMany) {
-        const selected = await vscode.window.showQuickPick(items, { ...options, canPickMany: true });
+        const selected = await vscode.window.showQuickPick(items, { ...options, canPickMany: true }, token);
         if (selected && selected.length > 0) {
             const labels = selected.map(item => item.label);
             return { value: labels[0], values: labels.join(',') };
@@ -4392,7 +4505,7 @@ async function handleQuickPick(task: any, defaultWorkspace?: string): Promise<{ 
             throw new Error('Quick pick selection was canceled.');
         }
     } else {
-        const selected = await vscode.window.showQuickPick(items, options);
+        const selected = await vscode.window.showQuickPick(items, options, token);
         if (selected) {
             return { value: selected.label };
         } else {
@@ -6155,6 +6268,13 @@ export function activate(context: vscode.ExtensionContext) {
         report: (outcome, stoppedTitles) => {
             if (outcome === 'none') {
                 vscode.window.showInformationMessage(t('실행 중인 액션이 없습니다.', 'No actions are running.'));
+            } else if (outcome === 'already-finished') {
+                // Confirmed the stop, but everything ended on its own in the
+                // meantime. Nothing went wrong — say so plainly.
+                vscode.window.showInformationMessage(t(
+                    '대상 액션이 이미 모두 끝났습니다.',
+                    'The actions had already finished.'
+                ));
             } else if (outcome === 'failed') {
                 vscode.window.showWarningMessage(t(
                     '중지할 활성 태스크를 찾지 못했습니다.',
