@@ -98,12 +98,92 @@ export interface RecoveryStore {
  * 한 번 일어난 실패는 다음 호출이 진행되도록 catch 로 swallow 하지만, 호출자에게는
  * 원래 promise 를 반환해 await 시 reject 가 그대로 전달된다.
  */
+/**
+ * 보관할 복구 스냅샷 최대 개수.
+ *
+ * 항목 하나가 **파일 전체의 파싱 결과**라 다이얼로그 위치(경로 문자열 하나)와는
+ * 무게가 다르다. 큰 JSON 을 여러 개 dirty 상태로 닫으면 workspaceState 와
+ * in-memory shadow 가 같이 선형으로 자라는데, 예전에는 개수도 수명도 제한이
+ * 없었다.
+ */
+export const RECOVERY_MAX_ENTRIES = 20;
+
+/**
+ * 보관할 스냅샷 총량 상한 (직렬화 기준 바이트).
+ *
+ * 개수 상한만으로는 부족하다 — 20MB 짜리 JSON 20개면 개수는 지켜도 400MB 다.
+ * 실제 무게는 바이트이므로 총량으로도 자른다. 개수와 총량 중 **먼저 걸리는
+ * 쪽**이 적용된다.
+ */
+export const RECOVERY_MAX_BYTES = 32 * 1024 * 1024;
+
+/** 스냅샷 하나의 대략적 크기. 정확한 힙 사용량이 아니라 상대 비교용이다. */
+function approximateEntryBytes(entry: RecoveryEntry): number {
+    try {
+        return JSON.stringify(entry.data)?.length ?? 0;
+    } catch {
+        // 순환 참조 등 — 직렬화할 수 없으면 어차피 persist 도 못 하므로
+        // 크게 쳐서 먼저 버려지게 한다.
+        return Number.MAX_SAFE_INTEGER;
+    }
+}
+
+/**
+ * 최신 `max` 개만 남기고 오래된 스냅샷부터 버린다.
+ *
+ * **수명(TTL) 기준 삭제는 일부러 넣지 않았다.** 여기 담긴 것은 사용자의
+ * *미저장 작업*이므로, "2주 지났으니 지운다" 같은 시계 기반 정책은 메모리
+ * 상한의 부수 효과로 결정할 일이 아니다. 개수 제한만으로 무한 증가는 막히고,
+ * 무엇을 언제 버리는지가 사용자 행동(더 많은 파일을 dirty 로 닫음)에만
+ * 좌우되어 예측 가능하다.
+ *
+ * 순수 함수라 축출 순서를 시계 없이 검증할 수 있다.
+ */
+export function pruneRecoveryEntries(
+    entries: Record<string, RecoveryEntry>,
+    max: number = RECOVERY_MAX_ENTRIES,
+    maxBytes: number = RECOVERY_MAX_BYTES
+): Record<string, RecoveryEntry> {
+    const all = Object.entries(entries);
+    // 개수가 상한 이하라도 총량은 넘을 수 있으므로 항상 확인한다.
+    const sizes = new Map(all.map(([k, e]) => [k, approximateEntryBytes(e)]));
+    let total = 0;
+    for (const size of sizes.values()) { total += size; }
+    if (all.length <= max && total <= maxBytes) { return entries; }
+
+    // `capturedAt` 이 같으면 경로로 갈라 결과가 결정적이게 한다.
+    all.sort((a, b) => {
+        const at = (e: RecoveryEntry) => (typeof e?.capturedAt === 'number' ? e.capturedAt : 0);
+        return (at(b[1]) - at(a[1])) || a[0].localeCompare(b[0]);
+    });
+
+    const kept: [string, RecoveryEntry][] = [];
+    let keptBytes = 0;
+    for (const pair of all) {
+        if (kept.length >= max) { break; }
+        const size = sizes.get(pair[0]) ?? 0;
+        // 첫 항목은 총량을 넘더라도 남긴다 — 방금 닫은 파일의 복구본을
+        // 크다는 이유로 통째로 버리면 기능 자체가 없는 것과 같다.
+        if (kept.length > 0 && keptBytes + size > maxBytes) { continue; }
+        kept.push(pair);
+        keptBytes += size;
+    }
+    return Object.fromEntries(kept);
+}
+
 export function makeRecoveryStore(state: MinimalWorkspaceState, key: string): RecoveryStore {
     let chain: Promise<void> = Promise.resolve();
     // 초기 shadow 는 workspaceState 로부터 한 번 읽어 들인 top-level clone.
     // 이후 set 호출은 shadow 만 동기적으로 mutate하고 persist 는 chain 으로 비동기 처리.
     const initial = state.get<Record<string, RecoveryEntry>>(key, {});
-    const shadow: Record<string, RecoveryEntry> = { ...initial };
+    // **로드 시점에도** 상한을 적용한다. `set()` 에서만 자르면 이미 20개를
+    // 넘겨 쌓아 둔 기존 사용자는 다음 저장이 일어나기 전까지 그대로 위험하고,
+    // 그 사이 shadow 가 전량을 메모리에 붙잡는다.
+    const shadow: Record<string, RecoveryEntry> = { ...pruneRecoveryEntries(initial) };
+    // 줄었다면 persist 도 맞춘다 — 안 그러면 다음 실행마다 같은 정리를 반복한다.
+    if (Object.keys(shadow).length !== Object.keys(initial).length) {
+        void Promise.resolve(state.update(key, { ...shadow })).then(undefined, () => undefined);
+    }
 
     return {
         get(filePath: string): RecoveryEntry | undefined {
@@ -115,6 +195,15 @@ export function makeRecoveryStore(state: MinimalWorkspaceState, key: string): Re
                 shadow[filePath] = entry;
             } else {
                 delete shadow[filePath];
+            }
+            // 쓸 때마다 상한을 지킨다. 항목 하나가 파일 전체의 파싱 결과라,
+            // 개수 제한이 없으면 큰 JSON 을 여럿 dirty 로 닫는 것만으로
+            // workspaceState 와 shadow 가 함께 선형으로 자란다.
+            const kept = pruneRecoveryEntries(shadow);
+            if (kept !== shadow) {
+                for (const k of Object.keys(shadow)) {
+                    if (!(k in kept)) { delete shadow[k]; }
+                }
             }
             // update 에는 shadow 의 clone 을 넘긴다 (defensive write).
             const snapshot = { ...shadow };
