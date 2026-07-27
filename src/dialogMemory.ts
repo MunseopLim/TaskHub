@@ -74,6 +74,15 @@ export interface DialogMemoryDeps {
     recall(scope: string): string | undefined;
     remember(scope: string, dir: string): void;
     workspaceFallbackDir(): string | undefined;
+    /**
+     * `taskhub.dialog.rememberLastLocation`.
+     *
+     * 이전에는 이 설정이 `recall`/`remember` 안쪽에서만 확인돼, 꺼도
+     * `workspaceFallbackDir()`는 그대로 적용됐다. 즉 TaskHub가 여전히
+     * `defaultUri`를 지정하고 있어서 "VS Code 자체의 최근 경로를 쓴다"는
+     * 설명과 실제 동작이 달랐다. 시작 위치 결정 전체를 이 값으로 가른다.
+     */
+    isEnabled(): boolean;
 }
 
 function defaultRecall(scope: string): string | undefined {
@@ -119,6 +128,7 @@ export function defaultDialogMemoryDeps(): DialogMemoryDeps {
         recall: defaultRecall,
         remember: defaultRemember,
         workspaceFallbackDir: defaultWorkspaceFallbackDir,
+        isEnabled: isMemoryEnabled,
     };
 }
 
@@ -171,9 +181,14 @@ export async function showOpenDialogWithMemory(
     const effective: vscode.OpenDialogOptions = { ...options };
     const caller = coerceDefaultUri(options.defaultUri);
     // 호출자가 명시한 위치가 실제로 존재하면 그대로 존중한다 — 액션 작성자가
-    // 의도한 시작 위치를 기억된 값이 덮어쓰지 않도록.
+    // 의도한 시작 위치를 기억된 값이 덮어쓰지 않도록. 설정을 꺼도 이건 남는다:
+    // 액션 JSON의 `defaultUri`는 TaskHub의 추측이 아니라 작성자의 지시다.
     if (caller && caller.scheme === 'file' && deps.exists(caller.fsPath)) {
         effective.defaultUri = caller;
+    } else if (!deps.isEnabled()) {
+        // 설정이 꺼졌으면 TaskHub는 시작 위치를 일절 지정하지 않는다. 그래야
+        // VS Code 자체의 최근 경로가 쓰인다 — 설정 설명이 약속하는 동작이다.
+        delete effective.defaultUri;
     } else {
         const startDir = firstUsableDir([deps.recall(scope), deps.workspaceFallbackDir()], deps);
         if (startDir) {
@@ -210,7 +225,12 @@ export async function showSaveDialogWithMemory(
 ): Promise<vscode.Uri | undefined> {
     const { defaultDir, ...rest } = options;
     const effective: vscode.SaveDialogOptions = { ...rest };
-    const startDir = firstUsableDir([deps.recall(scope), defaultDir, deps.workspaceFallbackDir()], deps);
+    // 꺼져 있으면 폴더는 비우고 파일명만 제안한다 — VS Code가 자기 최근 경로에
+    // 그 이름으로 대화상자를 연다. 파일명까지 버리면 저장 대화상자가 이름 없이
+    // 떠서 설정과 무관하게 쓰기 불편해진다.
+    const startDir = deps.isEnabled()
+        ? firstUsableDir([deps.recall(scope), defaultDir, deps.workspaceFallbackDir()], deps)
+        : undefined;
     effective.defaultUri = vscode.Uri.file(startDir ? path.join(startDir, suggestedName) : suggestedName);
 
     const picked = await deps.showSaveDialog(effective);

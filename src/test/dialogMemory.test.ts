@@ -50,6 +50,8 @@ function makeFakeEnv(overrides: {
     fallbackDir?: string;
     openResult?: vscode.Uri[];
     saveResult?: vscode.Uri;
+    /** `taskhub.dialog.rememberLastLocation`. 지정하지 않으면 켜진 것으로 본다. */
+    enabled?: boolean;
 } = {}): FakeEnv {
     const dirs = new Set((overrides.dirs ?? []).map(normalizePath));
     const files = new Set((overrides.files ?? []).map(normalizePath));
@@ -71,6 +73,7 @@ function makeFakeEnv(overrides: {
         recall: (scope) => stored.get(scope),
         remember: (scope, value) => { stored.set(scope, value); },
         workspaceFallbackDir: () => overrides.fallbackDir,
+        isEnabled: () => overrides.enabled !== false,
     };
 
     return { deps, stored, openCalls, saveCalls };
@@ -174,6 +177,94 @@ suite('dialogMemory', () => {
             assert.strictEqual(env.openCalls[0].canSelectMany, false);
             assert.strictEqual(env.openCalls[0].openLabel, 'Open JSON File');
             assert.deepStrictEqual(env.openCalls[0].filters, { 'JSON Files': ['json'] });
+        });
+    });
+
+    /**
+     * `rememberLastLocation`을 끈 상태 (0.6.30).
+     *
+     * 0.6.11~0.6.29는 이 설정을 `recall`/`remember` 안쪽에서만 확인했다. 그래서
+     * 꺼도 `workspaceFallbackDir()`가 그대로 적용돼 TaskHub는 여전히
+     * `defaultUri`를 지정하고 있었다 — 설정 설명(package.json / features.md
+     * §21·§25 / CHANGELOG)이 한목소리로 약속한 "VS Code 자체의 최근 경로"는
+     * 어느 경우에도 쓰이지 않았다. 기존 OFF 테스트는 `recall`/`remember`만
+     * 검사해 이 부분을 보지 못했다.
+     */
+    suite('rememberLastLocation OFF', () => {
+        test('기억된 위치도 워크스페이스 폴백도 쓰지 않는다 (defaultUri 자체를 넣지 않음)', async () => {
+            const workspace = dir('workspace');
+            const lastUsed = dir('build', 'output');
+            const env = makeFakeEnv({
+                enabled: false,
+                dirs: [workspace, lastUsed],
+                fallbackDir: workspace,
+                remembered: { [DIALOG_SCOPE.hexViewer]: lastUsed },
+            });
+
+            await showOpenDialogWithMemory(DIALOG_SCOPE.hexViewer, {}, env.deps);
+
+            assert.strictEqual(
+                env.openCalls[0].defaultUri,
+                undefined,
+                'TaskHub가 위치를 지정하면 VS Code 자체 최근 경로가 쓰일 수 없다'
+            );
+        });
+
+        test('액션 JSON이 명시한 defaultUri는 꺼도 존중한다', async () => {
+            const authored = dir('firmware');
+            const workspace = dir('workspace');
+            const env = makeFakeEnv({
+                enabled: false,
+                dirs: [authored, workspace],
+                fallbackDir: workspace,
+            });
+
+            await showOpenDialogWithMemory(
+                taskDialogScope('file', { actionId: 'flash', id: 'pick' }),
+                { defaultUri: vscode.Uri.file(authored) },
+                env.deps
+            );
+
+            assertSamePath(
+                env.openCalls[0].defaultUri?.fsPath,
+                authored,
+                '작성자가 액션에 적은 시작 위치는 TaskHub의 추측이 아니라 지시다'
+            );
+        });
+
+        test('저장 대화상자는 폴더를 비우고 파일명만 제안한다', async () => {
+            const workspace = dir('workspace');
+            const env = makeFakeEnv({
+                enabled: false,
+                dirs: [workspace],
+                fallbackDir: workspace,
+                remembered: { [DIALOG_SCOPE.actionsExport]: workspace },
+            });
+
+            await showSaveDialogWithMemory(
+                DIALOG_SCOPE.actionsExport,
+                'actions.taskhub',
+                { defaultDir: workspace },
+                env.deps
+            );
+
+            assert.strictEqual(
+                env.saveCalls[0].defaultUri?.fsPath.replace(/^[/\\]/, ''),
+                'actions.taskhub',
+                '폴더가 남아 있으면 VS Code 최근 경로 대신 그 폴더가 열린다'
+            );
+        });
+
+        test('켜져 있을 때와 결과가 실제로 다르다 (설정이 무의미해지지 않았는지)', async () => {
+            const workspace = dir('workspace');
+            const on = makeFakeEnv({ dirs: [workspace], fallbackDir: workspace });
+            const off = makeFakeEnv({ enabled: false, dirs: [workspace], fallbackDir: workspace });
+
+            await showOpenDialogWithMemory(DIALOG_SCOPE.jsonEditor, {}, on.deps);
+            await showOpenDialogWithMemory(DIALOG_SCOPE.jsonEditor, {}, off.deps);
+
+            assertSamePath(on.openCalls[0].defaultUri?.fsPath, workspace);
+            assert.strictEqual(off.openCalls[0].defaultUri, undefined);
         });
     });
 

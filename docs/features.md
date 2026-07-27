@@ -1885,7 +1885,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 | `taskhub.history.showPanel` | `boolean` | `true` | 사이드바의 History 패널 표시 여부. `false`면 뷰 자체가 감춰지지만 기록은 그대로 유지된다. | [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.preview.showSourceControlContextMenu` | `boolean` | `true` | Source Control 변경 파일 우클릭 메뉴에 TaskHub 프리뷰/브라우저 열기 항목을 표시할지 여부. VS Code SCM 메뉴는 확장자 context key를 안정적으로 제공하지 않으므로 켜져 있으면 대상 확장자 외 파일에도 항목이 보일 수 있으며, 실제 실행은 핸들러가 확장자로 재검증한다. | [§22 Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기) |
 | `taskhub.builtinActions` | `"auto"` \| `"always"` \| `"never"` | `"auto"` | 확장에 번들된 예제 액션(`defaultButton.*`)을 Actions 목록에 병합할지. `auto`는 목록에 넣지 않고 빈 상태 CTA의 *Browse Examples* 로만 안내, `never`는 그 버튼까지 숨김, `always`는 0.6.14 이전처럼 목록에 병합. | [§3 액션 소스와 병합](#액션-소스와-병합-우선순위) |
-| `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. `false`면 VS Code 자체의 최근 경로(창·확장 공유)를 그대로 쓴다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
+| `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. `false`면 TaskHub가 시작 위치를 **일절 지정하지 않아** VS Code 자체의 최근 경로(창·확장 공유)가 쓰인다. 액션 JSON의 `options.defaultUri`는 어느 쪽이든 존중한다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |
 | `taskhub.preset.selected` | `string` | `"none"` | 자동 적용할 프리셋 ID. `"none"`이면 워크스페이스 액션만 사용. 확장 내장 또는 워크스페이스 `.vscode/presets/` 내 프리셋 ID를 입력. | [§17 Preset](#17-preset-기능) |
@@ -2116,6 +2116,11 @@ TaskHub가 여는 모든 파일/폴더 선택 다이얼로그는 **같은 용도
 
 ### 25.3. 끄기
 
-`taskhub.dialog.rememberLastLocation`을 `false`로 두면 저장도 복원도 하지 않고 VS Code 기본 동작으로 돌아갑니다 ([§21 설정 레퍼런스](#21-설정-레퍼런스)).
+`taskhub.dialog.rememberLastLocation`을 `false`로 두면 저장도 복원도 하지 않고 VS Code 기본 동작으로 돌아갑니다 ([§21 설정 레퍼런스](#21-설정-레퍼런스)). 구체적으로는 위 우선순위 표 전체가 꺼져 **TaskHub가 `defaultUri`를 지정하지 않으며**, 그 결과 VS Code가 자기 최근 경로에서 대화상자를 엽니다. 예외는 두 가지입니다.
+
+*   액션 JSON에 적어 둔 `options.defaultUri`는 그대로 존중합니다 — TaskHub의 추측이 아니라 액션 작성자의 명시적 지시이기 때문입니다.
+*   저장 대화상자는 폴더만 비우고 **제안 파일명은 유지**합니다 (예: `actions.taskhub`). 이름까지 비우면 설정과 무관하게 저장이 불편해집니다.
+
+> 0.6.11~0.6.29에서는 이 설정이 `recall`/`remember` 안쪽에서만 확인돼, 꺼도 워크스페이스 폴더 폴백이 그대로 적용됐습니다. TaskHub가 여전히 `defaultUri`를 지정하고 있었으므로 "VS Code 자체의 최근 경로"는 실제로 쓰인 적이 없습니다. 0.6.30에서 구현을 설명에 맞췄습니다.
 
 > **참고**: 액션 JSON의 `options.defaultUri`는 문자열로 작성하지만 VS Code API는 `Uri`를 요구하므로, TaskHub가 파일 경로로 해석해 승격시킵니다 (`scheme://` 형태만 URI로 파싱하므로 `C:\proj\build` 같은 Windows 경로가 드라이브 문자를 scheme으로 오인당하지 않습니다).

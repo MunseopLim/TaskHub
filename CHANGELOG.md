@@ -53,6 +53,18 @@
 
 **테스트**: 신규 9 케이스 — IT-119~IT-122(마법사 종단 흐름, 이 범위 최초로 `taskhub.createAction` 명령 자체를 끝까지 실행한다) + 웹뷰 탐지기 5종(로케일별 렌더 3종 분화, 마스킹 회귀 가드, 로케일 고정 전제 검증). 최종 1634 passing.
 
+## [0.6.30] - 2026-07-27
+
+### 수정 — `dialog.rememberLastLocation`을 꺼도 동작이 바뀌지 않던 문제 (코드 리뷰 7/7)
+
+#### Medium (설정이 약속을 지키지 않음)
+
+- **끄면 "VS Code 자체의 최근 경로"를 쓴다고 했지만, 실제로는 한 번도 그러지 않았다**: 0.6.11 이후 이 설정은 `recall`/`remember` 안쪽에서만 확인됐다. 그래서 꺼도 `workspaceFallbackDir()`는 그대로 적용돼 TaskHub가 여전히 `defaultUri`를 지정했고, VS Code의 최근 경로에는 차례가 오지 않았다. package.json 설정 설명, [docs/features.md §21·§25](docs/features.md), CHANGELOG 0.6.11 항목이 한목소리로 같은 잘못된 약속을 하고 있었다. 문서가 아니라 **구현을 고쳤다** — 설정 이름과 사용자 기대에 맞는 쪽이다. 이제 꺼져 있으면 시작 위치 결정 전체를 건너뛴다. 참조: [src/dialogMemory.ts](src/dialogMemory.ts).
+- **두 가지는 꺼도 남는다**: 액션 JSON의 `options.defaultUri`(TaskHub의 추측이 아니라 작성자의 명시적 지시), 그리고 저장 대화상자의 **제안 파일명**(폴더만 비운다 — 이름까지 비우면 설정과 무관하게 저장이 불편해진다).
+- `isEnabled()`를 `DialogMemoryDeps`에 올려 주입 가능하게 했다. 기존 OFF 테스트는 `recall`/`remember`만 검사해 결함이 있는 부분을 원리적으로 볼 수 없었다.
+
+**테스트**: 신규 4 케이스([src/test/dialogMemory.test.ts](src/test/dialogMemory.test.ts) — 끈 상태에서 `defaultUri` 미지정, 액션 JSON의 `defaultUri`는 존중, 저장 대화상자는 파일명만 유지, 그리고 **켜짐/꺼짐의 결과가 실제로 다른지**를 대조하는 케이스). 최종 1648 passing.
+
 ## [0.6.29] - 2026-07-27
 
 ### 수정 — 중지 버튼이 노출되는 범위와 실제 취소 능력의 불일치 (코드 리뷰 7/7)
