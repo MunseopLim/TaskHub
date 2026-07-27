@@ -1801,19 +1801,60 @@ async function confirmWizardAction(input: {
     const inspectLabel = t('자세히 보기', 'Inspect');
     const editIdLabel = t('ID 변경', 'Change id');
 
+    const openReviewDocument = async (): Promise<void> => {
+        let previewReport: string;
+        try {
+            previewReport = buildPreviewReport(input.action, {
+                workspaceFolder: input.workspaceFolder,
+                extensionPath: input.extensionPath,
+                workspaceRoots,
+            });
+        } catch (error: any) {
+            previewReport = `(preview unavailable: ${error?.message ?? error})`;
+        }
+        const document = await vscode.workspace.openTextDocument({
+            content: buildWizardReviewDocument(input.action, introduced, previewReport, lang),
+            language: 'jsonc',
+        });
+        await vscode.window.showTextDocument(document, { preview: true });
+    };
+
+    // A VS Code modal dims the whole workbench and captures input, so a modal
+    // re-shown on top of the review document makes that document impossible
+    // to scroll or select — the user could only read the few lines visible
+    // around the dialog, and dismissing it to read properly cancelled the
+    // wizard. Once the document is open it *is* the review surface (it holds
+    // strictly more than the modal `detail`), so the prompt drops to a
+    // notification. Notifications carrying buttons stay until acted on.
+    let inspected = false;
+
     // Loop so "Inspect" / "Change id" can act and come back to the same
     // decision instead of silently ending the wizard.
     for (;;) {
-        const choice = await vscode.window.showInformationMessage(
-            t(`'${input.action.title}' 액션을 저장할까요?`, `Save the action '${input.action.title}'?`),
-            {
-                modal: true,
-                detail: buildWizardReviewDetail(input.action, input.destinationLabel, introduced, lang),
-            },
-            saveLabel,
-            editIdLabel,
-            inspectLabel
+        const question = t(
+            `'${input.action.title}' 액션을 저장할까요?`,
+            `Save the action '${input.action.title}'?`
         );
+        const choice = inspected
+            ? await vscode.window.showInformationMessage(
+                t(
+                    `${question} 열린 검토 문서를 확인한 뒤 선택하세요.`,
+                    `${question} Review the opened document, then choose.`
+                ),
+                saveLabel,
+                editIdLabel,
+                inspectLabel
+            )
+            : await vscode.window.showInformationMessage(
+                question,
+                {
+                    modal: true,
+                    detail: buildWizardReviewDetail(input.action, input.destinationLabel, introduced, lang),
+                },
+                saveLabel,
+                editIdLabel,
+                inspectLabel
+            );
 
         if (choice === saveLabel) {
             return true;
@@ -1833,6 +1874,11 @@ async function confirmWizardAction(input: {
                 // so the serialized preview and Doctor rerun both see the new id.
                 input.action.id = edited.trim();
                 introduced = collectFindings();
+                // The open document still shows the previous id — refresh it,
+                // or the surface the user is now deciding from is stale.
+                if (inspected) {
+                    await openReviewDocument();
+                }
             }
             continue;
         }
@@ -1840,21 +1886,8 @@ async function confirmWizardAction(input: {
             return false;
         }
 
-        let previewReport: string;
-        try {
-            previewReport = buildPreviewReport(input.action, {
-                workspaceFolder: input.workspaceFolder,
-                extensionPath: input.extensionPath,
-                workspaceRoots,
-            });
-        } catch (error: any) {
-            previewReport = `(preview unavailable: ${error?.message ?? error})`;
-        }
-        const document = await vscode.workspace.openTextDocument({
-            content: buildWizardReviewDocument(input.action, introduced, previewReport, lang),
-            language: 'jsonc',
-        });
-        await vscode.window.showTextDocument(document, { preview: true });
+        await openReviewDocument();
+        inspected = true;
     }
 }
 
@@ -1941,12 +1974,15 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
         const tasks = await template.promptForTasks();
 
         const existingIds = collectActionIds([...sources.bundledActions, ...sources.workspaceActions]);
-        const id = deriveActionIdFromTitle(title, existingIds);
 
         const destination = await promptForActionDestination(sources.workspaceActions);
 
+        // The derived id is deliberately *not* kept in a local: the review
+        // step below can rewrite `newAction.id`, and a second copy of the
+        // value is exactly what let the post-creation "Run now" fire with an
+        // id that no longer existed. `newAction` is the only source of truth.
         const newAction: ActionItem = {
-            id,
+            id: deriveActionIdFromTitle(title, existingIds),
             title,
             action: {
                 description: template.defaultDescription,
@@ -1974,7 +2010,12 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
 
         persistWorkspaceActions(targetFolder.uri.fsPath, sources.workspaceActionsPath, sources.workspaceActions);
         refreshActionsAndCommands(context, mainViewProvider);
-        await handlePostCreationChoice({ id, title }, sources.workspaceActionsPath);
+        // `newAction.id` rather than the derived `id`: the review step's
+        // *Change id* button rewrites the action in place, and passing the
+        // stale value here sent "Run now" to `executeActionById` with an id
+        // that no longer exists — the user got "action not found" for the
+        // action they had just created.
+        await handlePostCreationChoice({ id: newAction.id, title }, sources.workspaceActionsPath);
     } catch (error) {
         if (error instanceof WizardCancelledError) {
             return;

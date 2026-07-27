@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.26",
+  "version": "0.6.27",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -709,22 +709,12 @@
         },
         {
           "command": "taskhub.previewAction",
-          "when": "view == mainView.main && viewItem == action",
-          "group": "context@0"
-        },
-        {
-          "command": "taskhub.previewAction",
-          "when": "view == mainView.main && viewItem == succeededAction",
-          "group": "context@0"
-        },
-        {
-          "command": "taskhub.previewAction",
-          "when": "view == mainView.main && viewItem == failedAction",
+          "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
           "group": "context@0"
         },
         {
           "command": "taskhub.exportActionItem",
-          "when": "view == mainView.main && viewItem == action",
+          "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
           "group": "context@1"
         },
         {
@@ -734,17 +724,7 @@
         },
         {
           "command": "taskhub.assignShortcut",
-          "when": "view == mainView.main && viewItem == action",
-          "group": "context@2"
-        },
-        {
-          "command": "taskhub.assignShortcut",
-          "when": "view == mainView.main && viewItem == succeededAction",
-          "group": "context@2"
-        },
-        {
-          "command": "taskhub.assignShortcut",
-          "when": "view == mainView.main && viewItem == failedAction",
+          "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
           "group": "context@2"
         },
         {
