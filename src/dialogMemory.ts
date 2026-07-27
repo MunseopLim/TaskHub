@@ -183,7 +183,12 @@ export async function showOpenDialogWithMemory(
     // 호출자가 명시한 위치가 실제로 존재하면 그대로 존중한다 — 액션 작성자가
     // 의도한 시작 위치를 기억된 값이 덮어쓰지 않도록. 설정을 꺼도 이건 남는다:
     // 액션 JSON의 `defaultUri`는 TaskHub의 추측이 아니라 작성자의 지시다.
-    if (caller && caller.scheme === 'file' && deps.exists(caller.fsPath)) {
+    //
+    // `file` 이 아닌 scheme(원격/가상 파일시스템의 `vscode-remote://`,
+    // `vscode-vfs://` 등)은 존재 확인 없이 그대로 넘긴다. node `fs` 로는 stat 할
+    // 수 없어 검사하면 무조건 실패하고, 그러면 작성자가 적어 둔 원격 경로가
+    // 조용히 버려진다. 잘못된 값이면 VS Code 가 알아서 기본 위치로 연다.
+    if (caller && (caller.scheme !== 'file' || deps.exists(caller.fsPath))) {
         effective.defaultUri = caller;
     } else if (!deps.isEnabled()) {
         // 설정이 꺼졌으면 TaskHub는 시작 위치를 일절 지정하지 않는다. 그래야

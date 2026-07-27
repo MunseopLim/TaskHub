@@ -138,4 +138,75 @@ suite('Hex Viewer 웹뷰 지역화 / 접근성', () => {
             assert.ok(html.includes('placeholder="0x08000000 / 1024"'), '예시 입력은 그대로 유지한다');
         });
     });
+
+    /**
+     * 바이트 선택 (0.6.31).
+     *
+     * 0.6.20은 툴바·찾기 바·상태 표시줄의 접근성을 정리했지만, 정작 뷰어의
+     * 본래 용도인 **바이트 선택은 클릭 전용**으로 남아 있었다. 마우스 없이는
+     * 어떤 값도 검사할 수 없었으니, 표를 읽을 수는 있어도 뷰어로는 쓸 수 없는
+     * 상태였다.
+     *
+     * 셀마다 `tabindex`를 주는 흔한 해법은 여기서 쓸 수 없다 — 행이 가상
+     * 스크롤로 만들어졌다 사라지므로 Tab stop이 수천 개 생기고, 스크롤 밖으로
+     * 나간 셀에 포커스가 남는다. 격자의 표준 패턴인 "단일 tab stop + 화살표
+     * 이동"을 쓴다.
+     */
+    suite('바이트 선택 (0.6.31)', () => {
+        const html = render();
+        const strings = buildHexViewerStrings();
+
+        test('격자가 단일 tab stop이고 이름과 역할을 갖는다', () => {
+            const container = html.match(/<div class="hex-container" id="hexContainer"[^>]*>/);
+            assert.ok(container, 'hexContainer를 찾지 못했다');
+            assert.ok(container![0].includes('tabindex="0"'), `Tab이 닿지 않는다: ${container![0]}`);
+            assert.ok(container![0].includes('role="grid"'), `역할이 없다: ${container![0]}`);
+            assert.ok(/aria-label="[^"]+"/.test(container![0]), `접근 가능한 이름이 없다: ${container![0]}`);
+        });
+
+        test('격자 이름이 조작법을 알려 준다', () => {
+            // 화살표로 움직인다는 사실은 화면에 보이지 않으므로, 이름이
+            // 알려주지 않으면 스크린리더 사용자는 조작법을 알 길이 없다.
+            assert.ok(
+                /화살표|arrow/i.test(strings.gridLabel),
+                `이동 방법이 안내되지 않는다: ${strings.gridLabel}`
+            );
+            assert.ok(
+                /Shift/i.test(strings.gridLabel),
+                `범위 선택 방법이 안내되지 않는다: ${strings.gridLabel}`
+            );
+        });
+
+        test('화살표 · PageUp/Down · Home/End로 이동한다', () => {
+            for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End']) {
+                assert.ok(html.includes(`'${key}'`), `${key} 처리가 없다`);
+            }
+        });
+
+        test('Shift와 함께 누르면 시작점을 고정한 채 범위를 넓힌다', () => {
+            assert.ok(
+                /if \(e\.shiftKey && selectedOffset >= 0\)[\s\S]{0,120}selectedEndOffset = next/.test(html),
+                'Shift 확장이 Shift+클릭과 같은 의미로 동작하지 않는다'
+            );
+        });
+
+        test('파일 경계를 넘지 않고 unit 정렬을 유지한다', () => {
+            assert.ok(
+                html.includes('Math.min(next, TOTAL_SIZE - 1)'),
+                '경계를 넘으면 존재하지 않는 오프셋이 선택된다'
+            );
+            assert.ok(
+                html.includes('Math.floor(next / unitSize) * unitSize'),
+                'unit 정렬을 잃으면 셀과 대응되지 않아 선택 표시가 사라진다'
+            );
+        });
+
+        test('컨테이너 안의 폼 요소가 키를 먼저 가져간다', () => {
+            // Go to 입력에서 누른 화살표까지 격자가 가로채면 입력이 불가능해진다.
+            assert.ok(
+                html.includes("tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA'"),
+                '폼 요소 가드가 없다'
+            );
+        });
+    });
 });

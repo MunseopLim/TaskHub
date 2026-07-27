@@ -148,4 +148,86 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
                 '같은 수치를 두 번 읽히게 하면 표 탐색만 길어진다');
         });
     });
+
+    /**
+     * 0.6.21이 남긴 클릭 전용 인터랙션 (0.6.31에서 처리).
+     *
+     * 0.6.21은 정적 All Sections 표의 정렬만 키보드로 열었다. 정작 사용자가
+     * 오래 머무는 **region 카드**는 펼치는 것부터 마우스 전용이었다 —
+     * `<div class="region-header">`는 Tab이 닿지 않고 Enter/Space도 먹지 않아,
+     * 마우스 없이는 영역 상세를 볼 방법이 아예 없었다.
+     */
+    suite('접힘 헤더와 동적 표 (0.6.31)', () => {
+
+        test('region 헤더가 포커스를 받고 버튼으로 노출된다', () => {
+            const header = html.match(/<div class="region-header"[^>]*>/);
+            assert.ok(header, 'region-header를 찾지 못했다 — 픽스처가 영역 카드를 렌더하지 않았다');
+            assert.ok(header![0].includes('tabindex="0"'), `Tab이 닿지 않는다: ${header![0]}`);
+            assert.ok(header![0].includes('role="button"'), `역할이 없어 무엇인지 알 수 없다: ${header![0]}`);
+            assert.ok(header![0].includes('aria-expanded'), `펼침 상태를 알 수 없다: ${header![0]}`);
+        });
+
+        test('펼침 글리프는 장식으로 처리된다', () => {
+            // ▶/▼는 스크린리더에 아무 의미도 전달하지 않는다. 상태는
+            // aria-expanded가 담당하므로 글리프를 읽히면 잡음만 된다.
+            assert.ok(
+                /<span class="fold-icon" aria-hidden="true">/.test(html),
+                'fold-icon이 aria-hidden이 아니다'
+            );
+        });
+
+        test('키보드 활성화 경로가 클릭 위임과 나란히 존재한다', () => {
+            assert.ok(
+                /addEventListener\('keydown'[\s\S]{0,400}data-action/.test(html),
+                "data-action 요소에 keydown 경로가 없다 — role=button만 붙이면 포커스는 가지만 눌리지 않는다"
+            );
+        });
+
+        test('진짜 button은 키보드 위임에서 제외된다 (이중 실행 방지)', () => {
+            // 브라우저가 <button>의 Enter/Space에 click을 합성하므로, 위임에서
+            // 또 처리하면 토글이 두 번 일어나 아무 일도 안 한 것처럼 보인다.
+            assert.ok(
+                html.includes("tagName === 'BUTTON'"),
+                'button 제외 가드가 없다'
+            );
+        });
+
+        test('동적 표 머리글이 정렬 가능한 열로 노출된다', () => {
+            // 이 표들은 웹뷰 스크립트가 실행 시 조립하므로 렌더된 DOM을 볼 수
+            // 없다. 조립하는 헬퍼가 필요한 속성을 붙이는지를 대신 고정한다.
+            const helper = html.match(/function sortTh\(sortKey, label, opts\)[\s\S]{0,400}?\n    \}/);
+            assert.ok(helper, 'sortTh 헬퍼를 찾지 못했다');
+            for (const attr of ['tabindex="0"', 'role="columnheader"', 'aria-sort="none"', 'scope="col"']) {
+                assert.ok(helper![0].includes(attr), `${attr}가 없다: ${helper![0]}`);
+            }
+        });
+
+        test('정렬 불가 머리글에는 tabindex를 주지 않는다', () => {
+            const helper = html.match(/function plainTh\(label, cls\)[\s\S]{0,200}?\n    \}/);
+            assert.ok(helper, 'plainTh 헬퍼를 찾지 못했다');
+            assert.ok(
+                !helper![0].includes('tabindex'),
+                '눌러도 아무 일이 없는 열에 포커스를 주면 혼란만 준다'
+            );
+        });
+
+        test('region 표 정렬이 aria-sort를 갱신하고 키보드로도 동작한다', () => {
+            assert.ok(
+                /function sortRegionTable\(th\)/.test(html),
+                '정렬 로직이 함수로 분리되지 않으면 클릭과 키보드가 같은 경로를 쓸 수 없다'
+            );
+            assert.ok(
+                /addEventListener\('keydown'[\s\S]{0,300}section-table th\[data-sort\]/.test(html),
+                'region 표 정렬에 키보드 경로가 없다'
+            );
+            assert.ok(
+                /setAttribute\('aria-sort', asc \? 'ascending' : 'descending'\)/.test(html),
+                '정렬 방향이 aria-sort로 노출되지 않는다'
+            );
+            assert.ok(
+                /h\.setAttribute\('aria-sort', 'none'\)/.test(html),
+                '이전 기준 열을 none으로 되돌리지 않으면 두 열이 정렬된 것으로 안내된다'
+            );
+        });
+    });
 });

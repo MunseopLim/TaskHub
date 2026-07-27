@@ -93,6 +93,34 @@ suite('마법사 저장 전 확인', () => {
                 `id가 안 보이면 확인 단계의 존재 이유 절반이 사라진다:\n${detail}`);
         });
 
+        /**
+         * 0.6.25가 유니코드 id를 허용하면서 이 화면의 전제가 반쯤 깨졌다
+         * (0.6.31에서 보완).
+         *
+         * 확인 단계의 근거는 "이 값이 keybindings.json에 노출되는 커맨드 이름"
+         * 인데, `buildActionCommandId`가 non-ASCII를 percent-encoding하므로
+         * 한글 id는 화면에 보이는 것과 전혀 다른 문자열로 나타난다. 사용자는
+         * `펌웨어-빌드`를 보고 단축키를 찾으러 갔다가 그 이름을 찾지 못한다.
+         */
+        test('한글 id는 실제 커맨드 이름을 함께 보여준다', () => {
+            const koreanAction = { ...sampleAction, id: '펌웨어-빌드' } as ActionItem;
+
+            const detail = buildWizardReviewDetail(koreanAction, 'Root', [], 'ko');
+
+            assert.ok(detail.includes('ID: 펌웨어-빌드'), detail);
+            assert.ok(
+                detail.includes('단축키 커맨드: taskhub.runAction.%ED%8E%8C'),
+                `keybindings.json에 실제로 보일 이름을 알려주지 않으면 사용자가 찾지 못한다:\n${detail}`
+            );
+        });
+
+        test('ASCII id에는 커맨드 이름 줄을 넣지 않는다', () => {
+            // 값이 뻔한 경우(`taskhub.runAction.fw-build`)까지 보여주면 확인
+            // 화면이 길어지기만 한다.
+            const detail = buildWizardReviewDetail(sampleAction, 'Root', [], 'ko');
+            assert.ok(!detail.includes('단축키 커맨드'), detail);
+        });
+
         test('저장 위치와 task 목록을 보여준다', () => {
             const detail = buildWizardReviewDetail(sampleAction, 'Firmware', [], 'ko');
             assert.ok(detail.includes('위치: Firmware'), detail);

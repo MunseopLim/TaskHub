@@ -1695,11 +1695,25 @@ export function buildWizardReviewDetail(
     const tasks: any[] = action.action?.tasks ?? [];
     const lines: string[] = [
         lang === 'ko' ? `ID: ${action.id}` : `Id: ${action.id}`,
+    ];
+
+    // 0.6.25가 유니코드 id를 허용하면서 이 화면의 전제가 반쯤 깨졌다. 확인
+    // 단계의 근거는 "이 값이 keybindings.json에 노출되는 커맨드 이름"인데,
+    // `buildActionCommandId`가 non-ASCII를 percent-encoding하므로 한글 id는
+    // 여기 보이는 것과 전혀 다른 문자열로 나타난다
+    // (`펌웨어-빌드` → `taskhub.runAction.%ED%8E%8C…`).
+    // 달라질 때만 한 줄 더 보여 준다 — 대부분의 ASCII id에서는 잡음이다.
+    const commandId = buildActionCommandId(String(action.id ?? ''));
+    if (commandId !== `taskhub.runAction.${action.id}`) {
+        lines.push(lang === 'ko' ? `단축키 커맨드: ${commandId}` : `Keybinding command: ${commandId}`);
+    }
+
+    lines.push(
         lang === 'ko' ? `위치: ${destinationLabel}` : `Location: ${destinationLabel}`,
         '',
         lang === 'ko' ? `Task ${tasks.length}개` : `${tasks.length} task(s)`,
         ...collapseList(tasks.map(describeTaskLine), WIZARD_REVIEW_LIST_LIMIT, lang),
-    ];
+    );
 
     if (findings.length > 0) {
         const errors = findings.filter(f => f.severity === 'error').length;

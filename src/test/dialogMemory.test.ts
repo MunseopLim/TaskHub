@@ -178,6 +178,37 @@ suite('dialogMemory', () => {
             assert.strictEqual(env.openCalls[0].openLabel, 'Open JSON File');
             assert.deepStrictEqual(env.openCalls[0].filters, { 'JSON Files': ['json'] });
         });
+
+        test('원격/가상 FS의 defaultUri는 존재 확인 없이 그대로 넘긴다', async () => {
+            // node fs로는 stat할 수 없어 검사하면 무조건 실패한다. 그대로
+            // 버리면 원격 워크스페이스에서 작성자가 지정한 경로가 조용히 사라진다.
+            const remote = vscode.Uri.parse('vscode-remote://ssh-remote+box/home/dev/fw');
+            const workspace = dir('workspace');
+            const env = makeFakeEnv({ dirs: [workspace], fallbackDir: workspace });
+
+            await showOpenDialogWithMemory(DIALOG_SCOPE.hexViewer, { defaultUri: remote }, env.deps);
+
+            assert.strictEqual(
+                env.openCalls[0].defaultUri?.toString(),
+                remote.toString(),
+                '워크스페이스 폴백이 원격 경로를 덮어썼다'
+            );
+        });
+
+        test('존재하지 않는 file 경로는 종전대로 폴백한다', async () => {
+            // 위 완화가 file scheme까지 풀어 버리면, 오래된 defaultUri를 가진
+            // 액션이 늘 존재하지 않는 폴더에서 열리게 된다.
+            const workspace = dir('workspace');
+            const env = makeFakeEnv({ dirs: [workspace], fallbackDir: workspace });
+
+            await showOpenDialogWithMemory(
+                DIALOG_SCOPE.hexViewer,
+                { defaultUri: vscode.Uri.file(dir('gone', 'missing')) },
+                env.deps
+            );
+
+            assertSamePath(env.openCalls[0].defaultUri?.fsPath, workspace);
+        });
     });
 
     /**
@@ -253,6 +284,15 @@ suite('dialogMemory', () => {
                 'actions.taskhub',
                 '폴더가 남아 있으면 VS Code 최근 경로 대신 그 폴더가 열린다'
             );
+        });
+
+        test('file이 아닌 scheme의 defaultUri도 꺼진 상태에서 살아남는다', async () => {
+            const env = makeFakeEnv({ enabled: false, dirs: [dir('workspace')], fallbackDir: dir('workspace') });
+            const remote = vscode.Uri.parse('vscode-remote://ssh-remote+box/home/dev/fw');
+
+            await showOpenDialogWithMemory(DIALOG_SCOPE.hexViewer, { defaultUri: remote }, env.deps);
+
+            assert.strictEqual(env.openCalls[0].defaultUri?.toString(), remote.toString());
         });
 
         test('켜져 있을 때와 결과가 실제로 다르다 (설정이 무의미해지지 않았는지)', async () => {

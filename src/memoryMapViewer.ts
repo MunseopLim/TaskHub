@@ -523,8 +523,8 @@ function getWebviewContent(
     // so the CSP does not need to allow inline event attributes.
     const regionCardsHtml = regionJsonData.map((rd: any, idx: number) => `
         <div class="region-card" id="region-${esc(rd.name)}" data-idx="${idx}">
-            <div class="region-header" data-action="toggle-region">
-                <span class="fold-icon">▶</span>
+            <div class="region-header" data-action="toggle-region" role="button" tabindex="0" aria-expanded="false">
+                <span class="fold-icon" aria-hidden="true">▶</span>
                 <strong>${esc(rd.name)}</strong>
                 <span class="region-info">${esc(rd.infoText)}</span>
             </div>
@@ -941,6 +941,30 @@ const RD = ${regionDataJsLiteral};
 
     function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+    /**
+     * 정렬 가능한 표 머리글.
+     *
+     * 0.6.21은 정적 All Sections 표에만 tabindex / aria-sort를 붙였고, 여기서
+     * 런타임에 조립되는 표들(region 상세, Object Summary)은 빠져 있었다. 실제로
+     * 사용자가 오래 머무는 쪽이 이 표들인데 정렬이 마우스 전용이었고, 정렬
+     * 방향도 ▲/▼ 글리프로만 표시돼 스크린리더에는 아무것도 전달되지 않았다.
+     *
+     * aria-sort의 초기값 none이 중요하다 — 속성이 아예 없으면 스크린리더가
+     * 이 열을 정렬 가능한 것으로 안내하지 않는다.
+     */
+    function sortTh(sortKey, label, opts) {
+        opts = opts || {};
+        return '<th data-sort="' + sortKey + '"'
+            + (opts.sortBy ? ' data-sort-by="' + opts.sortBy + '"' : '')
+            + (opts.cls ? ' class="' + opts.cls + '"' : '')
+            + ' scope="col" role="columnheader" tabindex="0" aria-sort="none">' + label + '</th>';
+    }
+
+    /** 정렬 불가 머리글 — tabindex를 주면 눌러도 아무 일이 없어 혼란만 준다. */
+    function plainTh(label, cls) {
+        return '<th' + (cls ? ' class="' + cls + '"' : '') + ' scope="col">' + label + '</th>';
+    }
+
     // HTML-escape the text, wrapping every occurrence of the current search
     // query (curQ, already lowercased) in a mark element for visual highlight.
     // Operates on the raw string so the escaping stays correct regardless of
@@ -1022,28 +1046,29 @@ const RD = ${regionDataJsLiteral};
             // \uBC88\uB4E4 \uAC12\uB3C4 esc()\uB97C \uAC70\uCE5C\uB2E4. \uC9C0\uAE08 \uAC12\uC5D0\uB294 \uB530\uC634\uD45C\uAC00 \uC5C6\uC9C0\uB9CC, \uC18D\uC131\uC5D0
             // \uB123\uB294 \uBB38\uC790\uC5F4\uB9CC \uC774 \uC790\uB9AC\uC5D0\uC11C \uC608\uC678\uC600\uB358 \uAC83\uC740 \uC8FC\uBCC0 \uCF54\uB4DC\uC640 \uC5B4\uAE0B\uB09C\uB2E4 \u2014
             // \uBC88\uC5ED\uC774 \uD558\uB098 \uBC14\uB00C\uBA74 \uC18D\uC131\uC774 \uAE68\uC9C0\uB294 \uC885\uB958\uC758 \uC7A0\uBCF5 \uACB0\uD568\uC774\uB2E4.
-            h += '<div class="obj-summary-header" data-action="toggle-obj-summary"><span class="fold-icon">\u25B6</span> ' + esc(S.objectSummary) + ' (' + rd.objSummary.length + ') <button data-action="toggle-obj-detail-rows" title="' + esc(S.toggleObjectDetails) + '" aria-label="' + esc(S.toggleObjectDetails) + '">' + esc(S.details) + ' \u25B6</button></div>';
+            h += '<div class="obj-summary-header" data-action="toggle-obj-summary" role="button" tabindex="0" aria-expanded="false"><span class="fold-icon" aria-hidden="true">\u25B6</span> ' + esc(S.objectSummary) + ' (' + rd.objSummary.length + ') <button data-action="toggle-obj-detail-rows" title="' + esc(S.toggleObjectDetails) + '" aria-label="' + esc(S.toggleObjectDetails) + '">' + esc(S.details) + ' \u25B6</button></div>';
             h += '<div class="obj-summary-body" style="display:none"><table class="obj-summary-table sortable-table"><thead><tr>'
-                + '<th data-sort="name" scope="col">' + S.colObject + '</th>'
-                + '<th class="num" scope="col">' + S.colSection + '</th>'
-                + '<th class="num" scope="col">' + S.colAddress + '</th>'
-                + '<th class="num" scope="col">' + S.colEnd + '</th>'
-                + '<th class="num" data-sort="size" data-sort-by="bytes" scope="col">' + S.colSize + '</th>'
-                + '<th class="num" data-sort="bytes" scope="col">' + S.colBytes + '</th>'
-                + '<th class="num" data-sort="pct" scope="col">' + S.colPercent + '</th>'
+                + sortTh('name', S.colObject)
+                + plainTh(S.colSection, 'num')
+                + plainTh(S.colAddress, 'num')
+                + plainTh(S.colEnd, 'num')
+                + sortTh('size', S.colSize, { cls: 'num', sortBy: 'bytes' })
+                + sortTh('bytes', S.colBytes, { cls: 'num' })
+                + sortTh('pct', S.colPercent, { cls: 'num' })
                 + '<th aria-hidden="true"></th></tr></thead><tbody>' + oRows + '</tbody></table></div>';
         }
 
         // Section table
         if (rd.segments.length > 0) {
-            const thHtml = '<tr><th data-sort="name" scope="col">' + S.colObject + '</th>' +
-                (rd.hsi ? '<th data-sort="section" scope="col" class="func-cell' + (funcVis ? '' : ' hidden') + '">' + S.colSection + '</th>' : '') +
-                (rd.hfi ? '<th data-sort="func" scope="col" class="func-cell' + (funcVis ? '' : ' hidden') + '">' + S.colFunction + '</th>' : '') +
-                '<th class="num" data-sort="addr" scope="col">' + S.colAddress + '</th>'
-                + '<th class="num" data-sort="end" scope="col">' + S.colEnd + '</th>'
-                + '<th class="num" data-sort="size" data-sort-by="bytes" scope="col">' + S.colSize + '</th>'
-                + '<th class="num" data-sort="bytes" scope="col">' + S.colBytes + '</th>'
-                + '<th data-sort="type" scope="col">' + S.colType + '</th></tr>';
+            const funcCls = 'func-cell' + (funcVis ? '' : ' hidden');
+            const thHtml = '<tr>' + sortTh('name', S.colObject) +
+                (rd.hsi ? sortTh('section', S.colSection, { cls: funcCls }) : '') +
+                (rd.hfi ? sortTh('func', S.colFunction, { cls: funcCls }) : '')
+                + sortTh('addr', S.colAddress, { cls: 'num' })
+                + sortTh('end', S.colEnd, { cls: 'num' })
+                + sortTh('size', S.colSize, { cls: 'num', sortBy: 'bytes' })
+                + sortTh('bytes', S.colBytes, { cls: 'num' })
+                + sortTh('type', S.colType) + '</tr>';
 
             if (rd.segments.length > VT_THRESH) {
                 const vpH = Math.min(rd.segments.length * ROW_H, MAX_VP_H);
@@ -1122,6 +1147,9 @@ const RD = ${regionDataJsLiteral};
             detail.style.display = 'none';
             icon.textContent = '\u25B6';
         }
+        // \u25B6/\u25BC \uAE00\uB9AC\uD504\uB294 \uC2A4\uD06C\uB9B0\uB9AC\uB354\uC5D0 \uC544\uBB34 \uC758\uBBF8\uB3C4 \uC804\uB2EC\uD558\uC9C0 \uC54A\uB294\uB2E4(aria-hidden).
+        // \uD3BC\uCE68 \uC5EC\uBD80\uB294 aria-expanded\uB85C\uB9CC \uC54C \uC218 \uC788\uB2E4.
+        header.setAttribute('aria-expanded', detail.style.display === 'none' ? 'false' : 'true');
         window.syncToggleAllLabel();
     };
 
@@ -1562,6 +1590,20 @@ const RD = ${regionDataJsLiteral};
     // --- Data-driven sort for region section tables (including virtual) ---
     document.addEventListener('click', function(ev) {
         const th = ev.target.closest && ev.target.closest('.region-card .section-table th[data-sort]');
+        sortRegionTable(th);
+    });
+
+    // 클릭 전용이던 정렬에 키보드 경로를 붙인다. initSort의 정적 표는
+    // 0.6.21에 이 처리를 받았지만, 여기 region 표들은 빠져 있었다.
+    document.addEventListener('keydown', function(ev) {
+        if (ev.key !== 'Enter' && ev.key !== ' ') { return; }
+        const th = ev.target.closest && ev.target.closest('.region-card .section-table th[data-sort]');
+        if (!th) { return; }
+        ev.preventDefault();   // Space의 기본 스크롤 억제
+        sortRegionTable(th);
+    });
+
+    function sortRegionTable(th) {
         if (!th || th.closest('.sortable-table')) return;
 
         const card = th.closest('.region-card');
@@ -1604,10 +1646,18 @@ const RD = ${regionDataJsLiteral};
         }
 
         const ths = th.parentElement.querySelectorAll('th[data-sort]');
-        ths.forEach(function(h) { h.textContent = h.textContent.replace(/ [\u25B2\u25BC]$/, ''); });
+        ths.forEach(function(h) {
+            h.textContent = h.textContent.replace(/ [\u25B2\u25BC]$/, '');
+            // \uC815\uB82C \uAE30\uC900\uC774 \uC544\uB2CC \uC5F4\uC740 none\uC73C\uB85C \uB418\uB3CC\uB9B0\uB2E4. \uB0A8\uACA8 \uB450\uBA74 \uC2A4\uD06C\uB9B0\uB9AC\uB354\uAC00
+            // \uC774\uC804 \uAE30\uC900 \uC5F4\uC744 \uACC4\uC18D \uC815\uB82C\uB41C \uAC83\uC73C\uB85C \uC548\uB0B4\uD55C\uB2E4.
+            h.setAttribute('aria-sort', 'none');
+            h.setAttribute('title', S.sortAscending);
+        });
         th.textContent += asc ? ' \u25B2' : ' \u25BC';
+        th.setAttribute('aria-sort', asc ? 'ascending' : 'descending');
+        th.setAttribute('title', asc ? S.sortDescending : S.sortAscending);
         resyncAfterReflow();   // a region section table feeds matchList; resync nav after re-render
-    });
+    }
 
     // Initialize sort on static tables (overview, all-sections)
     initSort(document);
@@ -1641,6 +1691,7 @@ const RD = ${regionDataJsLiteral};
                 body.style.display = 'none';
                 if (icon) { icon.textContent = '\u25B6'; }
             }
+            header.setAttribute('aria-expanded', body.style.display === 'none' ? 'false' : 'true');
         }
     };
 
@@ -1668,6 +1719,29 @@ const RD = ${regionDataJsLiteral};
         if (!target || target.nodeType !== 1) { return; }
         const actionEl = target.closest('[data-action]');
         if (!actionEl) { return; }
+        runAction(actionEl, ev);
+    });
+
+    // --- 키보드 경로. 접히는 헤더 두 곳(region-header / obj-summary-header)은
+    // <div>라 Tab이 닿지 않고 Enter/Space도 먹지 않아, 마우스 없이는 region
+    // 상세를 펼칠 방법이 아예 없었다. role=button + tabindex로 포커스를 받게
+    // 하고 여기서 활성화를 처리한다.
+    //
+    // 진짜 <button>은 제외한다 — 브라우저가 Enter/Space에 click을 이미 합성하므로
+    // 여기서 또 처리하면 토글이 두 번 일어나 아무 일도 안 한 것처럼 보인다.
+    document.addEventListener('keydown', function(ev) {
+        if (ev.key !== 'Enter' && ev.key !== ' ') { return; }
+        const target = ev.target;
+        if (!target || target.nodeType !== 1) { return; }
+        if (target.tagName === 'BUTTON') { return; }
+        const actionEl = target.closest('[data-action]');
+        if (!actionEl || actionEl.tagName === 'BUTTON') { return; }
+        // Space는 기본 동작이 스크롤이다. 막지 않으면 펼치면서 화면이 튄다.
+        ev.preventDefault();
+        runAction(actionEl, ev);
+    });
+
+    function runAction(actionEl, ev) {
         const action = actionEl.getAttribute('data-action');
         switch (action) {
             case 'toggle-region':
@@ -1687,7 +1761,7 @@ const RD = ${regionDataJsLiteral};
                 window.toggleObjDetailRows(actionEl);
                 break;
         }
-    });
+    }
 })();
 </script>
 </body>

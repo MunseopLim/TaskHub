@@ -53,6 +53,30 @@
 
 **테스트**: 신규 9 케이스 — IT-119~IT-122(마법사 종단 흐름, 이 범위 최초로 `taskhub.createAction` 명령 자체를 끝까지 실행한다) + 웹뷰 탐지기 5종(로케일별 렌더 3종 분화, 마스킹 회귀 가드, 로케일 고정 전제 검증). 최종 1634 passing.
 
+## [0.6.31] - 2026-07-27
+
+### 수정 — 웹뷰 3종의 클릭 전용 인터랙션과 남은 리뷰 항목 (코드 리뷰 7/7)
+
+#### High (마우스 없이는 기능 자체가 없음)
+
+0.6.19~0.6.21의 웹뷰 접근성 작업은 툴바·라벨·정적 표에 그쳤고, **각 뷰어의 본래 용도에 해당하는 조작**이 클릭 전용으로 남아 있었다. 읽을 수는 있으나 쓸 수는 없는 상태였다.
+
+- **Memory Map — region 카드를 펼칠 수 없었다**: `<div class="region-header">`는 Tab이 닿지 않고 Enter/Space도 먹지 않아, 마우스 없이는 영역 상세를 볼 방법이 아예 없었다. `role="button"` + `tabindex` + `aria-expanded`를 붙이고, 기존 `data-action` 클릭 위임과 나란히 키보드 위임을 뒀다. 진짜 `<button>`은 브라우저가 Enter/Space에 click을 합성하므로 위임에서 제외한다 — 안 그러면 토글이 두 번 일어나 아무 일도 안 한 것처럼 보인다. Object Summary 헤더도 같다.
+- **Memory Map — 동적 표 정렬이 마우스 전용이었다**: 0.6.21은 정적 All Sections 표만 덮었고, 정작 사용자가 오래 머무는 region 상세 / Object Summary 표는 `tabindex`도 `aria-sort`도 없었다. 정렬 로직을 `sortRegionTable()`로 분리해 클릭과 키보드가 한 경로를 쓰게 하고, 정렬 시 기준 열은 `ascending`/`descending`, 나머지는 `none`으로 갱신한다.
+- **JSON Editor — 셀 편집 진입이 클릭 전용이었다**: 셀이 포커스를 받지 못해 키보드만으로는 값을 고칠 수 없었다. 편집 진입을 `beginEdit()`로 분리해 클릭과 Enter/Space가 같은 경로를 쓴다. 편집 중인 셀은 재진입을 건너뛴다 — input에서 누른 Enter가 올라오면 방금 연 셀을 다시 여는 셈이 되기 때문이다.
+- **Hex Viewer — 바이트 선택이 클릭 전용이었다**: 뷰어의 본래 용도인 "값 확인"이 마우스 없이는 불가능했다. 행이 가상 스크롤로 만들어졌다 사라지므로 셀마다 `tabindex`를 줄 수 없다(Tab stop이 수천 개 생기고, 스크롤 밖으로 나간 셀에 포커스가 남는다). 격자의 표준 패턴인 **단일 tab stop + 화살표 이동**을 쓴다 — 화살표/PageUp·Down/Home·End로 이동, Shift로 범위 확장, 파일 경계와 unit 정렬 유지. 컨테이너 안의 폼 요소(Go to 입력)가 키를 먼저 가져간다. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts), [src/jsonEditor.ts](src/jsonEditor.ts), [src/hexViewer.ts](src/hexViewer.ts).
+
+#### Medium (부분 적용된 ARIA)
+
+- **JSON Editor 탭 패턴을 완성했다**: 0.6.19가 `role="tablist"` / `role="tab"`을 붙이고 모든 탭에 `tabIndex=0`을 줬는데, ARIA tablist의 규약은 "Tab으로 묶음에 진입, 화살표로 내부 이동"이다. 스크린리더는 규약대로 안내하지만 화살표는 아무 동작도 하지 않았다 — **부분 적용이 미적용보다 나쁠 수 있는 사례**다. roving tabindex(활성 탭만 `0`), 좌우 화살표 이동과 양끝 순환, `aria-controls`, `role="tabpanel"`, 활성 탭을 따라가는 `aria-labelledby`를 갖췄다. 탭 줄이 숨겨질 때는 끊긴 참조를 남기지 않는다.
+
+#### UX / 일관성
+
+- **한글 액션 id의 실제 커맨드 이름을 확인 단계에 표시한다**: 0.6.18 확인 단계의 근거는 "이 값이 `keybindings.json`에 노출되는 커맨드 이름"인데, 0.6.25가 유니코드 id를 허용하면서 그 전제가 반쯤 깨졌다. `buildActionCommandId`가 non-ASCII를 percent-encoding하므로 `펌웨어-빌드`는 `taskhub.runAction.%ED%8E%8C…`로 나타나, 화면에서 본 이름으로는 단축키를 찾을 수 없었다. 두 값이 다를 때만 한 줄 더 보여 준다.
+- **원격/가상 파일시스템의 `defaultUri`가 버려지던 문제**: `showOpenDialogWithMemory`가 `file` scheme만 인정해, 액션에 적어 둔 `vscode-remote://` 경로가 조용히 워크스페이스 폴더로 덮였다. node `fs`로는 stat할 수 없어 존재 확인이 무조건 실패하기 때문이다. `file`이 아닌 scheme은 확인 없이 그대로 넘긴다(잘못된 값이면 VS Code가 기본 위치로 연다). `file` 경로의 기존 검증은 그대로 — 오래된 `defaultUri`가 늘 없는 폴더를 여는 일이 없어야 한다.
+
+**테스트**: 신규 25 케이스 — Memory Map 접힘 헤더·동적 표 7종, JSON Editor 셀 편집·탭 패턴 7종, Hex Viewer 바이트 선택 6종, dialogMemory 원격 URI 3종, 마법사 커맨드 이름 2종. 최종 1681 passing.
+
 ## [0.6.30] - 2026-07-27
 
 ### 수정 — `dialog.rememberLastLocation`을 꺼도 동작이 바뀌지 않던 문제 (코드 리뷰 7/7)

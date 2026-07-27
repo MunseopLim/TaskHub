@@ -1238,7 +1238,10 @@ export function getWebviewContent(
         <span class="filepath" title="${escapedPath}" aria-label="${esc(strings.filePath)}: ${escapedPath}">${escapedPath}</span>
     </div>
     <div class="tabs" id="tabs" role="tablist"></div>
-    <div class="table-wrapper" id="tableWrapper"></div>
+    <!-- 탭이 제어하는 대상. role=tabpanel이 없으면 role=tab이 가리키는 곳이
+         없어, 스크린리더가 탭을 읽고도 어디로 이동했는지 알리지 못한다.
+         aria-labelledby는 활성 탭을 따라 renderTabs가 갱신한다. -->
+    <div class="table-wrapper" id="tableWrapper" role="tabpanel" tabindex="0"></div>
     <div id="errorMsg" role="alert" style="color:var(--danger);padding:12px;display:none;"></div>
     <div id="srStatus" class="sr-only" role="status" aria-live="polite"></div>
 
@@ -1489,14 +1492,31 @@ export function getWebviewContent(
             const tab = document.createElement('div');
             tab.className = 'tab' + (idx === activeIdx ? ' active' : '');
             tab.textContent = entry.label === '_rootArray' ? S.rootArrayTab : entry.label;
+            tab.id = 'sheet-tab-' + idx;
             tab.setAttribute('role', 'tab');
             tab.setAttribute('aria-selected', idx === activeIdx ? 'true' : 'false');
-            tab.tabIndex = 0;
+            // 탭이 무엇을 제어하는지 연결한다. role=tab만 붙이고 대상을 알리지
+            // 않으면 스크린리더가 "탭 1/N"까지만 읽고 그게 어느 영역을 바꾸는지
+            // 전달하지 못한다.
+            tab.setAttribute('aria-controls', 'tableWrapper');
+            // Roving tabindex: 활성 탭 하나만 Tab 순서에 둔다. ARIA tablist는
+            // "Tab으로 묶음에 진입, 화살표로 그 안을 이동"이 규약인데, 0.6.19는
+            // 모든 탭에 tabIndex=0을 줘 화살표 이동 없이 Tab만 반복하게 했다 —
+            // 스크린리더가 안내하는 조작법과 실제 동작이 어긋난 상태였다.
+            tab.tabIndex = idx === activeIdx ? 0 : -1;
             tab.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
                     tab.click();
+                    return;
                 }
+                const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+                if (step === 0) { return; }
+                e.preventDefault();
+                // 양끝에서 순환한다 (WAI-ARIA tablist 권장 동작).
+                const next = (idx + step + sheetMap.length) % sheetMap.length;
+                const nextTab = tabsEl.children[next];
+                if (nextTab) { nextTab.focus(); nextTab.click(); }
             });
             tab.onclick = () => {
                 // 탭 전환은 즉시 renderTable로 DOM을 갈아치워 활성 셀의 td를
@@ -1509,6 +1529,18 @@ export function getWebviewContent(
             };
             tabsEl.appendChild(tab);
         });
+        // 패널이 어느 탭에 속하는지 알린다. 활성 탭이 바뀔 때마다 갱신해야
+        // 스크린리더가 읽는 패널 이름이 실제 내용과 어긋나지 않는다.
+        const panel = document.getElementById('tableWrapper');
+        if (panel) {
+            if (sheetMap.length > 1) {
+                panel.setAttribute('aria-labelledby', 'sheet-tab-' + activeIdx);
+            } else {
+                // 탭 줄이 숨겨져 있으면 가리킬 대상이 없다. 끊긴 참조를 남기면
+                // 스크린리더가 이름 없는 패널로 읽는다.
+                panel.removeAttribute('aria-labelledby');
+            }
+        }
     }
 
     function getDisplayValue(val) {
@@ -1785,7 +1817,7 @@ export function getWebviewContent(
         document.querySelectorAll('td[data-row]').forEach(td => {
             const view = td.querySelector('.cell-view');
             if (!view) { return; }
-            view.addEventListener('click', () => {
+            const beginEdit = () => {
                 // Close other editing cells. invalid JSON 등으로 commit이
                 // 거부되면 그 셀은 editing 상태로 남으며, 새 셀로의 진입을
                 // 막아 두 셀이 동시에 편집 상태가 되는 것을 방지한다.
@@ -1806,6 +1838,21 @@ export function getWebviewContent(
                 td.classList.add('editing');
                 const input = td.querySelector('.cell-edit input, .cell-edit textarea');
                 if (input) { input.focus(); input.select && input.select(); }
+            };
+            view.addEventListener('click', beginEdit);
+            // 편집 진입이 클릭 전용이었다. 셀 자체가 포커스를 받지 못해
+            // 키보드만으로는 값을 고칠 방법이 아예 없었다 — 표를 읽을 수는
+            // 있으나 편집기로는 쓸 수 없는 상태였다.
+            //
+            // 편집 중인 input 안에서 누른 Enter까지 여기로 올라오면 방금 연
+            // 셀을 다시 여는 셈이 되므로, 편집 상태의 셀은 건너뛴다.
+            view.setAttribute('tabindex', '0');
+            view.setAttribute('role', 'button');
+            view.addEventListener('keydown', (e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') { return; }
+                if (td.classList.contains('editing')) { return; }
+                e.preventDefault();
+                beginEdit();
             });
         });
 

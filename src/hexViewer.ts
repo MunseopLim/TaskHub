@@ -382,6 +382,7 @@ export function buildHexViewerStrings(): Record<string, string> {
         findNoMatches: t('결과 없음', 'No matches'),
         addressHeader: t('주소', 'Address'),
         statusHint: t('바이트를 클릭하면 값을 확인할 수 있습니다', 'Click a byte to inspect'),
+        gridLabel: t('16진수 바이트 표 — 화살표 키로 이동, Shift와 함께 누르면 범위 선택', 'Hex byte grid — arrow keys to move, hold Shift to extend the selection'),
         // 상태 표시줄의 첫 항목. 바로 옆 `statusAddress`는 번들에 있는데 이것만
         // 하드코딩돼 있었다 — 정적 마크업이 아니라 innerHTML로 조립되는 자리라
         // 0.6.26 탐지기의 검사 범위 밖이었다.
@@ -591,7 +592,12 @@ function getWebviewContent(
         <span class="find-info" id="findInfo" role="status" aria-live="polite"></span>
         <button id="findClose" aria-label="${esc(S.findClose)}" title="${esc(S.findClose)}">✕</button>
     </div>
-    <div class="hex-container" id="hexContainer">
+    <!-- 단일 tab stop + 화살표 이동. 행이 가상 스크롤로 만들어졌다 사라지므로
+         셀마다 tabindex를 주면 Tab stop이 수천 개 생기고, 스크롤 밖으로 나간
+         셀에 포커스가 남아 사라지는 문제도 생긴다. 격자에는 "Tab으로 진입,
+         화살표로 내부 이동"이 표준 패턴이다. -->
+    <div class="hex-container" id="hexContainer" tabindex="0" role="grid"
+         aria-label="${esc(S.gridLabel)}">
         <table class="hex-table" id="hexTable">
             <thead id="hexHead"></thead>
             <tbody id="hexBody"></tbody>
@@ -958,6 +964,61 @@ function getWebviewContent(
             selectedEndOffset = off;
         }
         updateSelection();
+    });
+
+    // 키보드 선택. 클릭 전용이라 마우스 없이는 어떤 바이트도 검사할 수 없었다
+    // — 표를 읽을 수는 있으나 뷰어의 본래 용도인 "값 확인"이 불가능했다.
+    hexContainer.addEventListener('keydown', (e) => {
+        // Go to 입력 등 컨테이너 안의 폼 요소에서 누른 키는 그쪽 것이다.
+        const tag = e.target && e.target.tagName;
+        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') { return; }
+
+        const perRow = BYTES_PER_ROW;
+        let delta = 0;
+        switch (e.key) {
+            case 'ArrowLeft':  delta = -unitSize; break;
+            case 'ArrowRight': delta = unitSize; break;
+            case 'ArrowUp':    delta = -perRow; break;
+            case 'ArrowDown':  delta = perRow; break;
+            case 'PageUp':     delta = -perRow * 16; break;
+            case 'PageDown':   delta = perRow * 16; break;
+            case 'Home':
+            case 'End':
+                break;
+            default:
+                return;
+        }
+        e.preventDefault();
+
+        // 아직 아무것도 고르지 않았으면 첫 바이트에서 시작한다.
+        const current = selectedEndOffset >= 0 ? selectedEndOffset
+            : (selectedOffset >= 0 ? selectedOffset : 0);
+        let next;
+        if (e.key === 'Home') {
+            next = 0;
+        } else if (e.key === 'End') {
+            next = Math.floor((TOTAL_SIZE - 1) / unitSize) * unitSize;
+        } else {
+            next = current + delta;
+        }
+        // 파일 경계에서 멈춘다. unit 정렬을 유지해야 셀과 대응된다.
+        next = Math.max(0, Math.min(next, TOTAL_SIZE - 1));
+        next = Math.floor(next / unitSize) * unitSize;
+
+        if (e.shiftKey && selectedOffset >= 0) {
+            // 시작점을 고정한 채 끝점만 옮긴다 — Shift+클릭과 같은 의미.
+            selectedEndOffset = next;
+            updateSelection();
+            const cell = hexBody.querySelector('.hex-cell[data-offset="' + next + '"]');
+            if (cell && typeof cell.scrollIntoView === 'function') {
+                cell.scrollIntoView({ block: 'nearest' });
+            } else {
+                scrollToRow(Math.floor(next / perRow));
+            }
+        } else {
+            // jumpToOffset이 선택 갱신 · 스크롤 · 재렌더를 모두 처리한다.
+            jumpToOffset(next);
+        }
     });
 
     // Unit size change
