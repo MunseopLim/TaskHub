@@ -424,6 +424,17 @@ export function buildMemoryMapStrings(): Record<string, string> {
         colFunction: t('함수', 'Function'),
         colPercent: t('비율', 'Percent'),
         noMatches: t('결과 없음', 'No matches'),
+        // Function 열 토글 버튼의 **본문**. `toggleFunctionColumn`(title/aria-label)은
+        // 0.6.21에 번역됐지만 눈에 보이는 라벨은 영어로 남아 있었다. 번들에
+        // `colFunction`이 이미 있었는데도 남은 이유는 0.6.26 탐지기가 이걸
+        // "번들 값 `Function 열 표시 전환`에 포함된다"며 통과시켰기 때문이다
+        // (0.6.27에서 그 마스킹을 제거).
+        funcColumnToggle: t('함수 열', 'Function'),
+        // 검색 결과 요약. live region으로 읽히므로 문구가 그대로 낭독된다.
+        // 한국어는 복수형이 없어 {n}만 갈아끼우면 되지만 영어는 단/복수가
+        // 갈리므로 두 벌을 둔다.
+        regionsMatchedOne: t(' — {n}개 영역 일치', ' — {n} region matched'),
+        regionsMatchedMany: t(' — {n}개 영역 일치', ' — {n} regions matched'),
     };
 }
 
@@ -875,7 +886,7 @@ function getWebviewContent(
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
         ${!hasLinkerData && !hasSymbols ? `<div class="info-note">${t('AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.', 'AXF/ELF files provide section-level information only. Use an ARM Linker Listing file for object-level analysis and linker-reported values.')}</div>` : ''}
         ${hasSymbols ? `<div class="info-note">${t('ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.', 'Function and variable details are extracted from the ELF symbol table. Program-header based automatic region detection was applied.')}</div>` : ''}
-        <div class="section-heading">${esc(S.regionDetails)}<span id="regMatchInfo" role="status" aria-live="polite"></span> <button data-action="toggle-all" id="toggleAllBtn" title="${esc(S.expandAll)}" aria-expanded="false">▼ ${esc(S.expandAll)}</button>${hasFuncData ? ` <button data-action="toggle-func-col" title="${esc(S.toggleFunctionColumn)}" aria-label="${esc(S.toggleFunctionColumn)}">Function ▶</button>` : ''}</div>
+        <div class="section-heading">${esc(S.regionDetails)}<span id="regMatchInfo" role="status" aria-live="polite"></span> <button data-action="toggle-all" id="toggleAllBtn" title="${esc(S.expandAll)}" aria-expanded="false">▼ ${esc(S.expandAll)}</button>${hasFuncData ? ` <button data-action="toggle-func-col" title="${esc(S.toggleFunctionColumn)}" aria-label="${esc(S.toggleFunctionColumn)}">${esc(S.funcColumnToggle)} ▶</button>` : ''}</div>
         ${regionCardsHtml}
     ` : `
         <div class="no-regions">
@@ -909,6 +920,12 @@ const RD = ${regionDataJsLiteral};
     // Locale-resolved UI labels from the host (buildMemoryMapStrings).
     // Report bodies below stay English by design — they are shared artifacts.
     const S = ${stringsLiteral};
+    // {placeholder} 치환 — 언어별 어순 차이를 수용한다. JSON Editor / Hex
+    // Viewer와 같은 구현.
+    function fmt(template, values) {
+        return String(template).replace(/\\{(\\w+)\\}/g, (match, key) =>
+            Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match);
+    }
     const report = ${reportJsLiteral};
     const summary = ${summaryJsLiteral};
     const VT_THRESH = 200, ROW_H = 24, BUFFER = 30, MAX_VP_H = 600;
@@ -1002,7 +1019,10 @@ const RD = ${regionDataJsLiteral};
                 }).join('');
                 return '<tr><td>' + esc(o.n) + '</td><td class="num" colspan="2"></td><td class="num"></td><td class="num">' + o.tss + '</td><td class="num">' + o.ts + '</td><td class="num">' + o.p + '%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:' + o.bw + '%;background:var(--ok)"></div></div></td></tr>' + dRows;
             }).join('');
-            h += '<div class="obj-summary-header" data-action="toggle-obj-summary"><span class="fold-icon">\u25B6</span> ' + S.objectSummary + ' (' + rd.objSummary.length + ') <button data-action="toggle-obj-detail-rows" title="' + S.toggleObjectDetails + '" aria-label="' + S.toggleObjectDetails + '">' + S.details + ' \u25B6</button></div>';
+            // \uBC88\uB4E4 \uAC12\uB3C4 esc()\uB97C \uAC70\uCE5C\uB2E4. \uC9C0\uAE08 \uAC12\uC5D0\uB294 \uB530\uC634\uD45C\uAC00 \uC5C6\uC9C0\uB9CC, \uC18D\uC131\uC5D0
+            // \uB123\uB294 \uBB38\uC790\uC5F4\uB9CC \uC774 \uC790\uB9AC\uC5D0\uC11C \uC608\uC678\uC600\uB358 \uAC83\uC740 \uC8FC\uBCC0 \uCF54\uB4DC\uC640 \uC5B4\uAE0B\uB09C\uB2E4 \u2014
+            // \uBC88\uC5ED\uC774 \uD558\uB098 \uBC14\uB00C\uBA74 \uC18D\uC131\uC774 \uAE68\uC9C0\uB294 \uC885\uB958\uC758 \uC7A0\uBCF5 \uACB0\uD568\uC774\uB2E4.
+            h += '<div class="obj-summary-header" data-action="toggle-obj-summary"><span class="fold-icon">\u25B6</span> ' + esc(S.objectSummary) + ' (' + rd.objSummary.length + ') <button data-action="toggle-obj-detail-rows" title="' + esc(S.toggleObjectDetails) + '" aria-label="' + esc(S.toggleObjectDetails) + '">' + esc(S.details) + ' \u25B6</button></div>';
             h += '<div class="obj-summary-body" style="display:none"><table class="obj-summary-table sortable-table"><thead><tr>'
                 + '<th data-sort="name" scope="col">' + S.colObject + '</th>'
                 + '<th class="num" scope="col">' + S.colSection + '</th>'
@@ -1408,7 +1428,9 @@ const RD = ${regionDataJsLiteral};
                 : String(secTotal);
         }
         if (regMatchInfo) {
-            regMatchInfo.textContent = q ? (' — ' + mr + (mr === 1 ? ' region' : ' regions') + ' matched') : '';
+            regMatchInfo.textContent = q
+                ? fmt(mr === 1 ? S.regionsMatchedOne : S.regionsMatchedMany, { n: mr })
+                : '';
         }
 
         // Rebuild the navigable match list and jump to the first match.
@@ -1593,7 +1615,7 @@ const RD = ${regionDataJsLiteral};
     // --- Toggle Function column ---
     function syncFuncBtn() {
         const fb = document.querySelector('[data-action="toggle-func-col"]');
-        if (fb) { fb.textContent = funcVis ? 'Function ▼' : 'Function ▶'; }
+        if (fb) { fb.textContent = S.funcColumnToggle + (funcVis ? ' ▼' : ' ▶'); }
     }
     window.toggleFuncCol = function() {
         funcVis = !funcVis;

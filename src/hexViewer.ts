@@ -382,6 +382,10 @@ export function buildHexViewerStrings(): Record<string, string> {
         findNoMatches: t('결과 없음', 'No matches'),
         addressHeader: t('주소', 'Address'),
         statusHint: t('바이트를 클릭하면 값을 확인할 수 있습니다', 'Click a byte to inspect'),
+        // 상태 표시줄의 첫 항목. 바로 옆 `statusAddress`는 번들에 있는데 이것만
+        // 하드코딩돼 있었다 — 정적 마크업이 아니라 innerHTML로 조립되는 자리라
+        // 0.6.26 탐지기의 검사 범위 밖이었다.
+        statusOffset: t('오프셋', 'Offset'),
         statusAddress: t('주소', 'Address'),
         statusValue: t('값', 'Value'),
         statusNoData: t('데이터 없음', 'no data'),
@@ -913,7 +917,7 @@ function getWebviewContent(
         const selSize = maxOff - minOff + unitSize;
         const dataSpan = Math.min(selSize, Math.max(0, TOTAL_SIZE - minOff));
         const selectionHasData = dataSpan > 0 && hasDataRange(minOff, dataSpan);
-        let html = '<span>Offset: 0x' + formatHex(minOff, 8) + '</span>';
+        let html = '<span>' + S.statusOffset + ': 0x' + formatHex(minOff, 8) + '</span>';
         html += '<span>' + S.statusAddress + ': ' + formatAddr(addr) + '</span>';
 
         if (!selectionHasData) {

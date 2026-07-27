@@ -68,11 +68,24 @@ const items = [{ label: skipLabel, description: t('섹션 정보만 표시', 'Sh
 if (selected.label === skipLabel) { ... }
 ```
 
+### package.json 안의 문자열 (manifest)
+
+`t()`는 TypeScript 코드에서만 쓸 수 있다. `package.json`의 `contributes.*`에 있는 사용자 노출 문자열은 VS Code의 nls 메커니즘으로 지역화한다.
+
+- 대상: 명령 `title`, 뷰 `name`, `viewsWelcome.contents`, 설정 `description` / `markdownDescription` / `enumDescriptions`
+- 방법: package.json에는 `%key%`만 두고, 문구는 `package.nls.json`(영어, 기본)과 `package.nls.ko.json`(한국어)에 둔다
+- 제외: 브랜드명 `TaskHub` (`displayName`, `category`, 뷰 컨테이너 `title`) — 번역 대상이 아니므로 nls를 거치지 않고 리터럴로 둔다
+
+**조용한 실패 모드에 주의한다.** ko 번들에 키가 없으면 VS Code는 오류 없이 영어로 폴백하므로, 한국어 사용자에게 영어가 섞여 보일 뿐 아무 신호도 나지 않는다. `src/test/packageNls.test.ts`가 두 번들의 키 집합 일치·미사용 키·번역 누락(양쪽 값이 동일)·welcome 본문의 `command:` 대상 일치를 검사한다.
+
+`viewsWelcome` 본문을 번역할 때 `[문구](command:id)`의 **문구는 번역하되 `id`는 절대 바꾸지 않는다** — 바꾸면 버튼이 아무 동작도 하지 않고 화면상 아무 표시가 없다.
+
 ### 새 메시지 추가 시 규칙
 
-1. 하드코딩된 문자열 대신 반드시 `t(ko, en)` 사용
+1. 하드코딩된 문자열 대신 반드시 `t(ko, en)` 사용 (manifest는 위 `%key%` 방식)
 2. 한국어가 먼저, 영어가 뒤에 위치
 3. QuickPick `label`이 이후 비교에 사용되면, `t()` 결과를 변수에 저장하여 비교에도 동일 변수 사용
+4. **웹뷰**: 호스트가 `buildXStrings()`로 번들을 만들어 주입하고, 웹뷰 스크립트는 `S.key`만 쓴다. 정적 마크업이든 `innerHTML`로 조립하는 마크업이든 예외 없다 — 후자는 `src/test/webviewStringCoverage.test.ts`의 검사 범위 밖이라 리뷰에서만 걸린다
 
 ## 커밋 메시지
 

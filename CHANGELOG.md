@@ -53,6 +53,18 @@
 
 **테스트**: 신규 9 케이스 — IT-119~IT-122(마법사 종단 흐름, 이 범위 최초로 `taskhub.createAction` 명령 자체를 끝까지 실행한다) + 웹뷰 탐지기 5종(로케일별 렌더 3종 분화, 마스킹 회귀 가드, 로케일 고정 전제 검증). 최종 1634 passing.
 
+## [0.6.28] - 2026-07-27
+
+### 추가 — `t()`가 닿지 않던 두 표면의 지역화 (코드 리뷰 7/7)
+
+#### 지역화
+
+- **manifest 문자열이 영어 전용이었다**: 명령 title 49개, 뷰 이름 4개, 설정 설명 15개, 그리고 0.6.15가 추가한 `viewsWelcome` 본문 5개 — 빈 패널에서 사용자가 읽는 가장 눈에 띄는 안내문이 여기 있었다. `t()`는 TypeScript에서만 쓸 수 있어 CLAUDE.md의 i18n 규칙이 `package.json`까지 닿지 못했다. VS Code nls 메커니즘으로 옮겼다(package.json에는 `%key%`, 문구는 [package.nls.json](package.nls.json) / [package.nls.ko.json](package.nls.ko.json)). 브랜드명 `TaskHub`(`displayName`, `category`, 뷰 컨테이너 title)는 번역 대상이 아니라 리터럴로 남겼다. ko 번들의 키가 빠지면 VS Code가 **오류 없이 영어로 폴백**하므로, 키 집합 일치·미사용 키·번역 누락·`command:` 대상 일치를 [src/test/packageNls.test.ts](src/test/packageNls.test.ts)가 검사한다.
+- **웹뷰에 남아 있던 문자열 3종**: `innerHTML`로 조립되는 자리라 0.6.26 탐지기의 검사 범위 밖이었다. Hex Viewer 상태 표시줄의 `Offset:`(바로 옆 `Address`는 번들에 있었다), Memory Map의 `Function ▶` 열 토글 버튼(번들에 `colFunction`이 이미 있었는데도 남아 있었다), 검색 결과 요약 `— N regions matched`(live region이라 그대로 낭독된다). 참조: [src/hexViewer.ts](src/hexViewer.ts), [src/memoryMapViewer.ts](src/memoryMapViewer.ts).
+- Memory Map의 Object Summary 헤더가 번들 값을 `esc()` 없이 속성에 넣던 자리도 함께 정리했다. 현재 값에는 따옴표가 없어 무해하지만, 번역이 하나 바뀌면 속성이 깨지는 종류의 잠복 결함이었다.
+
+**테스트**: 신규 6 케이스([src/test/packageNls.test.ts](src/test/packageNls.test.ts) — 두 번들의 키 집합 일치, manifest 참조 키 실재, 미사용 키 없음, 양쪽 값이 동일하면 번역 누락으로 실패, welcome 본문의 `command:` 대상 일치, 그 명령의 실재). 기존 빈 상태 테스트 2종은 nls를 거쳐 본문을 해석하도록 갱신했다 — 그러지 않으면 자리표시자 `%welcome.noActions%`만 들여다보며 통과한다. 최종 1640 passing.
+
 ## [0.6.26] - 2026-07-27
 
 ### 수정 — 웹뷰 잔여 하드코딩 문자열과 설정 설명 (코드 리뷰 5/6, 6/6)

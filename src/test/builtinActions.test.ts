@@ -87,9 +87,22 @@ suite('내장 예제 액션 노출 정책', () => {
         });
 
         test('빈 상태 CTA가 설정에 따라 두 갈래로 선언된다', () => {
+            // 0.6.27부터 본문은 `%welcome.*%` 자리표시자이므로 nls 번들을 거쳐
+            // 해석한다. 해석하지 않으면 아래 `contents.includes(...)` 검사가
+            // 자리표시자만 들여다보며 전부 실패한다.
+            const nls: Record<string, string> = JSON.parse(
+                fs.readFileSync(path.join(REPO_ROOT, 'package.nls.json'), 'utf-8')
+            );
             const welcomes = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8'))
                 .contributes.viewsWelcome
-                .filter((w: any) => w.view === 'mainView.main' && String(w.when).includes('workbenchState != empty'));
+                .filter((w: any) => w.view === 'mainView.main' && String(w.when).includes('workbenchState != empty'))
+                .map((w: any) => ({
+                    ...w,
+                    contents: String(w.contents).replace(/^%([\w.]+)%$/, (whole: string, key: string) => {
+                        assert.ok(key in nls, `nls 번들에 없는 키를 참조한다: ${whole}`);
+                        return nls[key];
+                    }),
+                }));
 
             assert.strictEqual(welcomes.length, 2, 'never 여부로 갈리는 두 변형이 있어야 한다');
 

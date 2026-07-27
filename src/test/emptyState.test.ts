@@ -124,7 +124,22 @@ suite('빈 상태 안내 (viewsWelcome)', () => {
 
     suite('manifest', () => {
         const manifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8'));
-        const welcomes: Array<{ view: string; when?: string; contents: string }> = manifest.contributes.viewsWelcome ?? [];
+        // 0.6.27부터 본문은 `%welcome.*%` 자리표시자이고 실제 문구는 nls 번들에
+        // 있다. 번들을 거쳐 해석하지 않으면 이 검사들이 자리표시자 문자열을
+        // 들여다보며 무의미하게 통과한다.
+        const nls: Record<string, string> = JSON.parse(
+            fs.readFileSync(path.join(REPO_ROOT, 'package.nls.json'), 'utf-8')
+        );
+        const resolveNls = (value: string): string =>
+            value.replace(/^%([\w.]+)%$/, (whole, key) => {
+                assert.ok(key in nls, `nls 번들에 없는 키를 참조한다: ${whole}`);
+                return nls[key];
+            });
+        const welcomes: Array<{ view: string; when?: string; contents: string }> =
+            (manifest.contributes.viewsWelcome ?? []).map((w: any) => ({
+                ...w,
+                contents: resolveNls(w.contents),
+            }));
 
         test('Actions / Links / Favorites 세 뷰에 빈 상태 안내가 있다', () => {
             for (const view of ['mainView.main', 'mainView.linkWorkspace', 'mainView.favorite']) {

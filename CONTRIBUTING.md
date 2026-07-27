@@ -48,6 +48,7 @@ npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 | **`src/` 파일** 추가·이동·삭제 | [docs/architecture.md](docs/architecture.md) 프로젝트 구조 트리 (§프로젝트 구조) · 필요 시 주요 컴포넌트/데이터 구조 섹션 · 분리되는 모듈이 TreeDataProvider면 `src/providers/` 규약 준수 |
 | **features.md 섹션 번호** 변경 (§N 또는 §N.M) | [examples/README.md](examples/README.md)의 `features.md §…` 참조 업데이트 · features.md 자체 TOC · 다른 문서에서 해당 번호를 인용하고 있지 않은지 `grep -rn '§15\.5'` 방식으로 확인 |
 | **사용자에게 보이는 문자열** 추가 | `src/i18n.ts`의 `t(ko, en)` 헬퍼 사용 ([CLAUDE.md 다국어 지원](CLAUDE.md#다국어-지원-i18n) 참조) |
+| **`package.json` `contributes.*`의 문자열** (명령 title, 뷰 name, `viewsWelcome`, 설정 설명) 추가·변경 | package.json에는 `%key%`만 두고 `package.nls.json` + `package.nls.ko.json` **양쪽**에 문구 추가 ([CLAUDE.md](CLAUDE.md#packagejson-안의-문자열-manifest)) · 한쪽만 넣으면 오류 없이 영어로 폴백한다 |
 | **실험적 기능** 추가 / 안정화(graduation) | 본 문서 [실험적 기능 추가 가이드](#실험적-기능-추가-가이드) 전체 절차 · [docs/features.md §16](docs/features.md#16-experimental-features) |
 | **보안 가드** (파서 한도·CSP·경로 검증) 변경 | [docs/architecture.md 보안 가드](docs/architecture.md#보안-가드) · 관련 유닛 테스트 (`defensive limits` 등) |
 | **공용 커밋 메시지 형식**이 필요한 PR | 버전 bump 동반 시 [package.json](package.json) + [package-lock.json](package-lock.json) 같이 올림. 테스트/문서-only는 버전 유지. 자세한 형식은 [CLAUDE.md 커밋 메시지](CLAUDE.md#커밋-메시지). |

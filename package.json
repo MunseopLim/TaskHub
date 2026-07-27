@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.27",
+  "version": "0.6.28",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -65,17 +65,17 @@
         "taskhub.showTaskStatus": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Show run feedback for actions: status icons and progress in the Actions view, plus the completion notifications. Turning this off **also silences failure notifications** (including an action's own `failMessage`) — check the History panel or the TaskHub output channel instead. Stopping actions is unaffected: the inline stop button and *Stop All Actions* stay available."
+          "markdownDescription": "%setting.showTaskStatus%"
         },
         "taskhub.pipeline.showVerboseLogs": {
           "type": "boolean",
           "default": false,
-          "description": "If true, shows detailed logs in the output panel when executing a pipeline. By default, only minimal status messages are shown."
+          "description": "%setting.showVerboseLogs%"
         },
         "taskhub.pipeline.pythonIoEncoding": {
           "type": "string",
           "default": "utf-8",
-          "markdownDescription": "Value to assign to the `PYTHONIOENCODING` environment variable for commands launched by TaskHub. Set to an empty string to avoid forcing an encoding or provide values such as `utf-8:ignore` for compatibility."
+          "markdownDescription": "%setting.pythonIoEncoding%"
         },
         "taskhub.pipeline.windowsPowerShellEncoding": {
           "type": "string",
@@ -84,45 +84,45 @@
             "system"
           ],
           "default": "utf8",
-          "description": "Controls how TaskHub configures PowerShell output on Windows. Use `system` to keep the current console code page for legacy tools that do not recognise UTF-8 (code page 65001)."
+          "description": "%setting.windowsPowerShellEncoding%"
         },
         "taskhub.pipeline.outputCaptureLimitMb": {
           "type": "number",
           "default": 10,
           "minimum": 1,
           "maximum": 1024,
-          "markdownDescription": "Maximum size (in megabytes) of command stdout/stderr captured into memory during a TaskHub action. When a command exceeds this limit it is terminated with an error to protect the VS Code extension host from OOM. Raise this value for pipelines that intentionally emit large logs, or redirect the output with `> file` to bypass capture."
+          "markdownDescription": "%setting.outputCaptureLimitMb%"
         },
         "taskhub.pipeline.maxParallelTasks": {
           "type": "integer",
           "default": 4,
           "minimum": 1,
           "maximum": 32,
-          "markdownDescription": "Maximum number of tasks that may run concurrently within a single action. Only tasks marked `parallel: true` are exempt from the implicit \"wait for every preceding task\" barrier; once exempt they still wait for their explicit `dependsOn` and any `${taskId.x}` auto-inferred dependencies before starting. Tasks without `parallel: true` always act as sync barriers regardless of `dependsOn`. The default `4` is conservative because embedded builds (linker / LTO stages) can each consume gigabytes of RAM — raise this on machines with more resources, or lower to `1` to force fully sequential execution."
+          "markdownDescription": "%setting.maxParallelTasks%"
         },
         "taskhub.history.maxItems": {
           "type": "number",
           "default": 10,
           "minimum": 1,
           "maximum": 50,
-          "description": "Maximum number of action history items to keep."
+          "description": "%setting.historyMaxItems%"
         },
         "taskhub.runAnyAction.recentLimit": {
           "type": "number",
           "default": 5,
           "minimum": 0,
           "maximum": 20,
-          "markdownDescription": "Maximum number of recently-used actions shown at the top of `TaskHub: Run Any Action…`. Set to `0` to hide the *Recently used* section entirely. Stale IDs (deleted actions) are filtered out at display time, so the visible count may be smaller than this limit."
+          "markdownDescription": "%setting.recentLimit%"
         },
         "taskhub.history.showPanel": {
           "type": "boolean",
           "default": true,
-          "description": "Show or hide the History panel in the TaskHub sidebar."
+          "description": "%setting.historyShowPanel%"
         },
         "taskhub.preview.showSourceControlContextMenu": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Show TaskHub preview/browser actions in the Source Control resource context menu. VS Code does not reliably expose file-extension context keys for SCM resources, so these menu items may appear for all changed files; TaskHub still validates the file extension before opening."
+          "markdownDescription": "%setting.showSourceControlContextMenu%"
         },
         "taskhub.builtinActions": {
           "type": "string",
@@ -132,32 +132,32 @@
             "never"
           ],
           "enumDescriptions": [
-            "Keep the bundled examples out of the action list; the empty-state view offers a 'Browse Examples' button instead.",
-            "Always merge the bundled example actions into the list (behavior before 0.6.14).",
-            "Keep them out of the list and hide the 'Browse Examples' button from the empty-state view too."
+            "%setting.builtinActions.auto%",
+            "%setting.builtinActions.always%",
+            "%setting.builtinActions.never%"
           ],
           "default": "auto",
-          "markdownDescription": "Controls whether TaskHub's bundled example actions (`defaultButton.*` from the extension's `media/actions.json`) appear in the Actions view. `auto` (default) keeps them out of your project's action list — the empty-state view links to them instead, so an empty Actions panel offers 'Create Action' rather than two demo buttons."
+          "markdownDescription": "%setting.builtinActions%"
         },
         "taskhub.dialog.rememberLastLocation": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Reopen TaskHub file/folder dialogs at the location last used for the same purpose (Hex Viewer, JSON Editor, Memory Map, export/import, each `fileDialog`/`folderDialog` task, ...). When off, dialogs use VS Code's own last-used path, which is shared across windows and extensions."
+          "markdownDescription": "%setting.rememberLastLocation%"
         },
         "taskhub.hover.numberBase.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Enable number base conversion hover tooltip for C/C++ files. Shows binary, decimal, and hexadecimal representations when hovering over numeric literals."
+          "description": "%setting.hoverNumberBase%"
         },
         "taskhub.experimental.bitOperationHover.enabled": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "**[Experimental]** Show bit operation results in hover tooltips for C/C++ files.\n\nDisplays calculation results for:\n- Variable operations: `value |= 0x80` (shows Before/After)\n- Constant expressions: `1U << 5` (shows Left/Result)\n\n**Supported patterns:**\n- ✅ `value & 0xFF` (variable & literal)\n- ✅ `1U << 5` (constant expressions)\n- ❌ `a ^ b` (variable & variable - not supported)\n\n⚠️ This feature is experimental and may change in future versions."
+          "markdownDescription": "%setting.bitOperationHover%"
         },
         "taskhub.preset.selected": {
           "type": "string",
           "default": "none",
-          "markdownDescription": "Select a preset to automatically apply predefined actions.\n\n- **none**: Use only workspace actions\n- **example**: Example preset with Git and Build commands\n- Or enter a custom preset ID from extension or workspace `.vscode/presets/` folder\n\nPresets are merged with workspace `.vscode/actions.json` (workspace actions take priority)."
+          "markdownDescription": "%setting.presetSelected%"
         }
       }
     },
@@ -174,22 +174,22 @@
       "mainView": [
         {
           "id": "mainView.main",
-          "name": "Actions",
+          "name": "%view.actions%",
           "icon": "media/m_icon.svg"
         },
         {
           "id": "mainView.linkWorkspace",
-          "name": "Workspace Links",
+          "name": "%view.links%",
           "icon": "media/l_icon.svg"
         },
         {
           "id": "mainView.favorite",
-          "name": "Favorite Files",
+          "name": "%view.favorites%",
           "icon": "media/f_icon.svg"
         },
         {
           "id": "mainView.history",
-          "name": "History",
+          "name": "%view.history%",
           "icon": "media/r_icon.svg",
           "when": "config.taskhub.history.showPanel"
         }
@@ -199,261 +199,261 @@
       {
         "view": "mainView.main",
         "when": "workbenchState == empty",
-        "contents": "TaskHub runs actions defined per project.\n[Open Folder](command:vscode.openFolder)\nOnce a folder is open you can create actions in its .vscode/actions.json."
+        "contents": "%welcome.noFolder%"
       },
       {
         "view": "mainView.main",
         "when": "workbenchState != empty && config.taskhub.builtinActions != never",
-        "contents": "No actions yet.\n[Create Action](command:taskhub.createAction)\nOr start from a sample and edit it by hand:\n[Browse Examples](command:taskhub.showExampleJsonQuickPick)\n[Import Actions…](command:taskhub.importActions)"
+        "contents": "%welcome.noActions%"
       },
       {
         "view": "mainView.main",
         "when": "workbenchState != empty && config.taskhub.builtinActions == never",
-        "contents": "No actions yet.\n[Create Action](command:taskhub.createAction)\n[Import Actions…](command:taskhub.importActions)"
+        "contents": "%welcome.noActionsNoExamples%"
       },
       {
         "view": "mainView.linkWorkspace",
         "when": "workbenchState != empty",
-        "contents": "No workspace links yet.\nLinks are shortcuts to docs, dashboards, or issue trackers, stored in .vscode/links.json.\n[Add Link](command:taskhub.addLink)"
+        "contents": "%welcome.noLinks%"
       },
       {
         "view": "mainView.favorite",
         "when": "workbenchState != empty",
-        "contents": "No favorite files yet.\nPin files you keep coming back to — right-click a file in the Explorer, or add one here.\n[Add File to Favorites](command:taskhub.addFavoriteFile)"
+        "contents": "%welcome.noFavorites%"
       }
     ],
     "commands": [
       {
         "command": "taskhub.openLink",
-        "title": "Open Link"
+        "title": "%cmd.openLink%"
       },
       {
         "command": "taskhub.copyLink",
-        "title": "Copy Link"
+        "title": "%cmd.copyLink%"
       },
       {
         "command": "taskhub.goToLink",
-        "title": "Go to Link"
+        "title": "%cmd.goToLink%"
       },
       {
         "command": "taskhub.addLink",
-        "title": "TaskHub: Add Link",
+        "title": "%cmd.addLink%",
         "icon": "$(add)"
       },
       {
         "command": "taskhub.editWorkspaceLink",
-        "title": "TaskHub: Edit Workspace Link",
+        "title": "%cmd.editWorkspaceLink%",
         "icon": "$(pencil)"
       },
       {
         "command": "taskhub.searchLinks",
-        "title": "TaskHub: Search Links",
+        "title": "%cmd.searchLinks%",
         "icon": "$(search)"
       },
       {
         "command": "taskhub.searchFavorites",
-        "title": "TaskHub: Search Favorites",
+        "title": "%cmd.searchFavorites%",
         "icon": "$(search)"
       },
       {
         "command": "taskhub.createAction",
-        "title": "TaskHub: Create Action",
+        "title": "%cmd.createAction%",
         "icon": "$(add)"
       },
       {
         "command": "taskhub.executeAction",
-        "title": "Execute Action"
+        "title": "%cmd.executeAction%"
       },
       {
         "command": "taskhub.previewAction",
-        "title": "Preview Run (Dry-run)",
+        "title": "%cmd.previewAction%",
         "category": "TaskHub",
         "icon": "$(eye)"
       },
       {
         "command": "taskhub.doctor",
-        "title": "Doctor — Lint Actions",
+        "title": "%cmd.doctor%",
         "category": "TaskHub",
         "icon": "$(checklist)"
       },
       {
         "command": "taskhub.stopAction",
-        "title": "Stop Action",
+        "title": "%cmd.stopAction%",
         "icon": "$(primitive-square)"
       },
       {
         "command": "taskhub.showVersion",
-        "title": "Show Extension Version"
+        "title": "%cmd.showVersion%"
       },
       {
         "command": "taskhub.openFavoriteFile",
-        "title": "Open Favorite File"
+        "title": "%cmd.openFavoriteFile%"
       },
       {
         "command": "taskhub.editFavorites",
-        "title": "Edit Favorites",
+        "title": "%cmd.editFavorites%",
         "icon": "$(pencil)"
       },
       {
         "command": "taskhub.editLinks",
-        "title": "Edit Links",
+        "title": "%cmd.editLinks%",
         "icon": "$(pencil)"
       },
       {
         "command": "taskhub.editActions",
-        "title": "Edit Actions",
+        "title": "%cmd.editActions%",
         "icon": "$(pencil)"
       },
       {
         "command": "taskhub.addFavoriteFile",
-        "title": "Add Existing File to Favorites",
+        "title": "%cmd.addFavoriteFile%",
         "icon": "$(add)"
       },
       {
         "command": "taskhub.deleteFavorite",
-        "title": "Delete Favorite",
+        "title": "%cmd.deleteFavorite%",
         "icon": "$(trash)"
       },
       {
         "command": "taskhub.deleteLink",
-        "title": "Delete Link",
+        "title": "%cmd.deleteLink%",
         "icon": "$(trash)"
       },
       {
         "command": "taskhub.addOpenFileToFavorites",
-        "title": "Add Open File to Favorites",
+        "title": "%cmd.addOpenFileToFavorites%",
         "icon": "$(add)"
       },
       {
         "command": "taskhub.showExampleJson",
-        "title": "Show Example JSON"
+        "title": "%cmd.showExampleJson%"
       },
       {
         "command": "taskhub.showExampleJsonQuickPick",
-        "title": "Show Example JSONs",
+        "title": "%cmd.showExampleJsonQuickPick%",
         "icon": "$(lightbulb)"
       },
       {
         "command": "taskhub.showChangelog",
-        "title": "Show Changelog"
+        "title": "%cmd.showChangelog%"
       },
       {
         "command": "taskhub.stopAllActions",
-        "title": "Stop All Actions",
+        "title": "%cmd.stopAllActions%",
         "icon": "$(primitive-square)"
       },
       {
         "command": "taskhub.closeAllTerminals",
-        "title": "Close TaskHub Terminals",
+        "title": "%cmd.closeAllTerminals%",
         "icon": "$(terminal)"
       },
       {
         "command": "taskhub.terminateAllActions",
-        "title": "Terminate All Actions",
+        "title": "%cmd.terminateAllActions%",
         "icon": "$(primitive-square)"
       },
       {
         "command": "taskhub.openSettings",
-        "title": "TaskHub: Open Extension Settings"
+        "title": "%cmd.openSettings%"
       },
       {
         "command": "taskhub.rerunFromHistory",
-        "title": "Re-run Action"
+        "title": "%cmd.rerunFromHistory%"
       },
       {
         "command": "taskhub.rerunFromHistoryWithInputs",
-        "title": "Re-run with Saved Inputs",
+        "title": "%cmd.rerunFromHistoryWithInputs%",
         "icon": "$(run-all)"
       },
       {
         "command": "taskhub.viewHistoryOutput",
-        "title": "View Output",
+        "title": "%cmd.viewHistoryOutput%",
         "icon": "$(output)"
       },
       {
         "command": "taskhub.viewHistoryCommand",
-        "title": "View Executed Command",
+        "title": "%cmd.viewHistoryCommand%",
         "icon": "$(terminal)"
       },
       {
         "command": "taskhub.deleteHistoryItem",
-        "title": "Delete History Item",
+        "title": "%cmd.deleteHistoryItem%",
         "icon": "$(trash)"
       },
       {
         "command": "taskhub.clearAllHistory",
-        "title": "Clear All History",
+        "title": "%cmd.clearAllHistory%",
         "icon": "$(clear-all)"
       },
       {
         "command": "taskhub.toggleHistoryPanel",
-        "title": "TaskHub: Toggle History Panel"
+        "title": "%cmd.toggleHistoryPanel%"
       },
       {
         "command": "taskhub.applyPreset",
-        "title": "TaskHub: Apply Preset"
+        "title": "%cmd.applyPreset%"
       },
       {
         "command": "taskhub.saveAsPreset",
-        "title": "TaskHub: Save as Preset"
+        "title": "%cmd.saveAsPreset%"
       },
       {
         "command": "taskhub.openJsonEditor",
-        "title": "TaskHub: Open JSON Editor",
+        "title": "%cmd.openJsonEditor%",
         "icon": "$(edit)"
       },
       {
         "command": "taskhub.openJsonEditorFromUri",
-        "title": "Open with JSON Editor",
+        "title": "%cmd.openJsonEditorFromUri%",
         "category": "TaskHub"
       },
       {
         "command": "taskhub.showMemoryMap",
-        "title": "Show Memory Map",
+        "title": "%cmd.showMemoryMap%",
         "category": "TaskHub"
       },
       {
         "command": "taskhub.memoryMapGoToSymbol",
-        "title": "Memory Map: Go to Symbol",
+        "title": "%cmd.memoryMapGoToSymbol%",
         "category": "TaskHub"
       },
       {
         "command": "taskhub.exportActions",
-        "title": "TaskHub: Export Actions",
+        "title": "%cmd.exportActions%",
         "icon": "$(cloud-upload)"
       },
       {
         "command": "taskhub.importActions",
-        "title": "TaskHub: Import Actions",
+        "title": "%cmd.importActions%",
         "icon": "$(cloud-download)"
       },
       {
         "command": "taskhub.exportActionItem",
-        "title": "Export Action",
+        "title": "%cmd.exportActionItem%",
         "icon": "$(cloud-upload)"
       },
       {
         "command": "taskhub.assignShortcut",
-        "title": "Assign Shortcut",
+        "title": "%cmd.assignShortcut%",
         "category": "TaskHub"
       },
       {
         "command": "taskhub.runAnyAction",
-        "title": "TaskHub: Run Any Action…"
+        "title": "%cmd.runAnyAction%"
       },
       {
         "command": "taskhub.showHexViewer",
-        "title": "Open Hex Viewer",
+        "title": "%cmd.showHexViewer%",
         "category": "TaskHub"
       },
       {
         "command": "taskhub.openMarkdownPreview",
-        "title": "Open Markdown Preview",
+        "title": "%cmd.openMarkdownPreview%",
         "category": "TaskHub"
       },
       {
         "command": "taskhub.openHtmlInBrowser",
-        "title": "Open HTML in Default Browser",
+        "title": "%cmd.openHtmlInBrowser%",
         "category": "TaskHub"
       }
     ],
