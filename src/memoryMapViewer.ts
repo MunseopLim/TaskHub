@@ -496,6 +496,10 @@ function getWebviewContent(
         const objSummary = regionObjSummary.map(o => ({
             n: o.name, ts: o.totalSize, tss: formatSize(o.totalSize),
             p: regionUsed > 0 ? (o.totalSize / regionUsed * 100).toFixed(1) : '0.0',
+            // 정렬용 원본 퍼센트. 화면에 쓰는 `p`는 `toFixed(1)`로 반올림돼
+            // 크기가 가까운 객체들이 동률이 되고, 안정 정렬이 그 구간에
+            // 직전 정렬 순서를 남긴다 — 표시값으로 정렬하면 안 되는 이유다.
+            pv: regionUsed > 0 ? o.totalSize / regionUsed * 100 : 0,
             bw: regionUsed > 0 ? Math.max(1, o.totalSize / regionUsed * 100) : 0,
             entries: o.entries.sort((a, b) => a.addr - b.addr).map(e => ({
                 s: e.section, ah: formatHex(e.addr),
@@ -1041,7 +1045,14 @@ const RD = ${regionDataJsLiteral};
                 const dRows = o.entries.map(function(e) {
                     return '<tr class="obj-detail-row"><td></td><td class="num">' + esc(e.s) + '</td><td class="num">' + e.ah + '</td><td class="num">' + e.eh + '</td><td class="num">' + e.ss + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + e.t + '</span></td></tr>';
                 }).join('');
-                return '<tr><td>' + esc(o.n) + '</td><td class="num" colspan="2"></td><td class="num"></td><td class="num">' + o.tss + '</td><td class="num">' + o.ts + '</td><td class="num">' + o.p + '%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:' + o.bw + '%;background:var(--ok)"></div></div></td></tr>' + dRows;
+                // 정렬값을 행 속성으로 싣는다. 이 표의 부모 행은 colspan=2
+                // 때문에 <td>가 헤더보다 하나 적어서, 헤더 순번을
+                // row.children[]에 그대로 쓰던 기존 정렬기가 엉뚱한 셀을
+                // 읽었다 — Size/Bytes는 Percent 셀을, Percent는 mini-bar의
+                // 빈 텍스트를 읽었다(그래서 Percent 정렬은 아무 일도 하지
+                // 않았다). 속성으로 읽으면 셀 배치와 무관해진다.
+                return '<tr data-sort-name="' + esc(o.n) + '" data-sort-bytes="' + o.ts + '" data-sort-pct="' + o.pv + '">'
+                    + '<td>' + esc(o.n) + '</td><td class="num" colspan="2"></td><td class="num"></td><td class="num">' + o.tss + '</td><td class="num">' + o.ts + '</td><td class="num">' + o.p + '%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:' + o.bw + '%;background:var(--ok)"></div></div></td></tr>' + dRows;
             }).join('');
             // \uBC88\uB4E4 \uAC12\uB3C4 esc()\uB97C \uAC70\uCE5C\uB2E4. \uC9C0\uAE08 \uAC12\uC5D0\uB294 \uB530\uC634\uD45C\uAC00 \uC5C6\uC9C0\uB9CC, \uC18D\uC131\uC5D0
             // \uB123\uB294 \uBB38\uC790\uC5F4\uB9CC \uC774 \uC790\uB9AC\uC5D0\uC11C \uC608\uC678\uC600\uB358 \uAC83\uC740 \uC8FC\uBCC0 \uCF54\uB4DC\uC640 \uC5B4\uAE0B\uB09C\uB2E4 \u2014
@@ -1553,21 +1564,51 @@ const RD = ${regionDataJsLiteral};
                     if (sortCol === col) sortAsc = !sortAsc;
                     else { sortCol = col; sortAsc = !descFirst.has(col); }
                     const tbody = tbl.querySelector('tbody');
-                    const rows = Array.from(tbody.querySelectorAll('tr:not(.obj-detail-row)'));
                     const sortByCol = th.dataset.sortBy || col;
                     const allThs = Array.from(th.parentElement.children);
                     const targetTh = allThs.find(function(h) { return h.dataset && h.dataset.sort === sortByCol; }) || th;
                     const valIdx = allThs.indexOf(targetTh);
-                    rows.sort(function(a, b) {
-                        if (valIdx >= a.children.length || valIdx >= b.children.length) return 0;
-                        const aT = a.children[valIdx].textContent.trim();
-                        const bT = b.children[valIdx].textContent.trim();
+
+                    // 부모 행과 그 뒤에 딸린 detail 행을 한 묶음으로 모은다.
+                    // 예전에는 부모만 골라 재배치해서, Object Summary의
+                    // Details를 펼친 상태로 정렬하면 section 행이 제자리에
+                    // 남아 묶음이 통째로 어긋났다. detail 행은 독립 정렬
+                    // 대상이 아니라 부모를 따라다니기만 한다.
+                    //
+                    // detail 행이 없는 표(All Sections, region 상세)에서는
+                    // 모든 행이 1개짜리 그룹이 되어 종전과 동일하게 동작한다.
+                    const groups = [];
+                    Array.from(tbody.children).forEach(function(row) {
+                        if (row.classList.contains('obj-detail-row') && groups.length > 0) {
+                            groups[groups.length - 1].rows.push(row);
+                        } else {
+                            groups.push({ head: row, rows: [row] });
+                        }
+                    });
+
+                    // 정렬값은 행 속성을 우선한다. colspan이 있는 행에서는
+                    // 헤더 순번과 <td> 순번이 어긋나므로 셀 텍스트를 믿을 수
+                    // 없고, 표시값(반올림된 퍼센트, "1.2 KB" 같은 문자열)은
+                    // 애초에 정렬 기준으로 부정확하다. 속성이 없는 표는
+                    // 종전대로 셀 텍스트를 읽는다.
+                    function sortValueOf(row) {
+                        const attr = row.getAttribute('data-sort-' + sortByCol);
+                        if (attr !== null) { return attr; }
+                        if (valIdx < 0 || valIdx >= row.children.length) { return ''; }
+                        return row.children[valIdx].textContent.trim();
+                    }
+
+                    groups.sort(function(a, b) {
+                        const aT = sortValueOf(a.head);
+                        const bT = sortValueOf(b.head);
                         const aN = parseFloat(aT.replace(/[^0-9.\-]/g, ''));
                         const bN = parseFloat(bT.replace(/[^0-9.\-]/g, ''));
                         if (!isNaN(aN) && !isNaN(bN)) return sortAsc ? aN - bN : bN - aN;
                         return sortAsc ? aT.localeCompare(bT) : bT.localeCompare(aT);
                     });
-                    rows.forEach(function(row) { tbody.appendChild(row); });
+                    groups.forEach(function(g) {
+                        g.rows.forEach(function(row) { tbody.appendChild(row); });
+                    });
                     ths.forEach(function(h) {
                         h.textContent = h.textContent.replace(/ [\u25B2\u25BC]$/, '');
                         // aria-sort is what a screen reader announces; the
