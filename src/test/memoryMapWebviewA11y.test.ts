@@ -211,6 +211,25 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
             );
         });
 
+        test('펼침 상태 변경이 setRegionExpanded 한 곳으로 모인다 (0.6.35)', () => {
+            // 0.6.31은 aria-expanded를 직접 클릭 경로에만 넣어, Expand All ·
+            // 검색 자동 확장 · Overview/명령 이동으로 펼친 카드를 스크린리더가
+            // 계속 "접힘"으로 읽었다. 상태를 바꾸는 경로가 다섯 곳인데 한
+            // 곳만 고친 결과다 — 이제 전부 한 함수를 거친다.
+            assert.ok(html.includes('function setRegionExpanded(card, expanded)'),
+                '단일 경로 함수가 없다');
+            const uses = (html.match(/setRegionExpanded\(card, /g) ?? []).length;
+            assert.ok(uses >= 4,
+                `호출이 ${uses}곳뿐이다 — toggleRegion / ensureRegionExpanded / foldAll / overview / scrollToRegion이 모두 거쳐야 한다`);
+            // 우회 경로가 되살아나지 않았는지: display를 직접 펼치는 패턴이
+            // setRegionExpanded 본문 밖에 남아 있으면 안 된다.
+            const outside = html
+                .split('function setRegionExpanded')[1]  // 본문 이후만
+                ?.split('window.toggleRegion')[1] ?? '';
+            assert.ok(!/detail\.style\.display = '';/.test(outside),
+                'setRegionExpanded를 우회해 display를 직접 바꾸는 펼침 경로가 남아 있다');
+        });
+
         test('region 표 정렬이 aria-sort를 갱신하고 키보드로도 동작한다', () => {
             assert.ok(
                 /function sortRegionTable\(th\)/.test(html),

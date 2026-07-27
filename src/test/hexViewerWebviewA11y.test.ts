@@ -190,10 +190,27 @@ suite('Hex Viewer 웹뷰 지역화 / 접근성', () => {
             );
         });
 
-        test('파일 경계를 넘지 않고 unit 정렬을 유지한다', () => {
+        test('경계는 마지막 완전한 unit이다 (불완전한 꼬리 unit은 선택 불가)', () => {
+            // 렌더는 byteOffset + unitSize <= TOTAL_SIZE인 셀에만 data-offset을
+            // 붙인다. 18바이트 파일의 4-byte 모드에서 마지막 셀은 12이고 16은
+            // 화면에 없다 — 마지막 바이트 기준(TOTAL_SIZE - 1)으로 정렬하면
+            // End가 존재하지 않는 셀을 선택해 상태 표시줄만 바뀌고 선택
+            // 표시는 사라진다.
             assert.ok(
-                html.includes('Math.min(next, TOTAL_SIZE - 1)'),
-                '경계를 넘으면 존재하지 않는 오프셋이 선택된다'
+                html.includes('Math.floor((TOTAL_SIZE - unitSize) / unitSize) * unitSize'),
+                '마지막 완전한 unit 계산이 없다'
+            );
+            assert.ok(
+                html.includes('Math.min(next, lastUnitStart)'),
+                '경계를 마지막 완전한 unit으로 제한하지 않는다'
+            );
+            assert.ok(
+                !html.includes('Math.min(next, TOTAL_SIZE - 1)'),
+                '마지막 바이트 기준 경계가 되살아났다'
+            );
+            assert.ok(
+                html.includes('if (lastUnitStart < 0) { return; }'),
+                '파일이 unit 하나보다 작으면 고를 셀이 없으므로 무동작이어야 한다'
             );
             assert.ok(
                 html.includes('Math.floor(next / unitSize) * unitSize'),

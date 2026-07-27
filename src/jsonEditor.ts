@@ -1514,9 +1514,15 @@ export function getWebviewContent(
                 if (step === 0) { return; }
                 e.preventDefault();
                 // 양끝에서 순환한다 (WAI-ARIA tablist 권장 동작).
+                //
+                // click만 부른다 — 미리 focus()하지 않는다. 전환이 성공하면
+                // onclick 끝의 포커스 복원이 새 활성 탭을 잡고, 셀 commit
+                // 거부로 전환이 무산되면 포커스는 지금 탭에 그대로 남는다.
+                // 예전처럼 focus 후 click하면 성공 시 renderTabs가 그 노드를
+                // detach해 포커스가 body로 떨어졌고, 이후 화살표가 죽었다.
                 const next = (idx + step + sheetMap.length) % sheetMap.length;
                 const nextTab = tabsEl.children[next];
-                if (nextTab) { nextTab.focus(); nextTab.click(); }
+                if (nextTab) { nextTab.click(); }
             });
             tab.onclick = () => {
                 // 탭 전환은 즉시 renderTable로 DOM을 갈아치워 활성 셀의 td를
@@ -1526,6 +1532,16 @@ export function getWebviewContent(
                 activeIdx = idx;
                 renderTabs();
                 renderTable();
+                // renderTabs가 탭 노드를 전부 새로 만들므로, 방금까지 포커스를
+                // 갖고 있던 노드는 detach되고 포커스가 body로 떨어진다. 그
+                // 상태에서는 화살표 키가 어디에도 닿지 않아 — roving tabindex
+                // 라 Tab으로도 비활성 탭엔 못 간다 — 한 번 이동한 뒤 키보드
+                // 탐색이 통째로 죽는다. 포커스가 실제로 떨어졌을 때만 새 활성
+                // 탭으로 되돌린다 (셀 편집 중 마우스 클릭까지 뺏지 않도록).
+                if (document.activeElement === document.body) {
+                    const renewed = tabsEl.children[activeIdx];
+                    if (renewed) { renewed.focus(); }
+                }
             };
             tabsEl.appendChild(tab);
         });

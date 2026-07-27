@@ -6,6 +6,7 @@ import {
     MainViewProvider,
     executeAction,
     isActionCancelled,
+    runCommandCaptureLines,
     stopRunningAction,
 } from '../extension';
 import { HistoryProvider } from '../providers/historyProvider';
@@ -213,5 +214,154 @@ suite('대화형 태스크 대기 중 중지', () => {
         assert.ok(error instanceof Error);
         assert.strictEqual(error.name, 'ActionStoppedError');
         assert.match(error.message, /stopped by user/i);
+    });
+
+    /**
+     * 0.6.29의 사각지대 (0.6.35에서 보완).
+     *
+     * 0.6.29는 inputBox / quickPick에 토큰을 배선하고 IT-123으로 inputBox만
+     * 고정했다. 그런데 INTERACTIVE_TASK_TYPES에는 envPick과 confirm도 있다 —
+     * 둘 다 중지 버튼이 뜨고 stopRunningAction이 true를 돌려주며 히스토리에
+     * "stopped by user"까지 기록되는데, 프롬프트는 열린 채 남았고 사용자가
+     * 값을 고르면 뒤 태스크가 계속 실행돼 **성공 기록이 중지 기록을 덮었다**
+     * (성공 히스토리 갱신은 try 블록에서 무조건 실행되고,
+     * manuallyTerminatedActions는 catch에서만 확인하기 때문).
+     */
+    suite('envPick / confirm 대기 중 중지 (0.6.35)', () => {
+
+        test('IT-126: envPick 대기 중 중지하면 목록이 닫히고 뒤 단계가 실행되지 않는다', async function () {
+            this.timeout(20000);
+            // showQuickPick을 토큰 계약 그대로 흉내 낸다 (IT-123의 inputBox와 동일).
+            const original = vscode.window.showQuickPick;
+            let received: vscode.CancellationToken | undefined;
+            (vscode.window as any).showQuickPick = (_items: any, _options: any, token?: vscode.CancellationToken) => {
+                received = token;
+                return new Promise<unknown>(resolve => {
+                    if (!token) { resolve(undefined); return; }
+                    if (token.isCancellationRequested) { resolve(undefined); return; }
+                    token.onCancellationRequested(() => resolve(undefined));
+                });
+            };
+            const context = makeContext();
+            const actionItem: ActionItem = {
+                id: 'stop-envpick',
+                title: 'Stop envPick',
+                action: {
+                    description: 'waits on env pick',
+                    tasks: [
+                        { id: 'pick', type: 'envPick' },
+                        { id: 'after', type: 'stringManipulation', function: 'trim', input: 'should-not-run' },
+                    ],
+                },
+            } as unknown as ActionItem;
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            try {
+                const run = executeAction(actionItem, context, mainView, history);
+                // envPick은 셸 프로브(getShellAccessibleEnvNames)를 먼저 돌리므로
+                // 프롬프트 도달까지 폴링으로 기다린다.
+                for (let i = 0; i < 100 && !received; i++) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+                assert.ok(received, 'showQuickPick이 CancellationToken을 받아야 중지가 가능하다');
+
+                assert.strictEqual(stopRunningAction('stop-envpick'), true);
+                await settleWithin(run, 3000, 'IT-126');
+
+                const entries = history.getHistory();
+                assert.strictEqual(entries.length, 1);
+                assert.strictEqual(
+                    entries[0].status,
+                    'failure',
+                    '중지 기록이 성공으로 덮이면 안 된다 — 뒤 태스크가 실행됐다는 뜻이다'
+                );
+            } finally {
+                (vscode.window as any).showQuickPick = original;
+            }
+        });
+
+        test('IT-127: confirm modal이 열린 채 중지되면, 사용자가 Yes를 눌러도 파이프라인이 중단된다', async function () {
+            this.timeout(20000);
+            // Modal은 토큰을 받지 않아 프로그램적으로 닫을 수 없다. 이 테스트는
+            // "중지 후 사용자가 Yes를 누른" 순서를 재현한다 — modal은 중지
+            // 요청을 기다렸다가 확인 라벨을 돌려준다.
+            const original = vscode.window.showWarningMessage;
+            (vscode.window as any).showWarningMessage = (_msg: string, _opts: any, ...buttons: string[]) =>
+                new Promise<string>(resolve => {
+                    const timer = setInterval(() => {
+                        if (isActionCancelled('stop-confirm')) {
+                            clearInterval(timer);
+                            resolve(buttons[0]);   // 사용자가 Yes를 누른 상황
+                        }
+                    }, 25);
+                });
+            const context = makeContext();
+            const actionItem: ActionItem = {
+                id: 'stop-confirm',
+                title: 'Stop confirm',
+                action: {
+                    description: 'waits on modal',
+                    tasks: [
+                        { id: 'ask', type: 'confirm', message: 'proceed?' },
+                        { id: 'after', type: 'stringManipulation', function: 'trim', input: 'should-not-run' },
+                    ],
+                },
+            } as unknown as ActionItem;
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            try {
+                const run = executeAction(actionItem, context, mainView, history);
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                assert.strictEqual(stopRunningAction('stop-confirm'), true,
+                    'modal 대기 중에도 중지가 "멈출 것을 찾았다"고 보고해야 한다');
+                await settleWithin(run, 3000, 'IT-127');
+
+                const entries = history.getHistory();
+                assert.strictEqual(entries.length, 1);
+                assert.strictEqual(
+                    entries[0].status,
+                    'failure',
+                    'Yes를 눌렀어도 중지 요청이 먼저였다 — 뒤 태스크가 실행돼 성공으로 덮이면 안 된다'
+                );
+            } finally {
+                (vscode.window as any).showWarningMessage = original;
+            }
+        });
+
+        test('IT-128: itemsFromCommand의 항목 생성 명령이 중지 즉시 종료된다', async function () {
+            this.timeout(20000);
+            // 항목 생성 spawn은 activeTasks에도 child-process registry에도
+            // 없어서, 토큰이 없으면 중지 후에도 timeout(기본 15초)까지 돌며
+            // 그동안 중지가 무반응으로 보였다.
+            const cts = new vscode.CancellationTokenSource();
+            // node는 테스트 환경 PATH에 반드시 있다 — 10초짜리 명령을 걸고
+            // 100ms 뒤 취소해, timeout이 아니라 취소가 끝냈음을 시간으로 가른다.
+            const longCommand = 'node -e "setTimeout(function(){}, 10000)"';
+            const started = Date.now();
+
+            const run = runCommandCaptureLines(longCommand, undefined, 15000, cts.token);
+            setTimeout(() => cts.cancel(), 100);
+
+            await assert.rejects(run, /canceled/i, '취소가 거부로 이어져야 파이프라인이 중단된다');
+            const elapsed = Date.now() - started;
+            assert.ok(
+                elapsed < 5000,
+                `취소 후 ${elapsed}ms — 명령 완료(10s)나 timeout(15s)을 기다렸다는 뜻이다`
+            );
+            cts.dispose();
+        });
+
+        test('IT-129: 이미 취소된 토큰이면 명령을 시작하자마자 끝낸다', async () => {
+            const cts = new vscode.CancellationTokenSource();
+            cts.cancel();
+            await assert.rejects(
+                runCommandCaptureLines('node -e "setTimeout(function(){}, 10000)"', undefined, 15000, cts.token),
+                /canceled/i
+            );
+            cts.dispose();
+        });
     });
 });

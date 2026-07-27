@@ -192,6 +192,30 @@ suite('JSON Editor 웹뷰 지역화 / 접근성', () => {
                 '패널 이름이 활성 탭을 따라가지 않으면 내용과 어긋난다');
         });
 
+        test('탭 전환 재렌더 후 포커스를 새 활성 탭으로 복원한다 (0.6.35)', () => {
+            // renderTabs가 노드를 전부 새로 만들므로 포커스한 노드는 detach되고
+            // 포커스가 body로 떨어진다. 복원이 없으면 화살표 이동이 한 번만
+            // 동작하고 죽는다 — roving tabindex라 Tab으로도 못 돌아온다.
+            assert.ok(
+                html.includes('document.activeElement === document.body'),
+                '포커스가 실제로 떨어졌는지 확인하지 않으면 마우스 사용자 포커스까지 뺏는다'
+            );
+            assert.ok(
+                /tabsEl\.children\[activeIdx\][\s\S]{0,80}renewed\.focus\(\)/.test(html),
+                '새 활성 탭으로 포커스를 복원하지 않는다'
+            );
+        });
+
+        test('화살표 이동은 click만 부른다 (전환 무산 시 포커스가 현재 탭에 남도록)', () => {
+            // focus 후 click하면 성공 시 그 노드가 detach돼 포커스가 죽고,
+            // 셀 commit 거부로 무산되면 비활성 탭에 포커스가 남는다.
+            assert.ok(
+                !/nextTab\.focus\(\); nextTab\.click\(\)/.test(html),
+                '이전의 focus-then-click 패턴이 되살아났다'
+            );
+            assert.ok(/if \(nextTab\) \{ nextTab\.click\(\); \}/.test(html));
+        });
+
         test('탭이 하나뿐이면 끊긴 참조를 남기지 않는다', () => {
             // 탭 줄이 숨겨진 상태에서 aria-labelledby가 남으면 스크린리더가
             // 이름 없는 패널로 읽는다.

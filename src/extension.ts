@@ -3957,11 +3957,17 @@ async function executeSingleTask(
                 ...task,
                 placeHolder: task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined
             };
-            result = await handleEnvPick(interpolatedEnvPickTask);
+            result = await handleEnvPick(interpolatedEnvPickTask, actionCancellationToken(actionId));
             break;
         case 'confirm':
             const interpolatedMessage = task.message ? interpolatePipelineVariables(task.message, interpolationContext) : undefined;
             result = await handleConfirm({ ...task, message: interpolatedMessage });
+            // Modal은 CancellationToken을 받지 않아 프로그램적으로 닫을 수
+            // 없다 — 네이티브 파일 대화상자와 같은 부류다. 중지 요청은
+            // 기록만 되고, 사용자가 Yes를 눌러 modal이 닫히는 순간 여기서
+            // 파이프라인을 중단시킨다. 이 검사가 없으면 "중지됨" 히스토리를
+            // 남긴 실행이 계속 진행돼 성공 기록으로 덮어쓴다.
+            throwIfActionCancelled(actionId);
             break;
         case 'writeFile':
         case 'appendFile':
@@ -4472,7 +4478,7 @@ async function handleInputBox(task: any, token?: vscode.CancellationToken): Prom
  * the `envPick` probe. Rejects on non-zero exit, spawn error, timeout, or
  * oversized output.
  */
-function runCommandCaptureLines(command: string, cwd: string | undefined, timeoutMs = 15000): Promise<string[]> {
+export function runCommandCaptureLines(command: string, cwd: string | undefined, timeoutMs = 15000, token?: vscode.CancellationToken): Promise<string[]> {
     return new Promise<string[]>((resolve, reject) => {
         const isWindows = process.platform === 'win32';
         const shell = isWindows ? 'cmd.exe' : (process.env.SHELL || '/bin/sh');
@@ -4503,6 +4509,22 @@ function runCommandCaptureLines(command: string, cwd: string | undefined, timeou
             finish(() => reject(new Error(t('명령 실행이 시간 내에 완료되지 않았습니다.', 'Command timed out.'))));
         }, timeoutMs);
 
+        // *Stop Action* 은 이 spawn 을 activeTasks 로도 child-process registry
+        // 로도 볼 수 없다 — 항목 생성 명령은 태스크 실행 이전의 준비 단계라
+        // 어느 쪽에도 등록되지 않는다. 취소 토큰이 유일한 연결 고리이고,
+        // 이게 없으면 중지를 눌러도 프로세스가 timeout(기본 15초)까지 돌며
+        // 그동안 중지가 무반응으로 보인다.
+        const cancelSub = token?.onCancellationRequested(() => {
+            clearTimeout(timer);
+            try { child.kill(); } catch { /* ignore */ }
+            finish(() => reject(new Error('Quick pick selection was canceled.')));
+        });
+        if (token?.isCancellationRequested) {
+            clearTimeout(timer);
+            try { child.kill(); } catch { /* ignore */ }
+            finish(() => reject(new Error('Quick pick selection was canceled.')));
+        }
+
         // Cap stdout+stderr *combined*: a failing command can spew unbounded
         // stderr, and at the quickPick stage that would balloon extension-host
         // memory. Kill once either stream pushes the total past the limit.
@@ -4524,6 +4546,7 @@ function runCommandCaptureLines(command: string, cwd: string | undefined, timeou
         });
         child.on('error', (e: Error) => {
             clearTimeout(timer);
+            cancelSub?.dispose();
             finish(() => reject(e));
         });
         // Resolve on `close`, not `exit`: `exit` can fire before the stdout
@@ -4531,6 +4554,7 @@ function runCommandCaptureLines(command: string, cwd: string | undefined, timeou
         // or slow output. `close` fires only after all stdio streams are done.
         child.on('close', (code: number | null) => {
             clearTimeout(timer);
+            cancelSub?.dispose();
             if (code !== 0) {
                 const detail = stderr.trim() || `exit code ${code}`;
                 finish(() => reject(new Error(detail)));
@@ -4551,7 +4575,7 @@ async function handleQuickPick(task: any, defaultWorkspace?: string, token?: vsc
         const runCwd = task.cwd || defaultWorkspace || '(none)';
         let lines: string[];
         try {
-            lines = await runCommandCaptureLines(task.itemsFromCommand, task.cwd || defaultWorkspace);
+            lines = await runCommandCaptureLines(task.itemsFromCommand, task.cwd || defaultWorkspace, undefined, token);
         } catch (e: any) {
             const message = e instanceof Error ? e.message : String(e);
             throw new Error(t(
@@ -4734,7 +4758,7 @@ function getShellAccessibleEnvNames(): Promise<Set<string> | null> {
     return cachedShellEnvNamesPromise;
 }
 
-async function handleEnvPick(task: any): Promise<{ value: string }> {
+async function handleEnvPick(task: any, token?: vscode.CancellationToken): Promise<{ value: string }> {
     const allNames = Object.keys(process.env);
     const shellNames = await getShellAccessibleEnvNames();
 
@@ -4757,12 +4781,15 @@ async function handleEnvPick(task: any): Promise<{ value: string }> {
     }
 
     const items: vscode.QuickPickItem[] = names.map(name => ({ label: name }));
+    // 토큰이 *Stop Action*을 실제로 동작하게 한다 — inputBox/quickPick과 같은
+    // 계약인데 0.6.29가 이 타입만 빠뜨려, 중지 후에도 목록이 열린 채 남았고
+    // 사용자가 값을 고르면 뒤 태스크가 계속 실행됐다.
     const selected = await vscode.window.showQuickPick(items, {
         placeHolder: task.placeHolder || t(
             '환경변수 이름을 선택하세요',
             'Select an environment variable name'
         )
-    });
+    }, token);
 
     if (!selected) {
         throw new Error('Environment variable selection was canceled.');

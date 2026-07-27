@@ -151,12 +151,26 @@ suite('Object Summary 정렬', () => {
             // 정렬이 통째로 죽는다.
             assert.ok(html.includes("row.getAttribute('data-sort-' + sortByCol)"), '속성 우선 경로가 없다');
             assert.ok(
-                /if \(attr !== null\) \{ return attr; \}/.test(html),
+                /if \(attr !== null\) \{ return \{ text: attr, fromAttr: true \}; \}/.test(html),
                 '속성이 있을 때 그것을 쓰지 않는다'
             );
             assert.ok(
                 html.includes('row.children[valIdx].textContent.trim()'),
                 '셀 텍스트 폴백이 사라지면 다른 표의 정렬이 깨진다'
+            );
+        });
+
+        test('속성 값은 문자 제거 없이 Number()로 읽는다 (지수 표기 보존)', () => {
+            // 정규식 정리는 "1.2 KB" 같은 표시용 텍스트에만 필요하다. 원본
+            // 속성에 적용하면 아주 작은 퍼센트의 지수 표기(9e-7)에서 e가
+            // 지워져 9-7 → 9로 읽힌다 — 실제 순서와 반대가 될 수 있다.
+            assert.ok(
+                /fromAttr\s*\?\s*Number\(value\.text\)/.test(html),
+                '속성 경로가 Number()를 쓰지 않는다'
+            );
+            assert.ok(
+                /parseFloat\(value\.text\.replace/.test(html),
+                '셀 텍스트 경로의 표시 문자열 정리는 유지되어야 한다'
             );
         });
     });

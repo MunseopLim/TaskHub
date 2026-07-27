@@ -1145,23 +1145,34 @@ const RD = ${regionDataJsLiteral};
     });
 
     // --- Region fold/unfold with lazy rendering ---
+    /**
+     * region \uCE74\uB4DC\uC758 \uD3BC\uCE68 \uC0C1\uD0DC\uB97C \uBC14\uAFB8\uB294 \uC720\uC77C\uD55C \uACBD\uB85C.
+     *
+     * \uD654\uBA74(display), \uAE00\uB9AC\uD504(\u25B6/\u25BC), \uC811\uADFC\uC131 \uC0C1\uD0DC(aria-expanded), \uC9C0\uC5F0 \uB80C\uB354,
+     * Expand All \uB77C\uBCA8\uC774 \uC804\uBD80 \uC5EC\uAE30\uC11C \uD568\uAED8 \uC6C0\uC9C1\uC778\uB2E4. 0.6.31\uC740 aria-expanded\uB97C
+     * \uC9C1\uC811 \uD074\uB9AD \uACBD\uB85C(toggleRegion)\uC5D0\uB9CC \uB123\uC5B4\uC11C, Expand All \u00B7 \uAC80\uC0C9 \uC790\uB3D9 \uD655\uC7A5 \u00B7
+     * Overview/\uBA85\uB839 \uC774\uB3D9\uC73C\uB85C \uD3BC\uCE5C \uCE74\uB4DC\uB97C \uC2A4\uD06C\uB9B0\uB9AC\uB354\uAC00 \uACC4\uC18D "\uC811\uD798"\uC73C\uB85C
+     * \uC77D\uC5C8\uB2E4 \u2014 \uC0C1\uD0DC\uB97C \uBC14\uAFB8\uB294 \uACBD\uB85C\uAC00 \uB2E4\uC12F \uACF3\uC778\uB370 \uD55C \uACF3\uB9CC \uACE0\uCE5C \uACB0\uACFC\uB2E4.
+     * \uC0C8 \uD3BC\uCE68 \uACBD\uB85C\uB97C \uCD94\uAC00\uD55C\uB2E4\uBA74 \uBC18\uB4DC\uC2DC \uC774 \uD568\uC218\uB97C \uAC70\uCE60 \uAC83.
+     */
+    function setRegionExpanded(card, expanded) {
+        const detail = card.querySelector('.region-detail');
+        if (!detail) { return; }
+        detail.style.display = expanded ? '' : 'none';
+        const icon = card.querySelector('.fold-icon');
+        if (icon) { icon.textContent = expanded ? '\u25BC' : '\u25B6'; }
+        // \u25B6/\u25BC \uAE00\uB9AC\uD504\uB294 \uC2A4\uD06C\uB9B0\uB9AC\uB354\uC5D0 \uC544\uBB34 \uC758\uBBF8\uB3C4 \uC804\uB2EC\uD558\uC9C0 \uC54A\uB294\uB2E4(aria-hidden).
+        // \uD3BC\uCE68 \uC5EC\uBD80\uB294 aria-expanded\uB85C\uB9CC \uC54C \uC218 \uC788\uB2E4.
+        const header = card.querySelector('.region-header');
+        if (header) { header.setAttribute('aria-expanded', expanded ? 'true' : 'false'); }
+        if (expanded) { renderDetail(parseInt(card.dataset.idx)); }   // rendered \uCE90\uC2DC\uB85C \uBA71\uB4F1
+        if (window.syncToggleAllLabel) { window.syncToggleAllLabel(); }
+    }
+
     window.toggleRegion = function(header) {
         const card = header.closest('.region-card');
         const detail = card.querySelector('.region-detail');
-        const icon = header.querySelector('.fold-icon');
-        const idx = parseInt(card.dataset.idx);
-        if (detail.style.display === 'none') {
-            detail.style.display = '';
-            icon.textContent = '\u25BC';
-            renderDetail(idx);
-        } else {
-            detail.style.display = 'none';
-            icon.textContent = '\u25B6';
-        }
-        // \u25B6/\u25BC \uAE00\uB9AC\uD504\uB294 \uC2A4\uD06C\uB9B0\uB9AC\uB354\uC5D0 \uC544\uBB34 \uC758\uBBF8\uB3C4 \uC804\uB2EC\uD558\uC9C0 \uC54A\uB294\uB2E4(aria-hidden).
-        // \uD3BC\uCE68 \uC5EC\uBD80\uB294 aria-expanded\uB85C\uB9CC \uC54C \uC218 \uC788\uB2E4.
-        header.setAttribute('aria-expanded', detail.style.display === 'none' ? 'false' : 'true');
-        window.syncToggleAllLabel();
+        setRegionExpanded(card, detail.style.display === 'none');
     };
 
     // --- Toggle-All button label reflects the next action: if any region is
@@ -1270,13 +1281,7 @@ const RD = ${regionDataJsLiteral};
         const card = document.querySelector('.region-card[data-idx="' + idx + '"]');
         if (!card) { return; }
         const detail = card.querySelector('.region-detail');
-        if (detail && detail.style.display === 'none') {
-            detail.style.display = '';
-            const icon = card.querySelector('.fold-icon');
-            if (icon) { icon.textContent = '▼'; }
-            renderDetail(idx);
-            if (window.syncToggleAllLabel) { window.syncToggleAllLabel(); }
-        }
+        if (detail && detail.style.display === 'none') { setRegionExpanded(card, true); }
     }
 
     // Reveal match #i: clear the previous current-match, expand its region if
@@ -1428,12 +1433,7 @@ const RD = ${regionDataJsLiteral};
             if (q && rm > 0) {
                 mr++;
                 const detail = card.querySelector('.region-detail');
-                const icon = card.querySelector('.fold-icon');
-                if (detail && detail.style.display === 'none') {
-                    detail.style.display = '';
-                    if (icon) icon.textContent = '\u25BC';
-                    renderDetail(idx);
-                }
+                if (detail && detail.style.display === 'none') { setRegionExpanded(card, true); }
             }
         });
 
@@ -1482,18 +1482,7 @@ const RD = ${regionDataJsLiteral};
     // --- Expand All / Collapse All ---
     window.foldAll = function(collapse) {
         document.querySelectorAll('.region-card').forEach(function(card) {
-            const detail = card.querySelector('.region-detail');
-            const icon = card.querySelector('.fold-icon');
-            const idx = parseInt(card.dataset.idx);
-            if (detail) {
-                if (collapse) {
-                    detail.style.display = 'none';
-                } else {
-                    detail.style.display = '';
-                    renderDetail(idx);
-                }
-            }
-            if (icon) icon.textContent = collapse ? '\u25B6' : '\u25BC';
+            setRegionExpanded(card, !collapse);
         });
     };
 
@@ -1504,14 +1493,7 @@ const RD = ${regionDataJsLiteral};
             const card = document.getElementById('region-' + name);
             if (!card) return;
             const detail = card.querySelector('.region-detail');
-            const icon = card.querySelector('.fold-icon');
-            const idx = parseInt(card.dataset.idx);
-            if (detail && detail.style.display === 'none') {
-                detail.style.display = '';
-                if (icon) icon.textContent = '\u25BC';
-                renderDetail(idx);
-                if (window.syncToggleAllLabel) window.syncToggleAllLabel();
-            }
+            if (detail && detail.style.display === 'none') { setRegionExpanded(card, true); }
             card.scrollIntoView({ behavior: 'smooth', block: 'start' });
             card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
             setTimeout(function() { card.style.outline = ''; }, 2500);
@@ -1527,14 +1509,7 @@ const RD = ${regionDataJsLiteral};
                 const strong = card.querySelector('.region-header strong');
                 if (strong && strong.textContent.trim() === msg.name) {
                     const detail = card.querySelector('.region-detail');
-                    const icon = card.querySelector('.fold-icon');
-                    const idx = parseInt(card.dataset.idx);
-                    if (detail && detail.style.display === 'none') {
-                        detail.style.display = '';
-                        if (icon) icon.textContent = '\u25BC';
-                        renderDetail(idx);
-                        if (window.syncToggleAllLabel) window.syncToggleAllLabel();
-                    }
+                    if (detail && detail.style.display === 'none') { setRegionExpanded(card, true); }
                     card.scrollIntoView({ behavior: 'smooth', block: 'start' });
                     card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
                     setTimeout(function() { card.style.outline = ''; }, 2500);
@@ -1593,18 +1568,32 @@ const RD = ${regionDataJsLiteral};
                     // 종전대로 셀 텍스트를 읽는다.
                     function sortValueOf(row) {
                         const attr = row.getAttribute('data-sort-' + sortByCol);
-                        if (attr !== null) { return attr; }
-                        if (valIdx < 0 || valIdx >= row.children.length) { return ''; }
-                        return row.children[valIdx].textContent.trim();
+                        if (attr !== null) { return { text: attr, fromAttr: true }; }
+                        if (valIdx < 0 || valIdx >= row.children.length) { return { text: '', fromAttr: false }; }
+                        return { text: row.children[valIdx].textContent.trim(), fromAttr: false };
+                    }
+
+                    // 속성 값은 프로그램이 넣은 원본이므로 문자 제거 없이
+                    // Number()로 그대로 읽는다. 정규식 정리는 "1.2 KB" 같은
+                    // 표시용 셀 텍스트에만 필요한데, 원본 값에 적용하면
+                    // 아주 작은 퍼센트의 지수 표기(9e-7)에서 e를 지워
+                    // 9-7 → 9로 읽는 오독이 생긴다. 이름처럼 숫자가 아닌
+                    // 속성은 Number()가 NaN을 돌려줘 문자열 비교로 넘어간다 —
+                    // stm32f4xx_hal.o가 324로 비교되던 셀 경로의 문제도 속성
+                    // 행에서는 함께 사라진다.
+                    function sortNumberOf(value) {
+                        return value.fromAttr
+                            ? Number(value.text)
+                            : parseFloat(value.text.replace(/[^0-9.\-]/g, ''));
                     }
 
                     groups.sort(function(a, b) {
-                        const aT = sortValueOf(a.head);
-                        const bT = sortValueOf(b.head);
-                        const aN = parseFloat(aT.replace(/[^0-9.\-]/g, ''));
-                        const bN = parseFloat(bT.replace(/[^0-9.\-]/g, ''));
+                        const aV = sortValueOf(a.head);
+                        const bV = sortValueOf(b.head);
+                        const aN = sortNumberOf(aV);
+                        const bN = sortNumberOf(bV);
                         if (!isNaN(aN) && !isNaN(bN)) return sortAsc ? aN - bN : bN - aN;
-                        return sortAsc ? aT.localeCompare(bT) : bT.localeCompare(aT);
+                        return sortAsc ? aV.text.localeCompare(bV.text) : bV.text.localeCompare(aV.text);
                     });
                     groups.forEach(function(g) {
                         g.rows.forEach(function(row) { tbody.appendChild(row); });

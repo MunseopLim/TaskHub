@@ -342,13 +342,22 @@ export async function showSaveDialogWithMemory(
 ): Promise<vscode.Uri | undefined> {
     const { defaultDir, ...rest } = options;
     const effective: vscode.SaveDialogOptions = { ...rest };
-    // 꺼져 있으면 폴더는 비우고 파일명만 제안한다 — VS Code가 자기 최근 경로에
-    // 그 이름으로 대화상자를 연다. 파일명까지 버리면 저장 대화상자가 이름 없이
-    // 떠서 설정과 무관하게 쓰기 불편해진다.
+    // 시작 디렉터리를 확보했을 때만 defaultUri를 지정한다.
+    //
+    // 0.6.30은 설정이 꺼졌을 때 "폴더는 비우고 파일명만 제안"하려고
+    // Uri.file(suggestedName)을 넘겼는데, 상대 경로 Uri는 파일시스템 루트로
+    // 해석된다(Windows `\actions.taskhub`, POSIX `/actions.taskhub`) — 결국
+    // TaskHub가 가장 이상한 위치를 지정한 셈이고, "시작 위치를 일절 지정하지
+    // 않는다"는 설정 약속과도 어긋났다. VS Code API에는 파일명만 제안하는
+    // 수단이 없으므로(defaultUri 하나뿐), 꺼진 상태에서는 파일명 제안을
+    // 포기하는 것이 정직한 선택이다. defaultUri가 없으면 VS Code가 자기
+    // 최근 경로에서 연다.
     const startDir = deps.isEnabled()
         ? firstUsableDir([deps.recall(scope), defaultDir, deps.workspaceFallbackDir()], deps)
         : undefined;
-    effective.defaultUri = vscode.Uri.file(startDir ? path.join(startDir, suggestedName) : suggestedName);
+    if (startDir) {
+        effective.defaultUri = vscode.Uri.file(path.join(startDir, suggestedName));
+    }
 
     const picked = await deps.showSaveDialog(effective);
     if (picked && picked.scheme === 'file') {

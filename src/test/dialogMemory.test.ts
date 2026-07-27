@@ -265,7 +265,13 @@ suite('dialogMemory', () => {
             );
         });
 
-        test('저장 대화상자는 폴더를 비우고 파일명만 제안한다', async () => {
+        test('저장 대화상자는 defaultUri를 아예 지정하지 않는다', async () => {
+            // 0.6.30은 "폴더는 비우고 파일명만 제안"하려고 Uri.file(이름만)을
+            // 넘겼는데, 상대 경로 Uri는 파일시스템 루트로 해석된다(Windows
+            // \actions.taskhub) — TaskHub가 가장 이상한 위치를 지정한 셈이다.
+            // 당시 이 테스트는 선행 구분자를 replace로 지우고 검사해 그 버그를
+            // 정상으로 봉인하고 있었다. API에 파일명만 제안하는 수단이 없으므로
+            // 꺼진 상태에서는 파일명 제안을 포기하는 것이 맞다.
             const workspace = dir('workspace');
             const env = makeFakeEnv({
                 enabled: false,
@@ -282,9 +288,9 @@ suite('dialogMemory', () => {
             );
 
             assert.strictEqual(
-                env.saveCalls[0].defaultUri?.fsPath.replace(/^[/\\]/, ''),
-                'actions.taskhub',
-                '폴더가 남아 있으면 VS Code 최근 경로 대신 그 폴더가 열린다'
+                env.saveCalls[0].defaultUri,
+                undefined,
+                'TaskHub가 위치를 지정하면 VS Code 자체 최근 경로가 쓰일 수 없다'
             );
         });
 
@@ -424,16 +430,16 @@ suite('dialogMemory', () => {
             assertSamePath(env.saveCalls[0].defaultUri?.fsPath, path.join(workspace, 'preset-hil.json'));
         });
 
-        test('쓸 수 있는 폴더가 없으면 파일명만 제안한다', async () => {
-            // 존재하는 디렉터리도, 워크스페이스 폴백도 없는 상태.
+        test('쓸 수 있는 폴더가 없으면 defaultUri를 지정하지 않는다', async () => {
+            // 존재하는 디렉터리도, 워크스페이스 폴백도 없는 상태. 예전에는
+            // Uri.file(파일명만)을 넘겼는데 상대 경로 Uri는 파일시스템 루트로
+            // 해석돼, "폴더가 없으니 VS Code에 맡긴다"가 아니라 루트를 지정하는
+            // 셈이 됐다 — rememberLastLocation OFF 경로와 같은 결함이다.
             const env = makeFakeEnv();
 
             await showSaveDialogWithMemory(DIALOG_SCOPE.presetSave, 'preset-hil.json', {}, env.deps);
 
-            assert.strictEqual(
-                path.basename(env.saveCalls[0].defaultUri!.fsPath),
-                'preset-hil.json'
-            );
+            assert.strictEqual(env.saveCalls[0].defaultUri, undefined);
         });
 
         test('저장한 폴더를 기억한다', async () => {

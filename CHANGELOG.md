@@ -53,6 +53,28 @@
 
 **테스트**: 신규 9 케이스 — IT-119~IT-122(마법사 종단 흐름, 이 범위 최초로 `taskhub.createAction` 명령 자체를 끝까지 실행한다) + 웹뷰 탐지기 5종(로케일별 렌더 3종 분화, 마스킹 회귀 가드, 로케일 고정 전제 검증). 최종 1634 passing.
 
+## [0.6.35] - 2026-07-27
+
+### 수정 — 0.6.27~0.6.34 후속 리뷰 반영 (7건)
+
+#### High (중지가 동작하지 않는 나머지 경로 — 0.6.29 후속)
+
+- **`envPick` / `confirm` 대기 중에는 중지가 여전히 무력했다**: 0.6.29는 `inputBox` / `quickPick`에 토큰을 배선하고 테스트도 `inputBox`만 덮었는데, `INTERACTIVE_TASK_TYPES`에는 두 타입이 더 있다. 중지 버튼이 뜨고 히스토리에 "stopped by user"까지 기록되지만 프롬프트는 열린 채 남았고, 사용자가 값을 고르면 뒤 태스크가 계속 실행돼 **성공 기록이 중지 기록을 덮었다** (성공 히스토리 갱신은 try 블록에서 무조건 실행되고 `manuallyTerminatedActions`는 catch에서만 확인한다). `envPick`은 `showQuickPick`에 토큰을 넘기고, modal이라 토큰을 받을 수 없는 `confirm`은 반환 직후 `throwIfActionCancelled`로 중단한다 — 네이티브 파일 대화상자와 같은 취급이다. 참조: [src/extension.ts](src/extension.ts).
+- **`quickPick.itemsFromCommand`의 항목 생성 명령이 중지를 무시했다**: 이 spawn은 태스크 실행 이전의 준비 단계라 `activeTasks`에도 child-process registry에도 없어, 토큰이 유일한 연결 고리인데 그것도 없었다. 중지는 성공으로 보고되지만 프로세스는 명령 완료나 timeout(기본 15초)까지 돌았다. `runCommandCaptureLines`가 토큰을 받아 취소 즉시 프로세스를 죽이고 거부한다.
+
+#### Medium (0.6.30~0.6.31 후속)
+
+- **JSON Editor 탭이 화살표 한 번 이동 후 키보드 포커스를 잃었다**: 화살표 처리가 `focus()` 후 `click()`했는데, click이 `renderTabs()`로 노드를 전부 새로 만들어 포커스한 노드가 detach되고 포커스가 body로 떨어졌다 — roving tabindex라 Tab으로도 비활성 탭에 못 돌아가, 한 번 이동한 뒤 키보드 탐색이 통째로 죽었다. 재렌더 후 포커스가 실제로 떨어졌을 때만 새 활성 탭으로 복원한다(셀 편집 중 마우스 클릭의 포커스는 뺏지 않는다). 화살표는 click만 부른다 — 전환이 셀 commit 거부로 무산되면 포커스가 현재 탭에 그대로 남는다. 참조: [src/jsonEditor.ts](src/jsonEditor.ts).
+- **Memory Map `aria-expanded`가 직접 클릭 외의 펼침 경로와 어긋났다**: 0.6.31은 `toggleRegion`에만 갱신을 넣었는데, 상태를 바꾸는 경로는 여섯 곳이었다(Expand All, 검색 자동 확장 2곳, Overview 클릭, Go to Symbol 명령). 그 경로들로 펼친 카드를 스크린리더가 계속 "접힘"으로 읽었다. `setRegionExpanded()` 하나로 모았다 — display·글리프·aria-expanded·지연 렌더·Expand All 라벨이 함께 움직인다. 참조: [src/memoryMapViewer.ts](src/memoryMapViewer.ts).
+- **Hex Viewer 키보드가 존재하지 않는 셀을 선택할 수 있었다**: 렌더는 완전한 unit에만 `data-offset`을 붙이는데, End/화살표 경계는 마지막 바이트 기준이었다. 18바이트 파일의 4-byte 모드에서 End가 16을 선택하지만 그 셀은 없다 — 상태 표시줄만 바뀌고 선택 표시는 사라졌다. 경계를 마지막 **완전한** unit으로 제한하고, 파일이 unit 하나보다 작으면 무동작한다. 참조: [src/hexViewer.ts](src/hexViewer.ts).
+- **`rememberLastLocation=false`인데 저장 대화상자가 파일시스템 루트를 지정했다**: 0.6.30이 "폴더는 비우고 파일명만 제안"하려고 `Uri.file(파일명만)`을 넘겼는데, 상대 경로 Uri는 루트로 해석된다(Windows `\actions.taskhub`) — "시작 위치를 일절 지정하지 않는다"는 설정 약속과 어긋났고, **당시 테스트는 선행 구분자를 지우고 검사해 이 버그를 정상으로 봉인하고 있었다**. VS Code API에는 파일명만 제안하는 수단이 없으므로(defaultUri 하나뿐) 꺼진 상태에서는 파일명 제안을 포기한다. 켜져 있어도 쓸 폴더를 못 찾으면 같은 이유로 defaultUri를 생략한다. 참조: [src/dialogMemory.ts](src/dialogMemory.ts).
+
+#### Low (0.6.34 후속)
+
+- **아주 작은 퍼센트의 지수 표기가 정렬에서 오독됐다**: comparator의 표시 문자열 정리(`replace(/[^0-9.\-]/g)`)가 원본 속성 값에도 적용돼, `9e-7`이 `9-7` → `9`로 읽혔다. 속성 값은 프로그램이 넣은 원본이므로 문자 제거 없이 `Number()`로 읽는다. 부수 효과로 `stm32f4xx_hal.o` 같은 이름이 숫자로 비교되던 문제도 속성 행에서는 사라진다(`Number()`가 `NaN`을 돌려줘 문자열 비교로 넘어간다). 셀 텍스트 폴백 경로의 정리는 유지 — `"1.2 KB"` 같은 표시값에는 여전히 필요하다.
+
+**테스트**: 신규 11 케이스 — IT-126~IT-129(envPick/confirm 중지, spawn 취소 2종), 탭 포커스 복원 2종, `setRegionExpanded` 단일 경로 가드, Hex 경계 재정의, 저장 대화상자 defaultUri 생략 2종(옛 동작을 봉인하던 테스트 교체), 지수 표기 보존. `setRegionExpanded` 가드는 작성 시점에 **여섯 번째 펼침 경로**(검색 필터의 자동 확장)를 실제로 잡아냈고, IT-126/127은 수정을 되돌린 상태에서 실패를 확인했다. 최종 1717 passing.
+
 ## [0.6.34] - 2026-07-27
 
 ### 수정 — Memory Map의 Object Summary 정렬 (사용자 제보)

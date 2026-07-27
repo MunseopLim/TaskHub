@@ -990,6 +990,15 @@ function getWebviewContent(
         }
         e.preventDefault();
 
+        // 이동 가능한 마지막 offset은 마지막 **완전한** unit의 시작이다.
+        // 렌더는 byteOffset + unitSize <= TOTAL_SIZE인 셀에만 data-offset을
+        // 붙이므로, 파일 끝의 불완전한 unit(18바이트 파일의 4-byte 모드에서
+        // offset 16)은 화면에 셀이 없다 — 마지막 바이트 기준으로 정렬하면
+        // 존재하지 않는 셀을 선택해 상태 표시줄만 바뀌고 선택 표시는 사라진다.
+        // 파일이 unit 하나보다 작으면 고를 수 있는 셀 자체가 없다.
+        const lastUnitStart = Math.floor((TOTAL_SIZE - unitSize) / unitSize) * unitSize;
+        if (lastUnitStart < 0) { return; }
+
         // 아직 아무것도 고르지 않았으면 첫 바이트에서 시작한다.
         const current = selectedEndOffset >= 0 ? selectedEndOffset
             : (selectedOffset >= 0 ? selectedOffset : 0);
@@ -997,12 +1006,11 @@ function getWebviewContent(
         if (e.key === 'Home') {
             next = 0;
         } else if (e.key === 'End') {
-            next = Math.floor((TOTAL_SIZE - 1) / unitSize) * unitSize;
+            next = lastUnitStart;
         } else {
             next = current + delta;
         }
-        // 파일 경계에서 멈춘다. unit 정렬을 유지해야 셀과 대응된다.
-        next = Math.max(0, Math.min(next, TOTAL_SIZE - 1));
+        next = Math.max(0, Math.min(next, lastUnitStart));
         next = Math.floor(next / unitSize) * unitSize;
 
         if (e.shiftKey && selectedOffset >= 0) {
