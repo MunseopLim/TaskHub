@@ -524,6 +524,29 @@ VS Code `DiagnosticCollection.set(uri, ...)`은 해당 URI의 기존 entry 전�
 1. **`vscode.commands.executeCommand('taskhub.stopAction', …)`를 쓰지 않습니다.** 번들(`dist/`)과 테스트(`out/`)는 별도 모듈 인스턴스라, 명령을 거치면 번들 쪽 레지스트리를 건드려 테스트가 만든 실행과 만나지 못합니다(처음에 이렇게 짰다가 무한 대기로 24개가 연쇄 실패했습니다). `stopRunningAction`을 직접 부릅니다 — 이 함수가 export된 이유입니다.
 2. **`await run`에 시간 경계를 둡니다**(`settleWithin`). 배선이 깨지면 프롬프트가 닫히지 않아 promise가 영원히 pending으로 남고, 그 하나가 스위트 전체를 무너뜨립니다. 원인 테스트 하나만 실패하게 합니다.
 
+## Memory Map 픽스처와 커버리지 경계
+
+Memory Map 웹뷰는 **입력에 따라 다른 분기를 렌더합니다.** 그래서 픽스처는 단순한 테스트 도우미가 아니라 **무엇이 검사 대상이 되는지를 결정하는 물건**입니다. 픽스처가 열지 않는 분기의 결함은 어떤 검사로도 보이지 않습니다.
+
+| 입력 | 여는 영역 |
+| --- | --- |
+| `buildMinimalElf32()` | 개요 표, All Sections 표 |
+| `buildElf32WithSymbols()` | + region 카드 상세 표, Object Summary |
+| `examples/sample_armlink.txt` | + `func`(함수명) 열, `Function ▶` 토글 |
+
+마지막 줄이 중요합니다. **`func`는 ARM link listing 파서만 채웁니다** — `computeSymbolUsage`는 `object`(부모 섹션명)까지만 만들므로, ELF 픽스처를 아무리 풍부하게 해도 `hasFuncData`는 거짓이고 `Function ▶` 분기에는 닿을 수 없습니다.
+
+이것이 0.6.26의 하드코딩 문자열 탐지기가 `Function ▶`을 놓친 이유의 절반입니다(나머지 절반은 호스트 로케일 의존, 0.6.27에서 수정). 두 원인이 겹쳐 있었기 때문에 **한쪽만 고쳐서는 잡히지 않습니다** — listing 픽스처를 물린 뒤 0.6.28의 수정을 되돌려, `ko` 렌더는 잡고 `en` 렌더는 통과하는 것을 확인했습니다.
+
+규칙 두 가지를 둡니다.
+
+1. **검사 전에 그 분기가 실제로 열렸는지 먼저 단언합니다** (`region-card` / `toggle-func-col` 존재 확인). 픽스처가 조용히 망가지면 빈 화면을 검사하며 통과하기 때문입니다.
+2. **픽스처 자체의 전제는 따로 검사합니다** (`src/test/elfFixtures.test.ts` — 심볼 개수·타입, 섹션 속성, 영역 분포, 그리고 "ELF는 `func`을 채우지 않는다"). 픽스처를 공유하는 테스트가 늘수록 조용한 손상의 파급이 커집니다.
+
+픽스처는 `src/test/fixtures/elfFixtures.ts` 한 벌로 관리합니다. 예전에는 `buildMinimalElf32()`가 세 테스트 파일에 복사돼 있었는데, 사본이 따로 자라면 어느 테스트가 무엇을 보고 있는지 알 수 없게 됩니다.
+
+**픽스처를 늘려도 닫히지 않는 사각지대**가 하나 남습니다. 탐지기는 호스트가 만든 **문자열로서의 HTML**을 보므로, 웹뷰 스크립트가 `innerHTML +=`로 실행 시 조립하는 마크업은 원리적으로 밖에 있습니다. 그 영역의 결함(Hex Viewer 상태 표시줄의 `Offset:`이 실제 사례였습니다)은 코드 리뷰로만 걸립니다.
+
 ## 시나리오 추가 절차
 
 1. 새 기능의 integration 측면이 생기면 이 문서의 "시나리오 그룹" 표에 먼저 한 줄 요약을 추가합니다.

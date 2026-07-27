@@ -5,9 +5,10 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { buildJsonEditorStrings, getWebviewContent as getJsonEditorHtml } from '../jsonEditor';
 import { buildHexViewerHtml, buildHexViewerStrings } from '../hexViewer';
-import { buildMemoryMapStrings, openMemoryMapPanel, panelRegistry } from '../memoryMapViewer';
+import { buildMemoryMapStrings, openMemoryMapFromListing, openMemoryMapPanel, panelRegistry } from '../memoryMapViewer';
 import { parseIntelHex } from '../hexParser';
 import { t } from '../i18n';
+import { buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
 
 /**
  * 웹뷰 하드코딩 문자열 탐지 (0.6.26, 0.6.27에서 로케일 의존 제거).
@@ -42,21 +43,30 @@ import { t } from '../i18n';
  * 포맷 이름, 예시 입력값. 새 항목을 추가할 때는 왜 번역 대상이 아닌지
  * 분명해야 한다.
  *
+ * ## 픽스처가 커버리지 경계다 (0.6.31)
+ *
+ * Memory Map 웹뷰는 **입력에 따라 다른 분기를 렌더한다.** 0.6.30까지는 심볼이
+ * 없는 최소 ELF 하나만 썼고, 그래서 region 상세 표 / Object Summary /
+ * `Function ▶` 토글이 달린 `section-heading` 분기가 아예 그려지지 않았다 —
+ * 그 마크업의 결함은 어떤 검사로도 보이지 않았다. 이제 세 입력을 모두 돌린다.
+ *
+ *   - `buildElf32WithSymbols()` → region 상세 표, Object Summary
+ *   - `examples/sample_armlink.txt` → `func` 열과 `Function ▶` 토글
+ *     (`func`는 ARM link listing 파서만 채운다. `computeSymbolUsage`는
+ *      `object`까지만 만들므로 ELF로는 이 분기에 닿을 수 없다.)
+ *
+ * 각 테스트는 검사 전에 **그 분기가 실제로 열렸는지** 먼저 단언한다. 픽스처가
+ * 조용히 망가지면 빈 화면을 검사하며 통과하기 때문이다. 픽스처 자체의 전제는
+ * `elfFixtures.test.ts`가 따로 못박는다.
+ *
  * ## 남은 사각지대 — 과신하지 말 것
  *
- * 1. **웹뷰 스크립트가 런타임에 조립하는 DOM은 검사하지 않는다.** 여기서 보는
- *    것은 호스트가 만든 정적 HTML이고, `isScriptFragment()`가 `S.*`를 포함한
- *    조각을 건너뛴다. Memory Map의 region 카드 / Object Summary 표, Hex Viewer
- *    상태 표시줄처럼 `innerHTML +=`로 만들어지는 마크업은 원리적으로 밖에 있다
- *    (`hexViewer.ts`의 `'<span>Offset: '`가 그 예).
- * 2. **픽스처가 렌더하지 않는 분기는 못 본다.** `buildMinimalElf32()`는 심볼
- *    테이블이 없어 `hasFuncData`가 false이므로, `Function ▶` 버튼이 달린
- *    `section-heading` 분기 자체가 렌더되지 않는다. 아래 "마스킹 회귀 가드"가
- *    그 문자열을 직접 넣어 탐지 능력만 따로 고정하지만, 픽스처를 통한 실제
- *    커버리지는 아니다. 심볼을 가진 ELF 픽스처를 만드는 것이 후속 과제다.
- *
- * 두 사각지대 모두 "탐지기가 통과했으니 하드코딩이 없다"고 결론내면 안 된다는
- * 뜻이다. 실제로 1번 때문에 0.6.26 이후에도 문자열이 남아 있다.
+ * **웹뷰 스크립트가 런타임에 조립하는 DOM은 여전히 검사하지 않는다.** 여기서
+ * 보는 것은 호스트가 만든 정적 HTML이고, `isScriptFragment()`가 `S.*`를 포함한
+ * 조각을 건너뛴다. `innerHTML +=`로 만들어지는 마크업(Hex Viewer 상태 표시줄의
+ * `'<span>Offset: '`가 그 예였다)은 원리적으로 밖에 있다. 픽스처를 늘려도 이건
+ * 닫히지 않는다 — 검사 대상이 문자열로서의 HTML이지 실행된 DOM이 아니기
+ * 때문이다. "탐지기가 통과했으니 하드코딩이 없다"고 결론내면 안 된다.
  */
 
 /**
@@ -231,26 +241,69 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
             });
         });
 
+        /**
+         * ARM link listing 경로. ELF 픽스처로는 도달할 수 없는 분기를 연다.
+         *
+         * `func`(함수명)는 **listing 파서만** 채운다 — `computeSymbolUsage`는
+         * `object`까지만 만든다. 그래서 `hasFuncData`가 참이 되는 경로가
+         * ELF에는 없고, `Function ▶` 열 토글 버튼이 달린 `section-heading`
+         * 분기 자체가 ELF 렌더에서는 그려지지 않았다. 0.6.27이 그 버튼의
+         * 하드코딩을 고치고도 탐지기로는 확인할 수 없었던 이유다.
+         */
+        test(`Memory Map — ARM link listing (${lang})`, function () {
+            this.timeout(10000);
+            withLanguage(lang, () => {
+                panelRegistry.clear();
+                const listingPath = path.resolve(__dirname, '..', '..', 'examples', 'sample_armlink.txt');
+                assert.ok(fs.existsSync(listingPath), `픽스처가 없다: ${listingPath}`);
+                try {
+                    const ctx = {
+                        extensionPath: path.resolve(__dirname, '..', '..'),
+                        subscriptions: [],
+                    } as unknown as vscode.ExtensionContext;
+                    assert.ok(openMemoryMapFromListing(ctx, listingPath));
+                    const html = panelRegistry.getHtml(listingPath) ?? '';
+                    // 이 분기가 실제로 열렸는지 먼저 못박는다. 픽스처가 바뀌어
+                    // func 정보를 잃으면 아래 검사가 조용히 무의미해진다.
+                    assert.ok(
+                        html.includes('toggle-func-col'),
+                        'Function 열 토글이 렌더되지 않았다 — 이 테스트가 열려던 분기에 도달하지 못했다'
+                    );
+                    assertNoHardcodedStrings(html, buildMemoryMapStrings(), 'Memory Map (listing)', lang);
+                } finally {
+                    panelRegistry.clear();
+                }
+            });
+        });
+
+        /**
+         * 심볼을 가진 ELF. 최소 ELF로는 열리지 않는 **region 상세 표와
+         * Object Summary** 분기를 그린다 — 웹뷰 스크립트가 `innerHTML`로
+         * 조립하는 영역이라, 픽스처가 이걸 열지 못하면 그 마크업의 결함은
+         * 어떤 검사로도 보이지 않는다.
+         */
         test(`Memory Map (${lang})`, function () {
             this.timeout(10000);
             withLanguage(lang, () => {
                 panelRegistry.clear();
                 const filePath = path.join(os.tmpdir(), `taskhub-strcov-${lang}-${process.pid}.axf`);
-                fs.writeFileSync(filePath, buildMinimalElf32());
+                fs.writeFileSync(filePath, buildElf32WithSymbols());
                 try {
                     const ctx = {
                         extensionPath: path.resolve(__dirname, '..', '..'),
                         subscriptions: [],
                     } as unknown as vscode.ExtensionContext;
                     assert.ok(openMemoryMapPanel(ctx, filePath, {
-                        regions: [{ name: 'FLASH', origin: 0x08000000, size: 512 * 1024 }],
+                        regions: [
+                            { name: 'FLASH', origin: 0x08000000, size: 512 * 1024 },
+                            { name: 'RAM', origin: 0x20000000, size: 128 * 1024 },
+                        ],
                     }));
-                    assertNoHardcodedStrings(
-                        panelRegistry.getHtml(filePath) ?? '',
-                        buildMemoryMapStrings(),
-                        'Memory Map',
-                        lang
-                    );
+                    const html = panelRegistry.getHtml(filePath) ?? '';
+                    // 분기가 실제로 열렸는지 못박는다. 픽스처가 조용히 망가지면
+                    // 아래 검사가 빈 화면을 보며 통과한다.
+                    assert.ok(html.includes('region-card'), 'region 카드가 렌더되지 않았다');
+                    assertNoHardcodedStrings(html, buildMemoryMapStrings(), 'Memory Map', lang);
                 } finally {
                     panelRegistry.clear();
                     try { fs.unlinkSync(filePath); } catch { /* best effort */ }
@@ -314,51 +367,3 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
     });
 });
 
-function buildMinimalElf32(): Buffer {
-    const sections = [{ name: '.text', type: 1, flags: 0x6, addr: 0x08000000, size: 1024 }];
-    let strTab = '\0';
-    const nameOffsets: number[] = [];
-    for (const sec of sections) {
-        nameOffsets.push(strTab.length);
-        strTab += sec.name + '\0';
-    }
-    const shstrtabNameOffset = strTab.length;
-    strTab += '.shstrtab\0';
-
-    const strTabBuf = Buffer.from(strTab, 'ascii');
-    const elfHeaderSize = 52;
-    const shEntSize = 40;
-    const totalSections = 1 + sections.length + 1;
-    const strTabOffset = elfHeaderSize;
-    const shOffset = elfHeaderSize + strTabBuf.length;
-    const buf = Buffer.alloc(shOffset + totalSections * shEntSize, 0);
-
-    buf[0] = 0x7f; buf[1] = 0x45; buf[2] = 0x4c; buf[3] = 0x46;
-    buf[4] = 1; buf[5] = 1; buf[6] = 1;
-    buf.writeUInt16LE(2, 16);
-    buf.writeUInt16LE(40, 18);
-    buf.writeUInt32LE(1, 20);
-    buf.writeUInt32LE(0x08000000, 24);
-    buf.writeUInt32LE(shOffset, 32);
-    buf.writeUInt16LE(elfHeaderSize, 40);
-    buf.writeUInt16LE(shEntSize, 46);
-    buf.writeUInt16LE(totalSections, 48);
-    buf.writeUInt16LE(totalSections - 1, 50);
-    strTabBuf.copy(buf, strTabOffset);
-
-    for (let i = 0; i < sections.length; i++) {
-        const base = shOffset + (i + 1) * shEntSize;
-        buf.writeUInt32LE(nameOffsets[i], base);
-        buf.writeUInt32LE(sections[i].type, base + 4);
-        buf.writeUInt32LE(sections[i].flags, base + 8);
-        buf.writeUInt32LE(sections[i].addr, base + 12);
-        buf.writeUInt32LE(strTabOffset, base + 16);
-        buf.writeUInt32LE(sections[i].size, base + 20);
-    }
-    const shstrtabBase = shOffset + (totalSections - 1) * shEntSize;
-    buf.writeUInt32LE(shstrtabNameOffset, shstrtabBase);
-    buf.writeUInt32LE(3, shstrtabBase + 4);
-    buf.writeUInt32LE(strTabOffset, shstrtabBase + 16);
-    buf.writeUInt32LE(strTabBuf.length, shstrtabBase + 20);
-    return buf;
-}
