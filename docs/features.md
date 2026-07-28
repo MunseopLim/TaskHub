@@ -268,6 +268,8 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
         -   캡처된 결과는 파이프라인의 다음 태스크에서 `${task_id.output}` 형태로 사용할 수 있습니다.
         -   캡처된 결과는 `output` 블록을 통해 파일이나 에디터로 보내는 등 추가적인 처리가 가능합니다.
         -   **메모리 보호를 위한 캡처 한도**: 캡처 모드에서 누적되는 stdout/stderr의 총 크기가 `taskhub.pipeline.outputCaptureLimitMb` (기본값 10MB, 범위 1~1024MB)를 초과하면 프로세스를 종료하고 명확한 에러(`Captured output exceeded the N MB limit ...`)를 반환합니다. 의도적으로 큰 로그를 생성하는 파이프라인이라면 설정을 높이거나 커맨드에서 `> file`로 리다이렉션해 캡처를 우회하세요.
+        -   **액션 전체 합계 한도 (0.6.43부터)**: 위 설정은 **태스크 하나**를 막습니다. 태스크 결과는 뒤 태스크가 `${앞태스크.stdout}` 을 참조할 수 있어야 하므로 액션이 끝날 때까지 메모리에 남는데, 그 **합계**에는 제한이 없었습니다 — 기본값(10MB)에서는 태스크가 수십 개여야 문제가 되지만, 로그가 잘려서 태스크 상한을 1024MB 로 올린 환경에서는 태스크 서넛만으로 GB 단위가 됩니다. `taskhub.pipeline.totalOutputLimitMb` (기본값 32MB, 범위 1~4096MB)가 합계를 막고, 초과하면 액션이 실패합니다.
+            -   **태스크 상한보다 작아지지 않습니다.** "이 태스크 출력 100MB 를 받겠다"고 설정해 놓고 총량이 32MB 라 곧바로 실패하면 두 설정이 서로를 부정하는 꼴이므로, 실효 총량은 둘 중 큰 값입니다.
     -   참고: `revealTerminal` 속성은 스트림 모드(`passTheResultToNextTask: false`)에서만 적용됩니다. 캡처 모드에서는 터미널이 열리지 않습니다.
 
 -   **`output`** (`object`, *선택*): 캡처된 결과를 어떻게 처리할지 정의합니다. `mode` 사용은 캡처 모드(`passTheResultToNextTask: true`)에서만 동작하지만, `capture` 규칙만 쓸 때는 `mode`를 생략할 수 있습니다.
@@ -1903,6 +1905,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 | `taskhub.pipeline.pythonIoEncoding` | `string` | `"utf-8"` | TaskHub가 실행하는 모든 명령의 `PYTHONIOENCODING` 환경변수 값. 빈 문자열이면 강제 설정 안 함. `utf-8:ignore` 같은 값도 가능. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell 출력 인코딩. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` (1–1024) | 캡처 모드(`passTheResultToNextTask: true`)에서 누적되는 stdout/stderr 총 크기 상한(MB). 초과 시 프로세스를 종료하고 명확한 에러로 실패. | [§5 Output Capture](#output-capture) |
+| `taskhub.pipeline.totalOutputLimitMb` | `number` | `32` (1–4096) | 한 액션이 들고 있는 **모든 태스크 결과의 합계** 상한(MB). 위 설정이 태스크 하나를 막는다면 이 설정은 합계를 막는다. **태스크 상한보다 작아지지 않는다.** 초과 시 액션 실패. | [§5 Output Capture](#output-capture) |
 | `taskhub.pipeline.maxParallelTasks` | `integer` | `4` (1–32) | 한 액션 안에서 동시에 실행될 수 있는 task 최대 개수. `parallel: true`가 붙은 task만 "이전 모든 task를 기다림" barrier에서 빠지며, barrier에서 빠진 뒤에도 명시적 `dependsOn`과 `${taskId.x}` 자동 추론 의존성은 그대로 기다린다. `parallel: true`가 없는 task는 `dependsOn` 유무와 무관하게 sync barrier로 동작. 기본 4는 임베디드 빌드(linker/LTO)의 메모리 부담을 고려한 보수적 값 — 자원 여유가 있는 머신에서는 늘리고, 완전 순차로 강제하려면 `1`로 설정. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
 | `taskhub.history.maxItems` | `number` | `10` (1–50) | 저장되는 액션 실행 히스토리 최대 개수. 초과분은 오래된 순으로 자동 제거. | [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.runAnyAction.recentLimit` | `number` | `5` (0–20) | `TaskHub: Run Any Action…` 팔레트의 *Recently used* 섹션에 표시할 최대 개수. `0`이면 섹션 자체가 숨겨진다. 목록은 히스토리에서 유도되므로 `taskhub.history.maxItems`가 상한으로 작용하고, 표시 시점에 stale 항목(삭제된 액션)을 걸러내므로 실제 보이는 개수는 이 값 이하가 될 수 있다. | [§5 Quick Action Palette](#5-actions-패널-mainviewmain) |

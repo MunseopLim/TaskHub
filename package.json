@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.42",
+  "version": "0.6.43",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -92,6 +92,13 @@
           "minimum": 1,
           "maximum": 1024,
           "markdownDescription": "%setting.outputCaptureLimitMb%"
+        },
+        "taskhub.pipeline.totalOutputLimitMb": {
+          "type": "number",
+          "default": 32,
+          "minimum": 1,
+          "maximum": 4096,
+          "markdownDescription": "%setting.totalOutputLimitMb%"
         },
         "taskhub.pipeline.maxParallelTasks": {
           "type": "integer",

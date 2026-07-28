@@ -63,6 +63,7 @@
   "setting.pythonIoEncoding": "TaskHub가 실행하는 명령의 `PYTHONIOENCODING` 환경 변수에 지정할 값입니다. 인코딩을 강제하지 않으려면 빈 문자열로 두고, 호환이 필요하면 `utf-8:ignore` 같은 값을 지정하세요.",
   "setting.windowsPowerShellEncoding": "Windows에서 TaskHub가 PowerShell 출력을 구성하는 방식입니다. UTF-8(코드 페이지 65001)을 인식하지 못하는 구형 도구를 쓴다면 `system`으로 두어 현재 콘솔 코드 페이지를 유지하세요.",
   "setting.outputCaptureLimitMb": "TaskHub 액션 실행 중 메모리에 캡처하는 명령 stdout/stderr의 최대 크기(MB)입니다. 이 한도를 넘으면 VS Code 확장 호스트의 OOM을 막기 위해 명령을 오류와 함께 종료합니다. 의도적으로 대량의 로그를 내보내는 파이프라인이라면 값을 올리거나, `> file`로 출력을 리다이렉트해 캡처를 우회하세요.",
+  "setting.totalOutputLimitMb": "한 액션이 메모리에 들고 있는 **모든 태스크 결과의 합계** 크기 상한(MB)입니다. 뒤 태스크가 `${앞태스크.stdout}` 을 참조할 수 있어야 하므로 결과는 액션이 끝날 때까지 남아 있습니다. `pipeline.outputCaptureLimitMb` 가 태스크 하나를 막는다면 이 설정은 합계를 막습니다 — 없으면 로그가 많은 빌드 때문에 태스크 상한을 올린 환경에서 태스크 몇 개만으로 GB 단위가 됩니다. 태스크 상한보다 작아지지는 않습니다: 태스크 하나에 100MB 를 허용했다면 최소한 그만큼은 담깁니다. 초과하면 액션이 실패합니다.",
   "setting.maxParallelTasks": "한 액션 안에서 동시에 실행할 수 있는 태스크의 최대 개수입니다. `parallel: true`가 붙은 태스크만 \"앞의 모든 태스크를 기다린다\"는 암묵적 배리어에서 제외되며, 제외되더라도 명시한 `dependsOn`과 `${taskId.x}`로 자동 추론된 의존은 그대로 기다린 뒤 시작합니다. `parallel: true`가 없는 태스크는 `dependsOn`과 무관하게 항상 동기화 배리어로 동작합니다. 기본값 `4`는 보수적인 값입니다 — 임베디드 빌드(링커 / LTO 단계)는 각각 수 기가바이트의 RAM을 쓸 수 있기 때문입니다. 자원이 넉넉한 장비라면 값을 올리고, 완전히 순차 실행하려면 `1`로 낮추세요.",
   "setting.historyMaxItems": "보관할 액션 실행 기록의 최대 개수입니다.",
   "setting.recentLimit": "`TaskHub: 액션 실행…` 목록 위쪽에 표시할 최근 실행 액션의 최대 개수입니다. `0`으로 두면 *최근 실행* 구역을 완전히 숨깁니다. 삭제된 액션의 ID는 표시 시점에 걸러지므로 실제로 보이는 개수는 이 한도보다 적을 수 있습니다.",

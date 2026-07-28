@@ -3413,6 +3413,12 @@ export async function executeActionPipeline(
     // user sees every failed task at a glance.
     const failures: { taskId: string; error: Error }[] = [];
 
+    // 태스크 결과 총량. 개별 태스크 출력은 `outputCaptureLimitMb` 로 막혀
+    // 있었지만 합계에는 제한이 없어, 그 설정을 크게 올린 환경에서 태스크
+    // 몇 개만으로 GB 단위가 될 수 있었다.
+    const totalResultLimit = getTotalResultLimitBytes();
+    let accumulatedResultBytes = 0;
+
     const launchTask = (taskId: string): Promise<InFlightOutcome> => {
         const task = taskById.get(taskId)!;
         scheduler.markStarted(taskId);
@@ -3517,6 +3523,16 @@ export async function executeActionPipeline(
         if (outcome.kind === 'success') {
             scheduler.markCompleted(outcome.taskId);
             stepResults[outcome.taskId] = outcome.result;
+            // 담은 **뒤에** 잰다. 결과를 버리고 실패시키는 것보다, 이 태스크까지는
+            // 정상으로 두고 다음 태스크를 띄우지 않는 편이 상태가 일관된다.
+            accumulatedResultBytes += approximateResultBytes(outcome.result);
+            if (accumulatedResultBytes > totalResultLimit) {
+                const limitMb = Math.round(totalResultLimit / (1024 * 1024));
+                throw new Error(t(
+                    `태스크 결과 총량이 ${limitMb}MB 한도를 초과했습니다. \`taskhub.pipeline.totalOutputLimitMb\` 설정을 높이거나, 큰 출력은 \`> file\` 로 리다이렉트하세요.`,
+                    `Combined task output exceeded the ${limitMb} MB limit. Raise \`taskhub.pipeline.totalOutputLimitMb\`, or redirect large output with \`> file\`.`
+                ));
+            }
             if (recordInputs) {
                 const t = taskById.get(outcome.taskId);
                 if (t && shouldRecordTaskInput(t)) {
@@ -5321,6 +5337,65 @@ export function mergeImportedActions(existing: ActionItem[], imported: ActionIte
 const DEFAULT_CAPTURE_LIMIT_MB = 10;
 const CAPTURE_LIMIT_MIN_MB = 1;
 const CAPTURE_LIMIT_MAX_MB = 1024;
+
+const DEFAULT_TOTAL_RESULT_LIMIT_MB = 32;
+const TOTAL_RESULT_LIMIT_MIN_MB = 1;
+const TOTAL_RESULT_LIMIT_MAX_MB = 4096;
+
+/**
+ * 한 액션이 메모리에 들고 있을 수 있는 **태스크 결과 총량**.
+ *
+ * `stepResults` 는 뒤 태스크가 `${앞태스크.stdout}` 을 참조할 수 있어야 해서
+ * 액션이 끝날 때까지 모든 결과를 들고 있는다. 태스크 하나의 출력은
+ * `pipeline.outputCaptureLimitMb` 로 막혀 있었지만 **합계에는 제한이 없었다** —
+ * 기본값(10MB)에서는 태스크가 수십 개여야 문제가 되지만, 로그가 잘려서 그
+ * 설정을 1024MB 로 올린 사용자는 태스크 서넛만으로 GB 단위가 된다.
+ *
+ * **태스크 상한보다 작을 수 없다.** 사용자가 "이 태스크 출력 100MB 를 받겠다"고
+ * 설정해 놓고 총량이 32MB 라 곧바로 실패하면, 두 설정이 서로를 부정하는 꼴이다.
+ * 그래서 실효 총량은 둘 중 큰 값이다 — 태스크 상한을 올리면 총량도 최소한 그
+ * 하나는 담을 수 있게 따라 올라간다.
+ */
+export function getTotalResultLimitBytes(
+    configuredTotalMb?: number,
+    perTaskLimitBytes?: number
+): number {
+    const raw = configuredTotalMb ?? vscode.workspace.getConfiguration('taskhub')
+        .get<number>('pipeline.totalOutputLimitMb', DEFAULT_TOTAL_RESULT_LIMIT_MB);
+    const clamped = Math.min(
+        Math.max(Number(raw) || DEFAULT_TOTAL_RESULT_LIMIT_MB, TOTAL_RESULT_LIMIT_MIN_MB),
+        TOTAL_RESULT_LIMIT_MAX_MB
+    );
+    const total = clamped * 1024 * 1024;
+    const perTask = perTaskLimitBytes ?? getCaptureLimitBytes();
+    return Math.max(total, perTask);
+}
+
+/**
+ * 태스크 결과의 대략적인 바이트 크기.
+ *
+ * 정확한 힙 사용량이 아니라 **상대 비교용**이다. 무거운 것은 shell 태스크의
+ * `stdout`/`stderr` 문자열이므로 문자열 길이를 더한다. 깊이를 제한해, 예상치
+ * 못한 중첩 구조에서 이 계산 자체가 비싸지지 않게 한다.
+ */
+export function approximateResultBytes(value: unknown, depth = 0): number {
+    if (depth > 3 || value === null || value === undefined) { return 0; }
+    if (typeof value === 'string') { return Buffer.byteLength(value, 'utf8'); }
+    if (typeof value === 'number' || typeof value === 'boolean') { return 8; }
+    if (Array.isArray(value)) {
+        let sum = 0;
+        for (const item of value) { sum += approximateResultBytes(item, depth + 1); }
+        return sum;
+    }
+    if (typeof value === 'object') {
+        let sum = 0;
+        for (const item of Object.values(value as Record<string, unknown>)) {
+            sum += approximateResultBytes(item, depth + 1);
+        }
+        return sum;
+    }
+    return 0;
+}
 
 function getCaptureLimitBytes(): number {
     const configured = vscode.workspace.getConfiguration('taskhub').get<number>('pipeline.outputCaptureLimitMb', DEFAULT_CAPTURE_LIMIT_MB);
