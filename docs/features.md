@@ -1646,6 +1646,8 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Import Actions"** 실행하거�
 
 ARM `.axf`/`.elf` 바이너리 파일을 파싱하여 메모리 사용량을 시각적으로 표시합니다. 임베디드 개발 시 Flash/RAM 사용량을 한눈에 파악할 수 있습니다.
 
+> **입력 크기 한도**: 파일은 **100MB** 까지 받습니다. ARM Linker Listing 은 여기에 더해 **엔트리 50만 개** 상한이 있습니다 (0.6.40부터) — listing 은 한 줄이 엔트리 하나라 파일 크기만으로는 부족하고, 엔트리 하나가 파싱 객체 → 파생 배열 → JSON → HTML → (모두 펼치기 시) DOM 노드로 증폭되기 때문입니다. 상한을 넘으면 **경고를 띄우고** 앞의 50만 개만 표시합니다. 이때도 **요약 수치(Total RO/RW/ROM)는 파일 전체 기준**이라 정확합니다 — 잘리는 것은 개별 엔트리 목록뿐입니다.
+
 ### 사용 방법
 
 Command Palette (Cmd+Shift+P)에서 **"TaskHub: Show Memory Map"** 실행:

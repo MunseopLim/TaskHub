@@ -32,7 +32,25 @@ export interface ArmLinkListResult {
         rwSize: number;
         romSize: number;
     };
+    /**
+     * 상한에 걸려 버려진 엔트리 수. 0이면 전부 담겼다.
+     *
+     * 조용히 자르면 사용자가 **불완전한 데이터를 완전한 것으로 착각**한다 —
+     * "이 심볼이 왜 없지"가 링커 문제인지 뷰어 한계인지 알 수 없다. 호출부가
+     * 이 값을 보고 알린다.
+     */
+    truncatedEntries: number;
 }
+
+/**
+ * 담을 엔트리 최대 개수.
+ *
+ * 파일 크기 상한(100MB)만으로는 부족하다 — listing 은 한 줄이 엔트리 하나라
+ * 100MB 면 수백만 줄이 되고, 그 각각이 파싱 객체 + 파생 배열 + JSON + HTML +
+ * (Expand All 시) DOM 노드로 증폭된다. 실제 펌웨어 맵이 50만 줄을 넘는 일은
+ * 드물어, 여기서 자르면 정상 사용에는 걸리지 않으면서 병리적 입력만 막는다.
+ */
+export const ARM_LINK_MAX_ENTRIES = 500_000;
 
 // Regex patterns — flexible whitespace for cross-version compatibility
 const EXEC_REGION_RE = /Execution\s+Region\s+(\S+)\s+\((.+)\)/i;
@@ -95,6 +113,8 @@ export function parseArmLinkList(content: string): ArmLinkListResult {
     let currentExecRegion: ArmLinkExecRegion | null = null;
     let entryPoint = 0;
     const totals = { roSize: 0, rwSize: 0, romSize: 0 };
+    let entryCount = 0;
+    let truncatedEntries = 0;
 
     for (const line of lines) {
         // Entry point
@@ -203,6 +223,14 @@ export function parseArmLinkList(content: string): ArmLinkListResult {
                     }
                 }
 
+                // 상한을 넘으면 **세기만 하고 담지 않는다**. totals 는 위에서
+                // 이미 누적됐으므로 요약 수치는 계속 정확하다 — 잘리는 것은
+                // 개별 엔트리 목록뿐이다.
+                if (entryCount >= ARM_LINK_MAX_ENTRIES) {
+                    truncatedEntries++;
+                    continue;
+                }
+                entryCount++;
                 currentExecRegion.entries.push({
                     addr,
                     size: sz,
@@ -233,7 +261,7 @@ export function parseArmLinkList(content: string): ArmLinkListResult {
         if (romMatch) { totals.romSize = parseInt(romMatch[1], 10); continue; }
     }
 
-    return { execRegions, entryPoint, totals };
+    return { execRegions, entryPoint, totals, truncatedEntries };
 }
 
 /**

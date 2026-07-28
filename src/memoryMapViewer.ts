@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, generateSummaryReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary } from './elfParser';
 import { parseLinkerFile } from './linkerScriptParser';
-import { parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
+import { ARM_LINK_MAX_ENTRIES, parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
 
@@ -231,6 +231,16 @@ export function openMemoryMapFromListing(context: vscode.ExtensionContext, fileP
     } catch (e: any) {
         vscode.window.showErrorMessage(t(`Listing 파싱 실패 (${fileName}): ${e.message}`, `Failed to parse listing (${fileName}): ${e.message}`));
         return false;
+    }
+
+    // 조용히 자르면 사용자가 불완전한 목록을 완전한 것으로 착각한다 —
+    // "이 심볼이 왜 없지"가 링커 문제인지 뷰어 한계인지 알 수 없다.
+    // 요약 수치(Total RO/RW/ROM)는 잘린 엔트리까지 포함해 계산되므로 정확하다.
+    if (result.truncatedEntries > 0) {
+        vscode.window.showWarningMessage(t(
+            `엔트리가 너무 많아 ${ARM_LINK_MAX_ENTRIES.toLocaleString()}개까지만 표시합니다 (${result.truncatedEntries.toLocaleString()}개 생략, ${fileName}). 요약 수치는 전체 기준입니다.`,
+            `Too many entries — showing the first ${ARM_LINK_MAX_ENTRIES.toLocaleString()} (${result.truncatedEntries.toLocaleString()} omitted, ${fileName}). Summary totals still cover the whole file.`
+        ));
     }
 
     if (result.execRegions.length === 0) {

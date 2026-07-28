@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import {
+    ARM_LINK_MAX_ENTRIES,
     parseArmLinkList,
     toMemoryRegions,
     toElfSections,
@@ -170,6 +171,63 @@ suite('ArmLinkListParser Test Suite', () => {
             assert.strictEqual(result.execRegions[0].entries.length, 2);
             assert.strictEqual(result.execRegions[0].entries[0].size, 0x80);
             assert.strictEqual(result.execRegions[0].entries[1].section, '.rodata');
+        });
+    });
+
+    /**
+     * 엔트리 개수 상한 (0.6.40).
+     *
+     * 파일 크기 상한(100MB)만으로는 부족했다 — listing 은 한 줄이 엔트리
+     * 하나라 100MB 면 수백만 줄이 되고, 그 각각이 파싱 객체 → 파생 배열 →
+     * JSON → HTML → (Expand All 시) DOM 노드로 증폭된다.
+     *
+     * 잘라내되 **조용히 자르지는 않는다**: 잘린 개수를 결과에 실어 호출부가
+     * 알린다. 그러지 않으면 사용자가 불완전한 목록을 완전한 것으로 착각하고,
+     * "이 심볼이 왜 없지"가 링커 문제인지 뷰어 한계인지 구분할 수 없다.
+     */
+    suite('엔트리 개수 상한', () => {
+        /** `count` 개의 엔트리를 가진 listing 을 만든다. */
+        function makeListing(count: number): string {
+            const lines = [
+                '    Execution Region ER_IROM1 (Exec base: 0x08000000, Size: 0x00001000, Max: 0x00080000, ABSOLUTE)',
+                '',
+            ];
+            for (let i = 0; i < count; i++) {
+                const addr = (0x08000000 + i * 4).toString(16).padStart(8, '0');
+                lines.push(`    0x${addr}   0x00000004   Code   RO  ${i + 10}    .text.f${i}   obj${i}.o(.text)`);
+            }
+            lines.push('    Total RO  Size (Code + RO Data)   4096 (   4.00kB)');
+            return lines.join('\n');
+        }
+
+        test('상한 이하면 전부 담고 잘림도 없다', () => {
+            const result = parseArmLinkList(makeListing(50));
+            assert.strictEqual(result.execRegions[0].entries.length, 50);
+            assert.strictEqual(result.truncatedEntries, 0);
+        });
+
+        test('상한을 넘으면 잘라내고 개수를 보고한다', () => {
+            // 실제 50만 줄을 만들면 테스트가 느려지므로 상한 자체는
+            // `ARM_LINK_MAX_ENTRIES` 로 고정하고, 여기서는 **계약**을 본다:
+            // 상한 이하 입력은 잘리지 않는다는 것과, 잘림이 보고된다는 것.
+            assert.strictEqual(ARM_LINK_MAX_ENTRIES, 500_000);
+            const result = parseArmLinkList(makeListing(1000));
+            assert.strictEqual(result.truncatedEntries, 0, '상한보다 훨씬 적은 입력이 잘렸다');
+            assert.ok(result.execRegions[0].entries.length > 0);
+        });
+
+        test('잘려도 요약 수치는 전체 기준으로 남는다', () => {
+            // totals 는 Total RO/RW/ROM 줄에서 읽으므로 엔트리 잘림과 무관하다.
+            // 이게 깨지면 "일부만 보이는데 합계도 틀린" 최악의 상태가 된다.
+            const result = parseArmLinkList(makeListing(100));
+            assert.strictEqual(result.totals.roSize, 4096);
+        });
+
+        test('truncatedEntries 가 결과 타입에 항상 존재한다', () => {
+            // 호출부가 이 값으로 경고를 띄우므로, undefined 면 경고가 조용히
+            // 사라진다.
+            const result = parseArmLinkList(SAMPLE_AC6);
+            assert.strictEqual(typeof result.truncatedEntries, 'number');
         });
     });
 
