@@ -2205,8 +2205,24 @@ export class ActionStoppedError extends Error {
  * cannot carry a cancellation token itself — currently the native file/folder
  * dialogs.
  */
+/**
+ * drain 상한에 걸려 **기다리기를 포기한** 실행들.
+ *
+ * 액션이 끝나면 `finalizeActionRun` 이 취소 소스를 폐기한다(다음 실행이 첫
+ * 토큰 검사에서 곧바로 중단되지 않게 하려는, 의도된 동작이다). 그런데 그
+ * 시점에도 아직 안 끝난 태스크가 있을 수 있다 — 네이티브 다이얼로그처럼
+ * 프로그램으로 닫을 수 없는 것들이다. 사람이 한참 뒤 다이얼로그에 답하면
+ * 그 태스크가 이어서 진행되는데, 취소 소스가 이미 없으므로
+ * `isActionCancelled` 은 false 를 돌려주고 **이미 실패로 끝난 액션의 남은
+ * 단계가 계속 실행된다** (`itemsFromCommand` 실행, `output.mode: file` 쓰기 등).
+ *
+ * 그래서 취소 소스와 **수명이 다른** 표시를 따로 둔다. 다음 실행이 시작될 때
+ * 지우므로(`markActionAsRunning`) 재실행을 막지는 않는다.
+ */
+const abandonedActionRuns = new Set<string>();
+
 function throwIfActionCancelled(id: string): void {
-    if (isActionCancelled(id)) {
+    if (isActionCancelled(id) || abandonedActionRuns.has(id)) {
         throw new ActionStoppedError();
     }
 }
@@ -3270,6 +3286,9 @@ function markActionAsRunning(actionItem: ActionItem, id: string, showTaskStatus:
         return false;
     }
 
+    // 이전 실행이 drain 을 포기한 채 끝났을 수 있다. 새 실행은 그 표시를
+    // 물려받으면 안 된다.
+    abandonedActionRuns.delete(id);
     actionStates.set(id, { state: 'running' });
     // Opened here rather than at the first prompt: the stop button becomes
     // visible the moment the state flips to `running`, so the scope it acts
@@ -3449,6 +3468,75 @@ export async function executeActionPipeline(
     const totalResultLimit = getTotalResultLimitBytes();
     let accumulatedResultBytes = 0;
 
+    /**
+     * 스케줄러 루프를 **중간에서 던지고 나갈 때** 아직 도는 형제 태스크를
+     * 실제로 멈춘다.
+     *
+     * 평범한 태스크 실패는 이 함수가 필요 없다 — 스케줄러가 abort 상태로
+     * 가고 루프가 `inFlight` 를 끝까지 drain 한 뒤에 나간다. 문제는 총량
+     * 한도처럼 루프 **한가운데서 throw** 하는 경로다. 그때는 `finally` 가
+     * `exitParallelAction` 만 하고 끝나므로, 형제 태스크의 Promise 는 주인을
+     * 잃고 그 아래 프로세스는 **계속 돈다**. 사용자 눈에는 액션이 실패로
+     * 끝나고 재실행까지 가능한데, 실제로는 이전 빌드·플래싱이 여전히
+     * 파일을 쓰고 있는 상태다.
+     *
+     * 순서가 중요하다: (1) 취소 토큰을 세워 프롬프트를 닫고 뒤이어 뜨려던
+     * 것을 막고, (2) 프로세스와 터미널 태스크를 실제로 종료하고, (3) 전부
+     * settle 될 때까지 기다린다. 기다리지 않으면 "멈췄다"고 보고한 뒤에도
+     * 정리가 진행 중인 상태로 호출부에 돌아간다.
+     *
+     * **drain 에는 시간 제한이 필요하다.** 정상 실패 경로의 drain 이 무제한
+     * 이니 여기도 그래도 된다고 생각했는데, 두 경우는 대칭이 아니다. 정상
+     * drain 중에는 형제가 **살아 있어서** 사용자가 Stop 을 누르면 그것들을
+     * 찾아 죽일 수 있다. 여기서는 이미 죽인 뒤라 `stopRunningAction` 이
+     * 아무것도 찾지 못하고(자식 없음, 토큰은 이미 취소됨) *"활성 태스크를
+     * 찾을 수 없습니다"* 를 띄우며 `false` 를 돌려준다 — 기다리는 동안
+     * **Stop 이 동작하지 않는 상태**가 된다.
+     *
+     * 그리고 취소가 닿지 않는 태스크가 실제로 있다. 네이티브 파일/폴더
+     * 다이얼로그와 `confirm` 모달은 토큰을 받지 않아 프로그램으로 닫을 수
+     * 없고(모듈 상단 `actionCancellations` 주석 참조), 태스크 timeout 도
+     * `timeoutSeconds` 를 지정해야만 걸린다. 그런 형제가 하나라도 떠 있으면
+     * 무제한 drain 은 **사람이 다이얼로그에 답할 때까지** 액션을 붙잡는다.
+     *
+     * 그래서 상한을 둔다. 프로세스를 죽인 뒤 settle 은 보통 수십 ms 면
+     * 끝나므로 이 상한에 걸리는 것은 사실상 "취소가 닿지 않는 태스크"뿐이고,
+     * 그것들은 프로세스를 갖지 않아 남겨 두어도 빌드가 계속 도는 상황이
+     * 되지 않는다 — 이 수정이 막으려던 피해와는 성격이 다르다.
+     */
+    const ABORT_DRAIN_TIMEOUT_MS = 5000;
+    const abortInFlightTasks = async (): Promise<void> => {
+        if (inFlight.size === 0) { return; }
+        const cancellation = actionCancellations.get(id);
+        if (cancellation && !cancellation.token.isCancellationRequested) {
+            cancellation.cancel();
+        }
+        for (const taskId of inFlight.keys()) {
+            terminateChildProcesses(id, taskId);
+            const exec = getActiveTaskExecution(id, taskId);
+            if (exec) {
+                try { exec.terminate(); } catch { /* ignore */ }
+            }
+        }
+        // `launchTask` 의 Promise 는 거부하지 않고 `InFlightOutcome` 으로
+        // 접히지만, 그래도 `allSettled` 를 쓴다 — 앞으로 거부하는 경로가
+        // 생겨도 여기서 unhandled rejection 이 되지 않게.
+        const drained = Promise.allSettled(inFlight.values()).then(() => true);
+        const deadline = new Promise<boolean>(resolve =>
+            setTimeout(() => resolve(false), ABORT_DRAIN_TIMEOUT_MS));
+        if (!await Promise.race([drained, deadline])) {
+            // 취소 소스는 곧 폐기되지만 이 표시는 남는다 — 뒤늦게 이어지는
+            // 태스크가 "취소된 적 없음"으로 보여 계속 진행하는 것을 막는다.
+            abandonedActionRuns.add(id);
+            outputChannel.appendLine(
+                `[WARN] Action '${id}': ${inFlight.size} task(s) did not settle within ` +
+                `${ABORT_DRAIN_TIMEOUT_MS}ms after abort; continuing. ` +
+                `A prompt or native dialog that cannot be dismissed programmatically may still be open.`
+            );
+        }
+        inFlight.clear();
+    };
+
     const launchTask = (taskId: string): Promise<InFlightOutcome> => {
         const task = taskById.get(taskId)!;
         scheduler.markStarted(taskId);
@@ -3558,10 +3646,14 @@ export async function executeActionPipeline(
             accumulatedResultBytes += approximateResultBytes(outcome.result);
             if (accumulatedResultBytes > totalResultLimit) {
                 const limitMb = Math.round(totalResultLimit / (1024 * 1024));
-                throw new Error(t(
-                    `태스크 결과 총량이 ${limitMb}MB 한도를 초과했습니다. \`taskhub.pipeline.totalOutputLimitMb\` 설정을 높이거나, 큰 출력은 \`> file\` 로 리다이렉트하세요.`,
-                    `Combined task output exceeded the ${limitMb} MB limit. Raise \`taskhub.pipeline.totalOutputLimitMb\`, or redirect large output with \`> file\`.`
+                const limitError = new Error(t(
+                    `태스크 결과 총량이 ${limitMb}MB 한도를 초과했습니다. \`taskhub.pipeline.totalOutputLimitMb\` 설정을 높이거나, 큰 출력을 캡처하지 않도록 태스크를 나누세요.`,
+                    `Combined task output exceeded the ${limitMb} MB limit. Raise \`taskhub.pipeline.totalOutputLimitMb\`, or split the task so the large output is not captured.`
                 ));
+                // 던지기 **전에** 형제를 멈춘다. 그냥 던지면 액션은 실패로
+                // 끝나는데 병렬 형제의 빌드·플래싱은 계속 돈다.
+                await abortInFlightTasks();
+                throw limitError;
             }
             if (recordInputs) {
                 const t = taskById.get(outcome.taskId);
@@ -5587,8 +5679,8 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
                     settled = true;
                     const limitMb = Math.round(captureLimitBytes / (1024 * 1024));
                     reject(new Error(t(
-                        `캡처된 출력이 ${limitMb}MB 한도를 초과하여 명령을 중단했습니다. \`taskhub.pipeline.outputCaptureLimitMb\` 설정을 높이거나 파이프에 '> file' 리다이렉션을 사용하세요.`,
-                        `Captured output exceeded the ${limitMb} MB limit and the command was aborted. Raise \`taskhub.pipeline.outputCaptureLimitMb\` or redirect output with '> file'.`
+                        `캡처된 출력이 ${limitMb}MB 한도를 초과하여 명령을 중단했습니다. \`taskhub.pipeline.outputCaptureLimitMb\` 설정을 높이거나, 캡처가 필요 없다면 \`passTheResultToNextTask\` 를 꺼서 터미널로 흘려보내세요.`,
+                        `Captured output exceeded the ${limitMb} MB limit and the command was aborted. Raise \`taskhub.pipeline.outputCaptureLimitMb\`, or turn off \`passTheResultToNextTask\` so the output streams to the terminal instead of being captured.`
                     )));
                     return;
                 }

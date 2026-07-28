@@ -3,11 +3,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { ActionItem } from '../schema';
 import {
+    MainViewProvider,
     approximateResultBytes,
+    executeAction,
     getTotalResultLimitBytes,
     runCommandCaptureLines,
 } from '../extension';
+import { HistoryProvider } from '../providers/historyProvider';
 
 /**
  * 명령 출력 캡처의 메모리 상한.
@@ -190,6 +194,166 @@ suite('메모리 상한 가드', () => {
 
             test('배열도 센다', () => {
                 assert.strictEqual(approximateResultBytes(['ab', 'cde']), 5);
+            });
+        });
+
+        /**
+         * 총량 한도로 액션을 중단할 때, **아직 도는 병렬 형제**를 실제로
+         * 멈추는가 (0.6.46).
+         *
+         * 평범한 태스크 실패는 스케줄러가 abort 상태로 가고 루프가 `inFlight`
+         * 를 끝까지 drain 한 뒤 나간다. 그런데 총량 한도는 루프 **한가운데서
+         * throw** 했고, `finally` 는 병렬 플래그만 정리했다 — 형제 태스크의
+         * Promise 는 주인을 잃고 그 아래 프로세스는 계속 돌았다. UI 와
+         * History 는 실패로 끝나고 재실행까지 가능해지는데, 실제로는 이전
+         * 빌드·플래싱이 여전히 파일을 쓰고 있는 상태다.
+         */
+        suite('한도 초과 중단이 병렬 형제를 멈춘다', () => {
+
+            function makeContext(): vscode.ExtensionContext {
+                const store = new Map<string, any>();
+                const memento = {
+                    get: (k: string, d?: any) => (store.has(k) ? store.get(k) : d),
+                    update: async (k: string, v: any) => { store.set(k, v); },
+                    keys: () => Array.from(store.keys()),
+                    setKeysForSync: () => { /* no-op */ },
+                };
+                return {
+                    extensionPath: '/ext',
+                    subscriptions: [],
+                    workspaceState: memento,
+                    globalState: memento,
+                    extensionMode: vscode.ExtensionMode.Test,
+                    extension: { packageJSON: { version: '0.0.0-test' } },
+                } as unknown as vscode.ExtensionContext;
+            }
+
+            /**
+             * 지정 바이트를 stdout 으로 뱉고 끝나는 스크립트. 이 태스크들이
+             * 차례로 성공하면서 누적 총량을 한도 위로 밀어 올린다.
+             */
+            function makeBulkScript(dir: string, name: string, bytes: number, delayMs: number): string {
+                // 지연이 필요하다. 지연 없이 두면 이 태스크들이 형제보다 먼저
+                // 끝나 버려 **형제가 뜨기도 전에** 중단이 걸리고, 그러면 검증할
+                // in-flight 형제가 없다 (처음 작성했을 때 실제로 이랬다).
+                fs.writeFileSync(
+                    path.join(dir, name),
+                    `setTimeout(function () { process.stdout.write('x'.repeat(${bytes})); }, ${delayMs});\n`
+                );
+                return `node ${name}`;
+            }
+
+            /**
+             * runner → worker 로 **실제 프로세스 트리**를 만드는 오래 도는
+             * 태스크. worker 는 뜨자마자 started 마커를, 3초 뒤 생존 마커를
+             * 쓴다. 중단이 트리까지 닿지 않으면 생존 마커가 남는다.
+             */
+            function makeSurvivorScript(dir: string, delayMs: number): {
+                command: string; marker: string; startedMarker: string;
+            } {
+                const marker = path.join(dir, 'survivor.txt');
+                const startedMarker = path.join(dir, 'survivor.started');
+                fs.writeFileSync(
+                    path.join(dir, 'worker.js'),
+                    `require('fs').writeFileSync(${JSON.stringify(startedMarker)}, 'started');\n` +
+                    `setTimeout(function () {\n` +
+                    `  require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran');\n` +
+                    `}, ${delayMs});\n`
+                );
+                fs.writeFileSync(
+                    path.join(dir, 'runner.js'),
+                    `require('child_process').spawn(process.execPath, [${JSON.stringify(path.join(dir, 'worker.js'))}], { stdio: 'ignore' });\n` +
+                    `setTimeout(function () { }, 20000);\n`
+                );
+                return { command: 'node runner.js', marker, startedMarker };
+            }
+
+            async function waitForFile(file: string, timeoutMs: number): Promise<boolean> {
+                const deadline = Date.now() + timeoutMs;
+                while (Date.now() < deadline) {
+                    if (fs.existsSync(file)) { return true; }
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                }
+                return false;
+            }
+
+            let dir: string;
+            let originalTotal: number | undefined;
+            let originalPerTask: number | undefined;
+
+            setup(async () => {
+                dir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-abort-'));
+                const cfg = vscode.workspace.getConfiguration('taskhub');
+                originalTotal = cfg.get<number>('pipeline.totalOutputLimitMb');
+                originalPerTask = cfg.get<number>('pipeline.outputCaptureLimitMb');
+                // 실효 총량은 **둘 중 큰 값**이므로 양쪽을 모두 1MB 로 내려야
+                // 1MB 에서 걸린다. 하나만 내리면 다른 쪽이 바닥을 받쳐 버린다.
+                await cfg.update('pipeline.totalOutputLimitMb', 1, vscode.ConfigurationTarget.Global);
+                await cfg.update('pipeline.outputCaptureLimitMb', 1, vscode.ConfigurationTarget.Global);
+            });
+
+            teardown(async () => {
+                const cfg = vscode.workspace.getConfiguration('taskhub');
+                await cfg.update('pipeline.totalOutputLimitMb', originalTotal, vscode.ConfigurationTarget.Global);
+                await cfg.update('pipeline.outputCaptureLimitMb', originalPerTask, vscode.ConfigurationTarget.Global);
+                try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+            });
+
+            test('총량을 넘겨 중단하면 형제 태스크의 프로세스 트리도 죽는다', async function () {
+                this.timeout(60000);
+                // 형제의 생존 마커는 중단이 걸리는 시점(≈2초)보다 **한참 뒤**여야
+                // 한다. 그래야 "중단이 죽였다"와 "아직 안 썼을 뿐"이 갈린다.
+                const survivor = makeSurvivorScript(dir, 6000);
+                // 개별로는 태스크 한도(1MB) 안이지만 둘을 합치면 총량(1MB)을 넘는다.
+                const bulkA = makeBulkScript(dir, 'bulkA.js', 600 * 1024, 2000);
+                const bulkB = makeBulkScript(dir, 'bulkB.js', 600 * 1024, 2000);
+
+                const actionItem = {
+                    id: 'abort-siblings',
+                    title: 'Abort siblings',
+                    action: {
+                        description: 'total-limit abort must stop in-flight siblings',
+                        // `parallel` 은 **태스크 단위** 속성이다. 기본은 순차라,
+                        // 이걸 빼면 survivor 가 끝난 *뒤에* 나머지가 돌아 애초에
+                        // 형제가 in-flight 인 순간이 없다 (그러면 이 테스트는
+                        // 결함과 무관하게 실패한다).
+                        tasks: [
+                            // 오래 도는 형제. 캡처 모드라야 우리 child registry 에
+                            // 등록되고, 중단이 그것을 실제로 종료해야 한다.
+                            { id: 'survivor', type: 'shell', command: survivor.command, cwd: dir, parallel: true, passTheResultToNextTask: true },
+                            { id: 'a', type: 'shell', command: bulkA, cwd: dir, parallel: true, passTheResultToNextTask: true },
+                            { id: 'b', type: 'shell', command: bulkB, cwd: dir, parallel: true, passTheResultToNextTask: true },
+                        ],
+                    },
+                } as unknown as ActionItem;
+
+                const context = makeContext();
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                // 전제가 깨졌을 때 원인을 보여 주기 위해 거부 사유를 붙잡아 둔다.
+                // 이게 없으면 "시작되지 않았다"만 보이고 왜인지 알 수 없다.
+                let runError: unknown;
+                const run = executeAction(actionItem, context, mainView, history);
+                run.catch(e => { runError = e; });
+
+                assert.ok(
+                    await waitForFile(survivor.startedMarker, 20000),
+                    `형제 태스크가 시작되지 않았다 — 테스트 전제가 깨졌다 (액션 오류: ${runError instanceof Error ? runError.message : String(runError)})`
+                );
+
+                await run.then(
+                    () => { throw new Error('총량 한도를 넘겼는데 액션이 성공했다'); },
+                    () => { /* 기대한 실패 */ }
+                );
+
+                // 형제의 생존 타이머(6s)를 충분히 넘겨 기다린다. 중단은 ≈2초에
+                // 걸리므로 여기서 마커가 없으면 "죽었다"가 맞다.
+                await new Promise(resolve => setTimeout(resolve, 7000));
+                assert.ok(
+                    !fs.existsSync(survivor.marker),
+                    '액션은 실패로 끝났는데 형제 태스크의 자손이 살아남아 작업을 끝냈다 — 중단이 형제를 멈추지 않는다'
+                );
             });
         });
     });

@@ -20,14 +20,20 @@
       "description": "Demonstrate env, cwd, and args properties for shell tasks.",
       "tasks": [
         {
+          "id": "show_args",
+          "type": "shell",
+          "command": "echo",
+          "args": ["--verbose", "--target=debug"],
+          "cwd": "${workspaceFolder}"
+        },
+        {
           "id": "run_with_env",
           "type": "shell",
           "command": {
-            "windows": "echo %MY_VAR% & echo %BUILD_MODE%",
-            "macos": "echo $MY_VAR && echo $BUILD_MODE",
-            "linux": "echo $MY_VAR && echo $BUILD_MODE"
+            "windows": "cmd /c echo %MY_VAR%",
+            "macos": "printenv MY_VAR",
+            "linux": "printenv MY_VAR"
           },
-          "args": ["--verbose"],
           "cwd": "${workspaceFolder}",
           "env": {
             "MY_VAR": "hello",
@@ -142,7 +148,7 @@
         {
           "id": "show_info",
           "type": "shell",
-          "command": "echo path: ${pick_file.path} && echo dir: ${pick_file.dir} && echo name: ${pick_file.name} && echo nameOnly: ${pick_file.fileNameOnly} && echo ext: ${pick_file.fileExt}",
+          "command": "echo path: ${pick_file.path} dir: ${pick_file.dir} name: ${pick_file.name} nameOnly: ${pick_file.fileNameOnly} ext: ${pick_file.fileExt}",
           "revealTerminal": "always"
         }
       ]
@@ -241,7 +247,7 @@
         {
           "id": "report_strings",
           "type": "shell",
-          "command": "echo dirname: ${string_dir.output} && echo basename: ${string_filename.output} && echo nameOnly: ${string_clean_name.output} && echo extension: ${string_ext.output} && echo stripExt: ${string_stripped.output} && echo upper: ${string_upper_name.output} && echo lower: ${string_lower_name.output} && echo trimmed: [${string_trimmed.output}]",
+          "command": "echo dirname: ${string_dir.output} basename: ${string_filename.output} nameOnly: ${string_clean_name.output} extension: ${string_ext.output} stripExt: ${string_stripped.output} upper: ${string_upper_name.output} lower: ${string_lower_name.output} trimmed: [${string_trimmed.output}]",
           "revealTerminal": "always"
         }
       ]

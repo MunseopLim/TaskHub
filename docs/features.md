@@ -267,7 +267,7 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
         -   명령어의 출력이 터미널에 표시되지 않고, 내부적으로 **캡처**됩니다.
         -   캡처된 결과는 파이프라인의 다음 태스크에서 `${task_id.output}` 형태로 사용할 수 있습니다.
         -   캡처된 결과는 `output` 블록을 통해 파일이나 에디터로 보내는 등 추가적인 처리가 가능합니다.
-        -   **메모리 보호를 위한 캡처 한도**: 캡처 모드에서 누적되는 stdout/stderr의 총 크기가 `taskhub.pipeline.outputCaptureLimitMb` (기본값 10MB, 범위 1~1024MB)를 초과하면 프로세스를 종료하고 명확한 에러(`Captured output exceeded the N MB limit ...`)를 반환합니다. 의도적으로 큰 로그를 생성하는 파이프라인이라면 설정을 높이거나 커맨드에서 `> file`로 리다이렉션해 캡처를 우회하세요.
+        -   **메모리 보호를 위한 캡처 한도**: 캡처 모드에서 누적되는 stdout/stderr의 총 크기가 `taskhub.pipeline.outputCaptureLimitMb` (기본값 10MB, 범위 1~1024MB)를 초과하면 프로세스를 종료하고 명확한 에러(`Captured output exceeded the N MB limit ...`)를 반환합니다. 의도적으로 큰 로그를 생성하는 파이프라인이라면 설정을 높이거나, 캡처가 필요 없다면 `passTheResultToNextTask`를 꺼서 터미널로 흘려보내세요. **커맨드에 `> file`을 붙이는 방식은 동작하지 않습니다** — `command` 문자열은 셸 연산자가 아니라 인자로 토큰화되므로 `>`가 리터럴 인자가 됩니다(아래 "셸 연산자는 지원하지 않습니다" 항목 참조).
         -   **액션 전체 합계 한도 (0.6.43부터)**: 위 설정은 **태스크 하나**를 막습니다. 태스크 결과는 뒤 태스크가 `${앞태스크.stdout}` 을 참조할 수 있어야 하므로 액션이 끝날 때까지 메모리에 남는데, 그 **합계**에는 제한이 없었습니다 — 기본값(10MB)에서는 태스크가 수십 개여야 문제가 되지만, 로그가 잘려서 태스크 상한을 1024MB 로 올린 환경에서는 태스크 서넛만으로 GB 단위가 됩니다. `taskhub.pipeline.totalOutputLimitMb` (기본값 32MB, 범위 1~4096MB)가 합계를 막고, 초과하면 액션이 실패합니다.
             -   **태스크 상한보다 작아지지 않습니다.** "이 태스크 출력 100MB 를 받겠다"고 설정해 놓고 총량이 32MB 라 곧바로 실패하면 두 설정이 서로를 부정하는 꼴이므로, 실효 총량은 둘 중 큰 값입니다.
     -   참고: `revealTerminal` 속성은 스트림 모드(`passTheResultToNextTask: false`)에서만 적용됩니다. 캡처 모드에서는 터미널이 열리지 않습니다.
@@ -279,6 +279,32 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
     -   `"mode": "terminal"`: 액션 ID별로 재사용되는 **읽기 전용 터미널**(`TaskHub: <액션 ID>`)에 결과를 표시합니다. 셸이 없는 출력 전용 터미널이므로 결과 본문이 명령으로 실행되지 않습니다.
     -   `"capture"` (object | array, *선택*): 태스크 출력 문자열에서 **원하는 값만 뽑아 파생 변수**를 만듭니다. 자세한 내용은 아래 [Output Capture](#output-capture) 섹션 참고.
     -   `"diagnostics"` (object | string | array, *선택*): 출력에서 컴파일러 에러·경고를 정규식으로 추출해 VS Code **Problems 패널에 진단**으로 표시. 자세한 내용은 아래 [Output Diagnostics](#output-diagnostics-problems-패널-통합) 섹션 참고.
+
+#### 셸 연산자는 지원하지 않습니다 (`command` 는 argv 로 해석됩니다)
+
+이름이 "shell" 이지만, `command` 문자열은 셸에 그대로 넘어가지 않습니다. TaskHub 는 문자열을 **공백 기준으로 토큰화한 뒤 각 토큰을 인용**해서 실행합니다. 따라서 셸 메타문자는 연산자가 아니라 **리터럴 인자**가 됩니다.
+
+| 작성한 것 | 실제로 실행되는 것 |
+| --- | --- |
+| `npm run build > out.txt` | `npm 'run' 'build' '>' 'out.txt'` |
+| `make && make flash` | `make '&&' 'make' 'flash'` |
+| `cat a \| grep b` | `cat 'a' '\|' 'grep' 'b'` |
+
+Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.txt'`). 이 규칙은 스트림 모드와 캡처 모드 **양쪽 모두**에 적용됩니다.
+
+같은 이유로 **셸 변수 확장도 일어나지 않습니다.** `echo $MY_VAR` 는 `echo '$MY_VAR'` 가 되어 값이 아니라 `$MY_VAR` 라는 글자를 출력합니다(Windows 의 `%MY_VAR%` 도 같습니다). `env` 로 넘긴 값은 자식 프로세스의 환경에는 **정상적으로 들어가므로**, 그 값을 읽는 것은 셸이 아니라 실행되는 프로그램의 몫입니다 — 예: `printenv MY_VAR`, `cmd /c echo %MY_VAR%`, `node -e "console.log(process.env.MY_VAR)"`. 반면 TaskHub 자신의 변수 치환(`${task_id.output}`, `${workspaceFolder}` 등)은 토큰화 **이전**에 일어나므로 그대로 동작합니다.
+
+대신 이렇게 쓰세요.
+
+-   **리다이렉션 대신**: [`writeFile` / `appendFile` 태스크](#writefile--appendfile-태스크)로 결과를 파일에 씁니다. 명령의 출력을 파일로 보내려면 캡처 모드로 받아 `output.mode: "file"` 을 쓰거나, 캡처가 필요 없다면 스트림 모드로 두세요.
+-   **`&&` 로 이어 붙이는 대신**: 태스크를 **두 개**로 나눕니다. 파이프라인의 기본 동작이 "앞 단계가 실패하면 뒤 단계는 실행하지 않음" 이라 `&&` 와 의미가 같고, 실패한 단계가 어느 것인지도 드러납니다. 마법사의 *다단계 파이프라인* 템플릿이 이 형태를 만들어 줍니다.
+-   **공백이 있는 경로**: 토큰화는 따옴표를 존중하므로 `node "C:/My Build/fw.js"` 처럼 직접 인용하거나, 값이 변수에서 오는 경우(`${selectFile.path}` 등)에는 **`args` 배열**에 넣으세요. `args` 항목은 토큰화되지 않고 하나의 인자로 그대로 전달됩니다.
+
+    ```json
+    { "type": "shell", "command": "flash", "args": ["${selectFile.path}"] }
+    ```
+
+    반대로 `"command": "flash ${selectFile.path}"` 는 경로에 공백이 있으면 두 인자로 쪼개집니다.
 
 #### Output Capture
 
@@ -1557,7 +1583,12 @@ Preset은 일반 `actions.json`과 동일한 형식을 사용합니다:
         {
           "id": "checkout",
           "type": "shell",
-          "command": "git checkout main && git pull"
+          "command": "git checkout main"
+        },
+        {
+          "id": "pull",
+          "type": "shell",
+          "command": "git pull"
         }
       ]
     }
