@@ -430,6 +430,77 @@ suite('대화형 태스크 대기 중 중지', () => {
         };
     }
 
+    /**
+     * **자손이 실제로 존재하는** 명령을 만든다. 트리 종료 테스트의 전제다.
+     *
+     * `makeMarkerScript` 로는 트리를 검증할 수 없다. 우리가 띄우는 것은
+     * `sh -c "node x.js"` 인데, 셸은 뒤에 할 일이 없는 단순 명령이면 fork 하지
+     * 않고 **exec 해 버린다** — 래퍼가 사라지고 우리가 잡은 pid 가 곧 node 다.
+     * 그러면 "래퍼만 죽였는가"를 가릴 자손 자체가 없어, 트리 종료를 통째로
+     * 되돌려도 테스트가 통과한다(실측: `ps -o comm=` 가 `sh` 가 아니라 `node`
+     * 를 보여주고 직계 자식이 0개다). 리다이렉트(`> /dev/null`)를 붙여도
+     * `buildPosixCommandLine` 이 토큰마다 따옴표를 씌워 `'>'` 를 리터럴 인자로
+     * 만들기 때문에 마찬가지다.
+     *
+     * 그래서 셸에 기대지 않고 **node 두 단계**로 트리를 만든다: runner 가
+     * worker 를 spawn 하고 살아 있는다. 이것이 실제 결함의 모양이기도 하다 —
+     * `make` 나 플래셔가 exec 되어 우리 pid 가 되고, 그것이 fork 한 컴파일러가
+     * 고아로 남았다. runner 만 죽이면 worker 가 살아남아 marker 를 쓴다.
+     *
+     * **판별력의 범위**: macOS 에서 `detached` 를 빼고 IT-132/IT-133 이 실제로
+     * 실패하는 것을 양방향으로 확인했다. Windows 는 **미검증**이다 — 그쪽은
+     * `detached` 를 애초에 쓰지 않으므로(`taskkill /T` 가 pid 로 트리를 잡는다)
+     * 이 테스트가 Windows 에서 거는 것은 `taskkill /T` 전제이지 POSIX 수정이
+     * 아니다. Windows 판별력은 실제 러너에서 확인이 필요하다.
+     */
+    function makeTreeMarkerScript(label: string, delayMs: number): {
+        command: string; cwd: string; marker: string; startedMarker: string; cleanup: () => void;
+    } {
+        const stamp = `${process.pid}-${Date.now()}-${label}`;
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-treetest-'));
+        const marker = path.join(dir, `${stamp}.txt`);
+        // 시작 마커는 **worker** 가 쓴다 — 자손이 실제로 떴는지를 기다려야
+        // 하기 때문이다. runner 만 보고 중지하면 아직 자손이 없어서 "잘
+        // 죽었다"는 잘못된 결론이 난다.
+        const startedMarker = path.join(dir, `${stamp}.started`);
+        const workerName = `${stamp}-worker.js`;
+        const runnerName = `${stamp}-runner.js`;
+
+        fs.writeFileSync(
+            path.join(dir, workerName),
+            `require('fs').writeFileSync(${JSON.stringify(startedMarker)}, 'started');\n` +
+            `setTimeout(function () {\n` +
+            `  require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran');\n` +
+            `}, ${delayMs});\n`
+        );
+        fs.writeFileSync(
+            path.join(dir, runnerName),
+            // worker 는 runner 의 `process.execPath` 로 띄운다 — 이 시점의
+            // execPath 는 진짜 node 이므로 PATH 조회가 필요 없다. (바깥
+            // 명령줄은 여전히 `node <runner>` 라 PATH 에 의존한다. 확장
+            // 호스트의 execPath 는 Electron 이라 그쪽에는 쓸 수 없다.)
+            // stdio 는 'ignore': worker 가 부모의 stdout 파이프를 붙잡으면
+            // runner 를 죽여도 close 가 오지 않아 액션이 끝나지 않는다.
+            `require('child_process').spawn(process.execPath, [${JSON.stringify(path.join(dir, workerName))}], { stdio: 'ignore' });\n` +
+            // runner 가 먼저 끝나 버리면 중지 시점에 죽일 대상이 없다. 반대로
+            // 너무 길면 트리 종료가 실패한 실행(=이미 red)에서 스위트가 끝난
+            // 뒤까지 남는다 — 판정에 충분하고 뒤끝은 짧은 20초로 둔다.
+            `setTimeout(function () { }, 20000);\n`
+        );
+
+        return {
+            // 메타문자 없는 단순 명령이라 `buildPosixCommandLine` 의 인용을
+            // 그대로 통과하고, Windows 에서도 node 를 직접 띄운다.
+            command: `node ${runnerName}`,
+            cwd: dir,
+            marker,
+            startedMarker,
+            cleanup: () => {
+                try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+            },
+        };
+    }
+
     /** 파일이 생길 때까지 폴링. 고정 sleep 대신 실제 상태를 기다린다. */
     async function waitForFile(file: string, timeoutMs: number): Promise<boolean> {
         const deadline = Date.now() + timeoutMs;
@@ -448,18 +519,29 @@ suite('대화형 태스크 대기 중 중지', () => {
      */
     suite('중지가 continueOnError·대기열보다 우선한다 (0.6.36)', () => {
 
-        test('IT-132: 중지가 셸 래퍼뿐 아니라 그 아래 실제 명령까지 죽인다', async function () {
+        test('IT-132: 중지가 우리가 잡은 프로세스뿐 아니라 그 자손까지 죽인다', async function () {
             this.timeout(30000);
-            // child.kill()은 우리가 띄운 cmd.exe / sh 래퍼만 죽인다. Windows의
-            // TerminateProcess는 트리를 따라가지 않으므로 래퍼가 사라져도 그
-            // 아래 명령이 고아로 남아 계속 돈다.
+            // child.kill()은 우리가 잡은 프로세스 하나만 죽인다. Windows의
+            // TerminateProcess는 트리를 따라가지 않고, POSIX는 자식이 다른
+            // 프로세스 그룹이면 그룹 종료가 닿지 않는다 — 어느 쪽이든 그 아래
+            // 실제 명령이 고아로 남아 계속 돈다.
             //
             // 자손이 살아 있으면 파일을 만드는 명령으로 확인한다: 취소 후
             // 충분히 기다렸는데 파일이 없어야 트리가 죽은 것이다.
-            const { command, cwd, marker, startedMarker, cleanup } = makeMarkerScript('tree-kill', 1500);
+            // `makeTreeMarkerScript` 를 쓰는 이유는 그 주석 참조 — 단순 명령은
+            // 셸이 exec 해 버려 자손이 아예 생기지 않는다.
+            // 자손의 타이머는 **여유 있게** 잡는다. 이 값은 "worker 가 뜬 것을
+            // 폴링(50ms 간격)으로 알아채고 → 취소하고 → 트리가 죽기까지" 걸리는
+            // 시간보다 커야 한다. 빠듯하면 굶주린 CI 에서 marker 가 먼저 써지고,
+            // 그 실패가 트리 종료 회귀와 똑같아 보인다.
+            const { command, cwd, marker, startedMarker, cleanup } = makeTreeMarkerScript('tree-kill', 3000);
             const cts = new vscode.CancellationTokenSource();
             try {
                 const run = runCommandCaptureLines(command, cwd, 20000, cts.token);
+                // 전제 assert 가 던지면 `run` 을 아무도 await 하지 않아 나중에
+                // unhandled rejection 이 되고, mocha 가 그것을 **엉뚱한 테스트**
+                // 탓으로 돌린다. 미리 삼켜 둔다 (아래 assert.rejects 가 진짜 판정).
+                run.catch(() => { /* 아래에서 판정한다 */ });
                 // 고정 sleep 대신 started 마커를 기다린다 — 느린 CI 에서
                 // 아직 뜨지도 않은 프로세스를 죽이고 "잘 죽었다"고 결론내면
                 // false positive 가 된다.
@@ -470,11 +552,11 @@ suite('대화형 태스크 대기 중 중지', () => {
                 cts.cancel();
                 await assert.rejects(run, /canceled/i);
 
-                // 자손의 타이머(1.5s)를 충분히 넘겨 기다린다.
-                await new Promise(resolve => setTimeout(resolve, 2500));
+                // 자손의 타이머(3s)를 충분히 넘겨 기다린다.
+                await new Promise(resolve => setTimeout(resolve, 4000));
                 assert.ok(
                     !fs.existsSync(marker),
-                    '셸 래퍼만 죽고 실제 명령이 살아남아 작업을 끝냈다 — 프로세스 트리를 종료해야 한다'
+                    '우리가 잡은 프로세스만 죽고 그 자손이 살아남아 작업을 끝냈다 — 프로세스 트리를 종료해야 한다'
                 );
             } finally {
                 cts.dispose();
@@ -485,37 +567,98 @@ suite('대화형 태스크 대기 중 중지', () => {
         test('IT-133: 실제 shell 액션을 중지하면 자손 프로세스도 죽는다', async function () {
             this.timeout(40000);
             // IT-132 는 `runCommandCaptureLines`(항목 생성 명령)만 본다. 실제
-            // 액션의 shell/command 실행은 **다른 spawn 지점**이고, POSIX 에서는
-            // `detached` 가 없으면 `process.kill(-pid)` 가 ESRCH 로 실패해
-            // 래퍼만 죽는다 — 컴파일러·플래셔 같은 자손이 계속 도는 상태였다.
-            // 이 테스트가 그 경로를 직접 지난다.
+            // 액션의 shell/command 실행은 **다른 spawn 지점**(extension.ts 의
+            // POSIX 분기)이고, `detached` 가 없으면 `process.kill(-pid)` 가
+            // ESRCH 로 실패해 우리가 잡은 프로세스만 죽는다 — 컴파일러·플래셔
+            // 같은 자손이 계속 도는 상태였다. 이 테스트가 그 경로를 직접 지난다.
             //
-            // **Windows 한계**: 확인해 보니 Windows 는 래퍼(PowerShell/cmd)를
-            // 죽이면 콘솔을 공유하는 자손도 함께 사라져, 트리 종료를 되돌려도
-            // 이 테스트가 통과한다. 즉 여기서 판별력이 나오는 것은 POSIX 뿐이며
-            // (이 수정이 겨냥한 곳도 거기다), Windows 에서는 "중지 후 자손이
-            // 남지 않는다"는 사후 조건만 확인하는 셈이다. Linux/macOS CI 에서
-            // 돌리면 `detached` 누락을 실제로 잡는다.
-            // 스크립트 **하나**로 둔다. `&&` 로 두 명령을 이으면 셸이 그것을
-            // 어떻게 실행하느냐(직접 실행 / PowerShell 폴백)에 따라 프로세스
-            // 구조가 달라져, 무엇이 자손인지 흐려진다. 한 스크립트가 시작
-            // 마커를 즉시 남기고 2.5초 뒤 생존 마커를 남기면 셸 래퍼 → node
-            // 관계가 명확하다.
-            const script = makeMarkerScript('action-tree', 2500);
+            // 자손 구조는 **셸에 기대지 않고** node runner → node worker 로
+            // 만든다. 예전에는 `node x.js > /dev/null` 로 "셸을 반드시 거치게"
+            // 했다고 적어 두었지만 실제로는 그렇지 않았다:
+            // `buildPosixCommandLine` 이 토큰마다 따옴표를 씌워 `'>'` 가 리터럴
+            // 인자가 되고, 메타문자가 없어진 단순 명령을 셸이 exec 해 버려
+            // 자손이 아예 생기지 않았다. 그래서 `detached` 를 통째로 빼도 이
+            // 테스트가 통과했다. 자세한 근거는 `makeTreeMarkerScript` 주석 참조.
+            const script = makeTreeMarkerScript('action-tree', 2500);
             const context = makeContext();
             const actionItem: ActionItem = {
                 id: 'stop-shell-tree',
                 title: 'Stop shell tree',
                 action: {
-                    description: 'shell wrapper spawns a node descendant',
-                    // 리다이렉트를 붙여 **셸을 반드시 거치게** 한다. Windows 는
-                    // `node script.js` 처럼 메타문자가 없으면 셸 없이 exe 를
-                    // 직접 띄우므로 래퍼가 없고, 그러면 "래퍼만 죽였는가"를
-                    // 가릴 수 없다(실제로 이 형태로는 되돌려도 통과했다).
+                    description: 'command spawns a node descendant',
                     tasks: [{
                         id: 'run',
                         type: 'shell',
-                        command: `${script.command} > ${process.platform === 'win32' ? 'NUL' : '/dev/null'}`,
+                        command: script.command,
+                        cwd: script.cwd,
+                        // **필수**. 이게 없으면 shell 태스크는 `executeStreamedTask`
+                        // → `vscode.tasks.executeTask` 로 가고, 중지는 VS Code 의
+                        // 터미널 종료가 처리한다 — 우리 `spawn` 도 `killProcessTree`
+                        // 도 지나지 않는다. 실제로 예전 형태의 이 테스트는
+                        // `killProcessTree` 를 **한 번도 호출하지 않은 채** 통과하고
+                        // 있었다. `passTheResultToNextTask` 를 켜야
+                        // `handleCommand` → `executeShellCommand` 의 spawn 경로로
+                        // 들어가고, 그곳이 이 수정이 `detached` 를 넣은 자리다.
+                        passTheResultToNextTask: true,
+                    }],
+                },
+            } as unknown as ActionItem;
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            try {
+                const run = executeAction(actionItem, context, mainView, history);
+                // 전제 assert 가 던지면 `run` 이 미처리 거부로 남아 뒤의 다른
+                // 테스트 실패로 둔갑한다 — 아래 settleWithin 이 진짜 판정이다.
+                run.catch(() => { /* settleWithin 이 판정한다 */ });
+
+                assert.ok(
+                    await waitForFile(script.startedMarker, 10000),
+                    '명령이 시작되지 않았다 — 테스트 전제가 깨졌다'
+                );
+
+                // 이 반환값 자체는 약한 신호다 — `stopRunningAction` 은
+                // 취소 토큰 분기만으로도 true 를 준다. 실제 판정은 아래
+                // marker 검사다.
+                assert.strictEqual(stopRunningAction('stop-shell-tree'), true);
+                await settleWithin(run, 10000, 'IT-133');
+
+                // 자손의 타이머(2.5s)를 충분히 넘겨 기다린다.
+                await new Promise(resolve => setTimeout(resolve, 3500));
+                assert.ok(
+                    !fs.existsSync(script.marker),
+                    '중지했는데 자손이 살아남아 작업을 끝냈다 — 우리가 잡은 프로세스만 죽었다'
+                );
+            } finally {
+                script.cleanup();
+            }
+        });
+
+        test('IT-134: passTheResultToNextTask 없는 shell 태스크도 중지가 끝낸다', async function () {
+            this.timeout(40000);
+            // IT-133 이 `passTheResultToNextTask: true` 로 spawn 경로를 타면서
+            // **기본 경로가 무주공산이 됐다**. `passTheResultToNextTask` 가
+            // 없는 shell 태스크는 `executeStreamedTask` →
+            // `vscode.tasks.executeTask` 로 가고, 중지는 우리 registry 가
+            // 아니라 `activeTasks` 의 `exec.terminate()` 가 처리한다
+            // (extension.ts 의 `stopRunningAction` 첫 분기). 그 분기에 닿는
+            // 테스트는 예전 IT-133 이 유일했다.
+            //
+            // 여기서는 **자손 종료를 주장하지 않는다** — 터미널의 주인은 VS
+            // Code 라 프로세스 트리가 우리 손을 떠나 있다. 이 테스트가 거는
+            // 계약은 "스트리밍 태스크도 중지로 확실히 끝나고 실패로 기록된다"
+            // 하나다.
+            const script = makeTreeMarkerScript('streamed-stop', 3000);
+            const context = makeContext();
+            const actionItem: ActionItem = {
+                id: 'stop-streamed',
+                title: 'Stop streamed task',
+                action: {
+                    description: 'streamed shell task (vscode.tasks path)',
+                    tasks: [{
+                        id: 'run',
+                        type: 'shell',
+                        command: script.command,
                         cwd: script.cwd,
                     }],
                 },
@@ -525,20 +668,26 @@ suite('대화형 태스크 대기 중 중지', () => {
 
             try {
                 const run = executeAction(actionItem, context, mainView, history);
+                run.catch(() => { /* settleWithin 이 판정한다 */ });
 
                 assert.ok(
-                    await waitForFile(script.startedMarker, 10000),
-                    '명령이 시작되지 않았다 — 테스트 전제가 깨졌다'
+                    await waitForFile(script.startedMarker, 15000),
+                    '스트리밍 태스크가 시작되지 않았다 — 테스트 전제가 깨졌다'
                 );
 
-                assert.strictEqual(stopRunningAction('stop-shell-tree'), true);
-                await settleWithin(run, 10000, 'IT-133');
+                assert.strictEqual(stopRunningAction('stop-streamed'), true);
+                await settleWithin(run, 15000, 'IT-134');
 
-                // 자손의 타이머(2.5s)를 충분히 넘겨 기다린다.
-                await new Promise(resolve => setTimeout(resolve, 3500));
+                const entries = history.getHistory();
+                assert.strictEqual(entries.length, 1);
+                assert.strictEqual(
+                    entries[0].status,
+                    'failure',
+                    '중지된 스트리밍 태스크가 성공으로 기록되면 사용자는 빌드가 끝난 줄 안다'
+                );
                 assert.ok(
-                    !fs.existsSync(script.marker),
-                    '중지했는데 자손이 살아남아 작업을 끝냈다 — 셸 래퍼만 죽었다'
+                    !actionStates.has('stop-streamed'),
+                    '중지된 액션은 상태 맵에서 지워져야 한다'
                 );
             } finally {
                 script.cleanup();

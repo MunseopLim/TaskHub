@@ -184,7 +184,15 @@
 
 **테스트**: 신규 24 케이스 — IT-130~IT-133(`continueOnError` 우선순위, 대기열 진입 검사, 프로세스 트리 종료, **실제 shell 액션**의 자손 종료), IT-128/129 를 취약한 `node -e` 대신 스크립트 파일 헬퍼로 교체, Hex 경계 동작 9종(구현 형태가 아니라 `(파일크기, unit, 주소)` 조합의 실제 규칙을 본다), All Sections·region 행의 정렬값 3종, 설정 설명 정합성 2종, CHANGELOG 순서 4종, 메모리 상한 2종. 최종 1749 passing.
 
-**되돌리기로 검증한 것**: IT-130(단일 태스크여야 `continueOnError` 결함이 드러난다 — 2개면 대기열 검사가 먼저 막는다), IT-131(`parallel: true` 여야 실제 뮤텍스 대기열이 생긴다), IT-132. IT-133 은 **Windows 에서 판별력이 없다** — 래퍼를 죽이면 콘솔을 공유하는 자손도 함께 사라져 트리 종료를 되돌려도 통과한다. 이 수정이 겨냥한 POSIX 에서만 실제로 잡히며, 그 한계를 테스트에 적어 두었다.
+**되돌리기로 검증한 것**: IT-130(단일 태스크여야 `continueOnError` 결함이 드러난다 — 2개면 대기열 검사가 먼저 막는다), IT-131(`parallel: true` 여야 실제 뮤텍스 대기열이 생긴다).
+
+> **정정 (macOS 에서 재검증)**: 여기 있던 "IT-132 는 되돌리기로 검증했고, IT-133 은 Windows 에서만 판별력이 없다"는 서술은 **틀렸다**. macOS 에서 `detached` 를 실제로 빼고 돌려 보니 **두 테스트 모두 그대로 통과**했다. 원인은 콘솔 공유가 아니라 두 가지다. ① 두 테스트의 명령(`node x.js`)은 셸이 fork 하지 않고 **exec** 해 버려 자손이 아예 없었다 — 죽일 자손이 없으니 "래퍼만 죽였는가"를 가릴 수가 없다. IT-133 은 `> /dev/null` 을 붙여 "셸을 반드시 거치게 했다"고 적어 두었지만, `buildPosixCommandLine` 이 토큰마다 따옴표를 씌워 `'>'` 를 리터럴 인자로 만들기 때문에 소용이 없었다(IT-132 는 `buildPosixCommandLine` 을 거치지 않고 `sh -l -c` 에 문자열을 그대로 넘기므로 리다이렉트와 무관하게 같은 결과였다). ② IT-133 의 `shell` 태스크는 `passTheResultToNextTask` 가 없어 `vscode.tasks.executeTask`(VS Code 터미널)로 실행됐고, 이 수정이 손댄 `spawn`/`killProcessTree` 를 **한 번도 호출하지 않았다**.
+>
+> **수정 자체는 옳다**는 것을 macOS 에서 따로 확인했다: `detached` 가 있으면 자식의 pgid 가 자기 pid 가 되어 `process.kill(-pid)` 가 성공하고 자손이 함께 죽는다. 없으면 pgid 가 확장 호스트의 것이라 `ESRCH` 로 실패하고 자손이 살아남는다. 검증되지 않았던 것은 수정이 아니라 **테스트**였다.
+>
+> 두 테스트를 고쳤다. 자손 구조를 셸에 기대지 않고 **node runner → node worker** 로 만들고(`makeTreeMarkerScript`), IT-133 에는 `passTheResultToNextTask: true` 를 주어 실제 `spawn` 경로로 들어가게 했다. 이제 `detached` 를 빼면 **두 테스트 모두 실패**한다 — macOS 에서 양방향으로 확인했다. Windows 는 애초에 `detached` 를 쓰지 않으므로(`taskkill /T` 가 pid 로 트리를 잡는다) 이 두 테스트가 Windows 에서 거는 것은 `taskkill /T` 전제이며, 그쪽 판별력은 여전히 미검증이다.
+>
+> IT-133 이 spawn 경로로 옮겨 가면서 비게 된 **기본 경로**(`passTheResultToNextTask` 없는 shell 태스크 → `vscode.tasks.executeTask` → `exec.terminate()`)는 IT-134 로 따로 덮었다. 이쪽은 터미널의 주인이 VS Code 라 자손 종료를 주장할 수 없고, "중지로 확실히 끝나고 실패로 기록된다"만 건다. `exec.terminate()` 를 무력화하면 실패하는 것으로 판별력을 확인했다.
 
 ## [0.6.36] - 2026-07-28
 
