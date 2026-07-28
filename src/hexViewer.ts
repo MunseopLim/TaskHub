@@ -241,29 +241,68 @@ export function parseHexViewerGoToOffset(input: string, baseAddress: number, tot
     return { kind: 'out-of-range', maxOffset: totalSize - 1, maxAddress: baseAddress + totalSize - 1 };
 }
 
+/**
+ * 웹뷰로 보낼 바이트 payload. Base64 를 거치지 않는다.
+ *
+ * 예전에는 이 데이터를 Base64 로 만들어 **HTML 문자열 안에 인라인**했다.
+ * 그 경로는 같은 내용을 네 번 복제한다:
+ *
+ *   1. dense `Uint8Array` (원본)
+ *   2. Base64 문자열 (원본의 1.33배)
+ *   3. 그 문자열이 박힌 HTML (또 한 벌)
+ *   4. 웹뷰의 `atob()` 결과 문자열 → 다시 `Uint8Array`
+ *
+ * 50MB 파일이면 peak 가 수백 MB 다. `postMessage` 는 구조화 복제로
+ * `Uint8Array` 를 그대로 보내므로 2~4가 전부 사라지고, Base64 인코딩과
+ * `atob` 디코딩 비용도 함께 없어진다 — 메모리뿐 아니라 속도에서도 이득이다.
+ */
+export interface HexViewerPayload {
+    /** 주소 순서대로 채운 dense 바이트 배열. */
+    data: Uint8Array;
+    /**
+     * 비트당 1바이트: 해당 offset 에 실제 데이터가 있는지.
+     * binary 포맷은 전 구간이 채워져 있어 `undefined` 다.
+     */
+    gap?: Uint8Array;
+}
+
+export function buildHexViewerPayload(result: HexParseResult): HexViewerPayload {
+    const totalSize = result.maxAddress - result.minAddress + 1;
+    assertWithinHexViewerSpan(totalSize);
+    const data = toFlatArray(result, result.minAddress, totalSize);
+
+    if (result.rawBuffer) {
+        // Binary format: all bytes have data, no gap bitmap needed
+        return { data };
+    }
+    const gap = new Uint8Array(Math.ceil(totalSize / 8));
+    for (let i = 0; i < totalSize; i++) {
+        if (result.data.has(result.minAddress + i)) {
+            gap[Math.floor(i / 8)] |= (1 << (i % 8));
+        }
+    }
+    return { data, gap };
+}
+
+/**
+ * 데이터를 웹뷰로 보낸다. HTML 을 세팅한 **직후** 불러야 한다.
+ *
+ * 웹뷰 스크립트는 이 메시지를 받을 때까지 "불러오는 중"을 표시하고, 받은 뒤에
+ * 첫 렌더를 한다. HTML 에 데이터가 박혀 있던 예전과 달리 한 프레임 늦지만,
+ * Base64 인코딩·`atob`·거대한 HTML 파싱이 사라져 전체 시간은 오히려 줄어든다.
+ */
+export function postHexViewerData(webview: vscode.Webview, result: HexParseResult): void {
+    const payload = buildHexViewerPayload(result);
+    void webview.postMessage({ command: 'hexData', data: payload.data, gap: payload.gap });
+}
+
 export function buildHexViewerHtml(fileName: string, result: HexParseResult, webview?: vscode.Webview): string {
     const totalSize = result.maxAddress - result.minAddress + 1;
     assertWithinHexViewerSpan(totalSize);
-    const flatData = toFlatArray(result, result.minAddress, totalSize);
-    const dataBase64 = Buffer.from(flatData).toString('base64');
-
-    let gapBase64 = '';
-    if (result.rawBuffer) {
-        // Binary format: all bytes have data, no gap bitmap needed
-        gapBase64 = '';
-    } else {
-        const gapBitmap = new Uint8Array(Math.ceil(totalSize / 8));
-        for (let i = 0; i < totalSize; i++) {
-            if (result.data.has(result.minAddress + i)) {
-                gapBitmap[Math.floor(i / 8)] |= (1 << (i % 8));
-            }
-        }
-        gapBase64 = Buffer.from(gapBitmap).toString('base64');
-    }
 
     return getWebviewContent(
         fileName, result.format, result.minAddress, result.maxAddress,
-        result.byteCount, result.entryPoint, dataBase64, gapBase64, !!result.rawBuffer, webview
+        result.byteCount, result.entryPoint, !!result.rawBuffer, webview
     );
 }
 
@@ -330,6 +369,9 @@ function openPanel(context: vscode.ExtensionContext, fileName: string, result: H
     currentPanel.title = `Hex: ${fileName}`;
     try {
         currentPanel.webview.html = buildHexViewerHtml(fileName, result, currentPanel.webview);
+        // HTML 직후에 보낸다. 웹뷰 스크립트가 리스너를 먼저 등록하므로
+        // 메시지가 먼저 도착해도 유실되지 않는다 (VS Code 가 큐잉한다).
+        postHexViewerData(currentPanel.webview, result);
     } catch (e: any) {
         const msg = t(
             `Hex Viewer 렌더링 실패 (${fileName}): ${e.message}`,
@@ -389,6 +431,8 @@ export function buildHexViewerStrings(): Record<string, string> {
         findNoMatches: t('결과 없음', 'No matches'),
         addressHeader: t('주소', 'Address'),
         statusHint: t('바이트를 클릭하면 값을 확인할 수 있습니다', 'Click a byte to inspect'),
+        loading: t('불러오는 중…', 'Loading…'),
+        loadFailed: t('데이터를 불러오지 못했습니다. 파일을 다시 열어 주세요.', 'Failed to load data. Please reopen the file.'),
         gridLabel: t('16진수 바이트 표 — 화살표 키로 이동, Shift와 함께 누르면 범위 선택', 'Hex byte grid — arrow keys to move, hold Shift to extend the selection'),
         // 상태 표시줄의 첫 항목. 바로 옆 `statusAddress`는 번들에 있는데 이것만
         // 하드코딩돼 있었다 — 정적 마크업이 아니라 innerHTML로 조립되는 자리라
@@ -408,8 +452,6 @@ function getWebviewContent(
     maxAddress: number,
     byteCount: number,
     entryPoint: number | undefined,
-    dataBase64: string,
-    gapBase64: string,
     isBinaryFormat: boolean,
     webview?: vscode.Webview
 ): string {
@@ -606,6 +648,10 @@ function getWebviewContent(
          셀마다 tabindex를 주면 Tab stop이 수천 개 생기고, 스크롤 밖으로 나간
          셀에 포커스가 남아 사라지는 문제도 생긴다. 격자에는 "Tab으로 진입,
          화살표로 내부 이동"이 표준 패턴이다. -->
+    <!-- 데이터가 postMessage 로 도착하기 전까지 표시. 빈 표를 그대로 두면
+         사용자가 "파일이 비었나"로 읽는다. role=status 라 스크린리더에도 전달된다. -->
+    <div id="hexLoading" role="status" aria-live="polite"
+         style="padding:16px;opacity:0.7">${esc(S.loading)}</div>
     <div class="hex-container" id="hexContainer" tabindex="0" role="grid"
          aria-label="${esc(S.gridLabel)}">
         <table class="hex-table" id="hexTable">
@@ -630,18 +676,12 @@ function getWebviewContent(
     const TOTAL_SIZE = ${maxAddress - minAddress + 1};
     const IS_BINARY = ${isBinaryFormat};
 
-    // Decode data
-    const raw = atob('${dataBase64}');
-    const DATA = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) { DATA[i] = raw.charCodeAt(i); }
-
-    // Decode gap bitmap (empty for binary format)
+    // 데이터는 HTML 에 박혀 오지 않고 postMessage 로 도착한다 —
+    // Base64 인코딩 / atob / 거대한 HTML 파싱을 모두 없애기 위해서다
+    // (buildHexViewerPayload 주석 참조). 도착 전까지는 빈 배열이라
+    // 어떤 렌더 함수가 먼저 불려도 예외 없이 빈 화면을 그린다.
+    let DATA = new Uint8Array(0);
     let GAP_BITMAP = null;
-    ${gapBase64 ? `{
-        const gapRaw = atob('${gapBase64}');
-        GAP_BITMAP = new Uint8Array(gapRaw.length);
-        for (let i = 0; i < gapRaw.length; i++) { GAP_BITMAP[i] = gapRaw.charCodeAt(i); }
-    }` : ''}
 
     function hasData(offset) {
         if (IS_BINARY) { return offset >= 0 && offset < TOTAL_SIZE; }
@@ -1368,8 +1408,32 @@ function getWebviewContent(
         }
     });
 
-    // Initial render
-    render();
+    // --- 데이터 도착을 기다린다 ---
+    //
+    // HTML 에 Base64 로 박아 넣던 것을 postMessage 로 바꿨으므로, 첫 렌더는
+    // 데이터가 온 뒤에 한다. 그 사이에는 "불러오는 중"을 보여 준다 — 빈 표를
+    // 그대로 두면 사용자가 "파일이 비었나"로 읽는다.
+    const loadingEl = document.getElementById('hexLoading');
+    let dataArrived = false;
+
+    window.addEventListener('message', (event) => {
+        const msg = event.data;
+        if (!msg || msg.command !== 'hexData') { return; }
+        // 구조화 복제로 온 Uint8Array 를 그대로 쓴다 — 복사하지 않는다.
+        DATA = msg.data instanceof Uint8Array ? msg.data : new Uint8Array(msg.data);
+        if (msg.gap) {
+            GAP_BITMAP = msg.gap instanceof Uint8Array ? msg.gap : new Uint8Array(msg.gap);
+        }
+        dataArrived = true;
+        if (loadingEl) { loadingEl.style.display = 'none'; }
+        render();
+    });
+
+    // 데이터가 끝내 오지 않는 경우(호스트 오류 등) 무한 "불러오는 중"에
+    // 갇히지 않도록, 잠시 뒤 안내 문구를 바꾼다.
+    setTimeout(() => {
+        if (!dataArrived && loadingEl) { loadingEl.textContent = S.loadFailed; }
+    }, 15000);
 })();
 </script>
 </body>
@@ -1430,6 +1494,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
         try {
             webviewPanel.webview.html = buildHexViewerHtml(fileName, result, webviewPanel.webview);
+            postHexViewerData(webviewPanel.webview, result);
         } catch (e: any) {
             const msg = t(
                 `Hex Viewer 렌더링 실패 (${fileName}): ${e.message}`,
