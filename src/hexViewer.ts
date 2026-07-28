@@ -19,7 +19,14 @@ let currentPanel: vscode.WebviewPanel | undefined;
 let currentMessageDisposable: vscode.Disposable | undefined;
 
 /** Hex Viewer에서 처리 가능한 최대 파일 크기 (50 MB) */
-const HEX_VIEWER_MAX_FILE_SIZE = 50 * 1024 * 1024;
+/**
+ * Hex Viewer 가 여는 파일 크기 상한. 넘으면 오류를 띄우고 열지 않는다.
+ *
+ * 파서의 `HEX_MAX_BYTE_ENTRIES` 와 짝이다 — 이 값이 커지면 HEX/SREC 가 만들 수
+ * 있는 entry 수도 함께 커지므로, 둘의 관계를 `hexParserLimits.test.ts` 가
+ * 고정한다. export 하는 이유도 그 테스트 때문이다.
+ */
+export const HEX_VIEWER_MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 export interface HexViewerOpenHistory {
     filePath: string;

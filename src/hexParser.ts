@@ -4,8 +4,25 @@
 
 export type HexFormat = 'intel' | 'srec' | 'binary';
 
-/** Maximum number of byte entries accepted by the parsers to prevent memory exhaustion. */
-export const HEX_MAX_BYTE_ENTRIES = 100 * 1024 * 1024; // 100M entries ~ ~1.6 GB Map worst case; practical cap for UI use.
+/**
+ * 파서가 받아들이는 최대 byte entry 수.
+ *
+ * 여기서 entry 는 **주소 하나에 담긴 바이트 하나**(`data: Map<주소, 바이트>`)다.
+ * 이 Map 은 **HEX/SREC 전용**이고, binary 는 `rawBuffer`(Uint8Array)를 쓰므로
+ * 이 상한과 무관하다.
+ *
+ * 이전 값(100M, 주석에 "최악 1.6GB")은 **도달할 수 없는 숫자**였다. HEX/SREC 는
+ * 텍스트 포맷이라 1바이트를 최소 2자 + 레코드 오버헤드로 적으므로, Hex Viewer
+ * 의 50MB 파일 상한을 통과한 입력이 만들 수 있는 entry 는 최대 약 25M 이다
+ * (Intel HEX 최대 레코드 길이 255바이트 기준 2.05자/바이트, SREC 도 비슷).
+ * 즉 옛 상한은 어떤 입력으로도 걸리지 않았고, 계산도 실제 V8 Map 비용(entry 당
+ * 수십 바이트)보다 낙관적이었다.
+ *
+ * 32M 은 그 도달 가능 최대치(~25M) 위의 backstop 이다 — 정상 파일을 거부하지
+ * 않으면서, 파일 상한이 어떤 이유로 완화되더라도 파서가 무한정 담지는 않는다.
+ * 파일 상한과의 관계는 `hexParserLimits.test.ts` 가 고정한다.
+ */
+export const HEX_MAX_BYTE_ENTRIES = 32 * 1024 * 1024;
 /** Maximum bytes per single record (Intel HEX data field is 1 byte → 255; SREC is 253). Guards malformed input. */
 const HEX_MAX_RECORD_BYTES = 255;
 
