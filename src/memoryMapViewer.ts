@@ -1613,9 +1613,25 @@ const RD = ${regionDataJsLiteral};
                     // stm32f4xx_hal.o가 324로 비교되던 셀 경로의 문제도 속성
                     // 행에서는 함께 사라진다.
                     function sortNumberOf(value) {
-                        return value.fromAttr
-                            ? Number(value.text)
-                            : parseFloat(value.text.replace(/[^0-9.\-]/g, ''));
+                        if (value.fromAttr) { return Number(value.text); }
+                        // 셀 텍스트는 **숫자를 표현한 것일 때만** 수치로 읽는다.
+                        //
+                        // 예전에는 숫자가 아닌 문자를 모두 지운 뒤 parseFloat 했다.
+                        // 그러면 이름도 숫자가 된다: stm32f4xx_hal.o → 324.
+                        // → 324. 그래서 이름 열에서 stm32f1.o(321)와
+                        // stm32f4.o(324)가 **문자열이 아니라 수치로** 비교됐고,
+                        // 숫자가 없는 이름은 NaN 이라 문자열 비교로 빠져 같은
+                        // 열 안에서 두 규칙이 섞였다.
+                        //
+                        // 표시용 숫자 셀(1.2 KB, 27.5%, 0x08000000)만
+                        // 통과시킨다 — 선택적 부호/0x 접두사 + 숫자로 시작하고,
+                        // 뒤에 단위나 기호가 붙는 형태. 이름처럼 문자로 시작하는
+                        // 값은 NaN 이 되어 문자열 비교로 간다.
+                        const text = value.text.trim();
+                        const numeric = /^[-+]?(0[xX][0-9a-fA-F]+|[0-9][0-9,]*(\\.[0-9]+)?)/.exec(text);
+                        if (!numeric) { return NaN; }
+                        const token = numeric[0].replace(/,/g, '');
+                        return /^[-+]?0[xX]/.test(token) ? Number(token) : parseFloat(token);
                     }
 
                     groups.sort(function(a, b) {

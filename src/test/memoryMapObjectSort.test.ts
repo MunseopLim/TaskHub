@@ -124,6 +124,79 @@ suite('Object Summary 정렬', () => {
         });
     });
 
+    /**
+     * 셀 텍스트 → 정렬값 규칙 (0.6.44).
+     *
+     * 웹뷰 스크립트 안의 `sortNumberOf` 와 같은 계약을 여기서 복제해
+     * **규칙 자체**를 검증한다. 스크립트를 호스트 테스트에서 실행할 수 없으므로,
+     * 규칙은 여기서 보고 구현이 그 규칙을 따르는지는 위 소스 검사가 본다.
+     *
+     * 핵심: 이름 열과 숫자 열이 **같은 규칙**을 타면 안 된다. 예전에는 숫자가
+     * 아닌 문자를 모두 지운 뒤 `parseFloat` 해서 `stm32f4xx_hal.o` 가 324 로
+     * 읽혔고, 숫자가 없는 이름은 NaN 이라 문자열 비교로 빠져 **한 열 안에서
+     * 두 규칙이 섞였다**.
+     */
+    suite('셀 텍스트 정렬값 규칙', () => {
+        /** `sortNumberOf` 의 셀 텍스트 경로와 같은 계약. */
+        function cellSortNumber(text: string): number {
+            const trimmed = text.trim();
+            const numeric = /^[-+]?(0[xX][0-9a-fA-F]+|[0-9][0-9,]*(\.[0-9]+)?)/.exec(trimmed);
+            if (!numeric) { return NaN; }
+            const token = numeric[0].replace(/,/g, '');
+            return /^[-+]?0[xX]/.test(token) ? Number(token) : parseFloat(token);
+        }
+
+        test('오브젝트 이름은 수치가 아니라 NaN 이다 (문자열 비교로 넘어간다)', () => {
+            for (const name of ['stm32f4xx_hal.o', 'main.o', 'lludiv5.o', '.text', 'c_2.l']) {
+                assert.ok(
+                    Number.isNaN(cellSortNumber(name)),
+                    `${name} 이 수치 ${cellSortNumber(name)} 로 읽혔다 — 이름이 숫자로 정렬된다`
+                );
+            }
+        });
+
+        test('예전 파싱이라면 이름이 숫자가 됐다 (회귀 형태 고정)', () => {
+            // 왜 바꿨는지를 숫자로 남긴다.
+            const old = (text: string) => parseFloat(text.replace(/[^0-9.\-]/g, ''));
+            assert.strictEqual(old('stm32f4xx_hal.o'), 324, '전제가 깨졌다면 이 설명을 갱신할 것');
+            assert.ok(!Number.isNaN(old('stm32f1.o')), '옛 파싱은 다른 이름도 숫자로 만들었다');
+            // 새 규칙에서는 둘 다 NaN → 문자열 비교로 일관된다.
+            assert.ok(Number.isNaN(cellSortNumber('stm32f4xx_hal.o')));
+            assert.ok(Number.isNaN(cellSortNumber('stm32f1.o')));
+        });
+
+        test('표시용 숫자 셀은 그대로 수치로 읽는다', () => {
+            assert.strictEqual(cellSortNumber('1.2 KB'), 1.2);
+            assert.strictEqual(cellSortNumber('900 B'), 900);
+            assert.strictEqual(cellSortNumber('27.5%'), 27.5);
+            assert.strictEqual(cellSortNumber('  42  '), 42);
+        });
+
+        test('16진 주소를 값으로 읽는다', () => {
+            // 예전 파싱은 0x0000F000 에서 F 를 지워 0 으로 만들었다.
+            assert.strictEqual(cellSortNumber('0x0000F000'), 0xF000);
+            assert.strictEqual(cellSortNumber('0x00001000'), 0x1000);
+            assert.ok(
+                cellSortNumber('0x0000F000') > cellSortNumber('0x00001000'),
+                '주소 정렬이 뒤집힌다'
+            );
+        });
+
+        test('천 단위 구분자를 무시한다', () => {
+            assert.strictEqual(cellSortNumber('1,234'), 1234);
+        });
+
+        test('부호를 유지한다', () => {
+            assert.strictEqual(cellSortNumber('-12'), -12);
+            assert.strictEqual(cellSortNumber('+7'), 7);
+        });
+
+        test('빈 셀은 NaN 이다', () => {
+            assert.ok(Number.isNaN(cellSortNumber('')));
+            assert.ok(Number.isNaN(cellSortNumber('   ')));
+        });
+    });
+
     suite('정렬기가 그룹 단위로 움직인다', () => {
         test('부모만 골라내던 선택자가 사라졌다', () => {
             assert.ok(
@@ -209,16 +282,32 @@ suite('Object Summary 정렬', () => {
         });
 
         test('속성 값은 문자 제거 없이 Number()로 읽는다 (지수 표기 보존)', () => {
-            // 정규식 정리는 "1.2 KB" 같은 표시용 텍스트에만 필요하다. 원본
-            // 속성에 적용하면 아주 작은 퍼센트의 지수 표기(9e-7)에서 e가
-            // 지워져 9-7 → 9로 읽힌다 — 실제 순서와 반대가 될 수 있다.
+            // 원본 속성에 정규식 정리를 적용하면 아주 작은 퍼센트의 지수
+            // 표기(9e-7)에서 e가 지워져 9-7 → 9로 읽힌다 — 실제 순서와 반대가
+            // 될 수 있다.
             assert.ok(
-                /fromAttr\s*\?\s*Number\(value\.text\)/.test(html),
+                /if \(value\.fromAttr\) \{ return Number\(value\.text\); \}/.test(html),
                 '속성 경로가 Number()를 쓰지 않는다'
             );
+        });
+
+        test('셀 텍스트는 숫자를 표현한 것일 때만 수치로 읽는다 (0.6.44)', () => {
+            // 예전에는 숫자가 아닌 문자를 모두 지운 뒤 parseFloat 했다.
+            // 그러면 이름도 숫자가 된다: stm32f4xx_hal.o → 324. 그래서 이름
+            // 열에서 stm32f1.o(321)와 stm32f4.o(324)가 문자열이 아니라 수치로
+            // 비교됐고, 숫자가 없는 이름은 NaN 이라 문자열 비교로 빠져 같은 열
+            // 안에서 두 규칙이 섞였다.
             assert.ok(
-                /parseFloat\(value\.text\.replace/.test(html),
-                '셀 텍스트 경로의 표시 문자열 정리는 유지되어야 한다'
+                !/parseFloat\(value\.text\.replace\(\/\[\^0-9/.test(html),
+                '모든 비숫자 문자를 지우는 옛 파싱이 되살아났다 — 이름이 숫자로 비교된다'
+            );
+            assert.ok(
+                /const numeric = \/\^\[-\+\]\?\(0\[xX\]/.test(html),
+                '숫자로 시작하는 값만 통과시키는 검사가 없다'
+            );
+            assert.ok(
+                /if \(!numeric\) \{ return NaN; \}/.test(html),
+                '숫자가 아니면 NaN 을 돌려 문자열 비교로 넘겨야 한다'
             );
         });
     });
