@@ -4,7 +4,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import AdmZip from 'adm-zip';
-import { createZipArchive, extractZipArchive } from './../archiveUtils';
+import {
+    ZIP_MAX_ENTRY_BYTES,
+    ZIP_MAX_TOTAL_BYTES,
+    assertZipWithinLimits,
+    createZipArchive,
+    extractZipArchive,
+} from './../archiveUtils';
 
 /**
  * adm-zip은 `addFile()` 시점에 엔트리 이름을 정규화하므로 ('../evil.txt' →
@@ -300,6 +306,93 @@ suite('archiveUtils', () => {
 
             assert.ok(fs.statSync(path.join(dest, 'empty-dir')).isDirectory());
             assert.strictEqual(fs.readFileSync(path.join(dest, 'filled', 'inner.txt'), 'utf8'), 'x');
+        });
+    });
+
+    /**
+     * 압축 해제 크기 상한 (0.6.39).
+     *
+     * `adm-zip` 은 엔트리를 통째로 메모리에 올려 쓰므로(`getData()`), 상한이
+     * 없으면 작은 zip 하나로 확장 호스트를 OOM 으로 끌 수 있다 — zip bomb.
+     * 압축 해제 크기는 중앙 디렉터리 헤더에 들어 있어 **적재 전에** 판단할 수
+     * 있다. 풀어 본 뒤에 재는 방식은 이미 메모리를 쓴 뒤라 방어가 되지 않는다.
+     *
+     * 실제 2GB 아카이브를 만들 수는 없으므로, 크기 판정 자체는 순수 함수
+     * (`assertZipWithinLimits`)에 주입한 작은 한도로 검증한다. 그 함수가
+     * 추출 경로에 실제로 연결돼 있는지는 마지막 케이스가 본다.
+     */
+    suite('압축 해제 크기 상한', () => {
+        const entry = (entryName: string, size: number, isDirectory = false) =>
+            ({ entryName, isDirectory, header: { size } });
+
+        test('기본 상한이 문서화된 값이다', () => {
+            assert.strictEqual(ZIP_MAX_TOTAL_BYTES, 2 * 1024 * 1024 * 1024);
+            assert.strictEqual(ZIP_MAX_ENTRY_BYTES, 512 * 1024 * 1024);
+        });
+
+        test('상한 안이면 통과한다', () => {
+            assert.doesNotThrow(() =>
+                assertZipWithinLimits([entry('a.bin', 100), entry('b.bin', 200)], 1000, 500));
+        });
+
+        test('엔트리 하나가 상한을 넘으면 거부한다', () => {
+            assert.throws(
+                () => assertZipWithinLimits([entry('huge.bin', 600)], 10000, 500),
+                /huge\.bin.*per-entry limit/s
+            );
+        });
+
+        test('총량이 상한을 넘으면 거부한다', () => {
+            // 각각은 엔트리 상한 안이지만 합치면 넘는다 — 개수로 우회하는
+            // 형태를 막는다.
+            assert.throws(
+                () => assertZipWithinLimits(
+                    [entry('a', 400), entry('b', 400), entry('c', 400)], 1000, 500),
+                /more than.*uncompressed/s
+            );
+        });
+
+        test('디렉터리 엔트리는 크기에 세지 않는다', () => {
+            // 디렉터리는 내용이 없으므로 헤더 size 가 비정상이어도 무시한다.
+            assert.doesNotThrow(() =>
+                assertZipWithinLimits([entry('d/', 999999, true), entry('a.bin', 100)], 1000, 500));
+        });
+
+        test('헤더 크기가 비정상이면 거부한다', () => {
+            for (const bad of [-1, NaN, Infinity]) {
+                assert.throws(
+                    () => assertZipWithinLimits([entry('weird.bin', bad)], 1000, 500),
+                    /Invalid uncompressed size/,
+                    `size=${bad} 를 통과시켰다`
+                );
+            }
+        });
+
+        test('추출 경로가 실제로 이 검사를 거친다', async () => {
+            // 순수 함수만 검증하면 배선이 빠져도 통과한다. 작은 한도를 줄 수
+            // 없는 경로이므로, 기본 상한을 넘는 크기를 **헤더에만** 신고하는
+            // 아카이브로 확인한다 — 실제 데이터를 만들지 않고도 사전 거부가
+            // 동작하는지 볼 수 있고, 그 자체가 "적재 전에 막는다"의 증거다.
+            const archivePath = path.join(tempDir, 'liar.zip');
+            const zip = new AdmZip();
+            zip.addFile('big.bin', Buffer.from('small'));
+            zip.writeZip(archivePath);
+
+            // 중앙 디렉터리의 uncompressed size 를 상한 초과로 바꾼다.
+            const raw = fs.readFileSync(archivePath);
+            const marker = Buffer.from('PK\x01\x02');            // central directory header
+            const at = raw.indexOf(marker);
+            assert.ok(at >= 0, '중앙 디렉터리를 찾지 못했다');
+            raw.writeUInt32LE(0xF0000000, at + 24);              // uncompressed size 필드
+            fs.writeFileSync(archivePath, raw);
+
+            const dest = path.join(tempDir, 'liar-dest');
+            await assert.rejects(
+                extractZipArchive(archivePath, dest),
+                /per-entry limit|more than/,
+                '추출이 크기 상한을 검사하지 않는다'
+            );
+            assert.ok(!fs.existsSync(dest), '거부됐는데 대상 디렉터리가 생겼다');
         });
     });
 });
