@@ -29,6 +29,19 @@ export const panelRegistry = {
 /** Memory Map에서 처리 가능한 최대 ELF/Listing 파일 크기 (100 MB). Exported so tests can pin the boundary. */
 export const MEMORY_MAP_MAX_FILE_SIZE = 100 * 1024 * 1024;
 
+/**
+ * *Save as HTML* 로 저장할 수 있는 최대 문서 크기(문자 수).
+ *
+ * 웹뷰가 `document.documentElement.outerHTML` 로 **펼쳐진 DOM 전체**를 직렬화해
+ * 호스트로 보낸다. region 을 모두 펼친 큰 맵이면 그 문자열 하나가 수백 MB 가
+ * 될 수 있고, 이후 정규식 치환과 문자열 결합이 사본을 더 만든다.
+ *
+ * 64MB 는 실제 맵을 저장하기에 넉넉하면서(보통 수 MB) 병리적 경우를 막는 선이다.
+ * 넘으면 **저장 대화상자를 띄우기 전에** 거부한다 — 경로를 고르고 나서 실패하면
+ * 사용자가 두 번 헛수고한다.
+ */
+export const MEMORY_MAP_MAX_SAVE_HTML_CHARS = 64 * 1024 * 1024;
+
 function formatFileSize(bytes: number): string {
     if (bytes < 1024) { return `${bytes} B`; }
     if (bytes < 1024 * 1024) { return `${(bytes / 1024).toFixed(1)} KB`; }
@@ -310,6 +323,20 @@ function showPanel(
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.'));
         } else if (message.command === 'saveHtml') {
+            const rawHtml = typeof message.html === 'string' ? message.html : '';
+            // `outerHTML` 은 펼쳐진 DOM 전체를 직렬화한다. region 을 모두 펼친
+            // 큰 맵이면 그 문자열 하나가 수백 MB 가 될 수 있는데, 이후 정규식
+            // 치환과 문자열 결합이 매번 사본을 더 만든다. 저장 대화상자를
+            // 띄우기 **전에** 막아, 사용자가 경로를 고르고 나서야 실패하는
+            // 일이 없게 한다.
+            if (rawHtml.length > MEMORY_MAP_MAX_SAVE_HTML_CHARS) {
+                const mb = Math.round(MEMORY_MAP_MAX_SAVE_HTML_CHARS / (1024 * 1024));
+                vscode.window.showErrorMessage(t(
+                    `저장할 HTML이 너무 큽니다(${mb}MB 초과). 영역을 접거나 검색으로 범위를 줄인 뒤 다시 시도하세요. 전체 데이터는 *Copy Full Dump* 로 받을 수 있습니다.`,
+                    `The HTML to save is too large (over ${mb} MB). Collapse regions or narrow the view with search, then try again. Use *Copy Full Dump* for the complete data.`
+                ));
+                return;
+            }
             const uri = await showSaveDialogWithMemory(
                 DIALOG_SCOPE.memoryMapExport,
                 `${fileName.replace(/\.[^.]+$/, '')}_memory_map.html`,
@@ -317,11 +344,16 @@ function showPanel(
             );
             if (uri) {
                 try {
-                    // Remove VS Code API script calls and make standalone
-                    let html = typeof message.html === 'string' ? message.html : '';
-                    html = html.replace(/const vscode = acquireVsCodeApi\(\);?\s*/g, '');
-                    html = html.replace(/vscode\.postMessage\(\{[^}]*\}\);?\s*/g, '');
-                    fs.writeFileSync(uri.fsPath, `<!DOCTYPE html>\n${html}`, 'utf-8');
+                    // 정규식 두 번을 한 번으로 합친다 — 각 `replace` 가 문자열
+                    // 사본을 하나씩 더 만들기 때문이다.
+                    const html = rawHtml.replace(
+                        /const vscode = acquireVsCodeApi\(\);?\s*|vscode\.postMessage\(\{[^}]*\}\);?\s*/g,
+                        ''
+                    );
+                    // DOCTYPE 을 템플릿 리터럴로 붙이면 전체 문자열이 한 벌 더
+                    // 복제된다. 두 번 써서 그 사본을 없앤다.
+                    fs.writeFileSync(uri.fsPath, '<!DOCTYPE html>\n', 'utf-8');
+                    fs.appendFileSync(uri.fsPath, html, 'utf-8');
                     vscode.window.showInformationMessage(t('HTML 파일이 저장되었습니다.', 'HTML file saved.'));
                 } catch (e: any) {
                     vscode.window.showErrorMessage(t(

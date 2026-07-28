@@ -2227,19 +2227,41 @@ interface OutputTerminalHandle {
     write: (text: string) => void;
 }
 
+/**
+ * `pty.open()` 이전에 버퍼링할 최대 크기.
+ *
+ * `open()` 은 터미널 UI 가 붙은 뒤 비동기로 불리므로 그 전의 write 는 유실된다.
+ * 그래서 버퍼링하는데, **상한이 없었다** — 터미널이 열리기 전에 대량 출력을
+ * 쏟는 태스크(빌드 로그 등)가 있으면 그 전량이 문자열 하나로 쌓인다.
+ *
+ * 1MB 면 터미널이 뜨기 전 몇 초 분량의 로그로 충분하고, 넘치는 경우에도
+ * **최근 것을 남긴다** — 사용자가 보려는 것은 대개 마지막 상태다.
+ */
+const PTY_PENDING_MAX_BYTES = 1024 * 1024;
+
 function createReadonlyOutputTerminal(name: string): OutputTerminalHandle {
     const writeEmitter = new vscode.EventEmitter<string>();
     // pty.open()은 createTerminal 직후가 아니라 터미널 UI가 붙은 뒤 비동기로
     // 호출된다. open 이전의 write는 유실되므로 버퍼링했다가 open 시 flush.
     let opened = false;
     let pending = '';
+    let droppedBytes = 0;
     const pty: vscode.Pseudoterminal = {
         onDidWrite: writeEmitter.event,
         open: () => {
             opened = true;
             if (pending.length > 0) {
-                writeEmitter.fire(pending);
+                // 잘렸다면 그 사실을 화면에 남긴다. 조용히 버리면 사용자가
+                // 로그 앞부분이 왜 없는지 알 수 없다.
+                const notice = droppedBytes > 0
+                    ? t(
+                        `[TaskHub] 터미널이 열리기 전 출력 ${Math.round(droppedBytes / 1024)}KB 를 생략했습니다.\r\n`,
+                        `[TaskHub] Omitted ${Math.round(droppedBytes / 1024)} KB of output produced before the terminal opened.\r\n`
+                    )
+                    : '';
+                writeEmitter.fire(notice + pending);
                 pending = '';
+                droppedBytes = 0;
             }
         },
         close: () => {
@@ -2253,8 +2275,16 @@ function createReadonlyOutputTerminal(name: string): OutputTerminalHandle {
         const normalized = text.replace(/\r?\n/g, '\r\n');
         if (opened) {
             writeEmitter.fire(normalized);
-        } else {
-            pending += normalized;
+            return;
+        }
+        pending += normalized;
+        // 상한을 넘으면 **앞쪽을 버린다**. 터미널이 열리기 전 대량 출력을
+        // 쏟는 태스크가 있으면 그 전량이 문자열 하나로 쌓이던 자리다.
+        // 사용자가 보려는 것은 대개 마지막 상태이므로 최근 것을 남긴다.
+        if (pending.length > PTY_PENDING_MAX_BYTES) {
+            const overflow = pending.length - PTY_PENDING_MAX_BYTES;
+            droppedBytes += overflow;
+            pending = pending.slice(overflow);
         }
     };
     return { terminal, write };

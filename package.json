@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.6.44",
+  "version": "0.6.45",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -815,6 +815,7 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
     "@types/vscode": "^1.75.0",
+    "@types/yauzl": "^3.4.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "@vscode/test-cli": "^0.0.15",
@@ -832,7 +833,8 @@
     "serialize-javascript": "^7.0.4"
   },
   "dependencies": {
-    "adm-zip": "^0.6.0"
+    "adm-zip": "^0.6.0",
+    "yauzl": "^3.4.0"
   },
   "allowScripts": {
     "esbuild@0.28.1": true
