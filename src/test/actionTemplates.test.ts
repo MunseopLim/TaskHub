@@ -3,7 +3,7 @@ import Ajv from 'ajv';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ACTION_TEMPLATES, MAX_PIPELINE_TEMPLATE_STEPS, parseTemplateChoiceList } from '../extension';
+import { ACTION_TEMPLATES, MAX_PIPELINE_TEMPLATE_STEPS, commandNeedsShellSyntax, parseTemplateChoiceList } from '../extension';
 
 /**
  * "액션 생성 템플릿 확장" (0.6.17).
@@ -45,7 +45,7 @@ suite('액션 생성 템플릿', () => {
                 const tasks = template.id === 'single-shell'
                     ? template.buildTasks({ command: 'x' })
                     : [];
-                return tasks.length === 1 && tasks[0].type === 'shell';
+                return tasks.length === 1 && tasks[0].type === 'command';
             });
             assert.strictEqual(singleShellLike.length, 1,
                 '단일 shell 템플릿은 하나여야 한다');
@@ -56,7 +56,7 @@ suite('액션 생성 템플릿', () => {
         test('단일 쉘', () => {
             assert.deepStrictEqual(
                 templateById('single-shell').buildTasks({ command: 'npm run build' }),
-                [{ id: 'run', type: 'shell', command: 'npm run build' }]
+                [{ id: 'run', type: 'command', command: 'npm run build' }]
             );
         });
 
@@ -68,7 +68,7 @@ suite('액션 생성 템플릿', () => {
             assert.strictEqual(tasks[0].type, 'fileDialog');
             assert.strictEqual(tasks[0].id, 'selectFile');
             assert.ok(tasks[0].options.openLabel, 'openLabel 기본값이 있어야 한다');
-            assert.strictEqual(tasks[1].type, 'shell');
+            assert.strictEqual(tasks[1].type, 'command');
             assert.ok(tasks[1].command.includes('${selectFile.path}'));
         });
 
@@ -78,7 +78,7 @@ suite('액션 생성 템플릿', () => {
 
             assert.strictEqual(tasks[0].type, 'folderDialog');
             assert.strictEqual(tasks[0].id, 'selectFolder');
-            assert.strictEqual(tasks[1].type, 'shell');
+            assert.strictEqual(tasks[1].type, 'command');
         });
 
         test('값 입력 + 쉘 — inputBox의 prompt가 사용자 문구로 채워진다', () => {
@@ -87,7 +87,7 @@ suite('액션 생성 템플릿', () => {
 
             assert.deepStrictEqual(tasks, [
                 { id: 'input', type: 'inputBox', prompt: '릴리스 태그를 입력하세요' },
-                { id: 'run', type: 'shell', command: 'git tag ${input.value}' },
+                { id: 'run', type: 'command', command: 'git tag ${input.value}' },
             ]);
         });
 
@@ -107,12 +107,68 @@ suite('액션 생성 템플릿', () => {
 
             assert.deepStrictEqual(tasks.map(t => t.id), ['step1', 'step2', 'step3']);
             assert.deepStrictEqual(tasks.map(t => t.command), ['make clean', 'make', 'make flash']);
-            assert.ok(tasks.every(t => t.type === 'shell'));
+            assert.ok(tasks.every(t => t.type === 'command'));
         });
 
         test('다단계 파이프라인 — 한 단계만 입력해도 유효하다', () => {
             const tasks = templateById('multi-step-shell').buildTasks({ commands: ['make'] });
-            assert.deepStrictEqual(tasks, [{ id: 'step1', type: 'shell', command: 'make' }]);
+            assert.deepStrictEqual(tasks, [{ id: 'step1', type: 'command', command: 'make' }]);
+        });
+    });
+
+    /**
+     * 0.6.47 이 `shell` 을 raw 셸 실행으로 바꾼 뒤, 보간값을 명령 문자열에 넣는
+     * 마법사 템플릿은 그대로 명령 주입 통로가 됐다. 생성 UI 가 문서가 금지하는
+     * 패턴을 스스로 만들어 내던 셈이라, 기본값을 argv 쪽으로 되돌린다.
+     */
+    suite('마법사는 주입에 안전한 타입을 낸다', () => {
+        test('명령을 실행하는 모든 템플릿이 command 타입을 낸다', () => {
+            const built: { template: string; type: string }[] = [];
+            for (const template of ACTION_TEMPLATES) {
+                const tasks = template.id === 'multi-step-shell'
+                    ? template.buildTasks({ commands: ['make'] })
+                    : template.id === 'quick-pick-shell'
+                        ? template.buildTasks({ items: ['a'], command: 'echo x' })
+                        : template.id === 'input-box-shell'
+                            ? template.buildTasks({ inputPrompt: 'p', command: 'echo x' })
+                            : template.buildTasks({ command: 'echo x' });
+                for (const task of tasks) {
+                    if (typeof task.command === 'string') {
+                        built.push({ template: template.id, type: task.type });
+                    }
+                }
+            }
+
+            assert.ok(built.length >= ACTION_TEMPLATES.length, '명령 태스크를 하나도 못 찾았다 — 테스트 전제가 깨졌다');
+            const rawShell = built.filter(entry => entry.type !== 'command');
+            assert.deepStrictEqual(
+                rawShell, [],
+                `마법사가 raw 셸 태스크를 만든다 — 보간값이 셸 문법으로 해석된다: ${JSON.stringify(rawShell)}`
+            );
+        });
+
+        test('보간을 담은 기본 명령이 실제로 argv 로 나간다', () => {
+            // 기본값 자체가 보간을 담고 있다는 것이 이 수정의 이유다.
+            const tasks = templateById('file-dialog-shell')
+                .buildTasks({ command: 'echo Selected file: ${selectFile.path}' });
+            assert.strictEqual(tasks[1].type, 'command');
+            assert.ok(tasks[1].command.includes('${selectFile.path}'));
+        });
+    });
+
+    suite('commandNeedsShellSyntax', () => {
+        test('셸 연산자를 알아본다', () => {
+            for (const command of ['make && make flash', 'a | b', 'echo x > out.txt', 'a; b', 'echo `id`', 'echo $(id)', 'cat < in.txt', 'a || b']) {
+                assert.ok(commandNeedsShellSyntax(command), `연산자를 놓쳤다: ${command}`);
+            }
+        });
+
+        test('평범한 명령과 TaskHub 보간은 연산자로 보지 않는다', () => {
+            // `${...}` 는 파이프라인이 처리하므로 argv 에서도 정상 동작한다.
+            // 여기서 참을 돌려주면 거의 모든 생성에 경고가 떠 무의미해진다.
+            for (const command of ['npm run build', 'make flash', 'git tag ${input.value}', 'echo Selected file: ${selectFile.path}', 'make TARGET=${choice.value}']) {
+                assert.strictEqual(commandNeedsShellSyntax(command), false, `평범한 명령을 연산자로 봤다: ${command}`);
+            }
         });
     });
 

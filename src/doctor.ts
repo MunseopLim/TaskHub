@@ -848,6 +848,33 @@ function analyzeActionTasks(
             }
         }
 
+        // `shell` 은 명령 문자열을 셸에 그대로 넘긴다(0.6.47). 그래서 그 안에
+        // 보간된 값도 **셸 문법으로 해석된다** — `${ask.value}` 가
+        // `x; rm -rf ~` 이면 뒤의 명령까지 실행된다. `command` 타입이나
+        // `args` 배열은 토큰마다 인용하므로 같은 값이 인자 하나로 남는다.
+        //
+        // Workspace Trust 는 **액션 정의**의 신뢰이지 실행 중 흘러 들어오는
+        // **값**의 신뢰가 아니므로, 신뢰된 워크스페이스에서도 유효한 경고다.
+        if (task.type === 'shell') {
+            const branches: string[] = typeof task.command === 'string'
+                ? [task.command]
+                : (task.command && typeof task.command === 'object'
+                    ? Object.values(task.command).filter((v): v is string => typeof v === 'string')
+                    : []);
+            const interpolatedBranch = branches.find(branch => /\$\{[^}]+\}/.test(branch));
+            if (interpolatedBranch) {
+                findings.push({
+                    filePath: input.filePath,
+                    sourceLabel: input.sourceLabel,
+                    range: findIdLine(input.rawText, task.id),
+                    severity: 'warning',
+                    code: 'shell.interpolated-command',
+                    message: `Task '${item.id}.${task.id}' is a 'shell' task that interpolates \${...} into the command string. 'shell' passes the string to a shell verbatim, so a value containing ';', '&&' or '$(...)' runs as a command. Pass such values through the 'args' array, or use type 'command' (argv, each token quoted).`,
+                    messageKo: `Task '${item.id}.${task.id}'는 명령 문자열에 \${...}를 보간하는 'shell' 태스크입니다. 'shell'은 문자열을 셸에 그대로 넘기므로, 값에 ';'나 '&&', '$(...)'가 있으면 명령으로 실행됩니다. 그런 값은 'args' 배열로 넘기거나 'command' 타입(토큰마다 인용하는 argv)을 사용하세요.`,
+                });
+            }
+        }
+
         // Outside-workspace write checks. Skip when the resolved string
         // still has unresolved variables — we can't decide safely.
         const candidates: Array<{ raw: string | undefined; kind: string }> = [

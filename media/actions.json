@@ -12,7 +12,7 @@
         },
         {
           "id": "show_env_value",
-          "type": "shell",
+          "type": "command",
           "command": {
             "windows": "cmd /c echo %${env_pick.value}%",
             "macos": "printenv ${env_pick.value}",
@@ -38,7 +38,7 @@
         },
         {
           "id": "show_env_value",
-          "type": "shell",
+          "type": "command",
           "command": {
             "windows": "cmd /c echo %${input_env_name.value}%",
             "macos": "printenv ${input_env_name.value}",

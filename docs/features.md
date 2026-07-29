@@ -1155,12 +1155,16 @@ editor/terminal 규칙은 **비밀을 참조하는 태스크뿐 아니라 비밀
 
     | 템플릿 | 생성되는 task | 노출하는 개념 |
     | --- | --- | --- |
-    | **Single Shell Command** | `shell` | 기본 |
-    | **File Picker + Shell** | `fileDialog` → `shell` | 대화형 입력 + `${selectFile.path}` |
-    | **Folder Picker + Shell** | `folderDialog` → `shell` | `${selectFolder.path}` |
-    | **Text Input + Shell** | `inputBox` → `shell` | 실행 시점 값 입력 + `${input.value}` |
-    | **Choice List + Shell** | `quickPick` → `shell` | 고정 목록 선택 + `${choice.value}` |
-    | **Multi-step Pipeline** | `shell` × N (`step1`…`stepN`) | 순차 실행 (앞 단계 실패 시 중단) |
+    | **Single Shell Command** | `command` | 기본 |
+    | **File Picker + Shell** | `fileDialog` → `command` | 대화형 입력 + `${selectFile.path}` |
+    | **Folder Picker + Shell** | `folderDialog` → `command` | `${selectFolder.path}` |
+    | **Text Input + Shell** | `inputBox` → `command` | 실행 시점 값 입력 + `${input.value}` |
+    | **Choice List + Shell** | `quickPick` → `command` | 고정 목록 선택 + `${choice.value}` |
+    | **Multi-step Pipeline** | `command` × N (`step1`…`stepN`) | 순차 실행 (앞 단계 실패 시 중단) |
+
+    **마법사는 `shell` 이 아니라 `command` 타입을 만듭니다** (0.6.49부터). 이 템플릿들은 대부분 `${selectFile.path}` 처럼 **실행 시점에 들어오는 값**을 명령에 끼워 넣는데, `shell` 은 문자열을 셸에 그대로 넘기므로 그 값에 `;` 나 `$(...)` 가 있으면 의도하지 않은 명령이 실행됩니다. `command` 는 토큰마다 인용해 argv 로 실행하므로 값이 어떤 문자를 담고 있어도 인자 하나로 남습니다. 셸 연산자가 필요하면 생성 후 actions.json 에서 타입을 `shell` 로 바꾸되, 그때는 값을 `args` 배열로 옮기세요 ([§5 `shell` 과 `command` 는 실행 방식이 다릅니다](#5-액션과-태스크) 참조).
+
+    입력한 명령에 `&&`·`|`·`>` 같은 셸 연산자가 들어 있으면 저장 전에 modal 로 알려 줍니다 — `command` 타입에서 그 연산자들은 **리터럴 인자**가 되어 동작하지 않으므로, 조용히 다르게 실행되는 대신 그 자리에서 알리는 편이 낫기 때문입니다.
 
     Multi-step Pipeline은 1단계를 필수로 받고, 2단계부터는 **빈 값으로 Enter를 누르면 거기서 끝납니다** (Esc는 마법사 전체 취소). 단계 수는 최대 10개로 제한되며, 그보다 긴 파이프라인은 actions.json에서 직접 작성하는 편이 낫습니다.
 
@@ -2067,6 +2071,7 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `dependsOn.missing` | error | `dependsOn`이 같은 액션에 존재하지 않는 task id를 가리킴. |
 | `dependsOn.cycle` | error | task 간 `dependsOn` 그래프에 순환이 있음. 출력 메시지에 순환 경로 포함. |
 | `parallel.interactive` | warning | `inputBox` / `quickPick` / `envPick` / `confirm` / `fileDialog` / `folderDialog` 같은 interactive task에 `parallel: true`가 붙음. 런타임은 prompt mutex로 다이얼로그를 강제 직렬화하므로 병렬 표시는 *post-prompt* 처리에만 적용되며, 사실상 효과가 없는 경우가 대부분. |
+| `shell.interpolated-command` | warning | `shell` 태스크의 command 문자열에 `${…}` 보간이 있음. `shell`은 문자열을 셸에 그대로 넘기므로 보간된 값도 셸 문법으로 해석되어, 값에 `;`나 `$(...)`가 있으면 의도하지 않은 명령이 실행됨. 값은 `args` 배열로 넘기거나 `command` 타입을 사용. OS별 객체는 어느 한 branch에만 있어도 검출. |
 
 ### 23.3. `dependsOn` / `parallel` 런타임 동작
 

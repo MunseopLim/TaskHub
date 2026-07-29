@@ -89,6 +89,52 @@ suite('Doctor', () => {
         assert.ok(findings.some(f => f.code === 'duplicate.task.id'));
     });
 
+    /**
+     * `shell` 은 명령 문자열을 셸에 그대로 넘긴다(0.6.47). 그래서 보간된 값도
+     * 셸 문법으로 해석되어, 값에 `;` 나 `$(...)` 가 있으면 뒤의 명령이 실행된다.
+     * 0.6.47 은 이 위험을 문서로만 알렸다 — Doctor 가 사용자 액션에서 잡는다.
+     */
+    suite('shell.interpolated-command', () => {
+        const shellTask = (task: any) => [{
+            id: 'a', title: 'X', action: { description: 'd', tasks: [task] }
+        }];
+
+        test('shell 태스크의 command 보간을 경고한다', () => {
+            const findings = runDoctor([makeInput(shellTask(
+                { id: 'run', type: 'shell', command: 'echo ${ask.value}' }
+            ))], compileValidator());
+            assert.ok(
+                findings.some(f => f.code === 'shell.interpolated-command'),
+                `주입 통로를 놓쳤다: ${JSON.stringify(findings.map(f => f.code))}`
+            );
+        });
+
+        test('OS별 객체는 한 branch에만 있어도 잡는다', () => {
+            const findings = runDoctor([makeInput(shellTask({
+                id: 'run',
+                type: 'shell',
+                command: { windows: 'echo hi', macos: 'printenv ${ask.value}', linux: 'echo hi' },
+            }))], compileValidator());
+            assert.ok(findings.some(f => f.code === 'shell.interpolated-command'));
+        });
+
+        test('command 타입은 경고하지 않는다 (argv 라 인용된다)', () => {
+            // 여기서 경고하면 우리가 권하는 안전한 형태에 경고가 붙어,
+            // 사용자가 룰 자체를 무시하게 된다.
+            const findings = runDoctor([makeInput(shellTask(
+                { id: 'run', type: 'command', command: 'printenv ${ask.value}' }
+            ))], compileValidator());
+            assert.ok(!findings.some(f => f.code === 'shell.interpolated-command'));
+        });
+
+        test('보간이 없는 shell 은 경고하지 않는다', () => {
+            const findings = runDoctor([makeInput(shellTask(
+                { id: 'run', type: 'shell', command: 'make clean && make' }
+            ))], compileValidator());
+            assert.ok(!findings.some(f => f.code === 'shell.interpolated-command'));
+        });
+    });
+
     test('flags invalid capture regex', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([
@@ -744,7 +790,13 @@ suite('Doctor', () => {
                     }
                 }
             ])], v);
-            assert.deepStrictEqual(findings, []);
+            // 이 suite 가 보는 것은 M9(출력 전달) 계열뿐이다. 같은 fixture 는
+            // `shell` 에 `${build.output}` 을 보간하므로 주입 룰에는 정당하게
+            // 걸린다 — "아무 finding 도 없다" 로 고정하면 새 룰이 추가될 때마다
+            // 이 테스트가 무관하게 깨지고, 룰을 약화시키는 압력이 된다.
+            assert.deepStrictEqual(
+                findings.filter(f => f.code.startsWith('output.')), []
+            );
         });
 
         test('warns when output mode/capture/diagnostics are dead without passTheResultToNextTask', () => {

@@ -112,5 +112,33 @@ suite('내장 예제 액션 노출 정책', () => {
             const parsed = JSON.parse(fs.readFileSync(mediaPath, 'utf-8'));
             assert.ok(Array.isArray(parsed) && parsed.length > 0);
         });
+
+        /**
+         * 번들 액션은 **모든 사용자가 설치 직후 실행할 수 있는** 것이고, 새 액션을
+         * 만들 때 베끼는 본보기이기도 하다. 0.6.47 이 `shell` 을 raw 셸 실행으로
+         * 바꾼 뒤 `printenv ${input_env_name.value}` 는 사용자가 입력한 이름에
+         * `; ...` 가 있으면 뒤의 명령까지 실행하는 형태가 됐다 — 우리가 문서로
+         * 금지한 패턴을 우리가 배포하고 있었다.
+         */
+        test('번들 액션은 raw shell 에 값을 보간하지 않는다', () => {
+            const mediaPath = path.join(REPO_ROOT, 'media', 'actions.json');
+            const parsed = JSON.parse(fs.readFileSync(mediaPath, 'utf-8'));
+            const offenders: string[] = [];
+            for (const item of parsed) {
+                for (const task of item?.action?.tasks ?? []) {
+                    if (task.type !== 'shell') { continue; }
+                    const branches = typeof task.command === 'string'
+                        ? [task.command]
+                        : Object.values(task.command ?? {}).filter((v): v is string => typeof v === 'string');
+                    if (branches.some(branch => /\$\{[^}]+\}/.test(branch))) {
+                        offenders.push(`${item.id}.${task.id}`);
+                    }
+                }
+            }
+            assert.deepStrictEqual(
+                offenders, [],
+                `번들 액션이 raw 셸에 값을 끼워 넣는다 (command 타입이나 args 를 쓸 것): ${offenders.join(', ')}`
+            );
+        });
     });
 });

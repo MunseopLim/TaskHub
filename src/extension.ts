@@ -1228,7 +1228,30 @@ export const MAX_PIPELINE_TEMPLATE_STEPS = 10;
 type DestinationPickItem = vscode.QuickPickItem & { folderRef?: ActionItem };
 
 /**
+ * 셸에 넘기지 않으면 **의미가 달라지는** 문자들. argv 실행에서는 전부 리터럴
+ * 인자가 되므로, 마법사가 `command` 로 저장하기 전에 이것이 들어 있으면
+ * 사용자에게 알린다 — 조용히 다르게 동작하는 것이 가장 나쁜 결과다.
+ *
+ * `$` 는 넣지 않는다. TaskHub 자신의 `${task.value}` 보간이 흔하고, 그것은
+ * 셸이 아니라 파이프라인이 처리하므로 argv 에서도 정상 동작한다.
+ */
+const SHELL_OPERATOR_PATTERN = /(\|\||&&|[|<>;`]|\$\(|(^|\s)>|(^|\s)<)/;
+
+export function commandNeedsShellSyntax(command: string): boolean {
+    return SHELL_OPERATOR_PATTERN.test(command);
+}
+
+/**
  * Wizard starting points, ordered simplest first.
+ *
+ * **모든 템플릿은 `command` 타입을 낸다** (0.6.49). 0.6.47 이 `shell` 을 raw
+ * 셸 실행으로 바꾸면서, 보간값을 명령 문자열에 끼워 넣는 이 템플릿들이
+ * 그대로 명령 주입 통로가 됐다 — `${selectFile.path}` 가 `x; rm -rf ~` 이면
+ * 뒤의 명령까지 실행된다. `command` 는 토큰마다 인용해 argv 로 실행하므로
+ * 보간값이 어떤 문자를 담고 있어도 인자 하나로 남는다.
+ *
+ * 셸 연산자가 필요하면 사용자가 actions.json 에서 `shell` 로 바꾸면 된다.
+ * 마법사가 기본으로 그것을 만들지는 않는다 — 안전한 쪽이 기본값이어야 한다.
  *
  * Every template here produces a *structurally different* action. Variants
  * that would differ only by the command string (a "Build" template next to
@@ -1248,7 +1271,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
         buildTasks({ command }: { command: string }) {
             return [{
                 id: 'run',
-                type: 'shell' as const,
+                type: 'command' as const,
                 command
             }];
         },
@@ -1276,7 +1299,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
                 },
                 {
                     id: 'run',
-                    type: 'shell' as const,
+                    type: 'command' as const,
                     command
                 }
             ];
@@ -1306,7 +1329,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
                 },
                 {
                     id: 'run',
-                    type: 'shell' as const,
+                    type: 'command' as const,
                     command
                 }
             ];
@@ -1334,7 +1357,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
                 },
                 {
                     id: 'run',
-                    type: 'shell' as const,
+                    type: 'command' as const,
                     command
                 }
             ];
@@ -1367,7 +1390,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
                 },
                 {
                     id: 'run',
-                    type: 'shell' as const,
+                    type: 'command' as const,
                     command
                 }
             ];
@@ -1397,7 +1420,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
         buildTasks({ commands }: { commands: string[] }) {
             return commands.map((command, index) => ({
                 id: `step${index + 1}`,
-                type: 'shell' as const,
+                type: 'command' as const,
                 command
             }));
         },
@@ -2135,6 +2158,27 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
             placeHolder: 'e.g. Build Project'
         });
         const tasks = await template.promptForTasks();
+
+        // 마법사는 `command`(argv) 로 저장한다. 사용자가 터미널에서 쓰던 것을
+        // 그대로 붙여 넣으면 `&&` 나 `|` 가 리터럴 인자가 되어 **오류 없이**
+        // 다르게 동작하므로, 저장하기 전에 그 사실을 알린다.
+        const shellSyntaxCommands = tasks
+            .filter((task: any) => typeof task?.command === 'string' && commandNeedsShellSyntax(task.command))
+            .map((task: any) => task.command as string);
+        if (shellSyntaxCommands.length > 0) {
+            const continueLabel = t('그대로 만들기', 'Create anyway');
+            const choice = await vscode.window.showWarningMessage(
+                t(
+                    `명령어에 셸 연산자(\`&&\`, \`|\`, \`>\` 등)가 있습니다. 마법사는 안전을 위해 \`command\` 타입으로 저장하며, 이 타입은 연산자를 **리터럴 인자로** 넘깁니다 — 연산자가 동작하지 않습니다. 셸 해석이 필요하면 만든 뒤 actions.json 에서 타입을 \`shell\` 로 바꾸세요. 다만 \`shell\` 에서는 \${...} 로 들어온 값도 셸 문법으로 해석되므로, 사용자 입력이나 파일 경로는 \`args\` 배열로 넘기세요.`,
+                    `The command contains shell operators (\`&&\`, \`|\`, \`>\`, …). The wizard saves a \`command\` task for safety, and that type passes operators as **literal arguments** — they will not work. If you need shell interpretation, change the type to \`shell\` in actions.json afterwards. Note that in \`shell\`, interpolated \${...} values are also parsed as shell syntax, so pass user input and file paths through the \`args\` array instead.`
+                ),
+                { modal: true },
+                continueLabel
+            );
+            if (choice !== continueLabel) {
+                return;
+            }
+        }
 
         const existingIds = wizardTakenActionIds(sources);
 
