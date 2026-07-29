@@ -1064,6 +1064,10 @@ import {
     buildPosixCommandLine,
     buildRawPowerShellCommandLine,
     buildRawShellCommandLine,
+    resolveWindowsRawShell,
+    rawCommandUsesChainOperators,
+    windowsSpawnStrategy,
+    buildRawOneShotWindowsScript,
     normalizeEol,
     encodeFileContent,
     withTaskTimeout,
@@ -1106,6 +1110,10 @@ export {
     buildPowerShellInvocation,
     buildNativeCommandInvocation,
     windowsCommandIsDirectlyLaunchable,
+    resolveWindowsRawShell,
+    rawCommandUsesChainOperators,
+    windowsSpawnStrategy,
+    buildRawOneShotWindowsScript,
     encodePowerShellScript,
     quotePosixArgument,
     buildPosixCommandLine,
@@ -5574,6 +5582,29 @@ function toProcessExecutionOptions(options: vscode.ShellExecutionOptions): vscod
     return processOptions;
 }
 
+/**
+ * raw `shell` 을 실행할 Windows 셸을 고르고, 그 셸이 명령의 연산자를 실제로
+ * 파싱할 수 있는지 확인한다.
+ *
+ * Windows PowerShell 5.1 에 `&&` 를 넘기면 *"The token '&&' is not a valid
+ * statement separator"* 라는 파스 오류만 나온다 — 사용자는 자기 명령이 틀렸다고
+ * 읽지, 인터프리터가 그 문법을 모른다고 읽지 않는다. 실행하기 전에 원인과
+ * 해결책을 담아 실패시킨다.
+ */
+export function assertWindowsRawShellSupports(
+    commandLine: string,
+    lookup: Partial<import('./pipelineUtils').WindowsExecutableLookup> = {}
+): import('./pipelineUtils').WindowsRawShell {
+    const shell = resolveWindowsRawShell(lookup);
+    if (!shell.supportsChainOperators && rawCommandUsesChainOperators(commandLine)) {
+        throw new Error(t(
+            `이 명령은 \`&&\` 또는 \`||\` 를 사용하는데, Windows PowerShell 5.1(\`powershell.exe\`)은 이 연산자를 지원하지 않습니다 — PowerShell 7(\`pwsh.exe\`)부터 도입됐습니다. PowerShell 7 을 설치하거나(PATH 에 있으면 자동으로 사용합니다), 태스크를 둘로 나누세요. 파이프라인은 앞 단계가 실패하면 뒤 단계를 실행하지 않으므로 \`&&\` 와 의미가 같고, 어느 단계가 실패했는지도 드러납니다.`,
+            `This command uses \`&&\` or \`||\`, which Windows PowerShell 5.1 (\`powershell.exe\`) does not support — those operators arrived in PowerShell 7 (\`pwsh.exe\`). Install PowerShell 7 (it is used automatically when on PATH), or split the task in two. A pipeline already stops at the first failing step, so it means the same thing as \`&&\` and also shows which step failed.`
+        ));
+    }
+    return shell;
+}
+
 export function createShellExecution(command: string, args: string[], options: vscode.ShellExecutionOptions, useUtf8Console: boolean, raw = false): { shellExecution: vscode.ShellExecution | vscode.ProcessExecution; displayCommand: string; usesNativeExecution?: boolean } {
     // `shell` 타입은 문자열을 셸에 그대로 넘긴다 (0.6.47). Windows 에서도
     // 네이티브 직접 실행 경로를 타지 않는다 — 그건 argv 실행이라 `&&` 나
@@ -5581,10 +5612,11 @@ export function createShellExecution(command: string, args: string[], options: v
     if (raw) {
         if (process.platform === 'win32') {
             const line = buildRawPowerShellCommandLine(command, args);
+            const shell = assertWindowsRawShellSupports(line, { env: { ...process.env, ...(options.env ?? {}) } });
             const utf8Prefix = useUtf8Console ? '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n' : '';
             const encoded = encodePowerShellScript(`${utf8Prefix}${line}`);
             return {
-                shellExecution: new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options),
+                shellExecution: new vscode.ShellExecution(shell.executable, ['-NoProfile', '-EncodedCommand', encoded], options),
                 displayCommand: line
             };
         }
@@ -5624,6 +5656,22 @@ export function wrapCommandForOneShot(command: string, args: string[], cwd: stri
     if (raw && process.platform !== 'win32') {
         const wrapped = `nohup ${buildRawShellCommandLine(command, args)} >/dev/null 2>&1 &`;
         return { commandLine: wrapped, displayCommand: wrapped, isPowerShellScript: false };
+    }
+    if (raw && process.platform === 'win32') {
+        // Windows 에서는 `raw` 를 **무시하고** 아래 argv 경로(`Start-Process` /
+        // `ProcessStartInfo`)로 갔다. one-shot 은 첫 토큰을 실행 파일로 잡으므로
+        // `&&` 뒤는 인자가 되고, 리다이렉션도 사라진다 — 같은 액션이
+        // `isOneShot` 하나로 의미가 달라졌다.
+        //
+        // 셸에 그대로 넘기되 백그라운드로 띄운다. `Start-Process` 로 인터프리터
+        // 자체를 떼어 내고, 명령 문자열은 `-EncodedCommand` 로 넘겨 인용을
+        // 거치지 않는다. `-WindowStyle Hidden` 은 콘솔 창이 뜨지 않게 한다.
+        const line = buildRawPowerShellCommandLine(command, args);
+        const shell = assertWindowsRawShellSupports(line, { env });
+        const utf8Prefix = useUtf8Console ? "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n" : '';
+        const encoded = encodePowerShellScript(`${utf8Prefix}${line}`);
+        const script = buildRawOneShotWindowsScript(shell.executable, encoded, cwd);
+        return { commandLine: script, displayCommand: line, isPowerShellScript: true };
     }
 
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
@@ -7026,12 +7074,18 @@ export function executeShellCommand(
                 : buildPowerShellInvocation(command, args || [], useUtf8Console);
             const encoded = encodePowerShellScript(invocation.script);
             displayCommand = invocation.display;
+            // raw 만 셸을 고른다. 비-raw 경로는 우리가 조립한 PowerShell
+            // 스크립트라 5.1 에서도 그대로 돌고, 여기서 pwsh 로 바꾸면 검증되지
+            // 않은 실행 경로가 하나 더 생긴다.
+            const shell = raw
+                ? assertWindowsRawShellSupports(invocation.script, { env: childEnv }).executable
+                : 'powershell.exe';
             if (showVerboseLogs && reason) {
                 appendVerboseLine(redactCapturedOutput
                     ? '[WARN] Native Windows process start failed (details hidden); retrying through PowerShell.'
                     : `[WARN] Native Windows process start failed (${reason.message}); retrying through PowerShell.`);
             }
-            childProcess = spawn('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], {
+            childProcess = spawn(shell, ['-NoProfile', '-EncodedCommand', encoded], {
                 cwd: workingDirectory,
                 env: childEnv
             });
@@ -7148,7 +7202,13 @@ export function executeShellCommand(
             });
         };
 
-        if (process.platform === 'win32' && windowsCommandIsDirectlyLaunchable(command, args || [], { env: childEnv })) {
+        // `raw` 는 native 보다 **먼저** 갈린다 — 그 순서가 계약이다
+        // (`windowsSpawnStrategy` 주석 참조). 예전에는 이 분기가 `raw` 를 보지
+        // 않아 캡처 모드에서만 `&&` 가 리터럴 인자가 됐다.
+        const windowsStrategy = process.platform === 'win32'
+            ? windowsSpawnStrategy(raw, windowsCommandIsDirectlyLaunchable(command, args || [], { env: childEnv }))
+            : undefined;
+        if (windowsStrategy === 'native') {
             const native = buildNativeCommandInvocation(command, args || []);
             displayCommand = native.display;
             // Windows 는 `taskkill /T` 가 pid 로 트리를 잡으므로 detached 가
@@ -7158,7 +7218,7 @@ export function executeShellCommand(
                 env: childEnv
             });
             attachChildHandlers(true);
-        } else if (process.platform === 'win32') {
+        } else if (windowsStrategy) {
             startPowerShellFallback();
         } else {
             const commandLine = raw

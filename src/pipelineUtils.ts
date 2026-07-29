@@ -1128,6 +1128,69 @@ export function windowsCommandIsDirectlyLaunchable(
     return false;
 }
 
+/** Windows 에서 raw `shell` 문자열을 넘길 인터프리터. */
+export interface WindowsRawShell {
+    executable: string;
+    /** `&&` / `||` 를 파싱할 수 있는가. Windows PowerShell 5.1 은 못 한다. */
+    supportsChainOperators: boolean;
+}
+
+/**
+ * raw `shell` 을 실행할 Windows 셸을 고른다.
+ *
+ * `powershell.exe` 는 **Windows PowerShell 5.1** 이고 `&&` / `||` 를 지원하지
+ * 않는다 (PowerShell 7 부터 도입, 실행 파일 이름은 `pwsh.exe`). 0.6.47 이
+ * `shell` 을 "셸에 그대로 넘긴다" 로 정의하면서 Windows 는 `powershell.exe` 로
+ * 고정했는데, 그러면 문서가 동작한다고 적은 `&&` 가 **파스 오류**로 끝난다.
+ *
+ * `cmd.exe` 로 가는 선택지도 있었지만 택하지 않았다 — 명령 문자열을 인용 없이
+ * 넘길 안전한 통로가 `-EncodedCommand`(base64) 뿐이고, 그것이 PowerShell 계열
+ * 에만 있다. cmd 로 가면 인용 문제를 우리가 다시 떠안는다.
+ */
+export function resolveWindowsRawShell(lookup: Partial<WindowsExecutableLookup> = {}): WindowsRawShell {
+    return windowsCommandIsDirectlyLaunchable('pwsh', [], lookup)
+        ? { executable: 'pwsh.exe', supportsChainOperators: true }
+        : { executable: 'powershell.exe', supportsChainOperators: false };
+}
+
+/** 명령 문자열이 PowerShell 7 이상을 요구하는 연산자를 쓰는가. */
+export function rawCommandUsesChainOperators(command: string): boolean {
+    return /&&|\|\|/.test(command);
+}
+
+/**
+ * Windows 에서 명령을 어떤 방식으로 띄울지 고른다.
+ *
+ * **raw 는 native 보다 먼저 판단해야 한다.** native 는 첫 토큰을 실행 파일로
+ * 보고 나머지를 argv 로 넘기므로 `&&`·`|`·`>` 가 리터럴 인자가 된다. 0.6.47 은
+ * 스트림 모드에서만 이 순서를 지켰고 캡처 모드는 `raw` 를 보지 않아, 같은
+ * 태스크가 `passTheResultToNextTask` 하나로 다르게 실행됐다. 순서를 함수로
+ * 고정해 두 경로가 같은 규칙을 공유하게 한다.
+ */
+export function windowsSpawnStrategy(raw: boolean, directlyLaunchable: boolean): 'raw-shell' | 'native' | 'powershell' {
+    if (raw) { return 'raw-shell'; }
+    return directlyLaunchable ? 'native' : 'powershell';
+}
+
+/**
+ * Windows 에서 raw `shell` one-shot 을 띄우는 PowerShell 스크립트.
+ *
+ * one-shot 은 파이프라인 수명을 벗어나 살아 있어야 하므로 인터프리터 자체를
+ * `Start-Process` 로 떼어 낸다. 명령 문자열은 `-EncodedCommand`(base64)로
+ * 넘겨 인용을 통째로 우회한다 — 이 경로가 Windows 에서 실행 검증이 어려운
+ * 만큼, 조립 규칙만이라도 순수 함수로 고정해 둔다.
+ */
+export function buildRawOneShotWindowsScript(
+    shellExecutable: string,
+    encodedCommand: string,
+    cwd: string | undefined
+): string {
+    const workingDirectoryPart = cwd ? ` -WorkingDirectory ${quotePowerShellArgument(cwd)}` : '';
+    return `Start-Process -FilePath ${quotePowerShellArgument(shellExecutable)}`
+        + ` -ArgumentList @('-NoProfile', '-EncodedCommand', ${quotePowerShellArgument(encodedCommand)})`
+        + `${workingDirectoryPart} -WindowStyle Hidden`;
+}
+
 export interface NativeCommandInvocation {
     executable: string;
     args: string[];

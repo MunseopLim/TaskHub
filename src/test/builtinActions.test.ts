@@ -120,24 +120,35 @@ suite('내장 예제 액션 노출 정책', () => {
          * `; ...` 가 있으면 뒤의 명령까지 실행하는 형태가 됐다 — 우리가 문서로
          * 금지한 패턴을 우리가 배포하고 있었다.
          */
-        test('번들 액션은 raw shell 에 값을 보간하지 않는다', () => {
-            const mediaPath = path.join(REPO_ROOT, 'media', 'actions.json');
-            const parsed = JSON.parse(fs.readFileSync(mediaPath, 'utf-8'));
+        test('번들 액션과 예제는 raw shell 에 값을 보간하지 않는다', () => {
+            // **예제 파일도 함께 본다.** 사용자가 *Browse Examples* 로 열어
+            // 베끼는 대상이라, 여기에 있는 형태가 그대로 사용자 액션이 된다 —
+            // 실제로 처음 이 검사를 번들 파일에만 걸었을 때 예제 쪽에 11건이
+            // 남아 있었다.
+            const targets = ['actions.json', 'actions_example.json'];
             const offenders: string[] = [];
-            for (const item of parsed) {
-                for (const task of item?.action?.tasks ?? []) {
-                    if (task.type !== 'shell') { continue; }
-                    const branches = typeof task.command === 'string'
-                        ? [task.command]
-                        : Object.values(task.command ?? {}).filter((v): v is string => typeof v === 'string');
-                    if (branches.some(branch => /\$\{[^}]+\}/.test(branch))) {
-                        offenders.push(`${item.id}.${task.id}`);
+            const walk = (items: any[], file: string) => {
+                for (const item of items ?? []) {
+                    for (const task of item?.action?.tasks ?? []) {
+                        if (task.type !== 'shell') { continue; }
+                        const branches = typeof task.command === 'string'
+                            ? [task.command]
+                            : Object.values(task.command ?? {}).filter((v): v is string => typeof v === 'string');
+                        if (branches.some(branch => /\$\{[^}]+\}/.test(branch))) {
+                            offenders.push(`${file}: ${item.id}.${task.id}`);
+                        }
                     }
+                    walk(item?.children ?? [], file);
                 }
+            };
+            for (const file of targets) {
+                const filePath = path.join(REPO_ROOT, 'media', file);
+                assert.ok(fs.existsSync(filePath), `${file} 이 사라졌다`);
+                walk(JSON.parse(fs.readFileSync(filePath, 'utf-8')), file);
             }
             assert.deepStrictEqual(
                 offenders, [],
-                `번들 액션이 raw 셸에 값을 끼워 넣는다 (command 타입이나 args 를 쓸 것): ${offenders.join(', ')}`
+                `배포하는 액션이 raw 셸에 값을 끼워 넣는다 (command 타입이나 args 를 쓸 것):\n  ${offenders.join('\n  ')}`
             );
         });
     });

@@ -56,7 +56,7 @@
         },
         {
           "id": "echo_file",
-          "type": "shell",
+          "type": "command",
           "command": "echo Selected file: ${select_file.path}",
           "passTheResultToNextTask": true,
           "output": {
@@ -122,7 +122,7 @@
         },
         {
           "id": "do_clean",
-          "type": "shell",
+          "type": "command",
           "command": "echo Cleaning ${select_target.path} ...",
           "revealTerminal": "always"
         }
@@ -147,7 +147,7 @@
         },
         {
           "id": "show_info",
-          "type": "shell",
+          "type": "command",
           "command": "echo path: ${pick_file.path} dir: ${pick_file.dir} name: ${pick_file.name} nameOnly: ${pick_file.fileNameOnly} ext: ${pick_file.fileExt}",
           "revealTerminal": "always"
         }
@@ -179,7 +179,7 @@
         },
         {
           "id": "announce_zip",
-          "type": "shell",
+          "type": "command",
           "command": "echo Archive created at: ${zip_folder.archivePath}",
           "revealTerminal": "always"
         }
@@ -246,7 +246,7 @@
         },
         {
           "id": "report_strings",
-          "type": "shell",
+          "type": "command",
           "command": "echo dirname: ${string_dir.output} basename: ${string_filename.output} nameOnly: ${string_clean_name.output} extension: ${string_ext.output} stripExt: ${string_stripped.output} upper: ${string_upper_name.output} lower: ${string_lower_name.output} trimmed: [${string_trimmed.output}]",
           "revealTerminal": "always"
         }
@@ -316,7 +316,7 @@
         },
         {
           "id": "echo_name",
-          "type": "shell",
+          "type": "command",
           "command": "echo Hello, ${input_name.value}!",
           "revealTerminal": "always"
         }
@@ -339,7 +339,7 @@
         },
         {
           "id": "show_args",
-          "type": "shell",
+          "type": "command",
           "command": "echo Full command args: ${input_args.value}",
           "revealTerminal": "always"
         }
@@ -382,7 +382,7 @@
         },
         {
           "id": "show_env",
-          "type": "shell",
+          "type": "command",
           "command": "echo Selected environment: ${select_env.value}",
           "revealTerminal": "always"
         }
@@ -419,7 +419,7 @@
         },
         {
           "id": "show_build",
-          "type": "shell",
+          "type": "command",
           "command": "echo Build type: ${select_build.value}",
           "revealTerminal": "always"
         }
@@ -441,7 +441,7 @@
         },
         {
           "id": "show_features",
-          "type": "shell",
+          "type": "command",
           "command": "echo Enabled features: ${select_features.values}",
           "revealTerminal": "always"
         }
@@ -504,7 +504,7 @@
         },
         {
           "id": "run_script",
-          "type": "shell",
+          "type": "command",
           "command": "node ${select_script.path} --env ${select_environment.value} --port ${input_port.value} ${input_extra_args.value}",
           "revealTerminal": "always"
         }

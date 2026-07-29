@@ -299,7 +299,20 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 
 Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.txt'`). 이 규칙은 스트림 모드와 캡처 모드 **양쪽 모두**에 적용됩니다.
 
-> **`shell` 로 바꿀 때 주의**: 셸에 그대로 넘어가므로 보간된 값도 셸 문법으로 해석됩니다. `${selectFile.path}` 나 `${ask.value}` 처럼 **사용자 입력·파일 경로·명령 출력에서 온 값**을 문자열 안에 넣으면, 그 값에 `;` 나 `$(...)` 가 있을 때 의도하지 않은 명령이 실행될 수 있습니다. 그런 값은 `args` 배열로 넘기세요 — `args` 는 `shell` 타입에서도 **인용해서** 뒤에 붙으므로 안전합니다. 값을 다루기만 하면 되는 경우에는 `command` 타입이 더 안전한 기본값입니다.
+> **`shell` 로 바꿀 때 주의**: 셸에 그대로 넘어가므로 보간된 값도 셸 문법으로 해석됩니다. `${selectFile.path}` 나 `${ask.value}` 처럼 **사용자 입력·파일 경로·명령 출력에서 온 값**을 문자열 안에 넣으면, 그 값에 `;` 나 `$(...)` 가 있을 때 의도하지 않은 명령이 실행될 수 있습니다. 그런 값은 `args` 배열로 넘기세요 — `args` 는 `shell` 타입에서도 **인용해서** 뒤에 붙으므로 안전합니다. 값을 다루기만 하면 되는 경우에는 `command` 타입이 더 안전한 기본값입니다. Doctor 의 `shell.interpolated-command` 룰이 이 형태를 찾아 줍니다 ([§23.2](#232-검사-항목)).
+
+#### `shell` 타입이 쓰는 인터프리터
+
+`shell` 이 "셸에 그대로 넘긴다" 고 할 때 그 셸이 무엇인지는 플랫폼마다 다릅니다.
+
+| 플랫폼 | 인터프리터 | 비고 |
+| --- | --- | --- |
+| macOS / Linux | 스트림 모드는 VS Code 의 기본 셸, 캡처 모드(`passTheResultToNextTask: true`)는 `/bin/sh` | `[[ ... ]]` 같은 bash/zsh 전용 문법은 캡처를 켜는 순간 실패할 수 있습니다 |
+| Windows | `pwsh.exe`(PowerShell 7)가 PATH 에 있으면 그것, 없으면 `powershell.exe`(Windows PowerShell 5.1) | 아래 참조 |
+
+**Windows PowerShell 5.1 에는 `&&` 와 `||` 가 없습니다** (PowerShell 7 부터 도입). `pwsh.exe` 가 없는 환경에서 이 연산자를 쓰면 TaskHub 가 실행 전에 그 사실을 설명하는 오류로 멈춥니다 — 5.1 에 그대로 넘기면 *"The token '&&' is not a valid statement separator"* 라는, 사용자가 자기 명령의 문제로 읽게 되는 파스 오류만 남기 때문입니다. `|`·`>`·`;` 는 5.1 에서도 동작하므로 막지 않습니다.
+
+이 경우 PowerShell 7 을 설치하거나, **태스크를 둘로 나누세요.** 파이프라인은 앞 단계가 실패하면 뒤 단계를 실행하지 않으므로 `&&` 와 의미가 같고, 어느 단계에서 실패했는지도 드러납니다.
 
 같은 이유로 **셸 변수 확장도 일어나지 않습니다.** `echo $MY_VAR` 는 `echo '$MY_VAR'` 가 되어 값이 아니라 `$MY_VAR` 라는 글자를 출력합니다(Windows 의 `%MY_VAR%` 도 같습니다). `env` 로 넘긴 값은 자식 프로세스의 환경에는 **정상적으로 들어가므로**, 그 값을 읽는 것은 셸이 아니라 실행되는 프로그램의 몫입니다 — 예: `printenv MY_VAR`, `cmd /c echo %MY_VAR%`, `node -e "console.log(process.env.MY_VAR)"`. 반면 TaskHub 자신의 변수 치환(`${task_id.output}`, `${workspaceFolder}` 등)은 토큰화 **이전**에 일어나므로 그대로 동작합니다.
 

@@ -34,6 +34,11 @@ import {
 	buildPowerShellInvocation,
 	buildNativeCommandInvocation,
 	windowsCommandIsDirectlyLaunchable,
+	resolveWindowsRawShell,
+	rawCommandUsesChainOperators,
+	windowsSpawnStrategy,
+	buildRawOneShotWindowsScript,
+	assertWindowsRawShellSupports,
 	buildPosixCommandLine,
 	encodePowerShellScript,
 	wrapCommandForOneShot,
@@ -567,6 +572,80 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('C:\\tools\\7z.exe', ['a'], lookup), true);
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('build.cmd', [], lookup), false);       // script shim
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('echo hi', [], lookup), false);         // shell builtin/alias
+		});
+	});
+
+	/**
+	 * Windows 의 raw `shell` 계약 (0.6.49).
+	 *
+	 * **실행 자체는 macOS 에서 검증할 수 없다.** 그래서 계약을 순수 함수로
+	 * 뽑아 여기서 고정한다 — 셸 선택, 연산자 지원 여부, 세 실행 모드가
+	 * 공유하는 분기 순서, one-shot 스크립트 조립까지.
+	 */
+	suite('Windows raw shell 계약', () => {
+		const withPwsh = {
+			env: { PATH: 'C:\\ps' },
+			isFile: (p: string) => p === 'C:\\ps\\pwsh.exe',
+		};
+		const withoutPwsh = {
+			env: { PATH: 'C:\\bin' },
+			isFile: (p: string) => p === 'C:\\bin\\node.exe',
+		};
+
+		test('pwsh.exe 가 PATH 에 있으면 그것을 쓴다 (&& 지원)', () => {
+			assert.deepStrictEqual(resolveWindowsRawShell(withPwsh), {
+				executable: 'pwsh.exe', supportsChainOperators: true,
+			});
+		});
+
+		test('없으면 powershell.exe 로 떨어지고 && 를 지원하지 않는다고 표시한다', () => {
+			assert.deepStrictEqual(resolveWindowsRawShell(withoutPwsh), {
+				executable: 'powershell.exe', supportsChainOperators: false,
+			});
+		});
+
+		test('rawCommandUsesChainOperators 는 && / || 만 본다', () => {
+			assert.strictEqual(rawCommandUsesChainOperators('a && b'), true);
+			assert.strictEqual(rawCommandUsesChainOperators('a || b'), true);
+			// 5.1 도 파이프와 리다이렉션·세미콜론은 파싱한다 — 이것까지 막으면
+			// 동작하는 명령을 우리가 거부하게 된다.
+			assert.strictEqual(rawCommandUsesChainOperators('a | b'), false);
+			assert.strictEqual(rawCommandUsesChainOperators('a > out.txt'), false);
+			assert.strictEqual(rawCommandUsesChainOperators('a; b'), false);
+		});
+
+		test('5.1 에 && 를 넘기려 하면 원인과 해결책을 담아 실패한다', () => {
+			assert.throws(
+				() => assertWindowsRawShellSupports('make && make flash', withoutPwsh),
+				/PowerShell 7|pwsh/,
+				'파스 오류로 넘기지 말고 이유를 설명해야 한다'
+			);
+			// pwsh 가 있으면 그대로 통과한다.
+			assert.strictEqual(
+				assertWindowsRawShellSupports('make && make flash', withPwsh).executable, 'pwsh.exe');
+			// 연산자가 없으면 5.1 에서도 통과한다.
+			assert.strictEqual(
+				assertWindowsRawShellSupports('make flash', withoutPwsh).executable, 'powershell.exe');
+		});
+
+		test('raw 는 직접 실행 가능한 명령이어도 native argv 경로를 타지 않는다', () => {
+			// 이것이 캡처 모드가 깨졌던 지점이다 — native 로 가면 `&&` 가
+			// 리터럴 인자가 된다. raw 판정이 native 판정보다 앞서야 한다.
+			assert.strictEqual(windowsSpawnStrategy(true, true), 'raw-shell');
+			assert.strictEqual(windowsSpawnStrategy(true, false), 'raw-shell');
+			assert.strictEqual(windowsSpawnStrategy(false, true), 'native');
+			assert.strictEqual(windowsSpawnStrategy(false, false), 'powershell');
+		});
+
+		test('one-shot 은 인터프리터를 Start-Process 로 떼어 내고 명령은 인코딩해 넘긴다', () => {
+			const script = buildRawOneShotWindowsScript('pwsh.exe', 'QQBCAEMA', 'C:\\proj dir');
+			assert.match(script, /^Start-Process -FilePath 'pwsh\.exe'/);
+			assert.match(script, /-EncodedCommand', 'QQBCAEMA'/);
+			// 공백이 든 경로가 인용된다.
+			assert.ok(script.includes("-WorkingDirectory 'C:\\proj dir'"), script);
+			assert.match(script, /-WindowStyle Hidden/);
+			// cwd 가 없으면 그 인자를 아예 넣지 않는다.
+			assert.ok(!buildRawOneShotWindowsScript('pwsh.exe', 'QQ', undefined).includes('-WorkingDirectory'));
 		});
 	});
 
