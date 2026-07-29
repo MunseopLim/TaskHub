@@ -1177,6 +1177,29 @@ export function quotePosixArgument(value: string): string {
  * only quoted if it contains a character outside the safe set — keeping
  * pathless names like `npm` readable in logs.
  */
+/**
+ * `shell` 타입의 실행 문자열 (0.6.47).
+ *
+ * `command` 문자열을 **셸에 그대로** 넘긴다 — `&&`, `|`, `>`, `$VAR` 가 모두
+ * 셸 문법으로 동작한다. `buildPosixCommandLine` 은 반대로 토큰마다 인용해
+ * argv 로 만든다(그쪽이 `command` 타입의 계약이다).
+ *
+ * `args` 는 뒤에 **인용해서** 붙인다. 공백이 든 경로를 안전하게 넘기는 통로가
+ * 그대로 필요하기 때문이다 — raw 문자열 안에 그런 값을 보간하면 셸이 쪼갠다.
+ */
+export function buildRawShellCommandLine(command: string, args: string[]): string {
+    const trimmed = command.trim();
+    if (!args || args.length === 0) { return trimmed; }
+    return `${trimmed} ${args.map(arg => quotePosixArgument(arg)).join(' ')}`;
+}
+
+/** {@link buildRawShellCommandLine} 의 PowerShell 판. */
+export function buildRawPowerShellCommandLine(command: string, args: string[]): string {
+    const trimmed = command.trim();
+    if (!args || args.length === 0) { return trimmed; }
+    return `${trimmed} ${args.map(arg => quotePowerShellArgument(arg)).join(' ')}`;
+}
+
 export function buildPosixCommandLine(command: string, args: string[]): string {
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
     const commandPart = /^[A-Za-z0-9_./-]+$/.test(executable) ? executable : quotePosixArgument(executable);

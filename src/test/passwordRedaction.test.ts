@@ -1339,3 +1339,80 @@ suite('Password taint and redaction', function () {
         });
     });
 });
+
+
+/**
+ * `shell` 과 `command` 의 계약 분리 (0.6.47).
+ *
+ * 이름은 "Shell Command" 인데 실제로는 argv 로 실행되어, `&&`·`|`·`>`·`$VAR`
+ * 가 모두 리터럴이 됐다. 사용자가 터미널에서 쓰던 것을 붙여넣으면 **조용히**
+ * 다르게 동작했다 — 오류도 없이 그냥 안 했다.
+ *
+ * 이제 `shell` 은 문자열을 셸에 그대로 넘기고, `command` 는 기존의 argv
+ * 실행을 유지한다. 두 타입을 **함께** 봐야 한다 — 한쪽만 보면 둘 다 같은
+ * 동작으로 바뀌는 회귀를 놓친다.
+ */
+suite('shell / command 실행 계약 (0.6.47)', function () {
+    this.timeout(30000);
+
+    let extension: typeof import('../extension');
+    let workspace: string;
+
+    suiteSetup(() => { extension = require('../extension') as typeof import('../extension'); });
+    setup(() => { workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-shell-contract-')); });
+    teardown(() => { try { fs.rmSync(workspace, { recursive: true, force: true }); } catch { /* best effort */ } });
+
+    function makeCtx(): vscode.ExtensionContext {
+        return {
+            extensionPath: workspace, subscriptions: [],
+            workspaceState: { get: (_k: string, d?: any) => d, update: async () => { }, keys: () => [], setKeysForSync: () => { } },
+            globalState: { get: (_k: string, d?: any) => d, update: async () => { }, keys: () => [], setKeysForSync: () => { } },
+            extensionMode: vscode.ExtensionMode.Test,
+            extension: { packageJSON: { version: '0.0.0-shell-contract-test' } },
+        } as unknown as vscode.ExtensionContext;
+    }
+
+    /** 캡처 모드로 한 태스크를 돌리고 stdout 을 돌려준다. */
+    async function runOne(type: 'shell' | 'command', command: string): Promise<string> {
+        let captured = '';
+        const item = {
+            id: `contract-${type}-${Date.now()}`,
+            title: 'Contract',
+            action: {
+                description: 'contract probe',
+                tasks: [{ id: 'probe', type, command, cwd: workspace, passTheResultToNextTask: true,
+                    output: { capture: [{ name: 'all', pattern: '([\\s\\S]*)' }] } }],
+            },
+        } as unknown as any;
+        // 결과는 history 대신 파일로 받는다 — 셸 리다이렉션이 동작하는지가
+        // 이 테스트의 핵심이라, 파일이 곧 증거다.
+        await extension.executeAction(item, makeCtx(), { refresh: () => { } } as any)
+            .catch(() => { /* 실패 여부는 아래 파일로 판정한다 */ });
+        const out = path.join(workspace, 'out.txt');
+        if (fs.existsSync(out)) { captured = fs.readFileSync(out, 'utf8'); }
+        return captured;
+    }
+
+    test('shell 은 리다이렉션을 셸 연산자로 처리한다', async () => {
+        await runOne('shell', 'echo redirected > out.txt');
+        const out = path.join(workspace, 'out.txt');
+        assert.ok(fs.existsSync(out), 'shell 타입인데 리다이렉션이 일어나지 않았다');
+        assert.match(fs.readFileSync(out, 'utf8'), /redirected/);
+    });
+
+    test('command 는 리다이렉션을 리터럴 인자로 넘긴다', async () => {
+        await runOne('command', 'echo redirected > out.txt');
+        assert.ok(
+            !fs.existsSync(path.join(workspace, 'out.txt')),
+            'command 타입이 셸 리다이렉션을 수행했다 — argv 계약이 깨졌다'
+        );
+    });
+
+    test('shell 은 && 로 이은 두 명령을 모두 실행한다', async function () {
+        if (process.platform === 'win32') { this.skip(); }
+        await runOne('shell', 'echo first > out.txt && echo second >> out.txt');
+        const body = fs.readFileSync(path.join(workspace, 'out.txt'), 'utf8');
+        assert.match(body, /first/);
+        assert.match(body, /second/, '&& 뒤의 명령이 실행되지 않았다');
+    });
+});

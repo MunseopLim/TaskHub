@@ -1062,6 +1062,8 @@ import {
     encodePowerShellScript,
     quotePosixArgument,
     buildPosixCommandLine,
+    buildRawPowerShellCommandLine,
+    buildRawShellCommandLine,
     normalizeEol,
     encodeFileContent,
     withTaskTimeout,
@@ -5500,7 +5502,24 @@ function toProcessExecutionOptions(options: vscode.ShellExecutionOptions): vscod
     return processOptions;
 }
 
-export function createShellExecution(command: string, args: string[], options: vscode.ShellExecutionOptions, useUtf8Console: boolean): { shellExecution: vscode.ShellExecution | vscode.ProcessExecution; displayCommand: string; usesNativeExecution?: boolean } {
+export function createShellExecution(command: string, args: string[], options: vscode.ShellExecutionOptions, useUtf8Console: boolean, raw = false): { shellExecution: vscode.ShellExecution | vscode.ProcessExecution; displayCommand: string; usesNativeExecution?: boolean } {
+    // `shell` 타입은 문자열을 셸에 그대로 넘긴다 (0.6.47). Windows 에서도
+    // 네이티브 직접 실행 경로를 타지 않는다 — 그건 argv 실행이라 `&&` 나
+    // 리다이렉션이 다시 리터럴이 되어 버린다.
+    if (raw) {
+        if (process.platform === 'win32') {
+            const line = buildRawPowerShellCommandLine(command, args);
+            const utf8Prefix = useUtf8Console ? '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n' : '';
+            const encoded = encodePowerShellScript(`${utf8Prefix}${line}`);
+            return {
+                shellExecution: new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options),
+                displayCommand: line
+            };
+        }
+        const line = buildRawShellCommandLine(command, args);
+        return { shellExecution: new vscode.ShellExecution(line, options), displayCommand: line };
+    }
+
     if (process.platform === 'win32') {
         // VS Code merges `options.env` onto the parent environment for the
         // spawned task, so the child's effective PATH is `options.env.PATH ??
@@ -5529,7 +5548,12 @@ export function createShellExecution(command: string, args: string[], options: v
     };
 }
 
-export function wrapCommandForOneShot(command: string, args: string[], cwd: string | undefined, useUtf8Console: boolean, env: NodeJS.ProcessEnv = process.env): { commandLine: string; displayCommand: string; isPowerShellScript: boolean } {
+export function wrapCommandForOneShot(command: string, args: string[], cwd: string | undefined, useUtf8Console: boolean, env: NodeJS.ProcessEnv = process.env, raw = false): { commandLine: string; displayCommand: string; isPowerShellScript: boolean } {
+    if (raw && process.platform !== 'win32') {
+        const wrapped = `nohup ${buildRawShellCommandLine(command, args)} >/dev/null 2>&1 &`;
+        return { commandLine: wrapped, displayCommand: wrapped, isPowerShellScript: false };
+    }
+
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
     if (process.platform === 'win32') {
         const utf8Prefix = useUtf8Console ? "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n" : '';
@@ -5594,7 +5618,7 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
         // onto the parent env) — used so `task.env.PATH` extensions are honoured
         // when judging launchability.
         const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...envOverrides };
-        const wrapped = wrapCommandForOneShot(command, taskArgs, options.cwd, useUtf8Console, effectiveEnv);
+        const wrapped = wrapCommandForOneShot(command, taskArgs, options.cwd, useUtf8Console, effectiveEnv, task.type === 'shell');
         if (wrapped.isPowerShellScript) {
             const encoded = encodePowerShellScript(wrapped.commandLine);
             shellExecution = new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options);
@@ -5605,7 +5629,8 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
     } else {
         const execCommand = command;
         const execArgs = taskArgs;
-        const result = createShellExecution(execCommand, execArgs, options, useUtf8Console);
+        // `shell` 은 raw, `command` 는 argv (0.6.47).
+        const result = createShellExecution(execCommand, execArgs, options, useUtf8Console, task.type === 'shell');
         shellExecution = result.shellExecution;
         displayCommand = result.displayCommand;
     }
@@ -5711,6 +5736,8 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
  * that the process may outlive the action (and the extension host).
  */
 function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string): void {
+    // `shell` 타입은 문자열을 셸에 그대로 넘긴다 (0.6.47).
+    const raw = task.type === 'shell';
     const command = getCommandString(task.command);
     const args = Array.isArray(task.args) ? task.args : [];
     const { envOverrides, useUtf8Console } = resolveExecutionSettings(task.env);
@@ -5736,7 +5763,12 @@ function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string
             // PowerShell resolves .cmd/.bat shims and scripts consistently;
             // the encoded script keeps argument quoting identical to captured
             // commands without exposing it in a command-line audit surface.
-            const invocation = buildPowerShellInvocation(command, args, useUtf8Console);
+            const invocation = raw
+                ? (() => {
+                    const line = buildRawPowerShellCommandLine(command, args);
+                    return { script: line, display: line };
+                })()
+                : buildPowerShellInvocation(command, args, useUtf8Console);
             // powershell.exe does not reliably propagate an external program's
             // exit code unless the script exits explicitly with LASTEXITCODE.
             const script = invocation.script +
@@ -5755,7 +5787,7 @@ function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string
                 }
             );
         } else {
-            child = spawn(buildPosixCommandLine(command, args), [], {
+            child = spawn(raw ? buildRawShellCommandLine(command, args) : buildPosixCommandLine(command, args), [], {
                 cwd: workingDirectory,
                 env: childEnv,
                 detached: true,
@@ -5794,7 +5826,9 @@ async function handleCommand(task: any, context: vscode.ExtensionContext, worksp
         task.redactOutput === true,
         task.runGeneration,
         task.sensitiveDebugOutputObserver,
-        task.discardCapturedOutput === true
+        task.discardCapturedOutput === true,
+        // `shell` 은 raw, `command` 는 argv (0.6.47).
+        task.type === 'shell'
     );
     // `output` keeps its historical meaning (= stdout only) so existing
     // `output.capture` rules and `${task.output}` interpolation behave
@@ -6783,7 +6817,12 @@ export function executeShellCommand(
     redactCapturedOutput = false,
     runGeneration?: number,
     rawOutputObserver?: (target: 'stdout' | 'stderr', chunk: string) => void,
-    discardCapturedOutput = false
+    discardCapturedOutput = false,
+    /**
+     * `shell` 타입 — 명령 문자열을 셸에 그대로 넘긴다 (0.6.47). `command`
+     * 타입은 false 로 두어 토큰마다 인용하는 argv 실행을 유지한다.
+     */
+    raw = false
 ): Promise<{ stdout: string; stderr: string }> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
@@ -6907,7 +6946,12 @@ export function executeShellCommand(
         };
 
         const startPowerShellFallback = (reason?: Error) => {
-            const invocation = buildPowerShellInvocation(command, args || [], useUtf8Console);
+            const invocation = raw
+                ? (() => {
+                    const line = buildRawPowerShellCommandLine(command, args || []);
+                    return { script: line, display: line };
+                })()
+                : buildPowerShellInvocation(command, args || [], useUtf8Console);
             const encoded = encodePowerShellScript(invocation.script);
             displayCommand = invocation.display;
             if (showVerboseLogs && reason) {
@@ -7033,7 +7077,9 @@ export function executeShellCommand(
         } else if (process.platform === 'win32') {
             startPowerShellFallback();
         } else {
-            const commandLine = buildPosixCommandLine(command, args || []);
+            const commandLine = raw
+                ? buildRawShellCommandLine(command, args || [])
+                : buildPosixCommandLine(command, args || []);
             displayCommand = commandLine;
             childProcess = spawn(commandLine, [], {
                 cwd: workingDirectory,
