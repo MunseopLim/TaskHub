@@ -2136,51 +2136,114 @@ import { MainViewProvider, Folder, Action } from './providers/mainViewProvider';
 import { actionStates, ActionProgress, ActionRunState } from './providers/actionStatus';
 export { MainViewProvider, Folder, Action };
 
-// Per-action, per-task tracking. Both maps are keyed by actionId at the
-// outer layer and taskId at the inner layer so parallel tasks (roadmap §4)
-// can be timed-out / stopped independently without affecting siblings.
+// Per-action, per-run-generation, per-task tracking. Both maps are keyed by
+// actionId at the outer layer and an opaque generation+task key inside, so a
+// late event from an abandoned run cannot overwrite/delete a newer run's slot.
+// Parallel siblings can still be timed-out / stopped independently.
 // Legacy spawn callers that don't carry a taskId use the empty string '' as
 // a sentinel slot — task ids are required non-empty by the schema, so no
 // real task collides with it.
-const activeTasks = new Map<string, Map<string, vscode.TaskExecution>>();
+interface ActiveTaskExecution {
+    readonly taskId: string;
+    readonly execution: vscode.TaskExecution;
+    readonly generation: number;
+}
+
+const activeTasks = new Map<string, Map<string, ActiveTaskExecution>>();
 const manuallyTerminatedActions = new Set<string>();
 
 /**
- * Per-action cancellation, keyed by action id.
+ * Cancellation and sensitive-data state for one concrete execution.
  *
- * `activeTasks` and `actionChildProcesses` only cover work that has a process
- * behind it. An action sitting on an `inputBox` / `quickPick` / `fileDialog`
- * prompt has neither, yet it is unambiguously *running* — the tree shows the
- * spinner and offers the inline stop button. Stop then found nothing to
- * terminate and told the user *"활성 태스크를 찾을 수 없습니다"* while the
- * prompt stayed on screen: a stop button that does not stop.
- *
- * The token is handed to `showInputBox` / `showQuickPick`, which VS Code
- * dismisses on cancellation, so those prompts really do close. Native file
- * dialogs take no token and cannot be dismissed programmatically; for them
- * the cancellation is *recorded* and the pipeline aborts as soon as the
- * dialog returns, instead of marching on through the rest of the tasks.
+ * The action id is deliberately NOT the identity of a run. A total-output
+ * abort can stop waiting after its drain deadline while a native dialog is
+ * still open. The user may then start the same action id again. Every late
+ * continuation must keep consulting the old object it captured, never the new
+ * run that happens to have the same id.
+ */
+interface ActionRunContext {
+    readonly id: string;
+    readonly generation: number;
+    readonly cancellation: vscode.CancellationTokenSource;
+    /** The scheduler stopped supervising unresolved work after its drain cap. */
+    abandoned: boolean;
+    /** The owning executeAction / detached pipeline has returned. */
+    closed: boolean;
+    /** Results that contain or were derived from a password input. */
+    readonly secretTaskIds: Set<string>;
+    /** AbortControllers owned by currently running built-in archive tasks. */
+    readonly taskAbortControllers: Map<string, Set<AbortController>>;
+}
+
+let nextActionRunGeneration = 1;
+const currentActionRuns = new Map<string, ActionRunContext>();
+
+/**
+ * Kept as the current-run token index for the public `isActionCancelled`
+ * helper and existing tests. Runtime continuations never look themselves up
+ * through this map; they capture an {@link ActionRunContext} instead.
  */
 const actionCancellations = new Map<string, vscode.CancellationTokenSource>();
 
+function createActionRunContext(id: string): ActionRunContext {
+    return {
+        id,
+        generation: nextActionRunGeneration++,
+        cancellation: new vscode.CancellationTokenSource(),
+        abandoned: false,
+        closed: false,
+        secretTaskIds: new Set<string>(),
+        taskAbortControllers: new Map<string, Set<AbortController>>(),
+    };
+}
+
+/** Register a new UI-visible run and return the exact object tasks capture. */
+function beginActionCancellation(id: string): ActionRunContext {
+    const previous = currentActionRuns.get(id);
+    if (previous) {
+        // Defensive only: the duplicate-run guard normally makes this
+        // unreachable. If state ever drifts, do not let the stale run continue.
+        previous.abandoned = true;
+        previous.cancellation.cancel();
+    }
+    // A run generation never inherits the previous generation's manual-stop
+    // classification, even if defensive recovery allowed the new run before
+    // the stale owner reached its finalizer.
+    manuallyTerminatedActions.delete(id);
+    const run = createActionRunContext(id);
+    currentActionRuns.set(id, run);
+    actionCancellations.set(id, run.cancellation);
+    return run;
+}
+
 /**
- * Start (or restart) the cancellation scope for an action run. Any source
- * left over from a previous run is disposed so a stale cancelled token can
- * never make a fresh run abort immediately.
+ * Close only this generation. A stale run must never delete a newer run's
+ * cancellation source or secret metadata.
  */
-function beginActionCancellation(id: string): void {
-    actionCancellations.get(id)?.dispose();
-    actionCancellations.set(id, new vscode.CancellationTokenSource());
+function endActionCancellation(run: ActionRunContext): void {
+    run.closed = true;
+    // `dispose()` alone does not notify token-aware prompts. Cancellation is
+    // required so any late inputBox/quickPick owned by this generation closes
+    // instead of surviving after its action has returned.
+    if (!run.cancellation.token.isCancellationRequested) {
+        run.cancellation.cancel();
+    }
+    for (const controllers of run.taskAbortControllers.values()) {
+        for (const controller of controllers) { controller.abort(); }
+    }
+    run.taskAbortControllers.clear();
+    run.cancellation.dispose();
+    if (currentActionRuns.get(run.id) === run) {
+        currentActionRuns.delete(run.id);
+    }
+    if (actionCancellations.get(run.id) === run.cancellation) {
+        actionCancellations.delete(run.id);
+    }
 }
 
-function endActionCancellation(id: string): void {
-    actionCancellations.get(id)?.dispose();
-    actionCancellations.delete(id);
-}
-
-/** The running action's token, or `undefined` when it has no live scope. */
-function actionCancellationToken(id: string): vscode.CancellationToken | undefined {
-    return actionCancellations.get(id)?.token;
+/** The captured run's token, never a token belonging to a later generation. */
+function actionCancellationToken(run: ActionRunContext): vscode.CancellationToken {
+    return run.cancellation.token;
 }
 
 /**
@@ -2209,17 +2272,84 @@ function isArchiveAbortError(error: unknown): boolean {
  * 반환된 `dispose` 를 **반드시** 부른다. 토큰 리스너를 걸어 두면 액션이
  * 끝날 때까지 남는데, 한 액션이 zip 태스크를 여러 번 돌리면 그만큼 쌓인다.
  */
-function abortSignalForAction(actionId?: string): { signal?: AbortSignal; dispose: () => void } {
-    const token = actionId ? actionCancellationToken(actionId) : undefined;
-    if (!token) { return { signal: undefined, dispose: () => { /* 없음 */ } }; }
-
+function abortSignalForAction(
+    run: ActionRunContext,
+    taskId: string
+): { signal: AbortSignal; abort: () => void; dispose: () => void } {
+    const token = actionCancellationToken(run);
     const controller = new AbortController();
-    if (token.isCancellationRequested) {
+    let controllers = run.taskAbortControllers.get(taskId);
+    if (!controllers) {
+        controllers = new Set<AbortController>();
+        run.taskAbortControllers.set(taskId, controllers);
+    }
+    controllers.add(controller);
+
+    if (token.isCancellationRequested || run.abandoned || run.closed) {
         controller.abort();
-        return { signal: controller.signal, dispose: () => { /* 리스너 없음 */ } };
+        return {
+            signal: controller.signal,
+            abort: () => controller.abort(),
+            dispose: () => {
+                controllers!.delete(controller);
+                if (controllers!.size === 0) { run.taskAbortControllers.delete(taskId); }
+            },
+        };
     }
     const sub = token.onCancellationRequested(() => controller.abort());
-    return { signal: controller.signal, dispose: () => sub.dispose() };
+    return {
+        signal: controller.signal,
+        abort: () => controller.abort(),
+        dispose: () => {
+            sub.dispose();
+            controllers!.delete(controller);
+            if (controllers!.size === 0) { run.taskAbortControllers.delete(taskId); }
+        },
+    };
+}
+
+function abortTaskOperations(run: ActionRunContext, taskId: string): void {
+    for (const controller of run.taskAbortControllers.get(taskId) ?? []) {
+        controller.abort();
+    }
+}
+
+interface TaskExecutionScope {
+    readonly run: ActionRunContext;
+    readonly taskId: string;
+    readonly cancellation: vscode.CancellationTokenSource;
+    readonly runCancellationSubscription: vscode.Disposable;
+    timedOut: boolean;
+}
+
+function createTaskExecutionScope(run: ActionRunContext, taskId: string): TaskExecutionScope {
+    const cancellation = new vscode.CancellationTokenSource();
+    if (run.cancellation.token.isCancellationRequested || run.abandoned || run.closed) {
+        cancellation.cancel();
+    }
+    const runCancellationSubscription = run.cancellation.token.onCancellationRequested(() => {
+        if (!cancellation.token.isCancellationRequested) { cancellation.cancel(); }
+    });
+    return { run, taskId, cancellation, runCancellationSubscription, timedOut: false };
+}
+
+function timeoutTaskExecution(scope: TaskExecutionScope): void {
+    scope.timedOut = true;
+    if (!scope.cancellation.token.isCancellationRequested) {
+        scope.cancellation.cancel();
+    }
+}
+
+function disposeTaskExecutionScope(scope: TaskExecutionScope): void {
+    scope.runCancellationSubscription.dispose();
+    scope.cancellation.dispose();
+}
+
+function throwIfTaskInactive(scope: TaskExecutionScope): void {
+    throwIfActionCancelled(scope.run);
+    if (scope.timedOut) {
+        throw new Error(`Task '${scope.taskId}' resumed after its timeout and was discarded.`);
+    }
 }
 
 /**
@@ -2231,49 +2361,45 @@ export function isActionCancelled(id: string, sources: ReadonlyMap<string, vscod
     return sources.get(id)?.token.isCancellationRequested === true;
 }
 
-/**
- * 이번 실행에서 **비밀 값을 만들어 낸** 태스크 id 들 (액션별).
- *
- * `shouldRecordTaskInput` 이 `password: true` 인 inputBox 의 **입력 자체**는
- * 이력에서 빼 준다. 그런데 그 값을 `${ask.output}` 으로 명령에 보간하면,
- * 보간이 **끝난** 명령줄이 `recordCommands` 로 workspace 이력에 평문 저장되고
- * verbose 로그에도 그대로 찍힌다 — 가려 둔 값이 옆문으로 새는 셈이다.
- *
- * 값이 아니라 **태스크 id** 를 기억한다. 값으로 문자열 치환을 하면 짧은
- * 비밀번호("1" 같은)가 명령 곳곳을 뭉개고, 반대로 놓치는 경우도 생긴다.
- * id 를 알면 기록용 문자열을 만들 때 그 자리만 정확히 가릴 수 있다.
- */
-const actionSecretTaskIds = new Map<string, Set<string>>();
+function markTaskResultSecret(run: ActionRunContext, taskId: string): void {
+    run.secretTaskIds.add(taskId);
+}
 
-function markTaskResultSecret(actionId: string | undefined, taskId: string): void {
-    if (!actionId) { return; }
-    let ids = actionSecretTaskIds.get(actionId);
-    if (!ids) {
-        ids = new Set<string>();
-        actionSecretTaskIds.set(actionId, ids);
-    }
-    ids.add(taskId);
+/**
+ * Conservatively propagate password taint through the task graph without ever
+ * retaining the password value itself. `${secretTask.*}` references anywhere
+ * in a task make its result sensitive; bare ids in `inputs` are handled too.
+ */
+function taskReferencesSecret(task: import('./schema').Task, run: ActionRunContext): boolean {
+    if (run.secretTaskIds.size === 0) { return false; }
+    // Reuse the graph's platform-aware scanner. Besides avoiding drift with
+    // scheduling semantics, this prevents a secret reference in an inactive
+    // Windows/macOS/Linux branch from unnecessarily tainting the branch that
+    // actually runs on this host. Bare task ids in `inputs` are covered too.
+    return inferTaskDependencies(task, run.secretTaskIds).size > 0;
 }
 
 /** 표시·기록용 보간 컨텍스트. 비밀 태스크의 결과를 자리표시자로 바꾼다. */
-function redactSecretsInContext(actionId: string | undefined, context: Record<string, any>): Record<string, any> {
-    const ids = actionId ? actionSecretTaskIds.get(actionId) : undefined;
-    if (!ids || ids.size === 0) { return context; }
+function redactSecretsInContext(run: ActionRunContext, context: Record<string, any>): Record<string, any> {
+    if (run.secretTaskIds.size === 0) { return context; }
 
     const redactValue = (value: unknown): unknown => {
-        if (typeof value === 'string') { return SECRET_PLACEHOLDER; }
-        if (value && typeof value === 'object' && !Array.isArray(value)) {
+        if (Array.isArray(value)) { return value.map(redactValue); }
+        if (value && typeof value === 'object') {
             const out: Record<string, unknown> = {};
             for (const [k, v] of Object.entries(value)) {
-                out[k] = typeof v === 'string' ? SECRET_PLACEHOLDER : v;
+                out[k] = redactValue(v);
             }
             return out;
         }
-        return value;
+        // Password presets enter as `unknown`, so do not assume every secret
+        // leaf is a string. Numbers/booleans would otherwise be converted to
+        // text by interpolation and leak into the display command.
+        return SECRET_PLACEHOLDER;
     };
 
     const redacted = { ...context };
-    for (const id of ids) {
+    for (const id of run.secretTaskIds) {
         if (Object.prototype.hasOwnProperty.call(redacted, id)) {
             redacted[id] = redactValue(redacted[id]);
         }
@@ -2288,21 +2414,32 @@ function redactSecretsInContext(actionId: string | undefined, context: Record<st
  * 보여 줄 때는 가려야 한다. 비밀이 없으면 원래 명령줄과 같다.
  */
 function buildRedactedDisplayCommand(
-    actionId: string | undefined,
+    run: ActionRunContext,
     task: import('./schema').Task,
     interpolationContext: Record<string, any>,
     interpolatedCommand: string,
     interpolatedArgs: string[]
 ): string {
-    const shown = redactSecretsInContext(actionId, interpolationContext);
+    const shown = redactSecretsInContext(run, interpolationContext);
     if (shown === interpolationContext) {
         return buildNativeCommandInvocation(interpolatedCommand, interpolatedArgs).display;
     }
-    const source = typeof task.command === 'string'
-        ? interpolatePipelineVariables(task.command, shown)
-        : interpolatedCommand;
+    // Resolve the raw platform branch first, then interpolate the redacted
+    // context. Reusing `interpolatedCommand` for an object would reuse the
+    // already-expanded password value.
+    const source = interpolatePipelineVariables(getCommandString(task.command), shown);
     const args = task.args ? task.args.map(arg => interpolatePipelineVariables(arg, shown)) : [];
     return buildNativeCommandInvocation(source, args).display;
+}
+
+function buildRedactedDisplayValue(
+    run: ActionRunContext,
+    interpolationContext: Record<string, any>,
+    template: string | undefined,
+    actual: string | undefined
+): string | undefined {
+    if (!template || actual === undefined || run.secretTaskIds.size === 0) { return actual; }
+    return interpolatePipelineVariables(template, redactSecretsInContext(run, interpolationContext));
 }
 
 /** 이력·로그에 남기는 자리표시자. 값 길이를 짐작하게 하지 않는다. */
@@ -2316,29 +2453,28 @@ export class ActionStoppedError extends Error {
     }
 }
 
-/**
- * Abort the run if a stop was requested. Called after awaiting anything that
- * cannot carry a cancellation token itself — currently the native file/folder
- * dialogs.
- */
-/**
- * drain 상한에 걸려 **기다리기를 포기한** 실행들.
- *
- * 액션이 끝나면 `finalizeActionRun` 이 취소 소스를 폐기한다(다음 실행이 첫
- * 토큰 검사에서 곧바로 중단되지 않게 하려는, 의도된 동작이다). 그런데 그
- * 시점에도 아직 안 끝난 태스크가 있을 수 있다 — 네이티브 다이얼로그처럼
- * 프로그램으로 닫을 수 없는 것들이다. 사람이 한참 뒤 다이얼로그에 답하면
- * 그 태스크가 이어서 진행되는데, 취소 소스가 이미 없으므로
- * `isActionCancelled` 은 false 를 돌려주고 **이미 실패로 끝난 액션의 남은
- * 단계가 계속 실행된다** (`itemsFromCommand` 실행, `output.mode: file` 쓰기 등).
- *
- * 그래서 취소 소스와 **수명이 다른** 표시를 따로 둔다. 다음 실행이 시작될 때
- * 지우므로(`markActionAsRunning`) 재실행을 막지는 않는다.
- */
-const abandonedActionRuns = new Set<string>();
+class SensitiveTaskError extends Error {
+    constructor(taskId: string) {
+        // Do not retain the original error as `cause`: stderr and spawn errors
+        // can themselves contain the secret, and callers may serialize the
+        // complete Error object rather than just `.message`.
+        super(`Task '${taskId}' failed; details were hidden because the task used a password input.`);
+        this.name = 'SensitiveTaskError';
+    }
+}
 
-function throwIfActionCancelled(id: string): void {
-    if (isActionCancelled(id) || abandonedActionRuns.has(id)) {
+function logSuppressedSensitiveDiagnostics(taskId: string): void {
+    const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+    if (showVerboseLogs) {
+        outputChannel.appendLine(
+            `[INFO] Diagnostics for task '${taskId}' were suppressed because the task used a password input.`
+        );
+    }
+}
+
+/** Check the exact run captured before an uncancellable await. */
+function throwIfActionCancelled(run: ActionRunContext): void {
+    if (run.cancellation.token.isCancellationRequested || run.abandoned || run.closed) {
         throw new ActionStoppedError();
     }
 }
@@ -2456,14 +2592,28 @@ function isParallelActionActive(id: string): boolean {
     return parallelActionRefs.has(id);
 }
 
-const actionChildProcesses = new Map<string, Map<string, Set<ReturnType<typeof spawn>>>>();
+interface ChildProcessBucket {
+    readonly taskId: string;
+    readonly generation: number | undefined;
+    readonly processes: Set<ReturnType<typeof spawn>>;
+}
 
-function setActiveTaskExecution(actionId: string, taskId: string, execution: vscode.TaskExecution): void {
+const actionChildProcesses = new Map<string, Map<string, ChildProcessBucket>>();
+
+function taskGenerationBucketKey(taskId: string, generation?: number): string {
+    return `${generation ?? 'legacy'}\u0000${taskId}`;
+}
+
+function setActiveTaskExecution(
+    actionId: string,
+    taskId: string,
+    execution: vscode.TaskExecution,
+    generation: number
+): void {
     if (!taskId) {
         // Defensive guard: schema enforces non-empty `task.id`, and the only
-        // call site already pre-checks `task.id`. An empty taskId here would
-        // collide with the legacy '' sentinel used by `actionChildProcesses`
-        // for unrelated callers — fail loudly instead of corrupting state.
+        // call site already pre-checks `task.id`. Fail loudly if an internal
+        // caller ever violates that invariant.
         throw new Error(`setActiveTaskExecution called with empty taskId for action '${actionId}'.`);
     }
     let perAction = activeTasks.get(actionId);
@@ -2471,18 +2621,27 @@ function setActiveTaskExecution(actionId: string, taskId: string, execution: vsc
         perAction = new Map();
         activeTasks.set(actionId, perAction);
     }
-    perAction.set(taskId, execution);
+    perAction.set(taskGenerationBucketKey(taskId, generation), { taskId, execution, generation });
 }
 
-function deleteActiveTaskExecution(actionId: string, taskId: string): void {
+function deleteActiveTaskExecution(
+    actionId: string,
+    taskId: string,
+    generation: number,
+    expectedExecution?: vscode.TaskExecution
+): void {
     const perAction = activeTasks.get(actionId);
     if (!perAction) { return; }
-    perAction.delete(taskId);
+    const key = taskGenerationBucketKey(taskId, generation);
+    const current = perAction.get(key);
+    if (!current) { return; }
+    if (expectedExecution && current.execution !== expectedExecution) { return; }
+    perAction.delete(key);
     if (perAction.size === 0) { activeTasks.delete(actionId); }
 }
 
-function getActiveTaskExecution(actionId: string, taskId: string): vscode.TaskExecution | undefined {
-    return activeTasks.get(actionId)?.get(taskId);
+function getActiveTaskExecution(actionId: string, taskId: string, generation: number): vscode.TaskExecution | undefined {
+    return activeTasks.get(actionId)?.get(taskGenerationBucketKey(taskId, generation))?.execution;
 }
 const actionStartTimestamps = new Map<string, number>();
 
@@ -2728,7 +2887,7 @@ export function killProcessTree(child: ReturnType<typeof spawn>): Promise<boolea
     });
 }
 
-function terminateChildProcesses(actionId: string, taskId?: string): boolean {
+function terminateChildProcesses(actionId: string, taskId?: string, generation?: number): boolean {
     const perAction = actionChildProcesses.get(actionId);
     if (!perAction || perAction.size === 0) {
         return false;
@@ -2766,23 +2925,29 @@ function terminateChildProcesses(actionId: string, taskId?: string): boolean {
     // 통째로 지우면 아직 살아 있는 프로세스를 추적할 방법이 사라진다.
     // 비워진 슬롯만 정리한다.
     const sweepEmpty = () => {
-        for (const [tid, set] of Array.from(perAction)) {
-            if (set.size === 0) { perAction.delete(tid); }
+        for (const [key, bucket] of Array.from(perAction)) {
+            if (bucket.processes.size === 0) { perAction.delete(key); }
         }
         if (perAction.size === 0) { actionChildProcesses.delete(actionId); }
     };
 
     if (taskId !== undefined) {
-        const set = perAction.get(taskId);
-        if (!set) { return false; }
-        const killed = killSet(set, `action '${actionId}' task '${taskId}'`);
+        const buckets = generation === undefined
+            ? Array.from(perAction.values()).filter(bucket => bucket.taskId === taskId)
+            : [perAction.get(taskGenerationBucketKey(taskId, generation))].filter(
+                (bucket): bucket is ChildProcessBucket => bucket !== undefined
+            );
+        let killed = false;
+        for (const bucket of buckets) {
+            if (killSet(bucket.processes, `action '${actionId}' task '${taskId}'`)) { killed = true; }
+        }
         sweepEmpty();
         return killed;
     }
 
     let terminatedAny = false;
-    for (const [tid, set] of perAction) {
-        if (killSet(set, `action '${actionId}' task '${tid}'`)) { terminatedAny = true; }
+    for (const bucket of perAction.values()) {
+        if (killSet(bucket.processes, `action '${actionId}' task '${bucket.taskId}'`)) { terminatedAny = true; }
     }
     sweepEmpty();
     return terminatedAny;
@@ -3392,29 +3557,31 @@ function resolveActionDefinition(actionItem: ActionItem): { action: PipelineActi
     return { action, id: actionItem.id };
 }
 
-function markActionAsRunning(actionItem: ActionItem, id: string, showTaskStatus: boolean, mainViewProvider: MainViewProvider): boolean {
+function markActionAsRunning(
+    actionItem: ActionItem,
+    id: string,
+    showTaskStatus: boolean,
+    mainViewProvider: MainViewProvider
+): ActionRunContext | undefined {
     // The duplicate-run guard is intentionally independent of `showTaskStatus`,
     // which only controls visual state indicators in the tree. Running the same
     // action concurrently would collide in activeTasks and is always wrong.
     const currentState = actionStates.get(id);
     if (currentState?.state === 'running') {
         vscode.window.showInformationMessage(t(`'${actionItem.title}' 액션이 이미 실행 중입니다.`, `Action '${actionItem.title}' is already running.`));
-        return false;
+        return undefined;
     }
 
-    // 이전 실행이 drain 을 포기한 채 끝났을 수 있다. 새 실행은 그 표시를
-    // 물려받으면 안 된다.
-    abandonedActionRuns.delete(id);
     actionStates.set(id, { state: 'running' });
     // Opened here rather than at the first prompt: the stop button becomes
     // visible the moment the state flips to `running`, so the scope it acts
     // on has to exist from that same moment.
-    beginActionCancellation(id);
+    const run = beginActionCancellation(id);
     syncRunningActionsContext();
     if (showTaskStatus) {
         mainViewProvider.refresh();
     }
-    return true;
+    return run;
 }
 
 function logActionStart(showVerboseLogs: boolean, title: string, description?: string): void {
@@ -3457,6 +3624,8 @@ export interface PipelineExecutionOptions {
     recordInputs?: Record<string, unknown>;
     recordCommands?: Record<string, string>;
     onTaskTransition?: (event: TaskTransitionEvent) => void;
+    /** Test/embedding override; production uses the 5s drain ceiling. */
+    abortDrainTimeoutMs?: number;
 }
 
 export interface TaskTransitionEvent {
@@ -3517,6 +3686,34 @@ export async function executeActionPipeline(
     workspaceFolderPath?: string,
     workspaceRoots?: string[],
     options?: PipelineExecutionOptions
+): Promise<void> {
+    // Direct callers do not own UI-visible cancellation state, but still get
+    // an isolated generation so timeout/late-continuation behavior is exactly
+    // the same as executeAction's registered runs.
+    const run = createActionRunContext(id);
+    try {
+        await executeActionPipelineForRun(
+            action,
+            context,
+            id,
+            workspaceFolderPath,
+            workspaceRoots,
+            options,
+            run
+        );
+    } finally {
+        endActionCancellation(run);
+    }
+}
+
+async function executeActionPipelineForRun(
+    action: PipelineAction,
+    context: vscode.ExtensionContext,
+    id: string,
+    workspaceFolderPath: string | undefined,
+    workspaceRoots: string[] | undefined,
+    options: PipelineExecutionOptions | undefined,
+    executionRun: ActionRunContext
 ): Promise<void> {
     const stepResults: Record<string, unknown> = {};
     const presetInputs = options?.presetInputs;
@@ -3620,16 +3817,15 @@ export async function executeActionPipeline(
      * 그것들은 프로세스를 갖지 않아 남겨 두어도 빌드가 계속 도는 상황이
      * 되지 않는다 — 이 수정이 막으려던 피해와는 성격이 다르다.
      */
-    const ABORT_DRAIN_TIMEOUT_MS = 5000;
+    const ABORT_DRAIN_TIMEOUT_MS = options?.abortDrainTimeoutMs ?? 5000;
     const abortInFlightTasks = async (): Promise<void> => {
         if (inFlight.size === 0) { return; }
-        const cancellation = actionCancellations.get(id);
-        if (cancellation && !cancellation.token.isCancellationRequested) {
-            cancellation.cancel();
+        if (!executionRun.cancellation.token.isCancellationRequested) {
+            executionRun.cancellation.cancel();
         }
         for (const taskId of inFlight.keys()) {
-            terminateChildProcesses(id, taskId);
-            const exec = getActiveTaskExecution(id, taskId);
+            terminateChildProcesses(id, taskId, executionRun.generation);
+            const exec = getActiveTaskExecution(id, taskId, executionRun.generation);
             if (exec) {
                 try { exec.terminate(); } catch { /* ignore */ }
             }
@@ -3643,7 +3839,7 @@ export async function executeActionPipeline(
         if (!await Promise.race([drained, deadline])) {
             // 취소 소스는 곧 폐기되지만 이 표시는 남는다 — 뒤늦게 이어지는
             // 태스크가 "취소된 적 없음"으로 보여 계속 진행하는 것을 막는다.
-            abandonedActionRuns.add(id);
+            executionRun.abandoned = true;
             outputChannel.appendLine(
                 `[WARN] Action '${id}': ${inFlight.size} task(s) did not settle within ` +
                 `${ABORT_DRAIN_TIMEOUT_MS}ms after abort; continuing. ` +
@@ -3655,6 +3851,7 @@ export async function executeActionPipeline(
 
     const launchTask = (taskId: string): Promise<InFlightOutcome> => {
         const task = taskById.get(taskId)!;
+        const taskUsesSecret = taskReferencesSecret(task, executionRun);
         scheduler.markStarted(taskId);
         emitTransition(taskId, 'running');
 
@@ -3664,6 +3861,7 @@ export async function executeActionPipeline(
             Object.prototype.hasOwnProperty.call(presetInputs, taskId);
         const isInteractive = INTERACTIVE_TASK_TYPES.has(task.type);
         const presetValue = usePreset ? presetInputs![taskId] : undefined;
+        const taskScope = createTaskExecutionScope(executionRun, taskId);
         // Preset values flow through `presetResult` so that
         // `executeSingleTask`'s shared post-processing (capture +
         // `passTheResultToNextTask` output) still runs on replay.
@@ -3678,23 +3876,29 @@ export async function executeActionPipeline(
         // first one. Holding the lock until the original dialog
         // promise settles keeps the "no two concurrent prompts"
         // guarantee even across a timed-out task.
-        const startTask = (): Promise<unknown> => {
+        const startTask = async (): Promise<unknown> => {
             // 대기열을 빠져나온 시점에 다시 확인한다. 인터랙티브 태스크는
             // 프롬프트 뮤텍스 뒤에 줄을 서므로, 앞 액션의 대화상자가 열려 있는
             // 동안 이 액션이 중지될 수 있다. 여기서 안 막으면 이미 중지된
             // 액션의 modal 이 한참 뒤에 새로 뜨고, itemsFromCommand 라면
             // 취소된 명령을 잠깐이라도 실행하게 된다.
-            throwIfActionCancelled(id);
-            return executeSingleTask(
-                task,
-                stepResults,
-                context,
-                id,
-                workspaceFolderPath,
-                workspaceRoots,
-                presetValue,
-                recordCommands
-            );
+            try {
+                throwIfTaskInactive(taskScope);
+                return await executeSingleTask(
+                    task,
+                    stepResults,
+                    context,
+                    id,
+                    workspaceFolderPath,
+                    workspaceRoots,
+                    presetValue,
+                    recordCommands,
+                    taskScope,
+                    taskUsesSecret
+                );
+            } finally {
+                disposeTaskExecutionScope(taskScope);
+            }
         };
         const underlying: Promise<unknown> = isInteractive
             ? withInteractivePromptLock(startTask)
@@ -3704,8 +3908,10 @@ export async function executeActionPipeline(
         // running in parallel keep going; the failure policy below
         // decides whether the action as a whole aborts.
         const wrapped = withTaskTimeout(underlying, task.timeoutSeconds, taskId, () => {
-            terminateChildProcesses(id, taskId);
-            const exec = getActiveTaskExecution(id, taskId);
+            timeoutTaskExecution(taskScope);
+            terminateChildProcesses(id, taskId, executionRun.generation);
+            abortTaskOperations(executionRun, taskId);
+            const exec = getActiveTaskExecution(id, taskId, executionRun.generation);
             if (exec) {
                 try { exec.terminate(); } catch { /* ignore */ }
             }
@@ -3714,14 +3920,17 @@ export async function executeActionPipeline(
         return wrapped.then(
             (result): InFlightOutcome => ({ taskId, kind: 'success', result }),
             (error): InFlightOutcome => {
-                const e = error instanceof Error ? error : new Error(String(error));
+                const raw = error instanceof Error ? error : new Error(String(error));
+                const e = taskUsesSecret && !(raw instanceof ActionStoppedError)
+                    ? new SensitiveTaskError(taskId)
+                    : raw;
                 // 사용자 중지는 `continueOnError` 보다 우선한다. 그 설정의 뜻은
                 // "이 태스크가 실패해도 나머지는 계속"이지 "사용자가 멈추라고
                 // 해도 계속"이 아니다. 구분하지 않으면 중지가 `skipped` 로
                 // 바뀌어 뒤 태스크가 실행되고, 액션이 성공으로 마감되면서
                 // 방금 기록한 "Action stopped by user" 를 덮는다 — 0.6.29 와
                 // 0.6.35 가 고친 증상이 이 설정 한 줄로 되살아나던 경로다.
-                if (isActionCancelled(id)) {
+                if (executionRun.cancellation.token.isCancellationRequested || executionRun.abandoned || executionRun.closed) {
                     return { taskId, kind: 'failed', error: e };
                 }
                 return task.continueOnError
@@ -3773,7 +3982,7 @@ export async function executeActionPipeline(
             }
             if (recordInputs) {
                 const t = taskById.get(outcome.taskId);
-                if (t && shouldRecordTaskInput(t)) {
+                if (t && shouldRecordTaskInput(t) && !executionRun.secretTaskIds.has(outcome.taskId)) {
                     recordInputs[outcome.taskId] = outcome.result;
                 }
             }
@@ -3888,8 +4097,9 @@ export type StopAllOutcome = 'none' | 'cancelled' | 'stopped' | 'failed' | 'alre
  * Everything {@link runStopAllActions} is allowed to touch.
  *
  * Note what is *absent*: nothing here can clear `manuallyTerminatedActions`.
- * That flag has exactly one consumer — `finalizeActionRun`, running in the
- * action's own `finally` — and 0.6.13 shipped a bulk-stop path that deleted
+ * The active generation owns that flag until `finalizeActionRun` (a later
+ * generation may defensively discard stale state at startup). 0.6.13 shipped
+ * a bulk-stop path that deleted
  * it synchronously right after `terminate()`. Task termination lands
  * asynchronously, so by the time `executeAction`'s catch checked the flag it
  * was gone: the user got a spurious failure toast, the freshly written
@@ -3984,16 +4194,22 @@ function syncRunningActionsContext(): void {
  */
 export function stopRunningAction(id: string): boolean {
     let stopped = false;
+    const markCurrentRunStopped = () => {
+        // Detached/one-shot leftovers may still be present after their owning
+        // action finalized. There is no executeAction catch left to consume a
+        // manual-stop flag for those, so do not poison the next run.
+        if (currentActionRuns.has(id)) { manuallyTerminatedActions.add(id); }
+    };
     const perAction = activeTasks.get(id);
     if (perAction && perAction.size > 0) {
-        manuallyTerminatedActions.add(id);
-        for (const exec of perAction.values()) {
-            try { exec.terminate(); } catch { /* ignore */ }
+        markCurrentRunStopped();
+        for (const active of perAction.values()) {
+            try { active.execution.terminate(); } catch { /* ignore */ }
         }
         stopped = true;
     }
     if (terminateChildProcesses(id)) {
-        manuallyTerminatedActions.add(id);
+        markCurrentRunStopped();
         stopped = true;
     }
     // An action waiting on a prompt has no task and no child process, so the
@@ -4003,7 +4219,7 @@ export function stopRunningAction(id: string): boolean {
     // aborts the moment the dialog returns.
     const cancellation = actionCancellations.get(id);
     if (cancellation && !cancellation.token.isCancellationRequested) {
-        manuallyTerminatedActions.add(id);
+        markCurrentRunStopped();
         cancellation.cancel();
         stopped = true;
     }
@@ -4025,13 +4241,21 @@ function recordManualStopInHistory(provider: HistoryProvider | undefined, id: st
     provider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user', durationMs);
 }
 
-function finalizeActionRun(id: string, showTaskStatus: boolean, mainViewProvider: MainViewProvider): void {
-    activeTasks.delete(id);
+function isCurrentActionRun(run: ActionRunContext): boolean {
+    return currentActionRuns.get(run.id) === run;
+}
+
+function finalizeActionRun(run: ActionRunContext, showTaskStatus: boolean, mainViewProvider: MainViewProvider): void {
+    const id = run.id;
+    const ownsCurrentState = isCurrentActionRun(run);
     // Owned by the run, so it dies with the run. Leaving a cancelled source
     // behind would make the *next* run of the same action abort on its first
     // token check.
-    endActionCancellation(id);
-    actionSecretTaskIds.delete(id);
+    endActionCancellation(run);
+    if (!ownsCurrentState) {
+        return;
+    }
+    actionStartTimestamps.delete(id);
     if (manuallyTerminatedActions.has(id)) {
         actionStates.delete(id);
         manuallyTerminatedActions.delete(id);
@@ -4068,7 +4292,8 @@ export async function executeAction(
     const actionWorkspaceFolder = id ? actionWorkspaceFolderMap.get(id) : undefined;
     const showTaskStatus = vscode.workspace.getConfiguration('taskhub').get('showTaskStatus', true);
 
-    if (!markActionAsRunning(actionItem, id, showTaskStatus, mainViewProvider)) {
+    const run = markActionAsRunning(actionItem, id, showTaskStatus, mainViewProvider);
+    if (!run) {
         return;
     }
 
@@ -4120,7 +4345,7 @@ export async function executeAction(
     const recordCommands: Record<string, string> = {};
 
     try {
-        await executeActionPipeline(action, context, id, actionWorkspaceFolder, undefined, {
+        await executeActionPipelineForRun(action, context, id, actionWorkspaceFolder, undefined, {
             presetInputs,
             recordInputs,
             recordCommands,
@@ -4137,7 +4362,7 @@ export async function executeAction(
             // pipelines see multiple ids in flight at once — the tree
             // renderer picks the right format per running.length.
             onTaskTransition: (event) => {
-                if (!showTaskStatus) {
+                if (!showTaskStatus || !isCurrentActionRun(run)) {
                     return;
                 }
                 const current = actionStates.get(id);
@@ -4163,7 +4388,10 @@ export async function executeAction(
                 });
                 mainViewProvider.refresh();
             }
-        });
+        }, run);
+        if (!isCurrentActionRun(run)) {
+            throw new ActionStoppedError();
+        }
         // 사용자가 중지를 눌렀는데 파이프라인이 그래도 완주한 경우가 있다.
         // 취소 신호를 받지 않는 작업(내장 ZIP/Unzip 등)이 마지막 태스크이거나
         // 유일한 태스크면, 중지 이후에도 그 작업이 끝까지 돌고 여기로 온다.
@@ -4188,8 +4416,12 @@ export async function executeAction(
             historyProvider.setHistoryCommands(id, timestamp, recordCommands);
         }
     } catch (error: any) {
-        if (!manuallyTerminatedActions.has(id)) {
-            handleActionFailure(id, actionItem, action, error, showTaskStatus);
+        const ownsCurrentState = isCurrentActionRun(run);
+        const manuallyStopped = ownsCurrentState && manuallyTerminatedActions.has(id);
+        if (!manuallyStopped) {
+            if (ownsCurrentState) {
+                handleActionFailure(id, actionItem, action, error, showTaskStatus);
+            }
 
             // Update history to failure
             if (historyProvider) {
@@ -4213,8 +4445,7 @@ export async function executeAction(
             }
         }
     } finally {
-        finalizeActionRun(id, showTaskStatus, mainViewProvider);
-        actionStartTimestamps.delete(id);
+        finalizeActionRun(run, showTaskStatus, mainViewProvider);
     }
 }
 
@@ -4226,8 +4457,15 @@ async function executeSingleTask(
     workspaceFolderPath?: string,
     workspaceRoots?: string[],
     presetResult?: unknown,
-    recordCommands?: Record<string, string>
+    recordCommands?: Record<string, string>,
+    scope?: TaskExecutionScope,
+    taskUsesSecret = false
 ): Promise<any> {
+    // The scheduler always supplies its captured generation. Never fall back
+    // to the current action-id map here: this function resumes after native
+    // dialogs and must not accidentally adopt a newer run of the same id.
+    if (!scope) { throw new Error(`Task '${task.id}' is missing its execution scope.`); }
+    const executionRun = scope.run;
     const defaultWorkspace = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const interpolationContext = { ...allResults, workspaceFolder: defaultWorkspace, extensionPath: context.extensionPath };
     let result: any;
@@ -4262,11 +4500,11 @@ async function executeSingleTask(
         // into the remaining tasks.
         case 'fileDialog':
             result = await handleFileDialog({ ...task, actionId });
-            throwIfActionCancelled(actionId);
+            throwIfTaskInactive(scope);
             break;
         case 'folderDialog':
             result = await handleFolderDialog({ ...task, actionId });
-            throwIfActionCancelled(actionId);
+            throwIfTaskInactive(scope);
             break;
         case 'inputBox':
             // Interpolate prompt, value, placeHolder, prefix, suffix
@@ -4278,9 +4516,7 @@ async function executeSingleTask(
                 prefix: task.prefix ? interpolatePipelineVariables(task.prefix, interpolationContext) : undefined,
                 suffix: task.suffix ? interpolatePipelineVariables(task.suffix, interpolationContext) : undefined
             };
-            result = await handleInputBox(interpolatedTask, actionCancellationToken(actionId));
-            // 이 값이 뒤 태스크의 명령으로 보간되면 기록·로그에서 가려야 한다.
-            if (task.password === true) { markTaskResultSecret(actionId, task.id); }
+            result = await handleInputBox(interpolatedTask, scope.cancellation.token);
             break;
         case 'quickPick':
             // Interpolate items if they're strings or contain interpolatable properties
@@ -4316,7 +4552,7 @@ async function executeSingleTask(
                 cwd: task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
                 placeHolder: task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined
             };
-            result = await handleQuickPick(interpolatedQuickPickTask, defaultWorkspace, actionCancellationToken(actionId));
+            result = await handleQuickPick(interpolatedQuickPickTask, defaultWorkspace, scope.cancellation.token);
             break;
         case 'unzip':
             const interpolatedUnzipTask: any = { ...task };
@@ -4338,10 +4574,10 @@ async function executeSingleTask(
                 }
                 interpolatedUnzipTask.env = interpolatedEnv;
             }
-            result = await handleUnzip(interpolatedUnzipTask, allResults, defaultWorkspace, actionId);
+            result = await handleUnzip(interpolatedUnzipTask, allResults, defaultWorkspace, executionRun, taskUsesSecret);
             break;
         case 'zip':
-            result = await handleZip(task, allResults, defaultWorkspace, actionId);
+            result = await handleZip(task, allResults, defaultWorkspace, executionRun, taskUsesSecret);
             break;
         case 'stringManipulation':
             const interpolatedInput = interpolatePipelineVariables(task.input || '', interpolationContext);
@@ -4352,7 +4588,7 @@ async function executeSingleTask(
                 ...task,
                 placeHolder: task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined
             };
-            result = await handleEnvPick(interpolatedEnvPickTask, actionCancellationToken(actionId));
+            result = await handleEnvPick(interpolatedEnvPickTask, scope.cancellation.token);
             break;
         case 'confirm':
             const interpolatedMessage = task.message ? interpolatePipelineVariables(task.message, interpolationContext) : undefined;
@@ -4362,7 +4598,7 @@ async function executeSingleTask(
             // 기록만 되고, 사용자가 Yes를 눌러 modal이 닫히는 순간 여기서
             // 파이프라인을 중단시킨다. 이 검사가 없으면 "중지됨" 히스토리를
             // 남긴 실행이 계속 진행돼 성공 기록으로 덮어쓴다.
-            throwIfActionCancelled(actionId);
+            throwIfTaskInactive(scope);
             break;
         case 'writeFile':
         case 'appendFile':
@@ -4411,18 +4647,35 @@ async function executeSingleTask(
                 // password 값이 평문으로 이력에 남는다. 값 문자열을 찾아
                 // 지우는 대신, 비밀 태스크의 결과를 자리표시자로 바꾼
                 // 컨텍스트로 처음부터 다시 만든다.
-                recordCommands[task.id] = buildRedactedDisplayCommand(actionId, task, interpolationContext, command, args);
+                recordCommands[task.id] = buildRedactedDisplayCommand(executionRun, task, interpolationContext, command, args);
             }
             // 같은 가림을 **로그에도** 적용해야 한다. verbose 로그는 보간이
             // 끝난 명령줄을 그대로 찍으므로, 이걸 넘기지 않으면 이력에서 가린
             // 값이 로그로 그대로 샌다.
-            const redactedDisplay = buildRedactedDisplayCommand(actionId, task, interpolationContext, command, args);
-            const handlerTask = { ...task, command, args, cwd: interpolatedCwd, env, actionId, redactedDisplay };
+            const redactedDisplay = buildRedactedDisplayCommand(executionRun, task, interpolationContext, command, args);
+            const redactedCwd = buildRedactedDisplayValue(executionRun, interpolationContext, task.cwd, interpolatedCwd);
+            const handlerTask = {
+                ...task,
+                command,
+                args,
+                cwd: interpolatedCwd,
+                env,
+                actionId,
+                runGeneration: executionRun.generation,
+                executionScope: scope,
+                redactedDisplay,
+                redactedCwd,
+                redactOutput: taskUsesSecret,
+            };
 
             if (task.passTheResultToNextTask) {
                 try {
                     result = await handleCommand(handlerTask, context, defaultWorkspace);
                 } catch (err) {
+                    // A task timeout rejects the scheduler-facing wrapper but
+                    // cannot make every underlying promise disappear. Do not
+                    // let a late process completion mutate diagnostics.
+                    throwIfTaskInactive(scope);
                     // Real-world gcc/clang reject with non-zero exit AND
                     // emit diagnostics on stderr. Apply matchers to the
                     // captured output before re-throwing so the user gets
@@ -4430,7 +4683,7 @@ async function executeSingleTask(
                     // case where they need it most. Without this branch the
                     // post-processing block below is unreachable on failure
                     // (regression caught by IT-079).
-                    if (err instanceof ShellCommandError && task.output?.diagnostics) {
+                    if (err instanceof ShellCommandError && task.output?.diagnostics && !taskUsesSecret) {
                         const failedOutput = combineStdoutStderrForDiagnostics(err.stdout, err.stderr);
                         try {
                             applyDiagnosticsToCollection(
@@ -4447,13 +4700,20 @@ async function executeSingleTask(
                                 `[Warning] Task '${task.id}' diagnostic emission on failure itself failed: ${msg}`
                             );
                         }
+                    } else if (err instanceof ShellCommandError && task.output?.diagnostics && taskUsesSecret) {
+                        // Diagnostic messages and their resolved file URIs are
+                        // another persistent display surface. Raw stdout,
+                        // stderr, or a secret-derived cwd must not reach it.
+                        logSuppressedSensitiveDiagnostics(task.id);
                     }
                     throw err;
                 }
             } else {
                 if (task.isOneShot) {
                     executeStreamedTask(handlerTask, defaultWorkspace).catch(error => {
-                        const msg = error instanceof Error ? error.message : String(error);
+                        const msg = taskUsesSecret
+                            ? `Task '${task.id}' failed; details hidden because it used a password input.`
+                            : (error instanceof Error ? error.message : String(error));
                         outputChannel.appendLine(`[ERROR] One-shot task ${task.id} failed: ${msg}`);
                         vscode.window.showErrorMessage(t(`원샷 태스크 '${task.id}' 시작 실패: ${msg}`, `One-shot task '${task.id}' failed to start: ${msg}`));
                     });
@@ -4466,6 +4726,11 @@ async function executeSingleTask(
         default:
             throw new Error(`Unsupported task type: ${task.type}`);
     } }
+
+    // The timeout wrapper may already have reported this task as failed while
+    // an uncancellable native dialog was still open. All common post-processing
+    // and output modes are side effects, so fence them with the task identity.
+    throwIfTaskInactive(scope);
 
     // Apply capture rules (if any) to derive named variables from a string
     // output. Capture only makes sense when the result carries a string
@@ -4498,7 +4763,9 @@ async function executeSingleTask(
     // can resolve relative paths against the task's cwd) and pushed to the
     // action's per-action collection.
     if (task.output && task.output.diagnostics) {
-        if (result && typeof result.output === 'string') {
+        if (taskUsesSecret) {
+            logSuppressedSensitiveDiagnostics(task.id);
+        } else if (result && typeof result.output === 'string') {
             try {
                 // shell/command tasks expose stderr alongside stdout via
                 // `result.stderr`; toolchains routinely write warnings to
@@ -4550,10 +4817,13 @@ async function executeSingleTask(
 
         switch (interpolatedOutput.mode) {
             case 'editor':
+                throwIfTaskInactive(scope);
                 const doc = await vscode.workspace.openTextDocument({ content: interpolatedOutput.content, language: interpolatedOutput.language || 'plaintext' });
+                throwIfTaskInactive(scope);
                 await vscode.window.showTextDocument(doc, { preview: false });
                 break;
             case 'file':
+                throwIfTaskInactive(scope);
                 if (!interpolatedOutput.filePath) { throw new Error(`Task '${task.id}' has output mode 'file' but 'filePath' is not defined.`); }
                 const safeOutputPath = resolveWithinWorkspace(
                     interpolatedOutput.filePath,
@@ -4569,6 +4839,7 @@ async function executeSingleTask(
                 break;
             case 'terminal':
                 {
+                    throwIfTaskInactive(scope);
                     // Sequential actions share one TaskHub terminal per
                     // actionId so consecutive tasks reuse it (backward
                     // compat). Parallel actions split per-task so two
@@ -4588,6 +4859,10 @@ async function executeSingleTask(
                 }
                 break;
         }
+    }
+    throwIfTaskInactive(scope);
+    if (taskUsesSecret || (task.type === 'inputBox' && task.password === true)) {
+        markTaskResultSecret(executionRun, task.id);
     }
     return result;
 }
@@ -4726,12 +5001,18 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
         revealTerminal,
         { taskId: task.id, isParallel: isParallelActionActive(actionKey) }
     );
+    if (task.redactOutput === true) {
+        // VS Code normally echoes the exact ShellExecution command into the
+        // terminal. The audit display above is redacted, but the execution
+        // object must retain the real value, so disable that second echo.
+        vsCodeTask.presentationOptions.echo = false;
+    }
 
     return {
         vsCodeTask,
         displayCommand,
         actionKey,
-        cwd: options.cwd || ''
+        cwd: typeof task.redactedCwd === 'string' ? task.redactedCwd : (options.cwd || '')
     };
 }
 
@@ -4751,7 +5032,7 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
             if (taskExecution && e.execution === taskExecution) {
                 disposable.dispose();
                 if (task.actionId && task.id) {
-                    deleteActiveTaskExecution(task.actionId, task.id);
+                    deleteActiveTaskExecution(task.actionId, task.id, task.runGeneration, taskExecution);
                 }
                 if (e.exitCode === 0) {
                     resolve();
@@ -4767,8 +5048,32 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
                 outputChannel.appendLine(`[INFO] Executing task via vscode.tasks: ${displayCommand} in ${cwd}`);
             }
             taskExecution = await vscode.tasks.executeTask(vsCodeTask);
-            if (task.actionId && task.id && taskExecution) {
-                setActiveTaskExecution(task.actionId, task.id, taskExecution);
+            // One-shot explicitly means detached from the pipeline lifetime:
+            // executeSingleTask reports success as soon as launch is requested,
+            // so the owning run may already be closed by the time VS Code
+            // returns its TaskExecution. Applying the stale-run fence here
+            // would immediately kill the very background job one-shot asked
+            // us to keep. Ordinary streamed tasks remain fenced below.
+            if (task.executionScope && task.isOneShot !== true) {
+                try {
+                    throwIfTaskInactive(task.executionScope as TaskExecutionScope);
+                } catch (error) {
+                    // executeTask itself may resolve only after the timeout or
+                    // action-drain deadline. In that case the earlier timeout
+                    // callback could not see an execution to terminate yet.
+                    try { taskExecution.terminate(); } catch { /* ignore */ }
+                    disposable.dispose();
+                    reject(error);
+                    return;
+                }
+            }
+            // A one-shot is deliberately detached from the action lifecycle.
+            // Registering a late-resolving launch here would recreate an
+            // activeTasks bucket after the owning pipeline had finalized,
+            // leaving a phantom Stop All target until VS Code happened to
+            // report process end. Ordinary streamed tasks remain stoppable.
+            if (task.isOneShot !== true && task.actionId && task.id && taskExecution) {
+                setActiveTaskExecution(task.actionId, task.id, taskExecution, task.runGeneration);
             }
         } catch (error) {
             disposable.dispose();
@@ -4780,7 +5085,19 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
 async function handleCommand(task: any, context: vscode.ExtensionContext, workspaceFolderPath?: string): Promise<{ output: string; stderr: string }> {
     const { args, cwd } = task;
     const command = getCommandString(task.command);
-    const captured = await executeShellCommand(command, args || [], cwd, task.env, workspaceFolderPath, task.actionId, task.id, task.redactedDisplay);
+    const captured = await executeShellCommand(
+        command,
+        args || [],
+        cwd,
+        task.env,
+        workspaceFolderPath,
+        task.actionId,
+        task.id,
+        task.redactedDisplay,
+        task.redactedCwd,
+        task.redactOutput === true,
+        task.runGeneration
+    );
     // `output` keeps its historical meaning (= stdout only) so existing
     // `output.capture` rules and `${task.output}` interpolation behave
     // exactly as before. `stderr` is exposed alongside so the diagnostic
@@ -5318,7 +5635,13 @@ async function handleWriteFile(
     return { path: safePath };
 }
 
-async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: string, actionId?: string): Promise<{ outputDir: string }> {
+async function handleUnzip(
+    task: any,
+    allResults: any,
+    workspaceFolderPath: string | undefined,
+    run: ActionRunContext,
+    redactOutput: boolean
+): Promise<{ outputDir: string }> {
     const inputs = task.inputs || {};
 
     const resolveValue = (value: any, preferredKeys: string[]): string | undefined => {
@@ -5368,7 +5691,7 @@ async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: str
         }
         // 내장 엔진은 우리 코드라 취소를 실제로 받을 수 있다. 외부 tool
         // 경로는 `executeShellCommand` 가 자식 프로세스를 종료해 처리한다.
-        const abort = abortSignalForAction(actionId);
+        const abort = abortSignalForAction(run, task.id);
         try {
             await extractZipArchive(archivePath, outputDir, { signal: abort.signal });
             return { outputDir: outputDir };
@@ -5385,14 +5708,32 @@ async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: str
     const toolCommand = getToolCommand(task.tool);
     const args = ['x', archivePath, `-o${outputDir}`, '-aoa'];
     try {
-        await executeShellCommand(toolCommand, args, undefined, task.env, workspaceFolderPath, actionId, task.id);
+        await executeShellCommand(
+            toolCommand,
+            args,
+            undefined,
+            task.env,
+            workspaceFolderPath,
+            run.id,
+            task.id,
+            redactOutput ? '[command hidden: uses password input]' : undefined,
+            redactOutput ? SECRET_PLACEHOLDER : undefined,
+            redactOutput,
+            run.generation
+        );
         return { outputDir: outputDir };
     } catch (error: any) {
         throw new Error(`Failed to unzip file: ${error.message}`);
     }
 }
 
-async function handleZip(task: import('./schema').Task, allResults: any, workspaceFolderPath?: string, actionId?: string): Promise<{ archivePath: string }> {
+async function handleZip(
+    task: import('./schema').Task,
+    allResults: any,
+    workspaceFolderPath: string | undefined,
+    run: ActionRunContext,
+    redactOutput: boolean
+): Promise<{ archivePath: string }> {
     const interpolationContext = { ...allResults, workspaceFolder: workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '' };
 
     const archive = task.archive ? interpolatePipelineVariables(task.archive, interpolationContext) : undefined;
@@ -5415,7 +5756,7 @@ async function handleZip(task: import('./schema').Task, allResults: any, workspa
         if (path.extname(archive).toLowerCase() !== '.zip') {
             throw new Error(`Built-in engine only supports .zip archives. For '${path.basename(archive)}', specify a 'tool' (e.g. 7z).`);
         }
-        const abort = abortSignalForAction(actionId);
+        const abort = abortSignalForAction(run, task.id);
         try {
             await createZipArchive(archive, sourcePaths, { signal: abort.signal });
             return { archivePath: archive };
@@ -5445,8 +5786,12 @@ async function handleZip(task: import('./schema').Task, allResults: any, workspa
             task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
             envOverrides,
             workspaceFolderPath,
-            actionId,
-            task.id
+            run.id,
+            task.id,
+            redactOutput ? '[command hidden: uses password input]' : undefined,
+            redactOutput ? SECRET_PLACEHOLDER : undefined,
+            redactOutput,
+            run.generation
         );
         return { archivePath: archive };
     } catch (error: any) {
@@ -5691,7 +6036,19 @@ export function __testHook_hasManuallyTerminated(id: string): boolean {
  * exit code. Callers that only care about stdout should read `.stdout`
  * from the resolved value.
  */
-export function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string, taskKey?: string, displayOverride?: string): Promise<{ stdout: string; stderr: string }> {
+export function executeShellCommand(
+    command: string,
+    args: string[],
+    cwd?: string,
+    taskEnv?: Record<string, string>,
+    workspaceFolderPath?: string,
+    actionKey?: string,
+    taskKey?: string,
+    displayOverride?: string,
+    workingDirectoryDisplayOverride?: string,
+    redactCapturedOutput = false,
+    runGeneration?: number
+): Promise<{ stdout: string; stderr: string }> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     const captureLimitBytes = getCaptureLimitBytes();
@@ -5705,6 +6062,7 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
         }
         // Use undefined instead of empty string to let Node.js use process.cwd() as fallback
         const workingDirectory = cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined;
+        const shownWorkingDirectory = workingDirectoryDisplayOverride ?? workingDirectory;
         let childProcess: ReturnType<typeof spawn>;
         let displayCommand = '';
         let settled = false;
@@ -5715,6 +6073,7 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
         // `terminateChildProcesses(actionId, taskId)` can target just
         // this task's children without affecting siblings.
         const effectiveTaskKey = taskKey ?? '';
+        const effectiveBucketKey = taskGenerationBucketKey(effectiveTaskKey, runGeneration);
         // Prefix verbose log lines with the task id so parallel runs are
         // distinguishable in the OutputChannel. Legacy callers (no taskKey)
         // keep the unprefixed format to avoid churn in existing log tooling.
@@ -5747,23 +6106,27 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
                 perAction = new Map();
                 actionChildProcesses.set(actionKey, perAction);
             }
-            let set = perAction.get(effectiveTaskKey);
-            if (!set) {
-                set = new Set<ReturnType<typeof spawn>>();
-                perAction.set(effectiveTaskKey, set);
+            let bucket = perAction.get(effectiveBucketKey);
+            if (!bucket) {
+                bucket = {
+                    taskId: effectiveTaskKey,
+                    generation: runGeneration,
+                    processes: new Set<ReturnType<typeof spawn>>(),
+                };
+                perAction.set(effectiveBucketKey, bucket);
             }
-            set.add(childProcess);
+            bucket.processes.add(childProcess);
         };
 
         const cleanupChildTracking = (target: ReturnType<typeof spawn>) => {
             if (!actionKey) { return; }
             const perAction = actionChildProcesses.get(actionKey);
             if (!perAction) { return; }
-            const set = perAction.get(effectiveTaskKey);
-            if (!set) { return; }
-            set.delete(target);
-            if (set.size === 0) {
-                perAction.delete(effectiveTaskKey);
+            const bucket = perAction.get(effectiveBucketKey);
+            if (!bucket) { return; }
+            bucket.processes.delete(target);
+            if (bucket.processes.size === 0) {
+                perAction.delete(effectiveBucketKey);
                 if (perAction.size === 0) {
                     actionChildProcesses.delete(actionKey);
                 }
@@ -5801,7 +6164,9 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
             const encoded = encodePowerShellScript(invocation.script);
             displayCommand = invocation.display;
             if (showVerboseLogs && reason) {
-                appendVerboseLine(`[WARN] Native Windows process start failed (${reason.message}); retrying through PowerShell.`);
+                appendVerboseLine(redactCapturedOutput
+                    ? '[WARN] Native Windows process start failed (details hidden); retrying through PowerShell.'
+                    : `[WARN] Native Windows process start failed (${reason.message}); retrying through PowerShell.`);
             }
             childProcess = spawn('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], {
                 cwd: workingDirectory,
@@ -5815,7 +6180,9 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
             trackChildProcess();
             // 비밀이 보간된 명령은 가린 것으로 찍는다 — 로그 파일은 공유되기
             // 쉽고, 이력에서 가린 값이 여기로 새면 의미가 없다.
-            if (showVerboseLogs) { appendVerboseLine(`[INFO] Executing command: ${displayOverride ?? displayCommand} in ${workingDirectory}`); }
+            if (showVerboseLogs) {
+                appendVerboseLine(`[INFO] Executing command: ${displayOverride ?? displayCommand} in ${shownWorkingDirectory}`);
+            }
 
             attachedChild.stdout?.setEncoding('utf8');
             attachedChild.stderr?.setEncoding('utf8');
@@ -5829,7 +6196,16 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
                     return;
                 }
 
-                if (showVerboseLogs) { appendVerboseLine(`[INFO] STDOUT: ${stdout}`); appendVerboseLine(`[INFO] STDERR: ${stderr}`); appendVerboseLine(`[INFO] Command finished with exit code ${code}.`); }
+                if (showVerboseLogs) {
+                    if (redactCapturedOutput) {
+                        appendVerboseLine('[INFO] STDOUT: [REDACTED: task used a password input]');
+                        appendVerboseLine('[INFO] STDERR: [REDACTED: task used a password input]');
+                    } else {
+                        appendVerboseLine(`[INFO] STDOUT: ${stdout}`);
+                        appendVerboseLine(`[INFO] STDERR: ${stderr}`);
+                    }
+                    appendVerboseLine(`[INFO] Command finished with exit code ${code}.`);
+                }
 
                 if (captureOverflowed) {
                     settled = true;
@@ -5879,7 +6255,11 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
                     return;
                 }
                 settled = true;
-                if (showVerboseLogs) { appendVerboseLine(`[ERROR] Failed to start command: ${err.message}`); }
+                if (showVerboseLogs) {
+                    appendVerboseLine(redactCapturedOutput
+                        ? '[ERROR] Failed to start command; details hidden because the task used a password input.'
+                        : `[ERROR] Failed to start command: ${err.message}`);
+                }
                 reject(err);
             });
         };
@@ -7709,6 +8089,15 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+    for (const run of Array.from(currentActionRuns.values())) {
+        run.abandoned = true;
+        if (!run.cancellation.token.isCancellationRequested) {
+            run.cancellation.cancel();
+        }
+        endActionCancellation(run);
+    }
+    currentActionRuns.clear();
+    actionCancellations.clear();
     actionStates.clear();
     activeTasks.clear();
     manuallyTerminatedActions.clear();

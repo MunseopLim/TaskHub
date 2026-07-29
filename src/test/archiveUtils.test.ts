@@ -3,6 +3,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { randomBytes } from 'crypto';
 import AdmZip from 'adm-zip';
 import {
     ZIP_MAX_ENTRIES,
@@ -122,6 +123,11 @@ suite('archiveUtils', () => {
         return archivePath;
     }
 
+    function taskHubTempFiles(dir: string): string[] {
+        if (!fs.existsSync(dir)) { return []; }
+        return fs.readdirSync(dir).filter(name => name.includes('.taskhub-') && name.endsWith('.tmp'));
+    }
+
     suite('createZipArchive', () => {
         test('빈 sources 배열이면 거부', async () => {
             await assert.rejects(
@@ -173,6 +179,28 @@ suite('archiveUtils', () => {
             await createZipArchive(archivePath, [src]);
 
             assert.ok(fs.existsSync(archivePath));
+        });
+
+        test('긴 정상 파일명도 임시 접미사 때문에 ENAMETOOLONG이 되지 않는다', async () => {
+            // 220 bytes is legal on common 255-byte NAME_MAX filesystems, but
+            // appending the old `.<basename>.taskhub-...tmp` suffix crossed
+            // that limit for both archive creation and entry extraction.
+            const sourceName = `${'s'.repeat(216)}.txt`;
+            const archiveName = `${'a'.repeat(216)}.zip`;
+            const source = path.join(tempDir, sourceName);
+            const archivePath = path.join(tempDir, archiveName);
+            const destination = path.join(tempDir, 'long-name-output');
+            fs.writeFileSync(source, 'long-name-content');
+
+            await createZipArchive(archivePath, [source]);
+            await extractZipArchive(archivePath, destination);
+
+            assert.strictEqual(
+                fs.readFileSync(path.join(destination, sourceName), 'utf8'),
+                'long-name-content'
+            );
+            assert.deepStrictEqual(taskHubTempFiles(tempDir), []);
+            assert.deepStrictEqual(taskHubTempFiles(destination), []);
         });
 
         if (process.platform !== 'win32') {
@@ -659,14 +687,17 @@ suite('archiveUtils', () => {
             const deadline = Date.now() + 15000;
             let started = false;
             while (Date.now() < deadline) {
-                if (fs.existsSync(dest) && fs.readdirSync(dest).length > 0) { started = true; break; }
+                // 임시 파일이 보인 것만으로는 현재 엔트리가 commit됐다고 할 수
+                // 없다. 첫 엔트리의 최종 이름이 생긴 뒤 취소해야 앞 엔트리는
+                // 유지되고 뒤 엔트리만 멈춘다는 테스트가 된다.
+                if (fs.existsSync(path.join(dest, 'f0000.txt'))) { started = true; break; }
                 await new Promise(resolve => setTimeout(resolve, 1));
             }
             assert.ok(started, '전제가 깨졌다 — 쓰기가 시작되지 않았다');
             controller.abort();
 
             await assert.rejects(run, (e: Error) => e.name === 'AbortError');
-            const written = fs.readdirSync(dest).length;
+            const written = fs.readdirSync(dest).filter(name => !name.includes('.taskhub-')).length;
             assert.ok(written > 0, '전제가 깨졌다 — 쓰기 루프를 지나지 않았다');
             assert.ok(
                 written < total,
@@ -684,6 +715,154 @@ suite('archiveUtils', () => {
                 (e: Error) => e.name === 'AbortError'
             );
             assert.ok(!fs.existsSync(archivePath), '취소됐는데 아카이브 파일이 생겼다');
+        });
+
+        test('ZIP 생성 도중 취소하면 이벤트 루프에서 즉시 중단하고 기존 아카이브를 보존한다', async function () {
+            this.timeout(30000);
+            const src = path.join(tempDir, 'large-source.bin');
+            const sourceFd = fs.openSync(src, 'w');
+            try {
+                // sparse 파일이라 fixture 생성은 빠르지만, deflate는 실제 64 MB를
+                // 비동기로 읽어야 한다. 예전 동기 adm-zip 경로는 이 동안 타이머와
+                // Stop command를 전혀 실행하지 못했다.
+                fs.ftruncateSync(sourceFd, 64 * 1024 * 1024);
+            } finally {
+                fs.closeSync(sourceFd);
+            }
+            const archivePath = path.join(tempDir, 'keep-last-good.zip');
+            const lastGood = Buffer.from('LAST-GOOD-ARCHIVE-BYTES');
+            fs.writeFileSync(archivePath, lastGood);
+
+            const controller = new AbortController();
+            const run = createZipArchive(archivePath, [src], { signal: controller.signal });
+
+            const deadline = Date.now() + 15000;
+            let compressionStarted = false;
+            while (Date.now() < deadline) {
+                const temps = taskHubTempFiles(tempDir);
+                if (temps.some(name => fs.statSync(path.join(tempDir, name)).size > 64)) {
+                    compressionStarted = true;
+                    break;
+                }
+                await new Promise(resolve => setTimeout(resolve, 1));
+            }
+            assert.ok(compressionStarted, '전제가 깨졌다 — ZIP 스트리밍 쓰기가 시작되지 않았다');
+            controller.abort();
+
+            await assert.rejects(run, (e: Error) => e.name === 'AbortError');
+            assert.deepStrictEqual(
+                fs.readFileSync(archivePath),
+                lastGood,
+                '생성 중 취소가 기존 정상 아카이브를 덮었다'
+            );
+            assert.deepStrictEqual(taskHubTempFiles(tempDir), [], '취소된 ZIP 임시 파일이 남았다');
+        });
+
+        test('취소 시 진행 중인 fs.write가 끝나기 전에 archive fd를 닫지 않는다', async function () {
+            this.timeout(10000);
+            const mutableFs = require('fs') as typeof fs;
+            const originalWrite = mutableFs.write;
+            const originalClose = mutableFs.close;
+            const src = path.join(tempDir, 'pending-write-source.bin');
+            const archivePath = path.join(tempDir, 'pending-write.zip');
+            fs.writeFileSync(src, randomBytes(256 * 1024));
+
+            let archiveFd: number | undefined;
+            let delayedFd: number | undefined;
+            let closeBeforeRelease = false;
+            let released = false;
+            let releaseWrite!: () => void;
+            let reportWritePending!: () => void;
+            const releaseGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+            const writePending = new Promise<void>(resolve => { reportWritePending = resolve; });
+
+            (mutableFs as any).write = (
+                fd: number,
+                buffer: Buffer,
+                offset: number,
+                length: number,
+                position: number | null,
+                callback: (error: NodeJS.ErrnoException | null, written: number, buffer: Buffer) => void
+            ) => {
+                if (buffer.length >= 4 && buffer.readUInt32LE(0) === 0x04034b50) {
+                    archiveFd = fd;
+                }
+                if (fd === archiveFd && delayedFd === undefined && length >= 1024) {
+                    delayedFd = fd;
+                    reportWritePending();
+                    void releaseGate.then(() => {
+                        (originalWrite as any)(fd, buffer, offset, length, position, callback);
+                    });
+                    return;
+                }
+                (originalWrite as any)(fd, buffer, offset, length, position, callback);
+            };
+            (mutableFs as any).close = (fd: number, callback: (error?: NodeJS.ErrnoException | null) => void) => {
+                if (fd === delayedFd && !released) { closeBeforeRelease = true; }
+                originalClose.call(mutableFs, fd, callback);
+            };
+
+            const controller = new AbortController();
+            const run = createZipArchive(archivePath, [src], { signal: controller.signal });
+            let settled = false;
+            void run.then(() => { settled = true; }, () => { settled = true; });
+            try {
+                await writePending;
+                controller.abort();
+                await new Promise<void>(resolve => setImmediate(resolve));
+                await new Promise<void>(resolve => setImmediate(resolve));
+
+                assert.strictEqual(settled, false, 'pipeline이 pending fs.write보다 먼저 종료됐다');
+                assert.strictEqual(closeBeforeRelease, false, 'pending fs.write가 archive fd close와 겹쳤다');
+
+                released = true;
+                releaseWrite();
+                await assert.rejects(run, (error: Error) => error.name === 'AbortError');
+                assert.deepStrictEqual(taskHubTempFiles(tempDir), [], '취소된 ZIP 임시 파일이 남았다');
+            } finally {
+                released = true;
+                releaseWrite();
+                (mutableFs as any).write = originalWrite;
+                (mutableFs as any).close = originalClose;
+            }
+        });
+
+        test('큰 엔트리 추출 도중 취소해도 기존 파일을 보존하고 임시 파일을 지운다', async function () {
+            this.timeout(30000);
+            const archivePath = path.join(tempDir, 'cancel-large-entry.zip');
+            const zip = new AdmZip();
+            zip.addFile('keep.bin', Buffer.alloc(32 * 1024 * 1024, 0x41));
+            zip.writeZip(archivePath);
+
+            const dest = path.join(tempDir, 'cancel-large-entry-out');
+            fs.mkdirSync(dest, { recursive: true });
+            const existing = path.join(dest, 'keep.bin');
+            const original = Buffer.from('ORIGINAL-CONTENT-MUST-STAY');
+            fs.writeFileSync(existing, original);
+
+            const controller = new AbortController();
+            const run = extractZipArchive(archivePath, dest, { signal: controller.signal });
+
+            const deadline = Date.now() + 15000;
+            let entryWriteStarted = false;
+            while (Date.now() < deadline) {
+                const temps = taskHubTempFiles(dest);
+                if (temps.some(name => fs.statSync(path.join(dest, name)).size > 0)) {
+                    entryWriteStarted = true;
+                    break;
+                }
+                await new Promise(resolve => setTimeout(resolve, 1));
+            }
+            assert.ok(entryWriteStarted, '전제가 깨졌다 — 엔트리 임시 파일 쓰기가 시작되지 않았다');
+            controller.abort();
+
+            await assert.rejects(run, (e: Error) => e.name === 'AbortError');
+            assert.deepStrictEqual(
+                fs.readFileSync(existing),
+                original,
+                '추출 중 취소가 기존 엔트리를 0바이트/부분 데이터로 바꿨다'
+            );
+            assert.deepStrictEqual(taskHubTempFiles(dest), [], '취소된 엔트리 임시 파일이 남았다');
         });
 
         test('signal 을 주지 않으면 예전처럼 동작한다', async () => {
@@ -705,16 +884,11 @@ suite('archiveUtils', () => {
      * 거부된 뒤에도 `closed:false, destroyed:false` 인 스트림이 남았다.
      */
     suite('손상된 아카이브의 스트림 정리', () => {
-        test('추출이 반복 실패해도 파일 디스크립터가 쌓이지 않는다', async function () {
-            // `fs.createWriteStream` 을 감싸 스트림 객체를 들여다보는 방법은 쓸 수
-            // 없다 — 컴파일된 모듈 네임스페이스에서 그 속성은 getter 전용이다.
-            // 대신 **결함 그 자체**(열린 fd 가 쌓이는 것)를 잰다.
-            if (process.platform === 'win32') { this.skip(); }   // `/dev/fd` 없음
-
+        function createCorruptedArchive(fileName: string): string {
             // 잘 압축되는 데이터로 만든 뒤 deflate 스트림 중간을 뒤집는다.
             // 중앙 디렉터리(파일 끝)는 건드리지 않으므로 열기는 성공하고
             // 엔트리를 읽는 도중에 실패한다 — 출력 스트림이 이미 열린 시점이다.
-            const archivePath = path.join(tempDir, 'corrupt.zip');
+            const archivePath = path.join(tempDir, fileName);
             const zip = new AdmZip();
             zip.addFile('big.bin', Buffer.alloc(200000, 0x41));
             zip.writeZip(archivePath);
@@ -722,6 +896,57 @@ suite('archiveUtils', () => {
             const mid = Math.floor(raw.length / 2);
             for (let i = mid; i < mid + 64; i++) { raw[i] = raw[i] ^ 0xff; }
             fs.writeFileSync(archivePath, raw);
+            return archivePath;
+        }
+
+        test('엔트리 스트림이 손상돼도 기존 파일을 byte-for-byte 보존하고 임시 파일을 지운다', async () => {
+            const archivePath = createCorruptedArchive('corrupt-preserve.zip');
+            const dest = path.join(tempDir, 'corrupt-preserve-out');
+            fs.mkdirSync(dest, { recursive: true });
+            const existing = path.join(dest, 'big.bin');
+            const original = Buffer.from('ORIGINAL-CONTENT-MUST-STAY');
+            fs.writeFileSync(existing, original);
+
+            await assert.rejects(extractZipArchive(archivePath, dest));
+
+            assert.deepStrictEqual(
+                fs.readFileSync(existing),
+                original,
+                '스트림 오류가 기존 엔트리를 0바이트/부분 데이터로 바꿨다'
+            );
+            assert.deepStrictEqual(taskHubTempFiles(dest), [], '실패한 엔트리 임시 파일이 남았다');
+        });
+
+        test('크기는 맞지만 CRC가 틀린 엔트리도 commit하지 않는다', async () => {
+            const archivePath = writeRawZip('bad-crc.zip', [
+                { name: 'keep.bin', data: Buffer.from('COMPLETE-BUT-BAD-CRC') },
+            ]);
+            const raw = fs.readFileSync(archivePath);
+            const centralSignature = Buffer.from([0x50, 0x4b, 0x01, 0x02]);
+            const centralOffset = raw.indexOf(centralSignature);
+            assert.ok(centralOffset >= 0, '전제가 깨졌다 — central directory가 없다');
+            const advertisedCrc = raw.readUInt32LE(centralOffset + 16);
+            raw.writeUInt32LE((advertisedCrc ^ 0xffffffff) >>> 0, centralOffset + 16);
+            fs.writeFileSync(archivePath, raw);
+
+            const dest = path.join(tempDir, 'bad-crc-out');
+            fs.mkdirSync(dest, { recursive: true });
+            const existing = path.join(dest, 'keep.bin');
+            const original = Buffer.from('ORIGINAL-CONTENT-MUST-STAY');
+            fs.writeFileSync(existing, original);
+
+            await assert.rejects(extractZipArchive(archivePath, dest), /CRC mismatch/);
+            assert.deepStrictEqual(fs.readFileSync(existing), original);
+            assert.deepStrictEqual(taskHubTempFiles(dest), []);
+        });
+
+        test('추출이 반복 실패해도 파일 디스크립터가 쌓이지 않는다', async function () {
+            // `fs.createWriteStream` 을 감싸 스트림 객체를 들여다보는 방법은 쓸 수
+            // 없다 — 컴파일된 모듈 네임스페이스에서 그 속성은 getter 전용이다.
+            // 대신 **결함 그 자체**(열린 fd 가 쌓이는 것)를 잰다.
+            if (process.platform === 'win32') { this.skip(); }   // `/dev/fd` 없음
+
+            const archivePath = createCorruptedArchive('corrupt.zip');
 
             const openFdCount = () => fs.readdirSync('/dev/fd').length;
             const attempt = async (n: number) => {
@@ -740,14 +965,14 @@ suite('archiveUtils', () => {
             await new Promise(resolve => setTimeout(resolve, 200));
             const before = openFdCount();
 
-            // **전제 확인**: 실패가 출력 스트림이 열린 *뒤에* 일어나야 이
-            // 테스트에 의미가 있다. 손상 위치가 우연히 중앙 디렉터리로 옮겨
-            // 가면 `yauzl.open` 단계에서 끝나 스트림이 아예 안 열리는데,
-            // 그래도 "거부됐다"는 통과하므로 판별력이 조용히 사라진다.
+            // 단계 2에 진입했으므로 대상 디렉터리는 생겼지만, 실패한 엔트리의
+            // 최종 이름과 임시 파일은 commit/잔류하면 안 된다.
             assert.ok(
-                fs.existsSync(path.join(tempDir, 'corrupt-dest-0', 'big.bin')),
-                '전제가 깨졌다 — 출력 파일이 만들어지기도 전에 실패했다 (손상 위치가 압축 데이터가 아니다)'
+                fs.existsSync(path.join(tempDir, 'corrupt-dest-0')),
+                '전제가 깨졌다 — 스트리밍 추출 단계에 진입하기 전에 실패했다'
             );
+            assert.ok(!fs.existsSync(path.join(tempDir, 'corrupt-dest-0', 'big.bin')));
+            assert.deepStrictEqual(taskHubTempFiles(path.join(tempDir, 'corrupt-dest-0')), []);
 
             const rounds = 8;
             for (let i = 1; i <= rounds; i++) { await attempt(i); }

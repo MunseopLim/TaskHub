@@ -1,8 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { Readable } from 'stream';
+import { randomBytes } from 'crypto';
+import { Readable, Transform, Writable, type TransformCallback } from 'stream';
 import { pipeline } from 'stream/promises';
-import AdmZip from 'adm-zip';
+import { createDeflateRaw } from 'zlib';
 import * as yauzl from 'yauzl';
 
 /**
@@ -26,52 +27,443 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
     }
 }
 
+const CRC32_TABLE: readonly number[] = (() => {
+    const table: number[] = [];
+    for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) {
+            c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+        }
+        table[n] = c >>> 0;
+    }
+    return table;
+})();
+
+/** 데이터를 그대로 통과시키면서 ZIP 규약의 CRC32와 바이트 수를 누적한다. */
+class Crc32Transform extends Transform {
+    private crc = 0xffffffff;
+    byteCount = 0;
+
+    get checksum(): number {
+        return (this.crc ^ 0xffffffff) >>> 0;
+    }
+
+    override _transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback): void {
+        for (const byte of chunk) {
+            this.crc = CRC32_TABLE[(this.crc ^ byte) & 0xff] ^ (this.crc >>> 8);
+        }
+        this.byteCount += chunk.length;
+        callback(null, chunk);
+    }
+}
+
+function closeFd(fd: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+        fs.close(fd, err => err ? reject(err) : resolve());
+    });
+}
+
+function syncFd(fd: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+        fs.fsync(fd, err => err ? reject(err) : resolve());
+    });
+}
+
+/** 현재 fd 위치에 버퍼 전체를 쓴다. `fs.write` 의 short write 도 처리한다. */
+function writeFdBuffer(fd: number, buffer: Buffer): Promise<void> {
+    return new Promise((resolve, reject) => {
+        let offset = 0;
+        const next = () => {
+            if (offset === buffer.length) { resolve(); return; }
+            fs.write(fd, buffer, offset, buffer.length - offset, null, (err, written) => {
+                if (err) { reject(err); return; }
+                if (written <= 0) { reject(new Error('Failed to make progress while writing ZIP archive.')); return; }
+                offset += written;
+                next();
+            });
+        };
+        next();
+    });
+}
+
+/** 공유 archive fd를 닫지 않는 entry별 pipeline sink. */
+class ArchiveFdSink extends Writable {
+    bytesWritten = 0;
+    private activeWrite: Promise<void> | undefined;
+
+    constructor(private readonly fd: number) {
+        super();
+    }
+
+    override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+        const write = writeFdBuffer(this.fd, chunk);
+        this.activeWrite = write;
+        void write.then(() => {
+            if (this.activeWrite === write) { this.activeWrite = undefined; }
+            this.bytesWritten += chunk.length;
+            callback();
+        }, error => {
+            if (this.activeWrite === write) { this.activeWrite = undefined; }
+            callback(error);
+        });
+    }
+
+    override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+        const write = this.activeWrite;
+        if (!write) {
+            callback(error);
+            return;
+        }
+
+        // `pipeline(..., { signal })` destroys its streams immediately on
+        // abort. A custom Writable's pending `_write` is not automatically an
+        // I/O barrier: without this hook pipeline can reject while fs.write is
+        // still using the externally-owned fd, and the caller's finally block
+        // may close/reuse it underneath that operation. Finish the outstanding
+        // write before allowing pipeline cleanup to close the descriptor.
+        void write.then(
+            () => callback(error),
+            writeError => callback(error ?? (
+                writeError instanceof Error ? writeError : new Error(String(writeError))
+            ))
+        );
+    }
+}
+
+interface ExclusiveTempFile {
+    tempPath: string;
+    fd: number;
+}
+
+/**
+ * 대상과 같은 디렉터리에 예측 불가능한 이름을 `O_EXCL` 로 만든다.
+ * 같은 파일시스템에 있어야 마지막 rename이 원자적이다.
+ */
+function openExclusiveSiblingTempFile(targetPath: string, kind: 'archive' | 'entry'): ExclusiveTempFile {
+    const parent = path.dirname(targetPath);
+    const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
+        (fs.constants.O_NOFOLLOW ?? 0);
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < 16; attempt++) {
+        const token = randomBytes(12).toString('hex');
+        // Do not embed the target basename. A perfectly valid 255-byte entry
+        // name would exceed the filesystem's NAME_MAX once our suffix was
+        // appended, regressing extraction/creation with ENAMETOOLONG.
+        const tempPath = path.join(parent, `.taskhub-${kind}-${process.pid}-${token}.tmp`);
+        try {
+            // 경로 검증 직후 같은 event-loop turn에서 연다. 이 짧은 metadata
+            // syscall까지 비동기로 넘기면 부모 링크가 바뀔 JS-level 틈이 생긴다.
+            const fd = fs.openSync(tempPath, flags, 0o600);
+            return { tempPath, fd };
+        } catch (error) {
+            lastError = error;
+            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') { throw error; }
+        }
+    }
+    throw lastError ?? new Error(`Could not create a temporary file beside: ${targetPath}`);
+}
+
+async function unlinkIfPresent(filePath: string): Promise<void> {
+    try {
+        await fs.promises.unlink(filePath);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
+    }
+}
+
+function defaultCreatedFileMode(): number {
+    return 0o666 & ~process.umask();
+}
+
+function replacementModeForArchive(targetPath: string): number {
+    try {
+        const stat = fs.lstatSync(targetPath);
+        if (stat.isFile() && !stat.isSymbolicLink()) { return stat.mode & 0o777; }
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
+    }
+    return defaultCreatedFileMode();
+}
+
+interface ZipSourceEntry {
+    sourcePath: string;
+    entryName: string;
+    isDirectory: boolean;
+    stat: fs.Stats;
+}
+
+function normalizeArchiveEntryName(name: string, isDirectory: boolean): string {
+    const normalized = name.replace(/\\/g, '/').replace(/^\/+/, '');
+    return isDirectory && !normalized.endsWith('/') ? `${normalized}/` : normalized;
+}
+
+async function collectDirectoryEntries(
+    sourceDir: string,
+    archiveDir: string,
+    visitedRealDirectories: Set<string>,
+    entries: ZipSourceEntry[],
+    signal: AbortSignal | undefined
+): Promise<void> {
+    throwIfAborted(signal);
+    const names = await fs.promises.readdir(sourceDir);
+    names.sort();
+
+    for (const name of names) {
+        throwIfAborted(signal);
+        const sourcePath = path.join(sourceDir, name);
+        const stat = await fs.promises.stat(sourcePath);
+        const entryName = normalizeArchiveEntryName(`${archiveDir}/${name}`, stat.isDirectory());
+        if (stat.isDirectory()) {
+            entries.push({ sourcePath, entryName, isDirectory: true, stat });
+            const realPath = await fs.promises.realpath(sourcePath);
+            if (!visitedRealDirectories.has(realPath)) {
+                visitedRealDirectories.add(realPath);
+                await collectDirectoryEntries(sourcePath, entryName.replace(/\/$/, ''), visitedRealDirectories, entries, signal);
+            }
+        } else if (stat.isFile()) {
+            entries.push({ sourcePath, entryName, isDirectory: false, stat });
+        }
+        // adm-zip도 폴더 안의 socket/FIFO/device는 엔트리로 만들지 않는다.
+    }
+}
+
+async function collectZipSourceEntries(sources: string[], signal: AbortSignal | undefined): Promise<ZipSourceEntry[]> {
+    const entries: ZipSourceEntry[] = [];
+    for (const source of sources) {
+        throwIfAborted(signal);
+        let stat: fs.Stats;
+        try {
+            stat = await fs.promises.stat(source);
+        } catch {
+            throw new Error(`Source path not found: ${source}`);
+        }
+
+        if (stat.isDirectory()) {
+            const realPath = await fs.promises.realpath(source);
+            await collectDirectoryEntries(
+                source,
+                normalizeArchiveEntryName(path.basename(source), false),
+                new Set([realPath]),
+                entries,
+                signal
+            );
+        } else if (stat.isFile()) {
+            entries.push({
+                sourcePath: source,
+                entryName: normalizeArchiveEntryName(path.basename(source), false),
+                isDirectory: false,
+                stat,
+            });
+        } else {
+            throw new Error(`Unsupported source type (not a file or directory): ${source}`);
+        }
+    }
+    return entries;
+}
+
+interface CentralDirectoryEntry {
+    name: Buffer;
+    flags: number;
+    method: number;
+    dosTime: number;
+    dosDate: number;
+    crc32: number;
+    compressedSize: number;
+    uncompressedSize: number;
+    localHeaderOffset: number;
+    externalAttributes: number;
+}
+
+function dosDateTime(date: Date): { dosTime: number; dosDate: number } {
+    const year = Math.min(2107, Math.max(1980, date.getFullYear()));
+    return {
+        dosTime: ((date.getHours() & 0x1f) << 11) |
+            ((date.getMinutes() & 0x3f) << 5) |
+            ((Math.floor(date.getSeconds() / 2)) & 0x1f),
+        dosDate: (((year - 1980) & 0x7f) << 9) |
+            (((date.getMonth() + 1) & 0x0f) << 5) |
+            (date.getDate() & 0x1f),
+    };
+}
+
+function assertClassicZipValue(value: number, label: string): void {
+    if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) {
+        throw new Error(`${label} exceeds the 4 GB limit of this ZIP writer.`);
+    }
+}
+
+function buildLocalFileHeader(entry: CentralDirectoryEntry): Buffer {
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt16LE(entry.flags, 6);
+    header.writeUInt16LE(entry.method, 8);
+    header.writeUInt16LE(entry.dosTime, 10);
+    header.writeUInt16LE(entry.dosDate, 12);
+    if ((entry.flags & 0x0008) === 0) {
+        header.writeUInt32LE(entry.crc32, 14);
+        header.writeUInt32LE(entry.compressedSize, 18);
+        header.writeUInt32LE(entry.uncompressedSize, 22);
+    }
+    header.writeUInt16LE(entry.name.length, 26);
+    return header;
+}
+
+function buildDataDescriptor(entry: CentralDirectoryEntry): Buffer {
+    const descriptor = Buffer.alloc(16);
+    descriptor.writeUInt32LE(0x08074b50, 0);
+    descriptor.writeUInt32LE(entry.crc32, 4);
+    descriptor.writeUInt32LE(entry.compressedSize, 8);
+    descriptor.writeUInt32LE(entry.uncompressedSize, 12);
+    return descriptor;
+}
+
+function buildCentralDirectoryHeader(entry: CentralDirectoryEntry): Buffer {
+    const header = Buffer.alloc(46);
+    header.writeUInt32LE(0x02014b50, 0);
+    header.writeUInt16LE(0x0314, 4); // Unix, ZIP 2.0
+    header.writeUInt16LE(20, 6);
+    header.writeUInt16LE(entry.flags, 8);
+    header.writeUInt16LE(entry.method, 10);
+    header.writeUInt16LE(entry.dosTime, 12);
+    header.writeUInt16LE(entry.dosDate, 14);
+    header.writeUInt32LE(entry.crc32, 16);
+    header.writeUInt32LE(entry.compressedSize, 20);
+    header.writeUInt32LE(entry.uncompressedSize, 24);
+    header.writeUInt16LE(entry.name.length, 28);
+    header.writeUInt32LE(entry.externalAttributes, 38);
+    header.writeUInt32LE(entry.localHeaderOffset, 42);
+    return header;
+}
+
 /**
  * Create a zip archive at `archivePath` containing the given sources. Each
  * source may be a file or a directory; directories are added recursively under
  * their basename. Returns after the archive is flushed to disk.
  *
- * **취소 입도의 한계**: `adm-zip` 의 `addLocalFolder` 는 동기적으로 트리를 다
- * 훑고, `writeZip` 도 한 번에 끝난다 — 그 안으로 취소가 들어갈 자리가 없다.
- * 그래서 source 하나 단위와 쓰기 직전에만 확인한다. 거대한 단일 폴더를 담는
- * 중에는 중지가 즉시 듣지 않는다는 뜻이고, 그 이상은 압축 라이브러리를
- * 스트리밍 방식으로 바꿔야 한다.
+ * 파일 읽기와 deflate를 스트리밍하므로 확장 호스트의 이벤트 루프를 막지 않고,
+ * 큰 파일 하나를 처리하는 도중에도 `AbortSignal`이 pipeline을 중단한다. 결과는
+ * 같은 디렉터리의 임시 파일에 먼저 완성하고 fsync/close한 뒤 rename한다 — 실패나
+ * 중지로 반쪽 ZIP이 생겨도 기존 `archivePath`는 마지막 성공본 그대로 남는다.
  */
 export async function createZipArchive(archivePath: string, sources: string[], options: ArchiveOptions = {}): Promise<void> {
     if (!Array.isArray(sources) || sources.length === 0) {
         throw new Error('createZipArchive requires at least one source path.');
     }
     throwIfAborted(options.signal);
-
-    const zip = new AdmZip();
-    for (const source of sources) {
-        throwIfAborted(options.signal);
-        let stat: fs.Stats;
-        try {
-            stat = fs.statSync(source);
-        } catch (e: any) {
-            throw new Error(`Source path not found: ${source}`);
+    const sourceEntries = await collectZipSourceEntries(sources, options.signal);
+    if (sourceEntries.length > 0xffff) {
+        throw new Error('Archive contains more than 65535 entries; ZIP64 creation is not supported.');
+    }
+    for (const entry of sourceEntries) {
+        const nameLength = Buffer.byteLength(entry.entryName, 'utf8');
+        if (nameLength > 0xffff) {
+            throw new Error(`Archive entry name is too long: ${entry.entryName}`);
         }
-
-        if (stat.isDirectory()) {
-            // Preserve the directory name as the top-level folder inside the archive.
-            zip.addLocalFolder(source, path.basename(source));
-        } else if (stat.isFile()) {
-            zip.addLocalFile(source);
-        } else {
-            throw new Error(`Unsupported source type (not a file or directory): ${source}`);
+        if (!entry.isDirectory) {
+            assertClassicZipValue(entry.stat.size, `Archive entry '${entry.entryName}'`);
         }
     }
 
-    // 쓰기 직전이 마지막 확인 지점이다. 여기서 걸리면 아카이브 파일 자체가
-    // 만들어지지 않는다 — 중지했는데 반쯤 쓰인 zip 이 남는 것보다 낫다.
+    const resolvedArchivePath = path.resolve(archivePath);
+    await fs.promises.mkdir(path.dirname(resolvedArchivePath), { recursive: true });
     throwIfAborted(options.signal);
-    fs.mkdirSync(path.dirname(archivePath), { recursive: true });
-    await new Promise<void>((resolve, reject) => {
-        zip.writeZip(archivePath, (err) => {
-            if (err) { reject(err); } else { resolve(); }
-        });
-    });
+    const temp = openExclusiveSiblingTempFile(resolvedArchivePath, 'archive');
+    let fdOpen = true;
+    let committed = false;
+
+    try {
+        const centralEntries: CentralDirectoryEntry[] = [];
+        let archiveOffset = 0;
+
+        for (const sourceEntry of sourceEntries) {
+            throwIfAborted(options.signal);
+            const name = Buffer.from(sourceEntry.entryName, 'utf8');
+            const { dosTime, dosDate } = dosDateTime(sourceEntry.stat.mtime);
+            const central: CentralDirectoryEntry = {
+                name,
+                flags: 0x0800 | (sourceEntry.isDirectory ? 0 : 0x0008),
+                method: sourceEntry.isDirectory ? 0 : 8,
+                dosTime,
+                dosDate,
+                crc32: 0,
+                compressedSize: 0,
+                uncompressedSize: 0,
+                localHeaderOffset: archiveOffset,
+                externalAttributes: (
+                    (((sourceEntry.stat.mode & 0xffff) << 16) >>> 0) |
+                    (sourceEntry.isDirectory ? 0x10 : 0)
+                ) >>> 0,
+            };
+
+            const localHeader = buildLocalFileHeader(central);
+            await writeFdBuffer(temp.fd, localHeader);
+            await writeFdBuffer(temp.fd, name);
+            archiveOffset += localHeader.length + name.length;
+
+            if (!sourceEntry.isDirectory) {
+                const checksum = new Crc32Transform();
+                const sink = new ArchiveFdSink(temp.fd);
+                await pipeline(
+                    fs.createReadStream(sourceEntry.sourcePath),
+                    checksum,
+                    createDeflateRaw(),
+                    sink,
+                    { signal: options.signal }
+                );
+                central.crc32 = checksum.checksum;
+                central.uncompressedSize = checksum.byteCount;
+                central.compressedSize = sink.bytesWritten;
+                assertClassicZipValue(central.uncompressedSize, `Archive entry '${sourceEntry.entryName}'`);
+                assertClassicZipValue(central.compressedSize, `Compressed archive entry '${sourceEntry.entryName}'`);
+                archiveOffset += central.compressedSize;
+
+                const descriptor = buildDataDescriptor(central);
+                await writeFdBuffer(temp.fd, descriptor);
+                archiveOffset += descriptor.length;
+            }
+            assertClassicZipValue(archiveOffset, 'ZIP archive');
+            centralEntries.push(central);
+        }
+
+        throwIfAborted(options.signal);
+        const centralDirectoryOffset = archiveOffset;
+        for (const central of centralEntries) {
+            throwIfAborted(options.signal);
+            const header = buildCentralDirectoryHeader(central);
+            await writeFdBuffer(temp.fd, header);
+            await writeFdBuffer(temp.fd, central.name);
+            archiveOffset += header.length + central.name.length;
+            assertClassicZipValue(archiveOffset, 'ZIP archive');
+        }
+        const centralDirectorySize = archiveOffset - centralDirectoryOffset;
+
+        const end = Buffer.alloc(22);
+        end.writeUInt32LE(0x06054b50, 0);
+        end.writeUInt16LE(centralEntries.length, 8);
+        end.writeUInt16LE(centralEntries.length, 10);
+        end.writeUInt32LE(centralDirectorySize, 12);
+        end.writeUInt32LE(centralDirectoryOffset, 16);
+        await writeFdBuffer(temp.fd, end);
+        throwIfAborted(options.signal);
+        fs.fchmodSync(temp.fd, replacementModeForArchive(resolvedArchivePath));
+        await syncFd(temp.fd);
+        await closeFd(temp.fd);
+        fdOpen = false;
+
+        // 이 검사와 rename 사이에는 await가 없다. 이 지점이 생성의 commit point다.
+        throwIfAborted(options.signal);
+        await fs.promises.rename(temp.tempPath, resolvedArchivePath);
+        committed = true;
+    } finally {
+        if (fdOpen) {
+            try { await closeFd(temp.fd); } catch { /* best effort */ }
+        }
+        if (!committed) {
+            try { await unlinkIfPresent(temp.tempPath); } catch { /* 원래 오류를 보존한다 */ }
+        }
+    }
 }
 
 /**
@@ -111,8 +503,8 @@ function formatBytes(bytes: number): string {
  * 이미 메모리를 쓴 뒤라 방어가 되지 않는다.
  *
  * 헤더 값은 아카이브가 스스로 신고한 값이라 거짓일 수 있다. 그래도 유효한
- * 방어다 — 거짓으로 작게 신고하면 압축 해제 결과가 헤더와 어긋나고, 그건
- * `adm-zip` 이 CRC 불일치로 잡는다. 목적은 "정직하게 거대한" 아카이브를
+ * 방어다 — 거짓으로 작게 신고하면 압축 해제 결과가 헤더와 어긋나고, 아래
+ * 스트리밍 크기/CRC 검증이 잡는다. 목적은 "정직하게 거대한" 아카이브를
  * 적재 전에 막는 것이다.
  *
  * 압축률(ratio) 검사는 두지 않았다. 절대 크기 상한이 이미 걸리므로 고압축
@@ -241,7 +633,7 @@ function mkdirWithinDestination(resolvedDest: string, dirPath: string): void {
 }
 
 /**
- * 파일 엔트리의 최종 경로를 **링크를 따라가지 않고** 연다.
+ * 파일 엔트리의 최종 경로를 **링크를 따라가지 않고** 검사한다.
  *
  * 부모 경로는 {@link mkdirWithinDestination} 이 보장하지만, 마지막 이름
  * 자체가 기존 링크면 그 링크를 따라 바깥 파일이 덮어써진다. 링크에는 두
@@ -253,50 +645,59 @@ function mkdirWithinDestination(resolvedDest: string, dirPath: string): void {
  *     `dest/note.txt` 가 `outside/victim.txt` 의 하드 링크일 때 엔트리
  *     `note.txt` 를 추출하면 예외 없이 바깥 파일이 덮어써졌다.
  *
- * 그래서 경로로 열지 않고 **fd 로 연 뒤 그 fd 를 검사**한다:
+ * 엔트리 데이터는 별도 임시 파일에 이미 완성되어 있으므로 최종 대상은 쓰기
+ * 모드로 열거나 자를 필요가 없다. 기존 대상이 있으면 **fd 로 열어 검사**한다:
  *
  *   1. `O_NOFOLLOW` — 마지막 이름이 심볼릭 링크면 커널이 `ELOOP` 로 막는다.
  *      경로를 `lstat` 한 뒤 다시 여는 방식의 TOCTOU 도 함께 사라진다.
- *   2. `O_TRUNC` 를 **일부러 넣지 않는다**. 열자마자 자르면 하드 링크 검사
- *      전에 바깥 파일을 이미 비워 버린 뒤가 된다. 열고 → `fstat` 으로
- *      `nlink` 를 보고 → 통과한 뒤에 자른다.
+ *   2. `fstat().nlink` — 하드 링크면 최종 rename 전에 거부한다.
  *
  * 링크를 지우고 새로 쓰는 대신 **거부**한다 — 사용자가 의도해 둔 링크를
  * 아카이브가 조용히 없애는 편이 더 나쁘다.
  */
-function openEntryTargetForWrite(resolvedDest: string, targetPath: string): number {
+function assertEntryTargetReplaceable(resolvedDest: string, targetPath: string): number {
     const shown = path.relative(resolvedDest, targetPath);
-    // Windows 에는 `O_NOFOLLOW` 가 없다. 0 이면 플래그가 빠질 뿐이고, 그쪽은
-    // 아래 `lstat` 검사와 junction 검사(`mkdirWithinDestination`)가 받는다.
-    const noFollow = fs.constants.O_NOFOLLOW ?? 0;
-    if (noFollow === 0) {
-        let stat: fs.Stats | undefined;
-        try { stat = fs.lstatSync(targetPath); } catch { stat = undefined; }
-        if (stat?.isSymbolicLink()) {
-            throw new Error(`Blocked symlinked path in archive destination: ${shown}`);
-        }
+    let pathStat: fs.Stats;
+    try {
+        pathStat = fs.lstatSync(targetPath);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return defaultCreatedFileMode(); }
+        throw error;
+    }
+    if (pathStat.isSymbolicLink()) {
+        throw new Error(`Blocked symlinked path in archive destination: ${shown}`);
+    }
+    if (!pathStat.isFile()) {
+        throw new Error(`Archive entry needs a file but a non-file exists at: ${shown}`);
     }
 
+    // Windows 에는 `O_NOFOLLOW` 가 없다. 그쪽에서도 lstat로 명백한 링크를 막고,
+    // 마지막 동작은 링크를 따라 쓰는 open이 아니라 링크 자체를 교체하는 rename이다.
+    const noFollow = fs.constants.O_NOFOLLOW ?? 0;
     let fd: number;
     try {
-        fd = fs.openSync(targetPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | noFollow);
+        fd = fs.openSync(targetPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | noFollow);
     } catch (e) {
         if ((e as NodeJS.ErrnoException).code === 'ELOOP') {
             throw new Error(`Blocked symlinked path in archive destination: ${shown}`);
         }
+        // 검사 사이에 대상이 사라졌다면 rename은 새 파일을 만들 뿐이다.
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') { return defaultCreatedFileMode(); }
         throw e;
     }
 
     try {
-        if (fs.fstatSync(fd).nlink > 1) {
+        const openedStat = fs.fstatSync(fd);
+        if (!openedStat.isFile()) {
+            throw new Error(`Archive entry needs a file but a non-file exists at: ${shown}`);
+        }
+        if (openedStat.nlink > 1) {
             throw new Error(`Blocked hard-linked path in archive destination: ${shown}`);
         }
-        fs.ftruncateSync(fd, 0);
-    } catch (e) {
+        return openedStat.mode & 0o777;
+    } finally {
         try { fs.closeSync(fd); } catch { /* best effort */ }
-        throw e;
     }
-    return fd;
 }
 
 /** zip 엔트리 이름이 디렉터리를 뜻하는가 (zip 규약: 끝이 `/`). */
@@ -341,8 +742,10 @@ function resolveEntryTarget(resolvedDest: string, entryName: string): string | n
  * 메모리를 쓸 수 있었다. `yauzl` 은 파일을 fd 로 읽고 엔트리를 read stream 으로
  * 주므로 peak 가 **파일 크기와 무관한 상수**가 된다.
  *
- * 생성(`createZipArchive`)은 그대로 `adm-zip` 을 쓴다 — `yauzl` 은 읽기 전용이고,
- * 쓰기까지 바꾸면 교체 범위가 필요 이상으로 커진다.
+ * 파일 하나는 같은 디렉터리의 임시 파일에 끝까지 스트리밍하고 크기와 CRC를
+ * 확인한 뒤에만 rename한다. 따라서 현재 엔트리가 손상됐거나 중지되면 기존
+ * 대상은 byte-for-byte 보존되고 임시 파일은 지워진다. 이미 완료해 교체한 앞쪽
+ * 엔트리와 생성한 디렉터리까지 되돌리는 archive 전체 transaction은 아니다.
  */
 export async function extractZipArchive(archivePath: string, destination: string, options: ArchiveOptions = {}): Promise<void> {
     if (!fs.existsSync(archivePath)) {
@@ -409,12 +812,8 @@ export async function extractZipArchive(archivePath: string, destination: string
             }
             mkdirWithinDestination(resolvedDest, path.dirname(targetPath));
 
-            // **읽기 스트림을 먼저 연다.** 순서가 뒤바뀌면 데이터가 사라진다:
-            // `openEntryTargetForWrite` 는 대상 파일을 자르는데, 그 뒤에
-            // `openReadStream` 이 실패하면(암호화 엔트리, 미지원 압축 방식 등)
-            // **쓸 내용도 없이 기존 파일만 비워 놓은** 상태가 된다. 실측:
-            // 16바이트 파일이 0바이트가 됐다. 스트림을 먼저 열면 그런 엔트리는
-            // 대상을 건드리기도 전에 거부된다.
+            // 읽기 스트림을 먼저 연다. 암호화 엔트리나 미지원 압축 방식이면
+            // 임시 파일조차 만들지 않고 거부할 수 있다.
             const readStream = await new Promise<Readable>((resolve, reject) => {
                 zipFile.openReadStream(entry, (err, stream) => {
                     if (err || !stream) { reject(err ?? new Error('Failed to open entry stream')); return; }
@@ -422,25 +821,60 @@ export async function extractZipArchive(archivePath: string, destination: string
                 });
             });
 
-            let fd: number;
+            let temp: ExclusiveTempFile;
             try {
-                // 경로가 아니라 **fd** 로 연다 — 심볼릭/하드 링크와 TOCTOU 를
-                // 한 번에 막는다 (openEntryTargetForWrite 참조).
-                fd = openEntryTargetForWrite(resolvedDest, targetPath);
+                // openReadStream을 기다리는 동안 부모가 링크로 바뀌었을 수 있다.
+                // 임시 파일 open 직전에 다시 검사하고 같은 turn에서 O_EXCL로 연다.
+                mkdirWithinDestination(resolvedDest, path.dirname(targetPath));
+                temp = openExclusiveSiblingTempFile(targetPath, 'entry');
             } catch (e) {
-                // 대상을 열지 못하면(링크 거부 등) 이미 연 읽기 스트림의 주인이
-                // 없어진다 — 버리지 않으면 zip 쪽 자원이 물린 채 남는다.
                 readStream.destroy();
                 throw e;
             }
-            // `pipeline` 을 쓴다. 손으로 엮으면 **한쪽 오류에서 다른 쪽이 남는다** —
-            // 예전에는 read 쪽 오류를 그대로 reject 만 하고 출력 `WriteStream` 은
-            // 닫지 않아, 손상 아카이브 하나마다 fd 가 하나씩 샜다(실측: 거부 후에도
-            // `closed:false, destroyed:false`). `pipeline` 은 어느 쪽이 실패하든
-            // 양쪽을 destroy 하고 한 번만 settle 한다.
-            // `fd` 를 넘긴다 — 경로로 다시 열면 링크 검사를 우회하게 된다.
-            // `autoClose` 기본값이 true 라 `pipeline` 이 실패해도 fd 는 닫힌다.
-            await pipeline(readStream, fs.createWriteStream(targetPath, { fd }), { signal: options.signal });
+
+            let fdOwned = true;
+            let committed = false;
+            try {
+                const checksum = new Crc32Transform();
+                // 이 sink는 fd를 닫지 않는다. CRC 검증 뒤 fsync/close까지 우리가
+                // 소유해야 임시 파일의 완성 시점과 commit을 분리할 수 있다.
+                const output = new ArchiveFdSink(temp.fd);
+                await pipeline(readStream, checksum, output, { signal: options.signal });
+
+                if (checksum.byteCount !== entry.uncompressedSize) {
+                    throw new Error(
+                        `Archive entry size mismatch for '${entry.fileName}': ` +
+                        `expected ${entry.uncompressedSize}, got ${checksum.byteCount}.`
+                    );
+                }
+                if (checksum.checksum !== entry.crc32) {
+                    throw new Error(`Archive entry CRC mismatch: ${entry.fileName}`);
+                }
+                throwIfAborted(options.signal);
+
+                // 부모가 링크로 바뀌지 않았는지 다시 확인하고, 최종 이름 자체의
+                // symlink/hardlink 방어도 commit 직전에 수행한다.
+                mkdirWithinDestination(resolvedDest, path.dirname(targetPath));
+                const finalMode = assertEntryTargetReplaceable(resolvedDest, targetPath);
+                fs.fchmodSync(temp.fd, finalMode);
+                await closeFd(temp.fd);
+                fdOwned = false;
+
+                // close 동안 대상 경로가 바뀔 수 있으므로 마지막으로 한 번 더
+                // 링크 방어를 확인한다. rename은 링크를 따라 쓰지 않고 이름을 교체한다.
+                mkdirWithinDestination(resolvedDest, path.dirname(targetPath));
+                assertEntryTargetReplaceable(resolvedDest, targetPath);
+                throwIfAborted(options.signal);
+                await fs.promises.rename(temp.tempPath, targetPath);
+                committed = true;
+            } finally {
+                if (fdOwned) {
+                    try { await closeFd(temp.fd); } catch { /* best effort */ }
+                }
+                if (!committed) {
+                    try { await unlinkIfPresent(temp.tempPath); } catch { /* 원래 오류를 보존한다 */ }
+                }
+            }
         }
     } finally {
         // `autoClose: false` 로 열었으므로 fd 를 직접 닫는다. 안 닫으면 Windows
