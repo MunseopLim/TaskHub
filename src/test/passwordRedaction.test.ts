@@ -471,4 +471,141 @@ suite('Password taint and redaction', function () {
             `provenance redaction over-masked an unrelated literal: ${recordCommands.use}`);
         assert.ok(!Object.prototype.hasOwnProperty.call(recordInputs, 'ask'));
     });
+
+    /**
+     * 실패 원인을 통째로 가리면 비밀번호를 쓰는 flash/deploy 가 실패했을 때
+     * 사용자가 아무 단서도 없이 막힌다. 정책을 "기본은 안전한 메타데이터만,
+     * 상세는 사용자가 승인한 일회성 실행에서만" 으로 완화했다 (0.6.46).
+     */
+    suite('실패 메타데이터와 일회성 민감 디버그', () => {
+
+        /** 지정한 종료 코드로 끝나며 stderr 에 비밀을 그대로 뱉는 스크립트. */
+        function makeFailingScript(secret: string, exitCode: number): string {
+            const scriptPath = path.join(tempWorkspace, 'fail.js');
+            fs.writeFileSync(
+                scriptPath,
+                `process.stderr.write('boom ' + process.argv[2] + '\\n');\n` +
+                `process.exit(${exitCode});\n`
+            );
+            return scriptPath;
+        }
+
+        function passwordAction(id: string, scriptPath: string): ActionItem {
+            return {
+                id,
+                title: `Sensitive ${id}`,
+                action: {
+                    description: 'a task that consumes a password and fails',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                        {
+                            id: 'use',
+                            type: 'shell',
+                            command: `node ${JSON.stringify(scriptPath)} \${ask.value}`,
+                            passTheResultToNextTask: true,
+                        },
+                    ] as unknown as Task[],
+                } as unknown as PipelineAction,
+            } as unknown as ActionItem;
+        }
+
+        test('실패 메시지에 단계·종료 코드·마스킹된 명령이 남고 비밀은 없다', async () => {
+            const secret = 'Sup3r-S3cret-Value';
+            const scriptPath = makeFailingScript(secret, 3);
+            const originalInputBox = vscode.window.showInputBox;
+            (vscode.window as any).showInputBox = () => Promise.resolve(secret);
+
+            let failure: Error | undefined;
+            try {
+                await extension.executeAction(
+                    passwordAction('sensitive-meta', scriptPath),
+                    makeContext(),
+                    makeMainViewProvider()
+                );
+            } catch (e) {
+                failure = e as Error;
+            } finally {
+                (vscode.window as any).showInputBox = originalInputBox;
+            }
+
+            assert.ok(failure, '태스크가 실패해야 이 테스트가 의미를 갖는다');
+            const message = failure!.message;
+            assert.ok(!message.includes(secret), `실패 메시지에 비밀이 남았다: ${message}`);
+            assert.ok(!message.includes('boom'), `stderr 원문이 새어 나왔다: ${message}`);
+            assert.ok(/\b3\b/.test(message), `종료 코드가 없다: ${message}`);
+            assert.ok(message.includes('***'), `마스킹된 명령이 없다: ${message}`);
+        });
+
+        test('민감 디버그를 요청하지 않으면 원본 출력을 열지 않는다', async () => {
+            const secret = 'Another-S3cret';
+            const scriptPath = makeFailingScript(secret, 1);
+            const originalInputBox = vscode.window.showInputBox;
+            const originalOpen = vscode.workspace.openTextDocument;
+            let openedContent: string | undefined;
+            (vscode.window as any).showInputBox = () => Promise.resolve(secret);
+            (vscode.workspace as any).openTextDocument = (options: any) => {
+                openedContent = typeof options?.content === 'string' ? options.content : '';
+                return (originalOpen as any)({ content: '', language: 'plaintext' });
+            };
+
+            try {
+                await extension.executeAction(
+                    passwordAction('sensitive-noopen', scriptPath),
+                    makeContext(),
+                    makeMainViewProvider()
+                ).catch(() => { /* 실패는 예상된 것이다 */ });
+            } finally {
+                (vscode.window as any).showInputBox = originalInputBox;
+                (vscode.workspace as any).openTextDocument = originalOpen;
+            }
+
+            assert.strictEqual(
+                openedContent,
+                undefined,
+                '승인하지 않았는데 원본 출력이 편집기로 열렸다'
+            );
+        });
+
+        test('민감 디버그 플래그는 한 실행만 쓰고 다음 실행으로 새지 않는다', async () => {
+            const secret = 'One-Shot-Only';
+            const scriptPath = makeFailingScript(secret, 2);
+            const originalInputBox = vscode.window.showInputBox;
+            const originalOpen = vscode.workspace.openTextDocument;
+            const opened: string[] = [];
+            (vscode.window as any).showInputBox = () => Promise.resolve(secret);
+            (vscode.workspace as any).openTextDocument = (options: any) => {
+                opened.push(typeof options?.content === 'string' ? options.content : '');
+                return (originalOpen as any)({ content: '', language: 'plaintext' });
+            };
+
+            try {
+                // 첫 실행: 민감 디버그를 요청한 상태로 돌린다.
+                extension.__testHook_requestSensitiveDebug('sensitive-once');
+                await extension.executeAction(
+                    passwordAction('sensitive-once', scriptPath),
+                    makeContext(),
+                    makeMainViewProvider()
+                ).catch(() => { /* 실패는 예상된 것이다 */ });
+
+                assert.strictEqual(opened.length, 1, '승인한 실행에서 원본이 열리지 않았다');
+                assert.ok(opened[0].includes('boom'), '원본 stderr 가 담기지 않았다');
+
+                // 두 번째 실행: 아무 요청도 하지 않았다.
+                await extension.executeAction(
+                    passwordAction('sensitive-once', scriptPath),
+                    makeContext(),
+                    makeMainViewProvider()
+                ).catch(() => { /* 실패는 예상된 것이다 */ });
+
+                assert.strictEqual(
+                    opened.length,
+                    1,
+                    '플래그가 다음 실행으로 넘어가 원본이 또 열렸다 — 일회성이 아니다'
+                );
+            } finally {
+                (vscode.window as any).showInputBox = originalInputBox;
+                (vscode.workspace as any).openTextDocument = originalOpen;
+            }
+        });
+    });
 });

@@ -1376,7 +1376,12 @@ export function withTaskTimeout<T>(
             if (settled) { return; }
             settled = true;
             try { onTimeout?.(); } catch { /* swallow — best effort */ }
-            reject(new Error(`Task '${taskId}' timed out after ${timeoutSeconds}s.`));
+            const timeoutError = new Error(`Task '${taskId}' timed out after ${timeoutSeconds}s.`);
+            // 호출부가 실패 원인을 **분류**해야 한다(비밀을 쓰는 태스크는 상세
+            // 출력을 가리는 대신 단계만 보여 준다). 메시지 문자열 매칭은 문구가
+            // 바뀌면 조용히 깨지므로 이름을 남긴다.
+            timeoutError.name = 'TaskTimeoutError';
+            reject(timeoutError);
         }, timeoutSeconds * 1000);
         promise.then(
             value => {

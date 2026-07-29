@@ -2173,6 +2173,16 @@ interface ActionRunContext {
     readonly secretTaskIds: Set<string>;
     /** AbortControllers owned by currently running built-in archive tasks. */
     readonly taskAbortControllers: Map<string, Set<AbortController>>;
+    /**
+     * 이 **한 번의 실행**에서만 원본 출력을 사용자에게 보여 준다.
+     *
+     * 사용자가 실패 알림에서 명시적으로 요청하고 모달로 동의했을 때만 선다.
+     * 영구 설정으로 두지 않는 것이 핵심이다 — 켜 놓고 잊으면 그 뒤의 모든
+     * 실행에서 비밀이 새기 때문이다. 실행이 끝나면 컨텍스트와 함께 사라진다.
+     */
+    sensitiveDebug: boolean;
+    /** 민감 디버그 실행에서 붙잡아 둔 원본 출력 (어디에도 저장하지 않는다). */
+    sensitiveDebugCapture?: { taskId: string; stdout: string; stderr: string };
 }
 
 let nextActionRunGeneration = 1;
@@ -2194,6 +2204,9 @@ function createActionRunContext(id: string): ActionRunContext {
         closed: false,
         secretTaskIds: new Set<string>(),
         taskAbortControllers: new Map<string, Set<AbortController>>(),
+        // 다음 실행이 이 플래그를 물려받으면 안 된다. 요청한 그 실행에서만
+        // `beginActionCancellation` 직후에 세운다.
+        sensitiveDebug: false,
     };
 }
 
@@ -2453,12 +2466,78 @@ export class ActionStoppedError extends Error {
     }
 }
 
+/**
+ * 비밀을 쓰는 태스크의 실패에서 **안전하게 보여 줄 수 있는** 부분.
+ *
+ * 원본 stdout/stderr 은 여기 담지 않는다 — 비밀번호가 출력에서 변형되거나
+ * 인코딩되어 나올 수 있어(base64, URL 인코딩, 셸이 다시 인용한 형태 등)
+ * 문자열 치환만으로는 가릴 수 없기 때문이다.
+ */
+interface SensitiveFailureDetail {
+    stage: 'start' | 'exit' | 'timeout' | 'capture-limit' | 'unknown';
+    exitCode?: number | null;
+    signal?: NodeJS.Signals | null;
+    /** 이미 마스킹된 명령줄. */
+    command?: string;
+}
+
+/** 실패 원인 중 **가릴 필요가 없는** 부분만 추려 낸다. */
+function describeSensitiveFailure(raw: Error, maskedCommand?: string): SensitiveFailureDetail {
+    if (raw instanceof ShellCommandError) {
+        return { stage: 'exit', exitCode: raw.exitCode, signal: raw.signal, command: maskedCommand };
+    }
+    if (raw.name === 'TaskTimeoutError') {
+        return { stage: 'timeout', command: maskedCommand };
+    }
+    if (raw.name === 'CaptureLimitError') {
+        return { stage: 'capture-limit', command: maskedCommand };
+    }
+    // spawn 자체가 실패한 경우(ENOENT/EACCES 등). errno 코드는 경로나 비밀을
+    // 담지 않는다.
+    const code = (raw as NodeJS.ErrnoException).code;
+    if (typeof code === 'string' && code.length > 0) {
+        return { stage: 'start', command: maskedCommand };
+    }
+    return { stage: 'unknown', command: maskedCommand };
+}
+
+function sensitiveStageLabel(stage: SensitiveFailureDetail['stage']): string {
+    switch (stage) {
+        case 'start': return t('실행 시작 실패', 'failed to start');
+        case 'exit': return t('비정상 종료', 'exited with a failure');
+        case 'timeout': return t('시간 초과', 'timed out');
+        case 'capture-limit': return t('출력 한도 초과', 'exceeded the output limit');
+        default: return t('실패', 'failed');
+    }
+}
+
 class SensitiveTaskError extends Error {
-    constructor(taskId: string) {
+    constructor(taskId: string, public readonly detail: SensitiveFailureDetail) {
         // Do not retain the original error as `cause`: stderr and spawn errors
         // can themselves contain the secret, and callers may serialize the
         // complete Error object rather than just `.message`.
-        super(`Task '${taskId}' failed; details were hidden because the task used a password input.`);
+        //
+        // 원인을 통째로 숨기면 비밀번호를 쓰는 flash/deploy 가 실패했을 때
+        // 사용자가 **아무 단서도 없이** 막힌다. 그래서 가려도 안전한 것만
+        // 골라 남긴다: 어느 단계에서 실패했는지, 종료 코드와 시그널, 이미
+        // 마스킹된 명령. 원본 출력은 일회성 "민감 디버그" 재실행으로만 본다.
+        const parts: string[] = [`Task '${taskId}' ${sensitiveStageLabel(detail.stage)}`];
+        if (detail.stage === 'exit') {
+            if (typeof detail.exitCode === 'number') {
+                parts.push(t(`종료 코드 ${detail.exitCode}`, `exit code ${detail.exitCode}`));
+            }
+            if (detail.signal) {
+                parts.push(t(`시그널 ${detail.signal}`, `signal ${detail.signal}`));
+            }
+        }
+        if (detail.command) {
+            parts.push(t(`명령: ${detail.command}`, `command: ${detail.command}`));
+        }
+        parts.push(t(
+            'password 입력을 사용해 상세 출력은 숨겼습니다',
+            'detailed output is hidden because the task used a password input'
+        ));
+        super(parts.join(' — '));
         this.name = 'SensitiveTaskError';
     }
 }
@@ -2660,7 +2739,13 @@ export class ShellCommandError extends Error {
         message: string,
         public readonly stdout: string,
         public readonly stderr: string,
-        public readonly exitCode: number | null
+        public readonly exitCode: number | null,
+        /**
+         * 종료 시그널. 프로세스가 죽어서 끝난 경우 `exitCode` 는 `null` 이라
+         * 그것만으로는 "왜 끝났는지"를 알 수 없다 — 비밀번호를 쓰는 태스크는
+         * 상세 출력을 가리므로, 이 값이 사용자에게 남는 몇 안 되는 단서다.
+         */
+        public readonly signal: NodeJS.Signals | null = null
     ) {
         super(message);
         this.name = 'ShellCommandError';
@@ -3577,6 +3662,10 @@ function markActionAsRunning(
     // visible the moment the state flips to `running`, so the scope it acts
     // on has to exist from that same moment.
     const run = beginActionCancellation(id);
+    // 요청을 **소비**한다. 남겨 두면 그 뒤의 평범한 실행까지 원본을 노출한다.
+    if (pendingSensitiveDebugActionIds.delete(id)) {
+        run.sensitiveDebug = true;
+    }
     syncRunningActionsContext();
     if (showTaskStatus) {
         mainViewProvider.refresh();
@@ -3849,6 +3938,13 @@ async function executeActionPipelineForRun(
         inFlight.clear();
     };
 
+    /**
+     * 이미 마스킹된 명령줄. `recordCommands` 는 태스크를 **실행하기 전에**
+     * 채워지므로 실패 시점에도 남아 있고, 그 값은 비밀이 이미 자리표시자로
+     * 바뀐 표시용 문자열이다 — 그대로 보여 줘도 안전하다.
+     */
+    const maskedCommandForTask = (taskId: string): string | undefined => recordCommands?.[taskId];
+
     const launchTask = (taskId: string): Promise<InFlightOutcome> => {
         const task = taskById.get(taskId)!;
         const taskUsesSecret = taskReferencesSecret(task, executionRun);
@@ -3921,8 +4017,15 @@ async function executeActionPipelineForRun(
             (result): InFlightOutcome => ({ taskId, kind: 'success', result }),
             (error): InFlightOutcome => {
                 const raw = error instanceof Error ? error : new Error(String(error));
+                if (taskUsesSecret && executionRun.sensitiveDebug && raw instanceof ShellCommandError
+                    && !executionRun.sensitiveDebugCapture) {
+                    // 사용자가 이 실행에 한해 원본을 보겠다고 동의했다. 여기서만
+                    // 붙잡아 두고, History·Problems·출력 채널에는 여전히 넣지
+                    // 않는다 — 아래에서 임시 편집기로 한 번 보여 주고 끝난다.
+                    executionRun.sensitiveDebugCapture = { taskId, stdout: raw.stdout, stderr: raw.stderr };
+                }
                 const e = taskUsesSecret && !(raw instanceof ActionStoppedError)
-                    ? new SensitiveTaskError(taskId)
+                    ? new SensitiveTaskError(taskId, describeSensitiveFailure(raw, maskedCommandForTask(taskId)))
                     : raw;
                 // 사용자 중지는 `continueOnError` 보다 우선한다. 그 설정의 뜻은
                 // "이 태스크가 실패해도 나머지는 계속"이지 "사용자가 멈추라고
@@ -4032,6 +4135,89 @@ function handleActionSuccess(id: string, action: PipelineAction, showTaskStatus:
     if (showTaskStatus && action.successMessage) {
         vscode.window.showInformationMessage(action.successMessage);
     }
+}
+
+/**
+ * 민감 디버그 재실행을 **한 번** 요청받아 수행한다.
+ *
+ * 정책은 "기본은 안전한 메타데이터만, 필요할 때 사용자가 명시적으로 승인한
+ * 단일 실행에서만 상세 출력"이다. 그래서:
+ *
+ *   - 모달로 경고하고 동의를 받는다(액션이 **다시 실행된다**는 것도 함께).
+ *   - 플래그는 그 실행의 컨텍스트에만 서고, 끝나면 컨텍스트와 함께 사라진다.
+ *   - 원본은 임시 편집기(untitled)로 한 번 보여 준다 — History·Problems·
+ *     출력 채널에는 그대로 넣지 않는다. 저장 여부는 사용자 손에 있다.
+ *   - 영구 설정으로 켜 두는 방법은 두지 않는다.
+ */
+async function offerSensitiveDebugRerun(
+    actionItem: ActionItem,
+    context: vscode.ExtensionContext,
+    mainViewProvider: MainViewProvider,
+    historyProvider: HistoryProvider | undefined,
+    failureMessage: string
+): Promise<void> {
+    const debugLabel = t('민감 디버그로 한 번 다시 실행', 'Re-run once with sensitive debug');
+    const picked = await vscode.window.showErrorMessage(failureMessage, debugLabel);
+    if (picked !== debugLabel) { return; }
+
+    const proceed = t('다시 실행', 'Re-run');
+    const confirmed = await vscode.window.showWarningMessage(
+        t(
+            `'${actionItem.title}' 액션을 다시 실행하고, 이번 실행에 한해 숨겨진 출력을 그대로 보여 줍니다.\n\n` +
+            '출력에 비밀번호가 그대로 또는 변형된 형태로 들어 있을 수 있습니다. ' +
+            '액션이 실제로 다시 수행되므로 빌드·플래시 같은 부수 효과도 다시 일어납니다.',
+            `This re-runs '${actionItem.title}' and, for this run only, shows the output that is normally hidden.\n\n` +
+            'That output may contain the password verbatim or in an encoded form. ' +
+            'The action really runs again, so side effects such as building or flashing happen again.'
+        ),
+        { modal: true },
+        proceed
+    );
+    if (confirmed !== proceed) { return; }
+
+    pendingSensitiveDebugActionIds.add(actionItem.id);
+    try {
+        await executeAction(actionItem, context, mainViewProvider, historyProvider);
+    } catch {
+        // 재실행의 실패는 평소 경로가 이미 알린다. 여기서 또 띄우지 않는다.
+    } finally {
+        // 사용자가 취소해 실행이 시작조차 못 한 경우를 대비해 확실히 지운다.
+        pendingSensitiveDebugActionIds.delete(actionItem.id);
+    }
+}
+
+/** 원본 출력을 임시 편집기로 한 번 보여 준다. 디스크에는 쓰지 않는다. */
+async function showSensitiveDebugOutput(
+    actionTitle: string,
+    capture: { taskId: string; stdout: string; stderr: string }
+): Promise<void> {
+    const header = t(
+        `# 민감 디버그 — '${actionTitle}' / 태스크 '${capture.taskId}'\n` +
+        '# 이 내용은 저장되지 않았습니다. 비밀번호가 포함돼 있을 수 있으니 공유 전에 확인하세요.\n',
+        `# Sensitive debug — '${actionTitle}' / task '${capture.taskId}'\n` +
+        '# This was not persisted. It may contain the password — check before sharing.\n'
+    );
+    const body = `${header}\n--- stdout ---\n${capture.stdout}\n--- stderr ---\n${capture.stderr}\n`;
+    const doc = await vscode.workspace.openTextDocument({ content: body, language: 'plaintext' });
+    await vscode.window.showTextDocument(doc, { preview: false });
+}
+
+/**
+ * 다음 실행에서 민감 디버그를 켤 액션 id.
+ *
+ * `executeAction` 이 실행 컨텍스트를 만든 직후 소비하고 **즉시 지운다** —
+ * 남겨 두면 그 뒤의 평범한 실행까지 원본을 노출한다.
+ */
+const pendingSensitiveDebugActionIds = new Set<string>();
+
+/**
+ * 테스트 전용 — 다음 실행 하나에만 민감 디버그를 건다.
+ *
+ * 실제 경로는 알림 → 모달 동의를 거치는데, 그 UI 를 테스트에서 몰아가는 것은
+ * 검증하려는 것(플래그가 **한 번만** 쓰이는가)과 무관한 배선이다.
+ */
+export function __testHook_requestSensitiveDebug(actionId: string): void {
+    pendingSensitiveDebugActionIds.add(actionId);
 }
 
 function handleActionFailure(id: string, actionItem: ActionItem, action: PipelineAction, error: Error, showTaskStatus: boolean): void {
@@ -4419,8 +4605,23 @@ export async function executeAction(
         const ownsCurrentState = isCurrentActionRun(run);
         const manuallyStopped = ownsCurrentState && manuallyTerminatedActions.has(id);
         if (!manuallyStopped) {
+            // 민감 디버그 실행이었다면 붙잡아 둔 원본을 한 번 보여 준다.
+            if (run.sensitiveDebug && run.sensitiveDebugCapture) {
+                void showSensitiveDebugOutput(actionItem.title, run.sensitiveDebugCapture);
+            }
             if (ownsCurrentState) {
-                handleActionFailure(id, actionItem, action, error, showTaskStatus);
+                // 비밀을 쓰는 태스크의 실패는 상세가 가려져 있다. 그대로 두면
+                // 사용자가 원인에 접근할 방법이 없으므로, 일회성 재실행을
+                // 제안한다 (이미 민감 디버그로 돌린 실행에는 제안하지 않는다).
+                if (error instanceof SensitiveTaskError && !run.sensitiveDebug && showTaskStatus) {
+                    void offerSensitiveDebugRerun(
+                        actionItem, context, mainViewProvider, historyProvider,
+                        t(`'${actionItem.title}' 액션 실패: ${error.message}`,
+                          `Action '${actionItem.title}' failed: ${error.message}`)
+                    );
+                } else {
+                    handleActionFailure(id, actionItem, action, error, showTaskStatus);
+                }
             }
 
             // Update history to failure
@@ -6210,7 +6411,7 @@ export function executeShellCommand(
             attachedChild.stdout?.on('data', (data) => { appendCapture('stdout', typeof data === 'string' ? data : String(data)); });
             attachedChild.stderr?.on('data', (data) => { appendCapture('stderr', typeof data === 'string' ? data : String(data)); });
 
-            attachedChild.on('close', (code) => {
+            attachedChild.on('close', (code, signal) => {
                 cleanupChildTracking(attachedChild);
                 if (attachedChild !== childProcess || settled) {
                     return;
@@ -6230,10 +6431,12 @@ export function executeShellCommand(
                 if (captureOverflowed) {
                     settled = true;
                     const limitMb = Math.round(captureLimitBytes / (1024 * 1024));
-                    reject(new Error(t(
+                    const limitError = new Error(t(
                         `캡처된 출력이 ${limitMb}MB 한도를 초과하여 명령을 중단했습니다. \`taskhub.pipeline.outputCaptureLimitMb\` 설정을 높이거나, 캡처가 필요 없다면 \`passTheResultToNextTask\` 를 꺼서 터미널로 흘려보내세요.`,
                         `Captured output exceeded the ${limitMb} MB limit and the command was aborted. Raise \`taskhub.pipeline.outputCaptureLimitMb\`, or turn off \`passTheResultToNextTask\` so the output streams to the terminal instead of being captured.`
-                    )));
+                    ));
+                    limitError.name = 'CaptureLimitError';
+                    reject(limitError);
                     return;
                 }
 
@@ -6245,10 +6448,13 @@ export function executeShellCommand(
                     // can still parse diagnostics out of the failed build (gcc /
                     // clang emit errors on stderr AND exit non-zero).
                     reject(new ShellCommandError(
-                        stderr || `Command failed with exit code ${code}`,
+                        stderr || (signal
+                            ? `Command terminated by signal ${signal}`
+                            : `Command failed with exit code ${code}`),
                         stdout,
                         stderr,
-                        code
+                        code,
+                        signal
                     ));
                 }
             });

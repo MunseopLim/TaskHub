@@ -240,7 +240,6 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
         };
         const fakeVscode = { postMessage: (m: any) => { posted.push(m); } };
 
-        // eslint-disable-next-line no-new-func
         const fn = new Function('document', 'vscode', 'SAVE_HTML_LIMIT', handlerSource);
         fn(fakeDocument, fakeVscode, MEMORY_MAP_MAX_SAVE_HTML_CHARS);
         return { posted, serialized };
@@ -286,7 +285,6 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
             getElementsByTagName: (tag: string) => (tag === 'tr' ? rows : []),
             get documentElement() { return { get outerHTML() { return ''; } }; },
         };
-        // eslint-disable-next-line no-new-func
         const fn = new Function('document', 'vscode', 'SAVE_HTML_LIMIT', handlerSource);
         fn(fakeDocument, { postMessage: (m: any) => posted.push(m) }, MEMORY_MAP_MAX_SAVE_HTML_CHARS);
 
