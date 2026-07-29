@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import Ajv from 'ajv';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as vscode from 'vscode';
 import { ACTION_TEMPLATES, MAX_PIPELINE_TEMPLATE_STEPS, parseTemplateChoiceList } from '../extension';
 
 /**
@@ -172,5 +173,111 @@ suite('액션 생성 템플릿', () => {
             assert.ok(MAX_PIPELINE_TEMPLATE_STEPS >= 2 && MAX_PIPELINE_TEMPLATE_STEPS <= 20,
                 '무한 프롬프트 방지용 가드 — 너무 작으면 기능이 반쪽이 된다');
         });
+    });
+});
+
+
+/**
+ * 다단계 마법사의 Back 과 초안 보존 (0.6.46).
+ *
+ * 최대 10단계를 받으면서 되돌아갈 방법이 없었다 — 8단계에서 오타를 발견하면
+ * Escape 로 **전부 버리고** 처음부터 다시 입력해야 했다. `showInputBox` 로는
+ * Back 버튼을 달 수 없어서 `createInputBox` 로 바꿨다.
+ *
+ * 실제 `promptForTasks` 를 돌린다. 가짜 입력 상자가 대본대로 accept/Back 을
+ * 일으키고, 각 단계에 무엇이 **미리 채워졌는지**까지 기록한다.
+ */
+suite('다단계 마법사 Back / 초안 보존', () => {
+    /**
+     * `createInputBox` 를 대본으로 움직인다. 대본 항목이 `'BACK'` 이면
+     * Back 버튼을 누른 것으로 처리한다.
+     */
+    function scriptInputBox(steps: (string | undefined | 'BACK')[]): {
+        restore: () => void; prefilled: (string | undefined)[];
+    } {
+        const original = vscode.window.createInputBox;
+        const prefilled: (string | undefined)[] = [];
+        let idx = 0;
+        (vscode.window as any).createInputBox = () => {
+            const handlers: any = {};
+            const box: any = {
+                value: '', prompt: undefined, placeholder: undefined,
+                ignoreFocusOut: false, buttons: [], validationMessage: undefined,
+                onDidTriggerButton: (fn: any) => { handlers.button = fn; return { dispose() { } }; },
+                onDidChangeValue: () => ({ dispose() { } }),
+                onDidAccept: (fn: any) => { handlers.accept = fn; return { dispose() { } }; },
+                onDidHide: (fn: any) => { handlers.hide = fn; return { dispose() { } }; },
+                dispose: () => { },
+                show: () => {
+                    // 이 단계에 무엇이 채워진 채로 열렸는지 기록한다.
+                    prefilled.push(box.value === '' ? undefined : box.value);
+                    const answer = steps[idx++];
+                    if (answer === 'BACK') {
+                        handlers.button?.(vscode.QuickInputButtons.Back);
+                        return;
+                    }
+                    if (answer === undefined) { box.value = ''; handlers.accept?.(); return; }
+                    box.value = answer;
+                    handlers.accept?.();
+                },
+            };
+            return box;
+        };
+        return { restore: () => { (vscode.window as any).createInputBox = original; }, prefilled };
+    }
+
+    test('Back 으로 돌아간 단계에는 이전 입력이 다시 채워진다', async () => {
+        // 1단계 make → 2단계 flash → Back → (2단계 재입력) test → 종료
+        const stub = scriptInputBox(['make', 'flash', 'BACK', 'test', undefined]);
+        let tasks: any[];
+        try {
+            tasks = await templateById('multi-step-shell').promptForTasks!();
+        } finally {
+            stub.restore();
+        }
+
+        assert.deepStrictEqual(
+            tasks.map((t: any) => t.command),
+            ['make', 'test'],
+            'Back 이후의 재입력이 이전 값을 대체하지 않았다'
+        );
+        // show 순서: [0] 1단계(빈칸) → [1] 2단계(빈칸) → [2] 3단계에서 Back →
+        // [3] 되돌아온 2단계(flash 가 채워져야 한다) → [4] 3단계
+        assert.strictEqual(
+            stub.prefilled[3],
+            'flash',
+            `Back 으로 돌아온 단계가 빈 칸으로 열렸다: ${JSON.stringify(stub.prefilled)}`
+        );
+    });
+
+    test('1단계에는 Back 을 달지 않는다', async () => {
+        // 돌아갈 곳이 없는 단계에 버튼이 있으면 눌렀을 때 갈 곳이 없다.
+        const original = vscode.window.createInputBox;
+        const buttonCounts: number[] = [];
+        (vscode.window as any).createInputBox = () => {
+            const handlers: any = {};
+            const box: any = {
+                value: '', buttons: [], validationMessage: undefined,
+                onDidTriggerButton: () => ({ dispose() { } }),
+                onDidChangeValue: () => ({ dispose() { } }),
+                onDidAccept: (fn: any) => { handlers.accept = fn; return { dispose() { } }; },
+                onDidHide: (fn: any) => { handlers.hide = fn; return { dispose() { } }; },
+                dispose: () => { },
+                show: () => {
+                    buttonCounts.push(box.buttons.length);
+                    if (buttonCounts.length === 1) { box.value = 'make'; } else { box.value = ''; }
+                    handlers.accept?.();
+                },
+            };
+            return box;
+        };
+        try {
+            await templateById('multi-step-shell').promptForTasks!();
+        } finally {
+            (vscode.window as any).createInputBox = original;
+        }
+
+        assert.strictEqual(buttonCounts[0], 0, '1단계에 Back 버튼이 달려 있다');
+        assert.ok(buttonCounts[1] > 0, '2단계에 Back 버튼이 없다 — 되돌아갈 방법이 없다');
     });
 });

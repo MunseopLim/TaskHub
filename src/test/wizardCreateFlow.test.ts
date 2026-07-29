@@ -57,6 +57,7 @@ suite('마법사 생성 종단 흐름', () => {
         const original = {
             showQuickPick: vscode.window.showQuickPick,
             showInputBox: vscode.window.showInputBox,
+            createInputBox: vscode.window.createInputBox,
             showInformationMessage: vscode.window.showInformationMessage,
             executeCommand: vscode.commands.executeCommand,
         };
@@ -70,6 +71,36 @@ suite('마법사 생성 종단 흐름', () => {
             return answer;
         };
         (vscode.window as any).showInputBox = async () => script.inputBox[seen.inputBox++];
+        // 마법사는 Back 버튼을 달기 위해 `createInputBox` 를 쓴다
+        // (`showInputBox` 로는 버튼을 달 수 없다). 스크립트의 다음 답을
+        // 그대로 accept 시키는 최소 구현으로 대신한다.
+        (vscode.window as any).createInputBox = () => {
+            const handlers: { accept?: () => void; hide?: () => void } = {};
+            const box: any = {
+                value: '',
+                prompt: undefined,
+                placeholder: undefined,
+                ignoreFocusOut: false,
+                buttons: [],
+                validationMessage: undefined,
+                onDidTriggerButton: () => ({ dispose() { /* 이 스텁은 Back 을 누르지 않는다 */ } }),
+                onDidChangeValue: () => ({ dispose() { /* no-op */ } }),
+                onDidAccept: (fn: () => void) => { handlers.accept = fn; return { dispose() { /* no-op */ } }; },
+                onDidHide: (fn: () => void) => { handlers.hide = fn; return { dispose() { /* no-op */ } }; },
+                dispose: () => { /* no-op */ },
+                show: () => {
+                    const answer = script.inputBox[seen.inputBox++];
+                    if (answer === undefined) {
+                        // 취소(Escape) 를 흉내 낸다.
+                        handlers.hide?.();
+                        return;
+                    }
+                    box.value = answer;
+                    handlers.accept?.();
+                },
+            };
+            return box;
+        };
         const prompts: { buttons: string[]; modal: boolean }[] = [];
         (vscode.window as any).showInformationMessage = async (...args: any[]) => {
             // 시그니처는 (message, options?, ...items) 두 갈래다. 문자열 항목만
@@ -98,6 +129,7 @@ suite('마법사 생성 종단 흐름', () => {
             restore() {
                 (vscode.window as any).showQuickPick = original.showQuickPick;
                 (vscode.window as any).showInputBox = original.showInputBox;
+                (vscode.window as any).createInputBox = original.createInputBox;
                 (vscode.window as any).showInformationMessage = original.showInformationMessage;
                 (vscode.commands as any).executeCommand = original.executeCommand;
             },

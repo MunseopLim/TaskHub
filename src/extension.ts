@@ -1401,23 +1401,39 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
         },
         async promptForTasks() {
             const commands: string[] = [];
+            // 각 단계에 마지막으로 입력한 값. 뒤로 갔다 다시 오면 이 값이
+            // 다시 채워진다 — 되돌아가서 한 글자 고치는 것이 목적인데 빈
+            // 칸이 나오면 그 목적이 무너진다.
+            const drafts: string[] = [];
             while (commands.length < MAX_PIPELINE_TEMPLATE_STEPS) {
                 const step = commands.length + 1;
-                // Step 1 is required; from step 2 on, an empty submit ends the
-                // chain (Escape still cancels the whole wizard).
-                const command = step === 1
-                    ? await promptForRequiredInput({
-                        prompt: t(`${step}단계 명령어를 입력하세요`, `Enter the command for step ${step}`),
-                        placeHolder: 'e.g. make clean'
-                    })
-                    : await promptForOptionalInput({
-                        prompt: t(`${step}단계 명령어 (비워 두면 완료)`, `Command for step ${step} (leave empty to finish)`),
-                        placeHolder: t('비워 두고 Enter를 누르면 여기까지 저장합니다', 'Press Enter on an empty box to stop here')
-                    });
-                if (!command) {
-                    break;
+                try {
+                    // Step 1 is required; from step 2 on, an empty submit ends the
+                    // chain (Escape still cancels the whole wizard).
+                    // 2단계부터는 Back 을 단다 — 1단계에서 뒤로 갈 곳은 없다.
+                    const command = step === 1
+                        ? await promptForRequiredInput({
+                            prompt: t(`${step}단계 명령어를 입력하세요`, `Enter the command for step ${step}`),
+                            placeHolder: 'e.g. make clean',
+                            value: drafts[step - 1]
+                        })
+                        : await promptForOptionalInput({
+                            prompt: t(`${step}단계 명령어 (비워 두면 완료)`, `Command for step ${step} (leave empty to finish)`),
+                            placeHolder: t('비워 두고 Enter를 누르면 여기까지 저장합니다', 'Press Enter on an empty box to stop here'),
+                            value: drafts[step - 1],
+                            canGoBack: true
+                        });
+                    if (!command) {
+                        break;
+                    }
+                    drafts[step - 1] = command;
+                    commands.push(command);
+                } catch (error) {
+                    if (!(error instanceof WizardBackError)) { throw error; }
+                    // 직전 단계를 다시 연다. `drafts` 는 남겨 두므로 그 값이
+                    // 그대로 채워지고, 앞으로 다시 나아갈 때도 유지된다.
+                    commands.pop();
                 }
-                commands.push(command);
             }
             return this.buildTasks({ commands });
         }
@@ -1476,24 +1492,74 @@ function collectFolderDestinations(items: ActionItem[]): DestinationPickItem[] {
     return destinations;
 }
 
-async function promptForRequiredInput(options: { prompt: string; value?: string; placeHolder?: string }): Promise<string> {
-    const result = await vscode.window.showInputBox({
-        prompt: options.prompt,
-        value: options.value,
-        placeHolder: options.placeHolder,
-        ignoreFocusOut: true,
-        validateInput: input => {
-            const trimmed = input.trim();
-            if (!trimmed) {
-                return t('값을 입력해야 합니다.', 'Value is required.');
-            }
-            return undefined;
-        }
-    });
-    if (result === undefined) {
-        throw new WizardCancelledError();
+/** 사용자가 마법사에서 **이전 단계로** 돌아갔다. 취소와 구분해야 한다. */
+class WizardBackError extends Error {
+    constructor() {
+        super('Wizard step went back');
+        this.name = 'WizardBackError';
     }
-    return result.trim();
+}
+
+/**
+ * 마법사용 입력 상자.
+ *
+ * `showInputBox` 대신 `createInputBox` 를 쓴다 — 전자는 **Back 버튼을 달 수
+ * 없다**. 10단계까지 받는 다단계 템플릿에서 8단계의 오타를 고치려면 Escape 로
+ * 전부 버리고 처음부터 다시 입력해야 했다.
+ *
+ * 돌아온 단계에는 이전에 입력한 값을 다시 채워 준다(`value`) — 되돌아가서
+ * 한 글자만 고치는 것이 목적인데 빈 칸이 나오면 그 목적이 무너진다.
+ */
+function showWizardInput(options: {
+    prompt: string;
+    value?: string;
+    placeHolder?: string;
+    required: boolean;
+    canGoBack?: boolean;
+}): Promise<string | undefined> {
+    return new Promise<string | undefined>((resolve, reject) => {
+        const input = vscode.window.createInputBox();
+        input.prompt = options.prompt;
+        input.value = options.value ?? '';
+        input.placeholder = options.placeHolder;
+        input.ignoreFocusOut = true;
+        input.buttons = options.canGoBack ? [vscode.QuickInputButtons.Back] : [];
+
+        let settled = false;
+        const finish = (fn: () => void) => {
+            if (settled) { return; }
+            settled = true;
+            fn();
+            input.dispose();
+        };
+
+        input.onDidTriggerButton(button => {
+            if (button === vscode.QuickInputButtons.Back) {
+                finish(() => reject(new WizardBackError()));
+            }
+        });
+        // 입력이 바뀌면 경고를 지운다. 남겨 두면 고친 뒤에도 빨간 문구가
+        // 붙어 있어 아직 잘못된 줄 안다.
+        input.onDidChangeValue(() => { input.validationMessage = undefined; });
+        input.onDidAccept(() => {
+            const trimmed = input.value.trim();
+            if (options.required && !trimmed) {
+                input.validationMessage = t('값을 입력해야 합니다.', 'Value is required.');
+                return;
+            }
+            finish(() => resolve(trimmed.length > 0 ? trimmed : undefined));
+        });
+        // Escape 나 포커스 이탈. `finish` 가 이미 돌았다면 무시된다.
+        input.onDidHide(() => { finish(() => reject(new WizardCancelledError())); });
+
+        input.show();
+    });
+}
+
+async function promptForRequiredInput(options: { prompt: string; value?: string; placeHolder?: string; canGoBack?: boolean }): Promise<string> {
+    const result = await showWizardInput({ ...options, required: true });
+    // `required: true` 면 빈 값으로는 accept 되지 않는다.
+    return result ?? '';
 }
 
 /**
@@ -1502,18 +1568,8 @@ async function promptForRequiredInput(options: { prompt: string; value?: string;
  * `WizardCancelledError`, so "done" and "cancelled" stay distinguishable —
  * the multi-step template relies on that split to end its chain.
  */
-async function promptForOptionalInput(options: { prompt: string; value?: string; placeHolder?: string }): Promise<string | undefined> {
-    const result = await vscode.window.showInputBox({
-        prompt: options.prompt,
-        value: options.value,
-        placeHolder: options.placeHolder,
-        ignoreFocusOut: true
-    });
-    if (result === undefined) {
-        throw new WizardCancelledError();
-    }
-    const trimmed = result.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
+async function promptForOptionalInput(options: { prompt: string; value?: string; placeHolder?: string; canGoBack?: boolean }): Promise<string | undefined> {
+    return showWizardInput({ ...options, required: false });
 }
 
 /**
