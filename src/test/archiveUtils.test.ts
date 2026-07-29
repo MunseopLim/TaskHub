@@ -598,6 +598,106 @@ suite('archiveUtils', () => {
     });
 
     /**
+     * 내장 ZIP 엔진의 취소 (0.6.46).
+     *
+     * 예전에는 `extractZipArchive` / `createZipArchive` 가 취소 신호를 아예
+     * 받지 않았다. 사용자가 Stop 을 눌러도 작업은 끝까지 돌았고, 단독이거나
+     * 마지막 태스크였다면 완료 후 성공 기록이 "중지됨" 이력을 덮었다.
+     *
+     * `vscode` 의 토큰이 아니라 표준 `AbortSignal` 을 받는다 — 이 모듈은
+     * 순수 node 에서도 require 될 수 있어야 한다.
+     */
+    suite('취소', () => {
+        test('이미 취소된 signal 이면 추출을 시작하지 않는다', async () => {
+            const archivePath = writeRawZip('cancel-pre.zip', [
+                { name: 'a.txt', data: Buffer.from('a') },
+            ]);
+            const dest = path.join(tempDir, 'cancel-pre-out');
+
+            await assert.rejects(
+                extractZipArchive(archivePath, dest, { signal: AbortSignal.abort() }),
+                (e: Error) => e.name === 'AbortError'
+            );
+            assert.ok(!fs.existsSync(dest), '취소됐는데 대상 디렉터리가 생겼다');
+        });
+
+        test('엔트리 목록을 읽는 중에 취소하면 아무것도 풀지 않는다', async () => {
+            const entries = Array.from({ length: 2000 }, (_, i) => ({
+                name: `f${String(i).padStart(4, '0')}.txt`,
+                data: Buffer.alloc(4096, 0x41),
+            }));
+            const archivePath = writeRawZip('cancel-phase1.zip', entries);
+            const dest = path.join(tempDir, 'cancel-phase1-out');
+
+            const controller = new AbortController();
+            const run = extractZipArchive(archivePath, dest, { signal: controller.signal });
+            controller.abort();   // 1단계(목록 읽기) 안에서 걸린다
+
+            await assert.rejects(run, (e: Error) => e.name === 'AbortError');
+            const written = fs.existsSync(dest) ? fs.readdirSync(dest).length : 0;
+            assert.strictEqual(written, 0, '1단계에서 취소했는데 파일이 만들어졌다');
+        });
+
+        test('쓰기가 시작된 뒤 취소하면 남은 엔트리를 풀지 않는다', async function () {
+            this.timeout(30000);
+            // **타이머로 재지 않는다.** 처음에 `setTimeout(abort, 5)` 로 짰다가
+            // 실측해 보니 5ms 는 1단계(엔트리 목록 읽기)에서 걸려 쓰기 루프를
+            // 전혀 지나지 않았다 — 이름과 달리 위 케이스와 같은 것을 보고
+            // 있었다. 첫 파일이 실제로 생긴 것을 확인하고 취소해야 "쓰기 루프가
+            // 취소를 존중하는가"를 본다.
+            const total = 2000;
+            const entries = Array.from({ length: total }, (_, i) => ({
+                name: `f${String(i).padStart(4, '0')}.txt`,
+                data: Buffer.alloc(4096, 0x41),
+            }));
+            const archivePath = writeRawZip('cancel-phase2.zip', entries);
+            const dest = path.join(tempDir, 'cancel-phase2-out');
+
+            const controller = new AbortController();
+            const run = extractZipArchive(archivePath, dest, { signal: controller.signal });
+
+            const deadline = Date.now() + 15000;
+            let started = false;
+            while (Date.now() < deadline) {
+                if (fs.existsSync(dest) && fs.readdirSync(dest).length > 0) { started = true; break; }
+                await new Promise(resolve => setTimeout(resolve, 1));
+            }
+            assert.ok(started, '전제가 깨졌다 — 쓰기가 시작되지 않았다');
+            controller.abort();
+
+            await assert.rejects(run, (e: Error) => e.name === 'AbortError');
+            const written = fs.readdirSync(dest).length;
+            assert.ok(written > 0, '전제가 깨졌다 — 쓰기 루프를 지나지 않았다');
+            assert.ok(
+                written < total,
+                `취소했는데 ${written}/${total} 개가 전부 풀렸다 — 쓰기 루프가 취소를 무시한다`
+            );
+        });
+
+        test('이미 취소된 signal 이면 아카이브를 만들지 않는다', async () => {
+            const src = path.join(tempDir, 'src.txt');
+            fs.writeFileSync(src, 'x');
+            const archivePath = path.join(tempDir, 'cancelled.zip');
+
+            await assert.rejects(
+                createZipArchive(archivePath, [src], { signal: AbortSignal.abort() }),
+                (e: Error) => e.name === 'AbortError'
+            );
+            assert.ok(!fs.existsSync(archivePath), '취소됐는데 아카이브 파일이 생겼다');
+        });
+
+        test('signal 을 주지 않으면 예전처럼 동작한다', async () => {
+            // 취소를 넣으면서 기존 호출부(외부 tool 경로 등)를 깨면 안 된다.
+            const archivePath = writeRawZip('nosignal.zip', [
+                { name: 'a.txt', data: Buffer.from('ok') },
+            ]);
+            const dest = path.join(tempDir, 'nosignal-out');
+            await extractZipArchive(archivePath, dest);
+            assert.strictEqual(fs.readFileSync(path.join(dest, 'a.txt'), 'utf8'), 'ok');
+        });
+    });
+
+    /**
      * 손상된 아카이브에서 출력 스트림이 남는 문제 (0.6.46).
      *
      * 예전에는 read 쪽 오류를 `reject` 만 하고 출력 `WriteStream` 을 닫지

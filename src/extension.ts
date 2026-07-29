@@ -2184,6 +2184,45 @@ function actionCancellationToken(id: string): vscode.CancellationToken | undefin
 }
 
 /**
+ * 내장 아카이브 작업이 **취소로** 끝났는가.
+ *
+ * `archiveUtils` 는 `vscode` 를 모르므로 `ActionStoppedError` 를 던질 수 없고,
+ * `pipeline({ signal })` 의 중단과 같은 `AbortError` 로 통일해 던진다. 여기서
+ * 그것을 이 모듈의 중지 표현으로 옮긴다 — 실패로 포장하면 사용자가 누른
+ * Stop 이 오류 메시지로 보인다.
+ */
+function isArchiveAbortError(error: unknown): boolean {
+    if (!(error instanceof Error)) { return false; }
+    // 두 경로가 있다. 우리가 직접 던지는 쪽은 `name` 을 `AbortError` 로 두고,
+    // `pipeline({ signal })` 의 중단은 `name: 'AbortError'` + `code:
+    // 'ABORT_ERR'` 로 온다 — 실측으로 확인했다. `name === 'ABORT_ERR'` 을
+    // 보는 것은 죽은 조건이라(그건 `code` 다) `code` 를 본다.
+    return error.name === 'AbortError' || (error as NodeJS.ErrnoException).code === 'ABORT_ERR';
+}
+
+/**
+ * 액션의 취소 토큰을 표준 `AbortSignal` 로 잇는다.
+ *
+ * `archiveUtils` 는 `vscode` 를 import 하지 않으므로(순수 node 자식
+ * 프로세스에서도 require 할 수 있어야 한다) 토큰을 그대로 넘길 수 없다.
+ *
+ * 반환된 `dispose` 를 **반드시** 부른다. 토큰 리스너를 걸어 두면 액션이
+ * 끝날 때까지 남는데, 한 액션이 zip 태스크를 여러 번 돌리면 그만큼 쌓인다.
+ */
+function abortSignalForAction(actionId?: string): { signal?: AbortSignal; dispose: () => void } {
+    const token = actionId ? actionCancellationToken(actionId) : undefined;
+    if (!token) { return { signal: undefined, dispose: () => { /* 없음 */ } }; }
+
+    const controller = new AbortController();
+    if (token.isCancellationRequested) {
+        controller.abort();
+        return { signal: controller.signal, dispose: () => { /* 리스너 없음 */ } };
+    }
+    const sub = token.onCancellationRequested(() => controller.abort());
+    return { signal: controller.signal, dispose: () => sub.dispose() };
+}
+
+/**
  * Whether a stop was requested for this action. Checked after every await on
  * something that cannot itself be cancelled (native dialogs), so the run ends
  * at the next safe point rather than continuing to the following task.
@@ -4047,6 +4086,16 @@ export async function executeAction(
                 mainViewProvider.refresh();
             }
         });
+        // 사용자가 중지를 눌렀는데 파이프라인이 그래도 완주한 경우가 있다.
+        // 취소 신호를 받지 않는 작업(내장 ZIP/Unzip 등)이 마지막 태스크이거나
+        // 유일한 태스크면, 중지 이후에도 그 작업이 끝까지 돌고 여기로 온다.
+        // 그대로 두면 방금 기록한 "Action stopped by user" 를 **성공이
+        // 덮어써서** 사용자는 중지가 무시된 것도 모른 채 성공했다고 읽는다.
+        // 실패 경로에는 예전부터 같은 가드가 있었다(아래 catch).
+        if (manuallyTerminatedActions.has(id)) {
+            throw new ActionStoppedError();
+        }
+
         handleActionSuccess(id, action, showTaskStatus);
 
         // Update history to success — `Math.max(0, ...)` defends against
@@ -5224,11 +5273,19 @@ async function handleUnzip(task: any, allResults: any, workspaceFolderPath?: str
         if (path.extname(archivePath).toLowerCase() !== '.zip') {
             throw new Error(`Built-in engine only supports .zip archives. For '${path.basename(archivePath)}', specify a 'tool' (e.g. 7z).`);
         }
+        // 내장 엔진은 우리 코드라 취소를 실제로 받을 수 있다. 외부 tool
+        // 경로는 `executeShellCommand` 가 자식 프로세스를 종료해 처리한다.
+        const abort = abortSignalForAction(actionId);
         try {
-            await extractZipArchive(archivePath, outputDir);
+            await extractZipArchive(archivePath, outputDir, { signal: abort.signal });
             return { outputDir: outputDir };
         } catch (error: any) {
+            // 중지로 끝난 것을 "실패"로 포장하면 사용자가 누른 Stop 이
+            // 오류처럼 보이고, 파이프라인의 중지 처리도 타지 않는다.
+            if (isArchiveAbortError(error)) { throw new ActionStoppedError(); }
             throw new Error(`Failed to unzip file: ${error.message}`);
+        } finally {
+            abort.dispose();
         }
     }
 
@@ -5265,11 +5322,15 @@ async function handleZip(task: import('./schema').Task, allResults: any, workspa
         if (path.extname(archive).toLowerCase() !== '.zip') {
             throw new Error(`Built-in engine only supports .zip archives. For '${path.basename(archive)}', specify a 'tool' (e.g. 7z).`);
         }
+        const abort = abortSignalForAction(actionId);
         try {
-            await createZipArchive(archive, sourcePaths);
+            await createZipArchive(archive, sourcePaths, { signal: abort.signal });
             return { archivePath: archive };
         } catch (error: any) {
+            if (isArchiveAbortError(error)) { throw new ActionStoppedError(); }
             throw new Error(`Failed to zip files for task '${task.id}': ${error.message}`);
+        } finally {
+            abort.dispose();
         }
     }
 

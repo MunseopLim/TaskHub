@@ -694,6 +694,47 @@ suite('대화형 태스크 대기 중 중지', () => {
             }
         });
 
+        test('IT-135: 중지 후 완주한 액션이 성공으로 이력을 덮지 않는다', async function () {
+            this.timeout(20000);
+            // 취소 신호를 받지 않는 작업(0.6.46 이전의 내장 ZIP/Unzip 이 그랬다)
+            // 이 단독 태스크이거나 마지막 태스크면, 중지 이후에도 끝까지 돌고
+            // 파이프라인이 **성공**으로 마감된다. 그러면 방금 기록한
+            // "Action stopped by user" 를 성공이 덮어써서, 사용자는 중지가
+            // 무시된 것도 모른 채 성공했다고 읽는다. 실패 경로에는 예전부터
+            // 같은 가드가 있었는데 성공 경로에만 없었다.
+            //
+            // 여기서는 "취소를 무시하고 완주하는 태스크"를 stringManipulation
+            // 으로 흉내 낸다 — 프로세스도 토큰도 없이 즉시 성공하는 태스크라,
+            // 중지를 누른 직후에도 파이프라인이 그대로 완주한다.
+            const context = makeContext();
+            const actionItem: ActionItem = {
+                id: 'stop-then-succeed',
+                title: 'Stop then succeed',
+                action: {
+                    description: 'task completes despite the stop request',
+                    tasks: [
+                        { id: 'work', type: 'stringManipulation', function: 'trim', input: '  x  ' },
+                    ],
+                },
+            } as unknown as ActionItem;
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            const run = executeAction(actionItem, context, mainView, history);
+            run.catch(() => { /* 아래에서 판정한다 */ });
+            // 파이프라인이 돌기 시작한 직후에 중지한다.
+            stopRunningAction('stop-then-succeed');
+            await settleWithin(run, 10000, 'IT-135');
+
+            const entries = history.getHistory();
+            assert.strictEqual(entries.length, 1);
+            assert.notStrictEqual(
+                entries[0].status,
+                'success',
+                '중지를 눌렀는데 성공으로 기록됐다 — 사용자는 중지가 무시된 것을 알 수 없다'
+            );
+        });
+
         test('IT-130: continueOnError가 사용자 중지를 삼키지 않는다', async function () {
             this.timeout(20000);
             const stub = stubTokenAwareInputBox();

@@ -6,17 +6,46 @@ import AdmZip from 'adm-zip';
 import * as yauzl from 'yauzl';
 
 /**
+ * 취소를 받는 방법.
+ *
+ * 이 모듈은 `vscode` 를 import 하지 않는다 — 순수 node 자식 프로세스에서도
+ * require 할 수 있어야 하기 때문이다(메모리 테스트가 그렇게 쓴다). 그래서
+ * VS Code 의 `CancellationToken` 대신 표준 `AbortSignal` 을 받는다. 호출부가
+ * 토큰을 signal 로 이어 준다.
+ */
+export interface ArchiveOptions {
+    signal?: AbortSignal;
+}
+
+/** 취소되었으면 던진다. `pipeline` 의 중단과 같은 `AbortError` 로 맞춘다. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+    if (signal?.aborted) {
+        const e = new Error('Archive operation was cancelled.');
+        e.name = 'AbortError';
+        throw e;
+    }
+}
+
+/**
  * Create a zip archive at `archivePath` containing the given sources. Each
  * source may be a file or a directory; directories are added recursively under
  * their basename. Returns after the archive is flushed to disk.
+ *
+ * **취소 입도의 한계**: `adm-zip` 의 `addLocalFolder` 는 동기적으로 트리를 다
+ * 훑고, `writeZip` 도 한 번에 끝난다 — 그 안으로 취소가 들어갈 자리가 없다.
+ * 그래서 source 하나 단위와 쓰기 직전에만 확인한다. 거대한 단일 폴더를 담는
+ * 중에는 중지가 즉시 듣지 않는다는 뜻이고, 그 이상은 압축 라이브러리를
+ * 스트리밍 방식으로 바꿔야 한다.
  */
-export async function createZipArchive(archivePath: string, sources: string[]): Promise<void> {
+export async function createZipArchive(archivePath: string, sources: string[], options: ArchiveOptions = {}): Promise<void> {
     if (!Array.isArray(sources) || sources.length === 0) {
         throw new Error('createZipArchive requires at least one source path.');
     }
+    throwIfAborted(options.signal);
 
     const zip = new AdmZip();
     for (const source of sources) {
+        throwIfAborted(options.signal);
         let stat: fs.Stats;
         try {
             stat = fs.statSync(source);
@@ -34,6 +63,9 @@ export async function createZipArchive(archivePath: string, sources: string[]): 
         }
     }
 
+    // 쓰기 직전이 마지막 확인 지점이다. 여기서 걸리면 아카이브 파일 자체가
+    // 만들어지지 않는다 — 중지했는데 반쯤 쓰인 zip 이 남는 것보다 낫다.
+    throwIfAborted(options.signal);
     fs.mkdirSync(path.dirname(archivePath), { recursive: true });
     await new Promise<void>((resolve, reject) => {
         zip.writeZip(archivePath, (err) => {
@@ -312,10 +344,11 @@ function resolveEntryTarget(resolvedDest: string, entryName: string): string | n
  * 생성(`createZipArchive`)은 그대로 `adm-zip` 을 쓴다 — `yauzl` 은 읽기 전용이고,
  * 쓰기까지 바꾸면 교체 범위가 필요 이상으로 커진다.
  */
-export async function extractZipArchive(archivePath: string, destination: string): Promise<void> {
+export async function extractZipArchive(archivePath: string, destination: string, options: ArchiveOptions = {}): Promise<void> {
     if (!fs.existsSync(archivePath)) {
         throw new Error(`Archive not found: ${archivePath}`);
     }
+    throwIfAborted(options.signal);
     const resolvedDest = path.resolve(destination);
 
     const zipFile = await new Promise<yauzl.ZipFile>((resolve, reject) => {
@@ -342,6 +375,7 @@ export async function extractZipArchive(archivePath: string, destination: string
         await new Promise<void>((resolve, reject) => {
             zipFile.on('entry', (entry: yauzl.Entry) => {
                 try {
+                    throwIfAborted(options.signal);
                     resolveEntryTarget(resolvedDest, entry.fileName);   // 규칙 위반이면 던진다
                 } catch (e) {
                     reject(e);
@@ -364,6 +398,10 @@ export async function extractZipArchive(archivePath: string, destination: string
         // 2단계: 스트리밍 추출. 엔트리 하나가 통째로 메모리에 올라오지 않는다.
         fs.mkdirSync(resolvedDest, { recursive: true });
         for (const entry of entries) {
+            // 엔트리 경계마다 확인한다. 엔트리 **안**에서의 중단은 아래
+            // `pipeline` 에 signal 을 넘겨 처리한다 — 큰 파일 하나를 푸는
+            // 도중에도 중지가 듣게 하려면 그쪽이 필요하다.
+            throwIfAborted(options.signal);
             const targetPath = resolveEntryTarget(resolvedDest, entry.fileName);
             if (targetPath === null) {
                 mkdirWithinDestination(resolvedDest, path.resolve(resolvedDest, entry.fileName));
@@ -402,7 +440,7 @@ export async function extractZipArchive(archivePath: string, destination: string
             // 양쪽을 destroy 하고 한 번만 settle 한다.
             // `fd` 를 넘긴다 — 경로로 다시 열면 링크 검사를 우회하게 된다.
             // `autoClose` 기본값이 true 라 `pipeline` 이 실패해도 fd 는 닫힌다.
-            await pipeline(readStream, fs.createWriteStream(targetPath, { fd }));
+            await pipeline(readStream, fs.createWriteStream(targetPath, { fd }), { signal: options.signal });
         }
     } finally {
         // `autoClose: false` 로 열었으므로 fd 를 직접 닫는다. 안 닫으면 Windows
