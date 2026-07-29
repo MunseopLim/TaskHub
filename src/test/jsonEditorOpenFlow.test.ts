@@ -224,4 +224,93 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             assert.strictEqual(infoPrompts.length, 0, `물어볼 것이 없는데 프롬프트가 떴다: ${JSON.stringify(infoPrompts)}`);
         });
     });
+
+    /**
+     * 디스크 단계가 실패해도 미저장 변경이 잠기지 않는다.
+     *
+     * dirty 상태로 닫은 뒤 파일에 사고가 나면(삭제 / 크기 폭증 / 깨진 JSON)
+     * 여는 것 자체가 실패한다. 그때 **그냥 오류만 띄우고 끝내면** 사용자의
+     * 미저장 변경이 복구 저장소에 있는 채로 영영 접근 불가가 된다. stat /
+     * size / read / parse 네 단계의 실패를 하나의 fallback 으로 모아, 매칭되는
+     * 복구본이 있으면 그것을 제안한다.
+     *
+     * 이 계약은 지금까지 **소스 텍스트를 정규식으로** 검사했다 —
+     * `earlyError = {` 가 4번 나오는지 세고, `baselineUnknownForWebview = true`
+     * 라는 문자열이 있는지 보는 식이다. 코드에 그 문자열이 있는지만 볼 뿐
+     * 실제로 복구가 제안되는지는 확인하지 않는다. 여기서 실행해서 본다.
+     */
+    suite('디스크 단계 실패 시 복구 fallback', () => {
+        /** 파일을 만들고 그것에 맞는 복구 스냅샷을 seed 한 뒤, 파일을 망가뜨린다. */
+        function seedThenBreak(name: string, breakIt: (filePath: string) => void) {
+            const filePath = writeJson(name, { rows: [{ a: 1 }] });
+            const stat = fs.statSync(filePath);
+            const seed = {
+                [RECOVERY_STATE_KEY]: {
+                    [filePath]: {
+                        data: { rows: [{ a: 'unsaved work' }] },
+                        isRootArray: false,
+                        fileMtimeMs: stat.mtimeMs,
+                        fileSize: stat.size,
+                        capturedAt: Date.now(),
+                    },
+                },
+            };
+            breakIt(filePath);
+            return { filePath, ctx: makeContext(seed) };
+        }
+
+        test('파일이 사라져도 복구를 제안한다 (stat 실패)', async () => {
+            installFakePanel();
+            const { filePath, ctx } = seedThenBreak('gone.json', p2 => fs.unlinkSync(p2));
+
+            await openJsonEditorFile(ctx, filePath);
+
+            assert.strictEqual(
+                infoPrompts.length, 1,
+                `파일이 사라지자 미저장 변경이 잠겼다 — 복구 제안이 없다: ${shownErrors.join(' / ')}`
+            );
+        });
+
+        test('JSON 이 깨져도 복구를 제안한다 (parse 실패)', async () => {
+            installFakePanel();
+            const { filePath, ctx } = seedThenBreak('corrupt.json', p2 => {
+                // 크기와 mtime 을 유지해야 스냅샷이 매칭된다 — 같은 길이로 덮어쓴다.
+                const original = fs.readFileSync(p2);
+                const stat = fs.statSync(p2);
+                fs.writeFileSync(p2, '{'.repeat(original.length));
+                fs.utimesSync(p2, stat.atime, stat.mtime);
+            });
+
+            await openJsonEditorFile(ctx, filePath);
+
+            assert.strictEqual(
+                infoPrompts.length, 1,
+                `JSON 이 깨지자 미저장 변경이 잠겼다: ${shownErrors.join(' / ')}`
+            );
+        });
+
+        test('복구본이 없으면 오류만 알리고 조용히 넘어가지 않는다', async () => {
+            installFakePanel();
+            const filePath = path.join(tempDir, 'no-recovery.json');
+            fs.writeFileSync(filePath, '{ broken');
+
+            await openJsonEditorFile(makeContext(), filePath);
+
+            assert.strictEqual(infoPrompts.length, 0, '복구본이 없는데 제안했다');
+            assert.ok(shownErrors.length > 0, '실패를 알리지도 않았다');
+        });
+
+        test('복구를 고르면 패널이 열린다 (오류로 끝나지 않는다)', async () => {
+            const fake = installFakePanel();
+            const { filePath, ctx } = seedThenBreak('recover-open.json', p2 => fs.unlinkSync(p2));
+            infoAnswer = 0;   // '복구'
+
+            await openJsonEditorFile(ctx, filePath);
+
+            assert.ok(
+                fake.events.includes('create-panel'),
+                '복구를 골랐는데 편집기가 열리지 않았다 — 미저장 변경에 접근할 수 없다'
+            );
+        });
+    });
 });

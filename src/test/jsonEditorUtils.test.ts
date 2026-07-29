@@ -839,57 +839,17 @@ suite('JsonEditorUtils Test Suite', () => {
             );
         });
 
-        test('open path unifies all disk-step failures (stat/size/read/parse) through a single recovery fallback', () => {
-            // 회귀 가드: 12차에서 stat 실패 / 파일 크기 초과 / 파일 읽기 실패 /
-            // JSON parse 실패 4 가지 early-return 을 단일 fallback 분기로 통합.
-            // 이로써 dirty close 후 외부 사고 (파일 삭제 / 사이즈 폭증 / invalid
-            // JSON 등) 가 발생해도 reopen 시 사용자의 미저장 변경이 영원히
-            // 잠기지 않고 매칭 recovery 가 제안된다.
-            const openPath = editorSource.match(/async function openJsonEditorWithPath\([\s\S]*?\n\}\s*\n/);
-            assert.ok(openPath, 'could not locate openJsonEditorWithPath');
-            const body = openPath![0];
+        /**
+         * 이 계약은 이제 **실행 기반**으로 검증한다 —
+         * `jsonEditorOpenFlow.test.ts` 의 "디스크 단계 실패 시 복구 fallback".
+         *
+         * 여기 있던 검사는 `openJsonEditorWithPath` 의 소스에서
+         * `earlyError = {` 가 4번 나오는지 세고 `baselineUnknownForWebview =
+         * true` 라는 문자열이 있는지 보는 방식이었다. 코드에 그 글자가 있는지만
+         * 볼 뿐 실제로 복구가 제안되는지는 확인하지 못한다. 진입점을 실제로
+         * 실행하는 하네스(`jsonPanelRegistry`)가 생겨 옮길 수 있게 됐다.
+         */
 
-            // 4 가지 disk-step 실패 모두 earlyError 객체 (msg + mtimeForRecovery) 로
-            // 캡쳐되어야 한다 — 각 단계가 별도로 early-return 으로 빠지면 fallback
-            // 통합이 깨진다.
-            const earlyErrorAssignments = body.match(/earlyError\s*=\s*\{/g) || [];
-            assert.ok(
-                earlyErrorAssignments.length >= 4,
-                `4 disk-step failures (stat / size / read / parse) must each capture into earlyError, found only ${earlyErrorAssignments.length}`
-            );
-
-            // earlyError 가 set 됐을 때 getRecoveryEntry + offerRecoveryIfAny 를
-            // 통과한 뒤 — 만약 fallback 이 없으면 그때만 error 메시지 + return.
-            assert.ok(
-                /if\s*\(\s*earlyError\s*\)\s*\{[\s\S]*?getRecoveryEntry\(\s*context\s*,\s*filePath\s*\)[\s\S]*?offerRecoveryIfAny\(/.test(body),
-                'earlyError branch must call getRecoveryEntry + offerRecoveryIfAny before showing the error'
-            );
-            assert.ok(
-                /if\s*\(\s*!fallback\s*\)\s*\{\s*\n[\s\S]*?showErrorMessage\(\s*earlyError\.msg\s*\)[\s\S]*?return;\s*\n/.test(body),
-                'earlyError branch must show the captured error and return only when no fallback recovery exists'
-            );
-
-            // disk-fail fallback 분기는 baselineUnknownForWebview 플래그를 켜
-            // webview 가 빈 문자열 sentinel 로 lastSavedSnapshot 을 잡게 한다 →
-            // dirty=true 로 시작. (이전 12차 코드는 `savedDataForWebview = {}`
-            // 객체 sentinel 을 썼지만 사용자가 실제로 빈 객체를 편집 중일 때
-            // 충돌 — 13차에서 baselineUnknown 신호로 교체.)
-            assert.ok(
-                /baselineUnknownForWebview\s*=\s*true/.test(body),
-                'disk-fail fallback must set baselineUnknownForWebview=true (the empty-string sentinel cannot be produced by JSON.stringify of any user data, unlike the old {} object sentinel)'
-            );
-
-            // 4 개의 개별 early-return 이 부활하지 않도록 negative guard. 기존
-            // showErrorMessage + return 패턴이 4 곳에서 분기되면 통합이 깨진 것.
-            // args 안에 `;` 가 없는 단일 문장 호출만 매치되도록 [^;] 로 제한 —
-            // 그렇지 않으면 lazy [\s\S]*? 가 멀리 떨어진 다른 함수의 return; 까지
-            // 잡아 false positive 가 발생한다.
-            const stragglingErrorReturns = body.match(/showErrorMessage\([^;]*?\)\s*;\s*\n\s*return;/g) || [];
-            assert.ok(
-                stragglingErrorReturns.length <= 1,
-                `disk-step failures must funnel through the single earlyError branch — found ${stragglingErrorReturns.length} straggling 'showErrorMessage(...); return;' patterns (expected ≤ 1 for the unified earlyError handler)`
-            );
-        });
 
         test('Keep branch parse-fail signals markBaselineUnknown (no `{}` sentinel collision)', () => {
             // 회귀 가드: external-change *Keep* 분기에서 새 디스크 baseline 의
