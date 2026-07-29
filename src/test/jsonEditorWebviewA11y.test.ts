@@ -223,4 +223,71 @@ suite('JSON Editor 웹뷰 지역화 / 접근성', () => {
                 '탭이 없을 때 참조를 지우지 않는다');
         });
     });
+
+
+    /**
+     * 셀 안의 변환 버튼을 키보드로 누를 수 있는가 (0.6.46).
+     *
+     * 셀(`.cell-view`)에는 `a→s` / `s→a` 변환 버튼이 들어 있다. 그 버튼에
+     * 포커스를 두고 Enter/Space 를 누르면 keydown 이 셀까지 버블링되는데,
+     * 셀 핸들러의 `preventDefault()` 가 브라우저의 기본 동작(= click 합성)을
+     * 취소해 **버튼이 영영 눌리지 않았다**. 대신 셀 편집이 열려서, 키보드
+     * 사용자에게는 변환 기능이 아예 없는 것과 같았다. 마우스 경로는 버튼의
+     * click 핸들러가 `stopPropagation` 으로 막고 있었지만 키보드는 아니었다.
+     *
+     * 정규식으로 "가드가 있는지"만 보면 조건이 뒤집혀도 통과한다. 핸들러를
+     * 실제로 꺼내 실행한다.
+     */
+    suite('셀 안 변환 버튼의 키보드 활성화 (0.6.46)', () => {
+        const html = render();
+
+        /** 주입된 셀 keydown 핸들러 본문을 꺼낸다. */
+        function extractCellKeydownBody(): string {
+            const marker = "view.addEventListener('keydown', (e) => {";
+            const start = html.indexOf(marker);
+            assert.ok(start >= 0, '셀 keydown 핸들러를 찾지 못했다 — 마커가 바뀌었는지 확인이 필요하다');
+            const bodyStart = start + marker.length;
+            const end = html.indexOf('\n            });', bodyStart);
+            assert.ok(end > bodyStart, '핸들러 본문의 끝을 찾지 못했다');
+            return html.slice(bodyStart, end);
+        }
+
+        /** 지정한 이벤트 대상으로 핸들러를 돌린다. */
+        function runKeydown(targetIsView: boolean, key = 'Enter'): { prevented: boolean; edited: boolean } {
+            const view = { id: 'view' };
+            const button = { id: 'convert-btn' };
+            let prevented = false;
+            let edited = false;
+            const e = {
+                key,
+                target: targetIsView ? view : button,
+                preventDefault: () => { prevented = true; },
+            };
+            const td = { classList: { contains: () => false } };
+            const beginEdit = () => { edited = true; };
+            const fn = new Function('e', 'view', 'td', 'beginEdit', extractCellKeydownBody());
+            fn(e, view, td, beginEdit);
+            return { prevented, edited };
+        }
+
+        test('셀 자신에서 누른 Enter는 편집을 연다', () => {
+            const { prevented, edited } = runKeydown(true);
+            assert.ok(edited, '셀에서 누른 Enter가 편집을 열지 않는다 — 키보드 편집이 막힌다');
+            assert.ok(prevented, '기본 동작을 막지 않으면 스크롤 등 부작용이 남는다');
+        });
+
+        test('버튼에서 누른 Enter는 가로채지 않는다', () => {
+            const { prevented, edited } = runKeydown(false);
+            assert.ok(
+                !prevented,
+                'preventDefault 가 버튼의 click 합성을 취소한다 — 키보드로 변환 버튼을 누를 수 없다'
+            );
+            assert.ok(!edited, '버튼을 누르려 했는데 셀 편집이 열렸다');
+        });
+
+        test('Space도 같은 규칙을 따른다', () => {
+            assert.ok(runKeydown(true, ' ').edited, '셀에서 누른 Space가 편집을 열지 않는다');
+            assert.ok(!runKeydown(false, ' ').prevented, 'Space에서 버튼 활성화가 취소된다');
+        });
+    });
 });

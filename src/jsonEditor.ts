@@ -1867,6 +1867,16 @@ export function getWebviewContent(
             view.addEventListener('keydown', (e) => {
                 if (e.key !== 'Enter' && e.key !== ' ') { return; }
                 if (td.classList.contains('editing')) { return; }
+                // **셀 자신에서 시작한 키만 받는다.**
+                //
+                // 셀 안에는 변환 버튼(a→s / s→a)이 들어 있다. 그 버튼에 포커스를
+                // 두고 Enter/Space 를 누르면 keydown 이 여기까지 버블링되는데,
+                // 아래 preventDefault() 가 브라우저의 기본 동작(= click 합성)을
+                // 취소해 **버튼이 영영 눌리지 않았다**. 대신 셀 편집이 열려서,
+                // 키보드 사용자에게는 변환 기능이 아예 없는 것과 같았다.
+                // 마우스 경로는 버튼의 click 핸들러가 stopPropagation 으로
+                // 막고 있었지만 키보드 경로에는 대응이 없었다.
+                if (e.target !== view) { return; }
                 e.preventDefault();
                 beginEdit();
             });
