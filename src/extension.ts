@@ -3077,6 +3077,21 @@ export function killProcessTree(child: ReturnType<typeof spawn>): Promise<boolea
     });
 }
 
+/**
+ * 종료를 시도한 자식을 registry 에서 빼도 되는가.
+ *
+ * 기준은 "시그널을 보냈다"가 아니라 **"끝났다"** 이다. `killProcessTree` 는
+ * timeout·권한 문제·`ESRCH` 로 실패해도 resolve 하므로, 그 반환값이나 호출
+ * 사실만으로 지우면 아직 살아 있는 프로세스가 *Stop All* 의 시야에서 사라진다.
+ *
+ * `child.killed` 도 쓰지 않는다 — 그 값 역시 "시그널 전송됨"일 뿐이다.
+ */
+export function shouldUntrackTerminatedChild(
+    child: { exitCode: number | null; signalCode: NodeJS.Signals | null }
+): boolean {
+    return child.exitCode !== null || child.signalCode !== null;
+}
+
 function terminateChildProcesses(actionId: string, taskId?: string, generation?: number): boolean {
     const perAction = actionChildProcesses.get(actionId);
     if (!perAction || perAction.size === 0) {
@@ -3100,8 +3115,30 @@ function terminateChildProcesses(actionId: string, taskId?: string, generation?:
                 // 프로세스를 *Stop All* 로 다시 찾을 수 없고, 이전 프로세스가
                 // 살아 있는 채로 같은 액션을 재실행하게 된다.
                 void killProcessTree(child)
-                    .then(() => { set.delete(child); })
-                    .catch(() => { set.delete(child); });
+                    .then(() => {
+                        // **실제로 죽었을 때만** 등록을 해제한다.
+                        //
+                        // `killProcessTree` 는 timeout·권한 문제·`ESRCH` 로
+                        // 실패해도 resolve 한다. 반환값을 무시하고 지우면 아직
+                        // 살아 있는 프로세스가 registry 에서 사라져 *Stop All*
+                        // 이 다시 찾지 못하고, 사용자는 첫 Stop 이 실패한 것을
+                        // 알 방법도 없다. `collectTargets` 가 상태 맵 대신 세
+                        // 소스를 합집합하는 것도 같은 이유다(바로 위 주석).
+                        //
+                        // boolean 대신 프로세스 상태를 직접 본다 — "시그널을
+                        // 보냈다"가 아니라 "끝났다"가 판단 기준이다. 남겨 둔
+                        // 항목은 나중에 프로세스가 죽을 때 `close` 핸들러의
+                        // `cleanupChildTracking` 이 정리하므로 새지 않는다.
+                        if (shouldUntrackTerminatedChild(child)) {
+                            set.delete(child);
+                            return;
+                        }
+                        outputChannel.appendLine(
+                            `[WARN] Process ${child.pid} for ${label} did not exit after the termination attempt; ` +
+                            'keeping it tracked so *Stop All Actions* can retry.'
+                        );
+                    })
+                    .catch(() => { /* 종료를 확인하지 못했다 — 남겨 두고 재시도에 맡긴다 */ });
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 outputChannel.appendLine(`[ERROR] Failed to terminate child process for ${label}: ${msg}`);

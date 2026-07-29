@@ -10,6 +10,7 @@ import {
     executeAction,
     isActionCancelled,
     runCommandCaptureLines,
+    shouldUntrackTerminatedChild,
     stopRunningAction,
 } from '../extension';
 import { HistoryProvider } from '../providers/historyProvider';
@@ -886,5 +887,41 @@ suite('대화형 태스크 대기 중 중지', () => {
                 (vscode.window as any).showInputBox = original;
             }
         });
+    });
+});
+
+
+/**
+ * 종료 실패를 registry 가 삼키던 문제 (0.6.46).
+ *
+ * `killProcessTree` 는 timeout·권한 문제·`ESRCH` 로 실패해도 resolve 한다.
+ * 예전에는 그 결과와 무관하게 registry 에서 지워서, **아직 살아 있는**
+ * 프로세스가 *Stop All* 의 시야에서 사라졌다 — 첫 Stop 이 실패한 것을 알
+ * 방법도, 다시 시도할 방법도 없었다.
+ *
+ * 실제로 SIGKILL 을 견디는 프로세스를 만들 수는 없으므로(그 시그널은 잡을 수
+ * 없다) 판단 규칙 자체를 검증한다.
+ */
+suite('종료 실패 시 프로세스 추적 유지', () => {
+    test('정상 종료 코드로 끝났으면 추적을 해제한다', () => {
+        assert.strictEqual(
+            shouldUntrackTerminatedChild({ exitCode: 0, signalCode: null }), true);
+        assert.strictEqual(
+            shouldUntrackTerminatedChild({ exitCode: 137, signalCode: null }), true);
+    });
+
+    test('시그널로 끝났으면 추적을 해제한다', () => {
+        assert.strictEqual(
+            shouldUntrackTerminatedChild({ exitCode: null, signalCode: 'SIGKILL' }), true);
+    });
+
+    test('아직 살아 있으면 추적을 유지한다', () => {
+        // 이것이 핵심이다. 여기서 true 를 돌려주면 죽지 않은 프로세스가
+        // Stop All 대상 목록에서 사라진다.
+        assert.strictEqual(
+            shouldUntrackTerminatedChild({ exitCode: null, signalCode: null }),
+            false,
+            '종료가 확인되지 않았는데 추적을 해제하면 Stop All 이 다시 찾지 못한다'
+        );
     });
 });

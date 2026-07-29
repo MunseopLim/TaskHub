@@ -141,4 +141,87 @@ suite('JSON Editor 복구 스냅샷', () => {
         assert.strictEqual(store.get('/f0.json'), undefined, 'shadow 에 축출된 항목이 남아 있다');
         assert.ok(store.get(`/f${RECOVERY_MAX_ENTRIES + 4}.json`), '최신 항목이 사라졌다');
     });
+
+
+    /**
+     * 초기 prune 쓰기와 이후 `set()` 의 경쟁 (0.6.46).
+     *
+     * 로드 시점의 정리 쓰기만 `chain` 밖의 fire-and-forget 이었다. 그 쓰기가
+     * 늦게 끝나면 **그 사이 저장한 최신 복구본을 오래된 스냅샷으로 덮어쓴다**
+     * — 항목 하나가 파일 전체의 미저장 작업이라 손실이 크다.
+     */
+    suite('초기 정리와 이후 저장의 순서', () => {
+        /** `update` 를 지연시켜 초기 정리가 늦게 끝나는 상황을 만든다. */
+        function makeSlowState(initial: Record<string, RecoveryEntry>) {
+            const writes: Record<string, RecoveryEntry>[] = [];
+            // 게이트를 **미리** 만든다. `update` 안에서 만들면, 그것이 실행되기
+            // 전에 `release()` 가 불릴 때 아무 일도 일어나지 않아 영영 열리지
+            // 않는다 (`chain` 은 마이크로태스크로 넘어가므로 실제로 그렇다).
+            let releaseFirst!: () => void;
+            const gate = new Promise<void>(resolve => { releaseFirst = resolve; });
+            let firstSeen = false;
+            const state = {
+                get<T>(_key: string, defaultValue: T): T {
+                    return initial as unknown as T;
+                },
+                async update(_key: string, value: unknown): Promise<void> {
+                    const snapshot = value as Record<string, RecoveryEntry>;
+                    if (!firstSeen) {
+                        firstSeen = true;
+                        await gate;   // 초기 정리 쓰기를 붙잡아 둔다
+                    }
+                    writes.push(snapshot);
+                },
+            };
+            return { state, writes, release: () => releaseFirst() };
+        }
+
+        test('초기 정리가 늦게 끝나도 이후 저장을 덮어쓰지 않는다', async function () {
+            this.timeout(10000);
+            // 상한을 넘겨 로드 시점 정리가 일어나게 한다.
+            const initial: Record<string, RecoveryEntry> = {};
+            for (let i = 0; i < RECOVERY_MAX_ENTRIES + 3; i++) {
+                initial[`/old${i}.json`] = { savedAt: i + 1, data: { v: i } } as unknown as RecoveryEntry;
+            }
+            const { state, writes, release } = makeSlowState(initial);
+
+            const store = makeRecoveryStore(state as any, 'recovery');
+            // 정리 쓰기가 아직 붙잡혀 있는 동안 새 복구본을 저장한다.
+            const fresh = { savedAt: 9999, data: { fresh: true } } as unknown as RecoveryEntry;
+            const pending = store.set('/fresh.json', fresh);
+
+            release();
+            await pending;
+
+            assert.ok(writes.length >= 2, `쓰기가 직렬화되지 않았다: ${writes.length}건`);
+            const last = writes[writes.length - 1];
+            assert.ok(
+                Object.prototype.hasOwnProperty.call(last, '/fresh.json'),
+                '마지막으로 persist 된 스냅샷에 최신 복구본이 없다 — 초기 정리가 덮어썼다'
+            );
+        });
+
+        test('삭제도 초기 정리에 되살아나지 않는다', async function () {
+            this.timeout(10000);
+            const initial: Record<string, RecoveryEntry> = {};
+            for (let i = 0; i < RECOVERY_MAX_ENTRIES + 3; i++) {
+                initial[`/old${i}.json`] = { savedAt: i + 1, data: { v: i } } as unknown as RecoveryEntry;
+            }
+            const survivor = `/old${RECOVERY_MAX_ENTRIES + 2}.json`;
+            const { state, writes, release } = makeSlowState(initial);
+
+            const store = makeRecoveryStore(state as any, 'recovery');
+            assert.ok(store.get(survivor), '전제가 깨졌다 — 정리 후에도 남아 있어야 할 항목이다');
+            const pending = store.set(survivor, null);   // 사용자가 복구본을 버렸다
+
+            release();
+            await pending;
+
+            const last = writes[writes.length - 1];
+            assert.ok(
+                !Object.prototype.hasOwnProperty.call(last, survivor),
+                '지운 복구본이 초기 정리 쓰기에 되살아났다'
+            );
+        });
+    });
 });

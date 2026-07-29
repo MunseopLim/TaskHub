@@ -181,8 +181,16 @@ export function makeRecoveryStore(state: MinimalWorkspaceState, key: string): Re
     // 그 사이 shadow 가 전량을 메모리에 붙잡는다.
     const shadow: Record<string, RecoveryEntry> = { ...pruneRecoveryEntries(initial) };
     // 줄었다면 persist 도 맞춘다 — 안 그러면 다음 실행마다 같은 정리를 반복한다.
+    //
+    // **`chain` 에 넣는다.** 예전에는 여기만 독립적인 fire-and-forget 이라
+    // `set()` 의 직렬화 밖에 있었다. 초기 정리 쓰기가 늦게 끝나면 그 사이
+    // 저장한 최신 복구본을 **오래된 스냅샷으로 덮어쓰거나**, 방금 지운 항목을
+    // 되살릴 수 있다 — 항목 하나가 파일 전체의 미저장 작업이라 손실이 크다.
     if (Object.keys(shadow).length !== Object.keys(initial).length) {
-        void Promise.resolve(state.update(key, { ...shadow })).then(undefined, () => undefined);
+        const prunedSnapshot = { ...shadow };
+        chain = chain
+            .then(() => Promise.resolve(state.update(key, prunedSnapshot)))
+            .then(undefined, () => undefined);
     }
 
     return {
