@@ -203,6 +203,52 @@ suite('archiveUtils', () => {
             assert.deepStrictEqual(taskHubTempFiles(destination), []);
         });
 
+        test("'..payload' 최상위 폴더는 생성→추출 왕복한다", async () => {
+            const source = path.join(tempDir, '..payload');
+            fs.mkdirSync(source, { recursive: true });
+            fs.writeFileSync(path.join(source, 'data.txt'), 'dotdot-prefix-roundtrip');
+            const archivePath = path.join(tempDir, 'dotdot-prefix-roundtrip.zip');
+            const destination = path.join(tempDir, 'dotdot-prefix-output');
+
+            await createZipArchive(archivePath, [source]);
+            await extractZipArchive(archivePath, destination);
+
+            assert.strictEqual(
+                fs.readFileSync(path.join(destination, '..payload', 'data.txt'), 'utf8'),
+                'dotdot-prefix-roundtrip'
+            );
+        });
+
+        test("source 문자열의 최상위 이름이 '..'면 거부한다", async () => {
+            const root = path.join(tempDir, 'dotdot-source-root');
+            const child = path.join(root, 'child');
+            fs.mkdirSync(child, { recursive: true });
+            fs.writeFileSync(path.join(root, 'inside.txt'), 'must-not-be-traversal-entry');
+            // path.join() would normalize the suffix away; retain the user's
+            // literal spelling so path.basename(source) is exactly `..`.
+            const source = `${child}${path.sep}..`;
+            const archivePath = path.join(tempDir, 'dotdot-source.zip');
+
+            await assert.rejects(
+                createZipArchive(archivePath, [source]),
+                /Unsafe archive entry name.*dot path component/
+            );
+            assert.strictEqual(fs.existsSync(archivePath), false);
+        });
+
+        test('POSIX 리터럴 backslash 파일명이 ZIP traversal로 변환되지 않는다', async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const source = path.join(tempDir, '..\\..\\outside.txt');
+            fs.writeFileSync(source, 'literal-backslash-file');
+            const archivePath = path.join(tempDir, 'backslash-name.zip');
+
+            await assert.rejects(
+                createZipArchive(archivePath, [source]),
+                /Unsafe archive entry name.*ambiguous backslash/
+            );
+            assert.strictEqual(fs.existsSync(archivePath), false);
+        });
+
         if (process.platform !== 'win32') {
             test('파일도 디렉터리도 아닌 소스(FIFO)는 거부', async function () {
                 const fifo = path.join(tempDir, 'pipe.fifo');
@@ -284,6 +330,94 @@ suite('archiveUtils', () => {
                 names.includes('proj-inner/alias/data.txt'),
                 `소스 안 링크가 담기지 않았다: ${names.join(', ')}`
             );
+        });
+
+        test('같은 내부 폴더를 가리키는 두 alias 모두에 콘텐츠를 담는다', async function () {
+            const src = path.join(tempDir, 'multi-alias-root');
+            const real = path.join(src, 'real');
+            const firstAlias = path.join(src, '!alias-one');
+            const secondAlias = path.join(src, '!alias-two');
+            fs.mkdirSync(real, { recursive: true });
+            fs.writeFileSync(path.join(real, 'data.txt'), 'shared-inside-content');
+            if (!trySymlink(real, firstAlias, 'dir')) { this.skip(); }
+            if (!trySymlink(real, secondAlias, 'dir')) { this.skip(); }
+            // The target also points back to an active ancestor. Both aliases
+            // must expand, but this cycle must never recurse indefinitely.
+            if (!trySymlink(src, path.join(real, 'back-to-root'), 'dir')) { this.skip(); }
+
+            const archivePath = path.join(tempDir, 'multi-alias.zip');
+            await createZipArchive(archivePath, [src]);
+
+            const names = new Set(new AdmZip(archivePath).getEntries().map(e => e.entryName));
+            assert.ok(
+                names.has('multi-alias-root/!alias-one/data.txt'),
+                '첫 번째 alias가 빈 폴더로 저장됐다'
+            );
+            assert.ok(
+                names.has('multi-alias-root/!alias-two/data.txt'),
+                '두 번째 alias가 빈 폴더로 저장됐다'
+            );
+        });
+
+        test("'..' 로 시작하는 정상 자식 폴더를 루트 밖으로 오판하지 않는다", async function () {
+            const src = path.join(tempDir, 'dotdot-prefix-root');
+            const target = path.join(src, '..payload');
+            const alias = path.join(src, '!payload-alias');
+            fs.mkdirSync(target, { recursive: true });
+            fs.writeFileSync(path.join(target, 'data.txt'), 'inside-dotdot-prefix');
+            // `!` sorts before `.`, so traversal reaches the alias before the
+            // real directory and proves that the alias itself was followed.
+            if (!trySymlink(target, alias, 'dir')) { this.skip(); }
+
+            const archivePath = path.join(tempDir, 'dotdot-prefix.zip');
+            const skipped: string[] = [];
+            await createZipArchive(archivePath, [src], {
+                onSkippedSymlink: ({ sourcePath }) => { skipped.push(sourcePath); },
+            });
+
+            const names = new AdmZip(archivePath).getEntries().map(e => e.entryName);
+            assert.deepStrictEqual(skipped, [], '정상 자식 경로를 외부 링크로 오판했다');
+            assert.ok(
+                names.includes('dotdot-prefix-root/!payload-alias/data.txt'),
+                `..prefix 대상의 내용이 담기지 않았다: ${names.join(', ')}`
+            );
+        });
+
+        test('소스 검증 후 부모 경로가 외부 링크로 교체되면 부모의 파일을 읽지 않는다', async function () {
+            const selectedParent = path.join(tempDir, 'selected-parent');
+            const parkedParent = path.join(tempDir, 'selected-parent-original');
+            const outsideParent = path.join(tempDir, 'outside-parent');
+            const triggerRoot = path.join(tempDir, 'trigger-root');
+            fs.mkdirSync(selectedParent, { recursive: true });
+            fs.mkdirSync(outsideParent, { recursive: true });
+            fs.mkdirSync(triggerRoot, { recursive: true });
+            const selectedFile = path.join(selectedParent, 'firmware.bin');
+            fs.writeFileSync(selectedFile, 'SAFE FIRMWARE');
+            fs.writeFileSync(path.join(outsideParent, 'firmware.bin'), 'PRIVATE OUTSIDE MATERIAL');
+            if (!trySymlink(outsideParent, path.join(triggerRoot, 'escape'), 'dir')) { this.skip(); }
+
+            const archivePath = path.join(tempDir, 'toctou.zip');
+            const lastGood = Buffer.from('LAST GOOD ARCHIVE');
+            fs.writeFileSync(archivePath, lastGood);
+            let swapped = false;
+
+            await assert.rejects(
+                createZipArchive(archivePath, [selectedFile, triggerRoot], {
+                    onSkippedSymlink: () => {
+                        // The first source has already been stat'ed. Replacing
+                        // an ancestor (rather than the final file) defeats a
+                        // final-component-only O_NOFOLLOW defense.
+                        fs.renameSync(selectedParent, parkedParent);
+                        fs.symlinkSync(outsideParent, selectedParent, 'dir');
+                        swapped = true;
+                    },
+                }),
+                /Archive source changed/
+            );
+
+            assert.strictEqual(swapped, true, '테스트가 TOCTOU 교체를 실행하지 않았다');
+            assert.deepStrictEqual(fs.readFileSync(archivePath), lastGood, '기존 아카이브를 덮어썼다');
+            assert.deepStrictEqual(taskHubTempFiles(tempDir), [], '실패한 아카이브의 임시 파일이 남았다');
         });
     });
 

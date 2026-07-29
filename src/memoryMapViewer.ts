@@ -49,8 +49,8 @@ export const MEMORY_MAP_MAX_SAVE_HTML_CHARS = 64 * 1024 * 1024;
 function showSaveHtmlTooLargeError(): void {
     const mb = Math.round(MEMORY_MAP_MAX_SAVE_HTML_CHARS / (1024 * 1024));
     vscode.window.showErrorMessage(t(
-        `저장할 HTML이 너무 큽니다(${mb}MB 초과). 영역을 접거나 검색으로 범위를 줄인 뒤 다시 시도하세요. 전체 데이터는 *Copy Full Dump* 로 받을 수 있습니다.`,
-        `The HTML to save is too large (over ${mb} MB). Collapse regions or narrow the view with search, then try again. Use *Copy Full Dump* for the complete data.`
+        `저장할 HTML이 너무 큽니다(${mb}MB 초과). HTML에는 접기·검색 상태와 무관하게 전체 맵 데이터가 포함됩니다. 더 작거나 분할된 맵을 열거나, 간략한 *Copy Report* 또는 전체 텍스트인 *Copy Full Dump* 를 사용하세요.`,
+        `The HTML to save is too large (over ${mb} MB). HTML always contains the full map data regardless of collapse or search state. Open a smaller or split map, or use the compact *Copy Report* or the complete text *Copy Full Dump* instead.`
     ));
 }
 
@@ -332,7 +332,16 @@ function showPanel(
     const state: PanelState = { panel, symbols: [], messageDisposable: undefined };
     state.messageDisposable = panel.webview.onDidReceiveMessage(async (message: any) => {
         if (message.command === 'copyReport') {
-            vscode.env.clipboard.writeText(message.text);
+            // 리포트 본문은 이미 extension host가 보유한다. 웹뷰에 수 MB~수십 MB
+            // 문자열을 심고 다시 postMessage 구조화 복제로 돌려받지 말고, 버튼은
+            // 종류만 전달한다. 예상하지 못한 kind는 clipboard를 건드리지 않는다.
+            const copyText = message.kind === 'summary'
+                ? summaryReport
+                : message.kind === 'full'
+                    ? textReport
+                    : undefined;
+            if (copyText === undefined) { return; }
+            await vscode.env.clipboard.writeText(copyText);
             vscode.window.showInformationMessage(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.'));
         } else if (message.command === 'saveHtmlTooLarge') {
             // 웹뷰가 **직렬화 전에** 걸러 낸 경우. 아래 호스트 검사와 같은
@@ -379,7 +388,7 @@ function showPanel(
 
     panel.title = `Memory Map: ${fileName}`;
     panel.webview.html = getWebviewContent(
-        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, summaryReport, hasSymbols, panel.webview
+        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, hasSymbols, panel.webview
     );
 
     // Store region symbols for Go to Symbol command
@@ -500,8 +509,6 @@ function getWebviewContent(
     sectionSummary: SectionSummary[],
     memoryUsage: MemoryUsage[],
     regions: MemoryRegion[],
-    textReport: string,
-    summaryReport: string,
     hasSymbols?: boolean,
     webview?: vscode.Webview
 ): string {
@@ -641,7 +648,7 @@ function getWebviewContent(
         </tr>`
     ).join('');
 
-    // Inject reports as JSON-encoded JS string literals.
+    // Inject region data as a JSON-encoded JS literal.
     //   1. JSON.stringify handles all JS escaping (quotes, backslashes,
     //      control chars, line separators) and preserves Unicode losslessly —
     //      avoids the atob() mojibake we previously hit on "—" / "≥".
@@ -649,14 +656,14 @@ function getWebviewContent(
     //      termination if user-controlled input (filename, file path, region
     //      or section names) ever contains "</script>". The JS parser still
     //      decodes < back to "<", but the HTML parser doesn't see it.
-    // Accepts any JSON-serializable value (string OR object). Strings come out
-    // as JS string literals; objects/arrays as object/array literals. Both end
-    // up safely embeddable inside <script>...</script> because every "<" is
-    // escaped to "<" — the JS parser still rebuilds the original value,
-    // but the HTML parser cannot see "</script>" in the payload.
+    // Arrays/objects end up safely embeddable inside <script>...</script>
+    // because every "<" is escaped — the JS parser still rebuilds the original
+    // value, but the HTML parser cannot see "</script>" in the payload.
+    //
+    // textReport/summaryReport는 host의 copy handler가 직접 사용한다. 웹뷰에
+    // 중복 삽입하면 Save HTML payload가 커지고 Copy Full Dump 때 같은 거대
+    // 문자열이 다시 IPC로 복제되므로 의도적으로 여기에는 포함하지 않는다.
     const escapeForScript = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
-    const reportJsLiteral = escapeForScript(textReport);
-    const summaryJsLiteral = escapeForScript(summaryReport);
     const regionDataJsLiteral = escapeForScript(regionJsonData);
 
     return /*html*/`<!DOCTYPE html>
@@ -984,7 +991,6 @@ const RD = ${regionDataJsLiteral};
 (function() {
     const vscode = acquireVsCodeApi();
     // Locale-resolved UI labels from the host (buildMemoryMapStrings).
-    // Report bodies below stay English by design — they are shared artifacts.
     const S = ${stringsLiteral};
     // 저장 HTML 상한. 호스트와 **같은 값**을 쓴다 — 웹뷰가 먼저 걸러 내고,
     // 호스트 검사는 그대로 두어 최종 권위로 남는다.
@@ -995,8 +1001,6 @@ const RD = ${regionDataJsLiteral};
         return String(template).replace(/\\{(\\w+)\\}/g, (match, key) =>
             Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match);
     }
-    const report = ${reportJsLiteral};
-    const summary = ${summaryJsLiteral};
     const VT_THRESH = 200, ROW_H = 24, BUFFER = 30, MAX_VP_H = 600;
     const rendered = new Set();
     const vtMap = new Map();
@@ -1209,14 +1213,13 @@ const RD = ${regionDataJsLiteral};
     }
 
     // --- Copy / Save ---
-    // Copy Report = curated markdown summary (regions, top sections, highlights).
-    // Copy Full Dump = legacy monospace text with every section. Both go through
-    // the same message so the extension can show one toast for either.
+    // 본문은 extension host가 이미 보유한다. 웹뷰는 선택한 종류만 보내므로
+    // Copy Full Dump도 거대한 report 문자열을 IPC로 다시 복제하지 않는다.
     document.getElementById('btnCopy').addEventListener('click', function() {
-        vscode.postMessage({ command: 'copyReport', text: summary });
+        vscode.postMessage({ command: 'copyReport', kind: 'summary' });
     });
     document.getElementById('btnCopyFull').addEventListener('click', function() {
-        vscode.postMessage({ command: 'copyReport', text: report });
+        vscode.postMessage({ command: 'copyReport', kind: 'full' });
     });
     document.getElementById('btnSaveHtml').addEventListener('click', function() {
         // **직렬화 전에** 크기를 잰다. documentElement.outerHTML 은
@@ -1224,17 +1227,139 @@ const RD = ${regionDataJsLiteral};
         // 호스트에 한 벌 더 복사된 **뒤에야** 호스트의 상한 검사에 닿는다 —
         // 가장 위험한 두 순간을 지나고 나서 막는 셈이었다.
         //
-        // 행 하나씩 더하면 문자열이 한 번에 한 행만 만들어진다(각각 수백 바이트).
-        // 행이 이 화면의 대부분을 차지하므로 이 합계로 충분히 갈린다. 남은
-        // 오차는 호스트 검사가 받는다.
-        var total = document.head ? document.head.outerHTML.length : 0;
-        var rows = document.getElementsByTagName('tr');
-        for (var i = 0; i < rows.length; i++) {
-            total += rows[i].outerHTML.length;
-            if (total > SAVE_HTML_LIMIT) {
-                vscode.postMessage({ command: 'saveHtmlTooLarge' });
-                return;
+        // DOM 을 순회하며 직렬화될 태그·속성·텍스트의 **상한**만 센다. 개별
+        // outerHTML 도 만들지 않으므로 큰 중간 문자열이 없다. 특히 inline
+        // script 의 RD 안에는 접혀 있거나 가상화로 아직 렌더되지 않은 행과
+        // mapSegHtml 까지 모두 들어 있으므로, head + 현재 <tr> 만 세던 검사는
+        // 이 데이터를 통째로 놓쳤다.
+        function serializedHtmlExceedsLimit(root, limit) {
+            var total = 0;
+            var stack = [root];
+
+            function add(chars) {
+                total += chars;
+                return total > limit;
             }
+
+            // HTML serializer 가 text/attribute 의 특수문자를 entity 로 늘릴
+            // 수 있는 만큼 더한다. 원문 길이를 먼저 더해 즉시 상한을 넘기면
+            // 거대한 문자열을 끝까지 훑지 않는다. script/style 은 raw text라
+            // entity 확장이 없고, 이 화면에서 가장 큰 RD payload도 이 경로다.
+            function addEscapedString(value, attribute) {
+                var text = value == null ? '' : String(value);
+                if (add(text.length)) { return true; }
+                for (var i = 0; i < text.length; i++) {
+                    var ch = text.charCodeAt(i);
+                    if (ch === 38) { // & -> &amp; (1 -> 5)
+                        if (add(4)) { return true; }
+                    } else if (ch === 160) { // NBSP -> &nbsp; (1 -> 6)
+                        if (add(5)) { return true; }
+                    } else if (ch === 60 || ch === 62) { // < or > -> &lt; / &gt;
+                        if (add(3)) { return true; }
+                    } else if (attribute && ch === 34) { // " -> &quot; (1 -> 6)
+                        if (add(5)) { return true; }
+                    }
+                }
+                return false;
+            }
+
+            function addCharacterData(node, attribute, rawText) {
+                // CharacterData.length는 nodeValue 전체를 JS 문자열로 만들지
+                // 않는다. 먼저 원문 길이만 더하면 대형 inline script/RD는
+                // nodeValue에 접근하지 않고 즉시 거부할 수 있다.
+                var length;
+                if (typeof node.length === 'number') {
+                    length = node.length;
+                } else {
+                    // 구형/가짜 DOM 폴백. 실제 Webview의 CharacterData에는 항상
+                    // length와 substringData가 있다.
+                    var fallback = node.nodeValue == null ? '' : String(node.nodeValue);
+                    length = fallback.length;
+                }
+                if (add(length) || rawText) { return total > limit; }
+
+                // 일반 text는 entity 확장분만 센다. substringData로 64KiB씩
+                // 읽어 전체 text node를 한 번에 materialize하지 않는다.
+                var chunkSize = 64 * 1024;
+                for (var offset = 0; offset < length; offset += chunkSize) {
+                    var count = Math.min(chunkSize, length - offset);
+                    var chunk;
+                    if (typeof node.substringData === 'function') {
+                        chunk = node.substringData(offset, count);
+                    } else {
+                        var value = node.nodeValue == null ? '' : String(node.nodeValue);
+                        chunk = value.slice(offset, offset + count);
+                    }
+                    for (var i = 0; i < chunk.length; i++) {
+                        var ch = chunk.charCodeAt(i);
+                        if (ch === 38) { // & -> &amp; (1 -> 5)
+                            if (add(4)) { return true; }
+                        } else if (ch === 160) { // NBSP -> &nbsp; (1 -> 6)
+                            if (add(5)) { return true; }
+                        } else if (ch === 60 || ch === 62) { // < or > -> &lt; / &gt;
+                            if (add(3)) { return true; }
+                        } else if (attribute && ch === 34) { // " -> &quot; (1 -> 6)
+                            if (add(5)) { return true; }
+                        }
+                    }
+                }
+                return false;
+            }
+
+            while (stack.length > 0) {
+                var node = stack.pop();
+                if (!node) { continue; }
+
+                if (node.nodeType === 1) { // Element
+                    // tagName 은 namespace prefix까지 포함하므로 localName보다
+                    // 직렬화될 이름에 가깝고, HTML 태그는 대소문자만 달라 길이는 같다.
+                    var tag = String(node.tagName || node.localName || '').toLowerCase();
+                    // <tag> + </tag>. Void element 에도 닫는 태그 길이를 더해
+                    // 실제 outerHTML 보다 작아지지 않게 보수적으로 계산한다.
+                    if (add(tag.length * 2 + 5)) { return true; }
+
+                    var attrs = node.attributes || [];
+                    for (var ai = 0; ai < attrs.length; ai++) {
+                        var attr = attrs[ai] || (attrs.item && attrs.item(ai));
+                        if (!attr) { continue; }
+                        var name = String(attr.name || '');
+                        // space + name + = + two quotes
+                        if (add(name.length + 4) || addEscapedString(attr.value, true)) {
+                            return true;
+                        }
+                    }
+
+                    var children = node.childNodes || [];
+                    // 마지막 자식부터 확인한다. 이 문서는 큰 inline script 가
+                    // body 뒤쪽에 있어 병리적 payload를 빠르게 거부할 수 있다.
+                    for (var ci = 0; ci < children.length; ci++) {
+                        stack.push(children[ci] || (children.item && children.item(ci)));
+                    }
+                } else if (node.nodeType === 3) { // Text
+                    var parent = node.parentElement || node.parentNode;
+                    var parentTag = parent
+                        ? String(parent.tagName || parent.localName || '').toLowerCase()
+                        : '';
+                    if (addCharacterData(node, false, parentTag === 'script' || parentTag === 'style')) {
+                        return true;
+                    }
+                } else if (node.nodeType === 8) { // Comment: <!--value-->
+                    if (add(7) || addCharacterData(node, false, true)) { return true; }
+                } else if (
+                    add(String(node.nodeName || '').length + 8)
+                    || addEscapedString(node.nodeValue, true)
+                ) {
+                    // ProcessingInstruction 등 이 문서에 통상 없을 노드는 entity
+                    // 확장과 구분자 여유까지 잡아 실제 직렬화보다 작게 추정하지 않는다.
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if (serializedHtmlExceedsLimit(document.documentElement, SAVE_HTML_LIMIT)) {
+            vscode.postMessage({ command: 'saveHtmlTooLarge' });
+            return;
         }
         vscode.postMessage({ command: 'saveHtml', html: document.documentElement.outerHTML });
     });

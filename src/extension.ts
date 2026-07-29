@@ -2152,6 +2152,27 @@ interface ActiveTaskExecution {
 const activeTasks = new Map<string, Map<string, ActiveTaskExecution>>();
 const manuallyTerminatedActions = new Set<string>();
 
+interface SensitiveDebugCapture {
+    readonly taskId: string;
+    /** Whether this task type has a stdout/stderr channel we can capture. */
+    readonly captureSupported: boolean;
+    readonly outputUnavailableReason?: 'detached-one-shot';
+    stdout: string;
+    stderr: string;
+    stdoutTruncated?: boolean;
+    stderrTruncated?: boolean;
+    outcome: 'running' | 'launched' | 'success' | 'failure';
+    /** Safe metadata only; never the original Error/cause. */
+    detail?: SensitiveFailureDetail;
+    /**
+     * Explicitly consented debug runs may retain the raw message string in
+     * memory. Never retain the Error object/cause or copy this into logs,
+     * Problems, History, or notifications.
+     */
+    rawErrorMessage?: string;
+    rawErrorMessageTruncated?: boolean;
+}
+
 /**
  * Cancellation and sensitive-data state for one concrete execution.
  *
@@ -2182,7 +2203,9 @@ interface ActionRunContext {
      */
     sensitiveDebug: boolean;
     /** 민감 디버그 실행에서 붙잡아 둔 원본 출력 (어디에도 저장하지 않는다). */
-    sensitiveDebugCapture?: { taskId: string; stdout: string; stderr: string };
+    readonly sensitiveDebugCaptures: Map<string, SensitiveDebugCapture>;
+    /** Raw debug bytes retained across all tasks in this run. */
+    sensitiveDebugCapturedBytes: number;
 }
 
 let nextActionRunGeneration = 1;
@@ -2207,6 +2230,8 @@ function createActionRunContext(id: string): ActionRunContext {
         // 다음 실행이 이 플래그를 물려받으면 안 된다. 요청한 그 실행에서만
         // `beginActionCancellation` 직후에 세운다.
         sensitiveDebug: false,
+        sensitiveDebugCaptures: new Map<string, SensitiveDebugCapture>(),
+        sensitiveDebugCapturedBytes: 0,
     };
 }
 
@@ -2499,6 +2524,86 @@ function describeSensitiveFailure(raw: Error, maskedCommand?: string): Sensitive
         return { stage: 'start', command: maskedCommand };
     }
     return { stage: 'unknown', command: maskedCommand };
+}
+
+function taskSupportsSensitiveDebugCapture(task: import('./schema').Task): boolean {
+    return ((task.type === 'command' || task.type === 'shell') && task.isOneShot !== true) ||
+        ((task.type === 'zip' || task.type === 'unzip') && task.tool !== undefined && task.tool !== null);
+}
+
+function ensureSensitiveDebugCapture(
+    run: ActionRunContext,
+    taskId: string,
+    captureSupported: boolean,
+    outputUnavailableReason?: SensitiveDebugCapture['outputUnavailableReason']
+): SensitiveDebugCapture | undefined {
+    if (!run.sensitiveDebug) { return undefined; }
+    let capture = run.sensitiveDebugCaptures.get(taskId);
+    if (!capture) {
+        capture = {
+            taskId,
+            captureSupported,
+            outputUnavailableReason,
+            stdout: '',
+            stderr: '',
+            outcome: 'running',
+        };
+        run.sensitiveDebugCaptures.set(taskId, capture);
+    }
+    return capture;
+}
+
+/**
+ * Keep raw output only in the one-run in-memory debug context. The callback is
+ * never installed during an ordinary run, so no new persistence/log surface is
+ * created for password-derived output.
+ */
+function sensitiveDebugOutputObserver(
+    run: ActionRunContext,
+    taskId: string
+): ((target: 'stdout' | 'stderr', chunk: string) => void) | undefined {
+    const capture = run.sensitiveDebugCaptures.get(taskId);
+    if (!run.sensitiveDebug || !capture?.captureSupported) { return undefined; }
+    return (target, chunk) => {
+        const remaining = SENSITIVE_DEBUG_DISPLAY_LIMIT_BYTES - run.sensitiveDebugCapturedBytes;
+        const part = takeSensitiveDebugPrefix(chunk, remaining);
+        run.sensitiveDebugCapturedBytes += part.bytes;
+        if (target === 'stdout') {
+            capture.stdout += part.text;
+            if (part.truncated) { capture.stdoutTruncated = true; }
+        } else {
+            capture.stderr += part.text;
+            if (part.truncated) { capture.stderrTruncated = true; }
+        }
+    };
+}
+
+function finishSensitiveDebugCapture(
+    run: ActionRunContext,
+    taskId: string,
+    outcome: 'launched' | 'success' | 'failure',
+    detail?: SensitiveFailureDetail,
+    rawErrorMessage?: string
+): void {
+    const capture = run.sensitiveDebugCaptures.get(taskId);
+    if (!capture) { return; }
+    capture.outcome = outcome;
+    capture.detail = detail;
+    if (rawErrorMessage) {
+        const remaining = SENSITIVE_DEBUG_DISPLAY_LIMIT_BYTES - run.sensitiveDebugCapturedBytes;
+        const part = takeSensitiveDebugPrefix(rawErrorMessage, remaining);
+        capture.rawErrorMessage = part.text;
+        capture.rawErrorMessageTruncated = part.truncated;
+        run.sensitiveDebugCapturedBytes += part.bytes;
+    }
+}
+
+/** AggregateError may contain a mix of sensitive and ordinary failures. */
+function containsSensitiveTaskError(error: unknown, seen = new Set<unknown>()): boolean {
+    if (error instanceof SensitiveTaskError) { return true; }
+    if (!(error instanceof AggregateError) || seen.has(error)) { return false; }
+    seen.add(error);
+    return Array.from(error.errors as Iterable<unknown>).some(item => containsSensitiveTaskError(item, seen));
 }
 
 function sensitiveStageLabel(stage: SensitiveFailureDetail['stage']): string {
@@ -3948,6 +4053,19 @@ async function executeActionPipelineForRun(
     const launchTask = (taskId: string): Promise<InFlightOutcome> => {
         const task = taskById.get(taskId)!;
         const taskUsesSecret = taskReferencesSecret(task, executionRun);
+        if (taskUsesSecret && executionRun.sensitiveDebug) {
+            // Create the record before dispatch. Timeout/spawn failures can
+            // happen before a single byte is emitted; the user still deserves
+            // a concrete outcome explaining why no raw output exists.
+            ensureSensitiveDebugCapture(
+                executionRun,
+                taskId,
+                taskSupportsSensitiveDebugCapture(task),
+                task.isOneShot && (task.type === 'command' || task.type === 'shell')
+                    ? 'detached-one-shot'
+                    : undefined
+            );
+        }
         scheduler.markStarted(taskId);
         emitTransition(taskId, 'running');
 
@@ -4014,15 +4132,28 @@ async function executeActionPipelineForRun(
         });
 
         return wrapped.then(
-            (result): InFlightOutcome => ({ taskId, kind: 'success', result }),
+            (result): InFlightOutcome => {
+                if (taskUsesSecret) {
+                    finishSensitiveDebugCapture(
+                        executionRun,
+                        taskId,
+                        task.isOneShot && (task.type === 'command' || task.type === 'shell')
+                            ? 'launched'
+                            : 'success'
+                    );
+                }
+                return { taskId, kind: 'success', result };
+            },
             (error): InFlightOutcome => {
                 const raw = error instanceof Error ? error : new Error(String(error));
-                if (taskUsesSecret && executionRun.sensitiveDebug && raw instanceof ShellCommandError
-                    && !executionRun.sensitiveDebugCapture) {
-                    // 사용자가 이 실행에 한해 원본을 보겠다고 동의했다. 여기서만
-                    // 붙잡아 두고, History·Problems·출력 채널에는 여전히 넣지
-                    // 않는다 — 아래에서 임시 편집기로 한 번 보여 주고 끝난다.
-                    executionRun.sensitiveDebugCapture = { taskId, stdout: raw.stdout, stderr: raw.stderr };
+                if (taskUsesSecret && executionRun.sensitiveDebug) {
+                    finishSensitiveDebugCapture(
+                        executionRun,
+                        taskId,
+                        'failure',
+                        describeSensitiveFailure(raw, maskedCommandForTask(taskId)),
+                        raw instanceof ShellCommandError ? undefined : raw.message
+                    );
                 }
                 const e = taskUsesSecret && !(raw instanceof ActionStoppedError)
                     ? new SensitiveTaskError(taskId, describeSensitiveFailure(raw, maskedCommandForTask(taskId)))
@@ -4145,8 +4276,9 @@ function handleActionSuccess(id: string, action: PipelineAction, showTaskStatus:
  *
  *   - 모달로 경고하고 동의를 받는다(액션이 **다시 실행된다**는 것도 함께).
  *   - 플래그는 그 실행의 컨텍스트에만 서고, 끝나면 컨텍스트와 함께 사라진다.
- *   - 원본은 임시 편집기(untitled)로 한 번 보여 준다 — History·Problems·
- *     출력 채널에는 그대로 넣지 않는다. 저장 여부는 사용자 손에 있다.
+ *   - 원본은 읽기 전용 임시 webview 로 한 번 보여 준다 — dirty untitled
+ *     문서가 아니므로 hot-exit/자동 백업 대상이 아니며, History·Problems·
+ *     출력 채널에도 넣지 않는다.
  *   - 영구 설정으로 켜 두는 방법은 두지 않는다.
  */
 async function offerSensitiveDebugRerun(
@@ -4186,20 +4318,169 @@ async function offerSensitiveDebugRerun(
     }
 }
 
-/** 원본 출력을 임시 편집기로 한 번 보여 준다. 디스크에는 쓰지 않는다. */
-async function showSensitiveDebugOutput(
+function escapeSensitiveDebugHtml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function sensitiveDebugEmptyReason(capture: SensitiveDebugCapture): string {
+    if (capture.outputUnavailableReason === 'detached-one-shot') {
+        return t(
+            'detached one-shot 출력은 터미널 노출과 extension host 종속을 피하기 위해 의도적으로 폐기했습니다.',
+            'Detached one-shot output was intentionally discarded to avoid terminal exposure and extension-host coupling.'
+        );
+    }
+    if (!capture.captureSupported) {
+        return t(
+            '이 태스크 유형은 stdout/stderr 스트림을 제공하지 않습니다.',
+            'This task type does not expose stdout/stderr streams.'
+        );
+    }
+    switch (capture.detail?.stage) {
+        case 'start':
+            return t('프로세스가 시작되지 않아 출력이 없습니다.', 'The process did not start, so no output was produced.');
+        case 'timeout':
+            return t('시간 초과 전에 받은 출력이 없습니다.', 'No output was received before the timeout.');
+        case 'capture-limit':
+            return t('출력 한도에 도달하기 전에 보존된 출력이 없습니다.', 'No output was retained before the capture limit was reached.');
+        default:
+            return t('태스크가 stdout/stderr를 출력하지 않았습니다.', 'The task produced no stdout/stderr output.');
+    }
+}
+
+const SENSITIVE_DEBUG_DISPLAY_LIMIT_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Take a UTF-8-bounded prefix without first materializing a Buffer for the
+ * entire value. outputCaptureLimitMb can be configured up to 1 GiB; copying
+ * that whole string into HTML and then escaping it would create several
+ * simultaneous GiB-sized allocations.
+ */
+function takeSensitiveDebugPrefix(
+    value: string,
+    maxBytes: number
+): { text: string; bytes: number; truncated: boolean } {
+    if (value.length === 0) { return { text: '', bytes: 0, truncated: false }; }
+    if (maxBytes <= 0) { return { text: '', bytes: 0, truncated: true }; }
+
+    const pieces: string[] = [];
+    let offset = 0;
+    let bytes = 0;
+    const chunkCharacters = 64 * 1024;
+    while (offset < value.length && bytes < maxBytes) {
+        const end = Math.min(value.length, offset + chunkCharacters);
+        const chunk = value.slice(offset, end);
+        const chunkBytes = Buffer.byteLength(chunk, 'utf8');
+        if (chunkBytes <= maxBytes - bytes) {
+            pieces.push(chunk);
+            bytes += chunkBytes;
+            offset = end;
+            continue;
+        }
+
+        let low = 0;
+        let high = chunk.length;
+        const remaining = maxBytes - bytes;
+        while (low < high) {
+            const mid = Math.ceil((low + high) / 2);
+            if (Buffer.byteLength(chunk.slice(0, mid), 'utf8') <= remaining) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        // Avoid ending the displayed prefix with an unmatched high surrogate.
+        if (low > 0 && /[\uD800-\uDBFF]/.test(chunk.charAt(low - 1))) { low--; }
+        const prefix = chunk.slice(0, low);
+        pieces.push(prefix);
+        bytes += Buffer.byteLength(prefix, 'utf8');
+        offset += low;
+        break;
+    }
+    return { text: pieces.join(''), bytes, truncated: offset < value.length };
+}
+
+/**
+ * 원본 출력을 읽기 전용 임시 webview 로 한 번 보여 준다.
+ *
+ * Webview serializer를 등록하지 않으므로 창을 닫거나 VS Code를 다시 열면
+ * 복원되지 않는다. enableScripts/localResourceRoots도 막아 원본이 다른 표면으로
+ * 이동할 경로를 두지 않는다.
+ */
+function showSensitiveDebugOutput(
     actionTitle: string,
-    capture: { taskId: string; stdout: string; stderr: string }
-): Promise<void> {
+    captures: Iterable<SensitiveDebugCapture>
+): void {
     const header = t(
-        `# 민감 디버그 — '${actionTitle}' / 태스크 '${capture.taskId}'\n` +
-        '# 이 내용은 저장되지 않았습니다. 비밀번호가 포함돼 있을 수 있으니 공유 전에 확인하세요.\n',
-        `# Sensitive debug — '${actionTitle}' / task '${capture.taskId}'\n` +
-        '# This was not persisted. It may contain the password — check before sharing.\n'
+        `민감 디버그 — '${actionTitle}'\n` +
+        '이 읽기 전용 화면은 저장·자동 백업되지 않습니다. 비밀번호가 포함돼 있을 수 있으니 공유 전에 확인하세요.',
+        `Sensitive debug — '${actionTitle}'\n` +
+        'This read-only view is not persisted or automatically backed up. It may contain the password — check before sharing.'
     );
-    const body = `${header}\n--- stdout ---\n${capture.stdout}\n--- stderr ---\n${capture.stderr}\n`;
-    const doc = await vscode.workspace.openTextDocument({ content: body, language: 'plaintext' });
-    await vscode.window.showTextDocument(doc, { preview: false });
+    const rows = Array.from(captures);
+    let remainingRawBytes = SENSITIVE_DEBUG_DISPLAY_LIMIT_BYTES;
+    const omittedNotice = t(
+        '[... 민감 디버그 표시 한도 4MiB를 넘어 나머지 출력을 생략했습니다 ...]',
+        '[... remaining output omitted: sensitive debug display is capped at 4 MiB ...]'
+    );
+    /**
+     * `alreadyTruncated` 를 반드시 함께 본다.
+     *
+     * 원본은 **수집 단계에서 이미** 표시 한도로 잘린다. 그래서 여기서 다시
+     * 자를 것이 없고, 이 함수의 `part.truncated` 만 보면 잘렸다는 사실이
+     * 화면에서 사라진다 — 사용자는 5MiB 중 4MiB만 보면서 그것이 전부라고
+     * 읽는다. 수집 단계가 남긴 플래그가 그 정보를 들고 있다.
+     */
+    const takeRaw = (value: string, alreadyTruncated?: boolean): string => {
+        const part = takeSensitiveDebugPrefix(value, remainingRawBytes);
+        remainingRawBytes -= part.bytes;
+        return part.text + (part.truncated || alreadyTruncated ? `\n${omittedNotice}` : '');
+    };
+    const sections = rows.length > 0
+        ? rows.map(capture => {
+            const detail = capture.detail
+                ? `${sensitiveStageLabel(capture.detail.stage)}` +
+                    (typeof capture.detail.exitCode === 'number' ? ` (${t('종료 코드', 'exit code')} ${capture.detail.exitCode})` : '')
+                : '';
+            const outcome = capture.outcome === 'success'
+                ? t('성공', 'success')
+                : capture.outcome === 'failure'
+                    ? t('실패', 'failure')
+                    : capture.outcome === 'launched' ? t('시작됨', 'launched') : t('실행 중', 'running');
+            const noOutput = capture.stdout.length === 0 && capture.stderr.length === 0 && !capture.rawErrorMessage
+                ? `\n${sensitiveDebugEmptyReason(capture)}\n`
+                : '';
+            const rawError = capture.rawErrorMessage
+                ? `\n--- ${t('원본 실패 메시지', 'raw failure message')} ---\n${takeRaw(capture.rawErrorMessage, capture.rawErrorMessageTruncated)}\n`
+                : '';
+            const stdout = takeRaw(capture.stdout, capture.stdoutTruncated);
+            const stderr = takeRaw(capture.stderr, capture.stderrTruncated);
+            return `## ${t('태스크', 'Task')} '${capture.taskId}' — ${outcome}${detail ? ` / ${detail}` : ''}` +
+                `${noOutput}${rawError}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`;
+        }).join('\n')
+        : t(
+            '비밀번호에서 파생된 태스크가 이번 재실행에서는 실행되지 않아 표시할 출력이 없습니다.',
+            'No password-derived task ran during this re-run, so there is no output to display.'
+        );
+    const text = `${header}\n\n${sections}`;
+    const panel = vscode.window.createWebviewPanel(
+        'taskhubSensitiveDebug',
+        t('TaskHub 민감 디버그', 'TaskHub Sensitive Debug'),
+        vscode.ViewColumn.Active,
+        {
+            enableScripts: false,
+            retainContextWhenHidden: false,
+            localResourceRoots: [],
+        }
+    );
+    panel.webview.html = '<!DOCTYPE html><html><head>' +
+        '<meta charset="UTF-8">' +
+        '<meta http-equiv="Content-Security-Policy" content="default-src \'none\';">' +
+        '</head><body><pre>' + escapeSensitiveDebugHtml(text) + '</pre></body></html>';
 }
 
 /**
@@ -4588,6 +4869,13 @@ export async function executeAction(
             throw new ActionStoppedError();
         }
 
+        // A debug re-run that succeeds is just as useful as one that fails:
+        // deploy/flash tools often print the decisive clue and still return 0.
+        // Always show a report, including an explicit no-output explanation.
+        if (run.sensitiveDebug) {
+            showSensitiveDebugOutput(actionItem.title, run.sensitiveDebugCaptures.values());
+        }
+
         handleActionSuccess(id, action, showTaskStatus);
 
         // Update history to success — `Math.max(0, ...)` defends against
@@ -4605,15 +4893,21 @@ export async function executeAction(
         const ownsCurrentState = isCurrentActionRun(run);
         const manuallyStopped = ownsCurrentState && manuallyTerminatedActions.has(id);
         if (!manuallyStopped) {
-            // 민감 디버그 실행이었다면 붙잡아 둔 원본을 한 번 보여 준다.
-            if (run.sensitiveDebug && run.sensitiveDebugCapture) {
-                void showSensitiveDebugOutput(actionItem.title, run.sensitiveDebugCapture);
+            // 민감 디버그 실행이었다면 결과 종류와 무관하게 보고서를 한 번
+            // 보여 준다. timeout/spawn 실패처럼 출력이 없어도 이유가 표시된다.
+            if (run.sensitiveDebug) {
+                showSensitiveDebugOutput(actionItem.title, run.sensitiveDebugCaptures.values());
             }
             if (ownsCurrentState) {
+                // The debug offer below is asynchronous and can immediately
+                // start the same action again when UI APIs are mocked/resolved.
+                // Transition first so the duplicate-run guard never sees the
+                // failed generation as still running.
+                actionStates.set(id, { state: 'failure' });
                 // 비밀을 쓰는 태스크의 실패는 상세가 가려져 있다. 그대로 두면
                 // 사용자가 원인에 접근할 방법이 없으므로, 일회성 재실행을
                 // 제안한다 (이미 민감 디버그로 돌린 실행에는 제안하지 않는다).
-                if (error instanceof SensitiveTaskError && !run.sensitiveDebug && showTaskStatus) {
+                if (containsSensitiveTaskError(error) && !run.sensitiveDebug && showTaskStatus) {
                     void offerSensitiveDebugRerun(
                         actionItem, context, mainViewProvider, historyProvider,
                         t(`'${actionItem.title}' 액션 실패: ${error.message}`,
@@ -4867,11 +5161,20 @@ async function executeSingleTask(
                 redactedDisplay,
                 redactedCwd,
                 redactOutput: taskUsesSecret,
+                sensitiveDebugOutputObserver: taskUsesSecret
+                    ? sensitiveDebugOutputObserver(executionRun, task.id)
+                    : undefined,
+                discardCapturedOutput: taskUsesSecret && !task.passTheResultToNextTask && !executionRun.sensitiveDebug,
             };
 
-            if (task.passTheResultToNextTask) {
+            if (task.passTheResultToNextTask || (taskUsesSecret && !task.isOneShot)) {
                 try {
-                    result = await handleCommand(handlerTask, context, defaultWorkspace);
+                    const capturedResult = await handleCommand(handlerTask, context, defaultWorkspace);
+                    // Password-derived tasks must not stream into VS Code's
+                    // ordinary terminal without consent. Capture them through
+                    // the same bounded process path even when downstream tasks
+                    // do not consume the result, then discard the value.
+                    result = task.passTheResultToNextTask ? capturedResult : {};
                 } catch (err) {
                     // A task timeout rejects the scheduler-facing wrapper but
                     // cannot make every underlying promise disappear. Do not
@@ -4911,13 +5214,15 @@ async function executeSingleTask(
                 }
             } else {
                 if (task.isOneShot) {
-                    executeStreamedTask(handlerTask, defaultWorkspace).catch(error => {
-                        const msg = taskUsesSecret
-                            ? `Task '${task.id}' failed; details hidden because it used a password input.`
-                            : (error instanceof Error ? error.message : String(error));
-                        outputChannel.appendLine(`[ERROR] One-shot task ${task.id} failed: ${msg}`);
-                        vscode.window.showErrorMessage(t(`원샷 태스크 '${task.id}' 시작 실패: ${msg}`, `One-shot task '${task.id}' failed to start: ${msg}`));
-                    });
+                    if (taskUsesSecret) {
+                        executeSensitiveDetachedOneShot(handlerTask, defaultWorkspace);
+                    } else {
+                        executeStreamedTask(handlerTask, defaultWorkspace).catch(error => {
+                            const msg = error instanceof Error ? error.message : String(error);
+                            outputChannel.appendLine(`[ERROR] One-shot task ${task.id} failed: ${msg}`);
+                            vscode.window.showErrorMessage(t(`원샷 태스크 '${task.id}' 시작 실패: ${msg}`, `One-shot task '${task.id}' failed to start: ${msg}`));
+                        });
+                    }
                 } else {
                     await executeStreamedTask(handlerTask, defaultWorkspace);
                 }
@@ -5018,12 +5323,28 @@ async function executeSingleTask(
 
         switch (interpolatedOutput.mode) {
             case 'editor':
+                if (taskUsesSecret) {
+                    // An untitled editor participates in VS Code hot-exit
+                    // backup. Treat it as persistence, not as an ephemeral
+                    // preview, and require the explicit sensitive-debug flow
+                    // instead of placing raw password-derived output there.
+                    vscode.window.showWarningMessage(t(
+                        `태스크 '${task.id}'의 에디터 출력을 숨겼습니다. password 입력에서 파생된 출력은 민감 디버그 재실행에서만 볼 수 있습니다.`,
+                        `Editor output for task '${task.id}' was hidden. Password-derived output is only available through a sensitive-debug re-run.`
+                    ));
+                    break;
+                }
                 throwIfTaskInactive(scope);
                 const doc = await vscode.workspace.openTextDocument({ content: interpolatedOutput.content, language: interpolatedOutput.language || 'plaintext' });
                 throwIfTaskInactive(scope);
                 await vscode.window.showTextDocument(doc, { preview: false });
                 break;
             case 'file':
+                // `mode: file` names a concrete workspace path in actions.json
+                // and is therefore an explicit persistent-output policy, unlike
+                // editor hot-exit or a shared terminal. Preserve that declared
+                // behavior (including for password-derived data); users can
+                // audit the destination in configuration and workspace VCS.
                 throwIfTaskInactive(scope);
                 if (!interpolatedOutput.filePath) { throw new Error(`Task '${task.id}' has output mode 'file' but 'filePath' is not defined.`); }
                 const safeOutputPath = resolveWithinWorkspace(
@@ -5040,6 +5361,13 @@ async function executeSingleTask(
                 break;
             case 'terminal':
                 {
+                    if (taskUsesSecret) {
+                        vscode.window.showWarningMessage(t(
+                            `태스크 '${task.id}'의 터미널 출력을 숨겼습니다. password 입력에서 파생된 출력은 민감 디버그 재실행에서만 볼 수 있습니다.`,
+                            `Terminal output for task '${task.id}' was hidden. Password-derived output is only available through a sensitive-debug re-run.`
+                        ));
+                        break;
+                    }
                     throwIfTaskInactive(scope);
                     // Sequential actions share one TaskHub terminal per
                     // actionId so consecutive tasks reuse it (backward
@@ -5283,6 +5611,80 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
     });
 }
 
+/**
+ * Launch a password-derived one-shot without creating a terminal or tying the
+ * child to the extension-host lifecycle. stdio:'ignore' prevents raw output
+ * from reaching VS Code, while detached+unref preserves one-shot's contract
+ * that the process may outlive the action (and the extension host).
+ */
+function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string): void {
+    const command = getCommandString(task.command);
+    const args = Array.isArray(task.args) ? task.args : [];
+    const { envOverrides, useUtf8Console } = resolveExecutionSettings(task.env);
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...envOverrides };
+    const workingDirectory = task.cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined;
+    const shownWorkingDirectory = task.redactedCwd ?? workingDirectory ?? '';
+    const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+    let failureReported = false;
+    const reportFailure = () => {
+        if (failureReported) { return; }
+        failureReported = true;
+        const message = t(
+            `민감 원샷 태스크 '${task.id}' 실행에 실패했습니다. 상세는 password 입력을 사용해 숨겼습니다.`,
+            `Sensitive one-shot task '${task.id}' failed. Details were hidden because it used a password input.`
+        );
+        outputChannel.appendLine(`[ERROR] ${message}`);
+        vscode.window.showErrorMessage(message);
+    };
+
+    try {
+        let child: ReturnType<typeof spawn>;
+        if (process.platform === 'win32') {
+            // PowerShell resolves .cmd/.bat shims and scripts consistently;
+            // the encoded script keeps argument quoting identical to captured
+            // commands without exposing it in a command-line audit surface.
+            const invocation = buildPowerShellInvocation(command, args, useUtf8Console);
+            // powershell.exe does not reliably propagate an external program's
+            // exit code unless the script exits explicitly with LASTEXITCODE.
+            const script = invocation.script +
+                '\n$taskHubSucceeded = $?\n$taskHubExitCode = $LASTEXITCODE\n' +
+                'if ($null -ne $taskHubExitCode) { exit [int]$taskHubExitCode }\n' +
+                'if (-not $taskHubSucceeded) { exit 1 }\nexit 0';
+            child = spawn(
+                'powershell.exe',
+                ['-NoProfile', '-EncodedCommand', encodePowerShellScript(script)],
+                {
+                    cwd: workingDirectory,
+                    env: childEnv,
+                    detached: true,
+                    stdio: 'ignore',
+                    windowsHide: true,
+                }
+            );
+        } else {
+            child = spawn(buildPosixCommandLine(command, args), [], {
+                cwd: workingDirectory,
+                env: childEnv,
+                detached: true,
+                stdio: 'ignore',
+                shell: true,
+            });
+        }
+
+        child.once('error', reportFailure);
+        child.once('exit', code => {
+            if (code !== 0) { reportFailure(); }
+        });
+        child.unref();
+        if (showVerboseLogs) {
+            outputChannel.appendLine(
+                `[INFO] Launched detached sensitive one-shot: ${task.redactedDisplay ?? '[command hidden: uses password input]'} ` +
+                `in ${shownWorkingDirectory}`
+            );
+        }
+    } catch { reportFailure(); }
+}
+
 async function handleCommand(task: any, context: vscode.ExtensionContext, workspaceFolderPath?: string): Promise<{ output: string; stderr: string }> {
     const { args, cwd } = task;
     const command = getCommandString(task.command);
@@ -5297,7 +5699,9 @@ async function handleCommand(task: any, context: vscode.ExtensionContext, worksp
         task.redactedDisplay,
         task.redactedCwd,
         task.redactOutput === true,
-        task.runGeneration
+        task.runGeneration,
+        task.sensitiveDebugOutputObserver,
+        task.discardCapturedOutput === true
     );
     // `output` keeps its historical meaning (= stdout only) so existing
     // `output.capture` rules and `${task.output}` interpolation behave
@@ -5920,7 +6324,8 @@ async function handleUnzip(
             redactOutput ? '[command hidden: uses password input]' : undefined,
             redactOutput ? SECRET_PLACEHOLDER : undefined,
             redactOutput,
-            run.generation
+            run.generation,
+            redactOutput ? sensitiveDebugOutputObserver(run, task.id) : undefined
         );
         return { outputDir: outputDir };
     } catch (error: any) {
@@ -5962,23 +6367,37 @@ async function handleZip(
             // 소스 밖을 가리키는 심볼릭 링크는 아카이브에 담지 않는다. 조용히
             // 빼면 "왜 이 파일이 zip 에 없지?" 가 되므로 반드시 알린다.
             const skippedLinks: string[] = [];
+            let skippedLinkCount = 0;
             await createZipArchive(archive, sourcePaths, {
                 signal: abort.signal,
                 onSkippedSymlink: ({ sourcePath, resolvedTarget }) => {
-                    skippedLinks.push(sourcePath);
-                    outputChannel.appendLine(
-                        `[WARN] Skipped symlink '${sourcePath}' -> '${resolvedTarget}': it resolves outside the source folder and was not added to the archive.`
-                    );
+                    skippedLinkCount++;
+                    if (!redactOutput) {
+                        skippedLinks.push(sourcePath);
+                        outputChannel.appendLine(
+                            `[WARN] Skipped symlink '${sourcePath}' -> '${resolvedTarget}': it resolves outside the source folder and was not added to the archive.`
+                        );
+                    }
                 },
             });
-            if (skippedLinks.length > 0) {
-                const shown = skippedLinks.slice(0, 3).map(p => path.basename(p)).join(', ');
-                const more = skippedLinks.length > 3 ? ` 외 ${skippedLinks.length - 3}개` : '';
-                const moreEn = skippedLinks.length > 3 ? ` and ${skippedLinks.length - 3} more` : '';
-                vscode.window.showWarningMessage(t(
-                    `소스 폴더 밖을 가리키는 심볼릭 링크 ${skippedLinks.length}개를 아카이브에서 제외했습니다 (${shown}${more}). 자세한 내용은 TaskHub 출력 채널을 보세요.`,
-                    `Excluded ${skippedLinks.length} symlink(s) pointing outside the source folder (${shown}${moreEn}). See the TaskHub output channel for details.`
-                ));
+            if (skippedLinkCount > 0) {
+                if (redactOutput) {
+                    outputChannel.appendLine(
+                        `[WARN] Password-derived zip task '${task.id}' excluded ${skippedLinkCount} symlink(s) pointing outside the source folder; path details hidden.`
+                    );
+                    vscode.window.showWarningMessage(t(
+                        `password 입력에서 파생된 ZIP 태스크가 소스 폴더 밖을 가리키는 심볼릭 링크 ${skippedLinkCount}개를 제외했습니다. 경로 상세는 숨겼습니다.`,
+                        `A password-derived ZIP task excluded ${skippedLinkCount} symlink(s) pointing outside the source folder. Path details were hidden.`
+                    ));
+                } else {
+                    const shown = skippedLinks.slice(0, 3).map(p => path.basename(p)).join(', ');
+                    const more = skippedLinkCount > 3 ? ` 외 ${skippedLinkCount - 3}개` : '';
+                    const moreEn = skippedLinkCount > 3 ? ` and ${skippedLinkCount - 3} more` : '';
+                    vscode.window.showWarningMessage(t(
+                        `소스 폴더 밖을 가리키는 심볼릭 링크 ${skippedLinkCount}개를 아카이브에서 제외했습니다 (${shown}${more}). 자세한 내용은 TaskHub 출력 채널을 보세요.`,
+                        `Excluded ${skippedLinkCount} symlink(s) pointing outside the source folder (${shown}${moreEn}). See the TaskHub output channel for details.`
+                    ));
+                }
             }
             return { archivePath: archive };
         } catch (error: any) {
@@ -6012,7 +6431,8 @@ async function handleZip(
             redactOutput ? '[command hidden: uses password input]' : undefined,
             redactOutput ? SECRET_PLACEHOLDER : undefined,
             redactOutput,
-            run.generation
+            run.generation,
+            redactOutput ? sensitiveDebugOutputObserver(run, task.id) : undefined
         );
         return { archivePath: archive };
     } catch (error: any) {
@@ -6268,7 +6688,9 @@ export function executeShellCommand(
     displayOverride?: string,
     workingDirectoryDisplayOverride?: string,
     redactCapturedOutput = false,
-    runGeneration?: number
+    runGeneration?: number,
+    rawOutputObserver?: (target: 'stdout' | 'stderr', chunk: string) => void,
+    discardCapturedOutput = false
 ): Promise<{ stdout: string; stderr: string }> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
@@ -6360,9 +6782,17 @@ export function executeShellCommand(
         let captureOverflowed = false;
 
         const appendCapture = (target: 'stdout' | 'stderr', chunk: string) => {
+            // Password-derived pass-through-disabled tasks use pipes only to
+            // drain the child safely. Ordinary runs neither retain bytes nor
+            // apply the capture limit; explicit sensitive-debug runs install
+            // an observer and use the normal bounded capture path instead.
+            if (discardCapturedOutput) { return; }
             if (captureOverflowed) { return; }
             const chunkBytes = Buffer.byteLength(chunk, 'utf8');
             if (wouldExceedCaptureLimit(capturedBytes, chunkBytes, captureLimitBytes)) {
+                if (rawOutputObserver) {
+                    try { rawOutputObserver(target, chunk); } catch { /* debug UI must not alter execution */ }
+                }
                 // Mark overflow but do NOT add to manuallyTerminatedActions —
                 // this is an action *failure*, not a user-initiated stop. The
                 // close handler below converts this into a rejected promise so
@@ -6378,6 +6808,9 @@ export function executeShellCommand(
             }
             capturedBytes += chunkBytes;
             if (target === 'stdout') { stdout += chunk; } else { stderr += chunk; }
+            if (rawOutputObserver) {
+                try { rawOutputObserver(target, chunk); } catch { /* debug UI must not alter execution */ }
+            }
         };
 
         const startPowerShellFallback = (reason?: Error) => {
@@ -6477,6 +6910,10 @@ export function executeShellCommand(
                     stderr = '';
                     capturedBytes = 0;
                     captureOverflowed = false;
+                    if (rawOutputObserver) {
+                        // The failed native attempt's output is intentionally
+                        // retained in the consented report; do not erase it.
+                    }
                     startPowerShellFallback(err);
                     return;
                 }

@@ -472,6 +472,288 @@ suite('Password taint and redaction', function () {
         assert.ok(!Object.prototype.hasOwnProperty.call(recordInputs, 'ask'));
     });
 
+    test('passTheResultToNextTask=false 민감 태스크는 기본 터미널 대신 bounded capture로 실행한다', async () => {
+        const secret = 'No-Terminal-S3cret';
+        const marker = path.join(tempWorkspace, 'no-terminal.marker');
+        const originalExecuteTask = vscode.tasks.executeTask;
+        let executeTaskCalls = 0;
+        (vscode.tasks as any).executeTask = (..._args: unknown[]) => {
+            executeTaskCalls++;
+            throw new Error('sensitive non-one-shot must not enter the VS Code task terminal');
+        };
+
+        const actionItem: ActionItem = {
+            id: 'sensitive-no-terminal',
+            title: 'Sensitive no terminal',
+            action: {
+                description: 'discard password-derived output safely',
+                tasks: [
+                    { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                    {
+                        id: 'deploy',
+                        type: 'command',
+                        command: platformCommand('node'),
+                        args: [
+                            '-e',
+                            `require('fs').writeFileSync(${JSON.stringify(marker)}, process.argv[1]); process.stdout.write(process.argv[1]); process.stderr.write(process.argv[1]);`,
+                            '${ask.value}',
+                        ],
+                        cwd: tempWorkspace,
+                        passTheResultToNextTask: false,
+                    },
+                ],
+            },
+        };
+
+        try {
+            await extension.executeActionPipeline(
+                actionItem.action as PipelineAction,
+                makeContext(),
+                actionItem.id,
+                tempWorkspace,
+                [tempWorkspace],
+                { presetInputs: { ask: { value: secret } } }
+            );
+        } finally {
+            (vscode.tasks as any).executeTask = originalExecuteTask;
+        }
+
+        assert.strictEqual(executeTaskCalls, 0);
+        assert.strictEqual(fs.readFileSync(marker, 'utf8'), secret, '실제 배포 명령은 실행돼야 한다');
+        assert.ok(!verboseLines.join('\n').includes(secret), 'discard된 민감 출력이 verbose log에 샜다');
+    });
+
+    test('민감 output.mode editor/terminal은 억제하고 명시적 file 저장은 유지한다', async () => {
+        const secret = 'Output-Mode-S3cret';
+        const outputFile = path.join(tempWorkspace, 'explicit-sensitive-output.txt');
+        const originalOpen = vscode.workspace.openTextDocument;
+        const originalCreateTerminal = vscode.window.createTerminal;
+        const originalShowWarning = vscode.window.showWarningMessage;
+        let editorCalls = 0;
+        let terminalCalls = 0;
+        const warnings: string[] = [];
+        (vscode.workspace as any).openTextDocument = (..._args: unknown[]) => {
+            editorCalls++;
+            throw new Error('password-derived output must not enter an untitled editor');
+        };
+        (vscode.window as any).createTerminal = (..._args: unknown[]) => {
+            terminalCalls++;
+            throw new Error('password-derived output must not enter a terminal');
+        };
+        (vscode.window as any).showWarningMessage = async (message: string) => {
+            warnings.push(message);
+            return undefined;
+        };
+
+        const outputCommand = {
+            type: 'command' as const,
+            command: platformCommand('node'),
+            args: ['-e', 'process.stdout.write(process.argv[1])', '${ask.value}'],
+            cwd: tempWorkspace,
+            passTheResultToNextTask: true,
+        };
+        const actionItem: ActionItem = {
+            id: 'sensitive-output-modes',
+            title: 'Sensitive output modes',
+            action: {
+                description: 'sensitive display boundaries',
+                tasks: [
+                    { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                    { id: 'editor', ...outputCommand, output: { mode: 'editor' } },
+                    { id: 'terminal', ...outputCommand, output: { mode: 'terminal' } },
+                    {
+                        id: 'file',
+                        ...outputCommand,
+                        output: { mode: 'file', filePath: outputFile, overwrite: true },
+                    },
+                ],
+            },
+        };
+
+        try {
+            await extension.executeActionPipeline(
+                actionItem.action as PipelineAction,
+                makeContext(),
+                actionItem.id,
+                tempWorkspace,
+                [tempWorkspace],
+                { presetInputs: { ask: { value: secret } } }
+            );
+        } finally {
+            (vscode.workspace as any).openTextDocument = originalOpen;
+            (vscode.window as any).createTerminal = originalCreateTerminal;
+            (vscode.window as any).showWarningMessage = originalShowWarning;
+        }
+
+        assert.strictEqual(editorCalls, 0);
+        assert.strictEqual(terminalCalls, 0);
+        assert.strictEqual(warnings.length, 2, 'editor/terminal 억제 사실을 각각 알려야 한다');
+        assert.ok(!warnings.join('\n').includes(secret));
+        assert.strictEqual(fs.readFileSync(outputFile, 'utf8'), secret,
+            'mode:file은 actions.json의 명시적 영구 저장 정책으로 유지한다');
+    });
+
+    test('password-derived ZIP의 제외 symlink 경고는 경로 없이 한 줄로 요약한다', async function () {
+        if (process.platform === 'win32') { this.skip(); }
+
+        const secret = 'Zip-Path-S3cret';
+        const sourceDir = path.join(tempWorkspace, secret);
+        const outsideTarget = path.join(tempWorkspace, `outside-${secret}.txt`);
+        const linkName = `leaky-${secret}`;
+        const archivePath = path.join(tempWorkspace, 'safe.zip');
+        fs.mkdirSync(sourceDir, { recursive: true });
+        fs.writeFileSync(outsideTarget, 'outside');
+        fs.symlinkSync(outsideTarget, path.join(sourceDir, linkName));
+
+        const originalShowWarning = vscode.window.showWarningMessage;
+        const warnings: string[] = [];
+        (vscode.window as any).showWarningMessage = async (message: string) => {
+            warnings.push(message);
+            return undefined;
+        };
+        const actionItem: ActionItem = {
+            id: 'sensitive-zip-symlink',
+            title: 'Sensitive ZIP symlink',
+            action: {
+                description: 'redact skipped symlink paths',
+                tasks: [
+                    { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                    {
+                        id: 'zip',
+                        type: 'zip',
+                        source: path.join(tempWorkspace, '${ask.value}'),
+                        archive: archivePath,
+                    },
+                ],
+            },
+        };
+
+        try {
+            await extension.executeAction(
+                actionItem,
+                makeContext(),
+                makeMainViewProvider(),
+                undefined,
+                { ask: { value: secret } }
+            );
+        } finally {
+            (vscode.window as any).showWarningMessage = originalShowWarning;
+        }
+
+        const visible = `${warnings.join('\n')}\n${verboseLines.join('\n')}`;
+        assert.ok(fs.existsSync(archivePath));
+        assert.strictEqual(warnings.length, 1);
+        assert.ok(/1/.test(warnings[0]), '제외 개수는 알려야 한다');
+        assert.ok(!visible.includes(secret), `민감 symlink 경로가 노출됐다:\n${visible}`);
+        assert.ok(!visible.includes(outsideTarget));
+        assert.strictEqual(
+            verboseLines.filter(line => /password-derived zip task/i.test(line)).length,
+            1,
+            '민감 symlink 경고는 링크별 로그가 아니라 요약 한 줄이어야 한다'
+        );
+    });
+
+    test('민감 one-shot은 detached 생명주기를 유지하고 터미널·Stop All 유령을 만들지 않는다', async () => {
+        const id = 'sensitive-one-shot-detached';
+        const secret = 'Detached-S3cret';
+        const marker = path.join(tempWorkspace, 'detached-one-shot.marker');
+        const originalExecuteTask = vscode.tasks.executeTask;
+        let executeTaskCalls = 0;
+        (vscode.tasks as any).executeTask = () => {
+            executeTaskCalls++;
+            throw new Error('sensitive one-shot must use detached stdio-ignore spawn');
+        };
+
+        try {
+            await extension.executeActionPipeline(
+                {
+                    description: 'sensitive detached one-shot',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                        {
+                            id: 'background',
+                            type: 'command',
+                            command: platformCommand('node'),
+                            args: [
+                                '-e',
+                                `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(marker)}, process.argv[1]), 100);`,
+                                '${ask.value}',
+                            ],
+                            isOneShot: true,
+                        },
+                    ],
+                },
+                makeContext(),
+                id,
+                tempWorkspace,
+                [tempWorkspace],
+                { presetInputs: { ask: { value: secret } } }
+            );
+            assert.strictEqual(executeTaskCalls, 0, '민감 one-shot이 터미널 Task를 만들었다');
+            assert.strictEqual(extension.stopRunningAction(id), false,
+                '완료된 pipeline 뒤에 one-shot이 Stop All 유령 대상을 만들었다');
+
+            const deadline = Date.now() + 3000;
+            while (!fs.existsSync(marker) && Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            assert.strictEqual(fs.readFileSync(marker, 'utf8'), secret,
+                'detached one-shot이 pipeline 종료 뒤에도 완주하지 못했다');
+            assert.ok(!verboseLines.join('\n').includes(secret), 'one-shot command가 verbose log에 샜다');
+        } finally {
+            (vscode.tasks as any).executeTask = originalExecuteTask;
+        }
+    });
+
+    test('민감 detached one-shot의 nonzero exit는 경로 없는 실패 알림을 한 번만 낸다', async () => {
+        const id = 'sensitive-one-shot-failure';
+        const secret = 'Detached-Failure-S3cret';
+        const originalShowError = vscode.window.showErrorMessage;
+        const shownErrors: string[] = [];
+        let resolveFailure!: () => void;
+        const failureShown = new Promise<void>(resolve => { resolveFailure = resolve; });
+        (vscode.window as any).showErrorMessage = async (message: string) => {
+            shownErrors.push(message);
+            resolveFailure();
+            return undefined;
+        };
+
+        try {
+            await extension.executeActionPipeline(
+                {
+                    description: 'sensitive detached failure reporting',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                        {
+                            id: 'background',
+                            type: 'command',
+                            command: platformCommand('node'),
+                            args: ['-e', 'process.exit(7)', '${ask.value}'],
+                            isOneShot: true,
+                        },
+                    ],
+                },
+                makeContext(),
+                id,
+                tempWorkspace,
+                [tempWorkspace],
+                { presetInputs: { ask: { value: secret } } }
+            );
+            await Promise.race([
+                failureShown,
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('one-shot failure notification timeout')), 3000)),
+            ]);
+            await new Promise(resolve => setTimeout(resolve, 25));
+        } finally {
+            (vscode.window as any).showErrorMessage = originalShowError;
+        }
+
+        assert.strictEqual(shownErrors.length, 1, `error/exit가 중복 알림을 냈다: ${shownErrors.join(' | ')}`);
+        assert.ok(!shownErrors[0].includes(secret));
+        assert.match(shownErrors[0], /details were hidden|상세.*숨겼/i);
+        assert.strictEqual(extension.stopRunningAction(id), false);
+    });
+
     /**
      * 실패 원인을 통째로 가리면 비밀번호를 쓰는 flash/deploy 가 실패했을 때
      * 사용자가 아무 단서도 없이 막힌다. 정책을 "기본은 안전한 메타데이터만,
@@ -536,6 +818,157 @@ suite('Password taint and redaction', function () {
             assert.ok(message.includes('***'), `마스킹된 명령이 없다: ${message}`);
         });
 
+        test('실패 알림 → 모달 동의 → 성공 재실행이 running 가드에 막히지 않는다', async () => {
+            const id = 'sensitive-ui-rerun';
+            const secret = 'UI-Rerun-S3cret';
+            const firstRunMarker = path.join(tempWorkspace, 'first-run.marker');
+            const scriptPath = path.join(tempWorkspace, 'fail-once.js');
+            fs.writeFileSync(scriptPath, [
+                "const fs = require('fs');",
+                `const marker = ${JSON.stringify(firstRunMarker)};`,
+                'if (!fs.existsSync(marker)) {',
+                "  fs.writeFileSync(marker, 'failed');",
+                "  process.stderr.write('first failure ' + process.argv[2]);",
+                '  process.exit(9);',
+                '}',
+                "process.stdout.write('rerun success ' + process.argv[2]);",
+            ].join('\n'));
+
+            const context = makeContext();
+            const history = new HistoryProvider(context);
+            const originalInputBox = vscode.window.showInputBox;
+            const originalShowError = vscode.window.showErrorMessage;
+            const originalShowWarning = vscode.window.showWarningMessage;
+            const originalShowInformation = vscode.window.showInformationMessage;
+            const originalCreateWebviewPanel = vscode.window.createWebviewPanel;
+            const stateAtFailurePrompt: Array<string | undefined> = [];
+            const informationMessages: string[] = [];
+            let modalCalls = 0;
+            let panelHtml = '';
+            let panelOptions: vscode.WebviewPanelOptions & vscode.WebviewOptions | undefined;
+            let resolvePanel!: () => void;
+            const panelShown = new Promise<void>(resolve => { resolvePanel = resolve; });
+
+            (vscode.window as any).showInputBox = () => Promise.resolve(secret);
+            (vscode.window as any).showErrorMessage = async (_message: string, ...items: unknown[]) => {
+                stateAtFailurePrompt.push(actionStates.get(id)?.state);
+                return items.find(item => typeof item === 'string' && /민감 디버그|sensitive debug/i.test(item as string));
+            };
+            (vscode.window as any).showWarningMessage = async (_message: string, ...items: unknown[]) => {
+                modalCalls++;
+                // Ensure the second history timestamp cannot collide with the
+                // first run's millisecond timestamp.
+                await new Promise(resolve => setTimeout(resolve, 5));
+                return [...items].reverse().find(item => typeof item === 'string');
+            };
+            (vscode.window as any).showInformationMessage = async (message: string) => {
+                informationMessages.push(message);
+                return undefined;
+            };
+            (vscode.window as any).createWebviewPanel = (_viewType: string, _title: string, _column: unknown, options: any) => ({
+                webview: {
+                    get html() { return panelHtml; },
+                    set html(value: string) {
+                        panelHtml = value;
+                        resolvePanel();
+                    },
+                },
+                __options: (panelOptions = options),
+            } as unknown as vscode.WebviewPanel);
+
+            try {
+                await extension.executeAction(
+                    passwordAction(id, scriptPath),
+                    context,
+                    makeMainViewProvider(),
+                    history
+                ).catch(() => { /* 첫 실패는 재실행 제안의 입력이다. */ });
+
+                await Promise.race([
+                    panelShown,
+                    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('sensitive debug panel timeout')), 5000)),
+                ]);
+            } finally {
+                (vscode.window as any).showInputBox = originalInputBox;
+                (vscode.window as any).showErrorMessage = originalShowError;
+                (vscode.window as any).showWarningMessage = originalShowWarning;
+                (vscode.window as any).showInformationMessage = originalShowInformation;
+                (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
+            }
+
+            assert.deepStrictEqual(stateAtFailurePrompt, ['failure'],
+                '재실행 버튼을 보여 주기 전에 실패 상태로 전환해야 한다');
+            assert.strictEqual(modalCalls, 1, '민감 출력 경고 모달을 거치지 않았다');
+            assert.ok(!informationMessages.some(message => /이미 실행 중|already running/i.test(message)),
+                `재실행이 duplicate guard에 막혔다: ${informationMessages.join(' | ')}`);
+            assert.strictEqual(actionStates.get(id)?.state, 'success');
+            assert.ok(panelHtml.includes(`rerun success ${secret}`), '성공 재실행의 원본 stdout이 없다');
+            assert.strictEqual(panelOptions?.enableScripts, false);
+            assert.strictEqual(panelOptions?.retainContextWhenHidden, false);
+
+            const entries = history.getHistory().filter(entry => entry.actionId === id);
+            assert.strictEqual(entries.length, 2, '최초 실패와 재실행을 각각 이력에 남겨야 한다');
+            assert.ok(entries.some(entry => entry.status === 'failure'));
+            assert.ok(entries.some(entry => entry.status === 'success'));
+            assert.ok(!entries.some(entry => entry.status === 'running'), 'running 이력이 고착됐다');
+            assert.ok(!JSON.stringify(entries).includes(secret), '민감 재실행 원본이 history에 저장됐다');
+        });
+
+        test('병렬 AggregateError 안의 민감 실패도 디버그 재실행을 제안한다', async () => {
+            const id = 'sensitive-aggregate';
+            const secret = 'Aggregate-S3cret';
+            const originalInputBox = vscode.window.showInputBox;
+            const originalShowError = vscode.window.showErrorMessage;
+            const offeredItems: string[] = [];
+            (vscode.window as any).showInputBox = () => Promise.resolve(secret);
+            (vscode.window as any).showErrorMessage = async (_message: string, ...items: unknown[]) => {
+                offeredItems.push(...items.filter((item): item is string => typeof item === 'string'));
+                return undefined;
+            };
+
+            const actionItem: ActionItem = {
+                id,
+                title: 'Sensitive aggregate',
+                action: {
+                    description: 'two password-derived parallel failures',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                        {
+                            id: 'failA',
+                            type: 'command',
+                            command: platformCommand('node'),
+                            args: ['-e', "process.stderr.write(process.argv[1]); process.exit(2)", '${ask.value}'],
+                            passTheResultToNextTask: true,
+                            parallel: true,
+                        },
+                        {
+                            id: 'failB',
+                            type: 'command',
+                            command: platformCommand('node'),
+                            args: ['-e', "process.stderr.write(process.argv[1]); process.exit(3)", '${ask.value}'],
+                            passTheResultToNextTask: true,
+                            parallel: true,
+                        },
+                    ],
+                },
+            };
+            let failure: unknown;
+            try {
+                await extension.executeAction(actionItem, makeContext(), makeMainViewProvider());
+            } catch (error) {
+                failure = error;
+            } finally {
+                (vscode.window as any).showInputBox = originalInputBox;
+                (vscode.window as any).showErrorMessage = originalShowError;
+            }
+
+            assert.ok(failure instanceof AggregateError, '병렬 실패가 AggregateError여야 한다');
+            assert.strictEqual(actionStates.get(id)?.state, 'failure');
+            assert.ok(offeredItems.some(item => /민감 디버그|sensitive debug/i.test(item)),
+                `AggregateError에서 민감 디버그 버튼이 빠졌다: ${offeredItems.join(' | ')}`);
+            assert.ok(!offeredItems.join('\n').includes(secret), '디버그 제안 버튼에 비밀이 샜다');
+        });
+
         test('민감 디버그를 요청하지 않으면 원본 출력을 열지 않는다', async () => {
             const secret = 'Another-S3cret';
             const scriptPath = makeFailingScript(secret, 1);
@@ -571,11 +1004,27 @@ suite('Password taint and redaction', function () {
             const scriptPath = makeFailingScript(secret, 2);
             const originalInputBox = vscode.window.showInputBox;
             const originalOpen = vscode.workspace.openTextDocument;
+            const originalCreateWebviewPanel = vscode.window.createWebviewPanel;
             const opened: string[] = [];
+            let untitledCalls = 0;
             (vscode.window as any).showInputBox = () => Promise.resolve(secret);
-            (vscode.workspace as any).openTextDocument = (options: any) => {
-                opened.push(typeof options?.content === 'string' ? options.content : '');
-                return (originalOpen as any)({ content: '', language: 'plaintext' });
+            (vscode.workspace as any).openTextDocument = (...args: unknown[]) => {
+                untitledCalls++;
+                return (originalOpen as any)(...args);
+            };
+            (vscode.window as any).createWebviewPanel = (_viewType: string, _title: string, _column: unknown, options: any) => {
+                const webview = { html: '' };
+                opened.push(webview.html);
+                return {
+                    webview: {
+                        get html() { return webview.html; },
+                        set html(value: string) {
+                            webview.html = value;
+                            opened[opened.length - 1] = value;
+                        },
+                    },
+                    __options: options,
+                } as unknown as vscode.WebviewPanel;
             };
 
             try {
@@ -589,6 +1038,7 @@ suite('Password taint and redaction', function () {
 
                 assert.strictEqual(opened.length, 1, '승인한 실행에서 원본이 열리지 않았다');
                 assert.ok(opened[0].includes('boom'), '원본 stderr 가 담기지 않았다');
+                assert.strictEqual(untitledCalls, 0, '민감 원본을 dirty untitled 문서로 열었다');
 
                 // 두 번째 실행: 아무 요청도 하지 않았다.
                 await extension.executeAction(
@@ -605,7 +1055,287 @@ suite('Password taint and redaction', function () {
             } finally {
                 (vscode.window as any).showInputBox = originalInputBox;
                 (vscode.workspace as any).openTextDocument = originalOpen;
+                (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
             }
+        });
+
+        test('민감 디버그의 detached one-shot은 출력이 의도적으로 폐기됐다고 안내한다', async () => {
+            const id = 'sensitive-debug-one-shot';
+            const originalCreateWebviewPanel = vscode.window.createWebviewPanel;
+            let panelHtml = '';
+            (vscode.window as any).createWebviewPanel = () => ({
+                webview: {
+                    get html() { return panelHtml; },
+                    set html(value: string) { panelHtml = value; },
+                },
+            } as unknown as vscode.WebviewPanel);
+            extension.__testHook_requestSensitiveDebug(id);
+
+            try {
+                await extension.executeAction(
+                    {
+                        id,
+                        title: 'Sensitive debug one-shot',
+                        action: {
+                            description: 'one-shot output is intentionally unavailable',
+                            tasks: [
+                                { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                                {
+                                    id: 'background',
+                                    type: 'command',
+                                    command: platformCommand('node'),
+                                    args: ['-e', 'process.exit(0)', '${ask.value}'],
+                                    isOneShot: true,
+                                },
+                            ],
+                        },
+                    },
+                    makeContext(),
+                    makeMainViewProvider(),
+                    undefined,
+                    { ask: { value: 'One-Shot-Debug-S3cret' } }
+                );
+            } finally {
+                (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
+            }
+
+            assert.match(panelHtml, /intentionally discarded|의도적으로 폐기/i);
+            assert.ok(!panelHtml.includes('태스크 유형은 stdout') && !panelHtml.includes('task type does not expose'),
+                'detached 정책을 일반적인 미지원 태스크로 오해시키면 안 된다');
+        });
+
+        test('민감 디버그 timeout은 부분 출력과 raw timeout 메시지를 임시 화면에 남긴다', async () => {
+            const id = 'sensitive-debug-timeout';
+            const secret = 'Timeout-S3cret';
+            const originalCreateWebviewPanel = vscode.window.createWebviewPanel;
+            const originalShowError = vscode.window.showErrorMessage;
+            let panelHtml = '';
+            const shownErrors: string[] = [];
+            (vscode.window as any).createWebviewPanel = () => ({
+                webview: {
+                    get html() { return panelHtml; },
+                    set html(value: string) { panelHtml = value; },
+                },
+            } as unknown as vscode.WebviewPanel);
+            (vscode.window as any).showErrorMessage = async (message: string) => {
+                shownErrors.push(message);
+                return undefined;
+            };
+
+            extension.__testHook_requestSensitiveDebug(id);
+            let failure: Error | undefined;
+            try {
+                await extension.executeAction(
+                    {
+                        id,
+                        title: 'Sensitive timeout',
+                        action: {
+                            description: 'emit once, then time out',
+                            tasks: [
+                                { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                                {
+                                    id: 'deploy',
+                                    type: 'command',
+                                    command: platformCommand('node'),
+                                    args: ['-e', 'process.stdout.write(process.argv[1]); setTimeout(() => {}, 5000)', '${ask.value}'],
+                                    passTheResultToNextTask: true,
+                                    timeoutSeconds: 0.08,
+                                },
+                            ],
+                        },
+                    },
+                    makeContext(),
+                    makeMainViewProvider(),
+                    undefined,
+                    { ask: { value: secret } }
+                );
+            } catch (error) {
+                failure = error as Error;
+            } finally {
+                (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
+                (vscode.window as any).showErrorMessage = originalShowError;
+            }
+
+            assert.ok(failure);
+            assert.ok(!failure!.message.includes(secret), '기본 실패 객체에는 비밀이 없어야 한다');
+            assert.ok(panelHtml.includes(secret), '동의한 화면에 timeout 전 부분 출력이 없다');
+            assert.match(panelHtml, /timed out|시간 초과/i);
+            assert.ok(!shownErrors.join('\n').includes(secret), '일반 실패 알림에 원본이 샜다');
+        });
+
+        test('stdout/stderr 없는 built-in 실패도 raw Error.message를 동의 화면에서 진단할 수 있다', async () => {
+            const id = 'sensitive-debug-builtin';
+            const secret = 'Missing-Zip-S3cret';
+            const missingSource = path.join(tempWorkspace, secret, 'does-not-exist');
+            const originalCreateWebviewPanel = vscode.window.createWebviewPanel;
+            const originalShowError = vscode.window.showErrorMessage;
+            let panelHtml = '';
+            const shownErrors: string[] = [];
+            (vscode.window as any).createWebviewPanel = () => ({
+                webview: {
+                    get html() { return panelHtml; },
+                    set html(value: string) { panelHtml = value; },
+                },
+            } as unknown as vscode.WebviewPanel);
+            (vscode.window as any).showErrorMessage = async (message: string) => {
+                shownErrors.push(message);
+                return undefined;
+            };
+
+            extension.__testHook_requestSensitiveDebug(id);
+            let failure: Error | undefined;
+            try {
+                await extension.executeAction(
+                    {
+                        id,
+                        title: 'Sensitive built-in failure',
+                        action: {
+                            description: 'built-in zip has no output stream',
+                            tasks: [
+                                { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                                {
+                                    id: 'zip',
+                                    type: 'zip',
+                                    source: path.join(tempWorkspace, '${ask.value}', 'does-not-exist'),
+                                    archive: path.join(tempWorkspace, 'missing.zip'),
+                                },
+                            ],
+                        },
+                    },
+                    makeContext(),
+                    makeMainViewProvider(),
+                    undefined,
+                    { ask: { value: secret } }
+                );
+            } catch (error) {
+                failure = error as Error;
+            } finally {
+                (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
+                (vscode.window as any).showErrorMessage = originalShowError;
+            }
+
+            assert.ok(failure);
+            assert.ok(!failure!.message.includes(secret));
+            assert.ok(panelHtml.includes(secret),
+                `동의한 raw Error.message에 실패 경로가 없다: ${panelHtml.slice(0, 1000)}`);
+            assert.match(panelHtml, /raw failure message|원본 실패 메시지/i);
+            assert.ok(!shownErrors.join('\n').includes(secret), '일반 실패 알림에 built-in 경로가 샜다');
+            assert.ok(!fs.existsSync(path.join(tempWorkspace, 'missing.zip')));
+            assert.ok(missingSource.includes(secret), '테스트 전제 확인');
+        });
+
+        test('capture-limit 디버그 재실행은 부분 출력과 실패 이유를 반드시 표시한다', async () => {
+            const id = 'sensitive-debug-capture-limit';
+            const secret = 'Capture-Limit-S3cret';
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const previousLimit = config.inspect<number>('pipeline.outputCaptureLimitMb')?.globalValue;
+            const originalCreateWebviewPanel = vscode.window.createWebviewPanel;
+            const originalShowError = vscode.window.showErrorMessage;
+            let panelHtml = '';
+            (vscode.window as any).createWebviewPanel = () => ({
+                webview: {
+                    get html() { return panelHtml; },
+                    set html(value: string) { panelHtml = value; },
+                },
+            } as unknown as vscode.WebviewPanel);
+            (vscode.window as any).showErrorMessage = async () => undefined;
+            await config.update('pipeline.outputCaptureLimitMb', 1, vscode.ConfigurationTarget.Global);
+
+            extension.__testHook_requestSensitiveDebug(id);
+            let failure: Error | undefined;
+            try {
+                await extension.executeAction(
+                    {
+                        id,
+                        title: 'Sensitive capture limit',
+                        action: {
+                            description: 'exceed bounded capture',
+                            tasks: [
+                                { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                                {
+                                    id: 'deploy',
+                                    type: 'command',
+                                    command: platformCommand('node'),
+                                    args: [
+                                        '-e',
+                                        "process.stdout.write(process.argv[1]); for (let i=0;i<24;i++) process.stdout.write('x'.repeat(65536));",
+                                        '${ask.value}',
+                                    ],
+                                    passTheResultToNextTask: true,
+                                },
+                            ],
+                        },
+                    },
+                    makeContext(),
+                    makeMainViewProvider(),
+                    undefined,
+                    { ask: { value: secret } }
+                );
+            } catch (error) {
+                failure = error as Error;
+            } finally {
+                await config.update('pipeline.outputCaptureLimitMb', previousLimit, vscode.ConfigurationTarget.Global);
+                (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
+                (vscode.window as any).showErrorMessage = originalShowError;
+            }
+
+            assert.ok(failure);
+            assert.match(failure!.message, /output limit|출력 한도/i);
+            assert.ok(!failure!.message.includes(secret));
+            assert.ok(panelHtml.includes(secret), '한도 전까지 받은 원본 출력이 없다');
+            assert.match(panelHtml, /capture limit|output limit|출력 한도/i);
+        });
+
+        test('민감 디버그 webview 원문은 실행 capture 설정과 무관하게 총 4MiB로 제한한다', async () => {
+            const id = 'sensitive-debug-display-cap';
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const previousCaptureLimit = config.inspect<number>('pipeline.outputCaptureLimitMb')?.globalValue;
+            const previousTotalLimit = config.inspect<number>('pipeline.totalOutputLimitMb')?.globalValue;
+            const originalCreateWebviewPanel = vscode.window.createWebviewPanel;
+            let panelHtml = '';
+            (vscode.window as any).createWebviewPanel = () => ({
+                webview: {
+                    get html() { return panelHtml; },
+                    set html(value: string) { panelHtml = value; },
+                },
+            } as unknown as vscode.WebviewPanel);
+            await config.update('pipeline.outputCaptureLimitMb', 10, vscode.ConfigurationTarget.Global);
+            await config.update('pipeline.totalOutputLimitMb', 10, vscode.ConfigurationTarget.Global);
+
+            extension.__testHook_requestSensitiveDebug(id);
+            try {
+                await extension.executeAction(
+                    {
+                        id,
+                        title: 'Sensitive display cap',
+                        action: {
+                            description: 'large successful debug output',
+                            tasks: [
+                                { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                                {
+                                    id: 'deploy',
+                                    type: 'command',
+                                    command: platformCommand('node'),
+                                    args: ['-e', "process.stdout.write('x'.repeat(5 * 1024 * 1024));", '${ask.value}'],
+                                    passTheResultToNextTask: true,
+                                },
+                            ],
+                        },
+                    },
+                    makeContext(),
+                    makeMainViewProvider(),
+                    undefined,
+                    { ask: { value: 'Display-Cap-S3cret' } }
+                );
+            } finally {
+                await config.update('pipeline.outputCaptureLimitMb', previousCaptureLimit, vscode.ConfigurationTarget.Global);
+                await config.update('pipeline.totalOutputLimitMb', previousTotalLimit, vscode.ConfigurationTarget.Global);
+                (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
+            }
+
+            assert.match(panelHtml, /omitted|생략/i, '4MiB 이후 생략 안내가 없다');
+            assert.ok(panelHtml.length < 4 * 1024 * 1024 + 32 * 1024,
+                `escape 전 원문을 통째로 복제했다: ${panelHtml.length} characters`);
         });
     });
 });

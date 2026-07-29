@@ -202,25 +202,131 @@ function replacementModeForArchive(targetPath: string): number {
 function isWithinRoot(rootReal: string, realTarget: string): boolean {
     if (realTarget === rootReal) { return true; }
     const relative = path.relative(rootReal, realTarget);
-    return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+    // `..payload` is an ordinary child name, not a parent traversal. Only a
+    // complete `..` path component escapes the root.
+    return relative !== '' &&
+        relative !== '..' &&
+        !relative.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(relative);
 }
 
 interface ZipSourceEntry {
     sourcePath: string;
+    /** Canonical path selected while enumerating the source tree. */
+    readPath: string;
+    /** Directory-source boundary. Directly selected files have no boundary. */
+    rootRealPath?: string;
     entryName: string;
     isDirectory: boolean;
     stat: fs.Stats;
 }
 
+function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
+    return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sourceChangedError(sourcePath: string): Error {
+    return new Error(`Archive source changed while it was being prepared: ${sourcePath}`);
+}
+
+/**
+ * Open the exact regular file selected during enumeration and pin it by fd.
+ *
+ * Checking a path and then passing that path to `createReadStream()` leaves a
+ * TOCTOU window: a file or any ancestor directory can be replaced by a link to
+ * an outside secret between the two operations. Node does not expose
+ * `openat2(RESOLVE_BENEATH)`, so fail closed using all portable primitives we
+ * have:
+ *
+ * 1. open asynchronously with `O_NOFOLLOW` (final-component link defense),
+ * 2. compare the opened fd's device/inode with the enumerated file,
+ * 3. while that fd remains pinned, re-resolve the path and verify that it
+ *    still names the fd and remains under the directory-source root, and
+ * 4. stream from the already-open fd, never by reopening the path.
+ *
+ * An external process can always race portable path syscalls at the kernel
+ * level, but identity revalidation detects ancestor swaps and the async
+ * metadata calls do not freeze the extension-host event loop.
+ */
+async function openVerifiedSourceStream(entry: ZipSourceEntry): Promise<fs.ReadStream> {
+    const flags = fs.constants.O_RDONLY |
+        (fs.constants.O_NOFOLLOW ?? 0) |
+        (fs.constants.O_NONBLOCK ?? 0);
+    let handle: fs.promises.FileHandle | undefined;
+
+    try {
+        // FileHandle keeps the same descriptor pinned throughout verification
+        // without blocking the extension-host event loop on a slow/network FS.
+        handle = await fs.promises.open(entry.readPath, flags);
+        const openedStat = await handle.stat();
+        if (!openedStat.isFile() || !sameFileIdentity(openedStat, entry.stat)) {
+            throw sourceChangedError(entry.sourcePath);
+        }
+
+        let currentRealPath: string;
+        let currentPathStat: fs.Stats;
+        try {
+            currentRealPath = await fs.promises.realpath(entry.readPath);
+            currentPathStat = await fs.promises.stat(currentRealPath);
+        } catch {
+            throw sourceChangedError(entry.sourcePath);
+        }
+        if ((entry.rootRealPath && !isWithinRoot(entry.rootRealPath, currentRealPath)) ||
+            !sameFileIdentity(openedStat, currentPathStat)) {
+            throw sourceChangedError(entry.sourcePath);
+        }
+
+        // FileHandle.createReadStream uses this already-open descriptor rather
+        // than reopening the path. Ownership passes to the stream/pipeline.
+        const stream = handle.createReadStream({ autoClose: true });
+        handle = undefined;
+        return stream;
+    } finally {
+        if (handle !== undefined) {
+            try { await handle.close(); } catch { /* preserve the verification error */ }
+        }
+    }
+}
+
 function normalizeArchiveEntryName(name: string, isDirectory: boolean): string {
-    const normalized = name.replace(/\\/g, '/').replace(/^\/+/, '');
-    return isDirectory && !normalized.endsWith('/') ? `${normalized}/` : normalized;
+    const reject = (reason: string): never => {
+        throw new Error(`Unsafe archive entry name (${reason}): ${JSON.stringify(name)}`);
+    };
+
+    if (name.includes('\0')) { reject('NUL byte'); }
+    // ZIP uses `/` on every platform. On POSIX, `\\` is a legal literal file
+    // name; converting it to `/` would turn `..\\..\\secret` into traversal.
+    // Generated Windows names never need a backslash either, because we only
+    // receive basenames/readdir names and compose them with `/` ourselves.
+    if (name.includes('\\')) { reject('ambiguous backslash'); }
+    if (path.posix.isAbsolute(name) || path.win32.isAbsolute(name)) {
+        reject('absolute path');
+    }
+
+    const components = name.split('/');
+    if (components.length === 0 || components.some(component => component === '')) {
+        reject('empty path component');
+    }
+    if (components.some(component => component === '.' || component === '..')) {
+        reject('dot path component');
+    }
+    return isDirectory ? `${name}/` : name;
+}
+
+const ZIP_CREATE_MAX_ENTRIES = 0xffff;
+
+/** Apply the classic-ZIP entry limit while walking, before aliases can amplify memory use. */
+function appendZipSourceEntry(entries: ZipSourceEntry[], entry: ZipSourceEntry): void {
+    if (entries.length >= ZIP_CREATE_MAX_ENTRIES) {
+        throw new Error('Archive contains more than 65535 entries; ZIP64 creation is not supported.');
+    }
+    entries.push(entry);
 }
 
 async function collectDirectoryEntries(
     sourceDir: string,
     archiveDir: string,
-    visitedRealDirectories: Set<string>,
+    activeRealDirectories: Set<string>,
     entries: ZipSourceEntry[],
     signal: AbortSignal | undefined,
     rootRealPath: string,
@@ -243,30 +349,50 @@ async function collectDirectoryEntries(
         // 그대로 따라가고(프로젝트 안에서 서로를 가리키는 링크는 흔하고
         // 정상이다), 밖을 가리키면 건너뛰고 호출부에 알린다.
         const linkStat = await fs.promises.lstat(sourcePath);
-        if (linkStat.isSymbolicLink()) {
-            let resolvedTarget: string;
-            try {
-                resolvedTarget = await fs.promises.realpath(sourcePath);
-            } catch {
-                continue;   // 끊어진 링크 — 담을 것이 없다
-            }
-            if (!isWithinRoot(rootRealPath, resolvedTarget)) {
-                options.onSkippedSymlink?.({ sourcePath, resolvedTarget });
-                continue;
-            }
+        let resolvedTarget: string;
+        try {
+            // Resolve every entry, not only a final-component symlink. An
+            // ancestor may itself be an allowed in-tree symlink, or may have
+            // been replaced concurrently.
+            resolvedTarget = await fs.promises.realpath(sourcePath);
+        } catch (error) {
+            if (linkStat.isSymbolicLink()) { continue; } // broken link
+            throw error;
+        }
+        if (!isWithinRoot(rootRealPath, resolvedTarget)) {
+            options.onSkippedSymlink?.({ sourcePath, resolvedTarget });
+            continue;
         }
 
-        const stat = await fs.promises.stat(sourcePath);
+        const stat = await fs.promises.stat(resolvedTarget);
         const entryName = normalizeArchiveEntryName(`${archiveDir}/${name}`, stat.isDirectory());
         if (stat.isDirectory()) {
-            entries.push({ sourcePath, entryName, isDirectory: true, stat });
-            const realPath = await fs.promises.realpath(sourcePath);
-            if (!visitedRealDirectories.has(realPath)) {
-                visitedRealDirectories.add(realPath);
-                await collectDirectoryEntries(sourcePath, entryName.replace(/\/$/, ''), visitedRealDirectories, entries, signal, rootRealPath, options);
+            appendZipSourceEntry(entries, {
+                sourcePath, readPath: resolvedTarget, rootRealPath, entryName, isDirectory: true, stat,
+            });
+            // Only ancestors in the current recursion branch form a cycle.
+            // A global visited set made a second legitimate alias to the same
+            // directory appear as an empty folder, depending on sort order.
+            if (!activeRealDirectories.has(resolvedTarget)) {
+                activeRealDirectories.add(resolvedTarget);
+                try {
+                    await collectDirectoryEntries(
+                        sourcePath,
+                        entryName.replace(/\/$/, ''),
+                        activeRealDirectories,
+                        entries,
+                        signal,
+                        rootRealPath,
+                        options
+                    );
+                } finally {
+                    activeRealDirectories.delete(resolvedTarget);
+                }
             }
         } else if (stat.isFile()) {
-            entries.push({ sourcePath, entryName, isDirectory: false, stat });
+            appendZipSourceEntry(entries, {
+                sourcePath, readPath: resolvedTarget, rootRealPath, entryName, isDirectory: false, stat,
+            });
         }
         // adm-zip도 폴더 안의 socket/FIFO/device는 엔트리로 만들지 않는다.
     }
@@ -297,8 +423,10 @@ async function collectZipSourceEntries(sources: string[], signal: AbortSignal | 
                 options
             );
         } else if (stat.isFile()) {
-            entries.push({
+            const realPath = await fs.promises.realpath(source);
+            appendZipSourceEntry(entries, {
                 sourcePath: source,
+                readPath: realPath,
                 entryName: normalizeArchiveEntryName(path.basename(source), false),
                 isDirectory: false,
                 stat,
@@ -401,7 +529,7 @@ export async function createZipArchive(archivePath: string, sources: string[], o
     }
     throwIfAborted(options.signal);
     const sourceEntries = await collectZipSourceEntries(sources, options.signal, options);
-    if (sourceEntries.length > 0xffff) {
+    if (sourceEntries.length > ZIP_CREATE_MAX_ENTRIES) {
         throw new Error('Archive contains more than 65535 entries; ZIP64 creation is not supported.');
     }
     for (const entry of sourceEntries) {
@@ -454,7 +582,7 @@ export async function createZipArchive(archivePath: string, sources: string[], o
                 const checksum = new Crc32Transform();
                 const sink = new ArchiveFdSink(temp.fd);
                 await pipeline(
-                    fs.createReadStream(sourceEntry.sourcePath),
+                    await openVerifiedSourceStream(sourceEntry),
                     checksum,
                     createDeflateRaw(),
                     sink,
@@ -767,7 +895,7 @@ function resolveEntryTarget(resolvedDest: string, entryName: string): string | n
         // Entry resolves exactly to destination — only allowed for directories.
         throw new Error(`Invalid archive entry resolves to destination root: ${entryName}`);
     }
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    if (!isWithinRoot(resolvedDest, targetPath)) {
         throw new Error(`Blocked path traversal in archive: ${entryName}`);
     }
     return isDir ? null : targetPath;

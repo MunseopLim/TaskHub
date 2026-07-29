@@ -193,6 +193,7 @@ suite('Memory Map Viewer Test Suite', () => {
 suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
     let filePath: string;
     let handlerSource: string;
+    let webviewHtml: string;
 
     suiteSetup(() => {
         panelRegistry.clear();
@@ -200,16 +201,16 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
         fs.writeFileSync(filePath, buildMinimalElf32());
         const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
         assert.ok(openMemoryMapPanel(ctx, filePath, { regions: [] }));
-        const html = panelRegistry.getHtml(filePath) ?? '';
+        webviewHtml = panelRegistry.getHtml(filePath) ?? '';
 
         // 주입된 핸들러 본문을 그대로 꺼내 실행한다.
         const marker = "document.getElementById('btnSaveHtml').addEventListener('click', function() {";
-        const start = html.indexOf(marker);
+        const start = webviewHtml.indexOf(marker);
         assert.ok(start >= 0, 'btnSaveHtml 핸들러를 찾지 못했다 — 마커가 바뀌었는지 확인이 필요하다');
         const bodyStart = start + marker.length;
-        const end = html.indexOf('\n    });', bodyStart);
+        const end = webviewHtml.indexOf('\n    });', bodyStart);
         assert.ok(end > bodyStart, '핸들러 본문의 끝을 찾지 못했다');
-        handlerSource = html.slice(bodyStart, end);
+        handlerSource = webviewHtml.slice(bodyStart, end);
         assert.ok(
             handlerSource.includes('SAVE_HTML_LIMIT'),
             '핸들러가 상한을 참조하지 않는다 — 직렬화 전 검사가 없다'
@@ -221,27 +222,64 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
         try { fs.unlinkSync(filePath); } catch { /* best effort */ }
     });
 
-    /** 행 크기를 지정해 가짜 DOM 을 만들고 핸들러를 돌린다. */
-    function runHandler(rowCount: number, rowBytes: number): { posted: any[]; serialized: boolean } {
+    interface FakeNode {
+        nodeType: number;
+        localName?: string;
+        nodeValue?: string;
+        length?: number;
+        substringData?: (offset: number, count: number) => string;
+        parentNode?: FakeNode;
+        parentElement?: FakeNode;
+        attributes?: { name: string; value: string }[];
+        childNodes?: FakeNode[];
+        outerHTML?: string;
+    }
+
+    function textNode(value: string): FakeNode {
+        return {
+            nodeType: 3,
+            length: value.length,
+            substringData: (offset, count) => value.slice(offset, offset + count),
+        };
+    }
+
+    function element(name: string, children: FakeNode[] = [], attributes: { name: string; value: string }[] = []): FakeNode {
+        const node: FakeNode = { nodeType: 1, localName: name, attributes, childNodes: children };
+        for (const child of children) {
+            child.parentNode = node;
+            child.parentElement = node;
+        }
+        return node;
+    }
+
+    /** 행과 inline script 크기를 지정해 가짜 DOM 을 만들고 핸들러를 돌린다. */
+    function runHandler(
+        rowCount: number,
+        rowBytes: number,
+        options: { scriptNode?: FakeNode; limit?: number; rowText?: string } = {}
+    ): { posted: any[]; serialized: boolean } {
         const posted: any[] = [];
         let serialized = false;
-        const rowHtml = 'x'.repeat(rowBytes);
-        const rows = Array.from({ length: rowCount }, () => ({ outerHTML: rowHtml }));
+        const rowHtml = options.rowText ?? 'x'.repeat(rowBytes);
+        const rows = Array.from({ length: rowCount }, () => element('tr', [textNode(rowHtml)]));
+        const head = element('head');
+        const script = element('script', [options.scriptNode ?? textNode('')]);
+        const body = element('body', [...rows, script]);
+        const root = element('html', [head, body]);
+        Object.defineProperty(root, 'outerHTML', {
+            get() {
+                serialized = true;
+                return 'y'.repeat(Math.min(rowCount * rowBytes, 1024));
+            },
+        });
 
         const fakeDocument = {
-            head: { outerHTML: '<head></head>' },
-            getElementsByTagName: (tag: string) => (tag === 'tr' ? rows : []),
-            get documentElement() {
-                // 이 getter 가 호출되면 전체 직렬화가 일어났다는 뜻이다.
-                return {
-                    get outerHTML() { serialized = true; return 'y'.repeat(rowCount * rowBytes); },
-                };
-            },
+            documentElement: root,
         };
         const fakeVscode = { postMessage: (m: any) => { posted.push(m); } };
 
         const fn = new Function('document', 'vscode', 'SAVE_HTML_LIMIT', handlerSource);
-        fn(fakeDocument, fakeVscode, MEMORY_MAP_MAX_SAVE_HTML_CHARS);
+        fn(fakeDocument, fakeVscode, options.limit ?? MEMORY_MAP_MAX_SAVE_HTML_CHARS);
         return { posted, serialized };
     }
 
@@ -250,6 +288,23 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
         assert.strictEqual(posted.length, 1);
         assert.strictEqual(posted[0].command, 'saveHtml');
         assert.ok(serialized, '상한 안에서는 직렬화가 일어나야 정상 동작이다');
+    });
+
+    test('리포트 본문을 웹뷰에 중복 삽입하거나 copy IPC payload로 보내지 않는다', () => {
+        assert.ok(
+            webviewHtml.includes("vscode.postMessage({ command: 'copyReport', kind: 'summary' });"),
+            '요약 복사 버튼은 본문 대신 종류만 보내야 한다'
+        );
+        assert.ok(
+            webviewHtml.includes("vscode.postMessage({ command: 'copyReport', kind: 'full' });"),
+            '전체 덤프 버튼은 본문 대신 종류만 보내야 한다'
+        );
+        assert.ok(
+            !/vscode\.postMessage\(\{\s*command:\s*['"]copyReport['"][^}]*\btext\s*:/.test(webviewHtml),
+            '리포트 본문이 postMessage payload에 남아 있다'
+        );
+        assert.ok(!webviewHtml.includes('const report ='), '전체 덤프 문자열이 inline script에 남아 있다');
+        assert.ok(!webviewHtml.includes('const summary ='), '요약 리포트 문자열이 inline script에 남아 있다');
     });
 
     test('상한을 넘으면 직렬화하지 않고 거부한다', () => {
@@ -272,19 +327,68 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
         );
     });
 
+    test('행이 적어도 대형 RD/report inline script를 직렬화 전에 거부한다', () => {
+        // 기존 head + <tr>.outerHTML 휴리스틱은 작은 행 두 개만 보고 통과한 뒤
+        // 대형 RD/report/summary/mapSegHtml 이 든 script까지 outerHTML로 만들었다.
+        // 작은 테스트 상한을 주어 같은 결함을 적은 메모리로 재현한다.
+        let materialized = false;
+        const scriptNode: FakeNode = { nodeType: 3, length: 4096 };
+        Object.defineProperty(scriptNode, 'nodeValue', {
+            get() {
+                materialized = true;
+                throw new Error('대형 script nodeValue를 materialize하면 안 된다');
+            },
+        });
+        scriptNode.substringData = () => {
+            materialized = true;
+            throw new Error('raw script는 substringData도 읽으면 안 된다');
+        };
+        const { posted, serialized } = runHandler(2, 16, { scriptNode, limit: 1024 });
+
+        assert.deepStrictEqual(posted, [{ command: 'saveHtmlTooLarge' }]);
+        assert.strictEqual(
+            serialized,
+            false,
+            '대형 inline script를 놓쳐 documentElement.outerHTML을 직렬화했다'
+        );
+        assert.strictEqual(materialized, false, 'script text를 length 검사 전에 materialize했다');
+    });
+
+    test('일반 텍스트의 NBSP entity 확장까지 상한에 반영한다', () => {
+        // 원문은 100자뿐이지만 HTML fragment serialization에서는 각 문자가
+        // &nbsp; 6자로 늘어난다. 이전 estimator는 원문 길이만 더해 300자
+        // 상한을 통과한 뒤 전체 outerHTML을 만들었다.
+        const { posted, serialized } = runHandler(1, 0, {
+            rowText: '\u00a0'.repeat(100),
+            limit: 300,
+        });
+
+        assert.deepStrictEqual(posted, [{ command: 'saveHtmlTooLarge' }]);
+        assert.strictEqual(serialized, false, 'NBSP 확장을 과소계산해 전체 HTML을 직렬화했다');
+    });
+
     test('상한을 넘으면 끝까지 세지 않고 즉시 멈춘다', () => {
         // 초과를 확인한 뒤에도 남은 행을 계속 훑으면, 큰 화면에서 거부 자체가
         // 오래 걸린다. 접근된 행 수로 조기 종료를 확인한다.
         let touched = 0;
         const posted: any[] = [];
-        const rows = Array.from({ length: 5000 }, () => ({
-            get outerHTML() { touched++; return 'x'.repeat(128 * 1024); },
-        }));
-        const fakeDocument = {
-            head: { outerHTML: '' },
-            getElementsByTagName: (tag: string) => (tag === 'tr' ? rows : []),
-            get documentElement() { return { get outerHTML() { return ''; } }; },
-        };
+        const rows = Array.from({ length: 5000 }, () => {
+            const text: FakeNode = {
+                nodeType: 3,
+                length: 128 * 1024,
+                substringData: (_offset, count) => {
+                    touched++;
+                    return 'x'.repeat(count);
+                },
+            };
+            Object.defineProperty(text, 'nodeValue', {
+                get() { throw new Error('일반 text도 전체 nodeValue를 읽으면 안 된다'); },
+            });
+            return element('tr', [text]);
+        });
+        const body = element('body', rows);
+        const root = element('html', [element('head'), body]);
+        const fakeDocument = { documentElement: root };
         const fn = new Function('document', 'vscode', 'SAVE_HTML_LIMIT', handlerSource);
         fn(fakeDocument, { postMessage: (m: any) => posted.push(m) }, MEMORY_MAP_MAX_SAVE_HTML_CHARS);
 
