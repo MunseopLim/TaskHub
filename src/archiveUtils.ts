@@ -16,6 +16,14 @@ import * as yauzl from 'yauzl';
  */
 export interface ArchiveOptions {
     signal?: AbortSignal;
+    /**
+     * 소스 루트 **밖**을 가리켜 아카이브에서 제외한 심볼릭 링크를 알린다.
+     *
+     * 이 모듈은 `vscode` 를 모르므로 사용자에게 직접 알릴 수 없다. 호출부가
+     * 이 콜백으로 받아 경고를 띄운다 — 조용히 빼면 "왜 이 파일이 zip 에
+     * 없지?" 가 되고, 조용히 담으면 비밀이 새어 나간다.
+     */
+    onSkippedSymlink?: (info: { sourcePath: string; resolvedTarget: string }) => void;
 }
 
 /** 취소되었으면 던진다. `pipeline` 의 중단과 같은 `AbortError` 로 맞춘다. */
@@ -186,6 +194,17 @@ function replacementModeForArchive(targetPath: string): number {
     return defaultCreatedFileMode();
 }
 
+/**
+ * `realTarget` 이 `rootReal` 안에 있는가 (같은 경로 포함).
+ *
+ * 문자열 접두사만 보면 `/a/bc` 가 `/a/b` 안이라고 오판하므로 구분자까지 본다.
+ */
+function isWithinRoot(rootReal: string, realTarget: string): boolean {
+    if (realTarget === rootReal) { return true; }
+    const relative = path.relative(rootReal, realTarget);
+    return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
 interface ZipSourceEntry {
     sourcePath: string;
     entryName: string;
@@ -203,7 +222,9 @@ async function collectDirectoryEntries(
     archiveDir: string,
     visitedRealDirectories: Set<string>,
     entries: ZipSourceEntry[],
-    signal: AbortSignal | undefined
+    signal: AbortSignal | undefined,
+    rootRealPath: string,
+    options: ArchiveOptions
 ): Promise<void> {
     throwIfAborted(signal);
     const names = await fs.promises.readdir(sourceDir);
@@ -212,6 +233,29 @@ async function collectDirectoryEntries(
     for (const name of names) {
         throwIfAborted(signal);
         const sourcePath = path.join(sourceDir, name);
+
+        // **`lstat` 을 먼저 본다.** `stat` 은 링크를 따라가므로, 소스 폴더 안의
+        // `link -> ~/.ssh` 같은 링크가 있으면 바깥의 비밀이 조용히 아카이브에
+        // 담긴다. 실측: `proj/linkdir -> /secret` 상태에서 압축하면
+        // `proj/linkdir/id_rsa` 로 개인 키 내용이 그대로 들어갔다.
+        //
+        // 규칙은 추출 측과 대칭이다 — **소스 루트 안**으로 해석되는 링크는
+        // 그대로 따라가고(프로젝트 안에서 서로를 가리키는 링크는 흔하고
+        // 정상이다), 밖을 가리키면 건너뛰고 호출부에 알린다.
+        const linkStat = await fs.promises.lstat(sourcePath);
+        if (linkStat.isSymbolicLink()) {
+            let resolvedTarget: string;
+            try {
+                resolvedTarget = await fs.promises.realpath(sourcePath);
+            } catch {
+                continue;   // 끊어진 링크 — 담을 것이 없다
+            }
+            if (!isWithinRoot(rootRealPath, resolvedTarget)) {
+                options.onSkippedSymlink?.({ sourcePath, resolvedTarget });
+                continue;
+            }
+        }
+
         const stat = await fs.promises.stat(sourcePath);
         const entryName = normalizeArchiveEntryName(`${archiveDir}/${name}`, stat.isDirectory());
         if (stat.isDirectory()) {
@@ -219,7 +263,7 @@ async function collectDirectoryEntries(
             const realPath = await fs.promises.realpath(sourcePath);
             if (!visitedRealDirectories.has(realPath)) {
                 visitedRealDirectories.add(realPath);
-                await collectDirectoryEntries(sourcePath, entryName.replace(/\/$/, ''), visitedRealDirectories, entries, signal);
+                await collectDirectoryEntries(sourcePath, entryName.replace(/\/$/, ''), visitedRealDirectories, entries, signal, rootRealPath, options);
             }
         } else if (stat.isFile()) {
             entries.push({ sourcePath, entryName, isDirectory: false, stat });
@@ -228,7 +272,7 @@ async function collectDirectoryEntries(
     }
 }
 
-async function collectZipSourceEntries(sources: string[], signal: AbortSignal | undefined): Promise<ZipSourceEntry[]> {
+async function collectZipSourceEntries(sources: string[], signal: AbortSignal | undefined, options: ArchiveOptions): Promise<ZipSourceEntry[]> {
     const entries: ZipSourceEntry[] = [];
     for (const source of sources) {
         throwIfAborted(signal);
@@ -240,13 +284,17 @@ async function collectZipSourceEntries(sources: string[], signal: AbortSignal | 
         }
 
         if (stat.isDirectory()) {
+            // 사용자가 **직접 지정한** source 는 링크여도 따라간다 — 그건
+            // 스스로의 선택이고, 그 실제 경로가 이 트리의 루트가 된다.
             const realPath = await fs.promises.realpath(source);
             await collectDirectoryEntries(
                 source,
                 normalizeArchiveEntryName(path.basename(source), false),
                 new Set([realPath]),
                 entries,
-                signal
+                signal,
+                realPath,
+                options
             );
         } else if (stat.isFile()) {
             entries.push({
@@ -352,7 +400,7 @@ export async function createZipArchive(archivePath: string, sources: string[], o
         throw new Error('createZipArchive requires at least one source path.');
     }
     throwIfAborted(options.signal);
-    const sourceEntries = await collectZipSourceEntries(sources, options.signal);
+    const sourceEntries = await collectZipSourceEntries(sources, options.signal, options);
     if (sourceEntries.length > 0xffff) {
         throw new Error('Archive contains more than 65535 entries; ZIP64 creation is not supported.');
     }

@@ -5758,7 +5758,27 @@ async function handleZip(
         }
         const abort = abortSignalForAction(run, task.id);
         try {
-            await createZipArchive(archive, sourcePaths, { signal: abort.signal });
+            // 소스 밖을 가리키는 심볼릭 링크는 아카이브에 담지 않는다. 조용히
+            // 빼면 "왜 이 파일이 zip 에 없지?" 가 되므로 반드시 알린다.
+            const skippedLinks: string[] = [];
+            await createZipArchive(archive, sourcePaths, {
+                signal: abort.signal,
+                onSkippedSymlink: ({ sourcePath, resolvedTarget }) => {
+                    skippedLinks.push(sourcePath);
+                    outputChannel.appendLine(
+                        `[WARN] Skipped symlink '${sourcePath}' -> '${resolvedTarget}': it resolves outside the source folder and was not added to the archive.`
+                    );
+                },
+            });
+            if (skippedLinks.length > 0) {
+                const shown = skippedLinks.slice(0, 3).map(p => path.basename(p)).join(', ');
+                const more = skippedLinks.length > 3 ? ` 외 ${skippedLinks.length - 3}개` : '';
+                const moreEn = skippedLinks.length > 3 ? ` and ${skippedLinks.length - 3} more` : '';
+                vscode.window.showWarningMessage(t(
+                    `소스 폴더 밖을 가리키는 심볼릭 링크 ${skippedLinks.length}개를 아카이브에서 제외했습니다 (${shown}${more}). 자세한 내용은 TaskHub 출력 채널을 보세요.`,
+                    `Excluded ${skippedLinks.length} symlink(s) pointing outside the source folder (${shown}${moreEn}). See the TaskHub output channel for details.`
+                ));
+            }
             return { archivePath: archive };
         } catch (error: any) {
             if (isArchiveAbortError(error)) { throw new ActionStoppedError(); }

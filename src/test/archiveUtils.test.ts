@@ -220,6 +220,73 @@ suite('archiveUtils', () => {
         }
     });
 
+    /**
+     * 생성 측 심볼릭 링크 (0.6.46).
+     *
+     * 추출 측은 대상 폴더 밖으로 **쓰는** 것을 막는다. 생성 측은 거울상이다 —
+     * 소스 폴더 안의 링크를 따라가면 바깥 파일이 아카이브에 **담긴다**.
+     * 실측: `proj/linkdir -> /secret` 상태에서 압축하면 `proj/linkdir/id_rsa`
+     * 로 개인 키 내용이 그대로 들어갔다.
+     *
+     * 규칙은 대칭이다 — 소스 루트 **안**으로 해석되는 링크는 따라가고(프로젝트
+     * 안에서 서로를 가리키는 링크는 흔하고 정상이다), 밖을 가리키면 건너뛴다.
+     */
+    suite('생성 측 심볼릭 링크', () => {
+        function trySymlink(target: string, linkPath: string, type: fs.symlink.Type): boolean {
+            try {
+                fs.symlinkSync(target, linkPath, type);
+                return fs.lstatSync(linkPath).isSymbolicLink();
+            } catch {
+                return false;
+            }
+        }
+
+        test('소스 밖을 가리키는 링크는 담지 않고 호출부에 알린다', async function () {
+            const outside = path.join(tempDir, 'outside');
+            fs.mkdirSync(outside, { recursive: true });
+            fs.writeFileSync(path.join(outside, 'id_rsa'), 'PRIVATE KEY MATERIAL');
+            const secretFile = path.join(tempDir, 'passwd.txt');
+            fs.writeFileSync(secretFile, 'TOP SECRET');
+
+            const src = path.join(tempDir, 'proj');
+            fs.mkdirSync(src, { recursive: true });
+            fs.writeFileSync(path.join(src, 'ok.txt'), 'fine');
+            if (!trySymlink(outside, path.join(src, 'linkdir'), 'dir')) { this.skip(); }
+            if (!trySymlink(secretFile, path.join(src, 'linkfile.txt'), 'file')) { this.skip(); }
+
+            const archivePath = path.join(tempDir, 'created.zip');
+            const skipped: string[] = [];
+            await createZipArchive(archivePath, [src], {
+                onSkippedSymlink: ({ sourcePath }) => { skipped.push(path.basename(sourcePath)); },
+            });
+
+            const names = new AdmZip(archivePath).getEntries().map(e => e.entryName).sort();
+            assert.deepStrictEqual(names, ['proj/ok.txt'], `링크를 따라 바깥 내용이 담겼다: ${names.join(', ')}`);
+            assert.deepStrictEqual(skipped.sort(), ['linkdir', 'linkfile.txt'], '건너뛴 링크를 알리지 않았다');
+        });
+
+        test('소스 안을 가리키는 링크는 그대로 담는다', async function () {
+            // 프로젝트 안에서 서로를 가리키는 링크까지 막으면 정상 사용이 깨진다.
+            const src = path.join(tempDir, 'proj-inner');
+            fs.mkdirSync(path.join(src, 'real'), { recursive: true });
+            fs.writeFileSync(path.join(src, 'real', 'data.txt'), 'inside');
+            if (!trySymlink(path.join(src, 'real'), path.join(src, 'alias'), 'dir')) { this.skip(); }
+
+            const archivePath = path.join(tempDir, 'inner.zip');
+            const skipped: string[] = [];
+            await createZipArchive(archivePath, [src], {
+                onSkippedSymlink: ({ sourcePath }) => { skipped.push(sourcePath); },
+            });
+
+            const names = new AdmZip(archivePath).getEntries().map(e => e.entryName).sort();
+            assert.deepStrictEqual(skipped, [], '소스 안을 가리키는 링크까지 건너뛰었다');
+            assert.ok(
+                names.includes('proj-inner/alias/data.txt'),
+                `소스 안 링크가 담기지 않았다: ${names.join(', ')}`
+            );
+        });
+    });
+
     suite('extractZipArchive', () => {
         test('존재하지 않는 아카이브면 거부', async () => {
             await assert.rejects(
