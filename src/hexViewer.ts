@@ -12,6 +12,32 @@ import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 
 let currentPanel: vscode.WebviewPanel | undefined;
+
+/**
+ * 패널 레지스트리 — **테스트용으로 노출한다** (Memory Map 의 `panelRegistry`
+ * 와 같은 형태).
+ *
+ * 이게 없어서 Hex Viewer 테스트는 순수 함수(`buildHexViewerHtml`)만 부를 수
+ * 있었고, 실제 진입점인 `openHexViewerFile` 은 **어느 테스트도 실행하지
+ * 않았다**. 패널 생성과 데이터 전송이 그 안에 있어서, 그 구간의 결함은
+ * 재현할 하네스 자체가 없었다.
+ */
+export const hexPanelRegistry = {
+    has(): boolean { return currentPanel !== undefined; },
+    getTitle(): string | undefined { return currentPanel?.title; },
+    getHtml(): string | undefined { return currentPanel?.webview.html; },
+    /** 호스트가 웹뷰로 보낸 메시지들 (테스트가 주입한 가짜 패널에서만 채워진다). */
+    getPostedMessages(): unknown[] { return postedMessages.slice(); },
+    clear(): void {
+        currentPanel = undefined;
+        currentMessageDisposable?.dispose();
+        currentMessageDisposable = undefined;
+        postedMessages.length = 0;
+    },
+};
+
+/** `postHexViewerData` 가 보낸 메시지 기록. 테스트가 순서를 검사한다. */
+const postedMessages: unknown[] = [];
 // standalone 패널(단일 인스턴스) 전용 메시지 disposable. Custom Editor
 // (HexEditorProvider)는 인스턴스가 여러 개일 수 있으므로 resolveCustomEditor
 // 지역에서 자체 관리한다 — 전역 하나를 공유하면 패널/에디터를 오갈 때
@@ -293,7 +319,9 @@ export function buildHexViewerPayload(result: HexParseResult): HexViewerPayload 
  */
 export function postHexViewerData(webview: vscode.Webview, result: HexParseResult): void {
     const payload = buildHexViewerPayload(result);
-    void webview.postMessage({ command: 'hexData', data: payload.data, gap: payload.gap });
+    const message = { command: 'hexData', data: payload.data, gap: payload.gap };
+    postedMessages.push(message);
+    void webview.postMessage(message);
 }
 
 export function buildHexViewerHtml(fileName: string, result: HexParseResult, webview?: vscode.Webview): string {
@@ -323,8 +351,20 @@ export function parseFile(filePath: string): HexParseResult {
  * webview/panel 단위로 수명을 관리한다 (standalone 패널은 모듈 전역 1개,
  * custom editor는 resolveCustomEditor 지역 + onDidDispose).
  */
-function setupWebviewMessageHandler(webview: vscode.Webview): vscode.Disposable {
+/** `ready` 가 오지 않을 때 그냥 보내 버리는 시한. */
+const HEX_READY_FALLBACK_MS = 3000;
+
+/** 이번 패널에서 `ready` 를 받았는가 — 폴백 중복 전송을 막는다. */
+let readyReceived = false;
+
+function setupWebviewMessageHandler(webview: vscode.Webview, onReady?: () => void): vscode.Disposable {
+    readyReceived = false;
     return webview.onDidReceiveMessage(message => {
+        if (message.command === 'ready') {
+            readyReceived = true;
+            onReady?.();
+            return;
+        }
         if (message.command === 'copySelection') {
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('클립보드에 복사되었습니다.', 'Copied to clipboard.'));
@@ -368,10 +408,24 @@ function openPanel(context: vscode.ExtensionContext, fileName: string, result: H
 
     currentPanel.title = `Hex: ${fileName}`;
     try {
+        // **핸들러를 HTML 보다 먼저 건다.** 웹뷰가 리스너를 등록한 뒤 보내는
+        // `ready` 를 받아야 데이터를 보내는데, 그 신호가 핸들러보다 먼저
+        // 도착하면 놓친다.
+        currentMessageDisposable?.dispose();
+        currentMessageDisposable = setupWebviewMessageHandler(currentPanel.webview, () => {
+            if (currentPanel) { postHexViewerData(currentPanel.webview, result); }
+        });
         currentPanel.webview.html = buildHexViewerHtml(fileName, result, currentPanel.webview);
-        // HTML 직후에 보낸다. 웹뷰 스크립트가 리스너를 먼저 등록하므로
-        // 메시지가 먼저 도착해도 유실되지 않는다 (VS Code 가 큐잉한다).
-        postHexViewerData(currentPanel.webview, result);
+
+        // 폴백: `ready` 가 끝내 오지 않아도 데이터는 보낸다. 핸드셰이크가
+        // 어떤 이유로든 실패했을 때 **아무것도 안 보내는** 것이 가장 나쁘다.
+        // 웹뷰는 같은 데이터를 두 번 받아도 다시 렌더할 뿐이다.
+        const panelAtSchedule = currentPanel;
+        setTimeout(() => {
+            if (currentPanel === panelAtSchedule && !readyReceived) {
+                postHexViewerData(panelAtSchedule.webview, result);
+            }
+        }, HEX_READY_FALLBACK_MS);
     } catch (e: any) {
         const msg = t(
             `Hex Viewer 렌더링 실패 (${fileName}): ${e.message}`,
@@ -381,9 +435,6 @@ function openPanel(context: vscode.ExtensionContext, fileName: string, result: H
         vscode.window.showErrorMessage(msg);
         return false;
     }
-    // 같은 패널에 새 파일을 열 때 이전 구독이 남지 않도록 교체
-    currentMessageDisposable?.dispose();
-    currentMessageDisposable = setupWebviewMessageHandler(currentPanel.webview);
     return true;
 }
 
@@ -1428,6 +1479,15 @@ function getWebviewContent(
         if (loadingEl) { loadingEl.style.display = 'none'; }
         render();
     });
+
+    // **리스너를 건 뒤에** 준비됐다고 알린다 (0.6.47).
+    //
+    // 예전에는 호스트가 HTML 을 넣자마자 데이터를 보냈다. 그 시점에는 이
+    // 문서의 스크립트가 아직 돌지 않았을 수 있고, 그러면 메시지가 유실된 채
+    // 15초 뒤 "불러오지 못했습니다" 만 남았다 — 재시도도 없었다. 코드 주석은
+    // "VS Code 가 큐잉하므로 유실되지 않는다" 고 단언했지만 API 문서는 그런
+    // 보장을 하지 않는다. 이제 이 신호를 받은 뒤에 보낸다.
+    vscode.postMessage({ command: 'ready' });
 
     // 데이터가 끝내 오지 않는 경우(호스트 오류 등) 무한 "불러오는 중"에
     // 갇히지 않도록, 잠시 뒤 안내 문구를 바꾼다.
