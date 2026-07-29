@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as vscode from 'vscode';
-import { openMemoryMapPanel, panelRegistry, MEMORY_MAP_MAX_FILE_SIZE } from '../memoryMapViewer';
+import { openMemoryMapPanel, panelRegistry, MEMORY_MAP_MAX_FILE_SIZE, MEMORY_MAP_MAX_SAVE_HTML_CHARS } from '../memoryMapViewer';
 import { buildMinimalElf32 } from './fixtures/elfFixtures';
 
 /**
@@ -176,5 +176,121 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.strictEqual(panelRegistry.has(badMagic), false);
             assert.strictEqual(panelRegistry.size(), 0);
         });
+    });
+});
+
+/**
+ * Save HTML 상한을 **직렬화 전에** 적용하는가 (0.6.46).
+ *
+ * 예전에는 웹뷰가 `document.documentElement.outerHTML` 로 DOM 전체를 먼저
+ * 문자열로 만들고, 그것이 구조화 복제로 호스트에 한 벌 더 복사된 **뒤에야**
+ * 호스트가 크기를 검사했다. 즉 상한은 그 이후의 정규식 치환과 파일 쓰기만
+ * 막았을 뿐, 가장 위험한 두 순간(직렬화·IPC 복제)은 이미 지난 뒤였다.
+ *
+ * 웹뷰 스크립트를 **실제로 실행해** 확인한다. 정규식으로 "코드가 있는지"만
+ * 보면 로직이 틀려도 통과한다.
+ */
+suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
+    let filePath: string;
+    let handlerSource: string;
+
+    suiteSetup(() => {
+        panelRegistry.clear();
+        filePath = path.join(os.tmpdir(), `taskhub-mm-save-${process.pid}.axf`);
+        fs.writeFileSync(filePath, buildMinimalElf32());
+        const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+        assert.ok(openMemoryMapPanel(ctx, filePath, { regions: [] }));
+        const html = panelRegistry.getHtml(filePath) ?? '';
+
+        // 주입된 핸들러 본문을 그대로 꺼내 실행한다.
+        const marker = "document.getElementById('btnSaveHtml').addEventListener('click', function() {";
+        const start = html.indexOf(marker);
+        assert.ok(start >= 0, 'btnSaveHtml 핸들러를 찾지 못했다 — 마커가 바뀌었는지 확인이 필요하다');
+        const bodyStart = start + marker.length;
+        const end = html.indexOf('\n    });', bodyStart);
+        assert.ok(end > bodyStart, '핸들러 본문의 끝을 찾지 못했다');
+        handlerSource = html.slice(bodyStart, end);
+        assert.ok(
+            handlerSource.includes('SAVE_HTML_LIMIT'),
+            '핸들러가 상한을 참조하지 않는다 — 직렬화 전 검사가 없다'
+        );
+    });
+
+    suiteTeardown(() => {
+        panelRegistry.clear();
+        try { fs.unlinkSync(filePath); } catch { /* best effort */ }
+    });
+
+    /** 행 크기를 지정해 가짜 DOM 을 만들고 핸들러를 돌린다. */
+    function runHandler(rowCount: number, rowBytes: number): { posted: any[]; serialized: boolean } {
+        const posted: any[] = [];
+        let serialized = false;
+        const rowHtml = 'x'.repeat(rowBytes);
+        const rows = Array.from({ length: rowCount }, () => ({ outerHTML: rowHtml }));
+
+        const fakeDocument = {
+            head: { outerHTML: '<head></head>' },
+            getElementsByTagName: (tag: string) => (tag === 'tr' ? rows : []),
+            get documentElement() {
+                // 이 getter 가 호출되면 전체 직렬화가 일어났다는 뜻이다.
+                return {
+                    get outerHTML() { serialized = true; return 'y'.repeat(rowCount * rowBytes); },
+                };
+            },
+        };
+        const fakeVscode = { postMessage: (m: any) => { posted.push(m); } };
+
+        // eslint-disable-next-line no-new-func
+        const fn = new Function('document', 'vscode', 'SAVE_HTML_LIMIT', handlerSource);
+        fn(fakeDocument, fakeVscode, MEMORY_MAP_MAX_SAVE_HTML_CHARS);
+        return { posted, serialized };
+    }
+
+    test('상한 안이면 평소대로 HTML 을 보낸다', () => {
+        const { posted, serialized } = runHandler(10, 100);
+        assert.strictEqual(posted.length, 1);
+        assert.strictEqual(posted[0].command, 'saveHtml');
+        assert.ok(serialized, '상한 안에서는 직렬화가 일어나야 정상 동작이다');
+    });
+
+    test('상한을 넘으면 직렬화하지 않고 거부한다', () => {
+        // 행 1024개 x 128KB = 128MB > 64MB 상한.
+        const { posted, serialized } = runHandler(1024, 128 * 1024);
+        assert.strictEqual(posted.length, 1);
+        assert.strictEqual(
+            posted[0].command,
+            'saveHtmlTooLarge',
+            '상한을 넘겼는데 HTML 을 그대로 보냈다'
+        );
+        assert.strictEqual(
+            serialized,
+            false,
+            'documentElement.outerHTML 이 호출됐다 — 막으려던 바로 그 직렬화가 일어났다'
+        );
+        assert.ok(
+            !('html' in posted[0]),
+            '거부 메시지에 HTML 이 실려 있다 — IPC 복제 비용을 그대로 치른다'
+        );
+    });
+
+    test('상한을 넘으면 끝까지 세지 않고 즉시 멈춘다', () => {
+        // 초과를 확인한 뒤에도 남은 행을 계속 훑으면, 큰 화면에서 거부 자체가
+        // 오래 걸린다. 접근된 행 수로 조기 종료를 확인한다.
+        let touched = 0;
+        const posted: any[] = [];
+        const rows = Array.from({ length: 5000 }, () => ({
+            get outerHTML() { touched++; return 'x'.repeat(128 * 1024); },
+        }));
+        const fakeDocument = {
+            head: { outerHTML: '' },
+            getElementsByTagName: (tag: string) => (tag === 'tr' ? rows : []),
+            get documentElement() { return { get outerHTML() { return ''; } }; },
+        };
+        // eslint-disable-next-line no-new-func
+        const fn = new Function('document', 'vscode', 'SAVE_HTML_LIMIT', handlerSource);
+        fn(fakeDocument, { postMessage: (m: any) => posted.push(m) }, MEMORY_MAP_MAX_SAVE_HTML_CHARS);
+
+        assert.strictEqual(posted[0].command, 'saveHtmlTooLarge');
+        assert.ok(touched < 5000, `행 ${touched}개를 전부 훑었다 — 조기 종료가 없다`);
     });
 });

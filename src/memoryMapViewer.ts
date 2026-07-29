@@ -42,6 +42,18 @@ export const MEMORY_MAP_MAX_FILE_SIZE = 100 * 1024 * 1024;
  */
 export const MEMORY_MAP_MAX_SAVE_HTML_CHARS = 64 * 1024 * 1024;
 
+/**
+ * 저장 HTML 상한 초과 안내. 웹뷰가 직렬화 전에 거른 경우와 호스트가 받은 뒤
+ * 거른 경우가 **같은 문구**를 쓰도록 한곳에 둔다.
+ */
+function showSaveHtmlTooLargeError(): void {
+    const mb = Math.round(MEMORY_MAP_MAX_SAVE_HTML_CHARS / (1024 * 1024));
+    vscode.window.showErrorMessage(t(
+        `저장할 HTML이 너무 큽니다(${mb}MB 초과). 영역을 접거나 검색으로 범위를 줄인 뒤 다시 시도하세요. 전체 데이터는 *Copy Full Dump* 로 받을 수 있습니다.`,
+        `The HTML to save is too large (over ${mb} MB). Collapse regions or narrow the view with search, then try again. Use *Copy Full Dump* for the complete data.`
+    ));
+}
+
 function formatFileSize(bytes: number): string {
     if (bytes < 1024) { return `${bytes} B`; }
     if (bytes < 1024 * 1024) { return `${(bytes / 1024).toFixed(1)} KB`; }
@@ -322,6 +334,10 @@ function showPanel(
         if (message.command === 'copyReport') {
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.'));
+        } else if (message.command === 'saveHtmlTooLarge') {
+            // 웹뷰가 **직렬화 전에** 걸러 낸 경우. 아래 호스트 검사와 같은
+            // 안내를 쓴다 — 사용자에게는 같은 상황이다.
+            showSaveHtmlTooLargeError();
         } else if (message.command === 'saveHtml') {
             const rawHtml = typeof message.html === 'string' ? message.html : '';
             // `outerHTML` 은 펼쳐진 DOM 전체를 직렬화한다. region 을 모두 펼친
@@ -330,11 +346,7 @@ function showPanel(
             // 띄우기 **전에** 막아, 사용자가 경로를 고르고 나서야 실패하는
             // 일이 없게 한다.
             if (rawHtml.length > MEMORY_MAP_MAX_SAVE_HTML_CHARS) {
-                const mb = Math.round(MEMORY_MAP_MAX_SAVE_HTML_CHARS / (1024 * 1024));
-                vscode.window.showErrorMessage(t(
-                    `저장할 HTML이 너무 큽니다(${mb}MB 초과). 영역을 접거나 검색으로 범위를 줄인 뒤 다시 시도하세요. 전체 데이터는 *Copy Full Dump* 로 받을 수 있습니다.`,
-                    `The HTML to save is too large (over ${mb} MB). Collapse regions or narrow the view with search, then try again. Use *Copy Full Dump* for the complete data.`
-                ));
+                showSaveHtmlTooLargeError();
                 return;
             }
             const uri = await showSaveDialogWithMemory(
@@ -974,6 +986,9 @@ const RD = ${regionDataJsLiteral};
     // Locale-resolved UI labels from the host (buildMemoryMapStrings).
     // Report bodies below stay English by design — they are shared artifacts.
     const S = ${stringsLiteral};
+    // 저장 HTML 상한. 호스트와 **같은 값**을 쓴다 — 웹뷰가 먼저 걸러 내고,
+    // 호스트 검사는 그대로 두어 최종 권위로 남는다.
+    const SAVE_HTML_LIMIT = ${MEMORY_MAP_MAX_SAVE_HTML_CHARS};
     // {placeholder} 치환 — 언어별 어순 차이를 수용한다. JSON Editor / Hex
     // Viewer와 같은 구현.
     function fmt(template, values) {
@@ -1204,6 +1219,23 @@ const RD = ${regionDataJsLiteral};
         vscode.postMessage({ command: 'copyReport', text: report });
     });
     document.getElementById('btnSaveHtml').addEventListener('click', function() {
+        // **직렬화 전에** 크기를 잰다. documentElement.outerHTML 은
+        // 그 자체로 수백 MB 짜리 문자열을 한 번에 만들고, 그것이 구조화 복제로
+        // 호스트에 한 벌 더 복사된 **뒤에야** 호스트의 상한 검사에 닿는다 —
+        // 가장 위험한 두 순간을 지나고 나서 막는 셈이었다.
+        //
+        // 행 하나씩 더하면 문자열이 한 번에 한 행만 만들어진다(각각 수백 바이트).
+        // 행이 이 화면의 대부분을 차지하므로 이 합계로 충분히 갈린다. 남은
+        // 오차는 호스트 검사가 받는다.
+        var total = document.head ? document.head.outerHTML.length : 0;
+        var rows = document.getElementsByTagName('tr');
+        for (var i = 0; i < rows.length; i++) {
+            total += rows[i].outerHTML.length;
+            if (total > SAVE_HTML_LIMIT) {
+                vscode.postMessage({ command: 'saveHtmlTooLarge' });
+                return;
+            }
+        }
         vscode.postMessage({ command: 'saveHtml', html: document.documentElement.outerHTML });
     });
 
