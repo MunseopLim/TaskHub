@@ -8,6 +8,7 @@
  */
 
 import * as vscode from 'vscode';
+import { t } from '../i18n';
 
 export type HistoryEntryType = 'action' | 'tool';
 export type HistoryToolKind = 'memoryMap' | 'hexEditor' | 'jsonEditor';
@@ -495,7 +496,11 @@ export class HistoryItem extends vscode.TreeItem {
                     : undefined
             );
         const pathLine = pathSource ? `${pathSource}\n` : '';
-        this.tooltip = `${pathLine}${isToolEntry ? 'Opened' : 'Executed'} at: ${date.toLocaleString()}`;
+        // 이 파일의 나머지(배지·aria 라벨)는 이미 지역화돼 있는데 tooltip 만
+        // 영어로 남아 있었다. 한국어 사용자에게는 여기만 영어로 보인다.
+        this.tooltip = `${pathLine}${isToolEntry
+            ? t(`연 시각: ${date.toLocaleString()}`, `Opened at: ${date.toLocaleString()}`)
+            : t(`실행 시각: ${date.toLocaleString()}`, `Executed at: ${date.toLocaleString()}`)}`;
 
         // Last-run badge: time + how-long, rendered in the muted
         // TreeItem.description slot next to actionTitle. Status is

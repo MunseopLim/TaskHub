@@ -24,7 +24,36 @@ export interface LinkEntry {
     sourceFile?: string;
 }
 
-export type LinkTreeNode = Link | LinkGroup;
+export type LinkTreeNode = Link | LinkGroup | LinkParseError;
+
+/**
+ * 파싱에 실패한 파일을 **트리에 남긴다**.
+ *
+ * 예전에는 실패를 빈 배열로 바꿔 loaded 로 확정했다. 토스트가 한 번 뜨긴
+ * 했지만 그것이 사라지고 나면 트리는 "링크가 하나도 없는 상태"와 **구분이
+ * 되지 않았고**, 빈 상태 CTA("링크 추가")까지 떠서 사용자는 파일이 비었다고
+ * 읽었다 — 실제로는 고쳐야 할 JSON 이 있는데도.
+ *
+ * 행 하나가 남으면 빈 상태 CTA 도 뜨지 않고, 클릭하면 문제의 파일이 열린다.
+ */
+export class LinkParseError extends vscode.TreeItem {
+    constructor(public readonly filePath: string, message: string) {
+        super(t(`${path.basename(filePath)} 을(를) 읽지 못했습니다`, `Could not read ${path.basename(filePath)}`),
+            vscode.TreeItemCollapsibleState.None);
+        this.description = message;
+        this.tooltip = t(
+            `${filePath}\n\n${message}\n\n클릭하면 파일을 엽니다.`,
+            `${filePath}\n\n${message}\n\nClick to open the file.`
+        );
+        this.command = {
+            command: 'vscode.open',
+            title: t('JSON 열기', 'Open JSON'),
+            arguments: [vscode.Uri.file(filePath)],
+        };
+        this.contextValue = 'linkParseError';
+        this.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('list.errorForeground'));
+    }
+}
 
 export class LinkGroup extends vscode.TreeItem {
     constructor(public readonly groupName: string, private readonly entries: LinkEntry[]) {
@@ -134,6 +163,8 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode>, 
     readonly onDidChangeTreeData: vscode.Event<LinkTreeNode | undefined | null | void> = this._onDidChangeTreeData.event;
     public view: vscode.TreeView<LinkTreeNode> | undefined;
     private cachedEntries: LinkEntry[] = [];
+    /** 이번 로드에서 파싱에 실패한 파일들. 트리에 오류 행으로 나타난다. */
+    private parseFailures: { filePath: string; message: string }[] = [];
     // Distinguish "never loaded" from "loaded but empty" so ensureCache() does
     // not keep re-reading the JSON when the user genuinely has zero links.
     private loaded = false;
@@ -166,10 +197,22 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode>, 
 
     private loadLinks(): LinkEntry[] {
         const results: LinkEntry[] = [];
+        // 실패한 파일을 기억해 트리에 오류 행으로 남긴다 (LinkParseError 주석 참조).
+        this.parseFailures = [];
         const folders = this.getWorkspaceFolders();
         for (const folder of folders) {
             const workspaceLinksPath = path.join(folder.uri.fsPath, '.vscode', 'links.json');
-            results.push(...loadLinksFromDisk(workspaceLinksPath, true));
+            const result = readLinksFromDisk(workspaceLinksPath);
+            if (result.ok) {
+                results.push(...result.entries);
+            } else {
+                console.error(`Error parsing ${workspaceLinksPath}: ${result.error}`);
+                this.parseFailures.push({ filePath: workspaceLinksPath, message: result.error });
+                vscode.window.showErrorMessage(t(
+                    `${path.basename(workspaceLinksPath)} 파싱 오류: ${result.error}`,
+                    `Error parsing ${path.basename(workspaceLinksPath)}: ${result.error}`
+                ));
+            }
         }
         return results;
     }
@@ -205,6 +248,10 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode>, 
         }
 
         const nodes: LinkTreeNode[] = [];
+        // 오류를 맨 위에 둔다 — 목록을 훑기 전에 보여야 한다.
+        for (const failure of this.parseFailures) {
+            nodes.push(new LinkParseError(failure.filePath, failure.message));
+        }
         const sortedGroupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
         for (const name of sortedGroupNames) {
             const entries = this.sortEntries(grouped.get(name)!);

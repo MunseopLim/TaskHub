@@ -4,9 +4,9 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { actionStates } from '../providers/actionStatus';
-import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteViewProvider, loadFavoritesFromDisk, removeFavoriteByIdentity } from '../providers/favoriteViewProvider';
+import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteParseError, FavoriteViewProvider, loadFavoritesFromDisk, removeFavoriteByIdentity } from '../providers/favoriteViewProvider';
 import { buildActionCommandId, buildRunAnyActionPaletteItems, buildRunAnyActionPicks, planRunAnyAction, serializeFavorites, syncActionCommandsFromActions, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT } from '../extension';
-import { Link, LinkGroup, LinkViewProvider } from '../providers/linkViewProvider';
+import { Link, LinkGroup, LinkParseError, LinkViewProvider } from '../providers/linkViewProvider';
 import { Action, Folder, MainViewProvider, formatProgressDescription } from '../providers/mainViewProvider';
 import { HistoryProvider } from '../providers/historyProvider';
 import { ActionItem } from '../schema';
@@ -78,6 +78,60 @@ suite('View provider integration', function () {
             index: 0
         };
     }
+
+    /**
+     * 깨진 JSON 이 "데이터 없음" 으로 위장되던 문제 (0.6.46).
+     *
+     * 파싱 실패를 빈 배열로 바꿔 loaded 로 확정했다. 토스트가 한 번 뜨긴 하지만
+     * 그것이 사라지면 트리는 "항목이 하나도 없는 상태" 와 **구분되지 않고**,
+     * 빈 상태 CTA 까지 떠서 사용자는 파일이 비었다고 읽는다 — 실제로는 고쳐야
+     * 할 JSON 이 있는데도. 오류 행이 남으면 CTA 도 뜨지 않는다.
+     */
+    test('깨진 links.json 은 빈 목록이 아니라 오류 행으로 보인다', async () => {
+        const workspace = createWorkspace();
+        const linksPath = path.join(workspace, '.vscode', 'links.json');
+        fs.writeFileSync(linksPath, '{ this is not valid json');
+
+        const originalShowError = vscode.window.showErrorMessage;
+        (vscode.window as any).showErrorMessage = () => Promise.resolve(undefined);
+        let roots: any[];
+        try {
+            const provider = new LinkViewProvider(() => [makeWorkspaceFolder(workspace)]);
+            provider.view = { title: 'Workspace Links' } as vscode.TreeView<any>;
+            roots = await provider.getChildren();
+        } finally {
+            (vscode.window as any).showErrorMessage = originalShowError;
+        }
+
+        assert.strictEqual(roots.length, 1, `깨진 파일이 빈 목록으로 보인다: ${roots.length}개 노드`);
+        assert.ok(roots[0] instanceof LinkParseError, '오류 행 대신 다른 노드가 들어 있다');
+        assert.strictEqual(
+            (roots[0] as LinkParseError).filePath,
+            linksPath,
+            '오류 행이 어떤 파일인지 알려주지 않는다'
+        );
+        assert.ok(roots[0].command, '오류 행을 눌러도 파일을 열 수 없다');
+    });
+
+    test('깨진 favorites.json 도 오류 행으로 보인다', async () => {
+        const workspace = createWorkspace();
+        const favoritesPath = path.join(workspace, '.vscode', 'favorites.json');
+        fs.writeFileSync(favoritesPath, '[[[');
+
+        const originalShowError = vscode.window.showErrorMessage;
+        (vscode.window as any).showErrorMessage = () => Promise.resolve(undefined);
+        let roots: any[];
+        try {
+            const provider = new FavoriteViewProvider(makeContext(), () => [makeWorkspaceFolder(workspace)]);
+            provider.view = { title: 'Favorites' } as vscode.TreeView<any>;
+            roots = await provider.getChildren();
+        } finally {
+            (vscode.window as any).showErrorMessage = originalShowError;
+        }
+
+        assert.strictEqual(roots.length, 1, `깨진 파일이 빈 목록으로 보인다: ${roots.length}개 노드`);
+        assert.ok(roots[0] instanceof FavoriteParseError, '오류 행 대신 다른 노드가 들어 있다');
+    });
 
     test('IT-021: LinkViewProvider는 workspace links.json을 lazy load하고 그룹/정렬/태그를 구성', async () => {
         const workspace = createWorkspace();

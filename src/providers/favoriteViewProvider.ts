@@ -27,7 +27,31 @@ export interface FavoriteEntry {
     workspaceFolder?: string;
 }
 
-export type FavoriteTreeNode = Favorite | FavoriteGroup;
+export type FavoriteTreeNode = Favorite | FavoriteGroup | FavoriteParseError;
+
+/**
+ * 파싱에 실패한 파일을 트리에 남긴다. 근거는 `LinkParseError` 와 같다 —
+ * 실패를 빈 배열로 바꾸면 "즐겨찾기가 없는 상태"와 구분되지 않고 빈 상태
+ * CTA 까지 떠서, 고쳐야 할 JSON 이 있다는 사실이 사라진다.
+ */
+export class FavoriteParseError extends vscode.TreeItem {
+    constructor(public readonly filePath: string, message: string) {
+        super(t(`${path.basename(filePath)} 을(를) 읽지 못했습니다`, `Could not read ${path.basename(filePath)}`),
+            vscode.TreeItemCollapsibleState.None);
+        this.description = message;
+        this.tooltip = t(
+            `${filePath}\n\n${message}\n\n클릭하면 파일을 엽니다.`,
+            `${filePath}\n\n${message}\n\nClick to open the file.`
+        );
+        this.command = {
+            command: 'vscode.open',
+            title: t('JSON 열기', 'Open JSON'),
+            arguments: [vscode.Uri.file(filePath)],
+        };
+        this.contextValue = 'favoriteParseError';
+        this.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('list.errorForeground'));
+    }
+}
 
 export class FavoriteGroup extends vscode.TreeItem {
     constructor(public readonly groupName: string, private readonly entries: FavoriteEntry[]) {
@@ -180,6 +204,8 @@ export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTre
     readonly onDidChangeTreeData: vscode.Event<FavoriteTreeNode | undefined | null | void> = this._onDidChangeTreeData.event;
     public view: vscode.TreeView<FavoriteTreeNode> | undefined;
     private cachedFavorites: FavoriteEntry[] = [];
+    /** 이번 로드에서 파싱에 실패한 파일들. 트리에 오류 행으로 나타난다. */
+    private parseFailures: { filePath: string; message: string }[] = [];
     // Distinguish "never loaded" from "loaded but empty" so ensureCache() does
     // not keep re-reading the JSON when the user genuinely has zero favorites.
     private loaded = false;
@@ -212,10 +238,21 @@ export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTre
 
     private loadFavorites(): FavoriteEntry[] {
         const entries: FavoriteEntry[] = [];
+        this.parseFailures = [];
         const folders = this.getWorkspaceFolders();
         for (const folder of folders) {
             const favoritesPath = path.join(folder.uri.fsPath, '.vscode', 'favorites.json');
-            entries.push(...loadFavoritesFromDisk(favoritesPath, true, folder.uri.fsPath));
+            const result = readFavoritesFromDisk(favoritesPath, folder.uri.fsPath);
+            if (result.ok) {
+                entries.push(...result.entries);
+            } else {
+                console.error(`Error parsing ${favoritesPath}: ${result.error}`);
+                this.parseFailures.push({ filePath: favoritesPath, message: result.error });
+                vscode.window.showErrorMessage(t(
+                    `${path.basename(favoritesPath)} 파싱 오류: ${result.error}`,
+                    `Error parsing ${path.basename(favoritesPath)}: ${result.error}`
+                ));
+            }
         }
         return entries;
     }
@@ -259,6 +296,10 @@ export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTre
         }
 
         const nodes: FavoriteTreeNode[] = [];
+        // 오류를 맨 위에 둔다 — 목록을 훑기 전에 보여야 한다.
+        for (const failure of this.parseFailures) {
+            nodes.push(new FavoriteParseError(failure.filePath, failure.message));
+        }
         const sortedGroupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
         for (const name of sortedGroupNames) {
             const entries = this.sortEntries(grouped.get(name)!);
