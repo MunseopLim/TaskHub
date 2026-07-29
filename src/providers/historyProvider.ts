@@ -47,7 +47,16 @@ export interface HistoryEntry {
     actionId: string;
     actionTitle: string;
     timestamp: number;
-    status: 'success' | 'failure' | 'running';
+    /**
+     * `cancelled` 는 **사용자가 중지한** 실행이다 (0.6.46).
+     *
+     * 예전에는 중지도 `failure` 로 적어서, 의도적으로 멈춘 것이 빨간 오류
+     * 아이콘으로 쌓였다 — 진짜 실패와 눈으로 구분되지 않아 History 를 훑을 때
+     * 노이즈가 된다. 0.6.46 **이전에 기록된** 중지는 `failure` 로 남아 있고
+     * 마이그레이션하지 않는다: 판별 근거가 오류 메시지 문자열뿐이라 그것에
+     * 기대면 문구가 바뀔 때 조용히 깨진다.
+     */
+    status: 'success' | 'failure' | 'running' | 'cancelled';
     output?: string;
     tool?: HistoryToolMetadata;
     /**
@@ -292,6 +301,9 @@ export function formatRecentRunDetail(
     if (entry.status === 'failure') {
         return `${lang === 'ko' ? '실패' : 'Failed'} · ${badge}`;
     }
+    if (entry.status === 'cancelled') {
+        return `${lang === 'ko' ? '중지됨' : 'Stopped'} · ${badge}`;
+    }
     return badge;
 }
 
@@ -326,7 +338,9 @@ export function buildHistoryItemAriaLabel(
         ? (lang === 'ko' ? '성공' : 'succeeded')
         : entry.status === 'failure'
             ? (lang === 'ko' ? '실패' : 'failed')
-            : (lang === 'ko' ? '실행 중' : 'running');
+            : entry.status === 'cancelled'
+                ? (lang === 'ko' ? '중지됨' : 'stopped')
+                : (lang === 'ko' ? '실행 중' : 'running');
     const durationPart = entry.durationMs !== undefined
         ? ` · ${formatDuration(entry.durationMs)}`
         : '';
@@ -465,6 +479,9 @@ export class HistoryItem extends vscode.TreeItem {
             this.iconPath = new vscode.ThemeIcon('pass', new vscode.ThemeColor('charts.green'));
         } else if (entry.status === 'failure') {
             this.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('charts.red'));
+        } else if (entry.status === 'cancelled') {
+            // 사용자가 의도해서 멈춘 것이므로 오류색을 쓰지 않는다.
+            this.iconPath = new vscode.ThemeIcon('circle-slash', new vscode.ThemeColor('disabledForeground'));
         } else {
             this.iconPath = new vscode.ThemeIcon('history');
         }
@@ -612,7 +629,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
     updateHistoryStatus(
         actionId: string,
         timestamp: number,
-        status: 'success' | 'failure',
+        status: 'success' | 'failure' | 'cancelled',
         output?: string,
         durationMs?: number
     ): void {

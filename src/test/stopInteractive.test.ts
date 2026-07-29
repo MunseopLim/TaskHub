@@ -152,8 +152,8 @@ suite('대화형 태스크 대기 중 중지', () => {
             assert.strictEqual(entries.length, 1);
             assert.strictEqual(
                 entries[0].status,
-                'failure',
-                '사용자 중지는 실패 상태로 마감된다 (개별 중지와 동일한 계약)'
+                'cancelled',
+                '사용자 중지는 cancelled 로 마감된다 — 0.6.46 이전에는 failure 였고, 의도적으로 멈춘 것이 진짜 실패와 같은 빨간 아이콘으로 쌓였다'
             );
             assert.ok(
                 !actionStates.has('stop-inputbox'),
@@ -277,7 +277,7 @@ suite('대화형 태스크 대기 중 중지', () => {
                 assert.strictEqual(entries.length, 1);
                 assert.strictEqual(
                     entries[0].status,
-                    'failure',
+                    'cancelled',
                     '중지 기록이 성공으로 덮이면 안 된다 — 뒤 태스크가 실행됐다는 뜻이다'
                 );
             } finally {
@@ -327,7 +327,7 @@ suite('대화형 태스크 대기 중 중지', () => {
                 assert.strictEqual(entries.length, 1);
                 assert.strictEqual(
                     entries[0].status,
-                    'failure',
+                    'cancelled',
                     'Yes를 눌렀어도 중지 요청이 먼저였다 — 뒤 태스크가 실행돼 성공으로 덮이면 안 된다'
                 );
             } finally {
@@ -683,7 +683,7 @@ suite('대화형 태스크 대기 중 중지', () => {
                 assert.strictEqual(entries.length, 1);
                 assert.strictEqual(
                     entries[0].status,
-                    'failure',
+                    'cancelled',
                     '중지된 스트리밍 태스크가 성공으로 기록되면 사용자는 빌드가 끝난 줄 안다'
                 );
                 assert.ok(
@@ -783,6 +783,52 @@ suite('대화형 태스크 대기 중 중지', () => {
             );
         });
 
+        test('IT-137: 중지와 진짜 실패가 서로 다른 상태로 기록된다', async function () {
+            this.timeout(20000);
+            // 0.6.46 이전에는 둘 다 `failure` 였다. 사용자가 의도해서 멈춘 것이
+            // 진짜 실패와 같은 빨간 오류 아이콘으로 History 에 쌓여, 목록을
+            // 훑을 때 구분이 되지 않았다. 두 경로가 **갈라지는지**를 본다 —
+            // 한쪽만 보면 둘 다 같은 값으로 바뀌어도 통과한다.
+            const failing: ActionItem = {
+                id: 'really-fails',
+                title: 'Really fails',
+                action: {
+                    description: 'a task that genuinely fails',
+                    tasks: [{ id: 'boom', type: 'shell', command: 'node --this-flag-does-not-exist', passTheResultToNextTask: true }],
+                },
+            } as unknown as ActionItem;
+
+            const failCtx = makeContext();
+            const failHistory = new HistoryProvider(failCtx);
+            await executeAction(failing, failCtx, new MainViewProvider(failCtx, () => [failing]), failHistory)
+                .catch(() => { /* 실패가 이 테스트의 전제다 */ });
+            const failStatus = failHistory.getHistory()[0]?.status;
+
+            const stopped: ActionItem = {
+                id: 'gets-stopped',
+                title: 'Gets stopped',
+                action: {
+                    description: 'stopped by the user',
+                    tasks: [{ id: 'work', type: 'stringManipulation', function: 'trim', input: '  x  ' }],
+                },
+            } as unknown as ActionItem;
+            const stopCtx = makeContext();
+            const stopHistory = new HistoryProvider(stopCtx);
+            const run = executeAction(stopped, stopCtx, new MainViewProvider(stopCtx, () => [stopped]), stopHistory);
+            run.catch(() => { /* 아래에서 판정한다 */ });
+            stopRunningAction('gets-stopped');
+            await settleWithin(run, 10000, 'IT-137');
+            const stopStatus = stopHistory.getHistory()[0]?.status;
+
+            assert.strictEqual(failStatus, 'failure', '진짜 실패가 failure 로 기록되지 않는다');
+            assert.strictEqual(stopStatus, 'cancelled', '사용자 중지가 cancelled 로 기록되지 않는다');
+            assert.notStrictEqual(
+                stopStatus,
+                failStatus,
+                '중지와 실패가 같은 상태로 기록되면 History 에서 구분되지 않는다'
+            );
+        });
+
         test('IT-130: continueOnError가 사용자 중지를 삼키지 않는다', async function () {
             this.timeout(20000);
             const stub = stubTokenAwareInputBox();
@@ -819,7 +865,7 @@ suite('대화형 태스크 대기 중 중지', () => {
                 assert.strictEqual(entries.length, 1);
                 assert.strictEqual(
                     entries[0].status,
-                    'failure',
+                    'cancelled',
                     'continueOnError가 중지를 skipped로 바꾸면 뒤 태스크가 실행되고 성공 기록이 중지 기록을 덮는다'
                 );
                 assert.ok(

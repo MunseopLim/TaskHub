@@ -4742,7 +4742,7 @@ function recordManualStopInHistory(provider: HistoryProvider | undefined, id: st
     const timestamp = actionStartTimestamps.get(id);
     if (!provider || !timestamp) { return; }
     const durationMs = Math.max(0, Date.now() - timestamp);
-    provider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user', durationMs);
+    provider.updateHistoryStatus(id, timestamp, 'cancelled', 'Action stopped by user', durationMs);
 }
 
 function isCurrentActionRun(run: ActionRunContext): boolean {
@@ -4971,7 +4971,7 @@ export async function executeAction(
             // Action was manually stopped
             if (historyProvider) {
                 const durationMs = Math.max(0, Date.now() - timestamp);
-                historyProvider.updateHistoryStatus(id, timestamp, 'failure', 'Action stopped by user', durationMs);
+                historyProvider.updateHistoryStatus(id, timestamp, 'cancelled', 'Action stopped by user', durationMs);
                 historyProvider.setHistoryInputs(id, timestamp, recordInputs);
                 historyProvider.setHistoryCommands(id, timestamp, recordCommands);
             }
