@@ -2231,6 +2231,83 @@ export function isActionCancelled(id: string, sources: ReadonlyMap<string, vscod
     return sources.get(id)?.token.isCancellationRequested === true;
 }
 
+/**
+ * 이번 실행에서 **비밀 값을 만들어 낸** 태스크 id 들 (액션별).
+ *
+ * `shouldRecordTaskInput` 이 `password: true` 인 inputBox 의 **입력 자체**는
+ * 이력에서 빼 준다. 그런데 그 값을 `${ask.output}` 으로 명령에 보간하면,
+ * 보간이 **끝난** 명령줄이 `recordCommands` 로 workspace 이력에 평문 저장되고
+ * verbose 로그에도 그대로 찍힌다 — 가려 둔 값이 옆문으로 새는 셈이다.
+ *
+ * 값이 아니라 **태스크 id** 를 기억한다. 값으로 문자열 치환을 하면 짧은
+ * 비밀번호("1" 같은)가 명령 곳곳을 뭉개고, 반대로 놓치는 경우도 생긴다.
+ * id 를 알면 기록용 문자열을 만들 때 그 자리만 정확히 가릴 수 있다.
+ */
+const actionSecretTaskIds = new Map<string, Set<string>>();
+
+function markTaskResultSecret(actionId: string | undefined, taskId: string): void {
+    if (!actionId) { return; }
+    let ids = actionSecretTaskIds.get(actionId);
+    if (!ids) {
+        ids = new Set<string>();
+        actionSecretTaskIds.set(actionId, ids);
+    }
+    ids.add(taskId);
+}
+
+/** 표시·기록용 보간 컨텍스트. 비밀 태스크의 결과를 자리표시자로 바꾼다. */
+function redactSecretsInContext(actionId: string | undefined, context: Record<string, any>): Record<string, any> {
+    const ids = actionId ? actionSecretTaskIds.get(actionId) : undefined;
+    if (!ids || ids.size === 0) { return context; }
+
+    const redactValue = (value: unknown): unknown => {
+        if (typeof value === 'string') { return SECRET_PLACEHOLDER; }
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            const out: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(value)) {
+                out[k] = typeof v === 'string' ? SECRET_PLACEHOLDER : v;
+            }
+            return out;
+        }
+        return value;
+    };
+
+    const redacted = { ...context };
+    for (const id of ids) {
+        if (Object.prototype.hasOwnProperty.call(redacted, id)) {
+            redacted[id] = redactValue(redacted[id]);
+        }
+    }
+    return redacted;
+}
+
+/**
+ * 이력·로그에 보여 줄 명령줄. 비밀 태스크의 결과 자리에 자리표시자가 들어간다.
+ *
+ * 실행에 쓰는 명령줄과 **다른 문자열**이다 — 실행에는 진짜 값이 필요하고,
+ * 보여 줄 때는 가려야 한다. 비밀이 없으면 원래 명령줄과 같다.
+ */
+function buildRedactedDisplayCommand(
+    actionId: string | undefined,
+    task: import('./schema').Task,
+    interpolationContext: Record<string, any>,
+    interpolatedCommand: string,
+    interpolatedArgs: string[]
+): string {
+    const shown = redactSecretsInContext(actionId, interpolationContext);
+    if (shown === interpolationContext) {
+        return buildNativeCommandInvocation(interpolatedCommand, interpolatedArgs).display;
+    }
+    const source = typeof task.command === 'string'
+        ? interpolatePipelineVariables(task.command, shown)
+        : interpolatedCommand;
+    const args = task.args ? task.args.map(arg => interpolatePipelineVariables(arg, shown)) : [];
+    return buildNativeCommandInvocation(source, args).display;
+}
+
+/** 이력·로그에 남기는 자리표시자. 값 길이를 짐작하게 하지 않는다. */
+const SECRET_PLACEHOLDER = '***';
+
 /** Raised when a run ends because the user pressed stop, not because it failed. */
 export class ActionStoppedError extends Error {
     constructor() {
@@ -3954,6 +4031,7 @@ function finalizeActionRun(id: string, showTaskStatus: boolean, mainViewProvider
     // behind would make the *next* run of the same action abort on its first
     // token check.
     endActionCancellation(id);
+    actionSecretTaskIds.delete(id);
     if (manuallyTerminatedActions.has(id)) {
         actionStates.delete(id);
         manuallyTerminatedActions.delete(id);
@@ -4201,6 +4279,8 @@ async function executeSingleTask(
                 suffix: task.suffix ? interpolatePipelineVariables(task.suffix, interpolationContext) : undefined
             };
             result = await handleInputBox(interpolatedTask, actionCancellationToken(actionId));
+            // 이 값이 뒤 태스크의 명령으로 보간되면 기록·로그에서 가려야 한다.
+            if (task.password === true) { markTaskResultSecret(actionId, task.id); }
             break;
         case 'quickPick':
             // Interpolate items if they're strings or contain interpolatable properties
@@ -4327,9 +4407,17 @@ async function executeSingleTask(
             // dialog — without re-executing. Uses the native-invocation display
             // form (`exe arg arg`) for readability across platforms.
             if (recordCommands) {
-                recordCommands[task.id] = buildNativeCommandInvocation(command, args).display;
+                // **다시 보간한다.** 이미 보간된 `command` 를 그대로 기록하면
+                // password 값이 평문으로 이력에 남는다. 값 문자열을 찾아
+                // 지우는 대신, 비밀 태스크의 결과를 자리표시자로 바꾼
+                // 컨텍스트로 처음부터 다시 만든다.
+                recordCommands[task.id] = buildRedactedDisplayCommand(actionId, task, interpolationContext, command, args);
             }
-            const handlerTask = { ...task, command, args, cwd: interpolatedCwd, env, actionId };
+            // 같은 가림을 **로그에도** 적용해야 한다. verbose 로그는 보간이
+            // 끝난 명령줄을 그대로 찍으므로, 이걸 넘기지 않으면 이력에서 가린
+            // 값이 로그로 그대로 샌다.
+            const redactedDisplay = buildRedactedDisplayCommand(actionId, task, interpolationContext, command, args);
+            const handlerTask = { ...task, command, args, cwd: interpolatedCwd, env, actionId, redactedDisplay };
 
             if (task.passTheResultToNextTask) {
                 try {
@@ -4625,6 +4713,11 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
         displayCommand = result.displayCommand;
     }
 
+    // 로그·표시에는 가린 명령줄을 쓴다 (실행에는 위에서 만든 진짜 것을 쓴다).
+    if (typeof task.redactedDisplay === 'string') {
+        displayCommand = task.redactedDisplay;
+    }
+
     const taskDefinition: vscode.TaskDefinition = { type: 'shell', actionId: actionKey };
     const taskName = `TaskHub: ${actionKey}`;
     const vsCodeTask = new vscode.Task(taskDefinition, vscode.TaskScope.Workspace, taskName, 'taskhub', shellExecution);
@@ -4687,7 +4780,7 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
 async function handleCommand(task: any, context: vscode.ExtensionContext, workspaceFolderPath?: string): Promise<{ output: string; stderr: string }> {
     const { args, cwd } = task;
     const command = getCommandString(task.command);
-    const captured = await executeShellCommand(command, args || [], cwd, task.env, workspaceFolderPath, task.actionId, task.id);
+    const captured = await executeShellCommand(command, args || [], cwd, task.env, workspaceFolderPath, task.actionId, task.id, task.redactedDisplay);
     // `output` keeps its historical meaning (= stdout only) so existing
     // `output.capture` rules and `${task.output}` interpolation behave
     // exactly as before. `stderr` is exposed alongside so the diagnostic
@@ -5598,7 +5691,7 @@ export function __testHook_hasManuallyTerminated(id: string): boolean {
  * exit code. Callers that only care about stdout should read `.stdout`
  * from the resolved value.
  */
-export function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string, taskKey?: string): Promise<{ stdout: string; stderr: string }> {
+export function executeShellCommand(command: string, args: string[], cwd?: string, taskEnv?: Record<string, string>, workspaceFolderPath?: string, actionKey?: string, taskKey?: string, displayOverride?: string): Promise<{ stdout: string; stderr: string }> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     const captureLimitBytes = getCaptureLimitBytes();
@@ -5720,7 +5813,9 @@ export function executeShellCommand(command: string, args: string[], cwd?: strin
         const attachChildHandlers = (allowPowerShellFallback: boolean) => {
             const attachedChild = childProcess;
             trackChildProcess();
-            if (showVerboseLogs) { appendVerboseLine(`[INFO] Executing command: ${displayCommand} in ${workingDirectory}`); }
+            // 비밀이 보간된 명령은 가린 것으로 찍는다 — 로그 파일은 공유되기
+            // 쉽고, 이력에서 가린 값이 여기로 새면 의미가 없다.
+            if (showVerboseLogs) { appendVerboseLine(`[INFO] Executing command: ${displayOverride ?? displayCommand} in ${workingDirectory}`); }
 
             attachedChild.stdout?.setEncoding('utf8');
             attachedChild.stderr?.setEncoding('utf8');

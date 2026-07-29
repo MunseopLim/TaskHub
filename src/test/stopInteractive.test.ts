@@ -694,6 +694,53 @@ suite('대화형 태스크 대기 중 중지', () => {
             }
         });
 
+        test('IT-136: password 입력이 명령 이력에 평문으로 남지 않는다', async function () {
+            this.timeout(20000);
+            // `shouldRecordTaskInput` 이 password 입력 **자체**는 이력에서 빼
+            // 준다. 그런데 그 값을 `${ask.output}` 으로 명령에 보간하면 보간이
+            // 끝난 명령줄이 `recordCommands` 로 workspace 이력에 평문 저장됐다
+            // — 가려 둔 값이 옆문으로 새는 셈이었다.
+            const SECRET = 'hunter2-super-secret';
+            const original = vscode.window.showInputBox;
+            (vscode.window as any).showInputBox = () => Promise.resolve(SECRET);
+
+            const context = makeContext();
+            const actionItem: ActionItem = {
+                id: 'secret-leak',
+                title: 'Secret leak',
+                action: {
+                    description: 'password value flows into a command',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                        // 실제로 돌지 않아도 된다 — 기록은 실행 **전에** 남는다.
+                        { id: 'use', type: 'shell', command: 'echo ${ask.value}' },
+                    ],
+                },
+            } as unknown as ActionItem;
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            try {
+                const run = executeAction(actionItem, context, mainView, history);
+                run.catch(() => { /* 명령 실행 성패는 이 테스트의 관심이 아니다 */ });
+                await settleWithin(run, 15000, 'IT-136').catch(() => { /* 위와 같음 */ });
+
+                const entries = history.getHistory();
+                assert.strictEqual(entries.length, 1);
+                const recorded = JSON.stringify(entries[0].commands ?? {});
+                assert.ok(
+                    !recorded.includes(SECRET),
+                    `password 값이 명령 이력에 평문으로 남았다: ${recorded}`
+                );
+                assert.ok(
+                    recorded.includes('***'),
+                    `가림 자리표시자가 없다 — 기록 자체가 안 된 것인지 확인이 필요하다: ${recorded}`
+                );
+            } finally {
+                (vscode.window as any).showInputBox = original;
+            }
+        });
+
         test('IT-135: 중지 후 완주한 액션이 성공으로 이력을 덮지 않는다', async function () {
             this.timeout(20000);
             // 취소 신호를 받지 않는 작업(0.6.46 이전의 내장 ZIP/Unzip 이 그랬다)
