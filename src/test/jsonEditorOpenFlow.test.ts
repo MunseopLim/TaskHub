@@ -300,6 +300,86 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             assert.ok(shownErrors.length > 0, '실패를 알리지도 않았다');
         });
 
+        /** 컨텍스트에 남아 있는 복구 스냅샷을 읽는다 (없으면 undefined). */
+        function readRecovery(ctx: vscode.ExtensionContext, filePath: string): unknown {
+            const state = ctx.workspaceState.get<Record<string, unknown>>(RECOVERY_STATE_KEY, {});
+            return state?.[filePath];
+        }
+
+        /**
+         * 알림을 Esc/X 로 닫으면 `showInformationMessage` 는 `undefined` 를 준다.
+         * 그것을 '버리기' 와 같이 처리하면 **결정을 미룬 것이 파기가 된다**.
+         * 원본이 사라진 이 경로에서는 스냅샷이 유일한 복구본이라 되돌릴 수 없다.
+         */
+        test('제안을 Esc 로 닫아도 스냅샷은 남는다 (다음에 다시 제안)', async () => {
+            installFakePanel();
+            const { filePath, ctx } = seedThenBreak('dismiss-keeps.json', p2 => fs.unlinkSync(p2));
+            infoAnswer = undefined;   // Esc/X — 아무 버튼도 누르지 않음
+
+            await openJsonEditorFile(ctx, filePath);
+
+            assert.strictEqual(infoPrompts.length, 1, '복구 제안 자체가 뜨지 않았다');
+            assert.ok(
+                readRecovery(ctx, filePath),
+                '알림을 닫았을 뿐인데 유일한 복구본이 삭제됐다 — 미저장 변경을 되찾을 방법이 없다'
+            );
+
+            // 스냅샷이 남아 있는 것만으로는 부족하다 — 다시 열었을 때 **실제로
+            // 다시 제안되어야** 사용자가 되찾을 수 있다. 여기까지 봐야 이
+            // 테스트가 제목대로 검증한다.
+            await openJsonEditorFile(ctx, filePath);
+            assert.strictEqual(
+                infoPrompts.length, 2,
+                '스냅샷은 남았는데 다시 열어도 제안하지 않는다 — 되찾을 경로가 없다'
+            );
+        });
+
+        /**
+         * 위 케이스는 원본이 사라진 `earlyError` 경로다. 정상 경로는 결과가
+         * 다르다 — 편집기가 디스크 내용으로 **열리고**, 그 뒤에도 스냅샷이
+         * 남아 있어야 한다. 여는 데 성공했다고 스냅샷을 정리해 버리면 안 된다.
+         */
+        test('정상 파일에서도 Esc 로 닫으면 패널은 열리고 스냅샷은 남는다', async () => {
+            const fake = installFakePanel();
+            const filePath = writeJson('dismiss-normal.json', { rows: [{ a: 1 }] });
+            const stat = fs.statSync(filePath);
+            const ctx = makeContext({
+                [RECOVERY_STATE_KEY]: {
+                    [filePath]: {
+                        data: { rows: [{ a: 'unsaved work' }] },
+                        isRootArray: false,
+                        fileMtimeMs: stat.mtimeMs,
+                        fileSize: stat.size,
+                        capturedAt: Date.now(),
+                    },
+                },
+            });
+            infoAnswer = undefined;   // Esc/X
+
+            await openJsonEditorFile(ctx, filePath);
+
+            assert.ok(fake.events.includes('create-panel'), '복구를 거절했으면 디스크 내용으로 열려야 한다');
+            assert.ok(readRecovery(ctx, filePath), '알림을 닫았을 뿐인데 스냅샷이 사라졌다');
+        });
+
+        /**
+         * 위 수정이 반대쪽으로 넘어가지 않는지 고정한다 — 명시적 '버리기' 는
+         * 계속 지워야 한다. 이 두 케이스가 짝이어야 판별력이 생긴다.
+         */
+        test('명시적 버리기는 스냅샷을 지운다', async () => {
+            installFakePanel();
+            const { filePath, ctx } = seedThenBreak('discard-clears.json', p2 => fs.unlinkSync(p2));
+            infoAnswer = 1;   // '버리기'
+
+            await openJsonEditorFile(ctx, filePath);
+
+            assert.strictEqual(infoPrompts.length, 1, '복구 제안 자체가 뜨지 않았다');
+            assert.strictEqual(
+                readRecovery(ctx, filePath), undefined,
+                "'버리기' 를 눌렀는데 스냅샷이 남았다 — 다음에 또 물어본다"
+            );
+        });
+
         test('복구를 고르면 패널이 열린다 (오류로 끝나지 않는다)', async () => {
             const fake = installFakePanel();
             const { filePath, ctx } = seedThenBreak('recover-open.json', p2 => fs.unlinkSync(p2));

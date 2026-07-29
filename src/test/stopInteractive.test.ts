@@ -12,6 +12,7 @@ import {
     runCommandCaptureLines,
     shouldUntrackTerminatedChild,
     stopRunningAction,
+    __testHook_trackedChildProcesses,
 } from '../extension';
 import { HistoryProvider } from '../providers/historyProvider';
 import { actionStates } from '../providers/actionStatus';
@@ -969,5 +970,170 @@ suite('종료 실패 시 프로세스 추적 유지', () => {
             false,
             '종료가 확인되지 않았는데 추적을 해제하면 Stop All 이 다시 찾지 못한다'
         );
+    });
+
+    /**
+     * 위 규칙을 `ChildProcess.error` 가 옆문으로 무효화하던 문제.
+     *
+     * Node 는 'error' 를 **spawn 실패**(프로세스가 없다)뿐 아니라 **kill 신호
+     * 전달 실패**(프로세스는 살아 있다)에서도 낸다. 핸들러가 생존 여부와 무관하게
+     * 먼저 추적을 해제하고 있어서, 후자에서 살아남은 flash/deploy 프로세스가
+     * *Stop All* 의 시야에서 사라졌다.
+     *
+     * 규칙만 보는 위 세 케이스로는 이 경로가 드러나지 않는다 — 실제로 프로세스를
+     * 띄우고 error 를 흘려 registry 를 직접 본다.
+     */
+    suite('spawn 이후의 error 는 추적을 지우지 않는다', () => {
+        function makeContext(): vscode.ExtensionContext {
+            const store = new Map<string, unknown>();
+            const memento = {
+                get: (k: string, d?: unknown) => (store.has(k) ? store.get(k) : d),
+                update: async (k: string, v: unknown) => { store.set(k, v); },
+                keys: () => Array.from(store.keys()),
+                setKeysForSync: () => { /* no-op */ },
+            };
+            return {
+                extensionPath: os.tmpdir(),
+                subscriptions: [],
+                workspaceState: memento,
+                globalState: memento,
+                extensionMode: vscode.ExtensionMode.Test,
+                extension: { packageJSON: { version: '0.0.0-child-error-test' } },
+            } as unknown as vscode.ExtensionContext;
+        }
+
+        /**
+         * 확장 호스트에서 `process.execPath` 는 **Electron** 이다. 그것을
+         * `-e` 로 띄우면 (ELECTRON_RUN_AS_NODE 없이) 곧바로 끝나 버리고,
+         * 'close' 가 추적을 정리한 뒤에 error 를 흘리게 되어 이 테스트가
+         * 제품 결함과 무관하게 실패한다. 파일의 다른 테스트와 같이 PATH 의
+         * `node` 로 스크립트를 띄우고, **started 마커로 살아 있음을 확인한
+         * 뒤에** 손을 댄다.
+         */
+        function makeSleeperScript(label: string, delayMs: number): {
+            command: string; cwd: string; startedMarker: string; cleanup: () => void;
+        } {
+            const stamp = `${process.pid}-${Date.now()}-${label}`;
+            const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-childerr-'));
+            const startedMarker = path.join(dir, `${stamp}.started`);
+            const scriptName = `${stamp}.js`;
+            fs.writeFileSync(
+                path.join(dir, scriptName),
+                `require('fs').writeFileSync(${JSON.stringify(startedMarker)}, 'started');\n` +
+                `setTimeout(function () {}, ${delayMs});\n`
+            );
+            return {
+                command: `node ${scriptName}`,
+                cwd: dir,
+                startedMarker,
+                cleanup: () => {
+                    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+                },
+            };
+        }
+
+        /** 위 suite 의 동명 헬퍼는 그 suite 스코프 안에 있어 여기서 못 쓴다. */
+        async function waitForFile(file: string, timeoutMs: number): Promise<boolean> {
+            const deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+                if (fs.existsSync(file)) { return true; }
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+            return false;
+        }
+
+        test('kill 실패로 온 error 뒤에도 Stop All 이 프로세스를 찾는다', async function () {
+            this.timeout(30000);
+            const actionId = 'child-error-keeps-tracking';
+            const script = makeSleeperScript('child-error', 20000);
+            const context = makeContext();
+            const actionItem: ActionItem = {
+                id: actionId,
+                title: 'Child error keeps tracking',
+                action: {
+                    description: 'long-running child',
+                    tasks: [{
+                        id: 'run',
+                        type: 'shell',
+                        command: script.command,
+                        cwd: script.cwd,
+                        // capture 경로(`executeShellCommand`)의 spawn 을 타야
+                        // 이 error 핸들러를 지난다 — IT-133 주석 참조.
+                        passTheResultToNextTask: true,
+                    }],
+                },
+            } as unknown as ActionItem;
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            const run = executeAction(actionItem, context, mainView, history);
+            run.catch(() => { /* 아래에서 판정한다 */ });
+
+            try {
+                assert.ok(
+                    await waitForFile(script.startedMarker, 15000),
+                    '자식이 시작되지 않았다 — 테스트 전제가 깨졌다'
+                );
+                const tracked = __testHook_trackedChildProcesses(actionId);
+                assert.strictEqual(tracked.length, 1, '살아 있는 자식이 추적되지 않았다 — 테스트 전제가 깨졌다');
+                const child = tracked[0];
+
+                // Node 가 "kill 신호를 전달하지 못했다" 고 알릴 때와 같은 모양.
+                // 프로세스는 **여전히 살아 있다**.
+                child.emit('error', Object.assign(new Error('kill failed'), { code: 'EPERM' }));
+
+                assert.strictEqual(
+                    __testHook_trackedChildProcesses(actionId).length, 1,
+                    'error 하나로 살아 있는 프로세스가 Stop All 의 시야에서 사라졌다'
+                );
+                assert.strictEqual(child.killed, false, '테스트 전제: 프로세스는 아직 살아 있어야 한다');
+            } finally {
+                stopRunningAction(actionId);
+                await Promise.race([
+                    run.catch(() => undefined),
+                    new Promise(resolve => setTimeout(resolve, 5000)),
+                ]);
+                for (const leftover of __testHook_trackedChildProcesses(actionId)) {
+                    try { leftover.kill('SIGKILL'); } catch { /* best effort */ }
+                }
+                script.cleanup();
+            }
+        });
+
+        /**
+         * 위 케이스의 짝. 이것이 없으면 `error` 핸들러에서 해제를 **통째로**
+         * 빼도 전체 스위트가 통과한다(리뷰에서 실측). spawn 이 실패했을 때는
+         * 프로세스가 없으므로 추적에 남기면 Stop All 이 죽은 항목을 붙잡는다.
+         */
+        test('spawn 자체가 실패하면 추적에 남기지 않는다', async function () {
+            this.timeout(30000);
+            const actionId = 'child-spawn-failure-untracks';
+            const context = makeContext();
+            const actionItem: ActionItem = {
+                id: actionId,
+                title: 'Spawn failure untracks',
+                action: {
+                    description: 'cwd does not exist',
+                    tasks: [{
+                        id: 'run',
+                        type: 'shell',
+                        command: 'node --version',
+                        // 없는 디렉터리를 cwd 로 주면 spawn 이 ENOENT 로 실패한다
+                        // ('spawn' 이벤트 없이 'error' 만 온다).
+                        cwd: path.join(os.tmpdir(), `taskhub-missing-${Date.now()}`),
+                        passTheResultToNextTask: true,
+                    }],
+                },
+            } as unknown as ActionItem;
+            const history = new HistoryProvider(context);
+            const mainView = new MainViewProvider(context, () => [actionItem]);
+
+            await executeAction(actionItem, context, mainView, history).catch(() => { /* 실패가 정상 */ });
+
+            assert.strictEqual(
+                __testHook_trackedChildProcesses(actionId).length, 0,
+                '뜨지도 못한 프로세스가 Stop All 대상으로 남았다'
+            );
+        });
     });
 });

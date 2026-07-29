@@ -593,6 +593,104 @@ suite('Password taint and redaction', function () {
             'mode:file은 actions.json의 명시적 영구 저장 정책으로 유지한다');
     });
 
+    /**
+     * 위 테스트는 비밀을 **참조하는** 태스크만 본다. 비밀을 만드는 태스크
+     * 자신은 `secretTaskIds` 에 들어가기 **전에** 자기 output 을 처리하므로,
+     * 같은 가드가 걸리는지 따로 확인해야 한다 — 이쪽이 더 직접적이다.
+     * `${ask.value}` 를 거치지 않고 비밀번호 **원문**이 그대로 나간다.
+     */
+    test('password inputBox 자신의 output.mode editor/terminal도 억제한다 (file 은 유지)', async () => {
+        const secret = 'Self-Output-S3cret';
+        const outputFile = path.join(tempWorkspace, 'self-sensitive-output.txt');
+        const originalOpen = vscode.workspace.openTextDocument;
+        const originalCreateTerminal = vscode.window.createTerminal;
+        const originalShowWarning = vscode.window.showWarningMessage;
+        let editorCalls = 0;
+        let terminalCalls = 0;
+        const warnings: string[] = [];
+        (vscode.workspace as any).openTextDocument = (..._args: unknown[]) => {
+            editorCalls++;
+            throw new Error('the password itself must not enter an untitled editor');
+        };
+        (vscode.window as any).createTerminal = (..._args: unknown[]) => {
+            terminalCalls++;
+            throw new Error('the password itself must not enter a terminal');
+        };
+        (vscode.window as any).showWarningMessage = async (message: string) => {
+            warnings.push(message);
+            return undefined;
+        };
+
+        const actionItem: ActionItem = {
+            id: 'sensitive-self-output',
+            title: 'Sensitive self output',
+            action: {
+                description: 'password task own output',
+                tasks: [
+                    {
+                        id: 'askEditor',
+                        type: 'inputBox',
+                        prompt: 'password?',
+                        password: true,
+                        passTheResultToNextTask: true,
+                        output: { mode: 'editor' },
+                    },
+                    {
+                        id: 'askTerminal',
+                        type: 'inputBox',
+                        prompt: 'password again?',
+                        password: true,
+                        passTheResultToNextTask: true,
+                        output: { mode: 'terminal' },
+                    },
+                    // `mode: file` 은 **일부러 막지 않는다** — 저장 경로가
+                    // actions.json 에 적힌 명시적 정책이기 때문이다. 새 플래그가
+                    // 이쪽까지 번지면 기존 계약이 조용히 깨지므로 함께 고정한다.
+                    {
+                        id: 'askFile',
+                        type: 'inputBox',
+                        prompt: 'password to file?',
+                        password: true,
+                        passTheResultToNextTask: true,
+                        output: { mode: 'file', filePath: outputFile, overwrite: true },
+                    },
+                ] as Task[],
+            },
+        };
+
+        try {
+            await extension.executeActionPipeline(
+                actionItem.action as PipelineAction,
+                makeContext(),
+                actionItem.id,
+                tempWorkspace,
+                [tempWorkspace],
+                {
+                    presetInputs: {
+                        askEditor: { value: secret },
+                        askTerminal: { value: secret },
+                        askFile: { value: secret },
+                    },
+                }
+            );
+        } finally {
+            (vscode.workspace as any).openTextDocument = originalOpen;
+            (vscode.window as any).createTerminal = originalCreateTerminal;
+            (vscode.window as any).showWarningMessage = originalShowWarning;
+        }
+
+        assert.strictEqual(editorCalls, 0, 'hot-exit 백업 대상인 untitled 에디터에 비밀번호가 그대로 들어갔다');
+        assert.strictEqual(terminalCalls, 0, '터미널에 비밀번호가 그대로 찍혔다');
+        assert.strictEqual(warnings.length, 2, 'editor/terminal 억제 사실을 각각 알려야 한다');
+        assert.ok(!warnings.join('\n').includes(secret), '억제 안내 문구에 비밀번호가 섞였다');
+        // `output.content` 가 없으면 결과 객체 전체가 직렬화되므로
+        // (`inputBox` 는 `{ value }`) 정확히 일치하는 대신 포함으로 본다.
+        assert.ok(
+            fs.readFileSync(outputFile, 'utf8').includes(secret),
+            'mode:file 까지 막혔다 — 명시적 저장 정책이 조용히 깨졌다'
+        );
+    });
+
     test('password-derived ZIP의 제외 symlink 경고는 경로 없이 한 줄로 요약한다', async function () {
         if (process.platform === 'win32') { this.skip(); }
 

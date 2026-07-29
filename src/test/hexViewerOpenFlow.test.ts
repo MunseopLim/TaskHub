@@ -212,4 +212,21 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         assert.ok(!fake.events.includes('create-panel'), '없는 파일에 패널을 만들었다');
         assert.ok(shownErrors.length > 0);
     });
+
+    /**
+     * 0.6.47 은 전송 순서를 보려고 호스트에 `postedMessages` 배열을 두고
+     * `getPostedMessages()` 로 노출했다. 그런데 그 push 는 프로덕션 경로에서도
+     * 실행돼, 파일당 최대 128MB 페이로드가 패널을 닫아도 남았다(0.6.48 에서 제거).
+     *
+     * 관찰은 **테스트가 주입한 가짜 패널의 `postMessage`** 가 한다 — 위 케이스들이
+     * 그렇게 순서를 검사한다. 호스트에 관찰용 사본을 다시 만들면 같은 누수가
+     * 조용히 돌아오므로, 레지스트리의 표면을 여기서 고정한다.
+     */
+    test('레지스트리는 상태를 읽기만 하고 보낸 데이터를 보관하지 않는다', () => {
+        assert.deepStrictEqual(
+            Object.keys(hexPanelRegistry).sort(),
+            ['clear', 'getHtml', 'getTitle', 'has'],
+            '레지스트리에 새 표면이 생겼다 — 페이로드를 호스트에 쌓는 관찰자가 아닌지 확인하라'
+        );
+    });
 });

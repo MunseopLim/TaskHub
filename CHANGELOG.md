@@ -29,6 +29,41 @@
 =====================================================================
 -->
 
+## [0.6.48] - 2026-07-30
+
+### 수정 — 외부 리뷰 P1 4건 (0.6.47 이 만든 회귀 1건 포함)
+
+#### High (보안: 비밀번호가 hot-exit 백업 대상으로 그대로 나갔다)
+
+- **가드가 비밀을 *참조하는* 태스크만 봤다**: 0.6.46 은 `output.mode: editor` / `terminal` 로 password 파생 출력이 나가는 것을 막았는데, 그 판정(`taskUsesSecret`)은 **앞선** 비밀 태스크를 참조하는지만 본다. 정작 비밀번호를 **입력받는 태스크 자신**은 함수 끝의 `markTaskResultSecret` 에서야 표시되므로, 출력 처리 시점에는 아직 아무 표시도 없었다. `inputBox` + `password: true` + `passTheResultToNextTask: true` + `output.mode: 'editor'` 조합이면 비밀번호 **원문**이 untitled 에디터로 들어갔고, 그 에디터는 VS Code hot-exit 백업 대상이라 디스크까지 갔다.
+- **표시 시점보다 앞서 계산한다**: `taskProducesSecret` 를 함수 진입부에서 구해 editor/terminal 가드가 함께 보게 했다. `mode: 'file'` 은 그대로 저장한다 — `actions.json` 에 경로가 적힌 명시적 영구 저장 정책이고, 0.6.46 의 판단을 그대로 잇는다. 참조: [src/extension.ts](src/extension.ts).
+
+#### High (0.6.47 회귀: 테스트용 배열이 프로덕션 메모리를 영구 점유)
+
+- **테스트 seam 이 관찰 사본을 호스트에 쌓았다**: 0.6.47 이 Hex Viewer 진입점을 테스트하려고 넣은 모듈 전역 `postedMessages` 는 "가짜 패널에서만 채워진다"고 주석에 적혀 있었지만, 실제로는 `postHexViewerData` 안에서 **무조건** push 됐다. 파일 하나당 최대 128MB(`HEX_VIEWER_MAX_SPAN`) flat 배열과 gap 비트맵이 들어가고, `clear()` 는 패널 dispose 가 부르지 않으므로 **패널을 닫아도 남는다** — 여러 파일을 열면 extension host 가 OOM 으로 간다. 0.6.42·0.6.45 에서 걷어낸 것과 같은 종류의 중복 보관을, 테스트 하네스가 되살린 셈이다.
+- **관찰은 테스트 쪽 책임으로 되돌렸다**: 배열과 `getPostedMessages()` 를 지웠다. 호출자는 처음부터 없었다 — 새 테스트는 주입한 가짜 패널의 `postMessage` 에서 직접 기록하고 있었다. 원형인 Memory Map 의 `panelRegistry` 에도 이런 배열은 없다. 참조: [src/hexViewer.ts](src/hexViewer.ts).
+
+#### Medium (미저장 데이터가 알림을 닫는 것만으로 사라졌다)
+
+- **Esc 를 '버리기' 로 해석했다**: JSON Editor 의 복구 제안에서 `showInformationMessage` 는 알림을 Esc/X 로 닫으면 `undefined` 를 준다. 코드는 '복구' 가 아닌 **모든** 응답에서 스냅샷을 지웠으므로, 결정을 미룬 것이 파기가 됐다. 원본 파일이 사라졌거나 깨져서 들어오는 fallback 경로에서는 그 스냅샷이 **유일한 복구본**이라 되돌릴 방법이 없었다.
+- **명시적으로 '버리기' 를 누른 경우에만 지운다**: 닫으면 스냅샷이 남아 다음에 다시 제안한다. 참조: [src/jsonEditor.ts](src/jsonEditor.ts).
+
+#### Medium (상태 무결성: 종료 실패 추적이 옆문으로 무효화됐다)
+
+- **`ChildProcess.error` 가 생존 여부와 무관하게 추적을 지웠다**: 0.6.46 은 `killProcessTree` 가 실제로 죽인 것을 확인한 뒤에만 registry 에서 빼도록 고쳤는데, `error` 핸들러는 그 판단 없이 맨 먼저 `cleanupChildTracking` 을 불렀다. Node 는 **kill 신호 전달 실패**에서도 `error` 를 내므로, 살아남은 flash/deploy 프로세스가 *Stop All* 의 시야에서 사라질 수 있었다.
+- **spawn 이 확인된 뒤의 error 는 추적을 유지한다**: `spawn` 이벤트로 갈라, spawn 자체가 실패한 경우(프로세스가 없다)에만 해제한다. 실제 종료는 기존대로 `close` 가 정리한다. 참조: [src/extension.ts](src/extension.ts).
+
+**테스트**: 신규 7 케이스. 수정 3건을 각각 되돌리면 **정확히 그에 대응하는 3건이 실패**한다 — 되돌린 상태에서 password 테스트의 스택은 `openTextDocument` 까지 실제로 도달해, 비밀번호가 에디터로 나가는 것을 그대로 보여준다.
+
+- **반대 방향도 함께 고정했다**: "명시적 버리기는 지운다", "`mode: file` 은 그대로 저장한다" 는 되돌린 코드에서도 통과해야 한다. 한쪽만 두면 가드를 과하게 넓히는 회귀(예: `mode: file` 까지 막기)를 잡지 못한다.
+- **첫 버전은 한쪽 분기가 비어 있었다**: `error` 핸들러에서 해제를 **통째로 빼도** 전체 스위트가 통과했다(리뷰 지적). spawn 실패 쪽 케이스를 더해 양쪽 분기를 모두 덮었다.
+- **`postedMessages` 제거는 표면으로 고정한다**: 호출자 없는 코드 삭제라 동작 테스트를 쓸 수 없다. 대신 `hexPanelRegistry` 의 키 집합을 단언해, 호스트에 관찰용 사본을 다시 만들면 실패하게 했다.
+- **테스트 자체의 함정 둘**: 확장 호스트에서 `process.execPath` 는 **Electron** 이라 `-e` 로 띄운 자식이 즉시 끝나 버렸다(제품과 무관하게 실패). PATH 의 `node` + started 마커로 바꿨다. 그리고 `output.content` 가 없으면 결과 **객체 전체**가 직렬화되므로(`inputBox` 는 `{ value }`) `mode: file` 단언을 정확히 일치에서 포함으로 고쳤다.
+
+최종 1905 passing.
+
+> 남은 것: 같은 리뷰의 P1 중 **`shell` 계약이 만든 명령 주입 표면**(마법사·번들 액션이 보간값을 raw 셸 문자열에 넣는다)과 **Windows 에서 raw `shell` 이 세 실행 모드 모두 깨지는 문제**는 다음 릴리스에서 다룬다. 둘 다 계약 변경이 필요해 이번 배치의 국소 수정과 성격이 다르다.
+
 ## [0.6.47] - 2026-07-29
 
 ### 수정 — Hex Viewer 초기 데이터 유실 + 진입점 테스트 하네스

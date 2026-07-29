@@ -26,18 +26,12 @@ export const hexPanelRegistry = {
     has(): boolean { return currentPanel !== undefined; },
     getTitle(): string | undefined { return currentPanel?.title; },
     getHtml(): string | undefined { return currentPanel?.webview.html; },
-    /** 호스트가 웹뷰로 보낸 메시지들 (테스트가 주입한 가짜 패널에서만 채워진다). */
-    getPostedMessages(): unknown[] { return postedMessages.slice(); },
     clear(): void {
         currentPanel = undefined;
         currentMessageDisposable?.dispose();
         currentMessageDisposable = undefined;
-        postedMessages.length = 0;
     },
 };
-
-/** `postHexViewerData` 가 보낸 메시지 기록. 테스트가 순서를 검사한다. */
-const postedMessages: unknown[] = [];
 // standalone 패널(단일 인스턴스) 전용 메시지 disposable. Custom Editor
 // (HexEditorProvider)는 인스턴스가 여러 개일 수 있으므로 resolveCustomEditor
 // 지역에서 자체 관리한다 — 전역 하나를 공유하면 패널/에디터를 오갈 때
@@ -319,9 +313,13 @@ export function buildHexViewerPayload(result: HexParseResult): HexViewerPayload 
  */
 export function postHexViewerData(webview: vscode.Webview, result: HexParseResult): void {
     const payload = buildHexViewerPayload(result);
-    const message = { command: 'hexData', data: payload.data, gap: payload.gap };
-    postedMessages.push(message);
-    void webview.postMessage(message);
+    // 보낸 메시지를 호스트가 **기록하지 않는다**. 0.6.47 이 테스트용으로 모듈
+    // 전역 배열에 push 했는데, 그 경로는 프로덕션에서도 무조건 실행됐다 —
+    // 파일 하나당 최대 `HEX_VIEWER_MAX_SPAN`(128MB) flat 배열과 gap 비트맵이
+    // 패널을 닫아도 남아, 여러 파일을 열면 extension host 가 OOM 으로 간다.
+    // 전송 순서를 봐야 하는 테스트는 주입한 가짜 패널의 `postMessage` 에서
+    // 직접 기록한다(hexViewerOpenFlow.test.ts) — 관찰은 테스트 쪽 책임이다.
+    void webview.postMessage({ command: 'hexData', data: payload.data, gap: payload.gap });
 }
 
 export function buildHexViewerHtml(fileName: string, result: HexParseResult, webview?: vscode.Webview): string {

@@ -187,7 +187,14 @@ async function offerRecoveryIfAny(
     if (choice === recoverLabel) {
         return entry;
     }
-    await setRecoveryEntry(context, filePath, null);
+    // **명시적으로 '버리기'를 누른 경우에만** 스냅샷을 지운다. 알림을 Esc/X 로
+    // 닫으면 `choice` 는 `undefined` 인데, 그것을 '버리기'와 같이 처리하면
+    // 사용자가 결정을 미룬 것을 파기로 해석하는 셈이다. 원본 파일이 사라졌거나
+    // 깨진 fallback 경로(`earlyError`)에서는 이 스냅샷이 **유일한 복구본**이라,
+    // 알림을 무심코 닫는 것만으로 미저장 변경이 영영 사라졌다.
+    if (choice === discardLabel) {
+        await setRecoveryEntry(context, filePath, null);
+    }
     return null;
 }
 

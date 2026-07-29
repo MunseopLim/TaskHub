@@ -2842,6 +2842,24 @@ interface ChildProcessBucket {
 
 const actionChildProcesses = new Map<string, Map<string, ChildProcessBucket>>();
 
+/**
+ * Test seam: 지금 이 액션에 대해 *Stop All* 이 볼 수 있는 자식 프로세스들.
+ *
+ * 추적 해제 규칙("죽은 것이 확인된 뒤에만 뺀다")은 registry 를 들여다보지
+ * 않으면 검증할 수 없다. 상태를 **읽기만** 하고 아무것도 보관하지 않으므로
+ * 프로덕션 메모리에 영향이 없다 — 0.6.47 의 `postedMessages` 처럼 관찰용
+ * 사본을 호스트에 쌓지 않는다.
+ */
+export function __testHook_trackedChildProcesses(actionId: string): ReturnType<typeof spawn>[] {
+    const perAction = actionChildProcesses.get(actionId);
+    if (!perAction) { return []; }
+    const found: ReturnType<typeof spawn>[] = [];
+    for (const bucket of perAction.values()) {
+        for (const child of bucket.processes) { found.push(child); }
+    }
+    return found;
+}
+
 function taskGenerationBucketKey(taskId: string, generation?: number): string {
     return `${generation ?? 'legacy'}\u0000${taskId}`;
 }
@@ -5056,6 +5074,12 @@ async function executeSingleTask(
     // dialogs and must not accidentally adopt a newer run of the same id.
     if (!scope) { throw new Error(`Task '${task.id}' is missing its execution scope.`); }
     const executionRun = scope.run;
+    // `taskUsesSecret` 은 **앞선** 비밀 태스크를 참조하는지만 본다. 비밀을
+    // 직접 만드는 태스크 자신은 `markTaskResultSecret` 이 이 함수 끝에서야
+    // 표시하므로, 그때까지는 두 플래그 모두 false 다 — 그 사이에 있는
+    // `output.mode` 처리가 비밀번호를 그대로 내보냈다. 출력 가드가 쓸 수
+    // 있도록 여기서 미리 계산한다.
+    const taskProducesSecret = task.type === 'inputBox' && task.password === true;
     const defaultWorkspace = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const interpolationContext = { ...allResults, workspaceFolder: defaultWorkspace, extensionPath: context.extensionPath };
     let result: any;
@@ -5418,11 +5442,15 @@ async function executeSingleTask(
 
         switch (interpolatedOutput.mode) {
             case 'editor':
-                if (taskUsesSecret) {
+                if (taskUsesSecret || taskProducesSecret) {
                     // An untitled editor participates in VS Code hot-exit
                     // backup. Treat it as persistence, not as an ephemeral
                     // preview, and require the explicit sensitive-debug flow
                     // instead of placing raw password-derived output there.
+                    //
+                    // `taskProducesSecret` covers the password inputBox itself:
+                    // with `passTheResultToNextTask` its own output IS the
+                    // password, and it is not yet in `secretTaskIds` here.
                     vscode.window.showWarningMessage(t(
                         `태스크 '${task.id}'의 에디터 출력을 숨겼습니다. password 입력에서 파생된 출력은 민감 디버그 재실행에서만 볼 수 있습니다.`,
                         `Editor output for task '${task.id}' was hidden. Password-derived output is only available through a sensitive-debug re-run.`
@@ -5456,7 +5484,7 @@ async function executeSingleTask(
                 break;
             case 'terminal':
                 {
-                    if (taskUsesSecret) {
+                    if (taskUsesSecret || taskProducesSecret) {
                         vscode.window.showWarningMessage(t(
                             `태스크 '${task.id}'의 터미널 출력을 숨겼습니다. password 입력에서 파생된 출력은 민감 디버그 재실행에서만 볼 수 있습니다.`,
                             `Terminal output for task '${task.id}' was hidden. Password-derived output is only available through a sensitive-debug re-run.`
@@ -5485,7 +5513,7 @@ async function executeSingleTask(
         }
     }
     throwIfTaskInactive(scope);
-    if (taskUsesSecret || (task.type === 'inputBox' && task.password === true)) {
+    if (taskUsesSecret || taskProducesSecret) {
         markTaskResultSecret(executionRun, task.id);
     }
     return result;
@@ -6969,6 +6997,14 @@ export function executeShellCommand(
         const attachChildHandlers = (allowPowerShellFallback: boolean) => {
             const attachedChild = childProcess;
             trackChildProcess();
+            // Node 는 'error' 를 두 가지 상황에서 낸다: **spawn 실패**(프로세스가
+            // 아예 없다)와 **kill 신호 전달 실패**(프로세스는 살아 있다). 후자에서
+            // 추적을 해제하면 살아남은 flash/deploy 프로세스를 *Stop All* 이
+            // 다시 찾지 못한다 — `killProcessTree` 결과를 보고서야 해제하는
+            // 위쪽 계약과 정확히 같은 이유다. 'spawn' 이 온 뒤의 error 는
+            // 추적을 유지하고, 실제 종료는 'close' 가 정리한다.
+            let spawnConfirmed = false;
+            attachedChild.on('spawn', () => { spawnConfirmed = true; });
             // 비밀이 보간된 명령은 가린 것으로 찍는다 — 로그 파일은 공유되기
             // 쉽고, 이력에서 가린 값이 여기로 새면 의미가 없다.
             if (showVerboseLogs) {
@@ -7030,7 +7066,11 @@ export function executeShellCommand(
             });
 
             attachedChild.on('error', (err) => {
-                cleanupChildTracking(attachedChild);
+                if (!spawnConfirmed) {
+                    // spawn 자체가 실패했다 — 프로세스가 없으므로 추적에 남길
+                    // 이유가 없고, 남기면 Stop All 이 죽은 항목을 붙잡는다.
+                    cleanupChildTracking(attachedChild);
+                }
                 if (attachedChild !== childProcess || settled) {
                     return;
                 }
