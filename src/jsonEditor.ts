@@ -8,6 +8,41 @@ import { shouldOfferRecovery, RecoveryEntry, RecoveryStore, makeRecoveryStore } 
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 
 let currentPanel: vscode.WebviewPanel | undefined;
+
+/**
+ * 패널 레지스트리 — **테스트용으로 노출한다** (Memory Map 의 `panelRegistry`,
+ * Hex Viewer 의 `hexPanelRegistry` 와 같은 형태).
+ *
+ * 이게 없어서 JSON Editor 테스트는 순수 함수(`getWebviewContent`)만 부를 수
+ * 있었고, 실제 진입점인 `openJsonEditorFile` 은 **어느 테스트도 실행하지
+ * 않았다**. 파일 읽기·크기 검사·복구 스냅샷 제안·dirty 처리가 모두 그 안에
+ * 있는데, 그 경로는 함수의 **소스 텍스트를 정규식으로** 검사하고 있었다 —
+ * 로직이 틀려도 통과하는 방식이다.
+ */
+export const jsonPanelRegistry = {
+    has(): boolean { return currentPanel !== undefined; },
+    getFilePath(): string | undefined { return currentFilePath; },
+    getTitle(): string | undefined { return currentPanel?.title; },
+    getHtml(): string | undefined { return currentPanel?.webview.html; },
+    isDirty(): boolean { return currentIsDirty; },
+    clear(): void {
+        currentPanel = undefined;
+        currentMessageDisposable?.dispose();
+        currentMessageDisposable = undefined;
+        currentIsDirty = false;
+        currentFilePath = undefined;
+        currentFileWatcher?.dispose();
+        currentFileWatcher = undefined;
+        if (currentSnapshotTimer) { clearTimeout(currentSnapshotTimer); }
+        currentSnapshotTimer = undefined;
+        currentPendingSnapshot = undefined;
+        // 복구 저장소는 **모듈 싱글턴**이라 첫 컨텍스트에 묶인다. 실전에서는
+        // 컨텍스트가 하나뿐이라 문제가 없지만, 테스트는 케이스마다 새
+        // workspaceState 를 주므로 여기서 놓아 주지 않으면 이전 케이스의
+        // 저장소를 계속 본다.
+        recoveryStoreInstance = undefined;
+    },
+};
 let currentMessageDisposable: vscode.Disposable | undefined;
 let currentIsDirty = false;
 let currentFilePath: string | undefined;
@@ -41,7 +76,8 @@ let currentFlushPendingSnapshot: (() => Promise<void>) | undefined;
 let currentLastWriteMtime: number | undefined;
 let currentLastWriteSize: number | undefined;
 
-const RECOVERY_STATE_KEY = 'taskhub.jsonEditor.recovery';
+/** workspaceState 안의 복구 스냅샷 키. 테스트가 같은 키로 seed 할 수 있게 노출한다. */
+export const RECOVERY_STATE_KEY = 'taskhub.jsonEditor.recovery';
 const SNAPSHOT_DEBOUNCE_MS = 300;
 
 /**
