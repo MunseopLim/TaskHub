@@ -1128,34 +1128,61 @@ export function windowsCommandIsDirectlyLaunchable(
     return false;
 }
 
-/** Windows 에서 raw `shell` 문자열을 넘길 인터프리터. */
-export interface WindowsRawShell {
-    executable: string;
-    /** `&&` / `||` 를 파싱할 수 있는가. Windows PowerShell 5.1 은 못 한다. */
-    supportsChainOperators: boolean;
+/**
+ * 명령 문자열이 PowerShell 7 이상을 요구하는 연산자를 쓰는가.
+ *
+ * **인용 구간은 세지 않는다.** `cmd /c "build && test"` 의 `&&` 는 문자열
+ * 리터럴 안이라 Windows PowerShell 5.1 도 문제없이 파싱한다 — 오히려 이것이
+ * 5.1 에서 chain 을 쓰는 **정석 우회법**이고, 우리 문서도 `cmd /c …` 형태를
+ * 가르친다. 인용을 무시하고 스캔하면 그 우회법을 우리가 차단하면서 "PowerShell
+ * 7 을 설치하라" 는 엉뚱한 안내를 하게 된다.
+ *
+ * `args` 는 아예 넘기지 않는다 — 우리가 항상 인용해서 붙이므로 그 안의 `&&` 는
+ * 연산자가 될 수 없다.
+ */
+export function rawCommandUsesChainOperators(command: string): boolean {
+    const withoutQuoted = command.replace(/'[^']*'|"[^"]*"/g, '');
+    return /&&|\|\|/.test(withoutQuoted);
 }
 
 /**
- * raw `shell` 을 실행할 Windows 셸을 고른다.
+ * `pwsh.exe`(PowerShell 7+)를 찾을 수 있는가.
+ *
+ * PATH 를 먼저 보고, 없으면 기본 설치 경로도 확인한다 — PATH 등록 없이 설치한
+ * 경우가 흔하고, 이 판정이 실패하면 (chain 연산자를 쓰는 명령에서) **태스크가
+ * 아예 실패**하므로 false negative 의 대가가 크다.
+ */
+export function pwshIsAvailable(lookup: Partial<WindowsExecutableLookup> = {}): boolean {
+    if (windowsCommandIsDirectlyLaunchable('pwsh', [], lookup)) { return true; }
+    const env = lookup.env ?? defaultWindowsExecutableLookup.env;
+    const isFile = lookup.isFile ?? defaultWindowsExecutableLookup.isFile;
+    const programFiles = [env.ProgramFiles, env['ProgramFiles(x86)']].filter((v): v is string => !!v);
+    return programFiles.some(root => isFile(path.win32.join(root, 'PowerShell', '7', 'pwsh.exe')));
+}
+
+/**
+ * raw `shell` 을 실행할 Windows 인터프리터. 못 고르면 `undefined`.
  *
  * `powershell.exe` 는 **Windows PowerShell 5.1** 이고 `&&` / `||` 를 지원하지
- * 않는다 (PowerShell 7 부터 도입, 실행 파일 이름은 `pwsh.exe`). 0.6.47 이
- * `shell` 을 "셸에 그대로 넘긴다" 로 정의하면서 Windows 는 `powershell.exe` 로
- * 고정했는데, 그러면 문서가 동작한다고 적은 `&&` 가 **파스 오류**로 끝난다.
+ * 않는다 (PowerShell 7 부터 도입, 실행 파일 이름은 `pwsh.exe`). 0.6.47 은
+ * Windows 를 `powershell.exe` 로 고정했고, 그래서 문서가 동작한다고 적은 `&&` 가
+ * 파스 오류로 끝났다.
+ *
+ * **chain 연산자를 쓸 때만 `pwsh` 로 간다.** 무조건 `pwsh` 를 선호하면 이미
+ * 동작하던 액션의 의미가 조용히 바뀐다 — PS 7 은 `curl`/`wget` 별칭을 없앴고
+ * `>` 의 기본 인코딩도 다르다. 게다가 같은 `actions.json` 이 pwsh 설치 여부에
+ * 따라 기계마다 다르게 동작하게 된다. 필요할 때만 바꾸면 그 두 문제가 사라진다.
  *
  * `cmd.exe` 로 가는 선택지도 있었지만 택하지 않았다 — 명령 문자열을 인용 없이
  * 넘길 안전한 통로가 `-EncodedCommand`(base64) 뿐이고, 그것이 PowerShell 계열
  * 에만 있다. cmd 로 가면 인용 문제를 우리가 다시 떠안는다.
+ *
+ * 참고: PowerShell **6** 의 실행 파일도 `pwsh.exe` 이고 거기에는 `&&` 가 없다
+ * (7.0 에서 도입). PS 6 은 EOL 이라 그 구분까지는 하지 않는다.
  */
-export function resolveWindowsRawShell(lookup: Partial<WindowsExecutableLookup> = {}): WindowsRawShell {
-    return windowsCommandIsDirectlyLaunchable('pwsh', [], lookup)
-        ? { executable: 'pwsh.exe', supportsChainOperators: true }
-        : { executable: 'powershell.exe', supportsChainOperators: false };
-}
-
-/** 명령 문자열이 PowerShell 7 이상을 요구하는 연산자를 쓰는가. */
-export function rawCommandUsesChainOperators(command: string): boolean {
-    return /&&|\|\|/.test(command);
+export function selectWindowsRawShell(needsChainOperators: boolean, pwshAvailable: boolean): string | undefined {
+    if (!needsChainOperators) { return 'powershell.exe'; }
+    return pwshAvailable ? 'pwsh.exe' : undefined;
 }
 
 /**

@@ -308,11 +308,15 @@ Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.tx
 | 플랫폼 | 인터프리터 | 비고 |
 | --- | --- | --- |
 | macOS / Linux | 스트림 모드는 VS Code 의 기본 셸, 캡처 모드(`passTheResultToNextTask: true`)는 `/bin/sh` | `[[ ... ]]` 같은 bash/zsh 전용 문법은 캡처를 켜는 순간 실패할 수 있습니다 |
-| Windows | `pwsh.exe`(PowerShell 7)가 PATH 에 있으면 그것, 없으면 `powershell.exe`(Windows PowerShell 5.1) | 아래 참조 |
+| Windows | 기본은 `powershell.exe`(Windows PowerShell 5.1). 명령이 `&&` / `||` 를 쓸 때만 `pwsh.exe`(PowerShell 7) | 아래 참조 |
 
-**Windows PowerShell 5.1 에는 `&&` 와 `||` 가 없습니다** (PowerShell 7 부터 도입). `pwsh.exe` 가 없는 환경에서 이 연산자를 쓰면 TaskHub 가 실행 전에 그 사실을 설명하는 오류로 멈춥니다 — 5.1 에 그대로 넘기면 *"The token '&&' is not a valid statement separator"* 라는, 사용자가 자기 명령의 문제로 읽게 되는 파스 오류만 남기 때문입니다. `|`·`>`·`;` 는 5.1 에서도 동작하므로 막지 않습니다.
+**Windows PowerShell 5.1 에는 `&&` 와 `||` 가 없습니다** (PowerShell 7 부터 도입). 그래서 명령이 이 연산자를 쓸 때만 `pwsh.exe` 를 찾습니다 — PATH 와 기본 설치 경로(`%ProgramFiles%\PowerShell\7`) 양쪽을 봅니다. 찾지 못하면 실행 전에 그 사실을 설명하는 오류로 멈춥니다. 5.1 에 그대로 넘기면 *"The token '&&' is not a valid statement separator"* 라는, 사용자가 자기 명령의 문제로 읽게 되는 파스 오류만 남기 때문입니다.
 
 이 경우 PowerShell 7 을 설치하거나, **태스크를 둘로 나누세요.** 파이프라인은 앞 단계가 실패하면 뒤 단계를 실행하지 않으므로 `&&` 와 의미가 같고, 어느 단계에서 실패했는지도 드러납니다.
+
+**연산자를 쓰지 않는 명령은 PowerShell 7 이 설치돼 있어도 계속 5.1 에서 실행됩니다.** 두 버전은 완전히 같지 않아서(예: `curl`/`wget` 이 더 이상 `Invoke-WebRequest` 의 별칭이 아니고, `>` 의 기본 인코딩도 다릅니다) 무조건 바꾸면 이미 동작하던 액션의 의미가 조용히 달라지고, 같은 `actions.json` 이 기계마다 다르게 돌게 됩니다.
+
+`|`·`>`·`;` 는 5.1 에서도 동작하므로 막지 않습니다. **인용 안의 `&&` 도 막지 않습니다** — `cmd /c "build && test"` 는 5.1 에서 chain 을 쓰는 정석 우회법이고, 그 `&&` 는 문자열 리터럴 안이라 PowerShell 이 해석하지 않습니다. `args` 배열은 항상 인용되므로 그 안의 내용도 검사 대상이 아닙니다.
 
 같은 이유로 **셸 변수 확장도 일어나지 않습니다.** `echo $MY_VAR` 는 `echo '$MY_VAR'` 가 되어 값이 아니라 `$MY_VAR` 라는 글자를 출력합니다(Windows 의 `%MY_VAR%` 도 같습니다). `env` 로 넘긴 값은 자식 프로세스의 환경에는 **정상적으로 들어가므로**, 그 값을 읽는 것은 셸이 아니라 실행되는 프로그램의 몫입니다 — 예: `printenv MY_VAR`, `cmd /c echo %MY_VAR%`, `node -e "console.log(process.env.MY_VAR)"`. 반면 TaskHub 자신의 변수 치환(`${task_id.output}`, `${workspaceFolder}` 등)은 토큰화 **이전**에 일어나므로 그대로 동작합니다.
 

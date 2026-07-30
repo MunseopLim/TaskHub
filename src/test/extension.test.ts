@@ -34,11 +34,12 @@ import {
 	buildPowerShellInvocation,
 	buildNativeCommandInvocation,
 	windowsCommandIsDirectlyLaunchable,
-	resolveWindowsRawShell,
+	selectWindowsRawShell,
+	pwshIsAvailable,
 	rawCommandUsesChainOperators,
 	windowsSpawnStrategy,
 	buildRawOneShotWindowsScript,
-	assertWindowsRawShellSupports,
+	resolveRawShellExecutable,
 	buildPosixCommandLine,
 	encodePowerShellScript,
 	wrapCommandForOneShot,
@@ -592,19 +593,30 @@ suite('Extension Test Suite', () => {
 			isFile: (p: string) => p === 'C:\\bin\\node.exe',
 		};
 
-		test('pwsh.exe 가 PATH 에 있으면 그것을 쓴다 (&& 지원)', () => {
-			assert.deepStrictEqual(resolveWindowsRawShell(withPwsh), {
-				executable: 'pwsh.exe', supportsChainOperators: true,
-			});
+		test('pwsh 를 PATH 와 기본 설치 경로 양쪽에서 찾는다', () => {
+			assert.strictEqual(pwshIsAvailable(withPwsh), true);
+			assert.strictEqual(pwshIsAvailable(withoutPwsh), false);
+			// PATH 등록 없이 설치한 경우가 흔하다. 이 판정이 틀리면 (chain 을 쓰는
+			// 명령에서) 태스크가 아예 실패하므로 false negative 의 대가가 크다.
+			assert.strictEqual(pwshIsAvailable({
+				env: { PATH: 'C:\\bin', ProgramFiles: 'C:\\Program Files' },
+				isFile: (p: string) => p === 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+			}), true);
+			// PATH 키가 아예 없어도 죽지 않는다.
+			assert.strictEqual(pwshIsAvailable({ env: {}, isFile: () => false }), false);
 		});
 
-		test('없으면 powershell.exe 로 떨어지고 && 를 지원하지 않는다고 표시한다', () => {
-			assert.deepStrictEqual(resolveWindowsRawShell(withoutPwsh), {
-				executable: 'powershell.exe', supportsChainOperators: false,
-			});
+		test('chain 연산자가 없으면 pwsh 가 있어도 5.1 을 그대로 쓴다', () => {
+			// 무조건 pwsh 를 선호하면 이미 동작하던 액션의 의미가 바뀐다 (PS 7 은
+			// curl/wget 별칭을 없앴고 `>` 의 기본 인코딩도 다르다). 필요할 때만
+			// 바꿔야 같은 actions.json 이 기계마다 다르게 돌지 않는다.
+			assert.strictEqual(selectWindowsRawShell(false, true), 'powershell.exe');
+			assert.strictEqual(selectWindowsRawShell(false, false), 'powershell.exe');
+			assert.strictEqual(selectWindowsRawShell(true, true), 'pwsh.exe');
+			assert.strictEqual(selectWindowsRawShell(true, false), undefined);
 		});
 
-		test('rawCommandUsesChainOperators 는 && / || 만 본다', () => {
+		test('rawCommandUsesChainOperators 는 && / || 만, 그리고 인용 밖에서만 본다', () => {
 			assert.strictEqual(rawCommandUsesChainOperators('a && b'), true);
 			assert.strictEqual(rawCommandUsesChainOperators('a || b'), true);
 			// 5.1 도 파이프와 리다이렉션·세미콜론은 파싱한다 — 이것까지 막으면
@@ -612,20 +624,27 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(rawCommandUsesChainOperators('a | b'), false);
 			assert.strictEqual(rawCommandUsesChainOperators('a > out.txt'), false);
 			assert.strictEqual(rawCommandUsesChainOperators('a; b'), false);
+			// **인용 안의 `&&` 는 연산자가 아니다.** `cmd /c "a && b"` 는 5.1 에서
+			// chain 을 쓰는 정석 우회법이고 문서도 그 형태를 가르친다 — 이것을
+			// 막으면 우회법 자체를 차단하면서 엉뚱한 안내를 하게 된다.
+			assert.strictEqual(rawCommandUsesChainOperators('cmd /c "build && test"'), false);
+			assert.strictEqual(rawCommandUsesChainOperators("git commit -m 'fix && cleanup'"), false);
+			assert.strictEqual(rawCommandUsesChainOperators('grep -E "foo||bar" file'), false);
+			// 인용 밖에 진짜 연산자가 함께 있으면 여전히 잡는다.
+			assert.strictEqual(rawCommandUsesChainOperators('echo "a && b" && ls'), true);
 		});
 
-		test('5.1 에 && 를 넘기려 하면 원인과 해결책을 담아 실패한다', () => {
+		test('5.1 에 && 를 넘기려 하면 원인과 해결책을 담아 실패한다', function () {
+			if (process.platform !== 'win32') { this.skip(); }
 			assert.throws(
-				() => assertWindowsRawShellSupports('make && make flash', withoutPwsh),
+				() => resolveRawShellExecutable('make && make flash', withoutPwsh),
 				/PowerShell 7|pwsh/,
 				'파스 오류로 넘기지 말고 이유를 설명해야 한다'
 			);
-			// pwsh 가 있으면 그대로 통과한다.
-			assert.strictEqual(
-				assertWindowsRawShellSupports('make && make flash', withPwsh).executable, 'pwsh.exe');
-			// 연산자가 없으면 5.1 에서도 통과한다.
-			assert.strictEqual(
-				assertWindowsRawShellSupports('make flash', withoutPwsh).executable, 'powershell.exe');
+			assert.strictEqual(resolveRawShellExecutable('make && make flash', withPwsh), 'pwsh.exe');
+			assert.strictEqual(resolveRawShellExecutable('make flash', withoutPwsh), 'powershell.exe');
+			// args 는 우리가 인용하므로 스캔 대상이 아니다 — command 만 넘긴다.
+			assert.strictEqual(resolveRawShellExecutable('cmd /c "a && b"', withoutPwsh), 'powershell.exe');
 		});
 
 		test('raw 는 직접 실행 가능한 명령이어도 native argv 경로를 타지 않는다', () => {
@@ -635,6 +654,101 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(windowsSpawnStrategy(true, false), 'raw-shell');
 			assert.strictEqual(windowsSpawnStrategy(false, true), 'native');
 			assert.strictEqual(windowsSpawnStrategy(false, false), 'powershell');
+		});
+
+		/** `-EncodedCommand` 페이로드를 되돌려 실제로 무엇이 넘어가는지 본다. */
+		function decodeEncodedCommand(script: string): string {
+			const m = script.match(/-EncodedCommand', '([A-Za-z0-9+/=]+)'/)
+				?? script.match(/-EncodedCommand ([A-Za-z0-9+/=]+)/);
+			assert.ok(m, `인코딩된 명령을 찾을 수 없다: ${script}`);
+			return Buffer.from(m![1], 'base64').toString('utf16le');
+		}
+
+		suite('실제 분기 (win32 강제)', () => {
+			function onWin32<T>(fn: () => T): T {
+				const originalPlatform = process.platform;
+				try {
+					Object.defineProperty(process, 'platform', { value: 'win32' });
+					return fn();
+				} finally {
+					Object.defineProperty(process, 'platform', { value: originalPlatform });
+				}
+			}
+
+			test('one-shot raw 는 Start-Process 로 감싸고 원본 줄을 표시한다', () => {
+				const result = onWin32(() => wrapCommandForOneShot(
+					'echo hi > out.txt', [], 'C:\\proj', false, withoutPwsh.env, true, withoutPwsh
+				));
+
+				assert.strictEqual(result.isPowerShellScript, true);
+				assert.ok(result.commandLine.startsWith("Start-Process -FilePath 'powershell.exe'"), result.commandLine);
+				// **표시는 원본 줄이다** — 다른 형제 분기와 달리 여기만 다르다.
+				// 스크립트를 그대로 보여주면 이력과 로그가 읽을 수 없게 된다.
+				assert.strictEqual(result.displayCommand, 'echo hi > out.txt');
+				// 이중 인코딩 계약: 안쪽 페이로드가 사용자 명령 그대로여야 한다.
+				assert.strictEqual(decodeEncodedCommand(result.commandLine), 'echo hi > out.txt');
+			});
+
+			test('one-shot raw 는 useUtf8Console 을 안쪽 페이로드에 붙인다', () => {
+				const result = onWin32(() => wrapCommandForOneShot(
+					'echo hi', [], undefined, true, withoutPwsh.env, true, withoutPwsh
+				));
+				assert.strictEqual(
+					decodeEncodedCommand(result.commandLine),
+					'[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\necho hi'
+				);
+			});
+
+			test('one-shot raw 는 5.1 에서 && 를 만나면 던진다', () => {
+				assert.throws(
+					() => onWin32(() => wrapCommandForOneShot(
+						'make && make flash', [], undefined, false, withoutPwsh.env, true, withoutPwsh
+					)),
+					/PowerShell 7|pwsh/
+				);
+			});
+
+			test('스트림 모드 raw 는 고른 인터프리터에 인코딩해 넘긴다', () => {
+				const result = onWin32(() => createShellExecution(
+					'echo hi && echo bye', [], {}, false, true, withPwsh
+				));
+				const exec = result.shellExecution as vscode.ShellExecution;
+				// chain 연산자가 있으니 pwsh 로 간다.
+				assert.strictEqual(exec.command, 'pwsh.exe');
+				assert.strictEqual((exec.args?.[0] as string), '-NoProfile');
+				assert.strictEqual(decodeEncodedCommand(`-EncodedCommand ${exec.args?.[2] as string}`), 'echo hi && echo bye');
+				assert.strictEqual(result.displayCommand, 'echo hi && echo bye');
+				assert.strictEqual(result.usesNativeExecution, undefined, 'raw 가 native 로 갔다');
+			});
+
+			test('스트림 모드 raw 는 연산자가 없으면 5.1 을 그대로 쓴다', () => {
+				const exec = onWin32(() => createShellExecution(
+					'make flash', [], {}, false, true, withPwsh
+				)).shellExecution as vscode.ShellExecution;
+				assert.strictEqual(exec.command, 'powershell.exe');
+			});
+		});
+
+		test('POSIX one-shot raw 는 sh -c 로 감싸 그룹과 리다이렉션을 지킨다', function () {
+			if (process.platform === 'win32') { this.skip(); }
+			// 예전에는 `nohup <line> >/dev/null 2>&1 &` 로 문자열을 그대로 끼워
+			// 넣어서 (실측) ① 사용자의 `> out.txt` 가 우리 `>/dev/null` 에 덮이고
+			// ② `sleep 3; touch m` 의 `;` 앞이 포그라운드에서 돌아 one-shot 이
+			// detach 되지 않았다.
+			const redirect = wrapCommandForOneShot('echo hi > out.txt', [], undefined, false, process.env, true);
+			assert.ok(
+				redirect.commandLine.includes("sh -c 'echo hi > out.txt'"),
+				`사용자 리다이렉션이 래퍼 안에 갇히지 않았다: ${redirect.commandLine}`
+			);
+			assert.ok(redirect.commandLine.endsWith('>/dev/null 2>&1 &'));
+
+			const sequence = wrapCommandForOneShot('sleep 3; touch m', [], undefined, false, process.env, true);
+			assert.ok(
+				sequence.commandLine.includes("sh -c 'sleep 3; touch m'"),
+				`\`;\` 앞이 포그라운드로 남는다: ${sequence.commandLine}`
+			);
+			// 표시는 스크립트가 아니라 사용자 명령이다.
+			assert.strictEqual(sequence.displayCommand, 'sleep 3; touch m');
 		});
 
 		test('one-shot 은 인터프리터를 Start-Process 로 떼어 내고 명령은 인코딩해 넘긴다', () => {
