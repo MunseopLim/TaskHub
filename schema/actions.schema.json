@@ -110,7 +110,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Options for 'fileDialog' or 'folderDialog' types, based on VS Code's OpenDialogOptions."
+          "description": "Options for 'fileDialog' or 'folderDialog' types, based on VS Code's OpenDialogOptions. Set 'canSelectMany': true on a fileDialog to let the user pick several files; the selected paths are then available as ${taskId.paths} (array), ${taskId.names}, and ${taskId.count}."
         },
         "prompt": {
           "type": "string",

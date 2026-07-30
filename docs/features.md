@@ -524,14 +524,60 @@ Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.tx
     - `title` (string): 다이얼로그 제목.
     - `defaultUri` (string, URI 형식): 다이얼로그가 처음 열릴 위치.
     - `filters` (object): 확장자 필터 (예: `{ "Firmware": ["elf", "bin", "hex"] }`).
-    - `canSelectMany` (boolean, 기본 false): 다중 선택 허용. **주의**: 현재 첫 번째 선택값만 task 결과로 노출되므로 다중 선택은 권장하지 않습니다.
+    - `canSelectMany` (boolean, 기본 false): 다중 선택 허용. 고른 파일 **전부**가 `${task_id.paths}` 로 노출됩니다 (0.6.51부터 — 이전에는 첫 번째만 쓰고 나머지를 조용히 버렸습니다).
     - `canSelectFiles` / `canSelectFolders` (boolean): 기본값(파일만 선택 가능) 그대로 두면 됩니다. 폴더 전용 다이얼로그가 필요하면 `fileDialog` 대신 `folderDialog`를 사용하세요.
-- **실행 결과**: 선택된 파일 경로를 분해해 다음 태스크가 참조할 수 있도록 합니다.
+- **실행 결과**: 선택된 파일 경로를 분해해 다음 태스크가 참조할 수 있도록 합니다. 단일 필드는 다중 선택일 때 **첫 번째 파일**을 가리킵니다.
     - `${task_id.path}` — 절대 경로 (예: `C:/proj/build/app.elf`)
     - `${task_id.dir}` — 부모 디렉터리 (예: `C:/proj/build`)
     - `${task_id.name}` — 파일명(확장자 포함, 예: `app.elf`)
     - `${task_id.fileNameOnly}` — 확장자를 제외한 파일명 (예: `app`)
     - `${task_id.fileExt}` — 확장자(앞의 `.` 제외, 예: `elf`)
+    - `${task_id.paths}` — **고른 파일 전체**의 절대 경로 (배열)
+    - `${task_id.names}` — 각 파일명(확장자 포함, 배열)
+    - `${task_id.count}` — 고른 파일 개수
+
+#### 여러 파일을 명령 인자로 넘기기
+
+`args` 배열의 원소가 **정확히 배열 참조 하나**(`"${pick.paths}"` — 앞뒤에 다른 글자가 없음)이면, 그 자리가 **고른 파일 수만큼의 인자**로 펼쳐집니다. 개수가 정해지지 않은 위치 인자를 받는 스크립트에 그대로 맞출 수 있습니다.
+
+```json
+{
+  "tasks": [
+    {
+      "id": "pick",
+      "type": "fileDialog",
+      "options": {
+        "canSelectMany": true,
+        "openLabel": "Select bin files",
+        "filters": { "Binary": ["bin"] }
+      }
+    },
+    {
+      "id": "report",
+      "type": "command",
+      "command": "py",
+      "args": [
+        "-3", "make_report.py",
+        "${pick.paths}",
+        "--debug-dir", "c:\\test\\debug",
+        "--output", "result.html",
+        "--with-slow"
+      ]
+    }
+  ]
+}
+```
+
+파일 세 개를 고르면 실제 실행은 이렇게 됩니다.
+
+```
+py -3 make_report.py c:\test\test1.bin c:\test\test2.bin c:\test\test3.bin --debug-dir c:\test\debug --output result.html --with-slow
+```
+
+- **경로에 공백이 있어도 안전합니다.** 각 항목이 별도 argv 원소로 들어가므로 `c:\my docs\a.bin` 이 두 인자로 갈라지지 않습니다. 명령 문자열에 이어 붙이는 방식으로는 이것을 지킬 수 없습니다.
+- **하나만 골라도, 하나도 못 골라도 동작합니다.** 1개면 인자 1개, 0개면 그 자리가 사라집니다(빈 인자를 남기지 않습니다).
+- **앞뒤에 글자가 붙으면 펼치지 않습니다.** `"--file=${pick.paths}"` 는 각 항목에 접두사를 붙이라는 뜻인지 이어 붙이라는 뜻인지 알 수 없어, 평소 규칙(문자열 보간)대로 둡니다. 항목마다 옵션을 붙여야 한다면 스크립트 쪽에서 위치 인자를 받도록 하는 편이 간단합니다.
+- 명령 **문자열**(`command`)에 `${pick.paths}` 를 넣으면 펼쳐지지 않고 인자 하나가 됩니다 — 여러 인자로 넘기려면 반드시 `args` 를 쓰세요.
 
 ### `folderDialog` 태스크
 

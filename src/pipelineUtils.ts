@@ -301,18 +301,58 @@ export function interpolatePipelineVariables(template: string, context: any): st
     if (typeof template !== 'string') { return template; }
     const regex = /\${([^}]+)}/g;
     return template.replace(regex, (match, expression) => {
-        let foundValue: any;
-        const parts = expression.split('.');
-        const stepId = parts[0];
-        const property = parts.slice(1).join('.');
-        if (context[stepId] && property && context[stepId][property] !== undefined) { foundValue = context[stepId][property]; }
-        else if (context[stepId] && context[stepId].output !== undefined) { foundValue = context[stepId].output; }
-        else if (context[stepId] && context[stepId].outputDir !== undefined) { foundValue = context[stepId].outputDir; }
-        else if (context[expression] !== undefined) { foundValue = context[expression]; }
-        const sanitized = sanitizeInterpolatedValue(foundValue);
+        const sanitized = sanitizeInterpolatedValue(resolvePipelineReference(expression, context));
         if (sanitized !== undefined) { return sanitized; }
         return match;
     });
+}
+
+/**
+ * `${...}` 안의 표현식 하나를 컨텍스트에서 찾아 **원래 값 그대로** 돌려준다
+ * (문자열화·sanitize 전). `interpolatePipelineVariables` 와 **같은 탐색 규칙**을
+ * 쓰므로, 보간과 배열 확장이 서로 다른 것을 가리키는 일이 없다.
+ */
+export function resolvePipelineReference(expression: string, context: any): unknown {
+    const parts = expression.split('.');
+    const stepId = parts[0];
+    const property = parts.slice(1).join('.');
+    if (context[stepId] && property && context[stepId][property] !== undefined) { return context[stepId][property]; }
+    if (context[stepId] && context[stepId].output !== undefined) { return context[stepId].output; }
+    if (context[stepId] && context[stepId].outputDir !== undefined) { return context[stepId].outputDir; }
+    if (context[expression] !== undefined) { return context[expression]; }
+    return undefined;
+}
+
+/**
+ * `args` 원소 하나를 **0개 이상의 인자**로 펼친다.
+ *
+ * 원소가 **정확히 하나의 참조**이고(`"${pick.paths}"` — 앞뒤에 다른 글자가 없다)
+ * 그 값이 배열이면, 항목마다 인자 하나가 된다. 그 외에는 평소처럼 문자열 보간
+ * 결과 하나를 돌려준다.
+ *
+ * 이 형태가 필요한 이유: 여러 파일을 고른 뒤
+ * `py -3 report.py a.bin b.bin c.bin --output x.html` 처럼 **개수가 정해지지 않은
+ * 인자들**을 넘기는 것이 흔한데, 배열을 문자열로 이어 붙이면 그 결과가 다시
+ * 인자 하나가 되거나(경계 보존 때문에) 공백으로 쪼개져 **경로에 공백이 있는
+ * 순간 깨진다.** 항목을 각각 별도 argv 원소로 만들면 두 문제가 함께 사라진다 —
+ * 각 원소는 그대로 인용되므로 셸도 개입하지 않는다.
+ *
+ * 앞뒤에 글자가 붙은 형태(`"--file=${pick.paths}"`)는 펼치지 않는다. 무엇을
+ * 의도한 것인지 알 수 없고(각 항목에 접두사를 붙이라는 것인지, 이어 붙이라는
+ * 것인지), 조용히 하나를 고르는 것보다 평소 규칙대로 두는 편이 낫다.
+ */
+export function expandArgTemplate(template: string, context: any): string[] {
+    if (typeof template !== 'string') { return [template]; }
+    const exact = /^\$\{([^}]+)\}$/.exec(template.trim());
+    if (exact) {
+        const value = resolvePipelineReference(exact[1], context);
+        if (Array.isArray(value)) {
+            return value
+                .map(entry => sanitizeInterpolatedValue(entry))
+                .filter((entry): entry is string => entry !== undefined);
+        }
+    }
+    return [interpolatePipelineVariables(template, context)];
 }
 
 // ============================================================================

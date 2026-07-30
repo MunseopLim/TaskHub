@@ -18,6 +18,7 @@ import type { Action, ActionItem, Task, OutputCapture } from './schema';
 import {
     interpolatePipelineVariables,
     interpolateCommandPreservingTokens,
+    expandArgTemplate,
     buildNativeCommandInvocation,
     getCommandString,
     buildTaskGraph,
@@ -33,7 +34,10 @@ export interface PreviewOptions {
 }
 
 export interface SimulatedResult {
-    [key: string]: string;
+    // 대부분의 값은 문자열 자리표시자지만, 다중 선택 `fileDialog` 의 `paths` /
+    // `names` 는 **배열**이고 `count` 는 숫자다 — `args` 배열 확장을 미리보기가
+    // 실제와 같은 개수로 보여 주려면 그 형태를 그대로 흉내 내야 한다.
+    [key: string]: string | string[] | number;
 }
 
 /**
@@ -51,14 +55,31 @@ export function placeholder(type: string, id: string, key?: string): string {
 export function simulateTaskResult(task: Task): SimulatedResult {
     switch (task.type) {
         case 'fileDialog':
-        case 'folderDialog':
-            return {
+        case 'folderDialog': {
+            const base: SimulatedResult = {
                 path: placeholder(task.type, task.id, 'path'),
                 dir: placeholder(task.type, task.id, 'dir'),
                 name: placeholder(task.type, task.id, 'name'),
                 fileNameOnly: placeholder(task.type, task.id, 'fileNameOnly'),
                 fileExt: placeholder(task.type, task.id, 'fileExt'),
             };
+            // 다중 선택이면 `paths` 를 **배열로** 흉내 내야 `args` 확장이
+            // 미리보기에서도 실제와 같은 개수로 보인다. 몇 개를 고를지는 알 수
+            // 없으므로 두 개로 대표한다 — 하나면 확장이 일어나는지 드러나지 않고,
+            // 셋 이상은 리포트만 길어진다.
+            if (task.type === 'fileDialog' && (task as any).options?.canSelectMany === true) {
+                base.paths = [
+                    placeholder(task.type, task.id, 'paths[0]'),
+                    placeholder(task.type, task.id, 'paths[1]'),
+                ];
+                base.names = [
+                    placeholder(task.type, task.id, 'names[0]'),
+                    placeholder(task.type, task.id, 'names[1]'),
+                ];
+                base.count = 2;
+            }
+            return base;
+        }
         case 'inputBox':
             return { value: placeholder('inputBox', task.id, 'value') };
         case 'quickPick':
@@ -426,7 +447,9 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                         command = '(no command for current platform)';
                     }
                 }
-                const args = (task.args ?? []).map(a => interpolatePipelineVariables(a, interpolationContext));
+                // 실행과 **같은 규칙**으로 펼친다 — 배열 참조는 인자 여러 개가
+                // 된다. 미리보기가 실제와 다른 개수를 보여 주면 안 된다.
+                const args = (task.args ?? []).flatMap(a => expandArgTemplate(a, interpolationContext));
                 const cwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : '(defaults to workspace folder)';
                 const env: Record<string, string> = {};
                 if (task.env) {

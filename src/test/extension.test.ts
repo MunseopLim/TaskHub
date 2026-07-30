@@ -36,6 +36,8 @@ import {
 	windowsCommandIsDirectlyLaunchable,
 	withPowerShellExitCode,
 	savedInputStillValid,
+	expandArgTemplate,
+	resolvePipelineReference,
 	interpolateCommandPreservingTokens,
 	quoteForCommandTokenizer,
 	selectWindowsRawShell,
@@ -577,6 +579,80 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('C:\\tools\\7z.exe', ['a'], lookup), true);
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('build.cmd', [], lookup), false);       // script shim
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('echo hi', [], lookup), false);         // shell builtin/alias
+		});
+	});
+
+	/**
+	 * 다중 선택 `fileDialog` 와 `args` 배열 확장 (0.6.51).
+	 *
+	 * `options.canSelectMany` 는 예전부터 VS Code 로 전달됐지만 결과는 첫 파일만
+	 * 쓰고 나머지를 조용히 버렸다. 그리고 고른 경로들을 **개수가 정해지지 않은
+	 * 인자들**로 넘길 방법이 없었다 — 문자열로 이어 붙이면 토큰 경계 보존 때문에
+	 * 인자 하나가 되거나, 공백으로 쪼개져 경로에 공백이 있는 순간 깨진다.
+	 */
+	suite('expandArgTemplate', () => {
+		const ctx = {
+			pick: {
+				paths: ['c:\\test\\test1.bin', 'c:\\my docs\\test2.bin', 'c:\\test\\test3.bin'],
+				path: 'c:\\test\\test1.bin',
+				count: 3,
+			},
+			one: { paths: ['only.bin'] },
+			none: { paths: [] },
+		};
+
+		test('배열 참조 하나가 인자 여러 개로 펼쳐진다', () => {
+			assert.deepStrictEqual(expandArgTemplate('${pick.paths}', ctx), ctx.pick.paths);
+		});
+
+		test('공백이 든 경로가 쪼개지지 않는다', () => {
+			const expanded = expandArgTemplate('${pick.paths}', ctx);
+			assert.strictEqual(expanded[1], 'c:\\my docs\\test2.bin');
+			assert.strictEqual(expanded.length, 3, '공백에서 인자가 갈라졌다');
+		});
+
+		test('실제 사용 형태: 위치 인자 사이에 끼워도 순서가 유지된다', () => {
+			const template = [
+				'-3', 'make_report.py', '${pick.paths}',
+				'--debug-dir', 'c:\\test\\debug', '--output', 'result.html', '--with-slow',
+			];
+			const args = template.flatMap(a => expandArgTemplate(a, ctx));
+			assert.deepStrictEqual(args, [
+				'-3', 'make_report.py',
+				'c:\\test\\test1.bin', 'c:\\my docs\\test2.bin', 'c:\\test\\test3.bin',
+				'--debug-dir', 'c:\\test\\debug', '--output', 'result.html', '--with-slow',
+			]);
+		});
+
+		test('1개 / 0개 선택도 그대로 다룬다', () => {
+			assert.deepStrictEqual(expandArgTemplate('${one.paths}', ctx), ['only.bin']);
+			// 0개면 인자 자체가 사라진다 — 빈 문자열 인자를 남기는 것보다 낫다.
+			assert.deepStrictEqual(expandArgTemplate('${none.paths}', ctx), []);
+		});
+
+		test('배열이 아닌 값은 평소대로 인자 하나', () => {
+			assert.deepStrictEqual(expandArgTemplate('${pick.path}', ctx), ['c:\\test\\test1.bin']);
+			assert.deepStrictEqual(expandArgTemplate('--count=${pick.count}', ctx), ['--count=3']);
+			assert.deepStrictEqual(expandArgTemplate('plain', ctx), ['plain']);
+		});
+
+		test('앞뒤에 글자가 붙으면 펼치지 않는다 (의도가 모호하다)', () => {
+			// 각 항목에 접두사를 붙이라는 것인지 이어 붙이라는 것인지 알 수 없다.
+			// 조용히 하나를 고르는 것보다 평소 규칙대로 두는 편이 낫다.
+			assert.deepStrictEqual(expandArgTemplate('--file=${pick.paths}', ctx), ['--file=${pick.paths}']);
+		});
+
+		test('알 수 없는 참조는 그대로 남는다 (기존 계약)', () => {
+			assert.deepStrictEqual(expandArgTemplate('${nope.paths}', ctx), ['${nope.paths}']);
+		});
+
+		test('resolvePipelineReference 는 보간과 같은 탐색 규칙을 쓴다', () => {
+			// 둘이 어긋나면 "보간은 되는데 확장은 안 되는" 참조가 생긴다.
+			const c = { a: { output: 'via-output' }, b: { paths: ['x'] }, plain: 'top' };
+			assert.strictEqual(resolvePipelineReference('a.anything', c), 'via-output');
+			assert.deepStrictEqual(resolvePipelineReference('b.paths', c), ['x']);
+			assert.strictEqual(resolvePipelineReference('plain', c), 'top');
+			assert.strictEqual(resolvePipelineReference('missing', c), undefined);
 		});
 	});
 

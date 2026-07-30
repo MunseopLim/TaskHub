@@ -1072,6 +1072,8 @@ import {
     withPowerShellExitCode,
     interpolateCommandPreservingTokens,
     quoteForCommandTokenizer,
+    expandArgTemplate,
+    resolvePipelineReference,
     normalizeEol,
     encodeFileContent,
     withTaskTimeout,
@@ -1122,6 +1124,8 @@ export {
     withPowerShellExitCode,
     interpolateCommandPreservingTokens,
     quoteForCommandTokenizer,
+    expandArgTemplate,
+    resolvePipelineReference,
     encodePowerShellScript,
     quotePosixArgument,
     buildPosixCommandLine,
@@ -2584,7 +2588,7 @@ function buildRedactedDisplayCommand(
     // context. Reusing `interpolatedCommand` for an object would reuse the
     // already-expanded password value.
     const source = interpolatePipelineVariables(getCommandString(task.command), shown);
-    const args = task.args ? task.args.map(arg => interpolatePipelineVariables(arg, shown)) : [];
+    const args = task.args ? task.args.flatMap((arg: string) => expandArgTemplate(arg, shown)) : [];
     return buildNativeCommandInvocation(source, args).display;
 }
 
@@ -5405,7 +5409,11 @@ async function executeSingleTask(
                 command = getCommandString(interpolatedCmdObj);
             }
 
-            const args = task.args ? task.args.map(arg => interpolatePipelineVariables(arg, interpolationContext)) : [];
+            // 배열 값을 가리키는 원소는 **인자 여러 개**로 펼친다
+            // (`"${pick.paths}"` → 고른 파일 수만큼). `expandArgTemplate` 주석 참조.
+            const args = task.args
+                ? task.args.flatMap((arg: string) => expandArgTemplate(arg, interpolationContext))
+                : [];
             interpolatedCwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined;
             let env: Record<string, string> | undefined;
             if (task.env && typeof task.env === 'object') {
@@ -6130,20 +6138,40 @@ async function handleCommand(task: any, context: vscode.ExtensionContext, worksp
     return { output: captured.stdout.trim(), stderr: captured.stderr.trim() };
 }
 
+/** `fileDialog` 결과. 단일 필드는 첫 파일, 배열 필드는 고른 전체. */
+export interface FileDialogResult {
+    path: string; dir: string; name: string; fileNameOnly: string; fileExt: string;
+    /** 고른 파일 전체의 절대 경로. `args` 에서 참조하면 인자 여러 개로 펼쳐진다. */
+    paths: string[];
+    /** 각 파일의 이름(확장자 포함). */
+    names: string[];
+    /** 고른 파일 개수. */
+    count: number;
+}
+
 export function parsePathInfo(fullPath: string): { path: string, dir: string, name: string, fileNameOnly: string, fileExt: string } {
     const baseName = path.basename(fullPath);
     const extension = path.extname(baseName);
     return { path: fullPath, dir: path.dirname(fullPath), name: baseName, fileNameOnly: path.basename(baseName, extension), fileExt: extension.startsWith('.') ? extension.substring(1) : extension };
 }
 
-async function handleFileDialog(task: any): Promise<{ path: string, dir: string, name: string, fileNameOnly: string, fileExt: string }> {
+async function handleFileDialog(task: any): Promise<FileDialogResult> {
     // `defaultUri`는 액션 JSON에서 문자열로 오므로 Uri로 승격한다 — 그대로
     // 넘기면 VS Code가 무시해 다이얼로그가 엉뚱한 위치에서 열린다. 명시하지
     // 않았다면 이 태스크가 마지막으로 고른 폴더에서 연다.
     const options: vscode.OpenDialogOptions = { ...(task.options || {}), defaultUri: coerceDefaultUri(task.options?.defaultUri) };
     const fileUri = await showOpenDialogWithMemory(taskDialogScope('file', task), options);
-    if (fileUri && fileUri[0]) { return parsePathInfo(fileUri[0].fsPath); }
-    else { throw new Error('File selection was canceled.'); }
+    if (!fileUri || !fileUri[0]) { throw new Error('File selection was canceled.'); }
+    // `options.canSelectMany` 는 예전부터 VS Code 로 그대로 전달됐지만, 결과는
+    // 첫 파일만 쓰고 **나머지를 조용히 버렸다** — 사용자는 여러 개를 골랐는데
+    // 하나만 처리되는 상태였다. 이제 전부 돌려준다. `path` 등 단일 필드는
+    // 첫 파일을 그대로 가리켜 기존 액션이 그대로 동작한다.
+    return {
+        ...parsePathInfo(fileUri[0].fsPath),
+        paths: fileUri.map(uri => uri.fsPath),
+        names: fileUri.map(uri => path.basename(uri.fsPath)),
+        count: fileUri.length,
+    };
 }
 
 async function handleFolderDialog(task: any): Promise<{ path: string, dir: string, name: string, fileNameOnly: string, fileExt: string }> {
