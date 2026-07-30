@@ -51,9 +51,10 @@ npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 | **`package.json` `contributes.*`의 문자열** (명령 title, 뷰 name, `viewsWelcome`, 설정 설명) 추가·변경 | package.json에는 `%key%`만 두고 `package.nls.json` + `package.nls.ko.json` **양쪽**에 문구 추가 ([CLAUDE.md](CLAUDE.md#packagejson-안의-문자열-manifest)) · 한쪽만 넣으면 오류 없이 영어로 폴백한다 |
 | **실험적 기능** 추가 / 안정화(graduation) | 본 문서 [실험적 기능 추가 가이드](#실험적-기능-추가-가이드) 전체 절차 · [docs/features.md §16](docs/features.md#16-experimental-features) |
 | **보안 가드** (파서 한도·CSP·경로 검증) 변경 | [docs/architecture.md 보안 가드](docs/architecture.md#보안-가드) · 관련 유닛 테스트 (`defensive limits` 등) |
+| **`IT-XXX` 통합 테스트** 추가 / suite 신설 | [docs/integration-tests.md](docs/integration-tests.md) "시나리오 그룹" 에 항목 한 줄 (+ 비자명한 제약은 상세 섹션) · `src/test/docConsistency.test.ts` 가 `test('IT-XXX` 제목과 대장을 대조하므로 빠뜨리면 CI 에서 실패 |
 | **공용 커밋 메시지 형식**이 필요한 PR | 버전 bump 동반 시 [package.json](package.json) + [package-lock.json](package-lock.json) 같이 올림. 테스트/문서-only는 버전 유지. 자세한 형식은 [CLAUDE.md 커밋 메시지](CLAUDE.md#커밋-메시지). |
 
-`src/test/docConsistency.test.ts`가 위 표의 일부(설정 키 정합성·팔레트 정책·§번호 참조 유효성)를 자동 검증하므로, 항목을 빠뜨리면 CI에서 실패합니다. 테스트가 잡지 못하는 범주(예: `examples/README.md` 문장 서술)는 사람 리뷰에서 보조 확인이 필요합니다.
+`src/test/docConsistency.test.ts`가 위 표의 일부(설정 키 정합성·팔레트 정책·§번호 참조 유효성·**구조 트리 ↔ `src/*.ts`**·**IT 대장 ↔ 테스트 제목**)를 자동 검증하므로, 항목을 빠뜨리면 CI에서 실패합니다. 테스트가 잡지 못하는 범주(예: `examples/README.md` 문장 서술)는 사람 리뷰에서 보조 확인이 필요합니다.
 
 ### 로컬 테스트
 

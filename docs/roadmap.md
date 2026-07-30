@@ -17,6 +17,15 @@
 | TaskHub Doctor / Action Lint (이전 §5) | 0.4.40부터 제공. `TaskHub: Doctor — Lint Actions` 커맨드가 모든 `actions.json` 소스를 한 번에 정적 분석해 Problems 패널에 게시 (스키마/regex/미해결 변수/외부 쓰기/중복 id/capture group/dependsOn cycle 7종 검사) | [docs/features.md §23](./features.md#23-taskhub-doctor-action-lint), [src/doctor.ts](../src/doctor.ts) |
 | 병렬 실행 / Task DAG (이전 §4) | 0.4.41부터 제공. `parallel: true` opt-in + `dependsOn` 런타임 honoring + `${taskId.x}` 자동 의존성 추론 + 사이클/missing/self 검증 + task 단위 timeout/stop + 출력 격리 (streamed terminal group / output.mode terminal 키 분리) + interactive prompt mutex + `taskhub.pipeline.maxParallelTasks` 설정. 기존 직렬 액션은 동작 변화 없음 | [docs/features.md §24](./features.md#24-병렬-실행--task-dag) |
 
+## 테스트 부채
+
+기능이 아니라 **검사의 판별력** 문제라 위 표와 따로 둡니다. CHANGELOG 는 append-only 이력이라 몇 릴리스만 지나면 묻히므로 여기서 추적합니다.
+
+| 항목 | 규모 | 메모 |
+| --- | --- | --- |
+| `jsonEditorUtils.test.ts` 의 소스 정규식 검사 | 65건 | 함수의 **소스 텍스트**를 정규식으로 검사한다 — 코드에 그 글자가 있는지만 보므로 로직이 틀려도 통과한다. 0.6.47 에서 "디스크 단계 실패 시 복구 fallback" 1건을 실행 기반으로 옮겼다. 대부분은 **웹뷰 스크립트 문자열**(호스트에서 실행할 수 없는 코드)을 보므로 성격이 조금 다르다 — Memory Map 저장 상한과 JSON 키보드 가드에서 쓴 "핸들러를 HTML 에서 꺼내 가짜 DOM 으로 실행" 방식으로 옮길 수 있는 것부터 고르면 된다. |
+| Windows 실행 경로 | - | raw `shell` 의 세 실행 모드(0.6.49)는 계약을 순수 함수로 고정했지만 **실제 프로세스 기동은 Windows 러너에서 미검증**이다. `IT-132`/`IT-133` 의 프로세스 트리 종료도 Windows 판별력은 확인되지 않았다. |
+
 ## 우선순위 요약
 
 | 순위 | 기능 | 근거 | 구현 크기 |

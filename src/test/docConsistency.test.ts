@@ -284,4 +284,63 @@ suite('Documentation Consistency', () => {
             );
         });
     });
+
+    // =====================================================================
+    // 7. architecture.md 프로젝트 구조 트리 ↔ 실제 src/*.ts
+    //
+    // CONTRIBUTING.md 의 체크리스트가 "`src/` 파일 추가 → architecture.md 트리"
+    // 를 요구하는데, 자동 검사가 없어 `dialogMemory.ts` 가 0.6.11 부터
+    // 0.6.49 까지 누락돼 있었다. 사람 눈에만 맡긴 범주만 실제로 어긋났다.
+    // =====================================================================
+    suite('architecture.md 구조 트리 ↔ src/*.ts', () => {
+        test('모든 src 모듈이 프로젝트 구조 트리에 있다', () => {
+            const doc = readRepoFile('docs/architecture.md');
+            const files: string[] = [];
+            for (const dir of ['src', path.join('src', 'providers')]) {
+                for (const name of fs.readdirSync(path.join(REPO_ROOT, dir))) {
+                    if (name.endsWith('.ts')) { files.push(name); }
+                }
+            }
+
+            assert.ok(files.length > 10, `src 모듈을 찾지 못했다 — 검사 전제가 깨졌다 (${files.length})`);
+            const missing = files.filter(name => !doc.includes(name));
+            assert.deepStrictEqual(
+                missing,
+                [],
+                `src 에는 있는데 architecture.md 구조 트리에 없는 모듈:\n  ${missing.join('\n  ')}`
+            );
+        });
+    });
+
+    // =====================================================================
+    // 8. docs/integration-tests.md 대장 ↔ 실제 `test('IT-XXX` 제목
+    //
+    // 그 문서 스스로 "새 suite 를 만들 때 이 문서에 항목을 추가한다" 고
+    // 규정하는데 검사가 없어, IT 35 건과 suite 3 개가 등재되지 않은 채
+    // 쌓였다 (stopInteractive 의 중지·보안 검증 전체 포함).
+    // =====================================================================
+    suite('integration-tests.md 대장 ↔ IT- 테스트 제목', () => {
+        test('모든 IT-XXX 테스트가 대장에 등재돼 있다', () => {
+            const ledger = readRepoFile('docs/integration-tests.md');
+            const documented = new Set(ledger.match(/IT-\d+/g) ?? []);
+            const testDir = path.join(REPO_ROOT, 'src', 'test');
+            const declared = new Map<string, string>();
+            for (const name of fs.readdirSync(testDir)) {
+                if (!name.endsWith('.test.ts')) { continue; }
+                const source = fs.readFileSync(path.join(testDir, name), 'utf-8');
+                for (const m of source.matchAll(/test\(\s*[\`'"](IT-\d+)/g)) {
+                    declared.set(m[1], name);
+                }
+            }
+
+            assert.ok(declared.size > 50, `IT- 테스트를 찾지 못했다 — 검사 전제가 깨졌다 (${declared.size})`);
+            const missing = [...declared].filter(([id]) => !documented.has(id));
+            assert.deepStrictEqual(
+                missing.map(([id, file]) => `${id} (${file})`),
+                [],
+                `테스트에는 있는데 docs/integration-tests.md 에 없는 시나리오:\n  `
+                + missing.map(([id, file]) => `${id} (${file})`).join('\n  ')
+            );
+        });
+    });
 });

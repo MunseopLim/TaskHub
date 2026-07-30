@@ -526,6 +526,70 @@ VS Code `DiagnosticCollection.set(uri, ...)`은 해당 URI의 기존 entry 전�
 1. **`vscode.commands.executeCommand('taskhub.stopAction', …)`를 쓰지 않습니다.** 번들(`dist/`)과 테스트(`out/`)는 별도 모듈 인스턴스라, 명령을 거치면 번들 쪽 레지스트리를 건드려 테스트가 만든 실행과 만나지 못합니다(처음에 이렇게 짰다가 무한 대기로 24개가 연쇄 실패했습니다). `stopRunningAction`을 직접 부릅니다 — 이 함수가 export된 이유입니다.
 2. **`await run`에 시간 경계를 둡니다**(`settleWithin`). 배선이 깨지면 프롬프트가 닫히지 않아 promise가 영원히 pending으로 남고, 그 하나가 스위트 전체를 무너뜨립니다. 원인 테스트 하나만 실패하게 합니다.
 
+### IT-088 ~ IT-092 / IT-098 ~ IT-107: Quick Action Palette (`Run Any Action…`)
+
+파일: [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts)
+
+`taskhub.runAnyAction` 은 트리 전체를 평면화해 fuzzy 검색으로 실행하는 단일 진입점입니다. 이 그룹은 그 **목록 구성 규칙**과 **실패 경로 라우팅**을 고정합니다.
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-088 | folder/separator 제외, runnable action 만 평면화 | 실행할 수 없는 노드가 picks 에 섞이지 않음 |
+| IT-089 | `folderPath` 는 leaf 제외 breadcrumb, root 는 빈 문자열 | 같은 title 을 가진 액션을 구분하는 근거 |
+| IT-090 | MRU 순서대로 recent 섹션이 채워지고 rest 에서 제외 | 같은 액션이 두 섹션에 중복 노출되지 않음 |
+| IT-091 | stale MRU 엔트리(삭제된 액션 / 폴더 id)는 조용히 누락 | 이름을 바꾸거나 지운 액션이 목록을 깨지 않음 |
+| IT-092 | MRU 내부 중복은 첫 등장만 유지 | 반복 실행이 recent 를 같은 항목으로 채우지 않음 |
+| IT-098 | stale id 가 MRU 앞쪽을 채워도 valid 항목이 limit 에 들어온다 | 리뷰 P2 — stale 을 세고 나면 recent 가 비어 보였다 |
+| IT-099 | 명시적 `recentLimit` 이 default 를 override, `0` 이면 recent 비활성 | 설정이 실제로 목록 구성을 바꾸는지 |
+| IT-100 | recent 가 비어 있으면 separator 없이 leading | 빈 섹션 머리글이 남지 않음 |
+| IT-102 | actions.json 파싱 실패(loader throws) → `load-error` 라우팅 | 깨진 파일에서 빈 목록을 보여 주지 않음 |
+| IT-103 | 스키마 검증 실패도 `load-error` 로 묶임 | JSON/스키마 구분 없이 같은 안내 surface |
+| IT-104 | loader 가 빈 배열이면 `empty` (info 토스트) | "액션이 없다" 와 "읽지 못했다" 를 가름 |
+| IT-105 | happy path: items + recentIds + limit 가 핸들러로 전달 | 배선 자체 |
+| IT-106 | 범위 밖 설정은 `[0, MAX_LIMIT]` 로 clamp, NaN/undefined 는 default | 설정 오타가 목록을 비우지 않음 |
+| IT-107 | recent + rest 가 모두 있으면 separator 둘이 정확한 순서로 | 섹션 경계가 뒤바뀌지 않음 |
+
+> IT-093 ~ IT-097 은 0.6.12 에서 제거됐습니다 — `updateRunAnyActionMru` 가 History 에서 유도되는 방식으로 바뀌어 그 함수 자체가 없어졌습니다. 번호는 재사용하지 않습니다.
+
+### IT-110 ~ IT-116: 실행 명령줄 기록과 입력 재사용
+
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+History 가 "무엇을 실행했는가" 를 보여 주려면 `${...}` 치환이 **끝난** 명령줄이 필요합니다. 이 그룹은 그 기록 경계와, 저장된 입력으로 재실행할 때 다이얼로그를 다시 열지 않는 규칙을 고정합니다.
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-110 | `recordCommands` 에 치환 완료된 명령줄이 task 별로 기록 | 템플릿이 아니라 실제 실행된 문자열 |
+| IT-111 | `executeAction` 이 그것을 history `entry.commands` 로 영속화 | 메모리에서만 살지 않음 |
+| IT-112 | 저장된 `folderDialog` 입력으로 재실행하면 다이얼로그를 다시 열지 않음 | 재실행이 사람 손을 다시 요구하지 않음 |
+| IT-113 | 여러 command/shell task 가 각자의 id 로 모두 기록 | 한 액션에 여러 명령이 있어도 누락 없음 |
+| IT-114 | command/shell task 가 없으면 `entry.commands` 를 남기지 않음 | 빈 섹션이 History 에 생기지 않음 |
+| IT-115 | 실패해도 실행한 명령줄은 기록되고 failure 경로에서 영속화 | 실패 진단에 가장 필요한 정보가 사라지지 않음 |
+| IT-116 | 저장된 입력이 없으면 `folderDialog` 가 정상적으로 열림 (IT-112 대조군) | 재사용 규칙이 정상 흐름을 막지 않음 |
+
+### IT-126 ~ IT-137: 중지의 사각지대와 password 노출
+
+파일: [src/test/stopInteractive.test.ts](../src/test/stopInteractive.test.ts)
+
+IT-123 ~ IT-125 가 "프롬프트 앞에 멈춘 액션" 을 다뤘고, 이 그룹은 그 뒤에 드러난 나머지 사각지대들입니다. **0.6.44 ~ 0.6.48 의 중지·보안 수정이 전부 여기에 걸려 있습니다.**
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-126 | envPick 대기 중 중지 → 목록이 닫히고 뒤 단계 미실행 | quickPick 계열의 나머지 타입 |
+| IT-127 | confirm modal 이 열린 채 중지되면 Yes 를 눌러도 중단 | modal 은 토큰을 받지 않아 프로그램으로 닫을 수 없다 |
+| IT-128 | `itemsFromCommand` 의 항목 생성 명령이 중지 즉시 종료 | 프롬프트를 띄우기 **전에** 도는 프로세스 |
+| IT-129 | 이미 취소된 토큰이면 spawn 조차 하지 않음 | 중지 후 새 프로세스가 뜨지 않음 |
+| IT-130 | `continueOnError` 가 사용자 중지를 삼키지 않음 | 중지가 "실패지만 계속" 으로 흡수되지 않음 |
+| IT-131 | 중지된 액션은 대기열을 빠져나올 때 프롬프트를 열지 않음 | drain 중에 새 다이얼로그가 뜨지 않음 |
+| IT-132 | 중지가 우리가 잡은 프로세스뿐 아니라 **자손까지** 죽임 | `runCommandCaptureLines` 경로 |
+| IT-133 | 실제 shell 액션 중지 시 자손도 죽음 | 액션 실행 경로 (POSIX `detached` 가 필요한 자리) |
+| IT-134 | `passTheResultToNextTask` 없는 shell 태스크도 중지가 끝냄 | 스트림 모드(`vscode.tasks`) 경로 |
+| IT-135 | 중지 후 완주한 액션이 성공으로 이력을 덮지 않음 | 취소가 닿지 않는 태스크가 마지막일 때 |
+| IT-136 | password 입력이 명령 이력에 평문으로 남지 않음 | 보간이 끝난 명령줄이 이력으로 가는 경로 |
+| IT-137 | 중지와 진짜 실패가 서로 다른 상태로 기록됨 | `cancelled` 와 `failure` 를 가름 |
+
+같은 파일의 나머지 두 suite(`종료 실패 시 프로세스 추적 유지`, `spawn 이후의 error 는 추적을 지우지 않는다`)는 IT 번호를 쓰지 않습니다 — 순수 판단 규칙과 registry 상태를 보는 단위 테스트라 시나리오 대장의 대상이 아닙니다.
+
 ## Memory Map 픽스처와 커버리지 경계
 
 Memory Map 웹뷰는 **입력에 따라 다른 분기를 렌더합니다.** 그래서 픽스처는 단순한 테스트 도우미가 아니라 **무엇이 검사 대상이 되는지를 결정하는 물건**입니다. 픽스처가 열지 않는 분기의 결함은 어떤 검사로도 보이지 않습니다.
