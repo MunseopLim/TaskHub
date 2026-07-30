@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { hexPanelRegistry, openHexViewerFile } from '../hexViewer';
+import { HEX_READY_FALLBACK_MS, HexEditorProvider, hexPanelRegistry, openHexViewerFile } from '../hexViewer';
 
 /**
  * Hex Viewer의 **실제 진입점**을 실행하는 테스트 (0.6.47).
@@ -211,6 +211,81 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         assert.strictEqual(ok, false);
         assert.ok(!fake.events.includes('create-panel'), '없는 파일에 패널을 만들었다');
         assert.ok(shownErrors.length > 0);
+    });
+
+    /**
+     * Custom Editor(`.hex` 파일을 직접 열 때 뜨는 편집기)는 0.6.47 의
+     * handshake 수정을 받지 못했다 — 여전히 `html` 을 넣은 **직후** 데이터를
+     * 보내고 핸들러는 그 뒤에 걸었다. standalone 패널에서 고친 것과 정확히
+     * 같은 데이터 유실이 남아 있었다.
+     */
+    suite('Custom Editor 진입점 (resolveCustomEditor)', function () {
+        // 폴백 시한(3초)을 실제로 기다리는 케이스가 둘 있다.
+        this.timeout(20000);
+
+        function resolve(filePath: string, fake: FakePanel): void {
+            const provider = new HexEditorProvider(
+                { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext
+            );
+            provider.resolveCustomEditor(
+                { uri: vscode.Uri.file(filePath), dispose() { /* no-op */ } } as vscode.CustomDocument,
+                fake.panel
+            );
+        }
+
+        test('핸들러를 HTML 보다 먼저 걸고, ready 를 받은 뒤에 보낸다', () => {
+            const fake = installFakePanel();
+            const filePath = writeIntelHex('custom-editor.hex');
+
+            resolve(filePath, fake);
+
+            // 이것이 결함의 핵심이다. 순서가 뒤집히면 웹뷰가 리스너를 걸기 전에
+            // 데이터가 도착해 유실되고, 화면이 "불러오는 중" 에 갇힌다.
+            assert.ok(
+                fake.events.indexOf('handler-installed') < fake.events.indexOf('set-html'),
+                `핸들러가 HTML 뒤에 걸렸다: ${fake.events.join(' → ')}`
+            );
+            assert.strictEqual(
+                fake.posted.length, 0,
+                'ready 를 받기 전에 데이터를 보냈다 — 그 메시지는 유실될 수 있다'
+            );
+
+            fake.sendReady();
+
+            assert.strictEqual(fake.posted.length, 1, 'ready 를 받고도 데이터를 보내지 않았다');
+            assert.strictEqual(fake.posted[0].command, 'hexData');
+        });
+
+        test('ready 가 오지 않아도 폴백으로 보낸다', async () => {
+            const fake = installFakePanel();
+            resolve(writeIntelHex('custom-editor-fallback.hex'), fake);
+
+            assert.strictEqual(fake.posted.length, 0);
+            // 핸드셰이크가 깨졌을 때 **아무것도 안 보내는** 것이 가장 나쁘다.
+            await new Promise(resolve => setTimeout(resolve, HEX_READY_FALLBACK_MS + 300));
+
+            assert.strictEqual(fake.posted.length, 1, '폴백 전송이 없다 — 화면이 영영 비어 있다');
+            assert.strictEqual(fake.posted[0].command, 'hexData');
+        });
+
+        test('한 에디터의 ready 가 다른 에디터의 폴백을 잘라먹지 않는다', async () => {
+            // `readyReceived` 를 모듈 전역으로 두면 이렇게 새어 나간다. Custom
+            // Editor 는 문서마다 인스턴스가 생기므로 상태도 인스턴스별이어야 한다.
+            const first = installFakePanel();
+            resolve(writeIntelHex('leak-a.hex'), first);
+            const second = installFakePanel();
+            resolve(writeIntelHex('leak-b.hex'), second);
+
+            first.sendReady();
+            assert.strictEqual(first.posted.length, 1, '첫 에디터가 ready 후에도 못 받았다');
+
+            await new Promise(resolve => setTimeout(resolve, HEX_READY_FALLBACK_MS + 300));
+
+            assert.strictEqual(
+                second.posted.length, 1,
+                '다른 에디터의 ready 가 이 에디터의 폴백을 취소했다 — 이 화면은 영영 비어 있다'
+            );
+        });
     });
 
     /**

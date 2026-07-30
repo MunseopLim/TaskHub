@@ -349,15 +349,24 @@ export function parseFile(filePath: string): HexParseResult {
  * webview/panel 단위로 수명을 관리한다 (standalone 패널은 모듈 전역 1개,
  * custom editor는 resolveCustomEditor 지역 + onDidDispose).
  */
-/** `ready` 가 오지 않을 때 그냥 보내 버리는 시한. */
-const HEX_READY_FALLBACK_MS = 3000;
+/** `ready` 가 오지 않을 때 그냥 보내 버리는 시한. 테스트가 이 값을 기다린다. */
+export const HEX_READY_FALLBACK_MS = 3000;
 
-/** 이번 패널에서 `ready` 를 받았는가 — 폴백 중복 전송을 막는다. */
-let readyReceived = false;
+/**
+ * 한 웹뷰의 핸드셰이크 상태 + 구독. **인스턴스마다 하나씩** 만든다.
+ *
+ * 처음에는 `readyReceived` 를 모듈 전역으로 뒀는데, Custom Editor 는 문서마다
+ * 인스턴스가 생기므로 어느 한 에디터의 `ready` 가 다른 인스턴스의 플래그까지
+ * 세워 그쪽 폴백 전송을 잘라먹을 수 있었다 — 메시지 disposable 을 인스턴스별로
+ * 나눈 것(M7)과 같은 이유다. 상태도 같이 나눠야 한다.
+ */
+interface HexWebviewHandshake extends vscode.Disposable {
+    readonly readyReceived: boolean;
+}
 
-function setupWebviewMessageHandler(webview: vscode.Webview, onReady?: () => void): vscode.Disposable {
-    readyReceived = false;
-    return webview.onDidReceiveMessage(message => {
+function setupWebviewMessageHandler(webview: vscode.Webview, onReady?: () => void): HexWebviewHandshake {
+    let readyReceived = false;
+    const subscription = webview.onDidReceiveMessage(message => {
         if (message.command === 'ready') {
             readyReceived = true;
             onReady?.();
@@ -389,6 +398,41 @@ function setupWebviewMessageHandler(webview: vscode.Webview, onReady?: () => voi
             }
         }
     });
+    return {
+        get readyReceived() { return readyReceived; },
+        dispose() { subscription.dispose(); },
+    };
+}
+
+/**
+ * HTML 을 넣고, `ready` 를 받은 뒤 데이터를 보낸다. **핸들러를 HTML 보다 먼저
+ * 걸어야 한다** — 웹뷰 스크립트가 리스너를 등록한 뒤 보내는 `ready` 가 우리
+ * 핸들러보다 먼저 도착하면 그 신호를 놓치고 화면이 "불러오는 중" 에 갇힌다.
+ *
+ * `ready` 가 시한 안에 오지 않으면 그냥 보낸다. 핸드셰이크가 어떤 이유로든
+ * 깨졌을 때 **아무것도 안 보내는** 것이 가장 나쁘다 — 웹뷰는 같은 데이터를 두
+ * 번 받아도 다시 렌더할 뿐이다.
+ *
+ * standalone 패널과 Custom Editor 가 **같은 함수를 쓴다**. 0.6.47 은 이 순서를
+ * standalone 에만 적용해, Custom Editor 로 열면 같은 데이터 유실이 그대로
+ * 남아 있었다.
+ */
+function renderWithReadyHandshake(
+    webview: vscode.Webview,
+    fileName: string,
+    result: HexParseResult,
+    isCurrent: () => boolean
+): HexWebviewHandshake {
+    const handshake = setupWebviewMessageHandler(webview, () => {
+        if (isCurrent()) { postHexViewerData(webview, result); }
+    });
+    webview.html = buildHexViewerHtml(fileName, result, webview);
+    setTimeout(() => {
+        if (isCurrent() && !handshake.readyReceived) {
+            postHexViewerData(webview, result);
+        }
+    }, HEX_READY_FALLBACK_MS);
+    return handshake;
 }
 
 function openPanel(context: vscode.ExtensionContext, fileName: string, result: HexParseResult): boolean {
@@ -406,24 +450,13 @@ function openPanel(context: vscode.ExtensionContext, fileName: string, result: H
 
     currentPanel.title = `Hex: ${fileName}`;
     try {
-        // **핸들러를 HTML 보다 먼저 건다.** 웹뷰가 리스너를 등록한 뒤 보내는
-        // `ready` 를 받아야 데이터를 보내는데, 그 신호가 핸들러보다 먼저
-        // 도착하면 놓친다.
         currentMessageDisposable?.dispose();
-        currentMessageDisposable = setupWebviewMessageHandler(currentPanel.webview, () => {
-            if (currentPanel) { postHexViewerData(currentPanel.webview, result); }
-        });
-        currentPanel.webview.html = buildHexViewerHtml(fileName, result, currentPanel.webview);
-
-        // 폴백: `ready` 가 끝내 오지 않아도 데이터는 보낸다. 핸드셰이크가
-        // 어떤 이유로든 실패했을 때 **아무것도 안 보내는** 것이 가장 나쁘다.
-        // 웹뷰는 같은 데이터를 두 번 받아도 다시 렌더할 뿐이다.
+        // 폴백 시점에 이 패널이 아직 그 패널인지 본다 — 그 사이 사용자가 닫고
+        // 다른 파일을 열었으면 남의 웹뷰에 이전 데이터를 보내게 된다.
         const panelAtSchedule = currentPanel;
-        setTimeout(() => {
-            if (currentPanel === panelAtSchedule && !readyReceived) {
-                postHexViewerData(panelAtSchedule.webview, result);
-            }
-        }, HEX_READY_FALLBACK_MS);
+        currentMessageDisposable = renderWithReadyHandshake(
+            currentPanel.webview, fileName, result, () => currentPanel === panelAtSchedule
+        );
     } catch (e: any) {
         const msg = t(
             `Hex Viewer 렌더링 실패 (${fileName}): ${e.message}`,
@@ -1550,9 +1583,14 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             return;
         }
 
+        // 에디터 인스턴스별 disposable + 핸드셰이크 상태 — 전역 공유 시 다른
+        // 패널/에디터의 핸들러를 dispose 하거나(M7) 그쪽 폴백 전송을 잘라먹는
+        // cross-talk 이 생긴다.
+        let handshake: HexWebviewHandshake;
         try {
-            webviewPanel.webview.html = buildHexViewerHtml(fileName, result, webviewPanel.webview);
-            postHexViewerData(webviewPanel.webview, result);
+            // 이 웹뷰는 이 문서 전용이라 "아직 그것인가" 를 볼 필요가 없다.
+            // dispose 되면 VS Code 가 postMessage 를 조용히 무시한다.
+            handshake = renderWithReadyHandshake(webviewPanel.webview, fileName, result, () => true);
         } catch (e: any) {
             const msg = t(
                 `Hex Viewer 렌더링 실패 (${fileName}): ${e.message}`,
@@ -1562,10 +1600,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             vscode.window.showErrorMessage(msg);
             return;
         }
-        // 에디터 인스턴스별 disposable — 전역 공유 시 다른 패널/에디터의
-        // 핸들러를 dispose 하는 cross-talk이 있었다(M7).
-        const messageDisposable = setupWebviewMessageHandler(webviewPanel.webview);
-        webviewPanel.onDidDispose(() => messageDisposable.dispose());
+        webviewPanel.onDidDispose(() => handshake.dispose());
         this.recordHistory?.({ filePath, fileName });
     }
 }
