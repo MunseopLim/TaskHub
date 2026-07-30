@@ -289,6 +289,64 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
     });
 
     /**
+     * 폴백 타이머가 dispose 를 넘어 살아남던 문제 (0.6.50).
+     *
+     * `dispose()` 가 구독만 해제하고 `setTimeout` 을 남기면 두 가지가 일어난다.
+     * 아래 두 케이스가 각각 그 하나씩을 본다.
+     */
+    suite('폴백 타이머는 dispose 와 함께 취소된다', function () {
+        this.timeout(20000);
+
+        test('ready 전에 다른 파일을 열면 이전 데이터가 새 화면에 오지 않는다', async () => {
+            const fake = installFakePanel();
+            const ctx = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+
+            // A 를 열고 **ready 를 보내지 않는다** — 타이머가 살아 있는 상태.
+            openHexViewerFile(ctx, writeIntelHex('stale-a.hex'));
+            // 같은 패널에 B 를 연다. standalone 은 패널 객체를 재사용하므로
+            // `currentPanel === panelAtSchedule` 검사로는 A 의 타이머를 막지 못했다.
+            openHexViewerFile(ctx, writeIntelHex('stale-b.hex'));
+            fake.sendReady();
+
+            const afterReady = fake.posted.length;
+            assert.strictEqual(afterReady, 1, 'B 의 데이터가 한 번 가야 한다');
+
+            // A 의 타이머 시한을 넘겨 기다린다.
+            await new Promise(resolve => setTimeout(resolve, HEX_READY_FALLBACK_MS + 500));
+
+            assert.strictEqual(
+                fake.posted.length, afterReady,
+                '이전 파일의 폴백 타이머가 새 화면에 옛 바이트를 보냈다 — 제목은 B, 내용은 A 가 된다'
+            );
+        });
+
+        test('Custom Editor 를 닫으면 폴백이 페이로드를 다시 만들지 않는다', async () => {
+            const fake = installFakePanel();
+            let disposeHandler: (() => void) | undefined;
+            (fake.panel as any).onDidDispose = (handler: () => void) => {
+                disposeHandler = handler;
+                return { dispose() { /* no-op */ } };
+            };
+
+            new HexEditorProvider({ extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext)
+                .resolveCustomEditor(
+                    { uri: vscode.Uri.file(writeIntelHex('closed.hex')), dispose() { /* no-op */ } } as vscode.CustomDocument,
+                    fake.panel
+                );
+
+            assert.ok(disposeHandler, 'onDidDispose 가 걸리지 않았다 — 테스트 전제가 깨졌다');
+            disposeHandler!();   // 사용자가 곧바로 닫는다
+
+            await new Promise(resolve => setTimeout(resolve, HEX_READY_FALLBACK_MS + 500));
+
+            assert.strictEqual(
+                fake.posted.length, 0,
+                '닫힌 에디터의 폴백이 그대로 돌았다 — 최대 128MB 페이로드를 보낼 곳도 없이 다시 만든다'
+            );
+        });
+    });
+
+    /**
      * 0.6.47 은 전송 순서를 보려고 호스트에 `postedMessages` 배열을 두고
      * `getPostedMessages()` 로 노출했다. 그런데 그 push 는 프로덕션 경로에서도
      * 실행돼, 파일당 최대 128MB 페이로드가 패널을 닫아도 남았다(0.6.48 에서 제거).

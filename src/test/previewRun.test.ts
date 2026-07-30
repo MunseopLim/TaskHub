@@ -30,6 +30,30 @@ suite('buildPreviewReport', () => {
         assert.match(report, /→ resolves to/);
     });
 
+    /**
+     * Preview 는 **실제로 실행될 것**을 보여 줘야 한다. 런타임이 `command`
+     * 타입에서 토큰 경계를 보존하며 보간하도록 바뀌었는데(0.6.50) Preview 가
+     * 옛 방식으로 만들면 서로 다른 argv 를 보여 주게 된다 — 미리 보기의 존재
+     * 이유가 사라진다.
+     */
+    test('command 타입 미리보기가 런타임과 같은 토큰 경계를 쓴다', () => {
+        const item: ActionItem = {
+            id: 'a.tokens',
+            title: 'tokens',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'pick', type: 'fileDialog' },
+                    { id: 'run', type: 'command', command: 'cat ${pick.path}' },
+                ]
+            }
+        } as unknown as ActionItem;
+        const report = buildPreviewReport(item, baseOptions());
+        // 자리표시자에 공백이 없더라도, 렌더가 토큰 단위 인용을 거친 뒤
+        // 다시 토큰화되어 **하나의 인자**로 보여야 한다.
+        assert.match(report, /cat\s+\S*<fileDialog:pick:path>/);
+    });
+
     test('summary has helpful hint about runtime behavior', () => {
         const item: ActionItem = {
             id: 'a.0b',

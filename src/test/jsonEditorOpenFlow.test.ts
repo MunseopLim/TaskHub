@@ -271,14 +271,21 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             );
         });
 
-        test('JSON 이 깨져도 복구를 제안한다 (parse 실패)', async () => {
+        /**
+         * **mtime 과 크기를 원복하지 않는다.** 처음 이 테스트는 손상 후
+         * `fs.utimesSync` 로 mtime 을 되돌리고 같은 길이로 덮어써서 신선도
+         * 검사를 통과시켰다. 그런데 실전의 손상은 대개 외부 변경이라 mtime 이
+         * 갱신되고 크기도 달라진다 — 즉 **테스트가 통과하는 조건 자체가
+         * 실전에서 성립하지 않았고**, 그래서 fallback 이 한 번도 발동하지 못하는
+         * 구조적 실패를 이 테스트가 가려 주고 있었다. 이제 평범하게 깨뜨린다.
+         */
+        test('JSON 이 깨져도 복구를 제안한다 (parse 실패, mtime·크기 변경됨)', async () => {
             installFakePanel();
             const { filePath, ctx } = seedThenBreak('corrupt.json', p2 => {
-                // 크기와 mtime 을 유지해야 스냅샷이 매칭된다 — 같은 길이로 덮어쓴다.
-                const original = fs.readFileSync(p2);
-                const stat = fs.statSync(p2);
-                fs.writeFileSync(p2, '{'.repeat(original.length));
-                fs.utimesSync(p2, stat.atime, stat.mtime);
+                // 길이도 mtime 도 그대로 두지 않는다 — 외부 편집의 실제 모양.
+                fs.writeFileSync(p2, '{ "rows": [ { "a": ');
+                const future = new Date(Date.now() + 60_000);
+                fs.utimesSync(p2, future, future);
             });
 
             await openJsonEditorFile(ctx, filePath);
@@ -286,6 +293,40 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             assert.strictEqual(
                 infoPrompts.length, 1,
                 `JSON 이 깨지자 미저장 변경이 잠겼다: ${shownErrors.join(' / ')}`
+            );
+        });
+
+        test('크기 한도를 넘어간 파일도 복구를 제안한다', async () => {
+            installFakePanel();
+            // 0.6.47 이 명시적으로 노렸던 케이스인데, 크기가 달라지는 것이
+            // 정의상 확실하므로 신선도 검사가 **항상** 어긋나 발동할 수 없었다.
+            const { filePath, ctx } = seedThenBreak('oversize.json', p2 => {
+                fs.writeFileSync(p2, `{"pad":"${'x'.repeat(11 * 1024 * 1024)}"}`);
+            });
+
+            await openJsonEditorFile(ctx, filePath);
+
+            assert.strictEqual(
+                infoPrompts.length, 1,
+                `크기 한도 초과에서 미저장 변경이 잠겼다: ${shownErrors.join(' / ')}`
+            );
+        });
+
+        test('제안을 거절해도(Esc) 스냅샷은 남는다 — 신선도 불일치로 지우지 않는다', async () => {
+            installFakePanel();
+            const { filePath, ctx } = seedThenBreak('mismatch-keeps.json', p2 => {
+                fs.writeFileSync(p2, '{ broken');
+                const future = new Date(Date.now() + 60_000);
+                fs.utimesSync(p2, future, future);
+            });
+            infoAnswer = undefined;
+
+            await openJsonEditorFile(ctx, filePath);
+
+            const state = ctx.workspaceState.get<Record<string, unknown>>(RECOVERY_STATE_KEY, {});
+            assert.ok(
+                state?.[filePath],
+                '신선도가 어긋난다는 이유로 미저장 변경을 우리 판단으로 파기했다'
             );
         });
 

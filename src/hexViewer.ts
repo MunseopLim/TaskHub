@@ -37,6 +37,8 @@ export const hexPanelRegistry = {
 // 지역에서 자체 관리한다 — 전역 하나를 공유하면 패널/에디터를 오갈 때
 // 남의 핸들러를 dispose 해 메시지가 끊겼다(M7).
 let currentMessageDisposable: vscode.Disposable | undefined;
+/** standalone 패널의 렌더 세대. 패널 객체가 재사용되므로 이것으로 최신 여부를 가른다. */
+let panelRenderGeneration = 0;
 
 /** Hex Viewer에서 처리 가능한 최대 파일 크기 (50 MB) */
 /**
@@ -426,13 +428,33 @@ function renderWithReadyHandshake(
     const handshake = setupWebviewMessageHandler(webview, () => {
         if (isCurrent()) { postHexViewerData(webview, result); }
     });
-    webview.html = buildHexViewerHtml(fileName, result, webview);
-    setTimeout(() => {
+    // 핸들러를 **먼저** 걸었으므로, 이후 단계가 던지면 그 구독이 주인 없이
+    // 남는다 (`buildHexViewerHtml` 은 span 한도로 throw 할 수 있다). 호출부의
+    // catch 는 오류 HTML 만 세팅하고 이 disposable 은 받지 못한다.
+    let html: string;
+    try {
+        html = buildHexViewerHtml(fileName, result, webview);
+    } catch (e) {
+        handshake.dispose();
+        throw e;
+    }
+    webview.html = html;
+    const fallback = setTimeout(() => {
         if (isCurrent() && !handshake.readyReceived) {
             postHexViewerData(webview, result);
         }
     }, HEX_READY_FALLBACK_MS);
-    return handshake;
+    // **타이머도 함께 취소한다.** 예전에는 구독만 해제해서, 이 타이머가
+    // 살아남아 두 가지를 일으켰다:
+    //   - standalone 패널은 **같은 객체를 재사용**하므로 A 를 열고 `ready` 전에
+    //     B 를 열면 A 의 타이머가 `isCurrent()` 를 통과해 B 화면에 A 의 바이트를
+    //     보냈다 — 제목은 B, 내용은 A.
+    //   - Custom Editor 를 곧바로 닫아도 타이머가 최대 `HEX_VIEWER_MAX_SPAN`
+    //     크기의 페이로드를 **다시 만들었다**. 보낼 곳도 없는 할당이다.
+    return {
+        get readyReceived() { return handshake.readyReceived; },
+        dispose() { clearTimeout(fallback); handshake.dispose(); },
+    };
 }
 
 function openPanel(context: vscode.ExtensionContext, fileName: string, result: HexParseResult): boolean {
@@ -451,11 +473,14 @@ function openPanel(context: vscode.ExtensionContext, fileName: string, result: H
     currentPanel.title = `Hex: ${fileName}`;
     try {
         currentMessageDisposable?.dispose();
-        // 폴백 시점에 이 패널이 아직 그 패널인지 본다 — 그 사이 사용자가 닫고
-        // 다른 파일을 열었으면 남의 웹뷰에 이전 데이터를 보내게 된다.
-        const panelAtSchedule = currentPanel;
+        // **패널 객체로는 가릴 수 없다.** standalone 은 패널을 재사용하므로
+        // `currentPanel === panelAtSchedule` 은 다른 파일을 열어도 계속 참이다 —
+        // 그 검사만으로는 A 의 타이머가 B 화면에 A 를 보내는 것을 막지 못했다.
+        // 열기마다 올라가는 세대 번호로 "이 렌더가 아직 최신인가" 를 본다.
+        const generation = ++panelRenderGeneration;
         currentMessageDisposable = renderWithReadyHandshake(
-            currentPanel.webview, fileName, result, () => currentPanel === panelAtSchedule
+            currentPanel.webview, fileName, result,
+            () => currentPanel !== undefined && panelRenderGeneration === generation
         );
     } catch (e: any) {
         const msg = t(

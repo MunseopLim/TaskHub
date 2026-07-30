@@ -135,6 +135,170 @@ suite('Doctor', () => {
         });
     });
 
+    /**
+     * `command` 로 바꾸면 셸이 사라지지만, 명령 **자체가** 인터프리터면 그것이
+     * 문자열을 다시 파싱한다 — 번들 예제의 `cmd /c echo %${…}%` 가 그 형태였다.
+     */
+    suite('command.nested-interpreter', () => {
+        const withTasks = (tasks: any[]) => [{
+            id: 'a', title: 'X', action: { description: 'd', tasks }
+        }];
+        const codes = (items: any) => runDoctor([makeInput(items)], compileValidator()).map(f => f.code);
+
+        test('제약 없는 입력이 cmd /c 로 흘러가면 경고한다', () => {
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'name?' },
+                { id: 'run', type: 'command', command: 'cmd /c echo %${ask.value}%' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('sh -c / powershell -Command 도 같이 잡는다', () => {
+            for (const command of ['sh -c "echo ${ask.value}"', 'powershell -Command "echo ${ask.value}"']) {
+                assert.ok(
+                    codes(withTasks([
+                        { id: 'ask', type: 'inputBox', prompt: 'name?' },
+                        { id: 'run', type: 'command', command },
+                    ])).includes('command.nested-interpreter'),
+                    `놓쳤다: ${command}`
+                );
+            }
+        });
+
+        test('validatePattern 으로 제약된 입력은 경고하지 않는다', () => {
+            // 이 면제가 없으면 올바른 완화책을 쓴 액션에도 경고가 붙어
+            // 사용자가 룰 자체를 무시하게 된다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'name?', validatePattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+                { id: 'run', type: 'command', command: 'cmd /c echo %${ask.value}%' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('메타문자 없는 고정 items 를 가진 quickPick 은 면제한다', () => {
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'quickPick', items: ['dev', 'prod'] },
+                { id: 'run', type: 'command', command: 'cmd /c echo %${ask.value}%' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('items 에 메타문자가 있으면 고정 목록이라도 면제하지 않는다', () => {
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'quickPick', items: ['ok', 'a;b'] },
+                { id: 'run', type: 'command', command: 'cmd /c echo %${ask.value}%' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        /**
+         * **`envPick` 은 면제하지 않는다.** 처음에는 "셸이 실제로 노출하는 이름만
+         * 나온다" 는 이유로 면제했는데, 이름이 안전해도 `cmd` 는 `%VAR%` 를
+         * 치환한 **뒤** 그 결과를 다시 해석하므로 값에 `&` 가 있으면 뚫린다 —
+         * 우리가 같은 이유로 번들 액션을 고쳐 놓고 Doctor 는 반대로 판정하고
+         * 있었다. 그때 이 테스트가 그 false negative 를 **정상 계약으로 고정**해
+         * 모순을 덮고 있었다.
+         */
+        test('envPick 은 면제하지 않는다 (값이 다시 해석된다)', () => {
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'envPick' },
+                { id: 'run', type: 'command', command: 'cmd /c echo %${ask.value}%' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('검증 뒤에 붙는 prefix/suffix 의 메타문자도 본다', () => {
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'n?', validatePattern: '^[A-Za-z]+$', suffix: '; rm -rf x' },
+                { id: 'run', type: 'command', command: 'sh -c "echo ${ask.value}"' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('args 안의 스크립트도 검사한다 (가장 흔한 형태)', () => {
+            // `command` 문자열만 보던 처음 구현이 통째로 놓치던 형태다.
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'n?' },
+                { id: 'run', type: 'command', command: 'sh', args: ['-c', 'printf ${ask.value}'] },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('인용된 실행 파일과 스위치 앞 플래그도 위치로 처리한다', () => {
+            for (const task of [
+                { id: 'run', type: 'command', command: '"pwsh.exe" -Command "echo ${ask.value}"' },
+                { id: 'run', type: 'command', command: 'cmd /v:on /c echo %${ask.value}%' },
+                { id: 'run', type: 'command', command: 'bash --noprofile -c "echo ${ask.value}"' },
+                { id: 'run', type: 'command', command: 'sh -o nounset -c "echo ${ask.value}"' },
+            ]) {
+                assert.ok(
+                    codes(withTasks([{ id: 'ask', type: 'inputBox', prompt: 'n?' }, task]))
+                        .includes('command.nested-interpreter'),
+                    `놓쳤다: ${JSON.stringify(task.command)}`
+                );
+            }
+        });
+
+        test('인터프리터와 스위치 사이에 다른 플래그가 껴 있어도 잡는다', () => {
+            // 처음 정규식은 둘이 붙어 있는 것만 봐서 이 형태를 모두 놓쳤다.
+            for (const command of [
+                'powershell -NoProfile -Command "echo ${ask.value}"',
+                'cmd /d /c echo %${ask.value}%',
+                'sh -lc "echo ${ask.value}"',
+            ]) {
+                assert.ok(
+                    codes(withTasks([
+                        { id: 'ask', type: 'inputBox', prompt: 'name?' },
+                        { id: 'run', type: 'command', command },
+                    ])).includes('command.nested-interpreter'),
+                    `놓쳤다: ${command}`
+                );
+            }
+        });
+
+        test('태스크가 아닌 참조(${workspaceFolder})도 안전하지 않다', () => {
+            // 폴더 이름에 `;` 나 `&` 가 들어갈 수 있다. "태스크 참조가 없으면
+            // 안전" 으로 보던 처음 구현은 이 형태를 통째로 놓쳤다.
+            assert.ok(codes(withTasks([
+                { id: 'run', type: 'command', command: 'sh -c "ls ${workspaceFolder}"' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('실질적으로 제약하지 않는 validatePattern 은 면제하지 않는다', () => {
+            for (const validatePattern of ['.*', '[', 'abc', '^.*$']) {
+                assert.ok(
+                    codes(withTasks([
+                        { id: 'ask', type: 'inputBox', prompt: 'name?', validatePattern },
+                        { id: 'run', type: 'command', command: 'cmd /c echo %${ask.value}%' },
+                    ])).includes('command.nested-interpreter'),
+                    `면제가 우회로가 됐다: ${JSON.stringify(validatePattern)}`
+                );
+            }
+        });
+
+        test('OS별 객체에서 안전한 branch 뒤의 취약한 branch 도 잡는다', () => {
+            // `find` 로 첫 일치만 검사하면 앞의 안전한 branch 가 뒤를 가린다.
+            assert.ok(codes(withTasks([
+                { id: 'safe', type: 'inputBox', prompt: 'n?', validatePattern: '^[A-Za-z_]+$' },
+                { id: 'free', type: 'inputBox', prompt: 'n?' },
+                {
+                    id: 'run', type: 'command', command: {
+                        windows: 'cmd /c echo %${safe.value}%',
+                        macos: 'sh -c "echo ${free.value}"',
+                        linux: 'sh -c "echo ${free.value}"',
+                    }
+                },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('중첩 인터프리터가 없으면 경고하지 않는다', () => {
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'name?' },
+                { id: 'run', type: 'command', command: 'printenv ${ask.value}' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('itemsFromCommand 는 값의 모양이 정해지지 않아 경고한다', () => {
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'quickPick', itemsFromCommand: 'git branch' },
+                { id: 'run', type: 'command', command: 'cmd /c echo %${ask.value}%' },
+            ])).includes('command.nested-interpreter'));
+        });
+    });
+
     test('flags invalid capture regex', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([

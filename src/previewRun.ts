@@ -17,6 +17,8 @@ import * as path from 'path';
 import type { Action, ActionItem, Task, OutputCapture } from './schema';
 import {
     interpolatePipelineVariables,
+    interpolateCommandPreservingTokens,
+    buildNativeCommandInvocation,
     getCommandString,
     buildTaskGraph,
     validateTaskGraph,
@@ -390,13 +392,33 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         switch (task.type) {
             case 'shell':
             case 'command': {
+                // 런타임과 **같은 규칙**으로 보간해야 한다 — `command` 는 토큰
+                // 경계를 보존하며 보간하고 `shell` 은 문자열을 그대로 넘긴다
+                // (0.6.50). 여기서 옛 방식으로 만들면 Preview 가 실제로 실행될
+                // argv 와 **다른 것을 보여 준다** — 미리 보기의 존재 이유가
+                // 사라진다.
+                //
+                // 다만 **표시는 읽을 수 있어야 한다.** 토큰 보존 형태는 모든
+                // 토큰을 인용하므로(`"cat" "<...>"`) 그대로 찍으면 읽기 나쁘다.
+                // 다시 토큰화해 필요한 곳만 인용하는 display 형태로 되돌린다 —
+                // 경계는 그대로 드러나고(공백 든 값은 인용된 채 남는다) 사람이
+                // 읽기도 좋다.
+                const interpolateCommandString = (template: string): string => {
+                    if (task.type !== 'command') {
+                        return interpolatePipelineVariables(template, interpolationContext);
+                    }
+                    const preserved = interpolateCommandPreservingTokens(
+                        template, value => interpolatePipelineVariables(value, interpolationContext)
+                    );
+                    return buildNativeCommandInvocation(preserved, []).display;
+                };
                 let command: string | undefined;
                 if (typeof task.command === 'string') {
-                    command = interpolatePipelineVariables(task.command, interpolationContext);
+                    command = interpolateCommandString(task.command);
                 } else if (task.command && typeof task.command === 'object') {
                     const cloned: any = JSON.parse(JSON.stringify(task.command));
                     for (const os of Object.keys(cloned)) {
-                        cloned[os] = interpolatePipelineVariables(cloned[os], interpolationContext);
+                        cloned[os] = interpolateCommandString(cloned[os]);
                     }
                     try {
                         command = getCommandString(cloned);

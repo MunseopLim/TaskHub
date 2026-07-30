@@ -938,6 +938,12 @@ export function tokenizeCommandLine(command: string): string[] {
     const tokens: string[] = [];
     let current = '';
     let quoteChar: string | null = null;
+    // 이 토큰에 **명시적 인용이 있었는가**. 빈 인용(`""`)은 "빈 인자" 라는
+    // 뜻이므로 토큰으로 남겨야 한다. 예전에는 `current.length > 0` 만 보고
+    // 버렸는데, 그러면 보간값이 빈 문자열일 때 그 인자가 **사라지고 뒤 인자가
+    // 앞으로 당겨진다** — `tool --output ${empty} target` 이
+    // `tool --output target` 이 되어 `target` 이 `--output` 의 값으로 먹힌다.
+    let quoted = false;
 
     for (let i = 0; i < command.length; i++) {
         const char = command[i];
@@ -957,20 +963,58 @@ export function tokenizeCommandLine(command: string): string[] {
             }
         } else if (char === '"' || char === '\'') {
             quoteChar = char;
+            quoted = true;
         } else if (/\s/.test(char)) {
-            if (current.length > 0) {
+            if (current.length > 0 || quoted) {
                 tokens.push(current);
                 current = '';
+                quoted = false;
             }
         } else {
             current += char;
         }
     }
 
-    if (current.length > 0) {
+    if (current.length > 0 || quoted) {
         tokens.push(current);
     }
     return tokens;
+}
+
+/**
+ * `tokenizeCommandLine` 의 역함수. 어떤 문자열이든 **정확히 한 토큰**으로
+ * 되돌아오게 인용한다 (큰따옴표로 감싸고 `\` 와 `"` 만 escape — 토크나이저가
+ * 큰따옴표 안에서 인식하는 두 escape 와 정확히 대응한다).
+ */
+export function quoteForCommandTokenizer(token: string): string {
+    return `"${token.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * argv 실행용 명령 문자열을 만들되, **보간값이 argv 경계를 만들지 못하게** 한다.
+ *
+ * 예전에는 문자열 전체를 먼저 보간하고 그 결과를 공백으로 토큰화했다. 그러면
+ * 보간값 안의 공백이 **새 인자를 만든다**:
+ *
+ *   - `git tag ${input.value}` 에 `--delete main` → `git tag --delete main`
+ *     (태그 생성이 아니라 **삭제**가 된다 — 옵션 주입)
+ *   - `${selectFile.path}` 가 `/My Docs/a.txt` → 인자 두 개로 쪼개진다
+ *
+ * `command` 타입으로 바꾼 것은 **셸** 주입만 닫았고 이 경계 문제는 그대로였다.
+ * 이제 **템플릿을 먼저 토큰화하고 토큰마다 보간**한다 — 보간값에 무엇이 있어도
+ * 그 토큰 하나로 남는다. `--env=${x}` 처럼 리터럴에 붙은 형태도 그대로 유지된다.
+ *
+ * `shell` 타입에는 쓰지 않는다. 그쪽은 문자열을 셸에 그대로 넘기는 것이 계약이라
+ * argv 경계라는 개념 자체가 없다 — 거기서는 값을 `args` 로 넘기는 것이 답이고,
+ * Doctor 의 `shell.interpolated-command` 룰이 그 형태를 찾아 준다.
+ */
+export function interpolateCommandPreservingTokens(
+    template: string,
+    interpolate: (value: string) => string
+): string {
+    return tokenizeCommandLine(template)
+        .map(token => quoteForCommandTokenizer(interpolate(token)))
+        .join(' ');
 }
 
 /**
@@ -1152,12 +1196,21 @@ export function rawCommandUsesChainOperators(command: string): boolean {
  * 경우가 흔하고, 이 판정이 실패하면 (chain 연산자를 쓰는 명령에서) **태스크가
  * 아예 실패**하므로 false negative 의 대가가 크다.
  */
-export function pwshIsAvailable(lookup: Partial<WindowsExecutableLookup> = {}): boolean {
-    if (windowsCommandIsDirectlyLaunchable('pwsh', [], lookup)) { return true; }
+export function resolvePwshPath(lookup: Partial<WindowsExecutableLookup> = {}): string | undefined {
+    // PATH 에 있으면 이름만으로 띄울 수 있다.
+    if (windowsCommandIsDirectlyLaunchable('pwsh', [], lookup)) { return 'pwsh.exe'; }
     const env = lookup.env ?? defaultWindowsExecutableLookup.env;
     const isFile = lookup.isFile ?? defaultWindowsExecutableLookup.isFile;
-    const programFiles = [env.ProgramFiles, env['ProgramFiles(x86)']].filter((v): v is string => !!v);
-    return programFiles.some(root => isFile(path.win32.join(root, 'PowerShell', '7', 'pwsh.exe')));
+    // PATH 에 없다면 **전체 경로를 돌려줘야 한다.** 처음 구현은 여기서 찾고도
+    // 이름(`pwsh.exe`)만 반환해서, PATH 에 없는 그 설치본을 spawn 이 찾지
+    // 못하고 세 실행 모드 모두 실패했다 — false negative 를 줄이려던 보완이
+    // 오히려 확실한 실패를 만들었다.
+    for (const root of [env.ProgramFiles, env['ProgramFiles(x86)']]) {
+        if (!root) { continue; }
+        const candidate = path.win32.join(root, 'PowerShell', '7', 'pwsh.exe');
+        if (isFile(candidate)) { return candidate; }
+    }
+    return undefined;
 }
 
 /**
@@ -1180,9 +1233,9 @@ export function pwshIsAvailable(lookup: Partial<WindowsExecutableLookup> = {}): 
  * 참고: PowerShell **6** 의 실행 파일도 `pwsh.exe` 이고 거기에는 `&&` 가 없다
  * (7.0 에서 도입). PS 6 은 EOL 이라 그 구분까지는 하지 않는다.
  */
-export function selectWindowsRawShell(needsChainOperators: boolean, pwshAvailable: boolean): string | undefined {
+export function selectWindowsRawShell(needsChainOperators: boolean, pwshPath: string | undefined): string | undefined {
     if (!needsChainOperators) { return 'powershell.exe'; }
-    return pwshAvailable ? 'pwsh.exe' : undefined;
+    return pwshPath;
 }
 
 /**
@@ -1246,6 +1299,39 @@ export function buildPowerShellInvocation(command: string, args: string[], enfor
     const prefix = enforceUtf8Console ? "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n" : '';
     const script = `${prefix}${invocation}`;
     return { script, display: invocation };
+}
+
+/**
+ * PowerShell 스크립트 끝에 **실제 종료 코드를 전달하는 후행부**를 붙인다.
+ *
+ * `powershell.exe -Command`/`-EncodedCommand` 는 외부 프로그램의 종료 코드를
+ * 그대로 물려주지 않는다 — 실패를 1 로 뭉갠다. 그래서 종료 코드 7 로 끝나는
+ * 컴파일러·플래셔가 1 로 보이고, `output.diagnostics` 나 사용자 스크립트가
+ * 코드로 분기할 수 없었다. Microsoft 도 구체적 코드를 보존하려면 명시적으로
+ * `exit $LASTEXITCODE` 를 넣으라고 안내한다.
+ *
+ * **`$?` 를 먼저 본다.** `$LASTEXITCODE` 는 세션에 **남아 있는** 값이다 —
+ * 마지막 *네이티브* 프로그램의 코드일 뿐이고, 그 뒤에 cmdlet 이 실패해도
+ * 갱신되지 않는다. 그래서 `$LASTEXITCODE` 를 먼저 적용하면 두 방향으로 틀린다:
+ *
+ *   - `cmd /c exit 0; Write-Error boom` → cmdlet 이 실패했는데 코드는 0 →
+ *     **실패가 성공으로 보고된다.** 이쪽이 훨씬 위험하다.
+ *   - `cmd /c exit 5; Write-Output ok` → 마지막 명령은 성공했는데 코드 5 →
+ *     성공이 실패로 보고된다.
+ *
+ * 그래서 성공 여부는 `$?` 가 판정하고, `$LASTEXITCODE` 는 **실패일 때 구체적인
+ * 코드를 되살리는 데만** 쓴다. 네이티브 프로그램이 0 이 아닌 코드로 끝나면
+ * `$?` 도 false 이므로 코드 7 은 그대로 7 로 나간다.
+ *
+ * 이 후행부는 민감 one-shot 이 쓰던 것을 공용화한 것인데, **그 원본이 이미 이
+ * 순서 문제를 갖고 있었다** — 공용화가 그것을 세 경로로 퍼뜨렸다.
+ */
+export function withPowerShellExitCode(script: string): string {
+    return script +
+        '\n$taskHubSucceeded = $?\n$taskHubExitCode = $LASTEXITCODE\n' +
+        'if ($taskHubSucceeded) { exit 0 }\n' +
+        'if ($null -ne $taskHubExitCode -and [int]$taskHubExitCode -ne 0) { exit [int]$taskHubExitCode }\n' +
+        'exit 1';
 }
 
 /** Encode a PowerShell script as UTF-16 LE Base64, suitable for `-EncodedCommand`. */

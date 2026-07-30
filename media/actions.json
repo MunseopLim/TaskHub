@@ -14,12 +14,15 @@
           "id": "show_env_value",
           "type": "command",
           "command": {
-            "windows": "cmd /c echo %${env_pick.value}%",
-            "macos": "printenv ${env_pick.value}",
-            "linux": "printenv ${env_pick.value}"
+            "windows": "powershell -NoProfile -Command [Environment]::GetEnvironmentVariable($env:TASKHUB_ENV_NAME)",
+            "macos": "sh -c 'printenv \"$TASKHUB_ENV_NAME\"'",
+            "linux": "sh -c 'printenv \"$TASKHUB_ENV_NAME\"'"
           },
           "passTheResultToNextTask": false,
-          "revealTerminal": "always"
+          "revealTerminal": "always",
+          "env": {
+            "TASKHUB_ENV_NAME": "${env_pick.value}"
+          }
         }
       ]
     }
@@ -34,18 +37,23 @@
           "id": "input_env_name",
           "type": "inputBox",
           "prompt": "Enter environment variable name",
-          "placeHolder": "e.g. ARM_TOOLCHAIN, GCC_ARM_PATH, ARMCC_DIR"
+          "placeHolder": "e.g. ARM_TOOLCHAIN, GCC_ARM_PATH, ARMCC_DIR",
+          "validatePattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "validateMessage": "Environment variable names may contain only letters, digits, and underscores."
         },
         {
           "id": "show_env_value",
           "type": "command",
           "command": {
-            "windows": "cmd /c echo %${input_env_name.value}%",
-            "macos": "printenv ${input_env_name.value}",
-            "linux": "printenv ${input_env_name.value}"
+            "windows": "powershell -NoProfile -Command [Environment]::GetEnvironmentVariable($env:TASKHUB_ENV_NAME)",
+            "macos": "sh -c 'printenv \"$TASKHUB_ENV_NAME\"'",
+            "linux": "sh -c 'printenv \"$TASKHUB_ENV_NAME\"'"
           },
           "passTheResultToNextTask": false,
-          "revealTerminal": "always"
+          "revealTerminal": "always",
+          "env": {
+            "TASKHUB_ENV_NAME": "${input_env_name.value}"
+          }
         }
       ]
     }

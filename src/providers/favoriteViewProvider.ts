@@ -26,6 +26,10 @@ export interface FavoriteEntry {
     tags?: string[];
     sourceFile?: string;
     workspaceFolder?: string;
+    /** 디스크에서 읽은 원본 객체. `LinkEntry.raw` 와 같은 규약 — 그 주석 참조. */
+    raw?: unknown;
+    /** 이번 작업에서 편집했는가. `LinkEntry.edited` 주석 참조. */
+    edited?: true;
 }
 
 export type FavoriteTreeNode = Favorite | FavoriteGroup | FavoriteParseError;
@@ -191,6 +195,7 @@ export function readFavoritesFromDisk(filePath: string, workspaceFolderPath?: st
             if (tags) {
                 entry.tags = tags;
             }
+            entry.raw = item;
             entry.sourceFile = filePath;
             if (workspaceFolderPath) {
                 entry.workspaceFolder = workspaceFolderPath;

@@ -289,6 +289,14 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 | **`shell`** | 명령 문자열을 **셸에 그대로** 넘깁니다 | **동작합니다** |
 | **`command`** | 공백으로 토큰화한 뒤 **각 토큰을 인용**해 argv 로 실행합니다 | 리터럴 인자가 됩니다 |
 
+`command` 타입에서는 **보간이 토큰화보다 나중에** 일어납니다 (0.6.50부터). 즉 `${...}` 로 들어온 값은 그 안에 공백이 있어도 **인자 하나로 남습니다** — `git tag ${input.value}` 에 `--delete main` 을 입력해도 `git tag` 에 인자 하나가 붙을 뿐 옵션이 되지 않고, 공백이 든 파일 경로도 쪼개지지 않습니다. `--env=${x}` 처럼 리터럴에 붙은 형태는 그대로 한 토큰으로 유지됩니다.
+
+> **이것이 막는 것과 막지 못하는 것**
+>
+> - **막습니다**: 보간값 안의 공백이 인자를 쪼개는 것. 공백 든 경로가 온전히 전달됩니다.
+> - **막지 못합니다 — 옵션 주입.** 값이 인자 하나로 남더라도 그 값이 `-` 로 시작하면 실행되는 프로그램은 그것을 **옵션으로 읽습니다.** `git tag ${input.value} main` 에 `--delete` 를 입력하면 `git tag --delete main` 이 되어 기존 태그가 삭제됩니다. 값의 모양을 `validatePattern` 으로 제약하거나, 명령이 지원한다면 위치 인자 앞에 `--` 를 두세요 (`git tag -- ${input.value}`).
+> - **막지 못합니다 — 중첩 인터프리터.** 명령 자체가 `cmd /c` · `sh -c` · `powershell -Command` 라면 그 인터프리터가 넘겨받은 줄을 **다시 파싱**하므로 argv 인용이 거기서 끝납니다. 값을 `args` 로 넘기거나, 아예 명령 문자열에 넣지 말고 `env` 로 전달하세요 — 번들 예제의 환경변수 액션이 그 형태입니다. Doctor 의 `command.nested-interpreter` 룰이 이 형태를 찾아 줍니다.
+
 `command` 타입에서는 셸 메타문자가 연산자가 아니라 **리터럴 인자**가 됩니다.
 
 | 작성한 것 | 실제로 실행되는 것 |
@@ -318,7 +326,7 @@ Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.tx
 
 `|`·`>`·`;` 는 5.1 에서도 동작하므로 막지 않습니다. **인용 안의 `&&` 도 막지 않습니다** — `cmd /c "build && test"` 는 5.1 에서 chain 을 쓰는 정석 우회법이고, 그 `&&` 는 문자열 리터럴 안이라 PowerShell 이 해석하지 않습니다. `args` 배열은 항상 인용되므로 그 안의 내용도 검사 대상이 아닙니다.
 
-같은 이유로 **셸 변수 확장도 일어나지 않습니다.** `echo $MY_VAR` 는 `echo '$MY_VAR'` 가 되어 값이 아니라 `$MY_VAR` 라는 글자를 출력합니다(Windows 의 `%MY_VAR%` 도 같습니다). `env` 로 넘긴 값은 자식 프로세스의 환경에는 **정상적으로 들어가므로**, 그 값을 읽는 것은 셸이 아니라 실행되는 프로그램의 몫입니다 — 예: `printenv MY_VAR`, `cmd /c echo %MY_VAR%`, `node -e "console.log(process.env.MY_VAR)"`. 반면 TaskHub 자신의 변수 치환(`${task_id.output}`, `${workspaceFolder}` 등)은 토큰화 **이전**에 일어나므로 그대로 동작합니다.
+같은 이유로 **셸 변수 확장도 일어나지 않습니다.** `echo $MY_VAR` 는 `echo '$MY_VAR'` 가 되어 값이 아니라 `$MY_VAR` 라는 글자를 출력합니다(Windows 의 `%MY_VAR%` 도 같습니다). `env` 로 넘긴 값은 자식 프로세스의 환경에는 **정상적으로 들어가므로**, 그 값을 읽는 것은 셸이 아니라 실행되는 프로그램의 몫입니다 — 예: `printenv MY_VAR`, `cmd /c echo %MY_VAR%`, `node -e "console.log(process.env.MY_VAR)"`. 반면 TaskHub 자신의 변수 치환(`${task_id.output}`, `${workspaceFolder}` 등)은 **토큰마다** 이루어지므로 그대로 동작하며, 치환된 값은 위에서 설명한 대로 인자 하나로 유지됩니다.
 
 대신 이렇게 쓰세요.
 
@@ -863,17 +871,20 @@ editor/terminal 규칙은 **비밀을 참조하는 태스크뿐 아니라 비밀
     },
     {
       "id": "show_env_value",
-      "type": "shell",
+      "type": "command",
       "command": {
-        "windows": "cmd /c echo %${env_pick.value}%",
-        "macos": "printenv ${env_pick.value}",
-        "linux": "printenv ${env_pick.value}"
+        "windows": "powershell -NoProfile -Command [Environment]::GetEnvironmentVariable($env:TASKHUB_ENV_NAME)",
+        "macos": "sh -c 'printenv \"$TASKHUB_ENV_NAME\"'",
+        "linux": "sh -c 'printenv \"$TASKHUB_ENV_NAME\"'"
       },
+      "env": { "TASKHUB_ENV_NAME": "${env_pick.value}" },
       "revealTerminal": "always"
     }
   ]
 }
 ```
+
+> **왜 이름을 명령 문자열에 넣지 않는가**: 예전 이 예제는 `cmd /c echo %${env_pick.value}%` 였습니다. 변수 **이름**이 안전해도 `cmd` 는 `%VAR%` 를 **치환한 뒤 그 결과를 다시 해석**하므로, 값에 `&` 나 `|` 가 있으면 별도 명령이 실행됩니다. 이름을 `env` 로 넘기면 명령 문자열이 고정되어 그럴 자리가 없습니다 — 중첩 인터프리터(`cmd /c`, `sh -c`)에 값을 넘겨야 할 때의 일반적인 해법입니다.
 
 ### `confirm` 태스크
 
@@ -2088,6 +2099,7 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `dependsOn.missing` | error | `dependsOn`이 같은 액션에 존재하지 않는 task id를 가리킴. |
 | `dependsOn.cycle` | error | task 간 `dependsOn` 그래프에 순환이 있음. 출력 메시지에 순환 경로 포함. |
 | `parallel.interactive` | warning | `inputBox` / `quickPick` / `envPick` / `confirm` / `fileDialog` / `folderDialog` 같은 interactive task에 `parallel: true`가 붙음. 런타임은 prompt mutex로 다이얼로그를 강제 직렬화하므로 병렬 표시는 *post-prompt* 처리에만 적용되며, 사실상 효과가 없는 경우가 대부분. |
+| `command.nested-interpreter` | warning | `command` 태스크의 **실효 argv**(`command` + `args`)가 다른 인터프리터(`cmd /c`, `sh -c`, `powershell -Command` 등)를 호출하면서, 그 인터프리터가 실행할 스크립트에 `${…}` 를 보간함. argv 인용은 그 인터프리터 앞에서 끝나고 인터프리터가 스크립트를 다시 파싱하므로 값이 문법으로 읽힐 수 있음. 값을 자식의 argv 로 직접 넘기거나 `env` 로 전달할 것. 스위치는 **위치로** 찾으므로 `cmd /v:on /c`·`bash --noprofile -c`·인용된 실행 파일도 검출. **면제**: 셸 메타문자를 하나도 통과시키지 않는 앵커된 `validatePattern` 을 가진 `inputBox`, 항목에 메타문자가 없는 고정 `items` 의 `quickPick`. 검증 뒤에 붙는 `prefix`/`suffix` 에 메타문자가 있으면 면제하지 않음. `envPick` 은 **면제하지 않음** — 이름이 안전해도 확장된 **값**이 다시 해석됨. |
 | `shell.interpolated-command` | warning | `shell` 태스크의 command 문자열에 `${…}` 보간이 있음. `shell`은 문자열을 셸에 그대로 넘기므로 보간된 값도 셸 문법으로 해석되어, 값에 `;`나 `$(...)`가 있으면 의도하지 않은 명령이 실행됨. 값은 `args` 배열로 넘기거나 `command` 타입을 사용. OS별 객체는 어느 한 branch에만 있어도 검출. |
 
 ### 23.3. `dependsOn` / `parallel` 런타임 동작

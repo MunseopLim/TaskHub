@@ -29,6 +29,7 @@
 import type { ActionItem, Task, OutputCapture, DiagnosticPattern } from './schema';
 import {
     interpolatePipelineVariables,
+    tokenizeCommandLine,
     RESERVED_CAPTURE_NAMES,
     INTERACTIVE_TASK_TYPES,
     buildTaskGraph,
@@ -671,6 +672,101 @@ function checkUnresolvedAndOutsideWrites(actions: ActionItem[], input: DoctorInp
     return findings;
 }
 
+
+/**
+ * 인터프리터별 "이 뒤가 스크립트" 스위치.
+ *
+ * `cmd` 는 `/c` 뒤 **나머지 전체**를 명령줄로 읽고, `sh`/`bash` 계열은 `-c`
+ * 바로 다음 인자를, PowerShell 은 `-Command` 뒤를 읽는다. 어느 쪽이든 뒤를
+ * 통째로 이어 붙여 보면 놓치는 형태가 없다.
+ *
+ * `-lc` · `-ec` 처럼 묶어 쓰는 형태, `--noprofile` · `/v:on` 처럼 스위치 앞에
+ * 끼는 플래그를 **위치로** 처리하므로, 문자열 정규식으로 형태를 하나씩
+ * 쫓아다닐 필요가 없다.
+ */
+const NESTED_INTERPRETERS: { executable: RegExp; scriptSwitch: RegExp }[] = [
+    { executable: /^cmd(\.exe)?$/i, scriptSwitch: /^\/c$/i },
+    { executable: /^(sh|bash|zsh|dash|ksh|ash)$/i, scriptSwitch: /^-[a-z]*c$/i },
+    { executable: /^(powershell|pwsh)(\.exe)?$/i, scriptSwitch: /^-(c|command|encodedcommand)$/i },
+];
+
+/**
+ * 실효 argv 가 중첩 인터프리터를 호출한다면, 그 인터프리터가 실행할 스크립트
+ * 텍스트를 돌려준다. 아니면 `undefined`.
+ */
+export function nestedInterpreterScript(argv: string[]): string | undefined {
+    if (argv.length === 0) { return undefined; }
+    const base = (argv[0].split(/[\\/]/).pop() ?? argv[0]).trim();
+    const interpreter = NESTED_INTERPRETERS.find(entry => entry.executable.test(base));
+    if (!interpreter) { return undefined; }
+    const switchIndex = argv.findIndex((token, i) => i > 0 && interpreter.scriptSwitch.test(token));
+    if (switchIndex === -1) { return undefined; }
+    const script = argv.slice(switchIndex + 1).join(' ');
+    return script.length > 0 ? script : undefined;
+}
+
+/** 셸·cmd 에서 문법적 의미를 갖는 문자를 담고 있는가. */
+function containsShellMetacharacter(value: string): boolean {
+    return /[;&|`$()<>*?!^%\n\r"'\\]/.test(value) || /\s/.test(value);
+}
+
+/**
+ * 중첩 인터프리터 스크립트가 참조하는 값들이 **모양이 제약된 소스**에서만 오는가.
+ *
+ * 면제는 **런타임이 실제로 보장하는 것만** 인정해야 한다. 처음 구현은
+ * `envPick` 을 무조건 면제했는데, 환경변수 **이름**이 안전해도 `cmd` 는
+ * `%VAR%` 를 치환한 **뒤** 그 결과를 다시 해석하므로 값에 `&` 가 있으면
+ * 그대로 뚫린다 — 우리 CHANGELOG 가 같은 이유로 번들 액션을 고쳐 놓고
+ * Doctor 는 반대로 판정하고 있었다.
+ */
+function nestedInterpreterRefsAreConstrained(script: string, tasks: Task[]): boolean {
+    const refs = [...script.matchAll(/\$\{([^}.]+)(?:\.[^}]*)?\}/g)].map(m => m[1]);
+    if (refs.length === 0) { return true; }
+    // **태스크를 가리키지 않는 참조도 안전하지 않다.** `${workspaceFolder}` 는
+    // 사용자 폴더 이름이고 거기에 `;` 나 `&` 가 들어갈 수 있다.
+    return refs.every(ref => {
+        const source = tasks.find(t => t.id === ref) as any;
+        if (!source) { return false; }
+        // 검증 **이후에** 붙는 prefix/suffix 는 패턴이 보장하지 못한다.
+        if (containsShellMetacharacter(String(source.prefix ?? '')) ||
+            containsShellMetacharacter(String(source.suffix ?? ''))) {
+            return false;
+        }
+        if (source.type === 'inputBox') { return patternMeaningfullyConstrains(source.validatePattern); }
+        if (source.type === 'quickPick') {
+            // 항목 자체에 메타문자가 있으면 고정 목록이라도 안전하지 않다.
+            if (!Array.isArray(source.items) || source.itemsFromCommand) { return false; }
+            return source.items.every((entry: any) => {
+                const label = typeof entry === 'string' ? entry : entry?.label;
+                return typeof label === 'string' && !containsShellMetacharacter(label);
+            });
+        }
+        // `envPick` 은 면제하지 않는다 — 위 주석 참조.
+        return false;
+    });
+}
+
+/**
+ * `validatePattern` 이 값의 모양을 **실제로** 좁히는가.
+ *
+ * `".*"` 처럼 무엇이든 통과시키는 패턴이나 컴파일되지 않는 패턴(`"["` — 런타임이
+ * 검증을 건너뛴다)을 제약으로 인정하면, 면제가 곧 우회로가 된다. 셸·cmd 에서
+ * 의미를 갖는 문자를 **하나라도** 통과시키면 제약으로 보지 않는다.
+ */
+function patternMeaningfullyConstrains(pattern: unknown): boolean {
+    if (typeof pattern !== 'string' || pattern.length === 0) { return false; }
+    let re: RegExp;
+    try {
+        re = new RegExp(pattern);
+    } catch {
+        return false;   // 런타임도 잘못된 패턴은 무시한다 → 제약이 없는 것과 같다
+    }
+    // 앵커가 없으면 부분 일치라 앞뒤에 무엇이든 붙일 수 있다.
+    if (!pattern.startsWith('^') || !pattern.endsWith('$')) { return false; }
+    const dangerous = [';', '&', '|', '`', '$', '(', ')', '<', '>', '*', '?', '!', '^', '%', '"', "'", '\\', ' ', '\n'];
+    return dangerous.every(char => !re.test(`a${char}b`) && !re.test(char));
+}
+
 function analyzeActionTasks(
     item: ActionItem,
     tasks: Task[],
@@ -871,6 +967,45 @@ function analyzeActionTasks(
                     code: 'shell.interpolated-command',
                     message: `Task '${item.id}.${task.id}' is a 'shell' task that interpolates \${...} into the command string. 'shell' passes the string to a shell verbatim, so a value containing ';', '&&' or '$(...)' runs as a command. Pass such values through the 'args' array, or use type 'command' (argv, each token quoted).`,
                     messageKo: `Task '${item.id}.${task.id}'는 명령 문자열에 \${...}를 보간하는 'shell' 태스크입니다. 'shell'은 문자열을 셸에 그대로 넘기므로, 값에 ';'나 '&&', '$(...)'가 있으면 명령으로 실행됩니다. 그런 값은 'args' 배열로 넘기거나 'command' 타입(토큰마다 인용하는 argv)을 사용하세요.`,
+                });
+            }
+        }
+
+        // `command` 는 argv 로 실행하므로 셸이 없다 — 그런데 명령 **자체가**
+        // 인터프리터면(`cmd /c`, `sh -c`, `powershell -Command`) 그 인터프리터가
+        // 넘겨받은 문자열을 다시 파싱한다. 그래서 `command` 로 바꾸는 것만으로는
+        // 닫히지 않는 경로가 남는다.
+        //
+        // **`args` 까지 합친 실효 argv 로 판정한다.** 처음 구현은 `task.command`
+        // 문자열만 정규식으로 봤는데, 가장 흔한 형태가 바로
+        // `command: "sh", args: ["-c", "... ${x} ..."]` 였다 — 그 형태를 통째로
+        // 놓쳤다. 인용된 실행 파일(`"pwsh.exe"`)이나 스위치 앞에 낀 플래그
+        // (`cmd /v:on /c`, `bash --noprofile -c`)도 문자열 정규식으로는 끝이 없다.
+        if (task.type === 'command') {
+            const commandBranches: string[] = typeof task.command === 'string'
+                ? [task.command]
+                : (task.command && typeof task.command === 'object'
+                    ? Object.values(task.command).filter((v): v is string => typeof v === 'string')
+                    : []);
+            const extraArgs: string[] = Array.isArray(task.args)
+                ? task.args.filter((a): a is string => typeof a === 'string')
+                : [];
+            // **모든 branch 를 본다** — 앞의 안전한 branch 가 뒤를 가리면 안 된다.
+            const vulnerable = commandBranches.some(branch => {
+                const script = nestedInterpreterScript([...tokenizeCommandLine(branch), ...extraArgs]);
+                return script !== undefined
+                    && /\$\{[^}]+\}/.test(script)
+                    && !nestedInterpreterRefsAreConstrained(script, tasks);
+            });
+            if (vulnerable) {
+                findings.push({
+                    filePath: input.filePath,
+                    sourceLabel: input.sourceLabel,
+                    range: findIdLine(input.rawText, task.id),
+                    severity: 'warning',
+                    code: 'command.nested-interpreter',
+                    message: `Task '${item.id}.${task.id}' is a 'command' task whose effective argv invokes another interpreter (\`cmd /c\`, \`sh -c\`, \`powershell -Command\`, …) with an interpolated \${...} value in the script it runs. argv quoting stops at that interpreter — it re-parses the script, so the value can still be read as syntax. Pass the value through the child's own argv, or hand it over via 'env' so it never appears in the script text.`,
+                    messageKo: `Task '${item.id}.${task.id}'의 실효 argv 가 다른 인터프리터(\`cmd /c\`, \`sh -c\`, \`powershell -Command\` 등)를 호출하면서, 그 인터프리터가 실행할 스크립트에 \${...} 를 보간합니다. argv 인용은 그 인터프리터 앞에서 끝나고 인터프리터가 스크립트를 다시 파싱하므로 값이 문법으로 읽힐 수 있습니다. 값을 자식의 argv 로 직접 넘기거나, 'env' 로 전달해 스크립트 문자열에 아예 넣지 마세요.`,
                 });
             }
         }

@@ -1065,10 +1065,13 @@ import {
     buildRawPowerShellCommandLine,
     buildRawShellCommandLine,
     selectWindowsRawShell,
-    pwshIsAvailable,
+    resolvePwshPath,
     rawCommandUsesChainOperators,
     windowsSpawnStrategy,
     buildRawOneShotWindowsScript,
+    withPowerShellExitCode,
+    interpolateCommandPreservingTokens,
+    quoteForCommandTokenizer,
     normalizeEol,
     encodeFileContent,
     withTaskTimeout,
@@ -1112,10 +1115,13 @@ export {
     buildNativeCommandInvocation,
     windowsCommandIsDirectlyLaunchable,
     selectWindowsRawShell,
-    pwshIsAvailable,
+    resolvePwshPath,
     rawCommandUsesChainOperators,
     windowsSpawnStrategy,
     buildRawOneShotWindowsScript,
+    withPowerShellExitCode,
+    interpolateCommandPreservingTokens,
+    quoteForCommandTokenizer,
     encodePowerShellScript,
     quotePosixArgument,
     buildPosixCommandLine,
@@ -3466,8 +3472,41 @@ export function serializeFavorites(entries: FavoriteEntry[]): any[] {
         if (entry.tags && entry.tags.length > 0) {
             payload.tags = entry.tags;
         }
-        return payload;
+        return applyKnownFieldsToRaw(entry, payload, ['title', 'path', 'line', 'group', 'tags']);
     });
+}
+
+/**
+ * 디스크 원본(`raw`)과 우리가 조립한 알려진 필드(`payload`)를 합친다.
+ *
+ *   - `raw` 가 없다 (Add 가 만든 새 항목)        → `payload` 그대로.
+ *   - `raw` 는 있고 편집하지 않았다              → **`raw` 그대로.** 정규화에서
+ *     걸러진 값(`group: 42`)과 확장 속성을 우리가 없앨 권한이 없다.
+ *   - `raw` 가 있고 편집했다                     → `raw` 위에 알려진 필드만
+ *     덮어쓴다. 사용자가 고친 값이 반영되면서 `custom` 같은 속성은 남는다.
+ *     편집으로 비운 필드는 지운다.
+ *
+ * 세 번째 갈래가 없던 동안, 편집 경로가 기존 항목을 spread 해 `raw` 를 함께
+ * 복사했고 직렬화가 그 `raw` 를 그대로 되써서 **편집이 조용히 버려졌다**.
+ */
+function applyKnownFieldsToRaw(
+    entry: { raw?: unknown; edited?: true },
+    payload: Record<string, any>,
+    knownKeys: string[]
+): any {
+    if (entry.raw === undefined || typeof entry.raw !== 'object' || entry.raw === null) {
+        return payload;
+    }
+    if (!entry.edited) { return entry.raw; }
+    const merged: Record<string, any> = { ...(entry.raw as Record<string, any>) };
+    for (const key of knownKeys) {
+        if (Object.prototype.hasOwnProperty.call(payload, key)) {
+            merged[key] = payload[key];
+        } else {
+            delete merged[key];
+        }
+    }
+    return merged;
 }
 
 export function serializeLinks(entries: LinkEntry[]): any[] {
@@ -3479,7 +3518,8 @@ export function serializeLinks(entries: LinkEntry[]): any[] {
         if (entry.tags && entry.tags.length > 0) {
             payload.tags = entry.tags;
         }
-        return payload;
+        // 위 `serializeFavorites` 와 같은 규약 — `LinkEntry.raw` / `edited` 주석 참조.
+        return applyKnownFieldsToRaw(entry, payload, ['title', 'link', 'group', 'tags']);
     });
 }
 
@@ -3832,7 +3872,10 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
         link: trimmedUrl,
         group,
         tags,
-        sourceFile: entryToEdit.sourceFile
+        sourceFile: entryToEdit.sourceFile,
+        // **필수.** spread 가 `raw` 를 함께 복사하므로, 편집했다는 표시가 없으면
+        // 직렬화가 `raw` 를 그대로 되써서 이 편집이 버려진다.
+        edited: true
     };
     links[targetIndex] = updated;
 
@@ -5113,6 +5156,44 @@ export async function executeAction(
     }
 }
 
+/**
+ * 저장된 입력(History 재실행 / 프리셋)이 **현재 정의된 제약**을 여전히 만족하는가.
+ *
+ * `validatePattern` 은 입력 상자에서만 걸리므로, 재실행 경로가 그것을 건너뛰면
+ * 패턴은 "그 순간의 UI 안내" 일 뿐 값에 대한 보장이 아니게 된다. Doctor 가
+ * 이 패턴을 근거로 주입 경고를 면제하는 이상, 재실행에서도 같은 제약이
+ * 적용돼야 그 면제가 정당해진다.
+ *
+ * 잘못된 정규식은 입력 시점과 **같게** 무시한다 — 두 경로가 다른 판정을 하면
+ * 그것대로 혼란스럽다.
+ */
+export function savedInputStillValid(task: any, saved: any): boolean {
+    const value = saved && typeof saved === 'object' ? saved.value : undefined;
+    if (typeof value !== 'string') { return true; }
+    if (task.type === 'inputBox' && typeof task.validatePattern === 'string' && task.validatePattern.length > 0) {
+        let re: RegExp;
+        try {
+            re = new RegExp(task.validatePattern);
+        } catch {
+            return true;
+        }
+        // prefix/suffix 는 검증 뒤에 붙으므로 검증 대상에서 뺀다 (입력 시점과 동일).
+        const prefix = typeof task.prefix === 'string' ? task.prefix : '';
+        const suffix = typeof task.suffix === 'string' ? task.suffix : '';
+        const core = value.startsWith(prefix) && value.endsWith(suffix)
+            ? value.slice(prefix.length, value.length - (suffix.length || 0) || undefined)
+            : value;
+        return re.test(core);
+    }
+    if (task.type === 'quickPick' && Array.isArray(task.items) && !task.itemsFromCommand) {
+        const labels = task.items.map((entry: any) => (typeof entry === 'string' ? entry : entry?.label));
+        // 다중 선택은 저장된 값이 쉼표로 이어진 형태라 그대로 비교할 수 없다.
+        if (task.canPickMany === true) { return true; }
+        return labels.includes(value);
+    }
+    return true;
+}
+
 async function executeSingleTask(
     task: import('./schema').Task,
     allResults: any,
@@ -5152,7 +5233,25 @@ async function executeSingleTask(
     // output handling) still runs, so an interactive task with
     // `output: { mode: 'file' }` writes its file on replay just like on a
     // normal run.
-    const usingPresetResult = presetResult !== undefined && INTERACTIVE_TASK_TYPES.has(task.type);
+    //
+    // **저장된 값도 현재 제약을 통과해야 한다.** 예전에는 저장된 값을 그대로
+    // 썼는데, 그러면 `validatePattern` 이 "이 태스크의 값은 이 모양뿐" 이라는
+    // 보장을 하지 못한다 — 패턴을 나중에 조인 경우나 프리셋 파일을 손으로 고친
+    // 경우, 재실행이 검증을 통째로 건너뛴다. Doctor 가 이 패턴을 근거로
+    // 주입 경고를 면제하므로, 그 근거가 실제로 참이어야 한다.
+    //
+    // 통과하지 못하면 저장된 값을 **버리고 정상 흐름으로 떨어진다** — 사용자가
+    // 그 자리에서 다시 입력한다(이전 값이 기본값으로 채워진다). 조용히 옛 값을
+    // 쓰거나 액션을 실패시키는 것보다 낫다.
+    const presetAcceptable = presetResult === undefined || savedInputStillValid(task, presetResult);
+    const usingPresetResult = presetResult !== undefined
+        && INTERACTIVE_TASK_TYPES.has(task.type)
+        && presetAcceptable;
+    if (presetResult !== undefined && INTERACTIVE_TASK_TYPES.has(task.type) && !presetAcceptable) {
+        outputChannel.appendLine(
+            `[WARN] Saved input for task '${task.id}' no longer satisfies its constraints; asking again.`
+        );
+    }
     if (usingPresetResult) {
         result = presetResult;
     }
@@ -5282,14 +5381,25 @@ async function executeSingleTask(
             break;
         case 'command':
         case 'shell':
+            // `command`(argv) 는 **토큰 경계를 보존하며** 보간한다 — 보간값의
+            // 공백이 새 인자를 만들지 못하게(옵션 주입·경로 분리 차단).
+            // `shell`(raw) 은 문자열을 셸에 그대로 넘기는 계약이라 그대로 둔다.
+            // 자세한 이유는 `interpolateCommandPreservingTokens` 주석 참조.
+            const interpolateCommandString = (template: string): string =>
+                task.type === 'command'
+                    ? interpolateCommandPreservingTokens(
+                        template, value => interpolatePipelineVariables(value, interpolationContext)
+                    )
+                    : interpolatePipelineVariables(template, interpolationContext);
+
             let command: string | undefined;
             if (typeof task.command === 'string') {
-                command = interpolatePipelineVariables(task.command, interpolationContext);
+                command = interpolateCommandString(task.command);
             } else if (typeof task.command === 'object') {
                 const interpolatedCmdObj = JSON.parse(JSON.stringify(task.command));
                 for (const os in interpolatedCmdObj) {
                     if (Object.prototype.hasOwnProperty.call(interpolatedCmdObj, os)) {
-                        interpolatedCmdObj[os] = interpolatePipelineVariables(interpolatedCmdObj[os], interpolationContext);
+                        interpolatedCmdObj[os] = interpolateCommandString(interpolatedCmdObj[os]);
                     }
                 }
                 command = getCommandString(interpolatedCmdObj);
@@ -5610,7 +5720,7 @@ export function resolveRawShellExecutable(
     // 여기서도 막는다.
     if (process.platform !== 'win32') { return 'powershell.exe'; }
     const needsChain = rawCommandUsesChainOperators(command);
-    const executable = selectWindowsRawShell(needsChain, needsChain && pwshIsAvailable(lookup));
+    const executable = selectWindowsRawShell(needsChain, needsChain ? resolvePwshPath(lookup) : undefined);
     if (!executable) {
         // 이름을 붙여 둔다 — 민감 one-shot 처럼 실패 상세를 일부러 가리는
         // 경로에서도 이 메시지만은 그대로 보여야 한다. 명령 텍스트나 비밀을
@@ -5641,7 +5751,7 @@ export function createShellExecution(
             const line = buildRawPowerShellCommandLine(command, args);
             const shell = resolveRawShellExecutable(command, { env: { ...process.env, ...(options.env ?? {}) }, ...lookup });
             const utf8Prefix = useUtf8Console ? '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n' : '';
-            const encoded = encodePowerShellScript(`${utf8Prefix}${line}`);
+            const encoded = encodePowerShellScript(withPowerShellExitCode(`${utf8Prefix}${line}`));
             return {
                 shellExecution: new vscode.ShellExecution(shell, ['-NoProfile', '-EncodedCommand', encoded], options),
                 displayCommand: line
@@ -5665,7 +5775,7 @@ export function createShellExecution(
             };
         }
         const invocation = buildPowerShellInvocation(command, args, useUtf8Console);
-        const encoded = encodePowerShellScript(invocation.script);
+        const encoded = encodePowerShellScript(withPowerShellExitCode(invocation.script));
         return {
             shellExecution: new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options),
             displayCommand: invocation.display
@@ -5944,10 +6054,7 @@ function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string
             const shell = raw ? resolveRawShellExecutable(command, { env: childEnv }) : 'powershell.exe';
             // powershell.exe does not reliably propagate an external program's
             // exit code unless the script exits explicitly with LASTEXITCODE.
-            const script = invocation.script +
-                '\n$taskHubSucceeded = $?\n$taskHubExitCode = $LASTEXITCODE\n' +
-                'if ($null -ne $taskHubExitCode) { exit [int]$taskHubExitCode }\n' +
-                'if (-not $taskHubSucceeded) { exit 1 }\nexit 0';
+            const script = withPowerShellExitCode(invocation.script);
             child = spawn(
                 shell,
                 ['-NoProfile', '-EncodedCommand', encodePowerShellScript(script)],
@@ -7143,7 +7250,7 @@ export function executeShellCommand(
                     return { script: `${utf8Prefix}${line}`, display: line };
                 })()
                 : buildPowerShellInvocation(command, args || [], useUtf8Console);
-            const encoded = encodePowerShellScript(invocation.script);
+            const encoded = encodePowerShellScript(withPowerShellExitCode(invocation.script));
             displayCommand = invocation.display;
             // raw 만 셸을 고른다. 비-raw 경로는 우리가 조립한 PowerShell
             // 스크립트라 5.1 에서도 그대로 돌고, 여기서 바꾸면 검증되지 않은

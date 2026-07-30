@@ -322,19 +322,29 @@ suite('Documentation Consistency', () => {
     suite('integration-tests.md 대장 ↔ IT- 테스트 제목', () => {
         test('모든 IT-XXX 테스트가 대장에 등재돼 있다', () => {
             const ledger = readRepoFile('docs/integration-tests.md');
-            const documented = new Set(ledger.match(/IT-\d+/g) ?? []);
+            // **접미사(`IT-072b`)까지 포함해 센다.** 처음 구현은 `IT-\d+` 로만
+            // 잡아 `IT-072b` 를 `IT-072` 로 뭉갰고, 그러면 접미사 시나리오가
+            // 대장에 없어도 통과한다. `Map` 도 같은 id 를 덮어써 파일이 다른
+            // 동명 시나리오를 하나로 합쳤다 — 둘 다 검사를 헐겁게 만든다.
+            const documented = new Set(ledger.match(/IT-\d+[a-z]*/g) ?? []);
             const testDir = path.join(REPO_ROOT, 'src', 'test');
-            const declared = new Map<string, string>();
+            const declared: { id: string; file: string }[] = [];
+            const seen = new Set<string>();
             for (const name of fs.readdirSync(testDir)) {
                 if (!name.endsWith('.test.ts')) { continue; }
                 const source = fs.readFileSync(path.join(testDir, name), 'utf-8');
-                for (const m of source.matchAll(/test\(\s*[\`'"](IT-\d+)/g)) {
-                    declared.set(m[1], name);
+                for (const m of source.matchAll(/test\(\s*[\`'"](IT-\d+[a-z]*)/g)) {
+                    const key = `${m[1]}\u0000${name}`;
+                    if (seen.has(key)) { continue; }
+                    seen.add(key);
+                    declared.push({ id: m[1], file: name });
                 }
             }
 
-            assert.ok(declared.size > 50, `IT- 테스트를 찾지 못했다 — 검사 전제가 깨졌다 (${declared.size})`);
-            const missing = [...declared].filter(([id]) => !documented.has(id));
+            assert.ok(declared.length > 50, `IT- 테스트를 찾지 못했다 — 검사 전제가 깨졌다 (${declared.length})`);
+            const missing = declared
+                .filter(({ id }) => !documented.has(id))
+                .map(({ id, file }) => [id, file] as [string, string]);
             assert.deepStrictEqual(
                 missing.map(([id, file]) => `${id} (${file})`),
                 [],

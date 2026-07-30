@@ -22,6 +22,27 @@ export interface LinkEntry {
     group?: string;
     tags?: string[];
     sourceFile?: string;
+    /**
+     * 디스크에서 읽은 **원본 객체**.
+     *
+     * 이게 없던 동안에는 `serializeLinks` 가 **알려진 필드만** 내보내서,
+     * 한 항목만 추가해도 파일 전체의 `custom: {...}` 같은 확장 속성과
+     * 정규화에서 걸러진 값(`tags: ["keep", 42]` 의 `42`, `group: 42`)이
+     * 사라졌다. 우리는 손대지 않은 항목의 형태를 정할 권한이 없다.
+     */
+    raw?: unknown;
+    /**
+     * 사용자가 이 항목을 **이번 작업에서 편집했는가**.
+     *
+     * `raw` 만으로는 "손대지 않았다" 와 "편집했다" 를 구분할 수 없다. 편집
+     * 경로가 기존 항목을 spread 하면 `raw` 까지 복사되는데, 그때 `raw` 를
+     * 그대로 되쓰면 **편집이 조용히 버려지고 옛 값이 다시 기록된다** — 실제로
+     * 그 상태였다. 편집 여부를 명시적으로 표시해 갈라야 한다.
+     *
+     * 편집된 항목은 `raw` 위에 알려진 필드만 patch 한다 — 사용자가 고친 값이
+     * 반영되면서 `custom` 같은 확장 속성은 남는다.
+     */
+    edited?: true;
 }
 
 export type LinkTreeNode = Link | LinkGroup | LinkParseError;
@@ -182,7 +203,8 @@ export function readLinksFromDisk(filePath: string): LinksLoadResult {
                 link: cast.link,
                 group: typeof cast.group === 'string' && cast.group.trim().length > 0 ? cast.group.trim() : undefined,
                 tags: normalizeTags(cast.tags),
-                sourceFile: filePath
+                sourceFile: filePath,
+                raw: item
             });
             return;
         }

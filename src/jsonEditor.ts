@@ -158,19 +158,28 @@ function disposeFileWatcher(): void {
 
 /**
  * Dirty 상태에서 파일을 닫았을 때를 대비한 복구 스냅샷이 있으면 사용자에게
- * 복구 여부를 묻는다. 파일이 외부에서 변경된 경우(스냅샷 기록 시점의 mtime과
- * 현재 파일 mtime이 다른 경우) 스냅샷은 자동으로 폐기한다.
+ * 복구 여부를 묻는다.
+ *
+ * **스냅샷은 사용자가 명시적으로 '버리기'를 누를 때만 지운다.** 예전에는
+ * 신선도 검사(mtime/size)가 어긋나면 묻지도 않고 지웠는데, 그 판단은 두 가지를
+ * 섞고 있었다 — "제안할 만한가" 와 "지워도 되는가" 는 다른 질문이다. 어긋난
+ * 스냅샷은 제안하지 않는 것으로 충분하고, 저장소 상한이 어차피 오래된 것부터
+ * 밀어낸다. 미저장 변경을 우리 판단으로 파기할 이유는 없다.
+ *
+ * `skipFreshnessCheck` 는 **디스크 단계가 실패한** 경로가 쓴다. 그때는 비교할
+ * 현재 내용이 애초에 없고(파일이 사라졌거나 JSON 이 깨졌다) 스냅샷이 유일한
+ * 데이터다 — 신선도를 요구하면 fallback 이 구조적으로 성공할 수 없다.
  */
 async function offerRecoveryIfAny(
     context: vscode.ExtensionContext,
     filePath: string,
     fileMtimeMs: number,
-    fileSize?: number
+    fileSize?: number,
+    options: { skipFreshnessCheck?: boolean } = {}
 ): Promise<RecoveryEntry | null> {
     const entry = getRecoveryEntry(context, filePath);
     if (!entry) { return null; }
-    if (!shouldOfferRecovery(entry, fileMtimeMs, fileSize)) {
-        await setRecoveryEntry(context, filePath, null);
+    if (!options.skipFreshnessCheck && !shouldOfferRecovery(entry, fileMtimeMs, fileSize)) {
         return null;
     }
     const fileName = path.basename(filePath);
@@ -340,18 +349,16 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     // 마지막에 매칭 recovery 가 있으면 그것으로 fallback — 옛 dirty close 의
     // 미저장 변경이 외부 사고 (파일 삭제 / 사이즈 폭증 / invalid JSON 등) 로
     // 영구히 잠기지 않도록 모든 early-return 을 단일 fallback 으로 라우팅한다.
-    let earlyError: { msg: string; mtimeForRecovery: number | undefined } | null = null;
+    // `mtimeForRecovery` 는 두지 않는다 — fallback 이 신선도를 보지 않으므로
+    // 읽는 곳이 없다. 남겨 두면 그 값이 무언가를 결정한다고 오해하게 된다.
+    let earlyError: { msg: string } | null = null;
 
     let stat: fs.Stats | undefined;
     try {
         stat = fs.statSync(filePath);
     } catch (e: any) {
         earlyError = {
-            msg: t(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`, `Cannot read file (${fileName}): ${e.message}`),
-            // stat 실패 — currentFileMtimeMs 를 알 수 없다. recovery 의 own
-            // mtime 을 그대로 쓰면 shouldOfferRecovery 가 "캡처 이후 외부 변경
-            // 없음" 으로 보고 제안한다 (파일이 사라진 케이스에 적절한 의미).
-            mtimeForRecovery: undefined
+            msg: t(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`, `Cannot read file (${fileName}): ${e.message}`)
         };
     }
 
@@ -360,8 +367,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             msg: t(
                 `파일 크기(${formatFileSize(stat.size)})가 JSON Editor 처리 한도(${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)})를 초과합니다. 대용량 JSON 파일은 텍스트 에디터에서 직접 편집해 주세요.`,
                 `File size (${formatFileSize(stat.size)}) exceeds the JSON Editor limit (${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)}). Please edit large JSON files directly in a text editor.`
-            ),
-            mtimeForRecovery: stat.mtimeMs
+            )
         };
     }
 
@@ -374,8 +380,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             content = fs.readFileSync(filePath, 'utf-8');
         } catch (error: any) {
             earlyError = {
-                msg: t(`파일 읽기 실패 (${fileName}): ${error.message}`, `Failed to read file (${fileName}): ${error.message}`),
-                mtimeForRecovery: stat!.mtimeMs
+                msg: t(`파일 읽기 실패 (${fileName}): ${error.message}`, `Failed to read file (${fileName}): ${error.message}`)
             };
         }
     }
@@ -393,8 +398,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             parseSucceeded = true;
         } catch (error: any) {
             earlyError = {
-                msg: t(`JSON 파싱 실패 (${fileName}): ${error.message}`, `Failed to parse JSON (${fileName}): ${error.message}`),
-                mtimeForRecovery: stat!.mtimeMs
+                msg: t(`JSON 파싱 실패 (${fileName}): ${error.message}`, `Failed to parse JSON (${fileName}): ${error.message}`)
             };
         }
     }
@@ -423,11 +427,18 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         const entry = getRecoveryEntry(context, filePath);
         let fallback: RecoveryEntry | null = null;
         if (entry) {
-            const mtime = earlyError.mtimeForRecovery ?? entry.fileMtimeMs;
-            // size: stat 이 있으면 그것을 기준으로, 없으면 entry 의 own size 를
-            // 그대로 흘려 size 검사가 spurious mismatch 를 일으키지 않게 한다.
-            const sizeForRecovery = stat ? stat.size : entry.fileSize;
-            fallback = await offerRecoveryIfAny(context, filePath, mtime, sizeForRecovery);
+            // **신선도를 요구하지 않는다.** 예전에는 `stat.mtimeMs`(현재 mtime)를
+            // 넘겼는데, 손상의 원인이 대개 외부 변경이라 mtime 은 거의 항상
+            // 갱신돼 있다 → 검사가 늘 어긋나 fallback 이 **한 번도 발동하지
+            // 못했다**. 파일이 10MB 를 넘어간 경우도 같다. 검사를 통과시키려고
+            // 테스트가 손상 후 mtime·size 를 인위적으로 원복하고 있었던 것이
+            // 이 구조적 실패를 가렸다.
+            //
+            // 여기서 비교할 "현재 내용" 은 애초에 없다 — 읽지 못했거나 파싱하지
+            // 못한 상태다. 스냅샷이 유일한 데이터이므로 그대로 제안한다.
+            fallback = await offerRecoveryIfAny(
+                context, filePath, entry.fileMtimeMs, entry.fileSize, { skipFreshnessCheck: true }
+            );
         }
         if (!fallback) {
             vscode.window.showErrorMessage(earlyError.msg);

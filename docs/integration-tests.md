@@ -56,6 +56,7 @@
 | IT-109 | inputBox `extractPattern` + `validatePattern` | 보간된 `value`(브랜치 이름)에서 Jira 키를 추출해 기본값으로 채우고, `validateInput`이 잘못된 형식은 거부·정상 형식은 통과시킴 |
 | IT-017 | confirm 취소 중단 | 사용자가 취소한 confirm task가 pipeline을 중단하고 이후 task를 실행하지 않음 |
 | IT-033 | envPick 목록 노출·선택 전달 | 사용자 셸이 노출하는 이름만 정렬되어 QuickPick 에 나오고 (`VSCODE_*` 등 확장 호스트 전용 변수는 필터링), 선택된 이름이 downstream 에 전달됨 |
+| IT-033b | envPick 실제 프로브가 확장 호스트 전용 변수를 걸러낸다 (stub 없음) | IT-033 은 목록을 stub 으로 주입한다. 이쪽은 **실제 셸을 띄워** 이름을 수집하므로, 필터가 실전 입력에도 듣는지를 본다 |
 | IT-034 | envPick 취소 중단 | 사용자가 취소한 envPick task 가 pipeline 을 중단하고 이후 task 를 실행하지 않음 |
 
 ### Dialog + Output Mode Pipeline
@@ -131,7 +132,7 @@
 | IT-068b | Action TreeItem에는 last-run 배지가 없다 | History 패널로 이동한 배지가 실수로 Actions 패널에 다시 추가되는 회귀를 가드 |
 
 ### Task 진행률
-파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-069/070/071/073/074/074b), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-072/072b/072c)
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-069/070/071/073/074/074b), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-072/072b/072c/072d/072e)
 
 | ID | 제목 | 핵심 검증 |
 | --- | --- | --- |
@@ -141,6 +142,8 @@
 | IT-072 | 멀티 task 액션 running 시 progress description 노출 | `actionStates.progress`가 채워진 멀티 task 액션은 `2/3 · taskId` 형태 description 렌더 |
 | IT-072b | 단일 task 액션은 progress description을 채우지 않음 | `total === 1`이면 description undefined — `1/1` 노이즈 회피 |
 | IT-072c | progress 없는 running 상태에서도 description은 비어 있음 | `actionStates.state === 'running'`이지만 `progress`가 없을 때 description 비어 있음 (legacy/manual 분기 방어) |
+| IT-072d | 두 개 이상 task 가 동시 running 이면 multi-track 라벨 | 병렬 실행에서 한 track 만 보여 주면 진행 상황을 오독한다 |
+| IT-072e | 3개 이상 동시 running 은 `+ N` overflow 로 자름 | description 이 무한히 길어져 트리를 밀어내지 않게 |
 | IT-073 | executeAction 종료 후 actionStates.progress 비움 | `finalizeActionRun`이 mid-run progress를 clear해 종료 후 description이 잔존하지 않음 |
 | IT-074 | throwing onTaskTransition은 success 경로 결과를 바꾸지 않음 | 4개 transition(`running`/`success`) 모두에서 콜백이 throw해도 파이프라인이 정상 resolve. `emitTransition` helper의 try/catch 격리 회귀 가드 |
 | IT-074b | throwing onTaskTransition은 failure 경로의 원본 에러를 가리지 않음 | failure transition에서 콜백이 throw해도 reject되는 에러는 task의 원본 에러(`'capture failed'`)이지 콜백 에러(`'callback boom'`)가 아님 |

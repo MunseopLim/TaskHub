@@ -1,4 +1,7 @@
 import * as assert from 'assert';
+import Ajv from 'ajv';
+import { runDoctor, DoctorValidator } from '../doctor';
+import * as actionSchema from '../../schema/actions.schema.json';
 import * as fs from 'fs';
 import * as path from 'path';
 import { BuiltinActionsMode, shouldIncludeBuiltinActions } from '../extension';
@@ -120,6 +123,39 @@ suite('내장 예제 액션 노출 정책', () => {
          * `; ...` 가 있으면 뒤의 명령까지 실행하는 형태가 됐다 — 우리가 문서로
          * 금지한 패턴을 우리가 배포하고 있었다.
          */
+        /**
+         * 번들·예제 액션을 **우리 Doctor 로 직접 돌린다.** 룰을 추가하면서
+         * 우리가 배포하는 액션이 그 룰에 걸리는 상태를 남기지 않기 위한
+         * 검사다 — 실제로 `cmd /c echo %${…}%` 가 그 상태였고,
+         * `validatePattern` 을 걸어 해결했다.
+         */
+        test('번들 액션과 예제는 Doctor 주입 룰에 걸리지 않는다', () => {
+            const ajv = new Ajv({ allErrors: true });
+            const validator = ajv.compile(actionSchema) as unknown as DoctorValidator;
+            const injectionCodes = ['shell.interpolated-command', 'command.nested-interpreter'];
+            const offenders: string[] = [];
+            for (const file of ['actions.json', 'actions_example.json']) {
+                const filePath = path.join(REPO_ROOT, 'media', file);
+                const findings = runDoctor([{
+                    filePath,
+                    sourceLabel: file,
+                    rawText: fs.readFileSync(filePath, 'utf-8'),
+                    workspaceFolder: REPO_ROOT,
+                    workspaceRoots: [REPO_ROOT],
+                    extensionPath: REPO_ROOT,
+                }], validator);
+                for (const finding of findings) {
+                    if (injectionCodes.includes(finding.code)) {
+                        offenders.push(`${file}: ${finding.code} — ${finding.message}`);
+                    }
+                }
+            }
+            assert.deepStrictEqual(
+                offenders, [],
+                `우리가 배포하는 액션이 우리 주입 룰에 걸린다:\n  ${offenders.join('\n  ')}`
+            );
+        });
+
         test('번들 액션과 예제는 raw shell 에 값을 보간하지 않는다', () => {
             // **예제 파일도 함께 본다.** 사용자가 *Browse Examples* 로 열어
             // 베끼는 대상이라, 여기에 있는 형태가 그대로 사용자 액션이 된다 —

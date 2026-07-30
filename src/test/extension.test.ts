@@ -34,8 +34,12 @@ import {
 	buildPowerShellInvocation,
 	buildNativeCommandInvocation,
 	windowsCommandIsDirectlyLaunchable,
+	withPowerShellExitCode,
+	savedInputStillValid,
+	interpolateCommandPreservingTokens,
+	quoteForCommandTokenizer,
 	selectWindowsRawShell,
-	pwshIsAvailable,
+	resolvePwshPath,
 	rawCommandUsesChainOperators,
 	windowsSpawnStrategy,
 	buildRawOneShotWindowsScript,
@@ -577,6 +581,181 @@ suite('Extension Test Suite', () => {
 	});
 
 	/**
+	 * 저장된 입력 재실행과 검증 (0.6.50).
+	 *
+	 * History 재실행과 프리셋은 저장된 값을 **그대로** 썼다. 그러면
+	 * `validatePattern` 은 "그 순간의 입력 안내" 일 뿐 값에 대한 보장이 아니다 —
+	 * 패턴을 나중에 조이거나 프리셋 파일을 손으로 고치면 재실행이 검증을
+	 * 통째로 건너뛴다. Doctor 가 이 패턴을 근거로 주입 경고를 **면제**하므로,
+	 * 그 근거가 실제로 참이어야 면제가 정당해진다.
+	 */
+	suite('savedInputStillValid', () => {
+		test('현재 패턴을 만족하지 않는 저장값은 거부한다', () => {
+			const task = { type: 'inputBox', validatePattern: '^[A-Za-z_][A-Za-z0-9_]*$' };
+			assert.strictEqual(savedInputStillValid(task, { value: 'PATH' }), true);
+			assert.strictEqual(
+				savedInputStillValid(task, { value: 'x & calc' }), false,
+				'패턴을 조이기 전에 저장된 위험한 값이 재실행에서 그대로 쓰인다'
+			);
+		});
+
+		test('prefix/suffix 는 검증 대상에서 뺀다 (입력 시점과 같게)', () => {
+			const task = { type: 'inputBox', validatePattern: '^[0-9]+$', prefix: 'v', suffix: '-rc' };
+			assert.strictEqual(savedInputStillValid(task, { value: 'v123-rc' }), true);
+			assert.strictEqual(savedInputStillValid(task, { value: 'vabc-rc' }), false);
+		});
+
+		test('잘못된 정규식은 입력 시점과 같게 무시한다', () => {
+			// 두 경로가 다른 판정을 하면 그것대로 혼란스럽다.
+			assert.strictEqual(savedInputStillValid({ type: 'inputBox', validatePattern: '[' }, { value: 'x' }), true);
+		});
+
+		test('quickPick 저장값이 현재 목록에 없으면 거부한다', () => {
+			const task = { type: 'quickPick', items: ['dev', 'prod'] };
+			assert.strictEqual(savedInputStillValid(task, { value: 'dev' }), true);
+			assert.strictEqual(savedInputStillValid(task, { value: 'staging' }), false);
+			// 동적 목록은 비교 기준이 없으므로 건드리지 않는다.
+			assert.strictEqual(
+				savedInputStillValid({ type: 'quickPick', itemsFromCommand: 'git branch' }, { value: 'x' }), true);
+		});
+
+		test('제약이 없는 태스크는 그대로 통과시킨다', () => {
+			assert.strictEqual(savedInputStillValid({ type: 'inputBox' }, { value: 'anything ; goes' }), true);
+			assert.strictEqual(savedInputStillValid({ type: 'fileDialog' }, { path: '/tmp/a b.txt' }), true);
+		});
+	});
+
+	/**
+	 * PowerShell 종료 코드 후행부 (0.6.50).
+	 *
+	 * `$LASTEXITCODE` 는 세션에 **남아 있는** 값이라 마지막 명령의 상태가
+	 * 아니다. 그것을 `$?` 보다 먼저 적용하면 **실패가 성공으로 보고된다.**
+	 */
+	suite('withPowerShellExitCode', () => {
+		test('성공 판정은 $? 가 먼저 한다', () => {
+			const epilogue = withPowerShellExitCode('cmd /c exit 0; Write-Error boom');
+			const successCheck = epilogue.indexOf('if ($taskHubSucceeded) { exit 0 }');
+			const codeCheck = epilogue.indexOf('exit [int]$taskHubExitCode');
+			assert.ok(successCheck >= 0, `성공 판정이 없다: ${epilogue}`);
+			assert.ok(
+				successCheck < codeCheck,
+				'$LASTEXITCODE 를 먼저 적용하면 cmdlet 실패가 stale 한 0 에 가려 성공으로 나간다'
+			);
+		});
+
+		test('실패일 때만 구체적인 코드를 되살린다', () => {
+			const epilogue = withPowerShellExitCode('build.exe');
+			// 0 이 아닌 코드만 되살리고, 그렇지 않으면 1 로 마감한다 —
+			// stale 한 0 이 실패를 덮지 않게.
+			assert.match(epilogue, /\$null -ne \$taskHubExitCode -and \[int\]\$taskHubExitCode -ne 0/);
+			assert.ok(epilogue.trimEnd().endsWith('exit 1'), epilogue);
+		});
+
+		test('원본 스크립트를 앞에 그대로 둔다', () => {
+			assert.ok(withPowerShellExitCode('& \'x.exe\'').startsWith("& 'x.exe'\n"));
+		});
+	});
+
+	/**
+	 * 보간값이 argv 경계를 넘던 문제 (0.6.50).
+	 *
+	 * `command` 타입으로 바꾼 것은 **셸** 주입만 닫았다. 문자열 전체를 먼저
+	 * 보간하고 나서 공백으로 토큰화하면 보간값 안의 공백이 새 인자를 만들어,
+	 * 옵션 주입과 경로 분리가 그대로 남는다.
+	 */
+	suite('보간 경계 보존', () => {
+		const ctx = { input: { value: '--delete main' }, selectFile: { path: '/My Docs/a.txt' } };
+		const interp = (v: string) => interpolatePipelineVariables(v, ctx);
+		/** 실제 실행이 보는 argv (executable + args). */
+		const argv = (template: string) => {
+			const line = interpolateCommandPreservingTokens(template, interp);
+			const { executable, args } = mergeCommandAndArgs(line, []);
+			return [executable, ...args];
+		};
+
+		test('보간값의 공백이 새 인자를 만들지 않는다', () => {
+			assert.deepStrictEqual(
+				argv('git tag ${input.value}'),
+				['git', 'tag', '--delete main'],
+				'보간값이 여러 인자로 쪼개졌다'
+			);
+		});
+
+		/**
+		 * **토큰 경계 보존은 옵션 주입을 막지 않는다.** 처음 이 스위트를 쓰면서
+		 * 위 케이스에 "옵션 주입 차단" 이라는 이름을 붙였는데 과장이었다 — 값이
+		 * 명령 **끝**에 있어서 통째로 한 인자가 됐을 뿐이다. 보간 지점 뒤에
+		 * 위치 인자가 오면 값이 선행 `-` 를 갖는 순간 그대로 옵션이 된다.
+		 *
+		 * 이 한계를 테스트로 고정해 둔다. 없애려면 값의 모양을 제약하거나
+		 * (`validatePattern`) 위치 인자 앞에 `--` 를 두어야 하고, 그 판단은
+		 * 명령마다 달라 우리가 일반적으로 대신할 수 없다.
+		 */
+		test('알려진 한계: 선행 `-` 는 여전히 옵션으로 읽힌다', () => {
+			assert.deepStrictEqual(
+				argv('git tag ${input.value} main'),
+				['git', 'tag', '--delete main', 'main'],
+				'토큰 경계는 지켜지지만(값이 한 인자) 그 인자가 옵션 자리에 온다'
+			);
+			// `--delete` 처럼 공백 없는 값이면 그대로 옵션 하나가 된다.
+			const single = interpolateCommandPreservingTokens(
+				'git tag ${input.value} main',
+				v => interpolatePipelineVariables(v, { input: { value: '--delete' } })
+			);
+			const { executable, args } = mergeCommandAndArgs(single, []);
+			assert.deepStrictEqual(
+				[executable, ...args], ['git', 'tag', '--delete', 'main'],
+				'이것이 남아 있는 위험이다 — 기존 main 태그가 삭제된다'
+			);
+		});
+
+		test('공백이 든 파일 경로가 하나의 인자로 남는다', () => {
+			assert.deepStrictEqual(
+				argv('cat ${selectFile.path}'),
+				['cat', '/My Docs/a.txt']
+			);
+		});
+
+		test('리터럴에 붙은 형태와 인용된 리터럴을 유지한다', () => {
+			assert.deepStrictEqual(argv('make TARGET=${input.value}'), ['make', 'TARGET=--delete main']);
+			assert.deepStrictEqual(
+				interpolateCommandPreservingTokens('echo "a b" c', interp),
+				'"echo" "a b" "c"'
+			);
+		});
+
+		test('quoteForCommandTokenizer 는 어떤 문자열이든 한 토큰으로 되돌린다', () => {
+			for (const value of ['a b', 'a"b', 'a\\b', '', 'a\\"b', "it's", 'a  b']) {
+				const round = tokenizeCommandLine(quoteForCommandTokenizer(value));
+				assert.deepStrictEqual(
+					round, [value],
+					`왕복이 깨졌다: ${JSON.stringify(value)} → ${JSON.stringify(round)}`
+				);
+			}
+		});
+
+		/**
+		 * 빈 보간값이 **인자를 사라지게 하면 뒤가 앞으로 당겨진다** — 옵션이
+		 * 엉뚱한 값을 먹는다. 예전 토크나이저는 명시적 빈 인용(`""`)도 버렸다.
+		 */
+		test('빈 보간값은 빈 인자로 남아 뒤 인자를 당기지 않는다', () => {
+			const line = interpolateCommandPreservingTokens(
+				'tool --output ${empty.value} target',
+				v => interpolatePipelineVariables(v, { empty: { value: '' } })
+			);
+			const { executable, args } = mergeCommandAndArgs(line, []);
+			assert.deepStrictEqual(
+				[executable, ...args], ['tool', '--output', '', 'target'],
+				'빈 값이 사라져 target 이 --output 의 값으로 먹혔다'
+			);
+		});
+
+		test('인용 없는 연속 공백은 여전히 토큰을 만들지 않는다', () => {
+			assert.deepStrictEqual(tokenizeCommandLine('git  commit -m msg'), ['git', 'commit', '-m', 'msg']);
+		});
+	});
+
+	/**
 	 * Windows 의 raw `shell` 계약 (0.6.49).
 	 *
 	 * **실행 자체는 macOS 에서 검증할 수 없다.** 그래서 계약을 순수 함수로
@@ -593,27 +772,33 @@ suite('Extension Test Suite', () => {
 			isFile: (p: string) => p === 'C:\\bin\\node.exe',
 		};
 
-		test('pwsh 를 PATH 와 기본 설치 경로 양쪽에서 찾는다', () => {
-			assert.strictEqual(pwshIsAvailable(withPwsh), true);
-			assert.strictEqual(pwshIsAvailable(withoutPwsh), false);
-			// PATH 등록 없이 설치한 경우가 흔하다. 이 판정이 틀리면 (chain 을 쓰는
-			// 명령에서) 태스크가 아예 실패하므로 false negative 의 대가가 크다.
-			assert.strictEqual(pwshIsAvailable({
+		test('PATH 에 있으면 이름, 없으면 전체 경로를 돌려준다', () => {
+			assert.strictEqual(resolvePwshPath(withPwsh), 'pwsh.exe');
+			assert.strictEqual(resolvePwshPath(withoutPwsh), undefined);
+			// **PATH 에 없는 설치본은 이름만으로 띄울 수 없다.** 처음 구현은
+			// 여기서 찾고도 `pwsh.exe` 만 반환해서 spawn 이 실패했다 — false
+			// negative 를 줄이려던 보완이 확실한 실패를 만들었다.
+			assert.strictEqual(resolvePwshPath({
 				env: { PATH: 'C:\\bin', ProgramFiles: 'C:\\Program Files' },
 				isFile: (p: string) => p === 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
-			}), true);
+			}), 'C:\\Program Files\\PowerShell\\7\\pwsh.exe');
 			// PATH 키가 아예 없어도 죽지 않는다.
-			assert.strictEqual(pwshIsAvailable({ env: {}, isFile: () => false }), false);
+			assert.strictEqual(resolvePwshPath({ env: {}, isFile: () => false }), undefined);
 		});
 
 		test('chain 연산자가 없으면 pwsh 가 있어도 5.1 을 그대로 쓴다', () => {
 			// 무조건 pwsh 를 선호하면 이미 동작하던 액션의 의미가 바뀐다 (PS 7 은
 			// curl/wget 별칭을 없앴고 `>` 의 기본 인코딩도 다르다). 필요할 때만
 			// 바꿔야 같은 actions.json 이 기계마다 다르게 돌지 않는다.
-			assert.strictEqual(selectWindowsRawShell(false, true), 'powershell.exe');
-			assert.strictEqual(selectWindowsRawShell(false, false), 'powershell.exe');
-			assert.strictEqual(selectWindowsRawShell(true, true), 'pwsh.exe');
-			assert.strictEqual(selectWindowsRawShell(true, false), undefined);
+			assert.strictEqual(selectWindowsRawShell(false, 'pwsh.exe'), 'powershell.exe');
+			assert.strictEqual(selectWindowsRawShell(false, undefined), 'powershell.exe');
+			assert.strictEqual(selectWindowsRawShell(true, 'pwsh.exe'), 'pwsh.exe');
+			assert.strictEqual(
+				selectWindowsRawShell(true, 'C:\\PF\\PowerShell\\7\\pwsh.exe'),
+				'C:\\PF\\PowerShell\\7\\pwsh.exe',
+				'전체 경로를 그대로 흘려야 한다'
+			);
+			assert.strictEqual(selectWindowsRawShell(true, undefined), undefined);
 		});
 
 		test('rawCommandUsesChainOperators 는 && / || 만, 그리고 인용 밖에서만 본다', () => {
@@ -687,12 +872,16 @@ suite('Extension Test Suite', () => {
 				assert.strictEqual(result.displayCommand, 'echo hi > out.txt');
 				// 이중 인코딩 계약: 안쪽 페이로드가 사용자 명령 그대로여야 한다.
 				assert.strictEqual(decodeEncodedCommand(result.commandLine), 'echo hi > out.txt');
+				// one-shot 은 종료 코드를 읽는 주체가 없어 후행부가 없어야 한다.
+				assert.ok(!result.commandLine.includes('taskHubExitCode'), result.commandLine);
 			});
 
 			test('one-shot raw 는 useUtf8Console 을 안쪽 페이로드에 붙인다', () => {
 				const result = onWin32(() => wrapCommandForOneShot(
 					'echo hi', [], undefined, true, withoutPwsh.env, true, withoutPwsh
 				));
+				// one-shot 은 detach 되어 종료 코드를 아무도 읽지 않으므로
+				// 후행부를 붙이지 않는다 — 그래서 여기서는 정확히 일치한다.
 				assert.strictEqual(
 					decodeEncodedCommand(result.commandLine),
 					'[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\necho hi'
@@ -716,7 +905,12 @@ suite('Extension Test Suite', () => {
 				// chain 연산자가 있으니 pwsh 로 간다.
 				assert.strictEqual(exec.command, 'pwsh.exe');
 				assert.strictEqual((exec.args?.[0] as string), '-NoProfile');
-				assert.strictEqual(decodeEncodedCommand(`-EncodedCommand ${exec.args?.[2] as string}`), 'echo hi && echo bye');
+				const payload = decodeEncodedCommand(`-EncodedCommand ${exec.args?.[2] as string}`);
+				assert.ok(payload.startsWith('echo hi && echo bye'), payload);
+				// **종료 코드 후행부가 붙어야 한다.** powershell 은 외부 프로그램의
+				// 종료 코드를 그대로 물려주지 않아, 이것이 없으면 코드 7 이 1 로
+				// 뭉개진다 — 민감 one-shot 만 갖고 있던 처리를 세 경로에 맞췄다.
+				assert.match(payload, /exit \[int\]\$taskHubExitCode/);
 				assert.strictEqual(result.displayCommand, 'echo hi && echo bye');
 				assert.strictEqual(result.usesNativeExecution, undefined, 'raw 가 native 로 갔다');
 			});
@@ -858,9 +1052,10 @@ suite('Extension Test Suite', () => {
 
 		test('should handle command with only quotes', () => {
 			const result = tokenizeCommandLine('""');
-			// Empty quoted string: when quotes are closed, current is empty
-			// so no token is added to the array, resulting in empty array
-			assert.deepStrictEqual(result, []);
+			// 명시적 빈 인용은 **빈 인자** 를 뜻하므로 토큰으로 남는다 (0.6.50).
+			// 예전에는 버렸는데, 그러면 빈 보간값이 든 인자가 통째로 사라지고
+			// 뒤 인자가 앞으로 당겨져 옵션이 엉뚱한 값을 먹었다.
+			assert.deepStrictEqual(result, ['']);
 		});
 
 		test('should handle unclosed quote', () => {
@@ -1638,6 +1833,104 @@ suite('Extension Test Suite', () => {
 			);
 			assert.ok(roundTripped.some((e: any) => e.title === 'New'), '새 항목이 저장되지 않았다');
 			assert.strictEqual(roundTripped.length, 4, '항목 수가 맞지 않는다');
+		});
+
+		/**
+		 * 필수 필드가 있는 **유효한** 항목도 확장 속성과 정규화에서 걸러진 값을
+		 * 잃고 있었다. 무효 항목만 보존한 앞선 수정은 절반이었다.
+		 */
+		test('건드리지 않은 항목의 확장 속성과 비정규 값이 살아남는다', () => {
+			const filePath = path.join(tempDir, 'extra-fields.json');
+			const original = [
+				{
+					title: 'GitHub',
+					link: 'https://github.com',
+					group: 42,                    // 정규화에서 걸러지던 값
+					tags: ['keep', 42],           // 42 가 걸러지던 값
+					custom: { note: 'mine' }      // 알려지지 않은 확장 속성
+				}
+			];
+			fs.writeFileSync(filePath, JSON.stringify(original, null, 2));
+
+			const loaded = readLinksFromDisk(filePath);
+			assert.strictEqual(loaded.ok, true);
+			if (!loaded.ok) { return; }
+			const { entries: withNew } = addLinkEntry(loaded.entries, {
+				title: 'New', link: 'https://new.example.com', sourceFile: filePath
+			});
+			const serialized = mergeInvalidJsonEntries(serializeLinks(withNew), loaded.invalid);
+
+			assert.deepStrictEqual(
+				serialized[0], original[0],
+				'손대지 않은 항목이 재직렬화되며 값을 잃었다'
+			);
+			assert.deepStrictEqual(serialized[1], { title: 'New', link: 'https://new.example.com' });
+		});
+
+		/**
+		 * 반대 방향. 원본 보존이 **편집을 덮어써서는 안 된다**.
+		 *
+		 * 처음 이 테스트는 `raw` 가 **없는** 객체를 직접 만들어 통과했는데,
+		 * 실제 편집 경로는 기존 항목을 spread 하므로 `raw` 가 함께 복사된다 —
+		 * 즉 **실제 경로를 우회한 자기확인 테스트**였고, 그 사이 편집이 조용히
+		 * 버려지는 회귀가 그대로 남아 있었다. 이제 실제 경로와 같은 모양
+		 * (spread + `edited`) 으로 검증한다.
+		 */
+		test('편집한 항목은 새 값으로 저장되고 확장 속성은 남는다', () => {
+			const filePath = path.join(tempDir, 'edited.json');
+			fs.writeFileSync(filePath, JSON.stringify([
+				{ title: 'Old', link: 'https://old.example.com', group: 'G', custom: { note: 'mine' } }
+			], null, 2));
+
+			const loaded = readLinksFromDisk(filePath);
+			assert.strictEqual(loaded.ok, true);
+			if (!loaded.ok) { return; }
+			const links = [...loaded.entries];
+			// **실제 편집 경로와 같은 형태** — 기존 항목을 spread 한다.
+			links[0] = {
+				...links[0],
+				title: 'Renamed',
+				link: 'https://new.example.com',
+				group: undefined,
+				tags: undefined,
+				edited: true,
+			};
+			const serialized = serializeLinks(links) as any[];
+
+			assert.strictEqual(serialized[0].title, 'Renamed', '편집한 제목이 저장되지 않았다');
+			assert.strictEqual(serialized[0].link, 'https://new.example.com', '편집한 URL 이 저장되지 않았다');
+			assert.strictEqual(serialized[0].group, undefined, '편집으로 비운 그룹이 남았다');
+			assert.deepStrictEqual(
+				serialized[0].custom, { note: 'mine' },
+				'편집하면서 확장 속성이 사라졌다'
+			);
+		});
+
+		test('편집 표시가 없으면 원본 그대로 (손대지 않은 항목)', () => {
+			const filePath = path.join(tempDir, 'untouched.json');
+			const original = [{ title: 'A', link: 'https://a.example.com', group: 42 }];
+			fs.writeFileSync(filePath, JSON.stringify(original, null, 2));
+			const loaded = readLinksFromDisk(filePath);
+			assert.strictEqual(loaded.ok, true);
+			if (!loaded.ok) { return; }
+			assert.deepStrictEqual(serializeLinks(loaded.entries)[0], original[0]);
+		});
+
+		test('favorites 도 확장 속성을 보존한다', () => {
+			const filePath = path.join(tempDir, 'fav-extra.json');
+			const original = [
+				{ title: 'README', path: 'README.md', line: '7', owner: 'me' }
+			];
+			fs.writeFileSync(filePath, JSON.stringify(original, null, 2));
+
+			const loaded = readFavoritesFromDisk(filePath);
+			assert.strictEqual(loaded.ok, true);
+			if (!loaded.ok) { return; }
+			const serialized = serializeFavorites(loaded.entries);
+
+			// `line: '7'` 은 정규화에서 숫자가 아니라 버려지던 값이고
+			// `owner` 는 알려지지 않은 속성이다.
+			assert.deepStrictEqual(serialized[0], original[0]);
 		});
 
 		test('favorites 로더도 같은 계약을 지킨다', () => {
