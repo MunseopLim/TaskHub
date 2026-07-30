@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { t } from '../i18n';
 import { normalizeLineNumber, normalizeTags } from './normalization';
+import { InvalidJsonEntry } from './linkViewProvider';
 
 export interface FavoriteEntry {
     title: string;
@@ -142,7 +143,7 @@ export function loadFavoritesFromDisk(filePath: string, reportErrors: boolean, w
 }
 
 export type FavoritesLoadResult =
-    | { ok: true; entries: FavoriteEntry[] }
+    | { ok: true; entries: FavoriteEntry[]; invalid: InvalidJsonEntry[] }
     | { ok: false; error: string };
 
 /**
@@ -152,7 +153,7 @@ export type FavoritesLoadResult =
  */
 export function readFavoritesFromDisk(filePath: string, workspaceFolderPath?: string): FavoritesLoadResult {
     if (!fs.existsSync(filePath)) {
-        return { ok: true, entries: [] };
+        return { ok: true, entries: [], invalid: [] };
     }
     let raw: string;
     try {
@@ -170,7 +171,8 @@ export function readFavoritesFromDisk(filePath: string, workspaceFolderPath?: st
         return { ok: false, error: 'Top-level value must be an array.' };
     }
     const entries: FavoriteEntry[] = [];
-    for (const item of parsed) {
+    const invalid: InvalidJsonEntry[] = [];
+    parsed.forEach((item, index) => {
         if (item && typeof (item as any).title === 'string' && typeof (item as any).path === 'string') {
             const cast = item as any;
             const entry: FavoriteEntry = {
@@ -194,9 +196,13 @@ export function readFavoritesFromDisk(filePath: string, workspaceFolderPath?: st
                 entry.workspaceFolder = workspaceFolderPath;
             }
             entries.push(entry);
+            return;
         }
-    }
-    return { ok: true, entries };
+        // links.json 과 같은 이유로 버리지 않는다 — 걸러 낸 배열을 되쓰면
+        // 사용자가 지운 적 없는 항목이 영구히 사라진다.
+        invalid.push({ index, raw: item });
+    });
+    return { ok: true, entries, invalid };
 }
 
 export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTreeNode>, vscode.Disposable {

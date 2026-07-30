@@ -109,9 +109,39 @@ export function loadLinksFromDisk(filePath: string, reportErrors: boolean): Link
     return [];
 }
 
+/**
+ * 스키마를 만족하지 못해 `LinkEntry` 로 만들 수 없었던 항목. **원본을 그대로**
+ * 들고 있다 — 쓰기 경로가 다시 끼워 넣어야 하기 때문이다.
+ */
+export interface InvalidJsonEntry {
+    /** 원본 배열에서의 위치. 되돌려 쓸 때 순서를 최대한 지키는 데 쓴다. */
+    index: number;
+    raw: unknown;
+}
+
 export type LinksLoadResult =
-    | { ok: true; entries: LinkEntry[] }
+    | { ok: true; entries: LinkEntry[]; invalid: InvalidJsonEntry[] }
     | { ok: false; error: string };
+
+/**
+ * 유효한 항목을 직렬화한 배열에 **무효 항목을 원래 자리로 되돌린다**.
+ *
+ * 이것이 없으면 `title`/`link` 타입이 틀린 항목이 로드 단계에서 조용히 걸러진
+ * 뒤, 다음 Add/Edit/Delete 가 걸러진 배열을 직렬화해 원본 파일을 덮어써
+ * **영구히 사라진다**. 사용자는 지운 적이 없다.
+ *
+ * 항목이 추가·삭제되면 인덱스가 밀리므로 원래 순서를 정확히 복원하지는
+ * 못한다. 그래도 위치보다 **잃지 않는 것**이 우선이다 — 넘치는 인덱스는 끝에
+ * 붙인다.
+ */
+export function mergeInvalidJsonEntries(serialized: unknown[], invalid: InvalidJsonEntry[]): unknown[] {
+    if (invalid.length === 0) { return serialized; }
+    const merged = [...serialized];
+    for (const { index, raw } of [...invalid].sort((a, b) => a.index - b.index)) {
+        merged.splice(Math.min(index, merged.length), 0, raw);
+    }
+    return merged;
+}
 
 /**
  * Write-safe loader: returns a tagged result that distinguishes `[]` (file
@@ -125,7 +155,7 @@ export type LinksLoadResult =
  */
 export function readLinksFromDisk(filePath: string): LinksLoadResult {
     if (!fs.existsSync(filePath)) {
-        return { ok: true, entries: [] };
+        return { ok: true, entries: [], invalid: [] };
     }
     let raw: string;
     try {
@@ -143,7 +173,8 @@ export function readLinksFromDisk(filePath: string): LinksLoadResult {
         return { ok: false, error: 'Top-level value must be an array.' };
     }
     const entries: LinkEntry[] = [];
-    for (const item of parsed) {
+    const invalid: InvalidJsonEntry[] = [];
+    parsed.forEach((item, index) => {
         if (item && typeof (item as any).title === 'string' && typeof (item as any).link === 'string') {
             const cast = item as any;
             entries.push({
@@ -153,9 +184,14 @@ export function readLinksFromDisk(filePath: string): LinksLoadResult {
                 tags: normalizeTags(cast.tags),
                 sourceFile: filePath
             });
+            return;
         }
-    }
-    return { ok: true, entries };
+        // **버리지 않고 들고 간다.** 예전에는 여기서 조용히 걸러 낸 뒤 `ok: true`
+        // 를 돌려줬고, 다음 Add/Edit/Delete 가 그 걸러진 배열을 직렬화해 원본을
+        // 덮어썼다 — 사용자가 지운 적 없는 항목이 영구히 사라졌다.
+        invalid.push({ index, raw: item });
+    });
+    return { ok: true, entries, invalid };
 }
 
 export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode>, vscode.Disposable {

@@ -3315,6 +3315,8 @@ import {
     LinkViewProvider,
     loadLinksFromDisk,
     readLinksFromDisk,
+    mergeInvalidJsonEntries,
+    InvalidJsonEntry,
 } from './providers/linkViewProvider';
 
 import {
@@ -3834,7 +3836,7 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
     };
     links[targetIndex] = updated;
 
-    const serialized = serializeLinks(links);
+    const serialized = mergeInvalidJsonEntries(serializeLinks(links), loadResult.invalid);
     fs.writeFileSync(entryToEdit.sourceFile, JSON.stringify(serialized, null, 2) + '\n');
     linkViewProvider.refresh();
 }
@@ -7548,7 +7550,7 @@ export function activate(context: vscode.ExtensionContext) {
                     } else {
                         const filtered = removeFavoriteByIdentity(loadResult.entries, target);
                         if (filtered.length !== loadResult.entries.length) {
-                            const serialized = serializeFavorites(filtered);
+                            const serialized = mergeInvalidJsonEntries(serializeFavorites(filtered), loadResult.invalid);
                             fs.writeFileSync(sourceFile, JSON.stringify(serialized, null, 2) + '\n');
                             favoriteViewProvider.refresh();
                         }
@@ -7912,7 +7914,7 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        const serialized = serializeLinks(updatedLinks);
+        const serialized = mergeInvalidJsonEntries(serializeLinks(updatedLinks), loadResult.invalid);
         if (!fs.existsSync(path.dirname(linksPath))) {
             fs.mkdirSync(path.dirname(linksPath), { recursive: true });
         }
@@ -7959,6 +7961,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const favoritesByPath = new Map<string, FavoriteEntry[]>();
+        const invalidByPath = new Map<string, InvalidJsonEntry[]>();
         const failedLoads = new Map<string, string>();
         const pathsWithAdditions = new Set<string>();
         let addedCount = 0;
@@ -7989,6 +7992,9 @@ export function activate(context: vscode.ExtensionContext) {
                     continue;
                 }
                 favoritesByPath.set(favoritesPath, loadResult.entries);
+                // 이 배치는 파일 여러 개를 돌므로 무효 항목도 파일별로 들고 간다
+                // — 되쓸 때 각자의 원본 항목을 다시 끼워 넣어야 한다.
+                invalidByPath.set(favoritesPath, loadResult.invalid);
             }
             const favorites = favoritesByPath.get(favoritesPath)!;
             const { entries: updatedFavorites, added } = addFavoriteEntry(favorites, {
@@ -8017,7 +8023,7 @@ export function activate(context: vscode.ExtensionContext) {
         // change* prompt for an unrelated open editor — see 0.4.30).
         for (const favoritesPath of pathsWithAdditions) {
             const favorites = favoritesByPath.get(favoritesPath)!;
-            const serialized = serializeFavorites(favorites);
+            const serialized = mergeInvalidJsonEntries(serializeFavorites(favorites), invalidByPath.get(favoritesPath) ?? []);
             if (!fs.existsSync(path.dirname(favoritesPath))) {
                 fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
             }
@@ -8131,7 +8137,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (filtered.length === loadResult.entries.length) {
             return;
         }
-        const serialized = serializeFavorites(filtered);
+        const serialized = mergeInvalidJsonEntries(serializeFavorites(filtered), loadResult.invalid);
         fs.writeFileSync(sourceFile, JSON.stringify(serialized, null, 2) + '\n');
         favoriteViewProvider.refresh();
     }));
@@ -8175,7 +8181,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (filtered.length === links.length) {
             return;
         }
-        const serialized = serializeLinks(filtered);
+        const serialized = mergeInvalidJsonEntries(serializeLinks(filtered), loadResult.invalid);
         fs.writeFileSync(sourceFile, JSON.stringify(serialized, null, 2) + '\n');
         workspaceLinkViewProvider.refresh();
     }));
@@ -8287,7 +8293,7 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        const serialized = serializeFavorites(updatedFavorites);
+        const serialized = mergeInvalidJsonEntries(serializeFavorites(updatedFavorites), loadResult.invalid);
         if (!fs.existsSync(path.dirname(favoritesPath))) {
             fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
         }

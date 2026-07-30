@@ -63,7 +63,7 @@ import {
 	formatExecutedCommandsDocument,
 } from '../extension';
 import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
-import { LinkViewProvider, readLinksFromDisk } from '../providers/linkViewProvider';
+import { LinkViewProvider, mergeInvalidJsonEntries, readLinksFromDisk } from '../providers/linkViewProvider';
 import { FavoriteViewProvider, readFavoritesFromDisk } from '../providers/favoriteViewProvider';
 import {
 	HistoryProvider,
@@ -1567,7 +1567,7 @@ suite('Extension Test Suite', () => {
 			const filePath = path.join(tempDir, 'valid.json');
 			fs.writeFileSync(filePath, JSON.stringify([
 				{ title: 'GitHub', link: 'https://github.com', group: 'Dev', tags: ['vcs'] },
-				{ title: 'Bad', link: 42 }   // schema-mismatch entries are silently skipped
+				{ title: 'Bad', link: 42 }
 			]));
 			const result = readLinksFromDisk(filePath);
 			assert.strictEqual(result.ok, true);
@@ -1575,6 +1575,83 @@ suite('Extension Test Suite', () => {
 				assert.strictEqual(result.entries.length, 1);
 				assert.strictEqual(result.entries[0].title, 'GitHub');
 				assert.strictEqual(result.entries[0].group, 'Dev');
+				// **버리지 않고 들고 온다.** 예전 주석은 "schema-mismatch entries are
+				// silently skipped" 로 이 조용한 삭제를 정상 계약으로 고정하고
+				// 있었다 — 그 상태에서는 다음 Add/Edit/Delete 가 걸러진 배열을
+				// 되써서 이 항목이 영구히 사라졌다.
+				assert.deepStrictEqual(result.invalid, [{ index: 1, raw: { title: 'Bad', link: 42 } }]);
+			}
+		});
+
+		/**
+		 * 무효 항목이 **쓰기를 왕복해 살아남는지**가 진짜 판정이다. 로더가
+		 * 들고만 오고 쓰기 경로가 쓰지 않으면 데이터는 그대로 사라진다.
+		 */
+		test('mergeInvalidJsonEntries 가 무효 항목을 원래 자리로 되돌린다', () => {
+			const invalid = [{ index: 1, raw: { title: 'Bad', link: 42 } }];
+			assert.deepStrictEqual(
+				mergeInvalidJsonEntries([{ title: 'A' }, { title: 'C' }], invalid),
+				[{ title: 'A' }, { title: 'Bad', link: 42 }, { title: 'C' }]
+			);
+			// 항목이 줄어 인덱스가 배열을 넘으면 끝에 붙인다 — 위치보다
+			// 잃지 않는 것이 우선이다.
+			assert.deepStrictEqual(
+				mergeInvalidJsonEntries([], [{ index: 5, raw: 'orphan' }]),
+				['orphan']
+			);
+			// 여러 개는 원래 순서대로 들어간다.
+			assert.deepStrictEqual(
+				mergeInvalidJsonEntries(['a'], [{ index: 2, raw: 'y' }, { index: 0, raw: 'x' }]),
+				['x', 'a', 'y']
+			);
+			// 무효 항목이 없으면 손대지 않는다.
+			const untouched = [{ title: 'A' }];
+			assert.strictEqual(mergeInvalidJsonEntries(untouched, []), untouched);
+		});
+
+		/**
+		 * 쓰기 경로 전체를 흉내 낸다: 읽기 → 항목 추가 → 직렬화 → 되쓰기.
+		 * 실전에서 데이터가 사라진 형태가 정확히 이것이다.
+		 */
+		test('무효 항목이 있는 파일에 링크를 추가해도 그 항목이 살아남는다', () => {
+			const filePath = path.join(tempDir, 'roundtrip.json');
+			const original = [
+				{ title: 'GitHub', link: 'https://github.com' },
+				{ title: 'Bad', link: 42 },
+				{ title: 'Docs', link: 'https://docs.example.com' }
+			];
+			fs.writeFileSync(filePath, JSON.stringify(original, null, 2));
+
+			const loaded = readLinksFromDisk(filePath);
+			assert.strictEqual(loaded.ok, true);
+			if (!loaded.ok) { return; }
+			const { entries: withNew } = addLinkEntry(loaded.entries, {
+				title: 'New', link: 'https://new.example.com', sourceFile: filePath
+			});
+			const serialized = mergeInvalidJsonEntries(serializeLinks(withNew), loaded.invalid);
+			fs.writeFileSync(filePath, JSON.stringify(serialized, null, 2) + '\n');
+
+			const roundTripped = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+			assert.ok(
+				roundTripped.some((e: any) => e.title === 'Bad' && e.link === 42),
+				`무효 항목이 쓰기에서 사라졌다: ${JSON.stringify(roundTripped)}`
+			);
+			assert.ok(roundTripped.some((e: any) => e.title === 'New'), '새 항목이 저장되지 않았다');
+			assert.strictEqual(roundTripped.length, 4, '항목 수가 맞지 않는다');
+		});
+
+		test('favorites 로더도 같은 계약을 지킨다', () => {
+			const filePath = path.join(tempDir, 'partially-invalid-favs.json');
+			fs.writeFileSync(filePath, JSON.stringify([
+				{ title: 'README', path: 'README.md' },
+				{ title: 'NoPath' },
+				{ title: 'Docs', path: 'docs/' }
+			]));
+			const result = readFavoritesFromDisk(filePath);
+			assert.strictEqual(result.ok, true);
+			if (result.ok) {
+				assert.strictEqual(result.entries.length, 2);
+				assert.deepStrictEqual(result.invalid, [{ index: 1, raw: { title: 'NoPath' } }]);
 			}
 		});
 
