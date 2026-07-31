@@ -4,6 +4,12 @@ import {
 	interpolatePipelineVariables,
 	sanitizeInterpolatedValue,
 	resolveWithinWorkspace,
+	resolveArchiveTaskPath,
+	isOnlyPromptCancellation,
+	handleFileDialog,
+	handleFolderDialog,
+	PromptCancelledError,
+	ActionStoppedError,
 	parseTagInput,
 	serializeFavorites,
 	serializeLinks,
@@ -333,6 +339,139 @@ suite('Extension Test Suite', () => {
 		test('falls back to the first workspace root when no baseDir is provided', () => {
 			const resolved = resolveWithinWorkspace('report.txt', [root]);
 			assert.strictEqual(resolved, path.join(root, 'report.txt'));
+		});
+	});
+
+	suite('대화형 취소는 전용 오류 타입을 쓴다', () => {
+		// 다섯 핸들러가 같은 타입을 던져야 액션이 '취소'로 마감된다. 평범한
+		// `Error` 로 되돌아가면 그 액션만 조용히 빨간 오류/`failure` 로 회귀하는데,
+		// 문구는 그대로라 눈으로는 드러나지 않는다. 문자열이 아니라 `name` 을
+		// 본다 — 메시지는 지역화되므로 로케일에 따라 깨진다.
+		async function assertPromptCancelled(fn: () => Promise<unknown>, what: string): Promise<void> {
+			await assert.rejects(fn, (e: unknown) => {
+				assert.ok(e instanceof Error, `${what}: Error 가 아니다`);
+				assert.strictEqual(e.name, 'PromptCancelledError', `${what}: ${e.name} 로 던졌다`);
+				return true;
+			});
+		}
+
+		test('folderDialog 취소', async () => {
+			const original = vscode.window.showOpenDialog;
+			(vscode.window as any).showOpenDialog = async () => undefined;
+			try {
+				await assertPromptCancelled(() => handleFolderDialog({ id: 'pick' }), 'folderDialog');
+			} finally {
+				(vscode.window as any).showOpenDialog = original;
+			}
+		});
+
+		test('fileDialog 취소', async () => {
+			const original = vscode.window.showOpenDialog;
+			(vscode.window as any).showOpenDialog = async () => undefined;
+			try {
+				await assertPromptCancelled(() => handleFileDialog({ id: 'pick' }), 'fileDialog');
+			} finally {
+				(vscode.window as any).showOpenDialog = original;
+			}
+		});
+	});
+
+	suite('isOnlyPromptCancellation', () => {
+		// 다이얼로그를 닫은 것은 실패가 아니다. 이 술어가 액션 마감을
+		// `failure`(빨간 토스트 + ✗)와 `cancelled`(조용히) 로 가른다.
+		const cancel = () => new PromptCancelledError('File selection was canceled.');
+
+		test('classifies a bare prompt cancellation', () => {
+			assert.strictEqual(isOnlyPromptCancellation(cancel()), true);
+		});
+
+		test('does not classify an ordinary failure', () => {
+			assert.strictEqual(isOnlyPromptCancellation(new Error('exit code 1')), false);
+		});
+
+		test('classifies an AggregateError made only of cancellations', () => {
+			// 병렬 파이프라인은 실패들을 AggregateError 로 묶는다.
+			assert.strictEqual(isOnlyPromptCancellation(new AggregateError([cancel(), cancel()])), true);
+		});
+
+		test('does NOT classify a mix of cancellation and real failure', () => {
+			// 취소가 섞였다는 이유로 진짜 오류를 삼키면 안 된다.
+			const mixed = new AggregateError([cancel(), new Error('compiler exited with 2')]);
+			assert.strictEqual(isOnlyPromptCancellation(mixed), false);
+		});
+
+		test('does not classify an empty AggregateError', () => {
+			assert.strictEqual(isOnlyPromptCancellation(new AggregateError([])), false);
+		});
+
+		test('handles nested AggregateErrors', () => {
+			assert.strictEqual(
+				isOnlyPromptCancellation(new AggregateError([new AggregateError([cancel()])])),
+				true
+			);
+			assert.strictEqual(
+				isOnlyPromptCancellation(new AggregateError([new AggregateError([new Error('boom')])])),
+				false
+			);
+		});
+
+		test('terminates on a self-referential AggregateError', () => {
+			const loop: any = new AggregateError([]);
+			loop.errors = [loop];
+			assert.strictEqual(isOnlyPromptCancellation(loop), false);
+		});
+
+		test('does not classify a stop as a prompt cancellation', () => {
+			// Stop 은 별도 경로(manuallyTerminatedActions)로 마감된다.
+			assert.strictEqual(isOnlyPromptCancellation(new ActionStoppedError()), false);
+		});
+
+		test('ignores non-error values', () => {
+			assert.strictEqual(isOnlyPromptCancellation(undefined), false);
+			assert.strictEqual(isOnlyPromptCancellation('File selection was canceled.'), false);
+		});
+	});
+
+	suite('resolveArchiveTaskPath', () => {
+		// zip/unzip 의 내장 엔진은 cwd 개념이 없어 `path.resolve` 가 extension
+		// host 의 `process.cwd()`(= VS Code 를 띄운 위치)를 기준으로 삼았다.
+		// 외부 `tool` 경로는 자식 프로세스의 cwd 를 쓰므로, 같은 태스크가
+		// `tool` 하나로 다른 위치에 파일을 만들었다.
+		const base = path.resolve(os.tmpdir(), 'taskhub-archive-base');
+
+		test('resolves a relative archive path against the base, not process.cwd()', () => {
+			const resolved = resolveArchiveTaskPath('build.zip', base);
+			assert.strictEqual(resolved, path.join(base, 'build.zip'));
+			assert.notStrictEqual(resolved, path.resolve('build.zip'));
+		});
+
+		test('resolves relative subpaths against the base', () => {
+			const resolved = resolveArchiveTaskPath('out/dist/app.zip', base);
+			assert.strictEqual(resolved, path.join(base, 'out', 'dist', 'app.zip'));
+		});
+
+		test('leaves absolute paths untouched — dialog picks may live anywhere', () => {
+			// 번들 예제(`media/actions_example.json`)의 zip 액션이 folderDialog 로
+			// 고른 폴더를 그 자리에서 압축한다. 워크스페이스로 묶으면 안 된다.
+			const outside = path.resolve(os.tmpdir(), 'somewhere-else', 'pick.zip');
+			assert.strictEqual(resolveArchiveTaskPath(outside, base), outside);
+		});
+
+		test('allows a relative path to escape the base — no containment here', () => {
+			// 이 헬퍼의 계약은 "기준점 고정"이지 "격리"가 아니다. 격리는
+			// writeFile/appendFile/output.filePath 쪽 `resolveWithinWorkspace` 몫.
+			const resolved = resolveArchiveTaskPath(path.join('..', 'sibling.zip'), base);
+			assert.strictEqual(resolved, path.resolve(base, '..', 'sibling.zip'));
+		});
+
+		test('falls back to process-relative resolution when there is no base', () => {
+			// 워크스페이스 없이 열린 창. 기준으로 삼을 것이 없으므로 기존 동작.
+			assert.strictEqual(resolveArchiveTaskPath('build.zip', ''), path.resolve('build.zip'));
+			assert.strictEqual(resolveArchiveTaskPath('build.zip', undefined), path.resolve('build.zip'));
+		});
+
+		test('passes empty input through unchanged', () => {
+			assert.strictEqual(resolveArchiveTaskPath('', base), '');
 		});
 	});
 
@@ -2743,6 +2882,29 @@ suite('Extension Test Suite', () => {
 			);
 		});
 
+		// 0.6.52: `cancelled` 하나에 Stop 과 프롬프트 취소가 섞여 있었고 화면에는
+		// "중지됨 / Stopped" 로만 나왔다. 다이얼로그를 닫은 것을 "중지됨"이라
+		// 부르는 것은 사실과 다르고, 스크린 리더에는 그 한 단어가 **유일한**
+		// 설명이라 더 나쁘다.
+		test('cancelled by Stop → 중지됨', () => {
+			const e = entry({ status: 'cancelled', cancelKind: 'stopped', durationMs: 100 });
+			assert.strictEqual(buildHistoryItemAriaLabel(e, 'Build', now, 'ko'), 'Build, 중지됨, 12:00 · 100ms');
+			assert.strictEqual(buildHistoryItemAriaLabel(e, 'Build', now, 'en'), 'Build, stopped, 12:00 · 100ms');
+		});
+
+		test('cancelled by dismissing a prompt → 취소됨', () => {
+			const e = entry({ status: 'cancelled', cancelKind: 'prompt', durationMs: 100 });
+			assert.strictEqual(buildHistoryItemAriaLabel(e, 'Build', now, 'ko'), 'Build, 취소됨, 12:00 · 100ms');
+			assert.strictEqual(buildHistoryItemAriaLabel(e, 'Build', now, 'en'), 'Build, canceled, 12:00 · 100ms');
+		});
+
+		test('legacy cancelled entry without cancelKind reads as 중지됨', () => {
+			// 이 필드가 생기기 전의 `cancelled` 는 전부 Stop 이었다 — 기존 기록을
+			// 마이그레이션하지 않으므로 기본값이 그쪽이어야 한다.
+			const e = entry({ status: 'cancelled', durationMs: 100 });
+			assert.strictEqual(buildHistoryItemAriaLabel(e, 'Build', now, 'ko'), 'Build, 중지됨, 12:00 · 100ms');
+		});
+
 		test('running entry still gets a label (icon spinner alone is silent for screen readers)', () => {
 			const e = entry({ status: 'running' });
 			assert.strictEqual(
@@ -2933,6 +3095,29 @@ suite('Extension Test Suite', () => {
 				maxItems === undefined ? undefined : { getMaxItems: () => maxItems }
 			);
 		}
+
+		// 0.6.52: `cancelKind` 는 `cancelled` 일 때만 의미가 있다. 재실행이 같은
+		// 항목을 갱신할 수 있으므로, 다른 상태로 바뀌면 반드시 지워야 한다 —
+		// 남으면 성공 항목이 취소 종류를 달고 다닌다.
+		test('updateHistoryStatus attaches cancelKind and clears it when the status changes', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('a', 'running', 1000));
+
+			provider.updateHistoryStatus('a', 1000, 'cancelled', 'reason', 5, 'prompt');
+			assert.strictEqual(provider.getHistory()[0].cancelKind, 'prompt');
+
+			provider.updateHistoryStatus('a', 1000, 'success', undefined, 5);
+			assert.strictEqual(provider.getHistory()[0].cancelKind, undefined);
+		});
+
+		test('updateHistoryStatus defaults cancelKind to stopped when omitted', () => {
+			// 이 인자를 넘기지 않는 기존 호출부(있다면)가 프롬프트 취소로
+			// 둔갑하면 안 된다 — 기본값은 Stop 쪽이다.
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('a', 'running', 1000));
+			provider.updateHistoryStatus('a', 1000, 'cancelled', 'reason', 5);
+			assert.strictEqual(provider.getHistory()[0].cancelKind, 'stopped');
+		});
 
 		test('addHistoryEntry unshifts entries so newest comes first', () => {
 			const provider = new HistoryProvider(createMockContext());
@@ -4187,7 +4372,9 @@ suite('Extension Test Suite', () => {
 			try {
 				await assert.rejects(
 					() => handleConfirm({ message: 'Continue?', confirmLabel: 'Yes', cancelLabel: 'No' }),
-					{ message: 'Action was canceled by user.' }
+					// 문구가 아니라 `name` 으로 분류한다 — 메시지는 이제 지역화되고,
+					// 파이프라인도 이 이름으로 '취소'와 '실패'를 가른다.
+					(e: unknown) => e instanceof Error && e.name === 'PromptCancelledError'
 				);
 			} finally {
 				(vscode.window as any).showWarningMessage = originalShowWarningMessage;
@@ -4200,7 +4387,9 @@ suite('Extension Test Suite', () => {
 			try {
 				await assert.rejects(
 					() => handleConfirm({ message: 'Continue?', confirmLabel: 'Yes', cancelLabel: 'No' }),
-					{ message: 'Action was canceled by user.' }
+					// 문구가 아니라 `name` 으로 분류한다 — 메시지는 이제 지역화되고,
+					// 파이프라인도 이 이름으로 '취소'와 '실패'를 가른다.
+					(e: unknown) => e instanceof Error && e.name === 'PromptCancelledError'
 				);
 			} finally {
 				(vscode.window as any).showWarningMessage = originalShowWarningMessage;

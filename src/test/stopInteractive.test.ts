@@ -935,6 +935,236 @@ suite('대화형 태스크 대기 중 중지', () => {
             }
         });
     });
+
+    /**
+     * 프롬프트 취소는 **실패가 아니다** (0.6.52).
+     *
+     * Stop 버튼은 0.6.46 에서 `cancelled` 로 갈렸는데, 다이얼로그를 Escape 로
+     * 닫는 것 — 똑같이 의도된 "됐어요" — 은 계속 실패로 마감됐다: 빨간 오류
+     * 토스트, History `failure`, 트리의 ✗. 게다가 메시지가 영어라 한국어 UI 에
+     * 섞였다. 이 suite 는 그 마감이 갈라지는지, 그리고 **진짜 실패를 삼키지는
+     * 않는지**를 함께 본다 — 한쪽만 보면 전부 `cancelled` 로 뭉개도 통과한다.
+     */
+    suite('프롬프트 취소의 마감', () => {
+
+        function cancellingAction(id: string): ActionItem {
+            return {
+                id,
+                title: `Cancelled ${id}`,
+                action: {
+                    description: 'user closes the prompt',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'value?' },
+                        // 뒤 태스크가 있어야 "취소했는데 계속 실행됐다"를 구분할 수 있다.
+                        { id: 'after', type: 'stringManipulation', function: 'trim', input: 'should-not-run' },
+                    ],
+                },
+            } as unknown as ActionItem;
+        }
+
+        /** `showInputBox` 를 즉시 취소(undefined)로 만든다. */
+        function stubCancelledInputBox(): () => void {
+            const original = vscode.window.showInputBox;
+            (vscode.window as any).showInputBox = async () => undefined;
+            return () => { (vscode.window as any).showInputBox = original; };
+        }
+
+        /** 오류 토스트가 떴는지 관찰한다. */
+        function stubErrorMessage(): { calls: string[]; restore: () => void } {
+            const original = vscode.window.showErrorMessage;
+            const calls: string[] = [];
+            (vscode.window as any).showErrorMessage = async (msg: string) => { calls.push(msg); return undefined; };
+            return { calls, restore: () => { (vscode.window as any).showErrorMessage = original; } };
+        }
+
+        /** 정보 토스트가 떴는지 관찰한다. */
+        function stubInformationMessage(): { calls: string[]; restore: () => void } {
+            const original = vscode.window.showInformationMessage;
+            const calls: string[] = [];
+            (vscode.window as any).showInformationMessage = async (msg: string) => { calls.push(msg); return undefined; };
+            return { calls, restore: () => { (vscode.window as any).showInformationMessage = original; } };
+        }
+
+        test('IT-138: 프롬프트를 닫으면 오류 토스트 없이 cancelled 로 마감된다', async function () {
+            this.timeout(20000);
+            const restoreInput = stubCancelledInputBox();
+            const toasts = stubErrorMessage();
+            const infos = stubInformationMessage();
+            try {
+                const context = makeContext();
+                const actionItem = cancellingAction('prompt-cancel');
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                // 던지지 않아야 한다 — 던지면 호출부가 `[ERROR] Execution failed`
+                // 를 남기고, 사용자는 자기가 닫은 다이얼로그 때문에 오류를 본다.
+                await executeAction(actionItem, context, mainView, history);
+
+                const entry = history.getHistory()[0];
+                assert.strictEqual(entry?.status, 'cancelled', '프롬프트 취소가 cancelled 로 기록되지 않았다');
+                assert.strictEqual(entry?.cancelKind, 'prompt', '중지와 구분되는 cancelKind 가 붙지 않았다');
+                assert.deepStrictEqual(toasts.calls, [], '취소인데 오류 토스트가 떴다');
+                assert.deepStrictEqual(
+                    infos.calls, [],
+                    '실행을 마친 태스크가 없는데 안내가 떴다 — 진행도 카운터는 취소된 프롬프트까지 "완료"로 세므로 그대로 쓰면 안 된다'
+                );
+                assert.ok(
+                    !actionStates.has('prompt-cancel'),
+                    '상태가 남으면 트리에 스피너가 영원히 돈다 (finalizeActionRun 은 중지된 액션만 지운다)'
+                );
+            } finally {
+                infos.restore();
+                toasts.restore();
+                restoreInput();
+            }
+        });
+
+        test('IT-145: 앞선 태스크가 실제로 실행됐을 때만, 그 개수만큼만 안내한다', async function () {
+            this.timeout(20000);
+            // 진행도 카운터(`ActionProgress.completed`)는 `running` 이 아닌 모든
+            // 종료 전이에서 올라간다 — 취소된 프롬프트도 `failure` 전이를 낸다.
+            // 그 값을 그대로 쓰면 (a) 프롬프트가 첫 태스크인 액션에서도 안내가
+            // 뜨고 (b) 개수가 항상 1 크다. 번들 예제는 대부분 프롬프트가 먼저라
+            // (a) 가 기본 경험이었다.
+            const restoreInput = stubCancelledInputBox();
+            const infos = stubInformationMessage();
+            try {
+                const context = makeContext();
+                const actionItem: ActionItem = {
+                    id: 'ran-before-cancel',
+                    title: 'Ran before cancel',
+                    action: {
+                        description: 'one task really runs, then a prompt is cancelled',
+                        tasks: [
+                            { id: 'first', type: 'stringManipulation', function: 'trim', input: '  x  ' },
+                            { id: 'ask', type: 'inputBox', prompt: 'value?' },
+                            { id: 'never', type: 'stringManipulation', function: 'trim', input: '  y  ' },
+                        ],
+                    },
+                } as unknown as ActionItem;
+                const history = new HistoryProvider(context);
+                await executeAction(actionItem, context, new MainViewProvider(context, () => [actionItem]), history);
+
+                assert.strictEqual(infos.calls.length, 1, '실행된 태스크가 있는데 안내가 뜨지 않았다');
+                assert.match(
+                    infos.calls[0],
+                    /(전체 3개 중 이미 실행된 1개|1 of 3 tasks)/,
+                    `실행 개수가 틀렸다 (취소된 프롬프트까지 세면 2가 된다): ${infos.calls[0]}`
+                );
+            } finally {
+                infos.restore();
+                restoreInput();
+            }
+        });
+
+        test('IT-139: 중지와 프롬프트 취소는 같은 cancelled 안에서도 구분된다', async function () {
+            this.timeout(20000);
+            // History 는 `cancelled` 를 "중지됨 / Stopped" 로 렌더한다. 프롬프트를
+            // 닫은 것을 "중지됨"이라 부르면 사실과 다르고, 스크린 리더에는 그
+            // 한 단어가 유일한 설명이라 더 나쁘다.
+            const restoreInput = stubCancelledInputBox();
+            let promptKind: string | undefined;
+            try {
+                const context = makeContext();
+                const actionItem = cancellingAction('kind-prompt');
+                const history = new HistoryProvider(context);
+                await executeAction(actionItem, context, new MainViewProvider(context, () => [actionItem]), history);
+                promptKind = history.getHistory()[0]?.cancelKind;
+            } finally {
+                restoreInput();
+            }
+
+            const stopped: ActionItem = {
+                id: 'kind-stopped',
+                title: 'Gets stopped',
+                action: {
+                    description: 'stopped by the user',
+                    tasks: [{ id: 'work', type: 'stringManipulation', function: 'trim', input: '  x  ' }],
+                },
+            } as unknown as ActionItem;
+            const stopCtx = makeContext();
+            const stopHistory = new HistoryProvider(stopCtx);
+            const run = executeAction(stopped, stopCtx, new MainViewProvider(stopCtx, () => [stopped]), stopHistory);
+            run.catch(() => { /* 아래에서 판정한다 */ });
+            stopRunningAction('kind-stopped');
+            await settleWithin(run, 10000, 'IT-139');
+            const stopKind = stopHistory.getHistory()[0]?.cancelKind;
+
+            assert.strictEqual(promptKind, 'prompt');
+            assert.strictEqual(stopKind, 'stopped');
+            assert.notStrictEqual(promptKind, stopKind, '두 취소가 구분되지 않으면 History 문구가 한쪽에 대해 거짓말한다');
+        });
+
+        test('IT-140: 취소와 진짜 실패가 섞이면 실패로 마감된다 (취소가 오류를 삼키지 않는다)', async function () {
+            this.timeout(20000);
+            const restoreInput = stubCancelledInputBox();
+            try {
+                const context = makeContext();
+                // 두 태스크를 병렬로 두면 실패들이 AggregateError 로 묶인다.
+                const actionItem: ActionItem = {
+                    id: 'mixed-cancel',
+                    title: 'Mixed',
+                    action: {
+                        description: 'a cancelled prompt AND a genuine failure',
+                        tasks: [
+                            { id: 'ask', type: 'inputBox', prompt: 'value?', parallel: true },
+                            { id: 'boom', type: 'shell', command: 'node --this-flag-does-not-exist', parallel: true, passTheResultToNextTask: true },
+                        ],
+                    },
+                } as unknown as ActionItem;
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                await executeAction(actionItem, context, mainView, history).catch(() => { /* 실패가 이 테스트의 전제다 */ });
+
+                assert.strictEqual(
+                    history.getHistory()[0]?.status,
+                    'failure',
+                    '취소가 섞였다는 이유로 진짜 실패를 cancelled 로 뭉개면 사용자가 오류를 놓친다'
+                );
+            } finally {
+                restoreInput();
+            }
+        });
+
+        test('IT-141: continueOnError 가 있으면 취소해도 뒤 태스크가 실행된다', async function () {
+            this.timeout(20000);
+            // 문서화된 계약("취소를 허용하려면 continueOnError"). 취소를 새 타입으로
+            // 분류하면서 **태스크 수준에서는 여전히 실패**로 남겨 둔 이유가 이것이다.
+            //
+            // "뒤 태스크가 돌았는가" 는 마감 상태로 읽는다 — 돌았다면 액션이
+            // 끝까지 가 `success` 가 되고, 취소가 끊었다면 `cancelled` 가 된다.
+            // 파일 마커는 쓸 수 없다: `writeFile` 은 워크스페이스 밖 경로를
+            // 거부하므로(resolveWithinWorkspace) 마커 자체가 실패한다.
+            const restoreInput = stubCancelledInputBox();
+            try {
+                const context = makeContext();
+                const actionItem: ActionItem = {
+                    id: 'continue-on-cancel',
+                    title: 'Continue on cancel',
+                    action: {
+                        description: 'cancel is tolerated',
+                        tasks: [
+                            { id: 'ask', type: 'inputBox', prompt: 'value?', continueOnError: true },
+                            { id: 'after', type: 'stringManipulation', function: 'trim', input: '  ran  ' },
+                        ],
+                    },
+                } as unknown as ActionItem;
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+
+                await executeAction(actionItem, context, mainView, history).catch(() => { /* 아래에서 판정한다 */ });
+
+                assert.strictEqual(
+                    history.getHistory()[0]?.status,
+                    'success',
+                    'continueOnError 가 있는데도 취소가 파이프라인을 끊었다 — 문서화된 계약이 깨졌다'
+                );
+            } finally {
+                restoreInput();
+            }
+        });
+    });
 });
 
 
@@ -1136,4 +1366,5 @@ suite('종료 실패 시 프로세스 추적 유지', () => {
             );
         });
     });
+
 });

@@ -57,6 +57,22 @@ export interface HistoryEntry {
      * 기대면 문구가 바뀔 때 조용히 깨진다.
      */
     status: 'success' | 'failure' | 'running' | 'cancelled';
+    /**
+     * `cancelled` 안에서 **무엇이 멈췄는지**를 가른다.
+     *
+     *  - `stopped` — 사용자가 Stop 버튼을 눌러 실행 중인 것을 끊었다.
+     *  - `prompt`  — 대화형 태스크의 프롬프트를 사용자가 닫았다(Escape/Cancel).
+     *
+     * 0.6.52 이전에는 둘 다 `cancelled` 하나였고 화면에는 **"중지됨 / Stopped"**
+     * 로만 나왔다. 다이얼로그를 닫은 것을 "중지됨"이라고 부르는 것은 사실과
+     * 다르고, 스크린 리더에는 그 한 단어가 **유일한** 설명이라 더 나쁘다.
+     * 0.6.46 이 `cancelled` 를 `failure` 에서 떼어낸 것과 같은 이유로 한 번 더
+     * 가른다.
+     *
+     * 없으면 `stopped` 로 읽는다 — 이 필드가 생기기 전의 기록은 전부 Stop
+     * 이었다. 기존 기록을 마이그레이션하지 않으므로 안전한 기본값이다.
+     */
+    cancelKind?: 'stopped' | 'prompt';
     output?: string;
     tool?: HistoryToolMetadata;
     /**
@@ -302,7 +318,11 @@ export function formatRecentRunDetail(
         return `${lang === 'ko' ? '실패' : 'Failed'} · ${badge}`;
     }
     if (entry.status === 'cancelled') {
-        return `${lang === 'ko' ? '중지됨' : 'Stopped'} · ${badge}`;
+        // 프롬프트를 닫은 것을 "중지됨"이라고 부르지 않는다 — `cancelKind` 주석 참조.
+        const word = entry.cancelKind === 'prompt'
+            ? (lang === 'ko' ? '취소됨' : 'Canceled')
+            : (lang === 'ko' ? '중지됨' : 'Stopped');
+        return `${word} · ${badge}`;
     }
     return badge;
 }
@@ -339,7 +359,9 @@ export function buildHistoryItemAriaLabel(
         : entry.status === 'failure'
             ? (lang === 'ko' ? '실패' : 'failed')
             : entry.status === 'cancelled'
-                ? (lang === 'ko' ? '중지됨' : 'stopped')
+                ? (entry.cancelKind === 'prompt'
+                    ? (lang === 'ko' ? '취소됨' : 'canceled')
+                    : (lang === 'ko' ? '중지됨' : 'stopped'))
                 : (lang === 'ko' ? '실행 중' : 'running');
     const durationPart = entry.durationMs !== undefined
         ? ` · ${formatDuration(entry.durationMs)}`
@@ -515,7 +537,18 @@ export class HistoryItem extends vscode.TreeItem {
         const pathLine = pathSource ? `${pathSource}\n` : '';
         // 이 파일의 나머지(배지·aria 라벨)는 이미 지역화돼 있는데 tooltip 만
         // 영어로 남아 있었다. 한국어 사용자에게는 여기만 영어로 보인다.
-        this.tooltip = `${pathLine}${isToolEntry
+        // `cancelled` 는 회색 `circle-slash` 아이콘 **하나로만** 표현되는데,
+        // 0.6.52 부터 그 아이콘이 서로 다른 두 결말(Stop / 프롬프트 취소)을
+        // 덮는다. 배지와 aria 라벨에는 단어가 들어가지만 배지는 Run Any Action
+        // 팔레트 쪽이고 트리 행에는 상태 단어가 없어서, **스크린 리더 사용자는
+        // 듣는 구분을 시각 사용자는 못 보는** 역전이 생겼다. 툴팁에 한 줄 더해
+        // 그 역전을 없앤다 (행을 더 어지럽히지 않는 자리다).
+        const cancelLine = entry.status === 'cancelled'
+            ? (entry.cancelKind === 'prompt'
+                ? t('취소됨 (프롬프트를 닫았습니다)\n', 'Cancelled (a prompt was dismissed)\n')
+                : t('중지됨 (Stop)\n', 'Stopped (Stop button)\n'))
+            : '';
+        this.tooltip = `${pathLine}${cancelLine}${isToolEntry
             ? t(`연 시각: ${date.toLocaleString()}`, `Opened at: ${date.toLocaleString()}`)
             : t(`실행 시각: ${date.toLocaleString()}`, `Executed at: ${date.toLocaleString()}`)}`;
 
@@ -631,12 +664,17 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
         timestamp: number,
         status: 'success' | 'failure' | 'cancelled',
         output?: string,
-        durationMs?: number
+        durationMs?: number,
+        cancelKind?: 'stopped' | 'prompt'
     ): void {
         const history = this.getHistory();
         const entry = history.find(e => e.actionId === actionId && e.timestamp === timestamp);
         if (entry) {
             entry.status = status;
+            // 재실행이 같은 항목을 갱신할 수 있으므로 `cancelled` 가 아닌
+            // 상태로 바뀌면 반드시 지운다 — 남으면 성공 항목이 취소 종류를
+            // 달고 다닌다.
+            entry.cancelKind = status === 'cancelled' ? (cancelKind ?? 'stopped') : undefined;
             if (output !== undefined) {
                 entry.output = output;
             }

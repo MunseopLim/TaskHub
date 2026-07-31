@@ -29,6 +29,7 @@
 import type { ActionItem, Task, OutputCapture, DiagnosticPattern } from './schema';
 import {
     interpolatePipelineVariables,
+    expandArgTemplate,
     tokenizeCommandLine,
     RESERVED_CAPTURE_NAMES,
     INTERACTIVE_TASK_TYPES,
@@ -825,6 +826,30 @@ function analyzeActionTasks(
             return out;
         };
 
+        /**
+         * `args` 원소는 **런타임과 같은 규칙**으로 펼쳐서 검사한다.
+         *
+         * 원소가 정확히 배열 참조 하나면(`"${pick.paths}"`) 런타임은
+         * `expandArgTemplate` 로 인자 여러 개를 만든다 — 리터럴 `${…}` 가
+         * 남지 않는다. 그런데 여기서 `visitString`(단순 보간)으로 보면 배열
+         * 값은 보간되지 않아 `${pick.paths}` 가 그대로 남고, 0.6.51 이
+         * 문서(`docs/features.md` §fileDialog 다중 선택)에 적어 둔 정상
+         * 예제가 `variable.unresolved` 경고를 받았다. 게다가 그 경고 문구는
+         * "런타임에서는 리터럴로 전달됩니다"라며 **사실과 반대**를 말했고,
+         * 같은 액션에 Preview Run 을 돌리면 "모두 해석됨"이 나와 두 진단이
+         * 정면으로 어긋났다.
+         *
+         * 접두사가 붙은 형태(`"--file=${pick.paths}"`)와 명령 **문자열** 안의
+         * 배열 참조는 런타임도 펼치지 않아 실제로 리터럴이 되므로, 그쪽
+         * 경고는 이 변경 뒤에도 그대로 남는다.
+         */
+        const visitArgTemplate = (value: unknown): void => {
+            if (typeof value !== 'string') { return; }
+            for (const out of expandArgTemplate(value, interpolationContext)) {
+                interpolated.push(out);
+            }
+        };
+
         // shell/command
         if (typeof task.command === 'string') {
             visitString(task.command);
@@ -834,7 +859,7 @@ function analyzeActionTasks(
             }
         }
         if (Array.isArray(task.args)) {
-            for (const a of task.args) { visitString(a); }
+            for (const a of task.args) { visitArgTemplate(a); }
         }
         if (task.env) {
             for (const v of Object.values(task.env)) {

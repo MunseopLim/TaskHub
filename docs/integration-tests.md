@@ -570,7 +570,7 @@ History 가 "무엇을 실행했는가" 를 보여 주려면 `${...}` 치환이 
 | IT-115 | 실패해도 실행한 명령줄은 기록되고 failure 경로에서 영속화 | 실패 진단에 가장 필요한 정보가 사라지지 않음 |
 | IT-116 | 저장된 입력이 없으면 `folderDialog` 가 정상적으로 열림 (IT-112 대조군) | 재사용 규칙이 정상 흐름을 막지 않음 |
 
-### IT-126 ~ IT-137: 중지의 사각지대와 password 노출
+### IT-126 ~ IT-141, IT-145: 중지의 사각지대, password 노출, 프롬프트 취소
 
 파일: [src/test/stopInteractive.test.ts](../src/test/stopInteractive.test.ts)
 
@@ -590,6 +590,22 @@ IT-123 ~ IT-125 가 "프롬프트 앞에 멈춘 액션" 을 다뤘고, 이 그�
 | IT-135 | 중지 후 완주한 액션이 성공으로 이력을 덮지 않음 | 취소가 닿지 않는 태스크가 마지막일 때 |
 | IT-136 | password 입력이 명령 이력에 평문으로 남지 않음 | 보간이 끝난 명령줄이 이력으로 가는 경로 |
 | IT-137 | 중지와 진짜 실패가 서로 다른 상태로 기록됨 | `cancelled` 와 `failure` 를 가름 |
+| IT-138 | 프롬프트를 닫으면 오류 토스트 없이 `cancelled` 로 마감됨 | 취소를 실패로 보고하던 것 (0.6.52) |
+| IT-139 | 중지와 프롬프트 취소가 `cancelKind` 로 구분됨 | History 가 둘 다 "중지됨"으로 부르던 것 |
+| IT-140 | 취소와 진짜 실패가 섞이면 실패로 마감됨 | 취소가 오류를 삼키지 않음 (AggregateError) |
+| IT-141 | `continueOnError` 가 있으면 취소해도 뒤 태스크가 실행됨 | 문서화된 계약이 새 오류 타입에도 유지됨 |
+| IT-145 | 실제로 실행을 마친 태스크가 있을 때만, 그 개수만큼만 안내함 | 진행도 카운터가 취소된 프롬프트까지 세던 것 |
+
+### IT-142 ~ IT-144, IT-146: 아카이브 경로의 기준점
+
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 시나리오 | 무엇을 고정하나 |
+| --- | --- | --- |
+| IT-142 | 내장 엔진의 상대 `archive`/`destination` 이 워크스페이스 기준으로 풀림 | `process.cwd()` 를 쓰던 것 (0.6.52) |
+| IT-143 | 두 엔진이 `task.cwd` 를 상대 경로의 기준으로 씀 | `unzip` 이 `cwd` 를 무시하던 비대칭 |
+| IT-144 | 외부 `tool` 경로도 해석된 절대 경로를 downstream 에 넘김 | `${zip.archivePath}` 가 상대 경로로 새던 것 |
+| IT-146 | 외부 `tool` unzip 도 `task.cwd` 를 씀 | `tool` 유무로 `cwd` 가 다르게 듣던 것 |
 
 같은 파일의 나머지 두 suite(`종료 실패 시 프로세스 추적 유지`, `spawn 이후의 error 는 추적을 지우지 않는다`)는 IT 번호를 쓰지 않습니다 — 순수 판단 규칙과 registry 상태를 보는 단위 테스트라 시나리오 대장의 대상이 아닙니다.
 

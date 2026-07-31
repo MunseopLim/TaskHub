@@ -130,6 +130,27 @@ suite('Run Any Action ↔ History 연동', () => {
             assert.strictEqual(en, 'Failed · 14:30 · 1.2s');
         });
 
+        // 0.6.52: `cancelled` 하나가 Stop 과 프롬프트 취소를 함께 덮고 있었고,
+        // 화면에는 "중지됨 / Stopped" 로만 나왔다. 두 값을 모두 고정하지 않으면
+        // 삼항을 뒤집어도 통과한다.
+        test('Stop 으로 끝난 것은 중지됨', () => {
+            const e = actionEntry({ actionId: 'a', timestamp: at1430, durationMs: 1200, status: 'cancelled', cancelKind: 'stopped' });
+            assert.strictEqual(formatRecentRunDetail(e, at1500, 'ko'), '중지됨 · 14:30 · 1.2s');
+            assert.strictEqual(formatRecentRunDetail(e, at1500, 'en'), 'Stopped · 14:30 · 1.2s');
+        });
+
+        test('프롬프트를 닫아 끝난 것은 취소됨', () => {
+            const e = actionEntry({ actionId: 'a', timestamp: at1430, durationMs: 1200, status: 'cancelled', cancelKind: 'prompt' });
+            assert.strictEqual(formatRecentRunDetail(e, at1500, 'ko'), '취소됨 · 14:30 · 1.2s');
+            assert.strictEqual(formatRecentRunDetail(e, at1500, 'en'), 'Canceled · 14:30 · 1.2s');
+        });
+
+        test('cancelKind 가 없는 예전 항목은 중지됨으로 읽는다', () => {
+            // 이 필드가 생기기 전의 `cancelled` 는 전부 Stop 이었다.
+            const e = actionEntry({ actionId: 'a', timestamp: at1430, durationMs: 1200, status: 'cancelled' });
+            assert.strictEqual(formatRecentRunDetail(e, at1500, 'ko'), '중지됨 · 14:30 · 1.2s');
+        });
+
         test('실행 중은 시각 대신 진행 상태를 표시한다', () => {
             assert.strictEqual(
                 formatRecentRunDetail(actionEntry({ actionId: 'a', status: 'running' }), at1500, 'ko'), '실행 중');

@@ -257,11 +257,11 @@
         },
         "archive": {
           "type": "string",
-          "description": "For 'unzip' tasks, specifies the archive to extract. For 'zip' tasks, specifies the output archive path. Supports interpolation."
+          "description": "For 'unzip' tasks, specifies the archive to extract. For 'zip' tasks, specifies the output archive path. Supports interpolation. Relative paths resolve against 'cwd' (default: the action's workspace folder). Unlike 'writeFile'/'appendFile', zip and unzip paths are NOT restricted to the workspace: they are meant to work on locations the user picks at runtime via fileDialog/folderDialog."
         },
         "destination": {
           "type": "string",
-          "description": "For 'unzip' tasks, a string (supports interpolation) specifying the destination directory."
+          "description": "For 'unzip' tasks, a string (supports interpolation) specifying the destination directory. Relative paths resolve against the action's workspace folder, and — like 'archive' — it is not restricted to the workspace."
         },
         "source": {
           "oneOf": [
@@ -273,7 +273,7 @@
               "items": { "type": "string" }
             }
           ],
-          "description": "File or directory paths to be compressed. Required for 'zip' type."
+          "description": "File or directory paths to be compressed. Required for 'zip' type. Relative paths resolve against 'cwd' (default: the action's workspace folder); sources outside the workspace are allowed on purpose, since a folderDialog pick may live anywhere. Symlinks that resolve outside the selected source root are skipped and reported."
         },
         "function": {
           "type": "string",

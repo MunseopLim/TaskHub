@@ -375,6 +375,11 @@ function setupWebviewMessageHandler(webview: vscode.Webview, onReady?: () => voi
             return;
         }
         if (message.command === 'copySelection') {
+            // 아래 `gotoError` 분기와 jsonEditor·memoryMapViewer 의 핸들러는
+            // 모두 페이로드 타입을 확인한다 — 여기만 예외였다. 웹뷰 콘텐츠가
+            // 우리 것이라도, 형태가 어긋난 메시지 하나로 클립보드에
+            // `undefined` 가 들어가는 것보다는 조용히 무시하는 편이 낫다.
+            if (typeof message.text !== 'string' || message.text.length === 0) { return; }
             vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage(t('클립보드에 복사되었습니다.', 'Copied to clipboard.'));
             return;

@@ -1043,6 +1043,7 @@ import {
     INTERPOLATED_VALUE_MAX_LENGTH,
     wouldExceedCaptureLimit,
     resolveWithinWorkspace,
+    resolveArchiveTaskPath,
     resolveFavoriteFilePath,
     toWorkspaceRelativePath,
     validateLinkScheme,
@@ -1103,6 +1104,7 @@ export {
     INTERPOLATED_VALUE_MAX_LENGTH,
     wouldExceedCaptureLimit,
     resolveWithinWorkspace,
+    resolveArchiveTaskPath,
     toWorkspaceRelativePath,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
@@ -1962,6 +1964,16 @@ function persistWorkspaceActions(workspaceFolder: string, workspaceActionsPath: 
  * Doctor needs the whole file (id collisions are cross-action), so it lints
  * the serialized prospective array and diffs against the current one.
  */
+/**
+ * 확인 관문의 결말.
+ *
+ *  - `save`      — 저장한다.
+ *  - `cancelled` — modal 에서 **명시적으로** 취소했다 (Cancel/Escape).
+ *  - `dismissed` — 비modal 알림이 지워졌다. X 나 *Clear All Notifications* 로
+ *                  실수로 닫히는 표면이라, 호출자가 초안을 살린 채 되묻는다.
+ */
+type WizardConfirmOutcome = 'save' | 'cancelled' | 'dismissed';
+
 async function confirmWizardAction(input: {
     action: ActionItem;
     destinationLabel: string;
@@ -1971,7 +1983,15 @@ async function confirmWizardAction(input: {
     extensionPath: string;
     /** Ids already in use, excluding the pending action itself. */
     existingIds: Set<string>;
-}): Promise<boolean> {
+    /**
+     * 검토 문서를 이미 연 상태인가. **호출자가 들고 있어야 한다** — 이 값이
+     * 함수 지역 변수였을 때, 취소 후 *다시 검토* 로 재진입하면 `false` 로
+     * 리셋돼 **열려 있는 검토 문서 위에 modal 이 다시 떴다.** 아래 주석이
+     * 굳이 피하려던 바로 그 상태이고, 하필 그 경로를 밟는 사람이 *Inspect*
+     * 를 눌러 문서를 읽고 있던 사용자다.
+     */
+    state: { inspected: boolean };
+}): Promise<WizardConfirmOutcome> {
     const lang: 'ko' | 'en' = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
     const workspaceRoots = getWorkspaceRoots();
 
@@ -2032,8 +2052,6 @@ async function confirmWizardAction(input: {
     // wizard. Once the document is open it *is* the review surface (it holds
     // strictly more than the modal `detail`), so the prompt drops to a
     // notification. Notifications carrying buttons stay until acted on.
-    let inspected = false;
-
     // Loop so "Inspect" / "Change id" can act and come back to the same
     // decision instead of silently ending the wizard.
     for (;;) {
@@ -2041,7 +2059,7 @@ async function confirmWizardAction(input: {
             `'${input.action.title}' 액션을 저장할까요?`,
             `Save the action '${input.action.title}'?`
         );
-        const choice = inspected
+        const choice = input.state.inspected
             ? await vscode.window.showInformationMessage(
                 t(
                     `${question} 열린 검토 문서를 확인한 뒤 선택하세요.`,
@@ -2063,7 +2081,7 @@ async function confirmWizardAction(input: {
             );
 
         if (choice === saveLabel) {
-            return true;
+            return 'save';
         }
         if (choice === editIdLabel) {
             // The id becomes the `taskhub.runAction.<id>` command name and is
@@ -2082,18 +2100,22 @@ async function confirmWizardAction(input: {
                 introduced = collectFindings();
                 // The open document still shows the previous id — refresh it,
                 // or the surface the user is now deciding from is stale.
-                if (inspected) {
+                if (input.state.inspected) {
                     await openReviewDocument();
                 }
             }
             continue;
         }
         if (choice !== inspectLabel) {
-            return false;
+            // **어느 표면에서 취소됐는지**를 구분해 돌려준다. modal 의 Cancel /
+            // Escape 는 명시적인 의사표시이므로 한 번에 끝나야 하고, 알림이
+            // 지워진 것은 실수일 수 있으므로 호출자가 한 번 되묻는다. 예전에는
+            // 둘 다 `false` 라, 일부러 취소한 사용자까지 두 번 닫아야 했다.
+            return input.state.inspected ? 'dismissed' : 'cancelled';
         }
 
         await openReviewDocument();
-        inspected = true;
+        input.state.inspected = true;
     }
 }
 
@@ -2222,7 +2244,7 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
         // Last gate before touching disk. `insertActionIntoDestination`
         // mutates the in-memory array only, so bailing out here leaves the
         // file untouched.
-        const confirmed = await confirmWizardAction({
+        const confirmInput = {
             action: newAction,
             destinationLabel: destination.label,
             prospectiveActions: sources.workspaceActions,
@@ -2230,8 +2252,43 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
             workspaceFolder: targetFolder.uri.fsPath,
             extensionPath: context.extensionPath,
             existingIds,
-        });
-        if (!confirmed) {
+            // 재진입해도 검토 문서를 연 사실이 유지된다 — 리셋되면 열린 문서
+            // 위에 modal 이 다시 뜬다.
+            state: { inspected: false },
+        };
+        // **말없이 끝내지 않는다.** 이 관문은 *Inspect* 를 누른 뒤 비modal
+        // 알림으로 내려가는데, 그 알림은 X 나 "Clear All Notifications" 로
+        // **실수로** 닫힌다. 그러면 최대 10단계까지 입력한 내용이 통째로
+        // 사라지면서 화면에는 아무 변화도 없어, 저장된 건지 취소된 건지조차
+        // 알 수 없었다. 0.6.46 이 Back 과 초안 보존을 넣은 이유가 바로 이
+        // 손실인데 마지막 관문만 그 보호 밖에 있었다.
+        //
+        // **초안은 아직 살아 있다.** `newAction` 은 완성된 상태로 여기 있고
+        // `persistWorkspaceActions` 는 아직 돌지 않았다. 그러니 "처음부터 다시"가
+        // 아니라 **방금 그 확인 화면으로 되돌아가는 것**이 옳다.
+        //
+        // 되묻는 것은 **알림이 지워졌을 때뿐**이다. modal 의 Cancel 은 명시적인
+        // 의사표시라 한 번에 끝낸다 — 일부러 취소한 사람까지 붙잡으면 그것대로
+        // 성가시다. 되물을 때는 *버리기* 를 **라벨 있는 버튼**으로 준다:
+        // 초안을 버리는 동작이 이름 없는 X 제스처뿐이면, 그 파괴적인 선택이
+        // 가장 눈에 안 띄는 자리에 놓인다.
+        let outcome = await confirmWizardAction(confirmInput);
+        while (outcome === 'dismissed') {
+            const reviewAgain = t('다시 검토', 'Review again');
+            const discard = t('버리기', 'Discard');
+            const choice = await vscode.window.showInformationMessage(
+                t(
+                    `'${newAction.title}' 액션을 아직 저장하지 않았습니다. 입력한 내용은 그대로 남아 있습니다.`,
+                    `'${newAction.title}' has not been saved yet. Your input is still here.`
+                ),
+                reviewAgain,
+                discard
+            );
+            // 이 알림마저 지워졌다면 더 붙잡지 않는다 — 한 번이면 충분하다.
+            if (choice !== reviewAgain) { return; }
+            outcome = await confirmWizardAction(confirmInput);
+        }
+        if (outcome !== 'save') {
             return;
         }
 
@@ -2611,6 +2668,102 @@ export class ActionStoppedError extends Error {
         super('Action stopped by user');
         this.name = 'ActionStoppedError';
     }
+}
+
+/**
+ * 사용자가 대화형 태스크의 프롬프트를 **의도적으로 닫았을 때** 던진다
+ * (`fileDialog`/`folderDialog`/`inputBox`/`quickPick`/`envPick`/`confirm` 에서
+ * Escape 또는 Cancel).
+ *
+ * **태스크 수준에서는 여전히 실패다.** 그래야 `continueOnError: true` 가 문서에
+ * 적힌 대로("취소를 허용하려면 continueOnError") 계속 동작한다. 바뀌는 것은
+ * **액션 수준의 마감 처리**다 — 예전에는 여기까지 올라온 취소가 빨간 오류
+ * 토스트 + History `failure` + 트리의 ✗ 로 끝났다. 사용자가 방금 "됐어요"라고
+ * 말한 것을 시스템 오류로 되돌려주는 셈이었고, 메시지도 한국어 UI 에 영어로
+ * 섞여 나왔다.
+ *
+ * Stop 버튼(0.6.46 에서 `cancelled` 로 분리)과 같은 부류이므로 같은 마감을
+ * 쓴다. 문자열 매칭이 아니라 `name` 으로 분류한다 — 문구가 바뀌면 조용히
+ * 깨지는 판정을 만들지 않기 위해서다(`TaskTimeoutError` 와 같은 이유).
+ */
+export class PromptCancelledError extends Error {
+    /**
+     * 어느 태스크의 프롬프트였는지. **생성 시점에는 비어 있고** 파이프라인이
+     * 태스크 경계에서 채운다 — 핸들러 11곳에 태스크 id 를 따로 넘기는 것보다,
+     * 이미 id 를 아는 자리 한 곳에서 붙이는 편이 어긋날 여지가 없다.
+     *
+     * 출력 채널의 취소 한 줄에 쓴다. 태스크가 여덟 개인 파이프라인에 프롬프트가
+     * 여럿이면, "왜 중간에 멈췄지" 를 답하라고 남긴 그 줄이 정작 **어느**
+     * 프롬프트였는지 말해 주지 않는다.
+     */
+    taskId?: string;
+
+    constructor(message: string) {
+        super(message);
+        this.name = 'PromptCancelledError';
+    }
+}
+
+/** 이 오류가 담고 있는 프롬프트 취소들의 태스크 id (선언 순서, 중복 제거). */
+export function promptCancellationTaskIds(error: unknown, seen = new Set<unknown>()): string[] {
+    if (!error || typeof error !== 'object' || seen.has(error)) { return []; }
+    seen.add(error);
+    const errors = (error as AggregateError).errors;
+    if (Array.isArray(errors)) {
+        const ids: string[] = [];
+        for (const inner of errors) {
+            for (const id of promptCancellationTaskIds(inner, seen)) {
+                if (!ids.includes(id)) { ids.push(id); }
+            }
+        }
+        return ids;
+    }
+    return error instanceof PromptCancelledError && error.taskId ? [error.taskId] : [];
+}
+
+/**
+ * 이 오류가 **오직 프롬프트 취소로만** 이루어져 있는가.
+ *
+ * 병렬 파이프라인은 실패들을 `AggregateError` 로 묶으므로, 취소 하나와 진짜
+ * 실패 하나가 함께 올라올 수 있다. 그럴 때는 실패로 보고해야 한다 — 취소가
+ * 섞였다는 이유로 진짜 오류를 조용히 삼키면 안 된다. 그래서 "하나라도
+ * 취소인가"가 아니라 "전부 취소인가"를 묻는다.
+ *
+ * `containsSensitiveTaskError` 와 같은 순환 방어(`seen`)를 쓴다.
+ */
+/**
+ * 이 오류가 담고 있는 **프롬프트 취소의 개수**.
+ *
+ * "이미 실행된 태스크가 몇 개인가" 를 셀 때 필요하다. 진행도 카운터
+ * (`ActionProgress.completed`)는 `running` 이 아닌 **모든** 종료 전이에서
+ * 올라가므로 — 취소된 프롬프트도 `failure` 전이를 내보낸다 — 그 값을 그대로
+ * 쓰면 아무것도 실행되지 않았는데 "1개 실행됨" 이 된다. 실측: 태스크가
+ * `fileDialog` 하나뿐인 액션에서 Escape 를 눌러도 안내가 떴고, 번들 예제는
+ * 대부분 프롬프트가 첫 태스크라 이것이 기본 경험이었다.
+ *
+ * `isOnlyPromptCancellation` 과 같은 순환 방어를 쓴다.
+ */
+export function countPromptCancellations(error: unknown, seen = new Set<unknown>()): number {
+    if (!error || typeof error !== 'object' || seen.has(error)) { return 0; }
+    seen.add(error);
+    const errors = (error as AggregateError).errors;
+    if (Array.isArray(errors)) {
+        let total = 0;
+        for (const inner of errors) { total += countPromptCancellations(inner, seen); }
+        return total;
+    }
+    return error instanceof PromptCancelledError ? 1 : 0;
+}
+
+export function isOnlyPromptCancellation(error: unknown, seen = new Set<unknown>()): boolean {
+    if (!error || typeof error !== 'object' || seen.has(error)) { return false; }
+    seen.add(error);
+    const errors = (error as AggregateError).errors;
+    if (Array.isArray(errors)) {
+        // 빈 AggregateError 는 취소라고 단정할 근거가 없다.
+        return errors.length > 0 && errors.every(inner => isOnlyPromptCancellation(inner, seen));
+    }
+    return error instanceof PromptCancelledError;
 }
 
 /**
@@ -4371,7 +4524,14 @@ async function executeActionPipelineForRun(
                         raw instanceof ShellCommandError ? undefined : raw.message
                     );
                 }
-                const e = taskUsesSecret && !(raw instanceof ActionStoppedError)
+                // 어느 태스크의 프롬프트였는지는 여기서만 확실히 안다.
+                if (raw instanceof PromptCancelledError && raw.taskId === undefined) {
+                    raw.taskId = taskId;
+                }
+                // 취소는 중지와 마찬가지로 **비밀 실패가 아니다.** 감싸 버리면
+                // 상세가 가려지고 "민감 디버그로 다시 실행" 제안까지 뜬다 —
+                // 사용자는 그냥 다이얼로그를 닫았을 뿐인데.
+                const e = taskUsesSecret && !(raw instanceof ActionStoppedError) && !(raw instanceof PromptCancelledError)
                     ? new SensitiveTaskError(taskId, describeSensitiveFailure(raw, maskedCommandForTask(taskId)))
                     : raw;
                 // 사용자 중지는 `continueOnError` 보다 우선한다. 그 설정의 뜻은
@@ -4921,7 +5081,14 @@ function recordManualStopInHistory(provider: HistoryProvider | undefined, id: st
     const timestamp = actionStartTimestamps.get(id);
     if (!provider || !timestamp) { return; }
     const durationMs = Math.max(0, Date.now() - timestamp);
-    provider.updateHistoryStatus(id, timestamp, 'cancelled', 'Action stopped by user', durationMs);
+    // History 의 이유 문구는 우클릭 → View Output 으로 **사용자에게 보인다**.
+    // 프롬프트 취소 쪽을 지역화하면서 이쪽만 영어로 남으면, 같은 회색 아이콘
+    // 아래 한국어와 영어가 섞인다.
+    provider.updateHistoryStatus(
+        id, timestamp, 'cancelled',
+        t('사용자가 실행을 중지했습니다.', 'Action stopped by the user.'),
+        durationMs, 'stopped'
+    );
 }
 
 function isCurrentActionRun(run: ActionRunContext): boolean {
@@ -5108,7 +5275,12 @@ export async function executeAction(
     } catch (error: any) {
         const ownsCurrentState = isCurrentActionRun(run);
         const manuallyStopped = ownsCurrentState && manuallyTerminatedActions.has(id);
-        if (!manuallyStopped) {
+        // 대화형 프롬프트를 사용자가 닫아서 끝난 실행은 **실패가 아니다.**
+        // Stop 버튼과 같은 부류이므로 같은 마감을 쓴다 — `PromptCancelledError`
+        // 주석 참조. (태스크 수준에서는 여전히 실패라 `continueOnError` 는
+        // 그대로 동작한다. 여기까지 올라왔다는 것은 그 설정이 없었다는 뜻이다.)
+        const promptCancelled = !manuallyStopped && isOnlyPromptCancellation(error);
+        if (!manuallyStopped && !promptCancelled) {
             // 민감 디버그 실행이었다면 결과 종류와 무관하게 보고서를 한 번
             // 보여 준다. timeout/spawn 실패처럼 출력이 없어도 이유가 표시된다.
             if (run.sensitiveDebug) {
@@ -5146,11 +5318,64 @@ export async function executeAction(
             }
 
             throw error;
+        } else if (promptCancelled) {
+            // 사용자가 프롬프트를 닫았다. 오류 토스트를 띄우지 않고 History 에
+            // `cancelled` 로 남긴다.
+            //
+            // 진행 상황은 상태를 지우기 **전에** 붙잡아 둔다 — 아래에서 "이미
+            // 몇 개가 실행됐는가" 로 안내 여부를 가르는 근거다.
+            const progressSnapshot = actionStates.get(id)?.progress;
+            if (ownsCurrentState) {
+                // `finalizeActionRun` 은 `manuallyTerminatedActions` 에 있는
+                // 액션만 상태를 지운다. 이쪽은 그 집합에 넣지 않으므로(중지가
+                // 아니라 프로세스를 죽일 것도 없다) 여기서 직접 지운다 —
+                // 안 지우면 상태가 `running` 인 채로 남아 트리에 스피너가
+                // 영원히 돈다.
+                actionStates.delete(id);
+            }
+            const reason = error instanceof Error ? error.message : String(error);
+            // **흔적은 남긴다.** 예전에는 이 오류가 위로 던져져 명령 래퍼가
+            // `[ERROR] Execution failed for action …` 을 출력 채널에 적었다.
+            // 이제 던지지 않으므로 그 줄도 사라졌는데, 그러면 "왜 배포가
+            // 중간에 멈췄지?" 를 확인할 곳이 History 우클릭밖에 없다.
+            const cancelledTaskIds = promptCancellationTaskIds(error);
+            const atPart = cancelledTaskIds.length > 0 ? ` at task '${cancelledTaskIds.join("', '")}'` : '';
+            outputChannel.appendLine(`[INFO] Action '${actionItem.title}' was canceled${atPart}: ${reason}`);
+            // 아직 아무 태스크도 끝나지 않았다면 조용히 끝내는 것이 맞다 —
+            // 사용자가 방금 닫은 다이얼로그가 그 액션의 전부였다. 하지만
+            // **이미 실행된 태스크가 있으면** 부작용(파일 생성·빌드·업로드)이
+            // 남은 채 나머지가 실행되지 않은 것이므로, 그 사실은 알려야 한다.
+            // 오류가 아니므로 오류 토스트는 쓰지 않는다.
+            //
+            // 진행도 카운터를 **그대로 쓰면 안 된다.** 그것은 종료 전이마다
+            // 올라가므로 방금 취소된 프롬프트까지 "실행됨"으로 세고, 그러면
+            // 프롬프트 하나뿐인 액션에서도 안내가 뜬다 —
+            // `countPromptCancellations` 주석 참조.
+            const ranBefore = Math.max(0, (progressSnapshot?.completed ?? 0) - countPromptCancellations(error));
+            if (ownsCurrentState && showTaskStatus && ranBefore > 0) {
+                // 전체 개수만 함께 보여 준다. "실행됨 N개 + 남은 M개 = 전체"
+                // 형태로 쓰면 취소된 프롬프트가 어느 쪽에도 없어 합이 맞지 않는다.
+                const total = progressSnapshot?.total ?? 0;
+                vscode.window.showInformationMessage(t(
+                    `'${actionItem.title}' 실행을 취소했습니다. 전체 ${total}개 중 이미 실행된 ${ranBefore}개의 결과는 되돌리지 않습니다.`,
+                    `Cancelled '${actionItem.title}'. ${ranBefore} of ${total} tasks had already run; their effects are not undone.`
+                ));
+            }
+            if (historyProvider) {
+                const durationMs = Math.max(0, Date.now() - timestamp);
+                historyProvider.updateHistoryStatus(id, timestamp, 'cancelled', reason, durationMs, 'prompt');
+                historyProvider.setHistoryInputs(id, timestamp, recordInputs);
+                historyProvider.setHistoryCommands(id, timestamp, recordCommands);
+            }
         } else {
             // Action was manually stopped
             if (historyProvider) {
                 const durationMs = Math.max(0, Date.now() - timestamp);
-                historyProvider.updateHistoryStatus(id, timestamp, 'cancelled', 'Action stopped by user', durationMs);
+                historyProvider.updateHistoryStatus(
+                    id, timestamp, 'cancelled',
+                    t('사용자가 실행을 중지했습니다.', 'Action stopped by the user.'),
+                    durationMs, 'stopped'
+                );
                 historyProvider.setHistoryInputs(id, timestamp, recordInputs);
                 historyProvider.setHistoryCommands(id, timestamp, recordCommands);
             }
@@ -5337,6 +5562,12 @@ async function executeSingleTask(
             }
             if (typeof task.destination === 'string') {
                 interpolatedUnzipTask.destination = interpolatePipelineVariables(task.destination, interpolationContext);
+            }
+            // `cwd` 는 여기서 빠져 있었다 — `handleUnzip` 이 그것을 아예 쓰지
+            // 않았기 때문이다. 이제 `zip` 과 마찬가지로 상대 경로의 기준이자
+            // 외부 tool 의 작업 디렉터리로 쓰므로 보간해서 넘긴다.
+            if (typeof task.cwd === 'string') {
+                interpolatedUnzipTask.cwd = interpolatePipelineVariables(task.cwd, interpolationContext);
             }
             if (task.env && typeof task.env === 'object') {
                 const interpolatedEnv: Record<string, string> = {};
@@ -6155,13 +6386,13 @@ export function parsePathInfo(fullPath: string): { path: string, dir: string, na
     return { path: fullPath, dir: path.dirname(fullPath), name: baseName, fileNameOnly: path.basename(baseName, extension), fileExt: extension.startsWith('.') ? extension.substring(1) : extension };
 }
 
-async function handleFileDialog(task: any): Promise<FileDialogResult> {
+export async function handleFileDialog(task: any): Promise<FileDialogResult> {
     // `defaultUri`는 액션 JSON에서 문자열로 오므로 Uri로 승격한다 — 그대로
     // 넘기면 VS Code가 무시해 다이얼로그가 엉뚱한 위치에서 열린다. 명시하지
     // 않았다면 이 태스크가 마지막으로 고른 폴더에서 연다.
     const options: vscode.OpenDialogOptions = { ...(task.options || {}), defaultUri: coerceDefaultUri(task.options?.defaultUri) };
     const fileUri = await showOpenDialogWithMemory(taskDialogScope('file', task), options);
-    if (!fileUri || !fileUri[0]) { throw new Error('File selection was canceled.'); }
+    if (!fileUri || !fileUri[0]) { throw new PromptCancelledError(t('파일 선택을 취소했습니다.', 'File selection was canceled.')); }
     // `options.canSelectMany` 는 예전부터 VS Code 로 그대로 전달됐지만, 결과는
     // 첫 파일만 쓰고 **나머지를 조용히 버렸다** — 사용자는 여러 개를 골랐는데
     // 하나만 처리되는 상태였다. 이제 전부 돌려준다. `path` 등 단일 필드는
@@ -6174,12 +6405,12 @@ async function handleFileDialog(task: any): Promise<FileDialogResult> {
     };
 }
 
-async function handleFolderDialog(task: any): Promise<{ path: string, dir: string, name: string, fileNameOnly: string, fileExt: string }> {
+export async function handleFolderDialog(task: any): Promise<{ path: string, dir: string, name: string, fileNameOnly: string, fileExt: string }> {
     const options: vscode.OpenDialogOptions = { ...(task.options || {}), defaultUri: coerceDefaultUri(task.options?.defaultUri) };
     options.canSelectFiles = false; options.canSelectFolders = true;
     const folderUri = await showOpenDialogWithMemory(taskDialogScope('folder', task), options);
     if (folderUri && folderUri[0]) { return parsePathInfo(folderUri[0].fsPath); }
-    else { throw new Error('Folder selection was canceled.'); }
+    else { throw new PromptCancelledError(t('폴더 선택을 취소했습니다.', 'Folder selection was canceled.')); }
 }
 
 async function handleInputBox(task: any, token?: vscode.CancellationToken): Promise<{ value: string }> {
@@ -6242,7 +6473,7 @@ async function handleInputBox(task: any, token?: vscode.CancellationToken): Prom
         const finalValue = prefix + userInput + suffix;
         return { value: finalValue };
     } else {
-        throw new Error('Input was canceled.');
+        throw new PromptCancelledError(t('입력을 취소했습니다.', 'Input was canceled.'));
     }
 }
 
@@ -6260,7 +6491,7 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
         // 실행하면 안 된다 — 사용자가 취소한 임의 명령이 부수 효과를 남길 수 있다.
         // (예전에는 spawn 뒤에 확인해, 죽이기 전까지 명령이 돌았다.)
         if (token?.isCancellationRequested) {
-            reject(new Error('Quick pick selection was canceled.'));
+            reject(new PromptCancelledError(t('목록에서 선택하기를 취소했습니다.', 'Quick pick selection was canceled.')));
             return;
         }
 
@@ -6324,7 +6555,7 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
         // 이게 없으면 중지를 눌러도 프로세스가 timeout(기본 15초)까지 돌며
         // 그동안 중지가 무반응으로 보인다.
         const cancelSub = token?.onCancellationRequested(() => {
-            abortWith(new Error('Quick pick selection was canceled.'));
+            abortWith(new PromptCancelledError(t('목록에서 선택하기를 취소했습니다.', 'Quick pick selection was canceled.')));
         });
 
         // Cap stdout+stderr *combined*: a failing command can spew unbounded
@@ -6445,14 +6676,14 @@ async function handleQuickPick(task: any, defaultWorkspace?: string, token?: vsc
             const labels = selected.map(item => item.label);
             return { value: labels[0], values: labels.join(',') };
         } else {
-            throw new Error('Quick pick selection was canceled.');
+            throw new PromptCancelledError(t('목록에서 선택하기를 취소했습니다.', 'Quick pick selection was canceled.'));
         }
     } else {
         const selected = await vscode.window.showQuickPick(items, options, token);
         if (selected) {
             return { value: selected.label };
         } else {
-            throw new Error('Quick pick selection was canceled.');
+            throw new PromptCancelledError(t('목록에서 선택하기를 취소했습니다.', 'Quick pick selection was canceled.'));
         }
     }
 }
@@ -6593,11 +6824,11 @@ async function handleEnvPick(task: any, token?: vscode.CancellationToken): Promi
         new Promise<null>((_, rejectRace) => {
             if (!token) { return; }
             if (token.isCancellationRequested) {
-                rejectRace(new Error('Environment variable selection was canceled.'));
+                rejectRace(new PromptCancelledError(t('환경 변수 선택을 취소했습니다.', 'Environment variable selection was canceled.')));
                 return;
             }
             token.onCancellationRequested(() =>
-                rejectRace(new Error('Environment variable selection was canceled.')));
+                rejectRace(new PromptCancelledError(t('환경 변수 선택을 취소했습니다.', 'Environment variable selection was canceled.'))));
         })
     ]);
 
@@ -6631,7 +6862,7 @@ async function handleEnvPick(task: any, token?: vscode.CancellationToken): Promi
     }, token);
 
     if (!selected) {
-        throw new Error('Environment variable selection was canceled.');
+        throw new PromptCancelledError(t('환경 변수 선택을 취소했습니다.', 'Environment variable selection was canceled.'));
     }
 
     return { value: selected.label };
@@ -6733,6 +6964,11 @@ async function handleUnzip(
         outputDir = path.dirname(archivePath);
     }
 
+    // `zip` 과 같은 기준점. 예전에는 `handleUnzip` 이 `cwd` 를 아예 무시해,
+    // 같은 설정이 zip 에서는 듣고 unzip 에서는 안 듣는 비대칭이 있었다.
+    const archiveBase = (typeof task.cwd === 'string' && task.cwd.length > 0 ? task.cwd : undefined)
+        || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
     // When `tool` is omitted, use the bundled zip engine. Only .zip archives
     // are supported by the built-in path; anything else requires an explicit
     // tool (e.g. 7z) since adm-zip cannot read those formats.
@@ -6740,12 +6976,21 @@ async function handleUnzip(
         if (path.extname(archivePath).toLowerCase() !== '.zip') {
             throw new Error(`Built-in engine only supports .zip archives. For '${path.basename(archivePath)}', specify a 'tool' (e.g. 7z).`);
         }
+        // 상대 경로는 `cwd` → 워크스페이스 기준이다. 내장 엔진은 cwd 개념이
+        // 없어 `path.resolve` 가 extension host 의 `process.cwd()` 를 쓰는데,
+        // 그건 VS Code 를 띄운 위치일 뿐이다 — 외부 tool 경로(자식 프로세스의
+        // cwd 가 기준)와 결과가 갈렸다. `resolveArchiveTaskPath` 주석 참조.
+        const resolvedArchive = resolveArchiveTaskPath(archivePath, archiveBase);
+        const resolvedOutputDir = resolveArchiveTaskPath(outputDir, archiveBase);
         // 내장 엔진은 우리 코드라 취소를 실제로 받을 수 있다. 외부 tool
         // 경로는 `executeShellCommand` 가 자식 프로세스를 종료해 처리한다.
         const abort = abortSignalForAction(run, task.id);
         try {
-            await extractZipArchive(archivePath, outputDir, { signal: abort.signal });
-            return { outputDir: outputDir };
+            await extractZipArchive(resolvedArchive, resolvedOutputDir, { signal: abort.signal });
+            // 다음 태스크가 `${unzip.outputDir}` 로 참조하는 값이므로 해석된
+            // 절대 경로를 돌려준다 — 상대 경로를 그대로 넘기면 그 태스크가
+            // 또 자기 기준으로 풀어 서로 다른 곳을 가리킨다.
+            return { outputDir: resolvedOutputDir };
         } catch (error: any) {
             // 중지로 끝난 것을 "실패"로 포장하면 사용자가 누른 Stop 이
             // 오류처럼 보이고, 파이프라인의 중지 처리도 타지 않는다.
@@ -6762,7 +7007,7 @@ async function handleUnzip(
         await executeShellCommand(
             toolCommand,
             args,
-            undefined,
+            typeof task.cwd === 'string' && task.cwd.length > 0 ? task.cwd : undefined,
             task.env,
             workspaceFolderPath,
             run.id,
@@ -6773,7 +7018,11 @@ async function handleUnzip(
             run.generation,
             redactOutput ? sensitiveDebugOutputObserver(run, task.id) : undefined
         );
-        return { outputDir: outputDir };
+        // 자식 프로세스는 자기 cwd 로 상대 경로를 풀지만, 우리가
+        // `${unzip.outputDir}` 로 넘겨주는 값이 상대 경로로 남으면 그것을 받은
+        // **다음 태스크**가 자기 기준으로 다시 푼다. 내장 엔진과 같은 절대
+        // 경로를 돌려줘 `tool` 유무로 downstream 이 갈리지 않게 한다.
+        return { outputDir: resolveArchiveTaskPath(outputDir, archiveBase) };
     } catch (error: any) {
         throw new Error(`Failed to unzip file: ${error.message}`);
     }
@@ -6802,19 +7051,29 @@ async function handleZip(
         throw new Error(`Zip task '${task.id}' has no 'source' files or directories specified.`);
     }
 
+    // 외부 tool 경로가 자식 프로세스의 cwd 로 쓰는 값과 **같은 기준점**이다
+    // (스키마: `cwd` 는 "Defaults to ${workspaceFolder}"). 내장 엔진도 이걸
+    // 상대 경로의 기준으로 써야 `tool` 유무로 결과가 갈리지 않는다.
+    const interpolatedCwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined;
+    const archiveBase = interpolatedCwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
     // When `tool` is omitted, use the bundled zip engine. Only .zip output is
     // supported; other formats still require an external tool.
     if (task.tool === undefined || task.tool === null) {
         if (path.extname(archive).toLowerCase() !== '.zip') {
             throw new Error(`Built-in engine only supports .zip archives. For '${path.basename(archive)}', specify a 'tool' (e.g. 7z).`);
         }
+        // `resolveArchiveTaskPath` 주석 참조 — 내장 엔진의 `path.resolve` 는
+        // extension host 의 `process.cwd()` 를 기준으로 삼는다.
+        const resolvedArchive = resolveArchiveTaskPath(archive, archiveBase);
+        const resolvedSources = sourcePaths.map(source => resolveArchiveTaskPath(source, archiveBase));
         const abort = abortSignalForAction(run, task.id);
         try {
             // 소스 밖을 가리키는 심볼릭 링크는 아카이브에 담지 않는다. 조용히
             // 빼면 "왜 이 파일이 zip 에 없지?" 가 되므로 반드시 알린다.
             const skippedLinks: string[] = [];
             let skippedLinkCount = 0;
-            await createZipArchive(archive, sourcePaths, {
+            await createZipArchive(resolvedArchive, resolvedSources, {
                 signal: abort.signal,
                 onSkippedSymlink: ({ sourcePath, resolvedTarget }) => {
                     skippedLinkCount++;
@@ -6845,7 +7104,10 @@ async function handleZip(
                     ));
                 }
             }
-            return { archivePath: archive };
+            // 다음 태스크가 `${zip.archivePath}` 로 받는 값이므로 해석된 절대
+            // 경로를 돌려준다 — 상대 경로를 그대로 넘기면 그 태스크가 또 자기
+            // 기준으로 풀어 서로 다른 파일을 가리킨다.
+            return { archivePath: resolvedArchive };
         } catch (error: any) {
             if (isArchiveAbortError(error)) { throw new ActionStoppedError(); }
             throw new Error(`Failed to zip files for task '${task.id}': ${error.message}`);
@@ -6869,7 +7131,7 @@ async function handleZip(
         await executeShellCommand(
             toolCommand,
             args,
-            task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
+            interpolatedCwd,
             envOverrides,
             workspaceFolderPath,
             run.id,
@@ -6880,7 +7142,8 @@ async function handleZip(
             run.generation,
             redactOutput ? sensitiveDebugOutputObserver(run, task.id) : undefined
         );
-        return { archivePath: archive };
+        // 내장 엔진과 같은 절대 경로를 돌려준다 — 위 unzip 주석 참조.
+        return { archivePath: resolveArchiveTaskPath(archive, archiveBase) };
     } catch (error: any) {
         throw new Error(`Failed to zip files for task '${task.id}': ${error.message}`);
     }
@@ -6944,7 +7207,7 @@ export async function handleConfirm(task: any): Promise<{ confirmed: string }> {
     if (selected === confirmLabel) {
         return { confirmed: 'true' };
     }
-    throw new Error('Action was canceled by user.');
+    throw new PromptCancelledError(t('사용자가 확인을 취소했습니다.', 'Confirmation was canceled by the user.'));
 }
 
 export interface TaskHubExportData {

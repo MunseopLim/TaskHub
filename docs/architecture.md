@@ -290,8 +290,10 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   `sanitizeInterpolatedValue(value)`에서 null 바이트(`\0`)를 거부하고 32KB 길이 상한을 강제한다.
     *   object/array 값은 치환 대신 placeholder를 그대로 유지한다 (`${id.prop}` 원형).
 2.  **파일 경로 검증(`resolveWithinWorkspace`)**
-    *   Task output mode가 `file`일 때, 치환 결과를 `path.resolve` → `path.relative(root, resolved)` 순으로 검사해 워크스페이스 루트 외부 쓰기를 거부한다.
+    *   Task output mode가 `file`일 때, 그리고 `writeFile` / `appendFile`의 `path`와 즐겨찾기 항목 경로에 대해, 치환 결과를 `path.resolve` → `path.relative(root, resolved)` 순으로 검사해 워크스페이스 루트 외부 쓰기를 거부한다.
     *   상대 경로(`"report.txt"`, `"build/out.log"` 등)는 `process.cwd()`가 아니라 실행 중인 액션의 워크스페이스 폴더(`defaultWorkspace`) 기준으로 resolve한다. 이를 위해 `resolveWithinWorkspace(targetPath, roots, baseDir)` 시그니처의 3번째 인자로 액션 워크스페이스를 전달한다.
+    *   **`zip` / `unzip`은 이 격리에서 의도적으로 제외된다.** 두 태스크는 `fileDialog` / `folderDialog`로 사용자가 **런타임에 고른** 위치를 그대로 다루는 것이 설계이고(번들 예제 `media/actions_example.json`의 zip 액션이 고른 폴더를 그 자리에서 압축한다), 워크스페이스로 묶으면 그 흐름 자체가 성립하지 않는다. 대신 다른 층으로 방어한다 — 추출은 zip-slip·심볼릭/하드 링크·크기/개수 상한(`archiveUtils.ts`)으로, 생성은 소스 루트 밖을 가리키는 링크 제외로 막는다.
+    *   다만 **상대 경로의 기준점은 두 엔진이 같아야 한다.** 내장 엔진은 cwd 개념이 없어 `path.resolve`가 extension host의 `process.cwd()`(= VS Code를 띄운 위치)를 쓰는 반면 외부 `tool` 경로는 자식 프로세스의 cwd를 쓰므로, 같은 태스크가 `tool` 유무로 다른 위치에 파일을 만들었다. `resolveBuiltinArchivePath(targetPath, baseDir)`가 내장 엔진 호출 직전에 `task.cwd` → 워크스페이스 순으로 기준점을 맞춘다(격리는 하지 않는다). 반환하는 `${zip.archivePath}` / `${unzip.outputDir}`도 해석된 절대 경로다.
 3.  **쉘 인자 이스케이프 / 실행 경로 선택**
     *   POSIX: `buildPosixCommandLine`이 `quotePosixArgument`로 각 인자를 싱글쿼트로 감싸고(내부 싱글쿼트는 `'\''`) `sh -c`로 실행.
     *   Windows — **실행 경로 판별**: `windowsCommandIsDirectlyLaunchable(command, args, { env })`가 실행 파일이 셸 없이 OS 프로세스 로더로 바로 띄울 수 있는지 판단한다 — 명시적 `.exe`/`.com` 확장자거나, 확장자 없는 이름이면 `PATH`(+ `.exe`/`.com`)로 해석해 찾으면 true. `.cmd`/`.bat`/`.ps1`/`.js` 같은 스크립트·shim(`npm`/`npx`/`pnpm`/`yarn` 등, 실제로는 `*.cmd`), 셸 빌트인/별칭(`echo`, `dir`, `cd`, …)은 false. PATH 해석은 호출자가 넘긴 **task의 실제 실행 env**(`{ ...process.env, ...envOverrides }` — `executeShellCommand`의 `childEnv`, `createShellExecution`의 `options.env` 병합, `prepareTaskExecution`의 one-shot env)를 기준으로 하므로 `task.env.PATH`로 추가한 toolchain bin도 반영된다.

@@ -448,6 +448,99 @@ suite('Doctor', () => {
             `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
     });
 
+    // 0.6.51 의 다중 선택 `args` 확장. Doctor 가 `args` 를 단순 보간으로만
+    // 검사하던 동안, 문서(`docs/features.md` §fileDialog 다중 선택)가 정답으로
+    // 제시한 형태가 그대로 경고를 받았고 문구는 "런타임에서는 리터럴로
+    // 전달됩니다"라며 사실과 반대를 말했다 — 같은 액션의 Preview Run 은
+    // "모두 해석됨"이라 두 진단이 정면으로 어긋났다.
+    const multiSelectAction = (args: string[]) => ({
+        id: 'a.multi',
+        title: 'multi',
+        action: {
+            description: 'd',
+            tasks: [
+                { id: 'pick', type: 'fileDialog', options: { canSelectMany: true } },
+                { id: 'run', type: 'command', command: 'py', args }
+            ]
+        }
+    });
+    const unresolvedCount = (findings: DoctorFinding[]) =>
+        findings.filter(f => f.code === 'variable.unresolved').length;
+
+    test('does not flag an exact array reference in `args` (runtime expands it)', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([multiSelectAction(['-3', 'report.py', '${pick.paths}', '--out', 'o.html'])])], v);
+        assert.strictEqual(unresolvedCount(findings), 0,
+            `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
+    });
+
+    test('does not flag an exact reference to the `names` array in `args`', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([multiSelectAction(['${pick.names}'])])], v);
+        assert.strictEqual(unresolvedCount(findings), 0,
+            `expected no unresolved finding, got ${codes(findings).join(',')}`);
+    });
+
+    test('does not flag `paths` on a SINGLE-select fileDialog', () => {
+        // `handleFileDialog` 은 `paths`/`names`/`count` 를 `canSelectMany` 와
+        // 무관하게 **항상** 돌려준다(단일 선택이면 원소 하나). 시뮬레이션이
+        // 다중 선택일 때만 채우면, 런타임은 멀쩡히 해석하는데 진단은
+        // "리터럴로 전달됩니다" 라고 말하는 같은 종류의 거짓말이 남는다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.single',
+                title: 'single',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'pick', type: 'fileDialog' },
+                        { id: 'run', type: 'command', command: 'py', args: ['${pick.paths}', '${pick.count}'] }
+                    ]
+                }
+            }
+        ])], v);
+        assert.strictEqual(unresolvedCount(findings), 0,
+            `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
+    });
+
+    test('still flags an array reference with a literal prefix in `args`', () => {
+        // 런타임도 이 형태는 펼치지 않는다 — 리터럴 `${…}` 가 그대로 자식
+        // 프로세스로 간다. 경고가 사라지면 안 된다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([multiSelectAction(['--file=${pick.paths}'])])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved' && f.message.includes('${pick.paths}')),
+            `expected variable.unresolved for the prefixed form, got ${codes(findings).join(',')}`);
+    });
+
+    test('still flags a typo against a multi-select task in `args`', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([multiSelectAction(['${pick.nosuchkey}'])])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `expected variable.unresolved for the typo, got ${codes(findings).join(',')}`);
+    });
+
+    test('still flags an array reference inside the command string', () => {
+        // `command` 는 토큰마다 보간하므로 배열 값이 리터럴로 남는다. `args` 를
+        // 쓰라고 알려 줘야 하는 자리이므로 경고가 유지돼야 한다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.multi-cmd',
+                title: 'multi-cmd',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'pick', type: 'fileDialog', options: { canSelectMany: true } },
+                        { id: 'run', type: 'command', command: 'py r.py ${pick.paths}' }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved' && f.message.includes('${pick.paths}')),
+            `expected variable.unresolved for the command-string form, got ${codes(findings).join(',')}`);
+    });
+
     test('does not flag a fully-resolved upstream reference', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([

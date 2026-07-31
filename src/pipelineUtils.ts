@@ -234,6 +234,41 @@ export function resolveWithinWorkspace(
 }
 
 /**
+ * 액션이 지정한 경로를 절대 경로로 만든다. **워크스페이스 격리는 하지 않는다.**
+ *
+ * `zip` / `unzip` 전용이다. 그쪽 경로는 다이얼로그로 고른
+ * 위치를 그대로 쓰는 것이 설계이므로(`media/actions_example.json` 의 zip 예제가
+ * `folderDialog` 로 고른 폴더를 그 자리에서 압축한다) 워크스페이스 밖을 막을 수
+ * 없다. 막아야 하는 것은 격리가 아니라 **상대 경로의 기준점**이었다.
+ *
+ * 내장 엔진(`createZipArchive` / `extractZipArchive`)은 `path.resolve` 를 그대로 쓰는데,
+ * 그 기준은 **extension host 의 `process.cwd()`** 다 — 워크스페이스도 태스크의
+ * `cwd` 도 아니고, VS Code 를 어떻게 띄웠는지에 따라 달라지는 값이다. 실측:
+ * `"archive": "build.zip"` 이 워크스페이스가 아니라 VS Code 를 실행한 디렉터리에
+ * 생겼다. 외부 tool 경로는 자식 프로세스의 cwd 가 기준이라 이 문제가 없었으므로,
+ * **같은 태스크가 `tool` 하나로 다른 위치에 파일을 만들고 있었다.**
+ *
+ * 기준점은 외부 tool 경로와 똑같이 `task.cwd` → 워크스페이스 순이다
+ * (스키마의 `cwd` 설명: *"Defaults to ${workspaceFolder}"*). 두 엔진이 같은
+ * 규칙을 쓰게 되어 `tool` 유무로 결과가 갈리지 않는다.
+ *
+ * 외부 tool 경로에서도 **반환값**에는 이것을 적용한다. 그쪽은 자식 프로세스가
+ * 알아서 자기 cwd 로 풀지만, 우리가 `${zip.archivePath}` 로 넘겨주는 값이
+ * 상대 경로로 남으면 그것을 받은 **다음 태스크**가 자기 기준으로 다시 풀어
+ * 서로 다른 파일을 가리킨다 (실측: `tool` 을 쓴 zip 뒤의 unzip 이
+ * `Archive not found` 로 실패했고, `tool` 만 지우면 성공했다).
+ *
+ * `baseDir` 이 비어 있으면(워크스페이스 없이 열린 창) 기준으로 삼을 것이
+ * 없으므로 기존 동작인 `path.resolve` 를 유지한다.
+ */
+export function resolveArchiveTaskPath(targetPath: string, baseDir: string | undefined): string {
+    if (typeof targetPath !== 'string' || targetPath.length === 0) { return targetPath; }
+    if (path.isAbsolute(targetPath)) { return path.resolve(targetPath); }
+    if (baseDir && baseDir.length > 0) { return path.resolve(baseDir, targetPath); }
+    return path.resolve(targetPath);
+}
+
+/**
  * `resolveWithinWorkspace`의 수용 여부 판정만 떼어낸 dry-run 술어. Preview와
  * Doctor가 런타임과 동일한 규칙(null byte·빈 경로 거부, realpath 정규화,
  * Windows 예약 디바이스명)으로 검사하도록 공유한다 — 규칙이 하나라도 빠지면

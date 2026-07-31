@@ -1152,6 +1152,119 @@ try {
             assert.deepStrictEqual(extracted.sources, [srcA, srcB]);
         });
 
+        test('IT-144: 외부 tool 경로도 해석된 절대 경로를 downstream 에 넘긴다', async () => {
+            // 자식 프로세스는 자기 cwd 로 상대 경로를 풀지만, 우리가
+            // `${pack.archivePath}` 로 넘겨주는 값이 상대 경로로 남으면 그것을
+            // 받은 다음 태스크가 자기 기준으로 다시 푼다 — `tool` 만 지우면
+            // 통과하고 붙이면 `Archive not found` 로 실패하는 상태였다.
+            const launcher = writeFake7zLauncher(tempWorkspace);
+            const base = path.join(tempWorkspace, 'build');
+            fs.mkdirSync(base, { recursive: true });
+            const srcA = path.join(tempWorkspace, 'a.txt');
+            fs.writeFileSync(srcA, 'alpha');
+
+            const action: PipelineAction = {
+                description: 'IT-144',
+                tasks: [
+                    { id: 'pack', type: 'zip', tool: launcher, cwd: base, archive: 'bundle.fake7z', source: [srcA] },
+                    { id: 'unpack', type: 'unzip', tool: launcher, archive: '${pack.archivePath}', destination: path.join(tempWorkspace, 'extracted') },
+                ]
+            };
+
+            await run(action);
+
+            assert.ok(
+                fs.existsSync(path.join(base, 'bundle.fake7z')),
+                'tool 이 cwd 기준으로 아카이브를 만들지 않았다'
+            );
+            assert.ok(
+                fs.existsSync(path.join(tempWorkspace, 'extracted', 'manifest.json')),
+                'archivePath 가 상대 경로로 새어 나가 downstream 이 다른 파일을 가리켰다'
+            );
+        });
+
+        test('IT-142: 내장 엔진의 상대 archive 경로가 워크스페이스 기준으로 풀린다', async () => {
+            // 0.6.52 이전에는 `path.resolve` 가 extension host 의 `process.cwd()`
+            // (= VS Code 를 띄운 위치)를 기준으로 삼아, 아카이브가 워크스페이스가
+            // 아니라 엉뚱한 곳에 생겼다. 외부 tool 경로는 자식 프로세스의 cwd 를
+            // 쓰므로 **같은 태스크가 `tool` 하나로 다른 위치에 파일을 만들었다.**
+            const srcDir = path.join(tempWorkspace, 'src');
+            fs.mkdirSync(srcDir, { recursive: true });
+            fs.writeFileSync(path.join(srcDir, 'a.txt'), 'alpha');
+
+            const action: PipelineAction = {
+                description: 'IT-142',
+                tasks: [
+                    { id: 'pack', type: 'zip', archive: 'out/bundle.zip', source: [srcDir] },
+                    // 앞 태스크가 돌려준 경로를 그대로 받는다 — 상대 경로가 새어
+                    // 나가면 여기서 자기 기준으로 다시 풀려 다른 파일을 가리킨다.
+                    { id: 'unpack', type: 'unzip', archive: '${pack.archivePath}', destination: 'out/extracted' },
+                ]
+            };
+
+            await run(action);
+
+            assert.ok(
+                fs.existsSync(path.join(tempWorkspace, 'out', 'bundle.zip')),
+                '상대 archive 경로가 워크스페이스 기준으로 풀리지 않았다'
+            );
+            assert.ok(
+                fs.existsSync(path.join(tempWorkspace, 'out', 'extracted', 'src', 'a.txt')),
+                '상대 destination 경로가 워크스페이스 기준으로 풀리지 않았거나 archivePath 가 상대 경로로 새어 나갔다'
+            );
+        });
+
+        test('IT-143: 내장 엔진이 task.cwd 를 상대 경로의 기준으로 쓴다', async () => {
+            // 스키마의 `cwd` 설명("Defaults to ${workspaceFolder}")과 맞춘다.
+            // `unzip` 은 0.6.52 이전에 `cwd` 를 아예 무시해, 같은 설정이 zip 에서만
+            // 듣는 비대칭이 있었다.
+            const base = path.join(tempWorkspace, 'build');
+            const srcDir = path.join(base, 'src');
+            fs.mkdirSync(srcDir, { recursive: true });
+            fs.writeFileSync(path.join(srcDir, 'a.txt'), 'alpha');
+
+            const action: PipelineAction = {
+                description: 'IT-143',
+                tasks: [
+                    { id: 'pack', type: 'zip', cwd: base, archive: 'bundle.zip', source: ['src'] },
+                    { id: 'unpack', type: 'unzip', cwd: base, archive: 'bundle.zip', destination: 'extracted' },
+                ]
+            };
+
+            await run(action);
+
+            assert.ok(fs.existsSync(path.join(base, 'bundle.zip')), 'zip 이 cwd 를 기준으로 쓰지 않았다');
+            assert.ok(
+                fs.existsSync(path.join(base, 'extracted', 'src', 'a.txt')),
+                'unzip 이 cwd 를 무시했다 — zip 과 비대칭이면 같은 설정이 한쪽에서만 듣는다'
+            );
+        });
+
+        test('IT-146: 외부 tool unzip 도 task.cwd 를 쓴다', async () => {
+            // `unzip` 은 0.6.52 이전에 `cwd` 를 아예 무시했다. 내장 엔진만
+            // 고치면 같은 설정이 `tool` 유무로 다르게 듣는 비대칭이 남는다.
+            const launcher = writeFake7zLauncher(tempWorkspace);
+            const base = path.join(tempWorkspace, 'build');
+            fs.mkdirSync(base, { recursive: true });
+            const srcA = path.join(tempWorkspace, 'a.txt');
+            fs.writeFileSync(srcA, 'alpha');
+
+            const action: PipelineAction = {
+                description: 'IT-146',
+                tasks: [
+                    { id: 'pack', type: 'zip', tool: launcher, cwd: base, archive: 'bundle.fake7z', source: [srcA] },
+                    { id: 'unpack', type: 'unzip', tool: launcher, cwd: base, archive: 'bundle.fake7z', destination: 'extracted' },
+                ]
+            };
+
+            await run(action);
+
+            assert.ok(
+                fs.existsSync(path.join(base, 'extracted', 'manifest.json')),
+                '외부 tool unzip 이 cwd 를 무시했다 — 상대 archive/destination 이 워크스페이스 루트로 풀렸다'
+            );
+        });
+
         test('IT-025: 빌트인 엔진은 .zip이 아닌 아카이브를 거부', async () => {
             const action: PipelineAction = {
                 description: 'IT-025',

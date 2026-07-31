@@ -63,20 +63,24 @@ export function simulateTaskResult(task: Task): SimulatedResult {
                 fileNameOnly: placeholder(task.type, task.id, 'fileNameOnly'),
                 fileExt: placeholder(task.type, task.id, 'fileExt'),
             };
-            // 다중 선택이면 `paths` 를 **배열로** 흉내 내야 `args` 확장이
-            // 미리보기에서도 실제와 같은 개수로 보인다. 몇 개를 고를지는 알 수
-            // 없으므로 두 개로 대표한다 — 하나면 확장이 일어나는지 드러나지 않고,
-            // 셋 이상은 리포트만 길어진다.
-            if (task.type === 'fileDialog' && (task as any).options?.canSelectMany === true) {
-                base.paths = [
-                    placeholder(task.type, task.id, 'paths[0]'),
-                    placeholder(task.type, task.id, 'paths[1]'),
-                ];
-                base.names = [
-                    placeholder(task.type, task.id, 'names[0]'),
-                    placeholder(task.type, task.id, 'names[1]'),
-                ];
-                base.count = 2;
+            // `paths` 를 **배열로** 흉내 내야 `args` 확장이 미리보기에서도
+            // 실제와 같은 개수로 보인다.
+            //
+            // **`canSelectMany` 와 무관하게 항상 채운다.** `handleFileDialog` 은
+            // 이 세 키를 조건 없이 돌려주는데(단일 선택이면 원소 하나), 시뮬레이션만
+            // 다중 선택일 때 채우면 단일 선택 `fileDialog` 에 `${pick.paths}` 를
+            // 쓴 액션이 Doctor 에서 `variable.unresolved` 로 잡힌다 — 런타임은
+            // 멀쩡히 해석하는데 진단은 "리터럴로 전달됩니다" 라고 말하는,
+            // 0.6.52 가 `args` 쪽에서 막 고친 것과 **똑같은 종류의 거짓말**이다.
+            //
+            // 다중 선택일 때만 원소를 둘로 둔다. 하나면 확장이 일어나는지
+            // 드러나지 않고, 셋 이상은 리포트만 길어진다.
+            if (task.type === 'fileDialog') {
+                const many = (task as any).options?.canSelectMany === true;
+                const count = many ? 2 : 1;
+                base.paths = Array.from({ length: count }, (_, i) => placeholder(task.type, task.id, `paths[${i}]`));
+                base.names = Array.from({ length: count }, (_, i) => placeholder(task.type, task.id, `names[${i}]`));
+                base.count = count;
             }
             return base;
         }
