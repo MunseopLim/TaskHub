@@ -480,6 +480,63 @@ suite('buildPreviewReport', () => {
     });
 
     suite('zip/unzip built-in engine preview', () => {
+        // 0.6.52: 아카이브 경로의 상대 기준점이 `task.cwd` → 워크스페이스로
+        // 바뀐 자리다. Preview 의 목적이 "어디에 떨어지는가" 를 보여 주는 것인데
+        // `writeFile` 만 `→ resolves to:` 를 달고 있었다.
+        test('상대 archive/destination 이 어디로 풀리는지 보여 준다', () => {
+            const item: ActionItem = {
+                id: 'a.zip.rel',
+                title: 'relative',
+                action: {
+                    description: 'relative paths',
+                    tasks: [{ id: 'pack', type: 'zip', archive: 'out/bundle.zip', source: ['src'] }]
+                }
+            } as unknown as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.ok(
+                report.includes(`→ resolves to: ${path.join(WS, 'out', 'bundle.zip')}`),
+                `상대 archive 의 해석 결과가 보이지 않는다:\n${report}`
+            );
+        });
+
+        test('task.cwd 가 있으면 그 기준으로 보여 준다', () => {
+            const item: ActionItem = {
+                id: 'a.zip.cwd',
+                title: 'cwd base',
+                action: {
+                    description: 'cwd base',
+                    tasks: [{ id: 'pack', type: 'zip', cwd: `${WS}/build`, archive: 'bundle.zip', source: ['src'] }]
+                }
+            } as unknown as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.ok(
+                report.includes(`→ resolves to: ${path.join(WS, 'build', 'bundle.zip')}`),
+                `cwd 기준 해석 결과가 보이지 않는다:\n${report}`
+            );
+        });
+
+        test('시뮬레이션 자리표시자에는 해석 결과를 붙이지 않는다', () => {
+            // 런타임에 `${pack.archivePath}` 자리에 오는 값은 **이미 해석된 절대
+            // 경로**라 기준점이 적용되지 않는다. 여기서 붙이면 미리보기가 실제와
+            // 다른 경로를 자신 있게 보여 준다.
+            const item: ActionItem = {
+                id: 'a.zip.ph',
+                title: 'placeholder',
+                action: {
+                    description: 'chained',
+                    tasks: [
+                        { id: 'pack', type: 'zip', archive: `${WS}/out.zip`, source: ['src'] },
+                        { id: 'unpack', type: 'unzip', archive: '${pack.archivePath}', destination: `${WS}/x` },
+                    ]
+                }
+            } as unknown as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.ok(
+                !/resolves to:.*<zip:pack:archivePath>/.test(report),
+                `자리표시자에 해석 결과를 붙였다:\n${report}`
+            );
+        });
+
         test('zip task without tool reports built-in engine', () => {
             const item: ActionItem = {
                 id: 'a.zip.builtin',

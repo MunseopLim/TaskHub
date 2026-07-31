@@ -6611,7 +6611,7 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
     });
 }
 
-async function handleQuickPick(task: any, defaultWorkspace?: string, token?: vscode.CancellationToken): Promise<{ value: string; values?: string }> {
+export async function handleQuickPick(task: any, defaultWorkspace?: string, token?: vscode.CancellationToken): Promise<{ value: string; values?: string }> {
     // When `itemsFromCommand` is set, build the pick list from the command's
     // stdout (one item per non-empty line). The command is already interpolated
     // and reduced to a single OS-specific string by the dispatcher.
@@ -6813,7 +6813,7 @@ function getShellAccessibleEnvNames(): Promise<Set<string> | null> {
     return cachedShellEnvNamesPromise;
 }
 
-async function handleEnvPick(task: any, token?: vscode.CancellationToken): Promise<{ value: string }> {
+export async function handleEnvPick(task: any, token?: vscode.CancellationToken): Promise<{ value: string }> {
     const allNames = Object.keys(process.env);
     // 셸 probe 는 최대 5초가 걸리는데 결과가 확장 호스트 수명 동안 캐시되므로
     // 죽이면 안 된다 — 다음 envPick 이 다시 5초를 문다. 대신 토큰과 race 해서

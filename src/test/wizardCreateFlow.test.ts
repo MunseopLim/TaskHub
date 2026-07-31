@@ -252,6 +252,93 @@ suite('마법사 생성 종단 흐름', () => {
         }
     });
 
+    test('IT-147: modal 취소는 되묻지 않고 한 번에 끝난다', async function () {
+        this.timeout(20000);
+        assert.ok(workspaceFolder, '워크스페이스 폴더가 필요하다');
+        // modal 의 Cancel/Escape 는 **명시적인 의사표시**다. 실수로 닫히는
+        // 알림과 같이 취급해 되물으면, 일부러 취소한 사용자가 두 번 닫아야 한다.
+        const script = scriptPrompts({
+            quickPick: [(items: any[]) => items[0]],
+            inputBox: ['Build Firmware', 'echo hi'],
+            information: [undefined],
+        });
+
+        try {
+            await vscode.commands.executeCommand('taskhub.createAction');
+
+            assert.strictEqual(
+                script.prompts.length, 1,
+                `modal 취소 뒤에 알림이 더 떴다: ${JSON.stringify(script.prompts)}`
+            );
+            assert.ok(!fs.existsSync(actionsPath!), '취소했는데 actions.json이 생성됐다');
+        } finally {
+            script.restore();
+        }
+    });
+
+    test('IT-148: 알림이 닫히면 초안을 살린 채 되묻고, 다시 검토는 알림 형태를 유지한다', async function () {
+        this.timeout(20000);
+        assert.ok(workspaceFolder, '워크스페이스 폴더가 필요하다');
+        // 비modal 알림은 X 나 Clear All Notifications 로 실수로 닫힌다. 그때
+        // 최대 10단계의 입력이 통째로 사라지면 안 된다.
+        //
+        // 재진입 시 **modal 로 돌아가서도 안 된다** — 검토 문서를 연 사실이
+        // 함수 지역 변수였을 때, 열려 있는 그 문서 위에 modal 이 다시 떴다.
+        const script = scriptPrompts({
+            quickPick: [(items: any[]) => items[0]],
+            inputBox: ['Build Firmware', 'echo hi'],
+            // 1) 확인 modal → 자세히 보기(2)
+            // 2) 확인 알림 → 닫힘(undefined)
+            // 3) 되묻는 알림 → 다시 검토(0)
+            // 4) 확인 → 저장(0)
+            // 5) 생성 후 안내 → actions.json 열기(0)
+            information: [2, undefined, 0, 0, 0],
+        });
+
+        try {
+            await vscode.commands.executeCommand('taskhub.createAction');
+
+            assert.strictEqual(script.prompts.length, 5, `프롬프트 순서가 다르다: ${JSON.stringify(script.prompts)}`);
+            assert.deepStrictEqual(
+                script.prompts[2]?.buttons.length, 2,
+                '되묻는 알림은 [다시 검토, 버리기] 두 개여야 한다 — 초안을 버리는 선택이 이름 없는 X 뿐이면 안 된다'
+            );
+            assert.strictEqual(
+                script.prompts[3]?.modal, false,
+                '다시 검토가 modal 로 돌아갔다 — 열려 있는 검토 문서를 가려 스크롤할 수 없게 된다'
+            );
+
+            const saved = readActions();
+            assert.strictEqual(
+                saved.filter(item => item.title === 'Build Firmware').length, 1,
+                `재진입이 액션을 중복 삽입했다: ${JSON.stringify(saved)}`
+            );
+        } finally {
+            script.restore();
+            await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        }
+    });
+
+    test('IT-149: 되묻는 알림에서 버리기를 고르면 저장하지 않는다', async function () {
+        this.timeout(20000);
+        assert.ok(workspaceFolder, '워크스페이스 폴더가 필요하다');
+        const script = scriptPrompts({
+            quickPick: [(items: any[]) => items[0]],
+            inputBox: ['Build Firmware', 'echo hi'],
+            information: [2, undefined, 1],   // 자세히 보기 → 알림 닫힘 → 버리기
+        });
+
+        try {
+            await vscode.commands.executeCommand('taskhub.createAction');
+
+            assert.ok(!fs.existsSync(actionsPath!), '버리기를 골랐는데 actions.json이 생성됐다');
+            assert.strictEqual(script.prompts.length, 3, `버리기 뒤에 더 물었다: ${JSON.stringify(script.prompts)}`);
+        } finally {
+            script.restore();
+            await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        }
+    });
+
     test('IT-121: 확인 단계를 취소하면 파일을 만들지 않는다', async function () {
         this.timeout(20000);
         assert.ok(workspaceFolder, '워크스페이스 폴더가 필요하다');

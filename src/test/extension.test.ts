@@ -8,6 +8,8 @@ import {
 	isOnlyPromptCancellation,
 	handleFileDialog,
 	handleFolderDialog,
+	handleQuickPick,
+	handleEnvPick,
 	PromptCancelledError,
 	ActionStoppedError,
 	parseTagInput,
@@ -362,6 +364,29 @@ suite('Extension Test Suite', () => {
 				await assertPromptCancelled(() => handleFolderDialog({ id: 'pick' }), 'folderDialog');
 			} finally {
 				(vscode.window as any).showOpenDialog = original;
+			}
+		});
+
+		test('quickPick 취소', async () => {
+			const original = vscode.window.showQuickPick;
+			(vscode.window as any).showQuickPick = async () => undefined;
+			try {
+				await assertPromptCancelled(
+					() => handleQuickPick({ id: 'pick', items: ['a', 'b'] }),
+					'quickPick'
+				);
+			} finally {
+				(vscode.window as any).showQuickPick = original;
+			}
+		});
+
+		test('envPick 취소', async () => {
+			const original = vscode.window.showQuickPick;
+			(vscode.window as any).showQuickPick = async () => undefined;
+			try {
+				await assertPromptCancelled(() => handleEnvPick({ id: 'pick' }), 'envPick');
+			} finally {
+				(vscode.window as any).showQuickPick = original;
 			}
 		});
 

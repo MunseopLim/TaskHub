@@ -17,6 +17,7 @@ import * as path from 'path';
 import type { Action, ActionItem, Task, OutputCapture } from './schema';
 import {
     interpolatePipelineVariables,
+    resolveArchiveTaskPath,
     interpolateCommandPreservingTokens,
     expandArgTemplate,
     buildNativeCommandInvocation,
@@ -569,8 +570,30 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 } else {
                     lines.push(`  tool: ${typeof tool === 'string' ? tool : JSON.stringify(tool)}`);
                 }
-                if (archive) { lines.push(`  archive:     ${archive}`); }
-                if (destination) { lines.push(`  destination: ${destination}`); }
+                // 상대 경로가 **어디에** 떨어지는지 보여 준다. Preview 의 목적이
+                // 그것인데, `writeFile` 만 `→ resolves to:` 를 달고 있었다 —
+                // 아카이브 경로는 0.6.52 에서 기준점이 `task.cwd` → 워크스페이스로
+                // 바뀐 자리라 더더욱 눈으로 확인할 수 있어야 한다. 여기는
+                // 워크스페이스 격리 대상이 아니므로(다이얼로그로 고른 위치를
+                // 다루는 것이 설계다) 격리 판정은 붙이지 않는다.
+                const cwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined;
+                const base = cwd || options.workspaceFolder || options.workspaceRoots[0] || '';
+                const showPath = (label: string, value: string) => {
+                    lines.push(`  ${label} ${value}`);
+                    // `UNRESOLVED_VAR_RE` 는 global 플래그라 `.test()` 가
+                    // `lastIndex` 를 들고 다닌다 — 같은 입력에 대해 호출마다
+                    // 다른 답을 낸다. 여기서는 매칭만 필요하므로 새 정규식을 쓴다.
+                    if (/\$\{[^}]+\}/.test(value)) { return; }   // 미해석 참조는 판단 불가
+                    // 시뮬레이션 자리표시자(`<zip:pack:archivePath>`)도 판단 불가다.
+                    // 런타임에 그 자리에 오는 값은 **이미 해석된 절대 경로**라
+                    // 기준점이 적용되지 않는데, 여기서 붙여 버리면 미리보기가
+                    // 실제와 다른 경로를 자신 있게 보여 준다.
+                    if (/<[A-Za-z]+:[^>]*>/.test(value)) { return; }
+                    const resolved = resolveArchiveTaskPath(value, base);
+                    if (resolved !== value) { lines.push(`    → resolves to: ${resolved}`); }
+                };
+                if (archive) { showPath('archive:    ', archive); }
+                if (destination) { showPath('destination:', destination); }
                 if (task.inputs) {
                     lines.push(`  inputs: ${JSON.stringify(task.inputs)}`);
                 }

@@ -6,6 +6,8 @@ import * as vscode from 'vscode';
 import { ActionItem } from '../schema';
 import {
     ActionStoppedError,
+    countPromptCancellations,
+    isOnlyPromptCancellation,
     MainViewProvider,
     executeAction,
     isActionCancelled,
@@ -1097,10 +1099,18 @@ suite('대화형 태스크 대기 중 중지', () => {
 
         test('IT-140: 취소와 진짜 실패가 섞이면 실패로 마감된다 (취소가 오류를 삼키지 않는다)', async function () {
             this.timeout(20000);
+            // **동시성 설정을 고정한다.** 이 시나리오는 두 태스크가 같은 스케줄
+            // 회차에 떠서 실패들이 AggregateError 로 묶이는 것을 전제로 한다.
+            // `taskhub.pipeline.maxParallelTasks` 가 1이면 `ask` 가 먼저 실패해
+            // 스케줄러가 abort 되고 `boom` 은 아예 뜨지 않는다 — 오류가 취소
+            // 하나뿐이 되어 판정이 `cancelled` 로 **조용히 뒤집힌다**. 기본값이
+            // 4라 지금은 통과하지만, 그것에 기대는 테스트는 언제든 뒤집힌다.
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const previous = config.get<number>('pipeline.maxParallelTasks');
+            await config.update('pipeline.maxParallelTasks', 4, vscode.ConfigurationTarget.Global);
             const restoreInput = stubCancelledInputBox();
             try {
                 const context = makeContext();
-                // 두 태스크를 병렬로 두면 실패들이 AggregateError 로 묶인다.
                 const actionItem: ActionItem = {
                     id: 'mixed-cancel',
                     title: 'Mixed',
@@ -1115,8 +1125,16 @@ suite('대화형 태스크 대기 중 중지', () => {
                 const history = new HistoryProvider(context);
                 const mainView = new MainViewProvider(context, () => [actionItem]);
 
-                await executeAction(actionItem, context, mainView, history).catch(() => { /* 실패가 이 테스트의 전제다 */ });
+                let raised: unknown;
+                await executeAction(actionItem, context, mainView, history)
+                    .catch((e: unknown) => { raised = e; });
 
+                // 전제부터 확인한다 — 여기서 걸리면 "판정이 틀렸다"가 아니라
+                // "시나리오가 성립하지 않았다"는 뜻이고, 그 둘은 원인이 다르다.
+                assert.ok(
+                    isOnlyPromptCancellation(raised) === false && countPromptCancellations(raised) === 1,
+                    `전제 불성립: 취소 1건 + 진짜 실패 1건이 함께 올라와야 한다 (동시 실행이 되지 않았을 수 있다). 실제: ${String(raised)}`
+                );
                 assert.strictEqual(
                     history.getHistory()[0]?.status,
                     'failure',
@@ -1124,6 +1142,7 @@ suite('대화형 태스크 대기 중 중지', () => {
                 );
             } finally {
                 restoreInput();
+                await config.update('pipeline.maxParallelTasks', previous, vscode.ConfigurationTarget.Global);
             }
         });
 
