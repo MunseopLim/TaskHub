@@ -13,12 +13,15 @@ import * as path from 'path';
  *
  *   1. 호출자(또는 액션 JSON)가 명시한 `defaultUri` — 실제로 존재할 때만
  *   2. 같은 scope 로 마지막에 선택했던 디렉터리 (workspace → global 순)
- *   3. 활성 에디터가 속한 워크스페이스 폴더, 없으면 첫 워크스페이스 폴더
- *   4. 위 후보가 모두 없으면 `defaultUri` 없이 (= VS Code 기본 동작)
+ *   3. scope 를 가리지 않고 **가장 최근에 사용한** 다이얼로그 위치
+ *   4. 활성 에디터가 속한 워크스페이스 폴더, 없으면 첫 워크스페이스 폴더
+ *   5. 위 후보가 모두 없으면 `defaultUri` 없이 (= VS Code 기본 동작)
  *
  * 저장은 `workspaceState` 와 `globalState` 양쪽에 한다. 프로젝트별로 다른
  * 위치를 기억하되(workspaceState 우선), 그 프로젝트에서 처음 여는 다이얼로그는
  * 다른 창에서 쓰던 같은 용도의 위치를 물려받도록(globalState) 하기 위함이다.
+ * 예외는 3번({@link LAST_USED_SCOPE})으로, 창을 넘지 않는다 — 물려받기의 근거가
+ * "같은 용도"인데 그 값에는 용도가 없기 때문이다.
  */
 
 /**
@@ -45,6 +48,21 @@ const STATE_KEY = 'taskhub.dialogLocations';
  */
 export const DIALOG_MEMORY_MAX_ENTRIES = 100;
 
+/**
+ * scope 를 가리지 않는 "가장 최근에 사용한 위치"가 담기는 예약 키.
+ *
+ * scope 별 기억은 **같은 용도를 반복할 때** 잘 맞지만, 그 scope 를 처음 쓰는
+ * 순간에는 아무것도 없어 워크스페이스 루트로 떨어졌다. 한 액션이 "펌웨어 파일을
+ * 고르고 → 출력 폴더를 고른다" 처럼 이어질 때, 두 번째 다이얼로그가 방금 다녀온
+ * 폴더와 무관한 곳에서 열리는 것이 그 증상이다. 이 값은 그 빈자리에만 쓰인다 —
+ * scope 기억이 있으면 언제나 그쪽이 이긴다.
+ *
+ * `*` 로 시작해 실제 scope 이름({@link DIALOG_SCOPE} 의 값, `taskDialogScope`
+ * 의 `task.` 접두사)과 겹치지 않는다. 저장 맵의 한 칸을 차지하지만
+ * {@link pruneDialogLocations} 가 축출 대상에서 뺀다.
+ */
+export const LAST_USED_SCOPE = '*last';
+
 interface DialogLocationEntry {
     /** 기억된 디렉터리. */
     dir: string;
@@ -67,9 +85,19 @@ type DialogLocationMap = Record<string, DialogLocationEntry>;
 export function pruneDialogLocations(map: DialogLocationMap, max: number = DIALOG_MEMORY_MAX_ENTRIES): DialogLocationMap {
     const entries = Object.entries(map);
     if (entries.length <= max) { return map; }
+    // 예약 키를 남기는 아래 분기가 `max` 를 넘기지 않도록 경계를 먼저 끊는다.
+    if (max <= 0) { return {}; }
     // `at` 이 같으면 scope 이름으로 갈라 결과가 결정적이게 한다.
     entries.sort((a, b) => (b[1].at - a[1].at) || a[0].localeCompare(b[0]));
-    return Object.fromEntries(entries.slice(0, max));
+    // {@link LAST_USED_SCOPE} 는 축출 대상에서 뺀다. 기록될 때마다 가장 새로운
+    // `at` 을 받으므로 보통은 어차피 살아남지만, 시계가 뒤로 간 뒤(또는 미래
+    // 시각이 적힌 저장소를 만나) 밀려나면 "직전 위치 이어받기"가 오래 쓴
+    // 프로젝트에서만 조용히 사라진다 — 재현하기 어려운 종류의 결함이다.
+    const reserved = map[LAST_USED_SCOPE];
+    const kept = entries
+        .filter(([scope]) => scope !== LAST_USED_SCOPE)
+        .slice(0, reserved ? max - 1 : max);
+    return Object.fromEntries(reserved ? [[LAST_USED_SCOPE, reserved], ...kept] : kept);
 }
 
 /** 다이얼로그 용도 식별자. 같은 값을 쓰는 다이얼로그끼리만 위치를 공유한다. */
@@ -162,6 +190,14 @@ export interface DialogMemoryDeps {
     /** 경로가 파일이든 디렉터리든 존재하는지 (호출자 `defaultUri` 검증용). */
     exists(targetPath: string): boolean;
     recall(scope: string): string | undefined;
+    /**
+     * `scope` 의 위치를 기록한다. 구현은 {@link LAST_USED_SCOPE} 에도 같은 값을
+     * **반드시 함께** 기록해야 한다 — 다른 용도의 다이얼로그가 자기 기억이 없을
+     * 때 폴백으로 읽어 가기 때문이다. 두 항목은 한 번의 쓰기로 함께 갱신한다.
+     *
+     * {@link isEnabled} 가 거짓이면 **아무것도 기록하지 않는다.** 호출부는 설정을
+     * 확인하지 않고 부르므로, 그 판단은 이 구현 안에 있다.
+     */
     remember(scope: string, dir: string): void;
     workspaceFallbackDir(): string | undefined;
     /**
@@ -198,8 +234,13 @@ function writeLocationMap(memento: vscode.Memento, map: DialogLocationMap): void
 
 function defaultRecall(scope: string): string | undefined {
     if (!memoryContext || !isMemoryEnabled()) { return undefined; }
-    return readLocationMap(memoryContext.workspaceState)[scope]?.dir
-        ?? readLocationMap(memoryContext.globalState)[scope]?.dir;
+    const fromWorkspace = readLocationMap(memoryContext.workspaceState)[scope]?.dir;
+    // 예약 키는 **창 안에서만** 산다. globalState 로 내려가면 다른 창에서 방금
+    // 다녀온 폴더가 이 프로젝트의 다이얼로그 시작 위치가 되는데, 그건 이 모듈이
+    // 없애려던 바로 그 증상이다. scope 별 기억이 창을 넘어 물려지는 근거는
+    // "같은 용도"인데, 예약 키에는 용도가 없다.
+    if (scope === LAST_USED_SCOPE) { return fromWorkspace; }
+    return fromWorkspace ?? readLocationMap(memoryContext.globalState)[scope]?.dir;
 }
 
 function defaultRemember(scope: string, dir: string): void {
@@ -208,6 +249,12 @@ function defaultRemember(scope: string, dir: string): void {
     for (const memento of [memoryContext.workspaceState, memoryContext.globalState]) {
         const map = readLocationMap(memento);
         map[scope] = { dir, at };
+        // 예약 키는 창 로컬이므로 workspaceState 에만 쓴다 ({@link defaultRecall}
+        // 참조). scope 기억과 같은 읽기-쓰기 안에서 처리해 저장소 왕복을 늘리지
+        // 않는다.
+        if (memento === memoryContext.workspaceState) {
+            map[LAST_USED_SCOPE] = { dir, at };
+        }
         writeLocationMap(memento, pruneDialogLocations(map));
     }
 }
@@ -307,7 +354,10 @@ export async function showOpenDialogWithMemory(
         // VS Code 자체의 최근 경로가 쓰인다 — 설정 설명이 약속하는 동작이다.
         delete effective.defaultUri;
     } else {
-        const startDir = firstUsableDir([deps.recall(scope), deps.workspaceFallbackDir()], deps);
+        // scope 기억 → 가장 최근에 쓴 위치 → 워크스페이스. 가운데 후보가 하는
+        // 일은 "이 용도로는 처음 여는 다이얼로그"를 직전에 다녀온 폴더에
+        // 붙여 주는 것뿐이다 ({@link LAST_USED_SCOPE}).
+        const startDir = firstUsableDir([deps.recall(scope), deps.recall(LAST_USED_SCOPE), deps.workspaceFallbackDir()], deps);
         if (startDir) {
             effective.defaultUri = vscode.Uri.file(startDir);
         } else {
@@ -352,8 +402,10 @@ export async function showSaveDialogWithMemory(
     // 수단이 없으므로(defaultUri 하나뿐), 꺼진 상태에서는 파일명 제안을
     // 포기하는 것이 정직한 선택이다. defaultUri가 없으면 VS Code가 자기
     // 최근 경로에서 연다.
+    // `defaultDir` 는 호출자가 이 저장에 대해 아는 사실(분석 중인 바이너리가 있던
+    // 폴더 등)이므로, scope 를 가리지 않는 최근 위치보다 앞에 둔다.
     const startDir = deps.isEnabled()
-        ? firstUsableDir([deps.recall(scope), defaultDir, deps.workspaceFallbackDir()], deps)
+        ? firstUsableDir([deps.recall(scope), defaultDir, deps.recall(LAST_USED_SCOPE), deps.workspaceFallbackDir()], deps)
         : undefined;
     if (startDir) {
         effective.defaultUri = vscode.Uri.file(path.join(startDir, suggestedName));
