@@ -374,16 +374,12 @@ function setupWebviewMessageHandler(webview: vscode.Webview, onReady?: () => voi
             onReady?.();
             return;
         }
-        if (message.command === 'copySelection') {
-            // 아래 `gotoError` 분기와 jsonEditor·memoryMapViewer 의 핸들러는
-            // 모두 페이로드 타입을 확인한다 — 여기만 예외였다. 웹뷰 콘텐츠가
-            // 우리 것이라도, 형태가 어긋난 메시지 하나로 클립보드에
-            // `undefined` 가 들어가는 것보다는 조용히 무시하는 편이 낫다.
-            if (typeof message.text !== 'string' || message.text.length === 0) { return; }
-            vscode.env.clipboard.writeText(message.text);
-            vscode.window.showInformationMessage(t('클립보드에 복사되었습니다.', 'Copied to clipboard.'));
-            return;
-        }
+        // `copySelection` 핸들러가 여기 있었다 (0.2.47~0.6.52). **보내는 쪽이
+        // 한 번도 없었다** — `git log --all -S "command: 'copySelection'"` 이
+        // 아무 커밋도 내놓지 않는다. 복사는 웹뷰 안에서 네이티브 `copy` 이벤트를
+        // 가로채 `clipboardData.setData` 로 처리하므로(아래 스크립트 참조)
+        // 호스트를 거치지 않는다. 죽은 채로 클립보드 쓰기 권한을 여는 분기라
+        // 지웠다. 같은 유형은 `webviewMessageContract.test.ts` 가 막는다.
         if (message.command === 'gotoError') {
             const rawInput = typeof message.input === 'string' ? message.input : '';
             // notification 에 표시할 입력값은 길이를 제한해 UI 가 무너지지 않도록 한다.
