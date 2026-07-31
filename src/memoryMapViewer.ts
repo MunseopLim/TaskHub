@@ -455,8 +455,17 @@ export function buildMemoryMapStrings(): Record<string, string> {
         searchNext: t('다음 결과 (Enter)', 'Next match (Enter)'),
         memoryRegions: t('메모리 영역', 'Memory Regions'),
         regionDetails: t('영역 상세', 'Region Details'),
-        expandAll: t('모두 펼치기', 'Expand All'),
-        collapseAll: t('모두 접기', 'Collapse All'),
+        // "무엇을" 펼치는지 이름에 넣는다. 이 버튼은 **영역만** 펼치고 그
+        // 안의 Object Summary 는 접힌 채로 둔다 — "모두 펼치기"는 3단 구조에서
+        // 지키지 못할 약속이었다.
+        expandAll: t('영역 모두 펼치기', 'Expand all regions'),
+        collapseAll: t('영역 모두 접기', 'Collapse all regions'),
+        // 이 버튼의 title 은 라벨을 그대로 되풀이하고 있었다 — 지연만 있고 더
+        // 알려 주는 것이 없는 툴팁이다. 이름을 바꾼 이유를 여기서 말한다.
+        expandAllHint: t(
+            '영역만 펼칩니다. 각 영역 안의 오브젝트 요약은 접힌 채로 남습니다.',
+            'Expands regions only. The Object Summary inside each region stays collapsed.'
+        ),
         toggleFunctionColumn: t('Function 열 표시 전환', 'Toggle Function column'),
         allSections: t('전체 섹션', 'All Sections'),
         scrollTop: t('맨 위로', 'Back to top'),
@@ -481,8 +490,26 @@ export function buildMemoryMapStrings(): Record<string, string> {
         sortAscending: t('오름차순 정렬', 'Sort ascending'),
         sortDescending: t('내림차순 정렬', 'Sort descending'),
         objectSummary: t('오브젝트 요약', 'Object Summary'),
-        toggleObjectDetails: t('섹션 상세 표시 전환', 'Toggle section details'),
-        details: t('상세', 'Details'),
+        // 이 토글이 펼치는 것은 오브젝트 하나를 이루는 **섹션 행**이다. 라벨이
+        // `Details`였을 때는 바로 위 `regionDetails`(영역 상세)와 구별되지 않아
+        // "영역 상세를 다시 접었다 폈다 하는 버튼"으로 읽혔다.
+        toggleObjectDetails: t('섹션 행 표시 전환', 'Toggle section rows'),
+        objDetailRows: t('섹션 행', 'Section rows'),
+        // 오브젝트가 몇 개 섹션으로 이뤄졌는지. 위 토글이 무엇을 펼치는지
+        // 누르기 전에 알려 준다.
+        objSectionsOne: t('섹션 {n}개', '{n} section'),
+        objSectionsMany: t('섹션 {n}개', '{n} sections'),
+        // 펼쳤는데 아무것도 없는 영역. 안내가 없으면 글리프만 뒤집히고 화면은
+        // 그대로여서 고장으로 읽힌다.
+        //
+        // 이 자리에 닿는 경우는 사실상 하나다 — **크기가 0으로 잡힌 영역**.
+        // 배치된 섹션이 없어도 크기가 있으면 분석기가 `[FREE]` 세그먼트를
+        // 만들어 넣으므로 표가 그려진다. 그래서 문구도 원인을 짚어 준다:
+        // 여기까지 온 사람은 설정을 고쳐야 하는 사람이다.
+        emptyRegion: t(
+            '이 영역은 크기가 0으로 정의되어 아무것도 배치할 수 없습니다. 영역 크기 설정을 확인하세요.',
+            'This region is defined with a size of 0, so nothing can be placed in it. Check the region size in your settings.'
+        ),
         colObject: t('오브젝트', 'Object'),
         colFunction: t('함수', 'Function'),
         colPercent: t('비율', 'Percent'),
@@ -588,15 +615,23 @@ function getWebviewContent(
     // so the CSP does not need to allow inline event attributes.
     const regionCardsHtml = regionJsonData.map((rd: any, idx: number) => `
         <div class="region-card" id="region-${esc(rd.name)}" data-idx="${idx}">
-            <div class="region-header" data-action="toggle-region" role="button" tabindex="0" aria-expanded="false">
+            <!-- 영역 이름은 제목이다(h3). 접기 컨트롤을 제목이 감싸는 형태라야
+                 제목 목록으로 영역 사이를 건너뛸 수 있다 — 컨트롤 자체를
+                 제목으로 만들면 role="button"이 제목 역할을 덮어쓴다. h3의
+                 내용 모델이 phrasing 이라 컨트롤은 span 이다. -->
+            <h3 class="region-heading"><span class="region-header" data-action="toggle-region" role="button" tabindex="0" aria-expanded="false">
                 <span class="fold-icon" aria-hidden="true">▶</span>
                 <strong>${esc(rd.name)}</strong>
                 <span class="region-info">${esc(rd.infoText)}</span>
-            </div>
+            </span></h3>
             ${rd.linkerLine ? `<div class="region-linker">${esc(rd.linkerLine)}</div>` : ''}
             <!-- The same numbers are already spelled out in .region-info above,
                  so the bar is decorative: announcing it twice adds nothing. -->
-            <div class="bar-bg" aria-hidden="true"><div class="bar-fill" style="width:${Math.min(rd.pct, 100)}%;background:${rd.color}"></div></div>
+            <!-- 막대도 카드를 여닫는다. 헤더 한 줄만 눌리던 탓에, 카드에서
+                 가장 눈에 띄는 이 20px 띠를 눌러도 아무 일이 없었다. 키보드
+                 경로는 헤더가 담당하므로 여기서는 마우스 편의만 더한다
+                 (aria-hidden 이라 스크린리더에는 잡히지 않는다). -->
+            <div class="bar-bg" data-action="toggle-region" aria-hidden="true"><div class="bar-fill" style="width:${Math.min(rd.pct, 100)}%;background:${rd.color}"></div></div>
             <div class="region-detail" style="display:none"></div>
         </div>`).join('');
 
@@ -696,7 +731,7 @@ function getWebviewContent(
         background: var(--bg);
         padding: 16px;
     }
-    h2 { font-size: 16px; margin-bottom: 4px; }
+    h1 { font-size: 16px; margin-bottom: 4px; }
     .header-row {
         display: flex;
         justify-content: space-between;
@@ -754,7 +789,14 @@ function getWebviewContent(
         border-radius: 3px;
         overflow: hidden;
         margin-bottom: 8px;
+        cursor: pointer;
     }
+    /* 눌러서 카드를 여닫는 막대다. 커서 모양만으로는 신호가 약하고, 펼친
+       카드에서는 12px 아래에 생김새가 비슷한 map-bar(누를 수 없다)가 붙는다 —
+       테두리로 "이쪽이 눌리는 쪽"을 구분한다. 터치에는 커서가 없으므로 이게
+       유일한 단서이기도 하다. */
+    .bar-bg:hover { box-shadow: inset 0 0 0 1px var(--border); }
+    .empty-region { font-size: 12px; opacity: 0.7; padding: 4px 0 8px; }
     .bar-fill {
         height: 100%;
         border-radius: 3px;
@@ -851,8 +893,21 @@ function getWebviewContent(
     tr.current-match { background: var(--vscode-list-activeSelectionBackground, rgba(255, 170, 0, 0.22)) !important; }
     tr.current-match td:first-child { box-shadow: inset 3px 0 0 var(--vscode-focusBorder, #007acc); }
     tr.current-match mark.sm-hl { background: var(--vscode-editor-findMatchBackground, #d18616); color: var(--vscode-editor-foreground, inherit); }
-    .region-header { cursor: pointer; }
-    .region-header:hover { opacity: 0.85; }
+    /* 제목이 감싸도 카드 안에서의 생김새는 그대로여야 한다 — 크기·굵기·여백은
+       카드가 정하고, h3 는 의미만 얹는다. */
+    .region-heading { font-size: inherit; font-weight: inherit; margin: 0; }
+    .region-header { display: block; cursor: pointer; }
+    /* 투명도만 낮추던 종전 hover는 "누를 수 있는 줄"이라는 신호로 약했다.
+       표 행(tr:hover)과 같은 배경을 써서 카드 전체에서 눌리는 영역이 어디인지
+       한눈에 보이게 한다. */
+    .region-header:hover { background: var(--hover-bg); }
+    /* 두 접기 헤더는 tabindex=0인 <div>다. 포커스 표시가 없으면 키보드
+       사용자는 지금 어디에 서 있는지 알 수 없다 — Enter를 눌러 보기 전에는. */
+    .region-header:focus-visible,
+    .obj-summary-header:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder, #007acc);
+        outline-offset: 2px;
+    }
     .fold-icon {
         display: inline-block;
         width: 16px;
@@ -882,6 +937,10 @@ function getWebviewContent(
         font-weight: 600;
         margin: 16px 0 8px;
     }
+    /* 제목 텍스트만 heading 요소로 감싼다 — 컨테이너를 통째로 제목으로 만들면
+       그 안의 버튼("영역 모두 펼치기" 등)까지 제목 이름에 딸려 들어가, 제목
+       목록으로 훑는 사람에게 잡음이 된다. 크기·굵기는 컨테이너에서 상속받는다. */
+    .section-heading h2 { display: inline; font-size: inherit; font-weight: inherit; margin: 0; }
     .no-regions {
         padding: 12px;
         border: 1px dashed var(--border);
@@ -925,9 +984,14 @@ function getWebviewContent(
     .func-cell { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
     .func-cell.hidden { display: none; }
     .obj-detail-row { display: none; font-size: 11px; opacity: 0.7; }
-    .obj-summary-header { font-size: 12px; font-weight: 600; margin-bottom: 4px; cursor: pointer; }
-    .obj-summary-header button { font-size: 11px; padding: 4px 10px; }
-    .obj-summary-header:hover { opacity: 0.85; }
+    .obj-summary-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .obj-summary-heading { font-size: inherit; font-weight: inherit; margin: 0; }
+    .obj-summary-header { display: inline-block; font-size: 12px; font-weight: 600; cursor: pointer; padding: 2px 4px; border-radius: 3px; }
+    .obj-summary-bar button { font-size: 11px; padding: 4px 10px; }
+    .obj-summary-header:hover { background: var(--hover-bg); }
+    /* 0.55는 기본 Dark+ 팔레트에서 4.34:1로 WCAG AA(4.5:1) 미달이다. 이 값이
+       섹션 행 토글이 무엇을 펼칠지 알려 주는 유일한 자리라 읽혀야 한다. */
+    .obj-sec-count { opacity: 0.7; font-size: 11px; font-weight: normal; }
     .obj-summary-table { margin-bottom: 10px; }
     .vt-viewport { position: relative; }
     .vt-viewport thead th { position: sticky; top: 0; z-index: 1; background: var(--bg); }
@@ -937,7 +1001,7 @@ function getWebviewContent(
 <body>
     <div class="header-row">
         <div class="header-left">
-            <h2>${esc(fileName)}</h2>
+            <h1>${esc(fileName)}</h1>
             <div class="subtitle">${esc(S.entryPoint)}: ${formatHex(entryPoint)}</div>
         </div>
         <button id="btnCopy" title="${esc(S.copyReportTitle)}">${esc(S.copyReport)}</button>
@@ -955,11 +1019,11 @@ function getWebviewContent(
     </div>
 
     ${hasRegions ? `
-        <div class="section-heading">${esc(S.memoryRegions)}</div>
+        <div class="section-heading"><h2>${esc(S.memoryRegions)}</h2></div>
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
         ${!hasLinkerData && !hasSymbols ? `<div class="info-note">${t('AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.', 'AXF/ELF files provide section-level information only. Use an ARM Linker Listing file for object-level analysis and linker-reported values.')}</div>` : ''}
         ${hasSymbols ? `<div class="info-note">${t('ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.', 'Function and variable details are extracted from the ELF symbol table. Program-header based automatic region detection was applied.')}</div>` : ''}
-        <div class="section-heading">${esc(S.regionDetails)}<span id="regMatchInfo" role="status" aria-live="polite"></span> <button data-action="toggle-all" id="toggleAllBtn" title="${esc(S.expandAll)}" aria-expanded="false">▼ ${esc(S.expandAll)}</button>${hasFuncData ? ` <button data-action="toggle-func-col" title="${esc(S.toggleFunctionColumn)}" aria-label="${esc(S.toggleFunctionColumn)}">${esc(S.funcColumnToggle)} ▶</button>` : ''}</div>
+        <div class="section-heading"><h2>${esc(S.regionDetails)}</h2><span id="regMatchInfo" role="status" aria-live="polite"></span> <button data-action="toggle-all" id="toggleAllBtn" title="${esc(S.expandAllHint)}" aria-label="${esc(S.expandAll)}" aria-expanded="false">▶ ${esc(S.expandAll)}</button>${hasFuncData ? ` <button data-action="toggle-func-col" title="${esc(S.toggleFunctionColumn)}" aria-label="${esc(S.toggleFunctionColumn)}">${esc(S.funcColumnToggle)} ▶</button>` : ''}</div>
         ${regionCardsHtml}
     ` : `
         <div class="no-regions">
@@ -969,7 +1033,7 @@ function getWebviewContent(
         </div>
     `}
 
-    <div class="section-heading">${esc(S.allSections)} (<span id="allSecCount">${sectionSummary.length}</span>)</div>
+    <div class="section-heading"><h2>${esc(S.allSections)} (<span id="allSecCount">${sectionSummary.length}</span>)</h2></div>
     <table id="sectionTable" class="sortable-table">
         <thead>
             <tr>
@@ -1133,14 +1197,43 @@ const RD = ${regionDataJsLiteral};
                 // 읽었다 — Size/Bytes는 Percent 셀을, Percent는 mini-bar의
                 // 빈 텍스트를 읽었다(그래서 Percent 정렬은 아무 일도 하지
                 // 않았다). 속성으로 읽으면 셀 배치와 무관해진다.
+                //
+                // 그 colspan 은 이제 없다. 비어 있던 Section 칸에 섹션 개수를
+                // 적으면서 Address 칸을 따로 두었고, 그 결과 부모 행의 칸 수가
+                // 머리글과 같아졌다 — 스크린리더가 개수를 "Address" 로 읽던
+                // 것도 함께 사라진다. 정렬은 계속 속성으로 읽는다.
+                const cnt = fmt(o.entries.length === 1 ? S.objSectionsOne : S.objSectionsMany, { n: o.entries.length });
                 return '<tr data-sort-name="' + esc(o.n) + '" data-sort-bytes="' + o.ts + '" data-sort-pct="' + o.pv + '">'
-                    + '<td>' + esc(o.n) + '</td><td class="num" colspan="2"></td><td class="num"></td><td class="num">' + o.tss + '</td><td class="num">' + o.ts + '</td><td class="num">' + o.p + '%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:' + o.bw + '%;background:var(--ok)"></div></div></td></tr>' + dRows;
+                    + '<td>' + esc(o.n) + '</td><td class="num obj-sec-count">' + esc(cnt) + '</td><td class="num"></td><td class="num"></td><td class="num">' + o.tss + '</td><td class="num">' + o.ts + '</td><td class="num">' + o.p + '%</td><td><div class="mini-bar"><div class="mini-bar-fill" style="width:' + o.bw + '%;background:var(--ok)"></div></div></td></tr>' + dRows;
             }).join('');
             // \uBC88\uB4E4 \uAC12\uB3C4 esc()\uB97C \uAC70\uCE5C\uB2E4. \uC9C0\uAE08 \uAC12\uC5D0\uB294 \uB530\uC634\uD45C\uAC00 \uC5C6\uC9C0\uB9CC, \uC18D\uC131\uC5D0
             // \uB123\uB294 \uBB38\uC790\uC5F4\uB9CC \uC774 \uC790\uB9AC\uC5D0\uC11C \uC608\uC678\uC600\uB358 \uAC83\uC740 \uC8FC\uBCC0 \uCF54\uB4DC\uC640 \uC5B4\uAE0B\uB09C\uB2E4 \u2014
             // \uBC88\uC5ED\uC774 \uD558\uB098 \uBC14\uB00C\uBA74 \uC18D\uC131\uC774 \uAE68\uC9C0\uB294 \uC885\uB958\uC758 \uC7A0\uBCF5 \uACB0\uD568\uC774\uB2E4.
-            h += '<div class="obj-summary-header" data-action="toggle-obj-summary" role="button" tabindex="0" aria-expanded="false"><span class="fold-icon" aria-hidden="true">\u25B6</span> ' + esc(S.objectSummary) + ' (' + rd.objSummary.length + ') <button data-action="toggle-obj-detail-rows" title="' + esc(S.toggleObjectDetails) + '" aria-label="' + esc(S.toggleObjectDetails) + '">' + esc(S.details) + ' \u25B6</button></div>';
-            h += '<div class="obj-summary-body" style="display:none"><table class="obj-summary-table sortable-table"><thead><tr>'
+            // \uC811\uAE30 \uD5E4\uB354\uC640 \uC139\uC158 \uD589 \uBC84\uD2BC\uC744 \uD615\uC81C\uB85C \uB454\uB2E4. 0.6.53\uAE4C\uC9C0\uB294 \uBC84\uD2BC\uC774
+            // role=button \uD5E4\uB354 **\uC548\uC5D0** \uC788\uC5B4\uC11C (1) \uBC84\uD2BC \uC548\uC758 \uBC84\uD2BC\uC774\uB77C\uB294 \uC798\uBABB\uB41C
+            // ARIA \uAD6C\uC870\uC600\uACE0, (2) \uAC19\uC740 \uC904\uC778\uB370 \uB20C\uB9AC\uB294 \uC9C0\uC810\uB9C8\uB2E4 \uB2E4\uB978 \uC77C\uC774 \uC77C\uC5B4\uB098
+            // \uC5B4\uB514\uB97C \uB20C\uB7EC\uC57C \uD558\uB294\uC9C0 \uC54C \uC218 \uC5C6\uC5C8\uB2E4.
+            const bodyId = 'objBody' + idx;
+            // \uC81C\uBAA9(h4)\uC774 \uC811\uAE30 \uBC84\uD2BC\uC744 \uAC10\uC2F8\uB294 \uD615\uD0DC \u2014 \uC81C\uBAA9\uC73C\uB85C \uD6D1\uC5B4 3\uB2E8 \uAD6C\uC870
+            // (\uC601\uC5ED \uC0C1\uC138 \u2192 \uC601\uC5ED \u2192 \uC624\uBE0C\uC81D\uD2B8 \uC694\uC57D)\uB97C \uC774\uB3D9\uD560 \uC218 \uC788\uAC8C \uD55C\uB2E4. \uC811\uAE30
+            // \uCEE8\uD2B8\uB864 \uC790\uCCB4\uB97C \uC81C\uBAA9\uC73C\uB85C \uB9CC\uB4E4\uBA74(role=button \uC774 \uC81C\uBAA9 \uC5ED\uD560\uC744 \uB36E\uC5B4\uC4F4\uB2E4)
+            // \uB458 \uC911 \uD558\uB098\uB97C \uC783\uB294\uB2E4. h4 \uC758 \uB0B4\uC6A9 \uBAA8\uB378\uC774 phrasing \uC774\uB77C span \uC744 \uC4F4\uB2E4.
+            h += '<div class="obj-summary-bar">'
+                // \uC774\uB984\uC5D0 \uC601\uC5ED\uC744 \uBD99\uC778\uB2E4 \u2014 \uCE74\uB4DC\uB97C \uC5EC\uB7FF \uD3BC\uCE58\uBA74 \uC81C\uBAA9 \uBAA9\uB85D\uC774 \uAC1C\uC218\uB9CC
+                // \uB2E4\uB978 "\uC624\uBE0C\uC81D\uD2B8 \uC694\uC57D (12)"\uC73C\uB85C \uB298\uC5B4\uC11C \uC5B4\uB290 \uC601\uC5ED \uAC83\uC778\uC9C0 \uC54C \uC218
+                // \uC5C6\uB2E4. \uD654\uBA74 \uBB38\uAD6C\uB97C \uADF8\uB300\uB85C \uD3EC\uD568\uD558\uBBC0\uB85C label-in-name \uC744 \uC9C0\uD0A8\uB2E4.
+                + '<h4 class="obj-summary-heading"><span class="obj-summary-header" data-action="toggle-obj-summary" role="button" tabindex="0" aria-expanded="false" aria-controls="' + bodyId + '" aria-label="' + esc(S.objectSummary + ' (' + rd.objSummary.length + ') \u2014 ' + rd.name) + '"><span class="fold-icon" aria-hidden="true">\u25B6</span> ' + esc(S.objectSummary) + ' (' + rd.objSummary.length + ')</span></h4>'
+                // \uC0C1\uD0DC\uB294 aria-pressed \uB85C \uB0B8\uB2E4. \uC774 \uBC84\uD2BC\uC774 \uC5EC\uB2EB\uB294 \uAC83\uC740 \uC694\uC57D \uBCF8\uBB38\uC774
+                // \uC544\uB2C8\uB77C \uADF8 \uC548\uC758 \uD589\uC774\uBBC0\uB85C, \uD5E4\uB354\uC640 \uB098\uB780\uD788 aria-expanded \uB97C \uB2EC\uBA74
+                // \uAC19\uC740 \uBCF8\uBB38\uC744 \uB450\uACE0 "\uD3BC\uCE68"(\uBC84\uD2BC)\uACFC "\uC811\uD798"(\uD5E4\uB354)\uC774 \uB3D9\uC2DC\uC5D0 \uC77D\uD788\uB294
+                // \uC0C1\uD0DC\uAC00 \uC0DD\uAE34\uB2E4. aria-controls \uB294 \uAD00\uACC4 \uD45C\uC2DC\uB85C\uB9CC \uB0A8\uAE34\uB2E4.
+                //
+                // aria-label \uC5D0 \uC601\uC5ED \uC774\uB984\uC744 \uBD99\uC778\uB2E4 \u2014 \uCE74\uB4DC\uB97C \uC5EC\uB7FF \uD3BC\uCE58\uBA74 \uBC84\uD2BC
+                // \uBAA9\uB85D\uC774 "\uC139\uC158 \uD589 \uD45C\uC2DC \uC804\uD658"\uC73C\uB85C\uB9CC \uB298\uC5B4\uC11C \uC5B4\uB290 \uC601\uC5ED \uAC83\uC778\uC9C0
+                // \uAD6C\uBD84\uD560 \uC218 \uC5C6\uB2E4.
+                + '<button data-action="toggle-obj-detail-rows" aria-controls="' + bodyId + '" aria-pressed="false" title="' + esc(S.toggleObjectDetails) + '" aria-label="' + esc(S.toggleObjectDetails + ' \u2014 ' + rd.name) + '">' + esc(S.objDetailRows) + ' \u25B6</button>'
+                + '</div>';
+            h += '<div class="obj-summary-body" id="' + bodyId + '" style="display:none"><table class="obj-summary-table sortable-table"><thead><tr>'
                 + sortTh('name', S.colObject)
                 + plainTh(S.colSection, 'num')
                 + plainTh(S.colAddress, 'num')
@@ -1171,6 +1264,10 @@ const RD = ${regionDataJsLiteral};
                 h += '<table class="section-table sortable-table"><thead>' + thHtml + '</thead><tbody>' + data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi); }).join('') + '</tbody></table>';
             }
         }
+
+        // 펼쳤는데 아무것도 없는 영역(크기 0으로 잡힌 영역 등)은 글리프만
+        // 뒤집히고 화면이 그대로여서, 이 릴리스가 고친 무반응과 똑같이 읽힌다.
+        if (h === '') { h = '<div class="empty-region">' + esc(S.emptyRegion) + '</div>'; }
 
         detail.innerHTML = h;
 
@@ -1379,7 +1476,11 @@ const RD = ${regionDataJsLiteral};
         const detail = card.querySelector('.region-detail');
         if (!detail) { return; }
         detail.style.display = expanded ? '' : 'none';
-        const icon = card.querySelector('.fold-icon');
+        // \uD55C \uCE74\uB4DC \uC548\uC5D0 fold-icon \uC774 \uB458\uC774\uB2E4 \u2014 region \uD5E4\uB354\uC640, \uD3BC\uCCD0\uC9C4 \uC0C1\uC138 \uC548\uC758
+        // Object Summary \uD5E4\uB354. \uBB38\uC11C \uC21C\uC11C\uC0C1 \uC55E\uC5D0 \uC788\uB294 \uAC83\uC744 \uC9D1\uC5B4 \uC6B0\uC5F0\uD788
+        // \uB9DE\uACE0 \uC788\uC5C8\uB294\uB370, \uB458\uC744 \uAD6C\uBD84\uD558\uC9C0 \uC54A\uC73C\uBA74 \uB9C8\uD06C\uC5C5 \uC21C\uC11C\uAC00 \uBC14\uB014 \uB54C
+        // region \uD1A0\uAE00\uC774 \uC5C9\uB6B1\uD55C \uAE00\uB9AC\uD504\uB97C \uB4A4\uC9D1\uB294\uB2E4.
+        const icon = card.querySelector('.region-header .fold-icon');
         if (icon) { icon.textContent = expanded ? '\u25BC' : '\u25B6'; }
         // \u25B6/\u25BC \uAE00\uB9AC\uD504\uB294 \uC2A4\uD06C\uB9B0\uB9AC\uB354\uC5D0 \uC544\uBB34 \uC758\uBBF8\uB3C4 \uC804\uB2EC\uD558\uC9C0 \uC54A\uB294\uB2E4(aria-hidden).
         // \uD3BC\uCE68 \uC5EC\uBD80\uB294 aria-expanded\uB85C\uB9CC \uC54C \uC218 \uC788\uB2E4.
@@ -1404,13 +1505,23 @@ const RD = ${regionDataJsLiteral};
         document.querySelectorAll('.region-card .region-detail').forEach(function(detail) {
             if (detail.style.display !== 'none') anyExpanded = true;
         });
+        // \uAE00\uB9AC\uD504\uB294 **\uC9C0\uAE08 \uC0C1\uD0DC**\uB97C \uAC00\uB9AC\uD0A8\uB2E4(\u25BC \uD558\uB098\uB77C\uB3C4 \uD3BC\uCCD0\uC9D0 / \u25B6 \uC804\uBD80 \uC811\uD798).
+        // \uB77C\uBCA8\uC740 \uB2E4\uC74C \uB3D9\uC791\uC774\uB2E4. 0.6.54\uAE4C\uC9C0\uB294 \uAE00\uB9AC\uD504\uB3C4 \uB2E4\uC74C \uB3D9\uC791\uC744 \uAC00\uB9AC\uCF1C,
+        // \uAC19\uC740 \uD654\uBA74\uC758 \uB2E4\uB978 \uAE00\uB9AC\uD504(\uC601\uC5ED \uD5E4\uB354 \u00B7 Object Summary \u00B7 Function \uC5F4)\uC640
+        // \uC815\uD655\uD788 \uBC18\uB300\uC600\uACE0 \uC790\uAE30 \uC790\uC2E0\uC758 aria-expanded \uC640\uB3C4 \uC5B4\uAE0B\uB0AC\uB2E4 \u2014 \uC804\uBD80
+        // \uC811\uD78C \uD654\uBA74\uC5D0\uC11C \uD5E4\uB354\uB294 \u25B6 \uC778\uB370 \uC774 \uBC84\uD2BC\uB9CC \u25BC \uC600\uB2E4.
+        // \uAE00\uB9AC\uD504\uB294 textContent \uB85C \uB123\uC73C\uBBC0\uB85C \uC811\uADFC \uAC00\uB2A5\uD55C \uC774\uB984\uC5D0 \uADF8\uB300\uB85C \uC11E\uC778\uB2E4
+        // ("\uAC80\uC740 \uC624\uB978\uCABD \uC0BC\uAC01\uD615 \uC601\uC5ED \uBAA8\uB450 \uD3BC\uCE58\uAE30"). \uC774\uB984\uC740 aria-label \uB85C \uB530\uB85C
+        // \uC900\uB2E4 \u2014 \uD654\uBA74 \uBB38\uAD6C\uB97C \uD3EC\uD568\uD558\uBBC0\uB85C label-in-name \uB3C4 \uC9C0\uD0A8\uB2E4.
         if (anyExpanded) {
-            btn.textContent = '\u25B6 ' + S.collapseAll;
-            btn.setAttribute('title', S.collapseAll);
+            btn.textContent = '\u25BC ' + S.collapseAll;
+            btn.setAttribute('aria-label', S.collapseAll);
+            btn.setAttribute('title', S.expandAllHint);
             btn.setAttribute('aria-expanded', 'true');
         } else {
-            btn.textContent = '\u25BC ' + S.expandAll;
-            btn.setAttribute('title', S.expandAll);
+            btn.textContent = '\u25B6 ' + S.expandAll;
+            btn.setAttribute('aria-label', S.expandAll);
+            btn.setAttribute('title', S.expandAllHint);
             btn.setAttribute('aria-expanded', 'false');
         }
     };
@@ -1952,28 +2063,72 @@ const RD = ${regionDataJsLiteral};
     };
 
     // --- Toggle Object Summary fold ---
-    window.toggleObjSummary = function(header) {
-        const body = header.nextElementSibling;
+    // \uD5E4\uB354\uC640 \uC139\uC158 \uD589 \uBC84\uD2BC\uC774 \uD615\uC81C\uB77C DOM \uC704\uCE58\uB85C \uBCF8\uBB38\uC744 \uCC3E\uC744 \uC218 \uC5C6\uB2E4. \uB458 \uB2E4
+    // aria-controls\uB85C \uAC19\uC740 \uBCF8\uBB38\uC744 \uAC00\uB9AC\uD0A4\uBBC0\uB85C \uADF8\uAC83\uC73C\uB85C \uCC3E\uB294\uB2E4 \u2014 \uB9C8\uD06C\uC5C5\uC774 \uB610
+    // \uBC14\uB00C\uC5B4\uB3C4 \uB530\uB77C \uAE68\uC9C0\uC9C0 \uC54A\uB294\uB2E4.
+    function objSummaryBody(el) {
+        const id = el.getAttribute('aria-controls');
+        return id ? document.getElementById(id) : null;
+    }
+
+    /** \uD3BC\uCE68 \uC0C1\uD0DC\uB97C \uBC14\uAFB8\uB294 \uC720\uC77C\uD55C \uACBD\uB85C \u2014 setRegionExpanded \uC640 \uAC19\uC740 \uC774\uC720\uB2E4. */
+    function setObjSummaryExpanded(header, expanded) {
+        const body = objSummaryBody(header);
+        if (!body) { return; }
+        body.style.display = expanded ? '' : 'none';
         const icon = header.querySelector('.fold-icon');
-        if (body && body.classList.contains('obj-summary-body')) {
-            if (body.style.display === 'none') {
-                body.style.display = '';
-                if (icon) { icon.textContent = '\u25BC'; }
-            } else {
-                body.style.display = 'none';
-                if (icon) { icon.textContent = '\u25B6'; }
-            }
-            header.setAttribute('aria-expanded', body.style.display === 'none' ? 'false' : 'true');
+        if (icon) { icon.textContent = expanded ? '\u25BC' : '\u25B6'; }
+        header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        if (!expanded) { resetObjDetailRows(header, body); }
+    }
+
+    /**
+     * \uC694\uC57D\uC744 \uC811\uC744 \uB54C \uC139\uC158 \uD589 \uBC84\uD2BC\uB3C4 \uB048 \uC0C1\uD0DC\uB85C \uB418\uB3CC\uB9B0\uB2E4.
+     *
+     * \uADF8\uB7EC\uC9C0 \uC54A\uC73C\uBA74 \uBC84\uD2BC\uC740 "\uCF1C\uC9D0"\uC774\uB77C \uB9D0\uD558\uB294\uB370 \uD654\uBA74\uC5D0\uB294 \uC544\uBB34\uAC83\uB3C4 \uC5C6\uACE0, \uADF8
+     * \uC0C1\uD0DC\uC5D0\uC11C \uD55C \uBC88 \uB354 \uB204\uB974\uBA74 **\uBCF4\uC774\uC9C0 \uC54A\uB294 \uD589\uC744 \uC228\uAE30\uB294** \uC148\uC774\uB77C \uB610 \uC544\uBB34
+     * \uBCC0\uD654\uAC00 \uC5C6\uB2E4 \u2014 \uC774\uBC88\uC5D0 \uACE0\uCE5C \uBB34\uBC18\uC751\uC774 \uBC29\uD5A5\uB9CC \uBC14\uB00C\uC5B4 \uB418\uC0B4\uC544\uB09C\uB2E4. \uC9C0\uCF1C\uC57C \uD560
+     * \uBD88\uBCC0\uC2DD\uC740 \uD558\uB098\uB2E4: \uBC84\uD2BC\uC758 \uC0C1\uD0DC\uB294 \uB298 \uD654\uBA74\uC5D0 \uC2E4\uC81C\uB85C \uBCF4\uC774\uB294 \uAC83\uACFC \uAC19\uB2E4.
+     */
+    function resetObjDetailRows(header, body) {
+        body.querySelectorAll('.obj-detail-row').forEach(function(el) { el.style.display = 'none'; });
+        const bar = header.closest('.obj-summary-bar');
+        const btn = bar && bar.querySelector('[data-action="toggle-obj-detail-rows"]');
+        if (btn) {
+            btn.setAttribute('aria-pressed', 'false');
+            btn.textContent = S.objDetailRows + ' \u25B6';
         }
+    }
+
+    window.toggleObjSummary = function(header) {
+        const body = objSummaryBody(header);
+        if (!body) { return; }
+        setObjSummaryExpanded(header, body.style.display === 'none');
     };
 
     // --- Toggle detail rows in per-region object summary ---
     window.toggleObjDetailRows = function(btn) {
-        const body = btn.closest('.obj-summary-header')?.nextElementSibling;
+        const body = objSummaryBody(btn);
         if (!body) { return; }
-        const rows = body.querySelectorAll('.obj-detail-row');
-        const isHidden = rows.length > 0 && getComputedStyle(rows[0]).display === 'none';
-        rows.forEach(function(el) { el.style.display = isHidden ? 'table-row' : 'none'; });
+        // \uC0C1\uD0DC\uB97C \uACC4\uC0B0\uB41C \uC2A4\uD0C0\uC77C\uC774 \uC544\uB2C8\uB77C \uBC84\uD2BC \uC790\uC2E0\uC5D0\uAC8C\uC11C \uC77D\uB294\uB2E4. \uD589\uC774 \uD558\uB098\uB3C4
+        // \uC5C6\uB294 \uD45C\uC5D0\uC11C\uB294 \uC61B \uBC29\uC2DD\uC774 \uB298 "\uC774\uBBF8 \uBCF4\uC784"\uC73C\uB85C \uD310\uC815\uD574 \uC544\uBB34 \uC77C\uB3C4 \uD558\uC9C0
+        // \uC54A\uC558\uACE0, \uBC84\uD2BC \uB77C\uBCA8\uACFC \uC2E4\uC81C \uC0C1\uD0DC\uAC00 \uAC08\uB77C\uC9C8 \uC790\uB9AC\uB3C4 \uC5C6\uC564\uB2E4.
+        const show = btn.getAttribute('aria-pressed') !== 'true';
+        body.querySelectorAll('.obj-detail-row').forEach(function(el) {
+            el.style.display = show ? 'table-row' : 'none';
+        });
+        btn.setAttribute('aria-pressed', show ? 'true' : 'false');
+        btn.textContent = S.objDetailRows + (show ? ' \u25BC' : ' \u25B6');
+
+        // \uC811\uD78C \uC694\uC57D \uC548\uC758 \uD589\uC744 \uCF1C\uB294 \uAC83\uC740 **\uD654\uBA74\uC0C1 \uC544\uBB34 \uC77C\uB3C4 \uC77C\uC5B4\uB098\uC9C0 \uC54A\uB294**
+        // \uC870\uC791\uC774\uC5C8\uB2E4. Object Summary\uB294 \uAE30\uBCF8\uC774 \uC811\uD798\uC774\uB77C \uC774 \uBC84\uD2BC\uC744 \uCC98\uC74C \uB204\uB974\uB294
+        // \uC0AC\uB78C\uC740 \uC608\uC678 \uC5C6\uC774 \uADF8 \uC0C1\uD0DC\uB97C \uB9CC\uB09C\uB2E4 \u2014 \uB20C\uB7EC\uB3C4 \uADF8\uB300\uB85C\uB2C8 \uACE0\uC7A5\uC73C\uB85C \uC77D\uD78C\uB2E4.
+        // \uCF1C\uB294 \uBC29\uD5A5\uC774\uBA74 \uC694\uC57D\uC744 \uD568\uAED8 \uD3BC\uCCD0 \uACB0\uACFC\uB97C \uBCF4\uC5EC \uC900\uB2E4.
+        if (show) {
+            const bar = btn.closest('.obj-summary-bar');
+            const header = bar && bar.querySelector('.obj-summary-header');
+            if (header && body.style.display === 'none') { setObjSummaryExpanded(header, true); }
+        }
     };
 
     // --- Scroll to top button ---
@@ -1991,7 +2146,7 @@ const RD = ${regionDataJsLiteral};
         if (!target || target.nodeType !== 1) { return; }
         const actionEl = target.closest('[data-action]');
         if (!actionEl) { return; }
-        runAction(actionEl, ev);
+        runAction(actionEl);
     });
 
     // --- 키보드 경로. 접히는 헤더 두 곳(region-header / obj-summary-header)은
@@ -2010,10 +2165,10 @@ const RD = ${regionDataJsLiteral};
         if (!actionEl || actionEl.tagName === 'BUTTON') { return; }
         // Space는 기본 동작이 스크롤이다. 막지 않으면 펼치면서 화면이 튄다.
         ev.preventDefault();
-        runAction(actionEl, ev);
+        runAction(actionEl);
     });
 
-    function runAction(actionEl, ev) {
+    function runAction(actionEl) {
         const action = actionEl.getAttribute('data-action');
         switch (action) {
             case 'toggle-region':
@@ -2029,7 +2184,9 @@ const RD = ${regionDataJsLiteral};
                 window.toggleObjSummary(actionEl);
                 break;
             case 'toggle-obj-detail-rows':
-                ev.stopPropagation();
+                // stopPropagation 은 버튼이 접기 헤더 **안에** 있던 시절의
+                // 잔재다. 위임 처리기는 문서에 하나뿐이고 closest 가 버튼
+                // 자신을 집으므로, 형제가 된 지금은 막을 것이 없다.
                 window.toggleObjDetailRows(actionEl);
                 break;
         }
