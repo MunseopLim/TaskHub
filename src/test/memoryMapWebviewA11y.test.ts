@@ -150,7 +150,8 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
             const toggle = html.match(/<button[^>]*id="toggleAllBtn"[^>]*>/);
             assert.ok(toggle, 'toggleAllBtn을 찾지 못했다');
             assert.ok(toggle![0].includes('aria-expanded'), toggle![0]);
-            assert.ok(html.includes("setAttribute('aria-expanded', 'true')"), '펼침 시 상태 갱신이 없다');
+            assert.ok(/setAttribute\('aria-expanded', state\.any \? 'true' : 'false'\)/.test(html),
+                '펼침 시 상태 갱신이 없다');
         });
 
         test('검색 입력에 접근 가능한 이름이 있다', () => {
@@ -423,8 +424,7 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
             const btn = html.match(/<button data-action="toggle-all"[^>]*>/);
             assert.ok(btn, 'toggleAllBtn을 찾지 못했다');
             assert.ok(/aria-label="[^"▶▼]+"/.test(btn![0]), btn![0]);
-            assert.ok(/setAttribute\('aria-label', S\.collapseAll\)/.test(html)
-                && /setAttribute\('aria-label', S\.expandAll\)/.test(html),
+            assert.ok(/setAttribute\('aria-label', label\)/.test(html),
                 '상태가 바뀔 때 이름도 함께 갱신해야 한다');
             // title 은 라벨을 되풀이하는 대신 이름을 바꾼 이유를 말한다.
             assert.ok(btn![0].includes('title="' + strings.expandAllHint), btn![0]);
@@ -509,22 +509,68 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
             }
         });
 
-        test('일괄 토글 글리프가 자기 aria-expanded와 같은 뜻을 가리킨다', () => {
+        test('일괄 토글: 글리프는 지금 상태, 라벨은 다음 동작', () => {
             // 0.6.54까지 이 글리프만 "다음 동작"을 가리켜, 전부 접힌 화면에서
             // 영역 헤더는 ▶인데 이 버튼만 ▼였다 — 같은 사실에 화살표 두 개가
-            // 반대로 붙어 있었다.
+            // 반대로 붙어 있었고, 자기 자신의 aria-expanded 와도 어긋났다.
             const sync = html.match(/window\.syncToggleAllLabel = function[\s\S]*?\n    \};/);
             assert.ok(sync, 'syncToggleAllLabel을 찾지 못했다');
-            const expanded = sync![0].slice(sync![0].indexOf('if (anyExpanded)'));
-            const [whenExpanded, whenCollapsed] = expanded.split('} else {');
-            assert.ok(/'▼ ' \+ S\.collapseAll/.test(whenExpanded) && /'true'/.test(whenExpanded),
-                `펼쳐진 상태의 글리프가 aria-expanded=true와 어긋난다: ${whenExpanded}`);
-            assert.ok(/'▶ ' \+ S\.expandAll/.test(whenCollapsed) && /'false'/.test(whenCollapsed),
-                `접힌 상태의 글리프가 aria-expanded=false와 어긋난다: ${whenCollapsed}`);
+            const src = sync![0];
+            assert.ok(/textContent = \(state\.any \? '▼ ' : '▶ '\) \+ label/.test(src),
+                `글리프가 지금 상태를 가리키지 않는다: ${src}`);
+            assert.ok(/setAttribute\('aria-expanded', state\.any \? 'true' : 'false'\)/.test(src),
+                '글리프와 aria-expanded가 서로 다른 사실을 말한다');
             // 최초 렌더는 전부 접힘이므로 정적 마크업도 ▶여야 한다.
             const initial = html.match(/<button data-action="toggle-all"[^>]*>[^<]*/);
             assert.ok(initial && initial[0].includes('▶'),
                 `첫 화면부터 글리프가 어긋나 있다: ${initial?.[0]}`);
+        });
+
+        test('일부만 펼친 상태에서 한 번 더 누르면 나머지가 펼쳐진다', () => {
+            // "하나라도 펼쳐졌으면 접기"였을 때는, 영역 하나를 펼쳐 본 사람이
+            // 나머지를 보려면 전부 접었다가 다시 펼쳐야 했다(두 번 클릭).
+            const sync = html.match(/window\.syncToggleAllLabel = function[\s\S]*?\n    \};/);
+            assert.ok(/const label = state\.all \? S\.collapseAll : S\.expandAll;/.test(sync![0]),
+                '전부 펼쳐졌을 때만 접기여야 한다');
+            assert.ok(/window\.foldAll\(regionFoldState\(\)\.all\)/.test(html),
+                '클릭 동작이 라벨과 같은 기준을 쓰지 않는다');
+            assert.ok(/all: all && details\.length > 0/.test(html),
+                '영역이 하나도 없으면 all이 참이 되어 첫 클릭이 접기로 간다');
+        });
+
+        test('검색이 요약 표에도 적용된다', () => {
+            // 이게 없으면 한 카드 안에서 섹션 표는 걸러진 결과를, 바로 위
+            // 요약 표는 전체 목록을 하이라이트도 없이 보여 준다 — "이 검색어가
+            // 어느 오브젝트에 있나"가 이 표를 보는 이유인데도.
+            assert.ok(/if \(rendered\.has\(idx\)\) \{ syncObjSummary\(card\); \}/.test(html),
+                'doSearch가 요약 표를 갱신하지 않는다');
+            assert.ok(/if \(curQ\) \{ syncObjSummary\(card\); \}/.test(html),
+                '검색 중 자동으로 펼쳐진 영역의 요약이 걸러지지 않은 채로 그려진다');
+        });
+
+        test('오브젝트는 딸린 섹션이 걸려도 남는다', () => {
+            const src = html.match(/function syncObjSummary\(card\)[\s\S]*?\n    \}/);
+            assert.ok(src, 'syncObjSummary를 찾지 못했다');
+            assert.ok(/const keep = parentHit \|\| detailHit\.indexOf\(true\) !== -1;/.test(src![0]),
+                '이름만 대조하면 "어느 오브젝트에 있나"에 답하지 못한다');
+        });
+
+        test('섹션 행 표시는 토글과 검색을 한 곳에서 합쳐 정한다', () => {
+            // 두 곳에서 각자 display를 만지면 나중에 실행된 쪽이 이기고, 그
+            // 순간부터 버튼 상태와 화면이 갈라진다 — 이 릴리스가 고친 결함이다.
+            const writes = (html.match(/\.style\.display = show \? 'table-row' : 'none'/g) ?? []).length;
+            assert.strictEqual(writes, 1, `섹션 행의 display를 ${writes}곳에서 쓴다 — 한 곳이어야 한다`);
+            const src = html.match(/function syncObjSummary\(card\)[\s\S]*?\n    \}/);
+            assert.ok(/const show = keep && rowsOn && \(parentHit \|\| detailHit\[i\]\)/.test(src![0]),
+                '두 조건(토글·검색)을 함께 보지 않는다');
+        });
+
+        test('하이라이트 전 원본 마크업을 보관한다', () => {
+            // mark를 덧칠한 위에 또 칠하면 행이 조금씩 망가진다.
+            const src = html.match(/function restoreRowHtml\(row\)[\s\S]*?\n    \}/);
+            assert.ok(src, 'restoreRowHtml을 찾지 못했다');
+            assert.ok(/staticOrig\.set\(row, row\.innerHTML\)/.test(src![0])
+                && /row\.innerHTML = orig/.test(src![0]), src![0]);
         });
 
         test('접기 헤더에 키보드 포커스 표시가 있다', () => {

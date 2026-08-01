@@ -463,8 +463,8 @@ export function buildMemoryMapStrings(): Record<string, string> {
         // 이 버튼의 title 은 라벨을 그대로 되풀이하고 있었다 — 지연만 있고 더
         // 알려 주는 것이 없는 툴팁이다. 이름을 바꾼 이유를 여기서 말한다.
         expandAllHint: t(
-            '영역만 펼칩니다. 각 영역 안의 오브젝트 요약은 접힌 채로 남습니다.',
-            'Expands regions only. The Object Summary inside each region stays collapsed.'
+            '영역만 여닫습니다. 각 영역 안의 오브젝트 요약은 그대로 둡니다.',
+            'Folds regions only. The Object Summary inside each region is left as is.'
         ),
         toggleFunctionColumn: t('Function 열 표시 전환', 'Toggle Function column'),
         allSections: t('전체 섹션', 'All Sections'),
@@ -1278,6 +1278,10 @@ const RD = ${regionDataJsLiteral};
 
         // Initialize DOM-based sort on obj-summary sortable-tables
         initSort(detail);
+
+        // 검색 도중 자동으로 펼쳐진 영역은 여기서 처음 그려진다 — 그 순간부터
+        // 현재 검색어를 반영해야 한다.
+        if (curQ) { syncObjSummary(card); }
     }
 
     function initVT(vp, idx) {
@@ -1496,15 +1500,25 @@ const RD = ${regionDataJsLiteral};
         setRegionExpanded(card, detail.style.display === 'none');
     };
 
-    // --- Toggle-All button label reflects the next action: if any region is
-    // expanded, clicking will collapse all; otherwise it will expand all.
+    // --- Toggle-All: 라벨과 클릭 동작은 "전부 펼쳐졌을 때만 접기", 글리프는
+    // 지금 상태를 가리킨다.
+    /**
+     * 영역들의 펼침 상태. any 는 글리프(= 지금 상태), all 은 라벨과 클릭
+     * 동작(= 다음 동작)을 정한다. 두 곳에서 따로 세면 어긋나므로 한 곳에서 낸다.
+     */
+    function regionFoldState() {
+        let any = false, all = true;
+        const details = document.querySelectorAll('.region-card .region-detail');
+        details.forEach(function(detail) {
+            if (detail.style.display !== 'none') { any = true; } else { all = false; }
+        });
+        return { any: any, all: all && details.length > 0 };
+    }
+
     window.syncToggleAllLabel = function() {
         const btn = document.getElementById('toggleAllBtn');
         if (!btn) return;
-        let anyExpanded = false;
-        document.querySelectorAll('.region-card .region-detail').forEach(function(detail) {
-            if (detail.style.display !== 'none') anyExpanded = true;
-        });
+        const state = regionFoldState();
         // \uAE00\uB9AC\uD504\uB294 **\uC9C0\uAE08 \uC0C1\uD0DC**\uB97C \uAC00\uB9AC\uD0A8\uB2E4(\u25BC \uD558\uB098\uB77C\uB3C4 \uD3BC\uCCD0\uC9D0 / \u25B6 \uC804\uBD80 \uC811\uD798).
         // \uB77C\uBCA8\uC740 \uB2E4\uC74C \uB3D9\uC791\uC774\uB2E4. 0.6.54\uAE4C\uC9C0\uB294 \uAE00\uB9AC\uD504\uB3C4 \uB2E4\uC74C \uB3D9\uC791\uC744 \uAC00\uB9AC\uCF1C,
         // \uAC19\uC740 \uD654\uBA74\uC758 \uB2E4\uB978 \uAE00\uB9AC\uD504(\uC601\uC5ED \uD5E4\uB354 \u00B7 Object Summary \u00B7 Function \uC5F4)\uC640
@@ -1513,25 +1527,18 @@ const RD = ${regionDataJsLiteral};
         // \uAE00\uB9AC\uD504\uB294 textContent \uB85C \uB123\uC73C\uBBC0\uB85C \uC811\uADFC \uAC00\uB2A5\uD55C \uC774\uB984\uC5D0 \uADF8\uB300\uB85C \uC11E\uC778\uB2E4
         // ("\uAC80\uC740 \uC624\uB978\uCABD \uC0BC\uAC01\uD615 \uC601\uC5ED \uBAA8\uB450 \uD3BC\uCE58\uAE30"). \uC774\uB984\uC740 aria-label \uB85C \uB530\uB85C
         // \uC900\uB2E4 \u2014 \uD654\uBA74 \uBB38\uAD6C\uB97C \uD3EC\uD568\uD558\uBBC0\uB85C label-in-name \uB3C4 \uC9C0\uD0A8\uB2E4.
-        if (anyExpanded) {
-            btn.textContent = '\u25BC ' + S.collapseAll;
-            btn.setAttribute('aria-label', S.collapseAll);
-            btn.setAttribute('title', S.expandAllHint);
-            btn.setAttribute('aria-expanded', 'true');
-        } else {
-            btn.textContent = '\u25B6 ' + S.expandAll;
-            btn.setAttribute('aria-label', S.expandAll);
-            btn.setAttribute('title', S.expandAllHint);
-            btn.setAttribute('aria-expanded', 'false');
-        }
+        // \uB77C\uBCA8\uC740 "\uC804\uBD80 \uD3BC\uCCD0\uC84C\uC744 \uB54C\uB9CC \uC811\uAE30"\uB2E4. \uD558\uB098\uB77C\uB3C4 \uC811\uD600 \uC788\uC73C\uBA74 \uB2E4\uC74C \uB3D9\uC791\uC740
+        // \uB098\uBA38\uC9C0\uB97C \uB9C8\uC800 \uD3BC\uCE58\uB294 \uAC83 \u2014 \uC608\uC804\uC5D0\uB294 \uD558\uB098\uB9CC \uD3BC\uCCD0\uB3C4 \uB77C\uBCA8\uC774 "\uBAA8\uB450 \uC811\uAE30"\uB85C
+        // \uBC14\uB00C\uC5B4, \uB098\uBA38\uC9C0\uB97C \uD3BC\uCE58\uB824\uBA74 \uC811\uC5C8\uB2E4\uAC00 \uB2E4\uC2DC \uD3BC\uCCD0\uC57C \uD588\uB2E4(\uB450 \uBC88 \uD074\uB9AD).
+        const label = state.all ? S.collapseAll : S.expandAll;
+        btn.textContent = (state.any ? '\u25BC ' : '\u25B6 ') + label;
+        btn.setAttribute('aria-label', label);
+        btn.setAttribute('title', S.expandAllHint);
+        btn.setAttribute('aria-expanded', state.any ? 'true' : 'false');
     };
 
     window.toggleAll = function() {
-        let anyExpanded = false;
-        document.querySelectorAll('.region-card .region-detail').forEach(function(detail) {
-            if (detail.style.display !== 'none') anyExpanded = true;
-        });
-        window.foldAll(anyExpanded);
+        window.foldAll(regionFoldState().all);
         window.syncToggleAllLabel();
     };
 
@@ -1766,6 +1773,10 @@ const RD = ${regionDataJsLiteral};
                 const detail = card.querySelector('.region-detail');
                 if (detail && detail.style.display === 'none') { setRegionExpanded(card, true); }
             }
+
+            // 요약 표도 같은 검색어를 따른다. 이게 없으면 한 카드 안에서
+            // 섹션 표는 걸러진 결과를, 요약 표는 전체 목록을 보여 준다.
+            if (rendered.has(idx)) { syncObjSummary(card); }
         });
 
         // Static tables (overview, all-sections): hide non-matches, highlight matches.
@@ -2091,13 +2102,13 @@ const RD = ${regionDataJsLiteral};
      * \uBD88\uBCC0\uC2DD\uC740 \uD558\uB098\uB2E4: \uBC84\uD2BC\uC758 \uC0C1\uD0DC\uB294 \uB298 \uD654\uBA74\uC5D0 \uC2E4\uC81C\uB85C \uBCF4\uC774\uB294 \uAC83\uACFC \uAC19\uB2E4.
      */
     function resetObjDetailRows(header, body) {
-        body.querySelectorAll('.obj-detail-row').forEach(function(el) { el.style.display = 'none'; });
         const bar = header.closest('.obj-summary-bar');
         const btn = bar && bar.querySelector('[data-action="toggle-obj-detail-rows"]');
         if (btn) {
             btn.setAttribute('aria-pressed', 'false');
             btn.textContent = S.objDetailRows + ' \u25B6';
         }
+        syncObjSummary(body.closest('.region-card'));
     }
 
     window.toggleObjSummary = function(header) {
@@ -2105,6 +2116,71 @@ const RD = ${regionDataJsLiteral};
         if (!body) { return; }
         setObjSummaryExpanded(header, body.style.display === 'none');
     };
+
+    /**
+     * 요약 표의 행 표시를 한 번에 맞춘다.
+     *
+     * 이 표의 행 하나에 조건이 둘 걸린다 — 섹션 행 토글이 켜졌는지, 그리고
+     * 검색어에 걸리는지. 두 곳에서 각자 display 를 만지면 나중에 실행된 쪽이
+     * 이기고, 그 순간부터 버튼 상태와 화면이 갈라진다(이 릴리스가 고친 결함이
+     * 바로 그것이다). 그래서 **여기서만** 두 조건을 합쳐 계산한다.
+     *
+     * 오브젝트는 자기 이름이 걸리거나 **딸린 섹션 중 하나라도** 걸리면 남는다.
+     * 검색 중에 이 표를 여는 이유가 "이 검색어가 어느 오브젝트에 있나"이기
+     * 때문이다. 매치 개수(◀▶ 이동)에는 넣지 않는다 — 같은 바이트가 아래
+     * 섹션 표에 이미 매치로 잡혀 있어 두 번 세게 된다.
+     */
+    function syncObjSummary(card) {
+        const body = card && card.querySelector('.obj-summary-body');
+        if (!body) { return; }
+        const bar = card.querySelector('.obj-summary-bar');
+        const btn = bar && bar.querySelector('[data-action="toggle-obj-detail-rows"]');
+        const rowsOn = !!btn && btn.getAttribute('aria-pressed') === 'true';
+        const q = curQ;
+
+        const groups = [];
+        body.querySelectorAll('tbody tr').forEach(function(row) {
+            if (row.classList.contains('obj-detail-row')) {
+                if (groups.length > 0) { groups[groups.length - 1].details.push(row); }
+            } else {
+                groups.push({ parent: row, details: [] });
+            }
+        });
+
+        groups.forEach(function(g) {
+            // 하이라이트를 걷어내고 원래 마크업으로 되돌린 뒤 다시 칠한다.
+            // 처음 만지는 행은 이때 원본이 보관된다.
+            restoreRowHtml(g.parent);
+            g.details.forEach(restoreRowHtml);
+
+            if (!q) {
+                g.parent.style.display = '';
+                g.details.forEach(function(r) { r.style.display = rowsOn ? 'table-row' : 'none'; });
+                return;
+            }
+
+            const parentHit = g.parent.textContent.toLowerCase().indexOf(q) !== -1;
+            const detailHit = g.details.map(function(r) { return r.textContent.toLowerCase().indexOf(q) !== -1; });
+            const keep = parentHit || detailHit.indexOf(true) !== -1;
+
+            g.parent.style.display = keep ? '' : 'none';
+            if (parentHit) { markTextNodes(g.parent, q); }
+            g.details.forEach(function(r, i) {
+                // 오브젝트 이름이 걸린 경우엔 딸린 섹션을 모두 보여 준다 —
+                // 그 오브젝트 전체가 결과이기 때문이다.
+                const show = keep && rowsOn && (parentHit || detailHit[i]);
+                r.style.display = show ? 'table-row' : 'none';
+                if (show && detailHit[i]) { markTextNodes(r, q); }
+            });
+        });
+    }
+
+    /** 원본 마크업 보관/복원. 정적 표와 같은 WeakMap 을 쓴다. */
+    function restoreRowHtml(row) {
+        const orig = staticOrig.get(row);
+        if (orig === undefined) { staticOrig.set(row, row.innerHTML); }
+        else if (row.innerHTML !== orig) { row.innerHTML = orig; }
+    }
 
     // --- Toggle detail rows in per-region object summary ---
     window.toggleObjDetailRows = function(btn) {
@@ -2114,11 +2190,11 @@ const RD = ${regionDataJsLiteral};
         // \uC5C6\uB294 \uD45C\uC5D0\uC11C\uB294 \uC61B \uBC29\uC2DD\uC774 \uB298 "\uC774\uBBF8 \uBCF4\uC784"\uC73C\uB85C \uD310\uC815\uD574 \uC544\uBB34 \uC77C\uB3C4 \uD558\uC9C0
         // \uC54A\uC558\uACE0, \uBC84\uD2BC \uB77C\uBCA8\uACFC \uC2E4\uC81C \uC0C1\uD0DC\uAC00 \uAC08\uB77C\uC9C8 \uC790\uB9AC\uB3C4 \uC5C6\uC564\uB2E4.
         const show = btn.getAttribute('aria-pressed') !== 'true';
-        body.querySelectorAll('.obj-detail-row').forEach(function(el) {
-            el.style.display = show ? 'table-row' : 'none';
-        });
         btn.setAttribute('aria-pressed', show ? 'true' : 'false');
         btn.textContent = S.objDetailRows + (show ? ' \u25BC' : ' \u25B6');
+        // \uC2E4\uC81C \uD45C\uC2DC\uB294 syncObjSummary \uAC00 \uC815\uD55C\uB2E4 \u2014 \uAC80\uC0C9 \uD544\uD130\uC640 \uC774 \uD1A0\uAE00\uC774 \uAC19\uC740
+        // \uD589\uC744 \uB450\uACE0 \uB2E4\uD22C\uC9C0 \uC54A\uB3C4\uB85D \uACC4\uC0B0\uC744 \uD55C \uACF3\uC5D0 \uBAA8\uC740\uB2E4.
+        syncObjSummary(body.closest('.region-card'));
 
         // \uC811\uD78C \uC694\uC57D \uC548\uC758 \uD589\uC744 \uCF1C\uB294 \uAC83\uC740 **\uD654\uBA74\uC0C1 \uC544\uBB34 \uC77C\uB3C4 \uC77C\uC5B4\uB098\uC9C0 \uC54A\uB294**
         // \uC870\uC791\uC774\uC5C8\uB2E4. Object Summary\uB294 \uAE30\uBCF8\uC774 \uC811\uD798\uC774\uB77C \uC774 \uBC84\uD2BC\uC744 \uCC98\uC74C \uB204\uB974\uB294
