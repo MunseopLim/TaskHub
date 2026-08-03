@@ -110,7 +110,42 @@
         },
         "options": {
           "type": "object",
-          "description": "Options for 'fileDialog' or 'folderDialog' types, based on VS Code's OpenDialogOptions. Set 'canSelectMany': true on a fileDialog to let the user pick several files; the selected paths are then available as ${taskId.paths} (array), ${taskId.names}, and ${taskId.count}."
+          "description": "Options for 'fileDialog' or 'folderDialog' types, based on VS Code's OpenDialogOptions. Keys not listed here are passed through to VS Code unchanged.",
+          "properties": {
+            "canSelectMany": {
+              "type": "boolean",
+              "default": false,
+              "description": "Allow picking several files (fileDialog) or folders (folderDialog). Everything picked is exposed as ${taskId.paths} (array of absolute paths), ${taskId.names} (array of base names) and ${taskId.count}. The single-value references (${taskId.path}, .dir, .name, ...) keep pointing at the first item. In an 'args' array, an element that is exactly \"${taskId.paths}\" expands into one argument per item; anywhere else the array is joined with spaces."
+            },
+            "openLabel": {
+              "type": "string",
+              "description": "Label of the confirmation button, e.g. \"Select firmware\"."
+            },
+            "title": {
+              "type": "string",
+              "description": "Dialog title."
+            },
+            "defaultUri": {
+              "type": "string",
+              "description": "Where the dialog opens, as a path or URI. When omitted TaskHub reopens the location this task last used."
+            },
+            "filters": {
+              "type": "object",
+              "description": "Extension filters, e.g. { \"Firmware\": [\"elf\", \"bin\", \"hex\"] }. Ignored by folderDialog.",
+              "additionalProperties": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "canSelectFiles": {
+              "type": "boolean",
+              "description": "Whether files can be picked. Leave unset: fileDialog already allows files, and folderDialog forces this to false."
+            },
+            "canSelectFolders": {
+              "type": "boolean",
+              "description": "Whether folders can be picked. Leave unset and use type 'folderDialog' instead, which forces this to true."
+            }
+          }
         },
         "prompt": {
           "type": "string",

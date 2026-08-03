@@ -30,6 +30,7 @@ import type { ActionItem, Task, OutputCapture, DiagnosticPattern } from './schem
 import {
     interpolatePipelineVariables,
     expandArgTemplate,
+    resolvePipelineReference,
     tokenizeCommandLine,
     RESERVED_CAPTURE_NAMES,
     INTERACTIVE_TASK_TYPES,
@@ -839,9 +840,10 @@ function analyzeActionTasks(
          * 같은 액션에 Preview Run 을 돌리면 "모두 해석됨"이 나와 두 진단이
          * 정면으로 어긋났다.
          *
-         * 접두사가 붙은 형태(`"--file=${pick.paths}"`)와 명령 **문자열** 안의
-         * 배열 참조는 런타임도 펼치지 않아 실제로 리터럴이 되므로, 그쪽
-         * 경고는 이 변경 뒤에도 그대로 남는다.
+         * 0.6.57 부터 배열은 문자열 자리에서 **공백으로 이어 붙는다**. 그래서
+         * 접두사가 붙은 형태(`"--file=${pick.paths}"`)도 더는 리터럴이 아니지만,
+         * 인자 **한 칸**에 경로 여러 개가 들어가므로 의도대로 동작할 리 없다 —
+         * 미해결이 아니라 `args.array-joined` 로 따로 알린다.
          */
         const visitArgTemplate = (value: unknown): void => {
             if (typeof value !== 'string') { return; }
@@ -849,6 +851,45 @@ function analyzeActionTasks(
                 interpolated.push(out);
             }
         };
+
+        /**
+         * 배열 참조가 `args` 원소 안에 **다른 글자와 섞여** 있는 경우.
+         *
+         * 런타임은 원소 전체가 참조 하나일 때만 인자 여러 개로 펼친다. 섞여
+         * 있으면 배열이 공백으로 이어 붙어 **인자 한 칸**이 되고, 경로에 공백이
+         * 사이의 **경계가 사라진다**. argv 라 셸이 다시 쪼개지지는 않지만,
+         * 스크립트는 값 하나만 받는다 — 조용히 잘못 도는 자리라 짚어 준다.
+         */
+        /**
+         * 참조가 가리키는 값이 배열인가.
+         *
+         * 누적된 컨텍스트만 보면 **전방 참조를 놓친다.** Doctor 는 선언 순서대로
+         * 도는데 런타임 스케줄러는 `${pick.paths}` 를 보고 의존성을 자동 추론해
+         * 순서를 뒤집으므로, 뒤에 선언된 `fileDialog` 를 앞 태스크가 참조하는
+         * 액션은 정상 동작한다 — 그런데 그 시점의 컨텍스트에는 `pick` 이 없어
+         * 배열인지 알 수 없고, 경고가 조용히 빠졌다. 아직 시뮬레이션되지 않은
+         * 태스크는 여기서 따로 흉내 내어 **결과의 모양만** 본다.
+         */
+        const referencesArray = (expression: string): boolean => {
+            if (Array.isArray(resolvePipelineReference(expression, interpolationContext))) { return true; }
+            const head = expression.split('.')[0];
+            if (!head || Object.prototype.hasOwnProperty.call(allResults, head)) { return false; }
+            const forward = tasksById.get(head);
+            if (!forward) { return false; }
+            return Array.isArray(resolvePipelineReference(expression, { [head]: simulateTaskResult(forward) }));
+        };
+
+        const joinedArgRefs: string[] = [];
+        if (Array.isArray(task.args)) {
+            for (const a of task.args) {
+                if (typeof a !== 'string' || /^\$\{[^}]+\}$/.test(a.trim())) { continue; }
+                for (const m of a.matchAll(/\$\{([^}]+)\}/g)) {
+                    if (referencesArray(m[1])) {
+                        joinedArgRefs.push(m[0]);
+                    }
+                }
+            }
+        }
 
         // shell/command
         if (typeof task.command === 'string') {
@@ -933,6 +974,18 @@ function analyzeActionTasks(
                 code: 'variable.unresolved',
                 message: `Task '${item.id}.${task.id}' has unresolved variable(s) under simulated inputs: ${merged.join(', ')}. At runtime these pass through as literal '\${…}'.`,
                 messageKo: `Task '${item.id}.${task.id}'에 시뮬레이션 입력으로 해석되지 않는 변수 참조가 있습니다: ${merged.join(', ')}. 런타임에서는 리터럴 '\${…}'로 전달됩니다.`,
+            });
+        }
+        if (joinedArgRefs.length > 0) {
+            const refs = Array.from(new Set(joinedArgRefs)).join(', ');
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: findIdLine(input.rawText, task.id),
+                severity: 'warning',
+                code: 'args.array-joined',
+                message: `Task '${item.id}.${task.id}' mixes an array reference (${refs}) with other text inside an 'args' element. Only an element that is exactly '\${…}' expands into one argument per item; here the array is joined with spaces into a single argument, so the boundaries between the items are lost and the program receives one value.`,
+                messageKo: `Task '${item.id}.${task.id}'의 'args' 원소 안에서 배열 참조(${refs})가 다른 글자와 섞여 있습니다. 원소 전체가 '\${…}' 하나일 때만 항목 수만큼의 인자로 펼쳐집니다. 지금은 공백으로 이어 붙어 **인자 한 칸**이 되어, 항목 사이의 경계가 사라지고 프로그램이 값 하나로 받습니다.`,
             });
         }
         if (uncaptured.size > 0) {

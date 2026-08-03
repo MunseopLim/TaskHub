@@ -474,6 +474,48 @@ suite('Doctor', () => {
             `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
     });
 
+    /**
+     * `folderDialog` 도 다중 선택이 되고(0.6.57) 같은 세 키를 돌려준다.
+     * 시뮬레이션이 fileDialog 만 채우면, 런타임은 멀쩡히 해석하는데 Doctor 만
+     * "리터럴로 전달됩니다"라고 말하는 어긋남이 폴더 쪽에 생긴다.
+     */
+    const folderMultiAction = (args: string[]) => ({
+        id: 'a.folder-multi',
+        title: 'folder-multi',
+        action: {
+            description: 'd',
+            tasks: [
+                { id: 'pick', type: 'folderDialog', options: { canSelectMany: true } },
+                { id: 'run', type: 'command', command: 'py', args }
+            ]
+        }
+    });
+
+    test('does not flag folderDialog paths/names/count', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([folderMultiAction(
+            ['${pick.paths}', '--names', '${pick.names}', '--n', '${pick.count}']
+        )])], v);
+        assert.strictEqual(unresolvedCount(findings), 0,
+            `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
+    });
+
+    test('folderDialog 단일 선택에서도 paths 가 해석된다', () => {
+        // `handleFolderDialog` 은 `canSelectMany` 와 무관하게 세 키를 채운다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([{
+            id: 'a.folder-one', title: 'folder-one',
+            action: {
+                description: 'd',
+                tasks: [
+                    { id: 'pick', type: 'folderDialog' },
+                    { id: 'run', type: 'command', command: 'py', args: ['${pick.paths}'] }
+                ]
+            }
+        }])], v);
+        assert.strictEqual(unresolvedCount(findings), 0, codes(findings).join(','));
+    });
+
     test('does not flag an exact reference to the `names` array in `args`', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([multiSelectAction(['${pick.names}'])])], v);
@@ -504,13 +546,76 @@ suite('Doctor', () => {
             `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
     });
 
-    test('still flags an array reference with a literal prefix in `args`', () => {
-        // 런타임도 이 형태는 펼치지 않는다 — 리터럴 `${…}` 가 그대로 자식
-        // 프로세스로 간다. 경고가 사라지면 안 된다.
+    test('flags an array reference with a literal prefix in `args` as joined', () => {
+        // 런타임은 이 형태를 펼치지 않는다. 0.6.57부터 배열이 공백으로 이어
+        // 붙으므로 리터럴은 아니지만, 경로 여러 개가 **인자 한 칸**에 들어가고
+        // 항목 사이의 경계가 사라져 스크립트가 값 하나로 받는다 — argv 라
+        // 셸이 다시 쪼개지지는 않지만, 조용히 잘못 도는 자리다.
         const v = compileValidator();
         const findings = runDoctor([makeInput([multiSelectAction(['--file=${pick.paths}'])])], v);
-        assert.ok(findings.some(f => f.code === 'variable.unresolved' && f.message.includes('${pick.paths}')),
-            `expected variable.unresolved for the prefixed form, got ${codes(findings).join(',')}`);
+        assert.ok(findings.some(f => f.code === 'args.array-joined' && f.message.includes('${pick.paths}')),
+            `expected args.array-joined for the prefixed form, got ${codes(findings).join(',')}`);
+        assert.strictEqual(unresolvedCount(findings), 0,
+            '이어 붙는 것이지 미해결이 아니다 — 두 경고가 같은 자리를 두고 다르게 말하면 안 된다');
+    });
+
+    test('전방 참조에서도 args.array-joined 를 잡는다', () => {
+        // Doctor 는 선언 순서대로 돌지만 런타임 스케줄러는 `${pick.paths}` 를
+        // 보고 의존성을 자동 추론해 순서를 뒤집는다 — 즉 이 액션은 실제로
+        // 동작하고, 인자도 실제로 이어 붙는다. 누적 컨텍스트만 보면 그 시점에
+        // `pick` 이 없어 경고가 조용히 빠졌다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([{
+            id: 'a.forward', title: 'forward',
+            action: {
+                description: 'd',
+                tasks: [
+                    // 순차 실행이면 barrier(뒤 태스크는 앞을 모두 기다린다) 와
+                    // 자동 추론 의존성이 **순환**을 만들어 아예 돌지 않는다 —
+                    // 그러면 "런타임은 도는데 경고만 빠졌다" 를 검증할 수 없다.
+                    { id: 'run', type: 'command', command: 'py', args: ['--files=${pick.paths}'], parallel: true },
+                    { id: 'pick', type: 'fileDialog', options: { canSelectMany: true }, parallel: true }
+                ]
+            }
+        }])], v);
+        assert.ok(findings.some(f => f.code === 'args.array-joined' && f.message.includes('${pick.paths}')),
+            `expected args.array-joined for the forward reference, got ${codes(findings).join(',')}`);
+        assert.ok(!findings.some(f => f.code === 'dependsOn.cycle'),
+            '픽스처가 순환이면 이 액션은 애초에 돌지 않는다 — 전방 참조를 검증한 것이 아니다');
+    });
+
+    test('전방 참조라도 스칼라 참조에는 경고하지 않는다', () => {
+        // `${pick.path}` 는 문자열이다 — 이어 붙을 것이 없다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([{
+            id: 'a.forward-scalar', title: 'forward-scalar',
+            action: {
+                description: 'd',
+                tasks: [
+                    { id: 'run', type: 'command', command: 'py', args: ['--file=${pick.path}'], parallel: true },
+                    { id: 'pick', type: 'fileDialog', options: { canSelectMany: true }, parallel: true }
+                ]
+            }
+        }])], v);
+        assert.ok(!findings.some(f => f.code === 'args.array-joined'),
+            `스칼라 참조에 경고가 붙었다: ${codes(findings).join(',')}`);
+    });
+
+    test('존재하지 않는 태스크 참조는 array-joined 로 보지 않는다', () => {
+        // 그쪽은 `variable.unresolved` 의 몫이다 — 두 경고가 같은 자리를 두고
+        // 다르게 말하면 안 된다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([multiSelectAction(['--x=${nosuch.paths}'])])], v);
+        assert.ok(!findings.some(f => f.code === 'args.array-joined'), codes(findings).join(','));
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'), codes(findings).join(','));
+    });
+
+    test('does not flag the bare array form in `args` as joined', () => {
+        // 정확히 참조 하나인 원소는 인자 여러 개로 펼쳐진다 — 문서가 권하는 형태다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([multiSelectAction(['${pick.paths}'])])], v);
+        assert.ok(!findings.some(f => f.code === 'args.array-joined'),
+            `권장 형태에 경고가 붙었다: ${codes(findings).join(',')}`);
     });
 
     test('still flags a typo against a multi-select task in `args`', () => {
@@ -520,9 +625,11 @@ suite('Doctor', () => {
             `expected variable.unresolved for the typo, got ${codes(findings).join(',')}`);
     });
 
-    test('still flags an array reference inside the command string', () => {
-        // `command` 는 토큰마다 보간하므로 배열 값이 리터럴로 남는다. `args` 를
-        // 쓰라고 알려 줘야 하는 자리이므로 경고가 유지돼야 한다.
+    test('명령 문자열 안의 배열 참조는 이어 붙어 해석된다 (0.6.57)', () => {
+        // 예전에는 리터럴 `${pick.paths}` 가 그대로 자식 프로세스로 가서
+        // `variable.unresolved` 로 잡혔다. 이제 공백으로 이어 붙으므로 해석된
+        // 것이 맞다 — 다만 경로에 공백이 있으면 셸이 다시 쪼개므로, 그 위험은
+        // `shell.interpolated-command` / `command.nested-interpreter` 가 맡는다.
         const v = compileValidator();
         const findings = runDoctor([makeInput([
             {
@@ -537,8 +644,8 @@ suite('Doctor', () => {
                 }
             }
         ])], v);
-        assert.ok(findings.some(f => f.code === 'variable.unresolved' && f.message.includes('${pick.paths}')),
-            `expected variable.unresolved for the command-string form, got ${codes(findings).join(',')}`);
+        assert.strictEqual(unresolvedCount(findings), 0,
+            `해석되는 참조를 미해결로 보고했다: ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
     });
 
     test('does not flag a fully-resolved upstream reference', () => {
@@ -1101,5 +1208,58 @@ suite('Doctor', () => {
             assert.ok(found.includes('output.not-captured'), `expected output.not-captured, got: ${found.join(', ')}`);
             assert.ok(found.includes('output.ignored'), `expected output.ignored, got: ${found.join(', ')}`);
         });
+    });
+});
+
+/**
+ * 다이얼로그 `options` 의 스키마 (0.6.57).
+ *
+ * `options` 는 `{"type":"object"}` 하나뿐이었다. 값은 런타임으로 잘 전달되고
+ * 오류도 없지만, **에디터가 제안할 것이 없다** — `canSelectMany` 를 쓰려던
+ * 사용자가 자동완성에 나오지 않아 그런 설정이 없는 줄 알았다는 보고가 이
+ * 항목의 출발점이다. 스키마가 곧 문서인 자리다.
+ */
+suite('actions.schema.json — 다이얼로그 options', () => {
+    const options: any = (actionSchema as any).definitions?.Task?.properties?.options;
+
+    test('제안할 키들이 스키마에 있다', () => {
+        assert.ok(options, 'options 스키마를 찾지 못했다 — 경로가 바뀌었으면 이 검사를 고칠 것');
+        assert.ok(options.properties, 'properties 가 없으면 에디터가 아무것도 제안하지 못한다');
+        for (const key of ['canSelectMany', 'openLabel', 'title', 'defaultUri', 'filters', 'canSelectFiles', 'canSelectFolders']) {
+            assert.ok(options.properties[key], `${key} 가 스키마에 없다`);
+            assert.ok(typeof options.properties[key].description === 'string' && options.properties[key].description.length > 0,
+                `${key} 에 설명이 없다 — 제안 목록에 이름만 뜨면 무엇인지 알 수 없다`);
+        }
+    });
+
+    test('canSelectMany 설명이 결과 참조까지 알려 준다', () => {
+        const d: string = options.properties.canSelectMany.description;
+        for (const ref of ['paths', 'names', 'count']) {
+            assert.ok(d.includes(ref), `설명에 \${taskId.${ref}} 안내가 없다: ${d}`);
+        }
+    });
+
+    test('알려지지 않은 키도 그대로 통과시킨다 (VS Code 옵션 전체를 열어 둔다)', () => {
+        const v = compileValidator();
+        const ok = v([{
+            id: 'a.x', title: 'x',
+            action: { description: 'd', tasks: [{ id: 'pick', type: 'fileDialog', options: { canSelectMany: true, someFutureVsCodeOption: 1 } }] }
+        }]);
+        assert.strictEqual(ok, true, JSON.stringify(v.errors));
+    });
+
+    test('실제 다중 선택 액션이 스키마를 통과한다', () => {
+        const v = compileValidator();
+        const ok = v([{
+            id: 'a.multi', title: 'multi',
+            action: {
+                description: 'd',
+                tasks: [
+                    { id: 'pick', type: 'folderDialog', options: { canSelectMany: true, openLabel: 'Select output folders' } },
+                    { id: 'run', type: 'command', command: 'py', args: ['r.py', '${pick.paths}'] }
+                ]
+            }
+        }]);
+        assert.strictEqual(ok, true, JSON.stringify(v.errors));
     });
 });

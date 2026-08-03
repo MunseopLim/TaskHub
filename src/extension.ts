@@ -24,6 +24,7 @@ import { buildPreviewReport } from './previewRun';
 import { runDoctor, DoctorFinding, DoctorInput } from './doctor';
 import { createZipArchive, extractZipArchive } from './archiveUtils';
 import { DIALOG_SCOPE, coerceDefaultUri, initDialogMemory, showOpenDialogWithMemory, showSaveDialogWithMemory, taskDialogScope } from './dialogMemory';
+import { collectVariableCompletions, referencePrefixAt } from './variableCompletions';
 
 // Compile the actions JSON-schema validator once and reuse it. Re-compiling on
 // every load path (activation + every view refresh + every executeAction) was
@@ -5396,7 +5397,37 @@ export async function executeAction(
  * 잘못된 정규식은 입력 시점과 **같게** 무시한다 — 두 경로가 다른 판정을 하면
  * 그것대로 혼란스럽다.
  */
+/**
+ * 0.6.57 이전 History 에 저장된 다이얼로그 결과에는 `paths` / `names` / `count`
+ * 가 없다 (`path` · `dir` · `name` … 뿐). 그대로 재사용하면 재실행에서
+ * `${pick.paths}` 가 리터럴로 남는다 — 저장된 입력이 있으면 핸들러 자체를
+ * 건너뛰기 때문이다.
+ *
+ * **단일 선택만 보정한다.** 고른 것이 하나였다면 남아 있는 `path` 로 배열을
+ * 그대로 복원할 수 있다. 다중 선택이었다면 첫 항목밖에 남아 있지 않아 복원이
+ * 불가능하므로, 보정하지 않고 {@link savedInputStillValid} 가 다시 고르게 한다 —
+ * 조용히 하나만 처리하면 "여러 개를 골랐던 실행"이 소리 없이 다른 일을 한다.
+ */
+export function backfillDialogArrays(task: any, saved: any): any {
+    if (task?.type !== 'fileDialog' && task?.type !== 'folderDialog') { return saved; }
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) { return saved; }
+    if (Array.isArray(saved.paths)) { return saved; }
+    if (typeof saved.path !== 'string' || saved.path.length === 0) { return saved; }
+    return {
+        ...saved,
+        paths: [saved.path],
+        names: [typeof saved.name === 'string' && saved.name.length > 0 ? saved.name : path.basename(saved.path)],
+        count: 1,
+    };
+}
+
 export function savedInputStillValid(task: any, saved: any): boolean {
+    // 옛 형식이면서 다중 선택인 다이얼로그는 복원할 수 없다 ({@link backfillDialogArrays}).
+    // `value` 검사보다 앞에 둔다 — 다이얼로그 결과에는 `value` 가 없어서
+    // 아래 조기 반환에 걸리면 이 검사에 닿지 못한다.
+    if ((task?.type === 'fileDialog' || task?.type === 'folderDialog') && task?.options?.canSelectMany === true) {
+        if (!saved || typeof saved !== 'object' || !Array.isArray((saved as any).paths)) { return false; }
+    }
     const value = saved && typeof saved === 'object' ? saved.value : undefined;
     if (typeof value !== 'string') { return true; }
     if (task.type === 'inputBox' && typeof task.validatePattern === 'string' && task.validatePattern.length > 0) {
@@ -5482,7 +5513,9 @@ async function executeSingleTask(
         );
     }
     if (usingPresetResult) {
-        result = presetResult;
+        // 옛 History 항목에는 배열 필드가 없다 — 보정하지 않으면 재실행에서만
+        // `${pick.paths}` 가 리터럴로 남는다.
+        result = backfillDialogArrays(task, presetResult);
     }
 
     if (!usingPresetResult) { switch (task.type) {
@@ -6405,12 +6438,22 @@ export async function handleFileDialog(task: any): Promise<FileDialogResult> {
     };
 }
 
-export async function handleFolderDialog(task: any): Promise<{ path: string, dir: string, name: string, fileNameOnly: string, fileExt: string }> {
+export async function handleFolderDialog(task: any): Promise<FileDialogResult> {
     const options: vscode.OpenDialogOptions = { ...(task.options || {}), defaultUri: coerceDefaultUri(task.options?.defaultUri) };
     options.canSelectFiles = false; options.canSelectFolders = true;
     const folderUri = await showOpenDialogWithMemory(taskDialogScope('folder', task), options);
-    if (folderUri && folderUri[0]) { return parsePathInfo(folderUri[0].fsPath); }
-    else { throw new PromptCancelledError(t('폴더 선택을 취소했습니다.', 'Folder selection was canceled.')); }
+    if (!folderUri || !folderUri[0]) { throw new PromptCancelledError(t('폴더 선택을 취소했습니다.', 'Folder selection was canceled.')); }
+    // `fileDialog` 와 같은 모양으로 돌려준다. `canSelectMany` 는 예전부터 VS Code
+    // 로 전달돼 폴더도 여러 개 고를 수 있었지만 결과는 첫 폴더만 쓰고 나머지를
+    // 조용히 버렸다 — 0.6.51 이전의 `fileDialog` 와 같은 결함이 폴더 쪽에만
+    // 남아 있었다. `path` 등 단일 필드는 첫 폴더를 가리키므로 기존 액션은
+    // 그대로 동작한다. `names` 는 폴더 이름이다.
+    return {
+        ...parsePathInfo(folderUri[0].fsPath),
+        paths: folderUri.map(uri => uri.fsPath),
+        names: folderUri.map(uri => path.basename(uri.fsPath)),
+        count: folderUri.length,
+    };
 }
 
 async function handleInputBox(task: any, token?: vscode.CancellationToken): Promise<{ value: string }> {
@@ -7867,6 +7910,41 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(historyProvider.view.onDidChangeVisibility(e => {
         if (e.visible) { historyProvider.refresh(); }
     }));
+
+    // `${…}` 참조 자동완성.
+    //
+    // 스키마는 옵션 **키**까지만 제안한다. `${pick.paths}` 는 값 문자열 안에
+    // 있고 무엇이 유효한지가 같은 액션의 다른 태스크 타입에 달렸으므로 스키마로는
+    // 표현할 자리가 없다 — `canSelectMany` 는 제안되는데 정작 그 결과인 `.paths`
+    // 는 아무 데서도 보이지 않아 "그런 것이 없는 줄 알았다"는 보고가 나왔다.
+    context.subscriptions.push(
+        vscode.languages.registerCompletionItemProvider(
+            [
+                { scheme: 'file', pattern: '**/.vscode/actions.json' },
+                { scheme: 'file', pattern: '**/.vscode/presets/*.json' },
+                { scheme: 'file', pattern: '**/media/actions*.json' },
+            ],
+            {
+                provideCompletionItems(document, position) {
+                    const text = document.getText();
+                    const offset = document.offsetAt(position);
+                    const ref = referencePrefixAt(text, offset);
+                    if (!ref) { return undefined; }
+                    // 이미 입력한 부분을 함께 대체한다 — 그러지 않으면
+                    // `${pick.` 뒤에 `pick.paths` 가 덧붙는다.
+                    const range = new vscode.Range(document.positionAt(ref.start), position);
+                    return collectVariableCompletions(text, offset).map(entry => {
+                        const item = new vscode.CompletionItem(entry.name, vscode.CompletionItemKind.Variable);
+                        item.detail = entry.detail;
+                        item.range = range;
+                        item.insertText = entry.name;
+                        return item;
+                    });
+                },
+            },
+            '{', '.'
+        )
+    );
 
     // Register hover provider for number base conversion and SFR bit fields in C/C++ files
     const numberBaseHoverProvider = new NumberBaseHoverProvider();

@@ -56,6 +56,18 @@
     *   즐겨찾기 패널은 워크스페이스의 `.vscode/favorites.json`을 표시합니다.
     *   관련 JSON 파일이 수정, 생성 또는 삭제되면 해당 뷰는 자동으로 새로 고쳐집니다.
 
+### 편집 지원 (스키마 + `${…}` 자동완성)
+
+`actions.json`에는 JSON 스키마([schema/actions.schema.json](../schema/actions.schema.json))가 연결돼 있어 키·타입·허용값이 제안되고 잘못된 값에 밑줄이 그어집니다. `options` 안의 `canSelectMany` 같은 다이얼로그 옵션도 여기에 포함됩니다(0.6.57부터 — 그전에는 `options`가 빈 객체 타입이라 **아무것도 제안되지 않았습니다**).
+
+**결과 참조(`${…}`)는 스키마가 다룰 수 없습니다.** 값 문자열 *안*에 있고, 무엇이 유효한지가 같은 액션의 다른 태스크 타입에 달려 있기 때문입니다. 그래서 0.6.58부터 전용 자동완성을 제공합니다 — `${`를 입력하면 **같은 액션의 다른 태스크 id**와 `${workspaceFolder}` / `${extensionPath}`가, `${pick.`처럼 점을 찍으면 **그 태스크 타입이 실제로 내는 결과 키**가 제안됩니다 (`fileDialog`이면 `path` · `dir` · `paths` · `names` · `count` …).
+
+- 결과 키 목록은 Preview Run · Doctor가 쓰는 시뮬레이션과 **같은 출처**입니다. 태스크에 결과 키가 늘면 세 곳이 함께 늘어납니다.
+- `output.capture`로 이름을 정의했다면 그 이름도 함께 제안됩니다.
+- **해석되지 않을 참조는 제안하지 않습니다.** `passTheResultToNextTask: true`가 없는 `shell`/`command`의 `${id.output}`이 그 예입니다 — 런타임이 출력을 캡처하지 않아 리터럴로 남는 자리이고, Doctor의 `output.not-captured`가 잡는 가장 흔한 설정 실수입니다.
+- 자기 자신과 **다른 액션의 태스크**는 제안하지 않습니다(참조할 수 없습니다).
+- 편집 중이라 JSON이 아직 유효하지 않아도 동작합니다 — 자동완성이 불리는 시점의 문서는 거의 항상 미완성이기 때문입니다.
+
 ### 액션 소스와 병합 우선순위
 
 Actions 패널의 목록은 세 종류의 소스를 병합해 만듭니다. 같은 `id`가 겹치면 **워크스페이스 > 프리셋 > 번들 예제** 순으로 우선합니다.
@@ -547,6 +559,12 @@ Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.tx
     - `${task_id.names}` — 각 파일명(확장자 포함, 배열)
     - `${task_id.count}` — 고른 파일 개수
 
+**고른 파일들이 있던 폴더는 `${task_id.dir}` 입니다.** OS 네이티브 파일 대화상자는 한 번에 한 폴더만 보여주므로 다중 선택은 **같은 폴더 안에서만** 이뤄집니다 — 그래서 파일을 몇 개 고르든 `dir` 은 그 폴더 하나를 가리킵니다. 폴더별 배열(`dirs`)을 따로 두지 않은 이유입니다. 반대로 폴더를 뺀 파일명만 필요하면 `${task_id.names}` 를 씁니다.
+
+**배열 참조를 문자열 안에 쓰면 공백으로 이어 붙습니다** (0.6.57부터). `"echo ${pick.paths}"`는 `echo /a/x.bin /a/y.bin`이 됩니다. 0.6.56까지는 이어 붙이지 않고 **`${pick.paths}`라는 글자를 그대로 남겨** 셸이나 파일 내용으로 흘려보냈는데, 그 값이 쓸모 있는 자리는 어디에도 없었습니다.
+
+> 다만 **경로에 공백이 있으면 셸이 그 안에서 다시 쪼갭니다.** 명령에 넘길 때는 아래 `args` 배열 확장을 쓰세요 — 항목마다 argv 한 칸이 되므로 셸이 개입하지 않습니다. TaskHub는 항목을 인용하지 않습니다: 단일 값(`${pick.path}`)을 그대로 넣는 것과 같은 규칙이고, 셸이 아닌 자리(`writeFile` 내용, 안내 문구)에 따옴표가 끼면 그쪽이 망가지기 때문입니다.
+
 #### 여러 파일을 명령 인자로 넘기기
 
 `args` 배열의 원소가 **정확히 배열 참조 하나**(`"${pick.paths}"` — 앞뒤에 다른 글자가 없음)이면, 그 자리가 **고른 파일 수만큼의 인자**로 펼쳐집니다. 개수가 정해지지 않은 위치 인자를 받는 스크립트에 그대로 맞출 수 있습니다.
@@ -587,16 +605,19 @@ py -3 make_report.py c:\test\test1.bin c:\test\test2.bin c:\test\test3.bin --deb
 
 - **경로에 공백이 있어도 안전합니다.** 각 항목이 별도 argv 원소로 들어가므로 `c:\my docs\a.bin` 이 두 인자로 갈라지지 않습니다. 명령 문자열에 이어 붙이는 방식으로는 이것을 지킬 수 없습니다.
 - **하나만 골라도, 하나도 못 골라도 동작합니다.** 1개면 인자 1개, 0개면 그 자리가 사라집니다(빈 인자를 남기지 않습니다).
-- **앞뒤에 글자가 붙으면 펼치지 않습니다.** `"--file=${pick.paths}"` 는 각 항목에 접두사를 붙이라는 뜻인지 이어 붙이라는 뜻인지 알 수 없어 그대로 둡니다(아래 참조 — 보간도 되지 않습니다). 항목마다 옵션을 붙여야 한다면 스크립트 쪽에서 위치 인자를 받도록 하는 편이 간단합니다.
-- **`args` 원소 하나가 통째로 배열 참조일 때만** 펼쳐집니다. 명령 **문자열**(`command`)에 넣거나 접두사를 붙이면(`"--file=${pick.paths}"`) 펼쳐지지도, 보간되지도 않고 **`${pick.paths}` 라는 글자 그대로** 자식 프로세스에 전달됩니다 — 배열 값은 문자열로 보간되지 않기 때문입니다. 실제로 실행되는 것: `py r.py "${pick.paths}"`. Doctor 의 `variable.unresolved` 가 이 형태를 잡아 줍니다.
+- **`args` 원소 하나가 통째로 배열 참조일 때만** 펼쳐집니다. 앞뒤에 글자가 붙으면(`"--file=${pick.paths}"`) 각 항목에 접두사를 붙이라는 뜻인지 알 수 없으므로 펼치지 않고, 대신 **공백으로 이어 붙어 인자 한 칸**이 됩니다 — 실제로 실행되는 것: `py r.py "--file=a.bin b.bin c.bin"`. **경로 사이의 경계가 사라져** 스크립트는 값 하나만 받으므로 의도대로 동작할 리 없고(argv 는 그대로 전달되므로 셸이 다시 쪼개지도 않습니다 — 합쳐진 채로 도착합니다), Doctor 의 [`args.array-joined`](#doctor-진단-코드)가 이 자리를 짚어 줍니다. 항목마다 옵션을 붙여야 한다면 스크립트 쪽에서 위치 인자를 받도록 하는 편이 간단합니다.
+- 명령 **문자열**(`command`)에 넣은 배열 참조도 같은 규칙으로 공백 결합됩니다(0.6.57부터 — 그전에는 `${pick.paths}` 라는 글자가 그대로 자식 프로세스로 갔습니다). 경계가 필요하면 `args` 를 쓰세요.
 
 ### `folderDialog` 태스크
 
 사용자에게 폴더 선택 대화상자를 표시합니다. 내부적으로 `vscode.window.showOpenDialog`를 호출하면서 `canSelectFiles=false`, `canSelectFolders=true`를 강제로 적용하므로, `options`에 다른 값을 지정해도 폴더 선택 모드는 항상 유지됩니다. 사용자가 대화상자를 취소하면 태스크가 실패합니다(`continueOnError: true`로 무시 가능). 액션 수준의 마감은 [`fileDialog` 태스크](#filedialog-태스크)와 동일하게 *취소*입니다.
 
 - `type` (string, **필수**): `folderDialog`로 설정해야 합니다.
-- `options` (object, *선택*): `OpenDialogOptions`와 동일하지만 `canSelectFiles` / `canSelectFolders`는 위와 같이 강제됩니다. 그 외 `openLabel`, `title`, `defaultUri`는 그대로 적용됩니다.
-- **실행 결과**: `fileDialog`와 동일한 키 셋(`path` / `dir` / `name` / `fileNameOnly` / `fileExt`)을 제공합니다. 단, 폴더에는 확장자가 없는 것이 일반적이므로 보통 `fileNameOnly === name`이고 `fileExt`는 빈 문자열입니다.
+- `options` (object, *선택*): `OpenDialogOptions`와 동일하지만 `canSelectFiles` / `canSelectFolders`는 위와 같이 강제됩니다. 그 외 `openLabel`, `title`, `defaultUri`, `canSelectMany`는 그대로 적용됩니다.
+    - `canSelectMany` (boolean, 기본 false): **폴더도 여러 개 고를 수 있습니다** (0.6.57부터). 대화상자에서 `Ctrl`/`Cmd`+클릭(연속 범위는 `Shift`+클릭)으로 폴더를 여러 개 집으면 됩니다. 고른 폴더 전부가 `${task_id.paths}` / `${task_id.names}` / `${task_id.count}`로 노출되며, `args` 배열 확장도 [`fileDialog`의 다중 선택](#여러-파일을-명령-인자로-넘기기)과 완전히 같습니다. 이전에는 이 옵션이 VS Code로 전달돼 다이얼로그에서 여러 개를 고를 수는 있었지만 **첫 폴더만 쓰고 나머지를 조용히 버렸습니다** — 0.6.51이 `fileDialog`에서 고친 것과 같은 결함이 폴더 쪽에만 남아 있었습니다.
+
+> **`paths` 와 `dir` 의 의미가 `fileDialog` 와 한 칸씩 다릅니다.** `folderDialog` 에서 `${task_id.paths}` 는 **고른 폴더들 자신**이고 `${task_id.names}` 는 그 폴더 이름들입니다. 반면 `${task_id.dir}` 은 첫 폴더의 **상위** 폴더입니다 — 고른 폴더 자신이 아닙니다. 고른 폴더 하나를 쓰려면 `${task_id.path}` 를 쓰세요.
+- **실행 결과**: `fileDialog`와 **동일한 키 셋**(`path` / `dir` / `name` / `fileNameOnly` / `fileExt` / `paths` / `names` / `count`)을 제공합니다. 단, 폴더에는 확장자가 없는 것이 일반적이므로 보통 `fileNameOnly === name`이고 `fileExt`는 빈 문자열입니다. `names`는 폴더 이름들입니다.
     - 예: 사용자가 `C:/proj/build`를 선택한 경우 — `path=C:/proj/build`, `dir=C:/proj`, `name=build`, `fileNameOnly=build`, `fileExt=""` (빈 문자열).
     - 폴더 이름에 `.`이 포함된 경우(예: `release.v1`)는 `node:path`의 `extname` 규칙을 그대로 따라 `fileNameOnly=release`, `fileExt=v1`이 됩니다 — 보통 의도하지 않은 결과이므로 폴더에서는 `${task_id.path}` 또는 `${task_id.name}`을 사용하는 것이 안전합니다.
 
@@ -1350,6 +1371,8 @@ editor/terminal 규칙은 **비밀을 참조하는 태스크뿐 아니라 비밀
 *   **실행/열람 시간 정보**: 히스토리 항목에 마우스를 올리면 액션 실행 또는 도구 열람의 정확한 시간이 툴팁으로 표시됩니다 (예: "Executed at: 2025-12-28 14:30:45", "Opened at: 2025-12-28 14:30:45").
 *   **빠른 재실행/다시 열기**: 액션 히스토리 항목을 클릭하면 해당 액션을 즉시 재실행합니다. Memory Map / Hex Editor / JSON Editor 히스토리 항목(각각 `graph` / `file-binary` / `json` 아이콘으로 구분)은 저장된 파일 경로로 해당 도구를 다시 엽니다. Memory Map은 ELF/AXF인지 ARM Linker Listing인지와 당시 사용한 메모리 region 설정을 함께 보존하므로, 다시 열 때 입력 형식·링커 스크립트 선택 다이얼로그를 건너뜁니다. 재실행 또는 다시 열기는 새로운 히스토리 엔트리로 추가됩니다.
 *   **저장된 입력값으로 재실행 (Re-run with Saved Inputs)**: 액션 실행 중 사용자가 입력한 인터랙티브 task 결과(`inputBox` / `quickPick` / `envPick` / `fileDialog` / `folderDialog` / `confirm`)는 자동으로 해당 히스토리 엔트리에 함께 기록됩니다. **히스토리 항목을 클릭해 재실행하면, 저장된 입력값이 있는 한 다이얼로그를 다시 띄우지 않고 이전 응답값(예: 직전에 선택한 디렉터리)을 그대로 재사용합니다.** 저장된 입력값이 있는 항목 옆에는 ▶ 아이콘도 표시되며, 동일하게 입력값을 재사용해 재실행합니다.
+
+    > **저장값이 현재 조건을 만족하지 못하면 그 task만 다시 묻습니다** (액션을 실패시키지 않습니다). `inputBox`의 `validatePattern`을 나중에 조인 경우, `quickPick`의 `items`에서 사라진 값인 경우, 그리고 **0.6.57 이전에 기록된 다중 선택 다이얼로그**가 그렇습니다 — 옛 기록에는 첫 항목만 남아 있어 무엇을 골랐는지 복원할 수 없고, 조용히 하나만 처리하면 여러 개를 골랐던 실행이 소리 없이 다른 일을 하게 됩니다. 단일 선택 기록은 남아 있는 경로로 `paths` / `names` / `count`를 복원해 그대로 재사용합니다.
     *   같은 task ID에 대해 저장된 값이 있을 때만 다이얼로그가 스킵됩니다. 액션 정의에 새 인터랙티브 task가 추가되어 매칭되는 저장값이 없으면, 그 task만 정상적으로 다이얼로그를 띄웁니다. 입력을 새로 고르고 싶을 때는 히스토리가 아니라 원본 액션을 실행합니다.
     *   **보안**: `inputBox` task에 `"password": true`가 설정된 경우 해당 입력값은 히스토리에 저장되지 않습니다. 비밀번호/토큰을 받는 task는 항상 새로 입력해야 합니다.
 *   **실행한 명령 보기 (View Executed Command)**: `command` / `shell` task가 실제로 실행한 명령줄이 `${...}` 치환(선택한 디렉터리 등 포함)이 끝난 상태로 히스토리에 함께 기록됩니다. 명령이 기록된 항목 옆의 터미널 아이콘을 클릭하면 **재실행하지 않고** 어떤 명령이 어떤 인자로 실행됐는지 task ID별로 정리된 읽기 전용 문서로 보여줍니다. (출력 보기와 달리 실행 결과가 아니라 실행한 명령 자체를 표시합니다.)
@@ -2168,6 +2191,7 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `diagnostics.group` | warning | `file`/`line`/`message` 등의 그룹 인덱스가 regex가 정의한 capture group 수보다 큼. |
 | `diagnostics.preset` | error | `"$gcc"` / `"$tsc"` 같은 preset 단축 문자열이 알 수 없는 이름이거나 `$` 없이 적힘. |
 | `variable.unresolved` | warning | Preview Run과 동일한 simulation 컨텍스트에서 변수 치환 후에도 남는 `${…}` 가 있음. 런타임에는 리터럴로 전달되므로 의도된 placeholder가 아니면 거의 항상 버그. |
+| `args.array-joined` | warning | `args` 원소 **안에** 배열 참조(`${pick.paths}` 등)가 다른 글자와 섞여 있음(`"--file=${pick.paths}"`). 원소 전체가 참조 하나일 때만 항목 수만큼의 인자로 펼쳐지고, 섞여 있으면 공백으로 이어 붙어 **인자 한 칸**이 됩니다 — 여러 경로의 경계가 사라져 스크립트가 값 하나로 받습니다(argv 이므로 셸이 다시 쪼개지지는 않습니다). 0.6.56까지는 이 형태가 리터럴로 남아 `variable.unresolved`로 잡혔습니다. |
 | `output.not-captured` | warning | `${A.output}`(또는 A의 capture 이름)을 참조하지만 shell/command 태스크 A에 `passTheResultToNextTask: true`가 없음. 런타임은 출력을 스트리밍만 하고 빈 결과를 넘기므로 참조가 리터럴로 남음 — 가장 흔한 설정 실수. 선언 순서와 무관하게(전방 참조 포함) 검출. |
 | `output.ignored` | warning | shell/command 태스크에 `output.mode`/`capture`/`diagnostics`가 정의되어 있지만 `passTheResultToNextTask: true`가 없음. 런타임이 조용히 무시하는 죽은 설정. |
 | `path.outside-workspace` | error | `writeFile` / `appendFile` / `output.filePath`의 해석 결과가 워크스페이스 밖. 런타임이 실행을 거부할 경로. (변수 치환 후에도 `${…}`가 남은 경우는 검사를 건너뜀 — 안전 결정 불가) |

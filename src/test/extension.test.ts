@@ -44,6 +44,7 @@ import {
 	windowsCommandIsDirectlyLaunchable,
 	withPowerShellExitCode,
 	savedInputStillValid,
+	backfillDialogArrays,
 	expandArgTemplate,
 	resolvePipelineReference,
 	interpolateCommandPreservingTokens,
@@ -100,6 +101,23 @@ suite('Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');
 
 	suite('interpolatePipelineVariables', () => {
+		/**
+		 * 배열 참조가 문자열 자리에서 실제로 해석되는지 (0.6.57).
+		 *
+		 * 예전에는 리터럴 `${pick.paths}` 가 그대로 남아 셸로 넘어갔다 — 사용자가
+		 * "목록이 안 나온다"고 보고한 그 자리다. 단위 검사(`sanitize…`)만으로는
+		 * 호출부가 `undefined` 를 어떻게 다루는지 고정되지 않는다.
+		 */
+		test('배열 참조를 공백으로 이어 붙여 넣는다', () => {
+			const ctx = { pick: { paths: ['/a/x.bin', '/a/y.bin'], names: ['x.bin', 'y.bin'], count: 2 } };
+			assert.strictEqual(interpolatePipelineVariables('echo ${pick.paths}', ctx), 'echo /a/x.bin /a/y.bin');
+			assert.strictEqual(interpolatePipelineVariables('${pick.names} (${pick.count})', ctx), 'x.bin y.bin (2)');
+		});
+
+		test('빈 배열은 빈 문자열이 된다 (리터럴이 남지 않는다)', () => {
+			assert.strictEqual(interpolatePipelineVariables('[${pick.paths}]', { pick: { paths: [] } }), '[]');
+		});
+
 		test('should replace simple variable', () => {
 			const template = 'Hello ${name}';
 			const context = { name: 'World' };
@@ -288,7 +306,34 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(sanitizeInterpolatedValue(undefined), undefined);
 			assert.strictEqual(sanitizeInterpolatedValue(null), undefined);
 			assert.strictEqual(sanitizeInterpolatedValue({ a: 1 }), undefined);
-			assert.strictEqual(sanitizeInterpolatedValue([1, 2]), undefined);
+		});
+		/**
+		 * 배열은 공백으로 이어 붙인다 (0.6.57).
+		 *
+		 * 예전에는 `undefined` 를 돌려줬고, 그러면 호출부가 참조를 리터럴로
+		 * 남긴다 — `echo ${pick.paths}` 가 문자 그대로 실행됐다는 뜻이다.
+		 * 문서는 `${pick.paths}` 를 fileDialog 의 결과 참조로 안내하면서 그것이
+		 * `args` 안에서만 동작한다는 말을 하지 않았다.
+		 */
+		test('joins arrays with a space', () => {
+			assert.strictEqual(sanitizeInterpolatedValue(['a', 'b']), 'a b');
+			assert.strictEqual(sanitizeInterpolatedValue([1, 2]), '1 2');
+			assert.strictEqual(sanitizeInterpolatedValue([]), '');
+			// 항목마다 같은 규칙을 적용한다 — 넣을 수 없는 값은 빠진다.
+			assert.strictEqual(sanitizeInterpolatedValue(['a', null, { x: 1 }, 'b']), 'a b');
+		});
+		test('applies the null-byte guard to array items too', () => {
+			assert.throws(() => sanitizeInterpolatedValue(['ok', 'x\x00y']), /null byte/);
+		});
+		test('applies the length guard to the joined result', () => {
+			// 항목 하나하나는 한도 안이어도 이어 붙이면 넘길 수 있다. 합친 뒤에
+			// 재지 않으면 이 경로로만 한도가 빠져나간다.
+			const chunk = 'a'.repeat(1000);
+			const many = Array.from({ length: 200 }, () => chunk);
+			assert.throws(() => sanitizeInterpolatedValue(many), /maximum length/);
+		});
+		test('중첩 배열도 평평하게 이어 붙인다', () => {
+			assert.strictEqual(sanitizeInterpolatedValue([['a', 'b'], 'c']), 'a b c');
 		});
 		test('rejects strings with null byte', () => {
 			assert.throws(() => sanitizeInterpolatedValue('x\x00y'), /null byte/);
@@ -398,6 +443,81 @@ suite('Extension Test Suite', () => {
 			} finally {
 				(vscode.window as any).showOpenDialog = original;
 			}
+		});
+	});
+
+	/**
+	 * 다중 선택 결과의 모양 (0.6.57).
+	 *
+	 * `folderDialog` 는 `canSelectMany` 를 VS Code 로 그대로 넘겨 폴더를 여러 개
+	 * 고를 수 있었는데도 **첫 폴더만 쓰고 나머지를 조용히 버렸다** — 0.6.51 이
+	 * `fileDialog` 에서 고친 것과 같은 결함이 폴더 쪽에만 남아 있었다.
+	 */
+	suite('dialog 다중 선택 결과', () => {
+		const uris = (...paths: string[]) => paths.map(p => vscode.Uri.file(p));
+
+		async function withPicked<T>(picked: vscode.Uri[], run: () => Promise<T>): Promise<T> {
+			const original = vscode.window.showOpenDialog;
+			(vscode.window as any).showOpenDialog = async () => picked;
+			try {
+				return await run();
+			} finally {
+				(vscode.window as any).showOpenDialog = original;
+			}
+		}
+
+		test('canSelectMany 를 VS Code 로 그대로 넘긴다', async () => {
+			// 넘기지 않으면 대화상자에서 애초에 여러 개를 고를 수 없다. 아래
+			// 결과 검사들은 mock 이 배열을 돌려주므로 옵션 전달이 깨져도 통과한다.
+			const seen: vscode.OpenDialogOptions[] = [];
+			const original = vscode.window.showOpenDialog;
+			(vscode.window as any).showOpenDialog = async (options: vscode.OpenDialogOptions) => {
+				seen.push(options);
+				return uris('/tmp/th-a');
+			};
+			try {
+				await handleFolderDialog({ id: 'pick', options: { canSelectMany: true } });
+				await handleFileDialog({ id: 'pick2', options: { canSelectMany: true } });
+			} finally {
+				(vscode.window as any).showOpenDialog = original;
+			}
+			assert.strictEqual(seen.length, 2);
+			assert.strictEqual(seen[0].canSelectMany, true, 'folderDialog 가 옵션을 삼켰다');
+			assert.strictEqual(seen[0].canSelectFolders, true, 'folderDialog 는 폴더 모드를 강제해야 한다');
+			assert.strictEqual(seen[0].canSelectFiles, false);
+			assert.strictEqual(seen[1].canSelectMany, true, 'fileDialog 가 옵션을 삼켰다');
+		});
+
+		test('folderDialog 가 고른 폴더 전부를 돌려준다', async () => {
+			const picked = uris('/tmp/th-a', '/tmp/th-b', '/tmp/th-c');
+			const result: any = await withPicked(picked, () =>
+				handleFolderDialog({ id: 'pick', options: { canSelectMany: true } }));
+
+			assert.deepStrictEqual(result.paths, picked.map(u => u.fsPath));
+			assert.deepStrictEqual(result.names, ['th-a', 'th-b', 'th-c']);
+			assert.strictEqual(result.count, 3);
+			// 단일 필드는 첫 폴더를 가리킨다 — 기존 액션이 그대로 동작해야 한다.
+			assert.strictEqual(result.path, picked[0].fsPath);
+			assert.strictEqual(result.name, 'th-a');
+		});
+
+		test('folderDialog 단일 선택도 같은 키를 채운다 (원소 하나)', async () => {
+			// 비워 두면 단일 선택 태스크에 쓴 `${pick.paths}` 가 Doctor 에서만
+			// 미해결로 잡히는, 0.6.52 가 fileDialog 쪽에서 고친 어긋남이 생긴다.
+			const picked = uris('/tmp/th-only');
+			const result: any = await withPicked(picked, () => handleFolderDialog({ id: 'pick' }));
+			assert.deepStrictEqual(result.paths, [picked[0].fsPath]);
+			assert.strictEqual(result.count, 1);
+		});
+
+		test('fileDialog 와 folderDialog 의 결과 키가 같다', async () => {
+			const picked = uris('/tmp/th-x.bin', '/tmp/th-y.bin');
+			const file: any = await withPicked(picked, () =>
+				handleFileDialog({ id: 'pick', options: { canSelectMany: true } }));
+			const folder: any = await withPicked(picked, () =>
+				handleFolderDialog({ id: 'pick', options: { canSelectMany: true } }));
+			assert.deepStrictEqual(Object.keys(file).sort(), Object.keys(folder).sort(),
+				'두 다이얼로그의 결과 모양이 다르면 문서가 둘 중 하나에 대해 거짓말을 하게 된다');
 		});
 	});
 
@@ -800,10 +920,15 @@ suite('Extension Test Suite', () => {
 			assert.deepStrictEqual(expandArgTemplate('plain', ctx), ['plain']);
 		});
 
-		test('앞뒤에 글자가 붙으면 펼치지 않는다 (의도가 모호하다)', () => {
-			// 각 항목에 접두사를 붙이라는 것인지 이어 붙이라는 것인지 알 수 없다.
-			// 조용히 하나를 고르는 것보다 평소 규칙대로 두는 편이 낫다.
-			assert.deepStrictEqual(expandArgTemplate('--file=${pick.paths}', ctx), ['--file=${pick.paths}']);
+		test('앞뒤에 글자가 붙으면 펼치지 않고 이어 붙인다', () => {
+			// 각 항목에 접두사를 붙이라는 것인지 알 수 없으므로 펼치지 않는다.
+			// 0.6.57부터 배열은 문자열 자리에서 공백으로 이어 붙으므로, 결과는
+			// 리터럴이 아니라 **인자 한 칸**이다 — 의도대로 동작할 리 없는
+			// 형태라 Doctor가 `args.array-joined`로 따로 짚어 준다.
+			assert.deepStrictEqual(
+				expandArgTemplate('--file=${pick.paths}', ctx),
+				['--file=c:\\test\\test1.bin c:\\my docs\\test2.bin c:\\test\\test3.bin']
+			);
 		});
 
 		test('알 수 없는 참조는 그대로 남는다 (기존 계약)', () => {
@@ -862,6 +987,63 @@ suite('Extension Test Suite', () => {
 		test('제약이 없는 태스크는 그대로 통과시킨다', () => {
 			assert.strictEqual(savedInputStillValid({ type: 'inputBox' }, { value: 'anything ; goes' }), true);
 			assert.strictEqual(savedInputStillValid({ type: 'fileDialog' }, { path: '/tmp/a b.txt' }), true);
+		});
+
+		/**
+		 * 0.6.57 이전 History 항목 (배열 필드 없음).
+		 *
+		 * 저장된 입력이 있으면 핸들러를 **건너뛴다.** 그래서 옛 기록을 그대로
+		 * 재사용하면 새로 추가된 `${pick.paths}` 가 재실행에서만 리터럴로 남는다.
+		 */
+		test('다중 선택 다이얼로그의 옛 저장값은 다시 고르게 한다', () => {
+			const many = { type: 'folderDialog', options: { canSelectMany: true } };
+			assert.strictEqual(
+				savedInputStillValid(many, { path: '/tmp/a', name: 'a' }), false,
+				'무엇을 골랐는지 첫 항목밖에 남아 있지 않다 — 조용히 하나만 처리하면 안 된다'
+			);
+			// 새 형식(배열이 있는 기록)은 그대로 쓴다.
+			assert.strictEqual(
+				savedInputStillValid(many, { path: '/tmp/a', paths: ['/tmp/a', '/tmp/b'], count: 2 }), true);
+			// 단일 선택은 보정할 수 있으므로 거부하지 않는다.
+			assert.strictEqual(savedInputStillValid({ type: 'folderDialog' }, { path: '/tmp/a' }), true);
+		});
+	});
+
+	suite('backfillDialogArrays', () => {
+		test('옛 단일 선택 결과에 배열 필드를 채운다', () => {
+			const saved = { path: '/tmp/build/app.elf', dir: '/tmp/build', name: 'app.elf', fileNameOnly: 'app', fileExt: 'elf' };
+			const filled: any = backfillDialogArrays({ type: 'fileDialog' }, saved);
+			assert.deepStrictEqual(filled.paths, ['/tmp/build/app.elf']);
+			assert.deepStrictEqual(filled.names, ['app.elf']);
+			assert.strictEqual(filled.count, 1);
+			// 원본 키는 그대로 남는다 — 기존 액션이 계속 동작해야 한다.
+			assert.strictEqual(filled.dir, '/tmp/build');
+		});
+
+		test('보정한 값이 실제로 args 확장에 쓰인다', () => {
+			// 이 검사가 없으면 "필드를 채웠다"까지만 확인하고, 정작 리터럴이
+			// 사라졌는지는 아무도 보지 않는다.
+			const filled = backfillDialogArrays({ type: 'folderDialog' }, { path: '/tmp/out', name: 'out' });
+			assert.deepStrictEqual(expandArgTemplate('${pick.paths}', { pick: filled }), ['/tmp/out']);
+			assert.strictEqual(
+				interpolatePipelineVariables('${pick.paths}', { pick: filled }), '/tmp/out');
+		});
+
+		test('이미 배열이 있으면 손대지 않는다', () => {
+			const saved = { path: '/a', paths: ['/a', '/b'], names: ['a', 'b'], count: 2 };
+			assert.strictEqual(backfillDialogArrays({ type: 'fileDialog' }, saved), saved);
+		});
+
+		test('다이얼로그가 아닌 태스크와 이상한 값은 그대로 돌려준다', () => {
+			const saved = { value: 'x' };
+			assert.strictEqual(backfillDialogArrays({ type: 'inputBox' }, saved), saved);
+			assert.strictEqual(backfillDialogArrays({ type: 'fileDialog' }, undefined), undefined);
+			assert.strictEqual(backfillDialogArrays({ type: 'fileDialog' }, { name: 'no path' }).count, undefined);
+		});
+
+		test('name 이 없으면 경로에서 만든다', () => {
+			const filled: any = backfillDialogArrays({ type: 'fileDialog' }, { path: path.join('/tmp', 'x.bin') });
+			assert.deepStrictEqual(filled.names, ['x.bin']);
 		});
 	});
 

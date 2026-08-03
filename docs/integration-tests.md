@@ -610,6 +610,23 @@ IT-123 ~ IT-125 가 "프롬프트 앞에 멈춘 액션" 을 다뤘고, 이 그�
 | IT-144 | 외부 `tool` 경로도 해석된 절대 경로를 downstream 에 넘김 | `${zip.archivePath}` 가 상대 경로로 새던 것 |
 | IT-146 | 외부 `tool` unzip 도 `task.cwd` 를 씀 | `tool` 유무로 `cwd` 가 다르게 듣던 것 |
 
+### IT-150 ~ IT-152: 다이얼로그 다중 선택
+
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 시나리오 | 무엇을 고정하나 |
+| --- | --- | --- |
+| IT-151 | `fileDialog` 다중 선택 → 다음 `command` 의 argv 로 **하나씩** 도착 (공백 든 경로 포함) | 조각별 단위 검사 사이를 잇는 실행 경로(핸들러 → 결과 컨텍스트 → argv)가 비어 있던 것 |
+| IT-152 | `folderDialog` 다중 선택도 같은 경로로 `count` / `names` 까지 흘러감 | 폴더 쪽만 결과 키가 갈라질 여지 |
+
+### IT-150: 옛 History 항목으로 재실행
+
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 시나리오 | 무엇을 고정하나 |
+| --- | --- | --- |
+| IT-150 | 배열 필드가 없는 0.6.57 이전 저장 입력으로 재실행해도 `${dir.paths}` / `.names` / `.count` 가 해석됨 | 저장된 입력이 있으면 다이얼로그 핸들러를 건너뛰므로, 보정이 없으면 **재실행에서만** 리터럴이 남던 것 |
+
 같은 파일의 나머지 두 suite(`종료 실패 시 프로세스 추적 유지`, `spawn 이후의 error 는 추적을 지우지 않는다`)는 IT 번호를 쓰지 않습니다 — 순수 판단 규칙과 registry 상태를 보는 단위 테스트라 시나리오 대장의 대상이 아닙니다.
 
 ## Memory Map 픽스처와 커버리지 경계

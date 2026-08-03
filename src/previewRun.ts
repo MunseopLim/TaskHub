@@ -76,13 +76,15 @@ export function simulateTaskResult(task: Task): SimulatedResult {
             //
             // 다중 선택일 때만 원소를 둘로 둔다. 하나면 확장이 일어나는지
             // 드러나지 않고, 셋 이상은 리포트만 길어진다.
-            if (task.type === 'fileDialog') {
-                const many = (task as any).options?.canSelectMany === true;
-                const count = many ? 2 : 1;
-                base.paths = Array.from({ length: count }, (_, i) => placeholder(task.type, task.id, `paths[${i}]`));
-                base.names = Array.from({ length: count }, (_, i) => placeholder(task.type, task.id, `names[${i}]`));
-                base.count = count;
-            }
+            //
+            // `folderDialog` 도 같이 채운다 — 0.6.57 부터 폴더도 여러 개 고를 수
+            // 있고 `handleFolderDialog` 이 같은 세 키를 돌려준다. 여기만 빠지면
+            // 폴더 쪽 `${pick.paths}` 가 Doctor 에서 미해결로 잡힌다.
+            const many = (task as any).options?.canSelectMany === true;
+            const count = many ? 2 : 1;
+            base.paths = Array.from({ length: count }, (_, i) => placeholder(task.type, task.id, `paths[${i}]`));
+            base.names = Array.from({ length: count }, (_, i) => placeholder(task.type, task.id, `names[${i}]`));
+            base.count = count;
             return base;
         }
         case 'inputBox':

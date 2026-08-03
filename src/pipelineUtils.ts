@@ -313,6 +313,26 @@ export function sanitizeInterpolatedValue(value: unknown): string | undefined {
         stringValue = value;
     } else if (typeof value === 'number' || typeof value === 'boolean') {
         stringValue = String(value);
+    } else if (Array.isArray(value)) {
+        // 배열은 공백으로 이어 붙인다.
+        //
+        // 예전에는 `undefined` 를 돌려줬고, 그러면 호출부가 참조를 **리터럴
+        // 그대로** 남긴다 — `echo ${pick.paths}` 가 문자 그대로 실행됐다는
+        // 뜻이다. 문서는 `${pick.paths}` 를 fileDialog 의 결과 참조로 안내하면서
+        // 그것이 `args` 안에서만 동작한다는 말은 하지 않았고, 리터럴이 남아
+        // 좋은 자리는 어디에도 없다.
+        //
+        // 항목을 인용하지는 않는다. 단일 값(`${pick.path}`)도 그대로 넣는 것과
+        // 같은 규칙이고, 셸이 아닌 자리(writeFile 내용 · 안내 문구)에 따옴표를
+        // 끼워 넣으면 그쪽이 망가진다. 공백이 든 경로를 명령에 넘길 때는
+        // `args` 의 배열 확장({@link expandArgTemplate})을 쓴다 — 그쪽은 원소가
+        // 각각 argv 한 칸이 되므로 셸이 개입하지 않는다.
+        const parts: string[] = [];
+        for (const entry of value) {
+            const part = sanitizeInterpolatedValue(entry);
+            if (part !== undefined) { parts.push(part); }
+        }
+        stringValue = parts.join(' ');
     } else {
         return undefined;
     }

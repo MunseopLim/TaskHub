@@ -28,6 +28,7 @@ TaskHub/
 │   ├── previewRun.ts                  # Preview Run (Dry-run) 리포트 생성
 │   ├── previewOpener.ts               # preview/browser 열기 명령 헬퍼
 │   ├── doctor.ts                      # actions.json 정적 분석(Doctor) 순수 모듈
+│   ├── variableCompletions.ts         # actions.json 의 ${…} 참조 자동완성 (결과 키는 previewRun 과 같은 출처)
 │   ├── dialogMemory.ts                # 파일/폴더 다이얼로그의 마지막 사용 위치 기억
 │   ├── diagnosticMatcher.ts           # shell 출력 → VS Code Diagnostic 매칭 순수 모듈
 │   ├── jsonEditor.ts                  # JSON Editor WebView (시트/행 편집)

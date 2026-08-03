@@ -353,4 +353,26 @@ suite('Documentation Consistency', () => {
             );
         });
     });
+
+    // =====================================================================
+    // 9. Doctor 진단 코드 ↔ features.md §Doctor 표
+    //
+    // 코드는 사용자가 Problems 패널에서 그대로 보는 식별자이고, 무엇을
+    // 뜻하는지는 그 표에만 적혀 있다. 새 코드를 추가하면서 표를 잊으면
+    // 사용자에게는 설명 없는 경고만 남는다 — 0.6.57 의 `args.array-joined`
+    // 를 추가하면서 이 검사가 없다는 것을 알았다.
+    // =====================================================================
+    suite('Doctor 진단 코드 ↔ features.md', () => {
+        test('doctor.ts 가 내는 모든 코드가 문서 표에 있다', () => {
+            const source = readRepoFile('src/doctor.ts');
+            const doc = readRepoFile('docs/features.md');
+            // 템플릿 리터럴(`schema.${keyword}`)은 표에 `schema.*` 한 줄로
+            // 대표되므로 고정 문자열만 센다.
+            const emitted = new Set(Array.from(source.matchAll(/code:\s*'([a-z][a-z0-9.-]*)'/g)).map(m => m[1]));
+            assert.ok(emitted.size > 5, `코드를 거의 못 찾았다 — 추출 규칙이 깨졌다: ${[...emitted].join(', ')}`);
+            const missing = [...emitted].filter(code => !doc.includes(`\`${code}\``));
+            assert.deepStrictEqual(missing, [],
+                `features.md 의 Doctor 표에 없는 코드: ${missing.join(', ')}`);
+        });
+    });
 });

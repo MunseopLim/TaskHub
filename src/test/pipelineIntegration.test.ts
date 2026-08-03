@@ -2065,6 +2065,159 @@ try {
             }
         });
 
+        /**
+         * 다중 선택이 실제 파이프라인을 타는지 (IT-151 / IT-152).
+         *
+         * 단위 검사는 조각별로만 본다 — 다이얼로그가 배열을 돌려주는지,
+         * `expandArgTemplate` 가 펼치는지, 보간이 이어 붙이는지. 그 사이를
+         * 잇는 실행 경로(핸들러 → 결과 컨텍스트 → argv)는 아무도 보지
+         * 않았다. 여기서 처음부터 끝까지 한 번 돌린다.
+         */
+        test('IT-151: fileDialog 다중 선택이 다음 command 의 argv 로 각각 전달된다', async () => {
+            const files = ['a.bin', 'b b.bin', 'c.bin']
+                .map(name => path.join(tempWorkspace, name));
+            files.forEach(f => fs.writeFileSync(f, 'x'));
+            const resultPath = path.join(tempWorkspace, 'it151.json');
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            try {
+                (vscode.window as any).showOpenDialog = async () => files.map(f => vscode.Uri.file(f));
+
+                const action: PipelineAction = {
+                    description: 'IT-151',
+                    tasks: [
+                        { id: 'pick', type: 'fileDialog', options: { canSelectMany: true } },
+                        {
+                            id: 'run',
+                            type: 'command',
+                            command: 'node',
+                            // 받은 인자를 그대로 JSON 으로 적는다 — argv 경계가
+                            // 유지됐는지 보려면 실제 프로세스가 본 것을 봐야 한다.
+                            args: [
+                                '-e',
+                                `require('fs').writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))`,
+                                resultPath,
+                                '${pick.paths}',
+                            ],
+                            passTheResultToNextTask: true,
+                        },
+                    ],
+                };
+
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                await executeActionPipeline(
+                    action,
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it151',
+                    tempWorkspace,
+                    [tempWorkspace]
+                );
+
+                assert.deepStrictEqual(
+                    JSON.parse(fs.readFileSync(resultPath, 'utf8')),
+                    files,
+                    '공백이 든 경로까지 인자 하나씩 그대로 도착해야 한다'
+                );
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
+        test('IT-152: folderDialog 다중 선택도 같은 경로를 탄다', async () => {
+            const dirs = ['out-1', 'out 2'].map(name => path.join(tempWorkspace, name));
+            dirs.forEach(d => fs.mkdirSync(d, { recursive: true }));
+            const resultPath = path.join(tempWorkspace, 'it152.txt');
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            try {
+                (vscode.window as any).showOpenDialog = async () => dirs.map(d => vscode.Uri.file(d));
+
+                const action: PipelineAction = {
+                    description: 'IT-152',
+                    tasks: [
+                        { id: 'pick', type: 'folderDialog', options: { canSelectMany: true } },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'n=${pick.count};names=${pick.names}',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: resultPath, overwrite: true },
+                        },
+                    ],
+                };
+
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                await executeActionPipeline(
+                    action,
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it152',
+                    tempWorkspace,
+                    [tempWorkspace]
+                );
+
+                assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'n=2;names=out-1 out 2');
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
+        /**
+         * 0.6.57 이전 History 항목으로 재실행 (IT-150).
+         *
+         * 저장된 입력이 있으면 다이얼로그 핸들러를 **건너뛴다.** 옛 기록에는
+         * `paths`/`names`/`count` 가 없으므로, 보정하지 않으면 새로 문서화한
+         * `${dir.paths}` 가 **재실행에서만** 리터럴로 남는다. 단위 검사는
+         * 보정 함수 자체만 보므로 호출부가 빠져도 통과한다 — 여기서 실제
+         * 파이프라인을 돌려 값이 흘러가는지 본다.
+         */
+        test('IT-150: 배열 필드가 없는 옛 저장 입력으로 재실행해도 paths 가 해석된다', async () => {
+            const picked = path.join(tempWorkspace, 'legacy-dir');
+            fs.mkdirSync(picked, { recursive: true });
+            const resultPath = path.join(tempWorkspace, 'it150.txt');
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            let dialogOpened = 0;
+            try {
+                (vscode.window as any).showOpenDialog = async () => {
+                    dialogOpened++;
+                    throw new Error('folderDialog must not open during replay');
+                };
+
+                const action: PipelineAction = {
+                    description: 'IT-150',
+                    tasks: [
+                        { id: 'dir', type: 'folderDialog' },
+                        {
+                            id: 'write',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'n=${dir.count};paths=${dir.paths};names=${dir.names}',
+                            passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: resultPath, overwrite: true },
+                        },
+                    ],
+                };
+
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                await executeActionPipeline(
+                    action,
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it150',
+                    tempWorkspace,
+                    [tempWorkspace],
+                    // 0.6.57 이전 형식: 단일 필드뿐이다.
+                    { presetInputs: { dir: { path: picked, dir: tempWorkspace, name: 'legacy-dir', fileNameOnly: 'legacy-dir', fileExt: '' } } }
+                );
+
+                assert.strictEqual(dialogOpened, 0, '저장된 입력이 있으면 다이얼로그를 열지 않는다');
+                assert.strictEqual(
+                    fs.readFileSync(resultPath, 'utf8'),
+                    `n=1;paths=${picked};names=legacy-dir`,
+                    '옛 기록을 보정하지 않으면 ${dir.paths} 가 리터럴로 남는다'
+                );
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
         test('IT-118: 같은 액션 안의 file / folder 다이얼로그도 위치를 공유하지 않는다', async () => {
             const originalShowOpenDialog = vscode.window.showOpenDialog;
             const previousContext = initDialogMemory(makeDialogMemoryContext());
