@@ -616,7 +616,7 @@ IT-123 ~ IT-125 가 "프롬프트 앞에 멈춘 액션" 을 다뤘고, 이 그�
 | IT-146 | 외부 `tool` unzip 도 `task.cwd` 를 씀 | `tool` 유무로 `cwd` 가 다르게 듣던 것 |
 | IT-153 | OS별 `tool` 객체가 **현재 플랫폼 branch 로 보간되어** 실행됨 (비활성 branch 의 미해결 참조는 무관) | 보간→선택 연결이 소스 정규식으로만 고정돼 있어, 보간 결과를 버려도 통과하던 것 |
 
-### IT-150 ~ IT-152: 다이얼로그 다중 선택
+### IT-151 ~ IT-152: 다이얼로그 다중 선택
 
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
 

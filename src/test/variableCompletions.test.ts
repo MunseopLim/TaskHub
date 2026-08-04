@@ -193,7 +193,7 @@ suite('variableCompletions', () => {
         });
 
         /**
-         * 캡처는 **결과에 문자열 `output` 이 있을 때만** 적용된다 (0.6.60).
+         * 캡처는 **결과에 문자열 `output` 이 있을 때만** 적용된다 (0.6.57).
          *
          * 런타임(`executeSingleTask`)은 `result.output` 이 문자열일 때만
          * `applyOutputCapture` 를 부른다. 타입 이름으로 가르면 그 규칙이 두
@@ -273,7 +273,7 @@ suite('variableCompletions', () => {
         });
 
         /**
-         * 폴더(`children`) 안의 액션들 (0.6.59).
+         * 폴더(`children`) 안의 액션들 (0.6.57).
          *
          * 바깥 객체를 액션으로 보고 **첫** `"tasks"` 를 집으면, 두 번째 자식을
          * 편집할 때 첫 번째 자식의 태스크가 제안된다 — 참조할 수 없는 id 를
