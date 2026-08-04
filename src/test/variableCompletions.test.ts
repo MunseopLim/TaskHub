@@ -94,6 +94,32 @@ suite('variableCompletions', () => {
             assert.deepStrictEqual(names(doc(`{ "id": "run", "type": "shell", "command": "echo \${nosuch.|" }`)), []);
         });
 
+        /**
+         * `canPickMany` 는 **task 최상위 필드**다 (다이얼로그의 `canSelectMany`
+         * 는 `options` 안이다). 최상위를 보지 않으면 다중 선택 quickPick 에서
+         * `${id.values}` 가 영영 제안되지 않는다 — 시뮬레이션은 그 필드만 보고
+         * 그 키를 만들기 때문이다. 자리를 하나로 넘겨 두면 아무 오류 없이
+         * "그런 참조는 없다" 로 보인다.
+         */
+        const quickPickDoc = (extra: string) => `[
+  { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
+    { "id": "pick", "type": "quickPick", "items": ["x", "y"]${extra} },
+    { "id": "run", "type": "shell", "command": "echo \${pick.|" }
+  ] } }
+]`;
+
+        test('다중 선택 quickPick 은 values 를 제안한다', () => {
+            const got = names(quickPickDoc(', "canPickMany": true'));
+            assert.ok(got.includes('pick.values'), `values 가 없다: ${got.join(',')}`);
+            assert.ok(got.includes('pick.value'), got.join(','));
+        });
+
+        test('단일 선택 quickPick 은 values 를 제안하지 않는다', () => {
+            // 런타임이 만들지 않는 키다 — 제안하면 Preview 만 해석하고 실행에서는
+            // 리터럴로 남는 참조를 우리가 권하는 셈이 된다.
+            assert.deepStrictEqual(names(quickPickDoc('')), ['pick.value']);
+        });
+
         test('output.capture 이름도 함께 낸다', () => {
             const fixture = `[
   { "id": "a", "title": "t", "action": { "description": "d", "tasks": [

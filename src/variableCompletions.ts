@@ -171,9 +171,17 @@ export function collectVariableCompletions(text: string, offset: number): Variab
     const type = firstStringField(target.text, 'type');
     if (!type) { return []; }
 
-    // 결과 키는 시뮬레이션에서 얻는다. `canSelectMany` 는 다중 선택 다이얼로그의
-    // 결과 개수만 바꾸므로 키 목록에는 영향이 없지만, 같은 입력을 넘겨 두면
-    // 나중에 옵션에 따라 키가 갈리더라도 따라간다.
+    // 결과 키는 시뮬레이션에서 얻는다. **키 집합을 가르는 옵션은 빠짐없이
+    // 넘겨야 한다** — 빠뜨리면 실재하는 참조를 제안하지 못한다.
+    //
+    // - `canPickMany` (quickPick, **task 최상위 필드**): 이것만이 `${id.values}`
+    //   를 만든다. 다중 선택 액션에서 그 참조가 제안되지 않던 원인이다.
+    // - `canSelectMany` (file/folderDialog, **`options` 안**): 결과 개수만 바꾸고
+    //   키 목록에는 영향이 없지만, 나중에 옵션에 따라 키가 갈리더라도 따라가도록
+    //   같은 입력을 넘겨 둔다.
+    //
+    // 두 옵션이 사는 자리가 다른 것은 런타임을 그대로 따른 것이다
+    // (`handleQuickPick` 은 `task.canPickMany`, 다이얼로그는 `task.options`).
     //
     // `passTheResultToNextTask` 는 반드시 함께 넘긴다 — shell/command 는 이
     // 플래그가 없으면 출력을 캡처하지 않아 `${id.output}` 이 해석되지 않는다.
@@ -181,12 +189,14 @@ export function collectVariableCompletions(text: string, offset: number): Variab
     // 참조를 제안하지 않는** 동작이 공짜로 따라온다(Doctor 의
     // `output.not-captured` 와 같은 기준).
     const many = /"canSelectMany"\s*:\s*true/.test(target.text);
+    const pickMany = /"canPickMany"\s*:\s*true/.test(target.text);
     const captured = /"passTheResultToNextTask"\s*:\s*true/.test(target.text);
     let simulated: Record<string, unknown>;
     try {
         simulated = (simulateTaskResult({
             id: head,
             type,
+            canPickMany: pickMany,
             passTheResultToNextTask: captured,
             options: many ? { canSelectMany: true } : undefined,
         } as any) ?? {}) as Record<string, unknown>;
