@@ -407,6 +407,36 @@ const int x = 5;
             assert.strictEqual(result.expandedValue, new Array(4096).fill('A').join(' '));
         });
 
+        test('memo 로 접힌 확장은 단계 목록에 그 사실을 남긴다', () => {
+            // memo hit 은 재귀를 건너뛰므로 그 하위 트리의 `→` 단계가 남지 않는다.
+            // 아무 표시가 없으면 hover 를 읽는 사람에게는 단계가 이유 없이
+            // 중간을 건너뛴 것으로 보인다 (같은 정의라도 토큰 순서에 따라 어느
+            // 쪽이 접히는지가 달라진다).
+            const result = expander.expandMacro('M6', binaryChain(6));
+
+            assert.strictEqual(result.success, true);
+            assert.match(
+                result.expansionSteps[result.expansionSteps.length - 1],
+                /reused from cache/,
+                `접힌 재사용을 알리지 않았다: ${JSON.stringify(result.expansionSteps.slice(-3))}`
+            );
+        });
+
+        test('접힌 것이 없으면 그 줄을 붙이지 않는다', () => {
+            const macros = new Map<string, MacroDefinition>([
+                ['A', { name: 'A', value: 'B + 1' }],
+                ['B', { name: 'B', value: '2' }]
+            ]);
+
+            const result = expander.expandMacro('A', macros);
+
+            assert.strictEqual(result.expandedValue, '2 + 1');
+            assert.ok(
+                !result.expansionSteps.some(s => /reused from cache/.test(s)),
+                '재사용이 없는데 안내를 붙이면 그것대로 오해를 만든다'
+            );
+        });
+
         test('memo 는 순환 참조 판정을 바꾸지 않는다', () => {
             // B 의 확장 결과는 "A 가 확장 중인가"에 달려 있으므로 memo 에 담기면
             // 안 된다. 담기면 A 를 먼저 확장한 뒤 B 를 확장할 때 A 문맥에서

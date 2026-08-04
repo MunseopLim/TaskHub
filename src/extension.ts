@@ -5600,10 +5600,13 @@ async function executeSingleTask(
         case 'unzip':
             const interpolatedUnzipTask: any = { ...task };
             // `tool` 이 있으면 **현재 플랫폼 branch 를 골라** 보간한다
-            // (`interpolateToolValue`). truthy 검사 대신 명시적으로 본다 —
-            // `tool: ""` 를 조용히 "내장 엔진" 으로 흘려보내면 사용자가 지정한
-            // 도구가 없는 것처럼 동작한다. 쓸 값이 없으면 `interpolateToolValue`
-            // 가 `getToolCommand` 와 같은 문구로 던진다.
+            // (`interpolateToolValue`). truthy 검사 대신 `undefined`/`null` 만
+            // 보는 것은 **`handleUnzip` 의 내장 엔진 판정과 같은 조건**이기
+            // 때문이다 — 거기서도 `tool: ""` 는 내장 엔진이 아니라 외부 도구
+            // 경로로 가서 `getToolCommand` 가 던진다. 두 곳의 조건이 갈리면
+            // 빈 문자열이 여기서는 "도구 없음", 저기서는 "도구 있음" 이 된다.
+            // 쓸 값이 없으면 `interpolateToolValue` 가 `getToolCommand` 와 같은
+            // 문구로 던지므로 실패 지점만 앞당겨진다.
             if (task.tool !== undefined && task.tool !== null) {
                 interpolatedUnzipTask.tool = interpolateToolValue(task.tool, interpolationContext);
             }

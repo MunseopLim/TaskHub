@@ -318,6 +318,49 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             assert.strictEqual(jsonPanelRegistry.getFilePath(), fileB);
         });
 
+        test('폐기 확인창 뒤에 패널이 닫히면 dirty 를 되살리지 않는다', async () => {
+            // **닫는 것도 세션의 끝이다.** 파일 전환만 세션으로 보면, 확인창이
+            // 떠 있는 사이 패널을 닫은 경우 옛 콜백이 그대로 재개되어 화면에도
+            // 없는 파일 때문에 전역 dirty 를 다시 켠다 — 패널이 없는데 레지스트리
+            // 는 "미저장 변경 있음" 이라고 답하는 상태가 남는다.
+            const fake = installFakePanel();
+            const filePath = writeJson('dispose-during-confirm.json', { rows: [{ a: 1 }] });
+            const ctx = makeContext();
+
+            await openJsonEditorFile(ctx, filePath);
+            await fake.send({ command: 'modified', value: true });   // dirty 로
+
+            let answerPrompt: (() => void) | undefined;
+            (vscode.window as any).showWarningMessage = (message: string, ...rest: unknown[]) => {
+                shownWarnings.push(message);
+                const labels = rest.filter((r): r is string => typeof r === 'string');
+                if (answerPrompt) { return Promise.resolve(labels[0]); }
+                return new Promise<string | undefined>(resolve => {
+                    answerPrompt = () => resolve(labels[0]);
+                });
+            };
+            const reloadPending = fake.send({ command: 'reload' });
+            for (let i = 0; i < 50 && !answerPrompt; i++) {
+                await new Promise(resolve => setImmediate(resolve));
+            }
+            assert.ok(answerPrompt, '폐기 확인창이 뜨지 않았다');
+
+            // 확인창이 열린 채로 사용자가 패널을 닫는다.
+            fake.disposePanel();
+            assert.strictEqual(jsonPanelRegistry.isDirty(), false, 'dispose 가 dirty 를 내리지 않았다');
+
+            // 그 사이 파일이 깨진다 → 재개된 reload 는 실패 경로(=dirty 로 되돌림)
+            // 로 간다. 세션이 살아 있다고 판단하면 여기서 dirty 가 되살아난다.
+            fs.writeFileSync(filePath, '{ broken');
+            answerPrompt();
+            await reloadPending;
+
+            assert.strictEqual(
+                jsonPanelRegistry.isDirty(), false,
+                '닫힌 패널의 reload 콜백이 전역 dirty 를 되살렸다'
+            );
+        });
+
         test('host→webview 메시지에는 모두 session 이 실린다', async () => {
             // webview 가 남의 메시지를 걸러내려면 세션이 붙어 있어야 한다.
             const fake = installFakePanel();
@@ -440,6 +483,36 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
                 JSON.parse(fs.readFileSync(fileA, 'utf-8')),
                 { rows: [{ a: 2 }] },
                 '응답 억제가 저장 자체를 막으면 안 된다'
+            );
+        });
+
+        test('예기치 않은 실패도 화면에 흔적을 남긴다', async () => {
+            // 알려진 실패(쓰기 · stat · recovery 정리)는 각자의 메시지가 있다.
+            // 그 바깥에서 던지는 것 — 여기서는 응답 전송 자체 — 은 우리가 모르는
+            // 상태이고, 메시지 핸들러는 async 인데 VS Code 가 await 하지 않으므로
+            // 그냥 던지면 확장 호스트 로그에만 남는다. 저장한 줄 아는 사용자에게
+            // 아무 신호도 가지 않는 것이 문제였다.
+            const fake = installFakePanel();
+            const filePath = writeJson('save-boom.json', { rows: [{ a: 1 }] });
+            await openJsonEditorFile(makeContext(), filePath);
+
+            (fake.panel.webview as any).postMessage = () => { throw new Error('post-boom'); };
+
+            await assert.rejects(
+                fake.send({ command: 'save', data: { rows: [{ a: 2 }] }, seq: 1 }),
+                /post-boom/,
+                '스택은 로그에 남도록 다시 던져야 한다'
+            );
+
+            assert.ok(
+                shownErrors.some(m => m.includes('save-boom.json')),
+                `사용자에게 아무것도 알리지 않았다: ${JSON.stringify(shownErrors)}`
+            );
+            // 바이트는 이미 디스크에 있다 — 그래서 "저장 실패" 라고 단정하지 않는다.
+            assert.deepStrictEqual(
+                JSON.parse(fs.readFileSync(filePath, 'utf-8')),
+                { rows: [{ a: 2 }] },
+                '응답 전송 실패가 저장 자체를 되돌리지는 않는다'
             );
         });
 

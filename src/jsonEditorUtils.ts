@@ -301,16 +301,24 @@ export function coerceEditedCellValue(rawInput: string, oldValue: unknown): unkn
  * no edit required. The scalar branch already avoids this via
  * {@link coerceEditedCellValue}; arrays apply the same rule per item.
  *
- * Items past the end of `oldArray` have no type to preserve, so they go through
- * {@link parseValue}. Note that the webview's "+" button pushes `''` into the
- * data *before* re-rendering, so a freshly added item is a string by then and
- * stays one — same as a scalar cell whose old value was `''`.
+ * **빈 슬롯에는 보존할 타입이 없다.** 옛 항목이 `''` 이거나 아예 없으면
+ * {@link parseValue} 로 해석한다. webview 의 "+" 버튼이 새 항목을 `''` 로 데이터에
+ * 밀어 넣고 다시 그리므로, 그것을 "문자열 항목" 으로 보면 숫자 배열에 항목 하나를
+ * 더한 것만으로 `[1, 2, "3"]` 같은 **혼합 배열**이 디스크에 기록된다.
+ *
+ * scalar 셀(`''` → 입력하면 문자열 유지)과 규칙이 갈리는 것은 의도적이다. scalar 의
+ * `''` 는 사용자가 파일에 적어 둔 값이지만, 배열의 빈 항목은 거의 언제나 방금 만든
+ * 자리 표시자이고, 배열은 항목끼리 같은 타입인 것이 정상이다.
  */
 export function coerceEditedArrayItems(
     rawInputs: readonly string[],
     oldArray: readonly unknown[]
 ): unknown[] {
-    return rawInputs.map((raw, i) => coerceEditedCellValue(raw, oldArray[i]));
+    return rawInputs.map((raw, i) => {
+        const oldValue = oldArray[i];
+        if (oldValue === '' || oldValue === undefined) { return parseValue(raw); }
+        return coerceEditedCellValue(raw, oldValue);
+    });
 }
 
 /**
@@ -378,20 +386,31 @@ export function effectiveBaseline(
  */
 export function decideSaveResult(input: SaveResultInput): SaveResultDecision {
     if (input.message.session !== input.sessionId) { return { kind: 'ignore' }; }
-    if (!input.message.success) {
-        // 실패해도 host 와 상태는 맞춰 둔다. 저장 시도 중에 host 가 pending
-        // snapshot 을 이미 버렸으므로, dirty 면 recovery 를 다시 채워야 한다.
-        return { kind: 'keep', dirty: input.currentSnapshot !== input.lastSavedSnapshot };
-    }
-    const saved = input.pendingSnapshots.get(input.message.seq);
-    if (saved === undefined) { return { kind: 'keep', dirty: true }; }
-    // **아직 남아 있는 다른 저장이 디스크의 최종 내용을 정한다.** 저장이 겹쳤을
-    // 때(seq1=B, seq2=C) seq1 의 응답만 보고 B 와 비교하면, 화면이 B 인 상태에서
-    // clean 으로 판정된다 — 그러나 곧 C 가 디스크에 남는다. 응답한 항목을 뺀
-    // 나머지 중 가장 최근 것을 기준으로 삼는다.
+    // **아직 남아 있는 다른 저장이 디스크의 최종 내용을 정한다.** 응답한 항목을
+    // 뺀 나머지가 기준이 되며, 이 계산은 성공·실패 **양쪽 모두**에 필요하다.
     const remaining = new Map(
         [...input.pendingSnapshots].filter(([seq]) => seq !== input.message.seq)
     );
+    if (!input.message.success) {
+        // 실패해도 host 와 상태는 맞춰 둔다. 저장 시도 중에 host 가 pending
+        // snapshot 을 이미 버렸으므로, dirty 면 recovery 를 다시 채워야 한다.
+        //
+        // **이 저장은 디스크에 닿지 않았지만 남은 저장은 곧 닿는다.** 그래서
+        // 기준은 `lastSavedSnapshot` 이 아니라 나머지 pending 이다. 겹친 저장
+        // (seq1=B, seq2=C)에서 seq1 이 실패했을 때 옛 baseline A 와만 비교하면,
+        // 화면을 A 로 undo 해 둔 사용자는 clean 판정을 받는다 — host 는
+        // `saveAck` 의 dirty 를 무조건 적용하므로 **복구 항목까지 지운다.**
+        // 그 직후 seq2 가 C 를 디스크에 남기므로 화면과 디스크가 실제로는
+        // 다르다. 성공 분기와 같은 기준을 쓰면 그 창이 아예 없다.
+        return {
+            kind: 'keep',
+            dirty: input.currentSnapshot !== effectiveBaseline(remaining, input.lastSavedSnapshot),
+        };
+    }
+    const saved = input.pendingSnapshots.get(input.message.seq);
+    if (saved === undefined) { return { kind: 'keep', dirty: true }; }
+    // 저장이 겹쳤을 때(seq1=B, seq2=C) seq1 의 응답만 보고 B 와 비교하면, 화면이
+    // B 인 상태에서 clean 으로 판정된다 — 그러나 곧 C 가 디스크에 남는다.
     const baselineForDirty = effectiveBaseline(remaining, saved);
     return {
         kind: 'apply',

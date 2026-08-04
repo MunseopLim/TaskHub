@@ -177,6 +177,189 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
         return { api, posted, doc };
     }
 
+    // ── commit / sync ───────────────────────────────────────────────────────
+    /**
+     * `commitCell` 의 배열 분기와 `syncEditingArrayCellToData` 를 **실제로
+     * 실행한다**.
+     *
+     * draft 쪽(`buildDraftSnapshot`)은 위 suite 가 돌리지만, 값이 디스크로 가는
+     * 경로는 이 둘이다 — 그동안 소스 정규식 가드만 걸려 있어서 로직이 틀려도
+     * 통과했다. 배열이 문자열로 굳는 결함이 정확히 이 두 함수에 있었다.
+     */
+    suite('배열 셀 커밋이 항목 타입을 보존한다 (실행 테스트)', () => {
+        const JSON_EDIT_SELECTOR = '.cell-edit textarea.json-edit';
+        const SCALAR_TEXTAREA_SELECTOR = '.cell-edit textarea';
+        const SCALAR_INPUT_SELECTOR = '.cell-edit input';
+
+        /** commitCell 이 쓰는 셀렉터까지 아는 td. 모르는 셀렉터는 즉시 실패. */
+        function makeCommitCell(row: number, col: string, inputs: FakeInput[], jsonEdit?: FakeInput) {
+            let editing = true;
+            return {
+                isEditing: () => editing,
+                classList: {
+                    contains: (name: string) => name === 'editing' && editing,
+                    remove: (name: string) => { if (name === 'editing') { editing = false; } },
+                },
+                dataset: { row: String(row), col },
+                querySelector(selector: string) {
+                    if (selector === JSON_EDIT_SELECTOR) { return jsonEdit ?? null; }
+                    if (selector === SCALAR_TEXTAREA_SELECTOR) { return null; }
+                    if (selector === SCALAR_INPUT_SELECTOR) { return inputs[0] ?? null; }
+                    return assert.fail(`가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                },
+                querySelectorAll(selector: string) {
+                    assert.strictEqual(selector, ARR_INPUT_SELECTOR, `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                    return inputs.filter(i => i.dataset.arrIdx !== undefined);
+                },
+            };
+        }
+
+        /** commitCell / syncEditingArrayCellToData 를 한 스코프에 모아 실행한다. */
+        function bootCommit(data: unknown) {
+            /** pushHistory 가 불린 시점의 data 스냅샷 — "변경으로 봤는가" 의 증거. */
+            const historyPushes: string[] = [];
+            const errors: string[] = [];
+
+            const script = [
+                extractFn('parseValue'),
+                extractFn('coerceCellValue'),
+                extractFn('coerceEditedArrayItems'),
+                extractFn('getActiveRows'),
+                extractFn('syncEditingArrayCellToData'),
+                extractFn('commitCell'),
+                'let activeIdx = 0;',
+                // 이 시나리오와 무관한 협력자들. pushHistory 만은 호출 여부가
+                // 의미를 가지므로(변경으로 봤는지) 기록한다.
+                'function pushHistory() { historyPushes.push(JSON.stringify(data)); }',
+                'function renderTable() {}',
+                'function showError(message) { errors.push(message); }',
+                'function fmt(template, values) { return template + JSON.stringify(values); }',
+                'const S = { invalidJsonInCell: "invalid-json-in-cell" };',
+                'return {',
+                '    commit: (td) => commitCell(td),',
+                '    sync: (td) => syncEditingArrayCellToData(td),',
+                '    data: () => data,',
+                '};',
+            ].join('\n');
+
+            const factory = new Function('data', 'sheetMap', 'historyPushes', 'errors', script);
+            const api = factory(data, sheetMap, historyPushes, errors);
+            return { api, historyPushes, errors };
+        }
+
+        test('값을 바꾸지 않고 열었다 나가면 항목 타입이 그대로다', () => {
+            // 이 결함의 트리거: 편집이 아니라 **클릭했다 나가기**. 항목마다
+            // text input 을 그리므로 값이 전부 string 으로 돌아오고, 그대로 모으면
+            // [1, true, null] 이 ["1","true","null"] 로 디스크에 기록됐다.
+            const data = { rows: [{ tags: [1, true, null] }] };
+            const { api, historyPushes } = bootCommit(data);
+            const cell = makeCommitCell(0, 'tags', [
+                makeInput('1', { arrIdx: 0 }),
+                makeInput('true', { arrIdx: 1 }),
+                makeInput('null', { arrIdx: 2 }),
+            ]);
+
+            assert.strictEqual(api.commit(cell), true);
+
+            assert.deepStrictEqual(api.data(), { rows: [{ tags: [1, true, null] }] });
+            assert.deepStrictEqual(historyPushes, [], '변경이 없는데 히스토리에 쌓였다');
+        });
+
+        test('고친 항목만 바뀌고 나머지 타입은 유지된다', () => {
+            const data = { rows: [{ tags: [1, true, null] }] };
+            const { api, historyPushes } = bootCommit(data);
+            const cell = makeCommitCell(0, 'tags', [
+                makeInput('10', { arrIdx: 0 }),
+                makeInput('true', { arrIdx: 1 }),
+                makeInput('null', { arrIdx: 2 }),
+            ]);
+
+            api.commit(cell);
+
+            assert.deepStrictEqual(api.data(), { rows: [{ tags: [10, true, null] }] });
+            assert.strictEqual(historyPushes.length, 1, '실제 변경은 히스토리에 쌓여야 한다');
+        });
+
+        test('문자열 배열은 raw 를 그대로 지킨다', () => {
+            // 숫자로 보이는 문자열("007")이 숫자로 바뀌면 그것도 데이터 손상이다.
+            const data = { rows: [{ tags: ['007', 'true'] }] };
+            const { api, historyPushes } = bootCommit(data);
+            const cell = makeCommitCell(0, 'tags', [
+                makeInput('007', { arrIdx: 0 }),
+                makeInput('true', { arrIdx: 1 }),
+            ]);
+
+            api.commit(cell);
+
+            assert.deepStrictEqual(api.data(), { rows: [{ tags: ['007', 'true'] }] });
+            assert.deepStrictEqual(historyPushes, []);
+        });
+
+        test('태그 추가·삭제 직전의 sync 도 같은 규칙을 쓰고 배열 참조를 지킨다', () => {
+            // ✕ / + 버튼은 sync 한 뒤 그 **같은 배열**에 splice/push 한다.
+            // 새 배열로 갈아끼우면 그 뒤의 splice 가 data 에 닿지 않는다.
+            const data = { rows: [{ tags: [1, 2] }] };
+            const { api } = bootCommit(data);
+            const original = data.rows[0].tags;
+            const cell = makeCommitCell(0, 'tags', [
+                makeInput('1', { arrIdx: 0 }),
+                makeInput('20', { arrIdx: 1 }),
+            ]);
+
+            const arr = api.sync(cell);
+
+            assert.strictEqual(arr, original, 'sync 가 배열 참조를 바꾸면 이후 splice/push 가 유실된다');
+            assert.deepStrictEqual(arr, [1, 20], '항목 타입을 보존한 채 제자리에서 갱신해야 한다');
+            arr.splice(0, 1);
+            assert.deepStrictEqual(api.data(), { rows: [{ tags: [20] }] }, 'sync 뒤의 splice 가 data 에 반영돼야 한다');
+        });
+
+        test('"+" 로 추가한 항목이 숫자 배열을 문자열로 오염시키지 않는다', () => {
+            // "+" 버튼의 결과 상태: arr.push('') 뒤 다시 그려 빈 칸이 하나 늘어난
+            // 모습. 거기에 3 을 입력하고 커밋한다. 빈 자리를 "문자열 항목" 으로
+            // 보면 [1, 2, "3"] 이 되어 스키마가 붙은 파일에서 특히 성가시다.
+            const data = { rows: [{ tags: [1, 2, ''] }] };
+            const { api } = bootCommit(data);
+            const cell = makeCommitCell(0, 'tags', [
+                makeInput('1', { arrIdx: 0 }),
+                makeInput('2', { arrIdx: 1 }),
+                makeInput('3', { arrIdx: 2 }),
+            ]);
+
+            api.commit(cell);
+
+            assert.deepStrictEqual(api.data(), { rows: [{ tags: [1, 2, 3] }] });
+        });
+
+        test('배열 셀의 json-edit 이 invalid 면 커밋을 거부하고 편집을 유지한다', () => {
+            // 객체가 든 배열은 항목별 input 대신 textarea 하나로 그린다. 여기서
+            // false 를 돌려주지 않으면 호출부(Save · 다른 셀 클릭 · 행 조작)가
+            // 그대로 진행해 **화면과 다른 stale 데이터**가 저장된다.
+            const data = { rows: [{ tags: [{ k: 1 }] }] };
+            const { api, errors, historyPushes } = bootCommit(data);
+            const textarea = makeInput('[{"k":', { jsonEdit: true });
+            const cell = makeCommitCell(0, 'tags', [], textarea);
+
+            assert.strictEqual(api.commit(cell), false, 'invalid JSON 을 커밋 성공으로 돌려주면 안 된다');
+            assert.strictEqual(cell.isEditing(), true, '편집을 풀면 사용자가 고칠 자리를 잃는다');
+            assert.strictEqual(errors.length, 1, '무엇이 잘못됐는지 알려야 한다');
+            assert.deepStrictEqual(historyPushes, []);
+            assert.deepStrictEqual(api.data(), { rows: [{ tags: [{ k: 1 }] }] }, '데이터를 건드리면 안 된다');
+        });
+
+        test('편집 중이 아닌 셀은 커밋이 아무것도 하지 않는다', () => {
+            const data = { rows: [{ tags: [1, 2] }] };
+            const { api, historyPushes } = bootCommit(data);
+            const cell = makeCommitCell(0, 'tags', [makeInput('9', { arrIdx: 0 })]);
+            cell.classList.remove('editing');
+
+            assert.strictEqual(api.commit(cell), true);
+
+            assert.deepStrictEqual(api.data(), { rows: [{ tags: [1, 2] }] });
+            assert.deepStrictEqual(historyPushes, []);
+        });
+    });
+
     // ── activeDraftState ────────────────────────────────────────────────────
     suite('activeDraftState 가 DOM 의 미커밋 입력을 읽는다', () => {
 
@@ -484,6 +667,60 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             assert.notStrictEqual(api.state().lastRecoverableDraft, undefined);
             api.type(input, '{"k":1}');     // baseline 으로 복귀 → clean
             assert.strictEqual(api.state().lastRecoverableDraft, undefined);
+        });
+
+        test('저장이 실패해도 아직 날아가고 있는 저장이 dirty 기준이다', () => {
+            // seq1=B · seq2=C 가 pending 인 상태에서 seq1 이 **실패**하고 화면은
+            // 옛 baseline A 로 undo 돼 있다. 실패한 저장은 디스크에 닿지 않았지만
+            // seq2 는 곧 C 를 남기므로 화면(A)과 디스크(C)는 결국 다르다.
+            // 여기서 dirty:false 를 보내면 host 가 (saveAck 의 dirty 를 무조건
+            // 적용하므로) 복구 항목을 지운다.
+            const screen = { rows: [{ a: 'A' }] };
+            const { api, posted } = bootWebview({
+                data: screen,
+                sheetMap,
+                lastSavedSnapshot: JSON.stringify(screen),
+                pending: [
+                    [1, JSON.stringify({ rows: [{ a: 'B' }] })],
+                    [2, JSON.stringify({ rows: [{ a: 'C' }] })],
+                ],
+            });
+
+            saveResult(api, 1, false);
+
+            const ack = posted.find(m => m.command === 'saveAck');
+            assert.deepStrictEqual(
+                ack, { command: 'saveAck', seq: 1, dirty: true },
+                '남은 저장이 디스크의 최종 내용을 정하는데 clean 으로 알렸다'
+            );
+            assert.strictEqual(
+                api.state().lastSavedSnapshot, JSON.stringify(screen),
+                '실패한 저장이 baseline 을 옮기면 안 된다'
+            );
+            assert.deepStrictEqual(
+                api.state().pending.map((e: [unknown, string]) => e[0]), [2],
+                '응답받은 항목만 pending 에서 빠져야 한다'
+            );
+        });
+
+        test('실패해도 남은 저장이 화면과 같으면 clean 이다 (가드가 과하지 않다)', () => {
+            const screen = { rows: [{ a: 'C' }] };
+            const { api, posted } = bootWebview({
+                data: screen,
+                sheetMap,
+                lastSavedSnapshot: JSON.stringify({ rows: [{ a: 'A' }] }),
+                pending: [
+                    [1, JSON.stringify({ rows: [{ a: 'B' }] })],
+                    [2, JSON.stringify(screen)],
+                ],
+            });
+
+            saveResult(api, 1, false);
+
+            assert.strictEqual(
+                posted.find(m => m.command === 'saveAck').dirty, false,
+                '곧 디스크가 화면과 같아지는데 불필요하게 dirty 로 남겼다'
+            );
         });
 
         test('남의 세션 응답은 pending 스냅샷을 건드리지 않는다', () => {

@@ -385,6 +385,32 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.deepStrictEqual(d, { kind: 'keep', dirty: false });
         });
 
+        test('실패해도 아직 날아가고 있는 저장이 dirty 기준이다', () => {
+            // seq1=B, seq2=C 가 pending 인 상태에서 seq1 이 **실패**하고 화면은
+            // 옛 baseline A 로 undo 돼 있다. 실패한 저장은 디스크에 닿지 않았지만
+            // seq2 는 곧 C 를 남기므로, A 와만 비교해 clean 이라고 답하면 host 가
+            // (saveAck 의 dirty 를 무조건 적용하므로) 복구 항목까지 지운다.
+            const d = decideSaveResult(input({
+                message: { success: false, seq: 1, session: 3 },
+                pendingSnapshots: new Map([[1, '{"a":"B"}'], [2, '{"a":"C"}']]),
+                currentSnapshot: '{"a":"A"}',
+                lastSavedSnapshot: '{"a":"A"}',
+            }));
+            assert.deepStrictEqual(d, { kind: 'keep', dirty: true });
+        });
+
+        test('실패 + 남은 저장이 화면과 같으면 clean 이다 (가드가 과하지 않다)', () => {
+            // 위와 같은 상황에서 화면이 C 라면 곧 디스크도 C 가 된다 — 불필요한
+            // dirty 로 남기지 않는다.
+            const d = decideSaveResult(input({
+                message: { success: false, seq: 1, session: 3 },
+                pendingSnapshots: new Map([[1, '{"a":"B"}'], [2, '{"a":"C"}']]),
+                currentSnapshot: '{"a":"C"}',
+                lastSavedSnapshot: '{"a":"A"}',
+            }));
+            assert.deepStrictEqual(d, { kind: 'keep', dirty: false });
+        });
+
         test('boot 직전(baseline null)에도 알 수 없는 seq 는 dirty 로 남는다', () => {
             const d = decideSaveResult(input({
                 message: { success: true, seq: 99, session: 3 },
@@ -432,6 +458,26 @@ suite('JsonEditorUtils Test Suite', () => {
 
         test('빈 배열은 빈 배열이다', () => {
             assert.deepStrictEqual(coerceEditedArrayItems([], []), []);
+        });
+
+        test('"+" 로 갓 추가된 빈 항목은 배열의 타입을 따른다', () => {
+            // "+" 버튼은 새 항목을 `''` 로 **데이터에 먼저** 밀어 넣고 다시 그린다.
+            // 그 자리를 "문자열 항목" 으로 보면 숫자 배열에 항목 하나를 더한 것만
+            // 으로 [1, 2, "3"] 같은 혼합 배열이 디스크에 기록된다.
+            assert.deepStrictEqual(coerceEditedArrayItems(['1', '2', '3'], [1, 2, '']), [1, 2, 3]);
+        });
+
+        test('빈 항목을 그대로 두면 빈 문자열로 남는다', () => {
+            // 사용자가 "+" 만 누르고 아무것도 입력하지 않은 경우. 자리를 없애지는
+            // 않는다 — 명시적으로 만든 항목이다.
+            assert.deepStrictEqual(coerceEditedArrayItems(['1', ''], [1, '']), [1, '']);
+        });
+
+        test('빈 문자열 항목은 문자열 배열에서도 타입 정보로 치지 않는다', () => {
+            // scalar 셀(`''` 에 입력하면 문자열 유지)과 규칙이 갈리는 유일한 자리.
+            // 의도적이다 — 배열의 빈 항목은 거의 언제나 방금 만든 자리 표시자이고,
+            // 배열은 항목끼리 같은 타입인 것이 정상이다.
+            assert.deepStrictEqual(coerceEditedArrayItems(['123', 'a'], ['', 'a']), [123, 'a']);
         });
     });
 
@@ -1090,10 +1136,13 @@ suite('JsonEditorUtils Test Suite', () => {
                 /function\s+coerceEditedArrayItems\s*\(\s*raws\s*,\s*oldArray\s*\)/.test(editorSource),
                 'webview 는 coerceEditedArrayItems(raws, oldArray) 를 정의해야 한다'
             );
+            // 정의 1 + 호출 3(commitCell · syncEditingArrayCellToData ·
+            // buildDraftSnapshot) = 4. `>= 3` 으로 두면 **셋 중 하나가 raw 수집으로
+            // 되돌아가도 통과한다** — 이 가드가 막으려던 것이 정확히 그 회귀다.
             const collectSites = editorSource.match(/coerceEditedArrayItems\(/g) || [];
             assert.ok(
-                collectSites.length >= 3,
-                `배열 수집 지점이 타입 보존을 거치지 않는다 (호출 ${collectSites.length}회, 정의 1 + 사용 2 이상 기대)`
+                collectSites.length >= 4,
+                `배열 수집 지점이 타입 보존을 거치지 않는다 (등장 ${collectSites.length}회, 정의 1 + 사용 3 기대)`
             );
             assert.ok(
                 !/newArr\.push\(input\.value\)/.test(editorSource),

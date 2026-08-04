@@ -31,6 +31,7 @@ export const jsonPanelRegistry = {
         currentMessageDisposable = undefined;
         currentIsDirty = false;
         currentFilePath = undefined;
+        currentSessionId = NO_SESSION;
         currentFileWatcher?.dispose();
         currentFileWatcher = undefined;
         if (currentSnapshotTimer) { clearTimeout(currentSnapshotTimer); }
@@ -52,9 +53,16 @@ let currentFilePath: string | undefined;
  * 전역인 `currentPanel` 만 보고 응답을 보내면 이전 파일의 in-flight 저장 결과가
  * 새 파일의 webview 로 배달된다. 열 때마다 증가하는 이 번호를 webview 에 심고
  * 응답에 함께 실어, 양쪽 모두 자기 세션이 아닌 메시지를 버린다.
+ *
+ * **패널이 닫히는 것도 세션의 끝이다.** dispose 후 이 값을 그대로 두면 옛
+ * 세션의 지연 콜백이 `isCurrentSession()` 을 통과해, 화면에 없는 파일 때문에
+ * `currentIsDirty` 같은 모듈 전역을 되살린다 — 패널이 없는데 dirty 로 남는다.
+ * 그래서 dispose 와 registry.clear 에서 {@link NO_SESSION} 으로 되돌린다.
  */
 let jsonEditorSessionCounter = 0;
-let currentSessionId = 0;
+/** 어떤 세션도 화면에 없음. 실제 세션 번호는 `++counter` 라 항상 1 이상이다. */
+const NO_SESSION = 0;
+let currentSessionId = NO_SESSION;
 let currentFileWatcher: vscode.FileSystemWatcher | undefined;
 let currentSnapshotTimer: NodeJS.Timeout | undefined;
 let currentPendingSnapshot: unknown | undefined;
@@ -148,6 +156,24 @@ function showSaveBaselineWarning(fileName: string, error: any): void {
     vscode.window.showWarningMessage(t(
         `${fileName}은(는) 저장됐지만 파일 정보를 읽지 못했습니다. 외부 변경 알림이 잘못 뜰 수 있습니다: ${error.message}`,
         `${fileName} was saved, but its file info could not be read. You may see a spurious external-change prompt: ${error.message}`
+    ));
+}
+
+/**
+ * 저장 핸들러가 **예상하지 못한 지점**에서 실패했을 때 (webview 로 응답을
+ * 보내는 것 자체가 던지는 등). 알려진 실패는 각자의 전용 메시지가 있으므로,
+ * 여기 오는 것은 우리가 모르는 상태다.
+ *
+ * 그래서 "저장 실패" 라고 단정하지 않는다 — 이 지점은 디스크 쓰기 **전후 모두**
+ * 도달 가능해서, 파일이 이미 바뀌었을 수도 있고 아닐 수도 있다. 확실한 것은
+ * 편집기 상태를 더 이상 믿을 수 없다는 것뿐이고, host 는 dirty 로 남으므로
+ * 사용자가 다음에 닫거나 파일을 바꿀 때 폐기 확인창이 뜬다.
+ */
+function showSaveHandlerFailure(fileName: string, error: any): void {
+    const detail = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(t(
+        `${fileName} 저장 처리 중 예기치 않은 오류가 발생했습니다. 파일 내용을 확인하고 다시 열어 주세요: ${detail}`,
+        `An unexpected error occurred while handling the save of ${fileName}. Check the file and reopen it: ${detail}`
     ));
 }
 
@@ -526,6 +552,10 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             currentMessageDisposable = undefined;
             currentIsDirty = false;
             currentFilePath = undefined;
+            // 닫힌 것도 세션의 끝이다. 이 줄이 없으면 모달·await 뒤에서 깨어난
+            // 옛 콜백이 `isCurrentSession()` 을 통과해, 화면에 없는 파일 때문에
+            // currentIsDirty 를 다시 켠다 (패널이 없는데 dirty 로 남는다).
+            currentSessionId = NO_SESSION;
             currentFlushPendingSnapshot = undefined;
             currentLastReceivedSnapshot = undefined;
             disposeFileWatcher();
@@ -772,6 +802,12 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                         // 없다 — 여기서 정리하지 않으면 host 가 영원히 dirty 로
                         // 남아 매번 폐기 확인창이 뜬다.
                         awaitingSaveAck.delete(saveSeq);
+                        // **사용자에게 반드시 알린다.** 이 핸들러는 async 인데
+                        // VS Code 가 await 하지 않으므로, 그냥 던지면 확장 호스트
+                        // 로그에만 남고 화면에는 아무 일도 일어나지 않는다 —
+                        // 저장한 줄 알았던 사용자가 아무 신호도 못 받는다.
+                        // 알린 뒤 다시 던져 스택은 로그에 남긴다.
+                        showSaveHandlerFailure(fileName, unexpected);
                         throw unexpected;
                     }
                     break;
@@ -1799,8 +1835,15 @@ export function getWebviewContent(
         return (typeof oldValue === 'string') ? raw : parseValue(raw);
     }
 
+    // 빈 슬롯에는 보존할 타입이 없다. "+" 버튼이 새 항목을 '' 로 데이터에 밀어
+    // 넣고 다시 그리므로, 그것을 문자열 항목으로 보면 숫자 배열에 항목 하나를
+    // 더한 것만으로 [1, 2, "3"] 같은 혼합 배열이 디스크에 기록된다.
     function coerceEditedArrayItems(raws, oldArray) {
-        return raws.map((raw, i) => coerceCellValue(raw, oldArray[i]));
+        return raws.map((raw, i) => {
+            const oldValue = oldArray[i];
+            if (oldValue === '' || oldValue === undefined) { return parseValue(raw); }
+            return coerceCellValue(raw, oldValue);
+        });
     }
 
     // NOTE: 아래 buildSheetMap / getActiveRows 로직은 src/jsonEditorUtils.ts 의
@@ -1853,16 +1896,20 @@ export function getWebviewContent(
     //      디스크에는 그 사이의 다른 스냅샷이 들어가 있다.
     function decideSaveResult(args) {
         if (args.message.session !== args.sessionId) { return { kind: 'ignore' }; }
-        if (!args.message.success) {
-            return { kind: 'keep', dirty: args.currentSnapshot !== args.lastSavedSnapshot };
-        }
-        const saved = args.pendingSnapshots.get(args.message.seq);
-        if (saved === undefined) { return { kind: 'keep', dirty: true }; }
         // 저장이 겹쳤으면 **아직 남은 저장**이 디스크의 최종 내용을 정한다.
+        // 성공·실패 양쪽이 같은 기준을 쓴다 — 실패한 저장은 디스크에 닿지
+        // 않았지만 남은 저장은 곧 닿으므로, 옛 baseline 과만 비교하면 그 사이
+        // undo 해 둔 화면이 clean 으로 판정되어 host 가 복구 항목을 지운다.
         const remaining = new Map();
         args.pendingSnapshots.forEach((snap, seq) => {
             if (seq !== args.message.seq) { remaining.set(seq, snap); }
         });
+        if (!args.message.success) {
+            const baseline = effectiveBaselineOf(remaining, args.lastSavedSnapshot);
+            return { kind: 'keep', dirty: args.currentSnapshot !== baseline };
+        }
+        const saved = args.pendingSnapshots.get(args.message.seq);
+        if (saved === undefined) { return { kind: 'keep', dirty: true }; }
         const baselineForDirty = effectiveBaselineOf(remaining, saved);
         return { kind: 'apply', lastSavedSnapshot: saved, dirty: args.currentSnapshot !== baselineForDirty };
     }
