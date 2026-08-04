@@ -29,6 +29,37 @@
 =====================================================================
 -->
 
+## [0.6.58] - 2026-08-04
+
+### 수정 — 조용히 값이 달라지던 네 자리
+
+모두 **오류 없이 다른 값이 되는** 종류다. 사용자가 무언가를 잘못하지 않아도 일어나고, 일어난 사실이 화면 어디에도 남지 않는다.
+
+#### High (데이터 손실 / 검증 우회)
+
+- **배열 셀을 열었다 나가기만 해도 타입이 문자열로 굳었다**: 배열 편집기는 항목마다 `<input>` 을 그리므로 값이 전부 string 으로 돌아오는데, 그것을 그대로 모아 새 배열로 갈아끼우고 있었다. `[1, true, null]` 이 담긴 셀을 **클릭했다 나가는 것만으로** `["1", "true", "null"]` 이 된다 — 편집한 적이 없어도 그렇다. scalar 셀이 이미 쓰던 규칙(옛 값이 string 이면 raw 유지, 아니면 `parseValue`)을 항목 단위로 적용한다. 값을 모으는 자리가 셋(`commitCell` · `syncEditingArrayCellToData` · 미커밋 draft)이라 한 곳만 고치면 그 경로로 되살아난다 ([src/jsonEditor.ts](src/jsonEditor.ts), [src/jsonEditorUtils.ts](src/jsonEditorUtils.ts)).
+- **저장 응답을 기다리는 동안의 편집이 "저장됨"으로 표시됐다**: webview 는 응답이 돌아온 **그 시점의** 데이터를 saved baseline 으로 잡았다. host 가 파일을 쓰고 복구 스냅샷을 비우는 사이는 비동기라 그 틈에 편집이 들어갈 수 있고, 그러면 디스크=A · 화면=B · dirty=false 가 되어 **패널을 닫으면 B 가 조용히 사라진다**(복구 스냅샷도 이미 지워진 뒤다). 이제 저장 요청마다 번호를 붙여 **보낸 스냅샷**을 기억하고, host 가 그 번호를 되돌려 주면 그것을 baseline 으로 삼는다. 응답을 못 찾으면 무조건 dirty 로 둔다 — 잘못 clean 처리하는 것만이 되돌릴 수 없는 실수이고, 반대 방향은 한 번 더 저장하면 끝난다.
+- **다른 파일을 열면 이전 파일의 저장 결과가 새 화면에 배달됐다**: 패널을 재사용하므로(`reveal` + 새 html) in-flight 메시지가 다음 파일의 webview·핸들러에 닿는다. 옛 `saveResult` 는 새 파일의 미저장 편집을 clean 처리하고, 옛 `loadData` 는 **화면을 남의 파일 데이터로 갈아치운 뒤** 그대로 저장까지 이어질 수 있었다. 열 때마다 증가하는 세션 번호를 양방향 모든 메시지에 실어 자기 것이 아니면 버린다. 메시지 필터만으로는 부족해 — 모달·`await` 뒤에서 깨어나는 콜백은 **모듈 전역 상태**(dirty · 스냅샷 · baseline)를 직접 만진다 — 그 자리마다 세션을 다시 확인한다 ([src/jsonEditor.ts](src/jsonEditor.ts)).
+- **미커밋 입력이 복구 스냅샷에서 덮였다**: 저장 응답과 baseline 교체 시점에 dirty 판정과 복구 스냅샷을 **커밋된 데이터**로 하고 있었다. 편집 중인 셀의 입력은 아직 거기 없으므로 (1) 화면에 값이 남았는데 clean 으로 확정돼 host 가 복구 항목을 비우거나, (2) dirty 로 남기더라도 keystroke 마다 보내 둔 draft 를 옛 내용으로 덮었다. 이제 세 자리(입력 송신 · 저장 응답 · baseline 교체)가 **DOM 입력을 반영한 같은 draft** 를 쓴다. json-edit 텍스트영역처럼 타이핑 도중 반드시 invalid 를 지나는 경우에는 마지막으로 표현 가능했던 draft 를 대신 보낸다 — 커밋된 데이터를 보내면 고치려던 유실이 그 경로로 되살아난다.
+- **capture 가 실패하면 그 자리에 stdout 전체가 들어갔다**: 속성이 붙은 참조(`${producer.safe}`)도 그 속성이 없으면 `.output` 으로 폴백하고 있었다. 정규식이 매칭되지 않아 `safe` 가 만들어지지 않으면 **검증되지 않은 출력 전체**가 downstream 명령으로 흘러간다 — 사용자가 정규식으로 좁힌 값을 받는다고 믿는 자리다. 문서의 capture 실패 정책("미해결 placeholder 로 남음")도 처음부터 반대였다. 이제 폴백은 bare `${producer}` 에만 적용한다. 오타(`${build.typoKey}`)도 조용히 다른 값이 되는 대신 리터럴로 드러난다 ([src/pipelineUtils.ts](src/pipelineUtils.ts)).
+
+#### Medium (Extension Host 정지 / 결과 오염)
+
+- **매크로 확장이 Extension Host 를 세웠다**: 깊이 제한(50)만으로는 부족하다 — `#define Mn M(n-1) M(n-1)` 형태는 깊이가 얕아도 결과가 2^n 으로 커진다. 헤더 위에 호버하는 것만으로 확장 단계가 262,144 항목 / 9.7MB 까지 쌓였다. 결과 길이(64KB) · 치환 횟수(20,000) · 확장 단계 수(500) 상한을 두고, 공유 하위식은 memo 로 접어 지수 팽창을 선형으로 만든다. memo 는 **순환에 참여하는 매크로를 절대 담지 않고**(그 결과는 "누가 위에서 확장 중인가"에 의존한다), 재사용이 깊이 검사를 건너뛰지 않도록 캐시에 소비 깊이를 함께 들고 있는다 — 그러지 않으면 같은 정의 집합인데 `M0 M50` 은 성공하고 `M50 M0` 은 실패하는, 토큰 순서로 답이 갈리는 상태가 된다 ([src/macroExpander.ts](src/macroExpander.ts)).
+- **`stderr` 를 capture 이름으로 쓸 수 있었다**: 캡처 결과는 태스크 결과에 병합되므로, **stdout 에서 뽑은 값이 진짜 stderr 를 덮는다** — 그 stderr 는 Problems 패널로 가는 진단의 입력이기도 하다. `__proto__` · `constructor` · `prototype` 도 함께 막았다 ([src/pipelineUtils.ts](src/pipelineUtils.ts)).
+- **상속 키가 태스크 결과처럼 해석됐다**: 보간 컨텍스트가 평범한 객체라 `${constructor.name}` 이 `Object` 로, `${toString.name}` 이 `toString` 으로 치환되어 셸 명령에 들어갔다. own property 만 보도록 고치고, 결과 맵은 null-prototype 으로 만든다 — 태스크 id 가 `__proto__` 이면 평범한 객체에서는 **own property 가 만들어지지 않아 그 결과가 조용히 사라진다** ([src/extension.ts](src/extension.ts), [src/pipelineUtils.ts](src/pipelineUtils.ts)).
+- **`zip` 의 `tool` 만 보간되지 않았다**: `unzip` 은 하고 Preview 도 보간된 값을 보여 주는데 실행만 원본을 써서, `${workspaceFolder}/bin/7z` 같은 값이 미리보기에서는 해석되고 실행에서만 실패했다. 겸사겸사 OS별 객체는 **고른 뒤 보간한다** — 모든 branch 를 보간하면 이 기계에서 절대 실행되지 않을 branch 의 값 하나(널바이트 · 길이 초과)로 태스크 전체가 실패한다. `JSON.stringify → 보간 → JSON.parse` 경로도 걷어냈다: 보간된 값이 JSON 문자열 안으로 들어가면 `C:\temp` 의 `\t` 가 탭이 되어 **조용히** 다른 경로가 된다 ([src/extension.ts](src/extension.ts)).
+
+#### 진단 (Preview Run / Doctor 가 런타임과 어긋나던 것)
+
+- **전방 참조를 키까지 관용했다**: 아직 시뮬레이션되지 않은 태스크를 가리키면 어떤 키든 통과시켰다. 자동 추론된 의존성이 순서를 뒤집으므로 전방 참조 자체는 정상이지만, 그 관용이 키까지 덮어 `${producer.safe}` 같은 오타가 Preview 에서는 "모두 해석됨" 으로 보였다. 이제 그 태스크가 **실제로 낼 키**만 관용한다 — 이미 시뮬레이션된 태스크에 대해 `findTypoRefs` 가 하던 일의 앞쪽 대칭이다 ([src/previewRun.ts](src/previewRun.ts)).
+- **`${pick.values}` 는 다중 선택에서만 생긴다**: `canPickMany` 없는 quickPick 에도 무조건 채워, 런타임에서는 리터럴로 남는 참조가 진단에서만 해석된 것처럼 보였다. 반대로 캡처 모드의 `${build.stderr}` 는 **정상 참조인데 미해결로 보고**되고 있었다 — 시뮬레이션에 없던 키다.
+- **검사 대상에서 빠져 있던 자리**: `tool` · `output.content` · inputBox 의 `prefix`/`suffix` 안의 참조는 런타임에서 보간되는데 아무도 보지 않았다. `tool: "${ghost.output}"` 이 무경고로 통과한 뒤 리터럴 실행 파일로 실행을 시도했다.
+- **공백이 낀 참조를 다듬어 정상으로 보이게 했다**: 런타임은 `${ producer.output}` 의 head 를 `" producer"` 로 쓰므로 어떤 id 와도 맞지 않아 리터럴로 남는데, 진단 쪽만 trim 해서 정상 참조로 보였다 — 의존성 추론은 순서를 잡고 값은 오지 않는 상태가 된다.
+- **`tool.platform-missing` (신규, warning)**: 현재 플랫폼에서 쓸 `tool` 값이 없다는 것은 참조가 전부 해석돼도 실행은 불가능하다는 뜻이라 `variable.unresolved` 로는 절대 드러나지 않는다. **Preview 는 이 기계가 고를 branch 하나만**, **Doctor 는 모든 branch** 를 본다 — 앞은 "지금 실행하면", 뒤는 설정 파일 자체를 보는 자리다 ([src/doctor.ts](src/doctor.ts)).
+
+**테스트**: 신규 210종, 최종 2348 passing. JSON Editor webview 쪽은 **배포되는 스크립트의 함수 본문을 그대로 뽑아 가짜 DOM 위에서 실행하는** 테스트를 새로 두었다 ([src/test/jsonEditorWebviewDraft.test.ts](src/test/jsonEditorWebviewDraft.test.ts)) — 그전에는 host 미러 단위테스트와 소스 정규식 가드뿐이라, DOM 에서 값을 **모으는** 코드는 한 줄도 실행되지 않았고 이번 결함 중 둘이 정확히 그 사이에 살아 있었다.
+
 ## [0.6.57] - 2026-08-03
 
 ### 수정 / 추가 — 다이얼로그 옵션의 발견 가능성과 다중 선택

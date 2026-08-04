@@ -394,7 +394,7 @@ Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.tx
 
 | 필드 | 타입 | 설명 |
 | --- | --- | --- |
-| `name` | `string` (**필수**) | 파생 변수 이름. `${task_id.<name>}`로 참조. `/^[A-Za-z_][A-Za-z0-9_]*$/`만 허용. `output`, `path`, `value` 등 내장 키는 예약어로 차단. |
+| `name` | `string` (**필수**) | 파생 변수 이름. `${task_id.<name>}`로 참조. `/^[A-Za-z_][A-Za-z0-9_]*$/`만 허용. `output`, `stderr`, `path`, `value` 등 내장 키는 예약어로 차단 — 캡처 결과는 태스크 결과에 병합되므로 허용하면 실제 결과 키를 덮어씁니다. |
 | `regex` | `string` | 출력 전체에 매칭할 정규식. 매칭 시 `group`에 지정한 그룹 값을 사용. |
 | `group` | `integer` | 캡처 그룹 인덱스. 기본값: 캡처 그룹이 있으면 `1`, 없으면 `0`(전체 매칭). `0`을 명시하면 항상 전체 매칭. |
 | `flags` | `string` | 정규식 플래그 (예: `"i"`, `"m"`, `"is"`). |
@@ -402,7 +402,7 @@ Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.tx
 | `trim` | `boolean` | 선택된 값에 `.trim()` 적용. 기본값 `false`. |
 
 **실패 정책**
-- 규칙이 매칭되지 않으면 **조용히 건너뜀** — 파생 변수가 생성되지 않고 이후 `${id.<name>}`는 미해결 placeholder로 남음 (Preview Run에서 경고로 보임).
+- 규칙이 매칭되지 않으면 **조용히 건너뜀** — 파생 변수가 생성되지 않고 이후 `${id.<name>}`는 미해결 placeholder로 남습니다. Preview Run과 Doctor는 **정규식을 실행하지 않으므로 매칭 실패 자체는 예측하지 못합니다** — 선언하지 않은 이름(`${id.오타}`)만 미해결로 보고합니다. 실제 매칭 여부는 실행해 봐야 알 수 있습니다.
 - 설정 오류(이름 누락, 예약어, 잘못된 정규식, 중복 이름)는 **즉시 에러**로 실행 중단.
 
 #### Output Diagnostics (Problems 패널 통합)
@@ -503,6 +503,8 @@ Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.tx
 - 미해결 `${...}` 변수 요약 (오타·상류 태스크 누락 발견에 유용)
 
 실제 shell 실행, 파일 쓰기, 대화상자 표시는 일어나지 않습니다.
+
+**OS별 객체(`command` / `tool` / `itemsFromCommand`)는 지금 이 기계가 고를 branch 하나만** 표시·검사합니다 — 런타임의 선택 규칙과 같습니다. 그래서 다른 OS branch에만 있는 `${...}` 오타는 Preview에 나타나지 않고(여기서는 실행되지 않으므로), 반대로 **현재 플랫폼 branch가 아예 없으면** 실행이 실패할 것임을 경고합니다. 모든 OS branch를 한 번에 보려면 [TaskHub Doctor](#23-taskhub-doctor-action-lint)를 쓰세요 — 그쪽은 설정 파일 자체를 검사하므로 다른 OS 사용자에게만 문제가 되는 오류도 잡습니다.
 
 -   **`isOneShot`** (`boolean`, *선택*, 기본값: `false`): **스트림 모드에서만 의미가 있습니다.**
     -   `true`로 설정하면, `notepad.exe` 같은 GUI 프로그램처럼 종료되지 않는 프로세스를 실행하고 즉시 '성공'으로 처리합니다.
@@ -1114,7 +1116,10 @@ editor/terminal 규칙은 **비밀을 참조하는 태스크뿐 아니라 비밀
     -   `${input_name.value}`: 입력된 값 (prefix/suffix 포함)
 -   `quickPick` 태스크 (`id: "select_env"`)의 결과 사용 예시:
     -   `${select_env.value}`: 선택된 항목 (단일 선택 또는 다중 선택의 첫 번째 항목)
-    -   `${select_env.values}`: 선택된 모든 항목 (다중 선택 시 쉼표로 구분된 문자열)
+    -   `${select_env.values}`: 선택된 모든 항목. **`canPickMany: true`일 때만 생성됩니다** — 단일 선택 태스크에서 참조하면 미해결 placeholder로 남습니다.
+-   `shell` / `command` 태스크 (`id: "build"`)의 결과 사용 예시 — **`passTheResultToNextTask: true`(캡처 모드)일 때만** 생성됩니다:
+    -   `${build.output}`: 표준 출력(stdout)
+    -   `${build.stderr}`: 표준 오류(stderr). 컴파일러 경고처럼 stderr로만 나오는 내용을 다음 태스크로 넘길 때 씁니다.
 -   `confirm` 태스크 (`id: "confirm_task"`)의 결과 사용 예시:
     -   `${confirm_task.confirmed}`: 확인 여부 (`"true"`)
 - `${zip_task.archivePath}`: `zip` 태스크가 생성한 아카이브 경로
@@ -2190,9 +2195,10 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `diagnostics.regex` | error | `output.diagnostics.pattern`이 컴파일 실패. `g` 플래그는 런타임과 동일하게 사전 제거된 뒤 검사. |
 | `diagnostics.group` | warning | `file`/`line`/`message` 등의 그룹 인덱스가 regex가 정의한 capture group 수보다 큼. |
 | `diagnostics.preset` | error | `"$gcc"` / `"$tsc"` 같은 preset 단축 문자열이 알 수 없는 이름이거나 `$` 없이 적힘. |
-| `variable.unresolved` | warning | Preview Run과 동일한 simulation 컨텍스트에서 변수 치환 후에도 남는 `${…}` 가 있음. 런타임에는 리터럴로 전달되므로 의도된 placeholder가 아니면 거의 항상 버그. |
+| `variable.unresolved` | warning | Preview Run과 동일한 simulation 컨텍스트에서 변수 치환 후에도 남는 `${…}` 가 있음. 런타임에는 리터럴로 전달되므로 의도된 placeholder가 아니면 거의 항상 버그. **OS별 객체(`command` / `tool` / `itemsFromCommand`)는 모든 branch를 검사합니다** — Doctor는 이 기계의 실행이 아니라 설정 파일 자체를 보므로, Windows branch의 깨진 참조는 그 OS 사용자에게 진짜 오류입니다. (현재 플랫폼 하나만 보려면 [Preview Run](#preview-run-dry-run).) |
 | `args.array-joined` | warning | `args` 원소 **안에** 배열 참조(`${pick.paths}` 등)가 다른 글자와 섞여 있음(`"--file=${pick.paths}"`). 원소 전체가 참조 하나일 때만 항목 수만큼의 인자로 펼쳐지고, 섞여 있으면 공백으로 이어 붙어 **인자 한 칸**이 됩니다 — 여러 경로의 경계가 사라져 스크립트가 값 하나로 받습니다(argv 이므로 셸이 다시 쪼개지지는 않습니다). 0.6.56까지는 이 형태가 리터럴로 남아 `variable.unresolved`로 잡혔습니다. |
 | `output.not-captured` | warning | `${A.output}`(또는 A의 capture 이름)을 참조하지만 shell/command 태스크 A에 `passTheResultToNextTask: true`가 없음. 런타임은 출력을 스트리밍만 하고 빈 결과를 넘기므로 참조가 리터럴로 남음 — 가장 흔한 설정 실수. 선언 순서와 무관하게(전방 참조 포함) 검출. |
+| `tool.platform-missing` | warning | `zip` / `unzip` 의 OS별 `tool` 객체에 **현재 플랫폼 항목이 없음**. 런타임은 `No tool path specified for the current platform` 으로 실패합니다. 참조가 전부 해석돼도 실행은 불가능한 설정이라 `variable.unresolved` 로는 드러나지 않습니다. 다른 OS 항목은 그대로 검사하므로, 크로스플랫폼 액션을 의도했다면 빠진 OS 항목을 채우면 됩니다. |
 | `output.ignored` | warning | shell/command 태스크에 `output.mode`/`capture`/`diagnostics`가 정의되어 있지만 `passTheResultToNextTask: true`가 없음. 런타임이 조용히 무시하는 죽은 설정. |
 | `path.outside-workspace` | error | `writeFile` / `appendFile` / `output.filePath`의 해석 결과가 워크스페이스 밖. 런타임이 실행을 거부할 경로. (변수 치환 후에도 `${…}`가 남은 경우는 검사를 건너뜀 — 안전 결정 불가) |
 | `dependsOn.self` | error | task의 `dependsOn`에 자기 자신이 포함됨. |

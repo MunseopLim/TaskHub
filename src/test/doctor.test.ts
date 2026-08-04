@@ -409,6 +409,299 @@ suite('Doctor', () => {
             `expected variable.unresolved, got ${codes(findings).join(',')}`);
     });
 
+    test('flags a forward reference to a capture the producer never declares', () => {
+        // 전방 참조는 정상이지만(자동 추론이 순서를 뒤집는다) **키까지** 관용하면
+        // `${producer.safe}` 오타가 앞쪽 producer 에 대해서만 조용히 지나간다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.fwd-typo',
+                title: 'fwd typo',
+                action: {
+                    description: 'd',
+                    // 둘 다 parallel 이어야 실제로 실행 가능한 전방 DAG 다.
+                    // producer 가 sequential 이면 암묵적 barrier 때문에
+                    // consumer → producer → consumer 사이클이 되어, 실행조차
+                    // 못 하는 액션을 놓고 참조 해석을 검사하게 된다.
+                    tasks: [
+                        { id: 'consumer', type: 'shell', parallel: true, command: 'use ${producer.safe}', passTheResultToNextTask: true },
+                        {
+                            id: 'producer', type: 'shell', parallel: true, command: 'make', passTheResultToNextTask: true,
+                            output: { capture: { name: 'version', regex: 'v(\\d+)' } }
+                        }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `expected variable.unresolved for the forward typo, got ${codes(findings).join(',')}`);
+    });
+
+    test('does not flag a forward reference to a declared capture', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.fwd-ok',
+                title: 'fwd ok',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'consumer', type: 'shell', parallel: true, command: 'use ${producer.version}', passTheResultToNextTask: true },
+                        {
+                            id: 'producer', type: 'shell', parallel: true, command: 'make', passTheResultToNextTask: true,
+                            output: { capture: { name: 'version', regex: 'v(\\d+)' } }
+                        }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(!findings.some(f => f.code === 'variable.unresolved'),
+            `declared forward capture must not be flagged, got ${codes(findings).join(',')}`);
+        // fixture 자체가 실행 가능한 DAG 여야 의미가 있다.
+        assert.ok(!findings.some(f => f.code === 'dependsOn.cycle'),
+            `fixture must be a runnable DAG, got ${codes(findings).join(',')}`);
+    });
+
+    test('참조에 공백이 섞이면 런타임처럼 미해결로 본다', () => {
+        // 런타임은 `expression.split('.')` 결과를 그대로 키로 쓴다 —
+        // `${ producer.output}` 의 head 는 `" producer"` 라 어떤 태스크와도
+        // 맞지 않아 리터럴로 남는다. Doctor 가 trim 하면 그 오타를 숨긴다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.space',
+                title: 'space',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'consumer', type: 'shell', parallel: true, command: 'use ${ producer.output}', passTheResultToNextTask: true },
+                        { id: 'producer', type: 'shell', parallel: true, command: 'make', passTheResultToNextTask: true }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `expected variable.unresolved for the spaced head, got ${codes(findings).join(',')}`);
+    });
+
+    test('prototype 오염 이름은 capture 이름으로 거부한다', () => {
+        // 평범한 객체에 results['__proto__'] = v 를 하면 own property 가 만들어
+        // 지지 않아 캡처가 조용히 사라진다 (결과가 {}).
+        const v = compileValidator();
+        for (const name of ['__proto__', 'constructor', 'prototype']) {
+            const findings = runDoctor([makeInput([
+                {
+                    id: `a.proto.${name}`,
+                    title: 'proto',
+                    action: {
+                        description: 'd',
+                        tasks: [{
+                            id: 'build', type: 'shell', command: 'make', passTheResultToNextTask: true,
+                            output: { capture: { name, regex: '(.*)' } }
+                        }]
+                    }
+                }
+            ])], v);
+            assert.ok(findings.some(f => f.code === 'capture.reserved'),
+                `expected capture.reserved for '${name}', got ${codes(findings).join(',')}`);
+        }
+    });
+
+    test('inputBox 의 prefix/suffix 안 참조도 검사한다', () => {
+        // 런타임은 prefix/suffix 를 보간한다. 검사 목록에서 빠지면 그 안의
+        // 오타가 무경고로 사용자 입력에 붙어 downstream 으로 나간다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.affix',
+                title: 'affix',
+                action: {
+                    description: 'd',
+                    tasks: [{ id: 'ask', type: 'inputBox', prompt: 'v?', prefix: '${ghost.output}-' }]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `expected variable.unresolved from prefix, got ${codes(findings).join(',')}`);
+    });
+
+    test('tool 안의 미해결 참조도 검사한다', () => {
+        // 빠뜨리면 tool: "${ghost.output}" 이 무경고로 통과한 뒤 런타임에서
+        // 리터럴 실행 파일로 실행을 시도한다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.tool',
+                title: 'tool',
+                action: {
+                    description: 'd',
+                    tasks: [{
+                        id: 'z', type: 'zip', tool: '${ghost.output}',
+                        source: '${workspaceFolder}/src', archive: '${workspaceFolder}/a.zip'
+                    }]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `expected variable.unresolved from tool, got ${codes(findings).join(',')}`);
+    });
+
+    test('OS별 tool 은 현재 플랫폼이 아닌 branch 도 검사한다', () => {
+        // **Doctor 와 Preview Run 의 의도적인 차이**를 고정한다.
+        //
+        // Doctor 는 이 기계의 실행이 아니라 **설정 파일 자체**를 본다 —
+        // windows branch 의 깨진 참조는 그 OS 사용자에게 진짜 오류이므로 여기서
+        // 알려야 한다 (`command` 의 nested-interpreter 검사도 같은 이유로 branch
+        // 전부를 훑는다). 반면 Preview Run 은 현재 플랫폼 branch 하나만 본다
+        // (src/test/previewRun.test.ts 의 'OS별 tool' 스위트).
+        //
+        // 이 테스트가 없으면 "Preview 와 통일" 이라는 이유로 Doctor 를
+        // selectPlatformValue 로 바꿔도 CI 가 통과하고, 다른 OS 진단이 조용히
+        // 사라진다.
+        const other = process.platform === 'win32' ? 'macos' : 'windows';
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.tool.os',
+                title: 'os tool',
+                action: {
+                    description: 'd',
+                    tasks: [{
+                        id: 'z', type: 'zip',
+                        tool: { [other]: '${ghost.output}' },
+                        source: '${workspaceFolder}/src', archive: '${workspaceFolder}/a.zip'
+                    }]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `다른 OS branch 의 깨진 참조를 놓쳤다: ${codes(findings).join(',')}`);
+    });
+
+    /**
+     * 현재 플랫폼에서 **실행 자체가 불가능한** 설정은 따로 알린다.
+     *
+     * 다른 OS branch 의 참조까지 검사하는 정책(위 테스트)과는 별개다 — 참조가
+     * 전부 해석돼도 이 기계에서 고를 branch 가 없으면 런타임은
+     * `No tool path specified for the current platform` 으로 실패한다.
+     */
+    suite('tool.platform-missing', () => {
+        const ACTIVE_OS = process.platform === 'win32' ? 'windows'
+            : process.platform === 'darwin' ? 'macos' : 'linux';
+        const INACTIVE_OS = ACTIVE_OS === 'windows' ? 'macos' : 'windows';
+
+        function zipWithTool(id: string, tool: unknown) {
+            return {
+                id,
+                title: 'os tool',
+                action: {
+                    description: 'd',
+                    tasks: [{
+                        id: 'z', type: 'zip', tool,
+                        source: '${workspaceFolder}/src', archive: '${workspaceFolder}/a.zip'
+                    }]
+                }
+            };
+        }
+
+        test('현재 플랫폼 branch 가 없으면 보고한다', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([
+                zipWithTool('a.tool.missing', { [INACTIVE_OS]: '/tools/other-7z' })
+            ])], v);
+            assert.ok(findings.some(f => f.code === 'tool.platform-missing'),
+                `이 기계에서 실행할 수 없는 설정을 놓쳤다: ${codes(findings).join(',')}`);
+        });
+
+        test('현재 플랫폼 branch 가 있으면 보고하지 않는다', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([
+                zipWithTool('a.tool.present', { [ACTIVE_OS]: '/usr/bin/7z', [INACTIVE_OS]: '/tools/other-7z' })
+            ])], v);
+            assert.ok(!findings.some(f => f.code === 'tool.platform-missing'),
+                `실행 가능한 설정을 막았다: ${codes(findings).join(',')}`);
+        });
+
+        test('문자열 tool 은 보고하지 않는다', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([
+                zipWithTool('a.tool.string', '/usr/bin/7z')
+            ])], v);
+            assert.ok(!findings.some(f => f.code === 'tool.platform-missing'),
+                `모든 플랫폼에서 쓰이는 문자열 tool 을 막았다: ${codes(findings).join(',')}`);
+        });
+
+        test('빈 문자열 tool 도 보고한다', () => {
+            // OS별 객체는 아니지만 getToolCommand 가 똑같이 던지는 값이다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([zipWithTool('a.tool.empty', '')])], v);
+            assert.ok(findings.some(f => f.code === 'tool.platform-missing'),
+                `실행할 수 없는 빈 tool 을 놓쳤다: ${codes(findings).join(',')}`);
+        });
+
+        test('unzip 태스크에서도 보고한다', () => {
+            // 문서 표가 zip/unzip 둘 다 약속한다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([
+                {
+                    id: 'a.tool.unzip',
+                    title: 'os tool',
+                    action: {
+                        description: 'd',
+                        tasks: [{
+                            id: 'u', type: 'unzip',
+                            tool: { [INACTIVE_OS]: '/tools/other-7z' },
+                            archive: '${workspaceFolder}/a.zip',
+                            destination: '${workspaceFolder}/out'
+                        }]
+                    }
+                }
+            ])], v);
+            assert.ok(findings.some(f => f.code === 'tool.platform-missing'),
+                `unzip 의 OS별 tool 은 검사하지 않았다: ${codes(findings).join(',')}`);
+        });
+    });
+
+    test('output.content 안 참조도 검사한다', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.content',
+                title: 'content',
+                action: {
+                    description: 'd',
+                    tasks: [{
+                        id: 'w', type: 'shell', command: 'make', passTheResultToNextTask: true,
+                        output: { mode: 'file', filePath: '${workspaceFolder}/o.txt', content: 'v=${ghost.output}' }
+                    }]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `expected variable.unresolved from output.content, got ${codes(findings).join(',')}`);
+    });
+
+    test('capture 이름으로 stderr 를 쓰면 예약어로 거부한다', () => {
+        // 캡처 결과는 결과 객체에 병합되므로, stdout 에서 뽑은 값이 진짜
+        // stderr 를 덮고 그 stderr 를 읽는 진단까지 함께 오염된다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.reserved',
+                title: 'reserved',
+                action: {
+                    description: 'd',
+                    tasks: [{
+                        id: 'build', type: 'shell', command: 'make', passTheResultToNextTask: true,
+                        output: { capture: { name: 'stderr', regex: '(.*)' } }
+                    }]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'capture.reserved'),
+            `expected capture.reserved for 'stderr', got ${codes(findings).join(',')}`);
+    });
+
     test('flags unresolved ${...} inside quickPick itemsFromCommand', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([

@@ -36,12 +36,15 @@ import {
     INTERACTIVE_TASK_TYPES,
     buildTaskGraph,
     detectGraphCycle,
+    selectPlatformValue,
 } from './pipelineUtils';
 import {
     simulateTaskResult,
+    simulateTaskResultWithCaptures,
     findUnresolved,
     findTypoRefs,
     findUncapturedOutputRefs,
+    makeForwardRefTolerance,
     isInsideWorkspace,
     placeholder,
     UNRESOLVED_VAR_RE,
@@ -775,7 +778,9 @@ function analyzeActionTasks(
     input: DoctorInput,
     findings: DoctorFinding[]
 ): void {
-    const allResults: Record<string, any> = {};
+    // null-prototype: 태스크 id 가 '__proto__' 여도 평범한 키가 되도록
+    // (런타임의 stepResults 와 같은 처치).
+    const allResults: Record<string, any> = Object.create(null);
     // Match the runtime's fallback chain (`executeSingleTask` in
     // extension.ts): explicit per-action workspaceFolder → first workspace
     // root → empty. The bundled `media/actions.json` and any global preset
@@ -811,11 +816,12 @@ function analyzeActionTasks(
         if (!task || typeof task.id !== 'string') {
             continue;
         }
-        const interpolationContext: any = {
-            ...allResults,
+        // null-prototype — 런타임과 같은 규칙. 평범한 객체면 `${constructor.name}`
+        // 같은 상속 키가 결과처럼 해석되어 진단이 런타임과 어긋난다.
+        const interpolationContext: any = Object.assign(Object.create(null), allResults, {
             workspaceFolder: baseDir,
             extensionPath: input.extensionPath,
-        };
+        });
 
         const interpolated: (string | undefined)[] = [];
         const visitString = (value: unknown): string | undefined => {
@@ -915,6 +921,40 @@ function analyzeActionTasks(
         visitString(task.input);
         visitString(task.archive);
         visitString(task.destination);
+        // `tool` 안의 참조도 런타임에서 보간된다. 빼 두면 `tool: "${ghost.output}"`
+        // 이 무경고로 통과한 뒤 리터럴 실행 파일로 실행을 시도한다.
+        //
+        // OS별 객체는 **모든 branch** 를 본다. Doctor 가 검사하는 것은 이 기계의
+        // 실행이 아니라 **설정 파일 자체**여서, windows branch 의 깨진 참조는
+        // 그 OS 사용자에게 진짜 오류다 (`command` 의 nested-interpreter 검사도
+        // 같은 이유로 branch 전부를 훑는다). 현재 플랫폼 하나만 보여 주는 것은
+        // Preview Run 의 몫이다 — 그쪽은 `selectPlatformValue` 로 고른 branch 만
+        // 표시·검사한다.
+        if (typeof task.tool === 'string') {
+            visitString(task.tool);
+        } else if (task.tool && typeof task.tool === 'object') {
+            for (const branch of Object.values(task.tool as Record<string, unknown>)) {
+                visitString(branch as any);
+            }
+        }
+        // 참조 검사와 **별개로**, 지금 이 기계에서 쓸 값이 없다는 것은 따로
+        // 알려야 한다 — 런타임은 그 경우 `No tool path specified for the current
+        // platform` 으로 실패한다. 참조가 전부 해석돼도 실행은 안 되는 설정이라
+        // unresolved 검사만으로는 절대 드러나지 않는다.
+        //
+        // 문자열 `tool` 도 같이 본다. `tool: ""` 는 OS별 객체가 아니지만
+        // `getToolCommand` 가 falsy 검사로 똑같이 던지는 값이다.
+        if (task.tool !== undefined && task.tool !== null && selectPlatformValue(task.tool) === undefined) {
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: findIdLine(input.rawText, task.id),
+                severity: 'warning',
+                code: 'tool.platform-missing',
+                message: `Task '${item.id}.${task.id}' has no usable 'tool' entry for the current platform (${process.platform}), so it would fail at runtime on this machine. Other platforms' entries are still checked.`,
+                messageKo: `Task '${item.id}.${task.id}'의 'tool'에 현재 플랫폼(${process.platform})에서 쓸 값이 없어 이 기계에서는 실행이 실패합니다. 다른 플랫폼 항목은 그대로 검사합니다.`,
+            });
+        }
         if (Array.isArray(task.source)) {
             for (const s of task.source) { visitString(s); }
         } else if (typeof task.source === 'string') {
@@ -952,6 +992,12 @@ function analyzeActionTasks(
 
         // output.filePath
         const resolvedOutputPath = visitString(task.output?.filePath);
+        // `output.content` 도 런타임에서 보간된다 (`executeSingleTask`). 빠뜨리면
+        // 그 안의 `${ghost.output}` 이 무경고로 파일에 그대로 기록된다.
+        visitString(task.output?.content);
+        // inputBox 의 prefix/suffix 도 보간 대상이다.
+        visitString(task.prefix);
+        visitString(task.suffix);
 
         const forwardTaskIds = new Set<string>();
         for (const id of knownTaskIds) {
@@ -959,7 +1005,10 @@ function analyzeActionTasks(
                 forwardTaskIds.add(id);
             }
         }
-        const unresolved = findUnresolved(interpolated, forwardTaskIds);
+        // 전방 태스크 참조는 **그 태스크가 실제로 낼 키에 한해** 관용한다.
+        // head 만 보고 통과시키면 `${producer.safe}` 같은 오타가 앞쪽 producer
+        // 를 가리킬 때만 조용히 넘어간다 (뒤쪽이면 findTypoRefs 가 잡는다).
+        const unresolved = findUnresolved(interpolated, makeForwardRefTolerance(forwardTaskIds, tasksById, task.id));
         const typos = findTypoRefs(task, allResults, task.id);
         // 미캡처 shell/command 출력 참조는 전용 경고(output.not-captured)로
         // 따로 보고 — 일반 unresolved 목록에서 제외해 중복을 막는다(M9).
@@ -1119,20 +1168,10 @@ function analyzeActionTasks(
             }
         }
 
-        // Seed downstream context. 런타임은 shell/command에서
-        // passTheResultToNextTask가 falsy면 capture도 건너뛴다(M9).
-        const sim = simulateTaskResult(task);
-        const captureSkippedAtRuntime =
-            (task.type === 'shell' || task.type === 'command') && !task.passTheResultToNextTask;
-        if (task.output?.capture && !captureSkippedAtRuntime) {
-            const rules = Array.isArray(task.output.capture) ? task.output.capture : [task.output.capture];
-            for (const r of rules) {
-                if (r && typeof r.name === 'string') {
-                    sim[r.name] = placeholder('capture', task.id, r.name);
-                }
-            }
-        }
-        allResults[task.id] = sim;
+        // Seed downstream context. capture 적용 조건(런타임은 문자열 `output` 이
+        // 있을 때만 capture 를 돌린다)은 `simulateTaskResultWithCaptures` 한
+        // 곳에만 두어 Preview / 전방 참조 판정과 같은 모델을 쓰게 한다.
+        allResults[task.id] = simulateTaskResultWithCaptures(task);
     }
 }
 

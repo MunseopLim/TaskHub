@@ -39,6 +39,7 @@ import {
 	confirmSavePresetOverwrite,
 	getCommandString,
 	getToolCommand,
+	INTERPOLATED_VALUE_MAX_LENGTH,
 	buildPowerShellInvocation,
 	buildNativeCommandInvocation,
 	windowsCommandIsDirectlyLaunchable,
@@ -47,6 +48,8 @@ import {
 	backfillDialogArrays,
 	expandArgTemplate,
 	resolvePipelineReference,
+	inferTaskDependencies,
+	interpolateToolValue,
 	interpolateCommandPreservingTokens,
 	quoteForCommandTokenizer,
 	selectWindowsRawShell,
@@ -181,18 +184,267 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(result, 'Path: /custom/path');
 		});
 
-		test('should use output when nested property is undefined', () => {
+		/**
+		 * 속성이 붙은 참조는 그 속성이 없을 때 **폴백하지 않는다.**
+		 *
+		 * 예전에는 `${task1.result}` 가 `task1.output` 으로 떨어졌다. capture
+		 * 규칙이 매칭되지 않아 파생 변수가 만들어지지 않은 경우, 사용자가
+		 * 정규식으로 좁혔다고 믿는 자리에 **stdout 전체**가 들어가는 경로였다.
+		 * 이제 리터럴로 남아 Preview Run · Doctor 가 미해결로 보고한다.
+		 */
+		test('속성이 없으면 output 으로 폴백하지 않고 리터럴로 남는다', () => {
 			const template = 'Output: ${task1.result}';
-			const context = { task1: { output: 'fallback' } };
+			const context = { task1: { output: 'FULL UNVALIDATED STDOUT' } };
 			const result = interpolatePipelineVariables(template, context);
-			assert.strictEqual(result, 'Output: fallback');
+			assert.strictEqual(result, 'Output: ${task1.result}');
 		});
 
-		test('should use outputDir when output is undefined', () => {
+		test('속성이 없으면 outputDir 로도 폴백하지 않는다', () => {
 			const template = 'Dir: ${task1.result}';
 			const context = { task1: { outputDir: '/dir' } };
 			const result = interpolatePipelineVariables(template, context);
-			assert.strictEqual(result, 'Dir: /dir');
+			assert.strictEqual(result, 'Dir: ${task1.result}');
+		});
+
+		test('bare 참조는 여전히 output / outputDir 로 해석된다', () => {
+			assert.strictEqual(
+				interpolatePipelineVariables('Output: ${task1}', { task1: { output: 'result.txt' } }),
+				'Output: result.txt'
+			);
+			assert.strictEqual(
+				interpolatePipelineVariables('Dir: ${task1}', { task1: { outputDir: '/dir' } }),
+				'Dir: /dir'
+			);
+			// output 이 있으면 outputDir 보다 우선한다 (기존 우선순위 유지).
+			assert.strictEqual(
+				interpolatePipelineVariables('${task1}', { task1: { output: 'o', outputDir: '/d' } }),
+				'o'
+			);
+		});
+
+		test('실재하는 속성은 그대로 우선한다 (폴백 축소가 정상 경로를 건드리지 않는다)', () => {
+			const context = { pick: { path: '/a/x.bin', output: 'unrelated' } };
+			assert.strictEqual(interpolatePipelineVariables('${pick.path}', context), '/a/x.bin');
+		});
+
+		/**
+		 * `tool` 보간은 **문자열 단위**여야 한다.
+		 *
+		 * `JSON.stringify → interpolate → JSON.parse` 로 하면 보간된 값이 JSON
+		 * 문자열 안으로 들어가면서 역슬래시가 escape 로 재해석된다 —
+		 * `C:\\Users\\me` 는 파싱이 깨지고 `C:\\temp` 는 `\t` 가 탭이 되어
+		 * **조용히** 다른 경로가 된다. Windows 경로가 흔한 자리다.
+		 */
+		suite('interpolateToolValue', () => {
+			const winCtx = { workspaceFolder: 'C:\\Users\\me' };
+
+			function withPlatform<T>(platform: string, fn: () => T): T {
+				const original = process.platform;
+				Object.defineProperty(process, 'platform', { value: platform });
+				try {
+					return fn();
+				} finally {
+					Object.defineProperty(process, 'platform', { value: original });
+				}
+			}
+
+			test('Windows 경로를 그대로 보존한다 (문자열 tool)', () => {
+				assert.strictEqual(
+					interpolateToolValue('${workspaceFolder}\\bin\\7z.exe', winCtx),
+					'C:\\Users\\me\\bin\\7z.exe'
+				);
+			});
+
+			test('탭으로 바뀔 수 있는 경로도 그대로다', () => {
+				assert.strictEqual(
+					interpolateToolValue('${workspaceFolder}/x', { workspaceFolder: 'C:\\temp' }),
+					'C:\\temp/x'
+				);
+			});
+
+			test('보간할 것이 없으면 그대로 돌려준다', () => {
+				assert.strictEqual(interpolateToolValue('/usr/bin/7z', winCtx), '/usr/bin/7z');
+			});
+
+			/**
+			 * **고르는 것이 먼저다.**
+			 *
+			 * 보간은 `sanitizeInterpolatedValue` 를 거치며 NUL 바이트·길이 초과에서
+			 * throw 한다. 모든 branch 를 먼저 보간하면, 이 기계에서 절대 실행되지
+			 * 않을 branch 의 값 하나가 태스크 전체를 실패시킨다.
+			 */
+			suite('현재 플랫폼 branch 를 먼저 고른다', () => {
+				const tool = {
+					windows: '${workspaceFolder}\\bin\\7z.exe',
+					macos: '${workspaceFolder}/bin/7z',
+				};
+
+				test('활성 branch 의 참조를 보간해 돌려준다', () => {
+					assert.strictEqual(
+						interpolateToolValue(tool, { workspaceFolder: '/ws' }, 'darwin'),
+						'/ws/bin/7z'
+					);
+				});
+
+				test('Windows branch 의 역슬래시는 그대로다', () => {
+					assert.strictEqual(
+						interpolateToolValue(tool, { workspaceFolder: 'C:\\temp' }, 'win32'),
+						'C:\\temp\\bin\\7z.exe'
+					);
+				});
+
+				test('비활성 branch 의 미해결 참조는 실행을 막지 않는다', () => {
+					assert.strictEqual(
+						interpolateToolValue({ windows: '${ghost.output}', macos: '/usr/bin/7z' }, {}, 'darwin'),
+						'/usr/bin/7z'
+					);
+				});
+
+				test('비활성 branch 의 NUL 바이트가 실행을 막지 않는다', () => {
+					// 보간이 먼저면 sanitize 가 여기서 throw 해, macOS 사용자가
+					// 손도 대지 않은 windows 설정 때문에 태스크를 못 돌린다.
+					const ctx = { pick: { value: 'bad\u0000value' } };
+					assert.strictEqual(
+						interpolateToolValue({ windows: '${pick.value}', macos: '/usr/bin/7z' }, ctx, 'darwin'),
+						'/usr/bin/7z'
+					);
+				});
+
+				test('비활성 branch 의 길이 초과 값도 실행을 막지 않는다', () => {
+					const ctx = { pick: { value: 'x'.repeat(INTERPOLATED_VALUE_MAX_LENGTH + 1) } };
+					assert.strictEqual(
+						interpolateToolValue({ windows: '${pick.value}', macos: '/usr/bin/7z' }, ctx, 'darwin'),
+						'/usr/bin/7z'
+					);
+				});
+
+				test('활성 branch 의 NUL 바이트는 그대로 실패한다', () => {
+					const ctx = { pick: { value: 'bad\u0000value' } };
+					assert.throws(
+						() => interpolateToolValue({ macos: '${pick.value}' }, ctx, 'darwin'),
+						/null byte/
+					);
+				});
+
+				test('활성 branch 의 길이 초과도 그대로 실패한다', () => {
+					const ctx = { pick: { value: 'x'.repeat(INTERPOLATED_VALUE_MAX_LENGTH + 1) } };
+					assert.throws(
+						() => interpolateToolValue({ macos: '${pick.value}' }, ctx, 'darwin'),
+						/exceeds maximum length/
+					);
+				});
+
+				test('현재 플랫폼 branch 가 없으면 실행 전에 실패한다', () => {
+					// 문구는 getToolCommand 와 같아야 한다 — 실패 지점만 앞당겨질 뿐
+					// 사용자가 보는 메시지는 그대로여야 한다.
+					assert.throws(
+						() => interpolateToolValue({ windows: 'C:\\7z.exe' }, {}, 'darwin'),
+						/No tool path specified for the current platform/
+					);
+					assert.throws(
+						() => withPlatform('darwin', () => getToolCommand({ windows: 'C:\\7z.exe' })),
+						/No tool path specified for the current platform/
+					);
+				});
+
+				test('tool 이 없거나 빈 값이면 실행 전에 실패한다', () => {
+					// 호출부는 task.tool 이 undefined/null 이 아닐 때만 부른다.
+					// 빈 문자열은 getToolCommand 도 던지는 값이라 여기서 드러내야 한다.
+					assert.throws(() => interpolateToolValue('', {}, 'darwin'), /No tool path specified/);
+					assert.throws(() => interpolateToolValue({ macos: '' }, {}, 'darwin'), /No tool path specified/);
+					assert.throws(() => interpolateToolValue(undefined, {}, 'darwin'), /No tool path specified/);
+				});
+
+				test('기본 platform 은 현재 프로세스의 것이다', () => {
+					const result = withPlatform('darwin', () => interpolateToolValue(
+						{ windows: 'C:\\7z.exe', macos: '/usr/local/bin/7z' },
+						{}
+					));
+					assert.strictEqual(result, '/usr/local/bin/7z');
+				});
+			});
+
+			/**
+			 * 런타임의 실제 연결: `executeSingleTask` 의 zip/unzip 분기가
+			 * `interpolateToolValue` 로 **고르고 보간한** 문자열을 넘기면,
+			 * `handleZip`/`handleUnzip` 의 `getToolCommand` 가 그것을 그대로 쓴다.
+			 */
+			suite('보간 → 실행 커맨드 (zip/unzip 실행 경로)', () => {
+				test('고른 branch 가 실행 커맨드가 된다', () => {
+					const interpolated = interpolateToolValue(
+						{ windows: '${workspaceFolder}\\7z.exe', macos: '${workspaceFolder}/bin/7z' },
+						{ workspaceFolder: '/ws' },
+						'darwin'
+					);
+					assert.strictEqual(getToolCommand(interpolated), '/ws/bin/7z');
+				});
+
+				test('공백이 든 경로는 실행 단계에서 인용된다', () => {
+					const interpolated = interpolateToolValue(
+						{ macos: '${workspaceFolder}/my tools/7z' },
+						{ workspaceFolder: '/ws' },
+						'darwin'
+					);
+					assert.strictEqual(getToolCommand(interpolated), '"/ws/my tools/7z"');
+				});
+			});
+
+			test('zip/unzip 분기가 tool 을 보간해서 넘긴다', () => {
+				// 위 조합 테스트가 의미를 가지려면 실행 경로가 실제로 보간된
+				// task 를 넘겨야 한다. `zip` 만 원본을 쓰던 회귀가 있었다.
+				const source = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'extension.ts'), 'utf-8');
+				for (const kind of ['Zip', 'Unzip']) {
+					const re = new RegExp(
+						`interpolated${kind}Task\\.tool = interpolateToolValue\\(task\\.tool, interpolationContext\\)[\\s\\S]*?handle${kind}\\(interpolated${kind}Task`
+					);
+					assert.ok(
+						re.test(source),
+						`${kind} 분기가 보간된 tool 을 handle${kind} 로 넘기지 않는다 — Preview 와 실행이 갈린다`
+					);
+				}
+			});
+		});
+
+		test('상속된 prototype 키는 태스크 결과로 해석되지 않는다', () => {
+			// 평범한 객체 컨텍스트에서는 `${constructor.name}` 이 "Object" 로,
+			// `${toString.name}` 이 "toString" 으로 "해석"되어 셸 명령에 들어갔다.
+			const ctx: any = { build: { output: 'x' } };
+			assert.strictEqual(interpolatePipelineVariables('${constructor.name}', ctx), '${constructor.name}');
+			assert.strictEqual(interpolatePipelineVariables('${toString.name}', ctx), '${toString.name}');
+			assert.strictEqual(resolvePipelineReference('constructor', ctx), undefined);
+			// 정상 참조는 그대로 동작한다.
+			assert.strictEqual(interpolatePipelineVariables('${build.output}', ctx), 'x');
+		});
+
+		test('의존성 추론도 head 를 다듬지 않는다', () => {
+			// 다듬으면 `${ producer.output}` 이 producer 에 대한 의존성으로 잡혀
+			// 실행 순서는 맞춰지지만, 런타임은 `" producer"` 를 못 찾아 값이
+			// 리터럴로 남는다 — 순서만 잡고 값은 안 오는 상태가 된다.
+			const spaced = inferTaskDependencies(
+				{ id: 'c', type: 'shell', command: 'use ${ producer.output}' } as any,
+				new Set(['producer', 'c'])
+			);
+			assert.deepStrictEqual([...spaced], [], 'trim 된 head 로 의존성을 만들면 안 된다');
+
+			// 반대로 id 자체에 공백이 있으면(스키마상 유효) 매칭되어야 한다.
+			const exact = inferTaskDependencies(
+				{ id: 'c', type: 'shell', command: 'use ${ producer.output}' } as any,
+				new Set([' producer', 'c'])
+			);
+			assert.deepStrictEqual([...exact], [' producer']);
+		});
+
+		test('점 뒤가 빈 참조는 bare 가 아니다', () => {
+			// `!property` 로 bare 를 판정하면 `${producer.}` 가 폴백을 타서
+			// "속성을 쓴 참조는 폴백하지 않는다" 는 계약이 오타 하나로 뚫린다.
+			const context = { producer: { output: 'FULL UNVALIDATED STDOUT' } };
+			assert.strictEqual(
+				interpolatePipelineVariables('run ${producer.}', context),
+				'run ${producer.}'
+			);
+			assert.strictEqual(resolvePipelineReference('producer.', context), undefined);
+			// 이름에 점이 여러 개인 형태도 마찬가지.
+			assert.strictEqual(resolvePipelineReference('producer..', context), undefined);
 		});
 
 		test('should handle deeply nested properties', () => {
@@ -938,7 +1190,11 @@ suite('Extension Test Suite', () => {
 		test('resolvePipelineReference 는 보간과 같은 탐색 규칙을 쓴다', () => {
 			// 둘이 어긋나면 "보간은 되는데 확장은 안 되는" 참조가 생긴다.
 			const c = { a: { output: 'via-output' }, b: { paths: ['x'] }, plain: 'top' };
-			assert.strictEqual(resolvePipelineReference('a.anything', c), 'via-output');
+			// 속성이 붙었는데 그 속성이 없으면 undefined — output 으로 떨어지지
+			// 않는다. capture 실패가 stdout 전체로 조용히 대체되던 경로였다.
+			assert.strictEqual(resolvePipelineReference('a.anything', c), undefined);
+			// bare 참조는 여전히 대표 결과(output)로 해석된다.
+			assert.strictEqual(resolvePipelineReference('a', c), 'via-output');
 			assert.deepStrictEqual(resolvePipelineReference('b.paths', c), ['x']);
 			assert.strictEqual(resolvePipelineReference('plain', c), 'top');
 			assert.strictEqual(resolvePipelineReference('missing', c), undefined);

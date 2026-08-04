@@ -34,9 +34,49 @@ export interface MacroExpansionResult {
  */
 const IDENTIFIER_PATTERN = /\b[A-Za-z_][A-Za-z0-9_]*\b/g;
 
+/**
+ * 확장 결과 문자열의 상한. 깊이 제한만으로는 부족하다 — `Mn = M(n-1) M(n-1)`
+ * 형태는 깊이가 얕아도 결과가 2^n 으로 커진다. 실제 헤더의 매크로는 수백 자를
+ * 넘지 않으므로 64KB 면 정상 사용에는 닿지 않는다.
+ */
+const MAX_EXPANDED_LENGTH = 64 * 1024;
+
+/**
+ * 치환 횟수 상한. 길이는 짧게 유지되면서 노드 수만 폭발하는 형태
+ * (`#define M9 M8 M8` 를 빈 매크로로 쌓는 등)를 막는다.
+ */
+const MAX_EXPANSIONS = 20000;
+
+/**
+ * `expansionSteps` 에 담을 최대 항목 수. steps 는 hover 에 그대로 표시되는
+ * 디버그 기록이라 무제한으로 모으면 결과 문자열보다 먼저 메모리를 먹는다
+ * (깊이 18 짜리 이진 매크로에서 262,144 항목 / 9.7MB 였다).
+ */
+const MAX_STEPS = 500;
+
 export class MacroExpander {
     private maxDepth = 50; // Prevent infinite recursion
     private expandingMacros: Set<string> = new Set();
+    /**
+     * 매크로 이름 → 확장 결과. `Mn = M(n-1) M(n-1)` 같은 공유 하위식을 한 번만
+     * 계산해 지수 팽창을 선형으로 접는다.
+     *
+     * **순수한 확장만 담는다.** 확장 도중 `expandingMacros` 때문에 건너뛴
+     * 식별자가 하나라도 있었다면 그 결과는 "누가 위에서 확장 중이었는가"에
+     * 의존하므로 다른 자리에서 재사용하면 안 된다. `circularSkips` 카운터가
+     * 하위 트리 동안 변했는지로 그것을 판별한다.
+     *
+     * **`height` 를 함께 담는다** — 그 확장이 소비한 상대 재귀 깊이다. memo hit
+     * 은 재귀를 건너뛰므로 깊이 검사도 함께 건너뛰게 되는데, 치환이 역순이라
+     * 어느 매크로가 먼저 캐시되는지가 토큰 순서에 달려 있다. 그러면 같은
+     * 정의 집합인데 `M0 M50` 은 성공하고 `M50 M0` 은 깊이 초과로 실패하는,
+     * 순서에 따라 답이 달라지는 상태가 된다. 지금 깊이에서 재사용했을 때
+     * 한도를 넘을 캐시는 쓰지 않고 정상 경로로 다시 확장해 판정을 맡긴다.
+     */
+    private memo: Map<string, { text: string; height: number }> = new Map();
+    private circularSkips = 0;
+    private expansionCount = 0;
+    private stepsTruncated = false;
 
     /**
      * Expand a macro definition recursively
@@ -50,6 +90,11 @@ export class MacroExpander {
     ): MacroExpansionResult {
         const steps: string[] = [];
         this.expandingMacros.clear();
+        // memo 는 `macros` 맵 하나에 대해서만 유효하다. 호출마다 비운다.
+        this.memo.clear();
+        this.circularSkips = 0;
+        this.expansionCount = 0;
+        this.stepsTruncated = false;
 
         try {
             const macroDef = macros.get(macroName);
@@ -62,8 +107,12 @@ export class MacroExpander {
                 };
             }
 
+            // 길이 검사는 **치환 전에도** 필요하다. 치환 후에만 재면 참조가
+            // 하나도 없는 거대 매크로가 그대로 통과한다 — 확장 자체는 공짜지만
+            // 70KB 짜리 문자열이 steps 와 호버 마크다운을 타고 그대로 흐른다.
+            this.assertWithinLengthBudget(macroDef.value);
             steps.push(`${macroName} = ${macroDef.value}`);
-            const expanded = this.expandRecursive(macroDef.value, macros, steps, 0);
+            const expanded = this.expandRecursive(macroDef.value, macros, steps, 0).text;
 
             return {
                 expandedValue: expanded,
@@ -88,14 +137,21 @@ export class MacroExpander {
         macros: Map<string, MacroDefinition>,
         steps: string[],
         depth: number
-    ): string {
+    ): { text: string; height: number } {
         // Prevent infinite recursion
         if (depth > this.maxDepth) {
             throw new Error('Maximum macro expansion depth exceeded');
         }
+        // 진입 시점의 값도 예산 안이어야 한다. 참조가 없는 leaf 는 치환이
+        // 일어나지 않아 아래의 치환 후 검사에 닿지 않는다.
+        this.assertWithinLengthBudget(value);
 
         let result = value;
         let hasExpansion = false;
+        // 이 호출이 소비한 상대 재귀 깊이. 확장이 없으면 0, 있으면
+        // 1 + (자식 중 가장 깊은 것). depth d 인 노드의 하위 트리가 닿는 가장
+        // 깊은 depth 는 d + height 다 — memo 재사용 가능 여부를 이 값으로 판정한다.
+        let height = 0;
 
         // Replace each identifier with its expansion if it's a macro
         const matches = Array.from(value.matchAll(IDENTIFIER_PATTERN));
@@ -106,45 +162,109 @@ export class MacroExpander {
             const identifier = match[0];
             const startIndex = match.index!;
 
-            // Skip if this macro is currently being expanded (circular reference)
+            // Skip if this macro is currently being expanded (circular reference).
+            // 이 skip 이 일어났다는 것은 지금 계산 중인 결과가 호출 문맥에
+            // 의존한다는 뜻이므로, 상위에서 memo 에 담지 못하도록 기록한다.
             if (this.expandingMacros.has(identifier)) {
+                this.circularSkips++;
                 continue;
             }
 
             // Check if identifier is a defined macro
             const macroDef = macros.get(identifier);
             if (macroDef) {
-                // Mark as expanding to prevent circular reference
-                this.expandingMacros.add(identifier);
+                const cached = this.memo.get(identifier);
+                // 캐시를 지금 자리에 끼워 넣으면 자식 호출은 depth + 1 에서
+                // 시작해 depth + 1 + height 까지 내려간다. 그 값이 한도를 넘으면
+                // 캐시를 쓰지 않고 정상 경로로 다시 확장한다 — 그래야 토큰
+                // 순서와 무관하게 같은 답(깊이 초과)이 나온다.
+                const usable = cached !== undefined && depth + 1 + cached.height <= this.maxDepth;
+                let expandedMacro: string;
+                let childHeight: number;
 
-                try {
-                    // Recursively expand the macro value
-                    const expandedMacro = this.expandRecursive(
-                        macroDef.value,
-                        macros,
-                        steps,
-                        depth + 1
-                    );
+                if (usable) {
+                    expandedMacro = cached!.text;
+                    childHeight = cached!.height;
+                } else {
+                    // Mark as expanding to prevent circular reference
+                    this.expandingMacros.add(identifier);
+                    const skipsBefore = this.circularSkips;
+                    let sub: { text: string; height: number };
 
-                    // Replace in result
-                    result = result.substring(0, startIndex) +
-                             expandedMacro +
-                             result.substring(startIndex + identifier.length);
+                    try {
+                        // Recursively expand the macro value
+                        sub = this.expandRecursive(
+                            macroDef.value,
+                            macros,
+                            steps,
+                            depth + 1
+                        );
+                    } finally {
+                        // Unmark
+                        this.expandingMacros.delete(identifier);
+                    }
 
-                    hasExpansion = true;
-                } finally {
-                    // Unmark
-                    this.expandingMacros.delete(identifier);
+                    expandedMacro = sub.text;
+                    childHeight = sub.height;
+                    if (this.circularSkips === skipsBefore) {
+                        this.memo.set(identifier, sub);
+                    }
                 }
+
+                height = Math.max(height, 1 + childHeight);
+
+                if (++this.expansionCount > MAX_EXPANSIONS) {
+                    throw new Error(
+                        `Macro expansion exceeded ${MAX_EXPANSIONS} substitutions — the definitions expand combinatorially.`
+                    );
+                }
+
+                // Replace in result
+                result = result.substring(0, startIndex) +
+                         expandedMacro +
+                         result.substring(startIndex + identifier.length);
+
+                this.assertWithinLengthBudget(result);
+
+                hasExpansion = true;
             }
         }
 
         // Add step if there was any expansion
         if (hasExpansion) {
-            steps.push(`→ ${result}`);
+            this.pushStep(steps, `→ ${result}`);
         }
 
-        return result;
+        return { text: result, height };
+    }
+
+    /**
+     * 문자열 하나가 길이 예산 안인지 확인한다. 확장의 **모든 단계**(진입 시점의
+     * 원본 값, 치환 결과)가 이 검사를 거쳐야 한다 — 한 자리만 빠지면 그 경로로
+     * 예산이 통째로 우회된다.
+     */
+    private assertWithinLengthBudget(value: string): void {
+        if (value.length > MAX_EXPANDED_LENGTH) {
+            throw new Error(
+                `Macro expansion exceeded ${MAX_EXPANDED_LENGTH} characters — the definitions expand combinatorially.`
+            );
+        }
+    }
+
+    /**
+     * steps 를 상한까지만 모은다. 상한에 닿으면 잘렸다는 사실을 한 줄로
+     * 남긴다 — 조용히 버리면 hover 를 읽는 사람이 확장이 거기서 끝난 것으로
+     * 오해한다.
+     */
+    private pushStep(steps: string[], step: string): void {
+        if (steps.length < MAX_STEPS) {
+            steps.push(step);
+            return;
+        }
+        if (!this.stepsTruncated) {
+            this.stepsTruncated = true;
+            steps.push(`… (expansion steps truncated at ${MAX_STEPS})`);
+        }
     }
 
     /**

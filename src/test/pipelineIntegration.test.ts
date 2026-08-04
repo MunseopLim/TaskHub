@@ -268,14 +268,55 @@ suite('Pipeline integration', function () {
                         id: 'w',
                         type: 'stringManipulation',
                         function: 'trim',
-                        input: 'hit=${src.hit}',
+                        // **매칭에 실패한 capture 도 downstream 에서 참조한다.**
+                        // 예전에는 miss 한 `third` 를 아무도 쓰지 않아서, 그것이
+                        // 리터럴로 남는지 아니면 producer 의 stdout 전체로
+                        // 조용히 치환되는지가 이 테스트로 드러나지 않았다.
+                        // 문서(features.md 의 capture 실패 정책)가 약속하는 것은
+                        // "미해결 placeholder 로 남음" 이다.
+                        input: 'hit=${src.hit} miss=${src.third}',
                         passTheResultToNextTask: true,
                         output: { mode: 'file', filePath: resultPath, overwrite: true }
                     }
                 ]
             };
             await run(action);
-            assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'hit=single');
+            assert.strictEqual(
+                fs.readFileSync(resultPath, 'utf8'),
+                'hit=single miss=${src.third}',
+                '매칭 실패한 capture 는 리터럴로 남아야 한다 (stdout 전체로 대체되면 안 된다)'
+            );
+        });
+
+        test('IT-005b: capture miss가 shell 인자로 들어가도 stdout으로 치환되지 않는다', async () => {
+            // 셸로 넘어가는 자리에서 특히 중요하다 — 정규식으로 좁힌 값을 받는다고
+            // 믿는 자리에 검증되지 않은 출력 전체가 들어가면 안 된다.
+            const resultPath = path.join(tempWorkspace, 'it005b.txt');
+            const action: PipelineAction = {
+                description: 'IT-005b',
+                tasks: [
+                    {
+                        id: 'src',
+                        type: 'shell',
+                        command: echoOneLine('DANGEROUS-FULL-OUTPUT'),
+                        passTheResultToNextTask: true,
+                        output: { capture: { name: 'safe', regex: 'v(\\d+)' } }   // miss
+                    },
+                    {
+                        id: 'use',
+                        type: 'command',
+                        command: 'node',
+                        args: ['-e', 'require("fs").writeFileSync(process.argv[1], process.argv[2])', resultPath, '${src.safe}'],
+                        passTheResultToNextTask: true
+                    }
+                ]
+            };
+            await run(action);
+            assert.strictEqual(
+                fs.readFileSync(resultPath, 'utf8'),
+                '${src.safe}',
+                'capture 실패가 producer 의 stdout 전체로 대체됐다'
+            );
         });
 
         test('IT-006: captured 값을 다음 태스크의 output.filePath에 사용', async () => {
@@ -1150,6 +1191,44 @@ try {
             assert.ok(fs.existsSync(manifestPath), 'manifest should be extracted');
             const extracted = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
             assert.deepStrictEqual(extracted.sources, [srcA, srcB]);
+        });
+
+        test('IT-153: OS별 tool 객체가 현재 플랫폼 branch 로 보간되어 실행된다', async () => {
+            // 실행 경로 전체를 탄다: executeSingleTask 가 `interpolateToolValue` 로
+            // **현재 플랫폼 branch 를 고르고 보간** → handleZip/handleUnzip 의
+            // `getToolCommand` 가 그것을 실행. 지금까지 이 연결은 소스 정규식으로만
+            // 고정돼 있어서, 보간 결과를 버리고 원본을 넘겨도 통과했다.
+            const launcher = writeFake7zLauncher(tempWorkspace);
+            const activeKey = process.platform === 'win32' ? 'windows'
+                : process.platform === 'darwin' ? 'macos' : 'linux';
+            const inactiveKey = activeKey === 'windows' ? 'macos' : 'windows';
+            // 활성 branch 는 보간이 필요한 값, 비활성 branch 는 해석되지 않는 참조.
+            // 후자가 실행에 영향을 주면 이 액션은 돌지 않는다.
+            const tool: Record<string, string> = {
+                [activeKey]: '${workspaceFolder}/' + path.basename(launcher),
+                [inactiveKey]: '${ghost.output}',
+            };
+            const archivePath = path.join(tempWorkspace, 'os-tool.fake7z');
+            const extractDir = path.join(tempWorkspace, 'os-tool-extracted');
+            const srcA = path.join(tempWorkspace, 'os-a.txt');
+            fs.writeFileSync(srcA, 'alpha');
+
+            const action: PipelineAction = {
+                description: 'IT-153',
+                tasks: [
+                    { id: 'pack', type: 'zip', tool, archive: archivePath, source: [srcA] },
+                    { id: 'unpack', type: 'unzip', tool, archive: archivePath, destination: extractDir },
+                ]
+            };
+
+            await run(action);
+
+            assert.ok(
+                fs.existsSync(archivePath),
+                'OS별 tool 이 보간되지 않았다 — ${workspaceFolder} 가 리터럴로 실행에 들어갔다'
+            );
+            const extracted = JSON.parse(fs.readFileSync(path.join(extractDir, 'manifest.json'), 'utf8'));
+            assert.deepStrictEqual(extracted.sources, [srcA]);
         });
 
         test('IT-144: 외부 tool 경로도 해석된 절대 경로를 downstream 에 넘긴다', async () => {

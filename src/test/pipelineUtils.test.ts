@@ -25,6 +25,7 @@ import {
     encodePowerShellScript,
     getCommandString,
     getToolCommand,
+    selectPlatformValue,
     applyOutputCapture,
     normalizeEol,
     encodeFileContent,
@@ -192,6 +193,50 @@ suite('pipelineUtils — direct-import smoke suite', () => {
     test('getToolCommand quotes paths containing spaces', () => {
         const out = getToolCommand('C:/Program Files/Tool/bin.exe');
         assert.strictEqual(out, '"C:/Program Files/Tool/bin.exe"');
+    });
+});
+
+/**
+ * `selectPlatformValue` 는 Preview Run 이 "지금 이 기계에서 실행하면" 을 보여
+ * 줄 때 쓰는 선택기다. `platform` 을 명시로 넘겨 **CI 가 도는 OS 와 무관하게**
+ * 세 분기를 모두 고정한다 — 그러지 않으면 darwin 호스트에서 win32/linux 경로가
+ * 한 번도 실행되지 않는다.
+ */
+suite('selectPlatformValue', () => {
+    const tool = { windows: 'C:\\7z.exe', macos: '/usr/local/bin/7z', linux: '/usr/bin/7z' };
+
+    test('플랫폼마다 그 branch 를 고른다', () => {
+        assert.strictEqual(selectPlatformValue(tool, 'win32'), 'C:\\7z.exe');
+        assert.strictEqual(selectPlatformValue(tool, 'darwin'), '/usr/local/bin/7z');
+        assert.strictEqual(selectPlatformValue(tool, 'linux'), '/usr/bin/7z');
+    });
+
+    test('문자열은 플랫폼과 무관하게 그대로다', () => {
+        assert.strictEqual(selectPlatformValue('/usr/bin/7z', 'win32'), '/usr/bin/7z');
+    });
+
+    test('현재 플랫폼 branch 가 없으면 undefined', () => {
+        assert.strictEqual(selectPlatformValue({ windows: 'C:\\7z.exe' }, 'darwin'), undefined);
+    });
+
+    test('알 수 없는 플랫폼도 undefined (aix 등)', () => {
+        assert.strictEqual(selectPlatformValue(tool, 'aix'), undefined);
+    });
+
+    test('빈 문자열 branch 는 없는 것으로 본다', () => {
+        // `getToolCommand` 가 falsy 검사로 던지는 값이다. "있다" 고 답하면
+        // 미리보기가 빈 명령을 정상처럼 보여 주고 실행만 실패한다.
+        assert.strictEqual(selectPlatformValue({ macos: '' }, 'darwin'), undefined);
+        assert.strictEqual(selectPlatformValue('', 'darwin'), undefined);
+    });
+
+    test('문자열이 아닌 branch / 값은 undefined', () => {
+        assert.strictEqual(selectPlatformValue({ darwin: 1 } as any, 'darwin'), undefined);
+        assert.strictEqual(selectPlatformValue({ macos: 7 } as any, 'darwin'), undefined);
+        assert.strictEqual(selectPlatformValue(['/usr/bin/7z'], 'darwin'), undefined);
+        assert.strictEqual(selectPlatformValue(undefined, 'darwin'), undefined);
+        assert.strictEqual(selectPlatformValue(null, 'darwin'), undefined);
+        assert.strictEqual(selectPlatformValue(42, 'darwin'), undefined);
     });
 });
 

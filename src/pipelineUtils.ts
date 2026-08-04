@@ -41,8 +41,17 @@ export function wouldExceedCaptureLimit(currentBytes: number, chunkBytes: number
  * automatically instead of through a mirror copy.
  */
 export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
-    'output', 'outputDir', 'path', 'dir', 'name', 'fileNameOnly', 'fileExt',
-    'value', 'values', 'archivePath', 'confirmed'
+    // `stderr` 는 `shell`/`command` 가 캡처 모드에서 실제로 돌려주는 키다.
+    // 캡처 결과는 `result = { ...result, ...captured }` 로 병합되므로, 이 이름을
+    // 허용하면 **stdout 에서 뽑은 값이 진짜 stderr 를 조용히 덮는다** — 그
+    // stderr 는 Problems 패널로 가는 진단의 입력이기도 하다.
+    'output', 'stderr', 'outputDir', 'path', 'dir', 'name', 'fileNameOnly', 'fileExt',
+    'value', 'values', 'archivePath', 'confirmed',
+    // 프로토타입 오염 이름들. 평범한 객체에 `results['__proto__'] = v` 를 하면
+    // **own property 가 만들어지지 않아** 캡처가 조용히 사라진다(결과가 `{}`).
+    // 결과 객체를 null-prototype 으로 만들어도 downstream 의 spread / 직렬화가
+    // 이 이름을 계속 특수 취급하므로, 이름 자체를 막는 편이 예측 가능하다.
+    '__proto__', 'constructor', 'prototype'
 ]);
 
 /**
@@ -363,18 +372,79 @@ export function interpolatePipelineVariables(template: string, context: any): st
 }
 
 /**
+ * `tool` 값(문자열 또는 OS별 객체)에서 **현재 플랫폼이 실행할 문자열 하나**를
+ * 골라 보간한다.
+ *
+ * **고르는 것이 먼저다.** 예전에는 모든 branch 를 보간한 뒤 실행 직전에 하나를
+ * 골랐는데, 보간은 `sanitizeInterpolatedValue` 를 거치며 **NUL 바이트나 길이
+ * 초과에서 throw** 한다. 그래서 이 기계에서 절대 실행되지 않을 branch 의 값
+ * 하나 때문에 태스크 전체가 실패했다 — 예: macOS 에서 도는 액션의 windows
+ * branch 에 `${pick.value}` 가 있고 사용자가 32KB 를 붙여 넣은 경우. 고른 뒤
+ * 보간하면 실행될 값만 검사 대상이 된다.
+ *
+ * **`JSON.stringify → interpolate → JSON.parse` 는 쓰면 안 된다.** 보간된 값이
+ * JSON 문자열 안으로 들어가는 순간 그 안의 역슬래시가 escape 로 재해석된다 —
+ * `C:\Users\me` 는 파싱 자체가 깨지고, `C:\temp` 는 `\t` 가 탭이 되어 **조용히**
+ * 다른 경로가 된다. Windows 경로가 흔한 자리라 반드시 문자열 단위로 보간한다.
+ *
+ * 현재 플랫폼 branch 가 없으면 {@link getToolCommand} 와 **같은 문구로** throw
+ * 한다 — 실패 지점만 앞당겨질 뿐 사용자가 보는 메시지는 그대로다.
+ */
+export function interpolateToolValue(
+    tool: unknown,
+    context: any,
+    platform: NodeJS.Platform = process.platform
+): string {
+    const selected = selectPlatformValue(tool, platform);
+    if (selected === undefined) {
+        throw new Error(`No tool path specified for the current platform (${platform}) in actions.json`);
+    }
+    return interpolatePipelineVariables(selected, context);
+}
+
+/** 상속된 키(`constructor`, `toString` …)를 결과로 오인하지 않도록 own property 만 본다. */
+function ownValue(context: any, key: string): unknown {
+    if (!context || typeof context !== 'object') { return undefined; }
+    return Object.prototype.hasOwnProperty.call(context, key) ? context[key] : undefined;
+}
+
+/**
  * `${...}` 안의 표현식 하나를 컨텍스트에서 찾아 **원래 값 그대로** 돌려준다
  * (문자열화·sanitize 전). `interpolatePipelineVariables` 와 **같은 탐색 규칙**을
  * 쓰므로, 보간과 배열 확장이 서로 다른 것을 가리키는 일이 없다.
+ *
+ * **`output` / `outputDir` 폴백은 bare `${stepId}` 에만 적용한다.**
+ * 예전에는 속성이 붙은 참조(`${producer.safe}`)도 그 속성이 없으면 폴백을 탔다.
+ * 그래서 capture 규칙이 매칭되지 않아 `safe` 가 만들어지지 않았을 때
+ * `${producer.safe}` 가 **검증되지 않은 stdout 전체**로 치환되어 downstream
+ * 명령에 들어갔다 — 사용자는 정규식으로 좁힌 값을 받는다고 믿는 자리다.
+ * [docs/features.md](../docs/features.md) 의 capture 실패 정책도 "미해결
+ * placeholder 로 남음" 이라 적혀 있어 구현만 반대였다.
+ *
+ * 속성이 붙었는데 그 속성이 없으면 이제 `undefined` 를 돌려주고, 호출부가
+ * `${...}` 리터럴을 그대로 남긴다. 오타(`${build.typoKey}`)도 조용히 다른 값이
+ * 되는 대신 리터럴로 드러난다. bare 참조의 폴백은 유지된다 — `${producer}` 가
+ * 그 태스크의 대표 결과를 뜻하는 것은 문서화된 계약이다.
  */
 export function resolvePipelineReference(expression: string, context: any): unknown {
     const parts = expression.split('.');
     const stepId = parts[0];
     const property = parts.slice(1).join('.');
-    if (context[stepId] && property && context[stepId][property] !== undefined) { return context[stepId][property]; }
-    if (context[stepId] && context[stepId].output !== undefined) { return context[stepId].output; }
-    if (context[stepId] && context[stepId].outputDir !== undefined) { return context[stepId].outputDir; }
-    if (context[expression] !== undefined) { return context[expression]; }
+    // **점이 아예 없을 때만** bare 다. `!property` 로 판정하면 `${producer.}` 처럼
+    // 점 뒤가 빈 형태까지 bare 로 새어 들어가 폴백을 타고, "속성을 쓴 참조는
+    // 폴백하지 않는다" 는 계약이 오타 하나로 뚫린다.
+    const isBare = parts.length === 1;
+    // **own property 만 본다.** 컨텍스트가 평범한 객체면 `${constructor.name}` 이
+    // `Object`, `${toString.name}` 이 `toString` 으로 "해석"되어 태스크 결과처럼
+    // 셸 명령에 들어간다.
+    const step = ownValue(context, stepId);
+    if (step && property && ownValue(step, property) !== undefined) { return ownValue(step, property); }
+    if (isBare && step) {
+        if (ownValue(step, 'output') !== undefined) { return ownValue(step, 'output'); }
+        if (ownValue(step, 'outputDir') !== undefined) { return ownValue(step, 'outputDir'); }
+    }
+    const direct = ownValue(context, expression);
+    if (direct !== undefined) { return direct; }
     return undefined;
 }
 
@@ -434,7 +504,13 @@ export function extractVariableHeads(text: string): string[] {
     while ((m = re.exec(text)) !== null) {
         const expr = m[1];
         if (!expr) { continue; }
-        const head = expr.split('.')[0].trim();
+        // **trim 하지 않는다** — `resolvePipelineReference` 는 split 결과를 그대로
+        // 키로 쓴다. 여기서 다듬으면 `${ producer.output}` 이 `producer` 에 대한
+        // 의존성으로 추론되어 실행 순서가 잡히지만, 런타임은 `" producer"` 를
+        // 찾지 못해 리터럴로 남긴다 — 순서만 잡고 값은 안 오는 상태가 된다.
+        // 반대로 id 자체가 `" producer"` 인 경우(스키마상 유효)에는 다듬지 않아야
+        // 매칭되어 의존성이 잡힌다. 양쪽 다 런타임과 같아진다.
+        const head = expr.split('.')[0];
         if (head.length > 0) { heads.push(head); }
     }
     return heads;
@@ -486,6 +562,32 @@ function pickPlatformBranch(
     if (platform === 'win32') { return obj.windows; }
     if (platform === 'darwin') { return obj.macos; }
     if (platform === 'linux') { return obj.linux; }
+    return undefined;
+}
+
+/**
+ * `tool` / `command` 처럼 문자열이거나 OS별 객체인 값에서 **현재 플랫폼이 실제로
+ * 고를 문자열 하나**를 돌려준다. 그 branch 가 없으면 `undefined` — 런타임의
+ * {@link getToolCommand} / {@link getCommandString} 가 던지는 자리와 같다.
+ *
+ * "지금 이 기계에서 실행하면" 을 보여 주는 자리(Preview Run)에서 쓴다. 모든
+ * branch 를 훑으면 이 기계에서 절대 실행되지 않을 branch 의 미해결 참조가
+ * 보고되고, 반대로 현재 플랫폼 branch 가 없는 객체는 런타임에서 실패하는데도
+ * 조용히 통과한다.
+ *
+ * **빈 문자열은 없는 것으로 본다.** `getToolCommand` / `getCommandString` 가
+ * falsy 검사로 던지므로, `{ macos: '' }` 를 "있다" 고 답하면 미리보기가 빈
+ * 명령을 정상처럼 보여 주고 실행만 실패한다.
+ */
+export function selectPlatformValue(
+    value: unknown,
+    platform: NodeJS.Platform = process.platform
+): string | undefined {
+    if (typeof value === 'string') { return value || undefined; }
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const branch = pickPlatformBranch(value as Record<string, unknown>, platform);
+        if (typeof branch === 'string' && branch.length > 0) { return branch; }
+    }
     return undefined;
 }
 

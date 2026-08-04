@@ -22,6 +22,7 @@ import {
     expandArgTemplate,
     buildNativeCommandInvocation,
     getCommandString,
+    selectPlatformValue,
     buildTaskGraph,
     validateTaskGraph,
     isInsideWorkspaceRoots,
@@ -89,11 +90,17 @@ export function simulateTaskResult(task: Task): SimulatedResult {
         }
         case 'inputBox':
             return { value: placeholder('inputBox', task.id, 'value') };
-        case 'quickPick':
-            return {
-                value: placeholder('quickPick', task.id, 'value'),
-                values: placeholder('quickPick', task.id, 'values'),
-            };
+        case 'quickPick': {
+            // `values` 는 **다중 선택일 때만** 나온다 — `handleQuickPick` 의
+            // `canPickMany` 분기만 그 키를 돌려준다. 무조건 채우면 단일 선택
+            // quickPick 의 `${pick.values}` 가 Preview 에서 해석된 것처럼
+            // 보이지만 런타임에서는 리터럴로 남는다.
+            const base: SimulatedResult = { value: placeholder('quickPick', task.id, 'value') };
+            if ((task as any).canPickMany) {
+                base.values = placeholder('quickPick', task.id, 'values');
+            }
+            return base;
+        }
         case 'envPick':
             return { value: placeholder('envPick', task.id, 'value') };
         case 'unzip':
@@ -110,8 +117,15 @@ export function simulateTaskResult(task: Task): SimulatedResult {
             // 출력을 스트리밍만 하고 빈 결과를 넘긴다. 시뮬레이션이 무조건
             // output을 만들면 다운스트림 `${id.output}` 참조가 늘 해석되는
             // 것처럼 보여 가장 흔한 설정 실수를 놓친다(M9).
+            //
+            // 캡처 모드에서는 `stderr` 도 함께 넘어간다 (`handleShell` /
+            // `handleCommand` 의 반환 형태). 빠뜨리면 `${build.stderr}` 라는
+            // **정상 참조**를 미해결로 보고하게 된다.
             return task.passTheResultToNextTask
-                ? { output: placeholder(task.type, task.id, 'stdout') }
+                ? {
+                    output: placeholder(task.type, task.id, 'stdout'),
+                    stderr: placeholder(task.type, task.id, 'stderr'),
+                }
                 : {};
         case 'writeFile':
         case 'appendFile':
@@ -127,13 +141,14 @@ export const UNRESOLVED_VAR_RE = /\$\{[^}]+\}/g;
 /**
  * Walk raw (pre-interpolation) string leaves of a task and report
  * `${id.key}` references that point at an already-simulated task but
- * a key the task did not produce. The runtime's
- * `interpolatePipelineVariables` silently falls back to `.output`
- * when the requested property is missing, which masks typos like
- * `${producer.typoKey}` in post-interpolation strings — so
- * `findUnresolved` alone cannot catch them. This pass runs *before*
- * the fallback would fire and surfaces the original `${...}` literal
- * so the user sees the exact typo to fix.
+ * a key the task did not produce.
+ *
+ * `resolvePipelineReference` no longer falls back to `.output` for
+ * property-qualified refs, so such a ref does survive interpolation and
+ * `findUnresolved` would also see it. This pass is still the better
+ * report: it runs on the *raw* leaves, so it names the exact `${...}`
+ * literal the user wrote and attributes it to a known producer id
+ * instead of lumping it in with forward refs and built-ins.
  *
  * `task.output.capture` and `task.output.diagnostics` subtrees are
  * skipped — their `${...}` literals are regex content, not refs.
@@ -238,7 +253,34 @@ function extractRefHead(match: string): string {
     }
     const expr = match.slice(2, -1);
     const dotIdx = expr.indexOf('.');
-    return (dotIdx === -1 ? expr : expr.slice(0, dotIdx)).trim();
+    // **trim 하지 않는다** — `resolvePipelineReference` 는 `expression.split('.')`
+    // 의 결과를 그대로 키로 쓴다. `${ producer.output}` 의 head 는 `" producer"`
+    // 이고 어떤 태스크 id 와도 맞지 않아 런타임에서는 리터럴로 남는다. 여기서
+    // 다듬으면 그 오타가 정상 참조로 보인다.
+    return dotIdx === -1 ? expr : expr.slice(0, dotIdx);
+}
+
+/**
+ * `${expr}` 에서 head 뒤의 속성 경로를 꺼낸다. **점이 없으면 `undefined`**
+ * (bare 참조). 점이 있으면 그 뒤 전부가 키다.
+ *
+ * 두 가지를 일부러 지킨다.
+ *
+ * - **`''` 와 `undefined` 를 구분한다.** `${producer.}` 는 점이 있으므로 bare 가
+ *   아니고, 런타임(`resolvePipelineReference`)도 bare 로 보지 않아 리터럴로
+ *   남긴다. 둘을 같은 값으로 뭉개면 이 오타가 Preview·Doctor 에서 조용히
+ *   정상 참조로 통과한다.
+ * - **trim 하지 않는다.** 런타임은 키를 다듬지 않으므로 `${producer. output}` 의
+ *   키는 `" output"` 이고 어떤 결과 키와도 맞지 않는다. 여기서 trim 하면
+ *   런타임이 리터럴로 남길 오타를 해석되는 것처럼 보여 준다.
+ */
+function extractRefKey(match: string): string | undefined {
+    if (!match.startsWith('${') || !match.endsWith('}') || match.length < 4) {
+        return undefined;
+    }
+    const expr = match.slice(2, -1);
+    const dotIdx = expr.indexOf('.');
+    return dotIdx === -1 ? undefined : expr.slice(dotIdx + 1);
 }
 
 /**
@@ -259,20 +301,105 @@ function extractRefHead(match: string): string {
  */
 export function findUnresolved(
     values: (string | undefined)[],
-    toleratedHeads?: ReadonlySet<string>
+    tolerate?: ReadonlySet<string> | RefTolerance
 ): string[] {
+    const accept: RefTolerance = typeof tolerate === 'function'
+        ? tolerate
+        : (_literal, head) => tolerate !== undefined && tolerate.has(head);
     const seen = new Set<string>();
     for (const v of values) {
         if (typeof v !== 'string') { continue; }
         const matches = v.match(UNRESOLVED_VAR_RE);
         if (matches) {
             for (const m of matches) {
-                if (toleratedHeads && toleratedHeads.has(extractRefHead(m))) { continue; }
+                if (accept(m, extractRefHead(m))) { continue; }
                 seen.add(m);
             }
         }
     }
     return Array.from(seen);
+}
+
+/**
+ * `${…}` 리터럴 하나를 "보고하지 않아도 되는가"로 판정한다. `true` 면 관용.
+ */
+export type RefTolerance = (literal: string, head: string) => boolean;
+
+/**
+ * 시뮬레이션 결과에 **capture 로 파생되는 이름까지** 얹은 것. downstream
+ * 컨텍스트를 채우는 모든 곳(Preview, Doctor, 전방 참조 판정)이 이 하나를 쓴다.
+ *
+ * capture 적용 조건은 런타임 그대로다 — `executeSingleTask` 는 결과에 **문자열
+ * `output` 이 있을 때만** capture 를 돌린다. 타입 이름으로 가르면
+ * (`shell`/`command` 만 제외) `fileDialog` 에 `output.capture` 를 적어 둔 액션에서
+ * 존재하지 않는 파생 변수가 해석되는 것처럼 보인다.
+ */
+export function simulateTaskResultWithCaptures(task: Task): SimulatedResult {
+    const sim = simulateTaskResult(task);
+    if (task.output?.capture && typeof sim.output === 'string') {
+        const rules = Array.isArray(task.output.capture) ? task.output.capture : [task.output.capture];
+        for (const r of rules) {
+            if (r && typeof r.name === 'string') {
+                sim[r.name] = placeholder('capture', task.id, r.name);
+            }
+        }
+    }
+    return sim;
+}
+
+/** 태스크가 실제로 내놓는 결과 키 집합. */
+export function simulatedResultKeys(task: Task): Set<string> {
+    return new Set(Object.keys(simulateTaskResultWithCaptures(task)));
+}
+
+/**
+ * 전방(아직 시뮬레이션되지 않은) 태스크를 가리키는 참조를 **그 태스크가 실제로
+ * 낼 키에 한해서만** 관용하는 판정기.
+ *
+ * 예전에는 head 가 전방 태스크이기만 하면 어떤 키든 통과시켰다. 자동 추론된
+ * 의존성이 실행 순서를 뒤집으므로 전방 참조 자체는 정상이지만, 그 관용이
+ * **키까지** 덮어 버려서 `${producer.safe}` 처럼 존재하지 않는 capture 를
+ * 가리키는 오타가 Preview 에서는 "모두 해석됨", Doctor 에서는 무경고로 보이고
+ * 런타임에서만 리터럴로 남았다. 이미 시뮬레이션된 태스크에 대해서는
+ * `findTypoRefs` 가 같은 일을 한다 — 이 판정기가 그 대칭을 앞쪽에도 채운다.
+ */
+export function makeForwardRefTolerance(
+    forwardTaskIds: ReadonlySet<string>,
+    tasksById: ReadonlyMap<string, Task>,
+    /**
+     * 지금 검사 중인 태스크의 id. 이 태스크는 아직 `allResults` 에 없으므로
+     * `forwardTaskIds` 에 들어 있지만, 런타임 컨텍스트에는 **자기 자신이 없다** —
+     * `${self.output}` 은 리터럴로 남는다. 관용 대상에서 빼지 않으면 자기
+     * 참조가 정상으로 보인다.
+     */
+    selfId?: string
+): RefTolerance {
+    const resultCache = new Map<string, SimulatedResult>();
+    const resultFor = (head: string, task: Task): SimulatedResult => {
+        let sim = resultCache.get(head);
+        if (!sim) {
+            sim = simulateTaskResultWithCaptures(task);
+            resultCache.set(head, sim);
+        }
+        return sim;
+    };
+    return (literal, head) => {
+        if (head === selfId) { return false; }
+        if (!forwardTaskIds.has(head)) { return false; }
+        const task = tasksById.get(head);
+        // id 는 알지만 태스크 본체를 못 찾는 경우는 판단 근거가 없다 → 관용.
+        if (!task) { return true; }
+        const sim = resultFor(head, task);
+        const key = extractRefKey(literal);
+        if (key === undefined) {
+            // bare `${id}` 는 대표 결과를 뜻한다. 런타임은 `output` 또는
+            // `outputDir` 이 있을 때만 해석하고(`resolvePipelineReference`),
+            // 그 외에는 결과 객체가 문자열이 아니라 sanitize 에서 걸려 리터럴로
+            // 남는다 — `zip` 처럼 `archivePath` 만 내는 태스크가 그렇다.
+            return sim.output !== undefined || sim.outputDir !== undefined;
+        }
+        return Object.prototype.hasOwnProperty.call(sim, key);
+    };
 }
 
 function formatCaptureRule(rule: OutputCapture): string {
@@ -350,7 +477,10 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
     lines.push('  ⚠️  ...               Warning — review before running.');
     lines.push('');
 
-    const allResults: Record<string, SimulatedResult> = {};
+    // null-prototype: 태스크 id 가 '__proto__' 여도 평범한 키가 되도록 (런타임의
+    // stepResults 와 같은 처치). 일반 객체면 그 id 의 결과가 조용히 사라져
+    // Preview 는 "모두 해석됨", 런타임은 리터럴이 되는 불일치가 생긴다.
+    const allResults: Record<string, SimulatedResult> = Object.create(null);
     const totalUnresolved = new Set<string>();
 
     // Surface graph issues (cycle / missing dep / self dep) up front so
@@ -399,11 +529,11 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
 
     for (let i = 0; i < action.tasks.length; i++) {
         const task = action.tasks[i];
-        const interpolationContext: any = {
-            ...allResults,
+        // null-prototype — 런타임과 같은 규칙 (상속 키가 결과로 새지 않도록).
+        const interpolationContext: any = Object.assign(Object.create(null), allResults, {
             workspaceFolder: options.workspaceFolder,
             extensionPath: options.extensionPath,
-        };
+        });
 
         // Preview Run simulates tasks in declaration order even though the
         // runtime may schedule `parallel: true` tasks concurrently. The
@@ -487,9 +617,14 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 if (prompt) { lines.push(`  prompt:      ${prompt}`); }
                 if (value) { lines.push(`  defaultVal:  ${value}`); }
                 if (placeHolder) { lines.push(`  placeHolder: ${placeHolder}`); }
-                if (task.prefix) { lines.push(`  prefix:      ${task.prefix}`); }
-                if (task.suffix) { lines.push(`  suffix:      ${task.suffix}`); }
-                interpolated.push(prompt, value, placeHolder);
+                // prefix/suffix 도 런타임에서 보간된다 (`executeSingleTask` 의
+                // inputBox 분기). 표시만 하고 검사 목록에서 빼면 그 안의
+                // `${ghost.output}` 이 미해결로 보고되지 않는다.
+                const prefix = task.prefix ? interpolatePipelineVariables(task.prefix, interpolationContext) : undefined;
+                const suffix = task.suffix ? interpolatePipelineVariables(task.suffix, interpolationContext) : undefined;
+                if (prefix) { lines.push(`  prefix:      ${prefix}`); }
+                if (suffix) { lines.push(`  suffix:      ${suffix}`); }
+                interpolated.push(prompt, value, placeHolder, prefix, suffix);
                 break;
             }
             case 'quickPick': {
@@ -561,16 +696,34 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
             }
             case 'zip':
             case 'unzip': {
-                const tool = (() => {
-                    try { return task.tool ? JSON.parse(interpolatePipelineVariables(JSON.stringify(task.tool), interpolationContext)) : undefined; }
-                    catch { return task.tool; }
-                })();
+                // OS별 객체는 **현재 플랫폼이 고를 branch 하나**만 본다 —
+                // Preview 는 "지금 이 기계에서 실행하면" 을 보여 주는 자리이고,
+                // 런타임의 `getToolCommand` 도 그 하나만 고른다. 모든 branch 를
+                // 훑으면 이 기계에서 절대 실행되지 않을 windows branch 의
+                // `${ghost.output}` 이 미해결로 보고되어 정상 설정이 막히고,
+                // 반대로 현재 플랫폼 branch 가 없는 객체는 런타임에서 실패하는데도
+                // "모두 해석됨" 이 된다. (설정 자체의 오류는 Doctor 가 모든
+                // branch 를 훑어 잡는다 — 그쪽은 다른 OS 사용자까지 본다.)
+                //
+                // 보간은 고른 문자열에 **문자열 단위로** 적용한다 — JSON 을
+                // 거치면 Windows 경로의 역슬래시가 escape 로 재해석되어 조용히
+                // 다른 경로가 된다 (`interpolateToolValue` 주석 참조).
+                const hasTool = task.tool !== undefined && task.tool !== null;
+                const toolForPlatform = hasTool ? selectPlatformValue(task.tool) : undefined;
+                const tool = toolForPlatform !== undefined
+                    ? interpolatePipelineVariables(toolForPlatform, interpolationContext)
+                    : undefined;
                 const archive = task.archive ? interpolatePipelineVariables(task.archive, interpolationContext) : undefined;
                 const destination = task.destination ? interpolatePipelineVariables(task.destination, interpolationContext) : undefined;
-                if (tool === undefined || tool === null) {
+                if (!hasTool) {
                     lines.push(`  tool: (built-in engine — .zip only)`);
+                } else if (tool === undefined) {
+                    // 런타임의 `getToolCommand` 가 여기서 던진다. 표시만 하고
+                    // 넘어가면 "모두 해석됨" 요약과 함께 정상처럼 보인다.
+                    lines.push(`  tool: (none for this platform)`);
+                    lines.push(`    ⚠️  no 'tool' entry for ${process.platform} — this task would fail at runtime`);
                 } else {
-                    lines.push(`  tool: ${typeof tool === 'string' ? tool : JSON.stringify(tool)}`);
+                    lines.push(`  tool: ${tool}`);
                 }
                 // 상대 경로가 **어디에** 떨어지는지 보여 준다. Preview 의 목적이
                 // 그것인데, `writeFile` 만 `→ resolves to:` 를 달고 있었다 —
@@ -599,6 +752,11 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 if (task.inputs) {
                     lines.push(`  inputs: ${JSON.stringify(task.inputs)}`);
                 }
+                // `tool` 도 검사 대상이다 — 표시만 하고 빼 두면 그 안의
+                // `${ghost.output}` 이 "모두 해석됨" 으로 요약된 뒤 런타임에서
+                // 리터럴 실행 파일로 실행을 시도한다. 검사하는 것은 위에서 고른
+                // **현재 플랫폼 branch** 하나다.
+                if (tool !== undefined) { interpolated.push(tool); }
                 interpolated.push(archive, destination);
                 break;
             }
@@ -660,6 +818,14 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
             if (task.output.language) {
                 lines.push(`    language: ${task.output.language}`);
             }
+            if (task.output.content) {
+                // `content` 는 런타임에서 보간된 뒤 파일/에디터로 나간다. 검사
+                // 목록에 넣지 않으면 그 안의 `${ghost.output}` 이 미해결로
+                // 보고되지 않은 채 그대로 기록된다.
+                const resolvedContent = interpolatePipelineVariables(task.output.content, interpolationContext);
+                lines.push(`    content: ${resolvedContent}`);
+                interpolated.push(resolvedContent);
+            }
             if (task.output.filePath) {
                 const resolvedPath = interpolatePipelineVariables(task.output.filePath, interpolationContext);
                 lines.push(`    filePath: ${resolvedPath}`);
@@ -710,13 +876,12 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         }
         // Two complementary passes:
         //  1. `findUnresolved` on POST-interpolation strings catches refs to
-        //     unknown heads (`${notATask.x}`) and forward refs whose head is
-        //     not (yet) tolerated.
+        //     unknown heads (`${notATask.x}`) and forward refs whose key the
+        //     forward task will not produce.
         //  2. `findTypoRefs` walks PRE-interpolation strings to catch typos
-        //     against ALREADY-simulated tasks — these are masked from pass (1)
-        //     because `interpolatePipelineVariables` silently falls back to
-        //     `.output` when the requested property is missing.
-        const unresolved = findUnresolved(interpolated, forwardTaskIds);
+        //     against ALREADY-simulated tasks, naming the exact literal the
+        //     user wrote and attributing it to a known producer.
+        const unresolved = findUnresolved(interpolated, makeForwardRefTolerance(forwardTaskIds, tasksById, task.id));
         const typos = findTypoRefs(task, allResults, task.id);
         // 미캡처 shell/command 출력 참조는 전용 경고로 따로 표시 — 일반
         // unresolved 목록에서 제외해 중복 보고를 막는다(M9).
@@ -731,20 +896,9 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
             totalUnresolved.add(ref);
         }
 
-        const sim = simulateTaskResult(task);
-        // 런타임은 shell/command에서 passTheResultToNextTask가 falsy면
-        // capture도 건너뛴다 — 시뮬레이션 컨텍스트도 동일하게(M9).
-        const captureSkippedAtRuntime =
-            (task.type === 'shell' || task.type === 'command') && !task.passTheResultToNextTask;
-        if (task.output?.capture && !captureSkippedAtRuntime) {
-            const rules = Array.isArray(task.output.capture) ? task.output.capture : [task.output.capture];
-            for (const r of rules) {
-                if (r && typeof r.name === 'string') {
-                    sim[r.name] = placeholder('capture', task.id, r.name);
-                }
-            }
-        }
-        allResults[task.id] = sim;
+        // capture 적용 조건은 `simulateTaskResultWithCaptures` 한 곳에만 둔다 —
+        // 전방 참조 판정도 같은 함수를 쓰므로 앞뒤가 같은 모델을 본다.
+        allResults[task.id] = simulateTaskResultWithCaptures(task);
 
         lines.push('');
     }

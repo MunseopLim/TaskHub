@@ -1054,6 +1054,7 @@ import {
     applyOutputCapture,
     getCommandString,
     getToolCommand,
+    interpolateToolValue,
     tokenizeCommandLine,
     mergeCommandAndArgs,
     quotePowerShellArgument,
@@ -1136,6 +1137,7 @@ export {
     encodeFileContent,
     withTaskTimeout,
     extractVariableHeads,
+    interpolateToolValue,
     inferTaskDependencies,
     buildTaskGraph,
     detectGraphCycle,
@@ -4279,7 +4281,12 @@ async function executeActionPipelineForRun(
     options: PipelineExecutionOptions | undefined,
     executionRun: ActionRunContext
 ): Promise<void> {
-    const stepResults: Record<string, unknown> = {};
+    // **null-prototype.** 태스크 id 는 사용자가 정하고 스키마가 `__proto__` 를
+    // 막지 않는데, 평범한 객체에 `stepResults['__proto__'] = result` 를 하면
+    // own property 가 만들어지지 않아 그 태스크의 결과가 조용히 사라진다
+    // (downstream 의 `${__proto__.output}` 이 리터럴로 남는다). 프로토타입
+    // 체인이 없으면 어떤 id 든 평범한 키가 된다.
+    const stepResults: Record<string, unknown> = Object.create(null);
     const presetInputs = options?.presetInputs;
     const recordInputs = options?.recordInputs;
     const recordCommands = options?.recordCommands;
@@ -5478,7 +5485,12 @@ async function executeSingleTask(
     // 있도록 여기서 미리 계산한다.
     const taskProducesSecret = task.type === 'inputBox' && task.password === true;
     const defaultWorkspace = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-    const interpolationContext = { ...allResults, workspaceFolder: defaultWorkspace, extensionPath: context.extensionPath };
+    // null-prototype: 평범한 객체 리터럴로 만들면 `${constructor.name}` 같은
+    // **상속 키**가 태스크 결과처럼 해석되어 셸 명령에 들어간다.
+    const interpolationContext = Object.assign(Object.create(null), allResults, {
+        workspaceFolder: defaultWorkspace,
+        extensionPath: context.extensionPath,
+    });
     let result: any;
     // Captured by the shell/command branch after `${workspaceFolder}` etc.
     // are resolved. Used by the diagnostic post-processing so relative
@@ -5587,8 +5599,13 @@ async function executeSingleTask(
             break;
         case 'unzip':
             const interpolatedUnzipTask: any = { ...task };
-            if (task.tool) {
-                interpolatedUnzipTask.tool = JSON.parse(interpolatePipelineVariables(JSON.stringify(task.tool), interpolationContext));
+            // `tool` 이 있으면 **현재 플랫폼 branch 를 골라** 보간한다
+            // (`interpolateToolValue`). truthy 검사 대신 명시적으로 본다 —
+            // `tool: ""` 를 조용히 "내장 엔진" 으로 흘려보내면 사용자가 지정한
+            // 도구가 없는 것처럼 동작한다. 쓸 값이 없으면 `interpolateToolValue`
+            // 가 `getToolCommand` 와 같은 문구로 던진다.
+            if (task.tool !== undefined && task.tool !== null) {
+                interpolatedUnzipTask.tool = interpolateToolValue(task.tool, interpolationContext);
             }
             if (typeof task.archive === 'string') {
                 interpolatedUnzipTask.archive = interpolatePipelineVariables(task.archive, interpolationContext);
@@ -5613,9 +5630,18 @@ async function executeSingleTask(
             }
             result = await handleUnzip(interpolatedUnzipTask, allResults, defaultWorkspace, executionRun, taskUsesSecret);
             break;
-        case 'zip':
-            result = await handleZip(task, allResults, defaultWorkspace, executionRun, taskUsesSecret);
+        case 'zip': {
+            // `tool` 을 보간해서 넘긴다 — `unzip` 분기가 이미 그렇게 하고
+            // Preview 도 보간된 값을 보여 준다. `zip` 만 원본을 쓰고 있어서
+            // `${workspaceFolder}/bin/7z` 같은 값이 Preview 에서는 해석되고
+            // 실제 실행만 실패했다. 조건은 unzip 과 같은 이유로 명시적 검사다.
+            const interpolatedZipTask: any = { ...task };
+            if (task.tool !== undefined && task.tool !== null) {
+                interpolatedZipTask.tool = interpolateToolValue(task.tool, interpolationContext);
+            }
+            result = await handleZip(interpolatedZipTask, allResults, defaultWorkspace, executionRun, taskUsesSecret);
             break;
+        }
         case 'stringManipulation':
             const interpolatedInput = interpolatePipelineVariables(task.input || '', interpolationContext);
             result = await handleStringManipulation({ ...task, input: interpolatedInput });
@@ -7078,7 +7104,9 @@ async function handleZip(
     run: ActionRunContext,
     redactOutput: boolean
 ): Promise<{ archivePath: string }> {
-    const interpolationContext = { ...allResults, workspaceFolder: workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '' };
+    const interpolationContext = Object.assign(Object.create(null), allResults, {
+        workspaceFolder: workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+    });
 
     const archive = task.archive ? interpolatePipelineVariables(task.archive, interpolationContext) : undefined;
     if (!archive) { throw new Error(`Zip task '${task.id}' is missing the 'archive' property.`); }

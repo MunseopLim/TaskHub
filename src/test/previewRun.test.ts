@@ -601,6 +601,85 @@ suite('buildPreviewReport', () => {
             assert.match(report, /tool: \/usr\/local\/bin\/7z/);
             assert.doesNotMatch(report, /built-in engine/);
         });
+
+        /**
+         * OS별 `tool` 객체는 **현재 플랫폼이 고를 branch 하나**만 본다.
+         *
+         * Preview 는 "지금 이 기계에서 실행하면" 을 보여 주는 자리이고, 런타임의
+         * `getToolCommand` 도 그 하나만 고른다. 모든 branch 를 훑던 시절에는
+         * 정상 설정이 미해결로 막히고(다른 OS branch 의 참조), 반대로 현재
+         * 플랫폼 branch 가 없는 객체는 런타임에서 던지는데도 "모두 해석됨" 이
+         * 나왔다. (설정 자체의 오류는 Doctor 가 모든 branch 를 훑어 잡는다.)
+         */
+        suite('OS별 tool', () => {
+            const ACTIVE_OS = process.platform === 'win32' ? 'windows'
+                : process.platform === 'darwin' ? 'macos' : 'linux';
+            const INACTIVE_OS = ACTIVE_OS === 'windows' ? 'macos' : 'windows';
+
+            function zipWithTool(id: string, tool: unknown): ActionItem {
+                return {
+                    id,
+                    title: 'os tool',
+                    action: {
+                        description: 'per-platform tool',
+                        tasks: [
+                            {
+                                id: 'pack',
+                                type: 'zip',
+                                tool,
+                                archive: '${workspaceFolder}/out.7z',
+                                source: ['${workspaceFolder}/a.txt']
+                            }
+                        ]
+                    }
+                } as unknown as ActionItem;
+            }
+
+            test('현재 플랫폼 branch 만 표시한다', () => {
+                const report = buildPreviewReport(
+                    zipWithTool('a.zip.os', { [ACTIVE_OS]: '/tools/active-7z', [INACTIVE_OS]: '/tools/other-7z' }),
+                    baseOptions()
+                );
+                assert.match(report, /tool: \/tools\/active-7z/);
+                assert.ok(
+                    !report.includes('/tools/other-7z'),
+                    `실행되지 않을 branch 까지 보여 주면 무엇이 돌지 헷갈린다:\n${report}`
+                );
+            });
+
+            test('비활성 branch 의 미해결 참조는 보고하지 않는다', () => {
+                // 이 기계에서는 정상 실행 가능한 설정이다. 막으면 안 된다.
+                const report = buildPreviewReport(
+                    zipWithTool('a.zip.os.ghost', { [ACTIVE_OS]: '/usr/bin/7z', [INACTIVE_OS]: '${ghost.output}' }),
+                    baseOptions()
+                );
+                assert.ok(
+                    !report.includes('${ghost.output}'),
+                    `현재 플랫폼에서 실행되지 않는 branch 때문에 정상 설정이 막혔다:\n${report}`
+                );
+                assert.match(report, /all \$\{\.\.\.\} references resolve/);
+            });
+
+            test('현재 플랫폼 branch 의 미해결 참조는 그대로 보고한다', () => {
+                const report = buildPreviewReport(
+                    zipWithTool('a.zip.os.active-ghost', { [ACTIVE_OS]: '${ghost.output}' }),
+                    baseOptions()
+                );
+                assert.match(report, /unresolved/i);
+                assert.ok(report.includes('${ghost.output}'), `실제로 실행될 참조를 놓쳤다:\n${report}`);
+            });
+
+            test('현재 플랫폼 branch 가 없으면 실패를 경고한다', () => {
+                // 런타임의 `getToolCommand` 가 던지는 설정이다.
+                const report = buildPreviewReport(
+                    zipWithTool('a.zip.os.missing', { [INACTIVE_OS]: '/tools/other-7z' }),
+                    baseOptions()
+                );
+                assert.match(report, /tool: \(none for this platform\)/);
+                assert.match(report, new RegExp(`no 'tool' entry for ${process.platform}`));
+                assert.doesNotMatch(report, /built-in engine/, 'tool 을 지정했는데 내장 엔진처럼 보이면 안 된다');
+            });
+        });
     });
 
     suite('symlink escape detection (M10 후속 회귀 가드)', () => {
@@ -636,6 +715,226 @@ suite('buildPreviewReport', () => {
             } finally {
                 fs.rmSync(base, { recursive: true, force: true });
             }
+        });
+    });
+
+    /**
+     * 전방(뒤에 선언된) 태스크 참조의 **키**까지 검증한다.
+     *
+     * 자동 추론된 의존성이 실행 순서를 뒤집으므로 전방 참조 자체는 정상이다.
+     * 그런데 그 관용이 head 단위라 키까지 덮어 버려서, 존재하지 않는 capture 를
+     * 가리키는 오타가 앞쪽에서는 무경고로 지나갔다 — 뒤쪽 producer 에 대해서는
+     * `findTypoRefs` 가 잡던 것과 비대칭이었다.
+     */
+    suite('전방 참조의 키 검증', () => {
+        /**
+         * **producer 도 `parallel: true` 여야 한다.** sequential 인 뒤쪽 태스크는
+         * 앞의 모든 태스크를 기다리는 암묵적 barrier 라, 앞의 consumer 가 그것을
+         * 참조하면 `consumer → producer → consumer` 사이클이 된다. 그러면
+         * 실행조차 불가능한 액션을 놓고 참조 해석을 검사하는 셈이다.
+         * 둘 다 parallel 이어야 실제로 돌아가는 전방 DAG 다.
+         */
+        function actionWithForwardRef(key: string, capture?: unknown): ActionItem {
+            return {
+                id: 'a.fwd',
+                title: 'forward',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        {
+                            id: 'consumer', type: 'shell', parallel: true,
+                            command: `use \${producer.${key}}`, passTheResultToNextTask: true
+                        },
+                        {
+                            id: 'producer', type: 'shell', parallel: true,
+                            command: 'make', passTheResultToNextTask: true,
+                            ...(capture ? { output: { capture } } : {})
+                        }
+                    ]
+                }
+            } as ActionItem;
+        }
+
+        test("task id 가 '__proto__' 여도 결과가 정상으로 흐른다", () => {
+            // 평범한 객체에 allResults['__proto__'] = sim 을 하면 own property 가
+            // 만들어지지 않는다. 그러면 런타임(null-prototype)과 Preview 가 서로
+            // 다른 답을 내놓는다 — Preview 는 "모두 해석됨" 인데 실행하면 리터럴.
+            const item: ActionItem = {
+                id: 'a.proto',
+                title: 'proto id',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: '__proto__', type: 'shell', command: 'make', passTheResultToNextTask: true },
+                        { id: 'use', type: 'shell', command: 'echo ${__proto__.output}', passTheResultToNextTask: true }
+                    ]
+                }
+            } as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /echo <shell:__proto__:stdout>/);
+            assert.doesNotMatch(report, /unresolved variables:/);
+        });
+
+        test('fixture 자체가 실행 가능한 DAG 다 (사이클이 아니다)', () => {
+            // 이 검사가 없으면 아래 테스트들이 "사이클이라 실행 불가" 인 액션을
+            // 놓고 참조 해석을 논하게 된다.
+            const report = buildPreviewReport(actionWithForwardRef('output'), baseOptions());
+            assert.doesNotMatch(report, /dependency cycle/);
+        });
+
+        test('전방 producer 가 내지 않는 capture 이름은 미해결로 보고한다', () => {
+            const report = buildPreviewReport(
+                actionWithForwardRef('safe', { name: 'version', regex: 'v(\\d+)' }),
+                baseOptions()
+            );
+            assert.match(report, /unresolved variables:.*\$\{producer\.safe\}/);
+        });
+
+        test('선언된 capture 이름은 그대로 관용한다', () => {
+            const report = buildPreviewReport(
+                actionWithForwardRef('version', { name: 'version', regex: 'v(\\d+)' }),
+                baseOptions()
+            );
+            assert.doesNotMatch(report, /unresolved variables:.*\$\{producer\.version\}/);
+        });
+
+        test('전방 producer 의 실제 결과 키(output)는 관용한다', () => {
+            const report = buildPreviewReport(actionWithForwardRef('output'), baseOptions());
+            assert.doesNotMatch(report, /unresolved variables:.*\$\{producer\.output\}/);
+        });
+
+        test('bare 전방 참조는 키 검증 대상이 아니다', () => {
+            const item: ActionItem = {
+                id: 'a.fwdbare',
+                title: 'forward bare',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'consumer', type: 'shell', parallel: true, command: 'use ${producer}', passTheResultToNextTask: true },
+                        { id: 'producer', type: 'shell', parallel: true, command: 'make', passTheResultToNextTask: true }
+                    ]
+                }
+            } as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.doesNotMatch(report, /unresolved variables:.*\$\{producer\}/);
+        });
+
+        test('점 뒤가 빈 참조는 관용하지 않는다', () => {
+            // 런타임은 `${producer.}` 를 bare 로 보지 않아 리터럴로 남긴다.
+            const report = buildPreviewReport(actionWithForwardRef(''), baseOptions());
+            assert.match(report, /unresolved variables:.*\$\{producer\.\}/);
+        });
+
+        test('키에 공백이 섞인 오타는 trim 으로 가려지지 않는다', () => {
+            // 런타임은 키를 다듬지 않으므로 `${producer. output}` 의 키는
+            // `" output"` 이고 어떤 결과 키와도 맞지 않는다.
+            const report = buildPreviewReport(actionWithForwardRef(' output'), baseOptions());
+            assert.match(report, /unresolved variables:/);
+        });
+
+        test('자기 자신을 가리키는 참조는 관용하지 않는다', () => {
+            // 아직 시뮬레이션되지 않았다는 이유로 forwardTaskIds 에 들어가지만,
+            // 런타임 컨텍스트에는 자기 자신이 없다.
+            const item: ActionItem = {
+                id: 'a.self',
+                title: 'self',
+                action: {
+                    description: 'x',
+                    tasks: [{ id: 'self', type: 'shell', command: 'echo ${self.output}', passTheResultToNextTask: true }]
+                }
+            } as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /unresolved variables:.*\$\{self\.output\}/);
+        });
+
+        test('bare 전방 참조도 output / outputDir 이 있을 때만 관용한다', () => {
+            // `zip` 은 archivePath 만 낸다 — 런타임의 bare 참조는 결과 객체를
+            // 문자열로 바꾸지 못해 리터럴로 남는다.
+            const item: ActionItem = {
+                id: 'a.barezip',
+                title: 'bare zip',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'consumer', type: 'shell', parallel: true, command: 'use ${z}', passTheResultToNextTask: true },
+                        { id: 'z', type: 'zip', parallel: true, source: '${workspaceFolder}/src', archive: '${workspaceFolder}/a.zip' }
+                    ]
+                }
+            } as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /unresolved variables:.*\$\{z\}/);
+        });
+
+        test('캡처 모드 shell 의 stderr 는 정상 참조다', () => {
+            // 런타임의 handleShell / handleCommand 는 { output, stderr } 를 낸다.
+            // 시뮬레이션에 stderr 가 없으면 멀쩡한 참조를 미해결로 보고한다.
+            const report = buildPreviewReport(actionWithForwardRef('stderr'), baseOptions());
+            assert.doesNotMatch(report, /unresolved variables:.*\$\{producer\.stderr\}/);
+        });
+
+        test('단일 선택 quickPick 의 values 는 런타임에 없다', () => {
+            const item: ActionItem = {
+                id: 'a.qp1',
+                title: 'single pick',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'pick', type: 'quickPick', items: ['a', 'b'] },
+                        { id: 'use', type: 'shell', command: 'echo ${pick.values}', passTheResultToNextTask: true }
+                    ]
+                }
+            } as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /unresolved variables:.*\$\{pick\.values\}/);
+        });
+
+        test('다중 선택 quickPick 의 values 는 정상 참조다', () => {
+            const item: ActionItem = {
+                id: 'a.qpN',
+                title: 'multi pick',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'pick', type: 'quickPick', items: ['a', 'b'], canPickMany: true },
+                        { id: 'use', type: 'shell', command: 'echo ${pick.values}', passTheResultToNextTask: true }
+                    ]
+                }
+            } as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.doesNotMatch(report, /unresolved variables:/);
+        });
+
+        test('문자열 output 이 없는 태스크의 capture 이름은 인정하지 않는다', () => {
+            // 런타임은 결과에 문자열 output 이 있을 때만 capture 를 돌린다.
+            const item: ActionItem = {
+                id: 'a.dlgcap',
+                title: 'dialog capture',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'pick', type: 'fileDialog', output: { capture: { name: 'ver', regex: 'v(\\d+)' } } },
+                        { id: 'use', type: 'shell', command: 'echo ${pick.ver}', passTheResultToNextTask: true }
+                    ]
+                }
+            } as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.match(report, /unresolved variables:.*\$\{pick\.ver\}/);
+        });
+
+        test('전방 dialog 태스크의 실제 키도 관용한다 (회귀 방지)', () => {
+            const item: ActionItem = {
+                id: 'a.fwddlg',
+                title: 'forward dialog',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'consumer', type: 'shell', parallel: true, command: 'use ${pick.path} ${pick.dir}', passTheResultToNextTask: true },
+                        { id: 'pick', type: 'fileDialog', parallel: true }
+                    ]
+                }
+            } as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.doesNotMatch(report, /unresolved variables:/);
         });
     });
 

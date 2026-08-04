@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
-import { buildSheetMap, getRowsByPath, SheetEntry, parseValue, coerceEditedCellValue, shouldOfferRecovery, RecoveryEntry, makeRecoveryStore, MinimalWorkspaceState, buildDraftSnapshot, DraftSnapshotInput } from '../jsonEditorUtils';
+import { buildSheetMap, getRowsByPath, SheetEntry, parseValue, coerceEditedCellValue, coerceEditedArrayItems, shouldOfferRecovery, RecoveryEntry, makeRecoveryStore, MinimalWorkspaceState, buildDraftSnapshot, DraftSnapshotInput, decideSaveResult, SaveResultInput, effectiveBaseline, resolveActiveDraftState, ActiveCellEdit } from '../jsonEditorUtils';
 import { wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY, getWebviewContent } from '../jsonEditor';
 
 function readSourceForRegex(filePath: string): string {
@@ -234,6 +234,208 @@ suite('JsonEditorUtils Test Suite', () => {
     });
 
     /**
+     * 저장 응답을 기다리는 동안의 dirty 기준.
+     *
+     * 이 규칙이 없으면 A→B 저장 후 **응답 전에 A 로 undo** 했을 때 webview 가
+     * 옛 baseline(A) 과 비교해 "변경 없음" 으로 판정한다. 그러면 dirty 도 안 켜지고
+     * recovery 스냅샷도 보내지 않는데, host 는 저장과 함께 recovery 를 이미
+     * 지웠다 — 패널을 닫는 순간 undo 결과를 되살릴 방법이 없다.
+     */
+    suite('effectiveBaseline', () => {
+        test('pending 이 없으면 saved baseline 을 쓴다', () => {
+            assert.strictEqual(effectiveBaseline(new Map(), '{"a":0}'), '{"a":0}');
+        });
+
+        test('pending 이 있으면 그 스냅샷이 기준이다', () => {
+            const pending = new Map([[1, '{"a":1}']]);
+            assert.strictEqual(effectiveBaseline(pending, '{"a":0}'), '{"a":1}');
+        });
+
+        test('저장 직후 옛 내용으로 undo 하면 dirty 로 판정된다', () => {
+            // 디스크로 가는 것은 {"a":1}. 화면은 undo 로 {"a":0} 이 됐다.
+            const pending = new Map([[1, '{"a":1}']]);
+            const baseline = effectiveBaseline(pending, '{"a":0}');
+            assert.notStrictEqual(
+                '{"a":0}', baseline,
+                'undo 결과가 clean 으로 판정되면 recovery 가 빈 채로 남는다'
+            );
+        });
+
+        test('여러 저장이 겹치면 가장 최근 요청이 기준이다', () => {
+            const pending = new Map([[1, '{"a":1}'], [2, '{"a":2}']]);
+            assert.strictEqual(effectiveBaseline(pending, '{"a":0}'), '{"a":2}');
+        });
+
+        test('boot 직전(baseline null)도 그대로 돌려준다', () => {
+            assert.strictEqual(effectiveBaseline(new Map(), null), null);
+        });
+    });
+
+    /**
+     * 저장 응답 처리의 두 경합.
+     *
+     * 1. host 는 파일을 바꿔 열 때 **패널을 재사용**한다(`currentPanel.reveal`
+     *    + 새 html). 저장은 파일을 쓴 뒤 recovery 엔트리를 지우느라 `await` 로
+     *    이벤트 루프를 놓아 주므로, 그 사이 다른 파일이 열리면 이전 파일의
+     *    응답이 **새 webview** 로 배달된다. 그 응답으로 baseline 을 옮기면
+     *    디스크에 쓰인 적 없는 새 파일의 편집이 clean 이 되어 닫는 순간 사라진다.
+     * 2. seq 를 못 찾으면 무엇이 저장됐는지 모른다. 그때 현재 data 를 baseline
+     *    으로 잡는 것은 1번과 똑같은 유실이다.
+     */
+    suite('decideSaveResult', () => {
+        function input(over: Partial<SaveResultInput> = {}): SaveResultInput {
+            return {
+                sessionId: 3,
+                message: { success: true, seq: 1, session: 3 },
+                pendingSnapshots: new Map([[1, '{"a":1}']]),
+                currentSnapshot: '{"a":1}',
+                lastSavedSnapshot: '{"a":0}',
+                ...over,
+            };
+        }
+
+        test('보낸 스냅샷을 baseline 으로 옮기고 clean 이 된다', () => {
+            const d = decideSaveResult(input());
+            assert.deepStrictEqual(d, { kind: 'apply', lastSavedSnapshot: '{"a":1}', dirty: false });
+        });
+
+        test('응답을 기다리는 사이의 편집은 dirty 로 남는다', () => {
+            // 디스크에 들어간 것은 {"a":1} 인데 화면은 이미 {"a":2} 다.
+            const d = decideSaveResult(input({ currentSnapshot: '{"a":2}' }));
+            assert.strictEqual(d.kind, 'apply');
+            assert.strictEqual((d as any).lastSavedSnapshot, '{"a":1}', 'baseline 은 보낸 것이어야 한다');
+            assert.strictEqual((d as any).dirty, true, '응답 후에도 미저장 편집이 남아 있다');
+        });
+
+        test('다른 세션의 응답은 무시한다 (패널 재사용 경합)', () => {
+            const d = decideSaveResult(input({
+                message: { success: true, seq: 1, session: 2 },   // 이전 파일의 세션
+                currentSnapshot: '{"new":"unsaved"}',
+                lastSavedSnapshot: '{"new":"disk"}',
+            }));
+            assert.deepStrictEqual(d, { kind: 'ignore' });
+        });
+
+        test('세션이 없는(옛 형식) 응답도 무시한다', () => {
+            const d = decideSaveResult(input({ message: { success: true, seq: 1 } }));
+            assert.deepStrictEqual(d, { kind: 'ignore' });
+        });
+
+        test('알 수 없는 seq 는 baseline 을 옮기지 않는다', () => {
+            const d = decideSaveResult(input({
+                message: { success: true, seq: 99, session: 3 },
+                currentSnapshot: '{"a":2}',
+                lastSavedSnapshot: '{"a":0}',
+            }));
+            assert.deepStrictEqual(d, { kind: 'keep', dirty: true });
+        });
+
+        test('알 수 없는 seq 는 현재 값이 옛 baseline 과 같아도 clean 이 아니다', () => {
+            // 사용자가 옛 baseline 으로 undo 해 두었더라도, 디스크에는 그 사이의
+            // **다른** pending 스냅샷이 들어가 있을 수 있다. 화면과 옛 baseline 이
+            // 같다는 사실은 디스크와 화면이 같다는 근거가 못 된다.
+            const d = decideSaveResult(input({
+                message: { success: true, seq: 99, session: 3 },
+                currentSnapshot: '{"a":0}',
+                lastSavedSnapshot: '{"a":0}',
+            }));
+            assert.deepStrictEqual(d, { kind: 'keep', dirty: true });
+        });
+
+        test('겹친 저장에서는 남아 있는 최신 저장이 dirty 기준이다', () => {
+            // seq1=B, seq2=C 가 pending 인 상태에서 화면을 B 로 되돌리고
+            // seq1 의 응답을 처리한다. B 와만 비교하면 clean 이 나오지만,
+            // 디스크에 최종적으로 남는 것은 C 다.
+            const d = decideSaveResult(input({
+                message: { success: true, seq: 1, session: 3 },
+                pendingSnapshots: new Map([[1, '{"a":"B"}'], [2, '{"a":"C"}']]),
+                currentSnapshot: '{"a":"B"}',
+                lastSavedSnapshot: '{"a":"A"}',
+            }));
+            assert.strictEqual(d.kind, 'apply');
+            assert.strictEqual((d as any).lastSavedSnapshot, '{"a":"B"}', 'baseline 은 응답한 저장의 것이다');
+            assert.strictEqual((d as any).dirty, true, '아직 C 가 남았으므로 clean 이 아니다');
+        });
+
+        test('마지막 저장의 응답이면 그 스냅샷과 비교한다', () => {
+            const d = decideSaveResult(input({
+                message: { success: true, seq: 2, session: 3 },
+                pendingSnapshots: new Map([[2, '{"a":"C"}']]),
+                currentSnapshot: '{"a":"C"}',
+                lastSavedSnapshot: '{"a":"A"}',
+            }));
+            assert.deepStrictEqual(d, { kind: 'apply', lastSavedSnapshot: '{"a":"C"}', dirty: false });
+        });
+
+        test('저장 실패는 baseline 을 옮기지 않고 현재 dirty 를 다시 알린다', () => {
+            const d = decideSaveResult(input({
+                message: { success: false, seq: 1, session: 3 },
+                currentSnapshot: '{"a":9}',
+                lastSavedSnapshot: '{"a":0}',
+            }));
+            assert.deepStrictEqual(d, { kind: 'keep', dirty: true });
+        });
+
+        test('저장 실패 시 내용이 baseline 과 같으면 clean 으로 알린다', () => {
+            const d = decideSaveResult(input({
+                message: { success: false, seq: 1, session: 3 },
+                currentSnapshot: '{"a":0}',
+                lastSavedSnapshot: '{"a":0}',
+            }));
+            assert.deepStrictEqual(d, { kind: 'keep', dirty: false });
+        });
+
+        test('boot 직전(baseline null)에도 알 수 없는 seq 는 dirty 로 남는다', () => {
+            const d = decideSaveResult(input({
+                message: { success: true, seq: 99, session: 3 },
+                lastSavedSnapshot: null,
+            }));
+            assert.deepStrictEqual(d, { kind: 'keep', dirty: true });
+        });
+    });
+
+    /**
+     * 배열 셀 편집의 round-trip 손실 회귀.
+     *
+     * 배열 편집기는 항목마다 text input 을 그리므로 값이 전부 string 으로
+     * 돌아온다. 그것을 그대로 모으던 시절에는 `[1, true, null]` 이 담긴 셀을
+     * **열었다 나가기만 해도** `["1","true","null"]` 이 되어 디스크에 기록됐다.
+     * scalar 셀은 이미 타입을 보존하고 있었으므로 배열만 뚫려 있었다.
+     */
+    suite('coerceEditedArrayItems', () => {
+        test('편집 없이 commit 해도 primitive 배열의 타입이 유지된다', () => {
+            const old = [1, true, null];
+            const raws = old.map(v => String(v));   // 렌더가 넣는 값 그대로
+            assert.deepStrictEqual(coerceEditedArrayItems(raws, old), [1, true, null]);
+        });
+
+        test('항목별로 옛 값의 타입을 본다 (혼합 배열)', () => {
+            const old = [1, 'abc', false];
+            assert.deepStrictEqual(
+                coerceEditedArrayItems(['2', '00123', 'true'], old),
+                [2, '00123', true]
+            );
+        });
+
+        test('문자열 항목은 숫자로 재해석되지 않는다', () => {
+            assert.deepStrictEqual(coerceEditedArrayItems(['007'], ['a']), ['007']);
+        });
+
+        test('옛 배열보다 길어진 항목은 parseValue 로 해석한다', () => {
+            // 대응하는 옛 값이 없으면 보존할 타입도 없다.
+            assert.deepStrictEqual(coerceEditedArrayItems(['1', '2'], [0]), [1, 2]);
+        });
+
+        test('항목이 줄어들면 남은 것만 돌려준다', () => {
+            assert.deepStrictEqual(coerceEditedArrayItems(['1'], [0, 0, 0]), [1]);
+        });
+
+        test('빈 배열은 빈 배열이다', () => {
+            assert.deepStrictEqual(coerceEditedArrayItems([], []), []);
+        });
+    });
+
+    /**
      * Regression coverage for three draft-recovery bugs that the source-regex
      * mirror guards could not catch:
      *
@@ -394,7 +596,7 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.strictEqual(result.kind, 'snapshot');
         });
 
-        test('array item draft applies raw string at the given index only', () => {
+        test('array draft applies every input in the cell', () => {
             const data = { items: [{ tags: ['a', 'b', 'c'] }] };
             const result = buildDraftSnapshot(input({
                 data,
@@ -402,14 +604,90 @@ suite('JsonEditorUtils Test Suite', () => {
                 rowIdx: 0,
                 col: 'tags',
                 rawInputValue: 'B!',
-                arrIdx: 1
+                arrValues: ['a', 'B!', 'c']
             }));
             assert.strictEqual(result.kind, 'snapshot');
             const snap = (result as { kind: 'snapshot'; data: any }).data;
             assert.deepStrictEqual(snap.items[0].tags, ['a', 'B!', 'c']);
         });
 
-        test('invalid arrIdx returns skip', () => {
+        /**
+         * 같은 배열 셀에 **미커밋 입력이 둘 이상**일 때의 회귀.
+         *
+         * 예전에는 이벤트가 난 항목 하나만 draft 에 반영해서, 첫 항목을 고친 뒤
+         * 둘째를 건드리면 첫 입력이 draft 에서 사라졌다. 게다가 둘째를 원래
+         * 값으로 되돌리면 draft 가 baseline 과 같아져 `clean` 이 나오고 dirty 와
+         * recovery 가 함께 풀렸다 — 첫 입력을 되살릴 방법이 없어진다.
+         */
+        test('배열 셀의 여러 미커밋 입력이 한 draft 에 함께 담긴다', () => {
+            const data = { items: [{ ports: [1, 2] }] };
+            const result = buildDraftSnapshot(input({
+                data,
+                sheetPath: ['items'],
+                rowIdx: 0,
+                col: 'ports',
+                rawInputValue: '2',
+                arrValues: ['10', '2'],   // 첫 항목은 10 으로 고친 상태
+                lastSavedSnapshot: JSON.stringify(data),
+            }));
+            assert.strictEqual(
+                result.kind, 'snapshot',
+                '둘째 항목을 원래 값으로 되돌렸다고 clean 이 되면 첫 입력이 사라진다'
+            );
+            const snap = (result as { kind: 'snapshot'; data: any }).data;
+            assert.deepStrictEqual(snap.items[0].ports, [10, 2]);
+        });
+
+        test('array draft preserves item types (number stays number)', () => {
+            const data = { items: [{ ports: [1, 2, 3] }] };
+            const result = buildDraftSnapshot(input({
+                data,
+                sheetPath: ['items'],
+                rowIdx: 0,
+                col: 'ports',
+                rawInputValue: '42',
+                arrValues: ['1', '42', '3']
+            }));
+            assert.strictEqual(result.kind, 'snapshot');
+            const snap = (result as { kind: 'snapshot'; data: any }).data;
+            assert.deepStrictEqual(snap.items[0].ports, [1, 42, 3]);
+            assert.strictEqual(typeof snap.items[0].ports[1], 'number');
+        });
+
+        test('array draft keeps a string item a string', () => {
+            // 문자열 배열에서는 "00123" 이 숫자로 재해석되면 안 된다 — scalar
+            // 셀의 string 보존 규칙과 같다.
+            const data = { items: [{ codes: ['a', 'b'] }] };
+            const result = buildDraftSnapshot(input({
+                data,
+                sheetPath: ['items'],
+                rowIdx: 0,
+                col: 'codes',
+                rawInputValue: '00123',
+                arrValues: ['00123', 'b']
+            }));
+            assert.strictEqual(result.kind, 'snapshot');
+            const snap = (result as { kind: 'snapshot'; data: any }).data;
+            assert.deepStrictEqual(snap.items[0].codes, ['00123', 'b']);
+        });
+
+        test('항목이 추가된 배열 draft 도 그대로 반영한다', () => {
+            // "+" 로 항목을 늘린 직후의 미커밋 상태.
+            const data = { items: [{ tags: ['a'] }] };
+            const result = buildDraftSnapshot(input({
+                data,
+                sheetPath: ['items'],
+                rowIdx: 0,
+                col: 'tags',
+                rawInputValue: 'b',
+                arrValues: ['a', 'b']
+            }));
+            assert.strictEqual(result.kind, 'snapshot');
+            const snap = (result as { kind: 'snapshot'; data: any }).data;
+            assert.deepStrictEqual(snap.items[0].tags, ['a', 'b']);
+        });
+
+        test('빈 arrValues 는 skip', () => {
             const data = { items: [{ tags: ['a'] }] };
             const result = buildDraftSnapshot(input({
                 data,
@@ -417,12 +695,12 @@ suite('JsonEditorUtils Test Suite', () => {
                 rowIdx: 0,
                 col: 'tags',
                 rawInputValue: 'X',
-                arrIdx: 5
+                arrValues: []
             }));
             assert.strictEqual(result.kind, 'skip');
         });
 
-        test('arrIdx pointing at a non-array column returns skip', () => {
+        test('arrValues pointing at a non-array column returns skip', () => {
             const data = { items: [{ name: 'foo' }] };
             const result = buildDraftSnapshot(input({
                 data,
@@ -430,7 +708,7 @@ suite('JsonEditorUtils Test Suite', () => {
                 rowIdx: 0,
                 col: 'name',
                 rawInputValue: 'X',
-                arrIdx: 0
+                arrValues: ['X']
             }));
             assert.strictEqual(result.kind, 'skip');
         });
@@ -517,6 +795,202 @@ suite('JsonEditorUtils Test Suite', () => {
         });
     });
 
+    /**
+     * draft 규칙과 commit 규칙은 **같아야 한다**.
+     *
+     * 둘이 갈라지면 값을 건드리지 않은 셀에서도 draft ≠ 커밋 데이터가 되어
+     * (1) 저장 뒤 dirty 가 풀리지 않고 — 이후 blur 의 commitCell 은 "변경 없음"
+     * 으로 보아 dirty 를 다시 계산하지 않는다 — (2) 그 차이가 recovery 스냅샷에
+     * 굳어, 복구를 받아 저장하면 디스크에 기록된다. 실제로 `null` 셀에서
+     * commitCell 의 empty 가드가 draft 쪽에만 빠져 있었다.
+     *
+     * commitCell 의 규칙(jsonEditor.ts)을 여기 한 벌로 옮겨 적고, 조합마다
+     * buildDraftSnapshot 의 결과 셀과 대조한다.
+     */
+    suite('draft 규칙 ≡ commit 규칙 (scalar 셀)', () => {
+        /** commitCell 의 scalar 분기와 같은 계산. 값이 바뀌지 않으면 undefined. */
+        function commitCellValue(oldVal: unknown, raw: string): { value: unknown } | undefined {
+            const newVal = coerceEditedCellValue(raw, oldVal);
+            const oldEmpty = oldVal === undefined || oldVal === null || oldVal === '';
+            const newEmpty = newVal === undefined || newVal === null || newVal === '';
+            if (oldEmpty && newEmpty) { return undefined; }
+            if (oldVal === newVal) { return undefined; }
+            return { value: newVal };
+        }
+
+        const oldValues: unknown[] = [null, undefined, '', 'x', 0, false, 7];
+        const raws = ['', 'x', 'null', '0', 'false', '007'];
+
+        for (const oldVal of oldValues) {
+            for (const raw of raws) {
+                test(`old=${JSON.stringify(oldVal)} raw=${JSON.stringify(raw)}`, () => {
+                    const row: Record<string, unknown> = oldVal === undefined ? {} : { c: oldVal };
+                    const data = { items: [row] };
+                    const result = buildDraftSnapshot({
+                        data,
+                        sheetPath: ['items'],
+                        rowIdx: 0,
+                        col: 'c',
+                        rawInputValue: raw,
+                        lastSavedSnapshot: null
+                    });
+                    assert.strictEqual(result.kind, 'snapshot');
+                    const draftRow = (result as { kind: 'snapshot'; data: any }).data.items[0];
+
+                    const committed = commitCellValue(oldVal, raw);
+                    if (committed === undefined) {
+                        assert.deepStrictEqual(
+                            draftRow, row,
+                            'commit 이 "변경 없음" 으로 보는 입력인데 draft 는 셀을 바꿨다 — ' +
+                            'dirty 가 풀리지 않고 그 차이가 복구본에 굳는다'
+                        );
+                    } else {
+                        assert.deepStrictEqual(
+                            draftRow.c, committed.value,
+                            'draft 가 commit 과 다른 값을 만들었다 — 복구 후 저장에서 디스크가 달라진다'
+                        );
+                    }
+                });
+            }
+        }
+    });
+
+    /**
+     * 저장 응답 / baseline 교체 시점의 판정 기준.
+     *
+     * 편집 중인 셀의 입력은 아직 `data` 에 없다. 그래서 커밋된 `data` 로
+     * 판정하면 두 가지가 동시에 깨졌다 — clean 으로 확정되어 host 가 recovery
+     * 를 비우거나(입력 유실), dirty 로 남기더라도 recovery 에 **옛 커밋
+     * 데이터**를 써서 keystroke 마다 보낸 draft 를 덮었다. 반대로 "활성 셀이
+     * 있으면 무조건 dirty" 는 값을 바꾸지 않고 클릭만 해도 영원히 dirty 로
+     * 남는 문제가 있었다.
+     */
+    suite('resolveActiveDraftState', () => {
+        const data = { items: [{ qty: 2, tags: [1, 'a'], obj: { k: 1 } }] };
+        const base: ActiveCellEdit = {
+            sheetPath: ['items'],
+            rowIdx: 0,
+            col: 'qty',
+            rawInputValue: '9',
+            isJsonEdit: false
+        };
+
+        test('활성 셀이 없으면 커밋된 데이터를 그대로 쓴다', () => {
+            const state = resolveActiveDraftState(data, null);
+            assert.strictEqual(state.valid, true);
+            assert.strictEqual(state.data, data);
+            assert.strictEqual(state.snapshot, JSON.stringify(data));
+        });
+
+        test('활성 셀의 입력을 반영한 스냅샷과 데이터를 함께 돌려준다', () => {
+            const state = resolveActiveDraftState(data, base);
+            assert.strictEqual(state.valid, true);
+            assert.deepStrictEqual((state.data as any).items[0].qty, 9, '숫자 셀은 숫자로 남아야 한다');
+            assert.strictEqual(state.snapshot, JSON.stringify(state.data), '판정과 저장이 같은 것을 봐야 한다');
+            assert.strictEqual((data as any).items[0].qty, 2, '원본 data 를 건드리면 안 된다');
+        });
+
+        test('배열 셀은 모든 항목 input 을 함께 반영한다', () => {
+            const state = resolveActiveDraftState(data, {
+                ...base, col: 'tags', rawInputValue: '10', arrValues: ['10', 'x']
+            });
+            assert.deepStrictEqual((state.data as any).items[0].tags, [10, 'x']);
+        });
+
+        test('값을 바꾸지 않은 활성 셀은 커밋 스냅샷과 같아 clean 판정이 가능하다', () => {
+            // 이 등식이 깨지면 셀을 클릭만 해도 저장 후 dirty 가 남는다.
+            const state = resolveActiveDraftState(data, { ...base, rawInputValue: '2' });
+            assert.strictEqual(state.snapshot, JSON.stringify(data));
+        });
+
+        test('draft 로 표현할 수 없으면 valid=false 이고 커밋 데이터를 돌려준다', () => {
+            // mid-edit invalid JSON: 비교로는 알 수 없으니 호출부가 무조건
+            // dirty 로 둬야 한다. 그래도 recovery 에는 (유일하게 유효한)
+            // 커밋 데이터를 남긴다.
+            const state = resolveActiveDraftState(data, {
+                ...base, col: 'obj', rawInputValue: '{ "k": ', isJsonEdit: true
+            });
+            assert.strictEqual(state.valid, false);
+            assert.strictEqual(state.data, data);
+            assert.strictEqual(state.snapshot, JSON.stringify(data));
+        });
+
+        test('json-edit 의 valid 입력은 draft 로 살린다', () => {
+            const state = resolveActiveDraftState(data, {
+                ...base, col: 'obj', rawInputValue: '{"k":2}', isJsonEdit: true
+            });
+            assert.strictEqual(state.valid, true);
+            assert.deepStrictEqual((state.data as any).items[0].obj, { k: 2 });
+        });
+
+        test('구조가 어긋난 활성 셀(삭제된 행 등)은 valid=false 로 떨어진다', () => {
+            const state = resolveActiveDraftState(data, { ...base, rowIdx: 5 });
+            assert.strictEqual(state.valid, false, '없는 행에 쓰지 말고 커밋 데이터로 물러나야 한다');
+            assert.strictEqual(state.data, data);
+        });
+
+        test('배열이 아닌 셀에 arrValues 가 오면 valid=false', () => {
+            // 렌더와 데이터가 어긋난 상태(변환 직후 등). 억지로 쓰면 배열이
+            // 아니었던 셀이 배열로 바뀐 채 복구본에 남는다.
+            const state = resolveActiveDraftState(data, { ...base, col: 'qty', arrValues: ['1'] });
+            assert.strictEqual(state.valid, false);
+            assert.strictEqual(state.data, data);
+        });
+
+        test('빈 arrValues 는 valid=false (수집 실패로 본다)', () => {
+            const state = resolveActiveDraftState(data, { ...base, col: 'tags', arrValues: [] });
+            assert.strictEqual(state.valid, false);
+        });
+
+        test('값이 비어 있는 셀을 열어 두기만 하면 커밋 스냅샷과 같다', () => {
+            const nullData = { items: [{ qty: null }] };
+            const state = resolveActiveDraftState(nullData, { ...base, rawInputValue: '' });
+            assert.strictEqual(state.snapshot, JSON.stringify(nullData));
+            assert.deepStrictEqual(state.data, { items: [{ qty: null }] });
+        });
+
+        /**
+         * `recoveryData` 는 **host 에 실제로 보낼 것**이라 `data` 와 다르다.
+         *
+         * draft 를 만들 수 없을 때 `data`(=커밋된 것)를 보내면, 직전 keystroke 가
+         * 남긴 valid draft 가 host 의 recovery 에서 옛 내용으로 덮인다.
+         */
+        suite('recoveryData', () => {
+            test('활성 셀이 없으면 커밋된 data 를 그대로 쓴다', () => {
+                assert.strictEqual(resolveActiveDraftState(data, null).recoveryData, data);
+            });
+
+            test('valid draft 는 그 draft 자신이다', () => {
+                const state = resolveActiveDraftState(data, base);
+                assert.strictEqual(state.recoveryData, state.data);
+            });
+
+            test('표현할 수 없으면 마지막 valid draft 를 쓴다', () => {
+                const lastValid = { items: [{ qty: 2, tags: [1, 'a'], obj: { k: 99 } }] };
+                const state = resolveActiveDraftState(
+                    data,
+                    { ...base, col: 'obj', rawInputValue: '{ "k": ', isJsonEdit: true },
+                    lastValid
+                );
+                assert.strictEqual(state.valid, false);
+                assert.strictEqual(
+                    state.recoveryData, lastValid,
+                    '커밋된 data 를 보내면 직전 valid draft 가 덮인다'
+                );
+                assert.strictEqual(state.data, data, 'data 는 판정에 쓴 커밋 상태 그대로다');
+            });
+
+            test('마지막 valid draft 도 없으면 undefined — 호출부는 아무것도 보내지 않는다', () => {
+                const state = resolveActiveDraftState(
+                    data,
+                    { ...base, col: 'obj', rawInputValue: '{ "k": ', isJsonEdit: true }
+                );
+                assert.strictEqual(state.valid, false);
+                assert.strictEqual(state.recoveryData, undefined);
+            });
+        });
+    });
+
     suite('shouldOfferRecovery', () => {
         const baseEntry: RecoveryEntry = {
             data: { foo: 'bar' },
@@ -599,12 +1073,161 @@ suite('JsonEditorUtils Test Suite', () => {
         const mirrorSource = readSourceForRegex(path.join(srcDir, 'jsonEditorUtils.ts'));
 
         test('mirror header references every synchronization target by name', () => {
-            for (const name of ['buildSheetMap', 'getActiveRows', 'parseValue', 'commitCell', 'sendDraftSnapshot']) {
+            for (const name of ['buildSheetMap', 'getActiveRows', 'parseValue', 'commitCell', 'sendDraftSnapshot', 'syncEditingArrayCellToData', 'decideSaveResult', 'readActiveCellEdit', 'activeDraftState']) {
                 assert.ok(
                     mirrorSource.includes(name),
                     `mirror header must mention "${name}" so drift is visible`
                 );
             }
+        });
+
+        test('배열 항목을 수집하는 세 자리가 모두 타입 보존을 거친다', () => {
+            // commitCell / syncEditingArrayCellToData / buildDraftSnapshot 이
+            // 각각 input.value 를 모은다. 한 곳만 놓쳐도 배열이 문자열로 굳는
+            // 경로가 되살아나므로, "raw 를 그대로 push 하는" 형태가 남아 있으면
+            // 실패시킨다.
+            assert.ok(
+                /function\s+coerceEditedArrayItems\s*\(\s*raws\s*,\s*oldArray\s*\)/.test(editorSource),
+                'webview 는 coerceEditedArrayItems(raws, oldArray) 를 정의해야 한다'
+            );
+            const collectSites = editorSource.match(/coerceEditedArrayItems\(/g) || [];
+            assert.ok(
+                collectSites.length >= 3,
+                `배열 수집 지점이 타입 보존을 거치지 않는다 (호출 ${collectSites.length}회, 정의 1 + 사용 2 이상 기대)`
+            );
+            assert.ok(
+                !/newArr\.push\(input\.value\)/.test(editorSource),
+                'input.value 를 배열에 그대로 push 하는 경로가 남아 있다'
+            );
+            assert.ok(
+                /row\[col\]\s*=\s*coerceEditedArrayItems\(arrValues,\s*arr\)/.test(editorSource),
+                'webview buildDraftSnapshot 은 셀의 모든 input 을 타입 보존해 한 번에 반영해야 한다'
+            );
+        });
+
+        /**
+         * 저장 응답 경합 회귀 가드.
+         *
+         * `saveResult` 가 **응답 시점의** data 를 saved baseline 으로 잡으면,
+         * host 가 파일을 쓰고 recovery 를 비우는 사이의 편집이 "저장됨"으로
+         * 표시된다 (디스크=A, 화면=B, dirty=false → 닫으면 B 소실). baseline 은
+         * save 를 보낸 시점의 스냅샷이어야 하고, 그것을 seq 로 짝지어 둔다.
+         */
+        test('webview 는 저장 요청 스냅샷을 seq 로 기억했다가 baseline 으로 쓴다', () => {
+            assert.ok(
+                /vscode\.postMessage\(\{\s*command:\s*'save',\s*data:\s*data,\s*seq:\s*seq\s*\}\)/.test(editorSource),
+                'save 메시지에 seq 가 실려야 host 가 되돌려 줄 수 있다'
+            );
+            assert.ok(
+                /pendingSaveSnapshots\.set\(seq,\s*snapshotData\(\)\)/.test(editorSource),
+                '보낸 시점의 스냅샷을 seq 로 기억해야 한다'
+            );
+            assert.ok(
+                /decideSaveResult\(\{[\s\S]{0,400}?pendingSnapshots:\s*pendingSaveSnapshots/.test(editorSource),
+                'saveResult 는 기억해 둔 스냅샷 맵을 판정에 넘겨야 한다'
+            );
+            // 응답 처리에서 dirty 를 다시 계산했으면 그 결과를 **반드시** host 로
+            // 보내야 한다. setModified 는 값이 안 바뀌면 아무것도 보내지 않으므로
+            // (저장 직후 host 는 이미 clean 이다) 여기서는 강제 동기화를 쓴다.
+            // dirty 는 **ack 한 메시지에** 실어 원자적으로 넘긴다. 따로 보내면
+            // 아직 ack 대기 중이라는 이유로 버려지고, ack 는 복원하지 않아
+            // 정상 저장인데도 host 가 dirty 로 남는다.
+            assert.ok(
+                /command: 'saveAck', seq: msg\.seq, dirty: ackDirty/.test(editorSource),
+                'saveAck 가 최종 dirty 를 함께 실어야 한다'
+            );
+            // 판정 기준은 **DOM 입력을 반영한 draft** 다. "활성 셀이 있으면
+            // 무조건 dirty" 로 때우면, 값을 바꾸지 않고 셀을 클릭만 해도 저장 뒤
+            // 영원히 dirty 로 남는다 (그 뒤 blur 는 값이 그대로면 commitCell 의
+            // changed 분기를 타지 않아 dirty 를 다시 계산하지 않는다).
+            assert.ok(
+                /currentSnapshot:\s*draft\.snapshot/.test(editorSource),
+                'saveResult 는 커밋된 data 가 아니라 활성 셀 draft 로 dirty 를 판정해야 한다'
+            );
+            assert.ok(
+                /const ackDirty = decision\.dirty \|\| !draft\.valid/.test(editorSource),
+                'draft 로 표현할 수 없는 미커밋 입력(mid-edit invalid JSON)만 무조건 dirty 여야 한다'
+            );
+            // 다시 채워 넣는 recovery 도 같은 draft 여야 한다 — 커밋된 data 를
+            // 보내면 응답을 기다리는 동안 친 입력이 그대로 덮인다. 무엇을 보내는지
+            // (draft.data 가 아니라 recoveryData) 는 아래 전용 테스트가 본다.
+            assert.ok(
+                /if\s*\(ackDirty && draft\.recoveryData !== undefined\)\s*\{/.test(editorSource),
+                'saveResult 는 dirty 이고 보낼 draft 가 있을 때 recovery 를 되돌려 채워야 한다'
+            );
+            // 남의 세션 응답으로 pending 을 지우면, 정작 자기 응답이 왔을 때
+            // 스냅샷을 못 찾아 "알 수 없는 seq" 경로로 떨어진다.
+            assert.ok(
+                /decision\.kind\s*!==\s*'ignore'[\s\S]{0,120}?pendingSaveSnapshots\.delete/.test(editorSource),
+                "ignore 판정에서는 pendingSaveSnapshots 를 건드리지 않아야 한다"
+            );
+        });
+
+        test('webview 는 들어오는 메시지의 세션을 확인한다', () => {
+            // host 가 파일을 바꿔 열면 이전 파일의 지연된 loadData 가 이 webview 로
+            // 올 수 있다 — 화면이 남의 데이터로 바뀐 뒤 이어서 저장하면 이 파일에
+            // 남의 데이터가 쓰인다.
+            const listener = editorSource.match(/window\.addEventListener\('message',[\s\S]{0,900}?msg\.command === 'loadData'/);
+            assert.ok(listener, 'could not locate the webview message listener');
+            assert.ok(
+                /msg\.session !== SESSION_ID/.test(listener![0]),
+                'webview 는 loadData 를 처리하기 전에 세션을 확인해야 한다'
+            );
+        });
+
+        test('webview 의 effectiveBaseline 이 pending 스냅샷을 우선한다', () => {
+            assert.ok(
+                /function effectiveBaselineOf\(pending, fallback\)/.test(editorSource),
+                'webview 가 effectiveBaselineOf 를 정의하지 않는다'
+            );
+            assert.ok(
+                /return effectiveBaselineOf\(pendingSaveSnapshots, lastSavedSnapshot\)/.test(editorSource),
+                'effectiveBaseline 은 pending 스냅샷을 우선하고 없을 때만 lastSavedSnapshot 으로 떨어져야 한다'
+            );
+        });
+
+        test('baseline 을 갈아치우는 두 경로가 모두 pending 저장을 무효화한다', () => {
+            // 디스크가 우리가 저장한 것이 아니게 되는 경로(외부 변경 Keep,
+            // baseline-unknown)에서 pending 을 남겨 두면, 뒤늦게 도착한
+            // saveResult 가 baseline 을 그 저장 내용으로 되돌려 화면과 디스크가
+            // 다른데도 clean 이 될 수 있다.
+            for (const command of ['setSavedBaseline', 'markBaselineUnknown']) {
+                const branch = editorSource.match(
+                    new RegExp("msg\\.command === '" + command + "'\\)[\\s\\S]{0,1400}?\\n        \\}")
+                );
+                assert.ok(branch, `could not locate the webview ${command} branch`);
+                assert.ok(
+                    /pendingSaveSnapshots\.clear\(\)/.test(branch![0]),
+                    `${command} 는 진행 중이던 저장 기록을 무효화해야 한다`
+                );
+            }
+        });
+
+        test('webview 의 decideSaveResult 는 mirror 와 같은 규칙을 쓴다', () => {
+            const body = editorSource.match(/function decideSaveResult\(args\) \{([\s\S]*?)\n    \}/);
+            assert.ok(body, 'webview 가 decideSaveResult 를 정의하지 않는다');
+            assert.ok(
+                /args\.message\.session\s*!==\s*args\.sessionId[\s\S]{0,60}?'ignore'/.test(body![1]),
+                '세션 불일치를 먼저 걸러야 한다'
+            );
+            assert.ok(
+                /saved\s*===\s*undefined[\s\S]{0,80}?'keep'[\s\S]{0,40}?dirty:\s*true/.test(body![1]),
+                '알 수 없는 seq 는 무조건 dirty 여야 한다 (clean 판정 금지)'
+            );
+        });
+
+        test('host 는 저장 직후 dirty 를 스스로 내리지 않는다', () => {
+            // webview 는 이어진 편집·undo 를 host 에 알리지 않는다 (setModified 는
+            // 값이 바뀔 때만 보내고 snapshot 은 dirty 를 올리지 않는다). host 가
+            // 먼저 clean 이 되면 그 창에서 다른 파일을 열 때 확인창 없이 편집이
+            // 사라진다. 진짜 상태는 saveResult 를 받은 webview 가 돌려준다.
+            // 분기의 끝을 성공 응답 전송으로 잡는다.
+            const saveBranch = editorSource.match(/case 'save':[\s\S]*?settle\(postSaveResult\(true/);
+            assert.ok(saveBranch, "could not locate the host's case 'save' branch");
+            assert.ok(
+                !/currentIsDirty\s*=\s*false/.test(saveBranch![0]),
+                "case 'save' 가 host dirty 를 스스로 내리면 안 된다 — webview 의 saveResult 응답이 유일한 근거다"
+            );
         });
 
         test('webview source still defines parseValue and the string-preservation branch', () => {
@@ -776,7 +1399,7 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.ok(cancelMatch, 'could not locate cancelCell body');
             const body = cancelMatch![1];
             assert.ok(
-                /const\s+dirtyNow\s*=\s*snap\s*!==\s*lastSavedSnapshot/.test(body),
+                /const\s+dirtyNow\s*=\s*snap\s*!==\s*effectiveBaseline\(\)/.test(body),
                 'cancelCell must compute dirtyNow from snapshotData() vs lastSavedSnapshot to mirror pushHistory'
             );
             assert.ok(
@@ -865,12 +1488,12 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.ok(keepBranch, 'could not locate Keep branch body');
             const body = keepBranch![1];
             assert.ok(
-                /\}\s*catch\s*\([^)]*\)\s*\{[\s\S]*?postMessage\(\s*\{\s*command:\s*'markBaselineUnknown'\s*\}/.test(body),
+                /\}\s*catch\s*\([^)]*\)\s*\{[\s\S]*?postToWebview\(\s*\{\s*command:\s*'markBaselineUnknown'\s*\}/.test(body),
                 'Keep branch catch (disk read/parse fail) must postMessage `markBaselineUnknown` (not data:{}) so webview uses the empty-string sentinel and cannot collide with real `{}` user data'
             );
             // 옛 `data: {}` 패턴이 부활하지 않았는지 negative guard.
             assert.ok(
-                !/postMessage\(\s*\{\s*\n?\s*command:\s*'setSavedBaseline'\s*,\s*\n?\s*data:\s*\{\s*\}\s*\n?\s*\}/.test(body),
+                !/postToWebview\(\s*\{\s*\n?\s*command:\s*'setSavedBaseline'\s*,\s*\n?\s*data:\s*\{\s*\}\s*\n?\s*\}/.test(body),
                 'Keep branch must not send `setSavedBaseline` with empty-object data — that sentinel collides with users editing `{}`. Use markBaselineUnknown instead.'
             );
         });
@@ -916,9 +1539,10 @@ suite('JsonEditorUtils Test Suite', () => {
                 !/savedDataForWebview\s*=\s*\{\s*\}/.test(body),
                 'open path must not assign empty-object to savedDataForWebview — that sentinel collides with users editing `{}`. Use baselineUnknownForWebview flag instead.'
             );
-            // getWebviewContent 호출에 새 인수 전달 확인.
+            // getWebviewContent 호출에 새 인수 전달 확인. (뒤에 sessionId 가
+            // 더 붙으므로 인수 목록의 마지막이라고 못 박지 않는다.)
             assert.ok(
-                /getWebviewContent\([\s\S]*?baselineUnknownForWebview\s*\)/.test(body),
+                /getWebviewContent\([\s\S]*?baselineUnknownForWebview\s*[,)]/.test(body),
                 'getWebviewContent call must pass baselineUnknownForWebview as the new parameter'
             );
         });
@@ -955,7 +1579,7 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.ok(watcher, 'could not locate watcher handleExternalChange');
             // catch 블록에서 baselineMtimeMs 갱신 + markBaselineUnknown postMessage.
             assert.ok(
-                /catch\s*\([^)]*\)\s*\{[\s\S]*?baselineMtimeMs\s*=\s*changedStat\.mtimeMs[\s\S]*?postMessage\(\s*\{\s*command:\s*'markBaselineUnknown'\s*\}/.test(watcher![0]),
+                /catch\s*\([^)]*\)\s*\{[\s\S]*?baselineMtimeMs\s*=\s*changedStat\.mtimeMs[\s\S]*?postToWebview\(\s*\{\s*command:\s*'markBaselineUnknown'\s*\}/.test(watcher![0]),
                 'auto-reload catch must update baselineMtimeMs and post markBaselineUnknown so the user\'s next edit lands in a recovery entry stamped with the new mtime'
             );
         });
@@ -979,7 +1603,7 @@ suite('JsonEditorUtils Test Suite', () => {
                 'Keep branch must read disk content again to refresh the saved baseline'
             );
             assert.ok(
-                /postMessage\(\s*\{\s*\n?\s*command:\s*'setSavedBaseline'/.test(body),
+                /postToWebview\(\s*\{\s*\n?\s*command:\s*'setSavedBaseline'/.test(body),
                 'Keep branch must postMessage setSavedBaseline so webview updates lastSavedSnapshot to the new disk content'
             );
         });
@@ -996,17 +1620,25 @@ suite('JsonEditorUtils Test Suite', () => {
                 /lastSavedSnapshot\s*=\s*JSON\.stringify\(\s*msg\.data\s*\)/.test(body),
                 'setSavedBaseline handler must set lastSavedSnapshot from the new disk data'
             );
+            // 비교 기준은 **활성 셀의 미커밋 입력까지 반영한 draft** 다.
+            // 커밋된 snapshotData() 로만 보면, 그것이 새 디스크 내용과 우연히
+            // 같을 때 clean 이 되어 화면에 입력이 남아 있는데도 host 가 recovery
+            // 를 지운다.
             assert.ok(
-                /const\s+dirtyNow\s*=\s*snapshotData\(\)\s*!==\s*lastSavedSnapshot/.test(body),
-                'setSavedBaseline handler must recompute dirtyNow against the new baseline'
+                /const\s+draft\s*=\s*activeDraftState\(\)/.test(body),
+                'setSavedBaseline handler must build the draft from the active cell before judging dirty'
+            );
+            assert.ok(
+                /const\s+dirtyNow\s*=\s*!draft\.valid\s*\|\|\s*draft\.snapshot\s*!==\s*lastSavedSnapshot/.test(body),
+                'setSavedBaseline handler must recompute dirtyNow from the draft against the new baseline'
             );
             assert.ok(
                 /setModified\(\s*dirtyNow\s*\)/.test(body),
                 'setSavedBaseline handler must call setModified(dirtyNow) (mirrors pushHistory policy)'
             );
             assert.ok(
-                /if\s*\(\s*dirtyNow\s*\)\s*\{[\s\S]*?postMessage\(\s*\{\s*command:\s*'snapshot'/.test(body),
-                'setSavedBaseline handler must send snapshot only inside the dirty branch'
+                /if\s*\(dirtyNow && draft\.recoveryData !== undefined\)\s*\{[\s\S]*?postMessage\(\s*\{\s*command:\s*'snapshot',\s*data:\s*draft\.recoveryData/.test(body),
+                'setSavedBaseline handler must send recoveryData (not the committed data) and only inside the dirty branch'
             );
         });
 
@@ -1079,23 +1711,27 @@ suite('JsonEditorUtils Test Suite', () => {
             type Site = { name: string; window: string | undefined };
             const sites: Site[] = [
                 {
+                    // 앞쪽에는 pending-save 가드의 early `break;` 가 있으므로
+                    // 실제 상태 전이가 시작되는 지점부터 창을 잡는다.
                     name: "case 'modified' (modified=false branch)",
-                    window: editorSource.match(/case 'modified':[\s\S]{0,800}?break;/)?.[0],
+                    window: editorSource.match(/currentIsDirty = nextDirty;[\s\S]{0,900}?break;/)?.[0],
                 },
                 {
+                    // 성공 분기의 끝을 `postSaveResult(true` 로 잡는다. 글자 수
+                    // 상한으로 자르면 주석이 늘 때마다 앵커가 조용히 깨진다.
                     name: "case 'save' success branch",
-                    window: editorSource.match(/case 'save':[\s\S]{0,1500}?break;/)?.[0],
+                    window: editorSource.match(/case 'save':[\s\S]*?postSaveResult\(true/)?.[0],
                 },
                 {
                     // case 'reload' 의 첫 break; 는 confirmDiscardIfDirty 거부 시
                     // early-return 이라 성공 분기까지 안 닿는다. reloadedStat
                     // 변수는 성공 try-block 에서만 선언되므로 그 anchor 사용.
                     name: "case 'reload' success branch",
-                    window: editorSource.match(/reloadedStat\s*=\s*fs\.statSync[\s\S]{0,1500}?postMessage\(\s*\{\s*command:\s*'loadData'/)?.[0],
+                    window: editorSource.match(/reloadedStat\s*=\s*fs\.statSync[\s\S]{0,1500}?postToWebview\(\s*\{\s*command:\s*'loadData'/)?.[0],
                 },
                 {
                     name: 'auto-reload watcher branch',
-                    window: editorSource.match(/baselineMtimeMs\s*=\s*changedStat\.mtimeMs[\s\S]{0,1000}?postMessage\(\s*\{\s*command:\s*'loadData'/)?.[0],
+                    window: editorSource.match(/baselineMtimeMs\s*=\s*changedStat\.mtimeMs[\s\S]{0,1000}?postToWebview\(\s*\{\s*command:\s*'loadData'/)?.[0],
                 },
             ];
             for (const site of sites) {
@@ -1586,7 +2222,7 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.ok(pushMatch, 'could not locate pushHistory body');
             const body = pushMatch![1];
             assert.ok(
-                /const\s+dirtyNow\s*=\s*snap\s*!==\s*lastSavedSnapshot/.test(body),
+                /const\s+dirtyNow\s*=\s*snap\s*!==\s*effectiveBaseline\(\)/.test(body),
                 'pushHistory must compute dirtyNow as snap !== lastSavedSnapshot'
             );
             assert.ok(
@@ -1713,6 +2349,119 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.ok(
                 /return\s*\{\s*kind:\s*'clean'\s*\}/.test(body),
                 'webview buildDraftSnapshot must return { kind: clean } when draft equals lastSavedSnapshot'
+            );
+        });
+
+        test('webview activeDraftState mirrors resolveActiveDraftState', () => {
+            // webview 는 외부 모듈을 import 하지 못하므로 두 벌이 존재한다.
+            // 실행 검증은 src/test/jsonEditorWebviewDraft.test.ts 가 실제 webview
+            // 스크립트를 돌려서 하고, 여기서는 **한쪽만 고치는 drift** 를 막는다.
+            const fn = editorSource.match(/function activeDraftState\(\) \{([\s\S]*?)\n    \}/);
+            assert.ok(fn, 'webview must define activeDraftState()');
+            const body = fn![1];
+            assert.ok(
+                /readActiveCellEdit\(document\.querySelector\('td\.editing'\)\)/.test(body),
+                'activeDraftState must read the active cell from the DOM'
+            );
+            assert.ok(
+                /lastSavedSnapshot:\s*null/.test(body),
+                'activeDraftState must not let buildDraftSnapshot decide clean — each caller compares against its own baseline'
+            );
+            assert.ok(
+                /valid:\s*false/.test(body),
+                'activeDraftState must report valid=false when the draft cannot be represented (mid-edit invalid JSON)'
+            );
+            // keystroke 송신도 같은 수집기를 써야 한다. sendDraftSnapshot 이
+            // 자기 사본으로 DOM 을 읽으면, 저장 응답이 만드는 draft 와 갈라져
+            // (수집 규칙이 하나만 바뀌어도) 이번 버그가 되살아난다.
+            const drafted = editorSource.match(/function sendDraftSnapshot\(input\) \{([\s\S]*?)\n    \}/);
+            assert.ok(drafted, 'could not locate sendDraftSnapshot');
+            assert.ok(
+                /readActiveCellEdit\(td\)/.test(drafted![1]),
+                'sendDraftSnapshot must collect the active cell via readActiveCellEdit'
+            );
+            assert.ok(
+                !/querySelectorAll\(/.test(drafted![1]),
+                'sendDraftSnapshot must not re-implement DOM collection — readActiveCellEdit owns it'
+            );
+        });
+
+        test('markBaselineUnknown 도 미커밋 입력이 반영된 draft 를 recovery 로 보낸다', () => {
+            const branch = editorSource.match(/msg\.command === 'markBaselineUnknown'\)\s*\{([\s\S]*?)\n\s{8}\}/);
+            assert.ok(branch, 'could not locate the webview markBaselineUnknown branch');
+            assert.ok(
+                /const unknownDraft = activeDraftState\(\)/.test(branch![1]),
+                'markBaselineUnknown 이 커밋된 data 를 보내면 keystroke 마다 쌓아 둔 draft 가 옛 내용으로 덮인다'
+            );
+            assert.ok(
+                /if\s*\(unknownDraft\.recoveryData !== undefined\)\s*\{[\s\S]*?data:\s*unknownDraft\.recoveryData/.test(branch![1]),
+                'recoveryData 가 없으면(표현 가능한 draft 가 하나도 없음) 아무것도 보내지 않아야 한다'
+            );
+        });
+
+        test('recovery 로는 draft.data 가 아니라 recoveryData 를 보낸다', () => {
+            // valid draft 를 친 뒤 invalid 로 넘어간 상태에서 `draft.data`
+            // (=커밋된 것)를 보내면, host recovery 에 있던 그 valid draft 가
+            // 옛 내용으로 덮인다 — P1 유실이 invalid 경로에서 되살아난다.
+            // draft 를 담는 지역 변수 이름은 분기마다 다르다.
+            const branches: [string, string][] = [
+                ['saveResult', 'draft'],
+                ['setSavedBaseline', 'draft'],
+                ['markBaselineUnknown', 'unknownDraft'],
+            ];
+            for (const [command, varName] of branches) {
+                const branch = editorSource.match(
+                    new RegExp("msg\\.command === '" + command + "'\\)\\s*\\{([\\s\\S]*?)\\n\\s{8}\\}")
+                );
+                assert.ok(branch, `could not locate the webview branch for ${command}`);
+                const body = branch![1];
+                assert.ok(
+                    !new RegExp("command:\\s*'snapshot',\\s*data:\\s*" + varName + "\\.data").test(body),
+                    `${command} 가 커밋된 ${varName}.data 를 recovery 로 보낸다 — invalid 입력에서 직전 valid draft 를 덮는다`
+                );
+                assert.ok(
+                    new RegExp(varName + "\\.recoveryData !== undefined[\\s\\S]*?data:\\s*" + varName + "\\.recoveryData").test(body),
+                    `${command} 는 recoveryData 가 있을 때만 그것을 보내야 한다`
+                );
+            }
+        });
+
+        test('마지막 valid draft 캐시는 표를 다시 그릴 때 풀린다', () => {
+            // 캐시를 남겨 두면 **다른 셀**의 invalid 입력에 옛 draft 가 recovery
+            // 로 나간다. commit / cancel / reload / 행 변경이 모두 renderTable 을
+            // 거치므로 그 한 곳에서 처리한다. (실행 검증은
+            // src/test/jsonEditorWebviewDraft.test.ts 가 하지만, renderTable 은
+            // 그 하네스에서 스텁이라 여기서 소스로 고정한다.)
+            const fn = editorSource.match(/function renderTable\(\) \{([\s\S]*?)\n    \}/);
+            assert.ok(fn, 'could not locate renderTable');
+            const body = fn![1];
+            const clearAt = body.indexOf('lastRecoverableDraft = undefined');
+            assert.ok(clearAt >= 0, 'renderTable 이 lastRecoverableDraft 를 비우지 않는다 — 옛 셀의 draft 가 살아남는다');
+            // 빈 시트는 early return 으로 빠진다. 그 뒤에서 비우면 **행이 하나도
+            // 없는 시트로 전환할 때만** 캐시가 살아남는 반쪽짜리가 된다.
+            const earlyReturnAt = body.indexOf('rows.length === 0');
+            assert.ok(earlyReturnAt >= 0, 'could not locate the empty-sheet early return');
+            assert.ok(
+                clearAt < earlyReturnAt,
+                'lastRecoverableDraft 해제가 빈 시트 early return 뒤에 있다 — 그 경로에서 옛 draft 가 남는다'
+            );
+        });
+
+        test('sendDraftSnapshot 이 마지막 valid draft 를 갱신·해제한다', () => {
+            const drafted = editorSource.match(/function sendDraftSnapshot\(input\) \{([\s\S]*?)\n    \}/);
+            assert.ok(drafted, 'could not locate sendDraftSnapshot');
+            const body = drafted![1];
+            assert.ok(
+                /'snapshot'[\s\S]{0,300}?lastRecoverableDraft = result\.data/.test(body),
+                'valid draft 를 기억해 두지 않으면 invalid 로 넘어간 순간 되돌려 보낼 것이 없다'
+            );
+            assert.ok(
+                /'clean'[\s\S]{0,300}?lastRecoverableDraft = undefined/.test(body),
+                'baseline 으로 되돌아왔으면 캐시도 풀어야 한다 — 사용자가 되돌린 값이 복구로 부활하면 안 된다'
+            );
+            assert.ok(
+                !/'skip'[\s\S]{0,200}?lastRecoverableDraft =/.test(body),
+                'skip(표현 불가) 에서 캐시를 건드리면 직전 valid draft 를 잃는다'
             );
         });
 

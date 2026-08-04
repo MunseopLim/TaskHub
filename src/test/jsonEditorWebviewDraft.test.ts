@@ -1,0 +1,600 @@
+import * as assert from 'assert';
+import * as vscode from 'vscode';
+import { getWebviewContent } from '../jsonEditor';
+
+/**
+ * **실제로 배포되는 webview 스크립트를 실행하는** 테스트.
+ *
+ * 지금까지 미커밋 draft 관련 테스트는 두 종류뿐이었다.
+ *
+ *   1. `src/jsonEditorUtils.ts` 의 **미러**를 부르는 단위테스트 — 완성된
+ *      `arrValues` 배열을 헬퍼에 직접 넣는다. DOM 에서 그 배열을 **모으는**
+ *      코드는 한 줄도 실행되지 않는다.
+ *   2. 소스 정규식 가드 — "이 문자열이 코드에 있는가" 를 볼 뿐이라 로직이
+ *      틀려도 통과한다.
+ *
+ * 그 사이에 실제 버그가 살았다: 저장 응답 처리는 활성 셀이 있으면 dirty 로
+ * 두면서도 recovery 로는 **DOM 입력이 빠진 커밋 데이터**를 다시 보내, 응답을
+ * 기다리는 동안 친 입력이 복구 스냅샷에서 사라졌다.
+ *
+ * 그래서 여기서는 `getWebviewContent()` 가 만든 **HTML 안의 함수 본문을 그대로
+ * 뽑아** 가짜 DOM 위에서 돌린다. 셀렉터 문자열까지 실제 코드의 것을 쓰므로,
+ * 셀렉터가 바뀌면 (아래 가짜 DOM 이 모르는 셀렉터라) 테스트가 깨진다.
+ */
+suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
+
+    const SESSION = 7;
+    const sheetMap = [{ label: 'rows', path: ['rows'] }];
+    const fakeWebview = { cspSource: 'https://test.invalid' } as unknown as vscode.Webview;
+    const html = getWebviewContent({ rows: [{ a: 1 }] }, undefined, '/tmp/sample.json', fakeWebview, false, SESSION);
+
+    /** webview HTML 에서 `function name(...) { ... }` 하나를 통째로 뽑는다. */
+    function extractFn(name: string): string {
+        const re = new RegExp('\\n    function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n    \\}');
+        const m = html.match(re);
+        assert.ok(m, `webview 스크립트에서 function ${name} 을 찾지 못했다`);
+        return m![0];
+    }
+
+    /** `window.addEventListener('message', ...)` 의 본문. */
+    function extractMessageHandlerBody(): string {
+        const m = html.match(/window\.addEventListener\('message', \(event\) => \{([\s\S]*?)\n    \}\);/);
+        assert.ok(m, 'webview 스크립트에서 message 리스너를 찾지 못했다');
+        return m![1];
+    }
+
+    // ── 가짜 DOM ────────────────────────────────────────────────────────────
+    // 셀렉터는 **실제 코드가 쓰는 문자열 그대로만** 받는다. 모르는 셀렉터가
+    // 오면 즉시 실패시켜, 코드가 바뀌었는데 테스트가 조용히 null 을 보고
+    // 통과하는 상황을 막는다.
+    const CELL_EDITOR_SELECTOR = '.cell-edit input, .cell-edit textarea';
+    const ARR_INPUT_SELECTOR = '.cell-edit input[data-arr-idx]';
+
+    interface FakeInput {
+        value: string;
+        dataset: { arrIdx?: string };
+        classList: { contains(name: string): boolean };
+        /** `sendDraftSnapshot` 이 쓰는 `input.closest('td')`. 셀에 붙일 때 채운다. */
+        closest?(selector: string): unknown;
+    }
+
+    function makeInput(value: string, opts: { arrIdx?: number; jsonEdit?: boolean } = {}): FakeInput {
+        return {
+            value,
+            dataset: opts.arrIdx === undefined ? {} : { arrIdx: String(opts.arrIdx) },
+            classList: { contains: (name: string) => name === 'json-edit' && !!opts.jsonEdit },
+        };
+    }
+
+    function makeEditingCell(row: number, col: string, inputs: FakeInput[]) {
+        const td = {
+            classList: { contains: (name: string) => name === 'editing' },
+            dataset: { row: String(row), col },
+            querySelector(selector: string) {
+                assert.strictEqual(selector, CELL_EDITOR_SELECTOR, `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                return inputs[0] ?? null;
+            },
+            querySelectorAll(selector: string) {
+                assert.strictEqual(selector, ARR_INPUT_SELECTOR, `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                return inputs.filter(i => i.dataset.arrIdx !== undefined);
+            },
+        };
+        for (const input of inputs) {
+            input.closest = (selector: string) => {
+                assert.strictEqual(selector, 'td', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                return td;
+            };
+        }
+        return td;
+    }
+
+    function makeDocument(editingCell: ReturnType<typeof makeEditingCell> | null) {
+        const flagClasses = new Set<string>();
+        return {
+            flagClasses,
+            querySelector(selector: string) {
+                assert.strictEqual(selector, 'td.editing', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                return editingCell;
+            },
+            getElementById(id: string) {
+                assert.strictEqual(id, 'modifiedFlag', `가짜 DOM 이 모르는 id: ${id}`);
+                return {
+                    classList: {
+                        toggle: (name: string, on: boolean) => {
+                            if (on) { flagClasses.add(name); } else { flagClasses.delete(name); }
+                        },
+                    },
+                };
+            },
+        };
+    }
+
+    // ── 스크립트 조립 ───────────────────────────────────────────────────────
+    /**
+     * webview 의 draft/저장응답 관련 함수 + message 리스너 본문을 하나의
+     * 스코프에 모아 실행 가능한 API 로 돌려준다. 렌더링·히스토리처럼 이
+     * 시나리오와 무관한 것만 스텁으로 넣는다.
+     */
+    function bootWebview(options: {
+        data: unknown;
+        sheetMap: { label: string; path: string[] }[];
+        editingCell?: ReturnType<typeof makeEditingCell> | null;
+        lastSavedSnapshot: string | null;
+        pending?: [unknown, string][];
+    }) {
+        const posted: any[] = [];
+        const doc = makeDocument(options.editingCell ?? null);
+        const fakeVscode = { postMessage: (m: unknown) => { posted.push(m); } };
+
+        const script = [
+            extractFn('parseValue'),
+            extractFn('coerceCellValue'),
+            extractFn('coerceEditedArrayItems'),
+            extractFn('buildDraftSnapshot'),
+            extractFn('effectiveBaselineOf'),
+            extractFn('effectiveBaseline'),
+            extractFn('decideSaveResult'),
+            extractFn('snapshotData'),
+            extractFn('readActiveCellEdit'),
+            extractFn('activeDraftState'),
+            extractFn('sendDraftSnapshot'),
+            extractFn('setModified'),
+            extractFn('setModifiedLocal'),
+            // 선언만 있는 상태 (webview 에서는 IIFE 지역 변수). 이 값을 읽고 쓰는
+            // 로직 자체는 위 실제 함수들이 그대로 들고 온다. renderTable 이
+            // 이것을 비우는 것만 여기서 재현되지 않으므로, 그쪽은
+            // jsonEditorUtils.test.ts 의 소스 가드로 고정한다.
+            'let lastRecoverableDraft;',
+            // 이 시나리오와 무관한 협력자들은 스텁.
+            'function updateUndoRedoButtons() {}',
+            'function buildSheetMap() {}',
+            'function renderTabs() {}',
+            'function renderTable() {}',
+            'function resetHistoryToCurrent() {}',
+            'let savedSnapshot;',
+            'let activeIdx = 0;',
+            'const handleMessage = (event) => {' + extractMessageHandlerBody() + '\n    };',
+            'return {',
+            '    handleMessage: handleMessage,',
+            '    draft: () => activeDraftState(),',
+            // 사용자의 keystroke 하나. 실제 input 이벤트 핸들러가 부르는 것과
+            // 같은 함수를 같은 인자로 부른다.
+            '    type: (input, value) => { input.value = value; sendDraftSnapshot(input); },',
+            '    state: () => ({ lastSavedSnapshot: lastSavedSnapshot, modified: modified, lastRecoverableDraft: lastRecoverableDraft, pending: Array.from(pendingSaveSnapshots.entries()) })',
+            '};',
+        ].join('\n');
+
+        const factory = new Function(
+            'document', 'vscode', 'SESSION_ID', 'BASELINE_UNKNOWN_SENTINEL',
+            'data', 'sheetMap', 'lastSavedSnapshot', 'modified', 'pendingSaveSnapshots',
+            script
+        );
+        const api = factory(
+            doc, fakeVscode, SESSION, '',
+            options.data, options.sheetMap, options.lastSavedSnapshot, false,
+            new Map(options.pending ?? [])
+        );
+        return { api, posted, doc };
+    }
+
+    // ── activeDraftState ────────────────────────────────────────────────────
+    suite('activeDraftState 가 DOM 의 미커밋 입력을 읽는다', () => {
+
+        test('배열 셀의 input 두 개를 모두 반영하고 항목 타입을 보존한다', () => {
+            // 실제 흐름: [1, "a"] 셀을 열어 첫 칸을 10, 둘째 칸을 "x" 로 고친 뒤
+            // 아직 Enter 를 누르지 않은 상태. 예전에는 이벤트가 난 input 하나만
+            // 반영되어 나머지 입력이 draft 에서 사라졌고, 전부 문자열로 굳었다.
+            const data = { rows: [{ tags: [1, 'a'] }] };
+            const cell = makeEditingCell(0, 'tags', [
+                makeInput('10', { arrIdx: 0 }),
+                makeInput('x', { arrIdx: 1 }),
+            ]);
+            const { api } = bootWebview({ data, sheetMap, editingCell: cell, lastSavedSnapshot: JSON.stringify(data) });
+
+            const draft = api.draft();
+
+            assert.strictEqual(draft.valid, true);
+            assert.deepStrictEqual(
+                draft.data, { rows: [{ tags: [10, 'x'] }] },
+                '두 input 이 함께 반영되고 숫자 항목은 숫자로 남아야 한다'
+            );
+            assert.strictEqual(draft.snapshot, JSON.stringify({ rows: [{ tags: [10, 'x'] }] }));
+            assert.deepStrictEqual(data, { rows: [{ tags: [1, 'a'] }] }, 'draft 계산이 원본 data 를 건드리면 안 된다');
+        });
+
+        test('활성 셀이 없으면 커밋된 데이터를 그대로 돌려준다', () => {
+            const data = { rows: [{ a: 1 }] };
+            const { api } = bootWebview({ data, sheetMap, editingCell: null, lastSavedSnapshot: JSON.stringify(data) });
+
+            const draft = api.draft();
+
+            assert.strictEqual(draft.valid, true);
+            assert.strictEqual(draft.data, data);
+            assert.strictEqual(draft.snapshot, JSON.stringify(data));
+        });
+
+        test('값을 바꾸지 않고 셀만 열었으면 draft 가 커밋 데이터와 같다', () => {
+            // P2: "활성 셀이 있으면 무조건 dirty" 였을 때, 값을 건드리지 않고
+            // 클릭만 해도 저장 뒤 영원히 dirty 로 남았다.
+            const data = { rows: [{ a: 'keep' }] };
+            const cell = makeEditingCell(0, 'a', [makeInput('keep')]);
+            const { api } = bootWebview({ data, sheetMap, editingCell: cell, lastSavedSnapshot: JSON.stringify(data) });
+
+            assert.strictEqual(api.draft().snapshot, JSON.stringify(data));
+        });
+
+        test('json-edit 의 mid-edit invalid JSON 은 valid=false 로 알린다', () => {
+            const data = { rows: [{ obj: { k: 1 } }] };
+            const cell = makeEditingCell(0, 'obj', [makeInput('{ "k": ', { jsonEdit: true })]);
+            const { api } = bootWebview({ data, sheetMap, editingCell: cell, lastSavedSnapshot: JSON.stringify(data) });
+
+            const draft = api.draft();
+
+            assert.strictEqual(draft.valid, false, 'draft 로 표현할 수 없으면 호출부가 무조건 dirty 로 두어야 한다');
+            assert.strictEqual(draft.data, data, '표현할 수 없을 때는 커밋된 데이터를 돌려준다');
+        });
+
+        test('null 셀을 열어 두기만 하면 draft 가 커밋 데이터와 같다', () => {
+            // null / undefined / '' 셀은 input 에 `""` 로 그려진다. 그 자체를
+            // 변경으로 보면 (1) 저장 뒤에도 dirty 가 풀리지 않고 — blur 의
+            // commitCell 은 empty 가드 때문에 changed 로 보지 않아 dirty 를
+            // 다시 계산하지 않는다 — (2) recovery 스냅샷에 null → "" 이 굳는다.
+            const data = { rows: [{ a: null }] };
+            const cell = makeEditingCell(0, 'a', [makeInput('')]);
+            const { api } = bootWebview({ data, sheetMap, editingCell: cell, lastSavedSnapshot: JSON.stringify(data) });
+
+            const draft = api.draft();
+
+            assert.strictEqual(draft.snapshot, JSON.stringify(data), 'null 을 "" 로 바꾸면 안 된다');
+            assert.deepStrictEqual(draft.data, { rows: [{ a: null }] });
+        });
+
+        test('그 열이 아예 없는 행에 빈 키를 만들지 않는다', () => {
+            // sparse 한 표에서 빈 셀을 열기만 해도 그 행에 `col: ""` 가 생기면,
+            // 복구본을 받아 저장할 때 그 변형이 디스크에 기록된다.
+            const data = { rows: [{ a: 1 }, { b: 2 }] };
+            const cell = makeEditingCell(1, 'a', [makeInput('')]);
+            const { api } = bootWebview({ data, sheetMap, editingCell: cell, lastSavedSnapshot: JSON.stringify(data) });
+
+            assert.deepStrictEqual(api.draft().data, { rows: [{ a: 1 }, { b: 2 }] });
+        });
+
+        test('빈 셀에 실제로 값을 입력하면 반영한다 (가드가 과하지 않다)', () => {
+            const data = { rows: [{ a: null }] };
+            const cell = makeEditingCell(0, 'a', [makeInput('typed')]);
+            const { api } = bootWebview({ data, sheetMap, editingCell: cell, lastSavedSnapshot: JSON.stringify(data) });
+
+            assert.deepStrictEqual(api.draft().data, { rows: [{ a: 'typed' }] });
+        });
+
+        test('값이 있던 셀을 비우는 것은 변경이다', () => {
+            const data = { rows: [{ a: 'x' }] };
+            const cell = makeEditingCell(0, 'a', [makeInput('')]);
+            const { api } = bootWebview({ data, sheetMap, editingCell: cell, lastSavedSnapshot: JSON.stringify(data) });
+
+            assert.deepStrictEqual(api.draft().data, { rows: [{ a: '' }] });
+        });
+
+        test('scalar 셀은 옛 값의 타입을 따라 보간한다', () => {
+            const data = { rows: [{ n: 1, s: '1' }] };
+            const numeric = bootWebview({
+                data, sheetMap, lastSavedSnapshot: null,
+                editingCell: makeEditingCell(0, 'n', [makeInput('42')]),
+            }).api.draft();
+            const stringy = bootWebview({
+                data, sheetMap, lastSavedSnapshot: null,
+                editingCell: makeEditingCell(0, 's', [makeInput('42')]),
+            }).api.draft();
+
+            assert.deepStrictEqual(numeric.data, { rows: [{ n: 42, s: '1' }] });
+            assert.deepStrictEqual(stringy.data, { rows: [{ n: 1, s: '42' }] });
+        });
+    });
+
+    // ── saveResult 처리 ─────────────────────────────────────────────────────
+    suite('saveResult 처리 (실제 메시지 핸들러)', () => {
+
+        function saveResult(api: any, seq: number, success = true) {
+            api.handleMessage({ data: { command: 'saveResult', session: SESSION, seq, success } });
+        }
+
+        test('응답 대기 중 친 입력이 recovery 로 되돌아간다', () => {
+            // P1 재현: B 저장 요청 → 응답 대기 중 셀에 D 입력 → saveResult 도착.
+            // 예전에는 이 시점에 **커밋된 B** 를 snapshot 으로 다시 보내, host 의
+            // recovery 가 D → B 로 덮여 commit 전에 패널을 닫으면 D 가 사라졌다.
+            const committed = { rows: [{ a: 'B' }] };
+            const cell = makeEditingCell(0, 'a', [makeInput('D')]);
+            const { api, posted } = bootWebview({
+                data: committed,
+                sheetMap,
+                editingCell: cell,
+                lastSavedSnapshot: JSON.stringify({ rows: [{ a: 'A' }] }),
+                pending: [[1, JSON.stringify(committed)]],
+            });
+
+            saveResult(api, 1);
+
+            const snapshots = posted.filter(m => m.command === 'snapshot');
+            assert.strictEqual(snapshots.length, 1, 'dirty 인데 recovery 를 다시 채우지 않았다');
+            assert.deepStrictEqual(
+                snapshots[0].data, { rows: [{ a: 'D' }] },
+                '커밋된 데이터를 보내면 응답 대기 중 친 입력이 복구 스냅샷에서 사라진다'
+            );
+            const ack = posted.find(m => m.command === 'saveAck');
+            assert.deepStrictEqual(ack, { command: 'saveAck', seq: 1, dirty: true });
+        });
+
+        test('배열 셀의 미커밋 입력도 타입 그대로 recovery 에 남는다', () => {
+            const committed = { rows: [{ tags: [1, 2] }] };
+            const cell = makeEditingCell(0, 'tags', [
+                makeInput('1', { arrIdx: 0 }),
+                makeInput('30', { arrIdx: 1 }),
+            ]);
+            const { api, posted } = bootWebview({
+                data: committed,
+                sheetMap,
+                editingCell: cell,
+                lastSavedSnapshot: JSON.stringify(committed),
+                pending: [[1, JSON.stringify(committed)]],
+            });
+
+            saveResult(api, 1);
+
+            const snapshot = posted.find(m => m.command === 'snapshot');
+            assert.ok(snapshot, '배열 셀의 미커밋 입력이 recovery 로 가지 않았다');
+            assert.deepStrictEqual(
+                snapshot.data, { rows: [{ tags: [1, 30] }] },
+                '문자열로 굳으면 복구 후 저장에서 디스크에 문자열 배열이 기록된다'
+            );
+        });
+
+        test('값을 바꾸지 않고 셀만 열어 둔 상태는 clean 으로 확정된다', () => {
+            // P2: `td.editing` 존재만으로 dirty 를 켜면, 이후 blur 는 값이
+            // 그대로일 때 commitCell 의 changed 분기를 타지 않아 dirty 가 다시
+            // 계산되지 않는다 — 저장했는데도 영원히 dirty 로 남는다.
+            const committed = { rows: [{ a: 'same' }] };
+            const cell = makeEditingCell(0, 'a', [makeInput('same')]);
+            const { api, posted } = bootWebview({
+                data: committed,
+                sheetMap,
+                editingCell: cell,
+                lastSavedSnapshot: JSON.stringify({ rows: [{ a: 'old' }] }),
+                pending: [[1, JSON.stringify(committed)]],
+            });
+
+            saveResult(api, 1);
+
+            const ack = posted.find(m => m.command === 'saveAck');
+            assert.deepStrictEqual(ack, { command: 'saveAck', seq: 1, dirty: false });
+            assert.deepStrictEqual(
+                posted.filter(m => m.command === 'snapshot'), [],
+                'clean 인데 snapshot 을 보내면 host 가 방금 비운 recovery 를 되살린다'
+            );
+        });
+
+        test('빈 셀을 열어 둔 것만으로 dirty 가 되지 않는다', () => {
+            // 위 empty 가드가 없으면 이 저장은 clean 으로 확정되지 않고, 이후
+            // blur 도 dirty 를 다시 계산하지 않아 편집기가 계속 dirty 로 남는다.
+            const committed = { rows: [{ a: null }] };
+            const cell = makeEditingCell(0, 'a', [makeInput('')]);
+            const { api, posted } = bootWebview({
+                data: committed,
+                sheetMap,
+                editingCell: cell,
+                lastSavedSnapshot: JSON.stringify({ rows: [{ a: 'old' }] }),
+                pending: [[1, JSON.stringify(committed)]],
+            });
+
+            saveResult(api, 1);
+
+            assert.deepStrictEqual(posted.find(m => m.command === 'saveAck'), { command: 'saveAck', seq: 1, dirty: false });
+            assert.deepStrictEqual(
+                posted.filter(m => m.command === 'snapshot'), [],
+                'null 을 "" 로 바꾼 스냅샷이 복구본으로 남으면 복구 후 저장에서 디스크가 바뀐다'
+            );
+        });
+
+        test('draft 를 표현할 수 없는 미커밋 입력은 무조건 dirty 로 둔다', () => {
+            const committed = { rows: [{ obj: { k: 1 } }] };
+            const cell = makeEditingCell(0, 'obj', [makeInput('{ "k": ', { jsonEdit: true })]);
+            const { api, posted } = bootWebview({
+                data: committed,
+                sheetMap,
+                editingCell: cell,
+                lastSavedSnapshot: JSON.stringify({ rows: [{ obj: { k: 0 } }] }),
+                pending: [[1, JSON.stringify(committed)]],
+            });
+
+            saveResult(api, 1);
+
+            const ack = posted.find(m => m.command === 'saveAck');
+            assert.strictEqual(ack.dirty, true, 'invalid mid-edit 입력을 clean 으로 확정하면 host 가 recovery 를 비운다');
+        });
+
+        test('invalid 로 넘어가도 직전의 valid draft 가 recovery 로 간다', () => {
+            // json-edit textarea 는 타이핑 도중 반드시 invalid 를 지난다.
+            // valid D 를 친 뒤 invalid E 상태에서 응답이 오면, 커밋된 B 를
+            // 보내는 순간 host 의 recovery 에 있던 D 가 옛 내용으로 덮인다.
+            const committed = { rows: [{ obj: { k: 1 } }] };
+            const input = makeInput('{"k":1}', { jsonEdit: true });
+            const cell = makeEditingCell(0, 'obj', [input]);
+            const { api, posted } = bootWebview({
+                data: committed,
+                sheetMap,
+                editingCell: cell,
+                lastSavedSnapshot: JSON.stringify(committed),
+                pending: [[1, JSON.stringify(committed)]],
+            });
+
+            api.type(input, '{"k":42}');    // valid D — host recovery = D
+            api.type(input, '{"k":42');     // invalid E — 아무것도 보내지 않음
+            posted.length = 0;              // 저장 응답이 보내는 것만 본다
+            saveResult(api, 1);
+
+            const snapshots = posted.filter(m => m.command === 'snapshot');
+            assert.strictEqual(snapshots.length, 1, 'dirty 인데 recovery 를 채우지 않았다');
+            assert.deepStrictEqual(
+                snapshots[0].data, { rows: [{ obj: { k: 42 } }] },
+                '커밋된 데이터를 보내면 직전 keystroke 가 남긴 valid draft 가 사라진다'
+            );
+            assert.strictEqual(posted.find(m => m.command === 'saveAck').dirty, true);
+        });
+
+        test('처음부터 invalid 면 커밋 데이터를 새로 보내지 않는다', () => {
+            // 보낼 수 있는 draft 가 없다. 커밋 데이터를 밀어 넣으면 host 의
+            // recovery 가 (더 나을 수도 있는) 기존 내용에서 덮인다 — dirty
+            // 표시만으로 reload/파일 전환은 이미 막힌다.
+            const committed = { rows: [{ obj: { k: 1 } }] };
+            const input = makeInput('{"k":', { jsonEdit: true });
+            const cell = makeEditingCell(0, 'obj', [input]);
+            const { api, posted } = bootWebview({
+                data: committed,
+                sheetMap,
+                editingCell: cell,
+                lastSavedSnapshot: JSON.stringify({ rows: [{ obj: { k: 0 } }] }),
+                pending: [[1, JSON.stringify(committed)]],
+            });
+
+            api.type(input, '{"k":');
+            posted.length = 0;
+            saveResult(api, 1);
+
+            assert.deepStrictEqual(
+                posted.filter(m => m.command === 'snapshot'), [],
+                '표현 가능한 draft 가 없는데 커밋 데이터를 recovery 로 밀어 넣었다'
+            );
+            assert.strictEqual(posted.find(m => m.command === 'saveAck').dirty, true, 'dirty 표시는 유지해야 한다');
+        });
+
+        test('입력이 baseline 으로 되돌아오면 캐시도 함께 풀린다', () => {
+            // clean 판정에서 host 는 recovery 를 비운다. 그 뒤 invalid 로 넘어가도
+            // 되살릴 draft 는 없어야 한다 — 남겨 두면 사용자가 되돌린 값이
+            // 복구 프롬프트로 부활한다.
+            const committed = { rows: [{ obj: { k: 1 } }] };
+            const input = makeInput('{"k":1}', { jsonEdit: true });
+            const cell = makeEditingCell(0, 'obj', [input]);
+            const { api } = bootWebview({
+                data: committed,
+                sheetMap,
+                editingCell: cell,
+                lastSavedSnapshot: JSON.stringify(committed),
+            });
+
+            api.type(input, '{"k":42}');
+            assert.notStrictEqual(api.state().lastRecoverableDraft, undefined);
+            api.type(input, '{"k":1}');     // baseline 으로 복귀 → clean
+            assert.strictEqual(api.state().lastRecoverableDraft, undefined);
+        });
+
+        test('남의 세션 응답은 pending 스냅샷을 건드리지 않는다', () => {
+            const committed = { rows: [{ a: 1 }] };
+            const { api, posted } = bootWebview({
+                data: committed,
+                sheetMap,
+                lastSavedSnapshot: JSON.stringify(committed),
+                pending: [[1, JSON.stringify(committed)]],
+            });
+
+            api.handleMessage({ data: { command: 'saveResult', session: SESSION + 1, seq: 1, success: true } });
+
+            assert.deepStrictEqual(posted, [], '남의 세션 응답에 반응하면 안 된다');
+            assert.strictEqual(api.state().pending.length, 1, '남의 응답으로 pending 을 지우면 내 응답이 unknown seq 로 떨어진다');
+        });
+    });
+
+    // ── baseline 교체 경로 ──────────────────────────────────────────────────
+    suite('baseline 교체 경로도 같은 draft 를 쓴다', () => {
+
+        test('setSavedBaseline: 커밋 데이터가 새 디스크와 같아도 활성 입력이 있으면 dirty', () => {
+            // 외부 변경 *Keep current edits* 분기. 커밋된 data 만 보면 새 디스크
+            // 내용과 같아 clean 이 되고, host 가 recovery 를 지운다 — 화면에는
+            // 아직 커밋 안 된 입력이 남아 있는데도.
+            const committed = { rows: [{ a: 'same' }] };
+            const cell = makeEditingCell(0, 'a', [makeInput('typing')]);
+            const { api, posted } = bootWebview({
+                data: committed,
+                sheetMap,
+                editingCell: cell,
+                lastSavedSnapshot: JSON.stringify({ rows: [{ a: 'old' }] }),
+            });
+
+            api.handleMessage({ data: { command: 'setSavedBaseline', session: SESSION, data: committed } });
+
+            assert.deepStrictEqual(
+                posted.find(m => m.command === 'modified'), { command: 'modified', value: true },
+                '활성 셀의 입력이 디스크와 다른데 clean 으로 처리했다'
+            );
+            assert.deepStrictEqual(
+                posted.find(m => m.command === 'snapshot')?.data, { rows: [{ a: 'typing' }] },
+                'recovery 에는 커밋 데이터가 아니라 화면의 입력이 들어가야 한다'
+            );
+        });
+
+        test('markBaselineUnknown: recovery 로 미커밋 입력을 보낸다', () => {
+            const committed = { rows: [{ a: 'committed' }] };
+            const cell = makeEditingCell(0, 'a', [makeInput('typing')]);
+            const { api, posted } = bootWebview({
+                data: committed,
+                sheetMap,
+                editingCell: cell,
+                lastSavedSnapshot: JSON.stringify(committed),
+            });
+
+            api.handleMessage({ data: { command: 'markBaselineUnknown', session: SESSION } });
+
+            assert.deepStrictEqual(
+                posted.find(m => m.command === 'snapshot')?.data, { rows: [{ a: 'typing' }] },
+                'baseline 을 모르는 상태에서 커밋 데이터를 보내면 미커밋 입력이 덮인다'
+            );
+        });
+
+        /** invalid 입력 상태에서 두 경로가 각각 무엇을 보내는지. */
+        for (const command of ['setSavedBaseline', 'markBaselineUnknown']) {
+            test(`${command}: invalid 입력이면 직전 valid draft 를 보낸다`, () => {
+                const committed = { rows: [{ obj: { k: 1 } }] };
+                const input = makeInput('{"k":1}', { jsonEdit: true });
+                const cell = makeEditingCell(0, 'obj', [input]);
+                const { api, posted } = bootWebview({
+                    data: committed,
+                    sheetMap,
+                    editingCell: cell,
+                    lastSavedSnapshot: JSON.stringify(committed),
+                });
+
+                api.type(input, '{"k":42}');
+                api.type(input, '{"k":42');
+                posted.length = 0;
+                api.handleMessage({ data: { command, session: SESSION, data: committed } });
+
+                assert.deepStrictEqual(
+                    posted.find(m => m.command === 'snapshot')?.data, { rows: [{ obj: { k: 42 } }] },
+                    '커밋 데이터를 보내면 직전 keystroke 가 남긴 valid draft 가 덮인다'
+                );
+            });
+
+            test(`${command}: 표현 가능한 draft 가 없으면 아무것도 보내지 않는다`, () => {
+                const committed = { rows: [{ obj: { k: 1 } }] };
+                const input = makeInput('{"k":', { jsonEdit: true });
+                const cell = makeEditingCell(0, 'obj', [input]);
+                const { api, posted } = bootWebview({
+                    data: committed,
+                    sheetMap,
+                    editingCell: cell,
+                    lastSavedSnapshot: JSON.stringify(committed),
+                });
+
+                api.type(input, '{"k":');
+                posted.length = 0;
+                api.handleMessage({ data: { command, session: SESSION, data: committed } });
+
+                assert.deepStrictEqual(
+                    posted.filter(m => m.command === 'snapshot'), [],
+                    '표현 가능한 draft 가 없는데 커밋 데이터를 recovery 로 밀어 넣었다'
+                );
+                // dirty 는 이미 keystroke 에서 host 로 갔다 (setModified 는 값이
+                // 바뀔 때만 보낸다). 여기서는 그것이 풀리지 않았는지를 본다.
+                assert.strictEqual(api.state().modified, true, 'dirty 표시는 유지해야 reload/전환이 막힌다');
+            });
+        }
+    });
+});
