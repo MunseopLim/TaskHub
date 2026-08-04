@@ -859,14 +859,6 @@ function analyzeActionTasks(
         };
 
         /**
-         * 배열 참조가 `args` 원소 안에 **다른 글자와 섞여** 있는 경우.
-         *
-         * 런타임은 원소 전체가 참조 하나일 때만 인자 여러 개로 펼친다. 섞여
-         * 있으면 배열이 공백으로 이어 붙어 **인자 한 칸**이 되고, 경로에 공백이
-         * 사이의 **경계가 사라진다**. argv 라 셸이 다시 쪼개지지는 않지만,
-         * 스크립트는 값 하나만 받는다 — 조용히 잘못 도는 자리라 짚어 준다.
-         */
-        /**
          * 참조가 가리키는 값이 배열인가.
          *
          * 누적된 컨텍스트만 보면 **전방 참조를 놓친다.** Doctor 는 선언 순서대로
@@ -885,6 +877,16 @@ function analyzeActionTasks(
             return Array.isArray(resolvePipelineReference(expression, { [head]: simulateTaskResult(forward) }));
         };
 
+        /**
+         * `args.array-joined` — 배열 참조가 `args` 원소 안에 **다른 글자와 섞여**
+         * 있는 경우 (`"--file=${pick.paths}"`).
+         *
+         * 런타임은 원소 **전체**가 참조 하나일 때만 인자 여러 개로 펼친다. 섞여
+         * 있으면 배열이 공백으로 이어 붙어 **인자 한 칸**이 되고, 그 안에서
+         * 경로 사이의 **경계가 사라진다**. argv 로 전달되므로 셸이 다시 쪼개
+         * 주지도 않아, 스크립트는 여러 경로를 값 하나로 받는다 — 리터럴로 남는
+         * 것과 달리 **조용히 잘못 도는** 자리라 짚어 준다.
+         */
         const joinedArgRefs: string[] = [];
         if (Array.isArray(task.args)) {
             for (const a of task.args) {
