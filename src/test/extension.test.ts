@@ -79,7 +79,9 @@ import {
 	invalidateActionsCache,
 	shouldRecordTaskInput,
 	formatExecutedCommandsDocument,
+	describeVariableCompletion,
 } from '../extension';
+import { collectVariableCompletions, type VariableCompletionDetail } from '../variableCompletions';
 import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
 import { LinkViewProvider, mergeInvalidJsonEntries, readLinksFromDisk } from '../providers/linkViewProvider';
 import { FavoriteViewProvider, readFavoritesFromDisk } from '../providers/favoriteViewProvider';
@@ -5380,6 +5382,89 @@ suite('Extension Test Suite', () => {
 			const second = await provider.getChildren();
 			assert.strictEqual(provider.loaded, true);
 			assert.strictEqual(second.length, 0);
+		});
+	});
+
+	/**
+	 * 자동완성 `detail` 의 i18n 경계.
+	 *
+	 * `variableCompletions` 는 `vscode` 를 import 하지 않는 순수 모듈이라 `t()` 를
+	 * 쓸 수 없다. 그래서 종류만 돌려주고 문구는 이 함수가 만드는데, 그 경계가
+	 * 무너지면 **오류 없이** 한국어 사용자의 자동완성 위젯에 영어만 보인다.
+	 */
+	suite('describeVariableCompletion (자동완성 detail i18n)', () => {
+		/**
+		 * `vscode.env.language` 를 고정한 채 실행한다. 호스트 로케일에 기대면
+		 * 영어 CI 에서는 한국어 분기가 **한 번도 실행되지 않아**, 번역을 빠뜨려도
+		 * 통과한다 — 이 테스트가 막으려는 결함 그 자체다.
+		 * (`webviewStringCoverage.test.ts` 의 `withLanguage` 와 같은 방식.)
+		 */
+		function withLanguage<T>(language: string, body: () => T): T {
+			const descriptor = Object.getOwnPropertyDescriptor(vscode.env, 'language');
+			assert.ok(
+				descriptor && (descriptor.configurable || typeof descriptor.set === 'function'),
+				'vscode.env.language를 고정할 수 없다.'
+			);
+			Object.defineProperty(vscode.env, 'language', { value: language, configurable: true });
+			try {
+				return body();
+			} finally {
+				Object.defineProperty(vscode.env, 'language', descriptor!);
+			}
+		}
+
+		const cases: VariableCompletionDetail[] = [
+			{ kind: 'task', taskType: 'fileDialog' },
+			{ kind: 'task' },
+			{ kind: 'builtin', ref: 'workspaceFolder' },
+			{ kind: 'builtin', ref: 'extensionPath' },
+			{ kind: 'result', taskType: 'quickPick' },
+			{ kind: 'capture', taskId: 'build' },
+		];
+
+		test('한국어 로케일에서는 모든 종류가 한글 문구를 낸다', () => {
+			withLanguage('ko', () => {
+				for (const detail of cases) {
+					const got = describeVariableCompletion(detail);
+					assert.match(got, /[가-힣]/, `번역되지 않았다: ${JSON.stringify(detail)} → ${got}`);
+				}
+			});
+		});
+
+		test('영어 로케일에서는 한글이 섞이지 않는다', () => {
+			withLanguage('en', () => {
+				for (const detail of cases) {
+					const got = describeVariableCompletion(detail);
+					assert.ok(got.length > 0, `빈 문구: ${JSON.stringify(detail)}`);
+					assert.doesNotMatch(got, /[가-힣]/, `영어 로케일에 한글이 섞였다: ${got}`);
+				}
+			});
+		});
+
+		test('타입 이름과 태스크 id 는 번역하지 않고 그대로 싣는다', () => {
+			// 사용자가 actions.json 에 적은 식별자다. 번역하면 무엇을 가리키는지
+			// 알 수 없어진다 (CLAUDE.md 의 "짧은 영어 식별자" 예외).
+			assert.ok(describeVariableCompletion({ kind: 'result', taskType: 'folderDialog' }).includes('folderDialog'));
+			assert.ok(describeVariableCompletion({ kind: 'task', taskType: 'stringManipulation' }).includes('stringManipulation'));
+			assert.ok(describeVariableCompletion({ kind: 'capture', taskId: 'build' }).includes('build'));
+		});
+
+		test('collectVariableCompletions 가 내는 detail 이 전부 문구로 옮겨진다', () => {
+			// 두 모듈이 같은 union 을 쓰는지 실제 출력으로 확인한다 — 새 종류가
+			// 늘었는데 여기를 잊으면 그 항목만 빈 detail 로 나간다.
+			const fixture = `[
+  { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
+    { "id": "build", "type": "shell", "command": "make", "passTheResultToNextTask": true,
+      "output": { "capture": { "name": "version", "regex": "v(\\\\d+)" } } },
+    { "id": "tag", "type": "shell", "command": "git tag \${build." }
+  ] } }
+]`;
+			const offset = fixture.indexOf('${build.') + '${build.'.length;
+			const entries = collectVariableCompletions(fixture, offset);
+			assert.ok(entries.length > 0, '픽스처가 아무것도 내지 않는다');
+			for (const entry of entries) {
+				assert.ok(describeVariableCompletion(entry.detail).length > 0, `빈 detail: ${entry.name}`);
+			}
 		});
 	});
 });

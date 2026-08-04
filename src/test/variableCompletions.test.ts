@@ -41,6 +41,51 @@ suite('variableCompletions', () => {
   }
 ]`;
 
+    /**
+     * `detail` 은 **문구가 아니라 종류**다. 이 모듈은 `vscode` 를 import 하지
+     * 않아 `t()` 를 쓸 수 없으므로, 여기서 문장을 만들면 한국어 사용자에게
+     * 영어가 그대로 보인다. 문구는 extension.ts 의 `describeVariableCompletion`
+     * 이 만든다.
+     */
+    suite('detail 은 종류만 담는다', () => {
+        const details = (fixture: string) => {
+            const { text, offset } = at(fixture);
+            return collectVariableCompletions(text, offset).map(c => c.detail);
+        };
+
+        test('태스크 id 와 전역 참조', () => {
+            const got = details(doc(`{ "id": "run", "type": "command", "command": "py", "args": ["\${|"] }`));
+            assert.deepStrictEqual(
+                got.find(d => d.kind === 'builtin' && d.ref === 'workspaceFolder'),
+                { kind: 'builtin', ref: 'workspaceFolder' }
+            );
+            assert.deepStrictEqual(
+                got.find(d => d.kind === 'task' && d.taskType === 'fileDialog'),
+                { kind: 'task', taskType: 'fileDialog' }
+            );
+        });
+
+        test('결과 키는 타입을, 캡처 이름은 태스크 id 를 싣는다', () => {
+            const fixture = `[
+  { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
+    { "id": "build", "type": "shell", "command": "make", "passTheResultToNextTask": true,
+      "output": { "capture": { "name": "version", "regex": "v(\\\\d+)" } } },
+    { "id": "tag", "type": "shell", "command": "git tag \${build.|" }
+  ] } }
+]`;
+            const { text, offset } = at(fixture);
+            const entries = collectVariableCompletions(text, offset);
+            assert.deepStrictEqual(
+                entries.find(e => e.name === 'build.version')?.detail,
+                { kind: 'capture', taskId: 'build' }
+            );
+            assert.deepStrictEqual(
+                entries.find(e => e.name === 'build.output')?.detail,
+                { kind: 'result', taskType: 'shell' }
+            );
+        });
+    });
+
     suite('referencePrefixAt', () => {
         test('`${` 안이면 그 사이 글자를 돌려준다', () => {
             const { text, offset } = at('"cmd ${pick.pa|"');

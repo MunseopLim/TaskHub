@@ -17,11 +17,29 @@
 
 import { simulateTaskResult } from './previewRun';
 
+/**
+ * 제안 항목이 **무엇인지**. 화면에 보일 문구가 아니라 종류다.
+ *
+ * 이 모듈은 `vscode` 에 의존하지 않으므로(`previewRun` · `doctor` 와 같다)
+ * `i18n.t` 를 쓸 수 없다 — `t` 는 `vscode.env.language` 를 본다. 그래서 문구를
+ * 여기서 만들면 한국어 사용자에게 영어가 그대로 보인다. 종류만 돌려주고
+ * `CompletionItem` 을 만드는 자리(extension.ts)에서 `t(ko, en)` 로 옮긴다.
+ */
+export type VariableCompletionDetail =
+    /** 같은 액션의 다른 태스크 id. `taskType` 은 `"type"` 을 못 읽었으면 없다. */
+    | { kind: 'task'; taskType?: string }
+    /** `${workspaceFolder}` / `${extensionPath}` 같은 전역 참조. */
+    | { kind: 'builtin'; ref: 'workspaceFolder' | 'extensionPath' }
+    /** 그 태스크 타입이 내는 결과 키. */
+    | { kind: 'result'; taskType: string }
+    /** `output.capture` 로 정의한 이름. */
+    | { kind: 'capture'; taskId: string };
+
 export interface VariableCompletion {
     /** 삽입할 참조 — `pick.paths`. `${}` 는 호출부가 붙인다. */
     name: string;
-    /** 어디서 왔는지 — `fileDialog task 'pick'`. */
-    detail: string;
+    /** 어디서 왔는지. 문구가 아니라 종류다 — {@link VariableCompletionDetail} 참조. */
+    detail: VariableCompletionDetail;
 }
 
 /** 스캐너가 찾아낸 조각 하나. */
@@ -158,10 +176,10 @@ export function collectVariableCompletions(text: string, offset: number): Variab
             const id = firstStringField(slice.text, 'id');
             const type = firstStringField(slice.text, 'type');
             if (!id) { continue; }
-            items.push({ name: id, detail: type ? `${type} task` : 'task' });
+            items.push({ name: id, detail: { kind: 'task', taskType: type } });
         }
-        items.push({ name: 'workspaceFolder', detail: 'workspace folder path' });
-        items.push({ name: 'extensionPath', detail: 'TaskHub install path' });
+        items.push({ name: 'workspaceFolder', detail: { kind: 'builtin', ref: 'workspaceFolder' } });
+        items.push({ name: 'extensionPath', detail: { kind: 'builtin', ref: 'extensionPath' } });
         return items;
     }
 
@@ -217,7 +235,9 @@ export function collectVariableCompletions(text: string, offset: number): Variab
     const captures = typeof simulated.output === 'string' ? capturedNames(target.text) : [];
     return [...keys, ...captures].map(key => ({
         name: `${head}.${key}`,
-        detail: captures.includes(key) ? `captured from '${head}'` : `${type} result`,
+        detail: captures.includes(key)
+            ? { kind: 'capture' as const, taskId: head }
+            : { kind: 'result' as const, taskType: type },
     }));
 }
 

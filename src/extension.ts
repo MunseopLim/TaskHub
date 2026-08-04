@@ -24,7 +24,35 @@ import { buildPreviewReport } from './previewRun';
 import { runDoctor, DoctorFinding, DoctorInput } from './doctor';
 import { createZipArchive, extractZipArchive } from './archiveUtils';
 import { DIALOG_SCOPE, coerceDefaultUri, initDialogMemory, showOpenDialogWithMemory, showSaveDialogWithMemory, taskDialogScope } from './dialogMemory';
-import { collectVariableCompletions, referencePrefixAt } from './variableCompletions';
+import { collectVariableCompletions, referencePrefixAt, type VariableCompletionDetail } from './variableCompletions';
+
+/**
+ * 자동완성 항목의 `detail` 문구. **i18n 경계다.**
+ *
+ * `variableCompletions` 는 `previewRun` · `doctor` 와 같이 `vscode` 를 import 하지
+ * 않는 순수 모듈이라 `t()` 를 쓸 수 없다(`t` 는 `vscode.env.language` 를 본다).
+ * 그래서 그쪽은 종류만 돌려주고 문구는 여기서 만든다 — 그러지 않으면 한국어
+ * 사용자의 자동완성 위젯에 영어가 그대로 보인다.
+ *
+ * 타입 이름(`fileDialog` 등)은 사용자가 `actions.json` 에 적는 식별자 그대로이므로
+ * 번역하지 않는다 (CLAUDE.md 의 "짧은 영어 식별자" 예외).
+ */
+export function describeVariableCompletion(detail: VariableCompletionDetail): string {
+    switch (detail.kind) {
+        case 'task':
+            return detail.taskType
+                ? t(`${detail.taskType} 태스크`, `${detail.taskType} task`)
+                : t('태스크', 'task');
+        case 'builtin':
+            return detail.ref === 'workspaceFolder'
+                ? t('워크스페이스 폴더 경로', 'workspace folder path')
+                : t('TaskHub 설치 경로', 'TaskHub install path');
+        case 'result':
+            return t(`${detail.taskType} 결과`, `${detail.taskType} result`);
+        case 'capture':
+            return t(`'${detail.taskId}' 에서 캡처한 값`, `captured from '${detail.taskId}'`);
+    }
+}
 
 // Compile the actions JSON-schema validator once and reuse it. Re-compiling on
 // every load path (activation + every view refresh + every executeAction) was
@@ -7948,6 +7976,9 @@ export function activate(context: vscode.ExtensionContext) {
     // 있고 무엇이 유효한지가 같은 액션의 다른 태스크 타입에 달렸으므로 스키마로는
     // 표현할 자리가 없다 — `canSelectMany` 는 제안되는데 정작 그 결과인 `.paths`
     // 는 아무 데서도 보이지 않아 "그런 것이 없는 줄 알았다"는 보고가 나왔다.
+    //
+    // **문구는 여기서 만든다.** `variableCompletions` 는 `previewRun` · `doctor` 와
+    // 같이 `vscode` 에 의존하지 않는 순수 모듈이라 `t()` 를 쓸 수 없다.
     context.subscriptions.push(
         vscode.languages.registerCompletionItemProvider(
             [
@@ -7966,7 +7997,7 @@ export function activate(context: vscode.ExtensionContext) {
                     const range = new vscode.Range(document.positionAt(ref.start), position);
                     return collectVariableCompletions(text, offset).map(entry => {
                         const item = new vscode.CompletionItem(entry.name, vscode.CompletionItemKind.Variable);
-                        item.detail = entry.detail;
+                        item.detail = describeVariableCompletion(entry.detail);
                         item.range = range;
                         item.insertText = entry.name;
                         return item;

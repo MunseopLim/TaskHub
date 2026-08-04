@@ -29,6 +29,14 @@
 =====================================================================
 -->
 
+## [0.6.61] - 2026-08-05
+
+### 수정 — 자동완성 `detail` 이 한국어 사용자에게도 영어로 보이던 것
+
+- **순수 모듈이 문구를 만들고 있었다**: 0.6.57 의 참조 자동완성은 항목 설명(`workspace folder path`, `captured from 'build'`, `shell result` 등)을 `variableCompletions.ts` 에서 만들어 그대로 `CompletionItem.detail` 에 실었다. 이 모듈은 `previewRun` · `doctor` 와 같이 `vscode` 를 import 하지 않는 순수 모듈이라 `t()` 를 쓸 수 없고(`t` 는 `vscode.env.language` 를 본다), 결과적으로 **한국어 사용자의 자동완성 위젯에 영어만 보였다.** 짧은 식별자가 아니라 산문이므로 i18n 제외 대상도 아니다. 이제 모듈은 **종류만** 돌려주고(`{ kind: 'result', taskType }` 등), 문구는 `CompletionItem` 을 만드는 extension.ts 경계에서 `t(ko, en)` 로 만든다. 타입 이름(`fileDialog`)과 태스크 id 는 사용자가 파일에 적은 식별자이므로 번역하지 않고 그대로 싣는다 ([src/variableCompletions.ts](src/variableCompletions.ts), [src/extension.ts](src/extension.ts)).
+
+**테스트**: 신규 6종, 최종 2374 passing. 로케일을 **고정한 채** 양쪽을 본다 — 호스트 로케일에 기대면 영어 환경에서는 한국어 분기가 한 번도 실행되지 않아 번역을 빠뜨려도 통과한다(이 결함 그 자체다). 한 분기의 `t()` 를 걷어내 한국어 테스트만 깨지는 것을 확인했다.
+
 ## [0.6.60] - 2026-08-05
 
 ### 수정 — 다중 선택 quickPick 의 `${id.values}` 가 자동완성에 없던 것
