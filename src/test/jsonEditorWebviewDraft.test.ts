@@ -214,8 +214,12 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             };
         }
 
-        /** commitCell / syncEditingArrayCellToData 를 한 스코프에 모아 실행한다. */
-        function bootCommit(data: unknown) {
+        /**
+         * commitCell / syncEditingArrayCellToData 를 한 스코프에 모아 실행한다.
+         * `sheets` 를 비우면 활성 시트가 없는 상태(=`getActiveRows()` 가 null)를
+         * 재현한다.
+         */
+        function bootCommit(data: unknown, sheets: { label: string; path: string[] }[] = sheetMap) {
             /** pushHistory 가 불린 시점의 data 스냅샷 — "변경으로 봤는가" 의 증거. */
             const historyPushes: string[] = [];
             const errors: string[] = [];
@@ -243,7 +247,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             ].join('\n');
 
             const factory = new Function('data', 'sheetMap', 'historyPushes', 'errors', script);
-            const api = factory(data, sheetMap, historyPushes, errors);
+            const api = factory(data, sheets, historyPushes, errors);
             return { api, historyPushes, errors };
         }
 
@@ -312,6 +316,28 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             assert.deepStrictEqual(arr, [1, 20], '항목 타입을 보존한 채 제자리에서 갱신해야 한다');
             arr.splice(0, 1);
             assert.deepStrictEqual(api.data(), { rows: [{ tags: [20] }] }, 'sync 뒤의 splice 가 data 에 반영돼야 한다');
+        });
+
+        /**
+         * 시트·행이 어긋난 상태의 sync.
+         *
+         * 두 호출부(✕ / +)는 `renderTable()` 이 매번 새로 만드는 버튼의 핸들러라
+         * 현재는 여기에 닿지 않는다. 그래도 고정해 두는 이유: 호출부는 이미
+         * `null` 계약을 지키고 host 미러(`buildDraftSnapshot`)도 같은 어긋남을
+         * skip 하는데, 여기서만 그냥 읽으면 어긋나는 순간 **TypeError 로 webview
+         * 스크립트 전체가 죽는다** — 화면은 남고 버튼만 조용히 먹통이 된다.
+         */
+        test('활성 시트가 없으면 터지지 않고 null 을 돌려준다', () => {
+            const { api } = bootCommit({ rows: [{ tags: [1, 2] }] }, []);
+            const cell = makeCommitCell(0, 'tags', [makeInput('1', { arrIdx: 0 })]);
+            assert.strictEqual(api.sync(cell), null);
+        });
+
+        test('행 인덱스가 범위를 넘어도 터지지 않는다', () => {
+            // 지연 commit 이 stale 한 dataset.row 를 들고 오는 경우의 모양.
+            const { api } = bootCommit({ rows: [{ tags: [1, 2] }] });
+            const cell = makeCommitCell(5, 'tags', [makeInput('1', { arrIdx: 0 })]);
+            assert.strictEqual(api.sync(cell), null);
         });
 
         test('"+" 로 추가한 항목이 숫자 배열을 문자열로 오염시키지 않는다', () => {

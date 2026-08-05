@@ -1815,7 +1815,14 @@ export function getWebviewContent(
         if (!td) { return null; }
         const rowIdx = parseInt(td.dataset.row);
         const col = td.dataset.col;
-        const arr = getActiveRows()[rowIdx][col];
+        // 시트·행이 어긋나면 읽지 않는다. getActiveRows() 는 활성 시트가 없으면
+        // null 을 돌려주고, 지연 commit 처럼 stale 한 dataset.row 는 새 길이를
+        // 넘을 수 있다 — 그냥 읽으면 TypeError 로 스크립트 전체가 죽는다. host
+        // 미러인 buildDraftSnapshot 은 같은 어긋남을 이미 skip 하는데 이쪽만
+        // 빠져 있었다. 두 호출부는 null 계약을 이미 지키므로 여기만 맞추면 된다.
+        const rows = getActiveRows();
+        if (!rows || !rows[rowIdx]) { return null; }
+        const arr = rows[rowIdx][col];
         if (!Array.isArray(arr)) { return null; }
         const inputs = td.querySelectorAll('.cell-edit input[data-arr-idx]');
         if (inputs.length > 0) {
