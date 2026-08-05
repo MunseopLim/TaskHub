@@ -1817,9 +1817,14 @@ export function getWebviewContent(
         const col = td.dataset.col;
         // 시트·행이 어긋나면 읽지 않는다. getActiveRows() 는 활성 시트가 없으면
         // null 을 돌려주고, 지연 commit 처럼 stale 한 dataset.row 는 새 길이를
-        // 넘을 수 있다 — 그냥 읽으면 TypeError 로 스크립트 전체가 죽는다. host
-        // 미러인 buildDraftSnapshot 은 같은 어긋남을 이미 skip 하는데 이쪽만
-        // 빠져 있었다. 두 호출부는 null 계약을 이미 지키므로 여기만 맞추면 된다.
+        // 넘을 수 있다 — 그냥 읽으면 TypeError 로 스크립트 전체가 죽는다.
+        //
+        // 이 함수부터 막는 이유는 **이미 null 계약이 있어서**다: 두 호출부가
+        // 돌려받은 값을 검사하고 있고, host 미러인 buildDraftSnapshot 도 같은
+        // 어긋남을 skip 한다. 계약이 있는데 여기서만 지키지 않던 자리였다.
+        // (data-convert · data-delete-row · commitCell 등 다른 getActiveRows()
+        // 호출부에는 아직 이 가드가 없다. 그쪽은 돌려줄 계약이 없어 같은 방식으로
+        // 고칠 수 없다 — 필요해지면 별도로 다룬다.)
         const rows = getActiveRows();
         if (!rows || !rows[rowIdx]) { return null; }
         const arr = rows[rowIdx][col];
