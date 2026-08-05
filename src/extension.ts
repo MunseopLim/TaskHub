@@ -5670,7 +5670,7 @@ async function executeSingleTask(
             if (task.tool !== undefined && task.tool !== null) {
                 interpolatedZipTask.tool = interpolateToolValue(task.tool, interpolationContext);
             }
-            result = await handleZip(interpolatedZipTask, allResults, defaultWorkspace, executionRun, taskUsesSecret);
+            result = await handleZip(interpolatedZipTask, allResults, defaultWorkspace, executionRun, taskUsesSecret, context.extensionPath);
             break;
         }
         case 'stringManipulation':
@@ -7133,10 +7133,23 @@ async function handleZip(
     allResults: any,
     workspaceFolderPath: string | undefined,
     run: ActionRunContext,
-    redactOutput: boolean
+    redactOutput: boolean,
+    /**
+     * `${extensionPath}` 를 해석하기 위해 받는다.
+     *
+     * `unzip` 은 `archive` · `destination` · `cwd` · `env` 를 `executeSingleTask`
+     * 에서 **미리** 보간해 넘기므로 그쪽 컨텍스트(=`extensionPath` 포함)를 쓴다.
+     * `zip` 만 `tool` 을 뺀 나머지를 여기서 직접 보간하는데, 이 컨텍스트에는
+     * `extensionPath` 가 없어 `${extensionPath}` 가 **리터럴로 남았다** — Preview
+     * 와 Doctor 는 둘 다 해석하므로 진단만 정상이라고 말하는 자리였다. 게다가
+     * `tool` 은 미리 보간되어 해석되므로, 같은 태스크 안에서 `tool` 과
+     * `archive` 가 서로 다른 규칙을 따르고 있었다.
+     */
+    extensionPath: string
 ): Promise<{ archivePath: string }> {
     const interpolationContext = Object.assign(Object.create(null), allResults, {
         workspaceFolder: workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+        extensionPath,
     });
 
     const archive = task.archive ? interpolatePipelineVariables(task.archive, interpolationContext) : undefined;

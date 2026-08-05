@@ -615,6 +615,7 @@ IT-123 ~ IT-125 가 "프롬프트 앞에 멈춘 액션" 을 다뤘고, 이 그�
 | IT-144 | 외부 `tool` 경로도 해석된 절대 경로를 downstream 에 넘김 | `${zip.archivePath}` 가 상대 경로로 새던 것 |
 | IT-146 | 외부 `tool` unzip 도 `task.cwd` 를 씀 | `tool` 유무로 `cwd` 가 다르게 듣던 것 |
 | IT-153 | OS별 `tool` 객체가 **현재 플랫폼 branch 로 보간되어** 실행됨 (비활성 branch 의 미해결 참조는 무관) | 보간→선택 연결이 소스 정규식으로만 고정돼 있어, 보간 결과를 버려도 통과하던 것 |
+| IT-154 | `zip` 의 `source` 안 `${extensionPath}` 가 런타임에서도 해석됨 | `handleZip` 만 자기 컨텍스트를 만들며 `extensionPath` 를 빠뜨려, `tool` 은 해석되고 `archive`/`source` 는 리터럴로 남던 것 |
 
 ### IT-151 ~ IT-152: 다이얼로그 다중 선택
 

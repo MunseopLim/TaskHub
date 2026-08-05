@@ -1344,6 +1344,28 @@ try {
             );
         });
 
+        test('IT-154: zip 의 ${extensionPath} 가 런타임에서도 해석된다', async () => {
+            // `handleZip` 은 자기 보간 컨텍스트를 만드는데 거기에 `extensionPath`
+            // 가 없어 `${extensionPath}` 가 **리터럴로 남았다** — Preview 와
+            // Doctor 는 둘 다 해석하므로 진단만 정상이라고 말하는 자리였다.
+            // `tool` 은 `executeSingleTask` 가 미리 보간해 넘기므로 해석됐고,
+            // 그래서 같은 태스크 안에서 필드마다 규칙이 갈려 있었다.
+            const action: PipelineAction = {
+                description: 'IT-154',
+                tasks: [
+                    { id: 'pack', type: 'zip', archive: 'out/ext.zip', source: ['${extensionPath}/package.json'] },
+                    { id: 'unpack', type: 'unzip', archive: '${pack.archivePath}', destination: 'out/extracted' },
+                ]
+            };
+
+            await run(action);
+
+            assert.ok(
+                fs.existsSync(path.join(tempWorkspace, 'out', 'extracted', 'package.json')),
+                '${extensionPath} 가 source 에서 해석되지 않았다 — 리터럴 경로를 압축하려 했다'
+            );
+        });
+
         test('IT-025: 빌트인 엔진은 .zip이 아닌 아카이브를 거부', async () => {
             const action: PipelineAction = {
                 description: 'IT-025',

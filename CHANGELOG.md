@@ -29,6 +29,14 @@
 =====================================================================
 -->
 
+## [0.6.64] - 2026-08-05
+
+### 수정 — `zip` 안에서 필드마다 `${extensionPath}` 규칙이 갈리던 것
+
+- **`handleZip` 만 자기 보간 컨텍스트를 만들며 `extensionPath` 를 빠뜨렸다**: `unzip` 은 `archive` · `destination` · `cwd` · `env` 를 `executeSingleTask` 에서 미리 보간해 넘기므로 그쪽 컨텍스트(=`extensionPath` 포함)를 쓰는데, `zip` 은 `tool` 만 미리 보간하고 나머지를 `handleZip` 이 직접 처리한다. 그 컨텍스트에 `extensionPath` 가 없어 `archive` / `source` / `cwd` 의 `${extensionPath}` 가 **리터럴로 남았다** — Preview 와 Doctor 는 둘 다 해석하므로 진단만 "정상" 이라고 말하는 자리다. 0.6.58 이 `tool` 을 미리 보간하도록 고치면서 **같은 태스크 안에서 `tool` 은 해석되고 `archive` 는 안 되는** 상태가 되어 대비가 더 뚜렷해졌다 ([src/extension.ts](src/extension.ts)).
+
+**테스트**: 신규 1종(IT-154), 최종 2379 passing. 실제 파이프라인으로 `${extensionPath}/package.json` 을 압축·해제해 파일이 도착하는지 본다 — 순수 검사로는 **호출부가 빠져도** 통과한다. `extensionPath` 를 컨텍스트에서 되돌려 이 테스트만 깨지는 것을 확인했다.
+
 ## [0.6.63] - 2026-08-05
 
 ### 수정 — Preview 가 `zip` 의 `source` 참조를 보지 않던 것
