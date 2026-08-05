@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as vm from 'vm';
 import { buildSheetMap, getRowsByPath, SheetEntry, parseValue, coerceEditedCellValue, coerceEditedArrayItems, shouldOfferRecovery, RecoveryEntry, makeRecoveryStore, MinimalWorkspaceState, buildDraftSnapshot, DraftSnapshotInput, decideSaveResult, SaveResultInput, effectiveBaseline, resolveActiveDraftState, ActiveCellEdit } from '../jsonEditorUtils';
 import { wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY, getWebviewContent } from '../jsonEditor';
 
@@ -1107,9 +1108,9 @@ suite('JsonEditorUtils Test Suite', () => {
      *   1. The mirror's documentation keeps listing every webview function
      *      it claims to mirror (someone removing a reference should fail
      *      the test instead of losing it silently).
-     *   2. The webview's `parseValue`, when extracted and evaluated in
-     *      isolation, produces identical results to the mirror's `parseValue`
-     *      across a fixture of tricky inputs.
+     *   2. 번들로 옮긴 것(현재 `parseValue`)은 **배포되는 산출물을 실제로
+     *      실행해** 인라인 스크립트가 꺼내는 이름이 거기 있는지 확인한다.
+     *      소스 정규식으로는 잡히지 않는 실패다.
      */
     suite('webview ↔ jsonEditorUtils mirror synchronization', () => {
         // src/ is the rootDir; compiled tests live in out/test/ so the source
@@ -1117,9 +1118,13 @@ suite('JsonEditorUtils Test Suite', () => {
         const srcDir = path.resolve(__dirname, '..', '..', 'src');
         const editorSource = readSourceForRegex(path.join(srcDir, 'jsonEditor.ts'));
         const mirrorSource = readSourceForRegex(path.join(srcDir, 'jsonEditorUtils.ts'));
+        const fakeWebview = { cspSource: 'https://test.invalid' } as unknown as import('vscode').Webview;
 
+        // `parseValue` 는 이 목록에 없다 — 더 이상 미러가 아니라 webview 가
+        // 번들로 직접 부르는 **한 벌**이기 때문이다. 나머지가 여기서 빠지는
+        // 날은 그것도 이관이 끝났다는 뜻이어야 한다.
         test('mirror header references every synchronization target by name', () => {
-            for (const name of ['buildSheetMap', 'getActiveRows', 'parseValue', 'commitCell', 'sendDraftSnapshot', 'syncEditingArrayCellToData', 'decideSaveResult', 'readActiveCellEdit', 'activeDraftState']) {
+            for (const name of ['buildSheetMap', 'getActiveRows', 'commitCell', 'sendDraftSnapshot', 'syncEditingArrayCellToData', 'decideSaveResult', 'readActiveCellEdit', 'activeDraftState']) {
                 assert.ok(
                     mirrorSource.includes(name),
                     `mirror header must mention "${name}" so drift is visible`
@@ -1279,13 +1284,17 @@ suite('JsonEditorUtils Test Suite', () => {
             );
         });
 
-        test('webview source still defines parseValue and the string-preservation branch', () => {
+        test('webview pulls parseValue from the bundle and keeps the string-preservation branch', () => {
             // Catches the case where someone rewrites the webview but forgets
             // to keep the string-type-preservation branch that the mirror
             // tests above rely on.
+            //
+            // parseValue **정의**는 더 이상 여기 없다 (번들로 옮겼다). 대신 그
+            // 이름을 실제로 꺼내 쓰는지를 본다 — 꺼내지 않으면 아래 분기의
+            // parseValue 호출이 ReferenceError 다.
             assert.ok(
-                /function\s+parseValue\s*\(\s*str\s*\)/.test(editorSource),
-                'webview template must still define parseValue(str)'
+                /const \{[^}]*\bparseValue\b[^}]*\} = TaskHubJsonEditorLogic;/.test(editorSource),
+                'webview must pull parseValue from the logic bundle'
             );
             assert.ok(
                 /typeof\s+oldVal\s*===\s*'string'\s*\?\s*input\.value\s*:\s*parseValue\(/.test(editorSource),
@@ -1345,30 +1354,81 @@ suite('JsonEditorUtils Test Suite', () => {
             );
         });
 
-        test('webview parseValue behaves identically to the mirror parseValue', () => {
-            // Extract the webview's parseValue text and re-evaluate it in an
-            // isolated Function scope, then compare its output to the mirror
-            // across a fixture that covers every branch of the coercion.
-            const match = editorSource.match(/function parseValue\(str\) \{([\s\S]*?)\n    \}/);
-            assert.ok(match, 'could not locate the webview parseValue function body');
-            const webviewParseValue = new Function('str', match![1]) as (s: string) => unknown;
+        /**
+         * `parseValue` 는 더 이상 미러가 아니다.
+         *
+         * 인라인 사본을 지우고 webview 가 `dist/jsonEditorWebview.js` 의 것을
+         * 그대로 부른다. 그러니 여기서 볼 것은 "두 벌이 같은가" 가 아니라
+         * **한 벌이 진짜로 배달되는가** 다 — 번들이 빌드되지 않았거나 전역
+         * 이름이 어긋나면 인라인 스크립트가 첫 줄에서 죽어 에디터 화면이
+         * 통째로 빈다. 소스 정규식으로는 절대 잡히지 않는 종류의 실패다.
+         */
+        test('webview 로직 번들이 인라인 스크립트가 꺼내는 것을 그대로 내보낸다', () => {
+            const bundlePath = path.resolve(__dirname, '..', '..', 'dist', 'jsonEditorWebview.js');
+            assert.ok(fs.existsSync(bundlePath), `번들이 없다: ${bundlePath}`);
 
+            const sandbox: Record<string, unknown> = {};
+            vm.runInNewContext(fs.readFileSync(bundlePath, 'utf-8'), sandbox);
+            const logic = sandbox.TaskHubJsonEditorLogic as Record<string, unknown> | undefined;
+            assert.ok(logic, '번들이 TaskHubJsonEditorLogic 전역을 올리지 않았다');
+
+            // 인라인 스크립트가 실제로 구조분해하는 이름들을 소스에서 뽑아
+            // 대조한다 — 한쪽만 바뀌면 여기서 드러난다.
+            const destructured = editorSource.match(/const \{ ([^}]+) \} = TaskHubJsonEditorLogic;/);
+            assert.ok(destructured, '인라인 스크립트가 번들에서 무엇을 꺼내는지 찾지 못했다');
+            const names = destructured![1].split(',').map(s => s.trim()).filter(Boolean);
+            assert.ok(names.length > 0, '구조분해 목록이 비어 있다');
+            for (const name of names) {
+                assert.strictEqual(typeof logic![name], 'function', `번들에 ${name} 이 없다`);
+            }
+
+            // 번들이 옛 산출물이면 여기서 드러난다.
             const fixtures: string[] = [
                 '', 'null', 'true', 'false',
                 '0', '42', '-3.14', '00123',
                 ' ', '   ', 'hello', 'NaN', 'Infinity', '-Infinity',
                 '1e10', '0xFF', '  42  '
             ];
+            const bundled = logic!.parseValue as (s: string) => unknown;
             for (const input of fixtures) {
-                const fromWebview = webviewParseValue(input);
-                const fromMirror = parseValue(input);
                 assert.deepStrictEqual(
-                    fromWebview,
-                    fromMirror,
-                    `parseValue drift for input ${JSON.stringify(input)}: ` +
-                    `webview=${JSON.stringify(fromWebview)}, mirror=${JSON.stringify(fromMirror)}`
+                    bundled(input),
+                    parseValue(input),
+                    `번들의 parseValue 가 모듈과 다르다: ${JSON.stringify(input)}`
                 );
             }
+        });
+
+        test('인라인 스크립트에 parseValue 사본이 남아 있지 않다', () => {
+            // 사본이 되살아나면 번들 쪽과 다시 두 벌이 되고, 그 순간부터 둘은
+            // 어긋나기 시작한다 — 이 이관이 없애려던 상태 그대로다.
+            // 들여쓰기나 화살표 함수로 되살아나도 걸리게 한다. 구조분해
+            // (`const { parseValue } = …`)는 사본이 아니므로 제외한다.
+            const withoutDestructure = editorSource.replace(/const \{[^}]*\} = TaskHubJsonEditorLogic;/g, '');
+            assert.ok(
+                !/\bfunction\s+parseValue\s*\(|\b(?:const|let|var)\s+parseValue\s*=/.test(withoutDestructure),
+                '인라인 parseValue 사본이 다시 생겼다'
+            );
+        });
+
+        test('로직 번들이 인라인 스크립트보다 먼저 로드된다', () => {
+            // 순서가 뒤집히면 인라인 스크립트가 전역을 못 찾고 첫 줄에서 죽는다.
+            const html = getWebviewContent(
+                { rows: [{ a: 1 }] }, undefined, '/tmp/t.json', fakeWebview, false, 7,
+                'https://test.invalid/jsonEditorWebview.js'
+            );
+            const bundleTag = html.indexOf('src="https://test.invalid/jsonEditorWebview.js"');
+            const inlineUse = html.indexOf('= TaskHubJsonEditorLogic;');
+            assert.ok(bundleTag > -1, '번들 script 태그가 없다');
+            assert.ok(inlineUse > -1, '인라인 스크립트가 번들을 쓰지 않는다');
+            assert.ok(bundleTag < inlineUse, '번들이 인라인 스크립트보다 뒤에 있다');
+            // nonce 는 **CSP 에 적힌 그 값**이어야 한다. 있기만 하고 값이 다르면
+            // 브라우저가 조용히 차단해 화면만 빈다 — 태그의 존재로는 못 잡는다.
+            const cspNonce = html.match(/script-src 'nonce-([^']+)'/);
+            assert.ok(cspNonce, 'CSP 에서 script-src nonce 를 찾지 못했다');
+            const tagNonce = html.match(/<script nonce="([^"]+)" src="https:\/\/test\.invalid/);
+            assert.ok(tagNonce, '번들 script 태그에 nonce 가 없다 — CSP 가 막는다');
+            assert.strictEqual(tagNonce![1], cspNonce![1], '번들 script 의 nonce 가 CSP 와 다르다');
         });
 
         test('every mutation site pushes to history', () => {
@@ -2582,7 +2642,7 @@ suite('JsonEditorUtils Test Suite', () => {
         }
 
         test('data literal preserves multi-byte characters losslessly', () => {
-            const html = getWebviewContent(unicodeData, undefined, '/tmp/t.json', fakeWebview, false, SESSION);
+            const html = getWebviewContent(unicodeData, undefined, '/tmp/t.json', fakeWebview, false, SESSION, 'https://test.invalid/jsonEditorWebview.js');
             const roundTripped = extractJsLiteral(html, /let data = (.*);/);
             assert.deepStrictEqual(roundTripped, unicodeData);
             // savedData 미지정 시 baseline 신호는 undefined 유지
@@ -2591,7 +2651,7 @@ suite('JsonEditorUtils Test Suite', () => {
 
         test('savedData literal preserves multi-byte characters losslessly', () => {
             const saved: Record<string, unknown> = { '키': '값—≥한글' };
-            const html = getWebviewContent(unicodeData, saved, '/tmp/t.json', fakeWebview, false, SESSION);
+            const html = getWebviewContent(unicodeData, saved, '/tmp/t.json', fakeWebview, false, SESSION, 'https://test.invalid/jsonEditorWebview.js');
             const roundTripped = extractJsLiteral(html, /const savedInit = (.*);/);
             assert.deepStrictEqual(roundTripped, saved);
         });
@@ -2602,7 +2662,7 @@ suite('JsonEditorUtils Test Suite', () => {
             // 오가는 메시지를 전부 버린다 — 화면은 멀쩡해 보인다.
             for (const bad of [0, -1, NaN, 1.5]) {
                 assert.throws(
-                    () => getWebviewContent(unicodeData, undefined, '/tmp/t.json', fakeWebview, false, bad),
+                    () => getWebviewContent(unicodeData, undefined, '/tmp/t.json', fakeWebview, false, bad, 'https://test.invalid/jsonEditorWebview.js'),
                     /must be a live session id/,
                     `세션 ${bad} 을 통과시켰다`
                 );
@@ -2611,7 +2671,7 @@ suite('JsonEditorUtils Test Suite', () => {
 
         test('injected literals cannot terminate the script block early', () => {
             const payload = { k: '</scr' + 'ipt><img src=x>' };
-            const html = getWebviewContent(payload, undefined, '/t.json', fakeWebview, false, SESSION);
+            const html = getWebviewContent(payload, undefined, '/t.json', fakeWebview, false, SESSION, 'https://test.invalid/jsonEditorWebview.js');
             const m = html.match(/let data = (.*);/);
             assert.ok(m, 'could not locate injected data literal');
             assert.ok(!m![1].includes('</scr' + 'ipt>'), 'literal must escape "<" so the HTML parser cannot see a closing script tag');

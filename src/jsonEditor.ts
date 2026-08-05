@@ -537,7 +537,11 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             {
                 enableScripts: true,
                 enableFindWidget: true,
-                retainContextWhenHidden: true
+                retainContextWhenHidden: true,
+                // webview 로직 번들을 실을 수 있어야 한다. 기본값도 확장 설치
+                // 디렉터리를 포함하지만, 읽는 사람이 "이 webview 가 디스크에서
+                // 무엇을 불러오는지" 를 여기서 바로 알 수 있도록 명시한다.
+                localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')]
             }
         );
         currentPanel.onDidDispose(() => {
@@ -569,7 +573,10 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     currentSessionId = sessionId;
 
     currentPanel.title = `JSON Editor: ${fileName}`;
-    currentPanel.webview.html = getWebviewContent(jsonData, savedDataForWebview, filePath, currentPanel.webview, baselineUnknownForWebview, sessionId);
+    const logicScriptUri = currentPanel.webview.asWebviewUri(
+        vscode.Uri.joinPath(context.extensionUri, 'dist', 'jsonEditorWebview.js')
+    ).toString();
+    currentPanel.webview.html = getWebviewContent(jsonData, savedDataForWebview, filePath, currentPanel.webview, baselineUnknownForWebview, sessionId, logicScriptUri);
     currentIsDirty = Boolean(recovered);
     currentFilePath = filePath;
     currentLastWriteMtime = baselineMtimeMs;
@@ -1195,6 +1202,10 @@ export function buildJsonEditorStrings(): Record<string, string> {
         invalidJsonInCell: t('셀 [{col}]의 JSON이 올바르지 않습니다: {message}', 'Invalid JSON in cell [{col}]: {message}'),
         historyRestoreFailed: t('편집 기록 복원에 실패했습니다: {message}', 'History restore failed: {message}'),
         scriptError: t('스크립트 오류: {message} ({line}번째 줄)', 'JS Error: {message} (line {line})'),
+        logicBundleMissing: t(
+            '편집기 스크립트(jsonEditorWebview.js)를 불러오지 못했습니다. 확장을 다시 설치하거나 VS Code 를 재시작해 주세요.',
+            'Failed to load the editor script (jsonEditorWebview.js). Try reinstalling the extension or restarting VS Code.'
+        ),
         rowMoved: t('{n}번 위치로 이동했습니다.', 'Moved to position {n}.'),
     };
 }
@@ -1228,7 +1239,19 @@ export function getWebviewContent(
      * 검사가 막으려던 교차 배달을 그대로 허용한다. 빠뜨린 호출부는 컴파일러가
      * 잡게 두고, 살아 있는 세션이 아닌 값은 아래에서 거부한다.
      */
-    sessionId: number
+    sessionId: number,
+    /**
+     * `dist/jsonEditorWebview.js` 의 webview URI (`asWebviewUri` 를 거친 문자열).
+     *
+     * webview 스크립트가 쓰는 순수 로직의 단일 출처다 — 자세한 배경은
+     * [src/webview/jsonEditorLogic.ts](./webview/jsonEditorLogic.ts) 참조.
+     * 인라인 스크립트보다 **먼저** 로드되어 전역 하나를 올려 준다.
+     *
+     * 여기도 기본값을 두지 않는다. 이 값을 빠뜨린 webview 는 전역이 없어
+     * 인라인 스크립트가 첫 줄에서 죽고 화면이 통째로 비므로, 컴파일러가 잡는
+     * 편이 낫다.
+     */
+    logicScriptUri: string
 ): string {
     // 인자를 필수로 만든 것은 **생략**만 막는다. 살아 있는 세션이 없는 상태에서
     // 화면을 다시 그리는 **새 호출부**(예: dispose 뒤의 refresh)가 생기면
@@ -1237,6 +1260,12 @@ export function getWebviewContent(
     // 막으면 NaN·음수처럼 똑같이 조용한 값이 남는다.
     if (!Number.isInteger(sessionId) || sessionId <= NO_SESSION) {
         throw new Error(`getWebviewContent: sessionId must be a live session id (positive integer), got ${sessionId}.`);
+    }
+    // sessionId 와 같은 정책을 실제로 같게 만든다. 인자를 필수로 만든 것은
+    // **생략**만 막는데, 빈 문자열이 들어오면 `<script src="">` 가 되어 문서
+    // 자신을 스크립트로 다시 요청하고 — 번들은 실리지 않은 채 화면만 빈다.
+    if (!logicScriptUri) {
+        throw new Error('getWebviewContent: logicScriptUri must be a non-empty webview URI.');
     }
     // Inject data as escaped JS literals (memoryMapViewer escapeForScript 패턴).
     // 이전의 base64 + atob() 경로는 atob()가 latin1 디코딩이라 멀티바이트 문자
@@ -1254,6 +1283,9 @@ export function getWebviewContent(
     const esc = (value: string) => value
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const savedLiteral = savedData !== undefined ? escapeForScript(savedData) : 'undefined';
+    // src 속성 컨텍스트. asWebviewUri 결과에 따옴표가 들어갈 일은 없지만,
+    // 속성으로 나가는 값은 예외 없이 이스케이프한다.
+    const escapedLogicScriptUri = esc(logicScriptUri);
     const escapedPath = filePath.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const nonce = generateNonce();
     const csp = `default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};`;
@@ -1582,6 +1614,9 @@ export function getWebviewContent(
     <div id="errorMsg" role="alert" style="color:var(--danger);padding:12px;display:none;"></div>
     <div id="srStatus" class="sr-only" role="status" aria-live="polite"></div>
 
+<!-- 순수 로직의 단일 출처. 아래 인라인 스크립트보다 **먼저** 로드되어야 한다 —
+     인라인 쪽이 첫 줄에서 이 전역을 꺼내 쓴다. src/webview/jsonEditorLogic.ts 참조. -->
+<script nonce="${nonce}" src="${escapedLogicScriptUri}"></script>
 <script nonce="${nonce}">
 (function() {
     // Locale-resolved labels injected by the host (buildJsonEditorStrings).
@@ -1604,6 +1639,22 @@ export function getWebviewContent(
     window.onerror = function(msg, src, line, col, err) {
         showError(fmt(S.scriptError, { message: msg, line: line }));
     };
+
+    // 번들이 올려 준 순수 로직. 예전에는 이 함수들의 사본이 이 문자열 안에 또
+    // 있었고, src/jsonEditorUtils.ts 의 "미러" 와 어긋나지 않기를 주석으로만
+    // 바라고 있었다. 이제 같은 것을 부른다.
+    //
+    // **화면에 남기고 나서 던진다.** \`<script src>\` 의 404 는 window.onerror 를
+    // 발생시키지 않으므로(리소스 로드 실패는 window 로 버블링되지 않는다) 이
+    // 자리가 유일한 발견 지점이다. 그냥 던지면 사용자는 툴바만 있는 빈 화면을
+    // 영원히 보고, 아무 신호도 받지 못한다. showError 는 위에서 이미 준비됐다 —
+    // 이 검사를 그 뒤에 두는 이유가 그것이다.
+    if (typeof TaskHubJsonEditorLogic === 'undefined') {
+        showError(S.logicBundleMissing);
+        throw new Error('jsonEditorWebview.js did not load');
+    }
+    const { parseValue } = TaskHubJsonEditorLogic;
+
     // 이 webview 인스턴스의 세션 번호. host 가 html 에 심어 준다.
     const SESSION_ID = ${sessionId};
 
@@ -2847,15 +2898,8 @@ export function getWebviewContent(
     // Type-coercing input parser used only when the original cell had a
     // non-string primitive type. For string cells we keep the raw string to
     // avoid data loss (see commitCell above).
-    function parseValue(str) {
-        if (str === '') { return ''; }
-        if (str === 'null') { return null; }
-        if (str === 'true') { return true; }
-        if (str === 'false') { return false; }
-        const num = Number(str);
-        if (Number.isFinite(num) && str.trim() !== '') { return num; }
-        return str;
-    }
+    // parseValue 는 여기 있었다. 지금은 번들이 올려 주는 것을 위에서 꺼내 쓴다
+    // (src/webview/jsonEditorLogic.ts).
 
     function escapeHtml(str) {
         return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

@@ -26,6 +26,12 @@ npm run test             # 유닛 테스트 실행 (vscode-test)
 npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 ```
 
+esbuild 는 **번들 두 개**를 만든다 — 확장 호스트용 `dist/extension.js` 와 JSON Editor
+webview 의 로직 번들 `dist/jsonEditorWebview.js`. 후자가 없으면 JSON Editor 화면이
+통째로 비므로, 테스트를 직접 돌릴 때(`npm run test` 는 `pretest` 가 알아서 빌드한다)나
+`vscode-test` 를 수동으로 부를 때는 `node esbuild.js` 를 먼저 실행한다. 배경은
+[docs/architecture.md](docs/architecture.md) "webview 스크립트의 두 층" 참조.
+
 ### 커밋 전 체크리스트
 
 커밋 전 반드시 다음 항목을 확인:

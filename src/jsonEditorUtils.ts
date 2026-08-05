@@ -1,13 +1,26 @@
 /**
- * webview JS(jsonEditor.ts의 getWebviewContent 내부 `buildSheetMap`/`getActiveRows`/
- * `parseValue`/`coerceEditedCellValue`/`buildDraftSnapshot`)의 테스트용 미러. 프로덕션
- * 코드는 webview 내부 JS 문자열을 사용하므로 이 파일을 import하지 못한다. 로직을
- * 변경할 때는 반드시 jsonEditor.ts의 동일 함수도 함께 수정해야 한다.
- * (동기화 대상: jsonEditor.ts의 buildSheetMap / getActiveRows / parseValue / commitCell /
+ * JSON Editor 의 순수 로직. `vscode` 를 import 하지 않으며, 앞으로도 하면 안 된다 —
+ * 이 파일은 webview 번들에도 들어가므로 확장 호스트 API 가 없는 곳에서 실행된다.
+ *
+ * **이 파일을 쓰는 곳은 셋이다.**
+ *
+ *   1. host (`jsonEditor.ts`) — 직접 import.
+ *   2. webview — `src/webview/jsonEditorLogic.ts` 를 통해 `dist/jsonEditorWebview.js`
+ *      로 묶여 전역 `TaskHubJsonEditorLogic` 으로 올라간다. 여기까지 옮긴 것은
+ *      **{@link parseValue}** 하나다.
+ *   3. 테스트.
+ *
+ * **아직 미러인 것들.** 아래 함수들은 `jsonEditor.ts` 의 템플릿 리터럴 안에 사본이
+ * 한 벌 더 있고, 그 사본이 실제로 도는 코드다. 로직을 바꾸면 **반드시 양쪽을 같이**
+ * 고쳐야 한다 — 컴파일러가 잡아 주지 않는다.
+ * (동기화 대상: jsonEditor.ts 의 buildSheetMap / getActiveRows / commitCell /
  * sendDraftSnapshot / syncEditingArrayCellToData / decideSaveResult / readActiveCellEdit /
  * activeDraftState)
  *
- * 이 파일은 host-side에서 import 가능한 순수 헬퍼도 같이 보관한다.
+ * 이 두 벌 상태를 없애는 것이 webview 번들 이관의 목적이다. 배경과 진행 상황은
+ * docs/architecture.md 의 "webview 스크립트의 두 층" 참조.
+ *
+ * 이 파일은 host-side 전용 순수 헬퍼도 같이 보관한다.
  * 예: dirty-close 복구 스냅샷의 유효성 판정({@link shouldOfferRecovery}).
  */
 
@@ -261,9 +274,11 @@ export function getRowsByPath(data: Record<string, unknown>, path: string[]): un
 }
 
 /**
- * Mirror of the webview's `parseValue`. Coerces the raw input string for a
- * simple cell editor back into a primitive JS value. Exported so the coercion
- * rules can be exercised in unit tests alongside {@link coerceEditedCellValue}.
+ * 단순 셀 편집기의 raw 입력 문자열을 원시 JS 값으로 되돌린다.
+ *
+ * **미러가 아니라 webview 가 실제로 부르는 그 함수다** — `jsonEditor.ts` 의
+ * 템플릿 리터럴에는 사본이 없고, 번들(`dist/jsonEditorWebview.js`)을 통해 이것이
+ * 그대로 실행된다. {@link coerceEditedCellValue} 와 함께 단위테스트로 검사한다.
  */
 export function parseValue(str: string): unknown {
     if (str === '') { return ''; }

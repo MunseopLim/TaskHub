@@ -21,7 +21,7 @@ const fakeWebview = { cspSource: 'https://test.invalid' } as unknown as vscode.W
 const SESSION = 7;
 
 function render(data: Record<string, unknown> = { rows: [{ a: 1 }] }): string {
-    return getWebviewContent(data, undefined, '/tmp/sample.json', fakeWebview, false, SESSION);
+    return getWebviewContent(data, undefined, '/tmp/sample.json', fakeWebview, false, SESSION, 'https://test.invalid/jsonEditorWebview.js');
 }
 
 suite('JSON Editor 웹뷰 지역화 / 접근성', () => {

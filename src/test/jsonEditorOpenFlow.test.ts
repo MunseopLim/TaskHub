@@ -41,6 +41,10 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         posted: any[];
         /** 현재 html 에 심긴 세션 번호. */
         sessionId(): number;
+        /** `createWebviewPanel` 에 넘어간 옵션 — webview 가 무엇을 읽을 수 있는지. */
+        panelOptions(): Record<string, unknown> | undefined;
+        /** host 가 세팅한 webview html 전체. */
+        html(): string;
         /** 호스트가 등록한 `onDidReceiveMessage` 콜백. 웹뷰 흉내에 쓴다. */
         send(message: Record<string, unknown>): Promise<void>;
         /**
@@ -83,8 +87,13 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             dispose: () => { /* no-op */ },
         } as unknown as vscode.WebviewPanel;
 
-        (vscode.window as any).createWebviewPanel = () => {
+        /** 패널 생성 옵션. webview 가 무엇을 읽을 수 있는지가 여기서 정해진다. */
+        let panelOptions: Record<string, unknown> | undefined;
+        (vscode.window as any).createWebviewPanel = (
+            _type: string, _title: string, _col: unknown, options?: Record<string, unknown>
+        ) => {
             events.push('create-panel');
+            panelOptions = options;
             return panel;
         };
         /** 현재 html 에 심긴 세션 번호 — 실제 webview 가 읽는 것과 같은 값. */
@@ -98,6 +107,8 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             panel,
             posted,
             sessionId,
+            panelOptions: () => panelOptions,
+            html: () => html,
             async send(message: Record<string, unknown>) {
                 assert.ok(handler, '호스트가 onDidReceiveMessage 를 등록하지 않았다');
                 // 실제 webview 는 `postToHost` 로 세션을 붙여 보낸다. 테스트가
@@ -134,6 +145,8 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         };
         return {
             extensionPath: tempDir,
+            // webview 로직 번들의 URI 를 만드는 데 쓴다 (asWebviewUri 대상).
+            extensionUri: vscode.Uri.file(tempDir),
             subscriptions: [],
             workspaceState: memento,
             globalState: memento,
@@ -199,6 +212,37 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         assert.ok(jsonPanelRegistry.has(), '레지스트리가 패널을 잡고 있지 않다');
         assert.strictEqual(jsonPanelRegistry.getFilePath(), filePath);
         assert.ok((jsonPanelRegistry.getHtml() ?? '').length > 0, 'HTML 이 비어 있다');
+    });
+
+    /**
+     * webview 로직 번들을 **실제로 가리키고 실제로 읽을 수 있는지.**
+     *
+     * 이 두 값이 host 쪽에서 유일하게 "어떤 URL 을 싣는가" 를 정한다. 나머지
+     * webview 테스트는 전부 `getWebviewContent` 에 리터럴 URI 를 넘기므로 여기를
+     * 덮지 못한다 — 파일명을 오타 내거나 `localResourceRoots` 를 비워도 전체
+     * 스위트가 초록으로 통과하는 것을 확인했다. 그 경우 사용자는 툴바만 있는 빈
+     * 화면을 본다.
+     */
+    test('패널이 로직 번들을 가리키고 그 디렉터리를 읽을 수 있다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('bundle.json', { alpha: [{ id: 1 }] });
+
+        await openJsonEditorFile(makeContext(), filePath);
+
+        // 기대 URI 는 extensionUri 에서 유도한다 — 리터럴로 적으면 소스와 함께
+        // 틀려도 알 수 없다. 가짜 asWebviewUri 는 항등이다.
+        const expected = vscode.Uri.file(path.join(tempDir, 'dist', 'jsonEditorWebview.js')).toString();
+        assert.ok(
+            fake.html().includes(`src="${expected}"`),
+            `번들 script 태그가 ${expected} 를 가리키지 않는다`
+        );
+
+        const roots = fake.panelOptions()?.localResourceRoots as vscode.Uri[] | undefined;
+        assert.ok(roots && roots.length > 0, 'localResourceRoots 가 비어 있으면 번들을 읽지 못한다');
+        assert.ok(
+            roots!.some(root => path.join(tempDir, 'dist').startsWith(root.fsPath)),
+            `localResourceRoots 에 dist 가 없다: ${roots!.map(r => r.fsPath).join(', ')}`
+        );
     });
 
     test('한도를 넘는 파일은 패널을 만들지 않고 오류만 알린다', async () => {

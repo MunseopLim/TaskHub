@@ -32,7 +32,9 @@ TaskHub/
 │   ├── dialogMemory.ts                # 파일/폴더 다이얼로그의 마지막 사용 위치 기억
 │   ├── diagnosticMatcher.ts           # shell 출력 → VS Code Diagnostic 매칭 순수 모듈
 │   ├── jsonEditor.ts                  # JSON Editor WebView (시트/행 편집)
-│   ├── jsonEditorUtils.ts             # jsonEditor.ts webview JS의 테스트용 pure mirror
+│   ├── jsonEditorUtils.ts             # JSON Editor 순수 로직 (host·webview 공용, vscode 비의존)
+│   ├── webview/
+│   │   └── jsonEditorLogic.ts         # 위 로직을 webview 번들로 내보내는 엔트리
 │   ├── hexViewer.ts                   # Hex Viewer WebView (assertWithinHexViewerSpan 포함)
 │   ├── hexParser.ts                   # Intel HEX / SREC / Binary 파서
 │   ├── archiveUtils.ts                # zip/unzip 내장 엔진
@@ -77,9 +79,22 @@ TaskHub/
 ```
 
 **빌드 출력:**
-- `dist/extension.js`: esbuild, CommonJS, 단일 파일 번들
+- `dist/extension.js`: esbuild, CommonJS, 단일 파일 번들 (Node)
+- `dist/jsonEditorWebview.js`: esbuild, IIFE, 브라우저 타깃. JSON Editor webview 의 순수 로직 번들 (아래 참조)
 - `out/`: tsc 컴파일 (테스트용)
 - 외부 의존성: `vscode` (번들에서 제외)
+
+**webview 스크립트의 두 층.** `jsonEditor.ts` 의 webview JS 는 대부분 `getWebviewContent()`
+의 템플릿 리터럴 안에 문자열로 있다 — 그 안은 타입체크도 린트도 걸리지 않는다. 그래서
+**순수 로직만은** 진짜 모듈로 빼서 `src/webview/jsonEditorLogic.ts` 를 엔트리로 번들하고,
+webview 가 전역 `TaskHubJsonEditorLogic` 에서 꺼내 쓴다. 같은 모듈을 host 테스트도 직접
+import 하므로 로직은 **한 벌**이다.
+
+예전에는 두 벌이었다 — 문자열 안의 사본과 `jsonEditorUtils.ts` 의 "테스트용 미러". 두 벌은
+반드시 어긋나고, 실제로 어긋났다. 인라인에 남아 있는 함수들은 아직 미러 관계이며
+(`NOTE: … 와 동일해야 한다` 주석이 붙어 있다) 순차적으로 이 번들로 옮긴다.
+
+이관된 것: `parseValue`.
 
 ## 주요 컴포넌트
 

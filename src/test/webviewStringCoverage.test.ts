@@ -227,7 +227,8 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
                     false,
                     // 문구만 보므로 값은 무관하지만 0 은 피한다 — NO_SESSION 과
                     // 같은 값이라 메시지를 전부 버리는 webview 가 된다.
-                    7
+                    7,
+                    'https://test.invalid/jsonEditorWebview.js'
                 );
                 assertNoHardcodedStrings(html, buildJsonEditorStrings(), 'JSON Editor', lang);
             });

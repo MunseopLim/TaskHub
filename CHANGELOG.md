@@ -29,6 +29,43 @@
 =====================================================================
 -->
 
+## [0.6.72] - 2026-08-05
+
+### 변경 — JSON Editor webview 로직을 진짜 모듈로 (1/n)
+
+사용자에게 보이는 변화는 없다. `jsonEditor.ts` 의 webview JS 는 1400 행 넘게가
+`getWebviewContent()` 의 **템플릿 리터럴 안 문자열**이라 타입체크도 린트도 걸리지 않고, 같은
+로직이 `jsonEditorUtils.ts` 에 "테스트용 미러" 로 한 벌 더 있었다. 0.6.68~0.6.70 세 릴리스가
+전부 "계약이 한쪽에만 지켜지고 있었다" 였던 것은 우연이 아니다 — 두 벌은 반드시 어긋난다.
+
+- **webview 가 미러를 직접 부른다**: esbuild 에 두 번째 엔트리를 추가해
+  `src/webview/jsonEditorLogic.ts` 를 `dist/jsonEditorWebview.js` (IIFE, 브라우저 타깃) 로 묶고,
+  webview 가 전역 `TaskHubJsonEditorLogic` 에서 꺼내 쓴다. 같은 모듈을 host 테스트도 그대로
+  import 하므로 로직이 **한 벌**이 된다. 이번에 옮긴 것은 `parseValue` 하나다 — 파이프라인
+  (빌드 · CSP nonce · `asWebviewUri` · `localResourceRoots` · VSIX 포함)을 먼저 뚫고, 나머지
+  함수는 이 위에 순차적으로 올린다 ([src/webview/jsonEditorLogic.ts](src/webview/jsonEditorLogic.ts),
+  [esbuild.js](esbuild.js)).
+- **`getWebviewContent` 가 로직 번들 URI 를 받는다**: `asWebviewUri` 를 거친 문자열이며 기본값을
+  두지 않는다. 빈 문자열도 던진다 — `<script src="">` 는 문서 자신을 스크립트로 다시 요청해
+  번들 없이 화면만 비게 만든다.
+- **번들이 안 실리면 화면에 말한다**: 인라인 스크립트가 전역을 못 찾으면 오류 영역에 문구를
+  남기고 던진다. `<script src>` 의 404 는 `window.onerror` 를 발생시키지 않으므로(리소스 로드
+  실패는 window 로 버블링되지 않는다) 이 자리가 유일한 발견 지점이다 — 그냥 던지면 사용자는
+  툴바만 있는 빈 화면을 아무 설명 없이 마주한다.
+- **`localResourceRoots` 를 `dist` 로 좁혔다**: 기본값은 확장 디렉터리 **더하기 모든 워크스페이스
+  폴더**다. 이 webview 가 디스크에서 읽어야 하는 것은 로직 번들 하나뿐이다.
+
+**테스트**: 최종 2414 passing. 소스 정규식으로는 잡을 수 없는 실패(번들 미빌드 · 전역 이름
+어긋남 · 스크립트 순서 역전 · CSP 와 다른 nonce)를 위해, **배포되는 번들 파일을 실제로 실행해**
+인라인 스크립트가 구조분해하는 이름들이 거기 있는지 대조한다. 웹뷰 실행 하네스 세 곳도 정규식
+추출 대신 그 번들을 쓴다 — 하네스가 실제 배달물과 같은 코드를 돌린다는 전제를 유지한다.
+
+host 쪽 절반(번들 파일명과 `localResourceRoots`)은 리뷰에서 **변이로 구멍이 증명됐다** — 파일명을
+오타 내거나 roots 를 비워도 전체 스위트가 초록이었고, 그 빌드의 JSON Editor 는 툴바만 남은 빈
+화면이 된다. 가짜 패널이 생성 옵션을 버리고 있었기에 이제 붙잡아 검사하고, 기대 URI 는
+`extensionUri` 에서 유도한다. 두 변이가 각각 잡히는 것을 확인했다. `vsce ls` 로 VSIX 포함도
+확인했다.
+
 ## [0.6.71] - 2026-08-05
 
 ### 수정 — 0.6.70 리뷰 반영: 배열 태그의 ✕ / +

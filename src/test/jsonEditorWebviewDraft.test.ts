@@ -1,4 +1,7 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as vm from 'vm';
 import * as vscode from 'vscode';
 import { getWebviewContent, buildJsonEditorStrings } from '../jsonEditor';
 
@@ -26,7 +29,42 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
     const SESSION = 7;
     const sheetMap = [{ label: 'rows', path: ['rows'] }];
     const fakeWebview = { cspSource: 'https://test.invalid' } as unknown as vscode.Webview;
-    const html = getWebviewContent({ rows: [{ a: 1 }] }, undefined, '/tmp/sample.json', fakeWebview, false, SESSION);
+    const html = getWebviewContent({ rows: [{ a: 1 }] }, undefined, '/tmp/sample.json', fakeWebview, false, SESSION, 'https://test.invalid/jsonEditorWebview.js');
+
+    /**
+     * **배포되는 로직 번들.** webview 가 전역으로 받는 것과 같은 산출물이다.
+     *
+     * `parseValue` 같은 순수 로직은 더 이상 템플릿 리터럴 안에 사본으로 있지
+     * 않고 `dist/jsonEditorWebview.js` 가 올려 준다. 그래서 여기서도 정규식으로
+     * 뜯어내는 대신 그 파일을 그대로 실행해 쓴다 — 하네스가 실제로 배달되는
+     * 것과 같은 코드를 돌린다는 이 스위트의 전제를 유지한다.
+     */
+    let cachedLogicBundle: unknown;
+    function logicBundle(): unknown {
+        // **지연 로드다.** 스위트 정의 시점에 읽으면 번들이 없을 때 Mocha 의
+        // 파일 로딩 단계에서 터져 **한 건도 실행되지 않은 채** 런 전체가 죽는다
+        // — 무관한 회귀까지 전부 가려진다. 테스트 안에서 실패해야 한 건만 붉다.
+        if (cachedLogicBundle === undefined) {
+            const bundlePath = path.resolve(__dirname, '..', '..', 'dist', 'jsonEditorWebview.js');
+            assert.ok(fs.existsSync(bundlePath), `번들이 없다: ${bundlePath} (node esbuild.js 를 먼저 돌린다)`);
+            const sandbox: Record<string, unknown> = {};
+            vm.runInNewContext(fs.readFileSync(bundlePath, 'utf-8'), sandbox);
+            assert.ok(sandbox.TaskHubJsonEditorLogic, '번들이 TaskHubJsonEditorLogic 전역을 올리지 않았다');
+            cachedLogicBundle = sandbox.TaskHubJsonEditorLogic;
+        }
+        return cachedLogicBundle;
+    }
+
+    /**
+     * 번들에서 꺼내는 문장. **인라인 스크립트의 것을 그대로 가져와** 전역 이름만
+     * 하네스의 인자 이름으로 바꾼다 — 손으로 베껴 두면 꺼내는 목록이 늘어날 때
+     * 조용히 어긋난다.
+     */
+    const PULL_FROM_BUNDLE = (() => {
+        const m = html.match(/const \{ [^}]+ \} = TaskHubJsonEditorLogic;/);
+        assert.ok(m, '인라인 스크립트에서 번들 구조분해 문장을 찾지 못했다');
+        return m![0].replace('TaskHubJsonEditorLogic', 'LOGIC');
+    })();
 
     /** webview HTML 에서 `function name(...) { ... }` 하나를 통째로 뽑는다. */
     function extractFn(name: string): string {
@@ -127,7 +165,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
         const fakeVscode = { postMessage: (m: unknown) => { posted.push(m); } };
 
         const script = [
-            extractFn('parseValue'),
+            PULL_FROM_BUNDLE,
             extractFn('coerceCellValue'),
             extractFn('coerceEditedArrayItems'),
             extractFn('buildDraftSnapshot'),
@@ -165,11 +203,13 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
         ].join('\n');
 
         const factory = new Function(
+            'LOGIC',
             'document', 'vscode', 'SESSION_ID', 'BASELINE_UNKNOWN_SENTINEL',
             'data', 'sheetMap', 'lastSavedSnapshot', 'modified', 'pendingSaveSnapshots',
             script
         );
         const api = factory(
+            logicBundle(),
             doc, fakeVscode, SESSION, '',
             options.data, options.sheetMap, options.lastSavedSnapshot, false,
             new Map(options.pending ?? [])
@@ -225,7 +265,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             const errors: string[] = [];
 
             const script = [
-                extractFn('parseValue'),
+                PULL_FROM_BUNDLE,
                 extractFn('coerceCellValue'),
                 extractFn('coerceEditedArrayItems'),
                 extractFn('getActiveRows'),
@@ -246,8 +286,8 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                 '};',
             ].join('\n');
 
-            const factory = new Function('data', 'sheetMap', 'historyPushes', 'errors', script);
-            const api = factory(data, sheets, historyPushes, errors);
+            const factory = new Function('LOGIC', 'data', 'sheetMap', 'historyPushes', 'errors', script);
+            const api = factory(logicBundle(), data, sheets, historyPushes, errors);
             return { api, historyPushes, errors };
         }
 
@@ -514,7 +554,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             /** 스크린리더로 나간 문구. 실제 문자열 번들과 실제 fmt 를 거친 결과다. */
             const announced: string[] = [];
             const script = [
-                extractFn('parseValue'),
+                PULL_FROM_BUNDLE,
                 extractFn('coerceCellValue'),
                 extractFn('coerceEditedArrayItems'),
                 extractFn('getActiveRows'),
@@ -531,8 +571,8 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             ].join('\n');
             // S 는 진짜 번들을 쓴다 — 핸들러가 없는 키를 부르면 fmt 가 그대로
             // 통과시켜 `undefined` 가 아니라 템플릿이 남으므로 단언에서 드러난다.
-            new Function('document', 'data', 'sheetMap', 'calls', 'announced', 'S', script)(
-                doc, data, sheets, calls, announced, buildJsonEditorStrings());
+            new Function('LOGIC', 'document', 'data', 'sheetMap', 'calls', 'announced', 'S', script)(
+                logicBundle(), doc, data, sheets, calls, announced, buildJsonEditorStrings());
 
             return {
                 calls,
