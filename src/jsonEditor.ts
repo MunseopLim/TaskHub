@@ -1189,6 +1189,9 @@ export function buildJsonEditorStrings(): Record<string, string> {
         splitToArray: t('문자열 → 배열 (쉼표로 분리)', 'String → Array (split by comma)'),
         addArrayItem: t('항목 추가', 'Add item'),
         removeArrayItem: t('{n}번째 항목 삭제', 'Remove item {n}'),
+        arrayItemLabel: t('{col} {n}번째 항목', '{col} item {n}'),
+        arrayItemAdded: t('항목을 추가했습니다. 총 {count}개입니다.', 'Item added. {count} total.'),
+        arrayItemRemoved: t('{n}번째 항목을 삭제했습니다. {count}개 남았습니다.', 'Removed item {n}. {count} remaining.'),
         invalidJsonInCell: t('셀 [{col}]의 JSON이 올바르지 않습니다: {message}', 'Invalid JSON in cell [{col}]: {message}'),
         historyRestoreFailed: t('편집 기록 복원에 실패했습니다: {message}', 'History restore failed: {message}'),
         scriptError: t('스크립트 오류: {message} ({line}번째 줄)', 'JS Error: {message} (line {line})'),
@@ -1791,14 +1794,24 @@ export function getWebviewContent(
         }
     }
 
+    // 툴바 ↶ / ↷.
+    //
+    // 편집 중인 셀이 있으면 **먼저 commit 한다.** 예전에는 그냥 return 했는데,
+    // 배열 태그의 ✕ / + 는 셀을 편집 상태로 남기므로(그래야 연속으로 지울 수
+    // 있다) 그 직후의 undo 가 조용히 아무것도 하지 않았다 — updateUndoRedoButtons
+    // 는 historyIndex 만 보므로 버튼은 **활성인 채로** 눌리기만 하고, 방금 지운
+    // 태그는 돌아오지 않는다. 되돌릴 수 없는 삭제 옆에서 특히 나쁘다.
+    //
+    // 키보드 Ctrl+Z 는 여기 오기 전에 자기 가드로 걸러진다 — 입력 중인 셀에서는
+    // 브라우저 input 의 기본 undo 에 양보한다는 별도의 의도이므로 그대로 둔다.
     function undo() {
-        if (document.querySelector('td.editing')) { return; }
+        if (!commitActiveCellOrAbort()) { return; }
         if (historyIndex <= 0) { return; }
         restoreFromHistoryIndex(historyIndex - 1);
     }
 
     function redo() {
-        if (document.querySelector('td.editing')) { return; }
+        if (!commitActiveCellOrAbort()) { return; }
         if (historyIndex >= historyStack.length - 1) { return; }
         restoreFromHistoryIndex(historyIndex + 1);
     }
@@ -1850,6 +1863,55 @@ export function getWebviewContent(
             for (const v of newArr) { arr.push(v); }
         }
         return arr;
+    }
+
+    // renderTable() 은 wrapper.innerHTML 을 통째로 갈아치우므로, 배열 항목을
+    // 더하거나 지운 직후의 td 는 이미 DOM 에서 사라진 것이다. 같은 셀을 새 표
+    // 에서 다시 찾는다.
+    //
+    // **셀렉터 문자열에 col 을 이어 붙이지 않는다.** 마크업은 escapeAttr 로
+    // 쓰지만 브라우저가 &quot; 를 되돌려 놓으므로 dataset.col 에는 **진짜
+    // 따옴표**가 들어 있을 수 있다(JSON 키에 따옴표가 있는 경우). 그대로 이어
+    // 붙이면 querySelector 가 문법 오류로 던져 **그 클릭 핸들러가 거기서
+    // 멈춘다** — 항목은 늘어나 있는데 포커스는 가지 않고 오류 배너만 뜬다.
+    // 역슬래시는 던지지도 않는다: CSS 가 이스케이프 시작으로 읽어 조용히 다른
+    // 값을 찾는다. rowIdx 는 숫자라 안전하니 행으로만 좁히고 col 은 값 비교로
+    // 고른다 — CSS 이스케이프 규칙을 escapeAttr 과 따로 맞출 필요가 없어진다.
+    function findCellByCol(rowIdx, col) {
+        const cells = document.querySelectorAll('td[data-row="' + rowIdx + '"]');
+        for (const cell of cells) {
+            if (cell.dataset.col === col) { return cell; }
+        }
+        return null;
+    }
+
+    // 배열 항목을 더하거나 지운 뒤, 다시 그린 셀을 편집 상태로 되돌리고
+    // itemSelector 가 가리키는 것들 중 idx 번째에 포커스를 준다. 이게 없으면
+    // ✕ 를 누를 때마다 셀이 view 모드로 접히고 포커스가 body 로 떨어져, 태그
+    // 세 개를 지우려면 셀을 세 번 다시 열어야 한다.
+    //
+    // **두 호출부가 서로 다른 것을 가리킨다.**
+    //   + : 새로 생긴 빈 input. 방금 만든 칸에 바로 입력하는 것이 의도다.
+    //   ✕ : 지운 자리로 올라온 항목의 **✕ 버튼**. input 에 포커스를 주면
+    //       "버튼을 Enter 로 눌렀는데 텍스트 필드에 와 있는" 모드 전환이 되어,
+    //       이어서 누르는 Enter 가 commitCell 로 가 셀이 접히고 포커스가 body
+    //       로 떨어진다 — 이 함수가 없애려던 바로 그 상태다. 버튼에 두면
+    //       Enter 를 계속 눌러 연속으로 지울 수 있다.
+    function refocusArrayCell(rowIdx, col, idx, itemSelector) {
+        const td = findCellByCol(rowIdx, col);
+        if (!td) { return; }
+        td.classList.add('editing');
+        const items = td.querySelectorAll(itemSelector);
+        if (items.length) {
+            // 마지막 항목을 지웠으면 그 앞 칸으로 물러난다.
+            items[Math.min(idx, items.length - 1)].focus();
+            return;
+        }
+        // 항목이 하나도 남지 않으면 포커스를 줄 것이 없다. 편집 상태는 유지해
+        // "+" 가 보이게 하고, 포커스를 그 버튼으로 넘긴다 — 그러지 않으면
+        // 마지막 태그를 지운 순간 포커스가 body 로 떨어진다.
+        const add = td.querySelector('[data-add-arr]');
+        if (add) { add.focus(); }
     }
 
     // NOTE: src/jsonEditorUtils.ts 의 coerceEditedCellValue /
@@ -2163,7 +2225,12 @@ export function getWebviewContent(
             let html = '<div class="cell-edit"><div class="array-edit-area">';
             val.forEach((item, i) => {
                 html += '<div class="tag-row">';
-                html += '<input type="text" value="' + escapeAttr(String(item)) + '" data-arr-idx="' + i + '">';
+                // 이름 없는 input 이었다. ✕ / + 는 이 칸으로 포커스를 옮기는
+                // 것으로 결과를 알리는데, 이름이 없으면 스크린리더는 옆 항목의
+                // 값만 읽어 줘 무슨 일이 일어났는지 알 수 없다.
+                html += '<input type="text" value="' + escapeAttr(String(item))
+                    + '" data-arr-idx="' + i + '" aria-label="'
+                    + escapeAttr(fmt(S.arrayItemLabel, { col: col, n: i + 1 })) + '">';
                 const removeLabel = fmt(S.removeArrayItem, { n: i + 1 });
                 html += '<button class="small danger" data-remove-arr="' + i
                     + '" title="' + escapeAttr(removeLabel) + '" aria-label="' + escapeAttr(removeLabel) + '">✕</button>';
@@ -2520,10 +2587,17 @@ export function getWebviewContent(
                 // 누른 순간 입력값이 data에도 history에도 들어가지 못한 채 사라진다.
                 const arr = syncEditingArrayCellToData(td);
                 if (!arr) { return; }
+                const rowIdx = parseInt(td.dataset.row);
+                const col = td.dataset.col;
                 const idx = parseInt(btn.dataset.removeArr);
                 arr.splice(idx, 1);
                 pushHistory();
                 renderTable();
+                // 포커스만으로는 무엇이 일어났는지 알 수 없다 — 값이 비슷한
+                // 태그들(["debug", "debug-2"])에서는 다음 항목으로 옮겨 간
+                // 포커스가 "지워졌다" 와 구별되지 않는다.
+                announce(fmt(S.arrayItemRemoved, { n: idx + 1, count: arr.length }));
+                refocusArrayCell(rowIdx, col, idx, '.cell-edit [data-remove-arr]');
             });
         });
 
@@ -2532,21 +2606,21 @@ export function getWebviewContent(
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const td = btn.closest('td');
-                const rowIdx = parseInt(td.dataset.row);
-                const col = td.dataset.col;
                 // sync first — 입력 중이던 태그 값이 사라지지 않도록.
+                // dataset 을 읽는 것도 이 뒤다: 그러지 않으면 td 가 null 인
+                // 순간 헬퍼의 null 계약에 닿기 전에 TypeError 로 죽어, ✕ 쪽과
+                // 순서가 어긋난다.
                 const arr = syncEditingArrayCellToData(td);
                 if (!arr) { return; }
+                const rowIdx = parseInt(td.dataset.row);
+                const col = td.dataset.col;
                 arr.push('');
                 pushHistory();
                 renderTable();
-                // Focus last input
-                const newTd = document.querySelector('td[data-row="' + rowIdx + '"][data-col="' + col + '"]');
-                if (newTd) {
-                    newTd.classList.add('editing');
-                    const inputs = newTd.querySelectorAll('.cell-edit input[data-arr-idx]');
-                    if (inputs.length) { inputs[inputs.length - 1].focus(); }
-                }
+                // 이미 빈 칸에 있던 사용자에게는 "+" 가 아무 일도 하지 않은
+                // 것과 구별되지 않는다.
+                announce(fmt(S.arrayItemAdded, { count: arr.length }));
+                refocusArrayCell(rowIdx, col, arr.length - 1, '.cell-edit input[data-arr-idx]');
             });
         });
 

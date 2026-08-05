@@ -1321,16 +1321,27 @@ suite('JsonEditorUtils Test Suite', () => {
         });
 
         test('webview undo/redo guard against in-progress cell edits', () => {
-            // 셀 편집 중에는 브라우저 input의 기본 undo가 우선이어야 한다.
-            // td.editing 가드가 사라지면 한 글자 지우려다 직전 행 삭제가
-            // 되돌려지는 사고가 발생한다.
+            // 셀 편집 중 **키보드** Ctrl+Z 는 브라우저 input 의 기본 undo 에
+            // 양보해야 한다. 이 가드가 사라지면 한 글자 지우려다 직전 행 삭제가
+            // 되돌려지는 사고가 난다.
+            //
+            // 가드는 **keydown 핸들러 쪽에만** 있어야 한다. undo() 자신에 두면
+            // 툴바 ↶ 까지 조용히 먹통이 된다 — 배열 태그의 ✕ / + 가 셀을 편집
+            // 상태로 남기므로(연속 삭제를 위해), 방금 지운 태그를 되돌리려고
+            // 누른 버튼이 아무 일도 하지 않는다. updateUndoRedoButtons 는
+            // historyIndex 만 보므로 버튼은 활성인 채라 신호조차 없다.
             assert.ok(
-                /function undo\(\)[\s\S]*?td\.editing[\s\S]*?return;/.test(editorSource),
-                'undo() must early-return while a cell is being edited'
+                /Undo\/Redo는 셀 편집 중일 때[\s\S]{0,200}?td\.editing[\s\S]{0,120}?return;/.test(editorSource),
+                'Ctrl+Z 경로가 편집 중인 셀에서 브라우저 기본 undo 에 양보해야 한다'
+            );
+            // 툴바 경로는 반대로 **commit 하고 진행**해야 한다.
+            assert.ok(
+                /function undo\(\) \{\s*if \(!commitActiveCellOrAbort\(\)\) \{ return; \}/.test(editorSource),
+                'undo() 는 편집 중인 셀을 commit 한 뒤 진행해야 한다 (그냥 return 하면 툴바 ↶ 가 먹통이다)'
             );
             assert.ok(
-                /function redo\(\)[\s\S]*?td\.editing[\s\S]*?return;/.test(editorSource),
-                'redo() must early-return while a cell is being edited'
+                /function redo\(\) \{\s*if \(!commitActiveCellOrAbort\(\)\) \{ return; \}/.test(editorSource),
+                'redo() 는 편집 중인 셀을 commit 한 뒤 진행해야 한다'
             );
         });
 
@@ -1370,8 +1381,7 @@ suite('JsonEditorUtils Test Suite', () => {
                 'data-convert',      // string ↔ array
                 'data-delete-row',   // 행 삭제
                 'dragSrcIdx',        // drag drop 정렬
-                'btnAddRow',         // 새 행 추가
-                'commitCell'         // 셀 commit (changed branch)
+                'btnAddRow'          // 새 행 추가
             ];
             for (const marker of markers) {
                 const re = new RegExp(marker + '[\\s\\S]{0,1200}?pushHistory\\(\\)');
@@ -1380,6 +1390,20 @@ suite('JsonEditorUtils Test Suite', () => {
                     'mutation path "' + marker + '" must call pushHistory() within the same handler'
                 );
             }
+
+            // `commitCell` 은 문자 창(window)으로 볼 수 없다. 이 이름은 다른
+            // 핸들러의 **호출**로도 여러 번 나오므로, 창 안에 우연히 들어온
+            // 이웃 블록의 pushHistory() 로 통과해 버린다 — 실제로 그렇게 통과하고
+            // 있었다. 정의(2715행)와 그 pushHistory() 는 69 행 떨어져 창 밖인데,
+            // 무관한 keydown 핸들러의 `commitCell(...)` 호출이 ✕ 핸들러의
+            // pushHistory() 창에 걸려 있었을 뿐이다. 사이에 몇 줄이 들어오자
+            // 드러났다. 정의를 통째로 떼어 그 안을 본다.
+            const commitCellBody = editorSource.match(/\n {4}function commitCell\(td\) \{[\s\S]*?\n {4}\}/);
+            assert.ok(commitCellBody, 'webview 스크립트에서 function commitCell 을 찾지 못했다');
+            assert.ok(
+                /pushHistory\(\)/.test(commitCellBody![0]),
+                'mutation path "commitCell" must call pushHistory() inside its own body'
+            );
         });
 
         test('row-shifting mutations call commitActiveCellOrAbort first', () => {

@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { getWebviewContent } from '../jsonEditor';
+import { getWebviewContent, buildJsonEditorStrings } from '../jsonEditor';
 
 /**
  * **실제로 배포되는 webview 스크립트를 실행하는** 테스트.
@@ -407,6 +407,8 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
 
         const REMOVE = '[data-remove-arr]';
         const ADD = '[data-add-arr]';
+        /** ✕ 가 포커스를 옮길 대상 — 항목의 input 이 아니라 그 항목의 ✕ 버튼이다. */
+        const REMOVE_ITEMS_SELECTOR = '.cell-edit [data-remove-arr]';
 
         /** `document.querySelectorAll('[data-…]').forEach(btn => { … });` 블록 하나. */
         function extractWiring(attr: string): string {
@@ -423,18 +425,34 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             return m![0];
         }
 
-        /** `+` 가 다시 그린 뒤 포커스할 새 td. 없으면(null) 그 분기를 타지 않는다. */
-        function makeFocusTarget() {
-            const focused: number[] = [];
+        /**
+         * `renderTable()` 뒤에도 표에 남아 있는 td.
+         *
+         * input 개수를 **호출 시점의 실제 배열**에서 뽑는다. 예전에는 3 개를
+         * 하드코딩해 두어, "마지막 칸에 포커스했다" 는 단언이 인과인지 시험
+         * 데이터와 우연히 맞은 것인지 구별되지 않았다 — 배열 길이를 바꿔도
+         * 가짜 DOM 만 옛 개수를 계속 보고했다.
+         */
+        function makeRenderedCell(col: string, readArr: () => unknown[]) {
+            /** 포커스를 받은 것. `input:2` / `remove:1` / `add` 로 기록한다 — ✕ 와
+             *  + 는 서로 **다른 종류의 요소**를 겨냥하므로 인덱스만으로는 부족하다. */
+            const focused: string[] = [];
             const added: string[] = [];
-            const inputs = [0, 1, 2].map(i => ({ focus: () => focused.push(i) }));
             return {
                 focused,
                 added,
+                dataset: { col },
                 classList: { add: (name: string) => added.push(name) },
                 querySelectorAll(selector: string) {
-                    assert.strictEqual(selector, ARR_INPUT_SELECTOR, `가짜 DOM 이 모르는 셀렉터: ${selector}`);
-                    return inputs;
+                    const kind = selector === ARR_INPUT_SELECTOR ? 'input'
+                        : selector === REMOVE_ITEMS_SELECTOR ? 'remove'
+                            : null;
+                    assert.ok(kind, `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                    return readArr().map((_, i) => ({ focus: () => focused.push(`${kind}:${i}`) }));
+                },
+                querySelector(selector: string) {
+                    assert.strictEqual(selector, '[data-add-arr]', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                    return { focus: () => focused.push('add') };
                 },
             };
         }
@@ -444,27 +462,46 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             sheets?: { label: string; path: string[] }[];
             /** ✕ 버튼이 자기 자리로 들고 있는 인덱스. */
             removeArr?: string;
-            /** `+` 이후 `document.querySelector` 가 돌려줄 td. */
-            newTd?: ReturnType<typeof makeFocusTarget> | null;
+            /** 편집 중인 셀의 열 이름. 기본 `tags`. */
+            col?: string;
+            /** 다시 그린 표에서 그 셀을 찾을 수 있는지. 기본 true. */
+            rerendered?: boolean;
+            /** 버튼의 `closest('td')` 가 null 을 돌려주는 상황. */
+            detachedButton?: boolean;
         }
 
         function bootHandlers(data: unknown, options: HandlerOptions = {}) {
             const sheets = options.sheets ?? sheetMap;
+            const col = options.col ?? 'tags';
             /** 핸들러가 "진행했다" 는 증거. 빠져나갔으면 비어 있어야 한다. */
             const calls: string[] = [];
-            const td = makeEditingCell(0, 'tags', [
-                makeInput('1', { arrIdx: 0 }),
-                makeInput('2', { arrIdx: 1 }),
-            ]);
+            const readArr = () => {
+                const rows = (data as { rows?: Record<string, unknown>[] }).rows;
+                const val = rows?.[0]?.[col];
+                return Array.isArray(val) ? val : [];
+            };
+            // 편집 중인 셀의 input 도 **시험 데이터에서 뽑는다.** 개수를 2 로
+            // 고정해 두면 핸들러가 부르는 sync 가 배열을 늘 길이 2 로 덮어써서,
+            // 배열 길이에 의존하는 단언이 전부 시험 데이터와 무관해진다.
+            const td = makeEditingCell(0, col, readArr().map((v, i) => makeInput(String(v), { arrIdx: i })));
+            const rendered = makeRenderedCell(col, readArr);
+            // 같은 행의 다른 열. col 을 보지 않고 첫 셀을 집으면 여기에 걸린다.
+            const decoy = makeRenderedCell('other', () => []);
             const handlers: Record<string, (e: unknown) => void> = {};
             const doc = {
                 querySelectorAll(selector: string) {
+                    // 다시 그린 표에서 셀을 되찾는 경로. **열 이름은 셀렉터에
+                    // 들어가지 않는다** — 들어가면 아래 단언이 즉시 깨진다.
+                    if (selector === 'td[data-row="0"]') {
+                        calls.push('refind');
+                        return options.rerendered === false ? [decoy] : [decoy, rendered];
+                    }
                     assert.ok(selector === REMOVE || selector === ADD, `가짜 DOM 이 모르는 셀렉터: ${selector}`);
                     return [{
                         dataset: { removeArr: options.removeArr ?? '0' },
                         closest: (sel: string) => {
                             assert.strictEqual(sel, 'td', `가짜 DOM 이 모르는 셀렉터: ${sel}`);
-                            return td;
+                            return options.detachedButton ? null : td;
                         },
                         addEventListener: (type: string, fn: (e: unknown) => void) => {
                             assert.strictEqual(type, 'click', `예상 밖의 이벤트: ${type}`);
@@ -472,32 +509,35 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                         },
                     }];
                 },
-                // "+" 는 다시 그린 뒤 새 td 를 찾아 포커스한다. 기본값은 "없음"
-                // 이다 — 이 가짜 DOM 은 다시 그리지 않으며, 실제 코드도 `if
-                // (newTd)` 로 그 경우를 다룬다.
-                querySelector(selector: string) {
-                    calls.push('querySelector');
-                    assert.strictEqual(selector, 'td[data-row="0"][data-col="tags"]', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
-                    return options.newTd ?? null;
-                },
             };
 
+            /** 스크린리더로 나간 문구. 실제 문자열 번들과 실제 fmt 를 거친 결과다. */
+            const announced: string[] = [];
             const script = [
                 extractFn('parseValue'),
                 extractFn('coerceCellValue'),
                 extractFn('coerceEditedArrayItems'),
                 extractFn('getActiveRows'),
                 extractFn('syncEditingArrayCellToData'),
+                extractFn('findCellByCol'),
+                extractFn('refocusArrayCell'),
+                extractFn('fmt'),
                 'let activeIdx = 0;',
+                'function announce(msg) { announced.push(msg); }',
                 'function pushHistory() { calls.push("pushHistory"); }',
                 'function renderTable() { calls.push("renderTable"); }',
                 extractWiring('data-remove-arr'),
                 extractWiring('data-add-arr'),
             ].join('\n');
-            new Function('document', 'data', 'sheetMap', 'calls', script)(doc, data, sheets, calls);
+            // S 는 진짜 번들을 쓴다 — 핸들러가 없는 키를 부르면 fmt 가 그대로
+            // 통과시켜 `undefined` 가 아니라 템플릿이 남으므로 단언에서 드러난다.
+            new Function('document', 'data', 'sheetMap', 'calls', 'announced', 'S', script)(
+                doc, data, sheets, calls, announced, buildJsonEditorStrings());
 
             return {
                 calls,
+                rendered,
+                announced,
                 click(selector: string) {
                     const fn = handlers[selector];
                     assert.ok(fn, `${selector} 에 click 핸들러가 등록되지 않았다`);
@@ -534,7 +574,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             click(REMOVE);
 
             assert.deepStrictEqual(data, { rows: [{ tags: [2] }] });
-            assert.deepStrictEqual(calls, ['pushHistory', 'renderTable']);
+            assert.deepStrictEqual(calls, ['pushHistory', 'renderTable', 'refind']);
         });
 
         test('✕ 는 자기 자리의 항목만 지운다', () => {
@@ -554,19 +594,160 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             click(ADD);
 
             assert.deepStrictEqual(data, { rows: [{ tags: [1, 2, ''] }] });
-            assert.deepStrictEqual(calls, ['pushHistory', 'renderTable', 'querySelector']);
+            assert.deepStrictEqual(calls, ['pushHistory', 'renderTable', 'refind']);
         });
 
         test('+ 는 새로 생긴 마지막 칸에 포커스를 준다', () => {
             // 이 버튼의 요점은 "빈 칸이 하나 늘어난다" 가 아니라 "거기에 바로
             // 입력할 수 있다" 이다. 다시 그린 뒤의 분기라 앞 테스트로는 안 닿는다.
-            const newTd = makeFocusTarget();
-            const { click } = bootHandlers({ rows: [{ tags: [1, 2] }] }, { newTd });
+            const { click, rendered } = bootHandlers({ rows: [{ tags: [1, 2] }] });
 
             click(ADD);
 
-            assert.deepStrictEqual(newTd.added, ['editing'], '새 셀을 편집 상태로 두지 않았다');
-            assert.deepStrictEqual(newTd.focused, [2], '마지막 칸이 아닌 곳에 포커스했다');
+            assert.deepStrictEqual(rendered.added, ['editing'], '새 셀을 편집 상태로 두지 않았다');
+            assert.deepStrictEqual(rendered.focused, ['input:2'], '새로 생긴 빈 칸에 포커스해야 한다');
+        });
+
+        test('+ 의 포커스 위치가 배열 길이를 따라간다', () => {
+            // 앞 테스트만 있으면 "늘 2 번" 이라는 구현으로도 통과한다.
+            const { click, rendered } = bootHandlers({ rows: [{ tags: [1, 2, 3, 4] }] });
+
+            click(ADD);
+
+            assert.deepStrictEqual(rendered.focused, ['input:4'], '길이가 바뀌면 포커스 자리도 따라가야 한다');
+        });
+
+        test('빈 배열에서도 + 가 첫 칸을 만들고 포커스한다', () => {
+            // input 이 0 개라 sync 가 수집 없이 arr 만 돌려주는 유일한 경로다.
+            const data = { rows: [{ tags: [] as unknown[] }] };
+            const { click, rendered } = bootHandlers(data);
+
+            click(ADD);
+
+            assert.deepStrictEqual(data, { rows: [{ tags: [''] }] });
+            assert.deepStrictEqual(rendered.focused, ['input:0']);
+        });
+
+        /**
+         * ✕ 뒤에도 셀이 편집 상태로 남는지, 그리고 **무엇에** 포커스가 가는지.
+         *
+         * `renderTable()` 은 wrapper 를 통째로 갈아치우므로, 되돌리지 않으면
+         * 태그 하나 지울 때마다 셀이 view 모드로 접히고 포커스가 body 로
+         * 떨어진다 — 세 개를 지우려면 셀을 세 번 다시 열어야 했다.
+         *
+         * 포커스는 항목의 input 이 **아니라** 그 항목의 ✕ 버튼으로 간다.
+         * input 으로 보내면 버튼을 Enter 로 누른 키보드 사용자가 텍스트 필드에
+         * 도착하고, 이어 누르는 Enter 가 commitCell 로 가 셀이 접힌다.
+         */
+        test('✕ 뒤에도 셀은 편집 상태로 남고 다음 ✕ 로 포커스가 간다', () => {
+            const { click, rendered } = bootHandlers({ rows: [{ tags: [1, 2, 3] }] }, { removeArr: '1' });
+
+            click(REMOVE);
+
+            assert.deepStrictEqual(rendered.added, ['editing'], '셀이 편집 상태에서 빠져나갔다');
+            assert.deepStrictEqual(rendered.focused, ['remove:1'], '지운 자리로 올라온 항목의 ✕ 에 포커스해야 한다');
+        });
+
+        test('✕ 는 지운 자리를 따라간다 (늘 마지막이 아니다)', () => {
+            // [1,2,3,4] 의 0 번을 지우면 새 길이는 3 이고 지운 자리는 0 이다.
+            // `items[items.length - 1]` 로 잘못 써도 앞 두 테스트는 통과한다 —
+            // 거기서는 지운 자리가 우연히 새 마지막 자리와 같기 때문이다.
+            const { click, rendered } = bootHandlers({ rows: [{ tags: [1, 2, 3, 4] }] }, { removeArr: '0' });
+
+            click(REMOVE);
+
+            assert.deepStrictEqual(rendered.focused, ['remove:0'], '지운 자리가 아닌 곳에 포커스했다');
+        });
+
+        test('✕ 가 마지막 항목을 지우면 그 앞으로 물러난다', () => {
+            // 지운 자리(2)가 새 길이(2)를 넘으므로 그대로 쓰면 undefined.focus() 다.
+            const { click, rendered } = bootHandlers({ rows: [{ tags: [1, 2, 3] }] }, { removeArr: '2' });
+
+            click(REMOVE);
+
+            assert.deepStrictEqual(rendered.focused, ['remove:1'], '남은 마지막 자리로 물러나야 한다');
+        });
+
+        test('마지막 하나 남은 태그를 지우면 + 버튼이 포커스를 받는다', () => {
+            // 항목이 0 개면 포커스를 줄 것이 없다. 그냥 두면 body 로 떨어진다.
+            const { click, rendered } = bootHandlers({ rows: [{ tags: [1] }] });
+
+            click(REMOVE);
+
+            assert.deepStrictEqual(rendered.focused, ['add'], '"+" 로 포커스를 넘기지 않았다');
+            assert.deepStrictEqual(rendered.added, ['editing'], '빈 배열에서도 편집 상태는 유지해야 "+" 가 보인다');
+        });
+
+        /**
+         * 포커스 이동만으로는 무슨 일이 일어났는지 알 수 없다.
+         *
+         * ["debug", "debug-2"] 처럼 값이 비슷하면, 다음 항목으로 옮겨 간 포커스는
+         * 스크린리더에게 "삭제됐다" 와 구별되지 않는다. 실제 문자열 번들과 실제
+         * `fmt` 를 거치므로, 템플릿 키가 어긋나면 `{n}` 이 남아 단언이 깨진다.
+         */
+        test('✕ / + 가 스크린리더에 결과를 알린다', () => {
+            const removed = bootHandlers({ rows: [{ tags: [1, 2, 3] }] }, { removeArr: '1' });
+            removed.click(REMOVE);
+            assert.strictEqual(removed.announced.length, 1, '삭제를 알리지 않았다');
+            assert.ok(!/[{}]/.test(removed.announced[0]), `템플릿이 그대로 남았다: ${removed.announced[0]}`);
+            assert.ok(/2/.test(removed.announced[0]), `몇 번째를 지웠는지 없다: ${removed.announced[0]}`);
+
+            const added = bootHandlers({ rows: [{ tags: [1, 2] }] });
+            added.click(ADD);
+            assert.strictEqual(added.announced.length, 1, '추가를 알리지 않았다');
+            assert.ok(!/[{}]/.test(added.announced[0]), `템플릿이 그대로 남았다: ${added.announced[0]}`);
+            assert.ok(/3/.test(added.announced[0]), `총 개수가 없다: ${added.announced[0]}`);
+        });
+
+        /**
+         * 버튼이 td 밖으로 떨어진 상태.
+         *
+         * `syncEditingArrayCellToData` 의 `if (!td) { return null; }` 는 이 두
+         * 호출부를 위해 있는데, 예전에는 `+` 가 그 계약에 닿기 전에
+         * `td.dataset.row` 를 먼저 읽어 TypeError 로 죽었다.
+         */
+        test('버튼이 td 를 못 찾으면 두 핸들러 모두 조용히 빠져나간다', () => {
+            for (const selector of [REMOVE, ADD]) {
+                const data = { rows: [{ tags: [1, 2] }] };
+                const { click, calls } = bootHandlers(data, { detachedButton: true });
+
+                click(selector);
+
+                assert.deepStrictEqual(calls, [], `${selector} 가 td 없이 진행했다`);
+                assert.deepStrictEqual(data, { rows: [{ tags: [1, 2] }] });
+            }
+        });
+
+        /**
+         * 열 이름이 셀렉터 문자열에 들어가지 않는지.
+         *
+         * 예전에는 `td[data-col="' + col + '"]` 로 이어 붙였다. 마크업은
+         * escapeAttr 로 쓰지만 브라우저가 `&quot;` 를 되돌려 놓으므로
+         * `dataset.col` 에는 진짜 따옴표가 들어 있고, 그 상태로 이어 붙이면
+         * querySelector 가 문법 오류로 던져 **그 핸들러가 거기서 멈춘다** —
+         * 항목은 추가되지만 포커스는 가지 않고 오류 배너만 뜬다.
+         */
+        test('열 이름에 따옴표가 있어도 셀을 되찾는다', () => {
+            const data = { rows: [{ 'ta"g\\s': [1, 2] }] };
+            const { click, rendered } = bootHandlers(data, { col: 'ta"g\\s' });
+
+            click(ADD);
+
+            assert.deepStrictEqual(data, { rows: [{ 'ta"g\\s': [1, 2, ''] }] });
+            assert.deepStrictEqual(rendered.focused, ['input:2'], '따옴표가 든 열에서 셀을 못 찾았다');
+        });
+
+        test('다시 그린 표에 그 셀이 없으면 조용히 넘어간다', () => {
+            // 시트를 바꾸는 등으로 열이 사라진 경우. 던지면 스크립트가 죽는다.
+            const data = { rows: [{ tags: [1, 2] }] };
+            const { click, calls, rendered } = bootHandlers(data, { rerendered: false });
+
+            click(ADD);
+
+            assert.deepStrictEqual(data, { rows: [{ tags: [1, 2, ''] }] }, 'mutation 자체는 끝나 있어야 한다');
+            assert.deepStrictEqual(calls, ['pushHistory', 'renderTable', 'refind']);
+            assert.deepStrictEqual(rendered.added, [], '못 찾았는데 무언가를 편집 상태로 만들었다');
+            assert.deepStrictEqual(rendered.focused, [], '못 찾았는데 어딘가에 포커스했다');
         });
     });
 
