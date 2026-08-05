@@ -660,6 +660,32 @@ suite('Doctor', () => {
             assert.ok(findings.some(f => f.code === 'tool.platform-missing'),
                 `unzip 의 OS별 tool 은 검사하지 않았다: ${codes(findings).join(',')}`);
         });
+
+        test('zip/unzip 이 아닌 태스크에 달아도 보고한다', () => {
+            // 이 검사에는 **타입 게이트가 없다**. `tool` 은 스키마에서 태스크 공통
+            // 속성이라(`definitions/Task/properties`) shell 에 달아도 유효한
+            // 설정이고, 런타임 `getToolCommand` 도 타입을 가리지 않는다.
+            //
+            // 문서 표는 이 동작을 "tool 을 가진 태스크(실질적으로 zip/unzip)" 로
+            // 적고 있다. 나중에 zip/unzip 으로 **좁히고 싶어지면** 이 테스트가
+            // 먼저 걸리므로, 그때 문서와 함께 의도적으로 바꾸게 된다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput([
+                {
+                    id: 'a.tool.shell',
+                    title: 'os tool',
+                    action: {
+                        description: 'd',
+                        tasks: [{
+                            id: 's', type: 'shell', command: 'echo hi',
+                            tool: { [INACTIVE_OS]: '/tools/other-7z' }
+                        }]
+                    }
+                }
+            ])], v);
+            assert.ok(findings.some(f => f.code === 'tool.platform-missing'),
+                `shell 태스크의 tool 은 검사하지 않았다: ${codes(findings).join(',')}`);
+        });
     });
 
     test('output.content 안 참조도 검사한다', () => {
