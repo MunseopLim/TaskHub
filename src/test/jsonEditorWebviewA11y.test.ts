@@ -16,9 +16,12 @@ import { buildJsonEditorStrings, getWebviewContent } from '../jsonEditor';
  */
 
 const fakeWebview = { cspSource: 'https://test.invalid' } as unknown as vscode.Webview;
+// 이 파일은 마크업만 보므로 세션 번호는 아무 값이나 된다. 다만 0 은 안 된다 —
+// NO_SESSION 과 같은 값이라 오가는 메시지를 전부 버리는 webview 가 된다.
+const SESSION = 7;
 
 function render(data: Record<string, unknown> = { rows: [{ a: 1 }] }): string {
-    return getWebviewContent(data, undefined, '/tmp/sample.json', fakeWebview);
+    return getWebviewContent(data, undefined, '/tmp/sample.json', fakeWebview, false, SESSION);
 }
 
 suite('JSON Editor 웹뷰 지역화 / 접근성', () => {

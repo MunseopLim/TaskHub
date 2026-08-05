@@ -1215,8 +1215,14 @@ export function getWebviewContent(
      * 새 webview 로 배달될 수 있다. 응답에 실려 온 세션이 자기 것이 아니면
      * webview 는 그 응답을 무시한다 — 그러지 않으면 남의 저장 결과로 이 파일의
      * 미저장 편집이 clean 처리되어 조용히 사라진다.
+     *
+     * **기본값을 두지 않는다.** 세션 번호는 1부터 발급되므로 어떤 기본값을
+     * 골라도 {@link NO_SESSION}(=0) 과 같거나 남의 세션과 겹친다. 전자는 오가는
+     * 메시지를 **전부** 버리는 webview 를 만들고(귀도 입도 막힌다), 후자는 이
+     * 검사가 막으려던 교차 배달을 그대로 허용한다. 빠뜨린 호출부는 컴파일러가
+     * 잡게 둔다.
      */
-    sessionId: number = 0
+    sessionId: number
 ): string {
     // Inject data as escaped JS literals (memoryMapViewer escapeForScript 패턴).
     // 이전의 base64 + atob() 경로는 atob()가 latin1 디코딩이라 멀티바이트 문자

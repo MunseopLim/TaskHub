@@ -2540,6 +2540,9 @@ suite('JsonEditorUtils Test Suite', () => {
         // 손상됐고, Save 시 깨진 데이터가 디스크에 영구 기록됐다. 데이터는
         // escapeForScript(JSON.stringify + "<" 이스케이프) JS 리터럴로 주입돼야 한다.
         const fakeWebview = { cspSource: 'https://test.invalid' } as unknown as import('vscode').Webview;
+        // 이 스위트는 세션과 무관하지만 인자는 필수다 — 0 을 넘기면 오가는
+        // 메시지를 전부 버리는 webview 가 만들어진다 (NO_SESSION 과 같은 값).
+        const SESSION = 7;
         const unicodeData: Record<string, unknown> = {
             '한글키': '한글-—≥',
             nested: { value: 'em dash — and ≥ and 𐍈' },
@@ -2555,7 +2558,7 @@ suite('JsonEditorUtils Test Suite', () => {
         }
 
         test('data literal preserves multi-byte characters losslessly', () => {
-            const html = getWebviewContent(unicodeData, undefined, '/tmp/t.json', fakeWebview);
+            const html = getWebviewContent(unicodeData, undefined, '/tmp/t.json', fakeWebview, false, SESSION);
             const roundTripped = extractJsLiteral(html, /let data = (.*);/);
             assert.deepStrictEqual(roundTripped, unicodeData);
             // savedData 미지정 시 baseline 신호는 undefined 유지
@@ -2564,14 +2567,14 @@ suite('JsonEditorUtils Test Suite', () => {
 
         test('savedData literal preserves multi-byte characters losslessly', () => {
             const saved: Record<string, unknown> = { '키': '값—≥한글' };
-            const html = getWebviewContent(unicodeData, saved, '/tmp/t.json', fakeWebview);
+            const html = getWebviewContent(unicodeData, saved, '/tmp/t.json', fakeWebview, false, SESSION);
             const roundTripped = extractJsLiteral(html, /const savedInit = (.*);/);
             assert.deepStrictEqual(roundTripped, saved);
         });
 
         test('injected literals cannot terminate the script block early', () => {
             const payload = { k: '</scr' + 'ipt><img src=x>' };
-            const html = getWebviewContent(payload, undefined, '/t.json', fakeWebview);
+            const html = getWebviewContent(payload, undefined, '/t.json', fakeWebview, false, SESSION);
             const m = html.match(/let data = (.*);/);
             assert.ok(m, 'could not locate injected data literal');
             assert.ok(!m![1].includes('</scr' + 'ipt>'), 'literal must escape "<" so the HTML parser cannot see a closing script tag');
