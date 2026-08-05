@@ -760,6 +760,17 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 };
                 if (archive) { showPath('archive:    ', archive); }
                 if (destination) { showPath('destination:', destination); }
+                // `source` 는 `handleZip` 이 원소마다 보간하는 값이다. 표시도
+                // 검사도 하지 않으면 `source: ["${ghost.output}"]` 이 "모두
+                // 해석됨" 으로 요약된 뒤 런타임에서 리터럴 경로를 압축하려 든다
+                // — `tool` 에서 막 고친 것과 같은 종류의 사각지대이고, Doctor 는
+                // 이미 보고 있어 두 진단이 같은 파일을 두고 어긋나 있었다.
+                const sources = Array.isArray(task.source)
+                    ? task.source.map(s => interpolatePipelineVariables(s, interpolationContext))
+                    : typeof task.source === 'string'
+                        ? [interpolatePipelineVariables(task.source, interpolationContext)]
+                        : [];
+                for (const s of sources) { showPath('source:     ', s); }
                 if (task.inputs) {
                     lines.push(`  inputs: ${JSON.stringify(task.inputs)}`);
                 }
@@ -768,7 +779,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 // 리터럴 실행 파일로 실행을 시도한다. 검사하는 것은 위에서 고른
                 // **현재 플랫폼 branch** 하나다.
                 if (tool !== undefined) { interpolated.push(tool); }
-                interpolated.push(archive, destination);
+                interpolated.push(archive, destination, ...sources);
                 break;
             }
             case 'stringManipulation': {

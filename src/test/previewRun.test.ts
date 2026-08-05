@@ -698,6 +698,51 @@ suite('buildPreviewReport', () => {
                     `요약에 어느 태스크인지 없다:\n${report}`);
             });
 
+            /**
+             * `source` 는 `handleZip` 이 원소마다 보간하는 값인데 Preview 만
+             * 보지 않았다 — Doctor 는 이미 검사하고 있어, 같은 파일을 두고 두
+             * 진단이 어긋나 있었다.
+             */
+            test('zip 의 source 참조도 검사한다', () => {
+                const item = {
+                    id: 'a.zip.source',
+                    title: 'zip source',
+                    action: {
+                        description: 'source refs',
+                        tasks: [{
+                            id: 'pack',
+                            type: 'zip',
+                            archive: '${workspaceFolder}/out.zip',
+                            source: ['${ghost.output}']
+                        }]
+                    }
+                } as unknown as ActionItem;
+                const report = buildPreviewReport(item, baseOptions());
+                assert.ok(report.includes('${ghost.output}'),
+                    `source 안의 미해결 참조를 놓쳤다:\n${report}`);
+                assert.doesNotMatch(report, /Summary: all \$\{\.\.\.\} references resolve/);
+            });
+
+            test('해석되는 source 는 경로로 보여 준다', () => {
+                // 과탐 방지 + Preview 의 목적(어디에 떨어지는지) 확인.
+                const item = {
+                    id: 'a.zip.source.ok',
+                    title: 'zip source ok',
+                    action: {
+                        description: 'source refs',
+                        tasks: [{
+                            id: 'pack',
+                            type: 'zip',
+                            archive: '${workspaceFolder}/out.zip',
+                            source: ['${workspaceFolder}/a.txt']
+                        }]
+                    }
+                } as unknown as ActionItem;
+                const report = buildPreviewReport(item, baseOptions());
+                assert.match(report, /source:/, `source 를 표시하지 않는다:\n${report}`);
+                assert.match(report, /Summary: all \$\{\.\.\.\} references resolve/);
+            });
+
             test('현재 플랫폼 branch 가 있으면 요약은 종전대로 정상이다', () => {
                 // 과탐 방지 — 차단 요약이 정상 설정에까지 붙으면 안 된다.
                 const report = buildPreviewReport(

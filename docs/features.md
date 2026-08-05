@@ -499,6 +499,7 @@ Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.tx
 - 각 태스크의 해석된 `command` / `args` / `cwd` / `env`
 - `parallel: true` 태스크 헤더의 `[parallel]` 마커
 - `output.filePath`의 해석값과 **워크스페이스 외부 쓰기 경고**
+- `zip` / `unzip`의 `archive` · `destination` · `source` · `tool` 해석값 (`source`는 0.6.63부터 — 그전에는 런타임이 보간하는데도 표시·검사에서 빠져 있었습니다)
 - 선언된 `capture` 규칙 목록 (downstream에서 참조되는 변수명 표시)
 - 상류 태스크 결과는 `<fileDialog:id:path>` 같은 placeholder로 시뮬레이션되어 변수 연결 확인 가능
 - 미해결 `${...}` 변수 요약 (오타·상류 태스크 누락 발견에 유용)
