@@ -2857,6 +2857,17 @@ export function getWebviewContent(
             activeIdx = newIdx >= 0 ? newIdx : 0;
             renderTabs();
             renderTable();
+            // **진행 중이던 저장 기록은 여기서 무효가 된다.** 디스크 내용은 이제
+            // 우리가 쓴 것이 아니므로 그 pending 스냅샷들은 더 이상 "디스크에 있을
+            // 내용" 이 아니다. setSavedBaseline / markBaselineUnknown 과 같은
+            // 처치이고, 재로드 경로(host 의 reload · 외부 변경 자동 재읽기)에는
+            // awaitingSaveAck 가드가 없어 저장 응답을 기다리는 사이에 이 메시지가
+            // 도착할 수 있다. 남겨 두면 (1) effectiveBaseline 이 재로드된 디스크
+            // 대신 옛 pending 을 기준으로 삼아, 사용자가 그 내용에 도달하면 clean 이
+            // 되어 host 가 recovery 를 비우고, (2) 뒤늦게 오는 saveResult 가
+            // baseline 을 그 옛 저장 내용으로 되돌린다. 비우면 그 응답은 "알 수 없는
+            // seq" 로 떨어져 dirty 를 유지한다.
+            pendingSaveSnapshots.clear();
             // 외부 변경/리로드 모두 새 디스크 데이터 = 현재 데이터 → 별도
             // savedSnapshot 없이 현재 상태를 baseline으로 잡는다.
             savedSnapshot = undefined;

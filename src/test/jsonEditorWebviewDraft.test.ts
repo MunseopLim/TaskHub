@@ -507,6 +507,68 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             assert.deepStrictEqual(ack, { command: 'saveAck', seq: 1, dirty: true });
         });
 
+        /**
+         * `loadData` 도 **baseline 을 교체하는 경로**다. 디스크 내용이 우리가
+         * 쓴 것이 아니게 되므로, 진행 중이던 저장의 스냅샷은 더 이상 "디스크에
+         * 있을 내용" 이 아니다.
+         *
+         * `setSavedBaseline` 과 `markBaselineUnknown` 은 정확히 이 이유로
+         * `pendingSaveSnapshots.clear()` 를 하고 주석까지 달아 두었는데
+         * `loadData` 만 빠져 있었다. 재로드 경로(host 의 `reload` / 외부 변경
+         * 자동 재읽기)에는 `awaitingSaveAck` 가드가 없어 저장 응답을 기다리는
+         * 사이에 `loadData` 가 도착할 수 있다.
+         *
+         * 남겨 두면 두 가지가 깨진다.
+         *  - `effectiveBaseline()` 이 재로드된 디스크 내용 대신 **옛 pending
+         *    스냅샷**을 기준으로 삼는다. 사용자가 그 내용에 도달하면 `clean` 이
+         *    되어 host 가 recovery 를 비우는데, 디스크는 다른 내용이다.
+         *  - 뒤늦게 도착한 `saveResult` 가 baseline 을 그 옛 저장 내용으로
+         *    **되돌린다**.
+         */
+        test('loadData 는 진행 중이던 저장 기록을 무효화한다', () => {
+            const inFlight = JSON.stringify({ rows: [{ a: 'B' }] });
+            const { api } = bootWebview({
+                data: { rows: [{ a: 'B' }] },
+                sheetMap,
+                lastSavedSnapshot: JSON.stringify({ rows: [{ a: 'A' }] }),
+                pending: [[1, inFlight]],
+            });
+
+            api.handleMessage({
+                data: { command: 'loadData', session: SESSION, data: { rows: [{ a: 'D' }] } }
+            });
+
+            assert.deepStrictEqual(
+                api.state().pending, [],
+                'baseline 이 교체됐는데 옛 저장 기록이 남았다 — effectiveBaseline 이 디스크 대신 그것을 기준으로 삼는다'
+            );
+        });
+
+        test('재로드 뒤 도착한 saveResult 는 baseline 을 되돌리지 않는다', () => {
+            const inFlight = JSON.stringify({ rows: [{ a: 'B' }] });
+            const reloaded = JSON.stringify({ rows: [{ a: 'D' }] });
+            const { api, posted } = bootWebview({
+                data: { rows: [{ a: 'B' }] },
+                // 재로드가 끝난 상태의 baseline (실제로는 resetHistoryToCurrent 가
+                // 세팅한다 — 이 하네스에서는 스텁이라 초기값으로 대신 둔다).
+                lastSavedSnapshot: reloaded,
+                sheetMap,
+                pending: [[1, inFlight]],
+            });
+
+            api.handleMessage({
+                data: { command: 'loadData', session: SESSION, data: { rows: [{ a: 'D' }] } }
+            });
+            saveResult(api, 1);
+
+            assert.strictEqual(
+                api.state().lastSavedSnapshot, reloaded,
+                'baseline 이 옛 저장 내용으로 되돌아갔다 — 화면과 디스크가 다른데 clean 으로 판정될 수 있다'
+            );
+            const ack = posted.find(m => m.command === 'saveAck');
+            assert.strictEqual(ack.dirty, true, '알 수 없는 seq 는 무조건 dirty 여야 한다');
+        });
+
         test('배열 셀의 미커밋 입력도 타입 그대로 recovery 에 남는다', () => {
             const committed = { rows: [{ tags: [1, 2] }] };
             const cell = makeEditingCell(0, 'tags', [
