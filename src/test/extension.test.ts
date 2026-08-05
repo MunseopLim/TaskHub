@@ -82,6 +82,7 @@ import {
 	describeVariableCompletion,
 } from '../extension';
 import { collectVariableCompletions, type VariableCompletionDetail } from '../variableCompletions';
+import { simulateTaskResult } from '../previewRun';
 import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
 import { LinkViewProvider, mergeInvalidJsonEntries, readLinksFromDisk } from '../providers/linkViewProvider';
 import { FavoriteViewProvider, readFavoritesFromDisk } from '../providers/favoriteViewProvider';
@@ -5465,6 +5466,62 @@ suite('Extension Test Suite', () => {
 			for (const entry of entries) {
 				assert.ok(describeVariableCompletion(entry.detail).length > 0, `빈 detail: ${entry.name}`);
 			}
+		});
+	});
+
+	/**
+	 * `${id.values}` 의 모양 계약 (런타임 ↔ 시뮬레이션).
+	 *
+	 * 이 키는 두 곳에서 만들어진다 — 실제로 실행하는 `handleQuickPick` 과,
+	 * Preview · Doctor · 자동완성이 함께 쓰는 `simulateTaskResult`. 둘이 갈리면
+	 * 아무 오류 없이 **다른 값**이 된다: 0.6.57 부터 배열은 문자열 자리에서
+	 * 공백으로 이어 붙으므로, 시뮬레이션만 배열이 되면 Preview 는 `a b` 를
+	 * 보여 주고 런타임은 `a,b` 를 넘긴다.
+	 *
+	 * 런타임 쪽은 반환 타입(`values?: string`)을 컴파일러가 지켜 준다. 무방비인
+	 * 것은 시뮬레이션 쪽으로, `SimulatedResult` 의 값 타입이
+	 * `string | string[] | number` 라 배열로 바꿔도 빌드가 깨지지 않는다
+	 * (`fileDialog` 의 `paths` 가 실제로 배열이다). 그쪽을 여기서 묶는다.
+	 */
+	suite('quickPick 결과 모양 (런타임 ↔ 시뮬레이션)', () => {
+		async function runtimeQuickPick(task: any, picked: any) {
+			const original = vscode.window.showQuickPick;
+			(vscode.window as any).showQuickPick = async () => picked;
+			try {
+				return await handleQuickPick(task);
+			} finally {
+				(vscode.window as any).showQuickPick = original;
+			}
+		}
+
+		test('다중 선택: 키 집합이 같고 values 는 양쪽 다 문자열이다', async () => {
+			const runtime = await runtimeQuickPick(
+				{ id: 'pick', type: 'quickPick', items: ['a', 'b'], canPickMany: true },
+				[{ label: 'a' }, { label: 'b' }]
+			);
+			const simulated = simulateTaskResult({ id: 'pick', type: 'quickPick', canPickMany: true } as any);
+			assert.strictEqual(runtime.values, 'a,b', '런타임은 쉼표로 잇는다');
+			assert.deepStrictEqual(
+				Object.keys(simulated).sort(), Object.keys(runtime).sort(),
+				'키 집합이 갈리면 없는 참조를 제안하거나 있는 참조를 미해결로 잡는다'
+			);
+			assert.strictEqual(
+				typeof simulated.values, typeof runtime.values,
+				'시뮬레이션만 배열이 되면 문자열 자리에서 공백 결합이라 런타임의 join(",") 과 갈린다'
+			);
+		});
+
+		test('단일 선택: 양쪽 다 values 를 내지 않는다', async () => {
+			// 여기서 시뮬레이션만 `values` 를 내면 단일 선택 액션의
+			// `${pick.values}` 가 Preview 에서는 해석된 것처럼 보이고 런타임에서는
+			// 리터럴로 남는다.
+			const runtime = await runtimeQuickPick(
+				{ id: 'pick', type: 'quickPick', items: ['a', 'b'] },
+				{ label: 'a' }
+			);
+			const simulated = simulateTaskResult({ id: 'pick', type: 'quickPick' } as any);
+			assert.strictEqual(runtime.values, undefined);
+			assert.deepStrictEqual(Object.keys(simulated).sort(), Object.keys(runtime).sort());
 		});
 	});
 });
