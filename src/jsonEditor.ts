@@ -1223,16 +1223,17 @@ export function getWebviewContent(
      * 골라도 {@link NO_SESSION}(=0) 과 같거나 남의 세션과 겹친다. 전자는 오가는
      * 메시지를 **전부** 버리는 webview 를 만들고(귀도 입도 막힌다), 후자는 이
      * 검사가 막으려던 교차 배달을 그대로 허용한다. 빠뜨린 호출부는 컴파일러가
-     * 잡게 두고, 명시적으로 넘어온 {@link NO_SESSION} 은 아래에서 거부한다.
+     * 잡게 두고, 살아 있는 세션이 아닌 값은 아래에서 거부한다.
      */
     sessionId: number
 ): string {
-    // 인자를 필수로 만든 것은 **생략**만 막는다. `currentSessionId` 는 dispose
-    // 시 NO_SESSION 으로 되돌아가므로, 지역 `sessionId` 대신 그 변수를 넘기는
-    // 리팩터 한 번이면 귀도 입도 막힌 webview 가 조용히 되살아난다. 그 값은
-    // 여기서 끊는다 — 이 함수가 만든 화면은 반드시 살아 있는 세션에 속한다.
-    if (sessionId === NO_SESSION) {
-        throw new Error(`getWebviewContent: sessionId must be an active session, got NO_SESSION (${NO_SESSION}).`);
+    // 인자를 필수로 만든 것은 **생략**만 막는다. 살아 있는 세션이 없는 상태에서
+    // 화면을 다시 그리는 **새 호출부**(예: dispose 뒤의 refresh)가 생기면
+    // `NO_SESSION` 이 그대로 넘어오고, 그 webview 는 오가는 메시지를 전부 버린다.
+    // 발급되는 번호는 언제나 1 이상이므로 그 밖의 값은 전부 거절한다 — 0 만
+    // 막으면 NaN·음수처럼 똑같이 조용한 값이 남는다.
+    if (!Number.isInteger(sessionId) || sessionId <= NO_SESSION) {
+        throw new Error(`getWebviewContent: sessionId must be a live session id (positive integer), got ${sessionId}.`);
     }
     // Inject data as escaped JS literals (memoryMapViewer escapeForScript 패턴).
     // 이전의 base64 + atob() 경로는 atob()가 latin1 디코딩이라 멀티바이트 문자

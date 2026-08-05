@@ -333,6 +333,14 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             assert.strictEqual(api.sync(cell), null);
         });
 
+        test('배열이 아닌 셀에서는 null 을 돌려준다', () => {
+            // data-convert 로 배열이 문자열이 된 뒤 stale 한 td 가 남는 모양.
+            // 이 분기가 없으면 호출부가 문자열에 splice 를 시도한다.
+            const { api } = bootCommit({ rows: [{ tags: 'abc' }] });
+            const cell = makeCommitCell(0, 'tags', [makeInput('a', { arrIdx: 0 })]);
+            assert.strictEqual(api.sync(cell), null);
+        });
+
         test('행 인덱스가 범위를 넘어도 터지지 않는다', () => {
             // 지연 commit 이 stale 한 dataset.row 를 들고 오는 경우의 모양.
             const { api } = bootCommit({ rows: [{ tags: [1, 2] }] });
@@ -407,10 +415,41 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             );
             const m = html.match(re);
             assert.ok(m, `webview 스크립트에서 ${attr} 배선을 찾지 못했다`);
+            // 블록이 더 깊이 들여쓰기되면 종결자가 **다음 블록의** 8칸 `});` 에
+            // 걸려 두 배선을 통째로 삼킨다. 그래도 테스트는 통과하므로(같은
+            // 핸들러가 두 번 등록될 뿐) 여기서 끊는다.
+            const handlerCount = m![0].split("addEventListener('click'").length - 1;
+            assert.strictEqual(handlerCount, 1, `${attr} 배선 추출이 이웃 블록까지 삼켰다`);
             return m![0];
         }
 
-        function bootHandlers(data: unknown, sheets: { label: string; path: string[] }[] = sheetMap) {
+        /** `+` 가 다시 그린 뒤 포커스할 새 td. 없으면(null) 그 분기를 타지 않는다. */
+        function makeFocusTarget() {
+            const focused: number[] = [];
+            const added: string[] = [];
+            const inputs = [0, 1, 2].map(i => ({ focus: () => focused.push(i) }));
+            return {
+                focused,
+                added,
+                classList: { add: (name: string) => added.push(name) },
+                querySelectorAll(selector: string) {
+                    assert.strictEqual(selector, ARR_INPUT_SELECTOR, `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                    return inputs;
+                },
+            };
+        }
+
+        interface HandlerOptions {
+            /** 활성 시트 목록. 비우면 `getActiveRows()` 가 null 이다. */
+            sheets?: { label: string; path: string[] }[];
+            /** ✕ 버튼이 자기 자리로 들고 있는 인덱스. */
+            removeArr?: string;
+            /** `+` 이후 `document.querySelector` 가 돌려줄 td. */
+            newTd?: ReturnType<typeof makeFocusTarget> | null;
+        }
+
+        function bootHandlers(data: unknown, options: HandlerOptions = {}) {
+            const sheets = options.sheets ?? sheetMap;
             /** 핸들러가 "진행했다" 는 증거. 빠져나갔으면 비어 있어야 한다. */
             const calls: string[] = [];
             const td = makeEditingCell(0, 'tags', [
@@ -422,7 +461,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                 querySelectorAll(selector: string) {
                     assert.ok(selector === REMOVE || selector === ADD, `가짜 DOM 이 모르는 셀렉터: ${selector}`);
                     return [{
-                        dataset: { removeArr: '0' },
+                        dataset: { removeArr: options.removeArr ?? '0' },
                         closest: (sel: string) => {
                             assert.strictEqual(sel, 'td', `가짜 DOM 이 모르는 셀렉터: ${sel}`);
                             return td;
@@ -433,13 +472,13 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                         },
                     }];
                 },
-                // "+" 는 다시 그린 뒤 새 td 를 찾아 포커스한다. 이 가짜 DOM 은
-                // 다시 그리지 않으므로 없다고 답한다 — 실제 코드도 `if (newTd)`
-                // 로 그 경우를 다룬다.
+                // "+" 는 다시 그린 뒤 새 td 를 찾아 포커스한다. 기본값은 "없음"
+                // 이다 — 이 가짜 DOM 은 다시 그리지 않으며, 실제 코드도 `if
+                // (newTd)` 로 그 경우를 다룬다.
                 querySelector(selector: string) {
                     calls.push('querySelector');
                     assert.strictEqual(selector, 'td[data-row="0"][data-col="tags"]', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
-                    return null;
+                    return options.newTd ?? null;
                 },
             };
 
@@ -469,7 +508,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
 
         test('활성 시트가 없으면 ✕ 는 아무것도 하지 않는다', () => {
             const data = { rows: [{ tags: [1, 2] }] };
-            const { click, calls } = bootHandlers(data, []);
+            const { click, calls } = bootHandlers(data, { sheets: [] });
 
             click(REMOVE);
 
@@ -479,7 +518,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
 
         test('활성 시트가 없으면 + 도 아무것도 하지 않는다', () => {
             const data = { rows: [{ tags: [1, 2] }] };
-            const { click, calls } = bootHandlers(data, []);
+            const { click, calls } = bootHandlers(data, { sheets: [] });
 
             click(ADD);
 
@@ -498,6 +537,16 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             assert.deepStrictEqual(calls, ['pushHistory', 'renderTable']);
         });
 
+        test('✕ 는 자기 자리의 항목만 지운다', () => {
+            // 인덱스를 안 쓰고 늘 0 번을 지워도 위 양성 대조는 통과한다.
+            const data = { rows: [{ tags: [1, 2] }] };
+            const { click } = bootHandlers(data, { removeArr: '1' });
+
+            click(REMOVE);
+
+            assert.deepStrictEqual(data, { rows: [{ tags: [1] }] }, '누른 태그가 아닌 것을 지웠다');
+        });
+
         test('정상 상태에서는 + 가 실제로 추가한다 (양성 대조)', () => {
             const data = { rows: [{ tags: [1, 2] }] };
             const { click, calls } = bootHandlers(data);
@@ -506,6 +555,18 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
 
             assert.deepStrictEqual(data, { rows: [{ tags: [1, 2, ''] }] });
             assert.deepStrictEqual(calls, ['pushHistory', 'renderTable', 'querySelector']);
+        });
+
+        test('+ 는 새로 생긴 마지막 칸에 포커스를 준다', () => {
+            // 이 버튼의 요점은 "빈 칸이 하나 늘어난다" 가 아니라 "거기에 바로
+            // 입력할 수 있다" 이다. 다시 그린 뒤의 분기라 앞 테스트로는 안 닿는다.
+            const newTd = makeFocusTarget();
+            const { click } = bootHandlers({ rows: [{ tags: [1, 2] }] }, { newTd });
+
+            click(ADD);
+
+            assert.deepStrictEqual(newTd.added, ['editing'], '새 셀을 편집 상태로 두지 않았다');
+            assert.deepStrictEqual(newTd.focused, [2], '마지막 칸이 아닌 곳에 포커스했다');
         });
     });
 

@@ -2572,14 +2572,17 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.deepStrictEqual(roundTripped, saved);
         });
 
-        test('NO_SESSION(0) 은 거부한다', () => {
-            // 인자를 필수로 만든 것은 생략만 막는다. 0 은 dispose 후
-            // `currentSessionId` 의 값이기도 해서, 그 변수를 넘기는 리팩터가
-            // 오가는 메시지를 전부 버리는 webview 를 조용히 되살릴 수 있다.
-            assert.throws(
-                () => getWebviewContent(unicodeData, undefined, '/tmp/t.json', fakeWebview, false, 0),
-                /NO_SESSION/
-            );
+        test('살아 있는 세션이 아닌 값은 거부한다', () => {
+            // 인자를 필수로 만든 것은 생략만 막는다. 세션이 없는 상태에서 화면을
+            // 다시 그리는 호출부가 생기면 이 값들이 그대로 넘어오고, 그 webview 는
+            // 오가는 메시지를 전부 버린다 — 화면은 멀쩡해 보인다.
+            for (const bad of [0, -1, NaN, 1.5]) {
+                assert.throws(
+                    () => getWebviewContent(unicodeData, undefined, '/tmp/t.json', fakeWebview, false, bad),
+                    /must be a live session id/,
+                    `세션 ${bad} 을 통과시켰다`
+                );
+            }
         });
 
         test('injected literals cannot terminate the script block early', () => {
