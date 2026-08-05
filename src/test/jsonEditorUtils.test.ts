@@ -2572,6 +2572,16 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.deepStrictEqual(roundTripped, saved);
         });
 
+        test('NO_SESSION(0) 은 거부한다', () => {
+            // 인자를 필수로 만든 것은 생략만 막는다. 0 은 dispose 후
+            // `currentSessionId` 의 값이기도 해서, 그 변수를 넘기는 리팩터가
+            // 오가는 메시지를 전부 버리는 webview 를 조용히 되살릴 수 있다.
+            assert.throws(
+                () => getWebviewContent(unicodeData, undefined, '/tmp/t.json', fakeWebview, false, 0),
+                /NO_SESSION/
+            );
+        });
+
         test('injected literals cannot terminate the script block early', () => {
             const payload = { k: '</scr' + 'ipt><img src=x>' };
             const html = getWebviewContent(payload, undefined, '/t.json', fakeWebview, false, SESSION);

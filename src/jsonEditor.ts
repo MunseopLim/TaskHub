@@ -1207,8 +1207,11 @@ export function getWebviewContent(
      * 문자열 sentinel 로 잡아 *어떤* user data 의 JSON.stringify 결과와도 같지
      * 않게 → 항상 dirty 유지. (이전에는 `{}` 객체를 sentinel 로 썼지만 사용자
      * 데이터가 우연히 `{}` 일 때 dirty=false 가 되어 충돌했다.)
+     *
+     * 뒤의 `sessionId` 가 필수이므로 이 자리도 생략할 수 없다 — 기본값을 두면
+     * 아무도 쓸 수 없는 값이 시그니처에만 남는다.
      */
-    baselineUnknown: boolean = false,
+    baselineUnknown: boolean,
     /**
      * 이 webview 인스턴스의 세션 식별자. host 는 파일을 바꿔 열 때 **패널을
      * 재사용**하므로(`currentPanel.reveal`), 이전 파일의 in-flight 저장 응답이
@@ -1220,10 +1223,17 @@ export function getWebviewContent(
      * 골라도 {@link NO_SESSION}(=0) 과 같거나 남의 세션과 겹친다. 전자는 오가는
      * 메시지를 **전부** 버리는 webview 를 만들고(귀도 입도 막힌다), 후자는 이
      * 검사가 막으려던 교차 배달을 그대로 허용한다. 빠뜨린 호출부는 컴파일러가
-     * 잡게 둔다.
+     * 잡게 두고, 명시적으로 넘어온 {@link NO_SESSION} 은 아래에서 거부한다.
      */
     sessionId: number
 ): string {
+    // 인자를 필수로 만든 것은 **생략**만 막는다. `currentSessionId` 는 dispose
+    // 시 NO_SESSION 으로 되돌아가므로, 지역 `sessionId` 대신 그 변수를 넘기는
+    // 리팩터 한 번이면 귀도 입도 막힌 webview 가 조용히 되살아난다. 그 값은
+    // 여기서 끊는다 — 이 함수가 만든 화면은 반드시 살아 있는 세션에 속한다.
+    if (sessionId === NO_SESSION) {
+        throw new Error(`getWebviewContent: sessionId must be an active session, got NO_SESSION (${NO_SESSION}).`);
+    }
     // Inject data as escaped JS literals (memoryMapViewer escapeForScript 패턴).
     // 이전의 base64 + atob() 경로는 atob()가 latin1 디코딩이라 멀티바이트 문자
     // (한글, "—", "≥" 등)가 mojibake 되고, Save 시 깨진 데이터가 그대로 디스크에

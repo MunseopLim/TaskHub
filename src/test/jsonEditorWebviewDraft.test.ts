@@ -386,6 +386,129 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
         });
     });
 
+    // ── ✕ / + 버튼 핸들러 ───────────────────────────────────────────────────
+    /**
+     * 배열 태그의 ✕ / + 는 `syncEditingArrayCellToData` 의 `null` 계약을 지키는
+     * **유일한** 소비자다. 그 계약은 그동안 소스 정규식으로만 고정돼 있어,
+     * `if (!arr) { return; }` 가 사라져도 검사에 걸리지 않았다 — 그러면 어긋난
+     * 상태에서 `arr.splice` 가 TypeError 로 스크립트 전체를 죽인다(헬퍼에 가드를
+     * 넣어 `null` 을 돌려주기 시작한 만큼, 이제 그 값을 받는 쪽이 관건이다).
+     * 배포되는 스크립트에서 두 핸들러를 그대로 떼어 실행한다.
+     */
+    suite('배열 태그 ✕ / + 가 어긋난 상태에서 빠져나간다 (실행 테스트)', () => {
+
+        const REMOVE = '[data-remove-arr]';
+        const ADD = '[data-add-arr]';
+
+        /** `document.querySelectorAll('[data-…]').forEach(btn => { … });` 블록 하나. */
+        function extractWiring(attr: string): string {
+            const re = new RegExp(
+                'document\\.querySelectorAll\\(\'\\[' + attr + '\\]\'\\)\\.forEach\\(btn => \\{[\\s\\S]*?\\n        \\}\\);'
+            );
+            const m = html.match(re);
+            assert.ok(m, `webview 스크립트에서 ${attr} 배선을 찾지 못했다`);
+            return m![0];
+        }
+
+        function bootHandlers(data: unknown, sheets: { label: string; path: string[] }[] = sheetMap) {
+            /** 핸들러가 "진행했다" 는 증거. 빠져나갔으면 비어 있어야 한다. */
+            const calls: string[] = [];
+            const td = makeEditingCell(0, 'tags', [
+                makeInput('1', { arrIdx: 0 }),
+                makeInput('2', { arrIdx: 1 }),
+            ]);
+            const handlers: Record<string, (e: unknown) => void> = {};
+            const doc = {
+                querySelectorAll(selector: string) {
+                    assert.ok(selector === REMOVE || selector === ADD, `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                    return [{
+                        dataset: { removeArr: '0' },
+                        closest: (sel: string) => {
+                            assert.strictEqual(sel, 'td', `가짜 DOM 이 모르는 셀렉터: ${sel}`);
+                            return td;
+                        },
+                        addEventListener: (type: string, fn: (e: unknown) => void) => {
+                            assert.strictEqual(type, 'click', `예상 밖의 이벤트: ${type}`);
+                            handlers[selector] = fn;
+                        },
+                    }];
+                },
+                // "+" 는 다시 그린 뒤 새 td 를 찾아 포커스한다. 이 가짜 DOM 은
+                // 다시 그리지 않으므로 없다고 답한다 — 실제 코드도 `if (newTd)`
+                // 로 그 경우를 다룬다.
+                querySelector(selector: string) {
+                    calls.push('querySelector');
+                    assert.strictEqual(selector, 'td[data-row="0"][data-col="tags"]', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                    return null;
+                },
+            };
+
+            const script = [
+                extractFn('parseValue'),
+                extractFn('coerceCellValue'),
+                extractFn('coerceEditedArrayItems'),
+                extractFn('getActiveRows'),
+                extractFn('syncEditingArrayCellToData'),
+                'let activeIdx = 0;',
+                'function pushHistory() { calls.push("pushHistory"); }',
+                'function renderTable() { calls.push("renderTable"); }',
+                extractWiring('data-remove-arr'),
+                extractWiring('data-add-arr'),
+            ].join('\n');
+            new Function('document', 'data', 'sheetMap', 'calls', script)(doc, data, sheets, calls);
+
+            return {
+                calls,
+                click(selector: string) {
+                    const fn = handlers[selector];
+                    assert.ok(fn, `${selector} 에 click 핸들러가 등록되지 않았다`);
+                    fn({ stopPropagation() { /* 실제 코드가 부른다 */ } });
+                },
+            };
+        }
+
+        test('활성 시트가 없으면 ✕ 는 아무것도 하지 않는다', () => {
+            const data = { rows: [{ tags: [1, 2] }] };
+            const { click, calls } = bootHandlers(data, []);
+
+            click(REMOVE);
+
+            assert.deepStrictEqual(calls, [], 'sync 가 null 을 돌려줬는데 진행했다');
+            assert.deepStrictEqual(data, { rows: [{ tags: [1, 2] }] });
+        });
+
+        test('활성 시트가 없으면 + 도 아무것도 하지 않는다', () => {
+            const data = { rows: [{ tags: [1, 2] }] };
+            const { click, calls } = bootHandlers(data, []);
+
+            click(ADD);
+
+            assert.deepStrictEqual(calls, [], 'sync 가 null 을 돌려줬는데 진행했다');
+            assert.deepStrictEqual(data, { rows: [{ tags: [1, 2] }] });
+        });
+
+        test('정상 상태에서는 ✕ 가 실제로 지운다 (양성 대조)', () => {
+            // 위 두 테스트가 "가짜 DOM 이 틀려서" 조용히 통과하는 것을 막는다.
+            const data = { rows: [{ tags: [1, 2] }] };
+            const { click, calls } = bootHandlers(data);
+
+            click(REMOVE);
+
+            assert.deepStrictEqual(data, { rows: [{ tags: [2] }] });
+            assert.deepStrictEqual(calls, ['pushHistory', 'renderTable']);
+        });
+
+        test('정상 상태에서는 + 가 실제로 추가한다 (양성 대조)', () => {
+            const data = { rows: [{ tags: [1, 2] }] };
+            const { click, calls } = bootHandlers(data);
+
+            click(ADD);
+
+            assert.deepStrictEqual(data, { rows: [{ tags: [1, 2, ''] }] });
+            assert.deepStrictEqual(calls, ['pushHistory', 'renderTable', 'querySelector']);
+        });
+    });
+
     // ── activeDraftState ────────────────────────────────────────────────────
     suite('activeDraftState 가 DOM 의 미커밋 입력을 읽는다', () => {
 
