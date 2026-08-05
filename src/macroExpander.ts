@@ -48,9 +48,13 @@ const MAX_EXPANDED_LENGTH = 64 * 1024;
 const MAX_EXPANSIONS = 20000;
 
 /**
- * `expansionSteps` 에 담을 최대 항목 수. steps 는 hover 에 그대로 표시되는
- * 디버그 기록이라 무제한으로 모으면 결과 문자열보다 먼저 메모리를 먹는다
- * (깊이 18 짜리 이진 매크로에서 262,144 항목 / 9.7MB 였다).
+ * `expansionSteps` 에 담을 최대 항목 수. **메모리 상한이다** — 무제한으로 모으면
+ * 결과 문자열보다 먼저 메모리를 먹는다 (깊이 18 짜리 이진 매크로에서 262,144
+ * 항목 / 9.7MB 였다).
+ *
+ * **표시 상한이 아니다.** 현재 호버(`numberBaseHoverProvider`)는 이 배열의
+ * **개수만** 보고(`length > 1` 로 "확장할 것이 있는가" 를 가른다) 내용은 쓰지
+ * 않는다. 단계 목록을 실제로 보여 주려면 그쪽 렌더러를 함께 고쳐야 한다.
  */
 const MAX_STEPS = 500;
 
@@ -77,13 +81,6 @@ export class MacroExpander {
     private circularSkips = 0;
     private expansionCount = 0;
     private stepsTruncated = false;
-    /**
-     * memo 를 재사용한 횟수. 재사용은 재귀를 건너뛰므로 그 하위 트리의 `→` 단계가
-     * `expansionSteps` 에 남지 않는다 — 같은 정의라도 어느 쪽이 먼저 캐시되느냐에
-     * 따라 hover 에 보이는 단계가 달라진다. 결과 값은 정확하지만 중간이 비어
-     * 보이므로, 몇 번 접혔는지를 끝에 한 줄로 남긴다.
-     */
-    private memoHits = 0;
 
     /**
      * Expand a macro definition recursively
@@ -102,7 +99,6 @@ export class MacroExpander {
         this.circularSkips = 0;
         this.expansionCount = 0;
         this.stepsTruncated = false;
-        this.memoHits = 0;
 
         try {
             const macroDef = macros.get(macroName);
@@ -117,20 +113,14 @@ export class MacroExpander {
 
             // 길이 검사는 **치환 전에도** 필요하다. 치환 후에만 재면 참조가
             // 하나도 없는 거대 매크로가 그대로 통과한다 — 확장 자체는 공짜지만
-            // 70KB 짜리 문자열이 steps 와 호버 마크다운을 타고 그대로 흐른다.
+            // 70KB 짜리 문자열이 steps 와 확장 결과를 타고 그대로 흐른다.
             this.assertWithinLengthBudget(macroDef.value);
             steps.push(`${macroName} = ${macroDef.value}`);
             const expanded = this.expandRecursive(macroDef.value, macros, steps, 0).text;
-            // 접힌 재사용이 있었다면 그 사실을 남긴다. 그러지 않으면 단계 목록이
-            // 이유 없이 중간을 건너뛴 것처럼 보인다 — 읽는 사람이 확장이 거기서
-            // 멈췄거나 무언가 빠졌다고 오해할 자리다.
-            if (this.memoHits > 0) {
-                this.pushStep(
-                    steps,
-                    `… (${this.memoHits} repeated expansion(s) reused from cache; their steps are not repeated)`
-                );
-            }
-
+            // 0.6.59 는 여기서 "몇 번 접혔는지" 를 한 줄로 남겼다. 근거는 "단계가
+            // 이유 없이 중간을 건너뛴 것처럼 보인다" 였는데, **단계 목록은 어디에도
+            // 표시되지 않으므로** 그 문장은 사실이 아니었다 — 호버는 개수만 보고
+            // 내용을 쓰지 않는다. 읽는 사람이 없는 안내라 걷어냈다.
             return {
                 expandedValue: expanded,
                 expansionSteps: steps,
@@ -202,7 +192,6 @@ export class MacroExpander {
                 if (usable) {
                     expandedMacro = cached!.text;
                     childHeight = cached!.height;
-                    this.memoHits++;
                 } else {
                     // Mark as expanding to prevent circular reference
                     this.expandingMacros.add(identifier);
@@ -270,9 +259,12 @@ export class MacroExpander {
     }
 
     /**
-     * steps 를 상한까지만 모은다. 상한에 닿으면 잘렸다는 사실을 한 줄로
-     * 남긴다 — 조용히 버리면 hover 를 읽는 사람이 확장이 거기서 끝난 것으로
-     * 오해한다.
+     * steps 를 상한까지만 모은다. 상한에 닿으면 잘렸다는 사실을 한 줄로 남긴다 —
+     * 배열만 보고 확장이 거기서 끝났다고 읽지 않도록 하기 위한 표시다.
+     *
+     * **지금 이 표시를 읽는 화면은 없다.** 호버는 `expansionSteps` 의 개수만 본다
+     * ({@link MAX_STEPS} 주석 참조). 단계 목록을 실제로 보여 주게 되면 이 줄이
+     * 그때 의미를 갖는다.
      */
     private pushStep(steps: string[], step: string): void {
         if (steps.length < MAX_STEPS) {

@@ -407,33 +407,25 @@ const int x = 5;
             assert.strictEqual(result.expandedValue, new Array(4096).fill('A').join(' '));
         });
 
-        test('memo 로 접힌 확장은 단계 목록에 그 사실을 남긴다', () => {
-            // memo hit 은 재귀를 건너뛰므로 그 하위 트리의 `→` 단계가 남지 않는다.
-            // 아무 표시가 없으면 hover 를 읽는 사람에게는 단계가 이유 없이
-            // 중간을 건너뛴 것으로 보인다 (같은 정의라도 토큰 순서에 따라 어느
-            // 쪽이 접히는지가 달라진다).
+        /**
+         * 0.6.59 는 memo 로 접힌 횟수를 `expansionSteps` 끝에 한 줄로 남겼고,
+         * 그 근거는 "hover 를 읽는 사람이 단계가 중간을 건너뛴 것으로 오해한다"
+         * 였다. **단계 목록을 보여 주는 화면은 없다** —
+         * `numberBaseHoverProvider` 는 `expansionSteps.length > 1` 로 "확장할
+         * 것이 있는가" 만 가르고 내용은 쓰지 않는다. 읽는 사람이 없는 안내라
+         * 0.6.65 에서 걷어냈고, 그것을 고정하던 두 테스트도 함께 지웠다.
+         *
+         * 아래 테스트가 **대신 지키는 것**: memo 접기가 결과 값과 단계 개수의
+         * 성질을 바꾸지 않는다는 것. 그쪽이 memo 최적화의 진짜 계약이다.
+         */
+        test('memo 로 접혀도 결과와 단계는 전시용 문구 없이 유지된다', () => {
             const result = expander.expandMacro('M6', binaryChain(6));
 
             assert.strictEqual(result.success, true);
-            assert.match(
-                result.expansionSteps[result.expansionSteps.length - 1],
-                /reused from cache/,
-                `접힌 재사용을 알리지 않았다: ${JSON.stringify(result.expansionSteps.slice(-3))}`
-            );
-        });
-
-        test('접힌 것이 없으면 그 줄을 붙이지 않는다', () => {
-            const macros = new Map<string, MacroDefinition>([
-                ['A', { name: 'A', value: 'B + 1' }],
-                ['B', { name: 'B', value: '2' }]
-            ]);
-
-            const result = expander.expandMacro('A', macros);
-
-            assert.strictEqual(result.expandedValue, '2 + 1');
+            assert.ok(result.expansionSteps.length > 1, '확장 단계가 남지 않았다');
             assert.ok(
                 !result.expansionSteps.some(s => /reused from cache/.test(s)),
-                '재사용이 없는데 안내를 붙이면 그것대로 오해를 만든다'
+                `읽는 화면이 없는 안내가 다시 들어왔다: ${JSON.stringify(result.expansionSteps.slice(-3))}`
             );
         });
 
