@@ -483,6 +483,16 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
     const allResults: Record<string, SimulatedResult> = Object.create(null);
     const totalUnresolved = new Set<string>();
 
+    /**
+     * 참조는 전부 해석되는데 **실행은 못 하는** 자리들.
+     *
+     * 미해결 참조와는 다른 종류의 실패다. `${...}` 가 하나도 남지 않아도
+     * 현재 플랫폼의 `tool` 이 없거나 경로가 워크스페이스 밖이면 런타임은
+     * 거부한다. 인라인 경고만 남기면 **요약만 읽는 사용자**에게는 `all ${...}
+     * references resolve` 만 보여, 실행하면 실패할 액션이 정상으로 안내된다.
+     */
+    const runtimeBlockers: string[] = [];
+
     // Surface graph issues (cycle / missing dep / self dep) up front so
     // Preview Run reflects what the runtime would refuse to schedule.
     // Without this, a cycle like A(parallel)→B + B(barrier)→A could
@@ -722,6 +732,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                     // 넘어가면 "모두 해석됨" 요약과 함께 정상처럼 보인다.
                     lines.push(`  tool: (none for this platform)`);
                     lines.push(`    ⚠️  no 'tool' entry for ${process.platform} — this task would fail at runtime`);
+                    runtimeBlockers.push(`task '${task.id}': no 'tool' entry for ${process.platform}`);
                 } else {
                     lines.push(`  tool: ${tool}`);
                 }
@@ -782,6 +793,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                     lines.push(`    → resolves to: ${resolved}`);
                     if (outsideWorkspace) {
                         lines.push(`    ⚠️  OUTSIDE WORKSPACE — execution will be refused`);
+                        runtimeBlockers.push(`task '${task.id}': path outside workspace — ${resolved}`);
                     }
                 }
                 UNRESOLVED_VAR_RE.lastIndex = 0;
@@ -840,6 +852,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                     lines.push(`      → resolves to: ${resolved}`);
                     if (outsideWorkspace) {
                         lines.push(`      ⚠️  OUTSIDE WORKSPACE — execution will be refused`);
+                        runtimeBlockers.push(`task '${task.id}': output path outside workspace — ${resolved}`);
                     }
                 }
                 UNRESOLVED_VAR_RE.lastIndex = 0;
@@ -909,15 +922,27 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         // headline here so a user scanning only the summary doesn't
         // miss that the action would never start.
         lines.push(`Summary: action would FAIL at start — ${graphIssues.length} graph issue(s) above.`);
-    } else if (totalUnresolved.size > 0) {
-        lines.push(`Summary: ${totalUnresolved.size} unresolved variable(s) — fix before running:`);
-        for (const u of totalUnresolved) {
-            lines.push(`  - ${u}`);
-        }
-        lines.push('(These will be passed through as literal "${...}" at runtime.)');
     } else {
-        lines.push('Summary: all ${...} references resolve under simulated inputs.');
-        lines.push('(Placeholder values like <fileDialog:id:path> become real values at runtime.)');
+        // 미해결 참조와 실행 차단은 **서로 독립**이므로 둘 다 낸다. 앞의 것만
+        // 보고 멈추면, 참조가 하나 미해결인 액션의 "실행 자체가 불가능하다" 는
+        // 사실이 요약에서 빠진다.
+        if (totalUnresolved.size > 0) {
+            lines.push(`Summary: ${totalUnresolved.size} unresolved variable(s) — fix before running:`);
+            for (const u of totalUnresolved) {
+                lines.push(`  - ${u}`);
+            }
+            lines.push('(These will be passed through as literal "${...}" at runtime.)');
+        }
+        if (runtimeBlockers.length > 0) {
+            lines.push(`Summary: ${runtimeBlockers.length} task(s) would FAIL at runtime even though references resolve:`);
+            for (const b of runtimeBlockers) {
+                lines.push(`  - ${b}`);
+            }
+        }
+        if (totalUnresolved.size === 0 && runtimeBlockers.length === 0) {
+            lines.push('Summary: all ${...} references resolve under simulated inputs.');
+            lines.push('(Placeholder values like <fileDialog:id:path> become real values at runtime.)');
+        }
     }
     lines.push('═══════════════════════════════════════════════════════════════════');
 

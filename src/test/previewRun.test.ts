@@ -679,6 +679,34 @@ suite('buildPreviewReport', () => {
                 assert.match(report, new RegExp(`no 'tool' entry for ${process.platform}`));
                 assert.doesNotMatch(report, /built-in engine/, 'tool 을 지정했는데 내장 엔진처럼 보이면 안 된다');
             });
+
+            /**
+             * 인라인 경고만으로는 부족하다. Preview 리포트는 길어서 **요약만
+             * 읽는** 사용법이 정상인데, 참조가 전부 해석되면 요약은 `all ${...}
+             * references resolve` 였다 — 실행하면 실패할 액션을 정상이라고
+             * 안내하는 셈이다. 미해결 참조와는 독립된 종류의 실패다.
+             */
+            test('요약이 "모두 해석됨" 이라고 말하지 않는다', () => {
+                const report = buildPreviewReport(
+                    zipWithTool('a.zip.os.missing-summary', { [INACTIVE_OS]: '/tools/other-7z' }),
+                    baseOptions()
+                );
+                assert.doesNotMatch(report, /Summary: all \$\{\.\.\.\} references resolve/,
+                    `실행 불가인데 요약이 정상이라고 말한다:\n${report}`);
+                assert.match(report, /Summary: 1 task\(s\) would FAIL at runtime/);
+                assert.ok(report.includes(`task 'pack': no 'tool' entry for ${process.platform}`),
+                    `요약에 어느 태스크인지 없다:\n${report}`);
+            });
+
+            test('현재 플랫폼 branch 가 있으면 요약은 종전대로 정상이다', () => {
+                // 과탐 방지 — 차단 요약이 정상 설정에까지 붙으면 안 된다.
+                const report = buildPreviewReport(
+                    zipWithTool('a.zip.os.ok-summary', { [ACTIVE_OS]: '/tools/7z' }),
+                    baseOptions()
+                );
+                assert.match(report, /Summary: all \$\{\.\.\.\} references resolve/);
+                assert.doesNotMatch(report, /would FAIL at runtime/);
+            });
         });
     });
 

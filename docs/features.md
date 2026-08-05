@@ -507,6 +507,8 @@ Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.tx
 
 **OS별 객체(`command` / `tool` / `itemsFromCommand`)는 지금 이 기계가 고를 branch 하나만** 표시·검사합니다 — 런타임의 선택 규칙과 같습니다. 그래서 다른 OS branch에만 있는 `${...}` 오타는 Preview에 나타나지 않고(여기서는 실행되지 않으므로), 반대로 **현재 플랫폼 branch가 아예 없으면** 실행이 실패할 것임을 경고합니다. 모든 OS branch를 한 번에 보려면 [TaskHub Doctor](#23-taskhub-doctor-action-lint)를 쓰세요 — 그쪽은 설정 파일 자체를 검사하므로 다른 OS 사용자에게만 문제가 되는 오류도 잡습니다.
 
+**요약은 두 종류의 실패를 따로 셉니다** (0.6.62부터). `${...}` 미해결과 별개로, 참조가 전부 해석돼도 실행이 불가능한 자리(현재 플랫폼의 `tool` 없음, 워크스페이스 밖 경로)는 `N task(s) would FAIL at runtime even though references resolve`로 나옵니다. 둘 다 있으면 둘 다 나옵니다. 0.6.61까지는 이 경고가 해당 태스크 줄에만 붙어, **요약만 읽으면** 실행하면 실패할 액션이 `all ${...} references resolve`로 보였습니다.
+
 -   **`isOneShot`** (`boolean`, *선택*, 기본값: `false`): **스트림 모드에서만 의미가 있습니다.**
     -   `true`로 설정하면, `notepad.exe` 같은 GUI 프로그램처럼 종료되지 않는 프로세스를 실행하고 즉시 '성공'으로 처리합니다.
 
