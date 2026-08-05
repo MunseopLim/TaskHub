@@ -5483,7 +5483,7 @@ suite('Extension Test Suite', () => {
 	 * `string | string[] | number` 라 배열로 바꿔도 빌드가 깨지지 않는다
 	 * (`fileDialog` 의 `paths` 가 실제로 배열이다). 그쪽을 여기서 묶는다.
 	 */
-	suite('quickPick 결과 모양 (런타임 ↔ 시뮬레이션)', () => {
+	suite('프롬프트 결과 모양 (런타임 ↔ 시뮬레이션)', () => {
 		async function runtimeQuickPick(task: any, picked: any) {
 			const original = vscode.window.showQuickPick;
 			(vscode.window as any).showQuickPick = async () => picked;
@@ -5523,5 +5523,41 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(runtime.values, undefined);
 			assert.deepStrictEqual(Object.keys(simulated).sort(), Object.keys(runtime).sort());
 		});
+
+		/**
+		 * `fileDialog` 는 시뮬레이션이 **일부러 문자열이 아닌 값**을 내는 유일한
+		 * 자리다 — `paths` · `names` 는 배열, `count` 는 숫자. `args` 배열 확장을
+		 * 미리보기가 실제와 같은 개수로 보여 주려면 그래야 한다. 그래서 위
+		 * quickPick 보다 어긋나기 쉬운 쪽이고, 어긋나면 미리보기의 인자 개수가
+		 * 실행과 달라진다.
+		 */
+		for (const many of [true, false]) {
+			test(`fileDialog(canSelectMany=${many}): 키 집합과 각 키의 모양이 같다`, async () => {
+				const originalDialog = vscode.window.showOpenDialog;
+				const picked = many
+					? [vscode.Uri.file('/tmp/a.txt'), vscode.Uri.file('/tmp/b.txt')]
+					: [vscode.Uri.file('/tmp/a.txt')];
+				(vscode.window as any).showOpenDialog = async () => picked;
+				let runtime: Record<string, unknown>;
+				try {
+					runtime = await handleFileDialog({ id: 'pick', type: 'fileDialog', options: { canSelectMany: many } }) as unknown as Record<string, unknown>;
+				} finally {
+					(vscode.window as any).showOpenDialog = originalDialog;
+				}
+				const simulated = simulateTaskResult({
+					id: 'pick', type: 'fileDialog', options: { canSelectMany: many }
+				} as any) as Record<string, unknown>;
+
+				assert.deepStrictEqual(Object.keys(simulated).sort(), Object.keys(runtime).sort());
+				for (const key of Object.keys(runtime)) {
+					assert.strictEqual(
+						Array.isArray(simulated[key]), Array.isArray(runtime[key]),
+						`${key} 의 배열 여부가 다르다 — 배열은 문자열 자리에서 공백으로 이어 붙고 args 에서는 인자 여러 개로 펼쳐진다`
+					);
+					assert.strictEqual(typeof simulated[key], typeof runtime[key], `${key} 의 타입이 다르다`);
+				}
+				assert.strictEqual(simulated.count, picked.length, '개수까지 흉내 내야 args 확장이 실제와 같은 수로 보인다');
+			});
+		}
 	});
 });

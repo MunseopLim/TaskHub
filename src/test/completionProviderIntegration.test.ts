@@ -40,6 +40,21 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
   }
 ]`;
 
+    /** `${` 바로 뒤 — 점이 없는 분기(태스크 id · 전역 참조). */
+    const NO_DOT_FIXTURE = `[
+  {
+    "id": "a.multi",
+    "title": "multi",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "pick", "type": "fileDialog", "options": { "canSelectMany": true } },
+        { "id": "run", "type": "shell", "command": "echo \${${CURSOR}" }
+      ]
+    }
+  }
+]`;
+
     let tempDir: string;
 
     suiteSetup(async () => {
@@ -55,19 +70,34 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
         try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best-effort */ }
     });
 
-    async function openFixture(relPath: string): Promise<{ doc: vscode.TextDocument; position: vscode.Position }> {
+    /** 경로마다 한 번 쓴 내용. 같은 경로에 다른 내용을 쓰는 것을 막는다. */
+    const written = new Map<string, string>();
+
+    async function openFixture(relPath: string, fixture: string = FIXTURE): Promise<{ doc: vscode.TextDocument; position: vscode.Position }> {
         const full = path.join(tempDir, relPath);
         fs.mkdirSync(path.dirname(full), { recursive: true });
-        const offset = FIXTURE.indexOf(CURSOR);
+        const offset = fixture.indexOf(CURSOR);
         assert.ok(offset >= 0, '픽스처에 커서가 없다');
-        fs.writeFileSync(full, FIXTURE.slice(0, offset) + FIXTURE.slice(offset + 1), 'utf8');
+        const text = fixture.slice(0, offset) + fixture.slice(offset + 1);
+        // `openTextDocument` 는 이미 열린 URI 에 **캐시된 모델**을 돌려주므로
+        // 디스크를 다시 읽지 않는다. 같은 경로에 다른 내용을 쓰면 조용히 옛
+        // 내용을 보게 되니, 픽스처가 다르면 경로도 달라야 한다.
+        const previous = written.get(full);
+        assert.ok(previous === undefined || previous === text, `같은 경로에 다른 픽스처를 썼다: ${relPath}`);
+        written.set(full, text);
+        fs.writeFileSync(full, text, 'utf8');
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(full));
         return { doc, position: doc.positionAt(offset) };
     }
 
     /**
-     * trigger character 로 `.` 을 넘긴다 — VS Code 는 그 문자를 등록하지 않은
-     * provider 를 건너뛰므로, 등록 목록에서 `.` 이 빠지면 여기서 걸린다.
+     * trigger character 로 `.` 을 넘겨 실제 입력에 가깝게 부른다.
+     *
+     * **이것으로 등록 목록을 검증할 수는 없다.** 이 명령은 trigger character 로
+     * provider 를 거르지 않는다 — 거르는 것은 편집기의 SuggestModel 이고 명령은
+     * 그 자리를 비운 채 registry 전체에 묻는다. 그래서 등록에서 `.` 이 빠져도
+     * 아래 테스트들은 전부 통과한다(실제로 지워 보고 확인했다). 그 자리는
+     * 마지막의 소스 가드가 맡는다.
      */
     async function completionsAt(doc: vscode.TextDocument, position: vscode.Position): Promise<vscode.CompletionItem[]> {
         const list = await vscode.commands.executeCommand<vscode.CompletionList>(
@@ -102,6 +132,12 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
             item.insertText, 'pick.paths',
             'range 가 `pick.` 을 덮으므로 넣는 것도 참조 전체여야 한다 (키만 넣으면 `${paths}`)'
         );
+        // detail 은 순수 모듈이 낸 종류를 `describeVariableCompletion` 이 문구로
+        // 옮긴 것이다. 그 연결이 끊기면 위젯 오른쪽이 빈 채로 뜬다.
+        assert.ok(
+            item.detail?.includes('fileDialog'),
+            `detail 이 태스크 타입을 담지 않았다: ${item.detail}`
+        );
     });
 
     test('제안 전체가 range 와 짝이 맞는다', async () => {
@@ -115,6 +151,22 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
             assert.ok(range && doc.getText(range) === 'pick.', `range 가 어긋났다: ${labelOf(item)}`);
             assert.strictEqual(item.insertText, labelOf(item), `insertText 가 라벨과 다르다: ${labelOf(item)}`);
         }
+    });
+
+    test('점이 없는 자리에서는 커서 위치를 덮는 빈 range 로 태스크 id 를 낸다', async () => {
+        // 결과 키 분기와 range 계산이 다르다 — 여기서는 대체할 것이 없으므로
+        // 빈 range 여야 하고, 넣는 것은 참조 이름 그대로다.
+        const { doc, position } = await openFixture(path.join('nodot', '.vscode', 'actions.json'), NO_DOT_FIXTURE);
+        const items = await completionsAt(doc, position);
+        const names = items.map(labelOf);
+        assert.ok(names.includes('pick'), `다른 태스크 id 를 내지 않았다: ${names.join(',')}`);
+        assert.ok(names.includes('workspaceFolder'), `전역 참조를 내지 않았다: ${names.join(',')}`);
+
+        const item = items.find(i => labelOf(i) === 'pick')!;
+        const range = replaceRangeOf(item);
+        assert.ok(range, 'range 가 없으면 앞 단어(`echo`)까지 먹을 수 있다');
+        assert.strictEqual(doc.getText(range), '', '입력한 것이 없으므로 대체할 범위도 비어 있어야 한다');
+        assert.strictEqual(item.insertText, 'pick');
     });
 
     test('selector 세 곳에서 모두 뜬다', async () => {
@@ -138,5 +190,16 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
         const { doc, position } = await openFixture(path.join('notes', 'scratch.json'));
         const names = (await completionsAt(doc, position)).map(labelOf);
         assert.ok(!names.includes('pick.paths'), `selector 밖에서도 제안이 떴다: ${names.join(',')}`);
+    });
+
+    test('트리거 문자 `{` 와 `.` 이 등록돼 있다 (소스 가드)', () => {
+        // 이 하나만 소스를 읽는 이유는 `completionsAt` 의 주석에 적었다 — 명령
+        // 경로로는 등록 목록을 관찰할 수 없다. 이것이 빠지면 사용자는 `${pick.`
+        // 까지 치고도 위젯을 못 보고, 위 테스트들은 전부 통과한다.
+        const source = fs.readFileSync(path.resolve(__dirname, '..', '..', 'src', 'extension.ts'), 'utf-8');
+        const at = source.indexOf('registerCompletionItemProvider(');
+        assert.ok(at >= 0, 'provider 등록을 찾지 못했다 — 이 가드가 무력화됐다');
+        const call = source.slice(at, source.indexOf('\n    );', at));
+        assert.ok(/'\{',\s*'\.'/.test(call), `트리거 문자가 빠졌다:\n${call.slice(-200)}`);
     });
 });
