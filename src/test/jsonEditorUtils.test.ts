@@ -1485,15 +1485,34 @@ suite('JsonEditorUtils Test Suite', () => {
             // 회귀 가드: 새 mutation 경로를 추가하면서 pushHistory 호출을
             // 빠뜨리면 그 편집은 Undo로 되돌릴 수 없게 된다. 현재 webview에서
             // 데이터가 변하는 경로는 정확히 다음과 같다.
-            const markers = [
+            // 버튼 배선은 **블록을 통째로 떼어** 그 안을 본다. 문자 창으로 보면
+            // 두 가지로 샌다: 핸들러가 길어지면 창 밖으로 밀려 거짓 실패가 나고,
+            // 반대로 이웃 블록의 pushHistory() 에 걸려 거짓 통과도 한다
+            // (commitCell 이 실제로 그렇게 통과하고 있었다).
+            const wiredMarkers = [
                 'data-remove-arr',   // tag 삭제
                 'data-add-arr',      // tag 추가
-                'data-convert',      // string ↔ array
-                'data-delete-row',   // 행 삭제
-                'dragSrcIdx',        // drag drop 정렬
-                'btnAddRow'          // 새 행 추가
+                'data-convert',      // string ↔ array · scalar 타입 변환
+                'data-delete-row'    // 행 삭제
             ];
-            for (const marker of markers) {
+            for (const marker of wiredMarkers) {
+                const block = editorSource.match(new RegExp(
+                    "document\\.querySelectorAll\\('\\[" + marker + "\\]'\\)\\.forEach\\([\\s\\S]*?\\n        \\}\\);"
+                ));
+                assert.ok(block, `${marker} 배선 블록을 찾지 못했다`);
+                // 블록이 더 깊이 들여쓰기되면 종결자가 **다음 블록의** 8칸
+                // `});` 에 걸려 두 배선을 통째로 삼킨다. 그러면 이웃의
+                // pushHistory() 로 거짓 통과한다 — 창 방식에서 옮겨 온 결함이라
+                // 여기서도 같이 끊는다 (extractWiring 이 쓰는 것과 같은 검사).
+                const handlerCount = block![0].split("addEventListener('click'").length - 1;
+                assert.strictEqual(handlerCount, 1, `${marker} 배선 추출이 이웃 블록까지 삼켰다`);
+                assert.ok(
+                    /pushHistory\(\)/.test(block![0]),
+                    'mutation path "' + marker + '" must call pushHistory() inside its own wiring block'
+                );
+            }
+            // 블록 모양이 아닌 두 경로는 문자 창으로 남긴다.
+            for (const marker of ['dragSrcIdx', 'btnAddRow']) {
                 const re = new RegExp(marker + '[\\s\\S]{0,1200}?pushHistory\\(\\)');
                 assert.ok(
                     re.test(editorSource),

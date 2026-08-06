@@ -74,6 +74,21 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
         return m![0];
     }
 
+    /** `document.querySelectorAll('[data-…]').forEach(btn => { … });` 블록 하나. */
+    function extractWiring(attr: string): string {
+        const re = new RegExp(
+            'document\\.querySelectorAll\\(\'\\[' + attr + '\\]\'\\)\\.forEach\\(btn => \\{[\\s\\S]*?\\n        \\}\\);'
+        );
+        const m = html.match(re);
+        assert.ok(m, `webview 스크립트에서 ${attr} 배선을 찾지 못했다`);
+        // 블록이 더 깊이 들여쓰기되면 종결자가 **다음 블록의** 8칸 `});` 에
+        // 걸려 두 배선을 통째로 삼킨다. 그래도 테스트는 통과하므로(같은
+        // 핸들러가 두 번 등록될 뿐) 여기서 끊는다.
+        const handlerCount = m![0].split("addEventListener('click'").length - 1;
+        assert.strictEqual(handlerCount, 1, `${attr} 배선 추출이 이웃 블록까지 삼켰다`);
+        return m![0];
+    }
+
     /** `window.addEventListener('message', ...)` 의 본문. */
     function extractMessageHandlerBody(): string {
         const m = html.match(/window\.addEventListener\('message', \(event\) => \{([\s\S]*?)\n    \}\);/);
@@ -483,21 +498,6 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
         /** ✕ 가 포커스를 옮길 대상 — 항목의 input 이 아니라 그 항목의 ✕ 버튼이다. */
         const REMOVE_ITEMS_SELECTOR = '.cell-edit [data-remove-arr]';
 
-        /** `document.querySelectorAll('[data-…]').forEach(btn => { … });` 블록 하나. */
-        function extractWiring(attr: string): string {
-            const re = new RegExp(
-                'document\\.querySelectorAll\\(\'\\[' + attr + '\\]\'\\)\\.forEach\\(btn => \\{[\\s\\S]*?\\n        \\}\\);'
-            );
-            const m = html.match(re);
-            assert.ok(m, `webview 스크립트에서 ${attr} 배선을 찾지 못했다`);
-            // 블록이 더 깊이 들여쓰기되면 종결자가 **다음 블록의** 8칸 `});` 에
-            // 걸려 두 배선을 통째로 삼킨다. 그래도 테스트는 통과하므로(같은
-            // 핸들러가 두 번 등록될 뿐) 여기서 끊는다.
-            const handlerCount = m![0].split("addEventListener('click'").length - 1;
-            assert.strictEqual(handlerCount, 1, `${attr} 배선 추출이 이웃 블록까지 삼켰다`);
-            return m![0];
-        }
-
         /**
          * `renderTable()` 뒤에도 표에 남아 있는 td.
          *
@@ -819,6 +819,295 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             assert.deepStrictEqual(calls, ['pushHistory', 'renderTable', 'refind']);
             assert.deepStrictEqual(rendered.added, [], '못 찾았는데 무언가를 편집 상태로 만들었다');
             assert.deepStrictEqual(rendered.focused, [], '못 찾았는데 어딘가에 포커스했다');
+        });
+    });
+
+    // ── scalar 셀 타입 변환 ──────────────────────────────────────────────────
+    /**
+     * 숫자 칸에 문자열을 한 번이라도 넣으면 그 셀은 문자열이 되고, 이후
+     * `coerceEditedCellValue` 의 "옛 값이 문자열이면 raw 유지" 규칙 때문에 숫자를
+     * 입력해도 계속 문자열로 남았다. 규칙 자체는 `"00123"` 을 지키려는 것이라
+     * 옳지만, **빠져나올 문이 없었다** — 표에서는 36 과 "36" 이 똑같이 보이므로
+     * 사용자는 그 사실조차 알 수 없다.
+     */
+    suite('scalar 셀 타입 변환 (실행 테스트)', () => {
+
+        const S = buildJsonEditorStrings();
+
+        /**
+         * 배포되는 renderCellView 를 그대로 떼어 돌린다. `fmt` · `escapeAttr` 도
+         * 함께 내보내, 기대 tooltip 을 **실제 문자열 번들 + 실제 이스케이프**로
+         * 만든다 — 문구를 손으로 적으면 로케일에 묶이고 이스케이프도 놓친다.
+         */
+        const R = (() => {
+            const script = [
+                PULL_FROM_BUNDLE,
+                extractFn('fmt'),
+                extractFn('escapeHtml'),
+                extractFn('escapeAttr'),
+                extractFn('isPlainObject'),
+                extractFn('hasOnlyPrimitives'),
+                extractFn('summarizeObject'),
+                extractFn('retypedScalar'),
+                extractFn('renderCellView'),
+                'return {',
+                '    render: (val) => renderCellView(val, Array.isArray(val), false),',
+                '    fmt: fmt,',
+                '    escapeAttr: escapeAttr,',
+                '};',
+            ].join('\n');
+            return new Function('LOGIC', 'S', script)(logicBundle(), S) as {
+                render(val: unknown): string;
+                fmt(template: string, values: Record<string, string>): string;
+                escapeAttr(str: string): string;
+            };
+        })();
+
+        /** 기대 tooltip: 실제 템플릿에 preview 를 끼우고 속성용으로 이스케이프. */
+        function expectedTitle(key: 'toValueType' | 'toStringType', preview: string): string {
+            return R.escapeAttr(R.fmt(S[key], { preview }));
+        }
+
+        /** 변환 버튼의 label 과 tooltip. 버튼이 없으면 null. */
+        function retypeButton(val: unknown): { label: string; title: string } | null {
+            const html = R.render(val);
+            const m = html.match(
+                /<button class="convert-btn" data-convert="retype" title="([^"]*)" aria-label="([^"]*)">([^<]*)<\/button>/
+            );
+            if (!m) { return null; }
+            // 아이콘만 있는 버튼이라 이름이 없으면 스크린리더에는 존재하지 않는 것과 같다.
+            assert.strictEqual(m[2], m[1], 'aria-label 이 title 과 달라졌다');
+            return { title: m[1], label: m[3] };
+        }
+
+        test('숫자·불리언 셀은 문자열로 바꾸는 버튼을 낸다', () => {
+            assert.deepStrictEqual(retypeButton(36), { label: '#→s', title: expectedTitle('toStringType', '"36"') });
+            assert.deepStrictEqual(retypeButton(true), { label: '#→s', title: expectedTitle('toStringType', '"true"') });
+            // expectedTitle 은 같은 템플릿·같은 fmt 로 만들므로 템플릿에서
+            // {preview} 가 통째로 빠져도 통과한다. 결과가 실제로 보이는지는
+            // 리터럴로 못박는다 (따옴표까지 — 그게 이 방향의 요점이다).
+            assert.ok(retypeButton(36)!.title.includes('&quot;36&quot;'), '문자열이 된다는 것이 안 보인다');
+        });
+
+        test('값으로 읽히는 문자열 셀은 값으로 바꾸는 버튼을 낸다', () => {
+            assert.deepStrictEqual(retypeButton('36'), { label: 's→#', title: expectedTitle('toValueType', '36') });
+            assert.deepStrictEqual(retypeButton('true'), { label: 's→#', title: expectedTitle('toValueType', 'true') });
+            assert.deepStrictEqual(retypeButton('null'), { label: 's→#', title: expectedTitle('toValueType', 'null') });
+            assert.ok(retypeButton('36')!.title.includes('36'), '무엇이 되는지가 안 보인다');
+        });
+
+        test('null 은 문자열로 되돌릴 수 있다 (일방통행이 되지 않도록)', () => {
+            // "null" → null 을 허용하면서 반대 방향이 없으면, 이 기능이 없애려던
+            // 일방통행을 새로 하나 만드는 셈이다.
+            assert.deepStrictEqual(retypeButton(null), { label: '#→s', title: expectedTitle('toStringType', '"null"') });
+        });
+
+        /**
+         * 2^53 을 넘는 정수 문자열.
+         *
+         * double 을 거치면서 값이 조용히 달라진다 — "0xFFFFFFFFFFFFFFFF" 는
+         * …551615 가 아니라 …552000 이 된다. 이 확장의 영역이 임베디드라 64비트
+         * 마스크·주소가 실제로 이런 모양이고, tooltip 에 미리 보여 준다 해도
+         * 20자리 중 끝 네 자리가 다른 것을 눈으로 걸러 내지는 못한다.
+         */
+        test('정확히 표현할 수 없는 큰 정수에는 버튼을 내지 않는다', () => {
+            for (const val of ['0xFFFFFFFFFFFFFFFF', '12345678901234567890', '9007199254740993']) {
+                assert.strictEqual(retypeButton(val), null, `${val} 이 double 을 거쳐 손상될 뻔했다`);
+            }
+            // 경계 바로 안쪽은 그대로 바꿀 수 있어야 한다 (가드가 과하지 않다).
+            assert.deepStrictEqual(
+                retypeButton('9007199254740991'),
+                { label: 's→#', title: expectedTitle('toValueType', '9007199254740991') }
+            );
+        });
+
+        test('바꿔도 그대로인 값에는 버튼을 내지 않는다', () => {
+            // 버튼이 아무 일도 하지 않으면 사용자를 속이는 것이다.
+            for (const val of ['abc', '', undefined, '  ']) {
+                assert.strictEqual(retypeButton(val), null, `${JSON.stringify(val)} 에 쓸모없는 버튼이 붙었다`);
+            }
+        });
+
+        test('결과를 tooltip 으로 미리 보여 준다 (16진 문자열은 10진수가 된다)', () => {
+            // "0x40013800" 은 JS 에서 숫자로도 읽힌다. 무엇이 될지 보이지 않으면
+            // 누르기 전에 알 수 없고, 눌러 보고 나서야 주소가 10진수로 바뀐 것을
+            // 발견하게 된다.
+            assert.deepStrictEqual(
+                retypeButton('0x40013800'),
+                { label: 's→#', title: expectedTitle('toValueType', '1073821696') }
+            );
+            // 이 미리보기가 없으면 사용자는 주소가 10진수로 바뀐 뒤에야 안다.
+            assert.ok(retypeButton('0x40013800')!.title.includes('1073821696'));
+        });
+
+        // ── 클릭 핸들러 ──────────────────────────────────────────────────
+        function bootConvert(
+            data: unknown,
+            options: { col?: string; sheets?: typeof sheetMap; convert?: string; row?: string } = {}
+        ) {
+            const col = options.col ?? 'v';
+            const calls: string[] = [];
+            const announced: string[] = [];
+            const td = { dataset: { row: options.row ?? '0', col } };
+            let clickHandler: ((e: unknown) => void) | undefined;
+            const doc = {
+                querySelectorAll(selector: string) {
+                    assert.strictEqual(selector, '[data-convert]', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                    return [{
+                        dataset: { convert: options.convert ?? 'retype' },
+                        closest: (sel: string) => {
+                            assert.strictEqual(sel, 'td[data-row]', `가짜 DOM 이 모르는 셀렉터: ${sel}`);
+                            return td;
+                        },
+                        addEventListener: (type: string, fn: (e: unknown) => void) => {
+                            assert.strictEqual(type, 'click', `예상 밖의 이벤트: ${type}`);
+                            clickHandler = fn;
+                        },
+                    }];
+                },
+            };
+            const script = [
+                PULL_FROM_BUNDLE,
+                extractFn('fmt'),
+                extractFn('getActiveRows'),
+                extractFn('retypedScalar'),
+                'let activeIdx = 0;',
+                'function commitActiveCellOrAbort() { return true; }',
+                'function pushHistory() { calls.push("pushHistory"); }',
+                'function renderTable() { calls.push("renderTable"); }',
+                'function announce(msg) { announced.push(msg); }',
+                extractWiring('data-convert'),
+            ].join('\n');
+            new Function('LOGIC', 'document', 'data', 'sheetMap', 'calls', 'announced', 'S', script)(
+                logicBundle(), doc, data, options.sheets ?? sheetMap, calls, announced, S);
+
+            return {
+                calls,
+                announced,
+                click() {
+                    assert.ok(clickHandler, 'data-convert 에 click 핸들러가 등록되지 않았다');
+                    clickHandler!({ stopPropagation() { /* 실제 코드가 부른다 */ } });
+                },
+            };
+        }
+
+        test('문자열 셀을 눌러 숫자로 되돌린다', () => {
+            const data = { rows: [{ v: '54' }] };
+            const { click, calls } = bootConvert(data);
+
+            click();
+
+            assert.deepStrictEqual(data, { rows: [{ v: 54 }] });
+            assert.strictEqual(typeof data.rows[0].v, 'number', '보이기만 숫자면 소용없다');
+            assert.deepStrictEqual(calls, ['pushHistory', 'renderTable'], 'undo 로 되돌릴 수 있어야 한다');
+        });
+
+        test('숫자 셀을 눌러 문자열로 바꾼다', () => {
+            const data = { rows: [{ v: 54 }] };
+            bootConvert(data).click();
+            assert.deepStrictEqual(data, { rows: [{ v: '54' }] });
+            assert.strictEqual(typeof data.rows[0].v, 'string');
+        });
+
+        /**
+         * 이 기능이 실제로 여는 문.
+         *
+         * 사용자가 겪은 그대로 재현한다: 숫자 칸에 문자열을 한 번 넣어 셀이
+         * 문자열로 굳고, 그 뒤로는 숫자를 입력해도 문자열로 남는다. 변환 버튼을
+         * 누른 **뒤에는** 같은 입력이 숫자로 들어가야 한다.
+         */
+        test('문자열로 굳은 칸이 변환 뒤에는 다시 숫자를 받는다', () => {
+            const logic = logicBundle() as { coerceEditedCellValue(raw: string, old: unknown): unknown };
+
+            // 1) irq: 36 인 칸에 "abc" 를 넣는다 → 문자열로 굳는다.
+            const stuck = logic.coerceEditedCellValue('abc', 36);
+            assert.strictEqual(typeof stuck, 'string');
+            // 2) 다시 숫자를 넣어도 문자열이다 — 이게 사용자가 본 것이다.
+            const stillString = logic.coerceEditedCellValue('54', stuck);
+            assert.strictEqual(stillString, '54');
+            assert.strictEqual(typeof stillString, 'string', '전제가 깨졌다면 이 기능의 이유도 사라진다');
+
+            // 3) 변환 버튼을 누른다.
+            const data = { rows: [{ v: stillString }] };
+            bootConvert(data).click();
+            assert.strictEqual(data.rows[0].v, 54);
+
+            // 4) 이제 같은 편집이 숫자로 들어간다.
+            const after = logic.coerceEditedCellValue('99', data.rows[0].v);
+            assert.strictEqual(after, 99);
+            assert.strictEqual(typeof after, 'number', '변환하고도 여전히 문자열이 되면 문이 열리지 않은 것이다');
+        });
+
+        test('무엇으로 바뀌었는지 스크린리더에 알린다', () => {
+            // 표에서는 36 과 "36" 이 똑같이 보이므로 화면만으로는 알 수 없다.
+            const { click, announced } = bootConvert({ rows: [{ v: '54' }] });
+
+            click();
+
+            assert.strictEqual(announced.length, 1, '변환을 알리지 않았다');
+            assert.ok(!/[{}]/.test(announced[0]), `템플릿이 그대로 남았다: ${announced[0]}`);
+            assert.ok(/\bv\b/.test(announced[0]), `어느 열인지 없다: ${announced[0]}`);
+            assert.ok(/54/.test(announced[0]), `무엇이 됐는지 없다: ${announced[0]}`);
+        });
+
+        test('바꿀 것이 없으면 아무것도 하지 않는다', () => {
+            // 렌더 시점과 클릭 사이에 값이 바뀌었을 수 있다.
+            const data = { rows: [{ v: 'abc' }] };
+            const { click, calls, announced } = bootConvert(data);
+
+            click();
+
+            assert.deepStrictEqual(data, { rows: [{ v: 'abc' }] });
+            assert.deepStrictEqual(calls, [], '바꾼 것이 없는데 히스토리를 쌓았다');
+            assert.deepStrictEqual(announced, []);
+        });
+
+        test('활성 시트가 없으면 아무것도 하지 않는다', () => {
+            const data = { rows: [{ v: '54' }] };
+            const { click, calls } = bootConvert(data, { sheets: [] });
+
+            click();
+
+            assert.deepStrictEqual(data, { rows: [{ v: '54' }] });
+            assert.deepStrictEqual(calls, [], 'getActiveRows 가 null 인데 진행했다');
+        });
+
+        test('행 인덱스가 범위를 넘어도 아무것도 하지 않는다', () => {
+            // 가드의 나머지 절반. 지연 commit 이 stale 한 dataset.row 를 들고 오는
+            // 경우다 — `!rows` 만 검사하면 여기서 undefined 에 대입하며 죽는다.
+            const data = { rows: [{ v: '54' }] };
+            const { click, calls } = bootConvert(data, { row: '5' });
+
+            click();
+
+            assert.deepStrictEqual(data, { rows: [{ v: '54' }] });
+            assert.deepStrictEqual(calls, []);
+        });
+
+        test('숫자를 문자열로 바꿀 때는 따옴표까지 알린다', () => {
+            // 이 방향에서만 JSON.stringify 와 String 이 갈린다. s→# 쪽만 보면
+            // 알림에서 따옴표가 사라져도 통과한다 — 따옴표가 이 알림의 요점인데도.
+            const { click, announced } = bootConvert({ rows: [{ v: 54 }] });
+
+            click();
+
+            assert.strictEqual(announced.length, 1);
+            assert.ok(/\"54\"/.test(announced[0]), `문자열이 됐다는 것이 안 보인다: ${announced[0]}`);
+        });
+
+        /**
+         * 같은 핸들러의 다른 두 갈래. 이번 변경이 두 줄을 모두 고쳐 썼는데
+         * (`getActiveRows()[rowIdx][col] =` → `rows[rowIdx][col] =`) 실행 테스트가
+         * 하나도 없었다 — 잘못 고쳐도 아무것도 실패하지 않는다.
+         */
+        test('split / join 갈래도 같은 행에 쓴다', () => {
+            const splitData = { rows: [{ v: 'a, b ,c' }] };
+            bootConvert(splitData, { convert: 'split' }).click();
+            assert.deepStrictEqual(splitData, { rows: [{ v: ['a', 'b', 'c'] }] }, '쉼표 분리 + 공백 정리');
+
+            const joinData = { rows: [{ v: ['a', 'b'] }] };
+            bootConvert(joinData, { convert: 'join' }).click();
+            assert.deepStrictEqual(joinData, { rows: [{ v: 'a, b' }] });
         });
     });
 

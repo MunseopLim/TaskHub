@@ -42,6 +42,14 @@ suite('JSON Editor 웹뷰 지역화 / 접근성', () => {
                 invalidJsonInCell: ['{col}', '{message}'],
                 historyRestoreFailed: ['{message}'],
                 scriptError: ['{message}', '{line}'],
+                // 변환 버튼은 결과를 미리 보여 주는 것이 존재 이유다. {preview} 가
+                // 빠지면 "무엇이 될지 모르는 버튼" 이 된다.
+                toValueType: ['{preview}'],
+                toStringType: ['{preview}'],
+                cellTypeChanged: ['{col}', '{preview}'],
+                arrayItemLabel: ['{col}', '{n}'],
+                arrayItemAdded: ['{count}'],
+                arrayItemRemoved: ['{n}', '{count}'],
             };
             for (const [key, tokens] of Object.entries(withPlaceholders)) {
                 for (const token of tokens) {

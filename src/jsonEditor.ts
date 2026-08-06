@@ -1194,6 +1194,9 @@ export function buildJsonEditorStrings(): Record<string, string> {
         deleteRow: t('{n}번 행 삭제', 'Delete row {n}'),
         joinToString: t('배열 → 문자열 (쉼표로 연결)', 'Array → String (join with comma)'),
         splitToArray: t('문자열 → 배열 (쉼표로 분리)', 'String → Array (split by comma)'),
+        toValueType: t('문자열 → 값 ({preview})', 'String → value ({preview})'),
+        toStringType: t('값 → 문자열 ({preview})', 'Value → string ({preview})'),
+        cellTypeChanged: t('{col} 을 {preview} 로 바꿨습니다.', 'Changed {col} to {preview}.'),
         addArrayItem: t('항목 추가', 'Add item'),
         removeArrayItem: t('{n}번째 항목 삭제', 'Remove item {n}'),
         arrayItemLabel: t('{col} {n}번째 항목', '{col} item {n}'),
@@ -1654,6 +1657,7 @@ export function getWebviewContent(
         throw new Error('jsonEditorWebview.js did not load');
     }
     const {
+        parseValue,
         coerceEditedCellValue,
         coerceEditedArrayItems,
         buildSheetMap,
@@ -2185,6 +2189,40 @@ export function getWebviewContent(
         attachCellEvents();
     }
 
+    // scalar 셀의 타입을 사용자가 **의도적으로** 바꿀 수 있게 한다.
+    //
+    // 편집만으로는 빠져나올 수 없는 자리가 있었다: 숫자 칸에 문자열을 한 번
+    // 넣으면 그 셀은 문자열이 되고, 이후 "옛 값이 문자열이면 raw 유지" 규칙
+    // (coerceEditedCellValue) 때문에 숫자를 입력해도 계속 문자열로 남는다.
+    // 그 규칙 자체는 "00123" · "true" 같은 값을 지키려는 것이라 옳지만, 한 번
+    // 문자열이 된 칸을 숫자로 되돌릴 문이 아예 없었다 — 파일을 직접 고치는 수밖에.
+    //
+    // 바꿀 것이 없으면 null. 변환 결과가 null 일 수 있으므로 { value } 로 감싼다.
+    function retypedScalar(val) {
+        // null 도 문자열로 되돌릴 수 있어야 한다. 그러지 않으면 "null" → null 이
+        // **또 하나의 일방통행**이 된다 — 이 기능이 없애려던 바로 그것이다.
+        if (typeof val === 'number' || typeof val === 'boolean' || val === null) {
+            return { value: String(val) };
+        }
+        if (typeof val === 'string') {
+            const parsed = parseValue(val);
+            // 'abc' 처럼 되돌려도 그대로인 값에는 버튼을 내지 않는다.
+            // ('' 도 parseValue 가 '' 를 돌려주므로 여기서 함께 걸러진다.)
+            if (typeof parsed === 'string') { return null; }
+            // **2^53 을 넘는 정수는 바꾸지 않는다.** double 을 거치면서 값이
+            // 조용히 달라진다 — "0xFFFFFFFFFFFFFFFF" 는 18446744073709551615 가
+            // 아니라 …552000 이 된다. 이 확장의 영역이 임베디드라 64비트 마스크·
+            // 주소가 실제로 이런 모양이고, tooltip 에 미리 보여 준다 해도 20자리
+            // 중 끝 네 자리가 다른 것을 사람이 눈으로 걸러 내지는 못한다.
+            // 저장하고 나면 원래 문자열은 사라진다.
+            if (typeof parsed === 'number' && Number.isInteger(parsed) && !Number.isSafeInteger(parsed)) {
+                return null;
+            }
+            return { value: parsed };
+        }
+        return null;
+    }
+
     function isPlainObject(val) {
         return val !== null && typeof val === 'object' && !Array.isArray(val);
     }
@@ -2226,6 +2264,15 @@ export function getWebviewContent(
         if (typeof val === 'string' && val.includes(',')) {
             html += '<button class="convert-btn" data-convert="split" title="' + escapeAttr(S.splitToArray)
                 + '" aria-label="' + escapeAttr(S.splitToArray) + '">s→a</button>';
+        }
+        const retyped = retypedScalar(val);
+        if (retyped) {
+            // **결과를 미리 보여 준다.** "0x40013800" 은 숫자로도 읽히므로
+            // (1073821696), 무엇이 될지 보이지 않으면 누르기 전에 알 수 없다.
+            const toText = typeof val !== 'string';
+            const title = fmt(toText ? S.toStringType : S.toValueType, { preview: JSON.stringify(retyped.value) });
+            html += '<button class="convert-btn" data-convert="retype" title="' + escapeAttr(title)
+                + '" aria-label="' + escapeAttr(title) + '">' + (toText ? '#→s' : 's→#') + '</button>';
         }
         html += '</div>';
         return html;
@@ -2654,12 +2701,24 @@ export function getWebviewContent(
                 if (!td) { return; }
                 const rowIdx = parseInt(td.dataset.row);
                 const col = td.dataset.col;
-                const val = getActiveRows()[rowIdx][col];
+                // getActiveRows() 는 시트·행이 어긋나면 null 이다. 예전에는
+                // 검사 없이 읽어 그 순간 스크립트가 죽었다.
+                const rows = getActiveRows();
+                if (!rows || !rows[rowIdx]) { return; }
+                const val = rows[rowIdx][col];
                 if (btn.dataset.convert === 'split') {
                     const str = String(val ?? '');
-                    getActiveRows()[rowIdx][col] = str.split(',').map(s => s.trim());
+                    rows[rowIdx][col] = str.split(',').map(s => s.trim());
+                } else if (btn.dataset.convert === 'retype') {
+                    const retyped = retypedScalar(val);
+                    // 렌더 시점과 지금 사이에 값이 바뀌었을 수 있다.
+                    if (!retyped) { return; }
+                    rows[rowIdx][col] = retyped.value;
+                    // 표에서는 36 과 "36" 이 똑같이 보인다. 무엇으로 바뀌었는지
+                    // 화면만으로는 알 수 없으므로 문구로 알린다.
+                    announce(fmt(S.cellTypeChanged, { col: col, preview: JSON.stringify(retyped.value) }));
                 } else {
-                    getActiveRows()[rowIdx][col] = Array.isArray(val) ? val.join(', ') : String(val);
+                    rows[rowIdx][col] = Array.isArray(val) ? val.join(', ') : String(val);
                 }
                 pushHistory();
                 renderTable();
