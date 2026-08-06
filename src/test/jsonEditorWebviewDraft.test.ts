@@ -1139,6 +1139,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                 extractFn('hasOnlyPrimitives'),
                 extractFn('summarizeObject'),
                 extractFn('retypedScalar'),
+                extractFn('cellViewLabel'),
                 extractFn('renderCellView'),
                 'return {',
                 '    render: (val) => renderCellView(val, Array.isArray(val), false),',
@@ -1230,6 +1231,57 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             assert.ok(retypeButton('0x40013800')!.title.includes('1073821696'));
         });
 
+        /** 셀 전체 마크업에서 변환 버튼들의 label 목록. */
+        function convertLabels(val: unknown): string[] {
+            return Array.from(R.render(val).matchAll(/data-convert="[^"]*"[^>]*>([^<]*)</g)).map(m => m[1]);
+        }
+
+        test('빈 배열에는 a→s 를 내지 않는다', () => {
+            // [] → "" 로 바꾸면 빈 문자열에는 되돌릴 버튼이 없어 일방통행이 된다.
+            assert.deepStrictEqual(convertLabels([]), []);
+            assert.deepStrictEqual(convertLabels(['a']), ['a→s'], '항목이 있으면 그대로 낸다');
+        });
+
+        test('쉼표가 없는 문자열에도 s→a 를 낸다', () => {
+            // 예전에는 쉼표가 든 문자열에만 붙어서, 항목 하나짜리 배열을 문자열로
+            // 바꾸면 배열로 되돌릴 방법이 사라졌다.
+            assert.deepStrictEqual(convertLabels('a'), ['s→a']);
+            assert.deepStrictEqual(convertLabels('a, b'), ['s→a']);
+            assert.deepStrictEqual(convertLabels(''), [], '빈 문자열에는 바꿀 것이 없다');
+        });
+
+        test('배열 ↔ 문자열이 왕복한다', () => {
+            // 한쪽 방향 버튼만 있으면 그 변환은 되돌릴 수 없는 문이 된다.
+            for (const val of [['a'], ['a', 'b'], 'a', 'a, b']) {
+                const labels = convertLabels(val);
+                const expected = Array.isArray(val) ? 'a→s' : 's→a';
+                assert.ok(labels.includes(expected), `${JSON.stringify(val)} 에 ${expected} 가 없다`);
+            }
+        });
+
+        /**
+         * 셀의 접근명.
+         *
+         * `.cell-view` 는 role=button 인데 그 안에 변환 버튼이 들어 있다. 이름을
+         * 내용에서 계산하게 두면 버튼 라벨이 섞인다 — 빈 배열 셀은 텍스트가 배지
+         * 하나뿐이라 이름이 통째로 "배열 → 문자열" 이 됐다.
+         */
+        test('셀의 접근명에 변환 버튼 라벨이 섞이지 않는다', () => {
+            const cases: [unknown, string][] = [
+                [36, '36'],
+                ['0x40', '0x40'],
+                [['a', 'b'], 'a, b'],
+                [[], S.emptyCellLabel],
+                [null, S.emptyCellLabel],
+                ['', S.emptyCellLabel],
+            ];
+            for (const [val, expected] of cases) {
+                const m = R.render(val).match(/<div class="cell-view[^"]*" aria-label="([^"]*)"/);
+                assert.ok(m, `${JSON.stringify(val)} 셀에 aria-label 이 없다`);
+                assert.strictEqual(m![1], R.escapeAttr(expected), `${JSON.stringify(val)} 의 접근명이 다르다`);
+            }
+        });
+
         // ── 클릭 핸들러 ──────────────────────────────────────────────────
         function bootConvert(
             data: unknown,
@@ -1260,6 +1312,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                 },
             };
             let clickHandler: ((e: unknown) => void) | undefined;
+            let keydownHandler: ((e: unknown) => void) | undefined;
             const doc = {
                 querySelectorAll(selector: string) {
                     // 다시 그린 표에서 셀을 되찾는 경로 (findCellByCol).
@@ -1272,8 +1325,8 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                             return td;
                         },
                         addEventListener: (type: string, fn: (e: unknown) => void) => {
-                            assert.strictEqual(type, 'click', `예상 밖의 이벤트: ${type}`);
-                            clickHandler = fn;
+                            assert.ok(type === 'click' || type === 'keydown', `예상 밖의 이벤트: ${type}`);
+                            if (type === 'click') { clickHandler = fn; } else { keydownHandler = fn; }
                         },
                     }];
                 },
@@ -1301,6 +1354,12 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                 click() {
                     assert.ok(clickHandler, 'data-convert 에 click 핸들러가 등록되지 않았다');
                     clickHandler!({ stopPropagation() { /* 실제 코드가 부른다 */ } });
+                },
+                keydown(event: { repeat?: boolean }) {
+                    assert.ok(keydownHandler, 'data-convert 에 keydown 핸들러가 등록되지 않았다');
+                    const prevented: string[] = [];
+                    keydownHandler!({ ...event, preventDefault: () => prevented.push('prevented') });
+                    return prevented.length > 0;
                 },
             };
         }
@@ -1384,6 +1443,17 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             click();
 
             assert.deepStrictEqual(focused, ['cell-view'], '갈 곳이 없다고 body 로 떨어뜨리면 안 된다');
+        });
+
+        /**
+         * Enter 를 누르고 있으면 브라우저가 click 을 반복 합성한다. 변환 뒤
+         * 포커스는 반대 방향 버튼에 앉으므로 타입이 진동하며 히스토리가 쌓이고,
+         * a→s / s→a 왕복은 손실까지 있다 ([1,2] → "1, 2" → ["1","2"]).
+         */
+        test('Enter 자동반복은 막는다', () => {
+            const { keydown } = bootConvert({ rows: [{ v: '54' }] });
+            assert.strictEqual(keydown({ repeat: true }), true, '반복 입력을 그대로 흘려보냈다');
+            assert.strictEqual(keydown({ repeat: false }), false, '첫 입력까지 막으면 버튼이 눌리지 않는다');
         });
 
         test('바꿀 것이 없으면 아무것도 하지 않는다', () => {

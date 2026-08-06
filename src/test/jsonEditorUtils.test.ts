@@ -1540,13 +1540,20 @@ suite('JsonEditorUtils Test Suite', () => {
             // skip 되어 사용자 입력이 사라진다. renderTable 을 호출하는 모든
             // 핸들러는 mutation 전에 commitActiveCellOrAbort()를 호출하고
             // false면 return해야 한다.
-            const guards = [
-                'data-delete-row',  // 행 삭제 클릭
-                'data-convert',     // string ↔ array (renderTable 로 다른 셀 detach)
-                'dragstart',        // 드래그 시작 (드래그 이전에 commit)
-                'btnAddRow'         // 새 행 추가
-            ];
-            for (const marker of guards) {
+            // 버튼 배선은 블록을 통째로 떼어 본다. 문자 창은 핸들러에 무엇이
+            // 붙느냐에 따라 거짓 실패·거짓 통과를 낸다 — 실제로 convert 에
+            // keydown 리스너가 하나 늘자 창 밖으로 밀려 났다.
+            for (const marker of ['data-delete-row', 'data-convert']) {
+                const block = editorSource.match(new RegExp(
+                    "document\\.querySelectorAll\\('\\[" + marker + "\\]'\\)\\.forEach\\([\\s\\S]*?\\n        \\}\\);"
+                ));
+                assert.ok(block, `${marker} 배선 블록을 찾지 못했다`);
+                assert.ok(
+                    /if\s*\(\s*!commitActiveCellOrAbort\(\)\s*\)/.test(block![0]),
+                    'row-shifting handler "' + marker + '" must guard with `if (!commitActiveCellOrAbort()) { return; }` before mutating'
+                );
+            }
+            for (const marker of ['dragstart', 'btnAddRow']) {
                 const re = new RegExp(marker + '[\\s\\S]{0,500}?if\\s*\\(\\s*!commitActiveCellOrAbort\\(\\)\\s*\\)');
                 assert.ok(
                     re.test(editorSource),

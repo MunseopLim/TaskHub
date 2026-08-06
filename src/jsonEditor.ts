@@ -1198,6 +1198,7 @@ export function buildJsonEditorStrings(): Record<string, string> {
         toStringType: t('값 → 문자열 ({preview})', 'Value → string ({preview})'),
         cellTypeChanged: t('{col} 을 {preview} 로 바꿨습니다.', 'Changed {col} to {preview}.'),
         addArrayItem: t('항목 추가', 'Add item'),
+        emptyCellLabel: t('빈 셀', 'Empty cell'),
         removeArrayItem: t('{n}번째 항목 삭제', 'Remove item {n}'),
         arrayItemLabel: t('{col} {n}번째 항목', '{col} item {n}'),
         arrayItemAdded: t('항목을 추가했습니다. 총 {count}개입니다.', 'Item added. {count} total.'),
@@ -2280,14 +2281,32 @@ export function getWebviewContent(
         return '{ ' + parts.join(', ') + (keys.length > 3 ? ', ...' : '') + ' }';
     }
 
+    // 셀의 접근명.
+    //
+    // .cell-view 는 role=button 인데 **그 안에 변환 버튼이 들어 있다.**
+    // 이름을 내용에서 계산하게 두면 버튼 라벨이 섞여 들어간다 — 빈 배열 셀은
+    // 텍스트가 배지 하나뿐이라 이름이 통째로 "배열 → 문자열 (쉼표로 연결)" 이
+    // 됐다. 스크린리더 사용자에게는 "이 셀을 편집" 이 아니라 "변환 액션" 으로
+    // 들린다. 이름을 명시해 내용 계산을 끊는다.
+    function cellViewLabel(val) {
+        if (val === null || val === undefined) { return S.emptyCellLabel; }
+        if (Array.isArray(val)) {
+            if (val.length === 0) { return S.emptyCellLabel; }
+            return val.map(item => (isPlainObject(item) ? summarizeObject(item) : String(item))).join(', ');
+        }
+        if (isPlainObject(val)) { return summarizeObject(val); }
+        return String(val) === '' ? S.emptyCellLabel : String(val);
+    }
+
     function renderCellView(val, isArray, isMultiline) {
         if (isPlainObject(val)) {
             const json = JSON.stringify(val, null, 2);
-            return '<div class="cell-view cell-object" title="' + escapeAttr(json) + '">' + escapeHtml(summarizeObject(val)) + '</div>';
+            return '<div class="cell-view cell-object" aria-label="' + escapeAttr(cellViewLabel(val))
+                + '" title="' + escapeAttr(json) + '">' + escapeHtml(summarizeObject(val)) + '</div>';
         }
         if (isArray) {
             const isPrimArr = hasOnlyPrimitives(val);
-            let html = '<div class="cell-view"><div class="array-tags">';
+            let html = '<div class="cell-view" aria-label="' + escapeAttr(cellViewLabel(val)) + '"><div class="array-tags">';
             val.forEach(item => {
                 if (isPlainObject(item)) {
                     html += '<span class="tag"><span>' + escapeHtml(summarizeObject(item)) + '</span></span>';
@@ -2295,15 +2314,22 @@ export function getWebviewContent(
                     html += '<span class="tag"><span>' + escapeHtml(String(item)) + '</span></span>';
                 }
             });
-            if (isPrimArr) {
+            // **빈 배열에는 내지 않는다.** [] 를 문자열로 바꾸면 "" 가 되는데,
+            // 빈 문자열에는 되돌릴 버튼이 붙지 않아 그대로 일방통행이 된다 —
+            // 이 버튼들이 없애려던 바로 그 상태다.
+            if (isPrimArr && val.length > 0) {
                 html += '<button class="convert-btn" data-convert="join" title="' + escapeAttr(S.joinToString)
                     + '" aria-label="' + escapeAttr(S.joinToString) + '">a→s</button>';
             }
             html += '</div></div>';
             return html;
         }
-        let html = '<div class="cell-view">' + escapeHtml(String(val ?? ''));
-        if (typeof val === 'string' && val.includes(',')) {
+        let html = '<div class="cell-view" aria-label="' + escapeAttr(cellViewLabel(val)) + '">'
+            + escapeHtml(String(val ?? ''));
+        // **쉼표가 없어도 낸다.** 예전에는 쉼표가 든 문자열에만 붙어서, 배열을
+        // 문자열로 바꾼 결과에 쉼표가 없으면(항목 하나였거나 빈 배열이었거나)
+        // 배열로 되돌릴 방법이 사라졌다.
+        if (typeof val === 'string' && val !== '') {
             html += '<button class="convert-btn" data-convert="split" title="' + escapeAttr(S.splitToArray)
                 + '" aria-label="' + escapeAttr(S.splitToArray) + '">s→a</button>';
         }
@@ -2662,6 +2688,13 @@ export function getWebviewContent(
 
         // Convert string <-> array
         document.querySelectorAll('[data-convert]').forEach(btn => {
+            // Enter 를 누르고 있으면 브라우저가 click 을 반복 합성한다. 변환 뒤
+            // 포커스는 **반대 방향 버튼**에 앉으므로, 그대로 두면 타입이 진동하며
+            // 히스토리가 쌓인다. a→s / s→a 왕복은 손실까지 있다:
+            // [1, 2] → "1, 2" → ["1", "2"] (숫자가 문자열이 된다).
+            btn.addEventListener('keydown', (e) => {
+                if (e.repeat) { e.preventDefault(); }
+            });
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 // 다른 셀이 편집 중이면 먼저 commit. convert 는 cell 의 타입을
