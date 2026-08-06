@@ -47,19 +47,36 @@ suite('JSON Editor 웹뷰 지역화 / 접근성', () => {
     test('작은 버튼들이 최소 타깃 크기를 가진다', () => {
         const html = render();
         assert.ok(/--touch-min: 24px;/.test(html), 'WCAG 2.2 SC 2.5.8 은 24x24 를 요구한다');
-        // ✕ 와 변환 배지 양쪽. 한쪽만 적용하면 나머지가 계속 23x17 로 남는다.
-        for (const rule of ['button.small', '.convert-btn']) {
-            const block = html.match(new RegExp(rule.replace('.', '\\.') + ' \\{[^}]*\\}'));
-            assert.ok(block, `${rule} 규칙을 찾지 못했다`);
-            assert.ok(
-                /min-width: var\(--touch-min\)/.test(block![0]) && /min-height: var\(--touch-min\)/.test(block![0]),
-                `${rule} 에 최소 타깃 크기가 없다`
-            );
-            // 높이만 늘리고 중앙정렬을 빼면 글리프가 위로 붙는다.
-            for (const decl of ['display: inline-flex', 'align-items: center', 'justify-content: center']) {
-                assert.ok(block![0].includes(decl), `${rule} 에 ${decl} 이 없다 — 글리프가 가운데 오지 않는다`);
-            }
+        // ✕ 는 상자 자체를 키운다.
+        const small = html.match(/button\.small \{[^}]*\}/);
+        assert.ok(small, 'button.small 규칙을 찾지 못했다');
+        assert.ok(
+            /min-width: var\(--touch-min\)/.test(small![0]) && /min-height: var\(--touch-min\)/.test(small![0]),
+            'button.small 에 최소 타깃 크기가 없다'
+        );
+        // 높이만 늘리고 중앙정렬을 빼면 글리프가 위로 붙는다.
+        for (const decl of ['display: inline-flex', 'align-items: center', 'justify-content: center']) {
+            assert.ok(small![0].includes(decl), `button.small 에 ${decl} 이 없다 — 글리프가 가운데 오지 않는다`);
         }
+
+        // 변환 배지는 셀마다 붙어서 상자를 키우면 표가 배지 밭이 된다. **보이는
+        // 크기는 작게 두고 누를 수 있는 넓이만** 투명한 확장 영역으로 지킨다.
+        const badge = html.match(/\.convert-btn \{[^}]*\}/);
+        assert.ok(badge, '.convert-btn 규칙을 찾지 못했다');
+        assert.ok(
+            /position: relative/.test(badge![0]),
+            '.convert-btn 이 relative 가 아니면 확장 영역이 엉뚱한 곳에 놓인다'
+        );
+        const expander = html.match(/\.convert-btn::after \{[^}]*\}/);
+        assert.ok(expander, '.convert-btn 의 클릭 영역 확장이 없다');
+        assert.ok(
+            /width: var\(--touch-min\)/.test(expander![0]) && /height: var\(--touch-min\)/.test(expander![0]),
+            '확장 영역이 --touch-min 을 쓰지 않는다'
+        );
+        assert.ok(
+            /position: absolute/.test(expander![0]),
+            '확장 영역이 흐름에 남으면 배지가 다시 커진다'
+        );
     });
 
     test('포커스 링이 모든 초점 대상에 붙는다', () => {
@@ -87,6 +104,7 @@ suite('JSON Editor 웹뷰 지역화 / 접근성', () => {
                 moveRow: ['{n}'],
                 deleteRow: ['{n}'],
                 rowMoved: ['{n}'],
+                rowDeleted: ['{n}', '{count}'],
                 invalidJsonInCell: ['{col}', '{message}'],
                 historyRestoreFailed: ['{message}'],
                 scriptError: ['{message}', '{line}'],

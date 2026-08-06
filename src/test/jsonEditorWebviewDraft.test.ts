@@ -1010,6 +1010,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             };
             const calls: string[] = [];
             const focused: string[] = [];
+            const announced: string[] = [];
             let clickHandler: ((e: unknown) => void) | undefined;
             const doc = {
                 querySelectorAll(selector: string) {
@@ -1035,16 +1036,18 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             const script = [
                 PULL_FROM_BUNDLE,
                 extractFn('getActiveRows'),
+                extractFn('fmt'),
                 'let activeIdx = 0;',
                 'function commitActiveCellOrAbort() { return true; }',
                 'function pushHistory() { calls.push("pushHistory"); }',
                 'function renderTable() { calls.push("renderTable"); }',
+                'function announce(msg) { announced.push(msg); }',
                 extractWiring('data-delete-row'),
             ].join('\n');
-            new Function('LOGIC', 'document', 'data', 'sheetMap', 'calls', script)(
-                logicBundle(), doc, data, options.sheets ?? sheetMap, calls);
+            new Function('LOGIC', 'document', 'data', 'sheetMap', 'calls', 'announced', 'S', script)(
+                logicBundle(), doc, data, options.sheets ?? sheetMap, calls, announced, buildJsonEditorStrings());
             assert.ok(clickHandler, 'data-delete-row 에 click 핸들러가 등록되지 않았다');
-            return { data, calls, focused, click: () => clickHandler!({}) };
+            return { data, calls, focused, announced, click: () => clickHandler!({}) };
         }
 
         test('지운 자리로 올라온 행의 ✕ 로 포커스가 간다', () => {
@@ -1074,6 +1077,17 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
          * 가드를 `!rows[rowIdx]` 로 쓰면 값이 0 · '' · false 인 행이 falsy 라
          * **✕ 가 아무 반응 없이 먹통**이 된다. 범위로 검사해야 한다.
          */
+        test('무엇을 지웠는지 스크린리더에 알린다', () => {
+            // 번호가 밀려 올라오므로 포커스는 **같은 라벨의** ✕ 에 다시 앉는다.
+            // 화면만으로는 "아무 일도 없었다" 와 구별되지 않는다.
+            const { click, announced } = bootDelete(3, '1');
+            click();
+            assert.strictEqual(announced.length, 1, '삭제를 알리지 않았다');
+            assert.ok(!/[{}]/.test(announced[0]), `템플릿이 그대로 남았다: ${announced[0]}`);
+            assert.ok(/2/.test(announced[0]) && /\b2\b.*\b2\b|2/.test(announced[0]),
+                `몇 번째를 지웠고 몇 개 남았는지 없다: ${announced[0]}`);
+        });
+
         test('값이 0 인 행도 지워진다', () => {
             const { click, data, calls } = bootDelete(3, '0', { primitiveRows: true });
             click();

@@ -1210,6 +1210,7 @@ export function buildJsonEditorStrings(): Record<string, string> {
             'Failed to load the editor script (jsonEditorWebview.js). Try reinstalling the extension or restarting VS Code.'
         ),
         rowMoved: t('{n}번 위치로 이동했습니다.', 'Moved to position {n}.'),
+        rowDeleted: t('{n}번 행을 삭제했습니다. {count}행 남았습니다.', 'Deleted row {n}. {count} rows remaining.'),
     };
 }
 
@@ -1582,18 +1583,31 @@ export function getWebviewContent(
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        min-width: var(--touch-min);
-        min-height: var(--touch-min);
+        position: relative;
         background: var(--badge-bg);
         color: var(--badge-fg);
         border: none;
-        padding: 0 5px;
+        padding: 3px 5px;
         border-radius: 2px;
         font-size: 10px;
         cursor: pointer;
         opacity: 0.7;
         margin-left: 4px;
         vertical-align: middle;
+    }
+    /* 배지는 **작게 그리되 누를 수 있는 넓이는 --touch-min 을 지킨다.**
+       셀마다 붙는 것이라 24px 사각형으로 그리면 표가 배지 밭이 된다(실제로
+       그랬다). 투명한 확장 영역이라 행 높이에도, 글자 배치에도 영향이 없다.
+       확장 폭(약 3px)은 td 의 padding(4px 8px) 안이라 overflow: hidden 에
+       잘리지 않는다 — 잘리면 그 부분은 클릭도 받지 못한다. */
+    .convert-btn::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: var(--touch-min);
+        height: var(--touch-min);
+        transform: translate(-50%, -50%);
     }
     .convert-btn:hover { opacity: 1; background: var(--btn-bg); color: var(--btn-fg); }
 
@@ -2708,6 +2722,10 @@ export function getWebviewContent(
                 rows.splice(rowIdx, 1);
                 pushHistory();
                 renderTable();
+                // 지운 뒤 포커스는 **같은 라벨의** ✕ 에 다시 앉는다 (번호가 밀려
+                // 올라오므로). 화면만으로는 "지워졌다" 와 "아무 일도 없었다" 가
+                // 구별되지 않아, 무엇이 사라졌는지 문구로 알린다.
+                announce(fmt(S.rowDeleted, { n: rowIdx + 1, count: rows.length }));
                 // 지운 자리로 올라온 행의 ✕ 로 옮긴다. 마지막 행을 지웠으면 그
                 // 앞으로, 하나도 남지 않으면 "행 추가" 로. 방금 사라진 버튼에
                 // 있던 포커스를 두면 body 로 떨어진다.
