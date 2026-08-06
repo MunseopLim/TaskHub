@@ -1653,7 +1653,14 @@ export function getWebviewContent(
         showError(S.logicBundleMissing);
         throw new Error('jsonEditorWebview.js did not load');
     }
-    const { parseValue } = TaskHubJsonEditorLogic;
+    const {
+        coerceEditedCellValue,
+        coerceEditedArrayItems,
+        buildSheetMap,
+        getRowsByPath,
+        effectiveBaseline,
+        decideSaveResult,
+    } = TaskHubJsonEditorLogic;
 
     // 이 webview 인스턴스의 세션 번호. host 가 html 에 심어 준다.
     const SESSION_ID = ${sessionId};
@@ -1748,14 +1755,12 @@ export function getWebviewContent(
      *
      * Map 은 삽입 순서를 지키므로 마지막 값이 가장 최근 요청이다.
      */
-    function effectiveBaselineOf(pending, fallback) {
-        let latest;
-        pending.forEach(snap => { latest = snap; });
-        return latest !== undefined ? latest : fallback;
-    }
 
-    function effectiveBaseline() {
-        return effectiveBaselineOf(pendingSaveSnapshots, lastSavedSnapshot);
+    // 번들의 effectiveBaseline 을 이 webview 의 현재 상태로 부르는 래퍼.
+    // 이름을 달리 두는 이유는 둘이 다른 것이기 때문이다 — 이쪽은 인자가 없고
+    // 전역(pendingSaveSnapshots · lastSavedSnapshot)을 읽는다.
+    function currentBaseline() {
+        return effectiveBaseline(pendingSaveSnapshots, lastSavedSnapshot);
     }
 
     function evictHistoryToCap() {
@@ -1784,7 +1789,7 @@ export function getWebviewContent(
         // recovery 엔트리를 곧바로 clean 데이터로 다시 쓰는 것을 막는다. dirty와
         // snapshot 송신은 이 한 곳에서 결정되며, 개별 mutation 핸들러는
         // setModified를 직접 호출하지 않는다.
-        const dirtyNow = snap !== effectiveBaseline();
+        const dirtyNow = snap !== currentBaseline();
         setModified(dirtyNow);
         if (dirtyNow) {
             vscode.postMessage({ command: 'snapshot', data: data });
@@ -1829,11 +1834,11 @@ export function getWebviewContent(
             return;
         }
         historyIndex = idx;
-        buildSheetMap();
+        rebuildSheetMap();
         if (activeIdx >= sheetMap.length) { activeIdx = 0; }
         renderTabs();
         renderTable();
-        const dirtyNow = historyStack[idx] !== effectiveBaseline();
+        const dirtyNow = historyStack[idx] !== currentBaseline();
         setModified(dirtyNow);
         updateUndoRedoButtons();
         // saved 상태로 undo 한 경우 host가 modified=false 처리에서 recovery
@@ -1965,54 +1970,34 @@ export function getWebviewContent(
         if (add) { add.focus(); }
     }
 
-    // NOTE: src/jsonEditorUtils.ts 의 coerceEditedCellValue /
-    // coerceEditedArrayItems 와 동일해야 한다. 한쪽만 수정하지 말 것.
+    // coerceEditedCellValue / coerceEditedArrayItems 는 번들에서 온다. 규칙만
+    // 여기 적어 둔다 (구현과 단위테스트는 src/jsonEditorUtils.ts).
     //
     // 배열 셀은 항목마다 text input 을 그리므로 값이 전부 string 으로 돌아온다.
     // 그대로 모으면 [1, true, null] 이 담긴 셀을 열었다 나가기만 해도
     // ["1","true","null"] 이 된다 — 값을 바꾸지 않아도 그렇다. scalar 셀이
     // 이미 쓰는 규칙(옛 값이 string 이면 raw 유지, 아니면 parseValue)을 항목
     // 단위로 그대로 적용한다.
-    function coerceCellValue(raw, oldValue) {
-        return (typeof oldValue === 'string') ? raw : parseValue(raw);
-    }
 
     // 빈 슬롯에는 보존할 타입이 없다. "+" 버튼이 새 항목을 '' 로 데이터에 밀어
     // 넣고 다시 그리므로, 그것을 문자열 항목으로 보면 숫자 배열에 항목 하나를
     // 더한 것만으로 [1, 2, "3"] 같은 혼합 배열이 디스크에 기록된다.
-    function coerceEditedArrayItems(raws, oldArray) {
-        return raws.map((raw, i) => {
-            const oldValue = oldArray[i];
-            if (oldValue === '' || oldValue === undefined) { return parseValue(raw); }
-            return coerceCellValue(raw, oldValue);
-        });
-    }
 
-    // NOTE: 아래 buildSheetMap / getActiveRows 로직은 src/jsonEditorUtils.ts 의
-    // buildSheetMap / getRowsByPath 와 동일해야 한다. 한쪽만 수정하지 말 것.
-    function buildSheetMap() {
-        sheetMap = [];
-        Object.keys(data).forEach(key => {
-            const val = data[key];
-            if (Array.isArray(val)) {
-                sheetMap.push({ label: key, path: [key] });
-            } else if (val && typeof val === 'object' && !Array.isArray(val)) {
-                Object.keys(val).forEach(subKey => {
-                    if (Array.isArray(val[subKey])) {
-                        sheetMap.push({ label: key + ' > ' + subKey, path: [key, subKey] });
-                    }
-                });
-            }
-        });
+    // 번들의 buildSheetMap(data) 은 배열을 돌려준다. 이 래퍼가 전역에 꽂는다.
+    function rebuildSheetMap() {
+        sheetMap = buildSheetMap(data);
     }
-    buildSheetMap();
+    rebuildSheetMap();
 
+    // 활성 시트의 행 배열. 시트가 없으면 null 이고, 경로가 배열에 닿지 못해도
+    // null 이다 — 예전에는 경로를 검사 없이 따라가 **배열이 아닌 것도 그대로**
+    // 돌려줬다. 그 경우가 특히 나빴던 것은 조용했기 때문이다: 종단이 문자열이면
+    // \`"abc"[0][col]\` 이 undefined 로 읽히고 대입은 아무 일도 하지 않는다.
+    // 이제는 이미 문서화돼 있던 null 계약과 같은 모양으로 실패한다.
     function getActiveRows() {
         const entry = sheetMap[activeIdx];
         if (!entry) { return null; }
-        let ref = data;
-        for (const k of entry.path) { ref = ref[k]; }
-        return ref;
+        return getRowsByPath(data, entry.path);
     }
 
     function setModified(val) {
@@ -2024,8 +2009,8 @@ export function getWebviewContent(
         document.getElementById('modifiedFlag').classList.toggle('show', next);
     }
 
-    // NOTE: src/jsonEditorUtils.ts 의 decideSaveResult 와 동일해야 한다.
-    // 한쪽만 수정하지 말 것 — 단위테스트는 그쪽에 있다.
+    // decideSaveResult 자체는 번들에서 온다 (구현·단위테스트는
+    // src/jsonEditorUtils.ts). 아래 주석은 그 판정이 지키는 invariant 다.
     //
     // 두 가지 invariant:
     //   1) 세션 귀속: host 는 파일을 바꿔 열 때 패널을 재사용하므로, 이전
@@ -2036,25 +2021,6 @@ export function getWebviewContent(
     //      들어갔는지 알 수 없다. 기존 baseline 과 비교하는 것으로는 부족하다 —
     //      사용자가 옛 baseline 으로 undo 해 두었다면 화면과 baseline 은 같지만
     //      디스크에는 그 사이의 다른 스냅샷이 들어가 있다.
-    function decideSaveResult(args) {
-        if (args.message.session !== args.sessionId) { return { kind: 'ignore' }; }
-        // 저장이 겹쳤으면 **아직 남은 저장**이 디스크의 최종 내용을 정한다.
-        // 성공·실패 양쪽이 같은 기준을 쓴다 — 실패한 저장은 디스크에 닿지
-        // 않았지만 남은 저장은 곧 닿으므로, 옛 baseline 과만 비교하면 그 사이
-        // undo 해 둔 화면이 clean 으로 판정되어 host 가 복구 항목을 지운다.
-        const remaining = new Map();
-        args.pendingSnapshots.forEach((snap, seq) => {
-            if (seq !== args.message.seq) { remaining.set(seq, snap); }
-        });
-        if (!args.message.success) {
-            const baseline = effectiveBaselineOf(remaining, args.lastSavedSnapshot);
-            return { kind: 'keep', dirty: args.currentSnapshot !== baseline };
-        }
-        const saved = args.pendingSnapshots.get(args.message.seq);
-        if (saved === undefined) { return { kind: 'keep', dirty: true }; }
-        const baselineForDirty = effectiveBaselineOf(remaining, saved);
-        return { kind: 'apply', lastSavedSnapshot: saved, dirty: args.currentSnapshot !== baselineForDirty };
-    }
 
     // host 에 알리지 않고 로컬 표시만 갱신한다. 저장 응답 처리에서 쓴다 —
     // 그쪽은 dirty 를 saveAck 에 실어 원자적으로 넘기므로, 여기서 따로 보내면
@@ -2305,13 +2271,13 @@ export function getWebviewContent(
     //
     // 핵심 로직(타입 보존 / JSON-edit valid 캡처 / clean revert 인식)은
     // jsonEditorUtils.ts 의 buildDraftSnapshot 과 동일하며, 단위테스트는 그쪽에
-    // 있다. webview 는 IIFE 로 외부 모듈을 import 할 수 없어 동일 로직을 여기에
-    // 인라인으로 둔다 — 한쪽만 수정하면 mirror sync regex 가드가 실패한다.
+    // 있다. 이 함수 자체는 DOM 을 읽으므로 아직 인라인이지만, 값 변환 규칙은
+    // 번들의 coerceEditedCellValue / coerceEditedArrayItems 한 곳에서만 온다.
     //
     // 세 가지 invariant:
-    //   1) plain (non-array) 셀은 commitCell 과 동일하게 oldVal 의 타입을 보고
-    //      raw 또는 parseValue(raw) 를 적용. 그렇지 않으면 숫자/불리언/null 셀의
-    //      미커밋 draft 가 string 으로 굳어 복구 후 저장 시 디스크에 string 이
+    //   1) plain (non-array) 셀은 commitCell 과 **같은 함수**로 변환한다
+    //      (coerceEditedCellValue). 그렇지 않으면 숫자/불리언/null 셀의 미커밋
+    //      draft 가 string 으로 굳어 복구 후 저장 시 디스크에 string 이
     //      기록된다.
     //   1-b) 배열 셀은 **그 셀의 모든 input 값**(arrValues)을 항목별 타입 보존
     //      규칙으로 한 번에 반영한다. 하나만 반영하면 같은 셀의 다른 미커밋
@@ -2373,7 +2339,7 @@ export function getWebviewContent(
             }
             row[col] = parsed;
         } else {
-            const newVal = (typeof oldVal === 'string') ? rawInputValue : parseValue(rawInputValue);
+            const newVal = coerceEditedCellValue(rawInputValue, oldVal);
             // **commitCell 의 empty 가드와 같은 규칙.** null / undefined / 빈 값
             // 셀은 input 에 "" 로 그려지므로 (renderCellEdit 의 val ?? ''),
             // 아무것도 타이핑하지 않고 셀을 열어 두기만 해도 draft 가 "" 로
@@ -2500,7 +2466,7 @@ export function getWebviewContent(
             rawInputValue: active.rawInputValue,
             arrValues: active.arrValues,
             isJsonEdit: active.isJsonEdit,
-            lastSavedSnapshot: effectiveBaseline()
+            lastSavedSnapshot: currentBaseline()
         });
         if (result.kind === 'snapshot') {
             // 이 셀에서 마지막으로 **표현 가능했던** 입력. 이어지는 keystroke 가
@@ -2850,10 +2816,10 @@ export function getWebviewContent(
                 if (textarea) {
                     newVal = textarea.value;
                 } else if (input) {
-                    // Preserve string type when the original cell was a string,
-                    // so values like "00123", "true", "false", or "null" are not
-                    // silently coerced to number/boolean/null on save.
-                    newVal = typeof oldVal === 'string' ? input.value : parseValue(input.value);
+                    // 옛 값이 문자열이면 raw 를 그대로 둔다 — "00123" · "true" ·
+                    // "null" 이 저장할 때 조용히 숫자/불리언/null 로 바뀌지 않도록.
+                    // 규칙은 번들의 coerceEditedCellValue 한 곳에만 있다.
+                    newVal = coerceEditedCellValue(input.value, oldVal);
                 }
                 const oldEmpty = oldVal === undefined || oldVal === null || oldVal === '';
                 const newEmpty = newVal === undefined || newVal === null || newVal === '';
@@ -2888,7 +2854,7 @@ export function getWebviewContent(
         // 하고, 다른 커밋된 변경이 남아 있으면 dirty 는 유지하되 host 의
         // recovery 를 cancelled draft 가 아닌 현재 data 로 덮어쓴다.
         const snap = snapshotData();
-        const dirtyNow = snap !== effectiveBaseline();
+        const dirtyNow = snap !== currentBaseline();
         setModified(dirtyNow);
         if (dirtyNow) {
             vscode.postMessage({ command: 'snapshot', data: data });
@@ -2999,7 +2965,7 @@ export function getWebviewContent(
         if (msg.command === 'loadData') {
             data = msg.data;
             const oldLabel = sheetMap[activeIdx] ? sheetMap[activeIdx].label : '';
-            buildSheetMap();
+            rebuildSheetMap();
             const newIdx = sheetMap.findIndex(e => e.label === oldLabel);
             activeIdx = newIdx >= 0 ? newIdx : 0;
             renderTabs();

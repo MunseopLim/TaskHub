@@ -1124,9 +1124,14 @@ suite('JsonEditorUtils Test Suite', () => {
         // 번들로 직접 부르는 **한 벌**이기 때문이다. 나머지가 여기서 빠지는
         // 날은 그것도 이관이 끝났다는 뜻이어야 한다.
         test('mirror header references every synchronization target by name', () => {
-            for (const name of ['buildSheetMap', 'getActiveRows', 'commitCell', 'sendDraftSnapshot', 'syncEditingArrayCellToData', 'decideSaveResult', 'readActiveCellEdit', 'activeDraftState']) {
+            // **머리말만** 본다. 파일 전체를 보면 export 이름이나 다른 jsdoc 문구에
+            // 걸려 거의 모든 이름이 그냥 통과한다 — 동기화 목록을 통째로 지워도
+            // 초록이었다.
+            const header = mirrorSource.slice(0, mirrorSource.indexOf('export'));
+            assert.ok(header.length > 0, '머리말을 찾지 못했다');
+            for (const name of ['commitCell', 'sendDraftSnapshot', 'syncEditingArrayCellToData', 'buildDraftSnapshot', 'readActiveCellEdit', 'activeDraftState']) {
                 assert.ok(
-                    mirrorSource.includes(name),
+                    header.includes(name),
                     `mirror header must mention "${name}" so drift is visible`
                 );
             }
@@ -1138,16 +1143,18 @@ suite('JsonEditorUtils Test Suite', () => {
             // 경로가 되살아나므로, "raw 를 그대로 push 하는" 형태가 남아 있으면
             // 실패시킨다.
             assert.ok(
-                /function\s+coerceEditedArrayItems\s*\(\s*raws\s*,\s*oldArray\s*\)/.test(editorSource),
-                'webview 는 coerceEditedArrayItems(raws, oldArray) 를 정의해야 한다'
+                /const \{[^}]*\bcoerceEditedArrayItems\b[^}]*\} = TaskHubJsonEditorLogic;/.test(editorSource),
+                'webview 는 coerceEditedArrayItems 를 번들에서 꺼내 써야 한다'
             );
-            // 정의 1 + 호출 3(commitCell · syncEditingArrayCellToData ·
-            // buildDraftSnapshot) = 4. `>= 3` 으로 두면 **셋 중 하나가 raw 수집으로
-            // 되돌아가도 통과한다** — 이 가드가 막으려던 것이 정확히 그 회귀다.
+            // 호출 3 곳(commitCell · syncEditingArrayCellToData ·
+            // buildDraftSnapshot). 정의가 번들로 가면서 `정의 1 + 사용 3` 이
+            // `사용 3` 이 됐다 — 구조분해에는 `(` 가 없어 세지 않는다.
+            // 느슨하게 두면 **셋 중 하나가 raw 수집으로 되돌아가도 통과한다** —
+            // 이 가드가 막으려던 것이 정확히 그 회귀라 정확히 3 을 요구한다.
             const collectSites = editorSource.match(/coerceEditedArrayItems\(/g) || [];
-            assert.ok(
-                collectSites.length >= 4,
-                `배열 수집 지점이 타입 보존을 거치지 않는다 (등장 ${collectSites.length}회, 정의 1 + 사용 3 기대)`
+            assert.strictEqual(
+                collectSites.length, 3,
+                `배열 수집 지점이 타입 보존을 거치지 않는다 (호출 ${collectSites.length}회, 3 기대)`
             );
             assert.ok(
                 !/newArr\.push\(input\.value\)/.test(editorSource),
@@ -1229,14 +1236,13 @@ suite('JsonEditorUtils Test Suite', () => {
             );
         });
 
-        test('webview 의 effectiveBaseline 이 pending 스냅샷을 우선한다', () => {
+        test('webview 의 currentBaseline 이 pending 스냅샷을 우선한다', () => {
+            // 규칙 자체(pending 우선, 없으면 fallback)는 번들의 effectiveBaseline
+            // 에 있고 단위테스트도 그쪽이다. 여기서 볼 것은 **webview 가 무엇을
+            // 넘기는가** 다 — 인자 순서가 뒤집히면 조용히 정반대로 동작한다.
             assert.ok(
-                /function effectiveBaselineOf\(pending, fallback\)/.test(editorSource),
-                'webview 가 effectiveBaselineOf 를 정의하지 않는다'
-            );
-            assert.ok(
-                /return effectiveBaselineOf\(pendingSaveSnapshots, lastSavedSnapshot\)/.test(editorSource),
-                'effectiveBaseline 은 pending 스냅샷을 우선하고 없을 때만 lastSavedSnapshot 으로 떨어져야 한다'
+                /function currentBaseline\(\) \{\s*return effectiveBaseline\(pendingSaveSnapshots, lastSavedSnapshot\);/.test(editorSource),
+                'currentBaseline 은 effectiveBaseline(pendingSaveSnapshots, lastSavedSnapshot) 이어야 한다'
             );
         });
 
@@ -1257,17 +1263,19 @@ suite('JsonEditorUtils Test Suite', () => {
             }
         });
 
-        test('webview 의 decideSaveResult 는 mirror 와 같은 규칙을 쓴다', () => {
-            const body = editorSource.match(/function decideSaveResult\(args\) \{([\s\S]*?)\n    \}/);
-            assert.ok(body, 'webview 가 decideSaveResult 를 정의하지 않는다');
-            assert.ok(
-                /args\.message\.session\s*!==\s*args\.sessionId[\s\S]{0,60}?'ignore'/.test(body![1]),
-                '세션 불일치를 먼저 걸러야 한다'
-            );
-            assert.ok(
-                /saved\s*===\s*undefined[\s\S]{0,80}?'keep'[\s\S]{0,40}?dirty:\s*true/.test(body![1]),
-                '알 수 없는 seq 는 무조건 dirty 여야 한다 (clean 판정 금지)'
-            );
+        test('webview 가 decideSaveResult 에 판정에 필요한 것을 다 넘긴다', () => {
+            // 판정 규칙(세션 불일치는 ignore · 모르는 seq 는 무조건 dirty)은
+            // 번들로 갔고 단위테스트도 그쪽이다. 인라인에 남은 책임은 **인자를
+            // 빠짐없이 넘기는 것** 뿐이라, 여기서는 그것만 본다. 하나라도 빠지면
+            // undefined 가 들어가 판정이 조용히 어긋난다.
+            const call = editorSource.match(/decideSaveResult\(\{([\s\S]{0,500}?)\}\)/);
+            assert.ok(call, 'webview 가 decideSaveResult 를 부르지 않는다');
+            for (const field of ['message', 'sessionId', 'pendingSnapshots', 'lastSavedSnapshot', 'currentSnapshot']) {
+                assert.ok(
+                    new RegExp(field + '\\s*:').test(call![1]),
+                    `decideSaveResult 호출에 ${field} 가 없다`
+                );
+            }
         });
 
         test('host 는 저장 직후 dirty 를 스스로 내리지 않는다', () => {
@@ -1289,16 +1297,22 @@ suite('JsonEditorUtils Test Suite', () => {
             // to keep the string-type-preservation branch that the mirror
             // tests above rely on.
             //
-            // parseValue **정의**는 더 이상 여기 없다 (번들로 옮겼다). 대신 그
-            // 이름을 실제로 꺼내 쓰는지를 본다 — 꺼내지 않으면 아래 분기의
-            // parseValue 호출이 ReferenceError 다.
+            // 규칙(옛 값이 문자열이면 raw 유지)은 번들의 coerceEditedCellValue
+            // 한 곳에만 있어야 한다. 손으로 다시 쓴 삼항식이 되살아나면 그쪽만
+            // 옛 규칙으로 남아도 아무 검사에 걸리지 않는다 — 실제로 그랬다.
             assert.ok(
-                /const \{[^}]*\bparseValue\b[^}]*\} = TaskHubJsonEditorLogic;/.test(editorSource),
-                'webview must pull parseValue from the logic bundle'
+                /const \{[^}]*\bcoerceEditedCellValue\b[^}]*\} = TaskHubJsonEditorLogic;/.test(editorSource),
+                'webview must pull coerceEditedCellValue from the logic bundle'
             );
             assert.ok(
-                /typeof\s+oldVal\s*===\s*'string'\s*\?\s*input\.value\s*:\s*parseValue\(/.test(editorSource),
-                'webview commitCell must still preserve string type via parseValue bypass'
+                !/typeof\s+oldVal\s*===\s*'string'\s*\?/.test(editorSource),
+                '문자열 보존 규칙을 손으로 다시 쓴 자리가 남아 있다 (coerceEditedCellValue 를 부를 것)'
+            );
+            // scalar 두 자리(commitCell · buildDraftSnapshot)가 모두 그 함수를 쓴다.
+            const scalarSites = editorSource.match(/coerceEditedCellValue\(/g) || [];
+            assert.strictEqual(
+                scalarSites.length, 2,
+                `scalar 셀 변환 지점이 번들 함수를 쓰지 않는다 (호출 ${scalarSites.length}회, 2 기대)`
             );
         });
 
@@ -1374,7 +1388,7 @@ suite('JsonEditorUtils Test Suite', () => {
 
             // 인라인 스크립트가 실제로 구조분해하는 이름들을 소스에서 뽑아
             // 대조한다 — 한쪽만 바뀌면 여기서 드러난다.
-            const destructured = editorSource.match(/const \{ ([^}]+) \} = TaskHubJsonEditorLogic;/);
+            const destructured = editorSource.match(/const \{([^}]+)\} = TaskHubJsonEditorLogic;/);
             assert.ok(destructured, '인라인 스크립트가 번들에서 무엇을 꺼내는지 찾지 못했다');
             const names = destructured![1].split(',').map(s => s.trim()).filter(Boolean);
             assert.ok(names.length > 0, '구조분해 목록이 비어 있다');
@@ -1399,15 +1413,51 @@ suite('JsonEditorUtils Test Suite', () => {
             }
         });
 
-        test('인라인 스크립트에 parseValue 사본이 남아 있지 않다', () => {
+        test('번들로 옮긴 이름의 인라인 사본이 남아 있지 않다', () => {
             // 사본이 되살아나면 번들 쪽과 다시 두 벌이 되고, 그 순간부터 둘은
-            // 어긋나기 시작한다 — 이 이관이 없애려던 상태 그대로다.
-            // 들여쓰기나 화살표 함수로 되살아나도 걸리게 한다. 구조분해
-            // (`const { parseValue } = …`)는 사본이 아니므로 제외한다.
+            // 어긋나기 시작한다 — 이 이관이 없애려던 상태 그대로다. 게다가
+            // `const x` 와 `function x` 가 같은 스코프에서 겹치면 SyntaxError 라
+            // 화면이 통째로 빈다.
+            //
+            // 검사 대상은 구조분해 목록에서 뽑는다 — 앞으로 옮기는 것들이
+            // 자동으로 포함된다.
+            const destructured = editorSource.match(/const \{([^}]+)\} = TaskHubJsonEditorLogic;/);
+            assert.ok(destructured, '번들 구조분해 문장을 찾지 못했다');
+            const names = destructured![1].split(',').map(n => n.trim()).filter(Boolean);
+            assert.ok(names.length > 0, '구조분해 목록이 비어 있다');
+
             const withoutDestructure = editorSource.replace(/const \{[^}]*\} = TaskHubJsonEditorLogic;/g, '');
-            assert.ok(
-                !/\bfunction\s+parseValue\s*\(|\b(?:const|let|var)\s+parseValue\s*=/.test(withoutDestructure),
-                '인라인 parseValue 사본이 다시 생겼다'
+            for (const name of names) {
+                assert.ok(
+                    !new RegExp(`\\bfunction\\s+${name}\\s*\\(|\\b(?:const|let|var)\\s+${name}\\s*=`).test(withoutDestructure),
+                    `인라인 ${name} 사본이 다시 생겼다`
+                );
+            }
+        });
+
+        /**
+         * 인라인 스크립트가 **문법적으로** 성립하는지.
+         *
+         * 번들로 옮긴 이름을 구조분해해 놓고 인라인 사본을 지우지 않으면
+         * `const x` 와 `function x` 가 같은 스코프에서 겹쳐 SyntaxError 다.
+         * 이건 템플릿 리터럴 안이라 **tsc 도 eslint 도 보지 못하고**, 실제로 이
+         * 이관 중에 한 번 그렇게 됐다. 결과는 화면이 통째로 빈 에디터다.
+         *
+         * `new Function` 은 본문을 컴파일만 하고 실행하지 않으므로, DOM 없이도
+         * 문법 오류만 골라낼 수 있다.
+         */
+        test('인라인 webview 스크립트가 문법적으로 성립한다', () => {
+            const html = getWebviewContent(
+                { rows: [{ a: 1 }] }, undefined, '/tmp/t.json', fakeWebview, false, 7,
+                'https://test.invalid/jsonEditorWebview.js'
+            );
+            // src 를 가진 번들 태그는 본문이 없으므로 이 정규식에 걸리지 않는다.
+            const inline = html.match(/<script nonce="[^"]+">\n([\s\S]*?)<\/script>/);
+            assert.ok(inline, '인라인 script 본문을 찾지 못했다');
+            assert.ok(inline![1].includes('TaskHubJsonEditorLogic'), '엉뚱한 script 를 잡았다');
+            assert.doesNotThrow(
+                () => new Function(inline![1]),
+                '인라인 webview 스크립트에 문법 오류가 있다 (번들로 옮긴 이름의 사본이 남았는지 확인)'
             );
         });
 
@@ -1532,7 +1582,7 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.ok(cancelMatch, 'could not locate cancelCell body');
             const body = cancelMatch![1];
             assert.ok(
-                /const\s+dirtyNow\s*=\s*snap\s*!==\s*effectiveBaseline\(\)/.test(body),
+                /const\s+dirtyNow\s*=\s*snap\s*!==\s*currentBaseline\(\)/.test(body),
                 'cancelCell must compute dirtyNow from snapshotData() vs lastSavedSnapshot to mirror pushHistory'
             );
             assert.ok(
@@ -2355,7 +2405,7 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.ok(pushMatch, 'could not locate pushHistory body');
             const body = pushMatch![1];
             assert.ok(
-                /const\s+dirtyNow\s*=\s*snap\s*!==\s*effectiveBaseline\(\)/.test(body),
+                /const\s+dirtyNow\s*=\s*snap\s*!==\s*currentBaseline\(\)/.test(body),
                 'pushHistory must compute dirtyNow as snap !== lastSavedSnapshot'
             );
             assert.ok(
@@ -2468,8 +2518,8 @@ suite('JsonEditorUtils Test Suite', () => {
                 'webview buildDraftSnapshot must operate on a deep clone of data, not mutate it'
             );
             assert.ok(
-                /typeof\s+oldVal\s*===\s*'string'\s*\)\s*\?\s*rawInputValue\s*:\s*parseValue\(/.test(body),
-                'webview buildDraftSnapshot must preserve cell type via the same string-vs-non-string coercion as commitCell'
+                /coerceEditedCellValue\(rawInputValue, oldVal\)/.test(body),
+                'webview buildDraftSnapshot must preserve cell type via the same coerceEditedCellValue as commitCell'
             );
             assert.ok(
                 /isJsonEdit[\s\S]*?JSON\.parse\(\s*rawInputValue\s*\)/.test(body),

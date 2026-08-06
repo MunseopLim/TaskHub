@@ -91,10 +91,23 @@ webview 가 전역 `TaskHubJsonEditorLogic` 에서 꺼내 쓴다. 같은 모듈�
 import 하므로 로직은 **한 벌**이다.
 
 예전에는 두 벌이었다 — 문자열 안의 사본과 `jsonEditorUtils.ts` 의 "테스트용 미러". 두 벌은
-반드시 어긋나고, 실제로 어긋났다. 인라인에 남아 있는 함수들은 아직 미러 관계이며
-(`NOTE: … 와 동일해야 한다` 주석이 붙어 있다) 순차적으로 이 번들로 옮긴다.
+반드시 어긋나고, 실제로 어긋났다. 아직 옮기지 못한 것들은 여전히 미러 관계이고, 그 목록은
+`jsonEditorUtils.ts` 머리말 하나가 관리한다 — 순차적으로 이 번들로 옮긴다.
 
-이관된 것: `parseValue`.
+webview 가 번들에서 꺼내 쓰는 것: `coerceEditedCellValue` · `coerceEditedArrayItems` ·
+`buildSheetMap` · `getRowsByPath` · `effectiveBaseline` · `decideSaveResult`.
+(`parseValue` 도 번들에 있지만 webview 는 직접 부르지 않는다 — `coerceEditedCellValue` 안에서
+쓰인다.)
+
+아직 인라인 사본이 남은 것들은 DOM 을 직접 읽거나 IIFE 지역 변수를 쓰므로 그대로는 옮길 수
+없다 — 순수한 알맹이를 분리한 뒤에야 옮길 수 있다. **그 목록은 여기 적지 않는다**:
+`jsonEditorUtils.ts` 머리말 하나가 단일 출처이고, 테스트가 그 머리말을 검사한다.
+
+**이름이 겹치면 조용히 죽는다.** 번들에서 꺼낸 이름(`const { … } = TaskHubJsonEditorLogic`)과
+같은 이름의 인라인 정의가 남아 있으면 `Identifier has already been declared` 로 스크립트 전체가
+문법 오류가 되고 화면이 통째로 빈다. 문자열 안이라 tsc 도 eslint 도 보지 못하므로, 인라인
+스크립트를 실행 없이 컴파일만 해 보는 테스트로 고정한다. 전역을 읽는 래퍼는 이름을 달리 둔다
+(`rebuildSheetMap` · `currentBaseline`).
 
 ## 주요 컴포넌트
 

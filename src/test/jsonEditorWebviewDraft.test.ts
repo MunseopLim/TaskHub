@@ -61,7 +61,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
      * 조용히 어긋난다.
      */
     const PULL_FROM_BUNDLE = (() => {
-        const m = html.match(/const \{ [^}]+ \} = TaskHubJsonEditorLogic;/);
+        const m = html.match(/const \{[^}]+\} = TaskHubJsonEditorLogic;/);
         assert.ok(m, '인라인 스크립트에서 번들 구조분해 문장을 찾지 못했다');
         return m![0].replace('TaskHubJsonEditorLogic', 'LOGIC');
     })();
@@ -166,12 +166,8 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
 
         const script = [
             PULL_FROM_BUNDLE,
-            extractFn('coerceCellValue'),
-            extractFn('coerceEditedArrayItems'),
             extractFn('buildDraftSnapshot'),
-            extractFn('effectiveBaselineOf'),
-            extractFn('effectiveBaseline'),
-            extractFn('decideSaveResult'),
+            extractFn('currentBaseline'),
             extractFn('snapshotData'),
             extractFn('readActiveCellEdit'),
             extractFn('activeDraftState'),
@@ -185,7 +181,10 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             'let lastRecoverableDraft;',
             // 이 시나리오와 무관한 협력자들은 스텁.
             'function updateUndoRedoButtons() {}',
-            'function buildSheetMap() {}',
+            // buildSheetMap 은 스텁을 두지 않는다 — 이름이 번들 구조분해와 겹쳐
+            // `Identifier has already been declared` 가 된다. 전역 sheetMap 을
+            // 갈아끼우는 쪽은 rebuildSheetMap 이므로 그것만 스텁으로 둔다.
+            'function rebuildSheetMap() {}',
             'function renderTabs() {}',
             'function renderTable() {}',
             'function resetHistoryToCurrent() {}',
@@ -266,8 +265,6 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
 
             const script = [
                 PULL_FROM_BUNDLE,
-                extractFn('coerceCellValue'),
-                extractFn('coerceEditedArrayItems'),
                 extractFn('getActiveRows'),
                 extractFn('syncEditingArrayCellToData'),
                 extractFn('commitCell'),
@@ -421,6 +418,42 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             assert.deepStrictEqual(api.data(), { rows: [{ tags: [{ k: 1 }] }] }, '데이터를 건드리면 안 된다');
         });
 
+        /**
+         * scalar 셀의 타입 보존. 이 분기는 실행 테스트가 하나도 없었다.
+         *
+         * 규칙은 번들의 `coerceEditedCellValue` 한 곳에 있지만, **commitCell 이
+         * 그것을 실제로 부르는지**는 별개다 — 예전에는 같은 삼항식을 손으로 다시
+         * 써 두어, 규칙을 바꿔도 이 자리만 옛 동작으로 남을 수 있었다.
+         */
+        test('scalar 셀은 옛 값이 문자열이면 raw 를 유지하고 아니면 해석한다', () => {
+            const numeric = { rows: [{ n: 1 }] };
+            const numApi = bootCommit(numeric);
+            numApi.api.commit(makeCommitCell(0, 'n', [makeInput('42')]));
+            assert.deepStrictEqual(numApi.api.data(), { rows: [{ n: 42 }] }, '숫자 셀은 숫자로 남아야 한다');
+
+            const stringy = { rows: [{ s: '1' }] };
+            const strApi = bootCommit(stringy);
+            strApi.api.commit(makeCommitCell(0, 's', [makeInput('00123')]));
+            assert.deepStrictEqual(
+                strApi.api.data(), { rows: [{ s: '00123' }] },
+                '문자열 셀은 "00123" 이 숫자 123 으로 굳으면 안 된다'
+            );
+        });
+
+        /**
+         * `getActiveRows` 가 번들의 `getRowsByPath` 에 위임하는지.
+         *
+         * 시트 경로의 종단이 배열이 아니면 null 이어야 한다. 예전의 "검사 없이
+         * 따라가기" 로 되돌리면 여기서 배열 아닌 것을 그대로 돌려주고, 호출부가
+         * 조용히 엉뚱한 값을 만진다. (제품에서 도달하는 경로는 없다 — 위임이
+         * 유지되는지만 고정한다.)
+         */
+        test('시트 경로가 배열에 닿지 못하면 sync 가 null 을 돌려준다', () => {
+            const { api } = bootCommit({ rows: { 0: { tags: [1, 2] } } } as unknown as Record<string, unknown>);
+            const cell = makeCommitCell(0, 'tags', [makeInput('1', { arrIdx: 0 })]);
+            assert.strictEqual(api.sync(cell), null, '배열이 아닌 종단을 행 목록으로 받았다');
+        });
+
         test('편집 중이 아닌 셀은 커밋이 아무것도 하지 않는다', () => {
             const data = { rows: [{ tags: [1, 2] }] };
             const { api, historyPushes } = bootCommit(data);
@@ -555,8 +588,6 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             const announced: string[] = [];
             const script = [
                 PULL_FROM_BUNDLE,
-                extractFn('coerceCellValue'),
-                extractFn('coerceEditedArrayItems'),
                 extractFn('getActiveRows'),
                 extractFn('syncEditingArrayCellToData'),
                 extractFn('findCellByCol'),

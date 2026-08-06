@@ -29,6 +29,34 @@
 =====================================================================
 -->
 
+## [0.6.73] - 2026-08-06
+
+### 변경 — JSON Editor webview 로직을 진짜 모듈로 (2/n)
+
+사용자에게 보이는 변화는 없다. 0.6.72 가 뚫어 둔 번들 위로 순수 로직 여섯 개를 더 올렸다.
+
+- **여섯 개가 한 벌이 됐다**: `coerceEditedCellValue` · `coerceEditedArrayItems` · `buildSheetMap` ·
+  `getRowsByPath` · `effectiveBaseline` · `decideSaveResult`. 인라인 사본을 지우고 번들에서 꺼내
+  쓴다. 전역을 읽는 래퍼는 이름을 달리 뒀다(`rebuildSheetMap` · `currentBaseline`) — 같은 이름을
+  두면 `const` 와 `function` 이 겹쳐 스크립트 전체가 문법 오류가 된다 ([src/webview/jsonEditorLogic.ts](src/webview/jsonEditorLogic.ts)).
+- **문자열 보존 규칙의 손복사 두 곳도 함께 걷었다**: `commitCell` 과 `buildDraftSnapshot` 이
+  `typeof oldVal === 'string' ? raw : parseValue(raw)` 를 각자 다시 쓰고 있어, 번들에서 꺼내 쓰기만
+  하고 실제로는 아무도 부르지 않는 상태였다. 규칙을 바꾸면 단위테스트만 움직이고 실제 커밋 경로는
+  옛 동작으로 남는다 — 이 이관이 없애려던 바로 그 상태다.
+- **`getActiveRows` 가 경로를 검사한다**: 예전에는 시트 경로를 검사 없이 따라가 **배열이 아닌 것도
+  그대로** 돌려줬다. 호출부는 대부분 곧바로 `[rowIdx][col]` 을 읽으므로 어차피 TypeError 였고, 이제는
+  이미 문서화돼 있던 `null` 계약과 같은 모양으로 실패한다 ([src/jsonEditor.ts](src/jsonEditor.ts)).
+- **남은 미러 여섯 개**: `commitCell` · `sendDraftSnapshot` · `syncEditingArrayCellToData` ·
+  `buildDraftSnapshot` · `readActiveCellEdit` · `activeDraftState`. DOM 을 직접 읽거나 IIFE 지역
+  변수를 쓰므로 순수한 알맹이를 분리한 뒤에야 옮길 수 있다. 목록은 `jsonEditorUtils.ts` 머리말
+  하나가 관리한다.
+
+**테스트**: 최종 2417 passing. **이름 겹침이 실제로 한 번 일어났다** — 구조분해해 놓고 인라인
+사본을 지우지 않아 `Identifier 'buildSheetMap' has already been declared` 로 스크립트가 통째로
+죽었다. 문자열 안이라 tsc 도 eslint 도 보지 못한다. 그래서 인라인 스크립트를 **실행하지 않고
+컴파일만 해 보는** 테스트를 넣었고, "번들로 옮긴 이름의 인라인 사본이 없는가" 가드는 검사 대상을
+구조분해 목록에서 뽑으므로 앞으로 옮기는 것들이 자동으로 포함된다.
+
 ## [0.6.72] - 2026-08-05
 
 ### 변경 — JSON Editor webview 로직을 진짜 모듈로 (1/n)

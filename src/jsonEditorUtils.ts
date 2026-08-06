@@ -7,15 +7,18 @@
  *   1. host (`jsonEditor.ts`) — 직접 import.
  *   2. webview — `src/webview/jsonEditorLogic.ts` 를 통해 `dist/jsonEditorWebview.js`
  *      로 묶여 전역 `TaskHubJsonEditorLogic` 으로 올라간다. 여기까지 옮긴 것은
- *      **{@link parseValue}** 하나다.
+ *      {@link parseValue} · {@link coerceEditedCellValue} · {@link coerceEditedArrayItems} ·
+ *      {@link buildSheetMap} · {@link getRowsByPath} · {@link effectiveBaseline} ·
+ *      {@link decideSaveResult} 다. 이것들은 **미러가 아니라 webview 가 실제로 부르는
+ *      그 함수**이므로, 고치면 양쪽에 동시에 반영된다.
  *   3. 테스트.
  *
- * **아직 미러인 것들.** 아래 함수들은 `jsonEditor.ts` 의 템플릿 리터럴 안에 사본이
- * 한 벌 더 있고, 그 사본이 실제로 도는 코드다. 로직을 바꾸면 **반드시 양쪽을 같이**
- * 고쳐야 한다 — 컴파일러가 잡아 주지 않는다.
- * (동기화 대상: jsonEditor.ts 의 buildSheetMap / getActiveRows / commitCell /
- * sendDraftSnapshot / syncEditingArrayCellToData / decideSaveResult / readActiveCellEdit /
- * activeDraftState)
+ * **아직 미러인 것들.** 아래는 `jsonEditor.ts` 의 템플릿 리터럴 안에 사본이 한 벌 더
+ * 있고, 그 사본이 실제로 도는 코드다. 로직을 바꾸면 **반드시 양쪽을 같이** 고쳐야
+ * 한다 — 컴파일러가 잡아 주지 않는다. DOM 을 직접 읽거나 IIFE 지역 변수를 쓰기
+ * 때문에 그대로는 옮길 수 없고, 순수한 알맹이를 분리한 뒤에야 옮길 수 있다.
+ * (동기화 대상: jsonEditor.ts 의 commitCell / sendDraftSnapshot /
+ * syncEditingArrayCellToData / buildDraftSnapshot / readActiveCellEdit / activeDraftState)
  *
  * 이 두 벌 상태를 없애는 것이 webview 번들 이관의 목적이다. 배경과 진행 상황은
  * docs/architecture.md 의 "webview 스크립트의 두 층" 참조.

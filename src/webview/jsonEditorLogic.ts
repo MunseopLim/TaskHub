@@ -19,4 +19,12 @@
  * 에서 실행되므로 확장 호스트 API 가 없다. `jsonEditorUtils.ts` 는 import 가
  * 하나도 없는 순수 모듈이라 그 조건을 이미 만족한다.
  */
-export { parseValue } from '../jsonEditorUtils';
+export {
+    parseValue,
+    coerceEditedCellValue,
+    coerceEditedArrayItems,
+    buildSheetMap,
+    getRowsByPath,
+    effectiveBaseline,
+    decideSaveResult,
+} from '../jsonEditorUtils';
