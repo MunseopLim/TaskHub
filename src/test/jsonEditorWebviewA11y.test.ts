@@ -26,6 +26,54 @@ function render(data: Record<string, unknown> = { rows: [{ a: 1 }] }): string {
 
 suite('JSON Editor 웹뷰 지역화 / 접근성', () => {
 
+    /**
+     * 대비 · 타깃 크기 · 포커스 링은 CSS 문자열이라 실행으로 볼 수 없다.
+     * 되돌아가기 쉬운 것들이라 형태로 고정한다.
+     */
+    test('삭제 버튼이 전경용 토큰을 배경으로 쓰지 않는다', () => {
+        const html = render();
+        // --danger 는 --vscode-errorForeground 다. 배경으로 쓰고 흰 글자를
+        // 올리면 다크 테마에서 약 2.5:1 로 WCAG 1.4.3(4.5:1) 미달이었다.
+        assert.ok(
+            /button\.danger \{ background: var\(--danger-bg\); color: var\(--danger-fg\); \}/.test(html),
+            'button.danger 는 배경용 토큰(--danger-bg)과 짝 전경(--danger-fg)을 써야 한다'
+        );
+        assert.ok(
+            /--danger-bg: var\(--vscode-statusBarItem-errorBackground/.test(html),
+            '--danger-bg 는 배경으로 설계된 테마 토큰에서 와야 한다'
+        );
+    });
+
+    test('작은 버튼들이 최소 타깃 크기를 가진다', () => {
+        const html = render();
+        assert.ok(/--touch-min: 24px;/.test(html), 'WCAG 2.2 SC 2.5.8 은 24x24 를 요구한다');
+        // ✕ 와 변환 배지 양쪽. 한쪽만 적용하면 나머지가 계속 23x17 로 남는다.
+        for (const rule of ['button.small', '.convert-btn']) {
+            const block = html.match(new RegExp(rule.replace('.', '\\.') + ' \\{[^}]*\\}'));
+            assert.ok(block, `${rule} 규칙을 찾지 못했다`);
+            assert.ok(
+                /min-width: var\(--touch-min\)/.test(block![0]) && /min-height: var\(--touch-min\)/.test(block![0]),
+                `${rule} 에 최소 타깃 크기가 없다`
+            );
+            // 높이만 늘리고 중앙정렬을 빼면 글리프가 위로 붙는다.
+            for (const decl of ['display: inline-flex', 'align-items: center', 'justify-content: center']) {
+                assert.ok(block![0].includes(decl), `${rule} 에 ${decl} 이 없다 — 글리프가 가운데 오지 않는다`);
+            }
+        }
+    });
+
+    test('포커스 링이 모든 초점 대상에 붙는다', () => {
+        const html = render();
+        // 예전에는 drag-grip 하나뿐이라, 프로그램이 옮겨 놓은 포커스가 어디
+        // 있는지 마우스 사용자에게 아무 표시도 나지 않았다.
+        const block = html.match(/button:focus-visible,[\s\S]*?\}/);
+        assert.ok(block, '일반 포커스 링 규칙이 없다');
+        for (const target of ['.cell-view:focus-visible', '[role="tab"]:focus-visible']) {
+            assert.ok(block![0].includes(target), `${target} 이 포커스 링에서 빠졌다`);
+        }
+    });
+
+
     suite('문자열 번들', () => {
         const strings = buildJsonEditorStrings();
 

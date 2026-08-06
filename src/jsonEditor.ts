@@ -1317,6 +1317,14 @@ export function getWebviewContent(
         --tab-inactive-fg: var(--vscode-tab-inactiveForeground, #888);
         --tab-border: var(--vscode-tab-activeBorderTop, var(--btn-bg));
         --danger: var(--vscode-errorForeground, #f44);
+        /* --danger 는 **전경용** 토큰이다 (다크 테마 #F48771). 그것을 버튼 배경으로
+           쓰고 흰 글자를 올리면 약 2.5:1 로 WCAG 1.4.3(4.5:1) 에 못 미친다.
+           배경으로 쓸 것은 배경으로 설계된 토큰에서 가져온다. */
+        --danger-bg: var(--vscode-statusBarItem-errorBackground, #a1260d);
+        --danger-fg: var(--vscode-statusBarItem-errorForeground, #ffffff);
+        /* 최소 클릭·터치 타깃 (WCAG 2.2 SC 2.5.8 AA). 표가 답답하면 이 한 줄만
+           줄이면 된다 — 아래 규칙들이 전부 이 값을 쓴다. */
+        --touch-min: 24px;
         --badge-bg: var(--vscode-badge-background, #444);
         --badge-fg: var(--vscode-badge-foreground, #fff);
         --hover-bg: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05));
@@ -1359,10 +1367,17 @@ export function getWebviewContent(
         cursor: not-allowed;
     }
     button:disabled:hover { background: var(--btn-bg); }
-    button.danger { background: var(--danger); }
+    button.danger { background: var(--danger-bg); color: var(--danger-fg); }
     button.small {
         padding: 2px 6px;
         font-size: 11px;
+        /* 글자는 작게 두되 **누를 수 있는 넓이**는 확보한다. inline-flex 로
+           글리프를 가운데 두지 않으면 높이만 늘어나고 ✕ 가 위로 붙는다. */
+        min-width: var(--touch-min);
+        min-height: var(--touch-min);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
     }
 
     .tabs {
@@ -1455,7 +1470,14 @@ export function getWebviewContent(
         font: inherit;
         cursor: grab;
     }
-    button.drag-grip:focus-visible {
+    /* 포커스 링은 **모든 초점 대상**에 준다. 예전에는 drag-grip 하나뿐이라,
+       키보드로 표를 훑거나 ✕ / 변환 버튼을 누른 뒤 코드가 옮겨 놓은 포커스가
+       어디 있는지 화면에 아무 표시도 나지 않았다.
+       (마우스 클릭 뒤의 프로그램적 focus() 는 :focus-visible 에 걸리지 않는다 —
+       이 규칙이 돕는 것은 키보드 경로다.) */
+    button:focus-visible,
+    .cell-view:focus-visible,
+    [role="tab"]:focus-visible {
         outline: 1px solid var(--vscode-focusBorder, var(--btn-bg));
         outline-offset: 1px;
     }
@@ -1557,7 +1579,11 @@ export function getWebviewContent(
     }
 
     .convert-btn {
-        display: inline-block;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: var(--touch-min);
+        min-height: var(--touch-min);
         background: var(--badge-bg);
         color: var(--badge-fg);
         border: none;
@@ -2517,6 +2543,54 @@ export function getWebviewContent(
             });
         });
 
+        // ✕ / + 에서도 Escape 로 셀을 빠져나온다. 마지막 태그를 지우고 나면
+        // 포커스가 "+" 에 있는데 거기서 Escape 가 먹지 않아, 키보드만으로는
+        // 편집을 취소할 방법이 아예 없었다 (Escape 는 input 에만 걸려 있었다).
+        document.querySelectorAll('.cell-edit [data-remove-arr], .cell-edit [data-add-arr]').forEach(btn => {
+            btn.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') { cancelCell(btn.closest('td')); }
+            });
+        });
+
+        // **셀 밖으로 나가면 commit 한다.** 단일 값 셀과 textarea 는 이미 이렇게
+        // 동작하는데 배열 셀만 빠져 있어, 다른 곳을 클릭해도 편집 상태로 남았다 —
+        // 화면 밖으로 스크롤되면 왜 그런지 알 방법도 없다.
+        //
+        // **input 뿐 아니라 ✕ / + 에도 건다.** 셀 안의 DOM 순서가
+        // (input, ✕) × n → + 라, 앞으로 Tab 해서 나가는 사람은 언제나 버튼을
+        // 거쳐 나간다. input 에만 걸면 그 경로가 통째로 빠진다.
+        document.querySelectorAll(
+            '.cell-edit input[data-arr-idx], .cell-edit [data-remove-arr], .cell-edit [data-add-arr]'
+        ).forEach(el => {
+            el.addEventListener('blur', () => {
+                const td = el.closest('td');
+                if (!td || !td.classList.contains('editing')) { return; }
+                setTimeout(() => {
+                    if (!td.isConnected || !td.classList.contains('editing')) { return; }
+                    // 같은 셀 안으로 옮겨 간 포커스는 편집을 끝낸 것이 아니다.
+                    // 태그 사이를 Tab 하거나 ✕ / + 를 누른 것까지 commit 으로
+                    // 보면 셀이 접혀 버린다.
+                    if (td.contains(document.activeElement)) { return; }
+                    // commitCell 은 표를 다시 그린다. 그 사이 사용자가 옮겨 간
+                    // 셀도 함께 사라지므로 어디였는지 기억했다가 돌려준다 —
+                    // 그러지 않으면 Shift+Tab 으로 빠져나온 100ms 뒤에 포커스가
+                    // 조용히 body 로 떨어져 다음 Tab 이 문서 맨 앞에서 다시
+                    // 시작한다. (툴바처럼 표 밖으로 나간 포커스는 다시 그려도
+                    // 살아 있으므로 건드리지 않는다.)
+                    const moved = document.activeElement;
+                    const movedTd = moved && moved.closest ? moved.closest('td[data-row]') : null;
+                    const backRow = movedTd ? parseInt(movedTd.dataset.row) : null;
+                    const backCol = movedTd ? movedTd.dataset.col : null;
+                    commitCell(td);
+                    if (backRow === null) { return; }
+                    const back = findCellByCol(backRow, backCol);
+                    if (!back) { return; }
+                    const view = back.querySelector('.cell-view');
+                    if (view) { view.focus(); }
+                }, 100);
+            });
+        });
+
         // Draft snapshot 송신 — 사용자가 commit 전에 탭 전환/Reload/패널 close
         // 등으로 input이 detach 되어도 host의 recovery 엔트리에 마지막 입력이
         // 남아 reopen 시 복구할 수 있게 한다. JSON-edit textarea는 partial JSON
@@ -2606,6 +2680,15 @@ export function getWebviewContent(
                 }
                 pushHistory();
                 renderTable();
+                // 다시 그리면 이 버튼이 든 td 가 통째로 사라진다. 같은 셀의
+                // 변환 버튼으로 포커스를 돌려 연속으로 누를 수 있게 하고,
+                // 없으면 셀 자체로 — 그러지 않으면 포커스가 body 로 떨어져
+                // 키보드 사용자는 문서 맨 앞으로 튕긴다.
+                const again = findCellByCol(rowIdx, col);
+                if (again) {
+                    const target = again.querySelector('.convert-btn') || again.querySelector('.cell-view');
+                    if (target) { target.focus(); }
+                }
             });
         });
 
@@ -2616,9 +2699,25 @@ export function getWebviewContent(
                 // 행 삭제도 중단해 stale 인덱스로 잘못된 행에 쓰는 사고를 막는다.
                 if (!commitActiveCellOrAbort()) { return; }
                 const rowIdx = parseInt(btn.dataset.deleteRow);
-                getActiveRows().splice(rowIdx, 1);
+                // getActiveRows() 는 시트가 어긋나면 null 이다. 검사 없이 읽던 자리.
+                const rows = getActiveRows();
+                // **범위로 검사한다.** \`!rows[rowIdx]\` 로 두면 값이 0 · '' · false
+                // 인 행이 falsy 라 삭제되지 않는다 — 루트가 [0, 1, 2] 인 파일에서
+                // 첫 행의 ✕ 가 아무 반응 없이 먹통이 된다.
+                if (!rows || rowIdx < 0 || rowIdx >= rows.length) { return; }
+                rows.splice(rowIdx, 1);
                 pushHistory();
                 renderTable();
+                // 지운 자리로 올라온 행의 ✕ 로 옮긴다. 마지막 행을 지웠으면 그
+                // 앞으로, 하나도 남지 않으면 "행 추가" 로. 방금 사라진 버튼에
+                // 있던 포커스를 두면 body 로 떨어진다.
+                const remaining = document.querySelectorAll('[data-delete-row]');
+                if (remaining.length) {
+                    remaining[Math.min(rowIdx, remaining.length - 1)].focus();
+                } else {
+                    const addRow = document.getElementById('btnAddRow');
+                    if (addRow) { addRow.focus(); }
+                }
             });
         });
 

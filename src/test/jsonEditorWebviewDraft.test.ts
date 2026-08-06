@@ -94,6 +94,27 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
         return m![0];
     }
 
+    /**
+     * `document.querySelectorAll('<셀렉터>').forEach(<param> => { … });` 블록 하나.
+     *
+     * 속성 셀렉터가 아닌 배선(`.cell-edit input[data-arr-idx]` 등)까지 다루려고
+     * {@link extractWiring} 과 따로 둔다. 삼킴 검사는 블록마다 리스너 수가
+     * 달라 기대값을 받는다.
+     */
+    function extractWiringBySelector(selector: string, param: string, listeners: number): string {
+        const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // 긴 셀렉터는 소스에서 줄이 나뉘어 있다 — 괄호 안 공백을 허용한다.
+        const re = new RegExp(
+            'document\\.querySelectorAll\\(\\s*\'' + escaped + '\'\\s*\\)\\.forEach\\('
+            + param + ' => \\{[\\s\\S]*?\\n        \\}\\);'
+        );
+        const m = html.match(re);
+        assert.ok(m, `webview 스크립트에서 ${selector} 배선을 찾지 못했다`);
+        const count = m![0].split('addEventListener(').length - 1;
+        assert.strictEqual(count, listeners, `${selector} 배선 추출이 이웃 블록까지 삼켰다`);
+        return m![0];
+    }
+
     /** `window.addEventListener('message', ...)` 의 본문. */
     function extractMessageHandlerBody(): string {
         const m = html.match(/window\.addEventListener\('message', \(event\) => \{([\s\S]*?)\n    \}\);/);
@@ -826,6 +847,257 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
         });
     });
 
+    // ── 편집을 벗어나는 길 ───────────────────────────────────────────────────
+    /**
+     * 배열 셀에서 편집을 끝내는 경로가 단일 값 셀보다 좁았다.
+     *
+     *   - 다른 곳을 클릭해도 commit 되지 않아 셀이 계속 편집 상태로 남았다
+     *     (단일 값 셀과 textarea 는 이미 blur 로 commit 한다).
+     *   - Escape 가 input 에만 걸려 있어, 마지막 태그를 지워 포커스가 "+" 에
+     *     있을 때는 키보드로 편집을 취소할 방법이 아예 없었다.
+     */
+    suite('배열 셀에서 편집을 벗어나기 (실행 테스트)', () => {
+
+        const BLUR_SELECTOR =
+            '.cell-edit input[data-arr-idx], .cell-edit [data-remove-arr], .cell-edit [data-add-arr]';
+        const ESC_SELECTOR = '.cell-edit [data-remove-arr], .cell-edit [data-add-arr]';
+
+        function bootExit(options: { focusMovesTo?: 'sameCell' | 'otherCell' | 'outsideTable' } = {}) {
+            const where = options.focusMovesTo ?? 'outsideTable';
+            const calls: string[] = [];
+            const focused: string[] = [];
+            let handlers: Record<string, (e: unknown) => void> = {};
+
+            const editingTd = {
+                isConnected: true,
+                classList: { contains: (n: string) => n === 'editing' },
+                contains: (el: unknown) => where === 'sameCell' && el === activeElement,
+            };
+            /** 포커스가 옮겨 간 곳. 표 밖이면 td 를 못 찾는다. */
+            const activeElement = {
+                closest: (sel: string) => {
+                    assert.strictEqual(sel, 'td[data-row]', `가짜 DOM 이 모르는 셀렉터: ${sel}`);
+                    return where === 'otherCell' ? { dataset: { row: '2', col: 'other' } } : null;
+                },
+            };
+            /** commit 이 표를 다시 그린 뒤의 그 셀. */
+            const reRendered = {
+                dataset: { col: 'other' },
+                querySelector: (sel: string) => {
+                    assert.strictEqual(sel, '.cell-view', `가짜 DOM 이 모르는 셀렉터: ${sel}`);
+                    return { focus: () => focused.push('cell-view:2') };
+                },
+            };
+            const makeEl = () => ({
+                closest: (sel: string) => {
+                    assert.strictEqual(sel, 'td', `가짜 DOM 이 모르는 셀렉터: ${sel}`);
+                    return editingTd;
+                },
+                addEventListener: (type: string, fn: (e: unknown) => void) => { handlers[type] = fn; },
+            });
+
+            const script = [
+                extractFn('findCellByCol'),
+                'function commitCell(t) { calls.push("commitCell"); return true; }',
+                'function cancelCell(t) { calls.push("cancelCell"); }',
+                extractWiringBySelector('.cell-edit input[data-arr-idx]', 'input', 1),
+                extractWiringBySelector(ESC_SELECTOR, 'btn', 1),
+                extractWiringBySelector(BLUR_SELECTOR, 'el', 1),
+            ].join('\n');
+
+            /** 셀렉터 하나만 태워 그 배선의 핸들러를 잡는다. */
+            function wire(selector: string) {
+                handlers = {};
+                const el = makeEl();
+                const doc = {
+                    activeElement,
+                    querySelectorAll: (sel: string) => {
+                        if (sel === selector) { return [el]; }
+                        // findCellByCol 이 다시 그린 표를 훑는 경로.
+                        if (sel === 'td[data-row="2"]') { return [reRendered]; }
+                        return [];
+                    },
+                };
+                new Function('document', 'calls', script)(doc, calls);
+                return handlers;
+            }
+            return { calls, focused, editingTd, wire };
+        }
+
+        test('배열 셀에서 포커스가 셀 밖으로 나가면 commit 한다', async () => {
+            const { calls, wire } = bootExit();
+            wire(BLUR_SELECTOR).blur({});
+            await new Promise(r => setTimeout(r, 150));
+            assert.deepStrictEqual(calls, ['commitCell'], '셀이 편집 상태로 계속 남는다');
+        });
+
+        test('같은 셀 안으로 옮겨 간 포커스는 commit 이 아니다', async () => {
+            // 다른 태그 input 으로 Tab 하거나 ✕ / + 를 누른 것까지 commit 으로
+            // 보면 셀이 접혀, 태그 여러 개를 고치는 흐름이 매번 끊긴다.
+            const { calls, wire } = bootExit({ focusMovesTo: 'sameCell' });
+            wire(BLUR_SELECTOR).blur({});
+            await new Promise(r => setTimeout(r, 150));
+            assert.deepStrictEqual(calls, [], '같은 셀 안인데 commit 했다');
+        });
+
+        test('셀이 이미 떨어져 나갔으면 commit 하지 않는다', async () => {
+            // ✕ / + 는 renderTable 로 td 를 갈아치운다. stale 한 td 에 commit 하면
+            // 엉뚱한 행에 쓴다.
+            const { calls, editingTd, wire } = bootExit();
+            wire(BLUR_SELECTOR).blur({});
+            editingTd.isConnected = false;
+            await new Promise(r => setTimeout(r, 150));
+            assert.deepStrictEqual(calls, []);
+        });
+
+        /**
+         * commit 은 표를 다시 그린다 — 그 사이 사용자가 옮겨 간 셀도 함께
+         * 사라진다. 되돌리지 않으면 Shift+Tab 으로 배열 셀을 빠져나온 100ms 뒤에
+         * 포커스가 조용히 body 로 떨어져, 다음 Tab 이 문서 맨 앞에서 시작한다.
+         */
+        test('다른 셀로 옮겨 간 포커스는 commit 뒤에 되돌려 준다', async () => {
+            const { calls, focused, wire } = bootExit({ focusMovesTo: 'otherCell' });
+            wire(BLUR_SELECTOR).blur({});
+            await new Promise(r => setTimeout(r, 150));
+            assert.deepStrictEqual(calls, ['commitCell']);
+            assert.deepStrictEqual(focused, ['cell-view:2'], '포커스가 body 로 떨어졌다');
+        });
+
+        test('표 밖으로 나간 포커스는 건드리지 않는다', async () => {
+            // 툴바 버튼은 다시 그려도 살아 있다. 굳이 표 안으로 끌어오면
+            // 사용자가 방금 옮긴 포커스를 빼앗는 것이다.
+            const { focused, wire } = bootExit({ focusMovesTo: 'outsideTable' });
+            wire(BLUR_SELECTOR).blur({});
+            await new Promise(r => setTimeout(r, 150));
+            assert.deepStrictEqual(focused, []);
+        });
+
+        test('✕ / + 에서 Escape 로 편집을 취소한다', () => {
+            const { calls, wire } = bootExit();
+            wire(ESC_SELECTOR).keydown({ key: 'Escape' });
+            assert.deepStrictEqual(calls, ['cancelCell']);
+        });
+
+        test('Escape 가 아닌 키는 그대로 흘려보낸다', () => {
+            // Enter 까지 여기서 삼키면 버튼이 눌리지 않는다.
+            const { calls, wire } = bootExit();
+            const h = wire(ESC_SELECTOR);
+            h.keydown({ key: 'Enter' });
+            h.keydown({ key: 'a' });
+            assert.deepStrictEqual(calls, []);
+        });
+
+        test('blur 배선이 input 뿐 아니라 ✕ / + 까지 덮는다', () => {
+            // 셀 안의 DOM 순서가 (input, ✕) × n → + 라, 앞으로 Tab 해서 나가는
+            // 사람은 언제나 버튼을 거쳐 나간다. input 에만 걸면 그 경로가 빠진다.
+            for (const part of ['input[data-arr-idx]', '[data-remove-arr]', '[data-add-arr]']) {
+                assert.ok(BLUR_SELECTOR.includes(part), `blur 배선에 ${part} 가 없다`);
+            }
+            extractWiringBySelector(BLUR_SELECTOR, 'el', 1);
+        });
+    });
+
+    // ── 행 삭제 뒤 포커스 ────────────────────────────────────────────────────
+    suite('행 삭제 뒤 포커스 (실행 테스트)', () => {
+
+        function bootDelete(
+            rowCount: number,
+            deleteRow: string,
+            options: { primitiveRows?: boolean; sheets?: typeof sheetMap } = {}
+        ) {
+            const data = {
+                rows: Array.from({ length: rowCount }, (_, i) => (options.primitiveRows ? i : { v: i })),
+            };
+            const calls: string[] = [];
+            const focused: string[] = [];
+            let clickHandler: ((e: unknown) => void) | undefined;
+            const doc = {
+                querySelectorAll(selector: string) {
+                    assert.strictEqual(selector, '[data-delete-row]', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                    // 배선 시점에는 버튼을 하나만 준다. 다시 그린 뒤의 조회는
+                    // **남은 행 수**를 그대로 비춘다.
+                    if (clickHandler) {
+                        return data.rows.map((_, i) => ({ focus: () => focused.push('row:' + i) }));
+                    }
+                    return [{
+                        dataset: { deleteRow },
+                        addEventListener: (type: string, fn: (e: unknown) => void) => {
+                            assert.strictEqual(type, 'click', `예상 밖의 이벤트: ${type}`);
+                            clickHandler = fn;
+                        },
+                    }];
+                },
+                getElementById(id: string) {
+                    assert.strictEqual(id, 'btnAddRow', `가짜 DOM 이 모르는 id: ${id}`);
+                    return { focus: () => focused.push('addRow') };
+                },
+            };
+            const script = [
+                PULL_FROM_BUNDLE,
+                extractFn('getActiveRows'),
+                'let activeIdx = 0;',
+                'function commitActiveCellOrAbort() { return true; }',
+                'function pushHistory() { calls.push("pushHistory"); }',
+                'function renderTable() { calls.push("renderTable"); }',
+                extractWiring('data-delete-row'),
+            ].join('\n');
+            new Function('LOGIC', 'document', 'data', 'sheetMap', 'calls', script)(
+                logicBundle(), doc, data, options.sheets ?? sheetMap, calls);
+            assert.ok(clickHandler, 'data-delete-row 에 click 핸들러가 등록되지 않았다');
+            return { data, calls, focused, click: () => clickHandler!({}) };
+        }
+
+        test('지운 자리로 올라온 행의 ✕ 로 포커스가 간다', () => {
+            // 방금 사라진 버튼에 포커스를 두면 body 로 떨어져 표 맨 앞으로 튕긴다.
+            const { click, focused, data } = bootDelete(3, '0');
+            click();
+            assert.strictEqual(data.rows.length, 2);
+            assert.deepStrictEqual(focused, ['row:0']);
+        });
+
+        test('마지막 행을 지우면 그 앞 행으로 물러난다', () => {
+            const { click, focused } = bootDelete(3, '2');
+            click();
+            assert.deepStrictEqual(focused, ['row:1'], '없는 버튼에 포커스를 시도했다');
+        });
+
+        test('행이 하나도 남지 않으면 "행 추가" 가 포커스를 받는다', () => {
+            const { click, focused } = bootDelete(1, '0');
+            click();
+            assert.deepStrictEqual(focused, ['addRow']);
+        });
+
+        /**
+         * 값이 falsy 인 행.
+         *
+         * 루트가 `[0, 1, 2]` 인 파일은 `wrapIfArray` 를 거쳐 그대로 시트가 된다.
+         * 가드를 `!rows[rowIdx]` 로 쓰면 값이 0 · '' · false 인 행이 falsy 라
+         * **✕ 가 아무 반응 없이 먹통**이 된다. 범위로 검사해야 한다.
+         */
+        test('값이 0 인 행도 지워진다', () => {
+            const { click, data, calls } = bootDelete(3, '0', { primitiveRows: true });
+            click();
+            assert.deepStrictEqual(data.rows, [1, 2], '값이 falsy 라 삭제되지 않았다');
+            assert.deepStrictEqual(calls, ['pushHistory', 'renderTable']);
+        });
+
+        test('활성 시트가 없으면 아무것도 하지 않는다', () => {
+            // `!rows` 분기. 이것만 빼면 rows[rowIdx] 에서 TypeError 로 죽는다.
+            const { click, data, calls } = bootDelete(2, '0', { sheets: [] });
+            click();
+            assert.strictEqual(data.rows.length, 2);
+            assert.deepStrictEqual(calls, []);
+        });
+
+        test('행 인덱스가 범위를 넘으면 아무것도 하지 않는다', () => {
+            // getActiveRows() 를 검사 없이 읽던 자리다.
+            const { click, calls, data } = bootDelete(1, '5');
+            click();
+            assert.strictEqual(data.rows.length, 1);
+            assert.deepStrictEqual(calls, []);
+        });
+    });
+
     // ── scalar 셀 타입 변환 ──────────────────────────────────────────────────
     /**
      * 숫자 칸에 문자열을 한 번이라도 넣으면 그 셀은 문자열이 되고, 이후
@@ -947,15 +1219,37 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
         // ── 클릭 핸들러 ──────────────────────────────────────────────────
         function bootConvert(
             data: unknown,
-            options: { col?: string; sheets?: typeof sheetMap; convert?: string; row?: string } = {}
+            options: {
+                col?: string;
+                sheets?: typeof sheetMap;
+                convert?: string;
+                row?: string;
+                /** 다시 그린 셀에 변환 버튼이 없는 경우(예: 더 바꿀 것이 없어짐). */
+                noConvertBtn?: boolean;
+            } = {}
         ) {
             const col = options.col ?? 'v';
             const calls: string[] = [];
             const announced: string[] = [];
             const td = { dataset: { row: options.row ?? '0', col } };
+            /** 다시 그린 뒤 포커스를 받은 것. */
+            const focused: string[] = [];
+            /** renderTable() 뒤에도 표에 남는 같은 셀. */
+            const rendered = {
+                dataset: { col },
+                querySelector(selector: string) {
+                    if (selector === '.convert-btn') {
+                        return options.noConvertBtn ? null : { focus: () => focused.push('convert-btn') };
+                    }
+                    assert.strictEqual(selector, '.cell-view', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
+                    return { focus: () => focused.push('cell-view') };
+                },
+            };
             let clickHandler: ((e: unknown) => void) | undefined;
             const doc = {
                 querySelectorAll(selector: string) {
+                    // 다시 그린 표에서 셀을 되찾는 경로 (findCellByCol).
+                    if (selector === `td[data-row="${options.row ?? '0'}"]`) { return [rendered]; }
                     assert.strictEqual(selector, '[data-convert]', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
                     return [{
                         dataset: { convert: options.convert ?? 'retype' },
@@ -975,6 +1269,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                 extractFn('fmt'),
                 extractFn('getActiveRows'),
                 extractFn('retypedScalar'),
+                extractFn('findCellByCol'),
                 'let activeIdx = 0;',
                 'function commitActiveCellOrAbort() { return true; }',
                 'function pushHistory() { calls.push("pushHistory"); }',
@@ -988,6 +1283,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             return {
                 calls,
                 announced,
+                focused,
                 click() {
                     assert.ok(clickHandler, 'data-convert 에 click 핸들러가 등록되지 않았다');
                     clickHandler!({ stopPropagation() { /* 실제 코드가 부른다 */ } });
@@ -1052,6 +1348,28 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             assert.ok(!/[{}]/.test(announced[0]), `템플릿이 그대로 남았다: ${announced[0]}`);
             assert.ok(/\bv\b/.test(announced[0]), `어느 열인지 없다: ${announced[0]}`);
             assert.ok(/54/.test(announced[0]), `무엇이 됐는지 없다: ${announced[0]}`);
+        });
+
+        /**
+         * 변환 뒤 포커스.
+         *
+         * `renderTable()` 이 td 를 통째로 갈아치우므로, 되돌리지 않으면 버튼을
+         * 누른 순간 포커스가 body 로 떨어져 키보드 사용자는 문서 맨 앞으로 튕긴다.
+         */
+        test('변환 뒤 같은 셀의 변환 버튼으로 포커스가 돌아온다', () => {
+            const { click, focused } = bootConvert({ rows: [{ v: '54' }] });
+
+            click();
+
+            assert.deepStrictEqual(focused, ['convert-btn'], '연속으로 누를 수 있어야 한다');
+        });
+
+        test('변환 버튼이 사라졌으면 셀 자체로 포커스가 간다', () => {
+            const { click, focused } = bootConvert({ rows: [{ v: '54' }] }, { noConvertBtn: true });
+
+            click();
+
+            assert.deepStrictEqual(focused, ['cell-view'], '갈 곳이 없다고 body 로 떨어뜨리면 안 된다');
         });
 
         test('바꿀 것이 없으면 아무것도 하지 않는다', () => {
