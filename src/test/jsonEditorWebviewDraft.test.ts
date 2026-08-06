@@ -47,10 +47,15 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
         if (cachedLogicBundle === undefined) {
             const bundlePath = path.resolve(__dirname, '..', '..', 'dist', 'jsonEditorWebview.js');
             assert.ok(fs.existsSync(bundlePath), `번들이 없다: ${bundlePath} (node esbuild.js 를 먼저 돌린다)`);
-            const sandbox: Record<string, unknown> = {};
-            vm.runInNewContext(fs.readFileSync(bundlePath, 'utf-8'), sandbox);
-            assert.ok(sandbox.TaskHubJsonEditorLogic, '번들이 TaskHubJsonEditorLogic 전역을 올리지 않았다');
-            cachedLogicBundle = sandbox.TaskHubJsonEditorLogic;
+            // **이 realm 에서 돌린다.** `vm.runInNewContext` 로 띄우면 번들이
+            // 만든 객체의 프로토타입이 달라 `deepStrictEqual` 이 구조가 같아도
+            // 실패한다 (buildDraftSnapshot 은 JSON.parse 로 새 객체를 만든다).
+            // 실제 webview 에서도 번들과 인라인 스크립트는 같은 realm 이므로,
+            // 이쪽이 배달되는 모습에 더 가깝다.
+            const src = fs.readFileSync(bundlePath, 'utf-8');
+            const logic = new Function(`${src}\n;return TaskHubJsonEditorLogic;`)();
+            assert.ok(logic, '번들이 TaskHubJsonEditorLogic 을 내보내지 않았다');
+            cachedLogicBundle = logic;
         }
         return cachedLogicBundle;
     }
@@ -181,7 +186,6 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
 
         const script = [
             PULL_FROM_BUNDLE,
-            extractFn('buildDraftSnapshot'),
             extractFn('currentBaseline'),
             extractFn('snapshotData'),
             extractFn('readActiveCellEdit'),

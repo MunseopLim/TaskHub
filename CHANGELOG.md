@@ -29,6 +29,36 @@
 =====================================================================
 -->
 
+## [0.6.75] - 2026-08-06
+
+### 변경 — JSON Editor webview 로직을 진짜 모듈로 (3/3) — 미러가 사라졌다
+
+사용자에게 보이는 변화는 없다. 남은 순수 로직 둘(`buildDraftSnapshot` ·
+`resolveActiveDraftState`)을 번들로 옮기면서, **webview 와 `jsonEditorUtils.ts` 가 같은 로직을 두
+벌 들고 있던 상태가 끝났다.** 0.6.68~0.6.70 세 릴리스가 전부 "계약이 한쪽에만 지켜지고 있었다"
+였던 원인이 이것이다.
+
+- **`activeDraftState` 가 한 줄이 됐다**: DOM 에서 활성 셀을 읽어 번들의
+  `resolveActiveDraftState` 에 넘기기만 한다. 무엇을 recovery 로 보낼지, invalid 일 때 무엇을
+  지킬지 같은 판정 규칙이 인라인에도 한 벌 더 있었는데 이제 한 곳뿐이다 ([src/jsonEditor.ts](src/jsonEditor.ts)).
+- **webview 에 남은 것은 DOM 어댑터뿐이다**: `commitCell` · `sendDraftSnapshot` ·
+  `syncEditingArrayCellToData` · `readActiveCellEdit` · `activeDraftState` 는 DOM 을 읽어 번들
+  함수에 넘기고 결과를 화면·host 에 반영할 뿐, 중복된 로직을 들고 있지 않다. "한쪽만 고쳐서
+  어긋난다" 는 실패 모드가 사라졌다 ([src/jsonEditorUtils.ts](src/jsonEditorUtils.ts)).
+- **소스 정규식 가드 두 개를 폐기했다**: `buildDraftSnapshot` 의 deep clone · 타입 보존 ·
+  json-edit 파싱 · clean 판정을 정규식으로 보던 것들이다. 사본이 있을 때만 필요했던 검사이고,
+  이제는 같은 분기를 단위테스트가 **실행으로** 덮는다.
+
+**테스트**: 최종 2430 passing (폐기한 소스 가드 2종만큼 줄었다). 변이 2종으로 확인했다 —
+위임을 걷어내고 규칙을 인라인으로 되돌리기(17종 실패), 사본을 부활시켜 이름 충돌 만들기.
+
+이관 중 하네스에서 **realm 문제**가 드러났다. 번들을 `vm.runInNewContext` 로 띄우면 그 안에서
+만든 객체의 프로토타입이 달라 `deepStrictEqual` 이 구조가 같아도 실패한다 —
+`buildDraftSnapshot` 은 `JSON.parse` 로 새 객체를 만들기 때문이다. 실제 webview 에서는 번들과
+인라인 스크립트가 같은 realm 이므로, 하네스도 같은 realm 에서 번들을 돌리도록 바꿨다. 문자 창
+방식이던 `setModified` 가드도 배선 블록 추출로 바꿨다 — 사이의 함수가 번들로 빠지자 이웃 코드에
+걸려 거짓 실패가 났다.
+
 ## [0.6.74] - 2026-08-06
 
 ### 추가 — 셀 타입을 의도적으로 바꾸는 버튼

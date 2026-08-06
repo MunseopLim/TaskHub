@@ -27,4 +27,6 @@ export {
     getRowsByPath,
     effectiveBaseline,
     decideSaveResult,
+    buildDraftSnapshot,
+    resolveActiveDraftState,
 } from '../jsonEditorUtils';

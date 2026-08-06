@@ -1146,24 +1146,21 @@ suite('JsonEditorUtils Test Suite', () => {
                 /const \{[^}]*\bcoerceEditedArrayItems\b[^}]*\} = TaskHubJsonEditorLogic;/.test(editorSource),
                 'webview 는 coerceEditedArrayItems 를 번들에서 꺼내 써야 한다'
             );
-            // 호출 3 곳(commitCell · syncEditingArrayCellToData ·
-            // buildDraftSnapshot). 정의가 번들로 가면서 `정의 1 + 사용 3` 이
-            // `사용 3` 이 됐다 — 구조분해에는 `(` 가 없어 세지 않는다.
-            // 느슨하게 두면 **셋 중 하나가 raw 수집으로 되돌아가도 통과한다** —
-            // 이 가드가 막으려던 것이 정확히 그 회귀라 정확히 3 을 요구한다.
+            // 인라인에 남은 호출 2 곳(commitCell · syncEditingArrayCellToData).
+            // buildDraftSnapshot 도 같은 규칙을 쓰지만 그쪽은 번들로 갔고,
+            // 단위테스트가 직접 덮는다. 느슨하게 두면 **둘 중 하나가 raw 수집으로
+            // 되돌아가도 통과한다** — 그게 이 가드가 막으려던 회귀라 정확히 센다.
             const collectSites = editorSource.match(/coerceEditedArrayItems\(/g) || [];
             assert.strictEqual(
-                collectSites.length, 3,
-                `배열 수집 지점이 타입 보존을 거치지 않는다 (호출 ${collectSites.length}회, 3 기대)`
+                collectSites.length, 2,
+                `배열 수집 지점이 타입 보존을 거치지 않는다 (호출 ${collectSites.length}회, 2 기대)`
             );
             assert.ok(
                 !/newArr\.push\(input\.value\)/.test(editorSource),
                 'input.value 를 배열에 그대로 push 하는 경로가 남아 있다'
             );
-            assert.ok(
-                /row\[col\]\s*=\s*coerceEditedArrayItems\(arrValues,\s*arr\)/.test(editorSource),
-                'webview buildDraftSnapshot 은 셀의 모든 input 을 타입 보존해 한 번에 반영해야 한다'
-            );
+            // buildDraftSnapshot 의 같은 규칙은 번들로 갔다 — 'array draft
+            // preserves item types' 등이 실행으로 덮으므로 여기서 볼 것이 없다.
         });
 
         /**
@@ -1308,11 +1305,12 @@ suite('JsonEditorUtils Test Suite', () => {
                 !/typeof\s+oldVal\s*===\s*'string'\s*\?/.test(editorSource),
                 '문자열 보존 규칙을 손으로 다시 쓴 자리가 남아 있다 (coerceEditedCellValue 를 부를 것)'
             );
-            // scalar 두 자리(commitCell · buildDraftSnapshot)가 모두 그 함수를 쓴다.
+            // 인라인에 남은 scalar 자리는 commitCell 하나다 (buildDraftSnapshot
+            // 은 번들로 갔고 그쪽 단위테스트가 같은 규칙을 덮는다).
             const scalarSites = editorSource.match(/coerceEditedCellValue\(/g) || [];
             assert.strictEqual(
-                scalarSites.length, 2,
-                `scalar 셀 변환 지점이 번들 함수를 쓰지 않는다 (호출 ${scalarSites.length}회, 2 기대)`
+                scalarSites.length, 1,
+                `scalar 셀 변환 지점이 번들 함수를 쓰지 않는다 (호출 ${scalarSites.length}회, 1 기대)`
             );
         });
 
@@ -1880,22 +1878,7 @@ suite('JsonEditorUtils Test Suite', () => {
             );
         });
 
-        test('webview buildDraftSnapshot accepts empty-string col (typeof check, not falsy)', () => {
-            // 회귀 가드: `!col` 검사는 빈 문자열 column 을 부당하게 skip 시킨다.
-            // JSON 은 {"": "value"} 처럼 빈 문자열 key 를 허용하므로 typeof
-            // 검사로 바꿔야 해당 셀의 미커밋 draft 도 recovery 에 남는다.
-            const fn = editorSource.match(/function buildDraftSnapshot\(args\) \{([\s\S]*?)\n    \}/);
-            assert.ok(fn, 'webview must define buildDraftSnapshot(args)');
-            const body = fn![1];
-            assert.ok(
-                /typeof\s+col\s*!==\s*'string'/.test(body),
-                "webview buildDraftSnapshot must guard col with `typeof col !== 'string'` (typeof check, not falsy) so empty-string keys are not rejected"
-            );
-            assert.ok(
-                !/\|\|\s*!col\b/.test(body),
-                'webview buildDraftSnapshot must not use the `!col` falsy check (regression — empty-string keys would be skipped)'
-            );
-        });
+        // buildDraftSnapshot 의 인라인 사본이 없어져, 빈 문자열 키 가드는 위 'empty-string column key is a valid JSON key' 가 실행으로 덮는다.
 
         test('every host recovery-clearing site also clears currentLastReceivedSnapshot', () => {
             // 회귀 가드: setRecoveryEntry(...null) 로 workspaceState 의 recovery
@@ -2444,9 +2427,20 @@ suite('JsonEditorUtils Test Suite', () => {
             // 수동 revert 시 modified=true → modified=false 가 두 번 송신되어
             // host 가 의미 없는 work 를 하고, 더 나쁘게는 race 가 다시 열린다.
             // mutation 사이트들에서 setModified(true) 가 사라졌는지 정적 검사.
-            const sites = ['data-remove-arr', 'data-add-arr', 'data-convert', 'data-delete-row', 'dragSrcIdx', 'btnAddRow'];
-            for (const marker of sites) {
-                // 각 사이트의 핸들러 안에서 첫 setModified( 가 등장하면 fail.
+            // 버튼 배선은 **블록을 통째로 떼어** 본다. 문자 창으로 보면 이웃
+            // 코드의 setModified(true) 에 걸려 거짓 실패가 난다 — 사이에 있던
+            // 함수를 번들로 옮기자 실제로 그렇게 됐다.
+            for (const marker of ['data-remove-arr', 'data-add-arr', 'data-convert', 'data-delete-row']) {
+                const block = editorSource.match(new RegExp(
+                    "document\\.querySelectorAll\\('\\[" + marker + "\\]'\\)\\.forEach\\([\\s\\S]*?\\n        \\}\\);"
+                ));
+                assert.ok(block, `${marker} 배선 블록을 찾지 못했다`);
+                assert.ok(
+                    !/setModified\(\s*true\s*\)/.test(block![0]),
+                    'handler "' + marker + '" must not call setModified(true) directly — pushHistory owns dirty state'
+                );
+            }
+            for (const marker of ['dragSrcIdx', 'btnAddRow']) {
                 const re = new RegExp(marker + '[\\s\\S]{0,1200}?setModified\\(\\s*true\\s*\\)');
                 assert.ok(
                     !re.test(editorSource),
@@ -2523,36 +2517,7 @@ suite('JsonEditorUtils Test Suite', () => {
             );
         });
 
-        test('webview buildDraftSnapshot mirrors the jsonEditorUtils helper', () => {
-            // 회귀 가드 (round 4): webview 의 IIFE 가 외부 모듈을 import 못 하므로
-            // buildDraftSnapshot 본체가 webview 와 mirror 양쪽에 존재해야 한다.
-            // 핵심 분기(타입 보존 / json-edit valid 캡처 / clean revert 인식) 가
-            // 한쪽에서만 살아남으면 단위테스트가 통과해도 실제 webview 에서는
-            // 데이터 손상이 발생한다.
-            const fn = editorSource.match(/function buildDraftSnapshot\(args\) \{([\s\S]*?)\n    \}/);
-            assert.ok(fn, 'webview must define buildDraftSnapshot(args)');
-            const body = fn![1];
-            assert.ok(
-                /JSON\.parse\(\s*JSON\.stringify\(\s*data\s*\)\s*\)/.test(body),
-                'webview buildDraftSnapshot must operate on a deep clone of data, not mutate it'
-            );
-            assert.ok(
-                /coerceEditedCellValue\(rawInputValue, oldVal\)/.test(body),
-                'webview buildDraftSnapshot must preserve cell type via the same coerceEditedCellValue as commitCell'
-            );
-            assert.ok(
-                /isJsonEdit[\s\S]*?JSON\.parse\(\s*rawInputValue\s*\)/.test(body),
-                'webview buildDraftSnapshot must parse json-edit raw text (Finding 2 — valid JSON drafts must reach recovery)'
-            );
-            assert.ok(
-                /JSON\.stringify\(\s*draft\s*\)\s*===\s*lastSavedSnapshot/.test(body),
-                'webview buildDraftSnapshot must compare against lastSavedSnapshot to detect clean reverts (Finding 3)'
-            );
-            assert.ok(
-                /return\s*\{\s*kind:\s*'clean'\s*\}/.test(body),
-                'webview buildDraftSnapshot must return { kind: clean } when draft equals lastSavedSnapshot'
-            );
-        });
+        // buildDraftSnapshot 은 이제 한 벌뿐이라 '미러가 어긋났는가' 를 볼 것이 없다. 이 테스트가 정규식으로 보던 분기(deep clone · 타입 보존 · json-edit 파싱 · clean 판정)는 모두 buildDraftSnapshot 스위트가 실행으로 덮는다.
 
         test('webview activeDraftState mirrors resolveActiveDraftState', () => {
             // webview 는 외부 모듈을 import 하지 못하므로 두 벌이 존재한다.
@@ -2565,14 +2530,16 @@ suite('JsonEditorUtils Test Suite', () => {
                 /readActiveCellEdit\(document\.querySelector\('td\.editing'\)\)/.test(body),
                 'activeDraftState must read the active cell from the DOM'
             );
+            // clean 판정을 buildDraftSnapshot 에 맡기지 않는 것(lastSavedSnapshot:
+            // null)은 이제 resolveActiveDraftState 안에 있고, 그쪽 스위트의
+            // '값을 바꾸지 않은 활성 셀은 커밋 스냅샷과 같아 clean 판정이 가능하다'
+            // 가 실행으로 덮는다. 여기서는 **위임한다는 사실**만 본다.
             assert.ok(
-                /lastSavedSnapshot:\s*null/.test(body),
-                'activeDraftState must not let buildDraftSnapshot decide clean — each caller compares against its own baseline'
+                /return resolveActiveDraftState\(data, active, lastRecoverableDraft\)/.test(body),
+                'activeDraftState must delegate the decision to the bundled resolveActiveDraftState'
             );
-            assert.ok(
-                /valid:\s*false/.test(body),
-                'activeDraftState must report valid=false when the draft cannot be represented (mid-edit invalid JSON)'
-            );
+            // valid=false 분기도 resolveActiveDraftState 안이고, 그쪽 스위트의
+            // 'draft 로 표현할 수 없으면 valid=false ...' 가 실행으로 덮는다.
             // keystroke 송신도 같은 수집기를 써야 한다. sendDraftSnapshot 이
             // 자기 사본으로 DOM 을 읽으면, 저장 응답이 만드는 draft 와 갈라져
             // (수집 규칙이 하나만 바뀌어도) 이번 버그가 되살아난다.

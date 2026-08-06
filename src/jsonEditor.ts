@@ -1664,6 +1664,8 @@ export function getWebviewContent(
         getRowsByPath,
         effectiveBaseline,
         decideSaveResult,
+        buildDraftSnapshot,
+        resolveActiveDraftState,
     } = TaskHubJsonEditorLogic;
 
     // 이 webview 인스턴스의 세션 번호. host 가 html 에 심어 준다.
@@ -2311,104 +2313,9 @@ export function getWebviewContent(
         return '<div class="cell-edit"><input type="text" value="' + escapeAttr(String(val ?? '')) + '"></div>';
     }
 
-    // 활성 편집 셀에서 사용자가 타이핑 중일 때, input.value를 data 의 클론에
-    // 적용한 *draft snapshot* 을 host로 송신한다. host는 이 스냅샷을
-    // workspaceState recovery 엔트리에 기록하므로, 사용자가 commit 전에
-    // 패널을 강제로 닫더라도 reopen 시 마지막 키스트로크까지 복구할 수 있다.
-    //
-    // 핵심 로직(타입 보존 / JSON-edit valid 캡처 / clean revert 인식)은
-    // jsonEditorUtils.ts 의 buildDraftSnapshot 과 동일하며, 단위테스트는 그쪽에
-    // 있다. 이 함수 자체는 DOM 을 읽으므로 아직 인라인이지만, 값 변환 규칙은
-    // 번들의 coerceEditedCellValue / coerceEditedArrayItems 한 곳에서만 온다.
-    //
-    // 세 가지 invariant:
-    //   1) plain (non-array) 셀은 commitCell 과 **같은 함수**로 변환한다
-    //      (coerceEditedCellValue). 그렇지 않으면 숫자/불리언/null 셀의 미커밋
-    //      draft 가 string 으로 굳어 복구 후 저장 시 디스크에 string 이
-    //      기록된다.
-    //   1-b) 배열 셀은 **그 셀의 모든 input 값**(arrValues)을 항목별 타입 보존
-    //      규칙으로 한 번에 반영한다. 하나만 반영하면 같은 셀의 다른 미커밋
-    //      입력이 draft 에서 사라지고, 되돌리기까지 겹치면 clean 판정이 나서
-    //      dirty 와 recovery 가 함께 풀린다.
-    //   2) json-edit textarea 는 raw 가 valid JSON 일 때만 parsed 값을 적용,
-    //      invalid 면 skip (이전 valid draft 가 남는다).
-    //   3) draft 가 lastSavedSnapshot 과 같으면 clean → setModified(false) 로
-    //      host 가 recovery 엔트리를 비우게 한다(의미 없는 복구 프롬프트 차단).
-    function buildDraftSnapshot(args) {
-        const data = args.data;
-        const sheetPath = args.sheetPath;
-        const rowIdx = args.rowIdx;
-        const col = args.col;
-        const rawInputValue = args.rawInputValue;
-        const arrValues = args.arrValues;
-        const isJsonEdit = args.isJsonEdit;
-        const lastSavedSnapshot = args.lastSavedSnapshot;
-
-        if (!data || typeof data !== 'object') { return { kind: 'skip' }; }
-        // col 은 string 타입만 검증 — JSON 은 빈 문자열 key 도 허용하므로 falsy
-        // 검사로는 안 된다. typeof 로 string 인지 확인 (mirror 와 동일 정책).
-        if (!Array.isArray(sheetPath) || typeof col !== 'string') { return { kind: 'skip' }; }
-        if (typeof rowIdx !== 'number' || Number.isNaN(rowIdx) || rowIdx < 0) { return { kind: 'skip' }; }
-
-        let draft;
-        try {
-            draft = JSON.parse(JSON.stringify(data));
-        } catch (e) {
-            return { kind: 'skip' };
-        }
-
-        let ref = draft;
-        for (let i = 0; i < sheetPath.length; i++) {
-            if (!ref || typeof ref !== 'object' || Array.isArray(ref)) { return { kind: 'skip' }; }
-            ref = ref[sheetPath[i]];
-        }
-        if (!Array.isArray(ref)) { return { kind: 'skip' }; }
-        const row = ref[rowIdx];
-        if (!row || typeof row !== 'object' || Array.isArray(row)) { return { kind: 'skip' }; }
-        const oldVal = row[col];
-
-        if (arrValues) {
-            const arr = row[col];
-            if (!Array.isArray(arr) || arrValues.length === 0) { return { kind: 'skip' }; }
-            // **셀의 모든 input 값을 한 번에 반영한다.** 이벤트가 난 항목 하나만
-            // 넣으면 같은 셀의 다른 미커밋 입력이 draft 에서 사라진다 —
-            // [1,2] 의 첫 항목을 10 으로 고친 뒤 둘째를 건드리면 첫 입력이
-            // 날아가고, 둘째를 원래 값으로 되돌리면 draft 가 baseline 과 같아져
-            // clean 판정까지 나서 dirty 와 recovery 가 함께 풀린다.
-            // commitCell 의 array 분기와 같은 규칙(항목별 타입 보존)을 쓴다.
-            row[col] = coerceEditedArrayItems(arrValues, arr);
-        } else if (isJsonEdit) {
-            let parsed;
-            try {
-                parsed = JSON.parse(rawInputValue);
-            } catch (e) {
-                return { kind: 'skip' };
-            }
-            row[col] = parsed;
-        } else {
-            const newVal = coerceEditedCellValue(rawInputValue, oldVal);
-            // **commitCell 의 empty 가드와 같은 규칙.** null / undefined / 빈 값
-            // 셀은 input 에 "" 로 그려지므로 (renderCellEdit 의 val ?? ''),
-            // 아무것도 타이핑하지 않고 셀을 열어 두기만 해도 draft 가 "" 로
-            // 달라진다. 그러면 (1) 저장 뒤에도 dirty 가 풀리지 않고 — blur 의
-            // commitCell 은 이 가드 때문에 changed 로 보지 않아 dirty 를 다시
-            // 계산하지 않는다 — (2) recovery 스냅샷에 null 이 "" 로 굳고,
-            // 그 키가 아예 없던 행에는 빈 문자열 키가 새로 생긴다. 복구를 받아
-            // 저장하면 그 변형이 디스크에 기록된다.
-            const oldEmpty = oldVal === undefined || oldVal === null || oldVal === '';
-            const newEmpty = newVal === undefined || newVal === null || newVal === '';
-            if (!(oldEmpty && newEmpty)) {
-                row[col] = newVal;
-            }
-        }
-
-        if (lastSavedSnapshot !== null && lastSavedSnapshot !== undefined) {
-            if (JSON.stringify(draft) === lastSavedSnapshot) {
-                return { kind: 'clean' };
-            }
-        }
-        return { kind: 'snapshot', data: draft };
-    }
+    // buildDraftSnapshot 은 번들에서 온다 (구현·단위테스트는
+    // src/jsonEditorUtils.ts). 활성 셀의 미커밋 입력을 반영한 draft 를 만들고,
+    // baseline 과 같으면 clean, 표현할 수 없으면 skip 을 돌려준다.
 
     // 활성 셀의 input/textarea 입력 이벤트 핸들러가 호출.
     //
@@ -2467,36 +2374,13 @@ export function getWebviewContent(
     // 반대로 "활성 셀이 있으면 무조건 dirty" 로 때우면, 값을 바꾸지 않고 셀을
     // 클릭만 해도 저장 뒤 영원히 dirty 로 남는다 (그 뒤 blur 는 값이 그대로면
     // commitCell 의 changed 분기를 타지 않아 dirty 를 다시 계산하지 않는다).
+    // DOM 에서 활성 셀을 읽어 번들의 판정에 넘긴다. 판정 규칙 — 무엇을
+    // recovery 로 보낼지, invalid 일 때 무엇을 지킬지 — 은 전부
+    // resolveActiveDraftState 안에 있다. 예전에는 그 규칙이 여기에도 한 벌
+    // 더 있었고, 두 벌이 어긋나지 않기를 주석으로만 바라고 있었다.
     function activeDraftState() {
-        const committed = snapshotData();
         const active = readActiveCellEdit(document.querySelector('td.editing'));
-        if (!active) {
-            return { snapshot: committed, data: data, valid: true, recoveryData: data };
-        }
-        const result = buildDraftSnapshot({
-            data: data,
-            sheetPath: active.sheetPath,
-            rowIdx: active.rowIdx,
-            col: active.col,
-            rawInputValue: active.rawInputValue,
-            arrValues: active.arrValues,
-            isJsonEdit: active.isJsonEdit,
-            // clean 판정은 호출부가 각자의 baseline 으로 한다.
-            lastSavedSnapshot: null
-        });
-        if (result.kind === 'snapshot') {
-            return { snapshot: JSON.stringify(result.data), data: result.data, valid: true, recoveryData: result.data };
-        }
-        // draft 를 표현할 수 없다 (mid-edit invalid JSON 등). valid=false 로
-        // 알려 호출부가 비교 대신 무조건 dirty 로 두게 한다.
-        //
-        // **recovery 로는 커밋된 data 를 보내면 안 된다.** 사용자가 valid 한 D 를
-        // 친 뒤 이어서 invalid 한 E 로 만들었다면, host 의 recovery 에는 D 가 들어
-        // 있다. 여기서 커밋된 data 를 보내면 그 D 가 옛 내용으로 덮인다 —
-        // 원래 고치려던 유실이 invalid 입력에서 그대로 되살아난다. 마지막으로
-        // 표현 가능했던 draft 를 보내고, 그런 것이 없으면 아무것도 보내지 않아
-        // host 의 기존 recovery 를 그대로 둔다.
-        return { snapshot: committed, data: data, valid: false, recoveryData: lastRecoverableDraft };
+        return resolveActiveDraftState(data, active, lastRecoverableDraft);
     }
 
     function sendDraftSnapshot(input) {
