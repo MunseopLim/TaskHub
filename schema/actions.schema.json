@@ -380,6 +380,26 @@
           "type": "boolean",
           "description": "If true, this task is exempt from the implicit 'wait for every preceding task in the array' barrier and may run concurrently with its siblings. It still waits for any task listed in 'dependsOn' and any task whose output it references via ${taskId.x} (auto-inferred). Note: 'parallel: true' is not fire-and-forget — a later task without 'parallel: true' is a sync barrier and waits for this task to finish. Interactive task types are flagged by TaskHub Doctor when 'parallel: true' because the runtime serializes their prompts via a UI mutex. Defaults to false.",
           "default": false
+        },
+        "when": {
+          "type": "object",
+          "description": "Condition deciding whether this task runs. When false the task ends as skipped (not failed) and the action continues. References inside the condition are auto-inferred as dependencies, so the condition is evaluated after the task it looks at has finished. A task that plainly references a condition-skipped task is skipped too; use '${a.x ?? b.y}' when either branch's result is acceptable.",
+          "properties": {
+            "var": {
+              "type": "string",
+              "description": "Value to compare, after variable interpolation. Usually a reference such as ${pick.value}."
+            },
+            "equals": { "type": "string", "description": "Run when the interpolated 'var' equals this string exactly." },
+            "notEquals": { "type": "string", "description": "Run when the interpolated 'var' differs from this string." },
+            "matches": { "type": "string", "description": "Run when the interpolated 'var' matches this regular expression (RegExp source, partial match)." },
+            "in": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Run when the interpolated 'var' equals one of these strings."
+            }
+          },
+          "required": ["var"],
+          "additionalProperties": false
         }
       },
       "required": ["id", "type"]

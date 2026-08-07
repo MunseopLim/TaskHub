@@ -1109,6 +1109,9 @@ import {
     encodeFileContent,
     withTaskTimeout,
     extractVariableHeads,
+    extractVariableReferences,
+    evaluateTaskCondition,
+    shouldSkipForSkippedDependencies,
     inferTaskDependencies,
     buildTaskGraph,
     detectGraphCycle,
@@ -4265,6 +4268,11 @@ function resolveMaxParallelTasks(): number {
 type InFlightOutcome =
     | { taskId: string; kind: 'success'; result: unknown }
     | { taskId: string; kind: 'skipped'; error: Error }
+    /**
+     * 조건(`when`)이 거짓이거나, 조건으로 꺼진 태스크를 참조해서 함께 꺼진 것.
+     * **실패가 아니다** — `continueOnError` 의 skipped 와 달리 error 가 없다.
+     */
+    | { taskId: string; kind: 'condition-skipped'; reason: string }
     | { taskId: string; kind: 'failed'; error: Error };
 
 // `withInteractivePromptLock` lives in pipelineUtils as a pure async
@@ -4455,6 +4463,34 @@ async function executeActionPipelineForRun(
      */
     const maskedCommandForTask = (taskId: string): string | undefined => recordCommands?.[taskId];
 
+    /**
+     * 조건으로 꺼진 태스크 id. 그 결과를 참조하는 태스크도 함께 꺼진다.
+     * `stepResults` 로는 구별할 수 없다 — 조건으로 꺼진 것도, 값을 안 만드는
+     * 태스크도 똑같이 `{}` 이기 때문이다.
+     */
+    const conditionSkipped = new Set<string>();
+
+    /**
+     * 실행 전에 이 태스크를 꺼야 하는지 본다. 끌 이유가 없으면 undefined.
+     *
+     * 두 가지를 본다: 자기 `when` 이 거짓인가, 그리고 조건으로 꺼진 태스크를
+     * 참조하는가. 후자가 없으면 미해결 리터럴 `"${pickFile.path}"` 가 경로나
+     * 인자로 그대로 넘어간다.
+     */
+    const conditionGate = (task: import('./schema').Task): string | undefined => {
+        if (shouldSkipForSkippedDependencies(task, conditionSkipped)) {
+            return t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.');
+        }
+        if (!task.when) { return undefined; }
+        const gateContext = Object.assign(Object.create(null), stepResults, {
+            workspaceFolder: workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+            extensionPath: context.extensionPath,
+        });
+        const resolved = interpolatePipelineVariables(task.when.var, gateContext);
+        if (evaluateTaskCondition(task.when, resolved)) { return undefined; }
+        return t(`조건이 맞지 않습니다 (${resolved}).`, `Condition not met (${resolved}).`);
+    };
+
     const launchTask = (taskId: string): Promise<InFlightOutcome> => {
         const task = taskById.get(taskId)!;
         const taskUsesSecret = taskReferencesSecret(task, executionRun);
@@ -4472,6 +4508,14 @@ async function executeActionPipelineForRun(
             );
         }
         scheduler.markStarted(taskId);
+        // **'running' 을 알리기 전에 판정한다.** 돌지 않은 태스크가 화면과
+        // 히스토리에 "실행됨" 으로 잠깐이라도 보이면 안 된다. markStarted 는
+        // 스케줄러 상태 기계가 markCompleted 전에 요구하므로 그대로 둔다.
+        const skipReason = conditionGate(task);
+        if (skipReason !== undefined) {
+            conditionSkipped.add(taskId);
+            return Promise.resolve({ taskId, kind: 'condition-skipped' as const, reason: skipReason });
+        }
         emitTransition(taskId, 'running');
 
         const usePreset =
@@ -4633,6 +4677,16 @@ async function executeActionPipelineForRun(
                 }
             }
             emitTransition(outcome.taskId, 'success');
+        } else if (outcome.kind === 'condition-skipped') {
+            const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+            if (showVerboseLogs) {
+                outputChannel.appendLine(`[INFO] Task '${outcome.taskId}' skipped — ${outcome.reason}`);
+            }
+            // `continueOnError` 의 skip 과 같은 모양으로 둔다: 뒤 태스크의
+            // `${task.*}` 참조가 "못 찾음 → 리터럴" 경로를 타게 된다.
+            stepResults[outcome.taskId] = {};
+            scheduler.markCompleted(outcome.taskId);
+            emitTransition(outcome.taskId, 'skipped');
         } else if (outcome.kind === 'skipped') {
             const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
             if (showVerboseLogs) {

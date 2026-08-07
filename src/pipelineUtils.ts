@@ -16,7 +16,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
-import type { OutputCapture, Task } from './schema';
+import type { OutputCapture, Task, TaskCondition } from './schema';
 
 /** Maximum allowed length of a single interpolated value. */
 export const INTERPOLATED_VALUE_MAX_LENGTH = 32 * 1024;
@@ -544,6 +544,77 @@ export function extractVariableHeads(text: string): string[] {
         }
     }
     return heads;
+}
+
+/**
+ * `${…}` 참조를 **참조 단위로** 묶어 낸다. {@link extractVariableHeads} 가
+ * 평평하게 펴는 것과 달리, `??` 체인 하나가 배열 하나가 된다.
+ *
+ * 건너뜀 전파에 필요하다: 평범한 참조는 그 태스크가 꺼지면 함께 꺼지지만,
+ * `??` 체인은 **대안이 전부** 꺼져야 꺼진다. 평평한 목록으로는 그 둘을
+ * 구별할 수 없다.
+ */
+export function extractVariableReferences(text: string): string[][] {
+    if (typeof text !== 'string' || text.length === 0) { return []; }
+    const refs: string[][] = [];
+    const re = /\${([^}]+)}/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+        const expr = m[1];
+        if (!expr) { continue; }
+        const alternatives = splitCoalesceAlternatives(expr) ?? [expr];
+        const heads = alternatives.map(alt => alt.split('.')[0]).filter(head => head.length > 0);
+        if (heads.length > 0) { refs.push(heads); }
+    }
+    return refs;
+}
+
+/**
+ * `Task.when` 판정. `resolved` 는 **보간을 마친** `var` 값이다.
+ *
+ * 조건이 없으면 항상 실행한다. 연산자가 하나도 없으면 **실행한다** — 사용자가
+ * 오타를 냈을 때 태스크가 조용히 사라지는 것보다, 도는 편이 눈에 띄고 Doctor 가
+ * 따로 잡아 준다.
+ */
+export function evaluateTaskCondition(when: TaskCondition | undefined, resolved: string): boolean {
+    if (!when || typeof when !== 'object') { return true; }
+    if (typeof when.equals === 'string') { return resolved === when.equals; }
+    if (typeof when.notEquals === 'string') { return resolved !== when.notEquals; }
+    if (typeof when.matches === 'string') {
+        try {
+            return new RegExp(when.matches).test(resolved);
+        } catch {
+            // 잘못된 패턴은 Doctor 가 잡는다. 런타임에서 던지면 액션 전체가
+            // 실패하므로, 여기서는 "맞지 않음" 으로 본다.
+            return false;
+        }
+    }
+    if (Array.isArray(when.in)) { return when.in.some(candidate => candidate === resolved); }
+    return true;
+}
+
+/**
+ * 조건으로 꺼진 태스크를 참조한다는 이유로 이 태스크도 건너뛸지.
+ *
+ * 평범한 참조 하나라도 꺼진 태스크를 가리키면 건너뛴다 — 그러지 않으면
+ * 미해결 리터럴 `"${pickFile.path}"` 가 경로나 인자로 그대로 넘어간다.
+ * `??` 체인은 **대안이 전부** 꺼졌을 때만 센다: 그 문법의 뜻이 "이 중 하나면
+ * 된다" 이므로, 살아남은 대안이 있으면 이 태스크는 돌아야 한다.
+ */
+export function shouldSkipForSkippedDependencies(
+    task: Task,
+    skippedTaskIds: ReadonlySet<string>,
+    options: InferTaskDependenciesOptions = {}
+): boolean {
+    if (!task || typeof task !== 'object' || skippedTaskIds.size === 0) { return false; }
+    const platform = options.platform ?? process.platform;
+    const projected = projectActivePlatformBranches(task, platform);
+    for (const str of walkStrings(projected, TASK_INFER_SKIP_KEYS)) {
+        for (const heads of extractVariableReferences(str)) {
+            if (heads.every(head => skippedTaskIds.has(head))) { return true; }
+        }
+    }
+    return false;
 }
 
 // `output.capture` and `output.diagnostics` contain regex patterns

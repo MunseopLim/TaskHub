@@ -23,6 +23,28 @@ export interface Action {
 /**
  * Represents a single task, the fundamental unit of execution.
  */
+/**
+ * 태스크를 실행할지 정하는 조건 (`Task.when`).
+ *
+ * `var` 는 보간을 거친 뒤 **문자열로** 비교된다. 참조가 풀리지 않으면 리터럴이
+ * 그대로 남으므로 `equals` 는 거의 항상 거짓이 되고, 그 분기는 꺼진다 — 앞선
+ * 태스크가 조건으로 꺼졌을 때 그 뒤 분기까지 자연스럽게 함께 꺼지는 이유다.
+ *
+ * 연산자는 **정확히 하나**만 쓴다. 여러 개를 쓰면 Doctor 가 잡는다.
+ */
+export interface TaskCondition {
+    /** 비교 대상. 보통 `${pick.value}` 같은 참조. */
+    var: string;
+    /** 문자열 완전 일치. */
+    equals?: string;
+    /** 문자열 완전 불일치. */
+    notEquals?: string;
+    /** 정규식(RegExp source) 부분 일치. 잘못된 패턴은 Doctor 가 잡고 런타임은 거짓으로 본다. */
+    matches?: string;
+    /** 목록 중 하나와 일치. */
+    in?: string[];
+}
+
 export interface Task {
     id: string;
     type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick' | 'envPick' | 'confirm' | 'writeFile' | 'appendFile';
@@ -219,6 +241,22 @@ export interface Task {
      * two modal dialogs never race.
      */
     parallel?: boolean;
+
+    /**
+     * 이 태스크를 실행할 조건. 거짓이면 태스크는 **실패가 아니라 건너뜀**으로
+     * 끝나고, 액션은 계속 진행된다.
+     *
+     * 조건 안의 `${…}` 참조는 다른 태스크 참조와 똑같이 의존성으로 추론되므로,
+     * 조건이 보는 태스크가 먼저 끝난 뒤에 평가된다.
+     *
+     * **꺼진 분기는 소비자까지 데려간다.** 조건으로 꺼진 태스크를 평범하게
+     * 참조하는(`${pickFile.path}`) 태스크도 함께 건너뛴다 — 그러지 않으면
+     * 미해결 리터럴 `"${pickFile.path}"` 가 경로 인자로 넘어간다. 어느 쪽 분기가
+     * 돌았든 하나의 소비자가 받게 하려면 `??` 를 쓴다
+     * (`${pickFile.path ?? pickFolder.path}`) — 그 체인은 **대안이 전부** 꺼졌을
+     * 때만 함께 꺼진다.
+     */
+    when?: TaskCondition;
 }
 
 /**

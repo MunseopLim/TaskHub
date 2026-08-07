@@ -940,6 +940,123 @@ suite('Pipeline integration', function () {
         });
     });
 
+    suite('조건부 태스크 (when)', () => {
+
+        /**
+         * 요청받은 그림 그대로: quickPick 으로 파일/폴더를 고르게 하고, 고른 쪽
+         * 다이얼로그만 띄운 뒤, **하나의 소비자**가 어느 쪽 결과든 받는다.
+         */
+        async function runBranching(choice: '파일' | '폴더') {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            const pickedFile = path.join(tempWorkspace, 'firmware.hex');
+            const pickedFolder = path.join(tempWorkspace, 'artifacts');
+            fs.writeFileSync(pickedFile, 'x');
+            fs.mkdirSync(pickedFolder, { recursive: true });
+            const outPath = path.join(tempWorkspace, 'chosen.txt');
+            /** 어떤 다이얼로그가 실제로 떴는지 — 꺼진 분기는 뜨면 안 된다. */
+            const opened: string[] = [];
+            try {
+                (vscode.window as any).showQuickPick = async () => ({ label: choice });
+                (vscode.window as any).showOpenDialog = async (options: vscode.OpenDialogOptions) => {
+                    if (options.canSelectFolders) {
+                        opened.push('folder');
+                        return [vscode.Uri.file(pickedFolder)];
+                    }
+                    opened.push('file');
+                    return [vscode.Uri.file(pickedFile)];
+                };
+                await run({
+                    description: 'when-branching',
+                    tasks: [
+                        { id: 'kind', type: 'quickPick', items: ['파일', '폴더'] },
+                        {
+                            id: 'pickFile', type: 'fileDialog',
+                            when: { var: '${kind.value}', equals: '파일' }
+                        },
+                        {
+                            id: 'pickFolder', type: 'folderDialog',
+                            options: { canSelectFolders: true, canSelectFiles: false },
+                            when: { var: '${kind.value}', equals: '폴더' }
+                        },
+                        {
+                            id: 'write', type: 'writeFile',
+                            path: outPath,
+                            content: '${pickFile.path ?? pickFolder.path}'
+                        }
+                    ]
+                });
+                return { opened, written: fs.readFileSync(outPath, 'utf8') };
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        }
+
+        test('파일을 고르면 파일 다이얼로그만 뜨고 그 경로가 넘어간다', async () => {
+            const { opened, written } = await runBranching('파일');
+            assert.deepStrictEqual(opened, ['file'], '꺼진 분기의 다이얼로그가 떴다');
+            assert.strictEqual(
+                normalizeWindowsPathForAssert(written),
+                normalizeWindowsPathForAssert(path.join(tempWorkspace, 'firmware.hex'))
+            );
+        });
+
+        test('폴더를 고르면 폴더 다이얼로그만 뜨고 그 경로가 넘어간다', async () => {
+            const { opened, written } = await runBranching('폴더');
+            assert.deepStrictEqual(opened, ['folder'], '꺼진 분기의 다이얼로그가 떴다');
+            assert.strictEqual(
+                normalizeWindowsPathForAssert(written),
+                normalizeWindowsPathForAssert(path.join(tempWorkspace, 'artifacts'))
+            );
+        });
+
+        /**
+         * 꺼진 분기를 **평범하게** 참조하는 소비자는 함께 꺼진다.
+         *
+         * 그러지 않으면 미해결 리터럴 `"${pickFile.path}"` 가 그대로 경로가 되어
+         * 워크스페이스에 그런 이름의 파일이 생긴다.
+         */
+        test('꺼진 태스크를 평범하게 참조하는 소비자는 함께 꺼진다', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            const outPath = path.join(tempWorkspace, 'never.txt');
+            try {
+                (vscode.window as any).showQuickPick = async () => ({ label: '폴더' });
+                (vscode.window as any).showOpenDialog = async () => [vscode.Uri.file(tempWorkspace)];
+                await run({
+                    description: 'when-propagation',
+                    tasks: [
+                        { id: 'kind', type: 'quickPick', items: ['파일', '폴더'] },
+                        { id: 'pickFile', type: 'fileDialog', when: { var: '${kind.value}', equals: '파일' } },
+                        { id: 'write', type: 'writeFile', path: outPath, content: '${pickFile.path}' }
+                    ]
+                });
+                assert.ok(!fs.existsSync(outPath), '꺼진 분기의 소비자가 실행됐다');
+                const literal = path.join(tempWorkspace, '${pickFile.path}');
+                assert.ok(!fs.existsSync(literal), '미해결 리터럴이 경로로 쓰였다');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
+        test('조건이 참이면 평소대로 실행된다 (가드가 과하지 않다)', async () => {
+            const outPath = path.join(tempWorkspace, 'ran.txt');
+            await run({
+                description: 'when-true',
+                tasks: [
+                    { id: 'seed', type: 'stringManipulation', function: 'trim', input: '  go  ' },
+                    {
+                        id: 'write', type: 'writeFile', path: outPath, content: 'ok',
+                        when: { var: '${seed.output}', equals: 'go' }
+                    }
+                ]
+            });
+            assert.strictEqual(fs.readFileSync(outPath, 'utf8'), 'ok');
+        });
+    });
+
     suite('Dialog + Output Mode Pipeline', () => {
         test('IT-018: fileDialog → folderDialog → stringManipulation → 파일 쓰기', async () => {
             const originalShowOpenDialog = vscode.window.showOpenDialog;

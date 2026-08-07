@@ -7,6 +7,9 @@ import {
     validateTaskGraph,
     actionUsesParallelTasks,
     TaskScheduler,
+    extractVariableReferences,
+    evaluateTaskCondition,
+    shouldSkipForSkippedDependencies,
 } from '../pipelineUtils';
 import type { Task } from '../schema';
 
@@ -833,5 +836,125 @@ suite('TaskScheduler', () => {
         assert.deepStrictEqual(s.nextReady(), []);
         s.markCompleted('A');
         assert.deepStrictEqual(s.nextReady(), ['C']);
+    });
+});
+
+suite('조건부 태스크 (when)', () => {
+
+    suite('extractVariableReferences', () => {
+        test('참조 단위로 묶는다 — ?? 체인은 배열 하나', () => {
+            assert.deepStrictEqual(
+                extractVariableReferences('${a.x} ${b.y ?? c.z}'),
+                [['a'], ['b', 'c']]
+            );
+        });
+
+        test('참조가 없으면 빈 배열', () => {
+            assert.deepStrictEqual(extractVariableReferences('no refs here'), []);
+            assert.deepStrictEqual(extractVariableReferences(''), []);
+        });
+    });
+
+    suite('evaluateTaskCondition', () => {
+        test('조건이 없으면 언제나 실행한다', () => {
+            assert.strictEqual(evaluateTaskCondition(undefined, 'anything'), true);
+        });
+
+        test('equals / notEquals', () => {
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', equals: '파일' }, '파일'), true);
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', equals: '파일' }, '폴더'), false);
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', notEquals: '파일' }, '폴더'), true);
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', notEquals: '파일' }, '파일'), false);
+        });
+
+        test('equals 는 완전 일치다 (부분 일치가 아니다)', () => {
+            // 부분 일치면 접두사 관계인 선택지에서 엉뚱한 분기가 켜진다 —
+            // dev / develop, prod / production 처럼 흔한 조합이다.
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', equals: 'dev' }, 'develop'), false);
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', equals: 'prod' }, 'production'), false);
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', notEquals: 'dev' }, 'develop'), true);
+            // in 도 같은 규칙.
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', in: ['dev'] }, 'develop'), false);
+        });
+
+        test('matches 는 부분 일치', () => {
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', matches: '^rel' }, 'release/1.0'), true);
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', matches: '^rel' }, 'feature/x'), false);
+        });
+
+        test('잘못된 정규식은 던지지 않고 거짓으로 본다', () => {
+            // 던지면 액션 전체가 실패한다. 패턴 오타는 Doctor 가 따로 잡는다.
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', matches: '[' }, 'anything'), false);
+        });
+
+        test('in 은 목록 중 하나', () => {
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', in: ['a', 'b'] }, 'b'), true);
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', in: ['a', 'b'] }, 'c'), false);
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}', in: [] }, 'a'), false);
+        });
+
+        test('풀리지 않은 참조는 리터럴이라 equals 가 거짓이 된다', () => {
+            // 앞선 태스크가 꺼졌을 때 그 뒤 분기까지 함께 꺼지는 이유다.
+            assert.strictEqual(
+                evaluateTaskCondition({ var: '${gone.value}', equals: '파일' }, '${gone.value}'),
+                false
+            );
+        });
+
+        test('연산자가 하나도 없으면 실행한다', () => {
+            // 오타로 태스크가 조용히 사라지는 것보다 도는 편이 눈에 띈다.
+            assert.strictEqual(evaluateTaskCondition({ var: '${x}' } as any, 'anything'), true);
+        });
+    });
+
+    suite('shouldSkipForSkippedDependencies', () => {
+        const task = (extra: Partial<Task>): Task => ({ id: 'run', type: 'command', ...extra } as Task);
+
+        test('꺼진 태스크를 평범하게 참조하면 함께 꺼진다', () => {
+            // 그러지 않으면 미해결 리터럴 "${pickFile.path}" 가 경로 인자로 간다.
+            assert.strictEqual(
+                shouldSkipForSkippedDependencies(task({ args: ['${pickFile.path}'] }), new Set(['pickFile'])),
+                true
+            );
+        });
+
+        test('?? 체인은 살아남은 대안이 있으면 꺼지지 않는다', () => {
+            assert.strictEqual(
+                shouldSkipForSkippedDependencies(
+                    task({ args: ['${pickFile.path ?? pickFolder.path}'] }),
+                    new Set(['pickFile'])
+                ),
+                false,
+                '이 문법의 뜻이 "이 중 하나면 된다" 인데 꺼지면 소비자를 쓸 수 없다'
+            );
+        });
+
+        test('?? 체인도 대안이 전부 꺼지면 꺼진다', () => {
+            assert.strictEqual(
+                shouldSkipForSkippedDependencies(
+                    task({ args: ['${pickFile.path ?? pickFolder.path}'] }),
+                    new Set(['pickFile', 'pickFolder'])
+                ),
+                true
+            );
+        });
+
+        test('꺼진 것이 없으면 언제나 실행한다', () => {
+            assert.strictEqual(
+                shouldSkipForSkippedDependencies(task({ args: ['${pickFile.path}'] }), new Set()),
+                false
+            );
+        });
+
+        test('조건 안의 참조도 센다', () => {
+            // when 이 꺼진 태스크를 보면 그 조건은 영영 맞지 않는다.
+            assert.strictEqual(
+                shouldSkipForSkippedDependencies(
+                    task({ when: { var: '${gone.value}', equals: 'x' } }),
+                    new Set(['gone'])
+                ),
+                true
+            );
+        });
     });
 });

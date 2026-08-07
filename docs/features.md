@@ -1134,6 +1134,25 @@ editor/terminal 규칙은 **비밀을 참조하는 태스크뿐 아니라 비밀
 - `${zip_task.archivePath}`: `zip` 태스크가 생성한 아카이브 경로
 - `${unzip_task.outputDir}`: `unzip` 태스크가 추출한 폴더 경로
 - `${write_task.path}`: `writeFile` / `appendFile` 태스크가 쓴 파일의 절대 경로
+### 조건부 태스크 (`when`, 0.7.4부터)
+
+태스크에 `when`을 달면 조건이 참일 때만 실행됩니다. 거짓이면 **실패가 아니라 건너뜀**으로 끝나고 액션은 계속 진행됩니다.
+
+```jsonc
+{ "id": "kind", "type": "quickPick", "items": ["파일", "폴더"] },
+{ "id": "pickFile",   "type": "fileDialog",   "when": { "var": "${kind.value}", "equals": "파일" } },
+{ "id": "pickFolder", "type": "folderDialog", "when": { "var": "${kind.value}", "equals": "폴더" } },
+{ "id": "run", "type": "command", "command": "myTool", "args": ["${pickFile.path ?? pickFolder.path}"] }
+```
+
+-   `var`: 비교 대상. 보간을 거친 뒤 **문자열로** 비교됩니다.
+-   연산자는 **정확히 하나**만 씁니다 — `equals`(완전 일치) / `notEquals` / `matches`(정규식 부분 일치) / `in`(목록 중 하나). 여럿을 쓰면 첫 번째만 적용되고 Doctor가 `when.operators`로 잡습니다.
+-   조건 안의 `${…}` 참조는 다른 참조와 똑같이 **의존성으로 추론**되므로, 조건이 보는 태스크가 끝난 뒤에 평가됩니다.
+
+**꺼진 분기는 소비자까지 데려갑니다.** 조건으로 꺼진 태스크를 평범하게 참조하는(`${pickFile.path}`) 태스크도 함께 건너뜁니다 — 그러지 않으면 미해결 리터럴 `"${pickFile.path}"`가 그대로 경로 인자로 넘어갑니다. 어느 쪽 분기가 돌았든 **하나의 소비자**가 받게 하려면 `??`를 씁니다. 그 체인은 **대안이 전부** 꺼졌을 때만 함께 꺼집니다.
+
+`equals`는 완전 일치입니다 — 부분 일치라면 `dev`/`develop`, `prod`/`production` 같은 접두사 관계에서 엉뚱한 분기가 켜집니다.
+
 - **`??` — 먼저 풀리는 참조 (0.7.3부터)**: `${pickFile.path ?? pickFolder.path}` 는 왼쪽부터 시도해 **처음으로 값이 있는 참조**를 씁니다. 셋 이상도 이어 쓸 수 있고(`${a.x ?? b.y ?? c.z}`), 대안이 전부 없으면 미해결 리터럴로 남습니다(조용히 빈 값이 되지 않습니다). 실행 순서는 **모든 대안**을 기다립니다 — 하나만 기다리면 살아남은 쪽이 값을 내기 전에 실행될 수 있기 때문입니다. 서로 배타적인 두 태스크(예: 파일 선택 / 폴더 선택) 중 어느 쪽이 돌았든 **하나의 소비자**가 그 결과를 받게 할 때 씁니다. `??` 가 없는 참조는 지금까지처럼 한 글자도 다듬지 않습니다.
 - `${workspaceFolder}`: 현재 워크스페이스 폴더의 절대 경로
 - `${extensionPath}`: 확장 프로그램이 설치된 절대 경로. 확장 내부에 포함된 리소스를 참조할 때 유용합니다.
@@ -2203,6 +2222,8 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `schema.*` | error | AJV 스키마 위반. `keyword`에 따라 코드가 `schema.required` / `schema.enum` / `schema.additionalProperties` 등으로 세분화. 메시지는 위반된 JSON Pointer(`/0/action/tasks/1/output`)와 함께 표시되며, 가능한 한 해당 라인을 가리킵니다. |
 | `duplicate.action.id` | error | 같은 파일 안에서 같은 action `id`가 두 번 이상 정의됨. |
 | `duplicate.task.id` | error | 한 액션의 `tasks[]` 배열에 같은 task `id`가 두 번 이상 등장. |
+| `when.operators` | error / warning | `when`에 연산자(`equals`/`notEquals`/`matches`/`in`)가 여럿이면 error — 런타임은 정해진 순서로 **첫 번째만** 적용하고 나머지를 조용히 무시한다. 하나도 없으면 warning (태스크가 항상 실행됨). |
+| `when.regex` | error | `when.matches`가 `new RegExp()` 컴파일에 실패. 런타임은 던지지 않고 "맞지 않음"으로 보므로, 잡아 주지 않으면 그 분기가 영영 꺼진 채로 남는다. |
 | `capture.regex` | error | `output.capture.regex`가 `new RegExp()` 컴파일에 실패. |
 | `capture.group` | warning | `output.capture.group` 인덱스가 regex의 capture group 개수를 벗어남. |
 | `capture.reserved` | error | `output.capture.name`이 reserved 집합(`output`/`path`/`value` 등 task 결과 빌트인 키)과 충돌. 스키마는 이름 패턴만 검사하므로 schema-pass 후 런타임에서 throw 하던 케이스를 Doctor가 사전에 잡음. |

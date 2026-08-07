@@ -492,6 +492,47 @@ function checkDuplicateIds(actions: ActionItem[], input: DoctorInput): DoctorFin
                         });
                     }
                     taskIds.set(task.id, count + 1);
+
+                    // `when` 은 연산자를 **정확히 하나** 써야 한다. 여럿을 쓰면
+                    // 런타임은 정해진 순서로 첫 번째만 보고 나머지를 조용히
+                    // 무시한다 — 사용자는 둘 다 걸리는 줄 안다.
+                    const when = (task as { when?: Record<string, unknown> }).when;
+                    if (when && typeof when === 'object') {
+                        const used = ['equals', 'notEquals', 'matches', 'in']
+                            .filter(op => when[op] !== undefined);
+                        if (used.length !== 1) {
+                            findings.push({
+                                filePath: input.filePath,
+                                sourceLabel: input.sourceLabel,
+                                range: findIdLine(input.rawText, task.id),
+                                severity: used.length === 0 ? 'warning' : 'error',
+                                code: 'when.operators',
+                                message: used.length === 0
+                                    ? `Task '${item.id ?? '(unknown)'}.${task.id}' has a 'when' with no operator — the task always runs.`
+                                    : `Task '${item.id ?? '(unknown)'}.${task.id}' has a 'when' with multiple operators (${used.join(', ')}); only the first is applied.`,
+                                messageKo: used.length === 0
+                                    ? `Task '${item.id ?? '(unknown)'}.${task.id}'의 'when'에 연산자가 없습니다 — 태스크는 항상 실행됩니다.`
+                                    : `Task '${item.id ?? '(unknown)'}.${task.id}'의 'when'에 연산자가 여럿입니다(${used.join(', ')}). 첫 번째만 적용됩니다.`,
+                            });
+                        }
+                        if (typeof when.matches === 'string') {
+                            try {
+                                new RegExp(when.matches);
+                            } catch (e: any) {
+                                // 런타임은 던지지 않고 "맞지 않음" 으로 보므로,
+                                // 잡아 주지 않으면 그 분기가 영영 꺼진 채로 남는다.
+                                findings.push({
+                                    filePath: input.filePath,
+                                    sourceLabel: input.sourceLabel,
+                                    range: findIdLine(input.rawText, task.id),
+                                    severity: 'error',
+                                    code: 'when.regex',
+                                    message: `Task '${item.id ?? '(unknown)'}.${task.id}' has an invalid 'when.matches' regex: ${e.message ?? e}`,
+                                    messageKo: `Task '${item.id ?? '(unknown)'}.${task.id}'의 'when.matches' 정규식이 올바르지 않습니다: ${e.message ?? e}`,
+                                });
+                            }
+                        }
+                    }
                 }
             }
             if (Array.isArray(item?.children) && item.children.length > 0) {
