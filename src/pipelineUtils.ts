@@ -752,12 +752,17 @@ export function selectPlatformValue(
  * `tool` / `itemsFromCommand` are platform-branched in the schema, so we
  * don't recurse into sub-objects (e.g. `output.*` fields are not
  * platform-keyed).
+ *
+ * **`platform` 을 생략하면 branch 는 그대로 두고 `items` 만 떨어뜨린다.** Doctor
+ * 는 이 기계의 실행이 아니라 설정 파일 자체를 보므로 모든 OS branch 를 검사해야
+ * 한다 — 반면 `itemsFromCommand` 가 있을 때 `items` 가 죽는 것은 플랫폼과 무관한
+ * 사실이라 양쪽 모두에 적용된다.
  */
-function projectActivePlatformBranches(task: unknown, platform: NodeJS.Platform): unknown {
+export function projectActivePlatformBranches(task: unknown, platform?: NodeJS.Platform): unknown {
     if (!task || typeof task !== 'object' || Array.isArray(task)) { return task; }
     const result: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(task as Record<string, unknown>)) {
-        if (PLATFORM_BRANCH_KEYS.has(k) && v && typeof v === 'object' && !Array.isArray(v)) {
+        if (platform !== undefined && PLATFORM_BRANCH_KEYS.has(k) && v && typeof v === 'object' && !Array.isArray(v)) {
             const branch = pickPlatformBranch(v as Record<string, unknown>, platform);
             // `undefined` (no entry for this platform) drops the field
             // from the inference view — there is no command/tool to run

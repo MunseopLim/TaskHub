@@ -1155,6 +1155,9 @@ editor/terminal 규칙은 **비밀을 참조하는 태스크뿐 아니라 비밀
 `equals`는 완전 일치입니다 — 부분 일치라면 `dev`/`develop`, `prod`/`production` 같은 접두사 관계에서 엉뚱한 분기가 켜집니다.
 
 - **`??` — 먼저 풀리는 참조 (0.7.3부터)**: `${pickFile.path ?? pickFolder.path}` 는 왼쪽부터 시도해 **처음으로 값이 있는 참조**를 씁니다. 셋 이상도 이어 쓸 수 있고(`${a.x ?? b.y ?? c.z}`), 대안이 전부 없으면 미해결 리터럴로 남습니다(조용히 빈 값이 되지 않습니다). 실행 순서는 **모든 대안**을 기다립니다 — 하나만 기다리면 살아남은 쪽이 값을 내기 전에 실행될 수 있기 때문입니다. 서로 배타적인 두 태스크(예: 파일 선택 / 폴더 선택) 중 어느 쪽이 돌았든 **하나의 소비자**가 그 결과를 받게 할 때 씁니다. `??` 가 없는 참조는 지금까지처럼 한 글자도 다듬지 않습니다.
+  대안은 **참조만** 쓸 수 있습니다 — `${a.x ?? 기본값}` 처럼 리터럴을 적으면 그것도 태스크 참조로 읽혀 해석되지 않습니다.
+  **대안에 bare 참조(`${z ?? b.output}` 의 `z`)를 쓸 때 주의합니다.** bare 참조는 그 태스크가 대표 결과(`output` / `outputDir`)를 낼 때만 값이 되는데, 내지 않더라도 결과 객체 자체가 잡혀 **체인이 거기서 끝납니다** — 뒤 대안은 시도되지 않고 참조 전체가 리터럴로 남습니다. `zip`(`archivePath`만 냄)이나 `passTheResultToNextTask`가 없는 `shell`이 그렇습니다. 이 형태는 `variable.unresolved`로 잡힙니다.
+  어긋난 대안은 `??` 가 조용히 건너뛰므로 실행해 봐도 드러나지 않습니다. 그래서 Doctor·Preview Run 이 대안 하나하나를 봅니다 — 하나라도 풀리면 `variable.dead-alternative`(참조는 동작하지만 그 대안은 선택되지 않음), 전부 어긋나면 `variable.unresolved`(이때만 리터럴로 남음)입니다. 두 진단은 **다른 사실**을 말하므로 섞이지 않습니다.
 - `${workspaceFolder}`: 현재 워크스페이스 폴더의 절대 경로
 - `${extensionPath}`: 확장 프로그램이 설치된 절대 경로. 확장 내부에 포함된 리소스를 참조할 때 유용합니다.
 
@@ -2232,9 +2235,10 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `diagnostics.regex` | error | `output.diagnostics.pattern`이 컴파일 실패. `g` 플래그는 런타임과 동일하게 사전 제거된 뒤 검사. |
 | `diagnostics.group` | warning | `file`/`line`/`message` 등의 그룹 인덱스가 regex가 정의한 capture group 수보다 큼. |
 | `diagnostics.preset` | error | `"$gcc"` / `"$tsc"` 같은 preset 단축 문자열이 알 수 없는 이름이거나 `$` 없이 적힘. |
-| `variable.unresolved` | warning | Preview Run과 동일한 simulation 컨텍스트에서 변수 치환 후에도 남는 `${…}` 가 있음. 런타임에는 리터럴로 전달되므로 의도된 placeholder가 아니면 거의 항상 버그. **OS별 객체(`command` / `tool` / `itemsFromCommand`)는 모든 branch를 검사합니다** — Doctor는 이 기계의 실행이 아니라 설정 파일 자체를 보므로, Windows branch의 깨진 참조는 그 OS 사용자에게 진짜 오류입니다. (현재 플랫폼 하나만 보려면 [Preview Run](#preview-run-dry-run).) |
+| `variable.unresolved` | warning | Preview Run과 동일한 simulation 컨텍스트에서 변수 치환 후에도 남는 `${…}` 가 있음. 런타임에는 리터럴로 전달되므로 의도된 placeholder가 아니면 거의 항상 버그. `??` 체인은 **대안이 전부** 어긋났을 때만 여기에 해당하며(하나라도 풀리면 리터럴로 남지 않습니다 → `variable.dead-alternative`), 이때 메시지가 대안마다 어긋난 이유를 밝힙니다. **OS별 객체(`command` / `tool` / `itemsFromCommand`)는 모든 branch를 검사합니다** — Doctor는 이 기계의 실행이 아니라 설정 파일 자체를 보므로, Windows branch의 깨진 참조는 그 OS 사용자에게 진짜 오류입니다. (현재 플랫폼 하나만 보려면 [Preview Run](#preview-run-dry-run).) |
+| `variable.dead-alternative` | warning | `??` 체인이 **해석은 되는데** 그 안에 절대 선택되지 않는 대안이 있음 (`${pick.value ?? pick2.nope}`). 참조 자체는 동작하므로 리터럴로 남지 않지만, 죽은 대안은 사용자가 의도한 분기가 영영 선택되지 않는다는 뜻입니다 — `??` 가 어긋난 참조를 조용히 건너뛰기 때문에 실행해 봐도 드러나지 않습니다. 이유는 네 가지로 구분해 알립니다: 그런 태스크가 없음 · 자기 자신 참조 · 그 키를 내지 않음 · `passTheResultToNextTask` 가 없어 출력이 캡처되지 않음. 선언 순서와 무관하게(전방 참조 포함) 같은 규칙으로 검사합니다. |
 | `args.array-joined` | warning | `args` 원소 **안에** 배열 참조(`${pick.paths}` 등)가 다른 글자와 섞여 있음(`"--file=${pick.paths}"`). 원소 전체가 참조 하나일 때만 항목 수만큼의 인자로 펼쳐지고, 섞여 있으면 공백으로 이어 붙어 **인자 한 칸**이 됩니다 — 여러 경로의 경계가 사라져 스크립트가 값 하나로 받습니다(argv 이므로 셸이 다시 쪼개지지는 않습니다). 0.6.56까지는 이 형태가 리터럴로 남아 `variable.unresolved`로 잡혔습니다. |
-| `output.not-captured` | warning | `${A.output}`(또는 A의 capture 이름)을 참조하지만 shell/command 태스크 A에 `passTheResultToNextTask: true`가 없음. 런타임은 출력을 스트리밍만 하고 빈 결과를 넘기므로 참조가 리터럴로 남음 — 가장 흔한 설정 실수. 선언 순서와 무관하게(전방 참조 포함) 검출. |
+| `output.not-captured` | warning | `${A.output}`(또는 A의 capture 이름)을 참조하지만 shell/command 태스크 A에 `passTheResultToNextTask: true`가 없음. 런타임은 출력을 스트리밍만 하고 빈 결과를 넘기므로 참조가 리터럴로 남음 — 가장 흔한 설정 실수. 선언 순서와 무관하게(전방 참조 포함) 검출. `??` 체인 안에서는 이 코드가 아니라 `variable.dead-alternative` / `variable.unresolved` 가 같은 사실을 대안 단위로 알립니다 — 체인은 다른 대안이 풀리면 리터럴로 남지 않으므로 "리터럴로 남음" 이 거짓이 됩니다. |
 | `tool.platform-missing` | warning | `tool` 을 가진 태스크(실질적으로 `zip` / `unzip`)에 **현재 플랫폼에서 쓸 값이 없음**. OS별 객체에 이 플랫폼 항목이 없는 경우와 `tool: ""` 처럼 빈 값인 경우가 모두 해당합니다 — 런타임의 `getToolCommand` 가 둘 다 `No tool path specified for the current platform` 으로 실패시킵니다. 참조가 전부 해석돼도 실행은 불가능한 설정이라 `variable.unresolved` 로는 드러나지 않습니다. 다른 OS 항목은 그대로 검사하므로, 크로스플랫폼 액션을 의도했다면 빠진 OS 항목을 채우면 됩니다. **이 경고는 검사하는 기계에 따라 달라집니다** — Windows 전용으로 의도한 액션은 macOS/Linux 에서 매번 뜹니다(메시지가 그 이유를 밝힙니다). |
 | `output.ignored` | warning | shell/command 태스크에 `output.mode`/`capture`/`diagnostics`가 정의되어 있지만 `passTheResultToNextTask: true`가 없음. 런타임이 조용히 무시하는 죽은 설정. |
 | `path.outside-workspace` | error | `writeFile` / `appendFile` / `output.filePath`의 해석 결과가 워크스페이스 밖. 런타임이 실행을 거부할 경로. (변수 치환 후에도 `${…}`가 남은 경우는 검사를 건너뜀 — 안전 결정 불가) |

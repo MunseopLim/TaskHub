@@ -45,6 +45,9 @@ import {
     findUnresolved,
     findTypoRefs,
     findUncapturedOutputRefs,
+    analyzeCoalesceRefs,
+    deadAlternatives,
+    describeDeadAlternative,
     makeForwardRefTolerance,
     isInsideWorkspace,
     placeholder,
@@ -1063,21 +1066,58 @@ function analyzeActionTasks(
         // 전방 태스크 참조는 **그 태스크가 실제로 낼 키에 한해** 관용한다.
         // head 만 보고 통과시키면 `${producer.safe}` 같은 오타가 앞쪽 producer
         // 를 가리킬 때만 조용히 넘어간다 (뒤쪽이면 findTypoRefs 가 잡는다).
-        const unresolved = findUnresolved(interpolated, makeForwardRefTolerance(forwardTaskIds, tasksById, task.id));
-        const typos = findTypoRefs(task, allResults, task.id);
+        // `??` 체인은 **대안 단위로** 따로 판정한다. 체인은 하나만 풀려도
+        // 리터럴로 남지 않으므로, 아래 세 pass 의 "런타임에서는 리터럴로
+        // 전달됩니다" 가 체인에는 거짓이 될 수 있다 — 그 자리를 분리한다.
+        const chains = analyzeCoalesceRefs(task, allResults, tasksById, task.id);
+        const chainLiterals = new Set(chains.map(c => c.literal));
+        const unresolved = findUnresolved(interpolated, makeForwardRefTolerance(forwardTaskIds, tasksById, task.id))
+            .filter(r => !chainLiterals.has(r));
+        const typos = findTypoRefs(task, allResults, task.id).filter(r => !chainLiterals.has(r));
         // 미캡처 shell/command 출력 참조는 전용 경고(output.not-captured)로
         // 따로 보고 — 일반 unresolved 목록에서 제외해 중복을 막는다(M9).
-        const uncaptured = findUncapturedOutputRefs(task, tasksById, task.id);
-        const merged = Array.from(new Set([...unresolved, ...typos])).filter(r => !uncaptured.has(r));
-        if (merged.length > 0) {
+        const uncaptured = new Map(
+            Array.from(findUncapturedOutputRefs(task, tasksById, task.id))
+                .filter(([literal]) => !chainLiterals.has(literal))
+        );
+        // 미해결은 **한 findings 로 모은다.** 평범한 참조와 전부 죽은 체인이
+        // 같은 태스크에 함께 있으면 같은 코드·같은 범위의 경고가 둘 붙는다.
+        const unresolvedEn = Array.from(new Set([...unresolved, ...typos])).filter(r => !uncaptured.has(r));
+        const unresolvedKo = [...unresolvedEn];
+        for (const chain of chains) {
+            const dead = deadAlternatives(chain);
+            if (dead.length === 0 || chain.resolves) { continue; }
+            // 대안이 전부 어긋났다 — 이때만 리터럴로 남는다. 어느 대안이 왜
+            // 어긋났는지까지 말한다. 리터럴만 나열하면 사용자는 체인 전체를
+            // 다시 훑어야 하고, 두 문제가 겹쳤을 때 하나가 묻힌다.
+            unresolvedEn.push(`${chain.literal} (${dead.map(alt => describeDeadAlternative(alt).en).join('; ')})`);
+            unresolvedKo.push(`${chain.literal} (${dead.map(alt => describeDeadAlternative(alt).ko).join('; ')})`);
+        }
+        if (unresolvedEn.length > 0) {
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
                 range: findIdLine(input.rawText, task.id),
                 severity: 'warning',
                 code: 'variable.unresolved',
-                message: `Task '${item.id}.${task.id}' has unresolved variable(s) under simulated inputs: ${merged.join(', ')}. At runtime these pass through as literal '\${…}'.`,
-                messageKo: `Task '${item.id}.${task.id}'에 시뮬레이션 입력으로 해석되지 않는 변수 참조가 있습니다: ${merged.join(', ')}. 런타임에서는 리터럴 '\${…}'로 전달됩니다.`,
+                message: `Task '${item.id}.${task.id}' has unresolved variable(s) under simulated inputs: ${unresolvedEn.join(', ')}. At runtime these pass through as literal '\${…}'.`,
+                messageKo: `Task '${item.id}.${task.id}'에 시뮬레이션 입력으로 해석되지 않는 변수 참조가 있습니다: ${unresolvedKo.join(', ')}. 런타임에서는 리터럴 '\${…}'로 전달됩니다.`,
+            });
+        }
+        for (const chain of chains) {
+            const dead = deadAlternatives(chain);
+            if (dead.length === 0 || !chain.resolves) { continue; }
+            // **리터럴로 남지 않는다.** 먼저 풀리는 대안이 있으므로 참조는
+            // 동작한다 — 그런데도 알리는 이유는, 죽은 대안이 곧 사용자가
+            // 의도한 분기가 영영 선택되지 않는다는 뜻이기 때문이다.
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: findIdLine(input.rawText, task.id),
+                severity: 'warning',
+                code: 'variable.dead-alternative',
+                message: `Task '${item.id}.${task.id}': ${chain.literal} resolves, but ${dead.length === 1 ? 'one alternative is' : `${dead.length} alternatives are`} never used — ${dead.map(alt => describeDeadAlternative(alt).en).join('; ')}.`,
+                messageKo: `Task '${item.id}.${task.id}': ${chain.literal} 는 해석되지만, 선택될 일이 없는 대안이 있습니다 — ${dead.map(alt => describeDeadAlternative(alt).ko).join('; ')}.`,
             });
         }
         if (joinedArgRefs.length > 0) {

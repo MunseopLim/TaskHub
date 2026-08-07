@@ -474,6 +474,195 @@ suite('Doctor', () => {
             `전방 ?? 체인에 경고가 붙었다: ${findings.map(f => f.message).join(' | ')}`);
     });
 
+    /**
+     * `??` 진단이 **사실대로** 말하는지. 0.6.52 의 "진단이 거짓말하면 안 된다"
+     * 를 체인에도 적용한 자리다 — 리터럴로 남느냐 아니냐가 두 코드를 가른다.
+     */
+    suite('?? 체인 진단은 사실과 맞는다', () => {
+        const chainAction = (tasks: any[]) => [{
+            id: 'a.chain', title: 'chain', action: { description: 'd', tasks }
+        }];
+
+        test('미캡처 출력이 대안이어도 참조가 풀리면 리터럴이라고 하지 않는다', () => {
+            // 예전에는 output.not-captured 가 "참조는 리터럴로 전달됩니다" 라고
+            // 말했다. pick.value 가 풀리므로 그 문장은 거짓이다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'pick', type: 'quickPick', items: ['x'] },
+                { id: 'b', type: 'shell', command: 'echo b' },
+                { id: 'report', type: 'command', command: 'node', args: ['${pick.value ?? b.output}'] },
+            ]))], v);
+            assert.ok(!findings.some(f => f.code === 'output.not-captured'),
+                `해석되는 체인에 output.not-captured 가 붙었다: ${codes(findings).join(',')}`);
+            const dead = findings.filter(f => f.code === 'variable.dead-alternative');
+            assert.strictEqual(dead.length, 1, codes(findings).join(','));
+            assert.ok(dead[0].message.includes("passTheResultToNextTask"), dead[0].message);
+            assert.ok(!dead[0].message.includes('literal'), dead[0].message);
+        });
+
+        test('대안이 전부 죽으면 이유를 모두 말한다 (하나가 묻히지 않는다)', () => {
+            // 예전에는 output.not-captured 가 리터럴을 통째로 삼켜 `pick.nope`
+            // 오타가 어디에도 나오지 않았다. 사용자는 b 를 고친 뒤 다시 돌려야
+            // 두 번째 결함을 알 수 있었다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'pick', type: 'fileDialog' },
+                { id: 'b', type: 'shell', command: 'echo b' },
+                { id: 'report', type: 'command', command: 'node', args: ['${pick.nope ?? b.output}'] },
+            ]))], v);
+            const unresolved = findings.filter(f => f.code === 'variable.unresolved');
+            assert.strictEqual(unresolved.length, 1, codes(findings).join(','));
+            assert.ok(unresolved[0].message.includes("'pick.nope'"), unresolved[0].message);
+            assert.ok(unresolved[0].message.includes("'b.output'"), unresolved[0].message);
+            assert.ok(unresolved[0].message.includes('passTheResultToNextTask'), unresolved[0].message);
+            // 전부 죽은 체인은 실제로 리터럴로 남는다 — 이때는 그렇게 말해야 한다.
+            assert.ok(unresolved[0].message.includes('literal'), unresolved[0].message);
+        });
+
+        test('전방 대안의 키 오타도 잡는다 (선언 순서와 무관)', () => {
+            // 0.7.6 까지 이 자리는 무경고였다. 관용이 "하나라도 풀리면" 이라
+            // findUnresolved 로는 볼 수 없고, findTypoRefs 는 전방을 건너뛴다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'report', type: 'command', command: 'node', parallel: true, args: ['${bA.output ?? bB.nope}'] },
+                { id: 'bA', type: 'shell', command: 'a', parallel: true, passTheResultToNextTask: true },
+                { id: 'bB', type: 'shell', command: 'b', parallel: true, passTheResultToNextTask: true },
+            ]))], v);
+            const dead = findings.filter(f => f.code === 'variable.dead-alternative');
+            assert.strictEqual(dead.length, 1, codes(findings).join(','));
+            assert.ok(dead[0].message.includes("'bB.nope'"), dead[0].message);
+        });
+
+        test('이유를 종류별로 구분해 말한다', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'pick', type: 'quickPick', items: ['x'] },
+                { id: 'report', type: 'command', command: 'node', args: ['${pick.value ?? nosuch.x}', '${pick.value ?? report.output}'] },
+            ]))], v);
+            const joined = findings.filter(f => f.code === 'variable.dead-alternative').map(f => f.message).join(' | ');
+            assert.ok(joined.includes("has no task 'nosuch'"), joined);
+            assert.ok(joined.includes('refers to this task itself'), joined);
+        });
+
+        test('죽은 대안이 둘이면 둘 다, 복수형으로 말한다', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'ok', type: 'quickPick', items: ['x'] },
+                { id: 'a', type: 'inputBox', prompt: 'p' },
+                { id: 'b', type: 'inputBox', prompt: 'p' },
+                { id: 'report', type: 'command', command: 'node', args: ['${a.nope ?? b.nope2 ?? ok.value}'] },
+            ]))], v);
+            const dead = findings.filter(f => f.code === 'variable.dead-alternative');
+            assert.strictEqual(dead.length, 1, codes(findings).join(','));
+            assert.ok(dead[0].message.includes('2 alternatives are never used'), dead[0].message);
+            assert.ok(dead[0].message.includes("'a.nope'") && dead[0].message.includes("'b.nope2'"), dead[0].message);
+        });
+
+        test('한국어 문구도 이유별로 채워진다', () => {
+            // ko 번들이 비면 한국어 사용자에게 영어가 섞여 보일 뿐 아무 신호도
+            // 나지 않는다 — 이유 종류마다 한 번씩 눌러 둔다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'ok', type: 'quickPick', items: ['x'] },
+                { id: 'raw', type: 'shell', command: 'make' },
+                {
+                    id: 'report', type: 'command', command: 'node', args: [
+                        '${ok.value ?? nosuch.x}',
+                        '${ok.value ?? report.output}',
+                        '${ok.value ?? ok.nope}',
+                        '${ok.value ?? raw.output}',
+                    ]
+                },
+            ]))], v);
+            const ko = findings.filter(f => f.code === 'variable.dead-alternative')
+                .map(f => f.messageKo ?? '').join(' | ');
+            assert.ok(ko.includes("태스크 'nosuch' 가 없습니다"), ko);
+            assert.ok(ko.includes('이 태스크 자신을 가리킵니다'), ko);
+            assert.ok(ko.includes("'nope' 를 내지 않습니다"), ko);
+            assert.ok(ko.includes('출력이 캡처되지 않습니다'), ko);
+            assert.ok(!ko.includes('undefined'), ko);
+        });
+
+        test('체인을 막는 bare 대안은 미해결이다 (뒤 대안은 시도되지 않는다)', () => {
+            // 런타임은 z 의 결과 **객체**를 받아 거기서 멈춘다 — 객체는 문자열이
+            // 아니라 참조 전체가 리터럴로 남는다. "해석된다" 고 하면 거짓이다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'z', type: 'zip', source: '${workspaceFolder}/s', archive: '${workspaceFolder}/a.zip' },
+                { id: 'build', type: 'shell', command: 'make', passTheResultToNextTask: true },
+                { id: 'report', type: 'command', command: 'node', args: ['${z ?? build.output}'] },
+            ]))], v);
+            assert.ok(!findings.some(f => f.code === 'variable.dead-alternative'),
+                `리터럴로 남는 체인을 "해석된다" 고 했다: ${findings.map(f => f.message).join(' | ')}`);
+            const unresolved = findings.filter(f => f.code === 'variable.unresolved');
+            assert.strictEqual(unresolved.length, 1, codes(findings).join(','));
+            assert.ok(unresolved[0].message.includes('never tried'), unresolved[0].message);
+        });
+
+        test('itemsFromCommand 가 있으면 items 안의 체인은 보지 않는다', () => {
+            // 런타임이 목록을 덮어쓰므로 실행되지 않는 참조다. 평범한 참조는
+            // 이미 조용한데 체인만 잡히면 앞뒤가 안 맞는다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'pick', type: 'quickPick', itemsFromCommand: 'ls', items: ['${nosuch.a ?? nosuch2.b}'] },
+                { id: 'run', type: 'command', command: 'node', args: ['${pick.value}'] },
+            ]))], v);
+            assert.deepStrictEqual(codes(findings), [], findings.map(f => f.message).join(' | '));
+        });
+
+        test('다른 OS branch 의 체인도 검사한다 (Doctor 는 파일 자체를 본다)', () => {
+            // Preview 는 이 기계의 branch 만 보지만 Doctor 는 모든 branch 를 본다 —
+            // Windows branch 의 깨진 참조는 그 OS 사용자에게 진짜 오류다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'ok', type: 'quickPick', items: ['x'] },
+                {
+                    id: 'run', type: 'command',
+                    command: { windows: '${ok.value ?? nosuch.b}', macos: 'echo', linux: 'echo' }
+                },
+            ]))], v);
+            assert.ok(findings.some(f => f.code === 'variable.dead-alternative'),
+                `다른 OS branch 의 체인을 놓쳤다: ${codes(findings).join(',')}`);
+        });
+
+        test('멀쩡한 체인에는 아무 경고도 붙지 않는다', () => {
+            // 가드가 과하지 않다는 대조군. 문서의 표준 분기 패턴이다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'pickFile', type: 'fileDialog' },
+                { id: 'pickFolder', type: 'folderDialog' },
+                { id: 'report', type: 'command', command: 'node', args: ['${pickFile.path ?? pickFolder.path}'] },
+            ]))], v);
+            assert.deepStrictEqual(codes(findings), [], findings.map(f => f.message).join(' | '));
+        });
+
+        test('평범한 참조는 예전 코드 그대로 간다', () => {
+            // 체인만 새 경로를 탄다 — 대안이 하나뿐인 참조의 진단은 바뀌지 않는다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'b', type: 'shell', command: 'echo b' },
+                { id: 'report', type: 'command', command: 'node', args: ['${b.output}', '${nosuch.x}'] },
+            ]))], v);
+            assert.ok(findings.some(f => f.code === 'output.not-captured'), codes(findings).join(','));
+            assert.ok(findings.some(f => f.code === 'variable.unresolved'), codes(findings).join(','));
+            assert.ok(!findings.some(f => f.code === 'variable.dead-alternative'), codes(findings).join(','));
+        });
+
+        test('bare 대안 하나로 풀리면 나머지 죽은 대안만 알린다', () => {
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(chainAction([
+                { id: 'build', type: 'shell', command: 'make', passTheResultToNextTask: true },
+                { id: 'z', type: 'zip', source: '${workspaceFolder}/src', archive: '${workspaceFolder}/a.zip' },
+                { id: 'report', type: 'command', command: 'node', args: ['${build ?? z}'] },
+            ]))], v);
+            const dead = findings.filter(f => f.code === 'variable.dead-alternative');
+            assert.strictEqual(dead.length, 1, codes(findings).join(','));
+            // zip 은 archivePath 만 낸다 — bare 참조로는 풀리지 않는다.
+            assert.ok(dead[0].message.includes("'z'"), dead[0].message);
+            assert.ok(dead[0].message.includes('representative value'), dead[0].message);
+        });
+    });
+
     test('전방 ?? 체인도 대안이 전부 어긋나면 잡는다', () => {
         // 관용이 "대안 하나라도 풀리면" 이지 "?? 면 무조건" 이 아님을 고정한다.
         const v = compileValidator();
@@ -501,6 +690,11 @@ suite('Doctor', () => {
     test('?? 체인 안의 오타는 대안 하나만 틀려도 잡는다', () => {
         // ?? 는 어긋난 참조를 조용히 건너뛰고 다음 대안을 쓴다 — 동작이 멀쩡해
         // 보이므로 오히려 알려 줘야 한다.
+        //
+        // **다만 `variable.unresolved` 가 아니다.** 다른 대안이 풀리므로 이
+        // 참조는 리터럴로 남지 않는다 — 0.7.5~0.7.7 은 그 사실과 반대되는 문구로
+        // 알렸다("런타임에서는 리터럴로 전달됩니다"). 0.7.8 부터 전용 코드로
+        // 나누고, 어느 대안이 왜 죽었는지까지 말한다.
         const v = compileValidator();
         const findings = runDoctor([makeInput([
             {
@@ -519,12 +713,20 @@ suite('Doctor', () => {
                 }
             }
         ])], v);
-        const reported = findings.filter(f => f.code === 'variable.unresolved');
-        assert.strictEqual(reported.length, 1, `기대: 경고 1건, 실제: ${codes(findings).join(',')}`);
+        assert.ok(!findings.some(f => f.code === 'variable.unresolved'),
+            `해석되는 체인을 미해결로 보고했다: ${findings.map(f => f.message).join(' | ')}`);
+        const reported = findings.filter(f => f.code === 'variable.dead-alternative');
+        assert.strictEqual(reported.length, 2, `기대: 경고 2건, 실제: ${codes(findings).join(',')}`);
+        const joined = reported.map(f => f.message).join(' | ');
         // 첫 대안의 오타도, **두 번째 대안**의 오타도 잡아야 한다 — 앞만 보면
         // 뒤쪽 오타가 ?? 뒤에 영영 숨는다.
-        assert.ok(reported[0].message.includes('pickFile.nope'), reported[0].message);
-        assert.ok(reported[0].message.includes('pickFolder.alsoNope'), reported[0].message);
+        assert.ok(joined.includes("'pickFile.nope'"), joined);
+        assert.ok(joined.includes("'pickFolder.alsoNope'"), joined);
+        // 문구가 사실과 맞아야 한다 — 이 참조들은 리터럴로 남지 않는다.
+        assert.ok(!joined.includes('literal'), `해석되는 참조에 "리터럴" 이라고 적었다: ${joined}`);
+        for (const f of reported) {
+            assert.ok(f.messageKo && !f.messageKo.includes('리터럴'), f.messageKo);
+        }
     });
 
     test('?? 체인도 대안이 전부 어긋나면 잡는다 (가드가 과하지 않다)', () => {

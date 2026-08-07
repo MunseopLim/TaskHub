@@ -19,6 +19,7 @@ import type { ReferenceAlternative } from './pipelineUtils';
 import {
     interpolatePipelineVariables,
     parseReferenceAlternatives,
+    projectActivePlatformBranches,
     resolveArchiveTaskPath,
     interpolateCommandPreservingTokens,
     expandArgTemplate,
@@ -166,7 +167,7 @@ export function findTypoRefs(
     // 알려야 한다. 판정 규칙 자체는 평범한 참조와 같다.
     visitTaskRefs(task, (literal, refs) => {
         for (const { head, key } of refs) {
-            if (head === selfId || key === '') { continue; }
+            if (head === selfId || key === undefined || key === '') { continue; }
             const result = allResults[head];
             if (!result) { continue; } // forward ref / built-in / unknown
             if (!Object.prototype.hasOwnProperty.call(result, key)) {
@@ -180,14 +181,21 @@ export function findTypoRefs(
 
 /**
  * Walk a task's raw (pre-interpolation) string leaves and invoke `onRef` for
- * every dotted `${head.key}` reference. Bare `${id}` short-forms are skipped.
+ * every `${…}` reference, **대안 단위로** 쪼개어 넘긴다.
  * `task.output.capture` / `task.output.diagnostics` / `dependsOn` subtrees
  * are skipped — their `${...}` literals are regex content, not refs.
- * Shared traversal for `findTypoRefs` / `findUncapturedOutputRefs`.
+ * Shared traversal for `findTypoRefs` / `findUncapturedOutputRefs` /
+ * `analyzeCoalesceRefs`.
+ *
+ * bare `${id}` 단축형도 그대로 넘긴다 (`key === undefined`). 키로 판정하는
+ * 호출부는 걸러 내면 되고, 체인의 해석 여부를 보는 호출부는 bare 대안도
+ * 세어야 하기 때문이다 — `${a ?? b.x}` 는 `a` 만으로 풀릴 수 있다.
  */
 function visitTaskRefs(
     task: Task,
-    onRef: (literal: string, refs: ReadonlyArray<{ head: string; key: string }>) => void
+    onRef: (literal: string, refs: ReadonlyArray<ReferenceAlternative>) => void,
+    /** {@link analyzeCoalesceRefs} 의 `platform` 과 같은 뜻. */
+    platform?: NodeJS.Platform
 ): void {
     const visit = (value: unknown): void => {
         if (typeof value === 'string') {
@@ -195,11 +203,7 @@ function visitTaskRefs(
                 // `??` 체인은 **대안 하나하나**가 참조다. 통째로 쪼개면
                 // `pickFile.path ?? pickFolder.path` 의 키가
                 // `path ?? pickFolder.path` 로 읽힌다.
-                //
-                // bare `${id}` 단축형은 키가 없어 여기서 판정할 것이 없다. 체인에
-                // 섞여 있으면 그 대안만 건너뛰고 나머지는 평소대로 본다.
-                const refs = parseReferenceAlternatives(m[1])
-                    .filter((alt): alt is ReferenceAlternative & { key: string } => alt.key !== undefined);
+                const refs = parseReferenceAlternatives(m[1]);
                 if (refs.length === 0) { continue; }
                 onRef(m[0], refs);
             }
@@ -215,7 +219,11 @@ function visitTaskRefs(
             visit(v);
         }
     };
-    visit(task);
+    // **런타임이 실제로 읽는 자리만 본다.** `itemsFromCommand` 가 있으면 정적
+    // `items` 는 실행되지 않고(런타임이 목록을 덮어쓴다), Preview 는 지금 이
+    // 기계의 OS branch 만 본다. 보간 pass 들은 이미 그 규칙을 지키고 있어서,
+    // 여기만 전체를 훑으면 **체인에만** 없던 경고가 붙는다.
+    visit(projectActivePlatformBranches(task, platform));
 }
 
 /**
@@ -236,28 +244,212 @@ export function findUncapturedOutputRefs(
     selfId: string
 ): Map<string, string> {
     const found = new Map<string, string>();
+    // capture 이름 집합은 head 마다 한 번만 만든다 — 대안마다 다시 훑으면
+    // 같은 태스크의 규칙을 참조 수만큼 되읽는다.
+    const captureNamesFor = memoizeByHead(head => {
+        const headTask = tasksById.get(head);
+        return headTask ? declaredCaptureNames(headTask) : new Set<string>();
+    });
     // 여기도 대안 하나하나를 본다 — `??` 가 미캡처 참조를 건너뛰어도 그 참조를
     // 쓴 것은 사용자의 의도이므로 알려야 한다.
     visitTaskRefs(task, (literal, refs) => {
         for (const { head, key } of refs) {
-            if (head === selfId || key === '') { continue; }
+            if (head === selfId || key === undefined || key === '') { continue; }
             const headTask = tasksById.get(head);
             if (!headTask || (headTask.type !== 'shell' && headTask.type !== 'command')) { continue; }
             if (headTask.passTheResultToNextTask) { continue; }
-            const captureNames = new Set<string>();
-            if (headTask.output?.capture) {
-                const rules = Array.isArray(headTask.output.capture) ? headTask.output.capture : [headTask.output.capture];
-                for (const r of rules) {
-                    if (r && typeof r.name === 'string') { captureNames.add(r.name); }
-                }
-            }
-            if (key === 'output' || captureNames.has(key)) {
+            if (key === 'output' || captureNamesFor(head).has(key)) {
                 found.set(literal, head);
                 return;
             }
         }
     });
     return found;
+}
+
+/** `output.capture` 로 선언된 이름들. 규칙은 하나이거나 배열이다. */
+function declaredCaptureNames(task: Task): Set<string> {
+    const names = new Set<string>();
+    if (!task.output?.capture) { return names; }
+    const rules = Array.isArray(task.output.capture) ? task.output.capture : [task.output.capture];
+    for (const r of rules) {
+        if (r && typeof r.name === 'string') { names.add(r.name); }
+    }
+    return names;
+}
+
+function memoizeByHead<T>(compute: (head: string) => T): (head: string) => T {
+    const cache = new Map<string, T>();
+    // `has` 로 판정한다 — `undefined` 를 miss 로 보면 "그런 태스크 없음" 이
+    // 캐시되지 않아, 캐시가 필요한 바로 그 경우에 매번 다시 계산한다.
+    return head => {
+        if (!cache.has(head)) { cache.set(head, compute(head)); }
+        return cache.get(head) as T;
+    };
+}
+
+/** `??` 대안 하나가 **왜** 안 풀리는지. */
+export type DeadAlternativeReason =
+    /** 이 액션에 그런 태스크가 없다 (내장 참조도 아니다). */
+    | 'unknown-head'
+    /** 자기 자신 — 런타임 컨텍스트에는 자기 결과가 없다. */
+    | 'self'
+    /** 태스크는 있는데 그 키를 내지 않는다. */
+    | 'missing-key'
+    /** shell/command 인데 `passTheResultToNextTask` 가 없어 출력이 캡처되지 않는다. */
+    | 'uncaptured'
+    /**
+     * bare 참조인데 그 태스크에 대표 결과(`output`/`outputDir`)가 없다.
+     *
+     * **뒤 대안으로 넘어가지 않고 체인을 여기서 끝낸다.** `resolvePipelineReference`
+     * 의 마지막 폴백이 결과 **객체 자체**를 돌려주는데, 객체는 `undefined` 가
+     * 아니라 `??` 루프가 멈춘다. 그 뒤 `sanitizeInterpolatedValue` 가 문자열이
+     * 아니라며 버려서 참조 전체가 리터럴로 남는다. 다른 어긋난 대안들이 조용히
+     * 건너뛰어지는 것과 **동작이 다르다.**
+     */
+    | 'blocks-chain';
+
+export interface AnalyzedAlternative extends ReferenceAlternative {
+    /** 안 풀리는 이유. **없으면 풀린다.** */
+    reason?: DeadAlternativeReason;
+}
+
+export interface AnalyzedReference {
+    /** 사용자가 쓴 `${…}` 리터럴 그대로. */
+    literal: string;
+    alternatives: AnalyzedAlternative[];
+    /** 하나라도 풀리는가 — 즉 런타임에서 리터럴로 **남지 않는가**. */
+    resolves: boolean;
+}
+
+/** 진단이 태스크 결과가 아니라고 아는 최상위 참조들. */
+export const BUILTIN_REFS: ReadonlySet<string> = new Set(['workspaceFolder', 'extensionPath']);
+
+/**
+ * 태스크의 raw 문자열에 있는 **`??` 체인**을 대안 단위로 판정한다.
+ * 대안이 하나뿐인 평범한 참조는 돌려주지 않는다.
+ *
+ * **왜 체인만인가.** 평범한 참조는 "풀리느냐 아니냐" 가 곧 리터럴로 남느냐이고,
+ * 기존 세 pass(`findUnresolved` · `findTypoRefs` · `findUncapturedOutputRefs`)가
+ * 이미 그것을 정확히 말한다. 체인은 다르다 — **하나만 풀려도 리터럴로 남지
+ * 않으므로**, 어긋난 대안이 있다는 사실과 "런타임에서 리터럴로 전달됩니다" 는
+ * 서로 다른 이야기다. 그 둘을 한 코드로 뭉쳐 말하던 것이 0.6.52 가 금지한
+ * "진단이 거짓말하는" 자리였다. 여기서 대안별 판정을 내고, 호출부가
+ * 사실대로 나눠 보고한다.
+ *
+ * 판정 규칙은 `resolvePipelineReference` 를 따른다 — 이미 시뮬레이션된 결과든
+ * 전방 태스크의 흉내든 **같은 규칙**으로 보므로, 선언 순서에 따라 답이 갈리지
+ * 않는다 (전방 대안의 키 오타가 조용히 넘어가던 구멍이 여기서 닫힌다).
+ */
+export function analyzeCoalesceRefs(
+    task: Task,
+    allResults: Record<string, SimulatedResult>,
+    tasksById: ReadonlyMap<string, Task>,
+    selfId: string,
+    /**
+     * 넘기면 OS별 객체에서 **이 플랫폼의 branch 만** 본다 (Preview Run — 지금 이
+     * 기계에서 실행하면 어떻게 되는지를 보여 준다). Doctor 는 설정 파일 자체를
+     * 보므로 넘기지 않는다 — Windows branch 의 깨진 참조는 그 OS 사용자에게
+     * 진짜 오류다.
+     */
+    platform?: NodeJS.Platform
+): AnalyzedReference[] {
+    const simFor = memoizeByHead(head => {
+        const forward = tasksById.get(head);
+        return forward ? simulateTaskResultWithCaptures(forward) : undefined;
+    });
+    const captureNamesFor = memoizeByHead(head => {
+        const headTask = tasksById.get(head);
+        return headTask ? declaredCaptureNames(headTask) : new Set<string>();
+    });
+
+    const judge = ({ head, key }: ReferenceAlternative): DeadAlternativeReason | undefined => {
+        if (head === selfId) { return 'self'; }
+        // 내장 참조는 **문자열**이다. 속성을 붙이면 런타임에서 리터럴로 남는다.
+        if (BUILTIN_REFS.has(head)) { return key === undefined ? undefined : 'missing-key'; }
+        const result = Object.prototype.hasOwnProperty.call(allResults, head)
+            ? allResults[head]
+            : simFor(head);
+        if (!result) { return 'unknown-head'; }
+        if (key === undefined) {
+            // bare 는 대표 결과다 — 런타임은 `output` / `outputDir` 이 있을 때만
+            // 해석한다. 그 외에는 **결과 객체 자체**가 돌아오는데, 객체는
+            // undefined 가 아니라 체인이 여기서 멈춘다 ('blocks-chain').
+            return result.output !== undefined || result.outputDir !== undefined ? undefined : 'blocks-chain';
+        }
+        if (Object.prototype.hasOwnProperty.call(result, key)) { return undefined; }
+        const headTask = tasksById.get(head);
+        if (headTask
+            && (headTask.type === 'shell' || headTask.type === 'command')
+            && !headTask.passTheResultToNextTask
+            && (key === 'output' || captureNamesFor(head).has(key))) {
+            return 'uncaptured';
+        }
+        return 'missing-key';
+    };
+
+    const found: AnalyzedReference[] = [];
+    const seen = new Set<string>();
+    visitTaskRefs(task, (literal, refs) => {
+        if (refs.length < 2 || seen.has(literal)) { return; }
+        seen.add(literal);
+        const alternatives: AnalyzedAlternative[] = refs.map(alt => {
+            const reason = judge(alt);
+            return reason === undefined ? { ...alt } : { ...alt, reason };
+        });
+        // **순서대로** 본다. 런타임은 처음으로 값이 나온 대안에서 멈추므로,
+        // "하나라도 풀리면 해석된다" 는 `blocks-chain` 앞에서 거짓이 된다.
+        let resolves = false;
+        for (const alt of alternatives) {
+            if (alt.reason === undefined) { resolves = true; break; }
+            if (alt.reason === 'blocks-chain') { break; }
+        }
+        found.push({ literal, alternatives, resolves });
+    }, platform);
+    return found;
+}
+
+/** 안 풀리는 대안만 추린다 — 반환 타입이 `reason` 이 있음을 보장한다. */
+export function deadAlternatives(ref: AnalyzedReference): Array<AnalyzedAlternative & { reason: DeadAlternativeReason }> {
+    return ref.alternatives.filter(
+        (alt): alt is AnalyzedAlternative & { reason: DeadAlternativeReason } => alt.reason !== undefined
+    );
+}
+
+/**
+ * 안 풀리는 대안 하나를 사람이 읽는 한 줄로. 한국어/영어 두 벌을 함께 돌려주는
+ * 이유는 Doctor 가 `message` / `messageKo` 를 모두 채워야 하기 때문이다 — 이
+ * 모듈은 `vscode` 에 의존하지 않아 `t()` 를 쓸 수 없다.
+ */
+export function describeDeadAlternative(alt: AnalyzedAlternative & { reason: DeadAlternativeReason }): { en: string; ko: string } {
+    const ref = `'${alt.text}'`;
+    switch (alt.reason) {
+        case 'blocks-chain':
+            return {
+                en: `${ref} — task '${alt.head}' produces no representative value ('output' / 'outputDir'), and a bare reference to it still ends the chain, so the alternatives after it are never tried`,
+                ko: `${ref} — 태스크 '${alt.head}' 는 대표 결과('output' / 'outputDir')를 내지 않는데, bare 참조는 그래도 체인을 여기서 끝냅니다 — 뒤 대안은 시도되지 않습니다`,
+            };
+        case 'self':
+            return {
+                en: `${ref} refers to this task itself, which is not in the runtime context`,
+                ko: `${ref} 는 이 태스크 자신을 가리킵니다 — 런타임 컨텍스트에 자기 결과는 없습니다`,
+            };
+        case 'unknown-head':
+            return {
+                en: `${ref} — this action has no task '${alt.head}'`,
+                ko: `${ref} — 이 액션에 태스크 '${alt.head}' 가 없습니다`,
+            };
+        case 'uncaptured':
+            return {
+                en: `${ref} — task '${alt.head}' does not set 'passTheResultToNextTask': true, so its output is not captured`,
+                ko: `${ref} — 태스크 '${alt.head}' 에 'passTheResultToNextTask': true 가 없어 출력이 캡처되지 않습니다`,
+            };
+        case 'missing-key':
+            return {
+                en: `${ref} — task '${alt.head}' does not produce '${alt.key}'`,
+                ko: `${ref} — 태스크 '${alt.head}' 는 '${alt.key}' 를 내지 않습니다`,
+            };
+    }
 }
 
 /**
@@ -484,6 +676,15 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
      * references resolve` 만 보여, 실행하면 실패할 액션이 정상으로 안내된다.
      */
     const runtimeBlockers: string[] = [];
+
+    /**
+     * 참조는 풀리는데 **대안 하나가 죽어 있는** 자리들 (`??` 체인).
+     *
+     * 미해결과 섞으면 안 된다 — 체인은 먼저 풀리는 대안을 쓰므로 리터럴로
+     * 남지 않는다. 그런데도 죽은 대안은 사용자가 의도한 분기가 **영영 선택되지
+     * 않는다**는 뜻이라 조용히 두면 안 된다. 요약에서 별도 항목으로 낸다.
+     */
+    const deadAltRefs: string[] = [];
 
     // Surface graph issues (cycle / missing dep / self dep) up front so
     // Preview Run reflects what the runtime would refuse to schedule.
@@ -897,11 +1098,23 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         //  2. `findTypoRefs` walks PRE-interpolation strings to catch typos
         //     against ALREADY-simulated tasks, naming the exact literal the
         //     user wrote and attributing it to a known producer.
-        const unresolved = findUnresolved(interpolated, makeForwardRefTolerance(forwardTaskIds, tasksById, task.id));
-        const typos = findTypoRefs(task, allResults, task.id);
+        //  3. `analyzeCoalesceRefs` 는 `??` 체인만 대안 단위로 판정한다. 체인은
+        //     **하나만 풀려도 리터럴로 남지 않으므로**, 위 두 pass 의 "리터럴로
+        //     전달된다" 는 말이 체인에는 거짓이 될 수 있다. 체인은 아래에서
+        //     따로 말하고 위 목록에서는 뺀다.
+        // Preview 는 **지금 이 기계에서 실행하면** 을 보여 준다 — 다른 OS branch 의
+        // 참조는 여기서 실행되지 않으므로 보지 않는다 (Doctor 는 반대로 모두 본다).
+        const chains = analyzeCoalesceRefs(task, allResults, tasksById, task.id, process.platform);
+        const chainLiterals = new Set(chains.map(c => c.literal));
+        const unresolved = findUnresolved(interpolated, makeForwardRefTolerance(forwardTaskIds, tasksById, task.id))
+            .filter(r => !chainLiterals.has(r));
+        const typos = findTypoRefs(task, allResults, task.id).filter(r => !chainLiterals.has(r));
         // 미캡처 shell/command 출력 참조는 전용 경고로 따로 표시 — 일반
         // unresolved 목록에서 제외해 중복 보고를 막는다(M9).
-        const uncaptured = findUncapturedOutputRefs(task, tasksById, task.id);
+        const uncaptured = new Map(
+            Array.from(findUncapturedOutputRefs(task, tasksById, task.id))
+                .filter(([literal]) => !chainLiterals.has(literal))
+        );
         const merged = Array.from(new Set([...unresolved, ...typos])).filter(r => !uncaptured.has(r));
         if (merged.length > 0) {
             lines.push(`  unresolved variables: ${merged.join(', ')}`);
@@ -910,6 +1123,22 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         for (const [ref, head] of uncaptured) {
             lines.push(`  ⚠️  ${ref} — task '${head}' does not set 'passTheResultToNextTask': true, so its output is not captured and this stays a literal at runtime`);
             totalUnresolved.add(ref);
+        }
+        for (const chain of chains) {
+            const dead = deadAlternatives(chain);
+            if (dead.length === 0) { continue; }
+            const detail = dead.map(alt => describeDeadAlternative(alt).en).join('; ');
+            if (chain.resolves) {
+                // 참조 자체는 풀린다 — 미해결로 세면 요약이 거짓말을 한다.
+                lines.push(`  ⚠️  ${chain.literal} — dead alternative(s), never used at runtime: ${detail}`);
+                deadAltRefs.push(`${chain.literal} (${task.id})`);
+            } else {
+                // 체인을 막는 대안이 있으면 "어느 대안도 해석되지 않는다" 가
+                // 정확하지 않다 — 뒤 대안은 **시도되지 않았을 뿐**이다.
+                const blocked = dead.some(alt => alt.reason === 'blocks-chain');
+                lines.push(`  unresolved variables: ${chain.literal} — ${blocked ? '' : 'no alternative resolves: '}${detail}`);
+                totalUnresolved.add(chain.literal);
+            }
         }
 
         // capture 적용 조건은 `simulateTaskResultWithCaptures` 한 곳에만 둔다 —
@@ -942,7 +1171,15 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 lines.push(`  - ${b}`);
             }
         }
-        if (totalUnresolved.size === 0 && runtimeBlockers.length === 0) {
+        if (deadAltRefs.length > 0) {
+            // 미해결과 따로 센다 — 이 참조들은 **풀린다.** 같이 세면 "리터럴로
+            // 전달됩니다" 라는 위 문장이 이들에게는 거짓이 된다.
+            lines.push(`Summary: ${deadAltRefs.length} '??' reference(s) resolve, but contain an alternative that is never used:`);
+            for (const d of deadAltRefs) {
+                lines.push(`  - ${d}`);
+            }
+        }
+        if (totalUnresolved.size === 0 && runtimeBlockers.length === 0 && deadAltRefs.length === 0) {
             lines.push('Summary: all ${...} references resolve under simulated inputs.');
             lines.push('(Placeholder values like <fileDialog:id:path> become real values at runtime.)');
         }

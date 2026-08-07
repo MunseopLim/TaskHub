@@ -2,7 +2,14 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { buildPreviewReport, findTypoRefs, findUncapturedOutputRefs } from '../previewRun';
+import {
+    buildPreviewReport,
+    findTypoRefs,
+    findUncapturedOutputRefs,
+    analyzeCoalesceRefs,
+    simulateTaskResultWithCaptures,
+} from '../previewRun';
+import { interpolatePipelineVariables } from '../pipelineUtils';
 import type { ActionItem, Task } from '../schema';
 
 const WS = path.resolve(os.tmpdir(), 'taskhub-preview-ws');
@@ -1075,9 +1082,8 @@ suite('buildPreviewReport', () => {
             });
 
             test('뒤쪽 대안이 전방이어도 앞쪽 대안의 오타는 잡는다', () => {
-                // 관용은 `findUnresolved` 쪽 이야기다. 이미 시뮬레이션된 대안의
-                // 오타는 `findTypoRefs` 가 raw 리터럴에서 따로 본다 — 전방 대안
-                // 하나가 멀쩡하다고 해서 그 오타까지 덮이면 안 된다.
+                // 전방 대안 하나가 멀쩡하다고 해서 오타가 덮이면 안 된다.
+                // 다만 **미해결이 아니다** — 참조는 풀린다. 죽은 대안으로 알린다.
                 const item: ActionItem = {
                     id: 'a.mixchain',
                     title: 'mixed chain',
@@ -1091,7 +1097,211 @@ suite('buildPreviewReport', () => {
                     }
                 } as ActionItem;
                 const report = buildPreviewReport(item, baseOptions());
-                assert.match(report, /unresolved variables:.*\$\{back\.nope \?\? fwd\.output\}/);
+                assert.doesNotMatch(report, /unresolved variables:/);
+                assert.match(report, /dead alternative\(s\).*'back\.nope'.*does not produce 'nope'/);
+            });
+
+            /**
+             * 리포트가 **한 화면 안에서 자기모순**이던 자리.
+             *
+             * `args: ["<quickPick:pick:value>"]` 로 값이 풀린 것을 보여 주고는,
+             * 두 줄 밑에서 같은 참조를 `unresolved variables:` 로 세고 요약에
+             * "리터럴 ${...} 로 전달됩니다" 라고 적었다. 둘 다 사용자가 같은
+             * 화면에서 본다.
+             */
+            test('풀리는 체인은 미해결로 세지 않는다 (요약까지)', () => {
+                const item: ActionItem = {
+                    id: 'a.deadalt',
+                    title: 'dead alt',
+                    action: {
+                        description: 'x',
+                        tasks: [
+                            { id: 'pick', type: 'quickPick', items: ['a'] },
+                            { id: 'pick2', type: 'quickPick', items: ['b'] },
+                            { id: 'run', type: 'command', command: 'node', args: ['${pick.value ?? pick2.nope}'] }
+                        ]
+                    }
+                } as ActionItem;
+                const report = buildPreviewReport(item, baseOptions());
+                // 값은 실제로 풀린다.
+                assert.match(report, /<quickPick:pick:value>/);
+                // 그러므로 미해결로 세면 안 되고, "리터럴로 전달" 문구도 안 된다.
+                assert.doesNotMatch(report, /unresolved variables:/);
+                assert.doesNotMatch(report, /unresolved variable\(s\) — fix before running/);
+                assert.doesNotMatch(report, /passed through as literal/);
+                // 대신 죽은 대안을 따로 알린다 — 요약에서도 별도 항목이다.
+                assert.match(report, /dead alternative\(s\).*'pick2\.nope'/);
+                assert.match(report, /Summary: 1 '\?\?' reference\(s\) resolve, but contain an alternative that is never used/);
+                // "모두 해석됨" 으로 끝내서도 안 된다 — 결함이 있는 액션이다.
+                assert.doesNotMatch(report, /all \$\{\.\.\.\} references resolve/);
+            });
+
+            test('미캡처 대안도 풀리는 체인에서는 리터럴이라 하지 않는다', () => {
+                const item: ActionItem = {
+                    id: 'a.deadcap',
+                    title: 'dead capture',
+                    action: {
+                        description: 'x',
+                        tasks: [
+                            { id: 'pick', type: 'quickPick', items: ['a'] },
+                            { id: 'b', type: 'shell', command: 'echo b' },
+                            { id: 'run', type: 'command', command: 'node', args: ['${pick.value ?? b.output}'] }
+                        ]
+                    }
+                } as ActionItem;
+                const report = buildPreviewReport(item, baseOptions());
+                assert.doesNotMatch(report, /stays a literal at runtime/);
+                assert.match(report, /dead alternative\(s\).*'b\.output'.*passTheResultToNextTask/);
+            });
+
+            /**
+             * **판정기와 런타임을 직접 맞대 본다.**
+             *
+             * `analyzeCoalesceRefs` 는 "이 체인이 런타임에서 리터럴로 남는가" 를
+             * 단언한다 — 그 단언이 틀리면 진단이 거짓말을 한다. 개별 케이스를
+             * 아무리 늘려도 규칙이 갈리는 것 자체는 못 막으므로, 보간 함수의
+             * 답과 표로 대조한다.
+             */
+            test('resolves 판정이 런타임 보간과 일치한다', () => {
+                const fixture: Task[] = [
+                    { id: 'build', type: 'shell', command: 'make', passTheResultToNextTask: true },
+                    { id: 'raw', type: 'shell', command: 'make' },
+                    { id: 'z', type: 'zip', source: 's', archive: 'a.zip' },
+                    { id: 'uz', type: 'unzip', archive: 'a.zip', destination: 'd' },
+                    { id: 'pick', type: 'fileDialog' },
+                ] as Task[];
+                const tasksById = new Map(fixture.map(t => [t.id, t]));
+                const results: Record<string, any> = Object.create(null);
+                for (const t of fixture) { results[t.id] = simulateTaskResultWithCaptures(t); }
+                const ctx = Object.assign(Object.create(null), results, {
+                    workspaceFolder: '/ws', extensionPath: '/ext',
+                });
+                const exprs = [
+                    'build.output ?? pick.path',
+                    'pick.nope ?? build.output',
+                    'build.output ?? pick.nope',
+                    // bare 대안이 체인을 **막는** 형태 — 뒤 대안은 시도되지 않는다.
+                    'z ?? build.output',
+                    'pick ?? build.output',
+                    'raw ?? build.output',
+                    // bare 여도 대표 결과가 있으면 풀린다.
+                    'build ?? z',
+                    'uz ?? build.output',
+                    // 컨텍스트에 아예 없는 head 는 undefined 라 넘어간다.
+                    'nosuch ?? build.output',
+                    'nosuch.x ?? build.output',
+                    // 내장 참조.
+                    'workspaceFolder ?? build.output',
+                    'workspaceFolder.x ?? build.output',
+                    'z.nope ?? uz.nope',
+                    'raw.output ?? build.output',
+                ];
+                for (const expr of exprs) {
+                    const literal = '${' + expr + '}';
+                    const consumer = { id: 'consumer', type: 'command', command: 'x', args: [literal] } as Task;
+                    const [analyzed] = analyzeCoalesceRefs(consumer, results, tasksById, 'consumer');
+                    assert.ok(analyzed, `체인으로 인식되지 않았다: ${literal}`);
+                    assert.strictEqual(
+                        analyzed.resolves,
+                        interpolatePipelineVariables(literal, ctx) !== literal,
+                        `런타임과 판정이 어긋났다: ${literal}`
+                    );
+                }
+            });
+
+            test('체인을 막는 bare 대안은 미해결로 보고한다', () => {
+                // `${z ?? build.output}` — 런타임은 z 의 **결과 객체**를 받아
+                // 거기서 멈추고, 객체는 문자열이 아니라 리터럴로 남는다.
+                // build.output 은 시도조차 되지 않는다.
+                const item: ActionItem = {
+                    id: 'a.block',
+                    title: 'blocking bare',
+                    action: {
+                        description: 'x',
+                        tasks: [
+                            { id: 'z', type: 'zip', source: '${workspaceFolder}/s', archive: '${workspaceFolder}/a.zip' },
+                            { id: 'build', type: 'shell', command: 'make', passTheResultToNextTask: true },
+                            { id: 'run', type: 'command', command: 'node', args: ['${z ?? build.output}'] }
+                        ]
+                    }
+                } as ActionItem;
+                const report = buildPreviewReport(item, baseOptions());
+                assert.match(report, /unresolved variables:.*\$\{z \?\? build\.output\}/);
+                assert.match(report, /never tried/);
+                assert.doesNotMatch(report, /reference\(s\) resolve, but contain/);
+            });
+
+            test('itemsFromCommand 가 있으면 items 안의 체인은 보지 않는다', () => {
+                // 런타임이 목록을 덮어쓰므로 그 참조는 실행되지 않는다. 평범한
+                // 참조는 이미 조용한데 체인만 경고가 붙으면 앞뒤가 안 맞는다.
+                const item: ActionItem = {
+                    id: 'a.ifc',
+                    title: 'itemsFromCommand',
+                    action: {
+                        description: 'x',
+                        tasks: [
+                            { id: 'pick', type: 'quickPick', itemsFromCommand: 'ls', items: ['${nosuch.a ?? nosuch2.b}'] },
+                            { id: 'run', type: 'shell', command: 'echo ${pick.value}' }
+                        ]
+                    }
+                } as ActionItem;
+                const report = buildPreviewReport(item, baseOptions());
+                assert.doesNotMatch(report, /unresolved variables:/);
+                assert.doesNotMatch(report, /dead alternative/);
+            });
+
+            test('내장 참조는 태스크가 아니라고 하지 않는다', () => {
+                const item: ActionItem = {
+                    id: 'a.builtin',
+                    title: 'builtin',
+                    action: {
+                        description: 'x',
+                        tasks: [
+                            { id: 'pick', type: 'quickPick', items: ['a'] },
+                            { id: 'run', type: 'command', command: 'node', args: ['${pick.value ?? workspaceFolder}'] }
+                        ]
+                    }
+                } as ActionItem;
+                const report = buildPreviewReport(item, baseOptions());
+                assert.doesNotMatch(report, /dead alternative/);
+                assert.doesNotMatch(report, /unresolved variables:/);
+            });
+
+            test('내장 참조에 속성을 붙이면 죽은 대안이다', () => {
+                // `${workspaceFolder}` 는 문자열이다 — 속성을 붙이면 런타임에서
+                // 어떤 값과도 맞지 않는다.
+                const item: ActionItem = {
+                    id: 'a.builtin2',
+                    title: 'builtin key',
+                    action: {
+                        description: 'x',
+                        tasks: [
+                            { id: 'pick', type: 'quickPick', items: ['a'] },
+                            { id: 'run', type: 'command', command: 'node', args: ['${workspaceFolder.x ?? pick.value}'] }
+                        ]
+                    }
+                } as ActionItem;
+                const report = buildPreviewReport(item, baseOptions());
+                assert.match(report, /dead alternative\(s\).*'workspaceFolder\.x'/);
+            });
+
+            test('이미 실행된 태스크의 bare 참조는 오탐하지 않는다', () => {
+                // `visitTaskRefs` 가 bare 대안까지 넘기게 되면서 `findTypoRefs` 의
+                // `key === undefined` 가드가 비로소 부하를 받는다. 빠지면
+                // `${producer}` 가 뒤쪽 태스크에서 미해결로 잡힌다.
+                const item: ActionItem = {
+                    id: 'a.barebwd',
+                    title: 'backward bare',
+                    action: {
+                        description: 'x',
+                        tasks: [
+                            { id: 'producer', type: 'shell', command: 'make', passTheResultToNextTask: true },
+                            { id: 'use', type: 'shell', command: 'echo ${producer}', passTheResultToNextTask: true }
+                        ]
+                    }
+                } as ActionItem;
+                const report = buildPreviewReport(item, baseOptions());
+                assert.doesNotMatch(report, /unresolved variables:/);
             });
 
             test('자기 자신은 체인 안에서도 관용하지 않는다', () => {
