@@ -441,6 +441,57 @@ export function splitCoalesceAlternatives(expression: string): string[] | null {
     return expression.split('??').map(part => part.trim()).filter(part => part.length > 0);
 }
 
+/** `${…}` 안 표현식의 대안 하나. {@link parseReferenceAlternatives} 참조. */
+export interface ReferenceAlternative {
+    /** 대안 전체 텍스트 (`??` 로 나뉜 뒤의 형태). */
+    text: string;
+    /** 첫 `.` 앞. 점이 없으면 `text` 전체. */
+    head: string;
+    /** 첫 `.` 뒤 전부. **점이 없으면 `undefined`** (bare 참조). */
+    key: string | undefined;
+}
+
+/**
+ * `${…}` 안의 표현식을 **런타임이 읽는 그대로** 대안 목록으로 쪼갠다.
+ * `??` 가 없으면 원소 하나짜리 배열이므로, 호출부는 평범한 참조와 체인을
+ * 구별하지 않고 같은 코드로 다룰 수 있다.
+ *
+ * **참조를 읽는 규칙은 여기 하나뿐이어야 한다.** {@link resolvePipelineReference}
+ * 가 실제로 값을 찾는 방식(대안별 `??` 분리 → 첫 `.` 기준 head/key)을 그대로 옮긴
+ * 것이므로, 호출부가 각자 문자열을 쪼개면 반드시 어긋난다. 실제로 어긋난 적이
+ * 있다 — 전방 참조 관용 판정만 `??` 를 모른 채 전체를 첫 `.` 로 잘라
+ * `${bA.output ?? bB.output}` 의 키를 `"output ?? bB.output"` 으로 읽었고, 멀쩡한
+ * 체인이 Doctor 에서 미해결 변수로 잡혔다.
+ *
+ * 진단(Doctor · Preview Run)과 의존성 추론은 모두 이 함수를 쓴다. 자동완성
+ * ([src/variableCompletions.ts](../src/variableCompletions.ts)) 은 아직 자체
+ * 파싱이라 `??` 를 모른다 — 아는 구멍이다.
+ *
+ * 두 가지 미묘한 계약을 {@link splitCoalesceAlternatives} / `resolvePipelineReference`
+ * 에서 그대로 이어받는다.
+ *
+ * - **`??` 가 있을 때만 다듬는다.** 평범한 참조의 공백은 런타임도 다듬지 않아
+ *   `${ producer.output}` 은 리터럴로 남는다. 여기서 다듬으면 그 오타가 정상
+ *   참조로 보인다.
+ * - **`key` 의 `''` 와 `undefined` 를 구분한다.** `${producer.}` 는 점이 있으므로
+ *   bare 가 아니고 런타임도 bare 폴백(`output`/`outputDir`)을 태우지 않는다.
+ *   둘을 뭉개면 이 오타가 정상 참조로 통과한다.
+ *
+ * 값을 **찾는** 규칙까지 옮기지는 않는다 — bare 참조의 `output`/`outputDir` 폴백과
+ * `resolvePipelineReference` 의 마지막 `ownValue(context, expression)` 폴백은
+ * 호출부 몫이다. 후자는 컨텍스트 최상위 키가 태스크 id(객체)와 점 없는 내장
+ * 참조뿐이라 점이 있는 표현식으로는 닿지 않는다.
+ */
+export function parseReferenceAlternatives(expression: string): ReferenceAlternative[] {
+    const parts = splitCoalesceAlternatives(expression) ?? [expression];
+    return parts.map(text => {
+        const dotIdx = text.indexOf('.');
+        return dotIdx === -1
+            ? { text, head: text, key: undefined }
+            : { text, head: text.slice(0, dotIdx), key: text.slice(dotIdx + 1) };
+    });
+}
+
 export function resolvePipelineReference(expression: string, context: any): unknown {
     // `??` 는 **먼저 푼 것이 이긴다.** 조건(`when`)으로 꺼진 분기는 결과가 없어
     // undefined 이므로, 살아남은 쪽 값이 자연스럽게 선택된다.
@@ -529,18 +580,11 @@ export function extractVariableHeads(text: string): string[] {
     while ((m = re.exec(text)) !== null) {
         const expr = m[1];
         if (!expr) { continue; }
-        // **trim 하지 않는다** — `resolvePipelineReference` 는 split 결과를 그대로
-        // 키로 쓴다. 여기서 다듬으면 `${ producer.output}` 이 `producer` 에 대한
-        // 의존성으로 추론되어 실행 순서가 잡히지만, 런타임은 `" producer"` 를
-        // 찾지 못해 리터럴로 남긴다 — 순서만 잡고 값은 안 오는 상태가 된다.
-        // 반대로 id 자체가 `" producer"` 인 경우(스키마상 유효)에는 다듬지 않아야
-        // 매칭되어 의존성이 잡힌다. 양쪽 다 런타임과 같아진다.
         // `??` 체인은 **모든 대안**을 의존성으로 낸다. 하나만 잡으면 소비자가
-        // 살아남은 쪽이 값을 내기 전에 실행될 수 있다.
-        const alternatives = splitCoalesceAlternatives(expr) ?? [expr];
-        for (const alt of alternatives) {
-            const head = alt.split('.')[0];
-            if (head.length > 0) { heads.push(head); }
+        // 살아남은 쪽이 값을 내기 전에 실행될 수 있다. 공백 처리를 포함한 읽기
+        // 규칙은 `parseReferenceAlternatives` 가 런타임과 맞춰 둔다.
+        for (const alt of parseReferenceAlternatives(expr)) {
+            if (alt.head.length > 0) { heads.push(alt.head); }
         }
     }
     return heads;
@@ -562,8 +606,9 @@ export function extractVariableReferences(text: string): string[][] {
     while ((m = re.exec(text)) !== null) {
         const expr = m[1];
         if (!expr) { continue; }
-        const alternatives = splitCoalesceAlternatives(expr) ?? [expr];
-        const heads = alternatives.map(alt => alt.split('.')[0]).filter(head => head.length > 0);
+        const heads = parseReferenceAlternatives(expr)
+            .map(alt => alt.head)
+            .filter(head => head.length > 0);
         if (heads.length > 0) { refs.push(heads); }
     }
     return refs;

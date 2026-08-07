@@ -7,6 +7,8 @@ import {
     wouldExceedCaptureLimit,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
+    parseReferenceAlternatives,
+    resolvePipelineReference,
     resolveWithinWorkspace,
     isInsideWorkspaceRoots,
     resolveFavoriteFilePath,
@@ -193,6 +195,107 @@ suite('pipelineUtils — direct-import smoke suite', () => {
     test('getToolCommand quotes paths containing spaces', () => {
         const out = getToolCommand('C:/Program Files/Tool/bin.exe');
         assert.strictEqual(out, '"C:/Program Files/Tool/bin.exe"');
+    });
+});
+
+/**
+ * `parseReferenceAlternatives` 는 `${…}` 를 읽는 **유일한 규칙**이다. 진단·
+ * 자동완성·의존성 추론이 각자 문자열을 쪼개면 반드시 어긋나므로, 여기서
+ * `resolvePipelineReference` 와 같은 답을 내는지 계약으로 고정한다.
+ */
+suite('parseReferenceAlternatives', () => {
+    test('평범한 참조는 원소 하나짜리 배열이다', () => {
+        assert.deepStrictEqual(parseReferenceAlternatives('producer.output'),
+            [{ text: 'producer.output', head: 'producer', key: 'output' }]);
+    });
+
+    test('점이 없으면 key 가 undefined (bare 참조)', () => {
+        assert.deepStrictEqual(parseReferenceAlternatives('producer'),
+            [{ text: 'producer', head: 'producer', key: undefined }]);
+    });
+
+    test("점 뒤가 비면 key 는 '' 이고 bare 가 아니다", () => {
+        // 런타임도 `${producer.}` 를 bare 로 보지 않아 output 폴백을 태우지
+        // 않는다. `''` 와 `undefined` 를 뭉개면 이 오타가 정상으로 통과한다.
+        assert.deepStrictEqual(parseReferenceAlternatives('producer.'),
+            [{ text: 'producer.', head: 'producer', key: '' }]);
+    });
+
+    test('키의 점은 첫 번째만 자른다', () => {
+        assert.deepStrictEqual(parseReferenceAlternatives('a.b.c'),
+            [{ text: 'a.b.c', head: 'a', key: 'b.c' }]);
+    });
+
+    test('평범한 참조의 공백은 다듬지 않는다', () => {
+        // 런타임은 split 결과를 그대로 키로 쓴다 — `${ producer.output}` 은
+        // 리터럴로 남는다. 여기서 다듬으면 그 오타가 정상 참조로 보인다.
+        assert.deepStrictEqual(parseReferenceAlternatives(' producer. output'),
+            [{ text: ' producer. output', head: ' producer', key: ' output' }]);
+    });
+
+    test('?? 는 대안마다 하나씩 쪼개고 공백을 다듬는다', () => {
+        assert.deepStrictEqual(parseReferenceAlternatives('  a.x  ??  b.y  '), [
+            { text: 'a.x', head: 'a', key: 'x' },
+            { text: 'b.y', head: 'b', key: 'y' },
+        ]);
+    });
+
+    test('?? 체인에 bare 대안이 섞여도 대안마다 판정한다', () => {
+        assert.deepStrictEqual(parseReferenceAlternatives('a ?? b.y'), [
+            { text: 'a', head: 'a', key: undefined },
+            { text: 'b.y', head: 'b', key: 'y' },
+        ]);
+    });
+
+    test('빈 대안은 버린다 (전부 비면 빈 배열)', () => {
+        // 런타임의 `resolvePipelineReference('??')` 도 돌 대안이 없어 undefined
+        // 를 내고 리터럴로 남는다 — 빈 배열이 그 상태와 같은 뜻이다.
+        assert.deepStrictEqual(parseReferenceAlternatives('a.x ?? '),
+            [{ text: 'a.x', head: 'a', key: 'x' }]);
+        assert.deepStrictEqual(parseReferenceAlternatives('??'), []);
+    });
+
+    test('런타임 해석과 같은 것을 가리킨다', () => {
+        // 파서가 읽은 head/key 로 값을 찾은 결과와 `resolvePipelineReference` 의
+        // 답이 어긋나면 진단이 거짓말을 한다. bare 폴백(`output`/`outputDir`)과
+        // own property 규칙까지 흉내 내어, 파서가 가리키는 자리가 런타임이 보는
+        // 자리와 같은지 본다.
+        // **평범한 객체**를 쓴다 — 그래야 own property 규칙이 실제로 시험된다.
+        // 어느 한쪽이 상속된 키를 보면 `${constructor.name}` 에서 갈린다.
+        const ctx: any = {
+            a: { x: 'AX' },
+            b: { y: 'BY' },
+            withOut: { output: 'OUT' },
+            withDir: { outputDir: 'DIR' },
+            neither: { archivePath: 'ZIP' },
+        };
+        const own = (o: any, k: string): unknown =>
+            o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined;
+        const lookup = (alt: { head: string; key: string | undefined }): unknown => {
+            const step = own(ctx, alt.head);
+            if (alt.key !== undefined) { return own(step, alt.key); }
+            if (!step) { return undefined; }
+            // bare 는 대표 결과 — 런타임과 같은 순서로 폴백한다.
+            if (own(step, 'output') !== undefined) { return own(step, 'output'); }
+            if (own(step, 'outputDir') !== undefined) { return own(step, 'outputDir'); }
+            // 둘 다 없으면 런타임은 **결과 객체 자체**를 돌려준다. 문자열이
+            // 아니라 sanitize 에서 걸려 리터럴로 남는 자리다 (`zip` 처럼
+            // `archivePath` 만 내는 태스크).
+            return step;
+        };
+        const cases = [
+            'a.x', 'b.y', 'a.nope', 'a.', ' a.x', 'a. x',
+            'withOut', 'withDir', 'neither', 'nosuch',
+            'constructor.name', 'toString.name',
+            'a.x ?? b.y', 'a.nope ?? b.y', 'a.nope ?? b.nope',
+            'withOut ?? b.y', 'neither ?? b.y', 'a.nope ?? withDir',
+        ];
+        for (const expr of cases) {
+            const first = parseReferenceAlternatives(expr)
+                .map(lookup)
+                .find(value => value !== undefined);
+            assert.strictEqual(resolvePipelineReference(expr, ctx), first, expr);
+        }
     });
 });
 

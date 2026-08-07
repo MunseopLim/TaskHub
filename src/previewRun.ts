@@ -15,9 +15,10 @@
 
 import * as path from 'path';
 import type { Action, ActionItem, Task, OutputCapture } from './schema';
+import type { ReferenceAlternative } from './pipelineUtils';
 import {
     interpolatePipelineVariables,
-    splitCoalesceAlternatives,
+    parseReferenceAlternatives,
     resolveArchiveTaskPath,
     interpolateCommandPreservingTokens,
     expandArgTemplate,
@@ -191,19 +192,14 @@ function visitTaskRefs(
     const visit = (value: unknown): void => {
         if (typeof value === 'string') {
             for (const m of value.matchAll(/\$\{([^}]+)\}/g)) {
-                const expr = m[1];
                 // `??` 체인은 **대안 하나하나**가 참조다. 통째로 쪼개면
                 // `pickFile.path ?? pickFolder.path` 의 키가
-                // `path ?? pickFolder.path` 로 읽혀 멀쩡한 참조가 오타로 잡힌다.
-                const alternatives = splitCoalesceAlternatives(expr) ?? [expr];
-                const refs: { head: string; key: string }[] = [];
-                for (const alt of alternatives) {
-                    const dotIdx = alt.indexOf('.');
-                    // bare `${id}` 단축형은 키가 없어 판정할 것이 없다. 체인에
-                    // 섞여 있으면 그 대안만 건너뛰고 나머지는 평소대로 본다.
-                    if (dotIdx === -1) { continue; }
-                    refs.push({ head: alt.slice(0, dotIdx).trim(), key: alt.slice(dotIdx + 1).trim() });
-                }
+                // `path ?? pickFolder.path` 로 읽힌다.
+                //
+                // bare `${id}` 단축형은 키가 없어 여기서 판정할 것이 없다. 체인에
+                // 섞여 있으면 그 대안만 건너뛰고 나머지는 평소대로 본다.
+                const refs = parseReferenceAlternatives(m[1])
+                    .filter((alt): alt is ReferenceAlternative & { key: string } => alt.key !== undefined);
                 if (refs.length === 0) { continue; }
                 onRef(m[0], refs);
             }
@@ -265,77 +261,49 @@ export function findUncapturedOutputRefs(
 }
 
 /**
- * Pull the head identifier out of a matched `${expr}` literal. Mirrors
- * `interpolatePipelineVariables`'s split on `.` so the same head the
- * runtime would look up in the context is what we test for tolerance.
- * Returns `''` if the match is malformed.
+ * 보간 후 남은 `${expr}` 리터럴을 런타임과 같은 규칙으로 읽는다
+ * ({@link parseReferenceAlternatives}). 형태가 아니면 빈 배열 — 판정 근거가
+ * 없으므로 호출부는 "관용하지 않음" 으로 다룬다.
  */
-function extractRefHead(match: string): string {
+function parseRefLiteral(match: string): ReferenceAlternative[] {
     if (!match.startsWith('${') || !match.endsWith('}') || match.length < 4) {
-        return '';
+        return [];
     }
-    const expr = match.slice(2, -1);
-    const dotIdx = expr.indexOf('.');
-    // **trim 하지 않는다** — `resolvePipelineReference` 는 `expression.split('.')`
-    // 의 결과를 그대로 키로 쓴다. `${ producer.output}` 의 head 는 `" producer"`
-    // 이고 어떤 태스크 id 와도 맞지 않아 런타임에서는 리터럴로 남는다. 여기서
-    // 다듬으면 그 오타가 정상 참조로 보인다.
-    return dotIdx === -1 ? expr : expr.slice(0, dotIdx);
-}
-
-/**
- * `${expr}` 에서 head 뒤의 속성 경로를 꺼낸다. **점이 없으면 `undefined`**
- * (bare 참조). 점이 있으면 그 뒤 전부가 키다.
- *
- * 두 가지를 일부러 지킨다.
- *
- * - **`''` 와 `undefined` 를 구분한다.** `${producer.}` 는 점이 있으므로 bare 가
- *   아니고, 런타임(`resolvePipelineReference`)도 bare 로 보지 않아 리터럴로
- *   남긴다. 둘을 같은 값으로 뭉개면 이 오타가 Preview·Doctor 에서 조용히
- *   정상 참조로 통과한다.
- * - **trim 하지 않는다.** 런타임은 키를 다듬지 않으므로 `${producer. output}` 의
- *   키는 `" output"` 이고 어떤 결과 키와도 맞지 않는다. 여기서 trim 하면
- *   런타임이 리터럴로 남길 오타를 해석되는 것처럼 보여 준다.
- */
-function extractRefKey(match: string): string | undefined {
-    if (!match.startsWith('${') || !match.endsWith('}') || match.length < 4) {
-        return undefined;
-    }
-    const expr = match.slice(2, -1);
-    const dotIdx = expr.indexOf('.');
-    return dotIdx === -1 ? undefined : expr.slice(dotIdx + 1);
+    return parseReferenceAlternatives(match.slice(2, -1));
 }
 
 /**
  * Collect every `${...}` reference that survived interpolation across the
- * given values. When `toleratedHeads` is provided, references whose head
- * (the `id` in `${id.key}`) belongs to that set are suppressed — used by
- * Doctor and Preview Run to silence *future-task* false positives where a
- * task in declaration order references a sibling that's only present in
- * the simulated context after it. The runtime's graph scheduler honors
- * the real dep, so the warning was misleading.
+ * given values. When `tolerate` is provided, references it accepts are
+ * suppressed — used by Doctor and Preview Run to silence *future-task*
+ * false positives where a task in declaration order references a sibling
+ * that's only present in the simulated context after it. The runtime's
+ * graph scheduler honors the real dep, so the warning was misleading.
  *
- * Caller responsibility: pass ONLY the forward task ids (those not yet
- * simulated / not yet in `allResults`). If you also pass already-executed
+ * Caller responsibility: tolerate ONLY forward task ids (those not yet
+ * simulated / not yet in `allResults`). If you also tolerate already-executed
  * ids, you suppress `${alreadyRan.typoKey}` style typos: at that point
  * the runtime has a real result for `alreadyRan`, the typoed key is
  * genuinely missing, and the user should hear about it. Doctor /
  * Preview compute `forwardTaskIds` per iteration to honor this.
+ *
+ * `??` 체인은 **대안마다** 판정하고 하나라도 관용되면 리터럴 전체를 넘어간다 —
+ * 런타임이 먼저 풀리는 대안을 쓰므로, 하나만 풀려도 리터럴로 남지 않기 때문이다.
  */
 export function findUnresolved(
     values: (string | undefined)[],
-    tolerate?: ReadonlySet<string> | RefTolerance
+    accept: RefTolerance = () => false
 ): string[] {
-    const accept: RefTolerance = typeof tolerate === 'function'
-        ? tolerate
-        : (_literal, head) => tolerate !== undefined && tolerate.has(head);
     const seen = new Set<string>();
     for (const v of values) {
         if (typeof v !== 'string') { continue; }
         const matches = v.match(UNRESOLVED_VAR_RE);
         if (matches) {
             for (const m of matches) {
-                if (accept(m, extractRefHead(m))) { continue; }
+                // **대안 하나라도** 관용 대상이면 리터럴 전체를 넘어간다.
+                // `??` 는 먼저 풀리는 것이 이기므로, 하나만 풀려도 런타임에서
+                // 리터럴로 남지 않는다 — 여기서 보고하면 거짓말이 된다.
+                if (parseRefLiteral(m).some(alt => accept(alt))) { continue; }
                 seen.add(m);
             }
         }
@@ -344,9 +312,11 @@ export function findUnresolved(
 }
 
 /**
- * `${…}` 리터럴 하나를 "보고하지 않아도 되는가"로 판정한다. `true` 면 관용.
+ * 참조의 **대안 하나**를 "보고하지 않아도 되는가"로 판정한다. `true` 면 관용.
+ * `??` 체인은 대안마다 한 번씩 불리고, 하나라도 `true` 면 리터럴 전체가 관용된다
+ * ({@link findUnresolved}).
  */
-export type RefTolerance = (literal: string, head: string) => boolean;
+export type RefTolerance = (alternative: ReferenceAlternative) => boolean;
 
 /**
  * 시뮬레이션 결과에 **capture 로 파생되는 이름까지** 얹은 것. downstream
@@ -406,14 +376,13 @@ export function makeForwardRefTolerance(
         }
         return sim;
     };
-    return (literal, head) => {
+    return ({ head, key }) => {
         if (head === selfId) { return false; }
         if (!forwardTaskIds.has(head)) { return false; }
         const task = tasksById.get(head);
         // id 는 알지만 태스크 본체를 못 찾는 경우는 판단 근거가 없다 → 관용.
         if (!task) { return true; }
         const sim = resultFor(head, task);
-        const key = extractRefKey(literal);
         if (key === undefined) {
             // bare `${id}` 는 대표 결과를 뜻한다. 런타임은 `output` 또는
             // `outputDir` 이 있을 때만 해석하고(`resolvePipelineReference`),

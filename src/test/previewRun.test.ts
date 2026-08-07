@@ -2,8 +2,8 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { buildPreviewReport } from '../previewRun';
-import type { ActionItem } from '../schema';
+import { buildPreviewReport, findTypoRefs, findUncapturedOutputRefs } from '../previewRun';
+import type { ActionItem, Task } from '../schema';
 
 const WS = path.resolve(os.tmpdir(), 'taskhub-preview-ws');
 
@@ -905,6 +905,31 @@ suite('buildPreviewReport', () => {
             assert.match(report, /unresolved variables:/);
         });
 
+        test('findTypoRefs 도 키의 공백을 다듬지 않는다', () => {
+            // 위 테스트의 뒤쪽 절반. 전방 참조는 `findUnresolved` 가, 이미
+            // 시뮬레이션된 참조는 `findTypoRefs` 가 본다 — 후자가 키를 다듬으면
+            // `" path"` 가 `path` 로 읽혀 런타임이 리터럴로 남길 오타가 이 pass
+            // 를 통과한다. 리포트 문자열로는 두 pass 를 구별할 수 없어(둘 다
+            // `unresolved variables:` 로 합쳐진다) 함수를 직접 부른다.
+            const task = { id: 'use', type: 'shell', command: 'echo ${pick. path}' } as Task;
+            assert.deepStrictEqual(
+                findTypoRefs(task, { pick: { path: 'P' } }, 'use'),
+                ['${pick. path}']
+            );
+        });
+
+        test('findUncapturedOutputRefs 도 키의 공백을 다듬지 않는다', () => {
+            // `${build. output}` 은 런타임에서 어떤 키와도 맞지 않는다.
+            // 다듬어 `output` 으로 읽으면 "패스 설정을 켜라" 는 처방을 내놓지만
+            // 켜도 해결되지 않는다.
+            const consumer = { id: 'use', type: 'shell', command: 'echo ${build. output}' } as Task;
+            const build = { id: 'build', type: 'shell', command: 'make' } as Task;
+            assert.strictEqual(
+                findUncapturedOutputRefs(consumer, new Map([['build', build]]), 'use').size,
+                0
+            );
+        });
+
         test('자기 자신을 가리키는 참조는 관용하지 않는다', () => {
             // 아직 시뮬레이션되지 않았다는 이유로 forwardTaskIds 에 들어가지만,
             // 런타임 컨텍스트에는 자기 자신이 없다.
@@ -994,6 +1019,89 @@ suite('buildPreviewReport', () => {
             assert.match(report, /unresolved variables:.*\$\{pick\.ver\}/);
         });
 
+        /**
+         * `??` 체인의 전방 참조. 관용 판정이 참조를 통째로 첫 `.` 으로 자르면
+         * `${producer.output ?? other.output}` 의 키가 `"output ?? other.output"`
+         * 이 되어 어떤 결과 키와도 맞지 않고, 멀쩡한 체인이 미해결로 보고됐다.
+         */
+        suite('?? 체인의 전방 참조', () => {
+            function forwardChain(expr: string): ActionItem {
+                return {
+                    id: 'a.fwdcoalesce',
+                    title: 'forward coalesce',
+                    action: {
+                        description: 'x',
+                        tasks: [
+                            { id: 'consumer', type: 'shell', parallel: true, command: `use ${expr}`, passTheResultToNextTask: true },
+                            { id: 'bA', type: 'shell', parallel: true, command: 'make a', passTheResultToNextTask: true },
+                            { id: 'bB', type: 'shell', parallel: true, command: 'make b', passTheResultToNextTask: true }
+                        ]
+                    }
+                } as ActionItem;
+            }
+
+            test('대안이 모두 실재하는 키면 관용한다', () => {
+                const report = buildPreviewReport(forwardChain('${bA.output ?? bB.output}'), baseOptions());
+                assert.doesNotMatch(report, /unresolved variables:/);
+            });
+
+            test('앞 대안 하나만 풀려도 관용한다', () => {
+                // 런타임은 먼저 풀리는 대안을 쓴다 — 리터럴로 남지 않으므로
+                // "리터럴로 전달됩니다" 는 거짓이 된다.
+                const report = buildPreviewReport(forwardChain('${bA.output ?? nosuch.value}'), baseOptions());
+                assert.doesNotMatch(report, /unresolved variables:/);
+            });
+
+            test('뒤 대안 하나만 풀려도 관용한다', () => {
+                const report = buildPreviewReport(forwardChain('${nosuch.value ?? bB.output}'), baseOptions());
+                assert.doesNotMatch(report, /unresolved variables:/);
+            });
+
+            test('대안이 전부 어긋나면 보고한다', () => {
+                const report = buildPreviewReport(forwardChain('${bA.nope ?? bB.alsoNope}'), baseOptions());
+                assert.match(report, /unresolved variables:.*\$\{bA\.nope \?\? bB\.alsoNope\}/);
+            });
+
+            test('?? 체인은 대안 주위의 공백을 다듬는다', () => {
+                // 사람이 손으로 쓰는 연산자라 `a.x ?? b.y` 처럼 띄어 쓰는 것이
+                // 자연스럽다. 런타임(`splitCoalesceAlternatives`)도 다듬는다.
+                const report = buildPreviewReport(forwardChain('${  bA.output   ??   bB.output  }'), baseOptions());
+                assert.doesNotMatch(report, /unresolved variables:/);
+            });
+
+            test('bare 대안도 output 이 있으면 관용한다', () => {
+                const report = buildPreviewReport(forwardChain('${bA ?? bB.nope}'), baseOptions());
+                assert.doesNotMatch(report, /unresolved variables:/);
+            });
+
+            test('뒤쪽 대안이 전방이어도 앞쪽 대안의 오타는 잡는다', () => {
+                // 관용은 `findUnresolved` 쪽 이야기다. 이미 시뮬레이션된 대안의
+                // 오타는 `findTypoRefs` 가 raw 리터럴에서 따로 본다 — 전방 대안
+                // 하나가 멀쩡하다고 해서 그 오타까지 덮이면 안 된다.
+                const item: ActionItem = {
+                    id: 'a.mixchain',
+                    title: 'mixed chain',
+                    action: {
+                        description: 'x',
+                        tasks: [
+                            { id: 'back', type: 'fileDialog', parallel: true },
+                            { id: 'consumer', type: 'shell', parallel: true, command: 'use ${back.nope ?? fwd.output}', passTheResultToNextTask: true },
+                            { id: 'fwd', type: 'shell', parallel: true, command: 'make', passTheResultToNextTask: true }
+                        ]
+                    }
+                } as ActionItem;
+                const report = buildPreviewReport(item, baseOptions());
+                assert.match(report, /unresolved variables:.*\$\{back\.nope \?\? fwd\.output\}/);
+            });
+
+            test('자기 자신은 체인 안에서도 관용하지 않는다', () => {
+                // 런타임 컨텍스트에는 자기 자신이 없다. 대안 하나가 자기 참조면
+                // 그 대안은 절대 풀리지 않는다.
+                const report = buildPreviewReport(forwardChain('${consumer.output ?? bB.nope}'), baseOptions());
+                assert.match(report, /unresolved variables:/);
+            });
+        });
+
         test('전방 dialog 태스크의 실제 키도 관용한다 (회귀 방지)', () => {
             const item: ActionItem = {
                 id: 'a.fwddlg',
@@ -1031,6 +1139,27 @@ suite('buildPreviewReport', () => {
             const report = buildPreviewReport(item, baseOptions());
             assert.match(report, /\$\{build\.output\}.*'build' does not set 'passTheResultToNextTask'/);
             assert.match(report, /fix before running/);
+        });
+
+        test('키에 공백이 섞이면 미캡처가 아니라 미해결로 본다', () => {
+            // 런타임은 키를 다듬지 않으므로 `${build. output}` 의 키는 `" output"`
+            // 이고, 그 태스크가 결과를 넘겼든 아니든 어떤 키와도 맞지 않는다.
+            // 여기서 다듬어 `output` 으로 읽으면 "패스 설정을 켜라" 는 엉뚱한
+            // 처방을 내놓는다 — 켜도 해결되지 않는다.
+            const item: ActionItem = {
+                id: 'a.m9ws',
+                title: 'uncaptured whitespace',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'build', type: 'shell', command: 'make all' },
+                        { id: 'deploy', type: 'shell', command: 'deploy ${build. output}', passTheResultToNextTask: true }
+                    ]
+                }
+            };
+            const report = buildPreviewReport(item, baseOptions());
+            assert.doesNotMatch(report, /does not set 'passTheResultToNextTask'/);
+            assert.match(report, /unresolved variables:.*\$\{build\. output\}/);
         });
 
         test('flags forward reference to an uncaptured task', () => {

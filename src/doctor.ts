@@ -30,6 +30,7 @@ import type { ActionItem, Task, OutputCapture, DiagnosticPattern } from './schem
 import {
     interpolatePipelineVariables,
     expandArgTemplate,
+    parseReferenceAlternatives,
     resolvePipelineReference,
     tokenizeCommandLine,
     RESERVED_CAPTURE_NAMES,
@@ -908,14 +909,25 @@ function analyzeActionTasks(
          * 액션은 정상 동작한다 — 그런데 그 시점의 컨텍스트에는 `pick` 이 없어
          * 배열인지 알 수 없고, 경고가 조용히 빠졌다. 아직 시뮬레이션되지 않은
          * 태스크는 여기서 따로 흉내 내어 **결과의 모양만** 본다.
+         *
+         * `??` 체인은 대안을 따로 보지 않고 **덧댄 컨텍스트에서 표현식 전체를
+         * 한 번** 푼다. 먼저 풀리는 대안이 이기므로, 앞 대안이 문자열이면 뒤
+         * 대안이 배열이어도 체인의 값은 배열이 아니다 — 대안별로 보면 그 순서를
+         * 잃는다.
          */
         const referencesArray = (expression: string): boolean => {
             if (Array.isArray(resolvePipelineReference(expression, interpolationContext))) { return true; }
-            const head = expression.split('.')[0];
-            if (!head || Object.prototype.hasOwnProperty.call(allResults, head)) { return false; }
-            const forward = tasksById.get(head);
-            if (!forward) { return false; }
-            return Array.isArray(resolvePipelineReference(expression, { [head]: simulateTaskResult(forward) }));
+            const augmented = Object.assign(Object.create(null), interpolationContext);
+            let addedForward = false;
+            for (const { head } of parseReferenceAlternatives(expression)) {
+                if (!head || Object.prototype.hasOwnProperty.call(allResults, head)) { continue; }
+                const forward = tasksById.get(head);
+                if (!forward) { continue; }
+                augmented[head] = simulateTaskResult(forward);
+                addedForward = true;
+            }
+            // 덧댈 것이 없었으면 위에서 이미 답이 나온 것과 같은 컨텍스트다.
+            return addedForward && Array.isArray(resolvePipelineReference(expression, augmented));
         };
 
         /**

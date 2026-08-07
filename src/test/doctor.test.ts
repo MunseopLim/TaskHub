@@ -439,6 +439,65 @@ suite('Doctor', () => {
             `?? 체인에 경고가 붙었다: ${codes(findings).join(',')}`);
     });
 
+    /**
+     * 같은 오탐의 **전방 참조 쪽 절반.**
+     *
+     * 위 테스트는 이미 시뮬레이션된 태스크를 가리키는 경우(`findTypoRefs`)만
+     * 막았고, 아직 시뮬레이션되지 않은 태스크를 가리키는 경로
+     * (`makeForwardRefTolerance`)는 여전히 참조 전체를 첫 `.` 으로 잘라
+     * 키를 `"output ?? bB.output"` 으로 읽었다. `??` 는 병렬 분기의 결과를
+     * 모으는 데 쓰는 문법이라 전방 참조가 오히려 흔한 형태다.
+     *
+     * 둘 다 `parallel: true` 여야 실제로 돌아가는 DAG 다 — sequential 인 뒤쪽
+     * 태스크는 앞의 모든 태스크를 기다리는 암묵적 barrier 라 사이클이 된다.
+     */
+    test('전방 태스크를 가리키는 ?? 체인도 오탐하지 않는다', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.coalesce.fwd',
+                title: 'coalesce forward',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        {
+                            id: 'report', type: 'command', command: 'node', parallel: true,
+                            args: ['${bA.output ?? bB.output}']
+                        },
+                        { id: 'bA', type: 'shell', command: 'make a', parallel: true, passTheResultToNextTask: true },
+                        { id: 'bB', type: 'shell', command: 'make b', parallel: true, passTheResultToNextTask: true }
+                    ]
+                }
+            }
+        ])], v);
+        assert.deepStrictEqual(codes(findings), [],
+            `전방 ?? 체인에 경고가 붙었다: ${findings.map(f => f.message).join(' | ')}`);
+    });
+
+    test('전방 ?? 체인도 대안이 전부 어긋나면 잡는다', () => {
+        // 관용이 "대안 하나라도 풀리면" 이지 "?? 면 무조건" 이 아님을 고정한다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.coalesce.fwd.bad',
+                title: 'coalesce forward bad',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        {
+                            id: 'report', type: 'command', command: 'node', parallel: true,
+                            args: ['${bA.nope ?? bB.alsoNope}']
+                        },
+                        { id: 'bA', type: 'shell', command: 'make a', parallel: true, passTheResultToNextTask: true },
+                        { id: 'bB', type: 'shell', command: 'make b', parallel: true, passTheResultToNextTask: true }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `전부 어긋난 전방 체인을 놓쳤다: ${codes(findings).join(',')}`);
+    });
+
     test('?? 체인 안의 오타는 대안 하나만 틀려도 잡는다', () => {
         // ?? 는 어긋난 참조를 조용히 건너뛰고 다음 대안을 쓴다 — 동작이 멀쩡해
         // 보이므로 오히려 알려 줘야 한다.
@@ -1024,6 +1083,47 @@ suite('Doctor', () => {
             `expected args.array-joined for the forward reference, got ${codes(findings).join(',')}`);
         assert.ok(!findings.some(f => f.code === 'dependsOn.cycle'),
             '픽스처가 순환이면 이 액션은 애초에 돌지 않는다 — 전방 참조를 검증한 것이 아니다');
+    });
+
+    test('앞 대안이 이미 실행된 태스크여도 뒤쪽 전방 배열을 놓치지 않는다', () => {
+        // 배열 판정기는 참조를 통째로 첫 `.` 으로 잘라 head 를 `chosen` 하나로
+        // 읽었다. `chosen` 은 이미 시뮬레이션된 태스크라 "전방이 아니니 볼 것
+        // 없다" 로 빠졌고, 실제로 값을 내는 뒤쪽 전방 대안(`pick.paths`)은
+        // 판정에 들어오지도 못했다 — 런타임에서는 인자가 실제로 이어 붙는다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([{
+            id: 'a.forwardCoalesce', title: 'forward coalesce',
+            action: {
+                description: 'd',
+                tasks: [
+                    // `chosen` 에는 `paths` 가 없다 — 체인은 뒤 대안으로 넘어간다.
+                    { id: 'chosen', type: 'quickPick', items: ['a', 'b'], parallel: true },
+                    { id: 'run', type: 'command', command: 'py', args: ['--files=${chosen.paths ?? pick.paths}'], parallel: true },
+                    { id: 'pick', type: 'fileDialog', options: { canSelectMany: true }, parallel: true }
+                ]
+            }
+        }])], v);
+        assert.ok(findings.some(f => f.code === 'args.array-joined'),
+            `expected args.array-joined for the forward ?? chain, got ${codes(findings).join(',')}`);
+    });
+
+    test('앞 대안이 배열이 아니면 체인 전체도 배열이 아니다', () => {
+        // `??` 는 먼저 풀리는 대안이 이긴다. 대안별로 "하나라도 배열이면" 으로
+        // 보면, 실제로는 문자열 하나가 들어가는 자리에 경고가 붙는다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([{
+            id: 'a.forwardCoalesceStr', title: 'forward coalesce string',
+            action: {
+                description: 'd',
+                tasks: [
+                    { id: 'run', type: 'command', command: 'py', args: ['--files=${pickOne.path ?? pickMany.paths}'], parallel: true },
+                    { id: 'pickOne', type: 'fileDialog', parallel: true },
+                    { id: 'pickMany', type: 'fileDialog', options: { canSelectMany: true }, parallel: true }
+                ]
+            }
+        }])], v);
+        assert.ok(!findings.some(f => f.code === 'args.array-joined'),
+            `문자열로 풀리는 체인에 경고가 붙었다: ${codes(findings).join(',')}`);
     });
 
     test('전방 참조라도 스칼라 참조에는 경고하지 않는다', () => {
