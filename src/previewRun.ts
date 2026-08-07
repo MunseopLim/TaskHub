@@ -17,6 +17,7 @@ import * as path from 'path';
 import type { Action, ActionItem, Task, OutputCapture } from './schema';
 import {
     interpolatePipelineVariables,
+    splitCoalesceAlternatives,
     resolveArchiveTaskPath,
     interpolateCommandPreservingTokens,
     expandArgTemplate,
@@ -159,12 +160,18 @@ export function findTypoRefs(
     selfId: string
 ): string[] {
     const found = new Set<string>();
-    visitTaskRefs(task, (literal, head, key) => {
-        if (head === selfId || key === '') { return; }
-        const result = allResults[head];
-        if (!result) { return; } // forward ref / built-in / unknown
-        if (!Object.prototype.hasOwnProperty.call(result, key)) {
-            found.add(literal);
+    // **대안 하나하나를 본다.** `??` 는 어긋난 참조를 조용히 건너뛰고 다음
+    // 대안을 쓰므로, 오타가 있어도 동작은 멀쩡해 보인다 — 그래서 오히려 여기서
+    // 알려야 한다. 판정 규칙 자체는 평범한 참조와 같다.
+    visitTaskRefs(task, (literal, refs) => {
+        for (const { head, key } of refs) {
+            if (head === selfId || key === '') { continue; }
+            const result = allResults[head];
+            if (!result) { continue; } // forward ref / built-in / unknown
+            if (!Object.prototype.hasOwnProperty.call(result, key)) {
+                found.add(literal);
+                return;
+            }
         }
     });
     return Array.from(found);
@@ -179,15 +186,26 @@ export function findTypoRefs(
  */
 function visitTaskRefs(
     task: Task,
-    onRef: (literal: string, head: string, key: string) => void
+    onRef: (literal: string, refs: ReadonlyArray<{ head: string; key: string }>) => void
 ): void {
     const visit = (value: unknown): void => {
         if (typeof value === 'string') {
             for (const m of value.matchAll(/\$\{([^}]+)\}/g)) {
                 const expr = m[1];
-                const dotIdx = expr.indexOf('.');
-                if (dotIdx === -1) { continue; } // bare `${id}` short-form
-                onRef(m[0], expr.slice(0, dotIdx).trim(), expr.slice(dotIdx + 1).trim());
+                // `??` 체인은 **대안 하나하나**가 참조다. 통째로 쪼개면
+                // `pickFile.path ?? pickFolder.path` 의 키가
+                // `path ?? pickFolder.path` 로 읽혀 멀쩡한 참조가 오타로 잡힌다.
+                const alternatives = splitCoalesceAlternatives(expr) ?? [expr];
+                const refs: { head: string; key: string }[] = [];
+                for (const alt of alternatives) {
+                    const dotIdx = alt.indexOf('.');
+                    // bare `${id}` 단축형은 키가 없어 판정할 것이 없다. 체인에
+                    // 섞여 있으면 그 대안만 건너뛰고 나머지는 평소대로 본다.
+                    if (dotIdx === -1) { continue; }
+                    refs.push({ head: alt.slice(0, dotIdx).trim(), key: alt.slice(dotIdx + 1).trim() });
+                }
+                if (refs.length === 0) { continue; }
+                onRef(m[0], refs);
             }
             return;
         }
@@ -222,20 +240,25 @@ export function findUncapturedOutputRefs(
     selfId: string
 ): Map<string, string> {
     const found = new Map<string, string>();
-    visitTaskRefs(task, (literal, head, key) => {
-        if (head === selfId || key === '') { return; }
-        const headTask = tasksById.get(head);
-        if (!headTask || (headTask.type !== 'shell' && headTask.type !== 'command')) { return; }
-        if (headTask.passTheResultToNextTask) { return; }
-        const captureNames = new Set<string>();
-        if (headTask.output?.capture) {
-            const rules = Array.isArray(headTask.output.capture) ? headTask.output.capture : [headTask.output.capture];
-            for (const r of rules) {
-                if (r && typeof r.name === 'string') { captureNames.add(r.name); }
+    // 여기도 대안 하나하나를 본다 — `??` 가 미캡처 참조를 건너뛰어도 그 참조를
+    // 쓴 것은 사용자의 의도이므로 알려야 한다.
+    visitTaskRefs(task, (literal, refs) => {
+        for (const { head, key } of refs) {
+            if (head === selfId || key === '') { continue; }
+            const headTask = tasksById.get(head);
+            if (!headTask || (headTask.type !== 'shell' && headTask.type !== 'command')) { continue; }
+            if (headTask.passTheResultToNextTask) { continue; }
+            const captureNames = new Set<string>();
+            if (headTask.output?.capture) {
+                const rules = Array.isArray(headTask.output.capture) ? headTask.output.capture : [headTask.output.capture];
+                for (const r of rules) {
+                    if (r && typeof r.name === 'string') { captureNames.add(r.name); }
+                }
             }
-        }
-        if (key === 'output' || captureNames.has(key)) {
-            found.set(literal, head);
+            if (key === 'output' || captureNames.has(key)) {
+                found.set(literal, head);
+                return;
+            }
         }
     });
     return found;

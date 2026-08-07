@@ -409,6 +409,129 @@ suite('Doctor', () => {
             `expected variable.unresolved, got ${codes(findings).join(',')}`);
     });
 
+    /**
+     * `??` 체인을 오타로 잡던 회귀.
+     *
+     * 참조를 통째로 `.` 으로 쪼개면 `pickFile.path ?? pickFolder.path` 의 키가
+     * `path ?? pickFolder.path` 로 읽혀, 멀쩡한 참조에 경고가 붙었다. 조건부
+     * 태스크(`when`)를 쓰면 이 문법이 사실상 필수라 모든 분기 액션에 경고가 떴다.
+     */
+    test('?? 체인은 오탐하지 않는다', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.coalesce',
+                title: 'coalesce',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'pickFile', type: 'fileDialog' },
+                        { id: 'pickFolder', type: 'folderDialog' },
+                        {
+                            id: 'report', type: 'command', command: 'node',
+                            args: ['${pickFile.path ?? pickFolder.path}']
+                        }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(!findings.some(f => f.code === 'variable.unresolved'),
+            `?? 체인에 경고가 붙었다: ${codes(findings).join(',')}`);
+    });
+
+    test('?? 체인 안의 오타는 대안 하나만 틀려도 잡는다', () => {
+        // ?? 는 어긋난 참조를 조용히 건너뛰고 다음 대안을 쓴다 — 동작이 멀쩡해
+        // 보이므로 오히려 알려 줘야 한다.
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.coalesce.half',
+                title: 'coalesce half',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'pickFile', type: 'fileDialog' },
+                        { id: 'pickFolder', type: 'folderDialog' },
+                        {
+                            id: 'report', type: 'command', command: 'node',
+                            args: ['${pickFile.nope ?? pickFolder.path}', '${pickFile.path ?? pickFolder.alsoNope}']
+                        }
+                    ]
+                }
+            }
+        ])], v);
+        const reported = findings.filter(f => f.code === 'variable.unresolved');
+        assert.strictEqual(reported.length, 1, `기대: 경고 1건, 실제: ${codes(findings).join(',')}`);
+        // 첫 대안의 오타도, **두 번째 대안**의 오타도 잡아야 한다 — 앞만 보면
+        // 뒤쪽 오타가 ?? 뒤에 영영 숨는다.
+        assert.ok(reported[0].message.includes('pickFile.nope'), reported[0].message);
+        assert.ok(reported[0].message.includes('pickFolder.alsoNope'), reported[0].message);
+    });
+
+    test('?? 체인도 대안이 전부 어긋나면 잡는다 (가드가 과하지 않다)', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.coalesce.bad',
+                title: 'coalesce bad',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'pickFile', type: 'fileDialog' },
+                        { id: 'pickFolder', type: 'folderDialog' },
+                        {
+                            id: 'report', type: 'command', command: 'node',
+                            args: ['${pickFile.nope ?? pickFolder.alsoNope}']
+                        }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+            `전부 어긋난 체인을 놓쳤다: ${codes(findings).join(',')}`);
+    });
+
+    test('when 의 연산자가 여럿이면 잡는다', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.when.ops',
+                title: 'when ops',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'pick', type: 'quickPick', items: ['a', 'b'] },
+                        {
+                            id: 'run', type: 'shell', command: 'echo hi',
+                            when: { var: '${pick.value}', equals: 'a', notEquals: 'b' }
+                        }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'when.operators'),
+            `expected when.operators, got ${codes(findings).join(',')}`);
+    });
+
+    test('when.matches 의 잘못된 정규식을 잡는다', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([
+            {
+                id: 'a.when.regex',
+                title: 'when regex',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: 'pick', type: 'quickPick', items: ['a'] },
+                        { id: 'run', type: 'shell', command: 'echo hi', when: { var: '${pick.value}', matches: '[' } }
+                    ]
+                }
+            }
+        ])], v);
+        assert.ok(findings.some(f => f.code === 'when.regex'),
+            `expected when.regex, got ${codes(findings).join(',')}`);
+    });
+
     test('flags a forward reference to a capture the producer never declares', () => {
         // 전방 참조는 정상이지만(자동 추론이 순서를 뒤집는다) **키까지** 관용하면
         // `${producer.safe}` 오타가 앞쪽 producer 에 대해서만 조용히 지나간다.
