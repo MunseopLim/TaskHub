@@ -39,6 +39,26 @@ suite('extractVariableHeads', () => {
         assert.deepStrictEqual(extractVariableHeads('${name}'), ['name']);
     });
 
+    /**
+     * `??` 체인은 **모든 대안**을 의존성으로 내야 한다.
+     *
+     * 하나만 잡으면 소비자가 살아남은 쪽이 값을 내기 전에 실행된다 — 조건으로
+     * 갈린 분기에서 정확히 그 일이 난다: 꺼진 쪽은 즉시 settle 하므로, 그쪽만
+     * 의존성으로 잡히면 실행 중인 쪽을 기다리지 않는다.
+     */
+    test('?? 체인의 대안을 모두 head 로 낸다', () => {
+        assert.deepStrictEqual(extractVariableHeads('${pickFile.path ?? pickFolder.path}'), ['pickFile', 'pickFolder']);
+        assert.deepStrictEqual(extractVariableHeads('${a.x ?? b.y ?? c.z}'), ['a', 'b', 'c']);
+        assert.deepStrictEqual(extractVariableHeads('${a.x??b.y}'), ['a', 'b'], '공백 없이 써도 같아야 한다');
+    });
+
+    test('?? 가 없는 참조는 한 글자도 다듬지 않는다', () => {
+        // 스키마는 태스크 id 에 공백을 금지하지 않는다. 다듬으면 의존성은
+        // `producer` 로 잡히는데 런타임은 `" producer"` 를 못 찾아 리터럴로
+        // 남는다 — 순서만 잡히고 값은 안 오는 상태가 된다.
+        assert.deepStrictEqual(extractVariableHeads('${ producer.output}'), [' producer']);
+    });
+
     test('extracts multiple heads in declaration order', () => {
         assert.deepStrictEqual(
             extractVariableHeads('${A.output} -- ${B.outputDir}/${C}'),

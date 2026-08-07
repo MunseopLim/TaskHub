@@ -426,7 +426,32 @@ function ownValue(context: any, key: string): unknown {
  * 되는 대신 리터럴로 드러난다. bare 참조의 폴백은 유지된다 — `${producer}` 가
  * 그 태스크의 대표 결과를 뜻하는 것은 문서화된 계약이다.
  */
+/**
+ * `${a.x ?? b.y}` 의 대안 목록. `??` 가 없으면 null (= 평범한 참조).
+ *
+ * **`??` 가 있을 때만 다듬는다.** 평범한 참조는 지금까지처럼 한 글자도 건드리지
+ * 않는다 — 스키마는 태스크 id 에 공백을 금지하지 않아서, `${ producer.output}`
+ * 을 다듬으면 의존성은 `producer` 로 잡히는데 런타임은 `" producer"` 를 찾지
+ * 못해 리터럴로 남는다(순서만 잡히고 값은 안 오는 상태). 반대로 `??` 는 사람이
+ * 손으로 쓰는 연산자라 `a.x ?? b.y` 처럼 띄어 쓰는 것이 자연스럽다. 두 규칙을
+ * 여기 한 곳에 모아 두어야 보간과 의존성 추론이 **같은 것**을 본다.
+ */
+export function splitCoalesceAlternatives(expression: string): string[] | null {
+    if (!expression.includes('??')) { return null; }
+    return expression.split('??').map(part => part.trim()).filter(part => part.length > 0);
+}
+
 export function resolvePipelineReference(expression: string, context: any): unknown {
+    // `??` 는 **먼저 푼 것이 이긴다.** 조건(`when`)으로 꺼진 분기는 결과가 없어
+    // undefined 이므로, 살아남은 쪽 값이 자연스럽게 선택된다.
+    const alternatives = splitCoalesceAlternatives(expression);
+    if (alternatives) {
+        for (const alt of alternatives) {
+            const value = resolvePipelineReference(alt, context);
+            if (value !== undefined) { return value; }
+        }
+        return undefined;
+    }
     const parts = expression.split('.');
     const stepId = parts[0];
     const property = parts.slice(1).join('.');
@@ -510,8 +535,13 @@ export function extractVariableHeads(text: string): string[] {
         // 찾지 못해 리터럴로 남긴다 — 순서만 잡고 값은 안 오는 상태가 된다.
         // 반대로 id 자체가 `" producer"` 인 경우(스키마상 유효)에는 다듬지 않아야
         // 매칭되어 의존성이 잡힌다. 양쪽 다 런타임과 같아진다.
-        const head = expr.split('.')[0];
-        if (head.length > 0) { heads.push(head); }
+        // `??` 체인은 **모든 대안**을 의존성으로 낸다. 하나만 잡으면 소비자가
+        // 살아남은 쪽이 값을 내기 전에 실행될 수 있다.
+        const alternatives = splitCoalesceAlternatives(expr) ?? [expr];
+        for (const alt of alternatives) {
+            const head = alt.split('.')[0];
+            if (head.length > 0) { heads.push(head); }
+        }
     }
     return heads;
 }

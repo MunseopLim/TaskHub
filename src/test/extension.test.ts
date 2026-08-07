@@ -114,6 +114,44 @@ suite('Extension Test Suite', () => {
 		 * "목록이 안 나온다"고 보고한 그 자리다. 단위 검사(`sanitize…`)만으로는
 		 * 호출부가 `undefined` 를 어떻게 다루는지 고정되지 않는다.
 		 */
+		/**
+		 * `??` — 먼저 푼 참조가 이긴다.
+		 *
+		 * 조건(`when`)으로 갈린 분기에서 **하나의 소비자가 어느 쪽 결과든 받게**
+		 * 하려고 있다. 꺼진 분기는 결과가 없어 undefined 이므로, 살아남은 쪽이
+		 * 자연스럽게 선택된다. 이것이 없으면 소비자를 분기마다 하나씩 복제해야 한다.
+		 */
+		test('?? 는 먼저 풀리는 참조를 쓴다', () => {
+			const onlyFolder = { pickFolder: { path: '/tmp/dir' } };
+			assert.strictEqual(
+				interpolatePipelineVariables('${pickFile.path ?? pickFolder.path}', onlyFolder),
+				'/tmp/dir'
+			);
+			const onlyFile = { pickFile: { path: '/tmp/a.bin' } };
+			assert.strictEqual(
+				interpolatePipelineVariables('${pickFile.path ?? pickFolder.path}', onlyFile),
+				'/tmp/a.bin'
+			);
+		});
+
+		test('?? 는 앞쪽을 우선하고 셋 이상도 이어진다', () => {
+			const ctx = { a: { x: 'A' }, b: { y: 'B' }, c: { z: 'C' } };
+			assert.strictEqual(interpolatePipelineVariables('${a.x ?? b.y}', ctx), 'A');
+			assert.strictEqual(interpolatePipelineVariables('${miss.x ?? miss2.y ?? c.z}', ctx), 'C');
+		});
+
+		test('?? 의 대안이 전부 없으면 리터럴로 남는다', () => {
+			// 조용히 빈 문자열이 되면 경로 자리에 빈 값이 들어가 엉뚱한 곳을 가리킨다.
+			// 미해결 리터럴은 눈에 띄고, 소비자를 건너뛰게 하는 신호로도 쓸 수 있다.
+			assert.strictEqual(interpolatePipelineVariables('${a.x ?? b.y}', {}), '${a.x ?? b.y}');
+		});
+
+		test('?? 는 빈 대안을 무시한다', () => {
+			const ctx = { b: { y: 'B' } };
+			assert.strictEqual(interpolatePipelineVariables('${ ?? b.y}', ctx), 'B');
+			assert.strictEqual(interpolatePipelineVariables('${b.y ?? }', ctx), 'B');
+		});
+
 		test('배열 참조를 공백으로 이어 붙여 넣는다', () => {
 			const ctx = { pick: { paths: ['/a/x.bin', '/a/y.bin'], names: ['x.bin', 'y.bin'], count: 2 } };
 			assert.strictEqual(interpolatePipelineVariables('echo ${pick.paths}', ctx), 'echo /a/x.bin /a/y.bin');
