@@ -464,8 +464,8 @@ export interface ReferenceAlternative {
  * 체인이 Doctor 에서 미해결 변수로 잡혔다.
  *
  * 진단(Doctor · Preview Run)과 의존성 추론은 모두 이 함수를 쓴다. 자동완성
- * ([src/variableCompletions.ts](../src/variableCompletions.ts)) 은 아직 자체
- * 파싱이라 `??` 를 모른다 — 아는 구멍이다.
+ * ([src/variableCompletions.ts](../src/variableCompletions.ts)) 만은 커서
+ * **오프셋**까지 알아야 해서 따로 쪼개지만, 쪼개는 문자열은 여기와 같은 `??` 다.
  *
  * 두 가지 미묘한 계약을 {@link splitCoalesceAlternatives} / `resolvePipelineReference`
  * 에서 그대로 이어받는다.

@@ -40,6 +40,28 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
   }
 ]`;
 
+    /**
+     * `??` 체인 중간. 커서는 **두 번째** 대안의 점 뒤에 있다.
+     *
+     * 여기가 이 파일에서 가장 아픈 자리다 — range 가 `${` 바로 뒤에서 시작하면
+     * 항목을 고르는 순간 `${pick.` 이 아니라 표현식 **전체**가 대체되어 사용자가
+     * 친 앞쪽 대안이 조용히 사라진다.
+     */
+    const COALESCE_FIXTURE = `[
+  {
+    "id": "a.multi",
+    "title": "multi",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "pick", "type": "fileDialog", "options": { "canSelectMany": true } },
+        { "id": "ask", "type": "inputBox", "prompt": "tag" },
+        { "id": "run", "type": "shell", "command": "echo \${pick.path ?? ask.${CURSOR}" }
+      ]
+    }
+  }
+]`;
+
     /** `${` 바로 뒤 — 점이 없는 분기(태스크 id · 전역 참조). */
     const NO_DOT_FIXTURE = `[
   {
@@ -151,6 +173,38 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
             assert.ok(range && doc.getText(range) === 'pick.', `range 가 어긋났다: ${labelOf(item)}`);
             assert.strictEqual(item.insertText, labelOf(item), `insertText 가 라벨과 다르다: ${labelOf(item)}`);
         }
+    });
+
+    test('?? 체인에서는 커서가 놓인 대안만 덮는다 (앞 대안을 지우지 않는다)', async () => {
+        const { doc, position } = await openFixture(path.join('coalesce', '.vscode', 'actions.json'), COALESCE_FIXTURE);
+        const items = await completionsAt(doc, position);
+
+        const item = items.find(i => labelOf(i) === 'ask.value');
+        assert.ok(item, `?? 뒤에서 ask.value 를 제안하지 않았다: ${items.map(labelOf).join(',')}`);
+
+        const range = replaceRangeOf(item);
+        assert.ok(range, 'range 가 없으면 VS Code 기본 단어 범위가 쓰여 덧붙는다');
+        assert.strictEqual(
+            doc.getText(range), 'ask.',
+            'range 가 넓으면 앞 대안(`pick.path ?? `)까지 먹어 사용자가 친 것이 사라진다'
+        );
+
+        // 실제로 수락했을 때 문서가 어떻게 되는지까지 본다 — range 만 맞아도
+        // 조합이 어긋나면 사용자가 보는 결과는 여전히 깨진다.
+        const applied = doc.getText().slice(0, doc.offsetAt(range.start))
+            + String(item.insertText)
+            + doc.getText().slice(doc.offsetAt(range.end));
+        assert.ok(
+            applied.includes('${pick.path ?? ask.value'),
+            `수락 결과에 앞 대안이 남지 않았다: ${applied.split('\n').find(l => l.includes('echo'))}`
+        );
+
+        // 앞 대안의 태스크 키를 이 자리에서 제안하면 안 된다 — 고르면 체인이
+        // 통째로 그 참조로 바뀐다.
+        assert.ok(
+            !items.some(i => labelOf(i).startsWith('pick.')),
+            `앞 대안의 키를 제안했다: ${items.map(labelOf).join(',')}`
+        );
     });
 
     test('점이 없는 자리에서는 커서 위치를 덮는 빈 range 로 태스크 id 를 낸다', async () => {

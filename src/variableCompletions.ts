@@ -140,23 +140,49 @@ function firstStringField(text: string, key: string): string | undefined {
 }
 
 /**
- * 커서가 `${…}` 안에 있는지 보고, `${` 와 커서 사이의 글자를 돌려준다.
+ * 커서가 `${…}` 안에 있는지 보고, **지금 입력 중인 참조**와 그 시작 오프셋을
+ * 돌려준다. `start` 는 자동완성이 대체할 범위의 시작점이기도 하다.
  *
  * 여는 `${` 뒤에 `}` 나 줄바꿈·따옴표가 끼어 있으면 참조 자리가 아니다.
+ *
+ * **`??` 체인은 대안 하나하나가 참조다** — 마지막 `??` 뒤부터가 지금 입력 중인
+ * 것이다. 체인 전체를 돌려주면 두 가지가 한꺼번에 어긋난다.
+ *
+ * - `${pickFile.path ?? pickFolder.` 의 head 가 `pickFile` 로 읽혀 **엉뚱한
+ *   태스크의 키**를 제안한다. 정작 사용자가 치고 있는 `pickFolder` 의 키는
+ *   목록에 없다.
+ * - 그렇게 뜬 항목을 고르면 `start`(= `${` 바로 뒤)부터 대체되므로 표현식이
+ *   통째로 `${pickFile.dir}` 이 된다 — **사용자가 친 뒤쪽 대안이 조용히
+ *   사라진다.** 오류도 나지 않아 되돌릴 실마리도 없다.
+ *
+ * 대안 앞의 공백은 범위에서 뺀다. 런타임(`splitCoalesceAlternatives`)이 대안을
+ * 다듬으므로 공백은 사용자가 쓴 서식이고, 대체 범위에 넣으면 항목을 고를 때마다
+ * `a.x ??b.y` 로 눌러붙는다.
+ *
+ * 쪼개는 규칙은 **런타임과 같은 `split('??')`** 이다. `lastIndexOf('??')` 로
+ * 뒤에서 찾으면 `?` 가 셋인 오타에서 갈린다 — `a ??? b.x` 를 런타임은
+ * `["a", "? b.x"]` 로 읽어 뒤 대안이 영영 안 풀리는데, 뒤에서 찾으면 `b.x` 가
+ * 멀쩡한 참조로 보여 **해석되지 않을 것을 제안하게 된다.**
  */
 export function referencePrefixAt(text: string, offset: number): { prefix: string; start: number } | undefined {
     const open = text.lastIndexOf('${', offset);
     if (open < 0) { return undefined; }
     const between = text.slice(open + 2, offset);
     if (/[}"\r\n]/.test(between)) { return undefined; }
-    return { prefix: between, start: open + 2 };
+    const parts = between.split('??');
+    const rest = parts[parts.length - 1];
+    if (parts.length === 1) { return { prefix: between, start: open + 2 }; }
+    const lead = rest.length - rest.trimStart().length;
+    return { prefix: rest.slice(lead), start: open + 2 + (between.length - rest.length) + lead };
 }
 
 /**
  * 커서 위치에서 제안할 참조 목록.
  *
  * `prefix` 에 `.` 이 있으면 그 앞을 태스크 id 로 보고 **그 태스크의 결과 키**를,
- * 없으면 같은 액션의 다른 태스크 **id** 와 전역 참조를 낸다.
+ * 없으면 같은 액션의 다른 태스크 **id** 와 전역 참조를 낸다. `??` 체인이면
+ * `referencePrefixAt` 이 이미 지금 입력 중인 대안만 잘라 주므로, 여기서는
+ * 평범한 참조와 똑같이 다룬다.
  */
 export function collectVariableCompletions(text: string, offset: number): VariableCompletion[] {
     const ref = referencePrefixAt(text, offset);

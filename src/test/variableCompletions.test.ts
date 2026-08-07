@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import { collectVariableCompletions, referencePrefixAt } from '../variableCompletions';
+import { parseReferenceAlternatives } from '../pipelineUtils';
 
 /**
  * `${…}` 참조 자동완성 (0.6.57).
@@ -102,6 +103,97 @@ suite('variableCompletions', () => {
         test('여는 `${` 가 없으면 undefined', () => {
             assert.strictEqual(referencePrefixAt('no refs here', 5), undefined);
         });
+
+        /**
+         * `??` 체인에서는 **마지막 대안**이 지금 입력 중인 참조다. `start` 는
+         * 자동완성이 대체할 범위의 시작점이라, 여기가 틀리면 항목을 고르는
+         * 순간 앞선 대안이 지워진다.
+         */
+        suite('?? 체인', () => {
+            test('마지막 `??` 뒤부터가 지금 입력 중인 참조다', () => {
+                const { text, offset } = at('"cmd ${pickFile.path ?? pickFolder.pa|"');
+                assert.deepStrictEqual(referencePrefixAt(text, offset), {
+                    prefix: 'pickFolder.pa',
+                    start: text.indexOf('pickFolder'),
+                });
+            });
+
+            test('대안 앞의 공백은 대체 범위에 넣지 않는다', () => {
+                // 넣으면 항목을 고를 때마다 `a.x ??b.y` 로 눌러붙는다.
+                const { text, offset } = at('"cmd ${a.x ??   b.|"');
+                const ref = referencePrefixAt(text, offset)!;
+                assert.strictEqual(ref.prefix, 'b.');
+                assert.strictEqual(text.slice(ref.start, offset), 'b.');
+            });
+
+            test('대안이 셋이면 마지막 것만 본다', () => {
+                const { text, offset } = at('"cmd ${a.x ?? b.y ?? c.|"');
+                const ref = referencePrefixAt(text, offset)!;
+                assert.strictEqual(ref.prefix, 'c.');
+                assert.strictEqual(text.slice(ref.start, offset), 'c.');
+            });
+
+            test('`??` 바로 뒤 (아직 아무것도 안 친 자리)', () => {
+                const { text, offset } = at('"cmd ${a.x ?? |"');
+                const ref = referencePrefixAt(text, offset)!;
+                assert.strictEqual(ref.prefix, '');
+                assert.strictEqual(ref.start, offset, '대체할 것이 없으므로 범위는 비어 있어야 한다');
+            });
+
+            test('물음표 하나는 구분자가 아니다', () => {
+                const { text, offset } = at('"cmd ${a.x?|"');
+                assert.strictEqual(referencePrefixAt(text, offset)?.prefix, 'a.x?');
+            });
+
+            test('커서가 앞 대안 안에 있으면 그 대안만 본다', () => {
+                // 뒤에 이미 다른 대안이 적혀 있어도 커서 앞쪽만이 지금 치고 있는
+                // 것이다. `${…}` 전체를 쪼갠 뒤 마지막을 집으면 `start` 가 커서보다
+                // **뒤**로 가고, Range 가 뒤집힌 채 정규화되어 ` ?? ` 를 덮는다 —
+                // 수락하면 `${pick.pick.paths ask.value}` 가 된다.
+                const { text, offset } = at('"cmd ${pick.| ?? ask.value}"');
+                const ref = referencePrefixAt(text, offset)!;
+                assert.strictEqual(ref.prefix, 'pick.');
+                assert.strictEqual(text.slice(ref.start, offset), 'pick.');
+            });
+
+            test('`??` 로 시작하는 표현식 (빈 첫 대안)', () => {
+                // 런타임은 빈 대안을 버린다. 경계에서 `lastSep <= 0` 처럼 막으면
+                // 이 자리에서 제안이 통째로 사라진다.
+                const { text, offset } = at('"cmd ${?? a.pa|"');
+                const ref = referencePrefixAt(text, offset)!;
+                assert.strictEqual(ref.prefix, 'a.pa');
+                assert.strictEqual(text.slice(ref.start, offset), 'a.pa');
+            });
+
+            test('물음표가 셋이면 런타임과 같게 쪼갠다', () => {
+                // 런타임의 `split('??')` 은 `a ??? b.x` 를 `["a", "? b.x"]` 로 읽어
+                // 뒤 대안이 영영 안 풀린다. 뒤에서 `??` 를 찾으면 `b.x` 가 멀쩡한
+                // 참조로 보여 **해석되지 않을 것을 제안**하게 된다.
+                const { text, offset } = at('"cmd ${a ??? b.|"');
+                assert.strictEqual(referencePrefixAt(text, offset)?.prefix, '? b.');
+            });
+
+            test('돌려준 대안은 런타임이 읽는 대안과 같다', () => {
+                // 이 모듈은 오프셋 때문에 따로 쪼갠다 — 쪼개는 규칙이 갈리면
+                // 수락한 텍스트가 런타임에서 리터럴로 남는다. 왕복으로 묶어 둔다.
+                for (const fixture of [
+                    '"${a.x ?? b.|"',
+                    '"${a.x ??b.|"',
+                    '"${a.x ?? b.y ?? c.|"',
+                    '"${?? a.|"',
+                ]) {
+                    const { text, offset } = at(fixture);
+                    const ref = referencePrefixAt(text, offset)!;
+                    const accepted = text.slice(0, ref.start) + ref.prefix + 'value';
+                    const expr = accepted.slice(accepted.indexOf('${') + 2);
+                    assert.ok(
+                        parseReferenceAlternatives(expr).some(alt => alt.text === ref.prefix + 'value'),
+                        `${fixture} → 런타임은 '${ref.prefix}value' 를 대안으로 보지 않는다: ` +
+                        JSON.stringify(parseReferenceAlternatives(expr))
+                    );
+                }
+            });
+        });
     });
 
     suite('태스크 id 제안', () => {
@@ -137,6 +229,37 @@ suite('variableCompletions', () => {
 
         test('알 수 없는 태스크 id 에는 아무것도 내지 않는다', () => {
             assert.deepStrictEqual(names(doc(`{ "id": "run", "type": "shell", "command": "echo \${nosuch.|" }`)), []);
+        });
+
+        /**
+         * `??` 체인 안에서는 **커서가 놓인 대안**의 태스크를 봐야 한다. 체인
+         * 전체를 참조 하나로 읽으면 첫 대안의 태스크 키가 뜨고, 정작 사용자가
+         * 치고 있는 태스크의 키는 목록에 없다.
+         */
+        test('?? 체인에서는 커서가 놓인 대안의 키를 낸다', () => {
+            const got = names(doc(`{ "id": "run", "type": "command", "command": "py", "args": ["\${pick.path ?? ask.|"] }`));
+            assert.deepStrictEqual(got, ['ask.value']);
+        });
+
+        test('?? 뒤의 알 수 없는 id 에는 아무것도 내지 않는다', () => {
+            // 앞 대안이 멀쩡하다고 해서 그 태스크의 키를 대신 내놓으면 안 된다.
+            assert.deepStrictEqual(
+                names(doc(`{ "id": "run", "type": "shell", "command": "echo \${pick.path ?? nosuch.|" }`)),
+                []
+            );
+        });
+
+        test('커서가 앞 대안 안에 있으면 그 대안의 키를 낸다', () => {
+            // 뒤에 이미 `ask.value` 가 적혀 있어도 커서는 앞 대안 안이다.
+            const got = names(doc(`{ "id": "run", "type": "shell", "command": "echo \${pick.| ?? ask.value}" }`));
+            assert.ok(got.includes('pick.paths'), got.join(','));
+            assert.ok(!got.some(n => n.startsWith('ask.')), `뒤 대안의 키를 제안했다: ${got.join(',')}`);
+        });
+
+        test('?? 뒤에서 점을 아직 안 쳤으면 태스크 id 를 낸다', () => {
+            const got = names(doc(`{ "id": "run", "type": "shell", "command": "echo \${pick.path ?? |" }`));
+            assert.ok(got.includes('ask'), got.join(','));
+            assert.ok(!got.includes('run'), `자기 자신을 제안했다: ${got.join(',')}`);
         });
 
         /**
