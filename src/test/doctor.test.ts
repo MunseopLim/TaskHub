@@ -4,6 +4,8 @@ import * as os from 'os';
 import * as path from 'path';
 import Ajv from 'ajv';
 import { runDoctor, DoctorInput, DoctorFinding, DoctorValidator } from '../doctor';
+import { detectFrozenCondition } from '../previewRun';
+import { evaluateTaskCondition } from '../pipelineUtils';
 import * as actionSchema from '../../schema/actions.schema.json';
 
 const WS = path.resolve(os.tmpdir(), 'taskhub-doctor-ws');
@@ -904,6 +906,211 @@ suite('Doctor', () => {
                 assert.ok(!findings.some(f => f.code === 'when.literal-operand'),
                     `${matches} → ${findings.map(f => f.message).join(' | ')}`);
             }
+        });
+
+        /**
+         * 조건이 굳는 경로는 넷이고 모두 같은 결함이다 — 실행해 봐도 오류가
+         * 나지 않고 분기만 조용히 한쪽으로 붙어 있다.
+         */
+        suite('굳는 경로 네 가지', () => {
+            test('in 이 빈 목록이면 어떤 값도 맞을 수 없다', () => {
+                // `when.operators` 는 `in` 을 연산자 하나로 세므로 여기를 통과한다 —
+                // 절대 실행되지 않는 태스크가 무경고로 남았다.
+                const v = compileValidator();
+                const findings = runDoctor([makeInput(whenAction([
+                    { id: 'pick', type: 'quickPick', items: ['a'] },
+                    { id: 'run', type: 'shell', command: 'echo hi', when: { var: '${pick.value}', in: [] } },
+                ]))], v);
+                const dead = findings.filter(f => f.code === 'when.dead-branch');
+                assert.strictEqual(dead.length, 1, codes(findings).join(','));
+                assert.ok(dead[0].message.includes('empty list'), dead[0].message);
+                assert.ok(dead[0].message.includes('never runs'), dead[0].message);
+            });
+
+            test('var 가 상수면 비교 결과가 처음부터 정해져 있다', () => {
+                const v = compileValidator();
+                const never = runDoctor([makeInput(whenAction([
+                    { id: 'run', type: 'shell', command: 'echo hi', when: { var: 'release', equals: 'debug' } },
+                ]))], v).filter(f => f.code === 'when.dead-branch');
+                assert.strictEqual(never.length, 1);
+                assert.ok(never[0].message.includes('never runs'), never[0].message);
+
+                const always = runDoctor([makeInput(whenAction([
+                    { id: 'run', type: 'shell', command: 'echo hi', when: { var: 'release', equals: 'release' } },
+                ]))], v).filter(f => f.code === 'when.dead-branch');
+                assert.strictEqual(always.length, 1);
+                assert.ok(always[0].message.includes('always runs'), always[0].message);
+            });
+
+            test('빈 var 도 상수다 (조용히 실행되지 않던 자리)', () => {
+                const v = compileValidator();
+                const findings = runDoctor([makeInput(whenAction([
+                    { id: 'run', type: 'shell', command: 'echo hi', when: { var: '', equals: 'a' } },
+                ]))], v);
+                assert.ok(findings.some(f => f.code === 'when.dead-branch'), codes(findings).join(','));
+            });
+
+            test('컴파일 안 되는 정규식은 when.regex 만 낸다 (중복 금지)', () => {
+                // 같은 사실을 두 코드가 말하면 같은 줄에 경고가 둘 붙는다.
+                const v = compileValidator();
+                const findings = runDoctor([makeInput(whenAction([
+                    { id: 'pick', type: 'quickPick', items: ['a'] },
+                    { id: 'run', type: 'shell', command: 'echo hi', when: { var: '${pick.value}', matches: '(' } },
+                ]))], v);
+                assert.ok(findings.some(f => f.code === 'when.regex'), codes(findings).join(','));
+                assert.ok(!findings.some(f => f.code === 'when.dead-branch'), codes(findings).join(','));
+            });
+
+            test('연산자가 없으면 when.operators 만 낸다 (중복 금지)', () => {
+                const v = compileValidator();
+                const findings = runDoctor([makeInput(whenAction([
+                    { id: 'pick', type: 'quickPick', items: ['a'] },
+                    { id: 'run', type: 'shell', command: 'echo hi', when: { var: '${pick.value}' } },
+                ]))], v);
+                assert.ok(findings.some(f => f.code === 'when.operators'), codes(findings).join(','));
+                assert.ok(!findings.some(f => f.code === 'when.dead-branch'), codes(findings).join(','));
+            });
+
+            test('무시당하는 연산자를 보고 판정하지 않는다', () => {
+                // 런타임은 처음 찾은 연산자 하나만 쓴다 — `{equals, in: []}` 는
+                // `equals` 로 판정되므로 값이 맞으면 실행된다. 빈 `in` 을 보고
+                // "절대 실행되지 않는다" 고 하면 런타임과 반대되는 말이 되고,
+                // 같은 태스크에 붙은 when.operators 와도 모순된다.
+                const v = compileValidator();
+                for (const when of [
+                    { var: '${pick.value}', equals: 'a', in: [] },
+                    { var: '${pick.value}', equals: 'a', matches: '(' },
+                ]) {
+                    const findings = runDoctor([makeInput(whenAction([
+                        { id: 'pick', type: 'quickPick', items: ['a'] },
+                        { id: 'run', type: 'shell', command: 'echo hi', when },
+                    ]))], v);
+                    assert.ok(!findings.some(f => f.code === 'when.dead-branch'),
+                        `${JSON.stringify(when)} → ${findings.map(f => f.message).join(' | ')}`);
+                    assert.ok(findings.some(f => f.code === 'when.operators'), codes(findings).join(','));
+                }
+            });
+
+            test('해석되지 않는 var 는 깨진 정규식보다 먼저 알린다', () => {
+                // 정규식 원인은 Doctor 가 억누르므로(when.regex 몫), 그쪽이 이기면
+                // "분기가 죽었다" 는 사실이 어디에도 남지 않는다.
+                const v = compileValidator();
+                const findings = runDoctor([makeInput(whenAction([
+                    { id: 'run', type: 'shell', command: 'echo hi', when: { var: '${ghost.output}', matches: '(' } },
+                ]))], v);
+                assert.ok(findings.some(f => f.code === 'when.regex'), codes(findings).join(','));
+                const dead = findings.filter(f => f.code === 'when.dead-branch');
+                assert.strictEqual(dead.length, 1, codes(findings).join(','));
+                assert.ok(dead[0].message.includes('never runs'), dead[0].message);
+            });
+
+            test('닫는 괄호를 빠뜨린 참조도 상수다', () => {
+                // 런타임의 보간은 `${…}` 형태만 치환한다 — `${pick.value` 는 글자
+                // 그대로 비교된다. `includes('${')` 로 보면 이 오타가 "참조가 있으니
+                // 값이 변한다" 로 새어 나간다.
+                const v = compileValidator();
+                for (const varText of ['${pick.value', '${}']) {
+                    const findings = runDoctor([makeInput(whenAction([
+                        { id: 'pick', type: 'quickPick', items: ['a'] },
+                        { id: 'run', type: 'shell', command: 'echo hi', when: { var: varText, equals: 'a' } },
+                    ]))], v);
+                    assert.ok(findings.some(f => f.code === 'when.dead-branch'),
+                        `${varText} → ${codes(findings).join(',')}`);
+                }
+            });
+
+            test('연산자 없는 상수 var 도 when.operators 만 낸다', () => {
+                // `hasConditionOperator` 조기 반환이 없으면 상수 판정이 먼저 걸려
+                // 같은 사실을 말하는 경고가 둘 붙는다.
+                const v = compileValidator();
+                const findings = runDoctor([makeInput(whenAction([
+                    { id: 'run', type: 'shell', command: 'echo hi', when: { var: 'release' } },
+                ]))], v);
+                assert.ok(findings.some(f => f.code === 'when.operators'), codes(findings).join(','));
+                assert.ok(!findings.some(f => f.code === 'when.dead-branch'), codes(findings).join(','));
+            });
+
+            test('한국어 문구도 원인별로 채워진다', () => {
+                const v = compileValidator();
+                const ko = (when: any) => runDoctor([makeInput(whenAction([
+                    { id: 'pick', type: 'quickPick', items: ['a'] },
+                    { id: 'run', type: 'shell', command: 'echo hi', when },
+                ]))], v).filter(f => f.code === 'when.dead-branch').map(f => f.messageKo ?? '').join(' ');
+                assert.ok(ko({ var: '${pick.value}', in: [] }).includes('빈 목록'), 'empty-in');
+                assert.ok(ko({ var: 'release', equals: 'debug' }).includes('상수'), 'constant-var');
+                assert.ok(ko({ var: 'release', equals: 'debug' }).includes('영영 실행되지 않습니다'), 'runs');
+            });
+
+            /**
+             * `frozen.runs` 가 **런타임이 실제로 낼 답**과 같은지 표로 대조한다.
+             * 개별 케이스를 아무리 늘려도 판정 규칙이 갈리는 것 자체는 못 막는다 —
+             * 이 검사가 연산자 우선순위를 무시하던 버그를 바로 잡아냈다.
+             *
+             * 원인에 따라 "고정" 의 뜻이 다르다.
+             *
+             * - `empty-in` · `invalid-regex`: 연산자가 **어떤 값에도** 같은 답을
+             *   낸다 → 표본 전부에 대해 일치해야 한다.
+             * - `constant-var` · `unresolved-var`: 비교되는 **값**이 하나로 정해진다
+             *   → 그 값에 대해 일치해야 한다.
+             */
+            test('frozen 판정은 런타임 결과와 일치한다', () => {
+                const samples = ['', 'a', 'release', 'debug', '${x}', '한글', 'ghost'];
+                const shapes: any[] = [
+                    { var: 'release', equals: 'release' },
+                    { var: 'release', equals: 'debug' },
+                    { var: 'release', notEquals: 'release' },
+                    { var: '${p.v}', in: [] },
+                    { var: '${p.v}', matches: '(' },
+                    // 무시당하는 연산자 — 판정이 나오면 안 되는 형태들.
+                    { var: '${p.v}', equals: 'a', in: [] },
+                    { var: '${p.v}', equals: 'a', matches: '(' },
+                    { var: '', equals: 'a' },
+                    { var: 'x', matches: '^x$' },
+                    { var: 'x', in: ['x', 'y'] },
+                    { var: '${ghost.out}', equals: 'a' },
+                    { var: '${ghost.out}', notEquals: 'a' },
+                ];
+                for (const when of shapes) {
+                    const stuck = when.var.includes('ghost');
+                    const frozen = detectFrozenCondition(when, when.var, stuck);
+                    if (!frozen) { continue; }
+                    const valueIndependent = frozen.cause === 'empty-in' || frozen.cause === 'invalid-regex';
+                    const values = valueIndependent ? samples : [when.var];
+                    for (const s of values) {
+                        assert.strictEqual(
+                            evaluateTaskCondition(when, s), frozen.runs,
+                            `${JSON.stringify(when)} (${frozen.cause}) 가 '${s}' 에서 어긋난다`
+                        );
+                    }
+                }
+            });
+
+            test('값이 풀리는 조건은 결과를 단정하지 않는다', () => {
+                // 시뮬레이션 값은 자리표시자라 `equals` 와 맞지 않는다. 그것을
+                // 근거로 "굳었다" 고 하면 사용자 입력과 무관하게 거짓을 말한다.
+                const v = compileValidator();
+                const findings = runDoctor([makeInput(whenAction([
+                    { id: 'pick', type: 'quickPick', items: ['release'] },
+                    { id: 'run', type: 'shell', command: 'echo hi', when: { var: '${pick.value}', equals: 'release' } },
+                ]))], v);
+                assert.deepStrictEqual(codes(findings), [], findings.map(f => f.message).join(' | '));
+            });
+        });
+
+        test('피연산자 경고는 의존성 간선까지 말한다', () => {
+            // 참조가 맞지 않는 것만이 아니다 — `inferTaskDependencies` 는 `when`
+            // 을 건너뛰지 않으므로 그 참조는 실행 순서를 바꾸고, 가리키는 태스크가
+            // 꺼지면 이 태스크까지 함께 건너뛰어진다.
+            const v = compileValidator();
+            const findings = runDoctor([makeInput(whenAction([
+                { id: 'pick', type: 'quickPick', items: ['a'] },
+                { id: 'p2', type: 'quickPick', items: ['a'] },
+                { id: 'run', type: 'shell', command: 'echo hi', when: { var: '${pick.value}', equals: '${p2.value}' } },
+            ]))], v);
+            const lit = findings.filter(f => f.code === 'when.literal-operand');
+            assert.strictEqual(lit.length, 1, codes(findings).join(','));
+            assert.ok(lit[0].message.includes('dependency'), lit[0].message);
+            assert.ok(lit[0].messageKo?.includes('의존성'), lit[0].messageKo);
         });
 
         test('평범한 when 에는 아무 경고도 붙지 않는다', () => {

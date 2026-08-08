@@ -1392,6 +1392,41 @@ suite('buildPreviewReport', () => {
             assert.match(report, /no operator — the task always runs/);
         });
 
+        test('정적으로 정해지는 조건은 결과를 말한다', () => {
+            // 예전에는 이 셋 모두 "the real branch depends on the input" 이라고
+            // 적었는데, 셋 다 입력과 무관하게 결과가 정해져 있다.
+            const emptyIn = buildPreviewReport(whenItem({ var: '${workspaceFolder}', in: [] }), baseOptions());
+            assert.match(emptyIn, /empty list.*NEVER runs/);
+            const badRegex = buildPreviewReport(whenItem({ var: '${workspaceFolder}', matches: '(' }), baseOptions());
+            assert.match(badRegex, /not a valid regular expression.*NEVER runs/);
+            const constant = buildPreviewReport(whenItem({ var: 'release', equals: 'debug' }), baseOptions());
+            assert.match(constant, /constant "release".*NEVER runs/);
+            for (const report of [emptyIn, badRegex, constant]) {
+                assert.doesNotMatch(report, /depends on the input at runtime/);
+                // 참조는 멀쩡히 풀리므로 미해결 집계에는 아무것도 안 들어간다 —
+                // 요약에 따로 남기지 않으면 "모두 해석됨" 으로 끝난다. 돌지 않는
+                // 태스크를 품은 액션인데도.
+                assert.doesNotMatch(report, /all \$\{\.\.\.\} references resolve/);
+                assert.match(report, /Summary: 1 task\(s\) have a 'when' whose outcome never changes/);
+            }
+        });
+
+        test('항상 실행되는 쪽도 말한다', () => {
+            const report = buildPreviewReport(whenItem({ var: 'release', equals: 'release' }), baseOptions());
+            assert.match(report, /ALWAYS runs \(the condition does nothing\)/);
+            assert.match(report, /Summary: 1 task\(s\) have a 'when' whose outcome never changes/);
+        });
+
+        test('무시당하는 연산자를 보고 단정하지 않는다', () => {
+            // 런타임은 `equals` 를 적용한다 — 빈 `in` 은 쳐다보지도 않는다.
+            const report = buildPreviewReport(
+                whenItem({ var: '${workspaceFolder}', equals: 'a', in: [] }),
+                baseOptions()
+            );
+            assert.doesNotMatch(report, /NEVER runs|ALWAYS runs/);
+            assert.match(report, /when: .* equals "a"/);
+        });
+
         test('matches 와 in 도 읽을 수 있게 적는다', () => {
             const m = buildPreviewReport(whenItem({ var: '${workspaceFolder}', matches: '^v[0-9]+$' }), baseOptions());
             assert.match(m, /matches \/\^v\[0-9\]\+\$\//);

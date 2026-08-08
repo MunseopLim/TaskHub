@@ -49,6 +49,7 @@ import {
     analyzeCoalesceRefs,
     deadAlternatives,
     describeDeadAlternative,
+    detectFrozenCondition,
     makeForwardRefTolerance,
     isInsideWorkspace,
     placeholder,
@@ -1157,16 +1158,20 @@ function analyzeActionTasks(
             // 참조는 여기서 아직 리터럴이지만 런타임에서는 멀쩡히 풀린다 —
             // 참조가 곧 의존성이라 스케줄러가 producer 를 먼저 돌린다. 미해결
             // 판정과 **같은 관용 규칙**을 태워야 정상 분기를 죽었다고 하지 않는다.
-            if (isGenuinelyStuck(task.when.var, resolvedWhenVar)) {
-                const alwaysRuns = evaluateTaskCondition(task.when, resolvedWhenVar);
+            const frozen = detectFrozenCondition(
+                task.when, resolvedWhenVar, isGenuinelyStuck(task.when.var, resolvedWhenVar)
+            );
+            // 컴파일되지 않는 정규식은 `when.regex`(error)가 이미 같은 사실을
+            // 말한다 — 같은 줄에 같은 이야기를 둘 붙이지 않는다.
+            if (frozen && frozen.cause !== 'invalid-regex') {
                 findings.push({
                     filePath: input.filePath,
                     sourceLabel: input.sourceLabel,
                     range: findIdLine(input.rawText, task.id),
                     severity: 'warning',
                     code: 'when.dead-branch',
-                    message: `Task '${item.id}.${task.id}' has a 'when.var' (${task.when.var}) that does not resolve, so at runtime the condition compares the literal '${resolvedWhenVar}' and the outcome never changes: this task ${alwaysRuns ? 'always runs, making the condition meaningless' : 'never runs'}.`,
-                    messageKo: `Task '${item.id}.${task.id}'의 'when.var'(${task.when.var})가 해석되지 않습니다. 런타임은 리터럴 '${resolvedWhenVar}'를 그대로 비교하므로 결과가 입력과 무관하게 고정됩니다 — 이 태스크는 ${alwaysRuns ? '항상 실행되어 조건이 의미가 없습니다' : '영영 실행되지 않습니다'}.`,
+                    message: `Task '${item.id}.${task.id}' has a 'when' whose outcome never changes: ${frozen.en}. This task ${frozen.runs ? 'always runs, making the condition meaningless' : 'never runs'}.`,
+                    messageKo: `Task '${item.id}.${task.id}'의 'when' 결과가 입력과 무관하게 고정됩니다: ${frozen.ko}. 이 태스크는 ${frozen.runs ? '항상 실행되어 조건이 의미가 없습니다' : '영영 실행되지 않습니다'}.`,
                 });
             }
         }
@@ -1197,8 +1202,8 @@ function analyzeActionTasks(
                 range: findIdLine(input.rawText, task.id),
                 severity: 'warning',
                 code: 'when.literal-operand',
-                message: `Task '${item.id}.${task.id}' puts a '\${…}' reference in a 'when' operand (${literalOperands.join(', ')}). Only 'when.var' is interpolated — the operand is compared verbatim, so the comparison is against the literal text and never matches a real value.`,
-                messageKo: `Task '${item.id}.${task.id}'의 'when' 피연산자에 '\${…}' 참조가 있습니다(${literalOperands.join(', ')}). 보간되는 것은 'when.var'뿐이며 피연산자는 적힌 그대로 비교되므로, 실제 값과는 결코 일치하지 않습니다.`,
+                message: `Task '${item.id}.${task.id}' puts a '\${…}' reference in a 'when' operand (${literalOperands.join(', ')}). Only 'when.var' is interpolated — the operand is compared verbatim, so the comparison is against the literal text and never matches a real value. The reference still counts as a dependency, so it also orders this task after the one it names and skips this task when that one is skipped by its own condition.`,
+                messageKo: `Task '${item.id}.${task.id}'의 'when' 피연산자에 '\${…}' 참조가 있습니다(${literalOperands.join(', ')}). 보간되는 것은 'when.var'뿐이며 피연산자는 적힌 그대로 비교되므로, 실제 값과는 결코 일치하지 않습니다. 그런데도 그 참조는 **의존성으로는 그대로 잡혀** 실행 순서를 바꾸고, 가리키는 태스크가 조건으로 꺼지면 이 태스크까지 함께 건너뜁니다.`,
             });
         }
         if (joinedArgRefs.length > 0) {

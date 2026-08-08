@@ -139,6 +139,9 @@ export function simulateTaskResult(task: Task): SimulatedResult {
     }
 }
 
+/** 문자열에 `${…}` 참조가 하나라도 있는가. **비-global** — `.test` 가 상태를 남기지 않는다. */
+const HAS_REFERENCE_RE = /\$\{[^}]+\}/;
+
 /** Regex to find ${...} references that survived interpolation. */
 export const UNRESOLVED_VAR_RE = /\$\{[^}]+\}/g;
 
@@ -411,17 +414,134 @@ export function analyzeCoalesceRefs(
 }
 
 /**
- * `when` 의 연산자 부분을 사람이 읽는 형태로. 런타임(`evaluateTaskCondition`)이
- * **먼저 찾은 연산자 하나만** 적용하므로 같은 순서로 고른다 — 여럿 적힌 설정에서
- * 리포트가 실제로 적용될 것과 다른 연산자를 보여 주면 안 된다 (그 상태 자체는
- * Doctor 의 `when.operators` 가 따로 잡는다).
+ * 런타임이 **실제로 적용할** 연산자 하나. 없으면 `undefined`(조건이 늘 참).
+ *
+ * `evaluateTaskCondition` 은 이 순서로 처음 찾은 하나만 쓰고 나머지는 쳐다보지
+ * 않는다. 조건을 읽는 모든 자리가 이 함수를 거쳐야 한다 — 각자 고르면 여럿 적힌
+ * 설정에서 **적용되지도 않는 연산자**를 놓고 리포트하거나 판정하게 된다. 실제로
+ * 그랬다: `{ equals: "a", in: [] }` 에서 빈 `in` 을 보고 "절대 실행되지 않는다"
+ * 고 단언했는데, 런타임은 `equals` 를 적용하므로 값이 맞으면 실행된다.
+ * (연산자가 여럿인 상태 자체는 Doctor 의 `when.operators` 가 따로 잡는다.)
+ */
+function effectiveConditionOperator(
+    when: NonNullable<Task['when']>
+): 'equals' | 'notEquals' | 'matches' | 'in' | undefined {
+    if (typeof when.equals === 'string') { return 'equals'; }
+    if (typeof when.notEquals === 'string') { return 'notEquals'; }
+    if (typeof when.matches === 'string') { return 'matches'; }
+    if (Array.isArray(when.in)) { return 'in'; }
+    return undefined;
+}
+
+function regexCompiles(pattern: string): boolean {
+    try {
+        new RegExp(pattern);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** 조건 결과가 고정되는 **이유**. */
+export type FrozenConditionCause =
+    /** `in: []` — 어떤 값도 맞을 수 없다. */
+    | 'empty-in'
+    /** `matches` 가 컴파일되지 않는다 — 런타임은 "맞지 않음" 으로 본다. */
+    | 'invalid-regex'
+    /** `var` 의 참조가 해석되지 않아 리터럴 글자가 비교된다. */
+    | 'unresolved-var'
+    /** `var` 에 참조가 아예 없다 — 비교 결과가 처음부터 정해져 있다. */
+    | 'constant-var';
+
+export interface FrozenCondition {
+    cause: FrozenConditionCause;
+    /** 고정된 결과 — 이 태스크가 도는가. */
+    runs: boolean;
+    en: string;
+    ko: string;
+}
+
+/**
+ * 조건의 결과가 **입력과 무관하게 고정**되는가. 고정되지 않으면 `undefined`.
+ *
+ * 조건부 태스크의 결함은 대개 "실행해 봐도 드러나지 않는" 모양이다 — 분기가
+ * 조용히 한쪽으로 굳어 있을 뿐 오류가 나지 않는다. 굳는 경로는 넷인데 모두 같은
+ * 결함이므로 한 자리에서 판정하고, **어느 쪽으로** 굳었는지까지 돌려준다.
+ * "실행되지 않습니다" 로 뭉뚱그리면 `notEquals` 처럼 반대로 굳은 경우에 사용자가
+ * 엉뚱한 곳을 고치게 된다.
+ *
+ * @param resolvedVar   시뮬레이션 보간을 마친 `var`.
+ * @param varIsStuck    `resolvedVar` 에 런타임에서도 안 풀릴 참조가 남았는가.
+ */
+export function detectFrozenCondition(
+    when: NonNullable<Task['when']>,
+    resolvedVar: string,
+    varIsStuck: boolean
+): FrozenCondition | undefined {
+    if (typeof when.var !== 'string') { return undefined; }
+    // 연산자가 없으면 런타임은 무조건 실행한다. 그 사실은 연산자 자리에서 따로
+    // 알린다(Doctor 의 `when.operators`, Preview 의 조건 줄) — 여기서 또 말하면
+    // 같은 태스크에 같은 이야기가 둘 붙는다.
+    const operator = effectiveConditionOperator(when);
+    if (operator === undefined) { return undefined; }
+
+    // **`var` 를 먼저 본다.** 아래 두 가지(빈 `in` · 깨진 정규식)와 겹칠 수 있는데,
+    // 사용자가 고쳐야 할 것은 대개 참조 쪽이고 Doctor 는 깨진 정규식을
+    // `when.regex` 로 따로 알리므로, 여기서 정규식이 이기면 "분기가 죽었다" 는
+    // 사실이 어디에도 남지 않는다.
+    if (varIsStuck) {
+        return {
+            cause: 'unresolved-var',
+            runs: evaluateTaskCondition(when, resolvedVar),
+            en: `'when.var' (${when.var}) does not resolve, so the literal '${resolvedVar}' is what gets compared`,
+            ko: `'when.var'(${when.var})가 해석되지 않아 리터럴 '${resolvedVar}'가 그대로 비교됩니다`,
+        };
+    }
+    // 아래 둘은 **실제로 적용되는 연산자일 때만** 결과를 고정한다. 무시당하는
+    // 연산자를 보고 판정하면 런타임과 반대되는 말을 하게 된다.
+    if (operator === 'in' && when.in!.length === 0) {
+        return {
+            cause: 'empty-in',
+            runs: false,
+            en: `'when.in' is an empty list, so no value can ever match`,
+            ko: `'when.in'이 빈 목록이라 어떤 값도 맞을 수 없습니다`,
+        };
+    }
+    if (operator === 'matches' && !regexCompiles(when.matches!)) {
+        return {
+            cause: 'invalid-regex',
+            runs: false,
+            en: `'when.matches' is not a valid regular expression, and the runtime treats an uncompilable pattern as "no match"`,
+            ko: `'when.matches'가 올바른 정규식이 아닙니다 — 런타임은 컴파일되지 않는 패턴을 "맞지 않음"으로 봅니다`,
+        };
+    }
+    // 참조 판정은 **런타임의 보간 정규식과 같은 것**을 쓴다. `includes('${')` 로
+    // 보면 `"${pick.value"` 처럼 닫는 괄호를 빠뜨린 오타가 "참조가 있으니 값이
+    // 변한다" 로 새어 나가는데, 런타임은 그것도 리터럴로 비교한다.
+    if (!HAS_REFERENCE_RE.test(when.var)) {
+        return {
+            cause: 'constant-var',
+            runs: evaluateTaskCondition(when, when.var),
+            en: `'when.var' is the constant ${JSON.stringify(when.var)}, holding no '\${…}' reference, so the comparison cannot change`,
+            ko: `'when.var'가 상수 ${JSON.stringify(when.var)}입니다 — '\${…}' 참조가 없어 비교 결과가 달라질 수 없습니다`,
+        };
+    }
+    return undefined;
+}
+
+/**
+ * `when` 의 연산자 부분을 사람이 읽는 형태로. 런타임이 실제로 적용할 하나만
+ * 보여 준다({@link effectiveConditionOperator}) — 여럿 적힌 설정에서 리포트가
+ * 다른 것을 보여 주면, 사용자는 적용되지도 않는 조건을 놓고 디버깅하게 된다.
  */
 function describeConditionOperator(when: NonNullable<Task['when']>): string {
-    if (typeof when.equals === 'string') { return `equals ${JSON.stringify(when.equals)}`; }
-    if (typeof when.notEquals === 'string') { return `!= ${JSON.stringify(when.notEquals)}`; }
-    if (typeof when.matches === 'string') { return `matches /${when.matches}/`; }
-    if (Array.isArray(when.in)) { return `in [${when.in.map(v => JSON.stringify(v)).join(', ')}]`; }
-    return '(no operator — the task always runs)';
+    switch (effectiveConditionOperator(when)) {
+        case 'equals': return `equals ${JSON.stringify(when.equals)}`;
+        case 'notEquals': return `!= ${JSON.stringify(when.notEquals)}`;
+        case 'matches': return `matches /${when.matches}/`;
+        case 'in': return `in [${when.in!.map(v => JSON.stringify(v)).join(', ')}]`;
+        default: return '(no operator — the task always runs)';
+    }
 }
 
 /** 안 풀리는 대안만 추린다 — 반환 타입이 `reason` 이 있음을 보장한다. */
@@ -701,6 +821,15 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
      */
     const deadAltRefs: string[] = [];
 
+    /**
+     * 조건의 결과가 입력과 무관하게 **고정된** 태스크들 ({@link detectFrozenCondition}).
+     *
+     * 미해결과 따로 센다 — 참조가 멀쩡히 풀려도(빈 `in`, 상수 `var`) 분기는 굳을
+     * 수 있고, 그때는 미해결 집계가 비어 리포트가 "모두 해석됨" 으로 끝난다.
+     * 돌지 않는 태스크를 품은 액션이 정상으로 안내되면 안 된다.
+     */
+    const frozenBranches: string[] = [];
+
     // Surface graph issues (cycle / missing dep / self dep) up front so
     // Preview Run reflects what the runtime would refuse to schedule.
     // Without this, a cycle like A(parallel)→B + B(barrier)→A could
@@ -799,12 +928,18 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
             const resolvedVar = interpolatePipelineVariables(task.when.var, interpolationContext);
             interpolated.push(resolvedVar);
             lines.push(`  when: ${task.when.var} ${describeConditionOperator(task.when)}`);
-            if (isGenuinelyStuck(task.when.var, resolvedVar)) {
-                // 해석되지 않으면 결과가 **입력과 무관하게 고정된다.** 확정해서
-                // 말할 수 있는 것은 이 경우뿐이다 — 값이 풀리는 경우의 결과는
-                // 실행 시점의 입력에 달렸으므로 단정하면 거짓이 된다.
-                const alwaysRuns = evaluateTaskCondition(task.when, resolvedVar);
-                lines.push(`    ⚠️  condition variable does not resolve — the literal '${resolvedVar}' is compared, so this task ${alwaysRuns ? 'ALWAYS runs (the condition does nothing)' : 'NEVER runs'}`);
+            // 결과가 고정되는 경우에만 단정한다 — 값이 실제로 풀리는 경우의
+            // 결과는 실행 시점의 입력에 달렸으므로 단정하면 거짓이 된다.
+            const frozen = detectFrozenCondition(
+                task.when, resolvedVar, isGenuinelyStuck(task.when.var, resolvedVar)
+            );
+            if (frozen) {
+                lines.push(`    ⚠️  ${frozen.en} → this task ${frozen.runs ? 'ALWAYS runs (the condition does nothing)' : 'NEVER runs'}`);
+                // 요약에도 남긴다. 미해결과 섞지 않는 이유는 죽은 대안과 같다 —
+                // 참조가 멀쩡히 풀리는 경우(빈 `in`, 상수 `var`)에도 분기는
+                // 굳는데, 그때는 미해결 집계에 아무것도 들어가지 않아 리포트가
+                // "모두 해석됨" 으로 끝나 버린다. 돌지 않는 태스크가 있는데도.
+                frozenBranches.push(`${task.id}: ${frozen.runs ? 'always runs' : 'never runs'} — ${frozen.en}`);
             } else if (UNRESOLVED_VAR_RE.test(resolvedVar)) {
                 UNRESOLVED_VAR_RE.lastIndex = 0;
                 // 아직 시뮬레이션되지 않은 태스크의 결과다. 리터럴을 그대로
@@ -1227,6 +1362,12 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 lines.push(`  - ${b}`);
             }
         }
+        if (frozenBranches.length > 0) {
+            lines.push(`Summary: ${frozenBranches.length} task(s) have a 'when' whose outcome never changes:`);
+            for (const f of frozenBranches) {
+                lines.push(`  - ${f}`);
+            }
+        }
         if (deadAltRefs.length > 0) {
             // 미해결과 따로 센다 — 이 참조들은 **풀린다.** 같이 세면 "리터럴로
             // 전달됩니다" 라는 위 문장이 이들에게는 거짓이 된다.
@@ -1235,7 +1376,8 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 lines.push(`  - ${d}`);
             }
         }
-        if (totalUnresolved.size === 0 && runtimeBlockers.length === 0 && deadAltRefs.length === 0) {
+        if (totalUnresolved.size === 0 && runtimeBlockers.length === 0
+            && deadAltRefs.length === 0 && frozenBranches.length === 0) {
             lines.push('Summary: all ${...} references resolve under simulated inputs.');
             lines.push('(Placeholder values like <fileDialog:id:path> become real values at runtime.)');
         }
