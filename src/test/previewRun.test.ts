@@ -1329,6 +1329,120 @@ suite('buildPreviewReport', () => {
         });
     });
 
+    /**
+     * 조건부 태스크(0.7.4)는 Preview 에 한 줄도 남지 않았다 — 분기 파이프라인을
+     * dry-run 해도 **분기 자체가 보이지 않았다.**
+     */
+    suite('when 은 리포트에 보인다', () => {
+        const whenItem = (when: any, extra: any[] = []): ActionItem => ({
+            id: 'a.when',
+            title: 'when',
+            action: {
+                description: 'x',
+                tasks: [...extra, { id: 'run', type: 'shell', command: 'echo hi', when }]
+            }
+        } as ActionItem);
+
+        test('조건과 시뮬레이션 값을 보여 준다', () => {
+            const report = buildPreviewReport(
+                whenItem({ var: '${pick.value}', equals: 'release' }, [{ id: 'pick', type: 'quickPick', items: ['release'] }]),
+                baseOptions()
+            );
+            assert.match(report, /when: \$\{pick\.value\} equals "release"/);
+            assert.match(report, /simulated value: <quickPick:pick:value>/);
+        });
+
+        test('결과를 단정하지 않는다 (실행 시점의 입력에 달렸다)', () => {
+            // 시뮬레이션 값은 자리표시자라 `equals` 와 맞지 않는다. 그것을 근거로
+            // "건너뜁니다" 라고 하면 사용자 입력과 무관하게 거짓을 말하는 셈이다.
+            const report = buildPreviewReport(
+                whenItem({ var: '${pick.value}', equals: 'release' }, [{ id: 'pick', type: 'quickPick', items: ['release'] }]),
+                baseOptions()
+            );
+            assert.doesNotMatch(report, /NEVER runs|ALWAYS runs/);
+            assert.match(report, /depends on the input at runtime/);
+        });
+
+        test('굳은 분기는 어느 쪽으로 굳었는지 말한다', () => {
+            const off = buildPreviewReport(whenItem({ var: '${ghost.output}', equals: 'a' }), baseOptions());
+            assert.match(off, /NEVER runs/);
+            const on = buildPreviewReport(whenItem({ var: '${ghost.output}', notEquals: 'a' }), baseOptions());
+            assert.match(on, /ALWAYS runs/);
+        });
+
+        test('전방 참조를 굳었다고 하지 않는다', () => {
+            const report = buildPreviewReport({
+                id: 'a.whenfwd',
+                title: 'when forward',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'run', type: 'shell', command: 'echo hi', parallel: true, when: { var: '${later.output}', equals: 'a' } },
+                        { id: 'later', type: 'shell', command: 'make', parallel: true, passTheResultToNextTask: true }
+                    ]
+                }
+            } as ActionItem, baseOptions());
+            assert.doesNotMatch(report, /NEVER runs|ALWAYS runs/);
+            assert.doesNotMatch(report, /unresolved variables:/);
+            assert.match(report, /scheduler runs first/);
+        });
+
+        test('연산자가 없으면 그대로 적는다', () => {
+            const report = buildPreviewReport(whenItem({ var: '${workspaceFolder}' }), baseOptions());
+            assert.match(report, /no operator — the task always runs/);
+        });
+
+        test('matches 와 in 도 읽을 수 있게 적는다', () => {
+            const m = buildPreviewReport(whenItem({ var: '${workspaceFolder}', matches: '^v[0-9]+$' }), baseOptions());
+            assert.match(m, /matches \/\^v\[0-9\]\+\$\//);
+            const i = buildPreviewReport(whenItem({ var: '${workspaceFolder}', in: ['a', 'b'] }), baseOptions());
+            assert.match(i, /in \["a", "b"\]/);
+        });
+
+        test('연산자가 여럿이면 런타임이 실제로 쓰는 것을 보여 준다', () => {
+            // `evaluateTaskCondition` 은 정해진 순서로 **첫 번째만** 적용한다.
+            // 리포트가 다른 것을 보여 주면, 사용자는 적용되지도 않는 조건을 놓고
+            // 디버깅하게 된다 (연산자가 여럿인 것 자체는 when.operators 가 잡는다).
+            const report = buildPreviewReport(
+                whenItem({ var: '${workspaceFolder}', equals: 'a', notEquals: 'b' }),
+                baseOptions()
+            );
+            assert.match(report, /when: .* equals "a"/);
+            assert.doesNotMatch(report, /!= "b"/);
+        });
+
+        test('굳은 분기는 요약에서도 미해결로 센다', () => {
+            // 인라인 ⚠️ 만 남기고 요약에서 빠지면, 요약만 읽는 사용자에게
+            // "모두 해석됨" 으로 보인다 — 분기가 죽은 액션인데도.
+            const report = buildPreviewReport(whenItem({ var: '${ghost.output}', equals: 'a' }), baseOptions());
+            assert.match(report, /Summary: 1 unresolved variable\(s\)/);
+            assert.match(report, /\$\{ghost\.output\}/);
+            assert.doesNotMatch(report, /all \$\{\.\.\.\} references resolve/);
+        });
+
+        test('체인을 막는 전방 대안은 선언 순서와 무관하게 굳었다고 말한다', () => {
+            const tasks = (order: 'forward' | 'backward') => {
+                const z = { id: 'z', type: 'zip', source: 's', archive: 'o.zip', parallel: true };
+                const pick = { id: 'pick', type: 'quickPick', items: ['a'], parallel: true };
+                const run = {
+                    id: 'run', type: 'shell', command: 'echo hi', parallel: true,
+                    when: { var: '${z ?? pick.value}', equals: 'a' }
+                };
+                return order === 'forward' ? [run, pick, z] : [z, pick, run];
+            };
+            for (const order of ['forward', 'backward'] as const) {
+                const report = buildPreviewReport({
+                    id: 'a.whenchain', title: 'when chain',
+                    action: { description: 'x', tasks: tasks(order) }
+                } as ActionItem, baseOptions());
+                assert.match(report, /NEVER runs/, order);
+                // 같은 참조를 두고 "스케줄러가 먼저 돌린다" 와 "미해결" 을 함께
+                // 말하면 한 화면 안에서 자기모순이다.
+                assert.doesNotMatch(report, /scheduler runs first/, order);
+            }
+        });
+    });
+
     suite('uncaptured output refs (M9 회귀 가드)', () => {
         // 런타임은 shell/command에서 passTheResultToNextTask가 falsy면 빈
         // 결과를 넘기므로 `${id.output}`이 리터럴로 셸에 들어간다. 이전

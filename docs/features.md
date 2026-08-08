@@ -1148,7 +1148,11 @@ editor/terminal 규칙은 **비밀을 참조하는 태스크뿐 아니라 비밀
 
 -   `var`: 비교 대상. 보간을 거친 뒤 **문자열로** 비교됩니다.
 -   연산자는 **정확히 하나**만 씁니다 — `equals`(완전 일치) / `notEquals` / `matches`(정규식 부분 일치) / `in`(목록 중 하나). 여럿을 쓰면 첫 번째만 적용되고 Doctor가 `when.operators`로 잡습니다.
+-   **보간되는 것은 `var`뿐입니다.** 피연산자(`equals` 등)에 `${…}`를 적으면 그 글자와 비교하게 되어 결코 일치하지 않습니다 — Doctor의 `when.literal-operand`가 잡습니다.
 -   조건 안의 `${…}` 참조는 다른 참조와 똑같이 **의존성으로 추론**되므로, 조건이 보는 태스크가 끝난 뒤에 평가됩니다.
+-   `var`의 참조가 해석되지 않으면 리터럴 문자열이 그대로 비교되어 **분기가 한쪽으로 굳습니다**(영영 실행 안 됨 / 항상 실행됨). Doctor의 `when.dead-branch`와 Preview Run이 어느 쪽인지 밝힙니다.
+
+Preview Run은 각 태스크의 첫 줄에 `when:`을 찍습니다 — 이 태스크가 아예 돌지 않을 수도 있다는 사실이 나머지를 읽는 전제이기 때문입니다. 조건의 **결과**는 단정하지 않습니다(실행 시점의 입력에 달렸으므로). 단정할 수 있는 것은 위의 "굳은 분기"뿐입니다.
 
 **꺼진 분기는 소비자까지 데려갑니다.** 조건으로 꺼진 태스크를 평범하게 참조하는(`${pickFile.path}`) 태스크도 함께 건너뜁니다 — 그러지 않으면 미해결 리터럴 `"${pickFile.path}"`가 그대로 경로 인자로 넘어갑니다. 어느 쪽 분기가 돌았든 **하나의 소비자**가 받게 하려면 `??`를 씁니다. 그 체인은 **대안이 전부** 꺼졌을 때만 함께 꺼집니다.
 
@@ -2228,6 +2232,8 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `duplicate.task.id` | error | 한 액션의 `tasks[]` 배열에 같은 task `id`가 두 번 이상 등장. |
 | `when.operators` | error / warning | `when`에 연산자(`equals`/`notEquals`/`matches`/`in`)가 여럿이면 error — 런타임은 정해진 순서로 **첫 번째만** 적용하고 나머지를 조용히 무시한다. 하나도 없으면 warning (태스크가 항상 실행됨). |
 | `when.regex` | error | `when.matches`가 `new RegExp()` 컴파일에 실패. 런타임은 던지지 않고 "맞지 않음"으로 보므로, 잡아 주지 않으면 그 분기가 영영 꺼진 채로 남는다. |
+| `when.dead-branch` | warning | `when.var`의 참조가 해석되지 않음. 런타임은 리터럴 문자열(`"${ghost.output}"`)을 그대로 비교하므로 결과가 **입력과 무관하게 고정**된다 — `equals`/`matches`/`in`이면 태스크가 영영 실행되지 않고, `notEquals`면 항상 실행되어 조건이 의미를 잃는다. 메시지가 둘 중 어느 쪽인지 밝힌다. 전방 참조(`${later.output}`)는 스케줄러가 producer를 먼저 돌리므로 제외한다. |
+| `when.literal-operand` | warning | `when`의 **피연산자**(`equals`/`notEquals`/`matches`/`in`)에 `${…}` 참조가 있음. 보간되는 것은 `when.var`뿐이라 피연산자는 적힌 그대로 비교되므로 실제 값과 결코 일치하지 않는다. |
 | `capture.regex` | error | `output.capture.regex`가 `new RegExp()` 컴파일에 실패. |
 | `capture.group` | warning | `output.capture.group` 인덱스가 regex의 capture group 개수를 벗어남. |
 | `capture.reserved` | error | `output.capture.name`이 reserved 집합(`output`/`path`/`value` 등 task 결과 빌트인 키)과 충돌. 스키마는 이름 패턴만 검사하므로 schema-pass 후 런타임에서 throw 하던 케이스를 Doctor가 사전에 잡음. |

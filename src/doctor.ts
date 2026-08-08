@@ -37,6 +37,7 @@ import {
     INTERACTIVE_TASK_TYPES,
     buildTaskGraph,
     detectGraphCycle,
+    evaluateTaskCondition,
     selectPlatformValue,
 } from './pipelineUtils';
 import {
@@ -1056,6 +1057,10 @@ function analyzeActionTasks(
         // inputBox 의 prefix/suffix 도 보간 대상이다.
         visitString(task.prefix);
         visitString(task.suffix);
+        // `when.var` 도 런타임이 보간한다 (`conditionGate`). 빠뜨리면 조건이
+        // 가리키는 참조의 오타가 **아무 진단도 없이** 지나가고, 런타임은 리터럴
+        // 문자열을 비교하게 되어 그 분기가 영영 한쪽으로 굳는다.
+        const resolvedWhenVar = visitString(task.when?.var);
 
         const forwardTaskIds = new Set<string>();
         for (const id of knownTaskIds) {
@@ -1080,6 +1085,28 @@ function analyzeActionTasks(
             Array.from(findUncapturedOutputRefs(task, tasksById, task.id))
                 .filter(([literal]) => !chainLiterals.has(literal))
         );
+
+        /**
+         * 이 문자열이 **런타임에서도** 안 풀리는가. `raw` 는 사용자가 쓴 원본,
+         * `interpolatedValue` 는 시뮬레이션 보간 결과다.
+         *
+         * **체인은 보간 결과로 판정할 수 없다.** 시뮬레이션 컨텍스트에는 전방
+         * 태스크가 없어서 그 대안이 `undefined` 로 보이고 뒤 대안이 이겨 버린다 —
+         * 런타임에서는 그 전방 태스크가 이미 돌아 있어 체인이 거기서 막힌다
+         * (`blocks-chain`). 그래서 선언 순서만 바꿔도 답이 갈렸다. 체인 판정은
+         * 선언 순서와 무관하므로 **먼저** 본다.
+         *
+         * 나머지(평범한 참조)는 전방 참조 관용을 그대로 쓴다.
+         */
+        const isGenuinelyStuck = (raw: string, interpolatedValue: string): boolean => {
+            if (chains.some(c => raw.includes(c.literal) && !c.resolves)) { return true; }
+            // 체인이 여기까지 왔다면 이미 위에서 걸렸다 — 남는 것은 평범한 참조다.
+            return findUnresolved(
+                [interpolatedValue],
+                makeForwardRefTolerance(forwardTaskIds, tasksById, task.id)
+            ).length > 0;
+        };
+
         // 미해결은 **한 findings 로 모은다.** 평범한 참조와 전부 죽은 체인이
         // 같은 태스크에 함께 있으면 같은 코드·같은 범위의 경고가 둘 붙는다.
         const unresolvedEn = Array.from(new Set([...unresolved, ...typos])).filter(r => !uncaptured.has(r));
@@ -1118,6 +1145,60 @@ function analyzeActionTasks(
                 code: 'variable.dead-alternative',
                 message: `Task '${item.id}.${task.id}': ${chain.literal} resolves, but ${dead.length === 1 ? 'one alternative is' : `${dead.length} alternatives are`} never used — ${dead.map(alt => describeDeadAlternative(alt).en).join('; ')}.`,
                 messageKo: `Task '${item.id}.${task.id}': ${chain.literal} 는 해석되지만, 선택될 일이 없는 대안이 있습니다 — ${dead.map(alt => describeDeadAlternative(alt).ko).join('; ')}.`,
+            });
+        }
+        // 조건이 **굳어 버린** 분기. `when.var` 가 해석되지 않으면 런타임은
+        // 리터럴 문자열 그대로를 비교하므로 결과가 입력과 무관하게 하나로
+        // 고정된다 — 태스크가 영영 돌지 않거나(equals/matches/in) 조건이 있는
+        // 의미가 없어진다(notEquals). `variable.unresolved` 는 "리터럴로
+        // 전달됩니다" 까지만 말하는데, 여기서 중요한 것은 그 **결과**다.
+        if (task.when && typeof task.when.var === 'string' && resolvedWhenVar !== undefined) {
+            // **보간 결과에 `${…}` 가 남았다는 것만으로는 부족하다.** 전방 태스크
+            // 참조는 여기서 아직 리터럴이지만 런타임에서는 멀쩡히 풀린다 —
+            // 참조가 곧 의존성이라 스케줄러가 producer 를 먼저 돌린다. 미해결
+            // 판정과 **같은 관용 규칙**을 태워야 정상 분기를 죽었다고 하지 않는다.
+            if (isGenuinelyStuck(task.when.var, resolvedWhenVar)) {
+                const alwaysRuns = evaluateTaskCondition(task.when, resolvedWhenVar);
+                findings.push({
+                    filePath: input.filePath,
+                    sourceLabel: input.sourceLabel,
+                    range: findIdLine(input.rawText, task.id),
+                    severity: 'warning',
+                    code: 'when.dead-branch',
+                    message: `Task '${item.id}.${task.id}' has a 'when.var' (${task.when.var}) that does not resolve, so at runtime the condition compares the literal '${resolvedWhenVar}' and the outcome never changes: this task ${alwaysRuns ? 'always runs, making the condition meaningless' : 'never runs'}.`,
+                    messageKo: `Task '${item.id}.${task.id}'의 'when.var'(${task.when.var})가 해석되지 않습니다. 런타임은 리터럴 '${resolvedWhenVar}'를 그대로 비교하므로 결과가 입력과 무관하게 고정됩니다 — 이 태스크는 ${alwaysRuns ? '항상 실행되어 조건이 의미가 없습니다' : '영영 실행되지 않습니다'}.`,
+                });
+            }
+        }
+        // `when` 의 **피연산자**는 보간되지 않는다 (`evaluateTaskCondition` 은
+        // `equals`/`notEquals`/`matches`/`in` 을 적힌 그대로 비교한다). 참조를
+        // 적으면 그 글자와 비교하게 되어 역시 결과가 굳는다.
+        const literalOperands: string[] = [];
+        if (task.when) {
+            const operandStrings: string[] = [];
+            for (const key of ['equals', 'notEquals', 'matches'] as const) {
+                const v = task.when[key];
+                if (typeof v === 'string') { operandStrings.push(v); }
+            }
+            if (Array.isArray(task.when.in)) {
+                for (const v of task.when.in) {
+                    if (typeof v === 'string') { operandStrings.push(v); }
+                }
+            }
+            for (const v of operandStrings) {
+                if (UNRESOLVED_VAR_RE.test(v)) { literalOperands.push(v); }
+                UNRESOLVED_VAR_RE.lastIndex = 0;
+            }
+        }
+        if (literalOperands.length > 0) {
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: findIdLine(input.rawText, task.id),
+                severity: 'warning',
+                code: 'when.literal-operand',
+                message: `Task '${item.id}.${task.id}' puts a '\${…}' reference in a 'when' operand (${literalOperands.join(', ')}). Only 'when.var' is interpolated — the operand is compared verbatim, so the comparison is against the literal text and never matches a real value.`,
+                messageKo: `Task '${item.id}.${task.id}'의 'when' 피연산자에 '\${…}' 참조가 있습니다(${literalOperands.join(', ')}). 보간되는 것은 'when.var'뿐이며 피연산자는 적힌 그대로 비교되므로, 실제 값과는 결코 일치하지 않습니다.`,
             });
         }
         if (joinedArgRefs.length > 0) {

@@ -18,6 +18,7 @@ import type { Action, ActionItem, Task, OutputCapture } from './schema';
 import type { ReferenceAlternative } from './pipelineUtils';
 import {
     interpolatePipelineVariables,
+    evaluateTaskCondition,
     parseReferenceAlternatives,
     projectActivePlatformBranches,
     resolveArchiveTaskPath,
@@ -409,6 +410,20 @@ export function analyzeCoalesceRefs(
     return found;
 }
 
+/**
+ * `when` 의 연산자 부분을 사람이 읽는 형태로. 런타임(`evaluateTaskCondition`)이
+ * **먼저 찾은 연산자 하나만** 적용하므로 같은 순서로 고른다 — 여럿 적힌 설정에서
+ * 리포트가 실제로 적용될 것과 다른 연산자를 보여 주면 안 된다 (그 상태 자체는
+ * Doctor 의 `when.operators` 가 따로 잡는다).
+ */
+function describeConditionOperator(when: NonNullable<Task['when']>): string {
+    if (typeof when.equals === 'string') { return `equals ${JSON.stringify(when.equals)}`; }
+    if (typeof when.notEquals === 'string') { return `!= ${JSON.stringify(when.notEquals)}`; }
+    if (typeof when.matches === 'string') { return `matches /${when.matches}/`; }
+    if (Array.isArray(when.in)) { return `in [${when.in.map(v => JSON.stringify(v)).join(', ')}]`; }
+    return '(no operator — the task always runs)';
+}
+
 /** 안 풀리는 대안만 추린다 — 반환 타입이 `reason` 이 있음을 보장한다. */
 export function deadAlternatives(ref: AnalyzedReference): Array<AnalyzedAlternative & { reason: DeadAlternativeReason }> {
     return ref.alternatives.filter(
@@ -750,6 +765,57 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
 
         const interpolated: (string | undefined)[] = [];
 
+        // 전방 참조 관용과 `??` 체인 판정은 **`when` 줄보다 먼저** 필요하다 —
+        // 조건 변수도 같은 규칙으로 봐야 정상 분기를 죽었다고 하지 않는다.
+        const forwardTaskIds = new Set<string>();
+        for (const id of knownTaskIds) {
+            if (!Object.prototype.hasOwnProperty.call(allResults, id)) {
+                forwardTaskIds.add(id);
+            }
+        }
+        // Preview 는 **지금 이 기계에서 실행하면** 을 보여 준다 — 다른 OS branch 의
+        // 참조는 여기서 실행되지 않으므로 보지 않는다 (Doctor 는 반대로 모두 본다).
+        const chains = analyzeCoalesceRefs(task, allResults, tasksById, task.id, process.platform);
+        const chainLiterals = new Set(chains.map(c => c.literal));
+        /**
+         * 런타임에서도 안 풀리는가. Doctor 의 같은 이름 헬퍼와 규칙이 같다 —
+         * **체인은 보간 결과가 아니라 대안 판정으로** 본다. 시뮬레이션에는 전방
+         * 태스크가 없어 그 대안이 없는 것처럼 보이고 뒤 대안이 이겨 버리는데,
+         * 런타임에서는 그 전방 대안이 체인을 막는다.
+         */
+        const isGenuinelyStuck = (raw: string, interpolatedValue: string): boolean => {
+            if (chains.some(c => raw.includes(c.literal) && !c.resolves)) { return true; }
+            return findUnresolved(
+                [interpolatedValue],
+                makeForwardRefTolerance(forwardTaskIds, tasksById, task.id)
+            ).length > 0;
+        };
+
+        // `when` 은 **가장 먼저** 보여 준다 — 이 태스크가 아예 돌지 않을 수도
+        // 있다는 사실이 나머지 줄을 읽는 전제이기 때문이다. 0.7.4 가 조건부
+        // 태스크를 넣고도 리포트에 한 줄도 남기지 않아, 분기 파이프라인은
+        // dry-run 에서 분기 자체가 보이지 않았다.
+        if (task.when && typeof task.when.var === 'string') {
+            const resolvedVar = interpolatePipelineVariables(task.when.var, interpolationContext);
+            interpolated.push(resolvedVar);
+            lines.push(`  when: ${task.when.var} ${describeConditionOperator(task.when)}`);
+            if (isGenuinelyStuck(task.when.var, resolvedVar)) {
+                // 해석되지 않으면 결과가 **입력과 무관하게 고정된다.** 확정해서
+                // 말할 수 있는 것은 이 경우뿐이다 — 값이 풀리는 경우의 결과는
+                // 실행 시점의 입력에 달렸으므로 단정하면 거짓이 된다.
+                const alwaysRuns = evaluateTaskCondition(task.when, resolvedVar);
+                lines.push(`    ⚠️  condition variable does not resolve — the literal '${resolvedVar}' is compared, so this task ${alwaysRuns ? 'ALWAYS runs (the condition does nothing)' : 'NEVER runs'}`);
+            } else if (UNRESOLVED_VAR_RE.test(resolvedVar)) {
+                UNRESOLVED_VAR_RE.lastIndex = 0;
+                // 아직 시뮬레이션되지 않은 태스크의 결과다. 리터럴을 그대로
+                // "simulated value" 라고 부르면 안 풀린 것처럼 보인다.
+                lines.push(`    value comes from a task the scheduler runs first — the real branch depends on the input at runtime`);
+            } else {
+                UNRESOLVED_VAR_RE.lastIndex = 0;
+                lines.push(`    simulated value: ${resolvedVar} (the real branch depends on the input at runtime)`);
+            }
+        }
+
         switch (task.type) {
             case 'shell':
             case 'command': {
@@ -1085,12 +1151,6 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
             }
         }
 
-        const forwardTaskIds = new Set<string>();
-        for (const id of knownTaskIds) {
-            if (!Object.prototype.hasOwnProperty.call(allResults, id)) {
-                forwardTaskIds.add(id);
-            }
-        }
         // Two complementary passes:
         //  1. `findUnresolved` on POST-interpolation strings catches refs to
         //     unknown heads (`${notATask.x}`) and forward refs whose key the
@@ -1102,10 +1162,6 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         //     **하나만 풀려도 리터럴로 남지 않으므로**, 위 두 pass 의 "리터럴로
         //     전달된다" 는 말이 체인에는 거짓이 될 수 있다. 체인은 아래에서
         //     따로 말하고 위 목록에서는 뺀다.
-        // Preview 는 **지금 이 기계에서 실행하면** 을 보여 준다 — 다른 OS branch 의
-        // 참조는 여기서 실행되지 않으므로 보지 않는다 (Doctor 는 반대로 모두 본다).
-        const chains = analyzeCoalesceRefs(task, allResults, tasksById, task.id, process.platform);
-        const chainLiterals = new Set(chains.map(c => c.literal));
         const unresolved = findUnresolved(interpolated, makeForwardRefTolerance(forwardTaskIds, tasksById, task.id))
             .filter(r => !chainLiterals.has(r));
         const typos = findTypoRefs(task, allResults, task.id).filter(r => !chainLiterals.has(r));
