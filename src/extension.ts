@@ -8061,11 +8061,19 @@ export function activate(context: vscode.ExtensionContext) {
                     if (!ref) { return undefined; }
                     // 이미 입력한 부분을 함께 대체한다 — 그러지 않으면
                     // `${pick.` 뒤에 `pick.paths` 가 덧붙는다.
-                    const range = new vscode.Range(document.positionAt(ref.start), position);
+                    //
+                    // **두 범위를 준다.** 하나만 주면 VS Code 는 두 모드에 같은
+                    // 범위를 쓰므로 `editor.suggest.insertMode` 설정과 무관하게
+                    // 커서 뒤가 그대로 남는다 — `${ask.va|lue}` 에서 항목을 고르면
+                    // `${ask.valuelue}` 가 됐다. `replacing` 은 지금 입력 중인
+                    // **대안의 끝**까지다(`??` 뒤 대안은 건드리지 않는다).
+                    const start = document.positionAt(ref.start);
+                    const inserting = new vscode.Range(start, position);
+                    const replacing = new vscode.Range(start, document.positionAt(ref.end));
                     return collectVariableCompletions(text, offset).map(entry => {
                         const item = new vscode.CompletionItem(entry.name, vscode.CompletionItemKind.Variable);
                         item.detail = describeVariableCompletion(entry.detail);
-                        item.range = range;
+                        item.range = { inserting, replacing };
                         item.insertText = entry.name;
                         return item;
                     });

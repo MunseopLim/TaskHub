@@ -115,6 +115,7 @@ suite('variableCompletions', () => {
                 assert.deepStrictEqual(referencePrefixAt(text, offset), {
                     prefix: 'pickFolder.pa',
                     start: text.indexOf('pickFolder'),
+                    end: offset,   // 뒤에 이어지는 글자가 없다
                 });
             });
 
@@ -171,6 +172,80 @@ suite('variableCompletions', () => {
                 // 참조로 보여 **해석되지 않을 것을 제안**하게 된다.
                 const { text, offset } = at('"cmd ${a ??? b.|"');
                 assert.strictEqual(referencePrefixAt(text, offset)?.prefix, '? b.');
+            });
+
+            /**
+             * 낱말 중간에서 자동완성을 받을 때 대체할 범위. 없으면 꼬리가 남아
+             * `${ask.valuelue}` 가 된다.
+             */
+            suite('end — 커서 뒤 대안의 끝', () => {
+                const endOf = (fixture: string) => {
+                    const { text, offset } = at(fixture);
+                    const ref = referencePrefixAt(text, offset)!;
+                    return { ref, offset, text, tail: text.slice(ref.start, ref.end) };
+                };
+
+                test('낱말 중간이면 뒤쪽 글자까지 덮는다', () => {
+                    assert.strictEqual(endOf('"cmd ${ask.va|lue}"').tail, 'ask.value');
+                });
+
+                test('`}` 에서 멈춘다', () => {
+                    assert.strictEqual(endOf('"cmd ${a.b|c} tail"').tail, 'a.bc');
+                });
+
+                test('다음 대안(`??`)은 건드리지 않는다', () => {
+                    assert.strictEqual(endOf('"cmd ${a.b|c ?? d.e}"').tail, 'a.bc');
+                });
+
+                test('`??` 앞의 공백은 덮지 않는다', () => {
+                    // 넣으면 항목을 고를 때마다 `a.bc ??d.e` 로 눌러붙는다.
+                    assert.strictEqual(endOf('"cmd ${a.b|c   ?? d.e}"').tail, 'a.bc');
+                });
+
+                test('문자열이 닫히지 않아도(편집 중) 따옴표·줄바꿈에서 멈춘다', () => {
+                    assert.strictEqual(endOf('"cmd ${a.b|c').tail, 'a.bc');
+                    assert.strictEqual(endOf('"cmd ${a.b|c\nnext').tail, 'a.bc');
+                    assert.strictEqual(endOf('"cmd ${a.b|c\r\nnext').tail, 'a.bc');
+                });
+
+                test('**공백에서 멈춘다** — 뒤따르는 명령 인자를 삼키지 않는다', () => {
+                    // 편집 중인 참조는 닫혀 있지 않은 것이 보통이다(JSON 문자열
+                    // 안에서는 `${` 가 자동으로 닫히지 않는다). 공백을 넘어가면
+                    // 대체 범위가 문자열 끝까지 가서, replace 모드 사용자는
+                    // 항목을 고르는 순간 인자를 통째로 잃는다.
+                    assert.strictEqual(endOf('"cp ${pick.| dist/out.txt"').tail, 'pick.');
+                    assert.strictEqual(endOf('"cp ${pick.pa| --force /tmp/x"').tail, 'pick.pa');
+                });
+
+                test('탭과 비-ASCII 공백도 공백이다', () => {
+                    // `??` 앞에 IME 가 넣은 U+00A0 를 넘기면 `a.value?? d.e` 로
+                    // 눌러붙는다.
+                    assert.strictEqual(endOf('"cmd ${a.b|c\t\t?? d.e}"').tail, 'a.bc');
+                    assert.strictEqual(endOf('"cmd ${a.b|c ?? d.e}"').tail, 'a.bc');
+                });
+
+                test('물음표 하나 뒤도 대안이 아니다', () => {
+                    assert.strictEqual(endOf('"cmd ${a.b|c ? d.e}"').tail, 'a.bc');
+                });
+
+                test('커서가 아직 `${` 를 지나지 않았으면 참조 자리가 아니다', () => {
+                    // 막지 않으면 시작점이 커서보다 뒤가 되어 두 범위의 시작이
+                    // 어긋나고 VS Code 가 항목을 조용히 버린다.
+                    for (const fixture of ['"echo |${a.b}"', '"echo $|{a.b}"']) {
+                        const { text, offset } = at(fixture);
+                        assert.strictEqual(referencePrefixAt(text, offset), undefined, fixture);
+                    }
+                });
+
+                test('end 는 커서보다 앞설 수 없다', () => {
+                    // VS Code 는 대체 범위가 삽입 범위를 품고 커서를 포함하기를
+                    // 요구한다 — 어기면 항목이 조용히 무시된다.
+                    for (const fixture of ['"${a.b|   }"', '"${a.b|  ?? c.d}"', '"${a.b|"']) {
+                        const { ref, offset } = endOf(fixture);
+                        assert.ok(ref.end >= offset, `${fixture} → end=${ref.end}, cursor=${offset}`);
+                        assert.ok(ref.start <= offset, fixture);
+                    }
+                });
             });
 
             test('돌려준 대안은 런타임이 읽는 대안과 같다', () => {

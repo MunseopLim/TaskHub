@@ -163,18 +163,65 @@ function firstStringField(text: string, key: string): string | undefined {
  * 뒤에서 찾으면 `?` 가 셋인 오타에서 갈린다 — `a ??? b.x` 를 런타임은
  * `["a", "? b.x"]` 로 읽어 뒤 대안이 영영 안 풀리는데, 뒤에서 찾으면 `b.x` 가
  * 멀쩡한 참조로 보여 **해석되지 않을 것을 제안하게 된다.**
+ *
+ * `end` 는 **커서 뒤로 이어지는 같은 대안의 끝**이다 (`start <= offset <= end`).
+ * 낱말 중간에서 자동완성을 받을 때 쓰는 대체 범위다 — `${ask.va|lue}` 에서 이것이
+ * 없으면 꼬리가 남아 `${ask.valuelue}` 가 된다.
  */
-export function referencePrefixAt(text: string, offset: number): { prefix: string; start: number } | undefined {
+export interface ReferencePrefix {
+    /** 지금 입력 중인 대안에서 커서 앞부분. */
+    prefix: string;
+    /** 그 대안의 시작 오프셋. */
+    start: number;
+    /** 그 대안의 끝 오프셋 (커서 이후 부분을 포함). */
+    end: number;
+}
+
+export function referencePrefixAt(text: string, offset: number): ReferencePrefix | undefined {
     const open = text.lastIndexOf('${', offset);
     if (open < 0) { return undefined; }
+    // 커서가 아직 `${` 를 지나지 않았으면 참조 자리가 아니다. `lastIndexOf` 는
+    // 커서 위치에서 시작하는 `${` 도 찾으므로, 막지 않으면 시작점이 커서보다
+    // 뒤가 되어 두 범위의 시작이 어긋나고 VS Code 가 항목을 버린다.
+    if (open + 2 > offset) { return undefined; }
     const between = text.slice(open + 2, offset);
     if (/[}"\r\n]/.test(between)) { return undefined; }
+    const end = alternativeEndAt(text, offset);
     const parts = between.split('??');
     const rest = parts[parts.length - 1];
-    if (parts.length === 1) { return { prefix: between, start: open + 2 }; }
+    if (parts.length === 1) { return { prefix: between, start: open + 2, end }; }
     const lead = rest.length - rest.trimStart().length;
-    return { prefix: rest.slice(lead), start: open + 2 + (between.length - rest.length) + lead };
+    return { prefix: rest.slice(lead), start: open + 2 + (between.length - rest.length) + lead, end };
 }
+
+/**
+ * 커서 뒤로 이어지는 **같은 대안**이 어디서 끝나는가.
+ *
+ * `${…}` 를 닫는 `}`, 문자열의 끝, 다음 대안을 여는 `??`, 그리고 **공백**에서
+ * 멈춘다. 시작점이 언제나 커서 이하이므로 결과는 커서보다 앞설 수 없다 —
+ * VS Code 는 대체 범위가 삽입 범위를 품고 커서를 포함하기를 요구한다.
+ *
+ * **공백에서 멈추는 것이 핵심이다.** 참조는 편집 중에 닫혀 있지 않은 것이 보통인데
+ * (JSON 문자열 안에서는 `${` 가 자동으로 닫히지 않는다), 공백을 넘어가면
+ * `"cp ${pick.| dist/out.txt"` 에서 대체 범위가 `pick. dist/out.txt` 가 되어
+ * **사용자의 명령 인자를 삼킨다.** 대안이 공백을 품는 일도 없다 — `??` 는 대안을
+ * 다듬고, 다듬지 않는 평범한 참조는 공백이 들어가는 순간 런타임에서 리터럴로
+ * 남는다(`${ producer.output}`). 그러니 공백 뒤는 애초에 이 참조의 일부가 아니다.
+ *
+ * 공백 판정은 정규식으로 한다 — `??` 앞에 IME 가 넣은 U+00A0 같은 것까지 잡아야
+ * 항목을 고를 때 `a.value?? d.e` 로 눌러붙지 않는다.
+ */
+function alternativeEndAt(text: string, offset: number): number {
+    for (let i = offset; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === '}' || ch === '"' || WHITESPACE_RE.test(ch) || (ch === '?' && text[i + 1] === '?')) {
+            return i;
+        }
+    }
+    return text.length;
+}
+
+const WHITESPACE_RE = /\s/;
 
 /**
  * 커서 위치에서 제안할 참조 목록.

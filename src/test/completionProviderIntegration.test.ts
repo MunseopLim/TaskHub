@@ -62,6 +62,45 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
   }
 ]`;
 
+    /**
+     * 낱말 **중간**에 커서가 있는 형태. `editor.suggest.insertMode` 가 `replace`
+     * 인 사용자는 꼬리(`lue`)가 사라져야 하고, `insert` 인 사용자는 남아야 한다 —
+     * 범위를 하나만 주면 설정과 무관하게 늘 남는다.
+     */
+    const MID_TOKEN_FIXTURE = `[
+  {
+    "id": "a.multi",
+    "title": "multi",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "ask", "type": "inputBox", "prompt": "tag" },
+        { "id": "run", "type": "shell", "command": "echo \${ask.va${CURSOR}lue}" }
+      ]
+    }
+  }
+]`;
+
+    /**
+     * `??` 체인 **이면서** 커서 뒤에 꼬리가 있는 형태. 두 규칙(대안 경계와 낱말
+     * 끝)이 동시에 걸리는 유일한 자리라, `end` 가 어긋나면 앞 대안을 지우거나
+     * 뒤 대안을 삼킨다.
+     */
+    const CHAIN_MID_TOKEN_FIXTURE = `[
+  {
+    "id": "a.multi",
+    "title": "multi",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "pick", "type": "fileDialog" },
+        { "id": "ask", "type": "inputBox", "prompt": "tag" },
+        { "id": "run", "type": "shell", "command": "echo \${pick.path ?? ask.va${CURSOR}lue}" }
+      ]
+    }
+  }
+]`;
+
     /** `${` 바로 뒤 — 점이 없는 분기(태스크 id · 전역 참조). */
     const NO_DOT_FIXTURE = `[
   {
@@ -137,6 +176,11 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
         return item.range instanceof vscode.Range ? item.range : item.range.replacing;
     }
 
+    function insertRangeOf(item: vscode.CompletionItem): vscode.Range | undefined {
+        if (!item.range) { return undefined; }
+        return item.range instanceof vscode.Range ? item.range : item.range.inserting;
+    }
+
     test('이미 입력한 `pick.` 을 덮는 range 로 참조 전체를 넣는다', async () => {
         const { doc, position } = await openFixture(path.join('.vscode', 'actions.json'));
         const items = await completionsAt(doc, position);
@@ -173,6 +217,52 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
             assert.ok(range && doc.getText(range) === 'pick.', `range 가 어긋났다: ${labelOf(item)}`);
             assert.strictEqual(item.insertText, labelOf(item), `insertText 가 라벨과 다르다: ${labelOf(item)}`);
         }
+    });
+
+    test('낱말 중간에서는 insert/replace 두 범위를 준다', async () => {
+        const { doc, position } = await openFixture(path.join('midtoken', '.vscode', 'actions.json'), MID_TOKEN_FIXTURE);
+        const items = await completionsAt(doc, position);
+
+        const item = items.find(i => labelOf(i) === 'ask.value');
+        assert.ok(item, `ask.value 를 제안하지 않았다: ${items.map(labelOf).join(',')}`);
+
+        // 범위를 하나만 주면 VS Code 가 두 모드에 같은 것을 써서, replace 를
+        // 고른 사용자도 꼬리를 떠안는다.
+        assert.ok(!(item.range instanceof vscode.Range), 'insert/replace 쌍이 아니라 단일 range 다');
+
+        const inserting = insertRangeOf(item)!;
+        const replacing = replaceRangeOf(item)!;
+        assert.strictEqual(doc.getText(inserting), 'ask.va', 'insert 는 커서까지만 덮는다');
+        assert.strictEqual(doc.getText(replacing), 'ask.value', 'replace 는 낱말 끝까지 덮는다');
+
+        // VS Code 의 요구 조건 — 어기면 항목이 조용히 무시된다.
+        assert.ok(replacing.contains(inserting), 'replace 가 insert 를 품어야 한다');
+        assert.ok(inserting.start.isEqual(replacing.start), '두 범위의 시작이 같아야 한다');
+
+        // 수락 결과: replace 모드에서 꼬리가 남지 않는다.
+        const applied = doc.getText().slice(0, doc.offsetAt(replacing.start))
+            + String(item.insertText)
+            + doc.getText().slice(doc.offsetAt(replacing.end));
+        assert.ok(applied.includes('${ask.value}'), applied.split('\n').find(l => l.includes('echo')));
+        assert.ok(!applied.includes('valuelue'), applied.split('\n').find(l => l.includes('echo')));
+    });
+
+    test('?? 체인 안의 낱말 중간에서도 그 대안만 덮는다', async () => {
+        const { doc, position } = await openFixture(
+            path.join('chainmid', '.vscode', 'actions.json'), CHAIN_MID_TOKEN_FIXTURE
+        );
+        const item = (await completionsAt(doc, position)).find(i => labelOf(i) === 'ask.value');
+        assert.ok(item, '?? 뒤 낱말 중간에서 ask.value 를 제안하지 않았다');
+
+        const replacing = replaceRangeOf(item)!;
+        assert.strictEqual(doc.getText(replacing), 'ask.value',
+            '대체 범위가 대안 하나를 정확히 덮어야 한다 — 넓으면 앞 대안을, 좁으면 꼬리를 남긴다');
+
+        const applied = doc.getText().slice(0, doc.offsetAt(replacing.start))
+            + String(item.insertText)
+            + doc.getText().slice(doc.offsetAt(replacing.end));
+        assert.ok(applied.includes('${pick.path ?? ask.value}'),
+            applied.split('\n').find(l => l.includes('echo')));
     });
 
     test('?? 체인에서는 커서가 놓인 대안만 덮는다 (앞 대안을 지우지 않는다)', async () => {
