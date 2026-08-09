@@ -880,11 +880,47 @@ function orderedActionSources(sources: EffectiveActionSources): ActionSource[] {
         .filter(source => source.actions.length > 0);
 }
 
+/**
+ * 워크스페이스 폴더들의 액션을 병합하면서 **각 액션이 어느 폴더 것인지도 함께**
+ * 정한다. 액션과 출처를 한 번에 확정하는 것이 이 함수의 존재 이유다.
+ *
+ * **둘을 나누면 반드시 어긋나고, 실제로 어긋나 있었다.** 병합은
+ * `mergeActions(ws, merged, 'keep-existing')` 로 **뒤쪽** 폴더를 택하는데
+ * 매핑은 역순 덮어쓰기로 **앞쪽** 폴더를 택했다. 같은 id 를 두 폴더가 정의하면
+ * B 폴더의 명령이 A 폴더의 cwd 와 `${workspaceFolder}` 로 돌았고, 중복 id 는
+ * 경고만 찍고 통과하므로(`validateUniqueActionIdsAcrossSources`) 아무도 막지 않았다.
+ *
+ * 승자 규칙은 병합 쪽을 그대로 따른다: **같은 id 를 마지막으로 정의한 폴더.**
+ * 트리에 보이고 실제로 실행되는 액션이 무엇인지는 바꾸지 않고, 어긋나 있던
+ * 폴더 매핑만 그쪽에 맞춘 것이다.
+ *
+ * 모듈 전역(`actionWorkspaceFolderMap`)을 건드리지 않고 결과만 돌려주므로
+ * 단위 테스트가 두 승자의 일치를 직접 확인할 수 있다.
+ */
+export function resolveWorkspaceActions(
+    base: ActionItem[],
+    workspaceSources: { actions: ActionItem[]; workspaceFolderPath: string | undefined }[]
+): { merged: ActionItem[]; folderById: Map<string, string | undefined> } {
+    let merged = base;
+    const folderById = new Map<string, string | undefined>();
+
+    for (const wsSource of workspaceSources) {
+        if (wsSource.actions.length === 0) { continue; }
+        merged = mergeActions(wsSource.actions, merged, 'keep-existing');
+        traverseActionItems(wsSource.actions, (item) => {
+            if (item.id) {
+                folderById.set(item.id, wsSource.workspaceFolderPath);
+            }
+        });
+    }
+
+    return { merged, folderById };
+}
+
 function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] {
     const effective = collectEffectiveActionSources(context);
     const extensionActions = effective.bundled.actions;
     const presetActions = effective.preset?.actions ?? [];
-    const workspaceSources = effective.workspaces;
 
     // Merge with priority: workspace > preset > extension
     let mergedActions = extensionActions;
@@ -894,27 +930,18 @@ function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] 
         mergedActions = mergeActions(presetActions, mergedActions, 'keep-existing');
     }
 
-    // Apply workspace actions (highest priority)
-    for (const wsSource of workspaceSources) {
-        if (wsSource.actions.length > 0) {
-            mergedActions = mergeActions(wsSource.actions, mergedActions, 'keep-existing');
-        }
+    // Apply workspace actions (highest priority).
+    const resolved = resolveWorkspaceActions(mergedActions, effective.workspaces);
+    mergedActions = resolved.merged;
+
+    actionWorkspaceFolderMap.clear();
+    for (const [id, folderPath] of resolved.folderById) {
+        actionWorkspaceFolderMap.set(id, folderPath);
     }
 
     const sources = orderedActionSources(effective);
     if (sources.length > 1) {
         validateUniqueActionIdsAcrossSources(sources.map(({ sourceLabel, actions }) => ({ sourceLabel, actions })));
-    }
-
-    actionWorkspaceFolderMap.clear();
-
-    // Map actions to workspace folders (workspace actions have priority)
-    for (const source of [...workspaceSources].reverse()) {
-        traverseActionItems(source.actions, (item) => {
-            if (item.id) {
-                actionWorkspaceFolderMap.set(item.id, source.workspaceFolderPath);
-            }
-        });
     }
 
     return mergedActions;
@@ -4488,7 +4515,19 @@ async function executeActionPipelineForRun(
         });
         const resolved = interpolatePipelineVariables(task.when.var, gateContext);
         if (evaluateTaskCondition(task.when, resolved)) { return undefined; }
-        return t(`조건이 맞지 않습니다 (${resolved}).`, `Condition not met (${resolved}).`);
+        // **판정에 쓴 값과 보여 줄 값은 다른 문자열이다.** 이 사유는 그대로
+        // 출력 채널에 실리므로(`condition-skipped` 분기), 비밀을 참조하는 조건이
+        // 실패하면 평문 비밀번호가 로그에 남는다. 명령줄·cwd·출력이 이미 거치는
+        // 그 마스킹을 여기서도 태운다.
+        //
+        // 컨텍스트를 다시 만드는 이유는 `redactSecretsInContext` 가 전개하면서
+        // null 프로토타입을 잃기 때문이다. 탐색은 `ownValue` 가 own property 만
+        // 보므로 안전하지만, 두 컨텍스트의 모양을 굳이 어긋나게 둘 이유가 없다.
+        const shown = interpolatePipelineVariables(
+            task.when.var,
+            Object.assign(Object.create(null), redactSecretsInContext(executionRun, gateContext))
+        );
+        return t(`조건이 맞지 않습니다 (${shown}).`, `Condition not met (${shown}).`);
     };
 
     const launchTask = (taskId: string): Promise<InFlightOutcome> => {
@@ -8065,15 +8104,97 @@ export function activate(context: vscode.ExtensionContext) {
                     // **두 범위를 준다.** 하나만 주면 VS Code 는 두 모드에 같은
                     // 범위를 쓰므로 `editor.suggest.insertMode` 설정과 무관하게
                     // 커서 뒤가 그대로 남는다 — `${ask.va|lue}` 에서 항목을 고르면
-                    // `${ask.valuelue}` 가 됐다. `replacing` 은 지금 입력 중인
-                    // **대안의 끝**까지다(`??` 뒤 대안은 건드리지 않는다).
+                    // `${ask.valuelue}` 가 됐다.
+                    //
+                    // `ref.end` 는 **상한**이지 대체 범위가 아니다. 실제 범위는
+                    // 아래에서 항목마다 정한다.
                     const start = document.positionAt(ref.start);
                     const inserting = new vscode.Range(start, position);
-                    const replacing = new vscode.Range(start, document.positionAt(ref.end));
+                    // 대안 끝까지 — 후보가 커서 뒤 글자와 이어지지 않을 때 쓰는 상한.
+                    const toAlternativeEnd = new vscode.Range(start, document.positionAt(ref.end));
+                    /**
+                     * 지금 치고 있는 **id 구간**의 끝. 태스크 id 후보에만 쓴다.
+                     *
+                     * 커서 앞에 `.` 이 없다면 사용자는 id 를 치는 중이고, 뒤따르는
+                     * `.key` 는 그 id 의 일부가 아니다(런타임도 첫 `.` 에서 자른다).
+                     * 전역 참조는 `.key` 를 갖지 않으므로 이 좁히기를 적용하지 않는다.
+                     * 찾지 못하면 `-1` — 호출부가 상한으로 폴백한다.
+                     */
+                    /**
+                     * 지금 커서가 **태스크 id 를 치는 자리**이고 이 후보가 그 id 인가.
+                     *
+                     * 이 자리에서만 뒤따르는 `.key` 가 후보의 것이 아니라 사용자가
+                     * 쓰던 키다. 전역 참조는 키를 갖지 않고, 결과 키 후보
+                     * (`ask.value`)는 이미 키까지 품고 있다.
+                     */
+                    const isTaskIdPosition = (detail: VariableCompletionDetail): boolean =>
+                        detail.kind === 'task' && !ref.prefix.includes('.');
+                    const idSegmentEndFor = (detail: VariableCompletionDetail): number => {
+                        if (!isTaskIdPosition(detail)) { return -1; }
+                        const dot = text.indexOf('.', offset);
+                        return dot >= 0 && dot < ref.end ? dot : -1;
+                    };
+                    /**
+                     * 후보가 문서의 이 자리를 **정확히** 차지하고 있는가.
+                     *
+                     * 길이만 맞추면 안 된다 — 후보가 **기존 토큰의 접두사**일 때
+                     * 그만큼만 지워서 고른 것과 다른 참조가 남는다.
+                     * `${as|ky.value}` 에서 `ask` 를 고르면 `${asky.value}` 가 됐고,
+                     * `${ask.va|luetail}` 에서 `ask.value` 를 고르면 `${ask.valuetail}`,
+                     * `${ask|tail}` 에서 `ask` 를 고르면 `${asktail}` 이 됐다.
+                     * 셋 다 오류 없이 **사용자가 고르지 않은 것**을 가리킨다.
+                     *
+                     * 그래서 뒤가 경계인지 본다: 대안이 거기서 끝나거나(`ref.end`),
+                     * **id 를 치는 자리에서** 키 구분자 `.` 이 이어질 때만 인정한다.
+                     *
+                     * `.` 을 무조건 경계로 보면 반대쪽이 깨진다 — 남긴 `.key` 를
+                     * 받아 줄 후보가 아니기 때문이다. 실제로 그랬다:
+                     * `${workspaceFol|der.foo}` 에서 `workspaceFolder` 를 고르면
+                     * `${workspaceFolder.foo}`, `${ask.va|lue.extra}` 에서
+                     * `ask.value` 를 고르면 `${ask.value.extra}` 가 됐고, **런타임은
+                     * 둘 다 해석하지 못해 리터럴로 남긴다.** 전역 참조는 키를 갖지
+                     * 않고, 결과 키 후보는 이미 키까지 품고 있다.
+                     */
+                    const exactMatchEnd = (name: string, detail: VariableCompletionDetail): number => {
+                        if (!text.startsWith(name, ref.start)) { return -1; }
+                        const end = ref.start + name.length;
+                        if (end === ref.end) { return end; }
+                        return isTaskIdPosition(detail) && text[end] === '.' ? end : -1;
+                    };
                     return collectVariableCompletions(text, offset).map(entry => {
                         const item = new vscode.CompletionItem(entry.name, vscode.CompletionItemKind.Variable);
                         item.detail = describeVariableCompletion(entry.detail);
-                        item.range = { inserting, replacing };
+                        // **대체 범위는 항목마다 다르다.** 후보가 커서 뒤 글자와
+                        // 그대로 이어지면 딱 그만큼만 덮는다. 대안 끝까지 일률로
+                        // 덮으면 넣는 글자와 지우는 글자가 어긋나 두 가지가 깨졌다.
+                        //
+                        // - `${as|k.value}` 에서 `ask` 를 고르면 `${ask}` 가 됐다.
+                        //   `insertText` 는 맨 id 인데 범위는 `ask.value` 였다.
+                        //   결과가 유효한 참조 모양이라 오류도 안 나고, bare 참조는
+                        //   `output`/`outputDir` 폴백을 타 **다른 값을 가리킨다.**
+                        // - `${my| task.value}` 에서 `my task`(공백 든 id — 스키마가
+                        //   막지 않고 런타임도 해석한다) 를 고르면 범위는 `my` 뿐인데
+                        //   `my task` 를 넣어 `${my task task.value}` 가 됐다. 이쪽은
+                        //   `insert` 모드에서도 걸리던, range 를 쪼개기 전부터 있던 것이다.
+                        //
+                        // 커서에 못 미치는 일치는 버린다 — VS Code 는 대체 범위가
+                        // 삽입 범위를 품기를 요구하므로(`${asktail|}` 에 후보 `ask`),
+                        // 어기면 항목이 조용히 사라진다.
+                        //
+                        // 정확히 이어지지 않는 후보도 **id 를 치고 있는 자리에서는**
+                        // 뒤따르는 `.key` 를 건드리면 안 된다. 형제 id 가 그 자리다 —
+                        // `ask` 와 `asky` 가 있을 때 `${as|k.value}` 에서 `asky` 를
+                        // 고르면 `${asky}` 가 되어 위와 똑같이 `.value` 가 사라진다.
+                        // 반면 전역 참조(`workspaceFolder`)는 `.key` 를 갖지 않으므로
+                        // 표현식 전체를 대체하는 것이 맞다. 그래서 후보의 종류로 가른다.
+                        const exact = exactMatchEnd(entry.name, entry.detail);
+                        const exactEnd = exact >= 0 ? exact : idSegmentEndFor(entry.detail);
+                        item.range = {
+                            inserting,
+                            replacing: exactEnd >= offset
+                                ? new vscode.Range(start, document.positionAt(exactEnd))
+                                : toAlternativeEnd,
+                        };
                         item.insertText = entry.name;
                         return item;
                     });

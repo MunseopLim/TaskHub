@@ -306,6 +306,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             const script = [
                 PULL_FROM_BUNDLE,
                 extractFn('getActiveRows'),
+                extractFn('isPlainObject'),
                 extractFn('syncEditingArrayCellToData'),
                 extractFn('commitCell'),
                 'let activeIdx = 0;',
@@ -2052,5 +2053,204 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                 assert.strictEqual(api.state().modified, true, 'dirty 표시는 유지해야 reload/전환이 막힌다');
             });
         }
+    });
+
+    /**
+     * **표는 객체 행을 전제하지만 배열 원소는 무엇이든 될 수 있다.**
+     *
+     * 루트 배열이든 중첩 배열(`{"items": [1,2,3]}`)이든 시트가 되고, 그 원소가
+     * 그대로 행이 된다. `null` 원소가 있으면 열을 모으는 `Object.keys(row)` 와
+     * 셀 값을 읽는 `row[col]` 이 **TypeError** 를 낸다 — 확장 호스트가 아니라
+     * webview 안이라 오류 알림조차 없이 화면만 텅 빈다.
+     *
+     * 진입점 테스트(`jsonEditorOpenFlow`)는 패널이 만들어지는 것까지만 본다.
+     * 그 뒤에 webview 가 죽는지는 여기서만 잡힌다.
+     */
+    suite('원시값 행이 표를 죽이지 않는다 (실행 테스트)', () => {
+        function renderRows(rows: unknown[]): string {
+            let out = '';
+            const script = [
+                extractFn('escapeHtml'),
+                extractFn('escapeAttr'),
+                extractFn('fmt'),
+                extractFn('isPlainObject'),
+                extractFn('renderTable'),
+                // 셀 마크업 자체는 이 테스트의 관심사가 아니다. 값이 무엇으로
+                // 넘어왔는지만 보이게 최소로 흉내 낸다.
+                'function detectMultiline() { return false; }',
+                'function renderCellView(val) { return "<v>" + String(val) + "</v>"; }',
+                'function renderCellEdit() { return ""; }',
+                'function attachCellEvents() {}',
+                'let lastRecoverableDraft;',
+                'return renderTable;',
+            ].join('\n');
+            const document = {
+                getElementById: () => ({ set innerHTML(v: string) { out = v; } }),
+            };
+            const run = new Function('document', 'S', 'getActiveRows', script)(
+                document, buildJsonEditorStrings(), () => rows
+            ) as () => void;
+            run();
+            return out;
+        }
+
+        test('`null` 원소가 있어도 던지지 않는다', () => {
+            // 이 가드가 없으면 여기서 TypeError 가 난다.
+            const html = renderRows([null, { a: 1 }]);
+            assert.ok(html.includes('<table>'), `표가 그려지지 않았다: ${html}`);
+            assert.ok(html.includes('>a<'), '객체 행의 열이 사라졌다');
+        });
+
+        test('원소가 전부 원시값이어도 던지지 않는다', () => {
+            for (const rows of [[null, 1, 'a'], [1, 2, 3], ['a', 'b']]) {
+                assert.doesNotThrow(() => renderRows(rows), JSON.stringify(rows));
+            }
+        });
+
+        test('문자열 원소의 인덱스가 열 이름으로 올라오지 않는다', () => {
+            // `Object.keys("ab")` 는 `["0","1"]` 이다. 거르지 않으면 그것이
+            // 그대로 표의 열 머리글이 된다.
+            const html = renderRows(['ab', { real: 1 }]);
+            assert.ok(html.includes('>real<'), '진짜 열이 사라졌다');
+            assert.ok(!/<th scope="col">[01]<\/th>/.test(html), `문자열 인덱스가 열이 됐다: ${html}`);
+        });
+
+        /** 이 행에 붙은 편집 가능한 셀의 `data-col` 목록. */
+        function editableColsOfRow(html: string, rowIdx: number): string[] {
+            const re = new RegExp('data-row="' + rowIdx + '" data-col="([^"]*)"', 'g');
+            return Array.from(html.matchAll(re)).map(m => m[1]);
+        }
+
+        /**
+         * **죽지 않는 것만으로는 부족하다.** 열은 다른 행들의 것이므로 이 행의
+         * 것이 아닌데, 셀을 만들어 두면 편집 가능해 보인다.
+         */
+        test('`null` 행에는 편집 가능한 셀을 만들지 않는다', () => {
+            const html = renderRows([null, { a: 1 }]);
+            assert.deepStrictEqual(editableColsOfRow(html, 0), [],
+                '`null` 행에 편집 셀이 생겼다 — 빠져나올 때 commitCell 이 죽는다');
+            assert.deepStrictEqual(editableColsOfRow(html, 1), ['a'], '객체 행은 그대로 편집 가능해야 한다');
+        });
+
+        /**
+         * 배열 행이 가장 위험하다. `length` 열이 걸리면 **2가 편집 가능한 값으로
+         * 보이고**, 0 으로 바꾸면 배열이 통째로 잘린다 — 조용한 데이터 손실이다.
+         */
+        test('배열 행의 `length` 가 편집 가능한 셀로 새지 않는다', () => {
+            const html = renderRows([[1, 2], { length: 7 }]);
+            assert.deepStrictEqual(editableColsOfRow(html, 0), [],
+                '배열 행에 셀이 생겼다 — `length` 를 쓰면 원소가 잘린다');
+            assert.deepStrictEqual(editableColsOfRow(html, 1), ['length'],
+                '객체 행의 `length` 는 평범한 열이므로 편집할 수 있어야 한다');
+        });
+
+        /** 한 `<tr>` 의 유효 열 수 — `colspan` 을 합산한다. */
+        function effectiveCols(tr: string): number {
+            return Array.from(tr.matchAll(/<t[hd]\b([^>]*)>/g)).reduce((sum, m) => {
+                const cs = /colspan="(\d+)"/.exec(m[1]);
+                return sum + (cs ? parseInt(cs[1], 10) : 1);
+            }, 0);
+        }
+
+        /**
+         * **헤더와 본문의 열 수가 어긋나면 표가 밀린다.** 원시값 행만 있는
+         * 시트에는 열 이름이 될 키가 없는데 읽기 전용 셀은 한 칸을 쓰므로,
+         * 그대로 두면 본문이 한 칸 넓어져 `작업` 헤더가 값 칸에 걸리고 삭제
+         * 버튼 열이 머리글을 잃는다.
+         */
+        test('모든 행의 열 수가 헤더와 같다', () => {
+            const cases: unknown[][] = [
+                [null, 1, 'a'],              // 원시값만 — 값 열이 서는 자리
+                [null, { a: 1 }],            // 섞임
+                [[1, 2], { length: 7 }],     // 배열 행 + 같은 이름의 객체 열
+                [{ a: 1 }, { b: 2 }],        // 객체만 (대조군)
+                [{}, null],                  // 키 없는 객체 + 원시값
+                [{}, {}],                    // 키 없는 객체만 — 값 열이 서면 안 된다
+            ];
+            for (const rows of cases) {
+                const html = renderRows(rows);
+                const trs = Array.from(html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)).map(m => m[0]);
+                assert.ok(trs.length >= 2, `${JSON.stringify(rows)}: 행이 그려지지 않았다`);
+                const header = effectiveCols(trs[0]);
+                trs.slice(1).forEach((tr, i) => {
+                    assert.strictEqual(
+                        effectiveCols(tr), header,
+                        `${JSON.stringify(rows)} 의 ${i + 1}번 행이 헤더(${header}열)와 어긋난다`
+                    );
+                });
+            }
+        });
+
+        test('원시값만 있는 시트에는 현지화된 값 열이 선다', () => {
+            const html = renderRows([null, 1, 'a']);
+            assert.ok(html.includes('>' + buildJsonEditorStrings().valueHeader + '<'),
+                `값 열 머리글이 없다: ${html}`);
+        });
+
+        test('객체만 있는 시트에는 값 열을 만들지 않는다', () => {
+            // 과하게 서면 빈 칸이 하나 더 생긴다.
+            const html = renderRows([{ a: 1 }]);
+            assert.ok(!html.includes('>' + buildJsonEditorStrings().valueHeader + '<'), html);
+        });
+
+        test('편집할 수 없는 행도 값은 보여 준다', () => {
+            // 값이 사라진 것처럼 보이면 사용자가 파일이 깨졌다고 오해한다.
+            const html = renderRows([[1, 2], { a: 1 }]);
+            assert.ok(html.includes('class="non-object-row"'), '읽기 전용 셀이 없다');
+            assert.ok(html.includes('[1,2]'), `값을 보여 주지 않았다: ${html}`);
+        });
+
+        /**
+         * 렌더가 막으므로 여기까지 오지 않지만, 오면 `null[col]` 로 죽거나
+         * 배열의 `length` 에 써서 원소를 잘라 낸다. 되돌릴 수 없는 손실이라
+         * 방어를 남겼고, 그 방어가 실제로 도는지 본다.
+         */
+        test('commitCell 은 객체가 아닌 행에 쓰지 않는다', () => {
+            // `isPlainObject` 도 배포되는 것을 그대로 쓴다 — 손으로 흉내 내면
+            // 판정이 갈려도 테스트가 통과한다.
+            const script = [
+                extractFn('isPlainObject'),
+                extractFn('commitCell'),
+                'return commitCell;',
+            ].join('\n');
+            const boot = (rows: unknown[]) =>
+                new Function('getActiveRows', script)(() => rows) as (td: unknown) => boolean;
+            const td = { classList: { contains: () => true }, dataset: { row: '0', col: 'length' } };
+
+            for (const rows of [[null], [42], ['ab']] as unknown[][]) {
+                assert.strictEqual(boot(rows)(td), true, JSON.stringify(rows));
+            }
+            // 배열 행이 잘리지 않았는지 직접 본다 — 여기가 조용한 손실 자리다.
+            const arrRows: unknown[] = [[1, 2]];
+            assert.strictEqual(boot(arrRows)(td), true);
+            assert.deepStrictEqual(arrRows[0], [1, 2], '배열이 잘렸다');
+        });
+
+        /**
+         * 파일은 열리는데 **"행 추가" 를 누르는 순간** webview 가 멈추던 자리.
+         * `Object.keys(rows[0])` 가 무조건 불렸다.
+         */
+        test('첫 행이 `null` 이어도 행 추가가 죽지 않는다', () => {
+            const m = html.match(/document\.getElementById\('btnAddRow'\)\.addEventListener\('click', \(\) => \{([\s\S]*?)\n    \}\);/);
+            assert.ok(m, 'btnAddRow 핸들러를 찾지 못했다');
+            const addRow = new Function(
+                'getActiveRows', 'commitActiveCellOrAbort', 'pushHistory', 'renderTable',
+                [extractFn('isPlainObject'), m![1]].join('\n')
+            ) as (
+                get: () => unknown[], commit: () => boolean, push: () => void, render: () => void
+            ) => void;
+
+            const rows: unknown[] = [null, 1, 'a', { name: '', count: 3, tags: ['x'] }];
+            assert.doesNotThrow(() => addRow(() => rows, () => true, () => {}, () => {}));
+            assert.deepStrictEqual(
+                rows[rows.length - 1], { name: '', count: 0, tags: [] },
+                '첫 **객체** 행을 본보기로 삼아야 한다'
+            );
+
+            // 객체 행이 하나도 없으면 빈 행.
+            const noObjects: unknown[] = [null, 1];
+            addRow(() => noObjects, () => true, () => {}, () => {});
+            assert.deepStrictEqual(noObjects[noObjects.length - 1], {});
+        });
     });
 });

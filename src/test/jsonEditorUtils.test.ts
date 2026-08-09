@@ -3,7 +3,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
 import { buildSheetMap, getRowsByPath, SheetEntry, parseValue, coerceEditedCellValue, coerceEditedArrayItems, shouldOfferRecovery, RecoveryEntry, makeRecoveryStore, MinimalWorkspaceState, buildDraftSnapshot, DraftSnapshotInput, decideSaveResult, SaveResultInput, effectiveBaseline, resolveActiveDraftState, ActiveCellEdit } from '../jsonEditorUtils';
-import { wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY, getWebviewContent } from '../jsonEditor';
+import {
+    wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY, getWebviewContent,
+    isSupportedJsonRoot, unsupportedJsonRootMessage,
+} from '../jsonEditor';
 
 function readSourceForRegex(filePath: string): string {
     return fs.readFileSync(filePath, 'utf-8').replace(/\r\n/g, '\n');
@@ -163,6 +166,50 @@ suite('JsonEditorUtils Test Suite', () => {
             const { wrapped } = wrapIfArray(data);
             const rows = getRowsByPath(wrapped, [ROOT_ARRAY_KEY]);
             assert.deepStrictEqual(rows, data);
+        });
+
+        /**
+         * 스칼라 루트도 유효한 JSON 이라 `JSON.parse` 를 통과한다. 걸러 내지
+         * 않으면 그대로 webview 로 넘어가는데, `null` 은 거기서
+         * `Object.keys(null)` 로 **TypeError** 를 낸다 — 확장 호스트가 아니라
+         * webview 안이라 오류 알림도 없이 패널만 텅 빈 채 열린다.
+         */
+        test('스칼라 루트는 던져서 막는다', () => {
+            for (const root of [null, 42, 'text', true]) {
+                assert.throws(() => wrapIfArray(root), /object or array roots|객체나 배열/, String(root));
+            }
+        });
+
+        test('`null` 은 webview 의 buildSheetMap 을 실제로 깨뜨린다 (막아야 하는 이유)', () => {
+            assert.throws(() => buildSheetMap(null as any), TypeError);
+        });
+
+        test('원시값이 든 배열과 `[null]` 은 정상 루트다', () => {
+            // 막을 것은 **루트**가 스칼라인 경우뿐이다. 원소는 무엇이든 좋다.
+            for (const data of [[null], [1, 2, 3], ['a', 'b']]) {
+                const result = wrapIfArray(data);
+                assert.strictEqual(result.isRootArray, true);
+                assert.deepStrictEqual(result.wrapped[ROOT_ARRAY_KEY], data);
+                assert.doesNotThrow(() => buildSheetMap(result.wrapped));
+            }
+        });
+    });
+
+    suite('isSupportedJsonRoot', () => {
+        test('객체와 배열만 통과한다', () => {
+            for (const ok of [{}, { a: 1 }, [], [1, 2]]) {
+                assert.strictEqual(isSupportedJsonRoot(ok), true, JSON.stringify(ok));
+            }
+            for (const bad of [null, 42, 'text', true, undefined]) {
+                assert.strictEqual(isSupportedJsonRoot(bad), false, String(bad));
+            }
+        });
+
+        test('거절 사유가 어떤 루트였는지 밝힌다', () => {
+            // 무엇이 잘못됐는지 모르면 사용자가 파일을 고칠 수 없다.
+            assert.match(unsupportedJsonRootMessage(null), /null/);
+            assert.match(unsupportedJsonRootMessage(42), /number/);
+            assert.match(unsupportedJsonRootMessage('x'), /string/);
         });
     });
 

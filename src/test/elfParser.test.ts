@@ -15,6 +15,7 @@ import {
     ElfSegment,
     MemoryRegion,
 } from '../elfParser';
+import { buildElf32WithSymbols } from './fixtures/elfFixtures';
 
 /**
  * Helper to build a minimal ELF32 little-endian binary in a Buffer.
@@ -156,6 +157,105 @@ suite('ELF Parser Test Suite', () => {
             const symtabBase = shOff + 40;
             buf.writeUInt32LE(999, symtabBase + 24); // sh_link
             assert.throws(() => parseElf32(buf), /linked string table index .* out of range/);
+        });
+
+        /**
+         * 심볼 테이블 항목 크기·범위 검증.
+         *
+         * `sh_entsize` 를 검사하지 않으면 **바이트마다 심볼 하나**가 나온다.
+         * 엔트리 크기 1 인 ELF 가 거부되지 않고 쓰레기 심볼을 냈고, 32MB 짜리는
+         * RSS 2.9GB 를 쓴 뒤에야 범위 초과로 끝났다 — Memory Map 은 100MB 까지
+         * 받으므로 그 크기면 extension host 가 OOM 으로 간다.
+         */
+        suite('symbol table validation', () => {
+            /** `SHT_SYMTAB` 섹션 헤더의 시작 오프셋. */
+            function symtabHeaderBase(buf: Buffer): number {
+                const shOff = buf.readUInt32LE(32);
+                const shEntSize = buf.readUInt16LE(46);
+                const shNum = buf.readUInt16LE(48);
+                for (let i = 0; i < shNum; i++) {
+                    const base = shOff + i * shEntSize;
+                    if (buf.readUInt32LE(base + 4) === 2) { return base; }
+                }
+                throw new Error('픽스처에 .symtab 이 없다');
+            }
+
+            test('정상 픽스처는 그대로 파싱된다 (대조군)', () => {
+                const result = parseElf32(buildElf32WithSymbols());
+                assert.strictEqual(result.symbols.length, 5);
+            });
+
+            test('엔트리 크기가 16바이트보다 작으면 거부한다', () => {
+                const buf = buildElf32WithSymbols();
+                buf.writeUInt32LE(1, symtabHeaderBase(buf) + 36); // sh_entsize = 1
+                assert.throws(() => parseElf32(buf), /entry size .* too small/);
+            });
+
+            test('심볼 테이블이 파일 밖으로 나가면 거부한다', () => {
+                const buf = buildElf32WithSymbols();
+                buf.writeUInt32LE(0xFFFFFF, symtabHeaderBase(buf) + 20); // sh_size
+                assert.throws(() => parseElf32(buf), /symbol table exceeds file size/);
+            });
+
+            test('심볼 개수가 상한을 넘으면 거부한다', () => {
+                // 범위 검사를 통과하면서 개수만 넘기려면 파일이 실제로 커야 한다.
+                const padded = Buffer.concat([buildElf32WithSymbols(), Buffer.alloc(17 * 1024 * 1024)]);
+                padded.writeUInt32LE(17 * 1024 * 1024, symtabHeaderBase(padded) + 20);
+                assert.throws(() => parseElf32(padded), /too many symbols/);
+            });
+
+            test('16보다 큰 엔트리 크기도 항목을 제대로 읽는다 (패딩된 항목)', () => {
+                // 스펙은 16이지만 더 큰 값도 배치는 그대로다 — 필드가 항목 시작
+                // 으로부터 고정 오프셋에 있으므로 읽을 수 있다. `=== 16` 으로 막으면
+                // 멀쩡한 툴체인 출력이 거부된다.
+                //
+                // 헤더의 `sh_entsize` 만 24로 바꾸면 데이터는 16바이트 간격 그대로라
+                // "거부하지 않는다" 밖에 못 본다. **실제로 24바이트 간격**으로 다시
+                // 깔아야 대조군이 된다. 기존 영역을 밀지 않도록 버퍼 끝에 새로 붙이고
+                // 섹션 헤더만 그쪽을 가리키게 한다.
+                const original = buildElf32WithSymbols();
+                const base = symtabHeaderBase(original);
+                const oldOffset = original.readUInt32LE(base + 16);
+                const oldSize = original.readUInt32LE(base + 20);
+                const count = oldSize / 16;
+
+                const padded = Buffer.alloc(count * 24, 0);
+                for (let i = 0; i < count; i++) {
+                    original.copy(padded, i * 24, oldOffset + i * 16, oldOffset + (i + 1) * 16);
+                }
+
+                const buf = Buffer.concat([original, padded]);
+                buf.writeUInt32LE(original.length, base + 16);   // sh_offset
+                buf.writeUInt32LE(padded.length, base + 20);     // sh_size
+                buf.writeUInt32LE(24, base + 36);                // sh_entsize
+
+                const result = parseElf32(buf);
+                assert.deepStrictEqual(
+                    result.symbols,
+                    parseElf32(buildElf32WithSymbols()).symbols,
+                    '패딩된 항목에서도 16바이트짜리와 같은 심볼이 나와야 한다'
+                );
+            });
+
+            test('크기는 있는데 엔트리 크기가 0이면 거부한다', () => {
+                // 예전에는 `symEntSize > 0` 가드에 걸려 "심볼 없음" 으로 조용히
+                // 열렸다. 이제는 명시적으로 거부한다 — 조용히 데이터를 버리는
+                // 대신 파일이 깨졌다는 사실을 알린다. **의도한 동작 변경이다.**
+                const buf = buildElf32WithSymbols();
+                buf.writeUInt32LE(0, symtabHeaderBase(buf) + 36);
+                assert.throws(() => parseElf32(buf), /entry size .* too small/);
+            });
+
+            test('빈 심볼 테이블은 거부하지 않는다', () => {
+                // 검사를 무조건 걸면 심볼 없는 정상 ELF 가 열리지 않는다.
+                const buf = buildElf32WithSymbols();
+                const base = symtabHeaderBase(buf);
+                buf.writeUInt32LE(0, base + 20); // sh_size = 0
+                buf.writeUInt32LE(0, base + 36); // sh_entsize = 0
+                const result = parseElf32(buf);
+                assert.deepStrictEqual(result.symbols, []);
+                assert.ok(result.sections.length > 0, '섹션은 그대로 읽혀야 한다');
+            });
         });
 
         test('should throw for ELF64', () => {

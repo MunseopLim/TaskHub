@@ -109,7 +109,22 @@ export interface ElfParseResult {
 const ELF32_HEADER_SIZE = 52;
 const ELF32_PH_ENTRY_MIN = 32;
 const ELF32_SH_ENTRY_MIN = 40;
+/** ELF32 `Elf32_Sym` 은 정확히 16바이트다. 그보다 작으면 항목을 읽을 수 없다. */
+const ELF32_SYM_ENTRY_MIN = 16;
 const ELF_MAX_ENTRIES = 65535;
+/**
+ * 심볼 개수 상한. 100MB(Memory Map 한도) 를 16바이트로 다 채워도 6.25M 이므로
+ * 정상 펌웨어는 근처에도 오지 않는다 — 변조된 헤더가 배열을 키우는 것만 막는다.
+ *
+ * **이 값이 렌더가 감당할 수 있는 수는 아니다.** `memoryMapViewer` 는 심볼마다
+ * 세그먼트 객체를 만들고 HTML 문자열까지 조립하므로, 상한을 꽉 채운 입력(약
+ * 16MB 파일)이 오면 뷰어 쪽에서 멈출 수 있다. 그럼에도 이 값을 낮추지 않기로
+ * 한 것은 **의도한 결정**이다 — 이번 검증이 없앤 것은 "심볼 배열이 파일 크기만큼
+ * 무한히 커지는" 경로이고, 100만 심볼짜리 임베디드 ELF 는 현실에 없다. 렌더
+ * 비용을 다루려면 파서가 아니라 뷰어에서 표시 개수를 자르고 요약만 전체 기준으로
+ * 계산해야 한다. 리뷰에서 반복해 제기되므로 판단 근거를 여기 남긴다.
+ */
+const ELF_MAX_SYMBOLS = 1_000_000;
 
 export function parseElf32(buffer: Buffer): ElfParseResult {
     if (!buffer || buffer.length < ELF32_HEADER_SIZE) {
@@ -280,8 +295,31 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
             throw new Error('ELF symbol string table exceeds file size.');
         }
 
-        if (symEntSize > 0) {
+        // **빈 심볼 테이블은 검사할 것이 없다.** 크기가 0이면 조용히 넘어간다 —
+        // 아래 검사를 무조건 걸면 심볼 없는 정상 ELF 가 거부된다.
+        if (symSize > 0) {
+            // 엔트리 크기를 검사하지 않으면 `sh_entsize` 를 1 로 적은 파일이
+            // **바이트마다 심볼 하나**를 만들어 낸다. 실제로 확인했다: 엔트리
+            // 크기 1, 크기 13 인 ELF 가 거부되지 않고 쓰레기 심볼 13개를 냈고,
+            // 32MB 짜리로는 RSS 2.9GB 를 쓴 뒤에야 범위 초과로 끝났다. Memory
+            // Map 은 100MB 까지 받으므로 그 크기면 extension host 가 OOM 으로 간다.
+            //
+            // 아래 읽기는 항목마다 16바이트 배치를 가정하므로(이름 0, 값 4,
+            // 크기 8, info 12, shndx 14), 그보다 작은 엔트리는 애초에 해석할 수 없다.
+            if (symEntSize < ELF32_SYM_ENTRY_MIN) {
+                throw new Error(
+                    `ELF symbol table entry size (${symEntSize}) is too small (need at least ${ELF32_SYM_ENTRY_MIN}).`
+                );
+            }
+            // 섹션이 파일 안에 들어 있는지 **미리** 본다. 루프 안의 범위 검사만
+            // 믿으면 파일 끝까지 헛돌며 심볼 배열만 키운다.
+            if (symOffset + symSize > buffer.length) {
+                throw new Error('ELF symbol table exceeds file size.');
+            }
             const numSyms = Math.floor(symSize / symEntSize);
+            if (numSyms > ELF_MAX_SYMBOLS) {
+                throw new Error(`ELF reports too many symbols (${numSyms}, limit ${ELF_MAX_SYMBOLS}).`);
+            }
             for (let i = 0; i < numSyms; i++) {
                 const sBase = symOffset + i * symEntSize;
                 if (sBase + symEntSize > buffer.length) { break; }

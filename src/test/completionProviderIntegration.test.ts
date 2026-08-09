@@ -297,6 +297,280 @@ suite('${…} 자동완성 provider (등록 · range · selector)', function () 
         );
     });
 
+    /**
+     * 점이 **없는** 자리인데 커서 뒤에는 이미 `.key` 가 있는 형태. 여기서
+     * `insertText` 는 맨 id 라, 대체 범위를 대안 끝까지 잡으면 `.value` 가 함께
+     * 지워져 `${ask}` 가 된다 — 오류도 안 나고, bare 참조는 `output`/`outputDir`
+     * 폴백을 타 **사용자가 쓰던 것과 다른 값**을 가리킨다.
+     */
+    const NO_DOT_MID_FIXTURE = `[
+  {
+    "id": "a.nodotmid",
+    "title": "nodotmid",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "ask", "type": "inputBox", "prompt": "tag" },
+        { "id": "run", "type": "shell", "command": "echo \${as${CURSOR}k.value}" }
+      ]
+    }
+  }
+]`;
+
+    /**
+     * 공백이 든 task id. 스키마가 막지 않고 런타임도 해석하는데, 대안 경계는
+     * 공백에서 끊긴다 — 범위(`my`)와 넣는 글자(`my task`)가 어긋나는 유일한 자리다.
+     * `insert` 모드에서도 걸리므로 range 를 쪼개기 전부터 있던 결함이다.
+     */
+    const SPACED_ID_FIXTURE = `[
+  {
+    "id": "a.spacedid",
+    "title": "spacedid",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "my task", "type": "inputBox", "prompt": "tag" },
+        { "id": "run", "type": "shell", "command": "echo \${my${CURSOR} task.value}" }
+      ]
+    }
+  }
+]`;
+
+    /** 닫는 `}` 가 없고 커서 뒤가 사용자의 명령 인자인 형태. */
+    const UNCLOSED_TAIL_FIXTURE = `[
+  {
+    "id": "a.unclosed",
+    "title": "unclosed",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "gen", "type": "inputBox", "prompt": "name" },
+        { "id": "run", "type": "shell", "command": "cp \${gen.${CURSOR}report.html dist/" }
+      ]
+    }
+  }
+]`;
+
+    /** 커서가 `??` 연산자 **안**에 있는 형태. */
+    const IN_OPERATOR_FIXTURE = `[
+  {
+    "id": "a.inop",
+    "title": "inop",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "pick", "type": "fileDialog" },
+        { "id": "ask", "type": "inputBox", "prompt": "tag" },
+        { "id": "run", "type": "shell", "command": "echo \${pick.path ?${CURSOR}? ask.value}" }
+      ]
+    }
+  }
+]`;
+
+    /** 항목을 수락했을 때 문서가 어떻게 되는가. */
+    function applyItem(doc: vscode.TextDocument, item: vscode.CompletionItem): string {
+        const replacing = replaceRangeOf(item)!;
+        return doc.getText().slice(0, doc.offsetAt(replacing.start))
+            + String(item.insertText)
+            + doc.getText().slice(doc.offsetAt(replacing.end));
+    }
+
+    test('점이 없는 자리에서 뒤에 `.key` 가 있으면 id 만 덮는다', async () => {
+        const { doc, position } = await openFixture(
+            path.join('nodotmid', '.vscode', 'actions.json'), NO_DOT_MID_FIXTURE
+        );
+        const item = (await completionsAt(doc, position)).find(i => labelOf(i) === 'ask');
+        assert.ok(item, '점 없는 자리에서 태스크 id 를 제안하지 않았다');
+
+        const replacing = replaceRangeOf(item)!;
+        assert.strictEqual(doc.getText(replacing), 'ask',
+            '넣는 것은 맨 id 인데 범위가 `ask.value` 면 `.value` 가 지워진다');
+
+        const applied = applyItem(doc, item);
+        assert.ok(applied.includes('${ask.value}'), applied.split('\n').find(l => l.includes('echo')));
+        // `${ask}` 는 유효한 참조 모양이라 사용자가 되돌릴 이유를 못 알아챈다.
+        assert.ok(!applied.includes('${ask}'), '`.value` 가 지워져 bare 참조가 됐다');
+    });
+
+    test('공백이 든 task id 를 골라도 뒤쪽이 겹쳐 남지 않는다', async () => {
+        const { doc, position } = await openFixture(
+            path.join('spacedid', '.vscode', 'actions.json'), SPACED_ID_FIXTURE
+        );
+        const item = (await completionsAt(doc, position)).find(i => labelOf(i) === 'my task');
+        assert.ok(item, '공백이 든 id 를 제안하지 않았다');
+
+        assert.strictEqual(doc.getText(replaceRangeOf(item)!), 'my task',
+            '범위가 `my` 뿐이면 `my task` 를 넣어 `${my task task.value}` 가 된다');
+
+        const applied = applyItem(doc, item);
+        assert.ok(applied.includes('${my task.value}'), applied.split('\n').find(l => l.includes('echo')));
+        assert.ok(!applied.includes('task task'), applied.split('\n').find(l => l.includes('echo')));
+    });
+
+    test('닫히지 않은 참조에서는 사용자의 명령 인자를 삼키지 않는다', async () => {
+        const { doc, position } = await openFixture(
+            path.join('unclosed', '.vscode', 'actions.json'), UNCLOSED_TAIL_FIXTURE
+        );
+        const item = (await completionsAt(doc, position)).find(i => labelOf(i) === 'gen.value');
+        assert.ok(item, '닫히지 않은 참조에서 결과 키를 제안하지 않았다');
+
+        assert.strictEqual(doc.getText(replaceRangeOf(item)!), 'gen.',
+            '`report.html` 이 참조의 속성인지 인자인지 알 수 없으므로 커서로 죄어야 한다');
+
+        const applied = applyItem(doc, item);
+        // 꼬리가 붙어 남는 것은 감수한다 — 눈에 띄고 지울 것이 명확하다.
+        assert.ok(applied.includes('report.html'), `사용자 인자가 사라졌다: ${applied.split('\n').find(l => l.includes('cp'))}`);
+        assert.ok(applied.includes('dist/'), applied.split('\n').find(l => l.includes('cp')));
+    });
+
+    /**
+     * 커서 뒤 글자와 **정확히 이어지지 않는** 태스크 id 후보. `ask` 를 치는
+     * 중에 형제 `asky` 를 고르는 자리다 — 여기서 대안 끝까지 덮으면 `${asky}` 가
+     * 되어 `.value` 가 사라지고 bare 폴백을 탄다. 정확 일치 규칙만으로는 안 막힌다.
+     */
+    const SIBLING_ID_FIXTURE = `[
+  {
+    "id": "a.sibling",
+    "title": "sibling",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "ask", "type": "inputBox", "prompt": "tag" },
+        { "id": "asky", "type": "inputBox", "prompt": "tag2" },
+        { "id": "run", "type": "shell", "command": "echo \${as${CURSOR}k.value}" }
+      ]
+    }
+  }
+]`;
+
+    test('이어지지 않는 형제 id 를 골라도 뒤의 `.key` 는 남는다', async () => {
+        const { doc, position } = await openFixture(
+            path.join('sibling', '.vscode', 'actions.json'), SIBLING_ID_FIXTURE
+        );
+        const items = await completionsAt(doc, position);
+
+        const sibling = items.find(i => labelOf(i) === 'asky');
+        assert.ok(sibling, `형제 id 를 제안하지 않았다: ${items.map(labelOf).join(',')}`);
+        assert.strictEqual(doc.getText(replaceRangeOf(sibling)!), 'ask',
+            'id 를 치는 자리에서는 뒤따르는 `.key` 를 덮지 않는다');
+        const applied = applyItem(doc, sibling);
+        assert.ok(applied.includes('${asky.value}'), applied.split('\n').find(l => l.includes('echo')));
+        assert.ok(!applied.includes('${asky}'), '`.value` 가 지워져 bare 참조가 됐다');
+
+        // 대조군: 전역 참조는 `.key` 를 갖지 않으므로 표현식 전체를 대체해야 한다.
+        // 여기까지 좁히면 `${workspaceFolder.value}` 라는 해석 불가능한 것이 나온다.
+        const builtin = items.find(i => labelOf(i) === 'workspaceFolder');
+        assert.ok(builtin, '전역 참조를 제안하지 않았다');
+        assert.strictEqual(doc.getText(replaceRangeOf(builtin)!), 'ask.value',
+            '전역 참조는 표현식 전체를 대체한다');
+        assert.ok(applyItem(doc, builtin).includes('${workspaceFolder}'));
+    });
+
+    /**
+     * 후보가 **기존 토큰의 접두사**인 자리. `ask` 를 고르는데 문서에는 `asky` 가
+     * 적혀 있다. 길이만 맞춰 대체하면 `y` 가 남아 `${asky.value}` 가 되고,
+     * 사용자는 **고르지 않은 참조**를 갖게 된다 — 오류는 나지 않는다.
+     */
+    const PREFIX_OF_TOKEN_FIXTURE = `[
+  {
+    "id": "a.prefixtoken",
+    "title": "prefixtoken",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "ask", "type": "inputBox", "prompt": "tag" },
+        { "id": "asky", "type": "inputBox", "prompt": "tag2" },
+        { "id": "run", "type": "shell", "command": "echo \${as${CURSOR}ky.value}" }
+      ]
+    }
+  }
+]`;
+
+    test('후보가 기존 토큰의 접두사면 토큰 전체를 대체한다', async () => {
+        const { doc, position } = await openFixture(
+            path.join('prefixtoken', '.vscode', 'actions.json'), PREFIX_OF_TOKEN_FIXTURE
+        );
+        const item = (await completionsAt(doc, position)).find(i => labelOf(i) === 'ask');
+        assert.ok(item, '짧은 쪽 id 를 제안하지 않았다');
+
+        assert.strictEqual(doc.getText(replaceRangeOf(item)!), 'asky',
+            '`ask` 길이만큼만 덮으면 `y` 가 남아 고르지 않은 참조가 된다');
+
+        const applied = applyItem(doc, item);
+        assert.ok(applied.includes('${ask.value}'), applied.split('\n').find(l => l.includes('echo')));
+        assert.ok(!applied.includes('${asky'), `고르지 않은 \`asky\` 가 남았다: ${applied.split('\n').find(l => l.includes('echo'))}`);
+    });
+
+    /**
+     * 후보 뒤의 `.` 을 **무조건** 경계로 보면 반대쪽이 깨진다 — 남긴 `.key` 를
+     * 받아 줄 후보가 아니기 때문이다. 전역 참조는 키를 갖지 않고, 결과 키 후보는
+     * 이미 키까지 품고 있다. 둘 다 런타임이 해석하지 못해 리터럴로 남는다.
+     */
+    const DOT_TAIL_FIXTURE = `[
+  {
+    "id": "a.dottail",
+    "title": "dottail",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "ask", "type": "inputBox", "prompt": "tag" },
+        { "id": "run", "type": "shell", "command": "echo \${ask.va${CURSOR}lue.extra}" }
+      ]
+    }
+  }
+]`;
+
+    const BUILTIN_DOT_TAIL_FIXTURE = `[
+  {
+    "id": "a.builtindot",
+    "title": "builtindot",
+    "action": {
+      "description": "d",
+      "tasks": [
+        { "id": "ask", "type": "inputBox", "prompt": "tag" },
+        { "id": "run", "type": "shell", "command": "echo \${workspaceFol${CURSOR}der.foo}" }
+      ]
+    }
+  }
+]`;
+
+    test('결과 키 후보는 뒤의 `.extra` 를 남기지 않는다', async () => {
+        const { doc, position } = await openFixture(
+            path.join('dottail', '.vscode', 'actions.json'), DOT_TAIL_FIXTURE
+        );
+        const item = (await completionsAt(doc, position)).find(i => labelOf(i) === 'ask.value');
+        assert.ok(item, '결과 키를 제안하지 않았다');
+
+        const applied = applyItem(doc, item);
+        assert.ok(applied.includes('${ask.value}'), applied.split('\n').find(l => l.includes('echo')));
+        // `${ask.value.extra}` 는 런타임이 해석하지 못해 리터럴로 남는다.
+        assert.ok(!applied.includes('value.extra'),
+            `해석되지 않을 꼬리를 남겼다: ${applied.split('\n').find(l => l.includes('echo'))}`);
+    });
+
+    test('전역 참조는 뒤의 `.foo` 를 남기지 않는다', async () => {
+        const { doc, position } = await openFixture(
+            path.join('builtindot', '.vscode', 'actions.json'), BUILTIN_DOT_TAIL_FIXTURE
+        );
+        const item = (await completionsAt(doc, position)).find(i => labelOf(i) === 'workspaceFolder');
+        assert.ok(item, '전역 참조를 제안하지 않았다');
+
+        const applied = applyItem(doc, item);
+        assert.ok(applied.includes('${workspaceFolder}'), applied.split('\n').find(l => l.includes('echo')));
+        assert.ok(!applied.includes('workspaceFolder.foo'),
+            `전역 참조에 없는 키를 남겼다: ${applied.split('\n').find(l => l.includes('echo'))}`);
+    });
+
+    test('커서가 `??` 안이면 아무 참조도 제안하지 않는다', async () => {
+        const { doc, position } = await openFixture(
+            path.join('inop', '.vscode', 'actions.json'), IN_OPERATOR_FIXTURE
+        );
+        const names = (await completionsAt(doc, position)).map(labelOf);
+        // 무엇을 고르든 대체 범위가 `??` 를 삼켜 체인이 통째로 리터럴이 된다.
+        const ours = names.filter(n => n.startsWith('pick') || n.startsWith('ask') || n === 'workspaceFolder');
+        assert.deepStrictEqual(ours, [], `연산자 안에서 제안이 떴다: ${names.join(',')}`);
+    });
+
     test('점이 없는 자리에서는 커서 위치를 덮는 빈 range 로 태스크 id 를 낸다', async () => {
         // 결과 키 분기와 range 계산이 다르다 — 여기서는 대체할 것이 없으므로
         // 빈 range 여야 하고, 넣는 것은 참조 이름 그대로다.

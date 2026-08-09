@@ -174,6 +174,22 @@ suite('variableCompletions', () => {
                 assert.strictEqual(referencePrefixAt(text, offset)?.prefix, '? b.');
             });
 
+            test('커서가 `??` **안**이면 아무것도 제안하지 않는다', () => {
+                // 이 자리에서는 앞쪽 `split('??')` 도 뒤쪽 경계 검사도 연산자를
+                // 보지 못한다. prefix 가 `a.b ?` 로 읽히므로 무엇을 고르든 대체
+                // 범위가 `??` 를 삼켜 **체인이 통째로 리터럴이 된다**.
+                for (const fixture of ['"cmd ${a.b ?|? c.d}"', '"cmd ${a.b ??|? c.d}"']) {
+                    const { text, offset } = at(fixture);
+                    assert.strictEqual(referencePrefixAt(text, offset), undefined, fixture);
+                }
+            });
+
+            test('`??` 밖의 물음표 하나는 여전히 참조 자리다', () => {
+                // 가드가 넓으면 `${a.x?` 같은 평범한 오타 자리에서 제안이 사라진다.
+                const { text, offset } = at('"cmd ${a.x?|"');
+                assert.strictEqual(referencePrefixAt(text, offset)?.prefix, 'a.x?');
+            });
+
             /**
              * 낱말 중간에서 자동완성을 받을 때 대체할 범위. 없으면 꼬리가 남아
              * `${ask.valuelue}` 가 된다.
@@ -203,9 +219,18 @@ suite('variableCompletions', () => {
                 });
 
                 test('문자열이 닫히지 않아도(편집 중) 따옴표·줄바꿈에서 멈춘다', () => {
-                    assert.strictEqual(endOf('"cmd ${a.b|c').tail, 'a.bc');
+                    assert.strictEqual(endOf('"cmd ${a.b|c"').tail, 'a.bc');
+                    // JSON 문자열 안에 날 줄바꿈이 있다는 것은 문자열이 닫히지
+                    // 않았다는 뜻이므로, 줄바꿈도 확신 있는 종결자다.
                     assert.strictEqual(endOf('"cmd ${a.b|c\nnext').tail, 'a.bc');
                     assert.strictEqual(endOf('"cmd ${a.b|c\r\nnext').tail, 'a.bc');
+                });
+
+                test('확신 있는 종결자 없이 문서가 끝나면 커서로 죈다', () => {
+                    // 커서 뒤 `c` 가 참조의 미완성 속성인지 누락된 `}` 뒤의
+                    // 사용자 인자인지 알 방법이 없다. 덮으면 잃고, 죄면 꼬리가
+                    // 붙어 남을 뿐이다 — 되돌릴 수 있는 쪽을 고른다.
+                    assert.strictEqual(endOf('"cmd ${a.b|c').tail, 'a.b');
                 });
 
                 test('**공백에서 멈춘다** — 뒤따르는 명령 인자를 삼키지 않는다', () => {
@@ -224,8 +249,26 @@ suite('variableCompletions', () => {
                     assert.strictEqual(endOf('"cmd ${a.b|c ?? d.e}"').tail, 'a.bc');
                 });
 
-                test('물음표 하나 뒤도 대안이 아니다', () => {
-                    assert.strictEqual(endOf('"cmd ${a.b|c ? d.e}"').tail, 'a.bc');
+                test('물음표 하나 뒤는 대안 경계가 아니므로 죈다', () => {
+                    // `?` 하나는 구분자가 아니라 오타 자리다 — 런타임은
+                    // `a.bc ? d.e` 전체를 대안 하나로 보고 리터럴로 남긴다.
+                    // 확신할 수 없으니 커서로 죈다. 꼬리가 남아도 손해가 없다.
+                    assert.strictEqual(endOf('"cmd ${a.b|c ? d.e}"').tail, 'a.b');
+                });
+
+                test('공백 뒤가 `??` 면 대안이 거기서 끝나는 것이 확실하다', () => {
+                    // 죄는 규칙의 예외다. 이것을 빼면 `??` 체인 낱말 중간 편집이
+                    // 통째로 후퇴한다 — `}` 가 `??` 뒤에 있어 스캔이 공백에서
+                    // 먼저 멈추기 때문이다.
+                    assert.strictEqual(endOf('"cmd ${a.b|c ?? d.e}"').tail, 'a.bc');
+                    assert.strictEqual(endOf('"cmd ${a.b|c   ?? d.e}"').tail, 'a.bc');
+                });
+
+                test('**사용자 인자를 삼키지 않는다** — 닫히지 않은 참조의 꼬리', () => {
+                    // `report.html` 이 참조의 속성인지 누락된 `}` 뒤의 인자인지
+                    // 판별할 정보가 없다. 덮으면 `"cp ${gen.outputDir dist/"` 가
+                    // 되어 사용자가 무엇을 잃었는지도 모른다.
+                    assert.strictEqual(endOf('"cp ${gen.|report.html dist/"').tail, 'gen.');
                 });
 
                 test('커서가 아직 `${` 를 지나지 않았으면 참조 자리가 아니다', () => {

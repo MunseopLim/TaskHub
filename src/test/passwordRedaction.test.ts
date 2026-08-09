@@ -141,6 +141,56 @@ suite('Password taint and redaction', function () {
         }
     });
 
+    /**
+     * `when` 이 거짓이면 그 사유가 verbose 로그에 그대로 실린다
+     * (`condition-skipped` 분기). 사유에 **판정에 쓴 값**을 넣으면 비밀을
+     * 참조하는 조건이 실패할 때 평문 비밀번호가 출력 채널에 남는다.
+     *
+     * 명령줄·cwd·출력은 진작부터 마스킹을 거쳤는데 이 경로만 빠져 있었다.
+     */
+    test('when 조건이 실패해도 비밀번호가 사유 문구로 새지 않는다', async () => {
+        const secret = 'Wh3n-Gate-Secret';
+        const marker = path.join(tempWorkspace, 'gate.json');
+
+        const originalShowInputBox = vscode.window.showInputBox;
+        (vscode.window as any).showInputBox = async () => secret;
+
+        const actionItem: ActionItem = {
+            id: 'password-when-gate',
+            title: 'Password when gate',
+            action: {
+                description: 'when condition must not leak the password it compared',
+                tasks: [
+                    { id: 'pw', type: 'inputBox', prompt: 'password?', password: true },
+                    {
+                        // 비밀번호와 절대 같지 않은 값을 요구해 조건을 반드시 실패시킨다.
+                        id: 'gated',
+                        type: 'command',
+                        command: platformCommand('node'),
+                        args: ['-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`],
+                        cwd: tempWorkspace,
+                        when: { var: '${pw.value}', equals: 'definitely-not-the-password' },
+                    },
+                ],
+            },
+        };
+        const context = makeContext();
+
+        try {
+            await extension.executeAction(actionItem, context, makeMainViewProvider(), new HistoryProvider(context));
+        } finally {
+            (vscode.window as any).showInputBox = originalShowInputBox;
+        }
+
+        assert.ok(!fs.existsSync(marker), '조건이 거짓인데 태스크가 실행됐다 — 픽스처가 잘못됐다');
+
+        const verbose = verboseLines.join('\n');
+        assert.ok(verbose.includes("Task 'gated' skipped"),
+            `조건 스킵이 verbose 로그에 남지 않았다 — 이 테스트가 겨누는 줄이 없다:\n${verbose}`);
+        assert.ok(!verbose.includes(secret), `비밀번호가 조건 사유로 샜다:\n${verbose}`);
+        assert.ok(verbose.includes('***'), `사유의 값이 자리표시자로 바뀌지 않았다:\n${verbose}`);
+    });
+
     test('platform command 객체와 args/cwd를 가리면서 파생 결과와 실제 출력은 유지한다', async () => {
         const secret = 'T4int-X9';
         const secretCwd = path.join(tempWorkspace, secret);

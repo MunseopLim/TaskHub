@@ -65,6 +65,7 @@ import {
 	filterConflictingItems,
 	findConflictingIds,
 	mergeActions,
+	resolveWorkspaceActions,
 	toWorkspaceRelativePath,
 	executeShellCommand,
 	__testHook_hasManuallyTerminated,
@@ -5223,6 +5224,70 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(byId.get('shared')?.title, 'Existing Shared');
 			assert.ok(byId.has('only-preset'));
 			assert.ok(byId.has('only-existing'));
+		});
+	});
+
+	/**
+	 * **병합 승자와 폴더 매핑은 같은 것을 가리켜야 한다.**
+	 *
+	 * 예전에는 병합이 뒤쪽 폴더를, 매핑이 앞쪽 폴더를 택해 B 폴더의 명령이
+	 * A 폴더의 cwd 와 `${workspaceFolder}` 로 실행됐다. 중복 id 는 경고만 찍고
+	 * 통과하므로 아무도 막지 않았다. 두 승자가 갈라지는 순간을 잡는 것이
+	 * 이 suite 의 목적이다.
+	 */
+	suite('resolveWorkspaceActions (병합 승자 = 폴더 매핑 승자)', () => {
+		const folderA = path.resolve('/tmp/ws-a');
+		const folderB = path.resolve('/tmp/ws-b');
+		const sources = [
+			{ actions: [{ id: 'dup', title: 'From A' }, { id: 'only-a', title: 'Only A' }], workspaceFolderPath: folderA },
+			{ actions: [{ id: 'dup', title: 'From B' }, { id: 'only-b', title: 'Only B' }], workspaceFolderPath: folderB },
+		];
+
+		test('중복 id 는 병합 결과와 폴더 매핑이 같은 폴더를 가리킨다', () => {
+			const { merged, folderById } = resolveWorkspaceActions([], sources);
+			const winner = merged.find(a => a.id === 'dup');
+			assert.strictEqual(winner?.title, 'From B', '병합은 마지막으로 정의한 폴더를 택한다');
+			assert.strictEqual(
+				folderById.get('dup'), folderB,
+				'폴더 매핑이 병합 승자와 다른 폴더를 가리킨다 — 명령이 엉뚱한 cwd 로 실행된다'
+			);
+		});
+
+		test('충돌하지 않는 액션은 각자의 폴더에 매핑된다', () => {
+			const { merged, folderById } = resolveWorkspaceActions([], sources);
+			assert.strictEqual(folderById.get('only-a'), folderA);
+			assert.strictEqual(folderById.get('only-b'), folderB);
+			assert.deepStrictEqual(
+				merged.map(a => a.id).sort(),
+				['dup', 'only-a', 'only-b'],
+				'충돌한 쪽만 하나로 접히고 나머지는 모두 남아야 한다'
+			);
+		});
+
+		test('중첩된 children 의 id 도 매핑된다', () => {
+			const nested = [{
+				actions: [{ id: 'group', title: 'G', children: [{ id: 'child', title: 'C' }] }],
+				workspaceFolderPath: folderA,
+			}];
+			const { folderById } = resolveWorkspaceActions([], nested);
+			assert.strictEqual(folderById.get('child'), folderA, '자식 액션도 실행 대상이므로 폴더가 필요하다');
+		});
+
+		test('base(번들·preset)는 폴더 매핑을 갖지 않는다', () => {
+			// 워크스페이스 밖에서 온 액션에는 소속 폴더가 없다. 여기에 값을
+			// 넣으면 번들 예제가 임의의 폴더에서 실행된다.
+			const { merged, folderById } = resolveWorkspaceActions([{ id: 'bundled', title: 'B' }], sources);
+			assert.ok(merged.some(a => a.id === 'bundled'), 'base 액션이 사라졌다');
+			assert.strictEqual(folderById.has('bundled'), false);
+		});
+
+		test('액션이 없는 폴더는 건너뛴다', () => {
+			const { merged, folderById } = resolveWorkspaceActions([], [
+				{ actions: [], workspaceFolderPath: folderA },
+				{ actions: [{ id: 'only-b', title: 'Only B' }], workspaceFolderPath: folderB },
+			]);
+			assert.deepStrictEqual(merged.map(a => a.id), ['only-b']);
+			assert.strictEqual(folderById.get('only-b'), folderB);
 		});
 	});
 

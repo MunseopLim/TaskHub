@@ -44,6 +44,76 @@ suite('HexParser Test Suite', () => {
             const binaryLikeText = 'random data here\nS3 looks like SREC but is not\nmore data';
             assert.strictEqual(detectFormat(binaryLikeText), 'binary');
         });
+
+        /**
+         * **첫 글자만 보면 바이너리가 텍스트로 넘어간다.** `:` 은 0x3A, `S0` 은
+         * 0x53 0x30 이라 우연히 그렇게 시작하는 펌웨어 이미지가 실제로 있다.
+         * 넘어가면 파서가 레코드를 하나도 못 읽어 **빈 뷰어**가 뜨고, 사용자는
+         * 파일이 비었다고 오해한다. 첫 레코드가 통째로 유효할 때만 넘긴다.
+         */
+        test('첫 바이트가 `:` 인 바이너리를 Intel HEX 로 오인하지 않는다', () => {
+            assert.strictEqual(detectFormat(Buffer.from([0x3A, 0x00, 0xFF]).toString('utf-8')), 'binary');
+        });
+
+        test('첫 바이트가 `S0` 인 바이너리를 SREC 로 오인하지 않는다', () => {
+            assert.strictEqual(detectFormat(Buffer.from([0x53, 0x30, 0x01, 0x02]).toString('utf-8')), 'binary');
+        });
+
+        test('길이는 맞지만 체크섬이 틀린 첫 레코드는 텍스트로 넘기지 않는다', () => {
+            // 체크섬을 F2 → F3 으로 한 글자만 바꿨다. 길이 검사만으로는 통과한다.
+            assert.strictEqual(detectFormat(':020000040800F3\n:10000000...'), 'binary');
+            // SREC 도 같다 (FC → FD).
+            assert.strictEqual(detectFormat('S0030000FD\nS1130000...'), 'binary');
+        });
+
+        test('레코드가 잘려 있으면 텍스트로 넘기지 않는다', () => {
+            // byteCount 는 0x10 인데 데이터가 그만큼 없다.
+            assert.strictEqual(detectFormat(':10000000AABB'), 'binary');
+        });
+
+        test('16진수가 아닌 글자가 섞이면 텍스트로 넘기지 않는다', () => {
+            // `parseInt` 는 앞부분만 읽고 성공하므로 자릿수 검사가 필요하다.
+            assert.strictEqual(detectFormat(':0Z0000040800F2'), 'binary');
+        });
+
+        /**
+         * 파서는 깨진 레코드를 건너뛰고 나머지를 읽는다. 첫 줄로만 판정하면
+         * 첫 줄만 상한 HEX 파일이 갑자기 바이너리로 보인다 — 지금까지 정상으로
+         * 열리던 파일이다. 그래서 앞 몇 줄 안에 유효한 레코드가 하나라도
+         * 있으면 텍스트로 본다.
+         */
+        test('첫 줄이 깨졌어도 뒤에 유효한 레코드가 있으면 HEX 로 본다', () => {
+            assert.strictEqual(detectFormat([
+                ':020000040800F3',       // 체크섬 틀림 (F2 여야 한다)
+                ':0400000000200008D4',   // 유효
+            ].join('\n')), 'intel');
+        });
+
+        test('SREC 도 같다', () => {
+            assert.strictEqual(detectFormat([
+                'S0030000FD',            // 체크섬 틀림 (FC 여야 한다)
+                'S107000001020304EE',    // 유효
+            ].join('\n')), 'srec');
+        });
+
+        test('유효한 레코드가 하나도 없으면 앞 몇 줄을 다 봐도 바이너리다', () => {
+            const allBroken = Array.from({ length: 12 }, () => ':020000040800F3').join('\n');
+            assert.strictEqual(detectFormat(allBroken), 'binary');
+        });
+
+        test('S1 로 시작하는 SREC (S0 헤더가 없는 파일)', () => {
+            assert.strictEqual(detectFormat('S107000001020304EE'), 'srec');
+        });
+
+        test('소문자 16진수와 CRLF 도 받는다', () => {
+            assert.strictEqual(detectFormat(':0400000000200008d4\r\n:00000001FF'), 'intel');
+            assert.strictEqual(detectFormat('S107000001020304ee\r\nS9030000FC'), 'srec');
+        });
+
+        test('완전한 레코드 뒤에 군더더기가 붙어도 받는다', () => {
+            // 길이는 `expectedLength` 로 판정하므로 뒤에 붙은 것은 무시된다.
+            assert.strictEqual(detectFormat(':020000040800F2   ; comment'), 'intel');
+        });
     });
 
     suite('parseIntelHex', () => {
@@ -346,6 +416,73 @@ suite('HexParser Test Suite', () => {
                 const result = parseFile(tmpFile);
                 assert.strictEqual(result.format, 'srec');
                 assert.strictEqual(result.byteCount, 4);
+            } finally {
+                fs.unlinkSync(tmpFile);
+            }
+        });
+
+        /**
+         * 확장자가 Raw Binary 를 확정하는 경우는 내용을 보지 않는다
+         * (docs/features.md 지원 포맷 표: `.bin` · `.dat`). 사용자가 `.bin` 을
+         * 열었다면 그것이 Raw Binary 라고 이미 말한 것이다.
+         */
+        for (const ext of ['.bin', '.dat']) {
+            test(`${ext} 는 내용이 유효한 HEX 라도 Raw Binary 로 연다`, () => {
+                const tmpFile = path.join(os.tmpdir(), `test_taskhub_extfirst${ext}`);
+                // 그대로 두면 detectFormat 이 intel 로 판정할 완전한 레코드다.
+                fs.writeFileSync(tmpFile, ':020000040800F2\n:00000001FF');
+                try {
+                    const result = parseFile(tmpFile);
+                    assert.strictEqual(result.format, 'binary', '확장자보다 내용을 우선했다');
+                    assert.ok(result.rawBuffer, 'Raw Binary 는 rawBuffer 로 온다');
+                } finally {
+                    fs.unlinkSync(tmpFile);
+                }
+            });
+        }
+
+        /**
+         * 내용 탐지는 앞부분만 본다. 앞쪽 레코드가 여러 개 상한 `.hex` 는 탐지
+         * 창을 벗어나 Raw Binary 로 열렸다 — 파서는 깨진 줄을 건너뛰고 읽을 수
+         * 있는데도 그랬다. 확장자가 말해 주는 것을 내용 추측으로 뒤집지 않는다.
+         */
+        test('앞쪽 레코드가 여러 개 깨진 .hex 도 Intel HEX 로 연다', () => {
+            const tmpFile = path.join(os.tmpdir(), 'test_taskhub_lateok.hex');
+            fs.writeFileSync(tmpFile, [
+                ...Array.from({ length: 8 }, () => ':020000040800F3'),  // 전부 체크섬 오류
+                ':020000040800F2',
+                ':0400000000200008D4',
+                ':00000001FF',
+            ].join('\n'));
+            try {
+                const result = parseFile(tmpFile);
+                assert.strictEqual(result.format, 'intel', '확장자보다 내용 탐지를 우선했다');
+                assert.strictEqual(result.data.get(0x08000000), 0x00, '유효한 레코드를 읽지 못했다');
+            } finally {
+                fs.unlinkSync(tmpFile);
+            }
+        });
+
+        for (const ext of ['.srec', '.s19']) {
+            test(`${ext} 도 확장자로 SREC 를 확정한다`, () => {
+                const tmpFile = path.join(os.tmpdir(), `test_taskhub_srecext${ext}`);
+                fs.writeFileSync(tmpFile, ['S0030000FD', 'S107000001020304EE', 'S9030000FC'].join('\n'));
+                try {
+                    assert.strictEqual(parseFile(tmpFile).format, 'srec');
+                } finally {
+                    fs.unlinkSync(tmpFile);
+                }
+            });
+        }
+
+        test('첫 바이트가 `:` 인 .img 바이너리를 Intel HEX 로 열지 않는다', () => {
+            // 확장자로는 정할 수 없는 자리 — 첫 레코드 검증이 막아야 한다.
+            const tmpFile = path.join(os.tmpdir(), 'test_taskhub_colon.img');
+            fs.writeFileSync(tmpFile, Buffer.from([0x3A, 0x00, 0xFF, 0x10, 0x20]));
+            try {
+                const result = parseFile(tmpFile);
+                assert.strictEqual(result.format, 'binary');
+                assert.strictEqual(result.byteCount, 5, '빈 뷰어가 되면 byteCount 가 0 이다');
             } finally {
                 fs.unlinkSync(tmpFile);
             }

@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexParseResult } from './hexParser';
+import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexParseResult, HexFormat } from './hexParser';
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 
@@ -334,10 +334,37 @@ export function buildHexViewerHtml(fileName: string, result: HexParseResult, web
     );
 }
 
+/**
+ * 확장자만으로 포맷이 확정되는 것들 (docs/features.md 의 지원 포맷 표 그대로).
+ *
+ * **양쪽 모두 확장자를 믿는다.**
+ *
+ * - Raw Binary: 내용이 우연히 `:`(0x3A) 이나 `S0`(0x53 0x30) 으로 시작하는
+ *   바이너리가 있고, 그것을 텍스트 포맷으로 넘기면 레코드를 하나도 못 읽어
+ *   **빈 뷰어**가 뜬다. 사용자가 `.bin` 을 열었다면 Raw Binary 라고 이미 말한 것이다.
+ * - Intel HEX · SREC: 반대 방향도 같다. 내용 탐지는 앞부분만 보므로, 앞쪽 레코드가
+ *   여러 개 상한 `.hex` 는 탐지 창을 벗어나 Raw Binary 로 열린다 — 파서는 깨진
+ *   줄을 건너뛰고 읽을 수 있는데도 그렇다. 확장자가 말해 주는 것을 내용 추측으로
+ *   뒤집을 이유가 없다.
+ *
+ * 내용 탐지(`detectFormat`)는 **확장자로 알 수 없는 파일**만 맡는다.
+ */
+const FORMAT_BY_EXTENSION = new Map<string, HexFormat>([
+    ['.bin', 'binary'], ['.dat', 'binary'],
+    ['.hex', 'intel'], ['.ihex', 'intel'],
+    ['.srec', 'srec'], ['.s19', 'srec'], ['.s28', 'srec'], ['.s37', 'srec'],
+]);
+
 export function parseFile(filePath: string): HexParseResult {
     const rawContent = fs.readFileSync(filePath);
+    // 확장자 판정을 **먼저** 한다. 한도(`HEX_VIEWER_MAX_FILE_SIZE`, 50MB)에 가까운
+    // 바이너리를 UTF-8 문자열로 바꾸는 비용도 함께 사라진다.
+    const known = FORMAT_BY_EXTENSION.get(path.extname(filePath).toLowerCase());
+    if (known === 'binary') {
+        return parseBinary(rawContent);
+    }
     const textContent = rawContent.toString('utf-8');
-    const format = detectFormat(textContent);
+    const format = known ?? detectFormat(textContent);
 
     switch (format) {
         case 'intel': return parseIntelHex(textContent);

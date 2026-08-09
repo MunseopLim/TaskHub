@@ -139,6 +139,15 @@ function firstStringField(text: string, key: string): string | undefined {
     return m ? m[1] : undefined;
 }
 
+export interface ReferencePrefix {
+    /** 지금 입력 중인 대안에서 커서 앞부분. */
+    prefix: string;
+    /** 그 대안의 시작 오프셋. */
+    start: number;
+    /** 그 대안의 끝 오프셋 (커서 이후 부분을 포함). */
+    end: number;
+}
+
 /**
  * 커서가 `${…}` 안에 있는지 보고, **지금 입력 중인 참조**와 그 시작 오프셋을
  * 돌려준다. `start` 는 자동완성이 대체할 범위의 시작점이기도 하다.
@@ -165,18 +174,11 @@ function firstStringField(text: string, key: string): string | undefined {
  * 멀쩡한 참조로 보여 **해석되지 않을 것을 제안하게 된다.**
  *
  * `end` 는 **커서 뒤로 이어지는 같은 대안의 끝**이다 (`start <= offset <= end`).
- * 낱말 중간에서 자동완성을 받을 때 쓰는 대체 범위다 — `${ask.va|lue}` 에서 이것이
- * 없으면 꼬리가 남아 `${ask.valuelue}` 가 된다.
+ * 낱말 중간에서 자동완성을 받을 때 쓰는 대체 범위의 상한이다 — `${ask.va|lue}`
+ * 에서 이것이 없으면 꼬리가 남아 `${ask.valuelue}` 가 된다. 상한인 이유는
+ * 호출부가 후보마다 더 좁힐 수 있기 때문이다 ({@link collectVariableCompletions}
+ * 를 쓰는 provider 참고).
  */
-export interface ReferencePrefix {
-    /** 지금 입력 중인 대안에서 커서 앞부분. */
-    prefix: string;
-    /** 그 대안의 시작 오프셋. */
-    start: number;
-    /** 그 대안의 끝 오프셋 (커서 이후 부분을 포함). */
-    end: number;
-}
-
 export function referencePrefixAt(text: string, offset: number): ReferencePrefix | undefined {
     const open = text.lastIndexOf('${', offset);
     if (open < 0) { return undefined; }
@@ -184,6 +186,13 @@ export function referencePrefixAt(text: string, offset: number): ReferencePrefix
     // 커서 위치에서 시작하는 `${` 도 찾으므로, 막지 않으면 시작점이 커서보다
     // 뒤가 되어 두 범위의 시작이 어긋나고 VS Code 가 항목을 버린다.
     if (open + 2 > offset) { return undefined; }
+    // **커서가 `??` 연산자 안이면 제안하지 않는다.** 이 자리에서는 앞쪽
+    // `split('??')` 도 뒤쪽 경계 검사도 연산자를 보지 못한다 — `${a.b ?|? c.d}`
+    // 의 prefix 는 `a.b ?` 로 읽히고 끝은 커서 다음 칸이라, 무엇을 고르든 대체
+    // 범위가 `??` 를 삼켜 **체인이 통째로 리터럴이 된다**(`${a.b c.d}`).
+    // 범위만 손봐서는 `${a.output? c.d}` 라는 어중간한 결과가 남을 뿐이므로,
+    // 애매한 자리에서는 아무것도 제안하지 않는 편이 낫다.
+    if (text[offset - 1] === '?' && text[offset] === '?') { return undefined; }
     const between = text.slice(open + 2, offset);
     if (/[}"\r\n]/.test(between)) { return undefined; }
     const end = alternativeEndAt(text, offset);
@@ -194,19 +203,32 @@ export function referencePrefixAt(text: string, offset: number): ReferencePrefix
     return { prefix: rest.slice(lead), start: open + 2 + (between.length - rest.length) + lead, end };
 }
 
+const WHITESPACE_RE = /\s/;
+
 /**
- * 커서 뒤로 이어지는 **같은 대안**이 어디서 끝나는가.
+ * 커서 뒤로 이어지는 **같은 대안**이 어디서 끝나는가. 결과는 커서보다 앞설 수
+ * 없다 — VS Code 는 대체 범위가 삽입 범위를 품고 커서를 포함하기를 요구한다.
  *
- * `${…}` 를 닫는 `}`, 문자열의 끝, 다음 대안을 여는 `??`, 그리고 **공백**에서
- * 멈춘다. 시작점이 언제나 커서 이하이므로 결과는 커서보다 앞설 수 없다 —
- * VS Code 는 대체 범위가 삽입 범위를 품고 커서를 포함하기를 요구한다.
+ * **참조의 끝을 확신할 수 있을 때만 커서 뒤를 덮는다.** 편집 중인 참조는 닫혀
+ * 있지 않은 것이 보통이라(JSON 문자열 안에서는 `${` 가 자동으로 닫히지 않는다),
+ * 커서 뒤 글자가 참조의 미완성 속성인지 **누락된 `}` 뒤의 사용자 인자**인지
+ * 판별할 정보가 없는 자리가 생긴다. `"cp ${gen.|report.html dist/"` 가 그것이다 —
+ * `report.html` 을 덮으면 항목을 고르는 순간 사용자의 인자가 사라진다.
  *
- * **공백에서 멈추는 것이 핵심이다.** 참조는 편집 중에 닫혀 있지 않은 것이 보통인데
- * (JSON 문자열 안에서는 `${` 가 자동으로 닫히지 않는다), 공백을 넘어가면
- * `"cp ${pick.| dist/out.txt"` 에서 대체 범위가 `pick. dist/out.txt` 가 되어
- * **사용자의 명령 인자를 삼킨다.** 대안이 공백을 품는 일도 없다 — `??` 는 대안을
- * 다듬고, 다듬지 않는 평범한 참조는 공백이 들어가는 순간 런타임에서 리터럴로
- * 남는다(`${ producer.output}`). 그러니 공백 뒤는 애초에 이 참조의 일부가 아니다.
+ * 그래서 종결자를 두 부류로 나눈다.
+ *
+ * - **확신 있는 종결자**: `}` · `"` · 줄바꿈 · `??`. 여기까지 덮는다. JSON 문자열
+ *   안에 날 줄바꿈이 있다는 것은 문자열이 닫히지 않았다는 뜻이므로 줄바꿈도
+ *   확신에 넣는다.
+ * - **그 밖의 공백**: 뒤에 `??` 가 오면 대안이 거기서 끝나는 것이 확실하므로
+ *   인정하고, 아니면 **커서로 죈다**. 확신 있는 종결자를 못 만난 채 문서 끝에
+ *   닿을 때도 마찬가지다.
+ *
+ * 죄면 꼬리가 붙어 남지만(`${gen.outputDirreport.html dist/`) **아무것도 잃지
+ * 않는다.** 눈에 띄고 무엇을 지울지 명확한 지저분함이, 알아채기 어려운 손실보다
+ * 싸다는 판단이다. 반대 정책(공백에서 무조건 멈추기)은 `??` 체인 편집을 통째로
+ * 후퇴시키기까지 한다 — `${a.b|c ?? d.e}` 는 `}` 가 `??` 뒤에 있어 스캔이 공백에서
+ * 먼저 멈추기 때문이다.
  *
  * 공백 판정은 정규식으로 한다 — `??` 앞에 IME 가 넣은 U+00A0 같은 것까지 잡아야
  * 항목을 고를 때 `a.value?? d.e` 로 눌러붙지 않는다.
@@ -214,14 +236,17 @@ export function referencePrefixAt(text: string, offset: number): ReferencePrefix
 function alternativeEndAt(text: string, offset: number): number {
     for (let i = offset; i < text.length; i++) {
         const ch = text[i];
-        if (ch === '}' || ch === '"' || WHITESPACE_RE.test(ch) || (ch === '?' && text[i + 1] === '?')) {
-            return i;
+        // 줄바꿈은 WHITESPACE_RE 에도 걸리므로 **공백 분기보다 먼저** 본다.
+        if (ch === '}' || ch === '"' || ch === '\n' || ch === '\r') { return i; }
+        if (ch === '?' && text[i + 1] === '?') { return i; }
+        if (WHITESPACE_RE.test(ch)) {
+            let j = i;
+            while (j < text.length && WHITESPACE_RE.test(text[j])) { j++; }
+            return (text[j] === '?' && text[j + 1] === '?') ? i : offset;
         }
     }
-    return text.length;
+    return offset;
 }
-
-const WHITESPACE_RE = /\s/;
 
 /**
  * 커서 위치에서 제안할 참조 목록.

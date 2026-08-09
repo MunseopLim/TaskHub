@@ -356,9 +356,41 @@ export async function openJsonEditorFile(context: vscode.ExtensionContext, fileP
 
 export const ROOT_ARRAY_KEY = '_rootArray';
 
+/**
+ * JSON Editor 가 다룰 수 있는 루트인가. **객체와 배열뿐이다.**
+ *
+ * 스칼라 루트(`null` · 숫자 · 문자열 · 불리언)도 유효한 JSON 이라 `JSON.parse` 를
+ * 그냥 통과한다. 여기서 걸러 내지 않으면 그대로 webview 로 넘어가는데,
+ *
+ * - `null` 은 webview 의 `buildSheetMap` 에서 `Object.keys(null)` 로 **TypeError**
+ *   를 낸다. 확장 호스트가 아니라 **webview 안**에서 나므로 오류 알림조차 뜨지
+ *   않고 패널만 텅 빈 채 열린다 — 신호가 없다는 점에서 더 나쁘다.
+ * - 숫자·문자열·불리언은 죽지는 않지만 시트가 하나도 없는 빈 화면이 된다.
+ *
+ * 사용자에게는 둘 다 "안 열린다" 이므로, 패널을 만들기 전에 현지화된 오류로 거절한다.
+ */
+export function isSupportedJsonRoot(data: unknown): boolean {
+    return Array.isArray(data) || (typeof data === 'object' && data !== null);
+}
+
+/** 거절 사유. 어떤 루트였는지 밝혀야 사용자가 파일을 고칠 수 있다. */
+export function unsupportedJsonRootMessage(data: unknown): string {
+    const kind = data === null ? 'null' : typeof data;
+    return t(
+        `JSON Editor 는 객체나 배열 루트만 열 수 있습니다 (받은 것: ${kind}).`,
+        `JSON Editor can only open object or array roots (got: ${kind}).`
+    );
+}
+
 export function wrapIfArray(data: unknown): { wrapped: Record<string, unknown>; isRootArray: boolean } {
     if (Array.isArray(data)) {
         return { wrapped: { [ROOT_ARRAY_KEY]: data }, isRootArray: true };
+    }
+    // 다시 읽는 경로(외부 변경·저장 후 baseline 갱신)의 방어선이다. 그쪽은
+    // 이미 try/catch 안이라 던지면 기존 오류 처리로 흘러간다. 첫 열기는
+    // `openJsonEditorWithPath` 가 미리 걸러 더 정확한 문구를 낸다.
+    if (!isSupportedJsonRoot(data)) {
+        throw new Error(unsupportedJsonRootMessage(data));
     }
     return { wrapped: data as Record<string, unknown>, isRootArray: false };
 }
@@ -445,18 +477,29 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     let parseSucceeded = false;
     let diskDataIfValid: Record<string, unknown> | undefined;
     if (!earlyError && content !== undefined) {
+        let parsed: unknown;
+        let parseFailure: string | undefined;
         try {
-            const parsed = JSON.parse(content);
+            parsed = JSON.parse(content);
+        } catch (error: any) {
+            parseFailure = t(
+                `JSON 파싱 실패 (${fileName}): ${error.message}`,
+                `Failed to parse JSON (${fileName}): ${error.message}`
+            );
+        }
+        if (parseFailure) {
+            earlyError = { msg: parseFailure };
+        } else if (!isSupportedJsonRoot(parsed)) {
+            // **파싱은 성공했다.** 아래 "파싱 실패" 문구로 뭉뚱그리면 사용자가
+            // 있지도 않은 문법 오류를 찾게 된다.
+            earlyError = { msg: `${fileName}: ${unsupportedJsonRootMessage(parsed)}` };
+        } else {
             const result = wrapIfArray(parsed);
             jsonData = result.wrapped;
             isRootArray = result.isRootArray;
             detectedIndent = detectIndent(content);
             diskDataIfValid = jsonData;
             parseSucceeded = true;
-        } catch (error: any) {
-            earlyError = {
-                msg: t(`JSON 파싱 실패 (${fileName}): ${error.message}`, `Failed to parse JSON (${fileName}): ${error.message}`)
-            };
         }
     }
 
@@ -1189,6 +1232,8 @@ export function buildJsonEditorStrings(): Record<string, string> {
         rowNumberHeader: t('행 번호', 'Row number'),
         reorderHeader: t('순서 변경', 'Reorder'),
         actionsHeader: t('작업', 'Actions'),
+        // 원시값 행만 있는 시트의 유일한 데이터 열. 열 이름이 될 키가 없다.
+        valueHeader: t('값', 'Value'),
         // {n} is substituted in the webview so the label names the row.
         moveRow: t('{n}번 행 이동 (Alt+위/아래)', 'Move row {n} (Alt+Up/Down)'),
         deleteRow: t('{n}번 행 삭제', 'Delete row {n}'),
@@ -2186,18 +2231,33 @@ export function getWebviewContent(
             return;
         }
 
+        // **행이 객체가 아닐 수 있다.** 표는 객체 행을 전제로 하지만 배열 원소는
+        // 무엇이든 될 수 있고(원시값이 든 배열, 중첩된 숫자 배열), 그 배열도
+        // 시트가 된다. 걸러 내지 않으면 Object.keys(null) 이 **TypeError** 를 내
+        // 화면이 통째로 빈다 — 여기는 webview 안이라 오류 알림조차 뜨지 않는다.
+        // 문자열은 죽지 않는 대신 Object.keys 가 인덱스를 돌려줘 "0","1" 이
+        // 열 이름으로 올라오고, 배열 행은 length 를 열로 내놓는다.
         const columns = [];
         const seen = new Set();
         rows.forEach(row => {
+            if (!isPlainObject(row)) { return; }
             Object.keys(row).forEach(k => {
                 if (!seen.has(k)) { seen.add(k); columns.push(k); }
             });
         });
 
+        // **헤더와 본문의 열 수를 맞춘다.** 원시값 행만 있는 시트에는 열 이름이
+        // 될 키가 하나도 없는데, 아래 읽기 전용 셀은 값을 보여 주려 한 칸을 쓴다.
+        // 그대로 두면 본문이 헤더보다 한 칸 넓어져 작업(Actions) 헤더가 값 칸에
+        // 걸리고 삭제 버튼 열은 머리글을 잃는다(작업 열 CSS 도 엉뚱한 칸에 붙는다).
+        // 그래서 그럴 때만 값 열 하나를 세우고, 객체 행에도 짝이 되는 빈 칸을 준다.
+        const valueColumn = columns.length === 0 && rows.some(row => !isPlainObject(row));
+
         let html = '<table><thead><tr>';
         html += '<th class="drag-handle" scope="col"><span class="sr-only">' + escapeHtml(S.reorderHeader) + '</span></th>';
         html += '<th class="row-num" scope="col"><span class="sr-only">' + escapeHtml(S.rowNumberHeader) + '</span>#</th>';
         columns.forEach(col => { html += '<th scope="col">' + escapeHtml(col) + '</th>'; });
+        if (valueColumn) { html += '<th scope="col">' + escapeHtml(S.valueHeader) + '</th>'; }
         html += '<th class="actions-cell" scope="col"><span class="sr-only">' + escapeHtml(S.actionsHeader) + '</span></th>';
         html += '</tr></thead><tbody>';
 
@@ -2212,15 +2272,35 @@ export function getWebviewContent(
             html += '<td class="drag-handle"><button type="button" class="drag-grip" draggable="true" data-move-row="' + rowIdx
                 + '" title="' + escapeAttr(rowLabel) + '" aria-label="' + escapeAttr(rowLabel) + '">⠿</button></td>';
             html += '<td class="row-num">' + (rowIdx + 1) + '</td>';
-            columns.forEach((col, colIdx) => {
-                const val = row[col];
-                const isArray = Array.isArray(val);
-                const isMultiline = detectMultiline(val);
-                html += '<td data-row="' + rowIdx + '" data-col="' + escapeAttr(col) + '">';
-                html += renderCellView(val, isArray, isMultiline);
-                html += renderCellEdit(val, isArray, isMultiline, rowIdx, col);
-                html += '</td>';
-            });
+            if (isPlainObject(row)) {
+                columns.forEach((col, colIdx) => {
+                    const val = row[col];
+                    const isArray = Array.isArray(val);
+                    const isMultiline = detectMultiline(val);
+                    html += '<td data-row="' + rowIdx + '" data-col="' + escapeAttr(col) + '">';
+                    html += renderCellView(val, isArray, isMultiline);
+                    html += renderCellEdit(val, isArray, isMultiline, rowIdx, col);
+                    html += '</td>';
+                });
+                // 값 열이 선 시트에서는 객체 행(키가 없는 {})도 짝이 되는 칸을
+                // 가져야 헤더와 어긋나지 않는다.
+                if (valueColumn) { html += '<td></td>'; }
+            } else {
+                // **객체가 아닌 행에는 편집 컨트롤을 만들지 않는다.**
+                //
+                // 열은 다른 행들의 것이므로 이 행의 것이 아니다. 그래도 셀을
+                // 만들면 두 가지가 깨진다.
+                //
+                //   - null 행: 빈 셀이 편집 가능해 보이고, 빠져나올 때
+                //     commitCell 이 null 에 인덱싱하며 죽는다.
+                //   - 배열 행: [1,2] 에 length 열이 걸리면 **2가 편집 가능한
+                //     값으로 보인다.** 0 으로 바꾸면 배열이 통째로 잘린다.
+                //
+                // data-row / data-col 이 없으므로 attachCellEvents 의 배선도
+                // 붙지 않는다. 값은 그대로 두고 읽기 전용으로 보여 주기만 한다.
+                html += '<td class="non-object-row" colspan="' + Math.max(columns.length, 1) + '">'
+                    + escapeHtml(JSON.stringify(row)) + '</td>';
+            }
             const deleteLabel = fmt(S.deleteRow, { n: rowIdx + 1 });
             html += '<td class="actions-cell"><button class="small danger" data-delete-row="' + rowIdx
                 + '" title="' + escapeAttr(deleteLabel) + '" aria-label="' + escapeAttr(deleteLabel) + '">✕</button></td>';
@@ -2861,7 +2941,13 @@ export function getWebviewContent(
         if (!td || !td.classList.contains('editing')) { return true; }
         const rowIdx = parseInt(td.dataset.row);
         const col = td.dataset.col;
-        const oldVal = getActiveRows()[rowIdx][col];
+        // **객체가 아닌 행에는 쓸 자리가 없다.** renderTable 이 그런 행에 편집
+        // 컨트롤을 만들지 않으므로 여기까지 오지 않지만, 오게 되면 null 에
+        // 인덱싱하며 죽거나 배열의 length 에 써서 원소를 조용히 잘라 낸다.
+        // 되돌릴 수 없는 손실이라 방어를 남긴다.
+        const row = getActiveRows()[rowIdx];
+        if (!isPlainObject(row)) { return true; }
+        const oldVal = row[col];
         let changed = false;
 
         if (Array.isArray(oldVal)) {
@@ -3011,9 +3097,14 @@ export function getWebviewContent(
         const rows = getActiveRows();
         if (!rows || !Array.isArray(rows)) { return; }
         const template = {};
-        if (rows.length > 0) {
-            Object.keys(rows[0]).forEach(k => {
-                const sample = rows[0][k];
+        // **첫 행이 객체가 아닐 수 있다.** Object.keys(null) 은 TypeError 고,
+        // 그것이 여기서 나면 webview 가 통째로 멈춘다 — 파일은 열렸는데 "행 추가"
+        // 를 누르는 순간 화면이 죽었다. 열 이름을 가진 **첫 객체 행**을 본보기로
+        // 삼고, 그런 행이 없으면 빈 행을 만든다.
+        const sampleRow = rows.find(isPlainObject);
+        if (sampleRow) {
+            Object.keys(sampleRow).forEach(k => {
+                const sample = sampleRow[k];
                 if (Array.isArray(sample)) { template[k] = []; }
                 else if (typeof sample === 'number') { template[k] = 0; }
                 else { template[k] = ''; }

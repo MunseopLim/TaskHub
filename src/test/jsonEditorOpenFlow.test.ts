@@ -269,6 +269,55 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         assert.ok(shownErrors.length > 0, '파싱 실패를 알리지 않았다');
     });
 
+    /**
+     * 스칼라 루트도 유효한 JSON 이라 `JSON.parse` 를 통과한다. 걸러 내지 않으면
+     * 그대로 webview 로 넘어가 `Object.keys(null)` 에서 TypeError 가 나는데,
+     * **확장 호스트가 아니라 webview 안**이라 오류 알림조차 없이 화면만 텅 빈다.
+     */
+    test('루트가 `null` 이면 패널을 만들지 않고 그 이유를 알린다', async () => {
+        const fake = installFakePanel();
+        const filePath = path.join(tempDir, 'null-root.json');
+        fs.writeFileSync(filePath, 'null');
+
+        await openJsonEditorFile(makeContext(), filePath);
+
+        assert.ok(!fake.events.includes('create-panel'), '스칼라 루트인데 패널을 만들었다');
+        assert.ok(shownErrors.length > 0, '사용자에게 아무것도 알리지 않았다');
+        assert.match(shownErrors[0], /객체나 배열|object or array/,
+            `무엇이 잘못됐는지 알리지 않았다: ${shownErrors[0]}`);
+        // **파싱은 성공했다.** "파싱 실패" 로 뭉뚱그리면 사용자가 있지도 않은
+        // 문법 오류를 찾는다 — 이 부정 단정이 없으면 그 구분이 고정되지 않는다.
+        assert.ok(!/파싱 실패|Failed to parse/.test(shownErrors[0]),
+            `파싱 실패로 잘못 이름 붙였다: ${shownErrors[0]}`);
+        assert.ok(!jsonPanelRegistry.has());
+    });
+
+    test('숫자·문자열 루트도 같은 이유로 거절한다', async () => {
+        for (const [name, body] of [['number-root', '42'], ['string-root', '"text"']]) {
+            const fake = installFakePanel();
+            shownErrors.length = 0;
+            const filePath = path.join(tempDir, `${name}.json`);
+            fs.writeFileSync(filePath, body);
+
+            await openJsonEditorFile(makeContext(), filePath);
+
+            assert.ok(!fake.events.includes('create-panel'), `${name}: 패널을 만들었다`);
+            assert.match(shownErrors[0] ?? '', /객체나 배열|object or array/, name);
+        }
+    });
+
+    test('원시값이 든 배열은 정상으로 연다', async () => {
+        // 막을 것은 **루트**뿐이다. 과하게 막으면 멀쩡한 파일이 안 열린다.
+        const fake = installFakePanel();
+        const filePath = path.join(tempDir, 'primitive-array.json');
+        fs.writeFileSync(filePath, '[null, 1, "a"]');
+
+        await openJsonEditorFile(makeContext(), filePath);
+
+        assert.ok(fake.events.includes('create-panel'),
+            `원시값 배열이 거절됐다: ${shownErrors.join(' / ')}`);
+    });
+
     test('없는 파일은 오류를 알리고 패널을 만들지 않는다', async () => {
         const fake = installFakePanel();
 

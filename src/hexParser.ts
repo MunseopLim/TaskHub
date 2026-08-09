@@ -42,8 +42,90 @@ export interface HexParseResult {
     byteCount: number;
 }
 
+/** 앞에서 훑어볼 줄 수. 앞줄만 깨진 파일을 살리되 바이너리에는 기회를 많이 주지 않는다. */
+const HEX_DETECT_LINES = 5;
+/** 판정에 읽을 앞부분 길이. 50MB 를 통째로 `split` 하지 않기 위한 것이다. */
+const HEX_DETECT_WINDOW = 4096;
+
+/**
+ * 이 줄이 **완전한 레코드**이고 체크섬까지 맞는가.
+ *
+ * 판정과 파싱이 **같은 규칙**을 쓰도록 길이·체크섬 계산은 `parseIntelHex` /
+ * `parseSrec` 의 것을 그대로 옮겼다. 한쪽만 바뀌면 "판정은 됐는데 아무것도 안
+ * 읽히는" 자리가 다시 생긴다.
+ *
+ * 자릿수 검사가 따로 있는 이유: `parseInt('0Z', 16)` 은 `0` 을 돌려주며 **성공한다.**
+ * 길이와 범위만 봐서는 16진수가 아닌 바이트가 섞인 파일이 그대로 통과한다.
+ */
+function recordIsValid(line: string, kind: 'intel' | 'srec'): boolean {
+    const hexAt = (from: number, len: number): number => {
+        const slice = line.substring(from, from + len);
+        return /^[0-9a-fA-F]+$/.test(slice) && slice.length === len ? parseInt(slice, 16) : NaN;
+    };
+
+    if (kind === 'intel') {
+        if (!line.startsWith(':') || line.length < 11) { return false; }
+        const byteCount = hexAt(1, 2);
+        if (!Number.isFinite(byteCount) || byteCount > HEX_MAX_RECORD_BYTES) { return false; }
+        const expectedLength = 11 + byteCount * 2;
+        if (line.length < expectedLength) { return false; }
+        let sum = 0;
+        for (let i = 1; i < expectedLength - 2; i += 2) {
+            const byte = hexAt(i, 2);
+            if (!Number.isFinite(byte)) { return false; }
+            sum += byte;
+        }
+        const checksum = hexAt(expectedLength - 2, 2);
+        return Number.isFinite(checksum) && ((sum + checksum) & 0xFF) === 0;
+    }
+
+    if (!/^S[0-9]/.test(line) || line.length < 4) { return false; }
+    const byteCount = hexAt(2, 2);
+    if (!Number.isFinite(byteCount)) { return false; }
+    const expectedLength = 4 + byteCount * 2;
+    if (line.length < expectedLength) { return false; }
+    let sum = 0;
+    for (let i = 2; i < expectedLength - 2; i += 2) {
+        const byte = hexAt(i, 2);
+        if (!Number.isFinite(byte)) { return false; }
+        sum += byte;
+    }
+    const checksum = hexAt(expectedLength - 2, 2);
+    return Number.isFinite(checksum) && ((sum + checksum) & 0xFF) === 0xFF;
+}
+
+/**
+ * 앞 몇 줄 안에 **완전히 유효한 레코드가 하나라도** 있는가.
+ *
+ * 접두사 한 글자로 포맷을 정하면 바이너리가 텍스트로 넘어간다 — 실제로 바이트
+ * `3A 00 FF` 로 시작하는 파일이 Intel HEX 로, `53 30` 으로 시작하는 파일이 SREC 로
+ * 판정됐다(`:` 은 0x3A, `S0` 은 0x53 0x30). 그렇게 넘어가면 파서가 레코드를 하나도
+ * 못 읽어 **빈 뷰어**가 뜨고, 사용자는 파일이 비었다고 오해한다.
+ *
+ * **첫 줄 하나만 보지 않는 이유.** 파서(`parseIntelHex`)는 깨진 레코드를 건너뛰고
+ * 나머지를 읽으므로, 첫 줄만 상한 HEX 파일도 지금까지 정상으로 열렸다. 첫 줄로만
+ * 판정하면 그런 파일이 갑자기 바이너리로 보인다. 반대로 줄 수를 늘려도 바이너리가
+ * 통과할 위험은 거의 늘지 않는다 — 레코드 하나가 통과하려면 그 구간이 **전부
+ * ASCII 16진수**이면서 체크섬까지 맞아야 하기 때문이다.
+ */
+function hasValidRecordNearStart(text: string, kind: 'intel' | 'srec'): boolean {
+    const marker = kind === 'intel' ? ':' : 'S';
+    const lines = text.slice(0, HEX_DETECT_WINDOW).split(/\r?\n/);
+    let seen = 0;
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line.startsWith(marker)) { continue; }
+        if (recordIsValid(line, kind)) { return true; }
+        if (++seen >= HEX_DETECT_LINES) { return false; }
+    }
+    return false;
+}
+
 /**
  * Detect file format from content.
+ *
+ * 접두사만 보지 않고 **유효한 레코드를 실제로 하나 찾았을 때만** 텍스트 포맷으로 넘긴다.
+ * 확장자로 이미 정해지는 경우는 호출부(`hexViewer.parseFile`)가 먼저 거른다.
  */
 export function detectFormat(content: string | Buffer): HexFormat {
     if (Buffer.isBuffer(content)) {
@@ -51,10 +133,10 @@ export function detectFormat(content: string | Buffer): HexFormat {
     }
     const trimmed = content.trimStart();
     if (trimmed.startsWith(':')) {
-        return 'intel';
+        return hasValidRecordNearStart(trimmed, 'intel') ? 'intel' : 'binary';
     }
     if (/^S[0-9]/.test(trimmed)) {
-        return 'srec';
+        return hasValidRecordNearStart(trimmed, 'srec') ? 'srec' : 'binary';
     }
     return 'binary';
 }
