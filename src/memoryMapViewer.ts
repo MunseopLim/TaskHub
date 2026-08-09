@@ -8,9 +8,35 @@ import { ARM_LINK_MAX_ENTRIES, parseArmLinkList, toMemoryRegions, toElfSections,
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
 
+/**
+ * *Go to Symbol* Quick Pick 이 다루는 한 항목. 웹뷰 영역 표의 **한 행과 1:1로
+ * 대응**한다 — 골랐을 때 이동할 대상이 실제로 그려져 있어야 하기 때문이다.
+ * (`region` + `name` + `addr` 가 그 행을 찾는 열쇠다.)
+ */
+export interface PanelEntry {
+    name: string;
+    addr: number;
+    size: number;
+    type: string;
+    region: string;
+    /** `memoryUsage` 순번 = 웹뷰 `RD` 순번. 이름이 겹쳐도 영역이 갈리지 않게 한다. */
+    regionIndex: number;
+    /** 부모 섹션(ELF 심볼) 또는 오브젝트 파일(Listing). */
+    object?: string;
+    section?: string;
+    func?: string;
+}
+
 interface PanelState {
     panel: vscode.WebviewPanel;
-    symbols: { name: string; addr: number; type: string }[];
+    /** 심볼/섹션 행 — Quick Pick 의 첫 번째 묶음. 상한에 걸려 잘려 있을 수 있다. */
+    entries: PanelEntry[];
+    /** 자르기 전 전체 행 수. 얼마나 가려졌는지를 Quick Pick 제목에 적는다. */
+    entriesTotal: number;
+    /** ELF 심볼 테이블에서 온 목록인가 (아니면 섹션·오브젝트 행이다). */
+    hasSymbols: boolean;
+    /** 메모리 영역 — Quick Pick 의 두 번째 묶음. */
+    regions: { name: string; addr: number; info: string }[];
     messageDisposable?: vscode.Disposable;
 }
 
@@ -23,6 +49,8 @@ export const panelRegistry = {
     size(): number { return panels.size; },
     getLastActive(): string | undefined { return lastActivePanel; },
     getHtml(filePath: string): string | undefined { return panels.get(filePath)?.panel.webview.html; },
+    /** Go to Symbol Quick Pick 이 다루는 목록. */
+    getEntries(filePath: string): PanelEntry[] | undefined { return panels.get(filePath)?.entries; },
     clear(): void { panels.clear(); lastActivePanel = undefined; },
 };
 
@@ -41,6 +69,17 @@ export const MEMORY_MAP_MAX_FILE_SIZE = 100 * 1024 * 1024;
  * 사용자가 두 번 헛수고한다.
  */
 export const MEMORY_MAP_MAX_SAVE_HTML_CHARS = 64 * 1024 * 1024;
+
+/**
+ * *Go to Symbol* Quick Pick 에 싣는 최대 항목 수.
+ *
+ * 파서는 심볼을 100만 개까지 허용한다([src/elfParser.ts](src/elfParser.ts)의
+ * `ELF_MAX_SYMBOLS`). 그만큼을 Quick Pick 에 그대로 넣으면 목록을 여는 순간
+ * UI 가 멈춘다 — 상한은 **표시 쪽**에서 잡아야 한다는 그 주석의 판단을 여기서
+ * 이행한다. 넘칠 때는 **큰 항목부터** 남긴다. 메모리 맵에서 찾게 되는 것은
+ * 자리를 많이 차지하는 쪽이고, 잘렸다는 사실은 Quick Pick 제목에 적는다.
+ */
+export const MEMORY_MAP_MAX_SYMBOL_PICK_ITEMS = 5000;
 
 /**
  * 저장 HTML 상한 초과 안내. 웹뷰가 직렬화 전에 거른 경우와 호스트가 받은 뒤
@@ -329,7 +368,9 @@ function showPanel(
     }
 
     lastActivePanel = filePath;
-    const state: PanelState = { panel, symbols: [], messageDisposable: undefined };
+    const state: PanelState = {
+        panel, entries: [], entriesTotal: 0, hasSymbols: false, regions: [], messageDisposable: undefined,
+    };
     state.messageDisposable = panel.webview.onDidReceiveMessage(async (message: any) => {
         if (message.command === 'copyReport') {
             // 리포트 본문은 이미 extension host가 보유한다. 웹뷰에 수 MB~수십 MB
@@ -391,30 +432,182 @@ function showPanel(
         fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, hasSymbols, panel.webview
     );
 
-    // Store region symbols for Go to Symbol command
-    state.symbols = memoryUsage.map(u => {
+    const allEntries = collectPickEntries(memoryUsage);
+    state.entries = limitSymbolPickEntries(allEntries);
+    state.entriesTotal = allEntries.length;
+    state.hasSymbols = hasSymbols === true;
+    state.regions = memoryUsage.map(u => {
         const origin = regions.find(r => r.name === u.region)?.origin ?? 0;
-        return { name: u.region, addr: origin, type: `${formatSize(u.used)} / ${formatSize(u.total)}` };
+        return { name: u.region, addr: origin, info: `${formatSize(u.used)} / ${formatSize(u.total)}` };
     });
     panels.set(filePath, state);
 }
 
+/**
+ * Quick Pick 이 다룰 행을 모은다.
+ *
+ * `regionIndex` 는 `memoryUsage` 순번이고, 웹뷰의 `RD` 도 같은 배열에서 같은
+ * 순서로 만들어진다([getWebviewContent](src/memoryMapViewer.ts)). 이름이 아니라
+ * 이 순번으로 영역을 찾아야 이름이 겹치는 설정(`memoryMap.regions` 는 사용자가
+ * 직접 쓰는 파일이라 중복을 막지 않는다)에서도 엉뚱한 카드로 가지 않는다.
+ *
+ * **크기 0 인 행은 뺀다.** 웹뷰가 같은 조건으로 걸러 표를 그리므로, 넣어 두면
+ * 고르고 나서 아무 일도 일어나지 않는 항목이 된다.
+ *
+ * Exported for testing.
+ */
+export function collectPickEntries(memoryUsage: MemoryUsage[]): PanelEntry[] {
+    const entries: PanelEntry[] = [];
+    memoryUsage.forEach((u, regionIndex) => {
+        for (const s of u.sections) {
+            if (s.size <= 0) { continue; }
+            entries.push({
+                name: s.name, addr: s.addr, size: s.size, type: s.type,
+                region: u.region, regionIndex, object: s.object, section: s.section, func: s.func,
+            });
+        }
+    });
+    return entries;
+}
+
+/**
+ * Quick Pick 목록을 주소순으로 정렬하고 상한을 적용한다. 상한을 넘으면 큰 것부터
+ * 남기되(무엇을 남길지의 근거는 `MEMORY_MAP_MAX_SYMBOL_PICK_ITEMS` 참조) 화면
+ * 순서는 다시 주소순으로 되돌린다 — 목록을 훑을 때는 맵과 같은 순서가 읽힌다.
+ *
+ * Exported for testing.
+ */
+export function limitSymbolPickEntries(
+    entries: PanelEntry[],
+    max: number = MEMORY_MAP_MAX_SYMBOL_PICK_ITEMS
+): PanelEntry[] {
+    // 이름 비교는 localeCompare 가 아니라 부호 비교다 — 정렬 결과가 실행 환경의
+    // 로케일에 따라 달라지면 안 된다(같은 파일이 기계마다 다른 순서로 보인다).
+    const byAddr = (a: PanelEntry, b: PanelEntry) =>
+        a.addr - b.addr || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    if (entries.length <= max) { return entries.slice().sort(byAddr); }
+    return entries.slice().sort((a, b) => b.size - a.size).slice(0, max).sort(byAddr);
+}
+
+/** Quick Pick 항목. 고른 뒤 어떤 메시지를 보낼지는 `entry` 유무로 갈린다. */
+export interface GoToSymbolItem extends vscode.QuickPickItem {
+    entry?: PanelEntry;
+}
+
+/**
+ * Quick Pick 항목을 만든다. 심볼이 먼저다 — 명령 이름이 가리키는 것이고,
+ * 목록을 열면 첫 항목이 선택된 상태로 뜨기 때문이다. 영역은 그 뒤에 둔다
+ * (0.7.12까지 이 명령이 하던 일이라, 없애면 그때까지의 쓰임이 사라진다).
+ *
+ * Exported for testing.
+ */
+export function buildGoToSymbolItems(
+    entries: PanelEntry[],
+    regions: { name: string; addr: number; info: string }[],
+    hasSymbols = false
+): GoToSymbolItem[] {
+    const items: GoToSymbolItem[] = [];
+    if (entries.length > 0) {
+        // 구분선은 목록에 실제로 든 것을 말해야 한다. stripped 바이너리나 Listing
+        // 파일에서는 이 행들이 심볼이 아니라 섹션·오브젝트다.
+        items.push({
+            label: hasSymbols ? t('심볼', 'Symbols') : t('섹션', 'Sections'),
+            kind: vscode.QuickPickItemKind.Separator,
+        });
+        for (const e of entries) {
+            // Listing 파일은 이름 칸이 오브젝트(main.o)라 행마다 겹친다. 함수명이
+            // 있으면 그것을 label 로 올려야 목록이 구분된다. ELF 심볼은 func 가
+            // 비어 있어 name(=심볼명)이 그대로 label 이 된다.
+            const label = e.func || e.name;
+            const parts = [formatHex(e.addr), formatSize(e.size), e.type, e.region];
+            if (e.name !== label) { parts.push(e.name); }
+            // 부모 섹션(.text/.data)은 ELF 심볼에서 `object` 로 온다. 이것이 없으면
+            // matchOnDescription 으로 ".text" 를 찾을 수 없다.
+            for (const extra of [e.section, e.object]) {
+                if (extra && !parts.includes(extra)) { parts.push(extra); }
+            }
+            items.push({ label, description: parts.join('  ·  '), entry: e });
+        }
+    }
+    if (regions.length > 0) {
+        items.push({ label: t('영역', 'Regions'), kind: vscode.QuickPickItemKind.Separator });
+        for (const r of regions) {
+            items.push({ label: r.name, description: `${formatHex(r.addr)}  ·  ${r.info}` });
+        }
+    }
+    return items;
+}
+
+/**
+ * 잘렸을 때만 붙는 Quick Pick 제목.
+ *
+ * 제목은 **한 줄로 가운데 정렬 후 말줄임** 되므로 (VS Code quick-input),
+ * 문장을 길게 쓰면 잘려 나가는 쪽이 하필 뒤쪽 — 사용자가 할 일 — 이다. 그래서
+ * 여기에는 숫자만 두고, 무엇을 하면 되는지는 placeHolder 가 말한다.
+ * 전체 개수를 함께 적는 이유는 "5,000 / 12,400" 과 "5,000 / 940,000" 이 서로
+ * 다른 판단을 부르기 때문이다.
+ *
+ * Exported for testing.
+ */
+export function buildGoToSymbolTitle(shown: number, total: number): string | undefined {
+    if (total <= shown) { return undefined; }
+    // 숫자 구분자는 UI 언어를 따른다 — OS 로케일을 따르면 한국어 문장 안에
+    // 독일식 "5.000" 이 섞인다.
+    const locale = vscode.env.language.startsWith('ko') ? 'ko-KR' : 'en-US';
+    const n = (v: number) => v.toLocaleString(locale);
+    // "크기순"이라고 쓰지 않는다 — 크기는 **무엇을 남길지**의 기준이고, 목록에
+    // 보이는 순서는 주소순이다. 둘을 같은 말로 적으면 화면과 어긋난다.
+    return t(
+        `Memory Map — 큰 항목 ${n(shown)} / 전체 ${n(total)}`,
+        `Memory Map — ${n(shown)} largest of ${n(total)}`
+    );
+}
+
+/**
+ * 호스트 → 웹뷰 이동 메시지. 웹뷰의 `revealEntry` 가 읽는 키와 **여기서 쓰는 키가
+ * 같아야** 기능이 산다. 한곳에 모아 두고 테스트가 웹뷰 쪽 참조와 대조한다.
+ *
+ * Exported for testing.
+ */
+export function buildRevealEntryMessage(entry: PanelEntry) {
+    return {
+        command: 'revealEntry',
+        regionIndex: entry.regionIndex,
+        region: entry.region,
+        name: entry.name,
+        addr: entry.addr,
+    };
+}
+
 export async function goToSymbol() {
     const active = lastActivePanel ? panels.get(lastActivePanel) : undefined;
-    if (!active || active.symbols.length === 0) { return; }
+    if (!active) { return; }
+    if (active.entries.length === 0 && active.regions.length === 0) {
+        // 이 상태는 "영역이 정의되지 않음"이다 — 패널에는 All Sections 표가 그대로
+        // 떠 있으므로, "아무것도 없다"고만 하면 화면과 어긋나 명령이 고장 난 것으로
+        // 읽힌다. 패널 안내와 같은 다음 단계를 가리킨다.
+        vscode.window.showInformationMessage(t(
+            '이동할 목록이 없습니다. 메모리 영역이 정의되지 않았습니다 — 링커 스크립트(.ld/.sct)를 선택하거나 .vscode/taskhub_types.json 에 memoryMap.regions 를 추가하세요.',
+            'Nothing to go to: no memory regions are defined. Pick a linker script (.ld/.sct), or add memoryMap.regions to .vscode/taskhub_types.json.'
+        ));
+        return;
+    }
 
-    const items = active.symbols.map(s => ({
-        label: s.name,
-        description: `${formatHex(s.addr)} | ${s.type}`,
-    }));
-
+    const items = buildGoToSymbolItems(active.entries, active.regions, active.hasSymbols);
     const selected = await vscode.window.showQuickPick(items, {
-        placeHolder: t('영역으로 이동...', 'Go to region...'),
+        placeHolder: t(
+            '심볼 또는 영역으로 이동… (이름·주소·크기·타입으로 검색)',
+            'Go to a symbol or region… (search by name, address, size, or type)'
+        ),
         matchOnDescription: true,
+        title: buildGoToSymbolTitle(active.entries.length, active.entriesTotal),
     });
 
-    if (selected) {
-        active.panel.reveal();
+    if (!selected) { return; }
+    active.panel.reveal();
+    if (selected.entry) {
+        active.panel.webview.postMessage(buildRevealEntryMessage(selected.entry));
+    } else {
         active.panel.webview.postMessage({
             command: 'scrollToRegion',
             name: selected.label,
@@ -525,6 +718,15 @@ export function buildMemoryMapStrings(): Record<string, string> {
         // 갈리므로 두 벌을 둔다.
         regionsMatchedOne: t(' — {n}개 영역 일치', ' — {n} region matched'),
         regionsMatchedMany: t(' — {n}개 영역 일치', ' — {n} regions matched'),
+        // 심볼 이동 결과. 같은 live region 으로 읽힌다 — 이동의 유일한 신호가
+        // 행 배경색이면 스크린리더 사용자에게는 아무 일도 일어나지 않은 것과 같다.
+        // 검색을 지운 경우를 따로 두는 이유: 사용자가 직접 친 검색어가 사라진
+        // 것이므로 그 사실과 이유가 화면에 남아야 한다.
+        revealed: t(' — {name} ({addr}) 으로 이동', ' — moved to {name} ({addr})'),
+        revealedAfterClear: t(
+            ' — 검색을 지우고 {name} ({addr}) 으로 이동',
+            ' — cleared the search to reach {name} ({addr})'
+        ),
     };
 }
 
@@ -891,7 +1093,14 @@ function getWebviewContent(
         padding: 0 1px;
     }
     tr.current-match { background: var(--vscode-list-activeSelectionBackground, rgba(255, 170, 0, 0.22)) !important; }
+    /* 배경만 바꾸고 글자색을 그대로 두면 밝은 테마에서 대비가 무너진다 —
+       list.activeSelectionBackground 는 #0060C0 같은 진한 색이라 기본 전경색과
+       3.4:1 밖에 되지 않아, 방금 이동한 행이 화면에서 가장 읽기 힘든 줄이 된다.
+       배경과 짝을 이루는 전경색을 함께 쓴다(WCAG 1.4.3). */
+    tr.current-match td { color: var(--vscode-list-activeSelectionForeground, inherit); }
     tr.current-match td:first-child { box-shadow: inset 3px 0 0 var(--vscode-focusBorder, #007acc); }
+    /* 명령으로 이동한 행은 포커스를 받는다(tabindex=-1). 어디에 섰는지 보이게 한다. */
+    tr.current-match:focus-visible { outline: 1px solid var(--vscode-focusBorder, #007acc); outline-offset: -1px; }
     tr.current-match mark.sm-hl { background: var(--vscode-editor-findMatchBackground, #d18616); color: var(--vscode-editor-foreground, inherit); }
     /* 제목이 감싸도 카드 안에서의 생김새는 그대로여야 한다 — 크기·굵기·여백은
        카드가 정하고, h3 는 의미만 얹는다. */
@@ -1075,6 +1284,11 @@ const RD = ${regionDataJsLiteral};
     // (a live row) or { k:'vt', vi:regionIdx, r:rowIndex } (a row in a virtual
     // table that may not be in the DOM yet — resolved by scrolling the viewport).
     let matchList = [], curMatch = -1, currentMatchEl = null;
+    // 지금 강조된 행을 **논리 좌표로도** 들고 있는다. 가상 스크롤 표는 스크롤할
+    // 때마다 tbody 를 다시 그려 <tr> 참조와 클래스가 함께 사라지므로, 요소만
+    // 기억해서는 조금 굴렸다 돌아온 사이에 강조가 지워진다 — 그 강조가 이동이
+    // 일어났다는 유일한 표시일 때는 이동 자체를 못 본 것이 된다.
+    let currentTarget = null;
 
     function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -1311,6 +1525,14 @@ const RD = ${regionDataJsLiteral};
         for (let i = s; i < e; i++) h += rowHtml(vt.fd[i], rd.hsi, rd.hfi);
         if (botH > 0) h += '<tr class="vt-sp"><td colspan="' + vt.cc + '" style="height:' + botH + 'px;padding:0;border:0"></td></tr>';
         vt.tb.innerHTML = h;
+        // 방금 innerHTML 로 날아간 강조를 되돌린다. currentTarget 이 논리 좌표라
+        // 다시 그려진 행에도 그대로 붙는다.
+        if (currentTarget && currentTarget.k === 'vt' && currentTarget.vi === vt.idx
+            && currentTarget.r >= s && currentTarget.r < e) {
+            const rows = vt.tb.querySelectorAll('tr:not(.vt-sp)');
+            const row = rows[currentTarget.r - s];
+            if (row) { row.classList.add('current-match'); currentMatchEl = row; }
+        }
     }
 
     // --- Copy / Save ---
@@ -1622,14 +1844,24 @@ const RD = ${regionDataJsLiteral};
         if (detail && detail.style.display === 'none') { setRegionExpanded(card, true); }
     }
 
-    // Reveal match #i: clear the previous current-match, expand its region if
-    // collapsed, resolve the target row (scrolling a virtual table's viewport if
-    // the row isn't rendered yet), mark it current, and scroll the page to it.
+    function revealMatch(i, force) {
+        revealTarget(matchList[i], force);
+    }
+
+    // Reveal one target row: clear the previous current-match, expand its region
+    // if collapsed, resolve the row (scrolling a virtual table's viewport if the
+    // row isn't rendered yet), mark it current, and scroll the page to it.
     // force = always center; otherwise only scroll when the row isn't already
     // comfortably on screen.
-    function revealMatch(i, force) {
+    //
+    // The target is either { k:'el', el } or { k:'vt', vi, r } — the same shape
+    // matchList holds, so search navigation and the Go to Symbol command land on
+    // a row through this one path.
+    function revealTarget(m, force, focusRow) {
         if (currentMatchEl) { currentMatchEl.classList.remove('current-match'); currentMatchEl = null; }
-        const m = matchList[i];
+        // matchList 항목을 그대로 들고 있지 않고 복사한다 — 아래에서 seg 를 달고,
+        // 정렬 뒤에는 r 을 고쳐 쓰는데, 그것이 matchList 를 건드리면 안 된다.
+        currentTarget = m ? { k: m.k, vi: m.vi, r: m.r, el: m.el } : null;
         if (!m) { updateNavUI(); return; }
         let el;
         if (m.k === 'el') {
@@ -1640,6 +1872,9 @@ const RD = ${regionDataJsLiteral};
             ensureRegionExpanded(m.vi);   // expand first so the viewport has a real clientHeight
             const vt = vtMap.get(m.vi);
             if (!vt) { updateNavUI(); return; }
+            // 행 **객체**도 함께 기억한다. 정렬은 이 배열을 제자리에서 재배열하므로
+            // 번호만으로는 같은 심볼을 다시 찾을 수 없다.
+            currentTarget.seg = vt.fd[m.r];
             const maxTop = Math.max(0, vt.fd.length * ROW_H - vt.vp.clientHeight);
             vt.vp.scrollTop = Math.min(maxTop, Math.max(0, (m.r + 0.5) * ROW_H - vt.vp.clientHeight / 2));
             vt.ls = -1;
@@ -1649,6 +1884,12 @@ const RD = ${regionDataJsLiteral};
         if (!el) { updateNavUI(); return; }
         el.classList.add('current-match');
         currentMatchEl = el;
+        if (focusRow) {
+            // 스크롤은 아래에서 우리가 부드럽게 한다 — focus() 가 먼저 뛰게 두면
+            // 화면이 두 번 튄다.
+            el.setAttribute('tabindex', '-1');
+            el.focus({ preventScroll: true });
+        }
         if (m.k === 'el') {
             if (force || !matchInView(el)) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
         } else {
@@ -1690,6 +1931,38 @@ const RD = ${regionDataJsLiteral};
         document.querySelectorAll('#sectionTable tbody tr.search-match').forEach(function(tr) { matchList.push({ k: 'el', el: tr }); });
     }
 
+    function clearCurrentTarget() {
+        if (currentMatchEl) { currentMatchEl.classList.remove('current-match'); }
+        currentMatchEl = null;
+        currentTarget = null;
+    }
+
+    /**
+     * 정렬로 영역 #idx 의 행이 재배열된 직후, 강조 대상을 다시 붙인다.
+     *
+     * 가상 표의 대상은 행 **번호**로 기억되는데 정렬은 rd.segments 를 제자리에서
+     * 재배열하므로, 그대로 두면 같은 번호에 **다른 심볼**이 앉아 강조가 엉뚱한
+     * 행으로 옮겨 간다. 기억해 둔 행 객체로 새 번호를 찾고, 못 찾으면(검색에
+     * 걸러졌다면) 강조를 놓는다 — 틀린 곳을 가리키느니 없는 편이 낫다.
+     *
+     * 일반 표는 tbody 를 통째로 다시 그려 <tr> 참조가 끊어지므로 그냥 놓는다.
+     *
+     * **renderVT 보다 먼저** 불러야 한다. 그 뒤면 이미 옛 번호로 칠한 뒤다.
+     */
+    function resyncCurrentTargetAfterSort(idx) {
+        if (!currentTarget) { return; }
+        if (currentTarget.k === 'vt') {
+            if (currentTarget.vi !== idx) { return; }
+            const vt = vtMap.get(idx);
+            const r = (vt && currentTarget.seg) ? vt.fd.indexOf(currentTarget.seg) : -1;
+            if (r >= 0) { currentTarget.r = r; return; }
+        } else {
+            const card = document.querySelector('.region-card[data-idx="' + idx + '"]');
+            if (!card || !currentTarget.el || !card.contains(currentTarget.el)) { return; }
+        }
+        clearCurrentTarget();
+    }
+
     // Re-sync match navigation after a column sort reordered (or, for virtual
     // tables, re-rendered) rows behind matchList's back: stale <tr> references
     // and wrong document order would make ◀/▶ jump to the wrong place. Mirrors
@@ -1698,6 +1971,7 @@ const RD = ${regionDataJsLiteral};
         if (!curQ) { return; }
         document.querySelectorAll('.current-match').forEach(function(el) { el.classList.remove('current-match'); });
         currentMatchEl = null;
+        currentTarget = null;   // 행 번호는 필터/정렬이 바뀌면 다른 행을 가리킨다
         rebuildMatchList(curQ);
         curMatch = matchList.length > 0 ? 0 : -1;
         updateNavUI();
@@ -1712,6 +1986,7 @@ const RD = ${regionDataJsLiteral};
         // Drop any stale current-match emphasis; matchList is rebuilt below.
         document.querySelectorAll('.current-match').forEach(function(el) { el.classList.remove('current-match'); });
         currentMatchEl = null;
+        currentTarget = null;   // 행 번호는 필터/정렬이 바뀌면 다른 행을 가리킨다
 
         // matchSeg() also searches the Section/Function columns, but those live
         // inside .func-cell which is hidden by default — so a function-only query
@@ -1831,30 +2106,118 @@ const RD = ${regionDataJsLiteral};
     // --- Overview row click -> scroll to region card ---
     document.querySelectorAll('.overview-row').forEach(function(row) {
         row.addEventListener('click', function() {
-            const name = row.getAttribute('data-region');
-            const card = document.getElementById('region-' + name);
-            if (!card) return;
-            const detail = card.querySelector('.region-detail');
-            if (detail && detail.style.display === 'none') { setRegionExpanded(card, true); }
-            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
-            setTimeout(function() { card.style.outline = ''; }, 2500);
+            scrollToRegionCard(document.getElementById('region-' + row.getAttribute('data-region')));
         });
     });
 
-    // --- Scroll to region (from extension Ctrl+Shift+O command) ---
+    // 영역 카드로 이동 — Overview 클릭 · scrollToRegion · 행을 못 찾았을 때의
+    // 되돌아갈 자리. 한 함수로 모아 세 경로가 같은 모습으로 착지하게 한다.
+    function scrollToRegionCard(card) {
+        if (!card) { return false; }
+        const detail = card.querySelector('.region-detail');
+        if (detail && detail.style.display === 'none') { setRegionExpanded(card, true); }
+        card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
+        setTimeout(function() { card.style.outline = ''; }, 2500);
+        return true;
+    }
+
+    // 이동 결과를 한 문장으로 알린다. 지금까지 성공의 유일한 신호가 행 배경색
+    // 이었는데, 그것은 스크린리더에 아무것도 전하지 못하고 검색을 지웠다는
+    // 사실은 아무 데도 남지 않았다. #regMatchInfo 는 이미 role="status" 다.
+    function announceReveal(text) {
+        if (regMatchInfo) { regMatchInfo.textContent = text; }
+    }
+
+    // --- Jump to one symbol/section row (from the Go to Symbol command) ---
+    // The picked row can be unreachable in three ways at once: its region is
+    // collapsed (and its table not even rendered yet), an active search filters
+    // it out, and — in a virtual table — the <tr> does not exist until the
+    // viewport scrolls there. All three are handled here; the last step hands a
+    // resolved target to revealTarget, the same path search navigation uses.
+    function revealEntry(regionIndex, regionName, name, addr) {
+        // 영역은 순번으로 찾는다. 이름은 사용자 설정에서 오므로 겹칠 수 있고,
+        // 겹치면 두 번째 영역의 행이 첫 번째 카드로 가서 조용히 실패한다.
+        // 순번이 어긋난 메시지(패널 재생성 등)만 이름으로 되짚는다.
+        let idx = (typeof regionIndex === 'number' && RD[regionIndex]) ? regionIndex : -1;
+        if (idx < 0 || (regionName && RD[idx].name !== regionName)) {
+            idx = -1;
+            for (let i = 0; i < RD.length; i++) {
+                if (RD[i].name === regionName) { idx = i; break; }
+            }
+        }
+        if (idx < 0) { return; }
+
+        const card = document.querySelector('.region-card[data-idx="' + idx + '"]');
+        const rd = RD[idx];
+        let seg = null;
+        for (let i = 0; i < rd.segments.length; i++) {
+            if (rd.segments[i].a === addr && rd.segments[i].n === name) { seg = rd.segments[i]; break; }
+        }
+        // 행을 못 찾으면 최소한 그 영역까지는 데려간다. 이 릴리스가 고친 것이
+        // "눌러도 아무 일이 없다"인데, 그 증상으로 되돌아가지 않게 한다.
+        if (!seg) { scrollToRegionCard(card); return; }
+
+        // 검색이 이 행을 걸러 내고 있으면 먼저 검색을 비운다. 그러지 않으면
+        // 카드째 숨겨져 있거나 표에 없는 행으로 이동해, 명령이 아무 일도 하지
+        // 않은 것처럼 보인다. 걸리지 않는 검색은 그대로 둔다 — 사용자가 좁혀 둔
+        // 화면을 명령 하나가 매번 되돌리지는 않는다.
+        const cleared = Boolean(curQ) && !matchSeg(seg, curQ);
+        if (cleared) {
+            searchInput.value = '';
+            doSearch();
+        }
+
+        ensureRegionExpanded(idx);   // 첫 펼침이면 여기서 상세 표가 렌더된다
+
+        let target = null;
+        const vt = vtMap.get(idx);
+        if (vt) {
+            const r = vt.fd.indexOf(seg);
+            if (r >= 0) { target = { k: 'vt', vi: idx, r: r }; }
+        } else {
+            // 행 순서는 정렬로 바뀌므로 위치가 아니라 속성으로 찾는다.
+            const rows = card ? card.querySelectorAll('.section-table tbody tr') : [];
+            for (const tr of rows) {
+                if (tr.getAttribute('data-sort-addr') === String(addr) && tr.getAttribute('data-sort-name') === name) {
+                    target = { k: 'el', el: tr };
+                    break;
+                }
+            }
+        }
+        if (!target) { scrollToRegionCard(card); return; }
+
+        // 검색이 살아 있다면 이 행을 현재 위치로 잡아 준다 — 그러지 않으면 바로
+        // 이어 누른 ◀/▶ 가 여기가 아니라 직전 위치의 다음 결과로 튄다.
+        if (curQ) {
+            for (let i = 0; i < matchList.length; i++) {
+                const m = matchList[i];
+                const same = target.k === 'vt'
+                    ? (m.k === 'vt' && m.vi === target.vi && m.r === target.r)
+                    : (m.k === 'el' && m.el === target.el);
+                if (same) { curMatch = i; break; }
+            }
+        }
+        // 키보드 사용자는 여기서 이어 가야 한다 — 포커스를 옮기지 않으면 Tab 이
+        // 다시 맨 위 툴바부터 시작한다. 검색 이동(◀/▶)에서는 포커스를 옮기지
+        // 않는다: 검색창에서 타이핑하던 손을 뺏게 된다.
+        revealTarget(target, true, true);
+        announceReveal(fmt(cleared ? S.revealedAfterClear : S.revealed, { name: seg.n, addr: seg.ah }));
+    }
+
+    // --- Scroll to region / row (from extension Ctrl+Shift+O command) ---
     window.addEventListener('message', function(event) {
         const msg = event.data;
+        if (msg.command === 'revealEntry') {
+            revealEntry(msg.regionIndex, msg.region, msg.name, msg.addr);
+            return;
+        }
         if (msg.command === 'scrollToRegion') {
             const cards = document.querySelectorAll('.region-card');
             for (const card of cards) {
                 const strong = card.querySelector('.region-header strong');
                 if (strong && strong.textContent.trim() === msg.name) {
-                    const detail = card.querySelector('.region-detail');
-                    if (detail && detail.style.display === 'none') { setRegionExpanded(card, true); }
-                    card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                    card.style.outline = '2px solid var(--vscode-focusBorder, #007acc)';
-                    setTimeout(function() { card.style.outline = ''; }, 2500);
+                    scrollToRegionCard(card);
                     return;
                 }
             }
@@ -2028,12 +2391,15 @@ const RD = ${regionDataJsLiteral};
         const vt = vtMap.get(idx);
         if (vt) {
             vt.fd = curQ ? vt.data.filter(function(seg) { return matchSeg(seg, curQ); }) : vt.data;
+            // renderVT 가 옛 행 번호로 강조를 다시 칠하기 **전에** 번호를 고친다.
+            resyncCurrentTargetAfterSort(idx);
             vt.vp.scrollTop = 0;
             vt.ls = -1;
             renderVT(vt);
         } else {
             const tbody = card.querySelector('.section-table tbody');
             if (tbody) {
+                resyncCurrentTargetAfterSort(idx);   // 곧 끊어질 <tr> 참조를 놓는다
                 const data = curQ ? rd.segments.filter(function(seg) { return matchSeg(seg, curQ); }) : rd.segments;
                 tbody.innerHTML = data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi); }).join('');
             }

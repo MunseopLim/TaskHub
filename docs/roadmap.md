@@ -15,6 +15,7 @@
 | 같은 title 폴더 액션 disambiguation (이전 §12) | 0.4.26부터 제공. History 패널이 같은 title 충돌 시에만 라벨을 풀 경로(`Firmware > Build`)로 스왑, 반복 실행은 충돌로 안 침. 풀 경로는 툴팁에도 항상 노출 | [src/providers/historyProvider.ts](../src/providers/historyProvider.ts) `computeDisambiguatedHistoryLabels` |
 | Quick Action Palette (이전 §9) | 0.4.28부터 제공. `TaskHub: Run Any Action…` 단일 커맨드로 모든 액션 fuzzy 검색·실행. 0.6.12부터 *Recently used* 섹션은 History에서 유도 — 트리 클릭·키바인딩·History 재실행까지 한 순서로 반영되고 마지막 실행 시각/성패가 행에 표시됨. 액션 ID 기준(이름 변경 무관)·표시 시점에 stale 항목 필터 | [src/extension.ts](../src/extension.ts) `taskhub.runAnyAction`, `buildRunAnyActionPicks`, [src/providers/historyProvider.ts](../src/providers/historyProvider.ts) `deriveRecentActionRuns` |
 | TaskHub Doctor / Action Lint (이전 §5) | 0.4.40부터 제공. `TaskHub: Doctor — Lint Actions` 커맨드가 모든 `actions.json` 소스를 한 번에 정적 분석해 Problems 패널에 게시 (스키마/regex/미해결 변수/외부 쓰기/중복 id/capture group/dependsOn cycle 7종 검사) | [docs/features.md §23](./features.md#23-taskhub-doctor-action-lint), [src/doctor.ts](../src/doctor.ts) |
+| ELF Symbol Navigator — 심볼 검색/점프 (이전 §3, 부분) | 0.7.13부터 제공. Memory Map 패널에서 `Ctrl/Cmd+Shift+O` 또는 명령 팔레트로 **실제 심볼/섹션 행**을 QuickPick 검색 → 그 행으로 이동(접힌 영역 펼침·가상 스크롤 스크롤·강조·live region 안내). 남은 것은 아래 §3 참조 (hex dump, 소스↔맵 양방향 점프) | [docs/features.md](./features.md) "검색 및 탐색", [src/memoryMapViewer.ts](../src/memoryMapViewer.ts) `goToSymbol` |
 | 병렬 실행 / Task DAG (이전 §4) | 0.4.41부터 제공. `parallel: true` opt-in + `dependsOn` 런타임 honoring + `${taskId.x}` 자동 의존성 추론 + 사이클/missing/self 검증 + task 단위 timeout/stop + 출력 격리 (streamed terminal group / output.mode terminal 키 분리) + interactive prompt mutex + `taskhub.pipeline.maxParallelTasks` 설정. 기존 직렬 액션은 동작 변화 없음 | [docs/features.md §24](./features.md#24-병렬-실행--task-dag) |
 
 ## 테스트 부채
@@ -31,7 +32,7 @@
 | 순위 | 기능 | 근거 | 구현 크기 |
 | --- | --- | --- | --- |
 | 2 | CMSIS-SVD 기반 Register/SFR Hover | 벤더 헤더 없는 프로젝트에서 차별점 | 대 |
-| 3 | ELF Symbol Navigator | 기존 ELF 파서를 활용한 검색/점프 UX. 단독 가치 있음 | 소 |
+| 3 | ELF Symbol Navigator — hex dump · 양방향 점프 | 심볼 검색/점프는 0.7.13에 구현됨. 남은 것은 심볼 → Hex Viewer 오프셋 열기와 소스 ↔ 맵 양방향 점프 | 소 |
 | 6 | Named Input Profiles | 인터랙티브 입력 재실행("수정해서 실행")의 더 큰 그림. 임베디드 워크플로 fitness 강함 | 중 |
 | 7 | Action Run Report | History 패널 자연 확장. 출력 로그 영속화와 페어 | 중 |
 | 8 | 출력 로그 영속화 + 회전 | 작은 비용. Action Run Report에 흡수 가능 | 소 |
@@ -75,12 +76,13 @@
 - Command Palette: `Decode Register Value`
 - 관련 문서: [docs/features.md](./features.md) 섹션 15
 
-## 3. ELF Symbol Navigator
+## 3. ELF Symbol Navigator  *(심볼 검색/점프는 0.7.13에 구현됨)*
 
 기존 [src/elfParser.ts](../src/elfParser.ts)를 활용한 심볼 검색/점프 UX.
 
-- 심볼 이름 검색 → 주소/크기/섹션/hex dump
-- Memory Map과 양방향 점프
+- ~~심볼 이름 검색 → 주소/크기/섹션~~ — 0.7.13. Memory Map 패널의 *Go to Symbol* 이 심볼/섹션 행을 QuickPick으로 검색해 해당 행으로 이동한다. 상세는 상단 "이미 구현된 항목" 표 참조
+- 심볼 → **hex dump**: 고른 심볼의 바이트를 Hex Viewer에서 그 오프셋으로 열기 (기존 [src/hexViewer.ts](../src/hexViewer.ts) 재사용)
+- **양방향 점프**: 소스의 함수/전역변수 ↔ Memory Map 행 (지금은 맵 안에서의 이동만 된다)
 
 ## 4. 병렬 실행 / Task DAG  *(0.4.41에 구현됨)*
 
