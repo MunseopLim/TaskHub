@@ -15,6 +15,7 @@ import {
     MemoryMapConfig,
     MemoryMapOpenHistory,
     goToSymbol,
+    revealSourceSymbolInMemoryMap,
     openMemoryMapPanel,
     openMemoryMapFromListing,
 } from './memoryMapViewer';
@@ -9833,6 +9834,31 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.memoryMapGoToSymbol', () => {
         goToSymbol();
+    }));
+
+    // 소스 → 맵 점프. 선택 영역이 있으면 그것을, 없으면 커서 아래 낱말을 쓴다
+    // (편집기의 Go to Definition 과 같은 규칙이라 따로 배울 것이 없다).
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.revealSymbolInMemoryMap', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showInformationMessage(t(
+                '열려 있는 편집기가 없습니다. 소스 파일에서 심볼 위에 커서를 두고 다시 실행해 주세요.',
+                'No active editor. Put the cursor on a symbol in a source file and run this again.'
+            ));
+            return;
+        }
+        const selection = editor.selection;
+        // 선택 영역이 식별자 하나일 때만 그것을 쓴다. `HAL_Init(&h);` 이나 파일
+        // 전체를 선택한 채 우클릭하는 것은 흔한 몸짓인데, 그 덩어리를 그대로
+        // 심볼로 취급하면 "찾지 못했습니다" 안내에 수 KB 문자열이 실린다.
+        const selected = selection.isEmpty ? '' : editor.document.getText(selection).trim();
+        // `getText(undefined)` 는 **문서 전체**를 준다. 낱말 범위가 없을 때
+        // 그대로 넘기면 파일 하나가 통째로 심볼 이름이 되므로 반드시 거른다.
+        const wordRange = editor.document.getWordRangeAtPosition(selection.active);
+        const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/.test(selected)
+            ? selected
+            : (wordRange ? editor.document.getText(wordRange) : '');
+        await revealSourceSymbolInMemoryMap(identifier);
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showHexViewer', async () => {

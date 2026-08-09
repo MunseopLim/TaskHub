@@ -31,6 +31,15 @@ interface PanelState {
     panel: vscode.WebviewPanel;
     /** 심볼/섹션 행 — Quick Pick 의 첫 번째 묶음. 상한에 걸려 잘려 있을 수 있다. */
     entries: PanelEntry[];
+    /**
+     * 자르지 않은 전체 행. **이름으로 찾는 경로는 반드시 이쪽을 본다.**
+     *
+     * 상한(`MEMORY_MAP_MAX_SYMBOL_PICK_ITEMS`)은 Quick Pick 이 5,000줄을 그리다
+     * 멈추는 것을 막으려는 것이지 "이 심볼이 맵에 없다"는 판정 기준이 아니다.
+     * 잘린 목록에서 찾으면 화면에 보이는 행을 두고 "없습니다" 라고 답하게 되고,
+     * 하필 잘려 나가는 쪽이 작은 심볼 — 크기를 궁금해하는 바로 그 대상이다.
+     */
+    allEntries: PanelEntry[];
     /** 자르기 전 전체 행 수. 얼마나 가려졌는지를 Quick Pick 제목에 적는다. */
     entriesTotal: number;
     /** ELF 심볼 테이블에서 온 목록인가 (아니면 섹션·오브젝트 행이다). */
@@ -49,8 +58,10 @@ export const panelRegistry = {
     size(): number { return panels.size; },
     getLastActive(): string | undefined { return lastActivePanel; },
     getHtml(filePath: string): string | undefined { return panels.get(filePath)?.panel.webview.html; },
-    /** Go to Symbol Quick Pick 이 다루는 목록. */
+    /** Go to Symbol Quick Pick 이 다루는 목록(상한 적용). */
     getEntries(filePath: string): PanelEntry[] | undefined { return panels.get(filePath)?.entries; },
+    /** 이름으로 찾는 경로가 보는 목록(상한 없음). */
+    getAllEntries(filePath: string): PanelEntry[] | undefined { return panels.get(filePath)?.allEntries; },
     clear(): void { panels.clear(); lastActivePanel = undefined; },
 };
 
@@ -369,7 +380,7 @@ function showPanel(
 
     lastActivePanel = filePath;
     const state: PanelState = {
-        panel, entries: [], entriesTotal: 0, hasSymbols: false, regions: [], messageDisposable: undefined,
+        panel, entries: [], allEntries: [], entriesTotal: 0, hasSymbols: false, regions: [], messageDisposable: undefined,
     };
     state.messageDisposable = panel.webview.onDidReceiveMessage(async (message: any) => {
         if (message.command === 'copyReport') {
@@ -433,6 +444,7 @@ function showPanel(
     );
 
     const allEntries = collectPickEntries(memoryUsage);
+    state.allEntries = allEntries;
     state.entries = limitSymbolPickEntries(allEntries);
     state.entriesTotal = allEntries.length;
     state.hasSymbols = hasSymbols === true;
@@ -579,9 +591,213 @@ export function buildRevealEntryMessage(entry: PanelEntry) {
     };
 }
 
+/** 소스의 식별자 하나에 대응하는, 열려 있는 맵의 행. */
+export interface SourceSymbolMatch {
+    /** 이 행이 속한 Memory Map 패널의 파일 경로. */
+    filePath: string;
+    entry: PanelEntry;
+    /** 이름이 그대로 맞았는가(아니면 mangled 이름 안에서 찾았는가). */
+    exact: boolean;
+}
+
+/**
+ * C++ mangled 이름 안에 이 식별자가 **한 성분으로** 들어 있는가.
+ *
+ * Itanium ABI 는 이름을 `<길이><이름>` 으로 잇는다 — `HAL_Init` 은
+ * `_ZN3HAL8HAL_InitEv` 안에 `8HAL_Init` 로 나타난다. 디맹글링은 하지 않는다.
+ * 여기서 필요한 것은 *찾기*이지 *복원*이 아니다.
+ *
+ * **성분을 왼쪽부터 따라간다.** 예전에는 `<길이><이름>` 을 문자열에서 검색하고
+ * 접두사 앞이 숫자면 버렸는데, 그 규칙이 임베디드 C++ 의 가장 흔한 이름을
+ * 통째로 떨어뜨렸다 — `CAN1::Init` 은 `_ZN4CAN14InitEv` 이고, `4Init` 앞 글자가
+ * 클래스 이름의 끝자리 `1` 이라 매번 거부됐다(`I2C1` · `USART2` · `TIM2` ·
+ * `Sha256` 전부 같다). 반대로 `Foo8HAL_Init::bar` 같은 이름은 통과시켰다.
+ * 성분 경계를 실제로 따라가면 양쪽이 함께 풀린다.
+ *
+ * Exported for testing.
+ */
+export function mangledNameContains(candidate: string, identifier: string): boolean {
+    if (!candidate.startsWith('_Z') || identifier.length === 0) { return false; }
+    for (let i = 2; i < candidate.length;) {
+        const digits = /^[1-9][0-9]*/.exec(candidate.slice(i));
+        if (!digits) {
+            // `N` `E` `K` 같은 구조 문자와 타입 인코딩. 다음 성분을 찾아 나간다.
+            i++;
+            continue;
+        }
+        const start = i + digits[0].length;
+        const length = Number(digits[0]);
+        if (length === identifier.length && candidate.substr(start, length) === identifier) { return true; }
+        // 길이가 파일 끝을 넘으면 길이 숫자가 아니었다는 뜻 — 한 칸만 전진해
+        // 다시 맞춰 본다(중첩 이름·치환·템플릿 인자에서 생긴다).
+        i = start + length <= candidate.length ? start + length : start;
+    }
+    return false;
+}
+
+/**
+ * GCC/Clang 이 최적화 중에 붙이는 clone 접미사를 뗀 이름.
+ *
+ * `-O2` 빌드에서 C 심볼은 `HAL_Init.constprop.0` · `foo.isra.0` · `bar.part.0`
+ * 처럼 나타난다. 접미사를 모르면 최적화 빌드에서 이름이 하나도 맞지 않는다.
+ * **아는 접미사만 뗀다** — 부분 일치를 하지 않는다는 규칙을 우회하지 않기 위해서다.
+ *
+ * Exported for testing.
+ */
+export function stripCloneSuffix(name: string): string {
+    const match = /^(.+?)\.(?:constprop|isra|part|cold|clone|lto_priv|localalias|llvm)\.[0-9]+$/.exec(name);
+    return match ? match[1] : name;
+}
+
+/**
+ * 소스의 식별자와 맵의 한 행이 대응하는지 본다.
+ *
+ * 이름이 그대로 맞는 경우가 우선이고(`exact`), 그다음이 mangled 이름 안에서
+ * 찾는 경우다. **부분문자열 검색은 하지 않는다** — `main` 으로 `main_init` 까지
+ * 걸리면 후보가 늘어 고르라는 목록만 길어진다.
+ *
+ * Exported for testing.
+ */
+export function matchSourceIdentifier(entry: PanelEntry, identifier: string): 'exact' | 'mangled' | undefined {
+    const names = [entry.func, entry.name].filter((n): n is string => typeof n === 'string' && n.length > 0);
+    if (names.some(n => n === identifier || stripCloneSuffix(n) === identifier)) { return 'exact'; }
+    if (names.some(n => mangledNameContains(stripCloneSuffix(n), identifier))) { return 'mangled'; }
+    return undefined;
+}
+
+/**
+ * 열려 있는 모든 맵에서 식별자에 대응하는 행을 모은다. 정확히 맞은 것이 앞,
+ * 그 안에서는 큰 것이 앞이다 — 같은 이름이 여러 맵에 있으면 보통 찾는 쪽은
+ * 자리를 많이 차지하는 실체 쪽이다.
+ *
+ * Exported for testing.
+ */
+export function collectSourceSymbolMatches(
+    panelEntries: { filePath: string; entries: PanelEntry[] }[],
+    identifier: string,
+    preferredPath?: string
+): SourceSymbolMatch[] {
+    const matches: SourceSymbolMatch[] = [];
+    for (const panel of panelEntries) {
+        for (const entry of panel.entries) {
+            const kind = matchSourceIdentifier(entry, identifier);
+            if (kind) { matches.push({ filePath: panel.filePath, entry, exact: kind === 'exact' }); }
+        }
+    }
+    // 마지막으로 보던 맵을 앞에 둔다. 부트로더와 앱을 함께 열어 둔 경우, 크기만으로
+    // 세우면 첫 항목(그대로 Enter 를 누르면 가는 곳)이 엉뚱한 빌드가 된다.
+    const rank = (m: SourceSymbolMatch) => (preferredPath && m.filePath === preferredPath ? 1 : 0);
+    return matches.sort((a, b) =>
+        (rank(b) - rank(a))
+        || (Number(b.exact) - Number(a.exact))
+        || (b.entry.size - a.entry.size));
+}
+
+/**
+ * 커서 아래 심볼을 열려 있는 Memory Map 에서 찾아 그 행으로 이동한다.
+ *
+ * 어느 바이너리인지는 **지금 열려 있는 패널**로 정한다 — 소스 ↔ 바이너리 매핑을
+ * 설정으로 받는 길도 있지만, 맵을 열어 두고 소스를 보는 것이 이 기능을 쓰는
+ * 상황 자체라 추가 설정 없이 맞는다. 후보가 여럿이면 고르게 한다.
+ */
+export async function revealSourceSymbolInMemoryMap(identifier: string): Promise<void> {
+    const trimmed = identifier.trim();
+    if (!trimmed) {
+        vscode.window.showInformationMessage(t(
+            '커서 위치에서 심볼 이름을 찾지 못했습니다.',
+            'No symbol name found at the cursor position.'
+        ));
+        return;
+    }
+
+    if (panels.size === 0) {
+        // 이 명령은 C/C++ 파일이면 항상 메뉴에 보이므로, 처음 써 보는 사람이
+        // 만나는 화면이 대개 여기다. 안내로 끝내면 막다른 길이라 여는 길을 같이 준다.
+        const openLabel = t('Memory Map 열기', 'Open Memory Map');
+        const choice = await vscode.window.showInformationMessage(
+            t(
+                '열려 있는 Memory Map 이 없습니다. 먼저 .axf/.elf 또는 Linker Listing 파일로 Memory Map 을 열어 주세요.',
+                'No Memory Map is open. Open one from an .axf/.elf or linker listing file first.'
+            ),
+            openLabel
+        );
+        if (choice === openLabel) {
+            await vscode.commands.executeCommand('taskhub.showMemoryMap');
+        }
+        return;
+    }
+
+    // **자르지 않은 목록**을 본다 — 상한은 Quick Pick 렌더용이지 존재 판정 기준이 아니다.
+    const panelEntries = Array.from(panels, ([filePath, state]) => ({ filePath, entries: state.allEntries }));
+    const matches = collectSourceSymbolMatches(panelEntries, trimmed, lastActivePanel);
+
+    if (matches.length === 0) {
+        // 열린 맵 중 심볼 단위 행을 가진 것이 하나도 없으면, 원인은 이 심볼이
+        // 아니라 맵 자체다. 그 경우 "인라인됐을 수 있다" 는 매번 틀린 설명이 된다.
+        const anySymbolic = Array.from(panels.values()).some(state => state.hasSymbols);
+        vscode.window.showInformationMessage(anySymbolic
+            ? t(
+                `'${trimmed}' — 열려 있는 Memory Map 에서 찾지 못했습니다. 최적화로 인라인됐거나, 크기가 0이거나, 다른 바이너리의 심볼일 수 있습니다.`,
+                `'${trimmed}' was not found in any open Memory Map. It may have been inlined, have zero size, or belong to a different binary.`
+            )
+            : t(
+                '열려 있는 Memory Map 에 심볼 단위 행이 없습니다 — stripped 바이너리이거나, 함수 단위 섹션 없이 만든 Listing 입니다. 심볼 테이블이 있는 .axf/.elf 를 열거나 -ffunction-sections 로 빌드해 주세요.',
+                'No open Memory Map has symbol-level rows — the binary is stripped, or the listing was built without per-function sections. Open an .axf/.elf that still has its symbol table, or build with -ffunction-sections.'
+            ));
+        return;
+    }
+
+    let picked = matches[0];
+    if (matches.length > 1) {
+        const items = matches.map(m => {
+            const parts = [formatHex(m.entry.addr), formatSize(m.entry.size), m.entry.type, m.entry.region];
+            // 같은 이름이 여러 파일에 있는 static 함수라면 주소만으로는 못 고른다.
+            for (const extra of [m.entry.section, m.entry.object]) {
+                if (extra && !parts.includes(extra)) { parts.push(extra); }
+            }
+            return {
+                label: m.entry.func || m.entry.name,
+                description: parts.join('  ·  '),
+                // 맵이 여럿 열려 있으면 어느 바이너리인지가 가장 중요한 구분이다.
+                detail: path.basename(m.filePath),
+                match: m,
+            };
+        });
+        const selected = await vscode.window.showQuickPick(items, {
+            title: t(`'${trimmed}' — Memory Map`, `'${trimmed}' — Memory Map`),
+            placeHolder: t('이동할 위치 선택', 'Pick where to go'),
+            matchOnDescription: true,
+            matchOnDetail: true,
+        });
+        if (!selected) { return; }
+        picked = selected.match;
+    }
+
+    const state = panels.get(picked.filePath);
+    if (!state) {
+        // Quick Pick 을 띄워 둔 사이에 그 패널이 닫힌 경우.
+        vscode.window.showInformationMessage(t(
+            '선택한 Memory Map 패널이 닫혔습니다. 다시 열고 시도해 주세요.',
+            'That Memory Map panel was closed. Reopen it and try again.'
+        ));
+        return;
+    }
+    lastActivePanel = picked.filePath;
+    state.panel.reveal();
+    state.panel.webview.postMessage(buildRevealEntryMessage(picked.entry));
+}
+
 export async function goToSymbol() {
     const active = lastActivePanel ? panels.get(lastActivePanel) : undefined;
-    if (!active) { return; }
+    if (!active) {
+        // 조용히 끝내면 명령이 죽은 것으로 읽힌다 — 형제 명령(소스 → 맵)과 같은
+        // 상황에서 같은 안내를 한다.
+        vscode.window.showInformationMessage(t(
+            '열려 있는 Memory Map 이 없습니다. 먼저 .axf/.elf 또는 Linker Listing 파일로 Memory Map 을 열어 주세요.',
+            'No Memory Map is open. Open one from an .axf/.elf or linker listing file first.'
+        ));
+        return;
+    }
     if (active.entries.length === 0 && active.regions.length === 0) {
         // 이 상태는 "영역이 정의되지 않음"이다 — 패널에는 All Sections 표가 그대로
         // 떠 있으므로, "아무것도 없다"고만 하면 화면과 어긋나 명령이 고장 난 것으로

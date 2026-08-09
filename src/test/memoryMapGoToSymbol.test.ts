@@ -5,6 +5,11 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import {
     buildGoToSymbolItems,
+    collectSourceSymbolMatches,
+    mangledNameContains,
+    matchSourceIdentifier,
+    revealSourceSymbolInMemoryMap,
+    stripCloneSuffix,
     buildGoToSymbolTitle,
     buildRevealEntryMessage,
     collectPickEntries,
@@ -15,7 +20,7 @@ import {
     PanelEntry,
 } from '../memoryMapViewer';
 import { MemoryUsage, MemoryUsageEntry } from '../elfParser';
-import { buildElf32WithSymbols } from './fixtures/elfFixtures';
+import { buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
 
 /**
  * *Go to Symbol* (0.7.13).
@@ -258,6 +263,134 @@ suite('Memory Map — Go to Symbol', () => {
             const withSymbols = buildGoToSymbolItems([entry()], [], true)[0].label;
             const withoutSymbols = buildGoToSymbolItems([entry()], [], false)[0].label;
             assert.notStrictEqual(withSymbols, withoutSymbols, '심볼 유무와 관계없이 같은 라벨을 쓰고 있다');
+        });
+    });
+
+    /**
+     * 소스 → 맵 점프(3a)의 판정부.
+     *
+     * 핵심은 **부분문자열 검색을 하지 않는다**는 것이다. `main` 으로 `main_init`
+     * 까지 걸리면 고르라는 목록만 길어지고, 사용자는 자기가 찾던 것이 목록에
+     * 없다고 읽는다. C++ mangled 이름만 예외적으로 길이 접두사를 근거로 뚫는다.
+     */
+    suite('소스 식별자 → 맵 행 매칭', () => {
+        test('이름이 그대로 맞으면 exact', () => {
+            assert.strictEqual(matchSourceIdentifier(entry({ name: 'main' }), 'main'), 'exact');
+            assert.strictEqual(matchSourceIdentifier(entry({ name: 'main.o', func: 'HAL_Init' }), 'HAL_Init'), 'exact');
+        });
+
+        test('부분문자열로는 걸리지 않는다', () => {
+            assert.strictEqual(matchSourceIdentifier(entry({ name: 'main_init' }), 'main'), undefined);
+            assert.strictEqual(matchSourceIdentifier(entry({ name: 'g_config_backup' }), 'g_config'), undefined);
+        });
+
+        test('대소문자는 구분한다 — C 식별자 규칙 그대로', () => {
+            assert.strictEqual(matchSourceIdentifier(entry({ name: 'Main' }), 'main'), undefined);
+        });
+
+        test('C++ mangled 이름 안에서 찾는다', () => {
+            // 맵에는 _ZN3HAL8HAL_InitEv 로 들어 있고 소스에는 HAL_Init 로 쓴다.
+            assert.strictEqual(
+                matchSourceIdentifier(entry({ name: '_ZN3HAL8HAL_InitEv' }), 'HAL_Init'),
+                'mangled'
+            );
+            assert.strictEqual(matchSourceIdentifier(entry({ func: '_Z4mainv', name: 'x.o' }), 'main'), 'mangled');
+        });
+
+        test('클래스 이름이 숫자로 끝나도 찾는다 — 임베디드 C++ 의 기본 작명', () => {
+            // CAN1 · I2C1 · USART2 · TIM2 · Sha256 … 성분 경계를 따라가지 않고
+            // "접두사 앞 글자가 숫자면 버린다"로 판정하면 이 이름들이 전부 탈락한다.
+            assert.strictEqual(mangledNameContains('_ZN4CAN14InitEv', 'Init'), true, 'CAN1::Init()');
+            assert.strictEqual(mangledNameContains('_ZN6Sha2566updateEv', 'update'), true, 'Sha256::update()');
+            assert.strictEqual(mangledNameContains('_ZN6USART28sendByteEh', 'sendByte'), true, 'USART2::sendByte()');
+        });
+
+        test('이름 안에 우연히 들어 있는 것은 성분이 아니다', () => {
+            // Foo8HAL_Init::bar() — `8HAL_Init` 이 문자열로는 들어 있지만
+            // 성분 경계로 보면 클래스 이름 `Foo8HAL_Init` 의 일부일 뿐이다.
+            assert.strictEqual(mangledNameContains('_ZN12Foo8HAL_Init3barEv', 'HAL_Init'), false);
+        });
+
+        test('중첩 이름과 템플릿 인자 안에서도 찾는다', () => {
+            assert.strictEqual(mangledNameContains('_ZNSt6vectorIiSaIiEE9push_backERKi', 'push_back'), true);
+            assert.strictEqual(mangledNameContains('_ZZN3Foo3barEvEN1B4initEv', 'init'), true);
+        });
+
+        test('최적화 clone 접미사를 뗀다', () => {
+            // -O2 빌드에서 C 심볼은 이렇게 나타난다.
+            assert.strictEqual(stripCloneSuffix('HAL_Init.constprop.0'), 'HAL_Init');
+            assert.strictEqual(stripCloneSuffix('foo.isra.0'), 'foo');
+            assert.strictEqual(matchSourceIdentifier(entry({ name: 'HAL_Init.constprop.0' }), 'HAL_Init'), 'exact');
+            // 아는 접미사만 뗀다 — 부분 일치 금지 규칙을 우회하지 않는다.
+            assert.strictEqual(stripCloneSuffix('my.custom.name'), 'my.custom.name');
+            assert.strictEqual(stripCloneSuffix('.text [other]'), '.text [other]');
+        });
+
+        test('mangled 판정은 길이 접두사를 요구한다', () => {
+            // 길이 없이 이름만 들어 있는 경우는 다른 토큰의 일부다.
+            assert.strictEqual(mangledNameContains('_ZN3HAL12HAL_InitFastEv', 'HAL_Init'), false);
+            assert.strictEqual(mangledNameContains('_ZN3HAL8HAL_InitEv', 'HAL_Init'), true);
+            // mangled 가 아닌 이름에는 적용하지 않는다.
+            assert.strictEqual(mangledNameContains('my_8HAL_Init_helper', 'HAL_Init'), false);
+        });
+
+        test('길이 접두사 숫자가 잘려 우연히 맞는 것을 막는다', () => {
+            // `_ZN...112abc...` 에서 뒤 두 자리만 떼어 `12abc` 로 읽으면 안 된다.
+            assert.strictEqual(mangledNameContains('_ZN5outer112abcdefghijklEv', 'abcdefghijkl'), false);
+        });
+    });
+
+    suite('collectSourceSymbolMatches', () => {
+        const panel = (filePath: string, entries: PanelEntry[]) => ({ filePath, entries });
+
+        test('여러 맵에 걸쳐 모으고 정확히 맞은 것을 앞에 둔다', () => {
+            const matches = collectSourceSymbolMatches([
+                panel('/a.axf', [entry({ name: '_ZN3HAL8HAL_InitEv', size: 900 })]),
+                panel('/b.axf', [entry({ name: 'HAL_Init', size: 10 })]),
+            ], 'HAL_Init');
+            assert.deepStrictEqual(matches.map(m => m.filePath), ['/b.axf', '/a.axf']);
+            assert.deepStrictEqual(matches.map(m => m.exact), [true, false]);
+        });
+
+        test('같은 등급이면 큰 것이 앞이다', () => {
+            const matches = collectSourceSymbolMatches([
+                panel('/a.axf', [entry({ name: 'main', size: 16 }), entry({ name: 'main', size: 256, addr: 0x900 })]),
+            ], 'main');
+            assert.deepStrictEqual(matches.map(m => m.entry.size), [256, 16]);
+        });
+
+        test('마지막으로 보던 맵이 맨 앞에 온다', () => {
+            // 부트로더와 앱을 함께 열어 둔 경우, 크기만으로 세우면 그대로 Enter 를
+            // 눌렀을 때 엉뚱한 빌드로 간다.
+            const matches = collectSourceSymbolMatches([
+                panel('/big.axf', [entry({ name: 'main', size: 9999 })]),
+                panel('/current.axf', [entry({ name: 'main', size: 8 })]),
+            ], 'main', '/current.axf');
+            assert.strictEqual(matches[0].filePath, '/current.axf');
+        });
+
+        test('mangled 끼리도 큰 것이 앞이다', () => {
+            const matches = collectSourceSymbolMatches([
+                panel('/a.axf', [
+                    entry({ name: '_ZN1A4initEv', size: 4 }),
+                    entry({ name: '_ZN1B4initEv', size: 400, addr: 0x900 }),
+                ]),
+            ], 'init');
+            assert.deepStrictEqual(matches.map(m => m.entry.size), [400, 4]);
+            assert.deepStrictEqual(matches.map(m => m.exact), [false, false]);
+        });
+
+        test('맞는 것이 없으면 빈 배열', () => {
+            assert.deepStrictEqual(collectSourceSymbolMatches([panel('/a.axf', [entry({ name: 'x' })])], 'main'), []);
+        });
+
+        test('행이 없는 패널이 섞여 있어도 안전하다', () => {
+            const matches = collectSourceSymbolMatches([
+                panel('/empty.axf', []),
+                panel('/a.axf', [entry({ name: 'main' })]),
+            ], 'main');
+            assert.strictEqual(matches.length, 1);
+            assert.strictEqual(matches[0].filePath, '/a.axf');
         });
     });
 
@@ -544,6 +677,149 @@ suite('Memory Map — Go to Symbol', () => {
             const r = run({ segments, virtual: true }, undefined, 'NOPE', 'main', 0x200);
             assert.strictEqual(r.revealed, undefined);
             assert.strictEqual(r.fellBack, undefined, '영역조차 없는데 카드로 스크롤을 시도했다');
+        });
+    });
+
+    /**
+     * `revealSourceSymbolInMemoryMap` 을 실제 패널로 돌린다.
+     *
+     * 이 명령의 실패 경로는 **안내 문구가 곧 기능**이다 — 못 찾았을 때 무엇을
+     * 해야 하는지가 틀리면, 사용자는 인라인되지도 않은 함수의 디스어셈블리를
+     * 읽으러 간다. 그래서 문구가 갈리는 조건마다 검사를 둔다.
+     */
+    suite('revealSourceSymbolInMemoryMap', () => {
+        const infos: string[] = [];
+        const picks: any[][] = [];
+        let originalInfo: any;
+        let originalPick: any;
+        let pickAnswer: (items: any[]) => any = () => undefined;
+        let filePath = '';
+        const opened: string[] = [];
+
+        setup(() => {
+            infos.length = 0;
+            picks.length = 0;
+            pickAnswer = () => undefined;
+            originalInfo = vscode.window.showInformationMessage;
+            originalPick = vscode.window.showQuickPick;
+            (vscode.window as any).showInformationMessage = async (message: string) => {
+                infos.push(message);
+                return undefined;
+            };
+            (vscode.window as any).showQuickPick = async (items: any[]) => {
+                const resolved = await Promise.resolve(items);
+                picks.push(resolved);
+                return pickAnswer(resolved);
+            };
+        });
+
+        teardown(() => {
+            (vscode.window as any).showInformationMessage = originalInfo;
+            (vscode.window as any).showQuickPick = originalPick;
+            panelRegistry.clear();
+            for (const f of opened) { try { fs.unlinkSync(f); } catch { /* best effort */ } }
+            opened.length = 0;
+            filePath = '';
+        });
+
+        function openMap(name: string, buffer: Buffer, regions: { name: string; origin: number; size: number }[]) {
+            filePath = path.join(os.tmpdir(), `taskhub-mm-src-${process.pid}-${name}`);
+            fs.writeFileSync(filePath, buffer);
+            opened.push(filePath);
+            const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+            assert.ok(openMemoryMapPanel(ctx, filePath, { regions }), '패널이 열려야 한다');
+            return filePath;
+        }
+
+        const flashAndRam = [
+            { name: 'FLASH', origin: 0x08000000, size: 512 * 1024 },
+            { name: 'RAM', origin: 0x20000000, size: 128 * 1024 },
+        ];
+
+        test('열린 맵이 없으면 여는 길을 함께 안내한다', async () => {
+            panelRegistry.clear();
+            await revealSourceSymbolInMemoryMap('main');
+            assert.strictEqual(infos.length, 1);
+            assert.ok(/Memory Map/.test(infos[0]), infos[0]);
+            assert.strictEqual(picks.length, 0, '맵이 없는데 목록을 띄웠다');
+        });
+
+        test('빈 식별자는 조용히 끝내지 않는다', async () => {
+            await revealSourceSymbolInMemoryMap('   ');
+            assert.strictEqual(infos.length, 1, '아무 말 없이 끝나면 명령이 죽은 것으로 읽힌다');
+        });
+
+        test('심볼 하나면 목록 없이 바로 이동한다', async () => {
+            openMap('single.axf', buildElf32WithSymbols(), flashAndRam);
+            await revealSourceSymbolInMemoryMap('HAL_GPIO_Init');
+            assert.deepStrictEqual(infos, [], `안내가 떴다: ${infos.join(' | ')}`);
+            assert.strictEqual(picks.length, 0, '후보가 하나인데 고르라고 했다');
+            assert.strictEqual(panelRegistry.getLastActive(), filePath, '이동한 패널이 활성으로 바뀌지 않았다');
+        });
+
+        test('없는 이름이면 이유를 함께 알린다', async () => {
+            openMap('missing.axf', buildElf32WithSymbols(), flashAndRam);
+            await revealSourceSymbolInMemoryMap('no_such_symbol');
+            assert.strictEqual(infos.length, 1);
+            assert.ok(infos[0].includes('no_such_symbol'), infos[0]);
+            // 심볼 단위 행이 있는 맵이므로 인라인/크기0/다른 바이너리 쪽 문구여야 한다.
+            assert.ok(/인라인|inlined/.test(infos[0]), `원인 설명이 없다: ${infos[0]}`);
+        });
+
+        test('심볼 없는 맵에서는 맵 자체를 지목한다', async () => {
+            // stripped 바이너리에서는 어떤 이름도 맞지 않는다 — 매번 "인라인됐을
+            // 수 있다"고 답하면 사용자는 자기 코드를 의심하게 된다.
+            openMap('stripped.axf', buildMinimalElf32(), [{ name: 'FLASH', origin: 0x08000000, size: 512 * 1024 }]);
+            await revealSourceSymbolInMemoryMap('main');
+            assert.strictEqual(infos.length, 1);
+            assert.ok(/stripped|심볼 단위/.test(infos[0]), `맵 자체를 지목하지 않는다: ${infos[0]}`);
+            assert.ok(!/인라인|inlined/.test(infos[0]), `틀린 원인을 댄다: ${infos[0]}`);
+        });
+
+        test('맵이 둘이면 파일명과 함께 고르게 한다', async () => {
+            // 부트로더와 앱을 함께 열어 둔 상황. 같은 이름이 양쪽에 있다.
+            const first = openMap('bootloader.axf', buildElf32WithSymbols(), flashAndRam);
+            const second = openMap('app.axf', buildElf32WithSymbols(), flashAndRam);
+            pickAnswer = items => items[0];
+            await revealSourceSymbolInMemoryMap('main');
+
+            assert.strictEqual(picks.length, 1, '후보가 둘인데 목록을 띄우지 않았다');
+            const items = picks[0];
+            assert.strictEqual(items.length, 2);
+            assert.deepStrictEqual(
+                items.map((i: any) => i.detail).sort(),
+                [path.basename(first), path.basename(second)].sort(),
+                '어느 바이너리인지 구분할 방법이 없다'
+            );
+            for (const item of items) {
+                assert.strictEqual(item.label, 'main');
+                assert.ok(/0x/.test(item.description), `주소가 없다: ${item.description}`);
+            }
+            // 마지막으로 보던 맵이 맨 앞이어야 한다 — 그대로 Enter 를 누르는 흐름.
+            assert.strictEqual(items[0].detail, path.basename(second));
+            assert.strictEqual(panelRegistry.getLastActive(), second);
+        });
+
+        test('목록에서 취소하면 아무 데도 가지 않는다', async () => {
+            openMap('cancel.axf', buildElf32WithSymbols(), flashAndRam);
+            const before = panelRegistry.getLastActive();
+            pickAnswer = () => undefined;
+            await revealSourceSymbolInMemoryMap('no_such_symbol');
+            assert.strictEqual(panelRegistry.getLastActive(), before);
+        });
+
+        test('상한에 잘린 목록이 아니라 전체에서 찾는다', () => {
+            // Quick Pick 상한(5,000)은 렌더용이지 존재 판정 기준이 아니다.
+            // 잘리는 쪽이 하필 작은 심볼 — 크기를 궁금해하는 바로 그 대상이다.
+            openMap('capped.axf', buildElf32WithSymbols(), flashAndRam);
+            const searchable = panelRegistry.getAllEntries(filePath) ?? [];
+            const shown = panelRegistry.getEntries(filePath) ?? [];
+            assert.ok(searchable.length >= shown.length, '탐색 목록이 표시 목록보다 작다');
+            const smallest = [...searchable].sort((a, b) => a.size - b.size)[0];
+            assert.ok(
+                collectSourceSymbolMatches([{ filePath, entries: searchable }], smallest.name).length > 0,
+                '가장 작은 심볼을 전체 목록에서 찾지 못했다'
+            );
         });
     });
 
