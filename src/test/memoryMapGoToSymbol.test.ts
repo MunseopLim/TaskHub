@@ -5,7 +5,9 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import {
     buildGoToSymbolItems,
+    openMemoryMapFromListing,
     collectSourceSymbolMatches,
+    mangledEntityNames,
     mangledNameContains,
     matchSourceIdentifier,
     revealSourceSymbolInMemoryMap,
@@ -303,6 +305,83 @@ suite('Memory Map — Go to Symbol', () => {
             assert.strictEqual(mangledNameContains('_ZN4CAN14InitEv', 'Init'), true, 'CAN1::Init()');
             assert.strictEqual(mangledNameContains('_ZN6Sha2566updateEv', 'update'), true, 'Sha256::update()');
             assert.strictEqual(mangledNameContains('_ZN6USART28sendByteEh', 'sendByte'), true, 'USART2::sendByte()');
+        });
+
+        test('매개변수 타입은 함수 이름이 아니다', () => {
+            // `_Z3foo6Widget` = foo(Widget). 인코딩 전체에서 `<길이><이름>` 을
+            // 찾으면 인자 타입까지 걸려, 소스에서 타입 이름에 커서를 두었을 때
+            // 그 타입을 받는 아무 함수로나 끌려간다 — 후보가 하나면 확인도 없이.
+            assert.strictEqual(mangledNameContains('_Z3foo6Widget', 'Widget'), false);
+            assert.strictEqual(mangledNameContains('_Z3foo6Widget', 'foo'), true, '함수 이름은 계속 찾아야 한다');
+            assert.strictEqual(mangledNameContains('_ZN6Widget3runE6Status', 'Status'), false);
+            assert.strictEqual(mangledNameContains('_ZN6Widget3runE6Status', 'run'), true);
+            assert.strictEqual(mangledNameContains('_ZN6Widget3runE6Status', 'Widget'), true, '바깥 클래스는 이름부다');
+        });
+
+        test('템플릿 인자도 타입이므로 이름이 아니다', () => {
+            // void foo<Widget>() — Widget 은 인자다.
+            assert.strictEqual(mangledNameContains('_Z3fooI6WidgetEvv', 'Widget'), false);
+            assert.strictEqual(mangledNameContains('_Z3fooI6WidgetEvv', 'foo'), true);
+        });
+
+        test('이름부만 뽑는다', () => {
+            assert.deepStrictEqual(mangledEntityNames('_Z3foo6Widget'), ['foo']);
+            assert.deepStrictEqual(mangledEntityNames('_ZN6Widget3runE6Status'), ['Widget', 'run']);
+            assert.deepStrictEqual(mangledEntityNames('_ZN4CAN14InitEv'), ['CAN1', 'Init']);
+            // static 함수의 내부 링키지 표시.
+            assert.deepStrictEqual(mangledEntityNames('_ZL3foov'), ['foo']);
+            assert.deepStrictEqual(mangledEntityNames('not_mangled'), []);
+        });
+
+        test('St 축약으로 시작하는 이름 (std::terminate)', () => {
+            // unscoped 이름이 항상 숫자로 시작한다고 보면 `St` 를 놓쳐 아무것도 못 읽는다.
+            assert.deepStrictEqual(mangledEntityNames('_ZSt9terminatev'), ['terminate']);
+            assert.strictEqual(mangledNameContains('_ZSt9terminatev', 'terminate'), true);
+        });
+
+        test('정수 템플릿 인자가 뒤 이름을 삼키지 않는다 (Foo<42>::bar)', () => {
+            // `ILi42EE` 의 리터럴을 닫는 E 를 템플릿 인자의 끝으로 오인하면
+            // 그 뒤의 진짜 이름 `bar` 를 통째로 잃는다.
+            assert.deepStrictEqual(mangledEntityNames('_ZN3FooILi42EE3barEv'), ['Foo', 'bar']);
+            assert.strictEqual(mangledNameContains('_ZN3FooILi42EE3barEv', 'bar'), true);
+        });
+
+        test('생성자·소멸자 토큰이 가짜 이름을 만들지 않는다', () => {
+            // `C1` 의 `1` 을 길이로 읽으면 `E` 라는 식별자가 생겨, 소스의 `E` 에서
+            // 엉뚱한 생성자로 이동하게 된다.
+            assert.deepStrictEqual(mangledEntityNames('_ZN6WidgetC1Ev'), ['Widget']);
+            assert.deepStrictEqual(mangledEntityNames('_ZN6WidgetD1Ev'), ['Widget']);
+            assert.strictEqual(mangledNameContains('_ZN6WidgetC1Ev', 'E'), false);
+            assert.strictEqual(mangledNameContains('_ZN6WidgetC1Ev', 'Widget'), true);
+        });
+
+        test('상속 생성자의 기반 클래스는 이름이 아니다', () => {
+            // `_ZN1DCI11BEv` = D::D() (B 로부터 상속). `CI1` 뒤에 붙는 `1B` 는
+            // 기반 클래스 **타입**이라 건너뛰기만 하면 이름으로 섞여 든다.
+            assert.deepStrictEqual(mangledEntityNames('_ZN1DCI11BEv'), ['D']);
+            assert.strictEqual(mangledNameContains('_ZN1DCI11BEv', 'B'), false);
+        });
+
+        test('ABI tag 는 이름이 아니다', () => {
+            // `_ZN3Foo3barB5cxx11Ev` = Foo::bar[abi:cxx11](). `B<source-name>` 은
+            // 태그이지 엔티티 이름이 아닌데, 모르는 토큰에서 한 칸씩 밀며 재동기화하면
+            // `cxx11` 이 이름으로 잡혀 소스의 그 식별자에서 이 함수로 끌려간다.
+            assert.deepStrictEqual(mangledEntityNames('_ZN3Foo3barB5cxx11Ev'), ['Foo', 'bar']);
+            assert.strictEqual(mangledNameContains('_ZN3Foo3barB5cxx11Ev', 'cxx11'), false);
+            assert.strictEqual(mangledNameContains('_ZN3Foo3barB5cxx11Ev', 'bar'), true);
+        });
+
+        test('모르는 문법은 가짜 이름을 만들지 않고 미탐으로 남긴다', () => {
+            // 벤더 확장 등 이 파서가 모르는 토큰. 재동기화하면 없는 이름이 생긴다.
+            assert.deepStrictEqual(mangledEntityNames('_ZN3FooU13__vendor_ext3barEv'), ['Foo']);
+        });
+
+        test('표현식·인자 팩 템플릿 뒤의 메서드 이름을 잃지 않는다', () => {
+            // X…E(표현식)와 J…E(인자 팩)도 E 로 닫힌다. 세지 않으면 그 안의 E 를
+            // 바깥 템플릿의 끝으로 오인해 뒤따르는 메서드 이름을 통째로 잃는다.
+            assert.deepStrictEqual(mangledEntityNames('_ZN3FooIXplLi1ELi2EEE3barEv'), ['Foo', 'bar']);
+            assert.deepStrictEqual(mangledEntityNames('_ZN3FooIJiiEE3barEv'), ['Foo', 'bar']);
+            assert.strictEqual(mangledNameContains('_ZN3FooIJiiEE3barEv', 'bar'), true);
         });
 
         test('이름 안에 우연히 들어 있는 것은 성분이 아니다', () => {
@@ -786,18 +865,58 @@ suite('Memory Map — Go to Symbol', () => {
             assert.strictEqual(picks.length, 1, '후보가 둘인데 목록을 띄우지 않았다');
             const items = picks[0];
             assert.strictEqual(items.length, 2);
-            assert.deepStrictEqual(
-                items.map((i: any) => i.detail).sort(),
-                [path.basename(first), path.basename(second)].sort(),
-                '어느 바이너리인지 구분할 방법이 없다'
+            const details = items.map((i: any) => i.detail);
+            assert.strictEqual(new Set(details).size, 2, '어느 바이너리인지 구분할 방법이 없다');
+            assert.ok(
+                details.some((d: string) => d.endsWith(path.basename(first)))
+                && details.some((d: string) => d.endsWith(path.basename(second))),
+                `경로 표시가 파일을 가리키지 않는다: ${details.join(' | ')}`
             );
             for (const item of items) {
                 assert.strictEqual(item.label, 'main');
                 assert.ok(/0x/.test(item.description), `주소가 없다: ${item.description}`);
             }
             // 마지막으로 보던 맵이 맨 앞이어야 한다 — 그대로 Enter 를 누르는 흐름.
-            assert.strictEqual(items[0].detail, path.basename(second));
+            assert.ok(items[0].detail.endsWith(path.basename(second)), items[0].detail);
             assert.strictEqual(panelRegistry.getLastActive(), second);
+        });
+
+        test('파일명이 같은 두 빌드를 구분한다', async () => {
+            // build/debug/app.elf 와 build/release/app.elf — 흔한 배치인데
+            // 파일명만 보이면 주소·크기까지 닮아 같은 줄이 된다.
+            const dir = path.join(os.tmpdir(), `taskhub-mm-variants-${process.pid}`);
+            const debugPath = path.join(dir, 'debug', 'app.axf');
+            const releasePath = path.join(dir, 'release', 'app.axf');
+            const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+            for (const target of [debugPath, releasePath]) {
+                fs.mkdirSync(path.dirname(target), { recursive: true });
+                fs.writeFileSync(target, buildElf32WithSymbols());
+                opened.push(target);
+                assert.ok(openMemoryMapPanel(ctx, target, { regions: flashAndRam }));
+            }
+            pickAnswer = items => items[0];
+            await revealSourceSymbolInMemoryMap('main');
+
+            assert.strictEqual(picks.length, 1);
+            const details = picks[0].map((i: any) => i.detail);
+            assert.strictEqual(new Set(details).size, 2, `같은 파일명이라 구분되지 않는다: ${details.join(' | ')}`);
+        });
+
+        test('함수 행이 있는 Listing 을 "심볼 없음"으로 안내하지 않는다', async () => {
+            // ARM Listing 은 함수 이름을 func 로 보존한다. 호출자가 넘기는
+            // hasSymbols 플래그만 믿으면(Listing 경로는 넘기지 않는다) 함수 행이
+            // 가득한 맵을 두고 "심볼 단위 행이 없습니다" 라고 답하게 된다.
+            const listingPath = path.resolve(__dirname, '..', '..', 'examples', 'sample_armlink.txt');
+            const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+            assert.ok(openMemoryMapFromListing(ctx, listingPath), 'Listing 이 열려야 한다');
+
+            const entries = panelRegistry.getAllEntries(listingPath) ?? [];
+            assert.ok(entries.some(e => e.func), '이 픽스처에 func 행이 없으면 검사 전제가 깨진다');
+
+            await revealSourceSymbolInMemoryMap('no_such_symbol_at_all');
+            assert.strictEqual(infos.length, 1);
+            assert.ok(!/stripped|심볼 단위/.test(infos[0]), `함수 행이 있는데 맵을 지목했다: ${infos[0]}`);
+            assert.ok(/인라인|inlined/.test(infos[0]), infos[0]);
         });
 
         test('목록에서 취소하면 아무 데도 가지 않는다', async () => {

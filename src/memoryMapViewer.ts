@@ -447,7 +447,11 @@ function showPanel(
     state.allEntries = allEntries;
     state.entries = limitSymbolPickEntries(allEntries);
     state.entriesTotal = allEntries.length;
-    state.hasSymbols = hasSymbols === true;
+    // ELF 심볼 테이블만 심볼 단위 행을 만드는 것이 아니다 — ARM Listing 은 함수
+    // 이름을 `func` 로 보존하므로 이름으로 찾을 수 있다. 호출자가 넘긴 플래그만
+    // 믿으면(Listing 경로는 넘기지 않는다) 함수 행이 가득한 맵을 두고
+    // "심볼 단위 행이 없습니다" 라고 안내하게 된다.
+    state.hasSymbols = hasSymbols === true || allEntries.some(e => Boolean(e.func));
     state.regions = memoryUsage.map(u => {
         const origin = regions.find(r => r.name === u.region)?.origin ?? 0;
         return { name: u.region, addr: origin, info: `${formatSize(u.used)} / ${formatSize(u.total)}` };
@@ -616,23 +620,166 @@ export interface SourceSymbolMatch {
  *
  * Exported for testing.
  */
-export function mangledNameContains(candidate: string, identifier: string): boolean {
-    if (!candidate.startsWith('_Z') || identifier.length === 0) { return false; }
-    for (let i = 2; i < candidate.length;) {
-        const digits = /^[1-9][0-9]*/.exec(candidate.slice(i));
-        if (!digits) {
-            // `N` `E` `K` 같은 구조 문자와 타입 인코딩. 다음 성분을 찾아 나간다.
-            i++;
-            continue;
+/** `<길이><이름>` 하나를 읽는다. 길이가 남은 문자열을 넘으면 길이 숫자가 아니었던 것이다. */
+function readSourceName(mangled: string, at: number): { name: string; next: number } | undefined {
+    const digits = /^[1-9][0-9]*/.exec(mangled.slice(at));
+    if (!digits) { return undefined; }
+    const start = at + digits[0].length;
+    const end = start + Number(digits[0]);
+    if (end > mangled.length) { return undefined; }
+    return { name: mangled.slice(start, end), next: end };
+}
+
+/**
+ * `S…` 치환 토큰 하나를 건너뛴다 — `St`(=`::std::`) 같은 약어와 `S_` / `S3_`
+ * 형태의 역참조. 한 글자씩 밀면 `S9_` 의 `9` 를 이름 길이로 읽어 버린다.
+ */
+function skipSubstitution(mangled: string, at: number): number {
+    if (mangled[at] !== 'S') { return at; }
+    if (/^S[abdiost]/.test(mangled.slice(at))) { return at + 2; }
+    const backref = /^S[0-9A-Z]*_/.exec(mangled.slice(at));
+    return at + (backref ? backref[0].length : 1);
+}
+
+/**
+ * `L…E` 리터럴을 통째로 건너뛴다.
+ *
+ * 템플릿 인자의 정수 리터럴(`Foo<42>` = `ILi42EE`)이 여기 해당한다. 안쪽을
+ * 성분으로 읽으려 들면 `42` 를 이름 길이로 보거나 리터럴을 닫는 `E` 를 템플릿
+ * 인자의 끝으로 오인해, 그 뒤의 진짜 이름(`bar`)을 통째로 잃는다.
+ */
+function skipLiteral(mangled: string, at: number): number {
+    const end = mangled.indexOf('E', at);
+    return end < 0 ? mangled.length : end + 1;
+}
+
+/** 생성자 / 소멸자 토큰(`C1` `C2` `CI1` `D0` `D1` …). 뒤 숫자는 이름 길이가 아니다. */
+function matchCtorDtor(mangled: string, at: number): number {
+    const token = /^(?:C[I]?[0-9]|D[0-9])/.exec(mangled.slice(at));
+    return token ? token[0].length : 0;
+}
+
+/**
+ * `N…E` / `I…E` / `Z…E` 를 짝이 맞는 `E` 까지 건너뛰고 그 다음 위치를 준다.
+ * 이름 payload 는 길이만큼 통째로 넘겨, 이름 안의 `E` 를 구분자로 오인하지 않는다.
+ */
+function skipToMatchingE(mangled: string, from: number): number {
+    let depth = 0;
+    for (let i = from; i < mangled.length;) {
+        if (mangled[i] === 'S') {
+            const next = skipSubstitution(mangled, i);
+            if (next > i) { i = next; continue; }
         }
-        const start = i + digits[0].length;
-        const length = Number(digits[0]);
-        if (length === identifier.length && candidate.substr(start, length) === identifier) { return true; }
-        // 길이가 파일 끝을 넘으면 길이 숫자가 아니었다는 뜻 — 한 칸만 전진해
-        // 다시 맞춰 본다(중첩 이름·치환·템플릿 인자에서 생긴다).
-        i = start + length <= candidate.length ? start + length : start;
+        if (mangled[i] === 'L') { i = skipLiteral(mangled, i); continue; }
+        const source = readSourceName(mangled, i);
+        if (source) { i = source.next; continue; }
+        const ch = mangled[i];
+        // `E` 로 닫히는 구조는 넷이다 — 중첩 이름(N) · 템플릿 인자(I) · local
+        // name(Z) 에 더해 표현식(X, `Foo<1 + 2>`)과 인자 팩(J, `Foo<int, int>`).
+        // 뒤 둘을 세지 않으면 그 안의 `E` 를 바깥 템플릿의 끝으로 오인해, 템플릿
+        // 뒤에 오는 진짜 메서드 이름을 통째로 잃는다.
+        if (ch === 'N' || ch === 'I' || ch === 'Z' || ch === 'X' || ch === 'J') { depth++; i++; continue; }
+        if (ch === 'E') {
+            if (depth === 0) { return i + 1; }
+            depth--; i++; continue;
+        }
+        i++;
     }
-    return false;
+    return -1;
+}
+
+/**
+ * Itanium mangled 이름에서 **엔티티 이름 성분만** 뽑는다 (네임스페이스·클래스·함수).
+ *
+ * 매개변수 타입은 뽑지 않는다. `_Z3foo6Widget` 은 `foo(Widget)` 이고 `Widget` 은
+ * 인자 타입일 뿐인데, 인코딩 전체에서 `<길이><이름>` 을 찾으면 그것까지 걸린다 —
+ * 소스에서 타입 이름에 커서를 두면 그 타입을 받는 아무 함수로나 끌려간다.
+ * 이름부(nested 는 `N…E`, 그 밖은 source-name 하나)에서 멈추면 그 뒤의
+ * bare-function-type 은 애초에 보지 않는다. 템플릿 인자(`I…E`)도 타입이므로 건너뛴다.
+ *
+ * 디맹글링이 아니다 — 찾기에 필요한 만큼만 읽는다.
+ *
+ * Exported for testing.
+ */
+export function mangledEntityNames(candidate: string): string[] {
+    if (!candidate.startsWith('_Z')) { return []; }
+    let i = 2;
+    if (candidate[i] === 'L') { i++; }   // 내부 링키지(static) 표시
+    if (candidate[i] === 'Z') {
+        // local name: `Z <바깥 함수 인코딩> E <이름>`. 바깥 인코딩에는 타입이
+        // 섞여 있으므로 통째로 건너뛰고 그 뒤의 이름만 읽는다.
+        const after = skipToMatchingE(candidate, i + 1);
+        if (after < 0) { return []; }
+        i = after;
+        if (candidate[i] === 'L') { i++; }
+    }
+
+    const names: string[] = [];
+    if (candidate[i] === 'N') {
+        i++;
+        while (i < candidate.length && /[rVKRO]/.test(candidate[i])) { i++; }   // CV/ref 한정자
+        while (i < candidate.length && candidate[i] !== 'E') {
+            const source = readSourceName(candidate, i);
+            if (source) { names.push(source.name); i = source.next; continue; }
+            if (candidate[i] === 'I') {
+                const after = skipToMatchingE(candidate, i + 1);
+                if (after < 0) { break; }
+                i = after;
+                continue;
+            }
+            if (candidate[i] === 'S') {
+                const next = skipSubstitution(candidate, i);
+                if (next > i) { i = next; continue; }
+            }
+            if (candidate[i] === 'L') { i = skipLiteral(candidate, i); continue; }
+            // `Widget::Widget()` 은 `_ZN6WidgetC1Ev` 다. `C1` 을 그냥 두면 `1` 을
+            // 길이로 읽어 `E` 라는 가짜 이름이 생기고, 소스의 `E` 에서 엉뚱한
+            // 생성자로 이동하게 된다.
+            //
+            // 건너뛰는 것이 아니라 **여기서 이름부를 끝낸다.** 생성자/소멸자는
+            // 이름부의 마지막 성분이고, 그 뒤에 오는 것은 이름이 아니다 — 상속
+            // 생성자(`_ZN1DCI11BEv` = `D::D()`)는 토큰 뒤에 기반 클래스 타입
+            // `1B` 를 달고 있어서, 계속 읽으면 그것이 엔티티 이름으로 섞인다.
+            // 생성자의 이름은 바깥 클래스 이름이고 그것은 이미 담겨 있다.
+            if (matchCtorDtor(candidate, i) > 0) { break; }
+            // **모르는 토큰에서는 재동기화하지 않고 끝낸다.** 한 칸씩 밀며 다시
+            // 맞춰 보면 이름이 아닌 것을 이름으로 만들어 내기 때문이다:
+            //
+            //   - ABI tag `B<source-name>` — `_ZN3Foo3barB5cxx11Ev` 는
+            //     `Foo::bar[abi:cxx11]()` 인데 `cxx11` 이 이름으로 잡혔다.
+            //   - 벤더 확장 `U…`, thunk, 특수 엔티티 — 같은 방식으로 샌다.
+            //   - 깨진 길이 숫자 — `112abc…` 에서 꼬리 `12abc…` 를 새 길이로 읽었다.
+            //
+            // 이 파서는 흔한 이름 형태를 찾는 도구이지 디맹글러가 아니다. 모르는
+            // 문법은 **못 찾는 쪽**으로 남긴다 — 엉뚱한 심볼로 이동하는 것보다 낫다.
+            // 연산자 이름(`pl` `ix` …)처럼 여기서 멈춰도 잃을 이름이 없는 경우도
+            // 많다: 이름부의 마지막 성분 자리이기 때문이다.
+            break;
+        }
+        return names;
+    }
+
+    // unscoped name: 치환이 앞설 수 있고(`_ZSt9terminatev` = `std::terminate()`),
+    // 그 뒤 source-name 하나로 끝난다 — 나머지는 전부 함수 타입이다.
+    if (candidate[i] === 'S') { i = skipSubstitution(candidate, i); }
+    const source = readSourceName(candidate, i);
+    if (source) { names.push(source.name); }
+    return names;
+}
+
+/**
+ * C++ mangled 이름의 **엔티티 이름**에 이 식별자가 있는가.
+ *
+ * 소스의 `HAL_Init` 은 `_ZN3HAL8HAL_InitEv` 안에 성분으로 들어 있다. 성분 경계를
+ * 따라가므로 `CAN1::Init`(`_ZN4CAN14InitEv`) 처럼 클래스 이름이 숫자로 끝나는
+ * 경우도 찾고, `Foo8HAL_Init::bar` 처럼 이름 안에 우연히 들어 있는 것이나
+ * `foo(Widget)` 의 인자 타입은 걸리지 않는다.
+ *
+ * Exported for testing.
+ */
+export function mangledNameContains(candidate: string, identifier: string): boolean {
+    if (identifier.length === 0) { return false; }
+    return mangledEntityNames(candidate).includes(identifier);
 }
 
 /**
@@ -759,7 +906,12 @@ export async function revealSourceSymbolInMemoryMap(identifier: string): Promise
                 label: m.entry.func || m.entry.name,
                 description: parts.join('  ·  '),
                 // 맵이 여럿 열려 있으면 어느 바이너리인지가 가장 중요한 구분이다.
-                detail: path.basename(m.filePath),
+                // 파일명만 쓰면 build/debug/app.elf 와 build/release/app.elf 가
+                // 같은 줄이 된다 — 흔한 배치인데 주소·크기까지 닮아 구별되지 않는다.
+                // 워크스페이스 폴더명을 빼면(두 번째 인자 false) 멀티루트에서 다시
+                // 겹친다 — bootloader/build/app.axf 와 application/build/app.axf 가
+                // 둘 다 `build/app.axf` 가 된다. 기본값(폴더가 여럿이면 포함)을 쓴다.
+                detail: vscode.workspace.asRelativePath(m.filePath),
                 match: m,
             };
         });
