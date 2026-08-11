@@ -22,7 +22,7 @@ import {
 import { showHexViewer, HexEditorProvider, HexViewerOpenHistory, openHexViewerFile } from './hexViewer';
 import { t } from './i18n';
 import { buildPreviewReport } from './previewRun';
-import { runDoctor, DoctorFinding, DoctorInput } from './doctor';
+import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput } from './doctor';
 import { createZipArchive, extractZipArchive } from './archiveUtils';
 import { DIALOG_SCOPE, coerceDefaultUri, initDialogMemory, showOpenDialogWithMemory, showSaveDialogWithMemory, taskDialogScope } from './dialogMemory';
 import { collectVariableCompletions, referencePrefixAt, type VariableCompletionDetail } from './variableCompletions';
@@ -2706,7 +2706,13 @@ function buildRedactedDisplayCommand(
     // Resolve the raw platform branch first, then interpolate the redacted
     // context. Reusing `interpolatedCommand` for an object would reuse the
     // already-expanded password value.
-    const source = interpolatePipelineVariables(getCommandString(task.command), shown);
+    // `command` 타입은 **토큰마다** 보간해야 실제 실행과 같은 argv 가 된다.
+    // 통짜로 보간하면 값 안의 공백이 인자를 쪼개, 실제로는 인자 하나로 간
+    // 경로가 기록에는 둘로 남는다 — 비밀은 가려도 이력이 실행을 잘못 설명한다.
+    const selected = getCommandString(task.command);
+    const source = task.type === 'command'
+        ? interpolateCommandPreservingTokens(selected, value => interpolatePipelineVariables(value, shown))
+        : interpolatePipelineVariables(selected, shown);
     const args = task.args ? task.args.flatMap((arg: string) => expandArgTemplate(arg, shown)) : [];
     return buildNativeCommandInvocation(source, args).display;
 }
@@ -5684,8 +5690,15 @@ async function executeSingleTask(
             result = await handleInputBox(interpolatedTask, scope.cancellation.token);
             break;
         case 'quickPick':
-            // Interpolate items if they're strings or contain interpolatable properties
-            const interpolatedItems = task.items?.map((item: any) => {
+            // **죽은 필드는 보간하지 않는다.** `itemsFromCommand` 가 있으면 런타임이
+            // 목록을 덮어쓰므로 정적 `items` 는 실행되지 않는데, 그 안의 값 하나가
+            // NUL·길이 상한에 걸리면 **쓰이지도 않는 필드 때문에** 태스크가 실패한다.
+            // (의존성 추론·Preview 는 이미 같은 규칙으로 이 필드를 건너뛴다 —
+            // `projectActivePlatformBranches` 참조.)
+            const itemsAreDead = typeof task.itemsFromCommand === 'string'
+                ? task.itemsFromCommand.length > 0
+                : Boolean(task.itemsFromCommand);
+            const interpolatedItems = itemsAreDead ? task.items : task.items?.map((item: any) => {
                 if (typeof item === 'string') {
                     return interpolatePipelineVariables(item, interpolationContext);
                 } else {
@@ -5698,17 +5711,13 @@ async function executeSingleTask(
             });
             // Resolve `itemsFromCommand` (string or OS-specific object) to a
             // single interpolated command string, mirroring the shell branch.
+            // 여기도 **고른 뒤 보간**한다 — 위 command 와 같은 이유다.
             let interpolatedItemsFromCommand: string | undefined;
-            if (typeof task.itemsFromCommand === 'string') {
-                interpolatedItemsFromCommand = interpolatePipelineVariables(task.itemsFromCommand, interpolationContext);
-            } else if (task.itemsFromCommand && typeof task.itemsFromCommand === 'object') {
-                const cmdObj = JSON.parse(JSON.stringify(task.itemsFromCommand));
-                for (const os in cmdObj) {
-                    if (Object.prototype.hasOwnProperty.call(cmdObj, os)) {
-                        cmdObj[os] = interpolatePipelineVariables(cmdObj[os], interpolationContext);
-                    }
-                }
-                interpolatedItemsFromCommand = getCommandString(cmdObj);
+            if (typeof task.itemsFromCommand === 'string'
+                || (task.itemsFromCommand && typeof task.itemsFromCommand === 'object')) {
+                interpolatedItemsFromCommand = interpolatePipelineVariables(
+                    getCommandString(task.itemsFromCommand), interpolationContext
+                );
             }
             const interpolatedQuickPickTask = {
                 ...task,
@@ -5811,17 +5820,14 @@ async function executeSingleTask(
                     )
                     : interpolatePipelineVariables(template, interpolationContext);
 
+            // **고르는 것이 먼저다.** 모든 branch 를 보간한 뒤 고르면, 이 기계에서
+            // 절대 실행되지 않을 branch 의 값 하나 때문에 태스크 전체가 실패한다 —
+            // 보간은 NUL 바이트나 길이 초과에서 throw 하기 때문이다(예: macOS 에서
+            // 도는 액션의 windows branch 에 `${pick.value}` 가 있고 사용자가 32KB 를
+            // 붙여 넣은 경우). `interpolateToolValue` 가 같은 이유로 이미 이 순서다.
             let command: string | undefined;
-            if (typeof task.command === 'string') {
-                command = interpolateCommandString(task.command);
-            } else if (typeof task.command === 'object') {
-                const interpolatedCmdObj = JSON.parse(JSON.stringify(task.command));
-                for (const os in interpolatedCmdObj) {
-                    if (Object.prototype.hasOwnProperty.call(interpolatedCmdObj, os)) {
-                        interpolatedCmdObj[os] = interpolateCommandString(interpolatedCmdObj[os]);
-                    }
-                }
-                command = getCommandString(interpolatedCmdObj);
+            if (typeof task.command === 'string' || (task.command && typeof task.command === 'object')) {
+                command = interpolateCommandString(getCommandString(task.command));
             }
 
             // 배열 값을 가리키는 원소는 **인자 여러 개**로 펼친다
@@ -6014,17 +6020,24 @@ async function executeSingleTask(
     if (task.passTheResultToNextTask && task.output) {
         const outputContent = task.output.content ? interpolatePipelineVariables(task.output.content, interpolationContext) : (typeof result?.output === 'string' ? result.output : JSON.stringify(result, null, 2));
 
+        // `filePath` · `overwrite` 는 `mode: 'file'` 에서만 쓰인다. 다른 모드에서
+        // 보간하면 결과가 버려질 뿐이지만, 값이 NUL·길이 상한에 걸리면 **쓰이지도
+        // 않는 필드 때문에** 태스크가 실패한다.
+        const writesFile = task.output.mode === 'file';
+
         let overwriteValue: boolean | undefined;
         if (typeof task.output.overwrite === 'boolean') {
             overwriteValue = task.output.overwrite;
-        } else if (typeof task.output.overwrite === 'string') {
+        } else if (writesFile && typeof task.output.overwrite === 'string') {
             const interpolated = interpolatePipelineVariables(task.output.overwrite, interpolationContext);
             overwriteValue = interpolated.trim().toLowerCase() === 'true';
         }
 
         const interpolatedOutput = {
             ...task.output,
-            filePath: task.output.filePath ? interpolatePipelineVariables(task.output.filePath, interpolationContext) : undefined,
+            filePath: (writesFile && task.output.filePath)
+                ? interpolatePipelineVariables(task.output.filePath, interpolationContext)
+                : undefined,
             content: outputContent,
             overwrite: overwriteValue
         };
@@ -8492,7 +8505,15 @@ export function activate(context: vscode.ExtensionContext) {
         const validator = getActionsValidator() as unknown as (data: unknown) => boolean;
         // AJV's ValidateFunction exposes `.errors` as a property on the
         // function object; cast through unknown to satisfy DoctorValidator.
-        const findings = runDoctor(inputs, validator as any);
+        //
+        // **한 소스의 예외가 나머지 소스의 결과까지 지우지 않게 한다.** Doctor 는
+        // 임의의 사용자 JSON 을 정적 분석하므로 분석기 하나가 예외를 던지면
+        // (예전에는 아주 긴 명령줄이 `RangeError` 를 냈다) 진단이 하나도 게시되지
+        // 않고 이유도 보이지 않았다. 소스마다 따로 돌려 실패한 소스에는 그 사실을
+        // finding 으로 남긴다 — 그래야 나머지 진단이 살고, 이전 진단도 갱신된다.
+        const findings = runDoctorPerSource(inputs, validator as any, (input, error: any) => {
+            outputChannel.appendLine(`[Doctor] analysis failed for ${input.sourceLabel}: ${error?.stack ?? error}`);
+        });
         publishDoctorDiagnostics(findings);
 
         const errorCount = findings.filter(f => f.severity === 'error').length;

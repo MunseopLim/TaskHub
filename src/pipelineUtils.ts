@@ -653,8 +653,7 @@ export function shouldSkipForSkippedDependencies(
 ): boolean {
     if (!task || typeof task !== 'object' || skippedTaskIds.size === 0) { return false; }
     const platform = options.platform ?? process.platform;
-    const projected = projectActivePlatformBranches(task, platform);
-    for (const str of walkStrings(projected, TASK_INFER_SKIP_KEYS)) {
+    for (const str of walkInterpolatedTaskStrings(task, platform)) {
         for (const heads of extractVariableReferences(str)) {
             if (heads.every(head => skippedTaskIds.has(head))) { return true; }
         }
@@ -662,11 +661,35 @@ export function shouldSkipForSkippedDependencies(
     return false;
 }
 
-// `output.capture` and `output.diagnostics` contain regex patterns
-// rather than interpolated text — skip those subtrees during the
-// string walk so a `${...}` literal inside a regex is not mistaken
-// for a task reference.
-const TASK_INFER_SKIP_KEYS: ReadonlySet<string> = new Set(['capture', 'diagnostics']);
+/**
+ * 의존성 추론·skip 전파의 문자열 훑기에서 **제외하는 키**.
+ *
+ * 여기 없는 문자열은 전부 "런타임이 보간하는 자리"로 취급된다. 그래서 런타임이
+ * 실제로는 보간하지 않는 필드가 빠져 있으면 **없는 의존성이 생긴다** — 그리고
+ * 그 대가는 순서가 한 칸 밀리는 정도가 아니다:
+ *
+ *   - `confirmLabel: "${A.value}"` 하나가 `B → A` 의존성을 만들고,
+ *   - `A` 가 조건으로 꺼지면 `B` 까지 조용히 꺼지며,
+ *   - 반대 방향의 진짜 참조가 있으면 가짜 순환으로 **액션 전체가 거부**된다.
+ *
+ * 두 부류를 담는다. (1) 정규식·열거값처럼 애초에 텍스트가 아닌 것,
+ * (2) 사용자에게 보이지만 런타임이 보간하지 않는 것(다이얼로그 `options`,
+ * 확인 버튼 라벨 등). 새 필드를 스키마에 더할 때는 **보간하는지 확인해서**
+ * 둘 중 하나로 분류할 것 — 판단을 미루면 조용히 가짜 의존성이 생긴다.
+ */
+export const NON_INTERPOLATED_TASK_KEYS: ReadonlySet<string> = new Set([
+    // 정규식 / 열거값 / 식별자
+    'validatePattern', 'extractPattern',
+    'id', 'type', 'function', 'encoding', 'eol',
+    // 런타임이 보간하지 않는 사용자 노출 문자열
+    'validateMessage', 'confirmLabel', 'cancelLabel', 'itemsExclude',
+    'dependsOn',                                 // 태스크 id 목록 — 참조 문법이 아니다
+    'options',                                   // 다이얼로그 options subtree
+    'output.capture', 'output.diagnostics',      // 정규식
+    'output.title', 'output.mode',
+    // `when` 은 `var` 만 보간한다 — 나머지는 비교 대상 리터럴이다.
+    'when.equals', 'when.notEquals', 'when.matches', 'when.in',
+]);
 
 /**
  * Variable heads that are reserved by the runtime's interpolation
@@ -788,16 +811,44 @@ export function projectActivePlatformBranches(task: unknown, platform?: NodeJS.P
     return result;
 }
 
-function* walkStrings(value: unknown, skipKeys: ReadonlySet<string>): Generator<string> {
+/**
+ * 태스크 안의 문자열을 훑되 **경로로** 지정된 자리는 건너뛴다.
+ *
+ * 키 이름만 보고 모든 깊이에서 거르면 안 된다 — `env` 는 임의 키를 허용하므로
+ * `env: { title: '${password.value}' }` 같은 설정이 `output.title` 과 같은 이름을
+ * 쓰는 순간 **실제로 보간되는 값**이 통째로 빠진다. 그 값이 비밀이면 taint 판정
+ * (`taskReferencesSecret`)까지 놓쳐 평문이 stdout·verbose 로그에 남는다.
+ *
+ * 배열 인덱스는 경로에 넣지 않는다 — `items[0].label` 과 `items[1].label` 은
+ * 같은 자리다.
+ */
+/**
+ * 태스크에서 **런타임이 보간하는 문자열**만 낸다 — OS 분기 투영과 경로 기반
+ * 제외를 한 번에 적용한 단일 순회.
+ *
+ * 의존성 추론 · skip 전파 · Preview · Doctor 가 **같은 자리**를 보게 하려면
+ * 집합만 공유해서는 안 된다. 0.7.16 에서 집합만 공유하고 순회는 각자 두었더니,
+ * 한쪽은 경로로 비교하고 다른 쪽은 마지막 키만 비교해 `output.capture` 의
+ * 정규식이 Preview 에서 다시 미해결 참조로 보고됐다.
+ */
+export function* walkInterpolatedTaskStrings(
+    task: unknown,
+    platform?: NodeJS.Platform
+): Generator<string> {
+    yield* walkStrings(projectActivePlatformBranches(task, platform), NON_INTERPOLATED_TASK_KEYS);
+}
+
+function* walkStrings(value: unknown, skipPaths: ReadonlySet<string>, path = ''): Generator<string> {
     if (typeof value === 'string') { yield value; return; }
     if (value === null || typeof value !== 'object') { return; }
     if (Array.isArray(value)) {
-        for (const item of value) { yield* walkStrings(item, skipKeys); }
+        for (const item of value) { yield* walkStrings(item, skipPaths, path); }
         return;
     }
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        if (skipKeys.has(k)) { continue; }
-        yield* walkStrings(v, skipKeys);
+        const child = path ? `${path}.${k}` : k;
+        if (skipPaths.has(child)) { continue; }
+        yield* walkStrings(v, skipPaths, child);
     }
 }
 
@@ -858,8 +909,7 @@ export function inferTaskDependencies(
     const deps = new Set<string>();
     if (!task || typeof task !== 'object') { return deps; }
     const platform = options.platform ?? process.platform;
-    const projected = projectActivePlatformBranches(task, platform);
-    for (const str of walkStrings(projected, TASK_INFER_SKIP_KEYS)) {
+    for (const str of walkInterpolatedTaskStrings(task, platform)) {
         for (const head of extractVariableHeads(str)) {
             if (head === task.id) { continue; }
             if (RESERVED_VARIABLE_HEADS.has(head)) { continue; }
@@ -881,9 +931,18 @@ export function inferTaskDependencies(
 /**
  * A node in the runtime task graph. `allDeps` is the union of
  * explicit `dependsOn`, dependencies inferred from variable
- * references, and the implicit "all previous tasks" barrier applied
- * when `parallel` is false/omitted (Option 2 semantics — `parallel`
+ * references, and the implicit ordering barrier applied when
+ * `parallel` is false/omitted (Option 2 semantics — `parallel`
  * is opt-in concurrency, not opt-out ordering).
+ *
+ * `barrierDeps` is the *minimal direct* barrier, not "every previous
+ * task": it holds the previous sequential task plus the `parallel`
+ * tasks declared after it. That previous sequential task already
+ * waits (transitively) on everything before it, so the induced
+ * ordering is identical while the set stays O(1)-ish instead of
+ * growing with the task index. Consumers that need "everything this
+ * task waits on" must walk the graph transitively rather than read
+ * `barrierDeps` directly.
  */
 export interface TaskGraphNode {
     id: string;
@@ -930,7 +989,8 @@ export function buildTaskGraph(
 
     const nodes = new Map<string, TaskGraphNode>();
     const order: string[] = [];
-    const previousIds: string[] = [];
+    /** `order` 안에서 마지막 비-parallel 태스크의 자리. 없으면 -1. */
+    let lastSequential = -1;
 
     for (let i = 0; i < tasks.length; i++) {
         const task = tasks[i];
@@ -949,7 +1009,10 @@ export function buildTaskGraph(
 
         const barrier = new Set<string>();
         if (!parallel) {
-            for (const prev of previousIds) { barrier.add(prev); }
+            // **직전 비-parallel 태스크부터**만 담는다 — 그 태스크가 이미 그 앞을
+            // 전부 (전이적으로) 기다리므로 순서 관계는 같고, 매번 앞 전체를
+            // 복사하던 것이 O(태스크 수²) 였다(태스크 8,000개에 2.5초).
+            for (let k = Math.max(lastSequential, 0); k < order.length; k++) { barrier.add(order[k]); }
         }
 
         const all = new Set<string>([...explicit, ...inferred, ...barrier]);
@@ -965,7 +1028,7 @@ export function buildTaskGraph(
             allDeps: all,
         });
         order.push(id);
-        previousIds.push(id);
+        if (!parallel) { lastSequential = order.length - 1; }
     }
 
     return { nodes, order };
@@ -1079,6 +1142,31 @@ export function validateTaskGraph(tasks: ReadonlyArray<Task>, graph: TaskGraph):
     return issues;
 }
 
+/** 순환 경로에서 양 끝으로 남길 태스크 수. */
+const CYCLE_PATH_EDGE = 6;
+
+/**
+ * Render a cycle path, folding the middle when it is long.
+ *
+ * Sequential pipelines chain through `barrierDeps`, so a cycle path can
+ * be as long as the task list: 12,000 tasks render to a ~109,000-char
+ * message. That used to be unreachable because the recursive cycle
+ * detector blew the stack first; with the iterative detector the string
+ * actually reaches the executor's error, Preview Run's report, and the
+ * Problems panel. What a reader needs is the two ends — where the cycle
+ * closes on the repeated id — so the middle is elided.
+ *
+ * Shared by all three consumers ({@link formatGraphIssue} for the
+ * executor, Preview Run, and Doctor's `dependsOn.cycle`) so none of them
+ * can regress back to a raw `join`.
+ */
+export function formatCyclePath(cycle: readonly string[], separator = ' -> '): string {
+    if (cycle.length <= CYCLE_PATH_EDGE * 2 + 1) { return cycle.join(separator); }
+    const head = cycle.slice(0, CYCLE_PATH_EDGE).join(separator);
+    const tail = cycle.slice(-CYCLE_PATH_EDGE).join(separator);
+    return `${head}${separator}… (${cycle.length - CYCLE_PATH_EDGE * 2} more)${separator}${tail}`;
+}
+
 /**
  * Single-source human-readable formatter for `TaskGraphIssue` so the
  * runtime executor (`extension.ts`) and Preview Run share one
@@ -1093,7 +1181,7 @@ export function formatGraphIssue(issue: TaskGraphIssue): string {
         case 'missing-dependency':
             return `task '${issue.taskId}' depends on unknown task '${issue.missingId}'`;
         case 'cycle':
-            return `dependency cycle: ${issue.cycle.join(' -> ')}`;
+            return `dependency cycle: ${formatCyclePath(issue.cycle)}`;
     }
 }
 
@@ -1103,39 +1191,76 @@ export function formatGraphIssue(issue: TaskGraphIssue): string {
  * if a cycle exists. Uses three-color DFS for parity with
  * `src/doctor.ts` `dependsOn.cycle` so the runtime and the linter
  * agree on cycle structure.
+ *
+ * The DFS is **iterative on an explicit frame stack**, not recursive.
+ * Since `barrierDeps` became the minimal direct barrier, a sequential
+ * pipeline is a chain rather than a dense graph, so its DFS depth now
+ * grows with the task count: a recursive walk blew the JS call stack
+ * (`RangeError: Maximum call stack size exceeded`) at ~12,000
+ * sequential tasks. The dense graph hid this because every task
+ * linked straight back to the first one, keeping paths short.
+ *
+ * Visit order and the returned cycle are identical to the recursive
+ * version — nodes are rooted in `graph.nodes` order and each node's
+ * `allDeps` are followed in iteration order.
  */
 export function detectGraphCycle(graph: TaskGraph): string[] | null {
     const WHITE = 0, GRAY = 1, BLACK = 2;
+    const EMPTY: ReadonlySet<string> = new Set<string>();
     const color = new Map<string, number>();
     for (const id of graph.nodes.keys()) { color.set(id, WHITE); }
-    const stack: string[] = [];
-    let found: string[] | null = null;
+    /** The current DFS path, GRAY nodes bottom-to-top. */
+    const path: string[] = [];
+    /**
+     * Each GRAY node's index in `path`. Replaces `path.indexOf(id)`,
+     * which is O(path) — on the long chains that motivated this
+     * rewrite that alone would make cycle reporting quadratic.
+     */
+    const depth = new Map<string, number>();
+    const frames: { id: string; deps: Iterator<string> }[] = [];
 
-    const visit = (id: string): void => {
-        if (found) { return; }
+    /**
+     * Enter `id`. Returns the cycle if `id` is already on the current
+     * path, otherwise pushes a frame (or does nothing for a finished
+     * node) and returns null.
+     */
+    const enter = (id: string): string[] | null => {
         const state = color.get(id) ?? WHITE;
-        if (state === BLACK) { return; }
+        if (state === BLACK) { return null; }
         if (state === GRAY) {
-            const idx = stack.indexOf(id);
-            // `idx < 0` should be unreachable: GRAY means we entered the
-            // node and pushed it onto `stack` higher up in the DFS, so
-            // the id MUST be present. The `[id, id]` fallback is a
-            // defensive escape — if it ever fires, the resulting "A -> A"
-            // message is unmistakable enough to flag the broken invariant.
-            found = idx >= 0 ? [...stack.slice(idx), id] : [id, id];
-            return;
+            const idx = depth.get(id);
+            // `idx === undefined` should be unreachable: GRAY means we
+            // entered the node and recorded its depth higher up in the
+            // DFS. The `[id, id]` fallback is a defensive escape — if it
+            // ever fires, the resulting "A -> A" message is unmistakable
+            // enough to flag the broken invariant.
+            return idx !== undefined ? [...path.slice(idx), id] : [id, id];
         }
         color.set(id, GRAY);
-        stack.push(id);
-        for (const next of graph.nodes.get(id)?.allDeps ?? []) { visit(next); }
-        stack.pop();
-        color.set(id, BLACK);
+        depth.set(id, path.length);
+        path.push(id);
+        frames.push({ id, deps: (graph.nodes.get(id)?.allDeps ?? EMPTY)[Symbol.iterator]() });
+        return null;
     };
-    for (const id of graph.nodes.keys()) {
-        if (found) { break; }
-        if ((color.get(id) ?? WHITE) === WHITE) { visit(id); }
+
+    for (const root of graph.nodes.keys()) {
+        if ((color.get(root) ?? WHITE) !== WHITE) { continue; }
+        enter(root);
+        while (frames.length > 0) {
+            const frame = frames[frames.length - 1];
+            const next = frame.deps.next();
+            if (next.done) {
+                frames.pop();
+                path.pop();
+                depth.delete(frame.id);
+                color.set(frame.id, BLACK);
+                continue;
+            }
+            const cycle = enter(next.value);
+            if (cycle) { return cycle; }
+        }
     }
-    return found;
+    return null;
 }
 
 export interface TaskSchedulerOptions {
@@ -1292,6 +1417,8 @@ export function tokenizeCommandLine(command: string): string[] {
     // 앞으로 당겨진다** — `tool --output ${empty} target` 이
     // `tool --output target` 이 되어 `target` 이 `--output` 의 값으로 먹힌다.
     let quoted = false;
+    /** 마지막 `}` 위치. `${` 뒤에 닫는 괄호가 있는지를 O(1) 로 판정한다. */
+    const lastClose = command.lastIndexOf('}');
 
     for (let i = 0; i < command.length; i++) {
         const char = command[i];
@@ -1308,6 +1435,31 @@ export function tokenizeCommandLine(command: string): string[] {
                 }
             } else {
                 current += char;
+            }
+        } else if (char === '$' && command[i + 1] === '{') {
+            // `${…}` 는 **통째로 한 토큰**이다. 안에 공백이 있어도 쪼개지 않는다.
+            //
+            // `??` 는 사람이 손으로 띄어 쓰는 연산자라(`${a.x ?? b.y}`), 공백에서
+            // 자르면 참조가 `${a.x` · `??` · `b.y}` 세 조각으로 부서져 **어느
+            // 것도 해석되지 않고 리터럴로** 넘어갔다. `command` 타입은 이 토큰
+            // 목록을 만든 뒤 토큰마다 보간하므로(interpolateCommandPreservingTokens),
+            // `??` 를 명령 문자열에 쓰면 조용히 실패했다 — 같은 참조가 `shell`
+            // 타입과 `args` 에서는 멀쩡히 동작해서 더 알기 어려웠다.
+            //
+            // 끝은 **첫 `}`** 로 본다 — 보간기(`\${([^}]+)}`)가 보는 경계와 같아야
+            // 토큰 경계와 보간 경계가 어긋나지 않는다. 닫히지 않았다면 참조가
+            // 아니므로 평범한 문자로 흘려보낸다.
+            // `lastClose` 로 먼저 거른다. 닫는 `}` 가 없는 입력(`${${${…`)에서는
+            // `indexOf` 가 매번 문자열 끝까지 다시 훑어 **O(n²)** 이 된다 —
+            // 500KB 입력이 1.1초였다. 이 토크나이저는 실행 경로뿐 아니라
+            // Doctor 도 쓰므로 확장 호스트가 그대로 멈춘다. `}` 를 찾은 경우는
+            // `i` 를 그 자리로 옮기므로 스캔 구간이 겹치지 않아 전체가 선형이다.
+            const close = lastClose < i + 2 ? -1 : command.indexOf('}', i + 2);
+            if (close === -1) {
+                current += char;
+            } else {
+                current += command.slice(i, close + 1);
+                i = close;
             }
         } else if (char === '"' || char === '\'') {
             quoteChar = char;

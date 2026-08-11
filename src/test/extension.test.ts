@@ -458,6 +458,115 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(interpolatePipelineVariables('${build.output}', ctx), 'x');
 		});
 
+		test('OS branch 는 고른 뒤에 보간한다', () => {
+			// 모든 branch 를 보간한 뒤 고르면, 이 기계에서 실행되지 않을 branch 의
+			// 값 하나 때문에 태스크 전체가 실패한다 — 보간은 NUL·길이 상한에서
+			// throw 하기 때문이다. `interpolateToolValue` 가 같은 이유로 이미
+			// 이 순서이고, command / itemsFromCommand 도 같아야 한다.
+			const huge = 'x'.repeat(40000);
+			const ctx = { pick: { value: huge } };
+			const other = process.platform === 'win32' ? 'macos' : 'windows';
+			const branches: Record<string, string> = { [other]: 'echo ${pick.value}' };
+			branches[process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : 'linux'] = 'echo ok';
+
+			// 고른 뒤 보간하면 이 기계의 branch 만 검사 대상이 된다.
+			assert.strictEqual(
+				interpolatePipelineVariables(getCommandString(branches), ctx),
+				'echo ok'
+			);
+			// 반대 순서(모든 branch 보간)는 실패한다 — 이 검사가 지키려는 것.
+			assert.throws(() => interpolatePipelineVariables(branches[other], ctx));
+		});
+
+		test('env 는 임의 키를 허용한다 — 이름이 겹쳐도 빼면 안 된다', () => {
+			// 제외를 **키 이름**으로 모든 깊이에 적용하면, `env: { title: … }` 처럼
+			// `output.title` 과 이름이 겹치는 순간 실제로 보간되는 값이 빠진다.
+			// 그 값이 비밀이면 taint 판정까지 놓쳐 평문이 로그에 남는다.
+			const ids = new Set(['A', 'B']);
+			for (const key of ['title', 'mode', 'id', 'type', 'options', 'function', 'encoding', 'dependsOn']) {
+				const deps = inferTaskDependencies(
+					{ id: 'B', type: 'shell', command: 'x', env: { [key]: '${A.value}' } } as any,
+					ids
+				);
+				assert.deepStrictEqual([...deps], ['A'], `env.${key} 의 참조가 빠졌다 — 비밀이면 마스킹도 놓친다`);
+			}
+		});
+
+		test('when 은 var 만 보간한다 — 비교 대상은 리터럴이다', () => {
+			const ids = new Set(['A', 'B']);
+			assert.deepStrictEqual(
+				[...inferTaskDependencies(
+					{ id: 'B', type: 'shell', command: 'x', when: { var: '${A.value}', equals: 'y' } } as any, ids)],
+				['A'], 'when.var 의 의존성이 사라졌다'
+			);
+			for (const key of ['equals', 'notEquals', 'matches', 'in']) {
+				assert.deepStrictEqual(
+					[...inferTaskDependencies(
+						{ id: 'B', type: 'shell', command: 'x', when: { var: 'lit', [key]: '${A.value}' } } as any, ids)],
+					[], `when.${key} 에서 가짜 의존성이 생겼다`
+				);
+			}
+		});
+
+		test('보간하지 않는 필드는 의존성을 만들지 않는다', () => {
+			// 런타임이 `confirmLabel` 을 보간하지 않는데도 의존성이 생기면,
+			// 순서가 밀리는 정도로 끝나지 않는다 — A 가 조건으로 꺼질 때 B 까지
+			// 조용히 꺼지고, 반대 방향의 진짜 참조가 있으면 가짜 순환으로
+			// **액션 전체가 거부**된다.
+			const ids = new Set(['A', 'B']);
+			for (const field of ['confirmLabel', 'cancelLabel', 'validateMessage', 'itemsExclude']) {
+				const deps = inferTaskDependencies(
+					{ id: 'B', type: 'confirm', message: 'go?', [field]: '${A.value}' } as any,
+					ids
+				);
+				assert.deepStrictEqual([...deps], [], `${field} 에서 가짜 의존성이 생겼다`);
+			}
+			// 다이얼로그 options 도 보간 대상이 아니다.
+			assert.deepStrictEqual(
+				[...inferTaskDependencies(
+					{ id: 'B', type: 'fileDialog', options: { title: '${A.value}', openLabel: '${A.value}' } } as any,
+					ids
+				)],
+				[]
+			);
+			// output.title 도 마찬가지 (content/filePath 는 보간된다 — 아래 참조).
+			assert.deepStrictEqual(
+				[...inferTaskDependencies(
+					{ id: 'B', type: 'shell', command: 'x', output: { mode: 'editor', title: '${A.value}' } } as any,
+					ids
+				)],
+				[]
+			);
+		});
+
+		test('보간하는 필드는 계속 의존성을 만든다 (과잉 제외 방지)', () => {
+			// 위 제외 목록이 넓어지면 이번엔 **진짜 의존성이 사라진다** — 그쪽이
+			// 더 나쁘다(순서가 어긋나 값이 오기 전에 실행된다). 대표 필드를 고정한다.
+			const ids = new Set(['A', 'B']);
+			const cases: Array<[string, any]> = [
+				['command', { id: 'B', type: 'shell', command: 'echo ${A.value}' }],
+				['args', { id: 'B', type: 'command', command: 'echo', args: ['${A.value}'] }],
+				['cwd', { id: 'B', type: 'shell', command: 'x', cwd: '${A.value}' }],
+				['env', { id: 'B', type: 'shell', command: 'x', env: { K: '${A.value}' } }],
+				['prompt', { id: 'B', type: 'inputBox', prompt: '${A.value}' }],
+				['message', { id: 'B', type: 'confirm', message: '${A.value}' }],
+				['input', { id: 'B', type: 'stringManipulation', function: 'trim', input: '${A.value}' }],
+				['path', { id: 'B', type: 'writeFile', path: '${A.value}', content: 'x' }],
+				['content', { id: 'B', type: 'writeFile', path: 'p', content: '${A.value}' }],
+				['archive', { id: 'B', type: 'unzip', archive: '${A.value}' }],
+				['items[].label', { id: 'B', type: 'quickPick', items: [{ label: '${A.value}' }] }],
+				['itemsFromCommand', { id: 'B', type: 'quickPick', itemsFromCommand: 'echo ${A.value}' }],
+				['output.content', { id: 'B', type: 'shell', command: 'x', output: { mode: 'file', filePath: 'f', content: '${A.value}' } }],
+				['when.var', { id: 'B', type: 'shell', command: 'x', when: { var: '${A.value}', equals: 'y' } }],
+			];
+			for (const [label, task] of cases) {
+				assert.deepStrictEqual(
+					[...inferTaskDependencies(task, ids)], ['A'],
+					`${label} 의 의존성이 사라졌다 — 값이 오기 전에 실행된다`
+				);
+			}
+		});
+
 		test('의존성 추론도 head 를 다듬지 않는다', () => {
 			// 다듬으면 `${ producer.output}` 이 producer 에 대한 의존성으로 잡혀
 			// 실행 순서는 맞춰지지만, 런타임은 `" producer"` 를 못 찾아 값이
@@ -1393,6 +1502,33 @@ suite('Extension Test Suite', () => {
 			return [executable, ...args];
 		};
 
+		/**
+		 * `??` 는 사람이 띄어 쓰는 연산자라 참조 안에 공백이 있다. 토큰화가
+		 * 보간보다 먼저 일어나므로, 토크나이저가 `${…}` 를 통째로 보지 않으면
+		 * 체인이 `${a.x` · `??` · `b.y}` 로 부서져 **어느 것도 해석되지 않는다.**
+		 * 같은 참조가 `shell` 타입과 `args` 에서는 동작해 원인을 찾기 어렵다.
+		 */
+		test('?? 체인이 명령 문자열에서도 해석된다', () => {
+			const branchCtx = { pickFolder: { path: '/w/dbg dir' } };   // pickFile 분기는 꺼짐
+			const line = interpolateCommandPreservingTokens(
+				'echo ${pickFile.path ?? pickFolder.path}',
+				(v: string) => interpolatePipelineVariables(v, branchCtx)
+			);
+			const { executable, args } = mergeCommandAndArgs(line, []);
+			assert.deepStrictEqual([executable, ...args], ['echo', '/w/dbg dir'],
+				'?? 체인이 리터럴로 남았다');
+		});
+
+		test('?? 체인이 전부 어긋나면 리터럴로 남는다 (조용히 비지 않는다)', () => {
+			const line = interpolateCommandPreservingTokens(
+				'echo ${nope.a ?? alsoNope.b}',
+				(v: string) => interpolatePipelineVariables(v, {})
+			);
+			const { args } = mergeCommandAndArgs(line, []);
+			assert.deepStrictEqual(args, ['${nope.a ?? alsoNope.b}'],
+				'해석 못 한 참조가 조각나거나 사라졌다');
+		});
+
 		test('보간값의 공백이 새 인자를 만들지 않는다', () => {
 			assert.deepStrictEqual(
 				argv('git tag ${input.value}'),
@@ -1445,7 +1581,9 @@ suite('Extension Test Suite', () => {
 		});
 
 		test('quoteForCommandTokenizer 는 어떤 문자열이든 한 토큰으로 되돌린다', () => {
-			for (const value of ['a b', 'a"b', 'a\\b', '', 'a\\"b', "it's", 'a  b']) {
+			// `${…}` 를 담은 값도 넣는다 — 토크나이저가 특별 취급하는 문자열이라
+			// 왕복 불변식이 깨지기 가장 쉬운 자리다.
+			for (const value of ['a b', 'a"b', 'a\\b', '', 'a\\"b', "it's", 'a  b', '${a b}', 'a ${x ?? y} b', '${']) {
 				const round = tokenizeCommandLine(quoteForCommandTokenizer(value));
 				assert.deepStrictEqual(
 					round, [value],
@@ -1733,6 +1871,104 @@ suite('Extension Test Suite', () => {
 		test('should handle empty command', () => {
 			const result = tokenizeCommandLine('');
 			assert.deepStrictEqual(result, []);
+		});
+
+		// `${…}` 안의 공백에서 자르면 `??` 체인이 부서진다. `command` 타입은 이
+		// 토큰 목록을 만든 뒤 토큰마다 보간하므로(interpolateCommandPreservingTokens),
+		// 부서진 조각은 어느 것도 해석되지 않고 리터럴로 넘어갔다 — 같은 참조가
+		// `shell` 타입과 `args` 에서는 동작해서 원인을 찾기 어려운 종류의 실패다.
+		test('`${…}` 는 안에 공백이 있어도 한 토큰이다 (?? 체인)', () => {
+			assert.deepStrictEqual(
+				tokenizeCommandLine('echo ${pickFile.path ?? pickFolder.path}'),
+				['echo', '${pickFile.path ?? pickFolder.path}']
+			);
+			assert.deepStrictEqual(
+				tokenizeCommandLine('t ${a.x ?? b.y ?? c.z} tail'),
+				['t', '${a.x ?? b.y ?? c.z}', 'tail']
+			);
+		});
+
+		test('참조가 토큰 가운데 있어도 한 토큰으로 남는다', () => {
+			assert.deepStrictEqual(
+				tokenizeCommandLine('tool --out=${a.x ?? b.y}.html'),
+				['tool', '--out=${a.x ?? b.y}.html']
+			);
+		});
+
+		test('참조의 끝은 첫 `}` — 보간기가 보는 경계와 같다', () => {
+			// 보간기 정규식이 `\${([^}]+)}` 이므로 토큰 경계도 첫 `}` 여야
+			// 토큰 하나가 참조 하나와 정확히 대응한다. 마지막 `}` 까지 탐욕적으로
+			// 잡으면 아래가 ['tool', '${a.x} b}', 'c'] 가 되어 어긋난다.
+			assert.deepStrictEqual(
+				tokenizeCommandLine('tool ${a.x} b} c'),
+				['tool', '${a.x}', 'b}', 'c']
+			);
+			assert.deepStrictEqual(
+				tokenizeCommandLine('echo ${a.x} ${b.y}'),
+				['echo', '${a.x}', '${b.y}']
+			);
+		});
+
+		test('안쪽 `${` 도 첫 `}` 에서 끊는다 — 보간기와 같은 규칙', () => {
+			// 잘못 쓴 형태(`${a.x ?? ${b.y}}`)지만, 토크나이저와 보간기가 **같은
+			// 지점**에서 끊어야 진단이 실행 결과와 어긋나지 않는다.
+			assert.deepStrictEqual(
+				tokenizeCommandLine('echo ${a.x ?? ${b.y}} z'),
+				['echo', '${a.x ?? ${b.y}}', 'z']
+			);
+		});
+
+		test('참조 스캔은 인용을 보지 않는다 — 의도된 계약', () => {
+			// 닫히지 않은 `${` 는 첫 `}` 를 찾아 인용 부호를 넘어서까지 삼킨다.
+			// 고칠 수도 있지만, 그러면 토크나이저가 보간기(`\${([^}]+)}`)보다
+			// 좁게 끊어 둘의 경계가 다시 어긋난다. 어차피 해석되지 않는 잘못된
+			// 템플릿이므로 **경계 일치**를 우선한다. 이 검사는 그 선택을 고정한다.
+			assert.deepStrictEqual(
+				tokenizeCommandLine('tool ${a.x "b} c" d'),
+				['tool', '${a.x "b}', 'c d']
+			);
+		});
+
+		test('참조가 인용 옆에 붙으면 한 토큰으로 이어진다', () => {
+			assert.deepStrictEqual(
+				tokenizeCommandLine('echo "a"${x y}"b"'),
+				['echo', 'a${x y}b']
+			);
+		});
+
+		test('`${` 로 끝나면 그대로 남는다', () => {
+			assert.deepStrictEqual(tokenizeCommandLine('echo ${'), ['echo', '${']);
+		});
+
+		test('닫히지 않은 `${` 가 많아도 선형으로 훑는다', () => {
+			// `}` 가 없으면 `indexOf` 가 매번 끝까지 다시 훑어 O(n²) 가 된다.
+			// 500KB 입력이 1.1초였고, 이 토크나이저는 Doctor 도 쓰므로 확장
+			// 호스트가 그대로 멈춘다. 시간이 아니라 **증가율**을 본다 —
+			// 느린 기계에서도 흔들리지 않는 기준이다.
+			const measure = (size: number) => {
+				const input = '${'.repeat(size);
+				const started = Date.now();
+				tokenizeCommandLine(input);
+				return Math.max(1, Date.now() - started);
+			};
+			measure(1000);   // JIT 예열
+			const small = measure(50_000);
+			const large = measure(200_000);
+			// 선형이면 4배, 2차면 16배. 여유를 크게 두어도 둘은 갈린다.
+			assert.ok(large / small < 8,
+				`입력이 4배일 때 시간이 ${(large / small).toFixed(1)}배 늘었다 — 선형이 아니다`);
+		});
+
+		test('닫히지 않은 `${` 는 참조가 아니므로 예전처럼 쪼갠다', () => {
+			assert.deepStrictEqual(
+				tokenizeCommandLine('echo ${broken chain'),
+				['echo', '${broken', 'chain']
+			);
+		});
+
+		test('평범한 `$` 와 인용은 종전 그대로다', () => {
+			assert.deepStrictEqual(tokenizeCommandLine('echo $HOME a'), ['echo', '$HOME', 'a']);
+			assert.deepStrictEqual(tokenizeCommandLine('echo "${a.x ?? b.y}"'), ['echo', '${a.x ?? b.y}']);
 		});
 
 		test('should handle multiple spaces', () => {

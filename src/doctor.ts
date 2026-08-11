@@ -37,6 +37,7 @@ import {
     INTERACTIVE_TASK_TYPES,
     buildTaskGraph,
     detectGraphCycle,
+    formatCyclePath,
     evaluateTaskCondition,
     selectPlatformValue,
 } from './pipelineUtils';
@@ -111,6 +112,40 @@ export function runDoctor(inputs: DoctorInput[], validator: DoctorValidator): Do
     const findings: DoctorFinding[] = [];
     for (const input of inputs) {
         findings.push(...analyzeFile(input, validator));
+    }
+    return findings;
+}
+
+/**
+ * {@link runDoctor} 를 **소스마다 따로** 돌린다.
+ *
+ * 한 소스에서 분석기가 예외를 던져도 나머지 소스의 결과는 살아야 한다 — 한 번에
+ * 감싸면 진단이 하나도 게시되지 않고, 이미 걸려 있던 진단이 stale 로 남는다.
+ * 실패한 소스에는 그 사실 자체를 finding 으로 남긴다.
+ *
+ * @param onError 로깅 훅(호스트의 출력 채널). 분석 자체에는 영향이 없다.
+ */
+export function runDoctorPerSource(
+    inputs: DoctorInput[],
+    validator: DoctorValidator,
+    onError?: (input: DoctorInput, error: unknown) => void
+): DoctorFinding[] {
+    const findings: DoctorFinding[] = [];
+    for (const input of inputs) {
+        try {
+            findings.push(...analyzeFile(input, validator));
+        } catch (e: any) {
+            onError?.(input, e);
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 1 },
+                severity: 'error',
+                code: 'doctor.analysis-failed',
+                message: `TaskHub Doctor could not finish analyzing this source: ${e?.message ?? e}`,
+                messageKo: `TaskHub Doctor 가 이 소스를 끝까지 분석하지 못했습니다: ${e?.message ?? e}`,
+            });
+        }
     }
     return findings;
 }
@@ -726,44 +761,1101 @@ function checkUnresolvedAndOutsideWrites(actions: ActionItem[], input: DoctorInp
 
 
 /**
- * 인터프리터별 "이 뒤가 스크립트" 스위치.
+ * 셸 옵션 토큰 하나를 읽은 결과.
  *
- * `cmd` 는 `/c` 뒤 **나머지 전체**를 명령줄로 읽고, `sh`/`bash` 계열은 `-c`
- * 바로 다음 인자를, PowerShell 은 `-Command` 뒤를 읽는다. 어느 쪽이든 뒤를
- * 통째로 이어 붙여 보면 놓치는 형태가 없다.
- *
- * `-lc` · `-ec` 처럼 묶어 쓰는 형태, `--noprofile` · `/v:on` 처럼 스위치 앞에
- * 끼는 플래그를 **위치로** 처리하므로, 문자열 정규식으로 형태를 하나씩
- * 쫓아다닐 필요가 없다.
+ * `next` 는 이어서 볼 자리(현재 자리 기준 오프셋). 인자를 삼키는지 모르는
+ * 옵션은 두 갈래를 모두 담는다.
  */
-const NESTED_INTERPRETERS: { executable: RegExp; scriptSwitch: RegExp }[] = [
-    { executable: /^cmd(\.exe)?$/i, scriptSwitch: /^\/c$/i },
-    { executable: /^(sh|bash|zsh|dash|ksh|ash)$/i, scriptSwitch: /^-[a-z]*c$/i },
-    { executable: /^(powershell|pwsh)(\.exe)?$/i, scriptSwitch: /^-(c|command|encodedcommand)$/i },
+type ShellOptionStep = { enablesScript: boolean; next: number[] };
+
+/** `--rcfile FILE` 처럼 **다음 argv** 를 삼키는 긴 옵션. */
+const SH_LONG_TAKES_ARGUMENT = /^--(rcfile|init-file)$/;
+/** 다음 argv 를 삼키지 않는 것이 확실한 긴 옵션. */
+const SH_LONG_NO_ARGUMENT = /^--(posix|norc|noprofile|noediting|noline-editing|login|verbose|debug|help|version|restricted|protected)$/;
+
+/**
+ * POSIX 셸의 옵션 토큰 하나를 읽는다.
+ *
+ * **`-c` 는 다음 argv 를 삼키는 옵션이 아니다.** 셸은 옵션을 다 읽은 뒤
+ * **첫 피연산자**를 command_string 으로 실행한다 — 그래서 `sh -cex -c '…'` ·
+ * `bash -cx -O extglob '…'` 처럼 `-c` 와 스크립트 사이에 옵션이 더 끼어도
+ * 스크립트는 실행된다(실제 `/bin/sh` · `bash` 로 확인). "스위치 바로 다음이
+ * 스크립트" 로 보던 모델은 이런 형태를 절반 가까이 놓쳤다.
+ *
+ * 묶음(`-cex`)은 글자마다 읽되, `o`/`O` 를 만나면 거기서 멈춘다:
+ *   - 묶음에 글자가 남아 있으면 그것이 `-o` 의 인자다 — `-oc` 의 `c` 는 옵션이
+ *     아니라 옵션 **이름**이다(`bash -oc 'echo hi'` → `c: invalid option name`).
+ *   - 묶음의 마지막이면 **다음 argv** 를 삼킨다(`-co nounset '…'`).
+ */
+function shellOptionStep(token: string): ShellOptionStep {
+    const bundle = /^[-+]([A-Za-z]+)$/.exec(token);
+    if (bundle) {
+        const letters = bundle[1];
+        let enablesScript = false;
+        let consumed = 0;
+        for (let k = 0; k < letters.length; k++) {
+            const ch = letters[k];
+            if (ch === 'c') { enablesScript = true; continue; }
+            if (ch === 'o' || ch === 'O') {
+                if (k === letters.length - 1) { consumed = 1; }
+                break;
+            }
+        }
+        return { enablesScript, next: [1 + consumed] };
+    }
+    if (SH_LONG_TAKES_ARGUMENT.test(token)) { return { enablesScript: false, next: [2] }; }
+    if (SH_LONG_NO_ARGUMENT.test(token)) { return { enablesScript: false, next: [1] }; }
+    return { enablesScript: false, next: [1, 2] };   // 모르는 옵션 — 두 갈래 모두
+}
+
+const PWSH_TAKES_ARGUMENT = /^-(executionpolicy|inputformat|outputformat|windowstyle|version|configurationname|psconsolefile|workingdirectory|settingsfile|custompipename)$/i;
+const PWSH_NO_ARGUMENT = /^-(nop|noprofile|nologo|noni|noninteractive|noexit|mta|sta|login|interactive|help)$/i;
+
+/**
+ * PowerShell 은 매개변수 이름을 **접두사로** 맞춘다 — `-Co` · `-Com` · `-Comman`
+ * 이 전부 `-Command` 이고 실제로 스크립트를 실행한다. 전체 이름만 보던 동안
+ * `powershell -Com "echo ${ask.value}"` 가 무경고였다. (`PWSH_NO_ARGUMENT` 의
+ * `nop` · `noni` 도 같은 규칙 덕에 유효한 축약이다.)
+ */
+function powerShellSwitch(...names: string[]): (token: string) => { inline?: string; ambiguous?: true } | undefined {
+    return token => {
+        if (!token.startsWith('-')) { return undefined; }
+        const typed = token.slice(1).toLowerCase();
+        if (typed.length === 0 || !names.some(name => name.startsWith(typed))) { return undefined; }
+        // 축약이 **다른 매개변수와도** 맞으면 그 해석도 살아 있다(`-e` 는
+        // `-EncodedCommand` 도 `-ExecutionPolicy` 도 된다). 정확히 하나로 풀리면
+        // 그 자리에서 끝난다 — 그러지 않으면 `$args` 같은 뒤 인자에 과탐이 붙는다.
+        const alternatives = PWSH_PARAMETERS.filter(name => name.startsWith(typed)).length;
+        return alternatives > 1 ? { ambiguous: true } : {};
+    };
+}
+
+/** 접두사 충돌을 세기 위한 PowerShell 매개변수 이름(별칭 포함). */
+const PWSH_PARAMETERS = [
+    'command', 'commandwithargs', 'cwa', 'encodedcommand', 'ec', 'file', 'executionpolicy',
+    'inputformat', 'outputformat', 'windowstyle', 'version', 'configurationname',
+    'psconsolefile', 'workingdirectory', 'settingsfile', 'custompipename',
+    'noprofile', 'nologo', 'noninteractive', 'noexit', 'mta', 'sta', 'login', 'interactive', 'help',
 ];
 
 /**
- * 실효 argv 가 중첩 인터프리터를 호출한다면, 그 인터프리터가 실행할 스크립트
- * 텍스트를 돌려준다. 아니면 `undefined`.
+ * 인터프리터별 "이 뒤가 스크립트" 규칙. 셋의 문법이 서로 달라 **모델**로 나눈다.
+ *
+ *   - `posix-shell`: `-c` 는 모드 스위치이고, 스크립트는 옵션이 끝난 뒤의
+ *     **첫 피연산자** 하나다. 그 뒤 토큰은 `$0` · `$1` … 로 들어간다 — 즉
+ *     `sh -c 'printf %s "$1"' _ "${ask.value}"` 는 값이 스크립트가 아니라
+ *     **인자**로 전달되는 안전한 형태이고, 우리가 권장하는 완화책이다.
+ *   - `switch`: 스위치 토큰 뒤가 곧 스크립트다. `cmd /c` 와 PowerShell
+ *     `-Command` 는 **나머지 전체**, `-EncodedCommand` 는 다음 하나.
+ *
+ * `--noprofile` · `/v:on` 처럼 스위치 앞에 끼는 플래그를 **위치로** 처리하므로,
+ * 문자열 정규식으로 형태를 하나씩 쫓아다닐 필요가 없다.
  */
-export function nestedInterpreterScript(argv: string[]): string | undefined {
-    if (argv.length === 0) { return undefined; }
+const NESTED_INTERPRETERS: {
+    executable: RegExp;
+    /** 이 인터프리터가 옵션으로 읽는 접두사. 그 밖의 토큰은 피연산자다. */
+    optionPrefix: '-' | '/';
+    /** `posix-shell` — 스크립트는 첫 피연산자. `switch` — 스위치 뒤가 스크립트. */
+    model: 'posix-shell' | 'switch';
+    /** 이 인터프리터가 스크립트를 읽는 문법. */
+    dialect: ScriptDialect;
+    /**
+     * `-c` 가 없어도 첫 피연산자를 **명령 문자열**로 실행하는가.
+     *
+     * ksh 가 그렇다 — 이 기계의 AT&T ksh93u+ 은 `ksh 'printf x'` 를 그대로
+     * 실행한다(`sh`·`zsh`·`dash` 는 파일 이름으로 읽고 실패한다). 구현마다
+     * 갈리는 자리라 ksh 계열은 통째로 fail-closed 로 둔다.
+     */
+    operandIsScript?: true;
+    /**
+     * `switch` 모델에서 스크립트를 여는 토큰. 붙어 있는 스크립트는 `inline`,
+     * 다른 매개변수로도 읽힐 수 있는 축약이면 `ambiguous` 로 알린다.
+     */
+    scriptSwitch?: (token: string) => { inline?: string; ambiguous?: true } | undefined;
+    /** `switch` 모델이 스크립트로 삼키는 범위. */
+    consumes?: 'one' | 'rest';
+    /** 텍스트로 문법 위치를 따질 수 없는 스크립트(base64 등). */
+    opaque?: true;
+    /** 다음 argv 를 인자로 삼키는 옵션 — 그 인자는 피연산자가 아니다. */
+    takesArgument?: RegExp;
+    /** 다음 argv 를 삼키지 **않는** 것이 확실한 옵션 — 두 갈래로 나눌 필요가 없다. */
+    noArgument?: RegExp;
+    /** 옵션 처리를 끝내는 옵션(PowerShell `-File` 처럼 뒤가 전부 스크립트/인자). */
+    endsOptions?: RegExp;
+}[] = [
+    {
+        executable: /^cmd(\.exe)?$/i, model: 'switch', dialect: 'cmd',
+        // `/r` 은 문서에 없지만 `/c` 의 별칭으로 알려져 있다 — 모르면 위험으로 본다.
+        // **스크립트가 스위치에 붙어 올 수 있다**(`cmd /c"echo …"` → 토큰 하나로
+        // `/cecho …`). 정확히 `/c` 인 토큰만 보던 동안 이 형태가 통째로 빠졌다.
+        scriptSwitch: token => {
+            const match = /^\/[ckr](.*)$/i.exec(token);
+            return match ? { inline: match[1] } : undefined;
+        },
+        consumes: 'rest', optionPrefix: '/',
+        // 문서화된 `cmd` 스위치는 값을 콜론 뒤에 붙인다(`/v:on`) — 다음 argv 를
+        // 삼키지 않는다. 그 밖의 스위치는 모르는 것으로 두어 두 갈래로 본다.
+        noArgument: /^\/([sqdaux]|[tef]:\S*|v:\S*)$/i,
+    },
+    // `.exe` 가 붙은 Git-Bash 의 `bash.exe` 도 같은 셸이다 — 접미사만으로 검사를
+    // 통째로 비껴가던 구멍이 있었다.
+    { executable: /^(sh|bash|zsh|dash|ash)(\.exe)?$/i, model: 'posix-shell', dialect: 'posix', optionPrefix: '-' },
+    {
+        executable: /^(m|pd)?ksh(88|93)?(u\+)?(\.exe)?$/i, model: 'posix-shell', dialect: 'posix', optionPrefix: '-',
+        operandIsScript: true,
+    },
+    // `-EncodedCommand` 는 base64 인자 하나, `-Command` 는 나머지 전부.
+    // `-CommandWithArgs`(7.5+, 별칭 `-cwa`)는 **첫 문자열만** 코드고 나머지는
+    // `$args` 다 — `rest` 로 보면 과탐이 된다.
+    {
+        executable: /^(powershell|pwsh)(\.exe)?$/i, model: 'switch', dialect: 'powershell',
+        scriptSwitch: powerShellSwitch('encodedcommand', 'ec'), consumes: 'one', optionPrefix: '-',
+        // base64 는 문법 위치를 따질 수 없다 — 허용 문자와 디코딩된 코드의 의미가 무관하다.
+        opaque: true,
+        takesArgument: PWSH_TAKES_ARGUMENT,
+        noArgument: PWSH_NO_ARGUMENT,
+        endsOptions: /^-file$/i,
+    },
+    {
+        executable: /^(powershell|pwsh)(\.exe)?$/i, model: 'switch', dialect: 'powershell',
+        scriptSwitch: powerShellSwitch('command'), consumes: 'rest', optionPrefix: '-',
+        takesArgument: PWSH_TAKES_ARGUMENT,
+        noArgument: PWSH_NO_ARGUMENT,
+        endsOptions: /^-file$/i,
+    },
+    {
+        executable: /^pwsh(\.exe)?$/i, model: 'switch', dialect: 'powershell',
+        scriptSwitch: powerShellSwitch('commandwithargs', 'cwa'), consumes: 'one', optionPrefix: '-',
+        takesArgument: PWSH_TAKES_ARGUMENT,
+        noArgument: PWSH_NO_ARGUMENT,
+        endsOptions: /^-file$/i,
+    },
+];
+
+/**
+ * 투명 실행 래퍼를 벗긴다.
+ *
+ * `env sh -c "…"` · `busybox sh -c "…"` 는 뒤의 argv 를 그대로 실행하는데,
+ * 첫 토큰만 보고 인터프리터를 찾던 동안 검사가 **통째로** 사라졌다
+ * (`/usr/bin/env sh -c 'printf x'` 가 실행되는 것을 확인했다).
+ *
+ * 벗겨 낼 수 있다고 확신하는 것만 벗긴다 — 모르는 옵션이 끼면 그만둔다.
+ */
+function unwrapExecWrapper(argv: string[]): { wrapper: boolean; argv?: string[] } {
     const base = (argv[0].split(/[\\/]/).pop() ?? argv[0]).trim();
-    const interpreter = NESTED_INTERPRETERS.find(entry => entry.executable.test(base));
-    if (!interpreter) { return undefined; }
-    const switchIndex = argv.findIndex((token, i) => i > 0 && interpreter.scriptSwitch.test(token));
-    if (switchIndex === -1) { return undefined; }
-    const script = argv.slice(switchIndex + 1).join(' ');
-    return script.length > 0 ? script : undefined;
+    if (/^busybox(\.exe)?$/i.test(base)) {
+        return { wrapper: true, argv: argv.length > 1 ? argv.slice(1) : undefined };
+    }
+    if (!/^env(\.exe)?$/i.test(base)) { return { wrapper: false }; }
+    let i = 1;
+    while (i < argv.length) {
+        const token = argv[i];
+        if (token === '--') { i++; break; }
+        if (/^(-i|--ignore-environment|-0|--null|-v|--debug)$/.test(token)) { i++; continue; }
+        // 값이 붙어 오기도 하고(`-uPATH` · `-C/tmp`) 떨어져 오기도 한다.
+        const withValue = /^(-[uCP]|--unset|--chdir)(=?)(.*)$/.exec(token);
+        if (withValue) { i += withValue[3].length > 0 ? 1 : 2; continue; }
+        // **`-S` 는 인자를 버리는 옵션이 아니다** — 그 문자열을 다시 쪼개 실행한다.
+        const split = /^(-S|--split-string)(=?)(.*)$/.exec(token);
+        if (split) {
+            const script = split[3].length > 0 ? split[3] : argv[i + 1];
+            if (script === undefined) { return { wrapper: true }; }
+            const consumed = split[3].length > 0 ? i + 1 : i + 2;
+            return { wrapper: true, argv: [...tokenizeCommandLine(script), ...argv.slice(consumed)] };
+        }
+        // 모르는 옵션. **래퍼인 것은 아는데 해석을 못 한다** — 조용히 포기하면
+        // 뒤의 `sh -c` 가 통째로 사라지므로, 호출부가 fail-closed 로 처리한다.
+        if (token.startsWith('-')) { return { wrapper: true }; }
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) { i++; continue; }    // NAME=value
+        break;
+    }
+    return { wrapper: true, argv: i < argv.length ? argv.slice(i) : undefined };
 }
 
+/**
+ * 인터프리터 판정 **전에** argv 를 실제로 올 수 있는 값들로 펼친다.
+ *
+ * 검사가 보간 전 템플릿을 보므로, 실행 파일이나 스크립트 스위치가 참조로
+ * 적혀 있으면(`${which.value} -c "…"`) 이름이 `${which.value}` 라 어떤
+ * 인터프리터와도 맞지 않아 **경고가 하나도 나지 않았다.** 런타임에서는 그것이
+ * `sh` 가 되어 뒤 값이 스크립트로 흘러간다.
+ *
+ * 고정 `quickPick` 은 값 집합이 정적이므로 그대로 열거한다. 열거할 수 없는
+ * 참조가 실행 파일이나 스위치 자리에 남으면 `dynamic` 로 알린다 — 무엇이
+ * 실행될지 모른다는 사실 자체가 경고할 거리다.
+ *
+ * Exported for testing.
+ */
+export function enumerateArgvCandidates(
+    argv: string[],
+    tasks: Task[]
+): { variants: string[][]; truncated: boolean } {
+    /** 실행 파일 후보 상한 — 진단 한 건에 쓸 비용이 아니다. */
+    const MAX_VARIANTS = 32;
+    let truncated = false;
+
+    const exact = /^\$\{([^}]+)\}$/.exec((argv[0] ?? '').trim());
+    if (!exact) { return { variants: [argv], truncated: false }; }
+
+    const values = new Set<string>();
+    for (const alt of parseReferenceAlternatives(exact[1])) {
+        const source = tasks.find(t => t.id === alt.head) as any;
+        if (!source || source.type !== 'quickPick' || source.itemsFromCommand || !Array.isArray(source.items)) {
+            return { variants: [argv], truncated: false };   // 열거 불가 — 그대로 두면 certain=false 로 잡힌다
+        }
+        for (const entry of source.items) {
+            const label = typeof entry === 'string' ? entry : entry?.label;
+            if (typeof label === 'string') { values.add(label); }
+        }
+    }
+
+    // **실행 파일만 펼친다.** 스위치나 스크립트까지 펼치면 스크립트 자리의
+    // `${pick.value}` 가 구체값으로 바뀌어 이후 참조 검사에 아무것도 남지 않고,
+    // 메타문자가 든 quickPick 이 무경고로 지나간다. 스위치가 참조인 경우는
+    // 펼치지 않고 `scriptCandidateTokens` 가 보수적으로 처리한다.
+    const variants: string[][] = [];
+    for (const head of values) {
+        if (variants.length < MAX_VARIANTS) { variants.push([head, ...argv.slice(1)]); }
+        else { truncated = true; }
+    }
+    return { variants: variants.length > 0 ? variants : [argv], truncated };
+}
+
+/**
+ * 인터프리터가 실행할 **스크립트 텍스트 한 덩어리**.
+ *
+ * 토큰이 아니라 텍스트인 이유는, 참조가 그 문법에서 데이터 자리인지 명령 자리인지
+ * 따지려면 앞뒤 문맥이 필요하기 때문이다.
+ */
+export type ScriptCandidate = {
+    text: string;
+    /** 이 텍스트를 읽는 문법. 인용·치환·변수 확장 규칙이 셋 다 다르다. */
+    dialect: ScriptDialect;
+    /** 텍스트로 문법을 따질 수 없는 자리(`-EncodedCommand` 의 base64 등). */
+    opaque?: true;
+};
+
+/** 스크립트를 읽는 문법. `unknown` 은 셋 중 가장 엄한 판정을 쓴다. */
+export type ScriptDialect = 'posix' | 'cmd' | 'powershell' | 'unknown';
+
+/** 스크립트 위치를 확정하지 못했는가 — 무엇이 실행될지 모른다는 뜻이다. */
+export function interpreterPositionIsDynamic(argv: string[]): boolean {
+    const { tokens, certain } = scriptCandidateTokens(argv);
+    return !certain && tokens.length > 0;
+}
+
+
+/**
+ * argv 가 **인터프리터를 통해 값을 스크립트로 흘릴 수 있는가**를 본다.
+ *
+ * 네 라운드에 걸쳐 이 검사에 구멍이 반복해 났고, 원인은 매번 같았다 —
+ * 셸의 옵션 파싱을 손으로 흉내 내면서 표에 없는 문법마다 **조용히 통과**시켰다
+ * (`sh -xo nounset -c`, `cmd /k`, PowerShell 의 두 번째 설정, 동적 스위치 뒤의
+ * 스크립트 …). 표를 계속 늘리는 대신 판정 방향을 뒤집는다:
+ *
+ *   **안전을 증명하지 못하면 위험으로 본다.**
+ *
+ * 증명이 되는 경우는 하나뿐이다 — 실행 파일이 **리터럴**이고, 옵션도 리터럴이라
+ * 어느 토큰이 스크립트인지 확정할 수 있으며, 그 스크립트 토큰에 제약 없는 참조가
+ * 없을 때. 그 밖에는(실행 파일이 참조, 스위치가 참조, 모르는 옵션이 끼어 스크립트
+ * 위치를 확정할 수 없음) 뒤따르는 참조를 전부 스크립트에 놓일 수 있는 것으로 본다.
+ *
+ * argv 를 **(자리, 스크립트 모드) 상태**로 걷는다. POSIX 셸의 `-c` 는 다음 인자를
+ * 삼키는 옵션이 아니라 모드 스위치이고, 스크립트는 옵션이 끝난 뒤의 첫 피연산자
+ * 하나다 — 그래서 `sh -cex -c '…'` 처럼 `-c` 와 스크립트 사이에 옵션이 더 끼어도
+ * 잡힌다. 인자를 삼키는지 모르는 옵션에서는 두 갈래로 갈라져 합집합을 취한다.
+ *
+ * 이 규칙은 문서가 권하는 안전한 형태(`sh -c '고정 스크립트' _ "${ask.value}"`)를
+ * 계속 조용히 통과시킨다 — 값이 스크립트가 아니라 `$1` 로 들어가기 때문이다.
+ *
+ * 반환값은 "스크립트에 놓일 수 있는 토큰들". 비어 있으면 위험 없음.
+ */
+export function scriptCandidateTokens(argv: string[]): { tokens: string[]; certain: boolean } {
+    const { candidates, certain } = scriptCandidates(argv);
+    return { tokens: candidates.map(candidate => candidate.text), certain };
+}
+
+/**
+ * {@link scriptCandidateTokens} 와 같은 판정이되, 후보를 **스크립트 텍스트**로
+ * 돌려준다. 참조가 그 안에서 데이터 자리인지 명령 자리인지 따지려면 앞뒤 문맥이
+ * 필요하기 때문이다 — `echo ok; ${v}` 의 `${v}` 는 문자 집합과 무관하게 명령이다.
+ *
+ * Exported for testing.
+ */
+export function scriptCandidates(argv: string[], depth = 0): { candidates: ScriptCandidate[]; certain: boolean } {
+    if (argv.length === 0) { return { candidates: [], certain: true }; }
+    const isRef = (token: string) => /\$\{[^}]+\}/.test(token);
+    /** 스크립트 텍스트 하나로 묶는다 — 문맥이 있어야 자리를 따질 수 있다. */
+    let dialect: ScriptDialect = 'unknown';
+    const asScript = (parts: string[], opaque?: true): ScriptCandidate[] => {
+        // 여러 argv 를 한 스크립트로 잇을 때는 **낱말 경계를 되살린다** —
+        // 토크나이저가 인용을 벗겨 낸 뒤 공백으로 이으면
+        // `if exist "C:\Program Files" ${v}` 가 세 낱말로 부서져, 경로 조각이
+        // 고정 명령 이름으로 읽힌다. 토큰 하나짜리(스크립트 본문 자체)는 그대로 둔다.
+        const text = parts.length === 1
+            ? parts[0]
+            : parts.map(part => (/\s/.test(part) ? `"${part}"` : part)).join(' ');
+        return isRef(text) ? [{ text, dialect, opaque }] : [];
+    };
+
+    // 실행 파일이 참조면 무엇이 실행될지 모른다 — 뒤 전부를 스크립트 후보로 본다.
+    if (isRef(argv[0])) { return { candidates: asScript(argv.slice(1)), certain: false }; }
+
+    const base = (argv[0].split(/[\\/]/).pop() ?? argv[0]).trim();
+    const matching = NESTED_INTERPRETERS.filter(entry => entry.executable.test(base));
+    if (matching.length === 0) {
+        // `env sh -c …` 처럼 투명 래퍼를 거치는 형태는 래퍼를 벗기고 다시 본다.
+        const unwrapped = depth < 4 ? unwrapExecWrapper(argv) : { wrapper: false };
+        if (unwrapped.argv) { return scriptCandidates(unwrapped.argv, depth + 1); }
+        // 래퍼인 것은 알지만 해석하지 못했다 — 뒤가 통째로 인터프리터일 수 있다.
+        if (unwrapped.wrapper) { return { candidates: asScript(argv.slice(1)), certain: false }; }
+        return { candidates: [], certain: true };   // 인터프리터가 아니다
+    }
+    dialect = matching[0].dialect;
+
+    // **모르는 옵션은 두 갈래로 진행한다.** 표에 없다고 "여기서 피연산자가
+    // 시작한다"고 단정하면 뒤의 `-c` 를 못 보고 조용히 통과시킨다. 표를 계속
+    // 늘리는 대신, 삼키는 경우와 아닌 경우를 **둘 다** 따라가 합집합을 취한다.
+    // 상태는 (자리, 스크립트 모드) 쌍이다 — POSIX 셸은 `-c` 를 본 뒤 옵션을 더
+    // 읽을 수 있고, 스크립트는 그 다음 **첫 피연산자**이기 때문이다.
+    const found: ScriptCandidate[] = [];
+    const addScript = (parts: (string | undefined)[], opaque?: true) => {
+        found.push(...asScript(parts.filter((part): part is string => part !== undefined), opaque));
+    };
+    // "이 자리부터 뒤는 전부 스크립트일 수 있다" 는 **수위선 하나**로 모은다.
+    // 자리마다 `argv.slice(...)` 를 펼쳐 담던 동안 비용이 O(예산 × argv) 였고,
+    // `push(...큰 배열)` 이 인자 상한을 넘겨 큰 명령줄에서 RangeError 로 죽었다 —
+    // 진단 하나가 확장 호스트를 멈추면 안 된다.
+    let openFrom = argv.length;
+    const openAt = (at: number) => { openFrom = Math.min(openFrom, at); };
+    let certain = true;
+    const visited = new Set<string>();
+    const queue: { at: number; scriptMode: boolean }[] = [{ at: 1, scriptMode: false }];
+    const push = (at: number, scriptMode: boolean) => queue.push({ at, scriptMode });
+    // 상태 폭발 방지. 방문한 상태는 다시 펴지 않으므로 갈래 수는 argv 길이에
+    // 비례한다 — 현실적인 명령줄은 예산 안에서 **끝까지** 본다. 64 로 고정해
+    // 두었을 때는 옵션이 65개만 돼도 예산이 끊겼다.
+    let budget = Math.min(8192, argv.length * 4 + 16);
+
+    while (queue.length > 0 && budget-- > 0) {
+        const { at: i, scriptMode } = queue.shift()!;
+        const key = `${i}:${scriptMode ? 1 : 0}`;
+        if (i >= argv.length || visited.has(key)) { continue; }
+        visited.add(key);
+        const token = argv[i];
+
+        const matched = matching.find(entry => entry.scriptSwitch?.(token));
+        if (matched) {
+            const match = matched.scriptSwitch!(token)!;
+            // 스크립트가 스위치 토큰에 붙어 있을 수 있다(`cmd /c"echo …"`).
+            const inline = match.inline;
+            if (matched.consumes === 'rest') {
+                // 붙어 있으면 그 조각과 나머지가 **한 스크립트**다. 따로 열면
+                // 같은 참조가 문맥 없는 후보로 한 번 더 잡혀 과탐이 된다.
+                if (inline) { addScript([inline, ...argv.slice(i + 1)]); }
+                else { openAt(i + 1); }
+                continue;                       // 뒤가 전부 스크립트다 — 더 볼 옵션이 없다
+            }
+            addScript([inline ? inline : argv[i + 1]], matched.opaque);
+            // 축약이 다른 매개변수와도 맞을 때만 뒤를 계속 본다 — 그래야
+            // `-e Bypass -Command …` 를 놓치지 않으면서, 정확한 스위치 뒤의
+            // 인자(`-CommandWithArgs '…' $args`)에는 경고가 붙지 않는다.
+            if (match.ambiguous) {
+                push(i + 1, scriptMode);
+                push(i + 2, scriptMode);
+            }
+            continue;
+        }
+
+        const prefix = matching[0].optionPrefix;
+        const looksLikeOption = token.startsWith(prefix) || (prefix === '-' && token.startsWith('+'));
+        // 스위치 자리에 참조가 있으면 그것이 `-c` 일 수 있다 — 다음 토큰부터가
+        // 스크립트일 수 있으므로 뒤 전부를 후보로 본다. **옵션이 될 수 있는
+        // 모양일 때만이다**: `echo ${ask.value}` 처럼 리터럴로 시작하는 토큰은
+        // 값이 무엇이든 옵션이 아니라 피연산자다. 참조가 들어 있다는 이유만으로
+        // 그것까지 동적 스위치로 보면, 정작 이 토큰 자신의 참조가 후보에서 빠졌다.
+        if (isRef(token) && (looksLikeOption || token.trimStart().startsWith('${'))) {
+            // 스크립트 모드라면 이 토큰이 옵션이 아니라 **첫 피연산자**, 즉
+            // 스크립트 본문일 수도 있다 — 두 해석을 모두 담는다.
+            if (scriptMode) { addScript([token]); }
+            openAt(i + 1);
+            certain = false;
+            continue;
+        }
+        // `--` 뒤는 전부 피연산자다 — 첫 피연산자가 곧 스크립트 자리다.
+        if (token === '--') {
+            if (scriptMode || matching[0].operandIsScript) { addScript([argv[i + 1]]); }
+            continue;
+        }
+        if (matching.some(entry => entry.endsOptions?.test(token))) { continue; }
+        if (!looksLikeOption) {
+            // 옵션이 끝났다. POSIX 셸에서 첫 피연산자는 `-c` 가 있으면
+            // **스크립트 본문**, 없으면 스크립트 **파일 이름**이다 — 다만 ksh 는
+            // `-c` 없이도 그것을 명령 문자열로 실행한다. 그 뒤 토큰은 `$0` ·
+            // `$1` … 이라 어느 쪽이든 스크립트가 아니다.
+            if (scriptMode || matching[0].operandIsScript) { addScript([token]); }
+            continue;
+        }
+        if (matching[0].model === 'posix-shell') {
+            const step = shellOptionStep(token);
+            for (const offset of step.next) { push(i + offset, scriptMode || step.enablesScript); }
+            continue;
+        }
+        if (matching.some(entry => entry.takesArgument?.test(token))) {
+            push(i + 2, scriptMode);            // 인자를 삼키는 것이 확실하다
+        } else if (matching.every(entry => entry.noArgument?.test(token) === true)) {
+            // 삼키지 않는 것이 확실하다. 여기서도 두 갈래로 나가면 실행되지
+            // 않는 값에 경고가 붙는다.
+            push(i + 1, scriptMode);
+        } else {
+            push(i + 1, scriptMode);            // 모른다 — 두 갈래 모두
+            push(i + 2, scriptMode);
+        }
+    }
+    // **예산이 끊겨도 조용해지지 않는다.** `certain=false` 만 남기면 후보가 비어
+    // 호출부가 "위험 없음" 으로 읽는다(`interpreterPositionIsDynamic` 도
+    // `vulnerable` 판정도 후보가 있어야 참이다). 아직 펴 보지 못한 가장 이른
+    // 자리부터 뒤의 참조를 전부 후보에 넣는다.
+    if (queue.length > 0) {
+        certain = false;
+        openAt(queue.reduce((earliest, state) => Math.min(earliest, state.at), argv.length));
+    }
+    if (openFrom < argv.length) { addScript(argv.slice(openFrom)); }
+    // 같은 텍스트를 두 갈래에서 담았을 수 있다.
+    const seen = new Set<string>();
+    return {
+        candidates: found.filter(candidate => {
+            const key = `${candidate.opaque ? 1 : 0}:${candidate.text}`;
+            if (seen.has(key)) { return false; }
+            seen.add(key);
+            return true;
+        }),
+        certain,
+    };
+}
 /** 셸·cmd 에서 문법적 의미를 갖는 문자를 담고 있는가. */
 function containsShellMetacharacter(value: string): boolean {
     return /[;&|`$()<>*?!^%\n\r"'\\]/.test(value) || /\s/.test(value);
 }
 
 /**
- * 중첩 인터프리터 스크립트가 참조하는 값들이 **모양이 제약된 소스**에서만 오는가.
+ * 인자를 **다시 코드로 읽는** 명령. 값이 데이터 자리에 있어도 안전하지 않다.
+ */
+const REINTERPRETING_COMMANDS = new Set([
+    // `trap 'CODE' EXIT` 의 첫 인자는 신호가 올 때 실행되는 **코드**다.
+    'trap', 'eval', 'exec', 'source', '.', 'command', 'builtin', 'env', 'sudo', 'doas', 'xargs',
+    'sh', 'bash', 'zsh', 'ksh', 'dash', 'ash', 'csh', 'tcsh', 'fish', 'busybox',
+    'pwsh', 'powershell', 'cmd', 'start', 'call', 'iex', 'invoke-expression',
+    'python', 'python2', 'python3', 'perl', 'ruby', 'node', 'deno', 'bun', 'awk',
+    'ssh', 'nohup', 'setsid', 'stdbuf', 'time', 'timeout', 'watch', 'nice',
+    // `coproc [NAME] CMD` — 이름이 **선택적**이라 "다음 낱말이 명령" 으로 볼 수 없다.
+    'coproc',
+    // **대입 빌트인.** `export CMD=${v}; $CMD` 는 값이 다음 명령이 된다(실행 확인).
+    // 명령 **앞**의 `TAG=${v}` 만 대입으로 보던 동안 이 형태가 평범한 인자로
+    // 면제됐다 — "대입은 안전한 자리가 아니다" 라는 방침과 정면으로 어긋난다.
+    // taint 분석 없이 닫으려면 이들의 인자를 코드로 보는 수밖에 없다.
+    'export', 'declare', 'typeset', 'local', 'readonly', 'alias', 'set',
+]);
+
+/**
+ * 뒤에 오는 낱말이 **명령**인 셸 예약어 — `if true; then ${v}; fi` 의 `${v}` 는
+ * `;` 뒤가 아니라 `then` 뒤라서, 구분자만 보던 규칙이 데이터로 오인했다
+ * (실제 `/bin/sh` 로 값이 실행되는 것을 확인했다).
+ *
+ * `for`·`case`·`in` 은 뒤가 낱말 목록이라 여기 넣지 않는다.
+ *
+ * **`time`·`coproc` 은 여기 없다.** 둘 다 명령 앞에 토큰이 더 올 수 있어서
+ * (`time -p CMD` · `coproc NAME CMD`) "다음 낱말이 명령" 규칙이 그 토큰을 고정
+ * 명령 이름으로 잡고 진짜 명령을 인자로 오인한다. 대신 {@link REINTERPRETING_COMMANDS}
+ * 에 두어 뒤따르는 낱말을 전부 명령 자리로 본다 — 옵션과 선택적 coprocess 이름을
+ * 따로 파싱하지 않고도 fail-closed 다.
+ */
+const COMMAND_INTRODUCING_KEYWORDS = new Set([
+    'if', 'then', 'else', 'elif', 'while', 'until', 'do', '!',
+]);
+
+/**
+ * 리다이렉션 연산자 — 그 **대상 낱말**도 명령 이름이 아니다.
+ *
+ * 긴 연산자를 **먼저** 시도한다. `&?>>?` 를 앞에 두면 `>&` 에서 `>` 만 맞아
+ * 낱말 길이와 어긋나고, "연산자 그 자체" 판정이 빗나가 대상 추적이 끊긴다.
+ * 같은 이유로 `<>`(읽기·쓰기 열기)도 `<` 보다 앞에 둔다.
+ */
+const REDIRECTION_OPERATOR = /^[0-9]*(>>|<<|<>|>&|<&|>\||&>>?|>|<)/;
+
+/**
+ * 명령 **머리**가 무엇인가. 뒤따르는 값이 데이터인지는 여기서 갈린다.
+ *
+ *   - `safe`: 리터럴이고 재해석 명령이 아니다 — 뒤는 인자다.
+ *   - `reinterpreting`: 리터럴인데 인자를 다시 코드로 읽는다(`eval` · `sh` · `trap` …).
+ *   - `dynamic`: 실행 시점에 정해진다(`$CMD` · `%TOOL%`). 무엇이 될지 모르므로
+ *     `eval` 일 수도 있다 — fail-closed 로 둔다.
+ */
+type CommandHeadKind = 'safe' | 'reinterpreting' | 'dynamic';
+
+/**
+ * 낱말에서 인용·이스케이프를 걷어 **셸이 실제로 보는 이름**을 낸다.
+ *
+ * 이 단계가 없으면 이름을 조금만 흩어 놓아도 목록 비교를 빠져나간다 —
+ * `e\val` · `ev''al` · `tr\ap` 은 셸에게 전부 `eval` · `trap` 이다(실행 확인).
+ * 예전 구현은 양 끝 따옴표 한 쌍만 떼고 `\` 를 **경로 구분자**로 갈랐는데,
+ * POSIX 셸에서 `\` 는 경로가 아니라 이스케이프다 — `e\val` 이 `val` 로 잘려
+ * `eval` 과 맞지 않았다.
+ *
+ * 인용 밖(또는 큰따옴표 안)에 살아 있는 확장이 남으면 `dynamic` 으로 알린다.
+ */
+function unquoteCommandWord(word: string, dialect: Exclude<ScriptDialect, 'unknown'>): { literal: string; dynamic: boolean } {
+    const escape = dialect === 'cmd' ? '^' : (dialect === 'powershell' ? '`' : '\\');
+    let literal = '';
+    let dynamic = false;
+    let single = false;
+    let double = false;
+    for (let i = 0; i < word.length; i++) {
+        const ch = word[i];
+        // 이스케이프는 **다음 한 글자를 리터럴로** 만든다. `e\val` → `eval`.
+        if (!single && ch === escape) {
+            const next = word[i + 1];
+            if (next === undefined) { continue; }
+            // 이스케이프 + 개행은 글자를 남기지 않는 **행 잇기**다 — 셸은 두 줄을
+            // 그냥 잇는다. 개행을 리터럴에 넣으면 `e\⏎val` 이 `eval` 과 맞지 않는다.
+            // dialect 를 가리지 않는다: PowerShell 의 `` ` ``+개행도, cmd 의 `^`+개행도
+            // 같은 행 잇기라 `i`⏎ex` · `c^⏎all` 이 똑같이 빠져나갔다.
+            if (next === '\n' || next === '\r') {
+                i++;
+                if (next === '\r' && word[i + 1] === '\n') { i++; }
+                continue;
+            }
+            literal += next;
+            i++;
+            continue;
+        }
+        if (!double && ch === "'" && dialect !== 'cmd') { single = !single; continue; }
+        if (!single && ch === '"') { double = !double; continue; }
+        if (single) { literal += ch; continue; }
+        // 작은따옴표 밖에서는 확장이 살아 있다 — 큰따옴표 안이어도 마찬가지다.
+        if (dialect === 'cmd' ? (ch === '%' || ch === '!') : ch === '$') { dynamic = true; }
+        // brace expansion 과 glob 은 **이름 자체를 바꾼다** — `e{v,v}al` 도
+        // `/bin/e*al` 도 셸에게는 `eval` 이다(실행 확인). 무엇으로 펼쳐질지
+        // 증명할 수 없으므로 고정 리터럴로 보지 않는다. 인자 자리의 `*.txt` 는
+        // 여기 오지 않는다 — 이 판정은 **머리 낱말**에만 쓴다.
+        if (dialect === 'posix' && /[{}*?[]/.test(ch)) { dynamic = true; }
+        literal += ch;
+    }
+    return { literal, dynamic };
+}
+
+/**
+ * 실행 파일 경로에서 이름만 남겨 재해석 명령 목록과 맞춰 본다 —
+ * `/usr/bin/env` 와 `env` 는 같은 명령이다.
+ *
+ * 경로 구분자는 dialect 마다 다르다. POSIX 에서 `\` 는 이스케이프이므로
+ * {@link unquoteCommandWord} 가 이미 걷어 냈고, 여기서는 `/` 만 가른다.
+ */
+function classifyCommandHead(word: string, dialect: Exclude<ScriptDialect, 'unknown'>): { kind: CommandHeadKind; name: string } {
+    const { literal, dynamic } = unquoteCommandWord(word, dialect);
+    const separator = dialect === 'posix' ? /\// : /[\\/]/;
+    const name = (literal.split(separator).pop() ?? literal).replace(/\.exe$/i, '').toLowerCase();
+    if (dynamic) { return { kind: 'dynamic', name }; }
+    return { kind: REINTERPRETING_COMMANDS.has(name) ? 'reinterpreting' : 'safe', name };
+}
+
+/**
+ * 고정 명령이라도 **이 옵션 뒤부터는** 인자를 코드나 변수로 다시 읽는다.
+ *
+ * 머리가 리터럴이고 재해석 목록에 없으면 뒤를 전부 데이터로 보던 것이 증명되지
+ * 않는 자리다 — 아래 둘은 값이 실제로 실행된다(확인).
+ *
+ *   - `find … -exec CMD …  \;` · `-execdir` · `-ok` · `-okdir` 의 피연산자는 **명령**이다.
+ *   - `printf -v VAR FMT ARG` 는 결과를 **변수**에 넣는다(`printf -v CMD %s ${v}; $CMD`).
+ *
+ * 옵션을 만나면 그 세그먼트의 나머지를 명령 자리로 본다. 어디까지가 피연산자인지
+ * (`\;` · `+`)까지 따라가지 않는 대신 넓게 잡는 fail-closed 다. 일반해는 taint
+ * 분석이고 그건 이 함수의 범위가 아니다.
+ */
+const ARGUMENT_REINTERPRETING_OPTIONS = new Map<string, RegExp>([
+    ['find', /^-(exec|execdir|ok|okdir)$/],
+    ['printf', /^-v$/],
+]);
+
+/**
+ * 스크립트 문법에서 이 참조가 어느 자리인가.
+ *
+ *   - `command`: 명령 **이름** 자리. 문자 집합이 아무리 좁아도 값이 곧 명령이다
+ *     (`sh -c "echo ok; ${ask.value}"` 에 `whoami`).
+ *   - `argument`: 고정된 명령의 인자. 데이터이긴 하지만 값이 `-` 로 시작하면
+ *     **옵션**이 된다(`find … ${v} id \;` 에 `-exec`), 그래서 `--` 유무를 함께 본다.
+ *
+ * **대입(`TAG=${v}`)은 더 이상 안전한 자리로 보지 않는다.** 이 분석은 참조가
+ * 놓인 **자리**만 보지 값이 그 뒤로 어떻게 흐르는지는 보지 않는다 —
+ * `sh -c "CMD=${ask.value}; $CMD"` 는 대입 자체는 데이터지만 다음 줄에서 명령이
+ * 된다. 흐름을 증명하려면 taint 분석이 필요하고 그건 이 함수의 범위가 아니므로,
+ * 증명할 수 없는 쪽을 fail-closed 로 둔다.
+ */
+type ReferencePosition =
+    | { kind: 'command' }
+    /** 리다이렉션 **대상** — 실행되지는 않지만 임의의 파일을 덮어쓴다. */
+    | { kind: 'redirection' }
+    | { kind: 'argument'; afterDoubleDash: boolean };
+
+/**
+ * `cmd` 의 `%…%` · `!…!` 확장 **안쪽**인가.
+ *
+ * 이름의 일부만 보간해도(`%PRE${ask.value}%`) 확장된 값이 다시 해석되므로 참조
+ * 바로 앞 글자만 봐서는 안 되고, 그렇다고 `%` 를 홀짝으로 세면 `%A`(FOR 변수) ·
+ * `%1`(배치 인자) · `%%` 하나에 계산이 통째로 뒤집힌다.
+ *
+ * 그래서 짝짓기를 포기하고 **스크립트 전체의 첫 구분자와 마지막 구분자**만 본다
+ * ({@link cmdExpansionMarks}) — 참조 앞에 여는 후보가 하나라도 있고 뒤에 닫는
+ * 후보가 하나라도 있으면 확장 안으로 친다. **공백을 일부러 넘는다**: Windows
+ * 환경변수 이름에는 공백이 들어갈 수 있어 `%PRE ${v}%` 도 확장이기 때문이다.
+ * 대가는 `echo %PATH% ${v} %HOME%` 같은 형태의 과탐이고, 그것이 의도한 방향이다
+ * (놓치는 쪽이 더 나쁘다).
+ *
+ * **"가장 가까운 구분자를 공백 안에서 찾는" 예전 방식으로 되돌리지 말 것** —
+ * 위의 `%PRE ${v}%` 를 놓친다.
+ */
+function insideCmdExpansion(script: string, refStart: number, refEnd: number, marks: CmdExpansionMarks): boolean {
+    return (marks.percent.first < refStart && marks.percent.last >= refEnd)
+        || (marks.bang.first < refStart && marks.bang.last >= refEnd);
+}
+
+type CmdExpansionMarks = { percent: { first: number; last: number }; bang: { first: number; last: number } };
+
+/**
+ * `cmd` 확장 구분자(`%` · `!`)의 첫/마지막 위치.
+ *
+ * 공백에서 끊던 휴리스틱은 `%PRE ${v}%` 를 놓쳤다 — Windows 환경변수 이름에는
+ * 공백이 들어갈 수 있고 확장은 닫는 구분자까지 읽는다. 그렇다고 짝을 지어 세면
+ * `%A`(FOR 변수)가 앞 구분자와 짝지어져 정작 뒤의 진짜 확장을 놓친다 — cmd 의
+ * 짝짓기는 명령줄과 배치 파일에서도 갈리는 자리다.
+ *
+ * 그래서 **모르는 쪽을 위험으로** 둔다: 참조 앞뒤에 구분자가 하나씩이라도 있으면
+ * 확장 안으로 본다. `echo %PATH% ${v} %HOME%` 같은 형태에 경고가 붙지만, 놓치는
+ * 것보다 낫다.
+ *
+ * **뒤 글자로 `%%`·`%<숫자>`·`%*` 를 알아보고 빼던 것은 틀렸다.** 그 `%` 가
+ * 앞선 확장의 **닫는** 구분자일 수 있기 때문이다 — `%PRE${v}%1` 의 가운데 `%` 는
+ * `%PRE…%` 를 닫는 자리인데 뒤의 `1` 때문에 `%1` 의 시작으로 보고 빼면 확장을
+ * 통째로 놓친다(`%*` · `%%` · `!!` 도 같다). 구분자인지 배치 인자인지는 위치에
+ * 달려 있으므로 미리 뺄 수 없다. 이제 `^` 이스케이프만 제외한다.
+ */
+function cmdExpansionMarks(script: string): CmdExpansionMarks {
+    const scan = (mark: string) => {
+        let first = Number.POSITIVE_INFINITY;
+        let last = Number.NEGATIVE_INFINITY;
+        for (let i = 0; i < script.length; i++) {
+            const ch = script[i];
+            if (ch === '^') { i++; continue; }                       // `^%` · `^!`
+            if (ch !== mark) { continue; }
+            if (first === Number.POSITIVE_INFINITY) { first = i; }
+            last = i;
+        }
+        return { first, last };
+    };
+    return { percent: scan('%'), bang: scan('!') };
+}
+
+/** `cmd` 의 `if` 조건 비교 연산자 (`if 1 EQU 1 …`). */
+const CMD_COMPARISON = /^(equ|neq|lss|leq|gtr|geq)$/i;
+
+/**
+ * `cmd` 의 `if` 조건을 낱말 단위로 소비하는 작은 상태 기계.
+ *
+ * `if [/i] [not] {errorlevel N | exist FILE | defined VAR | cmdextversion N |
+ * A==B | A EQU B}` 다음이 명령 자리다. **모르는 형태는 fail-closed** — 조건의
+ * 일부를 고정 명령 이름으로 잡으면 그 뒤 보간값이 인자로 분류돼 조용해진다.
+ */
+function cmdIfConditionConsumer(): { feed(word: string): 'consumed' | 'done' | 'unknown' } {
+    let state: 'flags' | 'operand' | 'value' | 'comparison' | 'right' = 'flags';
+    return {
+        feed(word) {
+            switch (state) {
+                case 'flags':
+                    if (/^(\/i|not)$/i.test(word)) { return 'consumed'; }
+                    if (/^(errorlevel|exist|defined|cmdextversion)$/i.test(word)) { state = 'value'; return 'consumed'; }
+                    if (word.includes('==')) { return 'done'; }
+                    state = 'comparison';
+                    return 'consumed';                       // 비교의 왼쪽 피연산자
+                case 'value':
+                    return 'done';                           // `errorlevel N` 의 N
+                case 'comparison':
+                    if (!CMD_COMPARISON.test(word)) { return 'unknown'; }
+                    state = 'right';
+                    return 'consumed';
+                case 'right':
+                    return 'done';                           // 비교의 오른쪽 피연산자
+                default:
+                    return 'unknown';
+            }
+        },
+    };
+}
+
+/**
+ * 스크립트를 **왼쪽에서 오른쪽으로 한 번만** 훑으며 각 참조의 문법 자리를
+ * 판정한다.
+ *
+ * 참조마다 처음부터 다시 훑던 동안 진단이 O(참조 수 × 길이) 였다 — 같은 값을
+ * 여러 번 쓴 큰 명령줄에서 초 단위로 늘어졌고, 큰 명령줄에서 죽지 않게 고쳐 둔
+ * 취지와 정면으로 어긋났다. 참조는 정렬돼 들어오므로 상태를 이어서 굴린다.
+ *
+ * 인용·이스케이프·`${…}`·명령 치환은 dialect 규칙대로 처리한다 —
+ * `sh -c "echo \"x; ${v}\""` 의 `;` 는 데이터이지 명령 구분자가 아니다.
+ */
+function createPositionScanner(script: string, dialect: Exclude<ScriptDialect, 'unknown'>) {
+    const escape = dialect === 'cmd' ? '^' : (dialect === 'powershell' ? '`' : '\\');
+    let cursor = 0;
+    let single = false;
+    let double = false;
+    /** 이 뒤로는 `}` 가 없다 — 닫히지 않은 `${` 를 만날 때마다 다시 찾지 않는다. */
+    let braceCloseExhausted = false;
+    // 확장 구분자는 스크립트당 한 번만 센다 — 참조마다 다시 훑으면 O(참조 × 길이) 다.
+    const expansionMarks = dialect === 'cmd'
+        ? cmdExpansionMarks(script)
+        : { percent: { first: Infinity, last: -Infinity }, bang: { first: Infinity, last: -Infinity } };
+
+    /** 진행 중인(아직 공백을 만나지 않은) 낱말. */
+    let pending = '';
+    /**
+     * 진행 중인 낱말이 **명령 치환 결과를 품는다** — `e$(echo val)` 의 리터럴
+     * 조각(`e`)만 봐서는 실제 이름을 알 수 없으므로 머리가 되면 `dynamic` 이다.
+     */
+    let pendingDynamic = false;
+    let headFound = false;
+    let headKind: CommandHeadKind = 'safe';
+    /** 머리의 basename — 옵션 하나로 인자를 코드로 바꾸는 명령을 알아보는 데 쓴다. */
+    let headName = '';
+    let condition: ReturnType<typeof cmdIfConditionConsumer> | undefined;
+    let conditionUnknown = false;
+    let redirectionTargetPending = false;
+    let doubleDashTrusted = false;
+    let sawOptionAfterHead = false;
+
+    /**
+     * `substitution` 은 낱말을 **만드는** 것(`$(…)` · `` `…` ``), `group` 은 문법
+     * 묶음일 뿐 낱말을 만들지 않는 것(`( … )` · `case` 패턴 · cmd `for … in (…)`).
+     */
+    type FrameKind = 'substitution' | 'group' | 'backtick';
+
+    type SegmentState = {
+        pending: string; pendingDynamic: boolean; headFound: boolean; headKind: CommandHeadKind;
+        headName: string;
+        condition: ReturnType<typeof cmdIfConditionConsumer> | undefined; conditionUnknown: boolean;
+        redirectionTargetPending: boolean; doubleDashTrusted: boolean; sawOptionAfterHead: boolean;
+    };
+
+    /**
+     * 치환·subshell 에 들어가기 전의 **바깥 세그먼트**. 닫히면 그 자리로 돌아간다.
+     *
+     * 플래그 하나로 "낱말 안에서 열렸다"만 기억하던 방식은 안쪽 `)`·백틱 하나에
+     * 어긋났다 — `s$(echo $(echo h)) -c ${v}` 는 안쪽 치환이 닫히며 플래그를 지워
+     * 바깥 낱말이 다시 리터럴로 읽혔다(실제로는 `sh -c` 가 되어 값이 실행된다).
+     * 스택으로 두면 중첩이 몇 겹이든 짝이 맞고, 덤으로 `echo $(date) ${v}` 처럼
+     * 치환이 **끝난 뒤** 바깥 명령이 이어지는 형태의 과탐도 사라진다(예전에는
+     * 닫는 자리에서 세그먼트를 초기화해 뒤 값이 명령 자리로 보였다).
+     */
+    const substitutionStack: { outer: SegmentState | undefined; kind: FrameKind; single: boolean; double: boolean }[] = [];
+    /**
+     * 이 깊이를 넘으면 바깥 세그먼트를 **담지 않는다**. 프레임 자체는 계속 쌓아
+     * 짝을 맞추되(열 때마다 하나), 되살릴 것이 없으니 닫을 때 fail-closed 다.
+     * 병적으로 깊은 중첩(`$($($(…`)에서 상태 사본이 메모리를 갉아먹는 것을 막는다.
+     */
+    const MAX_CAPTURED_DEPTH = 128;
+
+    const captureSegment = (): SegmentState => ({
+        pending, pendingDynamic, headFound, headKind, headName,
+        condition, conditionUnknown, redirectionTargetPending, doubleDashTrusted, sawOptionAfterHead,
+    });
+    const restoreSegment = (s: SegmentState) => {
+        pending = s.pending; pendingDynamic = s.pendingDynamic;
+        headFound = s.headFound; headKind = s.headKind; headName = s.headName;
+        condition = s.condition; conditionUnknown = s.conditionUnknown;
+        redirectionTargetPending = s.redirectionTargetPending;
+        doubleDashTrusted = s.doubleDashTrusted; sawOptionAfterHead = s.sawOptionAfterHead;
+    };
+
+    const startSegment = () => {
+        pending = '';
+        pendingDynamic = false;
+        headFound = false;
+        headKind = 'safe';
+        headName = '';
+        condition = undefined;
+        conditionUnknown = false;
+        redirectionTargetPending = false;
+        doubleDashTrusted = false;
+        sawOptionAfterHead = false;
+    };
+
+    /** 치환이 닫힌 자리에서 뒤 글자가 같은 낱말을 잇는가. */
+    const gluesForward = (at: number, to: number) =>
+        at + 1 < to && !/[\s;&|()<>{}]/.test(script[at + 1]);
+
+    /**
+     * 치환·그룹을 연다 — 바깥 세그먼트를 밀어 두고 안쪽을 새로 시작한다.
+     *
+     * 진행 중인 낱말(`pending`)은 **일부러 flush 하지 않는다.** 치환이 낱말 안에서
+     * 열렸으면(`e$(…)`) 그 조각은 아직 낱말의 일부이고, 밖에서 열렸으면 애초에
+     * 비어 있다. 프레임이 그대로 안고 있다가 닫힐 때 되돌린다.
+     *
+     * 인용 상태도 프레임에 싣고 **안쪽은 인용 없이 새로 시작한다.** `$( … )` 안은
+     * 독립된 스크립트라 바깥 `"` 가 미치지 않는다 — 이것을 안 하면
+     * `echo "$( (true); eval ${v} )"` 에서 안쪽 `(true)` 의 `)` 가 바깥 `$(` 를
+     * 닫은 것으로 오인돼 값이 면제되고(실행 확인), 반대로 안전한
+     * `echo "$(printf %s ${v})"` 에는 과탐이 붙었다.
+     */
+    const openSubstitution = (kind: FrameKind) => {
+        const outer = substitutionStack.length < MAX_CAPTURED_DEPTH ? captureSegment() : undefined;
+        substitutionStack.push({ outer, kind, single, double });
+        startSegment();
+        single = false;
+        double = false;
+    };
+
+    /**
+     * 치환·그룹을 닫는다.
+     *
+     * **치환**(`$(…)` · `` `…` ``)은 낱말을 만든다 — 바깥 세그먼트로 돌아가고 그
+     * 낱말을 동적으로 표시한다. **그룹**(`( … )`)은 낱말을 만들지 않으므로 되살리면
+     * 안 된다: `for %f in (a b) do ${v}` 의 `do` 가 앞 명령의 인자로 읽혀 뒤가 통째로
+     * 면제되고, `case x in (x) ${v};; esac` 도 같은 방식으로 빠져나간다(실행 확인).
+     */
+    const closeSubstitution = (kinds: readonly FrameKind[], at: number, to: number) => {
+        endWord();                        // 치환 **안**의 마지막 낱말
+        // **최상단 프레임만** 본다. 맞는 종류를 찾을 때까지 파고들면 그 사이의
+        // 프레임이 조용히 버려져 바깥 상태가 어긋나고, 백틱마다 스택 전체를 훑던
+        // 검사와 함께 O(중첩 깊이 × 길이) 를 만들었다(360KB 입력에 9.7초).
+        const frame = substitutionStack[substitutionStack.length - 1];
+        if (!frame || !kinds.includes(frame.kind)) { startSegment(); return; }
+        substitutionStack.pop();
+        single = frame.single;
+        double = frame.double;
+        // 그룹은 낱말을 만들지 않으므로 바깥 명령을 되살리지 않는다. 상한을 넘어
+        // 담지 못한 프레임도 되살릴 것이 없다 — 둘 다 fail-closed.
+        if (frame.kind === 'group' || !frame.outer) { startSegment(); return; }
+        restoreSegment(frame.outer);
+        pendingDynamic = true;
+        if (!gluesForward(at, to)) { endWord(); }  // 낱말이 여기서 끝난다
+    };
+
+    const consumeWord = (word: string, dynamic: boolean) => {
+        if (redirectionTargetPending) { redirectionTargetPending = false; return; }
+        if (condition) {
+            const verdict = condition.feed(word);
+            if (verdict === 'consumed') { return; }
+            if (verdict === 'done') { condition = undefined; return; }
+            conditionUnknown = true;
+            condition = undefined;
+            return;
+        }
+        // 리다이렉션은 명령 이름 **앞뒤 어디서나** 온다 — `headFound` 분기 뒤로
+        // 미루면 `echo ok > out/${v}` 의 `>` 가 그냥 인자로 삼켜져 대상 낱말을
+        // 리다이렉션으로 판정할 기회 자체가 사라진다.
+        const redirection = REDIRECTION_OPERATOR.exec(word);
+        if (redirection) {
+            // 낱말이 연산자 **그 자체**일 때만 다음 낱말이 대상이다.
+            // `>file` 은 대상이 이미 붙어 있으므로 다음 낱말은 평범한 인자다.
+            if (redirection[0].length === word.length) { redirectionTargetPending = true; }
+            return;
+        }
+        if (headFound) {
+            // 고정 명령이라도 이 옵션 뒤부터는 인자가 코드·변수다(`find -exec` ·
+            // `printf -v`) — 그 세그먼트의 나머지를 명령 자리로 본다.
+            const trigger = ARGUMENT_REINTERPRETING_OPTIONS.get(headName);
+            if (trigger && trigger.test(word.toLowerCase())) { headKind = 'reinterpreting'; return; }
+            // **`--` 앞에 옵션이 있으면 그 `--` 를 믿을 수 없다.** `curl -o -- ${v}`
+            // 의 `--` 는 `-o` 가 삼킨 파일 이름이라 값은 여전히 옵션으로 읽힌다.
+            if (word === '--' && !sawOptionAfterHead) { doubleDashTrusted = true; }
+            else if (word.startsWith('-')) { sawOptionAfterHead = true; }
+            return;
+        }
+        if (dialect === 'cmd' && word.toLowerCase() === 'if') {
+            // `if` 뒤에는 **조건**이 오고 그 다음이 명령이다. 예약어처럼 한 낱말만
+            // 건너뛰면 조건(`1==1` · `1 EQU 1`)을 고정 명령 이름으로 오인한다.
+            condition = cmdIfConditionConsumer();
+            return;
+        }
+        if (COMMAND_INTRODUCING_KEYWORDS.has(word.toLowerCase())) { return; }
+        if (dialect === 'posix' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) { return; }   // 선행 대입
+        headFound = true;
+        const classified = classifyCommandHead(word, dialect);
+        headName = classified.name;
+        // 치환을 품은 머리(`$(echo ev)al` · `e$(echo val)`)는 무엇이 될지 알 수 없다.
+        headKind = dynamic ? 'dynamic' : classified.kind;
+    };
+
+    function endWord() {
+        if (pending.length === 0 && !pendingDynamic) { return; }
+        consumeWord(pending, pendingDynamic);
+        pending = '';
+        pendingDynamic = false;
+    }
+
+    /** `to` 직전까지 읽는다. */
+    const advanceTo = (to: number) => {
+        for (; cursor < to; cursor++) {
+            const ch = script[cursor];
+            if (!single && ch === escape && cursor + 1 < to) {
+                pending += ch + script[cursor + 1];
+                cursor++;
+                // **CRLF 행 잇기는 세 글자 한 덩어리다.** `\r` 만 먹고 `\n` 을 남기면
+                // 그 개행이 아래에서 명령 구분자가 되어, 이어 붙어야 할 낱말이 갈린다
+                // (`i` + `ex` 로 쪼개져 `iex` 를 놓쳤다).
+                if (script[cursor] === '\r' && script[cursor + 1] === '\n' && cursor + 1 < to) {
+                    pending += script[cursor + 1];
+                    cursor++;
+                }
+                continue;
+            }
+            if (!double && ch === "'" && dialect !== 'cmd') { single = !single; pending += ch; continue; }
+            if (!single && ch === '"') { double = !double; pending += ch; continue; }
+            if (single) { pending += ch; continue; }
+            // `${…}` 는 매개변수 확장이다 — 그 안의 `{`·`}` 는 명령 묶음이 아니다.
+            if (ch === '$' && script[cursor + 1] === '{' && !braceCloseExhausted) {
+                const close = script.indexOf('}', cursor + 2);
+                // `}` 가 더 없다는 사실을 기억한다 — 닫히지 않은 `${` 가 많으면
+                // 매번 끝까지 다시 훑어 O(n²) 가 된다(같은 함정을 토크나이저에서
+                // 이미 한 번 밟았다).
+                if (close === -1) { braceCloseExhausted = true; }
+                if (close === -1 || close >= to) { pending += script.slice(cursor, to); cursor = to; break; }
+                pending += script.slice(cursor, close + 1);
+                cursor = close;
+                continue;
+            }
+            // 명령 치환은 큰따옴표 안에서도 살아 있다.
+            if (ch === '$' && script[cursor + 1] === '(') { openSubstitution('substitution'); cursor++; continue; }
+            if (dialect === 'powershell' && ch === '@' && script[cursor + 1] === '(') { openSubstitution('substitution'); cursor++; continue; }
+            if (dialect === 'posix' && ch === '`') {
+                // 여는 백틱인지 닫는 백틱인지는 **최상단 프레임**으로 판별한다.
+                // 스택 전체를 훑으면(`some`) 백틱마다 O(깊이) 라 깊은 중첩에서
+                // 진단이 초 단위로 늘어졌다.
+                const top = substitutionStack[substitutionStack.length - 1];
+                if (top && top.kind === 'backtick') { closeSubstitution(['backtick'], cursor, to); }
+                else { openSubstitution('backtick'); }
+                continue;
+            }
+            if (double) { pending += ch; continue; }
+            // `{`·`}` 는 POSIX 에서 **독립된 낱말일 때만** 그룹 경계다. 낱말 안에
+            // 있으면 brace expansion 이라 `e{v,v}al` 은 셸에게 `eval` 이다(실행 확인)
+            // — 무조건 끊으면 세 개의 고정 명령처럼 읽혀 뒤의 값이 인자로 빠져나갔고,
+            // 반대로 `echo a{b,c} ${v}` 는 세그먼트가 초기화되는 바람에 값이
+            // 명령으로 **오탐**됐다.
+            //
+            // **PowerShell 은 해당 없다.** 거기서 `{` 는 붙어 있어도 늘 스크립트
+            // 블록을 열고 그 안은 코드다 — `{iex ${v}}` 를 낱말로 묶으면 바깥 명령이
+            // 머리로 남아 값이 인자로 면제된다. **cmd 도 해당 없다** — 거기엔 중괄호
+            // 문법 자체가 없어 평범한 글자다(무조건 경계로 두면 `echo {x} ${v}` 에
+            // 과탐이 붙는다).
+            if (dialect === 'posix' && (ch === '{' || ch === '}')) {
+                if (pending.length === 0 && !pendingDynamic
+                    && (cursor + 1 >= to || /[\s;&|()<>]/.test(script[cursor + 1]))) {
+                    endWord(); startSegment(); continue;
+                }
+                pending += ch;
+                continue;
+            }
+            if (dialect === 'cmd' && (ch === '{' || ch === '}')) { pending += ch; continue; }
+            // 개행은 공백이기 **전에** 명령 구분자다 — 공백으로 먼저 걸러 내면
+            // `echo ok\n${v}` 의 `${v}` 가 앞 명령의 인자로 읽힌다.
+            // POSIX·cmd 의 맨 `(` 는 **그룹**이다(subshell · `for … in (a b)`) —
+            // 낱말을 만들지 않으므로 닫힐 때 바깥 명령을 되살리면 안 된다. 프레임은
+            // 그래도 밀어 두어야 중첩된 `$( ( ) )` 에서 안쪽 `)` 가 바깥 치환
+            // 프레임을 잘못 꺼내지 않는다.
+            //
+            // PowerShell 의 `( … )` 는 **값을 내는 부분식**이라 `$( … )` 쪽에 가깝다 —
+            // 그룹으로 보면 `Write-Output (Get-Date) ${v}` 에서 바깥 명령이 사라져
+            // 과탐이 붙는다.
+            if (ch === '(') { openSubstitution(dialect === 'powershell' ? 'substitution' : 'group'); continue; }
+            if (ch === ')') { closeSubstitution(['substitution', 'group'], cursor, to); continue; }
+            if (/[;&|{}\n\r]/.test(ch)) { endWord(); startSegment(); continue; }
+            // 리다이렉션 연산자는 **공백 없이도** 낱말을 가른다 — 셸은
+            // `echo prefix>out/x` 를 `echo prefix` 와 `>out/x` 로 읽어 `out/x` 에
+            // 쓴다. 낱말의 시작만 보던 동안 이 형태가 인자로 분류돼, 값이
+            // `../../target` 이면 의도한 디렉터리 밖 파일을 대상으로 삼을 수
+            // 있었다. 여기서 앞 낱말을 끊고 연산자부터 다시 모으면 붙어 있는
+            // 대상(`>out/${v}`)을 판정하던 경로가 그대로 쓰인다.
+            if (ch === '>' || ch === '<') {
+                // **연산자에 붙은 숫자는 IO number 다** — `2>out` 의 `2` 는 명령
+                // 이름이 아니라 리다이렉션의 일부다. 여기서 무조건 낱말을 끊으면
+                // `2` 가 고정 명령 머리로 확정되고, 뒤따르는 `${v}`(실제로 실행되는
+                // 명령 이름)가 안전한 인자로 분류돼 면제됐다. POSIX 처럼 **낱말
+                // 전체가 숫자**일 때만 붙여 둔다 — `prefix2>` 의 `prefix2` 는 셸도
+                // IO number 로 읽지 않으므로 그대로 끊는다.
+                if (!/^[0-9]+$/.test(pending)) { endWord(); }
+                // 연산자는 **한 덩어리로** 모은다. 글자마다 끊으면 `>>` 의 두 번째
+                // `>` 가 첫 번째의 **대상**으로 읽혀(`consumeWord` 가 대상 낱말을
+                // 소비하고 플래그를 내린다) 추적이 그 자리에서 끊긴다.
+                while (cursor < to && /[<>&|]/.test(script[cursor])) { pending += script[cursor]; cursor++; }
+                cursor--;                                    // for 문의 `cursor++` 보정
+                continue;
+            }
+            if (/\s/.test(ch)) { endWord(); continue; }
+            pending += ch;
+        }
+    };
+
+    return {
+        /** 참조 하나의 자리. 참조는 **왼쪽에서 오른쪽 순서**로 물어야 한다. */
+        positionAt(refStart: number, refEnd: number): ReferencePosition {
+            advanceTo(refStart);
+            // `cmd` 는 `%NAME%`(지연 확장이면 `!NAME!`)를 **치환한 뒤 다시 해석**한다.
+            // 이름이 아무리 안전해도 그 값에 `&` 가 있으면 명령이 된다 — `envPick`
+            // 을 면제하지 않는 것과 같은 위험이다.
+            const inExpansion = dialect === 'cmd' && insideCmdExpansion(script, refStart, refEnd, expansionMarks);
+            const glued = pending.length > 0;
+            const answer = ((): ReferencePosition => {
+                if (inExpansion) { return { kind: 'command' }; }
+                if (conditionUnknown || condition) { return { kind: 'command' }; }   // 모르는 조건 — fail-closed
+                // 명령 이름을 아직 못 만났으면 이 참조가 곧 명령 이름이다.
+                // 선행 대입(`TAG=${v}`)도 여기 들어간다 — 자리만으로는 그 값이
+                // 뒤에서 `$TAG` 로 실행되지 않는다는 것을 증명할 수 없다.
+                if (!headFound) { return { kind: 'command' }; }
+                // 재해석 명령이든 실행 시점에 정해지는 머리든 값이 코드가 될 수 있다.
+                if (headKind !== 'safe') { return { kind: 'command' }; }
+                // 리다이렉션 **대상**이면 임의의 파일을 읽고 쓴다.
+                //   - 붙어 있는 경우(`>out/${v}`): 지금 낱말이 연산자로 시작한다.
+                //   - 떨어져 있는 경우(`> out/${v}`): 직전 낱말이 연산자 **그 자체**라
+                //     `redirectionTargetPending` 이 서 있다. **대상 낱말 어디에 있든**
+                //     참조는 대상의 일부다 — 앞에 prefix 가 붙었는지(`out/`)는 상관없다.
+                //     `>file ${v}` 처럼 대상이 이미 끝났으면 플래그가 내려가 인자가 된다.
+                if (glued && REDIRECTION_OPERATOR.test(pending)) { return { kind: 'redirection' }; }
+                if (redirectionTargetPending) { return { kind: 'redirection' }; }
+                return { kind: 'argument', afterDoubleDash: doubleDashTrusted };
+            })();
+            // 참조 텍스트는 지금 낱말의 일부다(`pre${v}post`).
+            pending += script.slice(refStart, refEnd);
+            cursor = refEnd;
+            return answer;
+        },
+    };
+}
+
+/**
+ * 스크립트 문법에서 이 참조가 어느 자리인가. 참조 하나만 물을 때 쓴다 —
+ * 여러 개면 {@link createPositionScanner} 로 한 번에 훑는다.
+ */
+function referencePosition(script: string, refStart: number, refEnd: number, dialect: ScriptDialect): ReferencePosition {
+    if (dialect === 'unknown') {
+        // 무엇으로 읽힐지 모르면 셋 중 **가장 엄한** 판정을 취한다.
+        const all = (['posix', 'cmd', 'powershell'] as const)
+            .map(d => createPositionScanner(script, d).positionAt(refStart, refEnd));
+        return strictestPosition(all);
+    }
+    return createPositionScanner(script, dialect).positionAt(refStart, refEnd);
+}
+
+/** 여러 dialect 판정 중 가장 엄한 것. */
+function strictestPosition(all: ReferencePosition[]): ReferencePosition {
+    return all.find(p => p.kind === 'command')
+        ?? all.find(p => p.kind === 'redirection')
+        ?? all.find(p => p.kind === 'argument' && !p.afterDoubleDash)
+        ?? all[0];
+}
+
+
+/**
+ * 중첩 인터프리터 스크립트가 참조하는 값들이 **모양이 제약된 소스**에서만 오고,
+ * 그 값이 스크립트 문법에서 **데이터 자리**에 놓이는가.
  *
  * 면제는 **런타임이 실제로 보장하는 것만** 인정해야 한다. 처음 구현은
  * `envPick` 을 무조건 면제했는데, 환경변수 **이름**이 안전해도 `cmd` 는
@@ -771,42 +1863,365 @@ function containsShellMetacharacter(value: string): boolean {
  * 그대로 뚫린다 — 우리 CHANGELOG 가 같은 이유로 번들 액션을 고쳐 놓고
  * Doctor 는 반대로 판정하고 있었다.
  */
-function nestedInterpreterRefsAreConstrained(script: string, tasks: Task[]): boolean {
-    const refs = [...script.matchAll(/\$\{([^}.]+)(?:\.[^}]*)?\}/g)].map(m => m[1]);
-    if (refs.length === 0) { return true; }
-    // **태스크를 가리키지 않는 참조도 안전하지 않다.** `${workspaceFolder}` 는
-    // 사용자 폴더 이름이고 거기에 `;` 나 `&` 가 들어갈 수 있다.
-    return refs.every(ref => {
-        const source = tasks.find(t => t.id === ref) as any;
-        if (!source) { return false; }
-        // 검증 **이후에** 붙는 prefix/suffix 는 패턴이 보장하지 못한다.
-        if (containsShellMetacharacter(String(source.prefix ?? '')) ||
-            containsShellMetacharacter(String(source.suffix ?? ''))) {
+function nestedInterpreterRefsAreConstrained(candidate: ScriptCandidate, tasksById: Map<string, Task>): boolean {
+    // base64 처럼 텍스트로 문법을 따질 수 없는 자리는 면제하지 않는다 —
+    // 허용 문자와 디코딩된 코드의 의미가 무관하다(`-EncodedCommand`).
+    if (candidate.opaque) { return false; }
+    const script = candidate.text;
+    // 참조를 읽는 규칙은 한곳(`parseReferenceAlternatives`)에만 둔다. 여기서
+    // 자체 정규식을 쓰던 동안 `??` 체인의 **첫 대안만** 보였다 —
+    // `${safe.value ?? free.value}` 에서 `safe` 만 검사하고 통과시켰으므로,
+    // 첫 대안이 제약된 inputBox 이기만 하면 뒤에 무엇이 오든 조용했다.
+    // 어느 대안이 값을 낼지는 런타임에 갈리므로 **전부** 제약돼야 안전하다.
+    const matches = [...script.matchAll(/\$\{([^}]+)\}/g)];
+    // 스캐너는 스크립트를 **한 번만** 훑는다 — 참조마다 처음부터 다시 읽으면
+    // 진단이 O(참조 수 × 길이) 가 된다. dialect 를 모르면 셋 다 굴려 가장 엄한
+    // 판정을 취한다.
+    const dialects: Exclude<ScriptDialect, 'unknown'>[] =
+        candidate.dialect === 'unknown' ? ['posix', 'cmd', 'powershell'] : [candidate.dialect];
+    const scanners = dialects.map(d => createPositionScanner(script, d));
+    // **참조마다 자기 자리로 판정한다.** 자리를 한데 모아 하나의 플래그로 쓰면
+    // `sh -c "TAG=${tag.value} echo ${arg.value}"` 처럼 대입 값과 인자가 섞인
+    // 스크립트에서 한쪽 자리의 위험이 다른 쪽 값에 옮겨 붙는다.
+    return matches.every(match => {
+        const start = match.index ?? 0;
+        const position = strictestPosition(
+            scanners.map(scanner => scanner.positionAt(start, start + match[0].length))
+        );
+        // 값이 명령 자리에 놓이면 문자 집합이 아무리 좁아도 면제하지 않는다.
+        // 리다이렉션 대상도 마찬가지다 — 실행되지는 않지만 임의의 파일을 덮어쓴다.
+        if (position.kind === 'command' || position.kind === 'redirection') { return false; }
+        // 인자 자리라도 값이 `-` 로 시작할 수 있으면 **옵션**이 되고, 옵션 하나가
+        // 명령 실행으로 이어질 수 있다(`find … -exec id \;`). `--` 뒤라면 안전하다.
+        const optionInjectable = position.kind === 'argument' && !position.afterDoubleDash;
+        // **태스크를 가리키지 않는 참조도 안전하지 않다.** `${workspaceFolder}` 는
+        // 사용자 폴더 이름이고 거기에 `;` 나 `&` 가 들어갈 수 있다.
+        return parseReferenceAlternatives(match[1]).every(alt => {
+            // 참조마다 태스크 배열을 훑던 동안 진단이 O(참조 수 × 태스크 수) 였다.
+            const source = tasksById.get(alt.head) as any;
+            if (!source) { return false; }
+            // 검증 **이후에** 붙는 prefix/suffix 는 패턴이 보장하지 못한다.
+            if (containsShellMetacharacter(String(source.prefix ?? '')) ||
+                containsShellMetacharacter(String(source.suffix ?? ''))) {
+                return false;
+            }
+            // prefix 가 붙으면 값의 **첫 글자**는 prefix 의 첫 글자다 — 옵션이
+            // 되는지는 값이 아니라 prefix 로 갈린다.
+            const prefixed = typeof source.prefix === 'string' && source.prefix.length > 0;
+            const canLeadWithDash = (fromValue: boolean) => (prefixed ? String(source.prefix).startsWith('-') : fromValue);
+            if (source.type === 'inputBox') {
+                if (!patternMeaningfullyConstrains(source.validatePattern)) { return false; }
+                return !optionInjectable || !canLeadWithDash(patternCanStartWithDash(source.validatePattern));
+            }
+            if (source.type === 'quickPick') {
+                // 항목 자체에 메타문자가 있으면 고정 목록이라도 안전하지 않다.
+                if (!Array.isArray(source.items) || source.itemsFromCommand) { return false; }
+                return source.items.every((entry: any) => {
+                    const label = typeof entry === 'string' ? entry : entry?.label;
+                    if (typeof label !== 'string') { return false; }
+                    if (optionInjectable && canLeadWithDash(label.startsWith('-'))) { return false; }
+                    return !containsShellMetacharacter(label);
+                });
+            }
+            // `envPick` 은 면제하지 않는다 — 위 주석 참조.
             return false;
-        }
-        if (source.type === 'inputBox') { return patternMeaningfullyConstrains(source.validatePattern); }
-        if (source.type === 'quickPick') {
-            // 항목 자체에 메타문자가 있으면 고정 목록이라도 안전하지 않다.
-            if (!Array.isArray(source.items) || source.itemsFromCommand) { return false; }
-            return source.items.every((entry: any) => {
-                const label = typeof entry === 'string' ? entry : entry?.label;
-                return typeof label === 'string' && !containsShellMetacharacter(label);
-            });
-        }
-        // `envPick` 은 면제하지 않는다 — 위 주석 참조.
-        return false;
+        });
     });
+}
+
+/** `[…]` 안에서 `-` 를 매치할 수 있는가(리터럴이거나 범위에 걸리거나). */
+function charClassIncludesDash(classBody: string): boolean {
+    let i = 0;
+    let previous: number | undefined;
+    while (i < classBody.length) {
+        if (classBody[i] === '\\' && (classBody[i + 1] === 'w' || classBody[i + 1] === 'd')) {
+            i += 2; previous = undefined; continue;         // `\w` · `\d` 에는 `-` 가 없다
+        }
+        if (classBody[i] === '-' && previous !== undefined && i + 1 < classBody.length) {
+            const right = readRegexLiteral(classBody, i + 1);
+            if (right === undefined) { return true; }       // 못 읽었다 — 모르면 위험으로
+            if (previous <= 0x2d && 0x2d <= right.code) { return true; }
+            i = right.next; previous = undefined; continue;
+        }
+        const literal = readRegexLiteral(classBody, i);
+        if (literal === undefined) { return true; }
+        if (literal.code === 0x2d) { return true; }
+        previous = literal.code;
+        i = literal.next;
+    }
+    return false;
+}
+
+/** 짝이 맞는 `)` 의 인덱스. 클래스와 이스케이프는 건너뛴다. */
+function matchingParenthesis(body: string, open: number): number | undefined {
+    let depth = 0;
+    for (let i = open; i < body.length; i++) {
+        const ch = body[i];
+        if (ch === '\\') { i++; continue; }
+        if (ch === '[') {
+            const end = scanSafeCharClass(body, i);
+            if (end === undefined) { return undefined; }
+            i = end - 1;
+            continue;
+        }
+        if (ch === '(') { depth++; }
+        if (ch === ')' && --depth === 0) { return i; }
+    }
+    return undefined;
+}
+
+/** 맨 바깥 `|` 로 가른다. 클래스·그룹 안의 `|` 는 건드리지 않는다. */
+function splitTopLevelAlternatives(body: string): string[] {
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < body.length; i++) {
+        const ch = body[i];
+        if (ch === '\\') { i++; continue; }
+        if (ch === '[') {
+            const end = scanSafeCharClass(body, i);
+            if (end === undefined) { return [body]; }
+            i = end - 1;
+            continue;
+        }
+        if (ch === '(') { depth++; continue; }
+        if (ch === ')') { depth--; continue; }
+        if (ch === '|' && depth === 0) { parts.push(body.slice(start, i)); start = i + 1; }
+    }
+    parts.push(body.slice(start));
+    return parts;
+}
+
+/**
+ * 이 패턴이 매치하는 값이 `-` 로 **시작할 수 있는가**. 모르면 `true`(위험).
+ *
+ * 문자 집합만 좁혀도 `-` 로 시작할 수 있으면 값이 인자가 아니라 **옵션**이 된다 —
+ * `find … ${ask.value} id \;` 에 `-exec` 를 넣으면 명령이 실행된다. 그래서 권장
+ * 패턴은 `^[A-Za-z0-9_][A-Za-z0-9_-]*$` 처럼 **첫 글자**를 막아야 한다.
+ */
+/** 원자 하나를 읽은 결과. `canBeEmpty` 가 없으면 빈 그룹으로 검사를 우회할 수 있다. */
+type RegexAtom = { canStartWithDash: boolean; canBeEmpty: boolean; next: number };
+
+/**
+ * 원자 하나와 그 수량자를 읽는다.
+ *
+ * **`canBeEmpty` 를 따로 계산해야 한다.** 그룹이 빈 문자열도 매치하면
+ * (`^(ok|)-exec$` · `^([a-z]*)-exec$`) 그 뒤 원자가 첫 글자가 되는데, 그룹이
+ * `-` 로 시작하는지만 보던 동안 `-exec` 가 검사를 그대로 통과했다.
+ */
+function readRegexAtom(body: string, i: number): RegexAtom | undefined {
+    let canStartWithDash: boolean;
+    let canBeEmpty: boolean;
+    let end: number;
+    const ch = body[i];
+    if (ch === '(') {
+        const close = matchingParenthesis(body, i);
+        if (close === undefined) { return undefined; }
+        const inner = body.slice(body.startsWith('(?:', i) ? i + 3 : i + 1, close);
+        const alternatives = splitTopLevelAlternatives(inner);
+        canStartWithDash = alternatives.some(alt => sequenceCanStartWithDash(alt));
+        canBeEmpty = alternatives.some(alt => sequenceCanBeEmpty(alt));
+        end = close + 1;
+    } else if (ch === '[') {
+        const close = scanSafeCharClass(body, i);
+        if (close === undefined) { return undefined; }
+        canStartWithDash = charClassIncludesDash(body.slice(i + 1, close - 1));
+        canBeEmpty = false;
+        end = close;
+    } else if (ch === '\\' && (body[i + 1] === 'w' || body[i + 1] === 'd')) {
+        canStartWithDash = false;
+        canBeEmpty = false;
+        end = i + 2;
+    } else {
+        const literal = readRegexLiteral(body, i);
+        if (literal === undefined) { return undefined; }
+        canStartWithDash = literal.code === 0x2d;
+        canBeEmpty = false;
+        end = literal.next;
+    }
+    // 수량자를 **원자에 적용한다.** `{0}` 은 아예 나타나지 않으므로 `-` 로 시작할
+    // 수 없고, `*` · `?` · `{0,n}` 은 없을 수도 있다. 뒤의 lazy 표시(`*?` · `{0,3}?`)
+    // 까지 한 수량자로 삼킨다 — 남겨 두면 그 `?` 가 **다음 원자**로 읽혀
+    // `^[a-z]*?-exec$` 가 "`-` 로 시작할 수 없다" 로 판정됐다.
+    const quantifier = /^(\*|\+|\?|\{(\d+)(,(\d*))?\})\??/.exec(body.slice(end));
+    if (quantifier) {
+        const exact = quantifier[2] !== undefined ? Number(quantifier[2]) : undefined;
+        const zeroAllowed = quantifier[1] === '*' || quantifier[1] === '?' || exact === 0;
+        const neverAppears = exact === 0 && quantifier[3] === undefined;
+        if (neverAppears) { canStartWithDash = false; }
+        if (zeroAllowed) { canBeEmpty = true; }
+        end += quantifier[0].length;
+    }
+    return { canStartWithDash, canBeEmpty, next: end };
+}
+
+function sequenceCanStartWithDash(body: string): boolean {
+    let i = 0;
+    while (i < body.length) {
+        const atom = readRegexAtom(body, i);
+        if (atom === undefined) { return true; }        // 못 읽었다 — 모르면 위험으로
+        if (atom.canStartWithDash) { return true; }
+        // 이 원자가 **없을 수도** 있으면 다음 원자가 첫 글자가 된다.
+        if (!atom.canBeEmpty) { return false; }
+        i = atom.next;
+    }
+    return false;   // 전부 비워질 수 있으면 빈 값이다 — `-` 로 시작하지 않는다
+}
+
+/** 이 시퀀스가 빈 문자열을 매치할 수 있는가. 모르면 `true`(위험한 쪽). */
+function sequenceCanBeEmpty(body: string): boolean {
+    let i = 0;
+    while (i < body.length) {
+        const atom = readRegexAtom(body, i);
+        if (atom === undefined || !atom.canBeEmpty) { return atom === undefined; }
+        i = atom.next;
+    }
+    return true;
+}
+
+/** {@link sequenceCanStartWithDash} 를 앵커 벗긴 패턴 본문에 적용한다. */
+function patternCanStartWithDash(pattern: unknown): boolean {
+    if (typeof pattern !== 'string' || pattern.length < 2) { return true; }
+    return splitTopLevelAlternatives(pattern.slice(1, -1)).some(alt => sequenceCanStartWithDash(alt));
+}
+
+/** 셸·cmd 에서 문법적 의미가 없는 **평범한 글자**인가. */
+function isSafeLiteralChar(ch: string): boolean {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) { return false; }   // 제어문자 — 분석 대상 밖
+    return !containsShellMetacharacter(ch);
+}
+
+/** `from`~`to` 코드포인트 구간에 위험한 글자가 하나도 없는가. */
+function codePointRangeIsSafe(from: number, to: number): boolean {
+    if (to < from) { return false; }
+    // 셸 메타문자는 전부 ASCII 다 — 0x7f 위는 검사할 것이 없다.
+    for (let code = from; code <= Math.min(to, 0x7f); code++) {
+        if (!isSafeLiteralChar(String.fromCodePoint(code))) { return false; }
+    }
+    return true;
+}
+
+/**
+ * 문자 클래스 안에서 리터럴 한 글자를 읽는다.
+ *
+ * `\` 뒤가 영숫자면 클래스 축약(`\s` · `\W`)이나 제어·수치 이스케이프
+ * (`\t` · `\x3b` = `;`)다 — 어느 쪽도 눈으로 읽히지 않으므로 분석 불가로 본다.
+ */
+function readRegexLiteral(source: string, i: number): { code: number; next: number } | undefined {
+    const ch = source[i];
+    if (ch === undefined) { return undefined; }
+    if (ch !== '\\') {
+        const code = source.codePointAt(i)!;
+        return { code, next: i + (code > 0xffff ? 2 : 1) };
+    }
+    const escaped = source[i + 1];
+    if (escaped === undefined || /[A-Za-z0-9]/.test(escaped)) { return undefined; }
+    const code = source.codePointAt(i + 1)!;
+    return { code, next: i + 1 + (code > 0xffff ? 2 : 1) };
+}
+
+/**
+ * 문자 클래스(`[…]`)가 **안전한 글자만** 담고 있는가. 반환값은 `]` 다음 위치이고,
+ * 분석할 수 없으면 `undefined`.
+ */
+function scanSafeCharClass(body: string, start: number): number | undefined {
+    let i = start + 1;
+    if (body[i] === '^') { return undefined; }   // 부정 클래스 — 무엇이든 들어올 수 있다
+    /** 직전에 읽은 리터럴 — 범위(`a-z`)의 왼쪽 끝이 될 수 있는 것. */
+    let previous: number | undefined;
+    while (i < body.length) {
+        const ch = body[i];
+        if (ch === ']') { return i + 1; }
+        if (ch === '-' && previous !== undefined && body[i + 1] !== ']' && i + 1 < body.length) {
+            const right = readRegexLiteral(body, i + 1);
+            if (right === undefined || !codePointRangeIsSafe(previous, right.code)) { return undefined; }
+            i = right.next;
+            previous = undefined;
+            continue;
+        }
+        if (ch === '\\' && (body[i + 1] === 'w' || body[i + 1] === 'd')) {
+            i += 2;                              // `[A-Za-z0-9_]` · `[0-9]` — 전부 안전한 글자다
+            previous = undefined;
+            continue;
+        }
+        const literal = readRegexLiteral(body, i);
+        if (literal === undefined || !isSafeLiteralChar(String.fromCodePoint(literal.code))) { return undefined; }
+        previous = literal.code;
+        i = literal.next;
+    }
+    return undefined;   // 닫히지 않았다
+}
+
+/**
+ * 정규식 본문이 **안전한 글자만** 매치시키는가.
+ *
+ * 표본 실행으로는 증명되지 않는다. 문자 몇 개를 넣어 보는 것은 "그 문자
+ * **하나만으로는** 통과하지 못한다"는 뜻일 뿐이라, `^(ok|x;id)$` 도 `^.{4}$` 도
+ * 표본을 전부 거부하면서 `x;id` 는 통과시킨다. 그래서 패턴을 **직접 읽는다** —
+ * 분석할 수 있는 문법(리터럴 · 안전한 문자 클래스 · 그룹 · 선택 · 수량자)만
+ * 인정하고, 그 밖(`.` · `\s` · 부정 클래스 · lookaround · 역참조 · 수치
+ * 이스케이프)은 전부 "모른다" 로 본다. 모르면 면제하지 않는다.
+ *
+ * 이 규칙은 문서가 권하는 형태(`^[A-Za-z0-9_-]+$`)를 그대로 통과시킨다.
+ */
+function regexMatchesOnlySafeChars(body: string): boolean {
+    let i = 0;
+    /** 그룹 깊이 — 맨 바깥의 `|` 는 앵커를 갈라놓는다. */
+    let depth = 0;
+    while (i < body.length) {
+        const ch = body[i];
+        if (ch === '\\' && (body[i + 1] === 'w' || body[i + 1] === 'd')) { i += 2; continue; }
+        if (ch === '[') {
+            const end = scanSafeCharClass(body, i);
+            if (end === undefined) { return false; }
+            i = end;
+            continue;
+        }
+        if (ch === '(') {
+            // 캡처 그룹과 `(?:` 만 안다. lookaround · 이름 있는 그룹은 분석하지 않는다.
+            if (body.startsWith('(?', i) && !body.startsWith('(?:', i)) { return false; }
+            depth++;
+            i += body.startsWith('(?:', i) ? 3 : 1;
+            continue;
+        }
+        if (ch === ')') {
+            if (--depth < 0) { return false; }
+            i++;
+            continue;
+        }
+        if (ch === '|') {
+            // **맨 바깥의 `|` 는 앵커가 대안마다 붙지 않는다는 뜻이다.** `^a|b$` 는
+            // "`a` 로 시작" **또는** "`b` 로 끝" 이라, `a; rm -rf /` 를 통과시킨다.
+            // 그룹 안의 `|`(`^(a|b)$`)는 앵커가 전체를 감싸므로 그대로 본다.
+            if (depth === 0) { return false; }
+            i++;
+            continue;
+        }
+        if (ch === '?' || ch === '*' || ch === '+') { i++; continue; }
+        if (ch === '{') {
+            const quantifier = /^\{\d+(,\d*)?\}/.exec(body.slice(i));
+            if (!quantifier) { return false; }
+            i += quantifier[0].length;
+            continue;
+        }
+        // `.` 은 무엇이든 받고, 중간의 `^`·`$` 는 대안마다 앵커가 따로 있다는 뜻이다.
+        if (ch === '.' || ch === '^' || ch === '$') { return false; }
+        const literal = readRegexLiteral(body, i);
+        if (literal === undefined || !isSafeLiteralChar(String.fromCodePoint(literal.code))) { return false; }
+        i = literal.next;
+    }
+    return depth === 0;
 }
 
 /**
  * `validatePattern` 이 값의 모양을 **실제로** 좁히는가.
  *
  * `".*"` 처럼 무엇이든 통과시키는 패턴이나 컴파일되지 않는 패턴(`"["` — 런타임이
- * 검증을 건너뛴다)을 제약으로 인정하면, 면제가 곧 우회로가 된다. 셸·cmd 에서
- * 의미를 갖는 문자를 **하나라도** 통과시키면 제약으로 보지 않는다.
+ * 검증을 건너뛴다)을 제약으로 인정하면, 면제가 곧 우회로가 된다.
  */
 function patternMeaningfullyConstrains(pattern: unknown): boolean {
-    if (typeof pattern !== 'string' || pattern.length === 0) { return false; }
+    if (typeof pattern !== 'string' || pattern.length < 2) { return false; }
     let re: RegExp;
     try {
         re = new RegExp(pattern);
@@ -815,6 +2230,12 @@ function patternMeaningfullyConstrains(pattern: unknown): boolean {
     }
     // 앵커가 없으면 부분 일치라 앞뒤에 무엇이든 붙일 수 있다.
     if (!pattern.startsWith('^') || !pattern.endsWith('$')) { return false; }
+    // 앵커(맨 앞 `^`, 맨 뒤 `$`)는 구조이므로 본문에서 뺀다. 마지막 `$` 가
+    // 이스케이프된 리터럴이면(`^a\$`) 본문 끝에 `\` 만 남아 분석 불가가 된다.
+    if (!regexMatchesOnlySafeChars(pattern.slice(1, -1))) { return false; }
+    // 표본은 **증명이 아니라 거름망**이다 — 통과시키는 값을 찾으면 확실히
+    // 위험하지만, 못 찾았다고 안전한 것은 아니다(그래서 위 분석이 본체다).
+    // 파서에 구멍이 났을 때 마지막으로 걸리는 그물이라 남겨 둔다.
     const dangerous = [';', '&', '|', '`', '$', '(', ')', '<', '>', '*', '?', '!', '^', '%', '"', "'", '\\', ' ', '\n'];
     return dangerous.every(char => !re.test(`a${char}b`) && !re.test(char));
 }
@@ -858,6 +2279,22 @@ function analyzeActionTasks(
             tasksById.set(t.id, t);
         }
     }
+    // 보간 문맥과 "아직 실행되지 않은 태스크" 집합은 **한 번만** 만들고 태스크를
+    // 지날 때마다 갱신한다. 태스크마다 새로 만들면 둘 다 O(태스크 수²) 다.
+    const sharedInterpolationContext: any = Object.assign(Object.create(null), {
+        workspaceFolder: baseDir,
+        extensionPath: input.extensionPath,
+    });
+    /**
+     * 내장 참조는 **태스크 결과보다 세다.** 런타임은 태스크마다 문맥을 새로 만들며
+     * `Object.assign(…, allResults, { workspaceFolder, extensionPath })` 로 내장 값을
+     * 마지막에 덮는다(`extension.ts`). 여기서는 문맥을 한 번만 만들어 재사용하므로
+     * `id: "workspaceFolder"` 태스크가 지나가면 내장 문자열이 결과 객체로 덮여
+     * 뒤따르는 `${workspaceFolder}` 가 `variable.unresolved` 로 오진됐다 —
+     * 런타임은 정상 해석하는데 진단만 경고하던 자리다.
+     */
+    const BUILTIN_CONTEXT_KEYS = new Set(['workspaceFolder', 'extensionPath']);
+    const forwardTaskIds = new Set<string>(knownTaskIds);
 
     for (const task of tasks) {
         if (!task || typeof task.id !== 'string') {
@@ -865,10 +2302,11 @@ function analyzeActionTasks(
         }
         // null-prototype — 런타임과 같은 규칙. 평범한 객체면 `${constructor.name}`
         // 같은 상속 키가 결과처럼 해석되어 진단이 런타임과 어긋난다.
-        const interpolationContext: any = Object.assign(Object.create(null), allResults, {
-            workspaceFolder: baseDir,
-            extensionPath: input.extensionPath,
-        });
+        //
+        // 태스크마다 `allResults` 를 **복사**하던 동안 진단이 O(태스크 수²) 였다
+        // (태스크 4,000개에 2.2초). 문맥은 한 번만 만들고, 시뮬레이션 결과가
+        // 나올 때마다 그 자리에 더한다 — 어차피 이전 태스크 결과만 보인다.
+        const interpolationContext = sharedInterpolationContext;
 
         const interpolated: (string | undefined)[] = [];
         const visitString = (value: unknown): string | undefined => {
@@ -926,6 +2364,8 @@ function analyzeActionTasks(
             let addedForward = false;
             for (const { head } of parseReferenceAlternatives(expression)) {
                 if (!head || Object.prototype.hasOwnProperty.call(allResults, head)) { continue; }
+                // 내장 키는 여기서도 덮지 않는다 — 공유 문맥과 같은 규칙이다.
+                if (BUILTIN_CONTEXT_KEYS.has(head)) { continue; }
                 const forward = tasksById.get(head);
                 if (!forward) { continue; }
                 augmented[head] = simulateTaskResult(forward);
@@ -1063,12 +2503,7 @@ function analyzeActionTasks(
         // 문자열을 비교하게 되어 그 분기가 영영 한쪽으로 굳는다.
         const resolvedWhenVar = visitString(task.when?.var);
 
-        const forwardTaskIds = new Set<string>();
-        for (const id of knownTaskIds) {
-            if (!Object.prototype.hasOwnProperty.call(allResults, id)) {
-                forwardTaskIds.add(id);
-            }
-        }
+        // 전방 집합은 위에서 한 번 만들고 태스크가 끝날 때마다 하나씩 뺀다.
         // 전방 태스크 참조는 **그 태스크가 실제로 낼 키에 한해** 관용한다.
         // head 만 보고 통과시키면 `${producer.safe}` 같은 오타가 앞쪽 producer
         // 를 가리킬 때만 조용히 넘어간다 (뒤쪽이면 findTypoRefs 가 잡는다).
@@ -1202,8 +2637,8 @@ function analyzeActionTasks(
                 range: findIdLine(input.rawText, task.id),
                 severity: 'warning',
                 code: 'when.literal-operand',
-                message: `Task '${item.id}.${task.id}' puts a '\${…}' reference in a 'when' operand (${literalOperands.join(', ')}). Only 'when.var' is interpolated — the operand is compared verbatim, so the comparison is against the literal text and never matches a real value. The reference still counts as a dependency, so it also orders this task after the one it names and skips this task when that one is skipped by its own condition.`,
-                messageKo: `Task '${item.id}.${task.id}'의 'when' 피연산자에 '\${…}' 참조가 있습니다(${literalOperands.join(', ')}). 보간되는 것은 'when.var'뿐이며 피연산자는 적힌 그대로 비교되므로, 실제 값과는 결코 일치하지 않습니다. 그런데도 그 참조는 **의존성으로는 그대로 잡혀** 실행 순서를 바꾸고, 가리키는 태스크가 조건으로 꺼지면 이 태스크까지 함께 건너뜁니다.`,
+                message: `Task '${item.id}.${task.id}' puts a '\${…}' reference in a 'when' operand (${literalOperands.join(', ')}). Only 'when.var' is interpolated — the operand is compared verbatim, so the comparison is against the literal text and never matches a real value. The reference is not a dependency either (0.7.16) — it does not order this task after the one it names, so the comparison simply never matches.`,
+                messageKo: `Task '${item.id}.${task.id}'의 'when' 피연산자에 '\${…}' 참조가 있습니다(${literalOperands.join(', ')}). 보간되는 것은 'when.var'뿐이며 피연산자는 적힌 그대로 비교되므로, 실제 값과는 결코 일치하지 않습니다. 이 참조는 의존성으로도 잡히지 않으므로(0.7.16) 실행 순서도 바뀌지 않습니다 — 비교가 그냥 영영 일치하지 않을 뿐입니다.`,
             });
         }
         if (joinedArgRefs.length > 0) {
@@ -1299,12 +2734,41 @@ function analyzeActionTasks(
                 ? task.args.filter((a): a is string => typeof a === 'string')
                 : [];
             // **모든 branch 를 본다** — 앞의 안전한 branch 가 뒤를 가리면 안 된다.
-            const vulnerable = commandBranches.some(branch => {
-                const script = nestedInterpreterScript([...tokenizeCommandLine(branch), ...extraArgs]);
-                return script !== undefined
-                    && /\$\{[^}]+\}/.test(script)
-                    && !nestedInterpreterRefsAreConstrained(script, tasks);
-            });
+            // 각 branch 는 다시 **가능한 실제 argv 로 펼쳐** 본다: 실행 파일이나
+            // 스위치가 참조로 적혀 있으면 템플릿 그대로는 어떤 인터프리터와도
+            // 맞지 않아 검사를 통째로 비껴갔다.
+            let dynamicInterpreter = false;
+            // `some` 은 첫 참에서 멈춘다 — 뒤 branch 의 `dynamicInterpreter` 를
+            // 보지 못해 플래그가 선언 순서에 따라 달라졌다. 전부 평가한 뒤 합친다.
+            const vulnerable = commandBranches.map(branch => {
+                const argv = [...tokenizeCommandLine(branch), ...extraArgs];
+                const { variants, truncated } = enumerateArgvCandidates(argv, tasks);
+                // **하나라도** 미지수면 경고한다. `every` 로 보면 후보에 안전한
+                // 것이 섞여 있다는 이유로 위험한 변형이 묻힌다(`['node','sh']`).
+                // 상한에 걸려 못 본 후보가 있어도 마찬가지다 — 잘린 쪽에 셸이
+                // 있었을 수 있으므로 조용해지지 않는다.
+                if (truncated || variants.some(variant => interpreterPositionIsDynamic(variant))) {
+                    dynamicInterpreter = true;
+                }
+                return variants.some(variant => {
+                    // 스크립트에 **놓일 수 있는** 참조를 전부 본다. 위치를 확정하지
+                    // 못한 경우(동적 스위치·모르는 옵션)는 뒤따르는 참조가 모두
+                    // 후보이므로, 그중 하나라도 제약이 없으면 경고한다.
+                    const { candidates } = scriptCandidates(variant);
+                    return candidates.some(candidate => !nestedInterpreterRefsAreConstrained(candidate, tasksById));
+                });
+            }).some(Boolean);
+            if (dynamicInterpreter && !vulnerable) {
+                findings.push({
+                    filePath: input.filePath,
+                    sourceLabel: input.sourceLabel,
+                    range: findIdLine(input.rawText, task.id),
+                    severity: 'warning',
+                    code: 'command.dynamic-interpreter',
+                    message: `Task '${item.id}.${task.id}' decides its executable (or its script switch) from an interpolated \${...} value, so what actually runs cannot be determined here. If it resolves to a shell (\`sh -c\`, \`cmd /c\`, \`powershell -Command\`, …), other interpolated values in the same argv become script text and are re-parsed as syntax. Use a fixed executable, or pass values through 'env' so they never appear in the script text.`,
+                    messageKo: `Task '${item.id}.${task.id}'는 실행 파일(또는 스크립트 스위치)을 보간값 \${...} 으로 정하므로, 무엇이 실행될지 여기서는 알 수 없습니다. 그것이 셸(\`sh -c\`, \`cmd /c\`, \`powershell -Command\` 등)로 풀리면 같은 argv 의 다른 보간값이 스크립트 텍스트가 되어 문법으로 다시 읽힙니다. 실행 파일을 고정하거나, 값을 'env' 로 넘겨 스크립트 문자열에 넣지 마세요.`,
+                });
+            }
             if (vulnerable) {
                 findings.push({
                     filePath: input.filePath,
@@ -1353,6 +2817,10 @@ function analyzeActionTasks(
         // 있을 때만 capture 를 돌린다)은 `simulateTaskResultWithCaptures` 한
         // 곳에만 두어 Preview / 전방 참조 판정과 같은 모델을 쓰게 한다.
         allResults[task.id] = simulateTaskResultWithCaptures(task);
+        if (!BUILTIN_CONTEXT_KEYS.has(task.id)) {
+            sharedInterpolationContext[task.id] = allResults[task.id];
+        }
+        forwardTaskIds.delete(task.id);
     }
 }
 
@@ -1426,14 +2894,15 @@ function analyzeDependsOn(
     const graph = buildTaskGraph(tasks);
     const cycle = detectGraphCycle(graph);
     if (cycle) {
+        const path = formatCyclePath(cycle);
         findings.push({
             filePath: input.filePath,
             sourceLabel: input.sourceLabel,
             range: findIdLine(input.rawText, cycle[0]),
             severity: 'error',
             code: 'dependsOn.cycle',
-            message: `Task dependency cycle in action '${item.id}' (includes auto-inferred deps from \${id.x} references): ${cycle.join(' -> ')}.`,
-            messageKo: `Action '${item.id}'에 task 의존성 순환이 있습니다(\${id.x} 참조에서 자동 추론된 의존성 포함): ${cycle.join(' -> ')}.`,
+            message: `Task dependency cycle in action '${item.id}' (includes auto-inferred deps from \${id.x} references): ${path}.`,
+            messageKo: `Action '${item.id}'에 task 의존성 순환이 있습니다(\${id.x} 참조에서 자동 추론된 의존성 포함): ${path}.`,
         });
     }
 }

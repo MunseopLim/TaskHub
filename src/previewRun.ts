@@ -20,7 +20,6 @@ import {
     interpolatePipelineVariables,
     evaluateTaskCondition,
     parseReferenceAlternatives,
-    projectActivePlatformBranches,
     resolveArchiveTaskPath,
     interpolateCommandPreservingTokens,
     expandArgTemplate,
@@ -29,8 +28,9 @@ import {
     selectPlatformValue,
     buildTaskGraph,
     validateTaskGraph,
+    formatCyclePath,
     isInsideWorkspaceRoots,
-} from './pipelineUtils';
+    walkInterpolatedTaskStrings,} from './pipelineUtils';
 
 export interface PreviewOptions {
     workspaceFolder: string;
@@ -163,7 +163,9 @@ export const UNRESOLVED_VAR_RE = /\$\{[^}]+\}/g;
 export function findTypoRefs(
     task: Task,
     allResults: Record<string, SimulatedResult>,
-    selfId: string
+    selfId: string,
+    /** {@link analyzeCoalesceRefs} 의 `platform` 과 같은 뜻. */
+    platform?: NodeJS.Platform
 ): string[] {
     const found = new Set<string>();
     // **대안 하나하나를 본다.** `??` 는 어긋난 참조를 조용히 건너뛰고 다음
@@ -179,7 +181,7 @@ export function findTypoRefs(
                 return;
             }
         }
-    });
+    }, platform);
     return Array.from(found);
 }
 
@@ -201,8 +203,8 @@ function visitTaskRefs(
     /** {@link analyzeCoalesceRefs} 의 `platform` 과 같은 뜻. */
     platform?: NodeJS.Platform
 ): void {
-    const visit = (value: unknown): void => {
-        if (typeof value === 'string') {
+    const visit = (value: string): void => {
+        {
             for (const m of value.matchAll(/\$\{([^}]+)\}/g)) {
                 // `??` 체인은 **대안 하나하나**가 참조다. 통째로 쪼개면
                 // `pickFile.path ?? pickFolder.path` 의 키가
@@ -211,23 +213,15 @@ function visitTaskRefs(
                 if (refs.length === 0) { continue; }
                 onRef(m[0], refs);
             }
-            return;
-        }
-        if (value === null || typeof value !== 'object') { return; }
-        if (Array.isArray(value)) {
-            for (const item of value) { visit(item); }
-            return;
-        }
-        for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-            if (k === 'capture' || k === 'diagnostics' || k === 'dependsOn') { continue; }
-            visit(v);
         }
     };
     // **런타임이 실제로 읽는 자리만 본다.** `itemsFromCommand` 가 있으면 정적
     // `items` 는 실행되지 않고(런타임이 목록을 덮어쓴다), Preview 는 지금 이
     // 기계의 OS branch 만 본다. 보간 pass 들은 이미 그 규칙을 지키고 있어서,
     // 여기만 전체를 훑으면 **체인에만** 없던 경고가 붙는다.
-    visit(projectActivePlatformBranches(task, platform));
+    // **순회를 공유한다.** 같은 제외 집합을 쓰면서 순회를 따로 두면, 한쪽은
+    // 경로로 다른 쪽은 마지막 키로 비교해 곧바로 어긋난다(0.7.16 에서 그랬다).
+    for (const str of walkInterpolatedTaskStrings(task, platform)) { visit(str); }
 }
 
 /**
@@ -245,7 +239,9 @@ function visitTaskRefs(
 export function findUncapturedOutputRefs(
     task: Task,
     tasksById: Map<string, Task>,
-    selfId: string
+    selfId: string,
+    /** {@link analyzeCoalesceRefs} 의 `platform` 과 같은 뜻. */
+    platform?: NodeJS.Platform
 ): Map<string, string> {
     const found = new Map<string, string>();
     // capture 이름 집합은 head 마다 한 번만 만든다 — 대안마다 다시 훑으면
@@ -267,7 +263,7 @@ export function findUncapturedOutputRefs(
                 return;
             }
         }
-    });
+    }, platform);
     return found;
 }
 
@@ -851,7 +847,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                     lines.push(`  ✗ task '${issue.taskId}' depends on unknown task '${issue.missingId}'`);
                     break;
                 case 'cycle':
-                    lines.push(`  ✗ dependency cycle: ${issue.cycle.join(' → ')}`);
+                    lines.push(`  ✗ dependency cycle: ${formatCyclePath(issue.cycle, ' → ')}`);
                     break;
             }
         }
@@ -974,16 +970,13 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                     );
                     return buildNativeCommandInvocation(preserved, []).display;
                 };
+                // **고른 뒤 보간한다** — 런타임과 같은 순서. 모든 branch 를 보간하면
+                // 이 기계에서 실행되지 않을 branch 의 값 때문에 Preview 가 실패하거나
+                // 없는 문제를 보고한다.
                 let command: string | undefined;
-                if (typeof task.command === 'string') {
-                    command = interpolateCommandString(task.command);
-                } else if (task.command && typeof task.command === 'object') {
-                    const cloned: any = JSON.parse(JSON.stringify(task.command));
-                    for (const os of Object.keys(cloned)) {
-                        cloned[os] = interpolateCommandString(cloned[os]);
-                    }
+                if (typeof task.command === 'string' || (task.command && typeof task.command === 'object')) {
                     try {
-                        command = getCommandString(cloned);
+                        command = interpolateCommandString(getCommandString(task.command));
                     } catch {
                         command = '(no command for current platform)';
                     }
@@ -1036,16 +1029,16 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 // Dynamic source: items come from a command's stdout at runtime.
                 // Resolve it like `command` (string or per-platform object) so
                 // its ${...} refs are surfaced in the interpolation check.
+                // **고른 뒤 보간한다** — 런타임·command 와 같은 순서. 모든 branch 를
+                // 보간하면 이 기계에서 실행되지 않을 branch 의 값 때문에 Preview 가
+                // 실패하거나 없는 문제를 보고한다.
                 let itemsFromCommand: string | undefined;
-                if (typeof task.itemsFromCommand === 'string') {
-                    itemsFromCommand = interpolatePipelineVariables(task.itemsFromCommand, interpolationContext);
-                } else if (task.itemsFromCommand && typeof task.itemsFromCommand === 'object') {
-                    const cloned: any = JSON.parse(JSON.stringify(task.itemsFromCommand));
-                    for (const os of Object.keys(cloned)) {
-                        cloned[os] = interpolatePipelineVariables(cloned[os], interpolationContext);
-                    }
+                if (typeof task.itemsFromCommand === 'string'
+                    || (task.itemsFromCommand && typeof task.itemsFromCommand === 'object')) {
                     try {
-                        itemsFromCommand = getCommandString(cloned);
+                        itemsFromCommand = interpolatePipelineVariables(
+                            getCommandString(task.itemsFromCommand), interpolationContext
+                        );
                     } catch {
                         itemsFromCommand = '(no command for current platform)';
                     }
@@ -1299,11 +1292,11 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         //     따로 말하고 위 목록에서는 뺀다.
         const unresolved = findUnresolved(interpolated, makeForwardRefTolerance(forwardTaskIds, tasksById, task.id))
             .filter(r => !chainLiterals.has(r));
-        const typos = findTypoRefs(task, allResults, task.id).filter(r => !chainLiterals.has(r));
+        const typos = findTypoRefs(task, allResults, task.id, process.platform).filter(r => !chainLiterals.has(r));
         // 미캡처 shell/command 출력 참조는 전용 경고로 따로 표시 — 일반
         // unresolved 목록에서 제외해 중복 보고를 막는다(M9).
         const uncaptured = new Map(
-            Array.from(findUncapturedOutputRefs(task, tasksById, task.id))
+            Array.from(findUncapturedOutputRefs(task, tasksById, task.id, process.platform))
                 .filter(([literal]) => !chainLiterals.has(literal))
         );
         const merged = Array.from(new Set([...unresolved, ...typos])).filter(r => !uncaptured.has(r));

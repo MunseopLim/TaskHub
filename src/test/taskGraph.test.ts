@@ -5,6 +5,8 @@ import {
     buildTaskGraph,
     detectGraphCycle,
     validateTaskGraph,
+    formatGraphIssue,
+    formatCyclePath,
     actionUsesParallelTasks,
     TaskScheduler,
     extractVariableReferences,
@@ -521,6 +523,9 @@ suite('detectGraphCycle', () => {
         assert.ok(cycle, 'expected a cycle to be reported');
         // Cycle closes on the same node — first and last entries match.
         assert.strictEqual(cycle![0], cycle![cycle!.length - 1]);
+        // 경로 자체가 사용자에게 보인다(`formatGraphIssue` · `dependsOn.cycle`) —
+        // 순회 순서를 바꾸면 여기서 잡힌다.
+        assert.deepStrictEqual(cycle, ['A', 'B', 'A']);
     });
 
     test('detects 3-cycle through dependsOn', () => {
@@ -532,6 +537,70 @@ suite('detectGraphCycle', () => {
         const cycle = detectGraphCycle(g);
         assert.ok(cycle);
         assert.strictEqual(cycle![0], cycle![cycle!.length - 1]);
+        assert.deepStrictEqual(cycle, ['A', 'C', 'B', 'A']);
+    });
+
+    test('survives a cycle whose path spans the whole pipeline', () => {
+        // `barrierDeps` 가 "직전 순차 태스크"로 축약되면서 순차 파이프라인은
+        // 조밀 그래프가 아니라 **사슬**이 됐고, DFS 깊이가 태스크 수만큼 자란다.
+        // 재귀 DFS 는 여기서 `RangeError: Maximum call stack size exceeded` 로
+        // 죽었다 — 조밀 그래프에서는 마지막 태스크가 `T0` 에 직접 붙어 순환이
+        // 짧게 발견돼 드러나지 않던 자리다.
+        const N = 12000;
+        const tasks = [mkTask({ id: 'T0', command: `use \${T${N - 1}.output}` })];
+        for (let i = 1; i < N; i++) { tasks.push(mkTask({ id: `T${i}` })); }
+
+        const g = buildTaskGraph(tasks, { platform: 'linux' });
+        assert.strictEqual(g.nodes.size, N);
+        const cycle = detectGraphCycle(g);
+        assert.ok(cycle, '긴 경로의 순환을 찾지 못했다');
+        assert.strictEqual(cycle![0], cycle![cycle!.length - 1]);
+    });
+
+    test('returns null for a deep acyclic chain', () => {
+        // 순환이 없을 때도 끝까지 내려간다.
+        //
+        // 의존성을 **앞으로** 걸어야 실제로 깊어진다. 뒤로 거는 사슬
+        // (`T_i → T_{i-1}`, 순차 배리어가 만드는 모양)은 루트를 선언 순서로 도는
+        // 탓에 `T0` 가 먼저 BLACK 이 되어 최대 깊이가 2 다 — 재귀 구현으로도
+        // 통과하므로 회귀 테스트가 되지 못한다. `parallel: true` 로 두어 배리어가
+        // 반대 방향 간선을 덧붙이지 않게 한다.
+        const N = 12000;
+        const tasks: Task[] = [];
+        for (let i = 0; i < N; i++) {
+            tasks.push(mkTask({ id: `T${i}`, parallel: true, dependsOn: i + 1 < N ? [`T${i + 1}`] : [] }));
+        }
+        assert.strictEqual(detectGraphCycle(buildTaskGraph(tasks, { platform: 'linux' })), null);
+    });
+
+    test('formatGraphIssue folds a pipeline-length cycle path', () => {
+        // 실행 오류 메시지와 Preview 보고서도 같은 경로를 싣는다. Doctor 만
+        // 접으면 여기서 12,000개가 그대로 쏟아진다(측정: 108,910자) —
+        // 반복 DFS 로 스택 오버플로가 사라지면서 **새로 도달 가능해진** 자리다.
+        const N = 12000;
+        const tasks = [mkTask({ id: 'T0', command: `use \${T${N - 1}.output}` })];
+        for (let i = 1; i < N; i++) { tasks.push(mkTask({ id: `T${i}` })); }
+
+        const issues = validateTaskGraph(tasks, buildTaskGraph(tasks, { platform: 'linux' }));
+        const cycle = issues.find(i => i.kind === 'cycle');
+        assert.ok(cycle, '순환을 찾지 못했다');
+
+        const rendered = formatGraphIssue(cycle!);
+        assert.ok(rendered.length < 300, `실행용 메시지가 여전히 길다 (${rendered.length}자)`);
+        assert.ok(rendered.includes('more)'), `경로를 접지 않았다: ${rendered.slice(0, 200)}`);
+        // 양 끝은 남는다 — 순환이 닫히는 지점이 보여야 고칠 수 있다.
+        assert.ok(rendered.includes('T0 ->') && rendered.endsWith('-> T0'),
+            `순환이 닫히는 지점을 잘라 냈다: ${rendered.slice(0, 200)}`);
+    });
+
+    test('formatCyclePath leaves short paths alone and honors the separator', () => {
+        assert.strictEqual(formatCyclePath(['A', 'B', 'A']), 'A -> B -> A');
+        // Preview Run 은 유니코드 화살표를 쓴다 — 같은 함수를 공유하되 표기만 다르다.
+        assert.strictEqual(formatCyclePath(['A', 'B', 'A'], ' → '), 'A → B → A');
+        // 경계: 13개(=6*2+1)까지는 그대로, 14개부터 접는다.
+        const ids = (n: number) => Array.from({ length: n }, (_, i) => `T${i}`);
+        assert.ok(!formatCyclePath(ids(13)).includes('more)'));
+        assert.ok(formatCyclePath(ids(14)).includes('(2 more)'));
     });
 
     test('detects cycle through auto-inferred dependency', () => {

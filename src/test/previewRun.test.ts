@@ -22,6 +22,12 @@ function baseOptions() {
     };
 }
 
+/** 지금 플랫폼의 branch 키 하나를 담은 객체. */
+function currentBranch(value: string): Record<string, string> {
+    const key = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : 'linux';
+    return { [key]: value };
+}
+
 suite('buildPreviewReport', () => {
     test('includes How to read legend with placeholder/unresolved explanations', () => {
         const item: ActionItem = {
@@ -59,6 +65,48 @@ suite('buildPreviewReport', () => {
         // 자리표시자에 공백이 없더라도, 렌더가 토큰 단위 인용을 거친 뒤
         // 다시 토큰화되어 **하나의 인자**로 보여야 한다.
         assert.match(report, /cat\s+\S*<fileDialog:pick:path>/);
+    });
+
+    test('비활성 OS branch 의 오타를 오탐하지 않는다', () => {
+        // Preview 는 **이 기계에서 실제로 실행될 것**을 보여 준다. 다른 OS
+        // branch 의 참조까지 검사하면 고칠 수 없는 경고가 붙는다 — Doctor 는
+        // 설정 파일 전체를 보는 것이 목적이라 그쪽에서 검사하는 것이 맞다.
+        const other = process.platform === 'win32' ? 'macos' : 'windows';
+        const item: ActionItem = {
+            id: 'a.branch', title: 'branch',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'pick', type: 'fileDialog' },
+                    { id: 'run', type: 'command', command: { [other]: 'echo ${pick.typo}', ...currentBranch('echo ok') } },
+                ]
+            }
+        } as unknown as ActionItem;
+        const report = buildPreviewReport(item, baseOptions());
+        assert.ok(!/unresolved variables:.*pick\.typo/.test(report),
+            `비활성 branch 의 참조를 미해결로 보고했다:\n${report}`);
+    });
+
+    test('보간하지 않는 필드의 참조를 오탐하지 않는다', () => {
+        // `confirmLabel` 은 런타임이 보간하지 않는다 — 그 안의 `${…}` 는
+        // 리터럴로 남는 것이 정상이므로 경고할 것이 없다.
+        const item: ActionItem = {
+            id: 'a.label', title: 'label',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'pick', type: 'fileDialog' },
+                    { id: 'ask', type: 'confirm', message: 'go?', confirmLabel: '${pick.typo}' },
+                ]
+            }
+        } as unknown as ActionItem;
+        const report = buildPreviewReport(item, baseOptions());
+        // 리포트가 필드 값을 그대로 **보여 주는** 것은 정상이다. 검사 대상은
+        // 그것을 **미해결 참조로 보고하는가** 이다.
+        assert.ok(!/unresolved variables:.*pick\.typo/.test(report),
+            `보간하지 않는 필드를 미해결로 보고했다:\n${report}`);
+        assert.ok(!/fix before running/i.test(report),
+            `고칠 것이 없는데 수정을 요구했다:\n${report}`);
     });
 
     test('summary has helpful hint about runtime behavior', () => {
@@ -427,6 +475,25 @@ suite('buildPreviewReport', () => {
         assert.match(report, /Graph issues/);
         assert.match(report, /dependency cycle/);
         assert.match(report, /Summary: action would FAIL at start/);
+    });
+
+    test('folds a pipeline-length cycle path in the report', () => {
+        // Preview 도 Doctor·실행과 같은 `formatCyclePath` 를 쓴다 — 한 곳만 접으면
+        // 12,000개 순환에서 보고서 한 줄이 10만 자를 넘는다.
+        const N = 2000;
+        const tasks: any[] = [{ id: 'T0', type: 'shell', command: `echo \${T${N - 1}.output}` }];
+        for (let i = 1; i < N; i++) { tasks.push({ id: `T${i}`, type: 'shell', command: `echo ${i}` }); }
+        const item: ActionItem = {
+            id: 'a.longcycle', title: 'long cycle',
+            action: { description: 'x', tasks },
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        const line = report.split('\n').find(l => l.includes('dependency cycle'));
+        assert.ok(line, `순환 줄을 찾지 못했다`);
+        assert.ok(line!.length < 300, `Preview 줄이 여전히 길다 (${line!.length}자)`);
+        assert.ok(line!.includes('more)'), `경로를 접지 않았다: ${line!.slice(0, 160)}`);
+        // Preview 는 유니코드 화살표를 쓴다 — 공용 함수를 쓰되 표기는 유지한다.
+        assert.ok(line!.includes(' → '), `Preview 의 화살표 표기가 사라졌다: ${line!.slice(0, 160)}`);
     });
 
     test('reports missing-dependency from `dependsOn` referencing an unknown task', () => {

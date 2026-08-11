@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import Ajv from 'ajv';
-import { runDoctor, DoctorInput, DoctorFinding, DoctorValidator } from '../doctor';
+import { runDoctor, runDoctorPerSource, DoctorInput, DoctorFinding, DoctorValidator, scriptCandidateTokens } from '../doctor';
 import { detectFrozenCondition } from '../previewRun';
 import { evaluateTaskCondition } from '../pipelineUtils';
 import * as actionSchema from '../../schema/actions.schema.json';
@@ -137,6 +137,36 @@ suite('Doctor', () => {
         });
     });
 
+    suite('소스별 분석 격리', () => {
+        const good = makeInput([{ id: 'a', title: 'X', action: { description: 'd', tasks: [] } }]);
+        const bad = makeInput([{ id: 'b', title: 'Y', action: { description: 'd', tasks: [] } }], {
+            sourceLabel: 'test:broken.json', filePath: path.join(WS, '.vscode', 'broken.json'),
+        });
+
+        test('한 소스가 던져도 다른 소스의 결과는 살아남는다', () => {
+            const validator: any = (data: any) => {
+                if (JSON.stringify(data).includes('"b"')) { throw new Error('boom'); }
+                return true;
+            };
+            const findings = runDoctorPerSource([bad, good], validator);
+            const failed = findings.filter(f => f.code === 'doctor.analysis-failed');
+            assert.strictEqual(failed.length, 1, `분석 실패를 알리지 않았다: ${findings.map(f => f.code).join(', ')}`);
+            assert.strictEqual(failed[0].sourceLabel, 'test:broken.json');
+            assert.ok(failed[0].message.includes('boom'), '예외 내용을 싣지 않았다');
+            // 정상 소스는 그대로 분석된다 — 실패가 다른 소스를 가리지 않는다.
+            assert.ok(!findings.some(f => f.code !== 'doctor.analysis-failed' && f.sourceLabel === 'test:broken.json'));
+        });
+
+        test('예외가 없으면 runDoctor 와 같은 결과다', () => {
+            const validator = compileValidator();
+            const inputs = [good, bad];
+            assert.deepStrictEqual(
+                runDoctorPerSource(inputs, validator).map(f => f.code),
+                runDoctor(inputs, validator).map(f => f.code)
+            );
+        });
+    });
+
     /**
      * `command` 로 바꾸면 셸이 사라지지만, 명령 **자체가** 인터프리터면 그것이
      * 문자열을 다시 파싱한다 — 번들 예제의 `cmd /c echo %${…}%` 가 그 형태였다.
@@ -171,15 +201,1023 @@ suite('Doctor', () => {
             // 사용자가 룰 자체를 무시하게 된다.
             assert.ok(!codes(withTasks([
                 { id: 'ask', type: 'inputBox', prompt: 'name?', validatePattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
-                { id: 'run', type: 'command', command: 'cmd /c echo %${ask.value}%' },
+                { id: 'run', type: 'command', command: 'cmd /c echo ${ask.value}' },
             ])).includes('command.nested-interpreter'));
         });
 
         test('메타문자 없는 고정 items 를 가진 quickPick 은 면제한다', () => {
             assert.ok(!codes(withTasks([
                 { id: 'ask', type: 'quickPick', items: ['dev', 'prod'] },
-                { id: 'run', type: 'command', command: 'cmd /c echo %${ask.value}%' },
+                { id: 'run', type: 'command', command: 'cmd /c echo ${ask.value}' },
             ])).includes('command.nested-interpreter'));
+        });
+
+        test('?? 체인은 대안 **전부**가 제약돼야 면제한다', () => {
+            // 어느 대안이 값을 낼지는 런타임에 갈린다. 첫 대안만 보면
+            // `${safe.value ?? free.value}` 가 통과해, 실제로 흘러가는 값이
+            // 제약 없는 쪽일 때 아무 경고도 남지 않는다.
+            assert.ok(codes(withTasks([
+                { id: 'safe', type: 'inputBox', prompt: 'n?', validatePattern: '^[A-Za-z]+$' },
+                { id: 'free', type: 'inputBox', prompt: 'n?' },
+                { id: 'run', type: 'command', command: 'sh -c "echo ${safe.value ?? free.value}"' },
+            ])).includes('command.nested-interpreter'), '뒤 대안이 제약 없는데 통과시켰다');
+
+            assert.ok(!codes(withTasks([
+                { id: 'safe', type: 'inputBox', prompt: 'n?', validatePattern: '^[A-Za-z]+$' },
+                { id: 'alsoSafe', type: 'inputBox', prompt: 'n?', validatePattern: '^[0-9]+$' },
+                { id: 'run', type: 'command', command: 'sh -c "echo ${safe.value ?? alsoSafe.value}"' },
+            ])).includes('command.nested-interpreter'), '둘 다 제약됐는데 경고했다');
+        });
+
+        test('인용 없는 ?? 체인에서도 대안 전부를 본다', () => {
+            // 인용이 없어도 참조 토큰은 토큰마다 따로 후보에 담기므로 스크립트
+            // 텍스트 자체는 예전에도 온전했다. 여기서 검사하는 것은 그게 아니라
+            // **첫 대안만 보던 것**이다 — 첫 대안을 제약해 두면 예전 코드는
+            // 통과시킨다.
+            assert.ok(codes(withTasks([
+                { id: 'safe', type: 'inputBox', prompt: 'n?', validatePattern: '^[A-Za-z]+$' },
+                { id: 'free', type: 'inputBox', prompt: 'n?' },
+                { id: 'run', type: 'command', command: 'sh -c ${safe.value ?? free.value}' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('실행 파일이 참조로 정해져도 인터프리터를 알아본다', () => {
+            // 보간 전 템플릿만 보면 실행 파일 이름이 `${which.value}` 라 어떤
+            // 인터프리터와도 맞지 않아 검사를 통째로 비껴갔다. 런타임에서는
+            // `sh` 가 되어 ask.value 가 스크립트로 흘러간다.
+            assert.ok(codes(withTasks([
+                { id: 'which', type: 'quickPick', items: ['sh'] },
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: '${which.value} -c "echo ${ask.value}"' },
+            ])).includes('command.nested-interpreter'), '고정 items 로 풀리는 실행 파일을 놓쳤다');
+        });
+
+        test('스위치가 참조로 정해져도 알아본다', () => {
+            assert.ok(codes(withTasks([
+                { id: 'flag', type: 'quickPick', items: ['-c'] },
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'sh ${flag.value} "echo ${ask.value}"' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('열거할 수 없는 실행 파일 뒤의 참조는 스크립트 후보다', () => {
+            // 무엇이 실행될지 모르면 뒤따르는 참조가 전부 스크립트에 놓일 수 있다 —
+            // 제약이 없으면 구체적인 주입 경고가 붙는다.
+            const found = codes(withTasks([
+                { id: 'pick', type: 'inputBox', prompt: 'exe?' },
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: '${pick.value} -c "echo ${ask.value}"' },
+            ]));
+            assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${found.join(', ')}`);
+        });
+
+        test('값이 제약돼 있어도 무엇이 실행될지 모르면 알린다', () => {
+            // 값이 제약돼 주입 경고까지는 아니지만, 실행 파일이 미지수라는 사실은
+            // 알린다 — 셸로 풀리면 그 값이 스크립트 텍스트가 되는 자리다.
+            const found = codes(withTasks([
+                { id: 'pick', type: 'inputBox', prompt: 'exe?' },
+                { id: 'ask', type: 'inputBox', prompt: 'v?', validatePattern: '^[A-Za-z]+$' },
+                { id: 'run', type: 'command', command: '${pick.value} -c "echo ${ask.value}"' },
+            ]));
+            assert.ok(found.includes('command.dynamic-interpreter'), `놓쳤다: ${found.join(', ')}`);
+            assert.ok(!found.includes('command.nested-interpreter'), '제약된 값에 주입 경고까지 붙였다');
+        });
+
+        test('흘러들 값이 없으면 실행 파일이 미지수여도 조용하다', () => {
+            const found = codes(withTasks([
+                { id: 'pick', type: 'inputBox', prompt: 'exe?' },
+                { id: 'run', type: 'command', command: '${pick.value} -c "echo fixed"' },
+            ]));
+            assert.ok(!found.some(c => c.startsWith('command.')), `과하게 경고했다: ${found.join(', ')}`);
+        });
+
+        test('고정 실행 파일이면 dynamic 경고를 붙이지 않는다', () => {
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'node -e "console.log(1)"', args: ['${ask.value}'] },
+            ])).includes('command.dynamic-interpreter'));
+        });
+
+        test('sh -c 는 다음 인자 하나만 스크립트다 — 권장 완화책을 오진하지 않는다', () => {
+            // `sh -c '스크립트' _ "$값"` 은 값이 **인자**로 전달되는 안전한 형태이고
+            // 우리가 문서에서 권하는 회피책이다. 뒤를 전부 이어 붙이면 여기에
+            // 경고가 붙어, 사용자가 올바로 고쳐도 경고가 사라지지 않는다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                {
+                    id: 'run', type: 'command', command: 'sh',
+                    args: ['-c', 'printf \'%s\\n\' "$1"', '_', '${ask.value}'],
+                },
+            ])).includes('command.nested-interpreter'), '안전한 argv 전달을 주입으로 봤다');
+
+            // 값이 스크립트 자리에 있으면 여전히 경고한다.
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'sh', args: ['-c', 'echo ${ask.value}'] },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('cmd /c 는 나머지 전부가 스크립트다', () => {
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'cmd', args: ['/c', 'echo', '${ask.value}'] },
+            ])).includes('command.nested-interpreter'), 'cmd 는 뒤 인자도 명령줄로 재해석한다');
+        });
+
+        test('후보가 상한에 걸려 잘리면 조용해지지 않는다 (fail-closed)', () => {
+            // 33번째 후보가 `sh` 인 경우. 비용 때문에 잘랐다는 이유로 경고가
+            // 사라지면, 잘린 쪽에 셸이 있었을 때 그대로 뚫린다.
+            const many = Array.from({ length: 32 }, (_, i) => `tool${i}`).concat('sh');
+            const found = codes(withTasks([
+                { id: 'which', type: 'quickPick', items: many },
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: '${which.value} -c "echo ${ask.value}"' },
+            ]));
+            assert.ok(
+                found.includes('command.dynamic-interpreter') || found.includes('command.nested-interpreter'),
+                `상한에 걸려 조용해졌다: ${found.join(', ')}`
+            );
+        });
+
+        test('안전한 후보가 섞여 있어도 위험한 후보를 묻지 않는다', () => {
+            // `['node','sh']` 중 sh 로 풀리면 스위치가 미지수인 위험한 형태다.
+            const found = codes(withTasks([
+                { id: 'which', type: 'quickPick', items: ['node', 'sh'] },
+                { id: 'flag', type: 'inputBox', prompt: 'flag?' },
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: '${which.value} ${flag.value} "echo ${ask.value}"' },
+            ]));
+            assert.ok(found.includes('command.nested-interpreter'), `묻혔다: ${found.join(', ')}`);
+        });
+
+        test('플래그가 여럿 끼어 스위치가 뒤로 밀려도 본다', () => {
+            const found = codes(withTasks([
+                { id: 'flag', type: 'inputBox', prompt: 'flag?' },
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'sh -x -e -u ${flag.value} "echo ${ask.value}"' },
+            ]));
+            assert.ok(found.includes('command.nested-interpreter'), `앞자리만 봤다: ${found.join(', ')}`);
+        });
+
+        test('스크립트 파일 뒤의 -c 는 인터프리터 스위치가 아니다', () => {
+            // `sh /dev/null -c "…"` 는 /dev/null 을 실행하고 `-c` 는 위치 인자다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'sh /dev/null -c "echo ${ask.value}"' },
+            ])).includes('command.nested-interpreter'), '실행되지도 않는 문자열에 경고를 냈다');
+        });
+
+        test('인자를 받는 옵션(-o nounset) 뒤의 -c 는 여전히 스위치다', () => {
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'sh -o nounset -c "echo ${ask.value}"' },
+            ])).includes('command.nested-interpreter'));
+        });
+
+        test('스크립트 자리의 참조는 펼치지 않는다 — 펼치면 경고가 사라진다', () => {
+            // argv 전체를 펼치면 스크립트의 `${pick.value}` 가 구체값으로 바뀌어
+            // `${…}` 검사를 통과하지 못하고, 메타문자가 든 quickPick 이 **무경고로**
+            // 지나간다. 제어 토큰(실행 파일·옵션)만 펼쳐야 한다.
+            const found = codes(withTasks([
+                { id: 'pick', type: 'quickPick', items: ['echo ok', 'echo pwned; id'] },
+                { id: 'run', type: 'command', command: 'sh -c ${pick.value}' },
+            ]));
+            assert.ok(found.includes('command.nested-interpreter'), `스크립트를 펼쳐 경고가 사라졌다: ${found.join(', ')}`);
+        });
+
+        test('데이터 토큰의 조합 폭발이 가짜 dynamic 경고를 만들지 않는다', () => {
+            // 선택지 2개짜리 인자 6개 = 64조합. 실행 파일은 `node` 로 고정인데
+            // 상한에 걸렸다는 이유로 "동적 인터프리터" 라고 하면 안 된다.
+            const picks = Array.from({ length: 6 }, (_, i) => ({
+                id: `p${i}`, type: 'quickPick', items: ['a', 'b'],
+            }));
+            const args = picks.map(p => `\${${p.id}.value}`);
+            const found = codes(withTasks([
+                ...picks,
+                { id: 'run', type: 'command', command: 'node', args: ['-e', 'x', ...args] },
+            ]));
+            assert.ok(!found.includes('command.dynamic-interpreter'), `데이터 조합으로 오탐했다: ${found.join(', ')}`);
+        });
+
+        test('스크립트 파일 뒤의 위치 인자는 인터프리터 자리가 아니다', () => {
+            const found = codes(withTasks([
+                { id: 'arg', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'sh /dev/null ${arg.value}' },
+            ]));
+            assert.ok(!found.includes('command.dynamic-interpreter'), `위치 인자를 스위치로 봤다: ${found.join(', ')}`);
+        });
+
+        test('인자를 받는 옵션 여러 형태 뒤의 스위치를 찾는다', () => {
+            for (const command of [
+                'bash --rcfile /dev/null -c "echo ${ask.value}"',
+                'bash -O extglob -c "echo ${ask.value}"',
+                'sh +o nounset -c "echo ${ask.value}"',
+                'powershell -ExecutionPolicy Bypass -Command "echo ${ask.value}"',
+            ]) {
+                assert.ok(
+                    codes(withTasks([
+                        { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                        { id: 'run', type: 'command', command },
+                    ])).includes('command.nested-interpreter'),
+                    `놓쳤다: ${command}`
+                );
+            }
+        });
+
+        test('동적 스위치 뒤의 스크립트 참조를 펼치지 않는다', () => {
+            // 스위치가 참조면 그것이 `-c` 일 수 있고, 그러면 다음 토큰부터가
+            // 스크립트다. 스위치를 열거하며 스크립트까지 구체화하면 이후 참조
+            // 검사에 아무것도 남지 않아 무경고가 된다.
+            for (const exe of ['sh', 'cmd', 'pwsh']) {
+                const found = codes(withTasks([
+                    { id: 'flag', type: 'quickPick', items: exe === 'cmd' ? ['/c'] : ['-c'] },
+                    { id: 'script', type: 'quickPick', items: ['echo ok', 'echo pwned; id'] },
+                    { id: 'run', type: 'command', command: `${exe} \${flag.value} \${script.value}` },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `${exe}: 놓쳤다 (${found.join(', ')})`);
+            }
+        });
+
+        test('PowerShell 의 두 설정을 모두 본다', () => {
+            // `-EncodedCommand` 와 `-Command` 는 별도 항목이라, 첫 항목만 보면
+            // `-Command` 를 스위치로 알지 못하고 스크립트를 놓친다.
+            const found = codes(withTasks([
+                { id: 'pick', type: 'quickPick', items: ['Write-Output ok', 'Write-Output pwned; id'] },
+                { id: 'run', type: 'command', command: 'powershell -Command ${pick.value}' },
+            ]));
+            assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${found.join(', ')}`);
+        });
+
+        test('표에 없는 옵션 문법에서도 조용해지지 않는다', () => {
+            for (const command of [
+                'sh -xo nounset -c "echo ${ask.value}"',
+                'cmd /k echo ${ask.value}',
+                'pwsh -WorkingDirectory /tmp -Command "echo ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${command} (${found.join(', ')})`);
+            }
+        });
+
+        test('묶음 옵션 안의 `-c` 는 위치를 정확히 따진다', () => {
+            // `^-[a-z]*c$` 로 보던 동안 `c` 가 마지막이 아닌 묶음을 통째로
+            // 놓쳤다 — 실제 셸은 묶음 어디에 있든 `c` 를 옵션으로 읽는다.
+            // (`sh -cx "…"` · `bash -cex "…"` 가 스크립트를 실행하는 것을
+            // 확인했다.) `-co nounset "…"` 은 `o` 가 인자를 먼저 삼켜
+            // 스크립트가 한 칸 밀린다.
+            for (const command of [
+                'sh -cx "echo ${ask.value}"',
+                'bash -cex "echo ${ask.value}"',
+                'sh -co nounset "echo ${ask.value}"',
+                'bash -cO extglob "echo ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${command} (${found.join(', ')})`);
+            }
+        });
+
+        test('`-c` 뒤에 옵션이 더 와도 첫 피연산자가 스크립트다', () => {
+            // POSIX 셸의 `-c` 는 **다음 argv 를 삼키는 옵션이 아니다** — 옵션을
+            // 다 읽은 뒤 첫 피연산자가 command_string 이다. "스위치 바로 다음이
+            // 스크립트" 로 보면 아래 형태를 전부 놓친다 (넷 다 실제 `/bin/sh` ·
+            // `bash` 에서 스크립트가 실행되는 것을 확인했다).
+            for (const command of [
+                'sh -cex -c "echo ${ask.value}"',
+                'bash -cx -O extglob "echo ${ask.value}"',
+                'sh -c -o nounset -e "echo ${ask.value}"',
+                'bash -c -- "echo ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${command} (${found.join(', ')})`);
+            }
+        });
+
+        test('스크립트 뒤의 위치 인자는 스크립트가 아니다', () => {
+            // 권장 완화책(`sh -c '고정 스크립트' _ "${ask.value}"`)의 값은 `$1`
+            // 이지 스크립트가 아니다. 피연산자 하나만 스크립트로 본다.
+            assert.deepStrictEqual(
+                scriptCandidateTokens(['sh', '-cx', 'printf %s "$1"', '_', '${ask.value}']),
+                { tokens: [], certain: true }
+            );
+        });
+
+        test('참조가 든 비옵션 토큰을 동적 스위치로 보지 않는다', () => {
+            // `echo ${ask.value}` 는 값이 무엇이든 옵션이 아니라 피연산자다.
+            // 그것을 "스위치일 수 있다"고 보면 **그 토큰 자신의 참조**가 후보에서
+            // 빠져, `-cx` 처럼 스위치를 놓친 경우에 경고가 통째로 사라졌다.
+            const { tokens, certain } = scriptCandidateTokens(['sh', '-cx', 'echo ${ask.value}']);
+            assert.deepStrictEqual(tokens, ['echo ${ask.value}']);
+            assert.strictEqual(certain, true);
+
+            // 피연산자(스크립트 파일 이름) 뒤는 위치 인자다 — 그 뒤 참조를
+            // 스크립트 후보로 끌어오면 안 된다.
+            assert.deepStrictEqual(
+                scriptCandidateTokens(['sh', 'run ${a.value}', '${b.value}']),
+                { tokens: [], certain: true }
+            );
+        });
+
+        test('제약된 값이라도 **명령 자리**면 면제하지 않는다', () => {
+            // 문자 집합만 보는 면제의 근본 구멍이다 — 권장 패턴을 통과한
+            // `whoami` 는 메타문자가 하나도 없지만, 자리가 명령이면 그대로
+            // 실행된다(`sh -c 'echo ok; whoami'`).
+            const SAFE = '^[A-Za-z0-9_][A-Za-z0-9_-]*$';
+            for (const command of [
+                'sh -c "echo ok; ${ask.value}"',
+                'sh -c "echo ok && ${ask.value}"',
+                'sh -c "true | ${ask.value}"',
+                'sh -c "${ask.value}"',
+                'sh -c "echo $(${ask.value})"',
+                'sh -c "eval ${ask.value}"',
+                'sh -c "cat > ${ask.value}"',
+                // 대상이 붙어 와도 리다이렉션이다 — 임의의 파일을 읽고 쓴다.
+                'sh -c "echo ok >out/${ask.value}"',
+                'sh -c "cat <in/${ask.value}"',
+                // 연산자가 **떨어져 있고** 대상 낱말에 prefix 가 붙은 형태. 대상은
+                // 낱말 전체이므로 참조가 그 안 어디에 있든 리다이렉션이다.
+                'sh -c "echo ok > out/${ask.value}"',
+                'sh -c "cat < in/${ask.value}"',
+                'sh -c "echo ok 2> logs/${ask.value}"',
+                'sh -c "echo ok >> logs/${ask.value}"',
+                'sh -c "echo ok > out/${ask.value}.log"',
+                // 연산자 소비를 옮긴 것은 dialect 를 가리지 않는다.
+                'cmd /c echo ok > out/${ask.value}',
+                'pwsh -Command "Write-Output ok > out/${ask.value}"',
+                // **낱말 중간에서 시작하는 리다이렉션.** 셸은 공백이 없어도 `>` 를
+                // 연산자로 읽어 `echo prefix>out/x` 를 `out/x` 에 쓴다. 낱말의
+                // 시작만 보던 동안 값이 `../../target` 이면 의도한 디렉터리 밖
+                // 파일을 대상으로 삼을 수 있었다.
+                'sh -c "echo prefix>out/${ask.value}"',
+                'sh -c "echo prefix>>logs/${ask.value}"',
+                'sh -c "echo prefix<in/${ask.value}"',
+                'sh -c "echo prefix2>err/${ask.value}"',
+                'sh -c "echo prefix>${ask.value}"',
+                // 연산자를 글자마다 끊으면 `>>` 의 두 번째 `>` 가 첫 번째의
+                // **대상**으로 읽혀 추적이 끊긴다. 한 덩어리로 모아야 한다.
+                'sh -c "echo ok >> logs/${ask.value}"',
+                'sh -c "echo ok >& ${ask.value}"',
+                'sh -c "echo ok 2>&1 >> logs/${ask.value}"',
+                // 참조가 연산자 **바로 뒤**에 붙는 경계.
+                'sh -c "echo x>${ask.value}"',
+                // `<>`(읽기·쓰기 열기)도 리다이렉션이다 — 표에 없어 놓쳤다.
+                'sh -c "cat <> out/${ask.value}"',
+                'sh -c "cat 3<>rw/${ask.value}"',
+                // **선행 FD 리다이렉션 뒤는 명령 이름 자리다.** 연산자에 붙은 숫자는
+                // IO number 라 낱말을 끊으면 안 된다 — `2` 를 고정 명령 머리로
+                // 확정하면 실제로 실행되는 `${v}` 가 인자로 분류돼 면제된다.
+                'sh -c "2>out ${ask.value}"',
+                'sh -c "2>&1 ${ask.value}"',
+                'sh -c "2> out ${ask.value}"',
+                'sh -c "1>out ${ask.value}"',
+                'sh -c "2>/dev/null ${ask.value}"',
+                'sh -c "3<in ${ask.value}"',
+                // 붙어 있는 연산자 뒤로 세그먼트가 이어져도 구분자는 살아 있다.
+                'sh -c "echo x >out && ${ask.value}"',
+                // **대입은 안전한 자리가 아니다.** 자리만으로는 그 값이 뒤에서
+                // `$TAG` 로 실행되지 않는다는 것을 증명할 수 없다
+                // (`sh -c "CMD=${v}; $CMD"` 는 실제로 실행된다).
+                'sh -c "TAG=${ask.value}; echo done"',
+                'sh -c "CMD=${ask.value}; $CMD"',
+                'sh -c "A=1 B=${ask.value} echo ok"',
+                // 인자를 코드로 읽는 명령·문법.
+                'bash -c "trap ${ask.value} EXIT"',
+                'bash -c "coproc ${ask.value}; wait"',
+                // `time`·`coproc` 은 명령 **앞에 토큰이 더 올 수 있다**. "다음 낱말이
+                // 명령" 규칙으로 보면 `-p`·`NAME` 을 고정 명령 이름으로 잡고 값을
+                // 인자로 오인한다 — 둘 다 실제로 값이 실행되는 자리다.
+                'sh -c "time -p ${ask.value}"',
+                'bash -c "coproc NAME ${ask.value}"',
+                'sh -c "time ${ask.value}"',
+                'sh -c "time -p -- ${ask.value}"',
+                // 예약어 뒤도 명령 자리다 — 구분자만 보면 데이터로 오인한다.
+                'sh -c "if true; then ${ask.value}; fi"',
+                'sh -c "for i in 1; do ${ask.value}; done"',
+                // 명령 이름 앞에 오는 대입·리다이렉션을 명령으로 오인하면 안 된다.
+                'sh -c "A=1 ${ask.value}"',
+                'sh -c "> /tmp/out ${ask.value}"',
+                'sh -c ">/tmp/out ${ask.value}"',
+                // 경로가 붙어도 같은 명령이다 — 이름만 비교하면 놓친다.
+                'sh -c "/usr/bin/env ${ask.value}"',
+                // **이름을 흩어 놓아도 셸에게는 같은 명령이다.** 인용·이스케이프를
+                // 걷어 내지 않으면 목록 비교를 그대로 빠져나간다. POSIX 에서 `\` 는
+                // 경로 구분자가 아니라 이스케이프라, 경로처럼 자르면 `e\val` 이
+                // `val` 이 되어 `eval` 과 맞지 않았다.
+                'sh -c "e\\\\val ${ask.value}"',
+                'sh -c "ev\'\'al ${ask.value}"',
+                'sh -c "tr\\\\ap ${ask.value} EXIT"',
+                'sh -c "\\"eval\\" ${ask.value}"',
+                // 머리가 **실행 시점에 정해지면** 무엇이 될지 모른다 — `eval` 일 수도
+                // 있으므로 고정 리터럴 명령으로 보면 안 된다(fail-closed).
+                'sh -c "CMD=eval; $CMD ${ask.value}"',
+                'sh -c "$TOOL ${ask.value}"',
+                'cmd /c %TOOL% ${ask.value}',
+                // 큰따옴표 안에서도 확장은 살아 있다.
+                'sh -c "\\"$CMD\\" ${ask.value}"',
+                // brace expansion · glob 도 이름을 바꾼다 — 셸에게는 전부 `eval` 이다.
+                'bash -c "e{v,v}al ${ask.value}"',
+                'sh -c "/bin/e*al ${ask.value}"',
+                // `\\` + 개행은 글자를 남기지 않는 **행 잇기**다.
+                'sh -c "e\\\nval ${ask.value}"',
+                // 치환에 이어 붙은 조각도 이름의 일부다.
+                'sh -c "$(echo ev)al ${ask.value}"',
+                'sh -c "`echo ev`al ${ask.value}"',
+                'sh -c "e$(echo val) ${ask.value}"',
+                'sh -c "x$(echo hi) foo ${ask.value}"',
+                'sh -c "x`echo hi` foo ${ask.value}"',
+                // **중첩된 치환에서도 짝이 맞아야 한다.** 플래그 하나로 "낱말 안에서
+                // 열렸다"만 기억하면 안쪽 `)`·백틱이 그것을 지워 바깥 낱말이 다시
+                // 리터럴로 읽힌다 — 실제로는 `sh -c` 가 되어 값이 실행된다.
+                'sh -c "s$(echo h) -c ${ask.value}"',
+                'sh -c "s$(echo $(echo h)) -c ${ask.value}"',
+                'sh -c "x$(echo `true`) foo ${ask.value}"',
+                'sh -c "x$( (true) ) foo ${ask.value}"',
+                // **그룹 `( … )` 은 낱말을 만들지 않는다.** 닫을 때 바깥 명령을
+                // 되살리면 `do` 가 앞 명령의 인자로 읽혀 뒤가 통째로 면제된다.
+                'cmd /c "for %f in (a b) do ${ask.value}"',
+                'cmd /c "for %f in (a b) do call ${ask.value}"',
+                'cmd /c "for /f %i in (list.txt) do ${ask.value}"',
+                'sh -c "case x in (x) ${ask.value};; esac"',
+                'sh -c "case x in x) ${ask.value};; esac"',
+                // **`"$(…)"` 의 닫는 `)` 도 큰따옴표 안이다.** 거기서 프레임을 닫지
+                // 않으면 바깥 머리(`eval`)를 되찾지 못하고, 남은 프레임을 나중의
+                // 무관한 `)` 가 꺼내 엉뚱한 상태로 되돌린다.
+                'sh -c "eval \\"$(true)\\" ${ask.value}"',
+                'sh -c "case \\"$(uname)\\" in Darwin) ${ask.value};; esac"',
+                'sh -c "echo \\"$(date)\\"; case x in x) ${ask.value};; esac"',
+                'sh -c "eval $(true) ${ask.value}"',
+                'sh -c "$(echo eval) ${ask.value}"',
+                // **치환 안은 인용이 새로 시작한다.** 바깥 `"` 를 물려주면 안쪽
+                // `(true)` 의 `)` 가 바깥 `$(` 를 닫은 것으로 오인돼, 그 뒤 `eval` 이
+                // 사라지고 값이 면제된다.
+                'sh -c "echo \\"$( (true); eval ${ask.value} )\\""',
+                'sh -c "echo \\"$(eval ${ask.value})\\""',
+                // 고정 명령이라도 **이 옵션 뒤부터는** 인자가 코드·변수다.
+                'sh -c "find . -maxdepth 0 -exec ${ask.value} \\;"',
+                'sh -c "find . -execdir ${ask.value} \\;"',
+                'sh -c "find . -ok ${ask.value} \\;"',
+                'bash -c "printf -v CMD %s ${ask.value}; $CMD"',
+                // **CRLF 행 잇기**도 세 글자 한 덩어리다 — `\\r` 만 먹고 `\\n` 을
+                // 남기면 그 개행이 명령 구분자가 되어 낱말이 갈린다.
+                'pwsh -Command "i`\r\nex ${ask.value}"',
+                'sh -c "e\\\r\nval ${ask.value}"',
+                // PowerShell 의 이스케이프는 백틱이다 — `i`ex` 는 `iex` 다.
+                'pwsh -Command "i`ex ${ask.value}"',
+                // **PowerShell 의 `{` 는 붙어 있어도 스크립트 블록**이고 그 안은
+                // 코드다. POSIX 의 brace expansion 규칙을 그대로 적용해 낱말로
+                // 묶으면 바깥 명령이 머리로 남아 값이 인자로 면제된다.
+                'pwsh -Command "Invoke-Command -ScriptBlock {iex ${ask.value}}"',
+                'pwsh -Command "1..3 | ForEach-Object {iex ${ask.value}}"',
+                'powershell -Command "if ($true) {Invoke-Expression ${ask.value}}"',
+                // 행 잇기는 dialect 를 가리지 않는다 — 셸마다 이스케이프 글자만 다르다.
+                'pwsh -Command "i`\nex ${ask.value}"',
+                'cmd /c "c^\nall ${ask.value}"',
+                // `.exe` 를 떼고 비교한다.
+                'cmd /c C:\\Windows\\System32\\cmd.exe ${ask.value}',
+                // **대입 빌트인**을 거친 값도 다음 명령이 된다.
+                'sh -c "export CMD=${ask.value}; $CMD"',
+                'bash -c "declare CMD=${ask.value}; $CMD"',
+                'sh -c "readonly CMD=${ask.value}; $CMD"',
+                'bash -c "typeset CMD=${ask.value}; $CMD"',
+                'bash -c "local CMD=${ask.value}; $CMD"',
+                'sh -c "set -- ${ask.value}"',
+                // 독립된 `{` 는 그룹 경계가 맞다 — 그 뒤는 명령 자리다.
+                'sh -c "{ ${ask.value}; }"',
+                'pwsh -Command "Write-Output ok; ${ask.value}"',
+                'cmd /c echo ok & ${ask.value}',
+                // `cmd` 는 `%NAME%` 를 치환한 **뒤** 다시 해석한다 — 이름이
+                // 안전해도 그 값에 `&` 가 있으면 명령이 된다(`envPick` 과 같은 위험).
+                'cmd /c echo %${ask.value}%',
+                'cmd /v:on /c echo !${ask.value}!',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: SAFE },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `명령 자리를 데이터로 봤다: ${command} (${found.join(', ')})`);
+            }
+
+            // 고정된 명령 이름 뒤의 **인자** 자리는 그대로 면제한다 — 그러지
+            // 않으면 문서가 권하는 완화책에 경고가 붙는다.
+            for (const command of [
+                'sh -c "echo ${ask.value}"',
+                'sh -c "git checkout ${ask.value}"',
+                'cmd /c echo ${ask.value}',
+                'pwsh -Command "Write-Output ${ask.value}"',
+                'sh -c "if true; then echo ${ask.value}; fi"',
+                'sh -c "echo x > /tmp/out ${ask.value}"',
+                // 대상이 **붙어서** 이미 끝난 리다이렉션 뒤는 평범한 인자다.
+                // 연산자 소비를 `headFound` 앞으로 옮기면서 깨지기 쉬운 자리다.
+                'sh -c "echo x >/tmp/out ${ask.value}"',
+                // 인용된 연산자는 데이터다 — 인용 안의 `>` 는 낱말을 가르지 않는다.
+                'sh -c "echo \'>\' ${ask.value}"',
+                'sh -c "echo \'a>b\' ${ask.value}"',
+                'sh -c "echo \\"a>b\\" ${ask.value}"',
+                // 이스케이프된 `\\b` 는 `b` 일 뿐 — 재해석 명령이 아니다.
+                'sh -c "echo a\\\\bc ${ask.value}"',
+                // 경로가 붙은 평범한 명령은 dialect 별 구분자로 갈라 이름만 본다.
+                'sh -c "/usr/bin/git checkout ${ask.value}"',
+                'cmd /c C:\\Windows\\System32\\find.exe ${ask.value}',
+                // **POSIX 의 `\\` 는 경로 구분자가 아니라 이스케이프다.** 경로처럼
+                // 자르면 `x\\eval` 의 끝 조각 `eval` 이 재해석 명령으로 읽힌다 —
+                // 실제로는 `xeval` 이라는 다른 명령이다.
+                'sh -c "x\\eval ${ask.value}"',
+                // 작은따옴표·이스케이프는 확장을 죽인다 — 동적 머리가 아니다.
+                'sh -c "\'$CMD\' ${ask.value}"',
+                'sh -c "\\$CMD ${ask.value}"',
+                // brace expansion 이 **인자**에 있으면 머리는 그대로 `echo` 다.
+                // `{`·`}` 를 무조건 세그먼트 구분자로 보던 동안 여기서 세그먼트가
+                // 초기화돼 값이 명령 자리로 **오탐**됐다.
+                'sh -c "echo a{b,c} ${ask.value}"',
+                'sh -c "echo a{b,c}d ${ask.value}"',
+                'sh -c "ls *.txt ${ask.value}"',
+                // 그룹 안이라도 고정 명령 뒤는 인자다.
+                'sh -c "{ echo ${ask.value}; }"',
+                // **치환이 끝나면 바깥 명령으로 돌아온다.** 닫는 자리에서 세그먼트를
+                // 초기화하던 동안 `echo` 가 사라져 뒤의 값이 명령 자리로 오탐됐다.
+                'sh -c "echo $(date +%Y) ${ask.value}"',
+                'sh -c "echo `true` ${ask.value}"',
+                'sh -c "echo $(basename $(pwd)) ${ask.value}"',
+                // 가장 흔한 실제 형태 — 큰따옴표로 감싼 치환 뒤의 인자.
+                'sh -c "echo \\"$(date)\\" ${ask.value}"',
+                // 치환 **안**도 고정 명령 뒤면 인자다. 바깥 인용을 물려주면 여기에
+                // 과탐이 붙는다(닫는 `)` 를 못 찾아 머리를 잃는다).
+                'sh -c "echo \\"$(printf %s ${ask.value})\\""',
+                // `find` 라도 `-exec` 류가 없으면 종전대로 인자다.
+                'sh -c "find /tmp -maxdepth 0 -name ${ask.value}"',
+                // `cmd` 에는 중괄호 문법이 없다 — 평범한 글자다.
+                'cmd /c echo {x} ${ask.value}',
+                // PowerShell 의 `( … )` 는 값을 내는 부분식이라 바깥 명령이 이어진다.
+                'pwsh -Command "Write-Output (Get-Date) ${ask.value}"',
+                // 리다이렉션 **대상**이 아니라 그 앞의 인자다.
+                'sh -c "echo ${ask.value} > out"',
+                // 인용된 구분자는 데이터다 — 인용 상태를 안 보면 여기에 경고가 붙는다.
+                'sh -c "echo \\"x; ${ask.value}\\""',
+                // 참조 **한쪽에만** 확장 구분자가 있으면 확장 안이 아니다.
+                'cmd /c echo %PATH% ${ask.value}',
+                'cmd /c echo ${ask.value} %PATH%',
+                'cmd /v:on /c echo !PATH! ${ask.value}',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: SAFE },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(!found.includes('command.nested-interpreter'), `데이터 자리에 경고했다: ${command} (${found.join(', ')})`);
+            }
+        });
+
+        test('인자 자리라도 값이 `-` 로 시작할 수 있으면 면제하지 않는다', () => {
+            // `find … ${v} id \;` 에 `-exec` 를 넣으면 인자가 옵션이 되어 명령이
+            // 실행된다. 문자 집합만 좁혀서는 막지 못한다.
+            const command = 'sh -c "find /tmp -maxdepth 0 ${ask.value} id \\;"';
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z0-9_-]+$' },
+                { id: 'run', type: 'command', command },
+            ])).includes('command.nested-interpreter'), '선행 `-` 를 허용하는 패턴을 면제했다');
+
+            // 첫 글자를 막은 패턴은 면제한다 — 문서가 권하는 형태다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z0-9_][A-Za-z0-9_-]*$' },
+                { id: 'run', type: 'command', command },
+            ])).includes('command.nested-interpreter'), '첫 글자를 막았는데 경고했다');
+
+            // `--` 뒤라면 옵션으로 읽히지 않는다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z0-9_-]+$' },
+                { id: 'run', type: 'command', command: 'sh -c "grep -- ${ask.value} file"' },
+            ])).includes('command.nested-interpreter'), '`--` 뒤인데 경고했다');
+
+            // **`--` 앞에 옵션이 있으면 그 `--` 를 믿을 수 없다.** `curl -o -- x` 는
+            // `-o` 가 `--` 를 출력 파일 이름으로 삼켜, 값이 다시 옵션이 된다.
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: '^--version$' },
+                { id: 'run', type: 'command', command: 'sh -c "curl -o -- ${ask.value}"' },
+            ])).includes('command.nested-interpreter'), '옵션이 삼킨 `--` 를 믿었다');
+
+            // 고정 목록도 마찬가지다.
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'quickPick', items: ['ok', '--version'] },
+                { id: 'run', type: 'command', command: 'sh -c "git tag ${ask.value}"' },
+            ])).includes('command.nested-interpreter'), '`-` 로 시작하는 항목을 면제했다');
+
+        });
+
+        test('빈 문자열이 될 수 있는 그룹으로 첫 글자 검사를 우회하지 못한다', () => {
+            // `^(ok|)-exec$` 는 `-exec` 를 통과시킨다 — 그룹이 `-` 로 시작하는지만
+            // 보고 **그룹이 비워질 수 있는지**를 안 보면 그대로 새어 나간다.
+            for (const validatePattern of [
+                '^(ok|)-exec$', '^([a-z]*)-exec$', '^(a)?-exec$', '^[a-z]{0,3}-x$',
+                // lazy 표시를 수량자와 함께 삼키지 않으면 그 `?` 가 다음 원자로
+                // 읽혀 "`-` 로 시작할 수 없다" 가 된다.
+                '^[a-z]*?-exec$', '^(ok|)??-exec$', '^[a-z]{0,3}?-exec$',
+            ]) {
+                assert.ok(
+                    codes(withTasks([
+                        { id: 'ask', type: 'inputBox', prompt: '?', validatePattern },
+                        { id: 'run', type: 'command', command: 'sh -c "find /tmp -maxdepth 0 ${ask.value} id \\;"' },
+                    ])).includes('command.nested-interpreter'),
+                    `빈 그룹으로 우회했다: ${validatePattern}`
+                );
+            }
+
+            // 반대로 절대 나타나지 않는 그룹(`{0}`)까지 위험으로 보지는 않는다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: '^(-x){0}[a-z]+$' },
+                { id: 'run', type: 'command', command: 'sh -c "find /tmp -maxdepth 0 ${ask.value} id \\;"' },
+            ])).includes('command.nested-interpreter'), '나타나지 않는 그룹을 위험으로 봤다');
+        });
+
+        test('cmd 의 `if` 조건 뒤는 명령 자리다', () => {
+            for (const command of [
+                'cmd /c if 1==1 ${ask.value}',
+                'cmd /c if exist NUL ${ask.value}',
+                'cmd /c if defined PATH ${ask.value}',
+                'cmd /c if errorlevel 1 ${ask.value}',
+                'cmd /c if not exist NUL ${ask.value}',
+                'cmd /c if /i a==b ${ask.value}',
+                // 비교 연산자 형태와 `cmdextversion`, 인용된 경로.
+                'cmd /c if 1 EQU 1 ${ask.value}',
+                'cmd /c if 1 NEQ 2 ${ask.value}',
+                'cmd /c if not 1 LSS 2 ${ask.value}',
+                'cmd /c if cmdextversion 1 ${ask.value}',
+                'cmd /c if exist "C:\\Program Files" ${ask.value}',
+                // 모르는 조건 형태는 fail-closed 다.
+                'cmd /c if 1 ZZZ 2 ${ask.value}',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `조건을 명령 이름으로 봤다: ${command} (${found.join(', ')})`);
+            }
+
+            // 조건 뒤 명령의 **인자**는 그대로 데이터다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+                { id: 'run', type: 'command', command: 'cmd /c if 1==1 echo ${ask.value}' },
+            ])).includes('command.nested-interpreter'), '조건 뒤 인자에 경고했다');
+        });
+
+        test('cmd 환경변수 이름의 **일부**만 보간해도 2차 확장이다', () => {
+            for (const command of [
+                'cmd /c echo %PRE${ask.value}%',
+                'cmd /v:on /c echo !PRE${ask.value}!',
+                'cmd /c echo %VAR:~${ask.value}%',
+                'cmd /c echo %${ask.value}SUFFIX%',
+                // 앞선 `%A`(FOR 변수)·`%1`(배치 인자)에 홀짝 계산이 뒤집히면 안 된다.
+                'cmd /c for %A in (1) do echo %PRE${ask.value}%',
+                'cmd /c echo %1 %PRE${ask.value}%',
+                'cmd /c echo 100%% %PRE${ask.value}%',
+                // **닫는 구분자를 뒤 글자로 판별할 수 없다.** `%PREfoo%1` 의 가운데
+                // `%` 는 `%PRE…%` 를 닫는 자리인데, 뒤의 `1` 을 보고 `%1`(배치 인자)
+                // 시작으로 빼면 확장을 통째로 놓친다. `%*` · `%%` · `!!` 도 같다.
+                'cmd /c echo %PRE${ask.value}%1',
+                'cmd /c echo %PRE${ask.value}%*',
+                'cmd /c echo %PRE${ask.value}%%',
+                'cmd /v:on /c echo !PRE${ask.value}!!',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `확장 안쪽을 데이터로 봤다: ${command} (${found.join(', ')})`);
+            }
+
+            // `^` 이스케이프는 여전히 구분자가 아니다 — 참조 뒤에 유효한 구분자가
+            // 없으면 확장 안쪽이 아니다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+                { id: 'run', type: 'command', command: 'cmd /c echo %PATH% ${ask.value} ^%done' },
+            ])).includes('command.nested-interpreter'), '`^%` 를 구분자로 셌다');
+        });
+
+        test('참조마다 자기 자리로 판정한다', () => {
+            // 자리가 섞이면, 한쪽 자리의 위험이 다른 쪽 값에 옮겨 붙어 안전한
+            // 참조에까지 경고가 났다. `--` 앞 참조는 옵션 주입 검사를 받고,
+            // 뒤 참조는 받지 않는다.
+            assert.ok(!codes(withTasks([
+                { id: 'a', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z0-9_][A-Za-z0-9_-]*$' },
+                { id: 'b', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z0-9_-]+$' },
+                { id: 'run', type: 'command', command: 'sh -c "echo ${a.value} -- ${b.value}"' },
+            ])).includes('command.nested-interpreter'), '`--` 뒤 참조에 앞 참조의 자리를 적용했다');
+
+            // 한쪽만 위험해도 경고는 그대로 난다.
+            assert.ok(codes(withTasks([
+                { id: 'a', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z0-9_][A-Za-z0-9_-]*$' },
+                { id: 'b', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z0-9_-]+$' },
+                { id: 'run', type: 'command', command: 'sh -c "echo ${a.value} ${b.value}"' },
+            ])).includes('command.nested-interpreter'), '인자 자리의 선행 `-` 를 놓쳤다');
+        });
+
+        test('PowerShell 7.5+ `-CommandWithArgs` 도 스크립트를 연다', () => {
+            for (const command of [
+                'pwsh -CommandWithArgs "echo ${ask.value}"',
+                'pwsh -cwa "echo ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${command} (${found.join(', ')})`);
+            }
+
+            // `-CommandWithArgs` 는 **첫 문자열만** 코드다. 나머지는 `$args` 로
+            // 들어가므로 `-Command` 처럼 rest 로 보면 과탐이 된다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'pwsh -CommandWithArgs "echo fixed" ${ask.value}' },
+            ])).includes('command.nested-interpreter'), '$args 자리를 스크립트로 봤다');
+        });
+
+        test('ksh 는 `-c` 없이도 첫 피연산자를 실행한다', () => {
+            // 이 기계의 AT&T ksh93u+ 은 `ksh 'printf x'` 를 그대로 실행한다 —
+            // `sh`·`zsh`·`dash` 는 파일 이름으로 읽고 실패하는 자리다.
+            for (const command of [
+                'ksh "echo ${ask.value}"',
+                'ksh -e "echo ${ask.value}"',
+                'ksh93 "echo ${ask.value}"',
+                'mksh "echo ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${command} (${found.join(', ')})`);
+            }
+
+            // 같은 형태라도 `sh` 는 파일 이름이라 경고하지 않는다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'sh "echo ${ask.value}"' },
+            ])).includes('command.nested-interpreter'), 'sh 의 스크립트 파일 이름을 코드로 봤다');
+        });
+
+        test('스크립트가 `cmd` 스위치에 붙어 있어도 본다', () => {
+            for (const command of [
+                'cmd /c"echo ${ask.value}"',
+                'cmd /cecho ${ask.value}',
+                'cmd /kecho ${ask.value}',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${command} (${found.join(', ')})`);
+            }
+        });
+
+        test('투명 래퍼(`env` · `busybox`)를 거쳐도 인터프리터를 찾는다', () => {
+            for (const command of [
+                'env sh -c "echo ${ask.value}"',
+                '/usr/bin/env bash -c "echo ${ask.value}"',
+                'env -i FOO=bar sh -c "echo ${ask.value}"',
+                'env -u PATH sh -c "echo ${ask.value}"',
+                'busybox sh -c "echo ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${command} (${found.join(', ')})`);
+            }
+
+            // 인터프리터가 아닌 것을 감싼 래퍼는 그대로 조용하다.
+            assert.ok(!codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'env printenv ${ask.value}' },
+            ])).includes('command.nested-interpreter'), '래퍼를 벗기다 아무 명령에나 경고했다');
+        });
+
+        test('`env` 의 옵션 문법을 모르면 fail-closed 로 둔다', () => {
+            // 넷 다 실제 `/usr/bin/env` 에서 스크립트가 실행되는 것을 확인했다.
+            // `-S` 는 인자를 버리는 옵션이 아니라 그 문자열을 다시 쪼개 실행한다.
+            for (const command of [
+                'env -S "sh -c \'echo ${ask.value}\'"',
+                'env -P /bin sh -c "echo ${ask.value}"',
+                'env -C/tmp sh -c "echo ${ask.value}"',
+                'env -uPATH sh -c "echo ${ask.value}"',
+                'env --unset=PATH sh -c "echo ${ask.value}"',
+                // 모르는 옵션이면 "래퍼가 아니다" 가 아니라 **해석 불가**다.
+                'env --zzz sh -c "echo ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(
+                    found.includes('command.nested-interpreter') || found.includes('command.dynamic-interpreter'),
+                    `조용히 지나갔다: ${command} (${found.join(', ')})`
+                );
+            }
+        });
+
+        test('`.exe` 가 붙은 셸도 같은 셸이다', () => {
+            // Git-Bash 의 `bash.exe` 는 Windows 에서 흔한 형태인데, 접미사만으로
+            // 검사를 통째로 비껴갔다.
+            for (const command of [
+                'bash.exe -c "echo ${ask.value}"',
+                'sh.exe -c "echo ${ask.value}"',
+                '"C:\\Program Files\\Git\\bin\\bash.exe" -c "echo ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${command} (${found.join(', ')})`);
+            }
+        });
+
+        test('PowerShell 의 축약 매개변수도 스크립트 스위치다', () => {
+            // PowerShell 은 매개변수 이름을 접두사로 맞춘다 — `-Com` 은 `-Command`
+            // 이고 실제로 스크립트를 실행한다. 전체 이름만 보면 통째로 놓친다.
+            for (const command of [
+                'powershell -Com "echo ${ask.value}"',
+                'powershell -Comman "echo ${ask.value}"',
+                'pwsh -NoProfile -Comm "echo ${ask.value}"',
+                'powershell -ec ${b64.value}',
+                'powershell -EncodedCommand ${b64.value}',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'b64', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'), `놓쳤다: ${command} (${found.join(', ')})`);
+            }
+
+            // `-EncodedCommand` 는 **다음 하나**만 스크립트다. 축약이 다른
+            // 매개변수와 겹칠 수 있으므로 뒤의 스위치도 계속 본다.
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: 'powershell -e Bypass -Command "echo ${ask.value}"' },
+            ])).includes('command.nested-interpreter'), '축약 뒤의 -Command 를 놓쳤다');
+        });
+
+        test('`-File` 뒤는 스크립트가 아니라 인자다', () => {
+            for (const command of [
+                'pwsh -File a.ps1 ${ask.value}',
+                'pwsh -NoProfile -File a.ps1 -c "${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(!found.includes('command.nested-interpreter'), `오탐했다: ${command} (${found.join(', ')})`);
+            }
+        });
+
+        test('`-oc` 의 `c` 는 옵션이 아니라 `-o` 의 인자다', () => {
+            // `bash -oc 'echo hi'` 는 `c: invalid option name` 으로 죽는다 —
+            // 스크립트가 실행되지 않으므로 스위치로 보면 안 된다.
+            assert.deepStrictEqual(
+                scriptCandidateTokens(['bash', '-oc', 'echo ${ask.value}']),
+                { tokens: [], certain: true }
+            );
+        });
+
+        test('아주 긴 argv 에서도 죽지 않고 선형으로 끝난다', () => {
+            // 자리마다 `argv.slice(...)` 를 펼쳐 담던 동안 O(예산 × argv) 였고,
+            // 큰 명령줄에서는 spread 인자 상한을 넘겨 RangeError 로 죽었다.
+            // 진단 하나가 확장 호스트를 멈추면 안 된다.
+            const argv = ['sh', ...Array.from({ length: 200000 }, (_, i) => `\${a${i}.value}`)];
+            const started = Date.now();
+            const { tokens } = scriptCandidateTokens(argv);
+            assert.ok(Date.now() - started < 5000, `너무 느리다: ${Date.now() - started}ms`);
+            assert.ok(tokens.length > 0, '후보가 비었다');
+
+            const wide = ['cmd', '/c', ...Array.from({ length: 200000 }, (_, i) => `\${a${i}.value}`)];
+            assert.ok(scriptCandidateTokens(wide).tokens.length > 0);
+        });
+
+        test('참조가 많아도 스크립트를 한 번만 훑는다', () => {
+            // 참조마다 처음부터 다시 훑던 동안 O(참조 수 × 길이) 였고, 참조마다
+            // 태스크 배열을 훑어 O(참조 수 × 태스크 수) 이기도 했다 —
+            // 12,000 참조에 6초, 8,000 태스크를 반복 참조하면 11초였다.
+            // **마지막** 태스크를 참조해야 조회 경로가 드러난다.
+            const measure = (count: number) => {
+                const asks = Array.from({ length: count }, (_, i) => ({
+                    id: `ask${i}`, type: 'inputBox', prompt: '?',
+                    validatePattern: '^[A-Za-z0-9_][A-Za-z0-9_-]*$',
+                }));
+                const last = `\${ask${count - 1}.value}`;
+                const command = 'cmd /c echo ' + Array.from({ length: count }, () => last).join(' ');
+                const started = Date.now();
+                codes(withTasks([...asks, { id: 'run', type: 'command', command }]));
+                return Date.now() - started;
+            };
+            measure(500);                                   // 워밍업
+            const small = Math.max(measure(2000), 1);
+            const large = measure(8000);
+            assert.ok(large < 4000, `너무 느리다: ${large}ms`);
+            assert.ok(large / small < 12, `입력이 4배일 때 시간이 ${(large / small).toFixed(1)}배 — 선형이 아니다`);
+        });
+
+        test('중첩된 치환이 깊어도 선형이다', () => {
+            // 닫는 구분자를 찾을 때 스택 전체를 훑으면(백틱마다 `some`, `)` 마다
+            // "맞는 종류까지 pop") 중첩 깊이 × 길이가 되어 360KB 입력에 9.7초였다 —
+            // extension host 를 그대로 막는다. 최상단 프레임만 본다.
+            const measure = (n: number) => {
+                const script = '$('.repeat(n) + '`x` '.repeat(n) + '${ask.value}';
+                const started = Date.now();
+                codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: '?', validatePattern: '^[A-Za-z0-9_-]+$' },
+                    { id: 'run', type: 'command', command: `sh -c "${script}"` },
+                ]));
+                return Date.now() - started;
+            };
+            measure(2000);                                  // 워밍업
+            const small = Math.max(measure(10000), 1);
+            const large = measure(40000);
+            assert.ok(large < 4000, `너무 느리다: ${large}ms`);
+            assert.ok(large / small < 12, `입력이 4배일 때 시간이 ${(large / small).toFixed(1)}배 — 선형이 아니다`);
+        });
+
+        test('탐색 예산이 끊겨도 후보를 비우지 않는다', () => {
+            // 예산 소진을 `certain=false` 로만 알리면 후보가 비어 호출부가
+            // "위험 없음" 으로 읽는다 — 조용한 fail-open 이었다.
+            const argv = ['sh', ...Array.from({ length: 6000 }, () => '--zzz'), '-c', 'echo ${ask.value}'];
+            const { tokens, certain } = scriptCandidateTokens(argv);
+            assert.strictEqual(certain, false, '다 못 봤는데 확정했다고 했다');
+            assert.ok(tokens.some(text => text.includes('${ask.value}')), '예산이 끊기자 후보가 비었다');
+
+            // 옵션 65개 정도는 예산 안에서 **끝까지** 본다 (예전 고정 예산 64).
+            const many = `sh ${Array.from({ length: 65 }, () => '-x').join(' ')} -c "echo \${ask.value}"`;
+            const found = codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                { id: 'run', type: 'command', command: many },
+            ]));
+            assert.ok(found.includes('command.nested-interpreter'), `예산이 끊겨 조용해졌다: ${found.join(', ')}`);
+        });
+
+        test('인자를 삼키지 않는 것이 확실한 옵션은 갈래를 나누지 않는다', () => {
+            // `-x` 는 인자를 받지 않으므로 `/dev/null` 이 스크립트 파일이고
+            // 뒤의 `-c` 와 값은 위치 인자일 뿐이다 — 실제로 실행되지 않는다.
+            for (const command of [
+                'sh -x /dev/null -c "${ask.value}"',
+                'bash --noprofile /dev/null -c "${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(!found.includes('command.nested-interpreter'), `오탐했다: ${command} (${found.join(', ')})`);
+            }
+        });
+
+        test('표본 실행만으로 안전을 단정하지 않는다 (validatePattern)', () => {
+            // 표본 실행은 "그 문자 **하나만으로는** 통과하지 못한다"는 뜻일
+            // 뿐이다. 아래 패턴들은 표본을 전부 거부하면서 메타문자가 든 값을
+            // 통과시킨다 — `^.{4}$` 는 `x;id`, `^(ok|x;id)$` 는 `x;id`,
+            // `^[^a]+$` 는 무엇이든.
+            for (const validatePattern of [
+                '^.{4}$',
+                '^(ok|x;id)$',
+                '^(ok|x\\x3bid)$',       // 이스케이프로 감춘 메타문자
+                '^[^a]+$',               // 부정 클래스
+                '^\\w+\\s\\w+$',         // `\s` — 공백이 들어간다
+                '^[a-~]+$',              // 메타문자를 지나는 범위
+                '^(?=.*x)[a-z]+$',       // lookahead — 분석하지 않는다
+                '^a|b$',                 // 맨 바깥 `|` — "a 로 시작" **또는** "b 로 끝"
+                '^[a-z]+|.*$',
+                '^[\\;]$',               // 이스케이프한 메타문자도 결국 그 글자다
+                '^[^]$',                 // 부정 빈 클래스 — 무엇이든 통과한다
+                '^[a-😀]$',              // `|` 를 지나는 범위 (코드포인트로 읽어도 잡힌다)
+                '^[😀-\\uFFFF]$',        // 코드포인트/코드유닛이 어긋나 분석 불가
+            ]) {
+                assert.ok(
+                    codes(withTasks([
+                        { id: 'ask', type: 'inputBox', prompt: 'v?', validatePattern },
+                        { id: 'run', type: 'command', command: 'sh -c "echo ${ask.value}"' },
+                    ])).includes('command.nested-interpreter'),
+                    `면제가 우회로가 됐다: ${JSON.stringify(validatePattern)}`
+                );
+            }
+
+            // 문서가 권하는 형태는 계속 면제한다. (`-` 로 **시작**할 수 있는
+            // 패턴은 옵션 주입 때문에 별도 규칙이 막는다 — 아래 전용 테스트 참조.)
+            for (const validatePattern of [
+                '^[A-Za-z0-9_][A-Za-z0-9_-]*$',
+                '^[A-Za-z_][A-Za-z0-9_]*$',
+                '^(dev|prod)$',
+                '^v\\d+\\.\\d+\\.\\d+$',
+                '^[a-z]{2,8}$',
+            ]) {
+                assert.ok(
+                    !codes(withTasks([
+                        { id: 'ask', type: 'inputBox', prompt: 'v?', validatePattern },
+                        { id: 'run', type: 'command', command: 'sh -c "echo ${ask.value}"' },
+                    ])).includes('command.nested-interpreter'),
+                    `올바른 완화책에 경고가 붙었다: ${JSON.stringify(validatePattern)}`
+                );
+            }
         });
 
         test('items 에 메타문자가 있으면 고정 목록이라도 면제하지 않는다', () => {
@@ -1522,6 +2560,52 @@ suite('Doctor', () => {
             `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
     });
 
+    /**
+     * 내장 참조는 같은 이름의 **태스크 결과에 덮이지 않는다.**
+     *
+     * 런타임은 태스크마다 문맥을 새로 만들며 내장 값을 마지막에 덮으므로
+     * (`extension.ts` 의 `Object.assign(…, allResults, { workspaceFolder, … })`)
+     * `id: "workspaceFolder"` 태스크가 있어도 `${workspaceFolder}` 는 워크스페이스
+     * 경로로 해석된다. Doctor 는 문맥을 한 번만 만들어 재사용하므로, 태스크 결과를
+     * 그대로 얹으면 내장 문자열이 결과 객체로 덮여 런타임과 반대로 판정했다.
+     */
+    for (const builtin of ['workspaceFolder', 'extensionPath']) {
+        test(`same-named task does not clobber \${${builtin}}`, () => {
+            const findings = runDoctor([makeInput([{
+                id: 'a.shadow',
+                title: 'shadow',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: builtin, type: 'inputBox', prompt: '?' },
+                        { id: 'later', type: 'command', command: `echo \${${builtin}}` },
+                    ],
+                },
+            }])], compileValidator());
+            assert.strictEqual(findings.filter(f => f.code === 'variable.unresolved').length, 0,
+                `내장 참조를 동명 태스크가 덮었다: ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
+        });
+
+        test(`\${${builtin}.value} on a shadowing task is still reported`, () => {
+            // 반대 방향의 런타임 대조: 내장 값이 이겼으므로 `.value` 는 문자열의
+            // 없는 속성이라 런타임에서도 리터럴로 남는다. "내장이 참조를 통째로
+            // 삼키게" 고치면 이 경고가 사라져 버리므로 함께 고정한다.
+            const findings = runDoctor([makeInput([{
+                id: 'a.shadow-value',
+                title: 'shadow',
+                action: {
+                    description: 'd',
+                    tasks: [
+                        { id: builtin, type: 'inputBox', prompt: '?' },
+                        { id: 'later', type: 'command', command: `echo \${${builtin}.value}` },
+                    ],
+                },
+            }])], compileValidator());
+            assert.ok(findings.some(f => f.code === 'variable.unresolved'),
+                `내장이 이긴 뒤의 \`.value\` 를 해석된 것으로 봤다: ${codes(findings).join(', ')}`);
+        });
+    }
+
     // 0.6.51 의 다중 선택 `args` 확장. Doctor 가 `args` 를 단순 보간으로만
     // 검사하던 동안, 문서(`docs/features.md` §fileDialog 다중 선택)가 정답으로
     // 제시한 형태가 그대로 경고를 받았고 문구는 "런타임에서는 리터럴로
@@ -1932,6 +3016,28 @@ suite('Doctor', () => {
         ])], v);
         assert.ok(findings.some(f => f.code === 'dependsOn.cycle'),
             `expected dependsOn.cycle, got ${codes(findings).join(',')}`);
+        // 짧은 순환은 경로를 그대로 싣는다 — 접기가 평범한 경우를 건드리지 않는다.
+        assert.ok(findings.find(f => f.code === 'dependsOn.cycle')!.message.includes('a -> b -> a'),
+            '짧은 순환 경로를 접었다');
+    });
+
+    test('folds a pipeline-length cycle path instead of dumping every id', () => {
+        // 순차 배리어가 사슬이라 순환 경로가 태스크 수만큼 길어질 수 있다.
+        // 그대로 실으면 진단 하나가 수십 KB 라 Problems 패널을 덮는다.
+        const N = 400;
+        const tasks: any[] = [{ id: 'T0', type: 'shell', command: `echo \${T${N - 1}.output}` }];
+        for (let i = 1; i < N; i++) { tasks.push({ id: `T${i}`, type: 'shell', command: `echo ${i}` }); }
+        const findings = runDoctor([makeInput([
+            { id: 'a.long-cyc', title: 'cyc', action: { description: 'd', tasks } }
+        ])], compileValidator());
+
+        const cycle = findings.find(f => f.code === 'dependsOn.cycle');
+        assert.ok(cycle, `expected dependsOn.cycle, got ${codes(findings).join(',')}`);
+        assert.ok(cycle!.message.includes('more)'), `경로를 접지 않았다: ${cycle!.message.slice(0, 200)}`);
+        assert.ok(cycle!.message.length < 400, `메시지가 여전히 길다 (${cycle!.message.length}자)`);
+        // 양 끝은 남는다 — 순환을 고치려면 닫히는 지점이 보여야 한다.
+        assert.ok(cycle!.message.includes('T0 ->') && cycle!.message.includes('-> T0.'),
+            `순환이 닫히는 지점을 잘라 냈다: ${cycle!.message.slice(0, 200)}`);
     });
 
     test('flags self-referential dependsOn', () => {
