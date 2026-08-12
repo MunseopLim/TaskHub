@@ -687,6 +687,11 @@ export const NON_INTERPOLATED_TASK_KEYS: ReadonlySet<string> = new Set([
     'options',                                   // 다이얼로그 options subtree
     'output.capture', 'output.diagnostics',      // 정규식
     'output.title', 'output.mode',
+    // 에디터 언어 id — 런타임은 `...task.output` 로 받은 값을 **보간 없이** 그대로
+    // 쓴다(`language: interpolatedOutput.language || 'plaintext'`). 보간되지 않는
+    // 자리를 읽으면 `language: "${A.value}"` 하나가 `B → A` 를 만들고, 반대 방향의
+    // 진짜 참조와 만나면 가짜 순환으로 액션 전체가 거부된다.
+    'output.language',
     // `when` 은 `var` 만 보간한다 — 나머지는 비교 대상 리터럴이다.
     'when.equals', 'when.notEquals', 'when.matches', 'when.in',
 ]);
@@ -704,7 +709,7 @@ export const NON_INTERPOLATED_TASK_KEYS: ReadonlySet<string> = new Set([
  * separately in `inferTaskDependencies` because `extractVariableHeads`
  * preserves the colon in the head.
  */
-const RESERVED_VARIABLE_HEADS: ReadonlySet<string> = new Set([
+export const RESERVED_VARIABLE_HEADS: ReadonlySet<string> = new Set([
     'workspaceFolder',
     'extensionPath',
 ]);
@@ -719,7 +724,7 @@ const RESERVED_VARIABLE_HEADS: ReadonlySet<string> = new Set([
  * `${build:fw.output}` must still be auto-inferred as a dep.
  * Otherwise a `parallel: true` consumer would race its producer.
  */
-const RESERVED_HEAD_PREFIXES: ReadonlyArray<string> = ['env:', 'input:'];
+export const RESERVED_HEAD_PREFIXES: ReadonlyArray<string> = ['env:', 'input:'];
 
 /** Task object keys whose value can be a per-platform `{windows,macos,linux}` object. */
 const PLATFORM_BRANCH_KEYS: ReadonlySet<string> = new Set(['command', 'tool', 'itemsFromCommand']);
@@ -835,7 +840,38 @@ export function* walkInterpolatedTaskStrings(
     task: unknown,
     platform?: NodeJS.Platform
 ): Generator<string> {
-    yield* walkStrings(projectActivePlatformBranches(task, platform), NON_INTERPOLATED_TASK_KEYS);
+    const projected = projectActivePlatformBranches(task, platform);
+    yield* walkStrings(projected, skipPathsForTask(projected));
+}
+
+/**
+ * 정적 목록에 **이 태스크의 상태로만 갈리는** 자리를 더한다.
+ *
+ * 없는 의존성의 대가는 순서가 밀리는 정도가 아니다 — 반대 방향의 진짜 참조가
+ * 있으면 가짜 순환으로 액션 전체가 거부되고(`A → B → A`), 조건으로 꺼진 `A`
+ * 때문에 `B` 까지 조용히 skip 된다. 그래서 런타임이 **실제로 읽는 조건**을 그대로
+ * 옮긴다(`extension.ts`):
+ *
+ *   - `passTheResultToNextTask` 가 거짓이면 `output` subtree 를 통째로 읽지 않는다
+ *     (`if (task.passTheResultToNextTask && task.output)`). 이 바깥에서 쓰이는 것은
+ *     `capture` · `diagnostics` 뿐이고 둘 다 정규식이라 이미 제외돼 있다.
+ *   - 그 안에서도 `filePath` · `overwrite` 는 `mode === 'file'` 일 때만 보간한다
+ *     (`writesFile`).
+ *
+ * `mode` 도 `passTheResultToNextTask` 도 보간 대상이 아니므로(전자는 열거값,
+ * 후자는 boolean) 런타임과 **같은 리터럴 비교**로 판정할 수 있다.
+ */
+function skipPathsForTask(task: unknown): ReadonlySet<string> {
+    const t = task as { output?: { mode?: unknown }; passTheResultToNextTask?: unknown } | null | undefined;
+    const output = t?.output;
+    if (!output || typeof output !== 'object') { return NON_INTERPOLATED_TASK_KEYS; }
+    const extended = new Set(NON_INTERPOLATED_TASK_KEYS);
+    if (!t?.passTheResultToNextTask) { extended.add('output'); return extended; }
+    if (output.mode !== 'file') {
+        extended.add('output.filePath');
+        extended.add('output.overwrite');
+    }
+    return extended;
 }
 
 function* walkStrings(value: unknown, skipPaths: ReadonlySet<string>, path = ''): Generator<string> {

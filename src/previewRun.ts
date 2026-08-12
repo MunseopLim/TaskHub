@@ -1222,21 +1222,56 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
 
         if (task.output) {
             lines.push(`  output:`);
+            // **런타임이 이 subtree 를 언제 읽는가** — Doctor·의존성 추론과 같은
+            // 조건이다(`extension.ts` 의 `passTheResultToNextTask && task.output`,
+            // 그 안에서 `writesFile`). 여기만 조건을 빼면 Preview 혼자 실행되지도
+            // 않는 자리를 "fix before running" 으로 막고, Doctor 는 같은 설정에
+            // `output.ignored` 만 내어 두 진단이 정면으로 어긋난다.
+            //
+            // **`capture` · `diagnostics` 는 이 조건 밖이다.** 런타임은 결과에 문자열
+            // `output` 이 있으면 그 둘을 돌린다 — `stringManipulation` 은 플래그 없이도
+            // 해당한다. 그래서 "블록 전체가 무시된다" 고 적으면 안 된다: 같은 리포트가
+            // 한쪽에서는 무시된다고 하면서 downstream 에서는 `${id.<capture 이름>}` 을
+            // 정상 해석해 스스로 모순된다.
+            const outputLive = !!task.passTheResultToNextTask;
+            const outputWritesFile = outputLive && task.output.mode === 'file';
+            // `capture` · `diagnostics` 의 조건은 **문자열 결과가 나는가** 다 — 타입
+            // 목록이 아니라 시뮬레이션에서 가져와 Doctor 와 같은 출처를 쓴다.
+            const producesStringOutput = typeof simulateTaskResult(task).output === 'string';
+            if (!outputLive) {
+                lines.push(`    (mode / language / content / filePath / overwrite are ignored — 'passTheResultToNextTask' is not set)`);
+            }
+            if (task.output.capture || task.output.diagnostics) {
+                lines.push(producesStringOutput
+                    ? `    (capture / diagnostics run separately — they need a string output, which this task produces)`
+                    : `    (capture / diagnostics are skipped — they need a string output, which this task does not produce)`);
+            }
             if (task.output.mode) {
                 lines.push(`    mode: ${task.output.mode}`);
             }
             if (task.output.language) {
-                lines.push(`    language: ${task.output.language}`);
+                // 에디터 언어 id — 런타임이 보간하지 않고, `mode: 'editor'` 에서만 쓴다.
+                const languageLive = outputLive && task.output.mode === 'editor';
+                lines.push(languageLive
+                    ? `    language: ${task.output.language}`
+                    : `    language: ${task.output.language}  (not used — ${outputLive ? `only used with mode: 'editor'` : `'passTheResultToNextTask' is not set`})`);
             }
             if (task.output.content) {
                 // `content` 는 런타임에서 보간된 뒤 파일/에디터로 나간다. 검사
                 // 목록에 넣지 않으면 그 안의 `${ghost.output}` 이 미해결로
                 // 보고되지 않은 채 그대로 기록된다.
-                const resolvedContent = interpolatePipelineVariables(task.output.content, interpolationContext);
-                lines.push(`    content: ${resolvedContent}`);
-                interpolated.push(resolvedContent);
+                if (outputLive) {
+                    const resolvedContent = interpolatePipelineVariables(task.output.content, interpolationContext);
+                    lines.push(`    content: ${resolvedContent}`);
+                    interpolated.push(resolvedContent);
+                } else {
+                    lines.push(`    content: ${task.output.content}  (not interpolated — 'passTheResultToNextTask' is not set)`);
+                }
             }
-            if (task.output.filePath) {
+            if (task.output.filePath && !outputWritesFile) {
+                lines.push(`    filePath: ${task.output.filePath}  (not used — ${outputLive ? `mode is '${task.output.mode ?? 'unset'}', not 'file'` : `'passTheResultToNextTask' is not set`})`);
+            }
+            if (task.output.filePath && outputWritesFile) {
                 const resolvedPath = interpolatePipelineVariables(task.output.filePath, interpolationContext);
                 lines.push(`    filePath: ${resolvedPath}`);
                 interpolated.push(resolvedPath);
@@ -1256,15 +1291,20 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 UNRESOLVED_VAR_RE.lastIndex = 0;
             }
             if (task.output.overwrite !== undefined) {
-                if (typeof task.output.overwrite === 'string') {
+                if (typeof task.output.overwrite === 'string' && outputWritesFile) {
                     const resolved = interpolatePipelineVariables(task.output.overwrite, interpolationContext);
                     const effective = resolved.trim().toLowerCase() === 'true';
                     lines.push(`    overwrite: ${JSON.stringify(task.output.overwrite)}  →  ${effective} (string, matches "true" case-insensitively when enabled)`);
                     interpolated.push(resolved);
-                } else {
+                } else if (outputWritesFile) {
                     lines.push(`    overwrite: ${JSON.stringify(task.output.overwrite)}`);
+                } else {
+                    // boolean 이든 문자열이든 `mode: 'file'` 이 아니면 쓰이지 않는다 —
+                    // 문자열에만 사유를 붙이면 `overwrite: true` 가 살아 있는 것처럼 보인다.
+                    const why = outputLive ? `only used with mode: 'file'` : `'passTheResultToNextTask' is not set`;
+                    lines.push(`    overwrite: ${JSON.stringify(task.output.overwrite)}  (not used — ${why})`);
                 }
-            } else if (task.output.mode === 'file') {
+            } else if (outputWritesFile) {
                 lines.push(`    overwrite: false (default — write fails if target already exists)`);
             }
             if (task.output.capture) {
@@ -1273,8 +1313,12 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 for (const r of rules) {
                     lines.push(`      - ${formatCaptureRule(r)}  →  \${${task.id}.${r.name}}`);
                 }
-                if ((task.type === 'shell' || task.type === 'command') && !task.passTheResultToNextTask) {
-                    lines.push(`      ⚠️  capture is defined but 'passTheResultToNextTask' is false — captures will be skipped`);
+                if (!producesStringOutput) {
+                    // 타입으로 가르지 않는다 — 조건은 "문자열 결과가 나는가" 다.
+                    // `(shell|command) && !flag` 로 좁혀 두면 `fileDialog` 처럼 애초에
+                    // 문자열을 내지 않는 타입의 capture 가 아무 말 없이 지나간다.
+                    lines.push(`      ⚠️  capture is defined but this task produces no string output — captures will be skipped`
+                        + ((task.type === 'shell' || task.type === 'command') ? ` (set 'passTheResultToNextTask': true)` : ''));
                 }
             }
         }

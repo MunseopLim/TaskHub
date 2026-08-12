@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import Ajv from 'ajv';
-import { runDoctor, runDoctorPerSource, DoctorInput, DoctorFinding, DoctorValidator, scriptCandidateTokens } from '../doctor';
+import { runDoctor, runDoctorPerSource, DoctorInput, DoctorFinding, DoctorValidator, scriptCandidateTokens, enumerateArgvCandidates } from '../doctor';
 import { detectFrozenCondition } from '../previewRun';
 import { evaluateTaskCondition } from '../pipelineUtils';
 import * as actionSchema from '../../schema/actions.schema.json';
@@ -250,6 +250,194 @@ suite('Doctor', () => {
                 { id: 'ask', type: 'inputBox', prompt: 'v?' },
                 { id: 'run', type: 'command', command: '${which.value} -c "echo ${ask.value}"' },
             ])).includes('command.nested-interpreter'), '고정 items 로 풀리는 실행 파일을 놓쳤다');
+        });
+
+        test('열거는 런타임이 **실제로 내는 키**일 때만 한다', () => {
+            // `${which.typo}` 는 런타임에서 미해결 리터럴로 남아 실행 파일이 되지
+            // 않는다. 키를 안 보고 항목을 펼치면 Doctor 가 그것을 `sh` 로 바꿔 놓고
+            // 없는 위험을 만들어 낸다 — 옳은 `variable.unresolved` 위에
+            // `command.nested-interpreter` 까지 얹혔다.
+            const enumerated = (ref: string, extra: any = {}) =>
+                enumerateArgvCandidates([ref, '-c', 'echo x'],
+                    [{ id: 'which', type: 'quickPick', items: ['sh', 'node'], ...extra }] as any)
+                    .variants.map(v => v[0]);
+
+            assert.deepStrictEqual(enumerated('${which.value}'), ['sh', 'node'], '정상 키를 펼치지 않았다');
+            assert.deepStrictEqual(enumerated('${which.typo}'), ['${which.typo}'], '없는 키를 펼쳤다');
+            // bare 는 `output`·`outputDir` 로만 폴백하는데 quickPick 은 둘 다 내지 않는다.
+            assert.deepStrictEqual(enumerated('${which}'), ['${which}'], 'bare 참조를 펼쳤다');
+            // `values` 는 다중 선택일 때만 나온다.
+            assert.deepStrictEqual(enumerated('${which.values}'), ['${which.values}'], '단일 선택의 `values` 를 펼쳤다');
+            assert.deepStrictEqual(enumerated('${which.values}', { canPickMany: true }), ['sh', 'node']);
+
+            // **풀릴 대안이 하나도 없으면 그 명령은 실행 자체가 안 된다.** 실행 파일
+            // 이름이 리터럴로 남아 spawn 이 실패하므로 인터프리터 진단을 얹으면
+            // 없는 위험을 지어내는 것이다. 값에 제약이 없어도 마찬가지다 —
+            // 제약된 패턴으로만 검사하면 이 재현 조건이 가려진다.
+            const unresolvableExe = codes(withTasks([
+                { id: 'which', type: 'quickPick', items: ['sh'] },
+                { id: 'ask', type: 'inputBox', prompt: '?' },
+                { id: 'run', type: 'command', command: '${which.typo} -c "echo ${ask.value}"' },
+            ]));
+            assert.ok(unresolvableExe.includes('variable.unresolved'),
+                `오타를 미해결로 알리지 않았다: ${unresolvableExe.join(', ')}`);
+            assert.ok(!unresolvableExe.some(c => c.startsWith('command.')),
+                `실행되지도 않는 명령에 인터프리터 진단을 얹었다: ${unresolvableExe.join(', ')}`);
+
+            // 반대로 **풀리는** 자리는 그대로 경고한다 — fail-open 이 되면 안 된다.
+            const live = (command: string) => codes(withTasks([
+                { id: 'which', type: 'quickPick', items: ['sh'] },
+                { id: 'ask', type: 'inputBox', prompt: '?' },
+                { id: 'run', type: 'command', command },
+            ]));
+            assert.ok(live('${which.value} -c "echo ${ask.value}"').includes('command.nested-interpreter'),
+                '정상 키인데 조용해졌다');
+            // `??` 체인은 **하나라도** 풀리면 실행된다.
+            assert.ok(live('${which.typo ?? which.value} -c "echo ${ask.value}"').includes('command.nested-interpreter'),
+                '체인의 살아 있는 대안을 놓쳤다');
+            // 열거할 수 없는 실행 파일은 종전대로 fail-closed 다.
+            assert.ok(codes(withTasks([
+                { id: 'pick', type: 'inputBox', prompt: 'exe?' },
+                { id: 'ask', type: 'inputBox', prompt: '?' },
+                { id: 'run', type: 'command', command: '${pick.value} -c "echo ${ask.value}"' },
+            ])).includes('command.nested-interpreter'), '열거 불가 실행 파일이 조용해졌다');
+
+            // **내장 참조는 동명 태스크보다 세다.** 런타임은 태스크 결과 위에 내장
+            // 값을 덮으므로 `${workspaceFolder.value}` 는 문자열의 없는 속성이라
+            // 풀리지 않는다 — 태스크만 보고 항목을 펼치면 그것을 `sh` 로 바꿔 놓고
+            // 없는 주입을 지어낸다.
+            for (const builtin of ['workspaceFolder', 'extensionPath']) {
+                const found = codes(withTasks([
+                    { id: builtin, type: 'quickPick', items: ['sh'] },
+                    { id: 'ask', type: 'inputBox', prompt: '?' },
+                    { id: 'run', type: 'command', command: `\${${builtin}.value} -c "echo \${ask.value}"` },
+                ]));
+                assert.ok(!found.some(c => c.startsWith('command.')),
+                    `내장 이름과 겹치는 태스크를 펼쳤다 (${builtin}): ${found.join(', ')}`);
+                assert.ok(found.includes('variable.unresolved'), found.join(', '));
+            }
+
+            // 아예 없는 태스크를 가리키면 런타임에서 리터럴로 남아 spawn 이 실패한다.
+            for (const command of [
+                '${ghost.value} -c "echo ${ask.value}"',
+                '${which.typo ?? ghost.value} -c "echo ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'which', type: 'quickPick', items: ['sh'] },
+                    { id: 'ask', type: 'inputBox', prompt: '?' },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(!found.some(c => c.startsWith('command.')),
+                    `실행되지도 않는 명령에 인터프리터 진단을 얹었다: ${command} (${found.join(', ')})`);
+                assert.ok(found.includes('variable.unresolved'), found.join(', '));
+            }
+
+            // **bare 내장은 항상 풀려 `??` 체인을 끝낸다** — 뒤 대안은 쓰이지 않으므로
+            // 펼치면 있지도 않은 인터프리터를 지어낸다. 값 자체는 디렉터리 경로다.
+            assert.ok(!codes(withTasks([
+                { id: 'which', type: 'quickPick', items: ['sh'] },
+                { id: 'ask', type: 'inputBox', prompt: '?' },
+                { id: 'run', type: 'command', command: '${workspaceFolder ?? which.value} -c "echo ${ask.value}"' },
+            ])).some(c => c.startsWith('command.')), 'bare 내장 뒤의 죽은 대안을 펼쳤다');
+
+            // 반대로 `.value` 는 문자열의 없는 속성이라 풀리지 않으므로 **뒤 대안이
+            // 살아 있다** — 그쪽은 그대로 경고해야 한다.
+            assert.ok(codes(withTasks([
+                { id: 'which', type: 'quickPick', items: ['sh'] },
+                { id: 'ask', type: 'inputBox', prompt: '?' },
+                { id: 'run', type: 'command', command: '${workspaceFolder.value ?? which.value} -c "echo ${ask.value}"' },
+            ])).includes('command.nested-interpreter'), '살아 있는 뒤 대안을 놓쳤다');
+        });
+
+        test('`??` 체인은 **사라지지 않는 대안**에서만 끊는다', () => {
+            // 태스크 결과가 사라지는 길은 여럿이다 — `when` · `continueOnError` 실패나
+            // 취소 · 조건으로 꺼진 태스크를 참조한 전이적 skip. 그중 하나라도 빠뜨리고
+            // "뒤 대안은 죽었다" 고 단정하면 그 자리가 fail-open 이 된다. 그래서 태스크
+            // 대안은 체인을 끊지 않고 후보만 쌓는다(과탐을 감수한다). 끊을 수 있는 것은
+            // 꺼지는 길이 없는 **예약 내장**과, 결과 객체 자체가 값이 되는 **bare 참조**뿐이다.
+            const chain = (tasks: any[], command: string) => codes(withTasks([
+                ...tasks,
+                { id: 'ask', type: 'inputBox', prompt: '?' },
+                { id: 'run', type: 'command', command },
+            ])).includes('command.nested-interpreter');
+
+            const safe = { id: 'safe', type: 'quickPick', items: ['echo'] };
+            const bad = { id: 'bad', type: 'quickPick', items: ['sh'] };
+
+            // 앞이 살아 있으면 뒤 bare 내장이 진단을 끄지 못한다.
+            assert.ok(chain([bad], '${bad.value ?? workspaceFolder} -c "echo ${ask.value}"'),
+                '앞 대안이 살아 있는데 뒤 내장을 보고 진단을 껐다');
+            // 죽은 대안은 건너뛰고 다음으로 넘어간다.
+            assert.ok(chain([safe, bad], '${safe.typo ?? bad.value} -c "echo ${ask.value}"'),
+                '죽은 대안 뒤의 살아 있는 대안을 놓쳤다');
+
+            // **사라질 수 있는 앞 대안은 뒤를 가리지 못한다.** 세 가지 skip 경로를
+            // 모두 고정한다 — 하나만 모델링하던 동안 나머지 둘이 fail-open 이었다.
+            assert.ok(chain(
+                [{ ...safe, when: { var: '${x}', equals: 'y' } }, bad],
+                '${safe.value ?? bad.value} -c "echo ${ask.value}"',
+            ), '`when` 으로 꺼질 수 있는 대안에서 체인을 끝냈다');
+            assert.ok(chain(
+                [{ ...safe, continueOnError: true }, bad],
+                '${safe.value ?? bad.value} -c "echo ${ask.value}"',
+            ), '`continueOnError` 로 사라질 수 있는 대안에서 체인을 끝냈다');
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: '?' },
+                { id: 'gate', type: 'quickPick', items: ['g'], when: { var: '${ask.value}', equals: 'y' } },
+                { ...safe, placeHolder: 'pick ${gate.value}' },     // gate 가 꺼지면 함께 skip 된다
+                bad,
+                { id: 'run', type: 'command', command: '${safe.value ?? bad.value} -c "echo ${ask.value}"' },
+            ])).includes('command.nested-interpreter'), '전이적으로 skip 될 수 있는 대안에서 체인을 끝냈다');
+
+            // **bare 참조는 결과 객체가 값이 되어 체인을 끝낸다** — 뒤 대안은 시도되지
+            // 않는다(Preview 의 `blocks-chain` 과 같은 규칙). 값은 객체라 인터프리터가 아니다.
+            assert.ok(!chain([{ id: 'pick', type: 'quickPick', items: ['sh'] }, bad],
+                '${pick ?? bad.value} -c "echo ${ask.value}"'),
+                'bare 참조가 끊은 체인의 뒤 대안을 펼쳤다');
+
+            // **자기 자신은 예외다.** 태스크가 도는 시점에 그 결과는 아직 문맥에 없어
+            // bare 든 키든 풀리지 않고 다음 대안으로 넘어간다 — "존재하는 태스크" 라는
+            // 이유로 체인을 끊으면 뒤의 진짜 인터프리터를 놓친다.
+            for (const ref of ['${run ?? bad.value}', '${run.value ?? bad.value}']) {
+                assert.ok(codes(withTasks([
+                    bad,
+                    { id: 'ask', type: 'inputBox', prompt: '?' },
+                    { id: 'run', type: 'command', command: `${ref} -c "echo \${ask.value}"` },
+                ])).includes('command.nested-interpreter'), `자기 참조에서 체인을 끊었다: ${ref}`);
+            }
+        });
+
+        test('낼 수 없는 키는 시뮬레이션 한곳으로 판정한다', () => {
+            // 키 목록을 열거 쪽에 따로 적어 두면 `variable.unresolved` 를 내는 판정과
+            // 어긋난다 — `inputBox` 는 `value` 만 내므로 `${input.typo}` 는 절대 실행
+            // 파일이 되지 않는데, "모르는 것" 으로 분류돼 fail-closed 경로를 타고
+            // 가짜 인터프리터 경고가 됐다.
+            for (const source of [
+                { id: 'src', type: 'inputBox', prompt: '?' },
+                { id: 'src', type: 'quickPick', itemsFromCommand: 'ls' },
+                { id: 'src', type: 'confirm', message: '?' },
+            ]) {
+                const found = codes(withTasks([
+                    source,
+                    { id: 'ask', type: 'inputBox', prompt: '?' },
+                    { id: 'run', type: 'command', command: '${src.typo} -c "echo ${ask.value}"' },
+                ]));
+                assert.ok(!found.some(c => c.startsWith('command.')),
+                    `낼 수 없는 키에 인터프리터 진단을 얹었다 (${source.type}): ${found.join(', ')}`);
+                assert.ok(found.includes('variable.unresolved'), found.join(', '));
+            }
+
+            // **낼 수 있는 키는 종전대로 fail-closed** — 열거만 못 할 뿐 값은 난다.
+            for (const [source, key] of [
+                [{ id: 'src', type: 'inputBox', prompt: '?' }, 'value'],
+                [{ id: 'src', type: 'quickPick', itemsFromCommand: 'ls' }, 'value'],
+            ] as Array<[any, string]>) {
+                assert.ok(codes(withTasks([
+                    source,
+                    { id: 'ask', type: 'inputBox', prompt: '?' },
+                    { id: 'run', type: 'command', command: `\${src.${key}} -c "echo \${ask.value}"` },
+                ])).includes('command.nested-interpreter'), `낼 수 있는 키가 조용해졌다 (${source.type})`);
+            }
         });
 
         test('스위치가 참조로 정해져도 알아본다', () => {
@@ -807,6 +995,48 @@ suite('Doctor', () => {
                 { id: 'ask', type: 'quickPick', items: ['ok', '--version'] },
                 { id: 'run', type: 'command', command: 'sh -c "git tag ${ask.value}"' },
             ])).includes('command.nested-interpreter'), '`-` 로 시작하는 항목을 면제했다');
+
+            // **중괄호는 안전한 문자가 아니다.** PowerShell 에서 `{…}` 는 스크립트
+            // 블록이라 그 안이 곧 코드다 — 고정 목록 quickPick 하나로 명령이 실행된다.
+            for (const command of [
+                'pwsh -Command "Invoke-Command -ScriptBlock ${ask.value}"',
+                'pwsh -Command "Start-Job -ScriptBlock ${ask.value}"',
+                'pwsh -Command "ForEach-Object ${ask.value}"',
+                'pwsh -Command "Where-Object ${ask.value}"',
+                // 목록에 없는 cmdlet 이라도 `-ScriptBlock` 류 매개변수 뒤는 코드다.
+                'pwsh -Command "Register-ObjectEvent -Action ${ask.value}"',
+                'pwsh -Command "Some-Cmdlet -ScriptBlock ${ask.value}"',
+                // PowerShell 은 매개변수 이름을 접두사로 맞춘다.
+                'pwsh -Command "Invoke-Command -Scr ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'quickPick', items: ['{whoami}'] },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(found.includes('command.nested-interpreter'),
+                    `ScriptBlock 주입을 데이터로 봤다: ${command} (${found.join(', ')})`);
+            }
+
+            // **이름 있는 매개변수의 값은 데이터다.** cmdlet 전체를 sink 로 두면
+            // `-ComputerName ${host}` 같은 평범한 인자까지 경고가 붙는다.
+            for (const command of [
+                'pwsh -Command "Invoke-Command -ComputerName ${ask.value} -ScriptBlock { Get-Date }"',
+                'pwsh -Command "Start-Job -Name ${ask.value} -ScriptBlock { Get-Date }"',
+                'pwsh -Command "Write-Output ${ask.value}"',
+            ]) {
+                const found = codes(withTasks([
+                    { id: 'ask', type: 'quickPick', items: ['server1'] },
+                    { id: 'run', type: 'command', command },
+                ]));
+                assert.ok(!found.includes('command.nested-interpreter'),
+                    `데이터 매개변수에 경고했다: ${command} (${found.join(', ')})`);
+            }
+
+            // 데이터 매개변수가 앞에 와도 스크립트 자리는 그대로 잡는다.
+            assert.ok(codes(withTasks([
+                { id: 'ask', type: 'quickPick', items: ['{whoami}'] },
+                { id: 'run', type: 'command', command: 'pwsh -Command "Invoke-Command -ComputerName h -ScriptBlock ${ask.value}"' },
+            ])).includes('command.nested-interpreter'), '데이터 뒤의 스크립트 자리를 놓쳤다');
 
         });
 
@@ -2624,6 +2854,106 @@ suite('Doctor', () => {
     });
     const unresolvedCount = (findings: DoctorFinding[]) =>
         findings.filter(f => f.code === 'variable.unresolved').length;
+
+    /**
+     * `output` 검사는 **그래프 추론과 같은 생존 조건**을 따라야 한다. 어긋나면
+     * 두 진단이 정면으로 맞선다 — 한쪽은 "이 output 은 무시된다"(`output.ignored`)고
+     * 하면서 다른 쪽은 그 안의 참조를 미해결로 올리거나 경로를 에러로 막았다.
+     */
+    suite('output 검사의 생존 조건', () => {
+        const codesOf = (task: any) => runDoctor([makeInput([
+            { id: 'a.out', title: 'out', action: { description: 'd', tasks: [task] } },
+        ])], compileValidator()).map(f => f.code);
+
+        test('죽은 output 은 **모든 타입**에서 `output.ignored` 로 알린다', () => {
+            // 게이트(`passTheResultToNextTask && output`)는 타입을 가리지 않는다.
+            // 진단만 shell/command 로 좁혀 두면, 죽은 필드의 참조·경로 진단을 뺀 뒤로
+            // 다른 타입은 **아무 진단도 남지 않아** Preview 만 "ignored" 라고 말한다.
+            const cases: any[] = [
+                { id: 'w', type: 'fileDialog' },
+                { id: 'w', type: 'stringManipulation', function: 'trim', input: 'x' },
+                { id: 'w', type: 'zip', source: 's', archivePath: 'a.zip' },
+                { id: 'w', type: 'writeFile', path: 'p', content: 'c' },
+                { id: 'w', type: 'shell', command: 'x' },
+            ];
+            for (const base of cases) {
+                const found = codesOf({ ...base, output: { mode: 'file', filePath: 'f.txt', content: '${ghost.output}' } });
+                assert.ok(found.includes('output.ignored'),
+                    `${base.type} 의 죽은 output 에 아무 진단도 남지 않았다: ${found.join(', ') || '(none)'}`);
+            }
+
+            // 살아 있는 자리는 알리지 않는다.
+            assert.ok(!codesOf({
+                id: 'w', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                output: { mode: 'file', filePath: 'f.txt' },
+            }).includes('output.ignored'), '살아 있는 file output 을 무시된다고 했다');
+            // `capture` 는 게이트 **밖**이다 — 문자열 출력만 있으면 돈다.
+            assert.ok(!codesOf({
+                id: 'w', type: 'stringManipulation', function: 'trim', input: 'x',
+                output: { capture: { name: 'v', pattern: '(a)' } },
+            }).includes('output.ignored'), 'stringManipulation 의 capture 를 죽었다고 했다');
+            assert.ok(codesOf({
+                id: 'w', type: 'shell', command: 'x',
+                output: { capture: { name: 'v', pattern: '(a)' } },
+            }).includes('output.ignored'), '문자열 출력이 없는 capture 를 놓쳤다');
+
+            // `language` 는 **에디터 문서를 열 때만** 쓰인다. 목록에서 빠져 있어
+            // `output: { language }` 만 둔 태스크가 진단 0건이었다.
+            assert.ok(codesOf({
+                id: 'w', type: 'shell', command: 'x', output: { language: 'javascript' },
+            }).includes('output.ignored'), '플래그 없는 language 를 놓쳤다');
+            assert.ok(codesOf({
+                id: 'w', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                output: { mode: 'file', filePath: 'f.txt', language: 'javascript' },
+            }).includes('output.ignored'), "mode: 'file' 의 language 를 놓쳤다");
+            assert.ok(!codesOf({
+                id: 'w', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                output: { mode: 'editor', language: 'javascript' },
+            }).includes('output.ignored'), "mode: 'editor' 의 살아 있는 language 를 죽었다고 했다");
+        });
+
+        test('꺼진 output 의 참조·경로는 진단하지 않는다', () => {
+            const dead = codesOf({
+                id: 'B', type: 'shell', command: 'x',
+                output: { mode: 'file', filePath: 'f.txt', content: '${ghost.output}' },
+            });
+            assert.ok(!dead.includes('variable.unresolved'),
+                `실행되지도 않는 output 의 참조를 미해결로 올렸다: ${dead.join(', ')}`);
+
+            const deadPath = codesOf({
+                id: 'B', type: 'shell', command: 'x',
+                output: { mode: 'file', filePath: '/etc/passwd' },
+            });
+            assert.ok(!deadPath.includes('path.outside-workspace'),
+                `실행되지도 않는 경로를 에러로 막았다: ${deadPath.join(', ')}`);
+            // 대신 "이 output 은 무시된다" 는 진단은 그대로 나온다.
+            assert.ok(deadPath.includes('output.ignored'), deadPath.join(', '));
+        });
+
+        test('살아 있는 output 은 `overwrite` 까지 본다', () => {
+            // 조건을 맞추기 전에는 아무도 보지 않던 자리다.
+            assert.ok(codesOf({
+                id: 'B', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                output: { mode: 'file', filePath: 'f.txt', overwrite: '${ghost.output}' },
+            }).includes('variable.unresolved'), '살아 있는 `overwrite` 의 참조를 놓쳤다');
+
+            assert.ok(codesOf({
+                id: 'B', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                output: { mode: 'file', filePath: 'f.txt', content: '${ghost.output}' },
+            }).includes('variable.unresolved'), '살아 있는 `content` 의 참조를 놓쳤다');
+
+            assert.ok(codesOf({
+                id: 'B', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                output: { mode: 'file', filePath: '/etc/passwd' },
+            }).includes('path.outside-workspace'), '살아 있는 경로를 놓쳤다');
+
+            // `mode` 가 `file` 이 아니면 `filePath` 는 쓰이지 않는다.
+            assert.ok(!codesOf({
+                id: 'B', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                output: { mode: 'editor', filePath: '/etc/passwd' },
+            }).includes('path.outside-workspace'), '`mode: editor` 의 경로를 막았다');
+        });
+    });
 
     test('does not flag an exact array reference in `args` (runtime expands it)', () => {
         const v = compileValidator();

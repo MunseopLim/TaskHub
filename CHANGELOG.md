@@ -29,6 +29,117 @@
 =====================================================================
 -->
 
+## [0.7.17] - 2026-08-12
+
+### 수정 — 0.7.16 리뷰 반영: ScriptBlock 주입과 죽은 필드가 만든 가짜 순환
+
+`output` 이 **언제 살아 있는가**를 런타임·그래프·Doctor·Preview 네 곳이 다르게 알고 있었다. 이번
+릴리스는 그 조건을 런타임 기준 하나로 모은다 — `passTheResultToNextTask && output`, 그 안에서
+`filePath`·`overwrite` 는 `mode === 'file'` 일 때만, `language` 는 아예 보간하지 않는다.
+
+#### High (데이터 손실 / 신뢰 손상 / 호환성 깨짐)
+
+- **PowerShell ScriptBlock 주입이 Doctor 를 통과했다**: 안전 문자 판정이 `{`·`}` 를 메타문자로 세지
+  않아, 고정 목록 `quickPick: ["{whoami}"]` 가 `pwsh -Command "Invoke-Command -ScriptBlock ${v}"`
+  로 흘러가도 **경고가 0건**이었다. PowerShell 에서 `{…}` 는 스크립트 블록이라 그 안이 곧 코드이고
+  (POSIX 에서는 brace expansion 이다), `Invoke-Command` 는 재해석 명령 목록에 없어 안전한 데이터
+  소비자로 분류됐다. 중괄호를 메타문자에 넣고, 스크립트 자리를 **자리 단위로** 추적한다
+  ([src/doctor.ts](src/doctor.ts)) — `-ScriptBlock`·`-Action`·`-FilterScript` 류 매개변수의 값과,
+  스크립트 블록을 위치 인자로도 받는 cmdlet(`Invoke-Command`·`Start-Job`·`ForEach-Object`·
+  `Where-Object` 등)의 위치 인자가 코드 자리다. PowerShell 이 매개변수 이름을 접두사로 맞추므로
+  `-Scr` 같은 축약도 인정한다.
+
+  **cmdlet 을 통째로 재해석 명령으로 두지는 않는다.** 그러면 뒤따르는 **모든** 값이 코드가 되어
+  `Invoke-Command -ComputerName ${host} -ScriptBlock {…}` 의 컴퓨터 이름 같은 평범한 데이터 인자까지
+  경고가 붙는다. 이름 있는 매개변수의 값은 그 매개변수가 스크립트를 받을 때만 코드다.
+- **쓰이지 않는 `output` 필드가 가짜 의존성과 순환을 만들었다**: 제외 목록이 정적이라 공용 순회가
+  런타임이 읽지도 않는 자리를 계속 읽었다. 그 결과 **실제 실행상 DAG 인데 `A → B → A` 순환으로 액션
+  전체가 거부**되고, 조건으로 꺼진 `A` 때문에 `B` 까지 조용히 skip 됐다. 제외 경로를 태스크 상태로
+  계산해 런타임 조건을 그대로 옮겼다 ([src/pipelineUtils.ts](src/pipelineUtils.ts)) —
+  `passTheResultToNextTask` 가 없으면 `output` subtree 전체를 건너뛰고
+  (`if (task.passTheResultToNextTask && task.output)`; 이 바깥에서 쓰이는 `capture`·`diagnostics`
+  는 정규식이라 애초에 제외 대상이다), 그 안에서도 `filePath`·`overwrite` 는 `mode: "file"` 일 때만
+  본다(`writesFile`). `content` 는 모드와 무관하므로 그대로 의존성이다. Doctor 가 이미 같은 상황을
+  `output.ignored`("passTheResultToNextTask 없이 정의된 output 은 조용히 무시된다")로 알리고
+  있었으므로, 한쪽에서는 무시된다고 말하고 다른 쪽에서는 의존성을 잡던 모순도 함께 사라진다.
+
+  `output.language` 도 제외 목록에 넣었다 — 런타임은 `...task.output` 로 받은 값을 **보간 없이**
+  그대로 쓴다(`language: interpolatedOutput.language || 'plaintext'`). 여기 하나가 남아 있어
+  `language: "${A.value}"` 가 `B → A` 를 만들고 반대 방향의 진짜 참조와 만나 액션을 거부시켰다.
+
+- **Doctor 의 `output` 검사가 그래프와 다른 조건을 썼다**: 위 조건을 그래프에만 적용해 두 진단이
+  정면으로 어긋났다 — 꺼진 output 의 `${ghost.output}` 에 `variable.unresolved` 가 붙고 꺼진 경로에
+  `path.outside-workspace` **에러**까지 나서, 실행되지도 않는 자리를 고치라고 요구했다. 반대로
+  **살아 있는** `output.overwrite` 의 참조는 아무도 보지 않아 조용히 리터럴로 나갔다. Doctor 도 같은
+  `passTheResultToNextTask` + `mode === 'file'` 조건을 쓰고, 그 김에 `overwrite` 를 검사 대상에
+  넣었다 ([src/doctor.ts](src/doctor.ts)).
+- **Preview Run 도 죽은 `output` 을 실행되는 것처럼 검사했다**: 같은 조건을 Preview 에만 빠뜨려,
+  Doctor 는 `output.ignored` 만 내는 설정에 Preview 는 "fix before running" 과
+  "OUTSIDE WORKSPACE — execution will be refused" 를 띄웠다. 실행되지도 않는 자리를 고치라고
+  요구하는 셈이고, 같은 액션을 두 진단이 정면으로 다르게 말했다. 이제 조건이 같고, 무시되는 블록은
+  **왜 무시되는지**(`ignored — 'passTheResultToNextTask' is not set`)까지 적는다
+  ([src/previewRun.ts](src/previewRun.ts)).
+
+#### Medium (상태 무결성 / 명령 오동작)
+
+- **실행 파일 quickPick 열거가 참조 키를 무시했다**: `alt.head` 만 보고 항목 label 을 전부 실행 파일
+  후보로 썼다. `${which.typo}` 는 런타임에서 미해결 리터럴로 남아 실행조차 되지 않는데, Doctor 가
+  그것을 `sh` 로 펼쳐 옳은 `variable.unresolved` 위에 **없는 주입**(`command.nested-interpreter`)을
+  얹었다. 런타임이 실제로 내는 키일 때만 펼친다 — `value` 는 항상, `values` 는 `canPickMany` 일 때만.
+  점 없는 `${which}` 도 아니다(bare 는 `output`·`outputDir` 로만 폴백하는데 quickPick 은 둘 다 내지
+  않는다).
+
+  키를 안 보는 것만 고치면 절반이다 — 열거를 멈춰도 그 참조가 **동적 실행 파일**로 분류돼, 값에 제약이
+  없으면 여전히 `command.nested-interpreter` 가 붙었다. 풀릴 대안이 **하나도** 없으면 그 명령은 spawn
+  자체가 실패하므로 인터프리터 진단을 아예 얹지 않는다 — `variable.unresolved` 가 이미 정확하고 고칠
+  수 있는 진단이다. `??` 체인은 하나라도 풀리면 실행되므로 종전대로 경고하고, 열거할 수 없는 실행
+  파일(제약 없는 `inputBox` 등)도 fail-closed 그대로다.
+
+  같은 이유로 **예약 내장 키와 겹치는 태스크 id** 도 펼치지 않는다. 런타임은 태스크 결과 위에 내장
+  값을 덮으므로 `id: "workspaceFolder"` 인 quickPick 이 있어도 `${workspaceFolder.value}` 는 문자열의
+  없는 속성이라 풀리지 않는데, 태스크만 보고 항목을 펼쳐 `sh` 로 바꿔 놓고 있었다. 의존성 추론이 쓰던
+  예약 키 집합(`RESERVED_VARIABLE_HEADS`)을 내보내 열거·보간 문맥이 같은 규칙을 쓰게 했다 — 같은
+  목록이 세 곳에 복제돼 있던 것도 함께 정리된다.
+
+  **아예 없는 태스크**(`${ghost.value}`)도 같다 — 런타임에서 리터럴로 남아 spawn 이 실패하는데 그것을
+  "동적 실행 파일" 로 보고 뒤 참조를 전부 스크립트 후보로 삼았다. `env:`·`input:` 네임스페이스는 여기서
+  죽었다고 단정할 수 없으므로 종전대로 fail-closed 다.
+
+  **bare 참조는 `??` 체인을 끝낸다**: `${workspaceFolder ?? which.value}` 의 `workspaceFolder` 는 항상
+  풀리므로 뒤 대안은 **쓰이지 않는데**, 예약 키를 무조건 건너뛰는 바람에 `which.value` 를 `sh` 로 펼쳐
+  가짜 경고를 냈다. 태스크를 가리키는 bare 참조(`${pick}`)도 같다 — 결과 **객체 자체**가 값이 되어
+  체인이 거기서 끝난다(Preview 가 `blocks-chain` 으로 설명하는 자리와 같은 규칙). 다만 **자기 자신은
+  예외다**: 태스크가 도는 시점에 그 결과는 아직 문맥에 없으므로 `${run ?? bad.value}` 는 다음 대안으로
+  넘어간다. "존재하는 태스크" 라는 이유로 끊었다가 뒤의 진짜 인터프리터를 놓쳤다.
+
+  반대로 **태스크 대안은 체인을 끊지 않는다.** 처음에는 "먼저 풀리는 대안에서 멈춘다" 로 짰다가
+  fail-open 을 만들었다 — 태스크 결과가 사라지는 길이 `when` 말고도 `continueOnError` 실패·취소와
+  조건으로 꺼진 태스크를 참조한 전이적 skip 까지 있어서, 그중 하나만 빠뜨려도 뒤 대안이 실제로
+  실행되는데 죽었다고 단정하게 된다. 끊을 수 있는 것은 꺼지는 길이 없는 예약 내장과 bare 참조뿐이고,
+  나머지는 후보를 쌓아 `${safe.value ?? bad.value}` 의 과탐을 감수한다.
+
+- **낼 수 없는 키를 "모르는 것" 으로 분류했다**: 열거 쪽에 키 목록을 손으로 적어 둔 탓에 `inputBox` 의
+  `${input.typo}` 나 `itemsFromCommand` quickPick 의 오타처럼 **절대 풀리지 않는** 참조가 fail-closed
+  경로를 타고 가짜 인터프리터 경고가 됐다. 판정을 `simulatedResultKeys` 한곳에 맡겨
+  `variable.unresolved` 를 내는 모델과 같은 출처를 쓴다 — 태스크 타입별 키를 다시 적을 일이 없고,
+  `passTheResultToNextTask` 같은 조건도 이미 반영돼 있다.
+
+- **`output.ignored` 가 shell/command 로만 좁혀져 있었다**: 게이트는 타입을 가리지 않는데 진단만
+  좁아서, 위에서 죽은 필드의 참조·경로 진단을 뺀 뒤로 `fileDialog` 같은 타입은 **아무 진단도 남지
+  않았다** — Preview 만 "ignored" 라고 말하는 상태가 됐다. 타입 제한을 없애고 죽은 필드 목록을 같은
+  모델로 나눴다: `mode`·`content` 는 캡처 모드에서, `filePath`·`overwrite` 는 거기에 더해
+  `mode: "file"` 에서, `language` 는 `mode: "editor"` 에서만 살고, `capture`·`diagnostics` 는
+  **문자열 출력이 있을 때만** 산다(그래서 `stringManipulation` 은 플래그 없이도 돈다).
+  `language` 는 목록에서 아예 빠져 있어 `output: { language }` 만 둔 태스크가 진단 0건이었다.
+
+- **Preview 의 capture 안내가 한 리포트 안에서 어긋났다**: 머리말은 "capture / diagnostics 는 영향
+  없음" 이라 해 놓고 몇 줄 뒤에서 "captures will be skipped" 라고 말했다. 조건을 **문자열 결과가
+  나는가**로 통일해 두 줄이 같은 사실을 말하게 했고, `diagnostics` 도 함께 알린다. capture 경고가
+  `(shell|command)` 로 좁혀져 있어 `fileDialog` 처럼 애초에 문자열을 내지 않는 타입의 capture 가
+  아무 말 없이 지나가던 것도 같이 닫혔다.
+
+**테스트**: 신규 16 케이스, 최종 2823 passing.
+
 ## [0.7.16] - 2026-08-10
 
 ### 수정 — `command` 타입의 명령 문자열에서 `??` 가 조용히 리터럴이 되던 것

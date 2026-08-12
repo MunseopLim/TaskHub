@@ -556,7 +556,10 @@ suite('Extension Test Suite', () => {
 				['archive', { id: 'B', type: 'unzip', archive: '${A.value}' }],
 				['items[].label', { id: 'B', type: 'quickPick', items: [{ label: '${A.value}' }] }],
 				['itemsFromCommand', { id: 'B', type: 'quickPick', itemsFromCommand: 'echo ${A.value}' }],
-				['output.content', { id: 'B', type: 'shell', command: 'x', output: { mode: 'file', filePath: 'f', content: '${A.value}' } }],
+				// `output` 은 `passTheResultToNextTask` 가 있어야 런타임이 읽는다 —
+				// 없으면 죽은 필드이고 Doctor 도 `output.ignored` 로 그렇게 알린다.
+				['output.content', { id: 'B', type: 'shell', command: 'x', passTheResultToNextTask: true, output: { mode: 'file', filePath: 'f', content: '${A.value}' } }],
+				['output.filePath', { id: 'B', type: 'shell', command: 'x', passTheResultToNextTask: true, output: { mode: 'file', filePath: '${A.value}' } }],
 				['when.var', { id: 'B', type: 'shell', command: 'x', when: { var: '${A.value}', equals: 'y' } }],
 			];
 			for (const [label, task] of cases) {

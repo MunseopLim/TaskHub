@@ -272,12 +272,96 @@ suite('inferTaskDependencies — auto-inference from ${taskId.x}', () => {
     });
 
     test('infers from `output.filePath` and `output.content`', () => {
+        // `passTheResultToNextTask` 가 있어야 런타임이 `output` 을 읽는다 —
+        // 없으면 그 subtree 는 죽은 필드다(아래 테스트).
         const task = mkTask({
             id: 'D',
+            passTheResultToNextTask: true,
             output: { mode: 'file', filePath: '${A.outputDir}/report.txt', content: 'value: ${B.output}' },
-        });
+        } as any);
         const deps = [...inferTaskDependencies(task, validIds)].sort();
         assert.deepStrictEqual(deps, ['A', 'B']);
+    });
+
+    test('`output` subtree is dead without `passTheResultToNextTask`', () => {
+        // 런타임은 `passTheResultToNextTask && task.output` 일 때만 이 subtree 를
+        // 보간한다(`extension.ts`). 이 바깥에서 쓰이는 것은 `capture` ·
+        // `diagnostics` 뿐이고 둘 다 정규식이라 애초에 제외돼 있다.
+        for (const output of [
+            { mode: 'file', filePath: '${A.output}', content: '${B.output}' },
+            { mode: 'editor', content: '${B.output}' },
+            { content: '${B.output}' },
+        ]) {
+            const task = mkTask({ id: 'D', output } as any);
+            assert.deepStrictEqual([...inferTaskDependencies(task, validIds)], [],
+                `passTheResultToNextTask 없이 ${JSON.stringify(output)} 에서 의존성을 만들었다`);
+        }
+    });
+
+    test('`output.language` is never interpolated', () => {
+        // 런타임은 `...task.output` 로 받은 값을 그대로 쓴다
+        // (`language: interpolatedOutput.language || 'plaintext'`). 보간되지 않는
+        // 자리를 읽으면 반대 방향의 진짜 참조와 만나 가짜 순환을 만든다.
+        const task = mkTask({
+            id: 'D',
+            passTheResultToNextTask: true,
+            output: { mode: 'editor', language: '${A.value}' },
+        } as any);
+        assert.deepStrictEqual([...inferTaskDependencies(task, validIds)], []);
+
+        const graph = buildTaskGraph([
+            mkTask({ id: 'B', passTheResultToNextTask: true, output: { mode: 'editor', language: '${A.value}' } } as any),
+            mkTask({ id: 'A', command: 'echo ${B.output}' }),
+        ], { platform: 'linux' });
+        assert.strictEqual(detectGraphCycle(graph), null, '`language` 가 가짜 순환을 만들었다');
+    });
+
+    test('`output.filePath` / `overwrite` are dead unless `mode: "file"`', () => {
+        // 런타임은 `mode === 'file'` 일 때만 이 둘을 읽는다(`writesFile`). 다른
+        // 모드에 남은 오래된 참조가 의존성을 만들면 대가가 크다 — 반대 방향의
+        // 진짜 참조와 만나면 **가짜 순환으로 액션 전체가 거부**되고, 조건으로 꺼진
+        // 태스크 때문에 뒤 태스크까지 조용히 skip 된다.
+        for (const mode of ['editor', 'terminal', undefined]) {
+            const task = mkTask({
+                id: 'D',
+                passTheResultToNextTask: true,
+                output: { ...(mode ? { mode } : {}), filePath: '${A.output}', overwrite: '${B.output}' },
+            } as any);
+            assert.deepStrictEqual([...inferTaskDependencies(task, validIds)], [],
+                `mode=${mode} 인데 죽은 필드에서 의존성을 만들었다`);
+        }
+
+        // `content` 는 모드와 무관하게 쓰인다 — 계속 의존성이다.
+        const withContent = mkTask({
+            id: 'D',
+            passTheResultToNextTask: true,
+            output: { mode: 'editor', filePath: '${A.output}', content: '${B.output}' },
+        } as any);
+        assert.deepStrictEqual([...inferTaskDependencies(withContent, validIds)], ['B']);
+    });
+
+    test('stale `output.filePath` no longer fabricates a cycle', () => {
+        // 실제 실행상 DAG(B 먼저, A 가 B 를 참조)인데 B 의 죽은 `filePath` 에 남은
+        // `${A.value}` 가 `B → A` 를 만들어 액션 전체가 거부됐다.
+        for (const dead of [
+            { passTheResultToNextTask: true, output: { mode: 'editor', filePath: '${A.value}' } },
+            { output: { mode: 'file', filePath: '${A.value}' } },       // 플래그가 없어 subtree 전체가 죽었다
+        ]) {
+            const graph = buildTaskGraph([
+                mkTask({ id: 'B', ...dead } as any),
+                mkTask({ id: 'A', command: 'echo ${B.output}' }),
+            ], { platform: 'linux' });
+            assert.deepStrictEqual([...graph.nodes.get('B')!.allDeps], [],
+                `죽은 필드에서 의존성을 만들었다: ${JSON.stringify(dead)}`);
+            assert.strictEqual(detectGraphCycle(graph), null, '죽은 필드가 가짜 순환을 만들었다');
+        }
+
+        // 둘 다 살아 있으면 그 참조는 진짜이므로 순환이 맞다.
+        const live = buildTaskGraph([
+            mkTask({ id: 'B', passTheResultToNextTask: true, output: { mode: 'file', filePath: '${A.value}' } } as any),
+            mkTask({ id: 'A', command: 'echo ${B.output}' }),
+        ], { platform: 'linux' });
+        assert.ok(detectGraphCycle(live), '살아 있는 참조의 순환을 놓쳤다');
     });
 
     test('infers from quickPick items (string and object form)', () => {

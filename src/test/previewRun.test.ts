@@ -300,7 +300,32 @@ suite('buildPreviewReport', () => {
             }
         };
         const report = buildPreviewReport(item, baseOptions());
-        assert.match(report, /passTheResultToNextTask' is false/);
+        assert.match(report, /captures will be skipped/);
+        // shell/command 에는 어떻게 고치는지까지 말해 준다.
+        assert.match(report, /passTheResultToNextTask/);
+
+        // **타입으로 가르지 않는다.** 조건은 "문자열 결과가 나는가" 이므로 애초에
+        // 문자열을 내지 않는 타입의 capture 도 알려야 한다 — `(shell|command)` 로
+        // 좁혀 두던 동안 이쪽은 아무 말 없이 지나갔다.
+        const dialogCapture: ActionItem = {
+            id: 'a.7b', title: 'T',
+            action: {
+                description: 'x',
+                tasks: [{ id: 'pick', type: 'fileDialog', output: { capture: { name: 'v' } } } as any],
+            },
+        };
+        assert.match(buildPreviewReport(dialogCapture, baseOptions()), /captures will be skipped/);
+
+        // 문자열 결과를 내는 태스크의 capture 는 skip 되지 않는다.
+        const live: ActionItem = {
+            id: 'a.7c', title: 'T',
+            action: {
+                description: 'x',
+                tasks: [{ id: 'norm', type: 'stringManipulation', function: 'trim', input: 'x',
+                          output: { capture: { name: 'v' } } } as any],
+            },
+        };
+        assert.doesNotMatch(buildPreviewReport(live, baseOptions()), /captures will be skipped/);
     });
 
     test('flags file write outside workspace', () => {
@@ -475,6 +500,158 @@ suite('buildPreviewReport', () => {
         assert.match(report, /Graph issues/);
         assert.match(report, /dependency cycle/);
         assert.match(report, /Summary: action would FAIL at start/);
+    });
+
+    test('죽은 output 필드를 실행되는 것처럼 검사하지 않는다', () => {
+        // Preview 만 조건을 빼면 Doctor 는 `output.ignored` 만 내는 설정에
+        // "fix before running" · "OUTSIDE WORKSPACE" 를 띄워 두 진단이 어긋난다.
+        const dead: ActionItem = {
+            id: 'a.deadout', title: 'dead output',
+            action: {
+                description: 'x',
+                tasks: [{
+                    id: 'B', type: 'shell', command: 'x',
+                    output: { mode: 'file', filePath: '/etc/passwd', content: '${ghost.output}' },
+                } as any],
+            },
+        };
+        const report = buildPreviewReport(dead, baseOptions());
+        assert.doesNotMatch(report, /OUTSIDE WORKSPACE/, '꺼진 output 의 경로를 실행 차단으로 표시했다');
+        assert.doesNotMatch(report, /fix before running/, '꺼진 output 의 참조를 미해결로 올렸다');
+        assert.match(report, /ignored/, '왜 무시되는지 알려 주지 않았다');
+
+        // `mode` 가 `file` 이 아니면 `filePath`·`overwrite` 는 죽은 필드다.
+        const editorMode: ActionItem = {
+            id: 'a.editorout', title: 'editor output',
+            action: {
+                description: 'x',
+                tasks: [{
+                    id: 'B', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                    output: { mode: 'editor', filePath: '/etc/passwd', overwrite: '${ghost.output}' },
+                } as any],
+            },
+        };
+        const editorReport = buildPreviewReport(editorMode, baseOptions());
+        assert.doesNotMatch(editorReport, /OUTSIDE WORKSPACE/, "mode: editor 의 filePath 를 검사했다");
+        assert.doesNotMatch(editorReport, /fix before running/, 'mode: editor 의 overwrite 를 검사했다');
+    });
+
+    test('무시 사유는 실제로 무시되는 필드만 가리킨다', () => {
+        // `capture` · `diagnostics` 는 이 조건 **밖**이다 — 런타임은 결과에 문자열
+        // `output` 이 있으면 돌리고, `stringManipulation` 은 플래그 없이도 해당한다.
+        // "블록 전체가 무시된다" 고 적으면 같은 리포트가 downstream 에서 그 capture
+        // 를 정상 해석하며 스스로 모순된다.
+        const item: ActionItem = {
+            id: 'a.cap', title: 'capture without flag',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'norm', type: 'stringManipulation', function: 'trim', input: 'x',
+                      output: { mode: 'editor', capture: { name: 'ver', pattern: '(\\d+)' } } } as any,
+                    { id: 'use', type: 'shell', command: 'echo ${norm.ver}' } as any,
+                ],
+            },
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.doesNotMatch(report, /block is ignored/, 'capture 가 도는데 블록 전체가 무시된다고 했다');
+        assert.match(report, /are ignored/, '무시되는 필드를 알려 주지 않았다');
+        // downstream 의 capture 참조는 정상 해석된다 — 위 문구와 어긋나면 안 된다.
+        assert.doesNotMatch(report, /fix before running/, 'capture 참조를 미해결로 올렸다');
+    });
+
+    test('capture / diagnostics 안내가 같은 리포트 안에서 어긋나지 않는다', () => {
+        // 머리말이 "영향 없음" 이라고 하면서 몇 줄 뒤에서 "skip 된다" 고 말하던 자리다.
+        const shellNoFlag: ActionItem = {
+            id: 'a.capshell', title: 'T',
+            action: {
+                description: 'x',
+                tasks: [{ id: 'b', type: 'shell', command: 'x',
+                          output: { mode: 'editor', capture: { name: 'v', pattern: '(a)' } } } as any],
+            },
+        };
+        const report = buildPreviewReport(shellNoFlag, baseOptions());
+        assert.doesNotMatch(report, /capture \/ diagnostics are not affected/, '영향 없다고 해 놓고 아래에서 skip 된다고 했다');
+        assert.match(report, /capture \/ diagnostics are skipped/, 'skip 사실을 머리말에서 알리지 않았다');
+
+        // 문자열 결과를 내면 반대로 "따로 돈다" 고 말한다.
+        const live: ActionItem = {
+            id: 'a.caplive', title: 'T',
+            action: {
+                description: 'x',
+                tasks: [{ id: 'norm', type: 'stringManipulation', function: 'trim', input: 'x',
+                          output: { mode: 'editor', capture: { name: 'v', pattern: '(a)' } } } as any],
+            },
+        };
+        assert.match(buildPreviewReport(live, baseOptions()), /capture \/ diagnostics run separately/);
+    });
+
+    test('쓰이지 않는 `language` 에도 사유를 적는다', () => {
+        // 런타임은 `mode: 'editor'` 에서만 language 를 쓴다.
+        const dead: ActionItem = {
+            id: 'a.lang', title: 'T',
+            action: {
+                description: 'x',
+                tasks: [{ id: 'b', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                          output: { mode: 'file', filePath: 'f.txt', language: 'javascript' } } as any],
+            },
+        };
+        const line = buildPreviewReport(dead, baseOptions()).split('\n').find(l => l.includes('language:'));
+        assert.ok(line && /not used/.test(line), `죽은 language 에 사유가 없다: ${line?.trim()}`);
+
+        const live: ActionItem = {
+            id: 'a.lang2', title: 'T',
+            action: {
+                description: 'x',
+                tasks: [{ id: 'b', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                          output: { mode: 'editor', language: 'javascript' } } as any],
+            },
+        };
+        const liveLine = buildPreviewReport(live, baseOptions()).split('\n').find(l => l.includes('language:'));
+        assert.ok(liveLine && !/not used/.test(liveLine), `살아 있는 language 에 사유를 붙였다: ${liveLine?.trim()}`);
+    });
+
+    test('쓰이지 않는 boolean `overwrite` 에도 사유를 적는다', () => {
+        // 문자열에만 사유를 붙이면 `overwrite: true` 가 살아 있는 것처럼 보인다.
+        const item: ActionItem = {
+            id: 'a.ow', title: 'dead overwrite',
+            action: {
+                description: 'x',
+                tasks: [{ id: 'B', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                          output: { mode: 'editor', overwrite: true } } as any],
+            },
+        };
+        const line = buildPreviewReport(item, baseOptions()).split('\n').find(l => l.includes('overwrite:'));
+        assert.ok(line, 'overwrite 줄이 없다');
+        assert.match(line!, /not used/, `죽은 boolean overwrite 에 사유가 없다: ${line!.trim()}`);
+
+        // `mode: 'file'` 이면 사유 없이 그대로 보여 준다.
+        const live: ActionItem = {
+            id: 'a.ow2', title: 'live overwrite',
+            action: {
+                description: 'x',
+                tasks: [{ id: 'B', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                          output: { mode: 'file', filePath: 'f.txt', overwrite: true } } as any],
+            },
+        };
+        const liveLine = buildPreviewReport(live, baseOptions()).split('\n').find(l => l.includes('overwrite:'));
+        assert.doesNotMatch(liveLine!, /not used/, `살아 있는 overwrite 에 사유를 붙였다: ${liveLine!.trim()}`);
+    });
+
+    test('살아 있는 output 은 종전대로 검사한다', () => {
+        // 위 제외가 넓어지면 이번엔 진짜 문제가 조용해진다 — 양쪽을 함께 고정한다.
+        const live: ActionItem = {
+            id: 'a.liveout', title: 'live output',
+            action: {
+                description: 'x',
+                tasks: [{
+                    id: 'B', type: 'shell', command: 'x', passTheResultToNextTask: true,
+                    output: { mode: 'file', filePath: '/etc/passwd', content: '${ghost.output}' },
+                } as any],
+            },
+        };
+        const report = buildPreviewReport(live, baseOptions());
+        assert.match(report, /OUTSIDE WORKSPACE/, '살아 있는 경로를 놓쳤다');
+        assert.match(report, /fix before running/, '살아 있는 참조를 놓쳤다');
     });
 
     test('folds a pipeline-length cycle path in the report', () => {

@@ -40,10 +40,13 @@ import {
     formatCyclePath,
     evaluateTaskCondition,
     selectPlatformValue,
+    RESERVED_VARIABLE_HEADS,
+    RESERVED_HEAD_PREFIXES,
 } from './pipelineUtils';
 import {
     simulateTaskResult,
     simulateTaskResultWithCaptures,
+    simulatedResultKeys,
     findUnresolved,
     findTypoRefs,
     findUncapturedOutputRefs,
@@ -986,10 +989,30 @@ function unwrapExecWrapper(argv: string[]): { wrapper: boolean; argv?: string[] 
  *
  * Exported for testing.
  */
+/**
+ * 이 참조가 그 태스크에서 **값을 낼 수 있는가**.
+ *
+ * 키 목록을 여기 따로 적지 않고 {@link simulatedResultKeys} 에서 가져온다 —
+ * `variable.unresolved` 를 내는 판정과 **같은 출처**라 둘이 어긋날 수 없다. 키를
+ * 손으로 적어 두던 동안 `inputBox` 의 `${input.typo}` 나 `itemsFromCommand`
+ * quickPick 의 오타처럼 절대 풀리지 않는 참조가 "모르는 것" 으로 분류돼
+ * fail-closed 경로를 타고 가짜 인터프리터 경고가 됐다. 시뮬레이션은
+ * `passTheResultToNextTask` 같은 조건도 이미 반영한다.
+ */
+function referenceKeyIsProducible(source: Task, key: string | undefined): boolean {
+    const keys = simulatedResultKeys(source);
+    // 점 없는 참조는 `output` · `outputDir` 로만 폴백한다(`resolvePipelineReference`).
+    if (key === undefined) { return keys.has('output') || keys.has('outputDir'); }
+    // 중첩 키(`a.b`)도 결과 객체의 **최상위** 이름으로 조회된다.
+    return keys.has(key);
+}
+
 export function enumerateArgvCandidates(
     argv: string[],
-    tasks: Task[]
-): { variants: string[][]; truncated: boolean } {
+    tasks: Task[],
+    /** 참조를 쓰는 태스크 자신의 id — 자기 참조는 런타임에서 풀리지 않는다. */
+    currentTaskId?: string
+): { variants: string[][]; truncated: boolean; notAnInterpreter?: boolean } {
     /** 실행 파일 후보 상한 — 진단 한 건에 쓸 비용이 아니다. */
     const MAX_VARIANTS = 32;
     let truncated = false;
@@ -998,16 +1021,72 @@ export function enumerateArgvCandidates(
     if (!exact) { return { variants: [argv], truncated: false }; }
 
     const values = new Set<string>();
-    for (const alt of parseReferenceAlternatives(exact[1])) {
+    const alternatives = parseReferenceAlternatives(exact[1]);
+    // `??` 는 **먼저 풀린 것이 이긴다.** 그래서 대안을 순서대로 걷되, 체인을 끊는
+    // 것은 **절대 사라지지 않는다고 증명할 수 있는** 대안뿐이다.
+    //
+    // 태스크 결과는 사라지는 길이 여럿이다 — `when` 으로 꺼지거나, `continueOnError`
+    // 태스크가 실패·취소되거나(런타임이 `stepResults[id] = {}` 를 넣는다), 조건으로
+    // 꺼진 태스크를 참조해 전이적으로 skip 되거나. 그중 하나라도 빠뜨리고 "뒤 대안은
+    // 죽었다" 고 단정하면 그 자리가 그대로 fail-open 이 된다(실제로 `when` 만 보다가
+    // 두 경로를 놓쳤다). 그래서 **태스크 대안은 체인을 끊지 않고** 후보만 쌓는다 —
+    // `${safe.value ?? bad.value}` 에 뒤 대안까지 경고가 붙는 과탐은 감수한다.
+    // 끊을 수 있는 것은 예약 내장뿐이다: 문맥에 늘 있고 꺼지는 길이 없다.
+    for (const alt of alternatives) {
+        // **내장 참조는 동명 태스크보다 세다.** 런타임은 태스크 결과 위에 내장 값을
+        // 덮으므로(`extension.ts`), `id: "workspaceFolder"` 인 quickPick 이 있어도
+        // 태스크 항목이 값이 되지 않는다 — 의존성 추론과 같은 예약 키 규칙을 쓴다.
+        if (alt.head && RESERVED_VARIABLE_HEADS.has(alt.head)) {
+            // `.value` 같은 키는 문자열의 없는 속성이라 풀리지 않는다 — 다음 대안으로.
+            if (alt.key !== undefined) { continue; }
+            // **bare 내장은 항상 풀려 체인을 끝낸다.** 뒤 대안은 쓰이지 않고, 값
+            // 자체는 워크스페이스·확장 **디렉터리 경로**라 인터프리터가 될 수 없다.
+            // 다만 **앞선 대안이 이미 값을 냈다면** 그쪽이 이기므로 여기서 진단을
+            // 꺼서는 안 된다 — `${which.value ?? workspaceFolder}` 가 그 자리다.
+            // 아래 `values.size` 검사가 그 구분을 한다.
+            break;
+        }
+        // **자기 자신은 아직 문맥에 없다.** 태스크가 도는 시점에 그 태스크의 결과는
+        // `allResults` 에 없으므로 `${run}` · `${run.value}` 는 어느 쪽도 풀리지 않고
+        // 체인이 다음 대안으로 넘어간다(자기 참조는 의존성도 되지 못한다). 존재하는
+        // 태스크라는 이유로 bare 에서 체인을 끊으면 뒤의 진짜 인터프리터를 놓친다.
+        if (alt.head && alt.head === currentTaskId) { continue; }
         const source = tasks.find(t => t.id === alt.head) as any;
-        if (!source || source.type !== 'quickPick' || source.itemsFromCommand || !Array.isArray(source.items)) {
-            return { variants: [argv], truncated: false };   // 열거 불가 — 그대로 두면 certain=false 로 잡힌다
+        if (!source) {
+            // 태스크도 내장도 아니다 — 런타임에서 리터럴로 남아 이 대안은 값을 내지
+            // 못한다. 다만 `env:`·`input:` 네임스페이스는 여기서 죽었다고 단정할 수
+            // 없으므로 fail-closed 로 둔다.
+            if (alt.head && RESERVED_HEAD_PREFIXES.some(p => alt.head!.startsWith(p))) {
+                return { variants: [argv], truncated: false };
+            }
+            continue;
+        }
+        // **점 없는 참조는 그 자리에서 체인을 끝낸다.** 태스크가 있으면 결과 **객체**
+        // 자체가 값이 되어(`resolvePipelineReference` 의 `direct` 폴백) undefined 가
+        // 아니므로 뒤 대안은 시도되지 않는다. 그 값은 객체라 인터프리터가 아니고,
+        // 리터럴로 남아도 마찬가지다 — Preview 가 `blocks-chain` 으로 설명하는 자리와
+        // 같은 규칙이다.
+        if (alt.key === undefined) { break; }
+        // **이 태스크가 그 키를 낼 수 있는가** — 판정을 `simulatedResultKeys` 한곳에
+        // 맡긴다. 키 목록을 여기 따로 적어 두면 `inputBox` 의 `${input.typo}` 나
+        // `itemsFromCommand` quickPick 의 오타처럼 절대 풀리지 않는 참조가 "모르는
+        // 것" 으로 분류돼 fail-closed 경로를 타고 가짜 인터프리터 경고가 됐다.
+        // `variable.unresolved` 를 내는 판정과 같은 함수라 둘이 어긋날 수 없다.
+        if (!referenceKeyIsProducible(source, alt.key)) { continue; }
+        // 값은 나지만 열거는 못 한다(`inputBox`·`itemsFromCommand` 등) — fail-closed.
+        if (source.type !== 'quickPick' || source.itemsFromCommand || !Array.isArray(source.items)) {
+            return { variants: [argv], truncated: false };
         }
         for (const entry of source.items) {
             const label = typeof entry === 'string' ? entry : entry?.label;
             if (typeof label === 'string') { values.add(label); }
         }
     }
+    // **풀릴 대안이 하나도 없으면 그 명령은 실행되지 않는다.** 실행 파일 이름이
+    // 리터럴 그대로 남아 spawn 이 실패하므로, 인터프리터 분석을 얹으면 없는 위험을
+    // 지어내는 것이다 — `variable.unresolved` 가 이미 정확하고 실행 가능한 진단이다.
+    // bare 내장으로 끝난 체인도 마찬가지다(값이 디렉터리 경로다).
+    if (values.size === 0) { return { variants: [argv], truncated: false, notAnInterpreter: true }; }
 
     // **실행 파일만 펼친다.** 스위치나 스크립트까지 펼치면 스크립트 자리의
     // `${pick.value}` 가 구체값으로 바뀌어 이후 참조 검사에 아무것도 남지 않고,
@@ -1233,9 +1312,17 @@ export function scriptCandidates(argv: string[], depth = 0): { candidates: Scrip
         certain,
     };
 }
-/** 셸·cmd 에서 문법적 의미를 갖는 문자를 담고 있는가. */
+/**
+ * 셸·cmd 에서 문법적 의미를 갖는 문자를 담고 있는가.
+ *
+ * **중괄호도 포함한다.** PowerShell 에서 `{…}` 는 스크립트 블록이라 그 안이 곧
+ * 코드이고(`Invoke-Command -ScriptBlock {whoami}`), POSIX 에서는 brace expansion
+ * 이다 — 둘 다 "안전한 문자" 로 면제하면 고정 목록 quickPick 하나로 명령이
+ * 실행된다(`items: ["{whoami}"]` 로 확인). cmd 에는 중괄호 문법이 없어 여기서는
+ * 과탐이지만, 판정이 dialect 를 가리지 않는 자리라 엄한 쪽을 택한다.
+ */
 function containsShellMetacharacter(value: string): boolean {
-    return /[;&|`$()<>*?!^%\n\r"'\\]/.test(value) || /\s/.test(value);
+    return /[;&|`$(){}<>*?!^%\n\r"'\\]/.test(value) || /\s/.test(value);
 }
 
 /**
@@ -1376,6 +1463,40 @@ const ARGUMENT_REINTERPRETING_OPTIONS = new Map<string, RegExp>([
     ['find', /^-(exec|execdir|ok|okdir)$/],
     ['printf', /^-v$/],
 ]);
+
+/**
+ * 스크립트 블록을 **위치 인자로도** 받는 PowerShell cmdlet 과 별칭.
+ *
+ * 이들을 통째로 {@link REINTERPRETING_COMMANDS} 에 넣으면 뒤따르는 **모든** 값이
+ * 코드가 되어 과탐이다 — `Invoke-Command -ComputerName ${host} -ScriptBlock {…}`
+ * 의 `${host}` 는 컴퓨터 이름이지 코드가 아니다. 대신 자리로 나눈다: 이름 있는
+ * 매개변수의 값은 그 매개변수가 스크립트를 받을 때만 코드이고, 위치 인자는
+ * 이 목록의 cmdlet 에서 스크립트 블록 자리에 바인딩되므로 코드다.
+ */
+const POWERSHELL_SCRIPTBLOCK_CMDLETS = new Set([
+    'invoke-command', 'icm', 'start-job', 'sajb', 'start-threadjob',
+    'foreach-object', 'where-object', 'measure-command',
+    'register-objectevent', 'new-module',
+]);
+
+/**
+ * 값이 **코드**인 PowerShell 매개변수 이름. cmdlet 을 일일이 세지 않아도 닫힌다 —
+ * 목록에 없는 cmdlet 이라도 이 매개변수를 쓰면 그 값은 코드 자리다.
+ *
+ * PowerShell 은 이름을 **접두사로** 맞추므로(`-Scr` 도 `-ScriptBlock`) 접두사까지
+ * 인정한다. 짧은 접두사가 다른 매개변수와 겹칠 수 있지만, 겹치는 쪽을 위험으로
+ * 보는 것이 이 검사의 방침이다.
+ */
+const POWERSHELL_SCRIPT_PARAMETERS = [
+    'scriptblock', 'command', 'expression', 'filterscript', 'process', 'parallel',
+    'begin', 'end', 'initializationscript', 'action', 'onstreamavailable',
+];
+
+function isPowerShellScriptParameter(word: string): boolean {
+    if (!word.startsWith('-') || word.length < 2) { return false; }
+    const name = word.slice(1).toLowerCase();
+    return POWERSHELL_SCRIPT_PARAMETERS.some(p => p.startsWith(name));
+}
 
 /**
  * 스크립트 문법에서 이 참조가 어느 자리인가.
@@ -1525,6 +1646,12 @@ function createPositionScanner(script: string, dialect: Exclude<ScriptDialect, '
     let headKind: CommandHeadKind = 'safe';
     /** 머리의 basename — 옵션 하나로 인자를 코드로 바꾸는 명령을 알아보는 데 쓴다. */
     let headName = '';
+    /**
+     * PowerShell 의 **다음 낱말이 무엇인가**. `-ScriptBlock` 같은 매개변수 뒤는
+     * `code`, 그 밖의 이름 있는 매개변수 뒤는 `data`(그 값 하나만), 미정이면
+     * undefined(위치 인자).
+     */
+    let psSlot: 'code' | 'data' | undefined;
     let condition: ReturnType<typeof cmdIfConditionConsumer> | undefined;
     let conditionUnknown = false;
     let redirectionTargetPending = false;
@@ -1539,7 +1666,7 @@ function createPositionScanner(script: string, dialect: Exclude<ScriptDialect, '
 
     type SegmentState = {
         pending: string; pendingDynamic: boolean; headFound: boolean; headKind: CommandHeadKind;
-        headName: string;
+        headName: string; psSlot: 'code' | 'data' | undefined;
         condition: ReturnType<typeof cmdIfConditionConsumer> | undefined; conditionUnknown: boolean;
         redirectionTargetPending: boolean; doubleDashTrusted: boolean; sawOptionAfterHead: boolean;
     };
@@ -1563,12 +1690,12 @@ function createPositionScanner(script: string, dialect: Exclude<ScriptDialect, '
     const MAX_CAPTURED_DEPTH = 128;
 
     const captureSegment = (): SegmentState => ({
-        pending, pendingDynamic, headFound, headKind, headName,
+        pending, pendingDynamic, headFound, headKind, headName, psSlot,
         condition, conditionUnknown, redirectionTargetPending, doubleDashTrusted, sawOptionAfterHead,
     });
     const restoreSegment = (s: SegmentState) => {
         pending = s.pending; pendingDynamic = s.pendingDynamic;
-        headFound = s.headFound; headKind = s.headKind; headName = s.headName;
+        headFound = s.headFound; headKind = s.headKind; headName = s.headName; psSlot = s.psSlot;
         condition = s.condition; conditionUnknown = s.conditionUnknown;
         redirectionTargetPending = s.redirectionTargetPending;
         doubleDashTrusted = s.doubleDashTrusted; sawOptionAfterHead = s.sawOptionAfterHead;
@@ -1580,6 +1707,7 @@ function createPositionScanner(script: string, dialect: Exclude<ScriptDialect, '
         headFound = false;
         headKind = 'safe';
         headName = '';
+        psSlot = undefined;
         condition = undefined;
         conditionUnknown = false;
         redirectionTargetPending = false;
@@ -1663,6 +1791,14 @@ function createPositionScanner(script: string, dialect: Exclude<ScriptDialect, '
             // `printf -v`) — 그 세그먼트의 나머지를 명령 자리로 본다.
             const trigger = ARGUMENT_REINTERPRETING_OPTIONS.get(headName);
             if (trigger && trigger.test(word.toLowerCase())) { headKind = 'reinterpreting'; return; }
+            // PowerShell 은 **자리마다** 갈린다 — 이름 있는 매개변수의 값은 그
+            // 매개변수가 스크립트를 받을 때만 코드다. 명령 전체를 sink 로 두면
+            // `-ComputerName ${host}` 같은 데이터 인자까지 경고가 붙는다.
+            if (dialect === 'powershell') {
+                if (psSlot === 'data') { psSlot = undefined; }
+                else if (word.startsWith('-')) { psSlot = isPowerShellScriptParameter(word) ? 'code' : 'data'; }
+                else if (POWERSHELL_SCRIPTBLOCK_CMDLETS.has(headName)) { psSlot = 'code'; }
+            }
             // **`--` 앞에 옵션이 있으면 그 `--` 를 믿을 수 없다.** `curl -o -- ${v}`
             // 의 `--` 는 `-o` 가 삼킨 파일 이름이라 값은 여전히 옵션으로 읽힌다.
             if (word === '--' && !sawOptionAfterHead) { doubleDashTrusted = true; }
@@ -1812,6 +1948,15 @@ function createPositionScanner(script: string, dialect: Exclude<ScriptDialect, '
                 if (!headFound) { return { kind: 'command' }; }
                 // 재해석 명령이든 실행 시점에 정해지는 머리든 값이 코드가 될 수 있다.
                 if (headKind !== 'safe') { return { kind: 'command' }; }
+                // PowerShell 의 스크립트 자리 — `-ScriptBlock` 값이거나, 스크립트
+                // 블록을 위치로 받는 cmdlet 의 위치 인자다. 낱말이 `-` 로 시작하면
+                // 그것은 매개변수 이름이지 값이 아니다.
+                if (dialect === 'powershell'
+                    && (psSlot === 'code'
+                        || (psSlot === undefined && !pending.startsWith('-')
+                            && POWERSHELL_SCRIPTBLOCK_CMDLETS.has(headName)))) {
+                    return { kind: 'command' };
+                }
                 // 리다이렉션 **대상**이면 임의의 파일을 읽고 쓴다.
                 //   - 붙어 있는 경우(`>out/${v}`): 지금 낱말이 연산자로 시작한다.
                 //   - 떨어져 있는 경우(`> out/${v}`): 직전 낱말이 연산자 **그 자체**라
@@ -2293,7 +2438,7 @@ function analyzeActionTasks(
      * 뒤따르는 `${workspaceFolder}` 가 `variable.unresolved` 로 오진됐다 —
      * 런타임은 정상 해석하는데 진단만 경고하던 자리다.
      */
-    const BUILTIN_CONTEXT_KEYS = new Set(['workspaceFolder', 'extensionPath']);
+    const BUILTIN_CONTEXT_KEYS = RESERVED_VARIABLE_HEADS;
     const forwardTaskIds = new Set<string>(knownTaskIds);
 
     for (const task of tasks) {
@@ -2490,11 +2635,19 @@ function analyzeActionTasks(
         const resolvedWritePath = visitString(task.path);
         visitString(task.content);
 
-        // output.filePath
-        const resolvedOutputPath = visitString(task.output?.filePath);
-        // `output.content` 도 런타임에서 보간된다 (`executeSingleTask`). 빠뜨리면
-        // 그 안의 `${ghost.output}` 이 무경고로 파일에 그대로 기록된다.
-        visitString(task.output?.content);
+        // `output` 은 **그래프 추론과 같은 생존 조건**을 따른다
+        // (`pipelineUtils` 의 `skipPathsForTask`). 조건을 여기만 빠뜨리면 두 진단이
+        // 정면으로 어긋난다 — 꺼진 output 의 `${ghost.output}` 에 미해결 경고가 붙고
+        // 꺼진 경로에 `path.outside-workspace` **에러**까지 났으며, 반대로 살아 있는
+        // `overwrite` 의 참조는 아무도 보지 않았다.
+        const outputLive = !!task.passTheResultToNextTask && !!task.output;
+        const outputWritesFile = outputLive && task.output?.mode === 'file';
+        // `filePath` · `overwrite` 는 `mode: 'file'` 에서만 보간된다.
+        const resolvedOutputPath = outputWritesFile ? visitString(task.output?.filePath) : undefined;
+        if (outputWritesFile) { visitString(task.output?.overwrite); }
+        // `output.content` 는 모드와 무관하게 보간된다 (`executeSingleTask`).
+        // 빠뜨리면 그 안의 `${ghost.output}` 이 무경고로 파일에 그대로 기록된다.
+        if (outputLive) { visitString(task.output?.content); }
         // inputBox 의 prefix/suffix 도 보간 대상이다.
         visitString(task.prefix);
         visitString(task.suffix);
@@ -2667,13 +2820,35 @@ function analyzeActionTasks(
             });
         }
 
-        // shell/command에서 passTheResultToNextTask 없이 정의된 output
-        // mode/capture/diagnostics는 런타임이 조용히 무시한다(M9).
-        if ((task.type === 'shell' || task.type === 'command') && !task.passTheResultToNextTask && task.output) {
+        // 런타임이 **읽지 않는** output 필드를 알린다.
+        //
+        // 타입으로 가르지 않는다 — `passTheResultToNextTask && task.output` 게이트는
+        // 모든 타입에 걸린다(`extension.ts`). shell/command 로 좁혀 두면, 위에서
+        // 죽은 필드의 참조·경로 진단을 뺀 뒤로 `fileDialog` 같은 타입은 **아무 진단도
+        // 남지 않아** Preview 만 "ignored" 라고 말하는 상태가 된다.
+        //
+        // `capture`·`diagnostics` 는 이 게이트 **밖**이다 — 결과에 문자열 `output` 이
+        // 있으면 돈다. 그 판정도 시뮬레이션 한곳에서 가져와 타입 목록을 두지 않는다
+        // (`stringManipulation` 이 플래그 없이도 도는 이유가 거기서 나온다).
+        if (task.output) {
             const dead: string[] = [];
-            if (task.output.mode) { dead.push(`mode: '${task.output.mode}'`); }
-            if (task.output.capture) { dead.push('capture'); }
-            if (task.output.diagnostics) { dead.push('diagnostics'); }
+            const outputBlockLive = !!task.passTheResultToNextTask;
+            if (!outputBlockLive) {
+                if (task.output.mode) { dead.push(`mode: '${task.output.mode}'`); }
+                if (task.output.content) { dead.push('content'); }
+            }
+            if (!outputBlockLive || task.output.mode !== 'file') {
+                if (task.output.filePath) { dead.push('filePath'); }
+                if (task.output.overwrite !== undefined) { dead.push('overwrite'); }
+            }
+            // `language` 는 에디터 문서를 열 때만 쓰인다(`extension.ts` 의 `editor` 분기).
+            if (!outputBlockLive || task.output.mode !== 'editor') {
+                if (task.output.language) { dead.push('language'); }
+            }
+            if (typeof simulateTaskResult(task).output !== 'string') {
+                if (task.output.capture) { dead.push('capture'); }
+                if (task.output.diagnostics) { dead.push('diagnostics'); }
+            }
             if (dead.length > 0) {
                 findings.push({
                     filePath: input.filePath,
@@ -2681,8 +2856,8 @@ function analyzeActionTasks(
                     range: findIdLine(input.rawText, task.id),
                     severity: 'warning',
                     code: 'output.ignored',
-                    message: `Task '${item.id}.${task.id}' defines output ${dead.join(', ')} but does not set 'passTheResultToNextTask': true — for 'shell'/'command' tasks the runtime silently ignores them.`,
-                    messageKo: `Task '${item.id}.${task.id}'에 output ${dead.join(', ')}가 정의되어 있지만 'passTheResultToNextTask': true가 없습니다 — 'shell'/'command' 태스크에서 런타임이 조용히 무시합니다.`,
+                    message: `Task '${item.id}.${task.id}' defines output ${dead.join(', ')} that the runtime never reads — 'mode'/'language'/'content'/'filePath'/'overwrite' need 'passTheResultToNextTask': true (and 'filePath'/'overwrite' additionally need mode 'file', 'language' mode 'editor'); 'capture'/'diagnostics' need a string output.`,
+                    messageKo: `Task '${item.id}.${task.id}'에 런타임이 읽지 않는 output ${dead.join(', ')}가 정의되어 있습니다 — 'mode'/'language'/'content'/'filePath'/'overwrite'는 'passTheResultToNextTask': true가 필요하고('filePath'/'overwrite'는 mode가 'file', 'language'는 'editor'여야 합니다), 'capture'/'diagnostics'는 문자열 출력이 필요합니다.`,
                 });
             }
         }
@@ -2742,7 +2917,10 @@ function analyzeActionTasks(
             // 보지 못해 플래그가 선언 순서에 따라 달라졌다. 전부 평가한 뒤 합친다.
             const vulnerable = commandBranches.map(branch => {
                 const argv = [...tokenizeCommandLine(branch), ...extraArgs];
-                const { variants, truncated } = enumerateArgvCandidates(argv, tasks);
+                const { variants, truncated, notAnInterpreter } = enumerateArgvCandidates(argv, tasks, task.id);
+                // 실행 파일 자리가 인터프리터가 될 수 없다 — 풀리는 대안이 없어
+                // spawn 이 실패하거나, 풀린 값이 디렉터리 경로다. 진단을 얹지 않는다.
+                if (notAnInterpreter) { return false; }
                 // **하나라도** 미지수면 경고한다. `every` 로 보면 후보에 안전한
                 // 것이 섞여 있다는 이유로 위험한 변형이 묻힌다(`['node','sh']`).
                 // 상한에 걸려 못 본 후보가 있어도 마찬가지다 — 잘린 쪽에 셸이
@@ -2786,7 +2964,10 @@ function analyzeActionTasks(
         // still has unresolved variables — we can't decide safely.
         const candidates: Array<{ raw: string | undefined; kind: string }> = [
             { raw: (task.type === 'writeFile' || task.type === 'appendFile') ? resolvedWritePath : undefined, kind: `${task.type}.path` },
-            { raw: task.output?.mode === 'file' ? resolvedOutputPath : undefined, kind: 'output.filePath' },
+            // `resolvedOutputPath` 는 이미 생존 조건(`passTheResultToNextTask` +
+            // `mode: 'file'`)을 통과한 것만 담는다 — 꺼진 output 의 경로에 에러를
+            // 내면 실행되지도 않는 자리를 고치라고 요구하는 셈이다.
+            { raw: resolvedOutputPath, kind: 'output.filePath' },
         ];
         for (const { raw, kind } of candidates) {
             if (!raw || UNRESOLVED_VAR_RE.test(raw)) {
