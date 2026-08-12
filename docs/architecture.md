@@ -49,7 +49,7 @@ TaskHub/
 │   ├── linkerScriptParser.ts          # GNU/ARM 링커 스크립트 파서
 │   ├── armLinkListParser.ts           # ARM Linker Listing 파서 (armlink --list)
 │   ├── memoryMapViewer.ts             # Memory Map WebView 시각화
-│   └── test/                          # Mocha + Chai 유닛 테스트 (모듈별 *.test.ts)
+│   └── test/                          # Mocha + Node.js assert 테스트 (모듈별 *.test.ts)
 ├── schema/
 │   ├── actions.schema.json       # actions.json 스키마 및 검증
 │   ├── links.schema.json         # links.json 스키마 및 검증
@@ -65,7 +65,7 @@ TaskHub/
 ├── docs/
 │   ├── features.md           # 상세 기능 문서
 │   ├── architecture.md       # 이 파일
-│   ├── roadmap.md            # 향후 기능 로드맵 + 완료 항목
+│   ├── roadmap.md            # 미구현 기능 우선순위와 기술 부채
 │   └── integration-tests.md  # IT-xxx 통합 테스트 대장
 ├── .vscode/
 │   ├── actions.json          # 워크스페이스별 액션 (선택사항)
@@ -84,24 +84,12 @@ TaskHub/
 - `out/`: tsc 컴파일 (테스트용)
 - 외부 의존성: `vscode` (번들에서 제외)
 
-**webview 스크립트의 두 층.** `jsonEditor.ts` 의 webview JS 는 대부분 `getWebviewContent()`
-의 템플릿 리터럴 안에 문자열로 있다 — 그 안은 타입체크도 린트도 걸리지 않는다. 그래서
-**순수 로직만은** 진짜 모듈로 빼서 `src/webview/jsonEditorLogic.ts` 를 엔트리로 번들하고,
-webview 가 전역 `TaskHubJsonEditorLogic` 에서 꺼내 쓴다. 같은 모듈을 host 테스트도 직접
-import 하므로 로직은 **한 벌**이다.
-
-예전에는 두 벌이었다 — 문자열 안의 사본과 `jsonEditorUtils.ts` 의 "테스트용 미러". 두 벌은
-반드시 어긋나고, 실제로 어긋났다 (0.6.68~0.6.70 이 전부 그 얘기다). **지금은 사본이 없다.**
-
-문자열 안에 남은 것은 **DOM 어댑터**다 — DOM 을 읽어 번들 함수에 넘기고 결과를 화면·host 에
-반영할 뿐, 중복된 로직을 들고 있지 않다. 그래서 "한쪽만 고쳐서 어긋난다" 는 실패 모드는
-사라졌다. 어떤 함수가 번들에 있는지는 `jsonEditorUtils.ts` 머리말이 단일 출처다.
-
-**이름이 겹치면 조용히 죽는다.** 번들에서 꺼낸 이름(`const { … } = TaskHubJsonEditorLogic`)과
-같은 이름의 인라인 정의가 남아 있으면 `Identifier has already been declared` 로 스크립트 전체가
-문법 오류가 되고 화면이 통째로 빈다. 문자열 안이라 tsc 도 eslint 도 보지 못하므로, 인라인
-스크립트를 실행 없이 컴파일만 해 보는 테스트로 고정한다. 전역을 읽는 래퍼는 이름을 달리 둔다
-(`rebuildSheetMap` · `currentBaseline`).
+**webview 스크립트의 두 층.** `jsonEditor.ts`의 템플릿 리터럴에는 DOM 어댑터만 두고,
+타입 검사가 필요한 순수 로직은 `jsonEditorUtils.ts` 한 벌로 관리합니다.
+`src/webview/jsonEditorLogic.ts`가 이를 IIFE 번들로 내보내면 webview는 전역
+`TaskHubJsonEditorLogic`에서 사용하고 host 테스트는 원본 모듈을 직접 import합니다.
+인라인 스크립트는 tsc/eslint 범위 밖이므로 별도 컴파일 테스트를 유지하며, 번들에서 꺼낸
+이름과 같은 인라인 선언을 추가하지 않습니다.
 
 ## 주요 컴포넌트
 
@@ -151,53 +139,16 @@ import 하므로 로직은 **한 벌**이다.
 
 ## 데이터 구조
 
-### HistoryEntry
+타입 정의를 문서에 복사하지 않습니다. 필드의 정본과 역할은 다음 소스에 있습니다.
 
-```typescript
-interface HistoryEntry {
-    entryType?: 'action' | 'tool';  // 레거시 항목은 생략되며 action으로 취급
-    actionId: string;        // 액션 ID
-    actionTitle: string;     // 액션 제목
-    timestamp: number;       // 실행 시간 (Unix timestamp)
-    status: 'success' | 'failure' | 'running';  // 실행 상태
-    output?: string;         // 출력 (실패 시 에러 메시지)
-    tool?: {
-        kind: 'memoryMap' | 'hexEditor' | 'jsonEditor';
-        filePath: string;
-        fileName: string;
-        memoryMapInputType?: 'elf' | 'listing';  // kind === 'memoryMap'에만 의미 있음
-        memoryMapConfig?: { regions?: { name: string; origin: number; size: number }[] };
-    };
-    inputs?: Record<string, unknown>;  // 인터랙티브 task 결과 (task id → result). "Re-run with Saved Inputs" 재실행 시 다이얼로그를 건너뛰는 용도. `inputBox`의 `password: true`는 보안상 항상 제외된다. 자세한 동작은 [docs/features.md §14](./features.md#14-액션-실행-히스토리) 참조.
-    durationMs?: number;     // 실행 소요 시간(ms). running → success/failure 전이 시점에 `Math.max(0, Date.now() - timestamp)`로 기록 (clock-skew 음수 방어 — `executeAction` 4개 종료 경로 모두 동일). History 패널 HistoryItem의 "last run" 배지(`description`) 렌더에 사용 (자세한 동작은 [docs/features.md §14](./features.md#14-액션-실행-히스토리) 참조).
-}
-```
+| 구조 | 정본 | 핵심 규약 |
+| --- | --- | --- |
+| `HistoryEntry` | [providers/historyProvider.ts](../src/providers/historyProvider.ts) | 액션과 도구 열람을 함께 저장합니다. 상태는 `running`·`success`·`failure`·`cancelled`이며, 비밀번호 입력은 `inputs`에 기록하지 않습니다. 레거시 항목은 선택 필드가 없을 수 있습니다. |
+| `LinkEntry` | [providers/linkViewProvider.ts](../src/providers/linkViewProvider.ts) | 표시용 정규화 값과 원본 `raw`를 함께 보존하여 알 수 없는 사용자 필드를 잃지 않습니다. |
+| `FavoriteEntry` | [providers/favoriteViewProvider.ts](../src/providers/favoriteViewProvider.ts) | 링크와 같은 원본 보존 규약을 따르고 워크스페이스·줄 위치 메타데이터를 가집니다. |
+| 액션·태스크 스키마 | [schema.ts](../src/schema.ts), [actions.schema.json](../schema/actions.schema.json) | TypeScript 실행 타입과 사용자 JSON 검증 스키마를 함께 갱신합니다. |
 
-### LinkEntry
-
-```typescript
-interface LinkEntry {
-    title: string;
-    link: string;
-    group?: string;
-    tags?: string[];
-    sourceFile?: string;
-}
-```
-
-### FavoriteEntry
-
-```typescript
-interface FavoriteEntry {
-    title: string;
-    path: string;
-    line?: number;
-    group?: string;
-    tags?: string[];
-    sourceFile?: string;
-    workspaceFolder?: string;
-}
-```
+History의 사용자 동작과 저장 입력·명령·소요 시간은 [features.md §14](./features.md#14-액션-실행-히스토리)를 참조하세요.
 
 ## 활성화(Activation)
 
@@ -245,7 +196,7 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
     *   키: `'taskhub.actionHistory'`
     *   값: `HistoryEntry[]` 배열 — 구조는 위 "데이터 구조" 섹션 참조.
 
-TaskHub가 VS Code에 등록하는 모든 `contributes.configuration.*` 설정은 [docs/features.md §21 설정 레퍼런스](./features.md#21-설정-레퍼런스)에서 단일 출처로 관리합니다. 이 문서에서 개별 설정 키를 나열하지 않는 이유는 양쪽을 같이 갱신하지 못해 drift가 반복되던 과거 사례 때문입니다 (자동 검증은 `src/test/docConsistency.test.ts` 참조).
+설정 정의의 정본은 [package.json](../package.json)의 `contributes.configuration`입니다. [features.md §21 설정 레퍼런스](./features.md#21-설정-레퍼런스)는 이를 사용자 관점에서 설명하며, 이 문서는 중복 목록 대신 해당 레퍼런스만 가리킵니다. 키·기본값·범위의 정합성은 `src/test/docConsistency.test.ts`가 검사합니다.
 
 ## 실험적 기능 패턴
 
@@ -262,41 +213,11 @@ TaskHub가 VS Code에 등록하는 모든 `contributes.configuration.*` 설정�
 
 ## 개발 시 주의사항
 
-1. **히스토리 기능 수정 시**:
-   *   `HistoryProvider` 클래스 ([src/providers/historyProvider.ts](../src/providers/historyProvider.ts)) 및 persistence key(`taskhub.actionHistory`) 영향 확인
-   *   [src/extension.ts](../src/extension.ts) `executeAction()` 의 히스토리 추적 호출 순서(`addHistoryEntry` → `updateHistoryStatus(..., durationMs)` → `setHistoryInputs`) 유지. 종료 시 `Math.max(0, Date.now() - timestamp)`로 계산한 `durationMs`를 `updateHistoryStatus`의 5번째 인자로 전달해야 HistoryItem last-run 배지가 표시된다 (회귀 시 `IT-067`로 검출). 입력값 캡처는 `executeActionPipeline`의 `recordInputs` 옵션을 통해 누적되며, `password: true` `inputBox`는 `shouldRecordTaskInput`에서 명시적으로 제외된다 (회귀 시 `IT-065`로 검출).
-   *   `HistoryItem`은 생성자에서 `formatLastRunBadge(entry, Date.now(), lang)`을 통해 `description`을 채운다. 배지는 History 패널에만 노출되며, Actions 패널의 `Action` TreeItem에는 의도적으로 last-run 정보를 두지 않는다 (회귀 시 `IT-068b` 가드로 검출).
-   *   `HistoryItem.description`은 `Date.now()`를 생성자 시점에 캡처하므로 자정 경계를 넘기면 "오늘 23:30"이 다음 날에도 그대로 남는 stale 케이스가 발생한다. 이를 막기 위해 `startHistoryAutoRefresh`(시간당 background tick) + `historyProvider.view.onDidChangeVisibility`(패널 재진입 시 즉시 갱신) 두 hook이 [src/extension.ts](../src/extension.ts) `activate()`에서 등록된다 — 새 history 변형 경로를 추가할 때 이 두 hook은 건드릴 필요 없다.
-   *   히스토리에는 액션 실행 외에 **TaskHub 도구 열람 기록**(Memory Map / Hex Editor / JSON Editor)도 같은 `taskhub.actionHistory` 키에 누적된다. tool 엔트리는 `entryType === 'tool'` 판별자 + `tool` 메타데이터를 갖고, `createToolHistoryEntry`([src/providers/historyProvider.ts](../src/providers/historyProvider.ts))로 생성되며, viewer 모듈([src/memoryMapViewer.ts](../src/memoryMapViewer.ts) / [src/hexViewer.ts](../src/hexViewer.ts) / [src/jsonEditor.ts](../src/jsonEditor.ts))은 `HistoryProvider`를 직접 import하지 않고 `recordHistory` 콜백만 주입받는다(레이어 분리). 패널이 실제로 열린 경우에만(`openMemoryMapPanel` / `openHexViewerFile` / `openJsonEditorWithPath`의 `boolean` 반환) 기록한다. tool 엔트리는 `actionId`에 합성 식별자(`taskhub.tool.<kind>:<inputType>:<filePath>`)를 담아 `computeDisambiguatedHistoryLabels`를 그대로 재사용하고, `HistoryItem`이 클릭 시 `taskhub.rerunFromHistory` 대신 `taskhub.openToolFromHistory`로 분기한다 (`taskhub.rerunFromHistory` 핸들러는 tool 엔트리를 받으면 `openToolFromHistory`로 위임). 회귀 가드: `createToolHistoryEntry` 메타데이터 저장 / tool-row 가 `openToolFromHistory` 명령을 갖는지 검증하는 단위 테스트(`src/test/extension.test.ts`).
-
-2. **Action TreeItem `description` 슬롯 사용 정책**:
-   *   **회고 정보(시각·소요 시간) ≠ 진행 정보(현재 어디)**. 회고 정보는 `HistoryEntry`의 속성이므로 [HistoryItem.description](../src/providers/historyProvider.ts) 단일 표면에서만 렌더한다 (회귀 가드: `IT-068b`).
-   *   진행 정보는 액션 자기 자신의 in-flight 상태이므로 [Action TreeItem.description](../src/providers/mainViewProvider.ts)에 들어간다. `actionStates.progress`(`{ index, total, taskId }`)가 채워져 있고 `total > 1`일 때만 `2/3 · taskId` 형태로 노출되며, `finalizeActionRun`에서 progress를 clear해 종료 후 잔존하지 않게 한다 (회귀 가드: `IT-072` / `IT-072b` / `IT-072c` / `IT-073`).
-   *   `executeActionPipeline`의 `onTaskTransition` 콜백이 `running`/`success`/`failure`/`skipped` 4종 transition을 발사하며 (`IT-069`/`IT-070`/`IT-071`로 시퀀스 고정), `executeAction`은 `running` transition만 받아 progress를 갱신한다 — 종료 transition은 곧 `finalizeActionRun`이 progress를 비우므로 별도 처리가 불필요.
-
-3. **`output.diagnostics` (Problem Matcher) 라이프사이클**:
-   *   진단 매칭 자체는 [src/diagnosticMatcher.ts](../src/diagnosticMatcher.ts)의 순수 모듈에서 수행되며 vscode 의존이 없다 (단위 테스트로 직접 고정).
-   *   `vscode.Diagnostic` 객체 생성과 `DiagnosticCollection.set` 호출은 [src/extension.ts](../src/extension.ts)의 `applyDiagnosticsToCollection`이 담당. 상대 경로는 task의 `cwd` 기준으로 절대 경로로 해석된다 (회귀 가드: `IT-077`).
-   *   **컬렉션은 액션 단위로 격리**된다. `actionDiagnosticCollections: Map<actionId, vscode.DiagnosticCollection>`이 lazy하게 생성되며, `executeAction` 시작 시 `clearActionDiagnostics(id)`가 호출되어 해당 액션의 이전 진단만 비운다 — 다른 액션이 같은 파일에 진단을 남겼더라도 영향을 받지 않는다 (회귀 가드: `IT-076`).
-   *   `deactivate()`는 모든 컬렉션을 `dispose()`로 정리해 VS Code language feature 자원을 해제.
-   *   `src/test/extension.test.ts`의 `HistoryProvider` suite는 실제 클래스 인스턴스를 검증하므로 함께 갱신
-
-3. **새 패널 추가 시**:
-   *   `package.json`의 `views` 섹션에 뷰 정의 추가
-   *   TreeDataProvider는 `src/providers/<featureName>Provider.ts` 모듈로 분리해 구현
-   *   [src/extension.ts](../src/extension.ts) `activate()`에서 import 후 인스턴스화/등록
-   *   컨텍스트 전용 명령은 `package.json`의 `menus.commandPalette`에서 `"when": "false"` 로 팔레트에서 숨김
-
-4. **새 명령어 추가 시**:
-   *   `package.json`의 `commands` 섹션에 명령어 정의
-   *   `activate()` 함수에서 명령어 핸들러 등록
-   *   필요 시 `menus` 섹션에서 UI 위치 지정
-   *   인자 없이 호출 불가능한 명령은 `menus.commandPalette`에 `when:false`로 등록
-
-5. **스키마 수정 시**:
-   *   `schema/*.schema.json` 파일 업데이트
-   *   JSON 검증 로직 확인 (`loadAndValidateActions` / `parseImportData`)
-   *   `getActionsValidator()` 캐시는 자동으로 재사용되므로 별도 조치 불필요
+- **History**: 액션과 도구 열람은 같은 `taskhub.actionHistory` 저장소를 사용합니다. 종료 경로는 상태·`durationMs`·입력·실행 명령을 함께 확정하고, `password: true` 입력은 기록하지 않습니다. 회고 정보는 History에, 실행 중 진행률은 Actions에만 표시합니다.
+- **Problem Matcher**: 문자열 매칭은 [diagnosticMatcher.ts](../src/diagnosticMatcher.ts), VS Code `DiagnosticCollection` 관리는 [extension.ts](../src/extension.ts)가 담당합니다. 컬렉션은 액션별로 격리하고 재실행 시 그 액션의 이전 진단만 지웁니다.
+- **새 패널**: TreeDataProvider는 `src/providers/`에 두고 `activate()`에서는 생성·등록만 합니다. 컨텍스트 전용 명령은 Command Palette에서 숨깁니다.
+- **새 명령**: `package.json` 선언, `activate()` 핸들러, 필요한 메뉴와 문서를 함께 갱신합니다.
+- **스키마**: `schema/*.schema.json`, `src/schema.ts`, 검증·import 경로를 함께 확인합니다. 변경 유형별 전체 체크리스트는 [CONTRIBUTING.md](../CONTRIBUTING.md#변경-유형별-체크리스트)를 따릅니다.
 
 ## 디버깅
 

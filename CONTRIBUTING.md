@@ -113,7 +113,7 @@ suite('ModuleName Test Suite', () => {
 ```
 
 - 테스트 파일: `src/test/<module>.test.ts`
-- 프레임워크: Mocha + Chai (assert 스타일)
+- 프레임워크: Mocha + Node.js `assert`
 - 테스트 설정: `.vscode-test.mjs`
 
 ## Pull Requests
@@ -131,102 +131,20 @@ suite('ModuleName Test Suite', () => {
 
 사용자에게 보이는 모든 메시지는 `t(ko, en)`으로 감싸야 합니다. 적용 대상/제외/사용법 등 자세한 규칙은 [CLAUDE.md](CLAUDE.md#다국어-지원-i18n) "다국어 지원 (i18n)" 섹션에서 관리합니다.
 
+
 ## 실험적 기능 추가 가이드
 
-실험적 기능은 아직 안정화되지 않은 새로운 기능을 테스트하기 위한 프레임워크입니다.
+API나 동작이 바뀔 수 있고 사용자 피드백이 필요한 기능만 experimental로 시작합니다. 버그 수정과 기존 기능의 작은 개선에는 사용하지 않습니다.
 
-### 사용 기준
+추가할 때:
 
-**실험적 기능으로 추가해야 하는 경우:**
-- 아직 개발 중인 기능
-- API/동작이 변경될 수 있는 기능
-- 사용자 피드백이 필요한 기능
+1. `package.json`에 기본값이 `false`인 `taskhub.experimental.<name>.enabled` 설정을 추가하고, 사용자 노출 문구는 NLS 번들 양쪽에 넣습니다.
+2. 조건부 뷰가 필요하면 `when: "config.taskhub.experimental.<name>.enabled"`를 사용합니다.
+3. Provider는 `src/providers/`에 두고 `activate()`에서 설정을 확인해 등록합니다. TreeView가 아닌 기능도 동일한 게이트를 사용합니다.
+4. [features.md §16](docs/features.md#16-experimental-features)에 활성화 방법·범위·한계를 문서화합니다.
+5. 활성/비활성, 설정 토글, UI 노출과 핵심 동작을 테스트합니다.
 
-**실험적 기능으로 추가하지 않는 경우:**
-- 버그 수정
-- 기존 기능의 소규모 개선
-- 핵심 기능
-
-### 추가 절차
-
-#### 1. 설정 추가 (`package.json`)
-
-```json
-"taskhub.experimental.<featureName>.enabled": {
-    "type": "boolean",
-    "default": false,
-    "markdownDescription": "**[Experimental]** 기능 설명. ⚠️ This feature is experimental and may change in future versions."
-}
-```
-
-#### 2. 뷰 추가 (필요한 경우)
-
-```json
-{
-    "id": "mainView.<featureName>",
-    "name": "Feature Name (Experimental)",
-    "when": "config.taskhub.experimental.<featureName>.enabled"
-}
-```
-
-#### 3. Provider 구현 (`src/providers/<featureName>Provider.ts`)
-
-> 기존 4종(`mainViewProvider` / `linkViewProvider` / `favoriteViewProvider` / `historyProvider`)은 `src/providers/`에 분리되어 있습니다. 새 provider도 같은 디렉터리에 모듈 단위로 두고, `extension.ts`는 `activate()`에서 `import` 한 뒤 인스턴스화만 담당합니다.
-
-```typescript
-class YourFeatureProvider implements vscode.TreeDataProvider<YourItem> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<YourItem | undefined | null | void>();
-    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-    public view: vscode.TreeView<YourItem> | undefined;
-
-    constructor(private context: vscode.ExtensionContext) {}
-
-    refresh(): void { this._onDidChangeTreeData.fire(); }
-    getTreeItem(element: YourItem): vscode.TreeItem { return element; }
-    getChildren(): Thenable<YourItem[]> { return Promise.resolve([]); }
-}
-```
-
-`activate()` 함수에서 조건부 등록:
-
-```typescript
-const isEnabled = vscode.workspace.getConfiguration('taskhub.experimental')
-    .get<boolean>('featureName.enabled', false);
-
-if (isEnabled) {
-    const provider = new YourFeatureProvider(context);
-    provider.view = vscode.window.createTreeView('mainView.featureName', {
-        treeDataProvider: provider
-    });
-    provider.refresh();
-    context.subscriptions.push(provider.view);
-}
-```
-
-> TreeView가 아닌 hover provider 등을 확장하는 패턴은 Bit Operation Hover 구현을 참고하세요.
-
-#### 4. 문서 업데이트
-
-- `docs/features.md` 섹션 16에 기능 설명 추가
-
-#### 5. 테스트
-
-- [ ] 기능 활성화 상태에서 테스트
-- [ ] 기능 비활성화 상태에서 테스트
-- [ ] on/off 토글 테스트
-- [ ] 뷰 표시/숨김 동작 확인
-- [ ] 유닛 테스트 추가
-
-### 안정화 (Graduation)
-
-실험적 기능을 안정화할 때:
-
-1. "Experimental" 태그 제거
-2. `taskhub.experimental.` 접두사 제거
-3. `when` 조건절 제거 (항상 표시)
-4. 문서 업데이트
-5. 기존 설정 사용자를 위한 마이그레이션 경로 고려
-
+안정화할 때는 Experimental 표기와 조건부 게이트를 제거하고, 설정 키를 바꾸는 경우 기존 사용자를 위한 마이그레이션을 제공합니다.
 ## npm overrides
 
 보안 취약점 해결을 위해 다음 패키지에 override 적용 중:

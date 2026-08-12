@@ -43,7 +43,7 @@
 - **Bit Operation Hover** *(실험적)* — 비트 연산 결과 미리보기
 
 ### 뷰어
-- **Memory Map 시각화** — ARM Linker Listing / GNU ld 출력 파싱
+- **Memory Map 시각화** — ELF/AXF와 ARM Linker Listing 분석, GNU/ARM 링커 스크립트 기반 메모리 영역 표시
 - **Hex Viewer** — 주소/16진/ASCII 3단, Unit·Endian·Go-to·Find 지원
 - **JSON Editor** — JSON 배열/객체를 스프레드시트 UI로 편집
 
@@ -114,7 +114,7 @@
 
 ### 뷰어
 
-**Memory Map 시각화** — ARM Linker Listing / GNU ld 출력을 파싱해 메모리 리전별 사용량·섹션·함수 분포를 시각화.
+**Memory Map 시각화** — ELF/AXF 또는 ARM Linker Listing을 분석해 메모리 리전별 사용량·섹션·함수 분포를 시각화. GNU linker script와 ARM scatter file에서 메모리 영역도 읽습니다.
 
 ![Memory Map - ARM Linker 예제](docs/images/memory-map-armlink.png)
 
@@ -122,7 +122,7 @@
 
 ![Hex Viewer - sample_binary.bin 예제](docs/images/hex-viewer.png)
 
-**JSON Editor** — JSON 배열/객체를 스프레드시트 형태로 편집. 행 추가/삭제/드래그, 셀 타입 변환(`s→a`, `a→s`) 지원.
+**JSON Editor** — JSON 배열/객체를 스프레드시트 형태로 편집. 행 추가/삭제/드래그와 문자열↔배열·문자열↔숫자 셀 타입 변환을 지원.
 
 ![JSON Editor - test.json 예제](docs/images/json-editor.png)
 
@@ -152,7 +152,7 @@
 
 VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전체 설정을 분류별 UI로 조정할 수 있습니다. 가장 자주 손대는 항목은 `taskhub.runAnyAction.recentLimit`(Quick Action Palette의 *Recently used* 노출 개수)와 `taskhub.history.maxItems`(History 패널 보관 개수)입니다.
 
-전체 키·타입·기본값·범위·관련 기능과 새 설정 추가 절차는 [docs/features.md §21 설정 레퍼런스](docs/features.md#21-설정-레퍼런스)에서 단일 출처로 관리됩니다.
+설정 정의의 정본은 [package.json](package.json)의 `contributes.configuration`입니다. 사용자용 전체 키·기본값·범위와 설정 추가 절차는 [docs/features.md §21 설정 레퍼런스](docs/features.md#21-설정-레퍼런스)에 정리되어 있습니다.
 
 ---
 
@@ -162,7 +162,7 @@ VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전
 |------|------|
 | [docs/features.md](docs/features.md) | 상세 기능 문서 (태스크 타입, JSON 예제, hover 기능 등) |
 | [docs/architecture.md](docs/architecture.md) | 프로젝트 구조, 주요 컴포넌트, 데이터 구조, 보안 |
-| [docs/roadmap.md](docs/roadmap.md) | 향후 기능 로드맵 + 이미 구현된 항목 |
+| [docs/roadmap.md](docs/roadmap.md) | 미구현 기능 우선순위와 기술 부채 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 개발 환경 셋업, 빌드, 테스트, 기여 가이드 |
 | [CLAUDE.md](CLAUDE.md) | AI 에이전트 규칙 (코딩 컨벤션, i18n, 커밋 형식) |
 | [CHANGELOG.md](CHANGELOG.md) | 버전별 변경 이력 |

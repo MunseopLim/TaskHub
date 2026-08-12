@@ -21,6 +21,54 @@ function readRepoFile(relPath: string): string {
     return fs.readFileSync(path.join(REPO_ROOT, relPath), 'utf-8');
 }
 
+function markdownDocFiles(): string[] {
+    const roots = fs.readdirSync(REPO_ROOT)
+        .filter(name => name.endsWith('.md'));
+    const nested = ['docs', 'examples'].flatMap(dir =>
+        fs.readdirSync(path.join(REPO_ROOT, dir))
+            .filter(name => name.endsWith('.md'))
+            .map(name => path.join(dir, name))
+    );
+    return [...roots, ...nested].sort();
+}
+
+/** Approximate GitHub's heading IDs while preserving Korean and other Unicode letters. */
+function markdownHeadingIds(body: string): Set<string> {
+    const counts = new Map<string, number>();
+    const ids = new Set<string>();
+    for (const line of body.split('\n')) {
+        const match = /^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(line);
+        if (!match) { continue; }
+        const base = match[1]
+            .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+            .replace(/<[^>]+>/g, '')
+            .replace(/[`*_~]/g, '')
+            .toLocaleLowerCase('en-US')
+            .replace(/[^\p{L}\p{N}\p{M}\s_-]/gu, '')
+            .replace(/\s/g, '-');
+        const duplicateIndex = counts.get(base) ?? 0;
+        counts.set(base, duplicateIndex + 1);
+        ids.add(duplicateIndex === 0 ? base : `${base}-${duplicateIndex}`);
+    }
+    return ids;
+}
+
+function splitMarkdownTableRow(row: string): string[] {
+    const cells: string[] = [];
+    let cell = '';
+    for (let i = 1; i < row.length - 1; i++) {
+        const char = row[i];
+        if (char === '|' && row[i - 1] !== '\\') {
+            cells.push(cell.trim());
+            cell = '';
+        } else {
+            cell += char;
+        }
+    }
+    cells.push(cell.trim());
+    return cells;
+}
+
 suite('Documentation Consistency', () => {
 
     // =====================================================================
@@ -373,6 +421,125 @@ suite('Documentation Consistency', () => {
             const missing = [...emitted].filter(code => !doc.includes(`\`${code}\``));
             assert.deepStrictEqual(missing, [],
                 `features.md 의 Doctor 표에 없는 코드: ${missing.join(', ')}`);
+        });
+    });
+
+    // =====================================================================
+    // 10. 저장소 내 Markdown 링크와 heading anchor
+    // =====================================================================
+    suite('Markdown local links and anchors', () => {
+        test('모든 로컬 Markdown 링크의 파일과 heading이 존재한다', () => {
+            const files = markdownDocFiles();
+            const headingCache = new Map<string, Set<string>>();
+            const violations: string[] = [];
+            const linkRe = /!?\[[^\]]*\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
+
+            for (const doc of files) {
+                const body = readRepoFile(doc);
+                for (const match of body.matchAll(linkRe)) {
+                    const rawTarget = match[1].replace(/^<|>$/g, '');
+                    if (/^(?:https?:|mailto:|command:)/i.test(rawTarget)) { continue; }
+
+                    const hashAt = rawTarget.indexOf('#');
+                    const rawPath = hashAt === -1 ? rawTarget : rawTarget.slice(0, hashAt);
+                    const rawAnchor = hashAt === -1 ? '' : rawTarget.slice(hashAt + 1);
+                    let targetPath: string;
+                    let anchor: string;
+                    try {
+                        targetPath = decodeURIComponent(rawPath);
+                        anchor = decodeURIComponent(rawAnchor);
+                    } catch {
+                        violations.push(`${doc} — URI decode 실패: ${rawTarget}`);
+                        continue;
+                    }
+
+                    const resolved = rawPath
+                        ? path.resolve(REPO_ROOT, path.dirname(doc), targetPath)
+                        : path.resolve(REPO_ROOT, doc);
+                    if (!fs.existsSync(resolved)) {
+                        violations.push(`${doc} — 파일 없음: ${rawTarget}`);
+                        continue;
+                    }
+                    if (!anchor) { continue; }
+                    if (!fs.statSync(resolved).isFile() || path.extname(resolved).toLowerCase() !== '.md') {
+                        violations.push(`${doc} — Markdown가 아닌 대상의 anchor: ${rawTarget}`);
+                        continue;
+                    }
+
+                    let ids = headingCache.get(resolved);
+                    if (!ids) {
+                        ids = markdownHeadingIds(fs.readFileSync(resolved, 'utf-8'));
+                        headingCache.set(resolved, ids);
+                    }
+                    if (!ids.has(anchor)) {
+                        violations.push(`${doc} — heading 없음: ${rawTarget}`);
+                    }
+                }
+            }
+
+            assert.deepStrictEqual(
+                violations,
+                [],
+                `깨진 로컬 Markdown 링크:\n  ${violations.join('\n  ')}`
+            );
+        });
+    });
+
+    // =====================================================================
+    // 11. 설정 표 기본값·범위 ↔ package.json
+    // =====================================================================
+    suite('settings defaults and ranges ↔ features.md §21 table', () => {
+        test('문서의 기본값과 수치 범위가 manifest와 일치한다', () => {
+            const pkg = JSON.parse(readRepoFile('package.json'));
+            const properties = pkg?.contributes?.configuration?.properties as Record<string, {
+                type: string;
+                default: unknown;
+                enum?: unknown[];
+                minimum?: number;
+                maximum?: number;
+            }>;
+            const rows = new Map<string, string[]>();
+            for (const line of readRepoFile('docs/features.md').split('\n')) {
+                if (!/^\|\s*`taskhub\./.test(line)) { continue; }
+                const cells = splitMarkdownTableRow(line);
+                rows.set(cells[0].replace(/`/g, ''), cells);
+            }
+
+            const violations: string[] = [];
+            for (const [key, definition] of Object.entries(properties)) {
+                const cells = rows.get(key);
+                if (!cells) { continue; } // Key presence is covered by suite 1.
+                const documentedType = cells[1].replace(/`|\\/g, '');
+                const documentedDefault = cells[2].replace(/`/g, '');
+                const expectedDefault = typeof definition.default === 'string'
+                    ? JSON.stringify(definition.default)
+                    : String(definition.default);
+
+                if (definition.enum) {
+                    for (const member of definition.enum) {
+                        if (!documentedType.includes(JSON.stringify(member))) {
+                            violations.push(`${key}: enum ${JSON.stringify(member)} 누락`);
+                        }
+                    }
+                } else if (documentedType !== definition.type) {
+                    violations.push(`${key}: 타입 ${documentedType}, manifest ${definition.type}`);
+                }
+                if (!documentedDefault.startsWith(expectedDefault)) {
+                    violations.push(`${key}: 기본값 ${documentedDefault}, manifest ${expectedDefault}`);
+                }
+                if (definition.minimum !== undefined || definition.maximum !== undefined) {
+                    const expectedRange = `${definition.minimum}–${definition.maximum}`;
+                    if (!documentedDefault.includes(expectedRange)) {
+                        violations.push(`${key}: 범위 ${documentedDefault}, manifest ${expectedRange}`);
+                    }
+                }
+            }
+
+            assert.deepStrictEqual(
+                violations,
+                [],
+                `features.md §21 설정 값 drift:\n  ${violations.join('\n  ')}`
+            );
         });
     });
 });

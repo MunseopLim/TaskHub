@@ -43,7 +43,7 @@
 - **Bit Operation Hover** *(experimental)* — Preview bit operation results
 
 ### Viewers
-- **Memory Map Visualization** — Parse ARM Linker Listing / GNU ld output
+- **Memory Map Visualization** — Analyze ELF/AXF and ARM Linker Listings, with memory regions from GNU/ARM linker scripts
 - **Hex Viewer** — Address / hex / ASCII columns with Unit, Endian, Go-to, and Find
 - **JSON Editor** — Spreadsheet-style JSON editing
 
@@ -114,7 +114,7 @@
 
 ### Viewers
 
-**Memory Map Visualization** — Parses ARM Linker Listing / GNU ld output to show per-region usage, sections, and function distribution.
+**Memory Map Visualization** — Analyzes ELF/AXF or ARM Linker Listings to show per-region usage, sections, and function distribution. Memory regions can also be read from GNU linker scripts and ARM scatter files.
 
 ![Memory Map - ARM Linker example](docs/images/memory-map-armlink.png)
 
@@ -122,7 +122,7 @@
 
 ![Hex Viewer - sample_binary.bin example](docs/images/hex-viewer.png)
 
-**JSON Editor** — Edit JSON arrays/objects in a spreadsheet UI. Supports row add/delete/drag and cell-type conversion (`s→a`, `a→s`).
+**JSON Editor** — Edit JSON arrays/objects in a spreadsheet UI, with row add/delete/drag and string↔array or string↔number cell-type conversion.
 
 ![JSON Editor - test.json example](docs/images/json-editor.png)
 
@@ -152,7 +152,7 @@ To build from source or contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Open `File > Preferences > Settings` in VS Code and search for **"TaskHub"** to browse every setting in a categorized UI. The two dials users tweak most often are `taskhub.runAnyAction.recentLimit` (number of items in the *Recently used* section of Quick Action Palette) and `taskhub.history.maxItems` (how many runs the History panel keeps).
 
-The full list — keys, types, defaults, ranges, related features, and the "how to add a new setting" checklist — is the single source of truth in [docs/features.md §21 Settings Reference](docs/features.md#21-설정-레퍼런스) (Korean).
+The canonical setting definitions live in `contributes.configuration` in [package.json](package.json). The user-facing list of keys, defaults, ranges, related features, and the update checklist is maintained in [docs/features.md §21 Settings Reference](docs/features.md#21-설정-레퍼런스) (Korean).
 
 ---
 
@@ -162,7 +162,7 @@ The full list — keys, types, defaults, ranges, related features, and the "how 
 |------|------|
 | [docs/features.md](docs/features.md) | Detailed feature docs (task types, JSON examples, hover features) |
 | [docs/architecture.md](docs/architecture.md) | Project structure, key components, data structures, security |
-| [docs/roadmap.md](docs/roadmap.md) | Future roadmap + already-shipped items |
+| [docs/roadmap.md](docs/roadmap.md) | Priorities for unshipped features and technical debt |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, build, test, and contribution guide |
 | [CLAUDE.md](CLAUDE.md) | AI-agent rules (coding conventions, i18n, commit format) |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |

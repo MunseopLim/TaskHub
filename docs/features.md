@@ -83,9 +83,7 @@ Actions 패널의 목록은 세 종류의 소스를 병합해 만듭니다. 같�
 | 프리셋 | 확장 `presets/` 또는 워크스페이스 `.vscode/presets/` | `taskhub.preset.selected`로 선택했을 때 ([§17](#17-preset-기능)) |
 | 번들 예제 (`defaultButton.*`) | 확장의 `media/actions.json` | `taskhub.builtinActions` 설정에 따름 (기본 `auto`) |
 
-**번들 예제의 `auto` 동작 (0.6.24 기준)**: 예제를 **액션 목록에 넣지 않습니다.** 대신 액션이 없을 때 뜨는 [빈 상태 안내](#빈-상태-안내와-제목-표시줄-구성-0615부터)가 *Browse Examples* 버튼으로 예제 접근을 제공합니다.
-
-> 0.6.14의 `auto`는 "프로젝트가 비었을 때만 예제를 트리에 넣는다"였지만, 0.6.15에서 추가한 빈 상태 CTA와 충돌했습니다 — VS Code는 트리가 **완전히 비어야** welcome 뷰를 띄우므로, 예제가 주입되면 정작 CTA가 필요한 빈 프로젝트에서 CTA가 뜰 수 없었습니다. 0.6.24에서 CTA를 살리는 쪽으로 정리했습니다.
+**번들 예제의 `auto` 동작**: 예제를 액션 목록에 넣지 않고, 액션이 없을 때 뜨는 [빈 상태 안내](#빈-상태-안내와-제목-표시줄-구성)의 *Browse Examples* 버튼으로 연결합니다.
 
 | 값 | 액션 목록에 예제 | 빈 상태 CTA의 *Browse Examples* |
 | --- | --- | --- |
@@ -98,7 +96,7 @@ Actions 패널의 목록은 세 종류의 소스를 병합해 만듭니다. 같�
 
 **교차 소스 id 중복은 오류가 아니라 경고입니다.** 같은 `id`가 두 소스에 있으면 위 우선순위로 조용히 해소되고, 어떤 소스가 가려졌는지는 TaskHub 출력 채널에만 기록됩니다. 액션은 사라지지 않지만 `taskhub.runAction.<id>` 커맨드와 History 조회는 **살아남은 쪽 하나**만 가리키므로, 의도한 액션이 아닐 수 있습니다. (같은 파일 *안*의 중복은 다릅니다 — 그건 로드 자체가 실패합니다.)
 
-> **0.6.32**: [액션 생성 마법사](#8-액션-생성-마법사-create-action)가 이 목록 전체를 보게 됐습니다. 이전에는 대상 폴더의 파일과 번들 예제만 확인해, 선택된 프리셋이나 **다른 워크스페이스 폴더**와 같은 id를 만들어도 막지 못했고(위 경고만 남고 한쪽이 가려짐), 반대로 `builtinActions`가 숨긴 예제의 id는 쓸데없이 예약된 채였습니다. 이제 트리 목록과 마법사가 같은 판단 근거를 씁니다.
+> [액션 생성 마법사](#8-액션-생성-마법사)는 현재 트리에 병합되는 전체 소스를 기준으로 ID 중복을 검사합니다. 선택된 프리셋과 다른 워크스페이스 폴더도 포함하고, `builtinActions` 설정으로 제외된 예제는 검사하지 않습니다.
 
 ### JSON Editor 커맨드
 
@@ -113,20 +111,18 @@ Command Palette에서 `taskhub json`을 검색하면 두 개의 JSON Editor 커�
 
 **루트가 객체이거나 배열이어야 합니다.** 표(시트)로 보여 주는 도구라 그 둘만 의미가 있기 때문입니다. `null`·숫자·문자열·불리언은 그 자체로 유효한 JSON이지만 열 수 없고, 패널을 만들기 전에 어떤 루트였는지 밝히는 오류로 거절합니다.
 
-**표의 행은 객체를 전제합니다.** 배열 원소가 그대로 행이 되므로, 원시값이나 배열이 든 배열(`[null, 1, "a"]`이나 `{"items": [1, 2, 3]}`)은 파일이 열리고 표도 그려지지만 **그 행은 읽기 전용**입니다 — 값을 그대로 보여 주되 편집 컨트롤은 붙지 않습니다. 값이 사라지는 것은 아니며 저장해도 그대로 보존됩니다. 그런 행에 다른 행의 열을 붙이면 편집 가능한 가짜 셀이 되고, 특히 배열 행에 `length`가 열로 걸리면 그 값을 바꾸는 것만으로 배열이 잘리기 때문입니다. 열 이름이 될 키가 하나도 없는 시트(원시값 행만 있는 경우)에는 **값**(Value) 열 하나가 대신 섭니다.
+**표의 행은 객체를 전제합니다.** `[null, 1, "a"]`처럼 원시값이나 배열인 행은 값만 표시하고 읽기 전용으로 둡니다. 저장해도 원문은 보존되며, 객체 키가 하나도 없는 시트는 **값**(Value) 열을 사용합니다.
 
 #### 데이터 보호
 
-JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디스크에 기록되는 시나리오를 다음 네 가지 메커니즘으로 막습니다.
+JSON Editor는 다음 규칙으로 사용자 변경을 보호합니다.
 
-- **Invalid 셀 저장 차단**: object/array를 JSON으로 직접 편집하는 셀에서 파싱이 실패하면 Save / Ctrl+S 가 진행되지 않습니다. 해당 셀은 편집 상태가 유지되고 에러 메시지가 표시되어, "잘못된 입력이 그대로 저장됐다"가 아니라 "사용자가 고치고 다시 저장"하는 흐름이 됩니다.
-- **Undo / Redo (`Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y`, 툴바 ↶ ↷)**: 셀 commit, 행 추가/삭제, 드래그 정렬, string ↔ array 변환, 셀 타입 바꾸기, 태그 추가/삭제 단위로 메모리 스냅샷을 쌓습니다. 20 step / 16 MB 중 먼저 도달하는 cap 으로 가장 오래된 항목부터 정리. 셀 편집 중에는 단축키가 동작하지 않아 브라우저 input 의 기본 undo 가 우선합니다.
-- **Dirty-close 복구**: 미저장 변경이 있는 상태로 패널을 닫아도 워크스페이스 상태에 wrapped data 스냅샷이 남습니다. 같은 파일을 다시 열 때 디스크 mtime + size fingerprint 가 캡처 시점과 일치하면 *복구하시겠습니까?* 다이얼로그가 뜨고, 외부에서 파일이 변경됐다면 (mtime 변경 또는 mtime 보존 + size 변경) 스냅샷은 자동 폐기됩니다. 자동 복원이 아닌 명시적 프롬프트 — 의도적으로 닫은 변경이 원치 않게 되살아나지 않습니다. mtime 과 size 가 모두 같은 채로 내용만 바뀌는 외부 변경(예: 같은 길이로 in-place 패치)은 감지하지 못한다는 한계가 있어, 외부 변경이 의심되면 사용자가 *다시 읽기* 로 명시적 동기화를 트리거하는 것이 안전합니다. **복구 대상은 parse 가능한 셀 단위 변경과 commit 된 mutation** 입니다 — object/array 셀을 JSON textarea 로 직접 편집하는 도중 mid-edit invalid JSON 상태에서 패널을 닫으면 그 raw text 자체는 보존되지 않고 (parse 실패라 snapshot 대상에서 제외됩니다), 대신 dirty 표시가 유지되어 외부 변경 *Reload/Keep* 모달이나 다른 파일 열기 시 *변경사항 버리기* confirm 으로 silent discard 만 차단합니다.
-- **복구 스냅샷 보관 한도 (0.6.36부터)**: 스냅샷은 **최신 20개, 총 32MB** 까지만 보관합니다. 항목 하나가 파일 전체의 파싱 결과라 제한이 없으면 워크스페이스 상태가 무한히 자라기 때문입니다. 둘 중 먼저 걸리는 쪽이 적용되며, 넘으면 **가장 오래 전에 캡처된 스냅샷부터 조용히 사라집니다** — 별도 알림은 띄우지 않습니다. 따라서 미저장 변경이 있는 파일을 21개 이상 닫아 두었다면 가장 오래된 것의 복구 프롬프트가 뜨지 않을 수 있습니다. (총량을 넘는 큰 파일이라도 스냅샷 하나는 반드시 남습니다.) 수명 기준으로는 지우지 않으므로, 개수·총량 안에 있는 한 시간이 지나도 유지됩니다.
-- **셀 타입 보존 (0.6.58부터)**: 표 편집기는 값을 text input 으로 그리므로 입력은 언제나 문자열로 돌아옵니다. 원래 값이 문자열이면 raw 를 그대로 지키고(`"007"` 이 숫자 `7` 이 되지 않습니다), 그 외에는 숫자 / 불리언 / `null` 로 되돌립니다. 배열 셀도 **항목 단위로** 같은 규칙을 적용하므로, `[1, true, null]` 이 담긴 셀을 클릭했다 나가는 것만으로 `["1", "true", "null"]` 이 되지 않습니다. 단 **배열의 빈 항목(`""`)은 타입 정보가 없는 자리로 봅니다** — `+` 로 갓 추가한 항목이 그 자리이므로, 숫자 배열에 항목을 더하고 `3` 을 입력하면 `[1, 2, 3]` 이 됩니다(`[1, 2, "3"]` 이 아닙니다). 단일 값 셀의 `""` 는 사용자가 파일에 적어 둔 값이므로 이 예외를 적용하지 않습니다.
-- **문자열 ↔ 배열 변환의 왕복 (0.7.2부터)**: `a→s` 는 **비어 있지 않은** 배열에만, `s→a` 는 쉼표 유무와 관계없이 **비어 있지 않은 모든 문자열**에 붙습니다. 예전에는 `[]` → `""` 로 바꾸면 되돌릴 버튼이 없어 그 셀이 영영 문자열로 남았고, 항목 하나짜리 배열도 같은 막다른 길이었습니다.
-- **셀 타입 바꾸기 (0.6.74부터)**: 위 보존 규칙에는 한 방향으로만 잠기는 자리가 있었습니다 — 숫자 칸에 문자열을 한 번 넣으면 그 셀은 문자열이 되고, 그 뒤로는 숫자를 입력해도 계속 문자열로 남습니다(옛 값이 문자열이므로 raw 를 지키는 것이 규칙입니다). 표에서는 `36` 과 `"36"` 이 똑같이 보이므로 그 사실조차 알 수 없었고, 파일을 직접 고치는 것 말고는 되돌릴 길이 없었습니다. 이제 단일 값 셀에 **`s→#` / `#→s` 버튼**이 붙어 타입을 의도적으로 바꿀 수 있습니다. 버튼은 **실제로 바뀌는 경우에만** 나타나며(`"abc"` 처럼 되돌려도 그대로인 값에는 붙지 않고, `2^53` 을 넘는 정수 문자열처럼 **값이 손상될 변환은 아예 제공하지 않습니다** — `"0xFFFFFFFFFFFFFFFF"` 는 double 을 거치며 끝자리가 달라집니다), tooltip 이 결과를 미리 보여 줍니다 — `"0x40013800"` 은 JS 에서 숫자로도 읽히므로 누르면 `1073821696` 이 된다는 것을 미리 알 수 있습니다. 변환은 Undo 대상이고, 무엇으로 바뀌었는지 스크린리더에도 알립니다.
-- **외부 변경 감지**: 파일이 외부(예: `git checkout`)에서 수정되면 감시자가 이를 감지합니다. dirty 가 아니면 자동으로 다시 읽고 상태바에 알리며, dirty 라면 *다시 읽기 / 현재 편집 유지* 모달을 띄워 사용자가 결정합니다. JSON Editor 자신이 막 쓴 변경은 mtime + size fingerprint 가 모두 일치할 때만 무시되므로, 외부 도구가 mtime 을 보존한 채 내용을 바꾸는 경우(`touch -r`, 일부 sync 도구) 도 외부 변경으로 처리됩니다.
+- **잘못된 셀 차단**: 객체·배열 셀의 JSON 파싱이 실패하면 편집 상태와 오류를 유지하고 저장하지 않습니다.
+- **Undo / Redo**: 셀 commit, 행 추가·삭제·정렬, 값 변환을 최대 20단계·16MB까지 되돌립니다. 셀 입력 중에는 브라우저 input의 undo가 우선합니다.
+- **Dirty-close 복구**: commit된 변경은 워크스페이스 상태에 저장합니다. 다시 열 때 파일의 mtime·size가 같으면 복구를 묻고, 외부 변경이 확인되면 폐기합니다. 아직 파싱되지 않는 셀의 편집 중 raw text는 스냅샷에 포함하지 않습니다.
+- **복구 한도**: 최신 20개·총 32MB 중 먼저 닿는 한도를 적용해 오래된 항목부터 제거합니다. 단일 스냅샷이 총량보다 커도 그 항목 하나는 남깁니다.
+- **타입 보존과 변환**: 기존 문자열은 문자열로, 숫자·불리언·`null`은 원래 타입으로 commit합니다. 배열도 항목별로 적용하며 새 빈 항목은 주변 타입을 따릅니다. `a→s`·`s→a`와, 손실 없는 경우에만 보이는 `s→#`·`#→s`로 의도적인 변환을 수행합니다.
+- **외부 변경 감지**: dirty가 아니면 자동으로 다시 읽고, dirty면 *다시 읽기 / 현재 편집 유지*를 묻습니다.
 
 #### 기타 단축키
 
@@ -140,7 +136,7 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
 - 아이콘만 있는 버튼(↶ ↷ ✕ ⠿ a→s s→a s→# #→s)에 `aria-label`이 붙습니다.
 - **대비·타깃 크기 (0.7.0부터)**: 삭제 버튼은 배경으로 설계된 테마 토큰을 써 다크 테마에서 5.49:1 (WCAG 1.4.3 AA 통과). 삭제 버튼은 최소 24×24 크기를 가지고, 변환 배지는 **보이는 크기는 작게 두되 클릭·터치 영역만** 24×24 를 지킵니다 (WCAG 2.2 SC 2.5.8 AA) — 셀마다 붙는 것이라 상자를 키우면 표가 배지로 뒤덮입니다. 답답하면 `--touch-min` 한 줄로 조절할 수 있습니다.
 - **포커스 링**: 모든 버튼·셀·탭에 `:focus-visible` 윤곽선이 붙습니다. 키보드로 표를 훑거나 ✕ / 변환 버튼을 누른 뒤 코드가 옮겨 놓은 포커스가 어디 있는지 보입니다 (마우스 클릭 뒤의 프로그램적 포커스 이동은 `:focus-visible` 대상이 아닙니다).
-- **편집을 벗어나는 길 (0.7.0부터)**: 배열 항목 input 도 셀 밖을 클릭하면 commit 됩니다(같은 셀 안에서 Tab 하거나 ✕ / + 를 누르는 것은 편집을 끝낸 것으로 보지 않습니다). ✕ / + 버튼에서도 Escape 로 편집을 취소할 수 있고, 앞으로 Tab 해서 버튼을 거쳐 나가는 경로도 같이 commit 됩니다. 삭제·이동 버튼의 라벨에는 행 번호가 포함됩니다 (예: *3번 행 삭제*). 삭제·이동 버튼의 라벨에는 행 번호가 포함됩니다 (예: *3번 행 삭제*).
+- **편집을 벗어나는 길**: 배열 항목 input도 셀 밖을 클릭하거나 앞으로 Tab해 나가면 commit 됩니다. 같은 셀 안에서 Tab하거나 ✕ / +를 누르는 것은 편집을 끝낸 것으로 보지 않으며, 해당 버튼에서도 Escape로 편집을 취소할 수 있습니다. 삭제·이동 버튼의 라벨에는 행 번호가 포함됩니다(예: *3번 행 삭제*).
 - 수정 표시는 `role="status"`, 오류 메시지는 `role="alert"` live region으로 노출되고, 행 이동 같은 변화는 전용 알림 영역으로 전달됩니다. 아이콘 전용 열 머리글에는 화면에 보이지 않는 이름(순서 변경 / 행 번호 / 작업)이 들어갑니다.
 - **셀 편집 진입 (0.6.31부터)**: 셀에 Tab으로 이동해 `Enter` 또는 `Space`로 편집을 시작할 수 있습니다. 이전에는 클릭 전용이라 키보드만으로는 값을 고칠 수 없었습니다 — 표를 읽을 수는 있으나 편집기로는 쓸 수 없는 상태였습니다.
 - **시트 탭 (0.6.31부터)**: `Tab`으로 탭 줄에 진입하고 `←` / `→`로 이동합니다(양끝에서 순환). 0.6.19는 모든 탭을 Tab 순서에 넣었는데, 이는 스크린리더가 `role="tab"`을 보고 안내하는 조작법(화살표 이동)과 어긋났습니다. 탭과 표 영역이 `aria-controls` / `role="tabpanel"`로 서로를 가리키므로 어느 시트를 보고 있는지도 전달됩니다.
@@ -156,1175 +152,370 @@ JSON Editor는 사용자 입력이 조용히 사라지거나 stale 상태로 디
     *   브라우저 아이콘: 브라우저에서 열기
     *   연필 아이콘: 링크 편집
     *   휴지통 아이콘: 링크 삭제
-*   **링크 추가 / 편집**: 뷰 상단의 + 버튼은 *URL → 제목(URL의 host로 자동 채워짐, Enter로 그대로 사용) → 저장* (2 prompt). URL prompt 는 `validateLinkUrlForSave` 게이트를 거치며 ① scheme allowlist (http / https / mailto 만 허용 — `javascript:` / `file:` / `vscode:` 같은 schemes 는 입력 단계에서 빨간 줄로 차단), ② WHATWG `new URL()` parse (스킴만 붙은 `https://` 같은 입력도 입력 단계에서 차단)를 한 번에 적용합니다. 같은 게이트가 워크스페이스 링크 *편집* prompt 에도 적용되어 Add 와 Edit 의 검증이 대칭입니다. 그룹/태그는 묻지 않으며, 저장 직후 알림의 *links.json 열기* 버튼으로 곧장 편집기에 점프해 다듬을 수 있습니다. `links.json`이 파싱 실패면 마법사가 저장을 거부하고 *links.json 열기* 버튼이 달린 에러 알림으로 회복 경로를 제공합니다 (이전 버전은 깨진 파일을 신규 1개 항목으로 덮어써서 기존 데이터가 유실됐습니다). WHATWG parse 의 한계상 `https:///path` 같은 입력은 슬래시가 정규화되어 `https://path/` (host = `path`) 로 조용히 해석되며 게이트는 통과합니다 — 사용자 의도와 다르게 host 가 바뀐 상태로 저장될 수 있어, click 시점의 `vscode.Uri.parse` 가 최종 fail-safe 입니다.
+*   **링크 추가 / 편집**: **+**에서 URL과 제목을 입력합니다. 제목은 URL host로 미리 채우며 그룹·태그는 `links.json`에서 편집합니다. 저장 시 `http`·`https`·`mailto`만 허용하고 URL 구문을 검사합니다. 손상된 `links.json`은 덮어쓰지 않고 파일을 열어 고칠 수 있는 알림을 표시합니다.
 *   **검색**: 돋보기 아이콘을 클릭하여 링크를 빠르게 검색할 수 있습니다.
 *   **파일 편집**: 연필 버튼을 클릭하여 `links.json` 파일을 직접 편집할 수 있습니다.
 
 ## 5. Actions 패널 (`mainView.main`)
 
-이 패널은 워크스페이스의 `.vscode/actions.json`(그리고 선택한 프리셋 / 조건에 따라 번들 예제 — [§3 액션 소스와 병합 우선순위](#액션-소스와-병합-우선순위) 참조)에 정의된 다양한 구성 가능한 액션을 제공합니다. 새로운 스키마는 '태스크(Task)'라는 통일된 개념을 중심으로 설계되어, 간단한 명령어부터 여러 단계를 거치는 복잡한 파이프라인까지 일관된 방식으로 정의할 수 있습니다.
+워크스페이스의 `.vscode/actions.json`, 선택한 프리셋, 설정에 따라 번들 예제를 합쳐 실행 가능한 액션 트리를 만듭니다. JSON 형식의 정본은 [actions.schema.json](../schema/actions.schema.json), 런타임 타입은 [schema.ts](../src/schema.ts)입니다.
 
-> 마지막 실행 시각·소요 시간 같은 회고 정보는 [§14 액션 실행 히스토리](#14-액션-실행-히스토리)에서 확인합니다 — Actions 패널은 "지금 무엇을 실행할지"에만 집중합니다.
+### 빈 상태 안내와 제목 표시줄 구성
 
-### 빈 상태 안내와 제목 표시줄 구성 (0.6.15부터)
-
-표시할 액션이 없으면 패널이 비어 보이는 대신 VS Code의 welcome 뷰로 다음 단계를 제안합니다. Workspace Links / Favorite Files 패널도 동일합니다.
-
-| 상황 | 안내 |
-| --- | --- |
-| 폴더를 열지 않음 | *Open Folder* — TaskHub는 프로젝트 단위로 동작하므로 폴더가 먼저 필요합니다. |
-| 폴더는 열렸고 액션이 없음 | *Create Action* / *Browse Examples* / *Import Actions…* |
-| Links / Favorites가 비어 있음 | 각각 *Add Link* / *Add File to Favorites* |
-
-- **`actions.json`이 깨진 경우는 빈 상태가 아닙니다.** 파싱/스키마 오류가 나면 "액션을 불러오지 못했습니다" 행이 실패 이유와 함께 표시되고, 클릭하면 **실제로 실패한 파일**이 열립니다 (0.6.24부터 — 이전에는 워크스페이스 폴더를 다시 묻는 명령이라 멀티루트에서 멀쩡한 파일을 열 수 있었습니다). 소스 간 중복 id처럼 특정 파일로 좁힐 수 없는 오류는 폴더 선택 경로로 폴백합니다. 액션 200개짜리 파일을 가진 사용자에게 "첫 액션을 만드세요"라고 안내하지 않기 위한 구분입니다.
-- **확장 버전은 트리 행이 아니라 뷰 제목 옆**(`Actions 0.6.15`)에 표시됩니다. 예전에는 목록 첫 줄을 상시 차지했고, 그 때문에 트리가 절대 비지 않아 빈 상태 안내 자체가 뜰 수 없었습니다. CHANGELOG는 제목 표시줄 `…` 메뉴에서 엽니다.
-- **제목 표시줄 아이콘은 3개**입니다: *Create Action*, *Edit actions.json*, 그리고 실행 중일 때만 나타나는 *Stop All Actions*([§11](#11-작업-종료)). 예제 보기 / Import / Export / 터미널 닫기 / Changelog는 `…` 오버플로 메뉴로 옮겼습니다.
+액션이 없으면 *Create Action*·*Browse Examples*·*Import Actions…*를 안내합니다. JSON 파싱이나 스키마 검증이 실패한 경우에는 빈 상태로 처리하지 않고 오류 행을 표시하며, 클릭하면 실패한 파일을 엽니다. 제목에는 확장 버전이 표시되고, 자주 쓰는 생성·편집·중지 명령만 아이콘으로 노출합니다.
 
 ### 멀티 task 액션의 진행 표시
 
-여러 task로 구성된 액션이 실행 중일 때, 액션 라벨 옆에 현재 진행 중인 task가 표시됩니다.
-
-- 형식: `2/3 · link` — 전체 3개 task 중 2번째 task `link`가 현재 실행 중.
-- `taskhub.showTaskStatus: false`면 상태 아이콘과 함께 이 진행 표시도 나오지 않습니다. 다만 **가려지는 것은 겉모습뿐**이라, 실행 중인 액션의 인라인 *중지* 버튼과 제목 표시줄의 *Stop All Actions* 는 그대로 동작합니다 (0.6.16부터 — 이전에는 트리가 다시 그려질 때마다 꺼 둔 아이콘이 되살아났습니다).
-- 단일 task 액션은 진행 표시를 노출하지 않습니다 (`1/1`은 노이즈).
-- 액션이 종료되면(`success`/`failure`/manual stop) 진행 표시는 자동으로 사라지고, 상태 아이콘(✓/✗)만 남습니다.
-- `continueOnError: true`로 스킵된 task는 인덱스만 진행되며 별도 표시는 없습니다 — task 완료/실패 자체는 History 패널에서 회고 가능합니다.
+여러 태스크를 실행할 때 액션 옆에 `2/3 · link` 또는 병렬 실행 중인 태스크 요약이 표시됩니다. 단일 태스크에는 표시하지 않고 종료 시 제거합니다. `taskhub.showTaskStatus: false`면 상태 아이콘과 진행률만 숨으며 중지 기능은 그대로 동작합니다.
 
 ### 액션에 단축키 할당
 
-`id`가 지정된 모든 액션은 자동으로 `taskhub.runAction.<id>` VS Code 커맨드로 노출됩니다. 따라서 사용자는 키바인딩으로 직접 액션을 실행할 수 있습니다.
-
-- **권장 사용법**: Actions 패널에서 액션을 우클릭 → **Assign Shortcut** → VS Code의 Keyboard Shortcuts UI가 해당 액션의 커맨드 ID로 미리 필터링되어 열립니다. 사용자는 거기서 평소처럼 키를 입력해 등록합니다.
-- 확장이 사용자 `keybindings.json`을 직접 수정하지 않으므로, 키 충돌·`when` 절·플랫폼별 키 차이는 모두 VS Code 기본 UI에서 다룰 수 있습니다.
-- `actions.json`이 변경되면 추가/삭제된 액션에 맞춰 동적 커맨드도 즉시 동기화됩니다 (`syncActionCommands`). 액션이 사라져도 사용자가 등록한 키바인딩 항목은 `keybindings.json`에 남지만, 해당 커맨드가 없으면 VS Code가 조용히 무시하므로 무해합니다.
-- `id`가 없는 폴더·구분선·액션은 등록 대상이 아닙니다.
-- 커맨드 ID 도출은 단일 함수(`buildActionCommandId`)에 있으며 **bijective percent-encoding**을 사용합니다. `[A-Za-z0-9_.-]` 문자는 그대로 유지되어 일반적인 ID(`fw.build`, `defaultButton.showEnv`)는 keybindings.json에서 자연스럽게 보입니다. 그 외 문자(공백, `/`, `:`, 한글 등)는 UTF-8 바이트별로 `%HH`로 인코딩되므로 distinct ID가 distinct 커맨드 ID로 매핑되어 collision이 구조적으로 발생하지 않습니다.
+ID가 있는 액션은 `taskhub.runAction.<encoded-id>` 커맨드로 동적 등록됩니다. 액션 우클릭 → **Assign Shortcut**을 선택하면 VS Code Keyboard Shortcuts가 해당 커맨드로 필터링됩니다. 액션 변경 시 등록도 동기화되며, 폴더와 구분선은 등록하지 않습니다.
 
 ### Quick Action Palette (`TaskHub: Run Any Action…`)
 
-액션마다 단축키를 등록하지 않고도 **단일 커맨드 + 두세 글자**로 어떤 액션이든 실행할 수 있습니다. Command Palette(`Cmd/Ctrl+Shift+P`)에서 `TaskHub: Run Any Action…`을 호출하거나, `taskhub.runAnyAction` 한 명령에만 키바인딩을 걸어 두면 됩니다.
+Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색합니다. 폴더 breadcrumb도 검색 대상이며, 최근 실행 항목은 History에서 유도합니다.
 
-- **모든 runnable 액션이 한 리스트로 평면화**: 폴더·구분선은 노출되지 않습니다. 검색 시 `matchOnDescription`으로 폴더 breadcrumb(예: `Firmware`)도 매칭 면에 포함되어, `fw build` 처럼 부모 폴더 + 액션명 조합으로도 좁혀집니다.
-- **최근 실행 액션이 위 섹션 (`Recently used`) 에 표시**: 목록은 **[§14 히스토리](#14-액션-실행-히스토리)에서 유도**됩니다 (0.6.12부터). 팔레트로 고른 실행뿐 아니라 왼쪽 트리 클릭, 키바인딩(`taskhub.runAction.<id>`), History 재실행이 모두 같은 순서에 반영되며, 같은 액션의 반복 실행은 가장 최근 기록 하나로 접힙니다. 히스토리는 워크스페이스 단위로 저장되므로 다른 프로젝트의 액션 ID가 섞이지 않습니다. 표시 개수는 `taskhub.runAnyAction.recentLimit` 설정으로 제어 (기본 5, 범위 0–20, `0`이면 섹션 비활성). 자세한 옵션은 §21 참조.
-    - 히스토리 보관량(`taskhub.history.maxItems`, 기본 10)이 상한으로 작용합니다 — 그보다 큰 `recentLimit`을 지정하면 보관된 기록만큼만 표시됩니다.
-    - 최근 행에는 **마지막 실행 정보**가 둘째 줄로 붙습니다: `14:30 · 1.2s`, 실패였다면 `실패 · 14:30 · 1.2s`, 아직 실행 중이면 `실행 중`. 폴더 breadcrumb은 검색 대상(`matchOnDescription`)으로 남겨 두기 위해 첫째 줄에 그대로 유지됩니다.
-    - Memory Map / Hex / JSON Editor 열람 기록은 실행 가능한 액션이 아니므로 최근 섹션에 섞이지 않습니다.
-- **stale 항목은 표시 시점에 필터링**: 액션이 삭제되었거나 폴더 ID 가 우연히 기록에 들어 있어도, 매번 팔레트가 열릴 때 현재 액션 트리에 존재하는 runnable ID 만 추려서 노출합니다 — "더 이상 존재하지 않는 항목을 선택하는 경로" 자체를 차단합니다.
-- 키 한 방으로 액션 하나를 직접 실행하고 싶다면 위 "액션에 단축키 할당" 절의 `taskhub.runAction.<id>` 동적 커맨드를 사용하세요. 두 경로는 같은 실행 인프라를 공유합니다.
+- 최근 항목 수는 `taskhub.runAnyAction.recentLimit`, 보관 가능한 상한은 `taskhub.history.maxItems`가 결정합니다.
+- 삭제된 액션과 도구 열람 기록은 목록에서 제외합니다.
+- 최근 항목에는 마지막 실행 시각·소요 시간·실패/취소 상태가 표시됩니다.
 
 ### 기본 구조
 
-`actions.json` 파일은 최상위에 객체 배열을 가집니다. 각 객체는 다음 중 하나일 수 있습니다.
--   **액션 (`ActionItem`)**: UI에 버튼으로 표시되는 실행 가능한 항목입니다.
--   **폴더 (`Folder`)**: 다른 액션들을 그룹화하는 폴더입니다. (`type: "folder"`)
--   **구분선 (`Separator`)**: 시각적 구분선입니다. (`type: "separator"`)
+`actions.json`의 최상위 값은 배열이며 액션, 폴더, 구분선을 담습니다.
 
-**예시:**
 ```json
 [
   {
-    "id": "action.simple.echo",
-    "title": "Echo Message",
-    "action": { ... }
+    "id": "firmware.build",
+    "title": "Build",
+    "action": {
+      "description": "Build firmware",
+      "tasks": [
+        { "id": "build", "type": "command", "command": "npm run build" }
+      ]
+    }
   },
   {
-    "type": "separator",
-    "title": "----------"
-  },
-  {
-    "id": "folder.build",
+    "id": "tools",
+    "title": "Tools",
     "type": "folder",
-    "title": "Build Tasks",
-    "children": [ ... ]
-  }
+    "children": []
+  },
+  { "id": "separator.tools", "title": "Tools", "type": "separator" }
 ]
 ```
 
+소스 병합 우선순위와 번들 예제 노출은 [§3 액션 소스와 병합](#액션-소스와-병합-우선순위)을 참조하세요.
+
 ### 액션과 태스크 (`action` and `tasks`)
 
-모든 실행 가능한 액션은 `action` 객체를 가지며, 그 안에는 한 개 이상의 `tasks` 배열이 포함됩니다.
--   `tasks` 배열에 태스크가 하나만 있으면: 간단한 단일 액션입니다.
--   `tasks` 배열에 태스크가 여러 개 있으면: 태스크가 순서대로 실행되는 **파이프라인**입니다.
-
-```json
-"action": {
-  "description": "Explain what this pipeline does in the TaskHub panel.",
-  "successMessage": "Pipeline finished successfully!",
-  "failMessage": "Pipeline failed.",
-  "tasks": [
-    { ... task 1 ... },
-    { ... task 2 ... }
-  ]
-}
-```
-
-- `description` (string, **필수**): Actions 패널에서 액션을 마우스오버 할 때 표시되는 간단한 설명입니다.
-- `successMessage` (string, *선택*): 모든 태스크가 성공적으로 완료되었을 때 표시되는 팝업 알림 메시지입니다.
-- `failMessage` (string, *선택*): 태스크 실행 중 오류가 발생했을 때 표시되는 팝업 알림 메시지입니다.
+실행 가능한 항목은 `action.description`과 하나 이상의 `action.tasks`를 가집니다. `successMessage`와 `failMessage`는 선택 사항이며 `taskhub.showTaskStatus`가 꺼져 있으면 알림을 표시하지 않습니다.
 
 ### 태스크 객체 (`Task`)
 
-태스크는 실행의 가장 작은 단위이며, 다음과 같은 주요 속성을 가집니다.
+모든 태스크에는 액션 안에서 고유한 `id`와 다음 중 하나의 `type`이 필요합니다.
 
--   `id` (string, **필수**): 태스크의 고유 ID입니다. 파이프라인 내에서 다른 태스크가 이 태스크의 결과를 참조할 때 사용됩니다.
--   `type` (string, **필수**): 태스크의 종류입니다. (예: `shell`, `fileDialog`, `unzip`, `zip`, `stringManipulation`)
+| 분류 | 타입 |
+| --- | --- |
+| 명령 실행 | `shell`, `command` |
+| 사용자 입력 | `fileDialog`, `folderDialog`, `inputBox`, `quickPick`, `envPick`, `confirm` |
+| 파일·아카이브 | `writeFile`, `appendFile`, `zip`, `unzip` |
+| 값 변환 | `stringManipulation` |
+
+공통 실행 옵션은 `timeoutSeconds`, `continueOnError`, `when`, `dependsOn`, `parallel`입니다. 병렬 실행은 [§24](#24-병렬-실행--task-dag)를 참조하세요.
 
 ### `shell` / `command` 태스크의 핵심 옵션
 
-가장 일반적으로 사용되는 `shell` 또는 `command` 태스크는 다음과 같은 중요한 옵션을 가집니다.
+| 필드 | 설명 |
+| --- | --- |
+| `command` | 실행할 문자열 또는 `windows`·`macos`·`linux`별 문자열 객체 |
+| `args` | 별도 argv 항목. 동적 값과 다중 선택 경로는 여기에 두는 것을 권장 |
+| `cwd` | 실행 디렉터리. 생략 시 액션의 워크스페이스 |
+| `env` | 자식 프로세스에 추가할 환경변수 |
+| `revealTerminal` | 스트림 모드 터미널 노출 정책: `always`·`silent`·`never` |
+| `passTheResultToNextTask` | `false`면 터미널 스트림, `true`면 stdout/stderr 캡처 |
+| `isOneShot` | 스트림 모드에서 프로세스 시작 직후 성공으로 처리 |
+| `output` | 캡처 결과 표시·파일 저장·파생 변수·Problems 진단 |
 
--   **`command`** (`string` | `object`, **필수**): 실행할 명령어입니다.
-    -   단순 문자열: `"command": "echo Hello"`
-    -   OS별 객체:
-        ```json
-        "command": {
-          "windows": "dir",
-          "linux": "ls -la",
-          "macos": "ls -la"
-        }
-        ```
-    -   객체 형태를 사용할 때는 현재 실행 중인 OS에 해당하는 키를 반드시 포함해야 합니다. `default`, `command`와 같은 보조 키는 지원하지 않습니다.
-
--   **`passTheResultToNextTask`** (`boolean`, *선택*, 기본값: `false`): 태스크의 실행 방식을 결정하는 가장 중요한 옵션입니다.
-    -   **`false` (또는 생략 시) - 스트림 모드 (Stream Mode):**
-        -   명령어의 출력이 VS Code의 내장 터미널에 **실시간으로 스트리밍**됩니다.
-        -   하나의 액션에 포함된 여러 스트림 모드 태스크들은 **하나의 공유된 터미널**에 순차적으로 실행되어, 전체 작업 흐름을 한눈에 파악하기 용이합니다.
-        -   작업이 완료된 후 터미널은 바로 닫히지 않고, "계속하려면 아무 키나 누르십시오..." 메시지와 함께 사용자의 입력을 기다립니다.
-        -   Windows 환경에서 `PATH`상에 `.exe`/`.com`로 존재하는 실제 실행 파일(`node`, `git`, `cmd`, `powershell` 등)은 셸 없이 직접 실행하여 인자(특히 `"` 가 포함된 인자)가 그대로 전달되도록 합니다. `echo`·`dir` 같은 셸 빌트인, `.cmd`/`.bat`/`.ps1`/`.js` 스크립트, `npm`/`npx`/`pnpm`/`yarn` 같은 `.cmd` shim은 `PowerShell`을 거쳐 실행됩니다(유니코드 출력 보존 포함). 캡처 모드(`passTheResultToNextTask: true`)에서는 직접 실행이 실패하면 한 번 더 PowerShell 경로로 재시도하는 안전망이 있습니다.
-        -   이 모드에서는 출력을 캡처하지 않으므로, **다음 태스크에서 이 태스크의 결과를 변수로 사용할 수 없습니다.**
-    -   **`true` - 캡처 모드 (Capture Mode):**
-        -   명령어의 출력이 터미널에 표시되지 않고, 내부적으로 **캡처**됩니다.
-        -   캡처된 결과는 파이프라인의 다음 태스크에서 `${task_id.output}` 형태로 사용할 수 있습니다.
-        -   캡처된 결과는 `output` 블록을 통해 파일이나 에디터로 보내는 등 추가적인 처리가 가능합니다.
-        -   **메모리 보호를 위한 캡처 한도**: 캡처 모드에서 누적되는 stdout/stderr의 총 크기가 `taskhub.pipeline.outputCaptureLimitMb` (기본값 10MB, 범위 1~1024MB)를 초과하면 프로세스를 종료하고 명확한 에러(`Captured output exceeded the N MB limit ...`)를 반환합니다. 의도적으로 큰 로그를 생성하는 파이프라인이라면 설정을 높이거나, 캡처가 필요 없다면 `passTheResultToNextTask`를 꺼서 터미널로 흘려보내세요. `command` 타입에서는 **커맨드에 `> file`을 붙이는 방식이 동작하지 않습니다** — 문자열이 셸 연산자가 아니라 인자로 토큰화되므로 `>`가 리터럴 인자가 됩니다. `shell` 타입에서는 동작합니다(아래 "`shell` 과 `command` 는 실행 방식이 다릅니다" 항목 참조).
-        -   **액션 전체 합계 한도 (0.6.43부터)**: 위 설정은 **태스크 하나**를 막습니다. 태스크 결과는 뒤 태스크가 `${앞태스크.stdout}` 을 참조할 수 있어야 하므로 액션이 끝날 때까지 메모리에 남는데, 그 **합계**에는 제한이 없었습니다 — 기본값(10MB)에서는 태스크가 수십 개여야 문제가 되지만, 로그가 잘려서 태스크 상한을 1024MB 로 올린 환경에서는 태스크 서넛만으로 GB 단위가 됩니다. `taskhub.pipeline.totalOutputLimitMb` (기본값 32MB, 범위 1~4096MB)가 합계를 막고, 초과하면 액션이 실패합니다.
-            -   **태스크 상한보다 작아지지 않습니다.** "이 태스크 출력 100MB 를 받겠다"고 설정해 놓고 총량이 32MB 라 곧바로 실패하면 두 설정이 서로를 부정하는 꼴이므로, 실효 총량은 둘 중 큰 값입니다.
-    -   참고: `revealTerminal` 속성은 스트림 모드(`passTheResultToNextTask: false`)에서만 적용됩니다. 캡처 모드에서는 터미널이 열리지 않습니다.
-
--   **`output`** (`object`, *선택*): 캡처된 결과를 어떻게 처리할지 정의합니다. `mode` 사용은 캡처 모드(`passTheResultToNextTask: true`)에서만 동작하지만, `capture` 규칙만 쓸 때는 `mode`를 생략할 수 있습니다.
-    -   `"mode": "editor"`: 새 에디터 탭에 결과를 표시합니다.
-    -   `"mode": "file"`: 지정된 파일에 결과를 저장합니다. (`filePath`, `overwrite` 속성 사용)
-        -   `overwrite` (boolean | string, *선택*, 기본값: `false`): `true`로 설정하면 기존 파일을 덮어씁니다. `false`이거나 생략하면 파일이 이미 존재할 때 실행이 실패합니다. 문자열로 지정하면 변수 치환(예: `"${someVar}"`)을 사용할 수 있으며, 치환된 값이 `"true"`(대소문자 무시)이면 덮어쓰기가 활성화됩니다.
-    -   `"mode": "terminal"`: 액션 ID별로 재사용되는 **읽기 전용 터미널**(`TaskHub: <액션 ID>`)에 결과를 표시합니다. 셸이 없는 출력 전용 터미널이므로 결과 본문이 명령으로 실행되지 않습니다.
-    -   `"capture"` (object | array, *선택*): 태스크 출력 문자열에서 **원하는 값만 뽑아 파생 변수**를 만듭니다. 자세한 내용은 아래 [Output Capture](#output-capture) 섹션 참고.
-    -   `"diagnostics"` (object | string | array, *선택*): 출력에서 컴파일러 에러·경고를 정규식으로 추출해 VS Code **Problems 패널에 진단**으로 표시. 자세한 내용은 아래 [Output Diagnostics](#output-diagnostics-problems-패널-통합) 섹션 참고.
-    -   **어떤 필드가 언제 살아 있는가**: `mode`·`language`·`content`·`filePath`·`overwrite` 는 캡처 모드(`passTheResultToNextTask: true`)에서만 쓰이고, 그중 `filePath`·`overwrite` 는 거기에 더해 `mode: "file"` 일 때만, `language` 는 `mode: "editor"` 일 때만 쓰입니다. `capture`·`diagnostics` 는 **이 조건 밖**이라 결과에 문자열 출력만 있으면 동작합니다 — `stringManipulation` 이 플래그 없이도 capture 를 쓰는 이유입니다. 보간되는 것은 `content`·`filePath`·`overwrite` 뿐이고, `language` 는 에디터 언어 id 라 **보간되지 않습니다**(`"${...}"` 를 넣어도 그대로 언어 id 로 쓰입니다). 의존성 자동 추론·Doctor·Preview Run 이 모두 같은 조건을 쓰므로, 쓰이지 않는 자리에 남은 참조는 순서를 바꾸지도 경고를 내지도 않습니다 — 대신 Doctor 의 `output.ignored` 와 Preview 가 **왜 안 쓰이는지**를 알려 줍니다.
+캡처 모드의 태스크별 기본 상한은 10MB, 액션 전체 결과 기본 상한은 32MB입니다. 정확한 범위와 설정은 [§21](#21-설정-레퍼런스)을 참조하세요.
 
 #### `shell` 과 `command` 는 실행 방식이 다릅니다
 
-0.6.47부터 두 타입이 갈립니다. 그전에는 이름만 다르고 동작이 같아서, "Shell Command" 라고 안내하면서 실제로는 argv 로 실행했습니다.
-
-| 타입 | 실행 방식 | 셸 연산자 (`&&` `\|` `>` `$VAR`) |
+| 타입 | 실행 방식 | 셸 연산자 |
 | --- | --- | --- |
-| **`shell`** | 명령 문자열을 **셸에 그대로** 넘깁니다 | **동작합니다** |
-| **`command`** | 공백으로 토큰화한 뒤 **각 토큰을 인용**해 argv 로 실행합니다 | 리터럴 인자가 됩니다 |
+| `shell` | 명령 문자열을 셸에 전달 | `&&`, `|`, `>`, 셸 변수 등이 동작 |
+| `command` | 명령과 인자를 argv로 실행 | 셸 연산자는 리터럴 인자 |
 
-`command` 타입에서는 **보간이 토큰화보다 나중에** 일어납니다 (0.6.50부터). 즉 `${...}` 로 들어온 값은 그 안에 공백이 있어도 **인자 하나로 남습니다** — `git tag ${input.value}` 에 `--delete main` 을 입력해도 `git tag` 에 인자 하나가 붙을 뿐 옵션이 되지 않고, 공백이 든 파일 경로도 쪼개지지 않습니다. `--env=${x}` 처럼 리터럴에 붙은 형태는 그대로 한 토큰으로 유지됩니다.
+동적 파일 경로나 사용자 입력은 `command`의 `args`에 두는 것이 안전한 기본값입니다. `shell` 문자열에 `${…}` 값을 직접 넣으면 값의 셸 문법이 다시 해석될 수 있습니다. 반대로 `command`라도 `sh -c`, `cmd /c`, `powershell -Command` 같은 중첩 인터프리터를 호출하면 스크립트 문자열이 다시 파싱됩니다. Doctor의 `shell.interpolated-command`와 `command.nested-interpreter`가 이 패턴을 경고합니다.
 
-> **이것이 막는 것과 막지 못하는 것**
->
-> - **막습니다**: 보간값 안의 공백이 인자를 쪼개는 것. 공백 든 경로가 온전히 전달됩니다.
-> - **막지 못합니다 — 옵션 주입.** 값이 인자 하나로 남더라도 그 값이 `-` 로 시작하면 실행되는 프로그램은 그것을 **옵션으로 읽습니다.** `git tag ${input.value} main` 에 `--delete` 를 입력하면 `git tag --delete main` 이 되어 기존 태그가 삭제됩니다. 값의 **첫 글자**를 막는 `validatePattern` 을 쓰거나(`^[A-Za-z0-9_][A-Za-z0-9_-]*$` — `^[A-Za-z0-9_-]+$` 는 선행 `-` 를 그대로 통과시킵니다), 명령이 지원한다면 위치 인자 앞에 `--` 를 두세요 (`git tag -- ${input.value}`).
-> - **막지 못합니다 — 중첩 인터프리터.** 명령 자체가 `cmd /c` · `sh -c` · `powershell -Command` 라면 그 인터프리터가 넘겨받은 줄을 **다시 파싱**하므로 argv 인용이 거기서 끝납니다. 값을 `args` 로 넘기거나, 아예 명령 문자열에 넣지 말고 `env` 로 전달하세요 — 번들 예제의 환경변수 액션이 그 형태입니다. Doctor 의 `command.nested-interpreter` 룰이 이 형태를 찾아 줍니다.
-
-`command` 타입에서는 셸 메타문자가 연산자가 아니라 **리터럴 인자**가 됩니다.
-
-| 작성한 것 | 실제로 실행되는 것 |
-| --- | --- |
-| `npm run build > out.txt` | `npm 'run' 'build' '>' 'out.txt'` |
-| `make && make flash` | `make '&&' 'make' 'flash'` |
-| `cat a \| grep b` | `cat 'a' '\|' 'grep' 'b'` |
-
-Windows 의 PowerShell 경로도 같습니다(`& 'npm' 'run' 'build' '>' 'out.txt'`). 이 규칙은 스트림 모드와 캡처 모드 **양쪽 모두**에 적용됩니다.
-
-> **`shell` 로 바꿀 때 주의**: 셸에 그대로 넘어가므로 보간된 값도 셸 문법으로 해석됩니다. `${selectFile.path}` 나 `${ask.value}` 처럼 **사용자 입력·파일 경로·명령 출력에서 온 값**을 문자열 안에 넣으면, 그 값에 `;` 나 `$(...)` 가 있을 때 의도하지 않은 명령이 실행될 수 있습니다. 그런 값은 `args` 배열로 넘기세요 — `args` 는 `shell` 타입에서도 **인용해서** 뒤에 붙으므로 안전합니다. 값을 다루기만 하면 되는 경우에는 `command` 타입이 더 안전한 기본값입니다. Doctor 의 `shell.interpolated-command` 룰이 이 형태를 찾아 줍니다 ([§23.2](#232-검사-항목)).
+옵션 주입도 별개로 주의합니다. 값이 `-`로 시작할 수 있다면 프로그램이 옵션으로 읽을 수 있으므로 입력 패턴을 제한하거나 프로그램이 지원하는 `--` 뒤에 위치 인자를 둡니다.
 
 #### `shell` 타입이 쓰는 인터프리터
 
-`shell` 이 "셸에 그대로 넘긴다" 고 할 때 그 셸이 무엇인지는 플랫폼마다 다릅니다.
-
-| 플랫폼 | 인터프리터 | 비고 |
-| --- | --- | --- |
-| macOS / Linux | 스트림 모드는 VS Code 의 기본 셸, 캡처 모드(`passTheResultToNextTask: true`)는 `/bin/sh` | `[[ ... ]]` 같은 bash/zsh 전용 문법은 캡처를 켜는 순간 실패할 수 있습니다 |
-| Windows | 기본은 `powershell.exe`(Windows PowerShell 5.1). 명령이 `&&` / `||` 를 쓸 때만 `pwsh.exe`(PowerShell 7) | 아래 참조 |
-
-**Windows PowerShell 5.1 에는 `&&` 와 `||` 가 없습니다** (PowerShell 7 부터 도입). 그래서 명령이 이 연산자를 쓸 때만 `pwsh.exe` 를 찾습니다 — PATH 와 기본 설치 경로(`%ProgramFiles%\PowerShell\7`) 양쪽을 봅니다. 찾지 못하면 실행 전에 그 사실을 설명하는 오류로 멈춥니다. 5.1 에 그대로 넘기면 *"The token '&&' is not a valid statement separator"* 라는, 사용자가 자기 명령의 문제로 읽게 되는 파스 오류만 남기 때문입니다.
-
-이 경우 PowerShell 7 을 설치하거나, **태스크를 둘로 나누세요.** 파이프라인은 앞 단계가 실패하면 뒤 단계를 실행하지 않으므로 `&&` 와 의미가 같고, 어느 단계에서 실패했는지도 드러납니다.
-
-**연산자를 쓰지 않는 명령은 PowerShell 7 이 설치돼 있어도 계속 5.1 에서 실행됩니다.** 두 버전은 완전히 같지 않아서(예: `curl`/`wget` 이 더 이상 `Invoke-WebRequest` 의 별칭이 아니고, `>` 의 기본 인코딩도 다릅니다) 무조건 바꾸면 이미 동작하던 액션의 의미가 조용히 달라지고, 같은 `actions.json` 이 기계마다 다르게 돌게 됩니다.
-
-`|`·`>`·`;` 는 5.1 에서도 동작하므로 막지 않습니다. **인용 안의 `&&` 도 막지 않습니다** — `cmd /c "build && test"` 는 5.1 에서 chain 을 쓰는 정석 우회법이고, 그 `&&` 는 문자열 리터럴 안이라 PowerShell 이 해석하지 않습니다. `args` 배열은 항상 인용되므로 그 안의 내용도 검사 대상이 아닙니다.
-
-같은 이유로 **셸 변수 확장도 일어나지 않습니다.** `echo $MY_VAR` 는 `echo '$MY_VAR'` 가 되어 값이 아니라 `$MY_VAR` 라는 글자를 출력합니다(Windows 의 `%MY_VAR%` 도 같습니다). `env` 로 넘긴 값은 자식 프로세스의 환경에는 **정상적으로 들어가므로**, 그 값을 읽는 것은 셸이 아니라 실행되는 프로그램의 몫입니다 — 예: `printenv MY_VAR`, `cmd /c echo %MY_VAR%`, `node -e "console.log(process.env.MY_VAR)"`. 반면 TaskHub 자신의 변수 치환(`${task_id.output}`, `${workspaceFolder}` 등)은 **토큰마다** 이루어지므로 그대로 동작하며, 치환된 값은 위에서 설명한 대로 인자 하나로 유지됩니다.
-
-대신 이렇게 쓰세요.
-
--   **리다이렉션 대신**: [`writeFile` / `appendFile` 태스크](#writefile--appendfile-태스크)로 결과를 파일에 씁니다. 명령의 출력을 파일로 보내려면 캡처 모드로 받아 `output.mode: "file"` 을 쓰거나, 캡처가 필요 없다면 스트림 모드로 두세요.
--   **`&&` 로 이어 붙이는 대신**: 태스크를 **두 개**로 나눕니다. 파이프라인의 기본 동작이 "앞 단계가 실패하면 뒤 단계는 실행하지 않음" 이라 `&&` 와 의미가 같고, 실패한 단계가 어느 것인지도 드러납니다. 마법사의 *다단계 파이프라인* 템플릿이 이 형태를 만들어 줍니다.
--   **공백이 있는 경로**: 토큰화는 따옴표를 존중하므로 `node "C:/My Build/fw.js"` 처럼 직접 인용하거나, 값이 변수에서 오는 경우(`${selectFile.path}` 등)에는 **`args` 배열**에 넣으세요. `args` 항목은 토큰화되지 않고 하나의 인자로 그대로 전달됩니다.
-
-    ```json
-    { "type": "shell", "command": "flash", "args": ["${selectFile.path}"] }
-    ```
-
-    반대로 `"command": "flash ${selectFile.path}"` 는 경로에 공백이 있으면 두 인자로 쪼개집니다.
+- macOS/Linux 캡처 모드는 `/bin/sh`를 사용합니다. 스트림 모드는 VS Code의 기본 셸을 따릅니다.
+- Windows는 기본적으로 Windows PowerShell 5.1을 사용하며, 인용 밖의 `&&`·`||`가 필요하면 PowerShell 7(`pwsh`)을 찾습니다.
+- 플랫폼별 셸 차이를 피하려면 연산자 체인을 여러 태스크로 나누고 값을 `args`나 `env`로 전달하세요.
 
 #### Output Capture
 
-`shell`/`command`/`stringManipulation` 태스크의 출력 문자열에서 정규식·라인 인덱스로 값을 뽑아 `${task_id.<name>}` 형태의 파생 변수로 파이프라인 다음 태스크에 전달합니다. 기존 `${task_id.output}`은 그대로 유지되며(원본 보존), 캡처는 순수하게 **추가**입니다.
-
-**동작 조건**
-- `shell`/`command`: `passTheResultToNextTask: true` 필요 (스트림 모드에서는 stdout이 캡처되지 않으므로 capture는 무시되고 verbose 로그에 경고가 남음).
-- `stringManipulation`: 항상 문자열을 반환하므로 capture 가능.
-
-**단일 규칙 예시**
+문자열 출력에서 값을 추출해 `${taskId.<name>}` 파생 변수로 만듭니다. `shell`·`command`는 캡처 모드가 필요하고, `stringManipulation`은 항상 문자열 결과를 제공합니다.
 
 ```json
 {
-  "id": "git-sha",
-  "type": "shell",
+  "id": "git",
+  "type": "command",
   "command": "git rev-parse HEAD",
   "passTheResultToNextTask": true,
   "output": {
-    "capture": { "name": "shortSha", "regex": "^([a-f0-9]{7})" }
+    "capture": { "name": "shortSha", "regex": "^([a-f0-9]{7})", "group": 1 }
   }
 }
 ```
 
-다음 태스크에서 `${git-sha.shortSha}` 형태로 사용.
+규칙은 하나 또는 배열로 지정합니다.
 
-**여러 규칙 예시**
+| 필드 | 설명 |
+| --- | --- |
+| `name` | 파생 변수 이름 |
+| `regex`, `group`, `flags` | 정규식 매치와 캡처 그룹 선택. `group` 기본값은 1 |
+| `line` | 0-based 줄 선택. `-1`은 마지막 줄 |
+| `trim` | 선택 결과의 앞뒤 공백 제거 |
 
-```json
-{
-  "output": {
-    "capture": [
-      { "name": "sha",    "regex": "commit ([a-f0-9]+)" },
-      { "name": "author", "regex": "Author: (.+)", "trim": true },
-      { "name": "last",   "line": -1 }
-    ]
-  }
-}
-```
-
-**필드**
-
-| 필드 | 타입 | 설명 |
-| --- | --- | --- |
-| `name` | `string` (**필수**) | 파생 변수 이름. `${task_id.<name>}`로 참조. `/^[A-Za-z_][A-Za-z0-9_]*$/`만 허용. `output`, `stderr`, `path`, `value` 등 내장 키는 예약어로 차단 — 캡처 결과는 태스크 결과에 병합되므로 허용하면 실제 결과 키를 덮어씁니다. |
-| `regex` | `string` | 출력 전체에 매칭할 정규식. 매칭 시 `group`에 지정한 그룹 값을 사용. |
-| `group` | `integer` | 캡처 그룹 인덱스. 기본값: 캡처 그룹이 있으면 `1`, 없으면 `0`(전체 매칭). `0`을 명시하면 항상 전체 매칭. |
-| `flags` | `string` | 정규식 플래그 (예: `"i"`, `"m"`, `"is"`). |
-| `line` | `integer` | 0부터 시작하는 라인 인덱스. 음수는 끝에서부터 (`-1` = 마지막 라인). `regex`와 함께 지정하면 `regex`가 우선. |
-| `trim` | `boolean` | 선택된 값에 `.trim()` 적용. 기본값 `false`. |
-
-**실패 정책**
-- 규칙이 매칭되지 않으면 **조용히 건너뜀** — 파생 변수가 생성되지 않고 이후 `${id.<name>}`는 미해결 placeholder로 남습니다. Preview Run과 Doctor는 **정규식을 실행하지 않으므로 매칭 실패 자체는 예측하지 못합니다** — 선언하지 않은 이름(`${id.오타}`)만 미해결로 보고합니다. 실제 매칭 여부는 실행해 봐야 알 수 있습니다.
-- 설정 오류(이름 누락, 예약어, 잘못된 정규식, 중복 이름)는 **즉시 에러**로 실행 중단.
+`regex`가 우선하고 그다음 `line`, 둘 다 없으면 전체 출력을 사용합니다. 매치하지 않으면 해당 파생 변수만 만들지 않고 태스크는 계속됩니다.
 
 #### Output Diagnostics (Problems 패널 통합)
 
-`shell`/`command`/`stringManipulation` 태스크의 출력 문자열에서 컴파일러 에러·경고를 정규식으로 추출해 **VS Code Problems 패널**에 진단(Diagnostic)으로 표시합니다. 사용자는 Problems 항목을 클릭해 해당 파일·라인·칼럼으로 즉시 점프할 수 있고, 에디터에 빨간 squiggly가 자동으로 그려지며, F8 키로 다음 에러로 순환 가능합니다.
-
-**동작 조건** (capture와 동일)
-- `shell`/`command`: `passTheResultToNextTask: true` 필요. 스트림 모드(`false`)에서는 silent skip (verbose 로그에 경고).
-- `stringManipulation`: 항상 문자열 반환이므로 가능.
-
-**라이프사이클**
-- 진단은 액션별로 별도 `DiagnosticCollection`(`taskhub:<actionId>`)으로 관리되어, 같은 액션을 재실행하면 **이전 진단이 자동으로 clear**된 뒤 새 진단으로 교체됩니다 (다른 액션 진단은 영향 없음).
-- 매처가 매칭하지 못한 라인은 무시. 액션 종료 후에도 진단은 그대로 남아 사용자가 해결할 때까지 보입니다.
-- 상대 경로(`src/main.c`)는 task의 `cwd` 기준으로 해석.
-
-**프리셋 사용 예시 (`$gcc`)**
-
-```json
-{
-  "id": "build",
-  "type": "shell",
-  "command": "make all",
-  "passTheResultToNextTask": true,
-  "output": { "diagnostics": "$gcc" }
-}
-```
-
-`$gcc`는 `path:line:col: severity: message` 형태의 gcc / clang / arm-none-eabi-gcc 출력을 매칭. `severity`는 `error`/`warning`/`note`/`fatal error`를 자동 normalize.
-
-**커스텀 패턴 예시 (특수 toolchain)**
+`output.diagnostics`는 `"$gcc"`, `"$tsc"` 프리셋이나 사용자 패턴을 사용해 문자열 출력을 VS Code Problems로 변환합니다. 하나 또는 배열로 지정할 수 있습니다.
 
 ```json
 {
   "output": {
     "diagnostics": {
-      "pattern": "^(.+?)\\((\\d+)\\):\\s*(error|warning):\\s*(.+)$",
+      "pattern": "^(.+):(\\d+):(\\d+): (warning|error): (.+)$",
       "file": 1,
       "line": 2,
-      "severity": 3,
-      "message": 4,
-      "defaultSeverity": "error",
-      "source": "keil"
+      "column": 3,
+      "severity": 4,
+      "message": 5,
+      "source": "compiler"
     }
   }
 }
 ```
 
-여러 매처를 한 task에 결합 (예: 빌드 출력과 lint 출력이 섞인 경우):
+그룹 번호는 1-based입니다. 상대 파일 경로는 태스크의 해석된 `cwd` 기준이며, 진단은 액션별로 격리되어 같은 액션을 다시 실행할 때 이전 결과를 지웁니다. `shell`·`command`는 캡처 모드가 필요하고 성공 stdout/stderr와 실패 시 보존된 출력 모두를 검사합니다.
 
-```json
-{
-  "output": {
-    "diagnostics": [
-      "$gcc",
-      { "pattern": "^lint: (.+?):(\\d+): (.+)$", "file": 1, "line": 2, "message": 3, "defaultSeverity": "warning", "source": "lint" }
-    ]
-  }
-}
-```
+#### Output 표시·저장 조건
 
-**필드**
+| 필드 | 사용 조건 |
+| --- | --- |
+| `mode`, `content` | `passTheResultToNextTask: true` |
+| `language` | 위 조건 + `mode: "editor"` |
+| `filePath`, `overwrite` | 위 조건 + `mode: "file"` |
+| `capture`, `diagnostics` | 태스크 결과에 문자열 `output`이 있음 |
 
-| 필드 | 타입 | 설명 |
-| --- | --- | --- |
-| `pattern` | `string` (**필수**) | 출력의 각 라인에 매칭할 정규식. `g` 플래그는 자동 제거되므로 사용 불필요. |
-| `flags` | `string` | 정규식 플래그 (예: `"i"`). |
-| `file` | `integer` (**필수**) | 파일 경로의 1-based 캡처 그룹 인덱스. |
-| `line` | `integer` (**필수**) | 라인 번호의 1-based 캡처 그룹 인덱스 (라인 번호 자체는 1-based로 해석). |
-| `column` | `integer` | 칼럼 번호의 캡처 그룹. 선택. |
-| `endLine` / `endColumn` | `integer` | 다중 캐릭터 범위의 끝 위치. 선택. |
-| `severity` | `integer` | 심각도 텍스트(`error`/`warning`/`note`/...)의 캡처 그룹. 선택. |
-| `message` | `integer` (**필수**) | 메시지 텍스트의 캡처 그룹. |
-| `defaultSeverity` | `"error"`/`"warning"`/`"info"`/`"hint"` | severity 그룹이 누락되거나 인식 안 될 때 사용. 기본값 `"error"`. |
-| `source` | `string` | Problems 패널에 표시될 출처 라벨. 기본값 `"taskhub:<task_id>"`. |
-
-**내장 프리셋**
-
-| 프리셋 | 매칭 형식 | 대표 도구 |
-| --- | --- | --- |
-| `$gcc` | `path:line:col: severity: message` | gcc, clang, arm-none-eabi-gcc, 기타 GNU 호환 |
-| `$tsc` | `path(line,col): severity TS####: message` | TypeScript Compiler |
-
-**실패 정책**
-- 매칭되지 않으면 조용히 skip — task의 다른 출력 라인은 정상 진행.
-- 설정 오류(잘못된 정규식, 알 수 없는 프리셋 `$foo`, 누락된 `file`/`line`/`message` 필드)는 **즉시 에러**로 실행 중단 — 사용자가 첫 실행에서 발견하도록.
+`mode`는 `editor`, 읽기 전용 `terminal`, `file`을 지원합니다. `content`, `filePath`, 문자열 `overwrite`는 보간되지만 `language`는 고정 VS Code language ID입니다. 죽은 필드는 Doctor와 Preview가 이유를 표시합니다.
 
 #### Preview Run (Dry-run)
 
-액션을 **실행하지 않고** 파이프라인이 어떻게 해석되는지 미리 보는 기능입니다. Actions 패널에서 해당 액션을 우클릭하고 **Preview Run (Dry-run)** 을 선택합니다. (컨텍스트 전용 명령이며 Command Palette에는 노출되지 않습니다.)
+액션 우클릭 → **Preview Run**은 실제 명령·파일 쓰기·대화상자 없이 선택된 액션을 시뮬레이션합니다.
 
-결과는 `TaskHub Preview` 출력 채널에 표시되며 다음을 포함합니다:
-
-- 각 태스크의 해석된 `command` / `args` / `cwd` / `env`
-- `parallel: true` 태스크 헤더의 `[parallel]` 마커
-- `output.filePath`의 해석값과 **워크스페이스 외부 쓰기 경고**
-- `zip` / `unzip`의 `archive` · `destination` · `source` · `tool` 해석값 (`source`는 0.6.63부터 — 그전에는 런타임이 보간하는데도 표시·검사에서 빠져 있었습니다)
-- 선언된 `capture` 규칙 목록 (downstream에서 참조되는 변수명 표시)
-- 상류 태스크 결과는 `<fileDialog:id:path>` 같은 placeholder로 시뮬레이션되어 변수 연결 확인 가능
-- 미해결 `${...}` 변수 요약 (오타·상류 태스크 누락 발견에 유용)
-
-실제 shell 실행, 파일 쓰기, 대화상자 표시는 일어나지 않습니다.
-
-**OS별 객체(`command` / `tool` / `itemsFromCommand`)는 지금 이 기계가 고를 branch 하나만** 표시·검사합니다 — 런타임의 선택 규칙과 같습니다. 그래서 다른 OS branch에만 있는 `${...}` 오타는 Preview에 나타나지 않고(여기서는 실행되지 않으므로), 반대로 **현재 플랫폼 branch가 아예 없으면** 실행이 실패할 것임을 경고합니다. 모든 OS branch를 한 번에 보려면 [TaskHub Doctor](#23-taskhub-doctor-action-lint)를 쓰세요 — 그쪽은 설정 파일 자체를 검사하므로 다른 OS 사용자에게만 문제가 되는 오류도 잡습니다.
-
-**요약은 두 종류의 실패를 따로 셉니다** (0.6.62부터). `${...}` 미해결과 별개로, 참조가 전부 해석돼도 실행이 불가능한 자리(현재 플랫폼의 `tool` 없음, 워크스페이스 밖 경로)는 `N task(s) would FAIL at runtime even though references resolve`로 나옵니다. 둘 다 있으면 둘 다 나옵니다. 0.6.61까지는 이 경고가 해당 태스크 줄에만 붙어, **요약만 읽으면** 실행하면 실패할 액션이 `all ${...} references resolve`로 보였습니다.
-
--   **`isOneShot`** (`boolean`, *선택*, 기본값: `false`): **스트림 모드에서만 의미가 있습니다.**
-    -   `true`로 설정하면, `notepad.exe` 같은 GUI 프로그램처럼 종료되지 않는 프로세스를 실행하고 즉시 '성공'으로 처리합니다.
+- 현재 플랫폼에서 선택될 명령·도구·작업 디렉터리와 출력 처리 방식을 표시합니다.
+- 상류 결과는 placeholder로 만들어 변수 연결, `??` 대안, 조건과 자동 의존성을 검사합니다.
+- 미해결 참조, 무시되는 필드, 워크스페이스 밖 쓰기와 실행 불가능한 플랫폼 분기를 요약합니다.
+- 현재 플랫폼만 보므로 모든 OS 분기는 [TaskHub Doctor](#23-taskhub-doctor-action-lint)로 검사합니다.
 
 ### `unzip` 태스크
 
-이 태스크는 지정된 아카이브 파일의 압축을 해제합니다. `tool`을 생략하면 **내장 zip 엔진**(번들 포함)을 사용하고, `tool`을 지정하면 외부 CLI(예: 7z)를 호출합니다.
+`tool`을 생략하면 내장 엔진으로 `.zip`을 해제하고, 지정하면 7z 호환 `x <archive> -o<destination> -aoa` 형식으로 외부 도구를 호출합니다.
 
--   `type` (string, **필수**): `unzip`으로 설정해야 합니다.
--   `tool` (string | object, *선택*): 압축 해제에 사용할 외부 도구의 경로입니다.
-    -   **생략 시**: 내장 엔진으로 `.zip` 아카이브를 해제합니다. 별도 설치가 필요 없습니다.
-    -   **지정 시**: 해당 CLI를 `x <archive> -o<destDir> -aoa` 인자로 호출합니다 (7z 호환 셰이프). `.7z`, `.rar` 등 내장 엔진이 처리할 수 없는 포맷에 사용하세요.
--   `inputs.archive` (string, *선택*): 이전 태스크 ID를 지정하여 아카이브 경로를 전달합니다. (예: `{"archive": "select_zip_file"}`)
--   `inputs.file` (string, *선택*): `inputs.archive`의 레거시 별칭입니다.
--   `inputs.destination` (string, *선택*): 이전 태스크 ID를 지정하여 압축 해제 대상 폴더를 전달합니다. (예: `{"destination": "select_destination_folder"}`)
--   `archive` (string, *선택*): 직접 경로를 지정합니다. `${...}` 치환을 활용할 수 있습니다.
--   `destination` (string, *선택*): 직접 대상 폴더 경로를 지정합니다. `${...}` 치환을 활용할 수 있습니다.
--   **실행 결과**: 다음 태스크에서 `${unzip_task.outputDir}`을 사용해 해제된 폴더 경로를 참조할 수 있습니다.
+| 필드 | 설명 |
+| --- | --- |
+| `archive`, `destination` | 직접 경로. 변수 치환 지원 |
+| `inputs.archive` / `inputs.file` | 앞 태스크가 고른 아카이브 경로 |
+| `inputs.destination` | 앞 태스크가 고른 대상 폴더 |
+| `tool` | 문자열 또는 OS별 외부 도구 경로 |
 
-아카이브 경로는 `inputs.archive` → `inputs.file` → `archive` 순으로 해석됩니다. 대상 폴더는 `destination` → `inputs.destination` → (지정된 아카이브의 상위 폴더) 순으로 결정됩니다.
-
-내장 엔진은 아카이브 엔트리 이름을 검증하여 대상 디렉터리를 벗어나는 경로(zip-slip)를 거부합니다.
-
-**경로 해석 규칙** (`zip`/`unzip` 공통): 상대 경로는 `cwd`(기본값: 액션의 워크스페이스 폴더) 기준으로 해석됩니다. `writeFile`/`appendFile` 과 달리 **워크스페이스 밖 경로도 허용합니다** — 이 두 태스크는 `fileDialog`/`folderDialog` 로 사용자가 런타임에 고른 위치를 다루는 것이 목적이라 격리하면 그 흐름이 성립하지 않기 때문입니다. `${unzip_task.outputDir}` / `${zip_task.archivePath}` 로 넘어가는 값은 해석이 끝난 절대 경로입니다.
+결과 키는 `outputDir`입니다. 상대 경로는 `cwd`, 없으면 액션 워크스페이스 기준으로 해석됩니다. 내장 해제는 zip-slip, 링크, 엔트리 수와 압축 해제 크기를 제한합니다.
 
 ### `fileDialog` 태스크
 
-사용자에게 파일 선택 대화상자(`vscode.window.showOpenDialog`)를 표시하고 선택된 파일 경로의 구성 요소를 다음 태스크가 참조할 수 있는 키로 노출합니다. 사용자가 대화상자를 취소했을 때의 동작은 **태스크 수준과 액션 수준이 다릅니다** (0.6.52부터).
+파일 선택 다이얼로그를 엽니다. `options`에서 `title`, `openLabel`, `defaultUri`, `filters`, `canSelectMany`를 사용할 수 있습니다.
 
-| 수준 | 결과 |
+| 결과 키 | 값 |
 | --- | --- |
-| 태스크 | 실패로 처리되어 파이프라인이 거기서 멈춥니다. 취소해도 뒤를 계속하려면 task에 `continueOnError: true`를 둡니다. |
-| 액션 | 실패가 아니라 **취소**로 마감됩니다 — 오류 토스트가 뜨지 않고, 트리에 ✗ 가 붙지 않으며, History에 *취소됨 / Canceled* 로 남습니다 — Stop 버튼이 남기는 *중지됨 / Stopped* 와 구분되며, 두 결말은 History 항목의 툴팁과 Run Any Action 팔레트의 최근 실행 배지에서 단어로 확인할 수 있습니다(트리 아이콘은 둘 다 회색 `circle-slash` 로 같습니다). |
+| `path`, `name`, `dir`, `fileNameOnly`, `fileExt` | 첫 번째 선택 파일 정보 |
+| `paths`, `names`, `count` | 전체 선택 경로·파일명·개수 |
 
-**이미 실행된 태스크의 결과는 되돌리지 않습니다.** 생성된 파일이나 이미 돌아간 빌드는 그대로 남습니다. 그래서 **취소한 프롬프트 앞에서 실제로 실행을 마친 태스크가 하나라도 있으면**, 전체 몇 개 중 몇 개가 실행됐는지 알리는 안내가 한 번 뜹니다(`taskhub.showTaskStatus`를 끄면 뜨지 않습니다). 프롬프트가 첫 태스크였다면 실행된 것이 없으므로 조용히 끝납니다. 취소 사유는 그와 무관하게 TaskHub 출력 채널에 `[INFO]` 한 줄로 남습니다.
-
-아래 다른 대화형 태스크(`folderDialog`·`inputBox`·`quickPick`·`envPick`·`confirm`)도 모두 같습니다.
-
-- `type` (string, **필수**): `fileDialog`로 설정해야 합니다.
-- `options` (object, *선택*): VS Code의 [`OpenDialogOptions`](https://code.visualstudio.com/api/references/vscode-api#OpenDialogOptions)가 그대로 전달됩니다. 별도로 덮어쓰지 않으므로 사용자가 제공한 값이 기본 동작을 결정합니다. 자주 쓰는 키:
-    - `openLabel` (string): "Open" 버튼 라벨 (예: `"Select firmware ELF"`).
-    - `title` (string): 다이얼로그 제목.
-    - `defaultUri` (string, URI 형식): 다이얼로그가 처음 열릴 위치.
-    - `filters` (object): 확장자 필터 (예: `{ "Firmware": ["elf", "bin", "hex"] }`).
-    - `canSelectMany` (boolean, 기본 false): 다중 선택 허용. 고른 파일 **전부**가 `${task_id.paths}` 로 노출됩니다 (0.6.51부터 — 이전에는 첫 번째만 쓰고 나머지를 조용히 버렸습니다).
-    - `canSelectFiles` / `canSelectFolders` (boolean): 기본값(파일만 선택 가능) 그대로 두면 됩니다. 폴더 전용 다이얼로그가 필요하면 `fileDialog` 대신 `folderDialog`를 사용하세요.
-- **실행 결과**: 선택된 파일 경로를 분해해 다음 태스크가 참조할 수 있도록 합니다. 단일 필드는 다중 선택일 때 **첫 번째 파일**을 가리킵니다.
-    - `${task_id.path}` — 절대 경로 (예: `C:/proj/build/app.elf`)
-    - `${task_id.dir}` — 부모 디렉터리 (예: `C:/proj/build`)
-    - `${task_id.name}` — 파일명(확장자 포함, 예: `app.elf`)
-    - `${task_id.fileNameOnly}` — 확장자를 제외한 파일명 (예: `app`)
-    - `${task_id.fileExt}` — 확장자(앞의 `.` 제외, 예: `elf`)
-    - `${task_id.paths}` — **고른 파일 전체**의 절대 경로 (배열)
-    - `${task_id.names}` — 각 파일명(확장자 포함, 배열)
-    - `${task_id.count}` — 고른 파일 개수
-
-**고른 파일들이 있던 폴더는 `${task_id.dir}` 입니다.** OS 네이티브 파일 대화상자는 한 번에 한 폴더만 보여주므로 다중 선택은 **같은 폴더 안에서만** 이뤄집니다 — 그래서 파일을 몇 개 고르든 `dir` 은 그 폴더 하나를 가리킵니다. 폴더별 배열(`dirs`)을 따로 두지 않은 이유입니다. 반대로 폴더를 뺀 파일명만 필요하면 `${task_id.names}` 를 씁니다.
-
-**배열 참조를 문자열 안에 쓰면 공백으로 이어 붙습니다** (0.6.57부터). `"echo ${pick.paths}"`는 `echo /a/x.bin /a/y.bin`이 됩니다. 0.6.56까지는 이어 붙이지 않고 **`${pick.paths}`라는 글자를 그대로 남겨** 셸이나 파일 내용으로 흘려보냈는데, 그 값이 쓸모 있는 자리는 어디에도 없었습니다.
-
-> 다만 **경로에 공백이 있으면 셸이 그 안에서 다시 쪼갭니다.** 명령에 넘길 때는 아래 `args` 배열 확장을 쓰세요 — 항목마다 argv 한 칸이 되므로 셸이 개입하지 않습니다. TaskHub는 항목을 인용하지 않습니다: 단일 값(`${pick.path}`)을 그대로 넣는 것과 같은 규칙이고, 셸이 아닌 자리(`writeFile` 내용, 안내 문구)에 따옴표가 끼면 그쪽이 망가지기 때문입니다.
+취소하면 태스크는 실패합니다. `continueOnError`가 없으면 액션은 오류 토스트 없이 **취소됨**으로 끝나며, Stop으로 중지한 실행과 History에서 구분됩니다.
 
 #### 여러 파일을 명령 인자로 넘기기
 
-`args` 배열의 원소가 **정확히 배열 참조 하나**(`"${pick.paths}"` — 앞뒤에 다른 글자가 없음)이면, 그 자리가 **고른 파일 수만큼의 인자**로 펼쳐집니다. 개수가 정해지지 않은 위치 인자를 받는 스크립트에 그대로 맞출 수 있습니다.
+`args` 원소 전체가 배열 참조일 때 항목별 argv로 펼쳐집니다.
 
 ```json
 {
-  "tasks": [
-    {
-      "id": "pick",
-      "type": "fileDialog",
-      "options": {
-        "canSelectMany": true,
-        "openLabel": "Select bin files",
-        "filters": { "Binary": ["bin"] }
-      }
-    },
-    {
-      "id": "report",
-      "type": "command",
-      "command": "py",
-      "args": [
-        "-3", "make_report.py",
-        "${pick.paths}",
-        "--debug-dir", "c:\\test\\debug",
-        "--output", "result.html",
-        "--with-slow"
-      ]
-    }
-  ]
+  "id": "report",
+  "type": "command",
+  "command": "python",
+  "args": ["make_report.py", "${files.paths}", "--output", "report.html"]
 }
 ```
 
-파일 세 개를 고르면 실제 실행은 이렇게 됩니다.
-
-```
-py -3 make_report.py c:\test\test1.bin c:\test\test2.bin c:\test\test3.bin --debug-dir c:\test\debug --output result.html --with-slow
-```
-
-- **경로에 공백이 있어도 안전합니다.** 각 항목이 별도 argv 원소로 들어가므로 `c:\my docs\a.bin` 이 두 인자로 갈라지지 않습니다. 명령 문자열에 이어 붙이는 방식으로는 이것을 지킬 수 없습니다.
-- **하나만 골라도, 하나도 못 골라도 동작합니다.** 1개면 인자 1개, 0개면 그 자리가 사라집니다(빈 인자를 남기지 않습니다).
-- **`args` 원소 하나가 통째로 배열 참조일 때만** 펼쳐집니다. 앞뒤에 글자가 붙으면(`"--file=${pick.paths}"`) 각 항목에 접두사를 붙이라는 뜻인지 알 수 없으므로 펼치지 않고, 대신 **공백으로 이어 붙어 인자 한 칸**이 됩니다 — 실제로 실행되는 것: `py r.py "--file=a.bin b.bin c.bin"`. **경로 사이의 경계가 사라져** 스크립트는 값 하나만 받으므로 의도대로 동작할 리 없고(argv 는 그대로 전달되므로 셸이 다시 쪼개지도 않습니다 — 합쳐진 채로 도착합니다), Doctor 의 [`args.array-joined`](#doctor-진단-코드)가 이 자리를 짚어 줍니다. 항목마다 옵션을 붙여야 한다면 스크립트 쪽에서 위치 인자를 받도록 하는 편이 간단합니다.
-- 명령 **문자열**(`command`)에 넣은 배열 참조도 같은 규칙으로 공백 결합됩니다(0.6.57부터 — 그전에는 `${pick.paths}` 라는 글자가 그대로 자식 프로세스로 갔습니다). 경계가 필요하면 `args` 를 쓰세요.
+`"--file=${files.paths}"`처럼 다른 글자와 섞으면 공백으로 합쳐진 인자 하나가 됩니다. Doctor의 `args.array-joined`가 이 구성을 경고합니다.
 
 ### `folderDialog` 태스크
 
-사용자에게 폴더 선택 대화상자를 표시합니다. 내부적으로 `vscode.window.showOpenDialog`를 호출하면서 `canSelectFiles=false`, `canSelectFolders=true`를 강제로 적용하므로, `options`에 다른 값을 지정해도 폴더 선택 모드는 항상 유지됩니다. 사용자가 대화상자를 취소하면 태스크가 실패합니다(`continueOnError: true`로 무시 가능). 액션 수준의 마감은 [`fileDialog` 태스크](#filedialog-태스크)와 동일하게 *취소*입니다.
-
-- `type` (string, **필수**): `folderDialog`로 설정해야 합니다.
-- `options` (object, *선택*): `OpenDialogOptions`와 동일하지만 `canSelectFiles` / `canSelectFolders`는 위와 같이 강제됩니다. 그 외 `openLabel`, `title`, `defaultUri`, `canSelectMany`는 그대로 적용됩니다.
-    - `canSelectMany` (boolean, 기본 false): **폴더도 여러 개 고를 수 있습니다** (0.6.57부터). 대화상자에서 `Ctrl`/`Cmd`+클릭(연속 범위는 `Shift`+클릭)으로 폴더를 여러 개 집으면 됩니다. 고른 폴더 전부가 `${task_id.paths}` / `${task_id.names}` / `${task_id.count}`로 노출되며, `args` 배열 확장도 [`fileDialog`의 다중 선택](#여러-파일을-명령-인자로-넘기기)과 완전히 같습니다. 이전에는 이 옵션이 VS Code로 전달돼 다이얼로그에서 여러 개를 고를 수는 있었지만 **첫 폴더만 쓰고 나머지를 조용히 버렸습니다** — 0.6.51이 `fileDialog`에서 고친 것과 같은 결함이 폴더 쪽에만 남아 있었습니다.
-
-> **`paths` 와 `dir` 의 의미가 `fileDialog` 와 한 칸씩 다릅니다.** `folderDialog` 에서 `${task_id.paths}` 는 **고른 폴더들 자신**이고 `${task_id.names}` 는 그 폴더 이름들입니다. 반면 `${task_id.dir}` 은 첫 폴더의 **상위** 폴더입니다 — 고른 폴더 자신이 아닙니다. 고른 폴더 하나를 쓰려면 `${task_id.path}` 를 쓰세요.
-- **실행 결과**: `fileDialog`와 **동일한 키 셋**(`path` / `dir` / `name` / `fileNameOnly` / `fileExt` / `paths` / `names` / `count`)을 제공합니다. 단, 폴더에는 확장자가 없는 것이 일반적이므로 보통 `fileNameOnly === name`이고 `fileExt`는 빈 문자열입니다. `names`는 폴더 이름들입니다.
-    - 예: 사용자가 `C:/proj/build`를 선택한 경우 — `path=C:/proj/build`, `dir=C:/proj`, `name=build`, `fileNameOnly=build`, `fileExt=""` (빈 문자열).
-    - 폴더 이름에 `.`이 포함된 경우(예: `release.v1`)는 `node:path`의 `extname` 규칙을 그대로 따라 `fileNameOnly=release`, `fileExt=v1`이 됩니다 — 보통 의도하지 않은 결과이므로 폴더에서는 `${task_id.path}` 또는 `${task_id.name}`을 사용하는 것이 안전합니다.
+폴더 선택 다이얼로그를 열며 `options.canSelectMany`를 지원합니다. 결과 키는 `fileDialog`와 같지만 `path`·`paths`는 선택한 폴더 자체, `dir`은 첫 폴더의 부모입니다. 취소와 다중 선택 argv 규칙도 동일합니다.
 
 ### `zip` 태스크
 
-이 태스크는 지정된 파일이나 폴더를 압축하여 하나의 아카이브 파일을 생성합니다. `unzip`과 마찬가지로 `tool`을 생략하면 내장 zip 엔진을 사용합니다.
-
--   `type` (string, **필수**): `zip`으로 설정해야 합니다.
--   `tool` (string | object, *선택*): 압축에 사용할 외부 도구의 경로입니다.
-    -   **생략 시**: 내장 엔진이 `.zip` 아카이브를 만듭니다. 디렉터리 source는 그 이름이 아카이브 최상위 폴더로 보존됩니다.
-    -   **지정 시**: 해당 CLI를 `a <archive> <source...>` 인자로 호출합니다.
--   `source` (string | string[], **필수**): 압축할 파일 또는 폴더의 경로입니다. 단일 경로는 문자열로, 여러 경로는 배열로 지정할 수 있습니다.
--   `archive` (string, **필수**): 생성될 압축 파일의 경로와 이름입니다.
--   **실행 결과**: 생성된 압축 파일 경로는 `${zip_task.archivePath}`로 다음 태스크에서 참조할 수 있습니다.
-
-**예시 — 내장 엔진 (tool 생략):**
-```json
-{
-  "id": "action.zip.builtin",
-  "title": "Zip (built-in)",
-  "action": {
-    "tasks": [
-      {
-        "id": "zip_task",
-        "type": "zip",
-        "source": [
-          "${workspaceFolder}/src",
-          "${workspaceFolder}/README.md"
-        ],
-        "archive": "${workspaceFolder}/project-archive.zip"
-      }
-    ]
-  }
-}
-```
-
-**예시 — 외부 7z:**
-```json
-{
-  "id": "action.zip.external",
-  "title": "Zip Project Files",
-  "action": {
-    "tasks": [
-      {
-        "id": "zip_task",
-        "type": "zip",
-        "tool": {
-          "windows": "C:\\Program Files\\7-Zip\\7z.exe",
-          "macos": "/usr/local/bin/7z"
-        },
-        "source": [
-          "${workspaceFolder}/src",
-          "${workspaceFolder}/README.md"
-        ],
-        "archive": "${workspaceFolder}/project-archive.7z"
-      }
-    ]
-  }
-}
-```
+`source`의 파일·폴더를 `archive`로 압축합니다. 둘 다 변수 치환을 지원하고 `source`는 문자열 또는 배열입니다. `tool`을 생략하면 내장 `.zip` 엔진, 지정하면 7z 호환 `a <archive> <source...>` 호출을 사용합니다. 결과 키는 절대 경로 `archivePath`입니다.
 
 ### `stringManipulation` 태스크
 
-간단한 문자열 후처리를 수행하여 다음 태스크에서 사용할 값을 만들 때 활용합니다.
+`input` 문자열을 변환해 `output`으로 반환합니다.
 
--   `type` (string, **필수**): `stringManipulation`으로 설정해야 합니다.
--   `function` (string, **필수**): 수행할 내장 함수 이름입니다.
--   `input` (string, **필수**): 변환 대상 문자열입니다. 이전 태스크 결과를 `${...}` 형태로 참조할 수 있습니다.
--   **실행 결과**: 변환된 문자열은 `${task_id.output}`으로 접근합니다.
-
-지원되는 함수 목록:
-
-| 함수 | 설명 |
+| `function` | 동작 |
 | --- | --- |
-| `stripExtension` | 마지막 확장자를 제거합니다. (`/path/to/file.zip` → `/path/to/file`) |
-| `basename` | 경로에서 파일 이름만 추출합니다. (`/path/to/file.zip` → `file.zip`) |
-| `basenameWithoutExtension` | 확장자를 제외한 파일 이름을 반환합니다. (`/path/to/file.zip` → `file`) |
-| `dirname` | 상위 디렉터리 경로를 반환합니다. (`/path/to/file.zip` → `/path/to`) |
-| `extension` | 확장자에서 점을 제외한 문자열을 반환합니다. (`/path/to/file.zip` → `zip`) |
-| `toLowerCase` | 전체 문자열을 소문자로 변환합니다. |
-| `toUpperCase` | 전체 문자열을 대문자로 변환합니다. |
-| `trim` | 문자열 앞뒤의 공백을 제거합니다. |
-
-**예시:**
-```json
-{
-  "id": "string_task",
-  "type": "stringManipulation",
-  "function": "basenameWithoutExtension",
-  "input": "${select_file.path}"
-}
-```
+| `stripExtension` | 경로에서 마지막 확장자 제거 |
+| `basename` | 파일명만 반환 |
+| `basenameWithoutExtension` | 확장자 없는 파일명 |
+| `dirname` | 부모 경로 |
+| `extension` | 점 없는 확장자 |
+| `toLowerCase`, `toUpperCase`, `trim` | 대소문자·공백 변환 |
 
 ### `inputBox` 태스크
 
-사용자로부터 텍스트 입력을 받아 다음 태스크에서 사용할 수 있습니다. 명령어 실행 시 필요한 파라미터를 동적으로 입력받을 때 유용합니다.
+텍스트를 받아 `value`로 반환합니다.
 
-> **취소했을 때**: 태스크는 실패하고 파이프라인이 멈추지만, 액션은 *실패*가 아니라 *취소*로 마감됩니다 — 자세한 규칙은 [`fileDialog` 태스크](#filedialog-태스크)의 표를 보세요.
-
-
--   `type` (string, **필수**): `inputBox`로 설정해야 합니다.
--   `prompt` (string, *선택*): 입력 박스에 표시될 프롬프트 메시지입니다.
--   `value` (string, *선택*): 입력 박스의 기본값입니다.
--   `placeHolder` (string, *선택*): 입력 박스의 플레이스홀더 텍스트입니다.
--   `password` (boolean, *선택*, 기본값: `false`): `true`로 설정하면 입력값이 마스킹됩니다 (비밀번호 입력용). 마스킹은 입력 화면에서 끝나지 않고, 그 값과 **그 값에서 파생된 결과**가 표시·기록되는 모든 경계에 적용됩니다 — 아래 "password 값이 가려지는 범위" 참조.
--   `prefix` (string, *선택*): 사용자 입력 앞에 자동으로 추가될 텍스트입니다. 최종값은 `prefix + 사용자입력 + suffix`가 됩니다.
--   `suffix` (string, *선택*): 사용자 입력 뒤에 자동으로 추가될 텍스트입니다.
--   `validatePattern` (string, *선택*): 입력값이 만족해야 하는 정규식(RegExp source)입니다. 입력 도중 형식이 맞지 않으면 실시간으로 거부되고 `validateMessage`(없으면 기본 문구)가 표시됩니다. 잘못된 정규식은 무시됩니다(검증 미적용). 예: Jira 티켓 키 `^[A-Z][A-Z0-9]+-\\d+$`.
--   `validateMessage` (string, *선택*): `validatePattern` 검증 실패 시 표시할 메시지입니다. 생략 시 기본 문구를 사용합니다.
--   `extractPattern` (string, *선택*): 보간된 `value`에 적용해 기본값을 추출하는 정규식입니다. 캡처 그룹 1이 있으면 그 값을, 없으면 전체 매치를 사용합니다. 매치가 없으면 빈 값으로 두어 사용자가 새로 입력하게 합니다. `prefix`/`suffix`는 최종 입력값에 그대로 적용됩니다. 예: 브랜치 이름 `feature/ABCTEST-123-foo`에서 Jira 키 추출 `[A-Z][A-Z0-9]+-\\d+`.
--   **실행 결과**: 입력된 값(prefix/suffix 포함)은 `${task_id.value}`로 접근합니다.
-
-**예시 1: 간단한 입력**
-```json
-{
-  "id": "input_name",
-  "type": "inputBox",
-  "prompt": "Enter your name",
-  "placeHolder": "John Doe"
-}
-```
-
-**예시 2: prefix와 suffix 사용**
-```json
-{
-  "id": "input_args",
-  "type": "inputBox",
-  "prompt": "Enter arguments (prefix '-g' will be added automatically)",
-  "placeHolder": "Test 1234 123",
-  "prefix": "-g ",
-  "suffix": " --verbose"
-}
-```
-사용자가 "Test 1234 123"을 입력하면 `${input_args.value}` = "-g Test 1234 123 --verbose"
-
-**예시 3: 비밀번호 입력**
-```json
-{
-  "id": "input_password",
-  "type": "inputBox",
-  "prompt": "Enter API key",
-  "password": true
-}
-```
+| 필드 | 설명 |
+| --- | --- |
+| `prompt`, `placeHolder`, `value` | 안내와 초기값 |
+| `prefix`, `suffix` | 최종 값 앞뒤에 추가 |
+| `validatePattern`, `validateMessage` | 입력 정규식 검증과 오류 문구 |
+| `extractPattern` | 보간된 초기값에서 기본 입력을 추출 |
+| `password` | 입력을 마스킹하고 저장·표시 경계에서 비밀로 취급 |
 
 #### password 값이 가려지는 범위
 
-`password: true` 인 태스크의 값은 **실행에는 원문 그대로 쓰이고**, 표시·기록되는 경계에서만 가려집니다. 그 값을 `${task_id.value}` 로 참조하는 태스크의 결과도 같은 취급을 받습니다(파생값 전파).
-
-| 경계 | 동작 |
-| --- | --- |
-| 실행 히스토리 / 명령 이력 | 비밀 태스크의 결과를 `***` 로 바꾼 컨텍스트로 **원본 명령을 다시 보간해** 기록합니다. 완성된 명령줄에서 비밀 문자열을 찾아 치환하는 방식이 아닙니다 — 그렇게 하면 짧은 비밀번호(`1` 같은)가 명령의 관계없는 부분까지 뭉갭니다 |
-| verbose 출력 채널 | 명령·`args`·`cwd`·stdout/stderr 모두 가림 |
-| `output.mode: "editor"` | **출력하지 않고** 안내 메시지를 띄웁니다. untitled 에디터는 VS Code hot-exit 백업 대상이라 임시 미리보기가 아니라 영속화로 취급합니다 |
-| `output.mode: "terminal"` | **출력하지 않고** 안내 메시지를 띄웁니다 |
-| `output.mode: "file"` | **그대로 저장합니다.** `filePath` 는 `actions.json` 에 적힌 명시적 영구 저장 정책이고, 저장 위치를 사용자가 설정과 VCS 에서 감사할 수 있기 때문입니다 |
-| 실패 오류 메시지 / Problems 진단 | 원인을 그대로 노출하지 않고 안전한 메타데이터만 남깁니다 |
-
-editor/terminal 규칙은 **비밀을 참조하는 태스크뿐 아니라 비밀번호를 입력받는 태스크 자신에게도** 적용됩니다 — `passTheResultToNextTask: true` 와 함께 쓰면 그 태스크의 출력이 곧 비밀번호이기 때문입니다.
-
-가려진 출력을 실제로 봐야 할 때는 액션 실패 시 제안되는 **민감 디버그 재실행**을 사용하세요. 그 결과는 메모리에만 남고 저장되지 않습니다.
+`password: true` 입력과 그 값에서 파생된 결과는 History의 저장 입력, 실행 명령 보기, Preview, verbose 로그와 알림에서 평문으로 남기지 않습니다. 비밀번호를 사용한 태스크의 출력은 재노출 가능성이 있으므로 diagnostics를 게시하지 않습니다. 실제 자식 프로세스에는 실행에 필요한 원래 값이 전달됩니다.
 
 ### `quickPick` 태스크
 
-미리 정의된 옵션 목록에서 사용자가 선택할 수 있습니다. 환경 선택, 빌드 타입 선택 등에 유용합니다.
+고정 `items` 또는 `itemsFromCommand`의 비어 있지 않은 stdout 줄에서 항목을 고릅니다. `items`는 문자열이나 `{ label, description, detail }` 객체를 지원하고, `itemsExclude`로 동적 목록의 특정 줄을 제외할 수 있습니다.
 
-> **취소했을 때**: 태스크는 실패하고 파이프라인이 멈추지만, 액션은 *실패*가 아니라 *취소*로 마감됩니다 — 자세한 규칙은 [`fileDialog` 태스크](#filedialog-태스크)의 표를 보세요.
-
-
--   `type` (string, **필수**): `quickPick`으로 설정해야 합니다.
--   `items` (array, **조건부 필수**): 선택 가능한 항목 목록입니다. 문자열 배열 또는 객체 배열을 사용할 수 있습니다. `itemsFromCommand`를 지정하면 생략 가능하며, 이때 `items`는 무시됩니다.
-    -   문자열 배열: `["dev", "staging", "production"]`
-    -   객체 배열: `[{"label": "dev", "description": "개발 환경", "detail": "상세 설명"}]`
--   `itemsFromCommand` (string | OS별 객체, *선택*): stdout 출력을 선택 목록으로 채우는 셸 명령입니다. 각 비어 있지 않은 줄(trim 후)이 하나의 항목이 됩니다. `cwd`(없으면 워크스페이스 폴더)에서 로그인 셸로 실행되며, 변수 보간과 `command`와 동일한 OS별 객체 형태를 지원합니다. 지정 시 `items`는 무시됩니다(정적 `items`로 폴백하지 않습니다). OS별 객체를 줄 경우 `command`와 동일하게 **현재 플랫폼 branch가 없으면 오류**가 나므로 실행할 플랫폼을 모두 정의하세요. 예: `git for-each-ref --format='%(refname:short)' refs/remotes/origin`으로 origin 브랜치 목록 채우기.
--   `itemsExclude` (string | string[], *선택*): `itemsFromCommand` 출력에서 제외할 정확한 줄(예: `origin/HEAD`). `itemsFromCommand`가 없으면 무시됩니다.
--   `placeHolder` (string, *선택*): Quick Pick에 표시될 플레이스홀더 텍스트입니다.
--   `canPickMany` (boolean, *선택*, 기본값: `false`): `true`로 설정하면 다중 선택이 가능합니다.
--   **실행 결과**:
-    -   단일 선택: `${task_id.value}` (선택된 항목의 label)
-    -   다중 선택: `${task_id.value}` (첫 번째 선택), `${task_id.values}` (모든 선택, 쉼표로 구분)
-
-**예시 1: 간단한 선택**
-```json
-{
-  "id": "select_env",
-  "type": "quickPick",
-  "placeHolder": "Select deployment environment",
-  "items": ["dev", "staging", "production"]
-}
-```
-
-**예시 2: 설명이 있는 선택**
-```json
-{
-  "id": "select_build",
-  "type": "quickPick",
-  "placeHolder": "Select build type",
-  "items": [
-    {
-      "label": "debug",
-      "description": "Debug build with symbols",
-      "detail": "Best for development and debugging"
-    },
-    {
-      "label": "release",
-      "description": "Optimized release build",
-      "detail": "Best for production deployment"
-    }
-  ]
-}
-```
-
-**예시 3: 다중 선택**
-```json
-{
-  "id": "select_features",
-  "type": "quickPick",
-  "placeHolder": "Select features to enable (multiple selection)",
-  "canPickMany": true,
-  "items": ["authentication", "logging", "caching", "monitoring"]
-}
-```
-선택 결과: `${select_features.values}` = "authentication,logging"
-
-**예시 4: origin 브랜치 + Jira 티켓으로 CI 실행**
-
-`itemsFromCommand`로 origin 브랜치를 동적으로 채우고, 선택한 브랜치에서 Jira 키를 자동 추출해 입력값 기본으로 채운 뒤, 두 값을 CI 스크립트 파라미터로 넘기는 흐름입니다.
-
-```json
-{
-  "tasks": [
-    {
-      "id": "fetch",
-      "type": "shell",
-      "command": "git fetch --prune"
-    },
-    {
-      "id": "pick_branch",
-      "type": "quickPick",
-      "placeHolder": "CI에서 테스트할 origin 브랜치 선택",
-      "itemsFromCommand": "git for-each-ref --format='%(refname:short)' refs/remotes/origin --sort=-committerdate",
-      "itemsExclude": ["origin", "origin/HEAD"]
-    },
-    {
-      "id": "pick_ticket",
-      "type": "inputBox",
-      "prompt": "Jira 티켓 번호",
-      "placeHolder": "예: ABCTEST-123",
-      "value": "${pick_branch.value}",
-      "extractPattern": "[A-Z][A-Z0-9]+-\\d+",
-      "validatePattern": "^[A-Z][A-Z0-9]+-\\d+$",
-      "validateMessage": "형식: 프로젝트키-숫자 (예: ABCTEST-123)"
-    },
-    {
-      "id": "run_ci",
-      "type": "shell",
-      "command": "./trigger-ci.sh",
-      "args": ["--branch", "${pick_branch.value}", "--ticket", "${pick_ticket.value}"]
-    }
-  ]
-}
-```
-
-`pick_branch.value`가 `origin/feature/ABCTEST-123-foo`이면 `pick_ticket`의 기본값은 `ABCTEST-123`으로 채워져 엔터만 누르면 됩니다.
-
-> **참고 (symbolic HEAD)**: `git for-each-ref ... %(refname:short)`는 `refs/remotes/origin/HEAD`를 `origin/HEAD`가 아니라 **`origin`** 으로 축약해 출력합니다. 그래서 `itemsExclude`에는 `origin`과 `origin/HEAD`를 함께 넣어야 가짜 브랜치 `origin`이 목록에 남지 않습니다. (또는 명령 단에서 symbolic ref를 걸러도 됩니다.)
-
-> **보안 (값 전달은 `args`로)**: 원격 브랜치 이름은 완전히 신뢰할 수 없고 셸 메타문자가 포함될 수 있습니다. 선택한 값을 `command` 문자열에 직접 끼워 넣으면 명령 주입 표면이 되므로, 위 예시처럼 `command`(실행 파일)와 `args`(인자 배열)를 분리해 전달하세요. TaskHub는 `args` 각 항목을 OS별 규칙으로 quoting합니다. 같은 이유로 `${pick_ticket.value}` 같은 사용자 입력값도 `args`로 넘기는 것이 안전합니다.
-
-**예시 5: 로컬 브랜치 + Jira 티켓 (origin 불필요)**
-
-원격(origin) 존재 여부를 확인하지 않고 **로컬 브랜치**만 고르고 싶다면 `refs/remotes/origin` 대신 `refs/heads`를 사용합니다. 로컬 브랜치는 `%(refname:short)`가 `origin/` 접두사 없이 `main`·`feature/ABCTEST-123-foo`처럼 출력하므로 `itemsExclude`(symbolic HEAD 제거)도 필요 없습니다. 아래는 선택한 값을 터미널에 출력해 동작을 확인하는 액션입니다.
-
-```json
-{
-  "id": "testButton.ciBranchTicket",
-  "title": "Test: CI Branch + Jira Ticket Params",
-  "action": {
-    "description": "로컬 브랜치를 골라 Jira 티켓을 입력받고 두 값을 파라미터로 출력합니다.",
-    "tasks": [
-      {
-        "id": "pick_branch",
-        "type": "quickPick",
-        "placeHolder": "테스트할 로컬 브랜치 선택",
-        "itemsFromCommand": "git for-each-ref --format='%(refname:short)' refs/heads --sort=-committerdate"
-      },
-      {
-        "id": "pick_ticket",
-        "type": "inputBox",
-        "prompt": "Jira 티켓 번호",
-        "placeHolder": "예: ABCTEST-123",
-        "value": "${pick_branch.value}",
-        "extractPattern": "[A-Z][A-Z0-9]+-\\d+",
-        "validatePattern": "^[A-Z][A-Z0-9]+-\\d+$",
-        "validateMessage": "형식: 프로젝트키-숫자 (예: ABCTEST-123)"
-      },
-      {
-        "id": "show_params",
-        "type": "shell",
-        "command": {
-          "windows": "cmd /c echo branch=${pick_branch.value} ticket=${pick_ticket.value}",
-          "macos": "printf 'branch=%s\\nticket=%s\\n' '${pick_branch.value}' '${pick_ticket.value}'",
-          "linux": "printf 'branch=%s\\nticket=%s\\n' '${pick_branch.value}' '${pick_ticket.value}'"
-        },
-        "revealTerminal": "always"
-      }
-    ]
-  }
-}
-```
-
-> **참고**: `itemsFromCommand`는 `cwd`(없으면 워크스페이스 폴더)에서 실행됩니다. 결과가 0줄이면 "got no items …" 오류가 나며, 에러 메시지에 실행 `cwd`와 출력 줄 수가 포함되므로 잘못된 폴더에서 실행됐는지 바로 확인할 수 있습니다. 위 `show_params`는 동작 확인용이라 값을 명령 문자열에 직접 넣었지만, 실제 CI 스크립트에 넘길 땐 예시 4처럼 `args`로 전달하세요.
+- 단일 선택 결과: `value`.
+- `canPickMany: true`: 첫 선택 `value`, 전체 선택 배열 `values`.
+- 동적 목록 명령은 `cwd`, 없으면 액션 워크스페이스에서 실행됩니다.
+- 취소 규칙은 `fileDialog`와 같습니다.
 
 ### `envPick` 태스크
 
-사용자 셸이 실제로 노출하는 **환경변수 이름**만을 정렬해 QuickPick 으로 보여주고, 사용자가 고른 이름을 다음 태스크로 전달합니다. 값은 picker 에 노출하지 않으므로 이름만으로 안전하게 탐색할 수 있습니다.
-
-> **취소했을 때**: 태스크는 실패하고 파이프라인이 멈추지만, 액션은 *실패*가 아니라 *취소*로 마감됩니다 — 자세한 규칙은 [`fileDialog` 태스크](#filedialog-태스크)의 표를 보세요.
-
-
--   `type` (string, **필수**): `envPick` 으로 설정해야 합니다.
--   `placeHolder` (string, *선택*): QuickPick 에 표시될 안내 문구. 생략 시 기본 문구 ("Select an environment variable name" / "환경변수 이름을 선택하세요") 사용.
--   **실행 결과**: `${task_id.value}` — 선택된 환경변수의 **이름**. 값은 반환하지 않으므로 `printenv ${task_id.value}` 등 후속 `shell` 태스크에서 값을 조회합니다.
--   취소 시 파이프라인이 중단됩니다.
-
-**셸 환경 필터링**: 첫 호출 시 사용자의 기본 로그인 셸 (`$SHELL -l -c env`, Windows 는 `cmd /c set`) 을 한 번 실행해서 실제 노출되는 변수 목록을 캐시한 뒤, `process.env` 의 키 중 그 목록에 포함된 것만 picker 에 표시합니다. VS Code / Electron 이 확장 호스트 프로세스에 주입하는 `VSCODE_*`, `ELECTRON_RUN_AS_NODE` 같은 변수들은 후속 `printenv` 셸 태스크에서 보이지 않으므로 자동 제외됩니다. probe 호출 자체에도 sanitize 된 env 만 넘겨 확장 호스트 변수가 자식 프로세스로 새는 것을 막고, 호출부에서 `VSCODE_*`/`ELECTRON_*` prefix 와 알려진 Electron 전용 이름들의 hardcoded blocklist 를 한 번 더 적용합니다 (belt-and-suspenders). 셸 호출이 5초 안에 끝나지 않거나 실패하면 fallback 으로 blocklist 만 사용합니다.
-
-> **기준**: 필터 기준은 "**VS Code 가 task 로 spawn 한 셸 터미널에서 보이는 env**" 입니다 (사용자 보고 버그가 `revealTerminal: 'always'` 인 셸 task 의 `printenv` 실패였기 때문). `passTheResultToNextTask` 경로에서 사용되는 `executeShellCommand` 는 내부적으로 `process.env` 전체를 자식에 넘기므로 (확장 host 변수 포함), 이론상 picker 에서 가려진 변수도 그 경로에서는 읽을 수 있습니다. 다만 실제 envPick 사용 패턴은 거의 모두 "사용자가 셸에서 설정한 변수를 고른다" 이므로 picker 노출 기준은 더 엄격한 (a) 쪽으로 맞춰 일관된 UX 를 제공합니다.
-
-**예시: 선택 후 값 출력 (기본 제공 액션과 동일)**
-```json
-{
-  "tasks": [
-    {
-      "id": "env_pick",
-      "type": "envPick",
-      "placeHolder": "Type to filter, then select an environment variable"
-    },
-    {
-      "id": "show_env_value",
-      "type": "command",
-      "command": {
-        "windows": "powershell -NoProfile -Command [Environment]::GetEnvironmentVariable($env:TASKHUB_ENV_NAME)",
-        "macos": "sh -c 'printenv \"$TASKHUB_ENV_NAME\"'",
-        "linux": "sh -c 'printenv \"$TASKHUB_ENV_NAME\"'"
-      },
-      "env": { "TASKHUB_ENV_NAME": "${env_pick.value}" },
-      "revealTerminal": "always"
-    }
-  ]
-}
-```
-
-> **왜 이름을 명령 문자열에 넣지 않는가**: 예전 이 예제는 `cmd /c echo %${env_pick.value}%` 였습니다. 변수 **이름**이 안전해도 `cmd` 는 `%VAR%` 를 **치환한 뒤 그 결과를 다시 해석**하므로, 값에 `&` 나 `|` 가 있으면 별도 명령이 실행됩니다. 이름을 `env` 로 넘기면 명령 문자열이 고정되어 그럴 자리가 없습니다 — 중첩 인터프리터(`cmd /c`, `sh -c`)에 값을 넘겨야 할 때의 일반적인 해법입니다.
+사용자의 로그인 셸에 실제로 노출되는 환경변수 **이름**을 정렬해 선택하고 `value`로 반환합니다. 확장 호스트 전용 `VSCODE_*`·Electron 변수는 제외하며 값 자체는 목록에 표시하지 않습니다. 선택한 변수의 값이 필요하면 이름을 고정된 후속 명령의 `env`로 전달해 조회하세요.
 
 ### `confirm` 태스크
 
-파이프라인 실행 중간에 사용자에게 확인 대화상자를 표시합니다. 위험한 작업(플래싱, 배포, 삭제 등) 전에 안전장치로 활용할 수 있습니다.
-
-> **취소했을 때**: 태스크는 실패하고 파이프라인이 멈추지만, 액션은 *실패*가 아니라 *취소*로 마감됩니다 — 자세한 규칙은 [`fileDialog` 태스크](#filedialog-태스크)의 표를 보세요.
-
-
--   `type` (string, **필수**): `confirm`으로 설정해야 합니다.
--   `message` (string, *선택*, 기본값: `"Are you sure you want to continue?"`): 확인 대화상자에 표시될 메시지입니다. 변수 치환(`${...}`)을 지원합니다.
--   `confirmLabel` (string, *선택*, 기본값: `"Yes"`): 확인 버튼의 레이블입니다.
--   `cancelLabel` (string, *선택*, 기본값: `"No"`): 취소 버튼의 레이블입니다.
--   **실행 결과**: 사용자가 확인을 선택하면 `${task_id.confirmed}` = `"true"`를 반환합니다. 취소를 선택하거나 대화상자를 닫으면 파이프라인 실행이 중단됩니다.
-
-**예시 1: 기본 확인**
-```json
-{
-  "id": "confirm_deploy",
-  "type": "confirm",
-  "message": "정말 배포하시겠습니까?"
-}
-```
-
-**예시 2: 커스텀 레이블과 변수 치환**
-```json
-{
-  "id": "confirm_flash",
-  "type": "confirm",
-  "message": "${select_device.value} 장치에 펌웨어를 플래싱합니다. 계속하시겠습니까?",
-  "confirmLabel": "플래싱 시작",
-  "cancelLabel": "취소"
-}
-```
+`message`와 선택적 `confirmLabel`·`cancelLabel`로 확인 대화상자를 엽니다. 확인 결과는 `confirmed: "true"`입니다. 취소하면 다른 대화형 태스크와 같은 취소 정책을 따릅니다.
 
 ### `writeFile` / `appendFile` 태스크
 
-문자열 콘텐츠를 파일로 쓰거나 기존 파일에 이어 붙입니다. shell의 `echo > file` 우회를 대체하는 일급 태스크로, OS별 분기·셸 이스케이프 없이 동작합니다.
+셸 리다이렉션 없이 파일을 쓰며 결과 키 `path`에 절대 경로를 반환합니다.
 
-- `type` (string, **필수**): `writeFile` 또는 `appendFile`.
-- `path` (string, **필수**): 대상 파일 경로. 변수 치환 지원. 상대 경로는 액션의 워크스페이스 폴더를 기준으로 해석되며, 워크스페이스 외부로 빠져나가는 경로는 거부됩니다.
-- `content` (string, **필수**): 파일에 쓸 내용. 변수 치환 지원. 빈 문자열(`""`)도 허용.
-- `encoding` (string, *선택*, 기본값: `"utf8"`): `"utf8"` | `"utf8bom"` | `"ascii"`.
-    - `utf8`: BOM 없는 UTF-8.
-    - `utf8bom`: 선두에 BOM(EF BB BF) 추가. `appendFile`에서는 **대상 파일이 존재하지 않을 때에만** BOM을 추가합니다 (기존 파일 중간에 BOM을 끼워 넣어 깨뜨리지 않음).
-    - `ascii`: Node `ascii` 인코딩. 비-ASCII 문자는 안전하지 않으니 ASCII 입력에만 사용하세요.
-- `eol` (string, *선택*, 기본값: `"keep"`): 줄바꿈 정규화. `"lf"` | `"crlf"` | `"keep"`.
-- `overwrite` (boolean, *선택*, 기본값: `true`): `writeFile`에서만 의미 있음. `false`면 기존 파일이 있을 때 실패합니다. `appendFile`에서는 무시됩니다.
-- `mkdirs` (boolean, *선택*, 기본값: `true`): 상위 디렉터리 자동 생성. `false`면 부모 디렉터리가 없을 때 실패.
-- **실행 결과**: 다음 태스크에서 `${task_id.path}`로 절대 경로를 참조할 수 있습니다.
+| 필드 | 설명 |
+| --- | --- |
+| `path`, `content` | 필수. 변수 치환 지원 |
+| `encoding` | `utf8`·`utf8bom`·`ascii`; 기본 `utf8` |
+| `eol` | `keep`·`lf`·`crlf`; 기본 `keep` |
+| `mkdirs` | 부모 디렉터리 자동 생성, 기본 `true` |
+| `overwrite` | `writeFile`의 기존 파일 덮어쓰기, 기본 `true` |
 
-**예시 1: 빌드 메타데이터 헤더 생성**
-```json
-{
-  "id": "git-sha",
-  "type": "shell",
-  "command": "git rev-parse HEAD",
-  "passTheResultToNextTask": true,
-  "output": { "capture": { "name": "shortSha", "regex": "^([a-f0-9]{7})" } }
-}
-```
-```json
-{
-  "id": "stamp",
-  "type": "writeFile",
-  "path": "src/buildinfo.h",
-  "content": "#define GIT_SHA \"${git-sha.shortSha}\"\n",
-  "eol": "lf"
-}
-```
-
-**예시 2: 로그에 한 줄 이어쓰기**
-```json
-{
-  "id": "log",
-  "type": "appendFile",
-  "path": "logs/deploy.log",
-  "content": "[${timestamp.value}] deployed by ${user.value}\n"
-}
-```
-
-**예시 3: BOM 붙은 Windows 친화적 텍스트 파일**
-```json
-{
-  "id": "win-cfg",
-  "type": "writeFile",
-  "path": "tools/notice.txt",
-  "content": "한글 메시지",
-  "encoding": "utf8bom",
-  "eol": "crlf"
-}
-```
+상대 경로는 액션 워크스페이스 기준이며 밖으로 나가는 경로는 거부합니다. `appendFile`의 UTF-8 BOM은 새 파일에만 추가합니다.
 
 ### Task-level 옵션: `timeoutSeconds` / `continueOnError`
 
-모든 태스크 타입에 공통으로 적용되는 흐름 제어 옵션입니다.
-
-- **`timeoutSeconds`** (number, *선택*): 태스크가 이 시간(초) 안에 끝나지 않으면 취소되고 파이프라인이 timeout 에러로 실패합니다 (`continueOnError: true`이면 다음 태스크로 진행). `0`이거나 생략하면 timeout 비활성. shell/command 태스크의 경우 timeout이 발동하면 실행 중인 자식 프로세스를 best-effort로 종료합니다.
-- **`continueOnError`** (boolean, *선택*, 기본값: `false`): `true`이면 이 태스크가 실패해도 (timeout, 사용자 취소, 워크스페이스 경로 위반 등 어떤 사유든) 파이프라인이 다음 태스크로 진행합니다. 실패한 태스크의 결과는 `{}`로 저장되어 downstream의 `${task.output}`/`${task.path}` 등은 미해결 리터럴로 남습니다.
-
-**예시: shell 빌드에 5분 timeout + cleanup은 실패해도 계속**
-```json
-{
-  "id": "build",
-  "type": "shell",
-  "command": "npm run build",
-  "timeoutSeconds": 300
-}
-```
-```json
-{
-  "id": "cleanup-temp",
-  "type": "shell",
-  "command": "rm -rf .build-cache",
-  "continueOnError": true
-}
-```
-
-**예시: 사용자 취소를 흐름의 일부로 다루기**
-```json
-{
-  "id": "ask-deploy",
-  "type": "confirm",
-  "message": "운영에 배포하시겠습니까?",
-  "continueOnError": true
-}
-```
-사용자가 취소해도 파이프라인은 다음 태스크로 진행되며, downstream에서 `${ask-deploy.confirmed}`는 미해결 리터럴로 남으므로 "확인됐을 때만 배포"하는 명령어 안에 변수로 끼워두면 자연스럽게 noop이 됩니다.
+- `timeoutSeconds`: 모든 태스크 타입에 적용됩니다. 0 또는 생략은 제한 없음이며 실행 중 프로세스는 best-effort로 종료합니다.
+- `continueOnError: true`: 실패·timeout·사용자 취소 뒤에도 다음 태스크를 실행하고 실패한 태스크 결과를 `{}`로 둡니다. 해당 결과 참조는 미해결 리터럴로 남습니다.
+- 기본값은 첫 실패에서 액션을 중단하는 것입니다.
 
 ### 변수 치환
 
-파이프라인 내에서, 이전 태스크의 결과는 `${task_id.property}` 형식으로 다음 태스크의 속성(예: `command`, `args`, `filePath` 등)에서 사용할 수 있습니다.
+`${taskId.key}` 형식으로 앞 태스크 결과를 참조합니다. 대표 키는 각 태스크 절에 정리되어 있으며 스키마 자동완성과 Doctor도 같은 결과 모델을 사용합니다.
 
--   `fileDialog` / `folderDialog` 태스크 (`id: "select_file"`)의 결과 사용 예시:
-    -   `${select_file.path}`: 전체 경로
-    -   `${select_file.dir}`: 부모 디렉토리 경로
-    -   `${select_file.name}`: 파일/폴더명
-    -   `${select_file.fileNameOnly}`: 확장자를 제외한 이름
-    -   `${select_file.fileExt}`: 확장자
--   `inputBox` 태스크 (`id: "input_name"`)의 결과 사용 예시:
-    -   `${input_name.value}`: 입력된 값 (prefix/suffix 포함)
--   `quickPick` 태스크 (`id: "select_env"`)의 결과 사용 예시:
-    -   `${select_env.value}`: 선택된 항목 (단일 선택 또는 다중 선택의 첫 번째 항목)
-    -   `${select_env.values}`: 선택된 모든 항목. **`canPickMany: true`일 때만 생성됩니다** — 단일 선택 태스크에서 참조하면 미해결 placeholder로 남습니다.
--   `shell` / `command` 태스크 (`id: "build"`)의 결과 사용 예시 — **`passTheResultToNextTask: true`(캡처 모드)일 때만** 생성됩니다:
-    -   `${build.output}`: 표준 출력(stdout)
-    -   `${build.stderr}`: 표준 오류(stderr). 컴파일러 경고처럼 stderr로만 나오는 내용을 다음 태스크로 넘길 때 씁니다.
--   `confirm` 태스크 (`id: "confirm_task"`)의 결과 사용 예시:
-    -   `${confirm_task.confirmed}`: 확인 여부 (`"true"`)
-- `${zip_task.archivePath}`: `zip` 태스크가 생성한 아카이브 경로
-- `${unzip_task.outputDir}`: `unzip` 태스크가 추출한 폴더 경로
-- `${write_task.path}`: `writeFile` / `appendFile` 태스크가 쓴 파일의 절대 경로
-### 조건부 태스크 (`when`, 0.7.4부터)
+- `${workspaceFolder}`, `${extensionPath}`는 내장 경로입니다.
+- `${a.value ?? b.value}`는 왼쪽부터 실제로 해석되는 첫 값을 사용합니다.
+- 배열 값은 `args` 원소 전체가 참조일 때만 여러 argv로 펼쳐집니다.
+- 풀리지 않는 참조는 문자열에서 사라지지 않고 `${…}` 리터럴로 남습니다.
+- 태스크 자신을 참조할 수 없습니다.
+- `${env:VAR}`와 `${input:name}`은 그래프에서 예약된 이름이지만 현재 값 치환은 지원하지 않습니다.
 
-태스크에 `when`을 달면 조건이 참일 때만 실행됩니다. 거짓이면 **실패가 아니라 건너뜀**으로 끝나고 액션은 계속 진행됩니다.
+### 조건부 태스크 (`when`)
 
-```jsonc
-{ "id": "kind", "type": "quickPick", "items": ["파일", "폴더"] },
-{ "id": "pickFile",   "type": "fileDialog",   "when": { "var": "${kind.value}", "equals": "파일" } },
-{ "id": "pickFolder", "type": "folderDialog", "when": { "var": "${kind.value}", "equals": "폴더" } },
-{ "id": "run", "type": "command", "command": "myTool", "args": ["${pickFile.path ?? pickFolder.path}"] }
+`when.var`를 보간한 문자열에 연산자 하나를 적용합니다.
+
+```json
+{
+  "id": "flash",
+  "type": "command",
+  "command": "scripts/flash",
+  "when": { "var": "${mode.value}", "equals": "release" }
+}
 ```
 
--   `var`: 비교 대상. 보간을 거친 뒤 **문자열로** 비교됩니다.
--   연산자는 **정확히 하나**만 씁니다 — `equals`(완전 일치) / `notEquals` / `matches`(정규식 부분 일치) / `in`(목록 중 하나). 여럿을 쓰면 첫 번째만 적용되고 Doctor가 `when.operators`로 잡습니다.
--   **보간되는 것은 `var`뿐입니다.** 피연산자(`equals` 등)에 `${…}`를 적으면 그 글자와 비교하게 되어 결코 일치하지 않습니다 — Doctor의 `when.literal-operand`가 잡습니다. 0.7.16부터 이 참조는 **의존성으로도 잡히지 않습니다** — 실행 순서도 바뀌지 않고, 비교가 영영 일치하지 않을 뿐입니다.
--   조건 안의 `${…}` 참조는 다른 참조와 똑같이 **의존성으로 추론**되므로, 조건이 보는 태스크가 끝난 뒤에 평가됩니다.
--   조건의 결과가 **입력과 무관하게 고정**되면 Doctor의 `when.dead-branch`와 Preview Run이 어느 쪽으로 굳었는지 밝힙니다 — `var`의 참조가 해석되지 않거나(리터럴 문자열을 비교), `in`이 빈 목록이거나, `var`가 상수(빈 문자열, `${pick.value`처럼 닫는 괄호를 빠뜨린 형태 포함)인 경우입니다. Preview Run은 컴파일되지 않는 `matches`도 같은 자리에서 알립니다(Doctor는 `when.regex`로 냅니다).
--   판정은 **런타임이 실제로 적용할 연산자 하나**만 보고 합니다. `{ "equals": "a", "in": [] }`처럼 여럿 적혀 있으면 빈 `in`은 쳐다보지도 않으므로 "절대 실행되지 않는다"고 하지 않습니다 — 그 상태 자체는 `when.operators`가 잡습니다.
-
-Preview Run은 각 태스크의 첫 줄에 `when:`을 찍습니다 — 이 태스크가 아예 돌지 않을 수도 있다는 사실이 나머지를 읽는 전제이기 때문입니다. 조건의 **결과**는 단정하지 않습니다(실행 시점의 입력에 달렸으므로). 단정할 수 있는 것은 위의 "굳은 분기"뿐입니다.
-
-**꺼진 분기는 소비자까지 데려갑니다.** 조건으로 꺼진 태스크를 평범하게 참조하는(`${pickFile.path}`) 태스크도 함께 건너뜁니다 — 그러지 않으면 미해결 리터럴 `"${pickFile.path}"`가 그대로 경로 인자로 넘어갑니다. 어느 쪽 분기가 돌았든 **하나의 소비자**가 받게 하려면 `??`를 씁니다. 그 체인은 **대안이 전부** 꺼졌을 때만 함께 꺼집니다.
-
-`equals`는 완전 일치입니다 — 부분 일치라면 `dev`/`develop`, `prod`/`production` 같은 접두사 관계에서 엉뚱한 분기가 켜집니다.
-
-- **`??` — 먼저 풀리는 참조 (0.7.3부터)**: `${pickFile.path ?? pickFolder.path}` 는 왼쪽부터 시도해 **처음으로 값이 있는 참조**를 씁니다. 셋 이상도 이어 쓸 수 있고(`${a.x ?? b.y ?? c.z}`), 대안이 전부 없으면 미해결 리터럴로 남습니다(조용히 빈 값이 되지 않습니다). 실행 순서는 **모든 대안**을 기다립니다 — 하나만 기다리면 살아남은 쪽이 값을 내기 전에 실행될 수 있기 때문입니다. 서로 배타적인 두 태스크(예: 파일 선택 / 폴더 선택) 중 어느 쪽이 돌았든 **하나의 소비자**가 그 결과를 받게 할 때 씁니다. `??` 가 없는 참조는 지금까지처럼 한 글자도 다듬지 않습니다.
-  대안은 **참조만** 쓸 수 있습니다 — `${a.x ?? 기본값}` 처럼 리터럴을 적으면 그것도 태스크 참조로 읽혀 해석되지 않습니다. 대안 안쪽에 `${` 를 또 쓰는 것(`${a.x ?? ${b.y}}`)도 마찬가지입니다 — 그 `${` 가 태스크 이름의 일부로 읽힙니다.
-  **놓을 자리**: `args` 배열, `shell`/`command` 의 명령 문자열, `cwd`·`env`·`prompt`·`when` 어디서나 같은 규칙으로 동작합니다. 다만 배열 값(`${pick.paths}`)이 **인자 여러 개로 펼쳐지는 것은 `args` 안에서뿐**입니다. 명령 문자열에 두면 공백으로 이어 붙은 뒤 — `command` 타입에서는 공백이 있든 없든 **인자 하나**로, `shell` 타입에서는 셸이 다시 쪼개어 — 어느 쪽도 고른 개수만큼의 인자가 되지 않습니다. 여러 경로를 넘길 때는 반드시 `args` 를 쓰세요. (0.7.15까지 `command` 타입의 명령 문자열에서는 `??` 가 조용히 리터럴로 남았습니다.)
-  **대안에 bare 참조(`${z ?? b.output}` 의 `z`)를 쓸 때 주의합니다.** bare 참조는 그 태스크가 대표 결과(`output` / `outputDir`)를 낼 때만 값이 되는데, 내지 않더라도 결과 객체 자체가 잡혀 **체인이 거기서 끝납니다** — 뒤 대안은 시도되지 않고 참조 전체가 리터럴로 남습니다. `zip`(`archivePath`만 냄)이나 `passTheResultToNextTask`가 없는 `shell`이 그렇습니다. 이 형태는 `variable.unresolved`로 잡힙니다.
-  어긋난 대안은 `??` 가 조용히 건너뛰므로 실행해 봐도 드러나지 않습니다. 그래서 Doctor·Preview Run 이 대안 하나하나를 봅니다 — 하나라도 풀리면 `variable.dead-alternative`(참조는 동작하지만 그 대안은 선택되지 않음), 전부 어긋나면 `variable.unresolved`(이때만 리터럴로 남음)입니다. 두 진단은 **다른 사실**을 말하므로 섞이지 않습니다.
-- `${workspaceFolder}`: 현재 워크스페이스 폴더의 절대 경로
-- `${extensionPath}`: 확장 프로그램이 설치된 절대 경로. 확장 내부에 포함된 리소스를 참조할 때 유용합니다.
+지원 연산자는 `equals`, `notEquals`, `matches`, `in`이며 정확히 하나만 사용합니다. 비교 피연산자는 보간하지 않습니다. 조건이 거짓이면 실패가 아니라 skip이며, 그 태스크를 일반 참조하는 소비자도 함께 skip됩니다. 대안 체인(`??`)은 모든 대안이 skip될 때만 소비자를 skip합니다.
 
 ### 전체 예시
 
 ```json
 [
   {
-    "id": "action.pipeline.example",
-    "title": "Example: Select File, Echo, and Save",
+    "id": "firmware.package",
+    "title": "Package firmware",
     "action": {
-      "successMessage": "Pipeline finished!",
+      "description": "Select a binary, create metadata, then zip both files",
       "tasks": [
         {
-          "id": "select_a_file",
+          "id": "binary",
           "type": "fileDialog",
-          "options": {
-            "openLabel": "Select a text file"
-          }
+          "options": { "filters": { "Firmware": ["bin", "hex"] } }
         },
         {
-          "id": "echo_in_terminal",
-          "type": "shell",
-          "command": "echo [STREAM] You selected ${select_a_file.name}",
-          "passTheResultToNextTask": false,
-          "revealTerminal": "always"
+          "id": "meta",
+          "type": "writeFile",
+          "path": "build/selected.txt",
+          "content": "${binary.path}\n"
         },
         {
-          "id": "capture_file_content",
-          "type": "shell",
-          "command": {
-            "windows": "type \"${select_a_file.path}\"",
-            "linux": "cat \"${select_a_file.path}\"",
-            "macos": "cat \"${select_a_file.path}\""
-          },
-          "passTheResultToNextTask": true
-        },
-        {
-            "id": "save_to_file",
-            "type": "shell",
-            "command": "echo The content of ${select_a_file.name} is:\n\n${capture_file_content.output}",
-            "passTheResultToNextTask": true,
-            "output": {
-                "mode": "file",
-                "filePath": "${workspaceFolder}/report.txt",
-                "overwrite": true
-            }
+          "id": "package",
+          "type": "zip",
+          "source": ["${binary.path}", "${meta.path}"],
+          "archive": "build/firmware.zip"
         }
       ]
     }
   }
 ]
 ```
-
-**파일 실행 + 파라미터 입력 예시:**
-
-파일을 선택하고, 환경과 파라미터를 동적으로 입력받아 실행하는 실제 사용 예제입니다.
-
-```json
-{
-  "id": "action.run.script.with.params",
-  "title": "Run Script with Parameters",
-  "action": {
-    "description": "Select file, environment, and parameters to run a script",
-    "successMessage": "Script executed successfully!",
-    "tasks": [
-      {
-        "id": "select_script",
-        "type": "fileDialog",
-        "options": {
-          "filters": {
-            "Scripts": ["js", "py", "sh"]
-          }
-        }
-      },
-      {
-        "id": "select_environment",
-        "type": "quickPick",
-        "placeHolder": "Select environment",
-        "items": [
-          {
-            "label": "development",
-            "description": "Development environment"
-          },
-          {
-            "label": "staging",
-            "description": "Staging environment"
-          },
-          {
-            "label": "production",
-            "description": "Production environment"
-          }
-        ]
-      },
-      {
-        "id": "input_port",
-        "type": "inputBox",
-        "prompt": "Enter port number",
-        "value": "3000",
-        "placeHolder": "3000"
-      },
-      {
-        "id": "input_extra_args",
-        "type": "inputBox",
-        "prompt": "Enter extra arguments (optional)",
-        "placeHolder": "additional flags",
-        "prefix": "--extra "
-      },
-      {
-        "id": "run_script",
-        "type": "shell",
-        "command": "node ${select_script.path} --env ${select_environment.value} --port ${input_port.value} ${input_extra_args.value}",
-        "revealTerminal": "always"
-      }
-    ]
-  }
-}
-```
-
-이 예제는 다음 과정을 거칩니다:
-1. **파일 선택**: 실행할 스크립트 파일 선택 (`.js`, `.py`, `.sh`)
-2. **환경 선택**: Quick Pick으로 development/staging/production 중 선택
-3. **포트 입력**: 기본값 3000이 제시되며 사용자가 변경 가능
-4. **추가 인자 입력**: 사용자가 입력하면 자동으로 `--extra` 플래그가 앞에 붙음
-5. **스크립트 실행**: 모든 파라미터를 조합하여 명령어 실행
-
 ## 6. 즐겨찾기 패널 (`mainView.favorite`)
 
-이 패널은 `.vscode/favorites.json`에 정의된 사용자가 즐겨찾는 파일 목록을 표시합니다. 필요하다면 파일을 열 때 이동할 줄 번호까지 함께 저장할 수 있으며, 뷰의 제목에는 즐겨찾기된 항목의 총 개수가 표시됩니다 (예: "Favorite Files (12)").
+`.vscode/favorites.json`의 파일을 표시하며 제목에는 전체 개수가 붙습니다. 항목은 `title`, 워크스페이스 상대 `path`, 선택적인 `line`·`group`·`tags`를 가질 수 있습니다.
 
-**주요 기능:**
-*   **즐겨찾기 추가**: 뷰 제목 표시줄의 + 아이콘을 클릭하면 파일 선택 다이얼로그가 뜹니다 (multi-root 환경에서는 활성 편집기의 워크스페이스 폴더가 default). v0.4.32부터 선택한 파일들은 *제목 = basename, 경로 = 워크스페이스 상대경로* 로 즉시 저장됩니다 — 파일별 제목/그룹/태그/줄 번호 prompt는 모두 사라졌습니다. v0.4.33부터는 동일 항목이 이미 있으면 (path + line + title + group 일치) 중복으로 분류해 disk write를 생략하고, 알림 본문이 *N개 추가됨 (M개 중복 건너뜀, K개 건너뜀)* 형태로 결과를 요약합니다. 모든 파일이 중복이면 disk write를 생략하고 중복 개수에 맞는 *이미 존재* 안내(*이 즐겨찾기는 …에 이미 존재합니다* / *N개의 즐겨찾기가 이미 …에 존재합니다*) + *favorites.json 열기* 회복 토스트만 뜹니다. 워크스페이스 밖 파일은 경고와 함께 건너뛰며, 어떤 `favorites.json`이 파싱 실패면 그 파일에 해당하는 항목들은 저장하지 않고 회복 알림이 별도로 뜹니다.
-*   **열려 있는 파일 추가**: 편집기 컨텍스트 메뉴의 *열려 있는 파일 즐겨찾기에 추가* 또는 명령 팔레트로 호출합니다. v0.4.32부터 prompt는 0개 — 활성 편집기의 파일을 *제목 = basename, 줄 = 현재 커서* 로 즉시 저장하고 *favorites.json 열기* 버튼이 달린 알림을 표시합니다. 저장되는 경로는 워크스페이스 상대경로 (`${workspaceFolder}/...`, POSIX 슬래시)이며, `favorites.json`이 깨져 있으면 저장을 거부하고 회복 알림을 띄웁니다. v0.4.33부터 같은 줄/제목/그룹의 항목이 이미 있으면 *이 항목은 favorites.json에 이미 존재합니다* 회복 토스트로 끝내고 disk write를 생략합니다.
-*   **클릭하여 열기**: 즐겨찾기 항목을 클릭하면 해당 파일이 VS Code에서 열립니다. 줄 정보가 있으면 해당 줄로 자동으로 이동합니다.
-*   **인라인 액션**: 각 즐겨찾기 항목에 마우스를 올리면 휴지통 아이콘이 표시되며, 클릭하여 즐겨찾기를 삭제할 수 있습니다 (modal 확인이 표시됩니다).
-*   **검색**: 돋보기 아이콘을 클릭하여 즐겨찾기를 빠르게 검색할 수 있습니다.
-*   **파일 편집**: 연필 버튼을 클릭하여 `favorites.json` 파일을 직접 편집할 수 있습니다.
+- 제목 표시줄의 **+**에서 여러 파일을 고르면 basename을 제목으로 즉시 저장합니다. 워크스페이스 밖 파일과 기존 항목은 건너뛰며, 중복뿐이면 파일을 다시 쓰지 않습니다.
+- *열려 있는 파일 즐겨찾기에 추가*는 활성 파일과 현재 커서 줄을 저장합니다.
+- 손상된 `favorites.json`은 덮어쓰지 않고 파일을 열어 고칠 수 있는 알림을 제공합니다.
+- 항목을 클릭하면 저장된 줄로 이동합니다. 제목 표시줄에서는 검색·파일 편집을, 행의 휴지통 아이콘에서는 확인 후 삭제를 수행합니다.
 
 ## 7. 확장 프로그램 버전 표시
 
-`mainView.main` 패널은 확장 프로그램의 현재 버전을 상단에 표시합니다. 버전 항목을 클릭하면 `CHANGELOG.md` 파일이 열려 최신 변경 내역을 확인할 수 있습니다. 또한 패널 제목 표시줄의 전구(💡) 아이콘을 클릭하면 `actions.json`, `links.json`, `favorites.json`의 예제 JSON 파일을 빠르게 열어볼 수 있습니다.
+Actions 뷰 제목 옆 설명에 현재 확장 버전을 표시합니다. 별도 트리 행은 만들지 않으므로 액션이 없을 때 welcome 화면이 정상적으로 보입니다. `CHANGELOG.md`와 세 JSON 예제는 제목 표시줄의 `…` 메뉴에서 엽니다.
 
 ## 8. 액션 생성 마법사
 
-`mainView.main` 패널의 제목 표시줄에 있는 '+' 아이콘을 클릭하면 대화형 액션 생성 마법사가 시작됩니다. 이 마법사를 통해 코드를 직접 작성하지 않고도 새로운 액션을 쉽게 생성할 수 있습니다.
-
-흐름은 "꼭 필요한 것만 묻고 나머지는 기본값으로 채운 뒤 사용자가 actions.json을 열어 다듬을 수 있게" 두는 방향으로 정리되어 있습니다.
+Actions 뷰 제목 표시줄의 **+**에서 시작합니다. 필수 값만 받고 나머지는 기본값으로 채운 뒤 `.vscode/actions.json`에서 세부 옵션을 다듬는 흐름입니다.
 
 1.  **워크스페이스 폴더 선택**: 워크스페이스 폴더가 하나뿐이면 자동으로 그것이 사용되며, 여러 폴더를 연 경우에만 선택지가 표시됩니다.
-2.  **템플릿 선택**: 여섯 가지 중 하나를 고릅니다 (0.6.17부터 확장). 각 템플릿은 **생성되는 구조가 서로 다릅니다** — 명령어 문자열만 바뀌는 변형(Build / Test 등)은 넣지 않고 명령어 입력란의 예시 문구로 대신합니다.
+2.  **템플릿 선택**: 생성할 task 구조가 서로 다른 여섯 가지 중 하나를 고릅니다.
 
     | 템플릿 | 생성되는 task | 노출하는 개념 |
     | --- | --- | --- |
@@ -1335,25 +526,14 @@ Preview Run은 각 태스크의 첫 줄에 `when:`을 찍습니다 — 이 태�
     | **Choice List + Shell** | `quickPick` → `command` | 고정 목록 선택 + `${choice.value}` |
     | **Multi-step Pipeline** | `command` × N (`step1`…`stepN`) | 순차 실행 (앞 단계 실패 시 중단) |
 
-    **마법사는 `shell` 이 아니라 `command` 타입을 만듭니다** (0.6.49부터). 이 템플릿들은 대부분 `${selectFile.path}` 처럼 **실행 시점에 들어오는 값**을 명령에 끼워 넣는데, `shell` 은 문자열을 셸에 그대로 넘기므로 그 값에 `;` 나 `$(...)` 가 있으면 의도하지 않은 명령이 실행됩니다. `command` 는 토큰마다 인용해 argv 로 실행하므로 값이 어떤 문자를 담고 있어도 인자 하나로 남습니다. 셸 연산자가 필요하면 생성 후 actions.json 에서 타입을 `shell` 로 바꾸되, 그때는 값을 `args` 배열로 옮기세요 ([§5 `shell` 과 `command` 는 실행 방식이 다릅니다](#5-액션과-태스크) 참조).
-
-    입력한 명령에 `&&`·`|`·`>` 같은 셸 연산자가 들어 있으면 저장 전에 modal 로 알려 줍니다 — `command` 타입에서 그 연산자들은 **리터럴 인자**가 되어 동작하지 않으므로, 조용히 다르게 실행되는 대신 그 자리에서 알리는 편이 낫기 때문입니다.
-
-    Multi-step Pipeline은 1단계를 필수로 받고, 2단계부터는 **빈 값으로 Enter를 누르면 거기서 끝납니다** (Esc는 마법사 전체 취소). 단계 수는 최대 10개로 제한되며, 그보다 긴 파이프라인은 actions.json에서 직접 작성하는 편이 낫습니다.
-
-    선택지 목록은 쉼표로 구분해 입력하며(`stm32f4, stm32f7, nrf52`) 공백·빈 항목·중복은 자동으로 정리됩니다.
-3.  **제목 입력**: TaskHub 트리에 보일 사람용 제목 한 줄. **액션 ID는 이 제목에서 자동 도출**됩니다 (소문자화 + 문자·숫자가 아닌 구간을 하이픈으로 압축, 같은 ID가 있으면 `-2`, `-3` 형태로 충돌 회피). 유니코드 문자는 보존되므로 `펌웨어 빌드` → `펌웨어-빌드`가 됩니다 (0.6.25부터 — 이전에는 ASCII만 남겨 한글 제목이 모두 `action`, `action-2`가 됐습니다). ID는 아래 6단계 확인 창에서 바로 고칠 수 있습니다.
-4.  **템플릿 핵심 입력**: 템플릿마다 1~2개 질문만 받습니다. 대화형 task가 포함된 템플릿은 명령어 입력란에 참조 변수가 미리 채워져 나옵니다(예: `echo Selected file: ${selectFile.path}`, `echo ${input.value}`) — 변수 이름을 외우지 않아도 되도록. 작업 디렉터리(cwd), 터미널 reveal 모드, 성공/실패 메시지 같은 부수 옵션은 묻지 않고 기본값(`always` reveal, 메시지 없음)으로 채워집니다.
+    마법사는 동적 값을 안전하게 argv로 넘기기 위해 `shell` 대신 `command`를 만듭니다. `&&`·`|`·`>` 같은 셸 연산자가 있으면 저장 전에 경고합니다. Multi-step Pipeline은 최대 10단계이며, 선택지 입력은 쉼표로 나누고 빈 값과 중복을 제거합니다.
+3.  **제목 입력**: 제목에서 유니코드를 보존한 ID를 자동 생성하고, 충돌하면 `-2`, `-3`을 붙입니다. 확인 단계에서 ID를 바꿀 수 있습니다.
+4.  **핵심 값 입력**: 템플릿별로 1~2개 값만 묻고, 필요한 `${task.key}` 참조를 예시에 채웁니다. `cwd`, `revealTerminal`, 완료 메시지 같은 옵션은 기본값을 사용합니다.
 5.  **저장 위치 선택**: actions.json에 폴더(`type: 'folder'` 항목)가 있을 때만 위치 선택 Quick Pick이 뜹니다. 폴더가 하나도 없는 평탄한 actions.json이면 이 단계는 자동으로 건너뜁니다. 루트(폴더 밖)는 actions.json 배열 끝에 추가됩니다.
-6.  **저장 전 확인** (0.6.18부터): 디스크에 쓰기 직전 modal로 마지막 확인을 받습니다. 여기서 취소하면 파일은 전혀 건드리지 않습니다. modal의 *Cancel* / Escape는 명시적인 취소이므로 그대로 끝납니다.
-    *   **자동 도출된 `id`를 표시하고, *ID 변경* 버튼으로 그 자리에서 고칠 수 있습니다** (0.6.25부터). 이 값은 `taskhub.runAction.<id>` 커맨드 이름이 되어 `keybindings.json`에 노출되므로, 나중에 바꾸면 지정해 둔 단축키가 깨집니다. 입력값은 비어 있지 않고 공백이 없으며 기존 id와 겹치지 않는지 검사합니다 — 문자 종류에는 제약이 없습니다(한글 id도 유효하며, 커맨드 id로는 percent-encoding되어 들어갑니다). ID를 바꾸면 Doctor 검사도 새 id 기준으로 다시 돌립니다.
-    *   저장 위치와 task 목록(최대 8줄, 초과분은 개수로 접힘)을 함께 보여줍니다.
-    *   **[TaskHub Doctor](#23-taskhub-doctor-action-lint)를 저장 전에 돌립니다.** 파일 전체를 린트한 결과에서 *새 액션이 새로 만들어 낸 문제만* 골라 보고합니다 — 기존 액션이 원래 갖고 있던 경고까지 새 액션 탓으로 보이지 않도록 before/after를 비교합니다.
-    *   *자세히 보기* 버튼은 **추가될 액션 하나의 JSON**과 [Preview Run](#preview-run-dry-run) 시뮬레이션 결과를 임시 문서로 엽니다 (파일 전체를 덤프하지는 않습니다 — 액션이 수십 개인 파일에서는 미리보기로서 쓸모가 없기 때문입니다. 삽입 위치는 확인 창의 *위치* 줄에서 확인하세요). **문서를 연 뒤에는 확인 창이 modal이 아닌 알림으로 바뀝니다** (0.6.27부터) — VS Code modal은 워크벤치 전체를 가리고 입력을 잡아, 방금 연 문서를 스크롤하거나 선택할 수 없기 때문입니다. 선택지(*저장* / *ID 변경* / *자세히 보기*)는 그대로입니다. 이 알림은 X나 *Clear All Notifications*로 **실수로 닫히는** 표면이라, 닫히면 초안을 그대로 둔 채 한 번 되묻습니다 (0.6.52부터) — *다시 검토*를 고르면 입력한 내용이 살아 있는 같은 확인 화면으로 돌아가고(검토 문서를 이미 열었다면 알림 형태 그대로), *버리기*를 고르거나 그 알림마저 닫으면 저장하지 않고 끝납니다. 문서를 닫아도 저장 여부에는 영향이 없습니다.
-    *   검사기가 오류를 내더라도 생성 자체는 막지 않습니다 — 점검은 참고용이며, 실패는 TaskHub Output 채널에만 기록됩니다.
-7.  **자동 저장 + 후속 액션**: 생성된 액션은 워크스페이스의 `.vscode/actions.json`에 즉시 기록되며 Actions 패널이 갱신됩니다. 알림 본문은 *"'X' 액션이 actions.json에 추가되었습니다. cwd, revealTerminal, 성공/실패 메시지 등 추가 설정이 필요하면 actions.json을 편집하세요."* 형태로, 마법사가 묻지 않고 default 로 채운 부수 옵션이 존재한다는 사실을 사용자에게 알려줍니다. 알림의 *actions.json 열기* / *바로 실행* 버튼으로 곧바로 편집기에 점프하거나 액션을 시험 실행할 수 있습니다.
+6.  **저장 전 확인**: ID·위치·task 목록을 검토합니다. Doctor는 새 액션이 추가한 문제만 표시하고, *자세히 보기*는 해당 액션의 JSON과 [Preview Run](#preview-run-dry-run)을 엽니다. 취소하면 파일을 수정하지 않습니다.
+7.  **저장과 후속 작업**: 저장 후 Actions 뷰를 갱신하고 *actions.json 열기*와 *바로 실행*을 제공합니다.
 
-기존 `.vscode/actions.json`이 파싱 실패 / 스키마 위반으로 깨져 있으면 마법사가 곧바로 종료되지 않고, "actions.json 열기" 버튼을 가진 에러 알림을 띄워 사용자가 그 자리에서 파일을 열어 고칠 수 있게 합니다.
+기존 `actions.json`이 파싱 또는 스키마 검사에 실패하면 덮어쓰지 않고 파일을 열어 고칠 수 있는 알림을 표시합니다.
 
 ## 9. 검색 기능
 
@@ -1372,26 +552,15 @@ Preview Run은 각 태스크의 첫 줄에 `when:`을 찍습니다 — 이 태�
 
 ## 11. 작업 종료
 
-실행 중인 액션은 개별적으로 또는 모두 한 번에 종료할 수 있습니다. **실행 중지와 터미널 닫기는 서로 다른 명령입니다** (0.6.13부터) — 빌드를 멈추려다 읽고 있던 출력까지 사라지지 않도록 분리했습니다.
+실행 중인 행의 사각형 아이콘으로 액션 하나를, Actions 제목 표시줄의 **Stop All Actions**(`taskhub.stopAllActions`)로 전체를 중지합니다. 전체 중지 버튼은 실행 중인 액션이 있을 때만 보이며, 대상이 여러 개면 확인을 받습니다. 중지된 실행은 History에 `cancelled`·`stopped`로 기록되고 실패 알림은 표시하지 않습니다.
 
-*   **개별 액션 종료**: 실행 중인 액션 항목을 마우스 오른쪽 버튼으로 클릭하거나 인라인 아이콘(사각형)을 클릭하여 해당 액션만 종료할 수 있습니다.
-*   **모든 액션 중지** (`taskhub.stopAllActions`): `mainView.main` 제목 표시줄의 사각형 아이콘. **실행 중인 액션이 있을 때만 표시**됩니다 (`taskhub.hasRunningActions` context key). 터미널은 건드리지 않습니다.
-    *   대상이 2개 이상이면 중지할 액션 이름과 개수를 modal로 먼저 보여줍니다 (5개까지 나열하고 나머지는 "외 N개").
-    *   중지된 액션의 히스토리 항목은 `실패` + `Action stopped by user`로 마감됩니다 — 예전에는 일괄 종료 시 항목이 `실행 중` 상태로 남았습니다. (0.6.13~0.6.21에서는 이 기록이 종료 오류 메시지로 덮이고 불필요한 실패 알림이 함께 떴습니다. 0.6.22에서 수정되었습니다.)
-    *   확인 창에서 취소하면 어떤 액션도 중지되지 않고, 호환 명령 `taskhub.terminateAllActions`로 실행한 경우 **터미널도 닫지 않습니다**.
-    *   이미 끝난 액션의 ✓/✗ 아이콘은 지우지 않습니다.
-    *   확인 창이 떠 있는 동안 대상이 스스로 모두 끝났다면 *"대상 액션이 이미 모두 끝났습니다"* 로 알립니다 (0.6.29부터). 예전에는 같은 상황에서 *"중지할 활성 태스크를 찾지 못했습니다"* 경고가 떠, 정상적인 경합을 오류처럼 보이게 했습니다.
+### 대화형 태스크를 기다리는 중의 중지
 
-### 대화형 태스크를 기다리는 중의 중지 (0.6.29)
+- `inputBox`와 `quickPick`은 즉시 닫힙니다.
+- OS 네이티브 `fileDialog`·`folderDialog`는 강제로 닫을 수 없으므로, 사용자가 대화상자를 끝내는 즉시 파이프라인을 중단합니다.
+- **TaskHub 터미널 닫기**(`taskhub.closeAllTerminals`)는 `TaskHub: ` 접두사의 터미널만 닫으며 액션 실행 상태를 바꾸지 않습니다.
 
-`inputBox` / `quickPick` / `fileDialog` 프롬프트 앞에서 대기 중인 액션도 중지할 수 있습니다. 이 상태의 액션은 실행 중인 프로세스가 없어서, 예전에는 중지 버튼을 눌러도 *"활성 태스크를 찾을 수 없습니다"* 경고만 뜨고 프롬프트는 화면에 그대로 남았습니다.
-
-*   `inputBox`와 `quickPick`은 **프롬프트가 즉시 닫힙니다.** TaskHub가 실행마다 `CancellationToken`을 만들어 넘기고, VS Code가 취소 시 프롬프트를 닫습니다.
-*   `fileDialog` / `folderDialog`가 여는 **OS 네이티브 대화상자는 프로그램적으로 닫을 수 없습니다.** 중지 요청은 기록되고, 사용자가 대화상자를 닫거나 파일을 고르는 순간 파이프라인이 중단됩니다 — 고른 파일로 뒤 단계가 계속 진행되지 않습니다.
-*   어느 경우든 히스토리는 다른 중지 경로와 동일하게 `실패` + `Action stopped by user`로 마감되며, 실패 알림은 뜨지 않습니다.
-*   **TaskHub 터미널 닫기** (`taskhub.closeAllTerminals`): `TaskHub: ` 접두사를 가진 터미널을 모두 닫습니다. 제목 표시줄 `…` 오버플로 메뉴 또는 Command Palette에서 실행하며, 액션 실행에는 영향을 주지 않습니다.
-
-> `taskhub.terminateAllActions`는 두 동작을 한 번에 하던 예전 명령입니다. 기존 `keybindings.json`이 깨지지 않도록 **호환용으로만 남겨 두었고**(중지 후 터미널 닫기), 메뉴와 팔레트에는 노출되지 않습니다. 새로 키를 지정한다면 위 두 명령을 쓰세요.
+실행 중지와 터미널 닫기는 별도 명령입니다. 예전의 `taskhub.terminateAllActions`는 기존 단축키 호환을 위해 두 동작을 차례로 수행하지만 메뉴와 명령 팔레트에는 노출되지 않습니다.
 
 ## 12. Multi-root 워크스페이스 지원
 
@@ -1404,41 +573,19 @@ Preview Run은 각 태스크의 첫 줄에 `when:`을 찍습니다 — 이 태�
 ## 13. 쉬운 설정 관리
 
 *   **설정 파일 편집**: 각 뷰(Actions, 링크, 즐겨찾기)의 제목 표시줄에 있는 연필 아이콘을 클릭하여 `.vscode` 폴더에 있는 `actions.json`, `links.json`, `favorites.json` 파일을 쉽게 열고 편집할 수 있습니다. 파일이 없으면 새로 생성됩니다.
-*   **예제 JSON 보기**: Actions 패널 제목 표시줄의 전구(💡) 아이콘을 클릭하여 각 설정 파일의 예제 JSON 내용을 확인할 수 있습니다.
+*   **예제 JSON 보기**: Actions 패널 제목 표시줄의 `…` 메뉴에서 세 설정 파일의 예제를 선택합니다.
 *   **확장 프로그램 설정 열기**: 명령 팔레트(Cmd/Ctrl+Shift+P)에서 `TaskHub: Open Extension Settings`를 실행하여 확장 프로그램과 관련된 모든 설정을 VS Code 설정 화면에서 쉽게 확인하고 수정할 수 있습니다.
 
 ## 14. 액션 실행 히스토리
 
-메인 뷰의 최하단에 위치한 히스토리 패널은 최근 실행한 액션과 TaskHub 도구 열람 기록을 추적하고 관리합니다.
+History 패널은 액션 실행과 Memory Map·Hex Editor·JSON Editor 열람을 저장합니다.
 
-**주요 기능:**
-*   **기록 추적**: 액션을 실행하거나 Memory Map / Hex Editor / JSON Editor를 성공적으로 열 때마다 히스토리에 자동으로 추가되며, 제목에는 총 개수가 표시됩니다 (예: "History (10)").
-*   **상태 표시**: 각 히스토리 항목은 실행 상태를 시각적으로 표시합니다:
-    *   성공
-    *   실패
-    *   실행 중
-*   **"Last run" 배지 (시각 + 소요 시간)**: 종료된 항목은 라벨 옆에 짧은 배지가 함께 표시됩니다 — 확장을 재시작해도 그대로 남아 "오늘 빌드 됐었지?"에 한눈에 답이 됩니다.
-    *   형식: `HH:mm · 1.2s` / `어제 14:30 · 45ms`. 성공/실패는 위의 상태 아이콘(녹색 ✓ / 빨간 ✗)으로만 표시하며, 같은 신호를 배지 텍스트에 중복하지 않습니다.
-    *   시각 표기: 같은 날 `HH:mm`, 어제 `어제 HH:mm` (영문은 `Yest HH:mm`), 더 오래된 항목 `MM/DD`.
-    *   소요 시간 표기: `Nms` (1초 미만) / `N.Ns` (1분 미만, 절삭) / `Nm Ms` (1시간 미만) / `Hh Mm`.
-    *   진행 중(`running`) 항목은 배지 대신 상태 아이콘만 표시합니다.
-    *   VS Code를 24시간 이상 켜둔 채 자정을 넘겨도 배지는 자동으로 갱신됩니다 (시간당 background tick + 패널 재진입 시 갱신).
-*   **실행/열람 시간 정보**: 히스토리 항목에 마우스를 올리면 액션 실행 또는 도구 열람의 정확한 시간이 툴팁으로 표시됩니다 (예: "Executed at: 2025-12-28 14:30:45", "Opened at: 2025-12-28 14:30:45").
-*   **빠른 재실행/다시 열기**: 액션 히스토리 항목을 클릭하면 해당 액션을 즉시 재실행합니다. Memory Map / Hex Editor / JSON Editor 히스토리 항목(각각 `graph` / `file-binary` / `json` 아이콘으로 구분)은 저장된 파일 경로로 해당 도구를 다시 엽니다. Memory Map은 ELF/AXF인지 ARM Linker Listing인지와 당시 사용한 메모리 region 설정을 함께 보존하므로, 다시 열 때 입력 형식·링커 스크립트 선택 다이얼로그를 건너뜁니다. 재실행 또는 다시 열기는 새로운 히스토리 엔트리로 추가됩니다.
-*   **저장된 입력값으로 재실행 (Re-run with Saved Inputs)**: 액션 실행 중 사용자가 입력한 인터랙티브 task 결과(`inputBox` / `quickPick` / `envPick` / `fileDialog` / `folderDialog` / `confirm`)는 자동으로 해당 히스토리 엔트리에 함께 기록됩니다. **히스토리 항목을 클릭해 재실행하면, 저장된 입력값이 있는 한 다이얼로그를 다시 띄우지 않고 이전 응답값(예: 직전에 선택한 디렉터리)을 그대로 재사용합니다.** 저장된 입력값이 있는 항목 옆에는 ▶ 아이콘도 표시되며, 동일하게 입력값을 재사용해 재실행합니다.
-
-    > **저장값이 현재 조건을 만족하지 못하면 그 task만 다시 묻습니다** (액션을 실패시키지 않습니다). `inputBox`의 `validatePattern`을 나중에 조인 경우, `quickPick`의 `items`에서 사라진 값인 경우, 그리고 **0.6.57 이전에 기록된 다중 선택 다이얼로그**가 그렇습니다 — 옛 기록에는 첫 항목만 남아 있어 무엇을 골랐는지 복원할 수 없고, 조용히 하나만 처리하면 여러 개를 골랐던 실행이 소리 없이 다른 일을 하게 됩니다. 단일 선택 기록은 남아 있는 경로로 `paths` / `names` / `count`를 복원해 그대로 재사용합니다.
-    *   같은 task ID에 대해 저장된 값이 있을 때만 다이얼로그가 스킵됩니다. 액션 정의에 새 인터랙티브 task가 추가되어 매칭되는 저장값이 없으면, 그 task만 정상적으로 다이얼로그를 띄웁니다. 입력을 새로 고르고 싶을 때는 히스토리가 아니라 원본 액션을 실행합니다.
-    *   **보안**: `inputBox` task에 `"password": true`가 설정된 경우 해당 입력값은 히스토리에 저장되지 않습니다. 비밀번호/토큰을 받는 task는 항상 새로 입력해야 합니다.
-*   **실행한 명령 보기 (View Executed Command)**: `command` / `shell` task가 실제로 실행한 명령줄이 `${...}` 치환(선택한 디렉터리 등 포함)이 끝난 상태로 히스토리에 함께 기록됩니다. 명령이 기록된 항목 옆의 터미널 아이콘을 클릭하면 **재실행하지 않고** 어떤 명령이 어떤 인자로 실행됐는지 task ID별로 정리된 읽기 전용 문서로 보여줍니다. (출력 보기와 달리 실행 결과가 아니라 실행한 명령 자체를 표시합니다.)
-*   **인라인 액션**: 각 히스토리 항목에 마우스를 올리면 다음 아이콘들이 표시됩니다:
-    *   ▶ 아이콘: 저장된 입력값으로 재실행합니다. 인터랙티브 task가 있었던 항목에만 표시됩니다.
-    *   터미널 아이콘: 실행한 명령줄을 봅니다 (재실행 안 함). `command` / `shell` task가 있었던 항목에만 표시됩니다.
-    *   출력 보기 아이콘: 실패한 액션의 에러 메시지를 확인할 수 있습니다. 출력이 있는 항목에만 표시됩니다.
-    *   휴지통 아이콘: 개별 히스토리 항목을 삭제합니다 (v0.4.33부터 modal 확인 대화상자 표시 — `Delete Favorite` / `Delete Link`와 같은 보호 수준).
-*   **전체 히스토리 삭제**: 패널 제목 표시줄의 버튼을 클릭하여 모든 히스토리를 한 번에 삭제할 수 있습니다 (확인 대화상자 표시).
-*   **자동 제한**: 히스토리는 설정된 최대 개수까지만 유지되며, 초과 시 가장 오래된 항목부터 자동으로 삭제됩니다 (기본값: 10개).
-*   **패널 표시/숨김**: 설정에서 히스토리 패널을 숨길 수 있으며, `TaskHub: Toggle History Panel` 명령으로 표시/숨김을 전환할 수 있습니다.
+- 상태는 `running`·`success`·`failure`·`cancelled`이며, 취소는 사용자가 누른 Stop과 닫은 프롬프트를 구분합니다. 완료 항목은 실행 시각과 소요 시간 배지를 표시합니다.
+- 액션 항목을 클릭하면 다시 실행하고, 도구 항목을 클릭하면 저장된 파일과 열기 옵션으로 다시 엽니다.
+- `inputBox`·`quickPick`·`envPick`·`fileDialog`·`folderDialog`·`confirm` 결과가 있으면 재실행에 사용합니다. 현재 검증 규칙이나 선택지와 맞지 않는 값만 다시 묻고, `password: true` 입력은 저장하지 않습니다.
+- `command`·`shell`의 실제 실행 명령은 태스크별 읽기 전용 문서로 볼 수 있습니다. 비밀 입력은 기록 전에 마스킹합니다.
+- 행의 인라인 버튼으로 저장 입력 재실행, 명령 보기, 실패 출력 보기, 개별 삭제를 수행합니다. 제목 표시줄에서는 확인 후 전체 삭제합니다.
+- 보관 개수와 패널 표시 여부는 `taskhub.history.maxItems`와 `taskhub.history.showPanel`로 설정합니다. 자세한 기본값은 [§21](#21-설정-레퍼런스)을 참조하세요.
 
 ## 15. C/C++ Hover 기능
 
@@ -1848,8 +995,6 @@ Actions 패널에서 액션 또는 폴더를 **우클릭** → **"Export Action"
 2. 저장할 파일 위치와 이름을 선택합니다 (`.taskhub` 또는 `.json` 형식).
 3. 내보낸 항목 수가 알림으로 표시됩니다.
 
-> 0.6.27 이전에는 *Export Action* · *Preview Run* · *Assign Shortcut* 세 항목이 **한 번도 실행하지 않은 액션에서만** 보였습니다. 실행 상태가 TreeItem의 `contextValue`로 인코딩되는데(`runningAction` / `succeededAction` / `failedAction`) 메뉴 조건이 `action` 하나만 나열했기 때문입니다. 세 항목 모두 실행 상태와 무관하게 노출되도록 고쳤습니다. `taskhub.showTaskStatus`를 꺼도 `contextValue`는 실제 상태를 유지하므로(인라인 중지 버튼이 사라지면 안 되기 때문 — [§21 설정 레퍼런스](#21-설정-레퍼런스)) 설정으로 우회할 수 있는 문제도 아니었습니다.
-
 **Export 파일 형식 (`.taskhub`):**
 ```json
 {
@@ -1883,131 +1028,71 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Import Actions"** 실행하거�
 
 ## 19. Memory Map 시각화
 
-> **지역화 / 접근성 (0.6.21부터)**: 웹뷰 UI(버튼·제목·열 이름·검색·상태)가 VS Code 언어 설정을 따릅니다. **단 *Copy Report* / *Copy Full Dump* 로 복사되는 리포트 본문은 영어로 유지**됩니다 — 이슈·커밋·문서에 붙여 공유하는 산출물이라 문구가 안정적인 편이 낫기 때문입니다. 접근성 측면에서는 정렬 가능한 열 머리글이 키보드(Tab → Enter/Space)로 동작하고 `aria-sort`로 현재 정렬 상태를 알리며(▲/▼ 글리프는 스크린리더가 읽지 못합니다), 검색 결과 개수는 live region, 아이콘 전용 버튼(◀ ▶ ↑)에는 `aria-label`, *모두 펼치기* 버튼에는 `aria-expanded`가 붙습니다. 사용량 막대는 같은 수치가 이미 텍스트로 있으므로 `aria-hidden`으로 중복 낭독을 막습니다.
->
-> **0.6.31부터**: region 카드와 Object Summary 헤더가 `role="button"` + `tabindex` + `aria-expanded`를 갖춰 키보드(Tab → Enter/Space)로 펼칠 수 있습니다 — 이전에는 마우스 없이 영역 상세를 볼 방법이 아예 없었습니다. 0.6.21의 정렬 접근성이 정적 All Sections 표에만 적용돼 있던 것도 보완해, **런타임에 조립되는 region 상세 / Object Summary 표**의 정렬도 키보드로 동작하고 `aria-sort`를 갱신합니다.
->
-> **0.6.55부터**: 두 접기 헤더에 포커스 표시(`:focus-visible`)가 생겼고 — 이전에는 `tabindex=0`인데 포커스가 보이지 않아 Enter를 눌러 보기 전에는 자기 위치를 알 수 없었습니다 — 화면의 제목이 실제 제목 요소가 되어 스크린리더로 구조를 건너뛸 수 있습니다: `h1` 파일명 → `h2` 메모리 영역 / 영역 상세 / 전체 섹션 → `h3` 영역 이름 → `h4` 오브젝트 요약. 접기 컨트롤은 제목이 **감싸는** 형태입니다 — 컨트롤 자체에 `role="button"`을 주면 그 역할이 제목을 덮어써 제목 이동에서 사라지기 때문입니다. 컨트롤이 달린 제목은 텍스트만 감싸므로 버튼 문구가 제목 이름에 딸려 들어가지 않고, 영역이 여럿일 때를 위해 오브젝트 요약 제목과 섹션 행 버튼의 접근 가능한 이름에는 영역 이름이 붙습니다.
-
-ARM `.axf`/`.elf` 바이너리 파일을 파싱하여 메모리 사용량을 시각적으로 표시합니다. 임베디드 개발 시 Flash/RAM 사용량을 한눈에 파악할 수 있습니다.
-
-> **입력 크기 한도**: 파일은 **100MB** 까지 받습니다. ARM Linker Listing 은 여기에 더해 **엔트리 50만 개** 상한이 있습니다 (0.6.40부터) — listing 은 한 줄이 엔트리 하나라 파일 크기만으로는 부족하고, 엔트리 하나가 파싱 객체 → 파생 배열 → JSON → HTML → (모두 펼치기 시) DOM 노드로 증폭되기 때문입니다. 상한을 넘으면 **경고를 띄우고** 앞의 50만 개만 표시합니다. 이때도 **요약 수치(Total RO/RW/ROM)는 파일 전체 기준**이라 정확합니다 — 잘리는 것은 개별 엔트리 목록뿐입니다.
+ARM `.axf`/`.elf` 바이너리 또는 ARM Linker Listing을 분석해 Flash/RAM 배치와 사용량을 표시합니다. 파일 입력 한도는 100MB이며, Listing은 개별 엔트리를 최대 50만 개까지 그립니다. 상한을 넘겨도 Image Totals 요약은 전체 파일 기준입니다.
 
 ### 사용 방법
 
-Command Palette (Cmd+Shift+P)에서 **"TaskHub: Show Memory Map"** 실행:
+Command Palette에서 **TaskHub: Show Memory Map**을 실행합니다.
 
-1. 입력 형식을 선택합니다:
-   - **AXF/ELF 파일**: ARM 실행 바이너리 직접 파싱
-   - **ARM Linker Listing**: `armlink --list` 출력 파일 파싱 (별도 링커 스크립트 불필요)
-2. **(AXF/ELF 선택 시)** `.axf`, `.elf`, `.out` 파일을 선택합니다.
-   - 메모리 영역 설정이 없으면 링커 스크립트(`.ld`/`.sct`) 선택을 제안합니다.
-3. **(ARM Linker Listing 선택 시)** `*_axf_link.txt` 등 armlink listing 파일을 선택합니다.
-   - Execution Region에서 메모리 영역 크기를 자동 추출합니다.
-4. WebView 패널에서 메모리 사용량을 시각화합니다.
+1. **AXF/ELF** 또는 **ARM Linker Listing**을 선택합니다.
+2. AXF/ELF는 `.axf`·`.elf`·`.out` 파일을 고릅니다. 메모리 영역 설정이 없으면 GNU linker script나 ARM scatter file을 선택할 수 있습니다.
+3. Listing은 `armlink --list` 출력 파일을 고릅니다. Execution Region에서 영역 크기를 자동으로 읽습니다.
+4. 같은 파일을 다시 열면 기존 패널을 재사용하고, 다른 파일은 별도 탭에 엽니다.
 
 ### 표시 정보
 
-- **Region 요약 테이블**: 상단에 각 region별 Base, Size, Used, Free, Usage 한눈에 표시
-- **Flash/RAM 요약**: 코드(`.text`), 읽기 전용 데이터(`.rodata`), 초기화 데이터(`.data`), BSS(`.bss`) 크기
-- **메모리 영역별 사용률**: 설정된 메모리 영역에 대한 사용량 바 차트 (90% 이상: 빨강, 70% 이상: 주황, 기본: 초록)
-- **세그먼트 레이아웃 바**: 메모리 영역 내 섹션 배치를 색상 블록으로 시각화 (CODE: 파랑, RODATA: 보라, DATA: 주황, NOBITS: 회색, FREE: 투명)
-- **Free Space**: 메모리 영역 내 빈 공간 표시 (영역 헤더 및 테이블에 포함). Alignment padding (1~3바이트)은 의미 없는 공간으로 간주하여 Calc Free 및 세그먼트 레이아웃 바에서 제외
-- **Linker/Calc 구분 표시**: listing 파일의 경우 링커 보고값(Used, Free)과 계산값(Calc Used, Calc Free)을 Overview 테이블과 Region Details 양쪽에서 구분하여 표시
-- **전체 섹션 목록**: 이름, 주소, 크기, 타입(CODE/DATA/RODATA/NOBITS)
-- **End 주소**: 섹션의 마지막 바이트 주소 (inclusive, `addr + size - 1`)
+- Region별 Base·Size·Used·Free·Usage와 사용률 바
+- 코드·읽기 전용 데이터·초기화 데이터·BSS 요약
+- 영역 안 섹션과 빈 공간의 배치, 섹션 주소·inclusive End·크기·타입
+- Listing의 링커 보고값과 TaskHub 계산값 구분
+- Region Overview 행 클릭, 접기/펼치기, 실제 수치 기준 열 정렬
+
+사용률은 70% 이상 주황, 90% 이상 빨강으로 표시합니다. 1~3바이트 alignment padding은 계산된 free space에서 제외합니다.
 
 ### AXF/ELF 심볼 기반 상세 분석
 
-AXF/ELF 파일에서 프로그램 헤더(PT_LOAD)와 심볼 테이블(.symtab)을 파싱하여 armlink listing에 근접한 수준의 상세 정보를 제공합니다:
+ELF 프로그램 헤더와 심볼 테이블을 사용합니다.
 
-- **자동 리전 감지**: 링커 스크립트 없이도 ELF 프로그램 헤더의 PT_LOAD 세그먼트에서 FLASH/RAM 영역을 자동으로 감지
-- **함수/변수 단위 분석**: 심볼 테이블이 포함된 AXF 파일의 경우 함수(FUNC)와 전역 변수(OBJECT) 단위로 크기를 분석
-- **미할당 영역 표시**: 심볼로 커버되지 않는 섹션 부분은 `[other]`로 표시
-
-> **참고**: stripped 바이너리(심볼 테이블이 제거된 파일)에서는 섹션 단위 분석만 제공됩니다. 가능하면 디버그 심볼이 포함된 `.axf` 파일을 사용하세요.
+- `PT_LOAD` 세그먼트에서 메모리 영역을 자동 감지합니다.
+- 심볼이 있으면 함수(`FUNC`)와 전역 객체(`OBJECT`) 단위 크기를 보여 줍니다.
+- 심볼이 덮지 않는 섹션 구간은 `[other]`로 표시합니다.
+- stripped 바이너리는 섹션 단위 정보만 제공합니다.
 
 ### Region별 Object Summary
 
-각 Region Details 내부에 해당 region의 오브젝트(.o) 파일별 메모리 사용량을 집계하여 표시합니다 (오브젝트가 2개 이상인 region에서만 표시):
-
-- 기본 접힘 상태, 헤더 클릭으로 펼침/접기
-- 각 오브젝트의 총 크기, 해당 region의 used 대비 점유율(%), **그 오브젝트가 몇 개 섹션으로 이뤄졌는지**(`섹션 3개`) 표시
-- "섹션 행 ▶" 버튼: 오브젝트별 섹션 행(Section, Address, End, Size, Type) 표시/숨김. 라벨의 글리프가 현재 상태를 나타냅니다(`▶` 숨김 / `▼` 표시). **요약이 접혀 있을 때 누르면 요약을 함께 펼치고, 요약을 접으면 이 버튼도 꺼진 상태로 돌아갑니다** — 버튼의 상태는 늘 화면에 실제로 보이는 것과 같습니다
-- 크기순 내림차순 정렬로 가장 큰 오브젝트를 빠르게 파악
-- 열 머리글(Object / Size / Bytes / %)을 눌러 다시 정렬할 수 있습니다. **섹션 행을 펼친 상태에서도 오브젝트와 그에 딸린 섹션 행이 한 묶음으로 함께 이동**하며, 정렬 기준은 화면 표시값이 아니라 원본 값(바이트 수, 반올림 전 퍼센트)입니다.
-
-> **0.6.55에서 수정**: 이 버튼은 `Details ▶`라는 이름으로 **요약 헤더 안에** 있었고, 접힌 요약 안의 행만 뒤집었습니다. Object Summary는 기본이 접힘이므로 **처음 누르는 사람은 예외 없이 "눌러도 화면이 그대로"인 상태를 만났고**, 라벨도 상태에 따라 바뀌지 않아 눌렸는지조차 알 수 없었습니다. 이름 역시 바로 위 "영역 상세"(Region Details)와 구별되지 않았습니다. 이제 (1) 켜는 방향이면 요약을 함께 펼치고 요약을 접으면 버튼도 되돌리며, (2) 라벨 글리프와 `aria-pressed`로 상태를 드러내고, (3) 이름을 "섹션 행"으로 바꾸고, (4) 버튼을 헤더 밖 형제로 옮겼습니다 — `role="button"` 안의 진짜 `<button>`은 잘못된 ARIA 구조였고, 한 줄 안에서 누르는 지점마다 다른 일이 일어났습니다.
-
-> **0.6.34에서 수정**: 이 표의 정렬이 두 가지 이유로 깨져 있었습니다. (1) 정렬 시 오브젝트 행만 재배치하고 섹션 상세 행은 제자리에 남겨, Details를 펼친 상태에서 묶음이 통째로 어긋났습니다. (2) 오브젝트 행의 `colspan` 때문에 헤더 순번과 셀 순번이 어긋나, **Percent 정렬은 빈 셀을 읽어 아무 동작도 하지 않았고** Size/Bytes는 반올림된 퍼센트 셀을 읽었습니다. 후자는 퍼센트가 바이트에 비례해 방향은 대체로 맞아 보였지만, `toFixed(1)` 동률 구간에서는 직전 정렬 순서가 남아 크기 순서가 보장되지 않았습니다 — 패널을 막 열었을 때는 목록이 이미 크기 내림차순이라 정확해 보이고, Object 이름으로 한 번 정렬한 뒤 Size를 누르면 드러납니다.
+오브젝트가 둘 이상인 region은 `.o` 파일별 총 크기·바이트·점유율·섹션 수를 접힌 표로 제공합니다. *섹션 행* 토글로 Address·End·Size·Type을 펼칠 수 있고, 정렬할 때 오브젝트와 하위 섹션이 한 묶음으로 이동합니다.
 
 ### 함수명 표시 (Region Details)
 
-Region Details 테이블에서 Function 컬럼을 토글하여 각 엔트리의 함수/심볼명을 확인할 수 있습니다:
-
-- **ARM Linker Listing**: 섹션 토큰에서 `.text.`, `.rodata.` 등 알려진 prefix를 제거하고 함수명 추출 (예: `.text._ZN4Test8FuncEv` → `_ZN4Test8FuncEv`)
-- 괄호 없는 오브젝트 형식(`idx  .text._ZN...  Object.o`)에서도 함수명 추출 지원
-- 알려지지 않은 prefix의 경우 섹션 토큰 전체를 그대로 표시
-- 테이블 컬럼: **Object** | **Section** | **Function** | Address | End | Size | Bytes | Type
-- "Function ▶" 버튼 클릭으로 Section + Function 컬럼 함께 표시/숨김 전환
+Function 토글은 Section과 Function 열을 함께 표시합니다. ARM Listing은 `.text.`·`.rodata.` 같은 알려진 prefix를 제거해 함수명을 추출하며, 알 수 없는 prefix는 원문을 유지합니다.
 
 ### 리포트 복사
 
-Memory Map 패널 상단에 **두 개의 복사 버튼**이 있습니다 — 의도가 "공유용 요약"인지 "원시 데이터 dump"인지에 따라 골라 사용합니다.
+- **Copy Report**: 파일 정보, Memory Regions, region별 큰 섹션과 free hole, 포화 영역 경고를 담은 짧은 Markdown 보고서
+- **Copy Full Dump**: 모든 region·section을 담은 고정폭 텍스트. diff나 회귀 비교에 적합
 
-- **"Copy Report"** — 큐레이션된 markdown 요약(약 50줄). 헤더(파일명/경로/Entry Point/생성 시각), Memory Regions 표, region별 Top 5 섹션 + 가장 큰 free hole, 그리고 Highlights(가장 큰 섹션·가장 큰 free hole·≥80% 포화 region 경고). 형식은 markdown 표라 GitHub 이슈/PR, Slack, Notion에 그대로 붙여 넣어도 정렬이 깨지지 않습니다.
-- **"Copy Full Dump"** — region별 모든 섹션 + 전체 섹션 표(Address/End/Size/Bytes/Type)를 monospace 텍스트로 그대로 복사. grep / diff / 회귀 비교가 필요할 때 사용. 대용량 listing 파일은 수백~수천 줄에 이를 수 있습니다.
+공유할 때 문구가 안정적으로 유지되도록 복사되는 보고서 본문은 영어입니다.
 
 ### HTML 저장
 
-Memory Map 패널 상단의 **"Save HTML"** 버튼을 클릭하면, 현재 보이는 화면 그대로를 standalone HTML 파일로 저장할 수 있습니다:
-
-- 사용자가 펼치거나 접은 상태, 검색 필터 등 현재 DOM 상태가 그대로 반영됩니다
-- 저장된 HTML 파일은 VS Code 없이 일반 브라우저에서 열 수 있습니다
-- 팀원 공유, 리포트 보관, 오프라인 참조 용도로 활용할 수 있습니다
+**Save HTML**은 현재의 접기 상태와 검색 필터를 포함한 standalone HTML을 저장합니다. VS Code 없이 브라우저에서 열 수 있습니다.
 
 ### 성능 최적화
 
-대용량 ARM Linker Listing 파일(수천 개 엔트리)도 쾌적하게 표시할 수 있도록 다음 최적화가 적용되어 있습니다:
-
-- **Lazy Rendering**: Region 카드는 접힌 상태로 표시되며, 펼칠 때만 상세 테이블을 동적 생성합니다. 초기 로드 시 불필요한 DOM 노드를 생성하지 않습니다.
-- **Virtual Scrolling**: 200행을 초과하는 테이블은 보이는 영역 + 버퍼만 렌더링합니다. 스크롤 시 `requestAnimationFrame`으로 효율적으로 갱신됩니다.
-- **Data-driven Search/Sort**: 검색과 정렬이 JSON 데이터 배열에서 처리되어 DOM 전체 순회 없이 빠르게 동작합니다.
+Region 상세는 펼칠 때 생성하고, 200행을 넘는 표는 가상 스크롤을 사용합니다. 검색과 정렬은 원본 데이터 배열에서 처리합니다.
 
 ### 검색 및 탐색
 
-- **키워드 검색**: 상단 검색창에서 오브젝트/섹션/함수 이름, 주소, 크기, 타입으로 필터링. 검색 중 검색 대상이 되는 Section/Function 컬럼은 자동으로 표시됩니다(검색어를 비우면 원래대로). `Ctrl/Cmd+F`로 검색창에 포커스(기존 입력은 전체 선택), `Esc`로 검색어 초기화 후 다시 한 번 누르면 포커스 해제
-  - **매치 하이라이트**: Region Details 테이블(가상 스크롤 포함)과 All Sections / Overview 테이블 모두에서 검색어와 일치하는 부분 문자열을 에디터 "찾기" 강조색으로 칠해 위치를 즉시 알 수 있습니다
-  - **매치 네비게이션**: 검색창 오른쪽 `◀ ▶` 버튼과 `3 / 17` 위치 카운터로 매치 사이를 이동합니다. `Enter` = 다음, `Shift+Enter` = 이전, 양 끝에서 순환. 이동 시 해당 행을 화면 가운데로 가져오고 "현재 매치"를 진하게 강조하며, 검색 직후 첫 매치가 자동 선택됩니다. 결과가 없으면 `No matches`를 경고색으로 표시
-  - **결과 중심 정리**: 검색 중에는 매치가 0개인 region 카드를 숨기고, 헤딩에 매치 수를 표기합니다 — `All Sections (12 / 540)`, `Region Details — 2 regions matched`. 매치가 있는 region은 자동으로 펼쳐집니다
-  - **Object Summary도 함께 걸러집니다** (0.6.55): 오브젝트는 **자기 이름이 걸리거나 딸린 섹션 중 하나라도 걸리면** 남습니다 — 검색 중에 이 표를 여는 이유가 "이 검색어가 어느 오브젝트에 있나"이기 때문입니다. 섹션 행을 펼쳐 둔 상태라면 걸린 행만 보입니다(오브젝트 이름 자체가 걸린 경우에는 그 오브젝트의 섹션 전부). 다만 **매치 수와 `◀▶` 이동에는 넣지 않습니다** — 같은 바이트가 아래 섹션 표에 이미 매치로 잡혀 있어 두 번 세게 되기 때문입니다. 이전에는 한 카드 안에서 섹션 표는 걸러진 결과를, 바로 위 요약 표는 전체 목록을 하이라이트도 없이 보여 줬습니다
-  - **검색창 상단 고정**: 검색 박스(입력창 + 카운터 + ◀▶)가 화면 상단에 고정되어, 결과를 보러 아래로 스크롤해도 계속 보입니다
-- **다중 패널**: 서로 다른 파일을 열면 각각 별도 탭으로 표시됩니다. 동일 파일명이라도 경로가 다르면 독립 패널로 열리며, 같은 파일을 다시 열면 기존 패널을 재사용합니다.
-- **심볼 이동** (`Ctrl+Shift+O` / macOS `Cmd+Shift+O`, 또는 명령 팔레트): Memory Map 패널이 활성화된 상태에서 VS Code QuickPick으로 **심볼/섹션 행**을 표시하고, 선택 시 그 행으로 이동합니다 — 접힌 영역은 펼치고, 가상 스크롤 표는 해당 행까지 스크롤하며, 행을 검색 매치와 같은 방식으로 강조·포커스하고 이동 사실을 검색 요약 자리(live region)에 한 줄로 알립니다 (마지막으로 활성화된 패널 기준)
-  - 항목마다 주소·크기·타입·영역·부모 섹션이 함께 표시되고 설명까지 검색되므로, `FLASH`나 `.text`, `0x0800`처럼 이름이 아닌 것으로도 찾을 수 있습니다. ARM Linker Listing처럼 함수명이 있는 입력에서는 함수명이 앞에 오고 오브젝트명은 설명으로 갑니다
-  - **영역**은 심볼 아래 별도 묶음으로 남아 있어, 0.7.12까지의 region 이동도 그대로 됩니다
-  - 검색 중이라면, 그 검색이 대상 행을 걸러 낼 때만 검색을 비웁니다(그 사실을 알립니다). 대상이 검색 결과 안에 있으면 검색을 유지한 채 그 행을 "현재 매치"로 잡아 `◀ ▶`가 이어집니다
-  - 항목이 아주 많으면 **큰 것부터 5,000개**만 싣고 `큰 항목 5,000 / 전체 128,431` 처럼 제목에 적습니다(목록 자체는 주소순으로 놓입니다). 나머지는 패널 검색으로 찾습니다 (0.7.13까지 이 명령은 이름과 달리 region 목록만 보여 줬습니다)
-  - **크기가 0인 심볼은 목록에 없습니다** — 표가 그리지 않는 행이라 이동할 대상이 없기 때문입니다. `Reset_Handler`나 `_estack` 같은 어셈블리 레이블은 툴체인에 따라 `st_size = 0`으로 나오므로 여기에 해당할 수 있습니다
-- **소스에서 맵으로 점프** (C/C++ 편집기 우클릭 → *커서의 심볼 보기*, 또는 명령 팔레트 `Memory Map: 커서의 심볼 보기`): 커서 아래 심볼을 **열려 있는 Memory Map 들**에서 찾아 그 행으로 이동합니다. "이 함수가 얼마나 먹는지"를 소스에서 바로 확인하는 경로입니다
-  - 어느 바이너리인지는 **지금 열려 있는 패널**로 정합니다. 별도 매핑 설정은 없으며, 후보가 여럿이면 주소·크기·타입·영역과 **파일명**을 함께 보여 고르게 합니다. **마지막으로 보던 맵이 맨 앞**에 오므로, 부트로더와 앱을 함께 열어 두어도 그대로 Enter 를 누르면 보던 쪽으로 갑니다
-  - 선택 영역이 **식별자 하나일 때만** 그것을 씁니다. `HAL_Init(&h);` 처럼 덩어리를 선택한 채 실행하면 커서 아래 낱말로 되돌아갑니다
-  - **C++ mangled 이름을 뚫습니다**: 소스의 `HAL_Init` 이 맵에 `_ZN3HAL8HAL_InitEv` 로 들어 있어도 찾습니다. Itanium ABI 의 **이름부**만 따라가므로 `CAN1::Init`(`_ZN4CAN14InitEv`) 처럼 클래스 이름이 숫자로 끝나는 경우도 찾고, `Foo8HAL_Init::bar` 처럼 이름 안에 우연히 들어 있는 것이나 `foo(Widget)` 의 **인자 타입**·템플릿 인자는 걸리지 않습니다
-  - **최적화 clone 접미사**(`HAL_Init.constprop.0`, `foo.isra.0` 등)를 떼고 비교하므로 `-O2` 빌드에서도 찾습니다
-  - **부분 일치는 하지 않습니다** — `main` 으로 `main_init` 이 걸리지 않습니다
-  - 찾기는 QuickPick 표시 상한(5,000)과 **무관하게 전체 행**을 봅니다 — 상한은 목록을 그릴 때만 적용됩니다
-  - 못 찾을 때는 이유를 함께 알립니다. 열린 맵에 심볼 단위 행이 아예 없으면(stripped 바이너리이거나 함수 단위 섹션 없이 만든 Listing) 그 사실을 지목합니다 — 이 경우 어떤 이름도 맞지 않습니다
-- **Region 요약 테이블 클릭**: 상단 Overview 테이블의 row 클릭 시 해당 Region Details로 스크롤 및 자동 펼침
-- **Region 폴딩**: 각 region 카드가 기본 접힘 상태로 표시되며, 클릭으로 토글 가능 (헤더 + 사용률 바는 항상 표시)
-- **영역 일괄 펼침/접기 토글**: Region Details 섹션 헤더의 단일 버튼으로 전체 region을 일괄 펼침/접기. 라벨은 다음에 수행할 동작(`영역 모두 펼치기` ↔ `영역 모두 접기`), 앞의 글리프는 **현재 상태**(`▶` 전부 접힘 / `▼` 하나 이상 펼쳐짐)를 가리키며, 개별 region을 수동으로 펼치거나 접어도 동기화된다. **접기로 바뀌는 것은 전부 펼쳐졌을 때뿐이다** — 일부만 펼친 상태에서 누르면 나머지가 마저 펼쳐진다(0.6.55). 이전에는 하나만 펼쳐도 라벨이 "모두 접기"가 되어, 나머지를 보려면 전부 접었다가 다시 펼쳐야 했다. 이 버튼이 펼치는 것은 **region까지**이고 그 안의 Object Summary는 접힌 채로 남는다 — 0.6.54까지 이름이 "모두 펼치기"여서 지키지 못할 약속을 하고 있었고, 글리프도 상태가 아니라 다음 동작을 가리켜 **같은 화면의 다른 글리프(영역 헤더 · Object Summary · Function 열)와 정확히 반대**였다(전부 접힌 화면에서 헤더는 `▶`인데 이 버튼만 `▼`).
-- **영역 카드 클릭 영역**: 헤더 줄뿐 아니라 그 아래 사용량 막대를 눌러도 카드가 열린다(0.6.55). 막대에 마우스를 올리면 테두리가 생겨 "눌리는 쪽"임을 알린다 — 펼친 카드에서는 바로 아래에 생김새가 비슷하지만 눌리지 않는 map bar가 붙기 때문이다. 키보드 경로는 헤더가 담당한다.
-- **크기가 0인 영역 안내**: 크기가 `0`으로 정의된 region을 펼치면 그 사실과 확인할 곳(영역 크기 설정)을 한 줄로 알린다(0.6.55). 이전에는 글리프만 뒤집히고 아무것도 나타나지 않아 고장으로 읽혔다. **배치된 섹션이 없더라도 크기가 있으면** 분석기가 `[FREE]` 구간을 만들어 넣으므로 표가 정상적으로 그려진다 — 이 안내가 나오는 것은 사실상 설정이 잘못된 경우뿐이다.
-- **섹션 테이블 정렬**: Region Details 및 All Sections 테이블에서 컬럼 헤더 클릭으로 오름차순/내림차순 정렬. Size/Bytes/% 컬럼은 첫 클릭 시 내림차순. Size 정렬 시 단위(B/KB/MB) 관계없이 실제 바이트 크기 기준 정렬
-- **맨 위로 이동**: 페이지 하단 스크롤 시 우하단에 floating ↑ 버튼 표시, 클릭 시 페이지 최상단으로 이동
+- 상단 검색은 오브젝트·섹션·함수·주소·크기·타입을 필터링합니다. `Ctrl/Cmd+F`로 포커스하고 `Esc`로 비웁니다.
+- 일치 부분을 강조하고 `Enter`·`Shift+Enter` 또는 `◀`·`▶`로 순환 이동합니다. 결과가 없는 region은 숨기며 Object Summary도 같은 필터를 적용합니다.
+- **Go to Symbol**(`Ctrl/Cmd+Shift+O`)은 심볼·섹션·region을 Quick Pick으로 찾아 행으로 이동합니다. 목록은 큰 항목 5,000개로 제한하고 크기가 0인 심볼은 제외합니다.
+- C/C++ 편집기의 **커서의 심볼 보기**는 열려 있는 모든 맵의 전체 행을 검색합니다. Itanium ABI의 이름부와 `.constprop.N`·`.isra.N` clone을 인식하되 부분 문자열은 일치시키지 않습니다. 후보가 여러 개면 주소·크기·영역·파일을 보고 선택합니다.
+- 검색 필터가 이동 대상을 숨긴 경우에만 필터를 비우며, 접힌 region과 가상 스크롤 행은 자동으로 펼치고 이동합니다.
+- region 카드와 정렬 헤더는 키보드로 조작할 수 있고 포커스·상태를 스크린리더에 전달합니다.
 
 ### 메모리 영역 설정
 
-`.vscode/taskhub_types.json`에 `memoryMap.regions`를 추가하면 영역별 사용률 바 차트가 표시됩니다:
+`.vscode/taskhub_types.json`의 `memoryMap.regions`로 영역을 명시할 수 있습니다.
 
 ```json
 {
@@ -2020,142 +1105,88 @@ Memory Map 패널 상단의 **"Save HTML"** 버튼을 클릭하면, 현재 보�
 }
 ```
 
-- `origin`: 메모리 영역의 시작 주소 (10진수 또는 정수)
-- `size`: 메모리 영역의 총 크기 (바이트)
-
-Cortex-R/M 시리즈 모두 지원합니다 (ELF32, Little/Big Endian).
+`origin`은 시작 주소, `size`는 바이트 단위 크기입니다. 이 설정이 있으면 링커 스크립트 선택을 생략합니다. ELF32의 little/big endian과 Cortex-R/M 계열을 지원합니다.
 
 ### 링커 스크립트 자동 파싱
 
-`taskhub_types.json` 설정 대신 링커 스크립트 파일에서 메모리 영역을 자동으로 추출할 수 있습니다.
+GNU Linker Script의 `MEMORY` 블록(`.ld`·`.lds`·`.lcf`)과 ARM Scatter File(`.sct`)에서 이름·시작 주소·크기를 추출합니다.
 
-**GNU Linker Script (`.ld`):**
-```
-MEMORY
-{
+```ld
+MEMORY {
     FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 1M
     RAM (rwx)   : ORIGIN = 0x20000000, LENGTH = 256K
-    DTCM (rwx)  : ORIGIN = 0x20010000, LENGTH = 64K
 }
 ```
-
-**ARM Scatter File (`.sct`):**
-```
-LR_IROM1 0x08000000 0x00100000 {
-    ER_IROM1 0x08000000 0x00100000 {
-        *.o (RESET, +First)
-        .ANY (+RO)
-    }
-    RW_IRAM1 0x20000000 0x00040000 {
-        .ANY (+RW +ZI)
-    }
-}
-```
-
-**우선순위:** `taskhub_types.json`의 `memoryMap.regions` 설정이 있으면 링커 스크립트 선택을 건너뜁니다.
 
 ### ARM Linker Listing 파싱
 
-`armlink --list` 옵션으로 생성되는 listing 파일(`*_axf_link.txt`)을 파싱합니다. ELF + 링커 스크립트 조합 없이 이 파일 하나로 메모리 맵 전체를 구성할 수 있습니다.
-
-- ARM Compiler 5 (armcc) 및 ARM Compiler 6 (armclang) 포맷 지원
-- Execution Region에서 시작 주소, 현재 크기, 최대 크기 추출
-- 섹션 엔트리별 주소, 크기, 타입, 소속 오브젝트 파일 추출
-- 동일 섹션 이름 자동 집계 (예: 여러 .o 파일의 `.text` → 하나로 합산)
-- **Region별 Object Summary**: 각 region 내부에 오브젝트(.o) 파일별 크기 및 점유율(%) 집계
-- **함수명 추출/표시**: 섹션 토큰에서 `.text.` 등 prefix를 제거하여 함수명 추출, Region Details에서 Function 컬럼 토글로 확인
-- Image Totals (RO/RW/ROM 크기) 파싱
+ARM Compiler 5/6의 `armlink --list` 출력을 지원합니다. Execution Region, 섹션 주소·크기·타입·오브젝트, Image Totals를 읽고 같은 섹션 이름을 집계합니다. 오브젝트 요약과 Function 열도 동일한 UI에서 제공합니다.
 
 ### 지원 파일 형식
 
 | 확장자 | 설명 |
 | --- | --- |
-| `.axf` | ARM Executable Format |
-| `.elf` | ELF (Executable and Linkable Format) |
-| `.out` | GCC 기본 출력 파일 |
+| `.axf`, `.elf`, `.out` | ELF 실행 바이너리 |
 | `.ld`, `.lds`, `.lcf` | GNU Linker Script |
 | `.sct` | ARM Scatter File |
-| `.txt` | ARM Linker Listing (`armlink --list` 출력) |
-
+| `.txt` | ARM Linker Listing |
 ## 20. Hex Viewer
 
-> **지역화 / 접근성 (0.6.20부터)**: 툴바·헤더·상태 표시줄·찾기 바의 모든 문자열이 VS Code 언어 설정을 따릅니다. `Unit` / `Endian` / `Go to` 라벨이 `for` 속성으로 각 컨트롤과 연결되고, placeholder만 있던 찾기 입력과 아이콘 전용 버튼(◀ ▶ ✕)에는 `aria-label`이 붙습니다. 찾기 결과 개수와 바이트 검사 결과는 live region으로 노출되어 스크린리더가 변화를 읽습니다. `Little-Endian`, `ASCII`, 예시 입력값 같은 짧은 기술 식별자는 규칙대로 번역하지 않습니다.
->
-> **0.6.31부터**: 바이트 선택을 키보드로 할 수 있습니다. 표 전체가 하나의 tab stop이고(행이 가상 스크롤로 만들어졌다 사라지므로 셀마다 `tabindex`를 줄 수 없습니다), 진입 후 **화살표**로 이동, **PageUp/PageDown**으로 16행씩, **Home/End**로 처음/끝, **Shift+화살표**로 범위를 넓힙니다. 조작법은 표의 `aria-label`이 안내합니다.
-
-> **파일 끝의 불완전한 unit (0.6.36부터)**: 2/4/8-byte unit 모드에서 파일 길이가 unit의 배수가 아니면 마지막 셀은 남은 바이트만 담습니다 (예: 18바이트 파일 + 4-byte 모드 → offset 16에 2바이트). 그 셀도 **정상적으로 표시되며**(자리수가 짧고 흐리게 렌더됩니다) 선택·Go to·Find 대상이 됩니다. 0.6.35 이전에는 이 셀을 아예 그리지 않아 키보드·Go to가 존재하지 않는 위치를 가리켰고, 0.6.36 초안에서 이를 clamp로 막았더니 **Go to 17이 조용히 12로 바뀌는** 더 나쁜 동작이 됐습니다 — Find도 같은 경로를 쓰므로 끝부분 검색 결과가 엉뚱한 곳을 가리켰습니다. 표현할 수 있는 것을 그대로 표현하는 쪽으로 정리했습니다.
-
-펌웨어 이미지 파일(`.hex`, `.bin`, `.srec`)을 VS Code 내에서 Hex dump 형태로 열어볼 수 있는 뷰어입니다. Trace32의 `Data.dump`와 유사한 UX를 제공합니다.
-
-> **입력 크기 한도**: 파일은 **50MB** 까지 받습니다. 넘으면 오류를 띄우고 열지 않습니다 — 외부 Hex Editor 를 쓰라고 안내합니다.
->
-> **데이터 전송 방식 (0.6.42부터)**: 바이트는 HTML 에 박히지 않고 `postMessage` 로 웹뷰에 전달됩니다. 이전에는 Base64 로 만들어 HTML 문자열에 인라인했는데, 그러면 같은 내용이 네 벌(원본 배열 → Base64 문자열 → HTML → `atob` 결과)로 늘어나 50MB 파일의 peak 가 수백 MB 였습니다. 지금은 **HTML 크기가 파일 크기와 무관하게 약 39KB 로 고정**되고, Base64 인코딩·`atob` 디코딩 비용도 사라져 여는 속도도 함께 빨라집니다. 대가는 데이터가 한 프레임 늦게 도착한다는 것뿐이라, 그동안 *불러오는 중…* 을 표시합니다.
->
-> 파서에는 별도로 **byte entry 상한(32M)** 이 있습니다. 여기서 entry 는 *주소 하나에 담긴 바이트 하나*이고, 이 상한은 **HEX/SREC 에만** 해당합니다 (binary 는 Map 대신 raw 버퍼를 씁니다). HEX/SREC 는 텍스트 포맷이라 1바이트를 최소 2자 남짓으로 적으므로, 50MB 파일이 만들 수 있는 entry 는 최대 약 25M 입니다 — 즉 이 상한은 정상 파일을 거부하지 않는 backstop 입니다. 0.6.41 이전에는 100M 이라 **어떤 입력으로도 걸리지 않았고**, 두 상한의 관계는 이제 테스트가 고정합니다.
+Intel HEX, Motorola SREC, raw binary 펌웨어를 VS Code 안에서 주소·Hex·ASCII 형태로 표시합니다. 입력 한도는 50MB이며, HEX/SREC 파서에는 비정상적으로 희소하거나 큰 입력을 막는 3,200만 byte-entry 상한이 추가로 적용됩니다.
 
 ### 사용 방법
 
-Command Palette (Cmd+Shift+P)에서 **"TaskHub: Open Hex Viewer"** 실행:
-
-1. 파일을 선택합니다 (`.hex`, `.srec`, `.bin` 등).
-2. 포맷을 자동 감지하여 WebView 패널에서 Hex dump를 표시합니다.
+Command Palette에서 **TaskHub: Open Hex Viewer**를 실행하고 파일을 고릅니다. 알려진 확장자는 그 형식을 우선 사용하고, 그 밖의 파일만 길이·자릿수·체크섬이 유효한 레코드를 찾아 텍스트 형식을 감지합니다.
 
 ### 화면 구성
 
 | 영역 | 설명 |
-|------|------|
-| **헤더** | 파일명, 포맷 (Intel HEX/Motorola SREC/Binary), 크기, 주소 범위, Entry Point |
-| **툴바** | Unit 크기, Endian, Go to, Find, Copy |
-| **Address 컬럼** | 실제 메모리 주소 (Intel HEX의 Extended Address 반영) |
-| **Hex 컬럼** | 바이트 데이터를 Unit 크기에 맞춰 그룹핑하여 표시 |
-| **ASCII 컬럼** | 출력 가능 문자는 그대로, 나머지는 `.` 표시 |
-| **상태바** | 선택한 바이트의 Offset, Address, u8/u16/u32 해석 |
+| --- | --- |
+| 헤더 | 파일명, 포맷, 크기, 주소 범위, Entry Point |
+| 툴바 | Unit, Endian, Go to, Find, Copy |
+| Address | 실제 메모리 주소 |
+| Hex / ASCII | 단위별 바이트와 출력 가능한 문자 |
+| 상태바 | 선택한 바이트의 offset·address·정수 해석 |
 
 ### Unit 크기 옵션
 
-표시 단위를 1/2/4/8바이트 단위로 변경할 수 있습니다:
+1·2·4·8바이트 단위와 Little/Big Endian을 선택할 수 있습니다. 파일 끝이 unit 크기에 못 미치면 남은 바이트를 짧은 마지막 셀로 표시하며 선택·Go to·Find에도 포함합니다.
 
-| Unit | 표시 예시 | 용도 |
-|------|-----------|------|
-| **1 Byte** (기본) | `00 20 00 08` | 바이트 단위 분석 |
-| **2 Bytes** (16-bit) | `2000 0800` | 16-bit 레지스터, short 값 확인 |
-| **4 Bytes** (32-bit) | `00200008` | 32-bit 포인터, int 값 확인 |
-| **8 Bytes** (64-bit) | `0020000800000000` | 64-bit 값 확인 |
-
-Endian 설정 (Little-Endian/Big-Endian)에 따라 바이트 순서가 변경됩니다.
+| Unit | 예시 | 대표 용도 |
+| --- | --- | --- |
+| 1 Byte | `00 20 00 08` | 개별 바이트 |
+| 2 Bytes | `2000 0800` | 16-bit 값 |
+| 4 Bytes | `00200008` | 32-bit 포인터·정수 |
+| 8 Bytes | `0020000800000000` | 64-bit 값 |
 
 ### 검색 기능
 
-`Ctrl+F`로 Hex 바이트 패턴을 검색할 수 있습니다:
-- 검색 입력: `08 00 00 20` 형식
-- 매치 하이라이트 표시, Prev/Next로 이동
+`Ctrl/Cmd+F`에서 `08 00 00 20`처럼 바이트 패턴을 검색하고 Prev/Next로 이동합니다.
 
 ### 기타 기능
 
-- **Go to**: 주소 입력으로 해당 위치로 즉시 스크롤
-- **복사** (`Ctrl+C`): 드래그 선택 후 복사 시 탭 없이 스페이스 구분으로 정리된 텍스트 복사
-- **Gap 표시**: Intel HEX/SREC에서 데이터가 없는 주소 영역은 회색으로 표시
-- **Shift+클릭**: 범위 선택
+- **Go to**로 주소 이동
+- 드래그 또는 Shift+클릭으로 범위 선택 후 `Ctrl/Cmd+C` 복사
+- Intel HEX/SREC의 비어 있는 주소를 gap으로 표시
+- 키보드 화살표·PageUp/PageDown·Home/End로 이동하고 Shift와 함께 범위 선택
+- 지역화된 UI, 연결된 레이블, live region과 `aria-label` 제공
 
 ### 대용량 파일 지원
 
-Virtual scrolling을 사용하여 화면에 보이는 행만 렌더링합니다. 바이너리 파일은 `Uint8Array` 기반으로 파싱하여 64MB 이상의 대용량 파일도 원활하게 표시할 수 있습니다.
+가상 스크롤로 보이는 행만 렌더링하고, 바이트는 `postMessage`로 웹뷰에 전달합니다. raw binary는 `Uint8Array`로 유지합니다.
 
 ### 지원 포맷
 
 | 포맷 | 확장자 | 특징 |
-|------|--------|------|
-| **Intel HEX** | `.hex`, `.ihex` | Extended Linear/Segment Address 지원, Entry Point 파싱 |
-| **Motorola SREC** | `.srec`, `.s19`, `.s28`, `.s37` | S1/S2/S3 (16/24/32-bit 주소), S7/S8/S9 Entry Point |
-| **Raw Binary** | `.bin`, `.dat` | 0x00000000부터 순차 표시 |
-
-**포맷은 확장자를 먼저 봅니다.** 위 표의 확장자는 내용과 무관하게 그 포맷으로 엽니다 — 바이너리가 우연히 `:`(0x3A)이나 `S0`(0x53 0x30)으로 시작하는 일이 있고, 거꾸로 앞쪽 레코드가 손상된 `.hex`도 있기 때문입니다. 표에 없는 확장자만 내용으로 판정하며, 파일 앞부분에서 **길이·자릿수·체크섬이 모두 맞는 레코드를 실제로 하나 찾았을 때만** Intel HEX / SREC로 다룹니다.
+| --- | --- | --- |
+| Intel HEX | `.hex`, `.ihex` | Extended Linear/Segment Address, Entry Point |
+| Motorola SREC | `.srec`, `.s19`, `.s28`, `.s37` | S1/S2/S3 데이터, S7/S8/S9 Entry Point |
+| Raw Binary | `.bin`, `.dat` | 주소 0부터 순차 표시 |
 
 ---
-
 ## 21. 설정 레퍼런스
 
-TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설정의 **단일 출처** 입니다. 원본은 [package.json](../package.json)이며, 이 표는 그 내용을 그대로 한국어 설명과 함께 정리해 둔 것입니다. README는 이 섹션을 가리키는 포인터만 유지합니다.
+설정 정의의 정본은 [package.json](../package.json)의 `contributes.configuration`입니다. 이 표는 같은 키·타입·기본값·범위를 사용자 관점에서 설명하는 레퍼런스이며, README는 자주 쓰는 설정의 짧은 안내와 이 섹션을 가리키는 포인터만 유지합니다.
 
 설정을 수정하려면 VS Code에서 `File > Preferences > Settings` → "TaskHub"로 검색하거나, 워크스페이스 `.vscode/settings.json`에 직접 키를 추가하세요.
 
@@ -2190,7 +1221,7 @@ TaskHub가 `contributes.configuration`으로 VS Code에 등록하는 모든 설�
 4. [CHANGELOG.md](../CHANGELOG.md) 해당 릴리스 항목에 새 설정 명기.
 5. (선택) 동작 경계(min/max, 예외 경로)에 대한 유닛 테스트 추가.
 
-README([README.md](../README.md) / [README.en.md](../README.en.md))는 사용자가 자주 손대는 5–6개 설정만 **이름 + 한 줄 용도**의 하이라이트 표로 노출합니다. 타입·기본값·범위 같은 사실은 그쪽에 복제하지 않으므로(이름만으로는 단일 출처가 깨지지 않음), 새 설정을 추가하거나 기본값을 바꿀 때 README 표를 동시에 고칠 필요는 없습니다 — 다만 새 설정이 *자주 조정될 만한 사용자 노출 다이얼*이라면 README 하이라이트에 한 행 더 넣을지 검토하세요.
+README([README.md](../README.md) / [README.en.md](../README.en.md))는 자주 쓰는 설정 이름을 짧게 소개하고 이 표로 연결합니다. 타입·기본값·범위는 복제하지 않으므로 새 설정을 추가하거나 값을 바꿀 때 README까지 기계적으로 고칠 필요는 없습니다. 다만 사용자의 첫 설정 흐름이 달라지면 설명 문장도 함께 검토하세요.
 
 ---
 
@@ -2260,8 +1291,8 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `duplicate.task.id` | error | 한 액션의 `tasks[]` 배열에 같은 task `id`가 두 번 이상 등장. |
 | `when.operators` | error / warning | `when`에 연산자(`equals`/`notEquals`/`matches`/`in`)가 여럿이면 error — 런타임은 정해진 순서로 **첫 번째만** 적용하고 나머지를 조용히 무시한다. 하나도 없으면 warning (태스크가 항상 실행됨). |
 | `when.regex` | error | `when.matches`가 `new RegExp()` 컴파일에 실패. 런타임은 던지지 않고 "맞지 않음"으로 보므로, 잡아 주지 않으면 그 분기가 영영 꺼진 채로 남는다. |
-| `when.dead-branch` | warning | 조건의 결과가 **입력과 무관하게 고정**됨. 굳는 경로는 셋이다 — ①`when.var`의 참조가 해석되지 않아 리터럴 문자열(`"${ghost.output}"`)이 그대로 비교됨, ②`in`이 빈 목록이라 어떤 값도 맞을 수 없음, ③`var`에 `${…}`가 아예 없는 상수라 비교 결과가 처음부터 정해짐(빈 문자열과 `"${pick.value"`처럼 닫는 괄호를 빠뜨린 형태 포함 — 런타임의 보간도 `${…}` 형태만 치환한다). 메시지가 **어느 쪽으로** 굳었는지 밝힌다 — 영영 실행되지 않거나, 항상 실행되어 조건이 의미를 잃거나. 판정은 **런타임이 실제로 적용할 연산자 하나**만 보고 하므로, `{ "equals": "a", "in": [] }`처럼 무시당하는 연산자를 근거로 삼지 않는다. 전방 참조(`${later.output}`)는 스케줄러가 producer를 먼저 돌리므로 제외한다. 연산자가 없거나 정규식이 깨진 경우는 `when.operators` / `when.regex`가 같은 사실을 말하므로 중복해서 내지 않는다(단 `var`도 함께 해석되지 않으면 그 사실은 따로 알린다). |
-| `when.literal-operand` | warning | `when`의 **피연산자**(`equals`/`notEquals`/`matches`/`in`)에 `${…}` 참조가 있음. 보간되는 것은 `when.var`뿐이라 피연산자는 적힌 그대로 비교되므로 실제 값과 결코 일치하지 않는다. 0.7.16부터 이 참조는 **의존성으로도 잡히지 않는다** — 런타임이 읽지 않는 자리이므로 실행 순서를 바꾸지도, 가리키는 태스크가 꺼질 때 함께 꺼지지도 않는다. |
+| `when.dead-branch` | warning | 풀리지 않는 `when.var`, 상수 `var`, 빈 `in` 등으로 결과가 항상 참 또는 거짓인 조건. 런타임이 실제로 적용할 연산자만 판정하며 전방 참조는 제외. |
+| `when.literal-operand` | warning | `equals`·`notEquals`·`matches`·`in`에 `${…}`가 있음. 피연산자는 보간하거나 의존성으로 읽지 않으므로 적힌 문자열 그대로 비교됨. |
 | `capture.regex` | error | `output.capture.regex`가 `new RegExp()` 컴파일에 실패. |
 | `capture.group` | warning | `output.capture.group` 인덱스가 regex의 capture group 개수를 벗어남. |
 | `capture.reserved` | error | `output.capture.name`이 reserved 집합(`output`/`path`/`value` 등 task 결과 빌트인 키)과 충돌. 스키마는 이름 패턴만 검사하므로 schema-pass 후 런타임에서 throw 하던 케이스를 Doctor가 사전에 잡음. |
@@ -2269,18 +1300,18 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `diagnostics.regex` | error | `output.diagnostics.pattern`이 컴파일 실패. `g` 플래그는 런타임과 동일하게 사전 제거된 뒤 검사. |
 | `diagnostics.group` | warning | `file`/`line`/`message` 등의 그룹 인덱스가 regex가 정의한 capture group 수보다 큼. |
 | `diagnostics.preset` | error | `"$gcc"` / `"$tsc"` 같은 preset 단축 문자열이 알 수 없는 이름이거나 `$` 없이 적힘. |
-| `variable.unresolved` | warning | Preview Run과 동일한 simulation 컨텍스트에서 변수 치환 후에도 남는 `${…}` 가 있음. 런타임에는 리터럴로 전달되므로 의도된 placeholder가 아니면 거의 항상 버그. `??` 체인은 **대안이 전부** 어긋났을 때만 여기에 해당하며(하나라도 풀리면 리터럴로 남지 않습니다 → `variable.dead-alternative`), 이때 메시지가 대안마다 어긋난 이유를 밝힙니다. **OS별 객체(`command` / `tool` / `itemsFromCommand`)는 모든 branch를 검사합니다** — Doctor는 이 기계의 실행이 아니라 설정 파일 자체를 보므로, Windows branch의 깨진 참조는 그 OS 사용자에게 진짜 오류입니다. (현재 플랫폼 하나만 보려면 [Preview Run](#preview-run-dry-run).) |
-| `variable.dead-alternative` | warning | `??` 체인이 **해석은 되는데** 그 안에 절대 선택되지 않는 대안이 있음 (`${pick.value ?? pick2.nope}`). 참조 자체는 동작하므로 리터럴로 남지 않지만, 죽은 대안은 사용자가 의도한 분기가 영영 선택되지 않는다는 뜻입니다 — `??` 가 어긋난 참조를 조용히 건너뛰기 때문에 실행해 봐도 드러나지 않습니다. 이유는 네 가지로 구분해 알립니다: 그런 태스크가 없음 · 자기 자신 참조 · 그 키를 내지 않음 · `passTheResultToNextTask` 가 없어 출력이 캡처되지 않음. 선언 순서와 무관하게(전방 참조 포함) 같은 규칙으로 검사합니다. |
-| `args.array-joined` | warning | `args` 원소 **안에** 배열 참조(`${pick.paths}` 등)가 다른 글자와 섞여 있음(`"--file=${pick.paths}"`). 원소 전체가 참조 하나일 때만 항목 수만큼의 인자로 펼쳐지고, 섞여 있으면 공백으로 이어 붙어 **인자 한 칸**이 됩니다 — 여러 경로의 경계가 사라져 스크립트가 값 하나로 받습니다(argv 이므로 셸이 다시 쪼개지지는 않습니다). 0.6.56까지는 이 형태가 리터럴로 남아 `variable.unresolved`로 잡혔습니다. |
-| `output.not-captured` | warning | `${A.output}`(또는 A의 capture 이름)을 참조하지만 shell/command 태스크 A에 `passTheResultToNextTask: true`가 없음. 런타임은 출력을 스트리밍만 하고 빈 결과를 넘기므로 참조가 리터럴로 남음 — 가장 흔한 설정 실수. 선언 순서와 무관하게(전방 참조 포함) 검출. `??` 체인 안에서는 이 코드가 아니라 `variable.dead-alternative` / `variable.unresolved` 가 같은 사실을 대안 단위로 알립니다 — 체인은 다른 대안이 풀리면 리터럴로 남지 않으므로 "리터럴로 남음" 이 거짓이 됩니다. |
-| `tool.platform-missing` | warning | `tool` 을 가진 태스크(실질적으로 `zip` / `unzip`)에 **현재 플랫폼에서 쓸 값이 없음**. OS별 객체에 이 플랫폼 항목이 없는 경우와 `tool: ""` 처럼 빈 값인 경우가 모두 해당합니다 — 런타임의 `getToolCommand` 가 둘 다 `No tool path specified for the current platform` 으로 실패시킵니다. 참조가 전부 해석돼도 실행은 불가능한 설정이라 `variable.unresolved` 로는 드러나지 않습니다. 다른 OS 항목은 그대로 검사하므로, 크로스플랫폼 액션을 의도했다면 빠진 OS 항목을 채우면 됩니다. **이 경고는 검사하는 기계에 따라 달라집니다** — Windows 전용으로 의도한 액션은 macOS/Linux 에서 매번 뜹니다(메시지가 그 이유를 밝힙니다). |
-| `output.ignored` | warning | shell/command 태스크에 `output.mode`/`capture`/`diagnostics`가 정의되어 있지만 `passTheResultToNextTask: true`가 없음. 런타임이 조용히 무시하는 죽은 설정. |
+| `variable.unresolved` | warning | 보간 후에도 `${…}`가 남음. `??`는 모든 대안이 실패할 때만 해당하며, OS별 객체는 모든 branch를 검사. 현재 플랫폼만 보려면 [Preview Run](#preview-run-dry-run) 사용. |
+| `variable.dead-alternative` | warning | `??` 체인 안에 없는 태스크·자기 참조·지원하지 않는 키·캡처되지 않은 출력처럼 절대 선택되지 않는 대안이 있음. |
+| `args.array-joined` | warning | 배열 참조가 `args` 원소의 다른 글자와 섞여 한 argv로 합쳐짐. 여러 인자로 펼치려면 원소 전체를 참조 하나로 작성. |
+| `output.not-captured` | warning | `passTheResultToNextTask: true`가 없는 shell/command의 output 또는 capture를 참조함. 대체 체인은 대안 단위 진단을 사용. |
+| `tool.platform-missing` | warning | `zip`·`unzip`의 `tool`이 현재 플랫폼에서 비었거나 OS별 값이 없음. 검사하는 OS에 따라 결과가 달라짐. |
+| `output.ignored` | warning | 런타임이 읽지 않는 `output` 필드가 있음. `mode`·`content`·`filePath`·`overwrite`·`language`는 `passTheResultToNextTask: true`가 필요하고, `filePath`·`overwrite`는 `mode: "file"`, `language`는 `mode: "editor"`에서만 사용됩니다. `capture`·`diagnostics`는 이 게이트 밖에서 동작하지만 태스크 결과에 문자열 `output`이 있어야 합니다. |
 | `path.outside-workspace` | error | `writeFile` / `appendFile` / `output.filePath`의 해석 결과가 워크스페이스 밖. 런타임이 실행을 거부할 경로. (변수 치환 후에도 `${…}`가 남은 경우는 검사를 건너뜀 — 안전 결정 불가) |
 | `dependsOn.self` | error | task의 `dependsOn`에 자기 자신이 포함됨. |
 | `dependsOn.missing` | error | `dependsOn`이 같은 액션에 존재하지 않는 task id를 가리킴. |
 | `dependsOn.cycle` | error | task 간 `dependsOn` 그래프에 순환이 있음. 출력 메시지에 순환 경로 포함. |
 | `parallel.interactive` | warning | `inputBox` / `quickPick` / `envPick` / `confirm` / `fileDialog` / `folderDialog` 같은 interactive task에 `parallel: true`가 붙음. 런타임은 prompt mutex로 다이얼로그를 강제 직렬화하므로 병렬 표시는 *post-prompt* 처리에만 적용되며, 사실상 효과가 없는 경우가 대부분. |
-| `command.nested-interpreter` | warning | `command` 태스크의 **실효 argv**(`command` + `args`)가 다른 인터프리터(`cmd /c`, `sh -c`, `powershell -Command` 등)를 호출하면서, 그 인터프리터가 실행할 스크립트에 `${…}` 를 보간함. argv 인용은 그 인터프리터 앞에서 끝나고 인터프리터가 스크립트를 다시 파싱하므로 값이 문법으로 읽힐 수 있음. 값을 자식의 argv 로 직접 넘기거나 `env` 로 전달할 것. 스위치는 **위치로** 찾으므로 `cmd /v:on /c`·`bash --noprofile -c`·`sh -cx`(묶음 옵션)·`cmd /c"…"`(붙은 스크립트)·`env sh -c`(투명 래퍼)·인용된 실행 파일도 검출. `ksh` 는 `-c` 없이도 첫 피연산자를 실행하므로 그 형태까지 검출. **면제는 세 조건을 모두 만족할 때만**: ① 값의 모양이 제약됨 — 앵커돼 있고 **읽어 낼 수 있는 문법만으로** 적혀 셸 메타문자를 낼 수 없는 `validatePattern` 을 가진 `inputBox`(`^[A-Za-z0-9_][A-Za-z0-9_-]*$` · `^v\d+\.\d+\.\d+$` 같은 형태 — `.` · `\s` · 부정 클래스 · lookaround · 수치 이스케이프처럼 분석되지 않는 문법이 하나라도 있으면 면제하지 않음)이거나 항목에 메타문자가 없는 고정 `items` 의 `quickPick`. ② 값이 스크립트 문법에서 **데이터 자리**임 — 고정된 명령 이름 뒤의 인자여야 합니다. **변수 대입(`TAG=${v}`)은 데이터 자리로 보지 않습니다** — 이 검사는 값이 놓인 자리만 보고 그 뒤로 어떻게 흐르는지는 보지 않으므로, `sh -c "CMD=${v}; $CMD"` 처럼 나중에 실행되는 경우를 증명해 낼 수 없습니다(taint 분석이 필요한 영역). 메타문자가 하나도 없어도 **자리가 명령이면 명령**이므로(`sh -c "echo ok; ${ask.value}"` 에 `whoami` 를 넣으면 실행됨), 스크립트/명령 시작·`;`·`&&`·`|`·개행·`(`·백틱·`$(` 뒤·리다이렉션 대상·`then`/`do` 같은 예약어 뒤·`eval`·`env`·`sudo`·`trap`·`time`·`coproc` 같이 인자를 다시 코드로 읽는 명령의 인자는 면제하지 않습니다(인용된 구분자는 데이터로 봅니다 — `echo "x; ${v}"`). `time`·`coproc` 은 명령 앞에 토큰이 더 올 수 있어(`time -p CMD` · `coproc NAME CMD`) "다음 낱말이 명령" 으로 보지 않고 뒤따르는 낱말을 전부 명령 자리로 봅니다. 리다이렉션 대상은 연산자가 붙어 있든(`>out/${v}`) 떨어져 있든(`> out/${v}`) 낱말 중간에서 시작하든(`echo prefix>out/${v}` — 셸은 공백 없이도 연산자로 읽습니다) 면제하지 않으며, 대상 낱말 안 어디에 있는 참조든 대상의 일부로 봅니다. 명령 **이름**은 인용·이스케이프·행 잇기(`\`+개행)를 걷어 낸 뒤 비교하므로 `e\val`·`ev''al` 처럼 흩어 놓아도 `eval` 로 알아보며, 이름이 실행 시점에 정해지면(`$CMD`·`%TOOL%`·`e{v,v}al`·`/bin/e*al`·`$(echo ev)al`) 무엇이 될지 증명할 수 없으므로 면제하지 않습니다. 연산자에 붙은 숫자는 IO number 로 보아 `2>out ${v}` 의 `${v}` 는 인자가 아니라 **명령 이름** 자리이며, POSIX 에서 `{`·`}` 는 독립된 낱말일 때만 그룹 경계입니다(`echo a{b,c} ${v}` 의 `${v}` 는 인자). PowerShell 의 `{` 는 붙어 있어도 스크립트 블록을 열므로 그 안은 계속 코드 자리이고, cmd 에는 중괄호 문법이 없어 평범한 글자입니다. 명령 치환(`$(…)`·`` `…` ``) 안은 **독립된 스크립트**로 읽어 바깥 인용을 물려주지 않으며, 치환이 닫히면 바깥 명령으로 돌아옵니다(`echo "$(date)" ${v}` 의 `${v}` 는 인자). 고정 명령이라도 인자를 코드·변수로 다시 읽는 옵션 뒤는 면제하지 않습니다 — `find` 의 `-exec`·`-execdir`·`-ok`·`-okdir`, `printf -v`, PowerShell 의 `-ScriptBlock`·`-Action`·`-FilterScript` 류 매개변수의 **값**(접두사 축약 포함). 스크립트 블록을 위치 인자로도 받는 cmdlet(`Invoke-Command`·`Start-Job`·`ForEach-Object`·`Where-Object` 등)은 그 **위치 인자**가 코드 자리입니다 — 이름 있는 매개변수의 값(`-ComputerName ${v}`)은 데이터로 봅니다. 실행 파일 자리의 참조가 런타임에서 **하나도 풀리지 않으면**(`${which.typo}`, 또는 내장 이름과 겹치는 태스크를 가리키는 `${workspaceFolder.value}`) 그 명령은 실행 자체가 되지 않으므로 인터프리터 진단을 붙이지 않습니다 — `variable.unresolved` 로만 알립니다. 중괄호 `{}` 는 **안전한 문자가 아닙니다** — PowerShell 에서는 스크립트 블록, POSIX 에서는 brace expansion 이므로 `items: ["{whoami}"]` 같은 고정 목록도 면제하지 않습니다. `export`·`declare`·`typeset`·`local`·`readonly`·`set`·`alias` 의 인자도 면제하지 않습니다 — `export CMD=${v}; $CMD` 는 값이 다음 명령이 됩니다. cmd 의 `%NAME%`·`!NAME!` 자리도 면제하지 않습니다 — 이름이 안전해도 확장된 **값**이 다시 해석되며, 참조 앞뒤에 확장 구분자가 있으면 확장 안으로 봅니다(`%A` 같은 FOR 변수 때문에 짝을 정확히 셀 수 없어 모르는 쪽을 위험으로 둡니다. `%1`·`%*`·`%%` 도 구분자에서 빼지 않습니다 — 그 `%` 가 앞선 확장을 **닫는** 자리일 수 있어 뒤 글자만으로는 가려낼 수 없습니다. `^%`·`^!` 이스케이프만 제외합니다). `-EncodedCommand` 의 base64 도 면제 대상이 아닙니다. ③ 값이 **옵션이 될 수 없음** — 인자 자리라도 값이 `-` 로 시작할 수 있으면 옵션으로 읽혀 명령 실행으로 이어질 수 있으므로(`find … ${v} id \;` 에 `-exec`), 패턴이 첫 글자에 `-` 를 허용하거나 `items` 에 `-` 로 시작하는 항목이 있으면 면제하지 않습니다. 같은 명령 안에서 참조 **앞에** `--` 가 있으면 면제합니다. 검증 뒤에 붙는 `prefix`/`suffix` 에 메타문자가 있으면 면제하지 않음. `envPick` 은 **면제하지 않음** — 이름이 안전해도 확장된 **값**이 다시 해석됨. |
+| `command.nested-interpreter` | warning | `command` 태스크가 `cmd /c`, `sh -c`, `powershell -Command`처럼 스크립트를 다시 해석하는 인터프리터를 호출하고 그 스크립트 자리에 `${…}` 값을 넣음. argv 인용은 중첩 인터프리터 앞에서 끝나므로 값을 직접 argv나 `env`로 전달해야 합니다. 안전한 고정 목록·엄격한 `validatePattern`·`--` 뒤 데이터 인자는 제한적으로 제외하지만, 명령·변수 대입·리다이렉션·스크립트 블록·옵션이 될 수 있는 자리는 보수적으로 경고합니다. |
 | `command.dynamic-interpreter` | warning | `command` 태스크가 **실행 파일(또는 스크립트 스위치)을 보간값으로 정해**, 무엇이 실행될지 정적으로 알 수 없음. 그것이 셸(`sh -c` · `cmd /c` · `powershell -Command`)로 풀리면 같은 argv 의 다른 보간값이 스크립트 텍스트가 되어 문법으로 다시 읽힙니다 — `command.nested-interpreter` 가 잡는 것과 같은 위험인데, 인터프리터 이름이 참조라서 그 검사에 닿지 못하는 경우입니다. 고정 `quickPick` 처럼 값 집합을 열거할 수 있으면 열거해 실제로 판정하므로 이 경고 대신 `command.nested-interpreter` 가 붙습니다. |
 | `doctor.analysis-failed` | error | 그 소스를 분석하는 도중 예외가 발생해 검사를 끝내지 못함. 소스마다 따로 분석하므로 **다른 소스의 진단은 그대로 게시**됩니다. 메시지에 예외 내용이 실립니다. |
 | `shell.interpolated-command` | warning | `shell` 태스크의 command 문자열에 `${…}` 보간이 있음. `shell`은 문자열을 셸에 그대로 넘기므로 보간된 값도 셸 문법으로 해석되어, 값에 `;`나 `$(...)`가 있으면 의도하지 않은 명령이 실행됨. 값은 `args` 배열로 넘기거나 `command` 타입을 사용. OS별 객체는 어느 한 branch에만 있어도 검출. |
@@ -2296,10 +1327,6 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 - **워크스페이스 외부 경로 검사는 실제 fs 접근 없이** path normalization만으로 판정합니다. 심볼릭 링크/`..` 트릭은 런타임 가드(`resolveWithinWorkspace`, [src/pipelineUtils.ts](../src/pipelineUtils.ts))가 최종적으로 막습니다.
 - **중첩 인터프리터 검사가 보는 범위**는 argv 의 실행 파일과 `env`/`busybox` 래퍼까지입니다. `sudo sh -c …`, `xargs sh -c …`, 스크립트 파일 안에서 다시 셸을 부르는 형태처럼 **한 단계 더 들어가는 호출**은 정적으로 따라가지 않습니다. 대신 그런 명령을 **인자를 다시 코드로 읽는 명령**으로 취급해, 그 뒤에 오는 보간값에는 `validatePattern` 면제를 적용하지 않습니다.
 - **한 소스의 분석이 실패해도 나머지는 게시**합니다. 실패한 소스에는 `doctor.analysis-failed` 진단이 붙습니다.
-
-### 23.5. 구현 메모
-
-핵심 분석 로직은 `vscode`에 의존하지 않는 순수 모듈([src/doctor.ts](../src/doctor.ts))에 있고, 익스텐션 레이어는 (1) 워크스페이스/preset/번들 actions.json을 모두 모아 `DoctorInput[]`을 만들고 (2) 결과 `DoctorFinding[]`을 `vscode.Diagnostic`으로 변환해 publish 하는 두 역할만 합니다. AJV validator는 함수 파라미터로 주입되므로 같은 검사를 단위 테스트에서 그대로 돌릴 수 있습니다 — `src/test/doctor.test.ts`가 모든 finding code를 커버합니다.
 
 ## 24. 병렬 실행 / Task DAG
 
@@ -2388,67 +1415,38 @@ task의 string 필드(`command`, `args`, `env` 값, `cwd`, `output.filePath`, `o
 
 Doctor는 같은 `buildTaskGraph` + `detectGraphCycle` 헬퍼를 공유하므로 cycle 거부 조건이 런타임과 정확히 일치합니다. self/missing은 Doctor가 별도 메시지(액션 id 접두사 포함)로 보고하지만 거부되는 입력 집합은 같습니다.
 
-### 24.9. 구현 메모
-
-핵심 로직은 [src/pipelineUtils.ts](../src/pipelineUtils.ts)의 `buildTaskGraph` / `inferTaskDependencies` / `validateTaskGraph` / `TaskScheduler` / `withInteractivePromptLock`에 모여 있고, 모두 `vscode`에 의존하지 않는 순수 함수입니다. 실제 task 실행은 [src/extension.ts](../src/extension.ts) `executeActionPipeline`이 graph + scheduler를 소비하면서 `executeSingleTask`를 launching하는 형태로 짜여 있습니다. 단위 테스트는 [src/test/taskGraph.test.ts](../src/test/taskGraph.test.ts)가 graph 구성·자동 추론·cycle·scheduler lifecycle을, [src/test/pipelineUtils.test.ts](../src/test/pipelineUtils.test.ts)가 prompt mutex serialization을, [src/test/doctor.test.ts](../src/test/doctor.test.ts)가 `parallel.interactive` warning을 커버합니다.
-
 ---
+
 
 ## 25. 파일/폴더 다이얼로그 위치 기억
 
-TaskHub가 여는 모든 파일/폴더 선택 다이얼로그는 **같은 용도로 마지막에 사용한 위치**에서 열립니다. `defaultUri`를 주지 않으면 VS Code가 자체 기본 규칙(대체로 최근 활성 파일 → 워크스페이스 루트, `files.dialog.defaultPath` 설정이 있으면 그쪽 우선)으로 위치를 정하는데, 그 기준은 TaskHub의 용도 구분과 무관하므로 Hex Viewer 열기가 방금 편집하던 소스 파일 폴더에서 열리는 식의 부자연스러운 동작이 나옵니다. 구현은 [src/dialogMemory.ts](../src/dialogMemory.ts)에 모여 있습니다.
+TaskHub가 여는 다이얼로그는 같은 용도로 마지막에 사용한 디렉터리를 기억합니다. 구현은 [dialogMemory.ts](../src/dialogMemory.ts)에 있으며 `taskhub.dialog.rememberLastLocation` 설정으로 전체 동작을 끌 수 있습니다.
 
 ### 25.1. 시작 위치 결정 순서
 
-1. 호출자(또는 액션 JSON의 `options.defaultUri`)가 명시한 위치 — 실제로 존재할 때만.
-2. 같은 용도(scope)로 마지막에 선택했던 디렉터리.
-3. **용도를 가리지 않고 가장 최근에 사용한 다이얼로그 위치** (0.6.54부터).
-4. 활성 에디터가 속한 워크스페이스 폴더, 없으면 첫 워크스페이스 폴더.
-5. 위 후보가 모두 없으면 `defaultUri` 없이 — VS Code 기본 동작.
+1. 호출자나 액션의 `options.defaultUri`가 지정한 실제 존재 경로.
+2. 같은 용도(scope)로 마지막에 선택한 디렉터리.
+3. 현재 워크스페이스에서 가장 최근에 사용한 TaskHub 다이얼로그 위치.
+4. 활성 에디터의 워크스페이스 폴더, 없으면 첫 워크스페이스 폴더.
+5. 후보가 없으면 `defaultUri`를 전달하지 않고 VS Code 기본 동작에 맡김.
 
-(저장 다이얼로그는 호출자가 넘긴 `defaultDir`이 3번보다 앞에 옵니다 — 사용자가 방금 고른 워크스페이스 폴더나 분석 중인 바이너리가 있던 폴더처럼, 그 저장에 대해 호출자가 아는 구체적인 사실이기 때문입니다. 3번은 workspace 상태에서만 읽습니다 — [§25.3](#253-직전-다이얼로그-위치-이어받기-0654) 참조.)
-
-기억된 경로는 열 때마다 존재 여부를 확인하므로, 폴더를 지우거나 옮겼으면 조용히 다음 후보로 내려갑니다.
-
-저장은 workspace 상태와 global 상태 양쪽에 하며 읽을 때 workspace를 우선합니다. 프로젝트별로 다른 위치를 기억하되, 새 프로젝트에서 처음 여는 다이얼로그는 다른 창에서 쓰던 같은 용도의 위치를 물려받습니다.
-
-**저장 크기 (0.6.33부터)**: 위치는 scope → 경로 맵 하나(`taskhub.dialogLocations`)에 담기고 **최대 100개**까지만 유지합니다. 넘으면 가장 오래 전에 기록된 것부터 버립니다. `fileDialog` / `folderDialog` scope는 액션 id로 만들어지므로 액션을 바꾸거나 지울 때마다 쓰이지 않는 scope가 남는데, 이전에는 정리 경로가 없어 global 상태에 계속 쌓였습니다. 0.6.32 이전 형식(scope당 키 하나)은 확장 활성화 시 한 번 흡수되고 옛 키는 삭제됩니다.
-
-> 쓰이지 않는 scope를 **현재 열린 프로젝트의 액션 목록과 대조해** 지우는 방식은 쓰지 않습니다. global 상태는 창 사이에 공유되므로, 지금 열린 프로젝트에 없는 scope가 곧 죽은 scope인 것이 아닙니다 — 그 방식은 다른 프로젝트가 물려받아 쓰는 위치를 지워 위 "물려받기" 동작을 깨뜨립니다. 총량만 제한합니다.
+저장 다이얼로그는 호출자가 알고 있는 `defaultDir`을 3번보다 우선합니다. 기억된 경로가 사라졌다면 조용히 다음 후보로 내려갑니다.
 
 ### 25.2. 기억 단위 (scope)
 
-용도가 다른 다이얼로그는 위치를 공유하지 않습니다. Hex Viewer / JSON Editor / Memory Map(ELF·Linker Listing·링커 스크립트·HTML 저장) / 즐겨찾기 추가 / 액션 Import·Export / Preset 저장이 각각 독립적으로 기억됩니다.
+- Hex Viewer, JSON Editor, Memory Map의 각 입력/저장 단계, 즐겨찾기, Import/Export, Preset은 서로 다른 scope를 사용합니다.
+- `fileDialog`와 `folderDialog` 태스크는 **액션 ID + 태스크 ID** 단위로 구분합니다.
+- 파일 선택은 선택한 파일의 상위 디렉터리, 폴더 선택은 선택한 폴더 자체를 기억합니다.
+- 취소한 다이얼로그는 위치를 갱신하지 않습니다.
+- scope별 위치는 workspace와 global 상태에 저장해 같은 프로젝트를 우선하면서 새 프로젝트에서도 같은 용도의 마지막 위치를 사용할 수 있습니다.
+- 저장 맵은 최대 100개이며 오래된 항목부터 정리합니다.
 
-`fileDialog` / `folderDialog` 태스크([§5](#5-actions-패널-mainviewmain))는 **액션 id + 태스크 id 단위**로 기억합니다. 한 액션 안에서 "펌웨어 파일 고르기"와 "출력 폴더 고르기"를 연달아 하더라도 서로의 위치를 덮어쓰지 않습니다.
+### 25.3. 직전 다이얼로그 위치 이어받기
 
-폴더 선택 다이얼로그는 고른 폴더 *자체* 를(같은 출력 폴더를 반복해 고르는 경우가 많으므로), 파일 선택은 고른 파일이 있던 폴더를 기억합니다. 취소하면 아무것도 갱신하지 않습니다.
-
-### 25.3. 직전 다이얼로그 위치 이어받기 (0.6.54)
-
-scope별 기억은 **같은 용도를 반복할 때** 값을 갖습니다. 뒤집으면 그 scope를 처음 쓰는 다이얼로그는 기억이 없어 워크스페이스 루트로 떨어졌고, "펌웨어 파일을 고른 뒤 출력 폴더를 고른다"처럼 이어지는 액션에서 두 번째 다이얼로그가 방금 다녀온 폴더와 무관한 곳에서 열렸습니다.
-
-그래서 위 순서 3번에 **용도를 가리지 않는 "가장 최근에 사용한 위치"** 를 둡니다. TaskHub가 여는 모든 다이얼로그(Hex Viewer·JSON Editor·Memory Map·Import/Export·`fileDialog`/`folderDialog` 태스크)가 열기·저장 구분 없이 이 값을 **갱신**합니다.
-
-**읽는 쪽은 열기 다이얼로그가 사실상 전부입니다.** 저장 다이얼로그는 호출부가 모두 `defaultDir`(사용자가 방금 고른 워크스페이스 폴더, 분석 중인 바이너리가 있던 폴더)을 넘기고 그쪽이 앞서므로, 이 값까지 내려오는 것은 그 폴더가 사라졌을 때뿐입니다.
-
-**scope 기억을 대신하지 않습니다.** 한 번이라도 그 용도로 골라 둔 위치가 있으면 언제나 그쪽이 이깁니다 — 늘 같은 출력 폴더를 고르던 사용자의 흐름을, 직전에 다른 폴더를 다녀왔다는 이유로 바꾸지 않습니다. 저장은 scope별 위치와 별도의 예약 키(`*last`)에 하므로 어느 용도의 기억도 덮어쓰지 않으며, 저장 맵이 상한에 닿아도 이 항목은 축출하지 않습니다.
-
-**창을 넘지 않습니다.** scope별 기억과 달리 이 값은 workspace 상태에만 쓰고 거기서만 읽습니다. §25.1의 "다른 창에서 쓰던 위치를 물려받는다"는 *같은 용도*라는 근거 위에 서 있는데, 이 값에는 용도가 없습니다 — global까지 나가면 다른 프로젝트에서 방금 다녀온 폴더가 이 프로젝트의 다이얼로그를 끌고 가고, 그건 §25가 없애려던 바로 그 증상입니다.
-
-`taskhub.dialog.rememberLastLocation`을 끄면 이 폴백도 함께 꺼집니다 — 읽기도 기록도 하지 않습니다.
+같은 scope의 기록이 없으면 현재 워크스페이스에서 가장 최근에 사용한 TaskHub 다이얼로그 위치를 사용합니다. 이 값은 scope별 기억을 덮지 않으며 다른 VS Code 창으로 공유하지 않습니다. 따라서 한 액션에서 펌웨어 파일을 고른 뒤 처음 사용하는 출력 폴더 다이얼로그를 열어도 방금 사용한 디렉터리에서 이어갈 수 있습니다.
 
 ### 25.4. 끄기
 
-`taskhub.dialog.rememberLastLocation`을 `false`로 두면 저장도 복원도 하지 않습니다 ([§21 설정 레퍼런스](#21-설정-레퍼런스)). 구체적으로는 위 우선순위 표 전체가 꺼져 **TaskHub가 `defaultUri`를 지정하지 않으며**, 시작 위치 결정을 VS Code에 맡깁니다.
+`taskhub.dialog.rememberLastLocation`을 `false`로 두면 TaskHub는 위치를 읽거나 기록하지 않고 `defaultUri`도 지정하지 않습니다. 다만 액션이 명시한 `options.defaultUri`는 계속 존중합니다. 저장 다이얼로그는 VS Code API 제약상 `defaultUri`를 생략하면 제안 파일명도 함께 사라집니다.
 
-**VS Code가 그때 하는 일**: `defaultUri`가 없으면 VS Code가 자체 기본 규칙으로 위치를 정합니다 — 대체로 최근 활성 파일, 그다음 워크스페이스 루트를 따르며 `files.dialog.defaultPath` 설정이 있으면 그쪽이 우선합니다. **"창과 확장 프로그램이 공유하는 전역 최근 경로"가 아닙니다** (0.6.11~0.6.35의 설명이 그렇게 잘못 적혀 있었습니다). 정확한 순서는 VS Code 내부 구현이라 버전에 따라 달라질 수 있으므로 여기서 못박지 않습니다 — TaskHub 관점에서 보장하는 것은 "우리가 지정하지 않는다" 하나입니다.
-
-예외는 두 가지입니다.
-
-*   액션 JSON에 적어 둔 `options.defaultUri`는 그대로 존중합니다 — TaskHub의 추측이 아니라 액션 작성자의 명시적 지시이기 때문입니다.
-*   저장 대화상자도 `defaultUri`를 지정하지 않으며, 이때 **제안 파일명도 함께 사라집니다** (0.6.35부터). VS Code API는 파일명만 제안하는 수단이 없어(`defaultUri` 하나뿐), 0.6.30~0.6.34처럼 파일명만 담은 상대 경로 Uri를 넘기면 파일시스템 루트를 지정하는 셈이 됩니다 — 설정 약속과 어긋나는 쪽이 파일명 제안보다 더 나쁩니다.
-
-> 0.6.11~0.6.29에서는 이 설정이 `recall`/`remember` 안쪽에서만 확인돼, 꺼도 워크스페이스 폴더 폴백이 그대로 적용됐습니다. TaskHub가 여전히 `defaultUri`를 지정하고 있었으므로 VS Code의 자체 규칙은 실제로 쓰인 적이 없습니다. 0.6.30에서 구현을 고쳤고, 0.6.36에서 그 규칙이 무엇인지 정확히 적었습니다.
-
-> **참고**: 액션 JSON의 `options.defaultUri`는 문자열로 작성하지만 VS Code API는 `Uri`를 요구하므로, TaskHub가 파일 경로로 해석해 승격시킵니다 (`scheme://` 형태만 URI로 파싱하므로 `C:\proj\build` 같은 Windows 경로가 드라이브 문자를 scheme으로 오인당하지 않습니다).
+자세한 설정 정보는 [§21 설정 레퍼런스](#21-설정-레퍼런스)를 참조하세요.
