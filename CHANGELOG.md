@@ -6,6 +6,21 @@
 보안·데이터 손실 수정과 사용자 영향만 남긴다. 테스트를 적는다면 최종 수치만 기록한다.
 -->
 
+## [0.7.19] - 2026-08-13
+
+### 수정 — Windows 명령 인자와 PowerShell 출력 호환성
+
+- Windows PowerShell 5.1이 `shell` 태스크의 명시적 `args` 속 큰따옴표를 제거해
+  `node -e` 같은 명령을 훼손하던 문제를 고쳤다. 셸 문법이 없는 단일 실행 파일은 argv로
+  실행하고, 연산자·파이프·리다이렉션은 기존처럼 셸에서 처리한다.
+- 비밀번호를 쓰는 Windows one-shot은 실제 argv를 인코딩된 래퍼 안에 두면서도 큰따옴표와
+  종료 코드를 보존해, 백그라운드 실행과 실패 알림이 Windows에서도 동작한다.
+- `taskhub.pipeline.windowsPowerShellEncoding: "utf8"`이 콘솔 캡처뿐 아니라 `>`/`>>` 파일
+  리다이렉션에도 적용된다. Windows PowerShell 5.1은 UTF-8 BOM을 붙이고 PowerShell 7은
+  BOM 없이 기록하므로, 엄격한 바이트 형식을 요구하는 다음 단계는 이 차이를 고려해야 한다.
+
+**테스트**: Windows argv·one-shot·PowerShell 리다이렉션 회귀 검증 추가, 최종 2845 passing.
+
 ## [0.7.18] - 2026-08-13
 
 ### 보안 — 가져온 액션의 실행 위험 사전 검토

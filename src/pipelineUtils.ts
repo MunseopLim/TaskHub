@@ -1709,6 +1709,27 @@ export function windowsCommandIsDirectlyLaunchable(
 }
 
 /**
+ * A raw Windows `shell` command may use native argv execution only when the
+ * command text is exactly one executable token. Shell syntax, embedded
+ * command arguments, aliases, and script shims stay on the PowerShell path;
+ * explicit `args` can then keep their byte-for-byte boundaries without being
+ * reparsed by Windows PowerShell 5.1's legacy native-argument binder.
+ */
+export function windowsRawCommandIsDirectlyLaunchable(
+    command: string,
+    args: string[] = [],
+    lookup: Partial<WindowsExecutableLookup> = {}
+): boolean {
+    let tokens: string[];
+    try {
+        tokens = tokenizeCommandLine(command.trim());
+    } catch {
+        return false;
+    }
+    return args.length > 0 && tokens.length === 1 && windowsCommandIsDirectlyLaunchable(command, args, lookup);
+}
+
+/**
  * 명령 문자열이 PowerShell 7 이상을 요구하는 연산자를 쓰는가.
  *
  * **인용 구간은 세지 않는다.** `cmd /c "build && test"` 의 `&&` 는 문자열
@@ -1775,17 +1796,21 @@ export function selectWindowsRawShell(needsChainOperators: boolean, pwshPath: st
 }
 
 /**
- * Windows 에서 명령을 어떤 방식으로 띄울지 고른다.
- *
- * **raw 는 native 보다 먼저 판단해야 한다.** native 는 첫 토큰을 실행 파일로
- * 보고 나머지를 argv 로 넘기므로 `&&`·`|`·`>` 가 리터럴 인자가 된다. 0.6.47 은
- * 스트림 모드에서만 이 순서를 지켰고 캡처 모드는 `raw` 를 보지 않아, 같은
- * 태스크가 `passTheResultToNextTask` 하나로 다르게 실행됐다. 순서를 함수로
- * 고정해 두 경로가 같은 규칙을 공유하게 한다.
+ * Choose the Windows launch path shared by streamed, one-shot, sensitive,
+ * and captured tasks. Raw shell syntax stays on PowerShell, except for the
+ * deliberately narrow single-executable + explicit-args case where native
+ * argv avoids Windows PowerShell 5.1 quote loss.
  */
-export function windowsSpawnStrategy(raw: boolean, directlyLaunchable: boolean): 'raw-shell' | 'native' | 'powershell' {
-    if (raw) { return 'raw-shell'; }
-    return directlyLaunchable ? 'native' : 'powershell';
+export function windowsTaskSpawnStrategy(
+    raw: boolean,
+    command: string,
+    args: string[] = [],
+    lookup: Partial<WindowsExecutableLookup> = {}
+): 'raw-shell' | 'native' | 'powershell' {
+    if (raw) {
+        return windowsRawCommandIsDirectlyLaunchable(command, args, lookup) ? 'native' : 'raw-shell';
+    }
+    return windowsCommandIsDirectlyLaunchable(command, args, lookup) ? 'native' : 'powershell';
 }
 
 /**
@@ -1823,6 +1848,52 @@ export function buildNativeCommandInvocation(command: string, args: string[]): N
 }
 
 /**
+ * Build a PowerShell script that starts a native executable through
+ * ProcessStartInfo.Arguments. Windows PowerShell 5.1 otherwise removes
+ * embedded quote characters while rebinding native arguments. The encoded
+ * outer PowerShell command also keeps sensitive one-shot argv out of the
+ * plain-text process command line.
+ */
+export function buildWindowsNativeProcessScript(
+    command: string,
+    args: string[],
+    cwd?: string,
+    waitForExit = false
+): string {
+    const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
+    const argumentLine = combinedArgs.map(arg => quoteWindowsCommandLineArgument(arg)).join(' ');
+    const lines = [
+        '$psi = New-Object System.Diagnostics.ProcessStartInfo',
+        `$psi.FileName = ${quotePowerShellArgument(executable)}`,
+        '$psi.UseShellExecute = $false',
+        '$psi.CreateNoWindow = $true',
+    ];
+    if (argumentLine.length > 0) {
+        lines.push(`$psi.Arguments = ${quotePowerShellArgument(argumentLine)}`);
+    }
+    if (cwd) {
+        lines.push(`$psi.WorkingDirectory = ${quotePowerShellArgument(cwd)}`);
+    }
+    lines.push(
+        'try {',
+        '    $taskHubProcess = [System.Diagnostics.Process]::Start($psi)',
+        '    if ($null -eq $taskHubProcess) { exit 1 }'
+    );
+    if (waitForExit) {
+        lines.push('    $taskHubProcess.WaitForExit()', '    exit [int]$taskHubProcess.ExitCode');
+    }
+    lines.push('} catch {', '    exit 1', '}');
+    return lines.join('\n');
+}
+
+/** UTF-8 console and file-redirection defaults for Windows PowerShell 5.1. */
+export function buildPowerShellUtf8Preamble(enforceUtf8: boolean): string {
+    if (!enforceUtf8) { return ''; }
+    return '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n' +
+        "$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8';\n";
+}
+
+/**
  * Build a PowerShell invocation script (`& 'exe' 'arg1' 'arg2'`) plus a
  * display string for logs. When `enforceUtf8Console` is true, the script
  * prepends a `[Console]::OutputEncoding = UTF8` directive.
@@ -1832,7 +1903,7 @@ export function buildPowerShellInvocation(command: string, args: string[], enfor
     const quotedExe = quotePowerShellArgument(executable);
     const quotedArgs = combinedArgs.map(arg => quotePowerShellArgument(arg));
     const invocation = `& ${quotedExe}${quotedArgs.length ? ' ' + quotedArgs.join(' ') : ''}`;
-    const prefix = enforceUtf8Console ? "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n" : '';
+    const prefix = buildPowerShellUtf8Preamble(enforceUtf8Console);
     const script = `${prefix}${invocation}`;
     return { script, display: invocation };
 }

@@ -2331,8 +2331,8 @@ try {
                 );
 
                 assert.deepStrictEqual(
-                    JSON.parse(fs.readFileSync(resultPath, 'utf8')),
-                    files,
+                    (JSON.parse(fs.readFileSync(resultPath, 'utf8')) as string[]).map(normalizeWindowsPathForAssert),
+                    files.map(normalizeWindowsPathForAssert),
                     '공백이 든 경로까지 인자 하나씩 그대로 도착해야 한다'
                 );
             } finally {

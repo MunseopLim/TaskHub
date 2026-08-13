@@ -106,8 +106,8 @@ suite('View provider integration', function () {
         assert.strictEqual(roots.length, 1, `깨진 파일이 빈 목록으로 보인다: ${roots.length}개 노드`);
         assert.ok(roots[0] instanceof LinkParseError, '오류 행 대신 다른 노드가 들어 있다');
         assert.strictEqual(
-            (roots[0] as LinkParseError).filePath,
-            linksPath,
+            normalizeWindowsPathForAssert((roots[0] as LinkParseError).filePath),
+            normalizeWindowsPathForAssert(linksPath),
             '오류 행이 어떤 파일인지 알려주지 않는다'
         );
         assert.ok(roots[0].command, '오류 행을 눌러도 파일을 열 수 없다');

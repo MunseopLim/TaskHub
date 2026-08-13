@@ -24,6 +24,10 @@ import {
     buildPowerShellInvocation,
     buildNativeCommandInvocation,
     windowsCommandIsDirectlyLaunchable,
+    windowsRawCommandIsDirectlyLaunchable,
+    windowsTaskSpawnStrategy,
+    buildWindowsNativeProcessScript,
+    buildPowerShellUtf8Preamble,
     encodePowerShellScript,
     getCommandString,
     getToolCommand,
@@ -158,6 +162,37 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         assert.ok(invocation.display.includes('process.stdout.write(\\"ok\\")'));
     });
 
+    test('Windows native ProcessStartInfo script preserves quoted argv and can relay exit status', () => {
+        const script = buildWindowsNativeProcessScript(
+            'node',
+            ['-e', 'process.stdout.write("ok value")'],
+            'C:\\work dir',
+            true
+        );
+        assert.ok(script.includes('$psi.UseShellExecute = $false'));
+        assert.ok(script.includes('process.stdout.write(\\"ok value\\")'));
+        assert.ok(script.includes("$psi.WorkingDirectory = 'C:\\work dir'"));
+        assert.ok(script.includes('try {'));
+        assert.ok(script.includes('if ($null -eq $taskHubProcess) { exit 1 }'));
+        assert.ok(script.includes('$taskHubProcess.WaitForExit()'));
+        assert.ok(script.includes('exit [int]$taskHubProcess.ExitCode'));
+        assert.ok(script.includes('} catch {\n    exit 1\n}'));
+        assert.ok(!script.includes('$taskHubProcess | Out-Null'));
+
+        const detachedScript = buildWindowsNativeProcessScript('node', ['--version']);
+        assert.ok(detachedScript.includes('try {'));
+        assert.ok(detachedScript.includes('} catch {\n    exit 1\n}'));
+        assert.ok(!detachedScript.includes('.WaitForExit()'));
+        assert.ok(!detachedScript.includes('$taskHubProcess | Out-Null'));
+    });
+
+    test('PowerShell UTF-8 preamble also covers 5.1 file redirection', () => {
+        const preamble = buildPowerShellUtf8Preamble(true);
+        assert.ok(preamble.includes('[Console]::OutputEncoding'));
+        assert.ok(preamble.includes("$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'"));
+        assert.strictEqual(buildPowerShellUtf8Preamble(false), '');
+    });
+
     test('windowsCommandIsDirectlyLaunchable resolves PATH, rejects shims/scripts/builtins', () => {
         const lookup = {
             env: { PATH: 'C:\\Windows\\System32;C:\\node;C:\\git' },
@@ -168,6 +203,13 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         };
         // extensionless names resolved against the (fake) PATH
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('node', ['-e', 'x'], lookup), true);
+        assert.strictEqual(windowsRawCommandIsDirectlyLaunchable('node', ['-e', 'x'], lookup), true);
+        assert.strictEqual(windowsRawCommandIsDirectlyLaunchable('node', [], lookup), false);
+        assert.strictEqual(windowsRawCommandIsDirectlyLaunchable('node --version', [], lookup), false);
+        assert.strictEqual(windowsRawCommandIsDirectlyLaunchable('node > out.txt', [], lookup), false);
+        assert.strictEqual(windowsTaskSpawnStrategy(true, 'node', ['-e', 'x'], lookup), 'native');
+        assert.strictEqual(windowsTaskSpawnStrategy(true, 'node > out.txt', [], lookup), 'raw-shell');
+        assert.strictEqual(windowsTaskSpawnStrategy(false, 'node', ['-e', 'x'], lookup), 'native');
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('cmd /c echo hi', [], lookup), true);
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('git status', [], lookup), true);
         // npm/npx/pnpm only exist as `.cmd` shims → stay on PowerShell

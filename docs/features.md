@@ -249,12 +249,17 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 
 동적 파일 경로나 사용자 입력은 `command`의 `args`에 두는 것이 안전한 기본값입니다. `shell` 문자열에 `${…}` 값을 직접 넣으면 값의 셸 문법이 다시 해석될 수 있습니다. 반대로 `command`라도 `sh -c`, `cmd /c`, `powershell -Command` 같은 중첩 인터프리터를 호출하면 스크립트 문자열이 다시 파싱됩니다. Doctor의 `shell.interpolated-command`와 `command.nested-interpreter`가 이 패턴을 경고합니다.
 
+`shell`을 써야 한다면 동적 값은 문자열에 직접 보간하지 말고 `args`에 두세요. Windows에서도
+본문이 단일 실행 파일이면 이 `args`는 PowerShell 5.1의 재파싱을 거치지 않고 argv 경계를
+보존합니다. 이때 `curl`·`sort`·`where`·`tee`처럼 PowerShell 별칭과 PATH의 동명 exe가 함께
+있다면 별칭이 아니라 exe를 실행합니다.
+
 옵션 주입도 별개로 주의합니다. 값이 `-`로 시작할 수 있다면 프로그램이 옵션으로 읽을 수 있으므로 입력 패턴을 제한하거나 프로그램이 지원하는 `--` 뒤에 위치 인자를 둡니다.
 
 #### `shell` 타입이 쓰는 인터프리터
 
 - macOS/Linux 캡처 모드는 `/bin/sh`를 사용합니다. 스트림 모드는 VS Code의 기본 셸을 따릅니다.
-- Windows는 기본적으로 Windows PowerShell 5.1을 사용하며, 인용 밖의 `&&`·`||`가 필요하면 PowerShell 7(`pwsh`)을 찾습니다.
+- Windows는 기본적으로 Windows PowerShell 5.1을 사용하며, 인용 밖의 `&&`·`||`가 필요하면 PowerShell 7(`pwsh`)을 찾습니다. 본문이 단일 native 실행 파일이고 `args`가 별도로 있으면 인자 보존을 위해 argv 실행을 사용합니다.
 - 플랫폼별 셸 차이를 피하려면 연산자 체인을 여러 태스크로 나누고 값을 `args`나 `env`로 전달하세요.
 
 #### Output Capture
@@ -1202,7 +1207,7 @@ Command Palette에서 **TaskHub: Open Hex Viewer**를 실행하고 파일을 고
 | `taskhub.showTaskStatus` | `boolean` | `true` | Actions 뷰의 실행 상태 아이콘(running/success/failure)·진행률 표시와 완료 알림 표시 여부. `false`면 **실패 알림(액션의 `failMessage` 포함)도 함께 억제**되므로 실패 여부는 History 패널이나 출력 채널로 확인해야 한다. 동시 실행 가드, 인라인 *중지* 버튼, *Stop All Actions* 노출은 그대로 동작한다. | [§5 Actions 패널](#5-actions-패널-mainviewmain), [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | 파이프라인 실행 시 TaskHub OutputChannel에 상세 명령/STDOUT/STDERR/exit code를 출력. 디버깅에만 켤 것. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.pythonIoEncoding` | `string` | `"utf-8"` | TaskHub가 실행하는 모든 명령의 `PYTHONIOENCODING` 환경변수 값. 빈 문자열이면 강제 설정 안 함. `utf-8:ignore` 같은 값도 가능. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
-| `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell 출력 인코딩. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
+| `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell의 콘솔 출력과 `>`/`>>` 파일 리다이렉션 인코딩. `"utf8"`의 파일은 Windows PowerShell 5.1에서 BOM이 붙고 PowerShell 7에서는 BOM이 없다. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` (1–1024) | 캡처 모드(`passTheResultToNextTask: true`)에서 누적되는 stdout/stderr 총 크기 상한(MB). 초과 시 프로세스를 종료하고 명확한 에러로 실패. | [§5 Output Capture](#output-capture) |
 | `taskhub.pipeline.totalOutputLimitMb` | `number` | `32` (1–4096) | 한 액션이 들고 있는 **모든 태스크 결과의 합계** 상한(MB). 위 설정이 태스크 하나를 막는다면 이 설정은 합계를 막는다. **태스크 상한보다 작아지지 않는다.** 초과 시 액션 실패. | [§5 Output Capture](#output-capture) |
 | `taskhub.pipeline.maxParallelTasks` | `integer` | `4` (1–32) | 한 액션 안에서 동시에 실행될 수 있는 task 최대 개수. `parallel: true`가 붙은 task만 "이전 모든 task를 기다림" barrier에서 빠지며, barrier에서 빠진 뒤에도 명시적 `dependsOn`과 `${taskId.x}` 자동 추론 의존성은 그대로 기다린다. `parallel: true`가 없는 task는 `dependsOn` 유무와 무관하게 sync barrier로 동작. 기본 4는 임베디드 빌드(linker/LTO)의 메모리 부담을 고려한 보수적 값 — 자원 여유가 있는 머신에서는 늘리고, 완전 순차로 강제하려면 `1`로 설정. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |

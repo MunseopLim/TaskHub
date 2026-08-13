@@ -1126,6 +1126,9 @@ import {
     buildPowerShellInvocation,
     buildNativeCommandInvocation,
     windowsCommandIsDirectlyLaunchable,
+    windowsRawCommandIsDirectlyLaunchable,
+    buildWindowsNativeProcessScript,
+    buildPowerShellUtf8Preamble,
     encodePowerShellScript,
     quotePosixArgument,
     buildPosixCommandLine,
@@ -1134,7 +1137,7 @@ import {
     selectWindowsRawShell,
     resolvePwshPath,
     rawCommandUsesChainOperators,
-    windowsSpawnStrategy,
+    windowsTaskSpawnStrategy,
     buildRawOneShotWindowsScript,
     withPowerShellExitCode,
     interpolateCommandPreservingTokens,
@@ -1187,10 +1190,13 @@ export {
     buildPowerShellInvocation,
     buildNativeCommandInvocation,
     windowsCommandIsDirectlyLaunchable,
+    windowsRawCommandIsDirectlyLaunchable,
+    buildWindowsNativeProcessScript,
+    buildPowerShellUtf8Preamble,
     selectWindowsRawShell,
     resolvePwshPath,
     rawCommandUsesChainOperators,
-    windowsSpawnStrategy,
+    windowsTaskSpawnStrategy,
     buildRawOneShotWindowsScript,
     withPowerShellExitCode,
     interpolateCommandPreservingTokens,
@@ -6186,15 +6192,24 @@ export function createShellExecution(
     useUtf8Console: boolean,
     raw = false,
     lookup: Partial<import('./pipelineUtils').WindowsExecutableLookup> = {}
-): { shellExecution: vscode.ShellExecution | vscode.ProcessExecution; displayCommand: string; usesNativeExecution?: boolean } {
+): { shellExecution: vscode.ShellExecution | vscode.ProcessExecution; displayCommand: string } {
     // `shell` 타입은 문자열을 셸에 그대로 넘긴다 (0.6.47). Windows 에서도
-    // 네이티브 직접 실행 경로를 타지 않는다 — 그건 argv 실행이라 `&&` 나
-    // 리다이렉션이 다시 리터럴이 되어 버린다.
+    // 연산자·리다이렉션이 있는 본문은 반드시 셸에 넘긴다. 다만 실행 파일
+    // 토큰 하나뿐인 본문은 셸 문법이 없으므로, Windows PowerShell 5.1 이
+    // 명시적 args 속 큰따옴표를 제거하지 않도록 native argv 로 실행한다.
     if (raw) {
         if (process.platform === 'win32') {
+            const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) };
+            if (windowsTaskSpawnStrategy(true, command, args, { env: effectiveEnv, ...lookup }) === 'native') {
+                const native = buildNativeCommandInvocation(command, args);
+                return {
+                    shellExecution: new vscode.ProcessExecution(native.executable, native.args, toProcessExecutionOptions(options)),
+                    displayCommand: native.display
+                };
+            }
             const line = buildRawPowerShellCommandLine(command, args);
-            const shell = resolveRawShellExecutable(command, { env: { ...process.env, ...(options.env ?? {}) }, ...lookup });
-            const utf8Prefix = useUtf8Console ? '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n' : '';
+            const shell = resolveRawShellExecutable(command, { env: effectiveEnv, ...lookup });
+            const utf8Prefix = buildPowerShellUtf8Preamble(useUtf8Console);
             const encoded = encodePowerShellScript(withPowerShellExitCode(`${utf8Prefix}${line}`));
             return {
                 shellExecution: new vscode.ShellExecution(shell, ['-NoProfile', '-EncodedCommand', encoded], options),
@@ -6210,12 +6225,11 @@ export function createShellExecution(
         // spawned task, so the child's effective PATH is `options.env.PATH ??
         // process.env.PATH` — judge launchability against that.
         const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) };
-        if (windowsCommandIsDirectlyLaunchable(command, args, { env: effectiveEnv })) {
+        if (windowsTaskSpawnStrategy(false, command, args, { env: effectiveEnv }) === 'native') {
             const native = buildNativeCommandInvocation(command, args);
             return {
                 shellExecution: new vscode.ProcessExecution(native.executable, native.args, toProcessExecutionOptions(options)),
-                displayCommand: native.display,
-                usesNativeExecution: true
+                displayCommand: native.display
             };
         }
         const invocation = buildPowerShellInvocation(command, args, useUtf8Console);
@@ -6266,35 +6280,26 @@ export function wrapCommandForOneShot(
         // 셸에 그대로 넘기되 백그라운드로 띄운다. `Start-Process` 로 인터프리터
         // 자체를 떼어 내고, 명령 문자열은 `-EncodedCommand` 로 넘겨 인용을
         // 거치지 않는다. `-WindowStyle Hidden` 은 콘솔 창이 뜨지 않게 한다.
-        const line = buildRawPowerShellCommandLine(command, args);
-        const shell = resolveRawShellExecutable(command, { env, ...lookup });
-        const utf8Prefix = useUtf8Console ? "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n" : '';
-        const encoded = encodePowerShellScript(`${utf8Prefix}${line}`);
-        const script = buildRawOneShotWindowsScript(shell, encoded, cwd);
-        return { commandLine: script, displayCommand: line, isPowerShellScript: true };
+        if (windowsTaskSpawnStrategy(true, command, args, { env, ...lookup }) === 'raw-shell') {
+            const line = buildRawPowerShellCommandLine(command, args);
+            const shell = resolveRawShellExecutable(command, { env, ...lookup });
+            const utf8Prefix = buildPowerShellUtf8Preamble(useUtf8Console);
+            const encoded = encodePowerShellScript(`${utf8Prefix}${line}`);
+            const script = buildRawOneShotWindowsScript(shell, encoded, cwd);
+            return { commandLine: script, displayCommand: line, isPowerShellScript: true };
+        }
+        // A single native executable has no shell syntax to preserve. Fall
+        // through to ProcessStartInfo so explicit argv keeps embedded quotes.
     }
 
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
     if (process.platform === 'win32') {
-        const utf8Prefix = useUtf8Console ? "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n" : '';
-        if (windowsCommandIsDirectlyLaunchable(command, args, { env })) {
+        const utf8Prefix = buildPowerShellUtf8Preamble(useUtf8Console);
+        if (windowsTaskSpawnStrategy(false, command, args, { env, ...lookup }) === 'native') {
             // Directly-launchable executable: start it via ProcessStartInfo with
             // UseShellExecute=$false so we control arg quoting precisely
             // (CommandLineToArgvW rules), preserving embedded `"`.
-            const argLine = combinedArgs.map(arg => quoteWindowsCommandLineArgument(arg)).join(' ');
-            const lines = [
-                '$psi = New-Object System.Diagnostics.ProcessStartInfo',
-                `$psi.FileName = ${quotePowerShellArgument(executable)}`,
-                `$psi.UseShellExecute = $false`,
-            ];
-            if (argLine.length > 0) {
-                lines.push(`$psi.Arguments = ${quotePowerShellArgument(argLine)}`);
-            }
-            if (cwd) {
-                lines.push(`$psi.WorkingDirectory = ${quotePowerShellArgument(cwd)}`);
-            }
-            lines.push('[System.Diagnostics.Process]::Start($psi) | Out-Null');
-            const script = `${utf8Prefix}${lines.join('\n')}`;
+            const script = `${utf8Prefix}${buildWindowsNativeProcessScript(command, args, cwd)}`;
             return { commandLine: script, displayCommand: script, isPowerShellScript: true };
         }
         // Shims (`npm` → `npm.cmd`), scripts (`.js`), and shell builtins can't be
@@ -6480,36 +6485,56 @@ function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string
     try {
         let child: ReturnType<typeof spawn>;
         if (process.platform === 'win32') {
-            // PowerShell resolves .cmd/.bat shims and scripts consistently;
-            // the encoded script keeps argument quoting identical to captured
-            // commands without exposing it in a command-line audit surface.
-            const utf8Prefix = raw && useUtf8Console
-                ? '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n'
-                : '';
-            const invocation = raw
-                ? (() => {
-                    const line = buildRawPowerShellCommandLine(command, args);
-                    return { script: `${utf8Prefix}${line}`, display: line };
-                })()
-                : buildPowerShellInvocation(command, args, useUtf8Console);
-            // raw 는 여기서도 인터프리터를 골라야 한다 — 이 경로는 stdio:'ignore'
-            // 이고 실패 안내가 일부러 무내용("상세는 숨겼습니다")이라, 5.1 의
-            // `&&` 파스 오류가 나면 사용자에게 **아무 진단 단서도 남지 않는다**.
-            const shell = raw ? resolveRawShellExecutable(command, { env: childEnv }) : 'powershell.exe';
-            // powershell.exe does not reliably propagate an external program's
-            // exit code unless the script exits explicitly with LASTEXITCODE.
-            const script = withPowerShellExitCode(invocation.script);
-            child = spawn(
-                shell,
-                ['-NoProfile', '-EncodedCommand', encodePowerShellScript(script)],
-                {
-                    cwd: workingDirectory,
-                    env: childEnv,
-                    detached: true,
-                    stdio: 'ignore',
-                    windowsHide: true,
-                }
-            );
+            const strategy = windowsTaskSpawnStrategy(raw, command, args, { env: childEnv });
+            if (strategy === 'native') {
+                // Keep the real argv inside the encoded wrapper: direct spawn
+                // would expose a password-derived value in the process list.
+                // ProcessStartInfo also avoids PowerShell 5.1 removing embedded
+                // quotes from values such as a `node -e` script.
+                const script = buildWindowsNativeProcessScript(command, args, workingDirectory, true);
+                child = spawn(
+                    'powershell.exe',
+                    ['-NoProfile', '-EncodedCommand', encodePowerShellScript(script)],
+                    {
+                        cwd: workingDirectory,
+                        env: childEnv,
+                        detached: true,
+                        stdio: 'ignore',
+                        windowsHide: true,
+                    }
+                );
+            } else {
+                // PowerShell resolves .cmd/.bat shims and scripts consistently;
+                // the encoded script keeps argument quoting identical to captured
+                // commands without exposing it in a command-line audit surface.
+                const utf8Prefix = raw && useUtf8Console
+                    ? buildPowerShellUtf8Preamble(true)
+                    : '';
+                const invocation = raw
+                    ? (() => {
+                        const line = buildRawPowerShellCommandLine(command, args);
+                        return { script: `${utf8Prefix}${line}`, display: line };
+                    })()
+                    : buildPowerShellInvocation(command, args, useUtf8Console);
+                // raw 는 여기서도 인터프리터를 골라야 한다 — 이 경로는 stdio:'ignore'
+                // 이고 실패 안내가 일부러 무내용("상세는 숨겼습니다")이라, 5.1 의
+                // `&&` 파스 오류가 나면 사용자에게 **아무 진단 단서도 남지 않는다**.
+                const shell = raw ? resolveRawShellExecutable(command, { env: childEnv }) : 'powershell.exe';
+                // powershell.exe does not reliably propagate an external program's
+                // exit code unless the script exits explicitly with LASTEXITCODE.
+                const script = withPowerShellExitCode(invocation.script);
+                child = spawn(
+                    shell,
+                    ['-NoProfile', '-EncodedCommand', encodePowerShellScript(script)],
+                    {
+                        cwd: workingDirectory,
+                        env: childEnv,
+                        detached: true,
+                        stdio: 'ignore',
+                        windowsHide: true,
+                    }
+                );
+            }
         } else {
             child = spawn(raw ? buildRawShellCommandLine(command, args) : buildPosixCommandLine(command, args), [], {
                 cwd: workingDirectory,
@@ -8154,9 +8179,7 @@ export function executeShellCommand(
                     // 않고 있었다. PowerShell 이 OEM 코드페이지로 파이프에 쓰는데
                     // 우리는 `setEncoding('utf8')` 로 읽으므로, 비-ASCII 출력이
                     // 깨진 채 캡처됐다.
-                    const utf8Prefix = useUtf8Console
-                        ? '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n'
-                        : '';
+                    const utf8Prefix = buildPowerShellUtf8Preamble(useUtf8Console);
                     return { script: `${utf8Prefix}${line}`, display: line };
                 })()
                 : buildPowerShellInvocation(command, args || [], useUtf8Console);
@@ -8291,13 +8314,11 @@ export function executeShellCommand(
             });
         };
 
-        // `raw` 는 native 보다 **먼저** 갈린다 — 그 순서가 계약이다
-        // (`windowsSpawnStrategy` 주석 참조). 예전에는 이 분기가 `raw` 를 보지
-        // 않아 캡처 모드에서만 `&&` 가 리터럴 인자가 됐다.
-        // `!raw &&` 로 짧게 끊는다 — raw 면 native 자격을 볼 필요가 없고, 그
-        // 조회는 PATH 항목마다 `statSync` 를 도는 실제 I/O 다.
+        // raw 본문이 실행 파일 토큰 하나면 명시적 args 는 native argv 로
+        // 보존한다. 셸 문법이 있거나 직접 실행할 수 없으면 기존처럼
+        // raw-shell 경로를 탄다.
         const windowsStrategy = process.platform === 'win32'
-            ? windowsSpawnStrategy(raw, !raw && windowsCommandIsDirectlyLaunchable(command, args || [], { env: childEnv }))
+            ? windowsTaskSpawnStrategy(raw, command, args || [], { env: childEnv })
             : undefined;
         if (windowsStrategy === 'native') {
             const native = buildNativeCommandInvocation(command, args || []);

@@ -55,7 +55,7 @@ import {
 	selectWindowsRawShell,
 	resolvePwshPath,
 	rawCommandUsesChainOperators,
-	windowsSpawnStrategy,
+	windowsTaskSpawnStrategy,
 	buildRawOneShotWindowsScript,
 	resolveRawShellExecutable,
 	buildPosixCommandLine,
@@ -1700,13 +1700,16 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(resolveRawShellExecutable('cmd /c "a && b"', withoutPwsh), 'powershell.exe');
 		});
 
-		test('raw 는 직접 실행 가능한 명령이어도 native argv 경로를 타지 않는다', () => {
-			// 이것이 캡처 모드가 깨졌던 지점이다 — native 로 가면 `&&` 가
-			// 리터럴 인자가 된다. raw 판정이 native 판정보다 앞서야 한다.
-			assert.strictEqual(windowsSpawnStrategy(true, true), 'raw-shell');
-			assert.strictEqual(windowsSpawnStrategy(true, false), 'raw-shell');
-			assert.strictEqual(windowsSpawnStrategy(false, true), 'native');
-			assert.strictEqual(windowsSpawnStrategy(false, false), 'powershell');
+		test('Windows 실행 전략은 raw 단일 실행 파일 예외와 셸 문법을 구분한다', () => {
+			// 스트림·one-shot·민감·캡처 경로가 이 함수를 공유한다. raw 여부만
+			// 보고 "항상 raw-shell"로 결론내리면 단일 실행 파일의 명시적 args가
+			// PowerShell 5.1에서 재파싱된다. 반대로 셸 문법을 native로 보내면
+			// `&&`·`>`가 리터럴 인자가 된다.
+			assert.strictEqual(windowsTaskSpawnStrategy(true, 'node', ['-e', 'x'], withoutPwsh), 'native');
+			assert.strictEqual(windowsTaskSpawnStrategy(true, 'node > out.txt', [], withoutPwsh), 'raw-shell');
+			assert.strictEqual(windowsTaskSpawnStrategy(true, 'node --version', [], withoutPwsh), 'raw-shell');
+			assert.strictEqual(windowsTaskSpawnStrategy(false, 'node', ['-e', 'x'], withoutPwsh), 'native');
+			assert.strictEqual(windowsTaskSpawnStrategy(false, 'echo', ['x'], withoutPwsh), 'powershell');
 		});
 
 		/** `-EncodedCommand` 페이로드를 되돌려 실제로 무엇이 넘어가는지 본다. */
@@ -1752,8 +1755,20 @@ suite('Extension Test Suite', () => {
 				// 후행부를 붙이지 않는다 — 그래서 여기서는 정확히 일치한다.
 				assert.strictEqual(
 					decodeEncodedCommand(result.commandLine),
-					'[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\necho hi'
+					'[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n' +
+					"$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8';\n" +
+					'echo hi'
 				);
+			});
+
+			test('one-shot raw 의 단일 실행 파일은 ProcessStartInfo 로 args 를 보존한다', () => {
+				const result = onWin32(() => wrapCommandForOneShot(
+					'node', ['-e', 'process.stdout.write("ok value")'], 'C:\\work', false,
+					withoutPwsh.env, true, withoutPwsh
+				));
+				assert.strictEqual(result.isPowerShellScript, true);
+				assert.ok(result.commandLine.includes('$psi.UseShellExecute = $false'), result.commandLine);
+				assert.ok(result.commandLine.includes('process.stdout.write(\\"ok value\\")'), result.commandLine);
 			});
 
 			test('one-shot raw 는 5.1 에서 && 를 만나면 던진다', () => {
@@ -1780,7 +1795,13 @@ suite('Extension Test Suite', () => {
 				// 뭉개진다 — 민감 one-shot 만 갖고 있던 처리를 세 경로에 맞췄다.
 				assert.match(payload, /exit \[int\]\$taskHubExitCode/);
 				assert.strictEqual(result.displayCommand, 'echo hi && echo bye');
-				assert.strictEqual(result.usesNativeExecution, undefined, 'raw 가 native 로 갔다');
+			});
+
+			test('스트림 모드 raw 의 단일 실행 파일은 native argv 로 실행한다', () => {
+				const result = onWin32(() => createShellExecution(
+					'node', ['-e', 'process.stdout.write("ok value")'], {}, false, true, withoutPwsh
+				));
+				assert.ok(result.shellExecution instanceof vscode.ProcessExecution);
 			});
 
 			test('스트림 모드 raw 는 연산자가 없으면 5.1 을 그대로 쓴다', () => {
@@ -4771,8 +4792,7 @@ suite('Extension Test Suite', () => {
 				const options: vscode.ShellExecutionOptions = { cwd: 'C:\\' };
 				const result = createShellExecution('node.exe', ['-e', 'process.stdout.write("hello")'], options, true);
 
-				assert.ok(result.shellExecution);
-				assert.strictEqual(result.usesNativeExecution, true);
+				assert.ok(result.shellExecution instanceof vscode.ProcessExecution);
 				assert.ok(result.displayCommand.includes('process.stdout.write(\\"hello\\")'));
 			} finally {
 				Object.defineProperty(process, 'platform', { value: originalPlatform });
@@ -4787,8 +4807,7 @@ suite('Extension Test Suite', () => {
 				const options: vscode.ShellExecutionOptions = { cwd: 'C:\\' };
 				const result = createShellExecution('echo', ['hello'], options, true);
 
-				assert.ok(result.shellExecution);
-				assert.strictEqual(result.usesNativeExecution, undefined);
+				assert.ok(result.shellExecution instanceof vscode.ShellExecution);
 				assert.ok(result.displayCommand.includes('echo'));
 			} finally {
 				Object.defineProperty(process, 'platform', { value: originalPlatform });
@@ -5480,7 +5499,10 @@ suite('Extension Test Suite', () => {
 			try {
 				const allowed = await confirmImportTrustReview(reviewOptions.filePath, fixedMaliciousActions, []);
 				assert.strictEqual(allowed, true);
-				assert.strictEqual(openedPath, reviewOptions.filePath);
+				const normalizePath = (value: string | undefined) => process.platform === 'win32'
+					? value?.replace(/^([a-z]):\\/, (_match, drive: string) => `${drive.toUpperCase()}:\\`)
+					: value;
+				assert.strictEqual(normalizePath(openedPath), normalizePath(reviewOptions.filePath));
 				assert.strictEqual(call, 2);
 			} finally {
 				(vscode.window as any).showWarningMessage = originalWarning;

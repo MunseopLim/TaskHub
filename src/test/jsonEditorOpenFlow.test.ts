@@ -239,8 +239,9 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
 
         const roots = fake.panelOptions()?.localResourceRoots as vscode.Uri[] | undefined;
         assert.ok(roots && roots.length > 0, 'localResourceRoots 가 비어 있으면 번들을 읽지 못한다');
+        const expectedDist = path.resolve(tempDir, 'dist');
         assert.ok(
-            roots!.some(root => path.join(tempDir, 'dist').startsWith(root.fsPath)),
+            roots!.some(root => path.relative(root.fsPath, expectedDist) === ''),
             `localResourceRoots 에 dist 가 없다: ${roots!.map(r => r.fsPath).join(', ')}`
         );
     });
