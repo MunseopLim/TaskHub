@@ -23,9 +23,9 @@ import {
     buildPosixCommandLine,
     buildPowerShellInvocation,
     buildNativeCommandInvocation,
+    resolveWindowsDirectExecutable,
     windowsCommandIsDirectlyLaunchable,
-    windowsRawCommandIsDirectlyLaunchable,
-    windowsTaskSpawnStrategy,
+    resolveWindowsTaskSpawn,
     buildWindowsNativeProcessScript,
     buildPowerShellUtf8Preamble,
     encodePowerShellScript,
@@ -156,9 +156,14 @@ suite('pipelineUtils — direct-import smoke suite', () => {
     });
 
     test('buildNativeCommandInvocation preserves native argument boundaries', () => {
-        const invocation = buildNativeCommandInvocation('node', ['-e', 'process.stdout.write("ok")']);
-        assert.strictEqual(invocation.executable, 'node');
+        const invocation = buildNativeCommandInvocation(
+            'node',
+            ['-e', 'process.stdout.write("ok")'],
+            'C:\\toolchain\\node.exe'
+        );
+        assert.strictEqual(invocation.executable, 'C:\\toolchain\\node.exe');
         assert.deepStrictEqual(invocation.args, ['-e', 'process.stdout.write("ok")']);
+        assert.ok(invocation.display.startsWith('node '));
         assert.ok(invocation.display.includes('process.stdout.write(\\"ok\\")'));
     });
 
@@ -166,8 +171,7 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         const script = buildWindowsNativeProcessScript(
             'node',
             ['-e', 'process.stdout.write("ok value")'],
-            'C:\\work dir',
-            true
+            { executable: 'C:\\toolchain\\node.exe', cwd: 'C:\\work dir', waitForExit: true }
         );
         assert.ok(script.includes('$psi.UseShellExecute = $false'));
         assert.ok(script.includes('process.stdout.write(\\"ok value\\")'));
@@ -179,7 +183,11 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         assert.ok(script.includes('} catch {\n    exit 1\n}'));
         assert.ok(!script.includes('$taskHubProcess | Out-Null'));
 
-        const detachedScript = buildWindowsNativeProcessScript('node', ['--version']);
+        const detachedScript = buildWindowsNativeProcessScript(
+            'node',
+            ['--version'],
+            { executable: 'C:\\toolchain\\node.exe' }
+        );
         assert.ok(detachedScript.includes('try {'));
         assert.ok(detachedScript.includes('} catch {\n    exit 1\n}'));
         assert.ok(!detachedScript.includes('.WaitForExit()'));
@@ -199,29 +207,76 @@ suite('pipelineUtils — direct-import smoke suite', () => {
             isFile: (p: string) =>
                 p === 'C:\\node\\node.exe' ||
                 p === 'C:\\git\\git.exe' ||
-                p === 'C:\\Windows\\System32\\cmd.exe',
+                p === 'C:\\Windows\\System32\\cmd.exe' ||
+                p === 'C:\\tools\\7z.exe',
         };
         // extensionless names resolved against the (fake) PATH
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('node', ['-e', 'x'], lookup), true);
-        assert.strictEqual(windowsRawCommandIsDirectlyLaunchable('node', ['-e', 'x'], lookup), true);
-        assert.strictEqual(windowsRawCommandIsDirectlyLaunchable('node', [], lookup), false);
-        assert.strictEqual(windowsRawCommandIsDirectlyLaunchable('node --version', [], lookup), false);
-        assert.strictEqual(windowsRawCommandIsDirectlyLaunchable('node > out.txt', [], lookup), false);
-        assert.strictEqual(windowsTaskSpawnStrategy(true, 'node', ['-e', 'x'], lookup), 'native');
-        assert.strictEqual(windowsTaskSpawnStrategy(true, 'node > out.txt', [], lookup), 'raw-shell');
-        assert.strictEqual(windowsTaskSpawnStrategy(false, 'node', ['-e', 'x'], lookup), 'native');
+        assert.strictEqual(resolveWindowsDirectExecutable('node', ['-e', 'x'], lookup), 'C:\\node\\node.exe');
+        assert.strictEqual(resolveWindowsDirectExecutable('npm', ['test'], lookup), undefined);
+        assert.strictEqual(resolveWindowsTaskSpawn(true, 'node', ['-e', 'x'], lookup).strategy, 'native');
+        assert.strictEqual(resolveWindowsTaskSpawn(true, 'node', [], lookup).strategy, 'raw-shell');
+        assert.strictEqual(resolveWindowsTaskSpawn(true, 'node --version', [], lookup).strategy, 'raw-shell');
+        assert.strictEqual(resolveWindowsTaskSpawn(true, 'node > out.txt', [], lookup).strategy, 'raw-shell');
+        assert.strictEqual(resolveWindowsTaskSpawn(false, 'node', ['-e', 'x'], lookup).strategy, 'native');
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('cmd /c echo hi', [], lookup), true);
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('git status', [], lookup), true);
         // npm/npx/pnpm only exist as `.cmd` shims → stay on PowerShell
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('npm test', [], lookup), false);
-        // explicit extensions: .exe/.com launchable, scripts/shims not (no lookup)
+        // Bare .exe/.com names are pinned through PATH; scripts/shims stay on PowerShell.
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('node.exe', ['-e', 'x'], lookup), true);
+        assert.strictEqual(resolveWindowsDirectExecutable('node.exe', ['-e', 'x'], lookup), 'C:\\node\\node.exe');
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('C:\\tools\\7z.exe', ['a'], lookup), true);
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('build.cmd', [], lookup), false);
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('tool.bat', [], lookup), false);
         // shell builtins / aliases
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('echo hi', [], lookup), false);
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('dir', [], lookup), false);
+    });
+
+    test('Windows native plan reuses one PATH result for invocation and ProcessStartInfo', () => {
+        let lookupCount = 0;
+        const lookup = {
+            env: { PATH: 'C:\\toolchain' },
+            cwd: 'C:\\work',
+            isFile: (candidate: string) => {
+                lookupCount++;
+                return candidate === 'C:\\toolchain\\node.exe';
+            },
+        };
+        const plan = resolveWindowsTaskSpawn(false, 'node', ['-e', 'process.exit(7)'], lookup);
+        assert.deepStrictEqual(plan, { strategy: 'native', executable: 'C:\\toolchain\\node.exe' });
+        assert.strictEqual(lookupCount, 1);
+        assert.strictEqual(plan.strategy, 'native');
+        const invocation = buildNativeCommandInvocation('node', ['-e', 'process.exit(7)'], plan.executable);
+        const script = buildWindowsNativeProcessScript(
+            'node',
+            ['-e', 'process.exit(7)'],
+            { executable: invocation.executable, cwd: 'C:\\work', waitForExit: true }
+        );
+        assert.strictEqual(lookupCount, 1, 'building the launch command must not resolve PATH again');
+        assert.ok(script.includes("$psi.FileName = 'C:\\toolchain\\node.exe'"), script);
+        assert.ok(!script.includes("$psi.FileName = 'node'"), script);
+    });
+
+    test('Windows executable resolution anchors relative paths to the task cwd', () => {
+        const files = new Set([
+            'C:\\workspace\\tools\\node.exe',
+            'C:\\workspace\\local.exe',
+        ]);
+        const lookup = {
+            env: { PATH: 'tools' },
+            cwd: 'C:\\workspace',
+            isFile: (candidate: string) => files.has(candidate),
+        };
+        assert.strictEqual(
+            resolveWindowsDirectExecutable('node.exe', [], lookup),
+            'C:\\workspace\\tools\\node.exe'
+        );
+        assert.strictEqual(
+            resolveWindowsDirectExecutable('.\\local.exe', [], lookup),
+            'C:\\workspace\\local.exe'
+        );
     });
 
     test('encodePowerShellScript returns UTF-16 LE base64', () => {

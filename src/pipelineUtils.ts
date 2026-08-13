@@ -1637,9 +1637,11 @@ const WINDOWS_DIRECT_LAUNCH_EXTENSIONS = ['.exe', '.com'];
 export interface WindowsExecutableLookup {
     env: NodeJS.ProcessEnv;
     isFile: (filePath: string) => boolean;
+    /** Base directory for relative executable paths and relative PATH entries. */
+    cwd: string;
 }
 
-const defaultWindowsExecutableLookup: WindowsExecutableLookup = {
+const defaultWindowsExecutableLookup: Pick<WindowsExecutableLookup, 'env' | 'isFile'> = {
     env: process.env,
     isFile: (filePath: string): boolean => {
         try {
@@ -1651,82 +1653,100 @@ const defaultWindowsExecutableLookup: WindowsExecutableLookup = {
 };
 
 /**
- * Whether a Windows command can be launched as a native process
+ * Resolve the executable used to launch a Windows command as a native process
  * (`spawn(file, argvArray)` / `vscode.ProcessExecution`) instead of going
  * through PowerShell. Native launch is preferred because the argv array is
  * passed straight to the child, side-stepping Windows PowerShell 5.1's legacy
  * quote-mangling for arguments containing `"`.
  *
- *   - explicit `.exe` / `.com` extension                → yes (no lookup)
+ *   - `.exe` / `.com` with an explicit directory        → yes iff found
+ *   - bare `.exe` / `.com` name                          → search PATH exactly
  *   - explicit other extension (`.cmd`, `.bat`, `.ps1`,
  *     `.js`, …)                                          → no  (scripts/shims)
  *   - shell builtin / alias (`echo`, `dir`, `cd`, …)     → no
  *   - extensionless name: search PATH for `name.exe` /
- *     `name.com` (also checks `name` when it carries a
- *     path separator)                                    → yes iff found
+ *     `name.com`                                          → yes iff found
  *
  * A name that exists only as a `.cmd` shim (`npm` → `npm.cmd`, also `npx` /
  * `pnpm` / `yarn`) therefore stays on the PowerShell path, where `&` performs
  * the PATHEXT resolution. The lookup is only invoked on Windows (the POSIX path
  * uses `sh -c`), so its cost is Windows-only and runs once per task launch.
  *
- * `lookup` may override `env` and/or `isFile`; whatever isn't supplied falls
- * back to `process.env` / a real `fs.statSync`. Callers MUST pass the **task's
- * effective env** (`{ ...process.env, ...envOverrides }` — i.e. the same env the
- * child will run with) so a `PATH` extended via `task.env.PATH` is honoured here
- * too; otherwise a toolchain `.exe` could be misjudged and routed through
- * PowerShell (re-triggering the very quote bug this avoids).
+ * `lookup` may override `env`, `cwd`, and/or `isFile`; whatever isn't supplied
+ * falls back to `process.env`, `process.cwd()`, and a real `fs.statSync`. Callers
+ * MUST pass the **task's effective env** (`{ ...process.env, ...envOverrides }`
+ * — i.e. the same env the child will run with) so a `PATH` extended via
+ * `task.env.PATH` is honoured here too; otherwise a toolchain `.exe` could be
+ * misjudged and routed through PowerShell (re-triggering the very quote bug
+ * this avoids).
  */
+export function resolveWindowsDirectExecutable(
+    command: string,
+    args: string[] = [],
+    lookup: Partial<WindowsExecutableLookup> = {}
+): string | undefined {
+    const env = lookup.env ?? defaultWindowsExecutableLookup.env;
+    const cwd = lookup.cwd ?? process.cwd();
+    const isFile = lookup.isFile ?? defaultWindowsExecutableLookup.isFile;
+    const { executable } = mergeCommandAndArgs(command, args);
+    const base = (executable.split(/[\\/]/).pop() || executable).toLowerCase();
+    const dotIndex = base.lastIndexOf('.');
+    const explicitExtension = dotIndex > 0 ? base.slice(dotIndex) : undefined;
+    if (explicitExtension && !WINDOWS_DIRECT_LAUNCH_EXTENSIONS.includes(explicitExtension)) {
+        return undefined;
+    }
+    const hasSeparator = /[\\/]/.test(executable);
+    if (!explicitExtension && !hasSeparator && WINDOWS_SHELL_COMMANDS.has(base)) {
+        return undefined;
+    }
+
+    const extensions = explicitExtension ? [''] : WINDOWS_DIRECT_LAUNCH_EXTENSIONS;
+    if (hasSeparator) {
+        const baseCandidate = path.win32.isAbsolute(executable)
+            ? path.win32.normalize(executable)
+            : path.win32.resolve(cwd, executable);
+        for (const ext of extensions) {
+            const candidate = baseCandidate + ext;
+            if (isFile(candidate)) {
+                return candidate;
+            }
+        }
+        return undefined;
+    }
+
+    const pathValue = env.PATH ?? env.Path;
+    if (pathValue === undefined || pathValue.length === 0) {
+        return undefined;
+    }
+    for (const rawDir of pathValue.split(';')) {
+        if (rawDir.length === 0) {
+            continue;
+        }
+        const unquotedDir = rawDir.length >= 2 && rawDir.startsWith('"') && rawDir.endsWith('"')
+            ? rawDir.slice(1, -1)
+            : rawDir;
+        const resolvedDir = unquotedDir.length === 0
+            ? path.win32.resolve(cwd)
+            : (path.win32.isAbsolute(unquotedDir)
+                ? path.win32.normalize(unquotedDir)
+                : path.win32.resolve(cwd, unquotedDir));
+        for (const ext of extensions) {
+            const candidate = path.win32.join(resolvedDir, executable + ext);
+            if (isFile(candidate)) {
+                return candidate;
+            }
+        }
+    }
+    return undefined;
+}
+
+/** Whether {@link resolveWindowsDirectExecutable} found a native executable. */
 export function windowsCommandIsDirectlyLaunchable(
     command: string,
     args: string[] = [],
     lookup: Partial<WindowsExecutableLookup> = {}
 ): boolean {
-    const env = lookup.env ?? defaultWindowsExecutableLookup.env;
-    const isFile = lookup.isFile ?? defaultWindowsExecutableLookup.isFile;
-    const { executable } = mergeCommandAndArgs(command, args);
-    const base = (executable.split(/[\\/]/).pop() || executable).toLowerCase();
-    const dotIndex = base.lastIndexOf('.');
-    if (dotIndex > 0) {
-        return WINDOWS_DIRECT_LAUNCH_EXTENSIONS.includes(base.slice(dotIndex));
-    }
-    if (WINDOWS_SHELL_COMMANDS.has(base)) {
-        return false;
-    }
-    const hasSeparator = /[\\/]/.test(executable);
-    const searchDirs = hasSeparator ? [''] : (env.PATH ?? env.Path ?? '').split(';');
-    for (const dir of searchDirs) {
-        for (const ext of WINDOWS_DIRECT_LAUNCH_EXTENSIONS) {
-            const candidate = hasSeparator
-                ? executable + ext
-                : (dir ? path.win32.join(dir, executable + ext) : executable + ext);
-            if (isFile(candidate)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-/**
- * A raw Windows `shell` command may use native argv execution only when the
- * command text is exactly one executable token. Shell syntax, embedded
- * command arguments, aliases, and script shims stay on the PowerShell path;
- * explicit `args` can then keep their byte-for-byte boundaries without being
- * reparsed by Windows PowerShell 5.1's legacy native-argument binder.
- */
-export function windowsRawCommandIsDirectlyLaunchable(
-    command: string,
-    args: string[] = [],
-    lookup: Partial<WindowsExecutableLookup> = {}
-): boolean {
-    let tokens: string[];
-    try {
-        tokens = tokenizeCommandLine(command.trim());
-    } catch {
-        return false;
-    }
-    return args.length > 0 && tokens.length === 1 && windowsCommandIsDirectlyLaunchable(command, args, lookup);
+    return resolveWindowsDirectExecutable(command, args, lookup) !== undefined;
 }
 
 /**
@@ -1795,22 +1815,40 @@ export function selectWindowsRawShell(needsChainOperators: boolean, pwshPath: st
     return pwshPath;
 }
 
+export type WindowsTaskSpawnPlan =
+    | { strategy: 'raw-shell' | 'powershell' }
+    | { strategy: 'native'; executable: string };
+
 /**
- * Choose the Windows launch path shared by streamed, one-shot, sensitive,
- * and captured tasks. Raw shell syntax stays on PowerShell, except for the
- * deliberately narrow single-executable + explicit-args case where native
- * argv avoids Windows PowerShell 5.1 quote loss.
+ * Choose a Windows launch strategy and retain the exact executable that made a
+ * native command eligible. Runtime callers must use this plan instead of
+ * checking eligibility and resolving the name a second time.
  */
-export function windowsTaskSpawnStrategy(
+export function resolveWindowsTaskSpawn(
     raw: boolean,
     command: string,
     args: string[] = [],
     lookup: Partial<WindowsExecutableLookup> = {}
-): 'raw-shell' | 'native' | 'powershell' {
+): WindowsTaskSpawnPlan {
     if (raw) {
-        return windowsRawCommandIsDirectlyLaunchable(command, args, lookup) ? 'native' : 'raw-shell';
+        let tokens: string[];
+        try {
+            tokens = tokenizeCommandLine(command.trim());
+        } catch {
+            return { strategy: 'raw-shell' };
+        }
+        if (args.length === 0 || tokens.length !== 1) {
+            return { strategy: 'raw-shell' };
+        }
+        const executable = resolveWindowsDirectExecutable(command, args, lookup);
+        return executable
+            ? { strategy: 'native', executable }
+            : { strategy: 'raw-shell' };
     }
-    return windowsCommandIsDirectlyLaunchable(command, args, lookup) ? 'native' : 'powershell';
+    const executable = resolveWindowsDirectExecutable(command, args, lookup);
+    return executable
+        ? { strategy: 'native', executable }
+        : { strategy: 'powershell' };
 }
 
 /**
@@ -1838,13 +1876,28 @@ export interface NativeCommandInvocation {
     display: string;
 }
 
-export function buildNativeCommandInvocation(command: string, args: string[]): NativeCommandInvocation {
+export function formatNativeCommandDisplay(command: string, args: string[]): string {
+    const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
+    return [executable, ...combinedArgs].map(displayCommandPart).join(' ');
+}
+
+export function buildNativeCommandInvocation(
+    command: string,
+    args: string[],
+    resolvedExecutable: string
+): NativeCommandInvocation {
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
     return {
-        executable,
+        executable: resolvedExecutable,
         args: combinedArgs,
         display: [executable, ...combinedArgs].map(displayCommandPart).join(' '),
     };
+}
+
+export interface WindowsNativeProcessScriptOptions {
+    executable: string;
+    cwd?: string;
+    waitForExit?: boolean;
 }
 
 /**
@@ -1857,29 +1910,28 @@ export function buildNativeCommandInvocation(command: string, args: string[]): N
 export function buildWindowsNativeProcessScript(
     command: string,
     args: string[],
-    cwd?: string,
-    waitForExit = false
+    options: WindowsNativeProcessScriptOptions
 ): string {
-    const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
+    const { args: combinedArgs } = mergeCommandAndArgs(command, args);
     const argumentLine = combinedArgs.map(arg => quoteWindowsCommandLineArgument(arg)).join(' ');
     const lines = [
         '$psi = New-Object System.Diagnostics.ProcessStartInfo',
-        `$psi.FileName = ${quotePowerShellArgument(executable)}`,
+        `$psi.FileName = ${quotePowerShellArgument(options.executable)}`,
         '$psi.UseShellExecute = $false',
         '$psi.CreateNoWindow = $true',
     ];
     if (argumentLine.length > 0) {
         lines.push(`$psi.Arguments = ${quotePowerShellArgument(argumentLine)}`);
     }
-    if (cwd) {
-        lines.push(`$psi.WorkingDirectory = ${quotePowerShellArgument(cwd)}`);
+    if (options.cwd) {
+        lines.push(`$psi.WorkingDirectory = ${quotePowerShellArgument(options.cwd)}`);
     }
     lines.push(
         'try {',
         '    $taskHubProcess = [System.Diagnostics.Process]::Start($psi)',
         '    if ($null -eq $taskHubProcess) { exit 1 }'
     );
-    if (waitForExit) {
+    if (options.waitForExit) {
         lines.push('    $taskHubProcess.WaitForExit()', '    exit [int]$taskHubProcess.ExitCode');
     }
     lines.push('} catch {', '    exit 1', '}');

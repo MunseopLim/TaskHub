@@ -458,7 +458,7 @@ suite('대화형 태스크 대기 중 중지', () => {
      * 아니다. Windows 판별력은 실제 러너에서 확인이 필요하다.
      */
     function makeTreeMarkerScript(label: string, delayMs: number): {
-        command: string; cwd: string; marker: string; startedMarker: string; cleanup: () => void;
+        command: string; runnerArgs: string[]; cwd: string; marker: string; startedMarker: string; cleanup: () => void;
     } {
         const stamp = `${process.pid}-${Date.now()}-${label}`;
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-treetest-'));
@@ -496,6 +496,10 @@ suite('대화형 태스크 대기 중 중지', () => {
             // 메타문자 없는 단순 명령이라 `buildPosixCommandLine` 의 인용을
             // 그대로 통과하고, Windows 에서도 node 를 직접 띄운다.
             command: `node ${runnerName}`,
+            // 실제 액션은 실행 파일과 argv를 분리한다. Windows raw shell의
+            // 단일 실행 파일 예외도 이 형태에서만 native 경로를 타므로,
+            // IT-133은 합쳐진 command 대신 이 값을 사용한다.
+            runnerArgs: [runnerName],
             cwd: dir,
             marker,
             startedMarker,
@@ -593,7 +597,8 @@ suite('대화형 태스크 대기 중 중지', () => {
                     tasks: [{
                         id: 'run',
                         type: 'shell',
-                        command: script.command,
+                        command: 'node',
+                        args: script.runnerArgs,
                         cwd: script.cwd,
                         // **필수**. 이게 없으면 shell 태스크는 `executeStreamedTask`
                         // → `vscode.tasks.executeTask` 로 가고, 중지는 VS Code 의

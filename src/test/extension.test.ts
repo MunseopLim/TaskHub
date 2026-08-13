@@ -41,6 +41,7 @@ import {
 	getToolCommand,
 	INTERPOLATED_VALUE_MAX_LENGTH,
 	buildPowerShellInvocation,
+	formatNativeCommandDisplay,
 	buildNativeCommandInvocation,
 	windowsCommandIsDirectlyLaunchable,
 	withPowerShellExitCode,
@@ -55,7 +56,7 @@ import {
 	selectWindowsRawShell,
 	resolvePwshPath,
 	rawCommandUsesChainOperators,
-	windowsTaskSpawnStrategy,
+	resolveWindowsTaskSpawn,
 	buildRawOneShotWindowsScript,
 	resolveRawShellExecutable,
 	buildPosixCommandLine,
@@ -1251,6 +1252,37 @@ suite('Extension Test Suite', () => {
 	});
 
 	suite('Windows native command helpers', () => {
+		test('캡처 native 시작 실패는 원래 명령 이름을 PowerShell로 재시도하지 않는다', async () => {
+			const originalPlatform = process.platform;
+			const resolvedExecutable = 'C:\\taskhub-review-does-not-exist\\native.exe';
+			try {
+				Object.defineProperty(process, 'platform', { value: 'win32' });
+				let caught: NodeJS.ErrnoException | undefined;
+				try {
+					await executeShellCommand(
+						'native.exe', [], undefined, undefined, undefined, undefined, undefined,
+						undefined, undefined, false, undefined, undefined, false, false,
+						{
+							env: { PATH: 'C:\\taskhub-review-does-not-exist' },
+							cwd: 'C:\\work',
+							isFile: candidate => candidate === resolvedExecutable,
+						}
+					);
+				} catch (error) {
+					caught = error as NodeJS.ErrnoException;
+				}
+				assert.ok(caught, '존재하지 않는 고정 실행 경로가 성공으로 처리됐다');
+				assert.strictEqual(caught!.code, 'ENOENT');
+				assert.strictEqual(
+					caught!.path,
+					resolvedExecutable,
+					'PowerShell 재시도가 아니라 처음 고정한 실행 파일의 실패를 반환해야 한다'
+				);
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
+		});
+
 		test('quoteWindowsCommandLineArgument preserves embedded quotes', () => {
 			assert.strictEqual(
 				quoteWindowsCommandLineArgument('process.stdout.write("ok")'),
@@ -1259,20 +1291,29 @@ suite('Extension Test Suite', () => {
 		});
 
 		test('buildNativeCommandInvocation keeps argv boundaries', () => {
-			const result = buildNativeCommandInvocation('node', ['-e', 'process.stdout.write("ok")']);
-			assert.strictEqual(result.executable, 'node');
+			const result = buildNativeCommandInvocation(
+				'node', ['-e', 'process.stdout.write("ok")'], 'C:\\node\\node.exe'
+			);
+			assert.strictEqual(result.executable, 'C:\\node\\node.exe');
 			assert.deepStrictEqual(result.args, ['-e', 'process.stdout.write("ok")']);
+			assert.strictEqual(
+				formatNativeCommandDisplay('node', ['-e', 'process.stdout.write("ok")']),
+				result.display
+			);
 		});
 
-		test('windowsCommandIsDirectlyLaunchable: explicit .exe/.com is launchable, scripts/shims/builtins are not', () => {
+		test('windowsCommandIsDirectlyLaunchable: native binaries resolve to files, scripts/shims/builtins do not', () => {
 			const lookup = {
 				env: { PATH: 'C:\\bin;C:\\tools' },
-				isFile: (p: string) => p === 'C:\\bin\\node.exe' || p === 'C:\\tools\\git.exe',
+				isFile: (p: string) =>
+					p === 'C:\\bin\\node.exe' ||
+					p === 'C:\\tools\\git.exe' ||
+					p === 'C:\\tools\\7z.exe',
 			};
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('node', ['-e', 'x'], lookup), true);   // resolves to node.exe
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('git status', [], lookup), true);       // resolves to git.exe
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('npm test', [], lookup), false);        // only npm.cmd would exist
-			assert.strictEqual(windowsCommandIsDirectlyLaunchable('node.exe', ['-e', 'x'], lookup), true); // explicit ext, no lookup
+			assert.strictEqual(windowsCommandIsDirectlyLaunchable('node.exe', ['-e', 'x'], lookup), true); // exact PATH match
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('C:\\tools\\7z.exe', ['a'], lookup), true);
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('build.cmd', [], lookup), false);       // script shim
 			assert.strictEqual(windowsCommandIsDirectlyLaunchable('echo hi', [], lookup), false);         // shell builtin/alias
@@ -1705,11 +1746,11 @@ suite('Extension Test Suite', () => {
 			// 보고 "항상 raw-shell"로 결론내리면 단일 실행 파일의 명시적 args가
 			// PowerShell 5.1에서 재파싱된다. 반대로 셸 문법을 native로 보내면
 			// `&&`·`>`가 리터럴 인자가 된다.
-			assert.strictEqual(windowsTaskSpawnStrategy(true, 'node', ['-e', 'x'], withoutPwsh), 'native');
-			assert.strictEqual(windowsTaskSpawnStrategy(true, 'node > out.txt', [], withoutPwsh), 'raw-shell');
-			assert.strictEqual(windowsTaskSpawnStrategy(true, 'node --version', [], withoutPwsh), 'raw-shell');
-			assert.strictEqual(windowsTaskSpawnStrategy(false, 'node', ['-e', 'x'], withoutPwsh), 'native');
-			assert.strictEqual(windowsTaskSpawnStrategy(false, 'echo', ['x'], withoutPwsh), 'powershell');
+			assert.strictEqual(resolveWindowsTaskSpawn(true, 'node', ['-e', 'x'], withoutPwsh).strategy, 'native');
+			assert.strictEqual(resolveWindowsTaskSpawn(true, 'node > out.txt', [], withoutPwsh).strategy, 'raw-shell');
+			assert.strictEqual(resolveWindowsTaskSpawn(true, 'node --version', [], withoutPwsh).strategy, 'raw-shell');
+			assert.strictEqual(resolveWindowsTaskSpawn(false, 'node', ['-e', 'x'], withoutPwsh).strategy, 'native');
+			assert.strictEqual(resolveWindowsTaskSpawn(false, 'echo', ['x'], withoutPwsh).strategy, 'powershell');
 		});
 
 		/** `-EncodedCommand` 페이로드를 되돌려 실제로 무엇이 넘어가는지 본다. */
@@ -1802,6 +1843,11 @@ suite('Extension Test Suite', () => {
 					'node', ['-e', 'process.stdout.write("ok value")'], {}, false, true, withoutPwsh
 				));
 				assert.ok(result.shellExecution instanceof vscode.ProcessExecution);
+				assert.strictEqual(
+					(result.shellExecution as vscode.ProcessExecution).process,
+					'C:\\bin\\node.exe'
+				);
+				assert.ok(result.displayCommand.startsWith('node '));
 			});
 
 			test('스트림 모드 raw 는 연산자가 없으면 5.1 을 그대로 쓴다', () => {
@@ -4707,12 +4753,18 @@ suite('Extension Test Suite', () => {
 			const originalPlatform = process.platform;
 			try {
 				Object.defineProperty(process, 'platform', { value: 'win32' });
+				const lookup = {
+					env: { PATH: 'C:\\Windows\\System32' },
+					isFile: (candidate: string) => candidate === 'C:\\Windows\\System32\\notepad.exe',
+				};
 
-				const result = wrapCommandForOneShot('notepad.exe', ['file.txt'], undefined, true);
+				const result = wrapCommandForOneShot(
+					'notepad.exe', ['file.txt'], undefined, true, lookup.env, false, lookup
+				);
 
 				assert.strictEqual(result.isPowerShellScript, true);
 				assert.ok(result.commandLine.includes('System.Diagnostics.ProcessStartInfo'));
-				assert.ok(result.commandLine.includes("$psi.FileName = 'notepad.exe'"));
+				assert.ok(result.commandLine.includes("$psi.FileName = 'C:\\Windows\\System32\\notepad.exe'"));
 				assert.ok(result.commandLine.includes("$psi.Arguments = 'file.txt'"));
 				assert.ok(result.commandLine.includes('[Console]::OutputEncoding'));
 			} finally {
@@ -4724,8 +4776,14 @@ suite('Extension Test Suite', () => {
 			const originalPlatform = process.platform;
 			try {
 				Object.defineProperty(process, 'platform', { value: 'win32' });
+				const lookup = {
+					env: { PATH: 'C:\\Windows\\System32' },
+					isFile: (candidate: string) => candidate === 'C:\\Windows\\System32\\notepad.exe',
+				};
 
-				const result = wrapCommandForOneShot('notepad.exe', [], 'C:\\cwd', false);
+				const result = wrapCommandForOneShot(
+					'notepad.exe', [], 'C:\\cwd', false, lookup.env, false, lookup
+				);
 
 				assert.strictEqual(result.isPowerShellScript, true);
 				assert.ok(!result.commandLine.includes('[Console]::OutputEncoding'));
@@ -4739,10 +4797,18 @@ suite('Extension Test Suite', () => {
 			const originalPlatform = process.platform;
 			try {
 				Object.defineProperty(process, 'platform', { value: 'win32' });
+				const lookup = {
+					env: { PATH: 'C:\\node' },
+					isFile: (candidate: string) => candidate === 'C:\\node\\node.exe',
+				};
 
-				const result = wrapCommandForOneShot('node.exe', ['-e', 'process.stdout.write("ok")'], undefined, false);
+				const result = wrapCommandForOneShot(
+					'node.exe', ['-e', 'process.stdout.write("ok")'], undefined, false,
+					lookup.env, false, lookup
+				);
 
 				assert.ok(result.commandLine.includes('$psi.Arguments ='));
+				assert.ok(result.commandLine.includes("$psi.FileName = 'C:\\node\\node.exe'"));
 				assert.ok(result.commandLine.includes('process.stdout.write(\\"ok\\")'));
 			} finally {
 				Object.defineProperty(process, 'platform', { value: originalPlatform });
@@ -4790,9 +4856,16 @@ suite('Extension Test Suite', () => {
 				Object.defineProperty(process, 'platform', { value: 'win32' });
 
 				const options: vscode.ShellExecutionOptions = { cwd: 'C:\\' };
-				const result = createShellExecution('node.exe', ['-e', 'process.stdout.write("hello")'], options, true);
+				const lookup = {
+					env: { PATH: 'C:\\node' },
+					isFile: (candidate: string) => candidate === 'C:\\node\\node.exe',
+				};
+				const result = createShellExecution(
+					'node.exe', ['-e', 'process.stdout.write("hello")'], options, true, false, lookup
+				);
 
 				assert.ok(result.shellExecution instanceof vscode.ProcessExecution);
+				assert.strictEqual((result.shellExecution as vscode.ProcessExecution).process, 'C:\\node\\node.exe');
 				assert.ok(result.displayCommand.includes('process.stdout.write(\\"hello\\")'));
 			} finally {
 				Object.defineProperty(process, 'platform', { value: originalPlatform });
@@ -4821,6 +4894,11 @@ suite('Extension Test Suite', () => {
 
 				assert.ok(result.shellExecution instanceof vscode.ProcessExecution);
 				assert.ok(checkedPaths.includes('C:\\toolchain\\node.exe'));
+				assert.strictEqual(
+					(result.shellExecution as vscode.ProcessExecution).process,
+					'C:\\toolchain\\node.exe'
+				);
+				assert.ok(result.displayCommand.startsWith('node '));
 			} finally {
 				Object.defineProperty(process, 'platform', { value: originalPlatform });
 			}

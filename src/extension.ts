@@ -1124,9 +1124,9 @@ import {
     quotePowerShellArgument,
     quoteWindowsCommandLineArgument,
     buildPowerShellInvocation,
+    formatNativeCommandDisplay,
     buildNativeCommandInvocation,
     windowsCommandIsDirectlyLaunchable,
-    windowsRawCommandIsDirectlyLaunchable,
     buildWindowsNativeProcessScript,
     buildPowerShellUtf8Preamble,
     encodePowerShellScript,
@@ -1137,7 +1137,7 @@ import {
     selectWindowsRawShell,
     resolvePwshPath,
     rawCommandUsesChainOperators,
-    windowsTaskSpawnStrategy,
+    resolveWindowsTaskSpawn,
     buildRawOneShotWindowsScript,
     withPowerShellExitCode,
     interpolateCommandPreservingTokens,
@@ -1188,15 +1188,15 @@ export {
     quotePowerShellArgument,
     quoteWindowsCommandLineArgument,
     buildPowerShellInvocation,
+    formatNativeCommandDisplay,
     buildNativeCommandInvocation,
     windowsCommandIsDirectlyLaunchable,
-    windowsRawCommandIsDirectlyLaunchable,
     buildWindowsNativeProcessScript,
     buildPowerShellUtf8Preamble,
     selectWindowsRawShell,
     resolvePwshPath,
     rawCommandUsesChainOperators,
-    windowsTaskSpawnStrategy,
+    resolveWindowsTaskSpawn,
     buildRawOneShotWindowsScript,
     withPowerShellExitCode,
     interpolateCommandPreservingTokens,
@@ -2715,7 +2715,7 @@ function buildRedactedDisplayCommand(
 ): string {
     const shown = redactSecretsInContext(run, interpolationContext);
     if (shown === interpolationContext) {
-        return buildNativeCommandInvocation(interpolatedCommand, interpolatedArgs).display;
+        return formatNativeCommandDisplay(interpolatedCommand, interpolatedArgs);
     }
     // Resolve the raw platform branch first, then interpolate the redacted
     // context. Reusing `interpolatedCommand` for an object would reuse the
@@ -2728,7 +2728,7 @@ function buildRedactedDisplayCommand(
         ? interpolateCommandPreservingTokens(selected, value => interpolatePipelineVariables(value, shown))
         : interpolatePipelineVariables(selected, shown);
     const args = task.args ? task.args.flatMap((arg: string) => expandArgTemplate(arg, shown)) : [];
-    return buildNativeCommandInvocation(source, args).display;
+    return formatNativeCommandDisplay(source, args);
 }
 
 function buildRedactedDisplayValue(
@@ -6200,15 +6200,17 @@ export function createShellExecution(
     if (raw) {
         if (process.platform === 'win32') {
             const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) };
-            if (windowsTaskSpawnStrategy(true, command, args, { env: effectiveEnv, ...lookup }) === 'native') {
-                const native = buildNativeCommandInvocation(command, args);
+            const taskLookup = { env: effectiveEnv, cwd: options.cwd || process.cwd(), ...lookup };
+            const plan = resolveWindowsTaskSpawn(true, command, args, taskLookup);
+            if (plan.strategy === 'native') {
+                const native = buildNativeCommandInvocation(command, args, plan.executable);
                 return {
                     shellExecution: new vscode.ProcessExecution(native.executable, native.args, toProcessExecutionOptions(options)),
                     displayCommand: native.display
                 };
             }
             const line = buildRawPowerShellCommandLine(command, args);
-            const shell = resolveRawShellExecutable(command, { env: effectiveEnv, ...lookup });
+            const shell = resolveRawShellExecutable(command, taskLookup);
             const utf8Prefix = buildPowerShellUtf8Preamble(useUtf8Console);
             const encoded = encodePowerShellScript(withPowerShellExitCode(`${utf8Prefix}${line}`));
             return {
@@ -6225,8 +6227,10 @@ export function createShellExecution(
         // spawned task, so the child's effective PATH is `options.env.PATH ??
         // process.env.PATH` — judge launchability against that.
         const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) };
-        if (windowsTaskSpawnStrategy(false, command, args, { env: effectiveEnv, ...lookup }) === 'native') {
-            const native = buildNativeCommandInvocation(command, args);
+        const taskLookup = { env: effectiveEnv, cwd: options.cwd || process.cwd(), ...lookup };
+        const plan = resolveWindowsTaskSpawn(false, command, args, taskLookup);
+        if (plan.strategy === 'native') {
+            const native = buildNativeCommandInvocation(command, args, plan.executable);
             return {
                 shellExecution: new vscode.ProcessExecution(native.executable, native.args, toProcessExecutionOptions(options)),
                 displayCommand: native.display
@@ -6256,6 +6260,10 @@ export function wrapCommandForOneShot(
     raw = false,
     lookup: Partial<import('./pipelineUtils').WindowsExecutableLookup> = {}
 ): { commandLine: string; displayCommand: string; isPowerShellScript: boolean } {
+    const windowsLookup = { env, cwd: cwd || process.cwd(), ...lookup };
+    const windowsPlan = process.platform === 'win32'
+        ? resolveWindowsTaskSpawn(raw, command, args, windowsLookup)
+        : undefined;
     if (raw && process.platform !== 'win32') {
         // **명령을 `sh -c` 로 감싼다.** 예전에는 raw 문자열을 `nohup … >/dev/null
         // 2>&1 &` 사이에 그대로 끼워 넣었는데, 그러면 두 가지가 깨진다:
@@ -6280,9 +6288,9 @@ export function wrapCommandForOneShot(
         // 셸에 그대로 넘기되 백그라운드로 띄운다. `Start-Process` 로 인터프리터
         // 자체를 떼어 내고, 명령 문자열은 `-EncodedCommand` 로 넘겨 인용을
         // 거치지 않는다. `-WindowStyle Hidden` 은 콘솔 창이 뜨지 않게 한다.
-        if (windowsTaskSpawnStrategy(true, command, args, { env, ...lookup }) === 'raw-shell') {
+        if (windowsPlan?.strategy === 'raw-shell') {
             const line = buildRawPowerShellCommandLine(command, args);
-            const shell = resolveRawShellExecutable(command, { env, ...lookup });
+            const shell = resolveRawShellExecutable(command, windowsLookup);
             const utf8Prefix = buildPowerShellUtf8Preamble(useUtf8Console);
             const encoded = encodePowerShellScript(`${utf8Prefix}${line}`);
             const script = buildRawOneShotWindowsScript(shell, encoded, cwd);
@@ -6295,11 +6303,15 @@ export function wrapCommandForOneShot(
     const { executable, args: combinedArgs } = mergeCommandAndArgs(command, args);
     if (process.platform === 'win32') {
         const utf8Prefix = buildPowerShellUtf8Preamble(useUtf8Console);
-        if (windowsTaskSpawnStrategy(false, command, args, { env, ...lookup }) === 'native') {
+        if (windowsPlan?.strategy === 'native') {
             // Directly-launchable executable: start it via ProcessStartInfo with
             // UseShellExecute=$false so we control arg quoting precisely
             // (CommandLineToArgvW rules), preserving embedded `"`.
-            const script = `${utf8Prefix}${buildWindowsNativeProcessScript(command, args, cwd)}`;
+            const script = `${utf8Prefix}${buildWindowsNativeProcessScript(
+                command,
+                args,
+                { executable: windowsPlan.executable, cwd }
+            )}`;
             return { commandLine: script, displayCommand: script, isPowerShellScript: true };
         }
         // Shims (`npm` → `npm.cmd`), scripts (`.js`), and shell builtins can't be
@@ -6485,13 +6497,20 @@ function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string
     try {
         let child: ReturnType<typeof spawn>;
         if (process.platform === 'win32') {
-            const strategy = windowsTaskSpawnStrategy(raw, command, args, { env: childEnv });
-            if (strategy === 'native') {
+            const plan = resolveWindowsTaskSpawn(raw, command, args, {
+                env: childEnv,
+                cwd: workingDirectory || process.cwd(),
+            });
+            if (plan.strategy === 'native') {
                 // Keep the real argv inside the encoded wrapper: direct spawn
                 // would expose a password-derived value in the process list.
                 // ProcessStartInfo also avoids PowerShell 5.1 removing embedded
                 // quotes from values such as a `node -e` script.
-                const script = buildWindowsNativeProcessScript(command, args, workingDirectory, true);
+                const script = buildWindowsNativeProcessScript(
+                    command,
+                    args,
+                    { executable: plan.executable, cwd: workingDirectory, waitForExit: true }
+                );
                 child = spawn(
                     'powershell.exe',
                     ['-NoProfile', '-EncodedCommand', encodePowerShellScript(script)],
@@ -8048,7 +8067,8 @@ export function executeShellCommand(
      * `shell` 타입 — 명령 문자열을 셸에 그대로 넘긴다 (0.6.47). `command`
      * 타입은 false 로 두어 토큰마다 인용하는 argv 실행을 유지한다.
      */
-    raw = false
+    raw = false,
+    lookup: Partial<import('./pipelineUtils').WindowsExecutableLookup> = {}
 ): Promise<{ stdout: string; stderr: string }> {
 
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
@@ -8063,6 +8083,11 @@ export function executeShellCommand(
         }
         // Use undefined instead of empty string to let Node.js use process.cwd() as fallback
         const workingDirectory = cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined;
+        const windowsLookup = {
+            env: childEnv,
+            cwd: workingDirectory || process.cwd(),
+            ...lookup,
+        };
         const shownWorkingDirectory = workingDirectoryDisplayOverride ?? workingDirectory;
         let childProcess: ReturnType<typeof spawn>;
         let displayCommand = '';
@@ -8171,7 +8196,7 @@ export function executeShellCommand(
             }
         };
 
-        const startPowerShellFallback = (reason?: Error) => {
+        const startPowerShellFallback = () => {
             const invocation = raw
                 ? (() => {
                     const line = buildRawPowerShellCommandLine(command, args || []);
@@ -8190,21 +8215,16 @@ export function executeShellCommand(
             // 실행 경로가 하나 더 생긴다. 스캔 대상은 `command` 다 — `args` 는
             // 우리가 인용하므로 그 안의 `&&` 는 연산자가 아니다.
             const shell = raw
-                ? resolveRawShellExecutable(command, { env: childEnv })
+                ? resolveRawShellExecutable(command, windowsLookup)
                 : 'powershell.exe';
-            if (showVerboseLogs && reason) {
-                appendVerboseLine(redactCapturedOutput
-                    ? '[WARN] Native Windows process start failed (details hidden); retrying through PowerShell.'
-                    : `[WARN] Native Windows process start failed (${reason.message}); retrying through PowerShell.`);
-            }
             childProcess = spawn(shell, ['-NoProfile', '-EncodedCommand', encoded], {
                 cwd: workingDirectory,
                 env: childEnv
             });
-            attachChildHandlers(false);
+            attachChildHandlers();
         };
 
-        const attachChildHandlers = (allowPowerShellFallback: boolean) => {
+        const attachChildHandlers = () => {
             const attachedChild = childProcess;
             trackChildProcess();
             // Node 는 'error' 를 두 가지 상황에서 낸다: **spawn 실패**(프로세스가
@@ -8284,26 +8304,6 @@ export function executeShellCommand(
                 if (attachedChild !== childProcess || settled) {
                     return;
                 }
-                // Native `spawn(file, args)` on Windows can only launch real
-                // executables. A `.cmd` / `.bat` shim surfaces as EINVAL (Node's
-                // CVE-2024-27980 guard), an extensionless name that only exists
-                // as `name.cmd` surfaces as ENOENT, and a script file (`.js`,
-                // `.ps1`, …) or permission quirk surfaces as EINVAL / EACCES.
-                // For any of these, retry through PowerShell, which resolves the
-                // command the way a shell would.
-                const errCode = (err as NodeJS.ErrnoException).code;
-                if (allowPowerShellFallback && (errCode === 'ENOENT' || errCode === 'EINVAL' || errCode === 'EACCES')) {
-                    stdout = '';
-                    stderr = '';
-                    capturedBytes = 0;
-                    captureOverflowed = false;
-                    if (rawOutputObserver) {
-                        // The failed native attempt's output is intentionally
-                        // retained in the consented report; do not erase it.
-                    }
-                    startPowerShellFallback(err);
-                    return;
-                }
                 settled = true;
                 if (showVerboseLogs) {
                     appendVerboseLine(redactCapturedOutput
@@ -8317,11 +8317,11 @@ export function executeShellCommand(
         // raw 본문이 실행 파일 토큰 하나면 명시적 args 는 native argv 로
         // 보존한다. 셸 문법이 있거나 직접 실행할 수 없으면 기존처럼
         // raw-shell 경로를 탄다.
-        const windowsStrategy = process.platform === 'win32'
-            ? windowsTaskSpawnStrategy(raw, command, args || [], { env: childEnv })
+        const windowsPlan = process.platform === 'win32'
+            ? resolveWindowsTaskSpawn(raw, command, args || [], windowsLookup)
             : undefined;
-        if (windowsStrategy === 'native') {
-            const native = buildNativeCommandInvocation(command, args || []);
+        if (windowsPlan?.strategy === 'native') {
+            const native = buildNativeCommandInvocation(command, args || [], windowsPlan.executable);
             displayCommand = native.display;
             // Windows 는 `taskkill /T` 가 pid 로 트리를 잡으므로 detached 가
             // 필요 없다 (POSIX 만 프로세스 그룹이 필요하다).
@@ -8329,8 +8329,8 @@ export function executeShellCommand(
                 cwd: workingDirectory,
                 env: childEnv
             });
-            attachChildHandlers(true);
-        } else if (windowsStrategy) {
+            attachChildHandlers();
+        } else if (windowsPlan) {
             startPowerShellFallback();
         } else {
             const commandLine = raw
@@ -8348,7 +8348,7 @@ export function executeShellCommand(
                 // 동작하지 않던 원인이다.
                 detached: true
             });
-            attachChildHandlers(false);
+            attachChildHandlers();
         }
 
     });

@@ -23,7 +23,7 @@ import {
     resolveArchiveTaskPath,
     interpolateCommandPreservingTokens,
     expandArgTemplate,
-    buildNativeCommandInvocation,
+    formatNativeCommandDisplay,
     getCommandString,
     selectPlatformValue,
     buildTaskGraph,
@@ -968,7 +968,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                     const preserved = interpolateCommandPreservingTokens(
                         template, value => interpolatePipelineVariables(value, interpolationContext)
                     );
-                    return buildNativeCommandInvocation(preserved, []).display;
+                    return formatNativeCommandDisplay(preserved, []);
                 };
                 // **고른 뒤 보간한다** — 런타임과 같은 순서. 모든 branch 를 보간하면
                 // 이 기계에서 실행되지 않을 branch 의 값 때문에 Preview 가 실패하거나

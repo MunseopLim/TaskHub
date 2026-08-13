@@ -841,10 +841,17 @@ suite('Password taint and redaction', function () {
             assert.strictEqual(extension.stopRunningAction(id), false,
                 '완료된 pipeline 뒤에 one-shot이 Stop All 유령 대상을 만들었다');
 
-            const deadline = Date.now() + 3000;
+            // Windows CI는 powershell.exe → ProcessStartInfo → 실제 자식의
+            // 2단계 시작을 거친다. Defender가 처음 두 실행 파일을 검사하는
+            // 러너에서도 제품 실패와 단순 cold-start 지연을 혼동하지 않는다.
+            const deadline = Date.now() + (process.platform === 'win32' ? 10000 : 3000);
             while (!fs.existsSync(marker) && Date.now() < deadline) {
                 await new Promise(resolve => setTimeout(resolve, 20));
             }
+            assert.ok(
+                fs.existsSync(marker),
+                `detached one-shot marker timeout:\n${verboseLines.join('\n').split(secret).join('***')}`
+            );
             assert.strictEqual(fs.readFileSync(marker, 'utf8'), secret,
                 'detached one-shot이 pipeline 종료 뒤에도 완주하지 못했다');
             assert.ok(!verboseLines.join('\n').includes(secret), 'one-shot command가 verbose log에 샜다');
@@ -889,7 +896,12 @@ suite('Password taint and redaction', function () {
             );
             await Promise.race([
                 failureShown,
-                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('one-shot failure notification timeout')), 3000)),
+                new Promise<never>((_, reject) => setTimeout(
+                    () => reject(new Error(
+                        `one-shot failure notification timeout:\n${verboseLines.join('\n').split(secret).join('***')}`
+                    )),
+                    process.platform === 'win32' ? 10000 : 3000
+                )),
             ]);
             await new Promise(resolve => setTimeout(resolve, 25));
         } finally {
