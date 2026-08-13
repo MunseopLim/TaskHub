@@ -6,6 +6,17 @@
 보안·데이터 손실 수정과 사용자 영향만 남긴다. 테스트를 적는다면 최종 수치만 기록한다.
 -->
 
+## [0.7.23] - 2026-08-14
+
+### 수정 — 콘솔 없는 Windows 민감 one-shot의 PowerShell 경로
+
+- `.cmd`·`.bat`처럼 PowerShell이 필요한 민감 one-shot은 콘솔 없는 detached 프로세스에서
+  `[Console]::OutputEncoding`을 설정하지 않는다. Windows PowerShell 5.1이 명령 실행 전에
+  중단되어 백그라운드 작업이 아예 시작되지 않던 문제를 고쳤다. raw 명령의 `>`·`>>`
+  UTF-8 파일 출력 설정은 그대로 유지한다.
+
+**테스트**: 콘솔 비의존 프리앰블과 민감 `.cmd` one-shot 회귀 검증 추가, 최종 2850 passing.
+
 ## [0.7.22] - 2026-08-14
 
 ### 수정 — Windows 민감 one-shot 시작 안정성

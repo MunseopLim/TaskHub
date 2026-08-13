@@ -1129,6 +1129,7 @@ import {
     windowsCommandIsDirectlyLaunchable,
     buildWindowsNativeProcessScript,
     buildPowerShellUtf8Preamble,
+    buildPowerShellFileRedirectionPreamble,
     encodePowerShellScript,
     quotePosixArgument,
     buildPosixCommandLine,
@@ -6519,15 +6520,20 @@ function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string
                 // PowerShell resolves .cmd/.bat shims and scripts consistently;
                 // the encoded wrapper avoids another command-line parse of the
                 // already quoted PowerShell invocation.
-                const utf8Prefix = raw && useUtf8Console
-                    ? buildPowerShellUtf8Preamble(true)
+                // This process is detached with ignored stdio, so it has no
+                // console whose output encoding can be changed. Windows
+                // PowerShell 5.1 can fail at Console.OutputEncoding before the
+                // command starts in that state. Raw `>` / `>>` still use
+                // Out-File internally, so preserve only their file encoding.
+                const fileEncodingPrefix = raw && useUtf8Console
+                    ? buildPowerShellFileRedirectionPreamble(true)
                     : '';
                 const invocation = raw
                     ? (() => {
                         const line = buildRawPowerShellCommandLine(command, args);
-                        return { script: `${utf8Prefix}${line}`, display: line };
+                        return { script: `${fileEncodingPrefix}${line}`, display: line };
                     })()
-                    : buildPowerShellInvocation(command, args, useUtf8Console);
+                    : buildPowerShellInvocation(command, args, false);
                 // raw 는 여기서도 인터프리터를 골라야 한다 — 이 경로는 stdio:'ignore'
                 // 이고 실패 안내가 일부러 무내용("상세는 숨겼습니다")이라, 5.1 의
                 // `&&` 파스 오류가 나면 사용자에게 **아무 진단 단서도 남지 않는다**.

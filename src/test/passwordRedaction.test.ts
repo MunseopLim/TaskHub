@@ -893,10 +893,16 @@ suite('Password taint and redaction', function () {
         );
 
         const originalExecuteTask = vscode.tasks.executeTask;
+        const originalShowError = vscode.window.showErrorMessage;
+        const shownErrors: string[] = [];
         let executeTaskCalls = 0;
         (vscode.tasks as any).executeTask = () => {
             executeTaskCalls++;
             throw new Error('sensitive one-shot must use detached stdio-ignore spawn');
+        };
+        (vscode.window as any).showErrorMessage = async (message: string) => {
+            shownErrors.push(message);
+            return undefined;
         };
 
         try {
@@ -936,15 +942,20 @@ suite('Password taint and redaction', function () {
                 'PowerShell .cmd one-shot marker timeout — 어디서 끊겼는지:\n'
                 + `  batch 진입(cmd.exe 실행됨): ${readIfPresent(reachedMarker)}\n`
                 + `  node argv(%* 전달됨): ${readIfPresent(argvDump)}\n`
+                + `  실패 알림(spawn 오류 또는 nonzero 종료): ${redact(shownErrors.join(' | ')) || '(없음)'}\n`
                 + '  → 셋 다 없음이면 PowerShell 래퍼가 배치를 시작하지 못한 것(제품),\n'
                 + '    진입만 있으면 `%*` 인용이 node 호출을 깨뜨린 것(fixture)이다.\n'
                 + `${redact(verboseLines.join('\n'))}`
             );
             assert.strictEqual(fs.readFileSync(marker, 'utf8'), secret,
                 'PowerShell .cmd one-shot이 password 인자를 보존하지 못했다');
+            await new Promise(resolve => setTimeout(resolve, 50));
+            assert.strictEqual(shownErrors.length, 0,
+                `성공한 민감 .cmd one-shot이 실패 알림을 냈다: ${redact(shownErrors.join(' | '))}`);
             assert.ok(!verboseLines.join('\n').includes(secret), '민감 .cmd 명령이 verbose log에 샜다');
         } finally {
             (vscode.tasks as any).executeTask = originalExecuteTask;
+            (vscode.window as any).showErrorMessage = originalShowError;
         }
     });
 

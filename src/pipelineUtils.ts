@@ -1936,7 +1936,13 @@ export function buildWindowsNativeProcessScript(
 export function buildPowerShellUtf8Preamble(enforceUtf8: boolean): string {
     if (!enforceUtf8) { return ''; }
     return '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n' +
-        "$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8';\n";
+        buildPowerShellFileRedirectionPreamble(true);
+}
+
+/** UTF-8 file-redirection default that does not require a Windows console. */
+export function buildPowerShellFileRedirectionPreamble(enforceUtf8: boolean): string {
+    if (!enforceUtf8) { return ''; }
+    return "$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8';\n";
 }
 
 /**

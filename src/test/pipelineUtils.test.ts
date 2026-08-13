@@ -28,6 +28,7 @@ import {
     resolveWindowsTaskSpawn,
     buildWindowsNativeProcessScript,
     buildPowerShellUtf8Preamble,
+    buildPowerShellFileRedirectionPreamble,
     encodePowerShellScript,
     getCommandString,
     getToolCommand,
@@ -198,6 +199,16 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         assert.ok(preamble.includes('[Console]::OutputEncoding'));
         assert.ok(preamble.includes("$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'"));
         assert.strictEqual(buildPowerShellUtf8Preamble(false), '');
+    });
+
+    test('detached PowerShell file-redirection preamble does not access a console', () => {
+        const preamble = buildPowerShellFileRedirectionPreamble(true);
+        assert.strictEqual(
+            preamble,
+            "$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8';\n"
+        );
+        assert.ok(!preamble.includes('[Console]::OutputEncoding'));
+        assert.strictEqual(buildPowerShellFileRedirectionPreamble(false), '');
     });
 
     test('windowsCommandIsDirectlyLaunchable resolves PATH, rejects shims/scripts/builtins', () => {
