@@ -868,14 +868,27 @@ suite('Password taint and redaction', function () {
         const marker = path.join(tempWorkspace, 'cmd-shim-one-shot.marker');
         const runner = path.join(tempWorkspace, 'cmd-shim-runner.js');
         const shim = path.join(tempWorkspace, 'sensitive-shim.cmd');
+        // 실패했을 때 `PowerShell → cmd.exe → %* → node` 중 **어디서** 끊겼는지
+        // 한 번의 실행으로 가르기 위한 중간 신호들. 이게 없으면 "marker 없음"
+        // 하나만 남아 제품 문제와 fixture 인용 문제를 구분할 수 없다.
+        const reachedMarker = path.join(tempWorkspace, 'cmd-shim-reached.marker');
+        const argvDump = path.join(tempWorkspace, 'cmd-shim-argv.json');
         fs.writeFileSync(
             runner,
-            "require('fs').writeFileSync(process.argv[2], process.argv[3]);\n",
+            "const fs = require('fs');\n"
+            + `fs.writeFileSync(${JSON.stringify(argvDump)}, JSON.stringify(process.argv));\n`
+            + 'fs.writeFileSync(process.argv[2], process.argv[3]);\n',
             'utf8'
         );
         fs.writeFileSync(
             shim,
-            '@echo off\r\nnode "%~dp0cmd-shim-runner.js" %*\r\nexit /b %errorlevel%\r\n',
+            '@echo off\r\n'
+            // 리다이렉션을 앞에 두어 `%*` 의 끝 문자가 리다이렉트 핸들로 읽히지
+            // 않게 한다. 이 줄은 `%*` 를 건드리지 않으므로, 인용이 깨져 있어도
+            // 배치가 실행됐다는 사실만은 반드시 남는다.
+            + `>"%~dp0cmd-shim-reached.marker" echo reached\r\n`
+            + 'node "%~dp0cmd-shim-runner.js" %*\r\n'
+            + 'exit /b %errorlevel%\r\n',
             'utf8'
         );
 
@@ -915,9 +928,17 @@ suite('Password taint and redaction', function () {
             while (!fs.existsSync(marker) && Date.now() < deadline) {
                 await new Promise(resolve => setTimeout(resolve, 20));
             }
+            const redact = (value: string) => value.split(secret).join('***');
+            const readIfPresent = (filePath: string) =>
+                fs.existsSync(filePath) ? redact(fs.readFileSync(filePath, 'utf8').trim()) : '(없음)';
             assert.ok(
                 fs.existsSync(marker),
-                `PowerShell .cmd one-shot marker timeout:\n${verboseLines.join('\n').split(secret).join('***')}`
+                'PowerShell .cmd one-shot marker timeout — 어디서 끊겼는지:\n'
+                + `  batch 진입(cmd.exe 실행됨): ${readIfPresent(reachedMarker)}\n`
+                + `  node argv(%* 전달됨): ${readIfPresent(argvDump)}\n`
+                + '  → 셋 다 없음이면 PowerShell 래퍼가 배치를 시작하지 못한 것(제품),\n'
+                + '    진입만 있으면 `%*` 인용이 node 호출을 깨뜨린 것(fixture)이다.\n'
+                + `${redact(verboseLines.join('\n'))}`
             );
             assert.strictEqual(fs.readFileSync(marker, 'utf8'), secret,
                 'PowerShell .cmd one-shot이 password 인자를 보존하지 못했다');
