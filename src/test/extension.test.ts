@@ -4799,6 +4799,33 @@ suite('Extension Test Suite', () => {
 			}
 		});
 
+		test('비-raw Windows 명령은 주입된 PATH에서 확장자 없는 실행 파일을 찾는다', () => {
+			const originalPlatform = process.platform;
+			try {
+				Object.defineProperty(process, 'platform', { value: 'win32' });
+				const checkedPaths: string[] = [];
+				const result = createShellExecution(
+					'node',
+					['-e', 'process.stdout.write("hello")'],
+					{ cwd: 'C:\\' },
+					true,
+					false,
+					{
+						env: { PATH: 'C:\\toolchain' },
+						isFile: candidate => {
+							checkedPaths.push(candidate);
+							return candidate === 'C:\\toolchain\\node.exe';
+						},
+					}
+				);
+
+				assert.ok(result.shellExecution instanceof vscode.ProcessExecution);
+				assert.ok(checkedPaths.includes('C:\\toolchain\\node.exe'));
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
+		});
+
 		test('should keep Windows shell builtins on PowerShell execution', () => {
 			const originalPlatform = process.platform;
 			try {

@@ -6225,7 +6225,7 @@ export function createShellExecution(
         // spawned task, so the child's effective PATH is `options.env.PATH ??
         // process.env.PATH` — judge launchability against that.
         const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) };
-        if (windowsTaskSpawnStrategy(false, command, args, { env: effectiveEnv }) === 'native') {
+        if (windowsTaskSpawnStrategy(false, command, args, { env: effectiveEnv, ...lookup }) === 'native') {
             const native = buildNativeCommandInvocation(command, args);
             return {
                 shellExecution: new vscode.ProcessExecution(native.executable, native.args, toProcessExecutionOptions(options)),
