@@ -841,9 +841,9 @@ suite('Password taint and redaction', function () {
             assert.strictEqual(extension.stopRunningAction(id), false,
                 '완료된 pipeline 뒤에 one-shot이 Stop All 유령 대상을 만들었다');
 
-            // Windows CI는 powershell.exe → ProcessStartInfo → 실제 자식의
-            // 2단계 시작을 거친다. Defender가 처음 두 실행 파일을 검사하는
-            // 러너에서도 제품 실패와 단순 cold-start 지연을 혼동하지 않는다.
+            // Windows CI의 Defender cold-start 지연을 제품 실패로 오인하지
+            // 않도록 로컬보다 넉넉히 기다린다. native 경로는 판정된 실행
+            // 파일을 직접 띄워 PowerShell 래퍼의 추가 시작 지연은 없다.
             const deadline = Date.now() + (process.platform === 'win32' ? 10000 : 3000);
             while (!fs.existsSync(marker) && Date.now() < deadline) {
                 await new Promise(resolve => setTimeout(resolve, 20));
@@ -855,6 +855,73 @@ suite('Password taint and redaction', function () {
             assert.strictEqual(fs.readFileSync(marker, 'utf8'), secret,
                 'detached one-shot이 pipeline 종료 뒤에도 완주하지 못했다');
             assert.ok(!verboseLines.join('\n').includes(secret), 'one-shot command가 verbose log에 샜다');
+        } finally {
+            (vscode.tasks as any).executeTask = originalExecuteTask;
+        }
+    });
+
+    test('Windows 민감 non-native one-shot은 PowerShell 경로에서도 detached 실행을 완주한다', async function () {
+        if (process.platform !== 'win32') { this.skip(); }
+
+        const id = 'sensitive-one-shot-cmd-shim';
+        const secret = 'Cmd Shim S3cret & tail';
+        const marker = path.join(tempWorkspace, 'cmd-shim-one-shot.marker');
+        const runner = path.join(tempWorkspace, 'cmd-shim-runner.js');
+        const shim = path.join(tempWorkspace, 'sensitive-shim.cmd');
+        fs.writeFileSync(
+            runner,
+            "require('fs').writeFileSync(process.argv[2], process.argv[3]);\n",
+            'utf8'
+        );
+        fs.writeFileSync(
+            shim,
+            '@echo off\r\nnode "%~dp0cmd-shim-runner.js" %*\r\nexit /b %errorlevel%\r\n',
+            'utf8'
+        );
+
+        const originalExecuteTask = vscode.tasks.executeTask;
+        let executeTaskCalls = 0;
+        (vscode.tasks as any).executeTask = () => {
+            executeTaskCalls++;
+            throw new Error('sensitive one-shot must use detached stdio-ignore spawn');
+        };
+
+        try {
+            await extension.executeActionPipeline(
+                {
+                    description: 'sensitive .cmd shim one-shot',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                        {
+                            id: 'background',
+                            type: 'command',
+                            command: platformCommand(shim),
+                            args: [marker, '${ask.value}'],
+                            isOneShot: true,
+                        },
+                    ],
+                },
+                makeContext(),
+                id,
+                tempWorkspace,
+                [tempWorkspace],
+                { presetInputs: { ask: { value: secret } } }
+            );
+            assert.strictEqual(executeTaskCalls, 0, '민감 .cmd one-shot이 터미널 Task를 만들었다');
+            assert.strictEqual(extension.stopRunningAction(id), false,
+                '완료된 pipeline 뒤에 .cmd one-shot이 Stop All 유령 대상을 만들었다');
+
+            const deadline = Date.now() + 10000;
+            while (!fs.existsSync(marker) && Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            assert.ok(
+                fs.existsSync(marker),
+                `PowerShell .cmd one-shot marker timeout:\n${verboseLines.join('\n').split(secret).join('***')}`
+            );
+            assert.strictEqual(fs.readFileSync(marker, 'utf8'), secret,
+                'PowerShell .cmd one-shot이 password 인자를 보존하지 못했다');
+            assert.ok(!verboseLines.join('\n').includes(secret), '민감 .cmd 명령이 verbose log에 샜다');
         } finally {
             (vscode.tasks as any).executeTask = originalExecuteTask;
         }

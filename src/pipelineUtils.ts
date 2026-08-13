@@ -1897,15 +1897,12 @@ export function buildNativeCommandInvocation(
 export interface WindowsNativeProcessScriptOptions {
     executable: string;
     cwd?: string;
-    waitForExit?: boolean;
 }
 
 /**
  * Build a PowerShell script that starts a native executable through
  * ProcessStartInfo.Arguments. Windows PowerShell 5.1 otherwise removes
- * embedded quote characters while rebinding native arguments. The encoded
- * outer PowerShell command also keeps sensitive one-shot argv out of the
- * plain-text process command line.
+ * embedded quote characters while rebinding native arguments.
  */
 export function buildWindowsNativeProcessScript(
     command: string,
@@ -1931,9 +1928,6 @@ export function buildWindowsNativeProcessScript(
         '    $taskHubProcess = [System.Diagnostics.Process]::Start($psi)',
         '    if ($null -eq $taskHubProcess) { exit 1 }'
     );
-    if (options.waitForExit) {
-        lines.push('    $taskHubProcess.WaitForExit()', '    exit [int]$taskHubProcess.ExitCode');
-    }
     lines.push('} catch {', '    exit 1', '}');
     return lines.join('\n');
 }

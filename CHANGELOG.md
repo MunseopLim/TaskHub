@@ -6,6 +6,16 @@
 보안·데이터 손실 수정과 사용자 영향만 남긴다. 테스트를 적는다면 최종 수치만 기록한다.
 -->
 
+## [0.7.22] - 2026-08-14
+
+### 수정 — Windows 민감 one-shot 시작 안정성
+
+- 비밀번호 입력을 사용하는 Windows one-shot의 native 명령은 PATH에서 판정한 실제
+  실행 파일을 argv로 직접 띄운다. 불필요한 PowerShell·`ProcessStartInfo` 2단 래퍼에서
+  작업이 시작되지 않거나 종료 실패 알림이 전달되지 않던 문제를 고쳤다.
+
+**테스트**: Windows native·PowerShell 실행과 민감 detached one-shot 회귀 검증 포함, 최종 2849 passing.
+
 ## [0.7.21] - 2026-08-13
 
 ### 보안 — Windows 실행 파일 경로 고정

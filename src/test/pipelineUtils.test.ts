@@ -167,20 +167,19 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         assert.ok(invocation.display.includes('process.stdout.write(\\"ok\\")'));
     });
 
-    test('Windows native ProcessStartInfo script preserves quoted argv and can relay exit status', () => {
+    test('Windows native ProcessStartInfo script preserves quoted argv and reports launch failure', () => {
         const script = buildWindowsNativeProcessScript(
             'node',
             ['-e', 'process.stdout.write("ok value")'],
-            { executable: 'C:\\toolchain\\node.exe', cwd: 'C:\\work dir', waitForExit: true }
+            { executable: 'C:\\toolchain\\node.exe', cwd: 'C:\\work dir' }
         );
         assert.ok(script.includes('$psi.UseShellExecute = $false'));
         assert.ok(script.includes('process.stdout.write(\\"ok value\\")'));
         assert.ok(script.includes("$psi.WorkingDirectory = 'C:\\work dir'"));
         assert.ok(script.includes('try {'));
         assert.ok(script.includes('if ($null -eq $taskHubProcess) { exit 1 }'));
-        assert.ok(script.includes('$taskHubProcess.WaitForExit()'));
-        assert.ok(script.includes('exit [int]$taskHubProcess.ExitCode'));
         assert.ok(script.includes('} catch {\n    exit 1\n}'));
+        assert.ok(!script.includes('.WaitForExit()'));
         assert.ok(!script.includes('$taskHubProcess | Out-Null'));
 
         const detachedScript = buildWindowsNativeProcessScript(
@@ -252,7 +251,7 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         const script = buildWindowsNativeProcessScript(
             'node',
             ['-e', 'process.exit(7)'],
-            { executable: invocation.executable, cwd: 'C:\\work', waitForExit: true }
+            { executable: invocation.executable, cwd: 'C:\\work' }
         );
         assert.strictEqual(lookupCount, 1, 'building the launch command must not resolve PATH again');
         assert.ok(script.includes("$psi.FileName = 'C:\\toolchain\\node.exe'"), script);

@@ -6502,30 +6502,23 @@ function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string
                 cwd: workingDirectory || process.cwd(),
             });
             if (plan.strategy === 'native') {
-                // Keep the real argv inside the encoded wrapper: direct spawn
-                // would expose a password-derived value in the process list.
-                // ProcessStartInfo also avoids PowerShell 5.1 removing embedded
-                // quotes from values such as a `node -e` script.
-                const script = buildWindowsNativeProcessScript(
-                    command,
-                    args,
-                    { executable: plan.executable, cwd: workingDirectory, waitForExit: true }
-                );
-                child = spawn(
-                    'powershell.exe',
-                    ['-NoProfile', '-EncodedCommand', encodePowerShellScript(script)],
-                    {
-                        cwd: workingDirectory,
-                        env: childEnv,
-                        detached: true,
-                        stdio: 'ignore',
-                        windowsHide: true,
-                    }
-                );
+                // Node's native argv path already applies Windows quoting rules
+                // without PowerShell 5.1 rebinding. Launch the executable that
+                // made the plan eligible directly: the former PowerShell ->
+                // ProcessStartInfo -> child chain could stall before either the
+                // detached work or its non-zero exit reached this process.
+                const nativeArgs = mergeCommandAndArgs(command, args).args;
+                child = spawn(plan.executable, nativeArgs, {
+                    cwd: workingDirectory,
+                    env: childEnv,
+                    detached: true,
+                    stdio: 'ignore',
+                    windowsHide: true,
+                });
             } else {
                 // PowerShell resolves .cmd/.bat shims and scripts consistently;
-                // the encoded script keeps argument quoting identical to captured
-                // commands without exposing it in a command-line audit surface.
+                // the encoded wrapper avoids another command-line parse of the
+                // already quoted PowerShell invocation.
                 const utf8Prefix = raw && useUtf8Console
                     ? buildPowerShellUtf8Preamble(true)
                     : '';
