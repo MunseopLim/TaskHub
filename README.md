@@ -12,6 +12,7 @@
 - [스크린샷](#스크린샷)
 - [설치](#설치)
 - [사용법](#사용법)
+- [보안](#보안)
 - [설정](#설정)
 - [문서](#문서)
 
@@ -145,6 +146,17 @@
 1. 활동 표시줄의 **'H' 아이콘**을 클릭하여 TaskHub 뷰 열기
 2. Actions 패널에서 액션 실행, 링크 패널에서 리소스에 빠르게 접근
 3. `.vscode/actions.json` · `.vscode/links.json` · `.vscode/favorites.json` 파일을 편집하여 사용자 지정
+
+---
+
+## 보안
+
+TaskHub 액션은 워크스페이스 권한으로 명령을 실행할 수 있는 **실행 가능한 설정**입니다. 신뢰할 수
+없는 저장소나 `.taskhub` 파일의 액션은 실행하지 마세요. TaskHub는 VS Code의 Restricted Mode에서
+비활성화됩니다. 액션을 가져올 때는 Doctor 결과와 관계없이 `actions.json`을 수정하기 전에 액션·명령·
+파일 작업을 표시하고 원본 검토를 기본 동작으로 제공합니다. Doctor의 추가 진단이 없어도 고정된 악성
+명령까지 안전하다는 뜻은 아닙니다. 자세한 검사 방법은
+[TaskHub Doctor](docs/features.md#23-taskhub-doctor-action-lint)를 참조하세요.
 
 ---
 

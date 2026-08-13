@@ -230,30 +230,37 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 
 TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, 위험한 입력에 대해 다음 방어 계층을 유지한다:
 
-1.  **변수 치환(`interpolatePipelineVariables`) 입력 정화**
+1.  **워크스페이스 신뢰와 Import 신뢰 결정**
+    *   `package.json`의 `capabilities.untrustedWorkspaces.supported`는 `false`다. 워크스페이스의 `actions.json`이 임의 명령을 실행할 수 있으므로 VS Code Restricted Mode에서는 확장을 활성화하지 않는다.
+    *   Import는 스키마·중복 검증 뒤 `collectImportTrustAdvisories()`로 **가져온 액션만** Doctor에 전달하지만, 결과 유무와 관계없이 대상 `actions.json`을 읽거나 쓰기 전에 trust modal을 표시한다. 액션 목록과 명령·argv·cwd·env·파일/아카이브 부작용을 보여 주며, 첫/default 버튼은 원본 열기, 두 번째 버튼만 명시적 import다. Cancel은 `isCloseAffordance` 하나로 두어 Escape·닫기도 쓰기 없이 끝낸다.
+    *   Doctor range는 정규화해 재직렬화한 배열 기준이므로 finding의 `filePath`는 실제 원본이 아닌 `<import-review>` 합성 경로다. 현재 UI는 메시지만 사용하며, 이 구분은 나중에 실제 파일의 잘못된 줄로 진단을 게시하는 오용을 막는다.
+    *   원본을 처음 읽은 문자열을 최종 동의 시점에 다시 읽은 값과 비교한다. 검토 중 파일이 수정·교체·삭제되면 가져오기를 취소해, 화면에서 확인한 내용과 실제 병합되는 in-memory 스냅샷이 갈라지지 않게 한다.
+    *   손상된 기존 `actions.json`도 백업 동의 시점에 다시 읽는다. 검토 중 고쳐져 유효해졌다면 `parseAndValidateActionsContent()`로 그 스냅샷을 정상 병합하고, 여전히 유효하지 않다면 다시 읽은 최신 문자열만 `.bak`에 쓴다. 모달 전에 읽은 오래된 문자열을 백업하거나 최신 편집을 덮어쓰지 않는다.
+    *   Doctor 진단은 셸 보간 같은 작성·런타임 위험을 보조할 뿐, `curl … | sh` 같은 고정 악성 명령을 판별하지 못한다. 따라서 진단 0건도 안전 판정으로 표현하지 않으며 이 관문을 샌드박스로 설명하지 않는다.
+2.  **변수 치환(`interpolatePipelineVariables`) 입력 정화**
     *   `sanitizeInterpolatedValue(value)`에서 null 바이트(`\0`)를 거부하고 32KB 길이 상한을 강제한다.
     *   object/array 값은 치환 대신 placeholder를 그대로 유지한다 (`${id.prop}` 원형).
-2.  **파일 경로 검증(`resolveWithinWorkspace`)**
+3.  **파일 경로 검증(`resolveWithinWorkspace`)**
     *   Task output mode가 `file`일 때, 그리고 `writeFile` / `appendFile`의 `path`와 즐겨찾기 항목 경로에 대해, 치환 결과를 `path.resolve` → `path.relative(root, resolved)` 순으로 검사해 워크스페이스 루트 외부 쓰기를 거부한다.
     *   상대 경로(`"report.txt"`, `"build/out.log"` 등)는 `process.cwd()`가 아니라 실행 중인 액션의 워크스페이스 폴더(`defaultWorkspace`) 기준으로 resolve한다. 이를 위해 `resolveWithinWorkspace(targetPath, roots, baseDir)` 시그니처의 3번째 인자로 액션 워크스페이스를 전달한다.
     *   **`zip` / `unzip`은 이 격리에서 의도적으로 제외된다.** 두 태스크는 `fileDialog` / `folderDialog`로 사용자가 **런타임에 고른** 위치를 그대로 다루는 것이 설계이고(번들 예제 `media/actions_example.json`의 zip 액션이 고른 폴더를 그 자리에서 압축한다), 워크스페이스로 묶으면 그 흐름 자체가 성립하지 않는다. 대신 다른 층으로 방어한다 — 추출은 zip-slip·심볼릭/하드 링크·크기/개수 상한(`archiveUtils.ts`)으로, 생성은 소스 루트 밖을 가리키는 링크 제외로 막는다.
     *   다만 **상대 경로의 기준점은 두 엔진이 같아야 한다.** 내장 엔진은 cwd 개념이 없어 `path.resolve`가 extension host의 `process.cwd()`(= VS Code를 띄운 위치)를 쓰는 반면 외부 `tool` 경로는 자식 프로세스의 cwd를 쓰므로, 같은 태스크가 `tool` 유무로 다른 위치에 파일을 만들었다. `resolveBuiltinArchivePath(targetPath, baseDir)`가 내장 엔진 호출 직전에 `task.cwd` → 워크스페이스 순으로 기준점을 맞춘다(격리는 하지 않는다). 반환하는 `${zip.archivePath}` / `${unzip.outputDir}`도 해석된 절대 경로다.
-3.  **쉘 인자 이스케이프 / 실행 경로 선택**
+4.  **쉘 인자 이스케이프 / 실행 경로 선택**
     *   POSIX: `buildPosixCommandLine`이 `quotePosixArgument`로 각 인자를 싱글쿼트로 감싸고(내부 싱글쿼트는 `'\''`) `sh -c`로 실행.
     *   Windows — **실행 경로 판별**: `windowsCommandIsDirectlyLaunchable(command, args, { env })`가 실행 파일이 셸 없이 OS 프로세스 로더로 바로 띄울 수 있는지 판단한다 — 명시적 `.exe`/`.com` 확장자거나, 확장자 없는 이름이면 `PATH`(+ `.exe`/`.com`)로 해석해 찾으면 true. `.cmd`/`.bat`/`.ps1`/`.js` 같은 스크립트·shim(`npm`/`npx`/`pnpm`/`yarn` 등, 실제로는 `*.cmd`), 셸 빌트인/별칭(`echo`, `dir`, `cd`, …)은 false. PATH 해석은 호출자가 넘긴 **task의 실제 실행 env**(`{ ...process.env, ...envOverrides }` — `executeShellCommand`의 `childEnv`, `createShellExecution`의 `options.env` 병합, `prepareTaskExecution`의 one-shot env)를 기준으로 하므로 `task.env.PATH`로 추가한 toolchain bin도 반영된다.
     *   Windows — **native 경로**(true일 때): `executeShellCommand`는 `spawn(file, argvArray)`(셸 없이), VS Code Task 경로(`createShellExecution`)는 `vscode.ProcessExecution`, one-shot(`isOneShot`)은 `ProcessStartInfo`(`UseShellExecute=$false`, `Arguments`는 `quoteWindowsCommandLineArgument`로 CommandLineToArgvW 규칙에 맞춰 escape)로 실행. 인자를 argv 배열/escape된 문자열로 직접 넘겨 **Windows PowerShell 5.1의 native-command 인자 큐오팅 버그**(`"` 가 사라지는 문제)를 우회한다.
     *   Windows — **PowerShell 경로**(false일 때): `buildPowerShellInvocation`이 `quotePowerShellArgument`로 각 인자를 싱글쿼트로 감싸 PowerShell `-EncodedCommand`로 전달(또는 one-shot은 `Start-Process -FilePath … -ArgumentList @(…)` — PATHEXT/파일 연결을 셸처럼 해석). 추가로, native `spawn`이 `ENOENT`/`EINVAL`/`EACCES`로 실패하면 `executeShellCommand`(캡처 모드)는 같은 명령을 PowerShell 경로로 한 번 더 재시도한다 — `windowsCommandIsDirectlyLaunchable`의 PATH 해석과 실제 spawn 사이의 race·cwd-상대 경로 차이 등에 대한 안전망이며, 스트림/one-shot 경로에는 이 재시도가 없다.
-4.  **WebView 보안**
+5.  **WebView 보안**
     *   모든 WebView(HexViewer, JSON Editor, Memory Map)는 `Content-Security-Policy` 메타 태그를 포함한다.
     *   `script-src`는 패널마다 새로 생성되는 16바이트 nonce만 허용한다. nonce는 `crypto.randomBytes(16).toString('base64')`(CSPRNG)로 생성되며, 인라인 스크립트 전부에 동일 nonce를 부여한다.
     *   CSP가 인라인 이벤트 핸들러를 차단하므로, 모든 UI 컨트롤은 `data-action` 속성을 달고 nonce 스크립트 내부의 위임(delegated) 리스너에서 처리한다. 새 버튼/컨트롤을 추가할 때 절대 `onclick="..."` 형태를 쓰지 말 것.
     *   에러/정보 HTML 출력은 `escapeHtml` 경유를 강제한다.
-5.  **파서 입력 한도**
+6.  **파서 입력 한도**
     *   ELF32: 헤더 최소 크기/섹션 테이블/string table 범위를 선검증.
     *   Intel HEX/SREC: 레코드당 최대 255바이트, 누적 `HEX_MAX_BYTE_ENTRIES` 초과 시 throw.
     *   Hex Viewer 렌더링: `HEX_VIEWER_MAX_SPAN = 128 MB`. 주소 범위가 이를 초과하면(sparse 파일) 렌더링 거부.
     *   Macro 전처리: shift 카운트 0–63 clamp, 수식 길이 4KB 제한.
-6.  **Hover 타임아웃 및 비동기 IO**
+7.  **Hover 타임아웃 및 비동기 IO**
     *   `withLspTimeout(promise, token, 3000)`으로 모든 LSP 호출을 감싼다. `activeHoverCalls: Set<string>`이 동일 위치 재진입을 막는다.
     *   `taskhub_types.json` 로드는 `fs.promises.*`(stat/readFile/realpath) 기반이다. 느린 스토리지에서도 extension host 이벤트 루프를 블로킹하지 않는다.
 

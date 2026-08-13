@@ -4,7 +4,13 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { t } from './i18n';
 import { coerceToUri } from './previewOpener';
-import { shouldOfferRecovery, RecoveryEntry, RecoveryStore, makeRecoveryStore } from './jsonEditorUtils';
+import {
+    shouldOfferRecovery,
+    shouldSuppressJsonEditorSelfWrite,
+    RecoveryEntry,
+    RecoveryStore,
+    makeRecoveryStore,
+} from './jsonEditorUtils';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 
 let currentPanel: vscode.WebviewPanel | undefined;
@@ -1011,9 +1017,12 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         // 변경 (예: `touch -r`, 일부 sync 도구) 이 self-write 로 오인되므로,
         // currentLastWriteSize 가 알려져 있고 changedStat.size 와 다르면
         // suppression 을 통과시켜 외부 변경 처리 경로로 흐르게 한다.
-        if (currentLastWriteMtime !== undefined &&
-            Math.abs(changedStat.mtimeMs - currentLastWriteMtime) < 1 &&
-            (currentLastWriteSize === undefined || changedStat.size === currentLastWriteSize)) {
+        if (shouldSuppressJsonEditorSelfWrite(
+            currentLastWriteMtime,
+            currentLastWriteSize,
+            changedStat.mtimeMs,
+            changedStat.size
+        )) {
             return;
         }
         if (currentIsDirty) {

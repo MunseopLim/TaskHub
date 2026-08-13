@@ -91,14 +91,22 @@ function actionsLoadError(filePath: string, message: string): ActionsLoadError {
     return error;
 }
 
-function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
-    if (!fs.existsSync(filePath)) { return []; }
+function parseAndValidateActionsContent(
+    fileContent: string,
+    filePath: string,
+    options?: { sourceLabel?: string }
+): ActionItem[] {
     const validate = getActionsValidator();
-    let fileContent: string;
-    try { fileContent = fs.readFileSync(filePath, 'utf-8'); } catch (e: any) { throw actionsLoadError(filePath, `Error reading file ${filePath}: ${e.message}`); }
     let parsedJson: any;
     try { parsedJson = JSON.parse(fileContent); } catch (e: any) { throw actionsLoadError(filePath, `Error parsing JSON in ${path.basename(filePath)}: ${e.message}`); }
     if (validate(parsedJson)) { const sourceLabel = options?.sourceLabel ?? filePath; performAdditionalActionValidation(parsedJson, { sourceLabel, filePath }); return parsedJson; } else { const errors = validate.errors?.map(error => `  - path: '${error.instancePath}' - message: ${error.message}`).join('\n'); throw actionsLoadError(filePath, `Validation failed for ${path.basename(filePath)}:\n${errors}`); }
+}
+
+function loadAndValidateActions(filePath: string, options?: { sourceLabel?: string }): ActionItem[] {
+    if (!fs.existsSync(filePath)) { return []; }
+    let fileContent: string;
+    try { fileContent = fs.readFileSync(filePath, 'utf-8'); } catch (e: any) { throw actionsLoadError(filePath, `Error reading file ${filePath}: ${e.message}`); }
+    return parseAndValidateActionsContent(fileContent, filePath, options);
 }
 
 interface ActionValidationContext {
@@ -7493,6 +7501,395 @@ export function parseImportData(content: string): { actions: ActionItem[]; error
     return { actions: rawActions, errors: [] };
 }
 
+/** Doctor findings worth surfacing alongside an import trust decision. */
+export const IMPORT_TRUST_ADVISORY_CODES = new Set([
+    'shell.interpolated-command',
+    'command.dynamic-interpreter',
+    'command.nested-interpreter',
+    'path.outside-workspace',
+    'doctor.analysis-failed',
+]);
+
+export const IMPORT_TRUST_REVIEW_LIST_LIMIT = 6;
+const IMPORT_REVIEW_VIRTUAL_PATH = '<import-review>';
+
+export interface ImportTrustAdvisoryOptions {
+    filePath: string;
+    workspaceFolder: string;
+    workspaceRoots: string[];
+    extensionPath: string;
+}
+
+/** Run Doctor on the normalized imported array and retain import-relevant advisories. */
+export function collectImportTrustAdvisories(
+    actions: ActionItem[],
+    options: ImportTrustAdvisoryOptions
+): DoctorFinding[] {
+    const input: DoctorInput = {
+        // The ranges below belong to the normalized/re-serialized array, not
+        // the original .taskhub wrapper. Keep this synthetic so a future
+        // diagnostics caller cannot accidentally navigate to the wrong line.
+        filePath: IMPORT_REVIEW_VIRTUAL_PATH,
+        sourceLabel: `import: ${path.basename(options.filePath)}`,
+        // `parseImportData` has already removed the .taskhub wrapper. Doctor
+        // expects the actions array itself, so analyze that normalized form.
+        rawText: JSON.stringify(actions, null, 2) + '\n',
+        workspaceFolder: options.workspaceFolder,
+        workspaceRoots: options.workspaceRoots,
+        extensionPath: options.extensionPath,
+    };
+    const findings = runDoctorPerSource([input], getActionsValidator() as any);
+    return findings.filter(finding => IMPORT_TRUST_ADVISORY_CODES.has(finding.code));
+}
+
+function compactImportReviewText(value: unknown, maxLength = 240): string {
+    const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+    return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+}
+
+function describeImportPlatformValue(value: unknown): string {
+    if (typeof value === 'string') {
+        return compactImportReviewText(value);
+    }
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+        return Object.entries(value as Record<string, unknown>)
+            .filter(([, branch]) => typeof branch === 'string')
+            .map(([platform, branch]) => `${platform}=${JSON.stringify(compactImportReviewText(branch))}`)
+            .join(' | ');
+    }
+    return '';
+}
+
+interface ImportReviewPlaceholders {
+    missingCommand: string;
+    missingPath: string;
+    missingArchive: string;
+    missingSource: string;
+    fromInputs: string;
+    builtIn: string;
+    untitled: string;
+}
+
+function importReviewPlaceholders(lang: 'ko' | 'en'): ImportReviewPlaceholders {
+    return lang === 'ko'
+        ? {
+            missingCommand: '(명령 누락)',
+            missingPath: '(경로 누락)',
+            missingArchive: '(아카이브 누락)',
+            missingSource: '(소스 누락)',
+            fromInputs: '(inputs에서 받음)',
+            builtIn: '(내장)',
+            untitled: '(제목 없음)',
+        }
+        : {
+            missingCommand: '(missing command)',
+            missingPath: '(missing path)',
+            missingArchive: '(missing archive)',
+            missingSource: '(missing source)',
+            fromInputs: '(from inputs)',
+            builtIn: '(built-in)',
+            untitled: '(untitled)',
+        };
+}
+
+/** Describe commands and direct file/archive side effects for the import trust screen. */
+export function describeImportOperation(
+    task: any,
+    lang: 'ko' | 'en' = vscode.env.language.startsWith('ko') ? 'ko' : 'en'
+): string | undefined {
+    const placeholders = importReviewPlaceholders(lang);
+    const args = Array.isArray(task?.args)
+        ? ` args=${compactImportReviewText(JSON.stringify(task.args))}`
+        : '';
+    const cwd = typeof task?.cwd === 'string'
+        ? ` cwd=${JSON.stringify(compactImportReviewText(task.cwd))}`
+        : '';
+    const env = task?.env && typeof task.env === 'object' && !Array.isArray(task.env) && Object.keys(task.env).length > 0
+        ? ` env=${compactImportReviewText(JSON.stringify(task.env))}`
+        : '';
+    const outputFile = task?.passTheResultToNextTask === true &&
+        task?.output?.mode === 'file' && typeof task.output.filePath === 'string'
+        ? ` output.file=${JSON.stringify(compactImportReviewText(task.output.filePath))}`
+        : '';
+
+    if (task?.type === 'shell' || task?.type === 'command') {
+        const command = describeImportPlatformValue(task.command) || placeholders.missingCommand;
+        return `${command}${args}${cwd}${env}${outputFile}`;
+    }
+    if (task?.type === 'quickPick' && task.itemsFromCommand) {
+        return `itemsFromCommand=${describeImportPlatformValue(task.itemsFromCommand) || placeholders.missingCommand}` +
+            `${cwd}${outputFile}`;
+    }
+    if (task?.type === 'writeFile' || task?.type === 'appendFile') {
+        return `path=${JSON.stringify(compactImportReviewText(task.path ?? placeholders.missingPath))}`;
+    }
+    if (task?.type === 'zip') {
+        const source = Array.isArray(task.source) ? compactImportReviewText(JSON.stringify(task.source)) : compactImportReviewText(task.source);
+        const hasExternalTool = task.tool !== undefined && task.tool !== null;
+        const tool = hasExternalTool
+            ? describeImportPlatformValue(task.tool) || placeholders.missingCommand
+            : placeholders.builtIn;
+        return `archive=${JSON.stringify(compactImportReviewText(task.archive ?? placeholders.missingArchive))}` +
+            ` source=${source || placeholders.missingSource} tool=${tool}${cwd}${hasExternalTool ? env : ''}`;
+    }
+    if (task?.type === 'unzip') {
+        const hasExternalTool = task.tool !== undefined && task.tool !== null;
+        const tool = hasExternalTool
+            ? describeImportPlatformValue(task.tool) || placeholders.missingCommand
+            : placeholders.builtIn;
+        const inputs = task.inputs && typeof task.inputs === 'object'
+            ? ` inputs=${compactImportReviewText(JSON.stringify(task.inputs))}`
+            : '';
+        return `archive=${JSON.stringify(compactImportReviewText(task.archive ?? placeholders.fromInputs))}` +
+            ` destination=${JSON.stringify(compactImportReviewText(task.destination ?? placeholders.fromInputs))}` + inputs +
+            ` tool=${tool}${cwd}${hasExternalTool ? env : ''}`;
+    }
+    return outputFile ? outputFile.trim() : undefined;
+}
+
+export interface ImportTrustReviewSummary {
+    actionCount: number;
+    taskCount: number;
+    actionLines: string[];
+    operationLines: string[];
+}
+
+/** Flatten nested folders into the actions and executable/file operations a user must trust. */
+export function summarizeImportTrustReview(
+    actions: ActionItem[],
+    lang: 'ko' | 'en' = vscode.env.language.startsWith('ko') ? 'ko' : 'en'
+): ImportTrustReviewSummary {
+    const placeholders = importReviewPlaceholders(lang);
+    const actionLines: string[] = [];
+    const operationLines: string[] = [];
+    let actionCount = 0;
+    let taskCount = 0;
+
+    const walk = (items: ActionItem[], folders: string[]) => {
+        for (const item of items) {
+            const title = String(item.title ?? item.id ?? placeholders.untitled);
+            const breadcrumb = [...folders, title].join(' / ');
+            const tasks: any[] = Array.isArray(item.action?.tasks) ? item.action!.tasks : [];
+            if (item.action) {
+                actionCount++;
+                taskCount += tasks.length;
+                actionLines.push(`• ${breadcrumb} [${item.id ?? '?'}]`);
+                for (const [index, task] of tasks.entries()) {
+                    const operation = describeImportOperation(task, lang);
+                    if (!operation) { continue; }
+                    const taskId = typeof task?.id === 'string' ? task.id : `#${index + 1}`;
+                    const taskType = typeof task?.type === 'string' ? task.type : '?';
+                    operationLines.push(`• ${item.id ?? '?'} / ${taskId} (${taskType}) — ${operation}`);
+                }
+            }
+            if (Array.isArray(item.children)) {
+                walk(item.children, [...folders, title]);
+            }
+        }
+    };
+    walk(actions, []);
+    return { actionCount, taskCount, actionLines, operationLines };
+}
+
+export function buildImportTrustReviewDetail(
+    actions: ActionItem[],
+    findings: DoctorFinding[],
+    lang: 'ko' | 'en' = 'ko'
+): string {
+    const summary = summarizeImportTrustReview(actions, lang);
+    const errors = findings.filter(f => f.severity === 'error').length;
+    const warnings = findings.filter(f => f.severity === 'warning').length;
+    const infos = findings.filter(f => f.severity === 'info').length;
+    const lines = [
+        lang === 'ko'
+            ? `가져올 액션 ${summary.actionCount}개 · Task ${summary.taskCount}개`
+            : `${summary.actionCount} action(s) · ${summary.taskCount} task(s) to import`,
+        '',
+        lang === 'ko' ? '액션' : 'Actions',
+        ...collapseList(
+            summary.actionLines.length > 0 ? summary.actionLines : [lang === 'ko' ? '• 실행 가능한 액션 없음' : '• No runnable actions'],
+            IMPORT_TRUST_REVIEW_LIST_LIMIT,
+            lang
+        ),
+        '',
+        lang === 'ko' ? '명령 및 파일 작업' : 'Commands and file operations',
+        ...collapseList(
+            summary.operationLines.length > 0 ? summary.operationLines : [lang === 'ko' ? '• 직접 실행·파일 작업 없음' : '• No direct command or file operation'],
+            IMPORT_TRUST_REVIEW_LIST_LIMIT,
+            lang
+        ),
+        '',
+        lang === 'ko'
+            ? `Doctor 추가 진단 — 오류 ${errors}건, 경고 ${warnings}건, 정보 ${infos}건`
+            : `Additional Doctor findings — ${errors} error(s), ${warnings} warning(s), ${infos} info`,
+        ...(findings.length > 0
+            ? collapseList(findings.map(finding => formatFindingLine(finding, lang)), IMPORT_TRUST_REVIEW_LIST_LIMIT, lang)
+            : [lang === 'ko' ? '• 추가 진단 없음 — 안전하다는 판정이 아닙니다.' : '• No additional findings — this is not a safety verdict.']),
+        '',
+        lang === 'ko'
+            ? '정적 분석은 고정된 악성 명령을 판별하지 못합니다. 출처와 원본 전체를 신뢰하는 경우에만 가져오세요.'
+            : 'Static analysis cannot identify a fixed malicious command. Import only if you trust the source and the complete file.',
+    ];
+    return lines.join('\n');
+}
+
+async function openTrustReviewFile(filePath: string): Promise<boolean> {
+    try {
+        await vscode.window.showTextDocument(vscode.Uri.file(filePath), { preview: true });
+        return true;
+    } catch (error: any) {
+        vscode.window.showErrorMessage(t(
+            `검토할 파일을 열 수 없습니다: ${error?.message ?? error}`,
+            `Could not open the file for review: ${error?.message ?? error}`
+        ));
+        return false;
+    }
+}
+
+function importSourceStillMatches(filePath: string, expectedContent: string | undefined): boolean {
+    if (expectedContent === undefined) {
+        return true;
+    }
+    try {
+        if (fs.readFileSync(filePath, 'utf-8') === expectedContent) {
+            return true;
+        }
+    } catch {
+        // The same user-facing cancellation covers deletion and read failure.
+    }
+    vscode.window.showWarningMessage(t(
+        `'${path.basename(filePath)}' 내용이 처음 읽은 뒤 변경되어 가져오기를 취소했습니다. 파일을 다시 선택해 최신 내용을 검토하세요.`,
+        `'${path.basename(filePath)}' changed after it was first read, so the import was canceled. Select it again and review the current content.`
+    ));
+    return false;
+}
+
+/** Always require a trust decision before imported executable configuration reaches disk. */
+export async function confirmImportTrustReview(
+    filePath: string,
+    actions: ActionItem[],
+    findings: DoctorFinding[],
+    expectedContent?: string
+): Promise<boolean> {
+    const fileName = path.basename(filePath);
+    const lang: 'ko' | 'en' = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
+    const continueLabel = t('위험을 이해하고 가져오기', 'Understand risks and import');
+    const inspectLabel = t('원본 검토', 'Review source');
+    const cancelLabel = t('취소', 'Cancel');
+    const inspectItem: vscode.MessageItem = { title: inspectLabel };
+    const continueItem: vscode.MessageItem = { title: continueLabel };
+    const cancelItem: vscode.MessageItem = { title: cancelLabel, isCloseAffordance: true };
+    const choice = await vscode.window.showWarningMessage(
+        t(
+            `'${fileName}'의 실행 가능한 설정을 actions.json에 추가하려고 합니다.`,
+            `Executable configuration from '${fileName}' will be added to actions.json.`
+        ),
+        { modal: true, detail: buildImportTrustReviewDetail(actions, findings, lang) },
+        // The first/default action only opens the source. Import remains a
+        // separate deliberate choice, while Escape maps to one close affordance.
+        inspectItem,
+        continueItem,
+        cancelItem
+    );
+    if (choice === continueItem) {
+        return importSourceStillMatches(filePath, expectedContent);
+    }
+    if (choice !== inspectItem || !await openTrustReviewFile(filePath)) {
+        return false;
+    }
+
+    // The source document is now the review surface. A persistent notification
+    // offers the one explicit mutation; closing it cancels the import.
+    const reviewedChoice = await vscode.window.showWarningMessage(
+        t(
+            `'${fileName}' 원본을 열었습니다. 내용을 모두 확인하고 출처를 신뢰할 때만 가져오세요.`,
+            `Opened '${fileName}'. Import only after reviewing the complete file and trusting its source.`
+        ),
+        continueItem
+    );
+    return reviewedChoice === continueItem && importSourceStillMatches(filePath, expectedContent);
+}
+
+export type ImportInvalidActionsResolution =
+    | { kind: 'cancel' }
+    | { kind: 'merge'; actions: ActionItem[]; content: string }
+    | { kind: 'backup'; content: string };
+
+function resolveLatestInvalidActions(
+    actionsPath: string,
+    expectedContent: string
+): ImportInvalidActionsResolution {
+    let latestContent: string;
+    try {
+        latestContent = fs.readFileSync(actionsPath, 'utf-8');
+    } catch (error: any) {
+        vscode.window.showErrorMessage(t(
+            `기존 actions.json을 다시 읽을 수 없어 가져오기를 중단합니다: ${error?.message ?? error}`,
+            `Import aborted: could not re-read the existing actions.json: ${error?.message ?? error}`
+        ));
+        return { kind: 'cancel' };
+    }
+
+    // The user may naturally fix the file after choosing Review. Validate the
+    // exact bytes read at consent time: a repaired file should be merged, while
+    // a still-invalid edit must be the content preserved in the backup.
+    if (latestContent !== expectedContent) {
+        try {
+            const actions = parseAndValidateActionsContent(latestContent, actionsPath, { sourceLabel: 'workspace' });
+            vscode.window.showInformationMessage(t(
+                '검토 중 수정한 actions.json이 유효해져 백업 없이 정상 병합합니다.',
+                'The actions.json edited during review is now valid and will be merged without a backup.'
+            ));
+            return { kind: 'merge', actions, content: latestContent };
+        } catch {
+            // It is still invalid. The explicit backup decision applies to the
+            // latest reviewed bytes, never to the stale pre-modal snapshot.
+        }
+    }
+    return { kind: 'backup', content: latestContent };
+}
+
+/** Safe-default decision for replacing an invalid actions.json during import. */
+export async function confirmImportInvalidActionsBackup(
+    actionsPath: string,
+    backupPath: string,
+    invalidReason: string,
+    expectedContent: string
+): Promise<ImportInvalidActionsResolution> {
+    const inspectLabel = t('기존 파일 검토', 'Review existing file');
+    const backupLabel = t('손상된 파일 백업 후 계속', 'Back up corrupt file and continue');
+    const cancelLabel = t('취소', 'Cancel');
+    const inspectItem: vscode.MessageItem = { title: inspectLabel };
+    const backupItem: vscode.MessageItem = { title: backupLabel };
+    const cancelItem: vscode.MessageItem = { title: cancelLabel, isCloseAffordance: true };
+    const choice = await vscode.window.showWarningMessage(
+        t(
+            `기존 actions.json이 유효하지 않아 그대로 병합할 수 없습니다. 원본을 ${path.basename(backupPath)}로 백업하고 가져온 액션만 저장할 수 있습니다.`,
+            `The existing actions.json is invalid and cannot be merged as-is. TaskHub can back it up to ${path.basename(backupPath)} and save only the imported actions.`
+        ),
+        { modal: true, detail: invalidReason },
+        inspectItem,
+        backupItem,
+        cancelItem
+    );
+    if (choice === backupItem) {
+        return resolveLatestInvalidActions(actionsPath, expectedContent);
+    }
+    if (choice !== inspectItem || !await openTrustReviewFile(actionsPath)) {
+        return { kind: 'cancel' };
+    }
+    const reviewedChoice = await vscode.window.showWarningMessage(
+        t(
+            `기존 actions.json을 열었습니다. 가져오기를 계속하면 원본은 ${path.basename(backupPath)}에 보존됩니다.`,
+            `Opened the existing actions.json. If you continue, the original will be preserved as ${path.basename(backupPath)}.`
+        ),
+        backupItem
+    );
+    return reviewedChoice === backupItem
+        ? resolveLatestInvalidActions(actionsPath, expectedContent)
+        : { kind: 'cancel' };
+}
+
 export function mergeImportedActions(existing: ActionItem[], imported: ActionItem[]): { merged: ActionItem[]; skipped: string[] } {
     const existingIds = new Set<string>();
     const collectIds = (items: ActionItem[]) => {
@@ -9751,6 +10148,19 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
+        // An import file is executable configuration, not inert data. Doctor
+        // advisories supplement the decision, but even zero findings must not
+        // bypass source review: a fixed malicious command needs no interpolation.
+        const importTrustAdvisories = collectImportTrustAdvisories(importedActions, {
+            filePath: fileUri[0].fsPath,
+            workspaceFolder,
+            workspaceRoots: getWorkspaceRoots(),
+            extensionPath: context.extensionPath,
+        });
+        if (!await confirmImportTrustReview(fileUri[0].fsPath, importedActions, importTrustAdvisories, content)) {
+            return;
+        }
+
         const actionsPath = path.join(workspaceFolder, '.vscode', 'actions.json');
         let existingActions: ActionItem[] = [];
         if (fs.existsSync(actionsPath)) {
@@ -9778,30 +10188,29 @@ export function activate(context: vscode.ExtensionContext) {
             }
             if (existingInvalidReason) {
                 const backupPath = `${actionsPath}.bak`;
-                const backupLabel = t('손상된 파일 백업 후 계속', 'Back up corrupt file and continue');
-                const cancelLabel = t('취소', 'Cancel');
-                const choice = await vscode.window.showWarningMessage(
-                    t(
-                        `기존 actions.json이 유효하지 않아 가져오기를 안전하게 진행할 수 없습니다 (${existingInvalidReason}). 원본을 ${path.basename(backupPath)}로 백업하고 가져온 액션만 저장할까요?`,
-                        `The existing actions.json is invalid, so import cannot proceed safely (${existingInvalidReason}). Back up the original to ${path.basename(backupPath)} and save only the imported actions?`
-                    ),
-                    { modal: true },
-                    backupLabel,
-                    cancelLabel
+                const resolution = await confirmImportInvalidActionsBackup(
+                    actionsPath,
+                    backupPath,
+                    existingInvalidReason,
+                    existingContent
                 );
-                if (choice !== backupLabel) {
+                if (resolution.kind === 'cancel') {
                     return;
                 }
-                try {
-                    fs.writeFileSync(backupPath, existingContent, 'utf-8');
-                } catch (backupErr: any) {
-                    vscode.window.showErrorMessage(t(
-                        `백업 파일 작성에 실패하여 가져오기를 중단합니다: ${backupErr.message}`,
-                        `Import aborted: failed to write backup file: ${backupErr.message}`
-                    ));
-                    return;
+                if (resolution.kind === 'merge') {
+                    existingActions = resolution.actions;
+                } else {
+                    try {
+                        fs.writeFileSync(backupPath, resolution.content, 'utf-8');
+                    } catch (backupErr: any) {
+                        vscode.window.showErrorMessage(t(
+                            `백업 파일 작성에 실패하여 가져오기를 중단합니다: ${backupErr.message}`,
+                            `Import aborted: failed to write backup file: ${backupErr.message}`
+                        ));
+                        return;
+                    }
+                    existingActions = [];
                 }
-                existingActions = [];
             }
         }
 

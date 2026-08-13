@@ -89,4 +89,5 @@ SVD 파일을 새 데이터 소스로 읽어 기존 Register Decoder와 SFR 표�
 ## 테스트 부채
 
 - `jsonEditorUtils.test.ts`의 소스 문자열 정규식 검사를 실행 기반 테스트로 점진적으로 교체합니다.
-- Windows 명령 실행·인자 quoting·프로세스 트리 종료를 실제 Windows CI runner에서 검증합니다.
+- Windows 명령 실행·인자 quoting·프로세스 트리 종료 테스트가 추가된 CI의 Windows runner에서
+  실제로 통과하는지 확인한 뒤 이 항목을 제거합니다.

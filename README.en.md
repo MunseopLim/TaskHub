@@ -12,6 +12,7 @@
 - [Screenshots](#screenshots)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Security](#security)
 - [Configuration](#configuration)
 - [Documentation](#documentation)
 
@@ -145,6 +146,17 @@ To build from source or contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 1. Click the **'H' icon** in the Activity Bar to open the TaskHub view
 2. Run actions from the Actions panel; access resources from the Links panel
 3. Customize by editing `.vscode/actions.json`, `.vscode/links.json`, and `.vscode/favorites.json`
+
+---
+
+## Security
+
+TaskHub actions are **executable configuration** that can run commands with your workspace permissions. Do not
+run actions from an untrusted repository or `.taskhub` file. TaskHub is disabled in VS Code Restricted Mode.
+Every import shows its actions, commands, and file operations before changing `actions.json`, regardless of Doctor
+findings, and reviewing the complete source is the default action. No additional finding does not mean that a
+fixed malicious command is safe; see [TaskHub Doctor](docs/features.md#23-taskhub-doctor-action-lint) for the
+full set of checks.
 
 ---
 

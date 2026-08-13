@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
-import { buildSheetMap, getRowsByPath, SheetEntry, parseValue, coerceEditedCellValue, coerceEditedArrayItems, shouldOfferRecovery, RecoveryEntry, makeRecoveryStore, MinimalWorkspaceState, buildDraftSnapshot, DraftSnapshotInput, decideSaveResult, SaveResultInput, effectiveBaseline, resolveActiveDraftState, ActiveCellEdit } from '../jsonEditorUtils';
+import { buildSheetMap, getRowsByPath, SheetEntry, parseValue, coerceEditedCellValue, coerceEditedArrayItems, shouldOfferRecovery, shouldSuppressJsonEditorSelfWrite, RecoveryEntry, makeRecoveryStore, MinimalWorkspaceState, buildDraftSnapshot, DraftSnapshotInput, decideSaveResult, SaveResultInput, effectiveBaseline, resolveActiveDraftState, ActiveCellEdit } from '../jsonEditorUtils';
 import {
     wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY, getWebviewContent,
     isSupportedJsonRoot, unsupportedJsonRootMessage,
@@ -1142,6 +1142,26 @@ suite('JsonEditorUtils Test Suite', () => {
         test('falls back to mtime-only when current size unknown (file vanished etc.)', () => {
             const sized: RecoveryEntry = { ...baseEntry, fileSize: 128 };
             assert.strictEqual(shouldOfferRecovery(sized, 1_700_000_000_000, undefined), true);
+        });
+    });
+
+    suite('shouldSuppressJsonEditorSelfWrite', () => {
+        test('suppresses the editor write only when mtime and known size both match', () => {
+            assert.strictEqual(shouldSuppressJsonEditorSelfWrite(1000, 128, 1000, 128), true);
+            assert.strictEqual(shouldSuppressJsonEditorSelfWrite(1000, 128, 1000.5, 128), true);
+        });
+
+        test('does not suppress an mtime-preserving external change with a different size', () => {
+            assert.strictEqual(shouldSuppressJsonEditorSelfWrite(1000, 128, 1000, 256), false);
+        });
+
+        test('does not suppress when the mtime differs or no prior write exists', () => {
+            assert.strictEqual(shouldSuppressJsonEditorSelfWrite(1000, 128, 1001, 128), false);
+            assert.strictEqual(shouldSuppressJsonEditorSelfWrite(undefined, undefined, 1000, 128), false);
+        });
+
+        test('keeps legacy mtime-only behavior when the prior size is unknown', () => {
+            assert.strictEqual(shouldSuppressJsonEditorSelfWrite(1000, undefined, 1000, 256), true);
         });
     });
 
@@ -2297,28 +2317,6 @@ suite('JsonEditorUtils Test Suite', () => {
                 calls.length >= 2,
                 'handleReloadFailure must be invoked from both the size-exceeded path and the catch block (expected >= 2 calls, got ' + calls.length + ')'
             );
-        });
-
-        test('watcher self-write suppression requires both mtime AND size to match', () => {
-            // 회귀 가드: mtime 만으로 self-write 를 식별하면 mtime 보존형 외부 변경
-            // (`touch -r`, 일부 sync 도구) 이 self-write 로 오인돼 watcher 가
-            // 무시한다 → 사용자가 stale data 위에서 편집 → close 시 recovery 가
-            // 옛 baseline size 로 stamp → reopen 시 size mismatch 로 폐기 →
-            // 편집본 손실. mtime 일치 + size 불일치는 외부 변경 경로로 흘려야 한다.
-            //
-            // suppression 표현식의 위치는 `JSON Editor가 방금 쓴 변경이면 무시`
-            // 주석 직후. 그 if 블록 head 를 잡아 size 검사 조건이 들어 있는지 확인.
-            const suppressMatch = editorSource.match(
-                /JSON Editor가 방금 쓴 변경이면 무시[\s\S]{0,400}?if\s*\(([\s\S]*?)\)\s*\{\s*\n\s*return;/
-            );
-            assert.ok(suppressMatch, 'could not locate the watcher self-write suppression block');
-            const condition = suppressMatch![1];
-            assert.ok(/currentLastWriteMtime/.test(condition),
-                'suppression must still gate on currentLastWriteMtime');
-            assert.ok(/currentLastWriteSize/.test(condition),
-                'suppression must also consult currentLastWriteSize so mtime-preserving external changes are NOT suppressed');
-            assert.ok(/changedStat\.size/.test(condition),
-                'suppression must compare changedStat.size against currentLastWriteSize');
         });
 
         test('module declares currentLastWriteSize paired with currentLastWriteMtime', () => {

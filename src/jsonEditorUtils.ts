@@ -76,6 +76,25 @@ export function shouldOfferRecovery(
 }
 
 /**
+ * Whether a watcher event is the JSON Editor's own most recent write.
+ *
+ * mtime alone is insufficient: sync tools can preserve it and coarse
+ * filesystems can assign the same timestamp to different contents. When the
+ * previous size is known, both fingerprints must match. Missing size keeps
+ * compatibility with state recorded before size tracking was introduced.
+ */
+export function shouldSuppressJsonEditorSelfWrite(
+    lastWriteMtimeMs: number | undefined,
+    lastWriteSize: number | undefined,
+    changedMtimeMs: number,
+    changedSize: number
+): boolean {
+    return lastWriteMtimeMs !== undefined &&
+        Math.abs(changedMtimeMs - lastWriteMtimeMs) < 1 &&
+        (lastWriteSize === undefined || changedSize === lastWriteSize);
+}
+
+/**
  * 단위테스트가 vscode.ExtensionContext.workspaceState 없이도 RecoveryStore 로직을
  * 검증할 수 있도록 정의된 최소 인터페이스. 실제 구현(workspaceState)은 이미 호환된다.
  */
