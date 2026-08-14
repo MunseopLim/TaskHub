@@ -511,7 +511,7 @@ suite('Documentation Consistency', () => {
                 if (!cells) { continue; } // Key presence is covered by suite 1.
                 const documentedType = cells[1].replace(/`|\\/g, '');
                 const documentedDefault = cells[2].replace(/`/g, '');
-                const expectedDefault = typeof definition.default === 'string'
+                const expectedDefault = typeof definition.default === 'string' || Array.isArray(definition.default)
                     ? JSON.stringify(definition.default)
                     : String(definition.default);
 

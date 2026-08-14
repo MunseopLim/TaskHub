@@ -112,6 +112,7 @@
 | --- | --- | --- |
 | IT-027 | 성공 경로의 successMessage + history | `executeAction` 성공 후 `successMessage`가 `showInformationMessage`로 표시되고, HistoryProvider 기록이 running → success로 갱신 |
 | IT-028 | 실패 경로의 failMessage + history | 태스크 실패 후 `failMessage: <error>` 포맷이 `showErrorMessage`로 표시되고, HistoryProvider에 failure + output 메시지가 남음 |
+| IT-155 | 장시간 성공 묶음과 실패 상세 보존 | 성공 두 건은 750ms 정보 알림 하나로 묶되 실패는 `failMessage: <error>` 개별 오류 알림을 유지하고, 상태 표시줄만 성공·실패 전체 개수를 함께 요약 |
 
 ### History Input Replay
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)

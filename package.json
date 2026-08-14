@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.7.24",
+  "version": "0.7.25",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -66,6 +66,46 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "%setting.showTaskStatus%"
+        },
+        "taskhub.backgroundCompletion.thresholdSeconds": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 86400,
+          "markdownDescription": "%setting.backgroundCompletionThreshold%"
+        },
+        "taskhub.backgroundCompletion.notificationMode": {
+          "type": "string",
+          "enum": [
+            "whenUnfocused",
+            "always",
+            "never"
+          ],
+          "enumDescriptions": [
+            "%setting.backgroundCompletionMode.whenUnfocused%",
+            "%setting.backgroundCompletionMode.always%",
+            "%setting.backgroundCompletionMode.never%"
+          ],
+          "default": "whenUnfocused",
+          "markdownDescription": "%setting.backgroundCompletionMode%"
+        },
+        "taskhub.backgroundCompletion.outcomes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "success",
+              "failure",
+              "stopped"
+            ]
+          },
+          "default": [
+            "success",
+            "failure",
+            "stopped"
+          ],
+          "uniqueItems": true,
+          "markdownDescription": "%setting.backgroundCompletionOutcomes%"
         },
         "taskhub.pipeline.showVerboseLogs": {
           "type": "boolean",

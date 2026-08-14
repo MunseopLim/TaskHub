@@ -166,7 +166,13 @@ JSON Editor는 다음 규칙으로 사용자 변경을 보호합니다.
 
 ### 멀티 task 액션의 진행 표시
 
-여러 태스크를 실행할 때 액션 옆에 `2/3 · link` 또는 병렬 실행 중인 태스크 요약이 표시됩니다. 단일 태스크에는 표시하지 않고 종료 시 제거합니다. `taskhub.showTaskStatus: false`면 상태 아이콘과 진행률만 숨으며 중지 기능은 그대로 동작합니다.
+여러 태스크를 실행할 때 액션 옆에 `2/3 · link` 또는 병렬 실행 중인 태스크 요약이 표시됩니다. 단일 태스크에는 표시하지 않고 종료 시 제거합니다. `taskhub.showTaskStatus: false`면 상태 아이콘·진행률·완료 알림을 숨기며 중지 기능은 그대로 동작합니다.
+
+### 장시간 액션 완료 알림
+
+기본 10초 이상 실행된 액션이 성공·실패·중지되면 소요 시간을 상태 표시줄에 5초 동안 보여 줍니다. 완료 시점에 VS Code 창이 포커스되지 않았다면 알림도 보내며, 750ms 안의 성공·중지 알림은 결과 개수별 요약 하나로 묶습니다. 실패는 액션 이름과 원인을 잃지 않도록 기존 상세 오류 알림을 개별로 유지하고 상태 표시줄 요약에만 합칩니다. 기존 `successMessage`와 같은 결과를 두 번 알리지 않으며, 비밀번호 입력에서 파생된 실패는 민감 디버그 버튼이 있는 기존 알림을 우선합니다.
+
+`taskhub.showTaskStatus`는 모든 실행 피드백의 마스터 스위치이고, `taskhub.backgroundCompletion.*` 설정은 그 안에서 장시간 완료 표시의 임계값·포커스 정책·대상 결과만 좁힙니다. 자세한 옵션은 [§21 설정 레퍼런스](#21-설정-레퍼런스)를 참조하세요.
 
 ### 액션에 단축키 할당
 
@@ -1204,7 +1210,10 @@ Command Palette에서 **TaskHub: Open Hex Viewer**를 실행하고 파일을 고
 
 | 설정 ID | 타입 | 기본값 (범위) | 요약 | 관련 기능 |
 | --- | --- | --- | --- | --- |
-| `taskhub.showTaskStatus` | `boolean` | `true` | Actions 뷰의 실행 상태 아이콘(running/success/failure)·진행률 표시와 완료 알림 표시 여부. `false`면 **실패 알림(액션의 `failMessage` 포함)도 함께 억제**되므로 실패 여부는 History 패널이나 출력 채널로 확인해야 한다. 동시 실행 가드, 인라인 *중지* 버튼, *Stop All Actions* 노출은 그대로 동작한다. | [§5 Actions 패널](#5-actions-패널-mainviewmain), [§14 히스토리](#14-액션-실행-히스토리) |
+| `taskhub.showTaskStatus` | `boolean` | `true` | 액션 실행 피드백의 마스터 스위치. Actions 뷰의 상태 아이콘·진행률, 액션 지정 완료 메시지, 장시간 완료 표시를 함께 제어한다. `false`면 **실패 알림(`failMessage` 포함)도 함께 억제**되므로 History나 출력 채널을 확인해야 한다. 동시 실행 가드와 중지 기능은 그대로다. | [§5 Actions 패널](#5-actions-패널-mainviewmain), [§14 히스토리](#14-액션-실행-히스토리) |
+| `taskhub.backgroundCompletion.thresholdSeconds` | `number` | `10` (0–86400) | 장시간 완료 표시의 최소 실행 시간(초). `0`이면 모든 액션을 포함한다. | [§5 장시간 액션 완료 알림](#장시간-액션-완료-알림) |
+| `taskhub.backgroundCompletion.notificationMode` | `"whenUnfocused"` \| `"always"` \| `"never"` | `"whenUnfocused"` | 장시간 성공·중지 완료 알림의 포커스 정책. `never`여도 짧은 상태 표시줄 안내와 기존 액션 지정 메시지·상세 실패 알림은 유지된다. | [§5 장시간 액션 완료 알림](#장시간-액션-완료-알림) |
+| `taskhub.backgroundCompletion.outcomes` | `array` | `["success","failure","stopped"]` | 장시간 완료 표시 대상 결과. 빈 배열이면 다른 실행 피드백은 유지하면서 이 기능만 끈다. 750ms 안의 완료는 하나로 묶는다. | [§5 장시간 액션 완료 알림](#장시간-액션-완료-알림) |
 | `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | 파이프라인 실행 시 TaskHub OutputChannel에 상세 명령/STDOUT/STDERR/exit code를 출력. 디버깅에만 켤 것. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.pythonIoEncoding` | `string` | `"utf-8"` | TaskHub가 실행하는 모든 명령의 `PYTHONIOENCODING` 환경변수 값. 빈 문자열이면 강제 설정 안 함. `utf-8:ignore` 같은 값도 가능. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell의 콘솔 출력과 `>`/`>>` 파일 리다이렉션 인코딩. `"utf8"`의 파일은 Windows PowerShell 5.1에서 BOM이 붙고 PowerShell 7에서는 BOM이 없다. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |

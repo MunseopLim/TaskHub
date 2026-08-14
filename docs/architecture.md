@@ -25,6 +25,7 @@ TaskHub/
 │   │                                  # - 쉘 토큰화 + POSIX/PowerShell/Windows native 인자 quoting
 │   │                                  # - toWorkspaceRelativePath(): 절대경로 → ${workspaceFolder} 정규화
 │   │                                  # - wouldExceedCaptureLimit(): 캡처 한도 off-by-one guard
+│   ├── backgroundCompletion.ts        # 장시간 액션 완료 정책·750ms 묶음·표시 문구 순수 로직
 │   ├── previewRun.ts                  # Preview Run (Dry-run) 리포트 생성
 │   ├── previewOpener.ts               # preview/browser 열기 명령 헬퍼
 │   ├── doctor.ts                      # actions.json 정적 분석(Doctor) 순수 모듈
@@ -111,6 +112,7 @@ TaskHub/
     *   지원 태스크 타입 (`Task.type` union, [src/schema.ts](../src/schema.ts) 참조): `shell`, `command`, `fileDialog`, `folderDialog`, `unzip`, `zip`, `stringManipulation`, `inputBox`, `quickPick`, `envPick`, `confirm`, `writeFile`, `appendFile`
 *   **변수 치환**: `${task_id.property}` 형식으로 파이프라인 간 데이터 전달
 *   **Task DAG**: `dependsOn` 및 `${taskId.x}` 자동 추론 의존성으로 그래프를 구성하며, `parallel: true` 태스크는 sync barrier에서 빠져 동시 실행 풀에 들어간다. 상세 시맨틱은 [features.md §24 병렬 실행 / Task DAG](./features.md#24-병렬-실행--task-dag) 참조.
+*   **장시간 완료 피드백**: `executeAction()`이 성공·실패·명시적 중지의 `durationMs`와 완료 시점 창 포커스를 확정하고, [backgroundCompletion.ts](../src/backgroundCompletion.ts)가 임계값·대상 결과·알림 정책과 750ms 묶음을 판정합니다. 성공·중지 알림만 묶고 실패는 원인이 있는 기존 오류 알림을 개별 유지하며, 상태 표시줄은 모든 대상 결과를 요약합니다. `taskhub.showTaskStatus`가 마스터 게이트이며 비밀번호 파생 실패의 민감 디버그 알림은 대체하지 않습니다.
 *   **파일 감시**: debounce({ run, cancel }) 패턴으로 JSON 변경 감지
 
 ### 2.1. 동적 커맨드 등록 (`syncActionCommands`)

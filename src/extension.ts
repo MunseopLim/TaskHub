@@ -26,6 +26,18 @@ import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput } from './doc
 import { createZipArchive, extractZipArchive } from './archiveUtils';
 import { DIALOG_SCOPE, coerceDefaultUri, initDialogMemory, showOpenDialogWithMemory, showSaveDialogWithMemory, taskDialogScope } from './dialogMemory';
 import { collectVariableCompletions, referencePrefixAt, type VariableCompletionDetail } from './variableCompletions';
+import {
+    BackgroundCompletionBatcher,
+    BackgroundCompletionEvent,
+    BackgroundCompletionNotificationMode,
+    BackgroundCompletionOutcome,
+    BackgroundCompletionPolicy,
+    formatBackgroundCompletionPresentation,
+    isBackgroundCompletionNotificationMode,
+    isBackgroundCompletionOutcome,
+    shouldShowBackgroundCompletionNotification,
+    shouldSurfaceBackgroundCompletion,
+} from './backgroundCompletion';
 
 /**
  * 자동완성 항목의 `detail` 문구. **i18n 경계다.**
@@ -3021,6 +3033,110 @@ function throwIfActionCancelled(run: ActionRunContext): void {
     }
 }
 const outputChannel = vscode.window.createOutputChannel('TaskHub');
+
+const BACKGROUND_COMPLETION_BATCH_WINDOW_MS = 750;
+const BACKGROUND_COMPLETION_STATUS_DURATION_MS = 5_000;
+let backgroundCompletionBatcher: BackgroundCompletionBatcher | undefined;
+
+function presentBackgroundCompletionBatch(events: readonly BackgroundCompletionEvent[]): void {
+    const lang = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
+    const status = formatBackgroundCompletionPresentation(events, lang);
+    if (status) {
+        vscode.window.setStatusBarMessage(status.statusText, BACKGROUND_COMPLETION_STATUS_DURATION_MS);
+    }
+
+    const notificationEvents = events.filter(event => event.showNotification);
+    const notification = formatBackgroundCompletionPresentation(notificationEvents, lang);
+    if (!notification) {
+        return;
+    }
+    switch (notification.severity) {
+        case 'error':
+            void vscode.window.showErrorMessage(notification.notificationText);
+            break;
+        case 'warning':
+            void vscode.window.showWarningMessage(notification.notificationText);
+            break;
+        default:
+            void vscode.window.showInformationMessage(notification.notificationText);
+            break;
+    }
+}
+
+function getBackgroundCompletionBatcher(): BackgroundCompletionBatcher {
+    if (!backgroundCompletionBatcher) {
+        backgroundCompletionBatcher = new BackgroundCompletionBatcher(
+            presentBackgroundCompletionBatch,
+            BACKGROUND_COMPLETION_BATCH_WINDOW_MS
+        );
+    }
+    return backgroundCompletionBatcher;
+}
+
+/** Test-only deterministic drain for the otherwise time-based 750ms batch. */
+export function __testHook_flushBackgroundCompletions(): void {
+    backgroundCompletionBatcher?.flush();
+}
+
+function readBackgroundCompletionPolicy(): BackgroundCompletionPolicy {
+    const config = vscode.workspace.getConfiguration('taskhub');
+    const configuredThreshold = config.get<number>('backgroundCompletion.thresholdSeconds', 10);
+    const thresholdSeconds = Number.isFinite(configuredThreshold)
+        ? Math.min(86_400, Math.max(0, configuredThreshold))
+        : 10;
+    const configuredOutcomes = config.get<unknown[]>('backgroundCompletion.outcomes', [
+        'success', 'failure', 'stopped',
+    ]);
+    const outcomes = new Set<BackgroundCompletionOutcome>(
+        Array.isArray(configuredOutcomes)
+            ? configuredOutcomes.filter(isBackgroundCompletionOutcome)
+            : ['success', 'failure', 'stopped']
+    );
+    const configuredMode = config.get<unknown>('backgroundCompletion.notificationMode', 'whenUnfocused');
+    const notificationMode: BackgroundCompletionNotificationMode =
+        isBackgroundCompletionNotificationMode(configuredMode) ? configuredMode : 'whenUnfocused';
+    return { thresholdMs: thresholdSeconds * 1000, outcomes, notificationMode };
+}
+
+/**
+ * Add a long-running completion to the short batching window.
+ *
+ * `showTaskStatus` remains the master feedback switch for backward
+ * compatibility. The new settings only narrow when generic long-run cues are
+ * eligible; they never turn feedback back on for a user who disabled it.
+ * Returns true when this event will contribute to a batch notification, so
+ * the legacy per-event path can avoid showing the same result twice. Failures
+ * deliberately pass `allowNotification=false`: their detailed legacy error
+ * must survive even when the status-bar batch also contains that outcome.
+ */
+function enqueueBackgroundCompletion(
+    title: string,
+    outcome: BackgroundCompletionOutcome,
+    durationMs: number,
+    showTaskStatus: boolean,
+    message?: string,
+    allowNotification: boolean = true
+): boolean {
+    if (!showTaskStatus) {
+        return false;
+    }
+    const policy = readBackgroundCompletionPolicy();
+    if (!shouldSurfaceBackgroundCompletion(durationMs, outcome, policy)) {
+        return false;
+    }
+    const showNotification = allowNotification && shouldShowBackgroundCompletionNotification(
+        policy.notificationMode,
+        vscode.window.state.focused
+    );
+    getBackgroundCompletionBatcher().enqueue({
+        title,
+        outcome,
+        durationMs,
+        message,
+        showNotification,
+    });
+    return showNotification;
+}
 let previewOutputChannel: vscode.OutputChannel | undefined;
 function getPreviewOutputChannel(): vscode.OutputChannel {
     if (!previewOutputChannel) {
@@ -4795,6 +4911,16 @@ function handleActionSuccess(id: string, action: PipelineAction, showTaskStatus:
     }
 }
 
+function actionFailureNotificationMessage(
+    actionItem: ActionItem,
+    action: PipelineAction,
+    error: Error
+): string {
+    return action.failMessage
+        ? `${action.failMessage}: ${error.message}`
+        : t(`'${actionItem.title}' 액션 실패: ${error.message}`, `Action '${actionItem.title}' failed: ${error.message}`);
+}
+
 /**
  * 민감 디버그 재실행을 **한 번** 요청받아 수행한다.
  *
@@ -5033,11 +5159,7 @@ function handleActionFailure(id: string, actionItem: ActionItem, action: Pipelin
     if (!showTaskStatus) {
         return;
     }
-    if (action.failMessage) {
-        vscode.window.showErrorMessage(`${action.failMessage}: ${error.message}`);
-    } else {
-        vscode.window.showErrorMessage(t(`'${actionItem.title}' 액션 실패: ${error.message}`, `Action '${actionItem.title}' failed: ${error.message}`));
-    }
+    vscode.window.showErrorMessage(actionFailureNotificationMessage(actionItem, action, error));
 }
 
 /**
@@ -5410,15 +5532,22 @@ export async function executeAction(
             showSensitiveDebugOutput(actionItem.title, run.sensitiveDebugCaptures.values());
         }
 
-        handleActionSuccess(id, action, showTaskStatus);
-
         // Update history to success — `Math.max(0, ...)` defends against
         // wall-clock skew (NTP backward correction) producing a negative
         // duration that would persist into workspaceState. Display-side
         // also handles negatives (formatDuration → "0ms"), but clamping
         // here keeps the stored data clean for any future consumer.
+        const durationMs = Math.max(0, Date.now() - timestamp);
+        const backgroundWillNotify = enqueueBackgroundCompletion(
+            actionItem.title,
+            'success',
+            durationMs,
+            showTaskStatus,
+            action.successMessage
+        );
+        handleActionSuccess(id, action, showTaskStatus && !backgroundWillNotify);
+
         if (historyProvider) {
-            const durationMs = Math.max(0, Date.now() - timestamp);
             historyProvider.updateHistoryStatus(id, timestamp, 'success', undefined, durationMs);
             historyProvider.setHistoryInputs(id, timestamp, recordInputs);
             historyProvider.setHistoryCommands(id, timestamp, recordCommands);
@@ -5432,6 +5561,21 @@ export async function executeAction(
         // 그대로 동작한다. 여기까지 올라왔다는 것은 그 설정이 없었다는 뜻이다.)
         const promptCancelled = !manuallyStopped && isOnlyPromptCancellation(error);
         if (!manuallyStopped && !promptCancelled) {
+            const durationMs = Math.max(0, Date.now() - timestamp);
+            const sensitiveFailure = containsSensitiveTaskError(error);
+            if (ownsCurrentState) {
+                // 실패는 배치 상태 표시에는 포함하되 알림으로 접지 않는다.
+                // 여러 결과를 개수로 요약하면 어느 액션이 왜 실패했는지 사라지고,
+                // 아래 legacy 오류 알림까지 억제되어 진단 경로가 없어지기 때문이다.
+                enqueueBackgroundCompletion(
+                    actionItem.title,
+                    'failure',
+                    durationMs,
+                    showTaskStatus,
+                    actionFailureNotificationMessage(actionItem, action, error),
+                    false
+                );
+            }
             // 민감 디버그 실행이었다면 결과 종류와 무관하게 보고서를 한 번
             // 보여 준다. timeout/spawn 실패처럼 출력이 없어도 이유가 표시된다.
             if (run.sensitiveDebug) {
@@ -5446,7 +5590,7 @@ export async function executeAction(
                 // 비밀을 쓰는 태스크의 실패는 상세가 가려져 있다. 그대로 두면
                 // 사용자가 원인에 접근할 방법이 없으므로, 일회성 재실행을
                 // 제안한다 (이미 민감 디버그로 돌린 실행에는 제안하지 않는다).
-                if (containsSensitiveTaskError(error) && !run.sensitiveDebug && showTaskStatus) {
+                if (sensitiveFailure && !run.sensitiveDebug && showTaskStatus) {
                     void offerSensitiveDebugRerun(
                         actionItem, context, mainViewProvider, historyProvider,
                         t(`'${actionItem.title}' 액션 실패: ${error.message}`,
@@ -5460,7 +5604,6 @@ export async function executeAction(
             // Update history to failure
             if (historyProvider) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                const durationMs = Math.max(0, Date.now() - timestamp);
                 historyProvider.updateHistoryStatus(id, timestamp, 'failure', errorMessage, durationMs);
                 // Persist whatever inputs were captured before the failure
                 // — partial replay is still useful when a later task fails.
@@ -5520,8 +5663,16 @@ export async function executeAction(
             }
         } else {
             // Action was manually stopped
+            const durationMs = Math.max(0, Date.now() - timestamp);
+            if (ownsCurrentState) {
+                enqueueBackgroundCompletion(
+                    actionItem.title,
+                    'stopped',
+                    durationMs,
+                    showTaskStatus
+                );
+            }
             if (historyProvider) {
-                const durationMs = Math.max(0, Date.now() - timestamp);
                 historyProvider.updateHistoryStatus(
                     id, timestamp, 'cancelled',
                     t('사용자가 실행을 중지했습니다.', 'Action stopped by the user.'),
@@ -10332,6 +10483,8 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+    backgroundCompletionBatcher?.dispose();
+    backgroundCompletionBatcher = undefined;
     for (const run of Array.from(currentActionRuns.values())) {
         run.abandoned = true;
         if (!run.cancellation.token.isCancellationRequested) {

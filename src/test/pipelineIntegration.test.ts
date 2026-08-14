@@ -3,7 +3,12 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { executeAction, executeActionPipeline, __testHook_resetShellEnvNamesCache } from '../extension';
+import {
+    executeAction,
+    executeActionPipeline,
+    __testHook_flushBackgroundCompletions,
+    __testHook_resetShellEnvNamesCache,
+} from '../extension';
 import { initDialogMemory } from '../dialogMemory';
 import { actionStates } from '../providers/actionStatus';
 import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
@@ -1832,6 +1837,106 @@ try {
                 assert.strictEqual(actionStates.get('it028')?.state, 'failure');
             } finally {
                 (vscode.window as any).showErrorMessage = originalShowError;
+            }
+        });
+
+        test('IT-155: 장시간 성공은 묶고 실패는 원인이 있는 개별 알림을 보존한다', async () => {
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const settingKeys = [
+                'showTaskStatus',
+                'backgroundCompletion.thresholdSeconds',
+                'backgroundCompletion.notificationMode',
+                'backgroundCompletion.outcomes',
+            ] as const;
+            const previous = new Map(settingKeys.map(key => [key, config.inspect(key)?.globalValue]));
+            const originalShowInfo = vscode.window.showInformationMessage;
+            const originalShowError = vscode.window.showErrorMessage;
+            const originalSetStatus = vscode.window.setStatusBarMessage;
+            const shownInfo: string[] = [];
+            const shownErrors: string[] = [];
+            const shownStatus: string[] = [];
+            (vscode.window as any).showInformationMessage = async (message: string) => {
+                shownInfo.push(message);
+                return undefined;
+            };
+            (vscode.window as any).showErrorMessage = async (message: string) => {
+                shownErrors.push(message);
+                return undefined;
+            };
+            (vscode.window as any).setStatusBarMessage = (message: string) => {
+                shownStatus.push(message);
+                return { dispose: () => undefined };
+            };
+
+            try {
+                await config.update('showTaskStatus', true, vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.thresholdSeconds', 0, vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.notificationMode', 'always', vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.outcomes', ['success', 'failure'], vscode.ConfigurationTarget.Global);
+
+                const context = makeFakeContext();
+                const success: ActionItem = {
+                    id: 'it155.success',
+                    title: 'IT-155 Success',
+                    action: {
+                        description: 'batched success',
+                        successMessage: 'Success detail',
+                        tasks: [{ id: 'ok', type: 'stringManipulation', function: 'trim', input: 'ok' }],
+                    },
+                };
+                const failure: ActionItem = {
+                    id: 'it155.failure',
+                    title: 'IT-155 Failure',
+                    action: {
+                        description: 'batched failure',
+                        failMessage: 'Failure detail',
+                        tasks: [{
+                            id: 'fail',
+                            type: 'stringManipulation',
+                            function: 'trim',
+                            input: 'x',
+                            passTheResultToNextTask: true,
+                            output: { capture: { name: 'bad', regex: '(' } },
+                        }],
+                    },
+                };
+                const success2: ActionItem = {
+                    id: 'it155.success2',
+                    title: 'IT-155 Success 2',
+                    action: {
+                        description: 'second batched success',
+                        successMessage: 'Second success detail',
+                        tasks: [{ id: 'ok', type: 'stringManipulation', function: 'trim', input: 'ok' }],
+                    },
+                };
+                const history = new HistoryProvider(context);
+                const mainView = new MainViewProvider(context, () => [success, success2, failure]);
+
+                await executeAction(success, context, mainView, history);
+                await executeAction(success2, context, mainView, history);
+                await assert.rejects(() => executeAction(failure, context, mainView, history), /capture failed/);
+                assert.deepStrictEqual(shownInfo, [], '개별 successMessage가 묶음 알림보다 먼저 중복 표시됐다');
+                assert.strictEqual(shownErrors.length, 1, '실패 상세는 배치 flush 전에 개별 알림으로 남아야 한다');
+                assert.match(shownErrors[0], /^Failure detail: .*capture failed/);
+
+                __testHook_flushBackgroundCompletions();
+
+                assert.strictEqual(shownErrors.length, 1, '배치가 원인 없는 두 번째 실패 알림을 만들면 안 된다');
+                assert.strictEqual(shownInfo.length, 1, '성공 두 건은 정보 알림 하나로 묶여야 한다');
+                assert.match(shownInfo[0], /(액션 2개 종료|2 actions finished)/);
+                assert.match(shownInfo[0], /(성공 2|2 succeeded)/);
+                assert.strictEqual(shownStatus.length, 1, '상태 표시줄도 묶음 하나여야 한다');
+                assert.match(shownStatus[0], /(액션 3개 종료|3 actions finished)/);
+                assert.match(shownStatus[0], /(성공 2|2 succeeded)/);
+                assert.match(shownStatus[0], /(실패 1|1 failed)/);
+            } finally {
+                __testHook_flushBackgroundCompletions();
+                (vscode.window as any).showInformationMessage = originalShowInfo;
+                (vscode.window as any).showErrorMessage = originalShowError;
+                (vscode.window as any).setStatusBarMessage = originalSetStatus;
+                for (const key of settingKeys) {
+                    await config.update(key, previous.get(key), vscode.ConfigurationTarget.Global);
+                }
             }
         });
     });
