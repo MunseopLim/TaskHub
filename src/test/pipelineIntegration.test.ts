@@ -14,6 +14,7 @@ import { actionStates } from '../providers/actionStatus';
 import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
 import { MainViewProvider } from '../providers/mainViewProvider';
 import { ActionItem, Action as PipelineAction } from '../schema';
+import { buildInputProfileDraft, InputProfileStore, inspectInputProfile } from '../inputProfiles';
 
 /**
  * Integration test scenarios for TaskHub pipelines.
@@ -2010,6 +2011,10 @@ try {
                     env: { value: 'staging' },
                     tag: { value: 'release-1' }
                 });
+                assert.deepStrictEqual(entries[0].inputTaskTypes, {
+                    env: 'quickPick',
+                    tag: 'inputBox'
+                });
                 // Non-interactive task id is absent.
                 assert.ok(!(entries[0].inputs as any).noop);
             } finally {
@@ -2066,6 +2071,51 @@ try {
 
                 assert.strictEqual(dialogOpened, 0, 'no dialog should open when presetInputs supplies the values');
                 assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'env=prod;tag=r-2');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+                (vscode.window as any).showInputBox = originalShowInputBox;
+            }
+        });
+
+        test('IT-157: workspace 입력 프로필을 다시 읽어 대화상자 없이 실행한다', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const originalShowInputBox = vscode.window.showInputBox;
+            const resultPath = path.join(tempWorkspace, 'it157.txt');
+            let dialogOpened = 0;
+            try {
+                (vscode.window as any).showQuickPick = async () => { dialogOpened++; return undefined; };
+                (vscode.window as any).showInputBox = async () => { dialogOpened++; return undefined; };
+                const action: PipelineAction = {
+                    description: 'IT-157',
+                    tasks: [
+                        { id: 'env', type: 'quickPick', items: ['dev', 'prod'] },
+                        { id: 'tag', type: 'inputBox', validatePattern: '^r-\\d+$' },
+                        {
+                            id: 'write', type: 'stringManipulation', function: 'trim',
+                            input: '${env.value}:${tag.value}', passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: resultPath, overwrite: true }
+                        }
+                    ]
+                };
+                const profileContext = makeDialogMemoryContext();
+                const store = new InputProfileStore(profileContext.workspaceState);
+                await store.save(buildInputProfileDraft(
+                    'deploy', 'Release', action.tasks,
+                    { env: { value: 'prod' }, tag: { value: 'r-7' } },
+                    { env: 'quickPick', tag: 'inputBox' }
+                ));
+                const profile = store.list('deploy')[0];
+                const inspected = inspectInputProfile(profile, action.tasks);
+
+                await executeActionPipeline(
+                    action,
+                    { extensionPath: path.resolve(__dirname, '..', '..') } as vscode.ExtensionContext,
+                    'it157', tempWorkspace, [tempWorkspace],
+                    { presetInputs: inspected.usableInputs }
+                );
+
+                assert.strictEqual(dialogOpened, 0);
+                assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'prod:r-7');
             } finally {
                 (vscode.window as any).showQuickPick = originalShowQuickPick;
                 (vscode.window as any).showInputBox = originalShowInputBox;

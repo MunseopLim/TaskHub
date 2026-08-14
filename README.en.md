@@ -26,6 +26,7 @@
 - **Action Creation Wizard** — Build new actions through an interactive UI, no manual JSON editing required
 - **Presets** — Share per-environment action configurations with your team
 - **Run History** — Track success/failure status with one-click re-run
+- **Input Profiles** — Name reusable input sets from History and run them from an action's menu
 - **Quick Action Palette** — Fuzzy-search and run any action through the single `TaskHub: Run Any Action…` command. Recently used items appear at the top (count is configurable)
 - **Problem Matcher** — Surface compiler errors / warnings from build output in the Problems panel (built-in `$gcc` / `$tsc` presets or custom regex)
 

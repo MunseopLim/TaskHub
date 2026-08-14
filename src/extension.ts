@@ -38,6 +38,14 @@ import {
     shouldShowBackgroundCompletionNotification,
     shouldSurfaceBackgroundCompletion,
 } from './backgroundCompletion';
+import {
+    buildInputProfileDraft,
+    InputProfileStore,
+    InputProfileStoreError,
+    inspectInputProfile,
+    type InputProfileInspection,
+    type NamedInputProfile,
+} from './inputProfiles';
 
 /**
  * 자동완성 항목의 `detail` 문구. **i18n 경계다.**
@@ -3932,6 +3940,131 @@ export async function confirmDeleteHistoryItem(actionTitle: string): Promise<boo
     return confirm === 'Yes';
 }
 
+function inputProfileErrorMessage(error: unknown): string {
+    if (!(error instanceof InputProfileStoreError)) {
+        const message = error instanceof Error ? error.message : String(error);
+        return t(`입력 프로필을 저장할 수 없습니다: ${message}`, `Could not save the input profile: ${message}`);
+    }
+    switch (error.code) {
+        case 'invalid-name':
+            return t('프로필 이름은 1~80자로 입력하세요.', 'Enter a profile name between 1 and 80 characters.');
+        case 'duplicate-name':
+            return t('이 액션에 같은 이름의 입력 프로필이 이미 있습니다.', 'An input profile with this name already exists for this action.');
+        case 'empty-inputs':
+            return t('재사용할 수 있는 입력값이 없습니다.', 'There are no reusable input values.');
+        case 'profile-too-large':
+            return t('입력 프로필 하나가 128KB 저장 한도를 초과했습니다.', 'The input profile exceeds the 128 KB per-profile storage limit.');
+        case 'too-many-profiles':
+            return t('이 워크스페이스에는 입력 프로필을 최대 50개까지 저장할 수 있습니다.', 'This workspace can store up to 50 input profiles.');
+        case 'store-too-large':
+            return t('입력 프로필 전체가 2MB 저장 한도를 초과했습니다.', 'Input profiles exceed the 2 MB workspace storage limit.');
+        case 'store-corrupt':
+            return t(
+                '입력 프로필 저장소가 손상되었거나 지원하지 않는 형식입니다. 기존 데이터를 보호하기 위해 변경하지 않았습니다.',
+                'Input profile storage is corrupt or uses an unsupported format. No changes were made, to protect the existing data.'
+            );
+        case 'not-serializable':
+            return t('이 입력값은 프로필로 저장할 수 없는 형식입니다.', 'These input values cannot be stored in an input profile.');
+        case 'not-found':
+            return t('입력 프로필을 찾을 수 없습니다. 목록을 다시 열어 주세요.', 'The input profile no longer exists. Reopen the list.');
+    }
+}
+
+function inputProfileNameValidation(name: string): string | undefined {
+    const trimmed = name.trim();
+    if (trimmed.length === 0) {
+        return t('프로필 이름을 입력하세요.', 'Enter a profile name.');
+    }
+    if (trimmed.length > 80) {
+        return t('프로필 이름은 80자 이하여야 합니다.', 'Profile names must be 80 characters or fewer.');
+    }
+    if (/[\u0000-\u001f\u007f]/.test(trimmed)) {
+        return t('프로필 이름은 한 줄의 일반 문자로 입력하세요.', 'Use a single line of ordinary characters for the profile name.');
+    }
+    return undefined;
+}
+
+function summarizeInputProfileTaskIds(taskIds: string[]): string {
+    const shown = taskIds.slice(0, 5).map(taskId => {
+        const oneLine = taskId.replace(/\s+/g, ' ');
+        return oneLine.length > 60 ? `${oneLine.slice(0, 57)}…` : oneLine;
+    });
+    if (taskIds.length > shown.length) {
+        shown.push(`+${taskIds.length - shown.length}`);
+    }
+    return shown.join(', ');
+}
+
+type InputProfilePickItem = vscode.QuickPickItem & {
+    profile: NamedInputProfile;
+    inspection: InputProfileInspection;
+};
+
+function applyCurrentInputProfileValidation(
+    inspection: InputProfileInspection,
+    tasks: import('./schema').Task[]
+): InputProfileInspection {
+    const byId = new Map(tasks.map(task => [task.id, task]));
+    const usableInputs: Record<string, unknown> = Object.create(null);
+    const invalidTaskIds = new Set<string>();
+    for (const taskId of Object.keys(inspection.usableInputs)) {
+        const task = byId.get(taskId);
+        if (task && savedInputStillValid(task, inspection.usableInputs[taskId])) {
+            usableInputs[taskId] = inspection.usableInputs[taskId];
+        } else {
+            invalidTaskIds.add(taskId);
+        }
+    }
+    const promptSet = new Set([...inspection.promptTaskIds, ...invalidTaskIds]);
+    const promptTaskIds = tasks
+        .map(task => task.id)
+        .filter(taskId => promptSet.has(taskId));
+    return { ...inspection, usableInputs, promptTaskIds };
+}
+
+function buildInputProfilePickItems(
+    profiles: NamedInputProfile[],
+    tasks: import('./schema').Task[]
+): InputProfilePickItem[] {
+    return profiles.map(profile => {
+        // History 재실행과 같은 validator를 미리 적용해 팔레트의 "다시 묻기"
+        // 개수도 실제 실행과 맞춘다. 런타임은 방어선으로 다시 검사한다.
+        const inspection = applyCurrentInputProfileValidation(inspectInputProfile(profile, tasks), tasks);
+        const savedCount = Object.keys(inspection.usableInputs).length;
+        const staleCount = inspection.staleTaskIds.length;
+        const promptCount = inspection.promptTaskIds.length;
+        const description = staleCount > 0
+            ? t(`오래됨 · 유효 ${savedCount}개 · 다시 묻기 ${promptCount}개`, `Outdated · ${savedCount} valid · ask again for ${promptCount}`)
+            : promptCount > 0
+                ? t(`저장 ${savedCount}개 · 다시 묻기 ${promptCount}개`, `${savedCount} saved · ask again for ${promptCount}`)
+                : t(`저장된 입력 ${savedCount}개`, `${savedCount} saved inputs`);
+        const detail = staleCount > 0
+            ? t(
+                `현재 액션과 대조할 수 없는 태스크: ${summarizeInputProfileTaskIds(inspection.staleTaskIds)}`,
+                `Tasks that cannot be verified against the current action: ${summarizeInputProfileTaskIds(inspection.staleTaskIds)}`
+            )
+            : undefined;
+        return { label: profile.name, description, detail, profile, inspection };
+    });
+}
+
+async function confirmRunOutdatedInputProfile(
+    profileName: string,
+    inspection: InputProfileInspection
+): Promise<boolean> {
+    if (inspection.staleTaskIds.length === 0) { return true; }
+    const continueLabel = t('맞는 값만 사용하고 실행', 'Run with matching values');
+    const choice = await vscode.window.showWarningMessage(
+        t(
+            `'${profileName}' 프로필의 일부 태스크를 현재 액션과 대조할 수 없습니다 (${summarizeInputProfileTaskIds(inspection.staleTaskIds)}). 확인된 값만 사용하고 나머지는 다시 물을까요?`,
+            `Some tasks in profile '${profileName}' cannot be verified against the current action (${summarizeInputProfileTaskIds(inspection.staleTaskIds)}). Use only verified values and ask for the rest?`
+        ),
+        { modal: true },
+        continueLabel
+    );
+    return choice === continueLabel;
+}
+
 export type ApplyPresetBackupChoice = 'backup' | 'cancel';
 
 /**
@@ -4418,6 +4551,21 @@ export function shouldRecordTaskInput(task: import('./schema').Task): boolean {
         return false;
     }
     return true;
+}
+
+export function collectRecordedInputTaskTypes(
+    tasks: import('./schema').Task[],
+    inputs: Record<string, unknown>
+): Record<string, string> {
+    const taskById = new Map(tasks.map(task => [task.id, task]));
+    const types: Record<string, string> = Object.create(null);
+    for (const taskId of Object.keys(inputs)) {
+        const task = taskById.get(taskId);
+        if (task && shouldRecordTaskInput(task)) {
+            types[taskId] = task.type;
+        }
+    }
+    return types;
 }
 
 // `formatGraphIssue` lives in pipelineUtils so previewRun.ts shares
@@ -5461,11 +5609,13 @@ export async function executeAction(
 
     // Accumulator for interactive task inputs — attached to the history
     // entry below so a later "Re-run with saved inputs" can replay them.
-    const recordInputs: Record<string, unknown> = {};
+    // task id는 사용자 정의 문자열이라 `__proto__`도 합법이다. 프로필 저장과
+    // History 재실행이 그 id를 own property로 보존하도록 null prototype을 쓴다.
+    const recordInputs: Record<string, unknown> = Object.create(null);
 
     // Accumulator for resolved command lines — attached to the history entry
     // below so "실행한 명령 보기" can show what ran without re-executing.
-    const recordCommands: Record<string, string> = {};
+    const recordCommands: Record<string, string> = Object.create(null);
 
     try {
         await executeActionPipelineForRun(action, context, id, actionWorkspaceFolder, undefined, {
@@ -5549,7 +5699,10 @@ export async function executeAction(
 
         if (historyProvider) {
             historyProvider.updateHistoryStatus(id, timestamp, 'success', undefined, durationMs);
-            historyProvider.setHistoryInputs(id, timestamp, recordInputs);
+            historyProvider.setHistoryInputs(
+                id, timestamp, recordInputs,
+                collectRecordedInputTaskTypes(action.tasks, recordInputs)
+            );
             historyProvider.setHistoryCommands(id, timestamp, recordCommands);
         }
     } catch (error: any) {
@@ -5607,7 +5760,10 @@ export async function executeAction(
                 historyProvider.updateHistoryStatus(id, timestamp, 'failure', errorMessage, durationMs);
                 // Persist whatever inputs were captured before the failure
                 // — partial replay is still useful when a later task fails.
-                historyProvider.setHistoryInputs(id, timestamp, recordInputs);
+                historyProvider.setHistoryInputs(
+                    id, timestamp, recordInputs,
+                    collectRecordedInputTaskTypes(action.tasks, recordInputs)
+                );
                 historyProvider.setHistoryCommands(id, timestamp, recordCommands);
             }
 
@@ -5658,7 +5814,10 @@ export async function executeAction(
             if (historyProvider) {
                 const durationMs = Math.max(0, Date.now() - timestamp);
                 historyProvider.updateHistoryStatus(id, timestamp, 'cancelled', reason, durationMs, 'prompt');
-                historyProvider.setHistoryInputs(id, timestamp, recordInputs);
+                historyProvider.setHistoryInputs(
+                    id, timestamp, recordInputs,
+                    collectRecordedInputTaskTypes(action.tasks, recordInputs)
+                );
                 historyProvider.setHistoryCommands(id, timestamp, recordCommands);
             }
         } else {
@@ -5678,7 +5837,10 @@ export async function executeAction(
                     t('사용자가 실행을 중지했습니다.', 'Action stopped by the user.'),
                     durationMs, 'stopped'
                 );
-                historyProvider.setHistoryInputs(id, timestamp, recordInputs);
+                historyProvider.setHistoryInputs(
+                    id, timestamp, recordInputs,
+                    collectRecordedInputTaskTypes(action.tasks, recordInputs)
+                );
                 historyProvider.setHistoryCommands(id, timestamp, recordCommands);
             }
         }
@@ -8623,6 +8785,7 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceLinkViewProvider = new LinkViewProvider();
     const favoriteViewProvider = new FavoriteViewProvider(context);
     const historyProvider = new HistoryProvider(context);
+    const inputProfileStore = new InputProfileStore(context.workspaceState);
     context.subscriptions.push(
         mainViewProvider,
         workspaceLinkViewProvider,
@@ -8926,6 +9089,252 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage(t(`ID '${actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${actionId}'.`));
         }
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.runActionWithInputProfile', async (actionItem: Action) => {
+        const actionId = actionItem?.id;
+        if (!actionId) {
+            vscode.window.showWarningMessage(t('입력 프로필로 실행할 액션을 선택하세요.', 'Select an action to run with an input profile.'));
+            return;
+        }
+        let allActions: ActionItem[];
+        try {
+            allActions = loadAllActions(context);
+        } catch (error: any) {
+            outputChannel.appendLine(`[ERROR] ${error.message}`);
+            vscode.window.showErrorMessage(t(`입력 프로필을 사용할 수 없습니다: ${error.message}`, `Could not use an input profile: ${error.message}`));
+            return;
+        }
+        const fullActionItem = findActionById(allActions, actionId);
+        if (!fullActionItem?.action) {
+            vscode.window.showErrorMessage(t(`ID '${actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${actionId}'.`));
+            return;
+        }
+        let profiles: NamedInputProfile[];
+        try {
+            profiles = inputProfileStore.list(actionId);
+        } catch (error) {
+            vscode.window.showErrorMessage(inputProfileErrorMessage(error));
+            return;
+        }
+        if (profiles.length === 0) {
+            vscode.window.showInformationMessage(t(
+                '이 액션에 저장된 입력 프로필이 없습니다. 액션을 실행한 뒤 History 항목에서 입력 프로필을 저장하세요.',
+                'This action has no saved input profiles. Run it, then save an input profile from its History item.'
+            ));
+            return;
+        }
+        const selection = await vscode.window.showQuickPick(
+            buildInputProfilePickItems(profiles, fullActionItem.action.tasks),
+            {
+                placeHolder: t(`'${fullActionItem.title}'에 사용할 입력 프로필 선택`, `Select an input profile for '${fullActionItem.title}'`),
+                matchOnDescription: true,
+                matchOnDetail: true,
+                ignoreFocusOut: false,
+            }
+        );
+        if (!selection) { return; }
+        if (!await confirmRunOutdatedInputProfile(selection.profile.name, selection.inspection)) { return; }
+        const pathParts = findActionPathById(allActions, actionId);
+        try {
+            await executeAction(
+                fullActionItem,
+                context,
+                mainViewProvider,
+                historyProvider,
+                selection.inspection.usableInputs,
+                pathParts
+            );
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            outputChannel.appendLine(`[ERROR] Execution failed for action '${actionId}' (input profile '${selection.profile.name}'): ${msg}`);
+        }
+    }));
+
+    const manageInputProfiles = async (actionItem?: Action): Promise<void> => {
+        const actionId = actionItem?.id;
+        let allActions: ActionItem[] = [];
+        try {
+            allActions = loadAllActions(context);
+        } catch {
+            // 프로필 정리는 actions.json이 깨진 동안에도 가능해야 한다. 이 경우
+            // 액션 제목·stale 상세 대신 저장된 action id만 보여 준다.
+        }
+        const fullActionItem = actionId ? findActionById(allActions, actionId) : undefined;
+        let profiles: NamedInputProfile[];
+        try {
+            profiles = actionId ? inputProfileStore.list(actionId) : inputProfileStore.listAll();
+        } catch (error) {
+            vscode.window.showErrorMessage(inputProfileErrorMessage(error));
+            return;
+        }
+        if (profiles.length === 0) {
+            vscode.window.showInformationMessage(t(
+                '관리할 입력 프로필이 없습니다.',
+                'There are no input profiles to manage.'
+            ));
+            return;
+        }
+        const items: InputProfilePickItem[] = fullActionItem?.action
+            ? buildInputProfilePickItems(profiles, fullActionItem.action.tasks)
+            : profiles.map(profile => {
+                const current = findActionById(allActions, profile.actionId);
+                const actionDescription = current
+                    ? t(`액션: ${current.title}`, `Action: ${current.title}`)
+                    : t(`없는 액션: ${profile.actionId}`, `Missing action: ${profile.actionId}`);
+                return {
+                    label: profile.name,
+                    description: actionDescription,
+                    detail: t(`액션 ID: ${profile.actionId}`, `Action ID: ${profile.actionId}`),
+                    profile,
+                    inspection: { usableInputs: {}, staleTaskIds: [], promptTaskIds: [] },
+                };
+            });
+        const selected = await vscode.window.showQuickPick(
+            items,
+            {
+                placeHolder: t('관리할 입력 프로필 선택', 'Select an input profile to manage'),
+                matchOnDescription: true,
+                matchOnDetail: true,
+                ignoreFocusOut: false,
+            }
+        );
+        if (!selected) { return; }
+
+        const renameLabel = t('이름 변경', 'Rename');
+        const deleteLabel = t('삭제', 'Delete');
+        const operation = await vscode.window.showQuickPick(
+            [
+                { label: renameLabel, description: t('프로필 이름만 변경합니다.', 'Change only the profile name.') },
+                { label: deleteLabel, description: t('이 프로필을 워크스페이스에서 삭제합니다.', 'Delete this profile from the workspace.') },
+            ],
+            { placeHolder: t(`'${selected.profile.name}' 관리`, `Manage '${selected.profile.name}'`), ignoreFocusOut: false }
+        );
+        if (!operation) { return; }
+
+        try {
+            if (operation.label === renameLabel) {
+                const nextName = await vscode.window.showInputBox({
+                    prompt: t('새 입력 프로필 이름', 'New input profile name'),
+                    value: selected.profile.name,
+                    ignoreFocusOut: false,
+                    validateInput: value => {
+                        const basic = inputProfileNameValidation(value);
+                        if (basic) { return basic; }
+                        let duplicate: NamedInputProfile | undefined;
+                        try {
+                            duplicate = inputProfileStore.findByName(selected.profile.actionId, value);
+                        } catch (error) {
+                            return inputProfileErrorMessage(error);
+                        }
+                        return duplicate && duplicate.id !== selected.profile.id
+                            ? t('같은 이름의 프로필이 이미 있습니다.', 'A profile with this name already exists.')
+                            : undefined;
+                    },
+                });
+                if (nextName === undefined || nextName.trim() === selected.profile.name) { return; }
+                const renamed = await inputProfileStore.rename(selected.profile.id, nextName);
+                vscode.window.showInformationMessage(t(
+                    `입력 프로필 이름을 '${renamed.name}'(으)로 변경했습니다.`,
+                    `Renamed the input profile to '${renamed.name}'.`
+                ));
+                return;
+            }
+
+            const confirmLabel = t('프로필 삭제', 'Delete profile');
+            const confirmed = await vscode.window.showWarningMessage(
+                t(
+                    `'${selected.profile.name}' 입력 프로필을 삭제하시겠습니까?`,
+                    `Delete input profile '${selected.profile.name}'?`
+                ),
+                { modal: true },
+                confirmLabel
+            );
+            if (confirmed !== confirmLabel) { return; }
+            if (await inputProfileStore.delete(selected.profile.id)) {
+                vscode.window.showInformationMessage(t(
+                    `'${selected.profile.name}' 입력 프로필을 삭제했습니다.`,
+                    `Deleted input profile '${selected.profile.name}'.`
+                ));
+            }
+        } catch (error) {
+            vscode.window.showErrorMessage(inputProfileErrorMessage(error));
+        }
+    };
+    context.subscriptions.push(
+        vscode.commands.registerCommand('taskhub.manageInputProfiles', manageInputProfiles),
+        vscode.commands.registerCommand('taskhub.manageAllInputProfiles', () => manageInputProfiles())
+    );
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.saveHistoryInputsAsProfile', async (itemOrEntry: HistoryItem | HistoryEntry | undefined) => {
+        const maybeItem = itemOrEntry as HistoryItem | undefined;
+        const entry = typeof maybeItem?.getEntry === 'function'
+            ? maybeItem.getEntry()
+            : itemOrEntry as HistoryEntry | undefined;
+        if (!entry || !entry.actionId || isToolHistoryEntry(entry)) {
+            vscode.window.showErrorMessage(t('유효한 액션 실행 기록을 선택하세요.', 'Select a valid action history item.'));
+            return;
+        }
+        if (!entry.inputs || Object.keys(entry.inputs).length === 0) {
+            vscode.window.showInformationMessage(t(
+                '이 기록 항목에는 프로필로 저장할 입력값이 없습니다.',
+                'This history item has no inputs that can be saved as a profile.'
+            ));
+            return;
+        }
+        let allActions: ActionItem[];
+        try {
+            allActions = loadAllActions(context);
+        } catch (error: any) {
+            vscode.window.showErrorMessage(t(`입력 프로필을 저장할 수 없습니다: ${error.message}`, `Could not save the input profile: ${error.message}`));
+            return;
+        }
+        const fullActionItem = findActionById(allActions, entry.actionId);
+        if (!fullActionItem?.action) {
+            vscode.window.showErrorMessage(t(
+                `ID '${entry.actionId}'에 대한 현재 액션 정의를 찾을 수 없습니다.`,
+                `Could not find the current action definition for ID '${entry.actionId}'.`
+            ));
+            return;
+        }
+        const name = await vscode.window.showInputBox({
+            prompt: t(`'${fullActionItem.title}' 입력 프로필 이름`, `Input profile name for '${fullActionItem.title}'`),
+            placeHolder: t('예: 사무실, 테스트 장비, Release', 'For example: Office, Test device, Release'),
+            ignoreFocusOut: false,
+            validateInput: inputProfileNameValidation,
+        });
+        if (name === undefined) { return; }
+
+        try {
+            const draft = buildInputProfileDraft(
+                entry.actionId,
+                name,
+                fullActionItem.action.tasks,
+                entry.inputs,
+                entry.inputTaskTypes
+            );
+            const existing = inputProfileStore.findByName(entry.actionId, draft.name);
+            if (existing) {
+                const replaceLabel = t('기존 프로필 바꾸기', 'Replace existing profile');
+                const choice = await vscode.window.showWarningMessage(
+                    t(
+                        `'${draft.name}' 입력 프로필이 이미 있습니다. 이 기록의 입력값으로 바꿀까요?`,
+                        `Input profile '${draft.name}' already exists. Replace it with the inputs from this history item?`
+                    ),
+                    { modal: true },
+                    replaceLabel
+                );
+                if (choice !== replaceLabel) { return; }
+            }
+            const saved = await inputProfileStore.save(draft, existing?.id);
+            vscode.window.showInformationMessage(t(
+                `'${saved.name}' 입력 프로필을 저장했습니다.`,
+                `Saved input profile '${saved.name}'.`
+            ));
+        } catch (error) {
+            vscode.window.showErrorMessage(inputProfileErrorMessage(error));
+        }
+    }));
+
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeActionById', async (args: { id: string }) => {
         if (!args || !args.id) {
             vscode.window.showErrorMessage(t('이 명령어에는 액션 ID가 필요합니다.', 'Action ID is required for this command.'));

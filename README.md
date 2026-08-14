@@ -26,6 +26,7 @@
 - **액션 생성 마법사** — 대화형 UI로 코드 작성 없이 액션 생성
 - **Preset** — 팀원들과 action 설정 공유
 - **실행 히스토리** — 성공/실패 추적, 빠른 재실행
+- **입력 프로필** — History에서 반복 입력 조합을 이름 붙여 저장하고 액션 메뉴에서 재사용
 - **Quick Action Palette** — `TaskHub: Run Any Action…` 단일 커맨드로 모든 액션을 fuzzy 검색·실행. 최근 사용 항목을 상위에 표시 (개수는 설정에서 조정)
 - **Problem Matcher** — 빌드 출력의 컴파일러 에러·경고를 Problems 패널에 자동 표시 (gcc / TypeScript 프리셋 또는 커스텀 정규식)
 

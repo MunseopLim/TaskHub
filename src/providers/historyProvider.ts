@@ -86,6 +86,12 @@ export interface HistoryEntry {
      */
     inputs?: Record<string, unknown>;
     /**
+     * `inputs`가 수집될 당시의 task type. Named Input Profile이 같은 id를
+     * 다른 interactive type의 값으로 오인하지 않도록 함께 저장한다.
+     * 0.7.27 이전 History에는 없으며, 그 값은 프로필 저장 시 검증 불가로 본다.
+     */
+    inputTaskTypes?: Record<string, string>;
+    /**
      * Per-task resolved command lines for `command` / `shell` tasks, keyed by
      * task id. Captured at execution time AFTER `${...}` interpolation, so the
      * stored string is exactly what ran — including the directory the user
@@ -116,6 +122,20 @@ export interface HistoryEntry {
      * with another action.
      */
     actionPath?: string[];
+}
+
+/** 사용자 정의 task id(`__proto__` 포함)를 own property로 보존하는 일반 객체 복사. */
+function copyTaskRecord<T>(source: Record<string, T>): Record<string, T> {
+    const target: Record<string, T> = {};
+    for (const key of Object.keys(source)) {
+        Object.defineProperty(target, key, {
+            value: source[key],
+            enumerable: true,
+            configurable: true,
+            writable: true,
+        });
+    }
+    return target;
 }
 
 export function isToolHistoryEntry(entry: HistoryEntry | undefined): entry is HistoryEntry & { entryType: 'tool'; tool: HistoryToolMetadata } {
@@ -694,7 +714,12 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
      * something to replay. Unknown `(actionId, timestamp)` is a silent
      * no-op (mirrors `updateHistoryStatus`).
      */
-    setHistoryInputs(actionId: string, timestamp: number, inputs: Record<string, unknown>): void {
+    setHistoryInputs(
+        actionId: string,
+        timestamp: number,
+        inputs: Record<string, unknown>,
+        inputTaskTypes?: Record<string, string>
+    ): void {
         const history = this.getHistory();
         const entry = history.find(e => e.actionId === actionId && e.timestamp === timestamp);
         if (!entry) {
@@ -702,8 +727,14 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
         }
         if (Object.keys(inputs).length === 0) {
             delete entry.inputs;
+            delete entry.inputTaskTypes;
         } else {
-            entry.inputs = inputs;
+            entry.inputs = copyTaskRecord(inputs);
+            if (inputTaskTypes && Object.keys(inputTaskTypes).length > 0) {
+                entry.inputTaskTypes = copyTaskRecord(inputTaskTypes);
+            } else {
+                delete entry.inputTaskTypes;
+            }
         }
         this.context.workspaceState.update(this.historyKey, history);
         this.refresh();
@@ -725,7 +756,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
         if (Object.keys(commands).length === 0) {
             delete entry.commands;
         } else {
-            entry.commands = commands;
+            entry.commands = copyTaskRecord(commands);
         }
         this.context.workspaceState.update(this.historyKey, history);
         this.refresh();

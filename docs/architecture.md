@@ -103,6 +103,10 @@ TaskHub/
 *   **FavoriteViewProvider** ([providers/favoriteViewProvider.ts](../src/providers/favoriteViewProvider.ts)): 즐겨찾기 파일 관리
 *   **HistoryProvider** ([providers/historyProvider.ts](../src/providers/historyProvider.ts)): 액션 실행 및 TaskHub 도구 열람 히스토리 관리 (`workspaceState` 백엔드)
 
+Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
+[inputProfiles.ts](../src/inputProfiles.ts)가 담당합니다. `extension.ts`는 History와 액션 메뉴 UI를 연결하고,
+실행은 기존 `presetInputs` 및 `savedInputStillValid()` 경로를 그대로 사용합니다.
+
 `extension.ts`는 위 모듈에서 클래스를 import해 `activate()`에서 인스턴스를 만듭니다. 기존 호출자(테스트 포함)의 호환성을 위해 `MainViewProvider`, `Folder`, `Action` 세 심볼만 `extension.ts`에서 re-export됩니다. `LinkViewProvider`, `FavoriteViewProvider`, `HistoryProvider` 및 각 엔트리/아이템 타입은 re-export되지 않으므로 **외부/테스트 코드는 `./providers/...`에서 직접 import** 해야 합니다.
 
 ### 2. 액션 실행 파이프라인
@@ -145,7 +149,8 @@ TaskHub/
 
 | 구조 | 정본 | 핵심 규약 |
 | --- | --- | --- |
-| `HistoryEntry` | [providers/historyProvider.ts](../src/providers/historyProvider.ts) | 액션과 도구 열람을 함께 저장합니다. 상태는 `running`·`success`·`failure`·`cancelled`이며, 비밀번호 입력은 `inputs`에 기록하지 않습니다. 레거시 항목은 선택 필드가 없을 수 있습니다. |
+| `HistoryEntry` | [providers/historyProvider.ts](../src/providers/historyProvider.ts) | 액션과 도구 열람을 함께 저장합니다. 상태는 `running`·`success`·`failure`·`cancelled`이며, 비밀번호 입력은 `inputs`에 기록하지 않습니다. 프로필의 타입 변경 판정을 위해 새 실행은 `inputTaskTypes`도 함께 기록하며 레거시 항목은 선택 필드가 없을 수 있습니다. |
+| `NamedInputProfile` | [inputProfiles.ts](../src/inputProfiles.ts) | 액션 ID·이름·입력값과 저장 당시 task type 서명을 보관합니다. 현재 액션과 일치하는 값만 `presetInputs`로 전달합니다. |
 | `LinkEntry` | [providers/linkViewProvider.ts](../src/providers/linkViewProvider.ts) | 표시용 정규화 값과 원본 `raw`를 함께 보존하여 알 수 없는 사용자 필드를 잃지 않습니다. |
 | `FavoriteEntry` | [providers/favoriteViewProvider.ts](../src/providers/favoriteViewProvider.ts) | 링크와 같은 원본 보존 규약을 따르고 워크스페이스·줄 위치 메타데이터를 가집니다. |
 | 액션·태스크 스키마 | [schema.ts](../src/schema.ts), [actions.schema.json](../schema/actions.schema.json) | TypeScript 실행 타입과 사용자 JSON 검증 스키마를 함께 갱신합니다. |
@@ -197,6 +202,10 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 *   **workspaceState**: 히스토리 데이터 저장 (VS Code API)
     *   키: `'taskhub.actionHistory'`
     *   값: `HistoryEntry[]` 배열 — 구조는 위 "데이터 구조" 섹션 참조.
+    *   키: `'taskhub.inputProfiles.v1'`
+    *   값: 버전 1 입력 프로필 배열 — 직렬화된 프로필 전체 기준 128KB, 최대 50개·총 2MB. 구조가
+        잘못된 개별 항목과 알 수 없는 루트 필드는 후속 저장·삭제에서도 원본 그대로 보존하고,
+        루트 구조나 버전 자체가 지원되지 않으면 기존 상태를 덮어쓰지 않는다.
 
 설정 정의의 정본은 [package.json](../package.json)의 `contributes.configuration`입니다. [features.md §21 설정 레퍼런스](./features.md#21-설정-레퍼런스)는 이를 사용자 관점에서 설명하며, 이 문서는 중복 목록 대신 해당 레퍼런스만 가리킵니다. 키·기본값·범위의 정합성은 `src/test/docConsistency.test.ts`가 검사합니다.
 

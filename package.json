@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.7.26",
+  "version": "0.7.27",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -413,6 +413,22 @@
         "icon": "$(run-all)"
       },
       {
+        "command": "taskhub.runActionWithInputProfile",
+        "title": "%cmd.runActionWithInputProfile%"
+      },
+      {
+        "command": "taskhub.manageInputProfiles",
+        "title": "%cmd.manageInputProfiles%"
+      },
+      {
+        "command": "taskhub.manageAllInputProfiles",
+        "title": "%cmd.manageAllInputProfiles%"
+      },
+      {
+        "command": "taskhub.saveHistoryInputsAsProfile",
+        "title": "%cmd.saveHistoryInputsAsProfile%"
+      },
+      {
         "command": "taskhub.viewHistoryOutput",
         "title": "%cmd.viewHistoryOutput%",
         "icon": "$(output)"
@@ -569,6 +585,18 @@
         },
         {
           "command": "taskhub.rerunFromHistoryWithInputs",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.runActionWithInputProfile",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.manageInputProfiles",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.saveHistoryInputsAsProfile",
           "when": "false"
         },
         {
@@ -786,6 +814,16 @@
           "group": "context@2"
         },
         {
+          "command": "taskhub.runActionWithInputProfile",
+          "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
+          "group": "context@3"
+        },
+        {
+          "command": "taskhub.manageInputProfiles",
+          "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
+          "group": "context@4"
+        },
+        {
           "command": "taskhub.stopAction",
           "when": "view == mainView.main && viewItem == runningAction",
           "group": "inline"
@@ -794,6 +832,11 @@
           "command": "taskhub.rerunFromHistoryWithInputs",
           "when": "view == mainView.history && viewItem =~ /\\.inputs\\b/",
           "group": "inline@1"
+        },
+        {
+          "command": "taskhub.saveHistoryInputsAsProfile",
+          "when": "view == mainView.history && viewItem =~ /\\.inputs\\b/",
+          "group": "context@1"
         },
         {
           "command": "taskhub.viewHistoryCommand",

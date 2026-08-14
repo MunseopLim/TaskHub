@@ -4108,6 +4108,24 @@ suite('Extension Test Suite', () => {
 			});
 		});
 
+		test('input task type signatures round-trip and __proto__ remains an own key', () => {
+			const ctx = createMockContext();
+			const provider = new HistoryProvider(ctx);
+			provider.addHistoryEntry(makeEntry('typed-inputs', 'success', 43));
+			provider.setHistoryInputs(
+				'typed-inputs',
+				43,
+				JSON.parse('{"__proto__":{"value":"kept"}}'),
+				JSON.parse('{"__proto__":"inputBox"}')
+			);
+
+			const entry = new HistoryProvider(ctx).getHistory()[0];
+			assert.ok(Object.prototype.hasOwnProperty.call(entry.inputs, '__proto__'));
+			assert.ok(Object.prototype.hasOwnProperty.call(entry.inputTaskTypes, '__proto__'));
+			assert.deepStrictEqual(entry.inputs?.__proto__, { value: 'kept' });
+			assert.strictEqual(entry.inputTaskTypes?.__proto__, 'inputBox');
+		});
+
 		test('HistoryItem contextValue distinguishes inputs / output / both / neither', async () => {
 			const provider = new HistoryProvider(createMockContext());
 			provider.addHistoryEntry(makeEntry('plain', 'success', 1));
