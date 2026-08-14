@@ -1,5 +1,4 @@
 import * as assert from 'assert';
-import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -7,12 +6,6 @@ import * as vscode from 'vscode';
 import { actionStates } from '../providers/actionStatus';
 import { HistoryProvider } from '../providers/historyProvider';
 import { MainViewProvider } from '../providers/mainViewProvider';
-import {
-    buildPowerShellInvocation,
-    encodePowerShellScript,
-    quotePowerShellArgument,
-    withPowerShellExitCode,
-} from '../pipelineUtils';
 import { ActionItem, Action as PipelineAction, Task } from '../schema';
 
 /**
@@ -816,7 +809,7 @@ suite('Password taint and redaction', function () {
         let executeTaskCalls = 0;
         (vscode.tasks as any).executeTask = () => {
             executeTaskCalls++;
-            throw new Error('sensitive one-shot must use detached stdio-ignore spawn');
+            throw new Error('sensitive one-shot must not create a terminal Task');
         };
 
         try {
@@ -867,11 +860,9 @@ suite('Password taint and redaction', function () {
         }
     });
 
-    test.skip('Windows 민감 non-native one-shot은 PowerShell 경로에서도 detached 실행을 완주한다', async () => {
-        // Windows CI에서 PowerShell 프로세스가 error/exit 이벤트도 marker도
-        // 남기지 않은 채 멈추는 현상을 조사 중이다. 원인을 확정하기 전에는
-        // 이 제품 회귀 테스트로 main을 계속 막지 않고, 바로 아래의 비차단
-        // 실행 행렬이 detached / EncodedCommand / .cmd 변수를 각각 측정한다.
+    test('Windows 민감 non-native one-shot은 PowerShell 경로에서도 실행을 완주한다', async function () {
+        if (process.platform !== 'win32') { this.skip(); }
+
         const id = 'sensitive-one-shot-cmd-shim';
         const secret = 'Cmd Shim S3cret & tail';
         const marker = path.join(tempWorkspace, 'cmd-shim-one-shot.marker');
@@ -907,7 +898,7 @@ suite('Password taint and redaction', function () {
         let executeTaskCalls = 0;
         (vscode.tasks as any).executeTask = () => {
             executeTaskCalls++;
-            throw new Error('sensitive one-shot must use detached stdio-ignore spawn');
+            throw new Error('sensitive one-shot must not create a terminal Task');
         };
         (vscode.window as any).showErrorMessage = async (message: string) => {
             shownErrors.push(message);
@@ -968,149 +959,83 @@ suite('Password taint and redaction', function () {
         }
     });
 
-    test('Windows detached PowerShell 진단 행렬을 CI 로그에 기록한다', async function () {
+    /**
+     * 위 nonzero 테스트는 `node` 라 Windows 에서 native argv 분기만 탄다. `.cmd`
+     * 는 PowerShell 분기로 가는데, 그 분기가 종료 코드를 그대로 물려주는지가
+     * 이번 설계에서 `Start-Process` 를 **쓰지 않기로 한 이유**다 — `Start-Process`
+     * 는 바깥 PowerShell 을 즉시 exit 0 으로 끝내 실패 알림을 없앤다. 이 경로는
+     * stdio 도 없고 안내도 무내용이라, 알림이 유일한 단서다.
+     */
+    test('민감 non-native one-shot의 nonzero exit도 실패 알림을 한 번만 낸다', async function () {
         if (process.platform !== 'win32') { this.skip(); }
-        this.timeout(30000);
 
-        type Probe = {
-            name: string;
-            executable: string;
-            args: string[];
-            detached: boolean;
-            marker: string;
+        const id = 'sensitive-one-shot-cmd-failure';
+        const secret = 'Cmd Failure S3cret & tail';
+        const shim = path.join(tempWorkspace, 'failing-shim.cmd');
+        fs.writeFileSync(shim, '@echo off\r\nexit /b 7\r\n', 'utf8');
+
+        const originalExecuteTask = vscode.tasks.executeTask;
+        const originalShowError = vscode.window.showErrorMessage;
+        const shownErrors: string[] = [];
+        let executeTaskCalls = 0;
+        let resolveFailure!: () => void;
+        const failureShown = new Promise<void>(resolve => { resolveFailure = resolve; });
+        (vscode.tasks as any).executeTask = () => {
+            executeTaskCalls++;
+            throw new Error('sensitive one-shot must not create a terminal Task');
         };
-        type ProbeResult = {
-            name: string;
-            detached: boolean;
-            outcome: 'exit' | 'error' | 'timeout';
-            code?: number | null;
-            signal?: NodeJS.Signals | null;
-            error?: string;
-            spawned: boolean;
-            pid?: number;
-            marker: boolean;
-            elapsedMs: number;
+        (vscode.window as any).showErrorMessage = async (message: string) => {
+            shownErrors.push(message);
+            resolveFailure();
+            return undefined;
         };
 
-        const diagnosticDir = path.join(tempWorkspace, 'windows-detached-powershell-matrix');
-        fs.mkdirSync(diagnosticDir, { recursive: true });
-        const markerPath = (name: string) => path.join(diagnosticDir, `${name}.marker`);
-        const shim = path.join(diagnosticDir, 'probe-shim.cmd');
-        fs.writeFileSync(
-            shim,
-            '@echo off\r\n'
-            + '>"%~1" echo shim-reached\r\n'
-            + 'exit /b 0\r\n',
-            'utf8'
-        );
-
-        const directDetachedMarker = markerPath('1-powershell-detached');
-        const directAttachedMarker = markerPath('2-powershell-attached');
-        const shimViaPowerShellMarker = markerPath('3-powershell-detached-shim');
-        const shimViaCmdMarker = markerPath('4-cmd-detached-shim');
-        const writeMarkerScript = (marker: string) =>
-            `[System.IO.File]::WriteAllText(${quotePowerShellArgument(marker)}, 'powershell-reached'); exit 0`;
-        const productShimInvocation = buildPowerShellInvocation(
-            shim,
-            [shimViaPowerShellMarker],
-            false
-        );
-        const powershellArgs = (script: string) => [
-            '-NoProfile',
-            '-EncodedCommand',
-            encodePowerShellScript(script),
-        ];
-
-        const probes: Probe[] = [
-            {
-                name: '1 powershell EncodedCommand + detached',
-                executable: 'powershell.exe',
-                args: powershellArgs(writeMarkerScript(directDetachedMarker)),
-                detached: true,
-                marker: directDetachedMarker,
-            },
-            {
-                name: '2 powershell EncodedCommand + attached baseline',
-                executable: 'powershell.exe',
-                args: powershellArgs(writeMarkerScript(directAttachedMarker)),
-                detached: false,
-                marker: directAttachedMarker,
-            },
-            {
-                name: '3 powershell detached + cmd shim (product shape)',
-                executable: 'powershell.exe',
-                args: powershellArgs(withPowerShellExitCode(productShimInvocation.script)),
-                detached: true,
-                marker: shimViaPowerShellMarker,
-            },
-            {
-                name: '4 cmd detached + cmd shim alternative',
-                executable: process.env.ComSpec || 'cmd.exe',
-                // Do not embed quoted paths in one `/c` argument. libuv escapes
-                // inner quotes for CommandLineToArgvW (`\"`), but cmd.exe does
-                // not treat backslash as its quote escape. Separate argv keeps
-                // this probe about detached cmd execution rather than that
-                // unrelated quoting mismatch; `/c` can invoke a batch directly.
-                args: ['/d', '/c', shim, shimViaCmdMarker],
-                detached: true,
-                marker: shimViaCmdMarker,
-            },
-        ];
-
-        const runProbe = (probe: Probe): Promise<ProbeResult> => new Promise(resolve => {
-            const startedAt = Date.now();
-            let child: ReturnType<typeof spawn> | undefined;
-            let settled = false;
-            let spawned = false;
-            let timeout: NodeJS.Timeout | undefined;
-            const finish = (result: Omit<ProbeResult, 'name' | 'detached' | 'spawned' | 'pid' | 'marker' | 'elapsedMs'>) => {
-                if (settled) { return; }
-                settled = true;
-                if (timeout) { clearTimeout(timeout); }
-                resolve({
-                    name: probe.name,
-                    detached: probe.detached,
-                    spawned,
-                    pid: child?.pid,
-                    marker: fs.existsSync(probe.marker),
-                    elapsedMs: Date.now() - startedAt,
-                    ...result,
-                });
-            };
-
-            try {
-                child = spawn(probe.executable, probe.args, {
-                    cwd: diagnosticDir,
-                    env: process.env,
-                    detached: probe.detached,
-                    stdio: 'ignore',
-                    windowsHide: true,
-                });
-                child.once('spawn', () => { spawned = true; });
-                child.once('error', error => finish({ outcome: 'error', error: error.message }));
-                child.once('exit', (code, signal) => finish({ outcome: 'exit', code, signal }));
-                if (probe.detached) { child.unref(); }
-                timeout = setTimeout(() => {
-                    try { child?.kill(); } catch { /* best-effort diagnostic cleanup */ }
-                    finish({ outcome: 'timeout' });
-                }, 10000);
-            } catch (error) {
-                finish({
-                    outcome: 'error',
-                    error: error instanceof Error ? error.message : String(error),
-                });
-            }
-        });
-
-        // 같은 extension-host / Defender 상태에서 네 변수만 비교한다. 이 테스트는
-        // 조사용이므로 결과로 main을 실패시키지 않고, 후속 수정은 이 로그를 근거로 한다.
-        const results = await Promise.all(probes.map(runProbe));
-        for (const result of results) {
-            console.log(`[WIN-ONESHOT-DIAG] ${JSON.stringify(result)}`);
+        try {
+            await extension.executeActionPipeline(
+                {
+                    description: 'sensitive .cmd shim failure reporting',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                        {
+                            id: 'background',
+                            type: 'command',
+                            command: platformCommand(shim),
+                            args: ['${ask.value}'],
+                            isOneShot: true,
+                        },
+                    ],
+                },
+                makeContext(),
+                id,
+                tempWorkspace,
+                [tempWorkspace],
+                { presetInputs: { ask: { value: secret } } }
+            );
+            assert.strictEqual(executeTaskCalls, 0, '민감 .cmd one-shot이 터미널 Task를 만들었다');
+            await Promise.race([
+                failureShown,
+                new Promise<never>((_, reject) => setTimeout(
+                    () => reject(new Error(
+                        'PowerShell .cmd one-shot이 exit 7을 알리지 않았다 '
+                        + '(Start-Process 처럼 즉시 exit 0 으로 끝나면 이 단서가 사라진다):\n'
+                        + verboseLines.join('\n').split(secret).join('***')
+                    )),
+                    10000
+                )),
+            ]);
+            await new Promise(resolve => setTimeout(resolve, 25));
+        } finally {
+            (vscode.tasks as any).executeTask = originalExecuteTask;
+            (vscode.window as any).showErrorMessage = originalShowError;
         }
+
+        assert.strictEqual(shownErrors.length, 1, `error/exit가 중복 알림을 냈다: ${shownErrors.join(' | ')}`);
+        assert.ok(!shownErrors[0].includes(secret), '실패 알림에 비밀이 샜다');
+        assert.match(shownErrors[0], /details were hidden|상세.*숨겼/i);
+        assert.strictEqual(extension.stopRunningAction(id), false);
     });
 
-    test('민감 detached one-shot의 nonzero exit는 경로 없는 실패 알림을 한 번만 낸다', async () => {
+    test('민감 native one-shot의 nonzero exit는 경로 없는 실패 알림을 한 번만 낸다', async () => {
         const id = 'sensitive-one-shot-failure';
         const secret = 'Detached-Failure-S3cret';
         const originalShowError = vscode.window.showErrorMessage;
@@ -1469,7 +1394,7 @@ suite('Password taint and redaction', function () {
             }
         });
 
-        test('민감 디버그의 detached one-shot은 출력이 의도적으로 폐기됐다고 안내한다', async () => {
+        test('민감 디버그의 백그라운드 one-shot은 출력이 의도적으로 폐기됐다고 안내한다', async () => {
             const id = 'sensitive-debug-one-shot';
             const originalCreateWebviewPanel = vscode.window.createWebviewPanel;
             let panelHtml = '';
@@ -1511,7 +1436,7 @@ suite('Password taint and redaction', function () {
 
             assert.match(panelHtml, /intentionally discarded|의도적으로 폐기/i);
             assert.ok(!panelHtml.includes('태스크 유형은 stdout') && !panelHtml.includes('task type does not expose'),
-                'detached 정책을 일반적인 미지원 태스크로 오해시키면 안 된다');
+                '폐기 정책을 일반적인 미지원 태스크로 오해시키면 안 된다');
         });
 
         test('민감 디버그 timeout은 부분 출력과 raw timeout 메시지를 임시 화면에 남긴다', async () => {

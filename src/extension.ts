@@ -2412,7 +2412,7 @@ interface SensitiveDebugCapture {
     readonly taskId: string;
     /** Whether this task type has a stdout/stderr channel we can capture. */
     readonly captureSupported: boolean;
-    readonly outputUnavailableReason?: 'detached-one-shot';
+    readonly outputUnavailableReason?: 'background-one-shot';
     stdout: string;
     stderr: string;
     stdoutTruncated?: boolean;
@@ -4564,7 +4564,7 @@ async function executeActionPipelineForRun(
                 taskId,
                 taskSupportsSensitiveDebugCapture(task),
                 task.isOneShot && (task.type === 'command' || task.type === 'shell')
-                    ? 'detached-one-shot'
+                    ? 'background-one-shot'
                     : undefined
             );
         }
@@ -4855,10 +4855,10 @@ function escapeSensitiveDebugHtml(value: string): string {
 }
 
 function sensitiveDebugEmptyReason(capture: SensitiveDebugCapture): string {
-    if (capture.outputUnavailableReason === 'detached-one-shot') {
+    if (capture.outputUnavailableReason === 'background-one-shot') {
         return t(
-            'detached one-shot 출력은 터미널 노출과 extension host 종속을 피하기 위해 의도적으로 폐기했습니다.',
-            'Detached one-shot output was intentionally discarded to avoid terminal exposure and extension-host coupling.'
+            '백그라운드 one-shot 출력은 터미널 노출을 피하기 위해 의도적으로 폐기했습니다.',
+            'Background one-shot output was intentionally discarded to avoid exposing it in a terminal.'
         );
     }
     if (!capture.captureSupported) {
@@ -5944,7 +5944,7 @@ async function executeSingleTask(
             } else {
                 if (task.isOneShot) {
                     if (taskUsesSecret) {
-                        executeSensitiveDetachedOneShot(handlerTask, defaultWorkspace);
+                        executeSensitiveBackgroundOneShot(handlerTask, defaultWorkspace);
                     } else {
                         executeStreamedTask(handlerTask, defaultWorkspace).catch(error => {
                             const msg = error instanceof Error ? error.message : String(error);
@@ -6468,12 +6468,17 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
 }
 
 /**
- * Launch a password-derived one-shot without creating a terminal or tying the
- * child to the extension-host lifecycle. stdio:'ignore' prevents raw output
- * from reaching VS Code, while detached+unref preserves one-shot's contract
- * that the process may outlive the action (and the extension host).
+ * Launch a password-derived one-shot without creating a terminal. stdio:'ignore'
+ * prevents raw output from reaching VS Code, while unref keeps the extension
+ * host's event loop from waiting on it, so the process may outlive the action.
+ *
+ * Native commands and the POSIX path additionally use `detached`, which also
+ * lets them survive extension-host exit. The Windows PowerShell branch must
+ * not: `powershell.exe` started with `DETACHED_PROCESS` exits 0 without running
+ * its script at all (measured on Windows CI), which loses the work *and* the
+ * failure signal. Surviving host exit is therefore not guaranteed there.
  */
-function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string): void {
+function executeSensitiveBackgroundOneShot(task: any, workspaceFolderPath?: string): void {
     // `shell` 타입은 문자열을 셸에 그대로 넘긴다 (0.6.47).
     const raw = task.type === 'shell';
     const command = getCommandString(task.command);
@@ -6520,11 +6525,9 @@ function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string
                 // PowerShell resolves .cmd/.bat shims and scripts consistently;
                 // the encoded wrapper avoids another command-line parse of the
                 // already quoted PowerShell invocation.
-                // This process is detached with ignored stdio, so it has no
-                // console whose output encoding can be changed. Windows
-                // PowerShell 5.1 can fail at Console.OutputEncoding before the
-                // command starts in that state. Raw `>` / `>>` still use
-                // Out-File internally, so preserve only their file encoding.
+                // This process has ignored stdio, so no console output encoding
+                // is worth setting. Raw `>` / `>>` still use Out-File
+                // internally, so preserve only their file encoding.
                 const fileEncodingPrefix = raw && useUtf8Console
                     ? buildPowerShellFileRedirectionPreamble(true)
                     : '';
@@ -6541,13 +6544,19 @@ function executeSensitiveDetachedOneShot(task: any, workspaceFolderPath?: string
                 // powershell.exe does not reliably propagate an external program's
                 // exit code unless the script exits explicitly with LASTEXITCODE.
                 const script = withPowerShellExitCode(invocation.script);
+                // **`detached` 를 쓰지 않는다.** Windows CI 에서 잰 결과,
+                // `powershell.exe` 를 `detached`(= `DETACHED_PROCESS`) 로 띄우면
+                // 스크립트를 실행하지 않고 ~150ms 만에 **exit 0** 으로 끝난다.
+                // 실패조차 아니라서 `reportFailure` 도 걸리지 않아, 백그라운드
+                // 작업이 조용히 사라졌다. 같은 인코딩 명령을 detached 없이
+                // 띄우면 정상 실행된다. `unref()` 로 확장 호스트를 붙잡지 않는
+                // 것은 그대로다.
                 child = spawn(
                     shell,
                     ['-NoProfile', '-EncodedCommand', encodePowerShellScript(script)],
                     {
                         cwd: workingDirectory,
                         env: childEnv,
-                        detached: true,
                         stdio: 'ignore',
                         windowsHide: true,
                     }
