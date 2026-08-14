@@ -4,7 +4,9 @@ import * as path from 'path';
 import * as os from 'os';
 import * as vscode from 'vscode';
 import { openMemoryMapPanel, panelRegistry, MEMORY_MAP_MAX_FILE_SIZE, MEMORY_MAP_MAX_SAVE_HTML_CHARS } from '../memoryMapViewer';
-import { buildMinimalElf32 } from './fixtures/elfFixtures';
+import { buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
+import { parseElf32 } from '../elfParser';
+import { hexPanelRegistry } from '../hexViewer';
 
 /**
  * Build a minimal ELF32 little-endian binary for testing.
@@ -17,10 +19,12 @@ suite('Memory Map Viewer Test Suite', () => {
 
     setup(() => {
         panelRegistry.clear();
+        hexPanelRegistry.clear();
     });
 
     teardown(() => {
         panelRegistry.clear();
+        hexPanelRegistry.clear();
         for (const f of tmpFiles) {
             try { fs.unlinkSync(f); } catch { /* ignore */ }
         }
@@ -68,6 +72,133 @@ suite('Memory Map Viewer Test Suite', () => {
         openMemoryMapPanel(ctx, file2);
 
         assert.strictEqual(panelRegistry.getLastActive(), file2, 'last active should be file2');
+    });
+
+    test('ELF 심볼·섹션은 host가 보관한 file offset target으로 Hex 진입점을 만든다', () => {
+        const dir = path.join(tmpDir, 'taskhub-test', 'hex-targets');
+        fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, 'symbols.axf');
+        const buffer = buildElf32WithSymbols();
+        fs.writeFileSync(filePath, buffer);
+        tmpFiles.push(filePath);
+
+        const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const opened = openMemoryMapPanel(ctx, filePath, {
+            regions: [
+                { name: 'FLASH', origin: 0x08000000, size: 0x1000 },
+                { name: 'RAM', origin: 0x20000000, size: 0x1000 },
+            ],
+        });
+        assert.ok(opened);
+
+        const parsed = parseElf32(buffer);
+        const text = parsed.sections.find(section => section.name === '.text');
+        assert.ok(text?.offset !== undefined);
+        const targets = panelRegistry.getHexTargets(filePath) ?? [];
+        const main = targets.find(target => target.label === 'main');
+        assert.deepStrictEqual(main?.fileRange, { kind: 'file', offset: text!.offset, size: 0x120 });
+        const bss = targets.find(target => target.label === '.bss');
+        assert.deepStrictEqual(bss?.fileRange, { kind: 'unavailable', reason: 'nobits' });
+
+        const html = panelRegistry.getHtml(filePath) ?? '';
+        assert.ok(html.includes('data-action="open-hex"'), 'Hex 진입 버튼이 렌더되지 않았다');
+        assert.ok(html.includes("command: 'openHex'"), 'opaque target ID를 host로 보내는 경로가 없다');
+        assert.ok(!html.includes('fileRange'), '실제 file offset 객체를 웹뷰에 노출하면 안 된다');
+        const rdMatch = html.match(/^const RD = (.*);$/m);
+        assert.ok(rdMatch);
+        const rd = JSON.parse(rdMatch![1]);
+        const mainRow = rd.flatMap((region: any) => region.segments).find((entry: any) => entry.n === 'main');
+        assert.ok(mainRow?.hx && mainRow.ha === true, '심볼 행에는 opaque target ID와 가용 여부만 있어야 한다');
+        assert.strictEqual(mainRow.fo, undefined, 'file offset을 행 데이터에 싣지 않는다');
+
+        assert.ok(html.includes('S.noFileBytes'), '파일 바이트가 없는 행의 명시적 UI가 빠졌다');
+    });
+
+    test('IT-156: Memory Map 심볼 선택이 ELF file offset 범위를 Hex Viewer에 전달한다', async () => {
+        const dir = path.join(tmpDir, 'taskhub-test', 'hex-flow');
+        fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, 'flow.axf');
+        const buffer = buildElf32WithSymbols();
+        fs.writeFileSync(filePath, buffer);
+        tmpFiles.push(filePath);
+
+        const originalCreate = vscode.window.createWebviewPanel;
+        const originalWarning = vscode.window.showWarningMessage;
+        let memoryHandler: ((message: any) => Promise<void>) | undefined;
+        let hexHandler: ((message: any) => void) | undefined;
+        const hexPosted: any[] = [];
+        const warnings: string[] = [];
+
+        function fakePanel(viewType: string, title: string): vscode.WebviewPanel {
+            let html = '';
+            const isMemoryMap = viewType === 'taskhub.memoryMap';
+            const panel = {
+                title,
+                active: true,
+                webview: {
+                    get html() { return html; },
+                    set html(value: string) { html = value; },
+                    cspSource: 'vscode-webview:',
+                    postMessage: (message: any) => {
+                        if (!isMemoryMap) { hexPosted.push(message); }
+                        return Promise.resolve(true);
+                    },
+                    onDidReceiveMessage: (handler: (message: any) => any) => {
+                        if (isMemoryMap) { memoryHandler = handler; }
+                        else { hexHandler = handler; }
+                        return { dispose() { /* no-op */ } };
+                    },
+                },
+                reveal() { /* no-op */ },
+                onDidDispose() { return { dispose() { /* no-op */ } }; },
+                onDidChangeViewState() { return { dispose() { /* no-op */ } }; },
+            } as unknown as vscode.WebviewPanel;
+            return panel;
+        }
+
+        try {
+            (vscode.window as any).createWebviewPanel = (viewType: string, title: string) => fakePanel(viewType, title);
+            (vscode.window as any).showWarningMessage = (message: string) => {
+                warnings.push(message);
+                return Promise.resolve(undefined);
+            };
+
+            const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+            assert.ok(openMemoryMapPanel(ctx, filePath, {
+                regions: [
+                    { name: 'FLASH', origin: 0x08000000, size: 0x1000 },
+                    { name: 'RAM', origin: 0x20000000, size: 0x1000 },
+                ],
+            }));
+            assert.ok(memoryHandler, 'Memory Map host message handler가 설치되지 않았다');
+
+            const targets = panelRegistry.getHexTargets(filePath) ?? [];
+            const main = targets.find(target => target.label === 'main');
+            const bss = targets.find(target => target.label === '.bss');
+            assert.ok(main && main.fileRange.kind === 'file');
+            assert.ok(bss && bss.fileRange.kind === 'unavailable');
+
+            await memoryHandler!({ command: 'openHex', targetId: main!.id });
+            assert.ok(hexPanelRegistry.has(), 'Hex Viewer 패널이 열리지 않았다');
+            assert.ok(hexHandler, 'Hex Viewer ready handler가 설치되지 않았다');
+            hexHandler!({ command: 'ready' });
+            assert.strictEqual(hexPosted.length, 1);
+            assert.deepStrictEqual(hexPosted[0].initialSelection, {
+                startOffset: main!.fileRange.kind === 'file' ? main!.fileRange.offset : -1,
+                endOffset: main!.fileRange.kind === 'file'
+                    ? main!.fileRange.offset + main!.fileRange.size - 1
+                    : -1,
+            });
+            assert.strictEqual(hexPosted[0].data.length, buffer.length, 'ELF 컨테이너 전체를 raw binary로 열어야 한다');
+
+            await memoryHandler!({ command: 'openHex', targetId: bss!.id });
+            assert.ok(warnings.some(message => /BSS|NOBITS/.test(message)), 'NOBITS는 파일 바이트가 없다고 안내해야 한다');
+        } finally {
+            (vscode.window as any).createWebviewPanel = originalCreate;
+            (vscode.window as any).showWarningMessage = originalWarning;
+            panelRegistry.clear();
+            hexPanelRegistry.clear();
+        }
     });
 
     suite('webview HTML — search UX', () => {

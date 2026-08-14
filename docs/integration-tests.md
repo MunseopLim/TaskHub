@@ -245,6 +245,7 @@
 | IT-142, IT-143, IT-144, IT-146, IT-153, IT-154 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 내장·외부 zip/unzip의 상대 경로·`cwd`·OS별 tool·`${extensionPath}` 해석을 같은 기준으로 유지 |
 | IT-150 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 배열 필드가 없는 옛 History 입력도 단일 선택의 `paths`·`names`·`count`를 복원 |
 | IT-151, IT-152 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 파일·폴더 다중 선택이 배열 결과와 개별 argv를 보존 |
+| IT-156 | [memoryMapViewer.test.ts](../src/test/memoryMapViewer.test.ts) | Memory Map의 host 보관 ELF file offset target이 원본을 raw binary로 열고 Hex Viewer 초기 선택 범위로 전달되며 NOBITS를 거부 |
 
 IT-093~IT-097은 MRU를 별도 저장하던 구현이 제거되면서 함께 삭제된 번호이며 재사용하지 않습니다.
 

@@ -103,7 +103,7 @@ export function buildElf32WithSymbols(): Buffer {
 /**
  * 위 두 빌더가 공유하는 조립기.
  *
- * 레이아웃: [ELF 헤더][.shstrtab][.strtab][.symtab][섹션 헤더 배열]
+ * 레이아웃: [ELF 헤더][PROGBITS payload][.shstrtab][.strtab][.symtab][섹션 헤더 배열]
  * 섹션 헤더 인덱스: 0=NULL, 1..N=요청한 섹션, N+1=.shstrtab, N+2=.strtab, N+3=.symtab
  * (심볼이 없으면 뒤 둘은 만들지 않는다.)
  */
@@ -153,7 +153,16 @@ function assembleElf32(sections: SectionSpec[], symbols: SymbolSpec[]): Buffer {
     });
 
     // --- 오프셋 배치 ---
-    const shstrOffset = ELF_HEADER_SIZE;
+    // 실제 file-backed payload를 넣는다. 예전 픽스처는 모든 섹션의 sh_offset을
+    // .shstrtab에 겹쳐 놓아 Memory Map은 그럴듯했지만, 주소→파일 offset 기능은
+    // 성공 경로를 하나도 만들 수 없었다.
+    let payloadEnd = ELF_HEADER_SIZE;
+    const sectionOffsets = sections.map(sec => {
+        const offset = payloadEnd;
+        if (sec.type !== SHT_NOBITS) { payloadEnd += sec.size; }
+        return offset;
+    });
+    const shstrOffset = payloadEnd;
     const symStrOffset = shstrOffset + shstrBuf.length;
     const symtabOffset = symStrOffset + symStrBuf.length;
     const shOffset = symtabOffset + symtabBuf.length;
@@ -183,6 +192,14 @@ function assembleElf32(sections: SectionSpec[], symbols: SymbolSpec[]): Buffer {
     shstrBuf.copy(buf, shstrOffset);
     symStrBuf.copy(buf, symStrOffset);
     symtabBuf.copy(buf, symtabOffset);
+    sections.forEach((sec, sectionIndex) => {
+        if (sec.type === SHT_NOBITS) { return; }
+        // 섹션마다 구분되는 결정적 byte 패턴. 선택 범위가 실제 payload를
+        // 가리키는지 통합 테스트에서 확인할 수 있다.
+        for (let i = 0; i < sec.size; i++) {
+            buf[sectionOffsets[sectionIndex] + i] = (sectionIndex * 0x31 + i) & 0xff;
+        }
+    });
 
     // --- 섹션 헤더들 ---
     const writeSectionHeader = (index: number, fields: {
@@ -206,9 +223,8 @@ function assembleElf32(sections: SectionSpec[], symbols: SymbolSpec[]): Buffer {
             type: sec.type,
             flags: sec.flags,
             addr: sec.addr,
-            // NOBITS는 파일을 차지하지 않는다. 어차피 내용을 읽지 않으므로
-            // shstrtab 오프셋을 재사용해도 파서가 신경 쓰지 않는다.
-            offset: shstrOffset,
+            // NOBITS는 현재 payload 끝을 가리키지만 파일 공간은 늘리지 않는다.
+            offset: sectionOffsets[i],
             size: sec.size,
         });
     });

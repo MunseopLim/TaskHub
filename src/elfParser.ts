@@ -42,6 +42,8 @@ export interface ElfSection {
     type: number;
     flags: number;
     addr: number;
+    /** ELF `sh_offset`. Listing에서 합성한 섹션에는 대응 파일이 없어 비어 있다. */
+    offset?: number;
     size: number;
     isAlloc: boolean;
     isWrite: boolean;
@@ -66,6 +68,8 @@ export interface MemoryUsageEntry {
     section?: string;
     /** Function/symbol name extracted from section token (prefix stripped) */
     func?: string;
+    /** ELF 원본 파일에서 이 행이 차지하는 바이트 범위. Listing 행에는 없다. */
+    fileRange?: ElfFileRangeResolution;
 }
 
 export interface MemoryUsage {
@@ -89,6 +93,8 @@ export interface ElfSymbol {
 
 export interface ElfSegment {
     type: number;
+    /** ELF `p_offset`. */
+    offset: number;
     vaddr: number;
     memsz: number;
     filesz: number;
@@ -105,6 +111,11 @@ export interface ElfParseResult {
     symbols: ElfSymbol[];
     segments: ElfSegment[];
 }
+
+/** ELF 가상 주소 범위를 원본 파일 바이트로 바꾼 결과. */
+export type ElfFileRangeResolution =
+    | { kind: 'file'; offset: number; size: number }
+    | { kind: 'unavailable'; reason: 'nobits' | 'zero-fill' | 'unmapped' | 'outside-file' | 'invalid-range' };
 
 const ELF32_HEADER_SIZE = 52;
 const ELF32_PH_ENTRY_MIN = 32;
@@ -225,6 +236,7 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
             const base = phOff + i * phEntSize;
             if (base + phEntSize > buffer.length) { break; }
             const pType = read32(base);
+            const offset = read32(base + 4);
             const vaddr = read32(base + 8);
             const filesz = read32(base + 16);
             const memsz = read32(base + 20);
@@ -232,6 +244,7 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
 
             segments.push({
                 type: pType,
+                offset,
                 vaddr,
                 memsz,
                 filesz,
@@ -253,6 +266,7 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
         const type = read32(base + 4);
         const flags = read32(base + 8);
         const addr = read32(base + 12);
+        const offset = read32(base + 16);
         const size = read32(base + 20);
         const link = read32(base + 24);
 
@@ -268,6 +282,7 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
             type,
             flags,
             addr,
+            offset,
             size,
             isAlloc: (flags & SHF_ALLOC) !== 0,
             isWrite: (flags & SHF_WRITE) !== 0,
@@ -350,6 +365,77 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
     return { sections, entryPoint, isLittleEndian, symbols, segments };
 }
 
+/**
+ * ELF 메모리 주소 범위를 원본 파일의 byte offset으로 바꾼다.
+ *
+ * 심볼이 유효한 섹션 인덱스를 가리키면 그 섹션이 최종 권위다. 깨진 심볼이 섹션
+ * 밖을 가리킬 때 우연히 겹치는 segment로 다시 해석하면 엉뚱한 바이트를 보여 줄
+ * 수 있으므로 fallback하지 않는다. 섹션 정보가 없을 때만 PT_LOAD를 사용한다.
+ * PT_LOAD의 `memsz - filesz` 꼬리는 zero-fill 영역이므로 파일 바이트가 아니다.
+ */
+export function resolveElfFileRange(
+    address: number,
+    size: number,
+    sections: ElfSection[],
+    segments: ElfSegment[],
+    fileSize: number,
+    sectionIndex?: number
+): ElfFileRangeResolution {
+    const rangeEnd = address + size;
+    if (
+        !Number.isSafeInteger(address) || address < 0
+        || !Number.isSafeInteger(size) || size <= 0
+        || !Number.isSafeInteger(rangeEnd) || rangeEnd <= address
+        || !Number.isSafeInteger(fileSize) || fileSize < 0
+    ) {
+        return { kind: 'unavailable', reason: 'invalid-range' };
+    }
+
+    if (sectionIndex !== undefined) {
+        // SHN_UNDEF(0), SHN_ABS/COMMON 및 범위 밖 인덱스는 원본 파일의 어느
+        // 섹션 바이트라고 단정할 수 없다. 우연히 겹치는 PT_LOAD로 재해석하지 않는다.
+        if (sectionIndex <= 0 || sectionIndex >= sections.length) {
+            return { kind: 'unavailable', reason: 'unmapped' };
+        }
+        const section = sections[sectionIndex];
+        const sectionEnd = section.addr + section.size;
+        if (!Number.isSafeInteger(sectionEnd) || address < section.addr || rangeEnd > sectionEnd) {
+            return { kind: 'unavailable', reason: 'unmapped' };
+        }
+        if (section.isNoBits) {
+            return { kind: 'unavailable', reason: 'nobits' };
+        }
+        if (!Number.isSafeInteger(section.offset) || section.offset! < 0) {
+            return { kind: 'unavailable', reason: 'unmapped' };
+        }
+        const offset = section.offset! + (address - section.addr);
+        const fileEnd = offset + size;
+        if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(fileEnd) || offset < 0 || fileEnd > fileSize) {
+            return { kind: 'unavailable', reason: 'outside-file' };
+        }
+        return { kind: 'file', offset, size };
+    }
+
+    for (const segment of segments) {
+        if (segment.type !== PT_LOAD || segment.memsz <= 0) { continue; }
+        const memoryEnd = segment.vaddr + segment.memsz;
+        if (!Number.isSafeInteger(memoryEnd) || address < segment.vaddr || rangeEnd > memoryEnd) { continue; }
+
+        const fileBackedEnd = segment.vaddr + segment.filesz;
+        if (!Number.isSafeInteger(fileBackedEnd) || rangeEnd > fileBackedEnd) {
+            return { kind: 'unavailable', reason: 'zero-fill' };
+        }
+        const offset = segment.offset + (address - segment.vaddr);
+        const fileEnd = offset + size;
+        if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(fileEnd) || offset < 0 || fileEnd > fileSize) {
+            return { kind: 'unavailable', reason: 'outside-file' };
+        }
+        return { kind: 'file', offset, size };
+    }
+
+    return { kind: 'unavailable', reason: 'unmapped' };
+}
+
 export function classifySections(sections: ElfSection[]): { flash: ElfSection[]; ram: ElfSection[] } {
     const flash: ElfSection[] = [];
     const ram: ElfSection[] = [];
@@ -374,18 +460,32 @@ export function classifySections(sections: ElfSection[]): { flash: ElfSection[];
     return { flash, ram };
 }
 
-export function computeMemoryUsage(sections: ElfSection[], regions: MemoryRegion[]): MemoryUsage[] {
+export function computeMemoryUsage(
+    sections: ElfSection[],
+    regions: MemoryRegion[],
+    segments: ElfSegment[] = [],
+    fileSize?: number
+): MemoryUsage[] {
     const usages: MemoryUsage[] = [];
 
     for (const region of regions) {
         const regionEnd = region.origin + region.size;
-        const matchingSections: { name: string; size: number; addr: number; type: string }[] = [];
+        const matchingSections: MemoryUsageEntry[] = [];
 
-        for (const sec of sections) {
+        for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+            const sec = sections[sectionIndex];
             if (!sec.isAlloc || sec.size === 0) { continue; }
             if (sec.addr >= region.origin && sec.addr < regionEnd) {
                 const type = sec.isNoBits ? 'NOBITS' : (sec.isExec ? 'CODE' : (sec.isWrite ? 'DATA' : 'RODATA'));
-                matchingSections.push({ name: sec.name, size: sec.size, addr: sec.addr, type });
+                matchingSections.push({
+                    name: sec.name,
+                    size: sec.size,
+                    addr: sec.addr,
+                    type,
+                    fileRange: fileSize === undefined
+                        ? undefined
+                        : resolveElfFileRange(sec.addr, sec.size, sections, segments, fileSize, sectionIndex),
+                });
             }
         }
 
@@ -465,13 +565,16 @@ export function autoDetectRegions(segments: ElfSegment[], sections: ElfSection[]
 export function computeSymbolUsage(
     symbols: ElfSymbol[],
     sections: ElfSection[],
-    regions: MemoryRegion[]
+    regions: MemoryRegion[],
+    segments: ElfSegment[] = [],
+    fileSize?: number
 ): MemoryUsage[] {
     if (symbols.length === 0) {
-        return computeMemoryUsage(sections, regions);
+        return computeMemoryUsage(sections, regions, segments, fileSize);
     }
 
     const usages: MemoryUsage[] = [];
+    const sectionIndexes = new Map<ElfSection, number>(sections.map((section, index) => [section, index]));
 
     for (const region of regions) {
         const regionEnd = region.origin + region.size;
@@ -487,7 +590,7 @@ export function computeSymbolUsage(
         );
 
         // Build entries: use symbols first, then fill remaining section coverage
-        const entries: { name: string; size: number; addr: number; type: string; object?: string }[] = [];
+        const entries: MemoryUsageEntry[] = [];
 
         // Track symbol-covered ranges to find uncovered section portions
         const coveredRanges: { start: number; end: number }[] = [];
@@ -505,6 +608,9 @@ export function computeSymbolUsage(
                 addr: sym.addr,
                 type: symType,
                 object: parentName,
+                fileRange: fileSize === undefined
+                    ? undefined
+                    : resolveElfFileRange(sym.addr, sym.size, sections, segments, fileSize, sym.sectionIndex),
             });
             coveredRanges.push({ start: sym.addr, end: sym.addr + sym.size });
         }
@@ -539,6 +645,9 @@ export function computeSymbolUsage(
                         addr: gapStart,
                         type: secType,
                         object: sec.name,
+                        fileRange: fileSize === undefined
+                            ? undefined
+                            : resolveElfFileRange(gapStart, gapEnd - gapStart, sections, segments, fileSize, sectionIndexes.get(sec)),
                     });
                 }
                 cursor = Math.max(cursor, cr.end);
@@ -557,6 +666,9 @@ export function computeSymbolUsage(
                         addr: finalStart,
                         type: secType,
                         object: sec.name,
+                        fileRange: fileSize === undefined
+                            ? undefined
+                            : resolveElfFileRange(finalStart, secEnd - finalStart, sections, segments, fileSize, sectionIndexes.get(sec)),
                     });
                 } else {
                     // No symbols in this section, show as whole section
@@ -565,6 +677,9 @@ export function computeSymbolUsage(
                         size: sec.size,
                         addr: sec.addr,
                         type: secType,
+                        fileRange: fileSize === undefined
+                            ? undefined
+                            : resolveElfFileRange(sec.addr, sec.size, sections, segments, fileSize, sectionIndexes.get(sec)),
                     });
                 }
             }
@@ -605,17 +720,27 @@ export interface SectionSummary {
     addr: number;
     endAddr: number;
     type: string;
+    /** ELF 원본 파일에서 이 섹션이 차지하는 바이트 범위. Listing 요약에는 없다. */
+    fileRange?: ElfFileRangeResolution;
 }
 
-export function summarizeSections(sections: ElfSection[]): SectionSummary[] {
+export function summarizeSections(
+    sections: ElfSection[],
+    segments: ElfSegment[] = [],
+    fileSize?: number
+): SectionSummary[] {
     return sections
-        .filter(s => s.isAlloc && s.size > 0)
-        .map(s => ({
+        .map((section, sectionIndex) => ({ section, sectionIndex }))
+        .filter(({ section }) => section.isAlloc && section.size > 0)
+        .map(({ section: s, sectionIndex }) => ({
             name: s.name,
             size: s.size,
             addr: s.addr,
             endAddr: s.addr + s.size,
             type: s.isNoBits ? 'NOBITS' : (s.isExec ? 'CODE' : (s.isWrite ? 'DATA' : 'RODATA')),
+            fileRange: fileSize === undefined
+                ? undefined
+                : resolveElfFileRange(s.addr, s.size, sections, segments, fileSize, sectionIndex),
         }))
         .sort((a, b) => a.addr - b.addr);
 }

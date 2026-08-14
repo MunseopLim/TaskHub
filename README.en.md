@@ -44,7 +44,7 @@
 - **Bit Operation Hover** *(experimental)* — Preview bit operation results
 
 ### Viewers
-- **Memory Map Visualization** — Analyze ELF/AXF and ARM Linker Listings, with memory regions from GNU/ARM linker scripts
+- **Memory Map Visualization** — Analyze ELF/AXF and ARM Linker Listings, show memory regions, and open symbol/section bytes in Hex Viewer
 - **Hex Viewer** — Address / hex / ASCII columns with Unit, Endian, Go-to, and Find
 - **JSON Editor** — Spreadsheet-style JSON editing
 
@@ -115,7 +115,7 @@
 
 ### Viewers
 
-**Memory Map Visualization** — Analyzes ELF/AXF or ARM Linker Listings to show per-region usage, sections, and function distribution. Memory regions can also be read from GNU linker scripts and ARM scatter files.
+**Memory Map Visualization** — Analyzes ELF/AXF or ARM Linker Listings to show per-region usage, sections, and function distribution. Memory regions can also be read from GNU linker scripts and ARM scatter files, and ELF symbol/section bytes can be opened directly in Hex Viewer.
 
 ![Memory Map - ARM Linker example](docs/images/memory-map-armlink.png)
 

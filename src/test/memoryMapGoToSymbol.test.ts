@@ -912,6 +912,15 @@ suite('Memory Map — Go to Symbol', () => {
 
             const entries = panelRegistry.getAllEntries(listingPath) ?? [];
             assert.ok(entries.some(e => e.func), '이 픽스처에 func 행이 없으면 검사 전제가 깨진다');
+            assert.deepStrictEqual(panelRegistry.getHexTargets(listingPath), [], '대응 바이너리가 없는 Listing에 Hex target을 만들면 안 된다');
+            const listingHtml = panelRegistry.getHtml(listingPath) ?? '';
+            const listingRdMatch = listingHtml.match(/^const RD = (.*);$/m);
+            assert.ok(listingRdMatch, 'Listing region 데이터를 찾지 못했다');
+            const listingRd = JSON.parse(listingRdMatch![1]);
+            assert.ok(
+                listingRd.every((region: any) => region.hhx === false && region.segments.every((entry: any) => !entry.hx)),
+                'Listing 행에 동작하지 않는 Hex target을 노출하면 안 된다'
+            );
 
             await revealSourceSymbolInMemoryMap('no_such_symbol_at_all');
             assert.strictEqual(infos.length, 1);

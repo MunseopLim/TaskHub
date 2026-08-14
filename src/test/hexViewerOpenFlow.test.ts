@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { HEX_READY_FALLBACK_MS, HexEditorProvider, hexPanelRegistry, openHexViewerFile } from '../hexViewer';
+import { HEX_READY_FALLBACK_MS, HexEditorProvider, hexPanelRegistry, openHexViewerFile, validateHexViewerSelection } from '../hexViewer';
 
 /**
  * Hex Viewer의 **실제 진입점**을 실행하는 테스트 (0.6.47).
@@ -116,6 +116,68 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         fake.sendReady();
         assert.strictEqual(fake.posted.length, 1, 'ready 이후에도 데이터가 오지 않았다');
         assert.strictEqual(fake.posted[0].command, 'hexData');
+    });
+
+    test('ELF 원본을 binary로 열고 요청한 파일 offset 범위를 처음 선택한다', () => {
+        const fake = installFakePanel();
+        const filePath = path.join(tempDir, 'firmware.elf');
+        fs.writeFileSync(filePath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0xaa, 0xbb, 0xcc, 0xdd]));
+
+        const ok = openHexViewerFile(
+            { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext,
+            filePath,
+            { forceBinary: true, initialSelection: { startOffset: 4, endOffset: 6 } }
+        );
+
+        assert.strictEqual(ok, true, `열기에 실패했다: ${shownErrors.join(' / ')}`);
+        fake.sendReady();
+        assert.strictEqual(fake.posted.length, 1);
+        assert.deepStrictEqual(fake.posted[0].initialSelection, { startOffset: 4, endOffset: 6 });
+        assert.deepStrictEqual(Array.from(fake.posted[0].data), [0x7f, 0x45, 0x4c, 0x46, 0xaa, 0xbb, 0xcc, 0xdd]);
+        const html = hexPanelRegistry.getHtml() ?? '';
+        assert.ok(html.includes('jumpToOffset(initial.startOffset)'), '기존 Go-to 경로로 처음 선택 위치를 열어야 한다');
+        assert.ok(html.includes('selectedEndOffset = initial.endOffset'), '선택 끝점이 보존되어야 한다');
+    });
+
+    test('처음 선택 범위가 파일 밖이면 패널을 만들지 않는다', () => {
+        const fake = installFakePanel();
+        const filePath = path.join(tempDir, 'short.bin');
+        fs.writeFileSync(filePath, Buffer.from([1, 2, 3, 4]));
+
+        const ok = openHexViewerFile(
+            { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext,
+            filePath,
+            { forceBinary: true, initialSelection: { startOffset: 2, endOffset: 4 } }
+        );
+
+        assert.strictEqual(ok, false);
+        assert.ok(shownErrors.some(message => /selection|선택/.test(message)));
+        assert.ok(!fake.events.includes('create-panel'), '잘못된 선택으로 빈 패널을 만들면 안 된다');
+    });
+
+    test('처음 선택 범위는 raw binary 모드 없이 사용할 수 없다', () => {
+        const fake = installFakePanel();
+        const filePath = writeIntelHex('selection-without-binary.hex');
+
+        // JavaScript나 any가 판별 유니온을 우회해도 HEX 주소 공간을 원본 파일
+        // offset으로 오인하지 않는다.
+        const ok = openHexViewerFile(
+            { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext,
+            filePath,
+            { initialSelection: { startOffset: 0, endOffset: 1 } } as any
+        );
+
+        assert.strictEqual(ok, false);
+        assert.ok(shownErrors.some(message => /binary|바이너리/.test(message)));
+        assert.ok(!fake.events.includes('create-panel'), '잘못된 옵션 조합으로 패널을 만들면 안 된다');
+    });
+
+    test('selection validator는 inclusive 정수 범위만 받는다', () => {
+        assert.deepStrictEqual(validateHexViewerSelection({ startOffset: 1, endOffset: 3 }, 4), { startOffset: 1, endOffset: 3 });
+        assert.strictEqual(validateHexViewerSelection({ startOffset: -1, endOffset: 1 }, 4), undefined);
+        assert.strictEqual(validateHexViewerSelection({ startOffset: 2, endOffset: 1 }, 4), undefined);
+        assert.strictEqual(validateHexViewerSelection({ startOffset: 1, endOffset: 4 }, 4), undefined);
+        assert.strictEqual(validateHexViewerSelection({ startOffset: 1.5, endOffset: 2 }, 4), undefined);
     });
 
     /**

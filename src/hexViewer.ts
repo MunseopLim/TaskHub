@@ -57,6 +57,40 @@ export interface HexViewerOpenHistory {
 
 export type HexViewerHistoryRecorder = (entry: HexViewerOpenHistory) => void;
 
+/** Hex Viewer를 열 때 처음 선택할 inclusive 파일 offset 범위. */
+export interface HexViewerSelection {
+    startOffset: number;
+    endOffset: number;
+}
+
+export type HexViewerOpenOptions =
+    | {
+        /** Memory Map처럼 원본 컨테이너 파일의 byte offset을 볼 때 사용한다. */
+        forceBinary: true;
+        initialSelection?: HexViewerSelection;
+    }
+    | {
+        forceBinary?: false;
+        /** 파싱된 HEX/SREC 주소를 파일 offset으로 오인하지 않도록 binary 모드에서만 허용한다. */
+        initialSelection?: never;
+    };
+
+/** 웹뷰로 넘기기 전 선택 범위를 검증한다. 조용한 clamp는 잘못된 ELF 매핑을 숨기므로 하지 않는다. */
+export function validateHexViewerSelection(
+    selection: HexViewerSelection | undefined,
+    totalSize: number
+): HexViewerSelection | undefined {
+    if (selection === undefined) { return undefined; }
+    const { startOffset, endOffset } = selection;
+    if (
+        !Number.isSafeInteger(startOffset) || !Number.isSafeInteger(endOffset)
+        || startOffset < 0 || endOffset < startOffset || endOffset >= totalSize
+    ) {
+        return undefined;
+    }
+    return { startOffset, endOffset };
+}
+
 function formatFileSize(bytes: number): string {
     if (bytes < 1024) { return `${bytes} B`; }
     if (bytes < 1024 * 1024) { return `${(bytes / 1024).toFixed(1)} KB`; }
@@ -82,8 +116,23 @@ export async function showHexViewer(context: vscode.ExtensionContext, recordHist
     }
 }
 
-export function openHexViewerFile(context: vscode.ExtensionContext, filePath: string): boolean {
+export function openHexViewerFile(
+    context: vscode.ExtensionContext,
+    filePath: string,
+    options?: HexViewerOpenOptions
+): boolean {
     const fileName = path.basename(filePath);
+
+    // 타입 검사를 우회한 JS/any 호출도 같은 계약을 지켜야 한다. HEX/SREC의
+    // dense 주소 범위는 원본 파일 offset이 아니므로 그 상태에서 선택하면
+    // 엉뚱한 바이트를 가리킨다.
+    if (options?.initialSelection !== undefined && options.forceBinary !== true) {
+        vscode.window.showErrorMessage(t(
+            `Hex Viewer의 처음 선택 범위는 원본 바이너리 모드에서만 사용할 수 있습니다: ${fileName}`,
+            `The initial Hex Viewer selection can only be used in raw binary mode: ${fileName}`
+        ));
+        return false;
+    }
 
     let stat: fs.Stats;
     try {
@@ -106,7 +155,7 @@ export function openHexViewerFile(context: vscode.ExtensionContext, filePath: st
 
     let result: HexParseResult;
     try {
-        result = parseFile(filePath);
+        result = parseFile(filePath, options?.forceBinary === true);
     } catch (e: any) {
         vscode.window.showErrorMessage(t(
             `파일 파싱 실패 (${fileName}): ${e.message}`,
@@ -123,7 +172,17 @@ export function openHexViewerFile(context: vscode.ExtensionContext, filePath: st
         return false;
     }
 
-    return openPanel(context, fileName, result);
+    const totalSize = result.maxAddress - result.minAddress + 1;
+    const initialSelection = validateHexViewerSelection(options?.initialSelection, totalSize);
+    if (options?.initialSelection !== undefined && initialSelection === undefined) {
+        vscode.window.showErrorMessage(t(
+            `Hex Viewer 선택 범위가 파일을 벗어납니다: ${fileName}`,
+            `Hex Viewer selection is outside the file: ${fileName}`
+        ));
+        return false;
+    }
+
+    return openPanel(context, fileName, result, initialSelection);
 }
 
 function generateHexNonce(): string {
@@ -313,7 +372,11 @@ export function buildHexViewerPayload(result: HexParseResult): HexViewerPayload 
  * 첫 렌더를 한다. HTML 에 데이터가 박혀 있던 예전과 달리 한 프레임 늦지만,
  * Base64 인코딩·`atob`·거대한 HTML 파싱이 사라져 전체 시간은 오히려 줄어든다.
  */
-export function postHexViewerData(webview: vscode.Webview, result: HexParseResult): void {
+export function postHexViewerData(
+    webview: vscode.Webview,
+    result: HexParseResult,
+    initialSelection?: HexViewerSelection
+): void {
     const payload = buildHexViewerPayload(result);
     // 보낸 메시지를 호스트가 **기록하지 않는다**. 0.6.47 이 테스트용으로 모듈
     // 전역 배열에 push 했는데, 그 경로는 프로덕션에서도 무조건 실행됐다 —
@@ -321,7 +384,12 @@ export function postHexViewerData(webview: vscode.Webview, result: HexParseResul
     // 패널을 닫아도 남아, 여러 파일을 열면 extension host 가 OOM 으로 간다.
     // 전송 순서를 봐야 하는 테스트는 주입한 가짜 패널의 `postMessage` 에서
     // 직접 기록한다(hexViewerOpenFlow.test.ts) — 관찰은 테스트 쪽 책임이다.
-    void webview.postMessage({ command: 'hexData', data: payload.data, gap: payload.gap });
+    void webview.postMessage({
+        command: 'hexData',
+        data: payload.data,
+        gap: payload.gap,
+        initialSelection,
+    });
 }
 
 export function buildHexViewerHtml(fileName: string, result: HexParseResult, webview?: vscode.Webview): string {
@@ -355,8 +423,11 @@ const FORMAT_BY_EXTENSION = new Map<string, HexFormat>([
     ['.srec', 'srec'], ['.s19', 'srec'], ['.s28', 'srec'], ['.s37', 'srec'],
 ]);
 
-export function parseFile(filePath: string): HexParseResult {
+export function parseFile(filePath: string, forceBinary = false): HexParseResult {
     const rawContent = fs.readFileSync(filePath);
+    if (forceBinary) {
+        return parseBinary(rawContent);
+    }
     // 확장자 판정을 **먼저** 한다. 한도(`HEX_VIEWER_MAX_FILE_SIZE`, 50MB)에 가까운
     // 바이너리를 UTF-8 문자열로 바꾸는 비용도 함께 사라진다.
     const known = FORMAT_BY_EXTENSION.get(path.extname(filePath).toLowerCase());
@@ -451,10 +522,11 @@ function renderWithReadyHandshake(
     webview: vscode.Webview,
     fileName: string,
     result: HexParseResult,
-    isCurrent: () => boolean
+    isCurrent: () => boolean,
+    initialSelection?: HexViewerSelection
 ): HexWebviewHandshake {
     const handshake = setupWebviewMessageHandler(webview, () => {
-        if (isCurrent()) { postHexViewerData(webview, result); }
+        if (isCurrent()) { postHexViewerData(webview, result, initialSelection); }
     });
     // 핸들러를 **먼저** 걸었으므로, 이후 단계가 던지면 그 구독이 주인 없이
     // 남는다 (`buildHexViewerHtml` 은 span 한도로 throw 할 수 있다). 호출부의
@@ -469,7 +541,7 @@ function renderWithReadyHandshake(
     webview.html = html;
     const fallback = setTimeout(() => {
         if (isCurrent() && !handshake.readyReceived) {
-            postHexViewerData(webview, result);
+            postHexViewerData(webview, result, initialSelection);
         }
     }, HEX_READY_FALLBACK_MS);
     // **타이머도 함께 취소한다.** 예전에는 구독만 해제해서, 이 타이머가
@@ -485,7 +557,12 @@ function renderWithReadyHandshake(
     };
 }
 
-function openPanel(context: vscode.ExtensionContext, fileName: string, result: HexParseResult): boolean {
+function openPanel(
+    context: vscode.ExtensionContext,
+    fileName: string,
+    result: HexParseResult,
+    initialSelection?: HexViewerSelection
+): boolean {
     if (currentPanel) {
         currentPanel.reveal(vscode.ViewColumn.One);
     } else {
@@ -508,7 +585,8 @@ function openPanel(context: vscode.ExtensionContext, fileName: string, result: H
         const generation = ++panelRenderGeneration;
         currentMessageDisposable = renderWithReadyHandshake(
             currentPanel.webview, fileName, result,
-            () => currentPanel !== undefined && panelRenderGeneration === generation
+            () => currentPanel !== undefined && panelRenderGeneration === generation,
+            initialSelection
         );
     } catch (e: any) {
         const msg = t(
@@ -1562,6 +1640,18 @@ function getWebviewContent(
         dataArrived = true;
         if (loadingEl) { loadingEl.style.display = 'none'; }
         render();
+        const initial = msg.initialSelection;
+        if (
+            initial && Number.isSafeInteger(initial.startOffset) && Number.isSafeInteger(initial.endOffset)
+            && initial.startOffset >= 0 && initial.endOffset >= initial.startOffset
+            && initial.endOffset < TOTAL_SIZE
+        ) {
+            // 기존 Go-to 경로가 가상 스크롤과 unit 정렬을 모두 처리한다. 시작점으로
+            // 이동한 뒤 끝점만 복원해 symbol/section 전체를 선택한다.
+            jumpToOffset(initial.startOffset);
+            selectedEndOffset = initial.endOffset;
+            updateSelection();
+        }
     });
 
     // **리스너를 건 뒤에** 준비됐다고 알린다 (0.6.47).

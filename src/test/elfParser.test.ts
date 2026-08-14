@@ -10,6 +10,7 @@ import {
     generateSummaryReport,
     formatSize,
     formatHex,
+    resolveElfFileRange,
     ElfSection,
     ElfSymbol,
     ElfSegment,
@@ -121,6 +122,7 @@ suite('ELF Parser Test Suite', () => {
 
             const text = result.sections.find(s => s.name === '.text');
             assert.ok(text);
+            assert.strictEqual(text!.offset, 52, 'sh_offset should be preserved');
             assert.strictEqual(text!.size, 4096);
             assert.strictEqual(text!.isExec, true);
             assert.strictEqual(text!.isNoBits, false);
@@ -129,6 +131,25 @@ suite('ELF Parser Test Suite', () => {
             assert.ok(bss);
             assert.strictEqual(bss!.isNoBits, true);
             assert.strictEqual(bss!.isWrite, true);
+        });
+
+        test('should preserve p_offset from program headers', () => {
+            const original = buildElf32WithSymbols();
+            const buf = Buffer.concat([original, Buffer.alloc(32)]);
+            const phOffset = original.length;
+            buf.writeUInt32LE(phOffset, 28); // e_phoff
+            buf.writeUInt16LE(32, 42);       // e_phentsize
+            buf.writeUInt16LE(1, 44);        // e_phnum
+            buf.writeUInt32LE(1, phOffset);          // PT_LOAD
+            buf.writeUInt32LE(0x234, phOffset + 4);  // p_offset
+            buf.writeUInt32LE(0x08000000, phOffset + 8);
+            buf.writeUInt32LE(0x100, phOffset + 16);
+            buf.writeUInt32LE(0x180, phOffset + 20);
+            buf.writeUInt32LE(5, phOffset + 24);
+
+            const result = parseElf32(buf);
+            assert.strictEqual(result.segments.length, 1);
+            assert.strictEqual(result.segments[0].offset, 0x234);
         });
 
         test('should throw for non-ELF file', () => {
@@ -276,6 +297,70 @@ suite('ELF Parser Test Suite', () => {
             // Only null section and .shstrtab
             const allocSections = result.sections.filter(s => s.isAlloc);
             assert.strictEqual(allocSections.length, 0);
+        });
+    });
+
+    suite('resolveElfFileRange', () => {
+        const text: ElfSection = {
+            name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR,
+            addr: 0x08000000, offset: 0x100, size: 0x100,
+            isAlloc: true, isWrite: false, isExec: true, isNoBits: false,
+        };
+        const bss: ElfSection = {
+            name: '.bss', type: SHT_NOBITS, flags: SHF_ALLOC | SHF_WRITE,
+            addr: 0x20000000, offset: 0x200, size: 0x80,
+            isAlloc: true, isWrite: true, isExec: false, isNoBits: true,
+        };
+        const sections: ElfSection[] = [
+            { name: '', type: 0, flags: 0, addr: 0, offset: 0, size: 0, isAlloc: false, isWrite: false, isExec: false, isNoBits: false },
+            text,
+            bss,
+        ];
+        const load: ElfSegment = {
+            type: 1, offset: 0x40, vaddr: 0x08000000, filesz: 0x120, memsz: 0x180,
+            flags: 5, isRead: true, isWrite: false, isExec: true,
+        };
+
+        test('section address maps through sh_offset', () => {
+            assert.deepStrictEqual(
+                resolveElfFileRange(0x08000020, 0x10, sections, [load], 0x300, 1),
+                { kind: 'file', offset: 0x120, size: 0x10 }
+            );
+        });
+
+        test('valid section index does not fall back to an overlapping segment', () => {
+            assert.deepStrictEqual(
+                resolveElfFileRange(0x080000f8, 0x10, sections, [load], 0x300, 1),
+                { kind: 'unavailable', reason: 'unmapped' }
+            );
+        });
+
+        test('NOBITS section is rejected explicitly', () => {
+            assert.deepStrictEqual(
+                resolveElfFileRange(0x20000010, 8, sections, [], 0x300, 2),
+                { kind: 'unavailable', reason: 'nobits' }
+            );
+        });
+
+        test('address without a section maps through PT_LOAD p_offset', () => {
+            assert.deepStrictEqual(
+                resolveElfFileRange(0x08000030, 0x10, sections, [load], 0x300),
+                { kind: 'file', offset: 0x70, size: 0x10 }
+            );
+        });
+
+        test('PT_LOAD zero-fill tail has no file bytes', () => {
+            assert.deepStrictEqual(
+                resolveElfFileRange(0x08000130, 0x10, sections, [load], 0x300),
+                { kind: 'unavailable', reason: 'zero-fill' }
+            );
+        });
+
+        test('mapped range must still fit the actual file', () => {
+            assert.deepStrictEqual(
+                resolveElfFileRange(0x080000f0, 0x10, sections, [load], 0x108, 1),
+                { kind: 'unavailable', reason: 'outside-file' }
+            );
         });
     });
 
@@ -746,8 +831,8 @@ suite('ELF Parser Test Suite', () => {
     suite('autoDetectRegions', () => {
         test('should detect FLASH and RAM from PT_LOAD segments', () => {
             const segments: ElfSegment[] = [
-                { type: 1, vaddr: 0x08000000, memsz: 0x1200, filesz: 0x1200, flags: 5, isRead: true, isWrite: false, isExec: true },
-                { type: 1, vaddr: 0x20000000, memsz: 0x500, filesz: 0x100, flags: 6, isRead: true, isWrite: true, isExec: false },
+                { type: 1, offset: 0, vaddr: 0x08000000, memsz: 0x1200, filesz: 0x1200, flags: 5, isRead: true, isWrite: false, isExec: true },
+                { type: 1, offset: 0x1200, vaddr: 0x20000000, memsz: 0x500, filesz: 0x100, flags: 6, isRead: true, isWrite: true, isExec: false },
             ];
             const regions = autoDetectRegions(segments, []);
             assert.strictEqual(regions.length, 2);
@@ -761,7 +846,7 @@ suite('ELF Parser Test Suite', () => {
 
         test('should return empty for no PT_LOAD segments', () => {
             const segments: ElfSegment[] = [
-                { type: 2, vaddr: 0, memsz: 0, filesz: 0, flags: 0, isRead: false, isWrite: false, isExec: false },
+                { type: 2, offset: 0, vaddr: 0, memsz: 0, filesz: 0, flags: 0, isRead: false, isWrite: false, isExec: false },
             ];
             const regions = autoDetectRegions(segments, []);
             assert.strictEqual(regions.length, 0);
@@ -769,9 +854,9 @@ suite('ELF Parser Test Suite', () => {
 
         test('should handle multiple flash regions', () => {
             const segments: ElfSegment[] = [
-                { type: 1, vaddr: 0x08000000, memsz: 0x1000, filesz: 0x1000, flags: 5, isRead: true, isWrite: false, isExec: true },
-                { type: 1, vaddr: 0x08100000, memsz: 0x800, filesz: 0x800, flags: 4, isRead: true, isWrite: false, isExec: false },
-                { type: 1, vaddr: 0x20000000, memsz: 0x400, filesz: 0x100, flags: 6, isRead: true, isWrite: true, isExec: false },
+                { type: 1, offset: 0, vaddr: 0x08000000, memsz: 0x1000, filesz: 0x1000, flags: 5, isRead: true, isWrite: false, isExec: true },
+                { type: 1, offset: 0x1000, vaddr: 0x08100000, memsz: 0x800, filesz: 0x800, flags: 4, isRead: true, isWrite: false, isExec: false },
+                { type: 1, offset: 0x1800, vaddr: 0x20000000, memsz: 0x400, filesz: 0x100, flags: 6, isRead: true, isWrite: true, isExec: false },
             ];
             const regions = autoDetectRegions(segments, []);
             assert.strictEqual(regions.length, 3);

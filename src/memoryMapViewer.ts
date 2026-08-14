@@ -2,11 +2,12 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, generateSummaryReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary } from './elfParser';
+import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, generateSummaryReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary, ElfFileRangeResolution } from './elfParser';
 import { parseLinkerFile } from './linkerScriptParser';
 import { ARM_LINK_MAX_ENTRIES, parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
+import { openHexViewerFile } from './hexViewer';
 
 /**
  * *Go to Symbol* Quick Pick 이 다루는 한 항목. 웹뷰 영역 표의 **한 행과 1:1로
@@ -46,7 +47,17 @@ interface PanelState {
     hasSymbols: boolean;
     /** 메모리 영역 — Quick Pick 의 두 번째 묶음. */
     regions: { name: string; addr: number; info: string }[];
+    /** 웹뷰에는 opaque ID만 보내고 실제 file offset은 extension host가 보관한다. */
+    hexTargets: Map<string, MemoryMapHexTarget>;
+    /** 맵을 만든 뒤 ELF가 교체되면 오래된 offset으로 다른 바이트를 열지 않는다. */
+    sourceFingerprint?: { size: number; mtimeMs: number };
     messageDisposable?: vscode.Disposable;
+}
+
+export interface MemoryMapHexTarget {
+    id: string;
+    label: string;
+    fileRange: ElfFileRangeResolution;
 }
 
 const panels = new Map<string, PanelState>();
@@ -62,6 +73,11 @@ export const panelRegistry = {
     getEntries(filePath: string): PanelEntry[] | undefined { return panels.get(filePath)?.entries; },
     /** 이름으로 찾는 경로가 보는 목록(상한 없음). */
     getAllEntries(filePath: string): PanelEntry[] | undefined { return panels.get(filePath)?.allEntries; },
+    /** ELF file offset은 웹뷰가 아니라 호스트에만 남는다는 계약을 검증하기 위한 목록. */
+    getHexTargets(filePath: string): MemoryMapHexTarget[] | undefined {
+        const targets = panels.get(filePath)?.hexTargets;
+        return targets ? Array.from(targets.values()) : undefined;
+    },
     clear(): void { panels.clear(); lastActivePanel = undefined; },
 };
 
@@ -244,7 +260,7 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
 
     const { sections, entryPoint, symbols, segments } = parseResult;
     const { flash, ram } = classifySections(sections);
-    const sectionSummary = summarizeSections(sections);
+    const sectionSummary = summarizeSections(sections, segments, buffer.length);
 
     // Auto-detect regions from program headers if no linker script provided
     let regions = config?.regions || [];
@@ -255,8 +271,8 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     // Use symbol-level detail when symbols available, otherwise section-level
     const memoryUsage = regions.length > 0
         ? (symbols.length > 0
-            ? computeSymbolUsage(symbols, sections, regions)
-            : computeMemoryUsage(sections, regions))
+            ? computeSymbolUsage(symbols, sections, regions, segments, buffer.length)
+            : computeMemoryUsage(sections, regions, segments, buffer.length))
         : [];
     const flashTotal = flash.reduce((sum, s) => sum + s.size, 0);
     const ramTotal = ram.reduce((sum, s) => sum + s.size, 0);
@@ -264,7 +280,11 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     const summaryReport = generateSummaryReport(fileName, filePath, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions);
     const hasSymbols = symbols.length > 0;
 
-    showPanel(context, filePath, fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, summaryReport, hasSymbols);
+    showPanel(
+        context, filePath, fileName, entryPoint, flashTotal, ramTotal,
+        sectionSummary, memoryUsage, regions, textReport, summaryReport, hasSymbols,
+        { size: stat.size, mtimeMs: stat.mtimeMs }
+    );
     return true;
 }
 
@@ -352,7 +372,8 @@ function showPanel(
     regions: MemoryRegion[],
     textReport: string,
     summaryReport: string,
-    hasSymbols?: boolean
+    hasSymbols?: boolean,
+    sourceFingerprint?: { size: number; mtimeMs: number }
 ) {
     const existing = panels.get(filePath);
     let panel: vscode.WebviewPanel;
@@ -379,11 +400,65 @@ function showPanel(
     }
 
     lastActivePanel = filePath;
+    const hexTargets = collectMemoryMapHexTargets(sectionSummary, memoryUsage);
     const state: PanelState = {
-        panel, entries: [], allEntries: [], entriesTotal: 0, hasSymbols: false, regions: [], messageDisposable: undefined,
+        panel, entries: [], allEntries: [], entriesTotal: 0, hasSymbols: false, regions: [],
+        hexTargets, sourceFingerprint, messageDisposable: undefined,
     };
     state.messageDisposable = panel.webview.onDidReceiveMessage(async (message: any) => {
-        if (message.command === 'copyReport') {
+        if (message.command === 'openHex') {
+            const targetId = typeof message.targetId === 'string' && message.targetId.length <= 128
+                ? message.targetId
+                : '';
+            const target = state.hexTargets.get(targetId);
+            // 웹뷰 입력에서 offset/size를 받지 않는다. 렌더 당시 호스트가 만든 opaque
+            // ID와 일치하지 않으면 아무 파일도 열지 않는다.
+            if (!target) { return; }
+
+            if (state.sourceFingerprint) {
+                let current: fs.Stats;
+                try {
+                    current = fs.statSync(filePath);
+                } catch (e: any) {
+                    vscode.window.showErrorMessage(t(
+                        `ELF 파일을 다시 읽을 수 없습니다 (${fileName}): ${e.message}`,
+                        `Cannot read the ELF file again (${fileName}): ${e.message}`
+                    ));
+                    return;
+                }
+                if (current.size !== state.sourceFingerprint.size || current.mtimeMs !== state.sourceFingerprint.mtimeMs) {
+                    vscode.window.showWarningMessage(t(
+                        `ELF 파일이 Memory Map을 연 뒤 변경되었습니다 (${fileName}). 최신 주소와 파일 오프셋을 사용하려면 Memory Map을 다시 여세요.`,
+                        `The ELF file changed after the Memory Map was opened (${fileName}). Reopen the Memory Map to use current addresses and file offsets.`
+                    ));
+                    return;
+                }
+            }
+
+            const shownLabel = target.label.length > 120 ? `${target.label.slice(0, 120)}…` : target.label;
+            if (target.fileRange.kind !== 'file') {
+                if (target.fileRange.reason === 'nobits' || target.fileRange.reason === 'zero-fill') {
+                    vscode.window.showWarningMessage(t(
+                        `'${shownLabel}'은 메모리에서만 존재하는 BSS/NOBITS 영역이라 ELF 파일에 표시할 바이트가 없습니다.`,
+                        `'${shownLabel}' exists only in a BSS/NOBITS memory range, so the ELF file has no bytes to show.`
+                    ));
+                } else {
+                    vscode.window.showErrorMessage(t(
+                        `'${shownLabel}'의 메모리 주소 범위를 ELF 파일 바이트로 변환할 수 없습니다. 파일이 손상되었거나 범위가 섹션 경계를 벗어났습니다.`,
+                        `Cannot map the memory range for '${shownLabel}' to ELF file bytes. The file may be malformed or the range crosses a section boundary.`
+                    ));
+                }
+                return;
+            }
+
+            openHexViewerFile(context, filePath, {
+                forceBinary: true,
+                initialSelection: {
+                    startOffset: target.fileRange.offset,
+                    endOffset: target.fileRange.offset + target.fileRange.size - 1,
+                },
+            });
+        } else if (message.command === 'copyReport') {
             // 리포트 본문은 이미 extension host가 보유한다. 웹뷰에 수 MB~수십 MB
             // 문자열을 심고 다시 postMessage 구조화 복제로 돌려받지 말고, 버튼은
             // 종류만 전달한다. 예상하지 못한 kind는 clipboard를 건드리지 않는다.
@@ -457,6 +532,38 @@ function showPanel(
         return { name: u.region, addr: origin, info: `${formatSize(u.used)} / ${formatSize(u.total)}` };
     });
     panels.set(filePath, state);
+}
+
+function sectionHexTargetId(sectionIndex: number): string {
+    return `section:${sectionIndex}`;
+}
+
+function entryHexTargetId(regionIndex: number, entryIndex: number): string {
+    return `entry:${regionIndex}:${entryIndex}`;
+}
+
+/**
+ * Memory Map HTML에 넣을 opaque ID와 호스트 전용 file offset 표를 함께 만든다.
+ * Listing은 `fileRange`가 없으므로 빈 맵이 되고 Hex 진입점도 렌더되지 않는다.
+ */
+export function collectMemoryMapHexTargets(
+    sectionSummary: SectionSummary[],
+    memoryUsage: MemoryUsage[]
+): Map<string, MemoryMapHexTarget> {
+    const targets = new Map<string, MemoryMapHexTarget>();
+    sectionSummary.forEach((section, sectionIndex) => {
+        if (!section.fileRange) { return; }
+        const id = sectionHexTargetId(sectionIndex);
+        targets.set(id, { id, label: section.name, fileRange: section.fileRange });
+    });
+    memoryUsage.forEach((usage, regionIndex) => {
+        usage.sections.forEach((entry, entryIndex) => {
+            if (!entry.fileRange) { return; }
+            const id = entryHexTargetId(regionIndex, entryIndex);
+            targets.set(id, { id, label: entry.func || entry.name, fileRange: entry.fileRange });
+        });
+    });
+    return targets;
 }
 
 /**
@@ -1046,6 +1153,11 @@ export function buildMemoryMapStrings(): Record<string, string> {
         colSize: t('크기', 'Size'),
         colBytes: t('바이트', 'Bytes'),
         colType: t('타입', 'Type'),
+        colHex: 'Hex',
+        viewHex: t('바이트 보기', 'View bytes'),
+        viewHexTitle: t('ELF 원본 파일의 해당 바이트를 Hex Viewer에서 열기', 'Open these bytes from the original ELF file in Hex Viewer'),
+        noFileBytes: t('파일 바이트 없음', 'No file bytes'),
+        noFileBytesTitle: t('이 메모리 범위에 대응하는 ELF 파일 바이트가 없는 이유 보기', 'Show why this memory range has no corresponding ELF file bytes'),
         // {region}/{percent}/{used}/{total} filled in the webview.
         usageBarLabel: t('{region} 사용률 {percent}% ({used} / {total})', '{region} usage {percent}% ({used} of {total})'),
         sortAscending: t('오름차순 정렬', 'Sort ascending'),
@@ -1116,14 +1228,22 @@ function getWebviewContent(
     const stringsLiteral = JSON.stringify(S).replace(/</g, '\\u003c');
     const htmlLang = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
     // Build JSON data for lazy WebView rendering
-    const regionJsonData = memoryUsage.map(u => {
+    const regionJsonData = memoryUsage.map((u, regionIndex) => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
         const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warn)' : 'var(--ok)';
         const regionOrigin = regions.find(r => r.name === u.region)?.origin ?? 0;
 
         const allSegments = [
-            ...u.sections.map(s => ({ name: s.name, size: s.size, addr: s.addr, type: s.type, section: s.section || '', func: s.func || '' })),
-            ...u.freeSpaces.map(f => ({ name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', section: '', func: '' })),
+            ...u.sections.map((s, entryIndex) => ({
+                name: s.name, size: s.size, addr: s.addr, type: s.type,
+                section: s.section || '', func: s.func || '',
+                hexTargetId: s.fileRange ? entryHexTargetId(regionIndex, entryIndex) : '',
+                hexAvailable: s.fileRange?.kind === 'file',
+            })),
+            ...u.freeSpaces.map(f => ({
+                name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', section: '', func: '',
+                hexTargetId: '', hexAvailable: false,
+            })),
         ].sort((a, b) => a.addr - b.addr).filter(e => e.size > 0);
 
         const hasSectionInfo = u.sections.some(s => s.section);
@@ -1137,7 +1257,8 @@ function getWebviewContent(
         const segments = allSegments.map(e => ({
             n: e.name, s: e.section, f: e.func, a: e.addr,
             ah: formatHex(e.addr), eh: formatHex(e.size > 0 ? e.addr + e.size - 1 : e.addr),
-            sz: e.size, ss: formatSize(e.size), t: e.type, fr: e.type === 'FREE'
+            sz: e.size, ss: formatSize(e.size), t: e.type, fr: e.type === 'FREE',
+            hx: e.hexTargetId, ha: e.hexAvailable,
         }));
 
         interface ObjGroup { totalSize: number; entries: { section: string; addr: number; size: number; type: string }[] }
@@ -1177,6 +1298,7 @@ function getWebviewContent(
                 : '',
             segments, objSummary,
             hsi: hasSectionInfo, hfi: hasFuncInfo, hmo: regionObjSummary.length > 1,
+            hhx: u.sections.some(s => s.fileRange !== undefined),
         };
     });
 
@@ -1208,6 +1330,9 @@ function getWebviewContent(
     const hasRegions = memoryUsage.length > 0;
     const hasLinkerData = memoryUsage.some(u => u.reportedUsed !== undefined);
     const hasFuncData = memoryUsage.some(u => u.sections.some(s => s.func));
+    // All Sections 표는 자기 데이터만 보고 열을 결정한다. 영역 상세의 Hex 열은
+    // 각 영역의 `hhx`가 따로 제어하므로 두 데이터셋을 묶으면 빈 열이 생길 수 있다.
+    const hasSectionHexTargets = sectionSummary.some(s => s.fileRange !== undefined);
 
     const regionOverviewRows = memoryUsage.map(u => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
@@ -1242,7 +1367,7 @@ function getWebviewContent(
     // → `1000` 이 되어 주소 정렬이 무너지고, `1.2 KB` → `1.2` vs `900 B`
     // → `900` 처럼 단위가 다른 크기도 역전된다. 0.6.34 가 Object Summary 만
     // 속성 기반으로 옮겼고 이 표는 남아 있었다.
-    const sectionTableRows = sectionSummary.map(s =>
+    const sectionTableRows = sectionSummary.map((s, sectionIndex) =>
         `<tr data-sort-name="${esc(s.name)}" data-sort-addr="${s.addr}" data-sort-endaddr="${s.size > 0 ? s.endAddr - 1 : s.endAddr}" data-sort-size="${s.size}" data-sort-bytes="${s.size}" data-sort-type="${esc(s.type)}">
             <td>${esc(s.name)}</td>
             <td class="num">${formatHex(s.addr)}</td>
@@ -1250,6 +1375,9 @@ function getWebviewContent(
             <td class="num">${formatSize(s.size)}</td>
             <td class="num">${s.size}</td>
             <td><span class="type-badge type-${s.type.toLowerCase()}">${s.type}</span></td>
+            ${hasSectionHexTargets ? s.fileRange
+                ? `<td><button class="hex-link${s.fileRange.kind === 'file' ? '' : ' unavailable'}" data-action="open-hex" data-target-id="${sectionHexTargetId(sectionIndex)}" title="${esc(s.fileRange.kind === 'file' ? S.viewHexTitle : S.noFileBytesTitle)}">${esc(s.fileRange.kind === 'file' ? S.viewHex : S.noFileBytes)}</button></td>`
+                : '<td></td>' : ''}
         </tr>`
     ).join('');
 
@@ -1320,6 +1448,12 @@ function getWebviewContent(
         font-size: 11px;
     }
     button:hover { background: var(--btn-hover); }
+    button.hex-link.unavailable {
+        background: transparent;
+        color: var(--vscode-descriptionForeground, var(--fg));
+        border: 1px solid var(--border);
+    }
+    button.hex-link.unavailable:hover { background: var(--hover-bg); }
     .summary-row {
         display: flex;
         gap: 12px;
@@ -1620,6 +1754,7 @@ function getWebviewContent(
                 <th class="num" data-sort="size" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colSize)}</th>
                 <th class="num" data-sort="bytes" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colBytes)}</th>
                 <th data-sort="type" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colType)}</th>
+                ${hasSectionHexTargets ? `<th scope="col">${esc(S.colHex)}</th>` : ''}
             </tr>
         </thead>
         <tbody>${sectionTableRows}</tbody>
@@ -1730,10 +1865,15 @@ const RD = ${regionDataJsLiteral};
         }
     }
 
-    function rowHtml(e, hsi, hfi) {
+    function rowHtml(e, hsi, hfi, hhx) {
         const rc = e.fr ? ' class="free-row"' : '';
         const sc = hsi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.s) + '</td>' : '';
         const fc = hfi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.f) + '</td>' : '';
+        const hc = hhx
+            ? (e.hx
+                ? '<td><button class="hex-link' + (e.ha ? '' : ' unavailable') + '" data-action="open-hex" data-target-id="' + e.hx + '" title="' + esc(e.ha ? S.viewHexTitle : S.noFileBytesTitle) + '">' + esc(e.ha ? S.viewHex : S.noFileBytes) + '</button></td>'
+                : '<td></td>')
+            : '';
         // 정렬값 원본. 이 표는 행 수에 따라 정렬 경로가 갈린다 — 가상 스크롤
         // (200행 초과)이면 rd.segments 를 직접 정렬하지만, 그 아래면
         // sortable-table 로 렌더돼 공용 정렬기가 셀 텍스트를 읽었다. 같은 표가
@@ -1747,7 +1887,7 @@ const RD = ${regionDataJsLiteral};
             + ' data-sort-size="' + e.sz + '"'
             + ' data-sort-bytes="' + e.sz + '"'
             + ' data-sort-type="' + esc(e.t) + '"';
-        return '<tr' + rc + sv + '><td>' + hl(e.n) + '</td>' + sc + fc + '<td class="num">' + hl(e.ah) + '</td><td class="num">' + e.eh + '</td><td class="num">' + hl(e.ss) + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + hl(e.t) + '</span></td></tr>';
+        return '<tr' + rc + sv + '><td>' + hl(e.n) + '</td>' + sc + fc + '<td class="num">' + hl(e.ah) + '</td><td class="num">' + e.eh + '</td><td class="num">' + hl(e.ss) + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + hl(e.t) + '</span></td>' + hc + '</tr>';
     }
 
     function matchSeg(e, q) {
@@ -1836,14 +1976,15 @@ const RD = ${regionDataJsLiteral};
                 + sortTh('end', S.colEnd, { cls: 'num' })
                 + sortTh('size', S.colSize, { cls: 'num', sortBy: 'bytes' })
                 + sortTh('bytes', S.colBytes, { cls: 'num' })
-                + sortTh('type', S.colType) + '</tr>';
+                + sortTh('type', S.colType)
+                + (rd.hhx ? plainTh(S.colHex) : '') + '</tr>';
 
             if (rd.segments.length > VT_THRESH) {
                 const vpH = Math.min(rd.segments.length * ROW_H, MAX_VP_H);
                 h += '<div class="vt-viewport" data-ridx="' + idx + '" style="max-height:' + vpH + 'px;overflow-y:auto"><table class="section-table"><thead>' + thHtml + '</thead><tbody></tbody></table></div>';
             } else {
                 const data = curQ ? rd.segments.filter(function(e) { return matchSeg(e, curQ); }) : rd.segments;
-                h += '<table class="section-table sortable-table"><thead>' + thHtml + '</thead><tbody>' + data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi); }).join('') + '</tbody></table>';
+                h += '<table class="section-table sortable-table"><thead>' + thHtml + '</thead><tbody>' + data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi, rd.hhx); }).join('') + '</tbody></table>';
             }
         }
 
@@ -1872,7 +2013,7 @@ const RD = ${regionDataJsLiteral};
             vp: vp, tb: vp.querySelector('tbody'),
             data: rd.segments,
             fd: curQ ? rd.segments.filter(function(e) { return matchSeg(e, curQ); }) : rd.segments,
-            cc: 5 + (rd.hsi ? 1 : 0) + (rd.hfi ? 1 : 0),
+            cc: 6 + (rd.hsi ? 1 : 0) + (rd.hfi ? 1 : 0) + (rd.hhx ? 1 : 0),
             idx: idx, ls: -1, le: -1
         };
         vtMap.set(idx, vt);
@@ -1890,7 +2031,7 @@ const RD = ${regionDataJsLiteral};
         const topH = s * ROW_H, botH = Math.max(0, (total - e) * ROW_H);
         let h = '';
         if (topH > 0) h += '<tr class="vt-sp"><td colspan="' + vt.cc + '" style="height:' + topH + 'px;padding:0;border:0"></td></tr>';
-        for (let i = s; i < e; i++) h += rowHtml(vt.fd[i], rd.hsi, rd.hfi);
+        for (let i = s; i < e; i++) h += rowHtml(vt.fd[i], rd.hsi, rd.hfi, rd.hhx);
         if (botH > 0) h += '<tr class="vt-sp"><td colspan="' + vt.cc + '" style="height:' + botH + 'px;padding:0;border:0"></td></tr>';
         vt.tb.innerHTML = h;
         // 방금 innerHTML 로 날아간 강조를 되돌린다. currentTarget 이 논리 좌표라
@@ -2406,7 +2547,7 @@ const RD = ${regionDataJsLiteral};
                 // Non-virtual rendered table: re-render tbody from data (reuse filtered array above)
                 const tbody = card.querySelector('.section-table tbody');
                 if (tbody) {
-                    tbody.innerHTML = filtered.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi); }).join('');
+                    tbody.innerHTML = filtered.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi, rd.hhx); }).join('');
                 }
             }
 
@@ -2769,7 +2910,7 @@ const RD = ${regionDataJsLiteral};
             if (tbody) {
                 resyncCurrentTargetAfterSort(idx);   // 곧 끊어질 <tr> 참조를 놓는다
                 const data = curQ ? rd.segments.filter(function(seg) { return matchSeg(seg, curQ); }) : rd.segments;
-                tbody.innerHTML = data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi); }).join('');
+                tbody.innerHTML = data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi, rd.hhx); }).join('');
             }
         }
 
@@ -2998,6 +3139,9 @@ const RD = ${regionDataJsLiteral};
                 // 잔재다. 위임 처리기는 문서에 하나뿐이고 closest 가 버튼
                 // 자신을 집으므로, 형제가 된 지금은 막을 것이 없다.
                 window.toggleObjDetailRows(actionEl);
+                break;
+            case 'open-hex':
+                vscode.postMessage({ command: 'openHex', targetId: actionEl.getAttribute('data-target-id') });
                 break;
         }
     }
