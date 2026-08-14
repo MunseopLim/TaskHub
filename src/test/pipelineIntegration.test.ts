@@ -15,6 +15,7 @@ import { HistoryEntry, HistoryProvider } from '../providers/historyProvider';
 import { MainViewProvider } from '../providers/mainViewProvider';
 import { ActionItem, Action as PipelineAction } from '../schema';
 import { buildInputProfileDraft, InputProfileStore, inspectInputProfile } from '../inputProfiles';
+import { ActionRunLogCollector, RunLogStore } from '../runLogStore';
 
 /**
  * Integration test scenarios for TaskHub pipelines.
@@ -2829,6 +2830,69 @@ try {
                 (vscode.window as any).showInputBox = originalShowInputBox;
                 (vscode.window as any).showQuickPick = originalShowQuickPick;
             }
+        });
+    });
+
+    suite('Structured Run Logs', () => {
+        test('IT-158: 캡처 출력은 저장하고 password 파생 명령·출력은 디스크에 남기지 않는다', async () => {
+            const secret = 'it158-super-secret';
+            const action: PipelineAction = {
+                description: 'IT-158',
+                tasks: [
+                    {
+                        id: 'visible',
+                        type: 'command',
+                        command: 'node',
+                        args: ['-e', 'process.stdout.write("visible-output")'],
+                        passTheResultToNextTask: true,
+                    },
+                    { id: 'token', type: 'inputBox', prompt: 'token', password: true },
+                    {
+                        id: 'secretEcho',
+                        type: 'command',
+                        command: 'node',
+                        args: ['-e', 'process.stdout.write(process.argv[1])', '${token.value}'],
+                        passTheResultToNextTask: true,
+                    },
+                ],
+            };
+            const startedAt = Date.now();
+            const collector = new ActionRunLogCollector(
+                'it158',
+                'IT-158 Structured Run Log',
+                startedAt,
+                action.tasks
+            );
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+
+            await executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it158',
+                tempWorkspace,
+                [tempWorkspace],
+                {
+                    presetInputs: { token: { value: secret } },
+                    runLogCollector: collector,
+                }
+            );
+
+            const store = new RunLogStore(tempWorkspace);
+            const result = await store.write(collector.finish('success', Date.now()), {
+                maxFiles: 10,
+                retentionDays: 30,
+                maxTotalBytes: 8 * 1024 * 1024,
+            });
+            const serialized = fs.readFileSync(result.absolutePath, 'utf8');
+            const parsed = JSON.parse(serialized) as import('../runLogStore').ActionRunLog;
+            const visible = parsed.tasks.find(task => task.taskId === 'visible');
+            const secretEcho = parsed.tasks.find(task => task.taskId === 'secretEcho');
+
+            assert.strictEqual(visible?.output.availability, 'captured');
+            assert.strictEqual(visible?.output.stdout, 'visible-output');
+            assert.strictEqual(secretEcho?.output.availability, 'redacted');
+            assert.ok(secretEcho?.command?.includes('***'));
+            assert.ok(!serialized.includes(secret), 'password-derived value leaked into the persisted run log');
         });
     });
 

@@ -46,6 +46,19 @@ import {
     type InputProfileInspection,
     type NamedInputProfile,
 } from './inputProfiles';
+import {
+    ActionRunLogCollector,
+    RUN_LOG_DEFAULT_MAX_FILES,
+    RUN_LOG_DEFAULT_MAX_TOTAL_BYTES,
+    RUN_LOG_DEFAULT_RETENTION_DAYS,
+    RUN_LOG_DIRECTORY,
+    RUN_LOG_MAX_FILE_BYTES,
+    RunLogStore,
+    type ActionRunLogOutcome,
+    type RunLogRetentionPolicy,
+    type TaskRunLogOutput,
+    type TaskRunLogOutputAvailability,
+} from './runLogStore';
 
 /**
  * 자동완성 항목의 `detail` 문구. **i18n 경계다.**
@@ -4491,6 +4504,74 @@ function logActionStart(showVerboseLogs: boolean, title: string, description?: s
     }
 }
 
+interface ConfiguredRunLog {
+    workspaceRoot: string;
+    collector: ActionRunLogCollector;
+    policy: RunLogRetentionPolicy;
+}
+
+const runLogStores = new Map<string, RunLogStore>();
+
+function clampedRunLogNumber(value: unknown, fallback: number, min: number, max: number): number {
+    const numeric = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : fallback;
+    return Math.max(min, Math.min(max, numeric));
+}
+
+function configuredRunLog(
+    workspaceRoot: string | undefined,
+    actionId: string,
+    actionTitle: string,
+    startedAt: number,
+    tasks: readonly import('./schema').Task[]
+): ConfiguredRunLog | undefined {
+    if (!workspaceRoot) { return undefined; }
+    const config = vscode.workspace.getConfiguration('taskhub.runLogs', vscode.Uri.file(workspaceRoot));
+    if (!config.get<boolean>('enabled', false)) { return undefined; }
+    const maxFiles = clampedRunLogNumber(config.get('maxFiles'), RUN_LOG_DEFAULT_MAX_FILES, 1, 1000);
+    const retentionDays = clampedRunLogNumber(config.get('retentionDays'), RUN_LOG_DEFAULT_RETENTION_DAYS, 0, 3650);
+    const maxTotalMb = clampedRunLogNumber(
+        config.get('maxTotalSizeMb'),
+        RUN_LOG_DEFAULT_MAX_TOTAL_BYTES / (1024 * 1024),
+        RUN_LOG_MAX_FILE_BYTES / (1024 * 1024),
+        4096
+    );
+    return {
+        workspaceRoot,
+        collector: new ActionRunLogCollector(actionId, actionTitle, startedAt, tasks),
+        policy: {
+            maxFiles,
+            retentionDays,
+            maxTotalBytes: maxTotalMb * 1024 * 1024,
+            maxFileBytes: RUN_LOG_MAX_FILE_BYTES,
+        },
+    };
+}
+
+async function persistRunLog(
+    configured: ConfiguredRunLog | undefined,
+    outcome: ActionRunLogOutcome,
+    finishedAt: number,
+    error?: string
+): Promise<void> {
+    if (!configured) { return; }
+    const key = path.resolve(configured.workspaceRoot);
+    let store = runLogStores.get(key);
+    if (!store) {
+        store = new RunLogStore(configured.workspaceRoot);
+        runLogStores.set(key, store);
+    }
+    try {
+        const result = await store.write(configured.collector.finish(outcome, finishedAt, error), configured.policy);
+        outputChannel.appendLine(`[INFO] Saved action run log: ${result.workspaceRelativePath}`);
+        if (result.rotationWarning) {
+            outputChannel.appendLine(`[WARN] Run log rotation failed; the action result is unchanged: ${result.rotationWarning}`);
+        }
+    } catch (writeError) {
+        const message = writeError instanceof Error ? writeError.message : String(writeError);
+        outputChannel.appendLine(`[WARN] Could not persist the action run log; the action result is unchanged: ${message}`);
+    }
+}
+
 /**
  * Optional pipeline-execution side channels for replay/record support.
  *
@@ -4518,6 +4599,8 @@ export interface PipelineExecutionOptions {
     presetInputs?: Record<string, unknown>;
     recordInputs?: Record<string, unknown>;
     recordCommands?: Record<string, string>;
+    /** Optional structured run-log collector owned by executeAction(). */
+    runLogCollector?: ActionRunLogCollector;
     onTaskTransition?: (event: TaskTransitionEvent) => void;
     /** Test/embedding override; production uses the 5s drain ceiling. */
     abortDrainTimeoutMs?: number;
@@ -4639,6 +4722,7 @@ async function executeActionPipelineForRun(
     const presetInputs = options?.presetInputs;
     const recordInputs = options?.recordInputs;
     const recordCommands = options?.recordCommands;
+    const runLogCollector = options?.runLogCollector;
     const onTaskTransition = options?.onTaskTransition;
     const total = action.tasks.length;
 
@@ -4839,9 +4923,11 @@ async function executeActionPipelineForRun(
         const skipReason = conditionGate(task);
         if (skipReason !== undefined) {
             conditionSkipped.add(taskId);
+            runLogCollector?.skipTask(taskId, skipReason, Date.now());
             return Promise.resolve({ taskId, kind: 'condition-skipped' as const, reason: skipReason });
         }
         emitTransition(taskId, 'running');
+        runLogCollector?.startTask(taskId, Date.now());
 
         const usePreset =
             !!presetInputs &&
@@ -4881,6 +4967,7 @@ async function executeActionPipelineForRun(
                     workspaceRoots,
                     presetValue,
                     recordCommands,
+                    runLogCollector,
                     taskScope,
                     taskUsesSecret
                 );
@@ -4907,6 +4994,23 @@ async function executeActionPipelineForRun(
 
         return wrapped.then(
             (result): InFlightOutcome => {
+                let output: TaskRunLogOutput | undefined;
+                if (task.type === 'command' || task.type === 'shell') {
+                    if (taskUsesSecret) {
+                        output = { availability: 'redacted' };
+                    } else if (result && typeof result === 'object') {
+                        const stdout = typeof (result as any).output === 'string' ? (result as any).output : undefined;
+                        const stderr = typeof (result as any).stderr === 'string' ? (result as any).stderr : undefined;
+                        if (stdout !== undefined || stderr !== undefined) {
+                            output = { availability: 'captured', stdout: stdout ?? '', stderr: stderr ?? '' };
+                        }
+                    }
+                }
+                runLogCollector?.finishTask(taskId, {
+                    status: 'success',
+                    finishedAt: Date.now(),
+                    output,
+                });
                 if (taskUsesSecret) {
                     finishSensitiveDebugCapture(
                         executionRun,
@@ -4945,7 +5049,30 @@ async function executeActionPipelineForRun(
                 // 바뀌어 뒤 태스크가 실행되고, 액션이 성공으로 마감되면서
                 // 방금 기록한 "Action stopped by user" 를 덮는다 — 0.6.29 와
                 // 0.6.35 가 고친 증상이 이 설정 한 줄로 되살아나던 경로다.
-                if (executionRun.cancellation.token.isCancellationRequested || executionRun.abandoned || executionRun.closed) {
+                const actionStopped = executionRun.cancellation.token.isCancellationRequested
+                    || executionRun.abandoned
+                    || executionRun.closed;
+                let output: TaskRunLogOutput | undefined;
+                if (task.type === 'command' || task.type === 'shell') {
+                    if (taskUsesSecret) {
+                        output = { availability: 'redacted' };
+                    } else if (raw instanceof ShellCommandError) {
+                        output = { availability: 'captured', stdout: raw.stdout, stderr: raw.stderr };
+                    } else if (raw.name === 'CaptureLimitError') {
+                        output = { availability: 'capture-truncated', truncated: true };
+                    }
+                }
+                runLogCollector?.finishTask(taskId, {
+                    status: !actionStopped && task.continueOnError ? 'continued' : 'failure',
+                    finishedAt: Date.now(),
+                    error: taskUsesSecret
+                        ? `Task '${taskId}' details hidden because it used a password input.`
+                        : raw.message,
+                    exitCode: raw instanceof ShellCommandError ? raw.exitCode : undefined,
+                    signal: raw instanceof ShellCommandError ? raw.signal : undefined,
+                    output,
+                });
+                if (actionStopped) {
                     return { taskId, kind: 'failed', error: e };
                 }
                 return task.continueOnError
@@ -5579,6 +5706,15 @@ export async function executeAction(
 
     // Add history entry
     const timestamp = Date.now();
+    const runLog = configuredRunLog(
+        actionWorkspaceFolder ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+        id,
+        actionItem.title,
+        timestamp,
+        action.tasks
+    );
+    let runLogOutcome: ActionRunLogOutcome = 'failure';
+    let runLogError: string | undefined;
     actionStartTimestamps.set(id, timestamp);
     if (historyProvider) {
         // Resolve breadcrumb path so HistoryItem can disambiguate same-title
@@ -5622,6 +5758,7 @@ export async function executeAction(
             presetInputs,
             recordInputs,
             recordCommands,
+            runLogCollector: runLog?.collector,
             // Surface "지금 어디" progress on the Actions panel. We only
             // mutate the existing actionStates entry (markActionAsRunning
             // already set state='running') and refresh the tree.
@@ -5688,6 +5825,7 @@ export async function executeAction(
         // also handles negatives (formatDuration → "0ms"), but clamping
         // here keeps the stored data clean for any future consumer.
         const durationMs = Math.max(0, Date.now() - timestamp);
+        runLogOutcome = 'success';
         const backgroundWillNotify = enqueueBackgroundCompletion(
             actionItem.title,
             'success',
@@ -5716,6 +5854,10 @@ export async function executeAction(
         if (!manuallyStopped && !promptCancelled) {
             const durationMs = Math.max(0, Date.now() - timestamp);
             const sensitiveFailure = containsSensitiveTaskError(error);
+            runLogOutcome = 'failure';
+            runLogError = sensitiveFailure
+                ? 'Failure details hidden because a task used a password input.'
+                : (error instanceof Error ? error.message : String(error));
             if (ownsCurrentState) {
                 // 실패는 배치 상태 표시에는 포함하되 알림으로 접지 않는다.
                 // 여러 결과를 개수로 요약하면 어느 액션이 왜 실패했는지 사라지고,
@@ -5784,6 +5926,8 @@ export async function executeAction(
                 actionStates.delete(id);
             }
             const reason = error instanceof Error ? error.message : String(error);
+            runLogOutcome = 'cancelled';
+            runLogError = reason;
             // **흔적은 남긴다.** 예전에는 이 오류가 위로 던져져 명령 래퍼가
             // `[ERROR] Execution failed for action …` 을 출력 채널에 적었다.
             // 이제 던지지 않으므로 그 줄도 사라졌는데, 그러면 "왜 배포가
@@ -5823,6 +5967,8 @@ export async function executeAction(
         } else {
             // Action was manually stopped
             const durationMs = Math.max(0, Date.now() - timestamp);
+            runLogOutcome = 'stopped';
+            runLogError = 'Action stopped by the user.';
             if (ownsCurrentState) {
                 enqueueBackgroundCompletion(
                     actionItem.title,
@@ -5846,6 +5992,7 @@ export async function executeAction(
         }
     } finally {
         finalizeActionRun(run, showTaskStatus, mainViewProvider);
+        await persistRunLog(runLog, runLogOutcome, Date.now(), runLogError);
     }
 }
 
@@ -5926,6 +6073,7 @@ async function executeSingleTask(
     workspaceRoots?: string[],
     presetResult?: unknown,
     recordCommands?: Record<string, string>,
+    runLogCollector?: ActionRunLogCollector,
     scope?: TaskExecutionScope,
     taskUsesSecret = false
 ): Promise<any> {
@@ -6191,6 +6339,14 @@ async function executeSingleTask(
             // 값이 로그로 그대로 샌다.
             const redactedDisplay = buildRedactedDisplayCommand(executionRun, task, interpolationContext, command, args);
             const redactedCwd = buildRedactedDisplayValue(executionRun, interpolationContext, task.cwd, interpolatedCwd);
+            const runLogOutputAvailability: TaskRunLogOutputAvailability = taskUsesSecret
+                ? 'redacted'
+                : task.isOneShot
+                    ? 'background-one-shot'
+                    : task.passTheResultToNextTask
+                        ? 'captured'
+                        : 'terminal';
+            runLogCollector?.recordCommand(task.id, redactedDisplay, redactedCwd, runLogOutputAvailability);
             const handlerTask = {
                 ...task,
                 command,
@@ -9549,6 +9705,22 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showWarningMessage(t('CHANGELOG.md 파일을 찾을 수 없습니다.', 'CHANGELOG.md not found.'));
         }
     }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openRunLogsFolder', async () => {
+        const folder = await pickWorkspaceFolderForCommand(t(
+            '실행 로그를 볼 워크스페이스 폴더를 선택하세요',
+            'Select the workspace folder whose run logs should be opened'
+        ));
+        if (!folder) { return; }
+        const logsPath = path.join(folder.uri.fsPath, RUN_LOG_DIRECTORY);
+        if (!fs.existsSync(logsPath)) {
+            vscode.window.showInformationMessage(t(
+                '아직 저장된 실행 로그가 없습니다. `taskhub.runLogs.enabled`를 켠 뒤 액션을 실행하세요.',
+                'No run logs have been saved yet. Enable `taskhub.runLogs.enabled`, then run an action.'
+            ));
+            return;
+        }
+        await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(logsPath));
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.editFavorites', async () => {
         const folder = await pickWorkspaceFolderForCommand(t('즐겨찾기를 편집할 워크스페이스 폴더를 선택하세요', 'Select a workspace folder to edit favorites for'));
         if (!folder) {
@@ -10910,6 +11082,7 @@ export function deactivate() {
     actionWorkspaceFolderMap.clear();
     actionChildProcesses.clear();
     actionStartTimestamps.clear();
+    runLogStores.clear();
     // Dispose per-action diagnostic collections so VS Code releases the
     // underlying resources cleanly.
     for (const col of actionDiagnosticCollections.values()) {

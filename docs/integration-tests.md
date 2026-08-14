@@ -125,6 +125,13 @@
 | IT-066 | 재실행 시에도 인터랙티브 task의 output 후처리가 실행됨 | preset이 type-specific dispatch를 우회하더라도 공통 후처리(capture + `passTheResultToNextTask` output 처리)는 그대로 실행되어 `output.mode: 'file'` 등이 정상 작동 |
 | IT-157 | workspace 입력 프로필 재실행 | `workspaceState`에 저장한 이름 있는 프로필을 다시 읽어 현재 액션과 대조한 뒤 `presetInputs`로 전달하면 대화상자를 열지 않고 downstream 파일 결과까지 생성 |
 
+### Structured Run Logs
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-158 | 캡처 출력 저장과 password 파생 값 마스킹 | 실제 `command` 캡처 결과는 `.taskhub/logs/` JSON에 저장되지만 `password: true` 입력을 argv로 받은 태스크의 명령·출력에는 원본 비밀 문자열이 남지 않음 |
+
 ### Last-run 배지
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)
 

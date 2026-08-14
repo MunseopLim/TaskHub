@@ -601,6 +601,26 @@ History 패널은 액션 실행과 Memory Map·Hex Editor·JSON Editor 열람을
 - 행의 인라인 버튼으로 저장 입력 재실행, 명령 보기, 실패 출력 보기, 개별 삭제를 수행합니다. 제목 표시줄에서는 확인 후 전체 삭제합니다.
 - 보관 개수와 패널 표시 여부는 `taskhub.history.maxItems`와 `taskhub.history.showPanel`로 설정합니다. 자세한 기본값은 [§21](#21-설정-레퍼런스)을 참조하세요.
 
+### 실행 로그 영속화 (선택)
+
+`taskhub.runLogs.enabled`(기본 `false`)를 켜면 액션별 구조화 로그를 워크스페이스의
+`.taskhub/logs/`에 JSON `.log` 파일로 저장합니다. Command Palette의 **TaskHub: 실행 로그 폴더
+열기**로 저장 위치를 바로 열 수 있습니다.
+
+- 액션·태스크 상태, 소요 시간, 마스킹된 명령, `cwd`, 종료 코드, 실패 사유와 **이미
+  캡처 모드로 받은** stdout/stderr를 남깁니다. VS Code 터미널로 스트림한 출력과 백그라운드
+  one-shot 출력은 동작을 바꾸어 캡처하지 않고 각각 `terminal`·`background-one-shot`으로 표시합니다.
+- `password: true` 입력을 사용한 태스크의 명령과 `cwd`는 마스킹하고 출력은 `redacted`로만
+  기록합니다. 다만 일반 출력에 토큰·프로젝트 데이터가 들어 있는지는 TaskHub가 완전히
+  판별할 수 없으므로, 이 기능은 기본으로 꺼져 있습니다.
+- 개별 파일은 8MB에서 잘리며 `truncated`와 원래 바이트 수를 남겨 완전한 출력처럼
+  보이지 않게 합니다. 기본 보관 정책은 워크스페이스 전체 100개·30일·100MB이며, 만료
+  기간 → 개수 → 총 용량 순서로 오래된 파일을 정리합니다. 자세한 상한은 [§21](#21-설정-레퍼런스)에
+  있습니다.
+- `logs/.gitignore`가 없으면 자동 생성해 로그가 Git에 실수로 포함되지 않게 합니다. 기존
+  파일은 덮어쓰지 않습니다. 저장·회전 실패는
+  TaskHub 출력 채널에 경고만 남기고 액션의 성공·실패 결과를 바꾸지 않습니다.
+
 ## 15. C/C++ Hover 기능
 
 C/C++ 파일 작업 시 마우스를 올리면 유용한 정보를 자동으로 표시하는 기능들입니다.
@@ -1228,6 +1248,10 @@ ELF/AXF Memory Map의 **바이트 보기**에서 열면 ELF 컨테이너를 raw 
 | `taskhub.backgroundCompletion.notificationMode` | `"whenUnfocused"` \| `"always"` \| `"never"` | `"whenUnfocused"` | 장시간 성공·중지 완료 알림의 포커스 정책. `never`여도 짧은 상태 표시줄 안내와 기존 액션 지정 메시지·상세 실패 알림은 유지된다. | [§5 장시간 액션 완료 알림](#장시간-액션-완료-알림) |
 | `taskhub.backgroundCompletion.outcomes` | `array` | `["success","failure","stopped"]` | 장시간 완료 표시 대상 결과. 빈 배열이면 다른 실행 피드백은 유지하면서 이 기능만 끈다. 750ms 안의 완료는 하나로 묶는다. | [§5 장시간 액션 완료 알림](#장시간-액션-완료-알림) |
 | `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | 파이프라인 실행 시 TaskHub OutputChannel에 상세 명령/STDOUT/STDERR/exit code를 출력. 디버깅에만 켤 것. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
+| `taskhub.runLogs.enabled` | `boolean` | `false` | 구조화된 액션 실행 로그를 `.taskhub/logs/`에 저장. 일반 stdout/stderr의 미식별 비밀·프로젝트 데이터 영속화 위험 때문에 기본은 꺼짐. | [§14 실행 로그](#실행-로그-영속화-선택) |
+| `taskhub.runLogs.maxFiles` | `integer` | `100` (1–1000) | 워크스페이스 전체에 보관할 액션 실행 로그 파일 최대 개수. | [§14 실행 로그](#실행-로그-영속화-선택) |
+| `taskhub.runLogs.retentionDays` | `integer` | `30` (0–3650) | 설정 일수보다 오래된 로그를 삭제. `0`은 기간 기준만 끄고 개수·총 용량 상한은 유지. | [§14 실행 로그](#실행-로그-영속화-선택) |
+| `taskhub.runLogs.maxTotalSizeMb` | `integer` | `100` (8–4096) | 워크스페이스 전체 로그 합계 용량(MB). 개별 파일 8MB 상한은 별도로 적용. | [§14 실행 로그](#실행-로그-영속화-선택) |
 | `taskhub.pipeline.pythonIoEncoding` | `string` | `"utf-8"` | TaskHub가 실행하는 모든 명령의 `PYTHONIOENCODING` 환경변수 값. 빈 문자열이면 강제 설정 안 함. `utf-8:ignore` 같은 값도 가능. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell의 콘솔 출력과 `>`/`>>` 파일 리다이렉션 인코딩. `"utf8"`의 파일은 Windows PowerShell 5.1에서 BOM이 붙고 PowerShell 7에서는 BOM이 없다. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
 | `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` (1–1024) | 캡처 모드(`passTheResultToNextTask: true`)에서 누적되는 stdout/stderr 총 크기 상한(MB). 초과 시 프로세스를 종료하고 명확한 에러로 실패. | [§5 Output Capture](#output-capture) |

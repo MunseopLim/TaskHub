@@ -26,6 +26,7 @@ TaskHub/
 │   │                                  # - toWorkspaceRelativePath(): 절대경로 → ${workspaceFolder} 정규화
 │   │                                  # - wouldExceedCaptureLimit(): 캡처 한도 off-by-one guard
 │   ├── backgroundCompletion.ts        # 장시간 액션 완료 정책·750ms 묶음·표시 문구 순수 로직
+│   ├── runLogStore.ts                 # 구조화 실행 로그 수집·상한·원자 저장·회전
 │   ├── previewRun.ts                  # Preview Run (Dry-run) 리포트 생성
 │   ├── previewOpener.ts               # preview/browser 열기 명령 헬퍼
 │   ├── doctor.ts                      # actions.json 정적 분석(Doctor) 순수 모듈
@@ -117,6 +118,7 @@ Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
 *   **변수 치환**: `${task_id.property}` 형식으로 파이프라인 간 데이터 전달
 *   **Task DAG**: `dependsOn` 및 `${taskId.x}` 자동 추론 의존성으로 그래프를 구성하며, `parallel: true` 태스크는 sync barrier에서 빠져 동시 실행 풀에 들어간다. 상세 시맨틱은 [features.md §24 병렬 실행 / Task DAG](./features.md#24-병렬-실행--task-dag) 참조.
 *   **장시간 완료 피드백**: `executeAction()`이 성공·실패·명시적 중지의 `durationMs`와 완료 시점 창 포커스를 확정하고, [backgroundCompletion.ts](../src/backgroundCompletion.ts)가 임계값·대상 결과·알림 정책과 750ms 묶음을 판정합니다. 성공·중지 알림만 묶고 실패는 원인이 있는 기존 오류 알림을 개별 유지하며, 상태 표시줄은 모든 대상 결과를 요약합니다. `taskhub.showTaskStatus`가 마스터 게이트이며 비밀번호 파생 실패의 민감 디버그 알림은 대체하지 않습니다.
+*   **실행 로그**: `executeAction()`이 옵션으로 `ActionRunLogCollector`를 생성하고, 파이프라인이 태스크 전이·이미 마스킹된 명령·캡처 출력을 넣습니다. [runLogStore.ts](../src/runLogStore.ts)는 VS Code에 의존하지 않고 JSON 상한, 원자 쓰기와 워크스페이스별 직렬 회전을 담당합니다. 저장 실패는 실행 결과와 분리합니다.
 *   **파일 감시**: debounce({ run, cancel }) 패턴으로 JSON 변경 감지
 
 ### 2.1. 동적 커맨드 등록 (`syncActionCommands`)
@@ -151,6 +153,7 @@ Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
 | --- | --- | --- |
 | `HistoryEntry` | [providers/historyProvider.ts](../src/providers/historyProvider.ts) | 액션과 도구 열람을 함께 저장합니다. 상태는 `running`·`success`·`failure`·`cancelled`이며, 비밀번호 입력은 `inputs`에 기록하지 않습니다. 프로필의 타입 변경 판정을 위해 새 실행은 `inputTaskTypes`도 함께 기록하며 레거시 항목은 선택 필드가 없을 수 있습니다. |
 | `NamedInputProfile` | [inputProfiles.ts](../src/inputProfiles.ts) | 액션 ID·이름·입력값과 저장 당시 task type 서명을 보관합니다. 현재 액션과 일치하는 값만 `presetInputs`로 전달합니다. |
+| `ActionRunLog` | [runLogStore.ts](../src/runLogStore.ts) | 액션 결과와 태스크별 상태·시간·명령·출력 가용성을 버전 1 JSON으로 저장합니다. 실행기가 마스킹 경계를 결정하고 저장소는 이미 마스킹된 값만 받습니다. |
 | `LinkEntry` | [providers/linkViewProvider.ts](../src/providers/linkViewProvider.ts) | 표시용 정규화 값과 원본 `raw`를 함께 보존하여 알 수 없는 사용자 필드를 잃지 않습니다. |
 | `FavoriteEntry` | [providers/favoriteViewProvider.ts](../src/providers/favoriteViewProvider.ts) | 링크와 같은 원본 보존 규약을 따르고 워크스페이스·줄 위치 메타데이터를 가집니다. |
 | 액션·태스크 스키마 | [schema.ts](../src/schema.ts), [actions.schema.json](../schema/actions.schema.json) | TypeScript 실행 타입과 사용자 JSON 검증 스키마를 함께 갱신합니다. |
@@ -206,6 +209,7 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
     *   값: 버전 1 입력 프로필 배열 — 직렬화된 프로필 전체 기준 128KB, 최대 50개·총 2MB. 구조가
         잘못된 개별 항목과 알 수 없는 루트 필드는 후속 저장·삭제에서도 원본 그대로 보존하고,
         루트 구조나 버전 자체가 지원되지 않으면 기존 상태를 덮어쓰지 않는다.
+*   **워크스페이스 파일**: 실행 로그 저장을 켰을 때 `.taskhub/logs/<sanitized-action-id+hash>/<timestamp>-<nonce>.log`에 `ActionRunLog` JSON을 저장합니다. 개별 8MB 상한을 넘으면 stdout/stderr를 줄이고 `truncated`를 남기며, 기간 → 개수 → 총 용량 순으로 오래된 파일을 회전합니다. 로그 루트의 `.gitignore`는 생성하되 기존 파일은 덮어쓰지 않습니다.
 
 설정 정의의 정본은 [package.json](../package.json)의 `contributes.configuration`입니다. [features.md §21 설정 레퍼런스](./features.md#21-설정-레퍼런스)는 이를 사용자 관점에서 설명하며, 이 문서는 중복 목록 대신 해당 레퍼런스만 가리킵니다. 키·기본값·범위의 정합성은 `src/test/docConsistency.test.ts`가 검사합니다.
 
@@ -256,6 +260,7 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   상대 경로(`"report.txt"`, `"build/out.log"` 등)는 `process.cwd()`가 아니라 실행 중인 액션의 워크스페이스 폴더(`defaultWorkspace`) 기준으로 resolve한다. 이를 위해 `resolveWithinWorkspace(targetPath, roots, baseDir)` 시그니처의 3번째 인자로 액션 워크스페이스를 전달한다.
     *   **`zip` / `unzip`은 이 격리에서 의도적으로 제외된다.** 두 태스크는 `fileDialog` / `folderDialog`로 사용자가 **런타임에 고른** 위치를 그대로 다루는 것이 설계이고(번들 예제 `media/actions_example.json`의 zip 액션이 고른 폴더를 그 자리에서 압축한다), 워크스페이스로 묶으면 그 흐름 자체가 성립하지 않는다. 대신 다른 층으로 방어한다 — 추출은 zip-slip·심볼릭/하드 링크·크기/개수 상한(`archiveUtils.ts`)으로, 생성은 소스 루트 밖을 가리키는 링크 제외로 막는다.
     *   다만 **상대 경로의 기준점은 두 엔진이 같아야 한다.** 내장 엔진은 cwd 개념이 없어 `path.resolve`가 extension host의 `process.cwd()`(= VS Code를 띄운 위치)를 쓰는 반면 외부 `tool` 경로는 자식 프로세스의 cwd를 쓰므로, 같은 태스크가 `tool` 유무로 다른 위치에 파일을 만들었다. `resolveBuiltinArchivePath(targetPath, baseDir)`가 내장 엔진 호출 직전에 `task.cwd` → 워크스페이스 순으로 기준점을 맞춘다(격리는 하지 않는다). 반환하는 `${zip.archivePath}` / `${unzip.outputDir}`도 해석된 절대 경로다.
+    *   실행 로그는 사용자가 별도 경로를 지정할 수 없고 고정된 `.taskhub/logs/`에만 쓴다. 중간 디렉터리가 심볼릭 링크이거나 실제 경로가 워크스페이스 밖으로 나가면 쓰기를 거부한다. 파일은 exclusive 임시 파일에 먼저 쓰고 `fsync` 후 rename하며, 쓰기·회전 오류는 액션 결과를 바꾸지 않는다.
 4.  **쉘 인자 이스케이프 / 실행 경로 선택**
     *   POSIX: `buildPosixCommandLine`이 `quotePosixArgument`로 각 인자를 싱글쿼트로 감싸고(내부 싱글쿼트는 `'\''`) `sh -c`로 실행.
     *   Windows — **실행 경로 판별**: `resolveWindowsDirectExecutable(command, args, { env, cwd })`가 셸 없이 띄울 실제 `.exe`/`.com` 경로를 반환하고, `resolveWindowsTaskSpawn`은 전략과 이 절대 경로를 함께 보존한다. 확장자 없는 이름과 `node.exe` 같은 bare 이름은 `PATH`에서 찾고, 상대 명령 경로와 상대 PATH 항목은 task의 실제 cwd를 기준으로 해석한다. `.cmd`/`.bat`/`.ps1`/`.js` 같은 스크립트·shim(`npm`/`npx`/`pnpm`/`yarn` 등, 실제로는 `*.cmd`), 셸 빌트인/별칭(`echo`, `dir`, `cd`, …)은 제외한다. PATH 해석은 호출자가 넘긴 **task의 실제 실행 env**(`{ ...process.env, ...envOverrides }`)를 기준으로 한다.

@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.7.27",
+  "version": "0.7.28",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -111,6 +111,32 @@
           "type": "boolean",
           "default": false,
           "description": "%setting.showVerboseLogs%"
+        },
+        "taskhub.runLogs.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "%setting.runLogsEnabled%"
+        },
+        "taskhub.runLogs.maxFiles": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 1000,
+          "markdownDescription": "%setting.runLogsMaxFiles%"
+        },
+        "taskhub.runLogs.retentionDays": {
+          "type": "integer",
+          "default": 30,
+          "minimum": 0,
+          "maximum": 3650,
+          "markdownDescription": "%setting.runLogsRetentionDays%"
+        },
+        "taskhub.runLogs.maxTotalSizeMb": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 8,
+          "maximum": 4096,
+          "markdownDescription": "%setting.runLogsMaxTotalSize%"
         },
         "taskhub.pipeline.pythonIoEncoding": {
           "type": "string",
@@ -402,6 +428,10 @@
       {
         "command": "taskhub.openSettings",
         "title": "%cmd.openSettings%"
+      },
+      {
+        "command": "taskhub.openRunLogsFolder",
+        "title": "%cmd.openRunLogsFolder%"
       },
       {
         "command": "taskhub.rerunFromHistory",
