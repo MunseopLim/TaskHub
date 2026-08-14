@@ -137,7 +137,19 @@ suite('Password taint and redaction', function () {
     teardown(() => {
         actionStates.clear();
         if (tempWorkspace && fs.existsSync(tempWorkspace)) {
-            fs.rmSync(tempWorkspace, { recursive: true, force: true });
+            // 이 suite 는 one-shot 을 `cwd: tempWorkspace` 로 띄운다. 테스트는
+            // marker 파일이 보이면 곧바로 진행하는데 자식은 그 직후 아직 종료
+            // 중이고, Windows 는 **실행 중 프로세스의 현재 디렉터리를 잠근다**
+            // — 그 창에 걸리면 삭제가 `EPERM` 으로 죽어 정리 훅이 실패한다
+            // (실측: Windows CI). `force` 는 "없는 경로 무시"일 뿐 EPERM 을
+            // 재시도하지 않는다. pipelineIntegration.test.ts 와 같은 처리다:
+            // 재시도 후에도 남으면 os.tmpdir() 아래 잔여 디렉터리는 무해하므로
+            // 스위트를 실패시키지 않는다.
+            try {
+                fs.rmSync(tempWorkspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+            } catch (err: any) {
+                console.warn(`teardown: could not remove ${tempWorkspace} (${err?.code ?? err?.message ?? err}); leaving for OS temp cleanup`);
+            }
         }
     });
 
