@@ -186,6 +186,18 @@ export interface Task {
      * the parent directory does not exist.
      */
     mkdirs?: boolean;
+    /**
+     * Opt-in required to persist `password`-derived content to disk.
+     *
+     * `writeFile` / `appendFile` / `output.mode: 'file'` refuse to write a
+     * value derived from a `password: true` input unless the task declares
+     * this flag. The capability itself is legitimate (generating `.netrc`,
+     * `.env`, a signing config), but interpolating `${token.value}` into
+     * `content` must not silently grant it — the intent has to be visible in
+     * `actions.json` where it can be reviewed. Files written under this flag
+     * are created with owner-only permissions (`0600`, no effect on Windows).
+     */
+    allowSecretContent?: boolean;
 
     // Output handling
     output?: Output;

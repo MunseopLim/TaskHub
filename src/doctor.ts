@@ -39,6 +39,7 @@ import {
     detectGraphCycle,
     formatCyclePath,
     evaluateTaskCondition,
+    inferTaskDependencies,
     selectPlatformValue,
     RESERVED_VARIABLE_HEADS,
     RESERVED_HEAD_PREFIXES,
@@ -2385,6 +2386,42 @@ function patternMeaningfullyConstrains(pattern: unknown): boolean {
     return dangerous.every(char => !re.test(`a${char}b`) && !re.test(char));
 }
 
+/**
+ * `password` 결과가 흘러가는 태스크 집합.
+ *
+ * 런타임의 `taskReferencesSecret` 와 **같은 스캐너**(`inferTaskDependencies`)를
+ * 쓴다. 별도 구현을 두면 플랫폼별 분기 같은 세부에서 어긋나 진단만 틀리게 된다.
+ * 오염은 전이적이므로(비밀을 쓴 태스크는 자기 결과도 비밀이 된다) 더 늘지
+ * 않을 때까지 반복한다.
+ */
+function collectSecretTaskIds(tasks: Task[]): Set<string> {
+    const secret = new Set<string>();
+    for (const task of tasks) {
+        if (task && typeof task.id === 'string' && task.type === 'inputBox' && task.password === true) {
+            secret.add(task.id);
+        }
+    }
+    for (let changed = true; changed;) {
+        changed = false;
+        for (const task of tasks) {
+            if (!task || typeof task.id !== 'string' || secret.has(task.id)) { continue; }
+            if (inferTaskDependencies(task, secret).size > 0) {
+                secret.add(task.id);
+                changed = true;
+            }
+        }
+    }
+    return secret;
+}
+
+/** 런타임이 이 태스크로 디스크에 파일을 남기는가. */
+function persistsToFile(task: Task): boolean {
+    if (task.type === 'writeFile' || task.type === 'appendFile') { return true; }
+    // `output` 블록은 `passTheResultToNextTask` 게이트 안에서만 산다
+    // (`output.ignored` 검사와 같은 규칙).
+    return task.passTheResultToNextTask === true && task.output?.mode === 'file';
+}
+
 function analyzeActionTasks(
     item: ActionItem,
     tasks: Task[],
@@ -2440,6 +2477,11 @@ function analyzeActionTasks(
      */
     const BUILTIN_CONTEXT_KEYS = RESERVED_VARIABLE_HEADS;
     const forwardTaskIds = new Set<string>(knownTaskIds);
+    // 런타임과 **같은 스캐너**로 비밀 오염을 전파한다. 실행기는 태스크가 끝날 때
+    // `markTaskResultSecret` 로 자신을 오염 집합에 넣으므로 전이적이며, 여기서는
+    // 고정점까지 돌려 같은 집합을 만든다. 선언 순서가 아니라 참조 관계로 도는
+    // 이유는 스케줄러가 `${id.x}` 로 실행 순서를 뒤집기 때문이다.
+    const secretTaskIds = collectSecretTaskIds(tasks);
 
     for (const task of tasks) {
         if (!task || typeof task.id !== 'string') {
@@ -2860,6 +2902,38 @@ function analyzeActionTasks(
                     messageKo: `Task '${item.id}.${task.id}'에 런타임이 읽지 않는 output ${dead.join(', ')}가 정의되어 있습니다 — 'mode'/'language'/'content'/'filePath'/'overwrite'는 'passTheResultToNextTask': true가 필요하고('filePath'/'overwrite'는 mode가 'file', 'language'는 'editor'여야 합니다), 'capture'/'diagnostics'는 문자열 출력이 필요합니다.`,
                 });
             }
+        }
+
+        // password 파생 값을 디스크에 남기려면 태스크가 그렇게 선언해야 한다.
+        // 런타임이 실행 중에 거부하는 자리라 **실행하기 전에** 알려 준다 —
+        // 파이프라인 중간에서 멈추면 앞 태스크의 부수 효과는 이미 일어난 뒤다.
+        const writesSecretToFile = persistsToFile(task) && secretTaskIds.has(task.id);
+        if (writesSecretToFile && task.allowSecretContent !== true) {
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: findIdLine(input.rawText, task.id),
+                severity: 'error',
+                code: 'secret.file-optin',
+                message: `Task '${item.id}.${task.id}' would persist a password-derived value to disk without 'allowSecretContent': true — the runtime refuses this write.`,
+                messageKo: `Task '${item.id}.${task.id}'가 'allowSecretContent': true 없이 password 파생 값을 파일로 저장하려 합니다 — 런타임이 이 쓰기를 거부합니다.`,
+            });
+        }
+        // 반대 방향: 아무 효과도 없는 선언은 "여기서 비밀을 다룬다"는 잘못된
+        // 신호를 남기고 리뷰를 무디게 만든다.
+        if (task.allowSecretContent === true && !writesSecretToFile) {
+            const reason = persistsToFile(task)
+                ? { en: 'the task writes a file but nothing in it is password-derived', ko: '이 태스크는 파일을 쓰지만 password 파생 값이 없습니다' }
+                : { en: 'the task does not write a file', ko: '이 태스크는 파일을 쓰지 않습니다' };
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: findIdLine(input.rawText, task.id),
+                severity: 'warning',
+                code: 'secret.allow-unused',
+                message: `Task '${item.id}.${task.id}' sets 'allowSecretContent' but it grants nothing — ${reason.en}.`,
+                messageKo: `Task '${item.id}.${task.id}'의 'allowSecretContent'는 아무것도 허용하지 않습니다 — ${reason.ko}.`,
+            });
         }
 
         // `shell` 은 명령 문자열을 셸에 그대로 넘긴다(0.6.47). 그래서 그 안에

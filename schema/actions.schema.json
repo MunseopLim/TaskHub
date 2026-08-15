@@ -361,6 +361,11 @@
           "description": "For 'writeFile' / 'appendFile': if true (default), missing parent directories are created automatically. If false, the task fails when the parent directory is missing.",
           "default": true
         },
+        "allowSecretContent": {
+          "type": "boolean",
+          "description": "Allows 'writeFile' / 'appendFile' / output.mode 'file' to persist content derived from a 'password: true' input. Without this flag such writes are refused. Files written under this flag are created with owner-only permissions (0600; no effect on Windows).",
+          "default": false
+        },
         "timeoutSeconds": {
           "type": "number",
           "description": "Task-level timeout in seconds. If the task does not complete within this budget, it is canceled and the pipeline fails with a timeout error (subject to 'continueOnError'). 0 or omitted disables the timeout. Applies to every task type, including interactive ones.",

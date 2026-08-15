@@ -585,7 +585,7 @@ suite('Password taint and redaction', function () {
         assert.ok(!verboseLines.join('\n').includes(secret), 'discard된 민감 출력이 verbose log에 샜다');
     });
 
-    test('민감 output.mode editor/terminal은 억제하고 명시적 file 저장은 유지한다', async () => {
+    test('민감 output.mode editor/terminal은 억제하고 file 저장은 opt-in 으로만 허용한다', async () => {
         const secret = 'Output-Mode-S3cret';
         const outputFile = path.join(tempWorkspace, 'explicit-sensitive-output.txt');
         const originalOpen = vscode.workspace.openTextDocument;
@@ -626,6 +626,10 @@ suite('Password taint and redaction', function () {
                     {
                         id: 'file',
                         ...outputCommand,
+                        // 저장 경로가 명시적이라는 것과 **비밀을 남기겠다는
+                        // 의도**가 명시적인 것은 다르다. 후자는 이 플래그로만
+                        // 선언된다.
+                        allowSecretContent: true,
                         output: { mode: 'file', filePath: outputFile, overwrite: true },
                     },
                 ],
@@ -649,10 +653,74 @@ suite('Password taint and redaction', function () {
 
         assert.strictEqual(editorCalls, 0);
         assert.strictEqual(terminalCalls, 0);
-        assert.strictEqual(warnings.length, 2, 'editor/terminal 억제 사실을 각각 알려야 한다');
+        // editor/terminal 억제 2건 + 비밀이 디스크에 남았다는 고지 1건.
+        assert.strictEqual(warnings.length, 3, 'editor/terminal 억제와 파일 저장 사실을 각각 알려야 한다');
         assert.ok(!warnings.join('\n').includes(secret));
+        assert.ok(
+            warnings.some(message => message.includes(outputFile)),
+            '비밀이 디스크에 남은 사실은 경로와 함께 알려야 한다'
+        );
         assert.strictEqual(fs.readFileSync(outputFile, 'utf8'), secret,
-            'mode:file은 actions.json의 명시적 영구 저장 정책으로 유지한다');
+            'allowSecretContent 를 선언한 mode:file 저장은 그대로 수행한다');
+        if (process.platform !== 'win32') {
+            assert.strictEqual(
+                fs.statSync(outputFile).mode & 0o777, 0o600,
+                '비밀이 담긴 파일은 소유자만 읽을 수 있어야 한다'
+            );
+        }
+    });
+
+    test('allowSecretContent 없이는 password 파생 값을 파일로 쓰지 않는다', async () => {
+        const secret = 'No-OptIn-S3cret';
+        const outputFile = path.join(tempWorkspace, 'refused-output.txt');
+        const writeFileTarget = path.join(tempWorkspace, 'refused-write.txt');
+
+        for (const task of [
+            {
+                id: 'toFile',
+                type: 'command' as const,
+                command: platformCommand('node'),
+                args: ['-e', 'process.stdout.write(process.argv[1])', '${ask.value}'],
+                cwd: tempWorkspace,
+                passTheResultToNextTask: true,
+                output: { mode: 'file' as const, filePath: outputFile, overwrite: true },
+            },
+            {
+                id: 'toFile',
+                type: 'writeFile' as const,
+                path: writeFileTarget,
+                content: '${ask.value}',
+            },
+        ]) {
+            const actionItem: ActionItem = {
+                id: 'secret-file-optin',
+                title: 'Secret file opt-in',
+                action: {
+                    description: 'refuse secret persistence without the flag',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                        task,
+                    ] as Task[],
+                },
+            };
+
+            await assert.rejects(
+                extension.executeActionPipeline(
+                    actionItem.action as PipelineAction,
+                    makeContext(),
+                    actionItem.id,
+                    tempWorkspace,
+                    [tempWorkspace],
+                    { presetInputs: { ask: { value: secret } } }
+                ),
+                (error: unknown) =>
+                    error instanceof Error && /allowSecretContent/.test(error.message),
+                `${task.type} must refuse without the opt-in`
+            );
+        }
+
+        assert.ok(!fs.existsSync(outputFile), '거부된 output.mode:file 이 파일을 남겼다');
+        assert.ok(!fs.existsSync(writeFileTarget), '거부된 writeFile 이 파일을 남겼다');
     });
 
     /**
@@ -661,7 +729,7 @@ suite('Password taint and redaction', function () {
      * 같은 가드가 걸리는지 따로 확인해야 한다 — 이쪽이 더 직접적이다.
      * `${ask.value}` 를 거치지 않고 비밀번호 **원문**이 그대로 나간다.
      */
-    test('password inputBox 자신의 output.mode editor/terminal도 억제한다 (file 은 유지)', async () => {
+    test('password inputBox 자신의 output.mode editor/terminal도 억제한다 (file 은 opt-in)', async () => {
         const secret = 'Self-Output-S3cret';
         const outputFile = path.join(tempWorkspace, 'self-sensitive-output.txt');
         const originalOpen = vscode.workspace.openTextDocument;
@@ -705,15 +773,17 @@ suite('Password taint and redaction', function () {
                         passTheResultToNextTask: true,
                         output: { mode: 'terminal' },
                     },
-                    // `mode: file` 은 **일부러 막지 않는다** — 저장 경로가
-                    // actions.json 에 적힌 명시적 정책이기 때문이다. 새 플래그가
-                    // 이쪽까지 번지면 기존 계약이 조용히 깨지므로 함께 고정한다.
+                    // `mode: file` 은 `allowSecretContent` 를 선언한 경우에만
+                    // 수행한다. 비밀번호 태스크 **자신의** output 도 같은
+                    // 게이트를 지나는지 여기서 고정한다 — 이쪽은 `${ask.value}`
+                    // 를 거치지 않고 원문이 그대로 나가는 경로다.
                     {
                         id: 'askFile',
                         type: 'inputBox',
                         prompt: 'password to file?',
                         password: true,
                         passTheResultToNextTask: true,
+                        allowSecretContent: true,
                         output: { mode: 'file', filePath: outputFile, overwrite: true },
                     },
                 ] as Task[],
@@ -743,14 +813,17 @@ suite('Password taint and redaction', function () {
 
         assert.strictEqual(editorCalls, 0, 'hot-exit 백업 대상인 untitled 에디터에 비밀번호가 그대로 들어갔다');
         assert.strictEqual(terminalCalls, 0, '터미널에 비밀번호가 그대로 찍혔다');
-        assert.strictEqual(warnings.length, 2, 'editor/terminal 억제 사실을 각각 알려야 한다');
+        assert.strictEqual(warnings.length, 3, 'editor/terminal 억제와 파일 저장 사실을 각각 알려야 한다');
         assert.ok(!warnings.join('\n').includes(secret), '억제 안내 문구에 비밀번호가 섞였다');
         // `output.content` 가 없으면 결과 객체 전체가 직렬화되므로
         // (`inputBox` 는 `{ value }`) 정확히 일치하는 대신 포함으로 본다.
         assert.ok(
             fs.readFileSync(outputFile, 'utf8').includes(secret),
-            'mode:file 까지 막혔다 — 명시적 저장 정책이 조용히 깨졌다'
+            'allowSecretContent 를 선언한 mode:file 이 막혔다'
         );
+        if (process.platform !== 'win32') {
+            assert.strictEqual(fs.statSync(outputFile).mode & 0o777, 0o600);
+        }
     });
 
     test('password-derived ZIP의 제외 symlink 경고는 경로 없이 한 줄로 요약한다', async function () {

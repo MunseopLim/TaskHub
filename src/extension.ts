@@ -2784,6 +2784,63 @@ function buildRedactedDisplayValue(
 /** 이력·로그에 남기는 자리표시자. 값 길이를 짐작하게 하지 않는다. */
 const SECRET_PLACEHOLDER = '***';
 
+/** password 파생 파일의 권한. 소유자만 읽고 쓴다. */
+const SECRET_FILE_MODE = 0o600;
+
+/**
+ * password 파생 값을 디스크에 남기려면 **태스크가 그렇게 선언해야** 한다.
+ *
+ * `.netrc`·`.env`·서명 설정을 만드는 일 자체는 정당하므로 기능을 없애지
+ * 않는다. 막을 것은 `content` 에 `${token.value}` 를 끼워 넣었다는 이유만으로
+ * 아무 표시 없이 그 권한이 생기는 것이다 — 의도가 `actions.json` 에 남아야
+ * 리뷰와 Doctor 가 볼 수 있다.
+ *
+ * `editor`·`terminal` 은 사용자가 위치를 고르지 않은 **암묵적** 영속화라
+ * 여전히 전면 차단이다. 이쪽은 사용자가 `filePath` 를 직접 적은 경우다.
+ */
+function requireSecretContentOptIn(task: import('./schema').Task, secretDerived: boolean): void {
+    if (!secretDerived || task.allowSecretContent === true) { return; }
+    throw new SecretContentPolicyError(
+        `Task '${task.id}' would write a password-derived value to disk. `
+        + `Set 'allowSecretContent': true on the task to allow it (the file is then created with owner-only permissions).`
+    );
+}
+
+/**
+ * `writeFileSync` 의 `mode` 는 **파일을 새로 만들 때만** 적용된다. 이미
+ * 0644 로 있던 파일을 덮어쓰면 권한이 그대로 남으므로 쓴 뒤에 한 번 더 조인다.
+ * Windows 는 읽기 전용 비트만 대응하므로 건너뛴다 — 실패해도 쓰기 자체를
+ * 되돌리지는 않는다(파일은 이미 만들어졌고, 사용자가 요청한 동작이다).
+ */
+function restrictSecretFilePermissions(filePath: string): void {
+    if (process.platform === 'win32') { return; }
+    try {
+        fs.chmodSync(filePath, SECRET_FILE_MODE);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        outputChannel.appendLine(`[WARN] Could not restrict permissions on '${filePath}': ${message}`);
+    }
+}
+
+/** 비밀이 디스크에 남는 순간은 조용히 지나가면 안 된다. */
+function notifySecretFileWrite(taskId: string, filePath: string): void {
+    vscode.window.showWarningMessage(t(
+        `태스크 '${taskId}'가 password 파생 값을 '${filePath}'에 저장했습니다. 소유자만 읽도록 권한을 조였지만, 버전 관리에 올라가지 않는지 확인하세요.`,
+        `Task '${taskId}' stored a password-derived value in '${filePath}'. Permissions were restricted to the owner — make sure the file is not committed to version control.`
+    ));
+}
+
+/**
+ * 비밀 영속화 정책 위반. **메시지에 비밀이 없다** — 태스크 id 와 켜야 할 플래그
+ * 이름뿐이라, 비밀 태스크의 실패를 가리는 래퍼를 통과시킨다.
+ */
+export class SecretContentPolicyError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'SecretContentPolicyError';
+    }
+}
+
 /** Raised when a run ends because the user pressed stop, not because it failed. */
 export class ActionStoppedError extends Error {
     constructor() {
@@ -5064,7 +5121,15 @@ async function executeActionPipelineForRun(
                 // 취소는 중지와 마찬가지로 **비밀 실패가 아니다.** 감싸 버리면
                 // 상세가 가려지고 "민감 디버그로 다시 실행" 제안까지 뜬다 —
                 // 사용자는 그냥 다이얼로그를 닫았을 뿐인데.
-                const e = taskUsesSecret && !(raw instanceof ActionStoppedError) && !(raw instanceof PromptCancelledError)
+                //
+                // `SecretContentPolicyError` 도 같은 부류다. 내용은 태스크 id 와
+                // 켜야 할 플래그 이름뿐이라 비밀이 없고, 하필 **비밀 태스크에서만**
+                // 발생하므로 감싸 버리면 고치는 방법을 아무도 못 보게 된다.
+                const policyFailure = raw instanceof SecretContentPolicyError;
+                const e = taskUsesSecret
+                    && !policyFailure
+                    && !(raw instanceof ActionStoppedError)
+                    && !(raw instanceof PromptCancelledError)
                     ? new SensitiveTaskError(taskId, describeSensitiveFailure(raw, maskedCommandForTask(taskId)))
                     : raw;
                 // 사용자 중지는 `continueOnError` 보다 우선한다. 그 설정의 뜻은
@@ -5089,13 +5154,13 @@ async function executeActionPipelineForRun(
                 runLogCollector?.finishTask(taskId, {
                     status: !actionStopped && task.continueOnError ? 'continued' : 'failure',
                     finishedAt: Date.now(),
-                    error: taskUsesSecret
+                    error: taskUsesSecret && !policyFailure
                         ? `Task '${taskId}' details hidden because it used a password input.`
                         : raw.message,
                     // 보고서는 이 코드를 보고 **읽는 시점의 언어로** 문구를
                     // 만든다. 위 `error` 는 로그 파일을 직접 여는 사람을 위한
                     // 원문으로 남긴다.
-                    errorCode: taskUsesSecret ? 'sensitive-hidden' : undefined,
+                    errorCode: taskUsesSecret && !policyFailure ? 'sensitive-hidden' : undefined,
                     exitCode: raw instanceof ShellCommandError ? raw.exitCode : undefined,
                     signal: raw instanceof ShellCommandError ? raw.signal : undefined,
                     output,
@@ -6309,13 +6374,18 @@ async function executeSingleTask(
             break;
         case 'writeFile':
         case 'appendFile':
+            requireSecretContentOptIn(task, taskUsesSecret || taskProducesSecret);
             result = await handleWriteFile(
                 task,
                 interpolationContext,
                 workspaceRoots ?? getWorkspaceRoots(),
                 defaultWorkspace,
-                task.type === 'appendFile'
+                task.type === 'appendFile',
+                taskUsesSecret || taskProducesSecret
             );
+            if ((taskUsesSecret || taskProducesSecret) && typeof result?.path === 'string') {
+                notifySecretFileWrite(task.id, result.path);
+            }
             break;
         case 'command':
         case 'shell':
@@ -6603,12 +6673,15 @@ async function executeSingleTask(
                 throwIfTaskInactive(scope);
                 await vscode.window.showTextDocument(doc, { preview: false });
                 break;
-            case 'file':
+            case 'file': {
                 // `mode: file` names a concrete workspace path in actions.json
                 // and is therefore an explicit persistent-output policy, unlike
-                // editor hot-exit or a shared terminal. Preserve that declared
-                // behavior (including for password-derived data); users can
-                // audit the destination in configuration and workspace VCS.
+                // editor hot-exit or a shared terminal. The destination being
+                // explicit is not the same as the *intent to persist a secret*
+                // being explicit, though — password-derived content needs the
+                // task's `allowSecretContent` opt-in on top.
+                const secretDerived = taskUsesSecret || taskProducesSecret;
+                requireSecretContentOptIn(task, secretDerived);
                 throwIfTaskInactive(scope);
                 if (!interpolatedOutput.filePath) { throw new Error(`Task '${task.id}' has output mode 'file' but 'filePath' is not defined.`); }
                 const safeOutputPath = resolveWithinWorkspace(
@@ -6621,12 +6694,21 @@ async function executeSingleTask(
                 if (interpolatedOutput.overwrite !== true && fs.existsSync(safeOutputPath)) {
                     throw new Error(`Task '${task.id}' attempted to write to '${safeOutputPath}', but the file already exists. Set 'overwrite': true to replace it.`);
                 }
-                fs.writeFileSync(safeOutputPath, interpolatedOutput.content);
+                fs.writeFileSync(
+                    safeOutputPath,
+                    interpolatedOutput.content,
+                    secretDerived ? { mode: SECRET_FILE_MODE } : undefined
+                );
+                if (secretDerived) {
+                    restrictSecretFilePermissions(safeOutputPath);
+                    notifySecretFileWrite(task.id, safeOutputPath);
+                }
                 runLogCollector?.recordArtifact(
                     task.id,
-                    taskUsesSecret || taskProducesSecret ? SECRET_PLACEHOLDER : safeOutputPath
+                    secretDerived ? SECRET_PLACEHOLDER : safeOutputPath
                 );
                 break;
+            }
             case 'terminal':
                 {
                     if (taskUsesSecret || taskProducesSecret) {
@@ -7668,7 +7750,8 @@ async function handleWriteFile(
     interpolationContext: any,
     workspaceRoots: string[],
     defaultWorkspace: string,
-    append: boolean
+    append: boolean,
+    secretDerived = false
 ): Promise<{ path: string }> {
     if (typeof task.path !== 'string' || task.path.length === 0) {
         throw new Error(`Task '${task.id}' of type '${task.type}' requires a non-empty 'path' property.`);
@@ -7704,9 +7787,12 @@ async function handleWriteFile(
     const buffer = encodeFileContent(normalized, task.encoding, includeBom);
 
     if (append) {
-        fs.appendFileSync(safePath, buffer);
+        fs.appendFileSync(safePath, buffer, secretDerived ? { mode: SECRET_FILE_MODE } : undefined);
     } else {
-        fs.writeFileSync(safePath, buffer);
+        fs.writeFileSync(safePath, buffer, secretDerived ? { mode: SECRET_FILE_MODE } : undefined);
+    }
+    if (secretDerived) {
+        restrictSecretFilePermissions(safePath);
     }
 
     return { path: safePath };

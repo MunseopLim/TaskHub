@@ -413,6 +413,10 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 
 `password: true` 입력과 그 값에서 파생된 결과는 History의 저장 입력, 실행 명령 보기, Preview, verbose 로그와 알림에서 평문으로 남기지 않습니다. 비밀번호를 사용한 태스크의 출력은 재노출 가능성이 있으므로 diagnostics를 게시하지 않습니다. 실제 자식 프로세스에는 실행에 필요한 원래 값이 전달됩니다.
 
+**디스크에 남기는 경우는 태스크가 선언해야 합니다.** `output.mode`의 `editor`·`terminal`은 사용자가 위치를 고르지 않은 암묵적 영속화(hot-exit 백업, 공용 스크롤백)라 password 파생 값을 아예 싣지 않습니다. 반면 `writeFile`·`appendFile`·`output.mode: 'file'`은 `filePath`를 직접 적은 경우이므로 **`allowSecretContent: true`를 선언하면** 저장을 수행합니다. 선언이 없으면 실행이 거부되며, 오류 메시지가 켜야 할 플래그를 알려 줍니다(이 오류만은 비밀 실패 가림 대상이 아닙니다 — 고치는 방법이 가려지면 안 되기 때문입니다).
+
+선언한 경우 TaskHub는 파일을 소유자 전용 권한(`0600`, Windows에서는 효과 없음)으로 만들고, 저장 사실을 경로와 함께 알립니다. **파일 내용 자체는 평문입니다** — 버전 관리에 올라가지 않는지는 사용자가 확인해야 합니다.
+
 ### `quickPick` 태스크
 
 고정 `items` 또는 `itemsFromCommand`의 비어 있지 않은 stdout 줄에서 항목을 고릅니다. `items`는 문자열이나 `{ label, description, detail }` 객체를 지원하고, `itemsExclude`로 동적 목록의 특정 줄을 제외할 수 있습니다.
@@ -441,6 +445,7 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 | `eol` | `keep`·`lf`·`crlf`; 기본 `keep` |
 | `mkdirs` | 부모 디렉터리 자동 생성, 기본 `true` |
 | `overwrite` | `writeFile`의 기존 파일 덮어쓰기, 기본 `true` |
+| `allowSecretContent` | `password` 파생 값을 파일로 저장하는 것을 허용, 기본 `false` |
 
 상대 경로는 액션 워크스페이스 기준이며 밖으로 나가는 경로는 거부합니다. `appendFile`의 UTF-8 BOM은 새 파일에만 추가합니다.
 
@@ -1371,6 +1376,8 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `tool.platform-missing` | warning | `zip`·`unzip`의 `tool`이 현재 플랫폼에서 비었거나 OS별 값이 없음. 검사하는 OS에 따라 결과가 달라짐. |
 | `output.ignored` | warning | 런타임이 읽지 않는 `output` 필드가 있음. `mode`·`content`·`filePath`·`overwrite`·`language`는 `passTheResultToNextTask: true`가 필요하고, `filePath`·`overwrite`는 `mode: "file"`, `language`는 `mode: "editor"`에서만 사용됩니다. `capture`·`diagnostics`는 이 게이트 밖에서 동작하지만 태스크 결과에 문자열 `output`이 있어야 합니다. |
 | `path.outside-workspace` | error | `writeFile` / `appendFile` / `output.filePath`의 해석 결과가 워크스페이스 밖. 런타임이 실행을 거부할 경로. (변수 치환 후에도 `${…}`가 남은 경우는 검사를 건너뜀 — 안전 결정 불가) |
+| `secret.file-optin` | error | `password` 파생 값을 `allowSecretContent: true` 없이 파일로 저장하려 함(`writeFile` / `appendFile` / `output.mode: "file"`). 런타임이 실행 중에 거부하므로 실행 전에 알림. 오염은 런타임과 같은 규칙으로 전이됨 — 비밀을 참조한 태스크의 결과도 비밀로 본다. |
+| `secret.allow-unused` | warning | `allowSecretContent`가 켜져 있지만 허용하는 것이 없음(파일을 쓰지 않거나, 쓰더라도 `password` 파생 값이 아님). "여기서 비밀을 다룬다"는 잘못된 신호를 남기므로 지울 것. |
 | `dependsOn.self` | error | task의 `dependsOn`에 자기 자신이 포함됨. |
 | `dependsOn.missing` | error | `dependsOn`이 같은 액션에 존재하지 않는 task id를 가리킴. |
 | `dependsOn.cycle` | error | task 간 `dependsOn` 그래프에 순환이 있음. 출력 메시지에 순환 경로 포함. |

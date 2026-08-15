@@ -2946,6 +2946,8 @@ try {
                         type: 'writeFile',
                         path: secretArtifactPath,
                         content: '${token.value}',
+                        // 비밀을 디스크에 남기는 것은 태스크가 선언해야 한다.
+                        allowSecretContent: true,
                     },
                 ],
             };

@@ -92,6 +92,88 @@ suite('Doctor', () => {
     });
 
     /**
+     * password 파생 값의 파일 저장은 런타임이 **실행 중에** 거부한다. 그때는
+     * 앞 태스크의 부수 효과가 이미 일어난 뒤이므로, 편집 시점에 잡는 값이 크다.
+     */
+    suite('secret.file-optin', () => {
+        const secretAsk = { id: 'ask', type: 'inputBox', prompt: 'token?', password: true };
+        function analyze(tasks: any[]): DoctorFinding[] {
+            return runDoctor([makeInput([
+                { id: 'a.secret', title: 'S', action: { description: 'd', tasks } },
+            ])], compileValidator());
+        }
+
+        test('플래그 없는 writeFile 을 error 로 잡는다', () => {
+            const findings = analyze([
+                secretAsk,
+                { id: 'w', type: 'writeFile', path: path.join(WS, 'c.txt'), content: '${ask.value}' },
+            ]);
+            const finding = findings.find(f => f.code === 'secret.file-optin');
+            assert.ok(finding, `expected secret.file-optin, got ${codes(findings)}`);
+            assert.strictEqual(finding!.severity, 'error');
+            assert.ok(finding!.message.includes('a.secret.w'));
+        });
+
+        test('플래그 없는 output.mode file 도 같은 게이트를 지난다', () => {
+            const findings = analyze([
+                secretAsk,
+                {
+                    id: 'o', type: 'command', command: 'node',
+                    args: ['-e', 'process.stdout.write(process.argv[1])', '${ask.value}'],
+                    passTheResultToNextTask: true,
+                    output: { mode: 'file', filePath: path.join(WS, 'o.txt'), overwrite: true },
+                },
+            ]);
+            assert.ok(findings.some(f => f.code === 'secret.file-optin'));
+        });
+
+        test('오염은 런타임과 같이 전이된다 — 비밀을 거친 결과를 쓰는 태스크도 잡는다', () => {
+            const findings = analyze([
+                secretAsk,
+                {
+                    id: 'derive', type: 'command', command: 'node',
+                    args: ['-e', 'process.stdout.write(process.argv[1])', '${ask.value}'],
+                    passTheResultToNextTask: true,
+                },
+                { id: 'w', type: 'writeFile', path: path.join(WS, 'c.txt'), content: '${derive.output}' },
+            ]);
+            assert.ok(findings.some(f => f.code === 'secret.file-optin'));
+        });
+
+        test('선언했으면 잡지 않는다', () => {
+            const findings = analyze([
+                secretAsk,
+                {
+                    id: 'w', type: 'writeFile', path: path.join(WS, 'c.txt'),
+                    content: '${ask.value}', allowSecretContent: true,
+                },
+            ]);
+            assert.deepStrictEqual(codes(findings).filter(c => c.startsWith('secret.')), []);
+        });
+
+        test('비밀과 무관한 파일 쓰기는 건드리지 않는다', () => {
+            const findings = analyze([
+                { id: 'w', type: 'writeFile', path: path.join(WS, 'c.txt'), content: 'plain' },
+            ]);
+            assert.deepStrictEqual(codes(findings).filter(c => c.startsWith('secret.')), []);
+        });
+
+        test('아무것도 허용하지 않는 선언은 warning 으로 알린다', () => {
+            const noWrite = analyze([
+                { id: 'c', type: 'shell', command: 'echo hi', allowSecretContent: true },
+            ]);
+            const unusedOnShell = noWrite.find(f => f.code === 'secret.allow-unused');
+            assert.ok(unusedOnShell, `expected secret.allow-unused, got ${codes(noWrite)}`);
+            assert.strictEqual(unusedOnShell!.severity, 'warning');
+
+            const notSecret = analyze([
+                { id: 'w', type: 'writeFile', path: path.join(WS, 'c.txt'), content: 'plain', allowSecretContent: true },
+            ]);
+            assert.ok(notSecret.some(f => f.code === 'secret.allow-unused'));
+        });
+    });
+
+    /**
      * `shell` 은 명령 문자열을 셸에 그대로 넘긴다(0.6.47). 그래서 보간된 값도
      * 셸 문법으로 해석되어, 값에 `;` 나 `$(...)` 가 있으면 뒤의 명령이 실행된다.
      * 0.6.47 은 이 위험을 문서로만 알렸다 — Doctor 가 사용자 액션에서 잡는다.
