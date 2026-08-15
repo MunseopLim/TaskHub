@@ -9,6 +9,16 @@ export const RUN_LOG_DEFAULT_RETENTION_DAYS = 30;
 export const RUN_LOG_DEFAULT_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 
 export type ActionRunLogOutcome = 'success' | 'failure' | 'stopped' | 'cancelled';
+/**
+ * TaskHub가 스스로 만든 실패 사유는 **문장이 아니라 코드로** 남긴다.
+ *
+ * 로그는 영속 파일이라 쓴 세션과 읽는 세션의 UI 언어가 다를 수 있다. 문장을
+ * 그대로 저장하면 한국어 보고서 안에서 정작 읽으러 온 한 줄만 다른 언어로
+ * 남는다. 도구가 뱉은 stderr/오류 메시지는 번역 대상이 아니므로 `error`에
+ * 원문 그대로 둔다.
+ */
+export type ActionRunLogErrorCode = 'stopped-by-user' | 'sensitive-hidden';
+export type TaskRunLogErrorCode = 'sensitive-hidden';
 export type TaskRunLogStatus =
     | 'not-run'
     | 'running'
@@ -33,6 +43,13 @@ export interface TaskRunLogOutput {
     originalBytes?: number;
 }
 
+export interface TaskRunLogDiagnostics {
+    error: number;
+    warning: number;
+    info: number;
+    hint: number;
+}
+
 export interface TaskRunLogRecord {
     taskId: string;
     type: string;
@@ -45,8 +62,11 @@ export interface TaskRunLogRecord {
     cwd?: string;
     output: TaskRunLogOutput;
     error?: string;
+    errorCode?: TaskRunLogErrorCode;
     exitCode?: number | null;
     signal?: string | null;
+    diagnostics?: TaskRunLogDiagnostics;
+    artifacts?: string[];
 }
 
 export interface ActionRunLog {
@@ -58,6 +78,7 @@ export interface ActionRunLog {
     durationMs: number;
     outcome: ActionRunLogOutcome;
     error?: string;
+    errorCode?: ActionRunLogErrorCode;
     truncated?: boolean;
     tasks: TaskRunLogRecord[];
 }
@@ -71,6 +92,7 @@ export interface TaskRunLogCompletion {
     status: Extract<TaskRunLogStatus, 'success' | 'failure' | 'continued'>;
     finishedAt: number;
     error?: string;
+    errorCode?: TaskRunLogErrorCode;
     exitCode?: number | null;
     signal?: string | null;
     output?: TaskRunLogOutput;
@@ -141,12 +163,39 @@ export class ActionRunLogCollector {
             record.durationMs = Math.max(0, completion.finishedAt - record.startedAt);
         }
         if (completion.error) { record.error = completion.error; }
+        if (completion.errorCode) { record.errorCode = completion.errorCode; }
         if (completion.exitCode !== undefined) { record.exitCode = completion.exitCode; }
         if (completion.signal !== undefined) { record.signal = completion.signal; }
         if (completion.output) { record.output = completion.output; }
     }
 
-    finish(outcome: ActionRunLogOutcome, finishedAt: number, error?: string): ActionRunLog {
+    recordDiagnostics(taskId: string, diagnostics: TaskRunLogDiagnostics): void {
+        const record = this.byId.get(taskId);
+        if (!record) { return; }
+        const current = record.diagnostics ?? { error: 0, warning: 0, info: 0, hint: 0 };
+        record.diagnostics = {
+            error: current.error + diagnostics.error,
+            warning: current.warning + diagnostics.warning,
+            info: current.info + diagnostics.info,
+            hint: current.hint + diagnostics.hint,
+        };
+    }
+
+    recordArtifact(taskId: string, artifactPath: string): void {
+        const record = this.byId.get(taskId);
+        if (!record || !artifactPath) { return; }
+        const artifacts = record.artifacts ?? [];
+        if (!artifacts.includes(artifactPath)) {
+            record.artifacts = [...artifacts, artifactPath];
+        }
+    }
+
+    finish(
+        outcome: ActionRunLogOutcome,
+        finishedAt: number,
+        error?: string,
+        errorCode?: ActionRunLogErrorCode
+    ): ActionRunLog {
         for (const record of this.records) {
             if (record.status === 'running') {
                 record.status = 'unfinished';
@@ -165,9 +214,12 @@ export class ActionRunLogCollector {
             durationMs: Math.max(0, finishedAt - this.startedAt),
             outcome,
             ...(error ? { error } : {}),
+            ...(errorCode ? { errorCode } : {}),
             tasks: this.records.map(record => ({
                 ...record,
                 output: { ...record.output },
+                ...(record.diagnostics ? { diagnostics: { ...record.diagnostics } } : {}),
+                ...(record.artifacts ? { artifacts: [...record.artifacts] } : {}),
             })),
         };
     }
@@ -192,9 +244,203 @@ interface StoredLogFile {
     mtimeMs: number;
 }
 
+export type RunLogReadErrorCode =
+    | 'missing'
+    | 'workspace-missing'
+    | 'unsafe-path'
+    | 'too-large'
+    | 'invalid'
+    | 'mismatch';
+
+export class RunLogReadError extends Error {
+    constructor(public readonly code: RunLogReadErrorCode, message: string) {
+        super(message);
+        this.name = 'RunLogReadError';
+    }
+}
+
 function isOutside(root: string, candidate: string): boolean {
     const relative = path.relative(root, candidate);
     return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+    return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+    return value === undefined || typeof value === 'string';
+}
+
+function isOptionalNullableNumber(value: unknown): value is number | null | undefined {
+    return value === undefined || value === null || isFiniteNumber(value);
+}
+
+function isDiagnosticSummary(value: unknown): value is TaskRunLogDiagnostics {
+    if (!isRecord(value)) { return false; }
+    return ['error', 'warning', 'info', 'hint'].every(key =>
+        Number.isInteger(value[key]) && (value[key] as number) >= 0
+    );
+}
+
+const ACTION_OUTCOMES = new Set<ActionRunLogOutcome>(['success', 'failure', 'stopped', 'cancelled']);
+const TASK_STATUSES = new Set<TaskRunLogStatus>([
+    'not-run', 'running', 'success', 'failure', 'continued', 'condition-skipped', 'unfinished',
+]);
+const OUTPUT_AVAILABILITIES = new Set<TaskRunLogOutputAvailability>([
+    'captured', 'redacted', 'terminal', 'background-one-shot', 'capture-truncated', 'not-applicable',
+]);
+const ACTION_ERROR_CODES = new Set<ActionRunLogErrorCode>(['stopped-by-user', 'sensitive-hidden']);
+const TASK_ERROR_CODES = new Set<TaskRunLogErrorCode>(['sensitive-hidden']);
+
+/** 워크스페이스의 JSON 로그를 UI가 소비하기 전에 버전 1 계약으로 좁힌다. */
+export function parseActionRunLog(value: unknown): ActionRunLog {
+    if (!isRecord(value) || value.version !== 1) {
+        throw new RunLogReadError('invalid', 'Unsupported or missing action run log version.');
+    }
+    if (
+        typeof value.actionId !== 'string'
+        || typeof value.actionTitle !== 'string'
+        || !isFiniteNumber(value.startedAt)
+        || !isFiniteNumber(value.finishedAt)
+        || !isFiniteNumber(value.durationMs)
+        || !ACTION_OUTCOMES.has(value.outcome as ActionRunLogOutcome)
+        || !isOptionalString(value.error)
+        || (value.errorCode !== undefined && !ACTION_ERROR_CODES.has(value.errorCode as ActionRunLogErrorCode))
+        || (value.truncated !== undefined && typeof value.truncated !== 'boolean')
+        || !Array.isArray(value.tasks)
+    ) {
+        throw new RunLogReadError('invalid', 'Action run log metadata is invalid.');
+    }
+
+    for (const task of value.tasks) {
+        if (!isRecord(task) || !isRecord(task.output)) {
+            throw new RunLogReadError('invalid', 'Action run log contains an invalid task record.');
+        }
+        const output = task.output;
+        if (
+            typeof task.taskId !== 'string'
+            || typeof task.type !== 'string'
+            || !Number.isInteger(task.index)
+            || (task.index as number) < 1
+            || !TASK_STATUSES.has(task.status as TaskRunLogStatus)
+            || (task.startedAt !== undefined && !isFiniteNumber(task.startedAt))
+            || (task.finishedAt !== undefined && !isFiniteNumber(task.finishedAt))
+            || (task.durationMs !== undefined && !isFiniteNumber(task.durationMs))
+            || !isOptionalString(task.command)
+            || !isOptionalString(task.cwd)
+            || !isOptionalString(task.error)
+            || (task.errorCode !== undefined && !TASK_ERROR_CODES.has(task.errorCode as TaskRunLogErrorCode))
+            || !isOptionalNullableNumber(task.exitCode)
+            || !(task.signal === undefined || task.signal === null || typeof task.signal === 'string')
+            || !OUTPUT_AVAILABILITIES.has(output.availability as TaskRunLogOutputAvailability)
+            || !isOptionalString(output.stdout)
+            || !isOptionalString(output.stderr)
+            || (output.truncated !== undefined && typeof output.truncated !== 'boolean')
+            || (output.originalBytes !== undefined && (!Number.isInteger(output.originalBytes) || (output.originalBytes as number) < 0))
+            || (task.diagnostics !== undefined && !isDiagnosticSummary(task.diagnostics))
+            || (task.artifacts !== undefined && (
+                !Array.isArray(task.artifacts) || !task.artifacts.every(item => typeof item === 'string')
+            ))
+        ) {
+            throw new RunLogReadError('invalid', 'Action run log contains an invalid task record.');
+        }
+    }
+    return value as unknown as ActionRunLog;
+}
+
+function validateRunLogRelativePath(relativePath: string): string[] {
+    if (typeof relativePath !== 'string' || relativePath.includes('\\') || path.posix.isAbsolute(relativePath)) {
+        throw new RunLogReadError('unsafe-path', 'Run log reference is not a safe relative path.');
+    }
+    const segments = relativePath.split('/');
+    if (
+        segments.length !== 4
+        || segments[0] !== '.taskhub'
+        || segments[1] !== 'logs'
+        || !segments[2]
+        || !segments[3].endsWith('.log')
+        || segments.some(segment => !segment || segment === '.' || segment === '..')
+        || path.posix.normalize(relativePath) !== relativePath
+    ) {
+        throw new RunLogReadError('unsafe-path', 'Run log reference is outside the managed log directory.');
+    }
+    return segments;
+}
+
+/**
+ * History가 가리키는 로그를 읽는다. workspaceState와 워크스페이스 파일은 둘 다
+ * 수정 가능하므로 상대 경로·중간 symlink·파일 종류·크기·JSON 구조를 다시 검증한다.
+ */
+export async function readActionRunLog(workspaceRoot: string, relativePath: string): Promise<ActionRunLog> {
+    const segments = validateRunLogRelativePath(relativePath);
+    const targetPath = path.join(workspaceRoot, ...segments);
+    // 루트가 사라진 경우와 로그 파일이 회전된 경우는 사용자가 할 일이 서로
+    // 다르다. 아래의 일괄 ENOENT → 'missing' 매핑에 삼켜지면 폴더가 통째로
+    // 없어졌는데 "보관 정책으로 회전됐습니다"라고 안내하게 된다.
+    let realRoot: string;
+    try {
+        realRoot = await fs.realpath(workspaceRoot);
+    } catch (rootError) {
+        const code = (rootError as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+            throw new RunLogReadError('workspace-missing', `Workspace root is no longer readable: ${workspaceRoot}`);
+        }
+        throw rootError;
+    }
+    try {
+        let current = workspaceRoot;
+        for (const segment of segments.slice(0, -1)) {
+            current = path.join(current, segment);
+            const stat = await fs.lstat(current);
+            if (stat.isSymbolicLink() || !stat.isDirectory()) {
+                throw new RunLogReadError('unsafe-path', `Run log parent is not a real directory: ${current}`);
+            }
+            if (isOutside(realRoot, await fs.realpath(current))) {
+                throw new RunLogReadError('unsafe-path', 'Run log path escapes the workspace.');
+            }
+        }
+
+        const linkStat = await fs.lstat(targetPath);
+        if (linkStat.isSymbolicLink() || !linkStat.isFile()) {
+            throw new RunLogReadError('unsafe-path', 'Run log target is not a regular file.');
+        }
+        const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+        const handle = await fs.open(targetPath, fsConstants.O_RDONLY | noFollow);
+        try {
+            const stat = await handle.stat();
+            if (!stat.isFile()) {
+                throw new RunLogReadError('unsafe-path', 'Run log target is not a regular file.');
+            }
+            if (stat.size > RUN_LOG_MAX_FILE_BYTES) {
+                throw new RunLogReadError('too-large', `Run log exceeds the ${RUN_LOG_MAX_FILE_BYTES}-byte read limit.`);
+            }
+            const text = await handle.readFile('utf8');
+            let parsed: unknown;
+            try {
+                parsed = JSON.parse(text);
+            } catch {
+                throw new RunLogReadError('invalid', 'Run log is not valid JSON.');
+            }
+            return parseActionRunLog(parsed);
+        } finally {
+            await handle.close();
+        }
+    } catch (error) {
+        if (error instanceof RunLogReadError) { throw error; }
+        const code = (error as NodeJS.ErrnoException).code;
+        // ENOTDIR: 관리 디렉터리 자리에 파일이 생긴 경우. 회전·수동 삭제와
+        // 마찬가지로 "더 이상 보관되지 않음"이며, raw Node 메시지를 토스트에
+        // 그대로 흘리지 않는다.
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+            throw new RunLogReadError('missing', 'Run log file no longer exists.');
+        }
+        throw error;
+    }
 }
 
 async function ensureSafeDirectory(root: string, segments: string[]): Promise<string> {

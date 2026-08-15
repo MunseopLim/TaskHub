@@ -4195,6 +4195,41 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(history[0].commands, undefined);
 		});
 
+		test('setHistoryRunLog stores only the workspace-relative report reference', async () => {
+			const ctx = createMockContext();
+			const provider = new HistoryProvider(ctx);
+			provider.addHistoryEntry(makeEntry('reported', 'success', 77));
+			provider.setHistoryRunLog('reported', 77, {
+				workspaceFolderUri: 'file:///workspace',
+				relativePath: '.taskhub/logs/reported-deadbeef/run.log'
+			});
+
+			const entry = provider.getHistory()[0];
+			assert.deepStrictEqual(entry.runLog, {
+				workspaceFolderUri: 'file:///workspace',
+				relativePath: '.taskhub/logs/reported-deadbeef/run.log'
+			});
+			// 보고서 버튼은 `.runlog` 로만 붙는다 — 참조가 붙기 전에는 버튼이
+			// 없어야 "눌러도 안내만 뜨는" 죽은 버튼이 생기지 않는다.
+			assert.strictEqual((await provider.getChildren())[0].contextValue, 'historyItem.runlog');
+		});
+
+		test('보고서 참조가 없는 기록에는 .runlog 플래그가 붙지 않는다', async () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('no-report', 'success', 5));
+			assert.strictEqual((await provider.getChildren())[0].contextValue, 'historyItem');
+		});
+
+		test('setHistoryRunLog on an unknown execution is a silent no-op', () => {
+			const provider = new HistoryProvider(createMockContext());
+			provider.addHistoryEntry(makeEntry('present', 'success', 1));
+			provider.setHistoryRunLog('missing', 1, {
+				workspaceFolderUri: 'file:///workspace',
+				relativePath: '.taskhub/logs/missing-deadbeef/run.log'
+			});
+			assert.strictEqual(provider.getHistory()[0].runLog, undefined);
+		});
+
 		test('setHistoryCommands targets the entry matched by (actionId, timestamp), not just actionId', () => {
 			const provider = new HistoryProvider(createMockContext());
 			provider.addHistoryEntry(makeEntry('rerun', 'success', 100));
@@ -4375,7 +4410,7 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(items.length, 1);
 			const item = items[0];
 			assert.strictEqual(item.label, 'Hex Editor: image.hex');
-			assert.strictEqual(item.contextValue, 'historyItem');
+			assert.strictEqual(item.contextValue, 'historyToolItem');
 			assert.strictEqual(item.command?.command, 'taskhub.openToolFromHistory');
 			assert.ok(isToolHistoryEntry(item.getEntry()));
 		});

@@ -5,6 +5,8 @@ import * as path from 'path';
 import {
     ActionRunLog,
     ActionRunLogCollector,
+    readActionRunLog,
+    RunLogReadError,
     RunLogStore,
     serializeActionRunLog,
 } from '../runLogStore';
@@ -40,6 +42,8 @@ suite('Action run log storage', () => {
             error: 'details hidden',
             output: { availability: 'redacted' },
         });
+        collector.recordDiagnostics('build', { error: 1, warning: 2, info: 0, hint: 0 });
+        collector.recordArtifact('build', path.join(workspaceRoot, 'build', 'firmware.elf'));
         return collector.finish('failure', startedAt + 31, 'flash failed');
     }
 
@@ -53,6 +57,8 @@ suite('Action run log storage', () => {
         assert.strictEqual(log.tasks[1].output.availability, 'redacted');
         assert.strictEqual(log.tasks[1].output.stdout, undefined);
         assert.strictEqual(log.tasks[1].output.stderr, undefined);
+        assert.deepStrictEqual(log.tasks[0].diagnostics, { error: 1, warning: 2, info: 0, hint: 0 });
+        assert.deepStrictEqual(log.tasks[0].artifacts, [path.join(workspaceRoot, 'build', 'firmware.elf')]);
     });
 
     test('파일 상한을 넘는 stdout/stderr는 완전한 로그처럼 보이지 않게 표시한다', () => {
@@ -88,6 +94,170 @@ suite('Action run log storage', () => {
         assert.deepStrictEqual(
             fs.readdirSync(path.dirname(result.absolutePath)).filter(name => name.includes('.tmp-')),
             []
+        );
+
+        const readBack = await readActionRunLog(workspaceRoot, result.workspaceRelativePath);
+        assert.strictEqual(readBack.actionId, 'build/firmware');
+        assert.strictEqual(readBack.tasks[0].diagnostics?.warning, 2);
+    });
+
+    test('회전·수동 삭제로 사라진 History 참조는 missing으로 구분한다', async () => {
+        await assert.rejects(
+            readActionRunLog(workspaceRoot, '.taskhub/logs/action-deadbeef/missing.log'),
+            (error: unknown) => error instanceof RunLogReadError && error.code === 'missing'
+        );
+    });
+
+    test('History의 조작된 상대 경로는 워크스페이스 파일을 읽기 전에 거부한다', async () => {
+        fs.writeFileSync(path.join(workspaceRoot, 'outside.log'), JSON.stringify(sampleLog()));
+        for (const relativePath of [
+            '../outside.log',
+            '.taskhub/logs/../../outside.log',
+            '.taskhub\\logs\\action\\run.log',
+            '/tmp/outside.log',
+        ]) {
+            await assert.rejects(
+                readActionRunLog(workspaceRoot, relativePath),
+                (error: unknown) => error instanceof RunLogReadError && error.code === 'unsafe-path',
+                relativePath
+            );
+        }
+    });
+
+    test('손상된 JSON과 지원하지 않는 로그 버전을 invalid로 구분한다', async () => {
+        const actionDir = path.join(workspaceRoot, '.taskhub', 'logs', 'action-deadbeef');
+        fs.mkdirSync(actionDir, { recursive: true });
+        const invalidJson = path.join(actionDir, 'invalid.log');
+        fs.writeFileSync(invalidJson, '{');
+        await assert.rejects(
+            readActionRunLog(workspaceRoot, '.taskhub/logs/action-deadbeef/invalid.log'),
+            (error: unknown) => error instanceof RunLogReadError && error.code === 'invalid'
+        );
+
+        fs.writeFileSync(invalidJson, JSON.stringify({ ...sampleLog(), version: 2 }));
+        await assert.rejects(
+            readActionRunLog(workspaceRoot, '.taskhub/logs/action-deadbeef/invalid.log'),
+            (error: unknown) => error instanceof RunLogReadError && error.code === 'invalid'
+        );
+    });
+
+    test('구조가 깨진 태스크 레코드는 UI에 닿기 전에 거부한다', async () => {
+        const actionDir = path.join(workspaceRoot, '.taskhub', 'logs', 'action-deadbeef');
+        fs.mkdirSync(actionDir, { recursive: true });
+        const target = path.join(actionDir, 'invalid.log');
+        const broken: Array<Record<string, unknown>> = [
+            { status: 'bogus' },
+            { index: 0 },
+            { index: 1.5 },
+            { taskId: 42 },
+            { exitCode: 'one' },
+            { errorCode: 'made-up' },
+            { diagnostics: { error: -1, warning: 0, info: 0, hint: 0 } },
+            { diagnostics: { error: 1 } },
+            { diagnostics: { error: 1.5, warning: 0, info: 0, hint: 0 } },
+            { artifacts: [1] },
+            { artifacts: 'one.elf' },
+            { output: { availability: 'made-up' } },
+            { output: { availability: 'captured', originalBytes: -1 } },
+        ];
+        for (const patch of broken) {
+            const log = JSON.parse(JSON.stringify(sampleLog())) as Record<string, any>;
+            log.tasks[0] = { ...log.tasks[0], ...patch };
+            fs.writeFileSync(target, JSON.stringify(log));
+            await assert.rejects(
+                readActionRunLog(workspaceRoot, '.taskhub/logs/action-deadbeef/invalid.log'),
+                (error: unknown) => error instanceof RunLogReadError && error.code === 'invalid',
+                JSON.stringify(patch)
+            );
+        }
+    });
+
+    test('액션 수준 errorCode도 화이트리스트로 좁힌다', async () => {
+        const actionDir = path.join(workspaceRoot, '.taskhub', 'logs', 'action-deadbeef');
+        fs.mkdirSync(actionDir, { recursive: true });
+        const target = path.join(actionDir, 'code.log');
+
+        fs.writeFileSync(target, JSON.stringify({ ...sampleLog(), errorCode: 'made-up' }));
+        await assert.rejects(
+            readActionRunLog(workspaceRoot, '.taskhub/logs/action-deadbeef/code.log'),
+            (error: unknown) => error instanceof RunLogReadError && error.code === 'invalid'
+        );
+
+        fs.writeFileSync(target, JSON.stringify({ ...sampleLog(), errorCode: 'stopped-by-user' }));
+        const parsed = await readActionRunLog(workspaceRoot, '.taskhub/logs/action-deadbeef/code.log');
+        assert.strictEqual(parsed.errorCode, 'stopped-by-user');
+    });
+
+    test('중지·비밀 실패 사유는 문장이 아니라 코드로 저장한다', () => {
+        const collector = new ActionRunLogCollector('a', 'A', 1, [{ id: 'one', type: 'command' }]);
+        collector.startTask('one', 2);
+        collector.finishTask('one', {
+            status: 'failure',
+            finishedAt: 3,
+            error: "Task 'one' details hidden because it used a password input.",
+            errorCode: 'sensitive-hidden',
+        });
+        const log = collector.finish('stopped', 4, 'Action stopped by the user.', 'stopped-by-user');
+
+        assert.strictEqual(log.errorCode, 'stopped-by-user');
+        assert.strictEqual(log.tasks[0].errorCode, 'sensitive-hidden');
+        // 원문은 로그 파일을 직접 여는 사람을 위해 남긴다.
+        assert.strictEqual(log.error, 'Action stopped by the user.');
+    });
+
+    test('관리 디렉터리 밖을 가리키는 상대 경로 형태를 모두 거부한다', async () => {
+        for (const relativePath of [
+            '',
+            'taskhub/logs/action/run.log',
+            '.taskhub/logs/action/run.txt',
+            '.taskhub/logs/action/nested/run.log',
+            '.taskhub/logs/run.log',
+            '.taskhub/logs/action/',
+            './.taskhub/logs/action/run.log',
+        ]) {
+            await assert.rejects(
+                readActionRunLog(workspaceRoot, relativePath),
+                (error: unknown) => error instanceof RunLogReadError && error.code === 'unsafe-path',
+                relativePath
+            );
+        }
+    });
+
+    test('로그 파일 자리가 symlink거나 디렉터리면 열지 않는다', async function () {
+        if (process.platform === 'win32') { this.skip(); }
+        const actionDir = path.join(workspaceRoot, '.taskhub', 'logs', 'action-deadbeef');
+        fs.mkdirSync(actionDir, { recursive: true });
+        const outside = path.join(workspaceRoot, 'secret.json');
+        fs.writeFileSync(outside, JSON.stringify(sampleLog()));
+        fs.symlinkSync(outside, path.join(actionDir, 'link.log'));
+        fs.mkdirSync(path.join(actionDir, 'dir.log'));
+
+        for (const name of ['link.log', 'dir.log']) {
+            await assert.rejects(
+                readActionRunLog(workspaceRoot, `.taskhub/logs/action-deadbeef/${name}`),
+                (error: unknown) => error instanceof RunLogReadError && error.code === 'unsafe-path',
+                name
+            );
+        }
+    });
+
+    test('워크스페이스 루트가 사라진 경우와 로그 회전을 구분한다', async () => {
+        const missingRoot = path.join(workspaceRoot, 'gone');
+        await assert.rejects(
+            readActionRunLog(missingRoot, '.taskhub/logs/action-deadbeef/run.log'),
+            (error: unknown) => error instanceof RunLogReadError && error.code === 'workspace-missing'
+        );
+    });
+
+    test('읽기 상한보다 큰 파일은 JSON 파싱 전에 거부한다', async () => {
+        const actionDir = path.join(workspaceRoot, '.taskhub', 'logs', 'action-deadbeef');
+        fs.mkdirSync(actionDir, { recursive: true });
+        const oversized = path.join(actionDir, 'oversized.log');
+        fs.writeFileSync(oversized, 'x');
+        fs.truncateSync(oversized, 8 * 1024 * 1024 + 1);
+        await assert.rejects(
+            readActionRunLog(workspaceRoot, '.taskhub/logs/action-deadbeef/oversized.log'),
+            (error: unknown) => error instanceof RunLogReadError && error.code === 'too-large'
         );
     });
 
@@ -149,6 +319,24 @@ suite('Action run log storage', () => {
                 /not a real directory/
             );
             assert.deepStrictEqual(fs.readdirSync(outside), []);
+        } finally {
+            fs.rmSync(outside, { recursive: true, force: true });
+        }
+    });
+
+    test('읽기 참조의 중간 디렉터리가 symlink면 워크스페이스 밖 파일을 열지 않는다', async function () {
+        if (process.platform === 'win32') { this.skip(); }
+        const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-run-report-outside-'));
+        try {
+            const outsideAction = path.join(outside, 'action-deadbeef');
+            fs.mkdirSync(outsideAction);
+            fs.writeFileSync(path.join(outsideAction, 'run.log'), JSON.stringify(sampleLog()));
+            fs.mkdirSync(path.join(workspaceRoot, '.taskhub'));
+            fs.symlinkSync(outside, path.join(workspaceRoot, '.taskhub', 'logs'));
+            await assert.rejects(
+                readActionRunLog(workspaceRoot, '.taskhub/logs/action-deadbeef/run.log'),
+                (error: unknown) => error instanceof RunLogReadError && error.code === 'unsafe-path'
+            );
         } finally {
             fs.rmSync(outside, { recursive: true, force: true });
         }

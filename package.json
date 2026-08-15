@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.7.28",
+  "version": "0.7.29",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -434,6 +434,11 @@
         "title": "%cmd.openRunLogsFolder%"
       },
       {
+        "command": "taskhub.viewActionRunReport",
+        "title": "%cmd.viewActionRunReport%",
+        "icon": "$(preview)"
+      },
+      {
         "command": "taskhub.rerunFromHistory",
         "title": "%cmd.rerunFromHistory%"
       },
@@ -611,6 +616,10 @@
         },
         {
           "command": "taskhub.rerunFromHistory",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.viewActionRunReport",
           "when": "false"
         },
         {
@@ -879,9 +888,19 @@
           "group": "inline@3"
         },
         {
-          "command": "taskhub.deleteHistoryItem",
-          "when": "view == mainView.history && viewItem =~ /^historyItem/",
+          "command": "taskhub.viewActionRunReport",
+          "when": "view == mainView.history && viewItem =~ /\\.runlog\\b/",
           "group": "inline@4"
+        },
+        {
+          "command": "taskhub.viewActionRunReport",
+          "when": "view == mainView.history && viewItem =~ /\\.runlog\\b/",
+          "group": "context@2"
+        },
+        {
+          "command": "taskhub.deleteHistoryItem",
+          "when": "view == mainView.history && viewItem =~ /^(historyItem|historyToolItem)/",
+          "group": "inline@9"
         }
       ]
     },

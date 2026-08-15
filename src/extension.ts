@@ -3,6 +3,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import Ajv from 'ajv';
 import { ActionItem, Action as PipelineAction } from './schema';
@@ -53,12 +54,17 @@ import {
     RUN_LOG_DEFAULT_RETENTION_DAYS,
     RUN_LOG_DIRECTORY,
     RUN_LOG_MAX_FILE_BYTES,
+    readActionRunLog,
+    RunLogReadError,
     RunLogStore,
+    type ActionRunLogErrorCode,
     type ActionRunLogOutcome,
     type RunLogRetentionPolicy,
     type TaskRunLogOutput,
     type TaskRunLogOutputAvailability,
+    type TaskRunLogDiagnostics,
 } from './runLogStore';
+import { buildActionRunReportHtml } from './actionRunReport';
 
 /**
  * 자동완성 항목의 `detail` 문구. **i18n 경계다.**
@@ -3467,10 +3473,14 @@ function applyDiagnosticsToCollection(
     task: any,
     actionId: string,
     baseCwd: string
-): void {
+): TaskRunLogDiagnostics {
     const parsed = applyDiagnosticMatchers(output, config);
+    const summary: TaskRunLogDiagnostics = { error: 0, warning: 0, info: 0, hint: 0 };
+    for (const diagnostic of parsed) {
+        summary[diagnostic.severity]++;
+    }
     if (parsed.length === 0) {
-        return;
+        return summary;
     }
     const collection = getOrCreateActionDiagnostics(actionId);
     const byUri = new Map<string, vscode.Diagnostic[]>();
@@ -3501,6 +3511,7 @@ function applyDiagnosticsToCollection(
         const existing = collection.get(uri) ?? [];
         collection.set(uri, [...existing, ...diags]);
     }
+    return summary;
 }
 
 /**
@@ -3718,6 +3729,7 @@ import {
     HistoryEntry,
     HistoryItem,
     HistoryProvider,
+    type HistoryRunLogReference,
     isToolHistoryEntry,
     startHistoryAutoRefresh,
 } from './providers/historyProvider';
@@ -4551,9 +4563,10 @@ async function persistRunLog(
     configured: ConfiguredRunLog | undefined,
     outcome: ActionRunLogOutcome,
     finishedAt: number,
-    error?: string
-): Promise<void> {
-    if (!configured) { return; }
+    error?: string,
+    errorCode?: ActionRunLogErrorCode
+): Promise<HistoryRunLogReference | undefined> {
+    if (!configured) { return undefined; }
     const key = path.resolve(configured.workspaceRoot);
     let store = runLogStores.get(key);
     if (!store) {
@@ -4561,14 +4574,25 @@ async function persistRunLog(
         runLogStores.set(key, store);
     }
     try {
-        const result = await store.write(configured.collector.finish(outcome, finishedAt, error), configured.policy);
+        const result = await store.write(
+            configured.collector.finish(outcome, finishedAt, error, errorCode),
+            configured.policy
+        );
         outputChannel.appendLine(`[INFO] Saved action run log: ${result.workspaceRelativePath}`);
         if (result.rotationWarning) {
             outputChannel.appendLine(`[WARN] Run log rotation failed; the action result is unchanged: ${result.rotationWarning}`);
         }
+        const workspaceFolderUri = vscode.workspace.workspaceFolders?.find(folder =>
+            normalizedWorkspacePath(folder.uri.fsPath) === normalizedWorkspacePath(configured.workspaceRoot)
+        )?.uri.toString() ?? vscode.Uri.file(configured.workspaceRoot).toString();
+        return {
+            workspaceFolderUri,
+            relativePath: result.workspaceRelativePath,
+        };
     } catch (writeError) {
         const message = writeError instanceof Error ? writeError.message : String(writeError);
         outputChannel.appendLine(`[WARN] Could not persist the action run log; the action result is unchanged: ${message}`);
+        return undefined;
     }
 }
 
@@ -5068,6 +5092,10 @@ async function executeActionPipelineForRun(
                     error: taskUsesSecret
                         ? `Task '${taskId}' details hidden because it used a password input.`
                         : raw.message,
+                    // 보고서는 이 코드를 보고 **읽는 시점의 언어로** 문구를
+                    // 만든다. 위 `error` 는 로그 파일을 직접 여는 사람을 위한
+                    // 원문으로 남긴다.
+                    errorCode: taskUsesSecret ? 'sensitive-hidden' : undefined,
                     exitCode: raw instanceof ShellCommandError ? raw.exitCode : undefined,
                     signal: raw instanceof ShellCommandError ? raw.signal : undefined,
                     output,
@@ -5715,6 +5743,7 @@ export async function executeAction(
     );
     let runLogOutcome: ActionRunLogOutcome = 'failure';
     let runLogError: string | undefined;
+    let runLogErrorCode: ActionRunLogErrorCode | undefined;
     actionStartTimestamps.set(id, timestamp);
     if (historyProvider) {
         // Resolve breadcrumb path so HistoryItem can disambiguate same-title
@@ -5858,6 +5887,7 @@ export async function executeAction(
             runLogError = sensitiveFailure
                 ? 'Failure details hidden because a task used a password input.'
                 : (error instanceof Error ? error.message : String(error));
+            runLogErrorCode = sensitiveFailure ? 'sensitive-hidden' : undefined;
             if (ownsCurrentState) {
                 // 실패는 배치 상태 표시에는 포함하되 알림으로 접지 않는다.
                 // 여러 결과를 개수로 요약하면 어느 액션이 왜 실패했는지 사라지고,
@@ -5969,6 +5999,7 @@ export async function executeAction(
             const durationMs = Math.max(0, Date.now() - timestamp);
             runLogOutcome = 'stopped';
             runLogError = 'Action stopped by the user.';
+            runLogErrorCode = 'stopped-by-user';
             if (ownsCurrentState) {
                 enqueueBackgroundCompletion(
                     actionItem.title,
@@ -5992,7 +6023,10 @@ export async function executeAction(
         }
     } finally {
         finalizeActionRun(run, showTaskStatus, mainViewProvider);
-        await persistRunLog(runLog, runLogOutcome, Date.now(), runLogError);
+        const persistedRunLog = await persistRunLog(runLog, runLogOutcome, Date.now(), runLogError, runLogErrorCode);
+        if (persistedRunLog && historyProvider) {
+            historyProvider.setHistoryRunLog(id, timestamp, persistedRunLog);
+        }
     }
 }
 
@@ -6388,13 +6422,14 @@ async function executeSingleTask(
                     if (err instanceof ShellCommandError && task.output?.diagnostics && !taskUsesSecret) {
                         const failedOutput = combineStdoutStderrForDiagnostics(err.stdout, err.stderr);
                         try {
-                            applyDiagnosticsToCollection(
+                            const diagnostics = applyDiagnosticsToCollection(
                                 failedOutput,
                                 task.output.diagnostics,
                                 task,
                                 actionId,
                                 interpolatedCwd ?? defaultWorkspace
                             );
+                            runLogCollector?.recordDiagnostics(task.id, diagnostics);
                         } catch (diagErr) {
                             // Don't mask the original failure — log only.
                             const msg = diagErr instanceof Error ? diagErr.message : String(diagErr);
@@ -6430,6 +6465,25 @@ async function executeSingleTask(
         default:
             throw new Error(`Unsupported task type: ${task.type}`);
     } }
+
+    // TaskHub가 결과 경로를 직접 확정한 **파일** 쓰기만 보고서의 파일 결과로
+    // 남긴다. 임의 도구의 stdout을 해석해 산출물을 추측하지 않는다. `unzip`은
+    // 개별 파일이 아니라 디렉터리를 만들므로 여기서 제외한다. 비밀번호 파생
+    // 태스크는 경로 자체도 민감할 수 있으므로 보수적으로 전부 가린다.
+    //
+    // identity fence(`throwIfTaskInactive`)보다 앞이다 — 타임아웃으로 이미
+    // 실패로 마감된 태스크라도 파일은 실제로 쓰였으므로 기록이 사실에 맞다.
+    const directArtifact = task.type === 'writeFile' || task.type === 'appendFile'
+        ? result?.path
+        : task.type === 'zip'
+            ? result?.archivePath
+            : undefined;
+    if (typeof directArtifact === 'string') {
+        runLogCollector?.recordArtifact(
+            task.id,
+            taskUsesSecret || taskProducesSecret ? SECRET_PLACEHOLDER : directArtifact
+        );
+    }
 
     // The timeout wrapper may already have reported this task as failed while
     // an uncancellable native dialog was still open. All common post-processing
@@ -6480,13 +6534,14 @@ async function executeSingleTask(
                     result.output,
                     typeof result.stderr === 'string' ? result.stderr : ''
                 );
-                applyDiagnosticsToCollection(
+                const diagnostics = applyDiagnosticsToCollection(
                     combined,
                     task.output.diagnostics,
                     task,
                     actionId,
                     interpolatedCwd ?? defaultWorkspace
                 );
+                runLogCollector?.recordDiagnostics(task.id, diagnostics);
             } catch (error: any) {
                 throw new Error(`Task '${task.id}' diagnostics failed: ${error.message}`);
             }
@@ -6567,6 +6622,10 @@ async function executeSingleTask(
                     throw new Error(`Task '${task.id}' attempted to write to '${safeOutputPath}', but the file already exists. Set 'overwrite': true to replace it.`);
                 }
                 fs.writeFileSync(safeOutputPath, interpolatedOutput.content);
+                runLogCollector?.recordArtifact(
+                    task.id,
+                    taskUsesSecret || taskProducesSecret ? SECRET_PLACEHOLDER : safeOutputPath
+                );
                 break;
             case 'terminal':
                 {
@@ -8905,6 +8964,135 @@ export function formatExecutedCommandsDocument(entry: HistoryEntry): string | nu
     return `${header}\n${body}\n`;
 }
 
+function normalizedWorkspacePath(value: string): string {
+    const resolved = path.resolve(value);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function currentWorkspaceRootForRunLog(reference: HistoryRunLogReference): string | undefined {
+    let referencedUri: vscode.Uri;
+    try {
+        referencedUri = vscode.Uri.parse(reference.workspaceFolderUri, true);
+    } catch {
+        return undefined;
+    }
+    const referencedPath = normalizedWorkspacePath(referencedUri.fsPath);
+    return vscode.workspace.workspaceFolders?.find(folder =>
+        folder.uri.toString() === reference.workspaceFolderUri
+        || normalizedWorkspacePath(folder.uri.fsPath) === referencedPath
+    )?.uri.fsPath;
+}
+
+/**
+ * 열려 있는 보고서 패널. 같은 실행을 다시 누르면 새 탭을 쌓지 않고 그 패널을
+ * 앞으로 가져온다 (`hexViewer`·`jsonEditor` 와 같은 규약).
+ */
+const actionRunReportPanels = new Map<string, vscode.WebviewPanel>();
+
+function actionRunReportKey(entry: HistoryEntry): string {
+    return `${entry.actionId} ${entry.timestamp}`;
+}
+
+async function showActionRunReport(entry: HistoryEntry): Promise<void> {
+    if (!entry.runLog) {
+        if (entry.status === 'running') {
+            vscode.window.showInformationMessage(t(
+                '실행이 끝난 뒤 실행 로그가 저장되면 보고서를 볼 수 있습니다.',
+                'The report becomes available after the run finishes and its run log is saved.'
+            ));
+            return;
+        }
+        // 설정 ID 를 문장에 박아 두고 사용자가 알아서 찾게 두지 않는다. 이
+        // 설정이 기본으로 꺼져 있는 이유(출력에 프로젝트 데이터가 섞일 수
+        // 있다)도 함께 알려야 켜는 판단을 사용자가 할 수 있다.
+        const openSettings = t('설정 열기', 'Open Settings');
+        const choice = await vscode.window.showInformationMessage(
+            t(
+                '이 실행에는 저장된 보고서가 없습니다. 실행 로그 저장은 출력에 프로젝트 데이터가 섞일 수 있어 기본으로 꺼져 있으며, 켜면 이후 실행부터 기록합니다.',
+                'No report was recorded for this run. Run log storage is off by default because captured output can contain project data; enabling it records future runs.'
+            ),
+            openSettings
+        );
+        if (choice === openSettings) {
+            await vscode.commands.executeCommand('workbench.action.openSettings', 'taskhub.runLogs.enabled');
+        }
+        return;
+    }
+
+    const workspaceRoot = currentWorkspaceRootForRunLog(entry.runLog);
+    if (!workspaceRoot) {
+        // 어느 폴더인지 말해 주지 않으면 사용자가 할 수 있는 일이 없다.
+        let folderName = entry.runLog.workspaceFolderUri;
+        try {
+            folderName = vscode.Uri.parse(entry.runLog.workspaceFolderUri, true).fsPath;
+        } catch {
+            // 참조가 손상된 경우다. 원본 문자열이라도 보여 주는 편이 낫다.
+        }
+        vscode.window.showInformationMessage(t(
+            `이 보고서를 저장한 워크스페이스 폴더가 현재 열려 있지 않습니다: ${folderName}`,
+            `The workspace folder that stored this report is not currently open: ${folderName}`
+        ));
+        return;
+    }
+
+    try {
+        const log = await readActionRunLog(workspaceRoot, entry.runLog.relativePath);
+        if (log.actionId !== entry.actionId || log.startedAt !== entry.timestamp) {
+            throw new RunLogReadError('mismatch', 'Run log identity does not match its History entry.');
+        }
+        const key = actionRunReportKey(entry);
+        const existing = actionRunReportPanels.get(key);
+        const panel = existing ?? vscode.window.createWebviewPanel(
+            'taskhub.actionRunReport',
+            t(`실행 보고서: ${entry.actionTitle}`, `Run Report: ${entry.actionTitle}`),
+            vscode.ViewColumn.Beside,
+            {
+                enableScripts: false,
+                retainContextWhenHidden: false,
+                localResourceRoots: [],
+                // 20만 자짜리 빌드 출력을 스크롤만으로 훑게 두지 않는다.
+                // 스크립트가 없으므로 페이지 안에서 찾을 다른 방법이 없다.
+                enableFindWidget: true,
+            }
+        );
+        if (!existing) {
+            actionRunReportPanels.set(key, panel);
+            panel.onDidDispose(() => {
+                if (actionRunReportPanels.get(key) === panel) {
+                    actionRunReportPanels.delete(key);
+                }
+            });
+        }
+        panel.webview.html = buildActionRunReportHtml(log, randomBytes(16).toString('hex'));
+        panel.reveal(panel.viewColumn ?? vscode.ViewColumn.Beside, false);
+    } catch (error) {
+        if (error instanceof RunLogReadError && error.code === 'missing') {
+            vscode.window.showInformationMessage(t(
+                '이 실행의 보고서는 보관 정책으로 회전됐거나 수동으로 삭제되었습니다.',
+                'This run report was rotated by the retention policy or deleted manually.'
+            ));
+            return;
+        }
+        const detail = error instanceof Error ? error.message : String(error);
+        outputChannel.appendLine(`[WARN] Could not open action run report: ${detail}`);
+        const shownDetail = error instanceof RunLogReadError
+            ? error.code === 'unsafe-path'
+                ? t('로그 참조 경로가 안전하지 않습니다.', 'The run log reference path is unsafe.')
+                : error.code === 'too-large'
+                    ? t('로그 파일이 읽기 크기 상한을 넘습니다.', 'The run log file exceeds the read size limit.')
+                    : error.code === 'workspace-missing'
+                        ? t('워크스페이스 폴더를 더 이상 읽을 수 없습니다.', 'The workspace folder is no longer readable.')
+                        : error.code === 'mismatch'
+                            ? t('이 History 항목과 로그 파일이 서로 다른 실행입니다.', 'The log file belongs to a different run than this History entry.')
+                            : t('로그 파일이 손상됐거나 지원하지 않는 형식입니다.', 'The run log file is corrupt or uses an unsupported format.')
+            : detail;
+        vscode.window.showErrorMessage(t(
+            `실행 보고서를 열 수 없습니다: ${shownDetail}`,
+            `Could not open the action run report: ${shownDetail}`
+        ));
+    }
+}
+
 export function activate(context: vscode.ExtensionContext) {
     // 파일/폴더 다이얼로그의 마지막 위치 저장소. 등록 전에 열린 다이얼로그는
     // 기억 없이 워크스페이스 폴더에서 열리므로 activate 최상단에서 연결한다.
@@ -10450,6 +10638,15 @@ export function activate(context: vscode.ExtensionContext) {
             language: 'shellscript'
         });
         await vscode.window.showTextDocument(doc);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.viewActionRunReport', async (item: HistoryItem) => {
+        const entry = item?.getEntry?.();
+        if (!entry || isToolHistoryEntry(entry)) {
+            vscode.window.showErrorMessage(t('유효하지 않은 액션 실행 기록입니다.', 'Invalid action run history item.'));
+            return;
+        }
+        await showActionRunReport(entry);
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.deleteHistoryItem', async (item: HistoryItem) => {

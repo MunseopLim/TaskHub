@@ -38,6 +38,7 @@
   "cmd.terminateAllActions": "Terminate All Actions",
   "cmd.openSettings": "TaskHub: Open Extension Settings",
   "cmd.openRunLogsFolder": "TaskHub: Open Run Logs Folder",
+  "cmd.viewActionRunReport": "View Action Run Report",
   "cmd.rerunFromHistory": "Re-run Action",
   "cmd.rerunFromHistoryWithInputs": "Re-run with Saved Inputs",
   "cmd.runActionWithInputProfile": "Run with Input Profile…",

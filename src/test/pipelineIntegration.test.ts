@@ -2834,8 +2834,12 @@ try {
     });
 
     suite('Structured Run Logs', () => {
-        test('IT-158: 캡처 출력은 저장하고 password 파생 명령·출력은 디스크에 남기지 않는다', async () => {
+        test('IT-158: 캡처·진단·파일 결과는 저장하고 password 파생 값은 디스크에 남기지 않는다', async () => {
             const secret = 'it158-super-secret';
+            const sourcePath = path.join(tempWorkspace, 'main.c');
+            const artifactPath = path.join(tempWorkspace, 'build', 'report.txt');
+            fs.writeFileSync(sourcePath, 'int main(void) { return 0; }\n');
+            const visibleOutput = `${sourcePath}:3:2: warning: visible-warning`;
             const action: PipelineAction = {
                 description: 'IT-158',
                 tasks: [
@@ -2843,8 +2847,9 @@ try {
                         id: 'visible',
                         type: 'command',
                         command: 'node',
-                        args: ['-e', 'process.stdout.write("visible-output")'],
+                        args: ['-e', `process.stdout.write(${JSON.stringify(visibleOutput)})`],
                         passTheResultToNextTask: true,
+                        output: { diagnostics: '$gcc' },
                     },
                     { id: 'token', type: 'inputBox', prompt: 'token', password: true },
                     {
@@ -2853,6 +2858,14 @@ try {
                         command: 'node',
                         args: ['-e', 'process.stdout.write(process.argv[1])', '${token.value}'],
                         passTheResultToNextTask: true,
+                    },
+                    {
+                        id: 'artifact',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'report',
+                        passTheResultToNextTask: true,
+                        output: { mode: 'file', filePath: artifactPath, overwrite: true },
                     },
                 ],
             };
@@ -2887,12 +2900,93 @@ try {
             const parsed = JSON.parse(serialized) as import('../runLogStore').ActionRunLog;
             const visible = parsed.tasks.find(task => task.taskId === 'visible');
             const secretEcho = parsed.tasks.find(task => task.taskId === 'secretEcho');
+            const artifact = parsed.tasks.find(task => task.taskId === 'artifact');
 
             assert.strictEqual(visible?.output.availability, 'captured');
-            assert.strictEqual(visible?.output.stdout, 'visible-output');
+            assert.strictEqual(visible?.output.stdout, visibleOutput);
+            assert.deepStrictEqual(visible?.diagnostics, { error: 0, warning: 1, info: 0, hint: 0 });
+            assert.deepStrictEqual(artifact?.artifacts, [artifactPath]);
+            assert.strictEqual(fs.readFileSync(artifactPath, 'utf8'), 'report');
             assert.strictEqual(secretEcho?.output.availability, 'redacted');
             assert.ok(secretEcho?.command?.includes('***'));
             assert.ok(!serialized.includes(secret), 'password-derived value leaked into the persisted run log');
+        });
+
+        test('IT-159: 실패한 태스크의 진단도 수집하고 비밀 파생 파일 경로는 마스킹한다', async () => {
+            const secret = 'it159-super-secret';
+            const sourcePath = path.join(tempWorkspace, 'broken.c');
+            fs.writeFileSync(sourcePath, 'int main(void) { return; }\n');
+            const artifactPath = path.join(tempWorkspace, 'out', 'plain.txt');
+            const secretArtifactPath = path.join(tempWorkspace, 'out', 'secret.txt');
+            const failingOutput = `${sourcePath}:1:18: error: it159-broken`;
+            const action: PipelineAction = {
+                description: 'IT-159',
+                tasks: [
+                    {
+                        // 진단 수집의 존재 이유인 "오류를 내며 실패한 빌드".
+                        // 성공 경로와 실패 경로는 서로 다른 코드가 처리한다.
+                        id: 'compileFail',
+                        type: 'command',
+                        command: 'node',
+                        args: ['-e', `process.stderr.write(${JSON.stringify(failingOutput)}); process.exit(1);`],
+                        continueOnError: true,
+                        // 진단은 캡처 모드를 전제로 한다 (features.md §12).
+                        passTheResultToNextTask: true,
+                        output: { diagnostics: '$gcc' },
+                    },
+                    {
+                        id: 'plainWrite',
+                        type: 'writeFile',
+                        path: artifactPath,
+                        content: 'plain',
+                    },
+                    { id: 'token', type: 'inputBox', prompt: 'token', password: true },
+                    {
+                        id: 'secretWrite',
+                        type: 'writeFile',
+                        path: secretArtifactPath,
+                        content: '${token.value}',
+                    },
+                ],
+            };
+            const collector = new ActionRunLogCollector('it159', 'IT-159 Failure Diagnostics', Date.now(), action.tasks);
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+
+            await executeActionPipeline(
+                action,
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it159',
+                tempWorkspace,
+                [tempWorkspace],
+                {
+                    presetInputs: { token: { value: secret } },
+                    runLogCollector: collector,
+                }
+            );
+
+            const store = new RunLogStore(tempWorkspace);
+            const result = await store.write(collector.finish('failure', Date.now(), 'compile failed'), {
+                maxFiles: 10,
+                retentionDays: 30,
+                maxTotalBytes: 8 * 1024 * 1024,
+            });
+            const serialized = fs.readFileSync(result.absolutePath, 'utf8');
+            const parsed = JSON.parse(serialized) as import('../runLogStore').ActionRunLog;
+            const failed = parsed.tasks.find(task => task.taskId === 'compileFail');
+            const plain = parsed.tasks.find(task => task.taskId === 'plainWrite');
+            const secretWrite = parsed.tasks.find(task => task.taskId === 'secretWrite');
+
+            assert.strictEqual(failed?.status, 'continued');
+            assert.strictEqual(failed?.output.availability, 'captured');
+            assert.strictEqual(failed?.exitCode, 1);
+            assert.deepStrictEqual(failed?.diagnostics, { error: 1, warning: 0, info: 0, hint: 0 });
+            // writeFile 이 확정한 경로가 보고서의 파일 결과로 남는다.
+            assert.deepStrictEqual(plain?.artifacts, [artifactPath]);
+            // 비밀 파생 태스크는 경로 자체도 남기지 않는다.
+            assert.deepStrictEqual(secretWrite?.artifacts, ['***']);
+            assert.ok(!serialized.includes(secretArtifactPath), 'secret-derived artifact path leaked into the run log');
+            assert.ok(!serialized.includes(secret), 'password-derived value leaked into the persisted run log');
+            assert.strictEqual(fs.readFileSync(secretArtifactPath, 'utf8'), secret);
         });
     });
 

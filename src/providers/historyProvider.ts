@@ -37,6 +37,13 @@ export interface ToolHistoryEntryOptions {
     memoryMapConfig?: { regions?: HistoryToolMemoryRegion[] };
 }
 
+export interface HistoryRunLogReference {
+    /** 실행 당시 로그를 저장한 workspace folder의 file URI. */
+    workspaceFolderUri: string;
+    /** 위 폴더 기준 `.taskhub/logs/.../*.log` 상대 경로. */
+    relativePath: string;
+}
+
 export interface HistoryEntry {
     /**
      * Legacy entries omit this field and are treated as action entries.
@@ -107,6 +114,12 @@ export interface HistoryEntry {
      * Used to render the "last run" badge on each `HistoryItem`.
      */
     durationMs?: number;
+    /**
+     * 큰 로그 본문은 workspaceState에 넣지 않고 워크스페이스 파일을 가리킨다.
+     * 회전·수동 삭제 뒤에는 참조가 남을 수 있으며, 보고서 UI가 이를 정상적인
+     * "더 이상 보관되지 않음" 상태로 처리한다.
+     */
+    runLog?: HistoryRunLogReference;
     /**
      * Full breadcrumb path (folder titles + action title) at the moment of
      * execution. Used to disambiguate `HistoryItem` labels when two actions
@@ -538,7 +551,12 @@ export class HistoryItem extends vscode.TreeItem {
         if (hasInputs) { flags.push('inputs'); }
         if (entry.output) { flags.push('output'); }
         if (hasCommands) { flags.push('commands'); }
-        this.contextValue = flags.length > 0 ? `historyItem.${flags.join('.')}` : 'historyItem';
+        // 실행 로그 저장은 기본으로 꺼져 있고 0.7.28 이전 기록에는 참조 자체가
+        // 없다. 플래그로 걸러 두지 않으면 대부분의 행에서 보고서 버튼이
+        // "보고서 없음" 안내만 띄우는 죽은 버튼이 된다.
+        if (!isToolEntry && entry.runLog) { flags.push('runlog'); }
+        const baseContext = isToolEntry ? 'historyToolItem' : 'historyItem';
+        this.contextValue = flags.length > 0 ? `${baseContext}.${flags.join('.')}` : baseContext;
 
         const date = new Date(entry.timestamp);
         // Surface the full breadcrumb in the tooltip whenever it's available
@@ -758,6 +776,21 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
         } else {
             entry.commands = copyTaskRecord(commands);
         }
+        this.context.workspaceState.update(this.historyKey, history);
+        this.refresh();
+    }
+
+    /** 성공적으로 저장된 영속 로그의 작은 참조만 History 항목에 붙인다. */
+    setHistoryRunLog(actionId: string, timestamp: number, runLog: HistoryRunLogReference): void {
+        const history = this.getHistory();
+        const entry = history.find(e => e.actionId === actionId && e.timestamp === timestamp);
+        if (!entry) {
+            return;
+        }
+        entry.runLog = {
+            workspaceFolderUri: runLog.workspaceFolderUri,
+            relativePath: runLog.relativePath,
+        };
         this.context.workspaceState.update(this.historyKey, history);
         this.refresh();
     }

@@ -130,7 +130,8 @@
 
 | ID | 제목 | 핵심 검증 |
 | --- | --- | --- |
-| IT-158 | 캡처 출력 저장과 password 파생 값 마스킹 | 실제 `command` 캡처 결과는 `.taskhub/logs/` JSON에 저장되지만 `password: true` 입력을 argv로 받은 태스크의 명령·출력에는 원본 비밀 문자열이 남지 않음 |
+| IT-158 | 캡처·진단·파일 결과 저장과 password 파생 값 마스킹 | 실제 `command` 캡처 결과·Problem Matcher 진단 개수·TaskHub가 쓴 파일 경로는 `.taskhub/logs/` JSON에 저장되지만 `password: true` 입력을 argv로 받은 태스크의 명령·출력에는 원본 비밀 문자열이 남지 않음 |
+| IT-159 | 실패 경로의 진단 수집과 비밀 파생 파일 경로 마스킹 | 0이 아닌 종료 코드로 실패한 `command`(`continueOnError`)의 종료 코드와 stderr 진단이 로그에 남고, `writeFile`이 확정한 경로는 파일 결과로 기록되되 `password: true` 값을 쓴 태스크의 경로는 `***`로만 남음 |
 
 ### Last-run 배지
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)
