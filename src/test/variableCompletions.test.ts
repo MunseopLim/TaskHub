@@ -66,6 +66,18 @@ suite('variableCompletions', () => {
             );
         });
 
+        test('현재 파일 내장과 환경변수 네임스페이스도 종류를 구분한다', () => {
+            const got = details(doc(`{ "id": "run", "type": "command", "command": "py", "args": ["\${|"] }`));
+            assert.deepStrictEqual(
+                got.find(d => d.kind === 'builtin' && d.ref === 'file'),
+                { kind: 'builtin', ref: 'file' }
+            );
+            assert.deepStrictEqual(
+                got.find(d => d.kind === 'environment' && d.variable === undefined),
+                { kind: 'environment' }
+            );
+        });
+
         test('결과 키는 타입을, 캡처 이름은 태스크 id 를 싣는다', () => {
             const fixture = `[
   { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
@@ -84,6 +96,32 @@ suite('variableCompletions', () => {
                 entries.find(e => e.name === 'build.output')?.detail,
                 { kind: 'result', taskType: 'shell' }
             );
+        });
+    });
+
+    suite('내장 문맥 변수', () => {
+        test('현재 파일·선택 영역·클립보드를 최상위에서 제안한다', () => {
+            const got = names(doc(`{ "id": "run", "type": "command", "command": "py", "args": ["\${|"] }`));
+            for (const expected of [
+                'file', 'relativeFile', 'fileDirname', 'fileBasename',
+                'selectedText', 'lineNumber', 'columnNumber', 'clipboard', 'env:',
+            ]) {
+                assert.ok(got.includes(expected), `${expected} 누락: ${got.join(',')}`);
+            }
+        });
+
+        test('env: 뒤에는 실제 환경변수 이름과 값이 아닌 이름만 제안한다', () => {
+            const { text, offset } = at(doc(
+                `{ "id": "run", "type": "command", "command": "py", "args": ["\${env:PA|"] }`
+            ));
+            const got = collectVariableCompletions(text, offset, {
+                PATH: '/secret/path',
+                PATHEXT: '.EXE',
+                TOKEN: 'must-not-appear',
+            });
+            assert.deepStrictEqual(got.map(entry => entry.name), ['env:PATH', 'env:PATHEXT', 'env:TOKEN']);
+            assert.ok(got.every(entry => !entry.name.includes('/secret/path') && !entry.name.includes('must-not-appear')));
+            assert.deepStrictEqual(got[0].detail, { kind: 'environment', variable: 'PATH' });
         });
     });
 

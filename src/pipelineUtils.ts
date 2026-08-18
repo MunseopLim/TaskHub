@@ -17,9 +17,25 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import type { OutputCapture, Task, TaskCondition } from './schema';
+import {
+    BUILTIN_VARIABLE_NAMES,
+    hasBuiltinVariableSnapshot,
+    hasEnvironmentSnapshot,
+    lookupBuiltinVariable,
+    lookupEnvironmentVariable,
+    usesStrictBuiltinVariables,
+} from './builtinVariables';
 
 /** Maximum allowed length of a single interpolated value. */
 export const INTERPOLATED_VALUE_MAX_LENGTH = 32 * 1024;
+
+/** 없는 실행 문맥 내장값. `??` 체인은 이 오류를 다음 대안으로 넘길 수 있다. */
+export class PipelineBuiltinUnavailableError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'PipelineBuiltinUnavailableError';
+    }
+}
 
 /**
  * Predicate used by `executeShellCommand` to decide whether a newly arrived
@@ -501,12 +517,32 @@ export function resolvePipelineReference(expression: string, context: any): unkn
     // undefined 이므로, 살아남은 쪽 값이 자연스럽게 선택된다.
     const alternatives = splitCoalesceAlternatives(expression);
     if (alternatives) {
+        let unavailable: PipelineBuiltinUnavailableError | undefined;
         for (const alt of alternatives) {
-            const value = resolvePipelineReference(alt, context);
-            if (value !== undefined) { return value; }
+            try {
+                const value = resolvePipelineReference(alt, context);
+                if (value !== undefined) { return value; }
+            } catch (error) {
+                if (!(error instanceof PipelineBuiltinUnavailableError)) { throw error; }
+                unavailable = error;
+            }
+        }
+        if (unavailable) { throw unavailable; }
+        return undefined;
+    }
+    // `${env:NAME}` 는 task id가 아니라 실행 시작 시점의 환경변수 스냅샷이다.
+    // `process.env` 를 여기서 직접 읽지 않는다 — 한 액션 도중 환경이 바뀌어도
+    // 결과가 흔들리지 않고 Preview/Doctor도 같은 해석기를 쓸 수 있어야 한다.
+    if (expression.startsWith('env:')) {
+        const name = expression.slice('env:'.length);
+        const value = lookupEnvironmentVariable(context, name);
+        if (value !== undefined) { return value; }
+        if (hasEnvironmentSnapshot(context) && usesStrictBuiltinVariables(context)) {
+            throw new PipelineBuiltinUnavailableError(`Environment variable '${name}' is not defined.`);
         }
         return undefined;
     }
+
     const parts = expression.split('.');
     const stepId = parts[0];
     const property = parts.slice(1).join('.');
@@ -514,6 +550,20 @@ export function resolvePipelineReference(expression: string, context: any): unkn
     // 점 뒤가 빈 형태까지 bare 로 새어 들어가 폴백을 타고, "속성을 쓴 참조는
     // 폴백하지 않는다" 는 계약이 오타 하나로 뚫린다.
     const isBare = parts.length === 1;
+    // bare 내장은 별도 심볼 스냅샷에서 읽는다. 합쳐진 문맥의 문자열 키는 기존
+    // action 호환을 위해 동명 task 결과가 덮을 수 있다: `${file}`은 현재 파일,
+    // `${file.path}`는 id가 `file`인 task 결과다.
+    if (isBare && RESERVED_VARIABLE_HEADS.has(expression) && hasBuiltinVariableSnapshot(context)) {
+        const value = lookupBuiltinVariable(context, expression as typeof BUILTIN_VARIABLE_NAMES[number]);
+        if (value !== undefined) { return value; }
+        if (usesStrictBuiltinVariables(context)) {
+            throw new PipelineBuiltinUnavailableError(
+                `Built-in variable '\${${expression}}' is unavailable. ` +
+                `Open a file in an editor before running this action.`
+            );
+        }
+        return undefined;
+    }
     // **own property 만 본다.** 컨텍스트가 평범한 객체면 `${constructor.name}` 이
     // `Object`, `${toString.name}` 이 `toString` 으로 "해석"되어 태스크 결과처럼
     // 셸 명령에 들어간다.
@@ -525,6 +575,12 @@ export function resolvePipelineReference(expression: string, context: any): unkn
     }
     const direct = ownValue(context, expression);
     if (direct !== undefined) { return direct; }
+    if (isBare && RESERVED_VARIABLE_HEADS.has(expression) && usesStrictBuiltinVariables(context)) {
+        throw new PipelineBuiltinUnavailableError(
+            `Built-in variable '\${${expression}}' is unavailable. ` +
+            `Open a file in an editor before running this action.`
+        );
+    }
     return undefined;
 }
 
@@ -658,11 +714,25 @@ export function shouldSkipForSkippedDependencies(
     if (!task || typeof task !== 'object' || skippedTaskIds.size === 0) { return false; }
     const platform = options.platform ?? process.platform;
     for (const str of walkInterpolatedTaskStrings(task, platform)) {
-        for (const heads of extractVariableReferences(str)) {
-            if (heads.every(head => skippedTaskIds.has(head))) { return true; }
+        for (const refs of extractParsedVariableReferences(str)) {
+            if (refs.every(({ head, key }) =>
+                skippedTaskIds.has(head)
+                && !(key === undefined && RESERVED_VARIABLE_HEADS.has(head))
+            )) { return true; }
         }
     }
     return false;
+}
+
+function extractParsedVariableReferences(text: string): ReferenceAlternative[][] {
+    if (typeof text !== 'string' || text.length === 0) { return []; }
+    const refs: ReferenceAlternative[][] = [];
+    for (const match of text.matchAll(/\${([^}]+)}/g)) {
+        if (!match[1]) { continue; }
+        const alternatives = parseReferenceAlternatives(match[1]);
+        if (alternatives.length > 0) { refs.push(alternatives); }
+    }
+    return refs;
 }
 
 /**
@@ -701,21 +771,17 @@ export const NON_INTERPOLATED_TASK_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Variable heads that are reserved by the runtime's interpolation
- * context and therefore must NOT be auto-inferred as task dependencies,
- * even if a task happens to be named the same. Without this filter, a
- * task named `workspaceFolder` would steal every `${workspaceFolder}`
- * reference and could create false-positive cycles (sequential task
- * after such a task auto-inferring it as a dep while the task itself
- * was barriered against the rest of the action).
+ * Variable heads reserved by the runtime interpolation context. A bare
+ * `${file}` is a built-in and must not create a task dependency. Qualified
+ * `${file.path}` can still address a same-named task for backward
+ * compatibility; `inferTaskDependencies` distinguishes those forms.
  *
  * Colon-prefixed namespaces (`env:VAR`, `input:foo`) are handled
  * separately in `inferTaskDependencies` because `extractVariableHeads`
  * preserves the colon in the head.
  */
 export const RESERVED_VARIABLE_HEADS: ReadonlySet<string> = new Set([
-    'workspaceFolder',
-    'extensionPath',
+    ...BUILTIN_VARIABLE_NAMES,
 ]);
 
 /**
@@ -908,9 +974,9 @@ export interface InferTaskDependenciesOptions {
  * excluded.
  *
  * Filtered out *before* the `validTaskIds` lookup:
- *  - `RESERVED_VARIABLE_HEADS` (`workspaceFolder`, `extensionPath`) —
- *    these are runtime built-ins; if a task happens to share the name,
- *    we must not redirect the built-in reference into a fake dep.
+ *  - Bare `RESERVED_VARIABLE_HEADS` (`file`, `workspaceFolder`, …) — these
+ *    are runtime built-ins. Qualified refs such as `${file.path}` remain task
+ *    refs when a same-named task exists, preserving existing actions.
  *  - Heads starting with `RESERVED_HEAD_PREFIXES` (`env:`, `input:`) —
  *    VS Code-style namespaced built-ins. The check is on the prefix,
  *    NOT on whether the head merely contains a colon: the schema does
@@ -950,9 +1016,9 @@ export function inferTaskDependencies(
     if (!task || typeof task !== 'object') { return deps; }
     const platform = options.platform ?? process.platform;
     for (const str of walkInterpolatedTaskStrings(task, platform)) {
-        for (const head of extractVariableHeads(str)) {
+        for (const { head, key } of extractParsedVariableReferences(str).flat()) {
             if (head === task.id) { continue; }
-            if (RESERVED_VARIABLE_HEADS.has(head)) { continue; }
+            if (key === undefined && RESERVED_VARIABLE_HEADS.has(head)) { continue; }
             if (RESERVED_HEAD_PREFIXES.some(p => head.startsWith(p))) { continue; }
             if (validTaskIds.has(head)) { deps.add(head); }
         }

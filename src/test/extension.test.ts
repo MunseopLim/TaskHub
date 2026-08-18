@@ -445,7 +445,7 @@ suite('Extension Test Suite', () => {
 				const source = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'extension.ts'), 'utf-8');
 				for (const kind of ['Zip', 'Unzip']) {
 					const re = new RegExp(
-						`interpolated${kind}Task\\.tool = interpolateToolValue\\(task\\.tool, interpolationContext\\)[\\s\\S]*?handle${kind}\\(interpolated${kind}Task`
+						`interpolated${kind}Task\\.tool = interpolateToolValue\\(task\\.tool, interpolationContext\\)[\\s\\S]*?handle${kind}\\(\\s*interpolated${kind}Task`
 					);
 					assert.ok(
 						re.test(source),
@@ -6341,6 +6341,10 @@ suite('Extension Test Suite', () => {
 			{ kind: 'task' },
 			{ kind: 'builtin', ref: 'workspaceFolder' },
 			{ kind: 'builtin', ref: 'extensionPath' },
+			{ kind: 'builtin', ref: 'file' },
+			{ kind: 'builtin', ref: 'selectedText' },
+			{ kind: 'environment' },
+			{ kind: 'environment', variable: 'PATH' },
 			{ kind: 'result', taskType: 'quickPick' },
 			{ kind: 'capture', taskId: 'build' },
 		];

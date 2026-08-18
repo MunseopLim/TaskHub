@@ -60,7 +60,7 @@
 
 `actions.json`에는 JSON 스키마([schema/actions.schema.json](../schema/actions.schema.json))가 연결돼 있어 키·타입·허용값이 제안되고 잘못된 값에 밑줄이 그어집니다. `options` 안의 `canSelectMany` 같은 다이얼로그 옵션도 여기에 포함됩니다(0.6.57부터 — 그전에는 `options`가 빈 객체 타입이라 **아무것도 제안되지 않았습니다**).
 
-**결과 참조(`${…}`)는 스키마가 다룰 수 없습니다.** 값 문자열 *안*에 있고, 무엇이 유효한지가 같은 액션의 다른 태스크 타입에 달려 있기 때문입니다. 그래서 0.6.57부터 전용 자동완성을 제공합니다 — `${`를 입력하면 **같은 액션의 다른 태스크 id**와 `${workspaceFolder}` / `${extensionPath}`가, `${pick.`처럼 점을 찍으면 **그 태스크 타입이 실제로 내는 결과 키**가 제안됩니다 (`fileDialog`이면 `path` · `dir` · `paths` · `names` · `count` …).
+**결과 참조(`${…}`)는 스키마가 다룰 수 없습니다.** 값 문자열 *안*에 있고, 무엇이 유효한지가 같은 액션의 다른 태스크 타입에 달려 있기 때문입니다. 그래서 0.6.57부터 전용 자동완성을 제공합니다 — `${`를 입력하면 **같은 액션의 다른 태스크 id**와 현재 파일·선택 영역 같은 내장 문맥 변수가, `${pick.`처럼 점을 찍으면 **그 태스크 타입이 실제로 내는 결과 키**가 제안됩니다 (`fileDialog`이면 `path` · `dir` · `paths` · `names` · `count` …). `${env:` 뒤에는 현재 환경변수 이름이 제안됩니다(값은 목록에 표시하지 않음).
 
 - 결과 키 목록은 Preview Run · Doctor가 쓰는 시뮬레이션과 **같은 출처**입니다. 태스크에 결과 키가 늘면 세 곳이 함께 늘어납니다.
 - `output.capture`로 이름을 정의했다면 그 이름도 함께 제안됩니다.
@@ -68,7 +68,7 @@
 - 자기 자신과 **다른 액션의 태스크**는 제안하지 않습니다(참조할 수 없습니다).
 - `??` 체인 안에서는 **커서가 놓인 대안**만 봅니다 — `${pick.path ?? ask.`에서는 `ask`의 키가 제안되고, 항목을 골라도 앞의 `pick.path ?? `는 그대로 남습니다.
 - 낱말 중간(`${ask.va|lue}`)에서는 삽입/대체 두 범위를 제공하므로 `editor.suggest.insertMode` 설정이 그대로 적용됩니다 — `replace`면 꼬리(`lue`)가 사라지고 `insert`면 남습니다. 대체 범위는 **고른 항목에 맞춰** 정해집니다: 후보가 커서 뒤 글자와 그대로 이어질 때만 그만큼 덮으므로, `${as|k.value}`에서 `ask`를 골라도 `.value`가 지워지지 않고 `??` 뒤도 건드리지 않습니다.
-- **태스크 id를 치는 자리에서는 뒤따르는 `.key`를 건드리지 않습니다.** `ask`와 `asky`가 함께 있을 때 `${as|k.value}`에서 `asky`를 골라도 `${asky.value}`가 됩니다. 전역 참조(`workspaceFolder`, `extensionPath`)는 `.key`를 갖지 않으므로 표현식 전체를 대체합니다.
+- **태스크 id를 치는 자리에서는 뒤따르는 `.key`를 건드리지 않습니다.** `ask`와 `asky`가 함께 있을 때 `${as|k.value}`에서 `asky`를 골라도 `${asky.value}`가 됩니다. 전역 참조(`workspaceFolder`, `file` 등)는 `.key`를 갖지 않으므로 표현식 전체를 대체합니다.
 - **닫는 `}`가 없으면 커서 뒤를 덮지 않습니다.** `"cp ${gen.|report.html dist/"`처럼 참조가 닫혀 있지 않으면 뒤 글자가 참조의 속성인지 명령 인자인지 알 수 없어, 확신할 수 있는 자리(`}` · `"` · 줄바꿈 · `??`)에서만 덮습니다. 꼬리가 붙어 남을 수는 있어도 **입력한 것을 잃지는 않습니다.**
 - **커서가 `??` 안(`${a.b ?|? c.d}`)이면 제안하지 않습니다** — 그 자리에서는 무엇을 골라도 `??`가 지워져 체인이 통째로 리터럴이 되기 때문입니다.
 - 편집 중이라 JSON이 아직 유효하지 않아도 동작합니다 — 자동완성이 불리는 시점의 문서는 거의 항상 미완성이기 때문입니다.
@@ -483,13 +483,39 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 
 `${taskId.key}` 형식으로 앞 태스크 결과를 참조합니다. 대표 키는 각 태스크 절에 정리되어 있으며 스키마 자동완성과 Doctor도 같은 결과 모델을 사용합니다.
 
-- `${workspaceFolder}`, `${extensionPath}`는 내장 경로입니다.
+- `${workspaceFolder}`, `${extensionPath}`는 액션 워크스페이스와 TaskHub 설치 경로입니다.
+- 활성 에디터를 바로 쓰는 내장 변수:
+
+  | 참조 | 값 |
+  | --- | --- |
+  | `${file}` | 활성 파일의 절대 경로 |
+  | `${relativeFile}` | 활성 파일이 속한 워크스페이스 폴더 기준 경로 |
+  | `${relativeFileDirname}` | 위 상대 경로의 폴더 부분 |
+  | `${fileDirname}` | 활성 파일의 절대 폴더 경로 |
+  | `${fileBasename}` | 확장자를 포함한 파일명 |
+  | `${fileBasenameNoExtension}` | 마지막 확장자를 뺀 파일명 |
+  | `${fileExtname}` | 점을 포함한 마지막 확장자 |
+  | `${fileWorkspaceFolder}` | 활성 파일이 속한 워크스페이스 폴더 |
+  | `${selectedText}` | 실행 시작 시 선택한 텍스트 |
+  | `${lineNumber}`, `${columnNumber}` | 실행 시작 시 커서 위치, 1부터 시작 |
+  | `${clipboard}` | 실행 시작 시 클립보드 텍스트 |
+  | `${env:NAME}` | 실행 시작 시 환경변수 `NAME`의 값 |
+
+  에디터 값은 액션 시작 시 한 번 스냅샷하므로 중간에 포커스가 이동해도 바뀌지 않습니다. 활성
+  파일이 필요한 참조를 파일 에디터 없이 사용하거나 없는 환경변수를 참조하면 리터럴 `${…}`를
+  넘기지 않고 액션이 실패합니다. 대안이 있다면 `${file ?? workspaceFolder}`처럼 쓸 수 있습니다.
+  환경변수·클립보드·선택 텍스트는 History와 실행 로그에 기록되는 **명령 문자열** 및 조건 안내에서
+  `***`로 가립니다. 실행한 도구가 값을 stdout/stderr로 다시 출력하면 일반 출력과 구분할 수 없어
+  자동으로 지우지 못합니다.
+- task id가 내장 이름과 같으면 점 없는 참조와 속성 참조를 구분합니다. 예를 들어 `${file}`은 활성
+  파일이고, `${file.path}`는 id가 `file`인 task의 `path` 결과입니다. 기존 `fileDialog` action을
+  바꾸지 않으면서 현재 파일 변수도 함께 쓸 수 있습니다.
 - `${a.value ?? b.value}`는 왼쪽부터 실제로 해석되는 첫 값을 사용합니다.
 - 배열 값은 `args` 원소 전체 또는 `command` 토큰 전체가 참조일 때 여러 argv로 펼쳐집니다(`command` 타입 한정 — `shell`은 문자열을 셸에 그대로 넘기는 계약이라 공백으로 이어 붙습니다). 다른 글자가 섞이면(`--file=${pick.paths}`) 공백으로 이어 붙어 인자 한 칸이 되며, `args` 자리에서는 Doctor가 `args.array-joined`로 알립니다.
 - 명령 문자열에서 `"${pick.paths}"`처럼 **따옴표로 감싸도 인자 하나로 묶이지 않습니다** — 인용은 토큰 경계만 정하고, 그 토큰이 배열 참조 하나면 그대로 펼쳐집니다. 배열을 인자 한 칸으로 넘겨야 한다면 앞뒤에 글자를 붙이거나(`--file=${pick.paths}`) `stringManipulation`으로 먼저 문자열을 만드세요.
 - 풀리지 않는 참조는 문자열에서 사라지지 않고 `${…}` 리터럴로 남습니다.
 - 태스크 자신을 참조할 수 없습니다.
-- `${env:VAR}`와 `${input:name}`은 그래프에서 예약된 이름이지만 현재 값 치환은 지원하지 않습니다.
+- `${input:name}`은 그래프에서 예약된 이름이지만 아직 action-level 입력 치환은 지원하지 않습니다.
 
 ### 조건부 태스크 (`when`)
 
@@ -1472,9 +1498,11 @@ task의 string 필드(`command`, `args`, `env` 값, `cwd`, `output.filePath`, `o
 - `parallel: true`를 붙였더라도 출력을 참조하는 task가 먼저 실행되는 사고를 막을 수 있고,
 - `dependsOn`을 잊어도 정확한 순서가 유지됩니다.
 
-`${workspaceFolder}` / `${extensionPath}` 같은 reserved 이름과 `${env:BAR}` / `${input:foo}` 같은 reserved prefix(`env:`, `input:`)는 자동 추론에서 제외됩니다 — 같은 이름의 task가 존재하더라도 이 reference는 task가 아니라 빌트인으로 간주되어 가짜 의존성/사이클을 만들지 않습니다. `output.capture[].regex` / `output.diagnostics[].regex` 안의 `${…}` 리터럴도 정규식 패턴이지 변수 참조가 아니므로 제외.
+`${workspaceFolder}` / `${file}` 같은 점 없는 reserved 참조와 `${env:BAR}` / `${input:foo}` 같은 reserved prefix(`env:`, `input:`)는 자동 추론에서 제외됩니다. 단, `${file.path}`처럼 속성이 붙으면 같은 이름의 task 결과 참조이므로 그 task가 의존성으로 잡힙니다. `output.capture[].regex` / `output.diagnostics[].regex` 안의 `${…}` 리터럴도 정규식 패턴이지 변수 참조가 아니므로 제외됩니다.
 
-> **현재 한계**: `${workspaceFolder}` / `${extensionPath}`는 런타임에 실제 경로로 치환되지만, `${env:VAR}` / `${input:foo}`는 *예약은 되어 있지만 아직 치환되지는 않습니다* — interpolation 단계를 통과해서 셸에 리터럴로 전달됩니다(대부분의 셸은 이를 그대로 인쇄). VS Code 빌트인과의 동일성은 향후 작업이며, 현재 권장은 `task.env.VAR`로 명시 주입하는 패턴입니다. reserved prefix는 그래프 정확성을 위한 안전장치이며 task id를 `env:` / `input:`로 시작하지 마세요.
+> **현재 한계**: `${env:VAR}`는 0.7.32부터 실행 시작 시점의 환경값으로 치환됩니다. `${input:foo}`는
+> action-level 입력을 위한 예약 이름이지만 아직 치환되지 않으므로 리터럴로 남습니다. task id를
+> `env:` / `input:`로 시작하지 마세요.
 
 ### 24.4. 실패 정책
 

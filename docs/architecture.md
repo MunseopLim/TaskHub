@@ -25,6 +25,7 @@ TaskHub/
 │   │                                  # - 쉘 토큰화 + POSIX/PowerShell/Windows native 인자 quoting
 │   │                                  # - toWorkspaceRelativePath(): 절대경로 → ${workspaceFolder} 정규화
 │   │                                  # - wouldExceedCaptureLimit(): 캡처 한도 off-by-one guard
+│   ├── builtinVariables.ts            # 실행 시작 시점의 에디터·환경 내장 변수 스냅샷
 │   ├── backgroundCompletion.ts        # 장시간 액션 완료 정책·750ms 묶음·표시 문구 순수 로직
 │   ├── runLogStore.ts                 # 구조화 실행 로그 수집·상한·원자 저장·회전
 │   ├── actionRunReport.ts             # 실행 로그 → 스크립트 없는 읽기 전용 보고서 HTML

@@ -62,6 +62,7 @@ import {
 } from './previewRun';
 import { resolveDiagnosticMatcher } from './diagnosticMatcher';
 import * as path from 'path';
+import { buildBuiltinVariableContext } from './builtinVariables';
 
 /**
  * One issue surfaced by Doctor. The extension layer maps these to
@@ -1065,12 +1066,9 @@ export function enumerateArgvCandidates(
     // `${safe.value ?? bad.value}` 에 뒤 대안까지 경고가 붙는 과탐은 감수한다.
     // 끊을 수 있는 것은 예약 내장뿐이다: 문맥에 늘 있고 꺼지는 길이 없다.
     for (const alt of alternatives) {
-        // **내장 참조는 동명 태스크보다 세다.** 런타임은 태스크 결과 위에 내장 값을
-        // 덮으므로(`extension.ts`), `id: "workspaceFolder"` 인 quickPick 이 있어도
-        // 태스크 항목이 값이 되지 않는다 — 의존성 추론과 같은 예약 키 규칙을 쓴다.
-        if (alt.head && RESERVED_VARIABLE_HEADS.has(alt.head)) {
-            // `.value` 같은 키는 문자열의 없는 속성이라 풀리지 않는다 — 다음 대안으로.
-            if (alt.key !== undefined) { continue; }
+        // bare 내장은 동명 task보다 세지만, `${file.value}`처럼 속성이 붙으면 기존
+        // action 호환을 위해 id가 `file`인 task 결과를 읽는다.
+        if (alt.head && RESERVED_VARIABLE_HEADS.has(alt.head) && alt.key === undefined) {
             // **bare 내장은 항상 풀려 체인을 끝낸다.** 뒤 대안은 쓰이지 않고, 값
             // 자체는 워크스페이스·확장 **디렉터리 경로**라 인터프리터가 될 수 없다.
             // 다만 **앞선 대안이 이미 값을 냈다면** 그쪽이 이기므로 여기서 진단을
@@ -2077,6 +2075,7 @@ function nestedInterpreterRefsAreConstrained(candidate: ScriptCandidate, tasksBy
         // **태스크를 가리키지 않는 참조도 안전하지 않다.** `${workspaceFolder}` 는
         // 사용자 폴더 이름이고 거기에 `;` 나 `&` 가 들어갈 수 있다.
         return parseReferenceAlternatives(match[1]).every(alt => {
+            if (alt.key === undefined && RESERVED_VARIABLE_HEADS.has(alt.head)) { return false; }
             // 참조마다 태스크 배열을 훑던 동안 진단이 O(참조 수 × 태스크 수) 였다.
             const source = tasksById.get(alt.head) as any;
             if (!source) { return false; }
@@ -2501,18 +2500,24 @@ function analyzeActionTasks(
     }
     // 보간 문맥과 "아직 실행되지 않은 태스크" 집합은 **한 번만** 만들고 태스크를
     // 지날 때마다 갱신한다. 태스크마다 새로 만들면 둘 다 O(태스크 수²) 다.
-    const sharedInterpolationContext: any = Object.assign(Object.create(null), {
+    // Doctor는 실행 시점의 활성 에디터를 알 수 없다. 그렇다고 표준 내장 변수를
+    // 미해결 오타로 보고하면 모든 정상 액션에 경고가 붙으므로, 모양만 드러나는
+    // 안전한 자리표시자로 시뮬레이션한다. Preview Run은 실제 현재 에디터를 본다.
+    const builtinVariables = buildBuiltinVariableContext({
         workspaceFolder: baseDir,
         extensionPath: input.extensionPath,
+        editor: {
+            file: path.join(baseDir || input.workspaceRoots[0] || path.sep, 'current-file.ext'),
+            fileWorkspaceFolder: baseDir || input.workspaceRoots[0] || path.sep,
+            selectedText: '<builtin:selectedText>',
+            lineNumber: 1,
+            columnNumber: 1,
+        },
+        clipboard: '<builtin:clipboard>',
+        strict: false,
     });
-    /**
-     * 내장 참조는 **태스크 결과보다 세다.** 런타임은 태스크마다 문맥을 새로 만들며
-     * `Object.assign(…, allResults, { workspaceFolder, extensionPath })` 로 내장 값을
-     * 마지막에 덮는다(`extension.ts`). 여기서는 문맥을 한 번만 만들어 재사용하므로
-     * `id: "workspaceFolder"` 태스크가 지나가면 내장 문자열이 결과 객체로 덮여
-     * 뒤따르는 `${workspaceFolder}` 가 `variable.unresolved` 로 오진됐다 —
-     * 런타임은 정상 해석하는데 진단만 경고하던 자리다.
-     */
+    const sharedInterpolationContext: any = Object.assign(Object.create(null), builtinVariables);
+    /** bare 내장은 심볼 스냅샷에서, 속성 참조는 동명 task 결과에서 읽는다. */
     const BUILTIN_CONTEXT_KEYS = RESERVED_VARIABLE_HEADS;
     const forwardTaskIds = new Set<string>(knownTaskIds);
     // 런타임과 **같은 스캐너**로 비밀 오염을 전파한다. 실행기는 태스크가 끝날 때
@@ -2587,10 +2592,11 @@ function analyzeActionTasks(
             if (Array.isArray(resolvePipelineReference(expression, interpolationContext))) { return true; }
             const augmented = Object.assign(Object.create(null), interpolationContext);
             let addedForward = false;
-            for (const { head } of parseReferenceAlternatives(expression)) {
+            for (const { head, key } of parseReferenceAlternatives(expression)) {
                 if (!head || Object.prototype.hasOwnProperty.call(allResults, head)) { continue; }
-                // 내장 키는 여기서도 덮지 않는다 — 공유 문맥과 같은 규칙이다.
-                if (BUILTIN_CONTEXT_KEYS.has(head)) { continue; }
+                // bare 내장은 task가 아니라 실행 문맥을 뜻한다. 속성 참조는 동명
+                // task를 가리킬 수 있으므로 전방 결과 모형을 덧댄다.
+                if (key === undefined && BUILTIN_CONTEXT_KEYS.has(head)) { continue; }
                 const forward = tasksById.get(head);
                 if (!forward) { continue; }
                 augmented[head] = simulateTaskResult(forward);
@@ -3119,9 +3125,7 @@ function analyzeActionTasks(
         // 있을 때만 capture 를 돌린다)은 `simulateTaskResultWithCaptures` 한
         // 곳에만 두어 Preview / 전방 참조 판정과 같은 모델을 쓰게 한다.
         allResults[task.id] = simulateTaskResultWithCaptures(task);
-        if (!BUILTIN_CONTEXT_KEYS.has(task.id)) {
-            sharedInterpolationContext[task.id] = allResults[task.id];
-        }
+        sharedInterpolationContext[task.id] = allResults[task.id];
         forwardTaskIds.delete(task.id);
     }
 }

@@ -10,6 +10,7 @@ import {
     simulateTaskResultWithCaptures,
 } from '../previewRun';
 import { interpolatePipelineVariables } from '../pipelineUtils';
+import { buildBuiltinVariableContext } from '../builtinVariables';
 import type { ActionItem, Task } from '../schema';
 
 const WS = path.resolve(os.tmpdir(), 'taskhub-preview-ws');
@@ -29,6 +30,48 @@ function currentBranch(value: string): Record<string, string> {
 }
 
 suite('buildPreviewReport', () => {
+    test('현재 파일·환경변수 내장을 실제 Preview argv에 반영한다', () => {
+        const file = path.join(WS, 'src', 'main.c');
+        const options = baseOptions();
+        const item: ActionItem = {
+            id: 'a.builtin',
+            title: 'builtin',
+            action: {
+                description: 'x',
+                tasks: [{
+                    id: 'run', type: 'command', command: 'tool',
+                    args: ['${relativeFile}', '${env:TASKHUB_PREVIEW_ENV}'],
+                }],
+            },
+        };
+        const report = buildPreviewReport(item, {
+            ...options,
+            builtinVariables: buildBuiltinVariableContext({
+                workspaceFolder: WS,
+                extensionPath: '/ext',
+                editor: { file, fileWorkspaceFolder: WS },
+                clipboard: '<builtin:clipboard>',
+                environment: { TASKHUB_PREVIEW_ENV: 'preview-value' },
+            }),
+        });
+        assert.match(report, new RegExp(path.join('src', 'main.c').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        assert.match(report, /preview-value/);
+        assert.doesNotMatch(report, /unresolved variables/);
+    });
+
+    test('활성 파일이 없는 Preview는 ${file}을 해석된 것처럼 꾸미지 않는다', () => {
+        const item: ActionItem = {
+            id: 'a.no-editor',
+            title: 'no editor',
+            action: {
+                description: 'x',
+                tasks: [{ id: 'run', type: 'command', command: 'tool', args: ['${file}'] }],
+            },
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.match(report, /unresolved variables:.*\$\{file\}/);
+    });
+
     test('includes How to read legend with placeholder/unresolved explanations', () => {
         const item: ActionItem = {
             id: 'a.0',

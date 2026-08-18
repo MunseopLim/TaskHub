@@ -16,6 +16,7 @@
  */
 
 import { simulateTaskResult } from './previewRun';
+import { BUILTIN_VARIABLE_NAMES, type BuiltinVariableName } from './builtinVariables';
 
 /**
  * 제안 항목이 **무엇인지**. 화면에 보일 문구가 아니라 종류다.
@@ -28,8 +29,10 @@ import { simulateTaskResult } from './previewRun';
 export type VariableCompletionDetail =
     /** 같은 액션의 다른 태스크 id. `taskType` 은 `"type"` 을 못 읽었으면 없다. */
     | { kind: 'task'; taskType?: string }
-    /** `${workspaceFolder}` / `${extensionPath}` 같은 전역 참조. */
-    | { kind: 'builtin'; ref: 'workspaceFolder' | 'extensionPath' }
+    /** `${workspaceFolder}` / `${file}` 같은 전역 참조. */
+    | { kind: 'builtin'; ref: BuiltinVariableName }
+    /** `${env:NAME}` 네임스페이스 또는 실제 환경변수. */
+    | { kind: 'environment'; variable?: string }
     /** 그 태스크 타입이 내는 결과 키. */
     | { kind: 'result'; taskType: string }
     /** `output.capture` 로 정의한 이름. */
@@ -256,7 +259,11 @@ function alternativeEndAt(text: string, offset: number): number {
  * `referencePrefixAt` 이 이미 지금 입력 중인 대안만 잘라 주므로, 여기서는
  * 평범한 참조와 똑같이 다룬다.
  */
-export function collectVariableCompletions(text: string, offset: number): VariableCompletion[] {
+export function collectVariableCompletions(
+    text: string,
+    offset: number,
+    environment: NodeJS.ProcessEnv = process.env
+): VariableCompletion[] {
     const ref = referencePrefixAt(text, offset);
     if (!ref) { return []; }
 
@@ -267,6 +274,16 @@ export function collectVariableCompletions(text: string, offset: number): Variab
     const cursorTask = tasks.find(s => offset >= s.start && offset <= s.end);
     const dot = ref.prefix.indexOf('.');
 
+    if (ref.prefix.startsWith('env:')) {
+        return Object.keys(environment)
+            .filter(name => typeof environment[name] === 'string')
+            .sort((a, b) => a.localeCompare(b))
+            .map(name => ({
+                name: `env:${name}`,
+                detail: { kind: 'environment' as const, variable: name },
+            }));
+    }
+
     if (dot < 0) {
         const items: VariableCompletion[] = [];
         for (const slice of tasks) {
@@ -276,8 +293,10 @@ export function collectVariableCompletions(text: string, offset: number): Variab
             if (!id) { continue; }
             items.push({ name: id, detail: { kind: 'task', taskType: type } });
         }
-        items.push({ name: 'workspaceFolder', detail: { kind: 'builtin', ref: 'workspaceFolder' } });
-        items.push({ name: 'extensionPath', detail: { kind: 'builtin', ref: 'extensionPath' } });
+        for (const name of BUILTIN_VARIABLE_NAMES) {
+            items.push({ name, detail: { kind: 'builtin', ref: name } });
+        }
+        items.push({ name: 'env:', detail: { kind: 'environment' } });
         return items;
     }
 

@@ -231,6 +231,17 @@ suite('inferTaskDependencies — auto-inference from ${taskId.x}', () => {
         );
     });
 
+    test('reserved 이름도 속성 참조라면 동명 task 의존성으로 추론한다', () => {
+        const ids = new Set(['file', 'workspaceFolder', 'A']);
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(mkTask({
+                id: 'A',
+                args: ['${file.path}', '${workspaceFolder.value}', '${file}'],
+            }), ids)].sort(),
+            ['file', 'workspaceFolder']
+        );
+    });
+
     test('env:/input: prefixed heads are treated as built-ins (not deps)', () => {
         // Even if a task literally named `env:HOME` exists in the same
         // action (the schema does not forbid colons in task ids),
@@ -1106,6 +1117,17 @@ suite('조건부 태스크 (when)', () => {
                     task({ when: { var: '${gone.value}', equals: 'x' } }),
                     new Set(['gone'])
                 ),
+                true
+            );
+        });
+
+        test('동명 내장은 bare일 때 건너뛰지 않고 속성 task 참조일 때만 건너뛴다', () => {
+            assert.strictEqual(
+                shouldSkipForSkippedDependencies(task({ args: ['${file}'] }), new Set(['file'])),
+                false
+            );
+            assert.strictEqual(
+                shouldSkipForSkippedDependencies(task({ args: ['${file.path}'] }), new Set(['file'])),
                 true
             );
         });

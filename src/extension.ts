@@ -65,6 +65,12 @@ import {
     type TaskRunLogDiagnostics,
 } from './runLogStore';
 import { buildActionRunReportHtml } from './actionRunReport';
+import {
+    buildBuiltinVariableContext,
+    redactSensitiveBuiltinVariables,
+    type ActiveEditorVariableSnapshot,
+    type BuiltinVariableContext,
+} from './builtinVariables';
 
 /**
  * 자동완성 항목의 `detail` 문구. **i18n 경계다.**
@@ -84,9 +90,26 @@ export function describeVariableCompletion(detail: VariableCompletionDetail): st
                 ? t(`${detail.taskType} 태스크`, `${detail.taskType} task`)
                 : t('태스크', 'task');
         case 'builtin':
-            return detail.ref === 'workspaceFolder'
-                ? t('워크스페이스 폴더 경로', 'workspace folder path')
-                : t('TaskHub 설치 경로', 'TaskHub install path');
+            switch (detail.ref) {
+                case 'workspaceFolder': return t('워크스페이스 폴더 경로', 'workspace folder path');
+                case 'extensionPath': return t('TaskHub 설치 경로', 'TaskHub install path');
+                case 'file': return t('활성 파일의 절대 경로', 'active file absolute path');
+                case 'relativeFile': return t('워크스페이스 기준 활성 파일 경로', 'active file path relative to its workspace');
+                case 'relativeFileDirname': return t('워크스페이스 기준 활성 파일 폴더', 'active file directory relative to its workspace');
+                case 'fileBasename': return t('활성 파일 이름', 'active file name');
+                case 'fileBasenameNoExtension': return t('확장자 없는 활성 파일 이름', 'active file name without extension');
+                case 'fileExtname': return t('점을 포함한 활성 파일 확장자', 'active file extension including the dot');
+                case 'fileDirname': return t('활성 파일의 폴더 경로', 'active file directory');
+                case 'fileWorkspaceFolder': return t('활성 파일이 속한 워크스페이스 폴더', 'workspace folder containing the active file');
+                case 'selectedText': return t('활성 에디터에서 선택한 텍스트', 'selected text in the active editor');
+                case 'lineNumber': return t('활성 커서 줄 번호(1부터 시작)', 'active cursor line number (1-based)');
+                case 'columnNumber': return t('활성 커서 열 번호(1부터 시작)', 'active cursor column number (1-based)');
+                case 'clipboard': return t('클립보드 텍스트(기록에서는 가림)', 'clipboard text (redacted from records)');
+            }
+        case 'environment':
+            return detail.variable
+                ? t(`환경변수 ${detail.variable}(기록에서는 가림)`, `environment variable ${detail.variable} (redacted from records)`)
+                : t('환경변수 선택', 'environment variable');
         case 'result':
             return t(`${detail.taskType} 결과`, `${detail.taskType} result`);
         case 'capture':
@@ -1199,6 +1222,7 @@ import {
     actionUsesParallelTasks,
     withInteractivePromptLock,
     INTERACTIVE_TASK_TYPES,
+    walkInterpolatedTaskStrings,
     TaskScheduler,
 } from './pipelineUtils';
 import type {
@@ -2150,6 +2174,7 @@ async function confirmWizardAction(input: {
                 workspaceFolder: input.workspaceFolder,
                 extensionPath: input.extensionPath,
                 workspaceRoots,
+                builtinVariables: buildPreviewBuiltinVariables(input.workspaceFolder, input.extensionPath),
             });
         } catch (error: any) {
             previewReport = `(preview unavailable: ${error?.message ?? error})`;
@@ -2714,7 +2739,11 @@ function taskReferencesSecret(task: import('./schema').Task, run: ActionRunConte
 
 /** 표시·기록용 보간 컨텍스트. 비밀 태스크의 결과를 자리표시자로 바꾼다. */
 function redactSecretsInContext(run: ActionRunContext, context: Record<string, any>): Record<string, any> {
-    if (run.secretTaskIds.size === 0) { return context; }
+    // 환경변수·클립보드·선택 텍스트는 비밀번호 inputBox를 거치지 않아도 비밀일
+    // 수 있다. 실제 자식 프로세스에는 원문을 넘기되 History 명령, verbose 로그,
+    // run report와 조건 skip 사유에는 항상 자리표시자만 남긴다.
+    const builtinRedacted = redactSensitiveBuiltinVariables(context, SECRET_PLACEHOLDER);
+    if (run.secretTaskIds.size === 0) { return builtinRedacted; }
 
     const redactValue = (value: unknown): unknown => {
         if (Array.isArray(value)) { return value.map(redactValue); }
@@ -2731,7 +2760,7 @@ function redactSecretsInContext(run: ActionRunContext, context: Record<string, a
         return SECRET_PLACEHOLDER;
     };
 
-    const redacted = { ...context };
+    const redacted = { ...builtinRedacted };
     for (const id of run.secretTaskIds) {
         if (Object.prototype.hasOwnProperty.call(redacted, id)) {
             redacted[id] = redactValue(redacted[id]);
@@ -4680,11 +4709,83 @@ export interface PipelineExecutionOptions {
     presetInputs?: Record<string, unknown>;
     recordInputs?: Record<string, unknown>;
     recordCommands?: Record<string, string>;
+    /**
+     * 한 실행에서 고정해 쓸 내장 변수 스냅샷. 보통 실행기가 활성 에디터에서
+     * 자동으로 만들며, Preview/테스트 같은 embedding 경로만 직접 넘긴다.
+     */
+    builtinVariables?: BuiltinVariableContext;
     /** Optional structured run-log collector owned by executeAction(). */
     runLogCollector?: ActionRunLogCollector;
     onTaskTransition?: (event: TaskTransitionEvent) => void;
     /** Test/embedding override; production uses the 5s drain ceiling. */
     abortDrainTimeoutMs?: number;
+}
+
+/** 액션을 누른 순간의 활성 에디터 상태. 이후 프롬프트/터미널 포커스와 무관하다. */
+export function captureActiveEditorVariableSnapshot(): ActiveEditorVariableSnapshot | undefined {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) { return undefined; }
+
+    const snapshot: ActiveEditorVariableSnapshot = {};
+    const document = editor.document;
+    if (document?.uri?.scheme === 'file') {
+        snapshot.file = document.uri.fsPath;
+        snapshot.fileWorkspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath;
+    }
+    try {
+        snapshot.selectedText = document.getText(editor.selection);
+    } catch {
+        // 일부 embedding/test editor는 selection getText를 구현하지 않는다.
+    }
+    const active = editor.selection?.active;
+    if (active) {
+        snapshot.lineNumber = active.line + 1;
+        snapshot.columnNumber = active.character + 1;
+    }
+    return snapshot;
+}
+
+function buildPreviewBuiltinVariables(workspaceFolder: string, extensionPath: string): BuiltinVariableContext {
+    return buildBuiltinVariableContext({
+        workspaceFolder,
+        extensionPath,
+        editor: captureActiveEditorVariableSnapshot(),
+        // Preview 문서/출력 채널에 클립보드 원문을 복사하지 않는다.
+        clipboard: '<builtin:clipboard>',
+        environment: process.env,
+        strict: false,
+    });
+}
+
+function actionReferencesBuiltin(action: PipelineAction, name: string): boolean {
+    return action.tasks.some(task =>
+        Array.from(walkInterpolatedTaskStrings(task)).some(value =>
+            extractVariableHeads(value).includes(name)
+        )
+    );
+}
+
+async function captureRuntimeBuiltinVariables(
+    action: PipelineAction,
+    workspaceFolder: string,
+    extensionPath: string
+): Promise<BuiltinVariableContext> {
+    let clipboard: string | undefined;
+    if (actionReferencesBuiltin(action, 'clipboard')) {
+        try {
+            clipboard = await vscode.env.clipboard.readText();
+        } catch {
+            // strict 문맥에서 `${clipboard}`를 실제로 쓰면 명확한 unavailable 오류가 난다.
+        }
+    }
+    return buildBuiltinVariableContext({
+        workspaceFolder,
+        extensionPath,
+        editor: captureActiveEditorVariableSnapshot(),
+        clipboard,
+        environment: process.env,
+        strict: true,
+    });
 }
 
 export interface TaskTransitionEvent {
@@ -4806,6 +4907,11 @@ async function executeActionPipelineForRun(
     const runLogCollector = options?.runLogCollector;
     const onTaskTransition = options?.onTaskTransition;
     const total = action.tasks.length;
+    const defaultWorkspace = workspaceFolderPath
+        || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+        || '';
+    const builtinVariables = options?.builtinVariables
+        ?? await captureRuntimeBuiltinVariables(action, defaultWorkspace, context.extensionPath);
 
     // Build + validate the task graph. Issues (cycle / missing / self
     // dep) become a clean pipeline failure rather than a runtime
@@ -4960,10 +5066,7 @@ async function executeActionPipelineForRun(
             return t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.');
         }
         if (!task.when) { return undefined; }
-        const gateContext = Object.assign(Object.create(null), stepResults, {
-            workspaceFolder: workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
-            extensionPath: context.extensionPath,
-        });
+        const gateContext = Object.assign(Object.create(null), builtinVariables, stepResults);
         const resolved = interpolatePipelineVariables(task.when.var, gateContext);
         if (evaluateTaskCondition(task.when, resolved)) { return undefined; }
         // **판정에 쓴 값과 보여 줄 값은 다른 문자열이다.** 이 사유는 그대로
@@ -5050,7 +5153,8 @@ async function executeActionPipelineForRun(
                     recordCommands,
                     runLogCollector,
                     taskScope,
-                    taskUsesSecret
+                    taskUsesSecret,
+                    builtinVariables
                 );
             } finally {
                 disposeTaskExecutionScope(taskScope);
@@ -6221,7 +6325,8 @@ async function executeSingleTask(
     recordCommands?: Record<string, string>,
     runLogCollector?: ActionRunLogCollector,
     scope?: TaskExecutionScope,
-    taskUsesSecret = false
+    taskUsesSecret = false,
+    builtinVariables?: BuiltinVariableContext
 ): Promise<any> {
     // The scheduler always supplies its captured generation. Never fall back
     // to the current action-id map here: this function resumes after native
@@ -6235,12 +6340,14 @@ async function executeSingleTask(
     // 있도록 여기서 미리 계산한다.
     const taskProducesSecret = task.type === 'inputBox' && task.password === true;
     const defaultWorkspace = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const effectiveBuiltinVariables = builtinVariables ?? await captureRuntimeBuiltinVariables(
+        { description: '', tasks: [task] }, defaultWorkspace, context.extensionPath
+    );
     // null-prototype: 평범한 객체 리터럴로 만들면 `${constructor.name}` 같은
     // **상속 키**가 태스크 결과처럼 해석되어 셸 명령에 들어간다.
-    const interpolationContext = Object.assign(Object.create(null), allResults, {
-        workspaceFolder: defaultWorkspace,
-        extensionPath: context.extensionPath,
-    });
+    const interpolationContext = Object.assign(
+        Object.create(null), effectiveBuiltinVariables, allResults
+    );
     let result: any;
     // Captured by the shell/command branch after `${workspaceFolder}` etc.
     // are resolved. Used by the diagnostic post-processing so relative
@@ -6402,7 +6509,14 @@ async function executeSingleTask(
             if (task.tool !== undefined && task.tool !== null) {
                 interpolatedZipTask.tool = interpolateToolValue(task.tool, interpolationContext);
             }
-            result = await handleZip(interpolatedZipTask, allResults, defaultWorkspace, executionRun, taskUsesSecret, context.extensionPath);
+            result = await handleZip(
+                interpolatedZipTask,
+                allResults,
+                defaultWorkspace,
+                executionRun,
+                taskUsesSecret,
+                effectiveBuiltinVariables
+            );
             break;
         }
         case 'stringManipulation':
@@ -8046,23 +8160,10 @@ async function handleZip(
     workspaceFolderPath: string | undefined,
     run: ActionRunContext,
     redactOutput: boolean,
-    /**
-     * `${extensionPath}` 를 해석하기 위해 받는다.
-     *
-     * `unzip` 은 `archive` · `destination` · `cwd` · `env` 를 `executeSingleTask`
-     * 에서 **미리** 보간해 넘기므로 그쪽 컨텍스트(=`extensionPath` 포함)를 쓴다.
-     * `zip` 만 `tool` 을 뺀 나머지를 여기서 직접 보간하는데, 이 컨텍스트에는
-     * `extensionPath` 가 없어 `${extensionPath}` 가 **리터럴로 남았다** — Preview
-     * 와 Doctor 는 둘 다 해석하므로 진단만 정상이라고 말하는 자리였다. 게다가
-     * `tool` 은 미리 보간되어 해석되므로, 같은 태스크 안에서 `tool` 과
-     * `archive` 가 서로 다른 규칙을 따르고 있었다.
-     */
-    extensionPath: string
+    /** `${extensionPath}`와 실행 시작 시점의 에디터/환경 문맥을 그대로 이어받는다. */
+    builtinVariables: BuiltinVariableContext
 ): Promise<{ archivePath: string }> {
-    const interpolationContext = Object.assign(Object.create(null), allResults, {
-        workspaceFolder: workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
-        extensionPath,
-    });
+    const interpolationContext = Object.assign(Object.create(null), builtinVariables, allResults);
 
     const archive = task.archive ? interpolatePipelineVariables(task.archive, interpolationContext) : undefined;
     if (!archive) { throw new Error(`Zip task '${task.id}' is missing the 'archive' property.`); }
@@ -10105,6 +10206,7 @@ export function activate(context: vscode.ExtensionContext) {
             workspaceFolder,
             extensionPath: context.extensionPath,
             workspaceRoots: getWorkspaceRoots(),
+            builtinVariables: buildPreviewBuiltinVariables(workspaceFolder, context.extensionPath),
         });
         const channel = getPreviewOutputChannel();
         channel.appendLine(report);

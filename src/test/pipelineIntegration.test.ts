@@ -16,6 +16,7 @@ import { MainViewProvider } from '../providers/mainViewProvider';
 import { ActionItem, Action as PipelineAction } from '../schema';
 import { buildInputProfileDraft, InputProfileStore, inspectInputProfile } from '../inputProfiles';
 import { ActionRunLogCollector, RunLogStore } from '../runLogStore';
+import { buildBuiltinVariableContext } from '../builtinVariables';
 
 /**
  * Integration test scenarios for TaskHub pipelines.
@@ -105,6 +106,96 @@ suite('Pipeline integration', function () {
     function nodeMultilineArgs(lines: string[]): string[] {
         return ['-e', `process.stdout.write(${JSON.stringify(lines.join('\n'))})`];
     }
+
+    test('IT-169: 현재 파일·환경 문맥은 실행에 전달되고 기록에서는 민감 값이 가려진다', async () => {
+        const extensionRoot = path.resolve(__dirname, '..', '..');
+        const resultPath = path.join(tempWorkspace, 'it169.json');
+        const activeFile = path.join(tempWorkspace, 'src', 'main file.c');
+        const recordCommands: Record<string, string> = Object.create(null);
+        const builtinVariables = buildBuiltinVariableContext({
+            workspaceFolder: tempWorkspace,
+            extensionPath: extensionRoot,
+            editor: {
+                file: activeFile,
+                fileWorkspaceFolder: tempWorkspace,
+                selectedText: 'selected secret',
+                lineNumber: 7,
+                columnNumber: 3,
+            },
+            clipboard: 'clipboard secret',
+            environment: { TASKHUB_CONTEXT_TOKEN: 'environment secret' },
+            strict: true,
+        });
+        const action: PipelineAction = {
+            description: 'IT-169',
+            tasks: [
+                {
+                    id: 'run', type: 'command', command: 'node',
+                    args: [
+                        '-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))',
+                        '${file}', '${relativeFile}', '${selectedText}', '${clipboard}',
+                        '${env:TASKHUB_CONTEXT_TOKEN}', '${lineNumber}', '${columnNumber}',
+                    ],
+                    passTheResultToNextTask: true,
+                },
+                {
+                    id: 'save', type: 'writeFile', path: resultPath,
+                    content: '${run.output}',
+                },
+            ],
+        };
+
+        await executeActionPipeline(
+            action,
+            { extensionPath: extensionRoot } as vscode.ExtensionContext,
+            'it169',
+            tempWorkspace,
+            [tempWorkspace],
+            { builtinVariables, recordCommands }
+        );
+
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(resultPath, 'utf8')), [
+            activeFile,
+            path.join('src', 'main file.c'),
+            'selected secret',
+            'clipboard secret',
+            'environment secret',
+            '7',
+            '3',
+        ]);
+        assert.ok(recordCommands.run.includes(activeFile), '파일 경로까지 가리면 실행 기록의 효용이 사라진다');
+        for (const secret of ['selected secret', 'clipboard secret', 'environment secret']) {
+            assert.ok(!recordCommands.run.includes(secret), `실행 기록에 민감 문맥이 남았다: ${secret}`);
+        }
+        assert.ok(recordCommands.run.includes('***'), recordCommands.run);
+    });
+
+    test('IT-170: 실행 시작 시 활성 에디터의 파일·선택·커서를 자동 스냅샷한다', async () => {
+        const activeFile = path.join(tempWorkspace, 'src', 'active file.txt');
+        const resultPath = path.join(tempWorkspace, 'it170.txt');
+        fs.mkdirSync(path.dirname(activeFile), { recursive: true });
+        fs.writeFileSync(activeFile, 'alpha beta gamma', 'utf8');
+        const document = await vscode.workspace.openTextDocument(activeFile);
+        const editor = await vscode.window.showTextDocument(document, { preview: false });
+        editor.selection = new vscode.Selection(0, 6, 0, 10);
+
+        try {
+            await run({
+                description: 'IT-170',
+                tasks: [{
+                    id: 'save', type: 'writeFile', path: resultPath,
+                    content: '${file}|${relativeFile}|${selectedText}|${lineNumber}|${columnNumber}',
+                }],
+            }, 'it170');
+        } finally {
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        }
+
+        assert.strictEqual(
+            fs.readFileSync(resultPath, 'utf8'),
+            `${activeFile}|${path.join('src', 'active file.txt')}|beta|1|11`
+        );
+    });
 
     suite('Output Capture + Pipeline Chaining', () => {
 

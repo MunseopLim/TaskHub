@@ -32,6 +32,26 @@ function codes(findings: DoctorFinding[]): string[] {
 
 suite('Doctor', () => {
 
+    test('현재 에디터·환경 내장 참조를 task id 오타로 보고하지 않는다', () => {
+        const v = compileValidator();
+        const findings = runDoctor([makeInput([{
+            id: 'a.builtin',
+            title: 'Builtin',
+            action: {
+                description: 'ok',
+                tasks: [{
+                    id: 'run', type: 'command', command: 'tool',
+                    args: [
+                        '${file}', '${relativeFile}', '${fileDirname}', '${fileBasename}',
+                        '${selectedText}', '${lineNumber}', '${columnNumber}', '${clipboard}',
+                        '${env:PATH}',
+                    ],
+                }],
+            },
+        }])], v);
+        assert.ok(!codes(findings).includes('variable.unresolved'), JSON.stringify(findings, null, 2));
+    });
+
     test('returns no findings for a clean actions.json', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([
@@ -492,19 +512,18 @@ suite('Doctor', () => {
                 { id: 'run', type: 'command', command: '${pick.value} -c "echo ${ask.value}"' },
             ])).includes('command.nested-interpreter'), '열거 불가 실행 파일이 조용해졌다');
 
-            // **내장 참조는 동명 태스크보다 세다.** 런타임은 태스크 결과 위에 내장
-            // 값을 덮으므로 `${workspaceFolder.value}` 는 문자열의 없는 속성이라
-            // 풀리지 않는다 — 태스크만 보고 항목을 펼치면 그것을 `sh` 로 바꿔 놓고
-            // 없는 주입을 지어낸다.
+            // bare 내장은 동명 태스크보다 세지만, 속성이 붙으면 기존 action 호환을
+            // 위해 그 task 결과를 읽는다. 따라서 안전 진단도 실제 quickPick 값을
+            // 펼쳐 보아야 한다.
             for (const builtin of ['workspaceFolder', 'extensionPath']) {
                 const found = codes(withTasks([
                     { id: builtin, type: 'quickPick', items: ['sh'] },
                     { id: 'ask', type: 'inputBox', prompt: '?' },
                     { id: 'run', type: 'command', command: `\${${builtin}.value} -c "echo \${ask.value}"` },
                 ]));
-                assert.ok(!found.some(c => c.startsWith('command.')),
-                    `내장 이름과 겹치는 태스크를 펼쳤다 (${builtin}): ${found.join(', ')}`);
-                assert.ok(found.includes('variable.unresolved'), found.join(', '));
+                assert.ok(found.includes('command.nested-interpreter'),
+                    `동명 task의 속성 값을 펼치지 않았다 (${builtin}): ${found.join(', ')}`);
+                assert.ok(!found.includes('variable.unresolved'), found.join(', '));
             }
 
             // 아예 없는 태스크를 가리키면 런타임에서 리터럴로 남아 spawn 이 실패한다.
@@ -2980,15 +2999,7 @@ suite('Doctor', () => {
             `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
     });
 
-    /**
-     * 내장 참조는 같은 이름의 **태스크 결과에 덮이지 않는다.**
-     *
-     * 런타임은 태스크마다 문맥을 새로 만들며 내장 값을 마지막에 덮으므로
-     * (`extension.ts` 의 `Object.assign(…, allResults, { workspaceFolder, … })`)
-     * `id: "workspaceFolder"` 태스크가 있어도 `${workspaceFolder}` 는 워크스페이스
-     * 경로로 해석된다. Doctor 는 문맥을 한 번만 만들어 재사용하므로, 태스크 결과를
-     * 그대로 얹으면 내장 문자열이 결과 객체로 덮여 런타임과 반대로 판정했다.
-     */
+    /** bare 내장과 같은 이름의 task 속성 참조는 서로 공존한다. */
     for (const builtin of ['workspaceFolder', 'extensionPath']) {
         test(`same-named task does not clobber \${${builtin}}`, () => {
             const findings = runDoctor([makeInput([{
@@ -3006,10 +3017,7 @@ suite('Doctor', () => {
                 `내장 참조를 동명 태스크가 덮었다: ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
         });
 
-        test(`\${${builtin}.value} on a shadowing task is still reported`, () => {
-            // 반대 방향의 런타임 대조: 내장 값이 이겼으므로 `.value` 는 문자열의
-            // 없는 속성이라 런타임에서도 리터럴로 남는다. "내장이 참조를 통째로
-            // 삼키게" 고치면 이 경고가 사라져 버리므로 함께 고정한다.
+        test(`\${${builtin}.value} resolves from a same-named task`, () => {
             const findings = runDoctor([makeInput([{
                 id: 'a.shadow-value',
                 title: 'shadow',
@@ -3021,8 +3029,8 @@ suite('Doctor', () => {
                     ],
                 },
             }])], compileValidator());
-            assert.ok(findings.some(f => f.code === 'variable.unresolved'),
-                `내장이 이긴 뒤의 \`.value\` 를 해석된 것으로 봤다: ${codes(findings).join(', ')}`);
+            assert.ok(!findings.some(f => f.code === 'variable.unresolved'),
+                `동명 task의 \`.value\` 를 해석하지 못했다: ${codes(findings).join(', ')}`);
         });
     }
 

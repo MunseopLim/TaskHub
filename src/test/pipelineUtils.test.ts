@@ -38,7 +38,9 @@ import {
     encodeFileContent,
     withTaskTimeout,
     withInteractivePromptLock,
+    PipelineBuiltinUnavailableError,
 } from '../pipelineUtils';
+import { buildBuiltinVariableContext } from '../builtinVariables';
 
 /**
  * These tests import directly from ../pipelineUtils (not ../extension) to
@@ -58,6 +60,61 @@ suite('pipelineUtils — direct-import smoke suite', () => {
     test('interpolatePipelineVariables replaces known keys', () => {
         const out = interpolatePipelineVariables('hi ${name}', { name: 'Alice' });
         assert.strictEqual(out, 'hi Alice');
+    });
+
+    test('현재 파일·환경변수 내장을 같은 보간 규칙으로 해석한다', () => {
+        const workspace = path.resolve(os.tmpdir(), 'taskhub-builtin-workspace');
+        const context = buildBuiltinVariableContext({
+            workspaceFolder: workspace,
+            extensionPath: '/extension',
+            editor: { file: path.join(workspace, 'src', 'main.c'), fileWorkspaceFolder: workspace },
+            environment: { SDK_ROOT: '/opt/sdk' },
+            strict: true,
+        });
+        assert.strictEqual(
+            interpolatePipelineVariables('${relativeFile} @ ${env:SDK_ROOT}', context),
+            `${path.join('src', 'main.c')} @ /opt/sdk`
+        );
+    });
+
+    test('없는 실행 문맥 내장은 리터럴 전달 대신 실패하고 ?? 대안은 허용한다', () => {
+        const workspace = path.resolve(os.tmpdir(), 'taskhub-builtin-workspace');
+        const context = buildBuiltinVariableContext({
+            workspaceFolder: workspace,
+            extensionPath: '/extension',
+            environment: {},
+            strict: true,
+        });
+        assert.throws(
+            () => interpolatePipelineVariables('${file}', context),
+            (error: unknown) => error instanceof PipelineBuiltinUnavailableError && /Open a file/.test(error.message)
+        );
+        assert.throws(
+            () => interpolatePipelineVariables('${env:MISSING}', context),
+            (error: unknown) => error instanceof PipelineBuiltinUnavailableError && /MISSING/.test(error.message)
+        );
+        assert.strictEqual(
+            interpolatePipelineVariables('${file ?? workspaceFolder}', context),
+            workspace
+        );
+    });
+
+    test('동명 task가 있어도 bare 내장과 속성 task 참조를 구분한다', () => {
+        const workspace = path.resolve(os.tmpdir(), 'taskhub-builtin-workspace');
+        const builtin = buildBuiltinVariableContext({
+            workspaceFolder: workspace,
+            extensionPath: '/extension',
+            editor: { file: path.join(workspace, 'active.c') },
+            environment: {},
+            strict: true,
+        });
+        const context = Object.assign(Object.create(null), builtin, {
+            file: { path: '/picked/input.bin', fileNameOnly: 'input.bin' },
+        });
+
+        assert.strictEqual(interpolatePipelineVariables('${file}', context), path.join(workspace, 'active.c'));
+        assert.strictEqual(interpolatePipelineVariables('${file.path}', context), '/picked/input.bin');
+        assert.strictEqual(interpolatePipelineVariables('${file.fileNameOnly}', context), 'input.bin');
     });
 
     test('resolveWithinWorkspace works with only path + roots', () => {

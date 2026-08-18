@@ -30,13 +30,18 @@ import {
     validateTaskGraph,
     formatCyclePath,
     isInsideWorkspaceRoots,
-    walkInterpolatedTaskStrings,} from './pipelineUtils';
+    walkInterpolatedTaskStrings,
+    RESERVED_VARIABLE_HEADS,
+} from './pipelineUtils';
+import { buildBuiltinVariableContext, type BuiltinVariableContext } from './builtinVariables';
 
 export interface PreviewOptions {
     workspaceFolder: string;
     extensionPath: string;
     /** Workspace root list used to detect file writes outside the workspace. */
     workspaceRoots: string[];
+    /** 실행 직전 에디터 문맥. 없으면 파일 기반 변수는 미해결로 표시한다. */
+    builtinVariables?: BuiltinVariableContext;
 }
 
 export interface SimulatedResult {
@@ -338,7 +343,7 @@ export interface AnalyzedReference {
 }
 
 /** 진단이 태스크 결과가 아니라고 아는 최상위 참조들. */
-export const BUILTIN_REFS: ReadonlySet<string> = new Set(['workspaceFolder', 'extensionPath']);
+export const BUILTIN_REFS: ReadonlySet<string> = RESERVED_VARIABLE_HEADS;
 
 /**
  * 태스크의 raw 문자열에 있는 **`??` 체인**을 대안 단위로 판정한다.
@@ -380,8 +385,10 @@ export function analyzeCoalesceRefs(
 
     const judge = ({ head, key }: ReferenceAlternative): DeadAlternativeReason | undefined => {
         if (head === selfId) { return 'self'; }
-        // 내장 참조는 **문자열**이다. 속성을 붙이면 런타임에서 리터럴로 남는다.
-        if (BUILTIN_REFS.has(head)) { return key === undefined ? undefined : 'missing-key'; }
+        // bare 내장은 task id보다 우선한다. 속성이 붙으면 동명 task 결과를 읽을 수
+        // 있으므로 아래의 일반 task 판정으로 넘긴다.
+        if (BUILTIN_REFS.has(head) && key === undefined) { return undefined; }
+        if (head.startsWith('env:')) { return key === undefined ? undefined : 'missing-key'; }
         const result = Object.prototype.hasOwnProperty.call(allResults, head)
             ? allResults[head]
             : simFor(head);
@@ -812,6 +819,13 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
     // Preview 는 "모두 해석됨", 런타임은 리터럴이 되는 불일치가 생긴다.
     const allResults: Record<string, SimulatedResult> = Object.create(null);
     const totalUnresolved = new Set<string>();
+    const builtinVariables = options.builtinVariables ?? buildBuiltinVariableContext({
+        workspaceFolder: options.workspaceFolder,
+        extensionPath: options.extensionPath,
+        // Preview는 클립보드 원문을 출력 채널에 복사하지 않는다.
+        clipboard: '<builtin:clipboard>',
+        strict: false,
+    });
 
     /**
      * 참조는 전부 해석되는데 **실행은 못 하는** 자리들.
@@ -888,10 +902,9 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
     for (let i = 0; i < action.tasks.length; i++) {
         const task = action.tasks[i];
         // null-prototype — 런타임과 같은 규칙 (상속 키가 결과로 새지 않도록).
-        const interpolationContext: any = Object.assign(Object.create(null), allResults, {
-            workspaceFolder: options.workspaceFolder,
-            extensionPath: options.extensionPath,
-        });
+        const interpolationContext: any = Object.assign(
+            Object.create(null), builtinVariables, allResults
+        );
 
         // Preview Run simulates tasks in declaration order even though the
         // runtime may schedule `parallel: true` tasks concurrently. The

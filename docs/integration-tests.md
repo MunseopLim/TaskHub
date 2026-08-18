@@ -147,6 +147,8 @@
 | IT-166 | 다중 선택의 `valueList`·`values`·`labels` | `valueList` 는 평평하게 편 값으로 argv 확장, `values` 는 매핑 값의 쉼표 결합, `labels` 는 표시 문구의 쉼표 결합 |
 | IT-168 | 항목 `value` 안의 참조 보간 | `value: "--tag=${build.output}"` 와 배열 원소가 실행 시점 문맥으로 풀려 argv 에 도착 — label 만 보간하던 회귀를 잡음 |
 | IT-167 | 매핑을 바꾼 뒤의 재실행 | 저장된 입력은 고른 **항목**이므로, 값은 지금의 정의에서 다시 파생됨 — 매핑을 붙인 뒤 재실행하면 대화상자 없이 새 매핑 값(`--release`)이 argv 로 감 |
+| IT-169 | 현재 파일·환경 문맥 전달과 기록 마스킹 | 파일·상대 경로·선택·클립보드·환경·커서 값이 실제 argv에 도착하고, History 명령에는 파일 경로만 남으며 선택·클립보드·환경값은 `***`로 가려짐 |
+| IT-170 | 활성 에디터 자동 스냅샷 | 별도 주입 없이 실행 시작 시 활성 파일·선택 영역·1-based 커서 위치를 읽어 후속 `writeFile`까지 같은 값으로 전달 |
 
 ### Last-run 배지
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)
