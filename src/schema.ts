@@ -110,7 +110,7 @@ export interface Task {
     default?: string | string[];
     /** 단일 선택 QuickPick에서 목록에 없는 문자열도 직접 입력해 값으로 사용할 수 있다. */
     allowCustom?: boolean;
-    /** 마지막 선택의 label/custom 식별을 복원한다. 민감 문맥에서 파생된 선택은 저장하지 않는다. */
+    /** 마지막 선택의 id(없으면 label)/custom 식별을 복원한다. 민감 문맥에서 파생된 선택은 저장하지 않는다. */
     rememberLastSelection?: boolean;
     /**
      * For `quickPick`: a shell command whose stdout becomes the pick list —
@@ -290,6 +290,12 @@ export interface Task {
  * Represents a quick pick item with label and optional description.
  */
 export interface QuickPickItem {
+    /**
+     * 선택 기억과 History 재실행에 쓰는 안정 식별자. label을 바꾸거나 같은
+     * label을 여러 항목에 써도 이 값이 같으면 현재 항목 정의를 다시 찾는다.
+     * 화면이나 command 값에는 자동으로 노출되지 않는다.
+     */
+    id?: string;
     label: string;
     description?: string;
     detail?: string;

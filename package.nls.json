@@ -20,6 +20,7 @@
   "cmd.executeAction": "Execute Action",
   "cmd.previewAction": "Preview Run (Dry-run)",
   "cmd.doctor": "Doctor — Lint Actions",
+  "cmd.clearQuickPickSelections": "Forget QuickPick Selections",
   "cmd.stopAction": "Stop Action",
   "cmd.showVersion": "Show Extension Version",
   "cmd.openFavoriteFile": "Open Favorite File",

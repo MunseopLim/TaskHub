@@ -196,6 +196,12 @@
               "items": {
                 "type": "object",
                 "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "Optional stable identity used by rememberLastSelection and History replay. Unlike label it should not change when display text changes, and it disambiguates duplicate labels."
+                  },
                   "label": {
                     "type": "string",
                     "description": "The main text to display."

@@ -1545,6 +1545,36 @@ suite('Extension Test Suite', () => {
 			}), false);
 		});
 
+		test('안정 item id가 있으면 label 변경·중복 뒤에도 현재 mapping을 재파생한다', () => {
+			const task = {
+				type: 'quickPick',
+				items: [
+					{ id: 'debug', label: '빌드', value: '--debug' },
+					{ id: 'release', label: '빌드', value: '--release-new' },
+				],
+			};
+			const saved = {
+				label: 'Old release', labelList: ['Old release'], value: '--release-old',
+				custom: false, _itemId: 'release',
+			};
+			assert.strictEqual(savedInputStillValid(task, saved, {}), true);
+			assert.deepStrictEqual(backfillQuickPickValue(task, saved, {}), {
+				label: '빌드', labelList: ['빌드'], value: '--release-new',
+				valueList: ['--release-new'], custom: false,
+				_itemId: 'release', _itemIds: ['release'],
+			});
+		});
+
+		test('저장된 item id가 사라지면 같은 label로 후퇴하지 않는다', () => {
+			const task = {
+				type: 'quickPick', items: [{ id: 'other', label: 'Release', value: '--other' }],
+			};
+			assert.strictEqual(savedInputStillValid(task, {
+				label: 'Release', labelList: ['Release'], value: '--old', custom: false,
+				_itemId: 'removed',
+			}), false);
+		});
+
 		test('제약이 없는 태스크는 그대로 통과시킨다', () => {
 			assert.strictEqual(savedInputStillValid({ type: 'inputBox' }, { value: 'anything ; goes' }), true);
 			assert.strictEqual(savedInputStillValid({ type: 'fileDialog' }, { path: '/tmp/a b.txt' }), true);
@@ -6688,6 +6718,66 @@ suite('Extension Test Suite', () => {
 			}
 		});
 
+		test('안정 item id는 label이 바뀌거나 중복돼도 기억한 mapping을 복원한다', async () => {
+			const store = new Map<string, unknown>();
+			initQuickPickMemory({
+				workspaceState: {
+					get: <T>(key: string) => store.get(key) as T | undefined,
+					update: async (key: string, value: unknown) => { store.set(key, value); },
+				},
+			});
+			const task = {
+				actionId: 'build', id: 'mode', type: 'quickPick', rememberLastSelection: true,
+				items: [
+					{ id: 'debug', label: 'Build', value: '--debug' },
+					{ id: 'release', label: 'Build', value: '--release' },
+				],
+			};
+			try {
+				await rememberQuickPickSelection(task, [
+					{ label: 'Old release label', itemId: 'release', custom: false, index: 1 },
+				]);
+				const result = await advancedQuickPick(task, (picker, controls) => {
+					assert.strictEqual(picker.activeItems[0]?.taskHubItemId, 'release');
+					picker.selectedItems = [...picker.activeItems];
+					controls.accept();
+				});
+				assert.strictEqual(result.value, '--release');
+				assert.strictEqual(result._itemId, 'release');
+			} finally {
+				initQuickPickMemory(undefined);
+			}
+		});
+
+		test('과거 다중 선택 기억은 task가 단일 선택으로 바뀌면 무시한다', async () => {
+			const store = new Map<string, unknown>();
+			initQuickPickMemory({
+				workspaceState: {
+					get: <T>(key: string) => store.get(key) as T | undefined,
+					update: async (key: string, value: unknown) => { store.set(key, value); },
+				},
+			});
+			const task = {
+				actionId: 'build', id: 'mode', type: 'quickPick',
+				rememberLastSelection: true, items: ['one', 'two'],
+			};
+			try {
+				await rememberQuickPickSelection(task, [
+					{ label: 'one', custom: false, index: 0 },
+					{ label: 'two', custom: false, index: 1 },
+				]);
+				const result = await advancedQuickPick(task, (picker, controls) => {
+					assert.strictEqual(picker.activeItems.length, 0);
+					picker.activeItems = [picker.items[0]];
+					picker.selectedItems = [...picker.activeItems];
+					controls.accept();
+				});
+				assert.strictEqual(result.value, 'one');
+			} finally {
+				initQuickPickMemory(undefined);
+			}
+		});
+
 		test('기억한 custom은 복원하지만 삭제된 정적 항목은 custom으로 되살리지 않는다', async () => {
 			const store = new Map<string, unknown>();
 			initQuickPickMemory({
@@ -6797,6 +6887,19 @@ suite('Extension Test Suite', () => {
 			);
 		});
 
+		test('중복 item id는 다른 mapping을 기억하기 전에 거부한다', async () => {
+			await assert.rejects(
+				() => handleQuickPick({
+					id: 'pick', type: 'quickPick',
+					items: [
+						{ id: 'same', label: 'A', value: 'a' },
+						{ id: 'same', label: 'B', value: 'b' },
+					],
+				}),
+				/duplicated/
+			);
+		});
+
 		test('value 배열: 인자 여러 개 / 아무 인자도 없음', async () => {
 			const task = {
 				id: 'pick', type: 'quickPick',
@@ -6854,6 +6957,18 @@ suite('Extension Test Suite', () => {
 			assert.deepStrictEqual(runtime.valueList, ['-a', '-b', '1']);
 			assert.strictEqual(runtime.values, '-a,-b,1');
 			assert.strictEqual(runtime.labels, 'A,B', 'labels 는 표시 문구를 그대로 남긴다');
+		});
+
+		test('다중 선택의 안정 id는 id 없는 자리까지 배열 경계를 보존한다', async () => {
+			const runtime = await runtimeQuickPick(
+				{
+					id: 'pick', type: 'quickPick', canPickMany: true,
+					items: [{ id: 'a', label: 'A' }, { label: 'B' }],
+				},
+				[{ label: 'A' }, { label: 'B' }]
+			);
+			assert.strictEqual(runtime._itemId, 'a');
+			assert.deepStrictEqual(runtime._itemIds, ['a', null]);
 		});
 
 		test('다중 선택: 키 집합이 같고 values 는 양쪽 다 문자열이다', async () => {

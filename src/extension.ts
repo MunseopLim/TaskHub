@@ -27,6 +27,7 @@ import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput } from './doc
 import { createZipArchive, extractZipArchive } from './archiveUtils';
 import { DIALOG_SCOPE, coerceDefaultUri, initDialogMemory, showOpenDialogWithMemory, showSaveDialogWithMemory, taskDialogScope } from './dialogMemory';
 import {
+    clearQuickPickSelections,
     forgetQuickPickSelection,
     initQuickPickMemory,
     recallQuickPickSelection,
@@ -6432,6 +6433,19 @@ function savedQuickPickLabels(saved: any, many: boolean): string[] | undefined {
     return typeof label === 'string' && label.length > 0 ? [label] : undefined;
 }
 
+function savedQuickPickItemIds(saved: any, many: boolean, count: number): Array<string | undefined> {
+    if (many
+        && Array.isArray(saved?._itemIds)
+        && saved._itemIds.length === count
+        && saved._itemIds.every((id: unknown) => id === null || (typeof id === 'string' && id.length > 0))) {
+        return saved._itemIds.map((id: string | null) => id ?? undefined);
+    }
+    if (!many && count === 1 && typeof saved?._itemId === 'string' && saved._itemId.length > 0) {
+        return [saved._itemId];
+    }
+    return Array(count).fill(undefined);
+}
+
 function resolvedQuickPickEntries(task: any, context?: any): QuickPickEntry[] {
     if (!Array.isArray(task?.items)) { return []; }
     const resolvedItems = context === undefined
@@ -6444,6 +6458,7 @@ function replayQuickPickEntries(task: any, saved: any, context?: any): QuickPick
     const many = task.canPickMany === true;
     const labels = savedQuickPickLabels(saved, many);
     if (!labels) { return undefined; }
+    const itemIds = savedQuickPickItemIds(saved, many, labels.length);
     const entries = resolvedQuickPickEntries(task, context);
     if (saved?.custom === true) {
         if (many || labels.length !== 1) { return undefined; }
@@ -6457,9 +6472,14 @@ function replayQuickPickEntries(task: any, saved: any, context?: any): QuickPick
         return [{ label, taskHubValue: label, taskHubCustom: true }];
     }
     const selected: QuickPickEntry[] = [];
-    for (const label of labels) {
-        const matching = entries.filter(entry => entry.label === label);
-        // 같은 label이 여러 개면 어느 mapping이었는지 label만으로 증명할 수 없다.
+    for (let index = 0; index < labels.length; index++) {
+        const label = labels[index];
+        const itemId = itemIds[index];
+        const matching = itemId
+            ? entries.filter(entry => entry.taskHubItemId === itemId)
+            : entries.filter(entry => entry.label === label);
+        // 안정 id가 없고 같은 label이 여러 개면 어느 mapping이었는지 증명할 수 없다.
+        // id가 저장됐는데 현재 목록에서 사라진 경우에도 label로 후퇴하지 않는다.
         if (matching.length !== 1) { return undefined; }
         selected.push(matching[0]);
     }
@@ -8047,6 +8067,10 @@ export interface QuickPickResult {
     values?: string;
     /** `canPickMany` 일 때만: 고른 표시 문구 전체를 쉼표로 이은 문자열. */
     labels?: string;
+    /** History/기억 복원용 내부 식별자. actions 변수 API로 사용하지 않는다. */
+    _itemId?: string;
+    /** id가 없는 자리는 null로 보존하는 내부 식별자 배열. */
+    _itemIds?: Array<string | null>;
 }
 
 /** `showQuickPick` 이 돌려주는 항목 객체에 매핑된 값을 얹어 둔다. */
@@ -8056,6 +8080,8 @@ interface QuickPickEntry extends vscode.QuickPickItem {
     taskHubCustom?: boolean;
     /** 기억 복원에서 같은 label 항목을 구분하는 원래 목록 위치. */
     taskHubSourceIndex?: number;
+    /** actions.json 항목에 명시한 안정 id. */
+    taskHubItemId?: string;
 }
 
 /**
@@ -8101,9 +8127,19 @@ function interpolateQuickPickItems(items: readonly any[], context: any): any[] {
 }
 
 function quickPickEntries(items: readonly any[]): QuickPickEntry[] {
+    const seenIds = new Set<string>();
     return items.map((item: any, index: number) => {
         if (typeof item === 'string') {
             return { label: item, taskHubValue: item, taskHubSourceIndex: index };
+        }
+        if (item.id !== undefined) {
+            if (typeof item.id !== 'string' || item.id.length === 0 || item.id.length > 128) {
+                throw new Error('QuickPick item id must be a non-empty string of at most 128 characters.');
+            }
+            if (seenIds.has(item.id)) {
+                throw new Error(`QuickPick item id '${item.id}' is duplicated.`);
+            }
+            seenIds.add(item.id);
         }
         return {
             label: item.label,
@@ -8111,6 +8147,7 @@ function quickPickEntries(items: readonly any[]): QuickPickEntry[] {
             detail: item.detail,
             taskHubValue: quickPickItemValue(item, item.label),
             taskHubSourceIndex: index,
+            taskHubItemId: item.id,
         };
     });
 }
@@ -8139,6 +8176,10 @@ function buildQuickPickResult(selected: readonly QuickPickEntry[], canPickMany: 
         // 값이 곧 label 이라 예전과 **같은 문자열**이 나온다.
         result.values = valueList.join(',');
         result.labels = selected.map(entry => entry.label).join(',');
+    }
+    if (first.taskHubItemId) { result._itemId = first.taskHubItemId; }
+    if (selected.some(entry => !!entry.taskHubItemId)) {
+        result._itemIds = selected.map(entry => entry.taskHubItemId ?? null);
     }
     return result;
 }
@@ -8176,20 +8217,28 @@ async function showAdvancedQuickPick(
         throw new Error(`Task '${task.id}' cannot combine 'allowCustom' with 'canPickMany'.`);
     }
 
-    const { selections: requested, explicit } = requestedQuickPickSelections(task, memoryAllowed);
+    let { selections: requested, explicit } = requestedQuickPickSelections(task, memoryAllowed);
     if (explicit && requested.some(selection => selection.label.length === 0)) {
         throw new Error(`Task '${task.id}' has an empty quickPick default label.`);
     }
     if (task.canPickMany !== true && requested.length > 1) {
-        throw new Error(`Task '${task.id}' has multiple default labels but 'canPickMany' is not true.`);
+        if (explicit) {
+            throw new Error(`Task '${task.id}' has multiple default labels but 'canPickMany' is not true.`);
+        }
+        // 과거에는 다중 선택이던 task가 단일 선택으로 바뀔 수 있다. 저장된 두
+        // 항목을 설정 오류로 취급하면 QuickPick이 열리지도 않으므로, 이 기억만
+        // 버리고 사용자가 현재 목록에서 다시 고르게 한다.
+        requested = [];
     }
 
     const entriesForLabel = (label: string): QuickPickEntry[] =>
         baseItems.filter(item => item.label === label);
     const matchSelection = (selection: RememberedQuickPickSelection): QuickPickEntry | undefined => {
-        const matching = entriesForLabel(selection.label);
+        const matching = selection.itemId
+            ? baseItems.filter(item => item.taskHubItemId === selection.itemId)
+            : entriesForLabel(selection.label);
         // index만으로는 앞 항목 삽입·재정렬 뒤 같은 label의 다른 mapping을
-        // 가리킬 수 있다. 안정 id가 없는 현재 스키마에서는 unique label만
+        // 가리킬 수 있다. 안정 id가 없는 항목은 unique label만
         // 자동 복원하고, 중복은 사용자가 다시 고르게 하는 것이 안전하다. 과거
         // custom label이 이제 유일한 정적 항목이면 현재 mapping을 쓰는 것도 같은
         // 규칙이다.
@@ -8360,6 +8409,7 @@ export async function handleQuickPick(
         if (task.rememberLastSelection === true && memoryAllowed) {
             await rememberQuickPickSelection(task, selected.map(entry => ({
                 label: entry.label,
+                itemId: entry.taskHubItemId,
                 custom: entry.taskHubCustom === true,
                 index: entry.taskHubSourceIndex,
             })));
@@ -10844,6 +10894,35 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }
         outputChannel.appendLine(`[Doctor] scanned ${inputs.length} source(s); ${findings.length} finding(s) (errors=${errorCount}, warnings=${warningCount}).`);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.clearQuickPickSelections', async () => {
+        const clearLabel = t('초기화', 'Forget');
+        const choice = await vscode.window.showWarningMessage(
+            t(
+                '이 워크스페이스에 기억된 QuickPick 선택을 모두 초기화할까요?',
+                'Forget every remembered QuickPick selection in this workspace?'
+            ),
+            { modal: true },
+            clearLabel
+        );
+        if (choice !== clearLabel) { return; }
+        try {
+            const count = await clearQuickPickSelections();
+            vscode.window.showInformationMessage(count > 0
+                ? t(
+                    `QuickPick 선택 기억 ${count}개를 초기화했습니다.`,
+                    `Forgot ${count} remembered QuickPick selection(s).`
+                )
+                : t(
+                    '이 워크스페이스에 기억된 QuickPick 선택이 없습니다.',
+                    'There are no remembered QuickPick selections in this workspace.'
+                ));
+        } catch (error: any) {
+            vscode.window.showErrorMessage(t(
+                `QuickPick 선택 기억을 초기화하지 못했습니다: ${error?.message ?? error}`,
+                `Could not forget QuickPick selections: ${error?.message ?? error}`
+            ));
+        }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
         const id = actionItem.id || actionItem.label;

@@ -4175,6 +4175,42 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
         }
     });
 
+    test('QuickPick object item의 안정 id를 제안하고 길이를 검증한다', () => {
+        const itemSchema: any = properties?.items?.oneOf?.[1]?.items;
+        assert.ok(itemSchema?.properties?.id, 'QuickPick item id가 스키마 제안에 없다');
+        assert.match(itemSchema.properties.id.description, /stable identity/i);
+
+        const v = compileValidator();
+        const wrap = (id: string) => [{
+            id: 'a.quick-id', title: 'quick', action: {
+                description: 'd', tasks: [{
+                    id: 'pick', type: 'quickPick', items: [{ id, label: 'Release', value: '--release' }],
+                }],
+            },
+        }];
+        assert.strictEqual(v(wrap('release')), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap('')), false, '빈 item id가 통과했다');
+        assert.strictEqual(v(wrap('x'.repeat(129))), false, '지나치게 긴 item id가 통과했다');
+    });
+
+    test('Doctor는 같은 QuickPick 안의 중복 item id를 오류로 알린다', () => {
+        const actions = [{
+            id: 'a.quick-id', title: 'quick', action: {
+                description: 'd', tasks: [{
+                    id: 'pick', type: 'quickPick', items: [
+                        { id: 'same', label: 'Debug', value: '--debug' },
+                        { id: 'same', label: 'Release', value: '--release' },
+                    ],
+                }],
+            },
+        }];
+        const findings = runDoctor([makeInput(actions)], compileValidator());
+        const duplicate = findings.find(finding => finding.code === 'quickpick.item-id-duplicate');
+        assert.ok(duplicate, findings.map(finding => finding.code).join(', '));
+        assert.strictEqual(duplicate!.severity, 'error');
+        assert.match(duplicate!.message, /same.*unique/i);
+    });
+
     test('기본값·직접 입력·기억 설정은 유효하고 custom 다중 선택은 거부한다', () => {
         const v = compileValidator();
         const wrap = (task: any) => [{

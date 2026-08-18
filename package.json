@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.7.35",
+  "version": "0.7.36",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -348,6 +348,12 @@
         "title": "%cmd.doctor%",
         "category": "TaskHub",
         "icon": "$(checklist)"
+      },
+      {
+        "command": "taskhub.clearQuickPickSelections",
+        "title": "%cmd.clearQuickPickSelections%",
+        "category": "TaskHub",
+        "icon": "$(clear-all)"
       },
       {
         "command": "taskhub.stopAction",

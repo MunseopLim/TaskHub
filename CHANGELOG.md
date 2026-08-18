@@ -6,6 +6,23 @@
 보안·데이터 손실 수정과 사용자 영향만 남긴다. 테스트를 적는다면 최종 수치만 기록한다.
 -->
 
+## [0.7.36] - 2026-08-19
+
+### 개선 — QuickPick 선택 기억 안정화
+
+- QuickPick 객체 항목에 선택적 `id`를 지정할 수 있다. label을 번역·수정하거나 같은 label을 여러
+  mapping에 써도 `rememberLastSelection`과 History 재실행이 현재의 정확한 항목을 찾아 새 label/value를
+  다시 만든다. id가 없는 기존 액션은 종전처럼 고유 label로 복원되므로 호환된다.
+- 한 QuickPick 안의 중복 item id는 런타임과 Doctor가 실행 전에 오류로 알린다. 다중 선택은 id가 있는
+  항목과 없는 항목이 섞여도 History의 항목 경계를 보존하며, 저장된 id가 사라졌을 때 같은 label의
+  다른 mapping으로 후퇴하지 않는다.
+- Command Palette의 `TaskHub: QuickPick 선택 기억 초기화`로 현재 워크스페이스의 기억값을 한 번에
+  지울 수 있다. 다중 선택이던 task를 단일 선택으로 바꾼 경우 과거 다중 기억은 설정 오류를 일으키지
+  않고 무시되어 사용자가 현재 목록에서 다시 고를 수 있다.
+
+**테스트**: 안정 id 기억·label 변경/중복 History 재파생·혼합 다중 선택·기억 초기화를 포함해 최종
+3051 passing / 3 pending.
+
 ## [0.7.35] - 2026-08-19
 
 ### 개선 — QuickPick 실행값 참조 단순화

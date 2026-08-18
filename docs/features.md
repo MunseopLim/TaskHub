@@ -421,15 +421,15 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 
 ### `quickPick` 태스크
 
-고정 `items` 또는 `itemsFromCommand`의 비어 있지 않은 stdout 줄에서 항목을 고릅니다. `items`는 문자열이나 `{ label, description, detail, value }` 객체를 지원하고, `itemsExclude`로 동적 목록의 특정 줄을 제외할 수 있습니다.
+고정 `items` 또는 `itemsFromCommand`의 비어 있지 않은 stdout 줄에서 항목을 고릅니다. `items`는 문자열이나 `{ id, label, description, detail, value }` 객체를 지원하고, `itemsExclude`로 동적 목록의 특정 줄을 제외할 수 있습니다. `id`는 선택 기억·History 재실행에만 쓰는 선택적 안정 식별자로 화면이나 command 값에는 들어가지 않습니다.
 
 **`label`은 보이는 문구, `value`는 명령에 들어가는 값입니다.** `value`를 적지 않으면 `label`이 그대로 값이 되므로 기존 액션의 동작은 바뀌지 않습니다. 매핑은 **고정 `items`에만** 적용됩니다 — `itemsFromCommand`의 항목은 stdout 한 줄이 곧 값입니다. `value`에 배열을 적으면 `args` 원소와 `command` 토큰 자리에서 **인자 여러 개**로 펼쳐지고, 빈 배열은 아무 인자도 만들지 않습니다.
 
 ```jsonc
 { "id": "mode", "type": "quickPick", "placeHolder": "빌드 모드", "items": [
-    { "label": "옵션 켜고 빌드", "value": "--with-option" },
-    { "label": "옵션 없이 빌드", "value": [] },
-    { "label": "다른 옵션으로 빌드", "value": ["--option", "b"] }
+    { "id": "enabled", "label": "옵션 켜고 빌드", "value": "--with-option" },
+    { "id": "plain", "label": "옵션 없이 빌드", "value": [] },
+    { "id": "alternative", "label": "다른 옵션으로 빌드", "value": ["--option", "b"] }
 ] },
 { "id": "build", "type": "command", "command": "make", "args": ["all", "${mode}"] }
 ```
@@ -454,7 +454,7 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 | --- | --- |
 | `default` | 처음 활성화할 항목의 `label`. `canPickMany: true`이면 label 배열로 여러 항목을 미리 선택합니다. 변수 치환을 지원합니다. |
 | `allowCustom` | 단일 선택에서 목록에 없는 비어 있지 않은 문자열을 직접 입력해 그대로 `value`로 사용합니다. `canPickMany`와 함께 쓸 수 없습니다. |
-| `rememberLastSelection` | 마지막 label을 워크스페이스·액션·태스크별로 기억해 다음 일반 실행에서 복원합니다. 명시한 `default`가 기억값보다 우선합니다. |
+| `rememberLastSelection` | 마지막 선택을 워크스페이스·액션·태스크별로 기억해 다음 일반 실행에서 복원합니다. 항목에 `id`가 있으면 label을 바꾸거나 같은 label이 여러 개여도 정확히 찾습니다. 명시한 `default`가 기억값보다 우선합니다. |
 
 ```jsonc
 { "id": "branch", "type": "quickPick",
@@ -471,16 +471,18 @@ QuickPick·inputBox·envPick처럼 `value` 결과가 있는 태스크는 bare `$
 아예 만들지 않습니다. 화면에 보이는 문구가 실제로 필요할 때만 `${taskId.label}`을 사용하세요.
 
 목록 항목의 `label`·`description`·`detail`·`value`와 `default`는 앞 태스크 결과를 변수로 사용할 수
-있습니다. 기억은 label과 정적/직접 입력 구분을 저장하므로 나중에 같은 label의 `value` 매핑을
+있습니다. `id`는 표시 문구와 별개인 정적 문자열이며 한 QuickPick 안에서 고유해야 합니다. 기억은
+id(없으면 label)와 정적/직접 입력 구분을 저장하므로 나중에 같은 항목의 `label` 또는 `value` 매핑을
 바꾸면 다음 실행에는 새 매핑값이 전달됩니다. 목록에서 사라진 정적 항목은 직접 입력으로 되살리지
 않고 무시하며, 직접 입력값은 `allowCustom`이 켜진 동안 다시 복원할 수 있습니다. 환경변수·클립보드·
 선택 텍스트나 password 결과에서 파생된 QuickPick은 과거 기억을 지우고 새 선택도 저장하지 않습니다.
-같은 label이 여러 항목에 있으면 mapping을 안전하게 식별할 수 없어 기억값을 자동 복원하지 않습니다.
-기억 저장소는 최근 100개 scope와 scope key·label 합계 64K자로 제한합니다.
+`id`가 없는 같은 label 항목은 mapping을 안전하게 식별할 수 없어 기억값을 자동 복원하지 않습니다.
+기억 저장소는 최근 100개 scope와 scope key·label·id 합계 64K자로 제한합니다. 기억값을 모두 지우려면
+Command Palette에서 **`TaskHub: QuickPick 선택 기억 초기화`**를 실행하세요(현재 워크스페이스만 대상).
 
 - 동적 목록 명령은 `cwd`, 없으면 액션 워크스페이스에서 실행됩니다.
-- History 재실행은 `labelList`로 선택 경계를 보존하고 현재 항목 정의에서 `value`를 다시 만듭니다.
-  삭제된 항목이나 같은 label이 여러 개라 식별할 수 없는 선택만 다시 묻습니다.
+- History 재실행은 안정 `id`와 `labelList`로 선택 경계를 보존하고 현재 항목 정의에서 `label`·`value`를
+  다시 만듭니다. 삭제된 항목이나 id 없이 같은 label이 여러 개라 식별할 수 없는 선택만 다시 묻습니다.
 - 취소 규칙은 `fileDialog`와 같습니다.
 
 ### 배열 항목마다 태스크 반복 (`forEach`)
@@ -1506,6 +1508,7 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `variable.dead-alternative` | warning | `??` 체인 안에 없는 태스크·자기 참조·지원하지 않는 키·캡처되지 않은 출력처럼 절대 선택되지 않는 대안이 있음. |
 | `args.array-joined` | warning | 배열 참조가 `args` 원소의 다른 글자와 섞여 한 argv로 합쳐짐. 여러 인자로 펼치려면 원소 전체를 참조 하나로 작성. |
 | `quickpick.label-as-argument` | info | value mapping이 있는 QuickPick의 표시용 `${pick.label}`을 command/args에 전달함. 실행값은 `${pick}` 또는 `${pick.value}`를 쓰고, label 자체가 필요한 경우만 유지하도록 안내. |
+| `quickpick.item-id-duplicate` | error | 한 QuickPick 안에서 안정 `id`가 중복됨. 선택 기억·History가 다른 mapping을 복원하지 않도록 각 항목에 고유한 id를 사용. |
 | `output.not-captured` | warning | `passTheResultToNextTask: true`가 없는 shell/command의 output 또는 capture를 참조함. 대체 체인은 대안 단위 진단을 사용. |
 | `tool.platform-missing` | warning | `zip`·`unzip`의 `tool`이 현재 플랫폼에서 비었거나 OS별 값이 없음. 검사하는 OS에 따라 결과가 달라짐. |
 | `output.ignored` | warning | 런타임이 읽지 않는 `output` 필드가 있음. `mode`·`content`·`filePath`·`overwrite`·`language`는 `passTheResultToNextTask: true`가 필요하고, `filePath`·`overwrite`는 `mode: "file"`, `language`는 `mode: "editor"`에서만 사용됩니다. `capture`·`diagnostics`는 이 게이트 밖에서 동작하지만 태스크 결과에 문자열 `output`이 있어야 합니다. |

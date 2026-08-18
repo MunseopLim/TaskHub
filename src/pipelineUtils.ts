@@ -68,6 +68,9 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
     // 더한 결과 키들. 이 목록은 "내장 결과 키를 가리는 이름" 이 기준이므로,
     // 키가 늘 때마다 함께 늘어야 한다.
     'paths', 'names', 'count', 'label', 'labels', 'labelList', 'valueList', 'custom',
+    // QuickPick의 안정 id는 History/선택 기억용 내부 메타데이터다. capture가
+    // 덮어쓰면 다른 mapping을 재실행할 수 있으므로 사용자 API가 아니어도 예약한다.
+    '_itemId', '_itemIds',
     // forEach 집계가 단일 실행 결과 위에 덮어쓰는 배열 키.
     'outputs', 'stderrs',
     // 프로토타입 오염 이름들. 평범한 객체에 `results['__proto__'] = v` 를 하면

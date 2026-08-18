@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import {
+    clearQuickPickSelections,
     initQuickPickMemory,
     forgetQuickPickSelection,
     pruneQuickPickSelections,
@@ -91,6 +92,34 @@ suite('quickPickMemory', () => {
         const recalled = recallQuickPickSelection(task)!;
         recalled[0].label = 'changed';
         assert.deepStrictEqual(recallQuickPickSelection(task), [{ label: 'A', custom: true }]);
+    });
+
+    test('안정 item id를 label과 함께 손실 없이 기억한다', async () => {
+        const memory = context();
+        initQuickPickMemory(memory.context);
+        const task = { actionId: 'build', id: 'mode' };
+        await rememberQuickPickSelection(task, [
+            { label: '릴리스', itemId: 'release', custom: false, index: 1 },
+        ]);
+        assert.deepStrictEqual(recallQuickPickSelection(task), [
+            { label: '릴리스', itemId: 'release', custom: false, index: 1 },
+        ]);
+    });
+
+    test('현재 워크스페이스의 모든 QuickPick 기억을 한 번에 초기화한다', async () => {
+        const memory = context();
+        initQuickPickMemory(memory.context);
+        await rememberQuickPickSelection({ actionId: 'build', id: 'mode' }, [
+            { label: 'Release', itemId: 'release', custom: false },
+        ]);
+        await rememberQuickPickSelection({ actionId: 'deploy', id: 'target' }, [
+            { label: 'Staging', custom: false },
+        ]);
+
+        assert.strictEqual(await clearQuickPickSelections(), 2);
+        assert.strictEqual(memory.store.get('taskhub.quickPickSelections'), undefined);
+        assert.strictEqual(recallQuickPickSelection({ actionId: 'build', id: 'mode' }), undefined);
+        assert.strictEqual(await clearQuickPickSelections(), 0);
     });
 
     test('상한을 넘으면 오래된 선택부터 버린다', () => {

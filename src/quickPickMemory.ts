@@ -19,6 +19,8 @@ interface QuickPickMemoryContext {
 
 export interface RememberedQuickPickSelection {
     label: string;
+    /** 명시한 QuickPick item id. label 변경·중복과 무관한 정체성이다. */
+    itemId?: string;
     /** 목록 밖에서 직접 입력한 값인지. 삭제된 정적 항목과 구분한다. */
     custom: boolean;
     /** 같은 label이 여러 개일 때 원래 항목을 다시 찾기 위한 목록 위치. */
@@ -93,6 +95,10 @@ function readSelectionMap(memento: MementoLike): QuickPickSelectionMap {
                 const item = selection as Partial<RememberedQuickPickSelection>;
                 return typeof item.label === 'string'
                     && item.label.length <= MAX_LABEL_LENGTH
+                    && (item.itemId === undefined
+                        || (typeof item.itemId === 'string'
+                            && item.itemId.length > 0
+                            && item.itemId.length <= MAX_LABEL_LENGTH))
                     && typeof item.custom === 'boolean'
                     && (item.index === undefined
                         || (Number.isInteger(item.index) && (item.index as number) >= 0));
@@ -131,7 +137,10 @@ export function pruneQuickPickSelections(
     for (const entry of entries) {
         if (kept.length >= max) { break; }
         const next = entry[0].length
-            + entry[1].selections.reduce((sum, selection) => sum + selection.label.length, 0);
+            + entry[1].selections.reduce(
+                (sum, selection) => sum + selection.label.length + (selection.itemId?.length ?? 0),
+                0
+            );
         if (totalChars + next > QUICK_PICK_MEMORY_MAX_TOTAL_CHARS) { continue; }
         kept.push(entry);
         totalChars += next;
@@ -157,10 +166,17 @@ export async function rememberQuickPickSelection(
         || selections.length > MAX_LABELS_PER_ENTRY
         || selections.some(selection => typeof selection?.label !== 'string'
             || selection.label.length > MAX_LABEL_LENGTH
+            || (selection.itemId !== undefined
+                && (typeof selection.itemId !== 'string'
+                    || selection.itemId.length === 0
+                    || selection.itemId.length > MAX_LABEL_LENGTH))
             || typeof selection.custom !== 'boolean'
             || (selection.index !== undefined
                 && (!Number.isInteger(selection.index) || selection.index < 0)))
-        || selections.reduce((sum, selection) => sum + selection.label.length, 0)
+        || selections.reduce(
+            (sum, selection) => sum + selection.label.length + (selection.itemId?.length ?? 0),
+            0
+        )
             > QUICK_PICK_MEMORY_MAX_TOTAL_CHARS) {
         return;
     }
@@ -203,4 +219,15 @@ export async function forgetQuickPickSelection(
     } catch {
         // 편의 상태 정리 실패가 action 실행을 실패시키지는 않는다.
     }
+}
+
+/** 현재 워크스페이스에 저장된 QuickPick 선택을 모두 지우고 scope 수를 돌려준다. */
+export async function clearQuickPickSelections(): Promise<number> {
+    if (!memoryContext) { return 0; }
+    const context = memoryContext;
+    await memoryMigration;
+    if (!context || memoryContext !== context) { return 0; }
+    const count = Object.keys(readSelectionMap(context.workspaceState)).length;
+    await Promise.resolve(context.workspaceState.update(STATE_KEY, undefined));
+    return count;
 }

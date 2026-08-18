@@ -20,6 +20,7 @@
   "cmd.executeAction": "액션 실행",
   "cmd.previewAction": "미리 실행 (Dry-run)",
   "cmd.doctor": "Doctor — 액션 점검",
+  "cmd.clearQuickPickSelections": "QuickPick 선택 기억 초기화",
   "cmd.stopAction": "액션 중지",
   "cmd.showVersion": "확장 프로그램 버전 보기",
   "cmd.openFavoriteFile": "즐겨찾는 파일 열기",

@@ -2807,6 +2807,29 @@ function analyzeActionTasks(
         // variable.unresolved for refs that never execute.
         const ifc = (task as any).itemsFromCommand;
         const hasItemsFromCommand = typeof ifc === 'string' ? ifc.length > 0 : !!ifc;
+        if (!hasItemsFromCommand && task.type === 'quickPick' && Array.isArray(task.items)) {
+            const seenItemIds = new Set<string>();
+            const duplicateItemIds = new Set<string>();
+            for (const quickPickItem of task.items) {
+                if (!quickPickItem || typeof quickPickItem !== 'object' || Array.isArray(quickPickItem)) { continue; }
+                const itemId = (quickPickItem as any).id;
+                if (typeof itemId !== 'string') { continue; }
+                if (seenItemIds.has(itemId)) { duplicateItemIds.add(itemId); }
+                seenItemIds.add(itemId);
+            }
+            if (duplicateItemIds.size > 0) {
+                const ids = Array.from(duplicateItemIds).map(id => `'${id}'`).join(', ');
+                findings.push({
+                    filePath: input.filePath,
+                    sourceLabel: input.sourceLabel,
+                    range: findIdLine(input.rawText, task.id),
+                    severity: 'error',
+                    code: 'quickpick.item-id-duplicate',
+                    message: `Task '${item.id}.${task.id}' repeats QuickPick item id ${ids}. Item ids must be unique within the task so remembered and History selections cannot resolve to a different mapping.`,
+                    messageKo: `Task '${item.id}.${task.id}'에서 QuickPick item id ${ids}가 중복됩니다. 선택 기억과 History가 다른 mapping을 가리키지 않도록 한 태스크 안의 item id는 고유해야 합니다.`,
+                });
+            }
+        }
         if (typeof ifc === 'string') {
             visitString(ifc);
         } else if (ifc && typeof ifc === 'object') {
