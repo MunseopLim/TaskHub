@@ -446,6 +446,29 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 
 `values`는 **평평하게 편 값**을 잇습니다. 배열 매핑과 다중 선택을 함께 쓰면 항목 수와 선택 수가 달라지므로, 사람이 읽을 문자열이 필요하면 `labels`를, 인자로 넘길 값이 필요하면 `valueList`를 쓰세요.
 
+자주 쓰는 선택은 다음 세 옵션으로 설정을 줄일 수 있습니다.
+
+| 옵션 | 동작 |
+| --- | --- |
+| `default` | 처음 활성화할 항목의 `label`. `canPickMany: true`이면 label 배열로 여러 항목을 미리 선택합니다. 변수 치환을 지원합니다. |
+| `allowCustom` | 단일 선택에서 목록에 없는 비어 있지 않은 문자열을 직접 입력해 그대로 `value`로 사용합니다. `canPickMany`와 함께 쓸 수 없습니다. |
+| `rememberLastSelection` | 마지막 label을 워크스페이스·액션·태스크별로 기억해 다음 일반 실행에서 복원합니다. 명시한 `default`가 기억값보다 우선합니다. |
+
+```jsonc
+{ "id": "branch", "type": "quickPick",
+  "items": ["main", "develop"],
+  "default": "main",
+  "allowCustom": true,
+  "rememberLastSelection": true },
+{ "id": "checkout", "type": "command",
+  "command": "git", "args": ["checkout", "${branch.value}"] }
+```
+
+목록 항목의 `label`·`description`·`detail`·`value`와 `default`는 앞 태스크 결과를 변수로 사용할 수
+있습니다. 기억은 label을 저장하므로 나중에 같은 label의 `value` 매핑을 바꾸면 다음 실행에는 새
+매핑값이 전달됩니다. 목록에서 사라진 기억값은 무시하며, 직접 입력값은 `allowCustom`이 켜진 동안
+다시 복원할 수 있습니다.
+
 - 동적 목록 명령은 `cwd`, 없으면 액션 워크스페이스에서 실행됩니다.
 - History 재실행은 `label`로 선택지 유효성을 확인합니다 — 목록에서 사라진 선택지만 다시 묻습니다.
 - 취소 규칙은 `fileDialog`와 같습니다.

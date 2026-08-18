@@ -228,6 +228,23 @@
           "description": "If true, allows multiple selection (for 'quickPick' type). Results will be available as 'value' (first selection), 'label' / 'labels', 'values' (comma-separated) and 'valueList' (array).",
           "default": false
         },
+        "default": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+          ],
+          "description": "For 'quickPick': label to activate initially, or labels to preselect when canPickMany is true. Explicit default takes precedence over remembered selection. Supports variable interpolation."
+        },
+        "allowCustom": {
+          "type": "boolean",
+          "description": "For single-select 'quickPick': allow a non-empty value not present in items to be typed and returned directly. Cannot be combined with canPickMany.",
+          "default": false
+        },
+        "rememberLastSelection": {
+          "type": "boolean",
+          "description": "For 'quickPick': remember the selected label(s) per workspace, action, and task, and restore them on the next normal run. An explicit default takes precedence.",
+          "default": false
+        },
         "itemsFromCommand": {
           "oneOf": [
             { "type": "string" },
@@ -414,7 +431,28 @@
           "additionalProperties": false
         }
       },
-      "required": ["id", "type"]
+      "required": ["id", "type"],
+      "allOf": [
+        {
+          "not": {
+            "properties": {
+              "allowCustom": { "const": true },
+              "canPickMany": { "const": true }
+            },
+            "required": ["allowCustom", "canPickMany"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "default": { "type": "array" } },
+            "required": ["default"]
+          },
+          "then": {
+            "properties": { "canPickMany": { "const": true } },
+            "required": ["canPickMany"]
+          }
+        }
+      ]
     },
     "Output": {
       "type": "object",

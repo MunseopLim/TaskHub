@@ -26,6 +26,11 @@ import { buildPreviewReport } from './previewRun';
 import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput } from './doctor';
 import { createZipArchive, extractZipArchive } from './archiveUtils';
 import { DIALOG_SCOPE, coerceDefaultUri, initDialogMemory, showOpenDialogWithMemory, showSaveDialogWithMemory, taskDialogScope } from './dialogMemory';
+import {
+    initQuickPickMemory,
+    recallQuickPickSelection,
+    rememberQuickPickSelection,
+} from './quickPickMemory';
 import { collectVariableCompletions, referencePrefixAt, type VariableCompletionDetail } from './variableCompletions';
 import {
     BackgroundCompletionBatcher,
@@ -6291,6 +6296,9 @@ export function savedInputStillValid(task: any, saved: any): boolean {
             ? (typeof saved.label === 'string' ? saved.label : saved.value)
             : undefined;
         if (typeof picked !== 'string') { return true; }
+        // 직접 입력은 정적 items에 없다는 것이 정상이다. label/value 모양만
+        // 유지되면 History 재실행에서도 다시 묻지 않는다.
+        if (task.allowCustom === true && task.canPickMany !== true) { return picked.length > 0; }
         const labels = task.items.map((entry: any) => (typeof entry === 'string' ? entry : entry?.label));
         return labels.includes(picked);
     }
@@ -6457,10 +6465,18 @@ async function executeSingleTask(
             }
             const interpolatedQuickPickTask = {
                 ...task,
+                actionId,
                 items: interpolatedItems,
                 itemsFromCommand: interpolatedItemsFromCommand,
                 cwd: task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
-                placeHolder: task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined
+                placeHolder: task.placeHolder ? interpolatePipelineVariables(task.placeHolder, interpolationContext) : undefined,
+                default: Array.isArray(task.default)
+                    ? task.default.map((label: unknown) => typeof label === 'string'
+                        ? interpolatePipelineVariables(label, interpolationContext)
+                        : label)
+                    : (typeof task.default === 'string'
+                        ? interpolatePipelineVariables(task.default, interpolationContext)
+                        : task.default),
             };
             result = await handleQuickPick(interpolatedQuickPickTask, defaultWorkspace, scope.cancellation.token);
             break;
@@ -7680,6 +7696,8 @@ export interface QuickPickResult {
 /** `showQuickPick` 이 돌려주는 항목 객체에 매핑된 값을 얹어 둔다. */
 interface QuickPickEntry extends vscode.QuickPickItem {
     taskHubValue: string | string[];
+    /** `allowCustom`가 입력 중에 만든 임시 항목. */
+    taskHubCustom?: boolean;
 }
 
 /**
@@ -7731,6 +7749,118 @@ function buildQuickPickResult(selected: readonly QuickPickEntry[], canPickMany: 
         result.labels = selected.map(entry => entry.label).join(',');
     }
     return result;
+}
+
+function requestedQuickPickLabels(task: any): { labels: string[]; explicit: boolean } {
+    if (typeof task.default === 'string') { return { labels: [task.default], explicit: true }; }
+    if (Array.isArray(task.default)) {
+        return { labels: task.default.filter((label: unknown): label is string => typeof label === 'string'), explicit: true };
+    }
+    if (task.rememberLastSelection === true) {
+        return { labels: recallQuickPickSelection(task) ?? [], explicit: false };
+    }
+    return { labels: [], explicit: false };
+}
+
+/** 기본 선택·직접 입력·선택 기억이 필요한 경우에만 쓰는 고급 QuickPick UI. */
+async function showAdvancedQuickPick(
+    task: any,
+    baseItems: QuickPickEntry[],
+    options: vscode.QuickPickOptions,
+    token?: vscode.CancellationToken
+): Promise<QuickPickEntry[]> {
+    if (task.allowCustom === true && task.canPickMany === true) {
+        throw new Error(`Task '${task.id}' cannot combine 'allowCustom' with 'canPickMany'.`);
+    }
+
+    const { labels: requestedLabels, explicit } = requestedQuickPickLabels(task);
+    if (explicit && requestedLabels.some(label => label.length === 0)) {
+        throw new Error(`Task '${task.id}' has an empty quickPick default label.`);
+    }
+    if (task.canPickMany !== true && requestedLabels.length > 1) {
+        throw new Error(`Task '${task.id}' has multiple default labels but 'canPickMany' is not true.`);
+    }
+
+    const matching = requestedLabels.flatMap(label => {
+        const entry = baseItems.find(item => item.label === label);
+        return entry ? [entry] : [];
+    });
+    const missing = requestedLabels.filter(label => !baseItems.some(item => item.label === label));
+    if (explicit && missing.length > 0 && !(task.allowCustom === true && missing.length === 1)) {
+        throw new Error(`Task '${task.id}' default label was not found: ${missing.join(', ')}`);
+    }
+
+    const picker = vscode.window.createQuickPick<QuickPickEntry>();
+    picker.placeholder = options.placeHolder;
+    picker.canSelectMany = task.canPickMany === true;
+    picker.items = baseItems;
+
+    // 기억된 항목이 목록에서 사라졌으면 조용히 기본 상태로 연다. 명시한 default가
+    // 틀린 경우만 위에서 설정 오류로 알린다.
+    if (picker.canSelectMany) {
+        picker.selectedItems = matching;
+    } else if (matching.length > 0) {
+        picker.activeItems = [matching[0]];
+    }
+
+    const customDefault = task.allowCustom === true && missing.length === 1 ? missing[0] : undefined;
+    const refreshCustomEntry = (rawValue: string): void => {
+        if (task.allowCustom !== true) { return; }
+        const value = rawValue.trim();
+        const exact = baseItems.find(item => item.label === value);
+        if (value.length === 0 || exact) {
+            picker.items = baseItems;
+            if (exact) { picker.activeItems = [exact]; }
+            return;
+        }
+        const custom: QuickPickEntry = {
+            label: value,
+            description: t('직접 입력한 값 사용', 'Use custom value'),
+            taskHubValue: value,
+            taskHubCustom: true,
+        };
+        picker.items = [custom, ...baseItems];
+        picker.activeItems = [custom];
+    };
+
+    if (customDefault !== undefined) {
+        picker.value = customDefault;
+        refreshCustomEntry(customDefault);
+    }
+
+    return await new Promise<QuickPickEntry[]>((resolve, reject) => {
+        let settled = false;
+        const disposables: vscode.Disposable[] = [];
+        const finish = (fn: () => void): void => {
+            if (settled) { return; }
+            settled = true;
+            for (const disposable of disposables) { disposable.dispose(); }
+            picker.hide();
+            picker.dispose();
+            fn();
+        };
+        disposables.push(picker.onDidAccept(() => {
+            const selected = picker.canSelectMany
+                ? [...picker.selectedItems]
+                : (picker.selectedItems.length > 0
+                    ? [picker.selectedItems[0]]
+                    : (picker.activeItems.length > 0 ? [picker.activeItems[0]] : []));
+            if (selected.length === 0) { return; }
+            finish(() => resolve(selected));
+        }));
+        disposables.push(picker.onDidHide(() => finish(() => reject(
+            new PromptCancelledError(t('목록에서 선택하기를 취소했습니다.', 'Quick pick selection was canceled.'))
+        ))));
+        if (task.allowCustom === true) {
+            disposables.push(picker.onDidChangeValue(refreshCustomEntry));
+        }
+        if (token) {
+            disposables.push(token.onCancellationRequested(() => finish(() => reject(
+                new PromptCancelledError(t('목록에서 선택하기를 취소했습니다.', 'Quick pick selection was canceled.'))
+            ))));
+        }
+        picker.show();
+    });
 }
 
 export async function handleQuickPick(task: any, defaultWorkspace?: string, token?: vscode.CancellationToken): Promise<QuickPickResult> {
@@ -7790,6 +7920,17 @@ export async function handleQuickPick(task: any, defaultWorkspace?: string, toke
             };
         }
     });
+
+    const usesAdvancedPicker = task.default !== undefined
+        || task.allowCustom === true
+        || task.rememberLastSelection === true;
+    if (usesAdvancedPicker) {
+        const selected = await showAdvancedQuickPick(task, items, options, token);
+        if (task.rememberLastSelection === true) {
+            await rememberQuickPickSelection(task, selected.map(entry => entry.label));
+        }
+        return buildQuickPickResult(selected, task.canPickMany === true);
+    }
 
     // As with `handleInputBox`, the token is what lets *Stop Action* dismiss
     // an open pick list instead of leaving it on screen.
@@ -9487,6 +9628,8 @@ export function activate(context: vscode.ExtensionContext) {
     // 기억 없이 워크스페이스 폴더에서 열리므로 activate 최상단에서 연결한다.
     initDialogMemory(context);
     context.subscriptions.push(new vscode.Disposable(() => initDialogMemory(undefined)));
+    initQuickPickMemory(context);
+    context.subscriptions.push(new vscode.Disposable(() => initQuickPickMemory(undefined)));
     // One-shot cleanup of the palette's retired private MRU list. `undefined`
     // removes the key; on an install that never had it this is a no-op.
     if (context.globalState.get(RUN_ANY_ACTION_MRU_KEY) !== undefined) {

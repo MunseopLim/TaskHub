@@ -149,6 +149,8 @@
 | IT-167 | 매핑을 바꾼 뒤의 재실행 | 저장된 입력은 고른 **항목**이므로, 값은 지금의 정의에서 다시 파생됨 — 매핑을 붙인 뒤 재실행하면 대화상자 없이 새 매핑 값(`--release`)이 argv 로 감 |
 | IT-169 | 현재 파일·환경 문맥 전달과 기록 마스킹 | 파일·상대 경로·선택·클립보드·환경·커서 값이 실제 argv에 도착하고, History 명령에는 파일 경로만 남으며 선택·클립보드·환경값은 `***`로 가려짐 |
 | IT-170 | 활성 에디터 자동 스냅샷 | 별도 주입 없이 실행 시작 시 활성 파일·선택 영역·1-based 커서 위치를 읽어 후속 `writeFile`까지 같은 값으로 전달 |
+| IT-171 | QuickPick 동적 기본 선택 | 앞 command의 출력으로 `default` label을 정하고, 활성화된 항목의 매핑 `value`가 후속 파일에 전달됨 |
+| IT-172 | QuickPick 직접 입력 argv 전달 | `allowCustom`으로 입력한 목록 밖 문자열이 후속 `command`의 실제 argv 한 칸으로 전달됨 |
 
 ### Last-run 배지
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)

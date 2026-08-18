@@ -1080,16 +1080,48 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                     lines.push(`  items (${items.length}):`);
                     for (const it of items) {
                         if (typeof it === 'string') {
-                            lines.push(`    - ${interpolatePipelineVariables(it, interpolationContext)}`);
+                            const label = interpolatePipelineVariables(it, interpolationContext);
+                            lines.push(`    - ${label}`);
+                            interpolated.push(label);
                         } else if (it && typeof it === 'object') {
                             const label = it.label ? interpolatePipelineVariables(it.label, interpolationContext) : '(missing label)';
                             const desc = it.description ? interpolatePipelineVariables(it.description, interpolationContext) : '';
-                            lines.push(`    - ${label}${desc ? `  (${desc})` : ''}`);
+                            const detail = it.detail ? interpolatePipelineVariables(it.detail, interpolationContext) : '';
+                            const rawValue = (it as any).value;
+                            const mapped = Array.isArray(rawValue)
+                                ? rawValue.filter((value): value is string => typeof value === 'string')
+                                    .map(value => interpolatePipelineVariables(value, interpolationContext))
+                                : (typeof rawValue === 'string'
+                                    ? interpolatePipelineVariables(rawValue, interpolationContext)
+                                    : undefined);
+                            const mappedDisplay = Array.isArray(mapped) ? JSON.stringify(mapped) : mapped;
+                            lines.push(
+                                `    - ${label}${desc ? `  (${desc})` : ''}`
+                                + `${detail ? ` — ${detail}` : ''}`
+                                + `${mappedDisplay !== undefined ? `  → ${mappedDisplay}` : ''}`
+                            );
+                            interpolated.push(label, desc, detail);
+                            if (Array.isArray(mapped)) { interpolated.push(...mapped); }
+                            else { interpolated.push(mapped); }
                         }
                     }
                 }
                 if (placeHolder) { lines.push(`  placeHolder: ${placeHolder}`); }
+                const defaults = typeof task.default === 'string'
+                    ? [interpolatePipelineVariables(task.default, interpolationContext)]
+                    : (Array.isArray(task.default)
+                        ? task.default.filter((label): label is string => typeof label === 'string')
+                            .map(label => interpolatePipelineVariables(label, interpolationContext))
+                        : []);
+                if (defaults.length > 0) {
+                    lines.push(`  default: ${defaults.join(', ')}`);
+                    interpolated.push(...defaults);
+                }
                 if (task.canPickMany) { lines.push(`  canPickMany: true`); }
+                if (task.allowCustom) { lines.push(`  allowCustom: true (single selection)`); }
+                if (task.rememberLastSelection) {
+                    lines.push(`  rememberLastSelection: true (restored at runtime when available)`);
+                }
                 interpolated.push(placeHolder);
                 break;
             }

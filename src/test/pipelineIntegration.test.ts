@@ -70,6 +70,45 @@ suite('Pipeline integration', function () {
         );
     }
 
+    async function withCreatedQuickPick<T>(
+        interact: (picker: any, controls: { type(value: string): void; accept(): void }) => void,
+        fn: () => Promise<T>
+    ): Promise<T> {
+        const original = vscode.window.createQuickPick;
+        const acceptListeners: Array<() => void> = [];
+        const hideListeners: Array<() => void> = [];
+        const valueListeners: Array<(value: string) => void> = [];
+        const event = <TListener extends (...args: any[]) => void>(listeners: TListener[]) =>
+            (listener: TListener) => {
+                listeners.push(listener);
+                return { dispose: () => {
+                    const index = listeners.indexOf(listener);
+                    if (index >= 0) { listeners.splice(index, 1); }
+                } };
+            };
+        const picker: any = {
+            items: [], selectedItems: [], activeItems: [], value: '', canSelectMany: false,
+            onDidAccept: event(acceptListeners),
+            onDidHide: event(hideListeners),
+            onDidChangeValue: event(valueListeners),
+            show: () => queueMicrotask(() => interact(picker, {
+                type: (value: string) => {
+                    picker.value = value;
+                    for (const listener of [...valueListeners]) { listener(value); }
+                },
+                accept: () => { for (const listener of [...acceptListeners]) { listener(); } },
+            })),
+            hide: () => { for (const listener of [...hideListeners]) { listener(); } },
+            dispose: () => undefined,
+        };
+        (vscode.window as any).createQuickPick = () => picker;
+        try {
+            return await fn();
+        } finally {
+            (vscode.window as any).createQuickPick = original;
+        }
+    }
+
     /**
      * In-memory context for the dialog-location store. The bundled extension
      * (`dist/`) and this test file (`out/`) are separate module instances, so
@@ -752,6 +791,56 @@ suite('Pipeline integration', function () {
             } finally {
                 (vscode.window as any).showQuickPick = originalShowQuickPick;
             }
+        });
+
+        test('IT-171: quickPick default는 앞 task 값으로 정해지고 매핑 value가 전달된다', async () => {
+            const resultPath = path.join(tempWorkspace, 'it171.txt');
+            await withCreatedQuickPick((picker, controls) => {
+                assert.strictEqual(picker.activeItems[0]?.label, 'Release');
+                picker.selectedItems = [...picker.activeItems];
+                controls.accept();
+            }, () => run({
+                description: 'IT-171',
+                tasks: [
+                    {
+                        id: 'suggested', type: 'command', command: 'node',
+                        args: ['-e', "process.stdout.write('Release')"],
+                        passTheResultToNextTask: true,
+                    },
+                    {
+                        id: 'mode', type: 'quickPick', default: '${suggested.output}',
+                        items: [
+                            { label: 'Debug', value: '--debug' },
+                            { label: 'Release', value: '--release' },
+                        ],
+                    },
+                    { id: 'save', type: 'writeFile', path: resultPath, content: '${mode.value}' },
+                ],
+            }, 'it171'));
+            assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), '--release');
+        });
+
+        test('IT-172: quickPick 직접 입력값이 다음 command의 실제 argv로 전달된다', async () => {
+            const script = path.join(tempWorkspace, 'it172-argv.js');
+            const resultPath = path.join(tempWorkspace, 'it172.json');
+            fs.writeFileSync(script, 'require("fs").writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)))');
+
+            await withCreatedQuickPick((picker, controls) => {
+                controls.type('feature/new-flow');
+                picker.selectedItems = [...picker.activeItems];
+                controls.accept();
+            }, () => run({
+                description: 'IT-172',
+                tasks: [
+                    { id: 'branch', type: 'quickPick', allowCustom: true, items: ['main', 'develop'] },
+                    {
+                        id: 'run', type: 'command', command: 'node',
+                        args: [script, resultPath, '${branch.value}'],
+                    },
+                ],
+            }, 'it172'));
+
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(resultPath, 'utf8')), ['feature/new-flow']);
         });
 
         test('IT-108: quickPick itemsFromCommand populates list, itemsExclude filters, selection flows downstream', async () => {

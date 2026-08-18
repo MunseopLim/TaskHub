@@ -1104,7 +1104,10 @@ export function enumerateArgvCandidates(
         // `variable.unresolved` 를 내는 판정과 같은 함수라 둘이 어긋날 수 없다.
         if (!referenceKeyIsProducible(source, alt.key)) { continue; }
         // 값은 나지만 열거는 못 한다(`inputBox`·`itemsFromCommand` 등) — fail-closed.
-        if (source.type !== 'quickPick' || source.itemsFromCommand || !Array.isArray(source.items)) {
+        if (source.type !== 'quickPick'
+            || source.allowCustom === true
+            || source.itemsFromCommand
+            || !Array.isArray(source.items)) {
             return { variants: [argv], truncated: false };
         }
         for (const entry of source.items) {
@@ -2094,7 +2097,11 @@ function nestedInterpreterRefsAreConstrained(candidate: ScriptCandidate, tasksBy
             }
             if (source.type === 'quickPick') {
                 // 항목 자체에 메타문자가 있으면 고정 목록이라도 안전하지 않다.
-                if (!Array.isArray(source.items) || source.itemsFromCommand) { return false; }
+                // allowCustom이면 정적 목록 밖의 어떤 값도 올 수 있으므로 열거로
+                // 안전을 증명할 수 없다.
+                if (source.allowCustom === true || !Array.isArray(source.items) || source.itemsFromCommand) {
+                    return false;
+                }
                 // **label 이 아니라 실제로 치환되는 값**을 본다. `value` 매핑이
                 // 있으면 목록에 보이는 문구는 명령에 닿지 않는다.
                 return source.items.every((entry: any) => {
@@ -2713,6 +2720,7 @@ function analyzeActionTasks(
                 } else if (it && typeof it === 'object') {
                     visitString((it as any).label);
                     visitString((it as any).description);
+                    visitString((it as any).detail);
                     // `value` 매핑도 런타임이 보간한다. 빠뜨리면 여기 적힌 오타가
                     // 리터럴 그대로 argv 에 도착하는데 진단은 조용하다 — 같은 오타가
                     // `label` 에 있으면 잡히므로 자리에 따라 판정이 갈렸다.
@@ -2724,6 +2732,12 @@ function analyzeActionTasks(
                     }
                 }
             }
+        }
+        const quickPickDefault = (task as any).default;
+        if (Array.isArray(quickPickDefault)) {
+            for (const label of quickPickDefault) { visitString(label); }
+        } else {
+            visitString(quickPickDefault);
         }
 
         // writeFile / appendFile path + content

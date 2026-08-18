@@ -106,6 +106,12 @@ export interface Task {
     // Properties for 'quickPick'
     items?: string[] | QuickPickItem[];
     canPickMany?: boolean;
+    /** 처음 활성화/선택할 항목의 label. 다중 선택이면 label 배열을 쓴다. */
+    default?: string | string[];
+    /** 단일 선택 QuickPick에서 목록에 없는 문자열도 직접 입력해 값으로 사용할 수 있다. */
+    allowCustom?: boolean;
+    /** 같은 workspace의 같은 action/task에서 마지막으로 고른 label을 다음 실행에 복원한다. */
+    rememberLastSelection?: boolean;
     /**
      * For `quickPick`: a shell command whose stdout becomes the pick list —
      * each non-empty line (trimmed) is one item. Runs in `cwd` (or the

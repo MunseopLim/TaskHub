@@ -91,6 +91,7 @@ import {
 	describeVariableCompletion,
 } from '../extension';
 import { collectVariableCompletions, type VariableCompletionDetail } from '../variableCompletions';
+import { initQuickPickMemory } from '../quickPickMemory';
 import { simulateTaskResult } from '../previewRun';
 import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
 import { LinkViewProvider, mergeInvalidJsonEntries, readLinksFromDisk } from '../providers/linkViewProvider';
@@ -1440,6 +1441,14 @@ suite('Extension Test Suite', () => {
 			// 동적 목록은 비교 기준이 없으므로 건드리지 않는다.
 			assert.strictEqual(
 				savedInputStillValid({ type: 'quickPick', itemsFromCommand: 'git branch' }, { value: 'x' }), true);
+		});
+
+		test('allowCustom의 저장값은 정적 목록에 없어도 재실행할 수 있다', () => {
+			const task = { type: 'quickPick', allowCustom: true, items: ['main', 'develop'] };
+			assert.strictEqual(savedInputStillValid(task, {
+				label: 'feature/new-flow', value: 'feature/new-flow',
+			}), true);
+			assert.strictEqual(savedInputStillValid(task, { label: '', value: '' }), false);
 		});
 
 		/**
@@ -6428,6 +6437,47 @@ suite('Extension Test Suite', () => {
 			}
 		}
 
+		async function advancedQuickPick(
+			task: any,
+			interact: (picker: any, controls: { type(value: string): void; accept(): void }) => void
+		) {
+			const original = vscode.window.createQuickPick;
+			const acceptListeners: Array<() => void> = [];
+			const hideListeners: Array<() => void> = [];
+			const valueListeners: Array<(value: string) => void> = [];
+			const event = <T extends Function>(listeners: T[]) => (listener: T) => {
+				listeners.push(listener);
+				return { dispose: () => {
+					const index = listeners.indexOf(listener);
+					if (index >= 0) { listeners.splice(index, 1); }
+				} };
+			};
+			const picker: any = {
+				items: [], selectedItems: [], activeItems: [], value: '',
+				canSelectMany: false,
+				onDidAccept: event(acceptListeners),
+				onDidHide: event(hideListeners),
+				onDidChangeValue: event(valueListeners),
+				show: () => queueMicrotask(() => interact(picker, {
+					type: (value: string) => {
+						picker.value = value;
+						for (const listener of [...valueListeners]) { listener(value); }
+					},
+					accept: () => {
+						for (const listener of [...acceptListeners]) { listener(); }
+					},
+				})),
+				hide: () => { for (const listener of [...hideListeners]) { listener(); } },
+				dispose: () => undefined,
+			};
+			(vscode.window as any).createQuickPick = () => picker;
+			try {
+				return await handleQuickPick(task);
+			} finally {
+				(vscode.window as any).createQuickPick = original;
+			}
+		}
+
 		/**
 		 * `value` 매핑 — 목록에 **보이는 문구**와 명령에 **들어가는 값**을 가른다.
 		 * 매핑이 없으면 둘이 같으므로 예전 액션의 동작은 그대로다.
@@ -6447,6 +6497,84 @@ suite('Extension Test Suite', () => {
 
 			const plain = await runtimeQuickPick(task, { label: 'Plain' });
 			assert.strictEqual(plain.value, 'Plain', 'value 가 없으면 label 이 그대로 값이다');
+		});
+
+		test('default label을 처음 활성화하고 매핑된 value를 낸다', async () => {
+			const result = await advancedQuickPick({
+				id: 'pick', type: 'quickPick', default: 'Release',
+				items: [{ label: 'Debug', value: '--debug' }, { label: 'Release', value: '--release' }],
+			}, (picker, controls) => {
+				assert.strictEqual(picker.activeItems[0]?.label, 'Release');
+				picker.selectedItems = [...picker.activeItems];
+				controls.accept();
+			});
+			assert.strictEqual(result.label, 'Release');
+			assert.strictEqual(result.value, '--release');
+		});
+
+		test('다중 선택의 default label 배열을 미리 선택한다', async () => {
+			const result = await advancedQuickPick({
+				id: 'pick', type: 'quickPick', canPickMany: true,
+				default: ['A', 'C'], items: ['A', 'B', 'C'],
+			}, (picker, controls) => {
+				assert.deepStrictEqual(picker.selectedItems.map((item: any) => item.label), ['A', 'C']);
+				controls.accept();
+			});
+			assert.strictEqual(result.labels, 'A,C');
+			assert.deepStrictEqual(result.valueList, ['A', 'C']);
+		});
+
+		test('allowCustom은 목록에 없는 직접 입력을 그대로 값으로 낸다', async () => {
+			const result = await advancedQuickPick({
+				id: 'branch', type: 'quickPick', allowCustom: true, items: ['main', 'develop'],
+			}, (picker, controls) => {
+				controls.type('feature/new-flow');
+				assert.strictEqual(picker.activeItems[0]?.taskHubCustom, true);
+				picker.selectedItems = [...picker.activeItems];
+				controls.accept();
+			});
+			assert.deepStrictEqual(result, {
+				label: 'feature/new-flow', value: 'feature/new-flow', valueList: ['feature/new-flow'],
+			});
+		});
+
+		test('rememberLastSelection은 action/task별 마지막 label을 다음 실행에 복원한다', async () => {
+			const store = new Map<string, unknown>();
+			initQuickPickMemory({
+				workspaceState: {
+					get: <T>(key: string) => store.get(key) as T | undefined,
+					update: async (key: string, value: unknown) => { store.set(key, value); },
+				},
+			});
+			const task = {
+				actionId: 'build', id: 'mode', type: 'quickPick',
+				rememberLastSelection: true, items: ['Debug', 'Release'],
+			};
+			try {
+				await advancedQuickPick(task, (picker, controls) => {
+					const release = picker.items.find((item: any) => item.label === 'Release');
+					picker.activeItems = [release];
+					picker.selectedItems = [release];
+					controls.accept();
+				});
+				const restored = await advancedQuickPick(task, (picker, controls) => {
+					assert.strictEqual(picker.activeItems[0]?.label, 'Release');
+					picker.selectedItems = [...picker.activeItems];
+					controls.accept();
+				});
+				assert.strictEqual(restored.value, 'Release');
+			} finally {
+				initQuickPickMemory(undefined);
+			}
+		});
+
+		test('allowCustom과 canPickMany를 함께 쓰면 명확히 거부한다', async () => {
+			await assert.rejects(
+				() => handleQuickPick({
+					id: 'pick', type: 'quickPick', allowCustom: true, canPickMany: true, items: ['a'],
+				}),
+				/allowCustom.*canPickMany/
+			);
 		});
 
 		test('value 배열: 인자 여러 개 / 아무 인자도 없음', async () => {

@@ -304,6 +304,45 @@ suite('buildPreviewReport', () => {
         assert.match(report, /\$\{missing\.value\}/);
     });
 
+    test('quickPick 기본값·직접 입력·선택 기억 설정을 리포트에 보여 준다', () => {
+        const options = baseOptions();
+        const report = buildPreviewReport({
+            id: 'quick-options', title: 'Quick options',
+            action: {
+                description: 'd',
+                tasks: [{
+                    id: 'mode', type: 'quickPick', items: ['Debug', 'Release'],
+                    default: '${workspaceFolder}', allowCustom: true, rememberLastSelection: true,
+                }],
+            },
+        }, options);
+        assert.ok(report.includes(`default: ${options.workspaceFolder}`));
+        assert.match(report, /allowCustom: true/);
+        assert.match(report, /rememberLastSelection: true/);
+    });
+
+    test('quickPick의 동적 label·detail·value를 표시하고 미해결도 센다', () => {
+        const report = buildPreviewReport({
+            id: 'quick-mapping', title: 'Quick mapping',
+            action: {
+                description: 'd',
+                tasks: [{
+                    id: 'mode', type: 'quickPick',
+                    items: [{
+                        label: 'Mode ${ghost.label}',
+                        detail: 'detail ${ghost.detail}',
+                        value: ['--mode', '${ghost.value}'],
+                    }],
+                }],
+            },
+        }, baseOptions());
+        assert.match(report, /→ \["--mode","\$\{ghost\.value\}"\]/);
+        for (const ref of ['${ghost.label}', '${ghost.detail}', '${ghost.value}']) {
+            assert.ok(report.includes(ref), `${ref}가 Preview에서 사라졌다`);
+        }
+        assert.match(report, /unresolved/i);
+    });
+
     test('lists capture rules and references downstream', () => {
         const item: ActionItem = {
             id: 'a.6',

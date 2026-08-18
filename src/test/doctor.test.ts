@@ -512,6 +512,14 @@ suite('Doctor', () => {
                 { id: 'run', type: 'command', command: '${pick.value} -c "echo ${ask.value}"' },
             ])).includes('command.nested-interpreter'), '열거 불가 실행 파일이 조용해졌다');
 
+            const custom = codes(withTasks([
+                { id: 'which', type: 'quickPick', items: ['node'], allowCustom: true },
+                { id: 'ask', type: 'inputBox', prompt: '?' },
+                { id: 'run', type: 'command', command: '${which.value} -c "echo ${ask.value}"' },
+            ]));
+            assert.ok(custom.some(code => code.startsWith('command.')),
+                `직접 입력 가능한 quickPick을 고정 목록처럼 면제했다: ${custom.join(', ')}`);
+
             // bare 내장은 동명 태스크보다 세지만, 속성이 붙으면 기존 action 호환을
             // 위해 그 task 결과를 읽는다. 따라서 안전 진단도 실제 quickPick 값을
             // 펼쳐 보아야 한다.
@@ -2976,6 +2984,22 @@ suite('Doctor', () => {
             `expected variable.unresolved from itemsFromCommand, got ${codes(findings).join(',')}`);
     });
 
+    test('quickPick default와 detail 안의 미해결 참조도 잡는다', () => {
+        const findings = runDoctor([makeInput([{
+            id: 'a.quick-dynamic', title: 'quick',
+            action: {
+                description: 'd',
+                tasks: [{
+                    id: 'pick', type: 'quickPick', default: '${ghost.default}',
+                    items: [{ label: 'A', detail: '${ghost.detail}', value: 'a' }],
+                }],
+            },
+        }])], compileValidator());
+        const unresolved = findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ');
+        assert.ok(unresolved.includes('${ghost.default}'), unresolved);
+        assert.ok(unresolved.includes('${ghost.detail}'), unresolved);
+    });
+
     test('does not flag stale ${...} in quickPick `items` when itemsFromCommand is set', () => {
         // Runtime ignores `items` once itemsFromCommand populates the list, so
         // a leftover ${typo.value} in `items` must not raise variable.unresolved.
@@ -4010,5 +4034,35 @@ suite('actions.schema.json — 다이얼로그 options', () => {
             }
         }]);
         assert.strictEqual(ok, true, JSON.stringify(v.errors));
+    });
+});
+
+suite('actions.schema.json — quickPick 편의 옵션', () => {
+    const taskSchema: any = (actionSchema as any).definitions?.Task;
+    const properties: any = taskSchema?.properties;
+
+    test('default·allowCustom·rememberLastSelection이 설명과 함께 제안된다', () => {
+        for (const key of ['default', 'allowCustom', 'rememberLastSelection']) {
+            assert.ok(properties?.[key], `${key} 가 스키마에 없다`);
+            assert.ok(typeof properties[key].description === 'string' && properties[key].description.length > 0);
+        }
+    });
+
+    test('기본값·직접 입력·기억 설정은 유효하고 custom 다중 선택은 거부한다', () => {
+        const v = compileValidator();
+        const wrap = (task: any) => [{
+            id: 'a.quick', title: 'quick', action: { description: 'd', tasks: [task] },
+        }];
+        assert.strictEqual(v(wrap({
+            id: 'pick', type: 'quickPick', items: ['a', 'b'],
+            default: 'a', allowCustom: true, rememberLastSelection: true,
+        })), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap({
+            id: 'pick', type: 'quickPick', items: ['a', 'b'],
+            allowCustom: true, canPickMany: true,
+        })), false, '런타임에서 지원하지 않는 custom 다중 선택이 스키마를 통과했다');
+        assert.strictEqual(v(wrap({
+            id: 'pick', type: 'quickPick', items: ['a', 'b'], default: ['a', 'b'],
+        })), false, '다중 기본값이 단일 선택 설정을 통과했다');
     });
 });
