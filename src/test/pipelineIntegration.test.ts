@@ -969,6 +969,58 @@ suite('Pipeline integration', function () {
             }
         });
 
+        test('IT-179: jsonl itemsFromCommand의 표시 정보와 배열 value가 실제 argv로 전달된다', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const choicesPath = path.join(tempWorkspace, 'targets.jsonl');
+            const scriptPath = path.join(tempWorkspace, 'it179-argv.js');
+            const resultPath = path.join(tempWorkspace, 'it179.json');
+            fs.writeFileSync(choicesPath, [
+                JSON.stringify({ id: 'skip', label: 'Skip me', value: '--skip' }),
+                JSON.stringify({
+                    id: 'release', label: 'Release build', description: 'optimized',
+                    detail: 'deployment target', value: ['--mode', 'release'],
+                }),
+            ].join('\n'));
+            fs.writeFileSync(
+                scriptPath,
+                'require("fs").writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)))'
+            );
+            try {
+                (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) => {
+                    assert.deepStrictEqual(items.map(item => item.label), ['Release build']);
+                    assert.strictEqual(items[0].description, 'optimized');
+                    assert.strictEqual(items[0].detail, 'deployment target');
+                    assert.strictEqual((items[0] as any).taskHubItemId, 'release');
+                    return items[0];
+                };
+                await run({
+                    description: 'IT-179',
+                    tasks: [
+                        {
+                            id: 'target', type: 'quickPick',
+                            itemsFromCommand: {
+                                macos: 'cat targets.jsonl',
+                                linux: 'cat targets.jsonl',
+                                windows: 'type targets.jsonl',
+                            },
+                            itemsFromCommandFormat: 'jsonl',
+                            itemsExclude: 'skip',
+                        },
+                        {
+                            id: 'run', type: 'command', command: 'node',
+                            args: [scriptPath, resultPath, '${target}'],
+                        },
+                    ],
+                }, 'it179');
+                assert.deepStrictEqual(
+                    JSON.parse(fs.readFileSync(resultPath, 'utf8')),
+                    ['--mode', 'release']
+                );
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+            }
+        });
+
         test('IT-109: inputBox extractPattern prefills default and validatePattern guards input', async () => {
             const originalShowQuickPick = vscode.window.showQuickPick;
             const originalShowInputBox = vscode.window.showInputBox;

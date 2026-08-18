@@ -1201,6 +1201,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 if (itemsFromCommand !== undefined) {
                     const cwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : '(defaults to workspace folder)';
                     lines.push(`  itemsFromCommand: ${itemsFromCommand}`);
+                    lines.push(`  itemsFromCommandFormat: ${task.itemsFromCommandFormat ?? 'lines'}`);
                     lines.push(`  cwd:     ${cwd}`);
                     lines.push(`  (items will be populated from this command's output at runtime)`);
                     interpolated.push(itemsFromCommand, cwd);

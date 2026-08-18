@@ -91,6 +91,7 @@ import {
 	formatExecutedCommandsDocument,
 	describeVariableCompletion,
 	aggregateForEachResults,
+	parseQuickPickCommandItems,
 } from '../extension';
 import { collectVariableCompletions, type VariableCompletionDetail } from '../variableCompletions';
 import {
@@ -529,7 +530,7 @@ suite('Extension Test Suite', () => {
 			// 조용히 꺼지고, 반대 방향의 진짜 참조가 있으면 가짜 순환으로
 			// **액션 전체가 거부**된다.
 			const ids = new Set(['A', 'B']);
-			for (const field of ['confirmLabel', 'cancelLabel', 'validateMessage', 'itemsExclude']) {
+			for (const field of ['confirmLabel', 'cancelLabel', 'validateMessage', 'itemsExclude', 'itemsFromCommandFormat']) {
 				const deps = inferTaskDependencies(
 					{ id: 'B', type: 'confirm', message: 'go?', [field]: '${A.value}' } as any,
 					ids
@@ -6537,6 +6538,52 @@ suite('Extension Test Suite', () => {
 			assert.deepStrictEqual(aggregateForEachResults([{ path: '/tmp/a' }]), {
 				path: '/tmp/a', count: 1, outputs: [], stderrs: [], paths: ['/tmp/a'],
 			});
+		});
+	});
+
+	suite('itemsFromCommand 출력 해석', () => {
+		test('기본 lines 형식은 기존처럼 줄 자체를 label/value로 쓰고 제외한다', () => {
+			assert.deepStrictEqual(
+				parseQuickPickCommandItems(['main', 'origin/HEAD', 'develop'], 'lines', ['origin/HEAD']),
+				['main', 'develop']
+			);
+		});
+
+		test('jsonl은 표시 정보·배열 value·안정 id를 구조화 항목으로 만든다', () => {
+			const items = parseQuickPickCommandItems([
+				JSON.stringify({
+					id: 'release', label: 'Release build', description: 'optimized',
+					detail: 'for deployment', value: ['--mode', 'release'],
+					taskHubValue: 'must-not-pass', extra: 'ignored',
+				}),
+				JSON.stringify({ id: 'debug', label: 'Debug build', value: '--debug' }),
+			], 'jsonl', ['debug']);
+			assert.deepStrictEqual(items, [{
+				id: 'release', label: 'Release build', description: 'optimized',
+				detail: 'for deployment', value: ['--mode', 'release'],
+			}]);
+		});
+
+		test('jsonl 오류는 줄 번호만 알리고 원문은 노출하지 않는다', () => {
+			const secret = 'top-secret-dynamic-label';
+			let error: Error | undefined;
+			try {
+				parseQuickPickCommandItems([
+					JSON.stringify({ label: 'ok' }),
+					`{invalid:${secret}}`,
+				], 'jsonl');
+			} catch (caught: any) {
+				error = caught;
+			}
+			assert.ok(error);
+			assert.match(error!.message, /2/);
+			assert.ok(!error!.message.includes(secret));
+			assert.throws(
+				() => parseQuickPickCommandItems([
+					JSON.stringify({ label: 'bad', value: [1] }),
+				], 'jsonl'),
+				/value/
+			);
 		});
 	});
 

@@ -866,7 +866,7 @@ function extractParsedVariableReferences(text: string): ReferenceAlternative[][]
 export const NON_INTERPOLATED_TASK_KEYS: ReadonlySet<string> = new Set([
     // 정규식 / 열거값 / 식별자
     'validatePattern', 'extractPattern',
-    'id', 'type', 'function', 'encoding', 'eol',
+    'id', 'type', 'function', 'encoding', 'eol', 'itemsFromCommandFormat',
     // 런타임이 보간하지 않는 사용자 노출 문자열
     'validateMessage', 'confirmLabel', 'cancelLabel', 'itemsExclude',
     'dependsOn',                                 // 태스크 id 목록 — 참조 문법이 아니다

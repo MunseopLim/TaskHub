@@ -248,7 +248,7 @@
         },
         "rememberLastSelection": {
           "type": "boolean",
-          "description": "For 'quickPick': remember the selected label(s) and whether a single value was custom per workspace, action, and task, then restore them on the next normal run. An explicit default takes precedence. Selections derived from sensitive runtime context are not stored.",
+          "description": "For 'quickPick': remember the selected item id when available (otherwise its label) and whether a single value was custom per workspace, action, and task, then restore it on the next normal run. An explicit default takes precedence. Selections derived from sensitive runtime context are not stored.",
           "default": false
         },
         "itemsFromCommand": {
@@ -263,14 +263,20 @@
               }
             }
           ],
-          "description": "For 'quickPick': a shell command whose stdout becomes the pick list (one item per non-empty, trimmed line). Runs in 'cwd' (or the workspace folder) via the login shell. Supports interpolation and the OS-specific object form. When set, 'items' is ignored. e.g. 'git for-each-ref --format=%(refname:short) refs/remotes/origin' to list origin branches."
+          "description": "For 'quickPick': a shell command whose stdout becomes the pick list. By default each non-empty trimmed line is one label/value; set itemsFromCommandFormat to 'jsonl' for structured items. Runs in 'cwd' (or the workspace folder) via the login shell. Supports interpolation and the OS-specific object form. When set, 'items' is ignored."
+        },
+        "itemsFromCommandFormat": {
+          "type": "string",
+          "enum": ["lines", "jsonl"],
+          "default": "lines",
+          "description": "How to read itemsFromCommand stdout. 'lines' keeps the existing behavior: each non-empty trimmed line is both label and value. 'jsonl' parses each line as an object with label and optional id, description, detail, and value (string or string array)."
         },
         "itemsExclude": {
           "oneOf": [
             { "type": "string" },
             { "type": "array", "items": { "type": "string" } }
           ],
-          "description": "For 'quickPick' with 'itemsFromCommand': exact line(s) to drop from the command output (e.g. 'origin/HEAD'). Ignored when 'itemsFromCommand' is not set."
+          "description": "For 'quickPick' with 'itemsFromCommand': exact line(s) to drop from line output (e.g. 'origin/HEAD'). In jsonl mode, an item's exact id, label, or raw JSON line can be excluded. Ignored when 'itemsFromCommand' is not set."
         },
         "forEach": {
           "oneOf": [

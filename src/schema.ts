@@ -125,10 +125,13 @@ export interface Task {
         macos?: string;
         linux?: string;
     };
+    /** stdout 해석 방식. `lines`는 기존 동작, `jsonl`은 줄마다 QuickPick item 객체다. */
+    itemsFromCommandFormat?: 'lines' | 'jsonl';
     /**
      * For `quickPick` with `itemsFromCommand`: exact line(s) to drop from the
-     * command output (e.g. `origin/HEAD`). Accepts a single string or an
-     * array. Ignored when `itemsFromCommand` is not set.
+     * command output (e.g. `origin/HEAD`). In `jsonl` mode an item's exact
+     * `id`, `label`, or raw line can be excluded. Accepts a single string or
+     * an array. Ignored when `itemsFromCommand` is not set.
      */
     itemsExclude?: string | string[];
 

@@ -311,9 +311,24 @@ suite('buildPreviewReport', () => {
         assert.match(report, /itemsFromCommand: git for-each-ref/);
         // ${workspaceFolder} inside itemsFromCommand must be interpolated.
         assert.ok(report.includes(`git for-each-ref ${WS}`), `expected resolved path, got: ${report}`);
+        assert.match(report, /itemsFromCommandFormat: lines/);
         assert.match(report, /items will be populated from this command/);
         // The static items(N) listing must not appear for a dynamic source.
         assert.doesNotMatch(report, /items \(\d+\):/);
+    });
+
+    test('quickPick 구조화 동적 목록 형식을 미리보기에 표시한다', () => {
+        const item: ActionItem = {
+            id: 'a.ifc-jsonl', title: 'T', action: {
+                description: 'x', tasks: [{
+                    id: 'target', type: 'quickPick',
+                    itemsFromCommand: 'list-targets --jsonl',
+                    itemsFromCommandFormat: 'jsonl',
+                } as any],
+            },
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.match(report, /itemsFromCommandFormat: jsonl/);
     });
 
     test('quickPick itemsFromCommand surfaces unresolved variables in summary', () => {

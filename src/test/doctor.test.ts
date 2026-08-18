@@ -4175,6 +4175,22 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
         }
     });
 
+    test('itemsFromCommandFormat은 기존 lines와 구조화 jsonl만 허용한다', () => {
+        assert.ok(properties?.itemsFromCommandFormat);
+        assert.deepStrictEqual(properties.itemsFromCommandFormat.enum, ['lines', 'jsonl']);
+        const v = compileValidator();
+        const wrap = (format: string) => [{
+            id: 'a.dynamic', title: 'dynamic', action: {
+                description: 'd', tasks: [{
+                    id: 'pick', type: 'quickPick', itemsFromCommand: 'list',
+                    itemsFromCommandFormat: format,
+                }],
+            },
+        }];
+        assert.strictEqual(v(wrap('jsonl')), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap('csv')), false, '지원하지 않는 동적 목록 형식이 통과했다');
+    });
+
     test('QuickPick object item의 안정 id를 제안하고 길이를 검증한다', () => {
         const itemSchema: any = properties?.items?.oneOf?.[1]?.items;
         assert.ok(itemSchema?.properties?.id, 'QuickPick item id가 스키마 제안에 없다');

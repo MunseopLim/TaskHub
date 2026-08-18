@@ -421,9 +421,9 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 
 ### `quickPick` 태스크
 
-고정 `items` 또는 `itemsFromCommand`의 비어 있지 않은 stdout 줄에서 항목을 고릅니다. `items`는 문자열이나 `{ id, label, description, detail, value }` 객체를 지원하고, `itemsExclude`로 동적 목록의 특정 줄을 제외할 수 있습니다. `id`는 선택 기억·History 재실행에만 쓰는 선택적 안정 식별자로 화면이나 command 값에는 들어가지 않습니다.
+고정 `items` 또는 `itemsFromCommand`의 stdout에서 항목을 고릅니다. `items`는 문자열이나 `{ id, label, description, detail, value }` 객체를 지원합니다. `id`는 선택 기억·History 재실행에만 쓰는 선택적 안정 식별자로 화면이나 command 값에는 들어가지 않습니다.
 
-**`label`은 보이는 문구, `value`는 명령에 들어가는 값입니다.** `value`를 적지 않으면 `label`이 그대로 값이 되므로 기존 액션의 동작은 바뀌지 않습니다. 매핑은 **고정 `items`에만** 적용됩니다 — `itemsFromCommand`의 항목은 stdout 한 줄이 곧 값입니다. `value`에 배열을 적으면 `args` 원소와 `command` 토큰 자리에서 **인자 여러 개**로 펼쳐지고, 빈 배열은 아무 인자도 만들지 않습니다.
+**`label`은 보이는 문구, `value`는 명령에 들어가는 값입니다.** `value`를 적지 않으면 `label`이 그대로 값이 되므로 기존 액션의 동작은 바뀌지 않습니다. `value`에 배열을 적으면 `args` 원소와 `command` 토큰 자리에서 **인자 여러 개**로 펼쳐지고, 빈 배열은 아무 인자도 만들지 않습니다.
 
 ```jsonc
 { "id": "mode", "type": "quickPick", "placeHolder": "빌드 모드", "items": [
@@ -479,6 +479,29 @@ id(없으면 label)와 정적/직접 입력 구분을 저장하므로 나중에 
 `id`가 없는 같은 label 항목은 mapping을 안전하게 식별할 수 없어 기억값을 자동 복원하지 않습니다.
 기억 저장소는 최근 100개 scope와 scope key·label·id 합계 64K자로 제한합니다. 기억값을 모두 지우려면
 Command Palette에서 **`TaskHub: QuickPick 선택 기억 초기화`**를 실행하세요(현재 워크스페이스만 대상).
+
+동적 목록은 기본적으로 비어 있지 않은 stdout 한 줄을 label과 value로 함께 씁니다. 표시 문구와 실행값을
+나누려면 `itemsFromCommandFormat: "jsonl"`을 추가하고 명령이 줄마다 QuickPick item 객체를 출력하게
+하세요. 각 줄은 `label`과 선택적 `id`·`description`·`detail`·`value`를 지원하며, 외부 명령이 출력한
+`${…}` 문구는 설정 변수로 다시 해석하지 않고 데이터 그대로 사용합니다.
+
+```jsonc
+{ "id": "target", "type": "quickPick",
+  "itemsFromCommand": "node scripts/list-targets.js",
+  "itemsFromCommandFormat": "jsonl",
+  "itemsExclude": ["deprecated"] },
+{ "id": "run", "type": "command", "command": "deploy", "args": ["${target}"] }
+```
+
+명령의 출력 예시는 다음과 같습니다. 한 줄이 객체 하나이므로 배열 `value`도 그대로 argv 여러 칸이 됩니다.
+
+```jsonl
+{"id":"local","label":"로컬 실행","value":[]}
+{"id":"release","label":"릴리스 배포","description":"최적화 빌드","value":["--mode","release"]}
+```
+
+`itemsExclude`는 기본 형식에서는 정확한 줄을, JSONL에서는 정확한 `id`·`label`·원문 줄을 제외합니다.
+잘못된 JSONL은 원문을 알림에 노출하지 않고 줄 번호와 잘못된 필드를 알려 줍니다.
 
 - 동적 목록 명령은 `cwd`, 없으면 액션 워크스페이스에서 실행됩니다.
 - History 재실행은 안정 `id`와 `labelList`로 선택 경계를 보존하고 현재 항목 정의에서 `label`·`value`를

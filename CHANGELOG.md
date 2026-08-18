@@ -6,6 +6,21 @@
 보안·데이터 손실 수정과 사용자 영향만 남긴다. 테스트를 적는다면 최종 수치만 기록한다.
 -->
 
+## [0.7.37] - 2026-08-19
+
+### 추가 — 동적 QuickPick의 label/value 매핑
+
+- 기존 `itemsFromCommand`는 그대로 stdout의 비어 있지 않은 각 줄을 label/value로 사용한다. 선택적으로
+  `itemsFromCommandFormat: "jsonl"`을 지정하면 명령이 줄마다 `label`과 선택적 `id`·`description`·
+  `detail`·`value` 객체를 출력해, 정적 QuickPick과 같은 표시/실행값 분리를 동적으로 구성할 수 있다.
+- JSONL의 배열 `value`는 bare 참조·`.value`에서 argv 여러 칸으로 펼쳐지고 빈 배열은 인자를 만들지
+  않는다. `itemsExclude`는 JSONL 항목의 id·label·원문 줄을 제외할 수 있다.
+- 동적 객체는 허용된 필드만 새 객체로 옮기며 잘못된 줄은 원문 대신 줄 번호와 필드만 오류로 알려 준다.
+  Preview Run은 적용 형식을 표시하고, 안정 id의 중복은 기존 런타임 검증으로 차단한다.
+
+**테스트**: 기존 lines 호환·JSONL 검증/원문 비노출·표시 정보·id 제외·배열 실제 argv를 포함해 최종
+3057 passing / 3 pending.
+
 ## [0.7.36] - 2026-08-19
 
 ### 개선 — QuickPick 선택 기억 안정화

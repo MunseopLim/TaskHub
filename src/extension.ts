@@ -6,7 +6,7 @@ import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import Ajv from 'ajv';
-import { ActionItem, Action as PipelineAction } from './schema';
+import { ActionItem, Action as PipelineAction, type QuickPickItem } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri, openJsonEditorFile, JsonEditorOpenHistory } from './jsonEditor';
@@ -8043,6 +8043,96 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
 }
 
 /**
+ * `itemsFromCommand`의 stdout 줄을 QuickPick 항목으로 바꾼다.
+ *
+ * 기본 `lines` 형식은 기존 동작을 그대로 유지한다. `jsonl`은 외부 명령이
+ * 표시 문구와 실행값을 분리할 수 있게 하되, 파싱한 객체를 그대로 spread하지
+ * 않는다. 명시한 필드만 새 객체로 옮겨 프로토타입·내부 메타데이터 주입을 막고,
+ * 오류에는 원문을 싣지 않아 동적 목록에 민감값이 있어도 알림으로 새지 않는다.
+ */
+export function parseQuickPickCommandItems(
+    lines: readonly string[],
+    format: unknown = 'lines',
+    excluded: readonly unknown[] = []
+): Array<string | QuickPickItem> {
+    if (format !== 'lines' && format !== 'jsonl') {
+        throw new Error(t(
+            `지원하지 않는 itemsFromCommandFormat '${String(format)}'입니다.`,
+            `Unsupported itemsFromCommandFormat '${String(format)}'.`
+        ));
+    }
+    const exclude = new Set(excluded.map(value => String(value).trim()));
+    if (format === 'lines') {
+        return lines.filter(line => !exclude.has(line));
+    }
+
+    const items: QuickPickItem[] = [];
+    for (let index = 0; index < lines.length; index++) {
+        const raw = lines[index];
+        if (exclude.has(raw)) { continue; }
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(raw);
+        } catch {
+            throw new Error(t(
+                `itemsFromCommand JSONL ${index + 1}번째 줄이 올바른 JSON이 아닙니다.`,
+                `itemsFromCommand JSONL line ${index + 1} is not valid JSON.`
+            ));
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error(t(
+                `itemsFromCommand JSONL ${index + 1}번째 줄은 객체여야 합니다.`,
+                `itemsFromCommand JSONL line ${index + 1} must be an object.`
+            ));
+        }
+        const candidate = parsed as Record<string, unknown>;
+        if (typeof candidate.label !== 'string' || candidate.label.length === 0) {
+            throw new Error(t(
+                `itemsFromCommand JSONL ${index + 1}번째 줄에는 비어 있지 않은 문자열 label이 필요합니다.`,
+                `itemsFromCommand JSONL line ${index + 1} requires a non-empty string label.`
+            ));
+        }
+        if (candidate.id !== undefined
+            && (typeof candidate.id !== 'string' || candidate.id.length === 0 || candidate.id.length > 128)) {
+            throw new Error(t(
+                `itemsFromCommand JSONL ${index + 1}번째 줄의 id는 1~128자 문자열이어야 합니다.`,
+                `itemsFromCommand JSONL line ${index + 1} id must be a string of 1 to 128 characters.`
+            ));
+        }
+        for (const field of ['description', 'detail'] as const) {
+            if (candidate[field] !== undefined && typeof candidate[field] !== 'string') {
+                throw new Error(t(
+                    `itemsFromCommand JSONL ${index + 1}번째 줄의 ${field}은 문자열이어야 합니다.`,
+                    `itemsFromCommand JSONL line ${index + 1} ${field} must be a string.`
+                ));
+            }
+        }
+        if (candidate.value !== undefined
+            && typeof candidate.value !== 'string'
+            && (!Array.isArray(candidate.value)
+                || !candidate.value.every(value => typeof value === 'string'))) {
+            throw new Error(t(
+                `itemsFromCommand JSONL ${index + 1}번째 줄의 value는 문자열 또는 문자열 배열이어야 합니다.`,
+                `itemsFromCommand JSONL line ${index + 1} value must be a string or an array of strings.`
+            ));
+        }
+        if (exclude.has(candidate.label)
+            || (typeof candidate.id === 'string' && exclude.has(candidate.id))) {
+            continue;
+        }
+        const item: QuickPickItem = { label: candidate.label };
+        if (typeof candidate.id === 'string') { item.id = candidate.id; }
+        if (typeof candidate.description === 'string') { item.description = candidate.description; }
+        if (typeof candidate.detail === 'string') { item.detail = candidate.detail; }
+        if (typeof candidate.value === 'string' || Array.isArray(candidate.value)) {
+            item.value = candidate.value as string | string[];
+        }
+        items.push(item);
+    }
+    return items;
+}
+
+/**
  * `quickPick` 결과.
  *
  * `label` 은 **보이는 문구**, `value` 는 **명령에 들어가는 값**이다. 항목에
@@ -8137,7 +8227,10 @@ function quickPickEntries(items: readonly any[]): QuickPickEntry[] {
                 throw new Error('QuickPick item id must be a non-empty string of at most 128 characters.');
             }
             if (seenIds.has(item.id)) {
-                throw new Error(`QuickPick item id '${item.id}' is duplicated.`);
+                // 동적 JSONL의 id는 환경변수·password 파생 출력일 수도 있다.
+                // Doctor는 정적 actions.json의 id를 구체적으로 알려 주지만,
+                // 런타임 오류에는 값을 싣지 않아 알림 표면으로 새지 않게 한다.
+                throw new Error('QuickPick item id is duplicated.');
             }
             seenIds.add(item.id);
         }
@@ -8374,8 +8467,18 @@ export async function handleQuickPick(
         const excludeList = Array.isArray(task.itemsExclude)
             ? task.itemsExclude
             : (typeof task.itemsExclude === 'string' ? [task.itemsExclude] : []);
-        const exclude = new Set(excludeList.map((s: any) => String(s).trim()));
-        pickItems = lines.filter(line => !exclude.has(line));
+        try {
+            pickItems = parseQuickPickCommandItems(
+                lines,
+                task.itemsFromCommandFormat ?? 'lines',
+                excludeList
+            );
+        } catch (error: any) {
+            throw new Error(t(
+                `Task '${task.id}'의 동적 QuickPick 항목 형식이 올바르지 않습니다: ${error?.message ?? error}`,
+                `Task '${task.id}' has invalid dynamic QuickPick items: ${error?.message ?? error}`
+            ));
+        }
         if (pickItems.length === 0) {
             // Include cwd and the raw line count so an empty pick list is
             // debuggable: most often the command ran in a folder without the
