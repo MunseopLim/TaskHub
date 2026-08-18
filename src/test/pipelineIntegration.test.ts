@@ -1322,6 +1322,50 @@ suite('Pipeline integration', function () {
             );
         });
 
+        test('IT-180: pathDialog는 QuickPick mode 하나로 파일/폴더 분기를 합친다', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            const pickedFile = path.join(tempWorkspace, 'unified.hex');
+            const pickedFolder = path.join(tempWorkspace, 'unified-out');
+            fs.writeFileSync(pickedFile, 'x');
+            fs.mkdirSync(pickedFolder, { recursive: true });
+            try {
+                for (const scenario of [
+                    { label: '파일', mode: 'file', picked: pickedFile },
+                    { label: '폴더', mode: 'folder', picked: pickedFolder },
+                ]) {
+                    const outPath = path.join(tempWorkspace, `unified-${scenario.mode}.txt`);
+                    (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) =>
+                        items.find(item => item.label === scenario.label);
+                    (vscode.window as any).showOpenDialog = async (options: vscode.OpenDialogOptions) => {
+                        assert.strictEqual(options.canSelectFiles, scenario.mode === 'file');
+                        assert.strictEqual(options.canSelectFolders, scenario.mode === 'folder');
+                        return [vscode.Uri.file(scenario.picked)];
+                    };
+                    await run({
+                        description: 'pathDialog-branching',
+                        tasks: [
+                            {
+                                id: 'kind', type: 'quickPick', items: [
+                                    { label: '파일', value: 'file' },
+                                    { label: '폴더', value: 'folder' },
+                                ],
+                            },
+                            { id: 'target', type: 'pathDialog', mode: '${kind}' },
+                            { id: 'write', type: 'writeFile', path: outPath, content: '${target.path}' },
+                        ],
+                    }, `it180-${scenario.mode}`);
+                    assert.strictEqual(
+                        normalizeWindowsPathForAssert(fs.readFileSync(outPath, 'utf8')),
+                        normalizeWindowsPathForAssert(scenario.picked)
+                    );
+                }
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
         /**
          * 꺼진 분기를 **평범하게** 참조하는 소비자는 함께 꺼진다.
          *

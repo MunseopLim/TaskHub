@@ -117,7 +117,7 @@ Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
 
 *   **executeAction()**: 메인 액션 실행 함수 (히스토리 추적 통합)
 *   **executeSingleTask()**: 개별 태스크 실행
-    *   지원 태스크 타입 (`Task.type` union, [src/schema.ts](../src/schema.ts) 참조): `shell`, `command`, `fileDialog`, `folderDialog`, `unzip`, `zip`, `stringManipulation`, `inputBox`, `quickPick`, `envPick`, `confirm`, `writeFile`, `appendFile`
+    *   지원 태스크 타입 (`Task.type` union, [src/schema.ts](../src/schema.ts) 참조): `shell`, `command`, `fileDialog`, `folderDialog`, `pathDialog`, `unzip`, `zip`, `stringManipulation`, `inputBox`, `quickPick`, `envPick`, `confirm`, `writeFile`, `appendFile`
 *   **변수 치환**: `${task_id.property}` 형식으로 파이프라인 간 데이터 전달
 *   **Task DAG**: `dependsOn` 및 `${taskId.x}` 자동 추론 의존성으로 그래프를 구성하며, `parallel: true` 태스크는 sync barrier에서 빠져 동시 실행 풀에 들어간다. 상세 시맨틱은 [features.md §24 병렬 실행 / Task DAG](./features.md#24-병렬-실행--task-dag) 참조.
 *   **장시간 완료 피드백**: `executeAction()`이 성공·실패·명시적 중지의 `durationMs`와 완료 시점 창 포커스를 확정하고, [backgroundCompletion.ts](../src/backgroundCompletion.ts)가 임계값·대상 결과·알림 정책과 750ms 묶음을 판정합니다. 성공·중지 알림만 묶고 실패는 원인이 있는 기존 오류 알림을 개별 유지하며, 상태 표시줄은 모든 대상 결과를 요약합니다. `taskhub.showTaskStatus`가 마스터 게이트이며 비밀번호 파생 실패의 민감 디버그 알림은 대체하지 않습니다.
@@ -261,7 +261,7 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
 3.  **파일 경로 검증(`resolveWithinWorkspace`)**
     *   Task output mode가 `file`일 때, 그리고 `writeFile` / `appendFile`의 `path`와 즐겨찾기 항목 경로에 대해, 치환 결과를 `path.resolve` → `path.relative(root, resolved)` 순으로 검사해 워크스페이스 루트 외부 쓰기를 거부한다.
     *   상대 경로(`"report.txt"`, `"build/out.log"` 등)는 `process.cwd()`가 아니라 실행 중인 액션의 워크스페이스 폴더(`defaultWorkspace`) 기준으로 resolve한다. 이를 위해 `resolveWithinWorkspace(targetPath, roots, baseDir)` 시그니처의 3번째 인자로 액션 워크스페이스를 전달한다.
-    *   **`zip` / `unzip`은 이 격리에서 의도적으로 제외된다.** 두 태스크는 `fileDialog` / `folderDialog`로 사용자가 **런타임에 고른** 위치를 그대로 다루는 것이 설계이고(번들 예제 `media/actions_example.json`의 zip 액션이 고른 폴더를 그 자리에서 압축한다), 워크스페이스로 묶으면 그 흐름 자체가 성립하지 않는다. 대신 다른 층으로 방어한다 — 추출은 zip-slip·심볼릭/하드 링크·크기/개수 상한(`archiveUtils.ts`)으로, 생성은 소스 루트 밖을 가리키는 링크 제외로 막는다.
+    *   **`zip` / `unzip`은 이 격리에서 의도적으로 제외된다.** 두 태스크는 `fileDialog` / `folderDialog` / `pathDialog`로 사용자가 **런타임에 고른** 위치를 그대로 다루는 것이 설계이고(번들 예제 `media/actions_example.json`의 zip 액션이 고른 폴더를 그 자리에서 압축한다), 워크스페이스로 묶으면 그 흐름 자체가 성립하지 않는다. 대신 다른 층으로 방어한다 — 추출은 zip-slip·심볼릭/하드 링크·크기/개수 상한(`archiveUtils.ts`)으로, 생성은 소스 루트 밖을 가리키는 링크 제외로 막는다.
     *   다만 **상대 경로의 기준점은 두 엔진이 같아야 한다.** 내장 엔진은 cwd 개념이 없어 `path.resolve`가 extension host의 `process.cwd()`(= VS Code를 띄운 위치)를 쓰는 반면 외부 `tool` 경로는 자식 프로세스의 cwd를 쓰므로, 같은 태스크가 `tool` 유무로 다른 위치에 파일을 만들었다. `resolveBuiltinArchivePath(targetPath, baseDir)`가 내장 엔진 호출 직전에 `task.cwd` → 워크스페이스 순으로 기준점을 맞춘다(격리는 하지 않는다). 반환하는 `${zip.archivePath}` / `${unzip.outputDir}`도 해석된 절대 경로다.
     *   실행 로그는 사용자가 별도 경로를 지정할 수 없고 고정된 `.taskhub/logs/`에만 쓴다. 중간 디렉터리가 심볼릭 링크이거나 실제 경로가 워크스페이스 밖으로 나가면 쓰기를 거부한다. 파일은 exclusive 임시 파일에 먼저 쓰고 `fsync` 후 rename하며, 쓰기·회전 오류는 액션 결과를 바꾸지 않는다.
 4.  **쉘 인자 이스케이프 / 실행 경로 선택**

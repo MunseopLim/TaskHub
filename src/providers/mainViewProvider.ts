@@ -86,6 +86,7 @@ function defaultActionIcon(action: PipelineAction | undefined): vscode.ThemeIcon
             return new vscode.ThemeIcon('terminal');
         case 'fileDialog':
         case 'folderDialog':
+        case 'pathDialog':
             return new vscode.ThemeIcon('folder-opened');
         default:
             return new vscode.ThemeIcon('gear');

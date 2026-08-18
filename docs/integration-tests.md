@@ -56,6 +56,7 @@
 | IT-108 | quickPick `itemsFromCommand` + `itemsExclude` | 셸 명령 stdout의 각 비어 있지 않은 줄이 항목이 되고, `itemsExclude`가 지정 줄(`origin/HEAD`)을 제거하며, 선택값이 downstream에 전달됨 |
 | IT-179 | quickPick `itemsFromCommandFormat: "jsonl"` | 동적 JSONL 항목의 `id`·표시 정보·배열 `value`가 보존되고, `itemsExclude`가 id를 제거하며 bare 참조가 실제 argv 여러 칸으로 전달됨 |
 | IT-109 | inputBox `extractPattern` + `validatePattern` | 보간된 `value`(브랜치 이름)에서 Jira 키를 추출해 기본값으로 채우고, `validateInput`이 잘못된 형식은 거부·정상 형식은 통과시킴 |
+| IT-180 | QuickPick → 동적 `pathDialog.mode` | `file`/`folder` value를 `${kind}`로 mode에 연결해 when·중복 dialog 없이 올바른 네이티브 선택기를 열고 하나의 `${target.path}`로 소비 |
 | IT-017 | confirm 취소 중단 | 사용자가 취소한 confirm task가 pipeline을 중단하고 이후 task를 실행하지 않음 |
 | IT-033 | envPick 목록 노출·선택 전달 | 사용자 셸이 노출하는 이름만 정렬되어 QuickPick 에 나오고 (`VSCODE_*` 등 확장 호스트 전용 변수는 필터링), 선택된 이름이 downstream 에 전달됨 |
 | IT-033b | envPick 실제 프로브가 확장 호스트 전용 변수를 걸러낸다 (stub 없음) | IT-033 은 목록을 stub 으로 주입한다. 이쪽은 **실제 셸을 띄워** 이름을 수집하므로, 필터가 실전 입력에도 듣는지를 본다 |

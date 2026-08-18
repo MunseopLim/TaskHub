@@ -349,6 +349,21 @@ suite('buildPreviewReport', () => {
         assert.match(report, /\$\{missing\.value\}/);
     });
 
+    test('pathDialog의 동적 mode와 결과 키를 미리보기에 반영한다', () => {
+        const item: ActionItem = {
+            id: 'a.path-dialog', title: 'T', action: {
+                description: 'x', tasks: [
+                    { id: 'kind', type: 'quickPick', items: ['file', 'folder'] },
+                    { id: 'target', type: 'pathDialog', mode: '${kind.value}' } as any,
+                    { id: 'run', type: 'command', command: 'tool', args: ['${target.path}', '${target.paths}'] },
+                ],
+            },
+        };
+        const report = buildPreviewReport(item, baseOptions());
+        assert.match(report, /mode:\s+<quickPick:kind:value>/);
+        assert.doesNotMatch(report.split('Summary:')[1], /\$\{target\.(?:path|paths)\}/);
+    });
+
     test('quickPick 기본값·직접 입력·선택 기억 설정을 리포트에 보여 준다', () => {
         const options = baseOptions();
         const report = buildPreviewReport({

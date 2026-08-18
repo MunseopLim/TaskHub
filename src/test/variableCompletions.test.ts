@@ -494,7 +494,7 @@ suite('variableCompletions', () => {
          * 액션에서 만들어지지도 않는 `${pick.version}` 이 제안됐다.
          */
         test('문자열 출력이 없는 타입의 capture 이름은 제안하지 않는다', () => {
-            for (const type of ['fileDialog', 'folderDialog']) {
+            for (const type of ['fileDialog', 'folderDialog', 'pathDialog']) {
                 const fixture = `[
   { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
     { "id": "pick", "type": "${type}",

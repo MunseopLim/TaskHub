@@ -1442,7 +1442,7 @@ export function commandNeedsShellSyntax(command: string): boolean {
  * a "Test" template, both emitting one `shell` task) are deliberately absent
  * — they would pad the picker without teaching anything, and the command
  * placeholder already carries those examples. What the list is really for is
- * exposing the interactive task types (`fileDialog` / `folderDialog` /
+ * exposing the interactive task types (`fileDialog` / `folderDialog` / `pathDialog` /
  * `inputBox` / `quickPick`) and multi-task pipelines, which a first-time
  * user has no other way to discover short of reading the docs.
  */
@@ -2953,7 +2953,7 @@ export class ActionStoppedError extends Error {
 
 /**
  * 사용자가 대화형 태스크의 프롬프트를 **의도적으로 닫았을 때** 던진다
- * (`fileDialog`/`folderDialog`/`inputBox`/`quickPick`/`envPick`/`confirm` 에서
+ * (`fileDialog`/`folderDialog`/`pathDialog`/`inputBox`/`quickPick`/`envPick`/`confirm` 에서
  * Escape 또는 Cancel).
  *
  * **태스크 수준에서는 여전히 실패다.** 그래야 `continueOnError: true` 가 문서에
@@ -4777,7 +4777,7 @@ async function persistRunLog(
  * Optional pipeline-execution side channels for replay/record support.
  *
  *   - `presetInputs`: when a key matches a task id, the matching interactive
- *     task (inputBox / quickPick / envPick / fileDialog / folderDialog /
+ *     task (inputBox / quickPick / envPick / fileDialog / folderDialog / pathDialog /
  *     confirm) is short-circuited and the saved value becomes its result —
  *     no dialog is opened. Other task types ignore this map. Used by
  *     `taskhub.rerunFromHistoryWithInputs`.
@@ -6390,7 +6390,7 @@ export async function executeAction(
  * 조용히 하나만 처리하면 "여러 개를 골랐던 실행"이 소리 없이 다른 일을 한다.
  */
 export function backfillDialogArrays(task: any, saved: any): any {
-    if (task?.type !== 'fileDialog' && task?.type !== 'folderDialog') { return saved; }
+    if (task?.type !== 'fileDialog' && task?.type !== 'folderDialog' && task?.type !== 'pathDialog') { return saved; }
     if (!saved || typeof saved !== 'object' || Array.isArray(saved)) { return saved; }
     if (Array.isArray(saved.paths)) { return saved; }
     if (typeof saved.path !== 'string' || saved.path.length === 0) { return saved; }
@@ -6498,7 +6498,8 @@ export function savedInputStillValid(task: any, saved: any, context?: any): bool
     // 옛 형식이면서 다중 선택인 다이얼로그는 복원할 수 없다 ({@link backfillDialogArrays}).
     // `value` 검사보다 앞에 둔다 — 다이얼로그 결과에는 `value` 가 없어서
     // 아래 조기 반환에 걸리면 이 검사에 닿지 못한다.
-    if ((task?.type === 'fileDialog' || task?.type === 'folderDialog') && task?.options?.canSelectMany === true) {
+    if ((task?.type === 'fileDialog' || task?.type === 'folderDialog' || task?.type === 'pathDialog')
+        && task?.options?.canSelectMany === true) {
         if (!saved || typeof saved !== 'object' || !Array.isArray((saved as any).paths)) { return false; }
     }
     // quickPick 은 **label 로** 검사한다. `value` 는 항목의 매핑 값이라 목록에
@@ -6762,6 +6763,16 @@ async function executeSingleTask(
             break;
         case 'folderDialog':
             result = await handleFolderDialog({ ...task, actionId });
+            throwIfTaskInactive(scope);
+            break;
+        case 'pathDialog':
+            result = await handlePathDialog({
+                ...task,
+                actionId,
+                mode: typeof task.mode === 'string'
+                    ? interpolatePipelineVariables(task.mode, interpolationContext)
+                    : task.mode,
+            });
             throwIfTaskInactive(scope);
             break;
         case 'inputBox':
@@ -7841,6 +7852,39 @@ export async function handleFolderDialog(task: any): Promise<FileDialogResult> {
         paths: folderUri.map(uri => uri.fsPath),
         names: folderUri.map(uri => path.basename(uri.fsPath)),
         count: folderUri.length,
+    };
+}
+
+/**
+ * 파일/폴더 선택을 한 태스크로 합친 대화상자.
+ *
+ * `mode`는 실행기가 앞 태스크 결과로 보간한 뒤 넘긴다. 세 값 외에는 실제
+ * 대화상자를 열기 전에 거부하고 오류에 해석값을 싣지 않는다 — 환경변수나
+ * password에서 파생된 잘못된 값이 알림에 노출될 수 있기 때문이다.
+ */
+export async function handlePathDialog(task: any): Promise<FileDialogResult> {
+    const mode = task.mode;
+    if (mode !== 'file' && mode !== 'folder' && mode !== 'both') {
+        throw new Error(t(
+            `Task '${task.id}'의 pathDialog mode는 'file', 'folder', 'both' 중 하나로 해석되어야 합니다.`,
+            `Task '${task.id}' pathDialog mode must resolve to 'file', 'folder', or 'both'.`
+        ));
+    }
+    const options: vscode.OpenDialogOptions = {
+        ...(task.options || {}),
+        defaultUri: coerceDefaultUri(task.options?.defaultUri),
+        canSelectFiles: mode === 'file' || mode === 'both',
+        canSelectFolders: mode === 'folder' || mode === 'both',
+    };
+    const picked = await showOpenDialogWithMemory(taskDialogScope('path', task), options);
+    if (!picked || !picked[0]) {
+        throw new PromptCancelledError(t('경로 선택을 취소했습니다.', 'Path selection was canceled.'));
+    }
+    return {
+        ...parsePathInfo(picked[0].fsPath),
+        paths: picked.map(uri => uri.fsPath),
+        names: picked.map(uri => path.basename(uri.fsPath)),
+        count: picked.length,
     };
 }
 

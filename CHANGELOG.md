@@ -6,6 +6,22 @@
 보안·데이터 손실 수정과 사용자 영향만 남긴다. 테스트를 적는다면 최종 수치만 기록한다.
 -->
 
+## [0.7.38] - 2026-08-19
+
+### 추가 — 선택값으로 파일/폴더 대화상자 전환
+
+- 새 `pathDialog` 태스크는 `mode`에 `file`·`folder`·`both` 또는 그 값으로 해석되는 정확한 변수
+  참조를 받는다. QuickPick의 value를 `${kind}`로 바로 연결하면 fileDialog/folderDialog 태스크 두 개와
+  `when` 조건 두 개를 만들지 않고 하나의 `${target.path}`로 결과를 소비할 수 있다.
+- `options.canSelectMany`와 기존 경로 결과(`path`·`paths`·`name`·`names`·`count` 등)를 그대로 지원한다.
+  mode가 파일/폴더 허용 옵션보다 우선하며 `both`는 한 대화상자에서 둘 다 허용한다.
+- Preview·Doctor·변수 자동완성·History 입력 재사용·prompt 직렬화·다이얼로그 위치 기억이 새 타입을
+  기존 파일/폴더 선택기와 같은 interactive 경계로 처리한다. 잘못된 동적 mode 값은 실제 값을 오류에
+  노출하지 않고 대화상자를 열기 전에 거부한다.
+
+**테스트**: 세 mode의 실제 OpenDialog 옵션·QuickPick→pathDialog 통합 흐름·스키마·Preview·Doctor·
+취소/기억 경계를 포함해 최종 3065 passing / 3 pending.
+
 ## [0.7.37] - 2026-08-19
 
 ### 추가 — 동적 QuickPick의 label/value 매핑

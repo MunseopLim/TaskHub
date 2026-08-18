@@ -4164,6 +4164,41 @@ suite('actions.schema.json — 다이얼로그 options', () => {
     });
 });
 
+suite('actions.schema.json — pathDialog', () => {
+    const taskSchema: any = (actionSchema as any).definitions?.Task;
+    const properties: any = taskSchema?.properties;
+    const wrap = (task: any) => [{
+        id: 'a.path', title: 'path', action: { description: 'd', tasks: [task] },
+    }];
+
+    test('type과 mode가 제안되고 literal·변수 mode를 허용한다', () => {
+        assert.ok(properties?.type?.enum?.includes('pathDialog'));
+        assert.ok(properties?.mode?.description?.includes('pathDialog'));
+        const v = compileValidator();
+        assert.strictEqual(v(wrap({ id: 'pick', type: 'pathDialog', mode: 'file' })), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap({ id: 'pick', type: 'pathDialog', mode: '${kind}' })), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap({ id: 'pick', type: 'pathDialog' })), false, 'mode 없는 pathDialog가 통과했다');
+        assert.strictEqual(v(wrap({ id: 'pick', type: 'pathDialog', mode: 'invalid' })), false, '잘못된 mode가 통과했다');
+    });
+
+    test('동적 mode 참조와 path 결과 키를 Doctor가 정상 흐름으로 이해한다', () => {
+        const actions = [{
+            id: 'a.path', title: 'path', action: {
+                description: 'd', tasks: [
+                    {
+                        id: 'kind', type: 'quickPick',
+                        items: [{ label: '파일', value: 'file' }, { label: '폴더', value: 'folder' }],
+                    },
+                    { id: 'target', type: 'pathDialog', mode: '${kind.value}' },
+                    { id: 'run', type: 'command', command: 'tool', args: ['${target.path}', '${target.paths}'] },
+                ],
+            },
+        }];
+        const findings = runDoctor([makeInput(actions)], compileValidator());
+        assert.ok(!findings.some(finding => finding.code === 'variable.unresolved'), JSON.stringify(findings));
+    });
+});
+
 suite('actions.schema.json — quickPick 편의 옵션', () => {
     const taskSchema: any = (actionSchema as any).definitions?.Task;
     const properties: any = taskSchema?.properties;

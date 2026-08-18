@@ -84,7 +84,7 @@ export interface HistoryEntry {
     tool?: HistoryToolMetadata;
     /**
      * Per-task captured input values from interactive tasks (inputBox /
-     * quickPick / envPick / fileDialog / folderDialog / confirm), keyed by
+     * quickPick / envPick / fileDialog / folderDialog / pathDialog / confirm), keyed by
      * task id. Replay-with-saved-inputs (`taskhub.rerunFromHistoryWithInputs`)
      * uses these values as preset task results so the dialogs are skipped.
      * Absent for entries written before this field existed and for actions

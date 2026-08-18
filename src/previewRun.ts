@@ -94,7 +94,8 @@ export function simulateTaskResult(task: Task): SimulatedResult {
     }
     switch (task.type) {
         case 'fileDialog':
-        case 'folderDialog': {
+        case 'folderDialog':
+        case 'pathDialog': {
             const base: SimulatedResult = {
                 path: placeholder(task.type, task.id, 'path'),
                 dir: placeholder(task.type, task.id, 'dir'),
@@ -1271,12 +1272,22 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 break;
             }
             case 'fileDialog':
-            case 'folderDialog': {
+            case 'folderDialog':
+            case 'pathDialog': {
                 const title = task.options?.title;
                 const openLabel = task.options?.openLabel;
                 if (title) { lines.push(`  title:     ${title}`); }
                 if (openLabel) { lines.push(`  openLabel: ${openLabel}`); }
-                lines.push(`  (user will pick a ${task.type === 'folderDialog' ? 'folder' : 'file'} at runtime)`);
+                if (task.type === 'pathDialog') {
+                    const mode = typeof task.mode === 'string'
+                        ? interpolatePipelineVariables(task.mode, interpolationContext)
+                        : '(missing mode)';
+                    lines.push(`  mode:      ${mode}`);
+                    lines.push(`  (user will pick according to this file/folder mode at runtime)`);
+                    interpolated.push(mode);
+                } else {
+                    lines.push(`  (user will pick a ${task.type === 'folderDialog' ? 'folder' : 'file'} at runtime)`);
+                }
                 break;
             }
             case 'zip':

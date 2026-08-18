@@ -27,7 +27,7 @@ import * as path from 'path';
 /**
  * 0.6.11~0.6.32 의 저장 형식: scope 하나당 키 하나 (`dialogLocation:<scope>`).
  *
- * `fileDialog` / `folderDialog` 태스크의 scope 는 액션 id 와 태스크 id 로
+ * `fileDialog` / `folderDialog` / `pathDialog` 태스크의 scope 는 액션 id 와 태스크 id 로
  * 만들어지므로(`taskDialogScope`), 액션 이름을 바꾸거나 지울 때마다 옛 키가
  * 남았다. 정리 경로가 없어 **globalState 에 영구히 쌓였고**, 0.6.23 의 키 형식
  * 변경(액션 id 가 빠져 있던 버그 수정)으로 이미 한 세대가 고아가 됐다.
@@ -42,7 +42,7 @@ const STATE_KEY = 'taskhub.dialogLocations';
 /**
  * 맵에 담아 둘 scope 최대 개수.
  *
- * 고정 scope 는 10개 남짓이고 나머지는 `fileDialog` / `folderDialog` 태스크
+ * 고정 scope 는 10개 남짓이고 나머지는 경로 선택 다이얼로그 태스크
  * 단위로 생긴다. 100개면 실제 사용에서 넘길 일이 거의 없으면서, 액션을
  * 반복해서 만들고 지우는 프로젝트에서도 저장소가 무한히 자라지 않는다.
  */
@@ -115,10 +115,10 @@ export const DIALOG_SCOPE = {
 } as const;
 
 /**
- * `fileDialog` / `folderDialog` 태스크용 scope. 한 액션 안에서도 태스크마다
+ * `fileDialog` / `folderDialog` / `pathDialog` 태스크용 scope. 한 액션 안에서도 태스크마다
  * 고르는 대상이 다르므로(펌웨어 파일 vs 출력 폴더) 태스크 단위로 분리한다.
  */
-export function taskDialogScope(kind: 'file' | 'folder', task: { id?: unknown, actionId?: unknown }): string {
+export function taskDialogScope(kind: 'file' | 'folder' | 'path', task: { id?: unknown, actionId?: unknown }): string {
     const actionId = typeof task.actionId === 'string' ? task.actionId : '';
     const taskId = typeof task.id === 'string' ? task.id : '';
     return `task.${kind}Dialog:${actionId}/${taskId}`;

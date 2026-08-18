@@ -71,7 +71,7 @@
         "type": {
           "type": "string",
           "description": "The type of the task to execute.",
-          "enum": ["shell", "command", "fileDialog", "folderDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "envPick", "confirm", "writeFile", "appendFile"]
+          "enum": ["shell", "command", "fileDialog", "folderDialog", "pathDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "envPick", "confirm", "writeFile", "appendFile"]
         },
         "command": {
           "oneOf": [
@@ -108,14 +108,27 @@
           "enum": ["always", "silent", "never"],
           "description": "Controls terminal visibility for 'shell' type tasks."
         },
+        "mode": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": ["file", "folder", "both"]
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "description": "For 'pathDialog': what may be selected. Use 'file', 'folder', or 'both', or an exact variable reference such as '${kind}' that resolves to one of them."
+        },
         "options": {
           "type": "object",
-          "description": "Options for 'fileDialog' or 'folderDialog' types, based on VS Code's OpenDialogOptions. Keys not listed here are passed through to VS Code unchanged.",
+          "description": "Options for 'fileDialog', 'folderDialog', or 'pathDialog', based on VS Code's OpenDialogOptions. Keys not listed here are passed through to VS Code unchanged. pathDialog.mode overrides canSelectFiles/canSelectFolders.",
           "properties": {
             "canSelectMany": {
               "type": "boolean",
               "default": false,
-              "description": "Allow picking several files (fileDialog) or folders (folderDialog). Everything picked is exposed as ${taskId.paths} (array of absolute paths), ${taskId.names} (array of base names) and ${taskId.count}. The single-value references (${taskId.path}, .dir, .name, ...) keep pointing at the first item. In an 'args' array, an element that is exactly \"${taskId.paths}\" expands into one argument per item; anywhere else the array is joined with spaces."
+              "description": "Allow picking several files/folders. Everything picked is exposed as ${taskId.paths} (array of absolute paths), ${taskId.names} (array of base names) and ${taskId.count}. The single-value references (${taskId.path}, .dir, .name, ...) keep pointing at the first item. In an 'args' array, an element that is exactly \"${taskId.paths}\" expands into one argument per item; anywhere else the array is joined with spaces."
             },
             "openLabel": {
               "type": "string",
@@ -139,11 +152,11 @@
             },
             "canSelectFiles": {
               "type": "boolean",
-              "description": "Whether files can be picked. Leave unset: fileDialog already allows files, and folderDialog forces this to false."
+              "description": "Whether files can be picked. Leave unset: fileDialog already allows files, folderDialog forces this to false, and pathDialog derives it from mode."
             },
             "canSelectFolders": {
               "type": "boolean",
-              "description": "Whether folders can be picked. Leave unset and use type 'folderDialog' instead, which forces this to true."
+              "description": "Whether folders can be picked. Leave unset and use folderDialog, or pathDialog with a mode that can select folders."
             }
           }
         },
@@ -345,7 +358,7 @@
         },
         "archive": {
           "type": "string",
-          "description": "For 'unzip' tasks, specifies the archive to extract. For 'zip' tasks, specifies the output archive path. Supports interpolation. Relative paths resolve against 'cwd' (default: the action's workspace folder). Unlike 'writeFile'/'appendFile', zip and unzip paths are NOT restricted to the workspace: they are meant to work on locations the user picks at runtime via fileDialog/folderDialog."
+          "description": "For 'unzip' tasks, specifies the archive to extract. For 'zip' tasks, specifies the output archive path. Supports interpolation. Relative paths resolve against 'cwd' (default: the action's workspace folder). Unlike 'writeFile'/'appendFile', zip and unzip paths are NOT restricted to the workspace: they are meant to work on locations the user picks at runtime via fileDialog/folderDialog/pathDialog."
         },
         "destination": {
           "type": "string",
@@ -482,12 +495,21 @@
           }
         },
         {
+          "if": {
+            "properties": { "type": { "const": "pathDialog" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["mode"]
+          }
+        },
+        {
           "if": { "required": ["forEach"] },
           "then": {
             "properties": {
               "type": {
                 "not": {
-                  "enum": ["inputBox", "quickPick", "envPick", "fileDialog", "folderDialog", "confirm"]
+                  "enum": ["inputBox", "quickPick", "envPick", "fileDialog", "folderDialog", "pathDialog", "confirm"]
                 }
               },
               "isOneShot": { "not": { "const": true } }

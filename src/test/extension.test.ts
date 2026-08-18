@@ -8,6 +8,7 @@ import {
 	isOnlyPromptCancellation,
 	handleFileDialog,
 	handleFolderDialog,
+	handlePathDialog,
 	handleQuickPick,
 	handleEnvPick,
 	PromptCancelledError,
@@ -866,6 +867,19 @@ suite('Extension Test Suite', () => {
 				(vscode.window as any).showOpenDialog = original;
 			}
 		});
+
+		test('pathDialog 취소', async () => {
+			const original = vscode.window.showOpenDialog;
+			(vscode.window as any).showOpenDialog = async () => undefined;
+			try {
+				await assertPromptCancelled(
+					() => handlePathDialog({ id: 'pick', mode: 'both' }),
+					'pathDialog'
+				);
+			} finally {
+				(vscode.window as any).showOpenDialog = original;
+			}
+		});
 	});
 
 	/**
@@ -940,6 +954,38 @@ suite('Extension Test Suite', () => {
 				handleFolderDialog({ id: 'pick', options: { canSelectMany: true } }));
 			assert.deepStrictEqual(Object.keys(file).sort(), Object.keys(folder).sort(),
 				'두 다이얼로그의 결과 모양이 다르면 문서가 둘 중 하나에 대해 거짓말을 하게 된다');
+		});
+
+		test('pathDialog mode가 파일/폴더 선택 옵션을 정확히 강제한다', async () => {
+			const seen: vscode.OpenDialogOptions[] = [];
+			const original = vscode.window.showOpenDialog;
+			(vscode.window as any).showOpenDialog = async (options: vscode.OpenDialogOptions) => {
+				seen.push(options);
+				return uris('/tmp/th-path');
+			};
+			try {
+				await handlePathDialog({ id: 'file', mode: 'file', options: { canSelectFolders: true } });
+				await handlePathDialog({ id: 'folder', mode: 'folder', options: { canSelectFiles: true } });
+				await handlePathDialog({ id: 'both', mode: 'both' });
+			} finally {
+				(vscode.window as any).showOpenDialog = original;
+			}
+			assert.deepStrictEqual(
+				seen.map(options => [options.canSelectFiles, options.canSelectFolders]),
+				[[true, false], [false, true], [true, true]]
+			);
+		});
+
+		test('pathDialog의 잘못된 동적 mode는 값을 노출하지 않고 열기 전에 거부한다', async () => {
+			const sensitiveMode = 'top-secret-mode';
+			await assert.rejects(
+				() => handlePathDialog({ id: 'pick', mode: sensitiveMode }),
+				(error: any) => {
+					assert.match(error.message, /file.*folder.*both/);
+					assert.ok(!error.message.includes(sensitiveMode));
+					return true;
+				}
+			);
 		});
 	});
 
@@ -3984,7 +4030,7 @@ suite('Extension Test Suite', () => {
 		// Pins which task types contribute to history `inputs` for replay
 		// (and which are deliberately excluded — `password: true` opts out).
 		test('returns true for interactive task types', () => {
-			const types = ['inputBox', 'quickPick', 'envPick', 'fileDialog', 'folderDialog', 'confirm'] as const;
+			const types = ['inputBox', 'quickPick', 'envPick', 'fileDialog', 'folderDialog', 'pathDialog', 'confirm'] as const;
 			for (const type of types) {
 				assert.strictEqual(
 					shouldRecordTaskInput({ id: 't', type } as any),

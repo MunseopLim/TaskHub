@@ -225,7 +225,7 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 | 분류 | 타입 |
 | --- | --- |
 | 명령 실행 | `shell`, `command` |
-| 사용자 입력 | `fileDialog`, `folderDialog`, `inputBox`, `quickPick`, `envPick`, `confirm` |
+| 사용자 입력 | `fileDialog`, `folderDialog`, `pathDialog`, `inputBox`, `quickPick`, `envPick`, `confirm` |
 | 파일·아카이브 | `writeFile`, `appendFile`, `zip`, `unzip` |
 | 값 변환 | `stringManipulation` |
 
@@ -381,6 +381,26 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 ### `folderDialog` 태스크
 
 폴더 선택 다이얼로그를 열며 `options.canSelectMany`를 지원합니다. 결과 키는 `fileDialog`와 같지만 `path`·`paths`는 선택한 폴더 자체, `dir`은 첫 폴더의 부모입니다. 취소와 다중 선택 argv 규칙도 동일합니다.
+
+### `pathDialog` 태스크
+
+QuickPick 같은 앞 태스크의 선택에 따라 파일 또는 폴더 다이얼로그를 열어야 할 때 사용합니다. `mode`는
+`file`·`folder`·`both` 또는 그 값으로 해석되는 정확한 변수 참조를 받습니다. 결과 키와 다중 선택 규칙은
+`fileDialog`와 같습니다. mode가 `options.canSelectFiles`·`canSelectFolders`보다 우선합니다.
+
+```jsonc
+{ "id": "kind", "type": "quickPick", "items": [
+    { "label": "파일 선택", "value": "file" },
+    { "label": "폴더 선택", "value": "folder" }
+] },
+{ "id": "target", "type": "pathDialog", "mode": "${kind}" },
+{ "id": "run", "type": "command", "command": "python",
+  "args": ["test.py", "${target.path}"] }
+```
+
+기존 방식처럼 `fileDialog`와 `folderDialog`를 각각 만들고 `when`을 두 번 쓸 필요가 없습니다. `both`는
+한 대화상자에서 파일과 폴더를 모두 허용합니다. 해석 결과가 세 값 중 하나가 아니면 대화상자를 열기 전에
+오류로 중단하며, 민감 입력에서 파생된 잘못된 mode 값은 오류 문구에 표시하지 않습니다.
 
 ### `zip` 태스크
 
@@ -730,7 +750,7 @@ Actions 뷰 제목 표시줄의 **+**에서 시작합니다. 필수 값만 받�
 ### 대화형 태스크를 기다리는 중의 중지
 
 - `inputBox`와 `quickPick`은 즉시 닫힙니다.
-- OS 네이티브 `fileDialog`·`folderDialog`는 강제로 닫을 수 없으므로, 사용자가 대화상자를 끝내는 즉시 파이프라인을 중단합니다.
+- OS 네이티브 `fileDialog`·`folderDialog`·`pathDialog`는 강제로 닫을 수 없으므로, 사용자가 대화상자를 끝내는 즉시 파이프라인을 중단합니다.
 - **TaskHub 터미널 닫기**(`taskhub.closeAllTerminals`)는 `TaskHub: ` 접두사의 터미널만 닫으며 액션 실행 상태를 바꾸지 않습니다.
 
 실행 중지와 터미널 닫기는 별도 명령입니다. 예전의 `taskhub.terminateAllActions`는 기존 단축키 호환을 위해 두 동작을 차례로 수행하지만 메뉴와 명령 팔레트에는 노출되지 않습니다.
@@ -755,7 +775,7 @@ History 패널은 액션 실행과 Memory Map·Hex Editor·JSON Editor 열람을
 
 - 상태는 `running`·`success`·`failure`·`cancelled`이며, 취소는 사용자가 누른 Stop과 닫은 프롬프트를 구분합니다. 완료 항목은 실행 시각과 소요 시간 배지를 표시합니다.
 - 액션 항목을 클릭하면 다시 실행하고, 도구 항목을 클릭하면 저장된 파일과 열기 옵션으로 다시 엽니다.
-- `inputBox`·`quickPick`·`envPick`·`fileDialog`·`folderDialog`·`confirm` 결과가 있으면 재실행에 사용합니다. 현재 검증 규칙이나 선택지와 맞지 않는 값만 다시 묻고, `password: true`와 환경변수·클립보드·선택 텍스트에서 파생된 입력은 저장하지 않습니다.
+- `inputBox`·`quickPick`·`envPick`·`fileDialog`·`folderDialog`·`pathDialog`·`confirm` 결과가 있으면 재실행에 사용합니다. 현재 검증 규칙이나 선택지와 맞지 않는 값만 다시 묻고, `password: true`와 환경변수·클립보드·선택 텍스트에서 파생된 입력은 저장하지 않습니다.
 - 반복해서 쓸 입력 조합은 History 항목을 우클릭해 **입력값을 프로필로 저장…**으로 이름 붙입니다. 프로필은 팀 파일이 아닌 이 워크스페이스의 `workspaceState`에만 남으며, 액션 우클릭의 **입력 프로필로 실행…**과 **입력 프로필 관리…**에서 실행·이름 변경·삭제합니다. 삭제된 액션의 프로필은 Command Palette의 **TaskHub: 입력 프로필 관리…**에서 정리할 수 있습니다.
 - 프로필은 저장 당시의 task ID와 type을 현재 액션에 대조하고 기존 입력 검증도 다시 적용합니다. 바뀌었거나 검증할 수 없는 값은 *오래됨*으로 표시하며, 사용자 확인 없이 버리지 않습니다. 확인하고 실행하면 검증된 값만 재사용하고 나머지는 다시 묻습니다. 0.7.27 이전 History에는 type 서명이 없으므로 거기서 만든 프로필은 첫 실행에서 값을 다시 묻습니다.
 - 비밀번호 입력은 프로필에도 저장하지 않습니다. 프로필은 하나당 128KB, 워크스페이스당 50개·총 2MB로 제한됩니다.
@@ -1541,7 +1561,7 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `dependsOn.self` | error | task의 `dependsOn`에 자기 자신이 포함됨. |
 | `dependsOn.missing` | error | `dependsOn`이 같은 액션에 존재하지 않는 task id를 가리킴. |
 | `dependsOn.cycle` | error | task 간 `dependsOn` 그래프에 순환이 있음. 출력 메시지에 순환 경로 포함. |
-| `parallel.interactive` | warning | `inputBox` / `quickPick` / `envPick` / `confirm` / `fileDialog` / `folderDialog` 같은 interactive task에 `parallel: true`가 붙음. 런타임은 prompt mutex로 다이얼로그를 강제 직렬화하므로 병렬 표시는 *post-prompt* 처리에만 적용되며, 사실상 효과가 없는 경우가 대부분. |
+| `parallel.interactive` | warning | `inputBox` / `quickPick` / `envPick` / `confirm` / `fileDialog` / `folderDialog` / `pathDialog` 같은 interactive task에 `parallel: true`가 붙음. 런타임은 prompt mutex로 다이얼로그를 강제 직렬화하므로 병렬 표시는 *post-prompt* 처리에만 적용되며, 사실상 효과가 없는 경우가 대부분. |
 | `command.nested-interpreter` | warning | `command` 태스크가 `cmd /c`, `sh -c`, `powershell -Command`처럼 스크립트를 다시 해석하는 인터프리터를 호출하고 그 스크립트 자리에 `${…}` 값을 넣음. argv 인용은 중첩 인터프리터 앞에서 끝나므로 값을 직접 argv나 `env`로 전달해야 합니다. 안전한 고정 목록·엄격한 `validatePattern`·`--` 뒤 데이터 인자는 제한적으로 제외하지만, 명령·변수 대입·리다이렉션·스크립트 블록·옵션이 될 수 있는 자리는 보수적으로 경고합니다. |
 | `command.dynamic-interpreter` | warning | `command` 태스크가 **실행 파일(또는 스크립트 스위치)을 보간값으로 정해**, 무엇이 실행될지 정적으로 알 수 없음. 그것이 셸(`sh -c` · `cmd /c` · `powershell -Command`)로 풀리면 같은 argv 의 다른 보간값이 스크립트 텍스트가 되어 문법으로 다시 읽힙니다 — `command.nested-interpreter` 가 잡는 것과 같은 위험인데, 인터프리터 이름이 참조라서 그 검사에 닿지 못하는 경우입니다. 고정 `quickPick` 처럼 값 집합을 열거할 수 있으면 열거해 실제로 판정하므로 이 경고 대신 `command.nested-interpreter` 가 붙습니다. |
 | `doctor.analysis-failed` | error | 그 소스를 분석하는 도중 예외가 발생해 검사를 끝내지 못함. 소스마다 따로 분석하므로 **다른 소스의 진단은 그대로 게시**됩니다. 메시지에 예외 내용이 실립니다. |
@@ -1636,7 +1656,7 @@ task의 string 필드(`command`, `args`, `env` 값, `cwd`, `output.filePath`, `o
 
 ### 24.7. Interactive task와 `parallel: true`
 
-`inputBox` / `quickPick` / `envPick` / `confirm` / `fileDialog` / `folderDialog`에 `parallel: true`를 붙이면 Doctor가 `parallel.interactive` warning을 보고합니다. 런타임은 그 task의 실행을 거부하진 않고, 대신 **prompt mutex**로 다이얼로그를 강제 직렬화합니다 — 즉 modal 두 개가 동시에 뜨는 일은 없으며, 사실상 그 task의 "병렬" 부분은 post-prompt 처리(capture 등)에만 적용됩니다. 대부분의 경우 `parallel: true`를 빼는 게 의도와 가깝습니다.
+`inputBox` / `quickPick` / `envPick` / `confirm` / `fileDialog` / `folderDialog` / `pathDialog`에 `parallel: true`를 붙이면 Doctor가 `parallel.interactive` warning을 보고합니다. 런타임은 그 task의 실행을 거부하진 않고, 대신 **prompt mutex**로 다이얼로그를 강제 직렬화합니다 — 즉 modal 두 개가 동시에 뜨는 일은 없으며, 사실상 그 task의 "병렬" 부분은 post-prompt 처리(capture 등)에만 적용됩니다. 대부분의 경우 `parallel: true`를 빼는 게 의도와 가깝습니다.
 
 ### 24.8. 그래프 검증
 
@@ -1668,7 +1688,7 @@ TaskHub가 여는 다이얼로그는 같은 용도로 마지막에 사용한 디
 ### 25.2. 기억 단위 (scope)
 
 - Hex Viewer, JSON Editor, Memory Map의 각 입력/저장 단계, 즐겨찾기, Import/Export, Preset은 서로 다른 scope를 사용합니다.
-- `fileDialog`와 `folderDialog` 태스크는 **액션 ID + 태스크 ID** 단위로 구분합니다.
+- `fileDialog`·`folderDialog`·`pathDialog` 태스크는 **액션 ID + 태스크 ID** 단위로 구분합니다.
 - 파일 선택은 선택한 파일의 상위 디렉터리, 폴더 선택은 선택한 폴더 자체를 기억합니다.
 - 취소한 다이얼로그는 위치를 갱신하지 않습니다.
 - scope별 위치는 workspace와 global 상태에 저장해 같은 프로젝트를 우선하면서 새 프로젝트에서도 같은 용도의 마지막 위치를 사용할 수 있습니다.

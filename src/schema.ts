@@ -47,7 +47,7 @@ export interface TaskCondition {
 
 export interface Task {
     id: string;
-    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick' | 'envPick' | 'confirm' | 'writeFile' | 'appendFile';
+    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'pathDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick' | 'envPick' | 'confirm' | 'writeFile' | 'appendFile';
 
     // Properties for 'shell' and 'command' types
     command?: string | {
@@ -60,7 +60,7 @@ export interface Task {
     cwd?: string;
     revealTerminal?: 'always' | 'silent' | 'never';
 
-    // Properties for 'fileDialog' and 'folderDialog'
+    // Properties for 'fileDialog', 'folderDialog' and 'pathDialog'
     // Corresponds to vscode.OpenDialogOptions - using partial interface for type safety
     options?: {
         canSelectMany?: boolean;
@@ -71,6 +71,11 @@ export interface Task {
         filters?: Record<string, string[]>;
         title?: string;
     };
+    /**
+     * `pathDialog`에서 선택할 대상. `${kind}`처럼 앞 태스크 결과를 쓸 수 있다.
+     * `file`은 파일만, `folder`는 폴더만, `both`는 둘 다 허용한다.
+     */
+    mode?: 'file' | 'folder' | 'both' | string;
 
     // Properties for 'inputBox'
     prompt?: string;
@@ -265,7 +270,7 @@ export interface Task {
      * put the work in a separate action.
      *
      * Interactive task types (`inputBox`, `quickPick`, `envPick`,
-     * `confirm`, `fileDialog`, `folderDialog`) are flagged by TaskHub
+     * `confirm`, `fileDialog`, `folderDialog`, `pathDialog`) are flagged by TaskHub
      * Doctor when set to `parallel: true`; the runtime still
      * executes them but serializes their prompts via a UI mutex so
      * two modal dialogs never race.

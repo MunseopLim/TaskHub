@@ -83,7 +83,7 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
 /**
  * Task types whose execution shows VS Code modal / quick-pick UI
  * (`inputBox`, `quickPick`, `envPick`, `confirm`, `fileDialog`,
- * `folderDialog`). The runtime serializes these via a prompt mutex
+ * `folderDialog`, `pathDialog`). The runtime serializes these via a prompt mutex
  * when running in a parallel pipeline so two dialogs never race;
  * Doctor warns when one is set to `parallel: true`. Centralized here
  * so the executor and the linter agree on the boundary.
@@ -94,6 +94,7 @@ export const INTERACTIVE_TASK_TYPES: ReadonlySet<string> = new Set([
     'envPick',
     'fileDialog',
     'folderDialog',
+    'pathDialog',
     'confirm',
 ]);
 

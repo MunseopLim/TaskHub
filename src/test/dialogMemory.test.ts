@@ -751,6 +751,14 @@ suite('dialogMemory', () => {
             );
         });
 
+        test('pathDialog는 기존 두 타입과 겹치지 않는 scope를 쓴다', () => {
+            const task = { actionId: 'build', id: 'pick' };
+            const pathScope = taskDialogScope('path', task);
+            assert.strictEqual(pathScope, 'task.pathDialog:build/pick');
+            assert.notStrictEqual(pathScope, taskDialogScope('file', task));
+            assert.notStrictEqual(pathScope, taskDialogScope('folder', task));
+        });
+
         test('id가 없어도 안전한 문자열을 만든다', () => {
             assert.strictEqual(taskDialogScope('folder', {}), 'task.folderDialog:/');
         });
