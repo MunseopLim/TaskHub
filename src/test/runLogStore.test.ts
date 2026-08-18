@@ -61,6 +61,18 @@ suite('Action run log storage', () => {
         assert.deepStrictEqual(log.tasks[0].artifacts, [path.join(workspaceRoot, 'build', 'firmware.elf')]);
     });
 
+    test('같은 태스크의 반복 명령은 실행 보고서에 순서대로 모두 남긴다', () => {
+        const collector = new ActionRunLogCollector('foreach', 'For each', 1, [
+            { id: 'inspect', type: 'command' },
+        ]);
+        collector.startTask('inspect', 2);
+        collector.recordCommand('inspect', 'tool "one.bin"', workspaceRoot, 'captured');
+        collector.recordCommand('inspect', 'tool "two space.bin"', workspaceRoot, 'captured');
+        collector.finishTask('inspect', { status: 'success', finishedAt: 3 });
+        const log = collector.finish('success', 4);
+        assert.strictEqual(log.tasks[0].command, 'tool "one.bin"\ntool "two space.bin"');
+    });
+
     test('파일 상한을 넘는 stdout/stderr는 완전한 로그처럼 보이지 않게 표시한다', () => {
         const log = sampleLog();
         log.tasks[0].output.stdout = '가'.repeat(10_000);

@@ -343,6 +343,42 @@ suite('buildPreviewReport', () => {
         assert.match(report, /unresolved/i);
     });
 
+    test('forEach의 반복 횟수와 each 보간 결과를 보여 준다', () => {
+        const report = buildPreviewReport({
+            id: 'foreach-preview', title: 'For each',
+            action: {
+                description: 'd',
+                tasks: [
+                    { id: 'files', type: 'fileDialog', options: { canSelectMany: true } },
+                    {
+                        id: 'inspect', type: 'command', forEach: '${files.paths}',
+                        command: 'tool', args: ['${each}', '${each.number}/${each.count}'],
+                    },
+                ],
+            },
+        }, baseOptions());
+        assert.match(report, /forEach: \$\{files\.paths\}/);
+        assert.match(report, /repeats 2 time\(s\) sequentially/);
+        assert.match(report, /<fileDialog:files:paths\[0\]>/);
+        assert.match(report, /1\/2/);
+        assert.doesNotMatch(report, /unresolved variable\(s\).*each/i);
+    });
+
+    test('when에서 each를 쓰면 실행 전 차단을 미리 알린다', () => {
+        const report = buildPreviewReport({
+            id: 'foreach-when', title: 'For each when',
+            action: {
+                description: 'd',
+                tasks: [{
+                    id: 'run', type: 'command', forEach: ['a'], command: 'tool',
+                    when: { var: '${each.value}', equals: 'a' },
+                }],
+            },
+        }, baseOptions());
+        assert.match(report, /evaluated before 'forEach'/);
+        assert.match(report, /would FAIL at runtime/i);
+    });
+
     test('lists capture rules and references downstream', () => {
         const item: ActionItem = {
             id: 'a.6',

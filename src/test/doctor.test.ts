@@ -4066,3 +4066,50 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
         })), false, '다중 기본값이 단일 선택 설정을 통과했다');
     });
 });
+
+suite('forEach 설정과 Doctor', () => {
+    const wrap = (task: any) => [{
+        id: 'a.foreach', title: 'forEach', action: {
+            description: 'd',
+            tasks: [
+                { id: 'files', type: 'fileDialog', options: { canSelectMany: true } },
+                task,
+            ],
+        },
+    }];
+
+    test('배열 참조와 정적 배열은 스키마를 통과하고 interactive·one-shot은 거부한다', () => {
+        const v = compileValidator();
+        assert.strictEqual(v(wrap({
+            id: 'run', type: 'command', forEach: '${files.paths}', command: 'tool', args: ['${each}'],
+        })), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap({
+            id: 'run', type: 'command', forEach: ['a', 'b'], command: 'tool', args: ['${each.value}'],
+        })), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap({ id: 'ask', type: 'inputBox', forEach: ['a'], prompt: 'x' })), false);
+        assert.strictEqual(v(wrap({
+            id: 'run', type: 'command', forEach: ['a'], command: 'tool', isOneShot: true,
+        })), false);
+    });
+
+    test('each의 정상 키는 unresolved가 아니고 오타는 잡는다', () => {
+        const good = runDoctor([makeInput(wrap({
+            id: 'run', type: 'command', forEach: '${files.paths}', command: 'tool',
+            args: ['${each}', '${each.value}', '${each.index}', '${each.number}', '${each.count}'],
+        }))], compileValidator());
+        assert.ok(!codes(good).includes('variable.unresolved'), JSON.stringify(good, null, 2));
+
+        const bad = runDoctor([makeInput(wrap({
+            id: 'run', type: 'command', forEach: '${files.paths}', command: 'tool', args: ['${each.typo}'],
+        }))], compileValidator());
+        assert.ok(codes(bad).includes('variable.unresolved'));
+    });
+
+    test('when.var의 each 참조는 실행 전 오류로 진단한다', () => {
+        const findings = runDoctor([makeInput(wrap({
+            id: 'run', type: 'command', forEach: '${files.paths}', command: 'tool',
+            args: ['${each}'], when: { var: '${each.value}', equals: 'a' },
+        }))], compileValidator());
+        assert.ok(codes(findings).includes('foreach.when-each'), JSON.stringify(findings, null, 2));
+    });
+});

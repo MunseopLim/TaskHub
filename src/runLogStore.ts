@@ -141,7 +141,9 @@ export class ActionRunLogCollector {
     ): void {
         const record = this.byId.get(taskId);
         if (!record) { return; }
-        record.command = command;
+        // forEach는 같은 논리 태스크를 여러 번 실행한다. 실행 보고서에서 마지막
+        // 명령만 남기지 않고 실제 순서대로 모두 보이게 줄 단위로 누적한다.
+        record.command = record.command ? `${record.command}\n${command}` : command;
         if (cwd) { record.cwd = cwd; }
         record.output = { availability };
     }

@@ -613,4 +613,22 @@ suite('variableCompletions', () => {
         const got = names(doc(`{ "id": "run", "type": "shell", "command": "echo \${pick.|" }`));
         assert.deepStrictEqual(got, expected.map(k => `pick.${k}`));
     });
+
+    test('forEach 태스크 안에서만 each와 반복 메타데이터를 제안한다', () => {
+        const loop = doc(`{ "id": "run", "type": "command", "forEach": "\${pick.paths}",
+          "command": "tool", "args": ["\${each.|" ] }`);
+        assert.deepStrictEqual(names(loop), [
+            'each.value', 'each.index', 'each.number', 'each.count',
+        ]);
+
+        const plain = doc(`{ "id": "run", "type": "command", "command": "tool", "args": ["\${each.|" ] }`);
+        assert.deepStrictEqual(names(plain), []);
+
+        const source = doc(`{ "id": "run", "type": "command", "forEach": "\${each.|", "command": "tool" }`);
+        assert.deepStrictEqual(names(source), [], '반복 시작 전인 forEach 소스에서 each를 제안했다');
+
+        const condition = doc(`{ "id": "run", "type": "command", "forEach": ["a"], "command": "tool",
+          "when": { "var": "\${each.|", "equals": "a" } }`);
+        assert.deepStrictEqual(names(condition), [], 'task-level when에서 each를 제안했다');
+    });
 });

@@ -39,6 +39,10 @@ import {
     withTaskTimeout,
     withInteractivePromptLock,
     PipelineBuiltinUnavailableError,
+    FOR_EACH_MAX_ITEMS,
+    resolveForEachItems,
+    buildForEachValue,
+    inferTaskDependencies,
 } from '../pipelineUtils';
 import { buildBuiltinVariableContext } from '../builtinVariables';
 
@@ -359,6 +363,49 @@ suite('pipelineUtils — direct-import smoke suite', () => {
     test('getToolCommand quotes paths containing spaces', () => {
         const out = getToolCommand('C:/Program Files/Tool/bin.exe');
         assert.strictEqual(out, '"C:/Program Files/Tool/bin.exe"');
+    });
+});
+
+suite('forEach 값 해석', () => {
+    test('배열 참조는 공백이 든 항목의 경계를 그대로 보존한다', () => {
+        assert.deepStrictEqual(
+            resolveForEachItems('${files.paths}', { files: { paths: ['/a one.bin', '/b.bin'] } }),
+            ['/a one.bin', '/b.bin']
+        );
+    });
+
+    test('정적 배열은 항목별로 변수를 보간한다', () => {
+        assert.deepStrictEqual(
+            resolveForEachItems(['${root}/debug', '${root}/release'], { root: '/build' }),
+            ['/build/debug', '/build/release']
+        );
+    });
+
+    test('문자열·객체 결과와 상한 초과는 명확히 거부한다', () => {
+        assert.throws(() => resolveForEachItems('${one.value}', { one: { value: 'x' } }), /must resolve to an array/);
+        assert.throws(() => resolveForEachItems('${one.value}', { one: { value: [{}] } }), /item 1/);
+        assert.throws(() => resolveForEachItems('${one.value}', { one: { value: [['a', 'b']] } }), /item 1/);
+        assert.throws(
+            () => resolveForEachItems('${one.value}', { one: { value: Array(FOR_EACH_MAX_ITEMS + 1).fill('x') } }),
+            /limit is 1000/
+        );
+    });
+
+    test('each 문맥은 bare 값과 위치 메타데이터를 함께 제공한다', () => {
+        const each = buildForEachValue('firmware.bin', 1, 3);
+        assert.strictEqual(interpolatePipelineVariables('${each}', { each }), 'firmware.bin');
+        assert.strictEqual(
+            interpolatePipelineVariables('${each.value}:${each.index}:${each.number}/${each.count}', { each }),
+            'firmware.bin:1:2/3'
+        );
+    });
+
+    test('forEach 본문의 each는 task 의존성이 아니지만 소스 배열은 의존성이다', () => {
+        const deps = inferTaskDependencies({
+            id: 'flash', type: 'command', forEach: '${files.paths}',
+            command: 'tool', args: ['${each}', '${each.number}'],
+        }, new Set(['files', 'each']));
+        assert.deepStrictEqual([...deps], ['files']);
     });
 });
 

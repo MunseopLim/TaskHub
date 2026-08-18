@@ -473,6 +473,47 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 - History 재실행은 `label`로 선택지 유효성을 확인합니다 — 목록에서 사라진 선택지만 다시 묻습니다.
 - 취소 규칙은 `fileDialog`와 같습니다.
 
+### 배열 항목마다 태스크 반복 (`forEach`)
+
+여러 파일·폴더나 QuickPick 다중 선택을 **각각 따로 처리**하려면 비대화형 태스크에 `forEach`를
+추가합니다. 배열 참조는 전체가 `${…}` 하나여야 하므로 공백이 든 경로도 합쳐지거나 다시 쪼개지지
+않습니다.
+
+```jsonc
+{ "id": "files", "type": "fileDialog",
+  "options": { "canSelectMany": true } },
+{ "id": "inspect", "type": "command",
+  "forEach": "${files.paths}",
+  "command": "python",
+  "args": ["inspect.py", "${each}", "--number", "${each.number}"] }
+```
+
+두 파일을 골랐다면 위 command는 다음처럼 **두 번** 실행됩니다.
+
+```text
+python inspect.py "첫 번째 경로" --number 1
+python inspect.py "두 번째 경로" --number 2
+```
+
+`forEach`에는 `${files.paths}`·`${pick.valueList}` 같은 배열 참조나 `['debug', 'release']` 같은 정적
+문자열 배열을 씁니다. 반복 본문의 변수는 다음과 같습니다.
+
+| 변수 | 내용 |
+| --- | --- |
+| `${each}` / `${each.value}` | 현재 항목. command의 `args`에서는 argv 한 칸으로 안전하게 전달됩니다. |
+| `${each.index}` | 현재 위치(0부터 시작) |
+| `${each.number}` | 사람이 읽는 순번(1부터 시작) |
+| `${each.count}` | 전체 항목 수 |
+
+반복은 선언 순서대로 실행하며 동적 목록은 최대 1,000개입니다. 한 반복이 실패하면 오류에
+`forEach iteration 2/3`처럼 위치를 표시하고 남은 항목은 실행하지 않습니다. `continueOnError`는
+개별 항목이 아니라 반복 태스크 전체에 적용됩니다. `when`은 반복 시작 전에 한 번 평가되므로
+`${each}`를 사용할 수 없으며, 대화형 태스크와 `isOneShot`에도 `forEach`를 사용할 수 없습니다.
+
+후속 태스크에서는 `${inspect.count}`, `${inspect.outputs}`, `${inspect.paths}`를 사용할 수 있습니다.
+`${inspect.output}`은 각 반복의 stdout을 줄바꿈으로 합치고, 그 밖의 기존 단일 결과 키는 마지막
+반복의 값을 유지합니다. History의 실행 명령과 Action Run Report에는 반복된 명령이 모두 남습니다.
+
 ### `envPick` 태스크
 
 사용자의 로그인 셸에 실제로 노출되는 환경변수 **이름**을 정렬해 선택하고 `value`로 반환합니다. 확장 호스트 전용 `VSCODE_*`·Electron 변수는 제외하며 값 자체는 목록에 표시하지 않습니다. 선택한 변수의 값이 필요하면 이름을 고정된 후속 명령의 `env`로 전달해 조회하세요.
@@ -1436,6 +1477,7 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `when.regex` | error | `when.matches`가 `new RegExp()` 컴파일에 실패. 런타임은 던지지 않고 "맞지 않음"으로 보므로, 잡아 주지 않으면 그 분기가 영영 꺼진 채로 남는다. |
 | `when.dead-branch` | warning | 풀리지 않는 `when.var`, 상수 `var`, 빈 `in` 등으로 결과가 항상 참 또는 거짓인 조건. 런타임이 실제로 적용할 연산자만 판정하며 전방 참조는 제외. |
 | `when.literal-operand` | warning | `equals`·`notEquals`·`matches`·`in`에 `${…}`가 있음. 피연산자는 보간하거나 의존성으로 읽지 않으므로 적힌 문자열 그대로 비교됨. |
+| `foreach.when-each` | error | `forEach` 태스크의 `when.var`가 항목별 `${each}`를 참조함. task-level 조건은 반복 시작 전에 평가되므로 런타임도 이 설정을 실행 전에 거부합니다. |
 | `capture.regex` | error | `output.capture.regex`가 `new RegExp()` 컴파일에 실패. |
 | `capture.group` | warning | `output.capture.group` 인덱스가 regex의 capture group 개수를 벗어남. |
 | `capture.reserved` | error | `output.capture.name`이 reserved 집합(`output`/`path`/`value` 등 task 결과 빌트인 키)과 충돌. 스키마는 이름 패턴만 검사하므로 schema-pass 후 런타임에서 throw 하던 케이스를 Doctor가 사전에 잡음. |

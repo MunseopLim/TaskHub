@@ -152,6 +152,15 @@
 | IT-171 | QuickPick 동적 기본 선택 | 앞 command의 출력으로 `default` label을 정하고, 활성화된 항목의 매핑 `value`가 후속 파일에 전달됨 |
 | IT-172 | QuickPick 직접 입력 argv 전달 | `allowCustom`으로 입력한 목록 밖 문자열이 후속 `command`의 실제 argv 한 칸으로 전달됨 |
 
+### forEach 반복 실행
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-173 | 다중 파일을 파일별 command로 실행 | 공백이 든 경로를 포함한 `${files.paths}`를 순차 반복하고 `${each}`·index·number·count가 실제 argv에 맞게 도착하며, History 명령도 반복 횟수만큼 남음 |
+| IT-174 | 반복 중간 실패 | 두 번째 항목 실패가 `2/3` 위치를 밝히고 세 번째 항목은 실행하지 않음 |
+| IT-175 | password 파생 반복값 마스킹 | 실제 프로세스에는 원문 반복값을 전달하지만 History 명령에는 모든 반복을 `***`로 기록함 |
+
 ### Last-run 배지
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)
 

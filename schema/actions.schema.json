@@ -266,6 +266,23 @@
           ],
           "description": "For 'quickPick' with 'itemsFromCommand': exact line(s) to drop from the command output (e.g. 'origin/HEAD'). Ignored when 'itemsFromCommand' is not set."
         },
+        "forEach": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$",
+              "description": "An exact variable reference that resolves to an array, such as '${files.paths}' or '${pick.valueList}'."
+            },
+            {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1,
+              "maxItems": 1000,
+              "description": "A fixed list of values to iterate over. Entries support variable interpolation."
+            }
+          ],
+          "description": "Run this non-interactive task once per item, sequentially. Inside the task use '${each}' or '${each.value}', plus '${each.index}' (0-based), '${each.number}' (1-based), and '${each.count}'. Dynamic lists are limited to 1000 items."
+        },
         "message": {
           "type": "string",
           "description": "The confirmation message to display (for 'confirm' type). Supports variable interpolation."
@@ -450,6 +467,19 @@
           "then": {
             "properties": { "canPickMany": { "const": true } },
             "required": ["canPickMany"]
+          }
+        },
+        {
+          "if": { "required": ["forEach"] },
+          "then": {
+            "properties": {
+              "type": {
+                "not": {
+                  "enum": ["inputBox", "quickPick", "envPick", "fileDialog", "folderDialog", "confirm"]
+                }
+              },
+              "isOneShot": { "not": { "const": true } }
+            }
           }
         }
       ]

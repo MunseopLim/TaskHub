@@ -23,6 +23,8 @@ import {
     resolveArchiveTaskPath,
     interpolateCommandPreservingTokens,
     expandArgTemplate,
+    resolveForEachItems,
+    buildForEachValue,
     formatNativeCommandDisplay,
     getCommandString,
     selectPlatformValue,
@@ -64,6 +66,26 @@ export function placeholder(type: string, id: string, key?: string): string {
  * downstream tasks' interpolation context during preview / Doctor lint.
  */
 export function simulateTaskResult(task: Task): SimulatedResult {
+    if (task.forEach !== undefined) {
+        const single = { ...task, forEach: undefined };
+        const base = simulateTaskResult(single);
+        const aggregate: SimulatedResult = {
+            ...base,
+            count: 2,
+            outputs: typeof base.output === 'string' ? [base.output, base.output] : [],
+            paths: typeof base.path === 'string'
+                ? [base.path, base.path]
+                : typeof base.archivePath === 'string'
+                    ? [base.archivePath, base.archivePath]
+                    : typeof base.outputDir === 'string'
+                        ? [base.outputDir, base.outputDir]
+                        : [],
+        };
+        if (typeof base.output === 'string') {
+            aggregate.output = `${base.output}\n${base.output}`;
+        }
+        return aggregate;
+    }
     switch (task.type) {
         case 'fileDialog':
         case 'folderDialog': {
@@ -193,6 +215,7 @@ export function findTypoRefs(
     // 알려야 한다. 판정 규칙 자체는 평범한 참조와 같다.
     visitTaskRefs(task, (literal, refs) => {
         for (const { head, key } of refs) {
+            if (task.forEach !== undefined && head === 'each') { continue; }
             if (head === selfId || key === undefined || key === '') { continue; }
             const result = allResults[head];
             if (!result) { continue; } // forward ref / built-in / unknown
@@ -274,6 +297,7 @@ export function findUncapturedOutputRefs(
     // 쓴 것은 사용자의 의도이므로 알려야 한다.
     visitTaskRefs(task, (literal, refs) => {
         for (const { head, key } of refs) {
+            if (task.forEach !== undefined && head === 'each') { continue; }
             if (head === selfId || key === undefined || key === '') { continue; }
             const headTask = tasksById.get(head);
             if (!headTask || (headTask.type !== 'shell' && headTask.type !== 'command')) { continue; }
@@ -385,6 +409,11 @@ export function analyzeCoalesceRefs(
 
     const judge = ({ head, key }: ReferenceAlternative): DeadAlternativeReason | undefined => {
         if (head === selfId) { return 'self'; }
+        if (task.forEach !== undefined && head === 'each') {
+            return key === undefined || ['output', 'value', 'index', 'number', 'count'].includes(key)
+                ? undefined
+                : 'missing-key';
+        }
         // bare 내장은 task id보다 우선한다. 속성이 붙으면 동명 task 결과를 읽을 수
         // 있으므로 아래의 일반 task 판정으로 넘긴다.
         if (BUILTIN_REFS.has(head) && key === undefined) { return undefined; }
@@ -949,6 +978,13 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         // 태스크를 넣고도 리포트에 한 줄도 남기지 않아, 분기 파이프라인은
         // dry-run 에서 분기 자체가 보이지 않았다.
         if (task.when && typeof task.when.var === 'string') {
+            if (task.forEach !== undefined
+                && Array.from(task.when.var.matchAll(/\$\{([^}]+)}/g)).some(match =>
+                    parseReferenceAlternatives(match[1]).some(ref => ref.head === 'each'))) {
+                const message = "'when.var' is evaluated before 'forEach', so it cannot use the per-item '${each}' value";
+                lines.push(`    ⚠️  ${message}`);
+                runtimeBlockers.push(`${task.id}: ${message}`);
+            }
             const resolvedVar = interpolatePipelineVariables(task.when.var, interpolationContext);
             interpolated.push(resolvedVar);
             lines.push(`  when: ${task.when.var} ${describeConditionOperator(task.when)}`);
@@ -972,6 +1008,53 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
             } else {
                 UNRESOLVED_VAR_RE.lastIndex = 0;
                 lines.push(`    simulated value: ${resolvedVar} (the real branch depends on the input at runtime)`);
+            }
+        }
+
+        if (task.forEach !== undefined) {
+            if (typeof task.forEach === 'string') {
+                const shown = interpolatePipelineVariables(task.forEach, interpolationContext);
+                interpolated.push(shown);
+                lines.push(`  forEach: ${task.forEach}`);
+            } else {
+                const shown = task.forEach.map(value => interpolatePipelineVariables(value, interpolationContext));
+                interpolated.push(...shown);
+                lines.push(`  forEach: ${JSON.stringify(shown)}`);
+            }
+
+            // 전방 배열 참조도 스케줄러가 producer를 먼저 실행하므로 그 결과 모형을
+            // 잠시 덧대어 반복 횟수와 `${each}` 대표값을 보여 준다.
+            const augmented = Object.assign(Object.create(null), interpolationContext);
+            if (typeof task.forEach === 'string') {
+                const exact = /^\$\{([^}]+)\}$/.exec(task.forEach.trim());
+                if (exact) {
+                    for (const { head, key } of parseReferenceAlternatives(exact[1])) {
+                        if (key === undefined && RESERVED_VARIABLE_HEADS.has(head)) { continue; }
+                        if (!Object.prototype.hasOwnProperty.call(augmented, head)) {
+                            const forward = tasksById.get(head);
+                            if (forward) { augmented[head] = simulateTaskResultWithCaptures(forward); }
+                        }
+                    }
+                }
+            }
+            try {
+                const values = resolveForEachItems(task.forEach, augmented);
+                lines.push(`    repeats ${values.length} time(s) sequentially in this simulation`);
+                const representative = values[0] ?? placeholder('forEach', task.id, 'each');
+                interpolationContext.each = buildForEachValue(
+                    representative,
+                    0,
+                    values.length
+                );
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                lines.push(`    ⚠️  ${message}`);
+                runtimeBlockers.push(`${task.id}: ${message}`);
+                interpolationContext.each = buildForEachValue(
+                    placeholder('forEach', task.id, 'each'),
+                    0,
+                    1
+                );
             }
         }
 

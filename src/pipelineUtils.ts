@@ -616,6 +616,62 @@ export function expandArgTemplate(template: string, context: any): string[] {
     return [interpolatePipelineVariables(template, context)];
 }
 
+/** 한 태스크가 만들 수 있는 반복 횟수 상한. 정적·동적 목록에 똑같이 적용한다. */
+export const FOR_EACH_MAX_ITEMS = 1000;
+
+export interface ForEachValue {
+    /** `${each}`의 bare 대표값이 되도록 기존 task-result 모양을 따른다. */
+    output: string;
+    value: string;
+    index: number;
+    number: number;
+    count: number;
+}
+
+/**
+ * `Task.forEach`를 실제 반복 문자열 배열로 푼다.
+ *
+ * 문자열 형태는 배열의 argv 경계를 보존하려고 **정확한 참조 하나만** 받는다.
+ * 보간 후의 공백 문자열을 다시 쪼개면 공백이 든 파일 경로가 손상되기 때문이다.
+ */
+export function resolveForEachItems(spec: unknown, context: any): string[] {
+    let rawItems: unknown[];
+    if (Array.isArray(spec)) {
+        rawItems = spec.map(item => typeof item === 'string'
+            ? interpolatePipelineVariables(item, context)
+            : item);
+    } else if (typeof spec === 'string') {
+        const exact = /^\$\{([^}]+)\}$/.exec(spec.trim());
+        if (!exact) {
+            throw new Error("'forEach' must be an exact array reference such as '${files.paths}', or a string array.");
+        }
+        const resolved = resolvePipelineReference(exact[1], context);
+        if (!Array.isArray(resolved)) {
+            throw new Error(`'forEach' reference '${spec}' must resolve to an array.`);
+        }
+        rawItems = resolved;
+    } else {
+        throw new Error("'forEach' must be an exact array reference or a string array.");
+    }
+    if (rawItems.length > FOR_EACH_MAX_ITEMS) {
+        throw new Error(`'forEach' has ${rawItems.length} items; the limit is ${FOR_EACH_MAX_ITEMS}.`);
+    }
+    return rawItems.map((item, index) => {
+        if (typeof item !== 'string' && typeof item !== 'number' && typeof item !== 'boolean') {
+            throw new Error(`'forEach' item ${index + 1} must be a string, number, or boolean.`);
+        }
+        const value = sanitizeInterpolatedValue(item);
+        if (value === undefined) {
+            throw new Error(`'forEach' item ${index + 1} must be a string, number, or boolean.`);
+        }
+        return value;
+    });
+}
+
+export function buildForEachValue(value: string, index: number, count: number): ForEachValue {
+    return { output: value, value, index, number: index + 1, count };
+}
+
 // ============================================================================
 // Task graph utilities (roadmap §4 — Parallel Execution / Task DAG)
 //
@@ -717,6 +773,7 @@ export function shouldSkipForSkippedDependencies(
         for (const refs of extractParsedVariableReferences(str)) {
             if (refs.every(({ head, key }) =>
                 skippedTaskIds.has(head)
+                && !(task.forEach !== undefined && head === 'each')
                 && !(key === undefined && RESERVED_VARIABLE_HEADS.has(head))
             )) { return true; }
         }
@@ -1018,6 +1075,10 @@ export function inferTaskDependencies(
     for (const str of walkInterpolatedTaskStrings(task, platform)) {
         for (const { head, key } of extractParsedVariableReferences(str).flat()) {
             if (head === task.id) { continue; }
+            // `each`는 forEach 태스크 안에서만 생기는 지역 문맥이다. 같은 액션에
+            // id가 `each`인 태스크가 있어도 반복 본문의 `${each.*}` 의존성으로
+            // 오인하지 않는다. forEach가 없는 태스크의 기존 참조는 그대로다.
+            if (task.forEach !== undefined && head === 'each') { continue; }
             if (key === undefined && RESERVED_VARIABLE_HEADS.has(head)) { continue; }
             if (RESERVED_HEAD_PREFIXES.some(p => head.startsWith(p))) { continue; }
             if (validTaskIds.has(head)) { deps.add(head); }

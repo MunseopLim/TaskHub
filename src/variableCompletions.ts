@@ -33,6 +33,8 @@ export type VariableCompletionDetail =
     | { kind: 'builtin'; ref: BuiltinVariableName }
     /** `${env:NAME}` 네임스페이스 또는 실제 환경변수. */
     | { kind: 'environment'; variable?: string }
+    /** forEach 본문의 현재 항목 또는 반복 위치. */
+    | { kind: 'iteration'; key: 'value' | 'index' | 'number' | 'count' }
     /** 그 태스크 타입이 내는 결과 키. */
     | { kind: 'result'; taskType: string }
     /** `output.capture` 로 정의한 이름. */
@@ -140,6 +142,27 @@ function enclosingTasksArray(text: string, offset: number): { start: number; end
 function firstStringField(text: string, key: string): string | undefined {
     const m = new RegExp(`"${key}"\\s*:\\s*"([^"\\\\]*)"`).exec(text);
     return m ? m[1] : undefined;
+}
+
+/** 커서가 들어 있는 JSON 문자열이 `"key": "…"` 값이면 그 key를 돌려준다. */
+function currentStringProperty(text: string, from: number, offset: number): string | undefined {
+    let inString = false;
+    let escaped = false;
+    let stringStart = -1;
+    for (let i = from; i < offset; i++) {
+        const ch = text[i];
+        if (inString) {
+            if (escaped) { escaped = false; }
+            else if (ch === '\\') { escaped = true; }
+            else if (ch === '"') { inString = false; }
+        } else if (ch === '"') {
+            inString = true;
+            stringStart = i;
+        }
+    }
+    if (!inString || stringStart < 0) { return undefined; }
+    const match = /"([^"\\]+)"\s*:\s*$/.exec(text.slice(from, stringStart));
+    return match?.[1];
 }
 
 export interface ReferencePrefix {
@@ -272,6 +295,12 @@ export function collectVariableCompletions(
     const tasks = topLevelObjects(text, scope.start + 1, scope.end);
 
     const cursorTask = tasks.find(s => offset >= s.start && offset <= s.end);
+    const currentProperty = cursorTask ? currentStringProperty(text, cursorTask.start, offset) : undefined;
+    // 소스 배열과 task-level when은 반복이 시작되기 전에 해석되므로 each가 없다.
+    const inForEachTask = !!cursorTask
+        && /"forEach"\s*:/.test(cursorTask.text)
+        && currentProperty !== 'forEach'
+        && currentProperty !== 'var';
     const dot = ref.prefix.indexOf('.');
 
     if (ref.prefix.startsWith('env:')) {
@@ -296,11 +325,20 @@ export function collectVariableCompletions(
         for (const name of BUILTIN_VARIABLE_NAMES) {
             items.push({ name, detail: { kind: 'builtin', ref: name } });
         }
+        if (inForEachTask) {
+            items.push({ name: 'each', detail: { kind: 'iteration', key: 'value' } });
+        }
         items.push({ name: 'env:', detail: { kind: 'environment' } });
         return items;
     }
 
     const head = ref.prefix.slice(0, dot);
+    if (head === 'each' && inForEachTask) {
+        return (['value', 'index', 'number', 'count'] as const).map(key => ({
+            name: `each.${key}`,
+            detail: { kind: 'iteration' as const, key },
+        }));
+    }
     const target = tasks.find(slice => firstStringField(slice.text, 'id') === head);
     if (!target || target === cursorTask) { return []; }
     const type = firstStringField(target.text, 'type');

@@ -43,6 +43,7 @@ import {
     selectPlatformValue,
     RESERVED_VARIABLE_HEADS,
     RESERVED_HEAD_PREFIXES,
+    buildForEachValue,
 } from './pipelineUtils';
 import {
     simulateTaskResult,
@@ -2544,6 +2545,15 @@ function analyzeActionTasks(
         // (태스크 4,000개에 2.2초). 문맥은 한 번만 만들고, 시뮬레이션 결과가
         // 나올 때마다 그 자리에 더한다 — 어차피 이전 태스크 결과만 보인다.
         const interpolationContext = sharedInterpolationContext;
+        const hadEach = Object.prototype.hasOwnProperty.call(interpolationContext, 'each');
+        const previousEach = interpolationContext.each;
+        if (task.forEach !== undefined) {
+            interpolationContext.each = buildForEachValue(
+                placeholder('forEach', task.id, 'each'),
+                0,
+                1
+            );
+        }
 
         const interpolated: (string | undefined)[] = [];
         const visitString = (value: unknown): string | undefined => {
@@ -2659,6 +2669,11 @@ function analyzeActionTasks(
         visitString(task.input);
         visitString(task.archive);
         visitString(task.destination);
+        if (Array.isArray(task.forEach)) {
+            for (const value of task.forEach) { visitString(value); }
+        } else {
+            visitString(task.forEach);
+        }
         // `tool` 안의 참조도 런타임에서 보간된다. 빼 두면 `tool: "${ghost.output}"`
         // 이 무경고로 통과한 뒤 리터럴 실행 파일로 실행을 시도한다.
         //
@@ -2764,6 +2779,20 @@ function analyzeActionTasks(
         // 가리키는 참조의 오타가 **아무 진단도 없이** 지나가고, 런타임은 리터럴
         // 문자열을 비교하게 되어 그 분기가 영영 한쪽으로 굳는다.
         const resolvedWhenVar = visitString(task.when?.var);
+        if (task.forEach !== undefined
+            && typeof task.when?.var === 'string'
+            && Array.from(task.when.var.matchAll(/\$\{([^}]+)}/g)).some(match =>
+                parseReferenceAlternatives(match[1]).some(ref => ref.head === 'each'))) {
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: findIdLine(input.rawText, task.id),
+                severity: 'error',
+                code: 'foreach.when-each',
+                message: `Task '${item.id}.${task.id}' uses the per-item '\${each}' value in 'when.var', but the task-level condition is evaluated before 'forEach' starts. Move the condition into the command/tool being run or remove this reference.`,
+                messageKo: `Task '${item.id}.${task.id}'가 'when.var'에서 항목별 '\${each}' 값을 사용하지만, 태스크 조건은 'forEach'가 시작되기 전에 평가됩니다. 조건을 실행할 command/tool 안으로 옮기거나 이 참조를 제거하세요.`,
+            });
+        }
 
         // 전방 집합은 위에서 한 번 만들고 태스크가 끝날 때마다 하나씩 뺀다.
         // 전방 태스크 참조는 **그 태스크가 실제로 낼 키에 한해** 관용한다.
@@ -3138,6 +3167,8 @@ function analyzeActionTasks(
         // Seed downstream context. capture 적용 조건(런타임은 문자열 `output` 이
         // 있을 때만 capture 를 돌린다)은 `simulateTaskResultWithCaptures` 한
         // 곳에만 두어 Preview / 전방 참조 판정과 같은 모델을 쓰게 한다.
+        if (hadEach) { interpolationContext.each = previousEach; }
+        else { delete interpolationContext.each; }
         allResults[task.id] = simulateTaskResultWithCaptures(task);
         sharedInterpolationContext[task.id] = allResults[task.id];
         forwardTaskIds.delete(task.id);

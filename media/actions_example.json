@@ -449,6 +449,30 @@
     }
   },
   {
+    "id": "action.foreach.files",
+    "title": "For Each: Process Selected Files",
+    "action": {
+      "description": "Select several files and run one command per file",
+      "tasks": [
+        {
+          "id": "select_files",
+          "type": "fileDialog",
+          "options": {
+            "canSelectMany": true,
+            "openLabel": "Select files"
+          }
+        },
+        {
+          "id": "show_file",
+          "type": "command",
+          "forEach": "${select_files.paths}",
+          "command": "node",
+          "args": ["-e", "console.log(process.argv[1])", "${each}"]
+        }
+      ]
+    }
+  },
+  {
     "id": "action.run.script.with.params",
     "title": "Complete Example: Run Script with Parameters",
     "action": {

@@ -115,6 +115,13 @@ export function describeVariableCompletion(detail: VariableCompletionDetail): st
             return detail.variable
                 ? t(`환경변수 ${detail.variable}(기록에서는 가림)`, `environment variable ${detail.variable} (redacted from records)`)
                 : t('환경변수 선택', 'environment variable');
+        case 'iteration':
+            switch (detail.key) {
+                case 'value': return t('forEach 현재 항목', 'current forEach item');
+                case 'index': return t('forEach 위치(0부터 시작)', 'forEach index (0-based)');
+                case 'number': return t('forEach 순번(1부터 시작)', 'forEach number (1-based)');
+                case 'count': return t('forEach 전체 항목 수', 'total forEach item count');
+            }
         case 'result':
             return t(`${detail.taskType} 결과`, `${detail.taskType} result`);
         case 'capture':
@@ -1211,6 +1218,8 @@ import {
     interpolateCommandPreservingTokens,
     quoteForCommandTokenizer,
     expandArgTemplate,
+    resolveForEachItems,
+    buildForEachValue,
     resolvePipelineReference,
     normalizeEol,
     encodeFileContent,
@@ -2771,6 +2780,12 @@ function redactSecretsInContext(run: ActionRunContext, context: Record<string, a
             redacted[id] = redactValue(redacted[id]);
         }
     }
+    // forEach 본문은 원본 비밀 태스크를 직접 참조하지 않고 `${each}`만 쓴다.
+    // 반복 소스가 비밀에서 왔다는 표식을 보고 지역값도 같은 자리표시자로 바꾼다.
+    if ((context as any)[FOREACH_VALUE_IS_SECRET]
+        && Object.prototype.hasOwnProperty.call(redacted, 'each')) {
+        redacted.each = redactValue(redacted.each);
+    }
     return redacted;
 }
 
@@ -2817,6 +2832,9 @@ function buildRedactedDisplayValue(
 
 /** 이력·로그에 남기는 자리표시자. 값 길이를 짐작하게 하지 않는다. */
 const SECRET_PLACEHOLDER = '***';
+
+/** JSON에서 만들 수 없는 forEach 지역값의 taint 표식. */
+const FOREACH_VALUE_IS_SECRET = Symbol('taskhub.forEachValueIsSecret');
 
 /** password 파생 파일의 권한. 소유자만 읽고 쓴다. */
 const SECRET_FILE_MODE = 0o600;
@@ -4927,6 +4945,21 @@ async function executeActionPipelineForRun(
         const lines = issues.map(formatGraphIssue).map(m => `  - ${m}`).join('\n');
         throw new Error(`Action '${id}' has invalid task graph:\n${lines}`);
     }
+    for (const task of action.tasks) {
+        if (task.forEach === undefined) { continue; }
+        if (INTERACTIVE_TASK_TYPES.has(task.type)) {
+            throw new Error(`Task '${task.id}' cannot use 'forEach' with interactive type '${task.type}'.`);
+        }
+        if (task.isOneShot === true) {
+            throw new Error(`Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`);
+        }
+        if (typeof task.when?.var === 'string' && extractVariableHeads(task.when.var).includes('each')) {
+            throw new Error(
+                `Task '${task.id}' cannot use the per-item variable '\${each}' in 'when.var'; `
+                + "the task-level condition is evaluated before 'forEach' starts."
+            );
+        }
+    }
 
     const maxConcurrency = resolveMaxParallelTasks();
     const scheduler = new TaskScheduler(graph, { maxConcurrency });
@@ -6322,6 +6355,98 @@ export function savedInputStillValid(task: any, saved: any): boolean {
     return true;
 }
 
+/** 반복 결과에서 흔히 쓰는 후속 참조를 작고 예측 가능한 모양으로 합친다. */
+export function aggregateForEachResults(results: readonly any[]): Record<string, any> {
+    const last = results.length > 0 && results[results.length - 1]
+        && typeof results[results.length - 1] === 'object'
+        ? results[results.length - 1]
+        : undefined;
+    const aggregate: Record<string, any> = last ? { ...last } : {};
+    aggregate.count = results.length;
+
+    const collectStrings = (key: string): string[] => results.flatMap(result => {
+        if (!result || typeof result !== 'object') { return []; }
+        const value = result[key];
+        if (typeof value === 'string') { return [value]; }
+        if (Array.isArray(value)) { return value.filter((entry): entry is string => typeof entry === 'string'); }
+        return [];
+    });
+    const outputs = collectStrings('output');
+    const stderrs = collectStrings('stderr');
+    const paths = results.flatMap(result => {
+        if (!result || typeof result !== 'object') { return []; }
+        for (const key of ['path', 'archivePath', 'outputDir']) {
+            if (typeof result[key] === 'string') { return [result[key]]; }
+        }
+        return [];
+    });
+    aggregate.outputs = outputs;
+    aggregate.paths = paths;
+    if (outputs.length > 0) { aggregate.output = outputs.join('\n'); }
+    if (stderrs.length > 0) {
+        aggregate.stderrs = stderrs;
+        aggregate.stderr = stderrs.join('\n');
+    }
+    return aggregate;
+}
+
+async function executeForEachTask(
+    task: import('./schema').Task,
+    allResults: any,
+    context: vscode.ExtensionContext,
+    actionId: string,
+    workspaceFolderPath: string | undefined,
+    workspaceRoots: string[] | undefined,
+    recordCommands: Record<string, string> | undefined,
+    runLogCollector: ActionRunLogCollector | undefined,
+    scope: TaskExecutionScope,
+    taskUsesSecret: boolean,
+    builtinVariables: BuiltinVariableContext
+): Promise<Record<string, any>> {
+    if (INTERACTIVE_TASK_TYPES.has(task.type)) {
+        throw new Error(`Task '${task.id}' cannot use 'forEach' with interactive type '${task.type}'.`);
+    }
+    if (task.isOneShot === true) {
+        throw new Error(`Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`);
+    }
+
+    const baseContext = Object.assign(Object.create(null), builtinVariables, allResults);
+    const items = resolveForEachItems(task.forEach, baseContext);
+    const innerTask = { ...task, forEach: undefined };
+    const results: any[] = [];
+    for (let index = 0; index < items.length; index++) {
+        throwIfTaskInactive(scope);
+        const iterationResults = Object.assign(Object.create(null), allResults, {
+            each: buildForEachValue(items[index], index, items.length),
+        });
+        if (taskUsesSecret) {
+            iterationResults[FOREACH_VALUE_IS_SECRET] = true;
+        }
+        try {
+            results.push(await executeSingleTask(
+                innerTask,
+                iterationResults,
+                context,
+                actionId,
+                workspaceFolderPath,
+                workspaceRoots,
+                undefined,
+                recordCommands,
+                runLogCollector,
+                scope,
+                taskUsesSecret,
+                builtinVariables
+            ));
+        } catch (error) {
+            if (error instanceof Error) {
+                error.message = `Task '${task.id}' forEach iteration ${index + 1}/${items.length} failed: ${error.message}`;
+            }
+            throw error;
+        }
+    }
+    return aggregateForEachResults(results);
+}
+
 async function executeSingleTask(
     task: import('./schema').Task,
     allResults: any,
@@ -6356,6 +6481,21 @@ async function executeSingleTask(
     const interpolationContext = Object.assign(
         Object.create(null), effectiveBuiltinVariables, allResults
     );
+    if (task.forEach !== undefined) {
+        return executeForEachTask(
+            task,
+            allResults,
+            context,
+            actionId,
+            workspaceFolderPath,
+            workspaceRoots,
+            recordCommands,
+            runLogCollector,
+            scope,
+            taskUsesSecret,
+            effectiveBuiltinVariables
+        );
+    }
     let result: any;
     // Captured by the shell/command branch after `${workspaceFolder}` etc.
     // are resolved. Used by the diagnostic post-processing so relative
@@ -6618,7 +6758,10 @@ async function executeSingleTask(
                 // password 값이 평문으로 이력에 남는다. 값 문자열을 찾아
                 // 지우는 대신, 비밀 태스크의 결과를 자리표시자로 바꾼
                 // 컨텍스트로 처음부터 다시 만든다.
-                recordCommands[task.id] = buildRedactedDisplayCommand(executionRun, task, interpolationContext, command, args);
+                const display = buildRedactedDisplayCommand(executionRun, task, interpolationContext, command, args);
+                recordCommands[task.id] = recordCommands[task.id]
+                    ? `${recordCommands[task.id]}\n${display}`
+                    : display;
             }
             // 같은 가림을 **로그에도** 적용해야 한다. verbose 로그는 보간이
             // 끝난 명령줄을 그대로 찍으므로, 이걸 넘기지 않으면 이력에서 가린

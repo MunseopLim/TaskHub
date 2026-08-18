@@ -132,6 +132,14 @@ export interface Task {
      */
     itemsExclude?: string | string[];
 
+    /**
+     * 이 태스크를 배열 항목마다 순차 실행한다. `${pick.valueList}` / `${files.paths}`
+     * 같은 배열 참조 하나 또는 정적 문자열 배열을 쓴다. 반복 안에서는 현재 값을
+     * `${each}` / `${each.value}`, 0-based 위치를 `${each.index}`, 1-based 위치를
+     * `${each.number}`, 전체 개수를 `${each.count}`로 참조한다.
+     */
+    forEach?: string | string[];
+
     // Properties for 'confirm'
     message?: string;
     confirmLabel?: string;

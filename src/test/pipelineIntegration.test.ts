@@ -5048,4 +5048,127 @@ try {
             }
         });
     });
+
+    suite('forEach 반복 실행', () => {
+        test('IT-173: 여러 파일을 파일마다 command 한 번으로 실행하고 실제 명령을 모두 기록한다', async () => {
+            const files = [
+                path.join(tempWorkspace, 'one.bin'),
+                path.join(tempWorkspace, 'two space.bin'),
+            ];
+            files.forEach(file => fs.writeFileSync(file, 'x'));
+            const probe = path.join(tempWorkspace, 'foreach-probe.js');
+            const calls = path.join(tempWorkspace, 'foreach-calls.log');
+            const summary = path.join(tempWorkspace, 'foreach-summary.txt');
+            fs.writeFileSync(
+                probe,
+                "const fs=require('fs'); const a=process.argv.slice(2); fs.appendFileSync(a[0], JSON.stringify(a.slice(1))+'\\n'); process.stdout.write(a[1]);"
+            );
+            const commands: Record<string, string> = Object.create(null);
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            try {
+                (vscode.window as any).showOpenDialog = async () => files.map(file => vscode.Uri.file(file));
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                await executeActionPipeline(
+                    {
+                        description: 'IT-173',
+                        tasks: [
+                            { id: 'files', type: 'fileDialog', options: { canSelectMany: true } },
+                            {
+                                id: 'inspect', type: 'command', forEach: '${files.paths}',
+                                command: 'node',
+                                args: [probe, calls, '${each}', '${each.index}', '${each.number}', '${each.count}'],
+                                passTheResultToNextTask: true,
+                            },
+                            {
+                                id: 'summary', type: 'writeFile', path: summary,
+                                content: 'count=${inspect.count}\n${inspect.output}',
+                            },
+                        ],
+                    },
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it173', tempWorkspace, [tempWorkspace], { recordCommands: commands }
+                );
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+
+            const actual = fs.readFileSync(calls, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line));
+            assert.deepStrictEqual(
+                actual.map((row: string[]) => [normalizeWindowsPathForAssert(row[0]), ...row.slice(1)]),
+                [
+                    [normalizeWindowsPathForAssert(files[0]), '0', '1', '2'],
+                    [normalizeWindowsPathForAssert(files[1]), '1', '2', '2'],
+                ]
+            );
+            assert.strictEqual(
+                fs.readFileSync(summary, 'utf8'),
+                `count=2\n${files[0]}\n${files[1]}`
+            );
+            assert.strictEqual(commands.inspect.split(/\r?\n/).length, 2, '반복 명령이 History에 모두 남지 않았다');
+            assert.ok(commands.inspect.includes(files[0]) && commands.inspect.includes(files[1]));
+        });
+
+        test('IT-174: 반복 실패는 위치를 밝히고 남은 항목을 실행하지 않는다', async () => {
+            const probe = path.join(tempWorkspace, 'foreach-fail.js');
+            const calls = path.join(tempWorkspace, 'foreach-fail.log');
+            fs.writeFileSync(
+                probe,
+                "const fs=require('fs'); const [out,v]=process.argv.slice(2); fs.appendFileSync(out,v+'\\n'); if(v==='bad') process.exit(7);"
+            );
+            await assert.rejects(
+                () => run({
+                    description: 'IT-174',
+                    tasks: [{
+                        id: 'run', type: 'command', forEach: ['good', 'bad', 'never'],
+                        command: 'node', args: [probe, calls, '${each}'],
+                        passTheResultToNextTask: true,
+                    }],
+                }, 'it174'),
+                /forEach iteration 2\/3 failed/
+            );
+            assert.deepStrictEqual(fs.readFileSync(calls, 'utf8').trim().split(/\r?\n/), ['good', 'bad']);
+        });
+
+        test('IT-175: password 파생 반복값은 실제 실행에만 전달하고 명령 기록에서는 가린다', async () => {
+            const probe = path.join(tempWorkspace, 'foreach-secret.js');
+            const calls = path.join(tempWorkspace, 'foreach-secret.log');
+            fs.writeFileSync(
+                probe,
+                "const fs=require('fs'); fs.appendFileSync(process.argv[2],process.argv[3]+'\\n');"
+            );
+            const commands: Record<string, string> = Object.create(null);
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            try {
+                (vscode.window as any).showQuickPick = async (entries: vscode.QuickPickItem[]) => entries[0];
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                await executeActionPipeline(
+                    {
+                        description: 'IT-175',
+                        tasks: [
+                            { id: 'token', type: 'inputBox', password: true },
+                            {
+                                id: 'values', type: 'quickPick',
+                                items: [{ label: 'both', value: ['${token.value}', 'visible'] }],
+                            },
+                            {
+                                id: 'run', type: 'command', forEach: '${values.valueList}',
+                                command: 'node', args: [probe, calls, '${each}'],
+                                passTheResultToNextTask: true,
+                            },
+                        ],
+                    },
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it175', tempWorkspace, [tempWorkspace], {
+                        presetInputs: { token: { value: 'TOP-SECRET' } },
+                        recordCommands: commands,
+                    }
+                );
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+            }
+            assert.deepStrictEqual(fs.readFileSync(calls, 'utf8').trim().split(/\r?\n/), ['TOP-SECRET', 'visible']);
+            assert.ok(!commands.run.includes('TOP-SECRET'), '비밀 반복값이 History 명령에 남았다');
+            assert.ok(commands.run.split(/\r?\n/).every(line => line.includes('***')), commands.run);
+        });
+    });
 });

@@ -6354,6 +6354,8 @@ suite('Extension Test Suite', () => {
 			{ kind: 'builtin', ref: 'selectedText' },
 			{ kind: 'environment' },
 			{ kind: 'environment', variable: 'PATH' },
+			{ kind: 'iteration', key: 'value' },
+			{ kind: 'iteration', key: 'index' },
 			{ kind: 'result', taskType: 'quickPick' },
 			{ kind: 'capture', taskId: 'build' },
 		];
