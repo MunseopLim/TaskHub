@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import type { OutputCapture, SwitchTaskBranch, Task, TaskCondition } from './schema';
 import {
     BUILTIN_VARIABLE_NAMES,
+    type BuiltinVariableName,
     contextDeclaresTaskId,
     hasBuiltinVariableSnapshot,
     hasEnvironmentSnapshot,
@@ -36,6 +37,39 @@ export class PipelineBuiltinUnavailableError extends Error {
         super(message);
         this.name = 'PipelineBuiltinUnavailableError';
     }
+}
+
+/** 실행 문맥이 없는 내장 변수마다 사용자가 취할 수 있는 조치를 정확히 안내한다. */
+function describeUnavailableBuiltin(name: BuiltinVariableName): string {
+    const prefix = `Built-in variable '\${${name}}' is unavailable. `;
+    switch (name) {
+        case 'workspaceFolder':
+            return `${prefix}Open a workspace folder before running this action.`;
+        case 'extensionPath':
+            return `${prefix}Reload the window and try again.`;
+        case 'file':
+        case 'fileBasename':
+        case 'fileBasenameNoExtension':
+        case 'fileExtname':
+        case 'fileDirname':
+            return `${prefix}Open a file in an editor before running this action.`;
+        case 'relativeFile':
+        case 'relativeFileDirname':
+        case 'fileWorkspaceFolder':
+            return `${prefix}Open a file inside the current workspace before running this action.`;
+        case 'selectedText':
+            return `${prefix}Open a file in an editor and select text before running this action.`;
+        case 'lineNumber':
+        case 'columnNumber':
+            return `${prefix}Open a file in an editor and place the cursor before running this action.`;
+        case 'clipboard':
+            return `${prefix}Copy text to the clipboard and try again.`;
+    }
+    return assertUnreachableBuiltin(name);
+}
+
+function assertUnreachableBuiltin(value: never): never {
+    throw new Error(`Unsupported built-in variable: ${String(value)}`);
 }
 
 /**
@@ -653,20 +687,18 @@ export function resolvePipelineReference(expression: string, context: any): unkn
         const value = lookupBuiltinVariable(context, expression as typeof BUILTIN_VARIABLE_NAMES[number]);
         if (value !== undefined) { return value; }
         if (usesStrictBuiltinVariables(context)) {
-            throw new PipelineBuiltinUnavailableError(
-                `Built-in variable '\${${expression}}' is unavailable. ` +
-                `Open a file in an editor before running this action.`
-            );
+            throw new PipelineBuiltinUnavailableError(describeUnavailableBuiltin(
+                expression as BuiltinVariableName
+            ));
         }
         return undefined;
     }
     const direct = ownValue(context, expression);
     if (direct !== undefined) { return direct; }
     if (isBare && RESERVED_VARIABLE_HEADS.has(expression) && usesStrictBuiltinVariables(context)) {
-        throw new PipelineBuiltinUnavailableError(
-            `Built-in variable '\${${expression}}' is unavailable. ` +
-            `Open a file in an editor before running this action.`
-        );
+        throw new PipelineBuiltinUnavailableError(describeUnavailableBuiltin(
+            expression as BuiltinVariableName
+        ));
     }
     return undefined;
 }

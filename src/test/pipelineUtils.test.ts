@@ -132,6 +132,31 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         );
     });
 
+    test('없는 내장값 오류는 필요한 실행 문맥을 구체적으로 안내한다', () => {
+        const workspace = path.resolve(os.tmpdir(), 'taskhub-builtin-workspace');
+        const context = buildBuiltinVariableContext({
+            workspaceFolder: workspace,
+            extensionPath: '/extension',
+            environment: {},
+            strict: true,
+        });
+        const messageFor = (reference: string): string => {
+            try {
+                interpolatePipelineVariables(`\${${reference}}`, context);
+                assert.fail(`Expected \${${reference}} to be unavailable`);
+            } catch (error) {
+                assert.ok(error instanceof PipelineBuiltinUnavailableError);
+                return error.message;
+            }
+        };
+
+        assert.match(messageFor('relativeFile'), /inside the current workspace/);
+        assert.match(messageFor('fileWorkspaceFolder'), /inside the current workspace/);
+        assert.match(messageFor('selectedText'), /select text/);
+        assert.match(messageFor('lineNumber'), /place the cursor/);
+        assert.match(messageFor('clipboard'), /Copy text to the clipboard/);
+    });
+
     test('동명 task의 기존 bare 대표값이 내장보다 우선하고 속성 참조도 유지된다', () => {
         const workspace = path.resolve(os.tmpdir(), 'taskhub-builtin-workspace');
         const builtin = buildBuiltinVariableContext({

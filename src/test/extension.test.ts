@@ -91,6 +91,7 @@ import {
 	shouldRecordTaskInput,
 	formatExecutedCommandsDocument,
 	describeVariableCompletion,
+	applyCurrentInputProfileValidation,
 	aggregateForEachResults,
 	parseQuickPickCommandItems,
 } from '../extension';
@@ -1620,6 +1621,28 @@ suite('Extension Test Suite', () => {
 				label: 'Release', labelList: ['Release'], value: '--old', custom: false,
 				_itemId: 'removed',
 			}), false);
+		});
+
+		test('잘못된 QuickPick 정의는 입력 프로필 팔레트를 중단하지 않고 다시 묻게 한다', () => {
+			const result = applyCurrentInputProfileValidation({
+				usableInputs: {
+					mode: {
+						label: 'Release', labelList: ['Release'], value: '--release',
+						custom: false, _itemId: 'duplicate',
+					},
+				},
+				staleTaskIds: [],
+				promptTaskIds: [],
+			}, [{
+				id: 'mode', type: 'quickPick',
+				items: [
+					{ id: 'duplicate', label: 'Debug', value: '--debug' },
+					{ id: 'duplicate', label: 'Release', value: '--release' },
+				],
+			} as any]);
+
+			assert.deepStrictEqual(Object.keys(result.usableInputs), []);
+			assert.deepStrictEqual(result.promptTaskIds, ['mode']);
 		});
 
 		test('제약이 없는 태스크는 그대로 통과시킨다', () => {
@@ -6495,11 +6518,23 @@ suite('Extension Test Suite', () => {
 			{ kind: 'builtin', ref: 'workspaceFolder' },
 			{ kind: 'builtin', ref: 'extensionPath' },
 			{ kind: 'builtin', ref: 'file' },
+			{ kind: 'builtin', ref: 'relativeFile' },
+			{ kind: 'builtin', ref: 'relativeFileDirname' },
+			{ kind: 'builtin', ref: 'fileBasename' },
+			{ kind: 'builtin', ref: 'fileBasenameNoExtension' },
+			{ kind: 'builtin', ref: 'fileExtname' },
+			{ kind: 'builtin', ref: 'fileDirname' },
+			{ kind: 'builtin', ref: 'fileWorkspaceFolder' },
 			{ kind: 'builtin', ref: 'selectedText' },
+			{ kind: 'builtin', ref: 'lineNumber' },
+			{ kind: 'builtin', ref: 'columnNumber' },
+			{ kind: 'builtin', ref: 'clipboard' },
 			{ kind: 'environment' },
 			{ kind: 'environment', variable: 'PATH' },
 			{ kind: 'iteration', key: 'value' },
 			{ kind: 'iteration', key: 'index' },
+			{ kind: 'iteration', key: 'number' },
+			{ kind: 'iteration', key: 'count' },
 			{ kind: 'result', taskType: 'quickPick' },
 			{ kind: 'capture', taskId: 'build' },
 		];
@@ -6529,6 +6564,17 @@ suite('Extension Test Suite', () => {
 			assert.ok(describeVariableCompletion({ kind: 'result', taskType: 'folderDialog' }).includes('folderDialog'));
 			assert.ok(describeVariableCompletion({ kind: 'task', taskType: 'stringManipulation' }).includes('stringManipulation'));
 			assert.ok(describeVariableCompletion({ kind: 'capture', taskId: 'build' }).includes('build'));
+		});
+
+		test('알 수 없는 하위 종류는 다음 union 종류의 문구로 fallthrough하지 않는다', () => {
+			assert.throws(
+				() => describeVariableCompletion({ kind: 'builtin', ref: 'futureBuiltin' } as any),
+				/Unsupported variable completion detail: futureBuiltin/
+			);
+			assert.throws(
+				() => describeVariableCompletion({ kind: 'iteration', key: 'futureKey' } as any),
+				/Unsupported variable completion detail: futureKey/
+			);
 		});
 
 		test('collectVariableCompletions 가 내는 detail 이 전부 문구로 옮겨진다', () => {

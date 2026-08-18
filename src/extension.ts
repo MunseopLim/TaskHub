@@ -116,6 +116,7 @@ export function describeVariableCompletion(detail: VariableCompletionDetail): st
                 case 'columnNumber': return t('활성 커서 열 번호(1부터 시작)', 'active cursor column number (1-based)');
                 case 'clipboard': return t('클립보드 텍스트(기록에서는 가림)', 'clipboard text (redacted from records)');
             }
+            return assertUnreachableVariableCompletion(detail.ref);
         case 'environment':
             return detail.variable
                 ? t(`환경변수 ${detail.variable}(기록에서는 가림)`, `environment variable ${detail.variable} (redacted from records)`)
@@ -127,11 +128,18 @@ export function describeVariableCompletion(detail: VariableCompletionDetail): st
                 case 'number': return t('forEach 순번(1부터 시작)', 'forEach number (1-based)');
                 case 'count': return t('forEach 전체 항목 수', 'total forEach item count');
             }
+            return assertUnreachableVariableCompletion(detail.key);
         case 'result':
             return t(`${detail.taskType} 결과`, `${detail.taskType} result`);
         case 'capture':
             return t(`'${detail.taskId}' 에서 캡처한 값`, `captured from '${detail.taskId}'`);
     }
+    return assertUnreachableVariableCompletion(detail);
+}
+
+/** 새 completion 종류를 추가하고 표시 문구를 빠뜨리면 컴파일 단계에서 막는다. */
+function assertUnreachableVariableCompletion(value: never): never {
+    throw new Error(`Unsupported variable completion detail: ${String(value)}`);
 }
 
 // Compile the actions JSON-schema validator once and reuse it. Re-compiling on
@@ -2786,8 +2794,6 @@ function redactSecretsInContext(run: ActionRunContext, context: Record<string, a
     // 수 있다. 실제 자식 프로세스에는 원문을 넘기되 History 명령, verbose 로그,
     // run report와 조건 skip 사유에는 항상 자리표시자만 남긴다.
     const builtinRedacted = redactSensitiveBuiltinVariables(context, SECRET_PLACEHOLDER);
-    if (run.sensitiveTaskIds.size === 0) { return builtinRedacted; }
-
     const redactValue = (value: unknown): unknown => {
         if (Array.isArray(value)) { return value.map(redactValue); }
         if (value && typeof value === 'object') {
@@ -2803,6 +2809,12 @@ function redactSecretsInContext(run: ActionRunContext, context: Record<string, a
         return SECRET_PLACEHOLDER;
     };
 
+    // 첫 forEach 반복에서는 이 태스크의 결과가 아직 sensitiveTaskIds에 들어가지
+    // 않았다. 반복 소스의 taint 표식도 함께 봐야 첫 명령부터 `${each}`가 가려진다.
+    const redactForEachValue = !!(context as any)[FOREACH_VALUE_IS_SECRET]
+        && Object.prototype.hasOwnProperty.call(context, 'each');
+    if (run.sensitiveTaskIds.size === 0 && !redactForEachValue) { return builtinRedacted; }
+
     const redacted = { ...builtinRedacted };
     for (const id of run.sensitiveTaskIds) {
         if (Object.prototype.hasOwnProperty.call(redacted, id)) {
@@ -2811,8 +2823,7 @@ function redactSecretsInContext(run: ActionRunContext, context: Record<string, a
     }
     // forEach 본문은 원본 비밀 태스크를 직접 참조하지 않고 `${each}`만 쓴다.
     // 반복 소스가 비밀에서 왔다는 표식을 보고 지역값도 같은 자리표시자로 바꾼다.
-    if ((context as any)[FOREACH_VALUE_IS_SECRET]
-        && Object.prototype.hasOwnProperty.call(redacted, 'each')) {
+    if (redactForEachValue) {
         redacted.each = redactValue(redacted.each);
     }
     return redacted;
@@ -4203,7 +4214,7 @@ type InputProfilePickItem = vscode.QuickPickItem & {
     inspection: InputProfileInspection;
 };
 
-function applyCurrentInputProfileValidation(
+export function applyCurrentInputProfileValidation(
     inspection: InputProfileInspection,
     tasks: import('./schema').Task[]
 ): InputProfileInspection {
@@ -4212,7 +4223,16 @@ function applyCurrentInputProfileValidation(
     const invalidTaskIds = new Set<string>();
     for (const taskId of Object.keys(inspection.usableInputs)) {
         const task = byId.get(taskId);
-        if (task && savedInputStillValid(task, inspection.usableInputs[taskId])) {
+        let valid = false;
+        try {
+            valid = !!task && savedInputStillValid(task, inspection.usableInputs[taskId]);
+        } catch {
+            // 프로필 팔레트는 actions.json의 설정 오류를 진단하는 자리가 아니다.
+            // 잘못된/중복 quickPick id처럼 현재 정의를 복원할 수 없으면 그 입력만
+            // 다시 묻게 두고, 팔레트 명령 자체는 계속 열어 준다.
+            valid = false;
+        }
+        if (valid) {
             usableInputs[taskId] = inspection.usableInputs[taskId];
         } else {
             invalidTaskIds.add(taskId);

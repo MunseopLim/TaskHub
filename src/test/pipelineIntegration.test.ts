@@ -5345,6 +5345,91 @@ try {
             assert.ok(commands.run.split(/\r?\n/).every(line => line.includes('***')), commands.run);
         });
 
+        test('IT-186: 내장 민감값 반복은 첫 명령부터 History와 Run Report에서 가린다', async () => {
+            const secret = 'TOP-SECRET-FIRST-ITERATION';
+            const probe = path.join(tempWorkspace, 'foreach-builtin-secret.js');
+            const calls = path.join(tempWorkspace, 'foreach-builtin-secret.log');
+            fs.writeFileSync(
+                probe,
+                "const fs=require('fs'); fs.appendFileSync(process.argv[2],process.argv[3]+'\\n');"
+            );
+            const tasks = [{
+                id: 'run', type: 'command',
+                forEach: ['${env:TASKHUB_FOREACH_SECRET}', 'visible'],
+                command: 'node', args: [probe, calls, '${each}'],
+                passTheResultToNextTask: true,
+            }] as any[];
+            const commands: Record<string, string> = Object.create(null);
+            const collector = new ActionRunLogCollector('it186', 'IT-186', Date.now(), tasks);
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await executeActionPipeline(
+                { description: 'IT-186', tasks },
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it186', tempWorkspace, [tempWorkspace], {
+                    recordCommands: commands,
+                    runLogCollector: collector,
+                    builtinVariables: buildBuiltinVariableContext({
+                        workspaceFolder: tempWorkspace,
+                        extensionPath: extensionRoot,
+                        environment: { TASKHUB_FOREACH_SECRET: secret },
+                        strict: true,
+                    }),
+                }
+            );
+
+            assert.deepStrictEqual(
+                fs.readFileSync(calls, 'utf8').trim().split(/\r?\n/),
+                [secret, 'visible'],
+                '실제 프로세스에는 원문 반복값이 전달되어야 한다'
+            );
+            assert.ok(!commands.run.includes(secret), '첫 반복의 내장 민감값이 History 명령에 남았다');
+            assert.ok(commands.run.split(/\r?\n/).every(line => line.includes('***')), commands.run);
+            const report = JSON.stringify(collector.finish('success', Date.now()));
+            assert.ok(!report.includes(secret), '첫 반복의 내장 민감값이 Run Report에 남았다');
+            assert.ok(report.includes('***'));
+        });
+
+        test('IT-187: 첫 반복의 민감 파생 파일 경로를 알림에서 가린다', async () => {
+            const secret = 'TOP-SECRET-PATH';
+            const warnings: string[] = [];
+            const originalWarning = vscode.window.showWarningMessage;
+            try {
+                (vscode.window as any).showWarningMessage = async (message: string) => {
+                    warnings.push(message);
+                    return undefined;
+                };
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                await executeActionPipeline(
+                    {
+                        description: 'IT-187',
+                        tasks: [{
+                            id: 'write', type: 'writeFile',
+                            forEach: ['${env:TASKHUB_FOREACH_PATH}'],
+                            path: '${workspaceFolder}/${each}.txt',
+                            content: 'sensitive',
+                            allowSecretContent: true,
+                        }],
+                    },
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it187', tempWorkspace, [tempWorkspace], {
+                        builtinVariables: buildBuiltinVariableContext({
+                            workspaceFolder: tempWorkspace,
+                            extensionPath: extensionRoot,
+                            environment: { TASKHUB_FOREACH_PATH: secret },
+                            strict: true,
+                        }),
+                    }
+                );
+            } finally {
+                (vscode.window as any).showWarningMessage = originalWarning;
+            }
+
+            assert.strictEqual(fs.existsSync(path.join(tempWorkspace, `${secret}.txt`)), true);
+            assert.ok(warnings.length > 0, '민감 파생 파일 저장 알림이 나타나지 않았다');
+            assert.ok(!warnings.join('\n').includes(secret), '첫 반복의 민감 경로가 알림에 노출됐다');
+            assert.ok(warnings.join('\n').includes('***'));
+        });
+
         test('IT-177: forEach timeout은 중단된 반복 위치를 밝힌다', async () => {
             await assert.rejects(
                 () => run({
