@@ -5386,4 +5386,128 @@ try {
             }
         });
     });
+
+    suite('switch 선택 태스크', () => {
+        test('IT-181: 선택된 command case의 결과와 선택 메타데이터를 이어서 쓴다', async () => {
+            const summary = path.join(tempWorkspace, 'switch-command.txt');
+            await run({
+                description: 'IT-181',
+                tasks: [
+                    { id: 'mode', type: 'stringManipulation', function: 'trim', input: 'run' },
+                    {
+                        id: 'optional', type: 'switch', on: '${mode.output}',
+                        passTheResultToNextTask: true,
+                        cases: {
+                            run: {
+                                type: 'command', command: 'node',
+                                args: ['-e', 'process.stdout.write("branch-output")'],
+                            },
+                        },
+                    },
+                    {
+                        id: 'save', type: 'writeFile', path: summary,
+                        content: '${optional.output}|${optional.matched}|${optional.selected}',
+                    },
+                ],
+            }, 'it181');
+            assert.strictEqual(fs.readFileSync(summary, 'utf8'), 'branch-output|true|run');
+        });
+
+        test('IT-182: 일치하지 않는 선택은 실패 없이 건너뛰고 false를 돌려준다', async () => {
+            const marker = path.join(tempWorkspace, 'must-not-exist.txt');
+            const summary = path.join(tempWorkspace, 'switch-skipped.txt');
+            await run({
+                description: 'IT-182',
+                tasks: [
+                    {
+                        id: 'optional', type: 'switch', on: 'skip', cases: {
+                            run: { type: 'writeFile', path: marker, content: 'ran' },
+                        },
+                    },
+                    {
+                        id: 'save', type: 'writeFile', path: summary,
+                        content: '${optional.matched}|${optional.selected}',
+                    },
+                ],
+            }, 'it182');
+            assert.strictEqual(fs.existsSync(marker), false);
+            assert.strictEqual(fs.readFileSync(summary, 'utf8'), 'false|skip');
+        });
+
+        test('IT-183: 같은 switch에서 서로 다른 태스크 타입을 선택할 수 있다', async () => {
+            const selectedFile = path.join(tempWorkspace, 'switch-write.txt');
+            const summary = path.join(tempWorkspace, 'switch-write-result.txt');
+            await run({
+                description: 'IT-183',
+                tasks: [
+                    {
+                        id: 'work', type: 'switch', on: 'save', cases: {
+                            run: { type: 'command', command: 'node', args: ['-e', 'process.exit(9)'] },
+                            save: { type: 'writeFile', path: selectedFile, content: 'saved' },
+                        },
+                    },
+                    { id: 'summary', type: 'writeFile', path: summary, content: '${work.path}' },
+                ],
+            }, 'it183');
+            assert.strictEqual(fs.readFileSync(selectedFile, 'utf8'), 'saved');
+            assert.strictEqual(fs.readFileSync(summary, 'utf8'), selectedFile);
+        });
+
+        test('IT-184: defaultCase를 실행하고 잘못된 branch 타입은 선택값을 노출하지 않고 거부한다', async () => {
+            const fallback = path.join(tempWorkspace, 'switch-default.txt');
+            await run({
+                description: 'IT-184 default',
+                tasks: [{
+                    id: 'fallback', type: 'switch', on: 'unknown', cases: {
+                        run: { type: 'writeFile', path: 'unused.txt', content: 'unused' },
+                    },
+                    defaultCase: { type: 'writeFile', path: fallback, content: 'default' },
+                }],
+            }, 'it184-default');
+            assert.strictEqual(fs.readFileSync(fallback, 'utf8'), 'default');
+
+            const secretSelector = 'selector-must-not-appear';
+            await assert.rejects(
+                () => run({
+                    description: 'IT-184 invalid',
+                    tasks: [{
+                        id: 'bad', type: 'switch', on: secretSelector,
+                        cases: { [secretSelector]: { type: 'fileDialog' } as any },
+                    }],
+                }, 'it184-invalid'),
+                (error: any) => {
+                    assert.match(String(error?.message), /case type must be one of/);
+                    assert.ok(!String(error?.message).includes(secretSelector));
+                    return true;
+                }
+            );
+        });
+
+        test('IT-185: 조건으로 꺼진 의존성은 그것을 쓰는 case를 골랐을 때만 switch를 건너뛴다', async () => {
+            const safe = path.join(tempWorkspace, 'switch-safe.txt');
+            const blocked = path.join(tempWorkspace, 'switch-blocked.txt');
+            await run({
+                description: 'IT-185',
+                tasks: [
+                    {
+                        id: 'optionalInput', type: 'writeFile', path: 'unused-input.txt', content: 'x',
+                        when: { var: 'off', equals: 'on' },
+                    },
+                    {
+                        id: 'safeChoice', type: 'switch', on: 'safe', cases: {
+                            blocked: { type: 'writeFile', path: blocked, content: '${optionalInput.path}' },
+                            safe: { type: 'writeFile', path: safe, content: 'safe' },
+                        },
+                    },
+                    {
+                        id: 'blockedChoice', type: 'switch', on: 'blocked', cases: {
+                            blocked: { type: 'writeFile', path: blocked, content: '${optionalInput.path}' },
+                        },
+                    },
+                ],
+            }, 'it185');
+            assert.strictEqual(fs.readFileSync(safe, 'utf8'), 'safe');
+            assert.strictEqual(fs.existsSync(blocked), false);
+        });
+    });
 });

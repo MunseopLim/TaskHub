@@ -627,6 +627,23 @@ suite('variableCompletions', () => {
         assert.deepStrictEqual(got, expected.map(k => `pick.${k}`));
     });
 
+    test('완성된 switch 생산자는 메타데이터와 모든 branch 결과 키를 제안한다', () => {
+        const fixture = `[
+          { "id": "a.switch", "title": "switch", "action": { "description": "d", "tasks": [
+            { "id": "choice", "type": "quickPick", "items": ["run", "save"] },
+            { "id": "optional", "type": "switch", "on": "\${choice}", "cases": {
+              "run": { "type": "command", "command": "node", "passTheResultToNextTask": true },
+              "save": { "type": "writeFile", "path": "out.txt", "content": "ok" }
+            } },
+            { "id": "use", "type": "command", "command": "tool", "args": ["\${optional.|" ] }
+          ] } }
+        ]`;
+        assert.deepStrictEqual(names(fixture), [
+            'optional.matched', 'optional.selected', 'optional.output',
+            'optional.stderr', 'optional.path',
+        ]);
+    });
+
     test('forEach 태스크 안에서만 each와 반복 메타데이터를 제안한다', () => {
         const loop = doc(`{ "id": "run", "type": "command", "forEach": "\${pick.paths}",
           "command": "tool", "args": ["\${each.|" ] }`);

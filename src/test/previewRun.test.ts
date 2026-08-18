@@ -7,6 +7,7 @@ import {
     findTypoRefs,
     findUncapturedOutputRefs,
     analyzeCoalesceRefs,
+    simulateTaskResult,
     simulateTaskResultWithCaptures,
 } from '../previewRun';
 import { interpolatePipelineVariables } from '../pipelineUtils';
@@ -30,6 +31,27 @@ function currentBranch(value: string): Record<string, string> {
 }
 
 suite('buildPreviewReport', () => {
+    test('switch의 case와 불일치 no-op을 보여 주고 branch 결과 키를 합친다', () => {
+        const task: Task = {
+            id: 'optional', type: 'switch', on: 'skip',
+            cases: {
+                run: { type: 'command', command: 'node', passTheResultToNextTask: true },
+                save: { type: 'writeFile', path: 'out.txt', content: 'ok' },
+            },
+        };
+        const simulated = simulateTaskResult(task);
+        assert.deepStrictEqual(
+            new Set(Object.keys(simulated)),
+            new Set(['output', 'stderr', 'path', 'matched', 'selected'])
+        );
+        const report = buildPreviewReport({
+            id: 'a.switch', title: 'Switch', action: { description: 'd', tasks: [task] },
+        }, baseOptions());
+        assert.match(report, /"run" → command/);
+        assert.match(report, /"save" → writeFile/);
+        assert.match(report, /no match — succeeds without running a branch/);
+    });
+
     test('현재 파일은 반영하되 환경변수·선택 텍스트 원문은 Preview에서 가린다', () => {
         const file = path.join(WS, 'src', 'main.c');
         const options = baseOptions();

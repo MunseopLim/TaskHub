@@ -1244,6 +1244,7 @@ import {
     actionUsesParallelTasks,
     withInteractivePromptLock,
     INTERACTIVE_TASK_TYPES,
+    materializeSwitchBranchTask,
     walkInterpolatedTaskStrings,
     TaskScheduler,
 } from './pipelineUtils';
@@ -5214,7 +5215,41 @@ async function executeActionPipelineForRun(
      * 인자로 그대로 넘어간다.
      */
     const conditionGate = (task: import('./schema').Task): string | undefined => {
-        if (shouldSkipForSkippedDependencies(task, conditionSkipped)) {
+        let dependencyView = task;
+        if (task.type === 'switch') {
+            // 모든 case는 실행 순서를 잡기 위해 그래프 의존성에 포함하지만, skip
+            // 전파는 **실제로 고른 case만** 봐야 한다. 고르지 않은 case가 조건으로
+            // 꺼진 태스크를 참조한다는 이유로 현재 선택까지 사라지면 switch가
+            // `when` 복제를 줄이기는커녕 더 예측하기 어려워진다.
+            const selectorView = {
+                id: task.id,
+                type: 'switch',
+                on: task.on,
+                when: task.when,
+            } as import('./schema').Task;
+            if (shouldSkipForSkippedDependencies(selectorView, conditionSkipped)) {
+                return t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.');
+            }
+            if (typeof task.on === 'string' && task.cases && typeof task.cases === 'object') {
+                const gateContext = Object.assign(Object.create(null), builtinVariables, stepResults);
+                const selected = interpolatePipelineVariables(task.on, gateContext);
+                const branch = Object.prototype.hasOwnProperty.call(task.cases, selected)
+                    ? task.cases[selected]
+                    : task.defaultCase;
+                if (branch !== undefined) {
+                    try {
+                        dependencyView = materializeSwitchBranchTask(task, branch);
+                    } catch {
+                        // 실행기가 선택한 branch의 구체적인 설정 오류를 보고한다.
+                    }
+                } else {
+                    dependencyView = selectorView;
+                }
+            } else {
+                dependencyView = selectorView;
+            }
+        }
+        if (shouldSkipForSkippedDependencies(dependencyView, conditionSkipped)) {
             return t('조건으로 꺼진 태스크의 결과를 참조합니다.', 'References a task skipped by its condition.');
         }
         if (!task.when) { return undefined; }
@@ -5343,7 +5378,7 @@ async function executeActionPipelineForRun(
         return contextualized.then(
             (result): InFlightOutcome => {
                 let output: TaskRunLogOutput | undefined;
-                if (task.type === 'command' || task.type === 'shell') {
+                if (task.type === 'command' || task.type === 'shell' || task.type === 'switch') {
                     if (taskUsesSensitiveData) {
                         output = { availability: 'redacted' };
                     } else if (result && typeof result === 'object') {
@@ -6687,6 +6722,57 @@ async function executeSingleTask(
     const interpolationContext = Object.assign(
         Object.create(null), effectiveBuiltinVariables, allResults
     );
+    if (task.type === 'switch') {
+        if (task.forEach !== undefined) {
+            throw new Error(`Task '${task.id}' cannot combine 'switch' with 'forEach'.`);
+        }
+        if (typeof task.on !== 'string' || task.on.length === 0) {
+            throw new Error(`Task '${task.id}' of type 'switch' requires a non-empty 'on' string.`);
+        }
+        if (!task.cases || typeof task.cases !== 'object' || Array.isArray(task.cases)) {
+            throw new Error(`Task '${task.id}' of type 'switch' requires a 'cases' object.`);
+        }
+        const caseNames = Object.keys(task.cases);
+        if (caseNames.length === 0 || caseNames.length > 100) {
+            throw new Error(`Task '${task.id}' switch must define between 1 and 100 cases.`);
+        }
+        if (caseNames.some(name => name === '__proto__' || name === 'constructor' || name === 'prototype')) {
+            throw new Error(`Task '${task.id}' switch uses a reserved case name.`);
+        }
+        const selected = interpolatePipelineVariables(task.on, interpolationContext);
+        const matched = Object.prototype.hasOwnProperty.call(task.cases, selected);
+        const branch = matched ? task.cases[selected] : task.defaultCase;
+        if (branch === undefined) {
+            throwIfTaskInactive(scope);
+            if (taskUsesSecret) {
+                markTaskResultSecret(executionRun, task.id);
+            } else if (taskUsesSensitiveData) {
+                markTaskResultSensitive(executionRun, task.id);
+            }
+            return { matched: false, selected };
+        }
+        const selectedTask = materializeSwitchBranchTask(task, branch);
+        const branchResult = await executeSingleTask(
+            selectedTask,
+            allResults,
+            context,
+            actionId,
+            workspaceFolderPath,
+            workspaceRoots,
+            undefined,
+            recordCommands,
+            runLogCollector,
+            scope,
+            taskUsesSecret,
+            taskUsesSensitiveData,
+            effectiveBuiltinVariables
+        );
+        return {
+            ...(branchResult && typeof branchResult === 'object' ? branchResult : {}),
+            matched,
+            selected,
+        };
+    }
     if (task.forEach !== undefined) {
         return executeForEachTask(
             task,

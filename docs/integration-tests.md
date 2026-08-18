@@ -166,6 +166,7 @@
 | IT-175 | password 파생 반복값 마스킹 | 실제 프로세스에는 원문 반복값을 전달하지만 History 명령에는 모든 반복을 `***`로 기록함 |
 | IT-177 | 반복 timeout 위치 | 전체 timeout이 반복 도중 발생해도 현재 항목의 `1/2` 위치를 오류에 포함 |
 | IT-178 | 반복 결과 합계 상한 | 각 반복 출력은 개별 상한 이하더라도 누적 결과가 액션 상한을 넘으면 다음 결과를 보관하기 전에 중단 |
+| IT-181, IT-182, IT-183, IT-184, IT-185 | switch 선택 실행 | command case 결과/메타데이터, 불일치 no-op, 이종 태스크 선택, defaultCase·잘못된 branch 거부, 선택된 case에 한정한 조건 skip 전파를 실제 파이프라인에서 검증 |
 
 ### Last-run 배지
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)

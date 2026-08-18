@@ -33,6 +33,7 @@ import {
     formatCyclePath,
     isInsideWorkspaceRoots,
     walkInterpolatedTaskStrings,
+    materializeSwitchBranchTask,
     RESERVED_VARIABLE_HEADS,
 } from './pipelineUtils';
 import {
@@ -93,6 +94,28 @@ export function simulateTaskResult(task: Task): SimulatedResult {
         return aggregate;
     }
     switch (task.type) {
+        case 'switch': {
+            const union: SimulatedResult = {
+                matched: false,
+                selected: placeholder('switch', task.id, 'selected'),
+            };
+            const branches = [
+                ...Object.values(task.cases ?? {}),
+                ...(task.defaultCase ? [task.defaultCase] : []),
+            ];
+            for (const branch of branches) {
+                try {
+                    Object.assign(union, simulateTaskResult(materializeSwitchBranchTask(task, branch)));
+                } catch {
+                    // Schema/Doctor reports malformed branches. Keep the rest of the
+                    // result union useful for downstream completion and preview.
+                }
+            }
+            // Branch outputs must never shadow the selector metadata.
+            union.matched = false;
+            union.selected = placeholder('switch', task.id, 'selected');
+            return union;
+        }
         case 'fileDialog':
         case 'folderDialog':
         case 'pathDialog': {
@@ -1106,6 +1129,57 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         }
 
         switch (task.type) {
+            case 'switch': {
+                const resolvedOn = typeof task.on === 'string'
+                    ? interpolatePipelineVariables(task.on, interpolationContext)
+                    : '(missing)';
+                interpolated.push(resolvedOn);
+                lines.push(`  on:      ${task.on ?? '(missing)'} → ${resolvedOn}`);
+                const entries = Object.entries(task.cases ?? {});
+                if (entries.length === 0) {
+                    lines.push(`  cases:   (missing)`);
+                } else {
+                    lines.push(`  cases:`);
+                    for (const [key, branch] of entries) {
+                        lines.push(`    ${JSON.stringify(key)} → ${branch?.type ?? '(missing type)'}`);
+                        try {
+                            const selectedTask = materializeSwitchBranchTask(task, branch);
+                            for (const raw of walkInterpolatedTaskStrings(selectedTask, process.platform)) {
+                                interpolated.push(interpolatePipelineVariables(raw, interpolationContext));
+                            }
+                        } catch (error) {
+                            const message = error instanceof Error ? error.message : String(error);
+                            lines.push(`      ⚠️  ${message}`);
+                            runtimeBlockers.push(`${task.id}: ${message}`);
+                        }
+                    }
+                }
+                if (task.defaultCase) {
+                    lines.push(`  default: ${task.defaultCase.type ?? '(missing type)'}`);
+                    try {
+                        const fallbackTask = materializeSwitchBranchTask(task, task.defaultCase);
+                        for (const raw of walkInterpolatedTaskStrings(fallbackTask, process.platform)) {
+                            interpolated.push(interpolatePipelineVariables(raw, interpolationContext));
+                        }
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : String(error);
+                        lines.push(`    ⚠️  ${message}`);
+                        runtimeBlockers.push(`${task.id}: ${message}`);
+                    }
+                }
+                if (Object.prototype.hasOwnProperty.call(task.cases ?? {}, resolvedOn)) {
+                    lines.push(`    simulated selection: case ${JSON.stringify(resolvedOn)}`);
+                } else if (!UNRESOLVED_VAR_RE.test(resolvedOn) && !resolvedOn.startsWith('<')) {
+                    UNRESOLVED_VAR_RE.lastIndex = 0;
+                    lines.push(task.defaultCase
+                        ? `    simulated selection: default case`
+                        : `    simulated selection: no match — succeeds without running a branch`);
+                } else {
+                    UNRESOLVED_VAR_RE.lastIndex = 0;
+                    lines.push(`    selection is decided at runtime`);
+                }
+                break;
+            }
             case 'shell':
             case 'command': {
                 // 런타임과 **같은 규칙**으로 보간해야 한다 — `command` 는 토큰

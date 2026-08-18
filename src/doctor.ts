@@ -35,6 +35,7 @@ import {
     tokenizeCommandLine,
     RESERVED_CAPTURE_NAMES,
     INTERACTIVE_TASK_TYPES,
+    materializeSwitchBranchTask,
     buildTaskGraph,
     detectGraphCycle,
     formatCyclePath,
@@ -194,7 +195,22 @@ function analyzeFile(input: DoctorInput, validator: DoctorValidator): DoctorFind
     findings.push(...checkDependsOn(parsed, input));
     findings.push(...checkParallelInteractive(parsed, input));
 
-    return findings;
+    const seen = new Set<string>();
+    return findings.filter(finding => {
+        const key = [
+            finding.filePath,
+            finding.range.startLine,
+            finding.range.startColumn,
+            finding.range.endLine,
+            finding.range.endColumn,
+            finding.severity,
+            finding.code,
+            finding.message,
+        ].join('\u0000');
+        if (seen.has(key)) { return false; }
+        seen.add(key);
+        return true;
+    });
 }
 
 function jsonParseErrorRange(text: string, err: any): DoctorFinding['range'] {
@@ -757,6 +773,33 @@ function checkUnresolvedAndOutsideWrites(actions: ActionItem[], input: DoctorInp
         for (const item of items) {
             if (item?.action?.tasks && Array.isArray(item.action.tasks)) {
                 analyzeActionTasks(item, item.action.tasks, input, findings);
+                for (let index = 0; index < item.action.tasks.length; index++) {
+                    const switchTask = item.action.tasks[index];
+                    if (!switchTask || switchTask.type !== 'switch') { continue; }
+                    const branches = [
+                        ...Object.values(switchTask.cases ?? {}),
+                        ...(switchTask.defaultCase ? [switchTask.defaultCase] : []),
+                    ];
+                    for (const branch of branches) {
+                        let selectedTask: Task;
+                        try {
+                            selectedTask = materializeSwitchBranchTask(switchTask, branch);
+                        } catch {
+                            // JSON Schema already reports malformed branch shapes. Avoid
+                            // hiding valid diagnostics from the other cases.
+                            continue;
+                        }
+                        const variants = item.action.tasks.slice();
+                        variants[index] = selectedTask;
+                        const branchFindings: DoctorFinding[] = [];
+                        analyzeActionTasks(item, variants, input, branchFindings);
+                        const target = findIdLine(input.rawText, switchTask.id);
+                        findings.push(...branchFindings.filter(finding =>
+                            finding.range.startLine === target.startLine
+                            && finding.range.startColumn === target.startColumn
+                        ));
+                    }
+                }
             }
             if (Array.isArray(item?.children) && item.children.length > 0) {
                 walkActions(item.children);
@@ -2752,6 +2795,7 @@ function analyzeActionTasks(
         visitString(task.value);
         visitString(task.placeHolder);
         visitString(task.message);
+        visitString(task.on);
         visitString(task.input);
         visitString(task.archive);
         visitString(task.destination);
@@ -3417,6 +3461,19 @@ function forEachTask(
                 for (const task of item.action.tasks) {
                     if (task && typeof task.id === 'string') {
                         visitor(item, task);
+                        if (task.type === 'switch') {
+                            const branches = [
+                                ...Object.values(task.cases ?? {}),
+                                ...(task.defaultCase ? [task.defaultCase] : []),
+                            ];
+                            for (const branch of branches) {
+                                try {
+                                    visitor(item, materializeSwitchBranchTask(task, branch));
+                                } catch {
+                                    // Schema findings remain authoritative for malformed cases.
+                                }
+                            }
+                        }
                     }
                 }
             }

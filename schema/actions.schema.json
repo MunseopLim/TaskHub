@@ -71,7 +71,26 @@
         "type": {
           "type": "string",
           "description": "The type of the task to execute.",
-          "enum": ["shell", "command", "fileDialog", "folderDialog", "pathDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "envPick", "confirm", "writeFile", "appendFile"]
+          "enum": ["shell", "command", "fileDialog", "folderDialog", "pathDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "envPick", "confirm", "writeFile", "appendFile", "switch"]
+        },
+        "on": {
+          "type": "string",
+          "minLength": 1,
+          "description": "For 'switch': value used to choose a case after interpolation, usually '${pick}'. Matching is exact."
+        },
+        "cases": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 100,
+          "propertyNames": {
+            "not": { "enum": ["__proto__", "constructor", "prototype"] }
+          },
+          "additionalProperties": { "$ref": "#/definitions/SwitchTaskBranch" },
+          "description": "For 'switch': map from an exact resolved 'on' value to a non-interactive task body. If no key matches and defaultCase is omitted, the switch succeeds without running a branch."
+        },
+        "defaultCase": {
+          "$ref": "#/definitions/SwitchTaskBranch",
+          "description": "Optional non-interactive task body run when no case key matches."
         },
         "command": {
           "oneOf": [
@@ -504,12 +523,21 @@
           }
         },
         {
+          "if": {
+            "properties": { "type": { "const": "switch" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["on", "cases"]
+          }
+        },
+        {
           "if": { "required": ["forEach"] },
           "then": {
             "properties": {
               "type": {
                 "not": {
-                  "enum": ["inputBox", "quickPick", "envPick", "fileDialog", "folderDialog", "pathDialog", "confirm"]
+                  "enum": ["inputBox", "quickPick", "envPick", "fileDialog", "folderDialog", "pathDialog", "confirm", "switch"]
                 }
               },
               "isOneShot": { "not": { "const": true } }
@@ -517,6 +545,40 @@
           }
         }
       ]
+    },
+    "SwitchTaskBranch": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["shell", "command", "unzip", "zip", "stringManipulation", "writeFile", "appendFile"],
+          "description": "Non-interactive task type to execute for this branch. Dialogs and nested switches stay as separate outer tasks."
+        },
+        "command": { "$ref": "#/definitions/Task/properties/command" },
+        "args": { "$ref": "#/definitions/Task/properties/args" },
+        "env": { "$ref": "#/definitions/Task/properties/env" },
+        "cwd": { "$ref": "#/definitions/Task/properties/cwd" },
+        "revealTerminal": { "$ref": "#/definitions/Task/properties/revealTerminal" },
+        "tool": { "$ref": "#/definitions/Task/properties/tool" },
+        "inputs": { "$ref": "#/definitions/Task/properties/inputs" },
+        "source": { "$ref": "#/definitions/Task/properties/source" },
+        "archive": { "$ref": "#/definitions/Task/properties/archive" },
+        "destination": { "$ref": "#/definitions/Task/properties/destination" },
+        "function": { "$ref": "#/definitions/Task/properties/function" },
+        "input": { "$ref": "#/definitions/Task/properties/input" },
+        "path": { "$ref": "#/definitions/Task/properties/path" },
+        "content": { "$ref": "#/definitions/Task/properties/content" },
+        "encoding": { "$ref": "#/definitions/Task/properties/encoding" },
+        "eol": { "$ref": "#/definitions/Task/properties/eol" },
+        "overwrite": { "$ref": "#/definitions/Task/properties/overwrite" },
+        "mkdirs": { "$ref": "#/definitions/Task/properties/mkdirs" },
+        "allowSecretContent": { "$ref": "#/definitions/Task/properties/allowSecretContent" },
+        "output": { "$ref": "#/definitions/Task/properties/output" },
+        "passTheResultToNextTask": { "$ref": "#/definitions/Task/properties/passTheResultToNextTask" },
+        "isOneShot": { "$ref": "#/definitions/Task/properties/isOneShot" }
+      },
+      "required": ["type"],
+      "additionalProperties": false
     },
     "Output": {
       "type": "object",

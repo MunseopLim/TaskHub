@@ -4199,6 +4199,62 @@ suite('actions.schema.json — pathDialog', () => {
     });
 });
 
+suite('actions.schema.json — switch', () => {
+    const taskSchema: any = (actionSchema as any).definitions?.Task;
+    const wrap = (task: any) => [{
+        id: 'a.switch', title: 'switch', action: { description: 'd', tasks: [task] },
+    }];
+
+    test('비대화형 case와 선택적 defaultCase를 허용하고 제어 필드는 막는다', () => {
+        assert.ok(taskSchema?.properties?.type?.enum?.includes('switch'));
+        assert.ok(taskSchema?.properties?.cases);
+        const v = compileValidator();
+        assert.strictEqual(v(wrap({
+            id: 'optional', type: 'switch', on: '${mode}',
+            cases: {
+                run: { type: 'command', command: 'node', args: ['x'] },
+                save: { type: 'writeFile', path: 'out.txt', content: 'ok' },
+            },
+            defaultCase: { type: 'stringManipulation', function: 'trim', input: 'fallback' },
+        })), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap({ id: 'bad', type: 'switch', cases: { x: { type: 'command', command: 'x' } } })), false);
+        assert.strictEqual(v(wrap({
+            id: 'bad', type: 'switch', on: 'x', cases: { x: { type: 'fileDialog' } },
+        })), false, 'interactive case가 통과했다');
+        assert.strictEqual(v(wrap({
+            id: 'bad', type: 'switch', on: 'x', cases: {
+                x: { type: 'command', command: 'x', when: { var: 'x', equals: 'x' } },
+            },
+        })), false, 'case가 바깥 스케줄링 필드를 덮었다');
+    });
+
+    test('Doctor가 각 case의 미해결 참조·shell 주입·민감 파일 쓰기를 검사한다', () => {
+        const actions = wrap({
+            id: 'optional', type: 'switch', on: '${mode}', cases: {
+                run: { type: 'shell', command: 'echo ${ghost.value}' },
+                save: { type: 'writeFile', path: 'out.txt', content: '${env:TOKEN}' },
+            },
+        });
+        const findings = runDoctor([makeInput(actions)], compileValidator());
+        const got = codes(findings);
+        assert.ok(got.includes('variable.unresolved'), JSON.stringify(findings));
+        assert.ok(got.includes('shell.interpolated-command'), JSON.stringify(findings));
+        assert.ok(got.includes('secret.file-optin'), JSON.stringify(findings));
+    });
+
+    test('switch branch의 capture 예약 이름도 일반 태스크처럼 검사한다', () => {
+        const findings = runDoctor([makeInput(wrap({
+            id: 'optional', type: 'switch', on: 'run', cases: {
+                run: {
+                    type: 'command', command: 'node', passTheResultToNextTask: true,
+                    output: { capture: { name: 'matched', regex: '(.*)' } },
+                },
+            },
+        }))], compileValidator());
+        assert.ok(codes(findings).includes('capture.reserved'), JSON.stringify(findings));
+    });
+});
+
 suite('actions.schema.json — quickPick 편의 옵션', () => {
     const taskSchema: any = (actionSchema as any).definitions?.Task;
     const properties: any = taskSchema?.properties;

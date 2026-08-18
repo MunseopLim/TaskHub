@@ -44,6 +44,7 @@ import {
     resolveForEachItems,
     buildForEachValue,
     inferTaskDependencies,
+    materializeSwitchBranchTask,
 } from '../pipelineUtils';
 import { attachPipelineTaskIds, buildBuiltinVariableContext } from '../builtinVariables';
 
@@ -54,6 +55,33 @@ import { attachPipelineTaskIds, buildBuiltinVariableContext } from '../builtinVa
  * file will fail to load.
  */
 suite('pipelineUtils — direct-import smoke suite', () => {
+    test('switch case는 바깥 id와 공통 설정을 유지하고 case가 실행 필드를 덮는다', () => {
+        const selected = materializeSwitchBranchTask({
+            id: 'optional', type: 'switch', on: '${mode}', cases: {},
+            cwd: '/outer', passTheResultToNextTask: true,
+        } as any, {
+            type: 'command', command: 'node', cwd: '/case', args: ['x'],
+        } as any);
+        assert.strictEqual(selected.id, 'optional');
+        assert.strictEqual(selected.type, 'command');
+        assert.strictEqual(selected.cwd, '/case');
+        assert.strictEqual(selected.passTheResultToNextTask, true);
+        assert.ok(!Object.prototype.hasOwnProperty.call(selected, 'cases'));
+        assert.ok(!Object.prototype.hasOwnProperty.call(selected, 'on'));
+    });
+
+    test('switch case는 대화형 타입과 스케줄링 필드를 거부한다', () => {
+        const outer = { id: 'optional', type: 'switch', on: '${mode}', cases: {} } as any;
+        assert.throws(
+            () => materializeSwitchBranchTask(outer, { type: 'fileDialog' } as any),
+            /type must be one of/
+        );
+        assert.throws(
+            () => materializeSwitchBranchTask(outer, { type: 'command', command: 'x', when: {} } as any),
+            /cannot define 'when'/
+        );
+    });
+
     test('INTERPOLATED_VALUE_MAX_LENGTH matches documented 32 KB cap', () => {
         assert.strictEqual(INTERPOLATED_VALUE_MAX_LENGTH, 32 * 1024);
     });

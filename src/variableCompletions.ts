@@ -373,14 +373,26 @@ export function collectVariableCompletions(
     const repeated = /"forEach"\s*:/.test(target.text);
     let simulated: Record<string, unknown>;
     try {
-        simulated = (simulateTaskResult({
+        let simulatedTask: any = {
             id: head,
             type,
             canPickMany: pickMany,
             forEach: repeated ? ['<item>'] : undefined,
             passTheResultToNextTask: captured,
             options: many ? { canSelectMany: true } : undefined,
-        } as any) ?? {}) as Record<string, unknown>;
+        };
+        // switch의 결과 키는 각 case의 합집합이다. 생산자 객체가 완성된 JSON이면
+        // 실제 branch 정의를 시뮬레이션에 넘기고, 편집 중이라 아직 파싱할 수
+        // 없으면 matched/selected 메타데이터만 제안하는 안전한 폴백을 쓴다.
+        if (type === 'switch') {
+            try {
+                const parsed = JSON.parse(target.text);
+                if (parsed && typeof parsed === 'object') { simulatedTask = parsed; }
+            } catch {
+                // Partially typed JSON is expected while completion is open.
+            }
+        }
+        simulated = (simulateTaskResult(simulatedTask) ?? {}) as Record<string, unknown>;
     } catch {
         return [];
     }

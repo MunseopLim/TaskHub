@@ -47,7 +47,15 @@ export interface TaskCondition {
 
 export interface Task {
     id: string;
-    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'pathDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick' | 'envPick' | 'confirm' | 'writeFile' | 'appendFile';
+    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'pathDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick' | 'envPick' | 'confirm' | 'writeFile' | 'appendFile' | 'switch';
+
+    // Properties for 'switch'
+    /** 선택할 case 이름. 보통 `${pick}`처럼 앞 태스크의 실행값을 쓴다. */
+    on?: string;
+    /** `on`과 정확히 일치하는 비대화형 태스크 본문. 일치하지 않으면 성공적으로 건너뛴다. */
+    cases?: Record<string, SwitchTaskBranch>;
+    /** 어떤 case도 일치하지 않을 때 실행할 선택적 비대화형 태스크 본문. */
+    defaultCase?: SwitchTaskBranch;
 
     // Properties for 'shell' and 'command' types
     command?: string | {
@@ -292,6 +300,17 @@ export interface Task {
      * 때만 함께 꺼진다.
      */
     when?: TaskCondition;
+}
+
+/**
+ * `switch` 안에서 선택되는 실제 태스크 본문.
+ *
+ * 스케줄링과 식별은 바깥 switch가 소유하므로 id/when/dependsOn/parallel 등의
+ * 제어 필드는 허용하지 않는다. 런타임과 JSON Schema가 구체 필드를 검증한다.
+ */
+export interface SwitchTaskBranch {
+    type: 'shell' | 'command' | 'unzip' | 'zip' | 'stringManipulation' | 'writeFile' | 'appendFile';
+    [key: string]: unknown;
 }
 
 /**

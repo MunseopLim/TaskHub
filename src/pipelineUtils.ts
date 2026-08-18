@@ -16,7 +16,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
-import type { OutputCapture, Task, TaskCondition } from './schema';
+import type { OutputCapture, SwitchTaskBranch, Task, TaskCondition } from './schema';
 import {
     BUILTIN_VARIABLE_NAMES,
     contextDeclaresTaskId,
@@ -68,6 +68,8 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
     // 더한 결과 키들. 이 목록은 "내장 결과 키를 가리는 이름" 이 기준이므로,
     // 키가 늘 때마다 함께 늘어야 한다.
     'paths', 'names', 'count', 'label', 'labels', 'labelList', 'valueList', 'custom',
+    // switch가 선택 결과와 함께 항상 내놓는 메타데이터.
+    'matched', 'selected',
     // QuickPick의 안정 id는 History/선택 기억용 내부 메타데이터다. capture가
     // 덮어쓰면 다른 mapping을 재실행할 수 있으므로 사용자 API가 아니어도 예약한다.
     '_itemId', '_itemIds',
@@ -97,6 +99,64 @@ export const INTERACTIVE_TASK_TYPES: ReadonlySet<string> = new Set([
     'pathDialog',
     'confirm',
 ]);
+
+/** `switch` case에서 안전하게 실행할 수 있는 비대화형 태스크 타입. */
+export const SWITCH_BRANCH_TASK_TYPES: ReadonlySet<string> = new Set([
+    'shell',
+    'command',
+    'unzip',
+    'zip',
+    'stringManipulation',
+    'writeFile',
+    'appendFile',
+]);
+
+/** 바깥 switch가 소유하므로 case가 덮어쓸 수 없는 스케줄링/분기 필드. */
+export const SWITCH_BRANCH_CONTROL_FIELDS: ReadonlySet<string> = new Set([
+    'id',
+    'when',
+    'dependsOn',
+    'parallel',
+    'forEach',
+    'continueOnError',
+    'timeoutSeconds',
+    'on',
+    'cases',
+    'defaultCase',
+]);
+
+/**
+ * `switch` case를 같은 id를 가진 실제 실행 태스크로 만든다.
+ *
+ * 바깥 태스크의 공통 실행 설정은 기본값으로 유지되고 case 값이 그 위를
+ * 덮는다. 분기/스케줄링 필드는 바깥 switch만 소유한다. Doctor와 Preview도
+ * 이 함수를 사용해 런타임과 같은 태스크 모양을 본다.
+ */
+export function materializeSwitchBranchTask(task: Task, branch: SwitchTaskBranch): Task {
+    if (!branch || typeof branch !== 'object' || Array.isArray(branch)) {
+        throw new Error(`Task '${task.id}' switch case must be a task object.`);
+    }
+    if (typeof branch.type !== 'string' || !SWITCH_BRANCH_TASK_TYPES.has(branch.type)) {
+        throw new Error(
+            `Task '${task.id}' switch case type must be one of: ${Array.from(SWITCH_BRANCH_TASK_TYPES).join(', ')}.`
+        );
+    }
+    for (const key of SWITCH_BRANCH_CONTROL_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(branch, key)) {
+            throw new Error(`Task '${task.id}' switch case cannot define '${key}'; configure it on the outer switch task.`);
+        }
+    }
+    const outer: Record<string, unknown> = { ...(task as any) };
+    delete outer.on;
+    delete outer.cases;
+    delete outer.defaultCase;
+    return {
+        ...outer,
+        ...(branch as any),
+        id: task.id,
+        type: branch.type,
+    } as Task;
+}
 
 /**
  * Apply one or more capture rules to a task's string output and return a map

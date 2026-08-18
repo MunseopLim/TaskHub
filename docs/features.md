@@ -228,6 +228,7 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 | 사용자 입력 | `fileDialog`, `folderDialog`, `pathDialog`, `inputBox`, `quickPick`, `envPick`, `confirm` |
 | 파일·아카이브 | `writeFile`, `appendFile`, `zip`, `unzip` |
 | 값 변환 | `stringManipulation` |
+| 선택 실행 | `switch` |
 
 공통 실행 옵션은 `timeoutSeconds`, `continueOnError`, `when`, `dependsOn`, `parallel`입니다. 병렬 실행은 [§24](#24-병렬-실행--task-dag)를 참조하세요.
 
@@ -657,6 +658,58 @@ python inspect.py "두 번째 경로" --number 2
 ```
 
 지원 연산자는 `equals`, `notEquals`, `matches`, `in`이며 정확히 하나만 사용합니다. 비교 피연산자는 보간하지 않습니다. 조건이 거짓이면 실패가 아니라 skip이며, 그 태스크를 일반 참조하는 소비자도 함께 skip됩니다. 대안 체인(`??`)은 모든 대안이 skip될 때만 소비자를 skip합니다.
+
+### 선택 실행 (`switch`)
+
+QuickPick 선택마다 `when` 태스크를 하나씩 복제해야 한다면 `switch` 하나에 case를 모을 수 있습니다.
+`on`을 보간한 문자열과 case 이름은 정확히 비교됩니다.
+
+```json
+{
+  "id": "operation",
+  "type": "quickPick",
+  "items": [
+    { "label": "빌드", "value": "build" },
+    { "label": "테스트", "value": "test" },
+    { "label": "아무것도 안 함", "value": "skip" }
+  ]
+},
+{
+  "id": "selectedWork",
+  "type": "switch",
+  "on": "${operation}",
+  "cases": {
+    "build": { "type": "command", "command": "npm", "args": ["run", "build"] },
+    "test": { "type": "command", "command": "npm", "args": ["test"] }
+  }
+}
+```
+
+`skip`처럼 일치하는 case가 없고 `defaultCase`도 없으면 실패하지 않고 아무 branch도 실행하지 않습니다.
+결과의 `${selectedWork.matched}`는 `false`, `${selectedWork.selected}`는 `skip`입니다. case가 실행되면
+`matched`는 `true`이고, 선택된 태스크의 결과도 같은 ID로 이어집니다. 예를 들어 command branch가
+`passTheResultToNextTask: true`이면 `${selectedWork.output}`, writeFile branch이면 `${selectedWork.path}`를
+사용할 수 있습니다. branch마다 결과 모양이 다르면 **실제로 선택된 branch가 만든 키만** 존재하므로
+`${selectedWork.output ?? selectedWork.path}`처럼 대안 체인을 쓰거나 `matched`/`selected`로 소비자를
+조건화합니다. 일치하지 않을 때 실행할 작업이 필요하면 `defaultCase`에 같은 형태의 태스크를 적습니다.
+
+case에는 `command`, `shell`, `stringManipulation`, `writeFile`, `appendFile`, `zip`, `unzip`처럼
+프롬프트를 열지 않는 태스크를 쓸 수 있습니다. `id`·`when`·`dependsOn`·`parallel`·`forEach`·timeout·
+continue-on-error는 바깥 `switch`가 소유합니다. 바깥 switch에 적은 `cwd`, `env`,
+`passTheResultToNextTask` 같은 실행 설정은 case의 기본값이 되고, case에 같은 필드를 적으면 case 값이
+우선합니다. 의존성은 실행 전에 결정되어야 하므로 모든 case 안의 `${task.result}` 참조를 보수적으로
+의존성에 포함합니다.
+
+파일/폴더 중 하나를 고르는 경우는 case 안에 대화상자를 넣지 말고 `pathDialog`를 사용합니다.
+
+```json
+{ "id": "kind", "type": "quickPick", "items": [
+  { "label": "파일", "value": "file" },
+  { "label": "폴더", "value": "folder" }
+] },
+{ "id": "target", "type": "pathDialog", "mode": "${kind}" },
+{ "id": "run", "type": "command", "command": "tool", "args": ["${target.path}"] }
+```
 
 ### 전체 예시
 
