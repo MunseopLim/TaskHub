@@ -1008,6 +1008,37 @@ function referenceKeyIsProducible(source: Task, key: string | undefined): boolea
     return keys.has(key);
 }
 
+/**
+ * 고정 `quickPick` 항목 하나가 **그 참조 키 자리에** 낼 수 있는 문자열들.
+ *
+ * **키를 반드시 본다.** `value` 매핑이 생기면서 같은 항목이 키에 따라 다른
+ * 문자열을 낸다 — `${pick.value}` 는 매핑 값, `${pick.label}` 은 표시 문구다.
+ * 키를 무시하고 한쪽만 돌려주면 반대쪽 참조에서 **진단이 실행되지도 않는
+ * 문자열을 검사한다**: 얌전한 값을 매핑해 두고 label 에 `x; id` 를 적으면
+ * `${pick.label}` 의 면제가 그대로 뚫린다.
+ *
+ * 열거할 수 없으면(`value` 가 배열이거나 label 이 문자열이 아닌 항목, 모르는
+ * 키) `undefined` 를 돌려주고 호출부는 fail-closed 로 처리한다.
+ */
+function quickPickItemCandidates(entry: unknown, key: string | undefined): string[] | undefined {
+    const labelOf = (item: any): string[] | undefined => {
+        if (typeof item === 'string') { return [item]; }
+        return typeof item?.label === 'string' ? [item.label] : undefined;
+    };
+    // 표시 문구를 그대로 내는 키.
+    if (key === 'label' || key === 'labels') { return labelOf(entry); }
+    // 매핑 값을 내는 키. 그 밖의 키는 이 함수가 모형을 갖고 있지 않다.
+    if (key !== 'value' && key !== 'values' && key !== 'valueList') { return undefined; }
+    if (typeof entry === 'string') { return [entry]; }
+    if (!entry || typeof entry !== 'object') { return undefined; }
+    const item = entry as any;
+    if (item.value === undefined) { return labelOf(item); }
+    if (typeof item.value === 'string') { return [item.value]; }
+    // 배열 매핑은 argv 여러 칸이 된다 — 실행 파일 하나로 열거할 수도, 셸에서
+    // 공백 없이 이어 붙는다고 장담할 수도 없다.
+    return undefined;
+}
+
 export function enumerateArgvCandidates(
     argv: string[],
     tasks: Task[],
@@ -1079,8 +1110,11 @@ export function enumerateArgvCandidates(
             return { variants: [argv], truncated: false };
         }
         for (const entry of source.items) {
-            const label = typeof entry === 'string' ? entry : entry?.label;
-            if (typeof label === 'string') { values.add(label); }
+            const candidates = quickPickItemCandidates(entry, alt.key);
+            // 열거할 수 없는 항목이 하나라도 있으면 값 집합이 불완전해진다 —
+            // 그 상태로 열거하면 실제로 실행될 수 있는 인터프리터를 놓친다.
+            if (!candidates) { return { variants: [argv], truncated: false }; }
+            for (const candidate of candidates) { values.add(candidate); }
         }
     }
     // **풀릴 대안이 하나도 없으면 그 명령은 실행되지 않는다.** 실행 파일 이름이
@@ -2062,11 +2096,15 @@ function nestedInterpreterRefsAreConstrained(candidate: ScriptCandidate, tasksBy
             if (source.type === 'quickPick') {
                 // 항목 자체에 메타문자가 있으면 고정 목록이라도 안전하지 않다.
                 if (!Array.isArray(source.items) || source.itemsFromCommand) { return false; }
+                // **label 이 아니라 실제로 치환되는 값**을 본다. `value` 매핑이
+                // 있으면 목록에 보이는 문구는 명령에 닿지 않는다.
                 return source.items.every((entry: any) => {
-                    const label = typeof entry === 'string' ? entry : entry?.label;
-                    if (typeof label !== 'string') { return false; }
-                    if (optionInjectable && canLeadWithDash(label.startsWith('-'))) { return false; }
-                    return !containsShellMetacharacter(label);
+                    const candidates = quickPickItemCandidates(entry, alt.key);
+                    if (!candidates) { return false; }
+                    return candidates.every(candidate => {
+                        if (optionInjectable && canLeadWithDash(candidate.startsWith('-'))) { return false; }
+                        return !containsShellMetacharacter(candidate);
+                    });
                 });
             }
             // `envPick` 은 면제하지 않는다 — 위 주석 참조.
@@ -2669,6 +2707,15 @@ function analyzeActionTasks(
                 } else if (it && typeof it === 'object') {
                     visitString((it as any).label);
                     visitString((it as any).description);
+                    // `value` 매핑도 런타임이 보간한다. 빠뜨리면 여기 적힌 오타가
+                    // 리터럴 그대로 argv 에 도착하는데 진단은 조용하다 — 같은 오타가
+                    // `label` 에 있으면 잡히므로 자리에 따라 판정이 갈렸다.
+                    const mapped = (it as any).value;
+                    if (Array.isArray(mapped)) {
+                        for (const entry of mapped) { visitString(entry); }
+                    } else {
+                        visitString(mapped);
+                    }
                 }
             }
         }

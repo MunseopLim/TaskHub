@@ -47,6 +47,10 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
     // stderr 는 Problems 패널로 가는 진단의 입력이기도 하다.
     'output', 'stderr', 'outputDir', 'path', 'dir', 'name', 'fileNameOnly', 'fileExt',
     'value', 'values', 'archivePath', 'confirmed',
+    // 다중 선택 다이얼로그(0.6.51·0.6.57)와 quickPick `value` 매핑(0.7.31)이
+    // 더한 결과 키들. 이 목록은 "내장 결과 키를 가리는 이름" 이 기준이므로,
+    // 키가 늘 때마다 함께 늘어야 한다.
+    'paths', 'names', 'count', 'label', 'labels', 'valueList',
     // 프로토타입 오염 이름들. 평범한 객체에 `results['__proto__'] = v` 를 하면
     // **own property 가 만들어지지 않아** 캡처가 조용히 사라진다(결과가 `{}`).
     // 결과 객체를 null-prototype 으로 만들어도 downstream 의 spread / 직렬화가
@@ -1543,13 +1547,22 @@ export function quoteForCommandTokenizer(token: string): string {
  * `shell` 타입에는 쓰지 않는다. 그쪽은 문자열을 셸에 그대로 넘기는 것이 계약이라
  * argv 경계라는 개념 자체가 없다 — 거기서는 값을 `args` 로 넘기는 것이 답이고,
  * Doctor 의 `shell.interpolated-command` 룰이 그 형태를 찾아 준다.
+ *
+ * **배열 값은 토큰 하나로 뭉치지 않는다.** 토큰이 정확히 참조 하나이고
+ * (`ins ${pick.paths}`) 그 값이 배열이면 항목마다 argv 한 칸이 된다 —
+ * {@link expandArgTemplate} 와 **같은 규칙**이다. 예전에는 배열이 공백으로
+ * 이어 붙은 뒤 통째로 인용돼 `"a.bin b.bin"` 이라는 **인자 한 칸**이 됐고,
+ * 여러 파일을 고른 사용자는 도구가 존재하지 않는 파일 하나를 받는 것을 봤다.
+ * `args` 로 넘겼을 때만 제대로 도는 것은 같은 참조가 자리에 따라 다르게
+ * 동작한다는 뜻이라, 규칙을 한쪽으로 맞춘다.
  */
 export function interpolateCommandPreservingTokens(
     template: string,
-    interpolate: (value: string) => string
+    context: any
 ): string {
     return tokenizeCommandLine(template)
-        .map(token => quoteForCommandTokenizer(interpolate(token)))
+        .flatMap(token => expandArgTemplate(token, context))
+        .map(quoteForCommandTokenizer)
         .join(' ');
 }
 

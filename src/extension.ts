@@ -2765,7 +2765,7 @@ function buildRedactedDisplayCommand(
     // 경로가 기록에는 둘로 남는다 — 비밀은 가려도 이력이 실행을 잘못 설명한다.
     const selected = getCommandString(task.command);
     const source = task.type === 'command'
-        ? interpolateCommandPreservingTokens(selected, value => interpolatePipelineVariables(value, shown))
+        ? interpolateCommandPreservingTokens(selected, shown)
         : interpolatePipelineVariables(selected, shown);
     const args = task.args ? task.args.flatMap((arg: string) => expandArgTemplate(arg, shown)) : [];
     return formatNativeCommandDisplay(source, args);
@@ -6130,12 +6130,65 @@ export function backfillDialogArrays(task: any, saved: any): any {
     };
 }
 
+/**
+ * 저장된 `quickPick` 입력에서 **값을 다시 만든다**.
+ *
+ * 저장된 것은 "사용자가 고른 항목"이고, 그 항목이 어떤 값을 내는지는 **지금의
+ * 액션 정의**가 정한다. 저장된 `value` 를 그대로 쓰면 매핑을 추가하거나 고친 뒤의
+ * 재실행이 옛 값을 명령에 넘긴다 — 예전 기록에는 표시 문구가 값으로 들어 있으므로
+ * `--release` 대신 `Release` 가 인자로 가고, 아무 신호도 나지 않는다.
+ * {@link savedInputStillValid} 가 이미 label 을 선택의 정체로 선언했으므로, 값도
+ * 거기서 파생시키는 것이 그 선언과 맞는 유일한 방식이다.
+ *
+ * 결과 조립은 {@link buildQuickPickResult} 에 맡긴다 — 실제로 고른 실행과 **같은
+ * 함수**를 지나야 재실행에만 있는 모양 차이가 생기지 않는다.
+ *
+ * 되돌릴 수 없으면(동적 목록·label 미기록·목록에서 사라진 항목) 저장값을 그대로
+ * 둔다. 그중 사라진 항목은 `savedInputStillValid` 가 다시 묻게 한다.
+ */
+export function backfillQuickPickValue(task: any, saved: any, context?: any): any {
+    if (task?.type !== 'quickPick') { return saved; }
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) { return saved; }
+    if (!Array.isArray(task.items) || task.itemsFromCommand) { return saved; }
+    const many = task.canPickMany === true;
+    const labels: string[] = many
+        ? (typeof saved.labels === 'string' && saved.labels.length > 0 ? saved.labels.split(',') : [])
+        : (typeof saved.label === 'string' ? [saved.label] : []);
+    if (labels.length === 0) { return saved; }
+    const entries: QuickPickEntry[] = [];
+    for (const label of labels) {
+        const item = task.items.find((entry: any) =>
+            (typeof entry === 'string' ? entry : entry?.label) === label);
+        if (item === undefined) { return saved; }
+        // 값 안의 `${…}` 는 실행 시점 문맥으로 푼다 — 정상 실행과 같은 규칙이다.
+        const resolved = typeof item === 'string' || context === undefined
+            ? item
+            : { ...item, value: interpolateQuickPickItemValue(item.value, context) };
+        entries.push({ label, taskHubValue: quickPickItemValue(resolved, label) });
+    }
+    return buildQuickPickResult(entries, many);
+}
+
 export function savedInputStillValid(task: any, saved: any): boolean {
     // 옛 형식이면서 다중 선택인 다이얼로그는 복원할 수 없다 ({@link backfillDialogArrays}).
     // `value` 검사보다 앞에 둔다 — 다이얼로그 결과에는 `value` 가 없어서
     // 아래 조기 반환에 걸리면 이 검사에 닿지 못한다.
     if ((task?.type === 'fileDialog' || task?.type === 'folderDialog') && task?.options?.canSelectMany === true) {
         if (!saved || typeof saved !== 'object' || !Array.isArray((saved as any).paths)) { return false; }
+    }
+    // quickPick 은 **label 로** 검사한다. `value` 는 항목의 매핑 값이라 목록에
+    // 없을 수 있고(`--with-option`), 그것을 목록과 비교하면 매핑을 쓴 액션의
+    // 저장된 입력이 **매번** 거부돼 다시 묻게 된다. 0.7.31 이전 기록에는
+    // `label` 이 없으므로 그때만 `value` 로 떨어진다.
+    if (task.type === 'quickPick' && Array.isArray(task.items) && !task.itemsFromCommand) {
+        // 다중 선택은 저장된 값이 쉼표로 이어진 형태라 그대로 비교할 수 없다.
+        if (task.canPickMany === true) { return true; }
+        const picked = saved && typeof saved === 'object'
+            ? (typeof saved.label === 'string' ? saved.label : saved.value)
+            : undefined;
+        if (typeof picked !== 'string') { return true; }
+        const labels = task.items.map((entry: any) => (typeof entry === 'string' ? entry : entry?.label));
+        return labels.includes(picked);
     }
     const value = saved && typeof saved === 'object' ? saved.value : undefined;
     if (typeof value !== 'string') { return true; }
@@ -6153,12 +6206,6 @@ export function savedInputStillValid(task: any, saved: any): boolean {
             ? value.slice(prefix.length, value.length - (suffix.length || 0) || undefined)
             : value;
         return re.test(core);
-    }
-    if (task.type === 'quickPick' && Array.isArray(task.items) && !task.itemsFromCommand) {
-        const labels = task.items.map((entry: any) => (typeof entry === 'string' ? entry : entry?.label));
-        // 다중 선택은 저장된 값이 쉼표로 이어진 형태라 그대로 비교할 수 없다.
-        if (task.canPickMany === true) { return true; }
-        return labels.includes(value);
     }
     return true;
 }
@@ -6231,6 +6278,9 @@ async function executeSingleTask(
         // 옛 History 항목에는 배열 필드가 없다 — 보정하지 않으면 재실행에서만
         // `${pick.paths}` 가 리터럴로 남는다.
         result = backfillDialogArrays(task, presetResult);
+        // quickPick 값은 **지금의 정의**에서 다시 만든다 — 저장된 값을 그대로
+        // 쓰면 매핑을 추가·수정한 뒤의 재실행이 옛 값을 명령에 넘긴다.
+        result = backfillQuickPickValue(task, result, interpolationContext);
     }
 
     if (!usingPresetResult) { switch (task.type) {
@@ -6280,7 +6330,11 @@ async function executeSingleTask(
                     return {
                         label: item.label ? interpolatePipelineVariables(item.label, interpolationContext) : item.label,
                         description: item.description ? interpolatePipelineVariables(item.description, interpolationContext) : item.description,
-                        detail: item.detail ? interpolatePipelineVariables(item.detail, interpolationContext) : item.detail
+                        detail: item.detail ? interpolatePipelineVariables(item.detail, interpolationContext) : item.detail,
+                        // `value` 도 보간한다 — 명령에 실제로 들어가는 값이므로
+                        // 여기서 빠지면 `${build.output}` 같은 참조가 label 에서는
+                        // 풀리고 값에서는 리터럴로 남는다.
+                        value: interpolateQuickPickItemValue(item.value, interpolationContext)
                     };
                 }
             });
@@ -6395,9 +6449,7 @@ async function executeSingleTask(
             // 자세한 이유는 `interpolateCommandPreservingTokens` 주석 참조.
             const interpolateCommandString = (template: string): string =>
                 task.type === 'command'
-                    ? interpolateCommandPreservingTokens(
-                        template, value => interpolatePipelineVariables(value, interpolationContext)
-                    )
+                    ? interpolateCommandPreservingTokens(template, interpolationContext)
                     : interpolatePipelineVariables(template, interpolationContext);
 
             // **고르는 것이 먼저다.** 모든 branch 를 보간한 뒤 고르면, 이 기계에서
@@ -7488,7 +7540,86 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
     });
 }
 
-export async function handleQuickPick(task: any, defaultWorkspace?: string, token?: vscode.CancellationToken): Promise<{ value: string; values?: string }> {
+/**
+ * `quickPick` 결과.
+ *
+ * `label` 은 **보이는 문구**, `value` 는 **명령에 들어가는 값**이다. 항목에
+ * `value` 를 적지 않으면 둘이 같으므로 예전 액션은 그대로 동작한다.
+ */
+export interface QuickPickResult {
+    /**
+     * 고른 항목의 `value`(적지 않았으면 label). 배열이면 `args` 원소나
+     * `command` 토큰 자리에서 **인자 여러 개**로 펼쳐진다 — 빈 배열은 아무
+     * 인자도 만들지 않으므로 "이 선택지에서는 옵션을 붙이지 않는다" 가 된다.
+     */
+    value: string | string[];
+    /** 고른 항목의 표시 문구. `value` 매핑과 무관하게 **항상 문자열**이다. */
+    label: string;
+    /** 고른 값 전체를 평평하게 편 배열. 인자 확장용. */
+    valueList: string[];
+    /** `canPickMany` 일 때만: 고른 값 전체를 쉼표로 이은 문자열. */
+    values?: string;
+    /** `canPickMany` 일 때만: 고른 표시 문구 전체를 쉼표로 이은 문자열. */
+    labels?: string;
+}
+
+/** `showQuickPick` 이 돌려주는 항목 객체에 매핑된 값을 얹어 둔다. */
+interface QuickPickEntry extends vscode.QuickPickItem {
+    taskHubValue: string | string[];
+}
+
+/**
+ * 항목이 명령에 넘길 값. 문자열 항목과 `value` 없는 객체 항목은 label 그대로다.
+ * 배열은 문자열 원소만 남긴다 — 숫자·객체가 섞이면 무엇을 인자로 넘길지
+ * 정의되지 않고, 조용히 `[object Object]` 를 명령에 넣는 것보다 빼는 편이 낫다.
+ */
+function quickPickItemValue(item: any, label: string): string | string[] {
+    if (item && typeof item === 'object') {
+        if (typeof item.value === 'string') { return item.value; }
+        if (Array.isArray(item.value)) {
+            return item.value.filter((entry: any) => typeof entry === 'string');
+        }
+    }
+    return label;
+}
+
+/** 항목의 `value`(문자열 또는 문자열 배열)를 원래 모양 그대로 보간한다. */
+function interpolateQuickPickItemValue(value: unknown, context: any): unknown {
+    if (typeof value === 'string') { return interpolatePipelineVariables(value, context); }
+    if (Array.isArray(value)) {
+        return value.map(entry =>
+            typeof entry === 'string' ? interpolatePipelineVariables(entry, context) : entry);
+    }
+    return value;
+}
+
+function buildQuickPickResult(selected: readonly QuickPickEntry[], canPickMany: boolean): QuickPickResult {
+    // VS Code 는 넘긴 항목 객체를 그대로 돌려주므로 실행 경로에서는 `taskHubValue`
+    // 가 늘 붙어 있다. 그래도 label 로 떨어지는 길을 남기는 것은, 이 값이 없을 때
+    // `${pick.value}` 가 `undefined` 가 되어 **`when` 분기가 조용히 어긋나기**
+    // 때문이다 — 값이 사라지는 실패는 그 자리에서 드러나지 않는다.
+    const entryValue = (entry: QuickPickEntry): string | string[] =>
+        entry.taskHubValue !== undefined ? entry.taskHubValue : entry.label;
+    const first = selected[0];
+    const valueList = selected.flatMap(entry => {
+        const value = entryValue(entry);
+        return Array.isArray(value) ? value : [value];
+    });
+    const result: QuickPickResult = {
+        value: entryValue(first),
+        label: first.label,
+        valueList,
+    };
+    if (canPickMany) {
+        // `values` 는 예전부터 쉼표로 이은 문자열이었다. 매핑을 쓰지 않으면
+        // 값이 곧 label 이라 예전과 **같은 문자열**이 나온다.
+        result.values = valueList.join(',');
+        result.labels = selected.map(entry => entry.label).join(',');
+    }
+    return result;
+}
+
+export async function handleQuickPick(task: any, defaultWorkspace?: string, token?: vscode.CancellationToken): Promise<QuickPickResult> {
     // When `itemsFromCommand` is set, build the pick list from the command's
     // stdout (one item per non-empty line). The command is already interpolated
     // and reduced to a single OS-specific string by the dispatcher.
@@ -7533,14 +7664,15 @@ export async function handleQuickPick(task: any, defaultWorkspace?: string, toke
     };
 
     // Convert string items to QuickPickItem format
-    const items: vscode.QuickPickItem[] = task.items.map((item: any) => {
+    const items: QuickPickEntry[] = task.items.map((item: any) => {
         if (typeof item === 'string') {
-            return { label: item };
+            return { label: item, taskHubValue: item };
         } else {
             return {
                 label: item.label,
                 description: item.description,
-                detail: item.detail
+                detail: item.detail,
+                taskHubValue: quickPickItemValue(item, item.label)
             };
         }
     });
@@ -7550,15 +7682,14 @@ export async function handleQuickPick(task: any, defaultWorkspace?: string, toke
     if (task.canPickMany) {
         const selected = await vscode.window.showQuickPick(items, { ...options, canPickMany: true }, token);
         if (selected && selected.length > 0) {
-            const labels = selected.map(item => item.label);
-            return { value: labels[0], values: labels.join(',') };
+            return buildQuickPickResult(selected, true);
         } else {
             throw new PromptCancelledError(t('목록에서 선택하기를 취소했습니다.', 'Quick pick selection was canceled.'));
         }
     } else {
         const selected = await vscode.window.showQuickPick(items, options, token);
         if (selected) {
-            return { value: selected.label };
+            return buildQuickPickResult([selected], false);
         } else {
             throw new PromptCancelledError(t('목록에서 선택하기를 취소했습니다.', 'Quick pick selection was canceled.'));
         }
@@ -9082,23 +9213,94 @@ function actionRunReportKey(entry: HistoryEntry): string {
 async function showActionRunReport(entry: HistoryEntry): Promise<void> {
     if (!entry.runLog) {
         if (entry.status === 'running') {
-            vscode.window.showInformationMessage(t(
-                '실행이 끝난 뒤 실행 로그가 저장되면 보고서를 볼 수 있습니다.',
-                'The report becomes available after the run finishes and its run log is saved.'
-            ));
+            // 설정이 꺼져 있으면 **끝나도 보고서는 생기지 않는다.** 그것을 말하지
+            // 않으면 사용자는 오지 않을 것을 기다린다.
+            const willRecord = vscode.workspace
+                .getConfiguration('taskhub.runLogs')
+                .get<boolean>('enabled', false);
+            vscode.window.showInformationMessage(willRecord
+                ? t(
+                    '실행이 끝난 뒤 실행 로그가 저장되면 보고서를 볼 수 있습니다.',
+                    'The report becomes available after the run finishes and its run log is saved.'
+                )
+                : t(
+                    '실행 로그 저장이 꺼져 있어 이 실행에는 보고서가 만들어지지 않습니다. 실행이 끝난 뒤 다시 눌러 켤 수 있습니다.',
+                    'Run log storage is off, so this run will not produce a report. Press this again after the run finishes to turn it on.'
+                ));
             return;
         }
-        // 설정 ID 를 문장에 박아 두고 사용자가 알아서 찾게 두지 않는다. 이
-        // 설정이 기본으로 꺼져 있는 이유(출력에 프로젝트 데이터가 섞일 수
-        // 있다)도 함께 알려야 켜는 판단을 사용자가 할 수 있다.
+        // 설정 ID 를 문장에 박아 두고 사용자가 알아서 찾게 두지 않는다.
+        //
+        // **켜는 버튼을 여기 둔다.** 설정 화면으로 보내기만 하면, 보고서를 찾다
+        // 여기까지 온 사용자가 다시 검색창에서 이름을 맞혀야 한다 — 이 기능이
+        // 있는 줄도 몰랐다는 신고의 원인이 정확히 그 구간이었다.
+        //
+        // **먼저 지금 값을 읽는다.** 이 분기는 "설정이 꺼져 있다" 말고도 세 가지
+        // 이유로 닿는다: 켜기 **전에** 기록된 실행(0.7.28 이전 포함), 실행 당시
+        // 워크스페이스 폴더가 없었던 경우, 로그 쓰기가 실패한 경우. 원인을 확인하지
+        // 않고 "꺼져 있습니다 + 지금 켜기" 를 내밀면, 방금 켠 사용자가 **옛 기록**을
+        // 눌렀을 때 같은 안내를 다시 받고 아무 일도 일어나지 않는 버튼을 또 누른다 —
+        // 이 변경이 없애려던 "고장 났나 보다" 를 그대로 재현하는 자리다.
+        const alreadyEnabled = vscode.workspace
+            .getConfiguration('taskhub.runLogs')
+            .get<boolean>('enabled', false);
         const openSettings = t('설정 열기', 'Open Settings');
+        if (alreadyEnabled) {
+            const choice = await vscode.window.showInformationMessage(
+                t(
+                    '이 실행은 실행 로그 저장이 켜지기 전에 기록되었거나 로그를 남기지 못했습니다. 설정은 이미 켜져 있으므로 이후 실행부터는 보고서가 만들어집니다.',
+                    'This run predates run log storage being enabled, or its log could not be written. The setting is already on, so runs from now on will have reports.'
+                ),
+                openSettings
+            );
+            if (choice === openSettings) {
+                await vscode.commands.executeCommand('workbench.action.openSettings', 'taskhub.runLogs.enabled');
+            }
+            return;
+        }
+        // 켜면 무엇이 어디에 남는지 **버튼 옆에서** 말한다. 예전에는 설정 화면을
+        // 거쳐야만 이 문장을 볼 수 있었는데, 한 번 눌러 켜지는 버튼을 만든 이상
+        // 동의에 필요한 사실이 그 화면에 남아 있으면 안 된다 — 캡처된 출력에는
+        // TaskHub 가 식별할 수 없는 자격 증명이 섞일 수 있다.
+        const enableNow = t('실행 로그 켜기', 'Turn on run logs');
         const choice = await vscode.window.showInformationMessage(
             t(
-                '이 실행에는 저장된 보고서가 없습니다. 실행 로그 저장은 출력에 프로젝트 데이터가 섞일 수 있어 기본으로 꺼져 있으며, 켜면 이후 실행부터 기록합니다.',
-                'No report was recorded for this run. Run log storage is off by default because captured output can contain project data; enabling it records future runs.'
+                '이 실행에는 저장된 보고서가 없습니다. 켜면 이후 실행의 출력이 워크스페이스의 .taskhub/logs/ 에 저장됩니다(폴더는 자동으로 .gitignore 됩니다). 출력에는 TaskHub가 식별할 수 없는 프로젝트 데이터·자격 증명이 섞일 수 있어 기본은 꺼짐입니다.',
+                'No report was recorded for this run. Enabling saves future run output to .taskhub/logs/ in your workspace (the folder is auto-gitignored). Output can contain project data or credentials TaskHub cannot identify, which is why it is off by default.'
             ),
+            enableNow,
             openSettings
         );
+        if (choice === enableNow) {
+            // **사용자 설정에 쓴다.** `Workspace` 로 쓰면 `.vscode/settings.json` 에
+            // 남는데, 그 파일은 대개 커밋되므로 이 저장소를 clone 한 **모든 사람**의
+            // 출력 캡처가 켜진다. 한 사람이 보고서를 보려고 누른 버튼이 팀의 기본값을
+            // 바꾸면 안 된다. 범위를 좁히고 싶으면 설정 화면에서 폴더별로 바꾼다.
+            try {
+                await vscode.workspace.getConfiguration('taskhub.runLogs')
+                    .update('enabled', true, vscode.ConfigurationTarget.Global);
+                const openSettingsAfter = t('설정 열기', 'Open Settings');
+                // 어디에 썼는지 말해 두지 않으면, 나중에 설정 화면에서 확인하려던
+                // 사용자가 다른 탭을 보고 "안 켜졌다" 고 판단한다.
+                const after = await vscode.window.showInformationMessage(
+                    t(
+                        '실행 로그 저장을 사용자 설정에 켰습니다. 다음 실행부터 .taskhub/logs/ 에 기록합니다.',
+                        'Run log storage is on in your user settings. Runs from now on are recorded in .taskhub/logs/.'
+                    ),
+                    openSettingsAfter
+                );
+                if (after === openSettingsAfter) {
+                    await vscode.commands.executeCommand('workbench.action.openSettings', 'taskhub.runLogs.enabled');
+                }
+            } catch (updateError) {
+                const message = updateError instanceof Error ? updateError.message : String(updateError);
+                vscode.window.showErrorMessage(t(
+                    `설정을 저장하지 못했습니다: ${message}`,
+                    `Could not save the setting: ${message}`
+                ));
+            }
+            return;
+        }
         if (choice === openSettings) {
             await vscode.commands.executeCommand('workbench.action.openSettings', 'taskhub.runLogs.enabled');
         }

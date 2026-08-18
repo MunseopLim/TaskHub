@@ -278,6 +278,15 @@ export interface QuickPickItem {
     label: string;
     description?: string;
     detail?: string;
+    /**
+     * 이 항목을 골랐을 때 `${taskId.value}` 가 되는 값. 적지 않으면 `label` 이
+     * 그대로 값이 되므로 기존 액션의 동작은 바뀌지 않는다.
+     *
+     * 배열이면 `args` 원소나 `command` 토큰 자리에서 **인자 여러 개**로
+     * 펼쳐진다 — `["--option", "b"]` 는 인자 둘, `[]` 는 아무 인자도 만들지
+     * 않는다("이 선택지에서는 옵션을 붙이지 않는다").
+     */
+    value?: string | string[];
 }
 
 /**

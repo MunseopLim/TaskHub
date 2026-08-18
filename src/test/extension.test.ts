@@ -1442,6 +1442,33 @@ suite('Extension Test Suite', () => {
 				savedInputStillValid({ type: 'quickPick', itemsFromCommand: 'git branch' }, { value: 'x' }), true);
 		});
 
+		/**
+		 * `value` 매핑을 쓰면 저장된 `value` 는 **목록에 없는 문자열**이다
+		 * (`--with-option`). 그것을 목록과 비교하면 재실행이 매번 거부돼 다시
+		 * 묻게 되므로, 비교 기준은 `label` 이어야 한다.
+		 */
+		test('value 매핑은 label 로 검사한다', () => {
+			const task = {
+				type: 'quickPick',
+				items: [
+					{ label: 'With option', value: '--with-option' },
+					{ label: 'Plain', value: [] },
+				],
+			};
+			assert.strictEqual(
+				savedInputStillValid(task, { label: 'With option', value: '--with-option' }), true,
+				'매핑을 쓴 액션이 재실행마다 다시 물었다'
+			);
+			assert.strictEqual(
+				savedInputStillValid(task, { label: 'Gone', value: '--with-option' }), false,
+				'목록에서 사라진 선택지가 그대로 재사용된다'
+			);
+			// 0.7.31 이전 기록에는 `label` 이 없다 — 그때만 `value` 로 떨어진다.
+			assert.strictEqual(savedInputStillValid(task, { value: 'With option' }), true);
+			// 배열 `value` 만 있는 옛 기록은 비교할 문자열이 없으므로 통과시킨다.
+			assert.strictEqual(savedInputStillValid(task, { value: [] }), true);
+		});
+
 		test('제약이 없는 태스크는 그대로 통과시킨다', () => {
 			assert.strictEqual(savedInputStillValid({ type: 'inputBox' }, { value: 'anything ; goes' }), true);
 			assert.strictEqual(savedInputStillValid({ type: 'fileDialog' }, { path: '/tmp/a b.txt' }), true);
@@ -1545,10 +1572,9 @@ suite('Extension Test Suite', () => {
 	 */
 	suite('보간 경계 보존', () => {
 		const ctx = { input: { value: '--delete main' }, selectFile: { path: '/My Docs/a.txt' } };
-		const interp = (v: string) => interpolatePipelineVariables(v, ctx);
 		/** 실제 실행이 보는 argv (executable + args). */
 		const argv = (template: string) => {
-			const line = interpolateCommandPreservingTokens(template, interp);
+			const line = interpolateCommandPreservingTokens(template, ctx);
 			const { executable, args } = mergeCommandAndArgs(line, []);
 			return [executable, ...args];
 		};
@@ -1561,20 +1587,14 @@ suite('Extension Test Suite', () => {
 		 */
 		test('?? 체인이 명령 문자열에서도 해석된다', () => {
 			const branchCtx = { pickFolder: { path: '/w/dbg dir' } };   // pickFile 분기는 꺼짐
-			const line = interpolateCommandPreservingTokens(
-				'echo ${pickFile.path ?? pickFolder.path}',
-				(v: string) => interpolatePipelineVariables(v, branchCtx)
-			);
+			const line = interpolateCommandPreservingTokens('echo ${pickFile.path ?? pickFolder.path}', branchCtx);
 			const { executable, args } = mergeCommandAndArgs(line, []);
 			assert.deepStrictEqual([executable, ...args], ['echo', '/w/dbg dir'],
 				'?? 체인이 리터럴로 남았다');
 		});
 
 		test('?? 체인이 전부 어긋나면 리터럴로 남는다 (조용히 비지 않는다)', () => {
-			const line = interpolateCommandPreservingTokens(
-				'echo ${nope.a ?? alsoNope.b}',
-				(v: string) => interpolatePipelineVariables(v, {})
-			);
+			const line = interpolateCommandPreservingTokens('echo ${nope.a ?? alsoNope.b}', {});
 			const { args } = mergeCommandAndArgs(line, []);
 			assert.deepStrictEqual(args, ['${nope.a ?? alsoNope.b}'],
 				'해석 못 한 참조가 조각나거나 사라졌다');
@@ -1607,7 +1627,7 @@ suite('Extension Test Suite', () => {
 			// `--delete` 처럼 공백 없는 값이면 그대로 옵션 하나가 된다.
 			const single = interpolateCommandPreservingTokens(
 				'git tag ${input.value} main',
-				v => interpolatePipelineVariables(v, { input: { value: '--delete' } })
+				{ input: { value: '--delete' } }
 			);
 			const { executable, args } = mergeCommandAndArgs(single, []);
 			assert.deepStrictEqual(
@@ -1626,7 +1646,7 @@ suite('Extension Test Suite', () => {
 		test('리터럴에 붙은 형태와 인용된 리터럴을 유지한다', () => {
 			assert.deepStrictEqual(argv('make TARGET=${input.value}'), ['make', 'TARGET=--delete main']);
 			assert.deepStrictEqual(
-				interpolateCommandPreservingTokens('echo "a b" c', interp),
+				interpolateCommandPreservingTokens('echo "a b" c', ctx),
 				'"echo" "a b" "c"'
 			);
 		});
@@ -1650,7 +1670,7 @@ suite('Extension Test Suite', () => {
 		test('빈 보간값은 빈 인자로 남아 뒤 인자를 당기지 않는다', () => {
 			const line = interpolateCommandPreservingTokens(
 				'tool --output ${empty.value} target',
-				v => interpolatePipelineVariables(v, { empty: { value: '' } })
+				{ empty: { value: '' } }
 			);
 			const { executable, args } = mergeCommandAndArgs(line, []);
 			assert.deepStrictEqual(
@@ -1661,6 +1681,60 @@ suite('Extension Test Suite', () => {
 
 		test('인용 없는 연속 공백은 여전히 토큰을 만들지 않는다', () => {
 			assert.deepStrictEqual(tokenizeCommandLine('git  commit -m msg'), ['git', 'commit', '-m', 'msg']);
+		});
+
+		/**
+		 * 배열 참조는 `args` 에서만 여러 인자가 되고 명령 문자열에서는 통째로
+		 * 인용됐다 — 여러 파일을 고른 사용자가 `"a.bin b.bin"` 이라는 **인자 한
+		 * 칸**을 도구에 넘겼다. 같은 참조가 자리에 따라 다르게 동작하지 않도록
+		 * 두 자리의 규칙을 하나로 맞춘 것을 여기서 묶는다.
+		 */
+		suite('명령 토큰의 배열 확장', () => {
+			const pickCtx = { pick: { paths: ['/a/one.bin', '/b/two space.bin'], count: 2 } };
+			const pickArgv = (template: string, context: any = pickCtx) => {
+				const { executable, args } = mergeCommandAndArgs(
+					interpolateCommandPreservingTokens(template, context), []);
+				return [executable, ...args];
+			};
+
+			test('토큰 전체가 배열 참조면 항목마다 인자 하나가 된다', () => {
+				assert.deepStrictEqual(
+					pickArgv('ins ${pick.paths}'),
+					['ins', '/a/one.bin', '/b/two space.bin'],
+					'배열이 공백으로 이어 붙어 인자 한 칸이 됐다'
+				);
+			});
+
+			test('항목의 공백은 여전히 경계를 만들지 않는다', () => {
+				assert.deepStrictEqual(
+					pickArgv('ins ${pick.paths} --out x'),
+					['ins', '/a/one.bin', '/b/two space.bin', '--out', 'x'],
+					'공백 든 경로가 두 인자로 쪼개졌다'
+				);
+			});
+
+			test('리터럴에 붙은 형태는 펼치지 않는다 (args 와 같은 규칙)', () => {
+				assert.deepStrictEqual(
+					pickArgv('ins --file=${pick.paths}'),
+					['ins', '--file=/a/one.bin /b/two space.bin'],
+					'무엇을 의도했는지 알 수 없는 형태라 args 와 같이 이어 붙인다'
+				);
+			});
+
+			test('빈 배열은 인자를 만들지 않는다', () => {
+				assert.deepStrictEqual(
+					pickArgv('ins ${opt.value} target', { opt: { value: [] } }),
+					['ins', 'target'],
+					'빈 배열이 빈 인자로 남으면 도구가 빈 문자열을 값으로 받는다'
+				);
+			});
+
+			test('배열 아닌 값의 동작은 그대로다', () => {
+				assert.deepStrictEqual(
+					pickArgv('cat ${one.path}', { one: { path: '/My Docs/a.txt' } }),
+					['cat', '/My Docs/a.txt']
+				);
+			});
 		});
 	});
 
@@ -4220,6 +4294,40 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual((await provider.getChildren())[0].contextValue, 'historyItem');
 		});
 
+		/**
+		 * 인라인 아이콘과 우클릭 메뉴는 **일부러 다른 조건**이다 (0.7.31).
+		 *
+		 * 아이콘은 데이터가 있는 행에만 붙어 목록이 정직해지고, 메뉴는 액션 기록이면
+		 * 항상 붙어 "로그가 없다" 는 사실과 켜는 방법을 안내한다 — 메뉴까지 가리면
+		 * 기능이 있다는 것 자체를 알 수 없어, 사용자가 History 를 지우고 설정을 뒤진
+		 * 끝에 고장으로 결론 내린 것이 이 조건을 바꾼 이유다. 조건이 조용히 되돌아가면
+		 * 그 신고가 그대로 되살아나므로 manifest 를 여기서 고정한다.
+		 */
+		test('보고서 메뉴: 인라인은 .runlog, 우클릭은 모든 액션 기록', () => {
+			const manifest = JSON.parse(
+				fs.readFileSync(path.join(path.resolve(__dirname, '..', '..'), 'package.json'), 'utf-8'));
+			const entries = manifest.contributes.menus['view/item/context']
+				.filter((m: any) => m.command === 'taskhub.viewActionRunReport');
+			assert.strictEqual(entries.length, 2, '보고서 메뉴 항목이 인라인·우클릭 두 벌이 아니다');
+
+			const inline = entries.find((m: any) => String(m.group).startsWith('inline'));
+			const context = entries.find((m: any) => String(m.group).startsWith('context'));
+			assert.ok(inline, '인라인 보고서 메뉴 항목이 없다');
+			assert.ok(context, '우클릭 메뉴 항목이 없다');
+
+			// `when` 을 문자열로만 보지 않고 실제 contextValue 로 판정한다.
+			const match = (when: string, contextValue: string) => {
+				const m = /viewItem =~ \/(.+)\//.exec(when);
+				assert.ok(m, `viewItem 정규식을 읽지 못했다: ${when}`);
+				return new RegExp(m![1]).test(contextValue);
+			};
+			assert.ok(match(inline.when, 'historyItem.runlog'), '로그가 있는 행에서 인라인 아이콘이 숨는다');
+			assert.ok(match(context.when, 'historyItem'), '로그 없는 액션 기록에서 메뉴가 숨는다 — 발견 경로가 사라진다');
+			assert.ok(match(context.when, 'historyItem.inputs.runlog'));
+			assert.ok(!match(context.when, 'historyToolItem'), '도구 열람 기록에 액션 보고서 메뉴가 붙었다');
+			assert.ok(!match(inline.when, 'historyItem'), '로그 없는 행에 죽은 아이콘이 붙었다');
+		});
+
 		test('setHistoryRunLog on an unknown execution is a silent no-op', () => {
 			const provider = new HistoryProvider(createMockContext());
 			provider.addHistoryEntry(makeEntry('present', 'success', 1));
@@ -6300,13 +6408,101 @@ suite('Extension Test Suite', () => {
 	suite('프롬프트 결과 모양 (런타임 ↔ 시뮬레이션)', () => {
 		async function runtimeQuickPick(task: any, picked: any) {
 			const original = vscode.window.showQuickPick;
-			(vscode.window as any).showQuickPick = async () => picked;
+			// VS Code 는 **넘긴 항목 객체 그대로** 돌려준다. label 만 담은 가짜
+			// 객체를 돌려주는 스텁은 런타임이 항목에 얹어 둔 정보를 잃어버려,
+			// 계약 테스트가 실제로 도는 코드와 다른 것을 검사하게 된다.
+			(vscode.window as any).showQuickPick = async (items: any[]) => {
+				const wanted: string[] = (Array.isArray(picked) ? picked : [picked])
+					.map((entry: any) => entry?.label);
+				const matched = items.filter(item => wanted.includes(item.label));
+				return Array.isArray(picked) ? matched : matched[0];
+			};
 			try {
 				return await handleQuickPick(task);
 			} finally {
 				(vscode.window as any).showQuickPick = original;
 			}
 		}
+
+		/**
+		 * `value` 매핑 — 목록에 **보이는 문구**와 명령에 **들어가는 값**을 가른다.
+		 * 매핑이 없으면 둘이 같으므로 예전 액션의 동작은 그대로다.
+		 */
+		test('value 매핑: label 은 보이는 문구, value 는 명령에 들어가는 값', async () => {
+			const task = {
+				id: 'pick', type: 'quickPick',
+				items: [
+					{ label: 'With option', value: '--with-option' },
+					{ label: 'Plain' },
+				],
+			};
+			const mapped = await runtimeQuickPick(task, { label: 'With option' });
+			assert.strictEqual(mapped.value, '--with-option');
+			assert.strictEqual(mapped.label, 'With option', 'label 은 매핑과 무관하게 표시 문구다');
+			assert.deepStrictEqual(mapped.valueList, ['--with-option']);
+
+			const plain = await runtimeQuickPick(task, { label: 'Plain' });
+			assert.strictEqual(plain.value, 'Plain', 'value 가 없으면 label 이 그대로 값이다');
+		});
+
+		test('value 배열: 인자 여러 개 / 아무 인자도 없음', async () => {
+			const task = {
+				id: 'pick', type: 'quickPick',
+				items: [
+					{ label: 'B', value: ['--option', 'b'] },
+					{ label: 'None', value: [] },
+				],
+			};
+			const two = await runtimeQuickPick(task, { label: 'B' });
+			assert.deepStrictEqual(two.value, ['--option', 'b']);
+			assert.deepStrictEqual(
+				expandArgTemplate('${pick.value}', { pick: two }), ['--option', 'b'],
+				'배열 매핑이 args 에서 인자 둘로 펼쳐지지 않았다'
+			);
+			assert.deepStrictEqual(
+				interpolateCommandPreservingTokens('tool ${pick.value} in.c', { pick: two }),
+				'"tool" "--option" "b" "in.c"',
+				'명령 토큰 자리에서도 같은 규칙이어야 한다'
+			);
+
+			const none = await runtimeQuickPick(task, { label: 'None' });
+			assert.deepStrictEqual(none.value, []);
+			assert.deepStrictEqual(
+				expandArgTemplate('${pick.value}', { pick: none }), [],
+				'빈 배열이 빈 인자로 남으면 "옵션 없음" 이 되지 않는다'
+			);
+		});
+
+		/**
+		 * 문자열이 아닌 매핑 원소를 그대로 인자로 넘기면 `[object Object]` 가 명령에
+		 * 들어간다. 값에서 빼는 편이 낫다는 판단을 여기서 고정한다.
+		 */
+		test('문자열이 아닌 매핑 원소는 값에서 빠진다', async () => {
+			const mixed = await runtimeQuickPick(
+				{ id: 'pick', type: 'quickPick', items: [{ label: 'M', value: [1, 'a', null] }] },
+				{ label: 'M' }
+			);
+			assert.deepStrictEqual(mixed.value, ['a']);
+			// `value: null` 은 매핑이 아니므로 label 로 떨어진다.
+			const nulled = await runtimeQuickPick(
+				{ id: 'pick', type: 'quickPick', items: [{ label: 'N', value: null }] },
+				{ label: 'N' }
+			);
+			assert.strictEqual(nulled.value, 'N');
+		});
+
+		test('다중 선택도 매핑된 값을 잇는다', async () => {
+			const runtime = await runtimeQuickPick(
+				{
+					id: 'pick', type: 'quickPick', canPickMany: true,
+					items: [{ label: 'A', value: '-a' }, { label: 'B', value: ['-b', '1'] }],
+				},
+				[{ label: 'A' }, { label: 'B' }]
+			);
+			assert.deepStrictEqual(runtime.valueList, ['-a', '-b', '1']);
+			assert.strictEqual(runtime.values, '-a,-b,1');
+			assert.strictEqual(runtime.labels, 'A,B', 'labels 는 표시 문구를 그대로 남긴다');
+		});
 
 		test('다중 선택: 키 집합이 같고 values 는 양쪽 다 문자열이다', async () => {
 			const runtime = await runtimeQuickPick(

@@ -363,7 +363,7 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 
 #### 여러 파일을 명령 인자로 넘기기
 
-`args` 원소 전체가 배열 참조일 때 항목별 argv로 펼쳐집니다.
+`args` 원소 전체 또는 `command` 문자열의 토큰 전체가 배열 참조일 때 항목별 argv로 펼쳐집니다(`command` 타입 한정). 0.7.31 이전에는 `command` 쪽만 배열을 공백으로 이어 붙인 뒤 통째로 인용해 `"a.bin b.bin"`이라는 인자 한 칸을 넘겼습니다.
 
 ```json
 {
@@ -374,7 +374,9 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 }
 ```
 
-`"--file=${files.paths}"`처럼 다른 글자와 섞으면 공백으로 합쳐진 인자 하나가 됩니다. Doctor의 `args.array-joined`가 이 구성을 경고합니다.
+`"--file=${files.paths}"`처럼 다른 글자와 섞으면 공백으로 합쳐진 인자 하나가 됩니다. `command` 문자열의 토큰에서도 규칙은 같지만, Doctor의 `args.array-joined` 경고는 `args` 원소만 검사합니다.
+
+`shell` 타입은 문자열을 셸에 그대로 넘기는 계약이라 펼치지 않고 공백으로 이어 붙입니다 — 경로에 공백이 있으면 셸이 다시 쪼개므로, 여러 경로는 `command` 타입으로 넘깁니다.
 
 ### `folderDialog` 태스크
 
@@ -419,11 +421,33 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 
 ### `quickPick` 태스크
 
-고정 `items` 또는 `itemsFromCommand`의 비어 있지 않은 stdout 줄에서 항목을 고릅니다. `items`는 문자열이나 `{ label, description, detail }` 객체를 지원하고, `itemsExclude`로 동적 목록의 특정 줄을 제외할 수 있습니다.
+고정 `items` 또는 `itemsFromCommand`의 비어 있지 않은 stdout 줄에서 항목을 고릅니다. `items`는 문자열이나 `{ label, description, detail, value }` 객체를 지원하고, `itemsExclude`로 동적 목록의 특정 줄을 제외할 수 있습니다.
 
-- 단일 선택 결과: `value`.
-- `canPickMany: true`: 첫 선택 `value`, 전체 선택 배열 `values`.
+**`label`은 보이는 문구, `value`는 명령에 들어가는 값입니다.** `value`를 적지 않으면 `label`이 그대로 값이 되므로 기존 액션의 동작은 바뀌지 않습니다. 매핑은 **고정 `items`에만** 적용됩니다 — `itemsFromCommand`의 항목은 stdout 한 줄이 곧 값입니다. `value`에 배열을 적으면 `args` 원소와 `command` 토큰 자리에서 **인자 여러 개**로 펼쳐지고, 빈 배열은 아무 인자도 만들지 않습니다.
+
+```jsonc
+{ "id": "mode", "type": "quickPick", "placeHolder": "빌드 모드", "items": [
+    { "label": "옵션 켜고 빌드", "value": "--with-option" },
+    { "label": "옵션 없이 빌드", "value": [] },
+    { "label": "다른 옵션으로 빌드", "value": ["--option", "b"] }
+] },
+{ "id": "build", "type": "command", "command": "make", "args": ["all", "${mode.value}"] }
+```
+
+결과 키:
+
+| 키 | 내용 |
+| --- | --- |
+| `value` | 고른 항목의 `value`(없으면 `label`). 배열이면 인자 여러 개로 펼쳐집니다 |
+| `label` | 고른 항목의 표시 문구. 매핑과 무관하게 항상 문자열입니다 |
+| `valueList` | 고른 값 전체를 평평하게 편 배열. 인자 확장용 |
+| `values` | `canPickMany: true`일 때만. 고른 값 전체를 쉼표로 이은 문자열 |
+| `labels` | `canPickMany: true`일 때만. 고른 표시 문구 전체를 쉼표로 이은 문자열 |
+
+`values`는 **평평하게 편 값**을 잇습니다. 배열 매핑과 다중 선택을 함께 쓰면 항목 수와 선택 수가 달라지므로, 사람이 읽을 문자열이 필요하면 `labels`를, 인자로 넘길 값이 필요하면 `valueList`를 쓰세요.
+
 - 동적 목록 명령은 `cwd`, 없으면 액션 워크스페이스에서 실행됩니다.
+- History 재실행은 `label`로 선택지 유효성을 확인합니다 — 목록에서 사라진 선택지만 다시 묻습니다.
 - 취소 규칙은 `fileDialog`와 같습니다.
 
 ### `envPick` 태스크
@@ -461,7 +485,8 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 
 - `${workspaceFolder}`, `${extensionPath}`는 내장 경로입니다.
 - `${a.value ?? b.value}`는 왼쪽부터 실제로 해석되는 첫 값을 사용합니다.
-- 배열 값은 `args` 원소 전체가 참조일 때만 여러 argv로 펼쳐집니다.
+- 배열 값은 `args` 원소 전체 또는 `command` 토큰 전체가 참조일 때 여러 argv로 펼쳐집니다(`command` 타입 한정 — `shell`은 문자열을 셸에 그대로 넘기는 계약이라 공백으로 이어 붙습니다). 다른 글자가 섞이면(`--file=${pick.paths}`) 공백으로 이어 붙어 인자 한 칸이 되며, `args` 자리에서는 Doctor가 `args.array-joined`로 알립니다.
+- 명령 문자열에서 `"${pick.paths}"`처럼 **따옴표로 감싸도 인자 하나로 묶이지 않습니다** — 인용은 토큰 경계만 정하고, 그 토큰이 배열 참조 하나면 그대로 펼쳐집니다. 배열을 인자 한 칸으로 넘겨야 한다면 앞뒤에 글자를 붙이거나(`--file=${pick.paths}`) `stringManipulation`으로 먼저 문자열을 만드세요.
 - 풀리지 않는 참조는 문자열에서 사라지지 않고 `${…}` 리터럴로 남습니다.
 - 태스크 자신을 참조할 수 없습니다.
 - `${env:VAR}`와 `${input:name}`은 그래프에서 예약된 이름이지만 현재 값 치환은 지원하지 않습니다.
@@ -604,7 +629,7 @@ History 패널은 액션 실행과 Memory Map·Hex Editor·JSON Editor 열람을
 - 비밀번호 입력은 프로필에도 저장하지 않습니다. 프로필은 하나당 128KB, 워크스페이스당 50개·총 2MB로 제한됩니다.
 - `command`·`shell`의 실제 실행 명령은 태스크별 읽기 전용 문서로 볼 수 있습니다. 비밀 입력은 기록 전에 마스킹합니다.
 - 액션 기록의 **실행 보고서 보기**는 실행 당시 결과·소요 시간·실패 사유·실패한 태스크 이름·심각도별 진단 개수와 파일 결과를 태스크 요약 표와 함께 보여 줍니다. 태스크별 명령·출력 상세는 성공한 실행에서는 접고, 실패·중지된 실행에서는 펼친 채로 엽니다. 현재 액션 정의를 다시 읽지 않으므로 액션이 이름 변경·삭제된 뒤에도 실행 당시 보고서를 열 수 있습니다.
-- 보고서 버튼은 **저장된 실행 로그가 있는 기록에만** 나타납니다(`taskhub.runLogs.enabled`가 꺼져 있던 실행과 0.7.28 이전 기록에는 없음).
+- 인라인 보고서 버튼은 **저장된 실행 로그가 있는 기록에만** 나타납니다(`taskhub.runLogs.enabled`가 꺼져 있던 실행과 0.7.28 이전 기록에는 없음). 우클릭 메뉴의 **실행 보고서 보기**는 액션 기록이면 항상 있으며, 로그가 없으면 이유와 함께 **지금 켜기**·**설정 열기**를 제안합니다 — 기능이 있는 줄도 모른 채 지나가지 않도록.
 - 행의 인라인 버튼으로 저장 입력 재실행, 명령 보기, 실패 출력 보기, 실행 보고서, 개별 삭제를 수행합니다. 제목 표시줄에서는 확인 후 전체 삭제합니다.
 - 보관 개수와 패널 표시 여부는 `taskhub.history.maxItems`와 `taskhub.history.showPanel`로 설정합니다. 자세한 기본값은 [§21](#21-설정-레퍼런스)을 참조하세요.
 

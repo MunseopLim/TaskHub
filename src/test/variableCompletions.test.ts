@@ -402,8 +402,9 @@ suite('variableCompletions', () => {
 
         test('단일 선택 quickPick 은 values 를 제안하지 않는다', () => {
             // 런타임이 만들지 않는 키다 — 제안하면 Preview 만 해석하고 실행에서는
-            // 리터럴로 남는 참조를 우리가 권하는 셈이 된다.
-            assert.deepStrictEqual(names(quickPickDoc('')), ['pick.value']);
+            // 리터럴로 남는 참조를 우리가 권하는 셈이 된다. `label` · `valueList`
+            // 는 선택 수와 무관하게 런타임이 늘 내므로 함께 제안한다.
+            assert.deepStrictEqual(names(quickPickDoc('')), ['pick.value', 'pick.label', 'pick.valueList']);
         });
 
         test('output.capture 이름도 함께 낸다', () => {

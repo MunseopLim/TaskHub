@@ -99,9 +99,24 @@ export function simulateTaskResult(task: Task): SimulatedResult {
             // `canPickMany` 분기만 그 키를 돌려준다. 무조건 채우면 단일 선택
             // quickPick 의 `${pick.values}` 가 Preview 에서 해석된 것처럼
             // 보이지만 런타임에서는 리터럴로 남는다.
-            const base: SimulatedResult = { value: placeholder('quickPick', task.id, 'value') };
+            // 항목이 `value` 로 **배열**을 매핑하면 런타임의 `${pick.value}` 도
+            // 배열이다. 문자열로만 흉내 내면 `"--x=${pick.value}"` 같은 조용히
+            // 깨지는 형태에 `args.array-joined` 가 붙지 않는다.
+            const mapsArray = Array.isArray((task as any).items)
+                && (task as any).items.some((entry: any) =>
+                    entry && typeof entry === 'object' && Array.isArray(entry.value));
+            const base: SimulatedResult = {
+                value: mapsArray
+                    ? [placeholder('quickPick', task.id, 'value[0]')]
+                    : placeholder('quickPick', task.id, 'value'),
+                label: placeholder('quickPick', task.id, 'label'),
+                // 배열로 흉내 내야 `args` / `command` 토큰 확장이 미리보기에서도
+                // 실제와 같은 모양이 된다 (`fileDialog` 의 `paths` 와 같은 규칙).
+                valueList: [placeholder('quickPick', task.id, 'valueList[0]')],
+            };
             if ((task as any).canPickMany) {
                 base.values = placeholder('quickPick', task.id, 'values');
+                base.labels = placeholder('quickPick', task.id, 'labels');
             }
             return base;
         }
@@ -965,9 +980,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                     if (task.type !== 'command') {
                         return interpolatePipelineVariables(template, interpolationContext);
                     }
-                    const preserved = interpolateCommandPreservingTokens(
-                        template, value => interpolatePipelineVariables(value, interpolationContext)
-                    );
+                    const preserved = interpolateCommandPreservingTokens(template, interpolationContext);
                     return formatNativeCommandDisplay(preserved, []);
                 };
                 // **고른 뒤 보간한다** — 런타임과 같은 순서. 모든 branch 를 보간하면

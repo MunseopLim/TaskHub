@@ -334,6 +334,114 @@ suite('Doctor', () => {
             ])).includes('command.nested-interpreter'), '고정 items 로 풀리는 실행 파일을 놓쳤다');
         });
 
+        /**
+         * 항목의 `value` 매핑이 label 을 대신하므로, label 만 보는 판정은
+         * **실행되지 않는 문자열**을 검사하게 된다. 보이는 문구는 얌전한데
+         * 매핑에 `sh` 나 메타문자를 넣어 두면 그대로 뚫린다.
+         */
+        test('quickPick 은 label 이 아니라 치환되는 value 를 본다', () => {
+            const enumerated = (items: any[]) =>
+                enumerateArgvCandidates(['${which.value}', '-c', 'echo x'],
+                    [{ id: 'which', type: 'quickPick', items }] as any)
+                    .variants.map(v => v[0]);
+
+            assert.deepStrictEqual(
+                enumerated([{ label: 'POSIX shell', value: 'sh' }]), ['sh'],
+                'label 을 실행 파일로 열거해 실제로 도는 인터프리터를 놓쳤다'
+            );
+            // 배열 매핑은 argv 여러 칸이라 실행 파일 하나로 열거할 수 없다 — fail-closed.
+            assert.deepStrictEqual(
+                enumerated([{ label: 'B', value: ['sh', '-x'] }]), ['${which.value}'],
+                '열거할 수 없는 매핑을 펼쳤다'
+            );
+
+            // 셸 메타문자 면제도 같은 기준이어야 한다.
+            assert.ok(codes(withTasks([
+                { id: 'mode', type: 'quickPick', items: [{ label: 'Safe looking', value: 'x; id' }] },
+                { id: 'run', type: 'command', command: 'sh -c "echo ${mode.value}"' },
+            ])).includes('command.nested-interpreter'), '매핑에 숨은 메타문자가 면제됐다');
+            assert.ok(!codes(withTasks([
+                { id: 'mode', type: 'quickPick', items: [{ label: 'x; id', value: 'safe' }] },
+                { id: 'run', type: 'command', command: 'sh -c "echo ${mode.value}"' },
+            ])).includes('command.nested-interpreter'), '명령에 닿지도 않는 label 때문에 경고했다');
+        });
+
+        /**
+         * **키마다 다른 문자열이 치환된다.** `${pick.value}` 는 매핑 값,
+         * `${pick.label}` 은 표시 문구다. 판정이 키를 보지 않으면 얌전한 값을
+         * 매핑해 두고 label 에 위험한 문구를 적는 것만으로 면제가 뚫린다 —
+         * 매핑을 추가하면서 실제로 뚫렸던 자리라 양쪽을 함께 고정한다.
+         */
+        test('quickPick 판정은 참조한 키에 맞는 문자열을 본다', () => {
+            const hostileLabel = [
+                { id: 'mode', type: 'quickPick', items: [{ label: 'x; id', value: 'safe' }] },
+            ];
+            assert.ok(codes(withTasks([
+                ...hostileLabel,
+                { id: 'run', type: 'command', command: 'sh -c "echo ${mode.label}"' },
+            ])).includes('command.nested-interpreter'), 'label 참조인데 매핑 값으로 면제했다');
+            assert.ok(codes(withTasks([
+                { id: 'mode', type: 'quickPick', canPickMany: true, items: [{ label: 'x; id', value: 'safe' }] },
+                { id: 'run', type: 'command', command: 'sh -c "echo ${mode.labels}"' },
+            ])).includes('command.nested-interpreter'), 'labels 참조인데 매핑 값으로 면제했다');
+            // 반대 방향: label 이 얌전하면 label 참조는 그대로 면제된다.
+            assert.ok(!codes(withTasks([
+                { id: 'mode', type: 'quickPick', items: [{ label: 'safe', value: 'x; id' }] },
+                { id: 'run', type: 'command', command: 'sh -c "echo ${mode.label}"' },
+            ])).includes('command.nested-interpreter'), '치환되지 않는 매핑 값 때문에 경고했다');
+
+            // 인터프리터 열거도 같은 기준이다 — label 참조를 매핑 값으로 열거하면
+            // Doctor 가 `echo` 를 모형으로 삼고 런타임은 `sh` 를 실행한다.
+            const enumerated = (ref: string) =>
+                enumerateArgvCandidates([ref, '-c', 'echo x'],
+                    [{ id: 'which', type: 'quickPick', items: [{ label: 'sh', value: 'echo' }] }] as any)
+                    .variants.map(v => v[0]);
+            assert.deepStrictEqual(enumerated('${which.label}'), ['sh'], 'label 자리를 매핑 값으로 열거했다');
+            assert.deepStrictEqual(enumerated('${which.value}'), ['echo']);
+        });
+
+        /**
+         * 항목의 `value` 도 런타임이 보간한다. 검사에서 빠지면 거기 적힌 오타가
+         * `${bulid.output}` 리터럴 그대로 argv 에 도착하는데 아무 진단도 없다 —
+         * 같은 오타가 `label` 에 있으면 잡히므로 자리에 따라 판정이 갈렸다.
+         */
+        /**
+         * 배열 매핑을 쓰면 `${mode.value}` 도 **배열**이다. 시뮬레이션이 문자열로만
+         * 흉내 내면 `"--x=${mode.value}"` 처럼 조용히 인자 한 칸으로 뭉치는 형태에
+         * `args.array-joined` 가 붙지 않는다 — 그 경고가 있는 이유 자체가 사라진다.
+         */
+        test('배열 매핑은 시뮬레이션에서도 배열이라 array-joined 가 붙는다', () => {
+            const arrayMapped = { id: 'mode', type: 'quickPick', items: [{ label: 'B', value: ['--option', 'b'] }] };
+            assert.ok(codes(withTasks([
+                arrayMapped,
+                { id: 'run', type: 'command', command: 'tool', args: ['--x=${mode.value}'] },
+            ])).includes('args.array-joined'), '배열 매핑이 문자열로 흉내 내져 경고가 빠졌다');
+            // 원소 전체가 참조면 런타임이 펼치므로 경고 대상이 아니다.
+            assert.ok(!codes(withTasks([
+                arrayMapped,
+                { id: 'run', type: 'command', command: 'tool', args: ['${mode.value}'] },
+            ])).includes('args.array-joined'), '정상적으로 펼쳐지는 형태에 경고가 붙었다');
+            // 문자열 매핑은 배열이 아니므로 섞여 있어도 이 경고 대상이 아니다.
+            assert.ok(!codes(withTasks([
+                { id: 'mode', type: 'quickPick', items: [{ label: 'A', value: '--with-option' }] },
+                { id: 'run', type: 'command', command: 'tool', args: ['--x=${mode.value}'] },
+            ])).includes('args.array-joined'));
+        });
+
+
+        test('항목 value 의 미해결 참조도 잡는다', () => {
+            for (const item of [
+                { label: 'ok', value: '${bulid.output}' },
+                { label: 'ok', value: ['--f', '${bulid.output}'] },
+            ]) {
+                assert.ok(codes(withTasks([
+                    { id: 'build', type: 'shell', command: 'make', passTheResultToNextTask: true },
+                    { id: 'mode', type: 'quickPick', items: [item] },
+                    { id: 'run', type: 'command', command: 'tool', args: ['${mode.value}'] },
+                ])).includes('variable.unresolved'), `value 의 오타가 조용했다: ${JSON.stringify(item.value)}`);
+            }
+        });
+
         test('열거는 런타임이 **실제로 내는 키**일 때만 한다', () => {
             // `${which.typo}` 는 런타임에서 미해결 리터럴로 남아 실행 파일이 되지
             // 않는다. 키를 안 보고 항목을 펼치면 Doctor 가 그것을 `sh` 로 바꿔 놓고

@@ -133,6 +133,21 @@
 | IT-158 | 캡처·진단·파일 결과 저장과 password 파생 값 마스킹 | 실제 `command` 캡처 결과·Problem Matcher 진단 개수·TaskHub가 쓴 파일 경로는 `.taskhub/logs/` JSON에 저장되지만 `password: true` 입력을 argv로 받은 태스크의 명령·출력에는 원본 비밀 문자열이 남지 않음 |
 | IT-159 | 실패 경로의 진단 수집과 비밀 파생 파일 경로 마스킹 | 0이 아닌 종료 코드로 실패한 `command`(`continueOnError`)의 종료 코드와 stderr 진단이 로그에 남고, `writeFile`이 확정한 경로는 파일 결과로 기록되되 `password: true` 값을 쓴 태스크의 경로는 `***`로만 남음 |
 
+### quickPick value 매핑과 배열 확장
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-160 | `command` 문자열의 `value` 매핑이 argv 경계를 만든다 | 문자열 매핑은 인자 하나, 배열 매핑(`["--option","b"]`)은 인자 둘, 빈 배열은 인자 없음, 매핑 없는 항목은 label 이 값 — 실제 프로세스가 받은 argv 로 확인 |
+| IT-161 | 같은 매핑이 `args` 자리에서도 같은 결과 | 같은 참조가 `command` 문자열과 `args` 에서 다르게 동작하지 않음 |
+| IT-162 | 파일 다중 선택이 `command` 문자열에서 인자 여러 개 | 공백이 든 경로까지 인자 하나씩 도착 — 따옴표로 묶인 한 칸이 아님 |
+| IT-163 | 폴더 다중 선택도 같은 규칙 | `folderDialog` 의 `paths` 도 `command` 문자열에서 펼쳐짐 |
+| IT-164 | `shell` 타입은 문자열 결합 계약을 유지 | 배열이 공백으로 이어 붙은 뒤 셸이 쪼갬 — `command` 의 argv 확장과 구분되는 계약 |
+| IT-165 | `value`·`label` 이 다른 태스크 타입에서도 갈린다 | `writeFile` 내용·`stringManipulation` 입력·`when` 조건이 각각 매핑된 값과 표시 문구를 제 자리에 받음 (`when` 은 label 이 아니라 value 로 판정) |
+| IT-166 | 다중 선택의 `valueList`·`values`·`labels` | `valueList` 는 평평하게 편 값으로 argv 확장, `values` 는 매핑 값의 쉼표 결합, `labels` 는 표시 문구의 쉼표 결합 |
+| IT-168 | 항목 `value` 안의 참조 보간 | `value: "--tag=${build.output}"` 와 배열 원소가 실행 시점 문맥으로 풀려 argv 에 도착 — label 만 보간하던 회귀를 잡음 |
+| IT-167 | 매핑을 바꾼 뒤의 재실행 | 저장된 입력은 고른 **항목**이므로, 값은 지금의 정의에서 다시 파생됨 — 매핑을 붙인 뒤 재실행하면 대화상자 없이 새 매핑 값(`--release`)이 argv 로 감 |
+
 ### Last-run 배지
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)
 

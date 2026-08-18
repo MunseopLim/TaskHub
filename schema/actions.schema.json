@@ -207,6 +207,13 @@
                   "detail": {
                     "type": "string",
                     "description": "Detailed information about this option."
+                  },
+                  "value": {
+                    "oneOf": [
+                      { "type": "string" },
+                      { "type": "array", "items": { "type": "string" } }
+                    ],
+                    "description": "Value substituted for '${taskId.value}' when this item is picked. Defaults to the label. An array expands into several arguments in 'args' elements and 'command' tokens (e.g. ['--option','b']); an empty array adds no argument at all."
                   }
                 },
                 "required": ["label"]
@@ -218,7 +225,7 @@
         },
         "canPickMany": {
           "type": "boolean",
-          "description": "If true, allows multiple selection (for 'quickPick' type). Results will be available as both 'value' (first selection) and 'values' (comma-separated list).",
+          "description": "If true, allows multiple selection (for 'quickPick' type). Results will be available as 'value' (first selection), 'label' / 'labels', 'values' (comma-separated) and 'valueList' (array).",
           "default": false
         },
         "itemsFromCommand": {

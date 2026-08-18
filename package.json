@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.7.30",
+  "version": "0.7.31",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -894,7 +894,7 @@
         },
         {
           "command": "taskhub.viewActionRunReport",
-          "when": "view == mainView.history && viewItem =~ /\\.runlog\\b/",
+          "when": "view == mainView.history && viewItem =~ /^historyItem/",
           "group": "context@2"
         },
         {

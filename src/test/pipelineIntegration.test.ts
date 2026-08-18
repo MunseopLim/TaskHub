@@ -2009,7 +2009,9 @@ try {
                 const entries: HistoryEntry[] = history.getHistory();
                 assert.strictEqual(entries.length, 1);
                 assert.deepStrictEqual(entries[0].inputs, {
-                    env: { value: 'staging' },
+                    // quickPick 은 `label`(표시 문구) 과 `valueList`(인자 확장용)
+                    // 도 함께 남긴다 — 재실행이 label 로 선택지 유효성을 본다.
+                    env: { value: 'staging', label: 'staging', valueList: ['staging'] },
                     tag: { value: 'release-1' }
                 });
                 assert.deepStrictEqual(entries[0].inputTaskTypes, {
@@ -2819,7 +2821,7 @@ try {
 
                 const entry: HistoryEntry = history.getHistory()[0];
                 assert.deepStrictEqual(entry.inputs, {
-                    env: { value: 'visible' },
+                    env: { value: 'visible', label: 'visible', valueList: ['visible'] },
                     tag: { value: 'public-tag' }
                 });
                 assert.ok(!(entry.inputs as any).token, 'password input must not be persisted');
@@ -4480,6 +4482,390 @@ try {
             };
             await run(action);
             assert.strictEqual(fs.readFileSync(target, 'utf8'), 'survived');
+        });
+    });
+
+    /**
+     * `quickPick` 의 `value` 매핑과 배열 확장을 **실제 프로세스가 본 argv** 로
+     * 확인한다 (0.7.31).
+     *
+     * 단위 테스트는 문자열 조립까지만 본다. 여기서 보려는 것은 그 문자열이
+     * 실제 spawn 을 거친 뒤에도 같은 경계로 도착하는가다 — 사용자가 신고한
+     * 증상(`"파일명 파일명"` 인자 한 칸)이 정확히 조립과 실행 사이에서 났다.
+     */
+    suite('quickPick value 매핑과 배열 확장', () => {
+        /** 받은 인자를 JSON 으로 적는 스크립트. 경계를 보려면 프로세스가 본 것을 봐야 한다. */
+        function writeArgvProbe(): { script: string; out: string } {
+            const script = path.join(tempWorkspace, 'argv-probe.js');
+            fs.writeFileSync(
+                script,
+                "require('fs').writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));\n"
+            );
+            // Windows 에서도 `/` 를 쓰면 명령 문자열의 역슬래시 escape 를 피할 수 있다.
+            const forward = (p: string) => p.split(path.sep).join('/');
+            return { script: forward(script), out: forward(path.join(tempWorkspace, 'argv-probe.json')) };
+        }
+
+        function readArgv(): string[] {
+            return JSON.parse(fs.readFileSync(path.join(tempWorkspace, 'argv-probe.json'), 'utf8'));
+        }
+
+        async function pickAndRun(label: string, items: any[], task: any, id: string): Promise<void> {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            try {
+                // VS Code 는 **넘긴 항목 객체 그대로** 돌려준다.
+                (vscode.window as any).showQuickPick = async (entries: vscode.QuickPickItem[]) =>
+                    entries.find(entry => entry.label === label);
+                await run({
+                    description: id,
+                    tasks: [{ id: 'mode', type: 'quickPick', items }, task],
+                }, id);
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+            }
+        }
+
+        /** 요청받은 그림 그대로: 선택지마다 옵션을 붙이거나·붙이지 않거나·다른 옵션을 붙인다. */
+        const modeItems = [
+            { label: 'Label-A', value: '--with-option' },
+            { label: 'Label-B', value: [] },
+            { label: 'Label-C', value: ['--option', 'b'] },
+            { label: 'Label-D' },
+        ];
+
+        test('IT-160: command 문자열의 quickPick value 가 실제 argv 경계를 만든다', async () => {
+            const { script, out } = writeArgvProbe();
+            const cases: [string, string[]][] = [
+                ['Label-A', ['--with-option', 'in.c']],
+                // 빈 배열은 **아무 인자도 만들지 않는다** — 빈 인자로 남으면
+                // 도구가 빈 문자열을 값으로 받아 조용히 다르게 돈다.
+                ['Label-B', ['in.c']],
+                ['Label-C', ['--option', 'b', 'in.c']],
+                // 매핑이 없으면 label 이 그대로 값이다 (기존 액션 동작).
+                ['Label-D', ['Label-D', 'in.c']],
+            ];
+            for (const [label, expected] of cases) {
+                await pickAndRun(label, modeItems, {
+                    id: 'run',
+                    type: 'command',
+                    command: `node "${script}" "${out}" \${mode.value} in.c`,
+                    passTheResultToNextTask: true,
+                }, 'it160');
+                assert.deepStrictEqual(readArgv(), expected, `${label} 에서 argv 가 어긋났다`);
+            }
+        });
+
+        test('IT-161: command args 자리도 같은 결과를 낸다', async () => {
+            // 같은 참조가 자리에 따라 다르게 동작하면 안 된다 — 0.7.31 이전에는
+            // `args` 만 펼치고 `command` 는 인자 한 칸으로 뭉쳤다.
+            const { script, out } = writeArgvProbe();
+            for (const [label, expected] of [
+                ['Label-A', ['--with-option', 'in.c']],
+                ['Label-B', ['in.c']],
+                ['Label-C', ['--option', 'b', 'in.c']],
+            ] as [string, string[]][]) {
+                await pickAndRun(label, modeItems, {
+                    id: 'run',
+                    type: 'command',
+                    command: 'node',
+                    args: [script, out, '${mode.value}', 'in.c'],
+                    passTheResultToNextTask: true,
+                }, 'it161');
+                assert.deepStrictEqual(readArgv(), expected, `${label} 에서 args 확장이 어긋났다`);
+            }
+        });
+
+        test('IT-162: 여러 파일을 고르면 command 문자열에서도 인자 여러 개가 된다', async () => {
+            // 신고된 증상 그대로: `fileDialog` 다중 선택 → 다음 태스크가
+            // `"파일명 파일명"` 이라는 **인자 한 칸**을 받았다.
+            const { script, out } = writeArgvProbe();
+            const files = [
+                path.join(tempWorkspace, 'one.bin'),
+                path.join(tempWorkspace, 'two space.bin'),
+            ];
+            files.forEach(f => fs.writeFileSync(f, 'x'));
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            try {
+                (vscode.window as any).showOpenDialog = async () => files.map(f => vscode.Uri.file(f));
+                await run({
+                    description: 'IT-162',
+                    tasks: [
+                        { id: 'pick', type: 'fileDialog', options: { canSelectMany: true } },
+                        {
+                            id: 'run',
+                            type: 'command',
+                            command: `node "${script}" "${out}" \${pick.paths}`,
+                            passTheResultToNextTask: true,
+                        },
+                    ],
+                }, 'it162');
+                assert.deepStrictEqual(
+                    readArgv().map(normalizeWindowsPathForAssert),
+                    files.map(normalizeWindowsPathForAssert),
+                    '공백이 든 경로까지 인자 하나씩 도착해야 한다 — 따옴표로 묶인 한 칸이 아니라'
+                );
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
+        test('IT-163: 폴더 다중 선택도 같은 규칙이다', async () => {
+            const { script, out } = writeArgvProbe();
+            const folders = [
+                path.join(tempWorkspace, 'alpha'),
+                path.join(tempWorkspace, 'beta dir'),
+            ];
+            folders.forEach(f => fs.mkdirSync(f, { recursive: true }));
+            const originalShowOpenDialog = vscode.window.showOpenDialog;
+            try {
+                (vscode.window as any).showOpenDialog = async () => folders.map(f => vscode.Uri.file(f));
+                await run({
+                    description: 'IT-163',
+                    tasks: [
+                        { id: 'pick', type: 'folderDialog', options: { canSelectMany: true } },
+                        {
+                            id: 'run',
+                            type: 'command',
+                            command: `node "${script}" "${out}" \${pick.paths}`,
+                            passTheResultToNextTask: true,
+                        },
+                    ],
+                }, 'it163');
+                assert.deepStrictEqual(
+                    readArgv().map(normalizeWindowsPathForAssert),
+                    folders.map(normalizeWindowsPathForAssert),
+                    '폴더 쪽만 인자 한 칸으로 뭉쳤다'
+                );
+            } finally {
+                (vscode.window as any).showOpenDialog = originalShowOpenDialog;
+            }
+        });
+
+        test('IT-164: shell 타입에서는 값이 문자열로 이어 붙고 셸이 쪼갠다', async () => {
+            // `shell` 은 문자열을 셸에 그대로 넘기는 계약이라 argv 경계라는
+            // 개념이 없다. 배열은 공백으로 이어 붙고, 그 뒤 **셸이** 쪼갠다 —
+            // 결과 argv 는 같아 보이지만 경로에 공백이 있으면 갈린다는 점이
+            // `command` 와의 차이다. 그 계약을 여기서 고정한다.
+            const { script, out } = writeArgvProbe();
+            for (const [label, expected] of [
+                ['Label-A', ['--with-option', 'in.c']],
+                ['Label-B', ['in.c']],
+                ['Label-C', ['--option', 'b', 'in.c']],
+            ] as [string, string[]][]) {
+                await pickAndRun(label, modeItems, {
+                    id: 'run',
+                    type: 'shell',
+                    command: `node "${script}" "${out}" \${mode.value} in.c`,
+                    passTheResultToNextTask: true,
+                }, 'it164');
+                assert.deepStrictEqual(readArgv(), expected, `${label} 에서 shell 결과가 어긋났다`);
+            }
+        });
+
+        test('IT-165: value·label 이 다른 태스크 타입에서도 그대로 쓰인다', async () => {
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const notePath = path.join(tempWorkspace, 'it165-note.txt');
+            const derivedPath = path.join(tempWorkspace, 'it165-derived.txt');
+            const gatedPath = path.join(tempWorkspace, 'it165-gated.txt');
+            const skippedPath = path.join(tempWorkspace, 'it165-skipped.txt');
+            try {
+                (vscode.window as any).showQuickPick = async (entries: vscode.QuickPickItem[]) =>
+                    entries.find(entry => entry.label === 'Label-A');
+                await run({
+                    description: 'IT-165',
+                    tasks: [
+                        { id: 'mode', type: 'quickPick', items: modeItems },
+                        // writeFile 내용: 표시 문구와 명령 값이 각각 제 자리에 온다.
+                        {
+                            id: 'note', type: 'writeFile', path: notePath,
+                            content: 'label=${mode.label};value=${mode.value}',
+                        },
+                        // stringManipulation 입력.
+                        {
+                            id: 'derived', type: 'stringManipulation', function: 'trim',
+                            input: '  ${mode.value}  ', passTheResultToNextTask: true,
+                            output: { mode: 'file', filePath: derivedPath, overwrite: true },
+                        },
+                        // when 조건은 **label 이 아니라 value** 로 판정된다.
+                        {
+                            id: 'gated', type: 'writeFile', path: gatedPath, content: 'ran',
+                            when: { var: '${mode.value}', equals: '--with-option' },
+                        },
+                        {
+                            id: 'skipped', type: 'writeFile', path: skippedPath, content: 'ran',
+                            when: { var: '${mode.value}', equals: 'Label-A' },
+                        },
+                    ],
+                }, 'it165');
+
+                assert.strictEqual(
+                    fs.readFileSync(notePath, 'utf8'), 'label=Label-A;value=--with-option',
+                    'writeFile 에서 label 과 value 가 갈리지 않았다'
+                );
+                assert.strictEqual(fs.readFileSync(derivedPath, 'utf8'), '--with-option');
+                assert.ok(fs.existsSync(gatedPath), 'when 이 매핑된 value 로 판정하지 않았다');
+                assert.ok(!fs.existsSync(skippedPath), 'when 이 label 로 판정해 엉뚱한 태스크가 돌았다');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+            }
+        });
+
+        /**
+         * 저장된 입력은 "무엇을 골랐는가" 이지 "그것이 어떤 값인가" 가 아니다.
+         * 매핑을 추가·수정한 뒤의 재실행이 저장된 옛 값을 그대로 넘기면, 사용자는
+         * 아무 신호 없이 **표시 문구를 인자로** 받는다.
+         */
+        test('IT-167: 매핑을 바꾼 뒤 재실행하면 지금 정의의 값이 간다', async () => {
+            const { script, out } = writeArgvProbe();
+            const runWith = (items: any[], preset?: Record<string, unknown>) => {
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                return executeActionPipeline(
+                    {
+                        description: 'IT-167',
+                        tasks: [
+                            { id: 'mode', type: 'quickPick', items },
+                            {
+                                id: 'run', type: 'command',
+                                command: `node "${script}" "${out}" \${mode.value}`,
+                                passTheResultToNextTask: true,
+                            },
+                        ],
+                    } as PipelineAction,
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it167', tempWorkspace, [tempWorkspace],
+                    preset ? { presetInputs: preset } : undefined
+                );
+            };
+
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            const recorded: Record<string, unknown> = {};
+            try {
+                (vscode.window as any).showQuickPick = async (entries: vscode.QuickPickItem[]) =>
+                    entries.find(entry => entry.label === 'Release');
+                // v1: 매핑이 없다 — 저장되는 값은 표시 문구 그대로다.
+                const extensionRoot = path.resolve(__dirname, '..', '..');
+                await executeActionPipeline(
+                    {
+                        description: 'IT-167',
+                        tasks: [
+                            { id: 'mode', type: 'quickPick', items: ['Release', 'Debug'] },
+                            {
+                                id: 'run', type: 'command',
+                                command: `node "${script}" "${out}" \${mode.value}`,
+                                passTheResultToNextTask: true,
+                            },
+                        ],
+                    } as PipelineAction,
+                    { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                    'it167', tempWorkspace, [tempWorkspace],
+                    { recordInputs: recorded }
+                );
+                assert.deepStrictEqual(readArgv(), ['Release'], 'v1 의 전제가 깨졌다');
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+            }
+
+            // v2: 작성자가 같은 선택지에 매핑을 붙였다. 저장된 입력으로 재실행하면
+            // 대화상자는 뜨지 않아야 하고, 값은 **새 매핑**이어야 한다.
+            const dialogOpened = { count: 0 };
+            const original2 = vscode.window.showQuickPick;
+            try {
+                (vscode.window as any).showQuickPick = async () => {
+                    dialogOpened.count++;
+                    throw new Error('quickPick must not open during replay');
+                };
+                await runWith(
+                    [{ label: 'Release', value: '--release' }, { label: 'Debug', value: '--debug' }],
+                    recorded
+                );
+            } finally {
+                (vscode.window as any).showQuickPick = original2;
+            }
+            assert.strictEqual(dialogOpened.count, 0, '저장된 입력이 있는데 다시 물었다');
+            assert.deepStrictEqual(
+                readArgv(), ['--release'],
+                '재실행이 저장된 옛 값(표시 문구)을 명령에 넘겼다'
+            );
+        });
+
+        /**
+         * 항목의 `value` 안 참조는 **디스패치가** 보간한다. 빠뜨리면 같은 참조가
+         * 표시 문구에서는 풀리고 명령에서는 리터럴로 남는다 — 실행해 봐야 드러난다.
+         */
+        test('IT-168: 항목 value 안의 참조도 실행 시점에 보간된다', async () => {
+            const { script, out } = writeArgvProbe();
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            for (const [label, expected] of [
+                ['string', ['--tag=v9']],
+                ['array', ['--f', 'v9']],
+            ] as [string, string[]][]) {
+                try {
+                    (vscode.window as any).showQuickPick = async (entries: vscode.QuickPickItem[]) =>
+                        entries.find(entry => entry.label === label);
+                    await run({
+                        description: 'IT-168',
+                        tasks: [
+                            {
+                                id: 'build', type: 'command', command: 'node',
+                                args: ['-e', "process.stdout.write('v9')"],
+                                passTheResultToNextTask: true,
+                            },
+                            {
+                                id: 'mode', type: 'quickPick',
+                                items: [
+                                    { label: 'string', value: '--tag=${build.output}' },
+                                    { label: 'array', value: ['--f', '${build.output}'] },
+                                ],
+                            },
+                            {
+                                id: 'run', type: 'command',
+                                command: `node "${script}" "${out}" \${mode.value}`,
+                                passTheResultToNextTask: true,
+                            },
+                        ],
+                    }, 'it168');
+                } finally {
+                    (vscode.window as any).showQuickPick = originalShowQuickPick;
+                }
+                assert.deepStrictEqual(readArgv(), expected, `${label} 에서 value 의 참조가 리터럴로 남았다`);
+            }
+        });
+
+
+        test('IT-166: 다중 선택은 valueList 로 인자 여러 개가 된다', async () => {
+            const { script, out } = writeArgvProbe();
+            const originalShowQuickPick = vscode.window.showQuickPick;
+            try {
+                (vscode.window as any).showQuickPick = async (entries: vscode.QuickPickItem[]) =>
+                    entries.filter(entry => entry.label === 'Label-A' || entry.label === 'Label-C');
+                await run({
+                    description: 'IT-166',
+                    tasks: [
+                        { id: 'mode', type: 'quickPick', canPickMany: true, items: modeItems },
+                        {
+                            id: 'run', type: 'command',
+                            command: `node "${script}" "${out}" \${mode.valueList} in.c`,
+                            passTheResultToNextTask: true,
+                        },
+                        {
+                            id: 'note', type: 'writeFile',
+                            path: path.join(tempWorkspace, 'it166-note.txt'),
+                            content: 'labels=${mode.labels};values=${mode.values}',
+                        },
+                    ],
+                }, 'it166');
+                assert.deepStrictEqual(
+                    readArgv(), ['--with-option', '--option', 'b', 'in.c'],
+                    '다중 선택의 매핑 값이 평평하게 펴져 인자로 가지 않았다'
+                );
+                assert.strictEqual(
+                    fs.readFileSync(path.join(tempWorkspace, 'it166-note.txt'), 'utf8'),
+                    'labels=Label-A,Label-C;values=--with-option,--option,b',
+                    'labels 는 표시 문구, values 는 매핑된 값이어야 한다'
+                );
+            } finally {
+                (vscode.window as any).showQuickPick = originalShowQuickPick;
+            }
         });
     });
 });

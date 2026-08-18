@@ -552,8 +552,10 @@ export class HistoryItem extends vscode.TreeItem {
         if (entry.output) { flags.push('output'); }
         if (hasCommands) { flags.push('commands'); }
         // 실행 로그 저장은 기본으로 꺼져 있고 0.7.28 이전 기록에는 참조 자체가
-        // 없다. 플래그로 걸러 두지 않으면 대부분의 행에서 보고서 버튼이
-        // "보고서 없음" 안내만 띄우는 죽은 버튼이 된다.
+        // 없다. 이 플래그는 **인라인 아이콘**만 가린다 — 데이터가 있는 행에서만
+        // 아이콘이 보이게 해 목록이 정직해진다. 우클릭 메뉴는 0.7.31 부터 액션
+        // 기록이면 항상 붙는데(package.json 의 `^historyItem`), 그것이 의도다:
+        // 로그가 없는 이유와 켜는 방법을 안내하는 것이 유일한 발견 경로였다.
         if (!isToolEntry && entry.runLog) { flags.push('runlog'); }
         const baseContext = isToolEntry ? 'historyToolItem' : 'historyItem';
         this.contextValue = flags.length > 0 ? `${baseContext}.${flags.join('.')}` : baseContext;
