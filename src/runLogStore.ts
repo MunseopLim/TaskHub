@@ -4,6 +4,8 @@ import * as path from 'path';
 
 export const RUN_LOG_DIRECTORY = '.taskhub/logs';
 export const RUN_LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
+export const RUN_LOG_MAX_COMMAND_BYTES = 256 * 1024;
+export const RUN_LOG_COMMAND_TRUNCATED_MARKER = '[... additional commands omitted ...]';
 export const RUN_LOG_DEFAULT_MAX_FILES = 100;
 export const RUN_LOG_DEFAULT_RETENTION_DAYS = 30;
 export const RUN_LOG_DEFAULT_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
@@ -88,6 +90,19 @@ export interface ActionRunLogTaskSpec {
     type: string;
 }
 
+export function appendBoundedRunCommand(
+    existing: string | undefined,
+    command: string,
+    maxBytes = RUN_LOG_MAX_COMMAND_BYTES
+): string {
+    if (existing?.endsWith(RUN_LOG_COMMAND_TRUNCATED_MARKER)) { return existing; }
+    const combined = existing ? `${existing}\n${command}` : command;
+    if (Buffer.byteLength(combined, 'utf8') <= maxBytes) { return combined; }
+    const suffix = `${existing ? '\n' : ''}${RUN_LOG_COMMAND_TRUNCATED_MARKER}`;
+    const room = Math.max(0, maxBytes - Buffer.byteLength(suffix, 'utf8'));
+    return `${truncateUtf8(existing ?? command, room)}${suffix}`;
+}
+
 export interface TaskRunLogCompletion {
     status: Extract<TaskRunLogStatus, 'success' | 'failure' | 'continued'>;
     finishedAt: number;
@@ -143,7 +158,7 @@ export class ActionRunLogCollector {
         if (!record) { return; }
         // forEach는 같은 논리 태스크를 여러 번 실행한다. 실행 보고서에서 마지막
         // 명령만 남기지 않고 실제 순서대로 모두 보이게 줄 단위로 누적한다.
-        record.command = record.command ? `${record.command}\n${command}` : command;
+        record.command = appendBoundedRunCommand(record.command, command);
         if (cwd) { record.cwd = cwd; }
         record.output = { availability };
     }

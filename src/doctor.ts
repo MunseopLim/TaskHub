@@ -40,10 +40,12 @@ import {
     formatCyclePath,
     evaluateTaskCondition,
     inferTaskDependencies,
+    taskReferencesSensitiveBuiltin,
     selectPlatformValue,
     RESERVED_VARIABLE_HEADS,
     RESERVED_HEAD_PREFIXES,
     buildForEachValue,
+    walkInterpolatedTaskStrings,
 } from './pipelineUtils';
 import {
     simulateTaskResult,
@@ -63,7 +65,7 @@ import {
 } from './previewRun';
 import { resolveDiagnosticMatcher } from './diagnosticMatcher';
 import * as path from 'path';
-import { buildBuiltinVariableContext } from './builtinVariables';
+import { attachPipelineTaskIds, buildBuiltinVariableContext } from './builtinVariables';
 
 /**
  * One issue surfaced by Doctor. The extension layer maps these to
@@ -1044,8 +1046,8 @@ function quickPickItemCandidates(entry: unknown, key: string | undefined): strin
 export function enumerateArgvCandidates(
     argv: string[],
     tasks: Task[],
-    /** 참조를 쓰는 태스크 자신의 id — 자기 참조는 런타임에서 풀리지 않는다. */
-    currentTaskId?: string
+    /** 참조를 쓰는 태스크 — 자기 참조와 forEach 지역 `${each}` 판정에 쓴다. */
+    currentTask?: string | Task
 ): { variants: string[][]; truncated: boolean; notAnInterpreter?: boolean } {
     /** 실행 파일 후보 상한 — 진단 한 건에 쓸 비용이 아니다. */
     const MAX_VARIANTS = 32;
@@ -1055,6 +1057,8 @@ export function enumerateArgvCandidates(
     if (!exact) { return { variants: [argv], truncated: false }; }
 
     const values = new Set<string>();
+    const currentTaskId = typeof currentTask === 'string' ? currentTask : currentTask?.id;
+    const hasLocalEach = typeof currentTask === 'object' && currentTask.forEach !== undefined;
     const alternatives = parseReferenceAlternatives(exact[1]);
     // `??` 는 **먼저 풀린 것이 이긴다.** 그래서 대안을 순서대로 걷되, 체인을 끊는
     // 것은 **절대 사라지지 않는다고 증명할 수 있는** 대안뿐이다.
@@ -1067,9 +1071,15 @@ export function enumerateArgvCandidates(
     // `${safe.value ?? bad.value}` 에 뒤 대안까지 경고가 붙는 과탐은 감수한다.
     // 끊을 수 있는 것은 예약 내장뿐이다: 문맥에 늘 있고 꺼지는 길이 없다.
     for (const alt of alternatives) {
-        // bare 내장은 동명 task보다 세지만, `${file.value}`처럼 속성이 붙으면 기존
-        // action 호환을 위해 id가 `file`인 task 결과를 읽는다.
-        if (alt.head && RESERVED_VARIABLE_HEADS.has(alt.head) && alt.key === undefined) {
+        // 반복 본문의 실행 파일 `${each}` / `${each.value}`는 동명 task가 아니라
+        // 외부 배열 원소다. 어떤 실행 파일이 될지 열거할 수 없으므로 fail-closed.
+        if (hasLocalEach && alt.head === 'each') {
+            return { variants: [argv], truncated: false };
+        }
+        const source = tasks.find(t => t.id === alt.head) as any;
+        // 동명 task가 없을 때만 bare 내장이다. 0.7.31까지의 `${file}` task
+        // 대표값 호환을 보존한다.
+        if (alt.head && RESERVED_VARIABLE_HEADS.has(alt.head) && alt.key === undefined && !source) {
             // **bare 내장은 항상 풀려 체인을 끝낸다.** 뒤 대안은 쓰이지 않고, 값
             // 자체는 워크스페이스·확장 **디렉터리 경로**라 인터프리터가 될 수 없다.
             // 다만 **앞선 대안이 이미 값을 냈다면** 그쪽이 이기므로 여기서 진단을
@@ -1082,7 +1092,6 @@ export function enumerateArgvCandidates(
         // 체인이 다음 대안으로 넘어간다(자기 참조는 의존성도 되지 못한다). 존재하는
         // 태스크라는 이유로 bare 에서 체인을 끊으면 뒤의 진짜 인터프리터를 놓친다.
         if (alt.head && alt.head === currentTaskId) { continue; }
-        const source = tasks.find(t => t.id === alt.head) as any;
         if (!source) {
             // 태스크도 내장도 아니다 — 런타임에서 리터럴로 남아 이 대안은 값을 내지
             // 못한다. 다만 `env:`·`input:` 네임스페이스는 여기서 죽었다고 단정할 수
@@ -2045,7 +2054,11 @@ function strictestPosition(all: ReferencePosition[]): ReferencePosition {
  * 그대로 뚫린다 — 우리 CHANGELOG 가 같은 이유로 번들 액션을 고쳐 놓고
  * Doctor 는 반대로 판정하고 있었다.
  */
-function nestedInterpreterRefsAreConstrained(candidate: ScriptCandidate, tasksById: Map<string, Task>): boolean {
+function nestedInterpreterRefsAreConstrained(
+    candidate: ScriptCandidate,
+    tasksById: Map<string, Task>,
+    currentTask: Task
+): boolean {
     // base64 처럼 텍스트로 문법을 따질 수 없는 자리는 면제하지 않는다 —
     // 허용 문자와 디코딩된 코드의 의미가 무관하다(`-EncodedCommand`).
     if (candidate.opaque) { return false; }
@@ -2079,7 +2092,12 @@ function nestedInterpreterRefsAreConstrained(candidate: ScriptCandidate, tasksBy
         // **태스크를 가리키지 않는 참조도 안전하지 않다.** `${workspaceFolder}` 는
         // 사용자 폴더 이름이고 거기에 `;` 나 `&` 가 들어갈 수 있다.
         return parseReferenceAlternatives(match[1]).every(alt => {
-            if (alt.key === undefined && RESERVED_VARIABLE_HEADS.has(alt.head)) { return false; }
+            // 반복 본문의 `${each.*}`는 동명 task 결과가 아니라 외부 배열의 현재
+            // 원소다. 그 출처의 문자 집합은 여기서 증명할 수 없으므로 fail-closed.
+            if (currentTask.forEach !== undefined && alt.head === 'each') { return false; }
+            if (alt.key === undefined
+                && RESERVED_VARIABLE_HEADS.has(alt.head)
+                && !tasksById.has(alt.head)) { return false; }
             // 참조마다 태스크 배열을 훑던 동안 진단이 O(참조 수 × 태스크 수) 였다.
             const source = tasksById.get(alt.head) as any;
             if (!source) { return false; }
@@ -2441,8 +2459,11 @@ function patternMeaningfullyConstrains(pattern: unknown): boolean {
  */
 function collectSecretTaskIds(tasks: Task[]): Set<string> {
     const secret = new Set<string>();
+    const validTaskIds = new Set(tasks.map(task => task.id));
     for (const task of tasks) {
-        if (task && typeof task.id === 'string' && task.type === 'inputBox' && task.password === true) {
+        if (task && typeof task.id === 'string'
+            && ((task.type === 'inputBox' && task.password === true)
+                || taskReferencesSensitiveBuiltin(task, validTaskIds))) {
             secret.add(task.id);
         }
     }
@@ -2511,7 +2532,19 @@ function analyzeActionTasks(
     // Doctor는 실행 시점의 활성 에디터를 알 수 없다. 그렇다고 표준 내장 변수를
     // 미해결 오타로 보고하면 모든 정상 액션에 경고가 붙으므로, 모양만 드러나는
     // 안전한 자리표시자로 시뮬레이션한다. Preview Run은 실제 현재 에디터를 본다.
-    const builtinVariables = buildBuiltinVariableContext({
+    const doctorEnvironment: NodeJS.ProcessEnv = Object.create(null);
+    for (const task of tasks) {
+        for (const text of walkInterpolatedTaskStrings(task)) {
+            for (const match of text.matchAll(/\$\{([^}]+)\}/g)) {
+                for (const ref of parseReferenceAlternatives(match[1] ?? '')) {
+                    if (ref.key !== undefined || !ref.head.startsWith('env:')) { continue; }
+                    const name = ref.head.slice('env:'.length);
+                    if (name.length > 0) { doctorEnvironment[name] = `<builtin:env:${name}>`; }
+                }
+            }
+        }
+    }
+    const builtinVariables = attachPipelineTaskIds(buildBuiltinVariableContext({
         workspaceFolder: baseDir,
         extensionPath: input.extensionPath,
         editor: {
@@ -2522,8 +2555,12 @@ function analyzeActionTasks(
             columnNumber: 1,
         },
         clipboard: '<builtin:clipboard>',
+        // Doctor 진단은 공유·복사되는 기록 표면이다. process.env를 읽지 않고,
+        // 설정이 실제로 참조한 이름만 안전한 자리표시자로 채운다. 빈 환경을 쓰면
+        // 정상 `${env:NAME}`까지 미해결 오타로 보고하므로 이름의 존재는 모형화한다.
+        environment: doctorEnvironment,
         strict: false,
-    });
+    }), knownTaskIds);
     const sharedInterpolationContext: any = Object.assign(Object.create(null), builtinVariables);
     /** bare 내장은 심볼 스냅샷에서, 속성 참조는 동명 task 결과에서 읽는다. */
     const BUILTIN_CONTEXT_KEYS = RESERVED_VARIABLE_HEADS;
@@ -2544,9 +2581,10 @@ function analyzeActionTasks(
         // 태스크마다 `allResults` 를 **복사**하던 동안 진단이 O(태스크 수²) 였다
         // (태스크 4,000개에 2.2초). 문맥은 한 번만 만들고, 시뮬레이션 결과가
         // 나올 때마다 그 자리에 더한다 — 어차피 이전 태스크 결과만 보인다.
-        const interpolationContext = sharedInterpolationContext;
-        const hadEach = Object.prototype.hasOwnProperty.call(interpolationContext, 'each');
-        const previousEach = interpolationContext.each;
+        const preForEachContext = sharedInterpolationContext;
+        const interpolationContext = task.forEach === undefined
+            ? preForEachContext
+            : Object.assign(Object.create(null), preForEachContext);
         if (task.forEach !== undefined) {
             interpolationContext.each = buildForEachValue(
                 placeholder('forEach', task.id, 'each'),
@@ -2561,6 +2599,12 @@ function analyzeActionTasks(
                 return undefined;
             }
             const out = interpolatePipelineVariables(value, interpolationContext);
+            interpolated.push(out);
+            return out;
+        };
+        const visitPreForEachString = (value: unknown): string | undefined => {
+            if (typeof value !== 'string') { return undefined; }
+            const out = interpolatePipelineVariables(value, preForEachContext);
             interpolated.push(out);
             return out;
         };
@@ -2670,9 +2714,9 @@ function analyzeActionTasks(
         visitString(task.archive);
         visitString(task.destination);
         if (Array.isArray(task.forEach)) {
-            for (const value of task.forEach) { visitString(value); }
+            for (const value of task.forEach) { visitPreForEachString(value); }
         } else {
-            visitString(task.forEach);
+            visitPreForEachString(task.forEach);
         }
         // `tool` 안의 참조도 런타임에서 보간된다. 빼 두면 `tool: "${ghost.output}"`
         // 이 무경고로 통과한 뒤 리터럴 실행 파일로 실행을 시도한다.
@@ -2778,8 +2822,10 @@ function analyzeActionTasks(
         // `when.var` 도 런타임이 보간한다 (`conditionGate`). 빠뜨리면 조건이
         // 가리키는 참조의 오타가 **아무 진단도 없이** 지나가고, 런타임은 리터럴
         // 문자열을 비교하게 되어 그 분기가 영영 한쪽으로 굳는다.
-        const resolvedWhenVar = visitString(task.when?.var);
+        const resolvedWhenVar = visitPreForEachString(task.when?.var);
+        const hasDistinctEachProducer = tasks.some(candidate => candidate !== task && candidate.id === 'each');
         if (task.forEach !== undefined
+            && !hasDistinctEachProducer
             && typeof task.when?.var === 'string'
             && Array.from(task.when.var.matchAll(/\$\{([^}]+)}/g)).some(match =>
                 parseReferenceAlternatives(match[1]).some(ref => ref.head === 'each'))) {
@@ -3000,7 +3046,8 @@ function analyzeActionTasks(
             }
         }
 
-        // password 파생 값을 디스크에 남기려면 태스크가 그렇게 선언해야 한다.
+        // password·환경변수·클립보드·선택 텍스트에서 파생된 값을 디스크에
+        // 남기려면 태스크가 그렇게 선언해야 한다.
         // 런타임이 실행 중에 거부하는 자리라 **실행하기 전에** 알려 준다 —
         // 파이프라인 중간에서 멈추면 앞 태스크의 부수 효과는 이미 일어난 뒤다.
         const writesSecretToFile = persistsToFile(task) && secretTaskIds.has(task.id);
@@ -3011,15 +3058,15 @@ function analyzeActionTasks(
                 range: findIdLine(input.rawText, task.id),
                 severity: 'error',
                 code: 'secret.file-optin',
-                message: `Task '${item.id}.${task.id}' would persist a password-derived value to disk without 'allowSecretContent': true — the runtime refuses this write.`,
-                messageKo: `Task '${item.id}.${task.id}'가 'allowSecretContent': true 없이 password 파생 값을 파일로 저장하려 합니다 — 런타임이 이 쓰기를 거부합니다.`,
+                message: `Task '${item.id}.${task.id}' would persist a sensitive runtime value to disk without 'allowSecretContent': true — the runtime refuses this write.`,
+                messageKo: `Task '${item.id}.${task.id}'가 'allowSecretContent': true 없이 민감한 실행 문맥 값을 파일로 저장하려 합니다 — 런타임이 이 쓰기를 거부합니다.`,
             });
         }
         // 반대 방향: 아무 효과도 없는 선언은 "여기서 비밀을 다룬다"는 잘못된
         // 신호를 남기고 리뷰를 무디게 만든다.
         if (task.allowSecretContent === true && !writesSecretToFile) {
             const reason = persistsToFile(task)
-                ? { en: 'the task writes a file but nothing in it is password-derived', ko: '이 태스크는 파일을 쓰지만 password 파생 값이 없습니다' }
+                ? { en: 'the task writes a file but nothing in it is derived from sensitive runtime data', ko: '이 태스크는 파일을 쓰지만 민감한 실행 문맥에서 파생된 값이 없습니다' }
                 : { en: 'the task does not write a file', ko: '이 태스크는 파일을 쓰지 않습니다' };
             findings.push({
                 filePath: input.filePath,
@@ -3087,7 +3134,7 @@ function analyzeActionTasks(
             // 보지 못해 플래그가 선언 순서에 따라 달라졌다. 전부 평가한 뒤 합친다.
             const vulnerable = commandBranches.map(branch => {
                 const argv = [...tokenizeCommandLine(branch), ...extraArgs];
-                const { variants, truncated, notAnInterpreter } = enumerateArgvCandidates(argv, tasks, task.id);
+                const { variants, truncated, notAnInterpreter } = enumerateArgvCandidates(argv, tasks, task);
                 // 실행 파일 자리가 인터프리터가 될 수 없다 — 풀리는 대안이 없어
                 // spawn 이 실패하거나, 풀린 값이 디렉터리 경로다. 진단을 얹지 않는다.
                 if (notAnInterpreter) { return false; }
@@ -3103,7 +3150,8 @@ function analyzeActionTasks(
                     // 못한 경우(동적 스위치·모르는 옵션)는 뒤따르는 참조가 모두
                     // 후보이므로, 그중 하나라도 제약이 없으면 경고한다.
                     const { candidates } = scriptCandidates(variant);
-                    return candidates.some(candidate => !nestedInterpreterRefsAreConstrained(candidate, tasksById));
+                    return candidates.some(candidate =>
+                        !nestedInterpreterRefsAreConstrained(candidate, tasksById, task));
                 });
             }).some(Boolean);
             if (dynamicInterpreter && !vulnerable) {
@@ -3167,8 +3215,6 @@ function analyzeActionTasks(
         // Seed downstream context. capture 적용 조건(런타임은 문자열 `output` 이
         // 있을 때만 capture 를 돌린다)은 `simulateTaskResultWithCaptures` 한
         // 곳에만 두어 Preview / 전방 참조 판정과 같은 모델을 쓰게 한다.
-        if (hadEach) { interpolationContext.each = previousEach; }
-        else { delete interpolationContext.each; }
         allResults[task.id] = simulateTaskResultWithCaptures(task);
         sharedInterpolationContext[task.id] = allResults[task.id];
         forwardTaskIds.delete(task.id);

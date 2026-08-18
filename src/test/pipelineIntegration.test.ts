@@ -179,7 +179,7 @@ suite('Pipeline integration', function () {
                 },
                 {
                     id: 'save', type: 'writeFile', path: resultPath,
-                    content: '${run.output}',
+                    content: '${run.output}', allowSecretContent: true,
                 },
             ],
         };
@@ -224,6 +224,7 @@ suite('Pipeline integration', function () {
                 tasks: [{
                     id: 'save', type: 'writeFile', path: resultPath,
                     content: '${file}|${relativeFile}|${selectedText}|${lineNumber}|${columnNumber}',
+                    allowSecretContent: true,
                 }],
             }, 'it170');
         } finally {
@@ -234,6 +235,77 @@ suite('Pipeline integration', function () {
             fs.readFileSync(resultPath, 'utf8'),
             `${activeFile}|${path.join('src', 'active file.txt')}|beta|1|11`
         );
+    });
+
+    test('IT-179: 명시 workspaceRoots 밖의 창 파일에는 상대 경로를 만들지 않는다', async () => {
+        const windowWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        assert.ok(windowWorkspace, '테스트 호스트 workspace가 필요하다');
+        const activeFile = path.join(windowWorkspace, 'actions.schema.json');
+        const resultPath = path.join(tempWorkspace, 'it179.txt');
+        const document = await vscode.workspace.openTextDocument(activeFile);
+        await vscode.window.showTextDocument(document, { preview: false });
+
+        try {
+            await run({
+                description: 'IT-179',
+                tasks: [{
+                    id: 'save', type: 'writeFile', path: resultPath,
+                    content: '${relativeFile ?? workspaceFolder}',
+                }],
+            }, 'it179');
+        } finally {
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        }
+
+        assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), tempWorkspace);
+    });
+
+    test('IT-176: 민감 내장값은 중간 결과·cwd·History 입력까지 전이되어 가려진다', async () => {
+        const extensionRoot = path.resolve(__dirname, '..', '..');
+        const secret = 'taskhub-sensitive-builtin-value';
+        const recordCommands: Record<string, string> = Object.create(null);
+        const recordInputs: Record<string, unknown> = Object.create(null);
+        const collector = new ActionRunLogCollector('it176', 'IT-176', Date.now(), [
+            { id: 'derive', type: 'stringManipulation' },
+            { id: 'use', type: 'command' },
+            { id: 'confirmValue', type: 'inputBox' },
+        ]);
+        const builtinVariables = buildBuiltinVariableContext({
+            workspaceFolder: tempWorkspace,
+            extensionPath: extensionRoot,
+            editor: { selectedText: secret },
+            environment: { TASKHUB_SECRET_CWD: tempWorkspace },
+            strict: true,
+        });
+        const originalInput = vscode.window.showInputBox;
+        (vscode.window as any).showInputBox = async (options: vscode.InputBoxOptions) => options.value;
+        try {
+            await executeActionPipeline({
+                description: 'IT-176',
+                tasks: [
+                    { id: 'derive', type: 'stringManipulation', function: 'trim', input: '${selectedText}' },
+                    {
+                        id: 'use', type: 'command', command: 'node',
+                        args: ['-e', 'process.stdout.write(process.argv[1])', '${derive.output}'],
+                        cwd: '${env:TASKHUB_SECRET_CWD}', passTheResultToNextTask: true,
+                    },
+                    { id: 'confirmValue', type: 'inputBox', value: '${derive.output}' },
+                ],
+            }, { extensionPath: extensionRoot } as vscode.ExtensionContext,
+            'it176', tempWorkspace, [tempWorkspace], {
+                builtinVariables, recordCommands, recordInputs, runLogCollector: collector,
+            });
+        } finally {
+            (vscode.window as any).showInputBox = originalInput;
+        }
+
+        assert.ok(!recordCommands.use.includes(secret), recordCommands.use);
+        assert.strictEqual(Object.prototype.hasOwnProperty.call(recordInputs, 'confirmValue'), false);
+        const log = collector.finish('success', Date.now());
+        const use = log.tasks.find(task => task.taskId === 'use')!;
+        assert.strictEqual(use.cwd, '***');
+        assert.strictEqual(use.output.availability, 'redacted');
+        assert.ok(!JSON.stringify(log).includes(secret));
     });
 
     suite('Output Capture + Pipeline Chaining', () => {
@@ -2191,7 +2263,10 @@ try {
                 assert.deepStrictEqual(entries[0].inputs, {
                     // quickPick 은 `label`(표시 문구) 과 `valueList`(인자 확장용)
                     // 도 함께 남긴다 — 재실행이 label 로 선택지 유효성을 본다.
-                    env: { value: 'staging', label: 'staging', valueList: ['staging'] },
+                    env: {
+                        value: 'staging', label: 'staging', labelList: ['staging'],
+                        valueList: ['staging'], custom: false,
+                    },
                     tag: { value: 'release-1' }
                 });
                 assert.deepStrictEqual(entries[0].inputTaskTypes, {
@@ -3001,7 +3076,10 @@ try {
 
                 const entry: HistoryEntry = history.getHistory()[0];
                 assert.deepStrictEqual(entry.inputs, {
-                    env: { value: 'visible', label: 'visible', valueList: ['visible'] },
+                    env: {
+                        value: 'visible', label: 'visible', labelList: ['visible'],
+                        valueList: ['visible'], custom: false,
+                    },
                     tag: { value: 'public-tag' }
                 });
                 assert.ok(!(entry.inputs as any).token, 'password input must not be persisted');
@@ -5169,6 +5247,47 @@ try {
             assert.deepStrictEqual(fs.readFileSync(calls, 'utf8').trim().split(/\r?\n/), ['TOP-SECRET', 'visible']);
             assert.ok(!commands.run.includes('TOP-SECRET'), '비밀 반복값이 History 명령에 남았다');
             assert.ok(commands.run.split(/\r?\n/).every(line => line.includes('***')), commands.run);
+        });
+
+        test('IT-177: forEach timeout은 중단된 반복 위치를 밝힌다', async () => {
+            await assert.rejects(
+                () => run({
+                    description: 'IT-177',
+                    tasks: [{
+                        id: 'slow', type: 'command', forEach: ['first', 'second'],
+                        command: 'node',
+                        args: ['-e', 'setTimeout(() => {}, 1000)'],
+                        timeoutSeconds: 0.05,
+                        passTheResultToNextTask: true,
+                    }],
+                }, 'it177'),
+                /forEach iteration 1\/2 failed/
+            );
+        });
+
+        test('IT-178: forEach 결과 합계가 action 상한을 넘기 전에 중단한다', async () => {
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const previousTotal = config.get<number>('pipeline.totalOutputLimitMb');
+            const previousCapture = config.get<number>('pipeline.outputCaptureLimitMb');
+            try {
+                await config.update('pipeline.totalOutputLimitMb', 1, vscode.ConfigurationTarget.Global);
+                await config.update('pipeline.outputCaptureLimitMb', 1, vscode.ConfigurationTarget.Global);
+                await assert.rejects(
+                    () => run({
+                        description: 'IT-178',
+                        tasks: [{
+                            id: 'bulk', type: 'command', forEach: ['a', 'b'],
+                            command: 'node',
+                            args: ['-e', 'process.stdout.write("x".repeat(600 * 1024))'],
+                            passTheResultToNextTask: true,
+                        }],
+                    }, 'it178'),
+                    /forEach results exceeded the 1 MB combined result limit/
+                );
+            } finally {
+                await config.update('pipeline.totalOutputLimitMb', previousTotal, vscode.ConfigurationTarget.Global);
+                await config.update('pipeline.outputCaptureLimitMb', previousCapture, vscode.ConfigurationTarget.Global);
+            }
         });
     });
 });

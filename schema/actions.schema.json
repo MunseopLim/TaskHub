@@ -225,7 +225,7 @@
         },
         "canPickMany": {
           "type": "boolean",
-          "description": "If true, allows multiple selection (for 'quickPick' type). Results will be available as 'value' (first selection), 'label' / 'labels', 'values' (comma-separated) and 'valueList' (array).",
+          "description": "If true, allows multiple selection (for 'quickPick' type). Results include 'value' (first selection), 'label' / 'labels', lossless 'labelList', 'values' (comma-separated), 'valueList' (array), and 'custom' (false for multi-select).",
           "default": false
         },
         "default": {
@@ -242,7 +242,7 @@
         },
         "rememberLastSelection": {
           "type": "boolean",
-          "description": "For 'quickPick': remember the selected label(s) per workspace, action, and task, and restore them on the next normal run. An explicit default takes precedence.",
+          "description": "For 'quickPick': remember the selected label(s) and whether a single value was custom per workspace, action, and task, then restore them on the next normal run. An explicit default takes precedence. Selections derived from sensitive runtime context are not stored.",
           "default": false
         },
         "itemsFromCommand": {
@@ -281,7 +281,7 @@
               "description": "A fixed list of values to iterate over. Entries support variable interpolation."
             }
           ],
-          "description": "Run this non-interactive task once per item, sequentially. Inside the task use '${each}' or '${each.value}', plus '${each.index}' (0-based), '${each.number}' (1-based), and '${each.count}'. Dynamic lists are limited to 1000 items."
+          "description": "Run this non-interactive task once per item, sequentially. Inside the task use '${each}' or '${each.value}', plus '${each.index}' (0-based), '${each.number}' (1-based), and '${each.count}'. Dynamic lists are limited to 1000 items; accumulated results use the action result-size limit."
         },
         "message": {
           "type": "string",
@@ -404,7 +404,7 @@
         },
         "allowSecretContent": {
           "type": "boolean",
-          "description": "Allows 'writeFile' / 'appendFile' / output.mode 'file' to persist content derived from a 'password: true' input. Without this flag such writes are refused. Files written under this flag are created with owner-only permissions (0600; no effect on Windows).",
+          "description": "Allows 'writeFile' / 'appendFile' / output.mode 'file' to persist content derived from sensitive runtime data such as password input, environment variables, clipboard text, or selected text. Without this flag such writes are refused. Files written under this flag are created with owner-only permissions (0600; no effect on Windows).",
           "default": false
         },
         "timeoutSeconds": {

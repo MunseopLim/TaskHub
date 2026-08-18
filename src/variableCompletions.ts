@@ -315,14 +315,20 @@ export function collectVariableCompletions(
 
     if (dot < 0) {
         const items: VariableCompletion[] = [];
+        // 현재 task도 내장 이름의 소유권 판정에는 포함한다. 자기 자신은 결과
+        // 참조로 제안하지 않지만, runtime/Preview/Doctor가 동명 task 때문에
+        // bare 내장 폴백을 막는 것과 자동완성이 같은 계약을 써야 한다.
+        const declaredTaskIds = new Set<string>();
         for (const slice of tasks) {
-            if (slice === cursorTask) { continue; }   // 자기 자신은 참조할 수 없다
             const id = firstStringField(slice.text, 'id');
             const type = firstStringField(slice.text, 'type');
             if (!id) { continue; }
+            declaredTaskIds.add(id);
+            if (slice === cursorTask) { continue; }   // 자기 자신은 참조할 수 없다
             items.push({ name: id, detail: { kind: 'task', taskType: type } });
         }
         for (const name of BUILTIN_VARIABLE_NAMES) {
+            if (declaredTaskIds.has(name)) { continue; }
             items.push({ name, detail: { kind: 'builtin', ref: name } });
         }
         if (inForEachTask) {
@@ -364,12 +370,14 @@ export function collectVariableCompletions(
     const many = /"canSelectMany"\s*:\s*true/.test(target.text);
     const pickMany = /"canPickMany"\s*:\s*true/.test(target.text);
     const captured = /"passTheResultToNextTask"\s*:\s*true/.test(target.text);
+    const repeated = /"forEach"\s*:/.test(target.text);
     let simulated: Record<string, unknown>;
     try {
         simulated = (simulateTaskResult({
             id: head,
             type,
             canPickMany: pickMany,
+            forEach: repeated ? ['<item>'] : undefined,
             passTheResultToNextTask: captured,
             options: many ? { canSelectMany: true } : undefined,
         } as any) ?? {}) as Record<string, unknown>;

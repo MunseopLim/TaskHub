@@ -27,9 +27,11 @@ import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput } from './doc
 import { createZipArchive, extractZipArchive } from './archiveUtils';
 import { DIALOG_SCOPE, coerceDefaultUri, initDialogMemory, showOpenDialogWithMemory, showSaveDialogWithMemory, taskDialogScope } from './dialogMemory';
 import {
+    forgetQuickPickSelection,
     initQuickPickMemory,
     recallQuickPickSelection,
     rememberQuickPickSelection,
+    type RememberedQuickPickSelection,
 } from './quickPickMemory';
 import { collectVariableCompletions, referencePrefixAt, type VariableCompletionDetail } from './variableCompletions';
 import {
@@ -54,6 +56,7 @@ import {
 } from './inputProfiles';
 import {
     ActionRunLogCollector,
+    appendBoundedRunCommand,
     RUN_LOG_DEFAULT_MAX_FILES,
     RUN_LOG_DEFAULT_MAX_TOTAL_BYTES,
     RUN_LOG_DEFAULT_RETENTION_DAYS,
@@ -71,6 +74,7 @@ import {
 } from './runLogStore';
 import { buildActionRunReportHtml } from './actionRunReport';
 import {
+    attachPipelineTaskIds,
     buildBuiltinVariableContext,
     redactSensitiveBuiltinVariables,
     type ActiveEditorVariableSnapshot,
@@ -1182,6 +1186,7 @@ import {
     INTERPOLATED_VALUE_MAX_LENGTH,
     wouldExceedCaptureLimit,
     resolveWithinWorkspace,
+    isInsideWorkspaceRoots,
     resolveArchiveTaskPath,
     resolveFavoriteFilePath,
     toWorkspaceRelativePath,
@@ -1229,6 +1234,8 @@ import {
     evaluateTaskCondition,
     shouldSkipForSkippedDependencies,
     inferTaskDependencies,
+    parseReferenceAlternatives,
+    taskReferencesSensitiveBuiltin,
     buildTaskGraph,
     detectGraphCycle,
     validateTaskGraph,
@@ -2526,6 +2533,8 @@ interface ActionRunContext {
     closed: boolean;
     /** Results that contain or were derived from a password input. */
     readonly secretTaskIds: Set<string>;
+    /** Results derived from values that must never be persisted verbatim. */
+    readonly sensitiveTaskIds: Set<string>;
     /** AbortControllers owned by currently running built-in archive tasks. */
     readonly taskAbortControllers: Map<string, Set<AbortController>>;
     /**
@@ -2560,6 +2569,7 @@ function createActionRunContext(id: string): ActionRunContext {
         abandoned: false,
         closed: false,
         secretTaskIds: new Set<string>(),
+        sensitiveTaskIds: new Set<string>(),
         taskAbortControllers: new Map<string, Set<AbortController>>(),
         // 다음 실행이 이 플래그를 물려받으면 안 된다. 요청한 그 실행에서만
         // `beginActionCancellation` 직후에 세운다.
@@ -2692,6 +2702,7 @@ interface TaskExecutionScope {
     readonly cancellation: vscode.CancellationTokenSource;
     readonly runCancellationSubscription: vscode.Disposable;
     timedOut: boolean;
+    forEachIteration?: { index: number; total: number };
 }
 
 function createTaskExecutionScope(run: ActionRunContext, taskId: string): TaskExecutionScope {
@@ -2735,6 +2746,11 @@ export function isActionCancelled(id: string, sources: ReadonlyMap<string, vscod
 
 function markTaskResultSecret(run: ActionRunContext, taskId: string): void {
     run.secretTaskIds.add(taskId);
+    run.sensitiveTaskIds.add(taskId);
+}
+
+function markTaskResultSensitive(run: ActionRunContext, taskId: string): void {
+    run.sensitiveTaskIds.add(taskId);
 }
 
 /**
@@ -2751,13 +2767,24 @@ function taskReferencesSecret(task: import('./schema').Task, run: ActionRunConte
     return inferTaskDependencies(task, run.secretTaskIds).size > 0;
 }
 
+/** password뿐 아니라 env/선택/클립보드에서 파생된 결과의 기록 오염도 전파한다. */
+function taskReferencesSensitiveData(
+    task: import('./schema').Task,
+    run: ActionRunContext,
+    validTaskIds: ReadonlySet<string>
+): boolean {
+    if (taskReferencesSensitiveBuiltin(task, validTaskIds)) { return true; }
+    if (run.sensitiveTaskIds.size === 0) { return false; }
+    return inferTaskDependencies(task, run.sensitiveTaskIds).size > 0;
+}
+
 /** 표시·기록용 보간 컨텍스트. 비밀 태스크의 결과를 자리표시자로 바꾼다. */
 function redactSecretsInContext(run: ActionRunContext, context: Record<string, any>): Record<string, any> {
     // 환경변수·클립보드·선택 텍스트는 비밀번호 inputBox를 거치지 않아도 비밀일
     // 수 있다. 실제 자식 프로세스에는 원문을 넘기되 History 명령, verbose 로그,
     // run report와 조건 skip 사유에는 항상 자리표시자만 남긴다.
     const builtinRedacted = redactSensitiveBuiltinVariables(context, SECRET_PLACEHOLDER);
-    if (run.secretTaskIds.size === 0) { return builtinRedacted; }
+    if (run.sensitiveTaskIds.size === 0) { return builtinRedacted; }
 
     const redactValue = (value: unknown): unknown => {
         if (Array.isArray(value)) { return value.map(redactValue); }
@@ -2775,7 +2802,7 @@ function redactSecretsInContext(run: ActionRunContext, context: Record<string, a
     };
 
     const redacted = { ...builtinRedacted };
-    for (const id of run.secretTaskIds) {
+    for (const id of run.sensitiveTaskIds) {
         if (Object.prototype.hasOwnProperty.call(redacted, id)) {
             redacted[id] = redactValue(redacted[id]);
         }
@@ -2826,8 +2853,26 @@ function buildRedactedDisplayValue(
     template: string | undefined,
     actual: string | undefined
 ): string | undefined {
-    if (!template || actual === undefined || run.secretTaskIds.size === 0) { return actual; }
+    if (!template || actual === undefined) { return actual; }
     return interpolatePipelineVariables(template, redactSecretsInContext(run, interpolationContext));
+}
+
+function buildSensitiveDisplayPath(
+    run: ActionRunContext,
+    interpolationContext: Record<string, any>,
+    template: string,
+    workspaceRoots: string[],
+    defaultWorkspace: string
+): string {
+    try {
+        const redacted = interpolatePipelineVariables(
+            template,
+            redactSecretsInContext(run, interpolationContext)
+        );
+        return resolveWithinWorkspace(redacted, workspaceRoots, defaultWorkspace);
+    } catch {
+        return SECRET_PLACEHOLDER;
+    }
 }
 
 /** 이력·로그에 남기는 자리표시자. 값 길이를 짐작하게 하지 않는다. */
@@ -2836,11 +2881,11 @@ const SECRET_PLACEHOLDER = '***';
 /** JSON에서 만들 수 없는 forEach 지역값의 taint 표식. */
 const FOREACH_VALUE_IS_SECRET = Symbol('taskhub.forEachValueIsSecret');
 
-/** password 파생 파일의 권한. 소유자만 읽고 쓴다. */
+/** 민감 입력 파생 파일의 권한. 소유자만 읽고 쓴다. */
 const SECRET_FILE_MODE = 0o600;
 
 /**
- * password 파생 값을 디스크에 남기려면 **태스크가 그렇게 선언해야** 한다.
+ * 민감 입력 파생 값을 디스크에 남기려면 **태스크가 그렇게 선언해야** 한다.
  *
  * `.netrc`·`.env`·서명 설정을 만드는 일 자체는 정당하므로 기능을 없애지
  * 않는다. 막을 것은 `content` 에 `${token.value}` 를 끼워 넣었다는 이유만으로
@@ -2853,7 +2898,7 @@ const SECRET_FILE_MODE = 0o600;
 function requireSecretContentOptIn(task: import('./schema').Task, secretDerived: boolean): void {
     if (!secretDerived || task.allowSecretContent === true) { return; }
     throw new SecretContentPolicyError(
-        `Task '${task.id}' would write a password-derived value to disk. `
+        `Task '${task.id}' would write a value derived from sensitive runtime data to disk. `
         + `Set 'allowSecretContent': true on the task to allow it (the file is then created with owner-only permissions).`
     );
 }
@@ -2864,21 +2909,25 @@ function requireSecretContentOptIn(task: import('./schema').Task, secretDerived:
  * Windows 는 읽기 전용 비트만 대응하므로 건너뛴다 — 실패해도 쓰기 자체를
  * 되돌리지는 않는다(파일은 이미 만들어졌고, 사용자가 요청한 동작이다).
  */
-function restrictSecretFilePermissions(filePath: string): void {
+function restrictSecretFilePermissions(filePath: string, displayPath = SECRET_PLACEHOLDER): void {
     if (process.platform === 'win32') { return; }
     try {
         fs.chmodSync(filePath, SECRET_FILE_MODE);
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        outputChannel.appendLine(`[WARN] Could not restrict permissions on '${filePath}': ${message}`);
+        // filePath 자체가 `${env:TOKEN}` 등 민감값에서 파생됐을 수 있다.
+        // Node의 원문 오류도 경로를 포함하므로 안전한 errno code만 남긴다.
+        const code = typeof (error as NodeJS.ErrnoException)?.code === 'string'
+            ? ` (${(error as NodeJS.ErrnoException).code})`
+            : '';
+        outputChannel.appendLine(`[WARN] Could not restrict permissions on sensitive output file '${displayPath}'${code}.`);
     }
 }
 
-/** 비밀이 디스크에 남는 순간은 조용히 지나가면 안 된다. */
-function notifySecretFileWrite(taskId: string, filePath: string): void {
+/** 민감 입력이 디스크에 남는 순간은 조용히 지나가면 안 된다. */
+function notifySecretFileWrite(taskId: string, displayPath: string): void {
     vscode.window.showWarningMessage(t(
-        `태스크 '${taskId}'가 password 파생 값을 '${filePath}'에 저장했습니다. 소유자만 읽도록 권한을 조였지만, 버전 관리에 올라가지 않는지 확인하세요.`,
-        `Task '${taskId}' stored a password-derived value in '${filePath}'. Permissions were restricted to the owner — make sure the file is not committed to version control.`
+        `태스크 '${taskId}'가 민감한 실행 문맥에서 파생된 값을 '${displayPath}'에 저장했습니다. 경로의 민감 부분은 가렸습니다. 소유자만 읽도록 권한을 조였지만, 버전 관리에 올라가지 않는지 확인하세요.`,
+        `Task '${taskId}' stored a value derived from sensitive runtime data in '${displayPath}'. Sensitive parts of the path were hidden. Permissions were restricted to the owner — make sure the file is not committed to version control.`
     ));
 }
 
@@ -3112,6 +3161,15 @@ function containsSensitiveTaskError(error: unknown, seen = new Set<unknown>()): 
     return Array.from(error.errors as Iterable<unknown>).some(item => containsSensitiveTaskError(item, seen));
 }
 
+function containsDebuggableSensitiveTaskError(error: unknown, seen = new Set<unknown>()): boolean {
+    if (error instanceof SensitiveTaskError) { return error.debugAvailable; }
+    if (!(error instanceof AggregateError) || seen.has(error)) { return false; }
+    seen.add(error);
+    return Array.from(error.errors as Iterable<unknown>).some(item =>
+        containsDebuggableSensitiveTaskError(item, seen)
+    );
+}
+
 function sensitiveStageLabel(stage: SensitiveFailureDetail['stage']): string {
     switch (stage) {
         case 'start': return t('실행 시작 실패', 'failed to start');
@@ -3123,7 +3181,11 @@ function sensitiveStageLabel(stage: SensitiveFailureDetail['stage']): string {
 }
 
 class SensitiveTaskError extends Error {
-    constructor(taskId: string, public readonly detail: SensitiveFailureDetail) {
+    constructor(
+        taskId: string,
+        public readonly detail: SensitiveFailureDetail,
+        public readonly debugAvailable = true
+    ) {
         // Do not retain the original error as `cause`: stderr and spawn errors
         // can themselves contain the secret, and callers may serialize the
         // complete Error object rather than just `.message`.
@@ -3144,10 +3206,15 @@ class SensitiveTaskError extends Error {
         if (detail.command) {
             parts.push(t(`명령: ${detail.command}`, `command: ${detail.command}`));
         }
-        parts.push(t(
-            'password 입력을 사용해 상세 출력은 숨겼습니다',
-            'detailed output is hidden because the task used a password input'
-        ));
+        parts.push(debugAvailable
+            ? t(
+                'password 입력을 사용해 상세 출력은 숨겼습니다',
+                'detailed output is hidden because the task used a password input'
+            )
+            : t(
+                '민감한 실행 문맥을 사용해 상세 출력은 숨겼습니다',
+                'detailed output is hidden because the task used sensitive runtime context'
+            ));
         super(parts.join(' — '));
         this.name = 'SensitiveTaskError';
     }
@@ -3157,7 +3224,7 @@ function logSuppressedSensitiveDiagnostics(taskId: string): void {
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     if (showVerboseLogs) {
         outputChannel.appendLine(
-            `[INFO] Diagnostics for task '${taskId}' were suppressed because the task used a password input.`
+            `[INFO] Diagnostics for task '${taskId}' were suppressed because the task used sensitive input.`
         );
     }
 }
@@ -4769,30 +4836,61 @@ export function captureActiveEditorVariableSnapshot(): ActiveEditorVariableSnaps
 }
 
 function buildPreviewBuiltinVariables(workspaceFolder: string, extensionPath: string): BuiltinVariableContext {
+    const editor = captureActiveEditorVariableSnapshot();
+    if (editor?.selectedText !== undefined) {
+        editor.selectedText = '<builtin:selectedText>';
+    }
+    const environment: NodeJS.ProcessEnv = Object.create(null);
+    for (const name of Object.keys(process.env)) {
+        environment[name] = `<builtin:env:${name}>`;
+    }
     return buildBuiltinVariableContext({
         workspaceFolder,
         extensionPath,
-        editor: captureActiveEditorVariableSnapshot(),
+        editor,
         // Preview 문서/출력 채널에 클립보드 원문을 복사하지 않는다.
         clipboard: '<builtin:clipboard>',
-        environment: process.env,
+        environment,
         strict: false,
     });
 }
 
 function actionReferencesBuiltin(action: PipelineAction, name: string): boolean {
-    return action.tasks.some(task =>
-        Array.from(walkInterpolatedTaskStrings(task)).some(value =>
-            extractVariableHeads(value).includes(name)
-        )
-    );
+    const taskIds = new Set(action.tasks.map(task => task.id));
+    return action.tasks.some(task => {
+        for (const text of walkInterpolatedTaskStrings(task)) {
+            for (const match of text.matchAll(/\${([^}]+)}/g)) {
+                if (parseReferenceAlternatives(match[1] ?? '').some(alt =>
+                    alt.head === name && alt.key === undefined && !taskIds.has(name))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    });
 }
 
 async function captureRuntimeBuiltinVariables(
     action: PipelineAction,
     workspaceFolder: string,
-    extensionPath: string
+    extensionPath: string,
+    workspaceRoots: string[] = getWorkspaceRoots()
 ): Promise<BuiltinVariableContext> {
+    // clipboard.readText()를 기다리는 동안 사용자가 에디터를 바꿀 수 있다.
+    // 파일·선택·커서는 액션을 시작한 시점에 먼저 붙잡는다.
+    const editor = captureActiveEditorVariableSnapshot();
+    // Embedding callers and integration tests may supply an explicit workspace
+    // set that is different from the window currently hosting the extension.
+    // Treat an active file as workspace-relative only when one of those trusted
+    // roots actually contains it; never manufacture ../ paths for outside files.
+    if (editor?.file) {
+        const containingRoots = workspaceRoots
+            .filter(root => isInsideWorkspaceRoots(editor.file!, [root]))
+            .sort((left, right) => path.resolve(right).length - path.resolve(left).length);
+        // 명시 root 집합이 VS Code 창의 workspace와 다를 수 있다. 기존
+        // fileWorkspaceFolder도 그대로 신뢰하지 않고 이 실행의 root로 재판정한다.
+        editor.fileWorkspaceFolder = containingRoots[0];
+    }
     let clipboard: string | undefined;
     if (actionReferencesBuiltin(action, 'clipboard')) {
         try {
@@ -4804,7 +4902,7 @@ async function captureRuntimeBuiltinVariables(
     return buildBuiltinVariableContext({
         workspaceFolder,
         extensionPath,
-        editor: captureActiveEditorVariableSnapshot(),
+        editor,
         clipboard,
         environment: process.env,
         strict: true,
@@ -4933,8 +5031,13 @@ async function executeActionPipelineForRun(
     const defaultWorkspace = workspaceFolderPath
         || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
         || '';
-    const builtinVariables = options?.builtinVariables
-        ?? await captureRuntimeBuiltinVariables(action, defaultWorkspace, context.extensionPath);
+    const capturedBuiltinVariables = options?.builtinVariables
+        ?? await captureRuntimeBuiltinVariables(
+            action,
+            defaultWorkspace,
+            context.extensionPath,
+            workspaceRoots ?? getWorkspaceRoots()
+        );
 
     // Build + validate the task graph. Issues (cycle / missing / self
     // dep) become a clean pipeline failure rather than a runtime
@@ -4953,7 +5056,10 @@ async function executeActionPipelineForRun(
         if (task.isOneShot === true) {
             throw new Error(`Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`);
         }
-        if (typeof task.when?.var === 'string' && extractVariableHeads(task.when.var).includes('each')) {
+        const hasEachProducer = action.tasks.some(candidate => candidate !== task && candidate.id === 'each');
+        if (typeof task.when?.var === 'string'
+            && extractVariableHeads(task.when.var).includes('each')
+            && !hasEachProducer) {
             throw new Error(
                 `Task '${task.id}' cannot use the per-item variable '\${each}' in 'when.var'; `
                 + "the task-level condition is evaluated before 'forEach' starts."
@@ -4993,6 +5099,13 @@ async function executeActionPipelineForRun(
 
     const taskById = new Map<string, import('./schema').Task>();
     for (const t of action.tasks) { taskById.set(t.id, t); }
+    const validTaskIds = new Set(taskById.keys());
+    // embedding caller가 같은 스냅샷을 여러 실행에 재사용할 수 있으므로 원본에
+    // action별 task id를 붙이지 않는다.
+    const builtinVariables = attachPipelineTaskIds(
+        Object.assign(Object.create(null), capturedBuiltinVariables),
+        validTaskIds
+    ) as BuiltinVariableContext;
 
     const inFlight = new Map<string, Promise<InFlightOutcome>>();
     // Collect every failure so multi-failure runs (two parallel builds
@@ -5125,6 +5238,8 @@ async function executeActionPipelineForRun(
     const launchTask = (taskId: string): Promise<InFlightOutcome> => {
         const task = taskById.get(taskId)!;
         const taskUsesSecret = taskReferencesSecret(task, executionRun);
+        const taskUsesSensitiveData = taskUsesSecret
+            || taskReferencesSensitiveData(task, executionRun, validTaskIds);
         if (taskUsesSecret && executionRun.sensitiveDebug) {
             // Create the record before dispatch. Timeout/spawn failures can
             // happen before a single byte is emitted; the user still deserves
@@ -5192,6 +5307,7 @@ async function executeActionPipelineForRun(
                     runLogCollector,
                     taskScope,
                     taskUsesSecret,
+                    taskUsesSensitiveData,
                     builtinVariables
                 );
             } finally {
@@ -5215,11 +5331,19 @@ async function executeActionPipelineForRun(
             }
         });
 
-        return wrapped.then(
+        const contextualized = wrapped.catch((error: unknown) => {
+            if (error instanceof Error && error.name === 'TaskTimeoutError' && taskScope.forEachIteration) {
+                const { index, total } = taskScope.forEachIteration;
+                error.message = `Task '${taskId}' forEach iteration ${index}/${total} failed: ${error.message}`;
+            }
+            throw error;
+        });
+
+        return contextualized.then(
             (result): InFlightOutcome => {
                 let output: TaskRunLogOutput | undefined;
                 if (task.type === 'command' || task.type === 'shell') {
-                    if (taskUsesSecret) {
+                    if (taskUsesSensitiveData) {
                         output = { availability: 'redacted' };
                     } else if (result && typeof result === 'object') {
                         const stdout = typeof (result as any).output === 'string' ? (result as any).output : undefined;
@@ -5268,11 +5392,15 @@ async function executeActionPipelineForRun(
                 // 켜야 할 플래그 이름뿐이라 비밀이 없고, 하필 **비밀 태스크에서만**
                 // 발생하므로 감싸 버리면 고치는 방법을 아무도 못 보게 된다.
                 const policyFailure = raw instanceof SecretContentPolicyError;
-                const e = taskUsesSecret
+                const e = taskUsesSensitiveData
                     && !policyFailure
                     && !(raw instanceof ActionStoppedError)
                     && !(raw instanceof PromptCancelledError)
-                    ? new SensitiveTaskError(taskId, describeSensitiveFailure(raw, maskedCommandForTask(taskId)))
+                    ? new SensitiveTaskError(
+                        taskId,
+                        describeSensitiveFailure(raw, maskedCommandForTask(taskId)),
+                        taskUsesSecret
+                    )
                     : raw;
                 // 사용자 중지는 `continueOnError` 보다 우선한다. 그 설정의 뜻은
                 // "이 태스크가 실패해도 나머지는 계속"이지 "사용자가 멈추라고
@@ -5285,7 +5413,7 @@ async function executeActionPipelineForRun(
                     || executionRun.closed;
                 let output: TaskRunLogOutput | undefined;
                 if (task.type === 'command' || task.type === 'shell') {
-                    if (taskUsesSecret) {
+                    if (taskUsesSensitiveData) {
                         output = { availability: 'redacted' };
                     } else if (raw instanceof ShellCommandError) {
                         output = { availability: 'captured', stdout: raw.stdout, stderr: raw.stderr };
@@ -5296,13 +5424,13 @@ async function executeActionPipelineForRun(
                 runLogCollector?.finishTask(taskId, {
                     status: !actionStopped && task.continueOnError ? 'continued' : 'failure',
                     finishedAt: Date.now(),
-                    error: taskUsesSecret && !policyFailure
-                        ? `Task '${taskId}' details hidden because it used a password input.`
+                    error: taskUsesSensitiveData && !policyFailure
+                        ? `Task '${taskId}' details hidden because it used sensitive input.`
                         : raw.message,
                     // 보고서는 이 코드를 보고 **읽는 시점의 언어로** 문구를
                     // 만든다. 위 `error` 는 로그 파일을 직접 여는 사람을 위한
                     // 원문으로 남긴다.
-                    errorCode: taskUsesSecret && !policyFailure ? 'sensitive-hidden' : undefined,
+                    errorCode: taskUsesSensitiveData && !policyFailure ? 'sensitive-hidden' : undefined,
                     exitCode: raw instanceof ShellCommandError ? raw.exitCode : undefined,
                     signal: raw instanceof ShellCommandError ? raw.signal : undefined,
                     output,
@@ -5359,7 +5487,7 @@ async function executeActionPipelineForRun(
             }
             if (recordInputs) {
                 const t = taskById.get(outcome.taskId);
-                if (t && shouldRecordTaskInput(t) && !executionRun.secretTaskIds.has(outcome.taskId)) {
+                if (t && shouldRecordTaskInput(t) && !executionRun.sensitiveTaskIds.has(outcome.taskId)) {
                     recordInputs[outcome.taskId] = outcome.result;
                 }
             }
@@ -6090,9 +6218,10 @@ export async function executeAction(
         if (!manuallyStopped && !promptCancelled) {
             const durationMs = Math.max(0, Date.now() - timestamp);
             const sensitiveFailure = containsSensitiveTaskError(error);
+            const debuggableSensitiveFailure = containsDebuggableSensitiveTaskError(error);
             runLogOutcome = 'failure';
             runLogError = sensitiveFailure
-                ? 'Failure details hidden because a task used a password input.'
+                ? 'Failure details hidden because a task used sensitive input.'
                 : (error instanceof Error ? error.message : String(error));
             runLogErrorCode = sensitiveFailure ? 'sensitive-hidden' : undefined;
             if (ownsCurrentState) {
@@ -6122,7 +6251,7 @@ export async function executeAction(
                 // 비밀을 쓰는 태스크의 실패는 상세가 가려져 있다. 그대로 두면
                 // 사용자가 원인에 접근할 방법이 없으므로, 일회성 재실행을
                 // 제안한다 (이미 민감 디버그로 돌린 실행에는 제안하지 않는다).
-                if (sensitiveFailure && !run.sensitiveDebug && showTaskStatus) {
+                if (debuggableSensitiveFailure && !run.sensitiveDebug && showTaskStatus) {
                     void offerSensitiveDebugRerun(
                         actionItem, context, mainViewProvider, historyProvider,
                         t(`'${actionItem.title}' 액션 실패: ${error.message}`,
@@ -6288,30 +6417,64 @@ export function backfillDialogArrays(task: any, saved: any): any {
  * 되돌릴 수 없으면(동적 목록·label 미기록·목록에서 사라진 항목) 저장값을 그대로
  * 둔다. 그중 사라진 항목은 `savedInputStillValid` 가 다시 묻게 한다.
  */
+function savedQuickPickLabels(saved: any, many: boolean): string[] | undefined {
+    if (Array.isArray(saved?.labelList)
+        && saved.labelList.length > 0
+        && saved.labelList.every((label: unknown) => typeof label === 'string' && label.length > 0)) {
+        return [...saved.labelList];
+    }
+    if (many) {
+        // 옛 `labels: "a,b"`는 label 자체의 쉼표와 구분할 수 없다. 조용히 다른
+        // 항목을 재실행하는 대신 한 번 다시 묻는다.
+        return undefined;
+    }
+    const label = typeof saved?.label === 'string' ? saved.label : saved?.value;
+    return typeof label === 'string' && label.length > 0 ? [label] : undefined;
+}
+
+function resolvedQuickPickEntries(task: any, context?: any): QuickPickEntry[] {
+    if (!Array.isArray(task?.items)) { return []; }
+    const resolvedItems = context === undefined
+        ? task.items
+        : interpolateQuickPickItems(task.items, context);
+    return quickPickEntries(resolvedItems);
+}
+
+function replayQuickPickEntries(task: any, saved: any, context?: any): QuickPickEntry[] | undefined {
+    const many = task.canPickMany === true;
+    const labels = savedQuickPickLabels(saved, many);
+    if (!labels) { return undefined; }
+    const entries = resolvedQuickPickEntries(task, context);
+    if (saved?.custom === true) {
+        if (many || labels.length !== 1) { return undefined; }
+        const label = labels[0];
+        const matching = entries.filter(entry => entry.label === label);
+        // 직접 입력했던 label이 이제 정적 항목이 됐다면 현재 mapping을 쓴다.
+        // 동명 항목이 둘 이상이면 어느 mapping인지 증명할 수 없으므로 다시 묻는다.
+        if (matching.length === 1) { return matching; }
+        if (matching.length > 1) { return undefined; }
+        if (task.allowCustom !== true) { return undefined; }
+        return [{ label, taskHubValue: label, taskHubCustom: true }];
+    }
+    const selected: QuickPickEntry[] = [];
+    for (const label of labels) {
+        const matching = entries.filter(entry => entry.label === label);
+        // 같은 label이 여러 개면 어느 mapping이었는지 label만으로 증명할 수 없다.
+        if (matching.length !== 1) { return undefined; }
+        selected.push(matching[0]);
+    }
+    return selected;
+}
+
 export function backfillQuickPickValue(task: any, saved: any, context?: any): any {
     if (task?.type !== 'quickPick') { return saved; }
     if (!saved || typeof saved !== 'object' || Array.isArray(saved)) { return saved; }
     if (!Array.isArray(task.items) || task.itemsFromCommand) { return saved; }
-    const many = task.canPickMany === true;
-    const labels: string[] = many
-        ? (typeof saved.labels === 'string' && saved.labels.length > 0 ? saved.labels.split(',') : [])
-        : (typeof saved.label === 'string' ? [saved.label] : []);
-    if (labels.length === 0) { return saved; }
-    const entries: QuickPickEntry[] = [];
-    for (const label of labels) {
-        const item = task.items.find((entry: any) =>
-            (typeof entry === 'string' ? entry : entry?.label) === label);
-        if (item === undefined) { return saved; }
-        // 값 안의 `${…}` 는 실행 시점 문맥으로 푼다 — 정상 실행과 같은 규칙이다.
-        const resolved = typeof item === 'string' || context === undefined
-            ? item
-            : { ...item, value: interpolateQuickPickItemValue(item.value, context) };
-        entries.push({ label, taskHubValue: quickPickItemValue(resolved, label) });
-    }
-    return buildQuickPickResult(entries, many);
+    const entries = replayQuickPickEntries(task, saved, context);
+    return entries ? buildQuickPickResult(entries, task.canPickMany === true) : saved;
 }
 
-export function savedInputStillValid(task: any, saved: any): boolean {
+export function savedInputStillValid(task: any, saved: any, context?: any): boolean {
     // 옛 형식이면서 다중 선택인 다이얼로그는 복원할 수 없다 ({@link backfillDialogArrays}).
     // `value` 검사보다 앞에 둔다 — 다이얼로그 결과에는 `value` 가 없어서
     // 아래 조기 반환에 걸리면 이 검사에 닿지 못한다.
@@ -6323,17 +6486,16 @@ export function savedInputStillValid(task: any, saved: any): boolean {
     // 저장된 입력이 **매번** 거부돼 다시 묻게 된다. 0.7.31 이전 기록에는
     // `label` 이 없으므로 그때만 `value` 로 떨어진다.
     if (task.type === 'quickPick' && Array.isArray(task.items) && !task.itemsFromCommand) {
-        // 다중 선택은 저장된 값이 쉼표로 이어진 형태라 그대로 비교할 수 없다.
-        if (task.canPickMany === true) { return true; }
-        const picked = saved && typeof saved === 'object'
-            ? (typeof saved.label === 'string' ? saved.label : saved.value)
-            : undefined;
-        if (typeof picked !== 'string') { return true; }
-        // 직접 입력은 정적 items에 없다는 것이 정상이다. label/value 모양만
-        // 유지되면 History 재실행에서도 다시 묻지 않는다.
-        if (task.allowCustom === true && task.canPickMany !== true) { return picked.length > 0; }
-        const labels = task.items.map((entry: any) => (typeof entry === 'string' ? entry : entry?.label));
-        return labels.includes(picked);
+        // 입력 프로필 팔레트는 아직 실행 문맥이 없다. 동적 label을 raw 문자열과
+        // 비교해 미리 버리면 런타임의 현재 문맥 재파생 기회가 사라진다. 여기서는
+        // 판정을 보류하고, 실행기가 context와 함께 다시 검사하게 둔다.
+        if (context === undefined && task.items.some((item: any) => {
+            const label = typeof item === 'string' ? item : item?.label;
+            return typeof label === 'string' && label.includes('${');
+        })) {
+            return true;
+        }
+        return replayQuickPickEntries(task, saved, context) !== undefined;
     }
     const value = saved && typeof saved === 'object' ? saved.value : undefined;
     if (typeof value !== 'string') { return true; }
@@ -6381,10 +6543,10 @@ export function aggregateForEachResults(results: readonly any[]): Record<string,
         return [];
     });
     aggregate.outputs = outputs;
+    aggregate.stderrs = stderrs;
     aggregate.paths = paths;
     if (outputs.length > 0) { aggregate.output = outputs.join('\n'); }
     if (stderrs.length > 0) {
-        aggregate.stderrs = stderrs;
         aggregate.stderr = stderrs.join('\n');
     }
     return aggregate;
@@ -6401,6 +6563,7 @@ async function executeForEachTask(
     runLogCollector: ActionRunLogCollector | undefined,
     scope: TaskExecutionScope,
     taskUsesSecret: boolean,
+    taskUsesSensitiveData: boolean,
     builtinVariables: BuiltinVariableContext
 ): Promise<Record<string, any>> {
     if (INTERACTIVE_TASK_TYPES.has(task.type)) {
@@ -6414,16 +6577,19 @@ async function executeForEachTask(
     const items = resolveForEachItems(task.forEach, baseContext);
     const innerTask = { ...task, forEach: undefined };
     const results: any[] = [];
+    const resultLimit = getTotalResultLimitBytes();
+    let resultBytes = 0;
     for (let index = 0; index < items.length; index++) {
         throwIfTaskInactive(scope);
+        scope.forEachIteration = { index: index + 1, total: items.length };
         const iterationResults = Object.assign(Object.create(null), allResults, {
             each: buildForEachValue(items[index], index, items.length),
         });
-        if (taskUsesSecret) {
+        if (taskUsesSensitiveData) {
             iterationResults[FOREACH_VALUE_IS_SECRET] = true;
         }
         try {
-            results.push(await executeSingleTask(
+            const iterationResult = await executeSingleTask(
                 innerTask,
                 iterationResults,
                 context,
@@ -6435,8 +6601,17 @@ async function executeForEachTask(
                 runLogCollector,
                 scope,
                 taskUsesSecret,
+                taskUsesSensitiveData,
                 builtinVariables
-            ));
+            );
+            resultBytes += approximateResultBytes(iterationResult);
+            if (resultBytes > resultLimit) {
+                const limitMb = Math.round(resultLimit / (1024 * 1024));
+                throw new Error(
+                    `Task '${task.id}' forEach results exceeded the ${limitMb} MB combined result limit.`
+                );
+            }
+            results.push(iterationResult);
         } catch (error) {
             if (error instanceof Error) {
                 error.message = `Task '${task.id}' forEach iteration ${index + 1}/${items.length} failed: ${error.message}`;
@@ -6444,7 +6619,13 @@ async function executeForEachTask(
             throw error;
         }
     }
-    return aggregateForEachResults(results);
+    scope.forEachIteration = undefined;
+    const aggregate = aggregateForEachResults(results);
+    if (approximateResultBytes(aggregate) > resultLimit) {
+        const limitMb = Math.round(resultLimit / (1024 * 1024));
+        throw new Error(`Task '${task.id}' forEach aggregate exceeded the ${limitMb} MB combined result limit.`);
+    }
+    return aggregate;
 }
 
 async function executeSingleTask(
@@ -6459,6 +6640,7 @@ async function executeSingleTask(
     runLogCollector?: ActionRunLogCollector,
     scope?: TaskExecutionScope,
     taskUsesSecret = false,
+    taskUsesSensitiveData = false,
     builtinVariables?: BuiltinVariableContext
 ): Promise<any> {
     // The scheduler always supplies its captured generation. Never fall back
@@ -6474,7 +6656,10 @@ async function executeSingleTask(
     const taskProducesSecret = task.type === 'inputBox' && task.password === true;
     const defaultWorkspace = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const effectiveBuiltinVariables = builtinVariables ?? await captureRuntimeBuiltinVariables(
-        { description: '', tasks: [task] }, defaultWorkspace, context.extensionPath
+        { description: '', tasks: [task] },
+        defaultWorkspace,
+        context.extensionPath,
+        workspaceRoots ?? getWorkspaceRoots()
     );
     // null-prototype: 평범한 객체 리터럴로 만들면 `${constructor.name}` 같은
     // **상속 키**가 태스크 결과처럼 해석되어 셸 명령에 들어간다.
@@ -6493,6 +6678,7 @@ async function executeSingleTask(
             runLogCollector,
             scope,
             taskUsesSecret,
+            taskUsesSensitiveData,
             effectiveBuiltinVariables
         );
     }
@@ -6520,7 +6706,8 @@ async function executeSingleTask(
     // 통과하지 못하면 저장된 값을 **버리고 정상 흐름으로 떨어진다** — 사용자가
     // 그 자리에서 다시 입력한다(이전 값이 기본값으로 채워진다). 조용히 옛 값을
     // 쓰거나 액션을 실패시키는 것보다 낫다.
-    const presetAcceptable = presetResult === undefined || savedInputStillValid(task, presetResult);
+    const presetAcceptable = presetResult === undefined
+        || savedInputStillValid(task, presetResult, interpolationContext);
     const usingPresetResult = presetResult !== undefined
         && INTERACTIVE_TASK_TYPES.has(task.type)
         && presetAcceptable;
@@ -6578,21 +6765,9 @@ async function executeSingleTask(
             const itemsAreDead = typeof task.itemsFromCommand === 'string'
                 ? task.itemsFromCommand.length > 0
                 : Boolean(task.itemsFromCommand);
-            const interpolatedItems = itemsAreDead ? task.items : task.items?.map((item: any) => {
-                if (typeof item === 'string') {
-                    return interpolatePipelineVariables(item, interpolationContext);
-                } else {
-                    return {
-                        label: item.label ? interpolatePipelineVariables(item.label, interpolationContext) : item.label,
-                        description: item.description ? interpolatePipelineVariables(item.description, interpolationContext) : item.description,
-                        detail: item.detail ? interpolatePipelineVariables(item.detail, interpolationContext) : item.detail,
-                        // `value` 도 보간한다 — 명령에 실제로 들어가는 값이므로
-                        // 여기서 빠지면 `${build.output}` 같은 참조가 label 에서는
-                        // 풀리고 값에서는 리터럴로 남는다.
-                        value: interpolateQuickPickItemValue(item.value, interpolationContext)
-                    };
-                }
-            });
+            const interpolatedItems = itemsAreDead || !task.items
+                ? task.items
+                : interpolateQuickPickItems(task.items, interpolationContext);
             // Resolve `itemsFromCommand` (string or OS-specific object) to a
             // single interpolated command string, mirroring the shell branch.
             // 여기도 **고른 뒤 보간**한다 — 위 command 와 같은 이유다.
@@ -6618,7 +6793,12 @@ async function executeSingleTask(
                         ? interpolatePipelineVariables(task.default, interpolationContext)
                         : task.default),
             };
-            result = await handleQuickPick(interpolatedQuickPickTask, defaultWorkspace, scope.cancellation.token);
+            result = await handleQuickPick(
+                interpolatedQuickPickTask,
+                defaultWorkspace,
+                scope.cancellation.token,
+                !taskUsesSensitiveData
+            );
             break;
         case 'unzip':
             const interpolatedUnzipTask: any = { ...task };
@@ -6654,7 +6834,14 @@ async function executeSingleTask(
                 }
                 interpolatedUnzipTask.env = interpolatedEnv;
             }
-            result = await handleUnzip(interpolatedUnzipTask, allResults, defaultWorkspace, executionRun, taskUsesSecret);
+            result = await handleUnzip(
+                interpolatedUnzipTask,
+                allResults,
+                defaultWorkspace,
+                executionRun,
+                taskUsesSensitiveData,
+                taskUsesSecret
+            );
             break;
         case 'zip': {
             // `tool` 을 보간해서 넘긴다 — `unzip` 분기가 이미 그렇게 하고
@@ -6670,6 +6857,7 @@ async function executeSingleTask(
                 allResults,
                 defaultWorkspace,
                 executionRun,
+                taskUsesSensitiveData,
                 taskUsesSecret,
                 effectiveBuiltinVariables
             );
@@ -6698,17 +6886,29 @@ async function executeSingleTask(
             break;
         case 'writeFile':
         case 'appendFile':
-            requireSecretContentOptIn(task, taskUsesSecret || taskProducesSecret);
+            const writesSensitiveContent = taskUsesSensitiveData || taskProducesSecret;
+            requireSecretContentOptIn(task, writesSensitiveContent);
+            const writeRoots = workspaceRoots ?? getWorkspaceRoots();
+            const writeDisplayPath = writesSensitiveContent && typeof task.path === 'string'
+                ? buildSensitiveDisplayPath(
+                    executionRun,
+                    interpolationContext,
+                    task.path,
+                    writeRoots,
+                    defaultWorkspace
+                )
+                : undefined;
             result = await handleWriteFile(
                 task,
                 interpolationContext,
-                workspaceRoots ?? getWorkspaceRoots(),
+                writeRoots,
                 defaultWorkspace,
                 task.type === 'appendFile',
-                taskUsesSecret || taskProducesSecret
+                writesSensitiveContent,
+                writeDisplayPath
             );
-            if ((taskUsesSecret || taskProducesSecret) && typeof result?.path === 'string') {
-                notifySecretFileWrite(task.id, result.path);
+            if (writesSensitiveContent && typeof result?.path === 'string') {
+                notifySecretFileWrite(task.id, writeDisplayPath ?? SECRET_PLACEHOLDER);
             }
             break;
         case 'command':
@@ -6759,16 +6959,14 @@ async function executeSingleTask(
                 // 지우는 대신, 비밀 태스크의 결과를 자리표시자로 바꾼
                 // 컨텍스트로 처음부터 다시 만든다.
                 const display = buildRedactedDisplayCommand(executionRun, task, interpolationContext, command, args);
-                recordCommands[task.id] = recordCommands[task.id]
-                    ? `${recordCommands[task.id]}\n${display}`
-                    : display;
+                recordCommands[task.id] = appendBoundedRunCommand(recordCommands[task.id], display);
             }
             // 같은 가림을 **로그에도** 적용해야 한다. verbose 로그는 보간이
             // 끝난 명령줄을 그대로 찍으므로, 이걸 넘기지 않으면 이력에서 가린
             // 값이 로그로 그대로 샌다.
             const redactedDisplay = buildRedactedDisplayCommand(executionRun, task, interpolationContext, command, args);
             const redactedCwd = buildRedactedDisplayValue(executionRun, interpolationContext, task.cwd, interpolatedCwd);
-            const runLogOutputAvailability: TaskRunLogOutputAvailability = taskUsesSecret
+            const runLogOutputAvailability: TaskRunLogOutputAvailability = taskUsesSensitiveData
                 ? 'redacted'
                 : task.isOneShot
                     ? 'background-one-shot'
@@ -6787,14 +6985,16 @@ async function executeSingleTask(
                 executionScope: scope,
                 redactedDisplay,
                 redactedCwd,
-                redactOutput: taskUsesSecret,
+                redactOutput: taskUsesSensitiveData,
                 sensitiveDebugOutputObserver: taskUsesSecret
                     ? sensitiveDebugOutputObserver(executionRun, task.id)
                     : undefined,
-                discardCapturedOutput: taskUsesSecret && !task.passTheResultToNextTask && !executionRun.sensitiveDebug,
+                discardCapturedOutput: taskUsesSensitiveData
+                    && !task.passTheResultToNextTask
+                    && !(taskUsesSecret && executionRun.sensitiveDebug),
             };
 
-            if (task.passTheResultToNextTask || (taskUsesSecret && !task.isOneShot)) {
+            if (task.passTheResultToNextTask || (taskUsesSensitiveData && !task.isOneShot)) {
                 try {
                     const capturedResult = await handleCommand(handlerTask, context, defaultWorkspace);
                     // Password-derived tasks must not stream into VS Code's
@@ -6814,7 +7014,7 @@ async function executeSingleTask(
                     // case where they need it most. Without this branch the
                     // post-processing block below is unreachable on failure
                     // (regression caught by IT-079).
-                    if (err instanceof ShellCommandError && task.output?.diagnostics && !taskUsesSecret) {
+                    if (err instanceof ShellCommandError && task.output?.diagnostics && !taskUsesSensitiveData) {
                         const failedOutput = combineStdoutStderrForDiagnostics(err.stdout, err.stderr);
                         try {
                             const diagnostics = applyDiagnosticsToCollection(
@@ -6832,7 +7032,7 @@ async function executeSingleTask(
                                 `[Warning] Task '${task.id}' diagnostic emission on failure itself failed: ${msg}`
                             );
                         }
-                    } else if (err instanceof ShellCommandError && task.output?.diagnostics && taskUsesSecret) {
+                    } else if (err instanceof ShellCommandError && task.output?.diagnostics && taskUsesSensitiveData) {
                         // Diagnostic messages and their resolved file URIs are
                         // another persistent display surface. Raw stdout,
                         // stderr, or a secret-derived cwd must not reach it.
@@ -6842,7 +7042,7 @@ async function executeSingleTask(
                 }
             } else {
                 if (task.isOneShot) {
-                    if (taskUsesSecret) {
+                    if (taskUsesSensitiveData) {
                         executeSensitiveBackgroundOneShot(handlerTask, defaultWorkspace);
                     } else {
                         executeStreamedTask(handlerTask, defaultWorkspace).catch(error => {
@@ -6876,7 +7076,7 @@ async function executeSingleTask(
     if (typeof directArtifact === 'string') {
         runLogCollector?.recordArtifact(
             task.id,
-            taskUsesSecret || taskProducesSecret ? SECRET_PLACEHOLDER : directArtifact
+            taskUsesSensitiveData || taskProducesSecret ? SECRET_PLACEHOLDER : directArtifact
         );
     }
 
@@ -6916,7 +7116,7 @@ async function executeSingleTask(
     // can resolve relative paths against the task's cwd) and pushed to the
     // action's per-action collection.
     if (task.output && task.output.diagnostics) {
-        if (taskUsesSecret) {
+        if (taskUsesSensitiveData) {
             logSuppressedSensitiveDiagnostics(task.id);
         } else if (result && typeof result.output === 'string') {
             try {
@@ -6978,7 +7178,7 @@ async function executeSingleTask(
 
         switch (interpolatedOutput.mode) {
             case 'editor':
-                if (taskUsesSecret || taskProducesSecret) {
+                if (taskUsesSensitiveData || taskProducesSecret) {
                     // An untitled editor participates in VS Code hot-exit
                     // backup. Treat it as persistence, not as an ephemeral
                     // preview, and require the explicit sensitive-debug flow
@@ -6988,8 +7188,8 @@ async function executeSingleTask(
                     // with `passTheResultToNextTask` its own output IS the
                     // password, and it is not yet in `secretTaskIds` here.
                     vscode.window.showWarningMessage(t(
-                        `태스크 '${task.id}'의 에디터 출력을 숨겼습니다. password 입력에서 파생된 출력은 민감 디버그 재실행에서만 볼 수 있습니다.`,
-                        `Editor output for task '${task.id}' was hidden. Password-derived output is only available through a sensitive-debug re-run.`
+                        `태스크 '${task.id}'의 에디터 출력을 숨겼습니다. 민감한 실행 문맥에서 파생된 출력은 에디터에 표시하지 않습니다.`,
+                        `Editor output for task '${task.id}' was hidden because it was derived from sensitive runtime data.`
                     ));
                     break;
                 }
@@ -7003,9 +7203,9 @@ async function executeSingleTask(
                 // and is therefore an explicit persistent-output policy, unlike
                 // editor hot-exit or a shared terminal. The destination being
                 // explicit is not the same as the *intent to persist a secret*
-                // being explicit, though — password-derived content needs the
+                // being explicit, though — sensitive-derived content needs the
                 // task's `allowSecretContent` opt-in on top.
-                const secretDerived = taskUsesSecret || taskProducesSecret;
+                const secretDerived = taskUsesSensitiveData || taskProducesSecret;
                 requireSecretContentOptIn(task, secretDerived);
                 throwIfTaskInactive(scope);
                 if (!interpolatedOutput.filePath) { throw new Error(`Task '${task.id}' has output mode 'file' but 'filePath' is not defined.`); }
@@ -7025,8 +7225,15 @@ async function executeSingleTask(
                     secretDerived ? { mode: SECRET_FILE_MODE } : undefined
                 );
                 if (secretDerived) {
-                    restrictSecretFilePermissions(safeOutputPath);
-                    notifySecretFileWrite(task.id, safeOutputPath);
+                    const displayPath = buildSensitiveDisplayPath(
+                        executionRun,
+                        interpolationContext,
+                        task.output.filePath!,
+                        workspaceRoots ?? getWorkspaceRoots(),
+                        defaultWorkspace
+                    );
+                    restrictSecretFilePermissions(safeOutputPath, displayPath);
+                    notifySecretFileWrite(task.id, displayPath);
                 }
                 runLogCollector?.recordArtifact(
                     task.id,
@@ -7036,10 +7243,10 @@ async function executeSingleTask(
             }
             case 'terminal':
                 {
-                    if (taskUsesSecret || taskProducesSecret) {
+                    if (taskUsesSensitiveData || taskProducesSecret) {
                         vscode.window.showWarningMessage(t(
-                            `태스크 '${task.id}'의 터미널 출력을 숨겼습니다. password 입력에서 파생된 출력은 민감 디버그 재실행에서만 볼 수 있습니다.`,
-                            `Terminal output for task '${task.id}' was hidden. Password-derived output is only available through a sensitive-debug re-run.`
+                            `태스크 '${task.id}'의 터미널 출력을 숨겼습니다. 민감한 실행 문맥에서 파생된 출력은 터미널에 표시하지 않습니다.`,
+                            `Terminal output for task '${task.id}' was hidden because it was derived from sensitive runtime data.`
                         ));
                         break;
                     }
@@ -7067,6 +7274,8 @@ async function executeSingleTask(
     throwIfTaskInactive(scope);
     if (taskUsesSecret || taskProducesSecret) {
         markTaskResultSecret(executionRun, task.id);
+    } else if (taskUsesSensitiveData) {
+        markTaskResultSensitive(executionRun, task.id);
     }
     return result;
 }
@@ -7828,8 +8037,12 @@ export interface QuickPickResult {
     value: string | string[];
     /** 고른 항목의 표시 문구. `value` 매핑과 무관하게 **항상 문자열**이다. */
     label: string;
+    /** 고른 표시 문구의 손실 없는 배열. label에 쉼표가 있어도 경계가 보존된다. */
+    labelList: string[];
     /** 고른 값 전체를 평평하게 편 배열. 인자 확장용. */
     valueList: string[];
+    /** 단일 선택이 목록 밖 직접 입력이었는지. History 재실행 식별에도 쓴다. */
+    custom: boolean;
     /** `canPickMany` 일 때만: 고른 값 전체를 쉼표로 이은 문자열. */
     values?: string;
     /** `canPickMany` 일 때만: 고른 표시 문구 전체를 쉼표로 이은 문자열. */
@@ -7841,6 +8054,8 @@ interface QuickPickEntry extends vscode.QuickPickItem {
     taskHubValue: string | string[];
     /** `allowCustom`가 입력 중에 만든 임시 항목. */
     taskHubCustom?: boolean;
+    /** 기억 복원에서 같은 label 항목을 구분하는 원래 목록 위치. */
+    taskHubSourceIndex?: number;
 }
 
 /**
@@ -7868,6 +8083,38 @@ function interpolateQuickPickItemValue(value: unknown, context: any): unknown {
     return value;
 }
 
+function interpolateQuickPickItems(items: readonly any[], context: any): any[] {
+    return items.map(item => {
+        if (typeof item === 'string') {
+            return interpolatePipelineVariables(item, context);
+        }
+        return {
+            ...item,
+            label: item.label ? interpolatePipelineVariables(item.label, context) : item.label,
+            description: item.description
+                ? interpolatePipelineVariables(item.description, context)
+                : item.description,
+            detail: item.detail ? interpolatePipelineVariables(item.detail, context) : item.detail,
+            value: interpolateQuickPickItemValue(item.value, context),
+        };
+    });
+}
+
+function quickPickEntries(items: readonly any[]): QuickPickEntry[] {
+    return items.map((item: any, index: number) => {
+        if (typeof item === 'string') {
+            return { label: item, taskHubValue: item, taskHubSourceIndex: index };
+        }
+        return {
+            label: item.label,
+            description: item.description,
+            detail: item.detail,
+            taskHubValue: quickPickItemValue(item, item.label),
+            taskHubSourceIndex: index,
+        };
+    });
+}
+
 function buildQuickPickResult(selected: readonly QuickPickEntry[], canPickMany: boolean): QuickPickResult {
     // VS Code 는 넘긴 항목 객체를 그대로 돌려주므로 실행 경로에서는 `taskHubValue`
     // 가 늘 붙어 있다. 그래도 label 로 떨어지는 길을 남기는 것은, 이 값이 없을 때
@@ -7883,7 +8130,9 @@ function buildQuickPickResult(selected: readonly QuickPickEntry[], canPickMany: 
     const result: QuickPickResult = {
         value: entryValue(first),
         label: first.label,
+        labelList: selected.map(entry => entry.label),
         valueList,
+        custom: selected.length === 1 && selected[0].taskHubCustom === true,
     };
     if (canPickMany) {
         // `values` 는 예전부터 쉼표로 이은 문자열이었다. 매핑을 쓰지 않으면
@@ -7894,15 +8143,25 @@ function buildQuickPickResult(selected: readonly QuickPickEntry[], canPickMany: 
     return result;
 }
 
-function requestedQuickPickLabels(task: any): { labels: string[]; explicit: boolean } {
-    if (typeof task.default === 'string') { return { labels: [task.default], explicit: true }; }
+function requestedQuickPickSelections(
+    task: any,
+    memoryAllowed: boolean
+): { selections: RememberedQuickPickSelection[]; explicit: boolean } {
+    if (typeof task.default === 'string') {
+        return { selections: [{ label: task.default, custom: false }], explicit: true };
+    }
     if (Array.isArray(task.default)) {
-        return { labels: task.default.filter((label: unknown): label is string => typeof label === 'string'), explicit: true };
+        return {
+            selections: task.default
+                .filter((label: unknown): label is string => typeof label === 'string')
+                .map((label: string) => ({ label, custom: false })),
+            explicit: true,
+        };
     }
-    if (task.rememberLastSelection === true) {
-        return { labels: recallQuickPickSelection(task) ?? [], explicit: false };
+    if (task.rememberLastSelection === true && memoryAllowed) {
+        return { selections: recallQuickPickSelection(task) ?? [], explicit: false };
     }
-    return { labels: [], explicit: false };
+    return { selections: [], explicit: false };
 }
 
 /** 기본 선택·직접 입력·선택 기억이 필요한 경우에만 쓰는 고급 QuickPick UI. */
@@ -7910,27 +8169,47 @@ async function showAdvancedQuickPick(
     task: any,
     baseItems: QuickPickEntry[],
     options: vscode.QuickPickOptions,
+    memoryAllowed: boolean,
     token?: vscode.CancellationToken
 ): Promise<QuickPickEntry[]> {
     if (task.allowCustom === true && task.canPickMany === true) {
         throw new Error(`Task '${task.id}' cannot combine 'allowCustom' with 'canPickMany'.`);
     }
 
-    const { labels: requestedLabels, explicit } = requestedQuickPickLabels(task);
-    if (explicit && requestedLabels.some(label => label.length === 0)) {
+    const { selections: requested, explicit } = requestedQuickPickSelections(task, memoryAllowed);
+    if (explicit && requested.some(selection => selection.label.length === 0)) {
         throw new Error(`Task '${task.id}' has an empty quickPick default label.`);
     }
-    if (task.canPickMany !== true && requestedLabels.length > 1) {
+    if (task.canPickMany !== true && requested.length > 1) {
         throw new Error(`Task '${task.id}' has multiple default labels but 'canPickMany' is not true.`);
     }
 
-    const matching = requestedLabels.flatMap(label => {
-        const entry = baseItems.find(item => item.label === label);
+    const entriesForLabel = (label: string): QuickPickEntry[] =>
+        baseItems.filter(item => item.label === label);
+    const matchSelection = (selection: RememberedQuickPickSelection): QuickPickEntry | undefined => {
+        const matching = entriesForLabel(selection.label);
+        // index만으로는 앞 항목 삽입·재정렬 뒤 같은 label의 다른 mapping을
+        // 가리킬 수 있다. 안정 id가 없는 현재 스키마에서는 unique label만
+        // 자동 복원하고, 중복은 사용자가 다시 고르게 하는 것이 안전하다. 과거
+        // custom label이 이제 유일한 정적 항목이면 현재 mapping을 쓰는 것도 같은
+        // 규칙이다.
+        return matching.length === 1 ? matching[0] : undefined;
+    };
+    const matching = requested.flatMap(selection => {
+        const entry = matchSelection(selection);
         return entry ? [entry] : [];
     });
-    const missing = requestedLabels.filter(label => !baseItems.some(item => item.label === label));
-    if (explicit && missing.length > 0 && !(task.allowCustom === true && missing.length === 1)) {
-        throw new Error(`Task '${task.id}' default label was not found: ${missing.join(', ')}`);
+    const missing = requested.filter(selection => !matchSelection(selection));
+    if (explicit && missing.length > 0) {
+        const ambiguous = missing.filter(selection => entriesForLabel(selection.label).length > 1);
+        if (ambiguous.length > 0) {
+            throw new Error(
+                `Task '${task.id}' default label is ambiguous: ${ambiguous.map(v => v.label).join(', ')}`
+            );
+        }
+        if (!(task.allowCustom === true && missing.length === 1)) {
+            throw new Error(`Task '${task.id}' default label was not found: ${missing.map(v => v.label).join(', ')}`);
+        }
     }
 
     const picker = vscode.window.createQuickPick<QuickPickEntry>();
@@ -7946,14 +8225,23 @@ async function showAdvancedQuickPick(
         picker.activeItems = [matching[0]];
     }
 
-    const customDefault = task.allowCustom === true && missing.length === 1 ? missing[0] : undefined;
+    // 명시적 default의 누락은 allowCustom이면 직접 입력이다. 기억값은 저장된
+    // custom 표식이 있을 때만 그렇게 복원한다 — 삭제된 정적 항목은 무시한다.
+    const customDefault = task.allowCustom === true
+        && missing.length === 1
+        && entriesForLabel(missing[0].label).length === 0
+        && (explicit || missing[0].custom)
+        ? missing[0].label
+        : undefined;
     const refreshCustomEntry = (rawValue: string): void => {
         if (task.allowCustom !== true) { return; }
         const value = rawValue.trim();
-        const exact = baseItems.find(item => item.label === value);
-        if (value.length === 0 || exact) {
+        const exact = entriesForLabel(value);
+        if (value.length === 0 || exact.length > 0) {
             picker.items = baseItems;
-            if (exact) { picker.activeItems = [exact]; }
+            // 동명 mapping이 둘 이상이면 타이핑만으로 하나를 임의 선택하지 않는다.
+            // 사용자가 목록에서 원하는 행을 명시적으로 골라야 한다.
+            picker.activeItems = exact.length === 1 ? [exact[0]] : [];
             return;
         }
         const custom: QuickPickEntry = {
@@ -8006,7 +8294,18 @@ async function showAdvancedQuickPick(
     });
 }
 
-export async function handleQuickPick(task: any, defaultWorkspace?: string, token?: vscode.CancellationToken): Promise<QuickPickResult> {
+export async function handleQuickPick(
+    task: any,
+    defaultWorkspace?: string,
+    token?: vscode.CancellationToken,
+    memoryAllowed = true
+): Promise<QuickPickResult> {
+    // 민감 문맥을 쓰게 된 task는 현재 remember 설정이나 동적 목록 명령의
+    // 성공 여부와 무관하게 과거 기억부터 지운다. 0.7.33 개발 빌드의 구형
+    // scope에 평문 label이 남아 있을 수 있어 프롬프트를 만들기 전에 수행한다.
+    if (!memoryAllowed) {
+        await forgetQuickPickSelection(task);
+    }
     // When `itemsFromCommand` is set, build the pick list from the command's
     // stdout (one item per non-empty line). The command is already interpolated
     // and reduced to a single OS-specific string by the dispatcher.
@@ -8051,26 +8350,19 @@ export async function handleQuickPick(task: any, defaultWorkspace?: string, toke
     };
 
     // Convert string items to QuickPickItem format
-    const items: QuickPickEntry[] = task.items.map((item: any) => {
-        if (typeof item === 'string') {
-            return { label: item, taskHubValue: item };
-        } else {
-            return {
-                label: item.label,
-                description: item.description,
-                detail: item.detail,
-                taskHubValue: quickPickItemValue(item, item.label)
-            };
-        }
-    });
+    const items = quickPickEntries(task.items);
 
     const usesAdvancedPicker = task.default !== undefined
         || task.allowCustom === true
         || task.rememberLastSelection === true;
     if (usesAdvancedPicker) {
-        const selected = await showAdvancedQuickPick(task, items, options, token);
-        if (task.rememberLastSelection === true) {
-            await rememberQuickPickSelection(task, selected.map(entry => entry.label));
+        const selected = await showAdvancedQuickPick(task, items, options, memoryAllowed, token);
+        if (task.rememberLastSelection === true && memoryAllowed) {
+            await rememberQuickPickSelection(task, selected.map(entry => ({
+                label: entry.label,
+                custom: entry.taskHubCustom === true,
+                index: entry.taskHubSourceIndex,
+            })));
         }
         return buildQuickPickResult(selected, task.canPickMany === true);
     }
@@ -8280,7 +8572,8 @@ async function handleWriteFile(
     workspaceRoots: string[],
     defaultWorkspace: string,
     append: boolean,
-    secretDerived = false
+    secretDerived = false,
+    secretDisplayPath?: string
 ): Promise<{ path: string }> {
     if (typeof task.path !== 'string' || task.path.length === 0) {
         throw new Error(`Task '${task.id}' of type '${task.type}' requires a non-empty 'path' property.`);
@@ -8321,7 +8614,7 @@ async function handleWriteFile(
         fs.writeFileSync(safePath, buffer, secretDerived ? { mode: SECRET_FILE_MODE } : undefined);
     }
     if (secretDerived) {
-        restrictSecretFilePermissions(safePath);
+        restrictSecretFilePermissions(safePath, secretDisplayPath);
     }
 
     return { path: safePath };
@@ -8332,7 +8625,8 @@ async function handleUnzip(
     allResults: any,
     workspaceFolderPath: string | undefined,
     run: ActionRunContext,
-    redactOutput: boolean
+    redactOutput: boolean,
+    capturePasswordDebugOutput: boolean
 ): Promise<{ outputDir: string }> {
     const inputs = task.inputs || {};
 
@@ -8422,11 +8716,11 @@ async function handleUnzip(
             workspaceFolderPath,
             run.id,
             task.id,
-            redactOutput ? '[command hidden: uses password input]' : undefined,
+            redactOutput ? '[command hidden: uses sensitive input]' : undefined,
             redactOutput ? SECRET_PLACEHOLDER : undefined,
             redactOutput,
             run.generation,
-            redactOutput ? sensitiveDebugOutputObserver(run, task.id) : undefined
+            capturePasswordDebugOutput ? sensitiveDebugOutputObserver(run, task.id) : undefined
         );
         // 자식 프로세스는 자기 cwd 로 상대 경로를 풀지만, 우리가
         // `${unzip.outputDir}` 로 넘겨주는 값이 상대 경로로 남으면 그것을 받은
@@ -8444,6 +8738,7 @@ async function handleZip(
     workspaceFolderPath: string | undefined,
     run: ActionRunContext,
     redactOutput: boolean,
+    capturePasswordDebugOutput: boolean,
     /** `${extensionPath}`와 실행 시작 시점의 에디터/환경 문맥을 그대로 이어받는다. */
     builtinVariables: BuiltinVariableContext
 ): Promise<{ archivePath: string }> {
@@ -8499,12 +8794,19 @@ async function handleZip(
             });
             if (skippedLinkCount > 0) {
                 if (redactOutput) {
+                    const sourceLabel = capturePasswordDebugOutput
+                        ? 'Password-derived'
+                        : 'Sensitive-data-derived';
                     outputChannel.appendLine(
-                        `[WARN] Password-derived zip task '${task.id}' excluded ${skippedLinkCount} symlink(s) pointing outside the source folder; path details hidden.`
+                        `[WARN] ${sourceLabel} zip task '${task.id}' excluded ${skippedLinkCount} symlink(s) pointing outside the source folder; path details hidden.`
                     );
                     vscode.window.showWarningMessage(t(
-                        `password 입력에서 파생된 ZIP 태스크가 소스 폴더 밖을 가리키는 심볼릭 링크 ${skippedLinkCount}개를 제외했습니다. 경로 상세는 숨겼습니다.`,
-                        `A password-derived ZIP task excluded ${skippedLinkCount} symlink(s) pointing outside the source folder. Path details were hidden.`
+                        capturePasswordDebugOutput
+                            ? `password 입력에서 파생된 ZIP 태스크가 소스 폴더 밖을 가리키는 심볼릭 링크 ${skippedLinkCount}개를 제외했습니다. 경로 상세는 숨겼습니다.`
+                            : `민감 입력에서 파생된 ZIP 태스크가 소스 폴더 밖을 가리키는 심볼릭 링크 ${skippedLinkCount}개를 제외했습니다. 경로 상세는 숨겼습니다.`,
+                        capturePasswordDebugOutput
+                            ? `A password-derived ZIP task excluded ${skippedLinkCount} symlink(s) pointing outside the source folder. Path details were hidden.`
+                            : `A sensitive-data-derived ZIP task excluded ${skippedLinkCount} symlink(s) pointing outside the source folder. Path details were hidden.`
                     ));
                 } else {
                     const shown = skippedLinks.slice(0, 3).map(p => path.basename(p)).join(', ');
@@ -8548,11 +8850,11 @@ async function handleZip(
             workspaceFolderPath,
             run.id,
             task.id,
-            redactOutput ? '[command hidden: uses password input]' : undefined,
+            redactOutput ? '[command hidden: uses sensitive input]' : undefined,
             redactOutput ? SECRET_PLACEHOLDER : undefined,
             redactOutput,
             run.generation,
-            redactOutput ? sensitiveDebugOutputObserver(run, task.id) : undefined
+            capturePasswordDebugOutput ? sensitiveDebugOutputObserver(run, task.id) : undefined
         );
         // 내장 엔진과 같은 절대 경로를 돌려준다 — 위 unzip 주석 참조.
         return { archivePath: resolveArchiveTaskPath(archive, archiveBase) };

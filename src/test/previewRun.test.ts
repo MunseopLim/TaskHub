@@ -30,7 +30,7 @@ function currentBranch(value: string): Record<string, string> {
 }
 
 suite('buildPreviewReport', () => {
-    test('현재 파일·환경변수 내장을 실제 Preview argv에 반영한다', () => {
+    test('현재 파일은 반영하되 환경변수·선택 텍스트 원문은 Preview에서 가린다', () => {
         const file = path.join(WS, 'src', 'main.c');
         const options = baseOptions();
         const item: ActionItem = {
@@ -40,7 +40,7 @@ suite('buildPreviewReport', () => {
                 description: 'x',
                 tasks: [{
                     id: 'run', type: 'command', command: 'tool',
-                    args: ['${relativeFile}', '${env:TASKHUB_PREVIEW_ENV}'],
+                    args: ['${relativeFile}', '${env:TASKHUB_PREVIEW_ENV}', '${selectedText}'],
                 }],
             },
         };
@@ -49,13 +49,14 @@ suite('buildPreviewReport', () => {
             builtinVariables: buildBuiltinVariableContext({
                 workspaceFolder: WS,
                 extensionPath: '/ext',
-                editor: { file, fileWorkspaceFolder: WS },
+                editor: { file, fileWorkspaceFolder: WS, selectedText: 'preview-selection-secret' },
                 clipboard: '<builtin:clipboard>',
                 environment: { TASKHUB_PREVIEW_ENV: 'preview-value' },
             }),
         });
         assert.match(report, new RegExp(path.join('src', 'main.c').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-        assert.match(report, /preview-value/);
+        assert.doesNotMatch(report, /preview-value|preview-selection-secret/);
+        assert.match(report, /<builtin:sensitive>/);
         assert.doesNotMatch(report, /unresolved variables/);
     });
 
@@ -70,6 +71,35 @@ suite('buildPreviewReport', () => {
         };
         const report = buildPreviewReport(item, baseOptions());
         assert.match(report, /unresolved variables:.*\$\{file\}/);
+    });
+
+    test('전방 동명 task의 bare 참조를 활성 파일 내장으로 바꾸지 않는다', () => {
+        const activeFile = path.join(WS, 'active.c');
+        const item: ActionItem = {
+            id: 'a.forward-shadow',
+            title: 'forward shadow',
+            action: {
+                description: 'x',
+                tasks: [
+                    { id: 'use', type: 'command', command: 'tool', args: ['${file}'], parallel: true },
+                    {
+                        id: 'file', type: 'stringManipulation', function: 'trim',
+                        input: 'producer-value', parallel: true,
+                    },
+                ],
+            },
+        };
+        const report = buildPreviewReport(item, {
+            ...baseOptions(),
+            builtinVariables: buildBuiltinVariableContext({
+                workspaceFolder: WS,
+                extensionPath: '/ext',
+                editor: { file: activeFile, fileWorkspaceFolder: WS },
+                environment: {},
+            }),
+        });
+        assert.doesNotMatch(report, new RegExp(activeFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        assert.match(report, /stringManipulation:file:output|\$\{file\}/);
     });
 
     test('includes How to read legend with placeholder/unresolved explanations', () => {

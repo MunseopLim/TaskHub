@@ -110,7 +110,7 @@ export interface Task {
     default?: string | string[];
     /** 단일 선택 QuickPick에서 목록에 없는 문자열도 직접 입력해 값으로 사용할 수 있다. */
     allowCustom?: boolean;
-    /** 같은 workspace의 같은 action/task에서 마지막으로 고른 label을 다음 실행에 복원한다. */
+    /** 마지막 선택의 label/custom 식별을 복원한다. 민감 문맥에서 파생된 선택은 저장하지 않는다. */
     rememberLastSelection?: boolean;
     /**
      * For `quickPick`: a shell command whose stdout becomes the pick list —
@@ -201,13 +201,14 @@ export interface Task {
      */
     mkdirs?: boolean;
     /**
-     * Opt-in required to persist `password`-derived content to disk.
+     * Opt-in required to persist sensitive runtime content to disk.
      *
      * `writeFile` / `appendFile` / `output.mode: 'file'` refuse to write a
-     * value derived from a `password: true` input unless the task declares
-     * this flag. The capability itself is legitimate (generating `.netrc`,
-     * `.env`, a signing config), but interpolating `${token.value}` into
-     * `content` must not silently grant it — the intent has to be visible in
+     * value derived from a password input, environment variable, clipboard,
+     * or selected text unless the task declares this flag. The capability
+     * itself is legitimate (generating `.netrc`, `.env`, a signing config),
+     * but interpolating sensitive data into `content` must not silently grant
+     * it — the intent has to be visible in
      * `actions.json` where it can be reviewed. Files written under this flag
      * are created with owner-only permissions (`0600`, no effect on Windows).
      */

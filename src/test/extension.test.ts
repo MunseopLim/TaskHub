@@ -47,6 +47,7 @@ import {
 	withPowerShellExitCode,
 	savedInputStillValid,
 	backfillDialogArrays,
+	backfillQuickPickValue,
 	expandArgTemplate,
 	resolvePipelineReference,
 	inferTaskDependencies,
@@ -89,9 +90,14 @@ import {
 	shouldRecordTaskInput,
 	formatExecutedCommandsDocument,
 	describeVariableCompletion,
+	aggregateForEachResults,
 } from '../extension';
 import { collectVariableCompletions, type VariableCompletionDetail } from '../variableCompletions';
-import { initQuickPickMemory } from '../quickPickMemory';
+import {
+	initQuickPickMemory,
+	recallQuickPickSelection,
+	rememberQuickPickSelection,
+} from '../quickPickMemory';
 import { simulateTaskResult } from '../previewRun';
 import { normalizeTags, normalizeLineNumber } from '../providers/normalization';
 import { LinkViewProvider, mergeInvalidJsonEntries, readLinksFromDisk } from '../providers/linkViewProvider';
@@ -1446,8 +1452,13 @@ suite('Extension Test Suite', () => {
 		test('allowCustom의 저장값은 정적 목록에 없어도 재실행할 수 있다', () => {
 			const task = { type: 'quickPick', allowCustom: true, items: ['main', 'develop'] };
 			assert.strictEqual(savedInputStillValid(task, {
-				label: 'feature/new-flow', value: 'feature/new-flow',
+				label: 'feature/new-flow', labelList: ['feature/new-flow'],
+				value: 'feature/new-flow', custom: true,
 			}), true);
+			assert.strictEqual(savedInputStillValid(task, {
+				label: 'removed-static', labelList: ['removed-static'],
+				value: 'removed-static', custom: false,
+			}), false, '삭제된 정적 항목을 custom 값으로 되살렸다');
 			assert.strictEqual(savedInputStillValid(task, { label: '', value: '' }), false);
 		});
 
@@ -1474,8 +1485,64 @@ suite('Extension Test Suite', () => {
 			);
 			// 0.7.31 이전 기록에는 `label` 이 없다 — 그때만 `value` 로 떨어진다.
 			assert.strictEqual(savedInputStillValid(task, { value: 'With option' }), true);
-			// 배열 `value` 만 있는 옛 기록은 비교할 문자열이 없으므로 통과시킨다.
-			assert.strictEqual(savedInputStillValid(task, { value: [] }), true);
+			// 배열 `value`만 있는 옛 기록은 어느 label인지 복원할 수 없어 다시 묻는다.
+			assert.strictEqual(savedInputStillValid(task, { value: [] }), false);
+		});
+
+		test('동적 label도 현재 문맥에서 찾아 mapping을 다시 만든다', () => {
+			const task = {
+				type: 'quickPick', allowCustom: true,
+				items: [{ label: '${prior.value}', value: '--new' }],
+			};
+			const saved = {
+				label: 'Release', labelList: ['Release'], value: '--old', custom: false,
+			};
+			const context = { prior: { value: 'Release' } };
+			assert.strictEqual(savedInputStillValid(task, saved, context), true);
+			assert.strictEqual(backfillQuickPickValue(task, saved, context).value, '--new');
+		});
+
+		test('실행 문맥이 없는 프로필 사전검증은 동적 label 판정을 보류한다', () => {
+			const task = {
+				type: 'quickPick',
+				items: [{ label: '${workspaceFolder}', value: '--current' }],
+			};
+			const saved = { label: '/workspace', labelList: ['/workspace'], value: '--old', custom: false };
+			assert.strictEqual(savedInputStillValid(task, saved), true);
+			assert.strictEqual(savedInputStillValid(task, saved, { workspaceFolder: '/workspace' }), true);
+			assert.strictEqual(backfillQuickPickValue(task, saved, { workspaceFolder: '/workspace' }).value, '--current');
+		});
+
+		test('과거 custom과 같은 정적 항목이 생기면 현재 mapping을 사용한다', () => {
+			const task = {
+				type: 'quickPick', allowCustom: true,
+				items: [{ label: 'feature/new-flow', value: '--feature' }],
+			};
+			const saved = {
+				label: 'feature/new-flow', labelList: ['feature/new-flow'],
+				value: 'feature/new-flow', custom: true,
+			};
+			assert.strictEqual(savedInputStillValid(task, saved, {}), true);
+			assert.strictEqual(backfillQuickPickValue(task, saved, {}).value, '--feature');
+			assert.strictEqual(backfillQuickPickValue(task, saved, {}).custom, false);
+		});
+
+		test('다중 label은 배열 경계를 보존하고 모호한 옛 문자열은 다시 묻는다', () => {
+			const task = { type: 'quickPick', canPickMany: true, items: ['A,B', 'C'] };
+			assert.strictEqual(savedInputStillValid(task, {
+				labelList: ['A,B', 'C'], labels: 'A,B,C', custom: false,
+			}), true);
+			assert.strictEqual(savedInputStillValid(task, { labels: 'A,B,C' }), false);
+		});
+
+		test('동일 label mapping은 재실행에서 모호하므로 다시 묻는다', () => {
+			const task = {
+				type: 'quickPick',
+				items: [{ label: 'Same', value: 'a' }, { label: 'Same', value: 'b' }],
+			};
+			assert.strictEqual(savedInputStillValid(task, {
+				label: 'Same', labelList: ['Same'], value: 'b', custom: false,
+			}), false);
 		});
 
 		test('제약이 없는 태스크는 그대로 통과시킨다', () => {
@@ -6404,6 +6471,21 @@ suite('Extension Test Suite', () => {
 				assert.ok(describeVariableCompletion(entry.detail).length > 0, `빈 detail: ${entry.name}`);
 			}
 		});
+
+		test('forEach task 자동완성은 집계 결과 키를 제안한다', () => {
+			const fixture = `[
+  { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
+    { "id": "repeat", "type": "command", "forEach": ["a", "b"],
+      "command": "tool", "passTheResultToNextTask": true },
+    { "id": "use", "type": "command", "command": "echo \${repeat." }
+  ] } }
+]`;
+			const offset = fixture.indexOf('${repeat.') + '${repeat.'.length;
+			const names = new Set(collectVariableCompletions(fixture, offset).map(entry => entry.name));
+			for (const name of ['repeat.count', 'repeat.outputs', 'repeat.stderrs']) {
+				assert.ok(names.has(name), `${name} 누락: ${[...names].join(', ')}`);
+			}
+		});
 	});
 
 	/**
@@ -6420,6 +6502,14 @@ suite('Extension Test Suite', () => {
 	 * `string | string[] | number` 라 배열로 바꿔도 빌드가 깨지지 않는다
 	 * (`fileDialog` 의 `paths` 가 실제로 배열이다). 그쪽을 여기서 묶는다.
 	 */
+	suite('forEach 집계 결과 모양', () => {
+		test('출력이 없는 반복도 outputs와 stderrs 배열을 항상 제공한다', () => {
+			assert.deepStrictEqual(aggregateForEachResults([{ path: '/tmp/a' }]), {
+				path: '/tmp/a', count: 1, outputs: [], stderrs: [], paths: ['/tmp/a'],
+			});
+		});
+	});
+
 	suite('프롬프트 결과 모양 (런타임 ↔ 시뮬레이션)', () => {
 		async function runtimeQuickPick(task: any, picked: any) {
 			const original = vscode.window.showQuickPick;
@@ -6441,7 +6531,8 @@ suite('Extension Test Suite', () => {
 
 		async function advancedQuickPick(
 			task: any,
-			interact: (picker: any, controls: { type(value: string): void; accept(): void }) => void
+			interact: (picker: any, controls: { type(value: string): void; accept(): void }) => void,
+			memoryAllowed = true
 		) {
 			const original = vscode.window.createQuickPick;
 			const acceptListeners: Array<() => void> = [];
@@ -6474,7 +6565,7 @@ suite('Extension Test Suite', () => {
 			};
 			(vscode.window as any).createQuickPick = () => picker;
 			try {
-				return await handleQuickPick(task);
+				return await handleQuickPick(task, undefined, undefined, memoryAllowed);
 			} finally {
 				(vscode.window as any).createQuickPick = original;
 			}
@@ -6536,7 +6627,8 @@ suite('Extension Test Suite', () => {
 				controls.accept();
 			});
 			assert.deepStrictEqual(result, {
-				label: 'feature/new-flow', value: 'feature/new-flow', valueList: ['feature/new-flow'],
+				label: 'feature/new-flow', labelList: ['feature/new-flow'],
+				value: 'feature/new-flow', valueList: ['feature/new-flow'], custom: true,
 			});
 		});
 
@@ -6565,6 +6657,132 @@ suite('Extension Test Suite', () => {
 					controls.accept();
 				});
 				assert.strictEqual(restored.value, 'Release');
+			} finally {
+				initQuickPickMemory(undefined);
+			}
+		});
+
+		test('중복 label 기억은 다른 mapping으로 자동 복원하지 않는다', async () => {
+			const store = new Map<string, unknown>();
+			initQuickPickMemory({
+				workspaceState: {
+					get: <T>(key: string) => store.get(key) as T | undefined,
+					update: async (key: string, value: unknown) => { store.set(key, value); },
+				},
+			});
+			const task = {
+				actionId: 'build', id: 'mode', type: 'quickPick', rememberLastSelection: true,
+				items: [{ label: 'Same', value: 'a' }, { label: 'Same', value: 'b' }],
+			};
+			try {
+				await rememberQuickPickSelection(task, [{ label: 'Same', custom: false, index: 1 }]);
+				const result = await advancedQuickPick(task, (picker, controls) => {
+					assert.strictEqual(picker.activeItems.length, 0);
+					picker.activeItems = [picker.items[1]];
+					picker.selectedItems = [...picker.activeItems];
+					controls.accept();
+				});
+				assert.strictEqual(result.value, 'b');
+			} finally {
+				initQuickPickMemory(undefined);
+			}
+		});
+
+		test('기억한 custom은 복원하지만 삭제된 정적 항목은 custom으로 되살리지 않는다', async () => {
+			const store = new Map<string, unknown>();
+			initQuickPickMemory({
+				workspaceState: {
+					get: <T>(key: string) => store.get(key) as T | undefined,
+					update: async (key: string, value: unknown) => { store.set(key, value); },
+				},
+			});
+			const task = {
+				actionId: 'build', id: 'branch', type: 'quickPick', allowCustom: true,
+				rememberLastSelection: true, items: ['main'],
+			};
+			try {
+				await rememberQuickPickSelection(task, [
+					{ label: 'feature/custom', custom: true },
+				]);
+				await advancedQuickPick(task, (picker, controls) => {
+					assert.strictEqual(picker.activeItems[0]?.taskHubCustom, true);
+					picker.selectedItems = [...picker.activeItems];
+					controls.accept();
+				});
+
+				await rememberQuickPickSelection(task, [
+					{ label: 'removed', custom: false, index: 1 },
+				]);
+				await advancedQuickPick(task, (picker, controls) => {
+					assert.strictEqual(picker.activeItems.length, 0);
+					assert.ok(!picker.items.some((entry: any) => entry.label === 'removed'));
+					picker.activeItems = [picker.items[0]];
+					picker.selectedItems = [...picker.activeItems];
+					controls.accept();
+				});
+			} finally {
+				initQuickPickMemory(undefined);
+			}
+		});
+
+		test('기억한 custom과 동명 정적 항목이 중복이면 첫 mapping을 자동 선택하지 않는다', async () => {
+			const store = new Map<string, unknown>();
+			initQuickPickMemory({
+				workspaceState: {
+					get: <T>(key: string) => store.get(key) as T | undefined,
+					update: async (key: string, value: unknown) => { store.set(key, value); },
+				},
+			});
+			const task = {
+				actionId: 'build', id: 'mode', type: 'quickPick', allowCustom: true,
+				rememberLastSelection: true,
+				items: [{ label: 'Same', value: 'a' }, { label: 'Same', value: 'b' }],
+			};
+			try {
+				await rememberQuickPickSelection(task, [{ label: 'Same', custom: true }]);
+				const result = await advancedQuickPick(task, (picker, controls) => {
+					assert.strictEqual(picker.activeItems.length, 0);
+					picker.activeItems = [picker.items[1]];
+					picker.selectedItems = [...picker.activeItems];
+					controls.accept();
+				});
+				assert.strictEqual(result.value, 'b');
+			} finally {
+				initQuickPickMemory(undefined);
+			}
+		});
+
+		test('allowCustom default가 동명 정적 항목 여러 개와 겹치면 모호성을 알린다', async () => {
+			await assert.rejects(
+				() => handleQuickPick({
+					id: 'pick', type: 'quickPick', allowCustom: true, default: 'Same',
+					items: [{ label: 'Same', value: 'a' }, { label: 'Same', value: 'b' }],
+				}),
+				/ambiguous.*Same/
+			);
+		});
+
+		test('민감 task는 과거 QuickPick 기억을 지우고 새 선택도 저장하지 않는다', async () => {
+			const store = new Map<string, unknown>();
+			initQuickPickMemory({
+				workspaceState: {
+					get: <T>(key: string) => store.get(key) as T | undefined,
+					update: async (key: string, value: unknown) => { store.set(key, value); },
+				},
+			});
+			const task = {
+				actionId: 'build', id: 'mode', type: 'quickPick',
+				rememberLastSelection: true, items: ['Old secret', 'Safe'],
+			};
+			try {
+				await rememberQuickPickSelection(task, [{ label: 'Old secret', custom: false, index: 0 }]);
+				await advancedQuickPick(task, (picker, controls) => {
+					assert.strictEqual(picker.activeItems.length, 0, '민감 기억을 UI에 다시 올렸다');
+					picker.activeItems = [picker.items[1]];
+					picker.selectedItems = [...picker.activeItems];
+					controls.accept();
+				}, false);
+				assert.strictEqual(recallQuickPickSelection(task), undefined);
 			} finally {
 				initQuickPickMemory(undefined);
 			}

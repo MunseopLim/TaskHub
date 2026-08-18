@@ -110,6 +110,17 @@ suite('variableCompletions', () => {
             }
         });
 
+        test('현재 task가 내장과 동명이면 자기 참조도 내장으로 제안하지 않는다', () => {
+            for (const id of ['selectedText', 'clipboard']) {
+                const got = names(`[
+  { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
+    { "id": "${id}", "type": "command", "command": "tool", "args": ["\${|"] }
+  ] } }
+]`);
+                assert.ok(!got.includes(id), `${id} 자기 task 안에서 동명 내장을 제안했다`);
+            }
+        });
+
         test('env: 뒤에는 실제 환경변수 이름과 값이 아닌 이름만 제안한다', () => {
             const { text, offset } = at(doc(
                 `{ "id": "run", "type": "command", "command": "py", "args": ["\${env:PA|"] }`
@@ -442,7 +453,9 @@ suite('variableCompletions', () => {
             // 런타임이 만들지 않는 키다 — 제안하면 Preview 만 해석하고 실행에서는
             // 리터럴로 남는 참조를 우리가 권하는 셈이 된다. `label` · `valueList`
             // 는 선택 수와 무관하게 런타임이 늘 내므로 함께 제안한다.
-            assert.deepStrictEqual(names(quickPickDoc('')), ['pick.value', 'pick.label', 'pick.valueList']);
+            assert.deepStrictEqual(names(quickPickDoc('')), [
+                'pick.value', 'pick.label', 'pick.labelList', 'pick.valueList', 'pick.custom',
+            ]);
         });
 
         test('output.capture 이름도 함께 낸다', () => {

@@ -35,7 +35,12 @@ import {
     walkInterpolatedTaskStrings,
     RESERVED_VARIABLE_HEADS,
 } from './pipelineUtils';
-import { buildBuiltinVariableContext, type BuiltinVariableContext } from './builtinVariables';
+import {
+    attachPipelineTaskIds,
+    buildBuiltinVariableContext,
+    redactSensitiveBuiltinVariables,
+    type BuiltinVariableContext,
+} from './builtinVariables';
 
 export interface PreviewOptions {
     workspaceFolder: string;
@@ -50,7 +55,7 @@ export interface SimulatedResult {
     // 대부분의 값은 문자열 자리표시자지만, 다중 선택 `fileDialog` 의 `paths` /
     // `names` 는 **배열**이고 `count` 는 숫자다 — `args` 배열 확장을 미리보기가
     // 실제와 같은 개수로 보여 주려면 그 형태를 그대로 흉내 내야 한다.
-    [key: string]: string | string[] | number;
+    [key: string]: string | string[] | number | boolean;
 }
 
 /**
@@ -73,6 +78,7 @@ export function simulateTaskResult(task: Task): SimulatedResult {
             ...base,
             count: 2,
             outputs: typeof base.output === 'string' ? [base.output, base.output] : [],
+            stderrs: typeof base.stderr === 'string' ? [base.stderr, base.stderr] : [],
             paths: typeof base.path === 'string'
                 ? [base.path, base.path]
                 : typeof base.archivePath === 'string'
@@ -137,9 +143,11 @@ export function simulateTaskResult(task: Task): SimulatedResult {
                     ? [placeholder('quickPick', task.id, 'value[0]')]
                     : placeholder('quickPick', task.id, 'value'),
                 label: placeholder('quickPick', task.id, 'label'),
+                labelList: [placeholder('quickPick', task.id, 'labelList[0]')],
                 // 배열로 흉내 내야 `args` / `command` 토큰 확장이 미리보기에서도
                 // 실제와 같은 모양이 된다 (`fileDialog` 의 `paths` 와 같은 규칙).
                 valueList: [placeholder('quickPick', task.id, 'valueList[0]')],
+                custom: false,
             };
             if ((task as any).canPickMany) {
                 base.values = placeholder('quickPick', task.id, 'values');
@@ -213,9 +221,9 @@ export function findTypoRefs(
     // **대안 하나하나를 본다.** `??` 는 어긋난 참조를 조용히 건너뛰고 다음
     // 대안을 쓰므로, 오타가 있어도 동작은 멀쩡해 보인다 — 그래서 오히려 여기서
     // 알려야 한다. 판정 규칙 자체는 평범한 참조와 같다.
-    visitTaskRefs(task, (literal, refs) => {
+    visitTaskRefs(task, (literal, refs, localEach) => {
         for (const { head, key } of refs) {
-            if (task.forEach !== undefined && head === 'each') { continue; }
+            if (localEach && head === 'each') { continue; }
             if (head === selfId || key === undefined || key === '') { continue; }
             const result = allResults[head];
             if (!result) { continue; } // forward ref / built-in / unknown
@@ -242,11 +250,15 @@ export function findTypoRefs(
  */
 function visitTaskRefs(
     task: Task,
-    onRef: (literal: string, refs: ReadonlyArray<ReferenceAlternative>) => void,
+    onRef: (
+        literal: string,
+        refs: ReadonlyArray<ReferenceAlternative>,
+        localEach: boolean
+    ) => void,
     /** {@link analyzeCoalesceRefs} 의 `platform` 과 같은 뜻. */
     platform?: NodeJS.Platform
 ): void {
-    const visit = (value: string): void => {
+    const visit = (value: string, localEach: boolean): void => {
         {
             for (const m of value.matchAll(/\$\{([^}]+)\}/g)) {
                 // `??` 체인은 **대안 하나하나**가 참조다. 통째로 쪼개면
@@ -254,7 +266,7 @@ function visitTaskRefs(
                 // `path ?? pickFolder.path` 로 읽힌다.
                 const refs = parseReferenceAlternatives(m[1]);
                 if (refs.length === 0) { continue; }
-                onRef(m[0], refs);
+                onRef(m[0], refs, localEach);
             }
         }
     };
@@ -264,7 +276,19 @@ function visitTaskRefs(
     // 여기만 전체를 훑으면 **체인에만** 없던 경고가 붙는다.
     // **순회를 공유한다.** 같은 제외 집합을 쓰면서 순회를 따로 두면, 한쪽은
     // 경로로 다른 쪽은 마지막 키로 비교해 곧바로 어긋난다(0.7.16 에서 그랬다).
-    for (const str of walkInterpolatedTaskStrings(task, platform)) { visit(str); }
+    if (task.forEach === undefined) {
+        for (const str of walkInterpolatedTaskStrings(task, platform)) { visit(str, false); }
+        return;
+    }
+    const body = { ...task, forEach: undefined, when: undefined };
+    for (const str of walkInterpolatedTaskStrings(body, platform)) { visit(str, true); }
+    if (typeof task.forEach === 'string') { visit(task.forEach, false); }
+    else if (Array.isArray(task.forEach)) {
+        for (const value of task.forEach) {
+            if (typeof value === 'string') { visit(value, false); }
+        }
+    }
+    if (typeof task.when?.var === 'string') { visit(task.when.var, false); }
 }
 
 /**
@@ -295,9 +319,9 @@ export function findUncapturedOutputRefs(
     });
     // 여기도 대안 하나하나를 본다 — `??` 가 미캡처 참조를 건너뛰어도 그 참조를
     // 쓴 것은 사용자의 의도이므로 알려야 한다.
-    visitTaskRefs(task, (literal, refs) => {
+    visitTaskRefs(task, (literal, refs, localEach) => {
         for (const { head, key } of refs) {
-            if (task.forEach !== undefined && head === 'each') { continue; }
+            if (localEach && head === 'each') { continue; }
             if (head === selfId || key === undefined || key === '') { continue; }
             const headTask = tasksById.get(head);
             if (!headTask || (headTask.type !== 'shell' && headTask.type !== 'command')) { continue; }
@@ -407,16 +431,19 @@ export function analyzeCoalesceRefs(
         return headTask ? declaredCaptureNames(headTask) : new Set<string>();
     });
 
-    const judge = ({ head, key }: ReferenceAlternative): DeadAlternativeReason | undefined => {
+    const judge = (
+        { head, key }: ReferenceAlternative,
+        localEach: boolean
+    ): DeadAlternativeReason | undefined => {
         if (head === selfId) { return 'self'; }
-        if (task.forEach !== undefined && head === 'each') {
+        if (localEach && head === 'each') {
             return key === undefined || ['output', 'value', 'index', 'number', 'count'].includes(key)
                 ? undefined
                 : 'missing-key';
         }
-        // bare 내장은 task id보다 우선한다. 속성이 붙으면 동명 task 결과를 읽을 수
-        // 있으므로 아래의 일반 task 판정으로 넘긴다.
-        if (BUILTIN_REFS.has(head) && key === undefined) { return undefined; }
+        // 같은 이름의 task가 없을 때만 bare 내장이다. 기존 `${file}` task 대표값
+        // 참조를 활성 파일 내장이 조용히 바꾸면 안 된다.
+        if (BUILTIN_REFS.has(head) && key === undefined && !tasksById.has(head)) { return undefined; }
         if (head.startsWith('env:')) { return key === undefined ? undefined : 'missing-key'; }
         const result = Object.prototype.hasOwnProperty.call(allResults, head)
             ? allResults[head]
@@ -441,11 +468,11 @@ export function analyzeCoalesceRefs(
 
     const found: AnalyzedReference[] = [];
     const seen = new Set<string>();
-    visitTaskRefs(task, (literal, refs) => {
+    visitTaskRefs(task, (literal, refs, localEach) => {
         if (refs.length < 2 || seen.has(literal)) { return; }
         seen.add(literal);
         const alternatives: AnalyzedAlternative[] = refs.map(alt => {
-            const reason = judge(alt);
+            const reason = judge(alt, localEach);
             return reason === undefined ? { ...alt } : { ...alt, reason };
         });
         // **순서대로** 본다. 런타임은 처음으로 값이 나온 대안에서 멈추므로,
@@ -848,13 +875,22 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
     // Preview 는 "모두 해석됨", 런타임은 리터럴이 되는 불일치가 생긴다.
     const allResults: Record<string, SimulatedResult> = Object.create(null);
     const totalUnresolved = new Set<string>();
-    const builtinVariables = options.builtinVariables ?? buildBuiltinVariableContext({
+    const rawBuiltinVariables = options.builtinVariables ?? buildBuiltinVariableContext({
         workspaceFolder: options.workspaceFolder,
         extensionPath: options.extensionPath,
         // Preview는 클립보드 원문을 출력 채널에 복사하지 않는다.
         clipboard: '<builtin:clipboard>',
         strict: false,
     });
+    // Preview는 복사·공유되는 기록 표면이다. 호출자가 실제 실행 스냅샷을
+    // 넘겼더라도 선택 텍스트·클립보드·환경변수 원문은 표시하지 않는다.
+    const builtinVariables = attachPipelineTaskIds(
+        redactSensitiveBuiltinVariables(
+            Object.assign(Object.create(null), rawBuiltinVariables),
+            '<builtin:sensitive>'
+        ),
+        action.tasks.map(task => task.id)
+    );
 
     /**
      * 참조는 전부 해석되는데 **실행은 못 하는** 자리들.
@@ -978,7 +1014,11 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         // 태스크를 넣고도 리포트에 한 줄도 남기지 않아, 분기 파이프라인은
         // dry-run 에서 분기 자체가 보이지 않았다.
         if (task.when && typeof task.when.var === 'string') {
+            const hasDistinctEachProducer = action.tasks.some(candidate =>
+                candidate !== task && candidate.id === 'each'
+            );
             if (task.forEach !== undefined
+                && !hasDistinctEachProducer
                 && Array.from(task.when.var.matchAll(/\$\{([^}]+)}/g)).some(match =>
                     parseReferenceAlternatives(match[1]).some(ref => ref.head === 'each'))) {
                 const message = "'when.var' is evaluated before 'forEach', so it cannot use the per-item '${each}' value";
@@ -1029,7 +1069,9 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 const exact = /^\$\{([^}]+)\}$/.exec(task.forEach.trim());
                 if (exact) {
                     for (const { head, key } of parseReferenceAlternatives(exact[1])) {
-                        if (key === undefined && RESERVED_VARIABLE_HEADS.has(head)) { continue; }
+                        if (key === undefined
+                            && RESERVED_VARIABLE_HEADS.has(head)
+                            && !tasksById.has(head)) { continue; }
                         if (!Object.prototype.hasOwnProperty.call(augmented, head)) {
                             const forward = tasksById.get(head);
                             if (forward) { augmented[head] = simulateTaskResultWithCaptures(forward); }

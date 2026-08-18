@@ -93,7 +93,7 @@ function taskStatusGlyph(status: TaskRunLogStatus): string {
 function outputAvailabilityLabel(task: TaskRunLogRecord): string {
     switch (task.output.availability) {
         case 'captured': return t('캡처됨', 'Captured');
-        case 'redacted': return t('비밀번호 파생 값 때문에 숨김', 'Hidden because it used a password-derived value');
+        case 'redacted': return t('민감한 실행 문맥 때문에 숨김', 'Hidden because it used sensitive runtime data');
         case 'terminal': return t('터미널로 스트림되어 저장되지 않음', 'Streamed to a terminal and not stored');
         case 'background-one-shot': return t('백그라운드 one-shot이라 저장되지 않음', 'Not stored for a background one-shot');
         case 'capture-truncated': return t('캡처 상한을 넘어 저장되지 않음', 'Not stored because the capture limit was exceeded');

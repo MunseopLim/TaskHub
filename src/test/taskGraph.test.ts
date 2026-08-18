@@ -213,13 +213,7 @@ suite('inferTaskDependencies — auto-inference from ${taskId.x}', () => {
         );
     });
 
-    test('reserved variable head shadows task id without becoming a dep', () => {
-        // A user-authored action that names a task `workspaceFolder`
-        // and references `${workspaceFolder}` in a sibling intends the
-        // built-in (workspace path), not the task. Without the reserved
-        // filter, the graph would auto-infer the task as a dep — and
-        // pair that with a barrier dep going the other way to fabricate
-        // a cycle on a perfectly valid action.
+    test('reserved variable head도 동명 task가 있으면 기존 bare 의존성이다', () => {
         const idsIncludingReserved = new Set(['workspaceFolder', 'extensionPath', 'A']);
         const task = mkTask({
             id: 'A',
@@ -227,7 +221,20 @@ suite('inferTaskDependencies — auto-inference from ${taskId.x}', () => {
         });
         assert.deepStrictEqual(
             [...inferTaskDependencies(task, idsIncludingReserved)],
-            []
+            ['workspaceFolder', 'extensionPath']
+        );
+    });
+
+    test('forEach 소스의 each는 producer 의존성이고 본문의 each는 지역값이다', () => {
+        const ids = new Set(['each', 'run']);
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(mkTask({
+                id: 'run',
+                forEach: '${each.valueList}',
+                command: 'tool',
+                args: ['${each.value}'],
+            }), ids)],
+            ['each']
         );
     });
 
@@ -739,23 +746,19 @@ suite('detectGraphCycle', () => {
             'no cycle should be reported on Linux when only the linux branch is scanned');
     });
 
-    test('task id colliding with `workspaceFolder` does not fabricate a cycle', () => {
-        // Two parallel tasks. `workspaceFolder` (the task) references X's
-        // output — that should hold. X references `${workspaceFolder}` —
-        // pre-fix that auto-inferred the *task* `workspaceFolder` as a
-        // dep of X, completing the cycle workspaceFolder→X→workspaceFolder.
-        // Post-fix, `${workspaceFolder}` is treated as the runtime built-in
-        // and skipped, so only one direction remains and the graph is a DAG.
+    test('task id가 `workspaceFolder`와 같으면 bare 참조도 실제 cycle을 만든다', () => {
+        // 내장 이름과 같은 기존 task는 호환성을 위해 우선한다. 따라서 X의 bare
+        // 참조도 그 task 의존성이고, 반대 참조와 만나면 숨기지 말아야 할 cycle이다.
         const g = buildTaskGraph([
             mkTask({ id: 'X', parallel: true, args: ['${workspaceFolder}/build'] }),
             mkTask({ id: 'workspaceFolder', parallel: true, args: ['${X.output}'] }),
         ]);
-        assert.deepStrictEqual([...g.nodes.get('X')!.inferredDeps], []);
+        assert.deepStrictEqual([...g.nodes.get('X')!.inferredDeps], ['workspaceFolder']);
         assert.deepStrictEqual(
             [...g.nodes.get('workspaceFolder')!.inferredDeps],
             ['X']
         );
-        assert.strictEqual(detectGraphCycle(g), null);
+        assert.deepStrictEqual(detectGraphCycle(g), ['X', 'workspaceFolder', 'X']);
     });
 });
 
@@ -1121,14 +1124,31 @@ suite('조건부 태스크 (when)', () => {
             );
         });
 
-        test('동명 내장은 bare일 때 건너뛰지 않고 속성 task 참조일 때만 건너뛴다', () => {
+        test('동명 task가 꺼졌으면 bare 내장 이름이어도 함께 건너뛴다', () => {
             assert.strictEqual(
                 shouldSkipForSkippedDependencies(task({ args: ['${file}'] }), new Set(['file'])),
-                false
+                true
             );
             assert.strictEqual(
                 shouldSkipForSkippedDependencies(task({ args: ['${file.path}'] }), new Set(['file'])),
                 true
+            );
+        });
+
+        test('forEach 본문의 each는 지역값이지만 소스의 each producer는 전파한다', () => {
+            assert.strictEqual(
+                shouldSkipForSkippedDependencies(
+                    task({ forEach: '${each.valueList}', args: ['${each.value}'] }),
+                    new Set(['each'])
+                ),
+                true
+            );
+            assert.strictEqual(
+                shouldSkipForSkippedDependencies(
+                    task({ forEach: ['a'], args: ['${each.value}'] }),
+                    new Set(['each'])
+                ),
+                false
             );
         });
     });

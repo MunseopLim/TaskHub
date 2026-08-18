@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import type { OutputCapture, Task, TaskCondition } from './schema';
 import {
     BUILTIN_VARIABLE_NAMES,
+    contextDeclaresTaskId,
     hasBuiltinVariableSnapshot,
     hasEnvironmentSnapshot,
     lookupBuiltinVariable,
@@ -66,7 +67,9 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
     // 다중 선택 다이얼로그(0.6.51·0.6.57)와 quickPick `value` 매핑(0.7.31)이
     // 더한 결과 키들. 이 목록은 "내장 결과 키를 가리는 이름" 이 기준이므로,
     // 키가 늘 때마다 함께 늘어야 한다.
-    'paths', 'names', 'count', 'label', 'labels', 'valueList',
+    'paths', 'names', 'count', 'label', 'labels', 'labelList', 'valueList', 'custom',
+    // forEach 집계가 단일 실행 결과 위에 덮어쓰는 배열 키.
+    'outputs', 'stderrs',
     // 프로토타입 오염 이름들. 평범한 객체에 `results['__proto__'] = v` 를 하면
     // **own property 가 만들어지지 않아** 캡처가 조용히 사라진다(결과가 `{}`).
     // 결과 객체를 null-prototype 으로 만들어도 downstream 의 spread / 직렬화가
@@ -550,9 +553,34 @@ export function resolvePipelineReference(expression: string, context: any): unkn
     // 점 뒤가 빈 형태까지 bare 로 새어 들어가 폴백을 타고, "속성을 쓴 참조는
     // 폴백하지 않는다" 는 계약이 오타 하나로 뚫린다.
     const isBare = parts.length === 1;
-    // bare 내장은 별도 심볼 스냅샷에서 읽는다. 합쳐진 문맥의 문자열 키는 기존
-    // action 호환을 위해 동명 task 결과가 덮을 수 있다: `${file}`은 현재 파일,
-    // `${file.path}`는 id가 `file`인 task 결과다.
+    // **own property 만 본다.** 컨텍스트가 평범한 객체면 `${constructor.name}` 이
+    // `Object`, `${toString.name}` 이 `toString` 으로 "해석"되어 태스크 결과처럼
+    // 셸 명령에 들어간다.
+    const step = ownValue(context, stepId);
+    // builtin context는 예약 이름을 top-level에도 둔다. action에 동명 task가
+    // 선언됐지만 그 결과가 아직 없는(self/Preview 전방 참조) 때 그 문자열을
+    // task 결과로 오인하지 않도록 먼저 구분한다.
+    const declaredBuiltinNamedTaskHasNoResult = isBare
+        && RESERVED_VARIABLE_HEADS.has(expression)
+        && contextDeclaresTaskId(context, expression)
+        && step === lookupBuiltinVariable(context, expression as typeof BUILTIN_VARIABLE_NAMES[number]);
+    if (declaredBuiltinNamedTaskHasNoResult) { return undefined; }
+    if (step && property && ownValue(step, property) !== undefined) { return ownValue(step, property); }
+    if (isBare && step) {
+        if (ownValue(step, 'output') !== undefined) { return ownValue(step, 'output'); }
+        if (ownValue(step, 'outputDir') !== undefined) { return ownValue(step, 'outputDir'); }
+    }
+    // 같은 이름의 task 결과 객체가 있으면, 대표 키가 없는 경우도 예전처럼 그
+    // 객체가 이 참조를 소유한다(문자열 보간에서는 리터럴로 남음). 여기서 내장으로
+    // 떨어지면 기존 오타/비지원 참조가 활성 파일 같은 전혀 다른 값으로 바뀐다.
+    if (isBare && step !== undefined) { return step; }
+    // 0.7.31까지 `${file}`은 같은 id의 task 대표 결과를 뜻할 수 있었다. 내장을
+    // 먼저 읽으면 기존 액션이 오류 없이 활성 파일을 처리하는 호환성 파괴가 된다.
+    // action에 동명 task가 선언돼 있으면 그 결과가 아직 없거나 자기 참조여도
+    // 내장으로 떨어지지 않는다. 전방 producer는 graph가 먼저 실행하고, self는
+    // 기존처럼 미해결로 남는다.
+    if (isBare && contextDeclaresTaskId(context, expression)) { return undefined; }
+    // 동명 task 자체가 없을 때만 별도 심볼의 내장값으로 떨어진다.
     if (isBare && RESERVED_VARIABLE_HEADS.has(expression) && hasBuiltinVariableSnapshot(context)) {
         const value = lookupBuiltinVariable(context, expression as typeof BUILTIN_VARIABLE_NAMES[number]);
         if (value !== undefined) { return value; }
@@ -563,15 +591,6 @@ export function resolvePipelineReference(expression: string, context: any): unkn
             );
         }
         return undefined;
-    }
-    // **own property 만 본다.** 컨텍스트가 평범한 객체면 `${constructor.name}` 이
-    // `Object`, `${toString.name}` 이 `toString` 으로 "해석"되어 태스크 결과처럼
-    // 셸 명령에 들어간다.
-    const step = ownValue(context, stepId);
-    if (step && property && ownValue(step, property) !== undefined) { return ownValue(step, property); }
-    if (isBare && step) {
-        if (ownValue(step, 'output') !== undefined) { return ownValue(step, 'output'); }
-        if (ownValue(step, 'outputDir') !== undefined) { return ownValue(step, 'outputDir'); }
     }
     const direct = ownValue(context, expression);
     if (direct !== undefined) { return direct; }
@@ -769,16 +788,45 @@ export function shouldSkipForSkippedDependencies(
 ): boolean {
     if (!task || typeof task !== 'object' || skippedTaskIds.size === 0) { return false; }
     const platform = options.platform ?? process.platform;
-    for (const str of walkInterpolatedTaskStrings(task, platform)) {
+    for (const { text: str, localEach } of walkDependencyReferenceStrings(task, platform)) {
         for (const refs of extractParsedVariableReferences(str)) {
             if (refs.every(({ head, key }) =>
                 skippedTaskIds.has(head)
-                && !(task.forEach !== undefined && head === 'each')
-                && !(key === undefined && RESERVED_VARIABLE_HEADS.has(head))
+                && !(localEach && head === 'each')
             )) { return true; }
         }
     }
     return false;
+}
+
+/**
+ * forEach의 `${each}`는 본문에서만 지역값이다. 반복 소스와 task-level when은
+ * 지역값을 만들기 전에 평가되므로 동명 task 참조로 취급해야 한다.
+ */
+function* walkDependencyReferenceStrings(
+    task: Task,
+    platform: NodeJS.Platform
+): Generator<{ text: string; localEach: boolean }> {
+    if (task.forEach === undefined) {
+        for (const text of walkInterpolatedTaskStrings(task, platform)) {
+            yield { text, localEach: false };
+        }
+        return;
+    }
+    const body = { ...task, forEach: undefined, when: undefined };
+    for (const text of walkInterpolatedTaskStrings(body, platform)) {
+        yield { text, localEach: true };
+    }
+    const source = task.forEach;
+    if (typeof source === 'string') { yield { text: source, localEach: false }; }
+    else if (Array.isArray(source)) {
+        for (const text of source) {
+            if (typeof text === 'string') { yield { text, localEach: false }; }
+        }
+    }
+    if (typeof task.when?.var === 'string') {
+        yield { text: task.when.var, localEach: false };
+    }
 }
 
 function extractParsedVariableReferences(text: string): ReferenceAlternative[][] {
@@ -829,9 +877,8 @@ export const NON_INTERPOLATED_TASK_KEYS: ReadonlySet<string> = new Set([
 
 /**
  * Variable heads reserved by the runtime interpolation context. A bare
- * `${file}` is a built-in and must not create a task dependency. Qualified
- * `${file.path}` can still address a same-named task for backward
- * compatibility; `inferTaskDependencies` distinguishes those forms.
+ * `${file}` is a built-in only when the action does not define a same-named
+ * task; existing task ids keep precedence for backward compatibility.
  *
  * Colon-prefixed namespaces (`env:VAR`, `input:foo`) are handled
  * separately in `inferTaskDependencies` because `extractVariableHeads`
@@ -1024,6 +1071,28 @@ export interface InferTaskDependenciesOptions {
     platform?: NodeJS.Platform;
 }
 
+/** 기록 표면에서 가리는 env/선택/클립보드 내장을 실제로 참조하는가. */
+export function taskReferencesSensitiveBuiltin(
+    task: Task,
+    validTaskIds: ReadonlySet<string>,
+    options: InferTaskDependenciesOptions = {}
+): boolean {
+    const platform = options.platform ?? process.platform;
+    for (const text of walkInterpolatedTaskStrings(task, platform)) {
+        for (const match of text.matchAll(/\${([^}]+)}/g)) {
+            for (const alt of parseReferenceAlternatives(match[1] ?? '')) {
+                if (alt.head.startsWith('env:')) { return true; }
+                if (alt.key === undefined
+                    && (alt.head === 'selectedText' || alt.head === 'clipboard')
+                    && !validTaskIds.has(alt.head)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 /**
  * Infer dependencies for a task from `${taskId.x}` references in its
  * interpolatable string fields. Returns the set of task ids (subset of
@@ -1072,14 +1141,14 @@ export function inferTaskDependencies(
     const deps = new Set<string>();
     if (!task || typeof task !== 'object') { return deps; }
     const platform = options.platform ?? process.platform;
-    for (const str of walkInterpolatedTaskStrings(task, platform)) {
+    for (const { text: str, localEach } of walkDependencyReferenceStrings(task, platform)) {
         for (const { head, key } of extractParsedVariableReferences(str).flat()) {
             if (head === task.id) { continue; }
             // `each`는 forEach 태스크 안에서만 생기는 지역 문맥이다. 같은 액션에
             // id가 `each`인 태스크가 있어도 반복 본문의 `${each.*}` 의존성으로
             // 오인하지 않는다. forEach가 없는 태스크의 기존 참조는 그대로다.
-            if (task.forEach !== undefined && head === 'each') { continue; }
-            if (key === undefined && RESERVED_VARIABLE_HEADS.has(head)) { continue; }
+            if (localEach && head === 'each') { continue; }
+            if (key === undefined && RESERVED_VARIABLE_HEADS.has(head) && !validTaskIds.has(head)) { continue; }
             if (RESERVED_HEAD_PREFIXES.some(p => head.startsWith(p))) { continue; }
             if (validTaskIds.has(head)) { deps.add(head); }
         }

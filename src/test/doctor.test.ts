@@ -52,6 +52,27 @@ suite('Doctor', () => {
         assert.ok(!codes(findings).includes('variable.unresolved'), JSON.stringify(findings, null, 2));
     });
 
+    test('환경변수 실제 값이 path 진단 문구에 노출되지 않는다', () => {
+        const name = 'TASKHUB_DOCTOR_SECRET_PATH';
+        const previous = process.env[name];
+        process.env[name] = '/outside/doctor-secret';
+        try {
+            const findings = runDoctor([makeInput([{
+                id: 'a.env-path', title: 'env path', action: {
+                    description: 'd',
+                    tasks: [{
+                        id: 'write', type: 'writeFile',
+                        path: `\${env:${name}}/out.txt`, content: 'x', allowSecretContent: true,
+                    }],
+                },
+            }])], compileValidator());
+            assert.ok(!JSON.stringify(findings).includes('/outside/doctor-secret'));
+        } finally {
+            if (previous === undefined) { delete process.env[name]; }
+            else { process.env[name] = previous; }
+        }
+    });
+
     test('returns no findings for a clean actions.json', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([
@@ -286,6 +307,16 @@ suite('Doctor', () => {
             ])).includes('command.nested-interpreter'));
         });
 
+        test('forEach 지역 each는 동명 정적 task로 안전 판정하지 않는다', () => {
+            assert.ok(codes(withTasks([
+                { id: 'each', type: 'quickPick', items: ['safe'] },
+                {
+                    id: 'run', type: 'command', forEach: ['untrusted'],
+                    command: 'sh -c "echo ${each.value}"',
+                },
+            ])).includes('command.nested-interpreter'));
+        });
+
         test('sh -c / powershell -Command 도 같이 잡는다', () => {
             for (const command of ['sh -c "echo ${ask.value}"', 'powershell -Command "echo ${ask.value}"']) {
                 assert.ok(
@@ -352,6 +383,20 @@ suite('Doctor', () => {
                 { id: 'ask', type: 'inputBox', prompt: 'v?' },
                 { id: 'run', type: 'command', command: '${which.value} -c "echo ${ask.value}"' },
             ])).includes('command.nested-interpreter'), '고정 items 로 풀리는 실행 파일을 놓쳤다');
+        });
+
+        test('forEach 지역 each가 실행 파일이면 fail-closed로 진단한다', () => {
+            const found = codes(withTasks([
+                { id: 'ask', type: 'inputBox', prompt: 'v?' },
+                {
+                    id: 'run', type: 'command', forEach: ['sh'],
+                    command: '${each.value}', args: ['-c', 'echo ${ask.value}'],
+                },
+            ]));
+            assert.ok(
+                found.includes('command.nested-interpreter') || found.includes('command.dynamic-interpreter'),
+                `동적 반복 실행 파일이 진단을 우회했다: ${found.join(', ')}`
+            );
         });
 
         /**
@@ -2968,6 +3013,23 @@ suite('Doctor', () => {
             `expected capture.reserved for 'stderr', got ${codes(findings).join(',')}`);
     });
 
+    test('새 QuickPick·forEach 결과 키도 capture로 덮을 수 없다', () => {
+        const v = compileValidator();
+        for (const name of ['labelList', 'custom', 'outputs', 'stderrs']) {
+            const findings = runDoctor([makeInput([{
+                id: `a.reserved.${name}`, title: 'reserved', action: {
+                    description: 'd',
+                    tasks: [{
+                        id: 'build', type: 'shell', command: 'make',
+                        passTheResultToNextTask: true,
+                        output: { capture: { name, regex: '(.*)' } },
+                    }],
+                },
+            }])], v);
+            assert.ok(findings.some(f => f.code === 'capture.reserved'), name);
+        }
+    });
+
     test('flags unresolved ${...} inside quickPick itemsFromCommand', () => {
         const v = compileValidator();
         const findings = runDoctor([makeInput([
@@ -3023,22 +3085,22 @@ suite('Doctor', () => {
             `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
     });
 
-    /** bare 내장과 같은 이름의 task 속성 참조는 서로 공존한다. */
+    /** 내장과 같은 이름의 기존 task는 bare/속성 참조를 모두 소유한다. */
     for (const builtin of ['workspaceFolder', 'extensionPath']) {
-        test(`same-named task does not clobber \${${builtin}}`, () => {
+        test(`same-named task owns bare \${${builtin}}`, () => {
             const findings = runDoctor([makeInput([{
                 id: 'a.shadow',
                 title: 'shadow',
                 action: {
                     description: 'd',
                     tasks: [
-                        { id: builtin, type: 'inputBox', prompt: '?' },
+                        { id: builtin, type: 'stringManipulation', function: 'trim', input: 'task-result' },
                         { id: 'later', type: 'command', command: `echo \${${builtin}}` },
                     ],
                 },
             }])], compileValidator());
             assert.strictEqual(findings.filter(f => f.code === 'variable.unresolved').length, 0,
-                `내장 참조를 동명 태스크가 덮었다: ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
+                `동명 task 대표 결과가 풀리지 않았다: ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
         });
 
         test(`\${${builtin}.value} resolves from a same-named task`, () => {
@@ -3057,6 +3119,41 @@ suite('Doctor', () => {
                 `동명 task의 \`.value\` 를 해석하지 못했다: ${codes(findings).join(', ')}`);
         });
     }
+
+    test('동명 self bare 참조는 민감 내장으로 떨어지지 않고 미해결로 남는다', () => {
+        const findings = runDoctor([makeInput([{
+            id: 'a.self-shadow',
+            title: 'self shadow',
+            action: {
+                description: 'd',
+                tasks: [{
+                    id: 'selectedText', type: 'writeFile',
+                    path: path.join(WS, 'out.txt'), content: '${selectedText}',
+                }],
+            },
+        }])], compileValidator());
+        assert.ok(findings.some(f => f.code === 'variable.unresolved'));
+        assert.ok(!findings.some(f => f.code === 'secret.file-optin'));
+    });
+
+    test('전방 동명 task의 bare 참조를 내장값으로 오인하지 않는다', () => {
+        const findings = runDoctor([makeInput([{
+            id: 'a.forward-shadow',
+            title: 'forward shadow',
+            action: {
+                description: 'd',
+                tasks: [
+                    { id: 'use', type: 'command', command: 'echo ${file}', parallel: true },
+                    {
+                        id: 'file', type: 'stringManipulation', function: 'trim',
+                        input: 'task-result', parallel: true,
+                    },
+                ],
+            },
+        }])], compileValidator());
+        assert.ok(!findings.some(f => f.code === 'variable.unresolved'),
+            findings.map(f => `${f.code}: ${f.message}`).join('\n'));
+    });
 
     // 0.6.51 의 다중 선택 `args` 확장. Doctor 가 `args` 를 단순 보간으로만
     // 검사하던 동안, 문서(`docs/features.md` §fileDialog 다중 선택)가 정답으로
@@ -4111,5 +4208,45 @@ suite('forEach 설정과 Doctor', () => {
             args: ['${each}'], when: { var: '${each.value}', equals: 'a' },
         }))], compileValidator());
         assert.ok(codes(findings).includes('foreach.when-each'), JSON.stringify(findings, null, 2));
+    });
+
+    test('동명 each producer가 있으면 forEach 소스와 when은 그 task를 참조한다', () => {
+        const items = [{
+            id: 'a.foreach-producer', title: 'forEach producer', action: {
+                description: 'd',
+                tasks: [
+                    { id: 'each', type: 'quickPick', items: ['yes'] },
+                    { id: 'files', type: 'fileDialog', options: { canSelectMany: true } },
+                    {
+                        id: 'run', type: 'command', forEach: '${files.paths}',
+                        command: 'tool', args: ['${each.value}'],
+                        when: { var: '${each.value}', equals: 'yes' },
+                    },
+                ],
+            },
+        }];
+        const findings = runDoctor([makeInput(items)], compileValidator());
+        assert.ok(!codes(findings).includes('foreach.when-each'), JSON.stringify(findings, null, 2));
+    });
+
+    test('민감한 each producer를 forEach 소스로 쓴 파일 저장도 opt-in을 요구한다', () => {
+        const items = [{
+            id: 'a.foreach-secret', title: 'forEach secret', action: {
+                description: 'd',
+                tasks: [
+                    { id: 'password', type: 'inputBox', password: true },
+                    {
+                        id: 'each', type: 'quickPick',
+                        items: [{ label: 'secret', value: ['${password.value}'] }],
+                    },
+                    {
+                        id: 'save', type: 'writeFile', forEach: '${each.valueList}',
+                        path: '${workspaceFolder}/out.txt', content: '${each.value}',
+                    },
+                ],
+            },
+        }];
+        const findings = runDoctor([makeInput(items)], compileValidator());
+        assert.ok(codes(findings).includes('secret.file-optin'), JSON.stringify(findings, null, 2));
     });
 });

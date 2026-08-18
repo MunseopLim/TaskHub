@@ -587,7 +587,7 @@ suite('Password taint and redaction', function () {
 
     test('민감 output.mode editor/terminal은 억제하고 file 저장은 opt-in 으로만 허용한다', async () => {
         const secret = 'Output-Mode-S3cret';
-        const outputFile = path.join(tempWorkspace, 'explicit-sensitive-output.txt');
+        const outputFile = path.join(tempWorkspace, `${secret}-output.txt`);
         const originalOpen = vscode.workspace.openTextDocument;
         const originalCreateTerminal = vscode.window.createTerminal;
         const originalShowWarning = vscode.window.showWarningMessage;
@@ -630,7 +630,11 @@ suite('Password taint and redaction', function () {
                         // 의도**가 명시적인 것은 다르다. 후자는 이 플래그로만
                         // 선언된다.
                         allowSecretContent: true,
-                        output: { mode: 'file', filePath: outputFile, overwrite: true },
+                        output: {
+                            mode: 'file',
+                            filePath: '${workspaceFolder}/${ask.value}-output.txt',
+                            overwrite: true,
+                        },
                     },
                 ],
             },
@@ -656,10 +660,10 @@ suite('Password taint and redaction', function () {
         // editor/terminal 억제 2건 + 비밀이 디스크에 남았다는 고지 1건.
         assert.strictEqual(warnings.length, 3, 'editor/terminal 억제와 파일 저장 사실을 각각 알려야 한다');
         assert.ok(!warnings.join('\n').includes(secret));
-        assert.ok(
-            warnings.some(message => message.includes(outputFile)),
-            '비밀이 디스크에 남은 사실은 경로와 함께 알려야 한다'
-        );
+        assert.ok(!warnings.some(message => message.includes(outputFile)),
+            '민감 입력에서 파생될 수 있는 파일 경로를 알림에 노출했다');
+        assert.ok(warnings.some(message => message.includes('***-output.txt')),
+            '파일 저장 고지에서 정적 경로까지 모두 잃었다');
         assert.strictEqual(fs.readFileSync(outputFile, 'utf8'), secret,
             'allowSecretContent 를 선언한 mode:file 저장은 그대로 수행한다');
         if (process.platform !== 'win32') {

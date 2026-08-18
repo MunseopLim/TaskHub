@@ -149,8 +149,10 @@
 | IT-167 | 매핑을 바꾼 뒤의 재실행 | 저장된 입력은 고른 **항목**이므로, 값은 지금의 정의에서 다시 파생됨 — 매핑을 붙인 뒤 재실행하면 대화상자 없이 새 매핑 값(`--release`)이 argv 로 감 |
 | IT-169 | 현재 파일·환경 문맥 전달과 기록 마스킹 | 파일·상대 경로·선택·클립보드·환경·커서 값이 실제 argv에 도착하고, History 명령에는 파일 경로만 남으며 선택·클립보드·환경값은 `***`로 가려짐 |
 | IT-170 | 활성 에디터 자동 스냅샷 | 별도 주입 없이 실행 시작 시 활성 파일·선택 영역·1-based 커서 위치를 읽어 후속 `writeFile`까지 같은 값으로 전달 |
+| IT-179 | 명시 workspaceRoots 우선 | VS Code 창에는 속하지만 실행에 명시한 root 밖인 활성 파일에 가짜 `relativeFile`·`fileWorkspaceFolder`를 만들지 않음 |
 | IT-171 | QuickPick 동적 기본 선택 | 앞 command의 출력으로 `default` label을 정하고, 활성화된 항목의 매핑 `value`가 후속 파일에 전달됨 |
 | IT-172 | QuickPick 직접 입력 argv 전달 | `allowCustom`으로 입력한 목록 밖 문자열이 후속 `command`의 실제 argv 한 칸으로 전달됨 |
+| IT-176 | 민감 내장값의 전이 마스킹 | 선택 텍스트·환경변수에서 파생된 중간 결과와 cwd가 History 입력·명령·Action Run Report에 원문으로 남지 않음 |
 
 ### forEach 반복 실행
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
@@ -160,6 +162,8 @@
 | IT-173 | 다중 파일을 파일별 command로 실행 | 공백이 든 경로를 포함한 `${files.paths}`를 순차 반복하고 `${each}`·index·number·count가 실제 argv에 맞게 도착하며, History 명령도 반복 횟수만큼 남음 |
 | IT-174 | 반복 중간 실패 | 두 번째 항목 실패가 `2/3` 위치를 밝히고 세 번째 항목은 실행하지 않음 |
 | IT-175 | password 파생 반복값 마스킹 | 실제 프로세스에는 원문 반복값을 전달하지만 History 명령에는 모든 반복을 `***`로 기록함 |
+| IT-177 | 반복 timeout 위치 | 전체 timeout이 반복 도중 발생해도 현재 항목의 `1/2` 위치를 오류에 포함 |
+| IT-178 | 반복 결과 합계 상한 | 각 반복 출력은 개별 상한 이하더라도 누적 결과가 액션 상한을 넘으면 다음 결과를 보관하기 전에 중단 |
 
 ### Last-run 배지
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)

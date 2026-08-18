@@ -5,7 +5,9 @@ import * as path from 'path';
 import {
     ActionRunLog,
     ActionRunLogCollector,
+    appendBoundedRunCommand,
     readActionRunLog,
+    RUN_LOG_COMMAND_TRUNCATED_MARKER,
     RunLogReadError,
     RunLogStore,
     serializeActionRunLog,
@@ -71,6 +73,21 @@ suite('Action run log storage', () => {
         collector.finishTask('inspect', { status: 'success', finishedAt: 3 });
         const log = collector.finish('success', 4);
         assert.strictEqual(log.tasks[0].command, 'tool "one.bin"\ntool "two space.bin"');
+    });
+
+    test('반복 명령 누적은 UTF-8 byte 상한에서 한 번만 잘린다', () => {
+        let commands: string | undefined;
+        for (let i = 0; i < 20; i++) {
+            commands = appendBoundedRunCommand(commands, `tool ${'가'.repeat(20)}`, 180);
+        }
+        assert.ok(commands);
+        assert.ok(Buffer.byteLength(commands!, 'utf8') <= 180);
+        assert.ok(commands!.endsWith(RUN_LOG_COMMAND_TRUNCATED_MARKER));
+        assert.strictEqual(
+            commands!.split(RUN_LOG_COMMAND_TRUNCATED_MARKER).length - 1,
+            1
+        );
+        assert.strictEqual(appendBoundedRunCommand(commands, 'ignored', 180), commands);
     });
 
     test('파일 상한을 넘는 stdout/stderr는 완전한 로그처럼 보이지 않게 표시한다', () => {

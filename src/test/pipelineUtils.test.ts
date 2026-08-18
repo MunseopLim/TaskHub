@@ -44,7 +44,7 @@ import {
     buildForEachValue,
     inferTaskDependencies,
 } from '../pipelineUtils';
-import { buildBuiltinVariableContext } from '../builtinVariables';
+import { attachPipelineTaskIds, buildBuiltinVariableContext } from '../builtinVariables';
 
 /**
  * These tests import directly from ../pipelineUtils (not ../extension) to
@@ -103,7 +103,7 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         );
     });
 
-    test('동명 task가 있어도 bare 내장과 속성 task 참조를 구분한다', () => {
+    test('동명 task의 기존 bare 대표값이 내장보다 우선하고 속성 참조도 유지된다', () => {
         const workspace = path.resolve(os.tmpdir(), 'taskhub-builtin-workspace');
         const builtin = buildBuiltinVariableContext({
             workspaceFolder: workspace,
@@ -113,12 +113,25 @@ suite('pipelineUtils — direct-import smoke suite', () => {
             strict: true,
         });
         const context = Object.assign(Object.create(null), builtin, {
-            file: { path: '/picked/input.bin', fileNameOnly: 'input.bin' },
+            file: { output: '/picked/legacy.bin', path: '/picked/input.bin', fileNameOnly: 'input.bin' },
         });
 
-        assert.strictEqual(interpolatePipelineVariables('${file}', context), path.join(workspace, 'active.c'));
+        assert.strictEqual(interpolatePipelineVariables('${file}', context), '/picked/legacy.bin');
         assert.strictEqual(interpolatePipelineVariables('${file.path}', context), '/picked/input.bin');
         assert.strictEqual(interpolatePipelineVariables('${file.fileNameOnly}', context), 'input.bin');
+    });
+
+    test('동명 task 결과가 아직 없으면 bare 내장으로 떨어지지 않는다', () => {
+        const builtin = attachPipelineTaskIds(buildBuiltinVariableContext({
+            workspaceFolder: '/workspace',
+            extensionPath: '/extension',
+            editor: { selectedText: 'must-not-leak' },
+            clipboard: 'must-not-leak-either',
+            environment: {},
+            strict: true,
+        }), ['selectedText', 'clipboard']);
+        assert.strictEqual(interpolatePipelineVariables('${selectedText}', builtin), '${selectedText}');
+        assert.strictEqual(interpolatePipelineVariables('${clipboard}', builtin), '${clipboard}');
     });
 
     test('resolveWithinWorkspace works with only path + roots', () => {

@@ -411,13 +411,13 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 | `extractPattern` | 보간된 초기값에서 기본 입력을 추출 |
 | `password` | 입력을 마스킹하고 저장·표시 경계에서 비밀로 취급 |
 
-#### password 값이 가려지는 범위
+#### 민감 입력이 가려지는 범위
 
-`password: true` 입력과 그 값에서 파생된 결과는 History의 저장 입력, 실행 명령 보기, Preview, verbose 로그와 알림에서 평문으로 남기지 않습니다. 비밀번호를 사용한 태스크의 출력은 재노출 가능성이 있으므로 diagnostics를 게시하지 않습니다. 실제 자식 프로세스에는 실행에 필요한 원래 값이 전달됩니다.
+`password: true` 입력뿐 아니라 환경변수·클립보드·선택 텍스트와 그 값에서 파생된 결과는 History의 저장 입력, 실행 명령 보기, Preview, verbose 로그와 알림에서 평문으로 남기지 않습니다. 민감 입력을 사용한 태스크의 출력은 재노출 가능성이 있으므로 diagnostics를 게시하지 않습니다. 실제 자식 프로세스에는 실행에 필요한 원래 값이 전달됩니다.
 
-**디스크에 남기는 경우는 태스크가 선언해야 합니다.** `output.mode`의 `editor`·`terminal`은 사용자가 위치를 고르지 않은 암묵적 영속화(hot-exit 백업, 공용 스크롤백)라 password 파생 값을 아예 싣지 않습니다. 반면 `writeFile`·`appendFile`·`output.mode: 'file'`은 `filePath`를 직접 적은 경우이므로 **`allowSecretContent: true`를 선언하면** 저장을 수행합니다. 선언이 없으면 실행이 거부되며, 오류 메시지가 켜야 할 플래그를 알려 줍니다(이 오류만은 비밀 실패 가림 대상이 아닙니다 — 고치는 방법이 가려지면 안 되기 때문입니다).
+**디스크에 남기는 경우는 태스크가 선언해야 합니다.** `output.mode`의 `editor`·`terminal`은 사용자가 위치를 고르지 않은 암묵적 영속화(hot-exit 백업, 공용 스크롤백)라 민감 입력 파생 값을 아예 싣지 않습니다. 반면 `writeFile`·`appendFile`·`output.mode: 'file'`은 `filePath`를 직접 적은 경우이므로 **`allowSecretContent: true`를 선언하면** 저장을 수행합니다. 선언이 없으면 실행이 거부되며, 오류 메시지가 켜야 할 플래그를 알려 줍니다(이 오류만은 민감 실패 가림 대상이 아닙니다 — 고치는 방법이 가려지면 안 되기 때문입니다).
 
-선언한 경우 TaskHub는 파일을 소유자 전용 권한(`0600`, Windows에서는 효과 없음)으로 만들고, 저장 사실을 경로와 함께 알립니다. **파일 내용 자체는 평문입니다** — 버전 관리에 올라가지 않는지는 사용자가 확인해야 합니다.
+선언한 경우 TaskHub는 파일을 소유자 전용 권한(`0600`, Windows에서는 효과 없음)으로 만들고 저장 사실을 알립니다. 알림·권한 오류 로그의 경로는 정적 부분만 남기고 민감 입력에서 파생된 부분을 `***`로 가립니다. **파일 내용 자체는 평문입니다** — 버전 관리에 올라가지 않는지는 사용자가 확인해야 합니다.
 
 ### `quickPick` 태스크
 
@@ -440,7 +440,9 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 | --- | --- |
 | `value` | 고른 항목의 `value`(없으면 `label`). 배열이면 인자 여러 개로 펼쳐집니다 |
 | `label` | 고른 항목의 표시 문구. 매핑과 무관하게 항상 문자열입니다 |
+| `labelList` | 고른 표시 문구의 배열. label 안에 쉼표가 있어도 항목 경계를 보존합니다 |
 | `valueList` | 고른 값 전체를 평평하게 편 배열. 인자 확장용 |
+| `custom` | 단일 선택이 목록 밖 직접 입력이면 `true`, 정적 항목이면 `false` |
 | `values` | `canPickMany: true`일 때만. 고른 값 전체를 쉼표로 이은 문자열 |
 | `labels` | `canPickMany: true`일 때만. 고른 표시 문구 전체를 쉼표로 이은 문자열 |
 
@@ -465,12 +467,16 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
 ```
 
 목록 항목의 `label`·`description`·`detail`·`value`와 `default`는 앞 태스크 결과를 변수로 사용할 수
-있습니다. 기억은 label을 저장하므로 나중에 같은 label의 `value` 매핑을 바꾸면 다음 실행에는 새
-매핑값이 전달됩니다. 목록에서 사라진 기억값은 무시하며, 직접 입력값은 `allowCustom`이 켜진 동안
-다시 복원할 수 있습니다.
+있습니다. 기억은 label과 정적/직접 입력 구분을 저장하므로 나중에 같은 label의 `value` 매핑을
+바꾸면 다음 실행에는 새 매핑값이 전달됩니다. 목록에서 사라진 정적 항목은 직접 입력으로 되살리지
+않고 무시하며, 직접 입력값은 `allowCustom`이 켜진 동안 다시 복원할 수 있습니다. 환경변수·클립보드·
+선택 텍스트나 password 결과에서 파생된 QuickPick은 과거 기억을 지우고 새 선택도 저장하지 않습니다.
+같은 label이 여러 항목에 있으면 mapping을 안전하게 식별할 수 없어 기억값을 자동 복원하지 않습니다.
+기억 저장소는 최근 100개 scope와 scope key·label 합계 64K자로 제한합니다.
 
 - 동적 목록 명령은 `cwd`, 없으면 액션 워크스페이스에서 실행됩니다.
-- History 재실행은 `label`로 선택지 유효성을 확인합니다 — 목록에서 사라진 선택지만 다시 묻습니다.
+- History 재실행은 `labelList`로 선택 경계를 보존하고 현재 항목 정의에서 `value`를 다시 만듭니다.
+  삭제된 항목이나 같은 label이 여러 개라 식별할 수 없는 선택만 다시 묻습니다.
 - 취소 규칙은 `fileDialog`와 같습니다.
 
 ### 배열 항목마다 태스크 반복 (`forEach`)
@@ -508,11 +514,15 @@ python inspect.py "두 번째 경로" --number 2
 반복은 선언 순서대로 실행하며 동적 목록은 최대 1,000개입니다. 한 반복이 실패하면 오류에
 `forEach iteration 2/3`처럼 위치를 표시하고 남은 항목은 실행하지 않습니다. `continueOnError`는
 개별 항목이 아니라 반복 태스크 전체에 적용됩니다. `when`은 반복 시작 전에 한 번 평가되므로
-`${each}`를 사용할 수 없으며, 대화형 태스크와 `isOneShot`에도 `forEach`를 사용할 수 없습니다.
+항목별 `${each}`를 사용할 수 없습니다. 단, 액션에 id가 `each`인 별도 태스크가 있으면 `forEach`
+소스와 `when.var`의 `${each.*}`는 그 태스크 결과를 뜻합니다. 대화형 태스크와 `isOneShot`에는
+`forEach`를 사용할 수 없습니다.
 
-후속 태스크에서는 `${inspect.count}`, `${inspect.outputs}`, `${inspect.paths}`를 사용할 수 있습니다.
-`${inspect.output}`은 각 반복의 stdout을 줄바꿈으로 합치고, 그 밖의 기존 단일 결과 키는 마지막
-반복의 값을 유지합니다. History의 실행 명령과 Action Run Report에는 반복된 명령이 모두 남습니다.
+후속 태스크에서는 `${inspect.count}`, `${inspect.outputs}`, `${inspect.stderrs}`, `${inspect.paths}`를
+사용할 수 있습니다. `${inspect.output}`과 `${inspect.stderr}`는 각 반복의 출력을 줄바꿈으로 합치고,
+그 밖의 기존 단일 결과 키는 마지막 반복값을 유지합니다. 누적 결과는 액션 전체 결과 상한을 넘기기
+전에 중단됩니다. History와 Action Run Report에는 반복 명령이 순서대로 남되, 한 태스크의 명령 기록은
+256KB에서 생략 표식과 함께 잘립니다.
 
 ### `envPick` 태스크
 
@@ -533,7 +543,7 @@ python inspect.py "두 번째 경로" --number 2
 | `eol` | `keep`·`lf`·`crlf`; 기본 `keep` |
 | `mkdirs` | 부모 디렉터리 자동 생성, 기본 `true` |
 | `overwrite` | `writeFile`의 기존 파일 덮어쓰기, 기본 `true` |
-| `allowSecretContent` | `password` 파생 값을 파일로 저장하는 것을 허용, 기본 `false` |
+| `allowSecretContent` | password·환경변수·클립보드·선택 텍스트 파생 값을 파일로 저장하는 것을 허용, 기본 `false` |
 
 상대 경로는 액션 워크스페이스 기준이며 밖으로 나가는 경로는 거부합니다. `appendFile`의 UTF-8 BOM은 새 파일에만 추가합니다.
 
@@ -568,12 +578,14 @@ python inspect.py "두 번째 경로" --number 2
   에디터 값은 액션 시작 시 한 번 스냅샷하므로 중간에 포커스가 이동해도 바뀌지 않습니다. 활성
   파일이 필요한 참조를 파일 에디터 없이 사용하거나 없는 환경변수를 참조하면 리터럴 `${…}`를
   넘기지 않고 액션이 실패합니다. 대안이 있다면 `${file ?? workspaceFolder}`처럼 쓸 수 있습니다.
-  환경변수·클립보드·선택 텍스트는 History와 실행 로그에 기록되는 **명령 문자열** 및 조건 안내에서
-  `***`로 가립니다. 실행한 도구가 값을 stdout/stderr로 다시 출력하면 일반 출력과 구분할 수 없어
-  자동으로 지우지 못합니다.
-- task id가 내장 이름과 같으면 점 없는 참조와 속성 참조를 구분합니다. 예를 들어 `${file}`은 활성
-  파일이고, `${file.path}`는 id가 `file`인 task의 `path` 결과입니다. 기존 `fileDialog` action을
-  바꾸지 않으면서 현재 파일 변수도 함께 쓸 수 있습니다.
+  환경변수·클립보드·선택 텍스트에서 파생된 값은 다음 태스크까지 민감 표식이 전파됩니다. History·
+  입력 프로필·QuickPick 기억·verbose 로그·실행 보고서·터미널/에디터 출력에는 원문을 남기지 않고,
+  파일 저장은 `allowSecretContent: true` 선언을 요구합니다.
+- 활성 파일이 어느 워크스페이스에도 속하지 않으면 절대 경로 계열(`${file}` 등)만 사용할 수 있고,
+  `${relativeFile}`·`${relativeFileDirname}`·`${fileWorkspaceFolder}`는 정의되지 않은 것으로 처리합니다.
+- task id가 내장 이름과 같으면 기존 task가 우선합니다. 예를 들어 id가 `file`인 태스크가 있으면
+  `${file}`은 그 태스크의 대표 결과, `${file.path}`는 `path` 결과입니다. 그런 태스크가 없을 때만
+  `${file}`이 활성 파일 내장값을 뜻합니다.
 - `${a.value ?? b.value}`는 왼쪽부터 실제로 해석되는 첫 값을 사용합니다.
 - 배열 값은 `args` 원소 전체 또는 `command` 토큰 전체가 참조일 때 여러 argv로 펼쳐집니다(`command` 타입 한정 — `shell`은 문자열을 셸에 그대로 넘기는 계약이라 공백으로 이어 붙습니다). 다른 글자가 섞이면(`--file=${pick.paths}`) 공백으로 이어 붙어 인자 한 칸이 되며, `args` 자리에서는 Doctor가 `args.array-joined`로 알립니다.
 - 명령 문자열에서 `"${pick.paths}"`처럼 **따옴표로 감싸도 인자 하나로 묶이지 않습니다** — 인용은 토큰 경계만 정하고, 그 토큰이 배열 참조 하나면 그대로 펼쳐집니다. 배열을 인자 한 칸으로 넘겨야 한다면 앞뒤에 글자를 붙이거나(`--file=${pick.paths}`) `stringManipulation`으로 먼저 문자열을 만드세요.
@@ -713,7 +725,7 @@ History 패널은 액션 실행과 Memory Map·Hex Editor·JSON Editor 열람을
 
 - 상태는 `running`·`success`·`failure`·`cancelled`이며, 취소는 사용자가 누른 Stop과 닫은 프롬프트를 구분합니다. 완료 항목은 실행 시각과 소요 시간 배지를 표시합니다.
 - 액션 항목을 클릭하면 다시 실행하고, 도구 항목을 클릭하면 저장된 파일과 열기 옵션으로 다시 엽니다.
-- `inputBox`·`quickPick`·`envPick`·`fileDialog`·`folderDialog`·`confirm` 결과가 있으면 재실행에 사용합니다. 현재 검증 규칙이나 선택지와 맞지 않는 값만 다시 묻고, `password: true` 입력은 저장하지 않습니다.
+- `inputBox`·`quickPick`·`envPick`·`fileDialog`·`folderDialog`·`confirm` 결과가 있으면 재실행에 사용합니다. 현재 검증 규칙이나 선택지와 맞지 않는 값만 다시 묻고, `password: true`와 환경변수·클립보드·선택 텍스트에서 파생된 입력은 저장하지 않습니다.
 - 반복해서 쓸 입력 조합은 History 항목을 우클릭해 **입력값을 프로필로 저장…**으로 이름 붙입니다. 프로필은 팀 파일이 아닌 이 워크스페이스의 `workspaceState`에만 남으며, 액션 우클릭의 **입력 프로필로 실행…**과 **입력 프로필 관리…**에서 실행·이름 변경·삭제합니다. 삭제된 액션의 프로필은 Command Palette의 **TaskHub: 입력 프로필 관리…**에서 정리할 수 있습니다.
 - 프로필은 저장 당시의 task ID와 type을 현재 액션에 대조하고 기존 입력 검증도 다시 적용합니다. 바뀌었거나 검증할 수 없는 값은 *오래됨*으로 표시하며, 사용자 확인 없이 버리지 않습니다. 확인하고 실행하면 검증된 값만 재사용하고 나머지는 다시 묻습니다. 0.7.27 이전 History에는 type 서명이 없으므로 거기서 만든 프로필은 첫 실행에서 값을 다시 묻습니다.
 - 비밀번호 입력은 프로필에도 저장하지 않습니다. 프로필은 하나당 128KB, 워크스페이스당 50개·총 2MB로 제한됩니다.
@@ -1477,7 +1489,7 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `when.regex` | error | `when.matches`가 `new RegExp()` 컴파일에 실패. 런타임은 던지지 않고 "맞지 않음"으로 보므로, 잡아 주지 않으면 그 분기가 영영 꺼진 채로 남는다. |
 | `when.dead-branch` | warning | 풀리지 않는 `when.var`, 상수 `var`, 빈 `in` 등으로 결과가 항상 참 또는 거짓인 조건. 런타임이 실제로 적용할 연산자만 판정하며 전방 참조는 제외. |
 | `when.literal-operand` | warning | `equals`·`notEquals`·`matches`·`in`에 `${…}`가 있음. 피연산자는 보간하거나 의존성으로 읽지 않으므로 적힌 문자열 그대로 비교됨. |
-| `foreach.when-each` | error | `forEach` 태스크의 `when.var`가 항목별 `${each}`를 참조함. task-level 조건은 반복 시작 전에 평가되므로 런타임도 이 설정을 실행 전에 거부합니다. |
+| `foreach.when-each` | error | `forEach` 태스크의 `when.var`가 항목별 `${each}`를 참조함. task-level 조건은 반복 시작 전에 평가되므로 런타임도 이 설정을 실행 전에 거부합니다. 단, id가 `each`인 별도 producer가 있으면 그 결과 참조로 인정합니다. |
 | `capture.regex` | error | `output.capture.regex`가 `new RegExp()` 컴파일에 실패. |
 | `capture.group` | warning | `output.capture.group` 인덱스가 regex의 capture group 개수를 벗어남. |
 | `capture.reserved` | error | `output.capture.name`이 reserved 집합(`output`/`path`/`value` 등 task 결과 빌트인 키)과 충돌. 스키마는 이름 패턴만 검사하므로 schema-pass 후 런타임에서 throw 하던 케이스를 Doctor가 사전에 잡음. |
@@ -1492,8 +1504,8 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `tool.platform-missing` | warning | `zip`·`unzip`의 `tool`이 현재 플랫폼에서 비었거나 OS별 값이 없음. 검사하는 OS에 따라 결과가 달라짐. |
 | `output.ignored` | warning | 런타임이 읽지 않는 `output` 필드가 있음. `mode`·`content`·`filePath`·`overwrite`·`language`는 `passTheResultToNextTask: true`가 필요하고, `filePath`·`overwrite`는 `mode: "file"`, `language`는 `mode: "editor"`에서만 사용됩니다. `capture`·`diagnostics`는 이 게이트 밖에서 동작하지만 태스크 결과에 문자열 `output`이 있어야 합니다. |
 | `path.outside-workspace` | error | `writeFile` / `appendFile` / `output.filePath`의 해석 결과가 워크스페이스 밖. 런타임이 실행을 거부할 경로. (변수 치환 후에도 `${…}`가 남은 경우는 검사를 건너뜀 — 안전 결정 불가) |
-| `secret.file-optin` | error | `password` 파생 값을 `allowSecretContent: true` 없이 파일로 저장하려 함(`writeFile` / `appendFile` / `output.mode: "file"`). 런타임이 실행 중에 거부하므로 실행 전에 알림. 오염은 런타임과 같은 규칙으로 전이됨 — 비밀을 참조한 태스크의 결과도 비밀로 본다. |
-| `secret.allow-unused` | warning | `allowSecretContent`가 켜져 있지만 허용하는 것이 없음(파일을 쓰지 않거나, 쓰더라도 `password` 파생 값이 아님). "여기서 비밀을 다룬다"는 잘못된 신호를 남기므로 지울 것. |
+| `secret.file-optin` | error | 민감한 실행 문맥 파생 값을 `allowSecretContent: true` 없이 파일로 저장하려 함(`writeFile` / `appendFile` / `output.mode: "file"`). 런타임이 실행 중에 거부하므로 실행 전에 알림. 오염은 런타임과 같은 규칙으로 전이됨 — 민감 입력을 참조한 태스크의 결과도 민감하다고 본다. |
+| `secret.allow-unused` | warning | `allowSecretContent`가 켜져 있지만 허용하는 것이 없음(파일을 쓰지 않거나, 쓰더라도 민감 입력 파생 값이 아님). "여기서 비밀을 다룬다"는 잘못된 신호를 남기므로 지울 것. |
 | `dependsOn.self` | error | task의 `dependsOn`에 자기 자신이 포함됨. |
 | `dependsOn.missing` | error | `dependsOn`이 같은 액션에 존재하지 않는 task id를 가리킴. |
 | `dependsOn.cycle` | error | task 간 `dependsOn` 그래프에 순환이 있음. 출력 메시지에 순환 경로 포함. |
@@ -1563,7 +1575,7 @@ task의 string 필드(`command`, `args`, `env` 값, `cwd`, `output.filePath`, `o
 - `parallel: true`를 붙였더라도 출력을 참조하는 task가 먼저 실행되는 사고를 막을 수 있고,
 - `dependsOn`을 잊어도 정확한 순서가 유지됩니다.
 
-`${workspaceFolder}` / `${file}` 같은 점 없는 reserved 참조와 `${env:BAR}` / `${input:foo}` 같은 reserved prefix(`env:`, `input:`)는 자동 추론에서 제외됩니다. 단, `${file.path}`처럼 속성이 붙으면 같은 이름의 task 결과 참조이므로 그 task가 의존성으로 잡힙니다. `output.capture[].regex` / `output.diagnostics[].regex` 안의 `${…}` 리터럴도 정규식 패턴이지 변수 참조가 아니므로 제외됩니다.
+`${workspaceFolder}` / `${file}` 같은 점 없는 reserved 참조는 같은 id의 task가 없을 때만 자동 추론에서 제외됩니다. 동명 task가 있으면 bare 참조도 그 task의 대표 결과를 뜻하고 의존성으로 잡힙니다. `${env:BAR}` / `${input:foo}` 같은 reserved prefix(`env:`, `input:`)는 항상 제외됩니다. `output.capture[].regex` / `output.diagnostics[].regex` 안의 `${…}` 리터럴도 정규식 패턴이지 변수 참조가 아니므로 제외됩니다. `forEach`의 `${each}`는 반복 본문에서만 지역값이며, 반복 소스와 task-level `when.var`에서는 동명 task 참조로 처리합니다.
 
 > **현재 한계**: `${env:VAR}`는 0.7.32부터 실행 시작 시점의 환경값으로 치환됩니다. `${input:foo}`는
 > action-level 입력을 위한 예약 이름이지만 아직 치환되지 않으므로 리터럴로 남습니다. task id를

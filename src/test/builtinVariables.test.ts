@@ -53,6 +53,21 @@ suite('builtinVariables', () => {
         assert.ok(Object.prototype.hasOwnProperty.call(context, 'selectedText'));
     });
 
+    test('워크스페이스 밖 활성 파일에는 가짜 workspace-relative 값을 만들지 않는다', () => {
+        const context = buildBuiltinVariableContext({
+            workspaceFolder: '/workspace',
+            extensionPath: '/extension',
+            editor: { file: '/outside/active.txt' },
+            environment: {},
+            strict: true,
+        });
+        assert.strictEqual(context.file, path.resolve('/outside/active.txt'));
+        assert.strictEqual(context.fileWorkspaceFolder, undefined);
+        assert.strictEqual(context.relativeFile, undefined);
+        assert.strictEqual(context.relativeFileDirname, undefined);
+        assert.strictEqual(context.fileBasename, 'active.txt');
+    });
+
     test('기록용 사본은 파일 경로는 보존하고 환경·선택·클립보드는 가린다', () => {
         const context = buildBuiltinVariableContext({
             workspaceFolder: '/workspace',

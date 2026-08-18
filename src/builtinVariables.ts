@@ -58,12 +58,29 @@ export interface EnvironmentVariableSnapshot {
 export const PIPELINE_ENVIRONMENT = Symbol('taskhub.pipeline.environment');
 export const PIPELINE_STRICT_BUILTINS = Symbol('taskhub.pipeline.strictBuiltins');
 export const PIPELINE_BUILTIN_VALUES = Symbol('taskhub.pipeline.builtinValues');
+export const PIPELINE_TASK_IDS = Symbol('taskhub.pipeline.taskIds');
 
 export type BuiltinVariableContext = Record<string, unknown> & {
     [PIPELINE_ENVIRONMENT]: EnvironmentVariableSnapshot;
     [PIPELINE_STRICT_BUILTINS]: boolean;
     [PIPELINE_BUILTIN_VALUES]: Readonly<Record<BuiltinVariableName, unknown>>;
+    [PIPELINE_TASK_IDS]?: ReadonlySet<string>;
 };
+
+/** 동명 task가 bare 내장보다 우선하도록 action 전체 id 집합을 문맥에 붙인다. */
+export function attachPipelineTaskIds<T extends Record<string, unknown>>(
+    context: T,
+    taskIds: Iterable<string>
+): T {
+    (context as BuiltinVariableContext)[PIPELINE_TASK_IDS] = new Set(taskIds);
+    return context;
+}
+
+export function contextDeclaresTaskId(context: unknown, taskId: string): boolean {
+    return !!context
+        && typeof context === 'object'
+        && (context as BuiltinVariableContext)[PIPELINE_TASK_IDS]?.has(taskId) === true;
+}
 
 function snapshotEnvironment(
     environment: NodeJS.ProcessEnv,
@@ -82,8 +99,9 @@ function snapshotEnvironment(
  *
  * 모든 예약 키를 own property로 먼저 만들어 둔다. 동시에 같은 값을 심볼 아래에도
  * 보관한다. 합쳐진 실행 문맥에서는 동명 task 결과가 문자열 키를 덮을 수 있어야
- * `${file.path}` 같은 기존 참조가 유지되지만, bare `${file}`은 심볼 스냅샷을 읽어
- * 언제나 현재 파일을 뜻해야 하기 때문이다.
+ * `${file.path}`와 bare `${file}` 같은 기존 task 참조가 유지된다. 내장값은 동명
+ * task가 없을 때만 해석하되, 민감정보 가림처럼 실제 내장 스냅샷이 필요한 코드는
+ * 심볼 아래 값을 읽는다.
  */
 export function buildBuiltinVariableContext(options: BuiltinVariableContextOptions): BuiltinVariableContext {
     const result: Record<string | symbol, unknown> = Object.create(null);
@@ -97,20 +115,24 @@ export function buildBuiltinVariableContext(options: BuiltinVariableContextOptio
     const editor = options.editor;
     if (editor?.file) {
         const file = path.resolve(editor.file);
-        const fileWorkspaceFolder = editor.fileWorkspaceFolder
-            ? path.resolve(editor.fileWorkspaceFolder)
-            : path.resolve(options.workspaceFolder || path.dirname(file));
-        const relativeFile = path.relative(fileWorkspaceFolder, file);
         const extname = path.extname(file);
 
         result.file = file;
-        result.relativeFile = relativeFile;
-        result.relativeFileDirname = path.dirname(relativeFile);
         result.fileBasename = path.basename(file);
         result.fileBasenameNoExtension = path.basename(file, extname);
         result.fileExtname = extname;
         result.fileDirname = path.dirname(file);
-        result.fileWorkspaceFolder = fileWorkspaceFolder;
+        // 워크스페이스 밖의 활성 파일에 액션 워크스페이스를 억지로 붙이지 않는다.
+        // 그러면 `relativeFile`이 `../outside/...`가 되고 `fileWorkspaceFolder`는
+        // 실제로 그 파일을 포함하지 않는 폴더를 가리킨다. VS Code가 소속 폴더를
+        // 알려 준 경우에만 workspace-relative 계열을 만든다.
+        if (editor.fileWorkspaceFolder) {
+            const fileWorkspaceFolder = path.resolve(editor.fileWorkspaceFolder);
+            const relativeFile = path.relative(fileWorkspaceFolder, file);
+            result.relativeFile = relativeFile;
+            result.relativeFileDirname = path.dirname(relativeFile);
+            result.fileWorkspaceFolder = fileWorkspaceFolder;
+        }
     }
     if (editor?.selectedText !== undefined) { result.selectedText = editor.selectedText; }
     if (editor?.lineNumber !== undefined) { result.lineNumber = editor.lineNumber; }
