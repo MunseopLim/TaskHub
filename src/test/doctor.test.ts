@@ -519,8 +519,8 @@ suite('Doctor', () => {
 
             assert.deepStrictEqual(enumerated('${which.value}'), ['sh', 'node'], '정상 키를 펼치지 않았다');
             assert.deepStrictEqual(enumerated('${which.typo}'), ['${which.typo}'], '없는 키를 펼쳤다');
-            // bare 는 `output`·`outputDir` 로만 폴백하는데 quickPick 은 둘 다 내지 않는다.
-            assert.deepStrictEqual(enumerated('${which}'), ['${which}'], 'bare 참조를 펼쳤다');
+            // bare quickPick은 대표 `value`의 축약이다.
+            assert.deepStrictEqual(enumerated('${which}'), ['sh', 'node'], 'bare value 참조를 펼치지 않았다');
             // `values` 는 다중 선택일 때만 나온다.
             assert.deepStrictEqual(enumerated('${which.values}'), ['${which.values}'], '단일 선택의 `values` 를 펼쳤다');
             assert.deepStrictEqual(enumerated('${which.values}', { canPickMany: true }), ['sh', 'node']);
@@ -547,6 +547,8 @@ suite('Doctor', () => {
             ]));
             assert.ok(live('${which.value} -c "echo ${ask.value}"').includes('command.nested-interpreter'),
                 '정상 키인데 조용해졌다');
+            assert.ok(live('${which} -c "echo ${ask.value}"').includes('command.nested-interpreter'),
+                'bare value 축약인데 조용해졌다');
             // `??` 체인은 **하나라도** 풀리면 실행된다.
             assert.ok(live('${which.typo ?? which.value} -c "echo ${ask.value}"').includes('command.nested-interpreter'),
                 '체인의 살아 있는 대안을 놓쳤다');
@@ -611,6 +613,30 @@ suite('Doctor', () => {
             ])).includes('command.nested-interpreter'), '살아 있는 뒤 대안을 놓쳤다');
         });
 
+        test('value mapping이 있는데 command가 label을 전달하면 실행값 사용법을 안내한다', () => {
+            const findings = runDoctor([makeInput(withTasks([
+                {
+                    id: 'mode', type: 'quickPick',
+                    items: [
+                        { label: 'With option', value: '--release' },
+                        { label: 'No option', value: [] },
+                    ],
+                },
+                { id: 'run', type: 'command', command: 'tool', args: ['${mode.label}'] },
+            ]))], compileValidator());
+            const hint = findings.find(finding => finding.code === 'quickpick.label-as-argument');
+            assert.ok(hint, `label/value 안내가 없다: ${findings.map(f => f.code).join(', ')}`);
+            assert.strictEqual(hint!.severity, 'info');
+            assert.match(hint!.message, /bare reference.*\.value.*omits the argument/);
+
+            const usingValue = codes(withTasks([
+                { id: 'mode', type: 'quickPick', items: [{ label: 'Release', value: '--release' }] },
+                { id: 'run', type: 'command', command: 'tool', args: ['${mode}'] },
+            ]));
+            assert.ok(!usingValue.includes('quickpick.label-as-argument'));
+            assert.ok(!usingValue.includes('variable.unresolved'));
+        });
+
         test('`??` 체인은 **사라지지 않는 대안**에서만 끊는다', () => {
             // 태스크 결과가 사라지는 길은 여럿이다 — `when` · `continueOnError` 실패나
             // 취소 · 조건으로 꺼진 태스크를 참조한 전이적 skip. 그중 하나라도 빠뜨리고
@@ -651,11 +677,15 @@ suite('Doctor', () => {
                 { id: 'run', type: 'command', command: '${safe.value ?? bad.value} -c "echo ${ask.value}"' },
             ])).includes('command.nested-interpreter'), '전이적으로 skip 될 수 있는 대안에서 체인을 끝냈다');
 
-            // **bare 참조는 결과 객체가 값이 되어 체인을 끝낸다** — 뒤 대안은 시도되지
-            // 않는다(Preview 의 `blocks-chain` 과 같은 규칙). 값은 객체라 인터프리터가 아니다.
-            assert.ok(!chain([{ id: 'pick', type: 'quickPick', items: ['sh'] }, bad],
+            // bare QuickPick은 이제 `.value` 축약이므로 사라질 수 있는 일반 task
+            // 대안과 같다. 뒤의 위험한 대안도 fail-closed로 검사한다.
+            assert.ok(chain([safe, bad], '${safe ?? bad.value} -c "echo ${ask.value}"'),
+                'bare QuickPick value 뒤의 대안을 놓쳤다');
+            // 대표 결과가 없는 bare task는 결과 객체 자체로 체인을 끝낸다. 값은
+            // 문자열 실행 파일이 아니므로 뒤 대안을 펼치면 없는 위험을 만든다.
+            assert.ok(!chain([{ id: 'pick', type: 'fileDialog' }, bad],
                 '${pick ?? bad.value} -c "echo ${ask.value}"'),
-                'bare 참조가 끊은 체인의 뒤 대안을 펼쳤다');
+                '대표값 없는 bare 참조가 끊은 체인의 뒤 대안을 펼쳤다');
 
             // **자기 자신은 예외다.** 태스크가 도는 시점에 그 결과는 아직 문맥에 없어
             // bare 든 키든 풀리지 않고 다음 대안으로 넘어간다 — "존재하는 태스크" 라는

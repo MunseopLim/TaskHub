@@ -1344,7 +1344,7 @@ suite('buildPreviewReport', () => {
             assert.match(report, /unresolved variables:.*\$\{self\.output\}/);
         });
 
-        test('bare 전방 참조도 output / outputDir 이 있을 때만 관용한다', () => {
+        test('bare 전방 참조는 output / outputDir / value가 있을 때만 관용한다', () => {
             // `zip` 은 archivePath 만 낸다 — 런타임의 bare 참조는 결과 객체를
             // 문자열로 바꾸지 못해 리터럴로 남는다.
             const item: ActionItem = {
@@ -1360,6 +1360,22 @@ suite('buildPreviewReport', () => {
             } as ActionItem;
             const report = buildPreviewReport(item, baseOptions());
             assert.match(report, /unresolved variables:.*\$\{z\}/);
+        });
+
+        test('전방 quickPick의 bare 참조는 value 축약으로 해석한다', () => {
+            const item: ActionItem = {
+                id: 'a.barepick',
+                title: 'bare pick',
+                action: {
+                    description: 'x',
+                    tasks: [
+                        { id: 'consumer', type: 'command', parallel: true, command: 'tool', args: ['${mode}'] },
+                        { id: 'mode', type: 'quickPick', parallel: true, items: ['debug', 'release'] },
+                    ],
+                },
+            } as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.doesNotMatch(report, /unresolved variables:.*\$\{mode\}/);
         });
 
         test('캡처 모드 shell 의 stderr 는 정상 참조다', () => {

@@ -1006,8 +1006,8 @@ function unwrapExecWrapper(argv: string[]): { wrapper: boolean; argv?: string[] 
  */
 function referenceKeyIsProducible(source: Task, key: string | undefined): boolean {
     const keys = simulatedResultKeys(source);
-    // 점 없는 참조는 `output` · `outputDir` 로만 폴백한다(`resolvePipelineReference`).
-    if (key === undefined) { return keys.has('output') || keys.has('outputDir'); }
+    // 점 없는 참조는 대표 결과인 `output` · `outputDir` · `value` 로 폴백한다.
+    if (key === undefined) { return keys.has('output') || keys.has('outputDir') || keys.has('value'); }
     // 중첩 키(`a.b`)도 결과 객체의 **최상위** 이름으로 조회된다.
     return keys.has(key);
 }
@@ -1032,7 +1032,7 @@ function quickPickItemCandidates(entry: unknown, key: string | undefined): strin
     // 표시 문구를 그대로 내는 키.
     if (key === 'label' || key === 'labels') { return labelOf(entry); }
     // 매핑 값을 내는 키. 그 밖의 키는 이 함수가 모형을 갖고 있지 않다.
-    if (key !== 'value' && key !== 'values' && key !== 'valueList') { return undefined; }
+    if (key !== undefined && key !== 'value' && key !== 'values' && key !== 'valueList') { return undefined; }
     if (typeof entry === 'string') { return [entry]; }
     if (!entry || typeof entry !== 'object') { return undefined; }
     const item = entry as any;
@@ -1041,6 +1041,50 @@ function quickPickItemCandidates(entry: unknown, key: string | undefined): strin
     // 배열 매핑은 argv 여러 칸이 된다 — 실행 파일 하나로 열거할 수도, 셸에서
     // 공백 없이 이어 붙는다고 장담할 수도 없다.
     return undefined;
+}
+
+/**
+ * command argv에 표시용 label을 넣었지만 source가 실행용 value mapping도 갖는가.
+ * 오류는 아니다 — 실제로 label이 필요한 도구도 있다. 다만 `value: []`처럼
+ * 선택에 따라 인자를 생략하려는 액션이 label을 써 버리면 조용히 반대 동작을
+ * 하므로 Doctor에서 discoverability 안내를 준다.
+ */
+function mappedQuickPickLabelRefsInCommand(
+    task: Task,
+    tasksById: ReadonlyMap<string, Task>
+): string[] {
+    if (task.type !== 'command') { return []; }
+    const templates: string[] = [];
+    if (typeof task.command === 'string') { templates.push(task.command); }
+    else if (task.command && typeof task.command === 'object') {
+        for (const value of Object.values(task.command)) {
+            if (typeof value === 'string') { templates.push(value); }
+        }
+    }
+    if (Array.isArray(task.args)) {
+        for (const value of task.args) {
+            if (typeof value === 'string') { templates.push(value); }
+        }
+    }
+
+    const refs = new Set<string>();
+    for (const template of templates) {
+        for (const match of template.matchAll(/\${([^}]+)}/g)) {
+            for (const alt of parseReferenceAlternatives(match[1] ?? '')) {
+                if (alt.key !== 'label') { continue; }
+                const source = tasksById.get(alt.head);
+                if (source?.type !== 'quickPick' || source.itemsFromCommand || !Array.isArray(source.items)) {
+                    continue;
+                }
+                const hasMapping = source.items.some(entry =>
+                    !!entry
+                    && typeof entry === 'object'
+                    && Object.prototype.hasOwnProperty.call(entry, 'value'));
+                if (hasMapping) { refs.add(`\${${alt.text}}`); }
+            }
+        }
+    }
+    return [...refs];
 }
 
 export function enumerateArgvCandidates(
@@ -1101,12 +1145,10 @@ export function enumerateArgvCandidates(
             }
             continue;
         }
-        // **점 없는 참조는 그 자리에서 체인을 끝낸다.** 태스크가 있으면 결과 **객체**
-        // 자체가 값이 되어(`resolvePipelineReference` 의 `direct` 폴백) undefined 가
-        // 아니므로 뒤 대안은 시도되지 않는다. 그 값은 객체라 인터프리터가 아니고,
-        // 리터럴로 남아도 마찬가지다 — Preview 가 `blocks-chain` 으로 설명하는 자리와
-        // 같은 규칙이다.
-        if (alt.key === undefined) { break; }
+        // 대표 키가 없는 bare 참조만 그 자리에서 체인을 막는다. quickPick/inputBox
+        // 같은 `value` 결과는 이제 bare 축약으로 실제 문자열/배열을 내므로 아래의
+        // 키별 열거·fail-closed 경로를 그대로 타야 한다.
+        if (alt.key === undefined && !referenceKeyIsProducible(source, undefined)) { break; }
         // **이 태스크가 그 키를 낼 수 있는가** — 판정을 `simulatedResultKeys` 한곳에
         // 맡긴다. 키 목록을 여기 따로 적어 두면 `inputBox` 의 `${input.typo}` 나
         // `itemsFromCommand` quickPick 의 오타처럼 절대 풀리지 않는 참조가 "모르는
@@ -2988,6 +3030,18 @@ function analyzeActionTasks(
                 code: 'args.array-joined',
                 message: `Task '${item.id}.${task.id}' mixes an array reference (${refs}) with other text inside an 'args' element. Only an element that is exactly '\${…}' expands into one argument per item; here the array is joined with spaces into a single argument, so the boundaries between the items are lost and the program receives one value.`,
                 messageKo: `Task '${item.id}.${task.id}'의 'args' 원소 안에서 배열 참조(${refs})가 다른 글자와 섞여 있습니다. 원소 전체가 '\${…}' 하나일 때만 항목 수만큼의 인자로 펼쳐집니다. 지금은 공백으로 이어 붙어 **인자 한 칸**이 되어, 항목 사이의 경계가 사라지고 프로그램이 값 하나로 받습니다.`,
+            });
+        }
+        const mappedLabelRefs = mappedQuickPickLabelRefsInCommand(task, tasksById);
+        if (mappedLabelRefs.length > 0) {
+            findings.push({
+                filePath: input.filePath,
+                sourceLabel: input.sourceLabel,
+                range: findIdLine(input.rawText, task.id),
+                severity: 'info',
+                code: 'quickpick.label-as-argument',
+                message: `Task '${item.id}.${task.id}' passes display label ${mappedLabelRefs.join(', ')} to a command even though that QuickPick defines mapped values. Use the bare reference (for example '\${pick}') or '.value' to pass the execution value; an empty value array then omits the argument. Keep '.label' only when the displayed text is intentionally required.`,
+                messageKo: `Task '${item.id}.${task.id}'가 value 매핑이 있는 QuickPick의 표시 label ${mappedLabelRefs.join(', ')}을 command에 전달합니다. 실행값을 넘기려면 bare 참조(예: '\${pick}')나 '.value'를 사용하세요. value가 빈 배열이면 해당 인자가 생략됩니다. 화면 문구 자체가 필요할 때만 '.label'을 유지하세요.`,
             });
         }
         if (uncaptured.size > 0) {

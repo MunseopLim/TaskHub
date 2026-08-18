@@ -450,10 +450,14 @@ export function analyzeCoalesceRefs(
             : simFor(head);
         if (!result) { return 'unknown-head'; }
         if (key === undefined) {
-            // bare 는 대표 결과다 — 런타임은 `output` / `outputDir` 이 있을 때만
+            // bare 는 대표 결과다 — 런타임은 `output` / `outputDir` / `value` 가 있을 때
             // 해석한다. 그 외에는 **결과 객체 자체**가 돌아오는데, 객체는
             // undefined 가 아니라 체인이 여기서 멈춘다 ('blocks-chain').
-            return result.output !== undefined || result.outputDir !== undefined ? undefined : 'blocks-chain';
+            return result.output !== undefined
+                || result.outputDir !== undefined
+                || result.value !== undefined
+                ? undefined
+                : 'blocks-chain';
         }
         if (Object.prototype.hasOwnProperty.call(result, key)) { return undefined; }
         const headTask = tasksById.get(head);
@@ -635,8 +639,8 @@ export function describeDeadAlternative(alt: AnalyzedAlternative & { reason: Dea
     switch (alt.reason) {
         case 'blocks-chain':
             return {
-                en: `${ref} — task '${alt.head}' produces no representative value ('output' / 'outputDir'), and a bare reference to it still ends the chain, so the alternatives after it are never tried`,
-                ko: `${ref} — 태스크 '${alt.head}' 는 대표 결과('output' / 'outputDir')를 내지 않는데, bare 참조는 그래도 체인을 여기서 끝냅니다 — 뒤 대안은 시도되지 않습니다`,
+                en: `${ref} — task '${alt.head}' produces no representative value ('output' / 'outputDir' / 'value'), and a bare reference to it still ends the chain, so the alternatives after it are never tried`,
+                ko: `${ref} — 태스크 '${alt.head}' 는 대표 결과('output' / 'outputDir' / 'value')를 내지 않는데, bare 참조는 그래도 체인을 여기서 끝냅니다 — 뒤 대안은 시도되지 않습니다`,
             };
         case 'self':
             return {
@@ -786,10 +790,10 @@ export function makeForwardRefTolerance(
         const sim = resultFor(head, task);
         if (key === undefined) {
             // bare `${id}` 는 대표 결과를 뜻한다. 런타임은 `output` 또는
-            // `outputDir` 이 있을 때만 해석하고(`resolvePipelineReference`),
+            // `outputDir`, `value` 가 있을 때 해석하고(`resolvePipelineReference`),
             // 그 외에는 결과 객체가 문자열이 아니라 sanitize 에서 걸려 리터럴로
             // 남는다 — `zip` 처럼 `archivePath` 만 내는 태스크가 그렇다.
-            return sim.output !== undefined || sim.outputDir !== undefined;
+            return sim.output !== undefined || sim.outputDir !== undefined || sim.value !== undefined;
         }
         return Object.prototype.hasOwnProperty.call(sim, key);
     };

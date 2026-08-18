@@ -569,6 +569,10 @@ export function resolvePipelineReference(expression: string, context: any): unkn
     if (isBare && step) {
         if (ownValue(step, 'output') !== undefined) { return ownValue(step, 'output'); }
         if (ownValue(step, 'outputDir') !== undefined) { return ownValue(step, 'outputDir'); }
+        // 대화형 입력의 대표 결과. 특히 quickPick은 `${pick}`을
+        // `${pick.value}`의 짧은 형태로 쓸 수 있어, 표시용 `label`과 실행용
+        // `value`의 차이를 알지 못해도 가장 흔한 argv 전달이 자연스럽게 된다.
+        if (ownValue(step, 'value') !== undefined) { return ownValue(step, 'value'); }
     }
     // 같은 이름의 task 결과 객체가 있으면, 대표 키가 없는 경우도 예전처럼 그
     // 객체가 이 참조를 소유한다(문자열 보간에서는 리터럴로 남음). 여기서 내장으로

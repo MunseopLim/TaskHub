@@ -6,6 +6,18 @@
 보안·데이터 손실 수정과 사용자 영향만 남긴다. 테스트를 적는다면 최종 수치만 기록한다.
 -->
 
+## [0.7.35] - 2026-08-19
+
+### 개선 — QuickPick 실행값 참조 단순화
+
+- QuickPick·inputBox·envPick처럼 `value`를 내는 태스크는 `${choice}`를 `${choice.value}`의
+  축약으로 사용할 수 있다. 배열 mapping도 그대로 argv 여러 칸으로 펼쳐지고 `value: []`는 인자를
+  만들지 않으므로, 선택지마다 `when` 태스크를 복제하지 않고 command 하나로 연결할 수 있다.
+- value mapping이 있는 QuickPick의 `${choice.label}`을 command 인자로 쓰면 Doctor가 표시 문구와
+  실행값의 차이를 info로 안내한다. label 자체가 필요한 액션은 기존 참조를 그대로 사용할 수 있다.
+
+**테스트**: bare scalar/배열 argv·Preview 전방 참조·Doctor 보안 열거를 포함해 최종 3041 passing / 3 pending.
+
 ## [0.7.34] - 2026-08-19
 
 ### 추가 — 배열 결과를 태스크 반복 실행으로 바로 연결

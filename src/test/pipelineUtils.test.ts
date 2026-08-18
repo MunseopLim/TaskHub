@@ -7,6 +7,7 @@ import {
     wouldExceedCaptureLimit,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
+    expandArgTemplate,
     parseReferenceAlternatives,
     resolvePipelineReference,
     resolveWithinWorkspace,
@@ -491,6 +492,7 @@ suite('parseReferenceAlternatives', () => {
             b: { y: 'BY' },
             withOut: { output: 'OUT' },
             withDir: { outputDir: 'DIR' },
+            withValue: { value: 'VALUE' },
             neither: { archivePath: 'ZIP' },
         };
         const own = (o: any, k: string): unknown =>
@@ -502,6 +504,7 @@ suite('parseReferenceAlternatives', () => {
             // bare 는 대표 결과 — 런타임과 같은 순서로 폴백한다.
             if (own(step, 'output') !== undefined) { return own(step, 'output'); }
             if (own(step, 'outputDir') !== undefined) { return own(step, 'outputDir'); }
+            if (own(step, 'value') !== undefined) { return own(step, 'value'); }
             // 둘 다 없으면 런타임은 **결과 객체 자체**를 돌려준다. 문자열이
             // 아니라 sanitize 에서 걸려 리터럴로 남는 자리다 (`zip` 처럼
             // `archivePath` 만 내는 태스크).
@@ -509,10 +512,10 @@ suite('parseReferenceAlternatives', () => {
         };
         const cases = [
             'a.x', 'b.y', 'a.nope', 'a.', ' a.x', 'a. x',
-            'withOut', 'withDir', 'neither', 'nosuch',
+            'withOut', 'withDir', 'withValue', 'neither', 'nosuch',
             'constructor.name', 'toString.name',
             'a.x ?? b.y', 'a.nope ?? b.y', 'a.nope ?? b.nope',
-            'withOut ?? b.y', 'neither ?? b.y', 'a.nope ?? withDir',
+            'withOut ?? b.y', 'withValue ?? b.y', 'neither ?? b.y', 'a.nope ?? withDir',
         ];
         for (const expr of cases) {
             const first = parseReferenceAlternatives(expr)
@@ -520,6 +523,17 @@ suite('parseReferenceAlternatives', () => {
                 .find(value => value !== undefined);
             assert.strictEqual(resolvePipelineReference(expr, ctx), first, expr);
         }
+    });
+
+    test('bare input result는 value를 대표값으로 쓰고 배열 argv도 보존한다', () => {
+        const context = {
+            pick: { value: '--release', label: 'Release' },
+            optional: { value: [] as string[], label: 'No option' },
+            many: { value: ['--target', 'board a'] },
+        };
+        assert.strictEqual(interpolatePipelineVariables('${pick}', context), '--release');
+        assert.deepStrictEqual(expandArgTemplate('${optional}', context), []);
+        assert.deepStrictEqual(expandArgTemplate('${many}', context), ['--target', 'board a']);
     });
 });
 

@@ -431,14 +431,14 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
     { "label": "옵션 없이 빌드", "value": [] },
     { "label": "다른 옵션으로 빌드", "value": ["--option", "b"] }
 ] },
-{ "id": "build", "type": "command", "command": "make", "args": ["all", "${mode.value}"] }
+{ "id": "build", "type": "command", "command": "make", "args": ["all", "${mode}"] }
 ```
 
 결과 키:
 
 | 키 | 내용 |
 | --- | --- |
-| `value` | 고른 항목의 `value`(없으면 `label`). 배열이면 인자 여러 개로 펼쳐집니다 |
+| `value` | 고른 항목의 `value`(없으면 `label`). 배열이면 인자 여러 개로 펼쳐집니다. `${taskId}`로 짧게 쓸 수 있습니다 |
 | `label` | 고른 항목의 표시 문구. 매핑과 무관하게 항상 문자열입니다 |
 | `labelList` | 고른 표시 문구의 배열. label 안에 쉼표가 있어도 항목 경계를 보존합니다 |
 | `valueList` | 고른 값 전체를 평평하게 편 배열. 인자 확장용 |
@@ -463,8 +463,12 @@ Command Palette나 직접 지정한 단축키로 모든 액션을 fuzzy 검색�
   "allowCustom": true,
   "rememberLastSelection": true },
 { "id": "checkout", "type": "command",
-  "command": "git", "args": ["checkout", "${branch.value}"] }
+  "command": "git", "args": ["checkout", "${branch}"] }
 ```
+
+QuickPick·inputBox·envPick처럼 `value` 결과가 있는 태스크는 bare `${taskId}`가 `${taskId.value}`와
+같습니다. QuickPick의 배열 mapping도 보존하므로 `value: []`인 선택지는 command/args의 해당 토큰을
+아예 만들지 않습니다. 화면에 보이는 문구가 실제로 필요할 때만 `${taskId.label}`을 사용하세요.
 
 목록 항목의 `label`·`description`·`detail`·`value`와 `default`는 앞 태스크 결과를 변수로 사용할 수
 있습니다. 기억은 label과 정적/직접 입력 구분을 저장하므로 나중에 같은 label의 `value` 매핑을
@@ -587,6 +591,7 @@ python inspect.py "두 번째 경로" --number 2
   `${file}`은 그 태스크의 대표 결과, `${file.path}`는 `path` 결과입니다. 그런 태스크가 없을 때만
   `${file}`이 활성 파일 내장값을 뜻합니다.
 - `${a.value ?? b.value}`는 왼쪽부터 실제로 해석되는 첫 값을 사용합니다.
+- `value` 결과가 있는 입력 태스크는 `${choice}`를 `${choice.value}`의 축약으로 사용할 수 있습니다.
 - 배열 값은 `args` 원소 전체 또는 `command` 토큰 전체가 참조일 때 여러 argv로 펼쳐집니다(`command` 타입 한정 — `shell`은 문자열을 셸에 그대로 넘기는 계약이라 공백으로 이어 붙습니다). 다른 글자가 섞이면(`--file=${pick.paths}`) 공백으로 이어 붙어 인자 한 칸이 되며, `args` 자리에서는 Doctor가 `args.array-joined`로 알립니다.
 - 명령 문자열에서 `"${pick.paths}"`처럼 **따옴표로 감싸도 인자 하나로 묶이지 않습니다** — 인용은 토큰 경계만 정하고, 그 토큰이 배열 참조 하나면 그대로 펼쳐집니다. 배열을 인자 한 칸으로 넘겨야 한다면 앞뒤에 글자를 붙이거나(`--file=${pick.paths}`) `stringManipulation`으로 먼저 문자열을 만드세요.
 - 풀리지 않는 참조는 문자열에서 사라지지 않고 `${…}` 리터럴로 남습니다.
@@ -1500,6 +1505,7 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `variable.unresolved` | warning | 보간 후에도 `${…}`가 남음. `??`는 모든 대안이 실패할 때만 해당하며, OS별 객체는 모든 branch를 검사. 현재 플랫폼만 보려면 [Preview Run](#preview-run-dry-run) 사용. |
 | `variable.dead-alternative` | warning | `??` 체인 안에 없는 태스크·자기 참조·지원하지 않는 키·캡처되지 않은 출력처럼 절대 선택되지 않는 대안이 있음. |
 | `args.array-joined` | warning | 배열 참조가 `args` 원소의 다른 글자와 섞여 한 argv로 합쳐짐. 여러 인자로 펼치려면 원소 전체를 참조 하나로 작성. |
+| `quickpick.label-as-argument` | info | value mapping이 있는 QuickPick의 표시용 `${pick.label}`을 command/args에 전달함. 실행값은 `${pick}` 또는 `${pick.value}`를 쓰고, label 자체가 필요한 경우만 유지하도록 안내. |
 | `output.not-captured` | warning | `passTheResultToNextTask: true`가 없는 shell/command의 output 또는 capture를 참조함. 대체 체인은 대안 단위 진단을 사용. |
 | `tool.platform-missing` | warning | `zip`·`unzip`의 `tool`이 현재 플랫폼에서 비었거나 OS별 값이 없음. 검사하는 OS에 따라 결과가 달라짐. |
 | `output.ignored` | warning | 런타임이 읽지 않는 `output` 필드가 있음. `mode`·`content`·`filePath`·`overwrite`·`language`는 `passTheResultToNextTask: true`가 필요하고, `filePath`·`overwrite`는 `mode: "file"`, `language`는 `mode: "editor"`에서만 사용됩니다. `capture`·`diagnostics`는 이 게이트 밖에서 동작하지만 태스크 결과에 문자열 `output`이 있어야 합니다. |
