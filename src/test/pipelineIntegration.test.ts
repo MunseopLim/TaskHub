@@ -232,8 +232,10 @@ suite('Pipeline integration', function () {
         }
 
         assert.strictEqual(
-            fs.readFileSync(resultPath, 'utf8'),
-            `${activeFile}|${path.join('src', 'active file.txt')}|beta|1|11`
+            normalizeWindowsPathForAssert(fs.readFileSync(resultPath, 'utf8')),
+            normalizeWindowsPathForAssert(
+                `${activeFile}|${path.join('src', 'active file.txt')}|beta|1|11`
+            )
         );
     });
 
@@ -5275,11 +5277,15 @@ try {
                 ]
             );
             assert.strictEqual(
-                fs.readFileSync(summary, 'utf8'),
-                `count=2\n${files[0]}\n${files[1]}`
+                normalizeWindowsPathForAssert(fs.readFileSync(summary, 'utf8')),
+                normalizeWindowsPathForAssert(`count=2\n${files[0]}\n${files[1]}`)
             );
             assert.strictEqual(commands.inspect.split(/\r?\n/).length, 2, '반복 명령이 History에 모두 남지 않았다');
-            assert.ok(commands.inspect.includes(files[0]) && commands.inspect.includes(files[1]));
+            const normalizedCommands = normalizeWindowsPathForAssert(commands.inspect);
+            assert.ok(
+                normalizedCommands.includes(normalizeWindowsPathForAssert(files[0]))
+                && normalizedCommands.includes(normalizeWindowsPathForAssert(files[1]))
+            );
         });
 
         test('IT-174: 반복 실패는 위치를 밝히고 남은 항목을 실행하지 않는다', async () => {

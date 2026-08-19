@@ -76,7 +76,10 @@ suite('buildPreviewReport', () => {
                 environment: { TASKHUB_PREVIEW_ENV: 'preview-value' },
             }),
         });
-        assert.match(report, new RegExp(path.join('src', 'main.c').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        // Preview renders argv as JSON. On Windows a path separator is therefore
+        // displayed as `\\`, so compare against the same JSON representation
+        // instead of treating the raw platform path as a regular expression.
+        assert.ok(report.includes(JSON.stringify(path.join('src', 'main.c'))), report);
         assert.doesNotMatch(report, /preview-value|preview-selection-secret/);
         assert.match(report, /<builtin:sensitive>/);
         assert.doesNotMatch(report, /unresolved variables/);

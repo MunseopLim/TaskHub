@@ -298,7 +298,12 @@ suite('Doctor', () => {
         const withTasks = (tasks: any[]) => [{
             id: 'a', title: 'X', action: { description: 'd', tasks }
         }];
-        const codes = (items: any) => runDoctor([makeInput(items)], compileValidator()).map(f => f.code);
+        // This suite intentionally runs hundreds of command-shape cases. AJV
+        // compilation is independent of the case, so compile once; compiling
+        // for every loop item made the security matrix exceed Mocha's 2s
+        // timeout on CI while the actual Doctor analysis remained fast.
+        const validator = compileValidator();
+        const codes = (items: any) => runDoctor([makeInput(items)], validator).map(f => f.code);
 
         test('제약 없는 입력이 cmd /c 로 흘러가면 경고한다', () => {
             assert.ok(codes(withTasks([
