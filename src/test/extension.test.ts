@@ -4057,19 +4057,28 @@ suite('Extension Test Suite', () => {
 		// auto-refresh, so without this hook a session left open would
 		// keep showing yesterday's "23:30" forever).
 
-		test('fires refresh() on every interval and stops cleanly on dispose', async () => {
+		test('fires refresh() on every interval and stops cleanly on dispose', () => {
 			let count = 0;
+			let tick: (() => void) | undefined;
+			let scheduledDelay: number | undefined;
+			let cleared: unknown;
+			const handle = {} as ReturnType<typeof setInterval>;
 			const fakeProvider = { refresh: () => { count++; } };
-			const disposable = startHistoryAutoRefresh(fakeProvider, 30); // 30ms
-			// Wait long enough for ~3 ticks to fire.
-			await new Promise(r => setTimeout(r, 110));
+			const disposable = startHistoryAutoRefresh(fakeProvider, 30, {
+				setInterval: (callback, delayMs) => {
+					tick = callback;
+					scheduledDelay = delayMs;
+					return handle;
+				},
+				clearInterval: value => { cleared = value; },
+			});
+			assert.strictEqual(scheduledDelay, 30);
+			assert.ok(tick, 'interval callback must be registered');
+			tick!();
+			tick!();
+			assert.strictEqual(count, 2, 'registered interval callback must refresh every time');
 			disposable.dispose();
-			const afterDispose = count;
-			// Anything ≥ 2 proves the timer fires repeatedly.
-			assert.ok(afterDispose >= 2, `expected at least 2 refresh calls, got ${afterDispose}`);
-			// Now wait again — count must NOT keep growing after dispose.
-			await new Promise(r => setTimeout(r, 80));
-			assert.strictEqual(count, afterDispose, 'dispose() must clear the interval');
+			assert.strictEqual(cleared, handle, 'dispose() must clear the registered interval handle');
 		});
 	});
 

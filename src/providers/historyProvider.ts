@@ -509,10 +509,17 @@ export function computeDisambiguatedHistoryLabels(history: HistoryEntry[]): (str
  */
 export function startHistoryAutoRefresh(
     target: { refresh(): void },
-    intervalMs: number
+    intervalMs: number,
+    timers: {
+        setInterval(callback: () => void, delayMs: number): ReturnType<typeof setInterval>;
+        clearInterval(handle: ReturnType<typeof setInterval>): void;
+    } = {
+        setInterval: (callback, delayMs) => setInterval(callback, delayMs),
+        clearInterval: handle => clearInterval(handle),
+    }
 ): vscode.Disposable {
-    const handle = setInterval(() => target.refresh(), intervalMs);
-    return { dispose: () => clearInterval(handle) };
+    const handle = timers.setInterval(() => target.refresh(), intervalMs);
+    return { dispose: () => timers.clearInterval(handle) };
 }
 
 export class HistoryItem extends vscode.TreeItem {
