@@ -172,6 +172,13 @@ suite('inferTaskDependencies — auto-inference from ${taskId.x}', () => {
         );
     });
 
+    test('빈 itemsFromCommand는 정적 items의 의존성을 유지한다', () => {
+        const task = mkTask({
+            id: 'D', type: 'quickPick', itemsFromCommand: '', items: ['${A.output}'],
+        } as any);
+        assert.deepStrictEqual([...inferTaskDependencies(task, validIds)], ['A']);
+    });
+
     test('quickPick drops `items` even when itemsFromCommand lacks a branch for the platform', () => {
         // itemsFromCommand present (object) → static items never executes: on
         // win32 the command runs (items ignored); on linux the dispatcher's

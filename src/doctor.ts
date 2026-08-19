@@ -47,6 +47,7 @@ import {
     RESERVED_HEAD_PREFIXES,
     buildForEachValue,
     walkInterpolatedTaskStrings,
+    quickPickUsesItemsFromCommand,
 } from './pipelineUtils';
 import {
     simulateTaskResult,
@@ -1093,7 +1094,9 @@ function mappedQuickPickLabelRefsInCommand(
             for (const alt of parseReferenceAlternatives(match[1] ?? '')) {
                 if (alt.key !== 'label') { continue; }
                 const source = tasksById.get(alt.head);
-                if (source?.type !== 'quickPick' || source.itemsFromCommand || !Array.isArray(source.items)) {
+                if (source?.type !== 'quickPick'
+                    || quickPickUsesItemsFromCommand(source)
+                    || !Array.isArray(source.items)) {
                     continue;
                 }
                 const hasMapping = source.items.some(entry =>
@@ -1178,7 +1181,7 @@ export function enumerateArgvCandidates(
         // 값은 나지만 열거는 못 한다(`inputBox`·`itemsFromCommand` 등) — fail-closed.
         if (source.type !== 'quickPick'
             || source.allowCustom === true
-            || source.itemsFromCommand
+            || quickPickUsesItemsFromCommand(source)
             || !Array.isArray(source.items)) {
             return { variants: [argv], truncated: false };
         }
@@ -2180,7 +2183,9 @@ function nestedInterpreterRefsAreConstrained(
                 // 항목 자체에 메타문자가 있으면 고정 목록이라도 안전하지 않다.
                 // allowCustom이면 정적 목록 밖의 어떤 값도 올 수 있으므로 열거로
                 // 안전을 증명할 수 없다.
-                if (source.allowCustom === true || !Array.isArray(source.items) || source.itemsFromCommand) {
+                if (source.allowCustom === true
+                    || !Array.isArray(source.items)
+                    || quickPickUsesItemsFromCommand(source)) {
                     return false;
                 }
                 // **label 이 아니라 실제로 치환되는 값**을 본다. `value` 매핑이
@@ -2869,7 +2874,7 @@ function analyzeActionTasks(
         // so scanning the stale `items` here would raise a false
         // variable.unresolved for refs that never execute.
         const ifc = (task as any).itemsFromCommand;
-        const hasItemsFromCommand = typeof ifc === 'string' ? ifc.length > 0 : !!ifc;
+        const hasItemsFromCommand = quickPickUsesItemsFromCommand(task);
         if (!hasItemsFromCommand && task.type === 'quickPick' && Array.isArray(task.items)) {
             const seenItemIds = new Set<string>();
             const duplicateItemIds = new Set<string>();

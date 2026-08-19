@@ -35,6 +35,7 @@ import {
     walkInterpolatedTaskStrings,
     materializeSwitchBranchTask,
     quickPickProducesArgsResult,
+    quickPickUsesItemsFromCommand,
     RESERVED_VARIABLE_HEADS,
 } from './pipelineUtils';
 import {
@@ -1268,8 +1269,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 // 보간하면 이 기계에서 실행되지 않을 branch 의 값 때문에 Preview 가
                 // 실패하거나 없는 문제를 보고한다.
                 let itemsFromCommand: string | undefined;
-                if (typeof task.itemsFromCommand === 'string'
-                    || (task.itemsFromCommand && typeof task.itemsFromCommand === 'object')) {
+                if (quickPickUsesItemsFromCommand(task)) {
                     try {
                         itemsFromCommand = interpolatePipelineVariables(
                             getCommandString(task.itemsFromCommand), interpolationContext

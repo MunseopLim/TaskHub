@@ -3125,6 +3125,14 @@ suite('Doctor', () => {
         assert.strictEqual(unresolvedCount({
             id: 'pick', type: 'quickPick', itemsFromCommand: 'list', itemsFromCommandFormat: 'jsonl',
         }), 0, 'JSONL 동적 목록의 args 결과를 미해결로 판정했다');
+        assert.strictEqual(unresolvedCount({
+            id: 'pick', type: 'quickPick', itemsFromCommand: '',
+            items: [{ label: 'Static', args: ['--static'] }],
+        }), 0, '빈 동적 command가 정적 items의 args를 죽였다');
+        assert.strictEqual(unresolvedCount({
+            id: 'pick', type: 'quickPick', itemsFromCommand: '',
+            itemsFromCommandFormat: 'jsonl', items: ['Static'],
+        }), 1, '실행하지 않는 JSONL command가 args 결과를 만든다고 판정했다');
     });
 
     test('셸 스크립트 안의 quickPick args 배열은 안전을 증명할 수 없어 fail-closed한다', () => {
@@ -4348,6 +4356,8 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
     test('itemsFromCommandFormat은 기존 lines와 구조화 jsonl만 허용한다', () => {
         assert.ok(properties?.itemsFromCommandFormat);
         assert.deepStrictEqual(properties.itemsFromCommandFormat.enum, ['lines', 'jsonl']);
+        assert.match(properties.itemsFromCommandFormat.description, /args \(string array\)/);
+        assert.match(properties.itemsFromCommandFormat.description, /\$\{taskId\.args\}/);
         const v = compileValidator();
         const wrap = (format: string) => [{
             id: 'a.dynamic', title: 'dynamic', action: {

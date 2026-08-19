@@ -16,13 +16,16 @@
 - 정적·JSONL 동적 항목과 단일·다중 선택을 모두 지원한다. 다중 선택의 `args`는 선택 순서대로
   합친다. 매핑 없는 선택과 직접 입력은 빈 배열을 내므로 `${taskId.args}`가 리터럴 인자로 남지 않으며,
   기존 QuickPick 결과와 `value` 기반 액션은 그대로 동작한다.
+- 0.7.42 이전 JSONL 선택을 History에서 재실행해도 누락된 `args`를 빈 배열로 보정해 변수 문구가
+  명령 인자로 전달되지 않는다. 빈 `itemsFromCommand`는 런타임·Preview·Doctor 모두 정적 `items`를
+  활성 목록으로 사용한다.
 - JSON 스키마와 자동완성, Preview, Doctor 및 `actions.json` 작성 문서가 새 결과를 함께 안내하고
   검증한다.
 - 호환성: 새 결과 키와 충돌하지 않도록 `output.capture.name`의 `args`는 이제 예약 이름이다. 기존에
   사용했다면 다른 캡처 이름으로 바꿔야 한다.
 
 **테스트**: 정적·동적 매핑, 다중 선택, 실행 인자 확장, Preview·Doctor·자동완성을 포함해 최종
-3103 passing / 3 pending.
+3106 passing / 3 pending.
 
 ## [0.7.41] - 2026-08-19
 

@@ -306,7 +306,7 @@
           "type": "string",
           "enum": ["lines", "jsonl"],
           "default": "lines",
-          "description": "How to read itemsFromCommand stdout. 'lines' keeps the existing behavior: each non-empty trimmed line is both label and value. 'jsonl' parses each line as an object with label and optional id, description, detail, and value (string or string array)."
+          "description": "How to read itemsFromCommand stdout. 'lines' keeps the existing behavior: each non-empty trimmed line is both label and value. 'jsonl' parses each line as an object with label and optional id, description, detail, value (string or string array), and args (string array). JSONL QuickPick results always expose '${taskId.args}'; an item without args produces an empty array."
         },
         "itemsExclude": {
           "oneOf": [

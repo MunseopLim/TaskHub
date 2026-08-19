@@ -45,6 +45,8 @@ import {
     buildForEachValue,
     inferTaskDependencies,
     materializeSwitchBranchTask,
+    quickPickProducesArgsResult,
+    quickPickUsesItemsFromCommand,
     buildTaskGraph,
     detectGraphCycle,
 } from '../pipelineUtils';
@@ -57,6 +59,24 @@ import { attachPipelineTaskIds, buildBuiltinVariableContext } from '../builtinVa
  * file will fail to load.
  */
 suite('pipelineUtils — direct-import smoke suite', () => {
+    test('QuickPick 동적 목록 활성 판정은 빈 command를 정적 목록으로 되돌린다', () => {
+        const staticArgs = {
+            type: 'quickPick', itemsFromCommand: '',
+            items: [{ label: 'A', args: ['--a'] }],
+        };
+        assert.strictEqual(quickPickUsesItemsFromCommand(staticArgs), false);
+        assert.strictEqual(quickPickProducesArgsResult(staticArgs), true);
+        assert.strictEqual(quickPickUsesItemsFromCommand({
+            type: 'quickPick', itemsFromCommand: 'list',
+        }), true);
+        assert.strictEqual(quickPickUsesItemsFromCommand({
+            type: 'quickPick', itemsFromCommand: { linux: 'list' },
+        }), true);
+        assert.strictEqual(quickPickProducesArgsResult({
+            type: 'quickPick', itemsFromCommand: '', itemsFromCommandFormat: 'jsonl', items: ['A'],
+        }), false, '실행하지 않는 JSONL command가 args 결과를 선언했다');
+    });
+
     test('switch case는 바깥 id와 공통 설정을 유지하고 case가 실행 필드를 덮는다', () => {
         const selected = materializeSwitchBranchTask({
             id: 'optional', type: 'switch', on: '${mode}', cases: {},

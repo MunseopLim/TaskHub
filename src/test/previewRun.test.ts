@@ -366,8 +366,13 @@ suite('buildPreviewReport', () => {
             id: 'pick', type: 'quickPick',
             itemsFromCommand: 'list', itemsFromCommandFormat: 'jsonl',
         } as any);
+        const emptyCommand = simulateTaskResult({
+            id: 'pick', type: 'quickPick', itemsFromCommand: '',
+            items: [{ label: 'Static', args: ['--static'] }],
+        } as any);
         assert.ok(!Object.prototype.hasOwnProperty.call(lines, 'args'));
         assert.ok(Array.isArray(jsonl.args));
+        assert.ok(Array.isArray(emptyCommand.args), '빈 command가 정적 args mapping을 죽였다');
     });
 
     test('quickPick itemsFromCommand surfaces unresolved variables in summary', () => {

@@ -1254,6 +1254,7 @@ import {
     INTERACTIVE_TASK_TYPES,
     materializeSwitchBranchTask,
     quickPickProducesArgsResult,
+    quickPickUsesItemsFromCommand,
     walkInterpolatedTaskStrings,
     TaskScheduler,
 } from './pipelineUtils';
@@ -6545,11 +6546,15 @@ function replayQuickPickEntries(task: any, saved: any, context?: any): QuickPick
 export function backfillQuickPickValue(task: any, saved: any, context?: any): any {
     if (task?.type !== 'quickPick') { return saved; }
     if (!saved || typeof saved !== 'object' || Array.isArray(saved)) { return saved; }
-    if (!Array.isArray(task.items) || task.itemsFromCommand) { return saved; }
+    const producesArgs = quickPickProducesArgsResult(task);
+    const compatibleSaved = producesArgs && !Array.isArray(saved.args)
+        ? { ...saved, args: [] }
+        : saved;
+    if (!Array.isArray(task.items) || quickPickUsesItemsFromCommand(task)) { return compatibleSaved; }
     const entries = replayQuickPickEntries(task, saved, context);
     return entries
-        ? buildQuickPickResult(entries, task.canPickMany === true, quickPickProducesArgsResult(task))
-        : saved;
+        ? buildQuickPickResult(entries, task.canPickMany === true, producesArgs)
+        : compatibleSaved;
 }
 
 export function savedInputStillValid(task: any, saved: any, context?: any): boolean {
@@ -6564,7 +6569,7 @@ export function savedInputStillValid(task: any, saved: any, context?: any): bool
     // 없을 수 있고(`--with-option`), 그것을 목록과 비교하면 매핑을 쓴 액션의
     // 저장된 입력이 **매번** 거부돼 다시 묻게 된다. 0.7.31 이전 기록에는
     // `label` 이 없으므로 그때만 `value` 로 떨어진다.
-    if (task.type === 'quickPick' && Array.isArray(task.items) && !task.itemsFromCommand) {
+    if (task.type === 'quickPick' && Array.isArray(task.items) && !quickPickUsesItemsFromCommand(task)) {
         // 입력 프로필 팔레트는 아직 실행 문맥이 없다. 동적 label을 raw 문자열과
         // 비교해 미리 버리면 런타임의 현재 문맥 재파생 기회가 사라진다. 여기서는
         // 판정을 보류하고, 실행기가 context와 함께 다시 검사하게 둔다.
@@ -6916,9 +6921,7 @@ async function executeSingleTask(
             // NUL·길이 상한에 걸리면 **쓰이지도 않는 필드 때문에** 태스크가 실패한다.
             // (의존성 추론·Preview 는 이미 같은 규칙으로 이 필드를 건너뛴다 —
             // `projectActivePlatformBranches` 참조.)
-            const itemsAreDead = typeof task.itemsFromCommand === 'string'
-                ? task.itemsFromCommand.length > 0
-                : Boolean(task.itemsFromCommand);
+            const itemsAreDead = quickPickUsesItemsFromCommand(task);
             const interpolatedItems = itemsAreDead || !task.items
                 ? task.items
                 : interpolateQuickPickItems(task.items, interpolationContext);
@@ -9484,7 +9487,7 @@ export function describeImportOperation(
         const command = describeImportPlatformValue(task.command) || placeholders.missingCommand;
         return `${command}${args}${cwd}${env}${outputFile}`;
     }
-    if (task?.type === 'quickPick' && task.itemsFromCommand) {
+    if (quickPickUsesItemsFromCommand(task)) {
         return `itemsFromCommand=${describeImportPlatformValue(task.itemsFromCommand) || placeholders.missingCommand}` +
             `${cwd}${outputFile}`;
     }

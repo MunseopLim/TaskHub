@@ -118,6 +118,20 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * `quickPick`이 정적 `items` 대신 `itemsFromCommand`를 실제 목록 소스로 쓰는가.
+ *
+ * 빈 문자열은 런타임의 {@link handleQuickPick}이 실행하지 않고 정적 목록을 쓰므로
+ * 동적 소스로 보지 않는다. OS별 객체는 실행 전에 현재 플랫폼 문자열로 축소되며,
+ * 축소 전 분석 단계에서는 설정된 동적 소스로 취급한다.
+ */
+export function quickPickUsesItemsFromCommand(task: any): boolean {
+    if (task?.type !== 'quickPick') { return false; }
+    const source = task.itemsFromCommand;
+    if (typeof source === 'string') { return source.length > 0; }
+    return !!source && typeof source === 'object' && !Array.isArray(source);
+}
+
+/**
  * quickPick 태스크가 `${taskId.args}` 결과 키를 **항상** 생산하는가.
  *
  * 결과 키의 존재는 선택한 항목이 아니라 활성 목록 소스의 계약이다. 정적 목록은
@@ -127,7 +141,7 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
  */
 export function quickPickProducesArgsResult(task: any): boolean {
     if (task?.type !== 'quickPick') { return false; }
-    if (task.itemsFromCommand !== undefined) {
+    if (quickPickUsesItemsFromCommand(task)) {
         return task.itemsFromCommandFormat === 'jsonl';
     }
     return Array.isArray(task.items) && task.items.some((entry: any) =>
@@ -1100,9 +1114,7 @@ export function projectActivePlatformBranches(task: unknown, platform?: NodeJS.P
     // the inference view so stale `${...}` refs in `items` can't fabricate
     // deps/cycles. Checked against the *original* task, not the projected one,
     // because the object form may have just been projected away above.
-    const ifc = (task as Record<string, unknown>).itemsFromCommand;
-    const hasItemsFromCommand = typeof ifc === 'string' ? ifc.length > 0 : (!!ifc && typeof ifc === 'object');
-    if (hasItemsFromCommand) {
+    if (quickPickUsesItemsFromCommand(task)) {
         delete result.items;
     }
     return result;

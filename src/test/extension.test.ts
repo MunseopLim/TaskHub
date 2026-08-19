@@ -1652,6 +1652,26 @@ suite('Extension Test Suite', () => {
 			});
 		});
 
+		test('구버전 JSONL History에는 빈 args를 보정하고 현재 배열은 보존한다', () => {
+			const task = {
+				type: 'quickPick', itemsFromCommand: 'list --jsonl', itemsFromCommandFormat: 'jsonl',
+			};
+			const legacy = {
+				label: 'Archive', labelList: ['Archive'], value: 'file', custom: false,
+			};
+			const backfilled = backfillQuickPickValue(task, legacy, {});
+			assert.deepStrictEqual(backfilled, { ...legacy, args: [] });
+			assert.deepStrictEqual(expandArgTemplate('${pick.args}', { pick: backfilled }), []);
+
+			const current = { ...legacy, args: ['--input-file'] };
+			assert.deepStrictEqual(backfillQuickPickValue(task, current, {}), current);
+			assert.deepStrictEqual(
+				backfillQuickPickValue({ ...task, itemsFromCommandFormat: 'lines' }, legacy, {}),
+				legacy,
+				'lines 형식은 args 결과 계약이 없다'
+			);
+		});
+
 		test('저장된 item id가 사라지면 같은 label로 후퇴하지 않는다', () => {
 			const task = {
 				type: 'quickPick', items: [{ id: 'other', label: 'Release', value: '--other' }],
