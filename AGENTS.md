@@ -18,7 +18,8 @@ TaskHub는 VS Code 확장 프로그램으로, 반복적인 개발 작업 자동�
 | --- | --- |
 | 프로젝트 구조 / 모듈 역할 / 데이터 구조 / 활성화·보안 / 디버깅 | [docs/architecture.md](docs/architecture.md) |
 | 빌드·테스트·로컬 실행·VSIX·실험적 기능 추가 절차·PR 체크리스트·npm overrides | [CONTRIBUTING.md](CONTRIBUTING.md) |
-| 기능별 상세 레퍼런스 (태스크 타입, 호버, JSON Editor, Hex/Memory Map 등) | [docs/features.md](docs/features.md) |
+| `actions.json` 작성법 / 태스크 타입·필드·결과·조합 예시 | [docs/actions.md](docs/actions.md) |
+| 기능별 상세 레퍼런스 (Actions 패널 동작, 호버, JSON Editor, Hex/Memory Map 등) | [docs/features.md](docs/features.md) |
 | 설정·명령·메뉴 정의 (원본) | [package.json](package.json) `contributes.*` |
 | 릴리스 이력 | [CHANGELOG.md](CHANGELOG.md) |
 | 예제 파일 매핑 | [examples/README.md](examples/README.md) |

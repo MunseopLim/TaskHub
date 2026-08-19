@@ -148,6 +148,9 @@
 2. Actions 패널에서 액션 실행, 링크 패널에서 리소스에 빠르게 접근
 3. `.vscode/actions.json` · `.vscode/links.json` · `.vscode/favorites.json` 파일을 편집하여 사용자 지정
 
+액션 작성법과 태스크별 필드·결과·조합 예시는 [`actions.json` 작성 가이드](docs/actions.md)를
+참고하세요.
+
 ---
 
 ## 보안
