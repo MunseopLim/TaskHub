@@ -356,6 +356,20 @@ suite('buildPreviewReport', () => {
         assert.match(report, /itemsFromCommandFormat: jsonl/);
     });
 
+    test('quickPick args 결과는 활성 목록 소스만 보고 시뮬레이션한다', () => {
+        const lines = simulateTaskResult({
+            id: 'pick', type: 'quickPick',
+            items: [{ label: 'Stale', args: ['--stale'] }],
+            itemsFromCommand: 'list', itemsFromCommandFormat: 'lines',
+        } as any);
+        const jsonl = simulateTaskResult({
+            id: 'pick', type: 'quickPick',
+            itemsFromCommand: 'list', itemsFromCommandFormat: 'jsonl',
+        } as any);
+        assert.ok(!Object.prototype.hasOwnProperty.call(lines, 'args'));
+        assert.ok(Array.isArray(jsonl.args));
+    });
+
     test('quickPick itemsFromCommand surfaces unresolved variables in summary', () => {
         const item: ActionItem = {
             id: 'a.ifc2',
@@ -406,7 +420,7 @@ suite('buildPreviewReport', () => {
         assert.match(report, /rememberLastSelection: true/);
     });
 
-    test('quickPick의 동적 label·detail·value를 표시하고 미해결도 센다', () => {
+    test('quickPick의 동적 label·detail·value·args를 표시하고 미해결도 센다', () => {
         const report = buildPreviewReport({
             id: 'quick-mapping', title: 'Quick mapping',
             action: {
@@ -417,15 +431,35 @@ suite('buildPreviewReport', () => {
                         label: 'Mode ${ghost.label}',
                         detail: 'detail ${ghost.detail}',
                         value: ['--mode', '${ghost.value}'],
+                        args: ['--target', '${ghost.args}'],
                     }],
                 }],
             },
         }, baseOptions());
         assert.match(report, /→ \["--mode","\$\{ghost\.value\}"\]/);
-        for (const ref of ['${ghost.label}', '${ghost.detail}', '${ghost.value}']) {
+        assert.match(report, /args: \["--target","\$\{ghost\.args\}"\]/);
+        for (const ref of ['${ghost.label}', '${ghost.detail}', '${ghost.value}', '${ghost.args}']) {
             assert.ok(report.includes(ref), `${ref}가 Preview에서 사라졌다`);
         }
         assert.match(report, /unresolved/i);
+    });
+
+    test('quickPick의 별도 args 결과가 후속 command에서 argv로 펼쳐진다', () => {
+        const report = buildPreviewReport({
+            id: 'quick-args', title: 'Quick args',
+            action: {
+                description: 'd',
+                tasks: [
+                    {
+                        id: 'kind', type: 'quickPick',
+                        items: [{ label: 'File', value: 'file', args: ['--input-file'] }],
+                    },
+                    { id: 'run', type: 'command', command: 'tool', args: ['${kind.args}', 'target.zip'] },
+                ],
+            },
+        }, baseOptions());
+        assert.match(report, /args:\s+\["<quickPick:kind:args\[0\]>", "target\.zip"\]/);
+        assert.doesNotMatch(report.split('Summary:')[1], /\$\{kind\.args\}/);
     });
 
     test('forEach의 반복 횟수와 each 보간 결과를 보여 준다', () => {

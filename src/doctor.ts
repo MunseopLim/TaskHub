@@ -1047,6 +1047,10 @@ function quickPickItemCandidates(entry: unknown, key: string | undefined): strin
     };
     // 표시 문구를 그대로 내는 키.
     if (key === 'label' || key === 'labels') { return labelOf(entry); }
+    // `args`는 일부·다중 선택에 따라 길이가 달라지는 배열이다. 이 함수의 반환값은
+    // 문자열 **대안**이지 한 선택이 펼치는 argv 묶음이 아니므로 여기서 납작하게
+    // 만들면 실행 파일·셸 스크립트를 실제와 다르게 분석한다. 의도적으로 모형화하지
+    // 않고 fail-closed 경고를 유지한다.
     // 매핑 값을 내는 키. 그 밖의 키는 이 함수가 모형을 갖고 있지 않다.
     if (key !== undefined && key !== 'value' && key !== 'values' && key !== 'valueList') { return undefined; }
     if (typeof entry === 'string') { return [entry]; }
@@ -2912,6 +2916,10 @@ function analyzeActionTasks(
                         for (const entry of mapped) { visitString(entry); }
                     } else {
                         visitString(mapped);
+                    }
+                    const mappedArgs = (it as any).args;
+                    if (Array.isArray(mappedArgs)) {
+                        for (const entry of mappedArgs) { visitString(entry); }
                     }
                 }
             }

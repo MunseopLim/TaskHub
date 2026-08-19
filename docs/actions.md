@@ -81,7 +81,7 @@
 | 폴더 선택 | `folderDialog` | `options` | `path`, `paths`, `name`, `dir` |
 | 파일·폴더 종류를 실행 시 결정 | `pathDialog` | `mode`, `options` | `path`, `paths`, `name`, `dir` |
 | 문자열 입력 | `inputBox` | `prompt`, `value` | `value` |
-| 목록에서 선택 | `quickPick` | `items` 또는 `itemsFromCommand` | `value`, `label`, `valueList` |
+| 목록에서 선택 | `quickPick` | `items` 또는 `itemsFromCommand` | `value`, `args`, `label`, `valueList` |
 | 환경변수 이름 선택 | `envPick` | `placeHolder` | `value` |
 | 계속 진행할지 확인 | `confirm` | `message` | 확인 시 `confirmed` |
 | 문자열·경로 변환 | `stringManipulation` | `function`, `input` | `output` |
@@ -277,7 +277,24 @@ macOS에서는 한 대화상자에서 둘 다 선택할 수 있습니다.
 - `label`: 화면에 보이는 문구
 - `description`, `detail`: 보조 설명
 - `value`: command에 넘길 값. 생략하면 `label`; 배열은 여러 argv; 빈 배열은 인자 없음
+- `args`: `value`와 별도로 command에 넘길 argv 배열
 - `id`: 선택 기억과 History 재실행에 쓰는 선택적 고정 식별자
+
+선택값을 `pathDialog.mode` 같은 흐름 제어에도 쓰고 command 옵션도 만들어야 한다면 `value`와 `args`를
+같이 둡니다. `${kind.args}`는 배열이므로 command의 `args` 원소 전체에 넣어야 argv 여러 칸으로
+펼쳐집니다. 정적 항목 중 하나라도 `args`를 선언하면 이 태스크는 항상 `args` 결과를 만듭니다.
+매핑이 없는 항목이나 `allowCustom` 직접 입력을 고르면 `args: []`가 되어 인자를 추가하지 않습니다.
+JSONL 동적 목록도 같은 계약을 사용합니다.
+
+```jsonc
+{ "id": "kind", "type": "quickPick", "items": [
+  { "label": "ZIP 파일", "value": "file", "args": ["--input-file"] },
+  { "label": "압축 해제 폴더", "value": "folder", "args": ["--input-dir"] }
+] },
+{ "id": "target", "type": "pathDialog", "mode": "${kind}" },
+{ "id": "run", "type": "command", "command": "parser",
+  "args": ["${kind.args}", "${target.path}"] }
+```
 
 | 태스크 필드 | 설명 |
 | --- | --- |
@@ -294,6 +311,7 @@ macOS에서는 한 대화상자에서 둘 다 선택할 수 있습니다.
 | 결과 | 값 |
 | --- | --- |
 | `value` | 첫 선택의 매핑값. `${taskId}`로 줄여 쓸 수 있음 |
+| `args` | 태스크의 별도 command 인자 배열. 정적 항목 중 하나라도 `args`를 선언하거나 동적 형식이 `jsonl`이면 항상 생성 |
 | `label` | 첫 선택의 표시 문구 |
 | `valueList`, `labelList` | 전체 선택의 손실 없는 배열 |
 | `values`, `labels` | 다중 선택 값을 쉼표로 이은 문자열 |
@@ -306,6 +324,9 @@ macOS에서는 한 대화상자에서 둘 다 선택할 수 있습니다.
 {"id":"local","label":"로컬 실행","value":[]}
 {"id":"release","label":"릴리스 배포","value":["--mode","release"]}
 ```
+
+동적 항목도 의미값과 command 인자를 나누려면
+`{"id":"archive","label":"아카이브","value":"file","args":["--input-file"]}`처럼 출력합니다.
 
 ### `envPick`
 
@@ -589,7 +610,8 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
 
 ### 경로 종류와 command 옵션을 각각 선택
 
-첫 QuickPick은 `pathDialog.mode`를 정하고, 두 번째 QuickPick은 command 인자를 만듭니다.
+첫 QuickPick은 `pathDialog.mode`와 입력 종류 옵션을 함께 만들고, 두 번째 QuickPick은 파서 옵션을
+만듭니다. 각 선택의 `value`는 흐름 제어용 의미값, `args`는 command 전용 argv입니다.
 
 ```json
 [
@@ -604,8 +626,8 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
           "type": "quickPick",
           "placeHolder": "입력 종류를 선택하세요",
           "items": [
-            { "label": "ZIP 파일", "value": "file" },
-            { "label": "압축 해제 폴더", "value": "folder" }
+            { "label": "ZIP 파일", "value": "file", "args": ["--input-file"] },
+            { "label": "압축 해제 폴더", "value": "folder", "args": ["--input-dir"] }
           ],
           "rememberLastSelection": true
         },
@@ -620,9 +642,9 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
           "type": "quickPick",
           "placeHolder": "파서 옵션을 선택하세요",
           "items": [
-            { "label": "기본 실행", "value": [] },
-            { "label": "상세 분석", "value": ["--verbose"] },
-            { "label": "강제 재분석", "value": ["--force", "--verbose"] }
+            { "label": "기본 실행", "value": "default", "args": [] },
+            { "label": "상세 분석", "value": "verbose", "args": ["--verbose"] },
+            { "label": "강제 재분석", "value": "force", "args": ["--force", "--verbose"] }
           ],
           "rememberLastSelection": true
         },
@@ -630,7 +652,7 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
           "id": "run",
           "type": "command",
           "command": "python",
-          "args": ["parser.py", "${parserOptions}", "${target.path}"]
+          "args": ["parser.py", "${kind.args}", "${parserOptions.args}", "${target.path}"]
         }
       ]
     }
@@ -652,8 +674,9 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
 
 ### 선택값에 따라 명령 자체 변경
 
-인자만 달라지면 QuickPick의 `value` 배열 하나로 처리하고, 실행할 프로그램이나 태스크 종류까지 달라질 때만
-`switch`를 사용합니다.
+인자만 달라지고 의미값이 필요 없으면 QuickPick의 `value` 배열이 가장 짧습니다. 같은 선택을 흐름
+제어에도 쓰면 `value`와 `args`를 나누고, 실행할 프로그램이나 태스크 종류까지 달라질 때만 `switch`를
+사용합니다.
 
 ## 11. 실행 전 확인
 

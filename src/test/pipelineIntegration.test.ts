@@ -894,6 +894,41 @@ suite('Pipeline integration', function () {
             assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), '--release');
         });
 
+        test('QuickPick 하나가 흐름 value와 command args를 동시에 전달한다', async () => {
+            const script = path.join(tempWorkspace, 'quick-args.js');
+            const resultPath = path.join(tempWorkspace, 'quick-args.json');
+            fs.writeFileSync(script, 'require("fs").writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)))');
+
+            await withCreatedQuickPick((picker, controls) => {
+                const folder = picker.items.find((item: any) => item.label === 'Folder');
+                assert.ok(folder);
+                picker.activeItems = [folder];
+                picker.selectedItems = [folder];
+                controls.accept();
+            }, () => run({
+                description: 'quickPick separate args',
+                tasks: [
+                    {
+                        id: 'kind', type: 'quickPick',
+                        default: 'Folder',
+                        items: [
+                            { label: 'File', value: 'file', args: ['--input-file'] },
+                            { label: 'Folder', value: 'folder', args: ['--input-dir', '--recursive'] },
+                        ],
+                    },
+                    {
+                        id: 'run', type: 'command', command: 'node',
+                        args: [script, resultPath, '${kind.value}', '${kind.args}'],
+                    },
+                ],
+            }, 'quick-args'));
+
+            assert.deepStrictEqual(
+                JSON.parse(fs.readFileSync(resultPath, 'utf8')),
+                ['folder', '--input-dir', '--recursive']
+            );
+        });
+
         test('IT-172: quickPick 직접 입력값이 다음 command의 실제 argv로 전달된다', async () => {
             const script = path.join(tempWorkspace, 'it172-argv.js');
             const resultPath = path.join(tempWorkspace, 'it172.json');
@@ -971,7 +1006,7 @@ suite('Pipeline integration', function () {
             }
         });
 
-        test('IT-179: jsonl itemsFromCommand의 표시 정보와 배열 value가 실제 argv로 전달된다', async () => {
+        test('IT-179: jsonl itemsFromCommand의 표시 정보와 value·args가 실제 argv로 전달된다', async () => {
             const originalShowQuickPick = vscode.window.showQuickPick;
             const choicesPath = path.join(tempWorkspace, 'targets.jsonl');
             const scriptPath = path.join(tempWorkspace, 'it179-argv.js');
@@ -981,6 +1016,7 @@ suite('Pipeline integration', function () {
                 JSON.stringify({
                     id: 'release', label: 'Release build', description: 'optimized',
                     detail: 'deployment target', value: ['--mode', 'release'],
+                    args: ['--target', 'production'],
                 }),
             ].join('\n'));
             fs.writeFileSync(
@@ -1010,13 +1046,13 @@ suite('Pipeline integration', function () {
                         },
                         {
                             id: 'run', type: 'command', command: 'node',
-                            args: [scriptPath, resultPath, '${target}'],
+                            args: [scriptPath, resultPath, '${target}', '${target.args}'],
                         },
                     ],
                 }, 'it179');
                 assert.deepStrictEqual(
                     JSON.parse(fs.readFileSync(resultPath, 'utf8')),
-                    ['--mode', 'release']
+                    ['--mode', 'release', '--target', 'production']
                 );
             } finally {
                 (vscode.window as any).showQuickPick = originalShowQuickPick;

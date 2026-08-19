@@ -381,10 +381,11 @@ export function collectVariableCompletions(
             passTheResultToNextTask: captured,
             options: many ? { canSelectMany: true } : undefined,
         };
-        // switch의 결과 키는 각 case의 합집합이다. 생산자 객체가 완성된 JSON이면
-        // 실제 branch 정의를 시뮬레이션에 넘기고, 편집 중이라 아직 파싱할 수
-        // 없으면 matched/selected 메타데이터만 제안하는 안전한 폴백을 쓴다.
-        if (type === 'switch') {
+        // switch의 결과 키는 각 case의 합집합이고, quickPick의 별도 `.args` 결과는
+        // 활성 목록 소스가 args 계약을 선언할 때만 생긴다. 생산자 객체가 완성된 JSON이면
+        // 실제 정의를 시뮬레이션에 넘기고, 편집 중이면 공통 키만 제안하는 안전한
+        // 폴백을 쓴다.
+        if (type === 'switch' || type === 'quickPick') {
             try {
                 const parsed = JSON.parse(target.text);
                 if (parsed && typeof parsed === 'object') { simulatedTask = parsed; }

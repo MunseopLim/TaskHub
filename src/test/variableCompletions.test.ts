@@ -458,6 +458,43 @@ suite('variableCompletions', () => {
             ]);
         });
 
+        test('항목이 command args를 따로 매핑하면 args 결과를 제안한다', () => {
+            const fixture = `[
+  { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
+    { "id": "pick", "type": "quickPick", "items": [
+      { "label": "File", "value": "file", "args": ["--input-file"] }
+    ] },
+    { "id": "run", "type": "command", "command": "tool", "args": ["\${pick.|" ] }
+  ] } }
+]`;
+            const got = names(fixture);
+            assert.ok(got.includes('pick.args'), got.join(','));
+        });
+
+        test('args 매핑이 없거나 동적 목록이 덮은 정적 매핑이면 args를 제안하지 않는다', () => {
+            assert.ok(!names(quickPickDoc('')).includes('pick.args'));
+            const deadStatic = `[
+  { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
+    { "id": "pick", "type": "quickPick", "items": [
+      { "label": "Stale", "args": ["--stale"] }
+    ], "itemsFromCommand": "list", "itemsFromCommandFormat": "lines" },
+    { "id": "run", "type": "command", "command": "tool", "args": ["\${pick.|" ] }
+  ] } }
+]`;
+            assert.ok(!names(deadStatic).includes('pick.args'));
+        });
+
+        test('JSONL 동적 quickPick은 args 결과를 제안한다', () => {
+            const fixture = `[
+  { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
+    { "id": "pick", "type": "quickPick",
+      "itemsFromCommand": "list", "itemsFromCommandFormat": "jsonl" },
+    { "id": "run", "type": "command", "command": "tool", "args": ["\${pick.|" ] }
+  ] } }
+]`;
+            assert.ok(names(fixture).includes('pick.args'));
+        });
+
         test('output.capture 이름도 함께 낸다', () => {
             const fixture = `[
   { "id": "a", "title": "t", "action": { "description": "d", "tasks": [

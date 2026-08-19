@@ -3050,7 +3050,7 @@ suite('Doctor', () => {
 
     test('새 QuickPick·forEach 결과 키도 capture로 덮을 수 없다', () => {
         const v = compileValidator();
-        for (const name of ['labelList', 'custom', 'outputs', 'stderrs']) {
+        for (const name of ['labelList', 'args', 'custom', 'outputs', 'stderrs']) {
             const findings = runDoctor([makeInput([{
                 id: `a.reserved.${name}`, title: 'reserved', action: {
                     description: 'd',
@@ -3081,20 +3081,63 @@ suite('Doctor', () => {
             `expected variable.unresolved from itemsFromCommand, got ${codes(findings).join(',')}`);
     });
 
-    test('quickPick default와 detail 안의 미해결 참조도 잡는다', () => {
+    test('quickPick default·detail·args 안의 미해결 참조도 잡는다', () => {
         const findings = runDoctor([makeInput([{
             id: 'a.quick-dynamic', title: 'quick',
             action: {
                 description: 'd',
                 tasks: [{
                     id: 'pick', type: 'quickPick', default: '${ghost.default}',
-                    items: [{ label: 'A', detail: '${ghost.detail}', value: 'a' }],
+                    items: [{
+                        label: 'A', detail: '${ghost.detail}', value: 'a',
+                        args: ['--mode', '${ghost.args}'],
+                    }],
                 }],
             },
         }])], compileValidator());
         const unresolved = findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ');
         assert.ok(unresolved.includes('${ghost.default}'), unresolved);
         assert.ok(unresolved.includes('${ghost.detail}'), unresolved);
+        assert.ok(unresolved.includes('${ghost.args}'), unresolved);
+    });
+
+    test('quickPick args 결과는 태스크 단위로 판정하고 죽은 정적 items는 제외한다', () => {
+        const unresolvedCount = (pick: any) => {
+            const findings = runDoctor([makeInput([{
+                id: 'a.quick-args-contract', title: 'quick', action: {
+                    description: 'd',
+                    tasks: [
+                        pick,
+                        { id: 'run', type: 'command', command: 'node', args: ['${pick.args}'] },
+                    ],
+                },
+            }])], compileValidator());
+            return findings.filter(f => f.code === 'variable.unresolved').length;
+        };
+
+        assert.strictEqual(unresolvedCount({
+            id: 'pick', type: 'quickPick', items: ['Plain'],
+        }), 1, 'args 매핑이 전혀 없는데 결과 키가 있다고 판정했다');
+        assert.strictEqual(unresolvedCount({
+            id: 'pick', type: 'quickPick', items: [{ label: 'Stale', args: ['--stale'] }],
+            itemsFromCommand: 'list', itemsFromCommandFormat: 'lines',
+        }), 1, '동적 lines가 덮어쓰는 정적 items의 args를 살아 있다고 판정했다');
+        assert.strictEqual(unresolvedCount({
+            id: 'pick', type: 'quickPick', itemsFromCommand: 'list', itemsFromCommandFormat: 'jsonl',
+        }), 0, 'JSONL 동적 목록의 args 결과를 미해결로 판정했다');
+    });
+
+    test('셸 스크립트 안의 quickPick args 배열은 안전을 증명할 수 없어 fail-closed한다', () => {
+        const findings = runDoctor([makeInput([{
+            id: 'a.quick-args-shell', title: 'quick', action: {
+                description: 'd',
+                tasks: [
+                    { id: 'pick', type: 'quickPick', items: [{ label: 'A', args: ['safe'] }] },
+                    { id: 'run', type: 'command', command: 'sh', args: ['-c', 'echo ${pick.args}'] },
+                ],
+            },
+        }])], compileValidator());
+        assert.ok(findings.some(f => f.code === 'command.nested-interpreter'), codes(findings).join(','));
     });
 
     test('does not flag stale ${...} in quickPick `items` when itemsFromCommand is set', () => {
@@ -4334,6 +4377,24 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
         assert.strictEqual(v(wrap('release')), true, JSON.stringify(v.errors));
         assert.strictEqual(v(wrap('')), false, '빈 item id가 통과했다');
         assert.strictEqual(v(wrap('x'.repeat(129))), false, '지나치게 긴 item id가 통과했다');
+    });
+
+    test('QuickPick object item은 의미 value와 문자열 args 배열을 함께 허용한다', () => {
+        const itemSchema: any = properties?.items?.oneOf?.[1]?.items;
+        assert.ok(itemSchema?.properties?.args, 'QuickPick item args가 스키마 제안에 없다');
+        assert.match(itemSchema.properties.args.description, /command arguments/i);
+
+        const v = compileValidator();
+        const wrap = (args: unknown) => [{
+            id: 'a.quick-args', title: 'quick', action: {
+                description: 'd', tasks: [{
+                    id: 'kind', type: 'quickPick',
+                    items: [{ label: 'File', value: 'file', args }],
+                }],
+            },
+        }];
+        assert.strictEqual(v(wrap(['--input-file'])), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap(['--ok', 1])), false, '문자열이 아닌 QuickPick item args가 통과했다');
     });
 
     test('Doctor는 같은 QuickPick 안의 중복 item id를 오류로 알린다', () => {

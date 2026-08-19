@@ -34,6 +34,7 @@ import {
     isInsideWorkspaceRoots,
     walkInterpolatedTaskStrings,
     materializeSwitchBranchTask,
+    quickPickProducesArgsResult,
     RESERVED_VARIABLE_HEADS,
 } from './pipelineUtils';
 import {
@@ -162,6 +163,7 @@ export function simulateTaskResult(task: Task): SimulatedResult {
             const mapsArray = Array.isArray((task as any).items)
                 && (task as any).items.some((entry: any) =>
                     entry && typeof entry === 'object' && Array.isArray(entry.value));
+            const mapsArgs = quickPickProducesArgsResult(task);
             const base: SimulatedResult = {
                 value: mapsArray
                     ? [placeholder('quickPick', task.id, 'value[0]')]
@@ -173,6 +175,9 @@ export function simulateTaskResult(task: Task): SimulatedResult {
                 valueList: [placeholder('quickPick', task.id, 'valueList[0]')],
                 custom: false,
             };
+            if (mapsArgs) {
+                base.args = [placeholder('quickPick', task.id, 'args[0]')];
+            }
             if ((task as any).canPickMany) {
                 base.values = placeholder('quickPick', task.id, 'values');
                 base.labels = placeholder('quickPick', task.id, 'labels');
@@ -1299,15 +1304,21 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                                 : (typeof rawValue === 'string'
                                     ? interpolatePipelineVariables(rawValue, interpolationContext)
                                     : undefined);
+                            const mappedArgs = Array.isArray((it as any).args)
+                                ? (it as any).args.filter((value: unknown): value is string => typeof value === 'string')
+                                    .map((value: string) => interpolatePipelineVariables(value, interpolationContext))
+                                : undefined;
                             const mappedDisplay = Array.isArray(mapped) ? JSON.stringify(mapped) : mapped;
                             lines.push(
                                 `    - ${label}${desc ? `  (${desc})` : ''}`
                                 + `${detail ? ` — ${detail}` : ''}`
                                 + `${mappedDisplay !== undefined ? `  → ${mappedDisplay}` : ''}`
+                                + `${mappedArgs !== undefined ? `  args: ${JSON.stringify(mappedArgs)}` : ''}`
                             );
                             interpolated.push(label, desc, detail);
                             if (Array.isArray(mapped)) { interpolated.push(...mapped); }
                             else { interpolated.push(mapped); }
+                            if (mappedArgs) { interpolated.push(...mappedArgs); }
                         }
                     }
                 }

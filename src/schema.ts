@@ -336,6 +336,14 @@ export interface QuickPickItem {
      * 않는다("이 선택지에서는 옵션을 붙이지 않는다").
      */
     value?: string | string[];
+    /**
+     * 이 항목을 고른 뒤 `${taskId.args}` 로 꺼낼 command 인자 배열.
+     * `value`와 별개이므로 `value: "file"`을 `pathDialog.mode`에 쓰면서
+     * `args: ["--input-file"]`을 후속 command에 동시에 전달할 수 있다.
+     * 정적 항목 중 하나라도 이 필드를 선언하면 태스크는 항상 `args` 결과를
+     * 만들며, 이 필드가 없는 항목이나 직접 입력을 고르면 빈 배열을 낸다.
+     */
+    args?: string[];
 }
 
 /**

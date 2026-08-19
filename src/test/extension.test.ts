@@ -1622,18 +1622,33 @@ suite('Extension Test Suite', () => {
 				type: 'quickPick',
 				items: [
 					{ id: 'debug', label: '빌드', value: '--debug' },
-					{ id: 'release', label: '빌드', value: '--release-new' },
+					{ id: 'release', label: '빌드', value: '--release-new', args: ['--current-arg'] },
 				],
 			};
 			const saved = {
 				label: 'Old release', labelList: ['Old release'], value: '--release-old',
-				custom: false, _itemId: 'release',
+				args: ['--stale-arg'], custom: false, _itemId: 'release',
 			};
 			assert.strictEqual(savedInputStillValid(task, saved, {}), true);
 			assert.deepStrictEqual(backfillQuickPickValue(task, saved, {}), {
 				label: '빌드', labelList: ['빌드'], value: '--release-new',
-				valueList: ['--release-new'], custom: false,
+				valueList: ['--release-new'], args: ['--current-arg'], custom: false,
 				_itemId: 'release', _itemIds: ['release'],
+			});
+		});
+
+		test('History의 custom 입력도 현재 args 계약에 따라 빈 배열을 다시 만든다', () => {
+			const task = {
+				type: 'quickPick', allowCustom: true,
+				items: [{ label: 'main', args: ['--main'] }],
+			};
+			const saved = {
+				label: 'feature/new-flow', labelList: ['feature/new-flow'],
+				value: 'feature/new-flow', args: ['--stale'], custom: true,
+			};
+			assert.deepStrictEqual(backfillQuickPickValue(task, saved, {}), {
+				label: 'feature/new-flow', labelList: ['feature/new-flow'],
+				value: 'feature/new-flow', valueList: ['feature/new-flow'], args: [], custom: true,
 			});
 		});
 
@@ -6674,18 +6689,18 @@ suite('Extension Test Suite', () => {
 			);
 		});
 
-		test('jsonl은 표시 정보·배열 value·안정 id를 구조화 항목으로 만든다', () => {
+		test('jsonl은 표시 정보·의미 value·별도 args·안정 id를 구조화 항목으로 만든다', () => {
 			const items = parseQuickPickCommandItems([
 				JSON.stringify({
 					id: 'release', label: 'Release build', description: 'optimized',
-					detail: 'for deployment', value: ['--mode', 'release'],
+					detail: 'for deployment', value: 'release', args: ['--mode', 'release'],
 					taskHubValue: 'must-not-pass', extra: 'ignored',
 				}),
 				JSON.stringify({ id: 'debug', label: 'Debug build', value: '--debug' }),
 			], 'jsonl', ['debug']);
 			assert.deepStrictEqual(items, [{
 				id: 'release', label: 'Release build', description: 'optimized',
-				detail: 'for deployment', value: ['--mode', 'release'],
+				detail: 'for deployment', value: 'release', args: ['--mode', 'release'],
 			}]);
 		});
 
@@ -6709,6 +6724,12 @@ suite('Extension Test Suite', () => {
 				], 'jsonl'),
 				/value/
 			);
+			assert.throws(
+				() => parseQuickPickCommandItems([
+					JSON.stringify({ label: 'bad', args: ['--ok', 1] }),
+				], 'jsonl'),
+				/args/
+			);
 		});
 	});
 
@@ -6721,7 +6742,10 @@ suite('Extension Test Suite', () => {
 			(vscode.window as any).showQuickPick = async (items: any[]) => {
 				const wanted: string[] = (Array.isArray(picked) ? picked : [picked])
 					.map((entry: any) => entry?.label);
-				const matched = items.filter(item => wanted.includes(item.label));
+				const matched = wanted.flatMap(label => {
+					const item = items.find(candidate => candidate.label === label);
+					return item ? [item] : [];
+				});
 				return Array.isArray(picked) ? matched : matched[0];
 			};
 			try {
@@ -6794,6 +6818,40 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(plain.value, 'Plain', 'value 가 없으면 label 이 그대로 값이다');
 		});
 
+		test('value는 흐름 제어값, args는 command argv로 따로 매핑한다', async () => {
+			const task = {
+				id: 'kind', type: 'quickPick',
+				items: [
+					{ label: 'ZIP file', value: 'file', args: ['--input-file'] },
+					{ label: 'Folder', value: 'folder', args: ['--input-dir', '--recursive'] },
+				],
+			};
+			const picked = await runtimeQuickPick(task, { label: 'Folder' });
+			assert.strictEqual(picked.value, 'folder');
+			assert.deepStrictEqual(picked.args, ['--input-dir', '--recursive']);
+			assert.deepStrictEqual(
+				expandArgTemplate('${kind.args}', { kind: picked }),
+				['--input-dir', '--recursive']
+			);
+		});
+
+		test('일부 항목만 args를 매핑해도 매핑 없는 선택은 빈 배열을 낸다', async () => {
+			const task = {
+				id: 'kind', type: 'quickPick',
+				items: [
+					{ label: 'With option', value: 'mapped', args: ['--mapped'] },
+					{ label: 'Plain', value: 'plain' },
+				],
+			};
+			const picked = await runtimeQuickPick(task, { label: 'Plain' });
+			assert.deepStrictEqual(picked.args, []);
+			assert.deepStrictEqual(expandArgTemplate('${kind.args}', { kind: picked }), []);
+			assert.deepStrictEqual(
+				Object.keys(picked).sort(), Object.keys(simulateTaskResult(task as any)).sort(),
+				'선택에 따라 런타임과 시뮬레이션의 결과 키가 갈렸다'
+			);
+		});
+
 		test('default label을 처음 활성화하고 매핑된 value를 낸다', async () => {
 			const result = await advancedQuickPick({
 				id: 'pick', type: 'quickPick', default: 'Release',
@@ -6832,6 +6890,20 @@ suite('Extension Test Suite', () => {
 				label: 'feature/new-flow', labelList: ['feature/new-flow'],
 				value: 'feature/new-flow', valueList: ['feature/new-flow'], custom: true,
 			});
+		});
+
+		test('args 매핑이 있는 allowCustom 직접 입력은 빈 args를 낸다', async () => {
+			const result = await advancedQuickPick({
+				id: 'branch', type: 'quickPick', allowCustom: true,
+				items: [{ label: 'main', args: ['--main'] }],
+			}, (picker, controls) => {
+				controls.type('feature/new-flow');
+				picker.selectedItems = [...picker.activeItems];
+				controls.accept();
+			});
+			assert.strictEqual(result.value, 'feature/new-flow');
+			assert.deepStrictEqual(result.args, []);
+			assert.deepStrictEqual(expandArgTemplate('${branch.args}', { branch: result }), []);
 		});
 
 		test('rememberLastSelection은 action/task별 마지막 label을 다음 실행에 복원한다', async () => {
@@ -7129,6 +7201,21 @@ suite('Extension Test Suite', () => {
 			assert.deepStrictEqual(runtime.valueList, ['-a', '-b', '1']);
 			assert.strictEqual(runtime.values, '-a,-b,1');
 			assert.strictEqual(runtime.labels, 'A,B', 'labels 는 표시 문구를 그대로 남긴다');
+		});
+
+		test('다중 선택은 명시한 args만 선택 순서대로 잇는다', async () => {
+			const runtime = await runtimeQuickPick(
+				{
+					id: 'pick', type: 'quickPick', canPickMany: true,
+					items: [
+						{ label: 'A', value: 'a', args: ['--a'] },
+						{ label: 'Plain', value: 'plain' },
+						{ label: 'B', value: 'b', args: ['--b', '2'] },
+					],
+				},
+				[{ label: 'B' }, { label: 'Plain' }, { label: 'A' }]
+			);
+			assert.deepStrictEqual(runtime.args, ['--b', '2', '--a']);
 		});
 
 		test('다중 선택의 안정 id는 id 없는 자리까지 배열 경계를 보존한다', async () => {

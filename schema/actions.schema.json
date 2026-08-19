@@ -252,6 +252,11 @@
                       { "type": "array", "items": { "type": "string" } }
                     ],
                     "description": "Value substituted for '${taskId.value}' when this item is picked. Defaults to the label. An array expands into several arguments in 'args' elements and 'command' tokens (e.g. ['--option','b']); an empty array adds no argument at all."
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Command arguments exposed as '${taskId.args}'. This is independent of 'value', so one selection can provide a semantic value such as 'file' for pathDialog.mode and a separate argv mapping such as ['--input-file']. If any static item declares 'args', the result key always exists: selections without a mapping and custom input produce an empty array. Multiple selections concatenate their mapped arguments in selection order."
                   }
                 },
                 "required": ["label"]
@@ -263,7 +268,7 @@
         },
         "canPickMany": {
           "type": "boolean",
-          "description": "If true, allows multiple selection (for 'quickPick' type). Results include 'value' (first selection), 'label' / 'labels', lossless 'labelList', 'values' (comma-separated), 'valueList' (array), and 'custom' (false for multi-select).",
+          "description": "If true, allows multiple selection (for 'quickPick' type). Results include 'value' (first selection), 'label' / 'labels', lossless 'labelList', 'values' (comma-separated), 'valueList' (array), task-level mapped 'args' (flattened array when enabled), and 'custom' (false for multi-select).",
           "default": false
         },
         "default": {

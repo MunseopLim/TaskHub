@@ -98,10 +98,11 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
     // stderr 는 Problems 패널로 가는 진단의 입력이기도 하다.
     'output', 'stderr', 'outputDir', 'path', 'dir', 'name', 'fileNameOnly', 'fileExt',
     'value', 'values', 'archivePath', 'confirmed',
-    // 다중 선택 다이얼로그(0.6.51·0.6.57)와 quickPick `value` 매핑(0.7.31)이
+    // 다중 선택 다이얼로그(0.6.51·0.6.57), quickPick `value` 매핑(0.7.31)과
+    // `args` 매핑(0.7.42)이
     // 더한 결과 키들. 이 목록은 "내장 결과 키를 가리는 이름" 이 기준이므로,
     // 키가 늘 때마다 함께 늘어야 한다.
-    'paths', 'names', 'count', 'label', 'labels', 'labelList', 'valueList', 'custom',
+    'paths', 'names', 'count', 'label', 'labels', 'labelList', 'valueList', 'args', 'custom',
     // switch가 선택 결과와 함께 항상 내놓는 메타데이터.
     'matched', 'selected',
     // QuickPick의 안정 id는 History/선택 기억용 내부 메타데이터다. capture가
@@ -115,6 +116,23 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
     // 이 이름을 계속 특수 취급하므로, 이름 자체를 막는 편이 예측 가능하다.
     '__proto__', 'constructor', 'prototype'
 ]);
+
+/**
+ * quickPick 태스크가 `${taskId.args}` 결과 키를 **항상** 생산하는가.
+ *
+ * 결과 키의 존재는 선택한 항목이 아니라 활성 목록 소스의 계약이다. 정적 목록은
+ * 항목 하나라도 `args`를 선언하면 키를 생산하고, 매핑 없는 항목·직접 입력은 빈
+ * 배열을 낸다. JSONL 동적 목록은 실행 전 항목을 알 수 없으므로 형식 자체가 같은
+ * 계약을 선언한다. `itemsFromCommand`가 있으면 정적 `items`는 죽은 필드다.
+ */
+export function quickPickProducesArgsResult(task: any): boolean {
+    if (task?.type !== 'quickPick') { return false; }
+    if (task.itemsFromCommand !== undefined) {
+        return task.itemsFromCommandFormat === 'jsonl';
+    }
+    return Array.isArray(task.items) && task.items.some((entry: any) =>
+        entry && typeof entry === 'object' && Array.isArray(entry.args));
+}
 
 /**
  * Task types whose execution shows VS Code modal / quick-pick UI

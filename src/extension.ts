@@ -1253,6 +1253,7 @@ import {
     withInteractivePromptLock,
     INTERACTIVE_TASK_TYPES,
     materializeSwitchBranchTask,
+    quickPickProducesArgsResult,
     walkInterpolatedTaskStrings,
     TaskScheduler,
 } from './pipelineUtils';
@@ -6546,7 +6547,9 @@ export function backfillQuickPickValue(task: any, saved: any, context?: any): an
     if (!saved || typeof saved !== 'object' || Array.isArray(saved)) { return saved; }
     if (!Array.isArray(task.items) || task.itemsFromCommand) { return saved; }
     const entries = replayQuickPickEntries(task, saved, context);
-    return entries ? buildQuickPickResult(entries, task.canPickMany === true) : saved;
+    return entries
+        ? buildQuickPickResult(entries, task.canPickMany === true, quickPickProducesArgsResult(task))
+        : saved;
 }
 
 export function savedInputStillValid(task: any, saved: any, context?: any): boolean {
@@ -8308,6 +8311,14 @@ export function parseQuickPickCommandItems(
                 `itemsFromCommand JSONL line ${index + 1} value must be a string or an array of strings.`
             ));
         }
+        if (candidate.args !== undefined
+            && (!Array.isArray(candidate.args)
+                || !candidate.args.every(value => typeof value === 'string'))) {
+            throw new Error(t(
+                `itemsFromCommand JSONL ${index + 1}번째 줄의 args는 문자열 배열이어야 합니다.`,
+                `itemsFromCommand JSONL line ${index + 1} args must be an array of strings.`
+            ));
+        }
         if (exclude.has(candidate.label)
             || (typeof candidate.id === 'string' && exclude.has(candidate.id))) {
             continue;
@@ -8318,6 +8329,9 @@ export function parseQuickPickCommandItems(
         if (typeof candidate.detail === 'string') { item.detail = candidate.detail; }
         if (typeof candidate.value === 'string' || Array.isArray(candidate.value)) {
             item.value = candidate.value as string | string[];
+        }
+        if (Array.isArray(candidate.args)) {
+            item.args = candidate.args as string[];
         }
         items.push(item);
     }
@@ -8343,6 +8357,13 @@ export interface QuickPickResult {
     labelList: string[];
     /** 고른 값 전체를 평평하게 편 배열. 인자 확장용. */
     valueList: string[];
+    /**
+     * 태스크가 별도로 매핑한 command 인자. 정적 목록 중 하나라도 `args`를
+     * 선언하거나 동적 목록 형식이 JSONL이면 항상 생긴다. 선택 항목에 매핑이
+     * 없거나 직접 입력이면 빈 배열이다. `${taskId.args}`를 `command.args` 원소
+     * 하나로 두면 배열의 각 값이 argv 한 칸씩 된다.
+     */
+    args?: string[];
     /** 단일 선택이 목록 밖 직접 입력이었는지. History 재실행 식별에도 쓴다. */
     custom: boolean;
     /** `canPickMany` 일 때만: 고른 값 전체를 쉼표로 이은 문자열. */
@@ -8358,6 +8379,8 @@ export interface QuickPickResult {
 /** `showQuickPick` 이 돌려주는 항목 객체에 매핑된 값을 얹어 둔다. */
 interface QuickPickEntry extends vscode.QuickPickItem {
     taskHubValue: string | string[];
+    /** actions.json 항목의 별도 command 인자 매핑. */
+    taskHubArgs?: string[];
     /** `allowCustom`가 입력 중에 만든 임시 항목. */
     taskHubCustom?: boolean;
     /** 기억 복원에서 같은 label 항목을 구분하는 원래 목록 위치. */
@@ -8404,6 +8427,11 @@ function interpolateQuickPickItems(items: readonly any[], context: any): any[] {
                 : item.description,
             detail: item.detail ? interpolatePipelineVariables(item.detail, context) : item.detail,
             value: interpolateQuickPickItemValue(item.value, context),
+            args: Array.isArray(item.args)
+                ? item.args.map((entry: unknown) => typeof entry === 'string'
+                    ? interpolatePipelineVariables(entry, context)
+                    : entry)
+                : item.args,
         };
     });
 }
@@ -8431,13 +8459,20 @@ function quickPickEntries(items: readonly any[]): QuickPickEntry[] {
             description: item.description,
             detail: item.detail,
             taskHubValue: quickPickItemValue(item, item.label),
+            taskHubArgs: Array.isArray(item.args)
+                ? item.args.filter((entry: unknown): entry is string => typeof entry === 'string')
+                : undefined,
             taskHubSourceIndex: index,
             taskHubItemId: item.id,
         };
     });
 }
 
-function buildQuickPickResult(selected: readonly QuickPickEntry[], canPickMany: boolean): QuickPickResult {
+function buildQuickPickResult(
+    selected: readonly QuickPickEntry[],
+    canPickMany: boolean,
+    producesArgs: boolean
+): QuickPickResult {
     // VS Code 는 넘긴 항목 객체를 그대로 돌려주므로 실행 경로에서는 `taskHubValue`
     // 가 늘 붙어 있다. 그래도 label 로 떨어지는 길을 남기는 것은, 이 값이 없을 때
     // `${pick.value}` 가 `undefined` 가 되어 **`when` 분기가 조용히 어긋나기**
@@ -8456,6 +8491,9 @@ function buildQuickPickResult(selected: readonly QuickPickEntry[], canPickMany: 
         valueList,
         custom: selected.length === 1 && selected[0].taskHubCustom === true,
     };
+    if (producesArgs) {
+        result.args = selected.flatMap(entry => entry.taskHubArgs ?? []);
+    }
     if (canPickMany) {
         // `values` 는 예전부터 쉼표로 이은 문자열이었다. 매핑을 쓰지 않으면
         // 값이 곧 label 이라 예전과 **같은 문자열**이 나온다.
@@ -8687,6 +8725,7 @@ export async function handleQuickPick(
         throw new Error(`Task '${task.id}' of type 'quickPick' requires a non-empty 'items' array or an 'itemsFromCommand'.`);
     }
     task = { ...task, items: pickItems };
+    const producesArgs = quickPickProducesArgsResult(task);
 
     const options: vscode.QuickPickOptions = {
         placeHolder: task.placeHolder,
@@ -8709,7 +8748,7 @@ export async function handleQuickPick(
                 index: entry.taskHubSourceIndex,
             })));
         }
-        return buildQuickPickResult(selected, task.canPickMany === true);
+        return buildQuickPickResult(selected, task.canPickMany === true, producesArgs);
     }
 
     // As with `handleInputBox`, the token is what lets *Stop Action* dismiss
@@ -8717,14 +8756,14 @@ export async function handleQuickPick(
     if (task.canPickMany) {
         const selected = await vscode.window.showQuickPick(items, { ...options, canPickMany: true }, token);
         if (selected && selected.length > 0) {
-            return buildQuickPickResult(selected, true);
+            return buildQuickPickResult(selected, true, producesArgs);
         } else {
             throw new PromptCancelledError(t('목록에서 선택하기를 취소했습니다.', 'Quick pick selection was canceled.'));
         }
     } else {
         const selected = await vscode.window.showQuickPick(items, options, token);
         if (selected) {
-            return buildQuickPickResult([selected], false);
+            return buildQuickPickResult([selected], false, producesArgs);
         } else {
             throw new PromptCancelledError(t('목록에서 선택하기를 취소했습니다.', 'Quick pick selection was canceled.'));
         }
