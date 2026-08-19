@@ -773,33 +773,6 @@ function checkUnresolvedAndOutsideWrites(actions: ActionItem[], input: DoctorInp
         for (const item of items) {
             if (item?.action?.tasks && Array.isArray(item.action.tasks)) {
                 analyzeActionTasks(item, item.action.tasks, input, findings);
-                for (let index = 0; index < item.action.tasks.length; index++) {
-                    const switchTask = item.action.tasks[index];
-                    if (!switchTask || switchTask.type !== 'switch') { continue; }
-                    const branches = [
-                        ...Object.values(switchTask.cases ?? {}),
-                        ...(switchTask.defaultCase ? [switchTask.defaultCase] : []),
-                    ];
-                    for (const branch of branches) {
-                        let selectedTask: Task;
-                        try {
-                            selectedTask = materializeSwitchBranchTask(switchTask, branch);
-                        } catch {
-                            // JSON Schema already reports malformed branch shapes. Avoid
-                            // hiding valid diagnostics from the other cases.
-                            continue;
-                        }
-                        const variants = item.action.tasks.slice();
-                        variants[index] = selectedTask;
-                        const branchFindings: DoctorFinding[] = [];
-                        analyzeActionTasks(item, variants, input, branchFindings);
-                        const target = findIdLine(input.rawText, switchTask.id);
-                        findings.push(...branchFindings.filter(finding =>
-                            finding.range.startLine === target.startLine
-                            && finding.range.startColumn === target.startColumn
-                        ));
-                    }
-                }
             }
             if (Array.isArray(item?.children) && item.children.length > 0) {
                 walkActions(item.children);
@@ -2656,10 +2629,36 @@ function analyzeActionTasks(
     // 이유는 스케줄러가 `${id.x}` 로 실행 순서를 뒤집기 때문이다.
     const secretTaskIds = collectSecretTaskIds(tasks);
 
-    for (const task of tasks) {
-        if (!task || typeof task.id !== 'string') {
-            continue;
+    const analysisEntries: Array<{ task: Task; pipelineTask: Task; seedsResult: boolean }> = [];
+    for (const pipelineTask of tasks) {
+        if (!pipelineTask || typeof pipelineTask.id !== 'string') { continue; }
+        if (pipelineTask.type === 'switch') {
+            const branches = [
+                ...Object.values(pipelineTask.cases ?? {}),
+                ...(pipelineTask.defaultCase ? [pipelineTask.defaultCase] : []),
+            ];
+            for (const branch of branches) {
+                try {
+                    analysisEntries.push({
+                        task: materializeSwitchBranchTask(pipelineTask, branch),
+                        pipelineTask,
+                        seedsResult: false,
+                    });
+                } catch {
+                    // Schema findings remain authoritative for malformed cases.
+                }
+            }
         }
+        // switch는 case를 모두 같은 pre-task 문맥에서 본 뒤 논리 결과를 한 번만
+        // 심는다. 일반 태스크는 이 항목 하나만 만들어 기존 순서를 그대로 따른다.
+        analysisEntries.push({ task: pipelineTask, pipelineTask, seedsResult: true });
+    }
+
+    // 한 액션의 문맥·태스크 표·taint 고정점은 위에서 한 번만 만들고, switch
+    // case만 같은 위치의 문맥으로 추가 분석한다. case마다 액션 전체를 다시
+    // 돌던 O(switches × cases × tasks) 경로를 O(tasks + cases)로 줄인다.
+    for (const { task, pipelineTask, seedsResult } of analysisEntries) {
+        tasksById.set(pipelineTask.id, task);
         // null-prototype — 런타임과 같은 규칙. 평범한 객체면 `${constructor.name}`
         // 같은 상속 키가 결과처럼 해석되어 진단이 런타임과 어긋난다.
         //
@@ -2796,6 +2795,7 @@ function analyzeActionTasks(
         visitString(task.placeHolder);
         visitString(task.message);
         visitString(task.on);
+        visitString(task.mode);
         visitString(task.input);
         visitString(task.archive);
         visitString(task.destination);
@@ -3333,12 +3333,14 @@ function analyzeActionTasks(
             }
         }
 
-        // Seed downstream context. capture 적용 조건(런타임은 문자열 `output` 이
-        // 있을 때만 capture 를 돌린다)은 `simulateTaskResultWithCaptures` 한
-        // 곳에만 두어 Preview / 전방 참조 판정과 같은 모델을 쓰게 한다.
-        allResults[task.id] = simulateTaskResultWithCaptures(task);
-        sharedInterpolationContext[task.id] = allResults[task.id];
-        forwardTaskIds.delete(task.id);
+        if (seedsResult) {
+            // Seed downstream context once with the logical switch result, not
+            // a case inspected while runtime selection is still unknown.
+            tasksById.set(pipelineTask.id, pipelineTask);
+            allResults[pipelineTask.id] = simulateTaskResultWithCaptures(pipelineTask);
+            sharedInterpolationContext[pipelineTask.id] = allResults[pipelineTask.id];
+            forwardTaskIds.delete(pipelineTask.id);
+        }
     }
 }
 

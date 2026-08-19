@@ -6,6 +6,21 @@
 보안·데이터 손실 수정과 사용자 영향만 남긴다. 테스트를 적는다면 최종 수치만 기록한다.
 -->
 
+## [0.7.41] - 2026-08-19
+
+### 수정 — switch 분석과 크로스 플랫폼 경로 선택
+
+- `switch` case의 `command`·`tool`·`itemsFromCommand`는 현재 OS branch만 실행 의존성으로 사용한다.
+  다른 OS에서만 존재하는 참조가 가짜 순환을 만들어 정상 액션을 막지 않으며, 실행되지 않는 `output`
+  필드도 의존성·조건 skip 전파에서 제외한다.
+- Windows와 Linux에서 `pathDialog.mode: "both"`를 사용하면 파일/폴더 종류를 먼저 고른 뒤 정확한
+  네이티브 대화상자를 연다. 두 옵션을 동시에 전달해 폴더 선택기로 조용히 바뀌던 동작을 없앴다.
+- Doctor가 `pathDialog.mode`의 미해결 참조를 실행 전에 알리고, switch case마다 액션 전체를 다시
+  분석하지 않고 같은 실행 문맥에서 case 본문만 검사하도록 분석 비용을 줄였다.
+
+**테스트**: case 내부 OS 분기·비활성 output·가짜 순환, pathDialog mode 오타와 Windows/Linux `both`
+선택 흐름을 포함해 최종 3086 passing / 3 pending.
+
 ## [0.7.40] - 2026-08-19
 
 ### 수정 — 반복 민감값 보호와 실행 문맥 안내

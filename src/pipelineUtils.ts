@@ -1050,10 +1050,10 @@ export function selectPlatformValue(
  * sibling could trip `validateTaskGraph` on a cycle that doesn't exist
  * for the current platform.
  *
- * The projection is shallow on purpose: only top-level `command` /
- * `tool` / `itemsFromCommand` are platform-branched in the schema, so we
- * don't recurse into sub-objects (e.g. `output.*` fields are not
- * platform-keyed).
+ * The projection itself is shallow on purpose: one concrete task only has
+ * top-level `command` / `tool` / `itemsFromCommand` platform branches.
+ * `walkInterpolatedTaskStrings` first materializes each `switch` case into
+ * that concrete task shape, then applies this projection separately.
  *
  * **`platform` 을 생략하면 branch 는 그대로 두고 `items` 만 떨어뜨린다.** Doctor
  * 는 이 기계의 실행이 아니라 설정 파일 자체를 보므로 모든 OS branch 를 검사해야
@@ -1114,8 +1114,49 @@ export function* walkInterpolatedTaskStrings(
     task: unknown,
     platform?: NodeJS.Platform
 ): Generator<string> {
-    const projected = projectActivePlatformBranches(task, platform);
-    yield* walkStrings(projected, skipPathsForTask(projected));
+    const walkProjected = function* (value: unknown): Generator<string> {
+        const projected = projectActivePlatformBranches(value, platform);
+        yield* walkStrings(projected, skipPathsForTask(projected));
+    };
+
+    if (!task || typeof task !== 'object' || Array.isArray(task)
+        || (task as Record<string, unknown>).type !== 'switch') {
+        yield* walkProjected(task);
+        return;
+    }
+
+    const switchTask = task as Task;
+    // selector와 task-level condition은 case를 고르기 전에 한 번만 읽는다.
+    yield* walkProjected({
+        id: switchTask.id,
+        type: switchTask.type,
+        on: switchTask.on,
+        when: switchTask.when,
+    });
+
+    // case는 실제 실행 태스크 모양으로 만든 뒤 **각자** 플랫폼 투영과 output
+    // 생존 조건을 적용한다. cases.* 아래를 통째로 걷으면 Windows-only command가
+    // macOS 의존성으로 잡히고, 꺼진 output도 실행 참조처럼 잡힌다.
+    const branches = [
+        ...Object.values(switchTask.cases ?? {}),
+        ...(switchTask.defaultCase ? [switchTask.defaultCase] : []),
+    ];
+    for (const branch of branches) {
+        try {
+            const selected = materializeSwitchBranchTask(switchTask, branch);
+            // scheduler가 소비하는 바깥 제어 필드는 selector에서 이미 검사했다.
+            // executeSingleTask로 직접 들어가는 case 본문에는 적용되지 않는다.
+            const body = { ...selected } as Record<string, unknown>;
+            for (const key of SWITCH_BRANCH_CONTROL_FIELDS) {
+                if (key !== 'id') { delete body[key]; }
+            }
+            yield* walkProjected(body);
+        } catch {
+            // malformed branch는 Schema가 보고한다. 그래도 그 안의 문자열을
+            // 보수적으로 훑어 다른 진단까지 숨기지는 않는다.
+            yield* walkProjected(branch);
+        }
+    }
 }
 
 /**
@@ -1306,7 +1347,7 @@ export interface TaskGraphBuildOptions {
     dropMissingDeps?: boolean;
     /**
      * Platform forwarded to `inferTaskDependencies` so that
-     * platform-branched fields (`command` / `tool`) only contribute
+     * platform-branched fields (`command` / `tool` / `itemsFromCommand`) only contribute
      * dependencies from the active branch. Defaults to
      * `process.platform`. Tests set this explicitly to assert
      * deterministic per-platform behavior.

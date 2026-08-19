@@ -138,7 +138,7 @@
               "pattern": "^\\$\\{[^}]+\\}$"
             }
           ],
-          "description": "For 'pathDialog': what may be selected. Use 'file', 'folder', or 'both', or an exact variable reference such as '${kind}' that resolves to one of them."
+          "description": "For 'pathDialog': what may be selected. Use 'file', 'folder', or 'both', or an exact variable reference such as '${kind}' that resolves to one of them. On Windows/Linux, 'both' first asks whether to open a file or folder dialog because the native picker cannot select both kinds at once."
         },
         "options": {
           "type": "object",

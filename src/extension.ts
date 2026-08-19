@@ -7968,7 +7968,10 @@ export async function handleFolderDialog(task: any): Promise<FileDialogResult> {
  * 대화상자를 열기 전에 거부하고 오류에 해석값을 싣지 않는다 — 환경변수나
  * password에서 파생된 잘못된 값이 알림에 노출될 수 있기 때문이다.
  */
-export async function handlePathDialog(task: any): Promise<FileDialogResult> {
+export async function handlePathDialog(
+    task: any,
+    platform: NodeJS.Platform = process.platform
+): Promise<FileDialogResult> {
     const mode = task.mode;
     if (mode !== 'file' && mode !== 'folder' && mode !== 'both') {
         throw new Error(t(
@@ -7976,11 +7979,36 @@ export async function handlePathDialog(task: any): Promise<FileDialogResult> {
             `Task '${task.id}' pathDialog mode must resolve to 'file', 'folder', or 'both'.`
         ));
     }
+    let effectiveMode = mode;
+    // VS Code의 네이티브 OpenDialog는 Windows/Linux에서 file+folder 동시 선택을
+    // 지원하지 않고 두 옵션이 true면 조용히 **폴더 전용**으로 바꾼다. `both`의
+    // 의미를 잃지 않도록 그 두 OS에서는 종류를 먼저 고른 뒤 맞는 대화상자를 연다.
+    if (mode === 'both' && platform !== 'darwin') {
+        const target = await vscode.window.showQuickPick([
+            {
+                label: t('파일 선택', 'Select a file'),
+                description: t('파일 대화상자를 엽니다', 'Open a file dialog'),
+                taskHubPathMode: 'file' as const,
+            },
+            {
+                label: t('폴더 선택', 'Select a folder'),
+                description: t('폴더 대화상자를 엽니다', 'Open a folder dialog'),
+                taskHubPathMode: 'folder' as const,
+            },
+        ], {
+            placeHolder: t('선택할 경로 종류를 고르세요', 'Choose what kind of path to select'),
+            ignoreFocusOut: true,
+        });
+        if (!target) {
+            throw new PromptCancelledError(t('경로 선택을 취소했습니다.', 'Path selection was canceled.'));
+        }
+        effectiveMode = target.taskHubPathMode;
+    }
     const options: vscode.OpenDialogOptions = {
         ...(task.options || {}),
         defaultUri: coerceDefaultUri(task.options?.defaultUri),
-        canSelectFiles: mode === 'file' || mode === 'both',
-        canSelectFolders: mode === 'folder' || mode === 'both',
+        canSelectFiles: effectiveMode === 'file' || effectiveMode === 'both',
+        canSelectFolders: effectiveMode === 'folder' || effectiveMode === 'both',
     };
     const picked = await showOpenDialogWithMemory(taskDialogScope('path', task), options);
     if (!picked || !picked[0]) {

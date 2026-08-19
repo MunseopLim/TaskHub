@@ -4197,6 +4197,13 @@ suite('actions.schema.json — pathDialog', () => {
         const findings = runDoctor([makeInput(actions)], compileValidator());
         assert.ok(!findings.some(finding => finding.code === 'variable.unresolved'), JSON.stringify(findings));
     });
+
+    test('pathDialog mode의 미해결 참조를 실행 전에 찾는다', () => {
+        const findings = runDoctor([makeInput(wrap({
+            id: 'target', type: 'pathDialog', mode: '${missing.value}',
+        }))], compileValidator());
+        assert.ok(codes(findings).includes('variable.unresolved'), JSON.stringify(findings));
+    });
 });
 
 suite('actions.schema.json — switch', () => {

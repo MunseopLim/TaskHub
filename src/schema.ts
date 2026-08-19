@@ -82,6 +82,7 @@ export interface Task {
     /**
      * `pathDialog`에서 선택할 대상. `${kind}`처럼 앞 태스크 결과를 쓸 수 있다.
      * `file`은 파일만, `folder`는 폴더만, `both`는 둘 다 허용한다.
+     * Windows/Linux의 `both`는 네이티브 제약 때문에 종류를 먼저 고른다.
      */
     mode?: 'file' | 'folder' | 'both' | string;
 

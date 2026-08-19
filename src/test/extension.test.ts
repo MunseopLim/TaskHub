@@ -874,7 +874,7 @@ suite('Extension Test Suite', () => {
 			(vscode.window as any).showOpenDialog = async () => undefined;
 			try {
 				await assertPromptCancelled(
-					() => handlePathDialog({ id: 'pick', mode: 'both' }),
+					() => handlePathDialog({ id: 'pick', mode: 'both' }, 'darwin'),
 					'pathDialog'
 				);
 			} finally {
@@ -965,9 +965,9 @@ suite('Extension Test Suite', () => {
 				return uris('/tmp/th-path');
 			};
 			try {
-				await handlePathDialog({ id: 'file', mode: 'file', options: { canSelectFolders: true } });
-				await handlePathDialog({ id: 'folder', mode: 'folder', options: { canSelectFiles: true } });
-				await handlePathDialog({ id: 'both', mode: 'both' });
+				await handlePathDialog({ id: 'file', mode: 'file', options: { canSelectFolders: true } }, 'darwin');
+				await handlePathDialog({ id: 'folder', mode: 'folder', options: { canSelectFiles: true } }, 'darwin');
+				await handlePathDialog({ id: 'both', mode: 'both' }, 'darwin');
 			} finally {
 				(vscode.window as any).showOpenDialog = original;
 			}
@@ -975,6 +975,30 @@ suite('Extension Test Suite', () => {
 				seen.map(options => [options.canSelectFiles, options.canSelectFolders]),
 				[[true, false], [false, true], [true, true]]
 			);
+		});
+
+		test('Windows/Linux의 pathDialog both는 종류를 먼저 물어 정확한 대화상자를 연다', async () => {
+			const originalQuickPick = vscode.window.showQuickPick;
+			const originalOpenDialog = vscode.window.showOpenDialog;
+			const seen: Array<[boolean | undefined, boolean | undefined]> = [];
+			try {
+				(vscode.window as any).showOpenDialog = async (options: vscode.OpenDialogOptions) => {
+					seen.push([options.canSelectFiles, options.canSelectFolders]);
+					return [vscode.Uri.file('/tmp/th-path-both')];
+				};
+				for (const [platform, selected] of [
+					['win32', 'file'],
+					['linux', 'folder'],
+				] as const) {
+					(vscode.window as any).showQuickPick = async (items: any[]) =>
+						items.find(item => item.taskHubPathMode === selected);
+					await handlePathDialog({ id: `both-${platform}`, mode: 'both' }, platform);
+				}
+			} finally {
+				(vscode.window as any).showQuickPick = originalQuickPick;
+				(vscode.window as any).showOpenDialog = originalOpenDialog;
+			}
+			assert.deepStrictEqual(seen, [[true, false], [false, true]]);
 		});
 
 		test('pathDialog의 잘못된 동적 mode는 값을 노출하지 않고 열기 전에 거부한다', async () => {

@@ -45,6 +45,8 @@ import {
     buildForEachValue,
     inferTaskDependencies,
     materializeSwitchBranchTask,
+    buildTaskGraph,
+    detectGraphCycle,
 } from '../pipelineUtils';
 import { attachPipelineTaskIds, buildBuiltinVariableContext } from '../builtinVariables';
 
@@ -80,6 +82,61 @@ suite('pipelineUtils — direct-import smoke suite', () => {
             () => materializeSwitchBranchTask(outer, { type: 'command', command: 'x', when: {} } as any),
             /cannot define 'when'/
         );
+    });
+
+    test('switch case의 플랫폼 command는 현재 OS branch만 의존성으로 잡는다', () => {
+        const switchTask = {
+            id: 'sw', type: 'switch', on: '${pick.value}', cases: {
+                run: {
+                    type: 'command',
+                    command: { windows: 'tool ${b.output}', macos: 'tool', linux: 'tool' },
+                },
+            },
+        } as any;
+        const ids = new Set(['pick', 'b', 'sw']);
+
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(switchTask, ids, { platform: 'darwin' })].sort(),
+            ['pick']
+        );
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(switchTask, ids, { platform: 'win32' })].sort(),
+            ['b', 'pick']
+        );
+
+        const tasks = [
+            { id: 'b', type: 'command', command: 'tool ${sw.output}', parallel: true },
+            {
+                id: 'sw', type: 'switch', on: 'run', parallel: true, cases: {
+                    run: {
+                        type: 'command',
+                        command: { windows: 'tool ${b.output}', macos: 'tool', linux: 'tool' },
+                    },
+                },
+            },
+        ] as any[];
+        assert.strictEqual(detectGraphCycle(buildTaskGraph(tasks, { platform: 'darwin' })), null);
+        assert.deepStrictEqual(
+            detectGraphCycle(buildTaskGraph(tasks, { platform: 'win32' })),
+            ['b', 'sw', 'b']
+        );
+    });
+
+    test('switch case에서 실행되지 않는 output은 의존성으로 잡지 않는다', () => {
+        const ids = new Set(['sw', 'dead', 'live']);
+        const task = {
+            id: 'sw', type: 'switch', on: 'run', cases: {
+                ignored: {
+                    type: 'command', command: 'tool', passTheResultToNextTask: false,
+                    output: { mode: 'editor', content: '${dead.output}' },
+                },
+                used: {
+                    type: 'command', command: 'tool', passTheResultToNextTask: true,
+                    output: { mode: 'editor', content: '${live.output}' },
+                },
+            },
+        } as any;
+        assert.deepStrictEqual([...inferTaskDependencies(task, ids)], ['live']);
     });
 
     test('INTERPOLATED_VALUE_MAX_LENGTH matches documented 32 KB cap', () => {
