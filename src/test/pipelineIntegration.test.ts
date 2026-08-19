@@ -911,10 +911,10 @@ suite('Pipeline integration', function () {
                     {
                         id: 'kind', type: 'quickPick',
                         default: 'Folder',
-                        items: [
-                            { label: 'File', value: 'file', args: ['--input-file'] },
-                            { label: 'Folder', value: 'folder', args: ['--input-dir', '--recursive'] },
-                        ],
+                        items: {
+                            File: { value: 'file', args: '--input-file' },
+                            Folder: { value: 'folder', args: ['--input-dir', '--recursive'] },
+                        },
                     },
                     {
                         id: 'run', type: 'command', command: 'node',
@@ -1016,7 +1016,7 @@ suite('Pipeline integration', function () {
                 JSON.stringify({
                     id: 'release', label: 'Release build', description: 'optimized',
                     detail: 'deployment target', value: ['--mode', 'release'],
-                    args: ['--target', 'production'],
+                    args: '--target=production',
                 }),
             ].join('\n'));
             fs.writeFileSync(
@@ -1043,6 +1043,7 @@ suite('Pipeline integration', function () {
                             },
                             itemsFromCommandFormat: 'jsonl',
                             itemsExclude: 'skip',
+                            items: { Broken: 5 } as any,
                         },
                         {
                             id: 'run', type: 'command', command: 'node',
@@ -1052,7 +1053,7 @@ suite('Pipeline integration', function () {
                 }, 'it179');
                 assert.deepStrictEqual(
                     JSON.parse(fs.readFileSync(resultPath, 'utf8')),
-                    ['--mode', 'release', '--target', 'production']
+                    ['--mode', 'release', '--target=production']
                 );
             } finally {
                 (vscode.window as any).showQuickPick = originalShowQuickPick;

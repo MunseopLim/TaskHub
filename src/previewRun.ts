@@ -34,6 +34,7 @@ import {
     isInsideWorkspaceRoots,
     walkInterpolatedTaskStrings,
     materializeSwitchBranchTask,
+    normalizeQuickPickItems,
     quickPickProducesArgsResult,
     quickPickUsesItemsFromCommand,
     RESERVED_VARIABLE_HEADS,
@@ -161,8 +162,9 @@ export function simulateTaskResult(task: Task): SimulatedResult {
             // 항목이 `value` 로 **배열**을 매핑하면 런타임의 `${pick.value}` 도
             // 배열이다. 문자열로만 흉내 내면 `"--x=${pick.value}"` 같은 조용히
             // 깨지는 형태에 `args.array-joined` 가 붙지 않는다.
-            const mapsArray = Array.isArray((task as any).items)
-                && (task as any).items.some((entry: any) =>
+            const items = normalizeQuickPickItems((task as any).items);
+            const mapsArray = Array.isArray(items)
+                && items.some((entry: any) =>
                     entry && typeof entry === 'object' && Array.isArray(entry.value));
             const mapsArgs = quickPickProducesArgsResult(task);
             const base: SimulatedResult = {
@@ -1286,7 +1288,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                     lines.push(`  (items will be populated from this command's output at runtime)`);
                     interpolated.push(itemsFromCommand, cwd);
                 } else {
-                    const items = Array.isArray(task.items) ? task.items : [];
+                    const items = normalizeQuickPickItems(task.items) ?? [];
                     lines.push(`  items (${items.length}):`);
                     for (const it of items) {
                         if (typeof it === 'string') {

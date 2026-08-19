@@ -471,6 +471,30 @@ suite('variableCompletions', () => {
             assert.ok(got.includes('pick.args'), got.join(','));
         });
 
+        test('label-keyed 축약 항목의 단일 args도 args 결과를 제안한다', () => {
+            const fixture = `[
+  { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
+    { "id": "pick", "type": "quickPick", "items": {
+      "File": { "value": "file", "args": "--input-file" }
+    } },
+    { "id": "run", "type": "command", "command": "tool", "args": ["\${pick.|" ] }
+  ] } }
+]`;
+            assert.ok(names(fixture).includes('pick.args'));
+        });
+
+        test('label-keyed 축약 항목의 직접 value 배열은 args 결과가 아니다', () => {
+            const fixture = `[
+  { "id": "a", "title": "t", "action": { "description": "d", "tasks": [
+    { "id": "pick", "type": "quickPick", "items": { "Debug": ["--debug"] } },
+    { "id": "run", "type": "command", "command": "tool", "args": ["\${pick.|" ] }
+  ] } }
+]`;
+            const got = names(fixture);
+            assert.ok(got.includes('pick.value'));
+            assert.ok(!got.includes('pick.args'));
+        });
+
         test('args 매핑이 없거나 동적 목록이 덮은 정적 매핑이면 args를 제안하지 않는다', () => {
             assert.ok(!names(quickPickDoc('')).includes('pick.args'));
             const deadStatic = `[

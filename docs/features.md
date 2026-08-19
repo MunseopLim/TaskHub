@@ -1076,6 +1076,7 @@ Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 �
 | `args.array-joined` | warning | 배열 참조가 `args` 원소의 다른 글자와 섞여 한 argv로 합쳐짐. 여러 인자로 펼치려면 원소 전체를 참조 하나로 작성. |
 | `quickpick.label-as-argument` | info | value mapping이 있는 QuickPick의 표시용 `${pick.label}`을 command/args에 전달함. 실행값은 `${pick}` 또는 `${pick.value}`를 쓰고, label 자체가 필요한 경우만 유지하도록 안내. |
 | `quickpick.item-id-duplicate` | error | 한 QuickPick 안에서 안정 `id`가 중복됨. 선택 기억·History가 다른 mapping을 복원하지 않도록 각 항목에 고유한 id를 사용. |
+| `quickpick.numeric-label-order` | info | label-keyed QuickPick 축약형에 정수형 label이 있음. JavaScript가 이 키를 다른 label보다 먼저 숫자 오름차순으로 배치하므로, 작성 순서를 유지하려면 배열형 `items`를 사용. |
 | `output.not-captured` | warning | `passTheResultToNextTask: true`가 없는 shell/command의 output 또는 capture를 참조함. 대체 체인은 대안 단위 진단을 사용. |
 | `tool.platform-missing` | warning | `zip`·`unzip`의 `tool`이 현재 플랫폼에서 비었거나 OS별 값이 없음. 검사하는 OS에 따라 결과가 달라짐. |
 | `output.ignored` | warning | 런타임이 읽지 않는 `output` 필드가 있음. `mode`·`content`·`filePath`·`overwrite`·`language`는 `passTheResultToNextTask: true`가 필요하고, `filePath`·`overwrite`는 `mode: "file"`, `language`는 `mode: "editor"`에서만 사용됩니다. `capture`·`diagnostics`는 이 게이트 밖에서 동작하지만 태스크 결과에 문자열 `output`이 있어야 합니다. |

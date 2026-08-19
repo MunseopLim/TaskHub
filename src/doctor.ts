@@ -46,6 +46,8 @@ import {
     RESERVED_VARIABLE_HEADS,
     RESERVED_HEAD_PREFIXES,
     buildForEachValue,
+    isJavaScriptArrayIndexKey,
+    normalizeQuickPickItems,
     walkInterpolatedTaskStrings,
     quickPickUsesItemsFromCommand,
 } from './pipelineUtils';
@@ -1094,12 +1096,15 @@ function mappedQuickPickLabelRefsInCommand(
             for (const alt of parseReferenceAlternatives(match[1] ?? '')) {
                 if (alt.key !== 'label') { continue; }
                 const source = tasksById.get(alt.head);
+                const sourceItems = source?.type === 'quickPick'
+                    ? normalizeQuickPickItems(source.items)
+                    : undefined;
                 if (source?.type !== 'quickPick'
                     || quickPickUsesItemsFromCommand(source)
-                    || !Array.isArray(source.items)) {
+                    || !sourceItems) {
                     continue;
                 }
-                const hasMapping = source.items.some(entry =>
+                const hasMapping = sourceItems.some(entry =>
                     !!entry
                     && typeof entry === 'object'
                     && Object.prototype.hasOwnProperty.call(entry, 'value'));
@@ -1179,13 +1184,16 @@ export function enumerateArgvCandidates(
         // `variable.unresolved` 를 내는 판정과 같은 함수라 둘이 어긋날 수 없다.
         if (!referenceKeyIsProducible(source, alt.key)) { continue; }
         // 값은 나지만 열거는 못 한다(`inputBox`·`itemsFromCommand` 등) — fail-closed.
+        const sourceItems = source.type === 'quickPick'
+            ? normalizeQuickPickItems(source.items)
+            : undefined;
         if (source.type !== 'quickPick'
             || source.allowCustom === true
             || quickPickUsesItemsFromCommand(source)
-            || !Array.isArray(source.items)) {
+            || !sourceItems) {
             return { variants: [argv], truncated: false };
         }
-        for (const entry of source.items) {
+        for (const entry of sourceItems) {
             const candidates = quickPickItemCandidates(entry, alt.key);
             // 열거할 수 없는 항목이 하나라도 있으면 값 집합이 불완전해진다 —
             // 그 상태로 열거하면 실제로 실행될 수 있는 인터프리터를 놓친다.
@@ -2183,14 +2191,15 @@ function nestedInterpreterRefsAreConstrained(
                 // 항목 자체에 메타문자가 있으면 고정 목록이라도 안전하지 않다.
                 // allowCustom이면 정적 목록 밖의 어떤 값도 올 수 있으므로 열거로
                 // 안전을 증명할 수 없다.
+                const sourceItems = normalizeQuickPickItems(source.items);
                 if (source.allowCustom === true
-                    || !Array.isArray(source.items)
+                    || !sourceItems
                     || quickPickUsesItemsFromCommand(source)) {
                     return false;
                 }
                 // **label 이 아니라 실제로 치환되는 값**을 본다. `value` 매핑이
                 // 있으면 목록에 보이는 문구는 명령에 닿지 않는다.
-                return source.items.every((entry: any) => {
+                return sourceItems.every((entry: any) => {
                     const candidates = quickPickItemCandidates(entry, alt.key);
                     if (!candidates) { return false; }
                     return candidates.every(candidate => {
@@ -2875,10 +2884,31 @@ function analyzeActionTasks(
         // variable.unresolved for refs that never execute.
         const ifc = (task as any).itemsFromCommand;
         const hasItemsFromCommand = quickPickUsesItemsFromCommand(task);
-        if (!hasItemsFromCommand && task.type === 'quickPick' && Array.isArray(task.items)) {
+        const staticQuickPickItems = task.type === 'quickPick'
+            ? normalizeQuickPickItems(task.items)
+            : undefined;
+        if (!hasItemsFromCommand && staticQuickPickItems) {
+            const integerLabels = !Array.isArray(task.items)
+                && task.items
+                && typeof task.items === 'object'
+                ? Object.keys(task.items).filter(isJavaScriptArrayIndexKey)
+                : [];
+            if (integerLabels.length > 0) {
+                const shown = integerLabels.slice(0, 3).map(label => JSON.stringify(label)).join(', ');
+                const remaining = integerLabels.length > 3 ? ` (+${integerLabels.length - 3})` : '';
+                findings.push({
+                    filePath: input.filePath,
+                    sourceLabel: input.sourceLabel,
+                    range: findIdLine(input.rawText, task.id),
+                    severity: 'info',
+                    code: 'quickpick.numeric-label-order',
+                    message: `Task '${item.id}.${task.id}' uses integer-like compact QuickPick label(s) ${shown}${remaining}. JavaScript places these labels before other keys in ascending numeric order; use the array items form to preserve authored display order.`,
+                    messageKo: `Task '${item.id}.${task.id}'의 QuickPick 축약 label ${shown}${remaining}은 정수형 키입니다. JavaScript는 이 label을 다른 키보다 먼저 숫자 오름차순으로 배치하므로, 작성한 표시 순서를 유지하려면 items 배열 형식을 사용하세요.`,
+                });
+            }
             const seenItemIds = new Set<string>();
             const duplicateItemIds = new Set<string>();
-            for (const quickPickItem of task.items) {
+            for (const quickPickItem of staticQuickPickItems) {
                 if (!quickPickItem || typeof quickPickItem !== 'object' || Array.isArray(quickPickItem)) { continue; }
                 const itemId = (quickPickItem as any).id;
                 if (typeof itemId !== 'string') { continue; }
@@ -2905,8 +2935,10 @@ function analyzeActionTasks(
                 visitString(v as any);
             }
         }
-        if (!hasItemsFromCommand && Array.isArray(task.items)) {
-            for (const it of task.items) {
+        // `items`는 quickPick만 실행한다. 다른 task type에 붙은 같은 이름의 필드는
+        // 스키마상 무효인 죽은 필드이므로 참조·민감값 분석 대상으로 만들지 않는다.
+        if (!hasItemsFromCommand && staticQuickPickItems) {
+            for (const it of staticQuickPickItems) {
                 if (typeof it === 'string') {
                     visitString(it);
                 } else if (it && typeof it === 'object') {

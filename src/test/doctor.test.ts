@@ -3101,6 +3101,27 @@ suite('Doctor', () => {
         assert.ok(unresolved.includes('${ghost.args}'), unresolved);
     });
 
+    test('quickPick label-keyed 축약형의 label·value·args 참조도 분석한다', () => {
+        const findings = runDoctor([makeInput([{
+            id: 'a.quick-compact-refs', title: 'quick', action: {
+                description: 'd',
+                tasks: [{
+                    id: 'pick', type: 'quickPick',
+                    items: {
+                        '${ghost.label}': {
+                            value: '${ghost.value}',
+                            args: '--target=${ghost.args}',
+                        },
+                    },
+                }],
+            },
+        }])], compileValidator());
+        const messages = findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ');
+        for (const ref of ['${ghost.label}', '${ghost.value}', '${ghost.args}']) {
+            assert.ok(messages.includes(ref), `${ref} 누락: ${messages}`);
+        }
+    });
+
     test('quickPick args 결과는 태스크 단위로 판정하고 죽은 정적 items는 제외한다', () => {
         const unresolvedCount = (pick: any) => {
             const findings = runDoctor([makeInput([{
@@ -3150,7 +3171,7 @@ suite('Doctor', () => {
 
     test('does not flag stale ${...} in quickPick `items` when itemsFromCommand is set', () => {
         // Runtime ignores `items` once itemsFromCommand populates the list, so
-        // a leftover ${typo.value} in `items` must not raise variable.unresolved.
+        // leftover refs in compact `items` must not raise variable.unresolved.
         const v = compileValidator();
         const findings = runDoctor([makeInput([
             {
@@ -3161,7 +3182,9 @@ suite('Doctor', () => {
                     tasks: [{
                         id: 'branch',
                         type: 'quickPick',
-                        items: ['${typo.value}'],
+                        items: {
+                            '${typo.label}': { value: '${typo.value}', args: '${typo.args}' },
+                        },
                         itemsFromCommand: 'git for-each-ref'
                     }]
                 }
@@ -3169,6 +3192,17 @@ suite('Doctor', () => {
         ])], v);
         assert.strictEqual(findings.filter(f => f.code === 'variable.unresolved').length, 0,
             `expected no unresolved finding, got ${findings.filter(f => f.code === 'variable.unresolved').map(f => f.message).join(' | ')}`);
+    });
+
+    test('quickPick 외 task의 죽은 items는 변수 참조로 분석하지 않는다', () => {
+        const findings = runDoctor([makeInput([{
+            id: 'a.dead-items', title: 'dead', action: {
+                description: 'd', tasks: [{
+                    id: 'run', type: 'command', command: 'node', items: ['${ghost.value}'],
+                } as any],
+            },
+        }])], compileValidator());
+        assert.strictEqual(findings.filter(f => f.code === 'variable.unresolved').length, 0);
     });
 
     /** 내장과 같은 이름의 기존 task는 bare/속성 참조를 모두 소유한다. */
@@ -4356,7 +4390,7 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
     test('itemsFromCommandFormat은 기존 lines와 구조화 jsonl만 허용한다', () => {
         assert.ok(properties?.itemsFromCommandFormat);
         assert.deepStrictEqual(properties.itemsFromCommandFormat.enum, ['lines', 'jsonl']);
-        assert.match(properties.itemsFromCommandFormat.description, /args \(string array\)/);
+        assert.match(properties.itemsFromCommandFormat.description, /args \(one string or a string array\)/);
         assert.match(properties.itemsFromCommandFormat.description, /\$\{taskId\.args\}/);
         const v = compileValidator();
         const wrap = (format: string) => [{
@@ -4403,8 +4437,29 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
                 }],
             },
         }];
+        assert.strictEqual(v(wrap('--input-file')), true, JSON.stringify(v.errors));
         assert.strictEqual(v(wrap(['--input-file'])), true, JSON.stringify(v.errors));
         assert.strictEqual(v(wrap(['--ok', 1])), false, '문자열이 아닌 QuickPick item args가 통과했다');
+    });
+
+    test('QuickPick label-keyed items 축약형을 검증한다', () => {
+        const v = compileValidator();
+        const wrap = (items: unknown) => [{
+            id: 'a.quick-compact', title: 'quick', action: {
+                description: 'd', tasks: [{ id: 'kind', type: 'quickPick', items }],
+            },
+        }];
+        assert.strictEqual(v(wrap({
+            'ZIP 파일': { value: 'file', args: '--input-file' },
+            '폴더': { id: 'folder', value: 'folder', args: ['--input-dir'] },
+            '기본값': null,
+            '값 배열': ['--mode', 'debug'],
+        })), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap([])), false, '빈 items 배열이 작성 시점 검증을 통과했다');
+        assert.ok(v.errors?.some(error => error.keyword === 'minItems'), JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap({ '': null })), false, '빈 label 키가 통과했다');
+        assert.strictEqual(v(wrap({ Bad: { args: [1] } })), false, '문자열이 아닌 args가 통과했다');
+        assert.strictEqual(v(wrap({ Bad: { label: 'override' } })), false, '축약 객체 안의 중복 label이 통과했다');
     });
 
     test('Doctor는 같은 QuickPick 안의 중복 item id를 오류로 알린다', () => {
@@ -4423,6 +4478,23 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
         assert.ok(duplicate, findings.map(finding => finding.code).join(', '));
         assert.strictEqual(duplicate!.severity, 'error');
         assert.match(duplicate!.message, /same.*unique/i);
+    });
+
+    test('Doctor는 축약형의 정수형 label 순서 규칙을 안내한다', () => {
+        const actions = [{
+            id: 'a.quick-numeric-label', title: 'quick', action: {
+                description: 'd', tasks: [{
+                    id: 'baud', type: 'quickPick', items: {
+                        '115200': null, '9600': null, '57600': null, latest: null,
+                    },
+                }],
+            },
+        }];
+        const findings = runDoctor([makeInput(actions)], compileValidator());
+        const order = findings.find(finding => finding.code === 'quickpick.numeric-label-order');
+        assert.ok(order, findings.map(finding => finding.code).join(', '));
+        assert.strictEqual(order!.severity, 'info');
+        assert.match(order!.message, /ascending numeric order.*array items form/i);
     });
 
     test('기본값·직접 입력·기억 설정은 유효하고 custom 다중 선택은 거부한다', () => {

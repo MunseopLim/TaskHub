@@ -467,6 +467,27 @@ suite('buildPreviewReport', () => {
         assert.doesNotMatch(report.split('Summary:')[1], /\$\{kind\.args\}/);
     });
 
+    test('quickPick label-keyed 축약형과 단일 args를 기존 항목처럼 표시한다', () => {
+        const report = buildPreviewReport({
+            id: 'quick-compact', title: 'Quick compact', action: {
+                description: 'd',
+                tasks: [
+                    {
+                        id: 'kind', type: 'quickPick',
+                        items: {
+                            'ZIP 파일': { value: 'file', args: '--input-file' },
+                            '폴더': { value: 'folder', args: ['--input-dir'] },
+                        },
+                    },
+                    { id: 'run', type: 'command', command: 'tool', args: ['${kind.args}'] },
+                ],
+            },
+        }, baseOptions());
+        assert.match(report, /ZIP 파일\s+→ file\s+args: \["--input-file"\]/);
+        assert.match(report, /폴더\s+→ folder\s+args: \["--input-dir"\]/);
+        assert.match(report, /args:\s+\["<quickPick:kind:args\[0\]>"\]/);
+    });
+
     test('forEach의 반복 횟수와 each 보간 결과를 보여 준다', () => {
         const report = buildPreviewReport({
             id: 'foreach-preview', title: 'For each',

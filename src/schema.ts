@@ -118,7 +118,8 @@ export interface Task {
     extractPattern?: string;
 
     // Properties for 'quickPick'
-    items?: string[] | QuickPickItem[];
+    /** 배열형 또는 label을 키로 쓰는 축약 객체. */
+    items?: string[] | QuickPickItem[] | Record<string, QuickPickItemMapValue>;
     canPickMany?: boolean;
     /** 처음 활성화/선택할 항목의 label. 다중 선택이면 label 배열을 쓴다. */
     default?: string | string[];
@@ -139,7 +140,7 @@ export interface Task {
         macos?: string;
         linux?: string;
     };
-    /** stdout 해석 방식. `lines`는 기존 동작, `jsonl`은 줄마다 QuickPick item 객체다. */
+    /** stdout 해석 방식. `lines`는 기존 동작, `jsonl`은 줄마다 QuickPick item 객체이며 단일 문자열 `args`도 허용한다. */
     itemsFromCommandFormat?: 'lines' | 'jsonl';
     /**
      * For `quickPick` with `itemsFromCommand`: exact line(s) to drop from the
@@ -343,8 +344,18 @@ export interface QuickPickItem {
      * 정적 항목 중 하나라도 이 필드를 선언하면 태스크는 항상 `args` 결과를
      * 만들며, 이 필드가 없는 항목이나 직접 입력을 고르면 빈 배열을 낸다.
      */
-    args?: string[];
+    args?: string | string[];
 }
+
+/** label-keyed QuickPick `items` 축약형의 값. 객체 키가 표시 label이 된다. */
+export type QuickPickItemMapValue = null | string | string[] | {
+    id?: string;
+    description?: string;
+    detail?: string;
+    value?: string | string[];
+    /** 인자 하나면 문자열, 여러 개면 배열. */
+    args?: string | string[];
+};
 
 /**
  * Defines how the output of a task should be handled.

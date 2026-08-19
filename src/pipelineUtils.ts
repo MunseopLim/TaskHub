@@ -117,6 +117,69 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
     '__proto__', 'constructor', 'prototype'
 ]);
 
+/** QuickPick 항목의 단일 `args` 축약을 런타임 배열 모양으로 바꾼다. */
+function normalizeQuickPickItemObject(item: Record<string, unknown>, label?: string): Record<string, unknown> {
+    const normalized = { ...item };
+    if (label !== undefined) { normalized.label = label; }
+    if (typeof normalized.args === 'string') { normalized.args = [normalized.args]; }
+    return normalized;
+}
+
+/** JavaScript 객체 열거에서 다른 문자열 키보다 먼저 숫자 오름차순으로 배치되는 키인가. */
+export function isJavaScriptArrayIndexKey(value: string): boolean {
+    const index = Number(value);
+    return Number.isInteger(index)
+        && index >= 0
+        && index < 0xFFFFFFFF
+        && String(index) === value;
+}
+
+/** label-keyed QuickPick 축약형에서 허용하지 않는 첫 항목 label을 찾는다. */
+export function firstInvalidQuickPickCompactItemLabel(items: unknown): string | undefined {
+    if (!items || typeof items !== 'object' || Array.isArray(items)) { return undefined; }
+    for (const [label, definition] of Object.entries(items as Record<string, unknown>)) {
+        if (label.length === 0) { return label; }
+        if (definition === null || typeof definition === 'string') { continue; }
+        if (Array.isArray(definition)) {
+            if (definition.every(value => typeof value === 'string')) { continue; }
+            return label;
+        }
+        if (definition && typeof definition === 'object') { continue; }
+        return label;
+    }
+    return undefined;
+}
+
+/**
+ * QuickPick `items`의 배열형과 label-keyed 객체 축약형을 같은 항목 배열로 만든다.
+ * 원본은 수정하지 않아 가져오기·마법사가 사용자가 쓴 축약형을 그대로 보존한다.
+ * JavaScript 객체 열거 규칙상 정수형 label은 다른 키보다 먼저 숫자 오름차순으로
+ * 나온다. 작성 순서가 중요한 숫자 label은 배열형을 사용해야 한다.
+ */
+export function normalizeQuickPickItems(items: unknown): any[] | undefined {
+    if (Array.isArray(items)) {
+        return items.map(item => item && typeof item === 'object' && !Array.isArray(item)
+            ? normalizeQuickPickItemObject(item as Record<string, unknown>)
+            : item);
+    }
+    if (!items || typeof items !== 'object') { return undefined; }
+    if (firstInvalidQuickPickCompactItemLabel(items) !== undefined) { return undefined; }
+
+    const normalized: Record<string, unknown>[] = [];
+    for (const [label, definition] of Object.entries(items as Record<string, unknown>)) {
+        if (definition === null) {
+            normalized.push({ label });
+        } else if (typeof definition === 'string' || Array.isArray(definition)) {
+            normalized.push({ label, value: definition });
+        } else if (definition && typeof definition === 'object') {
+            normalized.push(normalizeQuickPickItemObject(definition as Record<string, unknown>, label));
+        } else {
+            return undefined;
+        }
+    }
+    return normalized;
+}
+
 /**
  * `quickPick`이 정적 `items` 대신 `itemsFromCommand`를 실제 목록 소스로 쓰는가.
  *
@@ -144,7 +207,7 @@ export function quickPickProducesArgsResult(task: any): boolean {
     if (quickPickUsesItemsFromCommand(task)) {
         return task.itemsFromCommandFormat === 'jsonl';
     }
-    return Array.isArray(task.items) && task.items.some((entry: any) =>
+    return (normalizeQuickPickItems(task.items) ?? []).some((entry: any) =>
         entry && typeof entry === 'object' && Array.isArray(entry.args));
 }
 
@@ -1116,6 +1179,8 @@ export function projectActivePlatformBranches(task: unknown, platform?: NodeJS.P
     // because the object form may have just been projected away above.
     if (quickPickUsesItemsFromCommand(task)) {
         delete result.items;
+    } else if (result.type === 'quickPick' && result.items !== undefined) {
+        result.items = normalizeQuickPickItems(result.items) ?? result.items;
     }
     return result;
 }

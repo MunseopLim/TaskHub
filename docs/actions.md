@@ -277,8 +277,31 @@ macOS에서는 한 대화상자에서 둘 다 선택할 수 있습니다.
 - `label`: 화면에 보이는 문구
 - `description`, `detail`: 보조 설명
 - `value`: command에 넘길 값. 생략하면 `label`; 배열은 여러 argv; 빈 배열은 인자 없음
-- `args`: `value`와 별도로 command에 넘길 argv 배열
+- `args`: `value`와 별도로 command에 넘길 argv. 하나면 문자열, 여러 개면 배열
 - `id`: 선택 기억과 History 재실행에 쓰는 선택적 고정 식별자
+
+항목이 많으면 `items`를 label-keyed 객체로 줄여 쓸 수 있습니다. 객체 키가 화면의 `label`이 됩니다.
+
+```jsonc
+"items": {
+  "ZIP 파일": { "value": "file", "args": "--input-file" },
+  "압축 해제 폴더": { "value": "folder", "args": "--input-dir" }
+}
+```
+
+축약 객체의 값은 다음처럼 해석합니다.
+
+| 값 | 의미 |
+| --- | --- |
+| `null` 또는 `{}` | `label`을 그대로 `value`로 사용 |
+| 문자열 또는 문자열 배열 | 해당 값을 `value`로 사용 |
+| 객체 | `id`, `description`, `detail`, `value`, `args`를 상세 지정 |
+
+같은 label을 여러 행에 쓰거나 표시 순서를 엄격히 고정해야 하거나, 항목마다 `label`을 명시해 읽는 편이
+나으면 기존 배열 형식을 사용합니다. 배열형과 축약형은 실행 결과가 같으며 기존 배열형도 계속 지원합니다.
+특히 `"0"`부터 `"4294967294"`까지의 정수형 label은 JavaScript 객체 규칙에 따라 다른 label보다 먼저
+숫자 오름차순으로 표시됩니다. 보드레이트·연도·숫자 버전처럼 작성 순서를 유지해야 하는 숫자 label은
+배열 형식으로 작성합니다.
 
 선택값을 `pathDialog.mode` 같은 흐름 제어에도 쓰고 command 옵션도 만들어야 한다면 `value`와 `args`를
 같이 둡니다. `${kind.args}`는 배열이므로 command의 `args` 원소 전체에 넣어야 argv 여러 칸으로
@@ -287,10 +310,10 @@ macOS에서는 한 대화상자에서 둘 다 선택할 수 있습니다.
 JSONL 동적 목록도 같은 계약을 사용합니다.
 
 ```jsonc
-{ "id": "kind", "type": "quickPick", "items": [
-  { "label": "ZIP 파일", "value": "file", "args": ["--input-file"] },
-  { "label": "압축 해제 폴더", "value": "folder", "args": ["--input-dir"] }
-] },
+{ "id": "kind", "type": "quickPick", "items": {
+  "ZIP 파일": { "value": "file", "args": "--input-file" },
+  "압축 해제 폴더": { "value": "folder", "args": "--input-dir" }
+} },
 { "id": "target", "type": "pathDialog", "mode": "${kind}" },
 { "id": "run", "type": "command", "command": "parser",
   "args": ["${kind.args}", "${target.path}"] }
@@ -298,6 +321,7 @@ JSONL 동적 목록도 같은 계약을 사용합니다.
 
 | 태스크 필드 | 설명 |
 | --- | --- |
+| `items` | 항목 배열 또는 label을 키로 쓰는 축약 객체 |
 | `canPickMany` | 여러 항목 선택 |
 | `default` | 처음 활성화할 label. 다중 선택이면 label 배열 |
 | `allowCustom` | 목록 밖의 직접 입력 허용. `canPickMany`와 함께 사용할 수 없음 |
@@ -326,7 +350,8 @@ JSONL 동적 목록도 같은 계약을 사용합니다.
 ```
 
 동적 항목도 의미값과 command 인자를 나누려면
-`{"id":"archive","label":"아카이브","value":"file","args":["--input-file"]}`처럼 출력합니다.
+`{"id":"archive","label":"아카이브","value":"file","args":"--input-file"}`처럼 인자 하나는 문자열로,
+여러 개는 `"args":["--input-file","--recursive"]`처럼 문자열 배열로 출력합니다.
 
 ### `envPick`
 
@@ -625,10 +650,10 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
           "id": "kind",
           "type": "quickPick",
           "placeHolder": "입력 종류를 선택하세요",
-          "items": [
-            { "label": "ZIP 파일", "value": "file", "args": ["--input-file"] },
-            { "label": "압축 해제 폴더", "value": "folder", "args": ["--input-dir"] }
-          ],
+          "items": {
+            "ZIP 파일": { "value": "file", "args": "--input-file" },
+            "압축 해제 폴더": { "value": "folder", "args": "--input-dir" }
+          },
           "rememberLastSelection": true
         },
         {
@@ -641,18 +666,18 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
           "id": "parserOptions",
           "type": "quickPick",
           "placeHolder": "파서 옵션을 선택하세요",
-          "items": [
-            { "label": "기본 실행", "value": "default", "args": [] },
-            { "label": "상세 분석", "value": "verbose", "args": ["--verbose"] },
-            { "label": "강제 재분석", "value": "force", "args": ["--force", "--verbose"] }
-          ],
+          "items": {
+            "기본 실행": [],
+            "상세 분석": ["--verbose"],
+            "강제 재분석": ["--force", "--verbose"]
+          },
           "rememberLastSelection": true
         },
         {
           "id": "run",
           "type": "command",
           "command": "python",
-          "args": ["parser.py", "${kind.args}", "${parserOptions.args}", "${target.path}"]
+          "args": ["parser.py", "${kind.args}", "${parserOptions}", "${target.path}"]
         }
       ]
     }

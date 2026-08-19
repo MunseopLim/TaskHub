@@ -1253,6 +1253,8 @@ import {
     withInteractivePromptLock,
     INTERACTIVE_TASK_TYPES,
     materializeSwitchBranchTask,
+    firstInvalidQuickPickCompactItemLabel,
+    normalizeQuickPickItems,
     quickPickProducesArgsResult,
     quickPickUsesItemsFromCommand,
     walkInterpolatedTaskStrings,
@@ -2019,12 +2021,13 @@ export function diffDoctorFindings(before: DoctorFinding[], after: DoctorFinding
 function describeTaskLine(task: any, index: number): string {
     const id = typeof task?.id === 'string' ? task.id : `#${index + 1}`;
     const type = typeof task?.type === 'string' ? task.type : '?';
+    const quickPickItems = normalizeQuickPickItems(task?.items);
     const command = typeof task?.command === 'string'
         ? task.command
         : typeof task?.prompt === 'string'
             ? task.prompt
-            : Array.isArray(task?.items)
-                ? task.items.join(', ')
+            : quickPickItems
+                ? quickPickItems.map(item => typeof item === 'string' ? item : item?.label).join(', ')
                 : '';
     const suffix = command ? ` — ${command}` : '';
     return `${index + 1}. ${id} (${type})${suffix}`;
@@ -6504,10 +6507,11 @@ function savedQuickPickItemIds(saved: any, many: boolean, count: number): Array<
 }
 
 function resolvedQuickPickEntries(task: any, context?: any): QuickPickEntry[] {
-    if (!Array.isArray(task?.items)) { return []; }
+    const items = normalizeQuickPickItems(task?.items);
+    if (!items) { return []; }
     const resolvedItems = context === undefined
-        ? task.items
-        : interpolateQuickPickItems(task.items, context);
+        ? items
+        : interpolateQuickPickItems(items, context);
     return quickPickEntries(resolvedItems);
 }
 
@@ -6550,7 +6554,7 @@ export function backfillQuickPickValue(task: any, saved: any, context?: any): an
     const compatibleSaved = producesArgs && !Array.isArray(saved.args)
         ? { ...saved, args: [] }
         : saved;
-    if (!Array.isArray(task.items) || quickPickUsesItemsFromCommand(task)) { return compatibleSaved; }
+    if (!normalizeQuickPickItems(task.items) || quickPickUsesItemsFromCommand(task)) { return compatibleSaved; }
     const entries = replayQuickPickEntries(task, saved, context);
     return entries
         ? buildQuickPickResult(entries, task.canPickMany === true, producesArgs)
@@ -6569,11 +6573,14 @@ export function savedInputStillValid(task: any, saved: any, context?: any): bool
     // 없을 수 있고(`--with-option`), 그것을 목록과 비교하면 매핑을 쓴 액션의
     // 저장된 입력이 **매번** 거부돼 다시 묻게 된다. 0.7.31 이전 기록에는
     // `label` 이 없으므로 그때만 `value` 로 떨어진다.
-    if (task.type === 'quickPick' && Array.isArray(task.items) && !quickPickUsesItemsFromCommand(task)) {
+    const staticQuickPickItems = task.type === 'quickPick'
+        ? normalizeQuickPickItems(task.items)
+        : undefined;
+    if (task.type === 'quickPick' && staticQuickPickItems && !quickPickUsesItemsFromCommand(task)) {
         // 입력 프로필 팔레트는 아직 실행 문맥이 없다. 동적 label을 raw 문자열과
         // 비교해 미리 버리면 런타임의 현재 문맥 재파생 기회가 사라진다. 여기서는
         // 판정을 보류하고, 실행기가 context와 함께 다시 검사하게 둔다.
-        if (context === undefined && task.items.some((item: any) => {
+        if (context === undefined && staticQuickPickItems.some((item: any) => {
             const label = typeof item === 'string' ? item : item?.label;
             return typeof label === 'string' && label.includes('${');
         })) {
@@ -6922,9 +6929,10 @@ async function executeSingleTask(
             // (의존성 추론·Preview 는 이미 같은 규칙으로 이 필드를 건너뛴다 —
             // `projectActivePlatformBranches` 참조.)
             const itemsAreDead = quickPickUsesItemsFromCommand(task);
-            const interpolatedItems = itemsAreDead || !task.items
+            const normalizedItems = normalizeQuickPickItems(task.items);
+            const interpolatedItems = itemsAreDead || !normalizedItems
                 ? task.items
-                : interpolateQuickPickItems(task.items, interpolationContext);
+                : interpolateQuickPickItems(normalizedItems, interpolationContext);
             // Resolve `itemsFromCommand` (string or OS-specific object) to a
             // single interpolated command string, mirroring the shell branch.
             // 여기도 **고른 뒤 보간**한다 — 위 command 와 같은 이유다.
@@ -8315,11 +8323,12 @@ export function parseQuickPickCommandItems(
             ));
         }
         if (candidate.args !== undefined
+            && typeof candidate.args !== 'string'
             && (!Array.isArray(candidate.args)
                 || !candidate.args.every(value => typeof value === 'string'))) {
             throw new Error(t(
-                `itemsFromCommand JSONL ${index + 1}번째 줄의 args는 문자열 배열이어야 합니다.`,
-                `itemsFromCommand JSONL line ${index + 1} args must be an array of strings.`
+                `itemsFromCommand JSONL ${index + 1}번째 줄의 args는 문자열 또는 문자열 배열이어야 합니다.`,
+                `itemsFromCommand JSONL line ${index + 1} args must be a string or an array of strings.`
             ));
         }
         if (exclude.has(candidate.label)
@@ -8333,8 +8342,10 @@ export function parseQuickPickCommandItems(
         if (typeof candidate.value === 'string' || Array.isArray(candidate.value)) {
             item.value = candidate.value as string | string[];
         }
-        if (Array.isArray(candidate.args)) {
-            item.args = candidate.args as string[];
+        if (typeof candidate.args === 'string' || Array.isArray(candidate.args)) {
+            item.args = typeof candidate.args === 'string'
+                ? [candidate.args]
+                : candidate.args as string[];
         }
         items.push(item);
     }
@@ -8684,7 +8695,18 @@ export async function handleQuickPick(
     // When `itemsFromCommand` is set, build the pick list from the command's
     // stdout (one item per non-empty line). The command is already interpolated
     // and reduced to a single OS-specific string by the dispatcher.
-    let pickItems: any = task.items;
+    const usesDynamicItems = quickPickUsesItemsFromCommand(task);
+    const normalizedPickItems = usesDynamicItems ? undefined : normalizeQuickPickItems(task.items);
+    const invalidCompactLabel = usesDynamicItems
+        ? undefined
+        : firstInvalidQuickPickCompactItemLabel(task.items);
+    if (normalizedPickItems === undefined && invalidCompactLabel !== undefined) {
+        throw new Error(t(
+            `Task '${task.id}'의 QuickPick 축약 항목 ${JSON.stringify(invalidCompactLabel)} 값이 올바르지 않습니다. null, 문자열, 문자열 배열 또는 상세 객체를 사용하세요.`,
+            `Task '${task.id}' has an invalid compact QuickPick item value at ${JSON.stringify(invalidCompactLabel)}. Use null, a string, an array of strings, or a detail object.`
+        ));
+    }
+    let pickItems: any = normalizedPickItems ?? task.items;
     if (typeof task.itemsFromCommand === 'string' && task.itemsFromCommand.length > 0) {
         const runCwd = task.cwd || defaultWorkspace || '(none)';
         let lines: string[];

@@ -47,6 +47,7 @@ import {
     materializeSwitchBranchTask,
     quickPickProducesArgsResult,
     quickPickUsesItemsFromCommand,
+    normalizeQuickPickItems,
     buildTaskGraph,
     detectGraphCycle,
 } from '../pipelineUtils';
@@ -75,6 +76,52 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         assert.strictEqual(quickPickProducesArgsResult({
             type: 'quickPick', itemsFromCommand: '', itemsFromCommandFormat: 'jsonl', items: ['A'],
         }), false, '실행하지 않는 JSONL command가 args 결과를 선언했다');
+    });
+
+    test('QuickPick 축약 객체와 단일 args를 기존 항목 배열로 정규화한다', () => {
+        const source = {
+            'ZIP 파일': { id: 'file', value: 'file', args: '--input-file' },
+            '폴더': { value: 'folder', args: ['--input-dir', '--recursive'] },
+            '기본값': null,
+            '값 배열': ['--mode', 'debug'],
+        };
+        assert.deepStrictEqual(normalizeQuickPickItems(source), [
+            { id: 'file', value: 'file', args: ['--input-file'], label: 'ZIP 파일' },
+            { value: 'folder', args: ['--input-dir', '--recursive'], label: '폴더' },
+            { label: '기본값' },
+            { label: '값 배열', value: ['--mode', 'debug'] },
+        ]);
+        assert.deepStrictEqual(source['ZIP 파일'].args, '--input-file', '원본 JSON 모양을 수정했다');
+
+        const arraySource = [{ label: 'Array item', args: '--array-option' }];
+        assert.deepStrictEqual(normalizeQuickPickItems(arraySource), [
+            { label: 'Array item', args: ['--array-option'] },
+        ]);
+        assert.strictEqual(arraySource[0].args, '--array-option', '배열형 원본 args를 수정했다');
+    });
+
+    test('QuickPick 축약 객체의 정수형 label은 JavaScript 키 순서를 따른다', () => {
+        assert.deepStrictEqual(
+            normalizeQuickPickItems({ '10': null, '2': null, b: null })?.map(item => item.label),
+            ['2', '10', 'b']
+        );
+        assert.strictEqual(normalizeQuickPickItems({ A: null, B: 5 }), undefined);
+    });
+
+    test('QuickPick 축약 객체의 label 키와 value·args 참조를 모두 의존성으로 추론한다', () => {
+        const deps = inferTaskDependencies({
+            id: 'pick', type: 'quickPick',
+            items: {
+                '${labelSource.value}': {
+                    value: '${valueSource.value}',
+                    args: '--mode=${argSource.value}',
+                },
+            },
+        } as any, new Set(['labelSource', 'valueSource', 'argSource']));
+        assert.deepStrictEqual(
+            [...deps].sort(),
+            ['argSource', 'labelSource', 'valueSource']
+        );
     });
 
     test('switch case는 바깥 id와 공통 설정을 유지하고 case가 실행 필드를 덮는다', () => {

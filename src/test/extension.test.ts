@@ -1672,6 +1672,39 @@ suite('Extension Test Suite', () => {
 			);
 		});
 
+		test('History 재실행은 label-keyed 축약형에서도 현재 mapping을 다시 만든다', () => {
+			const task = {
+				type: 'quickPick',
+				items: { 'Release': { id: 'release', value: 'release', args: '--current' } },
+			};
+			const saved = {
+				label: 'Old label', labelList: ['Old label'], value: 'old',
+				args: ['--stale'], custom: false, _itemId: 'release',
+			};
+			assert.deepStrictEqual(backfillQuickPickValue(task, saved, {}), {
+				label: 'Release', labelList: ['Release'], value: 'release',
+				valueList: ['release'], args: ['--current'], custom: false,
+				_itemId: 'release', _itemIds: ['release'],
+			});
+		});
+
+		test('축약형의 동적 label은 문맥이 없으면 보류하고 현재 문맥에서 mapping을 만든다', () => {
+			const task = {
+				type: 'quickPick', items: {
+					'${prior.value}': { value: 'release', args: '--release' },
+				},
+			};
+			const saved = {
+				label: 'Release', labelList: ['Release'], value: 'old', custom: false,
+			};
+			assert.strictEqual(savedInputStillValid(task, saved), true);
+			assert.strictEqual(savedInputStillValid(task, saved, { prior: { value: 'Release' } }), true);
+			assert.deepStrictEqual(backfillQuickPickValue(task, saved, { prior: { value: 'Release' } }), {
+				label: 'Release', labelList: ['Release'], value: 'release', valueList: ['release'],
+				args: ['--release'], custom: false,
+			});
+		});
+
 		test('저장된 item id가 사라지면 같은 label로 후퇴하지 않는다', () => {
 			const task = {
 				type: 'quickPick', items: [{ id: 'other', label: 'Release', value: '--other' }],
@@ -6717,11 +6750,15 @@ suite('Extension Test Suite', () => {
 					taskHubValue: 'must-not-pass', extra: 'ignored',
 				}),
 				JSON.stringify({ id: 'debug', label: 'Debug build', value: '--debug' }),
+				JSON.stringify({ id: 'single', label: 'Single option', args: '--single' }),
 			], 'jsonl', ['debug']);
-			assert.deepStrictEqual(items, [{
-				id: 'release', label: 'Release build', description: 'optimized',
-				detail: 'for deployment', value: 'release', args: ['--mode', 'release'],
-			}]);
+			assert.deepStrictEqual(items, [
+				{
+					id: 'release', label: 'Release build', description: 'optimized',
+					detail: 'for deployment', value: 'release', args: ['--mode', 'release'],
+				},
+				{ id: 'single', label: 'Single option', args: ['--single'] },
+			]);
 		});
 
 		test('jsonl 오류는 줄 번호만 알리고 원문은 노출하지 않는다', () => {
@@ -6855,6 +6892,39 @@ suite('Extension Test Suite', () => {
 			);
 		});
 
+		test('배열형 항목의 단일 args 문자열도 argv 배열로 정규화한다', async () => {
+			const picked = await runtimeQuickPick({
+				id: 'kind', type: 'quickPick',
+				items: [{ label: 'ZIP file', value: 'file', args: '--input-file' }],
+			}, { label: 'ZIP file' });
+			assert.deepStrictEqual(picked.args, ['--input-file']);
+			assert.deepStrictEqual(expandArgTemplate('${kind.args}', { kind: picked }), ['--input-file']);
+		});
+
+		test('label-keyed items와 단일 args 축약도 같은 QuickPick 결과를 낸다', async () => {
+			const task = {
+				id: 'kind', type: 'quickPick',
+				items: {
+					'ZIP file': { value: 'file', args: '--input-file' },
+					'Folder': { value: 'folder', args: ['--input-dir', '--recursive'] },
+				},
+			};
+			const file = await runtimeQuickPick(task, { label: 'ZIP file' });
+			assert.strictEqual(file.value, 'file');
+			assert.deepStrictEqual(file.args, ['--input-file']);
+
+			const folder = await runtimeQuickPick(task, { label: 'Folder' });
+			assert.strictEqual(folder.value, 'folder');
+			assert.deepStrictEqual(folder.args, ['--input-dir', '--recursive']);
+		});
+
+		test('잘못된 축약 항목은 문제 label을 런타임 오류에 표시한다', async () => {
+			await assert.rejects(
+				handleQuickPick({ id: 'kind', type: 'quickPick', items: { A: null, B: 5 } }),
+				/"B"/
+			);
+		});
+
 		test('일부 항목만 args를 매핑해도 매핑 없는 선택은 빈 배열을 낸다', async () => {
 			const task = {
 				id: 'kind', type: 'quickPick',
@@ -6915,7 +6985,7 @@ suite('Extension Test Suite', () => {
 		test('args 매핑이 있는 allowCustom 직접 입력은 빈 args를 낸다', async () => {
 			const result = await advancedQuickPick({
 				id: 'branch', type: 'quickPick', allowCustom: true,
-				items: [{ label: 'main', args: ['--main'] }],
+				items: { main: { args: '--main' } },
 			}, (picker, controls) => {
 				controls.type('feature/new-flow');
 				picker.selectedItems = [...picker.activeItems];
@@ -7227,11 +7297,11 @@ suite('Extension Test Suite', () => {
 			const runtime = await runtimeQuickPick(
 				{
 					id: 'pick', type: 'quickPick', canPickMany: true,
-					items: [
-						{ label: 'A', value: 'a', args: ['--a'] },
-						{ label: 'Plain', value: 'plain' },
-						{ label: 'B', value: 'b', args: ['--b', '2'] },
-					],
+					items: {
+						A: { value: 'a', args: '--a' },
+						Plain: { value: 'plain' },
+						B: { value: 'b', args: ['--b', '2'] },
+					},
 				},
 				[{ label: 'B' }, { label: 'Plain' }, { label: 'A' }]
 			);

@@ -172,6 +172,17 @@ suite('inferTaskDependencies — auto-inference from ${taskId.x}', () => {
         );
     });
 
+    test('itemsFromCommand는 축약형의 죽은 label·value·args 참조도 제외한다', () => {
+        const task = mkTask({
+            id: 'D', type: 'quickPick',
+            items: {
+                '${A.output}': { value: '${C.output}', args: '${A.output}' },
+            },
+            itemsFromCommand: 'list ${B.output}',
+        } as any);
+        assert.deepStrictEqual([...inferTaskDependencies(task, validIds)], ['B']);
+    });
+
     test('빈 itemsFromCommand는 정적 items의 의존성을 유지한다', () => {
         const task = mkTask({
             id: 'D', type: 'quickPick', itemsFromCommand: '', items: ['${A.output}'],
