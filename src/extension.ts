@@ -6651,6 +6651,20 @@ async function executeForEachTask(
 
     const baseContext = Object.assign(Object.create(null), builtinVariables, allResults);
     const items = resolveForEachItems(task.forEach, baseContext);
+    // task 전체가 민감하다는 사실과 반복값 자체가 민감하다는 사실은 다르다.
+    // 예를 들어 리터럴 ['debug', 'release']를 돌면서 env에만 `${env:TOKEN}`을
+    // 쓰는 command는 출력/로그의 TOKEN은 가려야 하지만 `${each}`까지 가리면
+    // 어떤 반복이 실행됐는지 History와 보고서에서 알 수 없다. 반복 소스를
+    // 마스킹 문맥으로 한 번 더 풀어 실제 항목이 달라질 때만 each를 가린다.
+    let forEachValueUsesSensitiveData = false;
+    if (taskUsesSensitiveData) {
+        const redactedItems = resolveForEachItems(
+            task.forEach,
+            redactSecretsInContext(scope.run, baseContext)
+        );
+        forEachValueUsesSensitiveData = redactedItems.length !== items.length
+            || redactedItems.some((item, index) => item !== items[index]);
+    }
     const innerTask = { ...task, forEach: undefined };
     const results: any[] = [];
     const resultLimit = getTotalResultLimitBytes();
@@ -6661,7 +6675,7 @@ async function executeForEachTask(
         const iterationResults = Object.assign(Object.create(null), allResults, {
             each: buildForEachValue(items[index], index, items.length),
         });
-        if (taskUsesSensitiveData) {
+        if (forEachValueUsesSensitiveData) {
             iterationResults[FOREACH_VALUE_IS_SECRET] = true;
         }
         try {

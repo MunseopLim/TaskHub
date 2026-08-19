@@ -2540,6 +2540,21 @@ function collectSecretTaskIds(tasks: Task[]): Set<string> {
 
 /** 런타임이 이 태스크로 디스크에 파일을 남기는가. */
 function persistsToFile(task: Task): boolean {
+    if (task.type === 'switch') {
+        const branches = [
+            ...Object.values(task.cases ?? {}),
+            ...(task.defaultCase ? [task.defaultCase] : []),
+        ];
+        return branches.some(branch => {
+            try {
+                return persistsToFile(materializeSwitchBranchTask(task, branch));
+            } catch {
+                // 잘못된 case는 Schema 진단이 담당한다. 실행할 수 없는 본문을
+                // 파일 쓰기로 인정해 opt-in 조언까지 겹치지 않는다.
+                return false;
+            }
+        });
+    }
     if (task.type === 'writeFile' || task.type === 'appendFile') { return true; }
     // `output` 블록은 `passTheResultToNextTask` 게이트 안에서만 산다
     // (`output.ignored` 검사와 같은 규칙).
@@ -3172,7 +3187,12 @@ function analyzeActionTasks(
         // 런타임이 실행 중에 거부하는 자리라 **실행하기 전에** 알려 준다 —
         // 파이프라인 중간에서 멈추면 앞 태스크의 부수 효과는 이미 일어난 뒤다.
         const writesSecretToFile = persistsToFile(task) && secretTaskIds.has(task.id);
-        if (writesSecretToFile && task.allowSecretContent !== true) {
+        const isSwitchDefinition = task.type === 'switch';
+        // switch 본문은 위 analysisEntries에서 materialize된 case마다 검사한다.
+        // 추상적인 바깥 switch에서도 missing opt-in을 내면 case 진단과 중복되고,
+        // case 자체의 allowSecretContent가 true인 유효 설정까지 거짓 양성으로
+        // 만들 수 있다.
+        if (!isSwitchDefinition && writesSecretToFile && task.allowSecretContent !== true) {
             findings.push({
                 filePath: input.filePath,
                 sourceLabel: input.sourceLabel,
@@ -3185,7 +3205,14 @@ function analyzeActionTasks(
         }
         // 반대 방향: 아무 효과도 없는 선언은 "여기서 비밀을 다룬다"는 잘못된
         // 신호를 남기고 리뷰를 무디게 만든다.
-        if (task.allowSecretContent === true && !writesSecretToFile) {
+        // 바깥 switch의 공통 opt-in은 선택될 모든 case에 상속된다. 하나의 case가
+        // 실제 민감 파일 쓰기에 사용하면 다른 non-file case에서 "unused"라고
+        // 뒤집어 말하지 않는다. 공통 선언의 사용 여부는 바깥 switch에서 한 번,
+        // case-local 선언은 해당 materialized case에서 판단한다.
+        const inheritsSwitchOptIn = pipelineTask.type === 'switch'
+            && pipelineTask.allowSecretContent === true
+            && !isSwitchDefinition;
+        if (task.allowSecretContent === true && !writesSecretToFile && !inheritsSwitchOptIn) {
             const reason = persistsToFile(task)
                 ? { en: 'the task writes a file but nothing in it is derived from sensitive runtime data', ko: '이 태스크는 파일을 쓰지만 민감한 실행 문맥에서 파생된 값이 없습니다' }
                 : { en: 'the task does not write a file', ko: '이 태스크는 파일을 쓰지 않습니다' };

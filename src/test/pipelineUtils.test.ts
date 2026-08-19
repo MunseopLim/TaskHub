@@ -122,6 +122,34 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         );
     });
 
+    test('switch case의 bare inputs도 실제 producer 의존성으로 잡는다', () => {
+        const switchTask = {
+            id: 'extract', type: 'switch', on: '${pick.value}', parallel: true,
+            inputs: { archive: 'deadOuter' },
+            cases: {
+                unzip: { type: 'unzip', inputs: { archive: 'makeZip' } },
+                skip: { type: 'command', command: 'echo skip' },
+            },
+        } as any;
+        const ids = new Set(['pick', 'makeZip', 'deadOuter', 'extract']);
+
+        assert.deepStrictEqual(
+            [...inferTaskDependencies(switchTask, ids)].sort(),
+            ['makeZip', 'pick'],
+            'case가 덮은 바깥 inputs는 버리고 선택 가능한 case의 producer는 기다려야 한다'
+        );
+
+        const graph = buildTaskGraph([
+            { id: 'pick', type: 'quickPick', items: ['unzip'], parallel: true },
+            { id: 'makeZip', type: 'zip', archive: 'out.zip', source: ['a.txt'], parallel: true },
+            switchTask,
+        ] as any[]);
+        assert.deepStrictEqual(
+            [...graph.nodes.get('extract')!.allDeps].sort(),
+            ['makeZip', 'pick']
+        );
+    });
+
     test('switch case에서 실행되지 않는 output은 의존성으로 잡지 않는다', () => {
         const ids = new Set(['sw', 'dead', 'live']);
         const task = {

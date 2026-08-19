@@ -1269,10 +1269,11 @@ export function taskReferencesSensitiveBuiltin(
  * wrapping) and looks them up in `allResults`. Without inferring those,
  * a `parallel: true` unzip following a zip can be scheduled before the
  * zip populates `allResults`, causing "requires an archive path" at
- * runtime. We inspect every `inputs` value across task types — matching
- * by `validTaskIds` keeps unrelated strings (paths, format names, …)
- * from being misread as deps. `inputs` is not platform-branched, so
- * the projection does not affect this path.
+ * runtime. Only `unzip` consumes this legacy bare-id object; matching
+ * `inputs` on command/zip/etc. would turn an ignored field into a fake dep.
+ * Within unzip, matching by `validTaskIds` keeps unrelated strings (paths,
+ * format names, …) from being misread as deps. `inputs` is not
+ * platform-branched, so the projection does not affect this path.
  */
 export function inferTaskDependencies(
     task: Task,
@@ -1294,8 +1295,29 @@ export function inferTaskDependencies(
             if (validTaskIds.has(head)) { deps.add(head); }
         }
     }
-    const inputs = (task as unknown as { inputs?: unknown }).inputs;
-    if (inputs && typeof inputs === 'object') {
+    // `inputs`의 bare task id는 `${...}` 문자열 순회로는 찾을 수 없다. switch는
+    // case가 바깥 공통 설정을 덮을 수 있으므로 raw `cases.*.inputs`와 바깥
+    // `inputs`를 따로 합치지 않고, 런타임과 같이 materialize한 **각 최종 case**를
+    // 본다. 그래야 case 전용 unzip이 producer보다 먼저 스케줄되지 않으면서,
+    // 모든 case가 덮어쓴 죽은 바깥 inputs로 가짜 의존성을 만들지도 않는다.
+    const inputOwners: unknown[] = task.type === 'switch'
+        ? [
+            ...Object.values(task.cases ?? {}),
+            ...(task.defaultCase ? [task.defaultCase] : []),
+        ].map(branch => {
+            try {
+                return materializeSwitchBranchTask(task, branch);
+            } catch {
+                // 잘못된 branch는 Schema가 보고한다. 그 안의 bare inputs까지
+                // 숨기지는 않아 그래프 판정이 가능한 한 보수적으로 실패하게 한다.
+                return branch;
+            }
+        })
+        : [task];
+    for (const owner of inputOwners) {
+        if ((owner as { type?: unknown } | null | undefined)?.type !== 'unzip') { continue; }
+        const inputs = (owner as { inputs?: unknown } | null | undefined)?.inputs;
+        if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) { continue; }
         for (const value of Object.values(inputs as Record<string, unknown>)) {
             if (typeof value !== 'string') { continue; }
             if (value === task.id) { continue; }

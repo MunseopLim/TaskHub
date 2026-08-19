@@ -5436,6 +5436,49 @@ try {
             assert.ok(warnings.join('\n').includes('***'));
         });
 
+        test('IT-188: 다른 필드만 민감하면 리터럴 each는 실행 기록에 남긴다', async () => {
+            const secret = 'TOP-SECRET-UNRELATED-ENV';
+            const probe = path.join(tempWorkspace, 'foreach-visible-each.js');
+            const calls = path.join(tempWorkspace, 'foreach-visible-each.log');
+            fs.writeFileSync(
+                probe,
+                "const fs=require('fs'); fs.appendFileSync(process.argv[2],process.argv[3]+'\\n'); process.stdout.write(process.env.TASKHUB_CHILD_SECRET || '');"
+            );
+            const tasks = [{
+                id: 'run', type: 'command', forEach: ['debug', 'release'],
+                command: 'node', args: [probe, calls, '${each}'],
+                env: { TASKHUB_CHILD_SECRET: '${env:TASKHUB_FOREACH_UNRELATED_SECRET}' },
+                passTheResultToNextTask: true,
+            }] as any[];
+            const commands: Record<string, string> = Object.create(null);
+            const collector = new ActionRunLogCollector('it188', 'IT-188', Date.now(), tasks);
+            const extensionRoot = path.resolve(__dirname, '..', '..');
+            await executeActionPipeline(
+                { description: 'IT-188', tasks },
+                { extensionPath: extensionRoot } as vscode.ExtensionContext,
+                'it188', tempWorkspace, [tempWorkspace], {
+                    recordCommands: commands,
+                    runLogCollector: collector,
+                    builtinVariables: buildBuiltinVariableContext({
+                        workspaceFolder: tempWorkspace,
+                        extensionPath: extensionRoot,
+                        environment: { TASKHUB_FOREACH_UNRELATED_SECRET: secret },
+                        strict: true,
+                    }),
+                }
+            );
+
+            assert.deepStrictEqual(
+                fs.readFileSync(calls, 'utf8').trim().split(/\r?\n/),
+                ['debug', 'release']
+            );
+            assert.ok(commands.run.includes('debug') && commands.run.includes('release'), commands.run);
+            assert.ok(!commands.run.includes('***'), `리터럴 each가 불필요하게 가려졌다: ${commands.run}`);
+            const report = JSON.stringify(collector.finish('success', Date.now()));
+            assert.ok(report.includes('debug') && report.includes('release'), report);
+            assert.ok(!report.includes(secret), '다른 필드의 민감값이 Run Report에 노출됐다');
+        });
+
         test('IT-177: forEach timeout은 중단된 반복 위치를 밝힌다', async () => {
             await assert.rejects(
                 () => run({

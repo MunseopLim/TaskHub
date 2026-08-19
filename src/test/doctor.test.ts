@@ -4254,6 +4254,30 @@ suite('actions.schema.json — switch', () => {
         assert.ok(got.includes('secret.file-optin'), JSON.stringify(findings));
     });
 
+    test('switch의 민감 파일 case와 공통 opt-in은 서로 반대 조언을 만들지 않는다', () => {
+        const task = (allowSecretContent?: boolean) => ({
+            id: 'optional', type: 'switch', on: 'save',
+            ...(allowSecretContent === undefined ? {} : { allowSecretContent }),
+            cases: {
+                run: { type: 'command', command: 'echo plain' },
+                save: { type: 'writeFile', path: 'out.txt', content: '${env:TOKEN}' },
+            },
+        });
+        const withoutOptIn = runDoctor([makeInput(wrap(task()))], compileValidator());
+        assert.deepStrictEqual(
+            codes(withoutOptIn).filter(code => code.startsWith('secret.')),
+            ['secret.file-optin'],
+            JSON.stringify(withoutOptIn, null, 2)
+        );
+
+        const withOptIn = runDoctor([makeInput(wrap(task(true)))], compileValidator());
+        assert.deepStrictEqual(
+            codes(withOptIn).filter(code => code.startsWith('secret.')),
+            [],
+            JSON.stringify(withOptIn, null, 2)
+        );
+    });
+
     test('switch branch의 capture 예약 이름도 일반 태스크처럼 검사한다', () => {
         const findings = runDoctor([makeInput(wrap({
             id: 'optional', type: 'switch', on: 'run', cases: {
