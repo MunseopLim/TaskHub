@@ -19,6 +19,7 @@
  * | --- | --- |
  * | `buildMinimalElf32()` | 개요 표, All Sections 표 |
  * | `buildElf32WithSymbols()` | + region 카드 상세 표, Object Summary |
+ * | `buildElf32WithDwarfLines()` | + 함수별 DWARF 소스 열기 |
  * | `examples/sample_armlink.txt` | + `func`(함수명) 열과 `Function ▶` 토글 |
  *
  * 마지막 줄이 중요하다: `func`는 **ARM link listing 파서만** 채운다.
@@ -34,6 +35,8 @@ interface SectionSpec {
     flags: number;
     addr: number;
     size: number;
+    /** 지정하면 결정적 패턴 대신 이 payload를 그대로 쓴다. */
+    data?: Buffer;
 }
 
 interface SymbolSpec {
@@ -98,6 +101,118 @@ export function buildElf32WithSymbols(): Buffer {
         { name: 'g_buffer', addr: 0x20000040, size: 0x40, type: 1, sectionIndex: 3 },
     ];
     return assembleElf32(sections, symbols);
+}
+
+/**
+ * 심볼과 DWARF 4 `.debug_line`을 함께 가진 ELF32.
+ *
+ * 세 함수의 시작 주소를 한 소스 파일의 서로 다른 줄에 연결한다. Memory Map의
+ * host/webview 통합 테스트가 실제 ELF 파싱부터 소스 대상 생성까지 검증할 때 쓴다.
+ */
+export function buildElf32WithDwarfLines(sourcePath = 'src/main.c', debugLineFlags = 0): Buffer {
+    const debugLine = buildDwarf4LineSection(sourcePath);
+    const sections: SectionSpec[] = [
+        { name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 0x400 },
+        { name: '.rodata', type: SHT_PROGBITS, flags: SHF_ALLOC, addr: 0x08000400, size: 0x100 },
+        { name: '.data', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_WRITE, addr: 0x20000000, size: 0x80 },
+        { name: '.bss', type: SHT_NOBITS, flags: SHF_ALLOC | SHF_WRITE, addr: 0x20000080, size: 0x200 },
+        { name: '.debug_line', type: SHT_PROGBITS, flags: debugLineFlags, addr: 0, size: debugLine.length, data: debugLine },
+    ];
+    const symbols: SymbolSpec[] = [
+        { name: 'main', addr: 0x08000000, size: 0x120, type: 2, sectionIndex: 1 },
+        { name: 'SystemInit', addr: 0x08000120, size: 0x80, type: 2, sectionIndex: 1 },
+        { name: 'HAL_GPIO_Init', addr: 0x080001a0, size: 0x160, type: 2, sectionIndex: 1 },
+        { name: 'g_config', addr: 0x20000000, size: 0x40, type: 1, sectionIndex: 3 },
+    ];
+    return assembleElf32(sections, symbols);
+}
+
+function encodeUleb(value: number): number[] {
+    const bytes: number[] = [];
+    let rest = value;
+    do {
+        let byte = rest & 0x7f;
+        rest = Math.floor(rest / 128);
+        if (rest > 0) { byte |= 0x80; }
+        bytes.push(byte);
+    } while (rest > 0);
+    return bytes;
+}
+
+function encodeSleb(value: number): number[] {
+    const bytes: number[] = [];
+    let rest = value;
+    let more = true;
+    while (more) {
+        let byte = rest & 0x7f;
+        rest >>= 7;
+        const sign = (byte & 0x40) !== 0;
+        more = !((rest === 0 && !sign) || (rest === -1 && sign));
+        if (more) { byte |= 0x80; }
+        bytes.push(byte);
+    }
+    return bytes;
+}
+
+function encodeCString(value: string): number[] {
+    return [...Buffer.from(value, 'utf8'), 0];
+}
+
+function encodeUInt16LE(value: number): number[] {
+    const buffer = Buffer.alloc(2);
+    buffer.writeUInt16LE(value);
+    return [...buffer];
+}
+
+function encodeUInt32LE(value: number): number[] {
+    const buffer = Buffer.alloc(4);
+    buffer.writeUInt32LE(value);
+    return [...buffer];
+}
+
+function splitDwarfPath(sourcePath: string): { directory: string; file: string } {
+    const normalized = sourcePath.replace(/\\/g, '/');
+    const separator = normalized.lastIndexOf('/');
+    if (separator < 0) { return { directory: '', file: normalized }; }
+    const directory = normalized.slice(0, separator) || '/';
+    return { directory, file: normalized.slice(separator + 1) };
+}
+
+/** DWARF 4 line unit 하나를 만든다. */
+export function buildDwarf4LineSection(sourcePath = 'src/main.c'): Buffer {
+    const { directory, file } = splitDwarfPath(sourcePath);
+    const directories = directory ? [...encodeCString(directory), 0] : [0];
+    const header = [
+        1, // minimum_instruction_length
+        1, // maximum_operations_per_instruction
+        1, // default_is_stmt
+        0xfb, // line_base = -5
+        14, // line_range
+        13, // opcode_base
+        0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1,
+        ...directories,
+        ...encodeCString(file), ...encodeUleb(directory ? 1 : 0), ...encodeUleb(0), ...encodeUleb(0),
+        0,
+    ];
+    const program = [
+        0, ...encodeUleb(5), 2, ...encodeUInt32LE(0x08000000), // DW_LNE_set_address
+        1, // main:1
+        3, ...encodeSleb(9),
+        2, ...encodeUleb(0x120),
+        1, // SystemInit:10
+        3, ...encodeSleb(10),
+        2, ...encodeUleb(0x80),
+        1, // HAL_GPIO_Init:20
+        2, ...encodeUleb(0x160),
+        0, ...encodeUleb(1), 1, // DW_LNE_end_sequence
+    ];
+    const body = [
+        ...encodeUInt16LE(4),
+        ...encodeUInt32LE(header.length),
+        ...header,
+        ...program,
+    ];
+    return Buffer.from([...encodeUInt32LE(body.length), ...body]);
 }
 
 /**
@@ -194,6 +309,10 @@ function assembleElf32(sections: SectionSpec[], symbols: SymbolSpec[]): Buffer {
     symtabBuf.copy(buf, symtabOffset);
     sections.forEach((sec, sectionIndex) => {
         if (sec.type === SHT_NOBITS) { return; }
+        if (sec.data) {
+            sec.data.copy(buf, sectionOffsets[sectionIndex]);
+            return;
+        }
         // 섹션마다 구분되는 결정적 byte 패턴. 선택 범위가 실제 payload를
         // 가리키는지 통합 테스트에서 확인할 수 있다.
         for (let i = 0; i < sec.size; i++) {

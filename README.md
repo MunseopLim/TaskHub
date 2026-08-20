@@ -45,7 +45,7 @@
 - **Bit Operation Hover** *(실험적)* — 비트 연산 결과 미리보기
 
 ### 뷰어
-- **Memory Map 시각화** — ELF/AXF와 ARM Linker Listing 분석, 메모리 영역 표시, 심볼·섹션 바이트를 Hex Viewer로 연결
+- **Memory Map 시각화** — ELF/AXF와 ARM Linker Listing 분석, 메모리 영역 표시, 심볼·섹션 바이트와 DWARF 소스 위치 연결
 - **Hex Viewer** — 주소/16진/ASCII 3단, Unit·Endian·Go-to·Find 지원
 - **JSON Editor** — JSON 배열/객체를 스프레드시트 UI로 편집
 
@@ -116,7 +116,7 @@
 
 ### 뷰어
 
-**Memory Map 시각화** — ELF/AXF 또는 ARM Linker Listing을 분석해 메모리 리전별 사용량·섹션·함수 분포를 시각화. GNU linker script와 ARM scatter file에서 메모리 영역도 읽으며, ELF 심볼·섹션의 원본 바이트를 Hex Viewer로 바로 열 수 있습니다.
+**Memory Map 시각화** — ELF/AXF 또는 ARM Linker Listing을 분석해 메모리 리전별 사용량·섹션·함수 분포를 시각화. GNU linker script와 ARM scatter file에서 메모리 영역도 읽으며, ELF 심볼·섹션의 원본 바이트를 Hex Viewer로 열거나 DWARF가 기록한 소스 위치로 이동할 수 있습니다.
 
 ![Memory Map - ARM Linker 예제](docs/images/memory-map-armlink.png)
 

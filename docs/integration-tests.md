@@ -298,6 +298,7 @@
 | IT-191a, IT-191b, IT-191c, IT-191d | [viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) | 병렬 진행 문구 지역화와 성공·실패·실행 중 접근성 라벨, 상태 표시 비활성화를 같은 정책으로 유지 |
 | IT-192 | [extension.test.ts](../src/test/extension.test.ts) | Actions 제목 표시줄의 검색 아이콘이 Quick Action Palette를 최우선 탐색 항목으로 노출 |
 | IT-193a, IT-193b, IT-193c, IT-193d, IT-193e, IT-193f, IT-193g | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts), [stopInteractive.test.ts](../src/test/stopInteractive.test.ts), [passwordRedaction.test.ts](../src/test/passwordRedaction.test.ts) | Actions 상태 표시와 실행 알림을 독립 제어하고 실행 중 설정 전환·일반/민감 원샷 실패·조건 skip 뒤 부분 취소에서도 capability와 기존 `followStatus` 호환을 유지 |
+| IT-194a, IT-194b | [memoryMapViewer.test.ts](../src/test/memoryMapViewer.test.ts) | ELF32의 DWARF 4 line 정보가 함수 행의 host 보관 opaque target으로 연결되고 기록된 소스 파일·줄을 열며 컴파일 경로는 웹뷰에 노출하지 않고, 압축 line section은 파서 오류 없이 소스 동작만 숨김 |
 
 IT-093~IT-097은 MRU를 별도 저장하던 구현이 제거되면서 함께 삭제된 번호이며 재사용하지 않습니다.
 
@@ -307,6 +308,7 @@ IT-093~IT-097은 MRU를 별도 저장하던 구현이 제거되면서 함께 삭
 | --- | --- |
 | `buildMinimalElf32()` | Overview, All Sections |
 | `buildElf32WithSymbols()` | region 상세, Object Summary |
+| `buildElf32WithDwarfLines()` | 함수별 DWARF 소스 열기 |
 | `examples/sample_armlink.txt` | `func` 열, Function 토글 |
 
 Memory Map 테스트는 다음 규칙을 지킵니다.

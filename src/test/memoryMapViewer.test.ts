@@ -3,10 +3,21 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as vscode from 'vscode';
-import { openMemoryMapPanel, panelRegistry, MEMORY_MAP_MAX_FILE_SIZE, MEMORY_MAP_MAX_SAVE_HTML_CHARS } from '../memoryMapViewer';
-import { buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
-import { parseElf32 } from '../elfParser';
+import {
+    openMemoryMapPanel,
+    panelRegistry,
+    MEMORY_MAP_MAX_FILE_SIZE,
+    MEMORY_MAP_MAX_SAVE_HTML_CHARS,
+    DWARF_SOURCE_SEARCH_MAX_RESULTS,
+    DwarfSourceSearchLimitError,
+    collectMemoryMapSourceTargets,
+    findWorkspaceSourceBySuffix,
+    resolveDwarfSourcePathCandidates,
+} from '../memoryMapViewer';
+import { buildElf32WithDwarfLines, buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
+import { computeSymbolUsage, parseElf32 } from '../elfParser';
 import { hexPanelRegistry } from '../hexViewer';
+import { parseDwarfLineSection } from '../dwarfLineParser';
 
 /**
  * Build a minimal ELF32 little-endian binary for testing.
@@ -199,6 +210,290 @@ suite('Memory Map Viewer Test Suite', () => {
             panelRegistry.clear();
             hexPanelRegistry.clear();
         }
+    });
+
+    test('IT-194a: DWARF 함수 행의 opaque target이 기록된 소스 줄을 연다', async () => {
+        const dir = path.join(tmpDir, 'taskhub-test', 'dwarf-source-flow');
+        fs.mkdirSync(dir, { recursive: true });
+        const sourcePath = path.join(dir, 'main.c');
+        const filePath = path.join(dir, 'source-flow.axf');
+        const sourceText = Array.from({ length: 30 }, (_value, index) => `line ${index + 1}`).join('\n');
+        fs.writeFileSync(sourcePath, sourceText);
+        fs.writeFileSync(filePath, buildElf32WithDwarfLines(sourcePath));
+        tmpFiles.push(sourcePath, filePath);
+
+        const originalCreate = vscode.window.createWebviewPanel;
+        const originalOpenTextDocument = vscode.workspace.openTextDocument;
+        const originalShowTextDocument = vscode.window.showTextDocument;
+        const originalWarning = vscode.window.showWarningMessage;
+        let memoryHandler: ((message: any) => Promise<void>) | undefined;
+        let openedPath: string | undefined;
+        let revealed = false;
+        let visibleLineCount = 30;
+        let showCount = 0;
+        const warnings: string[] = [];
+        const editor = {
+            selection: undefined as vscode.Selection | undefined,
+            revealRange: () => { revealed = true; },
+        };
+
+        try {
+            (vscode.window as any).createWebviewPanel = (_viewType: string, title: string) => {
+                let html = '';
+                return {
+                    title,
+                    active: true,
+                    webview: {
+                        get html() { return html; },
+                        set html(value: string) { html = value; },
+                        cspSource: 'vscode-webview:',
+                        postMessage: () => Promise.resolve(true),
+                        onDidReceiveMessage: (handler: (message: any) => Promise<void>) => {
+                            memoryHandler = handler;
+                            return { dispose() { /* no-op */ } };
+                        },
+                    },
+                    reveal() { /* no-op */ },
+                    onDidDispose() { return { dispose() { /* no-op */ } }; },
+                    onDidChangeViewState() { return { dispose() { /* no-op */ } }; },
+                } as unknown as vscode.WebviewPanel;
+            };
+            (vscode.workspace as any).openTextDocument = async (uri: vscode.Uri) => {
+                openedPath = uri.fsPath;
+                const lines = sourceText.split('\n');
+                return {
+                    lineCount: visibleLineCount,
+                    lineAt: (line: number) => ({ text: lines[line] }),
+                } as unknown as vscode.TextDocument;
+            };
+            (vscode.window as any).showTextDocument = async () => {
+                showCount++;
+                return editor as unknown as vscode.TextEditor;
+            };
+            (vscode.window as any).showWarningMessage = (message: string) => {
+                warnings.push(message);
+                return Promise.resolve(undefined);
+            };
+
+            const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+            assert.ok(openMemoryMapPanel(ctx, filePath, {
+                regions: [
+                    { name: 'FLASH', origin: 0x08000000, size: 0x1000 },
+                    { name: 'RAM', origin: 0x20000000, size: 0x1000 },
+                ],
+            }));
+            assert.ok(memoryHandler, 'Memory Map host message handler가 설치되지 않았다');
+
+            const targets = panelRegistry.getSourceTargets(filePath) ?? [];
+            assert.strictEqual(targets.find(target => target.label === 'main')?.location.line, 1);
+            assert.strictEqual(targets.find(target => target.label === 'SystemInit')?.location.line, 10);
+            assert.strictEqual(targets.find(target => target.label === 'HAL_GPIO_Init')?.location.line, 20);
+            assert.strictEqual(targets.length, 3);
+            assert.ok(!targets.some(target => target.label === 'g_config'), 'OBJECT 심볼에는 소스 이동을 만들면 안 된다');
+
+            const html = panelRegistry.getHtml(filePath) ?? '';
+            assert.ok(html.includes('data-action="open-source"'), 'DWARF가 있는 함수 행에 소스 버튼이 없다');
+            assert.ok(html.includes("command: 'openSource'"), '소스 대상 ID를 host로 보내는 경로가 없다');
+            assert.ok(!html.includes(sourcePath), '컴파일 경로를 웹뷰 HTML에 노출하면 안 된다');
+            const rdMatch = html.match(/^const RD = (.*);$/m);
+            assert.ok(rdMatch);
+            const rd = JSON.parse(rdMatch![1]);
+            const systemInit = rd.flatMap((region: any) => region.segments)
+                .find((entry: any) => entry.n === 'SystemInit');
+            assert.match(systemInit.sx, /^source:\d+:\d+$/);
+
+            const target = targets.find(candidate => candidate.label === 'SystemInit');
+            assert.ok(target);
+            await memoryHandler!({ command: 'openSource', targetId: 'source:forged:target' });
+            assert.strictEqual(openedPath, undefined, 'host가 만들지 않은 target ID는 아무 파일도 열면 안 된다');
+            assert.strictEqual(showCount, 0);
+
+            await memoryHandler!({ command: 'openSource', targetId: target!.id });
+            assert.strictEqual(openedPath, sourcePath);
+            assert.strictEqual(editor.selection?.active.line, 9);
+            assert.strictEqual(editor.selection?.active.character, 0);
+            assert.ok(revealed, '기록된 소스 줄을 화면 안으로 드러내야 한다');
+
+            visibleLineCount = 5;
+            const staleTarget = targets.find(candidate => candidate.label === 'HAL_GPIO_Init');
+            await memoryHandler!({ command: 'openSource', targetId: staleTarget!.id });
+            assert.strictEqual(showCount, 1, '범위를 벗어난 오래된 줄이면 에디터를 새로 열면 안 된다');
+            assert.ok(warnings.some(message => /20|line 20/.test(message)), '현재 소스 범위를 벗어난 줄을 안내해야 한다');
+
+            fs.appendFileSync(filePath, Buffer.from([0]));
+            const mainTarget = targets.find(candidate => candidate.label === 'main');
+            await memoryHandler!({ command: 'openSource', targetId: mainTarget!.id });
+            assert.strictEqual(showCount, 1, 'ELF가 교체된 뒤에는 오래된 소스 target을 열면 안 된다');
+            assert.ok(warnings.some(message => /changed|변경/.test(message)), 'ELF를 다시 열어야 한다고 안내해야 한다');
+        } finally {
+            (vscode.window as any).createWebviewPanel = originalCreate;
+            (vscode.workspace as any).openTextDocument = originalOpenTextDocument;
+            (vscode.window as any).showTextDocument = originalShowTextDocument;
+            (vscode.window as any).showWarningMessage = originalWarning;
+            panelRegistry.clear();
+        }
+    });
+
+    test('IT-194b: SHF_COMPRESSED .debug_line은 파서 오류 대신 지원 안내 후 소스 열을 숨긴다', () => {
+        const dir = path.join(tmpDir, 'taskhub-test', 'dwarf-compressed');
+        fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, 'compressed.axf');
+        fs.writeFileSync(filePath, buildElf32WithDwarfLines('src/main.c', 0x800));
+        tmpFiles.push(filePath);
+
+        const originalInformation = vscode.window.showInformationMessage;
+        const messages: string[] = [];
+        try {
+            (vscode.window as any).showInformationMessage = (message: string) => {
+                messages.push(message);
+                return Promise.resolve(undefined);
+            };
+            const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+            assert.ok(openMemoryMapPanel(ctx, filePath, {
+                regions: [{ name: 'FLASH', origin: 0x08000000, size: 0x1000 }],
+            }));
+            assert.deepStrictEqual(panelRegistry.getSourceTargets(filePath), []);
+            assert.ok(messages.some(message => /compressed|압축/.test(message)));
+            const html = panelRegistry.getHtml(filePath) ?? '';
+            const rdMatch = html.match(/^const RD = (.*);$/m);
+            assert.ok(rdMatch);
+            const rd = JSON.parse(rdMatch![1]);
+            assert.ok(rd.every((region: any) => region.hhs === false));
+            assert.ok(rd.flatMap((region: any) => region.segments).every((entry: any) => entry.sx === ''));
+        } finally {
+            (vscode.window as any).showInformationMessage = originalInformation;
+            panelRegistry.clear();
+        }
+    });
+
+    suite('DWARF source path resolution', () => {
+        test('ELF 인접 상대 경로와 워크스페이스의 가장 긴 suffix를 찾는다', () => {
+            const existing = new Set([
+                path.resolve('/repo/build/src/local.c'),
+                path.resolve('/workspace/project/src/main.c'),
+            ]);
+            const exists = (candidate: string): boolean => existing.has(path.resolve(candidate));
+
+            assert.deepStrictEqual(resolveDwarfSourcePathCandidates(
+                'src/local.c',
+                '/repo/build/app.elf',
+                ['/workspace/project'],
+                exists
+            ), [path.resolve('/repo/build/src/local.c')]);
+
+            assert.deepStrictEqual(resolveDwarfSourcePathCandidates(
+                '/old/agent/project/src/main.c',
+                '/repo/build/app.elf',
+                ['/workspace/project'],
+                exists
+            ), [path.resolve('/workspace/project/src/main.c')]);
+        });
+
+        test('워크스페이스 밖으로 나가는 suffix와 중복 후보를 제외한다', () => {
+            const source = path.resolve('/workspace/project/src/main.c');
+            const result = resolveDwarfSourcePathCandidates(
+                '../src/main.c',
+                '/workspace/project/build/app.elf',
+                ['/workspace/project', '/workspace/project'],
+                candidate => path.resolve(candidate) === source
+            );
+            assert.deepStrictEqual(result, [source]);
+
+            const first = path.resolve('/workspace/a/src/main.c');
+            const second = path.resolve('/workspace/b/src/main.c');
+            assert.deepStrictEqual(resolveDwarfSourcePathCandidates(
+                '/old/build/src/main.c',
+                '/repo/build/app.elf',
+                ['/workspace/a', '/workspace/b'],
+                candidate => [first, second].includes(path.resolve(candidate))
+            ), [first, second], '여러 workspace에 같은 suffix가 있으면 사용자가 고를 후보를 모두 남긴다');
+
+            const parentSource = path.resolve('/repo/src/parent.c');
+            assert.deepStrictEqual(resolveDwarfSourcePathCandidates(
+                '../../src/parent.c',
+                '/repo/build/out/app.elf',
+                [],
+                candidate => path.resolve(candidate) === parentSource
+            ), [parentSource], 'ELF 기준 상대 경로의 ..는 분리된 build/source 트리를 위해 허용한다');
+        });
+
+        test('findFiles 폴백은 glob을 이스케이프하고 가장 긴 suffix 후보만 남긴다', async () => {
+            const calls: { include: string; exclude: string; maxResults: number }[] = [];
+            const fileName = 'main[1]*?.c';
+            const selected = await findWorkspaceSourceBySuffix(
+                `/old/project/src/${fileName}`,
+                {
+                    hasWorkspace: true,
+                    findFiles: async (include, exclude, maxResults) => {
+                        calls.push({ include, exclude, maxResults });
+                        if (include !== '**/project/src/main[[]1[]][*][?].c') {
+                            return [];
+                        }
+                        return [
+                            vscode.Uri.file(`/workspace/a/project/src/${fileName}`),
+                            vscode.Uri.file(`/workspace/b/project/src/${fileName}`),
+                        ];
+                    },
+                }
+            );
+
+            assert.deepStrictEqual(calls, [
+                {
+                    include: '**/old/project/src/main[[]1[]][*][?].c',
+                    exclude: '**/{.git,node_modules}/**',
+                    maxResults: DWARF_SOURCE_SEARCH_MAX_RESULTS,
+                },
+                {
+                    include: '**/project/src/main[[]1[]][*][?].c',
+                    exclude: '**/{.git,node_modules}/**',
+                    maxResults: DWARF_SOURCE_SEARCH_MAX_RESULTS,
+                },
+            ]);
+            assert.deepStrictEqual(selected, [
+                path.resolve(`/workspace/a/project/src/${fileName}`),
+                path.resolve(`/workspace/b/project/src/${fileName}`),
+            ]);
+
+            let searched = false;
+            assert.deepStrictEqual(await findWorkspaceSourceBySuffix(fileName, {
+                hasWorkspace: false,
+                findFiles: async () => { searched = true; return []; },
+            }), []);
+            assert.strictEqual(searched, false, 'workspace가 없으면 전역 파일 검색을 시작하면 안 된다');
+
+            await assert.rejects(
+                findWorkspaceSourceBySuffix('/old/project/src/main.c', {
+                    hasWorkspace: true,
+                    findFiles: async () => Array.from(
+                        { length: DWARF_SOURCE_SEARCH_MAX_RESULTS },
+                        (_, index) => vscode.Uri.file(`/workspace/project-${index}/src/main.c`)
+                    ),
+                }),
+                (error: unknown) => error instanceof DwarfSourceSearchLimitError,
+                'findFiles 결과가 잘렸을 수 있으면 임의 후보를 자동 선택하면 안 된다'
+            );
+        });
+    });
+
+    test('collectMemoryMapSourceTargets는 FUNC만 주소 범위에 연결한다', () => {
+        const buffer = buildElf32WithDwarfLines('/workspace/src/main.c');
+        const parsed = parseElf32(buffer);
+        const debugLine = parsed.sections.find(section => section.name === '.debug_line');
+        assert.ok(debugLine?.offset !== undefined);
+        const locations = parseDwarfLineSection(
+            buffer.subarray(debugLine!.offset, debugLine!.offset! + debugLine!.size),
+            parsed.isLittleEndian
+        ).locations;
+        const usage = computeSymbolUsage(parsed.symbols, parsed.sections, [
+            { name: 'FLASH', origin: 0x08000000, size: 0x1000 },
+            { name: 'RAM', origin: 0x20000000, size: 0x1000 },
+        ]);
+
+        const targets = Array.from(collectMemoryMapSourceTargets(usage, parsed.symbols, locations).values());
+        assert.deepStrictEqual(targets.map(target => target.label).sort(), [
+            'HAL_GPIO_Init', 'SystemInit', 'main',
+        ]);
+        assert.ok(!targets.some(target => target.label === 'g_config'));
     });
 
     suite('webview HTML — search UX', () => {

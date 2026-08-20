@@ -2,12 +2,13 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, generateSummaryReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary, ElfFileRangeResolution } from './elfParser';
+import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, generateSummaryReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary, ElfFileRangeResolution, ElfSymbol } from './elfParser';
 import { parseLinkerFile } from './linkerScriptParser';
 import { ARM_LINK_MAX_ENTRIES, parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
 import { openHexViewerFile } from './hexViewer';
+import { DwarfSourceLocation, findDwarfSourceLocation, parseDwarfLineSection } from './dwarfLineParser';
 
 /**
  * *Go to Symbol* Quick Pick 이 다루는 한 항목. 웹뷰 영역 표의 **한 행과 1:1로
@@ -49,6 +50,8 @@ interface PanelState {
     regions: { name: string; addr: number; info: string }[];
     /** 웹뷰에는 opaque ID만 보내고 실제 file offset은 extension host가 보관한다. */
     hexTargets: Map<string, MemoryMapHexTarget>;
+    /** DWARF 경로·줄도 웹뷰에 싣지 않고 opaque ID 뒤의 extension host에만 둔다. */
+    sourceTargets: Map<string, MemoryMapSourceTarget>;
     /** 맵을 만든 뒤 ELF가 교체되면 오래된 offset으로 다른 바이트를 열지 않는다. */
     sourceFingerprint?: { size: number; mtimeMs: number };
     messageDisposable?: vscode.Disposable;
@@ -58,6 +61,12 @@ export interface MemoryMapHexTarget {
     id: string;
     label: string;
     fileRange: ElfFileRangeResolution;
+}
+
+export interface MemoryMapSourceTarget {
+    id: string;
+    label: string;
+    location: DwarfSourceLocation;
 }
 
 const panels = new Map<string, PanelState>();
@@ -78,11 +87,17 @@ export const panelRegistry = {
         const targets = panels.get(filePath)?.hexTargets;
         return targets ? Array.from(targets.values()) : undefined;
     },
+    /** 컴파일 경로와 줄 번호가 웹뷰에 노출되지 않는다는 계약을 검증한다. */
+    getSourceTargets(filePath: string): MemoryMapSourceTarget[] | undefined {
+        const targets = panels.get(filePath)?.sourceTargets;
+        return targets ? Array.from(targets.values()) : undefined;
+    },
     clear(): void { panels.clear(); lastActivePanel = undefined; },
 };
 
 /** Memory Map에서 처리 가능한 최대 ELF/Listing 파일 크기 (100 MB). Exported so tests can pin the boundary. */
 export const MEMORY_MAP_MAX_FILE_SIZE = 100 * 1024 * 1024;
+const ELF_SHF_COMPRESSED = 0x800;
 
 /**
  * *Save as HTML* 로 저장할 수 있는 최대 문서 크기(문자 수).
@@ -258,7 +273,7 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
         return false;
     }
 
-    const { sections, entryPoint, symbols, segments } = parseResult;
+    const { sections, entryPoint, symbols, segments, isLittleEndian } = parseResult;
     const { flash, ram } = classifySections(sections);
     const sectionSummary = summarizeSections(sections, segments, buffer.length);
 
@@ -279,11 +294,50 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     const textReport = generateTextReport(fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
     const summaryReport = generateSummaryReport(fileName, filePath, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions);
     const hasSymbols = symbols.length > 0;
+    let sourceLocations: DwarfSourceLocation[] = [];
+    const debugLine = sections.find(section => section.name === '.debug_line');
+    if (debugLine && debugLine.offset !== undefined && !debugLine.isNoBits) {
+        if ((debugLine.flags & ELF_SHF_COMPRESSED) !== 0) {
+            vscode.window.showInformationMessage(t(
+                `압축된 DWARF .debug_line은 아직 지원하지 않습니다 (${fileName}). Memory Map의 나머지 기능은 그대로 사용할 수 있습니다.`,
+                `Compressed DWARF .debug_line is not supported yet (${fileName}). The rest of the Memory Map remains available.`
+            ));
+        } else {
+            const debugLineEnd = debugLine.offset + debugLine.size;
+            if (
+                Number.isSafeInteger(debugLine.offset) && debugLine.offset >= 0
+                && Number.isSafeInteger(debugLineEnd) && debugLineEnd <= buffer.length
+            ) {
+                try {
+                    const dwarf = parseDwarfLineSection(buffer.subarray(debugLine.offset, debugLineEnd), isLittleEndian);
+                    sourceLocations = dwarf.locations;
+                    if (sourceLocations.length === 0 && (dwarf.unsupportedVersions.length > 0 || dwarf.skippedDwarf64Units > 0)) {
+                        const formats = dwarf.unsupportedVersions.map(version => `DWARF ${version}`);
+                        if (dwarf.skippedDwarf64Units > 0) { formats.push('DWARF64'); }
+                        vscode.window.showInformationMessage(t(
+                            `이 ELF의 소스 위치 정보(${formats.join(', ')})는 아직 지원하지 않습니다. Memory Map의 나머지 기능은 그대로 사용할 수 있습니다.`,
+                            `Source locations in this ELF (${formats.join(', ')}) are not supported yet. The rest of the Memory Map remains available.`
+                        ));
+                    }
+                } catch (e: any) {
+                    vscode.window.showWarningMessage(t(
+                        `DWARF 소스 위치를 읽지 못했습니다 (${fileName}). Memory Map은 계속 엽니다: ${e.message}`,
+                        `Could not read DWARF source locations (${fileName}). The Memory Map will still open: ${e.message}`
+                    ));
+                }
+            } else {
+                vscode.window.showWarningMessage(t(
+                    `DWARF .debug_line 범위가 ELF 파일을 벗어납니다 (${fileName}). Memory Map은 소스 이동 없이 계속 엽니다.`,
+                    `The DWARF .debug_line range exceeds the ELF file (${fileName}). The Memory Map will continue without source navigation.`
+                ));
+            }
+        }
+    }
 
     showPanel(
         context, filePath, fileName, entryPoint, flashTotal, ramTotal,
         sectionSummary, memoryUsage, regions, textReport, summaryReport, hasSymbols,
-        { size: stat.size, mtimeMs: stat.mtimeMs }
+        { size: stat.size, mtimeMs: stat.mtimeMs }, sourceLocations, symbols
     );
     return true;
 }
@@ -360,6 +414,32 @@ export function openMemoryMapFromListing(context: vscode.ExtensionContext, fileP
     return true;
 }
 
+function ensureMemoryMapElfIsCurrent(
+    filePath: string,
+    fileName: string,
+    fingerprint?: { size: number; mtimeMs: number }
+): boolean {
+    if (!fingerprint) { return true; }
+    let current: fs.Stats;
+    try {
+        current = fs.statSync(filePath);
+    } catch (e: any) {
+        vscode.window.showErrorMessage(t(
+            `ELF 파일을 다시 읽을 수 없습니다 (${fileName}): ${e.message}`,
+            `Cannot read the ELF file again (${fileName}): ${e.message}`
+        ));
+        return false;
+    }
+    if (current.size !== fingerprint.size || current.mtimeMs !== fingerprint.mtimeMs) {
+        vscode.window.showWarningMessage(t(
+            `ELF 파일이 Memory Map을 연 뒤 변경되었습니다 (${fileName}). 최신 주소·파일 오프셋·소스 위치를 사용하려면 Memory Map을 다시 여세요.`,
+            `The ELF file changed after the Memory Map was opened (${fileName}). Reopen the Memory Map to use current addresses, file offsets, and source locations.`
+        ));
+        return false;
+    }
+    return true;
+}
+
 function showPanel(
     context: vscode.ExtensionContext,
     filePath: string,
@@ -373,7 +453,9 @@ function showPanel(
     textReport: string,
     summaryReport: string,
     hasSymbols?: boolean,
-    sourceFingerprint?: { size: number; mtimeMs: number }
+    sourceFingerprint?: { size: number; mtimeMs: number },
+    sourceLocations: DwarfSourceLocation[] = [],
+    sourceSymbols: ElfSymbol[] = []
 ) {
     const existing = panels.get(filePath);
     let panel: vscode.WebviewPanel;
@@ -401,9 +483,10 @@ function showPanel(
 
     lastActivePanel = filePath;
     const hexTargets = collectMemoryMapHexTargets(sectionSummary, memoryUsage);
+    const sourceTargets = collectMemoryMapSourceTargets(memoryUsage, sourceSymbols, sourceLocations);
     const state: PanelState = {
         panel, entries: [], allEntries: [], entriesTotal: 0, hasSymbols: false, regions: [],
-        hexTargets, sourceFingerprint, messageDisposable: undefined,
+        hexTargets, sourceTargets, sourceFingerprint, messageDisposable: undefined,
     };
     state.messageDisposable = panel.webview.onDidReceiveMessage(async (message: any) => {
         if (message.command === 'openHex') {
@@ -415,25 +498,7 @@ function showPanel(
             // ID와 일치하지 않으면 아무 파일도 열지 않는다.
             if (!target) { return; }
 
-            if (state.sourceFingerprint) {
-                let current: fs.Stats;
-                try {
-                    current = fs.statSync(filePath);
-                } catch (e: any) {
-                    vscode.window.showErrorMessage(t(
-                        `ELF 파일을 다시 읽을 수 없습니다 (${fileName}): ${e.message}`,
-                        `Cannot read the ELF file again (${fileName}): ${e.message}`
-                    ));
-                    return;
-                }
-                if (current.size !== state.sourceFingerprint.size || current.mtimeMs !== state.sourceFingerprint.mtimeMs) {
-                    vscode.window.showWarningMessage(t(
-                        `ELF 파일이 Memory Map을 연 뒤 변경되었습니다 (${fileName}). 최신 주소와 파일 오프셋을 사용하려면 Memory Map을 다시 여세요.`,
-                        `The ELF file changed after the Memory Map was opened (${fileName}). Reopen the Memory Map to use current addresses and file offsets.`
-                    ));
-                    return;
-                }
-            }
+            if (!ensureMemoryMapElfIsCurrent(filePath, fileName, state.sourceFingerprint)) { return; }
 
             const shownLabel = target.label.length > 120 ? `${target.label.slice(0, 120)}…` : target.label;
             if (target.fileRange.kind !== 'file') {
@@ -458,6 +523,14 @@ function showPanel(
                     endOffset: target.fileRange.offset + target.fileRange.size - 1,
                 },
             });
+        } else if (message.command === 'openSource') {
+            const targetId = typeof message.targetId === 'string' && message.targetId.length <= 128
+                ? message.targetId
+                : '';
+            const target = state.sourceTargets.get(targetId);
+            if (!target) { return; }
+            if (!ensureMemoryMapElfIsCurrent(filePath, fileName, state.sourceFingerprint)) { return; }
+            await openMemoryMapSourceLocation(target, filePath);
         } else if (message.command === 'copyReport') {
             // 리포트 본문은 이미 extension host가 보유한다. 웹뷰에 수 MB~수십 MB
             // 문자열을 심고 다시 postMessage 구조화 복제로 돌려받지 말고, 버튼은
@@ -515,7 +588,8 @@ function showPanel(
 
     panel.title = `Memory Map: ${fileName}`;
     panel.webview.html = getWebviewContent(
-        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, hasSymbols, panel.webview
+        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions,
+        hasSymbols, sourceTargets, panel.webview
     );
 
     const allEntries = collectPickEntries(memoryUsage);
@@ -542,6 +616,10 @@ function entryHexTargetId(regionIndex: number, entryIndex: number): string {
     return `entry:${regionIndex}:${entryIndex}`;
 }
 
+function entrySourceTargetId(regionIndex: number, entryIndex: number): string {
+    return `source:${regionIndex}:${entryIndex}`;
+}
+
 /**
  * Memory Map HTML에 넣을 opaque ID와 호스트 전용 file offset 표를 함께 만든다.
  * Listing은 `fileRange`가 없으므로 빈 맵이 되고 Hex 진입점도 렌더되지 않는다.
@@ -564,6 +642,261 @@ export function collectMemoryMapHexTargets(
         });
     });
     return targets;
+}
+
+function sourceSymbolKey(name: string, address: number, size: number): string {
+    return `${address}:${size}:${name}`;
+}
+
+/** ELF FUNC 심볼 행만 DWARF 주소 범위에 연결하고 실제 경로는 host map에 보관한다. */
+export function collectMemoryMapSourceTargets(
+    memoryUsage: MemoryUsage[],
+    symbols: ElfSymbol[],
+    locations: DwarfSourceLocation[]
+): Map<string, MemoryMapSourceTarget> {
+    const targets = new Map<string, MemoryMapSourceTarget>();
+    if (locations.length === 0 || symbols.length === 0) { return targets; }
+    const functionSymbols = new Set(symbols
+        .filter(symbol => symbol.type === 'FUNC')
+        .map(symbol => sourceSymbolKey(symbol.name, symbol.addr, symbol.size)));
+    memoryUsage.forEach((usage, regionIndex) => {
+        usage.sections.forEach((entry, entryIndex) => {
+            if (!functionSymbols.has(sourceSymbolKey(entry.name, entry.addr, entry.size))) { return; }
+            const location = findDwarfSourceLocation(locations, entry.addr, entry.size);
+            if (!location) { return; }
+            const id = entrySourceTargetId(regionIndex, entryIndex);
+            targets.set(id, { id, label: entry.name, location });
+        });
+    });
+    return targets;
+}
+
+function isExistingFile(filePath: string): boolean {
+    try { return fs.statSync(filePath).isFile(); } catch { return false; }
+}
+
+function nativeRecordedPath(recordedPath: string): string {
+    return path.sep === '\\' ? recordedPath.replace(/\//g, '\\') : recordedPath.replace(/\\/g, '/');
+}
+
+function isPortableAbsolute(recordedPath: string): boolean {
+    return path.isAbsolute(nativeRecordedPath(recordedPath))
+        || /^[A-Za-z]:[\\/]/.test(recordedPath)
+        || /^[/\\]{2}/.test(recordedPath);
+}
+
+/**
+ * DWARF에 기록된 경로를 ELF 주변과 워크스페이스 suffix로 해석한다.
+ * 파일 시스템 전체를 훑지 않고, 긴 suffix부터 실제 존재하는 후보만 고른다.
+ */
+export function resolveDwarfSourcePathCandidates(
+    recordedPath: string,
+    elfFilePath: string,
+    workspaceRoots: string[],
+    exists: (candidate: string) => boolean = isExistingFile
+): string[] {
+    if (!recordedPath || recordedPath.length > 4096) { return []; }
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+    const add = (candidate: string): void => {
+        const resolved = path.resolve(candidate);
+        const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+        if (!seen.has(key) && exists(resolved)) {
+            seen.add(key);
+            candidates.push(resolved);
+        }
+    };
+
+    const native = nativeRecordedPath(recordedPath);
+    if (isPortableAbsolute(recordedPath)) {
+        // A Windows absolute path cannot be resolved on POSIX, but suffix matching below
+        // can still find its source in the current workspace.
+        if (path.isAbsolute(native)) { add(native); }
+    } else {
+        // 의도적으로 ELF 디렉터리에 가두지 않는다. out/debug/app.elf에서
+        // ../../src/main.c를 기록하는 빌드가 흔하고, 이 경로는 쓰기가 아니라
+        // 사용자가 소스 열기를 눌렀을 때 존재하는 파일을 여는 읽기 전용 후보다.
+        add(path.resolve(path.dirname(elfFilePath), native));
+    }
+
+    const portable = recordedPath.replace(/\\/g, '/');
+    const segments = portable.split('/')
+        .filter(segment => segment.length > 0 && segment !== '.' && !/^[A-Za-z]:$/.test(segment));
+    for (const root of workspaceRoots) {
+        for (let start = 0; start < segments.length; start++) {
+            const suffix = segments.slice(start);
+            if (suffix.includes('..')) { continue; }
+            const candidate = path.resolve(root, ...suffix);
+            const relative = path.relative(path.resolve(root), candidate);
+            if (relative.startsWith('..') || path.isAbsolute(relative)) { continue; }
+            if (exists(candidate)) {
+                add(candidate);
+                // The first hit uses the longest matching suffix in this workspace root.
+                break;
+            }
+        }
+    }
+    return candidates;
+}
+
+function escapeGlobSegment(value: string): string {
+    return value.replace(/([*?{}[\]])/g, '[$1]');
+}
+
+function matchingSuffixSegments(recordedPath: string, candidatePath: string): number {
+    const recorded = recordedPath.replace(/\\/g, '/').split('/').filter(Boolean);
+    const candidate = candidatePath.replace(/\\/g, '/').split('/').filter(Boolean);
+    let count = 0;
+    while (count < recorded.length && count < candidate.length) {
+        const left = recorded[recorded.length - 1 - count];
+        const right = candidate[candidate.length - 1 - count];
+        const same = process.platform === 'win32'
+            ? left.toLowerCase() === right.toLowerCase()
+            : left === right;
+        if (!same) { break; }
+        count++;
+    }
+    return count;
+}
+
+export const DWARF_SOURCE_SEARCH_MAX_RESULTS = 101;
+const DWARF_SOURCE_SEARCH_MAX_SUFFIX_SEGMENTS = 32;
+
+export class DwarfSourceSearchLimitError extends Error { }
+
+export function buildDwarfSourceSearchGlobs(recordedPath: string): string[] {
+    const segments = recordedPath.replace(/\\/g, '/').split('/')
+        .filter(segment => segment.length > 0
+            && segment !== '.'
+            && segment !== '..'
+            && !/^[A-Za-z]:$/.test(segment))
+        .slice(-DWARF_SOURCE_SEARCH_MAX_SUFFIX_SEGMENTS);
+    const globs: string[] = [];
+    for (let start = 0; start < segments.length; start++) {
+        globs.push(`**/${segments.slice(start).map(escapeGlobSegment).join('/')}`);
+    }
+    return globs;
+}
+
+export function rankDwarfSourcePathMatches(recordedPath: string, candidatePaths: string[]): string[] {
+    let bestScore = 0;
+    const scored = candidatePaths.map(filePath => ({
+        filePath,
+        score: matchingSuffixSegments(recordedPath, filePath),
+    }));
+    for (const item of scored) { bestScore = Math.max(bestScore, item.score); }
+    return scored.filter(item => item.score === bestScore && item.score > 0).map(item => item.filePath);
+}
+
+interface DwarfSourceSearchOptions {
+    hasWorkspace?: boolean;
+    findFiles?: (
+        include: string,
+        exclude: string,
+        maxResults: number
+    ) => Thenable<vscode.Uri[]>;
+}
+
+export async function findWorkspaceSourceBySuffix(
+    recordedPath: string,
+    options: DwarfSourceSearchOptions = {}
+): Promise<string[]> {
+    const searchGlobs = buildDwarfSourceSearchGlobs(recordedPath);
+    const hasWorkspace = options.hasWorkspace ?? Boolean(vscode.workspace.workspaceFolders);
+    if (searchGlobs.length === 0 || !hasWorkspace) { return []; }
+    const findFiles = options.findFiles ?? ((include, exclude, maxResults) =>
+        vscode.workspace.findFiles(include, exclude, maxResults));
+    for (const searchGlob of searchGlobs) {
+        const uris = await findFiles(
+            searchGlob,
+            '**/{.git,node_modules}/**',
+            DWARF_SOURCE_SEARCH_MAX_RESULTS
+        );
+        if (uris.length >= DWARF_SOURCE_SEARCH_MAX_RESULTS) {
+            throw new DwarfSourceSearchLimitError(searchGlob);
+        }
+        if (uris.length > 0) {
+            return rankDwarfSourcePathMatches(recordedPath, uris.map(uri => uri.fsPath));
+        }
+    }
+    return [];
+}
+
+async function openMemoryMapSourceLocation(target: MemoryMapSourceTarget, elfFilePath: string): Promise<void> {
+    const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath);
+    let candidates = resolveDwarfSourcePathCandidates(
+        target.location.filePath,
+        elfFilePath,
+        workspaceRoots
+    );
+    if (candidates.length === 0) {
+        try {
+            candidates = await findWorkspaceSourceBySuffix(target.location.filePath);
+        } catch (e: any) {
+            if (e instanceof DwarfSourceSearchLimitError) {
+                vscode.window.showWarningMessage(t(
+                    `소스 후보가 100개를 초과해 자동으로 선택하지 않았습니다 (${target.location.filePath}). 워크스페이스 범위를 좁혀 다시 시도하세요.`,
+                    `More than 100 source candidates matched, so none was selected automatically (${target.location.filePath}). Narrow the workspace and try again.`
+                ));
+                return;
+            }
+            vscode.window.showErrorMessage(t(
+                `워크스페이스에서 소스 파일 검색 실패 (${target.location.filePath}): ${e.message}`,
+                `Failed to search the workspace for the source file (${target.location.filePath}): ${e.message}`
+            ));
+            return;
+        }
+    }
+    if (candidates.length === 0) {
+        vscode.window.showWarningMessage(t(
+            `소스 파일을 찾을 수 없습니다: ${target.location.filePath}:${target.location.line}`,
+            `Source file not found: ${target.location.filePath}:${target.location.line}`
+        ));
+        return;
+    }
+
+    let selectedPath = candidates[0];
+    if (candidates.length > 1) {
+        const selected = await vscode.window.showQuickPick(
+            candidates.map(candidate => ({
+                label: path.basename(candidate),
+                description: path.dirname(candidate),
+                filePath: candidate,
+            })),
+            {
+                placeHolder: t(
+                    `${target.label}의 소스 파일을 선택하세요`,
+                    `Select the source file for ${target.label}`
+                ),
+            }
+        );
+        if (!selected) { return; }
+        selectedPath = selected.filePath;
+    }
+
+    try {
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(selectedPath));
+        const requestedLine = target.location.line - 1;
+        if (requestedLine < 0 || requestedLine >= document.lineCount) {
+            vscode.window.showWarningMessage(t(
+                `기록된 ${target.location.line}행이 현재 소스 파일 범위를 벗어납니다. ELF를 만든 뒤 소스가 변경되었을 수 있습니다.`,
+                `Recorded line ${target.location.line} is outside the current source file. The source may have changed since the ELF was built.`
+            ));
+            return;
+        }
+        const editor = await vscode.window.showTextDocument(document, { preview: true });
+        const textLine = document.lineAt(requestedLine);
+        const requestedColumn = target.location.column > 0 ? target.location.column - 1 : 0;
+        const column = Math.min(requestedColumn, textLine.text.length);
+        const position = new vscode.Position(requestedLine, column);
+        editor.selection = new vscode.Selection(position, position);
+        editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    } catch (e: any) {
+        vscode.window.showErrorMessage(t(
+            `소스 파일 열기 실패 (${selectedPath}): ${e.message}`,
+            `Failed to open source file (${selectedPath}): ${e.message}`
+        ));
+    }
 }
 
 /**
@@ -1154,10 +1487,13 @@ export function buildMemoryMapStrings(): Record<string, string> {
         colBytes: t('바이트', 'Bytes'),
         colType: t('타입', 'Type'),
         colHex: 'Hex',
+        colSource: t('소스', 'Source'),
         viewHex: t('바이트 보기', 'View bytes'),
         viewHexTitle: t('ELF 원본 파일의 해당 바이트를 Hex Viewer에서 열기', 'Open these bytes from the original ELF file in Hex Viewer'),
         noFileBytes: t('파일 바이트 없음', 'No file bytes'),
         noFileBytesTitle: t('이 메모리 범위에 대응하는 ELF 파일 바이트가 없는 이유 보기', 'Show why this memory range has no corresponding ELF file bytes'),
+        viewSource: t('소스 열기', 'Open source'),
+        viewSourceTitle: t('DWARF가 가리키는 소스 파일과 줄 열기', 'Open the source file and line referenced by DWARF'),
         // {region}/{percent}/{used}/{total} filled in the webview.
         usageBarLabel: t('{region} 사용률 {percent}% ({used} / {total})', '{region} usage {percent}% ({used} of {total})'),
         sortAscending: t('오름차순 정렬', 'Sort ascending'),
@@ -1219,6 +1555,7 @@ function getWebviewContent(
     memoryUsage: MemoryUsage[],
     regions: MemoryRegion[],
     hasSymbols?: boolean,
+    sourceTargets: Map<string, MemoryMapSourceTarget> = new Map(),
     webview?: vscode.Webview
 ): string {
     const nonce = generateMemoryMapNonce();
@@ -1239,10 +1576,13 @@ function getWebviewContent(
                 section: s.section || '', func: s.func || '',
                 hexTargetId: s.fileRange ? entryHexTargetId(regionIndex, entryIndex) : '',
                 hexAvailable: s.fileRange?.kind === 'file',
+                sourceTargetId: sourceTargets.has(entrySourceTargetId(regionIndex, entryIndex))
+                    ? entrySourceTargetId(regionIndex, entryIndex)
+                    : '',
             })),
             ...u.freeSpaces.map(f => ({
                 name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', section: '', func: '',
-                hexTargetId: '', hexAvailable: false,
+                hexTargetId: '', hexAvailable: false, sourceTargetId: '',
             })),
         ].sort((a, b) => a.addr - b.addr).filter(e => e.size > 0);
 
@@ -1258,7 +1598,7 @@ function getWebviewContent(
             n: e.name, s: e.section, f: e.func, a: e.addr,
             ah: formatHex(e.addr), eh: formatHex(e.size > 0 ? e.addr + e.size - 1 : e.addr),
             sz: e.size, ss: formatSize(e.size), t: e.type, fr: e.type === 'FREE',
-            hx: e.hexTargetId, ha: e.hexAvailable,
+            hx: e.hexTargetId, ha: e.hexAvailable, sx: e.sourceTargetId,
         }));
 
         interface ObjGroup { totalSize: number; entries: { section: string; addr: number; size: number; type: string }[] }
@@ -1299,6 +1639,7 @@ function getWebviewContent(
             segments, objSummary,
             hsi: hasSectionInfo, hfi: hasFuncInfo, hmo: regionObjSummary.length > 1,
             hhx: u.sections.some(s => s.fileRange !== undefined),
+            hhs: u.sections.some((_s, entryIndex) => sourceTargets.has(entrySourceTargetId(regionIndex, entryIndex))),
         };
     });
 
@@ -1865,13 +2206,18 @@ const RD = ${regionDataJsLiteral};
         }
     }
 
-    function rowHtml(e, hsi, hfi, hhx) {
+    function rowHtml(e, hsi, hfi, hhx, hhs) {
         const rc = e.fr ? ' class="free-row"' : '';
         const sc = hsi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.s) + '</td>' : '';
         const fc = hfi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.f) + '</td>' : '';
         const hc = hhx
             ? (e.hx
                 ? '<td><button class="hex-link' + (e.ha ? '' : ' unavailable') + '" data-action="open-hex" data-target-id="' + e.hx + '" title="' + esc(e.ha ? S.viewHexTitle : S.noFileBytesTitle) + '">' + esc(e.ha ? S.viewHex : S.noFileBytes) + '</button></td>'
+                : '<td></td>')
+            : '';
+        const sourceCell = hhs
+            ? (e.sx
+                ? '<td><button class="source-link" data-action="open-source" data-target-id="' + e.sx + '" title="' + esc(S.viewSourceTitle) + '">' + esc(S.viewSource) + '</button></td>'
                 : '<td></td>')
             : '';
         // 정렬값 원본. 이 표는 행 수에 따라 정렬 경로가 갈린다 — 가상 스크롤
@@ -1887,7 +2233,7 @@ const RD = ${regionDataJsLiteral};
             + ' data-sort-size="' + e.sz + '"'
             + ' data-sort-bytes="' + e.sz + '"'
             + ' data-sort-type="' + esc(e.t) + '"';
-        return '<tr' + rc + sv + '><td>' + hl(e.n) + '</td>' + sc + fc + '<td class="num">' + hl(e.ah) + '</td><td class="num">' + e.eh + '</td><td class="num">' + hl(e.ss) + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + hl(e.t) + '</span></td>' + hc + '</tr>';
+        return '<tr' + rc + sv + '><td>' + hl(e.n) + '</td>' + sc + fc + '<td class="num">' + hl(e.ah) + '</td><td class="num">' + e.eh + '</td><td class="num">' + hl(e.ss) + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + hl(e.t) + '</span></td>' + hc + sourceCell + '</tr>';
     }
 
     function matchSeg(e, q) {
@@ -1977,14 +2323,15 @@ const RD = ${regionDataJsLiteral};
                 + sortTh('size', S.colSize, { cls: 'num', sortBy: 'bytes' })
                 + sortTh('bytes', S.colBytes, { cls: 'num' })
                 + sortTh('type', S.colType)
-                + (rd.hhx ? plainTh(S.colHex) : '') + '</tr>';
+                + (rd.hhx ? plainTh(S.colHex) : '')
+                + (rd.hhs ? plainTh(S.colSource) : '') + '</tr>';
 
             if (rd.segments.length > VT_THRESH) {
                 const vpH = Math.min(rd.segments.length * ROW_H, MAX_VP_H);
                 h += '<div class="vt-viewport" data-ridx="' + idx + '" style="max-height:' + vpH + 'px;overflow-y:auto"><table class="section-table"><thead>' + thHtml + '</thead><tbody></tbody></table></div>';
             } else {
                 const data = curQ ? rd.segments.filter(function(e) { return matchSeg(e, curQ); }) : rd.segments;
-                h += '<table class="section-table sortable-table"><thead>' + thHtml + '</thead><tbody>' + data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi, rd.hhx); }).join('') + '</tbody></table>';
+                h += '<table class="section-table sortable-table"><thead>' + thHtml + '</thead><tbody>' + data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi, rd.hhx, rd.hhs); }).join('') + '</tbody></table>';
             }
         }
 
@@ -2013,7 +2360,7 @@ const RD = ${regionDataJsLiteral};
             vp: vp, tb: vp.querySelector('tbody'),
             data: rd.segments,
             fd: curQ ? rd.segments.filter(function(e) { return matchSeg(e, curQ); }) : rd.segments,
-            cc: 6 + (rd.hsi ? 1 : 0) + (rd.hfi ? 1 : 0) + (rd.hhx ? 1 : 0),
+            cc: 6 + (rd.hsi ? 1 : 0) + (rd.hfi ? 1 : 0) + (rd.hhx ? 1 : 0) + (rd.hhs ? 1 : 0),
             idx: idx, ls: -1, le: -1
         };
         vtMap.set(idx, vt);
@@ -2031,7 +2378,7 @@ const RD = ${regionDataJsLiteral};
         const topH = s * ROW_H, botH = Math.max(0, (total - e) * ROW_H);
         let h = '';
         if (topH > 0) h += '<tr class="vt-sp"><td colspan="' + vt.cc + '" style="height:' + topH + 'px;padding:0;border:0"></td></tr>';
-        for (let i = s; i < e; i++) h += rowHtml(vt.fd[i], rd.hsi, rd.hfi, rd.hhx);
+        for (let i = s; i < e; i++) h += rowHtml(vt.fd[i], rd.hsi, rd.hfi, rd.hhx, rd.hhs);
         if (botH > 0) h += '<tr class="vt-sp"><td colspan="' + vt.cc + '" style="height:' + botH + 'px;padding:0;border:0"></td></tr>';
         vt.tb.innerHTML = h;
         // 방금 innerHTML 로 날아간 강조를 되돌린다. currentTarget 이 논리 좌표라
@@ -2547,7 +2894,7 @@ const RD = ${regionDataJsLiteral};
                 // Non-virtual rendered table: re-render tbody from data (reuse filtered array above)
                 const tbody = card.querySelector('.section-table tbody');
                 if (tbody) {
-                    tbody.innerHTML = filtered.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi, rd.hhx); }).join('');
+                    tbody.innerHTML = filtered.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi, rd.hhx, rd.hhs); }).join('');
                 }
             }
 
@@ -2910,7 +3257,7 @@ const RD = ${regionDataJsLiteral};
             if (tbody) {
                 resyncCurrentTargetAfterSort(idx);   // 곧 끊어질 <tr> 참조를 놓는다
                 const data = curQ ? rd.segments.filter(function(seg) { return matchSeg(seg, curQ); }) : rd.segments;
-                tbody.innerHTML = data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi, rd.hhx); }).join('');
+                tbody.innerHTML = data.map(function(e) { return rowHtml(e, rd.hsi, rd.hfi, rd.hhx, rd.hhs); }).join('');
             }
         }
 
@@ -3142,6 +3489,9 @@ const RD = ${regionDataJsLiteral};
                 break;
             case 'open-hex':
                 vscode.postMessage({ command: 'openHex', targetId: actionEl.getAttribute('data-target-id') });
+                break;
+            case 'open-source':
+                vscode.postMessage({ command: 'openSource', targetId: actionEl.getAttribute('data-target-id') });
                 break;
         }
     }

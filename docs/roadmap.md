@@ -2,21 +2,24 @@
 
 이 문서는 **아직 구현되지 않은 기능과 기술 부채**만 추적합니다. 이미 배포된 기능은
 [CHANGELOG.md](../CHANGELOG.md), 현재 사용법은 [features.md](./features.md)를 참조하세요.
-우선순위와 규모는 요구사항이 바뀌면 함께 갱신합니다.
+새 후보가 확정되면 우선순위와 규모도 함께 기록합니다.
 
 ## 우선순위
 
 | 우선순위 | 항목 | 규모 | 핵심 이유 |
 | --- | --- | --- | --- |
-| P3 | Memory Map → 소스 위치 이동 | 대 | 정확한 구현에는 DWARF line 정보가 필요 |
+| P2 | Memory Map DWARF 5·압축 line table | 대 | 현재 지원 범위 밖인 디버그 정보를 가진 ELF에서도 소스 이동 제공 |
 
-## Memory Map → 소스 위치 이동
+## Memory Map DWARF 5·압축 line table
 
-심볼 행에서 정의된 소스 파일과 줄로 이동합니다.
+DWARF 5의 새 line-table header·directory/file entry format과 문자열 form을 해석하고,
+`SHF_COMPRESSED` 및 GNU `.zdebug_line`을 기존 파서 한도 안에서 복원합니다.
 
-- 정확한 구현은 ELF의 DWARF `.debug_line` 정보가 필요합니다.
-- Workspace Symbol Provider 기반 이름 검색은 C++ 오버로드·mangled 이름에서 오탐 가능성이 있어 보조 경로로만 검토합니다.
-- DWARF가 없거나 stripped된 바이너리는 기능을 숨기거나 한계를 명확히 안내합니다.
+- DWARF 5의 `address_size`, `segment_selector_size`, entry format descriptor와 관련 문자열
+  section 참조를 검증한 뒤 DWARF 2~4와 같은 주소 범위로 변환합니다.
+- 압축을 해제하기 전에 선언 크기와 실제 출력 크기를 검증하고 32MB `.debug_line` 상한을
+  동일하게 적용합니다.
+- DWARF 2~4, stripped ELF, 손상된 unit의 현재 동작과 opaque host target 경계를 유지합니다.
 
 ## 테스트 부채
 

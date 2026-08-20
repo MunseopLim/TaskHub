@@ -1,6 +1,7 @@
 import * as assert from 'assert';
-import { buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
+import { buildElf32WithDwarfLines, buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
 import { computeSymbolUsage, parseElf32 } from '../elfParser';
+import { parseDwarfLineSection } from '../dwarfLineParser';
 
 /**
  * 픽스처 자체의 검증 (0.6.31).
@@ -41,6 +42,35 @@ suite('ELF 픽스처', () => {
 
         const config = result.symbols.find(s => s.name === 'g_config');
         assert.strictEqual(config?.type, 'OBJECT', 'OBJECT 심볼이 없으면 RAM 영역 표가 비어 분기가 닫힌다');
+    });
+
+    test('DWARF ELF는 실제 .debug_line payload·section flags와 세 함수의 주소 범위를 가진다', () => {
+        const buffer = buildElf32WithDwarfLines('/workspace/src/main.c');
+        const result = parseElf32(buffer);
+        const debugLine = result.sections.find(section => section.name === '.debug_line');
+        assert.ok(debugLine?.offset !== undefined);
+
+        const compressed = parseElf32(buildElf32WithDwarfLines('/workspace/src/main.c', 0x800));
+        assert.strictEqual(
+            compressed.sections.find(section => section.name === '.debug_line')?.flags,
+            0x800,
+            'debugLineFlags 인자가 section header의 SHF_COMPRESSED 전제를 실제로 만들어야 한다'
+        );
+
+        const parsed = parseDwarfLineSection(
+            buffer.subarray(debugLine!.offset, debugLine!.offset! + debugLine!.size),
+            result.isLittleEndian
+        );
+        assert.deepStrictEqual(parsed.locations.map(location => ({
+            address: location.address,
+            endAddress: location.endAddress,
+            line: location.line,
+            filePath: location.filePath,
+        })), [
+            { address: 0x08000000, endAddress: 0x08000120, line: 1, filePath: '/workspace/src/main.c' },
+            { address: 0x08000120, endAddress: 0x080001a0, line: 10, filePath: '/workspace/src/main.c' },
+            { address: 0x080001a0, endAddress: 0x08000300, line: 20, filePath: '/workspace/src/main.c' },
+        ]);
     });
 
     test('네 섹션이 모두 읽히고 속성이 구분된다', () => {
