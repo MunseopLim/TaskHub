@@ -130,6 +130,9 @@ suite('빈 상태 안내 (viewsWelcome)', () => {
         const nls: Record<string, string> = JSON.parse(
             fs.readFileSync(path.join(REPO_ROOT, 'package.nls.json'), 'utf-8')
         );
+        const nlsKo: Record<string, string> = JSON.parse(
+            fs.readFileSync(path.join(REPO_ROOT, 'package.nls.ko.json'), 'utf-8')
+        );
         const resolveNls = (value: string): string =>
             value.replace(/^%([\w.]+)%$/, (whole, key) => {
                 assert.ok(key in nls, `nls 번들에 없는 키를 참조한다: ${whole}`);
@@ -173,6 +176,61 @@ suite('빈 상태 안내 (viewsWelcome)', () => {
                 `아이콘 줄이 다시 늘어났다 (${navigation.length}개): ${navigation.map((e: any) => e.command).join(', ')}`);
             const conditional = navigation.filter((e: any) => e.when.includes('taskhub.hasRunningActions'));
             assert.strictEqual(conditional.length, 1, '중지 버튼은 조건부 하나여야 한다');
+        });
+
+        test('트리 행은 핵심 동작 하나만 인라인에 두고 나머지는 우클릭 메뉴로 보낸다', () => {
+            const entries = manifest.contributes.menus['view/item/context'];
+            const inlineCommands = (view: string): string[] => entries
+                .filter((entry: any) => entry.when.includes(`view == ${view}`)
+                    && String(entry.group).startsWith('inline'))
+                .map((entry: any) => entry.command);
+
+            assert.deepStrictEqual(inlineCommands('mainView.linkWorkspace'), ['taskhub.copyLink']);
+            assert.deepStrictEqual(inlineCommands('mainView.favorite'), []);
+            assert.deepStrictEqual(inlineCommands('mainView.main'), ['taskhub.stopAction']);
+            assert.deepStrictEqual(inlineCommands('mainView.history'), ['taskhub.rerunFromHistory']);
+
+            const inlineEntries = entries.filter((entry: any) => String(entry.group).startsWith('inline'));
+            for (const inline of inlineEntries) {
+                const command = manifest.contributes.commands.find(
+                    (candidate: any) => candidate.command === inline.command
+                );
+                assert.ok(command?.icon, `${inline.command} 인라인 동작에 렌더링할 아이콘이 없다`);
+
+                const keyboardMirror = entries.find((entry: any) =>
+                    entry.command === inline.command
+                    && entry.when === inline.when
+                    && String(entry.group).startsWith('context'));
+                assert.ok(
+                    keyboardMirror,
+                    `${inline.command} 인라인 동작에 Shift+F10으로 접근할 동일 조건의 우클릭 메뉴가 없다`
+                );
+            }
+
+            const contextCommandIds = new Set<string>(entries
+                .filter((entry: any) => String(entry.group).startsWith('context'))
+                .map((entry: any) => entry.command));
+            for (const commandId of contextCommandIds) {
+                const command = manifest.contributes.commands.find(
+                    (candidate: any) => candidate.command === commandId
+                );
+                const nlsKey = /^%([\w.]+)%$/.exec(command?.title)?.[1];
+                assert.ok(nlsKey, `${commandId} 컨텍스트 동작 제목이 NLS 키를 쓰지 않는다`);
+                for (const [locale, bundle] of [['en', nls], ['ko', nlsKo]] as const) {
+                    assert.ok(!bundle[nlsKey].startsWith('TaskHub:'),
+                        `${commandId} ${locale} 컨텍스트 메뉴 제목에 불필요한 TaskHub: 접두사가 있다`);
+                }
+            }
+
+            const openLink = entries.find((entry: any) => entry.command === 'taskhub.goToLink');
+            assert.ok(openLink, '행 클릭 외에 키보드로 링크를 여는 명령이 없다');
+            assert.ok(String(openLink.group).startsWith('context'), '링크 열기 명령이 우클릭 메뉴에 없다');
+
+            for (const command of ['taskhub.deleteLink', 'taskhub.deleteFavorite', 'taskhub.deleteHistoryItem']) {
+                const item = entries.find((entry: any) => entry.command === command);
+                assert.ok(item, `${command} 메뉴가 없다`);
+                assert.ok(String(item.group).startsWith('context'), `${command}가 파괴적인 인라인 동작으로 돌아갔다`);
+            }
         });
     });
 });

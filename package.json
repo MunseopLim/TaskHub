@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.7.45",
+  "version": "0.7.46",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -317,7 +317,8 @@
       },
       {
         "command": "taskhub.copyLink",
-        "title": "%cmd.copyLink%"
+        "title": "%cmd.copyLink%",
+        "icon": "$(copy)"
       },
       {
         "command": "taskhub.goToLink",
@@ -843,52 +844,57 @@
         {
           "command": "taskhub.goToLink",
           "when": "view == mainView.linkWorkspace && viewItem == linkItem",
-          "group": "inline"
+          "group": "context@0"
+        },
+        {
+          "command": "taskhub.copyLink",
+          "when": "view == mainView.linkWorkspace && viewItem == linkItem",
+          "group": "context@1"
         },
         {
           "command": "taskhub.editWorkspaceLink",
           "when": "view == mainView.linkWorkspace && viewItem == linkItem",
-          "group": "inline"
+          "group": "context@2"
         },
         {
           "command": "taskhub.deleteLink",
           "when": "view == mainView.linkWorkspace && viewItem == linkItem",
-          "group": "inline"
+          "group": "context@9"
         },
         {
           "command": "taskhub.deleteFavorite",
           "when": "view == mainView.favorite && viewItem == favoriteItem",
-          "group": "inline"
+          "group": "context@9"
         },
         {
           "command": "taskhub.previewAction",
           "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
-          "group": "context@0"
-        },
-        {
-          "command": "taskhub.exportActionItem",
-          "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
           "group": "context@1"
         },
         {
           "command": "taskhub.exportActionItem",
-          "when": "view == mainView.main && viewItem == folder",
-          "group": "context@1"
-        },
-        {
-          "command": "taskhub.assignShortcut",
           "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
           "group": "context@2"
         },
         {
-          "command": "taskhub.runActionWithInputProfile",
+          "command": "taskhub.exportActionItem",
+          "when": "view == mainView.main && viewItem == folder",
+          "group": "context@2"
+        },
+        {
+          "command": "taskhub.assignShortcut",
           "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
           "group": "context@3"
         },
         {
-          "command": "taskhub.manageInputProfiles",
+          "command": "taskhub.runActionWithInputProfile",
           "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
           "group": "context@4"
+        },
+        {
+          "command": "taskhub.manageInputProfiles",
+          "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
+          "group": "context@5"
         },
         {
           "command": "taskhub.stopAction",
@@ -896,44 +902,49 @@
           "group": "inline"
         },
         {
+          "command": "taskhub.stopAction",
+          "when": "view == mainView.main && viewItem == runningAction",
+          "group": "context@0"
+        },
+        {
           "command": "taskhub.rerunFromHistory",
           "when": "view == mainView.history && viewItem =~ /^historyItem/",
           "group": "inline@0"
         },
         {
-          "command": "taskhub.rerunFromHistoryWithInputs",
-          "when": "view == mainView.history && viewItem =~ /\\.inputs\\b/",
-          "group": "inline@1"
+          "command": "taskhub.rerunFromHistory",
+          "when": "view == mainView.history && viewItem =~ /^historyItem/",
+          "group": "context@0"
         },
         {
-          "command": "taskhub.saveHistoryInputsAsProfile",
+          "command": "taskhub.rerunFromHistoryWithInputs",
           "when": "view == mainView.history && viewItem =~ /\\.inputs\\b/",
           "group": "context@1"
         },
         {
+          "command": "taskhub.saveHistoryInputsAsProfile",
+          "when": "view == mainView.history && viewItem =~ /\\.inputs\\b/",
+          "group": "context@2"
+        },
+        {
           "command": "taskhub.viewHistoryCommand",
           "when": "view == mainView.history && viewItem =~ /\\.commands\\b/",
-          "group": "inline@2"
+          "group": "context@4"
         },
         {
           "command": "taskhub.viewHistoryOutput",
           "when": "view == mainView.history && viewItem =~ /\\.output\\b/",
-          "group": "inline@3"
-        },
-        {
-          "command": "taskhub.viewActionRunReport",
-          "when": "view == mainView.history && viewItem =~ /\\.runlog\\b/",
-          "group": "inline@4"
+          "group": "context@5"
         },
         {
           "command": "taskhub.viewActionRunReport",
           "when": "view == mainView.history && viewItem =~ /^historyItem/",
-          "group": "context@2"
+          "group": "context@3"
         },
         {
           "command": "taskhub.deleteHistoryItem",
           "when": "view == mainView.history && viewItem =~ /^(historyItem|historyToolItem)/",
-          "group": "inline@9"
+          "group": "context@9"
         }
       ]
     },
@@ -1006,7 +1017,8 @@
   "overrides": {
     "minimatch": "^10.2.1",
     "diff": "^8.0.3",
-    "serialize-javascript": "^7.0.4"
+    "serialize-javascript": "^7.0.4",
+    "glob": "^13.0.6"
   },
   "dependencies": {
     "adm-zip": "^0.6.0",

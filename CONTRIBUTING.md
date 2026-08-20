@@ -151,6 +151,7 @@ API나 동작이 바뀔 수 있고 사용자 피드백이 필요한 기능만 ex
 - `minimatch`: mocha/eslint 내부 의존성
 - `diff`: mocha 내부 의존성
 - `serialize-javascript`: mocha 내부 의존성 (RCE 취약점)
+- `glob`: mocha 내부의 지원 종료된 glob 10 설치 경고 제거
 
 override 제거 전에 `npm audit`으로 취약점 상태 확인 필요.
 

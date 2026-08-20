@@ -4637,7 +4637,9 @@ async function promptLinkSearch(linkViewProvider: LinkViewProvider): Promise<voi
     const items: LinkQuickPickItem[] = sorted.map(entry => ({
         label: entry.title,
         description: entry.group ? `[${entry.group}] ${entry.link}` : entry.link,
-        detail: entry.tags && entry.tags.length > 0 ? `Tags: ${entry.tags.join(', ')}` : undefined,
+        detail: entry.tags && entry.tags.length > 0
+            ? t(`태그: ${entry.tags.join(', ')}`, `Tags: ${entry.tags.join(', ')}`)
+            : undefined,
         entry
     }));
 
@@ -4667,7 +4669,9 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
         const items: LinkQuickPickItem[] = entries.map(entry => ({
             label: entry.title,
             description: entry.group ? `[${entry.group}] ${entry.link}` : entry.link,
-            detail: entry.tags && entry.tags.length > 0 ? `Tags: ${entry.tags.join(', ')}` : undefined,
+            detail: entry.tags && entry.tags.length > 0
+                ? t(`태그: ${entry.tags.join(', ')}`, `Tags: ${entry.tags.join(', ')}`)
+                : undefined,
             entry
         }));
         const pick = await vscode.window.showQuickPick(items, {
@@ -4808,7 +4812,9 @@ async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider):
         return {
             label: entry.title,
             description: entry.group ? `[${entry.group}] ${location}` : location,
-            detail: entry.tags && entry.tags.length > 0 ? `Tags: ${entry.tags.join(', ')}` : undefined,
+            detail: entry.tags && entry.tags.length > 0
+                ? t(`태그: ${entry.tags.join(', ')}`, `Tags: ${entry.tags.join(', ')}`)
+                : undefined,
             entry
         };
     });

@@ -156,6 +156,10 @@ suite('View provider integration', function () {
         assert.strictEqual(labelOf(roots[1]), 'Loose');
         assert.strictEqual((roots[1] as Link).getLink(), 'https://loose.example');
         assert.strictEqual(roots[1].description, 'misc');
+        assert.strictEqual(
+            roots[1].command?.title,
+            vscode.env.language.startsWith('ko') ? '링크 열기' : 'Open Link'
+        );
 
         const groupChildren = await provider.getChildren(roots[0]);
         assert.deepStrictEqual(groupChildren.map(item => labelOf(item)), ['Alpha', 'Zeta']);
@@ -195,8 +199,12 @@ suite('View provider integration', function () {
         assert.deepStrictEqual(groupChildren.map(item => labelOf(item)), ['Alpha', 'Beta']);
         const alpha = groupChildren[0] as Favorite;
         assert.strictEqual(alpha.getLine(), 1);
-        assert.ok(String(alpha.description).includes('line 1'));
+        assert.ok(String(alpha.description).includes(vscode.env.language.startsWith('ko') ? '줄 1' : 'line 1'));
         assert.ok(String(alpha.description).includes('a'));
+        assert.strictEqual(
+            alpha.command?.title,
+            vscode.env.language.startsWith('ko') ? '즐겨찾는 파일 열기' : 'Open Favorite File'
+        );
         assert.strictEqual(
             normalizeWindowsPathForAssert(alpha.getEntry().sourceFile ?? ''),
             normalizeWindowsPathForAssert(favoritesPath)

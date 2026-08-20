@@ -8,22 +8,9 @@
 
 | 우선순위 | 항목 | 규모 | 핵심 이유 |
 | --- | --- | --- | --- |
-| P3 | CMSIS-SVD 기반 Register/SFR Hover | 대 | XML 파서와 상속·배열·cluster 지원이 필요 |
 | P3 | Memory Map → 소스 위치 이동 | 대 | 정확한 구현에는 DWARF line 정보가 필요 |
 
-권장 다음 작업은 **CMSIS-SVD 기반 Register/SFR Hover**입니다.
-CMSIS-SVD와 DWARF는 독립된 대형 작업으로 분리합니다.
-
-## 1. CMSIS-SVD 기반 Register/SFR Hover
-
-SVD 파일을 새 데이터 소스로 읽어 기존 Register Decoder와 SFR 표시 계층에 연결합니다.
-
-- `derivedFrom`, `dim`/`dimIncrement`, cluster와 기본값 상속을 포함해야 합니다.
-- 1~10MB 실파일을 고려한 파싱 한도와 캐시가 필요합니다.
-- XML 런타임 의존성을 추가할지 제한된 전용 파서를 만들지 먼저 결정합니다.
-- 파서와 hover 연결을 별도 단계로 나누고 실제 벤더 파일 기반 fixture를 둡니다.
-
-## 2. Memory Map → 소스 위치 이동
+## Memory Map → 소스 위치 이동
 
 심볼 행에서 정의된 소스 파일과 줄로 이동합니다.
 

@@ -94,7 +94,11 @@ export class Link extends vscode.TreeItem {
         super(entry.title, vscode.TreeItemCollapsibleState.None);
         this.tooltip = `${entry.title} - ${entry.link}`;
         this.description = entry.tags && entry.tags.length > 0 ? entry.tags.join(', ') : undefined;
-        this.command = { command: 'taskhub.openLink', title: 'Open Link', arguments: [entry.link] };
+        this.command = {
+            command: 'taskhub.openLink',
+            title: t('링크 열기', 'Open Link'),
+            arguments: [entry.link]
+        };
         this.contextValue = 'linkItem';
         this.iconPath = new vscode.ThemeIcon('link');
     }

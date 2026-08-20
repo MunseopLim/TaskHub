@@ -78,14 +78,18 @@ export class Favorite extends vscode.TreeItem {
         const location = line !== undefined ? `${entry.path}:${line}` : entry.path;
         const descriptionParts: string[] = [];
         if (line !== undefined) {
-            descriptionParts.push(`line ${line}`);
+            descriptionParts.push(t(`줄 ${line}`, `line ${line}`));
         }
         if (entry.tags && entry.tags.length > 0) {
             descriptionParts.push(entry.tags.join(', '));
         }
         this.tooltip = `${entry.title} - ${location}`;
         this.description = descriptionParts.length > 0 ? descriptionParts.join(' • ') : undefined;
-        this.command = { command: 'taskhub.openFavoriteFile', title: 'Open Favorite File', arguments: [entry] };
+        this.command = {
+            command: 'taskhub.openFavoriteFile',
+            title: t('즐겨찾는 파일 열기', 'Open Favorite File'),
+            arguments: [entry]
+        };
         this.contextValue = 'favoriteItem';
         this.iconPath = new vscode.ThemeIcon('star');
     }

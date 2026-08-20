@@ -272,8 +272,8 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
             // hidden; fall back to it only when the error carries no path
             // (e.g. a cross-source duplicate-id check).
             errorItem.command = failedPath
-                ? { command: 'vscode.open', title: 'Open actions.json', arguments: [vscode.Uri.file(failedPath)] }
-                : { command: 'taskhub.editActions', title: 'Open actions.json' };
+                ? { command: 'vscode.open', title: t('actions.json 열기', 'Open actions.json'), arguments: [vscode.Uri.file(failedPath)] }
+                : { command: 'taskhub.editActions', title: t('actions.json 열기', 'Open actions.json') };
             return Promise.resolve([errorItem]);
         }
 
@@ -326,8 +326,8 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
                 actionItems.push(new Action(item.title, item.action, vscode.TreeItemCollapsibleState.None, this.context, item.id, showTaskStatus));
             } else if (item.id) {
                 console.warn(`Item '${item.title}' is not a valid folder, separator, or runnable action.`);
-                const unknownItem = new vscode.TreeItem(item.title || 'Unknown Item');
-                unknownItem.tooltip = `Invalid item definition: ${item.id}`;
+                const unknownItem = new vscode.TreeItem(item.title || t('알 수 없는 항목', 'Unknown Item'));
+                unknownItem.tooltip = t(`잘못된 항목 정의: ${item.id}`, `Invalid item definition: ${item.id}`);
                 actionItems.push(unknownItem);
             }
         });

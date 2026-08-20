@@ -4562,37 +4562,33 @@ suite('Extension Test Suite', () => {
 				workspaceFolderUri: 'file:///workspace',
 				relativePath: '.taskhub/logs/reported-deadbeef/run.log'
 			});
-			// 보고서 버튼은 `.runlog` 로만 붙는다 — 참조가 붙기 전에는 버튼이
-			// 없어야 "눌러도 안내만 뜨는" 죽은 버튼이 생기지 않는다.
-			assert.strictEqual((await provider.getChildren())[0].contextValue, 'historyItem.runlog');
+			// 보고서는 인라인 아이콘이 아니라 우클릭 메뉴에서 여므로, 참조 유무를
+			// TreeItem capability 문자열에 중복해서 싣지 않는다.
+			assert.strictEqual((await provider.getChildren())[0].contextValue, 'historyItem');
 		});
 
-		test('보고서 참조가 없는 기록에는 .runlog 플래그가 붙지 않는다', async () => {
+		test('보고서 참조가 없는 기록도 같은 간결한 contextValue를 쓴다', async () => {
 			const provider = new HistoryProvider(createMockContext());
 			provider.addHistoryEntry(makeEntry('no-report', 'success', 5));
 			assert.strictEqual((await provider.getChildren())[0].contextValue, 'historyItem');
 		});
 
 		/**
-		 * 인라인 아이콘과 우클릭 메뉴는 **일부러 다른 조건**이다 (0.7.31).
+		 * 보고서는 우클릭 메뉴에만 둔다. 실행 로그가 없는 이유와 켜는 방법을
+		 * 안내하는 발견 경로는 유지하되, History 행을 아이콘으로 채우지 않는다.
 		 *
-		 * 아이콘은 데이터가 있는 행에만 붙어 목록이 정직해지고, 메뉴는 액션 기록이면
-		 * 항상 붙어 "로그가 없다" 는 사실과 켜는 방법을 안내한다 — 메뉴까지 가리면
-		 * 기능이 있다는 것 자체를 알 수 없어, 사용자가 History 를 지우고 설정을 뒤진
-		 * 끝에 고장으로 결론 내린 것이 이 조건을 바꾼 이유다. 조건이 조용히 되돌아가면
-		 * 그 신고가 그대로 되살아나므로 manifest 를 여기서 고정한다.
+		 * 메뉴는 액션 기록이면 항상 붙어 "로그가 없다"는 사실도 설명한다. 도구 열람
+		 * 기록에는 액션 보고서가 없으므로 붙이지 않는다.
 		 */
-		test('보고서 메뉴: 인라인은 .runlog, 우클릭은 모든 액션 기록', () => {
+		test('보고서 메뉴는 모든 액션 기록의 우클릭 메뉴에만 둔다', () => {
 			const manifest = JSON.parse(
 				fs.readFileSync(path.join(path.resolve(__dirname, '..', '..'), 'package.json'), 'utf-8'));
 			const entries = manifest.contributes.menus['view/item/context']
 				.filter((m: any) => m.command === 'taskhub.viewActionRunReport');
-			assert.strictEqual(entries.length, 2, '보고서 메뉴 항목이 인라인·우클릭 두 벌이 아니다');
+			assert.strictEqual(entries.length, 1, '보고서 메뉴가 인라인과 우클릭에 중복됐다');
 
-			const inline = entries.find((m: any) => String(m.group).startsWith('inline'));
-			const context = entries.find((m: any) => String(m.group).startsWith('context'));
-			assert.ok(inline, '인라인 보고서 메뉴 항목이 없다');
-			assert.ok(context, '우클릭 메뉴 항목이 없다');
+			const context = entries[0];
+			assert.ok(String(context.group).startsWith('context'), '보고서가 인라인 아이콘으로 돌아갔다');
 
 			// `when` 을 문자열로만 보지 않고 실제 contextValue 로 판정한다.
 			const match = (when: string, contextValue: string) => {
@@ -4600,20 +4596,21 @@ suite('Extension Test Suite', () => {
 				assert.ok(m, `viewItem 정규식을 읽지 못했다: ${when}`);
 				return new RegExp(m![1]).test(contextValue);
 			};
-			assert.ok(match(inline.when, 'historyItem.runlog'), '로그가 있는 행에서 인라인 아이콘이 숨는다');
 			assert.ok(match(context.when, 'historyItem'), '로그 없는 액션 기록에서 메뉴가 숨는다 — 발견 경로가 사라진다');
-			assert.ok(match(context.when, 'historyItem.inputs.runlog'));
+			assert.ok(match(context.when, 'historyItem.inputs.commands'));
 			assert.ok(!match(context.when, 'historyToolItem'), '도구 열람 기록에 액션 보고서 메뉴가 붙었다');
-			assert.ok(!match(inline.when, 'historyItem'), '로그 없는 행에 죽은 아이콘이 붙었다');
 		});
 
-		test('IT-190a: 재실행은 행 클릭이 아니라 명시적 인라인 명령으로 제공한다', () => {
+		test('IT-190a: 재실행은 행 클릭이 아니라 명시적 인라인·우클릭 명령으로 제공한다', () => {
 			const manifest = JSON.parse(
 				fs.readFileSync(path.join(path.resolve(__dirname, '..', '..'), 'package.json'), 'utf-8'));
 			const entries = manifest.contributes.menus['view/item/context']
 				.filter((m: any) => m.command === 'taskhub.rerunFromHistory');
-			assert.strictEqual(entries.length, 1);
-			assert.ok(String(entries[0].group).startsWith('inline'));
+			assert.strictEqual(entries.length, 2);
+			assert.ok(entries.some((entry: any) => String(entry.group).startsWith('inline')));
+			assert.ok(entries.some((entry: any) => String(entry.group).startsWith('context')));
+			assert.strictEqual(new Set(entries.map((entry: any) => entry.when)).size, 1,
+				'인라인과 우클릭 재실행의 노출 조건이 달라졌다');
 			const whenMatch = /viewItem =~ \/(.+)\//.exec(entries[0].when);
 			assert.ok(whenMatch, `viewItem 정규식을 읽지 못했다: ${entries[0].when}`);
 			assert.ok(new RegExp(whenMatch![1]).test('historyItem.inputs'));
