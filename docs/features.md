@@ -166,13 +166,13 @@ JSON Editor는 다음 규칙으로 사용자 변경을 보호합니다.
 
 ### 멀티 task 액션의 진행 표시
 
-여러 태스크를 실행할 때 액션 옆에 `2/3 · link` 또는 병렬 실행 중인 태스크 요약이 표시됩니다. 병렬 실행 문구는 VS Code 언어 설정을 따릅니다. 단일 태스크에는 표시하지 않고 종료 시 제거합니다. 상태와 진행률은 스크린리더용 이름에도 함께 제공됩니다. `taskhub.showTaskStatus: false`면 상태 아이콘·진행률·완료 알림과 접근성 상태 문구를 숨기며 중지 기능은 그대로 동작합니다.
+여러 태스크를 실행할 때 액션 옆에 `2/3 · link` 또는 병렬 실행 중인 태스크 요약이 표시됩니다. 병렬 실행 문구는 VS Code 언어 설정을 따릅니다. 단일 태스크에는 표시하지 않고 종료 시 제거합니다. 상태와 진행률은 스크린리더용 이름에도 함께 제공됩니다. `taskhub.showTaskStatus: false`의 직접 범위는 Actions 뷰의 상태 아이콘·진행률·접근성 상태 문구이며 중지 기능은 그대로 동작합니다. 기본 `executionNotifications: "followStatus"`에서는 일반 완료·실패 알림도 이 값을 따르고, 알림만 유지하려면 `"on"`을 선택합니다.
 
 ### 장시간 액션 완료 알림
 
 기본 10초 이상 실행된 액션이 성공·실패·중지되면 소요 시간을 상태 표시줄에 5초 동안 보여 줍니다. 완료 시점에 VS Code 창이 포커스되지 않았다면 알림도 보내며, 750ms 안의 성공·중지 알림은 결과 개수별 요약 하나로 묶습니다. 실패는 액션 이름과 원인을 잃지 않도록 기존 상세 오류 알림을 개별로 유지하고 상태 표시줄 요약에만 합칩니다. 기존 `successMessage`와 같은 결과를 두 번 알리지 않으며, 비밀번호 입력에서 파생된 실패는 민감 디버그 버튼이 있는 기존 알림을 우선합니다.
 
-`taskhub.showTaskStatus`는 모든 실행 피드백의 마스터 스위치이고, `taskhub.backgroundCompletion.*` 설정은 그 안에서 장시간 완료 표시의 임계값·포커스 정책·대상 결과만 좁힙니다. 자세한 옵션은 [§21 설정 레퍼런스](#21-설정-레퍼런스)를 참조하세요.
+`taskhub.executionNotifications`는 액션 지정 완료 메시지·상세 실패 알림·부분 취소 안내와 이 장시간 완료 표시를 제어합니다. 기본값 `followStatus`는 기존 동작을 보존하므로 일반 알림은 `taskhub.showTaskStatus`를 따르지만, 기존에도 독립적이던 분리 실행 원샷 실패 알림은 계속 표시합니다. `on` 또는 `off`를 선택하면 원샷 실패까지 포함한 실행 알림 전체를 Actions 뷰 상태와 독립적으로 켜고 끌 수 있습니다. 실행 중 설정을 바꾸면 완료 시점의 값을 적용합니다. `taskhub.backgroundCompletion.*` 설정은 알림이 켜진 범위 안에서 장시간 완료 표시의 임계값·포커스 정책·대상 결과만 좁힙니다. 자세한 옵션은 [§21 설정 레퍼런스](#21-설정-레퍼런스)를 참조하세요.
 
 ### 액션에 단축키 할당
 
@@ -958,9 +958,10 @@ ELF/AXF Memory Map의 **바이트 보기**에서 열면 ELF 컨테이너를 raw 
 
 | 설정 ID | 타입 | 기본값 (범위) | 요약 | 관련 기능 |
 | --- | --- | --- | --- | --- |
-| `taskhub.showTaskStatus` | `boolean` | `true` | 액션 실행 피드백의 마스터 스위치. Actions 뷰의 상태 아이콘·진행률, 액션 지정 완료 메시지, 장시간 완료 표시를 함께 제어한다. `false`면 **실패 알림(`failMessage` 포함)도 함께 억제**되므로 History나 출력 채널을 확인해야 한다. 동시 실행 가드와 중지 기능은 그대로다. | [§5 Actions 패널](#5-actions-패널-mainviewmain), [§14 히스토리](#14-액션-실행-히스토리) |
+| `taskhub.showTaskStatus` | `boolean` | `true` | Actions 뷰의 상태 아이콘·다중 태스크 진행률·접근성 상태 문구를 직접 제어한다. 기본 `executionNotifications: "followStatus"`의 일반 알림도 이 값을 따르며, 동시 실행 가드와 중지 기능은 그대로다. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
+| `taskhub.executionNotifications` | `"followStatus"` \| `"on"` \| `"off"` | `"followStatus"` | 액션 지정 완료 메시지, 상세 실패 알림, 부분 취소 안내, 장시간 완료 표시를 제어한다. `followStatus`는 기존 동작을 보존해 일반 알림은 `showTaskStatus`를 따르고 분리 실행 원샷 실패는 유지한다. `on`·`off`는 원샷 실패를 포함한 실행 알림 전체에 독립 적용된다. 알림을 꺼도 History·출력 채널·중지 기능은 유지되며 실행 중 변경은 완료 시점부터 반영된다. | [§5 장시간 액션 완료 알림](#장시간-액션-완료-알림), [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.backgroundCompletion.thresholdSeconds` | `number` | `10` (0–86400) | 장시간 완료 표시의 최소 실행 시간(초). `0`이면 모든 액션을 포함한다. | [§5 장시간 액션 완료 알림](#장시간-액션-완료-알림) |
-| `taskhub.backgroundCompletion.notificationMode` | `"whenUnfocused"` \| `"always"` \| `"never"` | `"whenUnfocused"` | 장시간 성공·중지 완료 알림의 포커스 정책. `never`여도 짧은 상태 표시줄 안내와 기존 액션 지정 메시지·상세 실패 알림은 유지된다. | [§5 장시간 액션 완료 알림](#장시간-액션-완료-알림) |
+| `taskhub.backgroundCompletion.notificationMode` | `"whenUnfocused"` \| `"always"` \| `"never"` | `"whenUnfocused"` | 장시간 성공·중지 완료 알림의 포커스 정책. `executionNotifications`가 켜진 상태라면 `never`여도 짧은 상태 표시줄 안내와 기존 액션 지정 메시지·상세 실패 알림은 유지된다. | [§5 장시간 액션 완료 알림](#장시간-액션-완료-알림) |
 | `taskhub.backgroundCompletion.outcomes` | `array` | `["success","failure","stopped"]` | 장시간 완료 표시 대상 결과. 빈 배열이면 다른 실행 피드백은 유지하면서 이 기능만 끈다. 750ms 안의 완료는 하나로 묶는다. | [§5 장시간 액션 완료 알림](#장시간-액션-완료-알림) |
 | `taskhub.pipeline.showVerboseLogs` | `boolean` | `false` | 파이프라인 실행 시 TaskHub OutputChannel에 상세 명령/STDOUT/STDERR/exit code를 출력. 디버깅에만 켤 것. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
 | `taskhub.runLogs.enabled` | `boolean` | `false` | 구조화된 액션 실행 로그를 `.taskhub/logs/`에 저장. 일반 stdout/stderr의 미식별 비밀·프로젝트 데이터 영속화 위험 때문에 기본은 꺼짐. | [§14 실행 로그](#실행-로그-영속화-선택) |

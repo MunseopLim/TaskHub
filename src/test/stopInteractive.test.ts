@@ -1028,11 +1028,9 @@ suite('대화형 태스크 대기 중 중지', () => {
 
         test('IT-145: 앞선 태스크가 실제로 실행됐을 때만, 그 개수만큼만 안내한다', async function () {
             this.timeout(20000);
-            // 진행도 카운터(`ActionProgress.completed`)는 `running` 이 아닌 모든
-            // 종료 전이에서 올라간다 — 취소된 프롬프트도 `failure` 전이를 낸다.
-            // 그 값을 그대로 쓰면 (a) 프롬프트가 첫 태스크인 액션에서도 안내가
-            // 뜨고 (b) 개수가 항상 1 크다. 번들 예제는 대부분 프롬프트가 먼저라
-            // (a) 가 기본 경험이었다.
+            // 취소된 프롬프트도 `running → failure` 전이를 내므로 실제 시작한
+            // 태스크 수에서 취소 개수를 빼야 한다. 그렇지 않으면 (a) 프롬프트가
+            // 첫 태스크인 액션에서도 안내가 뜨고 (b) 개수가 항상 1 크다.
             const restoreInput = stubCancelledInputBox();
             const infos = stubInformationMessage();
             try {
@@ -1061,6 +1059,94 @@ suite('대화형 태스크 대기 중 중지', () => {
             } finally {
                 infos.restore();
                 restoreInput();
+            }
+        });
+
+        test('IT-193c: 상태 표시를 숨겨도 독립 알림은 부분 취소 결과를 안내한다', async function () {
+            this.timeout(20000);
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const previousStatus = config.inspect('showTaskStatus')?.globalValue;
+            const previousNotifications = config.inspect('executionNotifications')?.globalValue;
+            const restoreInput = stubCancelledInputBox();
+            const infos = stubInformationMessage();
+            try {
+                await config.update('showTaskStatus', false, vscode.ConfigurationTarget.Global);
+                await config.update('executionNotifications', 'on', vscode.ConfigurationTarget.Global);
+                const context = makeContext();
+                const actionItem: ActionItem = {
+                    id: 'hidden-status-partial-cancel',
+                    title: 'Hidden status partial cancel',
+                    action: {
+                        description: 'one task runs before a hidden-status prompt cancellation',
+                        tasks: [
+                            { id: 'first', type: 'stringManipulation', function: 'trim', input: '  x  ' },
+                            { id: 'ask', type: 'inputBox', prompt: 'value?' },
+                            { id: 'never', type: 'stringManipulation', function: 'trim', input: '  y  ' },
+                        ],
+                    },
+                } as unknown as ActionItem;
+
+                await executeAction(
+                    actionItem,
+                    context,
+                    new MainViewProvider(context, () => [actionItem]),
+                    new HistoryProvider(context)
+                );
+
+                assert.strictEqual(infos.calls.length, 1,
+                    '진행 데이터를 시각 상태와 함께 버리면 독립 알림이 부분 실행을 설명할 수 없다');
+                assert.match(infos.calls[0], /(전체 3개 중 이미 실행된 1개|1 of 3 tasks)/);
+            } finally {
+                infos.restore();
+                restoreInput();
+                await config.update('showTaskStatus', previousStatus, vscode.ConfigurationTarget.Global);
+                await config.update('executionNotifications', previousNotifications, vscode.ConfigurationTarget.Global);
+            }
+        });
+
+        test('IT-193f: 조건으로 건너뛴 태스크를 부분 취소의 실행 개수로 세지 않는다', async function () {
+            this.timeout(20000);
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const previousStatus = config.inspect('showTaskStatus')?.globalValue;
+            const previousNotifications = config.inspect('executionNotifications')?.globalValue;
+            const restoreInput = stubCancelledInputBox();
+            const infos = stubInformationMessage();
+            try {
+                await config.update('showTaskStatus', false, vscode.ConfigurationTarget.Global);
+                await config.update('executionNotifications', 'on', vscode.ConfigurationTarget.Global);
+                const context = makeContext();
+                const actionItem: ActionItem = {
+                    id: 'condition-skip-before-cancel',
+                    title: 'Condition skip before cancel',
+                    action: {
+                        description: 'a condition skip leaves no side effect before prompt cancellation',
+                        tasks: [
+                            {
+                                id: 'skipped',
+                                type: 'stringManipulation',
+                                function: 'trim',
+                                input: 'x',
+                                when: { var: 'off', equals: 'on' },
+                            },
+                            { id: 'ask', type: 'inputBox', prompt: 'value?' },
+                        ],
+                    },
+                } as unknown as ActionItem;
+
+                await executeAction(
+                    actionItem,
+                    context,
+                    new MainViewProvider(context, () => [actionItem]),
+                    new HistoryProvider(context)
+                );
+
+                assert.deepStrictEqual(infos.calls, [],
+                    '조건 skip은 실행되지 않았고 취소 프롬프트 외에는 되돌릴 효과가 없다');
+            } finally {
+                infos.restore();
+                restoreInput();
+                await config.update('showTaskStatus', previousStatus, vscode.ConfigurationTarget.Global);
+                await config.update('executionNotifications', previousNotifications, vscode.ConfigurationTarget.Global);
             }
         });
 

@@ -26,6 +26,7 @@ TaskHub/
 │   │                                  # - toWorkspaceRelativePath(): 절대경로 → ${workspaceFolder} 정규화
 │   │                                  # - wouldExceedCaptureLimit(): 캡처 한도 off-by-one guard
 │   ├── builtinVariables.ts            # 실행 시작 시점의 에디터·환경 내장 변수 스냅샷
+│   ├── executionFeedback.ts           # Actions 상태와 실행 알림의 호환·독립 제어 정책
 │   ├── backgroundCompletion.ts        # 장시간 액션 완료 정책·750ms 묶음·표시 문구 순수 로직
 │   ├── runLogStore.ts                 # 구조화 실행 로그 수집·상한·원자 저장·회전
 │   ├── actionRunReport.ts             # 실행 로그 → 스크립트 없는 읽기 전용 보고서 HTML
@@ -120,7 +121,7 @@ Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
     *   지원 태스크 타입 (`Task.type` union, [src/schema.ts](../src/schema.ts) 참조): `shell`, `command`, `fileDialog`, `folderDialog`, `pathDialog`, `unzip`, `zip`, `stringManipulation`, `inputBox`, `quickPick`, `envPick`, `confirm`, `writeFile`, `appendFile`, `switch`
 *   **변수 치환**: `${task_id.property}` 형식으로 파이프라인 간 데이터 전달
 *   **Task DAG**: `dependsOn` 및 `${taskId.x}` 자동 추론 의존성으로 그래프를 구성하며, `parallel: true` 태스크는 sync barrier에서 빠져 동시 실행 풀에 들어간다. 상세 시맨틱은 [features.md §24 병렬 실행 / Task DAG](./features.md#24-병렬-실행--task-dag) 참조.
-*   **장시간 완료 피드백**: `executeAction()`이 성공·실패·명시적 중지의 `durationMs`와 완료 시점 창 포커스를 확정하고, [backgroundCompletion.ts](../src/backgroundCompletion.ts)가 임계값·대상 결과·알림 정책과 750ms 묶음을 판정합니다. 성공·중지 알림만 묶고 실패는 원인이 있는 기존 오류 알림을 개별 유지하며, 상태 표시줄은 모든 대상 결과를 요약합니다. `taskhub.showTaskStatus`가 마스터 게이트이며 비밀번호 파생 실패의 민감 디버그 알림은 대체하지 않습니다.
+*   **장시간 완료 피드백**: `executeAction()`이 성공·실패·명시적 중지의 `durationMs`와 완료 시점 창 포커스를 확정하고, [executionFeedback.ts](../src/executionFeedback.ts)가 Actions 상태 표시와 실행 알림의 호환 정책을, [backgroundCompletion.ts](../src/backgroundCompletion.ts)가 임계값·대상 결과·알림 정책과 750ms 묶음을 판정합니다. 성공·중지 알림만 묶고 실패는 원인이 있는 기존 오류 알림을 개별 유지하며, 상태 표시줄은 모든 대상 결과를 요약합니다. `taskhub.executionNotifications`가 완료 피드백의 마스터 게이트이며 비밀번호 파생 실패의 민감 디버그 알림은 대체하지 않습니다.
 *   **실행 로그·보고서**: `executeAction()`이 옵션으로 `ActionRunLogCollector`를 생성하고, 파이프라인이 태스크 전이·이미 마스킹된 명령·캡처 출력·진단 개수·확정된 파일 결과를 넣습니다. [runLogStore.ts](../src/runLogStore.ts)는 VS Code에 의존하지 않고 JSON 상한, 원자 쓰기와 워크스페이스별 직렬 회전을 담당합니다. 쓰기 성공 뒤 History에는 워크스페이스 URI와 상대 경로만 연결하며, [actionRunReport.ts](../src/actionRunReport.ts)는 스크립트 없는 CSP로 액션 요약과 접힌 태스크 상세를 렌더링합니다. 저장 실패는 실행 결과와 분리합니다.
 *   **파일 감시**: debounce({ run, cancel }) 패턴으로 JSON 변경 감지
 

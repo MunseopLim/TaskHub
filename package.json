@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.7.44",
+  "version": "0.7.45",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -66,6 +66,21 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "%setting.showTaskStatus%"
+        },
+        "taskhub.executionNotifications": {
+          "type": "string",
+          "enum": [
+            "followStatus",
+            "on",
+            "off"
+          ],
+          "enumDescriptions": [
+            "%setting.executionNotifications.followStatus%",
+            "%setting.executionNotifications.on%",
+            "%setting.executionNotifications.off%"
+          ],
+          "default": "followStatus",
+          "markdownDescription": "%setting.executionNotifications%"
         },
         "taskhub.backgroundCompletion.thresholdSeconds": {
           "type": "number",

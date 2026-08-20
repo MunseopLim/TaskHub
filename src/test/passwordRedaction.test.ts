@@ -1178,6 +1178,58 @@ suite('Password taint and redaction', function () {
         assert.strictEqual(extension.stopRunningAction(id), false);
     });
 
+    test('IT-193g: explicit off는 민감 detached one-shot 실패도 로그만 남긴다', async () => {
+        const config = vscode.workspace.getConfiguration('taskhub');
+        const previousNotifications = config.inspect('executionNotifications')?.globalValue;
+        const id = 'sensitive-one-shot-notification-off';
+        const secret = 'Detached-Off-S3cret';
+        const originalShowError = vscode.window.showErrorMessage;
+        const shownErrors: string[] = [];
+        (vscode.window as any).showErrorMessage = async (message: string) => {
+            shownErrors.push(message);
+            return undefined;
+        };
+
+        try {
+            await config.update('executionNotifications', 'off', vscode.ConfigurationTarget.Global);
+            await extension.executeActionPipeline(
+                {
+                    description: 'silent sensitive detached failure reporting',
+                    tasks: [
+                        { id: 'ask', type: 'inputBox', prompt: 'password?', password: true },
+                        {
+                            id: 'background',
+                            type: 'command',
+                            command: platformCommand('node'),
+                            args: ['-e', 'process.exit(7)', '${ask.value}'],
+                            isOneShot: true,
+                        },
+                    ],
+                },
+                makeContext(),
+                id,
+                tempWorkspace,
+                [tempWorkspace],
+                { presetInputs: { ask: { value: secret } } }
+            );
+
+            const deadline = Date.now() + (process.platform === 'win32' ? 10000 : 3000);
+            while (!verboseLines.some(line => /Sensitive one-shot|민감 원샷/.test(line))
+                && Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            assert.ok(verboseLines.some(line => /Sensitive one-shot|민감 원샷/.test(line)),
+                '알림을 꺼도 one-shot 실패는 출력 채널에 진단 흔적을 남겨야 한다');
+            await new Promise(resolve => setTimeout(resolve, 25));
+            assert.deepStrictEqual(shownErrors, [],
+                'explicit off인데 민감 one-shot 실패 토스트가 설정을 우회하면 안 된다');
+            assert.ok(!verboseLines.join('\n').includes(secret));
+        } finally {
+            (vscode.window as any).showErrorMessage = originalShowError;
+            await config.update('executionNotifications', previousNotifications, vscode.ConfigurationTarget.Global);
+        }
+    });
+
     /**
      * 실패 원인을 통째로 가리면 비밀번호를 쓰는 flash/deploy 가 실패했을 때
      * 사용자가 아무 단서도 없이 막힌다. 정책을 "기본은 안전한 메타데이터만,

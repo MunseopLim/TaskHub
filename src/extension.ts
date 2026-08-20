@@ -48,6 +48,10 @@ import {
     shouldSurfaceBackgroundCompletion,
 } from './backgroundCompletion';
 import {
+    resolveDetachedFailureNotifications,
+    resolveExecutionNotifications,
+} from './executionFeedback';
+import {
     buildInputProfileDraft,
     InputProfileStore,
     InputProfileStoreError,
@@ -3176,12 +3180,11 @@ export function promptCancellationTaskIds(error: unknown, seen = new Set<unknown
 /**
  * 이 오류가 담고 있는 **프롬프트 취소의 개수**.
  *
- * "이미 실행된 태스크가 몇 개인가" 를 셀 때 필요하다. 진행도 카운터
- * (`ActionProgress.completed`)는 `running` 이 아닌 **모든** 종료 전이에서
- * 올라가므로 — 취소된 프롬프트도 `failure` 전이를 내보낸다 — 그 값을 그대로
- * 쓰면 아무것도 실행되지 않았는데 "1개 실행됨" 이 된다. 실측: 태스크가
- * `fileDialog` 하나뿐인 액션에서 Escape 를 눌러도 안내가 떴고, 번들 예제는
- * 대부분 프롬프트가 첫 태스크라 이것이 기본 경험이었다.
+ * "이미 실행된 태스크가 몇 개인가" 를 셀 때 필요하다. 실행 시작과 종료 전이를
+ * 짝지어 조건 skip은 빼더라도, 취소된 프롬프트 자체는 시작 뒤 `failure` 전이를
+ * 내보낸다. 그 값을 그대로 쓰면 아무것도 완료되지 않았는데 "1개 실행됨" 이
+ * 된다. 실측: 태스크가 `fileDialog` 하나뿐인 액션에서 Escape 를 눌러도 안내가
+ * 떴고, 번들 예제는 대부분 프롬프트가 첫 태스크라 이것이 기본 경험이었다.
  *
  * `isOnlyPromptCancellation` 과 같은 순환 방어를 쓴다.
  */
@@ -3463,12 +3466,33 @@ function readBackgroundCompletionPolicy(): BackgroundCompletionPolicy {
     return { thresholdMs: thresholdSeconds * 1000, outcomes, notificationMode };
 }
 
+function readShowTaskStatus(): boolean {
+    return vscode.workspace.getConfiguration('taskhub').get('showTaskStatus', true);
+}
+
+/** Resolve ordinary action messages at the time the result is presented. */
+function readExecutionNotifications(): boolean {
+    const config = vscode.workspace.getConfiguration('taskhub');
+    return resolveExecutionNotifications(
+        config.get('showTaskStatus', true),
+        config.get<unknown>('executionNotifications', 'followStatus')
+    );
+}
+
+/** Detached failures have a distinct legacy edge; see executionFeedback.ts. */
+function readDetachedFailureNotifications(): boolean {
+    return resolveDetachedFailureNotifications(
+        vscode.workspace.getConfiguration('taskhub')
+            .get<unknown>('executionNotifications', 'followStatus')
+    );
+}
+
 /**
  * Add a long-running completion to the short batching window.
  *
- * `showTaskStatus` remains the master feedback switch for backward
- * compatibility. The new settings only narrow when generic long-run cues are
- * eligible; they never turn feedback back on for a user who disabled it.
+ * `showExecutionNotifications` is already resolved from the compatibility
+ * mode. Background settings only narrow when generic long-run cues are
+ * eligible.
  * Returns true when this event will contribute to a batch notification, so
  * the legacy per-event path can avoid showing the same result twice. Failures
  * deliberately pass `allowNotification=false`: their detailed legacy error
@@ -3478,11 +3502,11 @@ function enqueueBackgroundCompletion(
     title: string,
     outcome: BackgroundCompletionOutcome,
     durationMs: number,
-    showTaskStatus: boolean,
+    showExecutionNotifications: boolean,
     message?: string,
     allowNotification: boolean = true
 ): boolean {
-    if (!showTaskStatus) {
+    if (!showExecutionNotifications) {
         return false;
     }
     const policy = readBackgroundCompletionPolicy();
@@ -4834,12 +4858,11 @@ function resolveActionDefinition(actionItem: ActionItem): { action: PipelineActi
 function markActionAsRunning(
     actionItem: ActionItem,
     id: string,
-    showTaskStatus: boolean,
     mainViewProvider: MainViewProvider
 ): ActionRunContext | undefined {
-    // The duplicate-run guard is intentionally independent of `showTaskStatus`,
-    // which only controls visual state indicators in the tree. Running the same
-    // action concurrently would collide in activeTasks and is always wrong.
+    // The duplicate-run guard is intentionally independent of visual status.
+    // Running the same action concurrently would collide in activeTasks and is
+    // always wrong.
     const currentState = actionStates.get(id);
     if (currentState?.state === 'running') {
         vscode.window.showInformationMessage(t(`'${actionItem.title}' 액션이 이미 실행 중입니다.`, `Action '${actionItem.title}' is already running.`));
@@ -4856,9 +4879,9 @@ function markActionAsRunning(
         run.sensitiveDebug = true;
     }
     syncRunningActionsContext();
-    if (showTaskStatus) {
-        mainViewProvider.refresh();
-    }
+    // Even with icons hidden, the row must pick up `runningAction` so its
+    // capability-only inline Stop button appears.
+    mainViewProvider.refresh();
     return run;
 }
 
@@ -5756,11 +5779,11 @@ async function executeActionPipelineForRun(
     }
 }
 
-function handleActionSuccess(id: string, action: PipelineAction, showTaskStatus: boolean): void {
+function handleActionSuccess(id: string, action: PipelineAction, showExecutionNotifications: boolean): void {
     // State transitions are always tracked so that the duplicate-run guard in
     // markActionAsRunning() stays accurate regardless of the `showTaskStatus` setting.
     actionStates.set(id, { state: 'success' });
-    if (showTaskStatus && action.successMessage) {
+    if (showExecutionNotifications && action.successMessage) {
         vscode.window.showInformationMessage(action.successMessage);
     }
 }
@@ -6008,9 +6031,15 @@ export function __testHook_requestSensitiveDebug(actionId: string): void {
     pendingSensitiveDebugActionIds.add(actionId);
 }
 
-function handleActionFailure(id: string, actionItem: ActionItem, action: PipelineAction, error: Error, showTaskStatus: boolean): void {
+function handleActionFailure(
+    id: string,
+    actionItem: ActionItem,
+    action: PipelineAction,
+    error: Error,
+    showExecutionNotifications: boolean
+): void {
     actionStates.set(id, { state: 'failure' });
-    if (!showTaskStatus) {
+    if (!showExecutionNotifications) {
         return;
     }
     vscode.window.showErrorMessage(actionFailureNotificationMessage(actionItem, action, error));
@@ -6222,7 +6251,7 @@ function isCurrentActionRun(run: ActionRunContext): boolean {
     return currentActionRuns.get(run.id) === run;
 }
 
-function finalizeActionRun(run: ActionRunContext, showTaskStatus: boolean, mainViewProvider: MainViewProvider): void {
+function finalizeActionRun(run: ActionRunContext, mainViewProvider: MainViewProvider): void {
     const id = run.id;
     const ownsCurrentState = isCurrentActionRun(run);
     // Owned by the run, so it dies with the run. Leaving a cancelled source
@@ -6247,9 +6276,9 @@ function finalizeActionRun(run: ActionRunContext, showTaskStatus: boolean, mainV
         }
     }
     syncRunningActionsContext();
-    if (showTaskStatus) {
-        mainViewProvider.refresh();
-    }
+    // Clear `runningAction` even when status icons are hidden. This also
+    // prevents a spinner from surviving a mid-run setting change.
+    mainViewProvider.refresh();
 }
 
 export async function executeAction(
@@ -6267,9 +6296,7 @@ export async function executeAction(
 
     const { action, id } = resolved;
     const actionWorkspaceFolder = id ? actionWorkspaceFolderMap.get(id) : undefined;
-    const showTaskStatus = vscode.workspace.getConfiguration('taskhub').get('showTaskStatus', true);
-
-    const run = markActionAsRunning(actionItem, id, showTaskStatus, mainViewProvider);
+    const run = markActionAsRunning(actionItem, id, mainViewProvider);
     if (!run) {
         return;
     }
@@ -6333,15 +6360,24 @@ export async function executeAction(
     // below so "실행한 명령 보기" can show what ran without re-executing.
     const recordCommands: Record<string, string> = Object.create(null);
 
+    // Separate from visual progress: this count powers the partial-cancel
+    // message. A condition-skipped task never emits `running`, while a
+    // continueOnError failure does, so pairing terminal events with this set
+    // counts only tasks that actually started and may have left side effects.
+    const startedTaskIds = new Set<string>();
+    let executedTaskCount = 0;
+
     try {
         await executeActionPipelineForRun(action, context, id, actionWorkspaceFolder, undefined, {
             presetInputs,
             recordInputs,
             recordCommands,
             runLogCollector: runLog?.collector,
-            // Surface "지금 어디" progress on the Actions panel. We only
-            // mutate the existing actionStates entry (markActionAsRunning
-            // already set state='running') and refresh the tree.
+            // Track progress on the existing actionStates entry
+            // (markActionAsRunning already set state='running'). The data is
+            // also needed to explain a partial prompt cancellation when tree
+            // status is hidden; only the refresh/render is visual-policy
+            // dependent.
             // Single-task actions intentionally skip the description so
             // "1/1" noise never shows up — see Action TreeItem render
             // logic.
@@ -6352,8 +6388,13 @@ export async function executeAction(
             // pipelines see multiple ids in flight at once — the tree
             // renderer picks the right format per running.length.
             onTaskTransition: (event) => {
-                if (!showTaskStatus || !isCurrentActionRun(run)) {
+                if (!isCurrentActionRun(run)) {
                     return;
+                }
+                if (event.state === 'running') {
+                    startedTaskIds.add(event.taskId);
+                } else if (startedTaskIds.delete(event.taskId)) {
+                    executedTaskCount++;
                 }
                 const current = actionStates.get(id);
                 if (!current) {
@@ -6376,7 +6417,9 @@ export async function executeAction(
                     state: current.state,
                     progress: { total, completed, running }
                 });
-                mainViewProvider.refresh();
+                if (readShowTaskStatus()) {
+                    mainViewProvider.refresh();
+                }
             }
         }, run);
         if (!isCurrentActionRun(run)) {
@@ -6406,14 +6449,15 @@ export async function executeAction(
         // here keeps the stored data clean for any future consumer.
         const durationMs = Math.max(0, Date.now() - timestamp);
         runLogOutcome = 'success';
+        const showExecutionNotifications = readExecutionNotifications();
         const backgroundWillNotify = enqueueBackgroundCompletion(
             actionItem.title,
             'success',
             durationMs,
-            showTaskStatus,
+            showExecutionNotifications,
             action.successMessage
         );
-        handleActionSuccess(id, action, showTaskStatus && !backgroundWillNotify);
+        handleActionSuccess(id, action, showExecutionNotifications && !backgroundWillNotify);
 
         if (historyProvider) {
             historyProvider.updateHistoryStatus(id, timestamp, 'success', undefined, durationMs);
@@ -6426,6 +6470,7 @@ export async function executeAction(
     } catch (error: any) {
         const ownsCurrentState = isCurrentActionRun(run);
         const manuallyStopped = ownsCurrentState && manuallyTerminatedActions.has(id);
+        const showExecutionNotifications = readExecutionNotifications();
         // 대화형 프롬프트를 사용자가 닫아서 끝난 실행은 **실패가 아니다.**
         // Stop 버튼과 같은 부류이므로 같은 마감을 쓴다 — `PromptCancelledError`
         // 주석 참조. (태스크 수준에서는 여전히 실패라 `continueOnError` 는
@@ -6448,7 +6493,7 @@ export async function executeAction(
                     actionItem.title,
                     'failure',
                     durationMs,
-                    showTaskStatus,
+                    showExecutionNotifications,
                     actionFailureNotificationMessage(actionItem, action, error),
                     false
                 );
@@ -6467,14 +6512,14 @@ export async function executeAction(
                 // 비밀을 쓰는 태스크의 실패는 상세가 가려져 있다. 그대로 두면
                 // 사용자가 원인에 접근할 방법이 없으므로, 일회성 재실행을
                 // 제안한다 (이미 민감 디버그로 돌린 실행에는 제안하지 않는다).
-                if (debuggableSensitiveFailure && !run.sensitiveDebug && showTaskStatus) {
+                if (debuggableSensitiveFailure && !run.sensitiveDebug && showExecutionNotifications) {
                     void offerSensitiveDebugRerun(
                         actionItem, context, mainViewProvider, historyProvider,
                         t(`'${actionItem.title}' 액션 실패: ${error.message}`,
                           `Action '${actionItem.title}' failed: ${error.message}`)
                     );
                 } else {
-                    handleActionFailure(id, actionItem, action, error, showTaskStatus);
+                    handleActionFailure(id, actionItem, action, error, showExecutionNotifications);
                 }
             }
 
@@ -6496,9 +6541,6 @@ export async function executeAction(
             // 사용자가 프롬프트를 닫았다. 오류 토스트를 띄우지 않고 History 에
             // `cancelled` 로 남긴다.
             //
-            // 진행 상황은 상태를 지우기 **전에** 붙잡아 둔다 — 아래에서 "이미
-            // 몇 개가 실행됐는가" 로 안내 여부를 가르는 근거다.
-            const progressSnapshot = actionStates.get(id)?.progress;
             if (ownsCurrentState) {
                 // `finalizeActionRun` 은 `manuallyTerminatedActions` 에 있는
                 // 액션만 상태를 지운다. 이쪽은 그 집합에 넣지 않으므로(중지가
@@ -6527,11 +6569,11 @@ export async function executeAction(
             // 올라가므로 방금 취소된 프롬프트까지 "실행됨"으로 세고, 그러면
             // 프롬프트 하나뿐인 액션에서도 안내가 뜬다 —
             // `countPromptCancellations` 주석 참조.
-            const ranBefore = Math.max(0, (progressSnapshot?.completed ?? 0) - countPromptCancellations(error));
-            if (ownsCurrentState && showTaskStatus && ranBefore > 0) {
+            const ranBefore = Math.max(0, executedTaskCount - countPromptCancellations(error));
+            if (ownsCurrentState && showExecutionNotifications && ranBefore > 0) {
                 // 전체 개수만 함께 보여 준다. "실행됨 N개 + 남은 M개 = 전체"
                 // 형태로 쓰면 취소된 프롬프트가 어느 쪽에도 없어 합이 맞지 않는다.
-                const total = progressSnapshot?.total ?? 0;
+                const total = action.tasks.length;
                 vscode.window.showInformationMessage(t(
                     `'${actionItem.title}' 실행을 취소했습니다. 전체 ${total}개 중 이미 실행된 ${ranBefore}개의 결과는 되돌리지 않습니다.`,
                     `Cancelled '${actionItem.title}'. ${ranBefore} of ${total} tasks had already run; their effects are not undone.`
@@ -6557,7 +6599,7 @@ export async function executeAction(
                     actionItem.title,
                     'stopped',
                     durationMs,
-                    showTaskStatus
+                    showExecutionNotifications
                 );
             }
             if (historyProvider) {
@@ -6574,7 +6616,7 @@ export async function executeAction(
             }
         }
     } finally {
-        finalizeActionRun(run, showTaskStatus, mainViewProvider);
+        finalizeActionRun(run, mainViewProvider);
         const persistedRunLog = await persistRunLog(runLog, runLogOutcome, Date.now(), runLogError, runLogErrorCode);
         if (persistedRunLog && historyProvider) {
             historyProvider.setHistoryRunLog(id, timestamp, persistedRunLog);
@@ -7368,7 +7410,9 @@ async function executeSingleTask(
                         executeStreamedTask(handlerTask, defaultWorkspace).catch(error => {
                             const msg = error instanceof Error ? error.message : String(error);
                             outputChannel.appendLine(`[ERROR] One-shot task ${task.id} failed: ${msg}`);
-                            vscode.window.showErrorMessage(t(`원샷 태스크 '${task.id}' 시작 실패: ${msg}`, `One-shot task '${task.id}' failed to start: ${msg}`));
+                            if (readDetachedFailureNotifications()) {
+                                vscode.window.showErrorMessage(t(`원샷 태스크 '${task.id}' 시작 실패: ${msg}`, `One-shot task '${task.id}' failed to start: ${msg}`));
+                            }
                         });
                     }
                 } else {
@@ -7961,7 +8005,9 @@ function executeSensitiveBackgroundOneShot(task: any, workspaceFolderPath?: stri
             `Sensitive one-shot task '${task.id}' failed. Details were hidden because it used a password input.`
         );
         outputChannel.appendLine(`[ERROR] ${message}`);
-        vscode.window.showErrorMessage(message);
+        if (readDetachedFailureNotifications()) {
+            vscode.window.showErrorMessage(message);
+        }
     };
 
     try {
@@ -8054,7 +8100,9 @@ function executeSensitiveBackgroundOneShot(task: any, workspaceFolderPath?: stri
         if (error instanceof Error && error.name === RAW_SHELL_UNSUPPORTED_ERROR) {
             failureReported = true;
             outputChannel.appendLine(`[ERROR] ${error.message}`);
-            vscode.window.showErrorMessage(error.message);
+            if (readDetachedFailureNotifications()) {
+                vscode.window.showErrorMessage(error.message);
+            }
             return;
         }
         reportFailure();
@@ -11250,12 +11298,11 @@ export function activate(context: vscode.ExtensionContext) {
         const actionItem = findActionById(allActions, args.id);
         if (actionItem && actionItem.action) {
             const pathParts = findActionPathById(allActions, args.id);
-            // Mirror `taskhub.executeAction`'s catch (line ~3162): pipeline
-            // failures already surface via `handleActionFailure`'s user
-            // notification — re-throwing here would let VS Code show a
-            // second generic "command failed" toast on top of it. The
-            // keybinding entry point goes through this command, so the
-            // catch is essential for that path.
+            // Mirror `taskhub.executeAction`'s catch: `executeAction` owns the
+            // notification policy, including the deliberate silent mode.
+            // Re-throwing here would let VS Code add a generic "command
+            // failed" toast, either duplicating the detailed alert or
+            // bypassing `executionNotifications: off`.
             try {
                 await executeAction(actionItem, context, mainViewProvider, historyProvider, undefined, pathParts);
             } catch (error) {

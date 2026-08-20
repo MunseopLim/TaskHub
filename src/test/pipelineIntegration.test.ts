@@ -2328,6 +2328,288 @@ try {
                 }
             }
         });
+
+        test('IT-193a: Actions 상태를 숨겨도 실행 알림을 독립적으로 켤 수 있다', async () => {
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const settingKeys = [
+                'showTaskStatus',
+                'executionNotifications',
+                'backgroundCompletion.thresholdSeconds',
+                'backgroundCompletion.notificationMode',
+                'backgroundCompletion.outcomes',
+            ] as const;
+            const previous = new Map(settingKeys.map(key => [key, config.inspect(key)?.globalValue]));
+            const originalShowInfo = vscode.window.showInformationMessage;
+            const originalSetStatus = vscode.window.setStatusBarMessage;
+            const shownInfo: string[] = [];
+            const shownStatus: string[] = [];
+            (vscode.window as any).showInformationMessage = async (message: string) => {
+                shownInfo.push(message);
+                return undefined;
+            };
+            (vscode.window as any).setStatusBarMessage = (message: string) => {
+                shownStatus.push(message);
+                return { dispose: () => undefined };
+            };
+
+            const actionItem: ActionItem = {
+                id: 'it193a',
+                title: 'IT-193 Hidden Status',
+                action: {
+                    description: 'notification without tree status',
+                    successMessage: 'Independent completion',
+                    tasks: [{ id: 'ok', type: 'stringManipulation', function: 'trim', input: 'ok' }],
+                },
+            };
+
+            try {
+                await config.update('showTaskStatus', false, vscode.ConfigurationTarget.Global);
+                await config.update('executionNotifications', 'on', vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.thresholdSeconds', 0, vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.notificationMode', 'always', vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.outcomes', ['success'], vscode.ConfigurationTarget.Global);
+
+                const context = makeFakeContext();
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+                await executeAction(actionItem, context, mainView, new HistoryProvider(context));
+                __testHook_flushBackgroundCompletions();
+
+                assert.strictEqual(shownInfo.length, 1, '알림 on이 Actions 상태 설정에 다시 묶이면 안 된다');
+                assert.match(shownInfo[0], /^Independent completion/);
+                assert.strictEqual(shownStatus.length, 1, '장시간 완료 상태도 실행 알림 정책을 따라야 한다');
+                const rendered = (await mainView.getChildren())[0];
+                assert.strictEqual((rendered.iconPath as vscode.ThemeIcon).id, 'gear',
+                    '알림을 켰다고 숨긴 Actions 성공 아이콘이 되살아나면 안 된다');
+                assert.strictEqual(rendered.accessibilityInformation?.label, actionItem.title);
+            } finally {
+                __testHook_flushBackgroundCompletions();
+                (vscode.window as any).showInformationMessage = originalShowInfo;
+                (vscode.window as any).setStatusBarMessage = originalSetStatus;
+                for (const key of settingKeys) {
+                    await config.update(key, previous.get(key), vscode.ConfigurationTarget.Global);
+                }
+            }
+        });
+
+        test('IT-193b: Actions 상태를 유지하면서 실행 알림만 끌 수 있다', async () => {
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const settingKeys = [
+                'showTaskStatus',
+                'executionNotifications',
+                'backgroundCompletion.thresholdSeconds',
+                'backgroundCompletion.notificationMode',
+                'backgroundCompletion.outcomes',
+            ] as const;
+            const previous = new Map(settingKeys.map(key => [key, config.inspect(key)?.globalValue]));
+            const originalShowError = vscode.window.showErrorMessage;
+            const originalSetStatus = vscode.window.setStatusBarMessage;
+            const shownErrors: string[] = [];
+            const shownStatus: string[] = [];
+            (vscode.window as any).showErrorMessage = async (message: string) => {
+                shownErrors.push(message);
+                return undefined;
+            };
+            (vscode.window as any).setStatusBarMessage = (message: string) => {
+                shownStatus.push(message);
+                return { dispose: () => undefined };
+            };
+
+            const actionItem: ActionItem = {
+                id: 'it193b',
+                title: 'IT-193 Silent Failure',
+                action: {
+                    description: 'tree status without notification',
+                    failMessage: 'Hidden failure notification',
+                    tasks: [{
+                        id: 'fail',
+                        type: 'stringManipulation',
+                        function: 'trim',
+                        input: 'x',
+                        passTheResultToNextTask: true,
+                        output: { capture: { name: 'bad', regex: '(' } },
+                    }],
+                },
+            };
+
+            try {
+                await config.update('showTaskStatus', true, vscode.ConfigurationTarget.Global);
+                await config.update('executionNotifications', 'off', vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.thresholdSeconds', 0, vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.notificationMode', 'always', vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.outcomes', ['failure'], vscode.ConfigurationTarget.Global);
+
+                const context = makeFakeContext();
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+                await assert.rejects(
+                    () => executeAction(actionItem, context, mainView, new HistoryProvider(context)),
+                    /capture failed/
+                );
+                __testHook_flushBackgroundCompletions();
+
+                assert.deepStrictEqual(shownErrors, [], '알림 off인데 상세 실패 토스트가 남으면 안 된다');
+                assert.deepStrictEqual(shownStatus, [], '알림 off인데 장시간 완료 상태가 남으면 안 된다');
+                const rendered = (await mainView.getChildren())[0];
+                assert.strictEqual((rendered.iconPath as vscode.ThemeIcon).id, 'error',
+                    '알림을 껐다고 Actions 실패 상태까지 숨기면 안 된다');
+                assert.match(rendered.accessibilityInformation?.label ?? '', /(실패|failed)/);
+            } finally {
+                __testHook_flushBackgroundCompletions();
+                (vscode.window as any).showErrorMessage = originalShowError;
+                (vscode.window as any).setStatusBarMessage = originalSetStatus;
+                for (const key of settingKeys) {
+                    await config.update(key, previous.get(key), vscode.ConfigurationTarget.Global);
+                }
+            }
+        });
+
+        test('IT-193d: 실행 중 바꾼 상태 설정을 완료 알림과 트리 capability에 반영한다', async () => {
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const settingKeys = [
+                'showTaskStatus',
+                'executionNotifications',
+                'backgroundCompletion.outcomes',
+            ] as const;
+            const previous = new Map(settingKeys.map(key => [key, config.inspect(key)?.globalValue]));
+            const originalShowInfo = vscode.window.showInformationMessage;
+            const originalShowInputBox = vscode.window.showInputBox;
+            const shownInfo: string[] = [];
+            let resolveOpened!: () => void;
+            const opened = new Promise<void>(resolve => { resolveOpened = resolve; });
+            let resolveInput: ((value: string | undefined) => void) | undefined;
+            (vscode.window as any).showInformationMessage = async (message: string) => {
+                shownInfo.push(message);
+                return undefined;
+            };
+            (vscode.window as any).showInputBox = () => {
+                resolveOpened();
+                return new Promise<string | undefined>(resolve => { resolveInput = resolve; });
+            };
+
+            const actionItem: ActionItem = {
+                id: 'it193d',
+                title: 'IT-193 Dynamic Feedback',
+                action: {
+                    description: 'change feedback policy while prompt is open',
+                    successMessage: 'Dynamic completion',
+                    tasks: [{ id: 'ask', type: 'inputBox', prompt: 'value?' }],
+                },
+            };
+            let run: Promise<void> | undefined;
+            let changeCount = 0;
+            let changeSubscription: vscode.Disposable | undefined;
+
+            try {
+                await config.update('showTaskStatus', false, vscode.ConfigurationTarget.Global);
+                await config.update('executionNotifications', 'followStatus', vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.outcomes', [], vscode.ConfigurationTarget.Global);
+
+                const context = makeFakeContext();
+                const mainView = new MainViewProvider(context, () => [actionItem]);
+                changeSubscription = mainView.onDidChangeTreeData(() => { changeCount++; });
+                run = executeAction(actionItem, context, mainView, new HistoryProvider(context));
+                await opened;
+
+                assert.ok(changeCount >= 1,
+                    '상태 아이콘을 숨겨도 runningAction capability를 위한 시작 refresh가 필요하다');
+                const running = (await mainView.getChildren())[0];
+                assert.strictEqual(running.contextValue, 'runningAction');
+                assert.strictEqual((running.iconPath as vscode.ThemeIcon).id, 'gear');
+
+                await config.update('showTaskStatus', true, vscode.ConfigurationTarget.Global);
+                resolveInput?.('done');
+                await run;
+
+                assert.ok(shownInfo.includes('Dynamic completion'),
+                    'followStatus가 시작 시점 false에 고정되면 완료 시 켠 알림이 나오지 않는다');
+                const completed = (await mainView.getChildren())[0];
+                assert.strictEqual((completed.iconPath as vscode.ThemeIcon).id, 'check');
+                assert.strictEqual(completed.contextValue, 'succeededAction');
+                assert.ok(changeCount >= 3,
+                    '시작·태스크 종료·최종화 refresh가 있어야 설정 전환 뒤 상태가 정체되지 않는다');
+            } finally {
+                resolveInput?.(undefined);
+                await run?.catch(() => undefined);
+                changeSubscription?.dispose();
+                (vscode.window as any).showInformationMessage = originalShowInfo;
+                (vscode.window as any).showInputBox = originalShowInputBox;
+                for (const key of settingKeys) {
+                    await config.update(key, previous.get(key), vscode.ConfigurationTarget.Global);
+                }
+            }
+        });
+
+        test('IT-193e: explicit off만 detached one-shot 실패 알림을 숨긴다', async () => {
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const settingKeys = [
+                'showTaskStatus',
+                'executionNotifications',
+                'backgroundCompletion.outcomes',
+            ] as const;
+            const previous = new Map(settingKeys.map(key => [key, config.inspect(key)?.globalValue]));
+            const originalShowError = vscode.window.showErrorMessage;
+            const originalExecuteTask = vscode.tasks.executeTask;
+            const shownErrors: string[] = [];
+            let executeTaskCalls = 0;
+            let resolveFirstFailure!: () => void;
+            const firstFailure = new Promise<void>(resolve => { resolveFirstFailure = resolve; });
+            (vscode.window as any).showErrorMessage = async (message: string) => {
+                shownErrors.push(message);
+                resolveFirstFailure();
+                return undefined;
+            };
+            (vscode.tasks as any).executeTask = async () => {
+                executeTaskCalls++;
+                throw new Error('detached launch failed');
+            };
+
+            const runOneShot = async (id: string): Promise<void> => {
+                const actionItem: ActionItem = {
+                    id,
+                    title: id,
+                    action: {
+                        description: 'detached one-shot failure policy',
+                        tasks: [{ id: 'background', type: 'command', command: 'node', isOneShot: true }],
+                    },
+                };
+                const context = makeFakeContext();
+                await executeAction(actionItem, context, new MainViewProvider(context, () => [actionItem]));
+            };
+
+            try {
+                await config.update('showTaskStatus', false, vscode.ConfigurationTarget.Global);
+                await config.update('executionNotifications', 'followStatus', vscode.ConfigurationTarget.Global);
+                await config.update('backgroundCompletion.outcomes', [], vscode.ConfigurationTarget.Global);
+
+                await runOneShot('it193e.follow');
+                await Promise.race([
+                    firstFailure,
+                    new Promise<never>((_, reject) => setTimeout(
+                        () => reject(new Error('followStatus one-shot failure notification timeout')),
+                        2000
+                    )),
+                ]);
+                assert.strictEqual(shownErrors.length, 1,
+                    'followStatus는 showTaskStatus=false에서도 기존 one-shot 실패 알림을 보존한다');
+
+                shownErrors.length = 0;
+                await config.update('executionNotifications', 'off', vscode.ConfigurationTarget.Global);
+                await runOneShot('it193e.off');
+                const deadline = Date.now() + 2000;
+                while (executeTaskCalls < 2 && Date.now() < deadline) {
+                    await new Promise(resolve => setTimeout(resolve, 10));
+                }
+                await new Promise(resolve => setTimeout(resolve, 25));
+                assert.strictEqual(executeTaskCalls, 2);
+                assert.deepStrictEqual(shownErrors, [],
+                    'explicit off인데 detached one-shot 실패가 설정을 우회하면 안 된다');
+            } finally {
+                (vscode.window as any).showErrorMessage = originalShowError;
+                (vscode.tasks as any).executeTask = originalExecuteTask;
+                for (const key of settingKeys) {
+                    await config.update(key, previous.get(key), vscode.ConfigurationTarget.Global);
+                }
+            }
+        });
     });
 
     suite('History Input Replay', () => {
