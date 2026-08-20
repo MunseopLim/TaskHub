@@ -19,7 +19,8 @@
  * | --- | --- |
  * | `buildMinimalElf32()` | 개요 표, All Sections 표 |
  * | `buildElf32WithSymbols()` | + region 카드 상세 표, Object Summary |
- * | `buildElf32WithDwarfLines()` | + 함수별 DWARF 소스 열기 |
+ * | `buildElf32WithDwarfLines()` | + DWARF 4 함수별 소스 열기 |
+ * | `buildElf32WithDwarf5Lines()` | + 외부 문자열 table을 쓰는 DWARF 5 소스 열기 |
  * | `examples/sample_armlink.txt` | + `func`(함수명) 열과 `Function ▶` 토글 |
  *
  * 마지막 줄이 중요하다: `func`는 **ARM link listing 파서만** 채운다.
@@ -117,6 +118,94 @@ export function buildElf32WithDwarfLines(sourcePath = 'src/main.c', debugLineFla
         { name: '.data', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_WRITE, addr: 0x20000000, size: 0x80 },
         { name: '.bss', type: SHT_NOBITS, flags: SHF_ALLOC | SHF_WRITE, addr: 0x20000080, size: 0x200 },
         { name: '.debug_line', type: SHT_PROGBITS, flags: debugLineFlags, addr: 0, size: debugLine.length, data: debugLine },
+    ];
+    const symbols: SymbolSpec[] = [
+        { name: 'main', addr: 0x08000000, size: 0x120, type: 2, sectionIndex: 1 },
+        { name: 'SystemInit', addr: 0x08000120, size: 0x80, type: 2, sectionIndex: 1 },
+        { name: 'HAL_GPIO_Init', addr: 0x080001a0, size: 0x160, type: 2, sectionIndex: 1 },
+        { name: 'g_config', addr: 0x20000000, size: 0x40, type: 1, sectionIndex: 3 },
+    ];
+    return assembleElf32(sections, symbols);
+}
+
+export interface Dwarf5LineSectionsFixture {
+    debugLine: Buffer;
+    debugLineStr: Buffer;
+}
+
+/**
+ * Clang/GCC가 내는 형태에 가까운 DWARF 5 line table을 만든다.
+ * 경로는 `.debug_line_str`의 `DW_FORM_line_strp`로 참조하고 파일 인덱스 0을
+ * line program에서 명시적으로 선택한다.
+ */
+export function buildDwarf5LineSections(sourcePath = 'src/main.c'): Dwarf5LineSectionsFixture {
+    const { directory, file } = splitDwarfPath(sourcePath);
+    const directoryBytes = Buffer.from(encodeCString(directory));
+    const fileOffset = directoryBytes.length;
+    const debugLineStr = Buffer.concat([directoryBytes, Buffer.from(encodeCString(file))]);
+    const header = [
+        1, // minimum_instruction_length
+        1, // maximum_operations_per_instruction
+        1, // default_is_stmt
+        0xfb, // line_base = -5
+        14, // line_range
+        13, // opcode_base
+        0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1,
+        1, // directory_entry_format_count
+        ...encodeUleb(0x01), ...encodeUleb(0x1f), // path: line_strp
+        ...encodeUleb(1),
+        ...encodeUInt32LE(0),
+        3, // file_name_entry_format_count
+        ...encodeUleb(0x01), ...encodeUleb(0x1f), // path: line_strp
+        ...encodeUleb(0x02), ...encodeUleb(0x0f), // directory_index: udata
+        ...encodeUleb(0x05), ...encodeUleb(0x1e), // MD5: data16
+        ...encodeUleb(1),
+        ...encodeUInt32LE(fileOffset),
+        ...encodeUleb(0),
+        ...Array(16).fill(0),
+    ];
+    const program = [
+        4, ...encodeUleb(0), // DW_LNS_set_file 0 (DWARF 5의 0-based file table)
+        0, ...encodeUleb(5), 2, ...encodeUInt32LE(0x08000000), // DW_LNE_set_address
+        1, // main:1
+        3, ...encodeSleb(9),
+        2, ...encodeUleb(0x120),
+        1, // SystemInit:10
+        3, ...encodeSleb(10),
+        2, ...encodeUleb(0x80),
+        1, // HAL_GPIO_Init:20
+        2, ...encodeUleb(0x160),
+        0, ...encodeUleb(1), 1, // DW_LNE_end_sequence
+    ];
+    const body = [
+        ...encodeUInt16LE(5),
+        4, // address_size (ELF32)
+        0, // segment_selector_size
+        ...encodeUInt32LE(header.length),
+        ...header,
+        ...program,
+    ];
+    return {
+        debugLine: Buffer.from([...encodeUInt32LE(body.length), ...body]),
+        debugLineStr,
+    };
+}
+
+/** 심볼과 DWARF 5 `.debug_line`·`.debug_line_str`을 함께 가진 ELF32. */
+export function buildElf32WithDwarf5Lines(
+    sourcePath = 'src/main.c',
+    debugLineStrFlags = 0,
+    additionalDebugLineUnits: Buffer[] = []
+): Buffer {
+    const { debugLine, debugLineStr } = buildDwarf5LineSections(sourcePath);
+    const combinedDebugLine = Buffer.concat([debugLine, ...additionalDebugLineUnits]);
+    const sections: SectionSpec[] = [
+        { name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 0x400 },
+        { name: '.rodata', type: SHT_PROGBITS, flags: SHF_ALLOC, addr: 0x08000400, size: 0x100 },
+        { name: '.data', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_WRITE, addr: 0x20000000, size: 0x80 },
+        { name: '.bss', type: SHT_NOBITS, flags: SHF_ALLOC | SHF_WRITE, addr: 0x20000080, size: 0x200 },
+        { name: '.debug_line', type: SHT_PROGBITS, flags: 0, addr: 0, size: combinedDebugLine.length, data: combinedDebugLine },
+        { name: '.debug_line_str', type: SHT_PROGBITS, flags: debugLineStrFlags, addr: 0, size: debugLineStr.length, data: debugLineStr },
     ];
     const symbols: SymbolSpec[] = [
         { name: 'main', addr: 0x08000000, size: 0x120, type: 2, sectionIndex: 1 },

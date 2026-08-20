@@ -8,7 +8,12 @@ export const DWARF_LINE_MAX_UNITS = 10_000;
 export const DWARF_LINE_MAX_FILES = 200_000;
 export const DWARF_LINE_MAX_DIRECTORIES = 100_000;
 export const DWARF_LINE_MAX_STRING_BYTES = 4096;
+/** 외부 문자열 section의 같은 긴 경로를 반복 참조해 만드는 디코딩 증폭을 제한한다. */
+export const DWARF_LINE_MAX_DECODED_PATH_BYTES = 32 * 1024 * 1024;
 export const DWARF_LINE_MAX_LEB_BYTES = 10;
+/** 정상 producer는 1~5개를 사용한다. 변조된 v5 descriptor의 곱셈 비용을 제한한다. */
+export const DWARF_LINE_MAX_ENTRY_FORMATS = 64;
+export const DWARF_LINE_MAX_ENTRY_VALUES = 2_000_000;
 
 const DW_LNS_COPY = 1;
 const DW_LNS_ADVANCE_PC = 2;
@@ -28,6 +33,35 @@ const DW_LNE_SET_ADDRESS = 2;
 const DW_LNE_DEFINE_FILE = 3;
 const DW_LNE_SET_DISCRIMINATOR = 4;
 
+const DW_LNCT_PATH = 0x01;
+const DW_LNCT_DIRECTORY_INDEX = 0x02;
+const DW_LNCT_TIMESTAMP = 0x03;
+const DW_LNCT_SIZE = 0x04;
+const DW_LNCT_MD5 = 0x05;
+
+const DW_FORM_BLOCK2 = 0x03;
+const DW_FORM_BLOCK4 = 0x04;
+const DW_FORM_DATA2 = 0x05;
+const DW_FORM_DATA4 = 0x06;
+const DW_FORM_DATA8 = 0x07;
+const DW_FORM_STRING = 0x08;
+const DW_FORM_BLOCK = 0x09;
+const DW_FORM_BLOCK1 = 0x0a;
+const DW_FORM_DATA1 = 0x0b;
+const DW_FORM_FLAG = 0x0c;
+const DW_FORM_SDATA = 0x0d;
+const DW_FORM_STRP = 0x0e;
+const DW_FORM_UDATA = 0x0f;
+const DW_FORM_SEC_OFFSET = 0x17;
+const DW_FORM_STRX = 0x1a;
+const DW_FORM_STRP_SUP = 0x1d;
+const DW_FORM_DATA16 = 0x1e;
+const DW_FORM_LINE_STRP = 0x1f;
+const DW_FORM_STRX1 = 0x25;
+const DW_FORM_STRX2 = 0x26;
+const DW_FORM_STRX3 = 0x27;
+const DW_FORM_STRX4 = 0x28;
+
 export interface DwarfSourceLocation {
     address: number;
     /** 이 위치가 적용되는 첫 다음 주소. `address <= pc < endAddress`. */
@@ -46,6 +80,23 @@ export interface DwarfLineParseResult {
     unsupportedVersions: number[];
     /** 32-bit ELF 안의 DWARF64 line unit은 첫 수직 구현 범위 밖이다. */
     skippedDwarf64Units: number;
+    /** 형식은 유효하지만 아직 해석하지 않는 문자열 저장 방식. 해당 unit만 건너뛴다. */
+    unsupportedFeatures: DwarfLineUnsupportedFeature[];
+}
+
+export type DwarfLineUnsupportedFeature =
+    | 'compressed-debug-line-str'
+    | 'compressed-debug-str'
+    | 'indexed-path-forms'
+    | 'supplementary-path-form';
+
+/** DWARF 5 line header의 문자열 form이 참조할 수 있는 ELF section payload. */
+export interface DwarfLineStringSections {
+    debugLineStr?: Buffer;
+    debugStr?: Buffer;
+    /** section이 없어서가 아니라 SHF_COMPRESSED라 payload를 전달하지 않았음을 구분한다. */
+    compressedDebugLineStr?: boolean;
+    compressedDebugStr?: boolean;
 }
 
 interface DwarfFileEntry {
@@ -63,6 +114,17 @@ interface LineState {
 }
 
 interface PendingRow extends LineState { }
+
+interface DwarfLineEntryFormat {
+    contentType: number;
+    form: number;
+}
+
+interface DwarfLineFormValue {
+    stringValue?: string;
+    unsignedValue?: number;
+    unsupportedFeature?: DwarfLineUnsupportedFeature;
+}
 
 class DwarfReader {
     constructor(
@@ -114,6 +176,11 @@ class DwarfReader {
         return value;
     }
 
+    skip(bytes: number, limit: number, label: string): void {
+        this.ensure(bytes, limit, label);
+        this.offset += bytes;
+    }
+
     readULEB(limit: number): number {
         let value = 0n;
         let shift = 0n;
@@ -159,14 +226,215 @@ class DwarfReader {
             throw new Error('DWARF .debug_line string terminator is missing.');
         }
         const maxEnd = Math.min(limit, this.offset + DWARF_LINE_MAX_STRING_BYTES + 1);
-        const end = this.buffer.indexOf(0, this.offset);
-        if (end < 0 || end >= maxEnd || end >= limit) {
+        const relativeEnd = this.buffer.subarray(this.offset, maxEnd).indexOf(0);
+        if (relativeEnd < 0) {
             throw new Error(`DWARF .debug_line string exceeds ${DWARF_LINE_MAX_STRING_BYTES} bytes or is unterminated.`);
         }
+        const end = this.offset + relativeEnd;
         const value = this.buffer.toString('utf8', this.offset, end);
         this.offset = end + 1;
         return value;
     }
+}
+
+function readReferencedCString(section: Buffer | undefined, offset: number, sectionName: string): string {
+    if (!section) {
+        throw new Error(`DWARF .debug_line references missing ${sectionName}.`);
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset >= section.length) {
+        throw new Error(`DWARF .debug_line ${sectionName} string offset is out of range.`);
+    }
+    const maxEnd = Math.min(section.length, offset + DWARF_LINE_MAX_STRING_BYTES + 1);
+    const relativeEnd = section.subarray(offset, maxEnd).indexOf(0);
+    if (relativeEnd < 0) {
+        throw new Error(`DWARF .debug_line ${sectionName} string exceeds ${DWARF_LINE_MAX_STRING_BYTES} bytes or is unterminated.`);
+    }
+    const end = offset + relativeEnd;
+    return section.toString('utf8', offset, end);
+}
+
+function validateLineContentForm(contentType: number, form: number): void {
+    if (
+        contentType !== DW_LNCT_PATH
+        && contentType !== DW_LNCT_DIRECTORY_INDEX
+        && contentType !== DW_LNCT_TIMESTAMP
+        && contentType !== DW_LNCT_SIZE
+        && contentType !== DW_LNCT_MD5
+        && (contentType < 0x2000 || contentType > 0x3fff)
+    ) {
+        throw new Error(`DWARF 5 .debug_line uses unsupported content type 0x${contentType.toString(16)}.`);
+    }
+    let valid = true;
+    switch (contentType) {
+        case DW_LNCT_PATH:
+            valid = form === DW_FORM_STRING || form === DW_FORM_LINE_STRP || form === DW_FORM_STRP
+                || form === DW_FORM_STRX || form === DW_FORM_STRX1 || form === DW_FORM_STRX2
+                || form === DW_FORM_STRX3 || form === DW_FORM_STRX4 || form === DW_FORM_STRP_SUP;
+            break;
+        case DW_LNCT_DIRECTORY_INDEX:
+            valid = form === DW_FORM_DATA1 || form === DW_FORM_DATA2 || form === DW_FORM_UDATA;
+            break;
+        case DW_LNCT_TIMESTAMP:
+            valid = form === DW_FORM_UDATA || form === DW_FORM_DATA4
+                || form === DW_FORM_DATA8 || form === DW_FORM_BLOCK;
+            break;
+        case DW_LNCT_SIZE:
+            valid = form === DW_FORM_UDATA || form === DW_FORM_DATA1 || form === DW_FORM_DATA2
+                || form === DW_FORM_DATA4 || form === DW_FORM_DATA8;
+            break;
+        case DW_LNCT_MD5:
+            valid = form === DW_FORM_DATA16;
+            break;
+        default:
+            return;
+    }
+    if (!valid) {
+        throw new Error(
+            `DWARF 5 .debug_line content type 0x${contentType.toString(16)} uses invalid form 0x${form.toString(16)}.`
+        );
+    }
+}
+
+function readLineFormValue(
+    reader: DwarfReader,
+    form: number,
+    limit: number,
+    strings: DwarfLineStringSections,
+    resolveString: boolean
+): DwarfLineFormValue {
+    switch (form) {
+        case DW_FORM_STRING:
+            return { stringValue: reader.readCString(limit) };
+        case DW_FORM_LINE_STRP: {
+            const offset = reader.readU32(limit);
+            if (resolveString && !strings.debugLineStr && strings.compressedDebugLineStr) {
+                return { unsupportedFeature: 'compressed-debug-line-str' };
+            }
+            return resolveString
+                ? { stringValue: readReferencedCString(strings.debugLineStr, offset, '.debug_line_str') }
+                : {};
+        }
+        case DW_FORM_STRP: {
+            const offset = reader.readU32(limit);
+            if (resolveString && !strings.debugStr && strings.compressedDebugStr) {
+                return { unsupportedFeature: 'compressed-debug-str' };
+            }
+            return resolveString
+                ? { stringValue: readReferencedCString(strings.debugStr, offset, '.debug_str') }
+                : {};
+        }
+        case DW_FORM_STRP_SUP:
+            reader.readU32(limit);
+            return resolveString ? { unsupportedFeature: 'supplementary-path-form' } : {};
+        case DW_FORM_DATA1:
+        case DW_FORM_FLAG:
+            return { unsignedValue: reader.readU8(limit) };
+        case DW_FORM_DATA2:
+            return { unsignedValue: reader.readU16(limit) };
+        case DW_FORM_DATA4:
+        case DW_FORM_SEC_OFFSET:
+            return { unsignedValue: reader.readU32(limit) };
+        case DW_FORM_DATA8: {
+            const value = reader.readU64(limit);
+            return value <= BigInt(Number.MAX_SAFE_INTEGER) ? { unsignedValue: Number(value) } : {};
+        }
+        case DW_FORM_UDATA:
+            return { unsignedValue: reader.readULEB(limit) };
+        case DW_FORM_STRX:
+            reader.readULEB(limit);
+            return resolveString ? { unsupportedFeature: 'indexed-path-forms' } : {};
+        case DW_FORM_SDATA:
+            reader.readSLEB(limit);
+            return {};
+        case DW_FORM_DATA16:
+            reader.skip(16, limit, 'DW_FORM_data16');
+            return {};
+        case DW_FORM_STRX1:
+            reader.skip(1, limit, 'DW_FORM_strx1');
+            return resolveString ? { unsupportedFeature: 'indexed-path-forms' } : {};
+        case DW_FORM_STRX2:
+            reader.skip(2, limit, 'DW_FORM_strx2');
+            return resolveString ? { unsupportedFeature: 'indexed-path-forms' } : {};
+        case DW_FORM_STRX3:
+            reader.skip(3, limit, 'DW_FORM_strx3');
+            return resolveString ? { unsupportedFeature: 'indexed-path-forms' } : {};
+        case DW_FORM_STRX4:
+            reader.skip(4, limit, 'DW_FORM_strx4');
+            return resolveString ? { unsupportedFeature: 'indexed-path-forms' } : {};
+        case DW_FORM_BLOCK1:
+            reader.skip(reader.readU8(limit), limit, 'DW_FORM_block1');
+            return {};
+        case DW_FORM_BLOCK2:
+            reader.skip(reader.readU16(limit), limit, 'DW_FORM_block2');
+            return {};
+        case DW_FORM_BLOCK4:
+            reader.skip(reader.readU32(limit), limit, 'DW_FORM_block4');
+            return {};
+        case DW_FORM_BLOCK:
+            reader.skip(reader.readULEB(limit), limit, 'DW_FORM_block');
+            return {};
+        default:
+            throw new Error(`DWARF 5 .debug_line uses unsupported form 0x${form.toString(16)}.`);
+    }
+}
+
+function readV5EntryFormats(reader: DwarfReader, limit: number, label: string): DwarfLineEntryFormat[] {
+    const count = reader.readU8(limit);
+    if (count > DWARF_LINE_MAX_ENTRY_FORMATS) {
+        throw new Error(`DWARF 5 .debug_line ${label} contains more than ${DWARF_LINE_MAX_ENTRY_FORMATS} formats.`);
+    }
+    const formats: DwarfLineEntryFormat[] = [];
+    for (let i = 0; i < count; i++) {
+        const contentType = reader.readULEB(limit);
+        const form = reader.readULEB(limit);
+        validateLineContentForm(contentType, form);
+        formats.push({ contentType, form });
+    }
+    return formats;
+}
+
+function validateV5EntryFormats(
+    formats: DwarfLineEntryFormat[],
+    entryCount: number,
+    label: string
+): void {
+    if (entryCount === 0) { return; }
+    if (formats.length === 0) {
+        throw new Error(`DWARF 5 .debug_line ${label} has entries without a format.`);
+    }
+    const pathCount = formats.filter(format => format.contentType === DW_LNCT_PATH).length;
+    if (pathCount !== 1) {
+        throw new Error(`DWARF 5 .debug_line ${label} must describe exactly one path.`);
+    }
+}
+
+function readV5Entry(
+    reader: DwarfReader,
+    formats: DwarfLineEntryFormat[],
+    limit: number,
+    strings: DwarfLineStringSections,
+    onUnsupportedFeature: (feature: DwarfLineUnsupportedFeature) => void
+): { path: string; directoryIndex: number } {
+    let entryPath = '';
+    let directoryIndex = 0;
+    for (const descriptor of formats) {
+        const value = readLineFormValue(
+            reader,
+            descriptor.form,
+            limit,
+            strings,
+            descriptor.contentType === DW_LNCT_PATH
+        );
+        if (value.unsupportedFeature) {
+            onUnsupportedFeature(value.unsupportedFeature);
+        }
+        if (descriptor.contentType === DW_LNCT_PATH) {
+            entryPath = value.stringValue ?? '';
+        } else if (descriptor.contentType === DW_LNCT_DIRECTORY_INDEX) {
+            directoryIndex = value.unsignedValue ?? 0;
+        }
+    }
+    return { path: entryPath, directoryIndex };
 }
 
 function portableIsAbsolute(value: string): boolean {
@@ -181,14 +449,32 @@ function joinDwarfPath(directory: string, fileName: string): string {
     return `${directory.replace(/[\\/]$/, '')}${separator}${fileName}`;
 }
 
-function sourcePath(files: DwarfFileEntry[], directories: string[], fileIndex: number): string | undefined {
-    if (!Number.isSafeInteger(fileIndex) || fileIndex <= 0 || fileIndex > files.length) { return undefined; }
-    const file = files[fileIndex - 1];
+function sourcePath(
+    files: DwarfFileEntry[],
+    directories: string[],
+    fileIndex: number,
+    version: number
+): string | undefined {
+    const zeroIndexed = version >= 5;
+    const fileOffset = zeroIndexed ? fileIndex : fileIndex - 1;
+    if (!Number.isSafeInteger(fileOffset) || fileOffset < 0 || fileOffset >= files.length) { return undefined; }
+    const file = files[fileOffset];
     if (!file.name) { return undefined; }
-    if (portableIsAbsolute(file.name) || file.directoryIndex === 0) { return file.name; }
-    if (file.directoryIndex > directories.length) { return undefined; }
-    const directory = directories[file.directoryIndex - 1];
-    return directory ? joinDwarfPath(directory, file.name) : undefined;
+    if (portableIsAbsolute(file.name) || (!zeroIndexed && file.directoryIndex === 0)) { return file.name; }
+    const directoryOffset = zeroIndexed ? file.directoryIndex : file.directoryIndex - 1;
+    if (!Number.isSafeInteger(directoryOffset) || directoryOffset < 0 || directoryOffset >= directories.length) {
+        return undefined;
+    }
+    const directory = directories[directoryOffset];
+    if (!directory) { return zeroIndexed ? file.name : undefined; }
+    if (zeroIndexed && directoryOffset > 0 && !portableIsAbsolute(directory)) {
+        const compilationDirectory = directories[0];
+        const resolvedDirectory = compilationDirectory
+            ? joinDwarfPath(compilationDirectory, directory)
+            : directory;
+        return joinDwarfPath(resolvedDirectory, file.name);
+    }
+    return joinDwarfPath(directory, file.name);
 }
 
 function safeAdd(value: number, delta: number, label: string): number {
@@ -200,25 +486,41 @@ function safeAdd(value: number, delta: number, label: string): number {
 }
 
 /**
- * ELF32의 `.debug_line` section을 DWARF 2~4 line matrix로 확장한다.
+ * ELF32의 `.debug_line` section을 DWARF 2~5 line matrix로 확장한다.
  *
- * DWARF 5와 DWARF64 unit은 section 안의 다음 unit을 계속 읽기 위해 길이만
- * 검증하고 건너뛴다. 손상된 지원 unit은 잘못된 소스 위치를 내는 대신 예외로
- * 거부하며, 호출자는 Memory Map 자체를 계속 열고 소스 동작만 숨긴다.
+ * DWARF64 unit은 section 안의 다음 unit을 계속 읽기 위해 길이만 검증하고
+ * 건너뛴다. 손상된 지원 unit은 잘못된 소스 위치를 내는 대신 예외로 거부하며,
+ * 호출자는 Memory Map 자체를 계속 열고 소스 동작만 숨긴다.
  */
-export function parseDwarfLineSection(section: Buffer, littleEndian: boolean): DwarfLineParseResult {
+export function parseDwarfLineSection(
+    section: Buffer,
+    littleEndian: boolean,
+    strings: DwarfLineStringSections = {}
+): DwarfLineParseResult {
     if (section.length > DWARF_LINE_MAX_SECTION_BYTES) {
         throw new Error(`DWARF .debug_line section exceeds ${DWARF_LINE_MAX_SECTION_BYTES} bytes.`);
     }
     const reader = new DwarfReader(section, littleEndian);
     const locations: DwarfSourceLocation[] = [];
     const unsupportedVersions = new Set<number>();
+    const unsupportedFeatures = new Set<DwarfLineUnsupportedFeature>();
     let parsedUnits = 0;
     let skippedDwarf64Units = 0;
     let unitCount = 0;
     let appendedRows = 0;
     let totalFiles = 0;
     let totalDirectories = 0;
+    let decodedEntryValues = 0;
+    let decodedPathBytes = 0;
+
+    const accountDecodedPath = (value: string): void => {
+        decodedPathBytes += Buffer.byteLength(value, 'utf8');
+        if (!Number.isSafeInteger(decodedPathBytes) || decodedPathBytes > DWARF_LINE_MAX_DECODED_PATH_BYTES) {
+            throw new Error(
+                `DWARF 5 .debug_line decodes more than ${DWARF_LINE_MAX_DECODED_PATH_BYTES} path bytes.`
+            );
+        }
+    };
 
     while (reader.offset < section.length) {
         if (++unitCount > DWARF_LINE_MAX_UNITS) {
@@ -256,10 +558,19 @@ export function parseDwarfLineSection(section: Buffer, littleEndian: boolean): D
         }
 
         const version = reader.readU16(unitEnd);
-        if (version < 2 || version > 4) {
+        if (version < 2 || version > 5) {
             unsupportedVersions.add(version);
             reader.offset = unitEnd;
             continue;
+        }
+
+        const addressSize = version >= 5 ? reader.readU8(unitEnd) : 4;
+        const segmentSelectorSize = version >= 5 ? reader.readU8(unitEnd) : 0;
+        if (addressSize !== 4) {
+            throw new Error(`DWARF .debug_line address size ${addressSize} does not match ELF32.`);
+        }
+        if (segmentSelectorSize !== 0) {
+            throw new Error('DWARF .debug_line segmented addresses are not supported.');
         }
 
         const headerLength = reader.readU32(unitEnd);
@@ -284,17 +595,9 @@ export function parseDwarfLineSection(section: Buffer, littleEndian: boolean): D
         }
 
         const directories: string[] = [];
-        while (true) {
-            const directory = reader.readCString(headerEnd);
-            if (!directory) { break; }
-            directories.push(directory);
-            if (++totalDirectories > DWARF_LINE_MAX_DIRECTORIES) {
-                throw new Error(`DWARF .debug_line contains more than ${DWARF_LINE_MAX_DIRECTORIES} directories.`);
-            }
-        }
-
         const files: DwarfFileEntry[] = [];
-        const readFileEntry = (limit: number, name?: string): DwarfFileEntry | undefined => {
+        const unitUnsupportedFeatures = new Set<DwarfLineUnsupportedFeature>();
+        const readLegacyFileEntry = (limit: number, name?: string): DwarfFileEntry | undefined => {
             const fileName = name ?? reader.readCString(limit);
             if (!fileName) { return undefined; }
             const directoryIndex = reader.readULEB(limit);
@@ -305,10 +608,82 @@ export function parseDwarfLineSection(section: Buffer, littleEndian: boolean): D
             }
             return { name: fileName, directoryIndex };
         };
-        while (true) {
-            const file = readFileEntry(headerEnd);
-            if (!file) { break; }
-            files.push(file);
+
+        if (version >= 5) {
+            const directoryFormats = readV5EntryFormats(reader, headerEnd, 'directory entry format');
+            const directoryCount = reader.readULEB(headerEnd);
+            validateV5EntryFormats(directoryFormats, directoryCount, 'directory entry format');
+            if (directoryCount > DWARF_LINE_MAX_DIRECTORIES - totalDirectories) {
+                throw new Error(`DWARF .debug_line contains more than ${DWARF_LINE_MAX_DIRECTORIES} directories.`);
+            }
+            const directoryValueCount = directoryCount * directoryFormats.length;
+            if (
+                !Number.isSafeInteger(directoryValueCount)
+                || directoryValueCount > DWARF_LINE_MAX_ENTRY_VALUES - decodedEntryValues
+            ) {
+                throw new Error(`DWARF 5 .debug_line decodes more than ${DWARF_LINE_MAX_ENTRY_VALUES} entry values.`);
+            }
+            decodedEntryValues += directoryValueCount;
+            totalDirectories += directoryCount;
+            for (let i = 0; i < directoryCount; i++) {
+                const directory = readV5Entry(
+                    reader,
+                    directoryFormats,
+                    headerEnd,
+                    strings,
+                    feature => unitUnsupportedFeatures.add(feature)
+                ).path;
+                accountDecodedPath(directory);
+                directories.push(directory);
+            }
+
+            const fileFormats = readV5EntryFormats(reader, headerEnd, 'file entry format');
+            const fileCount = reader.readULEB(headerEnd);
+            validateV5EntryFormats(fileFormats, fileCount, 'file entry format');
+            if (fileCount > DWARF_LINE_MAX_FILES - totalFiles) {
+                throw new Error(`DWARF .debug_line contains more than ${DWARF_LINE_MAX_FILES} files.`);
+            }
+            const fileValueCount = fileCount * fileFormats.length;
+            if (
+                !Number.isSafeInteger(fileValueCount)
+                || fileValueCount > DWARF_LINE_MAX_ENTRY_VALUES - decodedEntryValues
+            ) {
+                throw new Error(`DWARF 5 .debug_line decodes more than ${DWARF_LINE_MAX_ENTRY_VALUES} entry values.`);
+            }
+            decodedEntryValues += fileValueCount;
+            totalFiles += fileCount;
+            for (let i = 0; i < fileCount; i++) {
+                const file = readV5Entry(
+                    reader,
+                    fileFormats,
+                    headerEnd,
+                    strings,
+                    feature => unitUnsupportedFeatures.add(feature)
+                );
+                accountDecodedPath(file.path);
+                files.push({ name: file.path, directoryIndex: file.directoryIndex });
+            }
+        } else {
+            while (true) {
+                const directory = reader.readCString(headerEnd);
+                if (!directory) { break; }
+                directories.push(directory);
+                if (++totalDirectories > DWARF_LINE_MAX_DIRECTORIES) {
+                    throw new Error(`DWARF .debug_line contains more than ${DWARF_LINE_MAX_DIRECTORIES} directories.`);
+                }
+            }
+            while (true) {
+                const file = readLegacyFileEntry(headerEnd);
+                if (!file) { break; }
+                files.push(file);
+            }
+        }
+        if (unitUnsupportedFeatures.size > 0) {
+            for (const feature of unitUnsupportedFeatures) {
+                unsupportedFeatures.add(feature);
+            }
+            reader.offset = unitEnd;
+            continue;
         }
         // Producers may reserve bytes at the end of the prologue. The line program begins
         // exactly at headerEnd, not necessarily at the byte after the file terminator.
@@ -325,6 +700,15 @@ export function parseDwarfLineSection(section: Buffer, littleEndian: boolean): D
         let state = initialState();
         let pending: PendingRow | undefined;
         let sequenceLocationStart = locations.length;
+        const resolvedSourcePaths = new Map<number, string | undefined>();
+        const resolveSourcePath = (fileIndex: number): string | undefined => {
+            if (resolvedSourcePaths.has(fileIndex)) {
+                return resolvedSourcePaths.get(fileIndex);
+            }
+            const resolved = sourcePath(files, directories, fileIndex, version);
+            resolvedSourcePaths.set(fileIndex, resolved);
+            return resolved;
+        };
 
         const advanceOperation = (operationAdvance: number): void => {
             if (!Number.isSafeInteger(operationAdvance) || operationAdvance < 0) {
@@ -348,7 +732,7 @@ export function parseDwarfLineSection(section: Buffer, littleEndian: boolean): D
                 throw new Error('DWARF .debug_line sequence addresses decrease.');
             }
             if (pending && state.address > pending.address) {
-                const filePath = sourcePath(files, directories, pending.file);
+                const filePath = resolveSourcePath(pending.file);
                 if (filePath && pending.line > 0 && Number.isSafeInteger(pending.line)) {
                     locations.push({
                         address: pending.address,
@@ -384,15 +768,19 @@ export function parseDwarfLineSection(section: Buffer, littleEndian: boolean): D
                 if (extendedOpcode === DW_LNE_END_SEQUENCE) {
                     appendRow(true);
                 } else if (extendedOpcode === DW_LNE_SET_ADDRESS) {
-                    // Existing Memory Map supports ELF32 only, so the target address is 4 bytes.
-                    if (extendedEnd - reader.offset !== 4) {
+                    if (extendedEnd - reader.offset !== addressSize) {
                         throw new Error('DWARF .debug_line set_address size does not match ELF32.');
                     }
                     state.address = reader.readU32(extendedEnd);
                     state.opIndex = 0;
                 } else if (extendedOpcode === DW_LNE_DEFINE_FILE) {
-                    const file = readFileEntry(extendedEnd);
-                    if (file) { files.push(file); }
+                    const file = readLegacyFileEntry(extendedEnd);
+                    if (file) {
+                        files.push(file);
+                        // 이전 행이 아직 존재하지 않던 이 index를 참조했을 수 있다.
+                        const definedFileIndex = version >= 5 ? files.length - 1 : files.length;
+                        resolvedSourcePaths.delete(definedFileIndex);
+                    }
                 } else if (extendedOpcode === DW_LNE_SET_DISCRIMINATOR) {
                     reader.readULEB(extendedEnd);
                 }
@@ -465,6 +853,7 @@ export function parseDwarfLineSection(section: Buffer, littleEndian: boolean): D
         parsedUnits,
         unsupportedVersions: Array.from(unsupportedVersions).sort((a, b) => a - b),
         skippedDwarf64Units,
+        unsupportedFeatures: Array.from(unsupportedFeatures).sort(),
     };
 }
 

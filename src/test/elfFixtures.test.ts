@@ -1,5 +1,10 @@
 import * as assert from 'assert';
-import { buildElf32WithDwarfLines, buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
+import {
+    buildElf32WithDwarf5Lines,
+    buildElf32WithDwarfLines,
+    buildElf32WithSymbols,
+    buildMinimalElf32,
+} from './fixtures/elfFixtures';
 import { computeSymbolUsage, parseElf32 } from '../elfParser';
 import { parseDwarfLineSection } from '../dwarfLineParser';
 
@@ -70,6 +75,32 @@ suite('ELF 픽스처', () => {
             { address: 0x08000000, endAddress: 0x08000120, line: 1, filePath: '/workspace/src/main.c' },
             { address: 0x08000120, endAddress: 0x080001a0, line: 10, filePath: '/workspace/src/main.c' },
             { address: 0x080001a0, endAddress: 0x08000300, line: 20, filePath: '/workspace/src/main.c' },
+        ]);
+    });
+
+    test('DWARF 5 ELF는 실제 .debug_line_str payload를 참조한다', () => {
+        const buffer = buildElf32WithDwarf5Lines('/workspace/src/main.c');
+        const result = parseElf32(buffer);
+        const debugLine = result.sections.find(section => section.name === '.debug_line');
+        const debugLineStr = result.sections.find(section => section.name === '.debug_line_str');
+        assert.ok(debugLine?.offset !== undefined);
+        assert.ok(debugLineStr?.offset !== undefined);
+        assert.strictEqual(debugLineStr!.flags, 0);
+
+        const parsed = parseDwarfLineSection(
+            buffer.subarray(debugLine!.offset, debugLine!.offset! + debugLine!.size),
+            result.isLittleEndian,
+            {
+                debugLineStr: buffer.subarray(
+                    debugLineStr!.offset,
+                    debugLineStr!.offset! + debugLineStr!.size
+                ),
+            }
+        );
+        assert.deepStrictEqual(parsed.locations.map(location => [location.address, location.line, location.filePath]), [
+            [0x08000000, 1, '/workspace/src/main.c'],
+            [0x08000120, 10, '/workspace/src/main.c'],
+            [0x080001a0, 20, '/workspace/src/main.c'],
         ]);
     });
 

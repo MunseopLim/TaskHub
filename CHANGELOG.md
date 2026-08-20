@@ -6,6 +6,24 @@
 보안·데이터 손실 수정과 사용자 영향만 남긴다. 테스트를 적는다면 최종 수치만 기록한다.
 -->
 
+## [0.8.1] - 2026-08-21
+
+### 추가 — Memory Map DWARF 5 소스 위치 이동
+
+- ELF32의 비압축 DWARF 5 `.debug_line`을 읽어 기존 DWARF 2~4와 같은 함수별 소스 이동을
+  제공한다. 0-based directory/file table과 inline·`.debug_line_str`·`.debug_str` 경로를
+  지원하며, 상대 include directory도 compilation directory를 기준으로 복원한다.
+- 외부 문자열 offset, entry descriptor와 누적 field 수를 경계 안에서 검증한다. 손상된 인덱스를
+  동명 파일로 추측하지 않고 소스 이동만 비활성화하며 기존 Memory Map 분석은 계속 유지한다.
+- 실제로 참조한 압축 `.debug_line_str`·`.debug_str`, `.debug_str_offsets`가 필요한 `strx*`와
+  supplementary object가 필요한 `strp_sup` 경로는 누락·손상으로 오진하지 않고 아직 지원하지
+  않는 형식으로 안내한다.
+- esbuild·ESLint·TypeScript-ESLint와 VS Code 타입 등 개발 도구 의존성을 최신 호환 버전으로
+  갱신하고 새 lockfile로도 경고 없이 재현 설치되도록 맞춘다.
+
+**테스트**: DWARF 5 문자열 form·인덱스·방어 한도·ELF 픽스처·웹뷰/host 종단 이동과 전체 통합
+실행을 포함해 최종 3180 passing / 3 pending.
+
 ## [0.8.0] - 2026-08-20
 
 ### 추가 — Memory Map DWARF 소스 위치 이동

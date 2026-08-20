@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -1025,6 +1025,6 @@
     "yauzl": "^3.4.0"
   },
   "allowScripts": {
-    "esbuild@0.28.1": true
+    "esbuild@0.28.2": true
   }
 }

@@ -8,7 +8,12 @@ import { ARM_LINK_MAX_ENTRIES, parseArmLinkList, toMemoryRegions, toElfSections,
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
 import { openHexViewerFile } from './hexViewer';
-import { DwarfSourceLocation, findDwarfSourceLocation, parseDwarfLineSection } from './dwarfLineParser';
+import {
+    DwarfLineUnsupportedFeature,
+    DwarfSourceLocation,
+    findDwarfSourceLocation,
+    parseDwarfLineSection,
+} from './dwarfLineParser';
 
 /**
  * *Go to Symbol* Quick Pick 이 다루는 한 항목. 웹뷰 영역 표의 **한 행과 1:1로
@@ -295,6 +300,27 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     const summaryReport = generateSummaryReport(fileName, filePath, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions);
     const hasSymbols = symbols.length > 0;
     let sourceLocations: DwarfSourceLocation[] = [];
+    const isCompressedDwarfSection = (sectionName: string): boolean => {
+        const section = sections.find(candidate => candidate.name === sectionName);
+        return section !== undefined && (section.flags & ELF_SHF_COMPRESSED) !== 0;
+    };
+    const readDwarfSection = (sectionName: string): Buffer | undefined => {
+        const section = sections.find(candidate => candidate.name === sectionName);
+        if (
+            !section || section.offset === undefined || section.isNoBits
+            || (section.flags & ELF_SHF_COMPRESSED) !== 0
+        ) {
+            return undefined;
+        }
+        const end = section.offset + section.size;
+        if (
+            !Number.isSafeInteger(section.offset) || section.offset < 0
+            || !Number.isSafeInteger(end) || end > buffer.length
+        ) {
+            return undefined;
+        }
+        return buffer.subarray(section.offset, end);
+    };
     const debugLine = sections.find(section => section.name === '.debug_line');
     if (debugLine && debugLine.offset !== undefined && !debugLine.isNoBits) {
         if ((debugLine.flags & ELF_SHF_COMPRESSED) !== 0) {
@@ -309,11 +335,35 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
                 && Number.isSafeInteger(debugLineEnd) && debugLineEnd <= buffer.length
             ) {
                 try {
-                    const dwarf = parseDwarfLineSection(buffer.subarray(debugLine.offset, debugLineEnd), isLittleEndian);
+                    const dwarf = parseDwarfLineSection(
+                        buffer.subarray(debugLine.offset, debugLineEnd),
+                        isLittleEndian,
+                        {
+                            debugLineStr: readDwarfSection('.debug_line_str'),
+                            debugStr: readDwarfSection('.debug_str'),
+                            compressedDebugLineStr: isCompressedDwarfSection('.debug_line_str'),
+                            compressedDebugStr: isCompressedDwarfSection('.debug_str'),
+                        }
+                    );
                     sourceLocations = dwarf.locations;
-                    if (sourceLocations.length === 0 && (dwarf.unsupportedVersions.length > 0 || dwarf.skippedDwarf64Units > 0)) {
+                    const hasUnsupportedUnitOnly = sourceLocations.length === 0
+                        && (dwarf.unsupportedVersions.length > 0 || dwarf.skippedDwarf64Units > 0);
+                    if (
+                        hasUnsupportedUnitOnly
+                        || dwarf.unsupportedFeatures.length > 0
+                    ) {
                         const formats = dwarf.unsupportedVersions.map(version => `DWARF ${version}`);
                         if (dwarf.skippedDwarf64Units > 0) { formats.push('DWARF64'); }
+                        const featureLabels: Record<DwarfLineUnsupportedFeature, string> = {
+                            'compressed-debug-line-str': t('압축 .debug_line_str', 'compressed .debug_line_str'),
+                            'compressed-debug-str': t('압축 .debug_str', 'compressed .debug_str'),
+                            'indexed-path-forms': t('DWARF 5 strx 경로 form', 'DWARF 5 strx path forms'),
+                            'supplementary-path-form': t(
+                                'DWARF 5 strp_sup 경로 form',
+                                'DWARF 5 strp_sup path form'
+                            ),
+                        };
+                        formats.push(...dwarf.unsupportedFeatures.map(feature => featureLabels[feature]));
                         vscode.window.showInformationMessage(t(
                             `이 ELF의 소스 위치 정보(${formats.join(', ')})는 아직 지원하지 않습니다. Memory Map의 나머지 기능은 그대로 사용할 수 있습니다.`,
                             `Source locations in this ELF (${formats.join(', ')}) are not supported yet. The rest of the Memory Map remains available.`

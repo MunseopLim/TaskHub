@@ -14,7 +14,13 @@ import {
     findWorkspaceSourceBySuffix,
     resolveDwarfSourcePathCandidates,
 } from '../memoryMapViewer';
-import { buildElf32WithDwarfLines, buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
+import {
+    buildDwarf4LineSection,
+    buildElf32WithDwarf5Lines,
+    buildElf32WithDwarfLines,
+    buildElf32WithSymbols,
+    buildMinimalElf32,
+} from './fixtures/elfFixtures';
 import { computeSymbolUsage, parseElf32 } from '../elfParser';
 import { hexPanelRegistry } from '../hexViewer';
 import { parseDwarfLineSection } from '../dwarfLineParser';
@@ -368,6 +374,160 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.ok(rd.flatMap((region: any) => region.segments).every((entry: any) => entry.sx === ''));
         } finally {
             (vscode.window as any).showInformationMessage = originalInformation;
+            panelRegistry.clear();
+        }
+    });
+
+    test('IT-195a: DWARF 5 외부 문자열 경로를 opaque target으로 열고 HTML에는 숨긴다', async () => {
+        const dir = path.join(tmpDir, 'taskhub-test', 'dwarf5-source-flow');
+        fs.mkdirSync(dir, { recursive: true });
+        const sourcePath = path.join(dir, 'main.c');
+        const filePath = path.join(dir, 'source-flow-v5.axf');
+        fs.writeFileSync(sourcePath, Array.from({ length: 30 }, (_value, index) => `line ${index + 1}`).join('\n'));
+        fs.writeFileSync(filePath, buildElf32WithDwarf5Lines(sourcePath));
+        tmpFiles.push(sourcePath, filePath);
+
+        const originalCreate = vscode.window.createWebviewPanel;
+        const originalOpenTextDocument = vscode.workspace.openTextDocument;
+        const originalShowTextDocument = vscode.window.showTextDocument;
+        let memoryHandler: ((message: any) => Promise<void>) | undefined;
+        let openedPath: string | undefined;
+        const editor = {
+            selection: undefined as vscode.Selection | undefined,
+            revealRange() { /* no-op */ },
+        };
+        try {
+            (vscode.window as any).createWebviewPanel = (_viewType: string, title: string) => {
+                let html = '';
+                return {
+                    title,
+                    active: true,
+                    webview: {
+                        get html() { return html; },
+                        set html(value: string) { html = value; },
+                        cspSource: 'vscode-webview:',
+                        postMessage: () => Promise.resolve(true),
+                        onDidReceiveMessage: (handler: (message: any) => Promise<void>) => {
+                            memoryHandler = handler;
+                            return { dispose() { /* no-op */ } };
+                        },
+                    },
+                    reveal() { /* no-op */ },
+                    onDidDispose() { return { dispose() { /* no-op */ } }; },
+                    onDidChangeViewState() { return { dispose() { /* no-op */ } }; },
+                } as unknown as vscode.WebviewPanel;
+            };
+            (vscode.workspace as any).openTextDocument = async (uri: vscode.Uri) => {
+                openedPath = uri.fsPath;
+                return {
+                    lineCount: 30,
+                    lineAt: (line: number) => ({ text: `line ${line + 1}` }),
+                } as unknown as vscode.TextDocument;
+            };
+            (vscode.window as any).showTextDocument = async () => editor as unknown as vscode.TextEditor;
+
+            const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+            assert.ok(openMemoryMapPanel(ctx, filePath, {
+                regions: [{ name: 'FLASH', origin: 0x08000000, size: 0x1000 }],
+            }));
+            assert.ok(memoryHandler);
+            const targets = panelRegistry.getSourceTargets(filePath) ?? [];
+            assert.deepStrictEqual(
+                targets.map(target => ({
+                    label: target.label,
+                    line: target.location.line,
+                })).sort((a, b) => a.label.localeCompare(b.label)),
+                [
+                    { label: 'HAL_GPIO_Init', line: 20 },
+                    { label: 'main', line: 1 },
+                    { label: 'SystemInit', line: 10 },
+                ]
+            );
+            assert.ok(!(panelRegistry.getHtml(filePath) ?? '').includes(sourcePath));
+
+            const target = targets.find(candidate => candidate.label === 'SystemInit');
+            await memoryHandler!({ command: 'openSource', targetId: target!.id });
+            const comparablePath = (value: string | undefined): string | undefined =>
+                process.platform === 'win32' ? value?.toLowerCase() : value;
+            assert.strictEqual(comparablePath(openedPath), comparablePath(sourcePath));
+            assert.strictEqual(editor.selection?.active.line, 9);
+        } finally {
+            (vscode.window as any).createWebviewPanel = originalCreate;
+            (vscode.workspace as any).openTextDocument = originalOpenTextDocument;
+            (vscode.window as any).showTextDocument = originalShowTextDocument;
+            panelRegistry.clear();
+        }
+    });
+
+    test('IT-195b: 압축된 DWARF 5 문자열 section은 미지원 안내 후 소스 이동만 숨긴다', () => {
+        const dir = path.join(tmpDir, 'taskhub-test', 'dwarf5-compressed-string');
+        fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, 'compressed-string.axf');
+        fs.writeFileSync(filePath, buildElf32WithDwarf5Lines('src/main.c', 0x800));
+        tmpFiles.push(filePath);
+
+        const originalInformation = vscode.window.showInformationMessage;
+        const originalWarning = vscode.window.showWarningMessage;
+        const informationMessages: string[] = [];
+        const warnings: string[] = [];
+        try {
+            (vscode.window as any).showInformationMessage = (message: string) => {
+                informationMessages.push(message);
+                return Promise.resolve(undefined);
+            };
+            (vscode.window as any).showWarningMessage = (message: string) => {
+                warnings.push(message);
+                return Promise.resolve(undefined);
+            };
+            const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+            assert.ok(openMemoryMapPanel(ctx, filePath, {
+                regions: [{ name: 'FLASH', origin: 0x08000000, size: 0x1000 }],
+            }));
+            assert.deepStrictEqual(panelRegistry.getSourceTargets(filePath), []);
+            assert.ok(informationMessages.some(message => /(?:compressed|압축).*debug_line_str/i.test(message)));
+            assert.deepStrictEqual(warnings, []);
+            assert.ok((panelRegistry.getHtml(filePath) ?? '').includes('Memory Map'));
+        } finally {
+            (vscode.window as any).showInformationMessage = originalInformation;
+            (vscode.window as any).showWarningMessage = originalWarning;
+            panelRegistry.clear();
+        }
+    });
+
+    test('IT-195c: 정상 unit이 함께 있어도 압축 문자열 unit의 미지원 형식을 안내한다', () => {
+        const dir = path.join(tmpDir, 'taskhub-test', 'dwarf5-mixed-compressed-string');
+        fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, 'mixed-compressed-string.axf');
+        fs.writeFileSync(filePath, buildElf32WithDwarf5Lines(
+            'src/unsupported.c',
+            0x800,
+            [buildDwarf4LineSection('src/supported.c')]
+        ));
+        tmpFiles.push(filePath);
+
+        const originalInformation = vscode.window.showInformationMessage;
+        const originalWarning = vscode.window.showWarningMessage;
+        const informationMessages: string[] = [];
+        const warnings: string[] = [];
+        try {
+            (vscode.window as any).showInformationMessage = (message: string) => {
+                informationMessages.push(message);
+                return Promise.resolve(undefined);
+            };
+            (vscode.window as any).showWarningMessage = (message: string) => {
+                warnings.push(message);
+                return Promise.resolve(undefined);
+            };
+            const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+            assert.ok(openMemoryMapPanel(ctx, filePath, {
+                regions: [{ name: 'FLASH', origin: 0x08000000, size: 0x1000 }],
+            }));
+            assert.strictEqual(panelRegistry.getSourceTargets(filePath)?.length, 3);
+            assert.ok(informationMessages.some(message => /(?:compressed|압축).*debug_line_str/i.test(message)));
+            assert.deepStrictEqual(warnings, []);
+        } finally {
+            (vscode.window as any).showInformationMessage = originalInformation;
+            (vscode.window as any).showWarningMessage = originalWarning;
             panelRegistry.clear();
         }
     });
