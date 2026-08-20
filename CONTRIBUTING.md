@@ -7,12 +7,14 @@
 ## 개발 환경 셋업
 
 ### 요구사항
-- Node.js and npm
+- Node.js 22 이상 (`nvm` 사용 시 저장소의 `.nvmrc`로 버전 선택)
+- npm
 - Visual Studio Code
 
 ### 설치
 ```bash
-npm install
+nvm use    # nvm을 사용하는 경우
+npm ci
 ```
 
 ## 빌드 & 테스트
