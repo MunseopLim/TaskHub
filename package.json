@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.7.43",
+  "version": "0.7.44",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -446,7 +446,8 @@
       },
       {
         "command": "taskhub.rerunFromHistory",
-        "title": "%cmd.rerunFromHistory%"
+        "title": "%cmd.rerunFromHistory%",
+        "icon": "$(refresh)"
       },
       {
         "command": "taskhub.rerunFromHistoryWithInputs",
@@ -548,7 +549,8 @@
       },
       {
         "command": "taskhub.runAnyAction",
-        "title": "%cmd.runAnyAction%"
+        "title": "%cmd.runAnyAction%",
+        "icon": "$(search)"
       },
       {
         "command": "taskhub.showHexViewer",
@@ -705,14 +707,19 @@
           "group": "navigation@3"
         },
         {
-          "command": "taskhub.createAction",
+          "command": "taskhub.runAnyAction",
           "when": "view == mainView.main",
           "group": "navigation@1"
         },
         {
-          "command": "taskhub.editActions",
+          "command": "taskhub.createAction",
           "when": "view == mainView.main",
           "group": "navigation@2"
+        },
+        {
+          "command": "taskhub.editActions",
+          "when": "view == mainView.main",
+          "group": "9_taskhub@0"
         },
         {
           "command": "taskhub.stopAllActions",
@@ -872,6 +879,11 @@
           "command": "taskhub.stopAction",
           "when": "view == mainView.main && viewItem == runningAction",
           "group": "inline"
+        },
+        {
+          "command": "taskhub.rerunFromHistory",
+          "when": "view == mainView.history && viewItem =~ /^historyItem/",
+          "group": "inline@0"
         },
         {
           "command": "taskhub.rerunFromHistoryWithInputs",

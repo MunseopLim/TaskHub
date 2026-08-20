@@ -25,9 +25,9 @@
 - **파이프라인** — 여러 태스크를 순서대로 실행하며 `${task_id.property}`로 결과 연결, `switch`로 선택값별 작업을 한곳에 구성
 - **액션 생성 마법사** — 대화형 UI로 코드 작성 없이 액션 생성
 - **Preset** — 팀원들과 action 설정 공유
-- **실행 히스토리** — 성공/실패 추적, 빠른 재실행
+- **실행 히스토리** — 성공/실패 추적, 새 입력 또는 저장 입력으로 명시적 재실행
 - **입력 프로필** — History에서 반복 입력 조합을 이름 붙여 저장하고 액션 메뉴에서 재사용
-- **Quick Action Palette** — `TaskHub: Run Any Action…` 단일 커맨드로 모든 액션을 fuzzy 검색·실행. 최근 사용 항목을 상위에 표시 (개수는 설정에서 조정)
+- **Quick Action Palette** — Actions의 돋보기나 `TaskHub: Run Any Action…` 커맨드로 모든 액션을 fuzzy 검색·실행. 최근 사용 항목을 상위에 표시 (개수는 설정에서 조정)
 - **Problem Matcher** — 빌드 출력의 컴파일러 에러·경고를 Problems 패널에 자동 표시 (gcc / TypeScript 프리셋 또는 커스텀 정규식)
 
 ### 사이드바 패널
@@ -176,7 +176,8 @@ VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전
 
 | 문서 | 설명 |
 |------|------|
-| [docs/features.md](docs/features.md) | 상세 기능 문서 (태스크 타입, JSON 예제, hover 기능 등) |
+| [docs/actions.md](docs/actions.md) | `actions.json` 작성법, 태스크 타입·필드·결과와 조합 예시 |
+| [docs/features.md](docs/features.md) | 패널 동작, Hover, JSON Editor, Hex/Memory Map 등 기능별 상세 문서 |
 | [docs/architecture.md](docs/architecture.md) | 프로젝트 구조, 주요 컴포넌트, 데이터 구조, 보안 |
 | [docs/roadmap.md](docs/roadmap.md) | 미구현 기능 우선순위와 기술 부채 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 개발 환경 셋업, 빌드, 테스트, 기여 가이드 |

@@ -266,28 +266,149 @@ function traverseActionItems(items: ActionItem[], visitor: (item: ActionItem, pa
     }
 }
 
-function validateUniqueActionIdsAcrossSources(sources: { sourceLabel: string; actions: ActionItem[] }[]): void {
-    const issues: string[] = [];
-    const idLocations = new Map<string, { sourceLabel: string; path: string }>();
+export interface ActionSourceConflictDefinition {
+    sourceLabel: string;
+    path: string;
+}
+
+export interface ActionSourceConflict {
+    id: string;
+    definitions: ActionSourceConflictDefinition[];
+    /** Undefined when an ancestor ID conflict removes every definition. */
+    winner?: ActionSourceConflictDefinition;
+}
+
+interface SourcedActionNode {
+    id?: string;
+    definition?: ActionSourceConflictDefinition;
+    children?: SourcedActionNode[];
+}
+
+/**
+ * Sources are ordered from lowest to highest priority. This mirrors
+ * `mergeActions(..., 'keep-existing')`, including its important ancestor
+ * rule: when a higher source conflicts with a folder ID, the whole lower
+ * folder (and therefore all nested definitions) disappears.
+ */
+export function findActionSourceConflicts(
+    sources: readonly { sourceLabel: string; actions: ActionItem[] }[]
+): ActionSourceConflict[] {
+    const definitionsById = new Map<string, ActionSourceConflictDefinition[]>();
+    let mergedNodes: SourcedActionNode[] = [];
+
+    const buildNodes = (
+        items: readonly ActionItem[],
+        sourceLabel: string,
+        breadcrumbs: string[] = []
+    ): SourcedActionNode[] => items.map(item => {
+        const label = item.title || item.id || '(unnamed)';
+        const currentParts = [...breadcrumbs, label];
+        const definition = item.id
+            ? { sourceLabel, path: formatActionPath(currentParts) }
+            : undefined;
+        if (item.id && definition) {
+            const definitions = definitionsById.get(item.id) ?? [];
+            definitions.push(definition);
+            definitionsById.set(item.id, definitions);
+        }
+        return {
+            id: item.id,
+            definition,
+            children: item.children?.length
+                ? buildNodes(item.children, sourceLabel, currentParts)
+                : undefined,
+        };
+    });
+
+    const collectIds = (nodes: readonly SourcedActionNode[], ids: Set<string>): void => {
+        for (const node of nodes) {
+            if (node.id) {
+                ids.add(node.id);
+            }
+            if (node.children) {
+                collectIds(node.children, ids);
+            }
+        }
+    };
+
+    const filterLowerPriorityNodes = (
+        nodes: readonly SourcedActionNode[],
+        higherPriorityIds: ReadonlySet<string>
+    ): SourcedActionNode[] => {
+        const kept: SourcedActionNode[] = [];
+        for (const node of nodes) {
+            if (node.id && higherPriorityIds.has(node.id)) {
+                continue;
+            }
+            kept.push({
+                ...node,
+                children: node.children
+                    ? filterLowerPriorityNodes(node.children, higherPriorityIds)
+                    : undefined,
+            });
+        }
+        return kept;
+    };
 
     for (const source of sources) {
-        traverseActionItems(source.actions, (item, pathParts) => {
-            if (!item.id) {
-                return;
-            }
-            const currentPath = formatActionPath(pathParts);
-            if (idLocations.has(item.id)) {
-                const existing = idLocations.get(item.id)!;
-                issues.push(`Action id '${item.id}' defined in both ${existing.sourceLabel} (${existing.path}) and ${source.sourceLabel} (${currentPath}).`);
-            } else {
-                idLocations.set(item.id, { sourceLabel: source.sourceLabel, path: currentPath });
-            }
-        });
+        const higherPriorityNodes = buildNodes(source.actions, source.sourceLabel);
+        const higherPriorityIds = new Set<string>();
+        collectIds(higherPriorityNodes, higherPriorityIds);
+        mergedNodes = [
+            ...higherPriorityNodes,
+            ...filterLowerPriorityNodes(mergedNodes, higherPriorityIds),
+        ];
     }
 
-    if (issues.length > 0) {
-        const uniqueIssues = Array.from(new Set(issues));
-        outputChannel.appendLine(`[Warning] Duplicate action IDs across sources (higher-priority source wins):\n${uniqueIssues.map(issue => `  - ${issue}`).join('\n')}`);
+    const survivingDefinitions = new Map<string, ActionSourceConflictDefinition>();
+    const collectSurvivors = (nodes: readonly SourcedActionNode[]): void => {
+        for (const node of nodes) {
+            if (node.id && node.definition) {
+                survivingDefinitions.set(node.id, node.definition);
+            }
+            if (node.children) {
+                collectSurvivors(node.children);
+            }
+        }
+    };
+    collectSurvivors(mergedNodes);
+
+    const conflicts: ActionSourceConflict[] = [];
+    for (const [id, definitions] of definitionsById) {
+        if (definitions.length > 1) {
+            conflicts.push({ id, definitions, winner: survivingDefinitions.get(id) });
+        }
+    }
+    return conflicts;
+}
+
+let latestActionSourceConflicts: ActionSourceConflict[] = [];
+
+function describeActionSourceConflict(conflict: ActionSourceConflict): string {
+    const locations = conflict.definitions
+        .map(definition => `${definition.sourceLabel} (${definition.path})`)
+        .join(' → ');
+    if (!conflict.winner) {
+        return t(
+            `'${conflict.id}' 충돌: ${locations}\n최종 트리에서 제외됨: 상위 항목 ID 충돌로 포함된 정의가 없습니다.`,
+            `'${conflict.id}' conflict: ${locations}\nNot in final tree: an ancestor ID conflict removed every definition.`
+        );
+    }
+    return t(
+        `'${conflict.id}' 충돌: ${locations}\n사용 중: ${conflict.winner.sourceLabel} (${conflict.winner.path})`,
+        `'${conflict.id}' conflict: ${locations}\nIn use: ${conflict.winner.sourceLabel} (${conflict.winner.path})`
+    );
+}
+
+function currentActionSourceConflictMessages(): string[] {
+    return latestActionSourceConflicts.map(describeActionSourceConflict);
+}
+
+function validateUniqueActionIdsAcrossSources(sources: { sourceLabel: string; actions: ActionItem[] }[]): void {
+    latestActionSourceConflicts = findActionSourceConflicts(sources);
+    if (latestActionSourceConflicts.length > 0) {
+        const messages = latestActionSourceConflicts.map(describeActionSourceConflict);
+        outputChannel.appendLine(`[Warning] Duplicate action IDs across sources:\n${messages.map(issue => `  - ${issue.replace(/\n/g, ' — ')}`).join('\n')}`);
     }
 }
 
@@ -917,7 +1038,7 @@ interface EffectiveActionSources {
  * from here, and losing them shouldn't block the workspace's own actions.
  */
 function collectEffectiveActionSources(context: vscode.ExtensionContext): EffectiveActionSources {
-    const extensionLabel = 'extension media/actions.json';
+    const extensionLabel = t('확장 번들 media/actions.json', 'extension media/actions.json');
 
     // Load selected preset from settings
     const presetId = getSelectedPresetId();
@@ -929,7 +1050,7 @@ function collectEffectiveActionSources(context: vscode.ExtensionContext): Effect
 
         if (found) {
             try {
-                const sourceLabel = `preset: ${found.name}`;
+                const sourceLabel = t(`프리셋: ${found.name}`, `preset: ${found.name}`);
                 preset = {
                     sourceLabel,
                     actions: loadAndValidateActions(found.filePath, { sourceLabel }),
@@ -1014,6 +1135,7 @@ export function resolveWorkspaceActions(
 }
 
 function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] {
+    latestActionSourceConflicts = [];
     const effective = collectEffectiveActionSources(context);
     const extensionActions = effective.bundled.actions;
     const presetActions = effective.preset?.actions ?? [];
@@ -1071,7 +1193,7 @@ function collectDoctorInputs(context: vscode.ExtensionContext): DoctorInput[] {
     if (bundledText !== undefined) {
         inputs.push({
             filePath: bundledPath,
-            sourceLabel: 'extension media/actions.json',
+            sourceLabel: t('확장 번들 media/actions.json', 'extension media/actions.json'),
             rawText: bundledText,
             workspaceRoots,
             extensionPath: context.extensionPath,
@@ -1086,7 +1208,7 @@ function collectDoctorInputs(context: vscode.ExtensionContext): DoctorInput[] {
             if (presetText !== undefined) {
                 inputs.push({
                     filePath: preset.filePath,
-                    sourceLabel: `preset: ${preset.name}`,
+                    sourceLabel: t(`프리셋: ${preset.name}`, `preset: ${preset.name}`),
                     rawText: presetText,
                     workspaceRoots,
                     extensionPath: context.extensionPath,
@@ -1441,14 +1563,15 @@ export function commandNeedsShellSyntax(command: string): boolean {
 /**
  * Wizard starting points, ordered simplest first.
  *
- * **모든 템플릿은 `command` 타입을 낸다** (0.6.49). 0.6.47 이 `shell` 을 raw
- * 셸 실행으로 바꾸면서, 보간값을 명령 문자열에 끼워 넣는 이 템플릿들이
- * 그대로 명령 주입 통로가 됐다 — `${selectFile.path}` 가 `x; rm -rf ~` 이면
- * 뒤의 명령까지 실행된다. `command` 는 토큰마다 인용해 argv 로 실행하므로
- * 보간값이 어떤 문자를 담고 있어도 인자 하나로 남는다.
+ * 동적 값을 보간하는 템플릿은 `command` 타입을 낸다 (0.6.49). 0.6.47 이
+ * `shell` 을 raw 셸 실행으로 바꾸면서, 보간값을 명령 문자열에 끼워 넣는
+ * 템플릿들이 그대로 명령 주입 통로가 됐다 — `${selectFile.path}` 가
+ * `x; rm -rf ~` 이면 뒤의 명령까지 실행된다. `command` 는 토큰마다 인용해
+ * argv 로 실행하므로 보간값이 어떤 문자를 담고 있어도 인자 하나로 남는다.
  *
- * 셸 연산자가 필요하면 사용자가 actions.json 에서 `shell` 로 바꾸면 된다.
- * 마법사가 기본으로 그것을 만들지는 않는다 — 안전한 쪽이 기본값이어야 한다.
+ * 파이프·리다이렉션 등이 꼭 필요한 경우만 명시적인 고급 `shell` 템플릿을
+ * 선택한다. 이 템플릿은 동적 입력 task를 만들지 않으며, 위험이 선택 목록의
+ * 이름과 설명에서 드러나야 한다.
  *
  * Every template here produces a *structurally different* action. Variants
  * that would differ only by the command string (a "Build" template next to
@@ -1462,9 +1585,9 @@ export function commandNeedsShellSyntax(command: string): boolean {
 export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
     {
         id: 'single-shell',
-        label: t('단일 쉘 명령어', 'Single Shell Command'),
-        description: t('하나의 쉘 명령어를 실행하고 공유 터미널에 출력을 스트리밍합니다.', 'Run one shell command and stream its output to the shared terminal.'),
-        defaultDescription: t('쉘 명령어를 실행합니다.', 'Run a shell command.'),
+        label: t('단일 명령 실행', 'Direct Command'),
+        description: t('셸 해석 없이 명령과 인자를 안전하게 실행하고 출력을 스트리밍합니다.', 'Run a command and its arguments without shell interpretation, then stream its output.'),
+        defaultDescription: t('명령을 직접 실행합니다.', 'Run a command directly.'),
         buildTasks({ command }: { command: string }) {
             return [{
                 id: 'run',
@@ -1474,16 +1597,36 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
         },
         async promptForTasks() {
             const command = await promptForRequiredInput({
-                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
+                prompt: t('실행할 명령과 인자를 입력하세요', 'Enter the command and arguments to execute'),
                 placeHolder: 'e.g. npm run build, make flash, ctest'
             });
             return this.buildTasks({ command });
         }
     },
     {
+        id: 'shell-script',
+        label: t('셸 스크립트 (고급)', 'Shell Script (Advanced)'),
+        description: t('파이프·리다이렉션 등 셸 문법을 해석합니다. 신뢰할 수 있는 고정 명령에만 사용하세요.', 'Interpret pipes, redirection, and other shell syntax. Use only with trusted, fixed commands.'),
+        defaultDescription: t('고급 셸 스크립트를 실행합니다.', 'Run an advanced shell script.'),
+        buildTasks({ command }: { command: string }) {
+            return [{
+                id: 'run',
+                type: 'shell' as const,
+                command
+            }];
+        },
+        async promptForTasks() {
+            const command = await promptForRequiredInput({
+                prompt: t('실행할 셸 스크립트를 입력하세요', 'Enter the shell script to execute'),
+                placeHolder: 'e.g. npm run build && npm test'
+            });
+            return this.buildTasks({ command });
+        }
+    },
+    {
         id: 'file-dialog-shell',
-        label: t('파일 선택 + 쉘', 'File Picker + Shell'),
-        description: t('사용자에게 파일을 선택하게 한 후, 선택된 경로를 받는 쉘 명령어를 실행합니다.', 'Ask the user to pick a file, then run a shell command that receives the selected path.'),
+        label: t('파일 선택 + 명령', 'File Picker + Command'),
+        description: t('사용자에게 파일을 선택하게 한 후, 선택된 경로를 안전한 인자로 받는 명령을 실행합니다.', 'Ask the user to pick a file, then run a command that receives the selected path as a safe argument.'),
         defaultDescription: t('파일을 선택하고 해당 파일로 명령어를 실행합니다.', 'Pick a file and run a command with the selection.'),
         buildTasks({ command }: { command: string }) {
             return [
@@ -1503,7 +1646,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
         },
         async promptForTasks() {
             const command = await promptForRequiredInput({
-                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
+                prompt: t('실행할 명령과 인자를 입력하세요', 'Enter the command and arguments to execute'),
                 value: 'echo Selected file: ${selectFile.path}',
                 placeHolder: t('선택한 파일을 참조하려면 ${selectFile.path}를 사용하세요', 'Use ${selectFile.path} to reference the selected file')
             });
@@ -1512,8 +1655,8 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
     },
     {
         id: 'folder-dialog-shell',
-        label: t('폴더 선택 + 쉘', 'Folder Picker + Shell'),
-        description: t('사용자에게 폴더를 선택하게 한 후, 선택된 경로를 받는 쉘 명령어를 실행합니다.', 'Ask the user to pick a folder, then run a shell command that receives the selected path.'),
+        label: t('폴더 선택 + 명령', 'Folder Picker + Command'),
+        description: t('사용자에게 폴더를 선택하게 한 후, 선택된 경로를 안전한 인자로 받는 명령을 실행합니다.', 'Ask the user to pick a folder, then run a command that receives the selected path as a safe argument.'),
         defaultDescription: t('폴더를 선택하고 해당 폴더로 명령어를 실행합니다.', 'Pick a folder and run a command with the selection.'),
         buildTasks({ command }: { command: string }) {
             return [
@@ -1533,7 +1676,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
         },
         async promptForTasks() {
             const command = await promptForRequiredInput({
-                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
+                prompt: t('실행할 명령과 인자를 입력하세요', 'Enter the command and arguments to execute'),
                 value: 'echo Selected folder: ${selectFolder.path}',
                 placeHolder: t('선택한 폴더를 참조하려면 ${selectFolder.path}를 사용하세요', 'Use ${selectFolder.path} to reference the selected folder')
             });
@@ -1542,7 +1685,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
     },
     {
         id: 'input-box-shell',
-        label: t('값 입력 + 쉘', 'Text Input + Shell'),
+        label: t('값 입력 + 명령', 'Text Input + Command'),
         description: t('실행 전에 값을 입력받아 명령어에 끼워 넣습니다 (예: 버전 태그, 대상 이름).', 'Ask for a value before running and splice it into the command (e.g. a version tag or target name).'),
         defaultDescription: t('입력받은 값으로 명령어를 실행합니다.', 'Run a command with a value entered at run time.'),
         buildTasks({ inputPrompt, command }: { inputPrompt: string; command: string }) {
@@ -1565,7 +1708,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
                 placeHolder: t('예: 릴리스 태그를 입력하세요', 'e.g. Enter the release tag')
             });
             const command = await promptForRequiredInput({
-                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
+                prompt: t('실행할 명령과 인자를 입력하세요', 'Enter the command and arguments to execute'),
                 value: 'echo ${input.value}',
                 placeHolder: t('입력값을 참조하려면 ${input.value}를 사용하세요', 'Use ${input.value} to reference the entered value')
             });
@@ -1574,7 +1717,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
     },
     {
         id: 'quick-pick-shell',
-        label: t('선택지 + 쉘', 'Choice List + Shell'),
+        label: t('선택지 + 명령', 'Choice List + Command'),
         description: t('미리 정한 목록에서 하나를 고르게 한 뒤 명령어를 실행합니다 (예: 타겟 보드).', 'Let the user pick from a fixed list, then run a command (e.g. a target board).'),
         defaultDescription: t('선택한 항목으로 명령어를 실행합니다.', 'Run a command with the selected item.'),
         buildTasks({ items, command }: { items: string[]; command: string }) {
@@ -1602,7 +1745,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
                 throw new Error(t('선택지를 하나 이상 입력해야 합니다.', 'At least one choice is required.'));
             }
             const command = await promptForRequiredInput({
-                prompt: t('실행할 쉘 명령어를 입력하세요', 'Enter the shell command to execute'),
+                prompt: t('실행할 명령과 인자를 입력하세요', 'Enter the command and arguments to execute'),
                 value: 'echo ${choice.value}',
                 placeHolder: t('선택한 항목을 참조하려면 ${choice.value}를 사용하세요', 'Use ${choice.value} to reference the selected item')
             });
@@ -1612,7 +1755,7 @@ export const ACTION_TEMPLATES: ActionTemplateDefinition[] = [
     {
         id: 'multi-step-shell',
         label: t('다단계 파이프라인', 'Multi-step Pipeline'),
-        description: t('여러 쉘 명령어를 순서대로 실행합니다. 앞 단계가 실패하면 뒤 단계는 실행되지 않습니다.', 'Run several shell commands in order. A failing step stops the ones after it.'),
+        description: t('여러 명령을 셸 해석 없이 순서대로 실행합니다. 앞 단계가 실패하면 뒤 단계는 실행되지 않습니다.', 'Run several commands in order without shell interpretation. A failing step stops the ones after it.'),
         defaultDescription: t('여러 단계를 순서대로 실행합니다.', 'Run several steps in order.'),
         buildTasks({ commands }: { commands: string[] }) {
             return commands.map((command, index) => ({
@@ -2327,8 +2470,8 @@ async function handlePostCreationChoice(created: { id: string; title: string }, 
  *   1. Pick workspace folder (auto-skipped if there's only one)
  *   2. Pick template
  *   3. Title
- *   4. Template-specific prompts — a single shell command for both bundled
- *      templates (File Picker + Shell prefills `${selectFile.path}`)
+ *   4. Template-specific prompts — one or two essential values, with safe
+ *      command templates prefilling their `${task.value}` references
  *   5. Pick destination (auto-skipped if no folders exist in actions.json)
  *   6. Save + post-creation choice (Open actions.json / Run now)
  *
@@ -2378,11 +2521,12 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
         });
         const tasks = await template.promptForTasks();
 
-        // 마법사는 `command`(argv) 로 저장한다. 사용자가 터미널에서 쓰던 것을
-        // 그대로 붙여 넣으면 `&&` 나 `|` 가 리터럴 인자가 되어 **오류 없이**
-        // 다르게 동작하므로, 저장하기 전에 그 사실을 알린다.
+        // 안전한 템플릿은 `command`(argv) 로 저장한다. 사용자가 터미널에서
+        // 쓰던 것을 그대로 붙여 넣으면 `&&` 나 `|` 가 리터럴 인자가 되어
+        // **오류 없이** 다르게 동작하므로, 저장하기 전에 그 사실을 알린다.
+        // 명시적으로 고른 고급 `shell` 템플릿에는 이 경고가 해당하지 않는다.
         const shellSyntaxCommands = tasks
-            .filter((task: any) => typeof task?.command === 'string' && commandNeedsShellSyntax(task.command))
+            .filter((task: any) => task?.type === 'command' && typeof task.command === 'string' && commandNeedsShellSyntax(task.command))
             .map((task: any) => task.command as string);
         if (shellSyntaxCommands.length > 0) {
             const continueLabel = t('그대로 만들기', 'Create anyway');
@@ -3929,6 +4073,17 @@ import {
 } from './providers/historyProvider';
 
 import { normalizeLineNumber } from './providers/normalization';
+
+/**
+ * History의 두 재실행 명령은 입력 처리만 다르다. 기본 재실행은 현재 조건으로
+ * 다시 묻고, 명시적인 저장 입력 재실행만 기록값을 전달한다.
+ */
+export function selectHistoryRerunInputs(
+    entry: HistoryEntry,
+    reuseSavedInputs: boolean
+): Record<string, unknown> | undefined {
+    return reuseSavedInputs ? entry.inputs : undefined;
+}
 
 function cloneMemoryMapHistoryConfig(config?: MemoryMapConfig): MemoryMapConfig | undefined {
     if (!config?.regions || config.regions.length === 0) {
@@ -10503,7 +10658,11 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(terminalDisposable);
 
 
-    const mainViewProvider = new MainViewProvider(context, () => loadAllActions(context));
+    const mainViewProvider = new MainViewProvider(
+        context,
+        () => loadAllActions(context),
+        () => currentActionSourceConflictMessages()
+    );
     // Register `taskhub.runAction.<id>` commands at activation so the user's
     // `keybindings.json` resolves to live commands as soon as the extension
     // loads. Cost: one `loadAllActions` JSON pass — comparable to the lazy
@@ -10718,6 +10877,9 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.createAction', async () => {
         await runActionCreationWizard(context, mainViewProvider);
     }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showActionSourceConflicts', () => {
+        outputChannel.show(true);
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openFavoriteFile', async (favorite: FavoriteEntry | string) => {
         try {
             const target: FavoriteEntry = typeof favorite === 'string' ? { title: path.basename(favorite), path: favorite } : favorite;
@@ -10810,7 +10972,14 @@ export function activate(context: vscode.ExtensionContext) {
         if (fullActionItem) {
             const pathParts = findActionPathById(allActions, actionId);
             try {
-                await executeAction(fullActionItem, context, mainViewProvider, historyProvider, undefined, pathParts);
+                await executeAction(
+                    fullActionItem,
+                    context,
+                    mainViewProvider,
+                    historyProvider,
+                    undefined,
+                    pathParts
+                );
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 outputChannel.appendLine(`[ERROR] Execution failed for action '${actionId}': ${msg}`);
@@ -11951,7 +12120,11 @@ export function activate(context: vscode.ExtensionContext) {
         await openToolHistoryEntry(context, historyProvider, entry);
     }));
 
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.rerunFromHistory', async (entry: HistoryEntry) => {
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.rerunFromHistory', async (itemOrEntry: HistoryItem | HistoryEntry | undefined) => {
+        const maybeItem = itemOrEntry as HistoryItem | undefined;
+        const entry = typeof maybeItem?.getEntry === 'function'
+            ? maybeItem.getEntry()
+            : itemOrEntry as HistoryEntry | undefined;
         if (!entry || !entry.actionId) {
             vscode.window.showErrorMessage(t('유효하지 않은 기록 항목입니다.', 'Invalid history entry.'));
             return;
@@ -11974,10 +12147,17 @@ export function activate(context: vscode.ExtensionContext) {
         if (fullActionItem) {
             const pathParts = findActionPathById(allActions, entry.actionId);
             try {
-                // 기본 클릭 재실행은 직전에 선택한 입력(예: dir 선택 dialog 결과)을
-                // 그대로 재사용한다. presetInputs는 taskId가 일치하는 interactive
-                // task에만 적용되므로, 저장된 입력이 없으면 평소처럼 다시 묻는다.
-                await executeAction(fullActionItem, context, mainViewProvider, historyProvider, entry.inputs, pathParts);
+                // "액션 다시 실행"은 현재 조건으로 새로 실행한다. 대화형 입력을
+                // 재사용하는 별도 명령은 `rerunFromHistoryWithInputs`다. 두 명령이
+                // 같은 일을 하면 사용자가 어느 쪽이 저장값을 쓰는지 알 수 없다.
+                await executeAction(
+                    fullActionItem,
+                    context,
+                    mainViewProvider,
+                    historyProvider,
+                    selectHistoryRerunInputs(entry, false),
+                    pathParts
+                );
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 outputChannel.appendLine(`[ERROR] Execution failed for action '${entry.actionId}': ${msg}`);
@@ -12017,7 +12197,14 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const pathParts = findActionPathById(allActions, entry.actionId);
         try {
-            await executeAction(fullActionItem, context, mainViewProvider, historyProvider, entry.inputs, pathParts);
+            await executeAction(
+                fullActionItem,
+                context,
+                mainViewProvider,
+                historyProvider,
+                selectHistoryRerunInputs(entry, true),
+                pathParts
+            );
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             outputChannel.appendLine(`[ERROR] Execution failed for action '${entry.actionId}' (with saved inputs): ${msg}`);

@@ -243,7 +243,10 @@ export class FavoriteViewProvider implements vscode.TreeDataProvider<FavoriteTre
 
     private updateTitle(): void {
         if (this.view) {
-            this.view.title = `Favorite Files (${this.cachedFavorites.length})`;
+            this.view.title = t(
+                `즐겨찾는 파일 (${this.cachedFavorites.length})`,
+                `Favorite Files (${this.cachedFavorites.length})`
+            );
         }
     }
 

@@ -293,6 +293,10 @@
 | IT-150 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 배열 필드가 없는 옛 History 입력도 단일 선택의 `paths`·`names`·`count`를 복원 |
 | IT-151, IT-152 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 파일·폴더 다중 선택이 배열 결과와 개별 argv를 보존 |
 | IT-156 | [memoryMapViewer.test.ts](../src/test/memoryMapViewer.test.ts) | Memory Map의 host 보관 ELF file offset target이 원본을 raw binary로 열고 Hex Viewer 초기 선택 범위로 전달되며 NOBITS를 거부 |
+| IT-189a, IT-189b, IT-189c | [viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts), [extension.test.ts](../src/test/extension.test.ts) | 교차 소스 액션 ID 충돌의 전체 정의·실제 최종 승자를 보존하고, 상위 폴더 충돌로 정의가 모두 제거되는 경우까지 Actions 루트의 지속 경고에 반영 |
+| IT-190a, IT-190b, IT-190c | [extension.test.ts](../src/test/extension.test.ts) | History 액션 행 클릭은 실행하지 않고, 명시적 기본 재실행은 새 입력을 받으며 저장 입력 명령만 기록값을 재사용 |
+| IT-191a, IT-191b, IT-191c, IT-191d | [viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) | 병렬 진행 문구 지역화와 성공·실패·실행 중 접근성 라벨, 상태 표시 비활성화를 같은 정책으로 유지 |
+| IT-192 | [extension.test.ts](../src/test/extension.test.ts) | Actions 제목 표시줄의 검색 아이콘이 Quick Action Palette를 최우선 탐색 항목으로 노출 |
 
 IT-093~IT-097은 MRU를 별도 저장하던 구현이 제거되면서 함께 삭제된 번호이며 재사용하지 않습니다.
 

@@ -2595,7 +2595,7 @@ try {
             // The user's exact scenario: a history rerun must reuse the
             // previously picked directory instead of re-prompting. The 5th
             // `executeAction` arg here is precisely what
-            // `taskhub.rerunFromHistory` now forwards from `entry.inputs`
+            // `taskhub.rerunFromHistoryWithInputs` forwards from `entry.inputs`
             // (it used to pass `undefined`, which forced the dialog open —
             // the regression this guards against).
             const originalShowOpenDialog = vscode.window.showOpenDialog;

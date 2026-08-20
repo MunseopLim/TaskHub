@@ -7,7 +7,7 @@ import { actionStates } from '../providers/actionStatus';
 import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteParseError, FavoriteViewProvider, loadFavoritesFromDisk, removeFavoriteByIdentity } from '../providers/favoriteViewProvider';
 import { buildActionCommandId, buildRunAnyActionPaletteItems, buildRunAnyActionPicks, planRunAnyAction, serializeFavorites, syncActionCommandsFromActions, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT } from '../extension';
 import { Link, LinkGroup, LinkParseError, LinkViewProvider } from '../providers/linkViewProvider';
-import { Action, Folder, MainViewProvider, formatProgressDescription } from '../providers/mainViewProvider';
+import { Action, Folder, MainViewProvider, buildActionAccessibilityLabel, formatProgressDescription } from '../providers/mainViewProvider';
 import { HistoryProvider } from '../providers/historyProvider';
 import { ActionItem } from '../schema';
 
@@ -260,6 +260,10 @@ suite('View provider integration', function () {
         assert.strictEqual(labelOf(roots[2]), 'Flash');
         assert.strictEqual(roots[2].contextValue, 'succeededAction');
         assert.strictEqual((roots[2].iconPath as vscode.ThemeIcon).id, 'check');
+        assert.ok(
+            roots[2].accessibilityInformation?.label?.includes('succeeded'),
+            '색 아이콘을 읽을 수 없는 사용자에게 성공 상태가 전달되지 않는다'
+        );
 
         const folderChildren = await provider.getChildren(roots[0]);
         assert.strictEqual(folderChildren.length, 1);
@@ -268,6 +272,27 @@ suite('View provider integration', function () {
         assert.strictEqual(folderChildren[0].contextValue, 'action');
         assert.strictEqual((folderChildren[0].iconPath as vscode.ThemeIcon).id, 'debug-alt');
         assert.strictEqual((folderChildren[0] as Action).command?.command, 'taskhub.executeAction');
+    });
+
+    test('IT-189a: Actions 루트에 소스 충돌 상세로 가는 지속적인 경고 행을 표시한다', async () => {
+        const context = makeContext();
+        const actions: ActionItem[] = [{
+            id: 'build',
+            title: 'Build',
+            action: { description: 'Build', tasks: [{ id: 'run', type: 'command', command: 'make' }] }
+        }];
+        const provider = new MainViewProvider(
+            context,
+            () => actions,
+            () => ["'build' conflict: preset → workspace\nIn use: workspace"]
+        );
+
+        const roots = await provider.getChildren();
+        assert.strictEqual(roots.length, 2);
+        assert.strictEqual(roots[0].contextValue, 'actionSourceConflicts');
+        assert.strictEqual(roots[0].command?.command, 'taskhub.showActionSourceConflicts');
+        assert.ok(String(roots[0].tooltip).includes('In use: workspace'));
+        assert.ok(roots[1] instanceof Action);
     });
 
     test('IT-068: HistoryItem.description에 시각 + 소요 시간 배지가 노출되고, 상태는 아이콘 / aria 라벨로 표시됨', async () => {
@@ -711,6 +736,17 @@ suite('View provider integration', function () {
             );
         });
 
+        test('IT-191a: 한국어 UI에서는 병렬 진행 상태를 한국어로 표시한다', () => {
+            assert.strictEqual(
+                formatProgressDescription({
+                    total: 3,
+                    completed: 0,
+                    running: [{ taskId: 'A', index: 1 }, { taskId: 'B', index: 2 }]
+                }, 'ko'),
+                '2개 실행 중 · A, B'
+            );
+        });
+
         test('zero running mid-pipeline shows compact `done/total`', () => {
             // Brief snapshot between sequential tasks: nothing in flight
             // but some already completed. Showing the running-task name
@@ -745,6 +781,25 @@ suite('View provider integration', function () {
                 }),
                 '1/3 · A'
             );
+        });
+    });
+
+    suite('Action 접근성 라벨', () => {
+        test('IT-191b: 색상 아이콘 대신 성공·실패 상태를 텍스트로 전달한다', () => {
+            assert.strictEqual(buildActionAccessibilityLabel('Build', 'success', undefined, 'ko'), 'Build, 성공');
+            assert.strictEqual(buildActionAccessibilityLabel('Build', 'failure', undefined, 'en'), 'Build, failed');
+        });
+
+        test('IT-191c: 실행 중인 병렬 태스크 요약을 상태와 함께 전달한다', () => {
+            assert.strictEqual(buildActionAccessibilityLabel('Build', 'running', {
+                total: 3,
+                completed: 0,
+                running: [{ taskId: 'A', index: 1 }, { taskId: 'B', index: 2 }]
+            }, 'ko'), 'Build, 실행 중, 2개 실행 중 · A, B');
+        });
+
+        test('IT-191d: 상태 표시를 끄면 접근성 라벨에서도 상태를 숨긴다', () => {
+            assert.strictEqual(buildActionAccessibilityLabel('Build', 'failure', undefined, 'ko', false), 'Build');
         });
     });
 

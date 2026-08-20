@@ -249,7 +249,7 @@ export class LinkViewProvider implements vscode.TreeDataProvider<LinkTreeNode>, 
     private updateTitle(): void {
         if (this.view) {
             const count = this.cachedEntries.length;
-            this.view.title = `Workspace Links (${count})`;
+            this.view.title = t(`워크스페이스 링크 (${count})`, `Workspace Links (${count})`);
         }
     }
 

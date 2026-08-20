@@ -39,7 +39,7 @@ suite('액션 생성 템플릿', () => {
         });
 
         test('구조가 서로 다른 템플릿만 존재한다 (명령어만 다른 변형 금지)', () => {
-            // "Build"/"Test"처럼 단일 shell 하나만 내놓는 템플릿이 여러 개면
+            // "Build"/"Test"처럼 단일 command 하나만 내놓는 템플릿이 여러 개면
             // 목록만 길어지고 배우는 것은 없다 — 그런 예시는 placeholder가 담당.
             const singleShellLike = ACTION_TEMPLATES.filter(template => {
                 const tasks = template.id === 'single-shell'
@@ -48,19 +48,26 @@ suite('액션 생성 템플릿', () => {
                 return tasks.length === 1 && tasks[0].type === 'command';
             });
             assert.strictEqual(singleShellLike.length, 1,
-                '단일 shell 템플릿은 하나여야 한다');
+                '단일 command 템플릿은 하나여야 한다');
         });
     });
 
     suite('buildTasks 출력', () => {
-        test('단일 쉘', () => {
+        test('단일 명령 실행', () => {
             assert.deepStrictEqual(
                 templateById('single-shell').buildTasks({ command: 'npm run build' }),
                 [{ id: 'run', type: 'command', command: 'npm run build' }]
             );
         });
 
-        test('파일 선택 + 쉘 — dialog가 먼저, shell이 그 결과를 참조', () => {
+        test('고급 셸 스크립트 — 명시적으로 shell 타입을 만든다', () => {
+            assert.deepStrictEqual(
+                templateById('shell-script').buildTasks({ command: 'npm run build && npm test' }),
+                [{ id: 'run', type: 'shell', command: 'npm run build && npm test' }]
+            );
+        });
+
+        test('파일 선택 + 명령 — dialog가 먼저, command가 그 결과를 참조', () => {
             const tasks = templateById('file-dialog-shell')
                 .buildTasks({ command: 'echo ${selectFile.path}' });
 
@@ -72,7 +79,7 @@ suite('액션 생성 템플릿', () => {
             assert.ok(tasks[1].command.includes('${selectFile.path}'));
         });
 
-        test('폴더 선택 + 쉘 — 파일 버전과 대칭', () => {
+        test('폴더 선택 + 명령 — 파일 버전과 대칭', () => {
             const tasks = templateById('folder-dialog-shell')
                 .buildTasks({ command: 'echo ${selectFolder.path}' });
 
@@ -81,7 +88,7 @@ suite('액션 생성 템플릿', () => {
             assert.strictEqual(tasks[1].type, 'command');
         });
 
-        test('값 입력 + 쉘 — inputBox의 prompt가 사용자 문구로 채워진다', () => {
+        test('값 입력 + 명령 — inputBox의 prompt가 사용자 문구로 채워진다', () => {
             const tasks = templateById('input-box-shell')
                 .buildTasks({ inputPrompt: '릴리스 태그를 입력하세요', command: 'git tag ${input.value}' });
 
@@ -91,7 +98,7 @@ suite('액션 생성 템플릿', () => {
             ]);
         });
 
-        test('선택지 + 쉘 — items 배열과 참조 변수', () => {
+        test('선택지 + 명령 — items 배열과 참조 변수', () => {
             const tasks = templateById('quick-pick-shell')
                 .buildTasks({ items: ['stm32f4', 'stm32f7'], command: 'make TARGET=${choice.value}' });
 
@@ -121,8 +128,8 @@ suite('액션 생성 템플릿', () => {
      * 마법사 템플릿은 그대로 명령 주입 통로가 됐다. 생성 UI 가 문서가 금지하는
      * 패턴을 스스로 만들어 내던 셈이라, 기본값을 argv 쪽으로 되돌린다.
      */
-    suite('마법사는 주입에 안전한 타입을 낸다', () => {
-        test('명령을 실행하는 모든 템플릿이 command 타입을 낸다', () => {
+    suite('마법사는 안전한 타입을 기본으로 낸다', () => {
+        test('명시적인 고급 셸을 제외한 모든 템플릿이 command 타입을 낸다', () => {
             const built: { template: string; type: string }[] = [];
             for (const template of ACTION_TEMPLATES) {
                 const tasks = template.id === 'multi-step-shell'
@@ -142,9 +149,15 @@ suite('액션 생성 템플릿', () => {
             assert.ok(built.length >= ACTION_TEMPLATES.length, '명령 태스크를 하나도 못 찾았다 — 테스트 전제가 깨졌다');
             const rawShell = built.filter(entry => entry.type !== 'command');
             assert.deepStrictEqual(
-                rawShell, [],
-                `마법사가 raw 셸 태스크를 만든다 — 보간값이 셸 문법으로 해석된다: ${JSON.stringify(rawShell)}`
+                rawShell, [{ template: 'shell-script', type: 'shell' }],
+                `명시하지 않은 raw 셸 태스크가 있다 — 보간값이 셸 문법으로 해석된다: ${JSON.stringify(rawShell)}`
             );
+        });
+
+        test('고급 셸 템플릿은 위험과 용도를 선택 단계에서 드러낸다', () => {
+            const template = templateById('shell-script');
+            assert.match(template.label, /(Advanced|고급)/i);
+            assert.match(template.description, /(trusted|신뢰)/i);
         });
 
         test('보간을 담은 기본 명령이 실제로 argv 로 나간다', () => {
@@ -200,6 +213,7 @@ suite('액션 생성 템플릿', () => {
 
         const samples: Record<string, any> = {
             'single-shell': { command: 'make' },
+            'shell-script': { command: 'make && make flash' },
             'file-dialog-shell': { command: 'echo ${selectFile.path}' },
             'folder-dialog-shell': { command: 'echo ${selectFolder.path}' },
             'input-box-shell': { inputPrompt: 'Tag?', command: 'git tag ${input.value}' },

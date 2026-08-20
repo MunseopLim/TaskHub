@@ -622,17 +622,19 @@ export class HistoryItem extends vscode.TreeItem {
             label: buildHistoryItemAriaLabel(entry, displayLabel ?? entry.actionTitle, now, lang)
         };
 
-        this.command = isToolEntry
-            ? {
+        // History is primarily an inspection surface. A click on an action
+        // row only selects it; it must never repeat a build/deploy/file-write
+        // as a side effect of trying to inspect the record. Explicit inline
+        // and context commands provide fresh-input and saved-input reruns.
+        // Tool entries are different: their recorded operation is opening a
+        // viewer, so clicking continues to reopen that viewer.
+        if (isToolEntry) {
+            this.command = {
                 command: 'taskhub.openToolFromHistory',
-                title: 'Open',
-                arguments: [this.entry]
-            }
-            : {
-                command: 'taskhub.rerunFromHistory',
-                title: 'Re-run Action',
+                title: t('다시 열기', 'Open again'),
                 arguments: [this.entry]
             };
+        }
     }
 
     getEntry(): HistoryEntry {
@@ -663,7 +665,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
     private updateTitle(): void {
         if (this.view) {
             const history = this.getHistory();
-            this.view.title = `History (${history.length})`;
+            this.view.title = t(`실행 기록 (${history.length})`, `History (${history.length})`);
         }
     }
 

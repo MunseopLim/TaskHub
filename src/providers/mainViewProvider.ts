@@ -15,7 +15,9 @@
 import * as vscode from 'vscode';
 import { ActionItem, Action as PipelineAction } from '../schema';
 import { t } from '../i18n';
-import { actionStates, ActionProgress } from './actionStatus';
+import { actionStates, ActionProgress, ActionRunState } from './actionStatus';
+
+type UiLanguage = 'ko' | 'en';
 
 /**
  * Render the in-flight progress hint shown on a running Action TreeItem.
@@ -34,7 +36,7 @@ import { actionStates, ActionProgress } from './actionStatus';
  * Returns `undefined` when the progress is too thin to be useful — the
  * caller treats `undefined` as "no description".
  */
-export function formatProgressDescription(progress: ActionProgress): string | undefined {
+export function formatProgressDescription(progress: ActionProgress, lang: UiLanguage = 'en'): string | undefined {
     const { total, completed, running } = progress;
     if (total <= 1) { return undefined; }
     if (running.length === 0) {
@@ -45,9 +47,38 @@ export function formatProgressDescription(progress: ActionProgress): string | un
         return `${running[0].index}/${total} · ${running[0].taskId}`;
     }
     if (running.length === 2) {
-        return `${running.length} running · ${running[0].taskId}, ${running[1].taskId}`;
+        return lang === 'ko'
+            ? `${running.length}개 실행 중 · ${running[0].taskId}, ${running[1].taskId}`
+            : `${running.length} running · ${running[0].taskId}, ${running[1].taskId}`;
     }
-    return `${running.length} running · ${running[0].taskId}, ${running[1].taskId} + ${running.length - 2}`;
+    return lang === 'ko'
+        ? `${running.length}개 실행 중 · ${running[0].taskId}, ${running[1].taskId} + ${running.length - 2}`
+        : `${running.length} running · ${running[0].taskId}, ${running[1].taskId} + ${running.length - 2}`;
+}
+
+/**
+ * TreeItem 아이콘의 색·회전만으로는 스크린 리더가 실행 상태를 알 수 없다.
+ * 보이는 정보와 같은 상태·진행률을 접근 가능한 이름 한 줄로 합친다.
+ */
+export function buildActionAccessibilityLabel(
+    label: string,
+    state: ActionRunState | undefined,
+    progress: ActionProgress | undefined,
+    lang: UiLanguage = 'en',
+    showTaskStatus: boolean = true
+): string {
+    if (!showTaskStatus || !state) {
+        return label;
+    }
+    const stateText = state === 'running'
+        ? (lang === 'ko' ? '실행 중' : 'running')
+        : state === 'success'
+            ? (lang === 'ko' ? '성공' : 'succeeded')
+            : (lang === 'ko' ? '실패' : 'failed');
+    const progressText = state === 'running' && progress
+        ? formatProgressDescription(progress, lang)
+        : undefined;
+    return progressText ? `${label}, ${stateText}, ${progressText}` : `${label}, ${stateText}`;
 }
 
 export class Folder extends vscode.TreeItem {
@@ -115,9 +146,13 @@ export class Action extends vscode.TreeItem {
         showTaskStatus: boolean = true
     ) {
         super(label, collapsibleState);
-        this.command = { command: 'taskhub.executeAction', title: 'Execute Action', arguments: [this] };
+        this.command = { command: 'taskhub.executeAction', title: t('액션 실행', 'Execute Action'), arguments: [this] };
         this.tooltip = action.description;
         const state = actionStates.get(this.id || '');
+        const lang: UiLanguage = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
+        this.accessibilityInformation = {
+            label: buildActionAccessibilityLabel(label, state?.state, state?.progress, lang, showTaskStatus)
+        };
         if (state && !showTaskStatus) {
             // Status display is off: keep the capability marker, drop every
             // visual trace of the run. Previously the icons came back on any
@@ -146,7 +181,7 @@ export class Action extends vscode.TreeItem {
                     // than two are active) so the description fits in
                     // the tree row without truncating.
                     if (state.progress && state.progress.total > 1) {
-                        this.description = formatProgressDescription(state.progress);
+                        this.description = formatProgressDescription(state.progress, lang);
                     }
                     break;
                 case 'success':
@@ -174,7 +209,8 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
 
     constructor(
         private context: vscode.ExtensionContext,
-        private readonly loadActions: () => ActionItem[]
+        private readonly loadActions: () => ActionItem[],
+        private readonly loadSourceWarnings: () => readonly string[] = () => []
     ) {}
 
     refresh(): void {
@@ -246,7 +282,24 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
         // title) — a permanent row cost the list its top line and, more
         // importantly, made the tree never empty, which suppressed the
         // welcome view entirely.
-        return Promise.resolve(this.createActionItems(actionsJson));
+        const actionItems = this.createActionItems(actionsJson);
+        const sourceWarnings = this.loadSourceWarnings();
+        if (sourceWarnings.length === 0) {
+            return Promise.resolve(actionItems);
+        }
+
+        const warningItem = new vscode.TreeItem(sourceWarnings.length === 1
+            ? t('액션 ID 충돌 1개', '1 action ID conflict')
+            : t(`액션 ID 충돌 ${sourceWarnings.length}개`, `${sourceWarnings.length} action ID conflicts`));
+        warningItem.description = t('우선순위 적용 결과 확인', 'Review priority resolution');
+        warningItem.tooltip = sourceWarnings.join('\n\n');
+        warningItem.iconPath = new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'));
+        warningItem.contextValue = 'actionSourceConflicts';
+        warningItem.command = {
+            command: 'taskhub.showActionSourceConflicts',
+            title: t('충돌 상세 보기', 'Show conflict details')
+        };
+        return Promise.resolve([warningItem, ...actionItems]);
     }
 
     /**

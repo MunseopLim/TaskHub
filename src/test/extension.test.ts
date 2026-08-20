@@ -69,6 +69,8 @@ import {
 	findConflictingIds,
 	mergeActions,
 	resolveWorkspaceActions,
+	findActionSourceConflicts,
+	selectHistoryRerunInputs,
 	toWorkspaceRelativePath,
 	executeShellCommand,
 	__testHook_hasManuallyTerminated,
@@ -4605,6 +4607,38 @@ suite('Extension Test Suite', () => {
 			assert.ok(!match(inline.when, 'historyItem'), '로그 없는 행에 죽은 아이콘이 붙었다');
 		});
 
+		test('IT-190a: 재실행은 행 클릭이 아니라 명시적 인라인 명령으로 제공한다', () => {
+			const manifest = JSON.parse(
+				fs.readFileSync(path.join(path.resolve(__dirname, '..', '..'), 'package.json'), 'utf-8'));
+			const entries = manifest.contributes.menus['view/item/context']
+				.filter((m: any) => m.command === 'taskhub.rerunFromHistory');
+			assert.strictEqual(entries.length, 1);
+			assert.ok(String(entries[0].group).startsWith('inline'));
+			const whenMatch = /viewItem =~ \/(.+)\//.exec(entries[0].when);
+			assert.ok(whenMatch, `viewItem 정규식을 읽지 못했다: ${entries[0].when}`);
+			assert.ok(new RegExp(whenMatch![1]).test('historyItem.inputs'));
+			assert.ok(!new RegExp(whenMatch![1]).test('historyToolItem'));
+		});
+
+		test('IT-190b: 기본 재실행은 새 입력을 받고 저장 입력 명령만 기록값을 재사용한다', () => {
+			const entry = makeEntry('rerun-inputs', 'success', 1);
+			entry.inputs = { target: { value: 'saved' } };
+			assert.strictEqual(selectHistoryRerunInputs(entry, false), undefined);
+			assert.strictEqual(selectHistoryRerunInputs(entry, true), entry.inputs);
+		});
+
+		test('IT-192: Actions 제목 표시줄에서 전체 액션 검색을 바로 연다', () => {
+			const manifest = JSON.parse(
+				fs.readFileSync(path.join(path.resolve(__dirname, '..', '..'), 'package.json'), 'utf-8'));
+			const titleEntry = manifest.contributes.menus['view/title']
+				.find((item: any) => item.command === 'taskhub.runAnyAction' && item.when === 'view == mainView.main');
+			assert.ok(titleEntry, 'Actions 제목 표시줄에 runAnyAction이 없다');
+			assert.strictEqual(titleEntry.group, 'navigation@1');
+			const command = manifest.contributes.commands
+				.find((item: any) => item.command === 'taskhub.runAnyAction');
+			assert.strictEqual(command?.icon, '$(search)');
+		});
+
 		test('setHistoryRunLog on an unknown execution is a silent no-op', () => {
 			const provider = new HistoryProvider(createMockContext());
 			provider.addHistoryEntry(makeEntry('present', 'success', 1));
@@ -4822,7 +4856,7 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(items[0].command?.command, 'taskhub.openToolFromHistory');
 		});
 
-		test('getChildren returns one HistoryItem per entry, carrying the rerun command', async () => {
+		test('IT-190c: 액션 기록 행 클릭은 재실행하지 않고 명시적 메뉴에 맡긴다', async () => {
 			const provider = new HistoryProvider(createMockContext());
 			provider.addHistoryEntry(makeEntry('run-me', 'success', 1));
 			const items = await provider.getChildren();
@@ -4830,7 +4864,7 @@ suite('Extension Test Suite', () => {
 			const item = items[0];
 			// TreeItem label comes from actionTitle in the entry.
 			assert.strictEqual(item.label, 'Title for run-me');
-			assert.strictEqual(item.command?.command, 'taskhub.rerunFromHistory');
+			assert.strictEqual(item.command, undefined);
 			assert.strictEqual(item.getEntry().actionId, 'run-me');
 		});
 	});
@@ -6384,6 +6418,53 @@ suite('Extension Test Suite', () => {
 			]);
 			assert.deepStrictEqual(merged.map(a => a.id), ['only-b']);
 			assert.strictEqual(folderById.get('only-b'), folderB);
+		});
+	});
+
+	suite('findActionSourceConflicts', () => {
+		test('IT-189b: 세 소스의 정의와 실제 최종 승자를 함께 돌려준다', () => {
+			const conflicts = findActionSourceConflicts([
+				{ sourceLabel: 'bundled', actions: [{ id: 'build', title: 'Bundled' }] },
+				{ sourceLabel: 'preset', actions: [{ id: 'build', title: 'Preset' }] },
+				{ sourceLabel: 'workspace', actions: [{ id: 'build', title: 'Workspace' }] },
+			]);
+			assert.strictEqual(conflicts.length, 1);
+			assert.strictEqual(conflicts[0].id, 'build');
+			assert.deepStrictEqual(conflicts[0].definitions.map(definition => definition.sourceLabel), [
+				'bundled', 'preset', 'workspace'
+			]);
+			assert.strictEqual(conflicts[0].winner?.sourceLabel, 'workspace');
+		});
+
+		test('IT-189c: 상위 폴더 충돌로 모든 중첩 정의가 사라지면 거짓 승자를 표시하지 않는다', () => {
+			const bundled: ActionItem[] = [{ id: 'x', title: 'Bundled X' }];
+			const preset: ActionItem[] = [{
+				id: 'container',
+				title: 'Preset Container',
+				type: 'folder',
+				children: [{ id: 'x', title: 'Preset X' }],
+			}];
+			const workspace: ActionItem[] = [{ id: 'container', title: 'Workspace Container' }];
+
+			let merged = mergeActions(preset, bundled, 'keep-existing');
+			merged = mergeActions(workspace, merged, 'keep-existing');
+			assert.strictEqual(findActionById(merged, 'x'), undefined, '실제 병합 트리에는 x가 없어야 한다');
+
+			const xConflict = findActionSourceConflicts([
+				{ sourceLabel: 'bundled', actions: bundled },
+				{ sourceLabel: 'preset', actions: preset },
+				{ sourceLabel: 'workspace', actions: workspace },
+			]).find(conflict => conflict.id === 'x');
+			assert.ok(xConflict, 'x 충돌을 찾지 못했다');
+			assert.strictEqual(xConflict!.winner, undefined,
+				'상위 폴더와 함께 제거된 중첩 정의를 최종 승자로 표시하면 안 된다');
+		});
+
+		test('서로 다른 id는 충돌로 보고하지 않는다', () => {
+			assert.deepStrictEqual(findActionSourceConflicts([
+				{ sourceLabel: 'a', actions: [{ id: 'build', title: 'Build' }] },
+				{ sourceLabel: 'b', actions: [{ id: 'flash', title: 'Flash' }] },
+			]), []);
 		});
 	});
 
