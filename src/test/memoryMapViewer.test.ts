@@ -309,7 +309,13 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.strictEqual(showCount, 0);
 
             await memoryHandler!({ command: 'openSource', targetId: target!.id });
-            assert.strictEqual(openedPath, sourcePath);
+            const comparablePath = (value: string | undefined): string | undefined =>
+                process.platform === 'win32' ? value?.toLowerCase() : value;
+            assert.strictEqual(
+                comparablePath(openedPath),
+                comparablePath(sourcePath),
+                'Windows의 Uri.fsPath 드라이브 문자 정규화와 무관하게 같은 파일을 열어야 한다'
+            );
             assert.strictEqual(editor.selection?.active.line, 9);
             assert.strictEqual(editor.selection?.active.character, 0);
             assert.ok(revealed, '기록된 소스 줄을 화면 안으로 드러내야 한다');
@@ -420,6 +426,10 @@ suite('Memory Map Viewer Test Suite', () => {
         test('findFiles 폴백은 glob을 이스케이프하고 가장 긴 suffix 후보만 남긴다', async () => {
             const calls: { include: string; exclude: string; maxResults: number }[] = [];
             const fileName = 'main[1]*?.c';
+            const matchingUris = [
+                vscode.Uri.file(path.join(tmpDir, 'workspace', 'a', 'project', 'src', fileName)),
+                vscode.Uri.file(path.join(tmpDir, 'workspace', 'b', 'project', 'src', fileName)),
+            ];
             const selected = await findWorkspaceSourceBySuffix(
                 `/old/project/src/${fileName}`,
                 {
@@ -429,10 +439,7 @@ suite('Memory Map Viewer Test Suite', () => {
                         if (include !== '**/project/src/main[[]1[]][*][?].c') {
                             return [];
                         }
-                        return [
-                            vscode.Uri.file(`/workspace/a/project/src/${fileName}`),
-                            vscode.Uri.file(`/workspace/b/project/src/${fileName}`),
-                        ];
+                        return matchingUris;
                     },
                 }
             );
@@ -449,10 +456,7 @@ suite('Memory Map Viewer Test Suite', () => {
                     maxResults: DWARF_SOURCE_SEARCH_MAX_RESULTS,
                 },
             ]);
-            assert.deepStrictEqual(selected, [
-                path.resolve(`/workspace/a/project/src/${fileName}`),
-                path.resolve(`/workspace/b/project/src/${fileName}`),
-            ]);
+            assert.deepStrictEqual(selected, matchingUris.map(uri => uri.fsPath));
 
             let searched = false;
             assert.deepStrictEqual(await findWorkspaceSourceBySuffix(fileName, {
