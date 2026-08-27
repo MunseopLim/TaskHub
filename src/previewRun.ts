@@ -216,6 +216,18 @@ export function simulateTaskResult(task: Task): SimulatedResult {
         case 'writeFile':
         case 'appendFile':
             return { path: placeholder(task.type, task.id, 'path') };
+        case 'browser': {
+            const result: SimulatedResult = {
+                url: placeholder('browser', task.id, 'url'),
+            };
+            // A literal HTTP(S) URL never has the optional local-file result.
+            // Dynamic values and path/file forms may resolve to a local file,
+            // so expose `path` to completion/Doctor as the runtime does.
+            if (typeof task.url !== 'string' || !/^https?:\/\//i.test(task.url.trim())) {
+                result.path = placeholder('browser', task.id, 'path');
+            }
+            return result;
+        }
         default:
             return {};
     }
@@ -1243,6 +1255,22 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 lines.push(`  passTheResultToNextTask: ${task.passTheResultToNextTask ? 'true' : 'false'}`);
                 if (task.isOneShot) { lines.push(`  isOneShot: true`); }
                 interpolated.push(command ?? '', ...args, cwd, ...Object.values(env));
+                break;
+            }
+            case 'browser': {
+                const url = typeof task.url === 'string'
+                    ? interpolatePipelineVariables(task.url, interpolationContext)
+                    : '(missing)';
+                const cwd = task.cwd
+                    ? interpolatePipelineVariables(task.cwd, interpolationContext)
+                    : '(defaults to workspace folder)';
+                lines.push(`  url:     ${url}`);
+                lines.push(`  target:  ${task.target ?? 'integrated'}`);
+                lines.push(`  cwd:     ${cwd}`);
+                if ((task.target ?? 'integrated') === 'integrated') {
+                    lines.push(`  (opens inside VS Code; never falls back to the OS browser)`);
+                }
+                interpolated.push(url, cwd);
                 break;
             }
             case 'inputBox': {

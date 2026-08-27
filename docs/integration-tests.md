@@ -171,6 +171,15 @@
 | IT-178 | 반복 결과 합계 상한 | 각 반복 출력은 개별 상한 이하더라도 누적 결과가 액션 상한을 넘으면 다음 결과를 보관하기 전에 중단 |
 | IT-181, IT-182, IT-183, IT-184, IT-185 | switch 선택 실행 | command case 결과/메타데이터, 불일치 no-op, 이종 태스크 선택, defaultCase·잘못된 branch 거부, 선택된 case에 한정한 조건 skip 전파를 실제 파이프라인에서 검증 |
 
+### browser 태스크
+파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-196 | 생성 HTML 내장 브라우저 연결 | 공백·한글이 있는 `writeFile`의 `${generate.path}`를 percent-encoded file URI로 Integrated Browser 명령에 전달하고, 같은 `${preview.url}`과 사람이 읽는 `${preview.path}`를 후속 태스크가 사용 |
+| IT-197 | `browser` 반복 열기 차단 | `forEach`로 같은 태스크가 여러 탭을 열려는 설정을 첫 탭을 열기 전에 거부 |
+| IT-198 | `switch`의 `browser` case | 선택된 browser case가 내장 브라우저를 열고 URI·로컬 경로와 `matched`·`selected` 메타데이터를 함께 반환 |
+
 ### Last-run 배지
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) (IT-067), [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) (IT-068, IT-068b)
 

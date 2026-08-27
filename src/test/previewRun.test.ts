@@ -31,6 +31,33 @@ function currentBranch(value: string): Record<string, string> {
 }
 
 suite('buildPreviewReport', () => {
+    test('browser의 대상·경로를 보여 주고 로컬 결과 키를 시뮬레이션한다', () => {
+        const local: Task = {
+            id: 'preview', type: 'browser', url: '${generate.path}', target: 'integrated', cwd: 'build',
+        };
+        assert.deepStrictEqual(
+            new Set(Object.keys(simulateTaskResult(local))),
+            new Set(['url', 'path'])
+        );
+        assert.deepStrictEqual(
+            Object.keys(simulateTaskResult({ id: 'site', type: 'browser', url: 'https://example.com' })),
+            ['url']
+        );
+        const report = buildPreviewReport({
+            id: 'a.browser', title: 'Browser', action: {
+                description: 'd',
+                tasks: [
+                    { id: 'generate', type: 'writeFile', path: 'report.html', content: 'ok' },
+                    local,
+                ],
+            },
+        }, baseOptions());
+        assert.match(report, /url:\s+<writeFile:generate:path>/);
+        assert.match(report, /target:\s+integrated/);
+        assert.match(report, /never falls back to the OS browser/);
+        assert.doesNotMatch(report, /unresolved variables/);
+    });
+
     test('switch의 case와 불일치 no-op을 보여 주고 branch 결과 키를 합친다', () => {
         const task: Task = {
             id: 'optional', type: 'switch', on: 'skip',

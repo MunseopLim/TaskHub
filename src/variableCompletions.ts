@@ -382,10 +382,11 @@ export function collectVariableCompletions(
             options: many ? { canSelectMany: true } : undefined,
         };
         // switch의 결과 키는 각 case의 합집합이고, quickPick의 별도 `.args` 결과는
-        // 활성 목록 소스가 args 계약을 선언할 때만 생긴다. 생산자 객체가 완성된 JSON이면
+        // 활성 목록 소스가 args 계약을 선언할 때만 생긴다. browser는 literal HTTP(S)인지에
+        // 따라 선택적 `.path` 키가 갈린다. 생산자 객체가 완성된 JSON이면
         // 실제 정의를 시뮬레이션에 넘기고, 편집 중이면 공통 키만 제안하는 안전한
         // 폴백을 쓴다.
-        if (type === 'switch' || type === 'quickPick') {
+        if (type === 'switch' || type === 'quickPick' || type === 'browser') {
             try {
                 const parsed = JSON.parse(target.text);
                 if (parsed && typeof parsed === 'object') { simulatedTask = parsed; }

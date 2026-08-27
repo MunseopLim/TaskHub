@@ -47,7 +47,7 @@ export interface TaskCondition {
 
 export interface Task {
     id: string;
-    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'pathDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick' | 'envPick' | 'confirm' | 'writeFile' | 'appendFile' | 'switch';
+    type: 'shell' | 'command' | 'fileDialog' | 'folderDialog' | 'pathDialog' | 'unzip' | 'zip' | 'stringManipulation' | 'inputBox' | 'quickPick' | 'envPick' | 'confirm' | 'writeFile' | 'appendFile' | 'browser' | 'switch';
 
     // Properties for 'switch'
     /** 선택할 case 이름. 보통 `${pick}`처럼 앞 태스크의 실행값을 쓴다. */
@@ -67,6 +67,16 @@ export interface Task {
     env?: Record<string, string>;
     cwd?: string;
     revealTerminal?: 'always' | 'silent' | 'never';
+
+    // Properties for 'browser'
+    /**
+     * HTTP(S) URL, file URL, or local file path to open. Supports variable
+     * interpolation. Relative paths resolve against `cwd`, then the action's
+     * workspace folder.
+     */
+    url?: string;
+    /** Open inside VS Code by default, or explicitly use the OS browser. */
+    target?: 'integrated' | 'default';
 
     // Properties for 'fileDialog', 'folderDialog' and 'pathDialog'
     // Corresponds to vscode.OpenDialogOptions - using partial interface for type safety
@@ -311,7 +321,7 @@ export interface Task {
  * 제어 필드는 허용하지 않는다. 런타임과 JSON Schema가 구체 필드를 검증한다.
  */
 export interface SwitchTaskBranch {
-    type: 'shell' | 'command' | 'unzip' | 'zip' | 'stringManipulation' | 'writeFile' | 'appendFile';
+    type: 'shell' | 'command' | 'unzip' | 'zip' | 'stringManipulation' | 'writeFile' | 'appendFile' | 'browser';
     [key: string]: unknown;
 }
 

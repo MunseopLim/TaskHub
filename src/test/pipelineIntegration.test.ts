@@ -5963,4 +5963,106 @@ try {
             assert.strictEqual(fs.existsSync(blocked), false);
         });
     });
+
+    suite('browser 태스크', () => {
+        test('IT-196: 생성 파일 결과를 내장 브라우저에 전달하고 URI·경로 결과를 이어 쓴다', async () => {
+            const htmlPath = path.join(tempWorkspace, 'reports', 'generated report-한글.html');
+            const resultPath = path.join(tempWorkspace, 'browser-result.txt');
+            const calls: Array<{ command: string; args: unknown[] }> = [];
+            const originalExecuteCommand = vscode.commands.executeCommand;
+            const originalGetCommands = vscode.commands.getCommands;
+            (vscode.commands as any).getCommands = async () => ['workbench.action.browser.open'];
+            (vscode.commands as any).executeCommand = async (command: string, ...args: unknown[]) => {
+                if (command === 'workbench.action.browser.open') {
+                    calls.push({ command, args });
+                    return undefined;
+                }
+                return originalExecuteCommand(command, ...args);
+            };
+            try {
+                await run({
+                    description: 'IT-196',
+                    tasks: [
+                        {
+                            id: 'generate', type: 'writeFile', path: htmlPath,
+                            content: '<!doctype html><title>TaskHub browser test</title>',
+                        },
+                        { id: 'preview', type: 'browser', url: '${generate.path}' },
+                        {
+                            id: 'save', type: 'writeFile', path: resultPath,
+                            content: '${preview.url}\n${preview.path}',
+                        },
+                    ],
+                }, 'it196');
+            } finally {
+                (vscode.commands as any).executeCommand = originalExecuteCommand;
+                (vscode.commands as any).getCommands = originalGetCommands;
+            }
+
+            assert.strictEqual(calls.length, 1);
+            assert.strictEqual(calls[0].command, 'workbench.action.browser.open');
+            const openedUrl = String(calls[0].args[0]);
+            assert.match(openedUrl, /\/reports\/generated%20report-%ED%95%9C%EA%B8%80\.html$/);
+            assert.ok(!openedUrl.includes(' '));
+            assert.ok(!openedUrl.includes('한글'));
+            assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), `${openedUrl}\n${htmlPath}`);
+        });
+
+        test('IT-197: browser forEach는 탭을 열기 전에 거부한다', async () => {
+            const htmlPath = path.join(tempWorkspace, 'report.html');
+            fs.writeFileSync(htmlPath, '<title>report</title>');
+            await assert.rejects(
+                () => run({
+                    description: 'IT-197',
+                    tasks: [{
+                        id: 'preview', type: 'browser', url: '${each}',
+                        forEach: [htmlPath, htmlPath],
+                    }],
+                }, 'it197'),
+                /cannot use 'forEach' with type 'browser'/
+            );
+        });
+
+        test('IT-198: switch가 선택한 browser case도 결과와 메타데이터를 돌려준다', async () => {
+            const htmlPath = path.join(tempWorkspace, 'switch-report.html');
+            const resultPath = path.join(tempWorkspace, 'switch-browser-result.txt');
+            fs.writeFileSync(htmlPath, '<title>switch report</title>');
+            const calls: string[] = [];
+            const originalExecuteCommand = vscode.commands.executeCommand;
+            const originalGetCommands = vscode.commands.getCommands;
+            (vscode.commands as any).getCommands = async () => ['workbench.action.browser.open'];
+            (vscode.commands as any).executeCommand = async (command: string, ...args: unknown[]) => {
+                if (command === 'workbench.action.browser.open') {
+                    calls.push(String(args[0]));
+                    return undefined;
+                }
+                return originalExecuteCommand(command, ...args);
+            };
+            try {
+                await run({
+                    description: 'IT-198',
+                    tasks: [
+                        {
+                            id: 'open', type: 'switch', on: 'preview', cases: {
+                                preview: { type: 'browser', url: htmlPath },
+                            },
+                        },
+                        {
+                            id: 'save', type: 'writeFile', path: resultPath,
+                            content: '${open.url}|${open.path}|${open.matched}|${open.selected}',
+                        },
+                    ],
+                }, 'it198');
+            } finally {
+                (vscode.commands as any).executeCommand = originalExecuteCommand;
+                (vscode.commands as any).getCommands = originalGetCommands;
+            }
+            const expectedUrl = vscode.Uri.file(htmlPath).toString();
+            assert.deepStrictEqual(calls, [expectedUrl]);
+            assert.strictEqual(
+                fs.readFileSync(resultPath, 'utf8'),
+                `${expectedUrl}|${htmlPath}|true|preview`
+            );
+        });
+    });
 });

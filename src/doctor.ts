@@ -2823,6 +2823,7 @@ function analyzeActionTasks(
             }
         }
         visitString(task.cwd);
+        visitString(task.url);
         visitString(task.prompt);
         visitString(task.value);
         visitString(task.placeHolder);

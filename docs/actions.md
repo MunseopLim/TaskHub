@@ -11,7 +11,7 @@
 3. [공통 작성 규칙](#3-공통-작성-규칙)
 4. [명령 실행](#4-명령-실행)
 5. [사용자 입력](#5-사용자-입력)
-6. [파일·아카이브·값 변환](#6-파일아카이브값-변환)
+6. [파일·브라우저·아카이브·값 변환](#6-파일브라우저아카이브값-변환)
 7. [조건·분기·반복](#7-조건분기반복)
 8. [출력 캡처와 표시](#8-출력-캡처와-표시)
 9. [변수 참조](#9-변수-참조)
@@ -86,6 +86,7 @@
 | 계속 진행할지 확인 | `confirm` | `message` | 확인 시 `confirmed` |
 | 문자열·경로 변환 | `stringManipulation` | `function`, `input` | `output` |
 | 파일 작성·추가 | `writeFile`, `appendFile` | `path`, `content` | `path` |
+| URL·로컬 파일을 브라우저로 열기 | `browser` | `url`, `target`, `cwd` | `url`, 로컬 파일이면 `path` |
 | ZIP 압축·해제 | `zip`, `unzip` | `source`/`archive`/`destination` | `archivePath`/`outputDir` |
 | 선택값에 따라 작업 변경 | `switch` | `on`, `cases` | `matched`, `selected`, 선택 case 결과 |
 
@@ -385,7 +386,7 @@ JSONL 동적 목록도 같은 계약을 사용합니다.
 Preview, 실행 보고서와 일반 로그에 원문을 남기지 않습니다. 이 값을 `writeFile`, `appendFile`,
 `output.mode: "file"`로 저장하려면 해당 태스크에 `allowSecretContent: true`를 명시해야 합니다.
 
-## 6. 파일·아카이브·값 변환
+## 6. 파일·브라우저·아카이브·값 변환
 
 ### `stringManipulation`
 
@@ -432,6 +433,59 @@ Preview, 실행 보고서와 일반 로그에 원문을 남기지 않습니다. 
 - `mkdirs`: 부모 폴더 자동 생성, 기본 `true`
 - `overwrite`: `writeFile`의 덮어쓰기, 기본 `true`
 - `allowSecretContent`: 민감값 저장을 명시적으로 허용
+
+### `browser`
+
+앞선 태스크가 만든 HTML이나 HTTP(S) 주소를 VS Code 내장 브라우저 또는 OS 기본 브라우저로 엽니다.
+생성한 파일을 바로 확인하려면 `writeFile`의 `${taskId.path}` 결과를 `url`에 연결하는 방식이 가장
+간단합니다.
+
+```json
+{
+  "id": "generate",
+  "type": "writeFile",
+  "path": "build/report.html",
+  "content": "<!doctype html><meta charset=\"utf-8\"><h1>Build report</h1>"
+},
+{
+  "id": "preview",
+  "type": "browser",
+  "url": "${generate.path}",
+  "target": "integrated"
+}
+```
+
+`url`은 다음 형식을 지원합니다.
+
+- `https://example.com/report` 또는 `http://localhost:3000`: WHATWG URL로 검증·정규화해 엽니다.
+- `file:///.../report.html`: 로컬 파일 URL을 엽니다. `file://server/share/...`처럼 네트워크 authority가
+  있는 file URL은 다른 로컬 경로로 오인하지 않도록 거부합니다.
+- `/absolute/path/report.html` 또는 `build/report.html`: 로컬 절대·상대 경로를 엽니다. 상대 경로는
+  `cwd`가 있으면 그 디렉터리, 없으면 액션 워크스페이스를 기준으로 해석합니다.
+- `${generate.path}`처럼 앞선 태스크 결과를 사용할 수 있습니다. 성공 결과의 `${preview.url}`은
+  TaskHub가 검증한 정규화 URL입니다. 로컬 file URI는 경로의 공백·한글 등을 percent-encoding하면서
+  query와 fragment의 구분과 기존 인코딩을 보존합니다. 비-Remote HTTP(S)를 내장 브라우저로 열 때도
+  query의 기존 percent-encoding을 다시 해석하지 않습니다. 로컬 파일을 연 경우에만 사람이 읽을 수 있는
+  절대 경로 `${preview.path}`도 제공합니다. 입력이 `${pick.value}`처럼 URL인지 파일인지 실행 전에는 알
+  수 없는 동적 값이라면 `path` 결과는 보장되지 않습니다.
+
+| 필드 | 설명 |
+| --- | --- |
+| `url` | 열 URL 또는 로컬 경로. 필수이며 변수 참조 지원 |
+| `target` | `integrated`(기본) 또는 `default` |
+| `cwd` | 상대 로컬 경로의 기준 디렉터리. 상대 `cwd` 자체는 액션 워크스페이스 기준이며, 워크스페이스가 없으면 절대 `cwd` 필요 |
+
+`target: "integrated"`는 최신 VS Code의 내장 브라우저를 사용합니다. HTTP(S)는 호환되는 VS Code에서
+Simple Browser로 대체될 수 있지만, 로컬 파일을 내부에서 열 수 없는 VS Code에서는 OS 브라우저로 몰래
+전환하지 않고 액션을 실패시킵니다. 외부 브라우저를 원할 때만 `target: "default"`를 명시합니다. 이 대상은
+VS Code의 `openExternal` URI 경계를 사용하므로 query 값 안의 `%26`처럼 이미 인코딩된 reserved 문자를
+브라우저까지 동일하게 전달해야 한다면 `integrated`를 사용하세요.
+
+Remote SSH·Dev Container·Codespaces에서는 확장 호스트의 로컬 경로나 `file:` URL을 브라우저가 직접
+읽을 수 없으므로 `target`과 관계없이 열기 전에 명시적으로 실패합니다. HTML 디렉터리에서 HTTP 서버를
+실행한 뒤 `http://localhost:<port>/report.html`을 `url`로 넘기세요. `target: "integrated"`이면 TaskHub가
+VS Code의 포트 전달 주소로 변환해 엽니다. `target: "default"`에서는 `openExternal`이 내부에서 전달을
+처리하므로 `${preview.url}`은 정규화된 원본 URL일 수 있습니다.
 
 ### `zip`
 
@@ -508,7 +562,11 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
 
 - 일치하는 case가 없고 `defaultCase`도 없으면 아무 작업 없이 성공
 - 결과의 `matched`는 case 일치 여부, `selected`는 `on`의 해석값
-- case는 `command`, `shell`, `stringManipulation`, `writeFile`, `appendFile`, `zip`, `unzip`만 지원
+- case는 `command`, `shell`, `stringManipulation`, `writeFile`, `appendFile`, `browser`, `zip`, `unzip`만 지원
+- 바깥 `switch`의 `command`, `args`, `cwd`, `env`, `output` 같은 공통 실행 필드는 case가 상속하며,
+  case에 같은 필드를 쓰면 case 값이 우선
+- `id`, `when`, `dependsOn`, `parallel`, `forEach`, `continueOnError`, `timeoutSeconds`와 분기 필드는
+  바깥 `switch`에서만 설정
 - 대화상자는 case 안에 넣지 않고 별도 태스크와 `pathDialog`를 사용
 
 ### `forEach`
@@ -531,7 +589,7 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
 | `${each.number}` | 1부터 시작하는 순번 |
 | `${each.count}` | 전체 개수 |
 
-대화형 태스크, `switch`, `isOneShot` 태스크에는 사용할 수 없습니다. 반복 결과는 `count`, `outputs`,
+대화형 태스크, `browser`, `switch`, `isOneShot` 태스크에는 사용할 수 없습니다. 반복 결과는 `count`, `outputs`,
 `stderrs` 등의 배열·집계 결과를 제공합니다.
 
 ## 8. 출력 캡처와 표시
@@ -570,7 +628,9 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
 ```
 
 이 값은 `${revision.shortSha}`로 참조합니다. `capture`는 객체 하나 또는 배열이며 `regex`, `group`,
-`flags`, `line`, `trim`을 지원합니다.
+`flags`, `line`, `trim`을 지원합니다. `name`은 `output`, `stderr`, `path`, `url`, `value`, `matched` 같은
+내장 결과 키와 겹칠 수 없습니다. URL을 추출할 때는 `url` 대신 `capturedUrl`처럼 별도 이름을
+사용하세요. Doctor는 충돌을 `capture.reserved` 오류로 알려줍니다.
 
 ### 출력 표시·저장
 

@@ -96,7 +96,8 @@ export const RESERVED_CAPTURE_NAMES: ReadonlySet<string> = new Set([
     // 캡처 결과는 `result = { ...result, ...captured }` 로 병합되므로, 이 이름을
     // 허용하면 **stdout 에서 뽑은 값이 진짜 stderr 를 조용히 덮는다** — 그
     // stderr 는 Problems 패널로 가는 진단의 입력이기도 하다.
-    'output', 'stderr', 'outputDir', 'path', 'dir', 'name', 'fileNameOnly', 'fileExt',
+    // browser가 실제로 연 URI를 `url`로 돌려주므로 그 이름도 같은 계약이다.
+    'output', 'stderr', 'outputDir', 'path', 'url', 'dir', 'name', 'fileNameOnly', 'fileExt',
     'value', 'values', 'archivePath', 'confirmed',
     // 다중 선택 다이얼로그(0.6.51·0.6.57), quickPick `value` 매핑(0.7.31)과
     // `args` 매핑(0.7.42)이
@@ -238,6 +239,7 @@ export const SWITCH_BRANCH_TASK_TYPES: ReadonlySet<string> = new Set([
     'stringManipulation',
     'writeFile',
     'appendFile',
+    'browser',
 ]);
 
 /** 바깥 switch가 소유하므로 case가 덮어쓸 수 없는 스케줄링/분기 필드. */
@@ -1054,7 +1056,7 @@ function extractParsedVariableReferences(text: string): ReferenceAlternative[][]
 export const NON_INTERPOLATED_TASK_KEYS: ReadonlySet<string> = new Set([
     // 정규식 / 열거값 / 식별자
     'validatePattern', 'extractPattern',
-    'id', 'type', 'function', 'encoding', 'eol', 'itemsFromCommandFormat',
+    'id', 'type', 'function', 'encoding', 'eol', 'itemsFromCommandFormat', 'target',
     // 런타임이 보간하지 않는 사용자 노출 문자열
     'validateMessage', 'confirmLabel', 'cancelLabel', 'itemsExclude',
     'dependsOn',                                 // 태스크 id 목록 — 참조 문법이 아니다

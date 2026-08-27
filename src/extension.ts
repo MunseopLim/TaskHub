@@ -11,6 +11,7 @@ import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri, openJsonEditorFile, JsonEditorOpenHistory } from './jsonEditor';
 import { coerceToUri, openMarkdownPreview, openHtmlInBrowser } from './previewOpener';
+import { openBrowserTask } from './browserTask';
 import {
     showMemoryMap,
     MemoryMapConfig,
@@ -5334,6 +5335,9 @@ async function executeActionPipelineForRun(
         if (INTERACTIVE_TASK_TYPES.has(task.type)) {
             throw new Error(`Task '${task.id}' cannot use 'forEach' with interactive type '${task.type}'.`);
         }
+        if (task.type === 'browser') {
+            throw new Error(`Task '${task.id}' cannot use 'forEach' with type 'browser'.`);
+        }
         if (task.isOneShot === true) {
             throw new Error(`Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`);
         }
@@ -6933,6 +6937,9 @@ async function executeForEachTask(
     if (INTERACTIVE_TASK_TYPES.has(task.type)) {
         throw new Error(`Task '${task.id}' cannot use 'forEach' with interactive type '${task.type}'.`);
     }
+    if (task.type === 'browser') {
+        throw new Error(`Task '${task.id}' cannot use 'forEach' with type 'browser'.`);
+    }
     if (task.isOneShot === true) {
         throw new Error(`Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`);
     }
@@ -7349,6 +7356,31 @@ async function executeSingleTask(
                 notifySecretFileWrite(task.id, writeDisplayPath ?? SECRET_PLACEHOLDER);
             }
             break;
+        case 'browser': {
+            if (typeof task.url !== 'string' || task.url.length === 0) {
+                throw new Error(t(
+                    `태스크 '${task.id}'의 browser 타입에는 비어 있지 않은 'url' 문자열이 필요합니다.`,
+                    `Task '${task.id}' of type 'browser' requires a non-empty 'url' string.`
+                ));
+            }
+            const url = interpolatePipelineVariables(task.url, interpolationContext);
+            const cwd = typeof task.cwd === 'string'
+                ? interpolatePipelineVariables(task.cwd, interpolationContext)
+                : undefined;
+            const baseDir = cwd
+                ? (path.isAbsolute(cwd)
+                    ? path.resolve(cwd)
+                    : (defaultWorkspace ? path.resolve(defaultWorkspace, cwd) : undefined))
+                : (defaultWorkspace || undefined);
+            throwIfTaskInactive(scope);
+            result = await openBrowserTask({
+                url,
+                target: task.target,
+                baseDir,
+            });
+            throwIfTaskInactive(scope);
+            break;
+        }
         case 'command':
         case 'shell':
             // `command`(argv) 는 **토큰 경계를 보존하며** 보간한다 — 보간값의
@@ -9724,9 +9756,10 @@ function describeImportPlatformValue(value: unknown): string {
         return compactImportReviewText(value);
     }
     if (value && typeof value === 'object' && !Array.isArray(value)) {
-        return Object.entries(value as Record<string, unknown>)
-            .filter(([, branch]) => typeof branch === 'string')
-            .map(([platform, branch]) => `${platform}=${JSON.stringify(compactImportReviewText(branch))}`)
+        const platformValue = value as Record<string, unknown>;
+        return (['windows', 'macos', 'linux'] as const)
+            .filter(platform => typeof platformValue[platform] === 'string')
+            .map(platform => `${platform}=${JSON.stringify(compactImportReviewText(platformValue[platform]))}`)
             .join(' | ');
     }
     return '';
@@ -9734,40 +9767,45 @@ function describeImportPlatformValue(value: unknown): string {
 
 interface ImportReviewPlaceholders {
     missingCommand: string;
+    missingUrl: string;
     missingPath: string;
     missingArchive: string;
     missingSource: string;
     fromInputs: string;
     builtIn: string;
     untitled: string;
+    invalidBranch: string;
 }
 
 function importReviewPlaceholders(lang: 'ko' | 'en'): ImportReviewPlaceholders {
     return lang === 'ko'
         ? {
             missingCommand: '(명령 누락)',
+            missingUrl: '(URL 누락)',
             missingPath: '(경로 누락)',
             missingArchive: '(아카이브 누락)',
             missingSource: '(소스 누락)',
             fromInputs: '(inputs에서 받음)',
             builtIn: '(내장)',
             untitled: '(제목 없음)',
+            invalidBranch: '[잘못된 case]',
         }
         : {
             missingCommand: '(missing command)',
+            missingUrl: '(missing URL)',
             missingPath: '(missing path)',
             missingArchive: '(missing archive)',
             missingSource: '(missing source)',
             fromInputs: '(from inputs)',
             builtIn: '(built-in)',
             untitled: '(untitled)',
+            invalidBranch: '[invalid branch]',
         };
 }
 
-/** Describe commands and direct file/archive side effects for the import trust screen. */
-export function describeImportOperation(
+function describeSingleImportOperation(
     task: any,
-    lang: 'ko' | 'en' = vscode.env.language.startsWith('ko') ? 'ko' : 'en'
+    lang: 'ko' | 'en'
 ): string | undefined {
     const placeholders = importReviewPlaceholders(lang);
     const args = Array.isArray(task?.args)
@@ -9795,6 +9833,11 @@ export function describeImportOperation(
     if (task?.type === 'writeFile' || task?.type === 'appendFile') {
         return `path=${JSON.stringify(compactImportReviewText(task.path ?? placeholders.missingPath))}`;
     }
+    if (task?.type === 'browser') {
+        const url = compactImportReviewText(task.url ?? placeholders.missingUrl);
+        const target = task.target === 'default' ? 'default' : 'integrated';
+        return `url=${JSON.stringify(url)} target=${target}${cwd}`;
+    }
     if (task?.type === 'zip') {
         const source = Array.isArray(task.source) ? compactImportReviewText(JSON.stringify(task.source)) : compactImportReviewText(task.source);
         const hasExternalTool = task.tool !== undefined && task.tool !== null;
@@ -9819,6 +9862,61 @@ export function describeImportOperation(
     return outputFile ? outputFile.trim() : undefined;
 }
 
+/**
+ * Describe every executable/file operation represented by one task.
+ *
+ * A switch branch is first materialized with the same outer-field inheritance
+ * used by the runtime. Each case remains a separate entry so a later branch is
+ * either visible or counted by the trust dialog's explicit list collapse; it is
+ * never silently removed by truncating the joined switch text.
+ */
+function describeImportOperations(task: any, lang: 'ko' | 'en'): string[] {
+    if (task?.type !== 'switch') {
+        const operation = describeSingleImportOperation(task, lang);
+        return operation ? [operation] : [];
+    }
+
+    const operations: string[] = [];
+    const appendBranch = (label: string, branch: unknown) => {
+        let effectiveBranch: unknown;
+        try {
+            effectiveBranch = materializeSwitchBranchTask(task, branch as any);
+        } catch {
+            // Invalid imported branches are rejected by schema validation before
+            // confirmation. Keep this formatter total for defensive callers, mark
+            // the invalid branch, and still expose any raw operation we can read.
+            const operation = describeSingleImportOperation(branch, lang);
+            operations.push(`${label} ${importReviewPlaceholders(lang).invalidBranch}` +
+                (operation ? `: ${operation}` : ''));
+            return;
+        }
+        const operation = describeSingleImportOperation(effectiveBranch, lang);
+        if (operation) {
+            operations.push(`${label}: ${operation}`);
+        }
+    };
+
+    for (const [caseName, branch] of Object.entries(task.cases ?? {})) {
+        const name = JSON.stringify(compactImportReviewText(caseName, 120));
+        const type = compactImportReviewText((branch as any)?.type ?? '?');
+        appendBranch(`case ${name} (${type})`, branch);
+    }
+    if (task.defaultCase) {
+        const type = compactImportReviewText(task.defaultCase.type ?? '?');
+        appendBranch(`default (${type})`, task.defaultCase);
+    }
+    return operations;
+}
+
+/** Describe commands and direct file/archive side effects for the import trust screen. */
+export function describeImportOperation(
+    task: any,
+    lang: 'ko' | 'en' = vscode.env.language.startsWith('ko') ? 'ko' : 'en'
+): string | undefined {
+    const operations = describeImportOperations(task, lang);
+    return operations.length > 0 ? operations.join('\n') : undefined;
+}
+
 export interface ImportTrustReviewSummary {
     actionCount: number;
     taskCount: number;
@@ -9839,19 +9937,27 @@ export function summarizeImportTrustReview(
 
     const walk = (items: ActionItem[], folders: string[]) => {
         for (const item of items) {
-            const title = String(item.title ?? item.id ?? placeholders.untitled);
-            const breadcrumb = [...folders, title].join(' / ');
+            const title = compactImportReviewText(item.title ?? item.id ?? placeholders.untitled, 120);
+            const breadcrumb = compactImportReviewText([...folders, title].join(' / '));
+            const actionId = compactImportReviewText(item.id ?? '?', 120);
             const tasks: any[] = Array.isArray(item.action?.tasks) ? item.action!.tasks : [];
             if (item.action) {
                 actionCount++;
                 taskCount += tasks.length;
-                actionLines.push(`• ${breadcrumb} [${item.id ?? '?'}]`);
+                actionLines.push(`• ${breadcrumb} [${actionId}]`);
                 for (const [index, task] of tasks.entries()) {
-                    const operation = describeImportOperation(task, lang);
-                    if (!operation) { continue; }
-                    const taskId = typeof task?.id === 'string' ? task.id : `#${index + 1}`;
-                    const taskType = typeof task?.type === 'string' ? task.type : '?';
-                    operationLines.push(`• ${item.id ?? '?'} / ${taskId} (${taskType}) — ${operation}`);
+                    const taskId = compactImportReviewText(
+                        typeof task?.id === 'string' ? task.id : `#${index + 1}`,
+                        120
+                    );
+                    const taskType = compactImportReviewText(
+                        typeof task?.type === 'string' ? task.type : '?',
+                        120
+                    );
+                    const owner = compactImportReviewText(`${actionId} / ${taskId} (${taskType})`);
+                    for (const operation of describeImportOperations(task, lang)) {
+                        operationLines.push(`• ${owner} — ${operation}`);
+                    }
                 }
             }
             if (Array.isArray(item.children)) {

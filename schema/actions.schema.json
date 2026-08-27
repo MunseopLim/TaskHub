@@ -71,7 +71,7 @@
         "type": {
           "type": "string",
           "description": "The type of the task to execute.",
-          "enum": ["shell", "command", "fileDialog", "folderDialog", "pathDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "envPick", "confirm", "writeFile", "appendFile", "switch"]
+          "enum": ["shell", "command", "fileDialog", "folderDialog", "pathDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "envPick", "confirm", "writeFile", "appendFile", "browser", "switch"]
         },
         "on": {
           "type": "string",
@@ -126,6 +126,17 @@
           "type": "string",
           "enum": ["always", "silent", "never"],
           "description": "Controls terminal visibility for 'shell' type tasks."
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "For 'browser': HTTP(S) URL, file URL, or local path to open. Supports variable interpolation. Relative paths resolve against 'cwd', then the action workspace."
+        },
+        "target": {
+          "type": "string",
+          "enum": ["integrated", "default"],
+          "default": "integrated",
+          "description": "For 'browser': open inside VS Code ('integrated', default) or in the OS default browser ('default'). Integrated mode never silently falls back to the OS browser."
         },
         "mode": {
           "oneOf": [
@@ -577,12 +588,21 @@
           }
         },
         {
+          "if": {
+            "properties": { "type": { "const": "browser" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["url"]
+          }
+        },
+        {
           "if": { "required": ["forEach"] },
           "then": {
             "properties": {
               "type": {
                 "not": {
-                  "enum": ["inputBox", "quickPick", "envPick", "fileDialog", "folderDialog", "pathDialog", "confirm", "switch"]
+                  "enum": ["inputBox", "quickPick", "envPick", "fileDialog", "folderDialog", "pathDialog", "confirm", "browser", "switch"]
                 }
               },
               "isOneShot": { "not": { "const": true } }
@@ -596,7 +616,7 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["shell", "command", "unzip", "zip", "stringManipulation", "writeFile", "appendFile"],
+          "enum": ["shell", "command", "unzip", "zip", "stringManipulation", "writeFile", "appendFile", "browser"],
           "description": "Non-interactive task type to execute for this branch. Dialogs and nested switches stay as separate outer tasks."
         },
         "command": { "$ref": "#/definitions/Task/properties/command" },
@@ -604,6 +624,8 @@
         "env": { "$ref": "#/definitions/Task/properties/env" },
         "cwd": { "$ref": "#/definitions/Task/properties/cwd" },
         "revealTerminal": { "$ref": "#/definitions/Task/properties/revealTerminal" },
+        "url": { "$ref": "#/definitions/Task/properties/url" },
+        "target": { "$ref": "#/definitions/Task/properties/target" },
         "tool": { "$ref": "#/definitions/Task/properties/tool" },
         "inputs": { "$ref": "#/definitions/Task/properties/inputs" },
         "source": { "$ref": "#/definitions/Task/properties/source" },
@@ -623,6 +645,17 @@
         "isOneShot": { "$ref": "#/definitions/Task/properties/isOneShot" }
       },
       "required": ["type"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "browser" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["url"]
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "Output": {

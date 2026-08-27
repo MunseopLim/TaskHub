@@ -3050,7 +3050,7 @@ suite('Doctor', () => {
 
     test('새 QuickPick·forEach 결과 키도 capture로 덮을 수 없다', () => {
         const v = compileValidator();
-        for (const name of ['labelList', 'args', 'custom', 'outputs', 'stderrs']) {
+        for (const name of ['labelList', 'args', 'custom', 'outputs', 'stderrs', 'url']) {
             const findings = runDoctor([makeInput([{
                 id: `a.reserved.${name}`, title: 'reserved', action: {
                     description: 'd',
@@ -4311,6 +4311,7 @@ suite('actions.schema.json — switch', () => {
             cases: {
                 run: { type: 'command', command: 'node', args: ['x'] },
                 save: { type: 'writeFile', path: 'out.txt', content: 'ok' },
+                preview: { type: 'browser', url: '${report.path}' },
             },
             defaultCase: { type: 'stringManipulation', function: 'trim', input: 'fallback' },
         })), true, JSON.stringify(v.errors));
@@ -4373,6 +4374,40 @@ suite('actions.schema.json — switch', () => {
             },
         }))], compileValidator());
         assert.ok(codes(findings).includes('capture.reserved'), JSON.stringify(findings));
+    });
+});
+
+suite('actions.schema.json — browser', () => {
+    const wrap = (task: any) => [{
+        id: 'a.browser', title: 'browser', action: { description: 'd', tasks: [task] },
+    }];
+
+    test('url을 필수로 하고 target 열거값과 forEach 금지를 검증한다', () => {
+        const v = compileValidator();
+        assert.strictEqual(v(wrap({
+            id: 'preview', type: 'browser', url: '${generate.path}', target: 'integrated', cwd: 'build',
+        })), true, JSON.stringify(v.errors));
+        assert.strictEqual(v(wrap({ id: 'preview', type: 'browser' })), false, 'url 없는 browser가 통과했다');
+        assert.strictEqual(v(wrap({
+            id: 'preview', type: 'browser', url: 'report.html', target: 'external',
+        })), false, '알 수 없는 target이 통과했다');
+        assert.strictEqual(v(wrap({
+            id: 'preview', type: 'browser', url: '${each}', forEach: ['a.html', 'b.html'],
+        })), false, '여러 브라우저 탭을 여는 forEach가 통과했다');
+        assert.strictEqual(v([{
+            id: 'a.switch-browser', title: 'switch browser', action: { description: 'd', tasks: [{
+                id: 'choose', type: 'switch', on: 'preview', cases: {
+                    preview: { type: 'browser' },
+                },
+            }] },
+        }]), false, 'url 없는 browser switch case가 통과했다');
+    });
+
+    test('Doctor가 browser url의 미해결 참조를 찾는다', () => {
+        const findings = runDoctor([makeInput(wrap({
+            id: 'preview', type: 'browser', url: '${missing.path}',
+        }))], compileValidator());
+        assert.ok(codes(findings).includes('variable.unresolved'), JSON.stringify(findings));
     });
 });
 

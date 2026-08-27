@@ -688,6 +688,26 @@ suite('variableCompletions', () => {
         assert.deepStrictEqual(got, expected.map(k => `pick.${k}`));
     });
 
+    test('browser 생산자는 연 URL과 선택적 로컬 경로를 제안한다', () => {
+        const fixture = `[
+          { "id": "a.browser", "title": "browser", "action": { "description": "d", "tasks": [
+            { "id": "preview", "type": "browser", "url": "\${report.path}" },
+            { "id": "use", "type": "command", "command": "echo \${preview.|" }
+          ] } }
+        ]`;
+        assert.deepStrictEqual(names(fixture), ['preview.url', 'preview.path']);
+    });
+
+    test('literal HTTP browser 생산자는 존재하지 않는 로컬 path를 제안하지 않는다', () => {
+        const fixture = `[
+          { "id": "a.browser-http", "title": "browser", "action": { "description": "d", "tasks": [
+            { "id": "preview", "type": "browser", "url": "https://example.com/report" },
+            { "id": "use", "type": "command", "command": "echo \${preview.|" }
+          ] } }
+        ]`;
+        assert.deepStrictEqual(names(fixture), ['preview.url']);
+    });
+
     test('완성된 switch 생산자는 메타데이터와 모든 branch 결과 키를 제안한다', () => {
         const fixture = `[
           { "id": "a.switch", "title": "switch", "action": { "description": "d", "tasks": [

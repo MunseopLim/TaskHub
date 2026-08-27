@@ -761,7 +761,7 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Import Actions"** 실행하거�
 
 1. 가져올 파일을 선택합니다 (`.taskhub` 또는 `.json` 형식).
 2. 파일의 스키마 유효성을 검사합니다. 스키마뿐 아니라 **액션 ID / 태스크 ID 중복**도 정상 로드 경로와 동일하게 검증하여, 가져오기 성공 후 다음 로드가 깨지는 상황을 막습니다.
-3. **실행 가능한 설정 신뢰 확인**: Doctor 진단 유무와 관계없이 파일을 쓰기 전에 항상 모달을 표시합니다. 가져올 액션과 `shell`/`command`의 명령·argv·cwd·env, `quickPick.itemsFromCommand`, `writeFile`/`appendFile` 경로, ZIP 작업과 외부 도구의 cwd·env, file output을 요약합니다. **원본 검토**가 기본 버튼이며 원본을 연 뒤에도 다시 명시적으로 동의해야 합니다. 닫기·취소는 가져오기를 중단합니다.
+3. **실행 가능한 설정 신뢰 확인**: Doctor 진단 유무와 관계없이 파일을 쓰기 전에 항상 모달을 표시합니다. `switch`의 각 case/defaultCase는 바깥 공통 설정과 합친 실제 실행 형태로 각각 표시하며, 가져올 액션의 `shell`/`command` 명령·argv·cwd·env, `quickPick.itemsFromCommand`, `writeFile`/`appendFile` 경로, `browser`의 URL·target·cwd, ZIP 작업과 외부 도구의 cwd·env, file output을 요약합니다. **원본 검토**가 기본 버튼이며 원본을 연 뒤에도 다시 명시적으로 동의해야 합니다. 닫기·취소는 가져오기를 중단합니다.
    - Doctor는 셸 보간, 동적·중첩 인터프리터, 워크스페이스 밖 파일 쓰기와 분석 실패를 **추가 진단**으로 표시합니다. 진단이 없다는 것은 `curl … | sh`처럼 고정된 악성 명령이 안전하다는 판정이 아닙니다.
    - 목록이 접혔거나 명령이 축약됐다면 기본 동작인 원본 검토에서 파일 전체를 확인해야 합니다. 이 절차는 신뢰 결정을 돕는 UI이며 샌드박스가 아닙니다.
    - 처음 파싱한 뒤 원본 파일이 변경되면 가져오기를 취소합니다. 다시 선택해 최신 내용을 검토해야 합니다.
@@ -1050,7 +1050,11 @@ VS Code의 소스 컨트롤·탐색기·에디터 탭에서 마크다운 / HTML 
 
 대소문자는 가리지 않습니다(`README.MD` / `INDEX.HTML` 모두 매칭). 위 외 확장자(`.svg`, `.mmd` 등)는 의도적으로 제외 — VS Code가 이미 자동 렌더하거나(SVG) 외부 익스텐션이 필요한 경우(Mermaid)이기 때문에 단순 어댑터로 끼워넣을 가치가 적습니다.
 
-**Simple Browser 미지원 (의도)**: 초기 설계에서는 `simpleBrowser.show`로 VS Code 내부 webview에 HTML을 띄우는 명령도 함께 제공했으나, Simple Browser는 webview iframe 구조 + CSP 제약 때문에 `file://` 로컬 HTML의 CSS·이미지·스크립트 로딩이 사실상 보장되지 않습니다. "보이긴 하는데 깨진" 결과가 나오는 명령을 메뉴에 두는 것이 더 나쁘다고 판단해 정리했습니다. VS Code 내부에서 HTML을 안전히 보고 싶다면 자체 `WebviewPanel`로 파일을 읽어 렌더하는 별도 기능이 필요하며, 현재 범위에는 포함하지 않습니다.
+HTML **우클릭 메뉴**는 빠르게 외부에서 확인하는 기존 동작을 유지하므로 항상 OS 기본 브라우저를
+사용합니다. 반면 액션이 생성한 HTML이나 HTTP(S) 주소를 VS Code 안에서 열 때는 `browser` 태스크의
+`target: "integrated"`를 사용합니다. 로컬 파일의 내장 브라우저 지원 여부는 VS Code 버전에 따라 다르며,
+지원되지 않을 때 외부 브라우저로 자동 전환하지 않습니다. 필드, 경로 기준, Remote 환경 사용법은
+[`actions.json` 작성 가이드의 `browser` 태스크](actions.md#browser)를 참고하세요.
 
 ### 22.2. 컨텍스트 메뉴 노출 위치
 

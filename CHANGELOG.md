@@ -6,6 +6,36 @@
 보안·데이터 손실 수정과 사용자 영향만 남긴다. 테스트를 적는다면 최종 수치만 기록한다.
 -->
 
+## [0.8.3] - 2026-08-27
+
+### 추가 — 액션 산출물 내장 브라우저 미리보기
+
+- `browser` 태스크로 앞선 태스크가 만든 로컬 HTML, `file:` URI, HTTP(S) 주소를 VS Code 내장
+  브라우저에서 연다. `${generate.path}`처럼 결과를 바로 연결할 수 있고 상대 경로는 `cwd` 또는 액션
+  워크스페이스를 기준으로 해석하며, 성공 결과는 브라우저 API에 전달한 URI와 선택적 로컬 절대 경로를
+  제공한다.
+- 기본값인 `target: "integrated"`는 최신 Integrated Browser를 우선 사용하고 HTTP(S)에 한해 구형
+  Simple Browser와 호환한다. 내부 브라우저를 쓸 수 없을 때 OS 브라우저로 몰래 전환하지 않으며,
+  외부 열기는 `target: "default"`를 명시한 경우에만 수행한다. 내장 브라우저 대상으로 여는 Remote의
+  HTTP(S)는 포트 전달 URI로 변환한다.
+- Schema·Preview Run·Doctor·변수 자동완성·가져오기 신뢰 검토와 switch 분기에 새 타입을 연결하고,
+  여러 탭을 뜻하지 않게 여는 `forEach` 조합은 거부한다. `command` 태스크가 VS Code 내장 명령을
+  실행한다고 잘못 설명하던 예제는 실제 `writeFile → browser` 사용 예제로 교체했다.
+- 가져오기 신뢰 검토는 `switch`의 각 case/defaultCase를 바깥 공통 필드와 합친 런타임 실행 형태로
+  표시한다. case를 독립된 행으로 세어 뒤쪽 명령을 조용히 잘라내지 않고, 접힌 수를 명시한다.
+- Remote 환경의 로컬 경로와 `file:` URL은 열렸다고 잘못 보고하지 않고 HTTP 서버 사용법과 함께
+  명시적으로 거부한다. 로컬 file URI는 결과와 내장 브라우저에서 경로의 공백·한글을 percent-encoding하면서
+  query·fragment의 구분과 기존 인코딩을 보존하고, 비-Remote HTTP(S)의 query 인코딩도 내장 브라우저
+  전달 과정에서 유지한다. 네트워크 authority가 있는 file URL은 다른 로컬 경로로 바꾸지 않고 지원
+  범위를 안내한다.
+
+**호환성**: `url`은 `browser` 태스크의 내장 결과 키로 예약된다. 기존 `output.capture.name: "url"`은
+`capturedUrl` 같은 이름으로 바꾸고 `${task.url}` 참조도 `${task.capturedUrl}`로 변경해야 한다. Doctor는
+이를 `capture.reserved` 오류로 보고한다.
+
+**테스트**: URI·경로 검증, 내장/기본 브라우저 경계, Remote 포트 전달, 실행 결과 연결과 switch·
+forEach·가져오기 신뢰 화면 회귀 검증을 포함해 최종 3252 passing / 3 pending.
+
 ## [0.8.2] - 2026-08-26
 
 ### 추가 — Memory Map 빠른 열기와 수동 Refresh

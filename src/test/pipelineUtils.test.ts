@@ -979,10 +979,12 @@ suite('applyOutputCapture', () => {
     });
 
     test('reserved name throws', () => {
-        assert.throws(
-            () => applyOutputCapture('x', { name: 'output' }),
-            /Capture name 'output' is reserved/
-        );
+        for (const name of ['output', 'url']) {
+            assert.throws(
+                () => applyOutputCapture('x', { name }),
+                new RegExp(`Capture name '${name}' is reserved`)
+            );
+        }
     });
 
     test('duplicate name throws', () => {
