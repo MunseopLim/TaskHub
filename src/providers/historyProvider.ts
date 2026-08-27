@@ -25,7 +25,7 @@ export interface HistoryToolMetadata {
     filePath: string;
     fileName: string;
     memoryMapInputType?: MemoryMapHistoryInputType;
-    memoryMapConfig?: { regions?: HistoryToolMemoryRegion[] };
+    memoryMapConfig?: { regions?: HistoryToolMemoryRegion[]; linkerFilePath?: string };
 }
 
 export interface ToolHistoryEntryOptions {
@@ -34,7 +34,7 @@ export interface ToolHistoryEntryOptions {
     fileName?: string;
     timestamp?: number;
     memoryMapInputType?: MemoryMapHistoryInputType;
-    memoryMapConfig?: { regions?: HistoryToolMemoryRegion[] };
+    memoryMapConfig?: { regions?: HistoryToolMemoryRegion[]; linkerFilePath?: string };
 }
 
 export interface HistoryRunLogReference {

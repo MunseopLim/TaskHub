@@ -96,6 +96,8 @@ import {
 	applyCurrentInputProfileValidation,
 	aggregateForEachResults,
 	parseQuickPickCommandItems,
+	cloneMemoryMapHistoryConfig,
+	loadMemoryMapConfig,
 } from '../extension';
 import { collectVariableCompletions, type VariableCompletionDetail } from '../variableCompletions';
 import {
@@ -126,6 +128,89 @@ import { ActionItem } from '../schema';
 
 suite('Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');
+
+	suite('Memory Map region config validation', () => {
+		let tempDir: string;
+
+		setup(() => {
+			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-mm-regions-'));
+			fs.mkdirSync(path.join(tempDir, '.vscode'), { recursive: true });
+		});
+
+		teardown(() => {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		});
+
+		function writeTypes(regions: unknown): void {
+			fs.writeFileSync(
+				path.join(tempDir, '.vscode', 'taskhub_types.json'),
+				JSON.stringify({ memoryMap: { regions } })
+			);
+		}
+
+		test('loads only a complete array of valid plain region objects', () => {
+			const regions = [
+				{ name: 'FLASH', origin: 0x08000000, size: 512 * 1024 },
+				{ name: 'RAM', origin: 0x20000000, size: 128 * 1024 },
+			];
+			writeTypes(regions);
+
+			assert.deepStrictEqual(loadMemoryMapConfig(tempDir), { regions });
+		});
+
+		test('invalid persisted regions fall back as one unit instead of leaking raw TypeError', () => {
+			const valid = { name: 'FLASH', origin: 0x08000000, size: 1024 };
+			const invalidRegions: unknown[] = [
+				'FLASH',
+				{},
+				[{}],
+				['FLASH'],
+				[null],
+				[[]],
+				[{ ...valid, name: '' }],
+				[{ ...valid, name: '   ' }],
+				[{ ...valid, name: 123 }],
+				[{ ...valid, origin: -1 }],
+				[{ ...valid, origin: 1.5 }],
+				[{ ...valid, origin: '0' }],
+				[{ ...valid, origin: Number.MAX_SAFE_INTEGER + 1 }],
+				[{ ...valid, size: -1 }],
+				[{ ...valid, size: 0 }],
+				[{ ...valid, size: 1.5 }],
+				[{ ...valid, size: '1024' }],
+				[{ ...valid, size: Number.MAX_SAFE_INTEGER + 1 }],
+				[valid, { ...valid, name: '' }],
+			];
+
+			for (const regions of invalidRegions) {
+				writeTypes(regions);
+				assert.doesNotThrow(() => loadMemoryMapConfig(tempDir));
+				assert.strictEqual(loadMemoryMapConfig(tempDir), undefined, JSON.stringify(regions));
+			}
+		});
+
+		test('History clone reuses validation and rejects class instances with valid-looking fields', () => {
+			class RegionLike {
+				name = 'FLASH';
+				origin = 0x08000000;
+				size = 1024;
+			}
+
+			for (const regions of [[{}], ['FLASH'], 'FLASH', [new RegionLike()]]) {
+				assert.doesNotThrow(() => cloneMemoryMapHistoryConfig({ regions } as any));
+				assert.strictEqual(cloneMemoryMapHistoryConfig({ regions } as any), undefined);
+			}
+		});
+
+		test('History clone keeps a valid linker path when regions are damaged', () => {
+			assert.deepStrictEqual(cloneMemoryMapHistoryConfig({
+				regions: 'FLASH',
+				linkerFilePath: '/workspace/linker/memory.ld',
+			} as any), {
+				linkerFilePath: '/workspace/linker/memory.ld',
+			});
+		});
+	});
 
 	suite('interpolatePipelineVariables', () => {
 		/**
@@ -4800,7 +4885,8 @@ suite('Extension Test Suite', () => {
 				timestamp: 1234,
 				memoryMapInputType: 'elf',
 				memoryMapConfig: {
-					regions: [{ name: 'FLASH', origin: 0x08000000, size: 1024 }]
+					regions: [{ name: 'FLASH', origin: 0x08000000, size: 1024 }],
+					linkerFilePath: '/workspace/linker/memory.ld'
 				}
 			});
 			assert.strictEqual(entry.entryType, 'tool');
@@ -4812,6 +4898,7 @@ suite('Extension Test Suite', () => {
 			assert.deepStrictEqual(entry.tool.memoryMapConfig?.regions, [
 				{ name: 'FLASH', origin: 0x08000000, size: 1024 }
 			]);
+			assert.strictEqual(entry.tool.memoryMapConfig?.linkerFilePath, '/workspace/linker/memory.ld');
 		});
 
 		test('tool history rows open the tool instead of rerunning an action', async () => {

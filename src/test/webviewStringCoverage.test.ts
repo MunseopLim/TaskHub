@@ -274,6 +274,8 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
                         html.includes('toggle-func-col'),
                         'Function 열 토글이 렌더되지 않았다 — 이 테스트가 열려던 분기에 도달하지 못했다'
                     );
+                    assert.ok(html.includes('id="btnRefresh"'),
+                        'ARM Linker Listing 패널에서도 입력 파일을 다시 읽는 Refresh를 제공해야 한다');
                     assertNoHardcodedStrings(html, buildMemoryMapStrings(), 'Memory Map (listing)', lang);
                 } finally {
                     panelRegistry.clear();
@@ -370,5 +372,18 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
         assert.strictEqual(ko.colFunction, '함수');
         assert.strictEqual(en.colFunction, 'Function');
     });
-});
 
+    test('한국어 Refresh 실패 시각 문구에 조사와 종결 문맥이 유지된다', () => {
+        const ko = withLanguage('ko', () => buildMemoryMapStrings());
+        const en = withLanguage('en', () => buildMemoryMapStrings());
+        assert.strictEqual(
+            ko.refreshFailedAt,
+            '{time}에 새로 고침 실패 — {reason} 이전 결과를 표시 중입니다.'
+        );
+        assert.strictEqual(
+            ko.refreshStaleCompact,
+            '{time}에 새로 고침 실패 · 이전 분석 결과 표시 중'
+        );
+        assert.strictEqual(en.refreshFailedAt, 'Refresh failed at {time} — {reason} Showing previous results.');
+    });
+});

@@ -56,6 +56,7 @@
   "cmd.openJsonEditor": "TaskHub: JSON Editor 열기",
   "cmd.openJsonEditorFromUri": "JSON Editor로 열기",
   "cmd.showMemoryMap": "Memory Map 보기",
+  "cmd.openMemoryMapFromUri": "Memory Map으로 열기",
   "cmd.memoryMapGoToSymbol": "Memory Map: 심볼로 이동",
   "cmd.revealSymbolInMemoryMap": "Memory Map: 커서의 심볼 보기",
   "cmd.exportActions": "TaskHub: 액션 내보내기",

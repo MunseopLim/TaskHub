@@ -57,6 +57,13 @@ suite('Memory Map Viewer Test Suite', () => {
         return filePath;
     }
 
+    function currentMemoryMapRenderId(filePath: string): string {
+        const html = panelRegistry.getHtml(filePath) ?? '';
+        const match = html.match(/const RENDER_ID = ("[^"]+");/);
+        assert.ok(match, 'Memory Map render ID를 찾지 못했다');
+        return JSON.parse(match![1]);
+    }
+
     test('should open multiple panels for different file paths', () => {
         const file1 = createTempElf('project-a', 'firmware.axf');
         const file2 = createTempElf('project-b', 'firmware.axf');
@@ -195,7 +202,8 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.ok(main && main.fileRange.kind === 'file');
             assert.ok(bss && bss.fileRange.kind === 'unavailable');
 
-            await memoryHandler!({ command: 'openHex', targetId: main!.id });
+            const renderId = currentMemoryMapRenderId(filePath);
+            await memoryHandler!({ command: 'openHex', targetId: main!.id, renderId });
             assert.ok(hexPanelRegistry.has(), 'Hex Viewer 패널이 열리지 않았다');
             assert.ok(hexHandler, 'Hex Viewer ready handler가 설치되지 않았다');
             hexHandler!({ command: 'ready' });
@@ -208,7 +216,7 @@ suite('Memory Map Viewer Test Suite', () => {
             });
             assert.strictEqual(hexPosted[0].data.length, buffer.length, 'ELF 컨테이너 전체를 raw binary로 열어야 한다');
 
-            await memoryHandler!({ command: 'openHex', targetId: bss!.id });
+            await memoryHandler!({ command: 'openHex', targetId: bss!.id, renderId });
             assert.ok(warnings.some(message => /BSS|NOBITS/.test(message)), 'NOBITS는 파일 바이트가 없다고 안내해야 한다');
         } finally {
             (vscode.window as any).createWebviewPanel = originalCreate;
@@ -310,11 +318,12 @@ suite('Memory Map Viewer Test Suite', () => {
 
             const target = targets.find(candidate => candidate.label === 'SystemInit');
             assert.ok(target);
-            await memoryHandler!({ command: 'openSource', targetId: 'source:forged:target' });
+            const renderId = currentMemoryMapRenderId(filePath);
+            await memoryHandler!({ command: 'openSource', targetId: 'source:forged:target', renderId });
             assert.strictEqual(openedPath, undefined, 'host가 만들지 않은 target ID는 아무 파일도 열면 안 된다');
             assert.strictEqual(showCount, 0);
 
-            await memoryHandler!({ command: 'openSource', targetId: target!.id });
+            await memoryHandler!({ command: 'openSource', targetId: target!.id, renderId });
             const comparablePath = (value: string | undefined): string | undefined =>
                 process.platform === 'win32' ? value?.toLowerCase() : value;
             assert.strictEqual(
@@ -328,13 +337,13 @@ suite('Memory Map Viewer Test Suite', () => {
 
             visibleLineCount = 5;
             const staleTarget = targets.find(candidate => candidate.label === 'HAL_GPIO_Init');
-            await memoryHandler!({ command: 'openSource', targetId: staleTarget!.id });
+            await memoryHandler!({ command: 'openSource', targetId: staleTarget!.id, renderId });
             assert.strictEqual(showCount, 1, '범위를 벗어난 오래된 줄이면 에디터를 새로 열면 안 된다');
             assert.ok(warnings.some(message => /20|line 20/.test(message)), '현재 소스 범위를 벗어난 줄을 안내해야 한다');
 
             fs.appendFileSync(filePath, Buffer.from([0]));
             const mainTarget = targets.find(candidate => candidate.label === 'main');
-            await memoryHandler!({ command: 'openSource', targetId: mainTarget!.id });
+            await memoryHandler!({ command: 'openSource', targetId: mainTarget!.id, renderId });
             assert.strictEqual(showCount, 1, 'ELF가 교체된 뒤에는 오래된 소스 target을 열면 안 된다');
             assert.ok(warnings.some(message => /changed|변경/.test(message)), 'ELF를 다시 열어야 한다고 안내해야 한다');
         } finally {
@@ -446,7 +455,11 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.ok(!(panelRegistry.getHtml(filePath) ?? '').includes(sourcePath));
 
             const target = targets.find(candidate => candidate.label === 'SystemInit');
-            await memoryHandler!({ command: 'openSource', targetId: target!.id });
+            await memoryHandler!({
+                command: 'openSource',
+                targetId: target!.id,
+                renderId: currentMemoryMapRenderId(filePath),
+            });
             const comparablePath = (value: string | undefined): string | undefined =>
                 process.platform === 'win32' ? value?.toLowerCase() : value;
             assert.strictEqual(comparablePath(openedPath), comparablePath(sourcePath));
@@ -794,7 +807,7 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
         webviewHtml = panelRegistry.getHtml(filePath) ?? '';
 
         // 주입된 핸들러 본문을 그대로 꺼내 실행한다.
-        const marker = "document.getElementById('btnSaveHtml').addEventListener('click', function() {";
+        const marker = "document.getElementById('btnSaveHtml')?.addEventListener('click', function() {";
         const start = webviewHtml.indexOf(marker);
         assert.ok(start >= 0, 'btnSaveHtml 핸들러를 찾지 못했다 — 마커가 바뀌었는지 확인이 필요하다');
         const bodyStart = start + marker.length;
@@ -868,8 +881,8 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
         };
         const fakeVscode = { postMessage: (m: any) => { posted.push(m); } };
 
-        const fn = new Function('document', 'vscode', 'SAVE_HTML_LIMIT', handlerSource);
-        fn(fakeDocument, fakeVscode, options.limit ?? MEMORY_MAP_MAX_SAVE_HTML_CHARS);
+        const fn = new Function('document', 'vscode', 'SAVE_HTML_LIMIT', 'RENDER_ID', handlerSource);
+        fn(fakeDocument, fakeVscode, options.limit ?? MEMORY_MAP_MAX_SAVE_HTML_CHARS, 'test-render');
         return { posted, serialized };
     }
 
@@ -882,11 +895,11 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
 
     test('리포트 본문을 웹뷰에 중복 삽입하거나 copy IPC payload로 보내지 않는다', () => {
         assert.ok(
-            webviewHtml.includes("vscode.postMessage({ command: 'copyReport', kind: 'summary' });"),
+            webviewHtml.includes("vscode.postMessage({ command: 'copyReport', kind: 'summary', renderId: RENDER_ID });"),
             '요약 복사 버튼은 본문 대신 종류만 보내야 한다'
         );
         assert.ok(
-            webviewHtml.includes("vscode.postMessage({ command: 'copyReport', kind: 'full' });"),
+            webviewHtml.includes("vscode.postMessage({ command: 'copyReport', kind: 'full', renderId: RENDER_ID });"),
             '전체 덤프 버튼은 본문 대신 종류만 보내야 한다'
         );
         assert.ok(
@@ -935,7 +948,7 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
         };
         const { posted, serialized } = runHandler(2, 16, { scriptNode, limit: 1024 });
 
-        assert.deepStrictEqual(posted, [{ command: 'saveHtmlTooLarge' }]);
+        assert.deepStrictEqual(posted, [{ command: 'saveHtmlTooLarge', renderId: 'test-render' }]);
         assert.strictEqual(
             serialized,
             false,
@@ -953,7 +966,7 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
             limit: 300,
         });
 
-        assert.deepStrictEqual(posted, [{ command: 'saveHtmlTooLarge' }]);
+        assert.deepStrictEqual(posted, [{ command: 'saveHtmlTooLarge', renderId: 'test-render' }]);
         assert.strictEqual(serialized, false, 'NBSP 확장을 과소계산해 전체 HTML을 직렬화했다');
     });
 
@@ -979,8 +992,13 @@ suite('Memory Map Save HTML 상한 (직렬화 이전)', () => {
         const body = element('body', rows);
         const root = element('html', [element('head'), body]);
         const fakeDocument = { documentElement: root };
-        const fn = new Function('document', 'vscode', 'SAVE_HTML_LIMIT', handlerSource);
-        fn(fakeDocument, { postMessage: (m: any) => posted.push(m) }, MEMORY_MAP_MAX_SAVE_HTML_CHARS);
+        const fn = new Function('document', 'vscode', 'SAVE_HTML_LIMIT', 'RENDER_ID', handlerSource);
+        fn(
+            fakeDocument,
+            { postMessage: (m: any) => posted.push(m) },
+            MEMORY_MAP_MAX_SAVE_HTML_CHARS,
+            'test-render'
+        );
 
         assert.strictEqual(posted[0].command, 'saveHtmlTooLarge');
         assert.ok(touched < 5000, `행 ${touched}개를 전부 훑었다 — 조기 종료가 없다`);

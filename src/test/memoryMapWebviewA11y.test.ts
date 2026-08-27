@@ -24,6 +24,27 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
     const strings = buildMemoryMapStrings();
     let filePath: string;
     let html: string;
+    let noRegionFilePath: string;
+    let noRegionHtml: string;
+
+    function generatedCssRules(): Array<{ selectors: string[]; declarations: string }> {
+        const css = Array.from(html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g))
+            .map(match => match[1])
+            .join('\n')
+            .replace(/\/\*[\s\S]*?\*\//g, '');
+        return Array.from(css.matchAll(/([^{}]+)\{([^{}]*)\}/g)).map(match => ({
+            selectors: match[1].split(',').map(selector => selector.trim()),
+            declarations: match[2],
+        }));
+    }
+
+    function generatedTextById(id: string): string {
+        const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const element = html.match(new RegExp(
+            `<([A-Za-z][A-Za-z0-9-]*)\\b[^>]*\\bid="${escapedId}"[^>]*>([\\s\\S]*?)<\\/\\1>`
+        ));
+        return (element?.[2] ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    }
 
     suiteSetup(() => {
         panelRegistry.clear();
@@ -36,11 +57,20 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
         assert.ok(openMemoryMapPanel(ctx, filePath, config), '패널이 열려야 HTML을 검사할 수 있다');
         html = panelRegistry.getHtml(filePath) ?? '';
         assert.ok(html.length > 0, '웹뷰 HTML이 비어 있다');
+
+        // 빠른 열기는 linker picker를 건너뛰므로, PT_LOAD도 설정도
+        // 없는 ELF에서는 패널 안에 실제 복구 경로가 있어야 한다.
+        noRegionFilePath = path.join(os.tmpdir(), `taskhub-mm-a11y-no-region-${process.pid}.axf`);
+        fs.writeFileSync(noRegionFilePath, buildMinimalElf32());
+        assert.ok(openMemoryMapPanel(ctx, noRegionFilePath), '영역 없는 패널도 열려야 한다');
+        noRegionHtml = panelRegistry.getHtml(noRegionFilePath) ?? '';
+        assert.ok(noRegionHtml.includes('class="no-regions"'), '영역 없음 안내 분기에 도달하지 못했다');
     });
 
     suiteTeardown(() => {
         panelRegistry.clear();
         try { fs.unlinkSync(filePath); } catch { /* best effort */ }
+        try { fs.unlinkSync(noRegionFilePath); } catch { /* best effort */ }
     });
 
     /**
@@ -85,6 +115,7 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
         test('UI 문자열은 번들을 쓴다', () => {
             assert.ok(html.includes(strings.copyReport), 'Copy Report 버튼');
             assert.ok(html.includes(strings.saveHtml), 'Save HTML 버튼');
+            assert.ok(html.includes(strings.refresh), 'Refresh 버튼');
             assert.ok(html.includes(strings.allSections), 'All Sections 제목');
             assert.ok(html.includes(strings.entryPoint), 'Entry Point 라벨');
         });
@@ -136,6 +167,192 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
             const count = html.match(/<span id="searchCount"[^>]*>/);
             assert.ok(count, 'searchCount 요소가 없다');
             assert.ok(count![0].includes('aria-live="polite"'), count![0]);
+        });
+
+        test('Refresh 버튼과 실패 상태에 접근 가능한 이름과 live region이 있다', () => {
+            const button = html.match(/<button[^>]*id="btnRefresh"[^>]*>/);
+            assert.ok(button, 'btnRefresh를 찾지 못했다');
+            assert.ok(/aria-label="[^"]+"/.test(button![0]), button![0]);
+            assert.ok(/title="[^"]+"/.test(button![0]), button![0]);
+
+            const status = html.match(/<div[^>]*id="refreshStatus"[^>]*>/);
+            assert.ok(status, 'refreshStatus를 찾지 못했다');
+            assert.ok(status![0].includes('role="status"'), status![0]);
+            assert.ok(status![0].includes('aria-live="polite"'), status![0]);
+            assert.ok(status![0].includes('aria-atomic="true"'), status![0]);
+        });
+
+        test('Refresh 진행과 실패는 서로 다른 상태 클래스를 쓴다', () => {
+            const busyRules = Array.from(html.matchAll(
+                /\.refresh-status\.([\w-]*(?:busy|refreshing)[\w-]*)[^\{]*\{([^}]*)\}/gi
+            ));
+            const errorRules = Array.from(html.matchAll(
+                /\.refresh-status\.([\w-]*(?:error|failed)[\w-]*)[^\{]*\{([^}]*)\}/gi
+            ));
+            const busyRule = busyRules.find(rule => /(?:border|background|color)\s*:/.test(rule[2]));
+            const errorRule = errorRules.find(rule => /inputValidation-error/i.test(rule[2]));
+            assert.ok(busyRule, 'Refresh 진행 상태 클래스 CSS가 없다');
+            assert.ok(errorRule, 'Refresh 실패 상태 클래스 CSS가 없다');
+            assert.notStrictEqual(busyRule![1], errorRule![1], '진행과 실패가 같은 클래스를 쓰면 안 된다');
+            assert.ok(!/inputValidation-error/i.test(busyRule![2]),
+                `진행 상태가 오류 색으로 표시된다: ${busyRule![0]}`);
+            assert.ok(/inputValidation-error/i.test(errorRule![2]),
+                `실패 상태에 오류 테마 색이 없다: ${errorRule![0]}`);
+            for (const className of [busyRule![1], errorRule![1]]) {
+                const occurrences = html.split(className).length - 1;
+                const stateName = className.replace(/^is-/, '');
+                const dynamicStateClass = html.includes("' is-' + kind")
+                    && new RegExp(`setRefreshFeedback\\(\\s*['\"]${stateName}(?:\\s|['\"])`).test(html);
+                assert.ok(occurrences >= 2 || dynamicStateClass,
+                    `${className}이 CSS에만 있고 스크립트 상태 전환에서 쓰이지 않는다`);
+            }
+        });
+
+        test('Refresh 버튼은 처리 중 재실행을 막고 disabled 상태를 보여 준다', () => {
+            const disabledRule = html.match(/button:disabled(?:\s*,[^\{]+)?\s*\{([^}]*)\}/);
+            const nativeDisabled = disabledRule !== null
+                && /(cursor|opacity|filter|background|color)\s*:/.test(disabledRule[1]);
+            const ariaDisabledGuard = /aria-disabled/.test(html)
+                && /(?:getAttribute\(\s*['"]aria-disabled['"]\s*\)|matches\([^)]*aria-disabled)[\s\S]{0,180}?(?:return|preventDefault)/.test(html);
+            assert.ok(nativeDisabled || ariaDisabledGuard,
+                '모든 button에 적용되는 :disabled 표시나 aria-disabled 재실행 가드가 없다');
+            assert.ok(/refreshButton\.disabled\s*=\s*true/.test(html) || /aria-disabled[\s\S]{0,100}true/.test(html),
+                'Refresh 요청 시 버튼을 disabled 상태로 만들지 않는다');
+        });
+
+        test('공유 button 규칙이 최소 24×24 터치 타깃을 보장한다', () => {
+            const buttonRule = html.match(/(?:^|\n)\s*button\s*\{([^}]*)\}/);
+            assert.ok(buttonRule, '공유 button CSS를 찾지 못했다');
+            assert.match(buttonRule![1], /min-width\s*:\s*24px/);
+            assert.match(buttonRule![1], /min-height\s*:\s*24px/);
+        });
+
+        test('Refresh status가 busy 소유자이며 live region에서 제거되지 않는다', () => {
+            const status = html.match(/<div[^>]*id="refreshStatus"[^>]*>/);
+            assert.ok(status, 'refreshStatus를 찾지 못했다');
+            assert.ok(status![0].includes('aria-busy="false"'), status![0]);
+            assert.ok(!/\shidden(?:\s|=|>)/.test(status![0]),
+                `hidden은 live region을 접근성 트리에서 제거한다: ${status![0]}`);
+            assert.ok(!/refreshStatus\.hidden\s*=/.test(html),
+                'Refresh 상태 전환이 live region을 hidden으로 제거한다');
+            const statusRules = Array.from(html.matchAll(/\.refresh-status[^\{]*\{([^}]*)\}/g)).map(match => match[1]);
+            assert.ok(!statusRules.some(rule => /display\s*:\s*none/.test(rule)),
+                'refresh-status CSS가 display:none으로 live region을 제거한다');
+
+            const busyUpdates = Array.from(html.matchAll(
+                /refreshStatus\.setAttribute\(\s*['"]aria-busy['"]\s*,\s*([^)]+)\)/g
+            )).map(match => match[1]).join(' ');
+            assert.ok(busyUpdates.includes("'true'") && busyUpdates.includes("'false'"),
+                `refreshStatus aria-busy가 true/false로 갱신되지 않는다: ${busyUpdates}`);
+        });
+
+        test('Refresh 실패 색은 테마 token이 없을 때 기본 foreground로 폴백한다', () => {
+            assert.ok(
+                /color\s*:\s*var\(\s*--vscode-inputValidation-errorForeground\s*,\s*var\(\s*--fg\s*\)\s*\)/.test(html),
+                'inputValidation.errorForeground에 --fg 폴백이 없다'
+            );
+        });
+
+        test('Refresh는 title에만 의존하지 않는 접근 가능한 설명을 갖는다', () => {
+            const button = html.match(/<button[^>]*id="btnRefresh"[^>]*>/);
+            assert.ok(button, 'btnRefresh를 찾지 못했다');
+            const describedBy = button![0].match(/aria-describedby="([^"]+)"/);
+            assert.ok(describedBy, `Refresh 버튼에 aria-describedby가 없다: ${button![0]}`);
+
+            const descriptionIds = describedBy![1].split(/\s+/).filter(Boolean);
+            const descriptions = descriptionIds.map(generatedTextById).join(' ').trim();
+            assert.ok(descriptions.length > 0, `aria-describedby 대상이 비어 있다: ${describedBy![1]}`);
+            assert.ok(/(?:현재\s*입력|입력\s*파일|current\s+input)/i.test(descriptions)
+                && /(?:다시\s*읽|reload|re-read)/i.test(descriptions),
+                `무엇을 다시 읽는 동작인지 설명하지 않는다: ${descriptions}`);
+            assert.ok(/(?:링커|스캐터|linker|scatter)/i.test(descriptions)
+                && /(?:포함|include)/i.test(descriptions),
+                `AXF/ELF Refresh에 linker/scatter 파일이 포함됨을 설명하지 않는다: ${descriptions}`);
+            assert.ok(/(?:자동[\s\S]{0,20}(?:하지|않|없|안\s*함)|not[\s\S]{0,20}(?:watch|monitor))/i.test(descriptions),
+                `파일 변경을 자동 감시하지 않음을 설명하지 않는다: ${descriptions}`);
+        });
+
+        test('Refresh 실패 배너가 좁은 폭에서 닫기 버튼을 밀어내지 않는다', () => {
+            const statusRules = generatedCssRules()
+                .filter(rule => rule.selectors.includes('.refresh-status'))
+                .map(rule => rule.declarations)
+                .join('\n');
+            assert.match(statusRules, /min-width\s*:\s*0(?:px)?\s*(?:;|$)/,
+                'flex item의 기본 min-width:auto가 긴 실패 사유의 축소를 막는다');
+            assert.match(statusRules, /overflow-wrap\s*:\s*anywhere\s*(?:;|$)/,
+                '긴 파일명/단일 토큰을 줄바꿈하지 못해 닫기 버튼이 viewport 밖으로 밀린다');
+
+            const dismissRules = generatedCssRules()
+                .filter(rule => rule.selectors.includes('.refresh-dismiss'))
+                .map(rule => rule.declarations)
+                .join('\n');
+            assert.ok(/flex-shrink\s*:\s*0\s*(?:;|$)/.test(dismissRules)
+                || /flex\s*:\s*0\s+0(?:\s+[^;]+)?\s*(?:;|$)/.test(dismissRules),
+                `실패 세부 정보 버튼의 flex 축소 방지가 없다: ${dismissRules}`);
+        });
+
+        test('포커스 가능한 aria-disabled Refresh 라벨은 group opacity로 흐려지지 않는다', () => {
+            const ariaDisabledRules = generatedCssRules().filter(rule => rule.selectors.some(selector =>
+                /(?:^|[\s>+~])(?:button)?\[aria-disabled=(?:["']true["']|true)\](?![^\[]*:)/.test(selector)
+            ));
+            assert.ok(ariaDisabledRules.length > 0, 'aria-disabled 버튼의 CSS 규칙을 찾지 못했다');
+
+            const computed = new Map<string, string>();
+            for (const rule of ariaDisabledRules) {
+                for (const declaration of rule.declarations.split(';')) {
+                    const separator = declaration.indexOf(':');
+                    if (separator < 0) { continue; }
+                    const property = declaration.slice(0, separator).trim().toLowerCase();
+                    const value = declaration.slice(separator + 1).trim();
+                    if (property) { computed.set(property, value); }
+                }
+            }
+            const opacity = computed.get('opacity');
+            const opacityValue = opacity === undefined ? 1 : Number(opacity);
+            assert.ok(Number.isFinite(opacityValue) && opacityValue >= 1,
+                `aria-disabled Refresh가 group opacity ${opacity ?? '(없음)'}에 의존한다`);
+
+            const hasExplicitColorPair = computed.has('color')
+                && (computed.has('background') || computed.has('background-color'));
+            const hasExplicitOpaqueStyle = opacity !== undefined && Number(opacity) >= 1;
+            assert.ok(hasExplicitOpaqueStyle || hasExplicitColorPair,
+                `aria-disabled Refresh에 opacity:1 또는 명시적 foreground/background 쌍이 없다: ${JSON.stringify(Object.fromEntries(computed))}`);
+        });
+
+        test('영역이 없을 때 linker 선택 흐름으로 가는 복구 action이 있다', () => {
+            const block = noRegionHtml.match(/<div class="no-regions"[^>]*>([\s\S]*?)<\/div>/);
+            assert.ok(block, 'no-regions 안내를 찾지 못했다');
+            const interactive = block![1].match(/<(button|a)\b([^>]*)>([\s\S]*?)<\/\1>/);
+            assert.ok(interactive, '안내 안에 실행 가능한 복구 컨트롤이 없다');
+            const actionName = interactive![2].match(/data-action="([^"]+)"/)?.[1];
+            assert.ok(actionName, `복구 컨트롤에 allowlist할 data-action이 없다: ${interactive![0]}`);
+            assert.ok(/aria-label="[^"]+"/.test(interactive![2]) || interactive![3].replace(/<[^>]+>/g, '').trim().length > 0,
+                `복구 컨트롤의 접근 가능한 이름이 없다: ${interactive![0]}`);
+
+            const singleQuotedCase = `case '${actionName}'`;
+            const doubleQuotedCase = `case "${actionName}"`;
+            const caseOffset = Math.max(noRegionHtml.indexOf(singleQuotedCase), noRegionHtml.indexOf(doubleQuotedCase));
+            assert.ok(caseOffset >= 0, `${actionName}을 처리하는 스크립트 분기가 없다`);
+            assert.ok(/postMessage/.test(noRegionHtml.slice(caseOffset, caseOffset + 500)),
+                `${actionName} 분기가 extension host에 복구 요청을 보내지 않는다`);
+            assert.ok(interactive![3].includes(strings.configureMemoryMap),
+                `복구 동작 자체가 버튼 라벨이어야 한다: ${interactive![0]}`);
+            assert.ok(!/TaskHub:\s*(?:Memory Map 보기|Show Memory Map)/.test(interactive![3]),
+                `전체 마법사 명령명을 동작 라벨로 쓰면 안 된다: ${interactive![0]}`);
+        });
+
+        test('실패 세부 정보 버튼은 접힌 뒤에도 disclosure로 남는다', () => {
+            const button = html.match(/<button[^>]*id="refreshDismiss"[^>]*>/);
+            assert.ok(button, 'Refresh failure disclosure를 찾지 못했다');
+            assert.ok(button![0].includes('aria-controls="refreshStatus"'), button![0]);
+            assert.ok(button![0].includes('aria-expanded="true"'), button![0]);
+            assert.ok(html.includes('S.showRefreshDetails'), '접힌 실패를 다시 펼칠 접근 가능한 이름이 없다');
+        });
+
+        test('좁은 폭에서 header 컨트롤이 다음 줄로 wrap된다', () => {
+            const headerRules = Array.from(html.matchAll(/\.header-row\s*\{([^}]*)\}/g)).map(match => match[1]);
+            assert.ok(headerRules.some(rule => /flex-wrap\s*:\s*wrap/.test(rule)),
+                'header-row에 flex-wrap: wrap이 없어 좁은 패널에서 버튼이 넘친다');
         });
 
         test('아이콘 전용 버튼에 aria-label이 있다', () => {

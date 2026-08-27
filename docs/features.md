@@ -778,16 +778,40 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Import Actions"** 실행하거�
 
 ## 19. Memory Map 시각화
 
-ARM `.axf`/`.elf` 바이너리 또는 ARM Linker Listing을 분석해 Flash/RAM 배치와 사용량을 표시합니다. 파일 입력 한도는 100MB이며, Listing은 개별 엔트리를 최대 50만 개까지 그립니다. 상한을 넘겨도 Image Totals 요약은 전체 파일 기준입니다.
+ARM `.axf`/`.elf` 바이너리 또는 ARM Linker Listing을 분석해 Flash/RAM 배치와 사용량을 표시합니다. ELF·Listing 입력 한도는 100MB, linker/scatter 파일 입력 한도는 10MB이며, Listing은 개별 엔트리를 최대 50만 개까지 그립니다. 상한을 넘겨도 Image Totals 요약은 전체 파일 기준입니다.
 
 ### 사용 방법
 
-Command Palette에서 **TaskHub: Show Memory Map**을 실행합니다.
+Command Palette에서 **TaskHub: Show Memory Map**을 실행합니다. Explorer에서 `.elf`·`.axf`·`.out`
+파일을 우클릭해 **Memory Map으로 열기**를 선택하면 입력 형식과 파일을 다시 묻지 않고 바로 엽니다.
+빠른 열기는 파일이 속한 workspace folder의 `taskhub_types.json` 영역 설정을 사용하며, 설정이 없으면
+기존 `PT_LOAD` 기반 영역 감지를 사용합니다. 분석 중에는 VS Code 창의 진행 상태에 파일명을 표시합니다.
 
 1. **AXF/ELF** 또는 **ARM Linker Listing**을 선택합니다.
 2. AXF/ELF는 `.axf`·`.elf`·`.out` 파일을 고릅니다. 메모리 영역 설정이 없으면 GNU linker script나 ARM scatter file을 선택할 수 있습니다.
 3. Listing은 `armlink --list` 출력 파일을 고릅니다. Execution Region에서 영역 크기를 자동으로 읽습니다.
 4. 같은 파일을 다시 열면 기존 패널을 재사용하고, 다른 파일은 별도 탭에 엽니다.
+
+Memory Map 패널의 **Refresh**는 현재 입력을 다시 읽어 같은 탭의 결과를 갱신합니다. AXF/ELF는
+처음 열 때 선택한 GNU linker script 또는 ARM scatter file도 함께 다시 읽고, ARM Linker Listing은
+현재 Listing 파일을 다시 분석합니다. 파일 변경을 자동 감시하지 않는다는 안내가 Refresh 옆에 항상
+표시됩니다. 분석이 오래 걸리면 중복 Refresh를 허용하지 않고 기다려야 함을 상태 영역에
+안내합니다.
+
+성공하면 완료 시각과 Flash/RAM 사용량 변화를 표시하고, 검색어·현재 검색 위치·영역과 Object Summary의
+접기 상태·함수 열·정렬·스크롤 위치를 복원합니다. 분석 중이거나 실패 상태에서 바꾼 화면도 마지막 조작을
+기준으로 보존합니다. 실패하면 이전 결과를 그대로 두면서 실패 시각과 원인을 표시하고, 세부 정보는 닫아 간단한
+이전 결과 표시로 줄이거나 같은 disclosure 버튼으로 다시 펼칠 수 있습니다. 파일을 고친 뒤 같은 버튼으로
+다시 시도할 수 있습니다. 사라진 ELF·Listing·linker/scatter 파일은 raw 시스템 오류와 절대 경로 대신
+파일명과 복원·재빌드·재선택 방법을 안내합니다. 성공 안내는 완료 시각을 남긴 채 자동으로 작게 줄어듭니다.
+
+History에 저장된 linker/scatter 파일이 없어졌거나 잠시 파싱되지 않아도 패널을 다시 여는 동작은 저장된
+영역 또는 ELF의 `PT_LOAD` 영역으로 계속 진행합니다. 단, **Refresh**는 잘못된 영역으로 성공 처리하지 않고
+실패 상태와 이전 결과를 유지합니다.
+
+ELF 패널의 **링커 스크립트 선택…**은 영역 유무와 관계없이 Refresh 옆에 항상 표시됩니다.
+현재 ELF를 유지한 채 linker/scatter 파일만 선택하며, 성공·실패 결과를 패널에 남깁니다. 성공한
+설정은 History에도 새로 기록되어 다시 열 때 같은 파일을 사용합니다.
 
 ### 표시 정보
 
@@ -825,7 +849,7 @@ ELF 프로그램 헤더와 심볼 테이블을 사용합니다.
   대응하는 파일 오프셋 범위를 바로 선택합니다. BSS/NOBITS처럼 파일에 저장되지 않는
   범위는 **파일 바이트 없음**으로 표시하고 이유를 안내합니다.
 - Memory Map을 연 뒤 ELF 파일이 다시 빌드되거나 교체되면 오래된 오프셋과 소스 위치를
-  사용하지 않고 맵을 다시 열도록 안내합니다. ARM Linker Listing에는 대응 바이너리와
+  사용하지 않고 **Refresh**하도록 안내합니다. ARM Linker Listing에는 대응 바이너리와
   DWARF가 없으므로 바이트·소스 열을 표시하지 않습니다.
 
 ### Region별 Object Summary
@@ -845,7 +869,11 @@ Function 토글은 Section과 Function 열을 함께 표시합니다. ARM Listin
 
 ### HTML 저장
 
-**Save HTML**은 현재의 접기 상태와 검색 필터를 포함한 standalone HTML을 저장합니다. VS Code 없이 브라우저에서 열 수 있습니다.
+**Save HTML**은 저장 시점에 렌더된 Memory Map을 standalone HTML로 저장합니다. VS Code 없이 브라우저에서
+열 수 있으며 검색·정렬·영역 펼치기/접기는 그대로 동작합니다. 브라우저에서 동작하지 않는 host 전용
+툴바·Refresh 상태·설정 이동 버튼과 Hex/Source 열은 내보내지 않고, 저장된 스냅샷이라는 안내를 표시합니다.
+저장 순간의 검색·lazy render DOM이 새 문서의 내부 상태와 어긋나지 않도록, standalone 문서는 검색을 비우고
+영역을 접은 일관된 상태에서 시작합니다.
 
 ### 성능 최적화
 
@@ -876,6 +904,8 @@ Region 상세는 펼칠 때 생성하고, 200행을 넘는 표는 가상 스크�
 ```
 
 `origin`은 시작 주소, `size`는 바이트 단위 크기입니다. 이 설정이 있으면 링커 스크립트 선택을 생략합니다. ELF32의 little/big endian과 Cortex-R/M 계열을 지원합니다.
+`regions`가 배열이 아니거나 항목의 `name`·`origin`·`size`가 잘못되면 부분만 임의로 쓰지 않고 설정
+전체를 무시한 뒤 ELF의 `PT_LOAD` 영역 자동 감지로 폴백합니다.
 
 ### 링커 스크립트 자동 파싱
 

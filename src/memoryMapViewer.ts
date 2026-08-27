@@ -8,6 +8,7 @@ import { ARM_LINK_MAX_ENTRIES, parseArmLinkList, toMemoryRegions, toElfSections,
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
 import { openHexViewerFile } from './hexViewer';
+import { coerceToUri } from './previewOpener';
 import {
     DwarfLineUnsupportedFeature,
     DwarfSourceLocation,
@@ -36,6 +37,8 @@ export interface PanelEntry {
 
 interface PanelState {
     panel: vscode.WebviewPanel;
+    /** 이전 webview에서 늦게 도착한 target/message를 새 결과에 적용하지 않는다. */
+    renderId: string;
     /** 심볼/섹션 행 — Quick Pick 의 첫 번째 묶음. 상한에 걸려 잘려 있을 수 있다. */
     entries: PanelEntry[];
     /**
@@ -59,6 +62,24 @@ interface PanelState {
     sourceTargets: Map<string, MemoryMapSourceTarget>;
     /** 맵을 만든 뒤 ELF가 교체되면 오래된 offset으로 다른 바이트를 열지 않는다. */
     sourceFingerprint?: { size: number; mtimeMs: number };
+    /** 숨겨진 webview가 실패 메시지를 놓쳐도 ready handshake에서 다시 보낸다. */
+    refreshFailure?: {
+        renderId: string;
+        refreshAttemptId: string;
+        reason?: string;
+        failedAt: number;
+    };
+    /** linker/scatter 재설정 결과도 새 webview의 ready 후 전달한다. */
+    panelFeedback?: {
+        renderId: string;
+        feedbackId: string;
+        kind: 'configure-success' | 'configure-failure';
+        linkerName: string;
+        reason?: string;
+        at: number;
+    };
+    /** 열기 대화상자가 중복으로 열리거나 동기 분석이 겹치지 않게 한다. */
+    configureInFlight: boolean;
     messageDisposable?: vscode.Disposable;
 }
 
@@ -102,6 +123,8 @@ export const panelRegistry = {
 
 /** Memory Map에서 처리 가능한 최대 ELF/Listing 파일 크기 (100 MB). Exported so tests can pin the boundary. */
 export const MEMORY_MAP_MAX_FILE_SIZE = 100 * 1024 * 1024;
+/** 링커/스캐터 파일은 텍스트 설정이므로 별도 10 MB 상한을 둔다. */
+export const MEMORY_MAP_MAX_LINKER_FILE_SIZE = 10 * 1024 * 1024;
 const ELF_SHF_COMPRESSED = 0x800;
 
 /**
@@ -116,6 +139,14 @@ const ELF_SHF_COMPRESSED = 0x800;
  * 사용자가 두 번 헛수고한다.
  */
 export const MEMORY_MAP_MAX_SAVE_HTML_CHARS = 64 * 1024 * 1024;
+
+/** Standalone HTML에서 VS Code host가 있어야만 동작하는 결합과 컨트롤을 제거한다. */
+export function stripMemoryMapHostBindings(rawHtml: string): string {
+    return rawHtml.replace(
+        /const vscode = acquireVsCodeApi\(\);?\s*|vscode\.postMessage\(\{[^}]*\}\);?\s*|<div id="memoryMapHostActions"[^>]*>[\s\S]*?<\/div>\s*|<span id="refreshControls"[^>]*>[\s\S]*?<\/span>\s*|<div id="refreshHint"[^>]*>[\s\S]*?<\/div>\s*|<div id="refreshFeedback"[^>]*>\s*<div id="refreshStatus"[^>]*>[\s\S]*?<\/div>\s*<button id="refreshDismiss"[^>]*>[\s\S]*?<\/button>\s*<\/div>\s*|<span id="noRegionConfigure"[^>]*>[\s\S]*?<\/span>\s*/g,
+        ''
+    );
+}
 
 /**
  * *Go to Symbol* Quick Pick 에 싣는 최대 항목 수.
@@ -148,6 +179,8 @@ function formatFileSize(bytes: number): string {
 
 export interface MemoryMapConfig {
     regions?: MemoryRegion[];
+    /** 사용자가 선택한 GNU linker script / ARM scatter file. Refresh 때 다시 읽는다. */
+    linkerFilePath?: string;
 }
 
 export interface MemoryMapOpenHistory {
@@ -158,6 +191,172 @@ export interface MemoryMapOpenHistory {
 }
 
 export type MemoryMapHistoryRecorder = (entry: MemoryMapOpenHistory) => void;
+
+interface MemoryMapRegionResolution {
+    ok: boolean;
+    regions: MemoryRegion[];
+    reason?: string;
+}
+
+interface MemoryMapPanelOpenResult {
+    opened: boolean;
+    reason?: string;
+}
+
+type MemoryMapOpenMode = 'cold' | 'refresh';
+
+class MemoryMapLinkerTooLargeError extends Error {
+    constructor(readonly size: number) {
+        super('Memory Map linker/scatter file size limit exceeded');
+    }
+}
+
+function readMemoryMapLinkerFile(filePath: string): string {
+    const stat = fs.statSync(filePath);
+    if (stat.size > MEMORY_MAP_MAX_LINKER_FILE_SIZE) {
+        throw new MemoryMapLinkerTooLargeError(stat.size);
+    }
+    return fs.readFileSync(filePath, 'utf-8');
+}
+
+function describeMemoryMapLinkerFailure(error: unknown, linkerName: string): string {
+    if (error instanceof MemoryMapLinkerTooLargeError) {
+        return t(
+            `링커/스캐터 파일이 너무 큽니다 (${linkerName}, ${formatFileSize(error.size)}). ${formatFileSize(MEMORY_MAP_MAX_LINKER_FILE_SIZE)} 이하의 파일을 선택하세요.`,
+            `The linker/scatter file is too large (${linkerName}, ${formatFileSize(error.size)}). Select a file no larger than ${formatFileSize(MEMORY_MAP_MAX_LINKER_FILE_SIZE)}.`
+        );
+    }
+    const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as NodeJS.ErrnoException).code ?? '')
+        : '';
+    if (code === 'ENOENT') {
+        return t(
+            `링커/스캐터 파일을 찾을 수 없습니다 (${linkerName}). 파일을 복원하거나 다른 링커 스크립트를 선택하세요.`,
+            `The linker/scatter file was not found (${linkerName}). Restore it or select another linker script.`
+        );
+    }
+    if (code === 'EACCES' || code === 'EPERM') {
+        return t(
+            `링커/스캐터 파일을 읽을 권한이 없습니다 (${linkerName}). 파일 권한을 확인하거나 다른 링커 스크립트를 선택하세요.`,
+            `Permission was denied for the linker/scatter file (${linkerName}). Check its permissions or select another linker script.`
+        );
+    }
+    return t(
+        `링커/스캐터 파일을 읽거나 해석하지 못했습니다 (${linkerName}). 파일 내용을 확인하거나 다른 링커 스크립트를 선택하세요.`,
+        `The linker/scatter file could not be read or parsed (${linkerName}). Check the file or select another linker script.`
+    );
+}
+
+/**
+ * Refresh 실패 배너에는 Node의 raw errno/절대 경로를 싣지 않는다. 빌드가
+ * 입력 파일을 교체하는 짧은 구간에 ENOENT가 나는 것이 흔하므로, 사용자가
+ * 바로 취할 수 있는 복구 동작과 안전한 파일명만 남긴다.
+ */
+function describeMemoryMapInputFailure(error: unknown, fileName: string): string {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as NodeJS.ErrnoException).code ?? '')
+        : '';
+    if (code === 'ENOENT') {
+        return t(
+            `입력 파일을 찾을 수 없습니다 (${fileName}). 파일을 복원하거나 다시 빌드한 뒤 다시 시도하세요.`,
+            `The input file was not found (${fileName}). Restore or rebuild it, then try again.`
+        );
+    }
+    if (code === 'EACCES' || code === 'EPERM') {
+        return t(
+            `입력 파일을 읽을 권한이 없습니다 (${fileName}). 파일 권한을 확인한 뒤 다시 시도하세요.`,
+            `Permission was denied for the input file (${fileName}). Check its permissions, then try again.`
+        );
+    }
+    return t(
+        `입력 파일을 읽지 못했습니다 (${fileName}). 파일을 복원하거나 다시 빌드한 뒤 다시 시도하세요.`,
+        `The input file could not be read (${fileName}). Restore or rebuild it, then try again.`
+    );
+}
+
+function describeUnexpectedMemoryMapRefreshFailure(fileName: string): string {
+    return t(
+        `Memory Map 새로 고침에 실패했습니다 (${fileName}). 입력 파일을 다시 빌드한 뒤 새로 고침을 다시 실행하세요.`,
+        `Failed to refresh the Memory Map (${fileName}). Rebuild the input file, then run Refresh again.`
+    );
+}
+
+function describeMemoryMapParseFailure(fileName: string, inputType: 'elf' | 'listing'): string {
+    if (inputType === 'elf') {
+        return t(
+            `ELF 파일을 해석하지 못했습니다 (${fileName}). 지원되는 32비트 ELF인지 확인하거나 다시 빌드한 뒤 다시 시도하세요.`,
+            `The ELF file could not be parsed (${fileName}). Verify that it is a supported 32-bit ELF, or rebuild it and try again.`
+        );
+    }
+    return t(
+        `Listing 파일을 해석하지 못했습니다 (${fileName}). ARM linker listing 형식인지 확인하거나 다시 생성한 뒤 다시 시도하세요.`,
+        `The listing file could not be parsed (${fileName}). Verify that it is an ARM linker listing, or regenerate it and try again.`
+    );
+}
+
+/**
+ * 정적 `taskhub_types.json` region은 그대로 쓰고, 사용자가 골랐던 linker/scatter
+ * 파일은 열기·Refresh마다 다시 읽는다. 파싱에 실패하면 caller가 기존 패널을
+ * 건드리지 않을 수 있도록 명시적인 실패 결과를 반환한다.
+ */
+function resolveMemoryMapRegions(
+    config: MemoryMapConfig | undefined,
+    mode: MemoryMapOpenMode
+): MemoryMapRegionResolution {
+    if (!config?.linkerFilePath) {
+        return { ok: true, regions: config?.regions ?? [] };
+    }
+
+    let linkerName = t('선택한 링커/스캐터 파일', 'selected linker/scatter file');
+    try {
+        if (typeof config.linkerFilePath !== 'string') {
+            throw new TypeError('linkerFilePath must be a string');
+        }
+        linkerName = path.basename(config.linkerFilePath) || linkerName;
+        const content = readMemoryMapLinkerFile(config.linkerFilePath);
+        const regions = parseLinkerFile(content, config.linkerFilePath);
+        if (regions.length === 0) {
+            const reason = t(
+                `링커/스캐터 파일에서 MEMORY 영역을 찾을 수 없습니다 (${linkerName}).`,
+                `No MEMORY regions were found in the linker/scatter file (${linkerName}).`
+            );
+            if (mode === 'refresh') {
+                const refreshReason = t(
+                    `${reason} MEMORY 블록을 복원하거나 파일을 다시 선택한 뒤 다시 시도하세요.`,
+                    `${reason} Restore the MEMORY block or select the file again, then try again.`
+                );
+                vscode.window.showWarningMessage(refreshReason);
+                return { ok: false, regions: [], reason: refreshReason };
+            }
+            vscode.window.showWarningMessage(t(
+                `${reason} 저장된 영역 또는 ELF 프로그램 헤더로 계속 엽니다.`,
+                `${reason} Opening with saved regions or ELF program headers instead.`
+            ));
+            return { ok: true, regions: config.regions ?? [] };
+        }
+        return { ok: true, regions };
+    } catch (e: unknown) {
+        const reason = describeMemoryMapLinkerFailure(e, linkerName);
+        if (mode === 'refresh') {
+            vscode.window.showErrorMessage(reason);
+            return { ok: false, regions: [], reason };
+        }
+        vscode.window.showWarningMessage(t(
+            `${reason} 저장된 영역 또는 ELF 프로그램 헤더로 계속 엽니다.`,
+            `${reason} Opening with saved regions or ELF program headers instead.`
+        ));
+        return { ok: true, regions: config.regions ?? [] };
+    }
+}
+
+async function pickMemoryMapLinkerScript(): Promise<string | undefined> {
+    const linkerUri = await showOpenDialogWithMemory(DIALOG_SCOPE.memoryMapLinkerScript, {
+        canSelectMany: false,
+        filters: { 'Linker Script': ['ld', 'lds', 'lcf', 'sct'] },
+        openLabel: t('링커 스크립트 선택', 'Select Linker Script')
+    });
+    return linkerUri?.[0]?.fsPath;
+}
 
 export async function showMemoryMap(context: vscode.ExtensionContext, config?: MemoryMapConfig, recordHistory?: MemoryMapHistoryRecorder) {
     const inputType = await vscode.window.showQuickPick([
@@ -203,29 +402,17 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
         );
 
         if (linkerChoice && linkerChoice.label !== t('건너뛰기', 'Skip')) {
-            const linkerUri = await showOpenDialogWithMemory(DIALOG_SCOPE.memoryMapLinkerScript, {
-                canSelectMany: false,
-                filters: { 'Linker Script': ['ld', 'lds', 'lcf', 'sct'] },
-                openLabel: t('링커 스크립트 선택', 'Select Linker Script')
-            });
-            if (linkerUri && linkerUri.length > 0) {
-                try {
-                    const content = fs.readFileSync(linkerUri[0].fsPath, 'utf-8');
-                    const regions = parseLinkerFile(content, linkerUri[0].fsPath);
-                    if (regions.length > 0) {
-                        resolvedConfig = { regions };
-                    } else {
-                        vscode.window.showWarningMessage(t('링커 스크립트에서 MEMORY 영역을 찾을 수 없습니다. 섹션 정보만 표시합니다.', 'No memory regions found in linker script. Showing sections only.'));
-                    }
-                } catch (e: any) {
-                    vscode.window.showErrorMessage(t(`링커 스크립트 파싱 실패: ${e.message}`, `Failed to parse linker script: ${e.message}`));
-                }
+            const linkerFilePath = await pickMemoryMapLinkerScript();
+            if (linkerFilePath) {
+                // 실제 읽기·크기 검사·파싱은 openMemoryMapPanelResult 한 곳에서만
+                // 수행한다. 선택 직후와 패널 open에서 같은 파일을 두 번 읽지 않는다.
+                resolvedConfig = { ...resolvedConfig, linkerFilePath };
             }
         }
     }
 
     const filePath = fileUri[0].fsPath;
-    if (openMemoryMapPanel(context, filePath, resolvedConfig)) {
+    if (openMemoryMapPanel(context, filePath, resolvedConfig, recordHistory)) {
         recordHistory?.({
             filePath,
             fileName: filePath.split(/[\\/]/).pop() || 'Memory Map',
@@ -235,47 +422,102 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
     }
 }
 
-export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: string, config?: MemoryMapConfig): boolean {
+/** Explorer 컨텍스트 메뉴에서 선택한 ELF를 추가 질문 없이 바로 연다. */
+export function openMemoryMapFromUri(
+    context: vscode.ExtensionContext,
+    arg?: unknown,
+    config?: MemoryMapConfig,
+    recordHistory?: MemoryMapHistoryRecorder
+): boolean {
+    const uri = coerceToUri(arg);
+    const supportedScheme = uri?.scheme === 'file' || uri?.scheme === 'vscode-remote';
+    if (!uri || !supportedScheme || !/\.(?:elf|axf|out)$/i.test(uri.fsPath)) {
+        vscode.window.showErrorMessage(t(
+            'Memory Map으로 열 ELF 파일(.elf/.axf/.out)을 선택해 주세요.',
+            'Select an ELF file (.elf/.axf/.out) to open with Memory Map.'
+        ));
+        return false;
+    }
+
+    const filePath = uri.fsPath;
+    if (!openMemoryMapPanel(context, filePath, config, recordHistory)) {
+        return false;
+    }
+    recordHistory?.({
+        filePath,
+        fileName: path.basename(filePath) || 'Memory Map',
+        inputType: 'elf',
+        config,
+    });
+    return true;
+}
+
+export function openMemoryMapPanel(
+    context: vscode.ExtensionContext,
+    filePath: string,
+    config?: MemoryMapConfig,
+    recordHistory?: MemoryMapHistoryRecorder
+): boolean {
+    return openMemoryMapPanelResult(context, filePath, config, 'cold', recordHistory).opened;
+}
+
+function openMemoryMapPanelResult(
+    context: vscode.ExtensionContext,
+    filePath: string,
+    config: MemoryMapConfig | undefined,
+    mode: MemoryMapOpenMode,
+    recordHistory?: MemoryMapHistoryRecorder
+): MemoryMapPanelOpenResult {
     const fileName = filePath.split(/[\\/]/).pop() || 'Memory Map';
+
+    const resolvedRegions = resolveMemoryMapRegions(config, mode);
+    if (!resolvedRegions.ok) {
+        return { opened: false, reason: resolvedRegions.reason };
+    }
 
     let stat: fs.Stats;
     try {
         stat = fs.statSync(filePath);
-    } catch (e: any) {
-        vscode.window.showErrorMessage(t(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`, `Cannot read file (${fileName}): ${e.message}`));
-        return false;
+    } catch (e: unknown) {
+        const reason = describeMemoryMapInputFailure(e, fileName);
+        vscode.window.showErrorMessage(reason);
+        return { opened: false, reason };
     }
 
     if (stat.size > MEMORY_MAP_MAX_FILE_SIZE) {
-        vscode.window.showErrorMessage(t(
-            `파일 크기(${formatFileSize(stat.size)})가 Memory Map 처리 한도(${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)})를 초과합니다.`,
-            `File size (${formatFileSize(stat.size)}) exceeds the Memory Map limit (${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)}).`
-        ));
-        return false;
+        const reason = t(
+            `파일 크기(${formatFileSize(stat.size)})가 Memory Map 처리 한도(${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)})를 초과합니다. 한도 이하의 입력 파일을 사용하세요.`,
+            `File size (${formatFileSize(stat.size)}) exceeds the Memory Map limit (${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)}). Use an input file within the limit.`
+        );
+        vscode.window.showErrorMessage(reason);
+        return { opened: false, reason };
     }
 
     let buffer: Buffer;
     try {
         buffer = fs.readFileSync(filePath);
-    } catch (e: any) {
-        vscode.window.showErrorMessage(t(`파일 읽기 실패 (${fileName}): ${e.message}`, `Failed to read file (${fileName}): ${e.message}`));
-        return false;
+    } catch (e: unknown) {
+        const reason = describeMemoryMapInputFailure(e, fileName);
+        vscode.window.showErrorMessage(reason);
+        return { opened: false, reason };
     }
 
     if (buffer.length < 16) {
-        vscode.window.showErrorMessage(t(
-            `유효한 ELF 파일이 아닙니다 (${fileName}): 파일이 너무 작습니다 (${formatFileSize(buffer.length)}).`,
-            `Not a valid ELF file (${fileName}): file is too small (${formatFileSize(buffer.length)}).`
-        ));
-        return false;
+        const reason = t(
+            `유효한 ELF 파일이 아닙니다 (${fileName}): 파일이 너무 작습니다 (${formatFileSize(buffer.length)}). 파일을 다시 빌드한 뒤 다시 시도하세요.`,
+            `Not a valid ELF file (${fileName}): file is too small (${formatFileSize(buffer.length)}). Rebuild the file, then try again.`
+        );
+        vscode.window.showErrorMessage(reason);
+        return { opened: false, reason };
     }
 
     let parseResult;
     try {
         parseResult = parseElf32(buffer);
-    } catch (e: any) {
-        vscode.window.showErrorMessage(t(`ELF 파싱 실패 (${fileName}): ${e.message}`, `Failed to parse ELF (${fileName}): ${e.message}`));
-        return false;
+    } catch (_e: unknown) {
+        const reason = describeMemoryMapParseFailure(fileName, 'elf');
+        vscode.window.showErrorMessage(reason);
+        return { opened: false, reason };
     }
 
     const { sections, entryPoint, symbols, segments, isLittleEndian } = parseResult;
@@ -283,7 +525,7 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     const sectionSummary = summarizeSections(sections, segments, buffer.length);
 
     // Auto-detect regions from program headers if no linker script provided
-    let regions = config?.regions || [];
+    let regions = resolvedRegions.regions;
     if (regions.length === 0 && segments.length > 0) {
         regions = autoDetectRegions(segments, sections);
     }
@@ -387,49 +629,84 @@ export function openMemoryMapPanel(context: vscode.ExtensionContext, filePath: s
     showPanel(
         context, filePath, fileName, entryPoint, flashTotal, ramTotal,
         sectionSummary, memoryUsage, regions, textReport, summaryReport, hasSymbols,
-        { size: stat.size, mtimeMs: stat.mtimeMs }, sourceLocations, symbols
+        { size: stat.size, mtimeMs: stat.mtimeMs }, sourceLocations, symbols,
+        () => openMemoryMapPanelResult(context, filePath, config, 'refresh', recordHistory),
+        linkerFilePath => {
+            const nextConfig = { ...config, linkerFilePath };
+            const result = openMemoryMapPanelResult(
+                context,
+                filePath,
+                nextConfig,
+                'refresh',
+                recordHistory
+            );
+            if (result.opened) {
+                recordHistory?.({
+                    filePath,
+                    fileName,
+                    inputType: 'elf',
+                    config: nextConfig,
+                });
+            }
+            return result;
+        }
     );
-    return true;
+    return { opened: true };
 }
 
 export function openMemoryMapFromListing(context: vscode.ExtensionContext, filePath: string): boolean {
+    return openMemoryMapFromListingResult(context, filePath).opened;
+}
+
+function openMemoryMapFromListingResult(
+    context: vscode.ExtensionContext,
+    filePath: string
+): MemoryMapPanelOpenResult {
     const fileName = filePath.split(/[\\/]/).pop() || 'Memory Map';
 
     let stat: fs.Stats;
     try {
         stat = fs.statSync(filePath);
-    } catch (e: any) {
-        vscode.window.showErrorMessage(t(`파일을 읽을 수 없습니다 (${fileName}): ${e.message}`, `Cannot read file (${fileName}): ${e.message}`));
-        return false;
+    } catch (e: unknown) {
+        const reason = describeMemoryMapInputFailure(e, fileName);
+        vscode.window.showErrorMessage(reason);
+        return { opened: false, reason };
     }
 
     if (stat.size > MEMORY_MAP_MAX_FILE_SIZE) {
-        vscode.window.showErrorMessage(t(
-            `파일 크기(${formatFileSize(stat.size)})가 Memory Map 처리 한도(${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)})를 초과합니다.`,
-            `File size (${formatFileSize(stat.size)}) exceeds the Memory Map limit (${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)}).`
-        ));
-        return false;
+        const reason = t(
+            `파일 크기(${formatFileSize(stat.size)})가 Memory Map 처리 한도(${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)})를 초과합니다. 한도 이하의 입력 파일을 사용하세요.`,
+            `File size (${formatFileSize(stat.size)}) exceeds the Memory Map limit (${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)}). Use an input file within the limit.`
+        );
+        vscode.window.showErrorMessage(reason);
+        return { opened: false, reason };
     }
 
     let content: string;
     try {
         content = fs.readFileSync(filePath, 'utf-8');
-    } catch (e: any) {
-        vscode.window.showErrorMessage(t(`파일 읽기 실패 (${fileName}): ${e.message}`, `Failed to read file (${fileName}): ${e.message}`));
-        return false;
+    } catch (e: unknown) {
+        const reason = describeMemoryMapInputFailure(e, fileName);
+        vscode.window.showErrorMessage(reason);
+        return { opened: false, reason };
     }
 
     if (content.trim().length === 0) {
-        vscode.window.showWarningMessage(t(`Listing 파일이 비어 있습니다: ${fileName}`, `Listing file is empty: ${fileName}`));
-        return false;
+        const reason = t(
+            `Listing 파일이 비어 있습니다 (${fileName}). Listing을 다시 생성한 뒤 다시 시도하세요.`,
+            `The listing file is empty (${fileName}). Regenerate it, then try again.`
+        );
+        vscode.window.showWarningMessage(reason);
+        return { opened: false, reason };
     }
 
     let result;
     try {
         result = parseArmLinkList(content);
-    } catch (e: any) {
-        vscode.window.showErrorMessage(t(`Listing 파싱 실패 (${fileName}): ${e.message}`, `Failed to parse listing (${fileName}): ${e.message}`));
-        return false;
+    } catch (_e: unknown) {
+        const reason = describeMemoryMapParseFailure(fileName, 'listing');
+        vscode.window.showErrorMessage(reason);
+        return { opened: false, reason };
     }
 
     // 조용히 자르면 사용자가 불완전한 목록을 완전한 것으로 착각한다 —
@@ -443,11 +720,12 @@ export function openMemoryMapFromListing(context: vscode.ExtensionContext, fileP
     }
 
     if (result.execRegions.length === 0) {
-        vscode.window.showWarningMessage(t(
+        const reason = t(
             `Execution Region을 찾을 수 없습니다 (${fileName}). ARM Linker Listing (armlink --list) 출력 파일인지 확인해 주세요.`,
             `No execution regions found (${fileName}). Please verify this is an ARM Linker Listing (armlink --list) output file.`
-        ));
-        return false;
+        );
+        vscode.window.showWarningMessage(reason);
+        return { opened: false, reason };
     }
 
     const sections = toElfSections(result);
@@ -460,34 +738,63 @@ export function openMemoryMapFromListing(context: vscode.ExtensionContext, fileP
     const textReport = generateTextReport(fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage);
     const summaryReport = generateSummaryReport(fileName, filePath, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions);
 
-    showPanel(context, filePath, fileName, result.entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions, textReport, summaryReport);
-    return true;
+    showPanel(
+        context, filePath, fileName, result.entryPoint, flashTotal, ramTotal,
+        sectionSummary, memoryUsage, regions, textReport, summaryReport,
+        undefined, undefined, [], [],
+        () => openMemoryMapFromListingResult(context, filePath)
+    );
+    return { opened: true };
 }
 
 function ensureMemoryMapElfIsCurrent(
     filePath: string,
     fileName: string,
-    fingerprint?: { size: number; mtimeMs: number }
+    fingerprint?: { size: number; mtimeMs: number },
+    requestRefresh?: () => void
 ): boolean {
     if (!fingerprint) { return true; }
     let current: fs.Stats;
     try {
         current = fs.statSync(filePath);
-    } catch (e: any) {
-        vscode.window.showErrorMessage(t(
-            `ELF 파일을 다시 읽을 수 없습니다 (${fileName}): ${e.message}`,
-            `Cannot read the ELF file again (${fileName}): ${e.message}`
-        ));
+    } catch (e: unknown) {
+        vscode.window.showErrorMessage(describeMemoryMapInputFailure(e, fileName));
         return false;
     }
     if (current.size !== fingerprint.size || current.mtimeMs !== fingerprint.mtimeMs) {
-        vscode.window.showWarningMessage(t(
-            `ELF 파일이 Memory Map을 연 뒤 변경되었습니다 (${fileName}). 최신 주소·파일 오프셋·소스 위치를 사용하려면 Memory Map을 다시 여세요.`,
-            `The ELF file changed after the Memory Map was opened (${fileName}). Reopen the Memory Map to use current addresses, file offsets, and source locations.`
-        ));
+        const message = t(
+            `ELF 파일이 Memory Map을 연 뒤 변경되었습니다 (${fileName}). 최신 주소·파일 오프셋·소스 위치를 사용하려면 패널에서 새로 고침을 실행하세요.`,
+            `The ELF file changed after the Memory Map was opened (${fileName}). Select Refresh in the panel to use current addresses, file offsets, and source locations.`
+        );
+        if (requestRefresh) {
+            const refreshLabel = t('새로 고침', 'Refresh');
+            void vscode.window.showWarningMessage(message, refreshLabel).then(selected => {
+                if (selected === refreshLabel) { requestRefresh(); }
+            });
+        } else {
+            vscode.window.showWarningMessage(message);
+        }
         return false;
     }
     return true;
+}
+
+function postMemoryMapRefreshFailure(state: PanelState): void {
+    const failure = state.refreshFailure;
+    if (!failure || failure.renderId !== state.renderId) { return; }
+    void state.panel.webview.postMessage({ command: 'refreshFailed', ...failure });
+}
+
+function postMemoryMapPanelFeedback(state: PanelState): void {
+    const feedback = state.panelFeedback;
+    if (!feedback || feedback.renderId !== state.renderId) { return; }
+    void state.panel.webview.postMessage({ command: 'memoryMapPanelFeedback', ...feedback });
+}
+
+function memoryMapRefreshAttemptId(value: unknown): string | undefined {
+    return typeof value === 'string' && value.length > 0 && value.length <= 128
+        ? value
+        : undefined;
 }
 
 function showPanel(
@@ -505,14 +812,16 @@ function showPanel(
     hasSymbols?: boolean,
     sourceFingerprint?: { size: number; mtimeMs: number },
     sourceLocations: DwarfSourceLocation[] = [],
-    sourceSymbols: ElfSymbol[] = []
+    sourceSymbols: ElfSymbol[] = [],
+    refresh?: () => MemoryMapPanelOpenResult,
+    configureLinker?: (linkerFilePath: string) => MemoryMapPanelOpenResult
 ) {
     const existing = panels.get(filePath);
     let panel: vscode.WebviewPanel;
+    let created = false;
     if (existing) {
         panel = existing.panel;
         panel.reveal(vscode.ViewColumn.Active);
-        existing.messageDisposable?.dispose();
     } else {
         panel = vscode.window.createWebviewPanel(
             'taskhub.memoryMap',
@@ -520,6 +829,7 @@ function showPanel(
             vscode.ViewColumn.Active,
             { enableScripts: true }
         );
+        created = true;
         panel.onDidDispose(() => {
             const state = panels.get(filePath);
             state?.messageDisposable?.dispose();
@@ -528,134 +838,268 @@ function showPanel(
         });
         panel.onDidChangeViewState(() => {
             if (panel.active) { lastActivePanel = filePath; }
+            if (panel.visible) {
+                const current = panels.get(filePath);
+                if (current) {
+                    postMemoryMapRefreshFailure(current);
+                    postMemoryMapPanelFeedback(current);
+                }
+            }
         });
     }
 
-    lastActivePanel = filePath;
-    const hexTargets = collectMemoryMapHexTargets(sectionSummary, memoryUsage);
-    const sourceTargets = collectMemoryMapSourceTargets(memoryUsage, sourceSymbols, sourceLocations);
-    const state: PanelState = {
-        panel, entries: [], allEntries: [], entriesTotal: 0, hasSymbols: false, regions: [],
-        hexTargets, sourceTargets, sourceFingerprint, messageDisposable: undefined,
-    };
-    state.messageDisposable = panel.webview.onDidReceiveMessage(async (message: any) => {
-        if (message.command === 'openHex') {
-            const targetId = typeof message.targetId === 'string' && message.targetId.length <= 128
-                ? message.targetId
-                : '';
-            const target = state.hexTargets.get(targetId);
-            // 웹뷰 입력에서 offset/size를 받지 않는다. 렌더 당시 호스트가 만든 opaque
-            // ID와 일치하지 않으면 아무 파일도 열지 않는다.
-            if (!target) { return; }
-
-            if (!ensureMemoryMapElfIsCurrent(filePath, fileName, state.sourceFingerprint)) { return; }
-
-            const shownLabel = target.label.length > 120 ? `${target.label.slice(0, 120)}…` : target.label;
-            if (target.fileRange.kind !== 'file') {
-                if (target.fileRange.reason === 'nobits' || target.fileRange.reason === 'zero-fill') {
-                    vscode.window.showWarningMessage(t(
-                        `'${shownLabel}'은 메모리에서만 존재하는 BSS/NOBITS 영역이라 ELF 파일에 표시할 바이트가 없습니다.`,
-                        `'${shownLabel}' exists only in a BSS/NOBITS memory range, so the ELF file has no bytes to show.`
-                    ));
-                } else {
-                    vscode.window.showErrorMessage(t(
-                        `'${shownLabel}'의 메모리 주소 범위를 ELF 파일 바이트로 변환할 수 없습니다. 파일이 손상되었거나 범위가 섹션 경계를 벗어났습니다.`,
-                        `Cannot map the memory range for '${shownLabel}' to ELF file bytes. The file may be malformed or the range crosses a section boundary.`
-                    ));
-                }
-                return;
-            }
-
-            openHexViewerFile(context, filePath, {
-                forceBinary: true,
-                initialSelection: {
-                    startOffset: target.fileRange.offset,
-                    endOffset: target.fileRange.offset + target.fileRange.size - 1,
-                },
-            });
-        } else if (message.command === 'openSource') {
-            const targetId = typeof message.targetId === 'string' && message.targetId.length <= 128
-                ? message.targetId
-                : '';
-            const target = state.sourceTargets.get(targetId);
-            if (!target) { return; }
-            if (!ensureMemoryMapElfIsCurrent(filePath, fileName, state.sourceFingerprint)) { return; }
-            await openMemoryMapSourceLocation(target, filePath);
-        } else if (message.command === 'copyReport') {
-            // 리포트 본문은 이미 extension host가 보유한다. 웹뷰에 수 MB~수십 MB
-            // 문자열을 심고 다시 postMessage 구조화 복제로 돌려받지 말고, 버튼은
-            // 종류만 전달한다. 예상하지 못한 kind는 clipboard를 건드리지 않는다.
-            const copyText = message.kind === 'summary'
-                ? summaryReport
-                : message.kind === 'full'
-                    ? textReport
-                    : undefined;
-            if (copyText === undefined) { return; }
-            await vscode.env.clipboard.writeText(copyText);
-            vscode.window.showInformationMessage(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.'));
-        } else if (message.command === 'saveHtmlTooLarge') {
-            // 웹뷰가 **직렬화 전에** 걸러 낸 경우. 아래 호스트 검사와 같은
-            // 안내를 쓴다 — 사용자에게는 같은 상황이다.
-            showSaveHtmlTooLargeError();
-        } else if (message.command === 'saveHtml') {
-            const rawHtml = typeof message.html === 'string' ? message.html : '';
-            // `outerHTML` 은 펼쳐진 DOM 전체를 직렬화한다. region 을 모두 펼친
-            // 큰 맵이면 그 문자열 하나가 수백 MB 가 될 수 있는데, 이후 정규식
-            // 치환과 문자열 결합이 매번 사본을 더 만든다. 저장 대화상자를
-            // 띄우기 **전에** 막아, 사용자가 경로를 고르고 나서야 실패하는
-            // 일이 없게 한다.
-            if (rawHtml.length > MEMORY_MAP_MAX_SAVE_HTML_CHARS) {
-                showSaveHtmlTooLargeError();
-                return;
-            }
-            const uri = await showSaveDialogWithMemory(
-                DIALOG_SCOPE.memoryMapExport,
-                `${fileName.replace(/\.[^.]+$/, '')}_memory_map.html`,
-                { filters: { 'HTML': ['html'] }, defaultDir: path.dirname(filePath) }
-            );
-            if (uri) {
-                try {
-                    // 정규식 두 번을 한 번으로 합친다 — 각 `replace` 가 문자열
-                    // 사본을 하나씩 더 만들기 때문이다.
-                    const html = rawHtml.replace(
-                        /const vscode = acquireVsCodeApi\(\);?\s*|vscode\.postMessage\(\{[^}]*\}\);?\s*/g,
-                        ''
-                    );
-                    // DOCTYPE 을 템플릿 리터럴로 붙이면 전체 문자열이 한 벌 더
-                    // 복제된다. 두 번 써서 그 사본을 없앤다.
-                    fs.writeFileSync(uri.fsPath, '<!DOCTYPE html>\n', 'utf-8');
-                    fs.appendFileSync(uri.fsPath, html, 'utf-8');
-                    vscode.window.showInformationMessage(t('HTML 파일이 저장되었습니다.', 'HTML file saved.'));
-                } catch (e: any) {
-                    vscode.window.showErrorMessage(t(
-                        `HTML 파일 저장 실패: ${e.message}`,
-                        `Failed to save HTML file: ${e.message}`
-                    ));
-                }
-            }
+    let html: string;
+    let state: PanelState;
+    try {
+        const renderId = generateMemoryMapNonce();
+        const hexTargets = collectMemoryMapHexTargets(sectionSummary, memoryUsage);
+        const sourceTargets = collectMemoryMapSourceTargets(memoryUsage, sourceSymbols, sourceLocations);
+        html = getWebviewContent(
+            fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions,
+            hasSymbols, sourceTargets, panel.webview, refresh !== undefined,
+            configureLinker !== undefined, renderId
+        );
+        const allEntries = collectPickEntries(memoryUsage);
+        state = {
+            panel,
+            renderId,
+            entries: limitSymbolPickEntries(allEntries),
+            allEntries,
+            entriesTotal: allEntries.length,
+            // ELF 심볼 테이블만 심볼 단위 행을 만드는 것이 아니다 — ARM Listing 은
+            // 함수 이름을 `func` 로 보존하므로 이름으로 찾을 수 있다.
+            hasSymbols: hasSymbols === true || allEntries.some(entry => Boolean(entry.func)),
+            regions: memoryUsage.map(usage => {
+                const origin = regions.find(region => region.name === usage.region)?.origin ?? 0;
+                return {
+                    name: usage.region,
+                    addr: origin,
+                    info: `${formatSize(usage.used)} / ${formatSize(usage.total)}`,
+                };
+            }),
+            hexTargets,
+            sourceTargets,
+            sourceFingerprint,
+            configureInFlight: false,
+            messageDisposable: undefined,
+        };
+    } catch (e) {
+        if (created) {
+            panel.dispose();
         }
-    });
+        throw e;
+    }
+    let nextMessageDisposable: vscode.Disposable | undefined;
+    try {
+        nextMessageDisposable = panel.webview.onDidReceiveMessage(async (message: any) => {
+            if (panels.get(filePath) !== state || message.renderId !== state.renderId) {
+                return;
+            }
+            if (message.command === 'openHex') {
+                const targetId = typeof message.targetId === 'string' && message.targetId.length <= 128
+                    ? message.targetId
+                    : '';
+                const target = state.hexTargets.get(targetId);
+                // 웹뷰 입력에서 offset/size를 받지 않는다. 렌더 당시 호스트가 만든 opaque
+                // ID와 일치하지 않으면 아무 파일도 열지 않는다.
+                if (!target) { return; }
 
-    panel.title = `Memory Map: ${fileName}`;
-    panel.webview.html = getWebviewContent(
-        fileName, entryPoint, flashTotal, ramTotal, sectionSummary, memoryUsage, regions,
-        hasSymbols, sourceTargets, panel.webview
-    );
+                if (!ensureMemoryMapElfIsCurrent(
+                    filePath,
+                    fileName,
+                    state.sourceFingerprint,
+                    () => {
+                        if (panels.get(filePath) === state) {
+                            void panel.webview.postMessage({ command: 'requestRefresh', renderId: state.renderId });
+                        }
+                    }
+                )) { return; }
 
-    const allEntries = collectPickEntries(memoryUsage);
-    state.allEntries = allEntries;
-    state.entries = limitSymbolPickEntries(allEntries);
-    state.entriesTotal = allEntries.length;
-    // ELF 심볼 테이블만 심볼 단위 행을 만드는 것이 아니다 — ARM Listing 은 함수
-    // 이름을 `func` 로 보존하므로 이름으로 찾을 수 있다. 호출자가 넘긴 플래그만
-    // 믿으면(Listing 경로는 넘기지 않는다) 함수 행이 가득한 맵을 두고
-    // "심볼 단위 행이 없습니다" 라고 안내하게 된다.
-    state.hasSymbols = hasSymbols === true || allEntries.some(e => Boolean(e.func));
-    state.regions = memoryUsage.map(u => {
-        const origin = regions.find(r => r.name === u.region)?.origin ?? 0;
-        return { name: u.region, addr: origin, info: `${formatSize(u.used)} / ${formatSize(u.total)}` };
-    });
+                const shownLabel = target.label.length > 120 ? `${target.label.slice(0, 120)}…` : target.label;
+                if (target.fileRange.kind !== 'file') {
+                    if (target.fileRange.reason === 'nobits' || target.fileRange.reason === 'zero-fill') {
+                        vscode.window.showWarningMessage(t(
+                            `'${shownLabel}'은 메모리에서만 존재하는 BSS/NOBITS 영역이라 ELF 파일에 표시할 바이트가 없습니다.`,
+                            `'${shownLabel}' exists only in a BSS/NOBITS memory range, so the ELF file has no bytes to show.`
+                        ));
+                    } else {
+                        vscode.window.showErrorMessage(t(
+                            `'${shownLabel}'의 메모리 주소 범위를 ELF 파일 바이트로 변환할 수 없습니다. 파일이 손상되었거나 범위가 섹션 경계를 벗어났습니다.`,
+                            `Cannot map the memory range for '${shownLabel}' to ELF file bytes. The file may be malformed or the range crosses a section boundary.`
+                        ));
+                    }
+                    return;
+                }
+
+                openHexViewerFile(context, filePath, {
+                    forceBinary: true,
+                    initialSelection: {
+                        startOffset: target.fileRange.offset,
+                        endOffset: target.fileRange.offset + target.fileRange.size - 1,
+                    },
+                });
+            } else if (message.command === 'openSource') {
+                const targetId = typeof message.targetId === 'string' && message.targetId.length <= 128
+                    ? message.targetId
+                    : '';
+                const target = state.sourceTargets.get(targetId);
+                if (!target) { return; }
+                if (!ensureMemoryMapElfIsCurrent(
+                    filePath,
+                    fileName,
+                    state.sourceFingerprint,
+                    () => {
+                        if (panels.get(filePath) === state) {
+                            void panel.webview.postMessage({ command: 'requestRefresh', renderId: state.renderId });
+                        }
+                    }
+                )) { return; }
+                await openMemoryMapSourceLocation(target, filePath);
+            } else if (message.command === 'memoryMapReady') {
+                postMemoryMapRefreshFailure(state);
+                postMemoryMapPanelFeedback(state);
+            } else if (message.command === 'refreshFailureAcknowledged') {
+                const refreshAttemptId = memoryMapRefreshAttemptId(message.refreshAttemptId);
+                const refreshFailure = state.refreshFailure;
+                if (refreshAttemptId && refreshFailure && refreshFailure.renderId === message.renderId
+                    && refreshFailure.refreshAttemptId === refreshAttemptId) {
+                    state.refreshFailure = undefined;
+                }
+            } else if (message.command === 'memoryMapPanelFeedbackAcknowledged') {
+                const feedbackId = memoryMapRefreshAttemptId(message.feedbackId);
+                const feedback = state.panelFeedback;
+                if (feedbackId && feedback && feedback.renderId === message.renderId
+                    && feedback.feedbackId === feedbackId) {
+                    state.panelFeedback = undefined;
+                }
+            } else if (message.command === 'refresh' && refresh) {
+                const refreshAttemptId = memoryMapRefreshAttemptId(message.refreshAttemptId);
+                if (!refreshAttemptId) { return; }
+                state.refreshFailure = undefined;
+                // 유효한 Refresh는 이전 linker 설정 결과보다 최신 사용자 작업이다.
+                // 미확인 durable feedback을 남겨 두면 context 재생성의 ready 재전송이
+                // 새 Refresh 실패 뒤에 옛 configure 문구를 덮어쓸 수 있다.
+                state.panelFeedback = undefined;
+                let result: MemoryMapPanelOpenResult = { opened: false };
+                try {
+                    result = refresh();
+                } catch (_e: unknown) {
+                    const reason = describeUnexpectedMemoryMapRefreshFailure(fileName);
+                    vscode.window.showErrorMessage(reason);
+                    result = { opened: false, reason };
+                }
+                if (!result.opened) {
+                    state.refreshFailure = {
+                        renderId: state.renderId,
+                        refreshAttemptId,
+                        reason: result.reason,
+                        failedAt: Date.now(),
+                    };
+                    postMemoryMapRefreshFailure(state);
+                }
+            } else if (message.command === 'showMemoryMapSetup') {
+                if (!configureLinker || state.configureInFlight) { return; }
+                state.configureInFlight = true;
+                try {
+                    const linkerFilePath = await pickMemoryMapLinkerScript();
+                    if (!linkerFilePath || panels.get(filePath) !== state) { return; }
+                    const linkerName = path.basename(linkerFilePath)
+                        || t('선택한 링커/스캐터 파일', 'selected linker/scatter file');
+                    let result: MemoryMapPanelOpenResult;
+                    try {
+                        result = configureLinker(linkerFilePath);
+                    } catch (_e: unknown) {
+                        result = {
+                            opened: false,
+                            reason: t(
+                                `링커/스캐터 파일을 적용하지 못했습니다 (${linkerName}). 파일을 확인한 뒤 다시 선택하세요.`,
+                                `The linker/scatter file could not be applied (${linkerName}). Check the file, then select it again.`
+                            ),
+                        };
+                    }
+                    const feedbackState = panels.get(filePath);
+                    if (!feedbackState) { return; }
+                    feedbackState.panelFeedback = {
+                        renderId: feedbackState.renderId,
+                        feedbackId: generateMemoryMapNonce(),
+                        kind: result.opened ? 'configure-success' : 'configure-failure',
+                        linkerName,
+                        reason: result.reason,
+                        at: Date.now(),
+                    };
+                    postMemoryMapPanelFeedback(feedbackState);
+                } finally {
+                    state.configureInFlight = false;
+                }
+            } else if (message.command === 'copyReport') {
+                // 리포트 본문은 이미 extension host가 보유한다. 웹뷰에 수 MB~수십 MB
+                // 문자열을 심고 다시 postMessage 구조화 복제로 돌려받지 말고, 버튼은
+                // 종류만 전달한다. 예상하지 못한 kind는 clipboard를 건드리지 않는다.
+                const copyText = message.kind === 'summary'
+                    ? summaryReport
+                    : message.kind === 'full'
+                        ? textReport
+                        : undefined;
+                if (copyText === undefined) { return; }
+                await vscode.env.clipboard.writeText(copyText);
+                vscode.window.showInformationMessage(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.'));
+            } else if (message.command === 'saveHtmlTooLarge') {
+                // 웹뷰가 **직렬화 전에** 걸러 낸 경우. 아래 호스트 검사와 같은
+                // 안내를 쓴다 — 사용자에게는 같은 상황이다.
+                showSaveHtmlTooLargeError();
+            } else if (message.command === 'saveHtml') {
+                const rawHtml = typeof message.html === 'string' ? message.html : '';
+                // `outerHTML` 은 펼쳐진 DOM 전체를 직렬화한다. region 을 모두 펼친
+                // 큰 맵이면 그 문자열 하나가 수백 MB 가 될 수 있는데, 이후 정규식
+                // 치환과 문자열 결합이 매번 사본을 더 만든다. 저장 대화상자를
+                // 띄우기 **전에** 막아, 사용자가 경로를 고르고 나서야 실패하는
+                // 일이 없게 한다.
+                if (rawHtml.length > MEMORY_MAP_MAX_SAVE_HTML_CHARS) {
+                    showSaveHtmlTooLargeError();
+                    return;
+                }
+                const uri = await showSaveDialogWithMemory(
+                    DIALOG_SCOPE.memoryMapExport,
+                    `${fileName.replace(/\.[^.]+$/, '')}_memory_map.html`,
+                    { filters: { 'HTML': ['html'] }, defaultDir: path.dirname(filePath) }
+                );
+                if (uri) {
+                    try {
+                        // 정규식 두 번을 한 번으로 합친다 — 각 `replace` 가 문자열
+                        // 사본을 하나씩 더 만들기 때문이다.
+                        const html = stripMemoryMapHostBindings(rawHtml);
+                        // DOCTYPE 을 템플릿 리터럴로 붙이면 전체 문자열이 한 벌 더
+                        // 복제된다. 두 번 써서 그 사본을 없앤다.
+                        fs.writeFileSync(uri.fsPath, '<!DOCTYPE html>\n', 'utf-8');
+                        fs.appendFileSync(uri.fsPath, html, 'utf-8');
+                        vscode.window.showInformationMessage(t('HTML 파일이 저장되었습니다.', 'HTML file saved.'));
+                    } catch (e: any) {
+                        vscode.window.showErrorMessage(t(
+                            `HTML 파일 저장 실패: ${e.message}`,
+                            `Failed to save HTML file: ${e.message}`
+                        ));
+                    }
+                }
+            }
+        });
+        panel.title = `Memory Map: ${fileName}`;
+        panel.webview.html = html;
+    } catch (e) {
+        nextMessageDisposable?.dispose();
+        if (created) {
+            panel.dispose();
+        }
+        throw e;
+    }
+
+    state.messageDisposable = nextMessageDisposable;
     panels.set(filePath, state);
+    lastActivePanel = filePath;
+    // 새 state를 먼저 커밋한다. 이전 listener 정리 자체가 실패해도 새 HTML과
+    // registry가 서로 다른 세대를 가리키는 반쪽 교체로 돌아가면 안 된다.
+    try {
+        existing?.messageDisposable?.dispose();
+    } catch { /* VS Code disposable 정리는 best effort이며 새 state를 롤백하지 않는다. */ }
 }
 
 function sectionHexTargetId(sectionIndex: number): string {
@@ -1500,6 +1944,55 @@ export function buildMemoryMapStrings(): Record<string, string> {
         copyFullDumpTitle: t('전체 텍스트 덤프 복사 (모든 섹션)', 'Copy full text dump (every section)'),
         saveHtml: t('HTML 저장', 'Save HTML'),
         saveHtmlTitle: t('HTML 파일로 저장', 'Save as HTML file'),
+        refresh: t('새로 고침', 'Refresh'),
+        refreshTitle: t(
+            '현재 입력 파일 다시 읽기 (AXF/ELF는 선택한 링커/스캐터 파일 포함)',
+            'Reload the current input (including the selected linker/scatter file for AXF/ELF)'
+        ),
+        refreshHint: t(
+            '현재 입력을 다시 읽습니다. AXF/ELF는 선택한 링커/스캐터 파일도 포함하며, 파일 변경은 자동 감시하지 않습니다.',
+            'Reloads the current input and includes the selected linker/scatter file for AXF/ELF. File changes are not watched automatically.'
+        ),
+        refreshing: t('새로 고치는 중…', 'Refreshing…'),
+        refreshTakingLong: t(
+            '새로 고침이 예상보다 오래 걸리고 있습니다. 분석이 끝날 때까지 기다려 주세요…',
+            'Refresh is taking longer than expected. Wait for analysis to finish…'
+        ),
+        refreshSucceeded: t('{time}에 새로 고침 완료', 'Refreshed at {time}'),
+        refreshFailedAt: t(
+            '{time}에 새로 고침 실패 — {reason} 이전 결과를 표시 중입니다.',
+            'Refresh failed at {time} — {reason} Showing previous results.'
+        ),
+        refreshUsageUnchanged: t('Flash/RAM 사용량 변화 없음', 'Flash/RAM usage unchanged'),
+        refreshFlash: 'Flash',
+        refreshRam: 'RAM',
+        refreshInterrupted: t(
+            '결과 응답을 받지 못했습니다.',
+            'No result was received.'
+        ),
+        refreshStaleCompact: t(
+            '{time}에 새로 고침 실패 · 이전 분석 결과 표시 중',
+            'Refresh failed at {time} · Showing previous analysis'
+        ),
+        dismissRefreshDetails: t('새로 고침 실패 세부 정보 닫기', 'Dismiss refresh failure details'),
+        showRefreshDetails: t('새로 고침 실패 세부 정보 보기', 'Show refresh failure details'),
+        configureMemoryMap: t('링커 스크립트 선택…', 'Select linker script…'),
+        configureMemoryMapTitle: t(
+            '현재 ELF에 사용할 링커/스캐터 파일 선택',
+            'Select a linker/scatter file for the current ELF'
+        ),
+        configureSucceededAt: t(
+            '{time}에 링커/스캐터 파일 적용 완료 — {file}',
+            'Linker/scatter file applied at {time} — {file}'
+        ),
+        configureFailedAt: t(
+            '{time}에 링커/스캐터 파일 적용 실패 — {reason} 이전 결과를 표시 중입니다.',
+            'Failed to apply the linker/scatter file at {time} — {reason} Showing previous results.'
+        ),
+        standaloneNotice: t(
+            '저장된 Memory Map 스냅샷입니다. 검색·정렬·펼치기는 사용할 수 있으며 VS Code 전용 Hex/Source 열은 제외되었습니다.',
+            'This is a saved Memory Map snapshot. Search, sorting, and folding remain available; VS Code-only Hex/Source columns were omitted.'
+        ),
         searchPlaceholder: t('검색… (오브젝트, 섹션, 함수, 주소, 크기, 타입)', 'Search... (object, section, function, address, size, type)'),
         searchLabel: t('검색', 'Search'),
         searchPrev: t('이전 결과 (Shift+Enter)', 'Previous match (Shift+Enter)'),
@@ -1606,7 +2099,10 @@ function getWebviewContent(
     regions: MemoryRegion[],
     hasSymbols?: boolean,
     sourceTargets: Map<string, MemoryMapSourceTarget> = new Map(),
-    webview?: vscode.Webview
+    webview?: vscode.Webview,
+    canRefresh: boolean = false,
+    canConfigureLinker: boolean = false,
+    renderId: string = generateMemoryMapNonce()
 ): string {
     const nonce = generateMemoryMapNonce();
     const cspSource = webview?.cspSource ?? 'vscode-webview:';
@@ -1614,6 +2110,18 @@ function getWebviewContent(
     const S = buildMemoryMapStrings();
     const stringsLiteral = JSON.stringify(S).replace(/</g, '\\u003c');
     const htmlLang = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
+    const refreshControls = canRefresh || canConfigureLinker
+        ? `<span id="refreshControls" class="refresh-controls">
+        ${canRefresh ? `<button id="btnRefresh" data-action="refresh" title="${esc(S.refreshTitle)}" aria-label="${esc(S.refresh)}" aria-describedby="refreshHint" aria-disabled="false">${esc(S.refresh)}</button>` : ''}
+        ${canConfigureLinker ? `<button id="btnConfigureMemoryMap" data-action="configure-memory-map" title="${esc(S.configureMemoryMapTitle)}">${esc(S.configureMemoryMap)}</button>` : ''}
+        ${canRefresh ? `<small id="refreshHint" class="refresh-hint">${esc(S.refreshHint)}</small>` : ''}</span>`
+        : '';
+    const refreshStatus = canRefresh
+        ? `<div id="refreshFeedback" class="refresh-feedback">
+            <div id="refreshStatus" class="refresh-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>
+            <button id="refreshDismiss" class="refresh-dismiss" data-action="dismiss-refresh" aria-controls="refreshStatus" aria-expanded="true" title="${esc(S.dismissRefreshDetails)}" aria-label="${esc(S.dismissRefreshDetails)}" hidden>×</button>
+        </div>`
+        : '';
     // Build JSON data for lazy WebView rendering
     const regionJsonData = memoryUsage.map((u, regionIndex) => {
         const pct = u.total > 0 ? (u.used / u.total * 100) : 0;
@@ -1767,8 +2275,8 @@ function getWebviewContent(
             <td class="num">${s.size}</td>
             <td><span class="type-badge type-${s.type.toLowerCase()}">${s.type}</span></td>
             ${hasSectionHexTargets ? s.fileRange
-                ? `<td><button class="hex-link${s.fileRange.kind === 'file' ? '' : ' unavailable'}" data-action="open-hex" data-target-id="${sectionHexTargetId(sectionIndex)}" title="${esc(s.fileRange.kind === 'file' ? S.viewHexTitle : S.noFileBytesTitle)}">${esc(s.fileRange.kind === 'file' ? S.viewHex : S.noFileBytes)}</button></td>`
-                : '<td></td>' : ''}
+                ? `<td class="memory-map-host-only"><button class="hex-link${s.fileRange.kind === 'file' ? '' : ' unavailable'}" data-action="open-hex" data-target-id="${sectionHexTargetId(sectionIndex)}" title="${esc(s.fileRange.kind === 'file' ? S.viewHexTitle : S.noFileBytesTitle)}">${esc(s.fileRange.kind === 'file' ? S.viewHex : S.noFileBytes)}</button></td>`
+                : '<td class="memory-map-host-only"></td>' : ''}
         </tr>`
     ).join('');
 
@@ -1825,20 +2333,35 @@ function getWebviewContent(
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
+        flex-wrap: wrap;
+        gap: 8px 12px;
         margin-bottom: 16px;
     }
-    .header-left { flex: 1; }
+    .header-left { flex: 1 1 220px; min-width: 0; }
+    .header-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
     .subtitle { font-size: 11px; opacity: 0.6; }
     button {
         background: var(--btn-bg);
         color: var(--btn-fg);
         border: none;
         padding: 4px 10px;
+        min-width: 24px;
+        min-height: 24px;
         cursor: pointer;
         border-radius: 2px;
         font-size: 11px;
     }
     button:hover { background: var(--btn-hover); }
+    button:disabled { opacity: 0.45; cursor: default; }
+    button[aria-disabled="true"] {
+        opacity: 1;
+        cursor: default;
+        color: var(--vscode-button-secondaryForeground, #ffffff);
+        background: var(--vscode-button-secondaryBackground, #5f6a79);
+    }
+    button[aria-disabled="true"]:hover {
+        background: var(--vscode-button-secondaryBackground, #5f6a79);
+    }
     button.hex-link.unavailable {
         background: transparent;
         color: var(--vscode-descriptionForeground, var(--fg));
@@ -2052,6 +2575,12 @@ function getWebviewContent(
         margin-bottom: 16px;
         line-height: 1.6;
     }
+    .no-regions .inline-action {
+        display: inline;
+        padding: 1px 5px;
+        font-size: inherit;
+        vertical-align: baseline;
+    }
     .info-note {
         padding: 8px 12px;
         border-left: 3px solid var(--vscode-editorInfo-foreground, #3794ff);
@@ -2091,6 +2620,68 @@ function getWebviewContent(
     .obj-summary-header { display: inline-block; font-size: 12px; font-weight: 600; cursor: pointer; padding: 2px 4px; border-radius: 3px; }
     .obj-summary-bar button { font-size: 11px; padding: 4px 10px; }
     .obj-summary-header:hover { background: var(--hover-bg); }
+    .refresh-controls {
+        display: inline-flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        min-width: 0;
+        max-width: 520px;
+    }
+    .refresh-hint {
+        flex: 1 1 260px;
+        min-width: 180px;
+        color: var(--vscode-descriptionForeground, var(--fg));
+        font-size: 11px;
+        line-height: 1.35;
+    }
+    .refresh-feedback { display: flex; align-items: flex-start; gap: 6px; }
+    .refresh-status {
+        border-radius: 3px;
+        flex: 1;
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+    .refresh-status:empty { border: 0; margin: 0; padding: 0; }
+    .refresh-status.is-busy,
+    .refresh-status.is-success,
+    .refresh-status.is-error {
+        margin: 2px 0 12px;
+        padding: 8px 10px;
+    }
+    .refresh-status.is-busy {
+        border: 1px solid var(--vscode-editorInfo-foreground, #3794ff);
+        background: var(--vscode-editorInfo-background, rgba(55, 148, 255, 0.08));
+        color: var(--fg);
+    }
+    .refresh-status.is-success {
+        border-left: 3px solid var(--ok);
+        background: var(--vscode-editorInfo-background, rgba(76, 175, 80, 0.08));
+        color: var(--fg);
+    }
+    .refresh-status.is-error {
+        border: 1px solid var(--vscode-inputValidation-errorBorder, var(--danger));
+        background: var(--vscode-inputValidation-errorBackground, rgba(190, 17, 0, 0.12));
+        color: var(--vscode-inputValidation-errorForeground, var(--fg));
+    }
+    .refresh-status.is-compact { flex: 0 1 auto; font-size: 11px; padding: 4px 8px; }
+    .refresh-dismiss { flex: 0 0 auto; margin-top: 2px; min-width: 28px; padding: 7px; }
+    .refresh-dismiss[hidden] { display: none; }
+    .standalone-notice {
+        padding: 8px 12px;
+        border-left: 3px solid var(--vscode-editorInfo-foreground, #3794ff);
+        background: var(--vscode-editorInfo-background, rgba(55, 148, 255, 0.08));
+        margin-bottom: 12px;
+        font-size: 12px;
+    }
+    @media (max-width: 480px) {
+        body { padding: 12px; }
+        .header-left { flex-basis: 100%; }
+        .header-actions { flex: 1 1 100%; justify-content: flex-start; }
+        .header-actions button { flex: 1 1 auto; white-space: nowrap; }
+        .refresh-controls { flex: 1 1 100%; max-width: none; }
+        .refresh-hint { flex-basis: 100%; min-width: 0; }
+    }
     /* 0.55는 기본 Dark+ 팔레트에서 4.34:1로 WCAG AA(4.5:1) 미달이다. 이 값이
        섹션 행 토글이 무엇을 펼칠지 알려 주는 유일한 자리라 읽혀야 한다. */
     .obj-sec-count { opacity: 0.7; font-size: 11px; font-weight: normal; }
@@ -2106,12 +2697,15 @@ function getWebviewContent(
             <h1>${esc(fileName)}</h1>
             <div class="subtitle">${esc(S.entryPoint)}: ${formatHex(entryPoint)}</div>
         </div>
-        <button id="btnCopy" title="${esc(S.copyReportTitle)}">${esc(S.copyReport)}</button>
-        <span style="width:8px;display:inline-block"></span>
-        <button id="btnCopyFull" title="${esc(S.copyFullDumpTitle)}">${esc(S.copyFullDump)}</button>
-        <span style="width:8px;display:inline-block"></span>
-        <button id="btnSaveHtml" title="${esc(S.saveHtmlTitle)}">${esc(S.saveHtml)}</button>
+        <div id="memoryMapHostActions" class="header-actions">
+            <button id="btnCopy" title="${esc(S.copyReportTitle)}">${esc(S.copyReport)}</button>
+            <button id="btnCopyFull" title="${esc(S.copyFullDumpTitle)}">${esc(S.copyFullDump)}</button>
+            <button id="btnSaveHtml" title="${esc(S.saveHtmlTitle)}">${esc(S.saveHtml)}</button>
+            ${refreshControls}
+        </div>
     </div>
+    <div id="memoryMapStandaloneNotice" class="standalone-notice" hidden>${esc(S.standaloneNotice)}</div>
+    ${refreshStatus}
 
     <div class="search-box">
         <input id="searchInput" type="text" placeholder="${esc(S.searchPlaceholder)}" aria-label="${esc(S.searchLabel)}">
@@ -2130,7 +2724,7 @@ function getWebviewContent(
     ` : `
         <div class="no-regions">
             ${t('메모리 영역 크기가 설정되지 않았습니다. 사용량 막대를 보려면:', 'Memory region sizes are not configured. To see usage bars:')}<br>
-            - ${t('이 명령을 다시 실행하고 링커 스크립트(.ld / .sct)를 선택하세요', 'Run this command again and select a linker script (.ld / .sct)')}<br>
+            ${canConfigureLinker ? `<span id="noRegionConfigure">- <button class="inline-action" data-action="configure-memory-map" title="${esc(S.configureMemoryMapTitle)}">${esc(S.configureMemoryMap)}</button><br></span>` : ''}
             - ${t('또는', 'Or add')} <code>memoryMap.regions</code> ${t('설정을', 'to')} <code>.vscode/taskhub_types.json</code>${t('에 추가하세요', '')}
         </div>
     `}
@@ -2145,7 +2739,7 @@ function getWebviewContent(
                 <th class="num" data-sort="size" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colSize)}</th>
                 <th class="num" data-sort="bytes" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colBytes)}</th>
                 <th data-sort="type" scope="col" tabindex="0" role="columnheader" aria-sort="none">${esc(S.colType)}</th>
-                ${hasSectionHexTargets ? `<th scope="col">${esc(S.colHex)}</th>` : ''}
+                ${hasSectionHexTargets ? `<th class="memory-map-host-only" scope="col">${esc(S.colHex)}</th>` : ''}
             </tr>
         </thead>
         <tbody>${sectionTableRows}</tbody>
@@ -2155,10 +2749,284 @@ function getWebviewContent(
 
 <script nonce="${nonce}">
 const RD = ${regionDataJsLiteral};
+const CURRENT_TOTALS = Object.freeze({ flash: ${flashTotal}, ram: ${ramTotal} });
 (function() {
+    const IS_STANDALONE = typeof acquireVsCodeApi !== 'function';
     const vscode = acquireVsCodeApi();
     // Locale-resolved UI labels from the host (buildMemoryMapStrings).
     const S = ${stringsLiteral};
+    if (IS_STANDALONE) {
+        document.querySelectorAll('.memory-map-host-only').forEach(function(cell) { cell.remove(); });
+        const standaloneNotice = document.getElementById('memoryMapStandaloneNotice');
+        if (standaloneNotice) { standaloneNotice.hidden = false; }
+
+        // Save as HTML은 live outerHTML을 받으므로, 저장 순간에 펼쳐진 lazy DOM과
+        // 검색 강조가 함께 직렬화될 수 있다. 새 문서의 rendered/vtMap은 비어
+        // 있어 그 DOM을 그대로 두면 검색·스크롤이 보이는 표와 다른 상태를
+        // 조작한다. canonical 데이터(RD)로 다시 만들 수 있도록 정적 시작 상태로
+        // 정규화한다. 사용자는 곧바로 검색하거나 영역을 다시 펼칠 수 있다.
+        const standaloneSearch = document.getElementById('searchInput');
+        if (standaloneSearch) { standaloneSearch.value = ''; }
+        document.querySelectorAll('.region-card').forEach(function(card) {
+            card.style.display = '';
+            const detail = card.querySelector('.region-detail');
+            if (detail) {
+                detail.innerHTML = '';
+                detail.style.display = 'none';
+            }
+            const header = card.querySelector('.region-header');
+            if (header) { header.setAttribute('aria-expanded', 'false'); }
+            const icon = card.querySelector('.region-header .fold-icon');
+            if (icon) { icon.textContent = '\u25B6'; }
+        });
+        document.querySelectorAll('mark.sm-hl').forEach(function(mark) {
+            mark.replaceWith(mark.textContent || '');
+        });
+        document.querySelectorAll('#sectionTable tbody tr, .overview-table tbody tr').forEach(function(row) {
+            row.style.display = '';
+            row.classList.remove('search-match', 'current-match');
+        });
+        document.querySelectorAll('.current-match').forEach(function(row) {
+            row.classList.remove('current-match');
+        });
+        document.querySelectorAll('.func-cell').forEach(function(cell) {
+            cell.classList.add('hidden');
+        });
+        document.querySelectorAll('.sortable-table th[data-sort]').forEach(function(header) {
+            header.textContent = header.textContent.replace(/ [\u25B2\u25BC]$/, '');
+            header.setAttribute('aria-sort', 'none');
+            header.setAttribute('title', S.sortAscending);
+        });
+    }
+    // render ID는 이전 문서에서 늦게 도착한 host 메시지를 거르는 세대 값이다.
+    // 화면 상태는 별도 필드로 저장해 성공한 Refresh의 새 세대에도 복원한다.
+    const RENDER_ID = ${JSON.stringify(renderId)};
+    let refreshInFlight = false;
+    let refreshFeedbackGeneration = 0;
+    let refreshLifecycleGeneration = 0;
+    let refreshAttemptSequence = 0;
+    let activeRefreshAttemptId;
+    let pendingSnapshotScheduled = false;
+    function readWebviewState() {
+        if (typeof vscode === 'undefined' || typeof vscode.getState !== 'function') return {};
+        const state = vscode.getState();
+        return state && typeof state === 'object' ? state : {};
+    }
+    function persistWebviewState(patch) {
+        if (typeof vscode === 'undefined' || typeof vscode.setState !== 'function') return;
+        vscode.setState(Object.assign({}, readWebviewState(), patch, { memoryMapRenderId: RENDER_ID }));
+    }
+    function afterPaint(callback) {
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(function() { requestAnimationFrame(callback); });
+        } else {
+            callback();
+        }
+    }
+    function refreshTime(timestamp) {
+        const value = Number(timestamp);
+        const date = Number.isFinite(value) ? new Date(value) : new Date();
+        const locale = document.documentElement.lang || undefined;
+        try {
+            return new Intl.DateTimeFormat(locale, {
+                hour: '2-digit', minute: '2-digit', second: '2-digit'
+            }).format(date);
+        } catch {
+            try {
+                return date.toLocaleTimeString(locale);
+            } catch {
+                return date.toLocaleTimeString();
+            }
+        }
+    }
+    function refreshSize(bytes) {
+        const value = Number(bytes);
+        if (!Number.isFinite(value) || value < 0) return '';
+        if (value < 1024) return value + ' B';
+        if (value < 1024 * 1024) return (value / 1024).toFixed(1) + ' KB';
+        return (value / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+    function refreshSuccessMessage(completedAt, previousTotals) {
+        const base = fmt(S.refreshSucceeded, { time: refreshTime(completedAt) });
+        if (!previousTotals || typeof previousTotals !== 'object') return base;
+        const previousFlash = Number(previousTotals.flash);
+        const previousRam = Number(previousTotals.ram);
+        if (!Number.isFinite(previousFlash) || previousFlash < 0
+            || !Number.isFinite(previousRam) || previousRam < 0) return base;
+        const changes = [];
+        if (previousFlash !== CURRENT_TOTALS.flash) {
+            changes.push(S.refreshFlash + ' ' + refreshSize(previousFlash) + ' \u2192 ' + refreshSize(CURRENT_TOTALS.flash));
+        }
+        if (previousRam !== CURRENT_TOTALS.ram) {
+            changes.push(S.refreshRam + ' ' + refreshSize(previousRam) + ' \u2192 ' + refreshSize(CURRENT_TOTALS.ram));
+        }
+        return base + ' \u00B7 ' + (changes.length > 0 ? changes.join(' \u00B7 ') : S.refreshUsageUnchanged);
+    }
+    function scheduleUiTimeout(callback, delayMs) {
+        if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
+            window.setTimeout(callback, delayMs);
+        }
+    }
+    function scheduleSuccessCompaction() {
+        const expectedGeneration = refreshFeedbackGeneration;
+        scheduleUiTimeout(function() {
+            if (expectedGeneration !== refreshFeedbackGeneration || refreshInFlight) return;
+            const refreshStatus = document.getElementById('refreshStatus');
+            if (refreshStatus && refreshStatus.classList.contains('is-success')) {
+                refreshStatus.classList.add('is-compact');
+            }
+        }, 8000);
+    }
+    function setRefreshFeedback(kind, message, focusButton, detailsExpanded) {
+        const refreshButton = document.getElementById('btnRefresh');
+        const configureButton = document.getElementById('btnConfigureMemoryMap');
+        const refreshStatus = document.getElementById('refreshStatus');
+        const refreshDismiss = document.getElementById('refreshDismiss');
+        if (!refreshButton || !refreshStatus) return;
+        const feedbackGeneration = ++refreshFeedbackGeneration;
+        refreshInFlight = kind === 'busy';
+        refreshButton.setAttribute('aria-disabled', refreshInFlight ? 'true' : 'false');
+        if (configureButton) {
+            configureButton.setAttribute('aria-disabled', refreshInFlight ? 'true' : 'false');
+        }
+        refreshStatus.className = 'refresh-status' + (kind ? ' is-' + kind : '');
+        refreshStatus.title = '';
+        refreshStatus.textContent = message || '';
+        // busy=true인 live region은 갱신 알림을 보류한다. 먼저 문구를 쓰고 현재
+        // busy를 false로 풀어 알린 뒤, 진행 상태라면 다음 paint 이후에만 true로
+        // 바꾼다. 그 사이 성공/실패가 도착하면 refreshInFlight guard가 stale
+        // callback이 true를 되살리는 것도 막는다.
+        refreshStatus.setAttribute('aria-busy', 'false');
+        if (refreshInFlight) {
+            afterPaint(function() {
+                if (feedbackGeneration === refreshFeedbackGeneration && refreshInFlight) {
+                    refreshStatus.setAttribute('aria-busy', 'true');
+                }
+            });
+            // 동기 ELF 분석을 UI timer로 취소할 수는 없다. 버튼을 다시
+            // 활성화해 중복 파싱을 허용하지 말고, 오래 걸린다는 상태만
+            // 알린다. 이후 성공/실패가 오면 generation guard가 이 callback을 버린다.
+            scheduleUiTimeout(function() {
+                if (feedbackGeneration !== refreshFeedbackGeneration || !refreshInFlight) return;
+                refreshStatus.setAttribute('aria-busy', 'false');
+                refreshStatus.textContent = S.refreshTakingLong;
+                afterPaint(function() {
+                    if (feedbackGeneration === refreshFeedbackGeneration && refreshInFlight) {
+                        refreshStatus.setAttribute('aria-busy', 'true');
+                    }
+                });
+            }, 12000);
+        }
+        if (refreshDismiss) {
+            const hasDetails = typeof detailsExpanded === 'boolean';
+            refreshDismiss.hidden = !hasDetails;
+            if (hasDetails) {
+                const expanded = detailsExpanded === true;
+                const label = expanded ? S.dismissRefreshDetails : S.showRefreshDetails;
+                refreshDismiss.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+                refreshDismiss.setAttribute('aria-label', label);
+                refreshDismiss.setAttribute('title', label);
+                refreshDismiss.textContent = expanded ? '×' : '…';
+            }
+        }
+        if (focusButton) { afterPaint(function() { refreshButton.focus({ preventScroll: true }); }); }
+    }
+    function normalizeFeedbackReason(reason) {
+        const rawReason = typeof reason === 'string' && reason.trim() ? reason.trim() : S.refreshInterrupted;
+        return /[.!?…。！？](?:["'”’)}»›]*)$/u.test(rawReason)
+            ? rawReason
+            : rawReason + '.';
+    }
+    function renderRefreshFailure(reason, failedAt, focusButton, compact) {
+        const safeReason = normalizeFeedbackReason(reason);
+        const effectiveFailedAt = Number.isFinite(Number(failedAt)) ? Number(failedAt) : Date.now();
+        const time = refreshTime(effectiveFailedAt);
+        const fullMessage = fmt(S.refreshFailedAt, { time: time, reason: safeReason });
+        const message = compact
+            ? fmt(S.refreshStaleCompact, { time: time })
+            : fullMessage;
+        setRefreshFeedback(compact ? 'error is-compact' : 'error', message, focusButton, !compact);
+        const refreshStatus = document.getElementById('refreshStatus');
+        if (refreshStatus) { refreshStatus.title = compact ? fullMessage : ''; }
+        persistWebviewState({
+            refreshPending: false,
+            refreshFailed: true,
+            refreshFailureReason: safeReason,
+            refreshFailedAt: effectiveFailedAt,
+            refreshFailureDismissed: compact === true,
+            refreshAttemptId: undefined
+        });
+    }
+    function renderRefreshSuccess(completedAt, focusButton, previousTotals) {
+        setRefreshFeedback('success', refreshSuccessMessage(completedAt, previousTotals), focusButton, undefined);
+        scheduleSuccessCompaction();
+        persistWebviewState({
+            refreshPending: false,
+            refreshFailed: false,
+            refreshFailureReason: undefined,
+            refreshFailedAt: undefined,
+            refreshFailureDismissed: false,
+            refreshAttemptId: undefined,
+            refreshCompletedAt: completedAt || Date.now()
+        });
+    }
+    function renderMemoryMapConfigurationFeedback(message) {
+        const completedAt = Number.isFinite(Number(message.at)) ? Number(message.at) : Date.now();
+        const time = refreshTime(completedAt);
+        if (message.kind === 'configure-success') {
+            setRefreshFeedback('success', fmt(S.configureSucceededAt, {
+                time: time,
+                file: typeof message.linkerName === 'string' ? message.linkerName : ''
+            }), true, undefined);
+            scheduleSuccessCompaction();
+            return;
+        }
+        const reason = normalizeFeedbackReason(message.reason);
+        setRefreshFeedback('error', fmt(S.configureFailedAt, {
+            time: time,
+            reason: reason
+        }), true, undefined);
+    }
+    const savedWebviewState = readWebviewState();
+    const sameRenderState = savedWebviewState.memoryMapRenderId === RENDER_ID;
+    const savedRefreshAttemptId = typeof savedWebviewState.refreshAttemptId === 'string'
+        && savedWebviewState.refreshAttemptId.length > 0
+        && savedWebviewState.refreshAttemptId.length <= 128
+        ? savedWebviewState.refreshAttemptId
+        : undefined;
+    const refreshStillPending = sameRenderState && savedWebviewState.refreshPending === true
+        && savedRefreshAttemptId !== undefined;
+    const refreshSucceededOnLoad = !sameRenderState && savedWebviewState.refreshPending === true;
+    activeRefreshAttemptId = refreshStillPending ? savedRefreshAttemptId : undefined;
+    const savedViewState = savedWebviewState.memoryMapViewState;
+    const validViewState = savedViewState && savedViewState.version === 1
+        && savedViewState.fromRenderId === savedWebviewState.memoryMapRenderId;
+    const pendingViewState = validViewState && (
+        sameRenderState || (refreshSucceededOnLoad && savedViewState.fromRenderId !== RENDER_ID)
+    ) ? savedViewState : undefined;
+    const restoredRefreshState = refreshStillPending
+        ? { kind: 'busy' }
+        : sameRenderState && savedWebviewState.refreshFailed === true
+            ? {
+            kind: 'failed',
+            reason: savedWebviewState.refreshFailureReason,
+            at: savedWebviewState.refreshFailedAt,
+            compact: savedWebviewState.refreshFailureDismissed === true
+            }
+            : refreshSucceededOnLoad
+                ? { kind: 'success', at: Date.now() }
+                : undefined;
+    persistWebviewState({
+        refreshPending: refreshStillPending,
+        refreshFailed: refreshStillPending || restoredRefreshState?.kind === 'failed',
+        refreshFailureReason: refreshStillPending
+            ? savedWebviewState.refreshFailureReason
+            : restoredRefreshState?.kind === 'failed' ? restoredRefreshState.reason : undefined,
+        refreshFailedAt: refreshStillPending
+            ? savedWebviewState.refreshFailedAt
+            : restoredRefreshState?.kind === 'failed' ? restoredRefreshState.at : undefined,
+        refreshAttemptId: refreshStillPending ? activeRefreshAttemptId : undefined
+    });
     // 저장 HTML 상한. 호스트와 **같은 값**을 쓴다 — 웹뷰가 먼저 걸러 내고,
     // 호스트 검사는 그대로 두어 최종 권위로 남는다.
     const SAVE_HTML_LIMIT = ${MEMORY_MAP_MAX_SAVE_HTML_CHARS};
@@ -2173,7 +3041,7 @@ const RD = ${regionDataJsLiteral};
     const vtMap = new Map();
     const staticOrig = new WeakMap();   // original innerHTML of static-table rows we've highlighted, for restore
     const secTotal = ${sectionSummary.length};   // total rows in the All Sections table (for the "X / N" heading)
-    let funcVis = false, curQ = '', searchAutoFunc = false, funcUserOverride = false;
+    let funcVis = false, curQ = '', searchAutoFunc = false, funcUserOverride = false, restoringView = false;
     // Ordered match list for ◀/▶ navigation. Entries are either { k:'el', el:<tr> }
     // (a live row) or { k:'vt', vi:regionIdx, r:rowIndex } (a row in a virtual
     // table that may not be in the DOM yet — resolved by scrolling the viewport).
@@ -2260,15 +3128,15 @@ const RD = ${regionDataJsLiteral};
         const rc = e.fr ? ' class="free-row"' : '';
         const sc = hsi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.s) + '</td>' : '';
         const fc = hfi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.f) + '</td>' : '';
-        const hc = hhx
+        const hc = hhx && !IS_STANDALONE
             ? (e.hx
-                ? '<td><button class="hex-link' + (e.ha ? '' : ' unavailable') + '" data-action="open-hex" data-target-id="' + e.hx + '" title="' + esc(e.ha ? S.viewHexTitle : S.noFileBytesTitle) + '">' + esc(e.ha ? S.viewHex : S.noFileBytes) + '</button></td>'
-                : '<td></td>')
+                ? '<td class="memory-map-host-only"><button class="hex-link' + (e.ha ? '' : ' unavailable') + '" data-action="open-hex" data-target-id="' + e.hx + '" title="' + esc(e.ha ? S.viewHexTitle : S.noFileBytesTitle) + '">' + esc(e.ha ? S.viewHex : S.noFileBytes) + '</button></td>'
+                : '<td class="memory-map-host-only"></td>')
             : '';
-        const sourceCell = hhs
+        const sourceCell = hhs && !IS_STANDALONE
             ? (e.sx
-                ? '<td><button class="source-link" data-action="open-source" data-target-id="' + e.sx + '" title="' + esc(S.viewSourceTitle) + '">' + esc(S.viewSource) + '</button></td>'
-                : '<td></td>')
+                ? '<td class="memory-map-host-only"><button class="source-link" data-action="open-source" data-target-id="' + e.sx + '" title="' + esc(S.viewSourceTitle) + '">' + esc(S.viewSource) + '</button></td>'
+                : '<td class="memory-map-host-only"></td>')
             : '';
         // 정렬값 원본. 이 표는 행 수에 따라 정렬 경로가 갈린다 — 가상 스크롤
         // (200행 초과)이면 rd.segments 를 직접 정렬하지만, 그 아래면
@@ -2373,8 +3241,8 @@ const RD = ${regionDataJsLiteral};
                 + sortTh('size', S.colSize, { cls: 'num', sortBy: 'bytes' })
                 + sortTh('bytes', S.colBytes, { cls: 'num' })
                 + sortTh('type', S.colType)
-                + (rd.hhx ? plainTh(S.colHex) : '')
-                + (rd.hhs ? plainTh(S.colSource) : '') + '</tr>';
+                + (rd.hhx && !IS_STANDALONE ? plainTh(S.colHex, 'memory-map-host-only') : '')
+                + (rd.hhs && !IS_STANDALONE ? plainTh(S.colSource, 'memory-map-host-only') : '') + '</tr>';
 
             if (rd.segments.length > VT_THRESH) {
                 const vpH = Math.min(rd.segments.length * ROW_H, MAX_VP_H);
@@ -2410,7 +3278,8 @@ const RD = ${regionDataJsLiteral};
             vp: vp, tb: vp.querySelector('tbody'),
             data: rd.segments,
             fd: curQ ? rd.segments.filter(function(e) { return matchSeg(e, curQ); }) : rd.segments,
-            cc: 6 + (rd.hsi ? 1 : 0) + (rd.hfi ? 1 : 0) + (rd.hhx ? 1 : 0) + (rd.hhs ? 1 : 0),
+            cc: 6 + (rd.hsi ? 1 : 0) + (rd.hfi ? 1 : 0)
+                + (!IS_STANDALONE && rd.hhx ? 1 : 0) + (!IS_STANDALONE && rd.hhs ? 1 : 0),
             idx: idx, ls: -1, le: -1
         };
         vtMap.set(idx, vt);
@@ -2444,13 +3313,13 @@ const RD = ${regionDataJsLiteral};
     // --- Copy / Save ---
     // 본문은 extension host가 이미 보유한다. 웹뷰는 선택한 종류만 보내므로
     // Copy Full Dump도 거대한 report 문자열을 IPC로 다시 복제하지 않는다.
-    document.getElementById('btnCopy').addEventListener('click', function() {
-        vscode.postMessage({ command: 'copyReport', kind: 'summary' });
+    document.getElementById('btnCopy')?.addEventListener('click', function() {
+        vscode.postMessage({ command: 'copyReport', kind: 'summary', renderId: RENDER_ID });
     });
-    document.getElementById('btnCopyFull').addEventListener('click', function() {
-        vscode.postMessage({ command: 'copyReport', kind: 'full' });
+    document.getElementById('btnCopyFull')?.addEventListener('click', function() {
+        vscode.postMessage({ command: 'copyReport', kind: 'full', renderId: RENDER_ID });
     });
-    document.getElementById('btnSaveHtml').addEventListener('click', function() {
+    document.getElementById('btnSaveHtml')?.addEventListener('click', function() {
         // **직렬화 전에** 크기를 잰다. documentElement.outerHTML 은
         // 그 자체로 수백 MB 짜리 문자열을 한 번에 만들고, 그것이 구조화 복제로
         // 호스트에 한 벌 더 복사된 **뒤에야** 호스트의 상한 검사에 닿는다 —
@@ -2587,10 +3456,10 @@ const RD = ${regionDataJsLiteral};
         }
 
         if (serializedHtmlExceedsLimit(document.documentElement, SAVE_HTML_LIMIT)) {
-            vscode.postMessage({ command: 'saveHtmlTooLarge' });
+            vscode.postMessage({ command: 'saveHtmlTooLarge', renderId: RENDER_ID });
             return;
         }
-        vscode.postMessage({ command: 'saveHtml', html: document.documentElement.outerHTML });
+        vscode.postMessage({ command: 'saveHtml', html: document.documentElement.outerHTML, renderId: RENDER_ID });
     });
 
     // --- Region fold/unfold with lazy rendering ---
@@ -2773,16 +3642,18 @@ const RD = ${regionDataJsLiteral};
         if (m.k === 'el') {
             el = m.el;
             const rc = el && el.closest && el.closest('.region-card');
-            if (rc && rc.dataset && rc.dataset.idx) { ensureRegionExpanded(parseInt(rc.dataset.idx)); }
+            if (!restoringView && rc && rc.dataset && rc.dataset.idx) { ensureRegionExpanded(parseInt(rc.dataset.idx)); }
         } else {
-            ensureRegionExpanded(m.vi);   // expand first so the viewport has a real clientHeight
+            if (!restoringView) { ensureRegionExpanded(m.vi); }   // expand first so the viewport has a real clientHeight
             const vt = vtMap.get(m.vi);
             if (!vt) { updateNavUI(); return; }
             // 행 **객체**도 함께 기억한다. 정렬은 이 배열을 제자리에서 재배열하므로
             // 번호만으로는 같은 심볼을 다시 찾을 수 없다.
             currentTarget.seg = vt.fd[m.r];
-            const maxTop = Math.max(0, vt.fd.length * ROW_H - vt.vp.clientHeight);
-            vt.vp.scrollTop = Math.min(maxTop, Math.max(0, (m.r + 0.5) * ROW_H - vt.vp.clientHeight / 2));
+            if (!restoringView) {
+                const maxTop = Math.max(0, vt.fd.length * ROW_H - vt.vp.clientHeight);
+                vt.vp.scrollTop = Math.min(maxTop, Math.max(0, (m.r + 0.5) * ROW_H - vt.vp.clientHeight / 2));
+            }
             vt.ls = -1;
             renderVT(vt);
             el = vt.tb.querySelectorAll('tr:not(.vt-sp)')[m.r - vt.ls];
@@ -2790,13 +3661,15 @@ const RD = ${regionDataJsLiteral};
         if (!el) { updateNavUI(); return; }
         el.classList.add('current-match');
         currentMatchEl = el;
-        if (focusRow) {
+        if (focusRow && !restoringView) {
             // 스크롤은 아래에서 우리가 부드럽게 한다 — focus() 가 먼저 뛰게 두면
             // 화면이 두 번 튄다.
             el.setAttribute('tabindex', '-1');
             el.focus({ preventScroll: true });
         }
-        if (m.k === 'el') {
+        if (restoringView) {
+            updateNavUI();
+        } else if (m.k === 'el') {
             if (force || !matchInView(el)) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
         } else {
             // el lives inside a nested-scroll viewport we already positioned; scroll only the page.
@@ -2881,7 +3754,8 @@ const RD = ${regionDataJsLiteral};
         rebuildMatchList(curQ);
         curMatch = matchList.length > 0 ? 0 : -1;
         updateNavUI();
-        if (curMatch === 0) { revealMatch(0, false); }
+        if (curMatch === 0 && !restoringView) { revealMatch(0, false); }
+        schedulePendingSnapshotRefresh();
     }
 
     function doSearch() {
@@ -2999,7 +3873,7 @@ const RD = ${regionDataJsLiteral};
         rebuildMatchList(q);
         curMatch = matchList.length > 0 ? 0 : -1;
         updateNavUI();
-        if (curMatch === 0) { revealMatch(0, false); }
+        if (curMatch === 0 && !restoringView) { revealMatch(0, false); }
     }
 
     // --- Expand All / Collapse All ---
@@ -3114,6 +3988,51 @@ const RD = ${regionDataJsLiteral};
     // --- Scroll to region / row (from extension Ctrl+Shift+O command) ---
     window.addEventListener('message', function(event) {
         const msg = event.data;
+        if (msg.command === 'memoryMapPanelFeedback' && msg.renderId === RENDER_ID) {
+            const feedbackId = typeof msg.feedbackId === 'string'
+                && msg.feedbackId.length > 0
+                && msg.feedbackId.length <= 128
+                ? msg.feedbackId
+                : undefined;
+            if (!feedbackId) return;
+            // 새 Refresh가 이미 시작됐다면 지연된 linker 결과가 busy를
+            // 덮지 않게 표시는 건너뛴다. ack는 보내 host의 durable 복원이
+            // 다음 context에서 이전 결과를 다시 살리지 않게 한다.
+            if (!refreshInFlight) {
+                refreshLifecycleGeneration++;
+                renderMemoryMapConfigurationFeedback(msg);
+            }
+            vscode.postMessage({
+                command: 'memoryMapPanelFeedbackAcknowledged',
+                renderId: RENDER_ID,
+                feedbackId: feedbackId
+            });
+            return;
+        }
+        if (msg.command === 'refreshFailed' && msg.renderId === RENDER_ID) {
+            const failedAttemptId = typeof msg.refreshAttemptId === 'string'
+                && msg.refreshAttemptId.length > 0
+                && msg.refreshAttemptId.length <= 128
+                ? msg.refreshAttemptId
+                : undefined;
+            // renderId는 HTML 세대만 구분한다. 같은 문서에서 실패 후 재시도한
+            // 경우에는 이전 attempt의 지연/중복 실패가 새 busy를 취소하지 못하게
+            // 요청별 ID까지 맞아야 한다.
+            if (!failedAttemptId || failedAttemptId !== activeRefreshAttemptId) { return; }
+            refreshLifecycleGeneration++;
+            activeRefreshAttemptId = undefined;
+            renderRefreshFailure(msg.reason, msg.failedAt, true, false);
+            vscode.postMessage({
+                command: 'refreshFailureAcknowledged',
+                renderId: RENDER_ID,
+                refreshAttemptId: failedAttemptId
+            });
+            return;
+        }
+        if (msg.command === 'requestRefresh' && msg.renderId === RENDER_ID) {
+            beginRefresh();
+            return;
+        }
         if (msg.command === 'revealEntry') {
             revealEntry(msg.regionIndex, msg.region, msg.name, msg.addr);
             return;
@@ -3344,6 +4263,7 @@ const RD = ${regionDataJsLiteral};
         // Re-render virtual tables to reflect column visibility
         vtMap.forEach(function(vt) { vt.ls = -1; renderVT(vt); });
     };
+    syncFuncBtn();
 
     // --- Toggle Object Summary fold ---
     // \uD5E4\uB354\uC640 \uC139\uC158 \uD589 \uBC84\uD2BC\uC774 \uD615\uC81C\uB77C DOM \uC704\uCE58\uB85C \uBCF8\uBB38\uC744 \uCC3E\uC744 \uC218 \uC5C6\uB2E4. \uB458 \uB2E4
@@ -3488,6 +4408,295 @@ const RD = ${regionDataJsLiteral};
         window.scrollTo({ top: 0, behavior: 'smooth' });
     });
 
+    function capturedSort(table, kind, regionIndex) {
+        if (!table) return null;
+        const active = table.querySelector('th[data-sort][aria-sort="ascending"], th[data-sort][aria-sort="descending"]');
+        if (!active) return null;
+        return {
+            kind: kind,
+            regionIndex: regionIndex,
+            regionName: regionIndex >= 0 && RD[regionIndex] ? RD[regionIndex].name : '',
+            column: active.dataset.sort,
+            ascending: active.getAttribute('aria-sort') === 'ascending'
+        };
+    }
+
+    function searchMatchKey(match) {
+        if (!match) return null;
+        if (match.k === 'vt') {
+            const vt = vtMap.get(match.vi);
+            const seg = vt && vt.fd[match.r];
+            return seg ? {
+                kind: 'region', regionIndex: match.vi, regionName: RD[match.vi]?.name,
+                name: seg.n, addr: seg.a,
+                section: seg.s, func: seg.f, type: seg.t, size: seg.sz
+            } : null;
+        }
+        const row = match.el;
+        if (!row) return null;
+        const overviewRegion = row.getAttribute('data-region');
+        if (overviewRegion !== null) return { kind: 'overview', region: overviewRegion };
+        const card = row.closest && row.closest('.region-card');
+        return {
+            kind: card ? 'region' : 'all',
+            regionIndex: card ? parseInt(card.dataset.idx) : -1,
+            regionName: card && RD[parseInt(card.dataset.idx)] ? RD[parseInt(card.dataset.idx)].name : '',
+            name: row.getAttribute('data-sort-name'),
+            addr: Number(row.getAttribute('data-sort-addr')),
+            section: row.getAttribute('data-sort-section') || '',
+            func: row.getAttribute('data-sort-func') || '',
+            type: row.getAttribute('data-sort-type') || '',
+            size: Number(row.getAttribute('data-sort-bytes'))
+        };
+    }
+
+    function sameSearchMatch(match, key) {
+        const candidate = searchMatchKey(match);
+        if (!candidate || !key || candidate.kind !== key.kind) return false;
+        if (candidate.kind === 'overview') return candidate.region === key.region;
+        return candidate.regionIndex === key.regionIndex
+            && candidate.regionName === key.regionName
+            && candidate.name === key.name
+            && candidate.addr === key.addr
+            && candidate.section === key.section
+            && candidate.func === key.func
+            && candidate.type === key.type
+            && candidate.size === key.size;
+    }
+
+    /** Refresh가 HTML을 교체하기 직전, 사용자가 보고 있던 문맥을 논리 상태로 저장한다. */
+    function captureMemoryMapViewState() {
+        const expandedRegions = [], objectSummaries = [], objectDetailRows = [], virtualScroll = [], sorts = [];
+        const refreshFeedback = document.getElementById('refreshFeedback');
+        const allSectionsSort = capturedSort(document.getElementById('sectionTable'), 'all', -1);
+        if (allSectionsSort) sorts.push(allSectionsSort);
+        document.querySelectorAll('.region-card').forEach(function(card) {
+            const idx = parseInt(card.dataset.idx);
+            const detail = card.querySelector('.region-detail');
+            const regionRef = { index: idx, name: RD[idx]?.name };
+            if (detail && detail.style.display !== 'none') expandedRegions.push(regionRef);
+            const objHeader = card.querySelector('.obj-summary-header');
+            if (objHeader && objHeader.getAttribute('aria-expanded') === 'true') objectSummaries.push(regionRef);
+            const objRows = card.querySelector('[data-action="toggle-obj-detail-rows"]');
+            if (objRows && objRows.getAttribute('aria-pressed') === 'true') objectDetailRows.push(regionRef);
+            const sectionSort = capturedSort(card.querySelector('.section-table'), 'section', idx);
+            const objectSort = capturedSort(card.querySelector('.obj-summary-table'), 'object', idx);
+            if (sectionSort) sorts.push(sectionSort);
+            if (objectSort) sorts.push(objectSort);
+            const viewport = card.querySelector('.vt-viewport');
+            if (viewport && viewport.scrollTop > 0) {
+                virtualScroll.push({ regionIndex: idx, regionName: RD[idx]?.name, top: viewport.scrollTop });
+            }
+        });
+        return {
+            scrollY: window.scrollY,
+            refreshFeedbackHeight: refreshFeedback ? refreshFeedback.getBoundingClientRect().height : 0,
+            refreshFeedbackTop: refreshFeedback
+                ? window.scrollY + refreshFeedback.getBoundingClientRect().top
+                : 0,
+            totals: { flash: CURRENT_TOTALS.flash, ram: CURRENT_TOTALS.ram },
+            searchQuery: searchInput ? searchInput.value : '',
+            currentMatch: curMatch,
+            currentMatchKey: curMatch >= 0 && curMatch < matchList.length ? searchMatchKey(matchList[curMatch]) : null,
+            funcVis: funcVis,
+            searchAutoFunc: searchAutoFunc,
+            funcUserOverride: funcUserOverride,
+            expandedRegions: expandedRegions,
+            objectSummaries: objectSummaries,
+            objectDetailRows: objectDetailRows,
+            virtualScroll: virtualScroll,
+            sorts: sorts
+        };
+    }
+
+    function applyCapturedSort(state) {
+        if (!state || !['all', 'section', 'object'].includes(state.kind)) return;
+        let table = null;
+        if (state.kind === 'all') {
+            table = document.getElementById('sectionTable');
+        } else {
+            const regionIndex = Number(state.regionIndex);
+            if (!Number.isInteger(regionIndex) || regionIndex < 0 || regionIndex >= RD.length) return;
+            if (typeof state.regionName === 'string' && state.regionName !== RD[regionIndex].name) return;
+            const card = document.querySelector('.region-card[data-idx="' + regionIndex + '"]');
+            table = card && card.querySelector(state.kind === 'object' ? '.obj-summary-table' : '.section-table');
+        }
+        if (!table || typeof state.column !== 'string') return;
+        const headers = Array.from(table.querySelectorAll('th[data-sort]'));
+        const header = headers.find(function(th) { return th.dataset.sort === state.column; });
+        if (!header) return;
+        header.click();
+        if ((header.getAttribute('aria-sort') === 'ascending') !== (state.ascending === true)) {
+            header.click();
+        }
+    }
+
+    /** 새 render의 lazy DOM을 만든 뒤 저장된 문맥을 복원한다. */
+    function restoreMemoryMapViewState(viewState, consumeSnapshot) {
+        if (!viewState || typeof viewState !== 'object') return undefined;
+        const previousRestoring = restoringView;
+        let restoredScrollY;
+        restoringView = true;
+        try {
+        function regionSet(value) {
+            const result = new Set();
+            if (!Array.isArray(value)) return result;
+            value.slice(0, RD.length).forEach(function(ref) {
+                const idx = typeof ref === 'number' ? ref : Number(ref && ref.index);
+                const name = typeof ref === 'object' && ref ? ref.name : undefined;
+                if (!Number.isInteger(idx) || idx < 0 || idx >= RD.length) return;
+                if (typeof name === 'string' && name !== RD[idx].name) return;
+                result.add(idx);
+            });
+            return result;
+        }
+        const expanded = regionSet(viewState.expandedRegions);
+        const objExpanded = regionSet(viewState.objectSummaries);
+        const objRowsOn = regionSet(viewState.objectDetailRows);
+        const sorts = Array.isArray(viewState.sorts)
+            ? viewState.sorts.filter(function(state) { return state && typeof state === 'object'; }).slice(0, RD.length * 2 + 1)
+            : [];
+        const virtualScroll = Array.isArray(viewState.virtualScroll)
+            ? viewState.virtualScroll.filter(function(state) {
+                const idx = Number(state && state.regionIndex);
+                return Number.isInteger(idx) && idx >= 0 && idx < RD.length
+                    && (typeof state.regionName !== 'string' || state.regionName === RD[idx].name)
+                    && Number.isFinite(Number(state.top));
+            }).slice(0, RD.length)
+            : [];
+        const needed = new Set();
+        expanded.forEach(function(idx) { needed.add(idx); });
+        objExpanded.forEach(function(idx) { needed.add(idx); });
+        objRowsOn.forEach(function(idx) { needed.add(idx); });
+        sorts.forEach(function(state) { if (state && state.regionIndex >= 0) needed.add(state.regionIndex); });
+        virtualScroll.forEach(function(state) { if (state && state.regionIndex >= 0) needed.add(state.regionIndex); });
+        if (viewState.currentMatchKey && viewState.currentMatchKey.kind === 'region') {
+            needed.add(viewState.currentMatchKey.regionIndex);
+        }
+
+        funcVis = viewState.funcVis === true;
+        funcUserOverride = viewState.funcUserOverride === true;
+        searchAutoFunc = viewState.searchAutoFunc === true;
+        syncFuncBtn();
+        if (searchInput && typeof viewState.searchQuery === 'string') {
+            searchInput.value = viewState.searchQuery;
+            doSearch();
+        }
+        needed.forEach(function(idx) {
+            if (Number.isInteger(idx) && RD[idx]) renderDetail(idx);
+        });
+        // 검색은 작은 region 표의 tbody를 다시 만들므로 정렬은 반드시 검색과
+        // 모든 lazy render가 끝난 뒤 적용한다.
+        sorts.forEach(applyCapturedSort);
+
+        document.querySelectorAll('.region-card').forEach(function(card) {
+            const idx = parseInt(card.dataset.idx);
+            setRegionExpanded(card, expanded.has(idx));
+            if (!rendered.has(idx)) return;
+            const objHeader = card.querySelector('.obj-summary-header');
+            if (objHeader) setObjSummaryExpanded(objHeader, objExpanded.has(idx));
+            const objRows = card.querySelector('[data-action="toggle-obj-detail-rows"]');
+            if (objRows && objRowsOn.has(idx)) {
+                objRows.setAttribute('aria-pressed', 'true');
+                objRows.textContent = S.objDetailRows + ' \u25BC';
+                syncObjSummary(card);
+            }
+        });
+        virtualScroll.forEach(function(state) {
+            const vt = vtMap.get(state.regionIndex);
+            if (vt && Number.isFinite(state.top)) {
+                vt.vp.scrollTop = Math.max(0, state.top);
+                vt.ls = -1;
+                renderVT(vt);
+            }
+        });
+        let targetMatch = -1;
+        if (viewState.currentMatchKey) {
+            targetMatch = matchList.findIndex(function(match) { return sameSearchMatch(match, viewState.currentMatchKey); });
+        }
+        if (targetMatch >= 0) {
+            curMatch = targetMatch;
+            revealMatch(curMatch, false);
+        } else if (matchList.length > 0 && typeof viewState.currentMatch === 'number'
+            && Number.isInteger(viewState.currentMatch)) {
+            // 행의 주소·크기가 빌드로 바뀌어 stable key가 더는 일치하지 않아도,
+            // 사용자가 보고 있던 검색 순번에 가장 가까운 결과를 유지한다.
+            curMatch = Math.min(matchList.length - 1, Math.max(0, viewState.currentMatch));
+            revealMatch(curMatch, false);
+        } else {
+            curMatch = matchList.length > 0 ? 0 : -1;
+            updateNavUI();
+        }
+        const scrollY = Number(viewState.scrollY);
+        if (Number.isFinite(scrollY)) {
+            restoredScrollY = Math.max(0, scrollY);
+        }
+        } finally {
+            restoringView = previousRestoring;
+            // 새 render에서 한 번 소비한 snapshot이 이후 context 재생성 때 사용자의
+            // 더 최신 조작을 덮어쓰지 않도록 제거한다.
+            if (consumeSnapshot !== false) {
+                persistWebviewState({ memoryMapViewState: undefined });
+            }
+        }
+        return restoredScrollY;
+    }
+
+    function beginRefresh() {
+        const refreshButton = document.getElementById('btnRefresh');
+        const refreshStatus = document.getElementById('refreshStatus');
+        if (!refreshButton || !refreshStatus || refreshInFlight || refreshButton.getAttribute('aria-disabled') === 'true') {
+            return;
+        }
+        const requestedAt = Date.now();
+        refreshLifecycleGeneration++;
+        activeRefreshAttemptId = RENDER_ID + ':' + requestedAt.toString(36)
+            + ':' + (++refreshAttemptSequence).toString(36);
+        persistWebviewState({
+            refreshPending: true,
+            // webview context가 사라져 응답을 못 받더라도 이전 결과를 최신으로
+            // 오인하지 않도록 요청 순간부터 보수적으로 stale 상태를 기록한다.
+            refreshFailed: true,
+            refreshFailureReason: S.refreshInterrupted,
+            refreshFailedAt: requestedAt,
+            refreshFailureDismissed: false,
+            refreshAttemptId: activeRefreshAttemptId,
+            memoryMapViewState: Object.assign({ version: 1, fromRenderId: RENDER_ID }, captureMemoryMapViewState())
+        });
+        setRefreshFeedback('busy', S.refreshing, false, undefined);
+        vscode.postMessage({
+            command: 'refresh',
+            renderId: RENDER_ID,
+            refreshAttemptId: activeRefreshAttemptId
+        });
+    }
+
+    function schedulePendingSnapshotRefresh() {
+        const shouldPersistViewState = function() {
+            return refreshInFlight || readWebviewState().refreshFailed === true;
+        };
+        if (!shouldPersistViewState() || pendingSnapshotScheduled) return;
+        pendingSnapshotScheduled = true;
+        const saveLatestView = function() {
+            pendingSnapshotScheduled = false;
+            // 실패가 확정된 뒤에도 사용자는 이전 결과에서 검색·정렬·접기를
+            // 계속 조작할 수 있다. 그 최신 상태를 저장하지 않으면 같은 render의
+            // webview context가 재생성될 때 요청 시점 snapshot으로 되돌아간다.
+            if (!shouldPersistViewState()) return;
+            persistWebviewState({
+                memoryMapViewState: Object.assign(
+                    { version: 1, fromRenderId: RENDER_ID },
+                    captureMemoryMapViewState()
+                )
+            });
+        };
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(saveLatestView);
+        } else {
+            setTimeout(saveLatestView, 0);
+        }
+    }
+
     // --- Delegated click handlers (replaces inline onclick for CSP compliance) ---
     document.addEventListener('click', function(ev) {
         const target = ev.target;
@@ -3538,13 +4747,127 @@ const RD = ${regionDataJsLiteral};
                 window.toggleObjDetailRows(actionEl);
                 break;
             case 'open-hex':
-                vscode.postMessage({ command: 'openHex', targetId: actionEl.getAttribute('data-target-id') });
+                vscode.postMessage({ command: 'openHex', targetId: actionEl.getAttribute('data-target-id'), renderId: RENDER_ID });
                 break;
             case 'open-source':
-                vscode.postMessage({ command: 'openSource', targetId: actionEl.getAttribute('data-target-id') });
+                vscode.postMessage({ command: 'openSource', targetId: actionEl.getAttribute('data-target-id'), renderId: RENDER_ID });
                 break;
+            case 'configure-memory-map':
+                if (actionEl.getAttribute('aria-disabled') === 'true' || refreshInFlight) break;
+                vscode.postMessage({ command: 'showMemoryMapSetup', renderId: RENDER_ID });
+                break;
+            case 'dismiss-refresh': {
+                const state = readWebviewState();
+                const compact = actionEl.getAttribute('aria-expanded') === 'true';
+                renderRefreshFailure(state.refreshFailureReason, state.refreshFailedAt, false, compact);
+                afterPaint(function() { actionEl.focus({ preventScroll: true }); });
+                break;
+            }
+            case 'refresh': {
+                beginRefresh();
+                break;
+            }
         }
     }
+    // 분석이 오래 걸리는 동안에도 검색·정렬·접기·스크롤은 조작할 수 있다.
+    // 새 HTML이 요청 시점의 snapshot으로 되돌리지 않도록 마지막 조작을 한 frame에
+    // 한 번만 다시 저장한다. scroll은 bubble하지 않으므로 capture phase로 듣는다.
+    document.addEventListener('click', schedulePendingSnapshotRefresh);
+    document.addEventListener('input', schedulePendingSnapshotRefresh);
+    document.addEventListener('keydown', schedulePendingSnapshotRefresh);
+    document.addEventListener('scroll', schedulePendingSnapshotRefresh, true);
+    if (IS_STANDALONE) {
+        // 정규화된 DOM에 검색 결과 수와 접기 버튼 라벨을 다시 맞춘다.
+        doSearch();
+    }
+    const restoredScrollY = pendingViewState
+        // 같은 render의 busy/failed 상태는 context가 여러 번 재생성될 수 있다.
+        // 성공한 새 render만 snapshot을 소비하고, 이전 결과를 보는 동안에는
+        // 검색·정렬·접기 상태를 다음 재생성에도 다시 쓸 수 있게 남긴다.
+        ? restoreMemoryMapViewState(
+            pendingViewState,
+            restoredRefreshState?.kind !== 'busy' && restoredRefreshState?.kind !== 'failed'
+        )
+        : undefined;
+    if (!pendingViewState && restoredRefreshState?.kind !== 'busy') {
+        persistWebviewState({ memoryMapViewState: undefined });
+    }
+    const startupLifecycleGeneration = refreshLifecycleGeneration;
+    function restoreFinalViewport(focusRefresh, expectedLifecycleGeneration, allowDurableFailureTransition) {
+        afterPaint(function() {
+            if (typeof expectedLifecycleGeneration === 'number') {
+                const lifecycleStillCurrent = expectedLifecycleGeneration === refreshLifecycleGeneration;
+                const matchingDurableFailure = allowDurableFailureTransition === true
+                    && refreshLifecycleGeneration === expectedLifecycleGeneration + 1
+                    && !refreshInFlight;
+                if (!lifecycleStillCurrent && !matchingDurableFailure) { return; }
+            }
+            if (Number.isFinite(restoredScrollY)) {
+                const previousHeight = Number(pendingViewState && pendingViewState.refreshFeedbackHeight);
+                const previousTop = Number(pendingViewState && pendingViewState.refreshFeedbackTop);
+                const refreshFeedback = document.getElementById('refreshFeedback');
+                const currentHeight = refreshFeedback ? refreshFeedback.getBoundingClientRect().height : 0;
+                const heightDelta = Number.isFinite(previousHeight) && previousHeight >= 0 && previousHeight <= 1000
+                    && Number.isFinite(currentHeight) && currentHeight >= 0 && currentHeight <= 1000
+                    && Number.isFinite(previousTop) && restoredScrollY > previousTop
+                    ? currentHeight - previousHeight
+                    : 0;
+                window.scrollTo({ top: Math.max(0, restoredScrollY + heightDelta), behavior: 'auto' });
+            }
+            if (focusRefresh) {
+                const refreshButton = document.getElementById('btnRefresh');
+                if (refreshButton) { refreshButton.focus({ preventScroll: true }); }
+            }
+        });
+    }
+    if (restoredRefreshState?.kind === 'busy') {
+        // live region 문구는 접근성 트리에 들어온 뒤 알리되, 중복 요청 가드는
+        // 첫 frame부터 닫아 context 복원 직후의 빠른 클릭도 통과시키지 않는다.
+        refreshInFlight = true;
+        const refreshButton = document.getElementById('btnRefresh');
+        if (refreshButton) { refreshButton.setAttribute('aria-disabled', 'true'); }
+        const configureButton = document.getElementById('btnConfigureMemoryMap');
+        if (configureButton) { configureButton.setAttribute('aria-disabled', 'true'); }
+        afterPaint(function() {
+            // ready handshake가 먼저 durable failure를 돌려주면 그 렌더가
+            // refreshInFlight를 false로 바꾼다. 예약된 busy가 뒤늦게 실패를
+            // 덮거나 이미 ack된 오류를 영구 busy로 만들지 않게 한다.
+            const startupBusyStillCurrent = refreshLifecycleGeneration === startupLifecycleGeneration
+                && refreshInFlight;
+            const durableFailureArrived = refreshLifecycleGeneration === startupLifecycleGeneration + 1
+                && !refreshInFlight;
+            if (startupBusyStillCurrent) {
+                setRefreshFeedback('busy', S.refreshing, false, undefined);
+            }
+            if (!startupBusyStillCurrent && !durableFailureArrived) { return; }
+            // durable failure가 먼저 도착했다면 그 generation에서 한 번은 복원하되,
+            // inner paint 전에 사용자가 재시도하면 이전 snapshot이 새 attempt의
+            // scroll 상태를 덮지 못하게 호출 시점 generation을 고정한다.
+            restoreFinalViewport(false, refreshLifecycleGeneration, true);
+        });
+    } else if (restoredRefreshState?.kind === 'failed') {
+        afterPaint(function() {
+            if (startupLifecycleGeneration !== refreshLifecycleGeneration || refreshInFlight) { return; }
+            renderRefreshFailure(
+                restoredRefreshState.reason,
+                restoredRefreshState.at,
+                false,
+                restoredRefreshState.compact
+            );
+            // 배너가 차지할 공간이 확정된 다음 저장된 viewport를 복원한다.
+            restoreFinalViewport(false, startupLifecycleGeneration);
+        });
+    } else if (restoredRefreshState?.kind === 'success') {
+        afterPaint(function() {
+            if (startupLifecycleGeneration !== refreshLifecycleGeneration || refreshInFlight) { return; }
+            renderRefreshSuccess(restoredRefreshState.at, false, pendingViewState?.totals);
+            restoreFinalViewport(true, startupLifecycleGeneration);
+        });
+    } else {
+        setRefreshFeedback('', '', false, undefined);
+        restoreFinalViewport(false, startupLifecycleGeneration);
+    }
+    vscode.postMessage({ command: 'memoryMapReady', renderId: RENDER_ID });
 })();
 </script>
 </body>

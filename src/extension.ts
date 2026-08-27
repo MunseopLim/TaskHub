@@ -10,13 +10,14 @@ import { ActionItem, Action as PipelineAction, type QuickPickItem } from './sche
 import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri, openJsonEditorFile, JsonEditorOpenHistory } from './jsonEditor';
-import { openMarkdownPreview, openHtmlInBrowser } from './previewOpener';
+import { coerceToUri, openMarkdownPreview, openHtmlInBrowser } from './previewOpener';
 import {
     showMemoryMap,
     MemoryMapConfig,
     MemoryMapOpenHistory,
     goToSymbol,
     revealSourceSymbolInMemoryMap,
+    openMemoryMapFromUri,
     openMemoryMapPanel,
     openMemoryMapFromListing,
 } from './memoryMapViewer';
@@ -4109,17 +4110,83 @@ export function selectHistoryRerunInputs(
     return reuseSavedInputs ? entry.inputs : undefined;
 }
 
-function cloneMemoryMapHistoryConfig(config?: MemoryMapConfig): MemoryMapConfig | undefined {
-    if (!config?.regions || config.regions.length === 0) {
+type MemoryMapRegions = NonNullable<MemoryMapConfig['regions']>;
+
+/**
+ * `taskhub_types.json`과 History는 TypeScript 타입의 보호를 받지 않는 영속 입력이다.
+ * 영역 하나라도 불완전하면 일부만 조용히 쓰지 않고 전체 설정을 버려, ELF의
+ * PT_LOAD 기반 자동 감지가 일관되게 대신하도록 한다.
+ */
+function validateMemoryMapRegions(value: unknown): MemoryMapRegions | undefined {
+    if (!Array.isArray(value)) {
+        return undefined;
+    }
+
+    const regions: MemoryMapRegions = [];
+    for (const candidate of value) {
+        if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+            return undefined;
+        }
+        const prototype = Object.getPrototypeOf(candidate);
+        if (prototype !== Object.prototype && prototype !== null) {
+            return undefined;
+        }
+
+        const region = candidate as Record<string, unknown>;
+        const name = region.name;
+        const origin = region.origin;
+        const size = region.size;
+        if (
+            typeof name !== 'string' || name.trim().length === 0
+            || typeof origin !== 'number' || !Number.isSafeInteger(origin) || origin < 0
+            || typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0
+        ) {
+            return undefined;
+        }
+        regions.push({ name, origin, size });
+    }
+    return regions;
+}
+
+export function cloneMemoryMapHistoryConfig(config?: MemoryMapConfig): MemoryMapConfig | undefined {
+    const regions = validateMemoryMapRegions(config?.regions);
+    const linkerFilePath = typeof config?.linkerFilePath === 'string' && config.linkerFilePath.length > 0
+        ? config.linkerFilePath
+        : undefined;
+    if ((!regions || regions.length === 0) && !linkerFilePath) {
         return undefined;
     }
     return {
-        regions: config.regions.map(region => ({
-            name: region.name,
-            origin: region.origin,
-            size: region.size,
-        })),
+        ...(regions && regions.length > 0 ? { regions } : {}),
+        ...(linkerFilePath ? { linkerFilePath } : {}),
     };
+}
+
+export function loadMemoryMapConfig(workspaceFolder?: string): MemoryMapConfig | undefined {
+    if (!workspaceFolder) {
+        return undefined;
+    }
+    const typesPath = path.join(workspaceFolder, '.vscode', 'taskhub_types.json');
+    if (!fs.existsSync(typesPath)) {
+        return undefined;
+    }
+    try {
+        const typesData = JSON.parse(fs.readFileSync(typesPath, 'utf-8'));
+        const regions = validateMemoryMapRegions(typesData?.memoryMap?.regions);
+        if (regions) {
+            return { regions };
+        }
+    } catch { /* 기존 설정 로드와 같이 잘못된 선택 설정은 영역 자동 감지로 폴백한다. */ }
+    return undefined;
+}
+
+export function loadMemoryMapConfigForResource(
+    arg: unknown,
+    getWorkspaceFolder: (uri: vscode.Uri) => vscode.WorkspaceFolder | undefined =
+        uri => vscode.workspace.getWorkspaceFolder(uri)
+): MemoryMapConfig | undefined {
+    const uri = coerceToUri(arg);
+    return loadMemoryMapConfig(uri ? getWorkspaceFolder(uri)?.uri.fsPath : undefined);
 }
 
 function recordMemoryMapHistory(historyProvider: HistoryProvider, entry: MemoryMapOpenHistory): void {
@@ -4161,15 +4228,18 @@ async function openToolHistoryEntry(
     const tool = entry.tool;
     if (tool.kind === 'memoryMap') {
         const inputType = tool.memoryMapInputType ?? 'elf';
+        const memoryMapConfig = cloneMemoryMapHistoryConfig(tool.memoryMapConfig);
+        const memoryMapRecorder = (nextEntry: MemoryMapOpenHistory) =>
+            recordMemoryMapHistory(historyProvider, nextEntry);
         const opened = inputType === 'listing'
             ? openMemoryMapFromListing(context, tool.filePath)
-            : openMemoryMapPanel(context, tool.filePath, tool.memoryMapConfig);
+            : openMemoryMapPanel(context, tool.filePath, memoryMapConfig, memoryMapRecorder);
         if (opened) {
             recordMemoryMapHistory(historyProvider, {
                 filePath: tool.filePath,
                 fileName: tool.fileName,
                 inputType,
-                config: tool.memoryMapConfig,
+                config: memoryMapConfig,
             });
         }
         return;
@@ -12861,19 +12931,32 @@ export function activate(context: vscode.ExtensionContext) {
                 if (!workspaceFolder) { return; }
             }
         }
-        let memConfig: MemoryMapConfig | undefined;
-        if (workspaceFolder) {
-            const typesPath = path.join(workspaceFolder, '.vscode', 'taskhub_types.json');
-            if (fs.existsSync(typesPath)) {
-                try {
-                    const typesData = JSON.parse(fs.readFileSync(typesPath, 'utf-8'));
-                    if (typesData.memoryMap?.regions) {
-                        memConfig = { regions: typesData.memoryMap.regions };
-                    }
-                } catch { /* ignore parse errors */ }
-            }
-        }
+        const memConfig = loadMemoryMapConfig(workspaceFolder);
         await showMemoryMap(context, memConfig, entry => recordMemoryMapHistory(historyProvider, entry));
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openMemoryMapFromUri', async (arg?: unknown) => {
+        const resource = coerceToUri(arg);
+        const resourceName = resource ? path.basename(resource.fsPath) : t('선택한 ELF', 'selected ELF');
+        return vscode.window.withProgress({
+            location: vscode.ProgressLocation.Window,
+            title: t(
+                `Memory Map 분석 중: ${resourceName}`,
+                `Analyzing Memory Map: ${resourceName}`
+            ),
+            cancellable: false,
+        }, async () => {
+            // progress UI가 renderer에 전달될 기회를 한 번 준 뒤 동기 ELF 파서를
+            // 실행한다. CPU 파싱의 worker 분리는 별도 성능 작업이지만, Explorer
+            // 클릭이 무반응처럼 보이는 구간은 이 상태 표시로 막는다.
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            return openMemoryMapFromUri(
+                context,
+                arg,
+                loadMemoryMapConfigForResource(arg),
+                entry => recordMemoryMapHistory(historyProvider, entry)
+            );
+        });
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.memoryMapGoToSymbol', () => {

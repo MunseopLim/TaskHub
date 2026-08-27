@@ -56,6 +56,7 @@
   "cmd.openJsonEditor": "TaskHub: Open JSON Editor",
   "cmd.openJsonEditorFromUri": "Open with JSON Editor",
   "cmd.showMemoryMap": "Show Memory Map",
+  "cmd.openMemoryMapFromUri": "Open with Memory Map",
   "cmd.memoryMapGoToSymbol": "Memory Map: Go to Symbol",
   "cmd.revealSymbolInMemoryMap": "Memory Map: Reveal Symbol Under Cursor",
   "cmd.exportActions": "TaskHub: Export Actions",

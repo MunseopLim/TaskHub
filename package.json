@@ -4,7 +4,7 @@
   "description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -534,6 +534,11 @@
         "category": "TaskHub"
       },
       {
+        "command": "taskhub.openMemoryMapFromUri",
+        "title": "%cmd.openMemoryMapFromUri%",
+        "category": "TaskHub"
+      },
+      {
         "command": "taskhub.memoryMapGoToSymbol",
         "title": "%cmd.memoryMapGoToSymbol%",
         "category": "TaskHub"
@@ -594,6 +599,10 @@
     ],
     "menus": {
       "commandPalette": [
+        {
+          "command": "taskhub.openMemoryMapFromUri",
+          "when": "false"
+        },
         {
           "command": "taskhub.terminateAllActions",
           "when": "false"
@@ -794,6 +803,11 @@
           "command": "taskhub.openJsonEditorFromUri",
           "when": "resourceExtname == .json",
           "group": "navigation"
+        },
+        {
+          "command": "taskhub.openMemoryMapFromUri",
+          "when": "resourceFilename =~ /\\.(elf|axf|out)$/i",
+          "group": "navigation@10"
         },
         {
           "command": "taskhub.openMarkdownPreview",
