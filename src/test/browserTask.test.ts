@@ -8,6 +8,7 @@ import {
     BrowserTaskRequest,
     openBrowserTask,
 } from '../browserTask';
+import { filePathIdentityKey } from '../pathIdentity';
 
 interface CapturedCommand {
     command: string;
@@ -20,6 +21,11 @@ interface FakeBrowserDeps {
     externalUris: vscode.Uri[];
     externalUriInputs: vscode.Uri[];
     getCommandsArgs: Array<boolean | undefined>;
+}
+
+function assertSameFilePath(actual: string | undefined, expected: string): void {
+    assert.ok(actual, '로컬 파일 결과에는 path가 있어야 한다');
+    assert.strictEqual(filePathIdentityKey(actual), filePathIdentityKey(expected));
 }
 
 function makeFakeDeps(options?: {
@@ -99,7 +105,7 @@ suite('browserTask', () => {
         assert.ok(!commandUrl.includes('한글'));
         assert.deepStrictEqual(fake.externalUris, []);
         assert.deepStrictEqual(fake.externalUriInputs, []);
-        assert.strictEqual(result.path, reportPath);
+        assertSameFilePath(result.path, reportPath);
         assert.strictEqual(result.url, commandUrl);
     });
 
@@ -109,7 +115,7 @@ suite('browserTask', () => {
                 availableCommands: ['workbench.action.browser.open'],
             });
             const result = await openBrowserTask(localRequest({ url }), fake.deps);
-            assert.strictEqual(result.path, reportPath);
+            assertSameFilePath(result.path, reportPath);
             assert.strictEqual(result.url, vscode.Uri.file(reportPath).toString());
         }
     });
@@ -132,7 +138,7 @@ suite('browserTask', () => {
         assert.ok(integratedResult.url.endsWith(integratedSuffix));
         assert.ok(!integratedResult.url.includes('mode%3Dsummary'));
         assert.ok(!integratedResult.url.includes('label=a&b'));
-        assert.strictEqual(integratedResult.path, reportPath);
+        assertSameFilePath(integratedResult.path, reportPath);
         assert.deepStrictEqual(integratedFake.commands, [{
             command: 'workbench.action.browser.open',
             args: [integratedResult.url],
@@ -147,7 +153,7 @@ suite('browserTask', () => {
 
         assert.match(defaultResult.url, /\?mode=summary&view=compact#details$/);
         assert.ok(!defaultResult.url.includes('mode%3Dsummary'));
-        assert.strictEqual(defaultResult.path, reportPath);
+        assertSameFilePath(defaultResult.path, reportPath);
         assert.strictEqual(defaultFake.externalUris.length, 1);
         assert.strictEqual(defaultFake.externalUris[0].query, 'mode=summary&view=compact');
         assert.strictEqual(defaultFake.externalUris[0].fragment, 'details');
@@ -228,11 +234,10 @@ suite('browserTask', () => {
 
         const result = await openBrowserTask(localRequest({ target: 'default' }), fake.deps);
 
-        assert.strictEqual(fake.externalUris[0].fsPath, reportPath);
-        assert.deepStrictEqual(result, {
-            url: vscode.Uri.file(reportPath).toString(),
-            path: reportPath,
-        });
+        assertSameFilePath(fake.externalUris[0].fsPath, reportPath);
+        assert.deepStrictEqual(Object.keys(result).sort(), ['path', 'url']);
+        assert.strictEqual(result.url, vscode.Uri.file(reportPath).toString());
+        assertSameFilePath(result.path, reportPath);
     });
 
     test('Remote environments reject existing and missing local files before any browser call', async () => {
@@ -330,14 +335,14 @@ suite('browserTask', () => {
         try {
             const fake = makeFakeDeps({ availableCommands: ['workbench.action.browser.open'] });
             const absoluteResult = await openBrowserTask(localRequest({ url: outsidePath }), fake.deps);
-            assert.strictEqual(absoluteResult.path, outsidePath);
+            assertSameFilePath(absoluteResult.path, outsidePath);
 
             const fileUriFake = makeFakeDeps({ availableCommands: ['workbench.action.browser.open'] });
             const fileUriResult = await openBrowserTask(
                 localRequest({ url: vscode.Uri.file(outsidePath).toString() }),
                 fileUriFake.deps,
             );
-            assert.strictEqual(fileUriResult.path, outsidePath);
+            assertSameFilePath(fileUriResult.path, outsidePath);
         } finally {
             fs.rmSync(outsideDir, { recursive: true, force: true });
         }

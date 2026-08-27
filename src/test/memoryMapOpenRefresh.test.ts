@@ -15,9 +15,15 @@ import {
     cloneMemoryMapHistoryConfig,
     loadMemoryMapConfigForResource,
 } from '../extension';
+import { filePathIdentityKey } from '../pathIdentity';
 import { buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
 
 type MessageHandler = (message: any) => Promise<void> | void;
+
+function assertSameFilePath(actual: string | undefined, expected: string): void {
+    assert.ok(actual, '기록된 경로가 있어야 한다');
+    assert.strictEqual(filePathIdentityKey(actual), filePathIdentityKey(expected));
+}
 
 interface FakePanelHarness {
     createCount: number;
@@ -204,10 +210,9 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.strictEqual(promptCount, 0);
         assert.strictEqual(fake.harness.createCount, 1);
         assert.ok(panelRegistry.has(filePath));
-        assert.deepStrictEqual(history.map(entry => ({
-            filePath: entry.filePath,
-            inputType: entry.inputType,
-        })), [{ filePath, inputType: 'elf' }]);
+        assert.strictEqual(history.length, 1);
+        assertSameFilePath(history[0].filePath, filePath);
+        assert.strictEqual(history[0].inputType, 'elf');
     });
 
     test('ELF 계열이 아닌 URI는 패널이나 History를 만들지 않는다', () => {
@@ -664,7 +669,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.ok(!configuredHtml.includes('class="no-regions"'));
         assert.ok(configuredHtml.includes('64.0 KB'));
         assert.strictEqual(recorded.length, 2, '최초 open과 성공한 linker 재설정을 각각 기록해야 한다');
-        assert.strictEqual(recorded[1].config?.linkerFilePath, linkerPath);
+        assertSameFilePath(recorded[1].config?.linkerFilePath, linkerPath);
         const feedback = fake.harness.posted.at(-1);
         assert.strictEqual(feedback?.command, 'memoryMapPanelFeedback');
         assert.strictEqual(feedback?.kind, 'configure-success');

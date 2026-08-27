@@ -9,6 +9,7 @@ import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
 import { openHexViewerFile } from './hexViewer';
 import { coerceToUri } from './previewOpener';
+import { filePathIdentityKey } from './pathIdentity';
 import {
     DwarfLineUnsupportedFeature,
     DwarfSourceLocation,
@@ -37,6 +38,8 @@ export interface PanelEntry {
 
 interface PanelState {
     panel: vscode.WebviewPanel;
+    /** 표시·History·Quick Pick에는 사용자가 연 경로 표기를 유지한다. */
+    filePath: string;
     /** 이전 webview에서 늦게 도착한 target/message를 새 결과에 적용하지 않는다. */
     renderId: string;
     /** 심볼/섹션 행 — Quick Pick 의 첫 번째 묶음. 상한에 걸려 잘려 있을 수 있다. */
@@ -100,22 +103,28 @@ let lastActivePanel: string | undefined;
 
 /** Panel registry – exported for testing */
 export const panelRegistry = {
-    has(filePath: string): boolean { return panels.has(filePath); },
+    has(filePath: string): boolean { return panels.has(filePathIdentityKey(filePath)); },
     size(): number { return panels.size; },
     getLastActive(): string | undefined { return lastActivePanel; },
-    getHtml(filePath: string): string | undefined { return panels.get(filePath)?.panel.webview.html; },
+    getHtml(filePath: string): string | undefined {
+        return panels.get(filePathIdentityKey(filePath))?.panel.webview.html;
+    },
     /** Go to Symbol Quick Pick 이 다루는 목록(상한 적용). */
-    getEntries(filePath: string): PanelEntry[] | undefined { return panels.get(filePath)?.entries; },
+    getEntries(filePath: string): PanelEntry[] | undefined {
+        return panels.get(filePathIdentityKey(filePath))?.entries;
+    },
     /** 이름으로 찾는 경로가 보는 목록(상한 없음). */
-    getAllEntries(filePath: string): PanelEntry[] | undefined { return panels.get(filePath)?.allEntries; },
+    getAllEntries(filePath: string): PanelEntry[] | undefined {
+        return panels.get(filePathIdentityKey(filePath))?.allEntries;
+    },
     /** ELF file offset은 웹뷰가 아니라 호스트에만 남는다는 계약을 검증하기 위한 목록. */
     getHexTargets(filePath: string): MemoryMapHexTarget[] | undefined {
-        const targets = panels.get(filePath)?.hexTargets;
+        const targets = panels.get(filePathIdentityKey(filePath))?.hexTargets;
         return targets ? Array.from(targets.values()) : undefined;
     },
     /** 컴파일 경로와 줄 번호가 웹뷰에 노출되지 않는다는 계약을 검증한다. */
     getSourceTargets(filePath: string): MemoryMapSourceTarget[] | undefined {
-        const targets = panels.get(filePath)?.sourceTargets;
+        const targets = panels.get(filePathIdentityKey(filePath))?.sourceTargets;
         return targets ? Array.from(targets.values()) : undefined;
     },
     clear(): void { panels.clear(); lastActivePanel = undefined; },
@@ -816,7 +825,8 @@ function showPanel(
     refresh?: () => MemoryMapPanelOpenResult,
     configureLinker?: (linkerFilePath: string) => MemoryMapPanelOpenResult
 ) {
-    const existing = panels.get(filePath);
+    const panelKey = filePathIdentityKey(filePath);
+    const existing = panels.get(panelKey);
     let panel: vscode.WebviewPanel;
     let created = false;
     if (existing) {
@@ -831,15 +841,18 @@ function showPanel(
         );
         created = true;
         panel.onDidDispose(() => {
-            const state = panels.get(filePath);
+            const state = panels.get(panelKey);
+            if (state?.panel !== panel) { return; }
             state?.messageDisposable?.dispose();
-            panels.delete(filePath);
-            if (lastActivePanel === filePath) { lastActivePanel = undefined; }
+            panels.delete(panelKey);
+            if (lastActivePanel && filePathIdentityKey(lastActivePanel) === panelKey) {
+                lastActivePanel = undefined;
+            }
         });
         panel.onDidChangeViewState(() => {
-            if (panel.active) { lastActivePanel = filePath; }
+            const current = panels.get(panelKey);
+            if (panel.active && current) { lastActivePanel = current.filePath; }
             if (panel.visible) {
-                const current = panels.get(filePath);
                 if (current) {
                     postMemoryMapRefreshFailure(current);
                     postMemoryMapPanelFeedback(current);
@@ -862,6 +875,7 @@ function showPanel(
         const allEntries = collectPickEntries(memoryUsage);
         state = {
             panel,
+            filePath,
             renderId,
             entries: limitSymbolPickEntries(allEntries),
             allEntries,
@@ -892,7 +906,7 @@ function showPanel(
     let nextMessageDisposable: vscode.Disposable | undefined;
     try {
         nextMessageDisposable = panel.webview.onDidReceiveMessage(async (message: any) => {
-            if (panels.get(filePath) !== state || message.renderId !== state.renderId) {
+            if (panels.get(panelKey) !== state || message.renderId !== state.renderId) {
                 return;
             }
             if (message.command === 'openHex') {
@@ -909,7 +923,7 @@ function showPanel(
                     fileName,
                     state.sourceFingerprint,
                     () => {
-                        if (panels.get(filePath) === state) {
+                        if (panels.get(panelKey) === state) {
                             void panel.webview.postMessage({ command: 'requestRefresh', renderId: state.renderId });
                         }
                     }
@@ -949,7 +963,7 @@ function showPanel(
                     fileName,
                     state.sourceFingerprint,
                     () => {
-                        if (panels.get(filePath) === state) {
+                        if (panels.get(panelKey) === state) {
                             void panel.webview.postMessage({ command: 'requestRefresh', renderId: state.renderId });
                         }
                     }
@@ -1002,7 +1016,7 @@ function showPanel(
                 state.configureInFlight = true;
                 try {
                     const linkerFilePath = await pickMemoryMapLinkerScript();
-                    if (!linkerFilePath || panels.get(filePath) !== state) { return; }
+                    if (!linkerFilePath || panels.get(panelKey) !== state) { return; }
                     const linkerName = path.basename(linkerFilePath)
                         || t('선택한 링커/스캐터 파일', 'selected linker/scatter file');
                     let result: MemoryMapPanelOpenResult;
@@ -1017,7 +1031,7 @@ function showPanel(
                             ),
                         };
                     }
-                    const feedbackState = panels.get(filePath);
+                    const feedbackState = panels.get(panelKey);
                     if (!feedbackState) { return; }
                     feedbackState.panelFeedback = {
                         renderId: feedbackState.renderId,
@@ -1093,7 +1107,7 @@ function showPanel(
     }
 
     state.messageDisposable = nextMessageDisposable;
-    panels.set(filePath, state);
+    panels.set(panelKey, state);
     lastActivePanel = filePath;
     // 새 state를 먼저 커밋한다. 이전 listener 정리 자체가 실패해도 새 HTML과
     // registry가 서로 다른 세대를 가리키는 반쪽 교체로 돌아가면 안 된다.
@@ -1809,7 +1823,10 @@ export async function revealSourceSymbolInMemoryMap(identifier: string): Promise
     }
 
     // **자르지 않은 목록**을 본다 — 상한은 Quick Pick 렌더용이지 존재 판정 기준이 아니다.
-    const panelEntries = Array.from(panels, ([filePath, state]) => ({ filePath, entries: state.allEntries }));
+    const panelEntries = Array.from(panels.values(), state => ({
+        filePath: state.filePath,
+        entries: state.allEntries,
+    }));
     const matches = collectSourceSymbolMatches(panelEntries, trimmed, lastActivePanel);
 
     if (matches.length === 0) {
@@ -1859,7 +1876,7 @@ export async function revealSourceSymbolInMemoryMap(identifier: string): Promise
         picked = selected.match;
     }
 
-    const state = panels.get(picked.filePath);
+    const state = panels.get(filePathIdentityKey(picked.filePath));
     if (!state) {
         // Quick Pick 을 띄워 둔 사이에 그 패널이 닫힌 경우.
         vscode.window.showInformationMessage(t(
@@ -1874,7 +1891,7 @@ export async function revealSourceSymbolInMemoryMap(identifier: string): Promise
 }
 
 export async function goToSymbol() {
-    const active = lastActivePanel ? panels.get(lastActivePanel) : undefined;
+    const active = lastActivePanel ? panels.get(filePathIdentityKey(lastActivePanel)) : undefined;
     if (!active) {
         // 조용히 끝내면 명령이 죽은 것으로 읽힌다 — 형제 명령(소스 → 맵)과 같은
         // 상황에서 같은 안내를 한다.

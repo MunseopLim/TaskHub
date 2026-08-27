@@ -107,6 +107,16 @@ suite('Hex Viewer 데이터 전송', () => {
             assert.ok(/msg\.command !== 'hexData'/.test(html), 'hexData 수신 경로가 없다');
             assert.ok(/dataArrived = true;[\s\S]{0,120}render\(\)/.test(html),
                 '데이터 도착 후 첫 렌더를 하지 않는다');
+            assert.ok(
+                /render\(\);[\s\S]*command: 'dataReceived',[\s\S]*deliveryId: msg\.deliveryId/.test(html),
+                '렌더를 마친 뒤 payload 수신 ACK를 보내지 않는다'
+            );
+            const isolatedHtml = buildHexViewerHtml('x.bin', binaryOf(32), undefined, 'delivery-current');
+            assert.ok(isolatedHtml.includes('const EXPECTED_DELIVERY_ID = "delivery-current"'));
+            assert.ok(
+                /msg\.deliveryId !== EXPECTED_DELIVERY_ID/.test(isolatedHtml),
+                '이전 문서에 큐잉된 stale payload를 현재 렌더가 받아들인다'
+            );
         });
 
         test('도착 전에는 빈 배열이라 렌더 함수가 터지지 않는다', () => {

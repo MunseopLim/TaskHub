@@ -33,6 +33,7 @@ TaskHub/
 │   ├── previewRun.ts                  # Preview Run (Dry-run) 리포트 생성
 │   ├── previewOpener.ts               # preview/browser 열기 명령 헬퍼
 │   ├── browserTask.ts                 # browser 태스크 URI 해석·내장/기본 브라우저 실행
+│   ├── pathIdentity.ts                # 플랫폼별 파일 경로 identity 키 정규화
 │   ├── doctor.ts                      # actions.json 정적 분석(Doctor) 순수 모듈
 │   ├── variableCompletions.ts         # actions.json 의 ${…} 참조 자동완성 (결과 키는 previewRun 과 같은 출처)
 │   ├── dialogMemory.ts                # 파일/폴더 다이얼로그의 마지막 사용 위치 기억

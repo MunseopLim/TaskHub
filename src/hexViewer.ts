@@ -10,12 +10,30 @@ import * as crypto from 'crypto';
 import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexParseResult, HexFormat } from './hexParser';
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
+import { filePathIdentityKey } from './pathIdentity';
 
-let currentPanel: vscode.WebviewPanel | undefined;
+interface HexPanelState {
+    panel: vscode.WebviewPanel;
+    messageDisposable: vscode.Disposable | undefined;
+    renderGeneration: number;
+}
+
+/** standalone Hex Viewer 패널은 파일별로 하나씩 유지한다. */
+const hexPanels = new Map<string, HexPanelState>();
+
+function hexPanelKey(filePath: string): string {
+    return filePathIdentityKey(filePath);
+}
+
+function disposeHexPanelMessage(state: HexPanelState): void {
+    const disposable = state.messageDisposable;
+    state.messageDisposable = undefined;
+    disposable?.dispose();
+}
 
 /**
- * 패널 레지스트리 — **테스트용으로 노출한다** (Memory Map 의 `panelRegistry`
- * 와 같은 형태).
+ * 파일별 패널 레지스트리 — **테스트용으로 노출한다** (Memory Map 의
+ * `panelRegistry` 와 같은 형태).
  *
  * 이게 없어서 Hex Viewer 테스트는 순수 함수(`buildHexViewerHtml`)만 부를 수
  * 있었고, 실제 진입점인 `openHexViewerFile` 은 **어느 테스트도 실행하지
@@ -23,22 +41,21 @@ let currentPanel: vscode.WebviewPanel | undefined;
  * 재현할 하네스 자체가 없었다.
  */
 export const hexPanelRegistry = {
-    has(): boolean { return currentPanel !== undefined; },
-    getTitle(): string | undefined { return currentPanel?.title; },
-    getHtml(): string | undefined { return currentPanel?.webview.html; },
+    has(filePath: string): boolean { return hexPanels.has(hexPanelKey(filePath)); },
+    size(): number { return hexPanels.size; },
+    getTitle(filePath: string): string | undefined {
+        return hexPanels.get(hexPanelKey(filePath))?.panel.title;
+    },
+    getHtml(filePath: string): string | undefined {
+        return hexPanels.get(hexPanelKey(filePath))?.panel.webview.html;
+    },
     clear(): void {
-        currentPanel = undefined;
-        currentMessageDisposable?.dispose();
-        currentMessageDisposable = undefined;
+        for (const state of hexPanels.values()) {
+            disposeHexPanelMessage(state);
+        }
+        hexPanels.clear();
     },
 };
-// standalone 패널(단일 인스턴스) 전용 메시지 disposable. Custom Editor
-// (HexEditorProvider)는 인스턴스가 여러 개일 수 있으므로 resolveCustomEditor
-// 지역에서 자체 관리한다 — 전역 하나를 공유하면 패널/에디터를 오갈 때
-// 남의 핸들러를 dispose 해 메시지가 끊겼다(M7).
-let currentMessageDisposable: vscode.Disposable | undefined;
-/** standalone 패널의 렌더 세대. 패널 객체가 재사용되므로 이것으로 최신 여부를 가른다. */
-let panelRenderGeneration = 0;
 
 /** Hex Viewer에서 처리 가능한 최대 파일 크기 (50 MB) */
 /**
@@ -121,6 +138,15 @@ export function openHexViewerFile(
     filePath: string,
     options?: HexViewerOpenOptions
 ): boolean {
+    return openHexViewerFileInternal(context, filePath, options, false);
+}
+
+function openHexViewerFileInternal(
+    context: vscode.ExtensionContext,
+    filePath: string,
+    options: HexViewerOpenOptions | undefined,
+    preserveFocus: boolean
+): boolean {
     const fileName = path.basename(filePath);
 
     // 타입 검사를 우회한 JS/any 호출도 같은 계약을 지켜야 한다. HEX/SREC의
@@ -182,7 +208,18 @@ export function openHexViewerFile(
         return false;
     }
 
-    return openPanel(context, fileName, result, initialSelection);
+    const reloadOptions: HexViewerOpenOptions | undefined = options?.forceBinary === true
+        ? { forceBinary: true, initialSelection }
+        : undefined;
+    return openPanel(
+        context,
+        filePath,
+        fileName,
+        result,
+        initialSelection,
+        reloadOptions,
+        preserveFocus
+    );
 }
 
 function generateHexNonce(): string {
@@ -366,7 +403,7 @@ export function buildHexViewerPayload(result: HexParseResult): HexViewerPayload 
 }
 
 /**
- * 데이터를 웹뷰로 보낸다. HTML 을 세팅한 **직후** 불러야 한다.
+ * 데이터를 웹뷰로 보낸다. 웹뷰가 `ready`를 보낸 뒤 호출해야 한다.
  *
  * 웹뷰 스크립트는 이 메시지를 받을 때까지 "불러오는 중"을 표시하고, 받은 뒤에
  * 첫 렌더를 한다. HTML 에 데이터가 박혀 있던 예전과 달리 한 프레임 늦지만,
@@ -375,7 +412,8 @@ export function buildHexViewerPayload(result: HexParseResult): HexViewerPayload 
 export function postHexViewerData(
     webview: vscode.Webview,
     result: HexParseResult,
-    initialSelection?: HexViewerSelection
+    initialSelection?: HexViewerSelection,
+    deliveryId?: string
 ): void {
     const payload = buildHexViewerPayload(result);
     // 보낸 메시지를 호스트가 **기록하지 않는다**. 0.6.47 이 테스트용으로 모듈
@@ -389,16 +427,22 @@ export function postHexViewerData(
         data: payload.data,
         gap: payload.gap,
         initialSelection,
+        deliveryId,
     });
 }
 
-export function buildHexViewerHtml(fileName: string, result: HexParseResult, webview?: vscode.Webview): string {
+export function buildHexViewerHtml(
+    fileName: string,
+    result: HexParseResult,
+    webview?: vscode.Webview,
+    expectedDeliveryId?: string
+): string {
     const totalSize = result.maxAddress - result.minAddress + 1;
     assertWithinHexViewerSpan(totalSize);
 
     return getWebviewContent(
         fileName, result.format, result.minAddress, result.maxAddress,
-        result.byteCount, result.entryPoint, !!result.rawBuffer, webview
+        result.byteCount, result.entryPoint, !!result.rawBuffer, webview, expectedDeliveryId
     );
 }
 
@@ -446,7 +490,7 @@ export function parseFile(filePath: string, forceBinary = false): HexParseResult
 
 /**
  * 호스트 측 메시지 핸들러를 구독하고 disposable을 돌려준다. 호출자가
- * webview/panel 단위로 수명을 관리한다 (standalone 패널은 모듈 전역 1개,
+ * webview/panel 단위로 수명을 관리한다 (standalone은 파일별 Map state,
  * custom editor는 resolveCustomEditor 지역 + onDidDispose).
  */
 /** `ready` 가 오지 않을 때 그냥 보내 버리는 시한. 테스트가 이 값을 기다린다. */
@@ -464,12 +508,22 @@ interface HexWebviewHandshake extends vscode.Disposable {
     readonly readyReceived: boolean;
 }
 
-function setupWebviewMessageHandler(webview: vscode.Webview, onReady?: () => void): HexWebviewHandshake {
+function setupWebviewMessageHandler(
+    webview: vscode.Webview,
+    onReady?: () => void,
+    onDataReceived?: (deliveryId: string) => void
+): HexWebviewHandshake {
     let readyReceived = false;
     const subscription = webview.onDidReceiveMessage(message => {
         if (message.command === 'ready') {
             readyReceived = true;
             onReady?.();
+            return;
+        }
+        if (message.command === 'dataReceived') {
+            if (typeof message.deliveryId === 'string' && message.deliveryId.length <= 128) {
+                onDataReceived?.(message.deliveryId);
+            }
             return;
         }
         // `copySelection` 핸들러가 여기 있었다 (0.2.47~0.6.52). **보내는 쪽이
@@ -523,77 +577,173 @@ function renderWithReadyHandshake(
     fileName: string,
     result: HexParseResult,
     isCurrent: () => boolean,
-    initialSelection?: HexViewerSelection
+    initialSelection?: HexViewerSelection,
+    onReloadReady?: () => void
 ): HexWebviewHandshake {
-    const handshake = setupWebviewMessageHandler(webview, () => {
-        if (isCurrent()) { postHexViewerData(webview, result, initialSelection); }
-    });
+    const deliveryId = generateHexNonce();
+    // ready/fallback 콜백이 큰 HexParseResult를 패널 수명 내내 붙잡지 않게 한다.
+    // fallback 전송은 웹뷰 리스너보다 먼저 도착해 유실될 수 있으므로, 실제 수신
+    // ACK가 같은 deliveryId로 돌아온 뒤에만 참조를 놓는다.
+    let pendingResult: HexParseResult | undefined = result;
+    let pendingSelection = initialSelection;
+    let readyObserved = false;
+    const deliverPendingData = () => {
+        if (pendingResult && isCurrent()) {
+            postHexViewerData(webview, pendingResult, pendingSelection, deliveryId);
+        }
+    };
+    const handshake = setupWebviewMessageHandler(
+        webview,
+        () => {
+            readyObserved = true;
+            if (pendingResult) {
+                deliverPendingData();
+            } else {
+                // ACK 뒤의 ready는 같은 문서의 정상 흐름에서는 나오지 않는다.
+                // Developer: Reload Webviews 등으로 새 문서가 생긴 경우이므로,
+                // 원본을 계속 보관하는 대신 소유자가 파일을 다시 읽어 렌더한다.
+                onReloadReady?.();
+            }
+        },
+        receivedDeliveryId => {
+            if (receivedDeliveryId !== deliveryId) { return; }
+            // 재로드 복구 경로가 있는 standalone 패널만 원본을 놓는다. Custom
+            // Editor는 VS Code가 resolver를 다시 부르는지 보장할 수 없으므로
+            // 기존 재전송 동작을 유지한다.
+            // fallback이 먼저 도착한 문서에서는 ACK 뒤에 원래 ready가 늦게 올 수
+            // 있다. 그 신호를 새 문서로 오인하지 않도록 ready까지 본 뒤 해제한다.
+            if (onReloadReady && readyObserved) {
+                pendingResult = undefined;
+                pendingSelection = undefined;
+            }
+        }
+    );
     // 핸들러를 **먼저** 걸었으므로, 이후 단계가 던지면 그 구독이 주인 없이
     // 남는다 (`buildHexViewerHtml` 은 span 한도로 throw 할 수 있다). 호출부의
     // catch 는 오류 HTML 만 세팅하고 이 disposable 은 받지 못한다.
-    let html: string;
     try {
-        html = buildHexViewerHtml(fileName, result, webview);
+        const html = buildHexViewerHtml(fileName, result, webview, deliveryId);
+        webview.html = html;
     } catch (e) {
+        pendingResult = undefined;
+        pendingSelection = undefined;
         handshake.dispose();
         throw e;
     }
-    webview.html = html;
     const fallback = setTimeout(() => {
         if (isCurrent() && !handshake.readyReceived) {
-            postHexViewerData(webview, result, initialSelection);
+            deliverPendingData();
         }
     }, HEX_READY_FALLBACK_MS);
     // **타이머도 함께 취소한다.** 예전에는 구독만 해제해서, 이 타이머가
     // 살아남아 두 가지를 일으켰다:
-    //   - standalone 패널은 **같은 객체를 재사용**하므로 A 를 열고 `ready` 전에
-    //     B 를 열면 A 의 타이머가 `isCurrent()` 를 통과해 B 화면에 A 의 바이트를
-    //     보냈다 — 제목은 B, 내용은 A.
+    //   - standalone 패널은 같은 파일을 다시 열 때 **같은 객체를 재사용**하므로
+    //     이전 렌더의 타이머가 남으면 새 화면에 오래된 바이트를 보낼 수 있다.
     //   - Custom Editor 를 곧바로 닫아도 타이머가 최대 `HEX_VIEWER_MAX_SPAN`
     //     크기의 페이로드를 **다시 만들었다**. 보낼 곳도 없는 할당이다.
     return {
         get readyReceived() { return handshake.readyReceived; },
-        dispose() { clearTimeout(fallback); handshake.dispose(); },
+        dispose() {
+            pendingResult = undefined;
+            pendingSelection = undefined;
+            clearTimeout(fallback);
+            handshake.dispose();
+        },
     };
 }
 
 function openPanel(
     context: vscode.ExtensionContext,
+    filePath: string,
     fileName: string,
     result: HexParseResult,
-    initialSelection?: HexViewerSelection
+    initialSelection?: HexViewerSelection,
+    reloadOptions?: HexViewerOpenOptions,
+    preserveFocus = false
 ): boolean {
-    if (currentPanel) {
-        currentPanel.reveal(vscode.ViewColumn.One);
+    const key = hexPanelKey(filePath);
+    let state = hexPanels.get(key);
+    if (state) {
+        try {
+            state.panel.reveal(vscode.ViewColumn.One, preserveFocus);
+        } catch (e: unknown) {
+            const reason = e instanceof Error ? e.message : String(e);
+            vscode.window.showErrorMessage(t(
+                `Hex Viewer 패널을 표시할 수 없습니다 (${fileName}): ${reason}`,
+                `Cannot reveal Hex Viewer panel (${fileName}): ${reason}`
+            ));
+            return false;
+        }
     } else {
-        currentPanel = vscode.window.createWebviewPanel(
+        const panel = vscode.window.createWebviewPanel(
             'taskhub.hexViewer',
             `Hex: ${fileName}`,
             vscode.ViewColumn.One,
             { enableScripts: true, retainContextWhenHidden: true }
         );
-        currentPanel.onDidDispose(() => { currentPanel = undefined; currentMessageDisposable?.dispose(); currentMessageDisposable = undefined; });
+        const newState: HexPanelState = { panel, messageDisposable: undefined, renderGeneration: 0 };
+        state = newState;
+        hexPanels.set(key, newState);
+        panel.onDidDispose(() => {
+            if (hexPanels.get(key) !== newState) { return; }
+            disposeHexPanelMessage(newState);
+            hexPanels.delete(key);
+        });
     }
 
-    currentPanel.title = `Hex: ${fileName}`;
+    const panel = state.panel;
     try {
-        currentMessageDisposable?.dispose();
-        // **패널 객체로는 가릴 수 없다.** standalone 은 패널을 재사용하므로
-        // `currentPanel === panelAtSchedule` 은 다른 파일을 열어도 계속 참이다 —
-        // 그 검사만으로는 A 의 타이머가 B 화면에 A 를 보내는 것을 막지 못했다.
-        // 열기마다 올라가는 세대 번호로 "이 렌더가 아직 최신인가" 를 본다.
-        const generation = ++panelRenderGeneration;
-        currentMessageDisposable = renderWithReadyHandshake(
-            currentPanel.webview, fileName, result,
-            () => currentPanel !== undefined && panelRenderGeneration === generation,
-            initialSelection
+        disposeHexPanelMessage(state);
+        // 같은 파일의 패널은 재사용되므로 열기마다 올라가는 세대 번호로 이전
+        // ready/fallback 응답이 최신 렌더를 덮지 못하게 한다.
+        const generation = ++state.renderGeneration;
+        const messageDisposable = renderWithReadyHandshake(
+            panel.webview, fileName, result,
+            () => hexPanels.get(key) === state && state.renderGeneration === generation,
+            initialSelection,
+            () => {
+                if (hexPanels.get(key) === state && state.renderGeneration === generation) {
+                    const reloaded = openHexViewerFileInternal(
+                        context,
+                        filePath,
+                        reloadOptions,
+                        true
+                    );
+                    if (!reloaded
+                        && hexPanels.get(key) === state
+                        && state.renderGeneration === generation) {
+                        // 파일 삭제·크기 초과·선택 범위 무효처럼 새 렌더를 시작하기
+                        // 전에 실패하면, 재로드된 문서는 payload를 영원히 기다린다.
+                        // 옛 handshake를 끊고 정적 안내로 바꿔 무한 loading을 막는다.
+                        disposeHexPanelMessage(state);
+                        state.renderGeneration++;
+                        try {
+                            panel.webview.html = buildErrorHtml(panel.webview, t(
+                                `파일을 다시 불러오지 못했습니다: ${fileName}. 파일을 확인한 뒤 Hex Viewer에서 다시 여세요.`,
+                                `Could not reload ${fileName}. Check the file, then reopen it in Hex Viewer.`
+                            ), 'info');
+                        } catch {
+                            // 이미 닫힌 패널이면 추가 처리가 필요 없다.
+                        }
+                    }
+                }
+            }
         );
+        if (hexPanels.get(key) !== state) {
+            messageDisposable.dispose();
+            return false;
+        }
+        state.messageDisposable = messageDisposable;
     } catch (e: any) {
         const msg = t(
             `Hex Viewer 렌더링 실패 (${fileName}): ${e.message}`,
             `Failed to render Hex Viewer (${fileName}): ${e.message}`
         );
-        currentPanel.webview.html = buildErrorHtml(currentPanel.webview, msg, 'error');
+        try {
+            panel.webview.html = buildErrorHtml(panel.webview, msg, 'error');
+        } catch {
+            // 이미 닫힌 패널에는 오류 HTML을 쓸 수 없다. 토스트는 계속 표시한다.
+        }
         vscode.window.showErrorMessage(msg);
         return false;
     }
@@ -666,12 +816,16 @@ function getWebviewContent(
     byteCount: number,
     entryPoint: number | undefined,
     isBinaryFormat: boolean,
-    webview?: vscode.Webview
+    webview?: vscode.Webview,
+    expectedDeliveryId?: string
 ): string {
     const formatLabel = format === 'intel' ? 'Intel HEX' : format === 'srec' ? 'Motorola SREC' : 'Binary';
     const entryStr = entryPoint !== undefined ? `0x${entryPoint.toString(16).toUpperCase().padStart(8, '0')}` : 'N/A';
     const S = buildHexViewerStrings();
     const stringsLiteral = JSON.stringify(S).replace(/</g, '\\u003c');
+    const expectedDeliveryLiteral = expectedDeliveryId === undefined
+        ? 'null'
+        : JSON.stringify(expectedDeliveryId);
     const htmlLang = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
     const nonce = generateHexNonce();
     const cspSource = webview?.cspSource ?? 'vscode-webview:';
@@ -888,6 +1042,7 @@ function getWebviewContent(
     const BASE_ADDR = ${minAddress};
     const TOTAL_SIZE = ${maxAddress - minAddress + 1};
     const IS_BINARY = ${isBinaryFormat};
+    const EXPECTED_DELIVERY_ID = ${expectedDeliveryLiteral};
 
     // 데이터는 HTML 에 박혀 오지 않고 postMessage 로 도착한다 —
     // Base64 인코딩 / atob / 거대한 HTML 파싱을 모두 없애기 위해서다
@@ -1631,7 +1786,10 @@ function getWebviewContent(
 
     window.addEventListener('message', (event) => {
         const msg = event.data;
-        if (!msg || msg.command !== 'hexData') { return; }
+        if (
+            !msg || msg.command !== 'hexData'
+            || (EXPECTED_DELIVERY_ID !== null && msg.deliveryId !== EXPECTED_DELIVERY_ID)
+        ) { return; }
         // 구조화 복제로 온 Uint8Array 를 그대로 쓴다 — 복사하지 않는다.
         DATA = msg.data instanceof Uint8Array ? msg.data : new Uint8Array(msg.data);
         if (msg.gap) {
@@ -1651,6 +1809,9 @@ function getWebviewContent(
             jumpToOffset(initial.startOffset);
             selectedEndOffset = initial.endOffset;
             updateSelection();
+        }
+        if (typeof msg.deliveryId === 'string') {
+            vscode.postMessage({ command: 'dataReceived', deliveryId: msg.deliveryId });
         }
     });
 

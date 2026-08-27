@@ -204,7 +204,7 @@ suite('Memory Map Viewer Test Suite', () => {
 
             const renderId = currentMemoryMapRenderId(filePath);
             await memoryHandler!({ command: 'openHex', targetId: main!.id, renderId });
-            assert.ok(hexPanelRegistry.has(), 'Hex Viewer 패널이 열리지 않았다');
+            assert.ok(hexPanelRegistry.has(filePath), 'Hex Viewer 패널이 열리지 않았다');
             assert.ok(hexHandler, 'Hex Viewer ready handler가 설치되지 않았다');
             hexHandler!({ command: 'ready' });
             assert.strictEqual(hexPosted.length, 1);
