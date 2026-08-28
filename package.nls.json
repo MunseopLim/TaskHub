@@ -65,6 +65,7 @@
   "cmd.assignShortcut": "Assign Shortcut",
   "cmd.runAnyAction": "TaskHub: Run Any Action…",
   "cmd.showHexViewer": "Open Hex Viewer",
+  "cmd.showHexConverter": "Hex/Text Converter",
   "cmd.openMarkdownPreview": "Open Markdown Preview",
   "cmd.openHtmlInBrowser": "Open HTML in Default Browser",
   "setting.showTaskStatus": "Controls status icons, multi-task progress, and accessible status text in the Actions view. Completion and failure messages can be controlled independently with `taskhub.executionNotifications`. Stopping actions is unaffected: the inline stop button and *Stop All Actions* stay available.",

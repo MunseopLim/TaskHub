@@ -34,6 +34,7 @@ interface WebviewSource {
 }
 
 const WEBVIEWS: WebviewSource[] = [
+    { file: 'src/hexConverter.ts', handlerAnchor: 'onDidReceiveMessage' },
     { file: 'src/hexViewer.ts', handlerAnchor: 'onDidReceiveMessage' },
     { file: 'src/jsonEditor.ts', handlerAnchor: 'onDidReceiveMessage' },
     { file: 'src/memoryMapViewer.ts', handlerAnchor: 'onDidReceiveMessage' },

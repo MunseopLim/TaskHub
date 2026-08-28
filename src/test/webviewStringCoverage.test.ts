@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { buildJsonEditorStrings, getWebviewContent as getJsonEditorHtml } from '../jsonEditor';
 import { buildHexViewerHtml, buildHexViewerStrings } from '../hexViewer';
+import { buildHexConverterHtml, buildHexConverterStrings } from '../hexConverter';
 import { buildMemoryMapStrings, openMemoryMapFromListing, openMemoryMapPanel, panelRegistry } from '../memoryMapViewer';
 import { parseIntelHex } from '../hexParser';
 import { t } from '../i18n';
@@ -241,6 +242,17 @@ suite('웹뷰 하드코딩 문자열 탐지', () => {
                     buildHexViewerHtml('firmware.hex', parsed),
                     buildHexViewerStrings(),
                     'Hex Viewer',
+                    lang
+                );
+            });
+        });
+
+        test(`Hex/Text Converter (${lang})`, () => {
+            withLanguage(lang, () => {
+                assertNoHardcodedStrings(
+                    buildHexConverterHtml(),
+                    buildHexConverterStrings(),
+                    'Hex/Text Converter',
                     lang
                 );
             });

@@ -65,6 +65,7 @@
   "cmd.assignShortcut": "단축키 지정",
   "cmd.runAnyAction": "TaskHub: 액션 실행…",
   "cmd.showHexViewer": "Hex Viewer 열기",
+  "cmd.showHexConverter": "Hex/Text 변환기",
   "cmd.openMarkdownPreview": "Markdown 미리 보기 열기",
   "cmd.openHtmlInBrowser": "기본 브라우저에서 HTML 열기",
   "setting.showTaskStatus": "Actions 뷰의 상태 아이콘·다중 태스크 진행률·접근성 상태 문구를 제어합니다. 완료·실패 메시지는 `taskhub.executionNotifications`로 따로 제어할 수 있습니다. 중지 기능은 영향받지 않습니다: 인라인 중지 버튼과 *모든 액션 중지*는 그대로 쓸 수 있습니다.",

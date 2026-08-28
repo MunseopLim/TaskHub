@@ -23,6 +23,7 @@ import {
     openMemoryMapFromListing,
 } from './memoryMapViewer';
 import { showHexViewer, HexEditorProvider, HexViewerOpenHistory, openHexViewerFile } from './hexViewer';
+import { showHexConverter } from './hexConverter';
 import { t } from './i18n';
 import { buildPreviewReport } from './previewRun';
 import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput } from './doctor';
@@ -13096,6 +13097,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showHexViewer', async () => {
         await showHexViewer(context, entry => recordHexViewerHistory(historyProvider, entry));
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showHexConverter', () => {
+        showHexConverter(context);
     }));
 
     context.subscriptions.push(vscode.window.registerCustomEditorProvider(
