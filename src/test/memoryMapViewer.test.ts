@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import {
     openMemoryMapPanel,
@@ -11,8 +12,11 @@ import {
     DWARF_SOURCE_SEARCH_MAX_RESULTS,
     DwarfSourceSearchLimitError,
     collectMemoryMapSourceTargets,
+    compareDwarfSourceCandidates,
     findWorkspaceSourceBySuffix,
+    openMemoryMapSourceLocation,
     resolveDwarfSourcePathCandidates,
+    selectDwarfSourceCandidate,
 } from '../memoryMapViewer';
 import {
     buildDwarf4LineSection,
@@ -342,10 +346,23 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.ok(warnings.some(message => /20|line 20/.test(message)), '현재 소스 범위를 벗어난 줄을 안내해야 한다');
 
             fs.appendFileSync(filePath, Buffer.from([0]));
+            const sourceSession = panelRegistry.getSourceSessionState(filePath);
+            assert.ok(sourceSession);
+            sourceSession!.sourceSelections.set('selection', sourcePath);
+            sourceSession!.sourceChecksumCache.set('checksum', {
+                expectedMd5: '00112233445566778899aabbccddeeff',
+                fingerprint: { size: 1, mtimeMs: 1, ctimeMs: 1 },
+                status: 'match',
+            });
+            sourceSession!.sourceWarningKeys.add('warning');
             const mainTarget = targets.find(candidate => candidate.label === 'main');
             await memoryHandler!({ command: 'openSource', targetId: mainTarget!.id, renderId });
             assert.strictEqual(showCount, 1, 'ELF가 교체된 뒤에는 오래된 소스 target을 열면 안 된다');
             assert.ok(warnings.some(message => /changed|변경/.test(message)), 'ELF를 다시 열어야 한다고 안내해야 한다');
+            assert.strictEqual(sourceSession!.sourceSelections.size, 0);
+            assert.strictEqual(sourceSession!.sourceChecksumCache.size, 0);
+            assert.strictEqual(sourceSession!.sourceWarningKeys.size, 0,
+                'stale ELF는 선택·checksum 캐시·단일 후보 경고 기억을 함께 폐기해야 한다');
         } finally {
             (vscode.window as any).createWebviewPanel = originalCreate;
             (vscode.workspace as any).openTextDocument = originalOpenTextDocument;
@@ -649,6 +666,453 @@ suite('Memory Map Viewer Test Suite', () => {
                 (error: unknown) => error instanceof DwarfSourceSearchLimitError,
                 'findFiles 결과가 잘렸을 수 있으면 임의 후보를 자동 선택하면 안 된다'
             );
+        });
+
+        test('DWARF 5 MD5를 bounded read로 비교하고 읽기 상한·미저장 편집을 구분한다', async () => {
+            const dir = path.join(tmpDir, 'taskhub-test', `dwarf-checksum-${process.pid}`);
+            fs.mkdirSync(dir, { recursive: true });
+            const first = path.join(dir, 'first.c');
+            const second = path.join(dir, 'second.c');
+            fs.writeFileSync(first, 'int main(void) { return 0; }\n');
+            fs.writeFileSync(second, 'int main(void) { return 1; }\n');
+            tmpFiles.push(first, second);
+            const expected = crypto.createHash('md5').update(fs.readFileSync(first)).digest('hex');
+
+            assert.deepStrictEqual(await compareDwarfSourceCandidates(expected, [first, second], {
+                isDirty: () => false,
+            }), [
+                { filePath: first, status: 'match' },
+                { filePath: second, status: 'mismatch' },
+            ]);
+
+            assert.deepStrictEqual(await compareDwarfSourceCandidates(expected, [first], {
+                maxFileBytes: fs.statSync(first).size - 1,
+                isDirty: () => false,
+            }), [
+                { filePath: first, status: 'unavailable', reason: 'file-too-large' },
+            ]);
+
+            assert.deepStrictEqual(await compareDwarfSourceCandidates(expected, [first, second], {
+                maxTotalBytes: fs.statSync(first).size,
+                isDirty: () => false,
+            }), [
+                { filePath: first, status: 'match' },
+                { filePath: second, status: 'unavailable', reason: 'total-limit' },
+            ]);
+
+            assert.deepStrictEqual(await compareDwarfSourceCandidates(expected, [first], {
+                isDirty: candidate => candidate === first,
+            }), [
+                { filePath: first, status: 'unavailable', reason: 'unsaved-edits' },
+            ]);
+
+            let dirtyChecks = 0;
+            assert.deepStrictEqual(await compareDwarfSourceCandidates(expected, [first], {
+                isDirty: () => ++dirtyChecks > 1,
+            }), [
+                { filePath: first, status: 'unavailable', reason: 'unsaved-edits' },
+            ], 'checksum을 읽은 뒤 편집이 시작되어도 자동 선택 후보로 남기면 안 된다');
+
+            assert.deepStrictEqual(await compareDwarfSourceCandidates('broken', [first], {
+                isDirty: () => false,
+            }), [
+                { filePath: first, status: 'unavailable', reason: 'invalid-record' },
+            ], '잘못된 ELF digest를 소스 파일 읽기 실패로 오인하면 안 된다');
+
+            let cancellationChecks = 0;
+            await assert.rejects(
+                compareDwarfSourceCandidates(expected, [first], {
+                    isDirty: () => false,
+                    cancellationToken: {
+                        get isCancellationRequested() { return ++cancellationChecks > 1; },
+                    },
+                }),
+                (error: unknown) => error instanceof vscode.CancellationError
+            );
+
+            const cache = new Map();
+            assert.deepStrictEqual(await compareDwarfSourceCandidates(expected, [first], {
+                isDirty: () => false,
+                cache,
+            }), [{ filePath: first, status: 'match' }]);
+            assert.deepStrictEqual(await compareDwarfSourceCandidates(expected, [first], {
+                maxFileBytes: 0,
+                maxTotalBytes: 0,
+                isDirty: () => false,
+                cache,
+            }), [{ filePath: first, status: 'match' }], 'fingerprint가 같으면 파일을 다시 읽지 않는다');
+
+            fs.writeFileSync(first, 'int main(void) { return 2; }\n');
+            const changedTime = new Date(Date.now() + 2000);
+            fs.utimesSync(first, changedTime, changedTime);
+            assert.deepStrictEqual(await compareDwarfSourceCandidates(expected, [first], {
+                maxFileBytes: 0,
+                maxTotalBytes: 0,
+                isDirty: () => false,
+                cache,
+            }), [
+                { filePath: first, status: 'unavailable', reason: 'file-too-large' },
+            ], 'fingerprint가 바뀌면 캐시를 버리고 현재 상한을 적용한다');
+        });
+
+        test('checksum을 읽는 동안 파일이 바뀌면 digest를 버린다', async () => {
+            const dir = path.join(tmpDir, 'taskhub-test', `dwarf-checksum-race-${process.pid}`);
+            fs.mkdirSync(dir, { recursive: true });
+            const candidate = path.join(dir, 'changed-during-read.c');
+            fs.writeFileSync(candidate, 'int value = 1;\n');
+            tmpFiles.push(candidate);
+            const expected = crypto.createHash('md5').update(fs.readFileSync(candidate)).digest('hex');
+            const originalOpen = fs.promises.open;
+            try {
+                (fs.promises as any).open = async (...args: Parameters<typeof fs.promises.open>) => {
+                    const handle = await originalOpen(...args);
+                    let statCalls = 0;
+                    return {
+                        stat: async () => {
+                            statCalls++;
+                            if (statCalls === 2) {
+                                fs.appendFileSync(candidate, 'int changed = 2;\n');
+                            }
+                            return handle.stat();
+                        },
+                        read: handle.read.bind(handle),
+                        close: handle.close.bind(handle),
+                    };
+                };
+                assert.deepStrictEqual(await compareDwarfSourceCandidates(expected, [candidate], {
+                    isDirty: () => false,
+                }), [
+                    { filePath: candidate, status: 'unavailable', reason: 'file-changed' },
+                ]);
+            } finally {
+                (fs.promises as any).open = originalOpen;
+            }
+        });
+
+        test('checksum이 없으면 기존 단일 후보를 그대로 자동 선택한다', async () => {
+            const candidate = path.join(tmpDir, 'workspace', 'src', 'main.c');
+            let pickerCalled = false;
+            const selected = await selectDwarfSourceCandidate({
+                id: 'source-1',
+                label: 'main',
+                location: {
+                    address: 0x08000000,
+                    endAddress: 0x08000010,
+                    filePath: '/build/src/main.c',
+                    line: 1,
+                    column: 0,
+                    isStatement: true,
+                },
+            }, [candidate], new Map(), {
+                showQuickPick: async () => { pickerCalled = true; return undefined; },
+            });
+            assert.strictEqual(selected, candidate);
+            assert.strictEqual(pickerCalled, false);
+        });
+
+        test('긴 target 이름은 Quick Pick 안내에서도 120자로 제한한다', async () => {
+            const first = path.join(tmpDir, 'workspace-a', 'src', 'main.c');
+            const second = path.join(tmpDir, 'workspace-b', 'src', 'main.c');
+            const longLabel = 'q'.repeat(200);
+            await selectDwarfSourceCandidate({
+                id: 'source-long-placeholder',
+                label: longLabel,
+                location: {
+                    address: 0x08000000,
+                    endAddress: 0x08000010,
+                    filePath: '/build/src/main.c',
+                    line: 1,
+                    column: 0,
+                    isStatement: true,
+                },
+            }, [first, second], new Map(), {
+                showQuickPick: async (_items, options) => {
+                    assert.ok(String(options.placeHolder).includes(`${'q'.repeat(120)}…`));
+                    assert.ok(!String(options.placeHolder).includes('q'.repeat(121)));
+                    return undefined;
+                },
+            });
+        });
+
+        test('checksum이 유일하게 일치할 때만 Quick Pick 없이 자동 선택한다', async () => {
+            const first = path.join(tmpDir, 'workspace-a', 'src', 'main.c');
+            const second = path.join(tmpDir, 'workspace-b', 'src', 'main.c');
+            let pickerCalled = false;
+            const selected = await selectDwarfSourceCandidate({
+                id: 'source-2',
+                label: 'main',
+                location: {
+                    address: 0x08000000,
+                    endAddress: 0x08000010,
+                    filePath: '/build/src/main.c',
+                    md5: '00112233445566778899aabbccddeeff',
+                    line: 1,
+                    column: 0,
+                    isStatement: true,
+                },
+            }, [first, second], new Map(), {
+                compareCandidates: async () => [
+                    { filePath: first, status: 'mismatch' },
+                    { filePath: second, status: 'match' },
+                ],
+                showQuickPick: async () => { pickerCalled = true; return undefined; },
+            });
+            assert.strictEqual(selected, second);
+            assert.strictEqual(pickerCalled, false);
+        });
+
+        test('실제 checksum 비교는 취소 가능한 Window 진행 상태로 감싼다', async () => {
+            const dir = path.join(tmpDir, 'taskhub-test', `dwarf-progress-${process.pid}`);
+            fs.mkdirSync(dir, { recursive: true });
+            const candidate = path.join(dir, 'main.c');
+            fs.writeFileSync(candidate, 'int main(void) { return 0; }\n');
+            tmpFiles.push(candidate);
+            const md5 = crypto.createHash('md5').update(fs.readFileSync(candidate)).digest('hex');
+            const longLabel = 'x'.repeat(200);
+            const originalWithProgress = vscode.window.withProgress;
+            let progressOptions: vscode.ProgressOptions | undefined;
+            try {
+                (vscode.window as any).withProgress = async (
+                    options: vscode.ProgressOptions,
+                    task: (progress: { report(): void }, token: vscode.CancellationToken) => Promise<unknown>
+                ) => {
+                    progressOptions = options;
+                    return task(
+                        { report() { /* no-op */ } },
+                        { isCancellationRequested: false } as vscode.CancellationToken
+                    );
+                };
+                const selected = await selectDwarfSourceCandidate({
+                    id: 'source-progress',
+                    label: longLabel,
+                    location: {
+                        address: 0x08000000,
+                        endAddress: 0x08000010,
+                        filePath: '/build/src/main.c',
+                        md5,
+                        line: 1,
+                        column: 0,
+                        isStatement: true,
+                    },
+                }, [candidate], new Map(), { checksumCache: new Map() });
+                assert.strictEqual(selected, candidate);
+                assert.strictEqual(progressOptions?.location, vscode.ProgressLocation.Window);
+                assert.strictEqual(progressOptions?.cancellable, true);
+                assert.ok(String(progressOptions?.title).includes(`${'x'.repeat(120)}…`));
+                assert.ok(!String(progressOptions?.title).includes('x'.repeat(121)),
+                    'ELF 심볼 이름 전체를 진행 상태 제목에 넣으면 안 된다');
+            } finally {
+                (vscode.window as any).withProgress = originalWithProgress;
+            }
+        });
+
+        test('checksum이 다른 단일 후보는 경고 완료를 기다리지 않고 세션당 한 번만 연다', async () => {
+            const candidate = path.join(tmpDir, 'workspace', 'src', 'changed.c');
+            for (const comparison of [
+                { filePath: candidate, status: 'mismatch' as const },
+                { filePath: candidate, status: 'unavailable' as const, reason: 'unsaved-edits' as const },
+            ]) {
+                let pickerCalled = false;
+                const warnings: string[] = [];
+                const shownWarningKeys = new Set<string>();
+                let resolveWarning!: () => void;
+                const pendingWarning = new Promise<void>(resolve => { resolveWarning = resolve; });
+                let settled = false;
+                let selected: string | undefined;
+                const selectionPromise = selectDwarfSourceCandidate({
+                    id: 'source-single',
+                    label: 'changed',
+                    location: {
+                        address: 0x08000000,
+                        endAddress: 0x08000010,
+                        filePath: '/build/src/changed.c',
+                        md5: '00112233445566778899aabbccddeeff',
+                        line: 1,
+                        column: 0,
+                        isStatement: true,
+                    },
+                }, [candidate], new Map(), {
+                    compareCandidates: async () => [comparison],
+                    showQuickPick: async () => { pickerCalled = true; return undefined; },
+                    showWarningMessage: message => {
+                        warnings.push(message);
+                        return pendingWarning;
+                    },
+                    shownWarningKeys,
+                }).then(value => {
+                    settled = true;
+                    selected = value;
+                });
+                await new Promise<void>(resolve => setImmediate(resolve));
+                const settledBeforeDismiss = settled;
+                resolveWarning();
+                await selectionPromise;
+                assert.strictEqual(settledBeforeDismiss, true,
+                    '버튼 없는 warning toast가 닫힐 때까지 소스 열기를 지연하면 안 된다');
+                assert.strictEqual(selected, candidate);
+                assert.strictEqual(pickerCalled, false);
+                assert.strictEqual(warnings.length, 1);
+                assert.match(warnings[0], comparison.status === 'mismatch'
+                    ? /ELF|내용|contents/
+                    : /checksum|Checksum/);
+
+                assert.strictEqual(await selectDwarfSourceCandidate({
+                    id: 'source-single',
+                    label: 'changed',
+                    location: {
+                        address: 0x08000000,
+                        endAddress: 0x08000010,
+                        filePath: '/build/src/changed.c',
+                        md5: '00112233445566778899aabbccddeeff',
+                        line: 1,
+                        column: 0,
+                        isStatement: true,
+                    },
+                }, [candidate], new Map(), {
+                    compareCandidates: async () => [comparison],
+                    showWarningMessage: async message => { warnings.push(message); },
+                    shownWarningKeys,
+                }), candidate);
+                assert.strictEqual(warnings.length, 1, '같은 단일 후보 경고를 클릭마다 반복하면 안 된다');
+            }
+        });
+
+        test('checksum 진행 상태 실패를 처리되지 않은 webview rejection으로 넘기지 않는다', async () => {
+            const dir = path.join(tmpDir, 'taskhub-test', `dwarf-open-error-${process.pid}`);
+            fs.mkdirSync(dir, { recursive: true });
+            const candidate = path.join(dir, 'main.c');
+            const elfPath = path.join(dir, 'app.elf');
+            fs.writeFileSync(candidate, 'int main(void) { return 0; }\n');
+            fs.writeFileSync(elfPath, Buffer.alloc(1));
+            tmpFiles.push(candidate, elfPath);
+            const originalWithProgress = vscode.window.withProgress;
+            const originalShowError = vscode.window.showErrorMessage;
+            const errors: string[] = [];
+            const longLabel = 'e'.repeat(200);
+            try {
+                (vscode.window as any).withProgress = async () => {
+                    throw new Error('injected checksum failure');
+                };
+                (vscode.window as any).showErrorMessage = (message: string) => {
+                    errors.push(message);
+                    return Promise.resolve(undefined);
+                };
+                await openMemoryMapSourceLocation({
+                    id: 'source-error',
+                    label: longLabel,
+                    location: {
+                        address: 0x08000000,
+                        endAddress: 0x08000010,
+                        filePath: candidate,
+                        md5: '00112233445566778899aabbccddeeff',
+                        line: 1,
+                        column: 0,
+                        isStatement: true,
+                    },
+                }, elfPath, new Map(), new Map(), new Set());
+                assert.strictEqual(errors.length, 1);
+                assert.match(errors[0], /injected checksum failure/);
+                assert.ok(errors[0].includes(`${'e'.repeat(120)}…`));
+                assert.ok(!errors[0].includes('e'.repeat(121)));
+            } finally {
+                (vscode.window as any).withProgress = originalWithProgress;
+                (vscode.window as any).showErrorMessage = originalShowError;
+            }
+        });
+
+        test('전부 불일치면 원인을 설명하고 상태 아이콘을 ThemeIcon으로 표시한다', async () => {
+            const first = path.join(tmpDir, 'workspace-a', 'src', 'main.c');
+            const second = path.join(tmpDir, 'workspace-b', 'src', 'main.c');
+            let pickerCalled = false;
+            const selected = await selectDwarfSourceCandidate({
+                id: 'source-mismatch',
+                label: 'main',
+                location: {
+                    address: 0x08000000,
+                    endAddress: 0x08000010,
+                    filePath: '/build/src/main.c',
+                    md5: '00112233445566778899aabbccddeeff',
+                    line: 1,
+                    column: 0,
+                    isStatement: true,
+                },
+            }, [first, second], new Map(), {
+                compareCandidates: async () => [
+                    { filePath: first, status: 'mismatch' },
+                    { filePath: second, status: 'mismatch' },
+                ],
+                showQuickPick: async (items, options) => {
+                    pickerCalled = true;
+                    assert.match(options.placeHolder ?? '', /일치.*없|No candidate matches/);
+                    assert.ok(items.every(item => item.iconPath instanceof vscode.ThemeIcon));
+                    assert.ok(items.every(item => !(item.description ?? '').includes('$(')));
+                    assert.strictEqual(options.matchOnDescription, false);
+                    return undefined;
+                },
+            });
+            assert.strictEqual(selected, undefined);
+            assert.strictEqual(pickerCalled, true);
+        });
+
+        test('다중 일치·확인 불가 후보는 상태와 이유를 표시하고 명시 선택을 세션에 기억한다', async () => {
+            const first = path.join(tmpDir, 'workspace-a', 'src', 'main.c');
+            const second = path.join(tmpDir, 'workspace-b', 'src', 'main.c');
+            const remembered = new Map<string, string>();
+            let pickerCalls = 0;
+            let compareCalls = 0;
+            const target = {
+                id: 'source-3',
+                label: 'main',
+                location: {
+                    address: 0x08000000,
+                    endAddress: 0x08000010,
+                    filePath: '/build/src/main.c',
+                    md5: '00112233445566778899aabbccddeeff',
+                    line: 1,
+                    column: 0,
+                    isStatement: true,
+                },
+            };
+            const options = {
+                compareCandidates: async () => {
+                    compareCalls++;
+                    return [
+                        { filePath: first, status: 'match' as const },
+                        { filePath: second, status: 'unavailable' as const, reason: 'unsaved-edits' as const },
+                    ];
+                },
+                showQuickPick: async (items: Array<vscode.QuickPickItem & { filePath: string }>) => {
+                    pickerCalls++;
+                    assert.match(items[0].description ?? '', /ELF|일치|Matches/);
+                    assert.match(items[1].description ?? '', /checksum|Checksum/);
+                    assert.match(items[1].detail ?? '', /unsaved|저장되지 않은/);
+                    return items[1];
+                },
+            };
+
+            assert.strictEqual(await selectDwarfSourceCandidate(target, [first, second], remembered, options), second);
+            assert.strictEqual(await selectDwarfSourceCandidate(target, [first, second], remembered, options), second);
+            assert.strictEqual(pickerCalls, 1, '같은 후보 집합의 명시 선택은 현재 패널 세션에서 다시 묻지 않는다');
+            assert.strictEqual(compareCalls, 1, '기억된 명시 선택은 checksum을 다시 읽지 않는다');
+
+            const third = path.join(tmpDir, 'workspace-c', 'src', 'main.c');
+            const changedOptions = {
+                compareCandidates: async () => [
+                    { filePath: first, status: 'match' as const },
+                    { filePath: second, status: 'mismatch' as const },
+                    { filePath: third, status: 'match' as const },
+                ],
+                showQuickPick: async (items: Array<vscode.QuickPickItem & { filePath: string }>) => {
+                    pickerCalls++;
+                    return items[0];
+                },
+            };
+            assert.strictEqual(
+                await selectDwarfSourceCandidate(target, [first, second, third], remembered, changedOptions),
+                first,
+                '후보 집합이 달라지면 이전 명시 선택을 재사용하지 않는다'
+            );
+            assert.strictEqual(pickerCalls, 2);
         });
     });
 

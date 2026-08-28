@@ -197,7 +197,8 @@ suite('DWARF .debug_line parser', () => {
     });
 
     test('DWARF 5 line_strp·0-based 인덱스·MD5 descriptor를 해석한다', () => {
-        const fixture = buildDwarf5LineSections('/workspace/src/main.c');
+        const md5 = Buffer.from('00112233445566778899aabbccddeeff', 'hex');
+        const fixture = buildDwarf5LineSections('/workspace/src/main.c', md5);
         const result = parseDwarfLineSection(fixture.debugLine, true, {
             debugLineStr: fixture.debugLineStr,
         });
@@ -208,11 +209,26 @@ suite('DWARF .debug_line parser', () => {
             end: location.endAddress,
             file: location.filePath,
             line: location.line,
+            md5: location.md5,
         })), [
-            { start: 0x08000000, end: 0x08000120, file: '/workspace/src/main.c', line: 1 },
-            { start: 0x08000120, end: 0x080001a0, file: '/workspace/src/main.c', line: 10 },
-            { start: 0x080001a0, end: 0x08000300, file: '/workspace/src/main.c', line: 20 },
+            { start: 0x08000000, end: 0x08000120, file: '/workspace/src/main.c', line: 1, md5: md5.toString('hex') },
+            { start: 0x08000120, end: 0x080001a0, file: '/workspace/src/main.c', line: 10, md5: md5.toString('hex') },
+            { start: 0x080001a0, end: 0x08000300, file: '/workspace/src/main.c', line: 20, md5: md5.toString('hex') },
         ]);
+    });
+
+    test('DWARF 5의 MD5 descriptor 유무를 구분하고 전부 0인 digest도 보존한다', () => {
+        const fixture = buildDwarf5LineSections('/workspace/src/main.c', Buffer.alloc(16));
+        const result = parseDwarfLineSection(fixture.debugLine, true, {
+            debugLineStr: fixture.debugLineStr,
+        });
+        assert.ok(result.locations.every(location => location.md5 === '0'.repeat(32)));
+
+        const withoutMd5 = buildDwarf5LineSections('/workspace/src/main.c');
+        const withoutMd5Result = parseDwarfLineSection(withoutMd5.debugLine, true, {
+            debugLineStr: withoutMd5.debugLineStr,
+        });
+        assert.ok(withoutMd5Result.locations.every(location => location.md5 === undefined));
     });
 
     test('DWARF 5 inline path의 상대 include directory와 초기 file 1을 해석한다', () => {
@@ -266,18 +282,22 @@ suite('DWARF .debug_line parser', () => {
         const debugLineStr = Buffer.from(cstring('embedded source'));
         const withVendorField = buildDwarf5Unit({
             fileTable: [
-                4,
+                5,
                 ...uleb(0x01), ...uleb(0x08),
                 ...uleb(0x02), ...uleb(0x0f),
+                ...uleb(0x2000), ...uleb(0x1e),
                 ...uleb(0x05), ...uleb(0x1e),
                 ...uleb(0x2001), ...uleb(0x1f),
-                ...uleb(1), ...cstring('main.c'), ...uleb(0), ...Array(16).fill(0), ...uint32(0, true),
+                ...uleb(1), ...cstring('main.c'), ...uleb(0),
+                ...Array(16).fill(0xaa),
+                ...Array(16).fill(0),
+                ...uint32(0, true),
             ],
         });
-        assert.strictEqual(
-            parseDwarfLineSection(withVendorField, true, { debugLineStr }).locations[0].filePath,
-            '/workspace/src/main.c'
-        );
+        const vendorResult = parseDwarfLineSection(withVendorField, true, { debugLineStr }).locations[0];
+        assert.strictEqual(vendorResult.filePath, '/workspace/src/main.c');
+        assert.strictEqual(vendorResult.md5, '00000000000000000000000000000000',
+            'vendor DW_FORM_data16은 건너뛰고 DW_LNCT_MD5 값만 보존해야 한다');
 
         const withIndexedVendorFields = buildDwarf5Unit({
             fileTable: [

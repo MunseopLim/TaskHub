@@ -68,6 +68,8 @@ export interface DwarfSourceLocation {
     endAddress: number;
     /** DWARF producer가 기록한 전체 또는 상대 경로. 실제 워크스페이스 경로는 호스트에서 해석한다. */
     filePath: string;
+    /** DWARF 5 file table의 16-byte MD5. descriptor가 없으면 undefined다. */
+    md5?: string;
     line: number;
     column: number;
     isStatement: boolean;
@@ -102,6 +104,7 @@ export interface DwarfLineStringSections {
 interface DwarfFileEntry {
     name: string;
     directoryIndex: number;
+    md5?: string;
 }
 
 interface LineState {
@@ -123,6 +126,7 @@ interface DwarfLineEntryFormat {
 interface DwarfLineFormValue {
     stringValue?: string;
     unsignedValue?: number;
+    data16Value?: string;
     unsupportedFeature?: DwarfLineUnsupportedFeature;
 }
 
@@ -179,6 +183,13 @@ class DwarfReader {
     skip(bytes: number, limit: number, label: string): void {
         this.ensure(bytes, limit, label);
         this.offset += bytes;
+    }
+
+    readHexBytes(bytes: number, limit: number, label: string): string {
+        this.ensure(bytes, limit, label);
+        const value = this.buffer.toString('hex', this.offset, this.offset + bytes);
+        this.offset += bytes;
+        return value;
     }
 
     readULEB(limit: number): number {
@@ -300,7 +311,8 @@ function readLineFormValue(
     form: number,
     limit: number,
     strings: DwarfLineStringSections,
-    resolveString: boolean
+    resolveString: boolean,
+    captureData16: boolean
 ): DwarfLineFormValue {
     switch (form) {
         case DW_FORM_STRING:
@@ -347,6 +359,9 @@ function readLineFormValue(
             reader.readSLEB(limit);
             return {};
         case DW_FORM_DATA16:
+            if (captureData16) {
+                return { data16Value: reader.readHexBytes(16, limit, 'DW_FORM_data16') };
+            }
             reader.skip(16, limit, 'DW_FORM_data16');
             return {};
         case DW_FORM_STRX1:
@@ -414,16 +429,18 @@ function readV5Entry(
     limit: number,
     strings: DwarfLineStringSections,
     onUnsupportedFeature: (feature: DwarfLineUnsupportedFeature) => void
-): { path: string; directoryIndex: number } {
+): { path: string; directoryIndex: number; md5?: string } {
     let entryPath = '';
     let directoryIndex = 0;
+    let md5: string | undefined;
     for (const descriptor of formats) {
         const value = readLineFormValue(
             reader,
             descriptor.form,
             limit,
             strings,
-            descriptor.contentType === DW_LNCT_PATH
+            descriptor.contentType === DW_LNCT_PATH,
+            descriptor.contentType === DW_LNCT_MD5
         );
         if (value.unsupportedFeature) {
             onUnsupportedFeature(value.unsupportedFeature);
@@ -432,9 +449,11 @@ function readV5Entry(
             entryPath = value.stringValue ?? '';
         } else if (descriptor.contentType === DW_LNCT_DIRECTORY_INDEX) {
             directoryIndex = value.unsignedValue ?? 0;
+        } else if (descriptor.contentType === DW_LNCT_MD5 && value.data16Value) {
+            md5 = value.data16Value;
         }
     }
-    return { path: entryPath, directoryIndex };
+    return { path: entryPath, directoryIndex, md5 };
 }
 
 function portableIsAbsolute(value: string): boolean {
@@ -449,32 +468,39 @@ function joinDwarfPath(directory: string, fileName: string): string {
     return `${directory.replace(/[\\/]$/, '')}${separator}${fileName}`;
 }
 
-function sourcePath(
+interface ResolvedDwarfSource {
+    filePath: string;
+    md5?: string;
+}
+
+function sourceFile(
     files: DwarfFileEntry[],
     directories: string[],
     fileIndex: number,
     version: number
-): string | undefined {
+): ResolvedDwarfSource | undefined {
     const zeroIndexed = version >= 5;
     const fileOffset = zeroIndexed ? fileIndex : fileIndex - 1;
     if (!Number.isSafeInteger(fileOffset) || fileOffset < 0 || fileOffset >= files.length) { return undefined; }
     const file = files[fileOffset];
     if (!file.name) { return undefined; }
-    if (portableIsAbsolute(file.name) || (!zeroIndexed && file.directoryIndex === 0)) { return file.name; }
+    if (portableIsAbsolute(file.name) || (!zeroIndexed && file.directoryIndex === 0)) {
+        return { filePath: file.name, md5: file.md5 };
+    }
     const directoryOffset = zeroIndexed ? file.directoryIndex : file.directoryIndex - 1;
     if (!Number.isSafeInteger(directoryOffset) || directoryOffset < 0 || directoryOffset >= directories.length) {
         return undefined;
     }
     const directory = directories[directoryOffset];
-    if (!directory) { return zeroIndexed ? file.name : undefined; }
+    if (!directory) { return zeroIndexed ? { filePath: file.name, md5: file.md5 } : undefined; }
     if (zeroIndexed && directoryOffset > 0 && !portableIsAbsolute(directory)) {
         const compilationDirectory = directories[0];
         const resolvedDirectory = compilationDirectory
             ? joinDwarfPath(compilationDirectory, directory)
             : directory;
-        return joinDwarfPath(resolvedDirectory, file.name);
+        return { filePath: joinDwarfPath(resolvedDirectory, file.name), md5: file.md5 };
     }
-    return joinDwarfPath(directory, file.name);
+    return { filePath: joinDwarfPath(directory, file.name), md5: file.md5 };
 }
 
 function safeAdd(value: number, delta: number, label: string): number {
@@ -661,7 +687,7 @@ export function parseDwarfLineSection(
                     feature => unitUnsupportedFeatures.add(feature)
                 );
                 accountDecodedPath(file.path);
-                files.push({ name: file.path, directoryIndex: file.directoryIndex });
+                files.push({ name: file.path, directoryIndex: file.directoryIndex, md5: file.md5 });
             }
         } else {
             while (true) {
@@ -700,13 +726,13 @@ export function parseDwarfLineSection(
         let state = initialState();
         let pending: PendingRow | undefined;
         let sequenceLocationStart = locations.length;
-        const resolvedSourcePaths = new Map<number, string | undefined>();
-        const resolveSourcePath = (fileIndex: number): string | undefined => {
-            if (resolvedSourcePaths.has(fileIndex)) {
-                return resolvedSourcePaths.get(fileIndex);
+        const resolvedSources = new Map<number, ResolvedDwarfSource | undefined>();
+        const resolveSource = (fileIndex: number): ResolvedDwarfSource | undefined => {
+            if (resolvedSources.has(fileIndex)) {
+                return resolvedSources.get(fileIndex);
             }
-            const resolved = sourcePath(files, directories, fileIndex, version);
-            resolvedSourcePaths.set(fileIndex, resolved);
+            const resolved = sourceFile(files, directories, fileIndex, version);
+            resolvedSources.set(fileIndex, resolved);
             return resolved;
         };
 
@@ -732,12 +758,13 @@ export function parseDwarfLineSection(
                 throw new Error('DWARF .debug_line sequence addresses decrease.');
             }
             if (pending && state.address > pending.address) {
-                const filePath = resolveSourcePath(pending.file);
-                if (filePath && pending.line > 0 && Number.isSafeInteger(pending.line)) {
+                const source = resolveSource(pending.file);
+                if (source && pending.line > 0 && Number.isSafeInteger(pending.line)) {
                     locations.push({
                         address: pending.address,
                         endAddress: state.address,
-                        filePath,
+                        filePath: source.filePath,
+                        md5: source.md5,
                         line: pending.line,
                         column: Number.isSafeInteger(pending.column) && pending.column >= 0 ? pending.column : 0,
                         isStatement: pending.isStatement,
@@ -779,7 +806,7 @@ export function parseDwarfLineSection(
                         files.push(file);
                         // 이전 행이 아직 존재하지 않던 이 index를 참조했을 수 있다.
                         const definedFileIndex = version >= 5 ? files.length - 1 : files.length;
-                        resolvedSourcePaths.delete(definedFileIndex);
+                        resolvedSources.delete(definedFileIndex);
                     }
                 } else if (extendedOpcode === DW_LNE_SET_DISCRIMINATOR) {
                     reader.readULEB(extendedEnd);

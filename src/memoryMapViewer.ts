@@ -63,6 +63,12 @@ interface PanelState {
     hexTargets: Map<string, MemoryMapHexTarget>;
     /** DWARF 경로·줄도 웹뷰에 싣지 않고 opaque ID 뒤의 extension host에만 둔다. */
     sourceTargets: Map<string, MemoryMapSourceTarget>;
+    /** 같은 렌더 세션에서 사용자가 명시적으로 고른 DWARF 소스 후보. Refresh 때 폐기한다. */
+    sourceSelections: Map<string, string>;
+    /** 같은 패널에서 fingerprint가 그대로인 소스 후보의 MD5 비교 결과. */
+    sourceChecksumCache: Map<string, DwarfSourceChecksumCacheEntry>;
+    /** 같은 렌더 세션의 단일 후보 checksum 경고를 반복하지 않는다. */
+    sourceWarningKeys: Set<string>;
     /** 맵을 만든 뒤 ELF가 교체되면 오래된 offset으로 다른 바이트를 열지 않는다. */
     sourceFingerprint?: { size: number; mtimeMs: number };
     /** 숨겨진 webview가 실패 메시지를 놓쳐도 ready handshake에서 다시 보낸다. */
@@ -101,6 +107,10 @@ export interface MemoryMapSourceTarget {
 const panels = new Map<string, PanelState>();
 let lastActivePanel: string | undefined;
 
+function compactMemoryMapTargetLabel(label: string): string {
+    return label.length > 120 ? `${label.slice(0, 120)}…` : label;
+}
+
 /** Panel registry – exported for testing */
 export const panelRegistry = {
     has(filePath: string): boolean { return panels.has(filePathIdentityKey(filePath)); },
@@ -126,6 +136,19 @@ export const panelRegistry = {
     getSourceTargets(filePath: string): MemoryMapSourceTarget[] | undefined {
         const targets = panels.get(filePathIdentityKey(filePath))?.sourceTargets;
         return targets ? Array.from(targets.values()) : undefined;
+    },
+    /** Refresh·stale ELF가 소스 선택 세션을 함께 폐기하는지 검증하기 위한 내부 상태. */
+    getSourceSessionState(filePath: string): Pick<
+        PanelState,
+        'sourceSelections' | 'sourceChecksumCache' | 'sourceWarningKeys'
+    > | undefined {
+        const state = panels.get(filePathIdentityKey(filePath));
+        if (!state) { return undefined; }
+        return {
+            sourceSelections: state.sourceSelections,
+            sourceChecksumCache: state.sourceChecksumCache,
+            sourceWarningKeys: state.sourceWarningKeys,
+        };
     },
     clear(): void { panels.clear(); lastActivePanel = undefined; },
 };
@@ -893,6 +916,9 @@ function showPanel(
             }),
             hexTargets,
             sourceTargets,
+            sourceSelections: new Map(),
+            sourceChecksumCache: new Map(),
+            sourceWarningKeys: new Set(),
             sourceFingerprint,
             configureInFlight: false,
             messageDisposable: undefined,
@@ -927,9 +953,12 @@ function showPanel(
                             void panel.webview.postMessage({ command: 'requestRefresh', renderId: state.renderId });
                         }
                     }
-                )) { return; }
+                )) {
+                    clearMemoryMapSourceSession(state);
+                    return;
+                }
 
-                const shownLabel = target.label.length > 120 ? `${target.label.slice(0, 120)}…` : target.label;
+                const shownLabel = compactMemoryMapTargetLabel(target.label);
                 if (target.fileRange.kind !== 'file') {
                     if (target.fileRange.reason === 'nobits' || target.fileRange.reason === 'zero-fill') {
                         vscode.window.showWarningMessage(t(
@@ -967,8 +996,17 @@ function showPanel(
                             void panel.webview.postMessage({ command: 'requestRefresh', renderId: state.renderId });
                         }
                     }
-                )) { return; }
-                await openMemoryMapSourceLocation(target, filePath);
+                )) {
+                    clearMemoryMapSourceSession(state);
+                    return;
+                }
+                await openMemoryMapSourceLocation(
+                    target,
+                    filePath,
+                    state.sourceSelections,
+                    state.sourceChecksumCache,
+                    state.sourceWarningKeys
+                );
             } else if (message.command === 'memoryMapReady') {
                 postMemoryMapRefreshFailure(state);
                 postMemoryMapPanelFeedback(state);
@@ -990,6 +1028,9 @@ function showPanel(
                 const refreshAttemptId = memoryMapRefreshAttemptId(message.refreshAttemptId);
                 if (!refreshAttemptId) { return; }
                 state.refreshFailure = undefined;
+                // 사용자가 고른 후보는 현재 분석 결과에만 유효하다. Refresh가 실패해
+                // 이전 표를 계속 보여 주더라도 다음 소스 이동에서는 다시 검증한다.
+                clearMemoryMapSourceSession(state);
                 // 유효한 Refresh는 이전 linker 설정 결과보다 최신 사용자 작업이다.
                 // 미확인 durable feedback을 남겨 두면 context 재생성의 ready 재전송이
                 // 새 Refresh 실패 뒤에 옛 configure 문구를 덮어쓸 수 있다.
@@ -1269,6 +1310,10 @@ function matchingSuffixSegments(recordedPath: string, candidatePath: string): nu
 
 export const DWARF_SOURCE_SEARCH_MAX_RESULTS = 101;
 const DWARF_SOURCE_SEARCH_MAX_SUFFIX_SEGMENTS = 32;
+/** 한 소스 후보의 checksum 비교에 읽을 수 있는 최대 바이트. */
+export const DWARF_SOURCE_CHECKSUM_MAX_FILE_BYTES = 8 * 1024 * 1024;
+/** 한 번의 소스 선택에서 모든 후보 checksum 비교에 읽을 수 있는 최대 바이트. */
+export const DWARF_SOURCE_CHECKSUM_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 
 export class DwarfSourceSearchLimitError extends Error { }
 
@@ -1330,7 +1375,401 @@ export async function findWorkspaceSourceBySuffix(
     return [];
 }
 
-async function openMemoryMapSourceLocation(target: MemoryMapSourceTarget, elfFilePath: string): Promise<void> {
+export type DwarfSourceChecksumStatus = 'match' | 'mismatch' | 'unavailable';
+export type DwarfSourceChecksumUnavailableReason =
+    | 'unsaved-edits'
+    | 'file-too-large'
+    | 'total-limit'
+    | 'read-failed'
+    | 'file-changed'
+    | 'invalid-record';
+
+export interface DwarfSourceChecksumComparison {
+    filePath: string;
+    status: DwarfSourceChecksumStatus;
+    reason?: DwarfSourceChecksumUnavailableReason;
+}
+
+interface DwarfSourceChecksumOptions {
+    maxFileBytes?: number;
+    maxTotalBytes?: number;
+    isDirty?: (filePath: string) => boolean;
+    cancellationToken?: Pick<vscode.CancellationToken, 'isCancellationRequested'>;
+    cache?: Map<string, DwarfSourceChecksumCacheEntry>;
+}
+
+interface DwarfSourceFileFingerprint {
+    size: number;
+    mtimeMs: number;
+    ctimeMs: number;
+}
+
+interface DwarfSourceChecksumCacheEntry {
+    expectedMd5: string;
+    fingerprint: DwarfSourceFileFingerprint;
+    status: 'match' | 'mismatch';
+}
+
+function clearMemoryMapSourceSession(
+    state: Pick<PanelState, 'sourceSelections' | 'sourceChecksumCache' | 'sourceWarningKeys'>
+): void {
+    state.sourceSelections.clear();
+    state.sourceChecksumCache.clear();
+    state.sourceWarningKeys.clear();
+}
+
+function isDirtyWorkspaceFile(filePath: string): boolean {
+    const candidateKey = filePathIdentityKey(filePath);
+    return vscode.workspace.textDocuments.some(document =>
+        document.isDirty
+        && document.uri.scheme === 'file'
+        && filePathIdentityKey(document.uri.fsPath) === candidateKey
+    );
+}
+
+async function md5FileWithStableSnapshot(
+    filePath: string,
+    expectedSize: number,
+    cancellationToken?: Pick<vscode.CancellationToken, 'isCancellationRequested'>
+): Promise<{ md5: string; changed: boolean; fingerprint?: DwarfSourceFileFingerprint }> {
+    if (cancellationToken?.isCancellationRequested) { throw new vscode.CancellationError(); }
+    const handle = await fs.promises.open(filePath, 'r');
+    try {
+        const before = await handle.stat();
+        if (!before.isFile() || before.size !== expectedSize) {
+            return { md5: '', changed: true };
+        }
+        const digest = crypto.createHash('md5');
+        const chunk = Buffer.allocUnsafe(Math.max(1, Math.min(64 * 1024, expectedSize)));
+        let offset = 0;
+        while (offset < expectedSize) {
+            if (cancellationToken?.isCancellationRequested) { throw new vscode.CancellationError(); }
+            const length = Math.min(chunk.length, expectedSize - offset);
+            const { bytesRead } = await handle.read(chunk, 0, length, offset);
+            if (bytesRead <= 0) {
+                return { md5: '', changed: true };
+            }
+            digest.update(chunk.subarray(0, bytesRead));
+            offset += bytesRead;
+        }
+        if (cancellationToken?.isCancellationRequested) { throw new vscode.CancellationError(); }
+        const after = await handle.stat();
+        const changed = after.size !== before.size
+            || after.mtimeMs !== before.mtimeMs
+            || after.ctimeMs !== before.ctimeMs;
+        return {
+            md5: changed ? '' : digest.digest('hex'),
+            changed,
+            fingerprint: changed ? undefined : {
+                size: after.size,
+                mtimeMs: after.mtimeMs,
+                ctimeMs: after.ctimeMs,
+            },
+        };
+    } finally {
+        await handle.close();
+    }
+}
+
+/**
+ * DWARF 5 MD5와 현재 소스 후보를 bounded read로 비교한다.
+ * 실패·미저장 편집·상한 초과 후보는 사용자가 직접 고를 수 있도록 unavailable로 남긴다.
+ */
+export async function compareDwarfSourceCandidates(
+    expectedMd5: string,
+    candidates: string[],
+    options: DwarfSourceChecksumOptions = {}
+): Promise<DwarfSourceChecksumComparison[]> {
+    const normalizedMd5 = expectedMd5.toLowerCase();
+    if (!/^[0-9a-f]{32}$/.test(normalizedMd5)) {
+        return candidates.map(filePath => ({ filePath, status: 'unavailable', reason: 'invalid-record' }));
+    }
+    const maxFileBytes = options.maxFileBytes ?? DWARF_SOURCE_CHECKSUM_MAX_FILE_BYTES;
+    const maxTotalBytes = options.maxTotalBytes ?? DWARF_SOURCE_CHECKSUM_MAX_TOTAL_BYTES;
+    const isDirty = options.isDirty ?? isDirtyWorkspaceFile;
+    const cancellationToken = options.cancellationToken;
+    let reservedBytes = 0;
+    const comparisons: DwarfSourceChecksumComparison[] = [];
+    for (const filePath of candidates) {
+        if (cancellationToken?.isCancellationRequested) { throw new vscode.CancellationError(); }
+        if (isDirty(filePath)) {
+            comparisons.push({ filePath, status: 'unavailable', reason: 'unsaved-edits' });
+            continue;
+        }
+        let fingerprint: DwarfSourceFileFingerprint;
+        try {
+            const stat = await fs.promises.stat(filePath);
+            if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 0) {
+                comparisons.push({ filePath, status: 'unavailable', reason: 'read-failed' });
+                continue;
+            }
+            fingerprint = { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
+        } catch {
+            comparisons.push({ filePath, status: 'unavailable', reason: 'read-failed' });
+            continue;
+        }
+        if (cancellationToken?.isCancellationRequested) { throw new vscode.CancellationError(); }
+        const cacheKey = filePathIdentityKey(filePath);
+        const cached = options.cache?.get(cacheKey);
+        if (cached
+            && cached.expectedMd5 === normalizedMd5
+            && cached.fingerprint.size === fingerprint.size
+            && cached.fingerprint.mtimeMs === fingerprint.mtimeMs
+            && cached.fingerprint.ctimeMs === fingerprint.ctimeMs) {
+            comparisons.push({ filePath, status: cached.status });
+            continue;
+        }
+        options.cache?.delete(cacheKey);
+        const size = fingerprint.size;
+        if (size > maxFileBytes) {
+            comparisons.push({ filePath, status: 'unavailable', reason: 'file-too-large' });
+            continue;
+        }
+        if (size > maxTotalBytes - reservedBytes) {
+            comparisons.push({ filePath, status: 'unavailable', reason: 'total-limit' });
+            continue;
+        }
+        reservedBytes += size;
+        try {
+            const result = await md5FileWithStableSnapshot(filePath, size, cancellationToken);
+            if (result.changed) {
+                comparisons.push({ filePath, status: 'unavailable', reason: 'file-changed' });
+            } else {
+                const status = result.md5 === normalizedMd5 ? 'match' : 'mismatch';
+                comparisons.push({
+                    filePath,
+                    status,
+                });
+                if (result.fingerprint) {
+                    options.cache?.set(cacheKey, {
+                        expectedMd5: normalizedMd5,
+                        fingerprint: result.fingerprint,
+                        status,
+                    });
+                }
+            }
+        } catch (error: unknown) {
+            if (error instanceof vscode.CancellationError) { throw error; }
+            comparisons.push({ filePath, status: 'unavailable', reason: 'read-failed' });
+        }
+    }
+    // 앞 후보를 읽은 뒤 다른 후보를 검사하는 동안 편집이 시작될 수 있다. 자동
+    // 선택 직전에 한 번 더 확인해 디스크 digest를 dirty editor의 내용으로 오인하지 않는다.
+    if (cancellationToken?.isCancellationRequested) { throw new vscode.CancellationError(); }
+    return comparisons.map(comparison =>
+        comparison.status !== 'unavailable' && isDirty(comparison.filePath)
+            ? { filePath: comparison.filePath, status: 'unavailable', reason: 'unsaved-edits' }
+            : comparison
+    );
+}
+
+interface DwarfSourceQuickPickItem extends vscode.QuickPickItem {
+    filePath: string;
+}
+
+interface DwarfSourceSelectionOptions {
+    compareCandidates?: (
+        expectedMd5: string,
+        candidates: string[]
+    ) => Promise<DwarfSourceChecksumComparison[]>;
+    showQuickPick?: (
+        items: DwarfSourceQuickPickItem[],
+        options: vscode.QuickPickOptions
+    ) => Thenable<DwarfSourceQuickPickItem | undefined>;
+    showWarningMessage?: (message: string) => Thenable<unknown>;
+    checksumCache?: Map<string, DwarfSourceChecksumCacheEntry>;
+    shownWarningKeys?: Set<string>;
+    /** P0 선호 소스 root가 구현되면 후보 정렬·초기 포커스와 이 기억 키에 함께 전달한다. */
+    preferredSourceRoot?: string;
+}
+
+function dwarfSourceSelectionKey(
+    recordedPath: string,
+    candidates: string[],
+    preferredSourceRoot?: string
+): string {
+    const identities = candidates.map(candidate => filePathIdentityKey(candidate)).sort();
+    return crypto.createHash('sha256')
+        .update(recordedPath)
+        .update('\0')
+        .update(preferredSourceRoot ? filePathIdentityKey(preferredSourceRoot) : '')
+        .update('\0')
+        .update(identities.join('\0'))
+        .digest('hex');
+}
+
+function checksumUnavailableDetail(reason: DwarfSourceChecksumUnavailableReason | undefined): string {
+    switch (reason) {
+        case 'unsaved-edits':
+            return t('저장되지 않은 편집 내용이 있어 비교하지 않았습니다.', 'Not compared because the file has unsaved edits.');
+        case 'file-too-large':
+            return t('파일별 checksum 읽기 상한을 초과했습니다.', 'The file exceeds the per-file checksum read limit.');
+        case 'total-limit':
+            return t('후보 전체 checksum 읽기 상한을 초과했습니다.', 'The candidates exceed the total checksum read limit.');
+        case 'file-changed':
+            return t('읽는 동안 파일이 변경되었습니다.', 'The file changed while it was being read.');
+        case 'invalid-record':
+            return t('ELF의 checksum 기록 형식이 올바르지 않습니다.', 'The ELF checksum record is invalid.');
+        default:
+            return t('파일을 읽을 수 없습니다.', 'The file could not be read.');
+    }
+}
+
+/** 후보 집합과 세션 선택 기억을 적용해 실제로 열 소스 하나를 결정한다. */
+export async function selectDwarfSourceCandidate(
+    target: MemoryMapSourceTarget,
+    candidates: string[],
+    rememberedSelections: Map<string, string>,
+    options: DwarfSourceSelectionOptions = {}
+): Promise<string | undefined> {
+    const uniqueCandidates = Array.from(new Map(
+        candidates.map(candidate => [filePathIdentityKey(candidate), candidate])
+    ).values());
+    if (uniqueCandidates.length === 0) { return undefined; }
+    const shownTargetLabel = compactMemoryMapTargetLabel(target.label);
+    const selectionKey = dwarfSourceSelectionKey(
+        target.location.filePath,
+        uniqueCandidates,
+        options.preferredSourceRoot
+    );
+    const rememberedPath = rememberedSelections.get(selectionKey);
+    if (rememberedPath) {
+        const rememberedKey = filePathIdentityKey(rememberedPath);
+        const current = uniqueCandidates.find(candidate => filePathIdentityKey(candidate) === rememberedKey);
+        if (current) { return current; }
+        rememberedSelections.delete(selectionKey);
+    }
+
+    const expectedMd5 = target.location.md5?.toLowerCase();
+    let comparisons: DwarfSourceChecksumComparison[] | undefined;
+    let comparisonByPath: Map<string, DwarfSourceChecksumComparison> | undefined;
+    if (expectedMd5 && /^[0-9a-f]{32}$/.test(expectedMd5)) {
+        if (options.compareCandidates) {
+            comparisons = await options.compareCandidates(expectedMd5, uniqueCandidates);
+        } else {
+            comparisons = await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Window,
+                title: t(
+                    `${shownTargetLabel} 소스 checksum 비교 중…`,
+                    `Comparing source checksums for ${shownTargetLabel}…`
+                ),
+                cancellable: true,
+            }, (_progress, cancellationToken) => compareDwarfSourceCandidates(
+                expectedMd5,
+                uniqueCandidates,
+                { cancellationToken, cache: options.checksumCache }
+            ));
+        }
+        comparisonByPath = new Map(
+            comparisons.map(comparison => [filePathIdentityKey(comparison.filePath), comparison])
+        );
+        const complete = comparisonByPath.size === uniqueCandidates.length
+            && uniqueCandidates.every(candidate =>
+                comparisonByPath?.get(filePathIdentityKey(candidate))?.status !== 'unavailable'
+                && comparisonByPath?.has(filePathIdentityKey(candidate)) === true
+            );
+        const matches = uniqueCandidates.filter(candidate =>
+            comparisonByPath?.get(filePathIdentityKey(candidate))?.status === 'match'
+        );
+        if (complete && matches.length === 1) {
+            return matches[0];
+        }
+        if (uniqueCandidates.length === 1) {
+            const candidate = uniqueCandidates[0];
+            const comparison = comparisonByPath.get(filePathIdentityKey(candidate));
+            const warningKey = comparison
+                ? `${selectionKey}\0${comparison.status}\0${comparison.reason ?? ''}`
+                : undefined;
+            const shouldWarn = warningKey !== undefined && !options.shownWarningKeys?.has(warningKey);
+            if (shouldWarn && warningKey) {
+                options.shownWarningKeys?.add(warningKey);
+            }
+            if (comparison?.status === 'mismatch') {
+                if (shouldWarn) {
+                    const showWarningMessage = options.showWarningMessage
+                        ?? ((message: string) => vscode.window.showWarningMessage(message));
+                    void Promise.resolve(showWarningMessage(t(
+                        `유일한 소스 후보를 엽니다. ELF 기록과 내용이 달라 빌드 후 소스가 변경되었을 수 있습니다: ${path.basename(candidate)}`,
+                        `Opening the only source candidate. Its contents differ from the ELF record and may have changed after the build: ${path.basename(candidate)}`
+                    ))).catch(() => undefined);
+                }
+            } else if (comparison?.status === 'unavailable' && shouldWarn) {
+                const reason = checksumUnavailableDetail(comparison.reason);
+                const showWarningMessage = options.showWarningMessage
+                    ?? ((message: string) => vscode.window.showWarningMessage(message));
+                void Promise.resolve(showWarningMessage(t(
+                    `유일한 소스 후보를 열지만 checksum을 확인하지 못했습니다: ${reason}`,
+                    `Opening the only source candidate, but its checksum could not be verified: ${reason}`
+                ))).catch(() => undefined);
+            }
+            return candidate;
+        }
+    } else if (uniqueCandidates.length === 1) {
+        return uniqueCandidates[0];
+    }
+
+    const byPath = comparisonByPath ?? new Map<string, DwarfSourceChecksumComparison>();
+    const items = uniqueCandidates.map(candidate => {
+        const comparison = byPath.get(filePathIdentityKey(candidate));
+        let description = path.dirname(candidate);
+        let detail: string | undefined;
+        if (comparison) {
+            if (comparison.status === 'match') {
+                description = t('ELF 기록과 일치', 'Matches ELF record');
+            } else if (comparison.status === 'mismatch') {
+                description = t('ELF 기록과 불일치', 'Does not match ELF record');
+            } else {
+                description = t('checksum 확인 불가', 'Checksum unavailable');
+            }
+            const reason = comparison.status === 'unavailable'
+                ? checksumUnavailableDetail(comparison.reason)
+                : undefined;
+            detail = reason ? `${candidate} — ${reason}` : candidate;
+        }
+        const iconPath = comparison
+            ? new vscode.ThemeIcon(
+                comparison.status === 'match' ? 'check' : comparison.status === 'mismatch' ? 'warning' : 'question'
+            )
+            : undefined;
+        return { label: path.basename(candidate), description, detail, iconPath, filePath: candidate };
+    });
+    const showQuickPick = options.showQuickPick ?? ((pickItems, pickOptions) =>
+        vscode.window.showQuickPick(pickItems, pickOptions));
+    const allMismatch = comparisons?.length === uniqueCandidates.length
+        && comparisons.every(comparison => comparison.status === 'mismatch');
+    const noConfirmedMatch = comparisons !== undefined
+        && !comparisons.some(comparison => comparison.status === 'match');
+    const placeHolder = allMismatch
+        ? t(
+            'ELF 기록과 일치하는 후보가 없습니다. 빌드 후 소스가 변경되었을 수 있습니다. 열 파일을 선택하세요.',
+            'No candidate matches the ELF record. The source may have changed after the build. Select a file to open.'
+        )
+        : noConfirmedMatch
+            ? t(
+                'ELF 기록과 일치하는 후보를 확인하지 못했습니다. 열 파일을 선택하세요.',
+                'No candidate could be confirmed against the ELF record. Select a file to open.'
+            )
+            : t(
+                `${shownTargetLabel}의 소스 파일을 선택하세요`,
+                `Select the source file for ${shownTargetLabel}`
+            );
+    const selected = await showQuickPick(items, {
+        placeHolder,
+        matchOnDescription: comparisons === undefined,
+        matchOnDetail: comparisons !== undefined,
+    });
+    if (!selected) { return undefined; }
+    rememberedSelections.set(selectionKey, selected.filePath);
+    return selected.filePath;
+}
+
+export async function openMemoryMapSourceLocation(
+    target: MemoryMapSourceTarget,
+    elfFilePath: string,
+    rememberedSelections: Map<string, string>,
+    checksumCache: Map<string, DwarfSourceChecksumCacheEntry>,
+    shownWarningKeys: Set<string> = new Set()
+): Promise<void> {
     const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath);
     let candidates = resolveDwarfSourcePathCandidates(
         target.location.filePath,
@@ -1363,24 +1802,23 @@ async function openMemoryMapSourceLocation(target: MemoryMapSourceTarget, elfFil
         return;
     }
 
-    let selectedPath = candidates[0];
-    if (candidates.length > 1) {
-        const selected = await vscode.window.showQuickPick(
-            candidates.map(candidate => ({
-                label: path.basename(candidate),
-                description: path.dirname(candidate),
-                filePath: candidate,
-            })),
-            {
-                placeHolder: t(
-                    `${target.label}의 소스 파일을 선택하세요`,
-                    `Select the source file for ${target.label}`
-                ),
-            }
-        );
-        if (!selected) { return; }
-        selectedPath = selected.filePath;
+    let selectedPath: string | undefined;
+    try {
+        selectedPath = await selectDwarfSourceCandidate(target, candidates, rememberedSelections, {
+            checksumCache,
+            shownWarningKeys,
+        });
+    } catch (error: unknown) {
+        if (error instanceof vscode.CancellationError) { return; }
+        const reason = error instanceof Error ? error.message : String(error);
+        const shownTargetLabel = compactMemoryMapTargetLabel(target.label);
+        vscode.window.showErrorMessage(t(
+            `소스 후보 확인 실패 (${shownTargetLabel}): ${reason}`,
+            `Failed to verify source candidates (${shownTargetLabel}): ${reason}`
+        ));
+        return;
     }
+    if (!selectedPath) { return; }
 
     try {
         const document = await vscode.workspace.openTextDocument(vscode.Uri.file(selectedPath));

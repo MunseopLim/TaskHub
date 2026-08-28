@@ -138,7 +138,13 @@ export interface Dwarf5LineSectionsFixture {
  * 경로는 `.debug_line_str`의 `DW_FORM_line_strp`로 참조하고 파일 인덱스 0을
  * line program에서 명시적으로 선택한다.
  */
-export function buildDwarf5LineSections(sourcePath = 'src/main.c'): Dwarf5LineSectionsFixture {
+export function buildDwarf5LineSections(
+    sourcePath = 'src/main.c',
+    sourceMd5?: Buffer
+): Dwarf5LineSectionsFixture {
+    if (sourceMd5 && sourceMd5.length !== 16) {
+        throw new Error('DWARF 5 source MD5 fixture must contain exactly 16 bytes.');
+    }
     const { directory, file } = splitDwarfPath(sourcePath);
     const directoryBytes = Buffer.from(encodeCString(directory));
     const fileOffset = directoryBytes.length;
@@ -155,14 +161,14 @@ export function buildDwarf5LineSections(sourcePath = 'src/main.c'): Dwarf5LineSe
         ...encodeUleb(0x01), ...encodeUleb(0x1f), // path: line_strp
         ...encodeUleb(1),
         ...encodeUInt32LE(0),
-        3, // file_name_entry_format_count
+        sourceMd5 ? 3 : 2, // file_name_entry_format_count
         ...encodeUleb(0x01), ...encodeUleb(0x1f), // path: line_strp
         ...encodeUleb(0x02), ...encodeUleb(0x0f), // directory_index: udata
-        ...encodeUleb(0x05), ...encodeUleb(0x1e), // MD5: data16
+        ...(sourceMd5 ? [...encodeUleb(0x05), ...encodeUleb(0x1e)] : []), // MD5: data16
         ...encodeUleb(1),
         ...encodeUInt32LE(fileOffset),
         ...encodeUleb(0),
-        ...Array(16).fill(0),
+        ...(sourceMd5 ?? []),
     ];
     const program = [
         4, ...encodeUleb(0), // DW_LNS_set_file 0 (DWARF 5의 0-based file table)
@@ -195,9 +201,10 @@ export function buildDwarf5LineSections(sourcePath = 'src/main.c'): Dwarf5LineSe
 export function buildElf32WithDwarf5Lines(
     sourcePath = 'src/main.c',
     debugLineStrFlags = 0,
-    additionalDebugLineUnits: Buffer[] = []
+    additionalDebugLineUnits: Buffer[] = [],
+    sourceMd5?: Buffer
 ): Buffer {
-    const { debugLine, debugLineStr } = buildDwarf5LineSections(sourcePath);
+    const { debugLine, debugLineStr } = buildDwarf5LineSections(sourcePath, sourceMd5);
     const combinedDebugLine = Buffer.concat([debugLine, ...additionalDebugLineUnits]);
     const sections: SectionSpec[] = [
         { name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 0x400 },

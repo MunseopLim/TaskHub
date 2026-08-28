@@ -292,12 +292,25 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         const stableHtml = refreshedHtml;
         const stableEntries = panelRegistry.getAllEntries(filePath);
         const stableHexTargets = panelRegistry.getHexTargets(filePath);
+        const sourceSession = panelRegistry.getSourceSessionState(filePath);
+        assert.ok(sourceSession);
+        sourceSession!.sourceSelections.set('selection', '/workspace/src/main.c');
+        sourceSession!.sourceChecksumCache.set('checksum', {
+            expectedMd5: '00112233445566778899aabbccddeeff',
+            fingerprint: { size: 1, mtimeMs: 1, ctimeMs: 1 },
+            status: 'match',
+        });
+        sourceSession!.sourceWarningKeys.add('warning');
         fs.writeFileSync(filePath, Buffer.alloc(64));
         await fake.harness.send({ command: 'refresh' });
 
         assert.strictEqual(panelRegistry.getHtml(filePath), stableHtml);
         assert.deepStrictEqual(panelRegistry.getAllEntries(filePath), stableEntries);
         assert.deepStrictEqual(panelRegistry.getHexTargets(filePath), stableHexTargets);
+        assert.strictEqual(sourceSession!.sourceSelections.size, 0);
+        assert.strictEqual(sourceSession!.sourceChecksumCache.size, 0);
+        assert.strictEqual(sourceSession!.sourceWarningKeys.size, 0,
+            '실패한 Refresh도 선택·checksum 캐시·단일 후보 경고 기억을 함께 폐기해야 한다');
         assertRefreshFailed(fake.harness.posted.at(-1), refreshedRenderId);
         const durableFailure = fake.harness.posted.at(-1);
         assert.match(durableFailure.reason, /32비트|32-bit/i,

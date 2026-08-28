@@ -57,7 +57,7 @@ TaskHub/
 │   ├── registerDecoder.ts             # 레지스터 비트 필드 디코더
 │   ├── macroExpander.ts               # C/C++ 매크로 전처리기 (4096자 ReDoS guard)
 │   ├── elfParser.ts                   # ELF32 파서와 가상 주소→파일 offset 변환
-│   ├── dwarfLineParser.ts             # DWARF 2~5 .debug_line 상태 머신과 주소→소스 범위 변환
+│   ├── dwarfLineParser.ts             # DWARF 2~5 .debug_line 상태 머신·주소→소스 범위·v5 MD5 보존
 │   ├── linkerScriptParser.ts          # GNU/ARM 링커 스크립트 파서
 │   ├── armLinkListParser.ts           # ARM Linker Listing 파서 (armlink --list)
 │   ├── memoryMapViewer.ts             # Memory Map WebView 시각화
@@ -283,11 +283,11 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   `script-src`는 패널마다 새로 생성되는 16바이트 nonce만 허용한다. nonce는 `crypto.randomBytes(16).toString('base64')`(CSPRNG)로 생성되며, 인라인 스크립트 전부에 동일 nonce를 부여한다.
     *   CSP가 인라인 이벤트 핸들러를 차단하므로, 모든 UI 컨트롤은 `data-action` 속성을 달고 nonce 스크립트 내부의 위임(delegated) 리스너에서 처리한다. 새 버튼/컨트롤을 추가할 때 절대 `onclick="..."` 형태를 쓰지 말 것.
     *   Memory Map의 Hex 진입점은 웹뷰에 실제 ELF file offset을 싣지 않고 opaque target ID만 보낸다. extension host가 렌더 시점에 보관한 `sh_offset`/`p_offset` 변환 결과를 다시 찾으며, ELF의 크기나 수정 시각이 달라졌으면 오래된 target을 사용하지 않는다.
-    *   DWARF 소스 경로·줄도 같은 opaque target ID 뒤의 extension host에만 둔다. 웹뷰에는 컴파일 머신의 경로를 노출하지 않으며, 열기 직전에 ELF 변경 여부와 대상 ID를 다시 검증한다.
+    *   DWARF 소스 경로·줄·선택적 MD5도 같은 opaque target ID 뒤의 extension host에만 둔다. 웹뷰에는 컴파일 머신의 경로와 checksum을 노출하지 않으며, 열기 직전에 ELF 변경 여부와 대상 ID를 다시 검증한다. MD5는 보안 검증이 아니라 이미 찾은 소스 후보와 빌드 기록의 내용 일치 여부를 보조하는 데만 쓴다. 후보 비교 결과는 열린 패널에만 두고 크기·mtime·ctime이 모두 같을 때 재사용하며 Refresh와 stale ELF 감지 시 폐기한다.
     *   에러/정보 HTML 출력은 `escapeHtml` 경유를 강제한다.
 6.  **파서 입력 한도**
     *   ELF32: 헤더 최소 크기/섹션 테이블/string table 범위를 선검증하고 `sh_offset`·`p_offset`을 보존한다. 심볼은 소속 섹션 범위 안에서만 `sh_offset`으로 변환하며, 섹션 정보가 없는 주소만 `PT_LOAD`의 file-backed 구간에 한해 `p_offset`으로 변환한다. NOBITS·zero-fill·파일 밖 범위는 다른 위치로 fallback하지 않는다.
-    *   DWARF `.debug_line`: DWARF 2~5의 32-bit unit을 상태 머신으로 확장하고, v5의 0-based directory/file table 및 `.debug_line_str`·`.debug_str` 참조를 함께 검증한다. 섹션 32MB, unit 1만 개, 행 50만 개, 파일 20만 개, 디렉터리 10만 개, 문자열 하나 4KB·누적 디코딩 경로 32MB, v5 entry format 64개·decoded field 200만 개 상한을 둔다. 손상된 unit은 소스 이동만 비활성화하고, DWARF64 unit은 길이를 검증한 뒤 건너뛴다. `SHF_COMPRESSED` `.debug_line`은 상태 머신에 넘기기 전에 감지하고, 실제 참조한 압축 문자열 section, `.debug_str_offsets`가 필요한 `strx*` 경로와 supplementary object가 필요한 `strp_sup` 경로도 구조화된 미지원 결과로 분리해 파서 손상 경고와 구분한다.
+    *   DWARF `.debug_line`: DWARF 2~5의 32-bit unit을 상태 머신으로 확장하고, v5의 0-based directory/file table, 선택적 `DW_LNCT_MD5` 및 `.debug_line_str`·`.debug_str` 참조를 함께 검증한다. 섹션 32MB, unit 1만 개, 행 50만 개, 파일 20만 개, 디렉터리 10만 개, 문자열 하나 4KB·누적 디코딩 경로 32MB, v5 entry format 64개·decoded field 200만 개 상한을 둔다. 소스 열기의 MD5 비교는 이미 찾은 후보만 파일당 8MB·요청당 총 32MB까지 취소 가능하게 읽고, 미저장 편집과 확인 실패가 섞인 다중 후보를 자동 선택하지 않는다. 손상된 unit은 소스 이동만 비활성화하고, DWARF64 unit은 길이를 검증한 뒤 건너뛴다. `SHF_COMPRESSED` `.debug_line`은 상태 머신에 넘기기 전에 감지하고, 실제 참조한 압축 문자열 section, `.debug_str_offsets`가 필요한 `strx*` 경로와 supplementary object가 필요한 `strp_sup` 경로도 구조화된 미지원 결과로 분리해 파서 손상 경고와 구분한다.
     *   Intel HEX/SREC: 레코드당 최대 255바이트, 누적 `HEX_MAX_BYTE_ENTRIES` 초과 시 throw.
     *   Hex Viewer 렌더링: `HEX_VIEWER_MAX_SPAN = 128 MB`. 주소 범위가 이를 초과하면(sparse 파일) 렌더링 거부.
     *   Macro 전처리: shift 카운트 0–63 clamp, 수식 길이 4KB 제한.
