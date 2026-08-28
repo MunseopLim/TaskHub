@@ -86,6 +86,8 @@ function resolveTargetUri(
     matches: (uri: vscode.Uri) => boolean,
     notMatchedKo: string,
     notMatchedEn: string,
+    notOpenKo: string,
+    notOpenEn: string,
     deps: PreviewOpenerDeps,
 ): vscode.Uri | undefined {
     const coerced = coerceToUri(arg);
@@ -100,7 +102,7 @@ function resolveTargetUri(
     if (editor && matches(editor.document.uri)) {
         return editor.document.uri;
     }
-    void deps.showErrorMessage(t(notMatchedKo, notMatchedEn));
+    void deps.showErrorMessage(t(notOpenKo, notOpenEn));
     return undefined;
 }
 
@@ -110,6 +112,8 @@ export async function openMarkdownPreview(arg?: unknown, deps: PreviewOpenerDeps
         isMarkdownUri,
         '마크다운(.md/.markdown) 파일이 아닙니다.',
         'Not a Markdown (.md/.markdown) file.',
+        '열려 있는 Markdown 파일이 없습니다. 파일을 열고 다시 실행하세요.',
+        'No Markdown file is open. Open a file and run the command again.',
         deps,
     );
     if (!target) {
@@ -124,6 +128,8 @@ export async function openHtmlInBrowser(arg?: unknown, deps: PreviewOpenerDeps =
         isHtmlUri,
         'HTML(.html/.htm) 파일이 아닙니다.',
         'Not an HTML (.html/.htm) file.',
+        '열려 있는 HTML 파일이 없습니다. 파일을 열고 다시 실행하세요.',
+        'No HTML file is open. Open a file and run the command again.',
         deps,
     );
     if (!target) {

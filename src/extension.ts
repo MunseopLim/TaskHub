@@ -24,6 +24,7 @@ import {
 } from './memoryMapViewer';
 import { showHexViewer, HexEditorProvider, HexViewerOpenHistory, openHexViewerFile } from './hexViewer';
 import { showHexConverter } from './hexConverter';
+import { registerFeatureLauncher } from './featureLauncher';
 import { t } from './i18n';
 import { buildPreviewReport } from './previewRun';
 import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput } from './doctor';
@@ -10875,6 +10876,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (context.globalState.get(RUN_ANY_ACTION_MRU_KEY) !== undefined) {
         void context.globalState.update(RUN_ANY_ACTION_MRU_KEY, undefined);
     }
+    registerFeatureLauncher(context);
     // Publish the initial (idle) value so the *Stop All Actions* button is
     // hidden from the first render rather than on the first state change.
     syncRunningActionsContext();

@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { t } from '../i18n';
 import {
     extensionOf,
     isMarkdownUri,
@@ -171,7 +172,10 @@ suite('previewOpener', () => {
             const { deps, execs, errors } = makeFakeDeps();
             await openMarkdownPreview(vscode.Uri.file('/tmp/notes.txt'), deps);
             assert.strictEqual(execs.length, 0);
-            assert.strictEqual(errors.length, 1);
+            assert.deepStrictEqual(errors, [t(
+                '마크다운(.md/.markdown) 파일이 아닙니다.',
+                'Not a Markdown (.md/.markdown) file.'
+            )]);
         });
 
         test('falls back to active editor URI when no explicit arg is passed', async () => {
@@ -189,7 +193,10 @@ suite('previewOpener', () => {
             });
             await openMarkdownPreview(undefined, deps);
             assert.strictEqual(execs.length, 0);
-            assert.strictEqual(errors.length, 1);
+            assert.deepStrictEqual(errors, [t(
+                '열려 있는 Markdown 파일이 없습니다. 파일을 열고 다시 실행하세요.',
+                'No Markdown file is open. Open a file and run the command again.'
+            )]);
         });
     });
 
@@ -217,7 +224,20 @@ suite('previewOpener', () => {
             const { deps, externals, errors } = makeFakeDeps();
             await openHtmlInBrowser(vscode.Uri.file('/tmp/notes.md'), deps);
             assert.strictEqual(externals.length, 0);
-            assert.strictEqual(errors.length, 1);
+            assert.deepStrictEqual(errors, [t(
+                'HTML(.html/.htm) 파일이 아닙니다.',
+                'Not an HTML (.html/.htm) file.'
+            )]);
+        });
+
+        test('explains how to recover when no HTML file is open', async () => {
+            const { deps, externals, errors } = makeFakeDeps();
+            await openHtmlInBrowser(undefined, deps);
+            assert.strictEqual(externals.length, 0);
+            assert.deepStrictEqual(errors, [t(
+                '열려 있는 HTML 파일이 없습니다. 파일을 열고 다시 실행하세요.',
+                'No HTML file is open. Open a file and run the command again.'
+            )]);
         });
     });
 

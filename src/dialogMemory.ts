@@ -108,6 +108,8 @@ export const DIALOG_SCOPE = {
     memoryMapListing: 'memoryMap.listing',
     memoryMapLinkerScript: 'memoryMap.linkerScript',
     memoryMapExport: 'memoryMap.export',
+    previewMarkdown: 'preview.markdown',
+    previewHtml: 'preview.html',
     favoriteFile: 'favoriteFile',
     actionsExport: 'actions.export',
     actionsImport: 'actions.import',

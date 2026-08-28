@@ -2458,20 +2458,32 @@ suite('Extension Test Suite', () => {
 		test('닫히지 않은 `${` 가 많아도 선형으로 훑는다', () => {
 			// `}` 가 없으면 `indexOf` 가 매번 끝까지 다시 훑어 O(n²) 가 된다.
 			// 500KB 입력이 1.1초였고, 이 토크나이저는 Doctor 도 쓰므로 확장
-			// 호스트가 그대로 멈춘다. 시간이 아니라 **증가율**을 본다 —
-			// 느린 기계에서도 흔들리지 않는 기준이다.
+			// 호스트가 그대로 멈춘다. 절대 시간이 아니라 **증가율**을 본다.
+			//
+			// `Date.now()` 한 번으로 측정하면 선형 구현의 small 표본이 0~1ms라
+			// 타이머 해상도·CI 스케줄링 한 번에 비율이 8배 이상으로 튀었다.
+			// 고해상도 시계로 같은 작업을 세 번씩 묶고, 일곱 개 비율의 중앙값을
+			// 쓰면 단발성 중단은 버리면서 선형(4배)과 2차(16배)는 여전히 갈린다.
 			const measure = (size: number) => {
 				const input = '${'.repeat(size);
-				const started = Date.now();
-				tokenizeCommandLine(input);
-				return Math.max(1, Date.now() - started);
+				const started = process.hrtime.bigint();
+				let tokenCount = 0;
+				for (let iteration = 0; iteration < 3; iteration++) {
+					tokenCount += tokenizeCommandLine(input).length;
+				}
+				assert.strictEqual(tokenCount, 3);
+				return Number(process.hrtime.bigint() - started);
 			};
 			measure(1000);   // JIT 예열
-			const small = measure(50_000);
-			const large = measure(200_000);
-			// 선형이면 4배, 2차면 16배. 여유를 크게 두어도 둘은 갈린다.
-			assert.ok(large / small < 8,
-				`입력이 4배일 때 시간이 ${(large / small).toFixed(1)}배 늘었다 — 선형이 아니다`);
+			const ratios: number[] = [];
+			for (let sample = 0; sample < 7; sample++) {
+				ratios.push(measure(80_000) / measure(20_000));
+			}
+			ratios.sort((a, b) => a - b);
+			const medianRatio = ratios[Math.floor(ratios.length / 2)];
+			// 선형이면 4배, 2차면 16배. 12배는 스케줄링 여유를 두면서도 둘을 가른다.
+			assert.ok(medianRatio < 12,
+				`입력이 4배일 때 중앙 시간 비율이 ${medianRatio.toFixed(1)}배다 — 선형이 아니다`);
 		});
 
 		test('닫히지 않은 `${` 는 참조가 아니므로 예전처럼 쪼갠다', () => {

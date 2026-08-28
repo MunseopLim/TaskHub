@@ -47,6 +47,7 @@ TaskHub/
 │   ├── hexParser.ts                   # Intel HEX / SREC / Binary 파서
 │   ├── hexConverter.ts                # Text ↔ Hex 실시간 변환 WebView와 패널 수명주기
 │   ├── hexConverterUtils.ts           # Text/Hex 변환·숫자 해석 순수 로직
+│   ├── featureLauncher.ts             # Status Bar 기능 런처·그룹형 Quick Pick·최근 사용
 │   ├── archiveUtils.ts                # zip/unzip 내장 엔진
 │   ├── i18n.ts                        # 다국어 지원 (한국어/영어, vscode.env.language 기반)
 │   ├── schema.ts                      # TypeScript 타입 정의
