@@ -114,21 +114,42 @@ function formatFileSize(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** 동기 파일 검사·파싱 전에 VS Code가 진행 표시를 그릴 기회를 준다. */
+export function withHexViewerAnalysisProgress<T>(
+    filePath: string,
+    analyze: () => T | Thenable<T>
+): Thenable<T> {
+    const fileName = path.basename(filePath) || 'Hex Viewer';
+    return vscode.window.withProgress({
+        location: vscode.ProgressLocation.Window,
+        title: t(`Hex Viewer 분석 중: ${fileName}`, `Analyzing Hex Viewer: ${fileName}`),
+        cancellable: false,
+    }, async () => {
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        return analyze();
+    });
+}
+
 export async function showHexViewer(context: vscode.ExtensionContext, recordHistory?: HexViewerHistoryRecorder) {
+    const supportedFiles = t('지원 파일', 'Supported Files');
+    const hexFiles = t('HEX 파일', 'Hex Files');
+    const srecFiles = t('SREC 파일', 'SREC Files');
+    const binaryFiles = t('바이너리 파일', 'Binary Files');
+    const allFiles = t('모든 파일', 'All Files');
     const fileUri = await showOpenDialogWithMemory(DIALOG_SCOPE.hexViewer, {
         canSelectMany: false,
         filters: {
-            'Supported Files': ['hex', 'ihex', 'srec', 's19', 's28', 's37', 'bin', 'dat'],
-            'Hex Files': ['hex', 'ihex'],
-            'SREC Files': ['srec', 's19', 's28', 's37'],
-            'Binary Files': ['bin', 'dat'],
-            'All Files': ['*']
+            [supportedFiles]: ['hex', 'ihex', 'srec', 's19', 's28', 's37', 'bin', 'dat'],
+            [hexFiles]: ['hex', 'ihex'],
+            [srecFiles]: ['srec', 's19', 's28', 's37'],
+            [binaryFiles]: ['bin', 'dat'],
+            [allFiles]: ['*']
         }
     });
     if (!fileUri || fileUri.length === 0) { return; }
 
     const filePath = fileUri[0].fsPath;
-    if (openHexViewerFile(context, filePath)) {
+    if (await withHexViewerAnalysisProgress(filePath, () => openHexViewerFile(context, filePath))) {
         recordHistory?.({ filePath, fileName: path.basename(filePath) });
     }
 }
@@ -791,7 +812,9 @@ export function buildHexViewerStrings(): Record<string, string> {
         findPrev: t('이전 결과', 'Previous match'),
         findNext: t('다음 결과', 'Next match'),
         findClose: t('찾기 닫기', 'Close find'),
+        finding: t('검색 중…', 'Searching…'),
         findNoMatches: t('결과 없음', 'No matches'),
+        findAsciiOnly: t('ASCII 검색은 영문자와 ASCII 기호만 지원합니다.', 'ASCII search supports ASCII characters only.'),
         addressHeader: t('주소', 'Address'),
         statusHint: t('바이트를 클릭하면 값을 확인할 수 있습니다', 'Click a byte to inspect'),
         loading: t('불러오는 중…', 'Loading…'),
@@ -1600,7 +1623,9 @@ function getWebviewContent(
         if (input.length === 0) { return null; }
         const bytes = [];
         for (let i = 0; i < input.length; i++) {
-            bytes.push(input.charCodeAt(i) & 0xFF);
+            const code = input.charCodeAt(i);
+            if (code > 0x7F) { return null; }
+            bytes.push(code);
         }
         return bytes;
     }
@@ -1619,6 +1644,7 @@ function getWebviewContent(
     // 매치 수 상한 — 무제한 수집은 한 바이트 패턴 검색 등에서 수백만 개의
     // 매치를 만들고 하이라이트 루프까지 함께 무너뜨린다(M11).
     const FIND_MAX_MATCHES = 10000;
+    let findGeneration = 0;
 
     function findCountLabel() {
         return findMatches.length >= FIND_MAX_MATCHES
@@ -1626,18 +1652,33 @@ function getWebviewContent(
             : String(findMatches.length);
     }
 
-    function doFind() {
+    async function doFind() {
+        const generation = ++findGeneration;
         findMatches = [];
         findCurrentIdx = -1;
+        if (document.getElementById('findMode').value === 'ascii'
+            && /[^\x00-\x7F]/.test(findHexInput.value)) {
+            findInfo.textContent = S.findAsciiOnly;
+            applyFindHighlightsToVisible();
+            return;
+        }
         const bytes = getFindBytes();
         if (!bytes || bytes.length === 0) {
             findInfo.textContent = '';
             applyFindHighlightsToVisible();
             return;
         }
+        findInfo.textContent = S.finding;
         for (let i = 0; i <= TOTAL_SIZE - bytes.length; i++) {
+            if (i > 0 && (i & 0x3FFFF) === 0) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+                if (generation !== findGeneration) { return; }
+            }
+            if (!hasDataRange(i, bytes.length)) { continue; }
             let match = true;
-            for (let j = 0; j < bytes.length; j++) {
+            // 끝에서 비교하면 00 … 00 01처럼 긴 공통 prefix를 가진
+            // no-match 검색이 첫 바이트부터 매번 다시 훑지 않는다.
+            for (let j = bytes.length - 1; j >= 0; j--) {
                 if (DATA[i + j] !== bytes[j]) { match = false; break; }
             }
             if (match) {
@@ -1699,6 +1740,7 @@ function getWebviewContent(
 
     document.getElementById('findBtn').addEventListener('click', toggleFind);
     document.getElementById('findClose').addEventListener('click', () => {
+        findGeneration++;
         findBar.classList.remove('visible');
         findMatches = [];
         findCurrentIdx = -1;
@@ -1845,7 +1887,24 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
     resolveCustomEditor(
         document: vscode.CustomDocument,
         webviewPanel: vscode.WebviewPanel
-    ): void {
+    ): Thenable<void> {
+        let disposed = false;
+        let handshake: HexWebviewHandshake | undefined;
+        webviewPanel.onDidDispose(() => {
+            disposed = true;
+            handshake?.dispose();
+        });
+        return withHexViewerAnalysisProgress(document.uri.fsPath, () => {
+            if (disposed) { return; }
+            handshake = this.resolveCustomEditorNow(document, webviewPanel);
+            if (disposed) { handshake?.dispose(); }
+        });
+    }
+
+    private resolveCustomEditorNow(
+        document: vscode.CustomDocument,
+        webviewPanel: vscode.WebviewPanel
+    ): HexWebviewHandshake | undefined {
         webviewPanel.webview.options = { enableScripts: true };
         const filePath = document.uri.fsPath;
         const fileName = path.basename(filePath);
@@ -1904,7 +1963,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             vscode.window.showErrorMessage(msg);
             return;
         }
-        webviewPanel.onDidDispose(() => handshake.dispose());
         this.recordHistory?.({ filePath, fileName });
+        return handshake;
     }
 }

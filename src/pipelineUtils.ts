@@ -530,7 +530,7 @@ export function isInsideWorkspaceRoots(resolvedPath: string, workspaceRoots: str
 
 /**
  * Validate and coerce a value about to be substituted into a shell template.
- * Returns `undefined` for null/undefined/objects/arrays (caller should keep
+ * Returns `undefined` for null/undefined/objects (caller should keep
  * the literal `${...}` placeholder). Throws on null byte or length overflow.
  */
 export function sanitizeInterpolatedValue(value: unknown): string | undefined {

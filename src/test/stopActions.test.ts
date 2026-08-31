@@ -8,6 +8,7 @@ import {
     formatStopAllConfirmMessage,
     runStopAllActions,
     STOP_ALL_CONFIRM_TITLE_LIMIT,
+    terminateTrackedWorkForShutdown,
 } from '../extension';
 import { ActionProgress, ActionRunState } from '../providers/actionStatus';
 
@@ -34,6 +35,40 @@ function readManifest(): any {
 }
 
 suite('실행 중지 / 터미널 닫기', () => {
+
+    suite('확장 비활성화 정리', () => {
+        test('모든 Task를 종료하고 child tree 정리가 끝날 때까지 기다린다', async () => {
+            const terminated: string[] = [];
+            const killed: string[] = [];
+            let releaseKill!: () => void;
+            const killBlocked = new Promise<void>(resolve => { releaseKill = resolve; });
+            const executions = [
+                { terminate: () => { terminated.push('first'); } },
+                { terminate: () => { terminated.push('second'); throw new Error('injected terminate failure'); } },
+            ];
+            const children = [{ id: 'a' }, { id: 'b' }];
+
+            let settled = false;
+            const shutdown = terminateTrackedWorkForShutdown(
+                executions,
+                children as any,
+                async (child: any) => {
+                    killed.push(child.id);
+                    await killBlocked;
+                    return true;
+                }
+            ).then(() => { settled = true; });
+
+            await Promise.resolve();
+            assert.deepStrictEqual(terminated, ['first', 'second']);
+            assert.deepStrictEqual(killed.sort(), ['a', 'b']);
+            assert.strictEqual(settled, false, 'child tree 종료 확인 전에 deactivate 정리가 끝나면 안 된다');
+
+            releaseKill();
+            await shutdown;
+            assert.strictEqual(settled, true);
+        });
+    });
 
     suite('collectRunningActionIds', () => {
         test('running 상태만 골라낸다', () => {

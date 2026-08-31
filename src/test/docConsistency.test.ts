@@ -290,11 +290,10 @@ suite('Documentation Consistency', () => {
     });
 
     // =====================================================================
-    // 6. Task.type union (schema.ts) ↔ architecture.md 에 나열된 지원 태스크
-    //    타입 목록이 일치하는지 (`writeFile`/`appendFile` 누락 재발 방어)
+    // 6. Task.type union (schema.ts) ↔ 단일 출처인 actions.md 선택표
     // =====================================================================
-    suite('architecture.md task type list ↔ schema.ts Task.type union', () => {
-        test('every Task.type member appears in architecture.md supported task list', () => {
+    suite('actions.md task type list ↔ schema.ts Task.type union', () => {
+        test('every Task.type member appears in actions.md and architecture links there', () => {
             const schema = readRepoFile('src/schema.ts');
             // Find the Task.type union line and extract each single-quoted member.
             const typeLineMatch = schema.match(/type:\s*(?:'[^']+'\s*\|\s*)+'[^']+'/);
@@ -307,12 +306,10 @@ suite('Documentation Consistency', () => {
             }
             assert.ok(members.size > 0, 'No Task.type members extracted');
 
-            const arch = readRepoFile('docs/architecture.md');
-            // Grab the "지원 태스크 타입" line(s) and the surrounding bullet, so
-            // we match both backticked and plain list variants.
-            const supportedBlock = arch.match(/지원 태스크 타입[\s\S]{0,400}/);
-            assert.ok(supportedBlock, 'Could not locate "지원 태스크 타입" block in architecture.md');
-            const blockText = supportedBlock![0];
+            const actions = readRepoFile('docs/actions.md');
+            const selectionTable = actions.match(/## 2\. 태스크 선택표[\s\S]*?(?=\n## 3\.)/);
+            assert.ok(selectionTable, 'docs/actions.md에서 태스크 선택표를 찾지 못했다');
+            const blockText = selectionTable![0];
 
             const missing: string[] = [];
             for (const type of members) {
@@ -328,7 +325,14 @@ suite('Documentation Consistency', () => {
             assert.deepStrictEqual(
                 missing,
                 [],
-                `Task.type members listed in schema.ts but missing from architecture.md "지원 태스크 타입" block:\n  ${missing.join('\n  ')}`
+                `schema.ts의 Task.type 중 docs/actions.md 선택표에 없는 타입:\n  ${missing.join('\n  ')}`
+            );
+
+            const arch = readRepoFile('docs/architecture.md');
+            assert.match(
+                arch,
+                /actions\.md#2-태스크-선택표/,
+                'architecture.md는 태스크 타입을 복제하지 말고 actions.md 선택표를 링크해야 한다'
             );
         });
     });
@@ -368,6 +372,53 @@ suite('Documentation Consistency', () => {
     // 쌓였다 (stopInteractive 의 중지·보안 검증 전체 포함).
     // =====================================================================
     suite('integration-tests.md 대장 ↔ IT- 테스트 제목', () => {
+        test('시나리오 ID 형식과 고유성을 지킨다', () => {
+            const testDir = path.join(REPO_ROOT, 'src', 'test');
+            const declared = new Map<string, string[]>();
+            const malformed: string[] = [];
+            for (const name of fs.readdirSync(testDir)) {
+                if (!name.endsWith('.test.ts')) { continue; }
+                if (name === 'docConsistency.test.ts') { continue; }
+                const lines = fs.readFileSync(path.join(testDir, name), 'utf-8').split('\n');
+                lines.forEach((line, index) => {
+                    for (const match of line.matchAll(/test\(\s*[`'"](IT-[^:`'"]+)/g)) {
+                        const id = match[1];
+                        const location = `${name}:${index + 1}`;
+                        if (!/^IT-\d{3}[a-z]?$/.test(id)) {
+                            malformed.push(`${id} (${location})`);
+                            continue;
+                        }
+                        const locations = declared.get(id) ?? [];
+                        locations.push(location);
+                        declared.set(id, locations);
+                    }
+                });
+            }
+
+            const duplicates = Array.from(declared)
+                .filter(([, locations]) => locations.length > 1)
+                .map(([id, locations]) => `${id}: ${locations.join(', ')}`);
+            assert.deepStrictEqual(malformed, [], `형식이 IT-XXX가 아닌 시나리오 ID:\n  ${malformed.join('\n  ')}`);
+            assert.deepStrictEqual(duplicates, [], `중복된 시나리오 ID:\n  ${duplicates.join('\n  ')}`);
+        });
+
+        test('대장 표의 시나리오 ID가 중복되지 않는다', () => {
+            const seen = new Map<string, number[]>();
+            readRepoFile('docs/integration-tests.md').split('\n').forEach((line, index) => {
+                if (!/^\|\s*IT-/.test(line)) { return; }
+                const firstCell = line.split('|')[1];
+                for (const id of firstCell.match(/IT-\d{3}[a-z]*/g) ?? []) {
+                    const lines = seen.get(id) ?? [];
+                    lines.push(index + 1);
+                    seen.set(id, lines);
+                }
+            });
+            const duplicates = Array.from(seen)
+                .filter(([, lines]) => lines.length > 1)
+                .map(([id, lines]) => `${id}: ${lines.join(', ')}`);
+            assert.deepStrictEqual(duplicates, [], `대장 표에 중복된 시나리오 ID:\n  ${duplicates.join('\n  ')}`);
+        });
+
         test('모든 IT-XXX 테스트가 대장에 등재돼 있다', () => {
             const ledger = readRepoFile('docs/integration-tests.md');
             // **접미사(`IT-072b`)까지 포함해 센다.** 처음 구현은 `IT-\d+` 로만
@@ -461,6 +512,16 @@ suite('Documentation Consistency', () => {
                         continue;
                     }
                     if (!anchor) { continue; }
+                    const lineAnchor = /^L(\d+)(?:-L(\d+))?$/.exec(anchor);
+                    if (lineAnchor) {
+                        const lineCount = fs.readFileSync(resolved, 'utf-8').split('\n').length;
+                        const start = Number(lineAnchor[1]);
+                        const end = Number(lineAnchor[2] ?? lineAnchor[1]);
+                        if (start < 1 || end < start || end > lineCount) {
+                            violations.push(`${doc} — line anchor 범위 오류: ${rawTarget}`);
+                        }
+                        continue;
+                    }
                     if (!fs.statSync(resolved).isFile() || path.extname(resolved).toLowerCase() !== '.md') {
                         violations.push(`${doc} — Markdown가 아닌 대상의 anchor: ${rawTarget}`);
                         continue;

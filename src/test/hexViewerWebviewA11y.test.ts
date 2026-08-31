@@ -100,6 +100,30 @@ suite('Hex Viewer 웹뷰 지역화 / 접근성', () => {
         });
     });
 
+    suite('검색 유효성', () => {
+        const html = render();
+
+        test('sparse HEX의 빈 주소를 검색 결과로 취급하지 않는다', () => {
+            assert.ok(
+                html.includes('if (!hasDataRange(i, bytes.length)) { continue; }'),
+                'DATA의 gap 채움값만 비교하면 존재하지 않는 주소에서 FF가 검색된다'
+            );
+        });
+
+        test('ASCII 범위를 벗어난 입력은 하위 바이트로 잘라 검색하지 않는다', () => {
+            assert.ok(html.includes('S.findAsciiOnly'), '비 ASCII 입력 안내가 없다');
+            assert.ok(html.includes('if (code > 0x7F) { return null; }'),
+                'Unicode code unit의 하위 바이트를 ASCII로 오인할 수 있다');
+        });
+
+        test('대용량 검색은 이벤트 루프에 양보하고 새 검색으로 취소할 수 있다', () => {
+            assert.ok(html.includes('async function doFind()'), '검색 루프가 동기 함수다');
+            assert.ok(html.includes('await new Promise(resolve => setTimeout(resolve, 0))'),
+                '긴 검색 중 웹뷰가 입력과 렌더링을 처리할 틈이 없다');
+            assert.ok(html.includes('generation !== findGeneration'), '새 검색이 이전 검색을 중단하지 못한다');
+        });
+    });
+
     suite('표 구조', () => {
         const html = render();
 

@@ -6,8 +6,8 @@
  * both by this provider and by command handlers that still live in
  * `extension.ts`.
  *
- * `extension.ts` re-exports everything here so existing callers (including
- * tests) can keep `import { ... } from './extension'` unchanged.
+ * `extension.ts` imports these symbols but does not re-export them. External
+ * callers and tests should import them directly from this module.
  */
 
 import * as vscode from 'vscode';

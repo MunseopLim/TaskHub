@@ -4,8 +4,8 @@
  * here to avoid circular imports between `extension.ts` and the provider
  * modules.
  *
- * `extension.ts` re-exports these so existing callers (including tests)
- * can keep importing from `./extension` unchanged.
+ * `extension.ts` imports the helpers it needs but does not re-export them.
+ * External callers and tests should import them directly from this module.
  */
 
 export function normalizeTags(rawTags: unknown): string[] | undefined {

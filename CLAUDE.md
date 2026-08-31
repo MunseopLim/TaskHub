@@ -81,7 +81,7 @@ if (selected.label === skipLabel) { ... }
 
 `t()`는 TypeScript 코드에서만 쓸 수 있다. `package.json`의 `contributes.*`에 있는 사용자 노출 문자열은 VS Code의 nls 메커니즘으로 지역화한다.
 
-- 대상: 명령 `title`, 뷰 `name`, `viewsWelcome.contents`, 설정 `description` / `markdownDescription` / `enumDescriptions`
+- 대상: 확장 `description`, Restricted Mode `description`, 명령 `title`, 뷰 `name`, `viewsWelcome.contents`, `customEditors.displayName`, 설정 `description` / `markdownDescription` / `enumDescriptions`
 - 방법: package.json에는 `%key%`만 두고, 문구는 `package.nls.json`(영어, 기본)과 `package.nls.ko.json`(한국어)에 둔다
 - 제외: 브랜드명 `TaskHub` (`displayName`, `category`, 뷰 컨테이너 `title`) — 번역 대상이 아니므로 nls를 거치지 않고 리터럴로 둔다
 

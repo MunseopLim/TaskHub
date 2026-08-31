@@ -313,9 +313,10 @@ function detectIndent(text: string): string | number {
 }
 
 export async function openJsonEditor(context: vscode.ExtensionContext, recordHistory?: JsonEditorHistoryRecorder) {
+    const jsonFiles = t('JSON 파일', 'JSON Files');
     const fileUris = await showOpenDialogWithMemory(DIALOG_SCOPE.jsonEditor, {
         canSelectMany: false,
-        filters: { 'JSON Files': ['json'] },
+        filters: { [jsonFiles]: ['json'] },
         openLabel: t('JSON 파일 열기', 'Open JSON File')
     });
 
@@ -1253,6 +1254,11 @@ export function buildJsonEditorStrings(): Record<string, string> {
         cellTypeChanged: t('{col} 을 {preview} 로 바꿨습니다.', 'Changed {col} to {preview}.'),
         addArrayItem: t('항목 추가', 'Add item'),
         emptyCellLabel: t('빈 셀', 'Empty cell'),
+        editableCellRole: t('편집 가능한 셀', 'Editable cell'),
+        editCellInstructions: t(
+            '편집하려면 Enter 또는 Space 키를 누르세요.',
+            'Press Enter or Space to edit.'
+        ),
         removeArrayItem: t('{n}번째 항목 삭제', 'Remove item {n}'),
         arrayItemLabel: t('{col} {n}번째 항목', '{col} item {n}'),
         arrayItemAdded: t('항목을 추가했습니다. 총 {count}개입니다.', 'Item added. {count} total.'),
@@ -1711,6 +1717,7 @@ export function getWebviewContent(
     <div class="table-wrapper" id="tableWrapper" role="tabpanel" tabindex="0"></div>
     <div id="errorMsg" role="alert" style="color:var(--danger);padding:12px;display:none;"></div>
     <div id="srStatus" class="sr-only" role="status" aria-live="polite"></div>
+    <div id="cellEditInstructions" class="sr-only">${esc(strings.editCellInstructions)}</div>
 
 <!-- 순수 로직의 단일 출처. 아래 인라인 스크립트보다 **먼저** 로드되어야 한다 —
      인라인 쪽이 첫 줄에서 이 전역을 꺼내 쓴다. src/webview/jsonEditorLogic.ts 참조. -->
@@ -2372,8 +2379,8 @@ export function getWebviewContent(
 
     // 셀의 접근명.
     //
-    // .cell-view 는 role=button 인데 **그 안에 변환 버튼이 들어 있다.**
-    // 이름을 내용에서 계산하게 두면 버튼 라벨이 섞여 들어간다 — 빈 배열 셀은
+    // .cell-view 안에는 별도의 변환 버튼이 들어 있다. 그룹 이름을 내용에서
+    // 계산하게 두면 버튼 라벨이 섞여 들어간다 — 빈 배열 셀은
     // 텍스트가 배지 하나뿐이라 이름이 통째로 "배열 → 문자열 (쉼표로 연결)" 이
     // 됐다. 스크린리더 사용자에게는 "이 셀을 편집" 이 아니라 "변환 액션" 으로
     // 들린다. 이름을 명시해 내용 계산을 끊는다.
@@ -2606,7 +2613,12 @@ export function getWebviewContent(
             // 편집 중인 input 안에서 누른 Enter까지 여기로 올라오면 방금 연
             // 셀을 다시 여는 셈이 되므로, 편집 상태의 셀은 건너뛴다.
             view.setAttribute('tabindex', '0');
-            view.setAttribute('role', 'button');
+            // 실제 변환 <button>을 품으므로 부모를 button으로 선언하면 중첩
+            // interactive control이 된다. group의 사용자 정의 역할명만으로는
+            // 활성화 방법을 알 수 없으므로 공용 설명을 연결한다.
+            view.setAttribute('role', 'group');
+            view.setAttribute('aria-roledescription', S.editableCellRole);
+            view.setAttribute('aria-describedby', 'cellEditInstructions');
             view.addEventListener('keydown', (e) => {
                 if (e.key !== 'Enter' && e.key !== ' ') { return; }
                 if (td.classList.contains('editing')) { return; }

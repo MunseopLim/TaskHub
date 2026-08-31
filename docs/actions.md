@@ -499,7 +499,8 @@ VS Code의 포트 전달 주소로 변환해 엽니다. `target: "default"`에�
 ```
 
 `source`는 경로 또는 경로 배열이고 `archive`는 생성할 파일입니다. `tool`을 생략하면 내장 ZIP 엔진을
-사용하며, 지정하면 7z 호환 도구를 사용합니다. 결과는 `${package.archivePath}`입니다.
+사용하며, 지정하면 7z 호환 도구를 사용합니다. 상대 `source`와 `archive`는 `cwd`, 없으면 액션
+워크스페이스를 기준으로 해석합니다. 결과 `${package.archivePath}`는 해석된 절대 경로입니다.
 
 ### `unzip`
 
@@ -514,7 +515,8 @@ VS Code의 포트 전달 주소로 변환해 엽니다. `target: "default"`에�
 
 `archive`, `destination`은 직접 경로를 받습니다. 이전 태스크 ID를 연결하는 기존 `inputs.archive`,
 `inputs.file`, `inputs.destination` 형식도 지원합니다. 결과는 `${extract.outputDir}`이며 `${extract}`로도
-참조할 수 있습니다.
+참조할 수 있습니다. 상대 `archive`와 `destination`은 `cwd`, 없으면 액션 워크스페이스를 기준으로
+해석하며 결과는 절대 경로입니다.
 
 `zip`과 `unzip`의 `tool`은 플랫폼별 객체를 사용할 수 있습니다.
 
@@ -525,6 +527,11 @@ VS Code의 포트 전달 주소로 변환해 엽니다. `target: "default"`에�
   "linux": "/usr/bin/7z"
 }
 ```
+
+`cwd`는 내장 엔진의 상대 경로 기준과 외부 도구의 작업 디렉터리에 모두 적용됩니다. `tool`을 지정한
+경우 `env`를 자식 프로세스에 추가할 수 있습니다. `tool`, `cwd`, `env` 값은 변수 치환을 지원합니다.
+ZIP 경로는 파일·폴더 대화상자로 워크스페이스 밖의 항목을 다루는 용도도 있으므로 워크스페이스 안으로
+제한하지 않습니다.
 
 ## 7. 조건·분기·반복
 

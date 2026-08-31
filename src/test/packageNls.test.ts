@@ -49,6 +49,27 @@ suite('manifest 지역화 (package.nls)', () => {
         assert.deepStrictEqual(missing, [], `package.json이 참조하는 키가 번들에 없다: ${missing.join(', ')}`);
     });
 
+    test('Custom Editor 표시 이름은 NLS 자리표시자를 사용한다', () => {
+        const manifest = JSON.parse(manifestText);
+        for (const editor of manifest.contributes?.customEditors ?? []) {
+            assert.match(
+                String(editor.displayName ?? ''),
+                /^%[A-Za-z][\w.]*%$/,
+                `${editor.viewType}: displayName이 NLS 자리표시자가 아니다`
+            );
+        }
+    });
+
+    test('확장 설명과 Restricted Mode 설명은 NLS 자리표시자를 사용한다', () => {
+        const manifest = JSON.parse(manifestText);
+        for (const [surface, value] of [
+            ['description', manifest.description],
+            ['capabilities.untrustedWorkspaces.description', manifest.capabilities?.untrustedWorkspaces?.description],
+        ] as const) {
+            assert.match(String(value ?? ''), /^%[A-Za-z][\w.]*%$/, `${surface}가 NLS 자리표시자가 아니다`);
+        }
+    });
+
     test('번들의 키가 모두 manifest에서 쓰인다', () => {
         const referenced = new Set(referencedKeys());
         const unused = bundleKeys(en).filter(key => !referenced.has(key));

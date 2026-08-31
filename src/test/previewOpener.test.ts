@@ -220,6 +220,23 @@ suite('previewOpener', () => {
             assert.deepStrictEqual(errors, []);
         });
 
+        test('reports when the default browser declines to open the file', async () => {
+            const { deps, externals, errors } = makeFakeDeps();
+            deps.openExternal = (target: vscode.Uri) => {
+                externals.push(target);
+                return Promise.resolve(false);
+            };
+            const uri = vscode.Uri.file('/tmp/page.html');
+
+            await openHtmlInBrowser(uri, deps);
+
+            assert.strictEqual(externals.length, 1);
+            assert.deepStrictEqual(errors, [t(
+                'HTML 파일을 기본 브라우저에서 열지 못했습니다.',
+                'Could not open the HTML file in the default browser.'
+            )]);
+        });
+
         test('rejects non-HTML files', async () => {
             const { deps, externals, errors } = makeFakeDeps();
             await openHtmlInBrowser(vscode.Uri.file('/tmp/notes.md'), deps);
@@ -249,7 +266,7 @@ suite('previewOpener', () => {
         const COMMANDS = ['taskhub.openMarkdownPreview', 'taskhub.openHtmlInBrowser'] as const;
         const SURFACES = ['explorer/context', 'editor/title/context', 'scm/resourceState/context'] as const;
 
-        test('IT-PRV-001: extension registers all preview/browser commands', async () => {
+        test('IT-199: extension registers all preview/browser commands', async () => {
             const all = await vscode.commands.getCommands(true);
             for (const id of COMMANDS) {
                 assert.ok(all.includes(id), `command not registered: ${id}`);
@@ -261,7 +278,7 @@ suite('previewOpener', () => {
             );
         });
 
-        test('IT-PRV-002: package.json declares each command', () => {
+        test('IT-200: package.json declares each command', () => {
             // Tests compile to out/test/*.test.js → repo root is two levels up.
             const repoRoot = path.resolve(__dirname, '..', '..');
             const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf-8'));
@@ -277,7 +294,7 @@ suite('previewOpener', () => {
             );
         });
 
-        test('IT-PRV-003: every command appears on every menu surface (full matrix)', () => {
+        test('IT-201: every command appears on every menu surface (full matrix)', () => {
             const repoRoot = path.resolve(__dirname, '..', '..');
             const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf-8'));
             const menus = pkg.contributes?.menus ?? {};
@@ -298,7 +315,7 @@ suite('previewOpener', () => {
             );
         });
 
-        test('IT-PRV-004: SCM preview menus are gated only by the Source Control visibility setting', () => {
+        test('IT-202: SCM preview menus are gated only by the Source Control visibility setting', () => {
             const repoRoot = path.resolve(__dirname, '..', '..');
             const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf-8'));
             const entries = (pkg.contributes?.menus?.['scm/resourceState/context'] ?? []) as Array<{

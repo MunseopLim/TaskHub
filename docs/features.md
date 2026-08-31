@@ -97,16 +97,16 @@ Actions 패널의 목록은 세 종류의 소스를 병합해 만듭니다. 같�
 | 프리셋 | 확장 `presets/` 또는 워크스페이스 `.vscode/presets/` | `taskhub.preset.selected`로 선택했을 때 ([§17](#17-preset-기능)) |
 | 번들 예제 (`defaultButton.*`) | 확장의 `media/actions.json` | `taskhub.builtinActions` 설정에 따름 (기본 `auto`) |
 
-**번들 예제의 `auto` 동작**: 예제를 액션 목록에 넣지 않고, 액션이 없을 때 뜨는 [빈 상태 안내](#빈-상태-안내와-제목-표시줄-구성)의 *Browse Examples* 버튼으로 연결합니다.
+**번들 예제의 `auto` 동작**: 예제를 액션 목록에 넣지 않고, 액션이 없을 때 뜨는 [빈 상태 안내](#빈-상태-안내와-제목-표시줄-구성)의 *예제 둘러보기* 버튼으로 연결합니다.
 
-| 값 | 액션 목록에 예제 | 빈 상태 CTA의 *Browse Examples* |
+| 값 | 액션 목록에 예제 | 빈 상태 CTA의 *예제 둘러보기* |
 | --- | --- | --- |
 | `auto` (기본) | 넣지 않음 | 표시 |
 | `always` | 넣음 (0.6.14 이전 동작) | — (목록이 비지 않으므로 CTA 자체가 없음) |
 | `never` | 넣지 않음 | 숨김 |
 
 - 예제가 목록에 없으면 id 충돌 검사 대상에서도 빠집니다 — 즉 자기 액션에 `defaultButton.showEnv` 같은 id를 써도 충돌로 막히지 않습니다.
-- 예제 정의는 언제든 제목 표시줄 `…` 메뉴의 *Show Example JSON* 으로 볼 수 있습니다.
+- 예제 정의는 언제든 제목 표시줄 `…` 메뉴의 *예제 JSON 목록 보기*로 볼 수 있습니다.
 
 **교차 소스 id 중복은 오류가 아니라 경고입니다.** 같은 `id`가 두 소스에 있으면 위 우선순위로 해소되고, Actions 트리 맨 위에 지속되는 경고 행이 표시됩니다. 행의 툴팁은 충돌한 소스와 실제 최종 적용된 정의를 보여 주며, 상위 폴더 ID 충돌로 중첩 정의가 모두 제거된 경우도 구분합니다. 클릭하면 전체 내용을 기록한 TaskHub 출력 채널을 엽니다. 충돌 구조에 따라 중첩 액션이 최종 트리에서 제외될 수 있고, `taskhub.runAction.<id>` 커맨드와 History 조회는 **최종 트리에 남은 쪽**만 가리키므로 경고를 확인해 의도한 정의인지 점검하세요. (같은 파일 *안*의 중복은 다릅니다 — 그건 로드 자체가 실패합니다.)
 
@@ -118,8 +118,8 @@ Command Palette에서 `taskhub json`을 검색하면 두 개의 JSON Editor 커�
 
 | 커맨드 | 동작 | 사용 시점 |
 | --- | --- | --- |
-| **TaskHub: Open JSON Editor** (`taskhub.openJsonEditor`) | 파일 선택 대화상자를 띄워 임의의 JSON 파일을 고른 뒤 JSON Editor로 엽니다. 활성 에디터와 무관하게 항상 동일하게 동작합니다. | Command Palette에서 임의의 JSON 파일을 바로 열고 싶을 때 |
-| **TaskHub: Open with JSON Editor** (`taskhub.openJsonEditorFromUri`) | URI 인자를 받는 컨텍스트 커맨드입니다. 에디터/탐색기/SCM 컨텍스트 메뉴의 *Open with JSON Editor* 항목에서 대상 파일을 전달받아 엽니다. Command Palette에서 인자 없이 실행하면 현재 활성 에디터가 `.json` 파일일 때 그 파일을 열고, 그 외에는 *Open JSON Editor* 동작으로 폴백해 파일 선택 대화상자를 띄웁니다. | `.json` 파일을 연 상태에서 빠르게 JSON Editor로 전환하거나, 탐색기/에디터 우클릭 메뉴에서 호출할 때 |
+| **TaskHub: JSON Editor 열기** (`taskhub.openJsonEditor`) | 파일 선택 대화상자를 띄워 임의의 JSON 파일을 고른 뒤 JSON Editor로 엽니다. 활성 에디터와 무관하게 항상 동일하게 동작합니다. | 명령 팔레트에서 임의의 JSON 파일을 바로 열고 싶을 때 |
+| **TaskHub: JSON Editor로 열기** (`taskhub.openJsonEditorFromUri`) | URI 인자를 받는 컨텍스트 명령입니다. 에디터/탐색기/SCM 컨텍스트 메뉴의 *JSON Editor로 열기* 항목에서 대상 파일을 전달받아 엽니다. 명령 팔레트에서 인자 없이 실행하면 현재 활성 에디터가 `.json` 파일일 때 그 파일을 열고, 그 외에는 *TaskHub: JSON Editor 열기* 동작으로 폴백해 파일 선택 대화상자를 띄웁니다. | `.json` 파일을 연 상태에서 빠르게 JSON Editor로 전환하거나, 탐색기/에디터 우클릭 메뉴에서 호출할 때 |
 
 #### 여는 파일의 조건
 
@@ -172,7 +172,7 @@ JSON Editor는 다음 규칙으로 사용자 변경을 보호합니다.
 
 ### 빈 상태 안내와 제목 표시줄 구성
 
-액션이 없으면 *Create Action*·*Browse Examples*·*Import Actions…*를 안내합니다. JSON 파싱이나 스키마 검증이 실패한 경우에는 빈 상태로 처리하지 않고 오류 행을 표시하며, 클릭하면 실패한 파일을 엽니다. 제목에는 확장 버전이 표시되고, 검색·생성과 실행 중에만 보이는 중지 명령을 아이콘으로 노출합니다. `actions.json` 편집은 `…` 메뉴에 둬 제목 표시줄이 복잡해지지 않게 합니다.
+액션이 없으면 *액션 만들기*·*예제 둘러보기*·*액션 가져오기…*를 안내합니다. JSON 파싱이나 스키마 검증이 실패한 경우에는 빈 상태로 처리하지 않고 오류 행을 표시하며, 클릭하면 실패한 파일을 엽니다. 제목에는 확장 버전이 표시되고, 검색·생성과 실행 중에만 보이는 중지 명령을 아이콘으로 노출합니다. `actions.json` 편집은 `…` 메뉴에 둬 제목 표시줄이 복잡해지지 않게 합니다.
 
 ### 멀티 task 액션의 진행 표시
 
@@ -188,7 +188,7 @@ JSON Editor는 다음 규칙으로 사용자 변경을 보호합니다.
 
 ID가 있는 액션은 `taskhub.runAction.<encoded-id>` 커맨드로 동적 등록됩니다. 액션 우클릭 → **Assign Shortcut**을 선택하면 VS Code Keyboard Shortcuts가 해당 커맨드로 필터링됩니다. 액션 변경 시 등록도 동기화되며, 폴더와 구분선은 등록하지 않습니다.
 
-### Quick Action Palette (`TaskHub: Run Any Action…`)
+### Quick Action Palette (`TaskHub: 액션 실행…`)
 
 Actions 제목 표시줄의 돋보기, Command Palette 또는 직접 지정한 단축키로 모든 액션을 fuzzy 검색합니다. 폴더 breadcrumb도 검색 대상이며, 최근 실행 항목은 History에서 유도합니다.
 
@@ -302,7 +302,7 @@ Actions 뷰 제목 표시줄의 **+**에서 시작합니다. 필수 값만 받�
 
 *   **설정 파일 편집**: Actions는 제목 표시줄의 `…` 메뉴에서, 링크와 즐겨찾기는 제목 표시줄의 연필 아이콘에서 각각 `actions.json`, `links.json`, `favorites.json`을 열어 편집합니다. 파일이 없으면 새로 생성됩니다.
 *   **예제 JSON 보기**: Actions 패널 제목 표시줄의 `…` 메뉴에서 세 설정 파일의 예제를 선택합니다.
-*   **확장 프로그램 설정 열기**: 명령 팔레트(Cmd/Ctrl+Shift+P)에서 `TaskHub: Open Extension Settings`를 실행하여 확장 프로그램과 관련된 모든 설정을 VS Code 설정 화면에서 쉽게 확인하고 수정할 수 있습니다.
+*   **확장 프로그램 설정 열기**: 명령 팔레트(Cmd/Ctrl+Shift+P)에서 `TaskHub: 확장 프로그램 설정 열기`를 실행하여 확장 프로그램과 관련된 모든 설정을 VS Code 설정 화면에서 쉽게 확인하고 수정할 수 있습니다.
 
 ## 14. 액션 실행 히스토리
 
@@ -645,8 +645,8 @@ value |= 0x80;  // Hover over '|=' to see: 0x0F → 0x8F
 Preset 기능을 사용하면 프로젝트 환경별(integration, hil 등) action 설정을 쉽게 공유하고 적용할 수 있습니다.
 
 **주요 기능:**
-- **Apply Preset**: 미리 정의된 preset을 현재 워크스페이스에 적용
-- **Save as Preset**: 현재 actions를 preset으로 저장하여 팀원들과 공유
+- **프리셋 적용**: 미리 정의된 preset을 현재 워크스페이스에 적용
+- **프리셋으로 저장**: 현재 actions를 preset으로 저장하여 팀원들과 공유
 
 ### Preset 저장 위치
 
@@ -659,7 +659,7 @@ Preset 파일은 다음 위치에서 자동으로 발견됩니다:
 
 **1. Preset 적용하기**
 
-Command Palette (Cmd+Shift+P)에서 **"TaskHub: Apply Preset"** 실행:
+명령 팔레트(Cmd+Shift+P)에서 **"TaskHub: 프리셋 적용"** 실행:
 
 1. 적용할 preset 선택 (example, integration, hil 등)
 2. 기존 `actions.json`이 있는 경우:
@@ -670,11 +670,11 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Apply Preset"** 실행:
    - **Use preset**: Preset actions 우선, 충돌하지 않는 기존 actions만 유지
    - **Keep both**: 기존 actions를 모두 유지하고, 충돌하지 않는 preset actions만 추가 (충돌하는 preset 항목은 제외 — `actions.json` 스키마는 ID 유일성을 요구하므로 *중복 허용*은 가능하지 않습니다)
 
-> **데이터 보호 (v0.4.33부터)**: 기존 `actions.json`이 JSON 파싱 또는 스키마 검증에 실패하면 *Replace / Merge* prompt 직전에 modal *손상된 파일 백업 후 계속 / 취소* 가 뜹니다. 백업을 선택하면 원본이 `actions.json.bak`으로 옮겨진 뒤 빈 배열로 진행되어, 손상된 파일을 무방비로 덮어쓰지 않습니다. (`Import Actions`와 같은 가드)
+> **데이터 보호 (v0.4.33부터)**: 기존 `actions.json`이 JSON 파싱 또는 스키마 검증에 실패하면 *교체 / 병합* 선택 직전에 *손상된 파일 백업 후 계속 / 취소* 모달이 뜹니다. 백업을 선택하면 원본이 `actions.json.bak`으로 옮겨진 뒤 빈 배열로 진행되어, 손상된 파일을 무방비로 덮어쓰지 않습니다. (*액션 가져오기*와 같은 보호 절차)
 
 **2. Preset 저장하기**
 
-Command Palette (Cmd+Shift+P)에서 **"TaskHub: Save as Preset"** 실행:
+명령 팔레트(Cmd+Shift+P)에서 **"TaskHub: 프리셋으로 저장"** 실행:
 
 1. Preset ID 입력 (예: integration, hil)
 2. 저장 위치 선택:
@@ -729,7 +729,7 @@ Preset은 일반 `actions.json`과 동일한 형식을 사용합니다:
 ### 팀 워크플로우 예시
 
 1. **팀 리드**: 환경별 preset 작성 → `.vscode/presets/` 저장 → Git commit
-2. **팀원들**: Git pull → "Apply Preset" 명령어로 원하는 환경 선택
+2. **팀원들**: Git pull → "프리셋 적용" 명령으로 원하는 환경 선택
 3. **개인화**: 필요한 경우 개인 actions 추가 (Merge 모드 사용)
 
 ## 18. 액션 Import/Export
@@ -740,7 +740,7 @@ Preset은 일반 `actions.json`과 동일한 형식을 사용합니다:
 
 #### 전체 내보내기
 
-Command Palette (Cmd+Shift+P)에서 **"TaskHub: Export Actions"** 실행:
+명령 팔레트(Cmd+Shift+P)에서 **"TaskHub: 액션 내보내기"** 실행:
 
 1. 현재 워크스페이스의 `.vscode/actions.json`을 읽어옵니다.
 2. 저장할 파일 위치와 이름을 선택합니다 (`.taskhub` 또는 `.json` 형식).
@@ -748,7 +748,7 @@ Command Palette (Cmd+Shift+P)에서 **"TaskHub: Export Actions"** 실행:
 
 #### 개별 내보내기 (컨텍스트 메뉴)
 
-Actions 패널에서 액션 또는 폴더를 **우클릭** → **"Export Action"** 선택:
+Actions 패널에서 액션 또는 폴더를 **우클릭** → **"액션 내보내기"** 선택:
 
 1. 선택한 액션 하나 또는 폴더(하위 항목 전체 포함)만 내보냅니다.
 2. 저장할 파일 위치와 이름을 선택합니다 (`.taskhub` 또는 `.json` 형식).
@@ -771,7 +771,7 @@ Actions 패널에서 액션 또는 폴더를 **우클릭** → **"Export Action"
 
 ### Import (가져오기)
 
-Command Palette (Cmd+Shift+P)에서 **"TaskHub: Import Actions"** 실행하거나, Actions 패널 타이틀바의 **Import 아이콘** ($(cloud-download))을 클릭:
+명령 팔레트(Cmd+Shift+P)에서 **"TaskHub: 액션 가져오기"**를 실행하거나, Actions 패널 제목 표시줄의 **`…` 메뉴 → 액션 가져오기**를 선택합니다.
 
 1. 가져올 파일을 선택합니다 (`.taskhub` 또는 `.json` 형식).
 2. 파일의 스키마 유효성을 검사합니다. 스키마뿐 아니라 **액션 ID / 태스크 ID 중복**도 정상 로드 경로와 동일하게 검증하여, 가져오기 성공 후 다음 로드가 깨지는 상황을 막습니다.
@@ -796,7 +796,7 @@ ARM `.axf`/`.elf` 바이너리 또는 ARM Linker Listing을 분석해 Flash/RAM 
 
 ### 사용 방법
 
-Command Palette에서 **TaskHub: Show Memory Map**을 실행합니다. Explorer에서 `.elf`·`.axf`·`.out`
+명령 팔레트에서 **TaskHub: Memory Map 보기**를 실행합니다. Explorer에서 `.elf`·`.axf`·`.out`
 파일을 우클릭해 **Memory Map으로 열기**를 선택하면 입력 형식과 파일을 다시 묻지 않고 바로 엽니다.
 빠른 열기는 파일이 속한 workspace folder의 `taskhub_types.json` 영역 설정을 사용하며, 설정이 없으면
 기존 `PT_LOAD` 기반 영역 감지를 사용합니다. 분석 중에는 VS Code 창의 진행 상태에 파일명을 표시합니다.
@@ -848,7 +848,7 @@ ELF 프로그램 헤더와 심볼 테이블을 사용합니다.
   경로 suffix를 먼저 확인합니다. 후보가 없으면 워크스페이스에서 기록 경로의 긴 suffix부터
   단계적으로 검색하며, 후보가 여러 개면 선택 목록을 표시합니다. 한 단계에서 100개를 넘으면
   잘못된 파일을 자동 선택하지 않고 워크스페이스 범위를 좁히도록 안내합니다. 기록된 줄이
-  현재 파일 범위를 벗어나면 오래된 위치를 열지 않고 안내합니다.
+  현재 파일 범위를 벗어나면 파일명과 변경 가능성을 알리고 가장 가까운 유효한 줄을 엽니다.
 - DWARF 5 file table에 `DW_LNCT_MD5`가 있으면 이미 찾은 후보의 현재 파일 내용과 비교합니다.
   모든 후보를 확인할 수 있고 저장하지 않은 편집이 없으며 **ELF 기록과 일치**하는 후보가 정확히
   하나일 때 자동으로 선택합니다. 후보가 하나뿐이면 고를 것이 없으므로 불일치나 확인 불가를
@@ -860,7 +860,7 @@ ELF 프로그램 헤더와 심볼 테이블을 사용합니다.
   다시 사용합니다. **Refresh**를 실행하거나 ELF·후보 집합이 달라지면 기억을 버립니다.
   checksum 비교는 후보 하나당 8MB, 한 번의 선택에서 총 32MB까지만 읽으며, 이 비교 때문에
   workspace 검색 범위를 넓히거나 Hover의 정의 후보를 판정하지 않습니다. 비교 중에는 VS Code
-  하단에 진행 상태가 표시되고 취소할 수 있습니다. 같은 패널에서 후보 파일의 크기·수정 시각이
+  하단에 진행 상태가 표시되고 취소할 수 있습니다. 같은 패널에서 후보 파일의 크기·수정 시각·메타데이터 변경 시각이
   그대로면 비교 결과를 재사용하며, 파일이 바뀌면 다시 읽습니다. checksum이 없는
   DWARF 2~5는 기존처럼 단일 후보를 바로 열고 복수 후보만 선택 목록을 표시합니다.
 - DWARF 5의 0-based directory/file table과 `DW_FORM_string`·`DW_FORM_line_strp`·
@@ -980,7 +980,7 @@ Intel HEX, Motorola SREC, raw binary 펌웨어를 VS Code 안에서 주소·Hex�
   선택도 값 해석에만 적용됩니다. 2·4바이트 표시에서 마지막 그룹이 덜 찬 경우 바이트 수 옆에
   부족한 개수를 알리고, 미리보기에서 실제 바이트는 보조 색상으로, 부족한 `··`는 warning 색상으로
   구분합니다. `··`는 화면 안내일 뿐 실제 Hex나 Text에 `00`을 추가하지 않습니다.
-- **Text 복사**·**Hex 복사**로 결과를 클립보드에 복사하고, **모두 지우기**로 새 변환을 시작합니다.
+- **Text 복사**·**Hex 복사**로 결과를 클립보드에 복사하고, **입력 지우기**로 새 변환을 시작합니다.
 - 자주 쓰는 값은 각 카드의 **Text 저장**·**Hex 저장**으로 등록합니다. 넓은 화면에서는 오른쪽에,
   좁은 화면에서는 변환기 아래에 저장 목록이 표시되며, 항목을 누르면 저장 당시 인코딩·바이트 순서와
   값을 즉시 불러옵니다. 최대 24개, 항목당 16KB까지 저장되고 VS Code를 다시 열어도 유지됩니다.
@@ -992,7 +992,7 @@ Intel HEX, Motorola SREC, raw binary 펌웨어를 VS Code 안에서 주소·Hex�
 
 ### 사용 방법
 
-Command Palette에서 **TaskHub: Open Hex Viewer**를 실행하고 파일을 고릅니다. 알려진 확장자는 그 형식을 우선 사용하고, 그 밖의 파일만 길이·자릿수·체크섬이 유효한 레코드를 찾아 텍스트 형식을 감지합니다.
+명령 팔레트에서 **TaskHub: Hex Viewer 열기**를 실행하고 파일을 고릅니다. 알려진 확장자는 그 형식을 우선 사용하고, 그 밖의 파일만 길이·자릿수·체크섬이 유효한 레코드를 찾아 텍스트 형식을 감지합니다.
 
 서로 다른 파일은 각각 별도의 Hex Viewer 탭으로 유지되며, 같은 파일을 다시 열면 기존 탭을
 표시하고 최신 내용으로 다시 읽습니다. 이 파일별 탭은 웹뷰가 표시 데이터를 받은 뒤 확장 호스트의
@@ -1075,10 +1075,10 @@ ELF/AXF Memory Map의 **바이트 보기**에서 열면 ELF 컨테이너를 raw 
 | `taskhub.pipeline.totalOutputLimitMb` | `number` | `32` (1–4096) | 한 액션이 들고 있는 **모든 태스크 결과의 합계** 상한(MB). 위 설정이 태스크 하나를 막는다면 이 설정은 합계를 막는다. **태스크 상한보다 작아지지 않는다.** 초과 시 액션 실패. | [`actions.json` Output Capture](actions.md#output-capture) |
 | `taskhub.pipeline.maxParallelTasks` | `integer` | `4` (1–32) | 한 액션 안에서 동시에 실행될 수 있는 task 최대 개수. `parallel: true`가 붙은 task만 "이전 모든 task를 기다림" barrier에서 빠지며, barrier에서 빠진 뒤에도 명시적 `dependsOn`과 `${taskId.x}` 자동 추론 의존성은 그대로 기다린다. `parallel: true`가 없는 task는 `dependsOn` 유무와 무관하게 sync barrier로 동작. 기본 4는 임베디드 빌드(linker/LTO)의 메모리 부담을 고려한 보수적 값 — 자원 여유가 있는 머신에서는 늘리고, 완전 순차로 강제하려면 `1`로 설정. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
 | `taskhub.history.maxItems` | `number` | `10` (1–50) | 저장되는 액션 실행 히스토리 최대 개수. 초과분은 오래된 순으로 자동 제거. | [§14 히스토리](#14-액션-실행-히스토리) |
-| `taskhub.runAnyAction.recentLimit` | `number` | `5` (0–20) | `TaskHub: Run Any Action…` 팔레트의 *Recently used* 섹션에 표시할 최대 개수. `0`이면 섹션 자체가 숨겨진다. 목록은 히스토리에서 유도되므로 `taskhub.history.maxItems`가 상한으로 작용하고, 표시 시점에 stale 항목(삭제된 액션)을 걸러내므로 실제 보이는 개수는 이 값 이하가 될 수 있다. | [§5 Quick Action Palette](#5-actions-패널-mainviewmain) |
+| `taskhub.runAnyAction.recentLimit` | `number` | `5` (0–20) | `TaskHub: 액션 실행…` 팔레트의 *최근 실행* 섹션에 표시할 최대 개수. `0`이면 섹션 자체가 숨겨진다. 목록은 히스토리에서 유도되므로 `taskhub.history.maxItems`가 상한으로 작용하고, 표시 시점에 stale 항목(삭제된 액션)을 걸러내므로 실제 보이는 개수는 이 값 이하가 될 수 있다. | [§5 Quick Action Palette](#5-actions-패널-mainviewmain) |
 | `taskhub.history.showPanel` | `boolean` | `true` | 사이드바의 History 패널 표시 여부. `false`면 뷰 자체가 감춰지지만 기록은 그대로 유지된다. | [§14 히스토리](#14-액션-실행-히스토리) |
 | `taskhub.preview.showSourceControlContextMenu` | `boolean` | `true` | Source Control 변경 파일 우클릭 메뉴에 TaskHub 프리뷰/브라우저 열기 항목을 표시할지 여부. VS Code SCM 메뉴는 확장자 context key를 안정적으로 제공하지 않으므로 켜져 있으면 대상 확장자 외 파일에도 항목이 보일 수 있으며, 실제 실행은 핸들러가 확장자로 재검증한다. | [§22 Markdown / HTML 우클릭 열기](#22-markdown--html-우클릭-열기) |
-| `taskhub.builtinActions` | `"auto"` \| `"always"` \| `"never"` | `"auto"` | 확장에 번들된 예제 액션(`defaultButton.*`)을 Actions 목록에 병합할지. `auto`는 목록에 넣지 않고 빈 상태 CTA의 *Browse Examples* 로만 안내, `never`는 그 버튼까지 숨김, `always`는 0.6.14 이전처럼 목록에 병합. | [§3 액션 소스와 병합](#액션-소스와-병합-우선순위) |
+| `taskhub.builtinActions` | `"auto"` \| `"always"` \| `"never"` | `"auto"` | 확장에 번들된 예제 액션(`defaultButton.*`)을 Actions 목록에 병합할지. `auto`는 목록에 넣지 않고 빈 상태 CTA의 *예제 둘러보기*로만 안내, `never`는 그 버튼까지 숨김, `always`는 0.6.14 이전처럼 목록에 병합. | [§3 액션 소스와 병합](#액션-소스와-병합-우선순위) |
 | `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. 그 용도의 기억이 없으면 가장 최근에 사용한 다이얼로그 위치를 이어받는다. `false`면 TaskHub가 시작 위치를 **일절 지정하지 않고** VS Code의 기본 규칙과 `files.dialog.defaultPath` 설정에 맡긴다. 저장 다이얼로그는 제안 파일명도 함께 사라진다. 액션 JSON의 `options.defaultUri`는 어느 쪽이든 존중한다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |
@@ -1106,8 +1106,8 @@ VS Code의 소스 컨트롤·탐색기·에디터 탭에서 마크다운 / HTML 
 
 | 확장자 | 메뉴 항목 | 동작 |
 | --- | --- | --- |
-| `.md`, `.markdown` | **TaskHub: Open Markdown Preview** | VS Code 내장 명령 `markdown.showPreviewToSide`에 위임 — 옆 컬럼에 렌더링된 프리뷰. |
-| `.html`, `.htm` | **TaskHub: Open HTML in Default Browser** | `vscode.env.openExternal`로 OS 기본 브라우저에서 열기. |
+| `.md`, `.markdown` | **TaskHub: Markdown 미리 보기 열기** | VS Code 내장 명령 `markdown.showPreviewToSide`에 위임 — 옆 컬럼에 렌더링된 프리뷰. |
+| `.html`, `.htm` | **TaskHub: 기본 브라우저에서 HTML 열기** | `vscode.env.openExternal`로 OS 기본 브라우저에서 열기. |
 
 대소문자는 가리지 않습니다(`README.MD` / `INDEX.HTML` 모두 매칭). 위 외 확장자(`.svg`, `.mmd` 등)는 의도적으로 제외 — VS Code가 이미 자동 렌더하거나(SVG) 외부 익스텐션이 필요한 경우(Mermaid)이기 때문에 단순 어댑터로 끼워넣을 가치가 적습니다.
 
@@ -1154,7 +1154,7 @@ HTML **우클릭 메뉴**는 빠르게 외부에서 확인하는 기존 동작�
 
 ### 23.1. 실행 방법
 
-Command Palette에서 **`TaskHub: Doctor — Lint Actions`** 를 실행하면 됩니다. 별도 인자/선택 없이 현재 로드된 모든 `actions.json` 소스를 한 번에 점검합니다. 발견된 문제가 없으면 정보 토스트로 알리고, 문제가 있으면 경고 토스트와 함께 **Problems 열기** 버튼을 제시합니다.
+명령 팔레트에서 **`TaskHub: Doctor — 액션 점검`**을 실행하면 됩니다. 별도 인자/선택 없이 현재 로드된 모든 `actions.json` 소스를 한 번에 점검합니다. 발견된 문제가 없으면 정보 토스트로 알리고, 문제가 있으면 경고 토스트와 함께 **Problems 열기** 버튼을 제시합니다.
 
 진단 컬렉션은 `taskhub-doctor` 라는 별도 source로 게시되며, 액션 실행 중 Problem Matcher가 만들어내는 진단(`taskhub:<actionId>`)과 분리되어 있습니다 — Doctor 재실행은 자기 결과만 지우고, 빌드 실행 결과는 건드리지 않습니다.
 

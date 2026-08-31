@@ -114,6 +114,10 @@ interface LineUnitOptions {
     version?: 2 | 3 | 4;
     littleEndian?: boolean;
     address?: number;
+    minimumInstructionLength?: number;
+    maximumOperationsPerInstruction?: number;
+    opcodeBase?: number;
+    standardOpcodeLengths?: number[];
     directories?: string[];
     files?: { name: string; directoryIndex: number }[];
     program?: number[];
@@ -123,18 +127,18 @@ function buildLineUnit(options: LineUnitOptions = {}): Buffer {
     const version = options.version ?? 4;
     const littleEndian = options.littleEndian ?? true;
     const address = options.address ?? 0x08000100;
-    const opcodeBase = version === 2 ? 9 : 13;
-    const standardLengths = version === 2
+    const opcodeBase = options.opcodeBase ?? (version === 2 ? 9 : 13);
+    const standardLengths = options.standardOpcodeLengths ?? (version === 2
         ? [0, 1, 1, 1, 1, 0, 0, 0]
-        : [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1];
+        : [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]);
     const directories = options.directories ?? ['/workspace/src'];
     const files = options.files ?? [
         { name: 'main.c', directoryIndex: 1 },
         { name: 'util.c', directoryIndex: 1 },
     ];
     const header = [
-        1, // minimum_instruction_length
-        ...(version >= 4 ? [1] : []), // maximum_operations_per_instruction
+        options.minimumInstructionLength ?? 1,
+        ...(version >= 4 ? [options.maximumOperationsPerInstruction ?? 1] : []),
         1, // default_is_stmt
         0xfb, // line_base = -5
         14, // line_range
@@ -184,6 +188,128 @@ suite('DWARF .debug_line parser', () => {
             { start: 0x08000100, end: 0x08000104, file: '/workspace/src/main.c', line: 1 },
             { start: 0x08000104, end: 0x08000108, file: '/workspace/src/main.c', line: 10 },
             { start: 0x08000108, end: 0x0800010c, file: '/workspace/src/util.c', line: 20 },
+        ]);
+    });
+
+    test('special opcode가 주소와 줄 delta를 한 번에 적용한다', () => {
+        const address = 0x08000100;
+        const result = parseDwarfLineSection(buildLineUnit({
+            address,
+            minimumInstructionLength: 4,
+            program: [
+                0, ...uleb(5), 2, ...uint32(address, true),
+                3, ...sleb(9), // line 10
+                0x14, // address +0, line +2
+                0x1b, // operation +1 => address +4, line -5
+                0x21, // operation +1 => address +4, line +1
+                2, ...uleb(1),
+                0, ...uleb(1), 1,
+            ],
+        }), true);
+
+        assert.deepStrictEqual(result.locations.map(location => ({
+            start: location.address,
+            end: location.endAddress,
+            line: location.line,
+        })), [
+            { start: address, end: address + 4, line: 12 },
+            { start: address + 4, end: address + 8, line: 7 },
+            { start: address + 8, end: address + 12, line: 8 },
+        ]);
+    });
+
+    test('주소 advance는 minimum_instruction_length 배수를 적용하고 fixed advance는 바이트 단위로 더한다', () => {
+        const address = 0x08000100;
+        const result = parseDwarfLineSection(buildLineUnit({
+            address,
+            minimumInstructionLength: 4,
+            program: [
+                0, ...uleb(5), 2, ...uint32(address, true),
+                1,
+                8, // DW_LNS_const_add_pc: operation advance 17, address +68
+                6, // DW_LNS_negate_stmt
+                1,
+                9, ...uint16(6, true), // DW_LNS_fixed_advance_pc: address +6 (not +24)
+                1,
+                2, ...uleb(1), // address +4
+                6, // DW_LNS_negate_stmt
+                1,
+                2, ...uleb(1),
+                0, ...uleb(1), 1,
+            ],
+        }), true);
+
+        assert.deepStrictEqual(result.locations.map(location => ({
+            start: location.address,
+            end: location.endAddress,
+            isStatement: location.isStatement,
+        })), [
+            { start: address, end: address + 68, isStatement: true },
+            { start: address + 68, end: address + 74, isStatement: false },
+            { start: address + 74, end: address + 78, isStatement: false },
+            { start: address + 78, end: address + 82, isStatement: true },
+        ]);
+    });
+
+    test('VLIW operation advance는 op_index를 누적해 instruction 경계에서만 주소를 올린다', () => {
+        const address = 0x08000100;
+        const result = parseDwarfLineSection(buildLineUnit({
+            address,
+            minimumInstructionLength: 4,
+            maximumOperationsPerInstruction: 3,
+            program: [
+                0, ...uleb(5), 2, ...uint32(address, true),
+                1,
+                3, ...sleb(9),
+                2, ...uleb(2), // op_index 0 -> 2, address 유지
+                2, ...uleb(1), // op_index 2 -> 0, address +4
+                1,
+                2, ...uleb(4), // address +4, op_index 0 -> 1
+                1,
+                2, ...uleb(2), // op_index 1 -> 0, address +4
+                0, ...uleb(1), 1,
+            ],
+        }), true);
+
+        assert.deepStrictEqual(result.locations.map(location => ({
+            start: location.address,
+            end: location.endAddress,
+            line: location.line,
+        })), [
+            { start: address, end: address + 4, line: 1 },
+            { start: address + 4, end: address + 8, line: 10 },
+            { start: address + 8, end: address + 12, line: 10 },
+        ]);
+    });
+
+    test('opcode_base가 14일 때 vendor 표준 opcode는 선언된 ULEB 피연산자 수만큼 건너뛴다', () => {
+        const address = 0x08000100;
+        const result = parseDwarfLineSection(buildLineUnit({
+            address,
+            opcodeBase: 14,
+            standardOpcodeLengths: [
+                0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1,
+                2, // vendor opcode 13
+            ],
+            program: [
+                0, ...uleb(5), 2, ...uint32(address, true),
+                1,
+                13, ...uleb(300), ...uleb(0x1234),
+                3, ...sleb(9),
+                2, ...uleb(4),
+                1,
+                2, ...uleb(4),
+                0, ...uleb(1), 1,
+            ],
+        }), true);
+
+        assert.deepStrictEqual(result.locations.map(location => ({
+            start: location.address,
+            end: location.endAddress,
+            line: location.line,
+        })), [
+            { start: address, end: address + 4, line: 1 },
+            { start: address + 4, end: address + 8, line: 10 },
         ]);
     });
 

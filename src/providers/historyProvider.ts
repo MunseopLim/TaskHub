@@ -2,9 +2,9 @@
  * History view TreeDataProvider and its supporting TreeItem (HistoryItem),
  * plus the `HistoryEntry` shape persisted in workspace state.
  *
- * Extracted from `extension.ts` (phase 2 module split). `extension.ts`
- * re-exports everything here so existing callers (including tests) can keep
- * `import { ... } from './extension'` unchanged.
+ * Extracted from `extension.ts` (phase 2 module split). `extension.ts` imports
+ * these symbols but does not re-export them. External callers and tests should
+ * import them directly from this module.
  */
 
 import * as vscode from 'vscode';

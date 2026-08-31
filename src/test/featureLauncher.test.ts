@@ -49,7 +49,7 @@ suite('TaskHub 기능 런처', () => {
         );
     });
 
-    test('최근 사용을 먼저 두고 모든 기능을 분야별 구분선 아래에 표시한다', () => {
+    test('최근 사용을 먼저 두고 일반 그룹에서는 중복을 제거한다', () => {
         const items = buildFeatureLauncherItems(['hexConverter', 'runAnyAction']);
         const recent = items.slice(1, 3).map(item => item.featureId);
         assert.deepStrictEqual(recent, ['hexConverter', 'runAnyAction']);
@@ -64,6 +64,7 @@ suite('TaskHub 기능 런처', () => {
             .map(item => item.featureId);
         const uniqueFeatureIds = new Set(allFeatureIds);
         assert.strictEqual(uniqueFeatureIds.size, 10);
+        assert.strictEqual(allFeatureIds.length, 10, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
         assert.ok(allFeatureIds.every(id => typeof id === 'string'));
         assert.ok(items.filter(item => item.featureId).every(item => item.label.includes('$(')));
     });

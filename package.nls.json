@@ -1,9 +1,12 @@
 {
   "_comment": "Default (English) manifest strings. Korean lives in package.nls.ko.json. VS Code substitutes %key% throughout package.json at load time; source strings must stay here rather than inline so the two locales cannot drift apart silently.",
+  "extension.description": "A customizable sidebar for running tasks and workflows in VS Code.",
+  "extension.untrustedWorkspaceDescription": "TaskHub can execute shell/command tasks defined in a workspace's .vscode/actions.json, so it is disabled in untrusted workspaces.",
   "view.actions": "Actions",
   "view.links": "Workspace Links",
   "view.favorites": "Favorite Files",
   "view.history": "History",
+  "customEditor.hexViewer": "TaskHub Hex Viewer",
   "welcome.noFolder": "TaskHub runs actions defined per project.\n[Open Folder](command:vscode.openFolder)\nOnce a folder is open you can create actions in its .vscode/actions.json.",
   "welcome.noActions": "No actions yet.\n[Create Action](command:taskhub.createAction)\nOr start from a sample and edit it by hand:\n[Browse Examples](command:taskhub.showExampleJsonQuickPick)\n[Import Actions…](command:taskhub.importActions)",
   "welcome.noActionsNoExamples": "No actions yet.\n[Create Action](command:taskhub.createAction)\n[Import Actions…](command:taskhub.importActions)",

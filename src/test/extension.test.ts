@@ -1077,6 +1077,8 @@ suite('Extension Test Suite', () => {
 			const originalQuickPick = vscode.window.showQuickPick;
 			const originalOpenDialog = vscode.window.showOpenDialog;
 			const seen: Array<[boolean | undefined, boolean | undefined]> = [];
+			const seenTokens: Array<vscode.CancellationToken | undefined> = [];
+			const cancellation = new vscode.CancellationTokenSource();
 			try {
 				(vscode.window as any).showOpenDialog = async (options: vscode.OpenDialogOptions) => {
 					seen.push([options.canSelectFiles, options.canSelectFolders]);
@@ -1086,15 +1088,23 @@ suite('Extension Test Suite', () => {
 					['win32', 'file'],
 					['linux', 'folder'],
 				] as const) {
-					(vscode.window as any).showQuickPick = async (items: any[]) =>
-						items.find(item => item.taskHubPathMode === selected);
-					await handlePathDialog({ id: `both-${platform}`, mode: 'both' }, platform);
+					(vscode.window as any).showQuickPick = async (
+						items: any[],
+						_options: vscode.QuickPickOptions,
+						token: vscode.CancellationToken | undefined
+					) => {
+						seenTokens.push(token);
+						return items.find(item => item.taskHubPathMode === selected);
+					};
+					await handlePathDialog({ id: `both-${platform}`, mode: 'both' }, platform, cancellation.token);
 				}
 			} finally {
+				cancellation.dispose();
 				(vscode.window as any).showQuickPick = originalQuickPick;
 				(vscode.window as any).showOpenDialog = originalOpenDialog;
 			}
 			assert.deepStrictEqual(seen, [[true, false], [false, true]]);
+			assert.deepStrictEqual(seenTokens, [cancellation.token, cancellation.token]);
 		});
 
 		test('pathDialog의 잘못된 동적 mode는 값을 노출하지 않고 열기 전에 거부한다', async () => {

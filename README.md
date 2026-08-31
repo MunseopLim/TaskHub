@@ -27,7 +27,8 @@
 - **Preset** — 팀원들과 action 설정 공유
 - **실행 히스토리** — 성공/실패 추적, 새 입력 또는 저장 입력으로 명시적 재실행
 - **입력 프로필** — History에서 반복 입력 조합을 이름 붙여 저장하고 액션 메뉴에서 재사용
-- **Quick Action Palette** — Actions의 돋보기나 `TaskHub: Run Any Action…` 커맨드로 모든 액션을 fuzzy 검색·실행. 최근 사용 항목을 상위에 표시 (개수는 설정에서 조정)
+- **Quick Action Palette** — Actions의 돋보기나 `TaskHub: 액션 실행…` 명령으로 모든 액션을 fuzzy 검색·실행. 최근 실행 항목을 상위에 표시 (개수는 설정에서 조정)
+- **Status Bar 기능 런처** — 하단의 TaskHub 항목에서 자주 쓰는 기능을 검색하고 최근 선택 3개에 빠르게 접근
 - **Problem Matcher** — 빌드 출력의 컴파일러 에러·경고를 Problems 패널에 자동 표시 (gcc / TypeScript 프리셋 또는 커스텀 정규식)
 
 ### 사이드바 패널
@@ -47,6 +48,7 @@
 ### 뷰어
 - **Memory Map 시각화** — ELF/AXF와 ARM Linker Listing 분석, 메모리 영역 표시, 심볼·섹션 바이트와 DWARF 소스 위치 연결
 - **Hex Viewer** — 주소/16진/ASCII 3단, Unit·Endian·Go-to·Find 지원
+- **Hex/Text 변환기** — 인코딩·그룹·바이트 순서를 적용해 문자열과 Hex 바이트를 실시간 변환하고 자주 쓰는 값 저장
 - **JSON Editor** — JSON 배열/객체를 스프레드시트 UI로 편집
 
 > 상세 설명과 JSON 예제는 [docs/features.md](docs/features.md) 참조.
@@ -77,7 +79,7 @@
   </tr>
 </table>
 
-**Quick Action Palette** — `TaskHub: Run Any Action…` 한 커맨드로 모든 액션을 fuzzy 검색·실행. 최근 사용 항목은 상단 *Recently used* 섹션에 모이고, 그 아래는 폴더 breadcrumb까지 매칭되는 전체 액션 리스트. 노출 개수는 `taskhub.runAnyAction.recentLimit`로 조정.
+**Quick Action Palette** — `TaskHub: 액션 실행…` 한 명령으로 모든 액션을 fuzzy 검색·실행. 최근 실행 항목은 상단 *최근 실행* 섹션에 모이고, 그 아래는 폴더 breadcrumb까지 매칭되는 전체 액션 리스트. 노출 개수는 `taskhub.runAnyAction.recentLimit`로 조정.
 
 ![Quick Action Palette - 최근 사용 액션과 전체 액션 fuzzy 검색](docs/images/quick-action-palette.png)
 
@@ -166,7 +168,7 @@ TaskHub 액션은 워크스페이스 권한으로 명령을 실행할 수 있는
 
 ## 설정
 
-VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전체 설정을 분류별 UI로 조정할 수 있습니다. 가장 자주 손대는 항목은 `taskhub.runAnyAction.recentLimit`(Quick Action Palette의 *Recently used* 노출 개수)와 `taskhub.history.maxItems`(History 패널 보관 개수)입니다.
+VS Code `File > Preferences > Settings`에서 **"TaskHub"** 로 검색하면 전체 설정을 분류별 UI로 조정할 수 있습니다. 가장 자주 손대는 항목은 `taskhub.runAnyAction.recentLimit`(Quick Action Palette의 *최근 실행* 노출 개수)와 `taskhub.history.maxItems`(History 패널 보관 개수)입니다.
 
 설정 정의의 정본은 [package.json](package.json)의 `contributes.configuration`입니다. 사용자용 전체 키·기본값·범위와 설정 추가 절차는 [docs/features.md §21 설정 레퍼런스](docs/features.md#21-설정-레퍼런스)에 정리되어 있습니다.
 

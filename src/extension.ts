@@ -21,6 +21,7 @@ import {
     openMemoryMapFromUri,
     openMemoryMapPanel,
     openMemoryMapFromListing,
+    withMemoryMapAnalysisProgress,
 } from './memoryMapViewer';
 import { showHexViewer, HexEditorProvider, HexViewerOpenHistory, openHexViewerFile } from './hexViewer';
 import { showHexConverter } from './hexConverter';
@@ -1483,7 +1484,13 @@ async function openExternalLinkSafely(rawUrl: unknown): Promise<void> {
         vscode.window.showErrorMessage(t('올바르지 않은 URL 형식입니다.', 'Invalid URL format.'));
         return;
     }
-    await vscode.env.openExternal(uri);
+    const opened = await vscode.env.openExternal(uri);
+    if (!opened) {
+        await vscode.window.showErrorMessage(t(
+            '기본 앱에서 링크를 열지 못했습니다.',
+            'Could not open the link in its default application.'
+        ));
+    }
 }
 
 function resolveExecutionSettings(customEnv?: Record<string, string>): { envOverrides: Record<string, string>; useUtf8Console: boolean } {
@@ -3965,6 +3972,22 @@ export function killProcessTree(child: ReturnType<typeof spawn>): Promise<boolea
         }
         return result;
     });
+}
+
+/**
+ * 확장 비활성화 시 추적 중인 VS Code Task와 직접 spawn한 프로세스를 모두 끝낸다.
+ * child 종료는 병렬로 기다려, 프로세스마다 최대 2초인 `killProcessTree` 상한이
+ * 여러 개 있을 때 직렬로 누적되지 않게 한다.
+ */
+export async function terminateTrackedWorkForShutdown(
+    taskExecutions: Iterable<Pick<vscode.TaskExecution, 'terminate'>>,
+    childProcesses: Iterable<ReturnType<typeof spawn>>,
+    killTree: (child: ReturnType<typeof spawn>) => Promise<boolean> = killProcessTree
+): Promise<void> {
+    for (const execution of taskExecutions) {
+        try { execution.terminate(); } catch { /* 다른 실행과 child 종료는 계속한다. */ }
+    }
+    await Promise.allSettled(Array.from(childProcesses, child => killTree(child)));
 }
 
 /**
@@ -6761,6 +6784,7 @@ function savedQuickPickLabels(saved: any, many: boolean): string[] | undefined {
     if (Array.isArray(saved?.labelList)
         && saved.labelList.length > 0
         && saved.labelList.every((label: unknown) => typeof label === 'string' && label.length > 0)) {
+        if (!many && saved.labelList.length > 1) { return undefined; }
         return [...saved.labelList];
     }
     if (many) {
@@ -7189,7 +7213,7 @@ async function executeSingleTask(
                 mode: typeof task.mode === 'string'
                     ? interpolatePipelineVariables(task.mode, interpolationContext)
                     : task.mode,
-            });
+            }, process.platform, scope.cancellation.token);
             throwIfTaskInactive(scope);
             break;
         case 'inputBox':
@@ -8311,7 +8335,8 @@ export async function handleFolderDialog(task: any): Promise<FileDialogResult> {
  */
 export async function handlePathDialog(
     task: any,
-    platform: NodeJS.Platform = process.platform
+    platform: NodeJS.Platform = process.platform,
+    token?: vscode.CancellationToken
 ): Promise<FileDialogResult> {
     const mode = task.mode;
     if (mode !== 'file' && mode !== 'folder' && mode !== 'both') {
@@ -8339,7 +8364,7 @@ export async function handlePathDialog(
         ], {
             placeHolder: t('선택할 경로 종류를 고르세요', 'Choose what kind of path to select'),
             ignoreFocusOut: true,
-        });
+        }, token);
         if (!target) {
             throw new PromptCancelledError(t('경로 선택을 취소했습니다.', 'Path selection was canceled.'));
         }
@@ -10690,7 +10715,7 @@ function currentWorkspaceRootForRunLog(reference: HistoryRunLogReference): strin
 const actionRunReportPanels = new Map<string, vscode.WebviewPanel>();
 
 function actionRunReportKey(entry: HistoryEntry): string {
-    return `${entry.actionId} ${entry.timestamp}`;
+    return `${entry.actionId}\0${entry.timestamp}`;
 }
 
 async function showActionRunReport(entry: HistoryEntry): Promise<void> {
@@ -11111,6 +11136,16 @@ export function activate(context: vscode.ExtensionContext) {
         await runActionCreationWizard(context, mainViewProvider);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showActionSourceConflicts', () => {
+        const messages = currentActionSourceConflictMessages();
+        if (messages.length > 0) {
+            outputChannel.appendLine(t(
+                `[정보] 현재 액션 소스 충돌 ${messages.length}건:`,
+                `[Info] Current action source conflicts (${messages.length}):`
+            ));
+            for (const message of messages) {
+                outputChannel.appendLine(`  - ${message.replace(/\n/g, ' — ')}`);
+            }
+        }
         outputChannel.show(true);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openFavoriteFile', async (favorite: FavoriteEntry | string) => {
@@ -12547,7 +12582,9 @@ export function activate(context: vscode.ExtensionContext) {
             const selected = await vscode.window.showQuickPick(
                 presets.map(p => ({
                     label: p.name,
-                    description: p.source === 'extension' ? 'built-in' : `workspace: ${p.workspaceName}`,
+                    description: p.source === 'extension'
+                        ? t('기본 제공', 'built-in')
+                        : t(`워크스페이스: ${p.workspaceName}`, `workspace: ${p.workspaceName}`),
                     preset: p
                 })),
                 { placeHolder: t('적용할 프리셋을 선택하세요', 'Select a preset to apply') }
@@ -13046,26 +13083,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openMemoryMapFromUri', async (arg?: unknown) => {
         const resource = coerceToUri(arg);
-        const resourceName = resource ? path.basename(resource.fsPath) : t('선택한 ELF', 'selected ELF');
-        return vscode.window.withProgress({
-            location: vscode.ProgressLocation.Window,
-            title: t(
-                `Memory Map 분석 중: ${resourceName}`,
-                `Analyzing Memory Map: ${resourceName}`
-            ),
-            cancellable: false,
-        }, async () => {
-            // progress UI가 renderer에 전달될 기회를 한 번 준 뒤 동기 ELF 파서를
-            // 실행한다. CPU 파싱의 worker 분리는 별도 성능 작업이지만, Explorer
-            // 클릭이 무반응처럼 보이는 구간은 이 상태 표시로 막는다.
-            await new Promise<void>(resolve => setTimeout(resolve, 0));
-            return openMemoryMapFromUri(
+        const filePath = resource?.fsPath ?? t('선택한 ELF', 'selected ELF');
+        return withMemoryMapAnalysisProgress(filePath, () => openMemoryMapFromUri(
                 context,
                 arg,
                 loadMemoryMapConfigForResource(arg),
                 entry => recordMemoryMapHistory(historyProvider, entry)
-            );
-        });
+            ));
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.memoryMapGoToSymbol', () => {
@@ -13112,9 +13136,26 @@ export function activate(context: vscode.ExtensionContext) {
     ));
 }
 
-export function deactivate() {
+export async function deactivate(): Promise<void> {
     backgroundCompletionBatcher?.dispose();
     backgroundCompletionBatcher = undefined;
+
+    // VS Code가 정상 비활성화 과정에서 반환 Promise를 기다리는 동안 수행하는
+    // best-effort 정리다. extension host 자체가 강제 종료되면 완료를 보장할 수 없다.
+    // 취소 finalizer가 registry를 비우기 전에 종료 대상을 먼저 붙잡는다. 기존
+    // 구현은 map만 clear해서 detached 빌드·플래시 자손이 extension host 밖에서
+    // 계속 실행될 수 있었다.
+    const taskExecutions = new Set<vscode.TaskExecution>();
+    for (const perAction of activeTasks.values()) {
+        for (const active of perAction.values()) { taskExecutions.add(active.execution); }
+    }
+    const childProcesses = new Set<ReturnType<typeof spawn>>();
+    for (const perAction of actionChildProcesses.values()) {
+        for (const bucket of perAction.values()) {
+            for (const child of bucket.processes) { childProcesses.add(child); }
+        }
+    }
+
     for (const run of Array.from(currentActionRuns.values())) {
         run.abandoned = true;
         if (!run.cancellation.token.isCancellationRequested) {
@@ -13122,10 +13163,12 @@ export function deactivate() {
         }
         endActionCancellation(run);
     }
+    await terminateTrackedWorkForShutdown(taskExecutions, childProcesses);
     currentActionRuns.clear();
     actionCancellations.clear();
     actionStates.clear();
     activeTasks.clear();
+    parallelActionRefs.clear();
     manuallyTerminatedActions.clear();
     actionTerminals.clear();
     actionWorkspaceFolderMap.clear();

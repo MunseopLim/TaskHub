@@ -437,7 +437,7 @@
         },
         "destination": {
           "type": "string",
-          "description": "For 'unzip' tasks, a string (supports interpolation) specifying the destination directory. Relative paths resolve against the action's workspace folder, and — like 'archive' — it is not restricted to the workspace."
+          "description": "For 'unzip' tasks, a string (supports interpolation) specifying the destination directory. Relative paths resolve against task.cwd when set, otherwise the action's workspace folder; like 'archive', it is not restricted to the workspace."
         },
         "source": {
           "oneOf": [

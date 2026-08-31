@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { actionStates } from '../providers/actionStatus';
 import { HistoryProvider } from '../providers/historyProvider';
 import { MainViewProvider } from '../providers/mainViewProvider';
+import { ActionRunLogCollector } from '../runLogStore';
 import { ActionItem, Action as PipelineAction, Task } from '../schema';
 
 /**
@@ -74,6 +75,89 @@ suite('Password taint and redaction', function () {
             `fs.writeFileSync(${JSON.stringify(filePath)}, process.argv[1]);`,
             "process.stdout.write('ok');",
         ].join('');
+    }
+
+    async function runPasswordSwitchFailure(matched: boolean): Promise<{
+        secret: string;
+        branchMarker: string;
+        downstreamMarker: string;
+        recordCommands: Record<string, string>;
+        failure: Error;
+        report: string;
+    }> {
+        const secret = matched ? 'Switch-Matched-P4ss' : 'Switch-Unmatched-P4ss';
+        const id = matched ? 'password-switch-matched' : 'password-switch-unmatched';
+        const branchMarker = path.join(tempWorkspace, `${id}-branch.txt`);
+        const downstreamMarker = path.join(tempWorkspace, `${id}-downstream.txt`);
+        const caseName = matched ? secret : 'some-other-case';
+        const failingScript = [
+            "const fs = require('fs');",
+            `fs.writeFileSync(${JSON.stringify(downstreamMarker)}, process.argv[1]);`,
+            "process.stdout.write('stdout:' + process.argv[1]);",
+            "process.stderr.write('stderr:' + process.argv[1]);",
+            'process.exit(7);',
+        ].join('');
+        const action: PipelineAction = {
+            description: `${id} selector redaction`,
+            tasks: [
+                { id: 'pw', type: 'inputBox', prompt: 'password?', password: true },
+                {
+                    id: 'sw',
+                    type: 'switch',
+                    on: '${pw.value}',
+                    cases: {
+                        [caseName]: {
+                            type: 'command',
+                            command: platformCommand('node'),
+                            args: ['-e', nodeWriteArgumentScript(branchMarker), '${pw.value}'],
+                            cwd: tempWorkspace,
+                            passTheResultToNextTask: true,
+                        },
+                    },
+                },
+                {
+                    id: 'use',
+                    type: 'command',
+                    command: platformCommand('node'),
+                    args: ['-e', failingScript, '${sw.selected}'],
+                    cwd: tempWorkspace,
+                    passTheResultToNextTask: true,
+                },
+            ],
+        };
+        const recordCommands: Record<string, string> = Object.create(null);
+        const collector = new ActionRunLogCollector(id, id, Date.now(), action.tasks);
+        const originalShowInputBox = vscode.window.showInputBox;
+        (vscode.window as any).showInputBox = async (options: vscode.InputBoxOptions) => {
+            assert.strictEqual(options.password, true);
+            return secret;
+        };
+
+        let failure: Error | undefined;
+        try {
+            await extension.executeActionPipeline(
+                action,
+                makeContext(),
+                id,
+                tempWorkspace,
+                [tempWorkspace],
+                { recordCommands, runLogCollector: collector },
+            );
+        } catch (error) {
+            failure = error as Error;
+        } finally {
+            (vscode.window as any).showInputBox = originalShowInputBox;
+        }
+
+        assert.ok(failure, 'downstream command must fail so the public error path is exercised');
+        return {
+            secret,
+            branchMarker,
+            downstreamMarker,
+            recordCommands,
+            failure,
+            report: JSON.stringify(collector.finish('failure', Date.now(), failure.message)),
+        };
     }
 
     suiteSetup(async () => {
@@ -201,6 +285,50 @@ suite('Password taint and redaction', function () {
             `조건 스킵이 verbose 로그에 남지 않았다 — 이 테스트가 겨누는 줄이 없다:\n${verbose}`);
         assert.ok(!verbose.includes(secret), `비밀번호가 조건 사유로 샜다:\n${verbose}`);
         assert.ok(verbose.includes('***'), `사유의 값이 자리표시자로 바뀌지 않았다:\n${verbose}`);
+    });
+
+    test('password switch case 일치 결과는 명령·보고서·오류에서 가린다', async () => {
+        const result = await runPasswordSwitchFailure(true);
+
+        assert.strictEqual(fs.readFileSync(result.branchMarker, 'utf8'), result.secret,
+            '선택된 case에는 실제 비밀번호가 전달되어야 한다');
+        assert.strictEqual(fs.readFileSync(result.downstreamMarker, 'utf8'), result.secret,
+            'switch.selected는 downstream 실행에 실제 선택값을 전달해야 한다');
+        assert.deepStrictEqual(Object.keys(result.recordCommands).sort(), ['sw', 'use']);
+        for (const command of Object.values(result.recordCommands)) {
+            assert.ok(!command.includes(result.secret), `실행 기록에 switch 선택값이 남았다: ${command}`);
+            assert.ok(command.includes('***'), `실행 기록에 마스킹 자리표시자가 없다: ${command}`);
+        }
+        assert.ok(!result.failure.message.includes(result.secret),
+            `실패 오류에 switch 선택값이 남았다: ${result.failure.message}`);
+        assert.ok(result.failure.message.includes('***'),
+            `실패 오류에 마스킹된 명령이 없다: ${result.failure.message}`);
+        assert.ok(!result.report.includes(result.secret),
+            `collector 보고서에 switch 선택값이 남았다: ${result.report}`);
+        assert.ok(result.report.includes('***'), 'collector 보고서에 마스킹 자리표시자가 없다');
+        assert.ok(!verboseLines.join('\n').includes(result.secret), 'verbose 로그에 switch 선택값이 남았다');
+    });
+
+    test('password switch 미일치 selected 결과도 명령·보고서·오류에서 가린다', async () => {
+        const result = await runPasswordSwitchFailure(false);
+
+        assert.strictEqual(fs.existsSync(result.branchMarker), false,
+            '일치하는 case가 없는데 branch가 실행됐다');
+        assert.strictEqual(fs.readFileSync(result.downstreamMarker, 'utf8'), result.secret,
+            '미일치 switch도 selected에 실제 선택값을 반환해야 한다');
+        assert.deepStrictEqual(Object.keys(result.recordCommands), ['use']);
+        assert.ok(!result.recordCommands.use.includes(result.secret),
+            `실행 기록에 미일치 선택값이 남았다: ${result.recordCommands.use}`);
+        assert.ok(result.recordCommands.use.includes('***'),
+            `실행 기록에 마스킹 자리표시자가 없다: ${result.recordCommands.use}`);
+        assert.ok(!result.failure.message.includes(result.secret),
+            `실패 오류에 미일치 선택값이 남았다: ${result.failure.message}`);
+        assert.ok(result.failure.message.includes('***'),
+            `실패 오류에 마스킹된 명령이 없다: ${result.failure.message}`);
+        assert.ok(!result.report.includes(result.secret),
+            `collector 보고서에 미일치 선택값이 남았다: ${result.report}`);
+        assert.ok(result.report.includes('***'), 'collector 보고서에 마스킹 자리표시자가 없다');
+        assert.ok(!verboseLines.join('\n').includes(result.secret), 'verbose 로그에 미일치 선택값이 남았다');
     });
 
     test('platform command 객체와 args/cwd를 가리면서 파생 결과와 실제 출력은 유지한다', async () => {

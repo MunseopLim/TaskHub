@@ -77,12 +77,14 @@ Extension Development Host로 실행하려면 로컬에 `.vscode/launch.json`을
             "type": "extensionHost",
             "request": "launch",
             "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
-            "outFiles": ["${workspaceFolder}/dist/**/*.js"],
-            "preLaunchTask": "${defaultBuildTask}"
+            "outFiles": ["${workspaceFolder}/dist/**/*.js"]
         }
     ]
 }
 ```
+
+아래 절차에서 빌드를 먼저 실행하므로 이 설정에는 `preLaunchTask`가 없습니다. 새 clone에 별도의
+`.vscode/tasks.json`이나 기본 빌드 태스크를 만들 필요가 없습니다.
 
 이후 절차:
 
@@ -156,6 +158,16 @@ API나 동작이 바뀔 수 있고 사용자 피드백이 필요한 기능만 ex
 - `glob`: mocha 내부의 지원 종료된 glob 10 설치 경고 제거
 
 override 제거 전에 `npm audit`으로 취약점 상태 확인 필요.
+
+### `@types/vscode` 잠금 정책
+
+`engines.vscode`의 `^1.75.0`은 확장의 최소 런타임 호환 범위이고, 개발 시 사용하는 API 타입은
+`package-lock.json`에서 `@types/vscode` 1.125.0으로 의도적으로 고정합니다. `package.json`의
+`^1.75.0` 범위만으로는 이 버전이 고정되지 않으므로 재현 가능한 설치에는 `npm ci`를 사용합니다.
+
+`npm install`이나 의존성 갱신으로 잠금 버전을 바꿀 때는 변경을 그대로 커밋하지 말고, 새로 허용된
+API가 최소 지원 VS Code 1.75에서도 동작하는지 확인합니다. 최소 버전에 없는 API가 필요하면 런타임
+기능 감지와 폴백을 함께 제공하고 해당 경로를 테스트합니다.
 
 ## 프로젝트 아키텍처
 

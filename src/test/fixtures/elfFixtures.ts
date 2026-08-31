@@ -69,9 +69,9 @@ const SHF_EXECINSTR = 0x4;
  * 파일 크기·매직·헤더 검증 같은 "파싱 자체"를 다루는 테스트용이다. 웹뷰
  * 렌더 분기를 검사하려면 `buildElf32WithSymbols()`를 쓸 것.
  */
-export function buildMinimalElf32(): Buffer {
+export function buildMinimalElf32(sectionName = '.text'): Buffer {
     return assembleElf32([
-        { name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 1024 },
+        { name: sectionName, type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 1024 },
     ], []);
 }
 

@@ -64,7 +64,7 @@ export function buildHexConverterStrings(): Record<string, string> {
         endianLabel: t('숫자 바이트 순서', 'Numeric byte order'),
         littleEndian: t('Little-Endian', 'Little-Endian'),
         bigEndian: t('Big-Endian', 'Big-Endian'),
-        clear: t('모두 지우기', 'Clear all'),
+        clear: t('입력 지우기', 'Clear input'),
         textLabel: t('Text', 'Text'),
         textHint: t('일반 문자열을 입력하세요.', 'Enter regular text.'),
         textPlaceholder: t('예: Hello', 'e.g. Hello'),
@@ -1198,7 +1198,8 @@ export function showHexConverter(context: vscode.ExtensionContext): void {
                     await vscode.env.clipboard.writeText(message.text);
                     await panel.webview.postMessage({ command: 'copyResult', ok: true, kind: message.kind });
                 } catch {
-                    await panel.webview.postMessage({ command: 'copyResult', ok: false, kind: message.kind });
+                    void panel.webview.postMessage({ command: 'copyResult', ok: false, kind: message.kind })
+                        .then(undefined, () => undefined);
                 }
                 return;
             }
@@ -1220,7 +1221,8 @@ export function showHexConverter(context: vscode.ExtensionContext): void {
                     await context.globalState.update(HEX_CONVERTER_SAVED_VALUES_KEY, values);
                     await panel.webview.postMessage({ command: 'savedValues', values, action: 'saved' });
                 } catch {
-                    await panel.webview.postMessage({ command: 'saveResult', ok: false });
+                    void panel.webview.postMessage({ command: 'saveResult', ok: false })
+                        .then(undefined, () => undefined);
                 }
                 return;
             }
@@ -1233,7 +1235,8 @@ export function showHexConverter(context: vscode.ExtensionContext): void {
                     await context.globalState.update(HEX_CONVERTER_SAVED_VALUES_KEY, values);
                     await panel.webview.postMessage({ command: 'savedValues', values, action: 'deleted' });
                 } catch {
-                    await panel.webview.postMessage({ command: 'saveResult', ok: false });
+                    void panel.webview.postMessage({ command: 'saveResult', ok: false })
+                        .then(undefined, () => undefined);
                 }
                 return;
             }

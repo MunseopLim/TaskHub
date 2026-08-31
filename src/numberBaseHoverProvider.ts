@@ -75,6 +75,11 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      */
     private readonly activeHoverCalls = new Set<string>();
 
+    constructor(
+        private readonly workspaceFolderForUri: (uri: vscode.Uri) => vscode.WorkspaceFolder | undefined
+            = uri => vscode.workspace.getWorkspaceFolder(uri)
+    ) {}
+
     // M12 성능 캐시 — 같은 문서 버전이면 호버마다 전체 텍스트를 다시
     // 파싱/복사하지 않는다 (수만 줄 SFR 헤더에서 호버 지연의 주범).
     private macroTableCache: { uri: string; version: number; macros: Map<string, MacroDefinition> } | undefined;
@@ -1562,7 +1567,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      * @returns TypeConfigFile or undefined if not found
      */
     private async loadTypeConfig(document: vscode.TextDocument): Promise<TypeConfigFile | undefined> {
-        const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+        const workspaceFolder = this.workspaceFolderForUri(document.uri);
         if (!workspaceFolder) {
             return undefined;
         }
@@ -1576,14 +1581,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             configFilePath = rawPath;
         }
 
-        // Short-circuit for absent-file cache before making any fs call
         const existing = this.typeConfigCache.get(configFilePath);
-        if (existing && existing.mtime === -1) {
-            // Touch LRU ordering
-            this.typeConfigCache.delete(configFilePath);
-            this.typeConfigCache.set(configFilePath, existing);
-            return undefined;
-        }
 
         try {
             const stat = await fs.promises.stat(configFilePath);
@@ -1599,7 +1597,11 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             this.setCache(configFilePath, { mtime, config });
             return config;
         } catch {
-            // File does not exist or is unreadable — cache as absent to avoid repeated stat calls.
+            // Missing files are remembered for LRU bookkeeping, but the next hover
+            // deliberately pays one async stat until the file exists. Otherwise
+            // creating taskhub_types.json after the first hover would have no effect
+            // until the extension host restarted; a watcher would cost more lifecycle
+            // state than this user-driven lookup warrants.
             // Prefer the last-known-good config when parse fails transiently.
             if (existing && existing.config) {
                 return existing.config;

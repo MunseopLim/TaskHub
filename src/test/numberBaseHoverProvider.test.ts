@@ -9,12 +9,40 @@ import {
 } from '../numberBaseHoverProvider';
 import * as vscode from 'vscode';
 import { CompleteBitFieldInfo } from '../sfrBitFieldParser';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 suite('NumberBaseHoverProvider Test Suite', () => {
     let provider: NumberBaseHoverProvider;
 
     setup(() => {
         provider = new NumberBaseHoverProvider();
+    });
+
+    test('처음에는 없던 taskhub_types.json을 세션 중 생성하면 다음 조회에서 읽는다', async () => {
+        const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-hover-config-'));
+        try {
+            const workspaceFolder: vscode.WorkspaceFolder = {
+                uri: vscode.Uri.file(workspacePath),
+                name: 'hover-config',
+                index: 0,
+            };
+            const testProvider = new NumberBaseHoverProvider(() => workspaceFolder);
+            const document = { uri: vscode.Uri.file(path.join(workspacePath, 'main.c')) } as vscode.TextDocument;
+
+            assert.strictEqual(await (testProvider as any).loadTypeConfig(document), undefined);
+
+            fs.mkdirSync(path.join(workspacePath, '.vscode'), { recursive: true });
+            fs.writeFileSync(path.join(workspacePath, '.vscode', 'taskhub_types.json'), JSON.stringify({
+                types: { HANDLE: { size: 8, alignment: 8 } },
+            }));
+
+            const loaded = await (testProvider as any).loadTypeConfig(document);
+            assert.strictEqual(loaded.types.HANDLE.size, 8);
+        } finally {
+            fs.rmSync(workspacePath, { recursive: true, force: true });
+        }
     });
 
     suite('Number Parsing Tests', () => {

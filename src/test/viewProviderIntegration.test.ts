@@ -269,7 +269,7 @@ suite('View provider integration', function () {
         assert.strictEqual(roots[2].contextValue, 'succeededAction');
         assert.strictEqual((roots[2].iconPath as vscode.ThemeIcon).id, 'check');
         assert.ok(
-            roots[2].accessibilityInformation?.label?.includes('succeeded'),
+            /성공|succeeded/.test(roots[2].accessibilityInformation?.label ?? ''),
             '색 아이콘을 읽을 수 없는 사용자에게 성공 상태가 전달되지 않는다'
         );
 

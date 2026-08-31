@@ -235,12 +235,23 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
 
     test('파일시스템이 아닌 URI는 ELF 확장자여도 열지 않는다', () => {
         const history: MemoryMapOpenHistory[] = [];
-        assert.strictEqual(openMemoryMapFromUri(
-            { subscriptions: [] } as unknown as vscode.ExtensionContext,
+        for (const uri of [
             vscode.Uri.parse('https://example.com/firmware.elf'),
-            undefined,
-            entry => history.push(entry)
-        ), false);
+            vscode.Uri.parse('vscode-remote://ssh-remote+box/home/dev/firmware.elf'),
+        ]) {
+            const previousErrorCount = errors.length;
+            assert.strictEqual(openMemoryMapFromUri(
+                { subscriptions: [] } as unknown as vscode.ExtensionContext,
+                uri,
+                undefined,
+                entry => history.push(entry)
+            ), false);
+            assert.strictEqual(errors.length, previousErrorCount + 1);
+            const message = errors[errors.length - 1];
+            assert.ok(message.includes(`${uri.scheme}:`), message);
+            assert.ok(!/\.elf|\.axf|\.out/.test(message),
+                `지원하지 않는 URI 스킴을 확장자 오류로 안내하면 안 된다: ${message}`);
+        }
         assert.strictEqual(fake.harness.createCount, 0);
         assert.deepStrictEqual(history, []);
     });
@@ -918,7 +929,9 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         };
         const rowStrings = {
             viewHexTitle: 'View bytes', noFileBytesTitle: 'No bytes', viewHex: 'View bytes',
-            noFileBytes: 'No bytes', viewSourceTitle: 'Open source', viewSource: 'Open source',
+            viewHexFor: 'View bytes for {name}', noFileBytes: 'No bytes',
+            noFileBytesFor: 'No bytes for {name}', viewSourceTitle: 'Open source',
+            viewSource: 'Open source', viewSourceFor: 'Open source for {name}',
         };
         const identity = (value: unknown) => String(value ?? '');
         const hostRow = runRowHtml(false, false, identity, identity, rowStrings, rowEntry);

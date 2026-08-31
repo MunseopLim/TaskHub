@@ -1,9 +1,12 @@
 {
   "_comment": "한국어 manifest 문자열. 키는 package.nls.json과 1:1로 맞춘다 — 빠진 키는 VS Code가 기본(영어) 번들로 폴백하므로 조용히 영어가 섞인다. 키 정합성은 packageNls.test.ts가 검사한다.",
+  "extension.description": "VS Code에서 태스크와 워크플로를 실행하는 사용자 정의 사이드바입니다.",
+  "extension.untrustedWorkspaceDescription": "TaskHub는 워크스페이스의 .vscode/actions.json에서 shell/command 태스크를 실행할 수 있으므로 신뢰할 수 없는 워크스페이스에서는 비활성화됩니다.",
   "view.actions": "액션",
   "view.links": "워크스페이스 링크",
   "view.favorites": "즐겨찾는 파일",
   "view.history": "실행 기록",
+  "customEditor.hexViewer": "TaskHub Hex Viewer 편집기",
   "welcome.noFolder": "TaskHub는 프로젝트마다 정의된 액션을 실행합니다.\n[폴더 열기](command:vscode.openFolder)\n폴더를 열면 그 폴더의 .vscode/actions.json에 액션을 만들 수 있습니다.",
   "welcome.noActions": "아직 액션이 없습니다.\n[액션 만들기](command:taskhub.createAction)\n또는 예제에서 시작해 직접 편집하세요:\n[예제 둘러보기](command:taskhub.showExampleJsonQuickPick)\n[액션 가져오기…](command:taskhub.importActions)",
   "welcome.noActionsNoExamples": "아직 액션이 없습니다.\n[액션 만들기](command:taskhub.createAction)\n[액션 가져오기…](command:taskhub.importActions)",

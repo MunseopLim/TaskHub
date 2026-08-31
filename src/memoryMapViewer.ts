@@ -89,6 +89,8 @@ interface PanelState {
     };
     /** 열기 대화상자가 중복으로 열리거나 동기 분석이 겹치지 않게 한다. */
     configureInFlight: boolean;
+    /** 소스 후보 검증/선택 Quick Pick을 한 패널에서 한 번만 연다. */
+    sourceOpenInFlight: boolean;
     messageDisposable?: vscode.Disposable;
 }
 
@@ -382,12 +384,32 @@ function resolveMemoryMapRegions(
 }
 
 async function pickMemoryMapLinkerScript(): Promise<string | undefined> {
+    const linkerScript = t('링커 스크립트', 'Linker Script');
     const linkerUri = await showOpenDialogWithMemory(DIALOG_SCOPE.memoryMapLinkerScript, {
         canSelectMany: false,
-        filters: { 'Linker Script': ['ld', 'lds', 'lcf', 'sct'] },
+        filters: { [linkerScript]: ['ld', 'lds', 'lcf', 'sct'] },
         openLabel: t('링커 스크립트 선택', 'Select Linker Script')
     });
     return linkerUri?.[0]?.fsPath;
+}
+
+/** 동기 ELF/Listing 분석 전에 renderer가 진행 표시를 그릴 기회를 준다. */
+export function withMemoryMapAnalysisProgress<T>(
+    filePath: string,
+    analyze: () => T | Thenable<T>
+): Thenable<T> {
+    const fileName = path.basename(filePath) || 'Memory Map';
+    return vscode.window.withProgress({
+        location: vscode.ProgressLocation.Window,
+        title: t(
+            `Memory Map 분석 중: ${fileName}`,
+            `Analyzing Memory Map: ${fileName}`
+        ),
+        cancellable: false,
+    }, async () => {
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        return analyze();
+    });
 }
 
 export async function showMemoryMap(context: vscode.ExtensionContext, config?: MemoryMapConfig, recordHistory?: MemoryMapHistoryRecorder) {
@@ -398,14 +420,15 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
     if (!inputType) { return; }
 
     if (inputType.label === 'ARM Linker Listing') {
+        const linkerListing = t('ARM 링커 Listing', 'ARM Linker Listing');
         const listUri = await showOpenDialogWithMemory(DIALOG_SCOPE.memoryMapListing, {
             canSelectMany: false,
-            filters: { 'ARM Linker Listing': ['txt'] },
+            filters: { [linkerListing]: ['txt'] },
             openLabel: t('Linker Listing 선택', 'Select Linker Listing')
         });
         if (!listUri || listUri.length === 0) { return; }
         const filePath = listUri[0].fsPath;
-        if (openMemoryMapFromListing(context, filePath)) {
+        if (await withMemoryMapAnalysisProgress(filePath, () => openMemoryMapFromListing(context, filePath))) {
             recordHistory?.({
                 filePath,
                 fileName: filePath.split(/[\\/]/).pop() || 'Memory Map',
@@ -415,9 +438,10 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
         return;
     }
 
+    const armExecutable = t('ARM 실행 파일', 'ARM Executable');
     const fileUri = await showOpenDialogWithMemory(DIALOG_SCOPE.memoryMapBinary, {
         canSelectMany: false,
-        filters: { 'ARM Executable': ['axf', 'elf', 'out'] },
+        filters: { [armExecutable]: ['axf', 'elf', 'out'] },
         openLabel: t('AXF/ELF 파일 선택', 'Select AXF/ELF file')
     });
     if (!fileUri || fileUri.length === 0) { return; }
@@ -425,26 +449,31 @@ export async function showMemoryMap(context: vscode.ExtensionContext, config?: M
     // If no regions configured, ask for linker script
     let resolvedConfig = config;
     if (!resolvedConfig?.regions || resolvedConfig.regions.length === 0) {
+        const selectLinkerLabel = t('링커 스크립트 선택 (.ld / .sct)', 'Select linker script (.ld / .sct)');
+        const skipLabel = t('건너뛰기', 'Skip');
         const linkerChoice = await vscode.window.showQuickPick(
             [
-                { label: t('링커 스크립트 선택 (.ld / .sct)', 'Select linker script (.ld / .sct)'), description: t('메모리 영역 자동 감지', 'Auto-detect memory regions') },
-                { label: t('건너뛰기', 'Skip'), description: t('섹션 정보만 표시', 'Show sections only') },
+                { label: selectLinkerLabel, description: t('메모리 영역 자동 감지', 'Auto-detect memory regions') },
+                { label: skipLabel, description: t('섹션 정보만 표시', 'Show sections only') },
             ],
             { placeHolder: t('메모리 영역 크기를 위한 링커 스크립트를 제공하시겠습니까?', 'Provide a linker script for memory region sizes?') }
         );
+        if (!linkerChoice) { return; }
 
-        if (linkerChoice && linkerChoice.label !== t('건너뛰기', 'Skip')) {
+        if (linkerChoice.label === selectLinkerLabel) {
             const linkerFilePath = await pickMemoryMapLinkerScript();
-            if (linkerFilePath) {
-                // 실제 읽기·크기 검사·파싱은 openMemoryMapPanelResult 한 곳에서만
-                // 수행한다. 선택 직후와 패널 open에서 같은 파일을 두 번 읽지 않는다.
-                resolvedConfig = { ...resolvedConfig, linkerFilePath };
-            }
+            if (!linkerFilePath) { return; }
+            // 실제 읽기·크기 검사·파싱은 openMemoryMapPanelResult 한 곳에서만
+            // 수행한다. 선택 직후와 패널 open에서 같은 파일을 두 번 읽지 않는다.
+            resolvedConfig = { ...resolvedConfig, linkerFilePath };
         }
     }
 
     const filePath = fileUri[0].fsPath;
-    if (openMemoryMapPanel(context, filePath, resolvedConfig, recordHistory)) {
+    if (await withMemoryMapAnalysisProgress(
+        filePath,
+        () => openMemoryMapPanel(context, filePath, resolvedConfig, recordHistory)
+    )) {
         recordHistory?.({
             filePath,
             fileName: filePath.split(/[\\/]/).pop() || 'Memory Map',
@@ -462,8 +491,18 @@ export function openMemoryMapFromUri(
     recordHistory?: MemoryMapHistoryRecorder
 ): boolean {
     const uri = coerceToUri(arg);
-    const supportedScheme = uri?.scheme === 'file' || uri?.scheme === 'vscode-remote';
-    if (!uri || !supportedScheme || !/\.(?:elf|axf|out)$/i.test(uri.fsPath)) {
+    // Remote extension hosts receive workspace resources as `file:` URIs whose
+    // fsPath belongs to that host. A literal vscode-remote URI still carries a
+    // UI-side authority that Node fs cannot preserve, so accepting it here
+    // would silently read the same path on the wrong machine.
+    if (uri && uri.scheme !== 'file') {
+        vscode.window.showErrorMessage(t(
+            `Memory Map은 ${uri.scheme}: URI를 직접 열 수 없습니다. 로컬 또는 현재 원격 확장 호스트에서 접근 가능한 파일을 선택해 주세요.`,
+            `Memory Map cannot open ${uri.scheme}: URIs directly. Select a file accessible to the local or current remote extension host.`
+        ));
+        return false;
+    }
+    if (!uri || !/\.(?:elf|axf|out)$/i.test(uri.fsPath)) {
         vscode.window.showErrorMessage(t(
             'Memory Map으로 열 ELF 파일(.elf/.axf/.out)을 선택해 주세요.',
             'Select an ELF file (.elf/.axf/.out) to open with Memory Map.'
@@ -921,6 +960,7 @@ function showPanel(
             sourceWarningKeys: new Set(),
             sourceFingerprint,
             configureInFlight: false,
+            sourceOpenInFlight: false,
             messageDisposable: undefined,
         };
     } catch (e) {
@@ -982,6 +1022,7 @@ function showPanel(
                     },
                 });
             } else if (message.command === 'openSource') {
+                if (state.sourceOpenInFlight) { return; }
                 const targetId = typeof message.targetId === 'string' && message.targetId.length <= 128
                     ? message.targetId
                     : '';
@@ -1000,13 +1041,18 @@ function showPanel(
                     clearMemoryMapSourceSession(state);
                     return;
                 }
-                await openMemoryMapSourceLocation(
-                    target,
-                    filePath,
-                    state.sourceSelections,
-                    state.sourceChecksumCache,
-                    state.sourceWarningKeys
-                );
+                state.sourceOpenInFlight = true;
+                try {
+                    await openMemoryMapSourceLocation(
+                        target,
+                        filePath,
+                        state.sourceSelections,
+                        state.sourceChecksumCache,
+                        state.sourceWarningKeys
+                    );
+                } finally {
+                    state.sourceOpenInFlight = false;
+                }
             } else if (message.command === 'memoryMapReady') {
                 postMemoryMapRefreshFailure(state);
                 postMemoryMapPanelFeedback(state);
@@ -1648,7 +1694,7 @@ export async function selectDwarfSourceCandidate(
             comparisons = await options.compareCandidates(expectedMd5, uniqueCandidates);
         } else {
             comparisons = await vscode.window.withProgress({
-                location: vscode.ProgressLocation.Window,
+                location: vscode.ProgressLocation.Notification,
                 title: t(
                     `${shownTargetLabel} 소스 checksum 비교 중…`,
                     `Comparing source checksums for ${shownTargetLabel}…`
@@ -1732,6 +1778,12 @@ export async function selectDwarfSourceCandidate(
             )
             : undefined;
         return { label: path.basename(candidate), description, detail, iconPath, filePath: candidate };
+    }).sort((a, b) => {
+        const rank = (filePath: string): number => {
+            const status = byPath.get(filePathIdentityKey(filePath))?.status;
+            return status === 'match' ? 0 : status === 'unavailable' ? 1 : status === 'mismatch' ? 2 : 1;
+        };
+        return rank(a.filePath) - rank(b.filePath);
     });
     const showQuickPick = options.showQuickPick ?? ((pickItems, pickOptions) =>
         vscode.window.showQuickPick(pickItems, pickOptions));
@@ -1809,32 +1861,50 @@ export async function openMemoryMapSourceLocation(
             shownWarningKeys,
         });
     } catch (error: unknown) {
-        if (error instanceof vscode.CancellationError) { return; }
-        const reason = error instanceof Error ? error.message : String(error);
-        const shownTargetLabel = compactMemoryMapTargetLabel(target.label);
-        vscode.window.showErrorMessage(t(
-            `소스 후보 확인 실패 (${shownTargetLabel}): ${reason}`,
-            `Failed to verify source candidates (${shownTargetLabel}): ${reason}`
-        ));
-        return;
+        if (error instanceof vscode.CancellationError) {
+            const selectManually = t('직접 선택', 'Select manually');
+            const selected = await vscode.window.showInformationMessage(t(
+                '소스 checksum 비교를 취소했습니다. 비교 없이 후보를 직접 선택할 수 있습니다.',
+                'Source checksum comparison was canceled. You can select a candidate without verification.'
+            ), selectManually);
+            if (selected !== selectManually) { return; }
+            const targetWithoutChecksum: MemoryMapSourceTarget = {
+                ...target,
+                location: { ...target.location, md5: undefined },
+            };
+            selectedPath = await selectDwarfSourceCandidate(
+                targetWithoutChecksum,
+                candidates,
+                rememberedSelections
+            );
+            if (!selectedPath) { return; }
+        } else {
+            const reason = error instanceof Error ? error.message : String(error);
+            const shownTargetLabel = compactMemoryMapTargetLabel(target.label);
+            vscode.window.showErrorMessage(t(
+                `소스 후보 확인 실패 (${shownTargetLabel}): ${reason}`,
+                `Failed to verify source candidates (${shownTargetLabel}): ${reason}`
+            ));
+            return;
+        }
     }
     if (!selectedPath) { return; }
 
     try {
         const document = await vscode.workspace.openTextDocument(vscode.Uri.file(selectedPath));
         const requestedLine = target.location.line - 1;
-        if (requestedLine < 0 || requestedLine >= document.lineCount) {
+        const line = Math.max(0, Math.min(requestedLine, document.lineCount - 1));
+        if (line !== requestedLine) {
             vscode.window.showWarningMessage(t(
-                `기록된 ${target.location.line}행이 현재 소스 파일 범위를 벗어납니다. ELF를 만든 뒤 소스가 변경되었을 수 있습니다.`,
-                `Recorded line ${target.location.line} is outside the current source file. The source may have changed since the ELF was built.`
+                `기록된 ${target.location.line}행이 ${path.basename(selectedPath)}의 범위를 벗어나 가장 가까운 ${line + 1}행을 엽니다. ELF를 만든 뒤 소스가 변경되었을 수 있습니다.`,
+                `Recorded line ${target.location.line} is outside ${path.basename(selectedPath)}. Opening the nearest line, ${line + 1}; the source may have changed since the ELF was built.`
             ));
-            return;
         }
         const editor = await vscode.window.showTextDocument(document, { preview: true });
-        const textLine = document.lineAt(requestedLine);
+        const textLine = document.lineAt(line);
         const requestedColumn = target.location.column > 0 ? target.location.column - 1 : 0;
         const column = Math.min(requestedColumn, textLine.text.length);
-        const position = new vscode.Position(requestedLine, column);
+        const position = new vscode.Position(line, column);
         editor.selection = new vscode.Selection(position, position);
         editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
     } catch (e: any) {
@@ -2487,10 +2557,13 @@ export function buildMemoryMapStrings(): Record<string, string> {
         colHex: 'Hex',
         colSource: t('소스', 'Source'),
         viewHex: t('바이트 보기', 'View bytes'),
+        viewHexFor: t('{name} 바이트 보기', 'View bytes for {name}'),
         viewHexTitle: t('ELF 원본 파일의 해당 바이트를 Hex Viewer에서 열기', 'Open these bytes from the original ELF file in Hex Viewer'),
         noFileBytes: t('파일 바이트 없음', 'No file bytes'),
+        noFileBytesFor: t('{name}: 파일 바이트 없음', 'No file bytes for {name}'),
         noFileBytesTitle: t('이 메모리 범위에 대응하는 ELF 파일 바이트가 없는 이유 보기', 'Show why this memory range has no corresponding ELF file bytes'),
         viewSource: t('소스 열기', 'Open source'),
+        viewSourceFor: t('{name} 소스 열기', 'Open source for {name}'),
         viewSourceTitle: t('DWARF가 가리키는 소스 파일과 줄 열기', 'Open the source file and line referenced by DWARF'),
         // {region}/{percent}/{used}/{total} filled in the webview.
         usageBarLabel: t('{region} 사용률 {percent}% ({used} / {total})', '{region} usage {percent}% ({used} of {total})'),
@@ -2541,6 +2614,22 @@ export function buildMemoryMapStrings(): Record<string, string> {
             ' — 검색을 지우고 {name} ({addr}) 으로 이동',
             ' — cleared the search to reach {name} ({addr})'
         ),
+        elfSectionInfo: t(
+            'AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.',
+            'AXF/ELF files provide section-level information only. Use an ARM Linker Listing file for object-level analysis and linker-reported values.'
+        ),
+        elfSymbolInfo: t(
+            'ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.',
+            'Function and variable details are extracted from the ELF symbol table. Program-header based automatic region detection was applied.'
+        ),
+        noRegionsIntro: t(
+            '메모리 영역 크기가 설정되지 않았습니다. 사용량 막대를 보려면:',
+            'Memory region sizes are not configured. To see usage bars:'
+        ),
+        noRegionsSetting: t(
+            '{setting} 설정을 {file}에 추가하세요.',
+            'Add {setting} to {file}.'
+        ),
     };
 }
 
@@ -2564,6 +2653,9 @@ function getWebviewContent(
     const csp = `default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${cspSource};`;
     const S = buildMemoryMapStrings();
     const stringsLiteral = JSON.stringify(S).replace(/</g, '\\u003c');
+    const noRegionsSettingHtml = esc(S.noRegionsSetting)
+        .replace('{setting}', '<code>memoryMap.regions</code>')
+        .replace('{file}', '<code>.vscode/taskhub_types.json</code>');
     const htmlLang = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
     const refreshControls = canRefresh || canConfigureLinker
         ? `<span id="refreshControls" class="refresh-controls">
@@ -2730,7 +2822,7 @@ function getWebviewContent(
             <td class="num">${s.size}</td>
             <td><span class="type-badge type-${s.type.toLowerCase()}">${s.type}</span></td>
             ${hasSectionHexTargets ? s.fileRange
-                ? `<td class="memory-map-host-only"><button class="hex-link${s.fileRange.kind === 'file' ? '' : ' unavailable'}" data-action="open-hex" data-target-id="${sectionHexTargetId(sectionIndex)}" title="${esc(s.fileRange.kind === 'file' ? S.viewHexTitle : S.noFileBytesTitle)}">${esc(s.fileRange.kind === 'file' ? S.viewHex : S.noFileBytes)}</button></td>`
+                ? `<td class="memory-map-host-only"><button class="hex-link${s.fileRange.kind === 'file' ? '' : ' unavailable'}" data-action="open-hex" data-target-id="${sectionHexTargetId(sectionIndex)}" title="${esc(s.fileRange.kind === 'file' ? S.viewHexTitle : S.noFileBytesTitle)}" aria-label="${esc((s.fileRange.kind === 'file' ? S.viewHexFor : S.noFileBytesFor).replace('{name}', () => s.name))}">${esc(s.fileRange.kind === 'file' ? S.viewHex : S.noFileBytes)}</button></td>`
                 : '<td class="memory-map-host-only"></td>' : ''}
         </tr>`
     ).join('');
@@ -3172,15 +3264,15 @@ function getWebviewContent(
     ${hasRegions ? `
         <div class="section-heading"><h2>${esc(S.memoryRegions)}</h2></div>
         <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
-        ${!hasLinkerData && !hasSymbols ? `<div class="info-note">${t('AXF/ELF 파일에서는 섹션 단위 정보만 제공됩니다. 오브젝트(.o) 단위 분석 및 Linker 보고값은 ARM Linker Listing 파일을 사용하세요.', 'AXF/ELF files provide section-level information only. Use an ARM Linker Listing file for object-level analysis and linker-reported values.')}</div>` : ''}
-        ${hasSymbols ? `<div class="info-note">${t('ELF 심볼 테이블에서 함수/변수 정보를 추출하여 표시합니다. 프로그램 헤더 기반 자동 리전 감지가 적용되었습니다.', 'Function and variable details are extracted from the ELF symbol table. Program-header based automatic region detection was applied.')}</div>` : ''}
+        ${!hasLinkerData && !hasSymbols ? `<div class="info-note">${esc(S.elfSectionInfo)}</div>` : ''}
+        ${hasSymbols ? `<div class="info-note">${esc(S.elfSymbolInfo)}</div>` : ''}
         <div class="section-heading"><h2>${esc(S.regionDetails)}</h2><span id="regMatchInfo" role="status" aria-live="polite"></span> <button data-action="toggle-all" id="toggleAllBtn" title="${esc(S.expandAllHint)}" aria-label="${esc(S.expandAll)}" aria-expanded="false">▶ ${esc(S.expandAll)}</button>${hasFuncData ? ` <button data-action="toggle-func-col" title="${esc(S.toggleFunctionColumn)}" aria-label="${esc(S.toggleFunctionColumn)}">${esc(S.funcColumnToggle)} ▶</button>` : ''}</div>
         ${regionCardsHtml}
     ` : `
         <div class="no-regions">
-            ${t('메모리 영역 크기가 설정되지 않았습니다. 사용량 막대를 보려면:', 'Memory region sizes are not configured. To see usage bars:')}<br>
+            ${esc(S.noRegionsIntro)}<br>
             ${canConfigureLinker ? `<span id="noRegionConfigure">- <button class="inline-action" data-action="configure-memory-map" title="${esc(S.configureMemoryMapTitle)}">${esc(S.configureMemoryMap)}</button><br></span>` : ''}
-            - ${t('또는', 'Or add')} <code>memoryMap.regions</code> ${t('설정을', 'to')} <code>.vscode/taskhub_types.json</code>${t('에 추가하세요', '')}
+            - ${noRegionsSettingHtml}
         </div>
     `}
 
@@ -3585,12 +3677,12 @@ const CURRENT_TOTALS = Object.freeze({ flash: ${flashTotal}, ram: ${ramTotal} })
         const fc = hfi ? '<td class="func-cell' + (funcVis ? '' : ' hidden') + '">' + hl(e.f) + '</td>' : '';
         const hc = hhx && !IS_STANDALONE
             ? (e.hx
-                ? '<td class="memory-map-host-only"><button class="hex-link' + (e.ha ? '' : ' unavailable') + '" data-action="open-hex" data-target-id="' + e.hx + '" title="' + esc(e.ha ? S.viewHexTitle : S.noFileBytesTitle) + '">' + esc(e.ha ? S.viewHex : S.noFileBytes) + '</button></td>'
+                ? '<td class="memory-map-host-only"><button class="hex-link' + (e.ha ? '' : ' unavailable') + '" data-action="open-hex" data-target-id="' + e.hx + '" title="' + esc(e.ha ? S.viewHexTitle : S.noFileBytesTitle) + '" aria-label="' + esc((e.ha ? S.viewHexFor : S.noFileBytesFor).replace('{name}', () => e.n)) + '">' + esc(e.ha ? S.viewHex : S.noFileBytes) + '</button></td>'
                 : '<td class="memory-map-host-only"></td>')
             : '';
         const sourceCell = hhs && !IS_STANDALONE
             ? (e.sx
-                ? '<td class="memory-map-host-only"><button class="source-link" data-action="open-source" data-target-id="' + e.sx + '" title="' + esc(S.viewSourceTitle) + '">' + esc(S.viewSource) + '</button></td>'
+                ? '<td class="memory-map-host-only"><button class="source-link" data-action="open-source" data-target-id="' + e.sx + '" title="' + esc(S.viewSourceTitle) + '" aria-label="' + esc(S.viewSourceFor.replace('{name}', () => e.n)) + '">' + esc(S.viewSource) + '</button></td>'
                 : '<td class="memory-map-host-only"></td>')
             : '';
         // 정렬값 원본. 이 표는 행 수에 따라 정렬 경로가 갈린다 — 가상 스크롤

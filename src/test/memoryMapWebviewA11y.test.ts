@@ -22,6 +22,7 @@ import { buildMinimalElf32 } from './fixtures/elfFixtures';
 
 suite('Memory Map 웹뷰 지역화 / 접근성', () => {
     const strings = buildMemoryMapStrings();
+    const armScatterSymbol = 'Image$$RW_IRAM1$$Base';
     let filePath: string;
     let html: string;
     let noRegionFilePath: string;
@@ -49,7 +50,7 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
     suiteSetup(() => {
         panelRegistry.clear();
         filePath = path.join(os.tmpdir(), `taskhub-mm-a11y-${process.pid}.axf`);
-        fs.writeFileSync(filePath, buildMinimalElf32());
+        fs.writeFileSync(filePath, buildMinimalElf32(armScatterSymbol));
         const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
         // 영역 설정을 함께 준다: region이 없으면 사용량 막대 / 영역 카드 /
         // 모두 펼치기 버튼이 아예 렌더되지 않아 그 경로를 검사할 수 없다.
@@ -139,6 +140,44 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
     });
 
     suite('접근성', () => {
+        test('ARM scatter 이름의 $$를 aria-label에서 그대로 보존한다', () => {
+            const sectionButton = html.match(/<button\b[^>]*data-target-id="section:0"[^>]*>/);
+            assert.ok(sectionButton, 'All Sections의 Hex 버튼을 찾지 못했다');
+            const sectionLabel = strings.viewHexFor.replace('{name}', () => armScatterSymbol);
+            assert.ok(sectionButton![0].includes(`aria-label="${sectionLabel}"`), sectionButton![0]);
+
+            // region 상세 행은 웹뷰가 런타임에 조립하므로, 생성된 rowHtml 자체를
+            // 격리해 실행한다. 문자열만 살피면 함수형 replacer가 다시 일반 문자열
+            // replacer로 바뀌어도 ARM의 $$ 축약을 재현하지 못한다.
+            const rowHtmlMatch = html.match(
+                /    (function rowHtml\(e, hsi, hfi, hhx, hhs\) \{[\s\S]*?\n    \})\n\n    function matchSeg/
+            );
+            assert.ok(rowHtmlMatch, '웹뷰 rowHtml 함수를 찾지 못했다');
+            const factory = new Function(
+                'S', 'IS_STANDALONE', 'funcVis', 'esc', 'hl',
+                `${rowHtmlMatch![1]}\nreturn rowHtml;`
+            ) as (...args: unknown[]) => (...args: unknown[]) => string;
+            const escapeHtml = (value: unknown): string => String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+            const rowHtml = factory(strings, false, false, escapeHtml, escapeHtml);
+
+            for (const name of [armScatterSymbol, 'Load$$LR$$LR_1$$Base']) {
+                const row = rowHtml({
+                    n: name, s: '.text', f: '', a: 0x08000000,
+                    ah: '0x08000000', eh: '0x0800001F', sz: 32, ss: '32 B',
+                    t: 'CODE', fr: false, hx: 'entry:0:0', ha: true, sx: 'source:0:0',
+                }, false, false, true, true);
+                const labels = Array.from(row.matchAll(/aria-label="([^"]*)"/g)).map(match => match[1]);
+                assert.deepStrictEqual(labels, [
+                    strings.viewHexFor.replace('{name}', () => name),
+                    strings.viewSourceFor.replace('{name}', () => name),
+                ]);
+            }
+        });
+
         test('정렬 가능한 열 머리글이 aria-sort와 키보드 포커스를 갖는다', () => {
             const headers = Array.from(html.matchAll(/<th[^>]*data-sort="[^"]*"[^>]*>/g)).map(m => m[0]);
             assert.ok(headers.length > 0, '정렬 머리글을 찾지 못했다');

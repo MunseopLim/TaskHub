@@ -124,7 +124,7 @@ Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
 
 *   **executeAction()**: 메인 액션 실행 함수 (히스토리 추적 통합)
 *   **executeSingleTask()**: 개별 태스크 실행
-    *   지원 태스크 타입 (`Task.type` union, [src/schema.ts](../src/schema.ts) 참조): `shell`, `command`, `fileDialog`, `folderDialog`, `pathDialog`, `unzip`, `zip`, `stringManipulation`, `inputBox`, `quickPick`, `envPick`, `confirm`, `writeFile`, `appendFile`, `browser`, `switch`
+    *   지원 태스크 타입과 필드·결과는 [`actions.json` 작성 가이드의 태스크 선택표](./actions.md#2-태스크-선택표)를 참고합니다. 타입 정의의 원본은 [src/schema.ts](../src/schema.ts)입니다.
 *   **변수 치환**: `${task_id.property}` 형식으로 파이프라인 간 데이터 전달
 *   **Task DAG**: `dependsOn` 및 `${taskId.x}` 자동 추론 의존성으로 그래프를 구성하며, `parallel: true` 태스크는 sync barrier에서 빠져 동시 실행 풀에 들어간다. 상세 시맨틱은 [features.md §24 병렬 실행 / Task DAG](./features.md#24-병렬-실행--task-dag) 참조.
 *   **장시간 완료 피드백**: `executeAction()`이 성공·실패·명시적 중지의 `durationMs`와 완료 시점 창 포커스를 확정하고, [executionFeedback.ts](../src/executionFeedback.ts)가 Actions 상태 표시와 실행 알림의 호환 정책을, [backgroundCompletion.ts](../src/backgroundCompletion.ts)가 임계값·대상 결과·알림 정책과 750ms 묶음을 판정합니다. 성공·중지 알림만 묶고 실패는 원인이 있는 기존 오류 알림을 개별 유지하며, 상태 표시줄은 모든 대상 결과를 요약합니다. `taskhub.executionNotifications`가 완료 피드백의 마스터 게이트이며 비밀번호 파생 실패의 민감 디버그 알림은 대체하지 않습니다.
@@ -264,12 +264,12 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   Doctor 진단은 셸 보간 같은 작성·런타임 위험을 보조할 뿐, `curl … | sh` 같은 고정 악성 명령을 판별하지 못한다. 따라서 진단 0건도 안전 판정으로 표현하지 않으며 이 관문을 샌드박스로 설명하지 않는다.
 2.  **변수 치환(`interpolatePipelineVariables`) 입력 정화**
     *   `sanitizeInterpolatedValue(value)`에서 null 바이트(`\0`)를 거부하고 32KB 길이 상한을 강제한다.
-    *   object/array 값은 치환 대신 placeholder를 그대로 유지한다 (`${id.prop}` 원형).
+    *   object 값은 치환 대신 placeholder를 그대로 유지한다 (`${id.prop}` 원형). 배열은 각 항목을 같은 규칙으로 정화한 뒤 공백으로 합치며, `args` 원소 전체가 배열 참조이면 `expandArgTemplate()`이 항목별 argv로 펼친다.
 3.  **파일 경로 검증(`resolveWithinWorkspace`)**
     *   Task output mode가 `file`일 때, 그리고 `writeFile` / `appendFile`의 `path`와 즐겨찾기 항목 경로에 대해, 치환 결과를 `path.resolve` → `path.relative(root, resolved)` 순으로 검사해 워크스페이스 루트 외부 쓰기를 거부한다.
     *   상대 경로(`"report.txt"`, `"build/out.log"` 등)는 `process.cwd()`가 아니라 실행 중인 액션의 워크스페이스 폴더(`defaultWorkspace`) 기준으로 resolve한다. 이를 위해 `resolveWithinWorkspace(targetPath, roots, baseDir)` 시그니처의 3번째 인자로 액션 워크스페이스를 전달한다.
     *   **`zip` / `unzip`은 이 격리에서 의도적으로 제외된다.** 두 태스크는 `fileDialog` / `folderDialog` / `pathDialog`로 사용자가 **런타임에 고른** 위치를 그대로 다루는 것이 설계이고(번들 예제 `media/actions_example.json`의 zip 액션이 고른 폴더를 그 자리에서 압축한다), 워크스페이스로 묶으면 그 흐름 자체가 성립하지 않는다. 대신 다른 층으로 방어한다 — 추출은 zip-slip·심볼릭/하드 링크·크기/개수 상한(`archiveUtils.ts`)으로, 생성은 소스 루트 밖을 가리키는 링크 제외로 막는다.
-    *   다만 **상대 경로의 기준점은 두 엔진이 같아야 한다.** 내장 엔진은 cwd 개념이 없어 `path.resolve`가 extension host의 `process.cwd()`(= VS Code를 띄운 위치)를 쓰는 반면 외부 `tool` 경로는 자식 프로세스의 cwd를 쓰므로, 같은 태스크가 `tool` 유무로 다른 위치에 파일을 만들었다. `resolveBuiltinArchivePath(targetPath, baseDir)`가 내장 엔진 호출 직전에 `task.cwd` → 워크스페이스 순으로 기준점을 맞춘다(격리는 하지 않는다). 반환하는 `${zip.archivePath}` / `${unzip.outputDir}`도 해석된 절대 경로다.
+    *   다만 **상대 경로의 기준점은 두 엔진이 같아야 한다.** 내장 엔진은 cwd 개념이 없어 `path.resolve`가 extension host의 `process.cwd()`(= VS Code를 띄운 위치)를 쓰는 반면 외부 `tool` 경로는 자식 프로세스의 cwd를 쓰므로, 같은 태스크가 `tool` 유무로 다른 위치에 파일을 만들었다. `resolveArchiveTaskPath(targetPath, baseDir)`가 `task.cwd` → 워크스페이스 순으로 기준점을 맞춘다(격리는 하지 않는다). 반환하는 `${zip.archivePath}` / `${unzip.outputDir}`도 해석된 절대 경로다.
     *   실행 로그는 사용자가 별도 경로를 지정할 수 없고 고정된 `.taskhub/logs/`에만 쓴다. 중간 디렉터리가 심볼릭 링크이거나 실제 경로가 워크스페이스 밖으로 나가면 쓰기를 거부한다. 파일은 exclusive 임시 파일에 먼저 쓰고 `fsync` 후 rename하며, 쓰기·회전 오류는 액션 결과를 바꾸지 않는다.
 4.  **쉘 인자 이스케이프 / 실행 경로 선택**
     *   POSIX: `buildPosixCommandLine`이 `quotePosixArgument`로 각 인자를 싱글쿼트로 감싸고(내부 싱글쿼트는 `'\''`) `sh -c`로 실행.
@@ -279,9 +279,9 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   password·환경변수·클립보드·선택 텍스트 파생값을 **파일로 남기는 것**은 태스크의 `allowSecretContent` 선언이 있을 때만 수행한다. `editor`·`terminal`은 사용자가 위치를 고르지 않은 암묵적 영속화라 계속 전면 차단이고, `writeFile`·`appendFile`·`output.mode: 'file'`은 사용자가 적은 경로이므로 선언을 요구하는 쪽을 택한다 — 기능을 없애면 같은 일이 `shell`의 리다이렉션으로 내려가 마스킹·권한·기록이 모두 사라지기 때문이다. 선언된 쓰기는 `0600`으로 만들고 저장 사실을 알린다. 사용자 관점 설명은 [`actions.json` 작성 가이드의 민감한 입력](./actions.md#민감한-입력) 참조.
     *   `password: true` 입력과 그 파생값은 TaskHub의 History·로그·알림·터미널·에디터에서 숨기지만, 실행 대상에는 원래 값이 전달되어야 한다. 따라서 argv에 넣은 값은 Windows 프로세스 명령줄 조회 등 로컬 OS 관찰 수단에 보일 수 있으며, 이 마스킹을 같은 사용자·관리자 권한의 로컬 프로세스에 대한 비밀 격리로 간주하지 않는다. 프로세스 명령줄에서 빼려면 액션 정의와 실행 대상이 stdin이나 별도 비밀 전달 채널을 사용해야 하며, 그것만으로 로컬 프로세스 격리가 생기는 것은 아니다.
 5.  **WebView 보안**
-    *   모든 WebView(HexViewer, JSON Editor, Memory Map)는 `Content-Security-Policy` 메타 태그를 포함한다.
-    *   `script-src`는 패널마다 새로 생성되는 16바이트 nonce만 허용한다. nonce는 `crypto.randomBytes(16).toString('base64')`(CSPRNG)로 생성되며, 인라인 스크립트 전부에 동일 nonce를 부여한다.
-    *   CSP가 인라인 이벤트 핸들러를 차단하므로, 모든 UI 컨트롤은 `data-action` 속성을 달고 nonce 스크립트 내부의 위임(delegated) 리스너에서 처리한다. 새 버튼/컨트롤을 추가할 때 절대 `onclick="..."` 형태를 쓰지 말 것.
+    *   스크립트를 쓰는 WebView(Hex Viewer, Hex/Text Converter, JSON Editor, Memory Map)는 `Content-Security-Policy` 메타 태그를 포함하고, `script-src`는 패널마다 새로 생성되는 16바이트 nonce만 허용한다. nonce는 `crypto.randomBytes(16).toString('base64')`(CSPRNG)로 생성하며 허용할 스크립트에 부여한다.
+    *   실행 보고서와 민감 디버그 출력처럼 스크립트가 필요 없는 패널은 `enableScripts: false`와 `default-src 'none'`을 사용한다.
+    *   CSP가 HTML의 인라인 이벤트 핸들러를 차단하므로 `onclick="..."` 같은 속성을 쓰지 않는다. 이벤트는 nonce가 붙은 스크립트에서 컨트롤에 직접 연결하거나 `data-action` 기반 위임 리스너로 처리한다.
     *   Memory Map의 Hex 진입점은 웹뷰에 실제 ELF file offset을 싣지 않고 opaque target ID만 보낸다. extension host가 렌더 시점에 보관한 `sh_offset`/`p_offset` 변환 결과를 다시 찾으며, ELF의 크기나 수정 시각이 달라졌으면 오래된 target을 사용하지 않는다.
     *   DWARF 소스 경로·줄·선택적 MD5도 같은 opaque target ID 뒤의 extension host에만 둔다. 웹뷰에는 컴파일 머신의 경로와 checksum을 노출하지 않으며, 열기 직전에 ELF 변경 여부와 대상 ID를 다시 검증한다. MD5는 보안 검증이 아니라 이미 찾은 소스 후보와 빌드 기록의 내용 일치 여부를 보조하는 데만 쓴다. 후보 비교 결과는 열린 패널에만 두고 크기·mtime·ctime이 모두 같을 때 재사용하며 Refresh와 stale ELF 감지 시 폐기한다.
     *   에러/정보 HTML 출력은 `escapeHtml` 경유를 강제한다.

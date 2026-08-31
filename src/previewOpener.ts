@@ -135,5 +135,11 @@ export async function openHtmlInBrowser(arg?: unknown, deps: PreviewOpenerDeps =
     if (!target) {
         return;
     }
-    await deps.openExternal(target);
+    const opened = await deps.openExternal(target);
+    if (!opened) {
+        await deps.showErrorMessage(t(
+            'HTML 파일을 기본 브라우저에서 열지 못했습니다.',
+            'Could not open the HTML file in the default browser.'
+        ));
+    }
 }

@@ -576,21 +576,21 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         // 폴백 시한(3초)을 실제로 기다리는 케이스가 둘 있다.
         this.timeout(20000);
 
-        function resolve(filePath: string, fake: FakePanel): void {
+        async function resolve(filePath: string, fake: FakePanel): Promise<void> {
             const provider = new HexEditorProvider(
                 { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext
             );
-            provider.resolveCustomEditor(
+            await provider.resolveCustomEditor(
                 { uri: vscode.Uri.file(filePath), dispose() { /* no-op */ } } as vscode.CustomDocument,
                 fake.panel
             );
         }
 
-        test('핸들러를 HTML 보다 먼저 걸고, ready 를 받은 뒤에 보낸다', () => {
+        test('핸들러를 HTML 보다 먼저 걸고, ready 를 받은 뒤에 보낸다', async () => {
             const fake = installFakePanel();
             const filePath = writeIntelHex('custom-editor.hex');
 
-            resolve(filePath, fake);
+            await resolve(filePath, fake);
 
             // 이것이 결함의 핵심이다. 순서가 뒤집히면 웹뷰가 리스너를 걸기 전에
             // 데이터가 도착해 유실되고, 화면이 "불러오는 중" 에 갇힌다.
@@ -611,7 +611,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
         test('ready 가 오지 않아도 폴백으로 보낸다', async () => {
             const fake = installFakePanel();
-            resolve(writeIntelHex('custom-editor-fallback.hex'), fake);
+            await resolve(writeIntelHex('custom-editor-fallback.hex'), fake);
 
             assert.strictEqual(fake.posted.length, 0);
             // 핸드셰이크가 깨졌을 때 **아무것도 안 보내는** 것이 가장 나쁘다.
@@ -625,9 +625,9 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
             // `readyReceived` 를 모듈 전역으로 두면 이렇게 새어 나간다. Custom
             // Editor 는 문서마다 인스턴스가 생기므로 상태도 인스턴스별이어야 한다.
             const first = installFakePanel();
-            resolve(writeIntelHex('leak-a.hex'), first);
+            await resolve(writeIntelHex('leak-a.hex'), first);
             const second = installFakePanel();
-            resolve(writeIntelHex('leak-b.hex'), second);
+            await resolve(writeIntelHex('leak-b.hex'), second);
 
             first.sendReady();
             assert.strictEqual(first.posted.length, 1, '첫 에디터가 ready 후에도 못 받았다');
@@ -685,14 +685,15 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
                 return { dispose() { /* no-op */ } };
             };
 
-            new HexEditorProvider({ extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext)
+            const resolving = new HexEditorProvider({ extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext)
                 .resolveCustomEditor(
                     { uri: vscode.Uri.file(writeIntelHex('closed.hex')), dispose() { /* no-op */ } } as vscode.CustomDocument,
                     fake.panel
                 );
 
-            assert.ok(disposeHandler, 'onDidDispose 가 걸리지 않았다 — 테스트 전제가 깨졌다');
-            disposeHandler!();   // 사용자가 곧바로 닫는다
+            assert.ok(disposeHandler, '비동기 분석 전에 onDidDispose를 걸어야 한다');
+            disposeHandler!();   // progress가 첫 tick을 양보한 사이 사용자가 닫는다
+            await resolving;
 
             await new Promise(resolve => setTimeout(resolve, HEX_READY_FALLBACK_MS + 500));
 
@@ -700,6 +701,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
                 fake.posted.length, 0,
                 '닫힌 에디터의 폴백이 그대로 돌았다 — 최대 128MB 페이로드를 보낼 곳도 없이 다시 만든다'
             );
+            assert.ok(!fake.events.includes('set-html'), '닫힌 Custom Editor를 뒤늦게 파싱·렌더했다');
         });
     });
 

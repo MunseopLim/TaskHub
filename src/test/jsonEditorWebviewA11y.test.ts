@@ -231,10 +231,23 @@ suite('JSON Editor 웹뷰 지역화 / 접근성', () => {
         test('셀이 포커스를 받고 키보드로 편집에 진입한다', () => {
             assert.ok(html.includes("view.setAttribute('tabindex', '0')"),
                 '셀이 Tab 순서에 없으면 키보드로 편집을 시작할 수 없다');
-            assert.ok(html.includes("view.setAttribute('role', 'button')"),
-                '역할이 없으면 누를 수 있는 것인지 알 수 없다');
+            assert.ok(html.includes("view.setAttribute('role', 'group')"),
+                '변환 버튼을 품은 셀은 중첩 button이 아닌 group이어야 한다');
+            assert.ok(html.includes("view.setAttribute('aria-roledescription', S.editableCellRole)"),
+                'group만으로는 편집 가능한 셀인지 알 수 없다');
+            assert.ok(!html.includes("view.setAttribute('role', 'button')"),
+                'button 안에 변환 button을 중첩하면 보조 기술이 내부 동작을 잃을 수 있다');
             assert.ok(/view\.addEventListener\('keydown'/.test(html),
                 'tabindex만 주고 키 처리를 안 하면 포커스는 가지만 눌리지 않는다');
+        });
+
+        test('group 셀이 Enter/Space 편집 방법을 접근 가능한 설명으로 알린다', () => {
+            const instructions = html.match(/<div id="cellEditInstructions" class="sr-only">([^<]+)<\/div>/);
+            assert.ok(instructions, '셀 편집 안내문이 스크린리더 전용 요소로 렌더되지 않았다');
+            assert.strictEqual(instructions![1], buildJsonEditorStrings().editCellInstructions,
+                '렌더된 안내문이 지역화 문자열 번들과 어긋난다');
+            assert.ok(html.includes("view.setAttribute('aria-describedby', 'cellEditInstructions')"),
+                'group 셀이 편집 키 안내문을 참조하지 않아 활성화 방법이 전달되지 않는다');
         });
 
         test('클릭과 키보드가 같은 진입 경로를 쓴다', () => {

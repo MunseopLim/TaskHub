@@ -28,6 +28,7 @@
 - **Run History** — Track success/failure status with one-click re-run
 - **Input Profiles** — Name reusable input sets from History and run them from an action's menu
 - **Quick Action Palette** — Fuzzy-search and run any action through the single `TaskHub: Run Any Action…` command. Recently used items appear at the top (count is configurable)
+- **Status Bar Feature Launcher** — Search common tools from the TaskHub status item and quickly reopen the three most recent choices
 - **Problem Matcher** — Surface compiler errors / warnings from build output in the Problems panel (built-in `$gcc` / `$tsc` presets or custom regex)
 
 ### Sidebar Panels
@@ -47,6 +48,7 @@
 ### Viewers
 - **Memory Map Visualization** — Analyze ELF/AXF and ARM Linker Listings, show memory regions, and connect symbol/section bytes and DWARF source locations
 - **Hex Viewer** — Address / hex / ASCII columns with Unit, Endian, Go-to, and Find
+- **Hex/Text Converter** — Convert text and Hex bytes in real time with encoding, grouping, byte-order controls, and saved values
 - **JSON Editor** — Spreadsheet-style JSON editing
 
 > See [docs/features.md](docs/features.md) for detailed explanations and JSON examples.
@@ -148,6 +150,9 @@ To build from source or contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 2. Run actions from the Actions panel; access resources from the Links panel
 3. Customize by editing `.vscode/actions.json`, `.vscode/links.json`, and `.vscode/favorites.json`
 
+For action authoring, task fields, results, and composition examples, see the
+[`actions.json` authoring guide](docs/actions.md).
+
 ---
 
 ## Security
@@ -173,7 +178,8 @@ The canonical setting definitions live in `contributes.configuration` in [packag
 
 | Doc | Description |
 |------|------|
-| [docs/features.md](docs/features.md) | Detailed feature docs (task types, JSON examples, hover features) |
+| [docs/actions.md](docs/actions.md) | `actions.json` authoring, task types, fields, results, and composition examples |
+| [docs/features.md](docs/features.md) | Feature reference for panels, hover, JSON Editor, Hex/Memory Map, and more |
 | [docs/architecture.md](docs/architecture.md) | Project structure, key components, data structures, security |
 | [docs/roadmap.md](docs/roadmap.md) | Priorities for unshipped features and technical debt |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, build, test, and contribution guide |

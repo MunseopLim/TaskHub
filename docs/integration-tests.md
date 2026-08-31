@@ -6,8 +6,8 @@
 ## 개요
 
 - **실행**: `npm run test`
-- **테스트 파일 위치**: [src/test/*Integration.test.ts](../src/test/)
-- **최상위 진입점**: `executeActionPipeline(action, context, id, workspaceFolderPath, workspaceRoots)` — 실제 JSON 액션을 받아 전체 파이프라인을 실행합니다. `workspaceRoots`를 명시하면 테스트가 VS Code 워크스페이스에 의존하지 않습니다.
+- **테스트 파일 위치**: [`src/test/*.test.ts`](../src/test/)
+- **파이프라인 진입점**: `executeActionPipeline(action, context, id, workspaceFolderPath, workspaceRoots)` — 실제 JSON 액션을 받아 전체 파이프라인을 실행합니다. 메뉴·뷰·웹뷰처럼 다른 모듈을 잇는 시나리오는 해당 기능의 테스트 파일에서 실제 VS Code API 경계까지 검증합니다.
 - **격리**: 각 테스트는 `os.tmpdir()` 아래 임시 워크스페이스를 생성/삭제하여 병렬 실행 및 반복 실행에 안전합니다.
 - **크로스 플랫폼 shell**: 단일 라인은 `printf` (POSIX) / `cmd /c echo` (Windows), 다중 라인은 `node -e` + `args`를 사용합니다. `process.stdout.write(...)` 인자는 `JSON.stringify`로 만들어 셸 인용 문제를 회피합니다.
 
@@ -151,7 +151,7 @@
 | IT-167 | 매핑을 바꾼 뒤의 재실행 | 저장된 입력은 고른 **항목**이므로, 값은 지금의 정의에서 다시 파생됨 — 매핑을 붙인 뒤 재실행하면 대화상자 없이 새 매핑 값(`--release`)이 argv 로 감 |
 | IT-169 | 현재 파일·환경 문맥 전달과 기록 마스킹 | 파일·상대 경로·선택·클립보드·환경·커서 값이 실제 argv에 도착하고, History 명령에는 파일 경로만 남으며 선택·클립보드·환경값은 `***`로 가려짐 |
 | IT-170 | 활성 에디터 자동 스냅샷 | 별도 주입 없이 실행 시작 시 활성 파일·선택 영역·1-based 커서 위치를 읽어 후속 `writeFile`까지 같은 값으로 전달 |
-| IT-179 | 명시 workspaceRoots 우선 | VS Code 창에는 속하지만 실행에 명시한 root 밖인 활성 파일에 가짜 `relativeFile`·`fileWorkspaceFolder`를 만들지 않음 |
+| IT-208 | 명시 workspaceRoots 우선 | VS Code 창에는 속하지만 실행에 명시한 root 밖인 활성 파일에 가짜 `relativeFile`·`fileWorkspaceFolder`를 만들지 않음 |
 | IT-171 | QuickPick 동적 기본 선택 | 앞 command의 출력으로 `default` label을 정하고, 활성화된 항목의 매핑 `value`가 후속 파일에 전달됨 |
 | IT-172 | QuickPick 직접 입력 argv 전달 | `allowCustom`으로 입력한 목록 밖 문자열이 후속 `command`의 실제 argv 한 칸으로 전달됨 |
 | IT-176 | 민감 내장값의 전이 마스킹 | 선택 텍스트·환경변수에서 파생된 중간 결과와 cwd가 History 입력·명령·Action Run Report에 원문으로 남지 않음 |
@@ -309,6 +309,8 @@
 | IT-193a, IT-193b, IT-193c, IT-193d, IT-193e, IT-193f, IT-193g | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts), [stopInteractive.test.ts](../src/test/stopInteractive.test.ts), [passwordRedaction.test.ts](../src/test/passwordRedaction.test.ts) | Actions 상태 표시와 실행 알림을 독립 제어하고 실행 중 설정 전환·일반/민감 원샷 실패·조건 skip 뒤 부분 취소에서도 capability와 기존 `followStatus` 호환을 유지 |
 | IT-194a, IT-194b | [memoryMapViewer.test.ts](../src/test/memoryMapViewer.test.ts) | ELF32의 DWARF 4 line 정보가 함수 행의 host 보관 opaque target으로 연결되고 기록된 소스 파일·줄을 열며 컴파일 경로는 웹뷰에 노출하지 않고, 압축 line section은 파서 오류 없이 소스 동작만 숨김 |
 | IT-195a, IT-195b, IT-195c | [memoryMapViewer.test.ts](../src/test/memoryMapViewer.test.ts) | DWARF 5 `.debug_line_str` 경로와 0-based file table을 host에서 해석해 기록된 소스 줄을 열고 실제 컴파일 경로는 웹뷰에 노출하지 않으며, 압축 문자열 section은 손상 경고 대신 미지원 안내 후 소스 이동만 숨기고 정상 unit이 함께 있어도 안내를 유지 |
+| IT-199, IT-200, IT-201, IT-202 | [previewOpener.test.ts](../src/test/previewOpener.test.ts) | Markdown/HTML 열기 명령의 실제 등록, manifest 선언, Explorer·Editor·SCM 메뉴 행렬과 Source Control 표시 설정 게이트를 함께 검증 |
+| IT-203, IT-204, IT-205, IT-206, IT-207 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 병렬 다중 실패 집계, 실제 동시 실행, 직렬화 설정, 자동 의존성 대기와 실패 뒤 실행 중 형제 drain을 전체 파이프라인에서 검증 |
 
 IT-093~IT-097은 MRU를 별도 저장하던 구현이 제거되면서 함께 삭제된 번호이며 재사용하지 않습니다.
 

@@ -239,22 +239,22 @@ suite('Pipeline integration', function () {
         );
     });
 
-    test('IT-179: 명시 workspaceRoots 밖의 창 파일에는 상대 경로를 만들지 않는다', async () => {
+    test('IT-208: 명시 workspaceRoots 밖의 창 파일에는 상대 경로를 만들지 않는다', async () => {
         const windowWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         assert.ok(windowWorkspace, '테스트 호스트 workspace가 필요하다');
         const activeFile = path.join(windowWorkspace, 'actions.schema.json');
-        const resultPath = path.join(tempWorkspace, 'it179.txt');
+        const resultPath = path.join(tempWorkspace, 'it208.txt');
         const document = await vscode.workspace.openTextDocument(activeFile);
         await vscode.window.showTextDocument(document, { preview: false });
 
         try {
             await run({
-                description: 'IT-179',
+                description: 'IT-208',
                 tasks: [{
                     id: 'save', type: 'writeFile', path: resultPath,
                     content: '${relativeFile ?? workspaceFolder}',
                 }],
-            }, 'it179');
+            }, 'it208');
         } finally {
             await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
         }
@@ -3868,7 +3868,7 @@ try {
             );
         });
 
-        test('IT-075: parallel 다중 실패는 AggregateError로 묶여 모든 cause를 노출', async () => {
+        test('IT-203: parallel 다중 실패는 AggregateError로 묶여 모든 cause를 노출', async () => {
             // Two parallel tasks both fail (bad capture regex). The pipeline
             // must throw an AggregateError that carries every cause, not
             // just the first — pre-fix the second failure was only logged
@@ -3876,7 +3876,7 @@ try {
             // had also broken. Single-failure callers still see the
             // original error unchanged (covered by IT-074b / IT-071).
             const action: PipelineAction = {
-                description: 'IT-075',
+                description: 'IT-203',
                 tasks: [
                     {
                         id: 'failA',
@@ -3903,7 +3903,7 @@ try {
             const err: unknown = await executeActionPipeline(
                 action,
                 { extensionPath: extensionRoot } as vscode.ExtensionContext,
-                'it075',
+                'it203',
                 tempWorkspace,
                 [tempWorkspace]
             ).then(
@@ -3920,7 +3920,7 @@ try {
             // Both task ids are mentioned in the summary message.
             assert.match(agg.message, /failA/);
             assert.match(agg.message, /failB/);
-            assert.match(agg.message, /it075/);
+            assert.match(agg.message, /it203/);
             // Both causes are preserved on .errors so callers can drill in.
             assert.strictEqual(agg.errors.length, 2);
             for (const cause of agg.errors) {
@@ -3965,7 +3965,7 @@ try {
             }
         }
 
-        test('IT-076: parallel commands both enter in-flight before any terminal event', async () => {
+        test('IT-204: parallel commands both enter in-flight before any terminal event', async () => {
             // Wall-clock thresholds are noisy on Windows process launch.
             // The scheduler invariant is stricter and cheaper to assert:
             // both ready parallel tasks must emit `running` before either
@@ -3973,7 +3973,7 @@ try {
             const sleepMs = 800;
             const events: import('../extension').TaskTransitionEvent[] = [];
             const action: PipelineAction = {
-                description: 'IT-076',
+                description: 'IT-204',
                 tasks: [
                     {
                         id: 'a',
@@ -3996,7 +3996,7 @@ try {
             await withMaxParallelTasks(4, () => executeActionPipeline(
                 action,
                 { extensionPath: extensionRoot } as vscode.ExtensionContext,
-                'it076',
+                'it204',
                 tempWorkspace,
                 [tempWorkspace],
                 { onTaskTransition: e => events.push(e) }
@@ -4015,7 +4015,7 @@ try {
             );
         });
 
-        test('IT-077: maxParallelTasks=1 설정 시 parallel: true도 직렬화', async () => {
+        test('IT-205: maxParallelTasks=1 설정 시 parallel: true도 직렬화', async () => {
             // The user knob `taskhub.pipeline.maxParallelTasks` lets a
             // resource-constrained machine force fully sequential
             // execution even when tasks opt into `parallel: true`. The
@@ -4027,7 +4027,7 @@ try {
             try {
                 const sleepMs = 600;
                 const action: PipelineAction = {
-                    description: 'IT-077',
+                    description: 'IT-205',
                     tasks: [
                         {
                             id: 'a', type: 'command',
@@ -4044,7 +4044,7 @@ try {
                     ]
                 };
                 const startedAt = Date.now();
-                await run(action, 'it077');
+                await run(action, 'it205');
                 const elapsed = Date.now() - startedAt;
 
                 assert.ok(
@@ -4056,16 +4056,16 @@ try {
             }
         });
 
-        test('IT-078: ${producer.output} auto-dep makes consumer wait for producer', async () => {
+        test('IT-206: ${producer.output} auto-dep makes consumer wait for producer', async () => {
             // `consumer` is parallel: true with a `${producer.output}`
             // ref; auto-inference must add producer as a dep so the
             // consumer cannot start while producer is still sleeping.
             // We assert both the transition order and the substituted
             // value that the consumer echoes into a file.
-            const resultPath = path.join(tempWorkspace, 'it078.txt');
+            const resultPath = path.join(tempWorkspace, 'it206.txt');
             const events: import('../extension').TaskTransitionEvent[] = [];
             const action: PipelineAction = {
-                description: 'IT-078',
+                description: 'IT-206',
                 tasks: [
                     {
                         id: 'producer',
@@ -4098,7 +4098,7 @@ try {
             await executeActionPipeline(
                 action,
                 { extensionPath: extensionRoot } as vscode.ExtensionContext,
-                'it078',
+                'it206',
                 tempWorkspace,
                 [tempWorkspace],
                 { onTaskTransition: e => events.push(e) }
@@ -4116,7 +4116,7 @@ try {
             );
         });
 
-        test('IT-079: failed sibling still waits for every in-flight sibling to drain', async () => {
+        test('IT-207: failed sibling still waits for every in-flight sibling to drain', async () => {
             // Three parallel tasks: `quickFail` fails fast (~100ms),
             // `slow` runs ~700ms, `medium` runs ~400ms. After quickFail
             // aborts new scheduling, every in-flight sibling must be
@@ -4127,7 +4127,7 @@ try {
             const slowMs = 700;
             const events: import('../extension').TaskTransitionEvent[] = [];
             const action: PipelineAction = {
-                description: 'IT-079',
+                description: 'IT-207',
                 tasks: [
                     {
                         id: 'quickFail',
@@ -4161,7 +4161,7 @@ try {
                 const caught = await executeActionPipeline(
                     action,
                     { extensionPath: extensionRoot } as vscode.ExtensionContext,
-                    'it079',
+                    'it207',
                     tempWorkspace,
                     [tempWorkspace],
                     { onTaskTransition: e => events.push(e) }

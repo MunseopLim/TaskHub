@@ -342,7 +342,8 @@ suite('Memory Map Viewer Test Suite', () => {
             visibleLineCount = 5;
             const staleTarget = targets.find(candidate => candidate.label === 'HAL_GPIO_Init');
             await memoryHandler!({ command: 'openSource', targetId: staleTarget!.id, renderId });
-            assert.strictEqual(showCount, 1, '범위를 벗어난 오래된 줄이면 에디터를 새로 열면 안 된다');
+            assert.strictEqual(showCount, 2, '범위를 벗어나도 사용자가 확인할 수 있게 가장 가까운 줄을 열어야 한다');
+            assert.strictEqual(editor.selection?.active.line, 4, '마지막 유효 행으로 이동해야 한다');
             assert.ok(warnings.some(message => /20|line 20/.test(message)), '현재 소스 범위를 벗어난 줄을 안내해야 한다');
 
             fs.appendFileSync(filePath, Buffer.from([0]));
@@ -357,7 +358,7 @@ suite('Memory Map Viewer Test Suite', () => {
             sourceSession!.sourceWarningKeys.add('warning');
             const mainTarget = targets.find(candidate => candidate.label === 'main');
             await memoryHandler!({ command: 'openSource', targetId: mainTarget!.id, renderId });
-            assert.strictEqual(showCount, 1, 'ELF가 교체된 뒤에는 오래된 소스 target을 열면 안 된다');
+            assert.strictEqual(showCount, 2, 'ELF가 교체된 뒤에는 오래된 소스 target을 열면 안 된다');
             assert.ok(warnings.some(message => /changed|변경/.test(message)), 'ELF를 다시 열어야 한다고 안내해야 한다');
             assert.strictEqual(sourceSession!.sourceSelections.size, 0);
             assert.strictEqual(sourceSession!.sourceChecksumCache.size, 0);
@@ -861,7 +862,7 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.strictEqual(pickerCalled, false);
         });
 
-        test('실제 checksum 비교는 취소 가능한 Window 진행 상태로 감싼다', async () => {
+        test('실제 checksum 비교는 취소 버튼이 보이는 Notification 진행 상태로 감싼다', async () => {
             const dir = path.join(tmpDir, 'taskhub-test', `dwarf-progress-${process.pid}`);
             fs.mkdirSync(dir, { recursive: true });
             const candidate = path.join(dir, 'main.c');
@@ -896,7 +897,7 @@ suite('Memory Map Viewer Test Suite', () => {
                     },
                 }, [candidate], new Map(), { checksumCache: new Map() });
                 assert.strictEqual(selected, candidate);
-                assert.strictEqual(progressOptions?.location, vscode.ProgressLocation.Window);
+                assert.strictEqual(progressOptions?.location, vscode.ProgressLocation.Notification);
                 assert.strictEqual(progressOptions?.cancellable, true);
                 assert.ok(String(progressOptions?.title).includes(`${'x'.repeat(120)}…`));
                 assert.ok(!String(progressOptions?.title).includes('x'.repeat(121)),

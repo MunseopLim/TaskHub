@@ -96,7 +96,7 @@ function buildFeatureLauncherDefinitions(): readonly FeatureLauncherDefinition[]
             id: 'hexConverter',
             command: 'taskhub.showHexConverter',
             group: 'embedded',
-            label: '$(replace-all) Hex/Text Converter',
+            label: t('$(replace-all) Hex/Text 변환기', '$(replace-all) Hex/Text Converter'),
             description: t('문자열과 Hex 바이트를 실시간 변환합니다.', 'Convert text and Hex bytes instantly.'),
         },
         {
@@ -156,6 +156,8 @@ export function buildFeatureLauncherItems(recentValue: unknown): FeatureLauncher
     const items: FeatureLauncherItem[] = [];
 
     if (recent.length > 0) {
+        // 설정·편집기처럼 실행이 아닌 기능도 포함하므로 여기서는 "최근 사용"이다.
+        // History에서 실제 실행을 모으는 Quick Action Palette의 "최근 실행"과 구분한다.
         items.push({ label: t('최근 사용', 'Recently used'), kind: vscode.QuickPickItemKind.Separator });
         for (const id of recent) {
             const definition = byId.get(id);
@@ -164,10 +166,13 @@ export function buildFeatureLauncherItems(recentValue: unknown): FeatureLauncher
     }
 
     const groupOrder: readonly FeatureLauncherGroup[] = ['taskhub', 'actions', 'embedded', 'preview'];
+    const recentIds = new Set(recent);
     for (const group of groupOrder) {
         items.push({ label: groupLabel(group), kind: vscode.QuickPickItemKind.Separator });
         for (const definition of definitions) {
-            if (definition.group === group) { items.push(toQuickPickItem(definition)); }
+            if (definition.group === group && !recentIds.has(definition.id)) {
+                items.push(toQuickPickItem(definition));
+            }
         }
     }
     return items;
