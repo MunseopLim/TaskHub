@@ -225,7 +225,8 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             await fake.send({ command: 'openSource', filePath: '/tmp/untrusted-other.json', session: fake.sessionId() + 1 });
             assert.deepStrictEqual(calls, [], '다른 세션의 요청은 무시한다');
             await fake.send({ command: 'openSource', filePath: '/tmp/untrusted-other.json' });
-            assert.deepStrictEqual(calls, [filePath, document, { viewColumn: vscode.ViewColumn.Beside, preview: false }]);
+            // VS Code URI는 Windows 드라이브 문자를 소문자로 정규화하므로 같은 API 기준으로 비교한다.
+            assert.deepStrictEqual(calls, [document.uri.fsPath, document, { viewColumn: vscode.ViewColumn.Beside, preview: false }]);
             assert.strictEqual(jsonPanelRegistry.isDirty(), true);
             assert.deepStrictEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), { rows: [] });
             fake.disposePanel();
