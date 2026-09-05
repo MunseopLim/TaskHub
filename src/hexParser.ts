@@ -42,6 +42,8 @@ export interface HexParseResult {
     byteCount: number;
     /** Invalid HEX/SREC records omitted from the displayed data. */
     invalidRecordCount?: number;
+    /** Valid Intel HEX data records omitted after an invalid address extension. */
+    unaddressedRecordCount?: number;
 }
 
 /** 앞에서 훑어볼 줄 수. 앞줄만 깨진 파일을 살리되 바이너리에는 기회를 많이 주지 않는다. */
@@ -87,6 +89,10 @@ function recordIsValid(line: string, kind: 'intel' | 'srec'): boolean {
         sum += parseInt(line.slice(i, i + 2), 16);
     }
     return (sum & 0xFF) === (kind === 'intel' ? 0 : 0xFF);
+}
+
+function isHexCommentOrBlank(line: string): boolean {
+    return !line || /^(?:;|#|\/\/)/.test(line);
 }
 
 /**
@@ -141,23 +147,36 @@ export function detectFormat(content: string | Buffer): HexFormat {
  */
 export function parseIntelHex(content: string): HexParseResult {
     const data = new Map<number, number>();
-    let baseAddress = 0;
+    let baseAddress: number | undefined = 0;
     let entryPoint: number | undefined;
     let minAddress = Infinity;
     let maxAddress = -Infinity;
     let invalidRecordCount = 0;
+    let unaddressedRecordCount = 0;
 
     const lines = content.split(/\r?\n/);
     for (const rawLine of lines) {
         const line = rawLine.trim();
-        if (!line || !line.startsWith(':')) { continue; }
-        if (!recordIsValid(line, 'intel')) { invalidRecordCount++; continue; }
+        if (isHexCommentOrBlank(line)) { continue; }
+        if (!recordIsValid(line, 'intel')) {
+            invalidRecordCount++;
+            // 손상된 주소 확장을 무시한 채 이전 기준점을 계속 쓰면 이후의 정상
+            // 데이터도 잘못된 주소에 놓인다. 다음 정상 확장까지 주소를 확정하지 않는다.
+            if (line.startsWith(':') && /^(?:02|04)$/.test(line.slice(7, 9))) {
+                baseAddress = undefined;
+            }
+            continue;
+        }
         const byteCount = parseInt(line.substring(1, 3), 16);
         const address = parseInt(line.substring(3, 7), 16);
         const recordType = parseInt(line.substring(7, 9), 16);
 
         switch (recordType) {
             case 0x00: { // Data record
+                if (baseAddress === undefined) {
+                    unaddressedRecordCount++;
+                    break;
+                }
                 const fullAddress = baseAddress + address;
                 for (let i = 0; i < byteCount; i++) {
                     const byte = parseInt(line.substring(9 + i * 2, 11 + i * 2), 16);
@@ -197,7 +216,7 @@ export function parseIntelHex(content: string): HexParseResult {
 
     if (minAddress === Infinity) { minAddress = 0; maxAddress = 0; }
 
-    return { format: 'intel', data, entryPoint, minAddress, maxAddress, byteCount: data.size, invalidRecordCount };
+    return { format: 'intel', data, entryPoint, minAddress, maxAddress, byteCount: data.size, invalidRecordCount, unaddressedRecordCount };
 }
 
 /**
@@ -213,7 +232,7 @@ export function parseSrec(content: string): HexParseResult {
     const lines = content.split(/\r?\n/);
     for (const rawLine of lines) {
         const line = rawLine.trim();
-        if (!line || !line.startsWith('S')) { continue; }
+        if (isHexCommentOrBlank(line)) { continue; }
         if (!recordIsValid(line, 'srec')) { invalidRecordCount++; continue; }
         const type = Number(line[1]);
         const byteCount = parseInt(line.substring(2, 4), 16);

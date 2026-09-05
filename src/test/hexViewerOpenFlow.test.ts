@@ -572,6 +572,32 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
      * 보내고 핸들러는 그 뒤에 걸었다. standalone 패널에서 고친 것과 정확히
      * 같은 데이터 유실이 남아 있었다.
      */
+    test('주소 확장 손상으로 모든 데이터를 제외하면 두 진입점이 재생성 방법을 안내한다', async () => {
+        const fake = installFakePanel();
+        const filePath = path.join(tempDir, 'unknown-address.hex');
+        fs.writeFileSync(filePath, ':00000004FC\n:01000000AA55');
+        const context = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const originalWarning = vscode.window.showWarningMessage;
+        const warnings: string[] = [];
+        (vscode.window as any).showWarningMessage = async (message: string) => { warnings.push(message); };
+        try {
+            assert.strictEqual(openHexViewerFile(context, filePath), false);
+            assert.ok(!fake.events.includes('create-panel'));
+            await new HexEditorProvider(context).resolveCustomEditor(
+                { uri: vscode.Uri.file(filePath), dispose() { /* no-op */ } } as vscode.CustomDocument, fake.panel
+            );
+            assert.strictEqual(warnings.length, 2);
+            for (const warning of warnings) {
+                assert.match(warning, /주소 확장|address extension/);
+                assert.match(warning, /다시 생성|Regenerate/);
+            }
+            assert.ok(fake.panel.webview.html.includes(path.basename(filePath)));
+            assert.strictEqual(fake.posted.length, 0);
+        } finally {
+            vscode.window.showWarningMessage = originalWarning;
+        }
+    });
+
     suite('Custom Editor 진입점 (resolveCustomEditor)', function () {
         // 폴백 시한(3초)을 실제로 기다리는 케이스가 둘 있다.
         this.timeout(20000);

@@ -207,6 +207,12 @@ suite('Hex Viewer 연속 조작', () => {
 });
 
 suite('HEX/SREC 손상 레코드', () => {
+    const intelRecord = (type: number, bytes: number[], address = 0): string => {
+        const payload = [bytes.length, address >>> 8, address & 0xFF, type, ...bytes];
+        const checksum = -payload.reduce((sum, byte) => sum + byte, 0) & 0xFF;
+        return ':' + [...payload, checksum].map(byte => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
+    };
+
     test('16진수가 아닌 접미사는 바이트·주소·체크섬에 사용할 수 없다', () => {
         for (const text of [':010000000ZFF', ':010Z000000FF', ':01000000FFFZ']) {
             const result = parseIntelHex(text);
@@ -226,9 +232,44 @@ suite('HEX/SREC 손상 레코드', () => {
         assert.ok(html.includes(buildHexViewerStrings().invalidRecords.replace('{n}', '1')));
     });
 
-    test('잘못된 주소 확장 레코드가 다음 데이터 주소를 변경하지 않는다', () => {
+    test('잘못된 주소 확장 뒤의 데이터를 이전 기준 주소로 표시하지 않는다', () => {
         const result = parseIntelHex(':00000004FC\n:01000000AA55');
-        assert.deepStrictEqual([...result.data], [[0, 0xAA]]);
+        assert.deepStrictEqual([...result.data], []);
         assert.strictEqual(result.invalidRecordCount, 1);
+        assert.strictEqual(result.unaddressedRecordCount, 1);
+    });
+
+    test('주소 확장이 손상되면 정상 확장 레코드가 나올 때까지 데이터를 제외한다', () => {
+        for (const type of [2, 4]) {
+            for (const damaged of [
+                intelRecord(type, [0, 1], 1), // 주소 필드는 0000이어야 한다.
+                intelRecord(type, [0]),
+                intelRecord(type, [0, 1]).slice(0, -2) + '00',
+            ]) {
+                const result = parseIntelHex([
+                    intelRecord(2, [0, 1]), intelRecord(0, [0xAA]),
+                    damaged, intelRecord(0, [0xBB], 1), intelRecord(0, [0xCC], 2),
+                    intelRecord(type, [0, 2]), intelRecord(0, [0xDD]),
+                ].join('\n'));
+                assert.deepStrictEqual([...result.data], [[0x10, 0xAA], [type === 2 ? 0x20 : 0x20000, 0xDD]]);
+                assert.strictEqual(result.invalidRecordCount, 1);
+                assert.strictEqual(result.unaddressedRecordCount, 2);
+                const html = buildHexViewerHtml('damaged-base.hex', result);
+                assert.ok(html.includes(buildHexViewerStrings().unaddressedRecords.replace('{n}', '2')));
+            }
+        }
+    });
+
+    test('접두사가 깨진 입력 줄은 계수하고 빈 줄·명시적 주석은 제외한다', () => {
+        for (const [parse, valid, damaged] of [
+            [parseIntelHex, ':01000000AA55', '!01000000BB44'],
+            [parseSrec, 'S1040000AA51', '!1040000BB40'],
+        ] as const) {
+            const result = parse(['', '; comment', '# comment', '// comment', valid, damaged, 'garbage'].join('\n'));
+            assert.deepStrictEqual([...result.data], [[0, 0xAA]]);
+            assert.strictEqual(result.invalidRecordCount, 2);
+            const html = buildHexViewerHtml('damaged-prefix', result);
+            assert.ok(html.includes(buildHexViewerStrings().invalidRecords.replace('{n}', '2')));
+        }
     });
 });

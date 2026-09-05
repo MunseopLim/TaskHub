@@ -162,6 +162,19 @@ export function openHexViewerFile(
     return openHexViewerFileInternal(context, filePath, options, false);
 }
 
+function describeEmptyHexData(result: HexParseResult, fileName: string): string {
+    if ((result.unaddressedRecordCount ?? 0) > 0) {
+        return t(
+            `손상된 주소 확장 때문에 데이터 주소를 확인할 수 없습니다: ${fileName}. 원본 파일을 다시 생성하세요.`,
+            `Data addresses are unknown because an address extension is damaged: ${fileName}. Regenerate the source file.`
+        );
+    }
+    return t(
+        `선택한 파일에 유효한 데이터가 없습니다: ${fileName}`,
+        `No valid data found in the selected file: ${fileName}`
+    );
+}
+
 function openHexViewerFileInternal(
     context: vscode.ExtensionContext,
     filePath: string,
@@ -212,10 +225,7 @@ function openHexViewerFileInternal(
     }
 
     if (result.byteCount === 0) {
-        vscode.window.showWarningMessage(t(
-            `선택한 파일에 유효한 데이터가 없습니다: ${fileName}`,
-            `No valid data found in the selected file: ${fileName}`
-        ));
+        vscode.window.showWarningMessage(describeEmptyHexData(result, fileName));
         return false;
     }
 
@@ -464,7 +474,7 @@ export function buildHexViewerHtml(
     return getWebviewContent(
         fileName, result.format, result.minAddress, result.maxAddress,
         result.byteCount, result.entryPoint, !!result.rawBuffer, webview, expectedDeliveryId,
-        result.invalidRecordCount ?? 0
+        result.invalidRecordCount ?? 0, result.unaddressedRecordCount ?? 0
     );
 }
 
@@ -830,8 +840,12 @@ export function buildHexViewerStrings(): Record<string, string> {
         statusNoData: t('데이터 없음', 'no data'),
         statusSelected: t('선택 {n} 바이트', 'Selected: {n} bytes'),
         invalidRecords: t(
-            '잘못된 레코드 {n}개를 제외했습니다. 표시된 데이터는 불완전할 수 있으니 원본 파일을 확인하세요.',
-            'Skipped {n} invalid records. Displayed data may be incomplete; check the source file.'
+            '잘못된 레코드·입력 줄 {n}개를 제외했습니다. 표시된 데이터는 불완전할 수 있으니 원본 파일을 확인하세요.',
+            'Skipped {n} invalid records or input lines. Displayed data may be incomplete; check the source file.'
+        ),
+        unaddressedRecords: t(
+            '손상된 주소 확장 뒤의 데이터 레코드 {n}개는 주소를 확인할 수 없어 제외했습니다. 원본 파일을 다시 생성하세요.',
+            'Skipped {n} data records after a damaged address extension because their addresses are unknown. Regenerate the source file.'
         ),
     };
 }
@@ -846,7 +860,8 @@ function getWebviewContent(
     isBinaryFormat: boolean,
     webview?: vscode.Webview,
     expectedDeliveryId?: string,
-    invalidRecordCount = 0
+    invalidRecordCount = 0,
+    unaddressedRecordCount = 0
 ): string {
     const formatLabel = format === 'intel' ? 'Intel HEX' : format === 'srec' ? 'Motorola SREC' : 'Binary';
     const entryStr = entryPoint !== undefined ? `0x${entryPoint.toString(16).toUpperCase().padStart(8, '0')}` : 'N/A';
@@ -1001,6 +1016,7 @@ function getWebviewContent(
 </head>
 <body>
     ${invalidRecordCount > 0 ? `<div class="parse-warning" role="status">${esc(S.invalidRecords.replace('{n}', String(invalidRecordCount)))}</div>` : ''}
+    ${unaddressedRecordCount > 0 ? `<div class="parse-warning" role="status">${esc(S.unaddressedRecords.replace('{n}', String(unaddressedRecordCount)))}</div>` : ''}
     <div class="header">
         <div class="file-info">
             <span class="file-name">${esc(fileName)}</span>
@@ -1960,7 +1976,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         }
 
         if (result.byteCount === 0) {
-            const msg = t(`선택한 파일에 유효한 데이터가 없습니다: ${fileName}`, `No valid data found in the selected file: ${fileName}`);
+            const msg = describeEmptyHexData(result, fileName);
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'info');
             vscode.window.showWarningMessage(msg);
             return;
