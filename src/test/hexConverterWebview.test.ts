@@ -29,11 +29,13 @@ class FakeWebviewElement {
     disabled = false;
     focused = false;
     hidden = false;
+    open = false;
     placeholder = '';
     scrollTop = 0;
     selectionStart = 0;
     selectionEnd = 0;
     dataset: Record<string, string> = {};
+    readonly attributes = new Map<string, string>();
     readonly classes = new Set<string>();
     readonly listeners = new Map<string, Array<(event: any) => void>>();
     readonly classList = {
@@ -48,6 +50,8 @@ class FakeWebviewElement {
         for (const listener of this.listeners.get(type) ?? []) { listener(event); }
     }
     focus(): void { this.focused = true; }
+    setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
+    getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
     setSelectionRange(start: number, end: number): void {
         this.selectionStart = start;
         this.selectionEnd = end;
@@ -67,16 +71,35 @@ function runHexConverterWebview(options: {
         'copyText', 'copyHex', 'saveText', 'saveHex', 'clearButton', 'status',
         'statusText', 'valueGrid', 'hexOffsets', 'hexGroupWarning', 'hexGroupMessage',
         'hexGroupPreviewLabel', 'hexGroupPresent', 'hexGroupMissing', 'savedList', 'savedCount',
+        'bitwisePanel', 'bitwiseExpression', 'bitwiseWidth', 'bitwiseStatus',
+        'bitwiseHex', 'bitwiseDecimal', 'bitwiseBinary',
+        'copyBitwiseHex', 'copyBitwiseDecimal', 'copyBitwiseBinary', 'bitwiseClear',
     ];
     const elements = Object.fromEntries(ids.map(id => [id, new FakeWebviewElement()])) as Record<string, FakeWebviewElement>;
     elements.encoding.value = 'utf8';
     elements.hexGroup.value = '1';
     elements.bytesPerRow.value = '16';
     elements.endian.value = 'little';
+    elements.bitwiseWidth.value = '32';
+    elements.bitwisePanel.open = true;
     const posted: any[] = [];
     let persisted: any;
     let nextTimerId = 1;
-    const timers = new Map<number, () => void>();
+    let timerTime = 0;
+    const timers = new Map<number, { callback: () => void; due: number }>();
+    function advanceTimers(milliseconds: number): void {
+        const targetTime = timerTime + milliseconds;
+        while (true) {
+            const next = Array.from(timers.entries())
+                .filter(([, timer]) => timer.due <= targetTime)
+                .sort((left, right) => left[1].due - right[1].due || left[0] - right[0])[0];
+            if (!next) { break; }
+            timerTime = next[1].due;
+            timers.delete(next[0]);
+            next[1].callback();
+        }
+        timerTime = targetTime;
+    }
     const windowListeners = new Map<string, Array<(event: any) => void>>();
     const html = buildHexConverterHtml(undefined, options.savedValues ?? [], options.preferences);
     const script = html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1] ?? '';
@@ -98,9 +121,9 @@ function runHexConverterWebview(options: {
                 windowListeners.set(type, list);
             },
         },
-        setTimeout: (callback: () => void) => {
+        setTimeout: (callback: () => void, delay = 0) => {
             const id = nextTimerId++;
-            timers.set(id, callback);
+            timers.set(id, { callback, due: timerTime + Math.max(0, delay) });
             return id;
         },
         clearTimeout: (id: number) => { timers.delete(id); },
@@ -119,11 +142,10 @@ function runHexConverterWebview(options: {
         html,
         persisted: () => persisted,
         pendingTimerCount: () => timers.size,
+        advanceTimers,
         flushTimers(): void {
             while (timers.size > 0) {
-                const callbacks = Array.from(timers.values());
-                timers.clear();
-                for (const callback of callbacks) { callback(); }
+                advanceTimers(Math.min(...Array.from(timers.values(), timer => timer.due)) - timerTime);
             }
         },
         dispatchWindowMessage(message: unknown): void {
@@ -522,6 +544,365 @@ suite('Hex/Text 변환기 Webview', () => {
         }
     });
 
+    suite('비트 계산', () => {
+        test('입력 중 오류 결과는 즉시 지우고 마지막 입력에서 350ms 뒤에만 오류를 알린다', () => {
+            const strings = buildHexConverterStrings();
+            const harness = runHexConverterWebview();
+            const { elements } = harness;
+            elements.bitwiseExpression.value = '1';
+            elements.bitwiseExpression.dispatch('input');
+            elements.bitwiseExpression.value = '1 <<';
+            elements.bitwiseExpression.dispatch('input');
+            for (const format of ['Hex', 'Decimal', 'Binary']) {
+                assert.strictEqual(elements['bitwise' + format].textContent, '—');
+                assert.strictEqual(elements['copyBitwise' + format].disabled, true);
+            }
+            assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'false');
+            assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseEditing);
+            assert.ok(!elements.bitwiseStatus.classes.has('is-error'));
+            assert.ok(!elements.bitwiseStatus.classes.has('is-success'));
+            assert.strictEqual(harness.pendingTimerCount(), 1);
+            harness.advanceTimers(349);
+            assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseEditing);
+            assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'false');
+
+            elements.bitwiseExpression.value = '(1 2)';
+            elements.bitwiseExpression.dispatch('input');
+            assert.strictEqual(harness.pendingTimerCount(), 1, '연속 입력은 기존 오류 timer를 취소해야 한다');
+            harness.advanceTimers(1);
+            assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseEditing,
+                '첫 입력의 350ms 시점에 새 입력 오류를 알리면 안 된다');
+            harness.advanceTimers(348);
+            assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'false');
+            harness.advanceTimers(1);
+            assert.strictEqual(harness.pendingTimerCount(), 0);
+            assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseErrorPosition
+                .replace('{message}', strings.bitwiseInvalidExpression).replace('{position}', '4'));
+            assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'true');
+            assert.ok(elements.bitwiseStatus.classes.has('is-error'));
+            assert.ok(!elements.bitwiseStatus.classes.has('is-success'));
+        });
+
+        test('유효 입력·지우기·blur·폭 변경은 대기 오류를 취소하고 최종 상태를 유지한다', () => {
+            const strings = buildHexConverterStrings();
+            for (const action of ['valid', 'clear', 'blur', 'width']) {
+                const harness = runHexConverterWebview();
+                const { elements } = harness;
+                elements.bitwiseExpression.value = '1 <<';
+                elements.bitwiseExpression.dispatch('input');
+                harness.advanceTimers(200);
+                assert.strictEqual(harness.pendingTimerCount(), 1);
+                if (action === 'valid') {
+                    elements.bitwiseExpression.value = '2';
+                    elements.bitwiseExpression.dispatch('input');
+                    assert.strictEqual(elements.bitwiseDecimal.textContent, '2');
+                    assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseSuccess.replace('{width}', '32'));
+                    assert.ok(elements.bitwiseStatus.classes.has('is-success'));
+                } else if (action === 'clear') {
+                    elements.bitwiseClear.dispatch('click');
+                    assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseReady);
+                    assert.ok(!elements.bitwiseStatus.classes.has('is-success'));
+                } else if (action === 'blur') {
+                    elements.bitwiseExpression.dispatch('blur');
+                } else {
+                    elements.bitwiseWidth.value = '8';
+                    elements.bitwiseWidth.dispatch('change');
+                }
+                const errorExpected = action === 'blur' || action === 'width';
+                assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), String(errorExpected), action);
+                assert.strictEqual(elements.bitwiseStatus.classes.has('is-error'), errorExpected, action);
+                if (errorExpected) {
+                    assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseErrorPosition
+                        .replace('{message}', strings.bitwiseInvalidExpression).replace('{position}', '5'), action);
+                }
+                assert.strictEqual(harness.pendingTimerCount(), 0, action);
+                const finalStatus = elements.bitwiseStatus.textContent;
+                harness.advanceTimers(350);
+                assert.strictEqual(elements.bitwiseStatus.textContent, finalStatus, action);
+            }
+        });
+
+        test('복원된 잘못된 수식은 기다리지 않고 오류와 위치를 표시한다', () => {
+            const strings = buildHexConverterStrings();
+            const harness = runHexConverterWebview({
+                restoredState: { bitwise: { expression: '1 <<', width: 32, open: true } },
+            });
+            assert.strictEqual(harness.pendingTimerCount(), 0);
+            assert.strictEqual(harness.elements.bitwiseExpression.getAttribute('aria-invalid'), 'true');
+            assert.strictEqual(harness.elements.bitwiseStatus.textContent, strings.bitwiseErrorPosition
+                .replace('{message}', strings.bitwiseInvalidExpression).replace('{position}', '5'));
+            assert.ok(harness.elements.bitwiseStatus.classes.has('is-error'));
+        });
+
+        test('모든 오류 유형의 한국어·영어 문구와 1부터 시작하는 위치를 정확히 표시한다', () => {
+            const cases = [
+                { expression: '1', width: 128, key: 'bitwiseInvalidWidth', position: 1 },
+                { expression: '1 + 2', width: 32, key: 'bitwiseInvalidToken', position: 3 },
+                { expression: '1 <<', width: 32, key: 'bitwiseInvalidExpression', position: 5 },
+                { expression: '(1 2)', width: 32, key: 'bitwiseInvalidExpression', position: 4 },
+                { expression: '1 | 0x100', width: 8, key: 'bitwiseOutOfRange', position: 5 },
+                { expression: '1 << 8', width: 8, key: 'bitwiseInvalidShift', position: 6 },
+                { expression: '1'.repeat(4097), width: 32, key: 'bitwiseTooComplex', position: 4097 },
+            ];
+            for (const language of ['ko', 'en']) {
+                withLanguage(language, () => {
+                    const strings = buildHexConverterStrings();
+                    const harness = runHexConverterWebview();
+                    const { elements } = harness;
+                    for (const { expression, width, key, position } of cases) {
+                        elements.bitwiseWidth.value = String(width);
+                        elements.bitwiseExpression.value = expression;
+                        elements.bitwiseExpression.dispatch('input');
+                        elements.bitwiseExpression.dispatch('blur');
+                        const message = strings[key].replace('{width}', String(width)).replace('{max}', String(width - 1));
+                        assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseErrorPosition
+                            .replace('{message}', message).replace('{position}', String(position)), `${language}: ${key}`);
+                        assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'true');
+                        assert.ok(elements.bitwiseStatus.classes.has('is-error'));
+                        assert.ok(!elements.bitwiseStatus.classes.has('is-success'));
+                        assert.strictEqual(harness.pendingTimerCount(), 0);
+                    }
+                });
+            }
+        });
+
+        test('성공·빈 입력·복사 성공과 실패의 한국어·영어 상태 및 클래스를 정확히 표시한다', () => {
+            for (const language of ['ko', 'en']) {
+                withLanguage(language, () => {
+                    const strings = buildHexConverterStrings();
+                    const harness = runHexConverterWebview();
+                    const { elements, posted } = harness;
+                    assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseReady);
+                    assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'false');
+                    for (const width of [8, 16, 32, 64]) {
+                        elements.bitwiseWidth.value = String(width);
+                        elements.bitwiseExpression.value = '010';
+                        elements.bitwiseExpression.dispatch('input');
+                        assert.strictEqual(elements.bitwiseDecimal.textContent, '10');
+                        assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseSuccess.replace('{width}', String(width)));
+                        assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'false');
+                        assert.ok(elements.bitwiseStatus.classes.has('is-success'));
+                        assert.ok(!elements.bitwiseStatus.classes.has('is-error'));
+                    }
+                    assert.match(strings.bitwiseHint, /010\s*=\s*10/);
+                    assert.match(strings.bitwiseHint, language === 'ko' ? /8진수/ : /octal/i);
+                    for (const ok of [false, true]) {
+                        elements.copyBitwiseHex.dispatch('click');
+                        harness.dispatchWindowMessage({ command: 'bitwiseCopyResult', ok, requestId: posted.at(-1).requestId });
+                        assert.strictEqual(elements.bitwiseStatus.textContent, ok ? strings.bitwiseCopied : strings.copyFailed);
+                        assert.strictEqual(elements.bitwiseStatus.classes.has('is-success'), ok);
+                        assert.strictEqual(elements.bitwiseStatus.classes.has('is-error'), !ok);
+                        assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'false');
+                        assert.strictEqual(elements.bitwiseDecimal.textContent, '10');
+                        assert.strictEqual(elements.copyBitwiseHex.disabled, false);
+                    }
+                    elements.bitwiseExpression.value = '   ';
+                    elements.bitwiseExpression.dispatch('input');
+                    assert.strictEqual(elements.bitwiseStatus.textContent, strings.bitwiseReady);
+                    assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'false');
+                    assert.ok(!elements.bitwiseStatus.classes.has('is-error'));
+                    assert.ok(!elements.bitwiseStatus.classes.has('is-success'));
+                    assert.strictEqual(harness.pendingTimerCount(), 0);
+                });
+            }
+        });
+
+        test('결과에 접근 가능한 이름을 붙이고 상태 영역 하나만 읽어 주며 summary 키보드 포커스를 표시한다', () => {
+            const html = buildHexConverterHtml();
+            const panel = html.match(/<details\b[^>]*id="bitwisePanel"[^>]*>([\s\S]*?)<\/details>/)?.[1];
+            assert.ok(panel);
+            assert.match(panel!, /<summary\b[^>]*aria-labelledby="bitwiseTitle"[^>]*>\s*<h2\b[^>]*id="bitwiseTitle"/);
+            assert.match(html, /summary:focus-visible\s*\{[^}]*outline-offset:\s*-2px/);
+            assert.match(html, /summary:focus-visible\s*\{[^}]*outline:\s*(?!none)[^;}]+/);
+            assert.strictEqual(Array.from(panel!.matchAll(/aria-live="polite"/g)).length, 1);
+            assert.match(panel!, /id="bitwiseStatus"[^>]*role="status"[^>]*aria-live="polite"/);
+            for (const format of ['Hex', 'Decimal', 'Binary']) {
+                const output = panel!.match(new RegExp(`<output\\b[^>]*id="bitwise${format}"[^>]*>`))?.[0];
+                assert.ok(output, format);
+                assert.match(output!, /aria-live="off"/);
+                const labelId = output!.match(/aria-labelledby="([^"]+)"/)?.[1];
+                assert.ok(labelId, `${format} 결과의 접근 가능한 이름이 없다`);
+                assert.match(panel!, new RegExp(`<label\\b[^>]*id="${labelId}"[^>]*>`));
+            }
+        });
+
+        test('기본 32비트에서 즉시 계산하고 64비트 정밀도와 논리 우측 이동을 유지한다', () => {
+            const { elements } = runHexConverterWebview();
+            assert.strictEqual(elements.bitwiseWidth.value, '32');
+            assert.strictEqual(elements.bitwisePanel.open, true);
+            elements.bitwiseExpression.value = '(0x1234 >> 8) & 0xFF';
+            elements.bitwiseExpression.dispatch('input');
+            assert.strictEqual(elements.bitwiseHex.textContent, '0x00000012');
+            assert.strictEqual(elements.bitwiseDecimal.textContent, '18');
+            assert.strictEqual(elements.bitwiseBinary.textContent, '0b00000000000000000000000000010010');
+
+            elements.bitwiseWidth.value = '64';
+            elements.bitwiseWidth.dispatch('change');
+            elements.bitwiseExpression.value = '~0';
+            elements.bitwiseExpression.dispatch('input');
+            assert.strictEqual(elements.bitwiseHex.textContent, '0xFFFFFFFFFFFFFFFF');
+            assert.strictEqual(elements.bitwiseDecimal.textContent, '18446744073709551615');
+            assert.strictEqual(elements.bitwiseBinary.textContent, '0b' + '1'.repeat(64));
+            assert.strictEqual(elements.copyBitwiseHex.disabled, false);
+            assert.strictEqual(elements.copyBitwiseDecimal.disabled, false);
+            assert.strictEqual(elements.copyBitwiseBinary.disabled, false);
+
+            elements.bitwiseExpression.value = '0x8000000000000000 >> 63';
+            elements.bitwiseExpression.dispatch('input');
+            assert.strictEqual(elements.bitwiseHex.textContent, '0x0000000000000001');
+            assert.strictEqual(elements.bitwiseDecimal.textContent, '1');
+        });
+
+        test('식이 잘못되거나 폭을 줄여 범위를 넘으면 이전 결과와 복사 가능 상태를 지운다', () => {
+            const harness = runHexConverterWebview();
+            const { elements } = harness;
+            elements.bitwiseExpression.value = '0x1234 & 0xFF';
+            elements.bitwiseExpression.dispatch('input');
+            assert.strictEqual(elements.bitwiseDecimal.textContent, '52');
+            for (const invalid of ['0x1234 &', '-1', '1 << 32', '0x100000000']) {
+                elements.bitwiseExpression.value = invalid;
+                elements.bitwiseExpression.dispatch('input');
+                for (const format of ['Hex', 'Decimal', 'Binary']) {
+                    assert.strictEqual(elements['bitwise' + format].textContent, '—', invalid);
+                    assert.strictEqual(elements['copyBitwise' + format].disabled, true, invalid);
+                }
+                harness.advanceTimers(350);
+                assert.ok(elements.bitwiseStatus.classes.has('is-error'), invalid);
+                assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'true');
+            }
+            elements.bitwiseExpression.value = '0x100';
+            elements.bitwiseExpression.dispatch('input');
+            assert.strictEqual(elements.bitwiseDecimal.textContent, '256');
+            assert.ok(!elements.bitwiseStatus.classes.has('is-error'));
+            assert.strictEqual(elements.bitwiseExpression.getAttribute('aria-invalid'), 'false');
+            elements.bitwiseWidth.value = '8';
+            elements.bitwiseWidth.dispatch('change');
+            assert.strictEqual(elements.bitwiseHex.textContent, '—');
+            assert.strictEqual(elements.copyBitwiseHex.disabled, true);
+            assert.ok(elements.bitwiseStatus.classes.has('is-error'));
+        });
+
+        test('수식·폭·접힘 상태를 복원하고 기존 변환 상태와 함께 저장한다', () => {
+            const harness = runHexConverterWebview({
+                restoredState: {
+                    source: 'text', text: 'A', encoding: 'ascii', endian: 'big',
+                    bitwise: { expression: '0x8000000000000000 | 1', width: 64, open: false },
+                },
+            });
+            const { elements } = harness;
+            assert.strictEqual(elements.bitwiseExpression.value, '0x8000000000000000 | 1');
+            assert.strictEqual(elements.bitwiseWidth.value, '64');
+            assert.strictEqual(elements.bitwisePanel.open, false);
+            assert.strictEqual(elements.bitwiseDecimal.textContent, '9223372036854775809');
+            assert.strictEqual(elements.textInput.value, 'A');
+            assert.strictEqual(elements.hexInput.value, '41');
+
+            elements.bitwisePanel.open = true;
+            elements.bitwisePanel.dispatch('toggle');
+            assert.strictEqual(harness.persisted().bitwise.open, true);
+            assert.strictEqual(harness.persisted().bitwise.width, 64);
+            elements.textInput.value = 'AB';
+            elements.textInput.dispatch('input');
+            assert.strictEqual(harness.persisted().bitwise.expression, '0x8000000000000000 | 1');
+            assert.strictEqual(harness.persisted().text, 'AB');
+        });
+
+        test('기존 변환 옵션은 초기 비트 폭에 영향을 주지 않고 손상된 비트 상태를 기본값으로 복원한다', () => {
+            const harness = runHexConverterWebview({
+                preferences: { encoding: 'ascii', hexGroup: 4, endian: 'big' },
+                restoredState: { bitwise: { expression: null, width: 128, open: 'false' } },
+            });
+            assert.strictEqual(harness.elements.bitwiseWidth.value, '32');
+            assert.strictEqual(harness.elements.bitwiseExpression.value, '');
+            assert.strictEqual(harness.elements.bitwisePanel.open, true);
+            assert.strictEqual(harness.elements.encoding.value, 'ascii');
+            assert.strictEqual(harness.elements.endian.value, 'big');
+        });
+
+        test('Endian·UTF-8 오류·계산 지우기는 서로의 결과와 상태를 덮어쓰지 않는다', () => {
+            const harness = runHexConverterWebview();
+            const { elements } = harness;
+            elements.hexInput.value = 'FF';
+            elements.hexInput.dispatch('input');
+            const conversionError = elements.statusText.textContent;
+            assert.ok(elements.status.classes.has('is-error'));
+            elements.bitwiseExpression.value = '0x1234';
+            elements.bitwiseExpression.dispatch('input');
+            assert.strictEqual(elements.bitwiseHex.textContent, '0x00001234');
+            assert.strictEqual(elements.statusText.textContent, conversionError);
+            elements.endian.value = 'big';
+            elements.endian.dispatch('change');
+            assert.strictEqual(elements.bitwiseHex.textContent, '0x00001234');
+            assert.strictEqual(elements.statusText.textContent, conversionError);
+            elements.bitwiseClear.dispatch('click');
+            assert.strictEqual(elements.bitwiseExpression.value, '');
+            assert.strictEqual(elements.bitwiseHex.textContent, '—');
+            assert.strictEqual(elements.copyBitwiseHex.disabled, true);
+            assert.strictEqual(elements.hexInput.value, 'FF');
+            assert.strictEqual(elements.statusText.textContent, conversionError);
+            assert.ok(elements.status.classes.has('is-error'));
+            assert.strictEqual(harness.persisted().bitwise.expression, '');
+        });
+
+        test('복사는 원본 수식과 폭·형식을 전달하고 늦은 응답이 새 결과를 덮어쓰지 않는다', () => {
+            const harness = runHexConverterWebview();
+            const { elements, posted } = harness;
+            elements.bitwiseExpression.value = '0x1234 & 0xFF';
+            elements.bitwiseExpression.dispatch('input');
+            for (const [button, format] of [
+                ['copyBitwiseHex', 'hex'], ['copyBitwiseDecimal', 'decimal'], ['copyBitwiseBinary', 'binary'],
+            ]) {
+                elements[button].dispatch('click');
+                assert.strictEqual(posted.at(-1).command, 'copyBitwiseResult');
+                assert.strictEqual(posted.at(-1).expression, '0x1234 & 0xFF');
+                assert.strictEqual(posted.at(-1).width, 32);
+                assert.strictEqual(posted.at(-1).format, format);
+                assert.ok(Number.isSafeInteger(posted.at(-1).requestId));
+            }
+            const latestRequestId = posted.at(-1).requestId;
+            harness.dispatchWindowMessage({ command: 'bitwiseCopyResult', ok: false, requestId: latestRequestId });
+            assert.ok(elements.bitwiseStatus.classes.has('is-error'));
+            assert.strictEqual(elements.bitwiseDecimal.textContent, '52');
+
+            elements.bitwiseExpression.value = '0xFF';
+            elements.bitwiseExpression.dispatch('input');
+            const latestStatus = elements.bitwiseStatus.textContent;
+            harness.dispatchWindowMessage({ command: 'bitwiseCopyResult', ok: true, requestId: latestRequestId });
+            assert.strictEqual(elements.bitwiseStatus.textContent, latestStatus);
+            assert.strictEqual(elements.bitwiseDecimal.textContent, '255');
+            assert.ok(!elements.bitwiseStatus.classes.has('is-error'));
+
+            elements.copyBitwiseHex.dispatch('click');
+            const oldRequestId = posted.at(-1).requestId;
+            elements.copyBitwiseDecimal.dispatch('click');
+            const newRequestId = posted.at(-1).requestId;
+            assert.notStrictEqual(oldRequestId, newRequestId);
+            harness.dispatchWindowMessage({ command: 'bitwiseCopyResult', ok: true, requestId: newRequestId });
+            const copiedStatus = elements.bitwiseStatus.textContent;
+            harness.dispatchWindowMessage({ command: 'bitwiseCopyResult', ok: false, requestId: oldRequestId });
+            assert.strictEqual(elements.bitwiseStatus.textContent, copiedStatus);
+            assert.ok(!elements.bitwiseStatus.classes.has('is-error'));
+
+            elements.copyBitwiseHex.dispatch('click');
+            const resizedRequestId = posted.at(-1).requestId;
+            elements.bitwiseWidth.value = '16';
+            elements.bitwiseWidth.dispatch('change');
+            const resizedStatus = elements.bitwiseStatus.textContent;
+            harness.dispatchWindowMessage({ command: 'bitwiseCopyResult', ok: false, requestId: resizedRequestId });
+            assert.strictEqual(elements.bitwiseStatus.textContent, resizedStatus);
+            assert.strictEqual(elements.bitwiseHex.textContent, '0x00FF');
+            assert.ok(!elements.bitwiseStatus.classes.has('is-error'));
+
+            elements.copyBitwiseBinary.dispatch('click');
+            const clearedRequestId = posted.at(-1).requestId;
+            elements.bitwiseClear.dispatch('click');
+            const clearedStatus = elements.bitwiseStatus.textContent;
+            harness.dispatchWindowMessage({ command: 'bitwiseCopyResult', ok: false, requestId: clearedRequestId });
+            assert.strictEqual(elements.bitwiseStatus.textContent, clearedStatus);
+            assert.ok(!elements.bitwiseStatus.classes.has('is-error'));
+        });
+    });
+
     suite('패널 수명주기와 복사', () => {
         let originalCreateWebviewPanel: typeof vscode.window.createWebviewPanel;
         let originalClipboardDescriptor: PropertyDescriptor | undefined;
@@ -538,6 +919,74 @@ suite('Hex/Text 변환기 Webview', () => {
             if (originalClipboardDescriptor) {
                 Object.defineProperty(vscode.env, 'clipboard', originalClipboardDescriptor);
             }
+        });
+
+        test('비트 복사는 호스트가 64비트 결과를 재계산하고 잘못된 메시지와 클립보드 실패를 처리한다', async () => {
+            let messageHandler: ((message: any) => Promise<void>) | undefined;
+            const copied: string[] = [];
+            const posted: any[] = [];
+            let clipboardFails = false;
+            const panel = {
+                webview: {
+                    cspSource: 'vscode-webview:',
+                    html: '',
+                    onDidReceiveMessage(handler: (message: any) => Promise<void>) {
+                        messageHandler = handler;
+                        return { dispose() {} };
+                    },
+                    postMessage(message: any) { posted.push(message); return Promise.resolve(true); },
+                },
+                onDidDispose() { return { dispose() {} }; },
+                dispose() {},
+            } as unknown as vscode.WebviewPanel;
+            (vscode.window as any).createWebviewPanel = () => panel;
+            Object.defineProperty(vscode.env, 'clipboard', {
+                configurable: true,
+                value: { writeText: async (value: string) => {
+                    if (clipboardFails) { throw new Error('clipboard unavailable'); }
+                    copied.push(value);
+                } },
+            });
+            const context = {
+                globalState: { get(_key: string, fallback: unknown) { return fallback; } },
+            } as unknown as vscode.ExtensionContext;
+            showHexConverter(context);
+            assert.ok(messageHandler);
+            const validRequest = {
+                command: 'copyBitwiseResult', expression: '~0', width: 64, format: 'decimal', requestId: 0,
+                text: 'untrusted result',
+            };
+            await messageHandler!(validRequest);
+            assert.deepStrictEqual(copied, ['18446744073709551615']);
+            assert.deepStrictEqual(posted.at(-1), { command: 'bitwiseCopyResult', ok: true, requestId: 0 });
+            await messageHandler!({ ...validRequest, format: 'hex', requestId: 8 });
+            assert.strictEqual(copied.at(-1), '0xFFFFFFFFFFFFFFFF');
+            await messageHandler!({ ...validRequest, format: 'binary', requestId: 9 });
+            assert.strictEqual(copied.at(-1), '0b' + '1'.repeat(64));
+
+            for (const invalid of [
+                { expression: '' }, { expression: 1 }, { expression: '0x100', width: 8 },
+                { expression: '1 << 64' }, { expression: '1 <<' }, { expression: '(1 2)' },
+                { expression: '1'.repeat(10000) },
+                { width: '64' }, { width: 128 }, { format: 'toString' },
+            ]) {
+                const postedBefore = posted.length;
+                await messageHandler!({ ...validRequest, ...invalid });
+                assert.strictEqual(copied.length, 3, JSON.stringify(invalid));
+                assert.strictEqual(posted.length, postedBefore + 1, '유효한 requestId에는 실패 응답을 한 번 보내야 한다');
+                assert.deepStrictEqual(posted.at(-1), { command: 'bitwiseCopyResult', ok: false, requestId: 0 });
+            }
+            for (const requestId of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, '7', null, undefined]) {
+                const postedBefore = posted.length;
+                await messageHandler!({ ...validRequest, requestId });
+                assert.strictEqual(copied.length, 3, String(requestId));
+                assert.strictEqual(posted.length, postedBefore, '잘못된 requestId에는 응답을 보내면 안 된다');
+            }
+
+            clipboardFails = true;
+            await messageHandler!(validRequest);
+            assert.deepStrictEqual(posted.at(-1), { command: 'bitwiseCopyResult', ok: false, requestId: 0 });
+            assert.strictEqual(copied.length, 3);
         });
 
         test('명령을 다시 실행하면 기존 패널을 표시하고 클립보드 결과를 돌려준다', async () => {

@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { t } from './i18n';
+import { evaluateHexBitwiseExpression } from './hexBitwiseUtils';
 import {
     buildHexConverterValueRows,
     decodeHexConverterBytes,
@@ -16,6 +17,7 @@ const HEX_CONVERTER_MAX_SAVED_VALUES = 24;
 const HEX_CONVERTER_MAX_SAVED_BYTES = 16 * 1024;
 const HEX_CONVERTER_LARGE_INPUT_CHARACTERS = 64 * 1024;
 const HEX_CONVERTER_LARGE_INPUT_DELAY_MS = 120;
+const HEX_BITWISE_ERROR_DELAY_MS = 350;
 const HEX_CONVERTER_PREFERENCES_KEY = 'taskhub.hexConverter.preferences.v1';
 
 export interface HexConverterPreferences {
@@ -91,6 +93,41 @@ export function buildHexConverterStrings(): Record<string, string> {
         inspectorTitle: t('값 해석', 'Value inspector'),
         inspectorHint: t('첫 8바이트를 선택한 바이트 순서로 해석합니다.', 'Interprets the first 8 bytes using the selected byte order.'),
         noBytes: t('변환된 바이트가 여기에 표시됩니다.', 'Converted byte values appear here.'),
+        bitwiseTitle: t('비트 계산', 'Bitwise calculator'),
+        bitwiseExpressionLabel: t('수식', 'Expression'),
+        bitwisePlaceholder: '(0x1234 >> 8) & 0xFF',
+        bitwiseWidthLabel: t('비트 폭', 'Bit width'),
+        bitwiseWidth8: t('8비트', '8-bit'),
+        bitwiseWidth16: t('16비트', '16-bit'),
+        bitwiseWidth32: t('32비트', '32-bit'),
+        bitwiseWidth64: t('64비트', '64-bit'),
+        bitwiseHint: t(
+            '0x: 16진수 · 0b: 2진수 · 접두사 없음: 10진수(선행 0도 동일: 010 = 10). 8진수는 지원하지 않습니다. 연산자: & | ^ ~ << >> ( ).',
+            '0x: hex · 0b: binary · no prefix: decimal (including leading zeros: 010 = 10). Octal is not supported. Operators: & | ^ ~ << >> ( ).'
+        ),
+        bitwiseRules: t(
+            '부호 없는 정수로 계산합니다. 각 연산 결과는 선택한 비트 폭으로 제한하며, >>는 0으로 채웁니다. 숫자 바이트 순서는 계산에 영향을 주지 않습니다.',
+            'Uses unsigned integers. Each operation is limited to the selected width; >> shifts in zeros. Numeric byte order does not affect this calculation.'
+        ),
+        bitwiseReady: t('수식을 입력하면 결과가 즉시 표시됩니다.', 'Enter an expression to calculate instantly.'),
+        bitwiseEditing: t('수식 입력 중…', 'Editing expression…'),
+        bitwiseSuccess: t('{width}비트 계산 결과', '{width}-bit result'),
+        bitwiseHexLabel: t('16진수', 'Hex'),
+        bitwiseDecimalLabel: t('10진수', 'Decimal'),
+        bitwiseBinaryLabel: t('2진수', 'Binary'),
+        bitwiseEmptyResult: '—',
+        bitwiseCopyHex: t('16진수 복사', 'Copy hex result'),
+        bitwiseCopyDecimal: t('10진수 복사', 'Copy decimal result'),
+        bitwiseCopyBinary: t('2진수 복사', 'Copy binary result'),
+        bitwiseClear: t('수식 지우기', 'Clear expression'),
+        bitwiseCopied: t('계산 결과를 복사했습니다.', 'Calculation result copied.'),
+        bitwiseInvalidWidth: t('8·16·32·64비트 중에서 선택하세요.', 'Select 8, 16, 32, or 64 bits.'),
+        bitwiseInvalidToken: t('지원하지 않는 숫자 또는 문자가 있습니다.', 'The expression contains an unsupported number or character.'),
+        bitwiseInvalidExpression: t('숫자·연산자·괄호의 위치를 확인하세요.', 'Check the placement of numbers, operators, and parentheses.'),
+        bitwiseOutOfRange: t('숫자가 선택한 {width}비트 범위를 넘었습니다.', 'A number exceeds the selected {width}-bit range.'),
+        bitwiseInvalidShift: t('이동 횟수는 0~{max}의 정수여야 합니다.', 'The shift count must be an integer from 0 to {max}.'),
+        bitwiseTooComplex: t('수식이 너무 길거나 복잡합니다. 나누어 계산하세요.', 'The expression is too long or complex. Split it into smaller calculations.'),
+        bitwiseErrorPosition: t('{message} (위치 {position})', '{message} (position {position})'),
         copiedText: t('Text를 클립보드에 복사했습니다.', 'Text copied to the clipboard.'),
         copiedHex: t('Hex를 클립보드에 복사했습니다.', 'Hex copied to the clipboard.'),
         copyFailed: t('클립보드에 복사하지 못했습니다.', 'Could not copy to the clipboard.'),
@@ -248,14 +285,14 @@ export function buildHexConverterHtml(
             font-family: var(--vscode-font-family);
             font-size: var(--vscode-font-size);
         }
-        button, select, textarea { font: inherit; }
+        button, select, textarea, input { font: inherit; }
         button, select {
             min-height: 32px;
             border: 1px solid var(--vscode-button-border, transparent);
             border-radius: 4px;
         }
         button { cursor: pointer; }
-        button:focus-visible, select:focus-visible, textarea:focus-visible {
+        button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible, summary:focus-visible {
             outline: 1px solid var(--vscode-focusBorder);
             outline-offset: 2px;
         }
@@ -439,6 +476,31 @@ export function buildHexConverterHtml(
         .value-name { display: block; margin-bottom: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; }
         .value-number { display: block; overflow: hidden; text-overflow: ellipsis; font-family: var(--vscode-editor-font-family, monospace); font-size: 13px; white-space: nowrap; }
         .empty { grid-column: 1 / -1; padding: 18px 12px; color: var(--vscode-descriptionForeground); text-align: center; }
+        .bitwise-panel { margin-top: 14px; }
+        .bitwise-panel summary { padding: 11px 12px; background: var(--vscode-sideBar-background); cursor: pointer; font-size: 14px; font-weight: 600; }
+        .bitwise-panel summary:focus-visible { outline-offset: -2px; }
+        .bitwise-panel summary h2 { display: inline; margin: 0; font: inherit; }
+        .bitwise-body { padding: 12px; border-top: 1px solid var(--vscode-panel-border); }
+        .bitwise-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+        .bitwise-expression-control { flex: 1 1 300px; min-width: 0; }
+        .bitwise-width-control { min-width: 100px; }
+        #bitwiseExpression {
+            width: 100%;
+            min-width: 0;
+            min-height: 34px;
+            padding: 6px 8px;
+            border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+            border-radius: 4px;
+            color: var(--vscode-input-foreground);
+            background: var(--vscode-input-background);
+            font-family: var(--vscode-editor-font-family, monospace);
+        }
+        #bitwiseExpression[aria-invalid="true"] { border-color: var(--vscode-inputValidation-errorBorder, #be1100); }
+        .bitwise-hint { margin: 10px 0 0; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.5; }
+        .bitwise-results { display: grid; gap: 8px; }
+        .bitwise-result { display: grid; grid-template-columns: 60px minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+        .bitwise-result label { color: var(--vscode-descriptionForeground); font-size: 12px; }
+        .bitwise-result output { min-width: 0; overflow-wrap: anywhere; font-family: var(--vscode-editor-font-family, monospace); font-size: 13px; line-height: 1.6; }
         .saved-panel {
             min-width: 0;
             border: 1px solid var(--vscode-panel-border);
@@ -516,6 +578,9 @@ export function buildHexConverterHtml(
             .card-footer { align-items: flex-start; flex-direction: column; }
             .card-actions { width: 100%; }
             .card-actions button { flex: 1; }
+            .bitwise-result { grid-template-columns: 1fr auto; }
+            .bitwise-result output { grid-column: 1 / -1; grid-row: 2; }
+            .bitwise-expression-control { flex-basis: 100%; }
         }
     </style>
 </head>
@@ -620,6 +685,48 @@ export function buildHexConverterHtml(
         </div>
         <div id="valueGrid" class="value-grid"><div class="empty">${htmlStrings.noBytes}</div></div>
     </section>
+
+    <details id="bitwisePanel" class="inspector bitwise-panel" open>
+        <summary aria-labelledby="bitwiseTitle"><h2 id="bitwiseTitle">${htmlStrings.bitwiseTitle}</h2></summary>
+        <div class="bitwise-body">
+            <div class="bitwise-controls">
+                <div class="control bitwise-expression-control">
+                    <label for="bitwiseExpression">${htmlStrings.bitwiseExpressionLabel}</label>
+                    <input id="bitwiseExpression" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="bitwiseHint bitwiseRules bitwiseStatus" placeholder="${htmlStrings.bitwisePlaceholder}">
+                </div>
+                <div class="control bitwise-width-control">
+                    <label for="bitwiseWidth">${htmlStrings.bitwiseWidthLabel}</label>
+                    <select id="bitwiseWidth">
+                        <option value="8">${htmlStrings.bitwiseWidth8}</option>
+                        <option value="16">${htmlStrings.bitwiseWidth16}</option>
+                        <option value="32" selected>${htmlStrings.bitwiseWidth32}</option>
+                        <option value="64">${htmlStrings.bitwiseWidth64}</option>
+                    </select>
+                </div>
+                <button id="bitwiseClear" class="clear-button" type="button">${htmlStrings.bitwiseClear}</button>
+            </div>
+            <p id="bitwiseHint" class="bitwise-hint">${htmlStrings.bitwiseHint}</p>
+            <p id="bitwiseRules" class="bitwise-hint">${htmlStrings.bitwiseRules}</p>
+            <div id="bitwiseStatus" class="status" role="status" aria-live="polite" aria-atomic="true">${htmlStrings.bitwiseReady}</div>
+            <div class="bitwise-results">
+                <div class="bitwise-result">
+                    <label id="bitwiseHexLabel" for="bitwiseHex">${htmlStrings.bitwiseHexLabel}</label>
+                    <output id="bitwiseHex" for="bitwiseExpression bitwiseWidth" aria-labelledby="bitwiseHexLabel" aria-live="off">${htmlStrings.bitwiseEmptyResult}</output>
+                    <button id="copyBitwiseHex" class="copy-button" type="button" disabled>${htmlStrings.bitwiseCopyHex}</button>
+                </div>
+                <div class="bitwise-result">
+                    <label id="bitwiseDecimalLabel" for="bitwiseDecimal">${htmlStrings.bitwiseDecimalLabel}</label>
+                    <output id="bitwiseDecimal" for="bitwiseExpression bitwiseWidth" aria-labelledby="bitwiseDecimalLabel" aria-live="off">${htmlStrings.bitwiseEmptyResult}</output>
+                    <button id="copyBitwiseDecimal" class="copy-button" type="button" disabled>${htmlStrings.bitwiseCopyDecimal}</button>
+                </div>
+                <div class="bitwise-result">
+                    <label id="bitwiseBinaryLabel" for="bitwiseBinary">${htmlStrings.bitwiseBinaryLabel}</label>
+                    <output id="bitwiseBinary" for="bitwiseExpression bitwiseWidth" aria-labelledby="bitwiseBinaryLabel" aria-live="off">${htmlStrings.bitwiseEmptyResult}</output>
+                    <button id="copyBitwiseBinary" class="copy-button" type="button" disabled>${htmlStrings.bitwiseCopyBinary}</button>
+                </div>
+            </div>
+        </div>
+    </details>
     </div>
 
     <aside class="saved-panel" aria-labelledby="savedTitle">
@@ -643,12 +750,14 @@ export function buildHexConverterHtml(
     const MAX_SAVED_BYTES = ${HEX_CONVERTER_MAX_SAVED_BYTES};
     const LARGE_INPUT_CHARACTERS = ${HEX_CONVERTER_LARGE_INPUT_CHARACTERS};
     const LARGE_INPUT_DELAY_MS = ${HEX_CONVERTER_LARGE_INPUT_DELAY_MS};
+    const BITWISE_ERROR_DELAY_MS = ${HEX_BITWISE_ERROR_DELAY_MS};
     const HEX_PLACEHOLDER_BYTES = new Uint8Array([0x48, 0x65, 0x6C, 0x6C, 0x6F]);
     const parseHexConverterInput = ${parseHexConverterInput.toString()};
     const formatHexConverterBytes = ${formatHexConverterBytes.toString()};
     const encodeHexConverterText = ${encodeHexConverterText.toString()};
     const decodeHexConverterBytes = ${decodeHexConverterBytes.toString()};
     const buildHexConverterValueRows = ${buildHexConverterValueRows.toString()};
+    const evaluateHexBitwiseExpression = ${evaluateHexBitwiseExpression.toString()};
 
     const textInput = document.getElementById('textInput');
     const hexInput = document.getElementById('hexInput');
@@ -674,6 +783,24 @@ export function buildHexConverterHtml(
     const hexGroupMissing = document.getElementById('hexGroupMissing');
     const savedList = document.getElementById('savedList');
     const savedCount = document.getElementById('savedCount');
+    const bitwisePanel = document.getElementById('bitwisePanel');
+    const bitwiseExpression = document.getElementById('bitwiseExpression');
+    const bitwiseWidth = document.getElementById('bitwiseWidth');
+    const bitwiseStatus = document.getElementById('bitwiseStatus');
+    const bitwiseClear = document.getElementById('bitwiseClear');
+    const bitwiseOutputs = {
+        hex: document.getElementById('bitwiseHex'),
+        decimal: document.getElementById('bitwiseDecimal'),
+        binary: document.getElementById('bitwiseBinary'),
+    };
+    const bitwiseCopyButtons = {
+        hex: document.getElementById('copyBitwiseHex'),
+        decimal: document.getElementById('copyBitwiseDecimal'),
+        binary: document.getElementById('copyBitwiseBinary'),
+    };
+    let bitwiseResult;
+    let bitwiseCopyRequestId = 0;
+    let bitwiseErrorTimer;
     let activeSource = 'text';
     let currentBytes = new Uint8Array();
     let savedValues = Array.isArray(INITIAL_SAVED_VALUES) ? INITIAL_SAVED_VALUES : [];
@@ -854,6 +981,86 @@ export function buildHexConverterHtml(
             hexGroup: selectedHexGroup(),
             bytesPerRow: selectedBytesPerRow(),
             endian: endian.value,
+            bitwise: {
+                expression: bitwiseExpression.value,
+                width: Number(bitwiseWidth.value),
+                open: bitwisePanel.open,
+            },
+        });
+    }
+
+    function setBitwiseStatus(message, kind) {
+        bitwiseStatus.textContent = message;
+        bitwiseStatus.classList.toggle('is-error', kind === 'error');
+        bitwiseStatus.classList.toggle('is-success', kind === 'success');
+    }
+
+    function updateBitwise(deferError = false) {
+        if (bitwiseErrorTimer !== undefined) {
+            clearTimeout(bitwiseErrorTimer);
+            bitwiseErrorTimer = undefined;
+        }
+        bitwiseCopyRequestId++;
+        const width = Number(bitwiseWidth.value);
+        const result = evaluateHexBitwiseExpression(bitwiseExpression.value, width);
+        bitwiseResult = result.ok ? result : undefined;
+        const hasError = !result.ok && result.reason !== 'empty';
+        bitwiseExpression.setAttribute('aria-invalid', String(hasError && !deferError));
+        for (const format of ['hex', 'decimal', 'binary']) {
+            bitwiseOutputs[format].textContent = result.ok ? result[format] : S.bitwiseEmptyResult;
+            bitwiseCopyButtons[format].disabled = !result.ok;
+        }
+        if (result.ok) {
+            setBitwiseStatus(template(S.bitwiseSuccess, { width }), 'success');
+        } else if (!hasError) {
+            setBitwiseStatus(S.bitwiseReady, 'idle');
+        } else {
+            const messages = {
+                'invalid-width': S.bitwiseInvalidWidth,
+                'invalid-token': S.bitwiseInvalidToken,
+                'invalid-expression': S.bitwiseInvalidExpression,
+                'out-of-range': template(S.bitwiseOutOfRange, { width }),
+                'invalid-shift': template(S.bitwiseInvalidShift, { max: width - 1 }),
+                'too-complex': S.bitwiseTooComplex,
+            };
+            const showError = () => {
+                bitwiseErrorTimer = undefined;
+                bitwiseExpression.setAttribute('aria-invalid', 'true');
+                setBitwiseStatus(template(S.bitwiseErrorPosition, {
+                    message: messages[result.reason], position: result.index + 1,
+                }), 'error');
+            };
+            if (deferError) {
+                setBitwiseStatus(S.bitwiseEditing, 'idle');
+                bitwiseErrorTimer = setTimeout(showError, BITWISE_ERROR_DELAY_MS);
+            } else {
+                showError();
+            }
+        }
+    }
+
+    bitwiseExpression.addEventListener('input', () => { updateBitwise(true); persist(); });
+    bitwiseExpression.addEventListener('blur', () => {
+        if (bitwiseErrorTimer !== undefined) { updateBitwise(); }
+    });
+    bitwiseWidth.addEventListener('change', () => { updateBitwise(); persist(); });
+    bitwisePanel.addEventListener('toggle', persist);
+    bitwiseClear.addEventListener('click', () => {
+        bitwiseExpression.value = '';
+        updateBitwise();
+        persist();
+        bitwiseExpression.focus();
+    });
+    for (const format of ['hex', 'decimal', 'binary']) {
+        bitwiseCopyButtons[format].addEventListener('click', () => {
+            if (!bitwiseResult) { return; }
+            vscode.postMessage({
+                command: 'copyBitwiseResult',
+                expression: bitwiseExpression.value,
+                width: Number(bitwiseWidth.value),
+                format,
+                requestId: ++bitwiseCopyRequestId,
+            });
         });
     }
 
@@ -1050,7 +1257,11 @@ export function buildHexConverterHtml(
     window.addEventListener('message', event => {
         const message = event.data;
         if (!message) { return; }
-        if (message.command === 'copyResult') {
+        if (message.command === 'bitwiseCopyResult') {
+            if (message.requestId === bitwiseCopyRequestId && bitwiseResult) {
+                setBitwiseStatus(message.ok ? S.bitwiseCopied : S.copyFailed, message.ok ? 'success' : 'error');
+            }
+        } else if (message.command === 'copyResult') {
             setStatus(message.ok ? (message.kind === 'hex' ? S.copiedHex : S.copiedText) : S.copyFailed, message.ok ? 'success' : 'error');
         } else if (message.command === 'savedValues' && Array.isArray(message.values)) {
             savedValues = message.values;
@@ -1065,7 +1276,16 @@ export function buildHexConverterHtml(
     encoding.value = INITIAL_PREFERENCES.encoding;
     hexGroup.value = String(INITIAL_PREFERENCES.hexGroup);
     endian.value = INITIAL_PREFERENCES.endian;
+    bitwiseWidth.value = '32';
+    bitwisePanel.open = true;
     const restored = vscode.getState();
+    if (restored && restored.bitwise && typeof restored.bitwise === 'object') {
+        if ([8, 16, 32, 64].includes(restored.bitwise.width)) {
+            bitwiseWidth.value = String(restored.bitwise.width);
+        }
+        if (typeof restored.bitwise.expression === 'string') { bitwiseExpression.value = restored.bitwise.expression; }
+        if (typeof restored.bitwise.open === 'boolean') { bitwisePanel.open = restored.bitwise.open; }
+    }
     if (restored && (restored.encoding === 'utf8' || restored.encoding === 'ascii')) { encoding.value = restored.encoding; }
     if (restored && (restored.hexGroup === 1 || restored.hexGroup === 2 || restored.hexGroup === 4)) {
         hexGroup.value = String(restored.hexGroup);
@@ -1077,6 +1297,7 @@ export function buildHexConverterHtml(
     if (restored && typeof restored.text === 'string') { textInput.value = restored.text; }
     if (restored && typeof restored.hex === 'string') { hexInput.value = restored.hex; }
     updateHexPlaceholder();
+    updateBitwise();
     if (restored && restored.source === 'hex') { scheduleConversion('hex'); } else { scheduleConversion('text'); }
 </script>
 </body>
@@ -1146,6 +1367,32 @@ export function showHexConverter(context: vscode.ExtensionContext): void {
                     await panel.webview.postMessage({ command: 'copyResult', ok: true, kind: message.kind });
                 } catch {
                     void panel.webview.postMessage({ command: 'copyResult', ok: false, kind: message.kind })
+                        .then(undefined, () => undefined);
+                }
+                return;
+            }
+            case 'copyBitwiseResult': {
+                if (!Number.isSafeInteger(message.requestId) || message.requestId < 0) { return; }
+                const requestId: number = message.requestId;
+                if (
+                    typeof message.expression !== 'string'
+                    || typeof message.width !== 'number'
+                    || (message.format !== 'hex' && message.format !== 'decimal' && message.format !== 'binary')
+                ) {
+                    await panel.webview.postMessage({ command: 'bitwiseCopyResult', ok: false, requestId });
+                    return;
+                }
+                const result = evaluateHexBitwiseExpression(message.expression, message.width);
+                if (!result.ok) {
+                    await panel.webview.postMessage({ command: 'bitwiseCopyResult', ok: false, requestId });
+                    return;
+                }
+                const format: 'hex' | 'decimal' | 'binary' = message.format;
+                try {
+                    await vscode.env.clipboard.writeText(result[format]);
+                    await panel.webview.postMessage({ command: 'bitwiseCopyResult', ok: true, requestId });
+                } catch {
+                    void panel.webview.postMessage({ command: 'bitwiseCopyResult', ok: false, requestId })
                         .then(undefined, () => undefined);
                 }
                 return;

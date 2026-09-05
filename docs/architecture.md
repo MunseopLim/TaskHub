@@ -47,6 +47,7 @@ TaskHub/
 │   ├── hexParser.ts                   # Intel HEX / SREC / Binary 파서
 │   ├── hexConverter.ts                # Text ↔ Hex 실시간 변환 WebView와 패널 수명주기
 │   ├── hexConverterUtils.ts           # Text/Hex 변환·숫자 해석 순수 로직
+│   ├── hexBitwiseUtils.ts             # 고정 폭 정수 비트 수식 파서·계산 순수 로직
 │   ├── featureLauncher.ts             # Status Bar 기능 런처·그룹형 Quick Pick·최근 사용
 │   ├── archiveUtils.ts                # zip/unzip 내장 엔진
 │   ├── i18n.ts                        # 다국어 지원 (한국어/영어, vscode.env.language 기반)
@@ -286,6 +287,7 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   DWARF 소스 경로·줄·선택적 MD5도 같은 opaque target ID 뒤의 extension host에만 둔다. 웹뷰에는 컴파일 머신의 경로와 checksum을 노출하지 않으며, 열기 직전에 ELF 변경 여부와 대상 ID를 다시 검증한다. MD5는 보안 검증이 아니라 이미 찾은 소스 후보와 빌드 기록의 내용 일치 여부를 보조하는 데만 쓴다. 후보 비교 결과는 열린 패널에만 두고 크기·mtime·ctime이 모두 같을 때 재사용하며 Refresh와 stale ELF 감지 시 폐기한다.
     *   에러/정보 HTML 출력은 `escapeHtml` 경유를 강제한다.
 6.  **파서 입력 한도**
+    *   Hex/Text 비트 계산: `evaluateHexBitwiseExpression()`은 수식을 4096자·256토큰·괄호와 `~`의 합산 중첩 32단계로 제한한다. 허용된 숫자·비트 연산자만 직접 파싱하며, `BigInt` 계산 전에 리터럴 범위와 shift 횟수를 검사한다. 동적 코드 실행은 사용하지 않는다.
     *   GNU 링커 상수식: `parseLinkerConstantExpression()`은 식당 4096자·256토큰으로 제한하고 안전한 정수 범위를 검사한다. 허용된 토큰을 직접 해석하며 `eval`이나 동적 코드 실행을 사용하지 않는다.
     *   링커 파싱 진단은 `incomplete`(영역 누락·주소 불확정)와 `note`(영역 추출에 영향 없는 사후 검사)를 구분한다. Memory Map은 `incomplete`가 있는 결과를 사용하지 않고, `ScatterAssert`의 `note`만 있으면 안내 후 영역을 사용한다. 기존 `warnings`는 불완전 진단 메시지와의 호환용으로 유지한다. GNU 주석은 `/* */`만 제거하며 따옴표 안의 파일명을 먼저 분리해 주석·영역 선언으로 오인하지 않는다.
     *   ELF32: 헤더 최소 크기/섹션 테이블/string table 범위를 선검증하고 `sh_offset`·`p_offset`을 보존한다. 심볼은 소속 섹션 범위 안에서만 `sh_offset`으로 변환하며, 섹션 정보가 없는 주소만 `PT_LOAD`의 file-backed 구간에 한해 `p_offset`으로 변환한다. NOBITS·zero-fill·파일 밖 범위는 다른 위치로 fallback하지 않는다.
