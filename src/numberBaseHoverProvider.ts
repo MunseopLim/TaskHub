@@ -97,6 +97,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return cached.lines;
         }
         const lines = document.getText().split(/\r?\n/);
+        // Struct packing metadata can safely share this immutable version snapshot.
+        Object.freeze(lines);
         this.documentLinesCache = { uri, version: document.version, lines };
         return lines;
     }
@@ -1436,9 +1438,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return null;
         }
 
+        const sourceVersion = document.version;
+
         // Calculate struct size
         // Load custom type configuration if available (async fs I/O under the hood)
         const typeConfig = await this.loadTypeConfig(document);
+        if (document.version !== sourceVersion) { return null; }
         const calculator = new StructSizeCalculator(typeConfig);
 
         // Register all struct/class definitions in the document
@@ -1449,8 +1454,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         if (!result.success) {
             const explanation = new vscode.MarkdownString();
             explanation.appendText(t(
-                `구조체 ${structName}의 크기를 계산할 수 없습니다. 지원되지 않는 선언 또는 해석되지 않은 타입이 있습니다. 대상 컴파일러의 sizeof로 확인하고, 사용자 타입은 .vscode/taskhub_types.json에 정의하세요.`,
-                `Cannot calculate the size of ${structName}: unsupported declarations or unresolved types. Check sizeof with the target compiler and define custom types in .vscode/taskhub_types.json.`
+                `구조체 ${structName}의 크기를 계산할 수 없습니다. 상속·가상 멤버 등 지원되지 않는 선언 또는 해석되지 않은 타입이 있습니다. 대상 컴파일러의 sizeof로 확인하고, 사용자 타입은 .vscode/taskhub_types.json에 정의하세요.`,
+                `Cannot calculate the size of ${structName}: unsupported declarations (such as inheritance or virtual members) or unresolved types. Check sizeof with the target compiler and define custom types in .vscode/taskhub_types.json.`
             ));
             return new vscode.Hover(explanation, wordRange);
         }
@@ -1488,8 +1493,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         md.appendMarkdown('\n');
         md.appendMarkdown(t(
-            '*설정된 타입 크기와 packing 기준의 추정값입니다. 실제 ABI·비트 필드 배치는 대상 컴파일러의 sizeof로 확인하세요. `.vscode/taskhub_types.json`에서 크기와 정렬을 설정할 수 있습니다.*\n',
-            '*Estimate based on configured type sizes and packing. Verify the target ABI and bit-field layout with compiler sizeof. Customize sizes and alignment in `.vscode/taskhub_types.json`.*\n'
+            '*설정된 타입 크기와 packing 기준의 추정값입니다. #include와 조건부 전처리는 수행하지 않습니다. 실제 ABI·비트 필드 배치는 대상 컴파일러의 sizeof로 확인하세요. `.vscode/taskhub_types.json`에서 크기와 정렬을 설정할 수 있습니다.*\n',
+            '*Estimate based on configured type sizes and packing. #include and conditional preprocessing are not performed. Verify the target ABI and bit-field layout with compiler sizeof. Customize sizes and alignment in `.vscode/taskhub_types.json`.*\n'
         ));
 
         return md;

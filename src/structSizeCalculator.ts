@@ -85,6 +85,12 @@ interface ParsedMembers {
     unparsed: string[];
 }
 
+interface AggregateSource {
+    header: string;
+    body: string;
+    suffix: string;
+}
+
 /**
  * Default type configurations for common C/C++ types
  */
@@ -155,6 +161,9 @@ const DEFAULT_TYPE_CONFIG: TypeConfigFile = {
  * StructSizeCalculator - calculates struct/class sizes with padding
  */
 export class StructSizeCalculator {
+    // Frozen line arrays are immutable document-version snapshots from the hover
+    // provider. Weak keys let old documents go without retaining a global history.
+    private static readonly packingBySource = new WeakMap<string[], readonly boolean[]>();
     private typeConfig: TypeConfigFile;
     private customTypes: Map<string, StructSizeResult> = new Map();
 
@@ -187,16 +196,12 @@ export class StructSizeCalculator {
                 };
             }
             const aggregateKind = this.getAggregateKind(lines[startLine]);
-            const { members, unparsed } = this.parseStructMembers(lines, startLine);
-            const source = lines.slice(startLine).join('\n').replace(
-                /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
-                (text, literal: string | undefined) => literal ?? text.replace(/[^\n]/g, ' ')
-            );
-            const header = source.slice(0, source.indexOf('{'));
-            const closingBrace = this.findMatchingBraceInText(source, source.indexOf('{'));
-            const suffix = closingBrace < 0 ? '' : source.slice(closingBrace + 1).split(';')[0];
-            if (/\b(?:alignas|__attribute__|__declspec)\b|\[\[|;|:(?!:)/u.test(header + suffix)) {
-                unparsed.push(header.trim());
+            const aggregate = this.extractAggregateSource(lines, startLine);
+            const { members, unparsed } = aggregate
+                ? this.parseMemberStatements(aggregate.body)
+                : { members: [], unparsed: [] };
+            if (aggregate && /\b(?:alignas|__attribute__|__declspec)\b|\[\[|;|:(?!:)/u.test(aggregate.header + aggregate.suffix)) {
+                unparsed.push(aggregate.header.trim());
             }
             // Source-level packing is compiler/preprocessor dependent. The explicit
             // taskhub_types.json packing setting is the only packing input we apply.
@@ -242,61 +247,73 @@ export class StructSizeCalculator {
     }
 
     private hasActiveSourcePacking(lines: string[], startLine: number): boolean {
-        // Ignore directive-shaped text in comments and string/character literals.
-        const source = lines.slice(0, startLine + 1).join('\n').replace(
+        const cached = StructSizeCalculator.packingBySource.get(lines);
+        if (cached) { return cached[startLine] ?? false; }
+        // Mutable API inputs are not cached: editing a prior pragma in place must
+        // affect the very next calculation, even when array length stays the same.
+        const cacheable = Object.isFrozen(lines);
+        const states = this.buildSourcePacking(lines.slice(0, cacheable ? lines.length : startLine + 1));
+        if (cacheable) { StructSizeCalculator.packingBySource.set(lines, states); }
+        return states[startLine] ?? false;
+    }
+
+    private buildSourcePacking(lines: string[]): readonly boolean[] {
+        // Mask once for the whole immutable document, preserving line positions.
+        const source = lines.join('\n').replace(
             /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
             text => text.replace(/[^\n]/g, ' ')
         );
         let active = false;
+        const states: boolean[] = [];
         const stack: Array<{ name?: string; previous: boolean }> = [];
-        for (const match of source.matchAll(/^\s*#\s*pragma\s+pack\s*\(([^)]*)\)/gm)) {
-            const args = match[1].split(',').map(arg => arg.trim()).filter(Boolean);
-            const operation = args[0];
-            if (operation === 'push') {
-                stack.push({ name: args[1] && !/^\d+$/.test(args[1]) ? args[1] : undefined, previous: active });
-                if (args.slice(1).some(arg => /^\d+$/.test(arg))) { active = true; }
-            } else if (operation === 'pop') {
-                const name = args[1] && !/^\d+$/.test(args[1]) ? args[1] : undefined;
-                const index = name === undefined ? stack.length - 1 : stack.map(entry => entry.name).lastIndexOf(name);
-                if (index >= 0) {
-                    active = stack[index].previous;
-                    stack.splice(index);
-                } else if (name !== undefined) {
-                    active = true; // Unknown stack labels cannot establish a natural layout.
-                }
-                if (args.slice(1).some(arg => /^\d+$/.test(arg))) { active = true; }
-            } else {
-                active = args.length > 0;
+        let continued = '';
+        for (const line of source.split('\n')) {
+            const logicalLine = continued + line;
+            if (/\\\s*$/u.test(line)) {
+                continued = logicalLine.replace(/\\\s*$/u, ' ');
+                states.push(active);
+                continue;
             }
+            continued = '';
+            const match = /^\s*#\s*pragma\s+pack\s*\(([^)]*)\)/u.exec(logicalLine);
+            if (match) {
+                const args = match[1].split(',').map(arg => arg.trim()).filter(Boolean);
+                const operation = args[0];
+                if (operation === 'push') {
+                    stack.push({ name: args[1] && !/^\d+$/.test(args[1]) ? args[1] : undefined, previous: active });
+                    if (args.slice(1).some(arg => /^\d+$/.test(arg))) { active = true; }
+                } else if (operation === 'pop') {
+                    const name = args[1] && !/^\d+$/.test(args[1]) ? args[1] : undefined;
+                    const index = name === undefined ? stack.length - 1 : stack.map(entry => entry.name).lastIndexOf(name);
+                    if (index >= 0) {
+                        active = stack[index].previous;
+                        stack.splice(index);
+                    } else if (name !== undefined) {
+                        active = true;
+                    }
+                    if (args.slice(1).some(arg => /^\d+$/.test(arg))) { active = true; }
+                } else {
+                    active = args.length > 0;
+                }
+            }
+            states.push(active);
         }
-        return active;
+        return states;
     }
 
-    /**
-     * Parse struct members from source code
-     */
-    private parseStructMembers(lines: string[], startLine: number): ParsedMembers {
-        const body = this.extractAggregateBody(lines, startLine);
-        if (body === null) {
-            return { members: [], unparsed: [] };
-        }
-        return this.parseMemberStatements(body);
-    }
-
-    private extractAggregateBody(lines: string[], startLine: number): string | null {
-        let foundOpeningBrace = false;
+    /** Scan only this declaration, ending at the semicolon after its closing brace. */
+    private extractAggregateSource(lines: string[], startLine: number): AggregateSource | null {
+        const result: AggregateSource = { header: '', body: '', suffix: '' };
+        let part: keyof AggregateSource = 'header';
         let braceDepth = 0;
-        let body = '';
         let inBlockComment = false;
+        let inString: '"' | '\'' | null = null;
 
         for (let i = startLine; i < lines.length; i++) {
             const line = lines[i];
-            let inString: '"' | '\'' | null = null;
-
             for (let ci = 0; ci < line.length; ci++) {
                 const ch = line[ci];
-                const next = ci + 1 < line.length ? line[ci + 1] : '';
-
+                const next = line[ci + 1] ?? '';
                 if (inBlockComment) {
                     if (ch === '*' && next === '/') {
                         inBlockComment = false;
@@ -305,51 +322,61 @@ export class StructSizeCalculator {
                     continue;
                 }
                 if (inString) {
-                    if (foundOpeningBrace && braceDepth > 0) { body += ch; }
+                    if (part !== 'suffix' || braceDepth === 0) { result[part] += ch; }
                     if (ch === '\\') {
                         ci++;
-                        if (foundOpeningBrace && braceDepth > 0 && ci < line.length) { body += line[ci]; }
-                        continue;
+                        if (ci < line.length && (part !== 'suffix' || braceDepth === 0)) { result[part] += line[ci]; }
+                    } else if (ch === inString) {
+                        inString = null;
                     }
-                    if (ch === inString) { inString = null; }
                     continue;
                 }
-                if (ch === '/' && next === '/') {
-                    break;
-                }
+                if (ch === '/' && next === '/') { break; }
                 if (ch === '/' && next === '*') {
+                    if (part !== 'suffix' || braceDepth === 0) { result[part] += ' '; }
                     inBlockComment = true;
                     ci++;
                     continue;
                 }
                 if (ch === '"' || ch === '\'') {
                     inString = ch;
-                    if (foundOpeningBrace && braceDepth > 0) { body += ch; }
+                    if (part !== 'suffix' || braceDepth === 0) { result[part] += ch; }
                     continue;
                 }
-                if (ch === '{') {
-                    if (foundOpeningBrace && braceDepth > 0) { body += ch; }
-                    foundOpeningBrace = true;
+                if (part === 'suffix') {
+                    // Objects declared with the type can have nested brace
+                    // initializers. They do not affect the type's layout.
+                    if (ch === '{') { braceDepth++; continue; }
+                    if (ch === '}') {
+                        if (braceDepth === 0) { return null; }
+                        braceDepth--;
+                        continue;
+                    }
+                    if (braceDepth > 0) { continue; }
+                    if (ch === ';') { return result; }
+                } else if (ch === '{') {
+                    if (part === 'header') {
+                        part = 'body';
+                    } else {
+                        result.body += ch;
+                    }
                     braceDepth++;
                     continue;
-                }
-                if (ch === '}') {
+                } else if (ch === '}') {
                     braceDepth--;
-                    if (braceDepth === 0 && foundOpeningBrace) {
-                        return body;
+                    if (braceDepth === 0 && part === 'body') {
+                        part = 'suffix';
+                    } else {
+                        result[part] += ch;
                     }
-                    if (foundOpeningBrace && braceDepth > 0) { body += ch; }
                     continue;
+                } else if (ch === ';' && part === 'header') {
+                    return null; // A forward declaration is not a definition.
                 }
-                if (foundOpeningBrace && braceDepth > 0) {
-                    body += ch;
-                }
+                result[part] += ch;
             }
-            if (foundOpeningBrace && braceDepth > 0) {
-                body += '\n';
-            }
+            result[part] += '\n';
         }
-
         return null;
     }
 
@@ -928,7 +955,8 @@ export class StructSizeCalculator {
      * Find struct definition in source code
      */
     static findStructDefinition(lines: string[], structName: string): number {
-        const pattern = new RegExp(`\\b(struct|class|union)\\s+(?:alignas\\s*\\([^()]*\\)\\s*)?${structName}\\b`);
+        const escapedName = structName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(`\\b(struct|class|union)\\s+(?:alignas\\s*\\([^()]*\\)\\s*)?${escapedName}\\b`);
 
         for (let i = 0; i < lines.length; i++) {
             if (pattern.test(lines[i])) {

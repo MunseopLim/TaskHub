@@ -296,5 +296,6 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
 7.  **Hover 타임아웃 및 비동기 IO**
     *   `withLspTimeout(promise, token, 3000)`으로 모든 LSP 호출을 감싼다. `activeHoverCalls: Set<string>`이 동일 위치 재진입을 막는다.
     *   `taskhub_types.json` 로드는 `fs.promises.*`(stat/readFile/realpath) 기반이다. 느린 스토리지에서도 extension host 이벤트 루프를 블로킹하지 않는다.
+    *   구조체는 선언의 종료 세미콜론까지만 읽는다. 소스 packing 상태는 URI·문서 버전별 불변 줄 배열을 키로 `WeakMap`에 한 번 전처리해 공유한다. 직접 전달된 가변 배열은 캐시하지 않으며, 비동기 설정 읽기 중 문서가 바뀌면 해당 Hover 계산을 중단한다.
 
 보안 관련 변경 시 관련 유닛 테스트(`src/test/extension.test.ts`의 `sanitizeInterpolatedValue`, `resolveWithinWorkspace`, 파서별 `defensive` suite)를 함께 갱신한다.

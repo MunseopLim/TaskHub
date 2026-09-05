@@ -56,6 +56,7 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             assert.match(markdown, /Estimated Size|추정 크기/);
             assert.match(markdown, /8 bytes/);
             assert.match(markdown, /sizeof/);
+            assert.match(markdown, /#include/);
         });
 
         for (const content of [
@@ -76,6 +77,43 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 assert.doesNotMatch(markdown, /Estimated Size|Total Size|추정 크기/);
             });
         }
+    });
+
+    suite('Struct source snapshot freshness', () => {
+        test('cached lines are immutable within a version and replaced after editing', () => {
+            let content = '#pragma pack(1)\nstruct Sample { char first; int last; };';
+            const document = {
+                uri: vscode.Uri.parse('untitled:struct-cache'),
+                version: 1,
+                getText: () => content,
+            };
+            const first = (provider as any).getDocumentLines(document) as string[];
+            assert.ok(Object.isFrozen(first));
+            assert.strictEqual((provider as any).getDocumentLines(document), first);
+            content = '#pragma pack()\nstruct Sample { char first; int last; };';
+            document.version++;
+            const next = (provider as any).getDocumentLines(document) as string[];
+            assert.notStrictEqual(next, first);
+            assert.ok(Object.isFrozen(next));
+            assert.strictEqual(next[0], '#pragma pack()');
+            assert.strictEqual(first[0], '#pragma pack(1)');
+        });
+
+        test('an edit while type configuration loads cannot return a stale struct hover', async () => {
+            const document = {
+                uri: vscode.Uri.parse('untitled:struct-pending'),
+                version: 1,
+                lineAt: () => ({ text: 'struct Sample { int value; };' }),
+                getWordRangeAtPosition: () => new vscode.Range(0, 7, 0, 13),
+                getText: (range?: vscode.Range) => range ? 'Sample' : 'struct Sample { int value; };',
+            };
+            (provider as any).loadTypeConfig = async () => {
+                document.version++;
+                return undefined;
+            };
+            const hover = await (provider as any).tryStructSizeInfo(document, new vscode.Position(0, 8));
+            assert.strictEqual(hover, null);
+        });
     });
 
     suite('Number Parsing Tests', () => {

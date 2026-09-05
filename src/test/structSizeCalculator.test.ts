@@ -534,6 +534,98 @@ suite('StructSizeCalculator Test Suite', () => {
         });
     });
 
+    suite('Document scan bounds and invalidation', () => {
+        test('three passes over a frozen document inspect a linear number of source lines', () => {
+            const lines: string[] = [];
+            const starts: number[] = [];
+            for (let index = 0; index < 80; index++) {
+                starts.push(lines.length);
+                lines.push(`struct Sample${index} {`, ...Array.from({ length: 38 }, (_, member) => `int member${member};`), '};', '');
+            }
+            Object.freeze(lines);
+            let inspectedLines = 0;
+            const source = new Proxy(lines, {
+                get(target, property, receiver) {
+                    if (typeof property === 'string' && /^\d+$/.test(property)) { inspectedLines++; }
+                    return Reflect.get(target, property, receiver);
+                }
+            });
+            for (let pass = 0; pass < 3; pass++) {
+                const current = new StructSizeCalculator();
+                for (const [index, start] of starts.entries()) {
+                    const result = current.calculateStructSize(`Sample${index}`, source, start);
+                    assert.strictEqual(result.success, true);
+                    assert.strictEqual(result.totalSize, 38 * 4);
+                }
+            }
+            assert.ok(inspectedLines <= lines.length * 5,
+                `expected one packing pass and bounded aggregate scans, got ${inspectedLines} reads for ${lines.length} lines`);
+        });
+
+        test('packing metadata is shared only for immutable snapshots and honors replacements', () => {
+            const packed = ['#pragma pack(1)', 'struct S { char first; int last; };'];
+            Object.freeze(packed);
+            assert.strictEqual(calculator.calculateStructSize('S', packed, 1).success, false);
+            const natural = ['#pragma pack()', packed[1]];
+            Object.freeze(natural);
+            assert.strictEqual(calculator.calculateStructSize('S', natural, 1).totalSize, 8);
+            assert.strictEqual(calculator.calculateStructSize('S', natural, 1).success, true);
+            const mutable = [...packed];
+            assert.strictEqual(calculator.calculateStructSize('S', mutable, 1).success, false);
+            mutable[0] = '#pragma pack()';
+            assert.strictEqual(calculator.calculateStructSize('S', mutable, 1).success, true);
+        });
+
+        test('continued pragma directives preserve physical-line packing state', () => {
+            const slash = String.fromCharCode(92);
+            const lines = [`#pragma pack(push, ${slash}`, '1)', 'struct Packed { char first; int last; };',
+                `#pragma pack(${slash}`, 'pop)', 'struct Natural { char first; int last; };'];
+            Object.freeze(lines);
+            assert.strictEqual(calculator.calculateStructSize('Packed', lines, 2).success, false);
+            assert.strictEqual(calculator.calculateStructSize('Natural', lines, 5).success, true);
+        });
+
+        test('multiline trailing attributes are checked without scanning the next declaration', () => {
+            const result = calculator.calculateStructSize('S', [
+                'struct S {', '    int x;', '    char y;', '}',
+                '    /* layout attribute on the next line */',
+                '    __attribute__((packed));',
+                'struct Next { int ignored; };'
+            ], 0);
+            assert.strictEqual(result.success, false);
+            const natural = calculator.calculateStructSize('S', [
+                'struct S { const char *url = "http://host"; int x; };',
+                'struct alignas(16) Next { int ignored; };'
+            ], 0);
+            assert.strictEqual(natural.success, true);
+            assert.strictEqual(natural.totalSize, 8);
+        });
+
+        test('struct lookup treats caller-supplied names as literal text', () => {
+            const lines = ['struct Normal { int x; };'];
+            for (const name of ['[', '(', 'Normal|Other', '.*']) {
+                assert.doesNotThrow(() => StructSizeCalculator.findStructDefinition(lines, name));
+                assert.strictEqual(StructSizeCalculator.findStructDefinition(lines, name), -1);
+            }
+            assert.strictEqual(StructSizeCalculator.findStructDefinition(lines, 'Normal'), 0);
+        });
+
+        test('objects initialized after the type definition do not change its layout or scan boundary', () => {
+            for (const suffix of ['s{1}', 's = {1}', 's[] = {{1}, {2}}',
+                's{[]() { const char *text = "virtual; }"; return 1; }()}']) {
+                const result = calculator.calculateStructSize('S', [
+                    `struct S { int x; } ${suffix};`,
+                    'struct Next { int ignored; } __attribute__((packed));'
+                ], 0);
+                assert.strictEqual(result.success, true, suffix);
+                assert.strictEqual(result.totalSize, 4, suffix);
+                assert.deepStrictEqual(result.members.map(member => member.name), ['x']);
+            }
+            assert.strictEqual(calculator.calculateStructSize('S', ['struct S { int x; } s{1;'], 0).success, false);
+            assert.strictEqual(calculator.calculateStructSize('S', ['struct S { int x; } __attribute__((packed)) s{1};'], 0).success, false);
+        });
+    });
+
     suite('Custom Type Configuration', () => {
         test('Use custom type sizes', () => {
             const customConfig: TypeConfigFile = {
