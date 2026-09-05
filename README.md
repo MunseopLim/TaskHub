@@ -48,7 +48,7 @@
 ### 뷰어
 - **Memory Map 시각화** — ELF/AXF와 ARM Linker Listing 분석, 메모리 영역 표시, 심볼·섹션 바이트와 DWARF 소스 위치 연결
 - **Hex Viewer** — 주소/16진/ASCII 3단, Unit·Endian·Go-to·Find 지원
-- **Hex/Text 변환기** — 인코딩·그룹·바이트 순서를 적용해 문자열과 Hex 바이트를 실시간 변환하고 자주 쓰는 값 저장
+- **Hex/Text 변환기** — 문자열·Hex 바이트 실시간 변환, 자주 쓰는 값 저장, 8/16/32/64비트 정수 비트 연산
 - **JSON Editor** — JSON 배열/객체를 스프레드시트 UI로 편집
 
 > 상세 설명과 JSON 예제는 [docs/features.md](docs/features.md) 참조.
@@ -57,78 +57,72 @@
 
 ## 스크린샷
 
-### 워크플로우
+### 워크플로우 — Build → Verify → ZIP
 
-<table>
-  <tr>
-    <td align="center" width="34%">
-      <b>사이드바</b><br>
-      <sub>Actions · Links · Favorites · History 통합 뷰</sub><br>
-      <img src="docs/images/sidebar-overview.png" alt="TaskHub 사이드바" width="260">
-    </td>
-    <td align="center" width="33%">
-      <b>액션 실행</b><br>
-      <sub>실행 중 상태 아이콘 표시</sub><br>
-      <img src="docs/images/actions-running.png" alt="액션 실행 중" width="260">
-    </td>
-    <td align="center" width="33%">
-      <b>실행 히스토리</b><br>
-      <sub>성공/실패 기록 + 시각·소요 시간 배지, 빠른 재실행</sub><br>
-      <img src="docs/images/history-panel.png" alt="History 패널" width="260">
-    </td>
-  </tr>
-</table>
+센서 데이터 바이너리를 생성·검증·압축하는 액션을 실행하고, 출력과 실행 기록을 함께 확인합니다. [실행 예제](examples/sensor_pipeline/README.md)
 
-**Quick Action Palette** — `TaskHub: 액션 실행…` 한 명령으로 모든 액션을 fuzzy 검색·실행. 최근 실행 항목은 상단 *최근 실행* 섹션에 모이고, 그 아래는 폴더 breadcrumb까지 매칭되는 전체 액션 리스트. 노출 개수는 `taskhub.runAnyAction.recentLimit`로 조정.
+![TaskHub의 Build → Verify → ZIP 액션과 실행 결과 및 History](docs/images/workflow-overview.jpg)
 
-![Quick Action Palette - 최근 사용 액션과 전체 액션 fuzzy 검색](docs/images/quick-action-palette.png)
+### Memory Map — 메모리 사용량과 영역 상세
 
-**Problem Matcher** — 빌드 task 출력의 컴파일러 에러·경고를 정규식으로 추출해 VS Code Problems 패널에 자동 등록. 클릭으로 파일·라인 점프, F8로 다음 진단 순환, 에디터의 빨간 squiggly까지 표시. `$gcc` / `$tsc` 내장 프리셋과 커스텀 정규식 모두 지원.
+ARM Linker Listing의 Flash·RAM 사용량을 살펴보고, 영역을 펼쳐 섹션과 함수 배치를 확인합니다.
 
-![Problem Matcher - 빌드 진단을 Problems 패널에 표시](docs/images/problem-matcher.png)
+![Flash와 RAM 사용량 및 펼쳐진 메모리 영역 상세](docs/images/memory-map-detail.jpg)
 
-### C/C++ Hover
+### Register Decoder — 레지스터 값 해석
 
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <b>Number Base Hover</b><br>
-      <sub>리터럴 진법 변환 + 32-bit 비트 맵</sub><br>
-      <img src="docs/images/hover-number-base.png" alt="Number Base Hover">
-    </td>
-    <td align="center" width="50%">
-      <b>Register Decoder Hover</b><br>
-      <sub>레지스터 값을 비트 필드별로 디코드</sub><br>
-      <img src="docs/images/hover-register-decode.png" alt="Register Decoder Hover">
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <b>SFR Bit Field Hover</b><br>
-      <sub>비트 필드 위치·접근 타입·리셋 값 요약</sub><br>
-      <img src="docs/images/hover-sfr-bit-field.png" alt="SFR Bit Field Hover">
-    </td>
-    <td align="center" width="50%">
-      <b>Macro Expansion Hover</b><br>
-      <sub><code>#define</code> 매크로의 최종 확장</sub><br>
-      <img src="docs/images/hover-macro-expansion.png" alt="Macro Expansion Hover">
-    </td>
-  </tr>
-</table>
+`UartCtrlReg uart_ctrl = 0x30B`에 마우스를 올려 `tx_en`, `rx_en`, `baud_sel` 같은 필드 값을 읽습니다.
 
-### 뷰어
+![UartCtrlReg에 대입한 0x30B를 비트 필드별로 해석한 Hover](docs/images/hover-register-decoder.jpg)
 
-**Memory Map 시각화** — ELF/AXF 또는 ARM Linker Listing을 분석해 메모리 리전별 사용량·섹션·함수 분포를 시각화. GNU linker script와 ARM scatter file에서 메모리 영역도 읽으며, ELF 심볼·섹션의 원본 바이트를 Hex Viewer로 열거나 DWARF가 기록한 소스 위치로 이동할 수 있습니다.
+### Hex/Text — 변환, 저장값, 비트 연산
 
-![Memory Map - ARM Linker 예제](docs/images/memory-map-armlink.png)
+`TaskHub`를 Hex로 변환하고 자주 쓰는 값을 저장합니다. 같은 화면에서 `0x123456789ABCDEF0 & 0xFFFF` 같은 64비트 마스크 계산도 할 수 있습니다.
 
-**Hex Viewer** — 바이너리 파일을 주소/16진/ASCII 3단으로 표시. Unit(1/2/4/8 Byte), Endian, Go-to, Find 지원.
+![TaskHub 문자열을 Hex로 변환하고 저장값을 표시한 변환기](docs/images/hex-text-converter.jpg)
 
-![Hex Viewer - sample_binary.bin 예제](docs/images/hex-viewer.png)
+![64비트 마스크 식과 Hex·Decimal·Binary 계산 결과](docs/images/hex-bitwise-calculator.jpg)
 
-**JSON Editor** — JSON 배열/객체를 스프레드시트 형태로 편집. 행 추가/삭제/드래그와 문자열↔배열·문자열↔숫자 셀 타입 변환을 지원.
+### Struct Size — 크기와 패딩 확인
 
-![JSON Editor - test.json 예제](docs/images/json-editor.png)
+`PacketHeader`의 추정 크기와 멤버별 오프셋·패딩을 코드 위에서 확인합니다.
+
+![PacketHeader 구조체의 추정 크기와 멤버 오프셋 및 패딩을 보여 주는 Hover](docs/images/hover-struct-size.jpg)
+
+### JSON Editor — 장치 설정 편집
+
+`devices.json`의 장치 이름·주소·활성 상태·태그를 표로 확인하고 편집합니다.
+
+![장치 이름, 주소, 활성 상태, 태그를 표시한 JSON Editor](docs/images/json-editor-devices.jpg)
+
+<details>
+<summary>다른 기능 예시 더 보기</summary>
+
+**Quick Action Palette** — 최근 실행 항목과 전체 액션을 검색합니다.
+
+![최근 실행 항목과 액션 검색을 보여 주는 Quick Action Palette](docs/images/quick-action-palette.png)
+
+**Problem Matcher** — 빌드 진단을 Problems 패널에서 확인합니다.
+
+![빌드 진단이 표시된 Problems 패널](docs/images/problem-matcher.png)
+
+**Number Base Hover** — 숫자의 진법 변환과 비트 정보를 확인합니다.
+
+![숫자 리터럴의 진법 변환과 비트 정보를 보여 주는 Hover](docs/images/hover-number-base.png)
+
+**SFR Bit Field Hover** — 비트 필드의 위치·접근 타입·리셋 값을 확인합니다.
+
+![레지스터 비트 필드 정보를 보여 주는 Hover](docs/images/hover-sfr-bit-field.png)
+
+**Macro Expansion Hover** — `#define` 매크로의 최종 확장을 확인합니다.
+
+![매크로의 최종 확장 결과를 보여 주는 Hover](docs/images/hover-macro-expansion.png)
+
+**Hex Viewer** — 바이너리 파일의 주소·Hex·ASCII를 함께 확인합니다.
+
+![sample_binary.bin을 표시한 Hex Viewer](docs/images/hex-viewer.png)
+
+</details>
 
 ---
 

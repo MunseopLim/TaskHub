@@ -1,0 +1,59 @@
+[
+    {
+        "id": "sensor.release",
+        "title": "Build → Verify → ZIP",
+        "action": {
+            "description": "센서 프레임 이미지를 생성하고 CRC32·SHA-256 검증 후 ZIP으로 묶습니다.",
+            "successMessage": "센서 이미지 검증 및 ZIP 패키징을 완료했습니다.",
+            "failMessage": "빌드 또는 검증 실패: 터미널 출력을 확인하세요.",
+            "tasks": [
+                {
+                    "id": "Build",
+                    "type": "command",
+                    "command": {
+                        "windows": "python",
+                        "macos": "python3",
+                        "linux": "python3"
+                    },
+                    "args": [
+                        "examples/sensor_pipeline/image_pipeline.py",
+                        "build"
+                    ],
+                    "cwd": "${workspaceFolder}",
+                    "revealTerminal": "always"
+                },
+                {
+                    "id": "Verify",
+                    "type": "command",
+                    "command": {
+                        "windows": "python",
+                        "macos": "python3",
+                        "linux": "python3"
+                    },
+                    "args": [
+                        "examples/sensor_pipeline/image_pipeline.py",
+                        "verify"
+                    ],
+                    "cwd": "${workspaceFolder}",
+                    "dependsOn": [
+                        "Build"
+                    ],
+                    "revealTerminal": "always"
+                },
+                {
+                    "id": "ZIP",
+                    "type": "zip",
+                    "source": [
+                        "examples/sensor_pipeline/build/sensor-node.bin",
+                        "examples/sensor_pipeline/build/manifest.json"
+                    ],
+                    "archive": "examples/sensor_pipeline/build/sensor-node-release.zip",
+                    "cwd": "${workspaceFolder}",
+                    "dependsOn": [
+                        "Verify"
+                    ]
+                }
+            ]
+        }
+    }
+]

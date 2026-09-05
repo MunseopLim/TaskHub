@@ -48,7 +48,7 @@
 ### Viewers
 - **Memory Map Visualization** — Analyze ELF/AXF and ARM Linker Listings, show memory regions, and connect symbol/section bytes and DWARF source locations
 - **Hex Viewer** — Address / hex / ASCII columns with Unit, Endian, Go-to, and Find
-- **Hex/Text Converter** — Convert text and Hex bytes in real time with encoding, grouping, byte-order controls, and saved values
+- **Hex/Text Converter** — Convert text and Hex bytes in real time, save reusable values, and run 8/16/32/64-bit bitwise calculations
 - **JSON Editor** — Spreadsheet-style JSON editing
 
 > See [docs/features.md (Korean)](docs/features.md) for detailed explanations and JSON examples.
@@ -57,78 +57,72 @@
 
 ## Screenshots
 
-### Workflow
+### Workflow — Build → Verify → ZIP
 
-<table>
-  <tr>
-    <td align="center" width="34%">
-      <b>Sidebar</b><br>
-      <sub>Actions · Links · Favorites · History in one view</sub><br>
-      <img src="docs/images/sidebar-overview.png" alt="TaskHub sidebar" width="260">
-    </td>
-    <td align="center" width="33%">
-      <b>Action Execution</b><br>
-      <sub>Running-state indicator</sub><br>
-      <img src="docs/images/actions-running.png" alt="Action running" width="260">
-    </td>
-    <td align="center" width="33%">
-      <b>Run History</b><br>
-      <sub>Success/failure log with time · duration badges and quick re-run</sub><br>
-      <img src="docs/images/history-panel.png" alt="History panel" width="260">
-    </td>
-  </tr>
-</table>
+Generate a sensor data binary, verify it, and archive it in one action, with output and run history in view. [Runnable example](examples/sensor_pipeline/README.md)
 
-**Quick Action Palette** — A single `TaskHub: Run Any Action…` command fuzzy-searches and runs every action. Recently used items collect in the top *Recently used* section, and the rest is a flat list that also matches against the folder breadcrumb. The visible count is controlled by `taskhub.runAnyAction.recentLimit`.
+![TaskHub Build → Verify → ZIP action with output and History](docs/images/workflow-overview.jpg)
 
-![Quick Action Palette — recently used actions plus full fuzzy search](docs/images/quick-action-palette.png)
+### Memory Map — Usage and region details
 
-**Problem Matcher** — Build-task output is parsed via regex matchers and surfaced as VS Code Problems entries. Click to jump to the file/line, F8 to cycle, red squigglies in the editor. Built-in `$gcc` / `$tsc` presets plus arbitrary custom patterns are supported.
+Inspect Flash and RAM usage from an ARM Linker Listing, then expand a region to see its sections and functions.
 
-![Problem Matcher — build diagnostics in the Problems panel](docs/images/problem-matcher.png)
+![Flash and RAM usage with an expanded memory region](docs/images/memory-map-detail.jpg)
 
-### C/C++ Hover
+### Register Decoder — Read register values
 
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <b>Number Base Hover</b><br>
-      <sub>Literal base conversion + 32-bit bit map</sub><br>
-      <img src="docs/images/hover-number-base.png" alt="Number Base Hover">
-    </td>
-    <td align="center" width="50%">
-      <b>Register Decoder Hover</b><br>
-      <sub>Decode register values into bit fields</sub><br>
-      <img src="docs/images/hover-register-decode.png" alt="Register Decoder Hover">
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <b>SFR Bit Field Hover</b><br>
-      <sub>Position, access type, reset value at a glance</sub><br>
-      <img src="docs/images/hover-sfr-bit-field.png" alt="SFR Bit Field Hover">
-    </td>
-    <td align="center" width="50%">
-      <b>Macro Expansion Hover</b><br>
-      <sub>Final expansion of <code>#define</code> macros</sub><br>
-      <img src="docs/images/hover-macro-expansion.png" alt="Macro Expansion Hover">
-    </td>
-  </tr>
-</table>
+Hover over `UartCtrlReg uart_ctrl = 0x30B` to read fields such as `tx_en`, `rx_en`, and `baud_sel`.
 
-### Viewers
+![Hover decoding 0x30B into UartCtrlReg bit fields](docs/images/hover-register-decoder.jpg)
 
-**Memory Map Visualization** — Analyzes ELF/AXF or ARM Linker Listings to show per-region usage, sections, and function distribution. Memory regions can also be read from GNU linker scripts and ARM scatter files, while ELF symbol/section bytes can be opened directly in Hex Viewer and DWARF-recorded source locations can be opened in the editor.
+### Hex/Text — Conversion, saved values, and bitwise calculations
 
-![Memory Map - ARM Linker example](docs/images/memory-map-armlink.png)
+Convert `TaskHub` to Hex and save reusable values. Calculate a 64-bit mask such as `0x123456789ABCDEF0 & 0xFFFF` in the same view.
 
-**Hex Viewer** — Displays binary files in address / hex / ASCII columns. Supports Unit (1/2/4/8 byte), Endian, Go-to, and Find.
+![Hex/Text Converter showing TaskHub text as Hex bytes and saved values](docs/images/hex-text-converter.jpg)
 
-![Hex Viewer - sample_binary.bin example](docs/images/hex-viewer.png)
+![64-bit mask expression with Hex, Decimal, and Binary results](docs/images/hex-bitwise-calculator.jpg)
 
-**JSON Editor** — Edit JSON arrays/objects in a spreadsheet UI, with row add/delete/drag and string↔array or string↔number cell-type conversion.
+### Struct Size — Size and padding
 
-![JSON Editor - test.json example](docs/images/json-editor.png)
+Check the estimated size, member offsets, and padding of `PacketHeader` directly in the editor.
+
+![Hover showing estimated PacketHeader size, member offsets, and padding](docs/images/hover-struct-size.jpg)
+
+### JSON Editor — Edit device settings
+
+View and edit device names, addresses, enabled states, and tags from `devices.json` in a table.
+
+![JSON Editor showing device names, addresses, enabled states, and tags](docs/images/json-editor-devices.jpg)
+
+<details>
+<summary>More feature examples</summary>
+
+**Quick Action Palette** — Search recent runs and all available actions.
+
+![Quick Action Palette showing recent runs and action search](docs/images/quick-action-palette.png)
+
+**Problem Matcher** — View build diagnostics in the Problems panel.
+
+![Build diagnostics in the Problems panel](docs/images/problem-matcher.png)
+
+**Number Base Hover** — Inspect number base conversions and bit information.
+
+![Hover showing number base conversions and bit information](docs/images/hover-number-base.png)
+
+**SFR Bit Field Hover** — Inspect bit positions, access types, and reset values.
+
+![Hover showing register bit field information](docs/images/hover-sfr-bit-field.png)
+
+**Macro Expansion Hover** — Read the final expansion of a `#define` macro.
+
+![Hover showing the final macro expansion](docs/images/hover-macro-expansion.png)
+
+**Hex Viewer** — Inspect binary addresses, Hex bytes, and ASCII together.
+
+![Hex Viewer displaying sample_binary.bin](docs/images/hex-viewer.png)
+
+</details>
 
 ---
 

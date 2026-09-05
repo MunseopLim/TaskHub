@@ -1,0 +1,26 @@
+[
+    {
+        "name": "UART Console",
+        "address": "0x40001000",
+        "enabled": true,
+        "tags": ["serial", "debug"]
+    },
+    {
+        "name": "SPI Flash",
+        "address": "0x40002000",
+        "enabled": true,
+        "tags": ["storage", "firmware"]
+    },
+    {
+        "name": "I2C Sensors",
+        "address": "0x40003000",
+        "enabled": true,
+        "tags": ["sensor", "telemetry"]
+    },
+    {
+        "name": "PWM Motor",
+        "address": "0x40004000",
+        "enabled": false,
+        "tags": ["motor", "control"]
+    }
+]
