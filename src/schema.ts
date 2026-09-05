@@ -65,6 +65,7 @@ export interface Task {
     };
     args?: string[];
     env?: Record<string, string>;
+    /** Relative cwd resolves against the action workspace; without one, use an absolute cwd. */
     cwd?: string;
     revealTerminal?: 'always' | 'silent' | 'never';
 

@@ -120,7 +120,7 @@
         },
         "cwd": {
           "type": "string",
-          "description": "Current working directory for the command. Defaults to ${workspaceFolder}."
+          "description": "Working directory for command, shell, dynamic quickPick, browser, zip, and unzip tasks. Supports interpolation. Relative cwd resolves against the action workspace; without a workspace, an absolute cwd is required. Defaults to the action workspace, or the extension host working directory for command/archive tasks without a workspace."
         },
         "revealTerminal": {
           "type": "string",

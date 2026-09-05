@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
+import { StringDecoder } from 'string_decoder';
 import Ajv from 'ajv';
 import { ActionItem, Action as PipelineAction, type QuickPickItem } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
@@ -1328,6 +1329,7 @@ import {
     resolveWithinWorkspace,
     isInsideWorkspaceRoots,
     resolveArchiveTaskPath,
+    resolveTaskWorkingDirectory,
     resolveFavoriteFilePath,
     toWorkspaceRelativePath,
     validateLinkScheme,
@@ -1407,6 +1409,7 @@ export {
     wouldExceedCaptureLimit,
     resolveWithinWorkspace,
     resolveArchiveTaskPath,
+    resolveTaskWorkingDirectory,
     toWorkspaceRelativePath,
     sanitizeInterpolatedValue,
     interpolatePipelineVariables,
@@ -7393,11 +7396,7 @@ async function executeSingleTask(
             const cwd = typeof task.cwd === 'string'
                 ? interpolatePipelineVariables(task.cwd, interpolationContext)
                 : undefined;
-            const baseDir = cwd
-                ? (path.isAbsolute(cwd)
-                    ? path.resolve(cwd)
-                    : (defaultWorkspace ? path.resolve(defaultWorkspace, cwd) : undefined))
-                : (defaultWorkspace || undefined);
+            const baseDir = resolveTaskCwd(cwd, defaultWorkspace);
             throwIfTaskInactive(scope);
             result = await openBrowserTask({
                 url,
@@ -7433,7 +7432,10 @@ async function executeSingleTask(
             const args = task.args
                 ? task.args.flatMap((arg: string) => expandArgTemplate(arg, interpolationContext))
                 : [];
-            interpolatedCwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined;
+            interpolatedCwd = resolveTaskCwd(
+                task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined,
+                defaultWorkspace
+            );
             let env: Record<string, string> | undefined;
             if (task.env && typeof task.env === 'object') {
                 env = {};
@@ -7973,6 +7975,19 @@ export function wrapCommandForOneShot(
     return { commandLine: wrapped, displayCommand: wrapped, isPowerShellScript: false };
 }
 
+/** 런타임 진입점들이 같은 워크스페이스 기준과 오류 안내를 사용한다. */
+function resolveTaskCwd(cwd: string | undefined, workspaceFolderPath?: string): string | undefined {
+    const workspaceFolder = workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const resolved = resolveTaskWorkingDirectory(cwd, workspaceFolder);
+    if (cwd && !resolved) {
+        throw new Error(t(
+            '상대 cwd를 해석할 워크스페이스 폴더가 없습니다. 절대 cwd를 지정하거나 워크스페이스 폴더를 여세요.',
+            'A relative cwd requires a workspace folder. Set an absolute cwd or open a workspace folder.'
+        ));
+    }
+    return resolved;
+}
+
 function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExecutionSetup {
     const { command, args, cwd, id, actionId, revealTerminal, env: taskEnv, isOneShot } = task;
     if (typeof command !== 'string') {
@@ -7981,7 +7996,7 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
 
     const actionKey = actionId || id;
     const options: vscode.ShellExecutionOptions = {
-        cwd: cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
+        cwd: resolveTaskCwd(cwd, workspaceFolderPath)
     };
     const { envOverrides, useUtf8Console } = resolveExecutionSettings(taskEnv);
     if (Object.keys(envOverrides).length > 0) {
@@ -8127,7 +8142,7 @@ function executeSensitiveBackgroundOneShot(task: any, workspaceFolderPath?: stri
     const args = Array.isArray(task.args) ? task.args : [];
     const { envOverrides, useUtf8Console } = resolveExecutionSettings(task.env);
     const childEnv: NodeJS.ProcessEnv = { ...process.env, ...envOverrides };
-    const workingDirectory = task.cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined;
+    const workingDirectory = resolveTaskCwd(task.cwd, workspaceFolderPath);
     const shownWorkingDirectory = task.redactedCwd ?? workingDirectory ?? '';
     const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
     let failureReported = false;
@@ -8490,6 +8505,9 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
 
         let stdout = '';
         let stderr = '';
+        const stdoutDecoder = new StringDecoder('utf8');
+        const stderrDecoder = new StringDecoder('utf8');
+        let capturedBytes = 0;
         let settled = false;
         const finish = (fn: () => void) => {
             if (settled) { return; }
@@ -8537,23 +8555,24 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
         // stderr, and at the quickPick stage that would balloon extension-host
         // memory. Kill once either stream pushes the total past the limit.
         const MAX_CAPTURE_BYTES = 1024 * 1024;
-        const enforceCaptureLimit = () => {
-            if (Buffer.byteLength(stdout, 'utf8') + Buffer.byteLength(stderr, 'utf8') > MAX_CAPTURE_BYTES) {
+        const acceptChunk = (chunk: Buffer): boolean => {
+            capturedBytes += chunk.length;
+            if (capturedBytes > MAX_CAPTURE_BYTES) {
                 abortWith(new Error(t('명령 출력이 너무 큽니다.', 'Command output is too large.')));
+                return false;
             }
+            return true;
         };
         // abort 이후의 chunk 는 **버린다**. 종료가 확정되기 전까지 파이프에
         // 남아 있던 출력이 계속 도착하는데, 그걸 계속 이어 붙이면 상한을
         // 넘긴 뒤에도 메모리가 자란다 — 상한의 의미가 없어진다.
         child.stdout?.on('data', (chunk: Buffer) => {
-            if (abortReason) { return; }
-            stdout += chunk.toString('utf8');
-            enforceCaptureLimit();
+            if (abortReason || !acceptChunk(chunk)) { return; }
+            stdout += stdoutDecoder.write(chunk);
         });
         child.stderr?.on('data', (chunk: Buffer) => {
-            if (abortReason) { return; }
-            stderr += chunk.toString('utf8');
-            enforceCaptureLimit();
+            if (abortReason || !acceptChunk(chunk)) { return; }
+            stderr += stderrDecoder.write(chunk);
         });
         child.on('error', (e: Error) => {
             clearTimeout(timer);
@@ -8575,6 +8594,8 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
                 finish(() => reject(reason));
                 return;
             }
+            stdout += stdoutDecoder.end();
+            stderr += stderrDecoder.end();
             if (code !== 0) {
                 const detail = stderr.trim() || `exit code ${code}`;
                 finish(() => reject(new Error(detail)));
@@ -9046,10 +9067,11 @@ export async function handleQuickPick(
     }
     let pickItems: any = normalizedPickItems ?? task.items;
     if (typeof task.itemsFromCommand === 'string' && task.itemsFromCommand.length > 0) {
-        const runCwd = task.cwd || defaultWorkspace || '(none)';
+        const resolvedCwd = resolveTaskCwd(task.cwd, defaultWorkspace);
+        const runCwd = resolvedCwd || '(none)';
         let lines: string[];
         try {
-            lines = await runCommandCaptureLines(task.itemsFromCommand, task.cwd || defaultWorkspace, undefined, token);
+            lines = await runCommandCaptureLines(task.itemsFromCommand, resolvedCwd, undefined, token);
         } catch (e: any) {
             const message = e instanceof Error ? e.message : String(e);
             throw new Error(t(
@@ -9417,8 +9439,7 @@ async function handleUnzip(
 
     // `zip` 과 같은 기준점. 예전에는 `handleUnzip` 이 `cwd` 를 아예 무시해,
     // 같은 설정이 zip 에서는 듣고 unzip 에서는 안 듣는 비대칭이 있었다.
-    const archiveBase = (typeof task.cwd === 'string' && task.cwd.length > 0 ? task.cwd : undefined)
-        || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const archiveBase = resolveTaskCwd(task.cwd, workspaceFolderPath);
 
     // When `tool` is omitted, use the bundled zip engine. Only .zip archives
     // are supported by the built-in path; anything else requires an explicit
@@ -9509,7 +9530,7 @@ async function handleZip(
     // (스키마: `cwd` 는 "Defaults to ${workspaceFolder}"). 내장 엔진도 이걸
     // 상대 경로의 기준으로 써야 `tool` 유무로 결과가 갈리지 않는다.
     const interpolatedCwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined;
-    const archiveBase = interpolatedCwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const archiveBase = resolveTaskCwd(interpolatedCwd, workspaceFolderPath);
 
     // When `tool` is omitted, use the bundled zip engine. Only .zip output is
     // supported; other formats still require an external tool.
@@ -10343,7 +10364,7 @@ export function executeShellCommand(
             childEnv[key] = value;
         }
         // Use undefined instead of empty string to let Node.js use process.cwd() as fallback
-        const workingDirectory = cwd || workspaceFolderPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined;
+        const workingDirectory = resolveTaskCwd(cwd, workspaceFolderPath);
         const windowsLookup = {
             env: childEnv,
             cwd: workingDirectory || process.cwd(),

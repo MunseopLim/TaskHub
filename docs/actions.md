@@ -152,12 +152,19 @@
 | --- | --- |
 | `command` | 문자열 또는 `{ "windows", "macos", "linux" }` 객체 |
 | `args` | argv 배열. 배열 결과를 정확히 한 원소로 참조하면 여러 argv로 펼쳐짐 |
-| `cwd` | 작업 디렉터리. 생략 시 액션 워크스페이스 |
+| `cwd` | 작업 디렉터리. 상대 경로는 액션 워크스페이스 기준으로 해석. 생략 시 액션 워크스페이스 |
 | `env` | 자식 프로세스에 추가할 환경변수 |
 | `revealTerminal` | `always`, `silent`, `never` |
 | `passTheResultToNextTask` | `true`이면 stdout/stderr 캡처 |
 | `isOneShot` | 프로세스를 시작한 직후 태스크 성공 처리. 캡처와 함께 사용할 수 없음 |
 | `output` | 캡처 결과의 표시·저장·추출·Problems 진단 |
+
+`cwd`는 `command`, `shell`, 동적 `quickPick`, `browser`, 내장·외부 `zip`/`unzip`에서 같은
+기준을 사용합니다. 예를 들어 `"cwd": "build"`는 액션을 정의한 워크스페이스의 `build` 폴더를
+뜻합니다. 변수 치환 후 해석하며, 워크스페이스 없이 상대 `cwd`를 지정하면 오류로 안내합니다.
+워크스페이스 없이 명령을 실행하려면 절대 `cwd`를 지정하세요. `cwd`와 워크스페이스가 모두 없을
+때 명령·아카이브는 확장 호스트의 작업 디렉터리를 사용합니다. Preview에서 해석된 `cwd`와
+아카이브 경로를 확인할 수 있습니다.
 
 ### `shell`
 

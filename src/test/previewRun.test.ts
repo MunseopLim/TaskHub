@@ -1020,6 +1020,28 @@ suite('buildPreviewReport', () => {
         assert.match(report, /\$\{notATask\.output\}/);
     });
 
+    test('command, shell, browser, dynamic quickPick resolve relative cwd against the action workspace', () => {
+        for (const task of [
+            { id: 'run', type: 'command', command: 'node' },
+            { id: 'run', type: 'shell', command: 'node' },
+            { id: 'run', type: 'browser', url: 'index.html' },
+            { id: 'run', type: 'quickPick', itemsFromCommand: 'node list.js' },
+        ]) {
+            const item = { id: 'cwd', title: 'cwd', action: { description: '', tasks: [{ ...task, cwd: 'build' }] } } as ActionItem;
+            const report = buildPreviewReport(item, baseOptions());
+            assert.ok(report.includes(`cwd:     ${path.join(WS, 'build')}`), report);
+        }
+    });
+
+    test('relative cwd without a workspace is a runtime blocker in preview', () => {
+        const item: ActionItem = { id: 'cwd', title: 'cwd', action: { description: '', tasks: [
+            { id: 'run', type: 'command', command: 'node', cwd: 'build' },
+        ] } };
+        const report = buildPreviewReport(item, { ...baseOptions(), workspaceFolder: '', workspaceRoots: [] });
+        assert.match(report, /relative cwd requires a workspace folder/);
+        assert.match(report, /would FAIL at runtime/);
+    });
+
     suite('zip/unzip built-in engine preview', () => {
         // 0.6.52: 아카이브 경로의 상대 기준점이 `task.cwd` → 워크스페이스로
         // 바뀐 자리다. Preview 의 목적이 "어디에 떨어지는가" 를 보여 주는 것인데
@@ -1046,7 +1068,7 @@ suite('buildPreviewReport', () => {
                 title: 'cwd base',
                 action: {
                     description: 'cwd base',
-                    tasks: [{ id: 'pack', type: 'zip', cwd: `${WS}/build`, archive: 'bundle.zip', source: ['src'] }]
+                    tasks: [{ id: 'pack', type: 'zip', cwd: 'build', archive: 'bundle.zip', source: ['src'] }]
                 }
             } as unknown as ActionItem;
             const report = buildPreviewReport(item, baseOptions());

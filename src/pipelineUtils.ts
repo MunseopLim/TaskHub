@@ -460,6 +460,13 @@ export function resolveWithinWorkspace(
     return resolved;
 }
 
+/** 액션 워크스페이스를 기준으로 cwd를 해석한다. 기준이 없는 상대 cwd는 undefined다. */
+export function resolveTaskWorkingDirectory(cwd: string | undefined, workspaceFolder: string | undefined): string | undefined {
+    if (!cwd) { return workspaceFolder || undefined; }
+    if (path.isAbsolute(cwd)) { return path.resolve(cwd); }
+    return workspaceFolder ? path.resolve(workspaceFolder, cwd) : undefined;
+}
+
 /**
  * 액션이 지정한 경로를 절대 경로로 만든다. **워크스페이스 격리는 하지 않는다.**
  *

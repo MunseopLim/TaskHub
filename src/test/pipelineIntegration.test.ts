@@ -1816,8 +1816,8 @@ try {
             const action: PipelineAction = {
                 description: 'IT-143',
                 tasks: [
-                    { id: 'pack', type: 'zip', cwd: base, archive: 'bundle.zip', source: ['src'] },
-                    { id: 'unpack', type: 'unzip', cwd: base, archive: 'bundle.zip', destination: 'extracted' },
+                    { id: 'pack', type: 'zip', cwd: 'build', archive: 'bundle.zip', source: ['src'] },
+                    { id: 'unpack', type: 'unzip', cwd: 'build', archive: 'bundle.zip', destination: 'extracted' },
                 ]
             };
 
@@ -1842,8 +1842,8 @@ try {
             const action: PipelineAction = {
                 description: 'IT-146',
                 tasks: [
-                    { id: 'pack', type: 'zip', tool: launcher, cwd: base, archive: 'bundle.fake7z', source: [srcA] },
-                    { id: 'unpack', type: 'unzip', tool: launcher, cwd: base, archive: 'bundle.fake7z', destination: 'extracted' },
+                    { id: 'pack', type: 'zip', tool: launcher, cwd: 'build', archive: 'bundle.fake7z', source: [srcA] },
+                    { id: 'unpack', type: 'unzip', tool: launcher, cwd: 'build', archive: 'bundle.fake7z', destination: 'extracted' },
                 ]
             };
 
