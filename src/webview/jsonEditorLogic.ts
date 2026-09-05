@@ -24,6 +24,7 @@ export {
     coerceEditedCellValue,
     coerceEditedArrayItems,
     buildSheetMap,
+    addJsonEditorField,
     getRowsByPath,
     effectiveBaseline,
     decideSaveResult,

@@ -2075,6 +2075,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                 extractFn('fmt'),
                 extractFn('isPlainObject'),
                 extractFn('renderTable'),
+                'function syncFieldFormForSheet() {}',
                 // 셀 마크업 자체는 이 테스트의 관심사가 아니다. 값이 무엇으로
                 // 넘어왔는지만 보이게 최소로 흉내 낸다.
                 'function detectMultiline() { return false; }',
@@ -2234,10 +2235,10 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             const m = html.match(/document\.getElementById\('btnAddRow'\)\.addEventListener\('click', \(\) => \{([\s\S]*?)\n    \}\);/);
             assert.ok(m, 'btnAddRow 핸들러를 찾지 못했다');
             const addRow = new Function(
-                'getActiveRows', 'commitActiveCellOrAbort', 'pushHistory', 'renderTable',
+                'getActiveRows', 'commitActiveCellOrAbort', 'pushHistory', 'renderTable', 'showFieldForm',
                 [extractFn('isPlainObject'), m![1]].join('\n')
             ) as (
-                get: () => unknown[], commit: () => boolean, push: () => void, render: () => void
+                get: () => unknown[], commit: () => boolean, push: () => void, render: () => void, show?: () => void
             ) => void;
 
             const rows: unknown[] = [null, 1, 'a', { name: '', count: 3, tags: ['x'] }];
@@ -2247,10 +2248,12 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                 '첫 **객체** 행을 본보기로 삼아야 한다'
             );
 
-            // 객체 행이 하나도 없으면 빈 행.
+            // 객체의 필드가 하나도 없으면 편집 불가능한 {} 대신 필드 만들기로 안내한다.
             const noObjects: unknown[] = [null, 1];
-            addRow(() => noObjects, () => true, () => {}, () => {});
-            assert.deepStrictEqual(noObjects[noObjects.length - 1], {});
+            let showedFields = false;
+            addRow(() => noObjects, () => true, () => {}, () => {}, () => { showedFields = true; });
+            assert.deepStrictEqual(noObjects, [null, 1]);
+            assert.strictEqual(showedFields, true);
         });
     });
 });

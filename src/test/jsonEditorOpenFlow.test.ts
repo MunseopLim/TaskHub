@@ -202,6 +202,58 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         return state?.[filePath];
     }
 
+    test('원문 열기는 현재 파일을 옆에서 열고 미저장 표와 디스크를 유지한다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('source.json', { rows: [] });
+        const ctx = makeContext();
+        await openJsonEditorFile(ctx, filePath);
+        const edited = { rows: [{ name: 'draft' }] };
+        await fake.send({ command: 'modified', value: true });
+        await fake.send({ command: 'snapshot', data: edited });
+        const originalOpen = vscode.workspace.openTextDocument;
+        const originalShow = vscode.window.showTextDocument;
+        const calls: unknown[] = [];
+        const document = { uri: vscode.Uri.file(filePath) };
+        try {
+            (vscode.workspace as any).openTextDocument = async (uri: vscode.Uri) => {
+                calls.push(uri.fsPath);
+                return document;
+            };
+            (vscode.window as any).showTextDocument = async (actual: unknown, options: unknown) => {
+                calls.push(actual, options);
+            };
+            await fake.send({ command: 'openSource', filePath: '/tmp/untrusted-other.json', session: fake.sessionId() + 1 });
+            assert.deepStrictEqual(calls, [], '다른 세션의 요청은 무시한다');
+            await fake.send({ command: 'openSource', filePath: '/tmp/untrusted-other.json' });
+            assert.deepStrictEqual(calls, [filePath, document, { viewColumn: vscode.ViewColumn.Beside, preview: false }]);
+            assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), { rows: [] });
+            fake.disposePanel();
+            // dispose는 기존 debounce flush 경로로 스냅샷을 보존한다.
+            await new Promise(resolve => setTimeout(resolve, 50));
+            assert.deepStrictEqual((readRecoveryEntry(ctx, filePath) as any)?.data, edited);
+        } finally {
+            (vscode.workspace as any).openTextDocument = originalOpen;
+            (vscode.window as any).showTextDocument = originalShow;
+        }
+    });
+
+    test('원문 열기 실패는 오류를 알리고 표의 dirty 상태를 바꾸지 않는다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('source-error.json', { rows: [] });
+        await openJsonEditorFile(makeContext(), filePath);
+        await fake.send({ command: 'modified', value: true });
+        const originalOpen = vscode.workspace.openTextDocument;
+        try {
+            (vscode.workspace as any).openTextDocument = async () => { throw new Error('read denied'); };
+            await fake.send({ command: 'openSource' });
+            assert.ok(shownErrors.some(message => message.includes('read denied')));
+            assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+        } finally {
+            (vscode.workspace as any).openTextDocument = originalOpen;
+        }
+    });
+
     test('정상 JSON 을 열면 패널이 생기고 그 파일을 잡는다', async () => {
         const fake = installFakePanel();
         const filePath = writeJson('config.json', { alpha: [{ id: 1 }] });

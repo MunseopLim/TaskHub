@@ -744,6 +744,22 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                 return;
             }
             switch (message.command) {
+                case 'openSource': {
+                    try {
+                        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+                        if (!isCurrentSession()) { return; }
+                        // 웹뷰를 닫거나 저장하지 않는다. 미저장 표 편집은 기존 복구 경로에 남는다.
+                        await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+                    } catch (error: unknown) {
+                        if (!isCurrentSession()) { return; }
+                        const detail = error instanceof Error ? error.message : String(error);
+                        vscode.window.showErrorMessage(t(
+                            `원문 파일을 열지 못했습니다 (${fileName}): ${detail}`,
+                            `Could not open the source file (${fileName}): ${detail}`
+                        ));
+                    }
+                    break;
+                }
                 case 'modified': {
                     const nextDirty = Boolean(message.value);
                     // 저장 응답을 기다리는 동안의 **clean 선언은 무시한다.**
@@ -1235,10 +1251,20 @@ export function buildJsonEditorStrings(): Record<string, string> {
         undo: t('실행 취소 (Ctrl+Z)', 'Undo (Ctrl+Z)'),
         redo: t('다시 실행 (Ctrl+Shift+Z / Ctrl+Y)', 'Redo (Ctrl+Shift+Z / Ctrl+Y)'),
         addRow: t('행 추가', 'Add Row'),
+        addField: t('필드 추가', 'Add Field'),
+        fieldName: t('새 필드 이름', 'New field name'),
+        fieldNameRequired: t('필드 이름을 입력하세요.', 'Enter a field name.'),
+        fieldNameDuplicate: t('이미 있는 필드 이름입니다.', 'This field already exists.'),
+        fieldAdded: t('{name} 필드를 추가했습니다. 셀을 선택해 값을 입력하세요.', 'Added field {name}. Select a cell to enter a value.'),
+        fieldHint: t('객체 행에 빈 값의 필드를 추가합니다. 행이 없으면 첫 행도 만듭니다.', 'Add an empty field to object rows. If there are no object rows, create the first one.'),
+        cancelField: t('취소', 'Cancel'),
+        openSource: t('원문 열기', 'Open Source'),
+        openSourceTitle: t('JSON 원문을 옆에서 엽니다. 표의 미저장 편집은 유지됩니다.', 'Open the JSON file beside this table. Unsaved table edits are kept.'),
+        noSheets: t('표로 표시할 배열이 없습니다. 원문을 열어 편집하세요.', 'There are no arrays to display as a table. Open the source to edit this JSON.'),
+        noFields: t('아직 필드가 없습니다. 첫 필드 이름을 입력해 편집을 시작하세요.', 'There are no fields yet. Enter the first field name to start editing.'),
         modified: t('● 수정됨', '● Modified'),
         filePath: t('파일 경로', 'File path'),
         rootArrayTab: t('항목', 'Items'),
-        emptyMessage: t('데이터가 없습니다. "행 추가"를 눌러 추가하세요.', 'No data. Click "Add Row" to add a row.'),
         rowNumberHeader: t('행 번호', 'Row number'),
         reorderHeader: t('순서 변경', 'Reorder'),
         actionsHeader: t('작업', 'Actions'),
@@ -1401,6 +1427,7 @@ export function getWebviewContent(
     }
     .toolbar {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         gap: 8px;
         margin-bottom: 12px;
@@ -1685,6 +1712,13 @@ export function getWebviewContent(
         text-align: center;
         opacity: 0.5;
     }
+    .field-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px; }
+    .field-form[hidden] { display: none; }
+    .field-form input { color: var(--input-fg); background: var(--input-bg); border: 1px solid var(--input-border); padding: 5px; }
+    .field-form input:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+    .field-form p { flex-basis: 100%; margin: 0; }
+    #fieldHint { color: var(--vscode-descriptionForeground); }
+    #fieldError { color: var(--danger); }
     .cell-object {
         font-family: var(--vscode-editor-font-family, monospace);
         font-size: 11px;
@@ -1707,10 +1741,20 @@ export function getWebviewContent(
         <button id="btnUndo" title="${esc(strings.undo)}" aria-label="${esc(strings.undo)}" disabled>↶</button>
         <button id="btnRedo" title="${esc(strings.redo)}" aria-label="${esc(strings.redo)}" disabled>↷</button>
         <button id="btnAddRow">+ ${esc(strings.addRow)}</button>
+        <button id="btnAddField" aria-controls="fieldForm" aria-expanded="false">+ ${esc(strings.addField)}</button>
+        <button id="btnOpenSource" title="${esc(strings.openSourceTitle)}">${esc(strings.openSource)}</button>
         <span class="modified-indicator" id="modifiedFlag" role="status" aria-live="polite">${esc(strings.modified)}</span>
         <span class="filepath" title="${escapedPath}" aria-label="${esc(strings.filePath)}: ${escapedPath}">${escapedPath}</span>
     </div>
     <div class="tabs" id="tabs" role="tablist"></div>
+    <form id="fieldForm" class="field-form" hidden>
+        <label for="fieldName">${esc(strings.fieldName)}</label>
+        <input id="fieldName" type="text" aria-describedby="fieldHint fieldError" autocomplete="off">
+        <button type="submit">${esc(strings.addField)}</button>
+        <button id="btnCancelField" type="button">${esc(strings.cancelField)}</button>
+        <p id="fieldHint">${esc(strings.fieldHint)}</p>
+        <p id="fieldError" role="alert"></p>
+    </form>
     <!-- 탭이 제어하는 대상. role=tabpanel이 없으면 role=tab이 가리키는 곳이
          없어, 스크린리더가 탭을 읽고도 어디로 이동했는지 알리지 못한다.
          aria-labelledby는 활성 탭을 따라 renderTabs가 갱신한다. -->
@@ -1763,6 +1807,7 @@ export function getWebviewContent(
         coerceEditedCellValue,
         coerceEditedArrayItems,
         buildSheetMap,
+        addJsonEditorField,
         getRowsByPath,
         effectiveBaseline,
         decideSaveResult,
@@ -1816,6 +1861,8 @@ export function getWebviewContent(
     let sheetMap = [];
     let activeIdx = 0;
     let modified = false;
+    let fieldFormSheetKey;
+    let fieldFormHadFields = false;
 
     // Undo/Redo 스냅샷 스택. 각 항목은 JSON.stringify(data) 결과 문자열.
     // - cap: 20 step / 16 MB 중 먼저 도달하는 쪽에서 가장 오래된 항목부터 evict
@@ -2242,8 +2289,16 @@ export function getWebviewContent(
         lastRecoverableDraft = undefined;
         const wrapper = document.getElementById('tableWrapper');
         const rows = getActiveRows();
-        if (!rows || !Array.isArray(rows) || rows.length === 0) {
-            wrapper.innerHTML = '<div class="empty-msg">' + escapeHtml(S.emptyMessage) + '</div>';
+        const hasSheet = Array.isArray(rows);
+        document.getElementById('btnAddRow').disabled = !hasSheet;
+        document.getElementById('btnAddField').disabled = !hasSheet;
+        syncFieldFormForSheet(rows);
+        if (!hasSheet) {
+            wrapper.innerHTML = '<div class="empty-msg">' + escapeHtml(S.noSheets) + '</div>';
+            return;
+        }
+        if (rows.length === 0) {
+            wrapper.innerHTML = '<div class="empty-msg">' + escapeHtml(S.noFields) + '</div>';
             return;
         }
 
@@ -3111,24 +3166,104 @@ export function getWebviewContent(
     document.getElementById('btnUndo').addEventListener('click', undo);
     document.getElementById('btnRedo').addEventListener('click', redo);
 
+    function setFieldFormVisible(visible) {
+        document.getElementById('fieldForm').hidden = !visible;
+        document.getElementById('btnAddField').setAttribute('aria-expanded', String(visible));
+    }
+
+    function resetFieldForm() {
+        document.getElementById('fieldName').value = '';
+        document.getElementById('fieldName').removeAttribute('aria-invalid');
+        document.getElementById('fieldError').textContent = '';
+    }
+
+    function syncFieldFormForSheet(rows) {
+        const entry = sheetMap[activeIdx];
+        const sheetKey = entry ? JSON.stringify(entry.path) : null;
+        const hasSheet = Array.isArray(rows);
+        const hasFields = hasSheet && rows.some(row => isPlainObject(row) && Object.keys(row).length > 0);
+        if (fieldFormSheetKey !== sheetKey) {
+            // 필드 입력은 이 시트에 속한다. 같은 시트의 셀 commit/blur 재렌더는
+            // 폼과 무관하므로 입력·오류·펼침 상태를 건드리지 않는다.
+            fieldFormSheetKey = sheetKey;
+            resetFieldForm();
+            setFieldFormVisible(hasSheet && !hasFields);
+        } else if (hasSheet && fieldFormHadFields && !hasFields) {
+            // 마지막 행이 사라진 경우에는 첫 필드를 만들 수 있는 경로를 다시 연다.
+            setFieldFormVisible(true);
+        }
+        fieldFormHadFields = hasFields;
+    }
+
+    function showFieldForm() {
+        if (!commitActiveCellOrAbort() || !getActiveRows()) { return; }
+        resetFieldForm();
+        setFieldFormVisible(true);
+        document.getElementById('fieldName').focus();
+    }
+
+    function cancelFieldForm() {
+        resetFieldForm();
+        setFieldFormVisible(false);
+        document.getElementById('btnAddField').focus();
+    }
+
+    document.getElementById('btnAddField').addEventListener('click', showFieldForm);
+    document.getElementById('btnCancelField').addEventListener('click', cancelFieldForm);
+    document.getElementById('fieldForm').addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            cancelFieldForm();
+        }
+    });
+    document.getElementById('fieldForm').addEventListener('submit', (event) => {
+        event.preventDefault();
+        if (!commitActiveCellOrAbort()) { return; }
+        const rows = getActiveRows();
+        if (!rows) { return; }
+        const input = document.getElementById('fieldName');
+        const name = input.value.trim();
+        const result = addJsonEditorField(rows, name);
+        if (result !== 'added') {
+            document.getElementById('fieldError').textContent = result === 'empty-name' ? S.fieldNameRequired : S.fieldNameDuplicate;
+            input.setAttribute('aria-invalid', 'true');
+            input.focus();
+            return;
+        }
+        pushHistory();
+        resetFieldForm();
+        setFieldFormVisible(false);
+        renderTable();
+        const cell = Array.from(document.querySelectorAll('td[data-col]')).find(td => td.dataset.col === name);
+        if (cell) { cell.querySelector('.cell-view')?.focus(); }
+        announce(fmt(S.fieldAdded, { name: name }));
+    });
+    document.getElementById('btnOpenSource').addEventListener('click', () => {
+        // 원문은 옆에서 연다. 파싱 중인 셀의 raw 입력까지 그대로 유지한다.
+        vscode.postMessage({ command: 'openSource' });
+    });
+
     document.getElementById('btnAddRow').addEventListener('click', () => {
         // 행 추가는 인덱스를 시프트시키지 않지만, 일관성과 사용자 의도(편집 중인
         // 셀의 변경을 잃지 않음)를 위해 같은 가드를 적용한다.
         if (!commitActiveCellOrAbort()) { return; }
         const rows = getActiveRows();
         if (!rows || !Array.isArray(rows)) { return; }
+        if (!rows.some(row => isPlainObject(row) && Object.keys(row).length > 0)) {
+            showFieldForm();
+            return;
+        }
         const template = {};
         // **첫 행이 객체가 아닐 수 있다.** Object.keys(null) 은 TypeError 고,
         // 그것이 여기서 나면 webview 가 통째로 멈춘다 — 파일은 열렸는데 "행 추가"
-        // 를 누르는 순간 화면이 죽었다. 열 이름을 가진 **첫 객체 행**을 본보기로
-        // 삼고, 그런 행이 없으면 빈 행을 만든다.
+        // 를 누르는 순간 화면이 죽었다. 첫 객체 행을 본보기로 삼으며,
+        // 객체 필드가 전혀 없는 경우에는 위에서 필드 만들기로 안내한다.
         const sampleRow = rows.find(isPlainObject);
         if (sampleRow) {
             Object.keys(sampleRow).forEach(k => {
                 const sample = sampleRow[k];
-                if (Array.isArray(sample)) { template[k] = []; }
-                else if (typeof sample === 'number') { template[k] = 0; }
-                else { template[k] = ''; }
+                const value = Array.isArray(sample) ? [] : typeof sample === 'number' ? 0 : '';
+                Object.defineProperty(template, k, { value: value, enumerable: true, configurable: true, writable: true });
             });
         }
         rows.push(template);
@@ -3147,7 +3282,7 @@ export function getWebviewContent(
             return;
         }
         // Undo/Redo는 셀 편집 중일 때 브라우저 input 기본 undo에 양보한다.
-        if (document.querySelector('td.editing')) { return; }
+        if (document.querySelector('td.editing') || document.activeElement === document.getElementById('fieldName')) { return; }
         if (key === 'z' && !e.shiftKey) {
             e.preventDefault();
             undo();

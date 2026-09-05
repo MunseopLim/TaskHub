@@ -266,6 +266,25 @@ export interface SheetEntry {
     path: string[];
 }
 
+/** 표의 객체 행에 새 필드를 추가한다. 객체 행이 없으면 첫 객체 행을 만든다. */
+export function addJsonEditorField(rows: unknown[], fieldName: string): 'added' | 'empty-name' | 'duplicate-name' {
+    const name = fieldName.trim();
+    if (!name) { return 'empty-name'; }
+    const objects = rows.filter((row): row is Record<string, unknown> =>
+        row !== null && typeof row === 'object' && !Array.isArray(row));
+    if (objects.some(row => Object.hasOwn(row, name))) { return 'duplicate-name'; }
+    if (objects.length === 0) {
+        const first: Record<string, unknown> = {};
+        objects.push(first);
+        rows.push(first);
+    }
+    for (const row of objects) {
+        // __proto__ 같은 유효한 JSON 키도 객체의 prototype을 바꾸지 않고 저장한다.
+        Object.defineProperty(row, name, { value: '', enumerable: true, configurable: true, writable: true });
+    }
+    return 'added';
+}
+
 export function buildSheetMap(data: Record<string, unknown>): SheetEntry[] {
     const sheetMap: SheetEntry[] = [];
     Object.keys(data).forEach(key => {
