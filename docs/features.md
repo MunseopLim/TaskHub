@@ -680,7 +680,6 @@ Preset 파일은 다음 위치에서 자동으로 발견됩니다:
 3. Merge 선택 시 ID 충돌이 있으면 해결 방법 선택:
    - **Keep existing**: 기존 actions 우선, 충돌하지 않는 preset actions만 추가
    - **Use preset**: Preset actions 우선, 충돌하지 않는 기존 actions만 유지
-   - **Keep both**: 기존 actions를 모두 유지하고, 충돌하지 않는 preset actions만 추가 (충돌하는 preset 항목은 제외 — `actions.json` 스키마는 ID 유일성을 요구하므로 *중복 허용*은 가능하지 않습니다)
 
 > **데이터 보호 (v0.4.33부터)**: 기존 `actions.json`이 JSON 파싱 또는 스키마 검증에 실패하면 *교체 / 병합* 선택 직전에 *손상된 파일 백업 후 계속 / 취소* 모달이 뜹니다. 백업을 선택하면 원본이 `actions.json.bak`으로 옮겨진 뒤 빈 배열로 진행되어, 손상된 파일을 무방비로 덮어쓰지 않습니다. (*액션 가져오기*와 같은 보호 절차)
 

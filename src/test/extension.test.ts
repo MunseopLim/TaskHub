@@ -6557,13 +6557,10 @@ suite('Extension Test Suite', () => {
 			assert.ok(byId.has('only-existing'));
 		});
 
-		test('keep-both: existing and preset coexist, with preset conflicts dropped', () => {
-			const merged = mergeActions(existing, preset, 'keep-both');
-			const byId = new Map(merged.map(a => [a.id, a]));
-			assert.strictEqual(byId.get('shared')?.title, 'Existing Shared');
-			assert.ok(byId.has('only-preset'));
-			assert.ok(byId.has('only-existing'));
-		});
+        test('충돌이 없으면 기존 항목 뒤에 프리셋 항목을 모두 추가한다', () => {
+            const uniquePreset: ActionItem[] = [{ id: 'new', title: 'New' }];
+            assert.deepStrictEqual(mergeActions(existing, uniquePreset, 'keep-existing'), [...existing, ...uniquePreset]);
+        });
 	});
 
 	/**

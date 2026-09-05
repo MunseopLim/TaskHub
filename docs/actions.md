@@ -759,6 +759,17 @@ QuickPick 선택마다 실행할 태스크 자체가 달라질 때 사용합니�
 ]
 ```
 
+### JavaScript 파일에 실행 옵션 전달
+
+번들 [`media/actions_example.json`](../media/actions_example.json)의 **Complete Example: Run JavaScript
+with Parameters**는 Node.js가 설치된 환경에서 `.js` 파일을 실행합니다. 선택한 스크립트가 `--env`,
+`--port`, 선택적 `--verbose` / `--flag` 인자를 받도록 작성되어 있어야 합니다.
+
+파일 경로와 입력값은 `args`의 개별 원소로 전달합니다. 추가 옵션은 QuickPick의 `args` 배열로
+선택하며, **No extra options**는 빈 배열이므로 argv를 추가하지 않습니다. **Verbose with flag**는
+`--verbose`와 `--flag`를 각각 전달합니다. 직접 입력한 문자열의 공백은 자동으로 여러 인자로
+분리하지 않습니다. 여러 옵션은 이 예제처럼 배열로 정의합니다.
+
 ### 여러 파일을 각각 처리
 
 `fileDialog.options.canSelectMany`로 고른 배열을 command의 `forEach`에 연결합니다.

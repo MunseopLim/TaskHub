@@ -547,7 +547,7 @@ function discoverPresets(context: vscode.ExtensionContext): PresetInfo[] {
 export function mergeActions(
     existing: ActionItem[],
     preset: ActionItem[],
-    strategy: 'keep-existing' | 'use-preset' | 'keep-both'
+    strategy: 'keep-existing' | 'use-preset'
 ): ActionItem[] {
     const collectIds = (items: ActionItem[], target: Set<string>) => {
         for (const item of items) {
@@ -562,12 +562,6 @@ export function mergeActions(
 
     const existingIds = new Set<string>();
     collectIds(existing, existingIds);
-
-    if (strategy === 'keep-both') {
-        // Drop preset items whose IDs conflict with existing to prevent validation failures.
-        const filteredPreset = filterConflictingItems(preset, existingIds);
-        return [...existing, ...filteredPreset];
-    }
 
     if (strategy === 'keep-existing') {
         const filteredPreset = filterConflictingItems(preset, existingIds);
@@ -12689,12 +12683,11 @@ export function activate(context: vscode.ExtensionContext) {
                     // again on the same broken file we already backed up.
                     const conflicts = findConflictingIds(existingActions, presetActions);
 
-                    let mergeStrategy: 'keep-existing' | 'use-preset' | 'keep-both';
+                    let mergeStrategy: 'keep-existing' | 'use-preset';
 
                     if (conflicts.length > 0) {
                         const keepExistingLabel = t('기존 유지', 'Keep existing');
                         const usePresetLabel = t('프리셋 사용', 'Use preset');
-                        const keepBothLabel = t('모두 유지', 'Keep both');
                         const choice = await vscode.window.showQuickPick([
                             {
                                 label: keepExistingLabel,
@@ -12703,10 +12696,6 @@ export function activate(context: vscode.ExtensionContext) {
                             {
                                 label: usePresetLabel,
                                 description: t(`프리셋의 ${conflicts.length}개 액션을 사용하고 충돌하지 않는 기존 항목 유지`, `Use preset's ${conflicts.length} actions, keep non-conflicting from yours`)
-                            },
-                            {
-                                label: keepBothLabel,
-                                description: t('모든 액션 유지 (충돌하는 프리셋 액션은 제외)', 'Keep all actions (conflicting preset actions are dropped)')
                             }
                         ], {
                             placeHolder: t(`${conflicts.length}개의 충돌하는 액션 ID를 찾았습니다. 어떻게 해결할까요?`, `Found ${conflicts.length} conflicting action IDs. How to resolve?`)
@@ -12718,11 +12707,9 @@ export function activate(context: vscode.ExtensionContext) {
 
                         mergeStrategy = choice.label === keepExistingLabel
                             ? 'keep-existing'
-                            : choice.label === usePresetLabel
-                                ? 'use-preset'
-                                : 'keep-both';
+                            : 'use-preset';
                     } else {
-                        mergeStrategy = 'keep-both';
+                        mergeStrategy = 'keep-existing';
                     }
 
                     finalActions = mergeActions(existingActions, presetActions, mergeStrategy);

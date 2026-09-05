@@ -482,9 +482,9 @@
   },
   {
     "id": "action.run.script.with.params",
-    "title": "Complete Example: Run Script with Parameters",
+    "title": "Complete Example: Run JavaScript with Parameters",
     "action": {
-      "description": "Select file, environment, and parameters to run a script",
+      "description": "Requires Node.js and a JavaScript script accepting --env, --port, and optional --verbose / --flag options",
       "successMessage": "Script executed successfully!",
       "tasks": [
         {
@@ -492,7 +492,7 @@
           "type": "fileDialog",
           "options": {
             "filters": {
-              "Scripts": ["js", "py", "sh"]
+              "JavaScript": ["js"]
             }
           }
         },
@@ -528,16 +528,25 @@
           "placeHolder": "3000"
         },
         {
-          "id": "input_extra_args",
-          "type": "inputBox",
-          "prompt": "Enter extra arguments (optional)",
-          "placeHolder": "additional flags",
-          "prefix": "--extra "
+          "id": "select_extra_options",
+          "type": "quickPick",
+          "placeHolder": "Select additional script options",
+          "items": [
+            { "label": "No extra options", "args": [] },
+            { "label": "Verbose", "args": ["--verbose"] },
+            { "label": "Verbose with flag", "args": ["--verbose", "--flag"] }
+          ]
         },
         {
           "id": "run_script",
           "type": "command",
-          "command": "node ${select_script.path} --env ${select_environment.value} --port ${input_port.value} ${input_extra_args.value}",
+          "command": "node",
+          "args": [
+            "${select_script.path}",
+            "--env", "${select_environment.value}",
+            "--port", "${input_port.value}",
+            "${select_extra_options.args}"
+          ],
           "revealTerminal": "always"
         }
       ]
