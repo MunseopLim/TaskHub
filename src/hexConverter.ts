@@ -757,71 +757,21 @@ export function buildHexConverterHtml(
         return '0x' + offset.toString(16).toUpperCase().padStart(8, '0');
     }
 
-    function renderHexOffsets(byteCount) {
-        const rowSize = selectedBytesPerRow();
-        // 파싱 오류·홀수 자릿수·대용량 변환 대기 중에는 textarea를 그대로
-        // 유지한다. 이때 byteCount만 보면 gutter가 한 줄로 접혀 실제 줄과
-        // 어긋나므로, 화면에 남은 줄 수를 최소 행 수로 보존한다.
-        const visibleLineCount = hexInput.value.length === 0 ? 1 : hexInput.value.split('\\n').length;
-        const rowCount = Math.max(visibleLineCount, Math.ceil(byteCount / rowSize) || 1);
-        const lines = new Array(rowCount);
-        for (let row = 0; row < rowCount; row++) {
-            lines[row] = formatOffset(row * rowSize);
-        }
-        hexOffsets.textContent = lines.join('\\n');
+    function renderHexOffsets(pending = false) {
+        let offset = 0;
+        const lines = hexInput.value.split('\\n');
+        const offsets = lines.map((line, index) => {
+            const label = offset === undefined ? '—' : formatOffset(offset);
+            if (!pending && offset !== undefined && index < lines.length - 1) {
+                const parsed = parseHexConverterInput(line, MAX_BYTES);
+                offset = parsed.ok ? offset + parsed.bytes.length : undefined;
+            } else {
+                offset = undefined;
+            }
+            return label;
+        });
+        hexOffsets.textContent = offsets.join('\\n');
         hexOffsets.scrollTop = hexInput.scrollTop;
-    }
-
-    function countHexDigits(value) {
-        let count = 0;
-        let tokenStart = true;
-        for (let index = 0; index < value.length; index++) {
-            const character = value[index];
-            if (/\s|[,\-_:]/.test(character)) {
-                tokenStart = true;
-                continue;
-            }
-            if (tokenStart && character === '0' && (value[index + 1] === 'x' || value[index + 1] === 'X')) {
-                tokenStart = false;
-                index++;
-                continue;
-            }
-            if (/[0-9a-fA-F]/.test(character)) { count++; }
-            tokenStart = false;
-        }
-        return count;
-    }
-
-    function positionAfterHexDigits(value, targetDigits) {
-        if (targetDigits <= 0) { return 0; }
-        let digits = 0;
-        for (let index = 0; index < value.length; index++) {
-            if (/[0-9a-fA-F]/.test(value[index])) {
-                digits++;
-                if (digits === targetDigits) {
-                    let position = index + 1;
-                    while (position < value.length && /\s/.test(value[position])) { position++; }
-                    return position;
-                }
-            }
-        }
-        return value.length;
-    }
-
-    function normalizeHexInput(bytes, preserveSelection) {
-        const previous = hexInput.value;
-        const selectionStart = typeof hexInput.selectionStart === 'number' ? hexInput.selectionStart : previous.length;
-        const selectionEnd = typeof hexInput.selectionEnd === 'number' ? hexInput.selectionEnd : selectionStart;
-        const startDigits = preserveSelection ? countHexDigits(previous.slice(0, selectionStart)) : 0;
-        const endDigits = preserveSelection ? countHexDigits(previous.slice(0, selectionEnd)) : 0;
-        const formatted = formatBytes(bytes);
-        hexInput.value = formatted;
-        if (preserveSelection && typeof hexInput.setSelectionRange === 'function') {
-            hexInput.setSelectionRange(
-                positionAfterHexDigits(formatted, startDigits),
-                positionAfterHexDigits(formatted, endDigits)
-            );
-        }
     }
 
     function persistPreferences() {
@@ -835,7 +785,7 @@ export function buildHexConverterHtml(
 
     function setBytes(bytes) {
         currentBytes = bytes;
-        renderHexOffsets(bytes.length);
+        renderHexOffsets();
         renderIncompleteGroup(bytes);
         textCount.textContent = template(S.characters, { count: Array.from(textInput.value).length });
         hexCount.textContent = template(S.bytes, { count: bytes.length });
@@ -930,7 +880,7 @@ export function buildHexConverterHtml(
         saveText.disabled = true;
         saveHex.disabled = true;
         valueGrid.innerHTML = '<div class="empty">' + escapeHtml(S.noBytes) + '</div>';
-        renderHexOffsets(0);
+        renderHexOffsets(true);
         renderIncompleteGroup(currentBytes);
         setStatus(S.conversionPending, 'idle');
     }
@@ -940,14 +890,14 @@ export function buildHexConverterHtml(
         activeSource = source;
         const inputLength = source === 'hex' ? hexInput.value.length : textInput.value.length;
         if (inputLength <= LARGE_INPUT_CHARACTERS) {
-            if (source === 'hex') { updateFromHex(true, true); } else { updateFromText(); }
+            if (source === 'hex') { updateFromHex(); } else { updateFromText(); }
             return;
         }
         showPendingConversion(source);
         conversionTimer = setTimeout(() => {
             conversionTimer = undefined;
             if (activeSource !== source) { return; }
-            if (source === 'hex') { updateFromHex(true, true); } else { updateFromText(); }
+            if (source === 'hex') { updateFromHex(); } else { updateFromText(); }
         }, LARGE_INPUT_DELAY_MS);
     }
 
@@ -968,7 +918,7 @@ export function buildHexConverterHtml(
         persist();
     }
 
-    function updateFromHex(normalize = false, preserveSelection = false) {
+    function updateFromHex(normalize = false) {
         activeSource = 'hex';
         const parsed = parseHexConverterInput(hexInput.value, MAX_BYTES);
         if (!parsed.ok) {
@@ -979,7 +929,7 @@ export function buildHexConverterHtml(
             persist();
             return;
         }
-        if (normalize) { normalizeHexInput(parsed.bytes, preserveSelection); }
+        if (normalize) { hexInput.value = formatBytes(parsed.bytes); }
         const decoded = decodeHexConverterBytes(parsed.bytes, encoding.value);
         if (!decoded.ok) {
             textInput.value = '';
@@ -1006,6 +956,7 @@ export function buildHexConverterHtml(
         const parsed = parseHexConverterInput(hexInput.value, MAX_BYTES);
         if (parsed.ok) {
             hexInput.value = formatBytes(parsed.bytes);
+            renderHexOffsets();
             persist();
         }
     });
@@ -1016,12 +967,8 @@ export function buildHexConverterHtml(
     hexGroup.addEventListener('change', () => {
         updateHexPlaceholder();
         if (conversionTimer === undefined && currentBytes.length > 0) {
-            hexInput.value = formatBytes(currentBytes);
-            setBytes(currentBytes);
-            const message = activeSource === 'hex'
-                ? template(S.fromHex, { bytes: currentBytes.length })
-                : template(S.fromText, { bytes: currentBytes.length });
-            setStatus(withIncompleteGroup(message, currentBytes), 'success');
+            // 표시 설정을 바꿔도 원래 변환 경로에서 입력의 유효성을 확인한다.
+            if (activeSource === 'hex') { updateFromHex(true); } else { updateFromText(); }
         } else {
             renderIncompleteGroup(currentBytes);
         }
@@ -1033,7 +980,7 @@ export function buildHexConverterHtml(
         if (conversionTimer === undefined && currentBytes.length > 0) {
             hexInput.value = formatBytes(currentBytes);
         }
-        renderHexOffsets(currentBytes.length);
+        renderHexOffsets(conversionTimer !== undefined);
         persist();
     });
     endian.addEventListener('change', () => {

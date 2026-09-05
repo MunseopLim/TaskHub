@@ -40,6 +40,8 @@ export interface HexParseResult {
     maxAddress: number;
     /** Total byte count */
     byteCount: number;
+    /** Invalid HEX/SREC records omitted from the displayed data. */
+    invalidRecordCount?: number;
 }
 
 /** 앞에서 훑어볼 줄 수. 앞줄만 깨진 파일을 살리되 바이너리에는 기회를 많이 주지 않는다. */
@@ -50,48 +52,41 @@ const HEX_DETECT_WINDOW = 4096;
 /**
  * 이 줄이 **완전한 레코드**이고 체크섬까지 맞는가.
  *
- * 판정과 파싱이 **같은 규칙**을 쓰도록 길이·체크섬 계산은 `parseIntelHex` /
- * `parseSrec` 의 것을 그대로 옮겼다. 한쪽만 바뀌면 "판정은 됐는데 아무것도 안
- * 읽히는" 자리가 다시 생긴다.
+ * 포맷 감지와 실제 파서가 함께 호출해 자릿수·레코드 길이·체크섬을 검증한다.
  *
  * 자릿수 검사가 따로 있는 이유: `parseInt('0Z', 16)` 은 `0` 을 돌려주며 **성공한다.**
  * 길이와 범위만 봐서는 16진수가 아닌 바이트가 섞인 파일이 그대로 통과한다.
  */
 function recordIsValid(line: string, kind: 'intel' | 'srec'): boolean {
-    const hexAt = (from: number, len: number): number => {
-        const slice = line.substring(from, from + len);
-        return /^[0-9a-fA-F]+$/.test(slice) && slice.length === len ? parseInt(slice, 16) : NaN;
-    };
-
-    if (kind === 'intel') {
-        if (!line.startsWith(':') || line.length < 11) { return false; }
-        const byteCount = hexAt(1, 2);
-        if (!Number.isFinite(byteCount) || byteCount > HEX_MAX_RECORD_BYTES) { return false; }
-        const expectedLength = 11 + byteCount * 2;
-        if (line.length < expectedLength) { return false; }
-        let sum = 0;
-        for (let i = 1; i < expectedLength - 2; i += 2) {
-            const byte = hexAt(i, 2);
-            if (!Number.isFinite(byte)) { return false; }
-            sum += byte;
-        }
-        const checksum = hexAt(expectedLength - 2, 2);
-        return Number.isFinite(checksum) && ((sum + checksum) & 0xFF) === 0;
-    }
-
-    if (!/^S[0-9]/.test(line) || line.length < 4) { return false; }
-    const byteCount = hexAt(2, 2);
-    if (!Number.isFinite(byteCount)) { return false; }
-    const expectedLength = 4 + byteCount * 2;
+    const start = kind === 'intel' ? 1 : 2;
+    if (kind === 'intel' ? !line.startsWith(':') : !/^S[0-9]/.test(line)) { return false; }
+    const countText = line.slice(start, start + 2);
+    if (!/^[0-9a-fA-F]{2}$/.test(countText)) { return false; }
+    const count = parseInt(countText, 16);
+    const expectedLength = (kind === 'intel' ? 11 : 4) + count * 2;
     if (line.length < expectedLength) { return false; }
-    let sum = 0;
-    for (let i = 2; i < expectedLength - 2; i += 2) {
-        const byte = hexAt(i, 2);
-        if (!Number.isFinite(byte)) { return false; }
-        sum += byte;
+    // 기존에 허용한 공백 뒤 세미콜론 주석은 레코드 검증에서 제외한다.
+    const suffix = line.slice(expectedLength);
+    if (suffix && !/^\s+;/.test(suffix)) { return false; }
+    const fields = line.slice(start, expectedLength);
+    if (!/^[0-9a-fA-F]+$/.test(fields) || fields.length % 2 !== 0) { return false; }
+    if (kind === 'intel') {
+        const type = parseInt(line.slice(7, 9), 16);
+        const required = [undefined, 0, 2, 4, 2, 4];
+        if (type > 5 || (type !== 0 && (count !== required[type] || line.slice(3, 7) !== '0000'))) {
+            return false;
+        }
+    } else {
+        const type = Number(line[1]);
+        const addressBytes = [2, 2, 3, 4, 0, 2, 3, 4, 3, 2][type];
+        if (!addressBytes || count < addressBytes + 1) { return false; }
+        if (type >= 5 && count !== addressBytes + 1) { return false; }
     }
-    const checksum = hexAt(expectedLength - 2, 2);
-    return Number.isFinite(checksum) && ((sum + checksum) & 0xFF) === 0xFF;
+    let sum = 0;
+    for (let i = start; i < expectedLength; i += 2) {
+        sum += parseInt(line.slice(i, i + 2), 16);
+    }
+    return (sum & 0xFF) === (kind === 'intel' ? 0 : 0xFF);
 }
 
 /**
@@ -150,40 +145,16 @@ export function parseIntelHex(content: string): HexParseResult {
     let entryPoint: number | undefined;
     let minAddress = Infinity;
     let maxAddress = -Infinity;
+    let invalidRecordCount = 0;
 
     const lines = content.split(/\r?\n/);
     for (const rawLine of lines) {
         const line = rawLine.trim();
         if (!line || !line.startsWith(':')) { continue; }
-        if (line.length < 11) { continue; }
-
+        if (!recordIsValid(line, 'intel')) { invalidRecordCount++; continue; }
         const byteCount = parseInt(line.substring(1, 3), 16);
         const address = parseInt(line.substring(3, 7), 16);
         const recordType = parseInt(line.substring(7, 9), 16);
-        if (!Number.isFinite(byteCount) || byteCount < 0 || byteCount > HEX_MAX_RECORD_BYTES) {
-            continue;
-        }
-        const expectedLength = 11 + byteCount * 2;
-        if (line.length < expectedLength) {
-            continue;
-        }
-
-        // Validate checksum
-        let sum = 0;
-        let validBytes = true;
-        for (let i = 1; i < expectedLength - 2; i += 2) {
-            const byte = parseInt(line.substring(i, i + 2), 16);
-            if (!Number.isFinite(byte)) {
-                validBytes = false;
-                break;
-            }
-            sum += byte;
-        }
-        if (!validBytes) { continue; }
-        const checksum = parseInt(line.substring(expectedLength - 2, expectedLength), 16);
-        if (!Number.isFinite(checksum) || ((sum + checksum) & 0xFF) !== 0) {
-            continue; // Skip invalid lines
-        }
 
         switch (recordType) {
             case 0x00: { // Data record
@@ -226,7 +197,7 @@ export function parseIntelHex(content: string): HexParseResult {
 
     if (minAddress === Infinity) { minAddress = 0; maxAddress = 0; }
 
-    return { format: 'intel', data, entryPoint, minAddress, maxAddress, byteCount: data.size };
+    return { format: 'intel', data, entryPoint, minAddress, maxAddress, byteCount: data.size, invalidRecordCount };
 }
 
 /**
@@ -237,37 +208,15 @@ export function parseSrec(content: string): HexParseResult {
     let entryPoint: number | undefined;
     let minAddress = Infinity;
     let maxAddress = -Infinity;
+    let invalidRecordCount = 0;
 
     const lines = content.split(/\r?\n/);
     for (const rawLine of lines) {
         const line = rawLine.trim();
         if (!line || !line.startsWith('S')) { continue; }
-        if (line.length < 4) { continue; }
-
-        const type = parseInt(line[1], 10);
+        if (!recordIsValid(line, 'srec')) { invalidRecordCount++; continue; }
+        const type = Number(line[1]);
         const byteCount = parseInt(line.substring(2, 4), 16);
-        if (!Number.isFinite(type) || !Number.isFinite(byteCount)) { continue; }
-        const expectedLength = 4 + byteCount * 2;
-        if (line.length < expectedLength) {
-            continue;
-        }
-
-        // Validate checksum
-        let sum = 0;
-        let validBytes = true;
-        for (let i = 2; i < expectedLength - 2; i += 2) {
-            const byte = parseInt(line.substring(i, i + 2), 16);
-            if (!Number.isFinite(byte)) {
-                validBytes = false;
-                break;
-            }
-            sum += byte;
-        }
-        if (!validBytes) { continue; }
-        const checksum = parseInt(line.substring(expectedLength - 2, expectedLength), 16);
-        if (!Number.isFinite(checksum) || ((sum + checksum) & 0xFF) !== 0xFF) {
-            continue;
-        }
 
         let addressBytes: number;
         switch (type) {
@@ -312,7 +261,7 @@ export function parseSrec(content: string): HexParseResult {
 
     if (minAddress === Infinity) { minAddress = 0; maxAddress = 0; }
 
-    return { format: 'srec', data, entryPoint, minAddress, maxAddress, byteCount: data.size };
+    return { format: 'srec', data, entryPoint, minAddress, maxAddress, byteCount: data.size, invalidRecordCount };
 }
 
 /**

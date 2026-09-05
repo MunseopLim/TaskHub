@@ -215,6 +215,80 @@ suite('Hex/Text 변환기 Webview', () => {
         assert.match(elements.hexCount.textContent, /71681/);
     });
 
+    test('큰 Hex 입력은 오프셋 계산도 변환 완료까지 미룬다', () => {
+        const harness = runHexConverterWebview();
+        const { elements } = harness;
+        elements.hexInput.value = '41'.repeat(40 * 1024) + '\n42';
+        elements.hexInput.dispatch('input');
+        assert.strictEqual(harness.pendingTimerCount(), 1);
+        assert.strictEqual(elements.hexOffsets.textContent, '0x00000000\n—');
+        elements.bytesPerRow.value = '8';
+        elements.bytesPerRow.dispatch('change');
+        assert.strictEqual(elements.hexOffsets.textContent, '0x00000000\n—');
+        harness.flushTimers();
+        assert.strictEqual(elements.hexOffsets.textContent, '0x00000000\n0x0000A000');
+        assert.strictEqual(elements.textInput.value, 'A'.repeat(40 * 1024) + 'B');
+    });
+
+    test('Hex 연속 입력·중간 수정·구분자 삭제는 입력 원문과 커서를 유지한다', () => {
+        const { elements } = runHexConverterWebview();
+        const input = elements.hexInput;
+        const insert = (text: string) => {
+            const start = input.selectionStart;
+            input.value = input.value.slice(0, start) + text + input.value.slice(input.selectionEnd);
+            input.setSelectionRange(start + text.length, start + text.length);
+            input.dispatch('input');
+        };
+        for (const character of '4865') { insert(character); }
+        assert.strictEqual(input.value, '4865');
+        assert.strictEqual(input.selectionStart, 4);
+        assert.strictEqual(elements.textInput.value, 'He');
+        input.setSelectionRange(2, 4);
+        insert('69');
+        assert.strictEqual(elements.textInput.value, 'Hi');
+        assert.strictEqual(input.selectionStart, 4);
+        input.dispatch('blur');
+        assert.strictEqual(input.value, '48 69');
+        input.setSelectionRange(2, 3);
+        insert('');
+        assert.strictEqual(input.value, '4869', '구분자를 지워도 즉시 다시 삽입하지 않는다');
+        assert.strictEqual(input.selectionStart, 2);
+        assert.strictEqual(elements.textInput.value, 'Hi');
+    });
+
+    test('0x 접두사와 구분자는 미완성 입력에서도 지워지지 않는다', () => {
+        const { elements } = runHexConverterWebview();
+        for (const value of ['0', '0x', '0x4', '0x48', '0x48, 0x', '0x48, 0x65']) {
+            elements.hexInput.value = value;
+            elements.hexInput.setSelectionRange(value.length, value.length);
+            elements.hexInput.dispatch('input');
+            assert.strictEqual(elements.hexInput.value, value);
+            assert.strictEqual(elements.hexInput.selectionStart, value.length);
+        }
+        assert.strictEqual(elements.textInput.value, 'He');
+        elements.hexInput.dispatch('blur');
+        assert.strictEqual(elements.hexInput.value, '48 65');
+    });
+
+    test('표시 단위·행 크기·Endian 변경은 UTF-8 및 ASCII 디코딩 오류를 유지한다', () => {
+        for (const encoding of ['utf8', 'ascii']) {
+            const { elements } = runHexConverterWebview();
+            elements.encoding.value = encoding;
+            elements.hexInput.value = 'FF';
+            elements.hexInput.dispatch('input');
+            const message = elements.statusText.textContent;
+            assert.ok(elements.status.classes.has('is-error'));
+            for (const [id, value] of [['hexGroup', '2'], ['bytesPerRow', '8'], ['endian', 'big']]) {
+                elements[id].value = value;
+                elements[id].dispatch('change');
+                assert.ok(elements.status.classes.has('is-error'), id);
+                assert.strictEqual(elements.statusText.textContent, message, id);
+                assert.strictEqual(elements.textInput.value, '');
+                assert.strictEqual(elements.copyText.disabled, true);
+            }
+        }
+    });
+
     test('Hex 표시를 1·2·4바이트로 즉시 다시 묶고 바이트 순서는 유지한다', () => {
         const harness = runHexConverterWebview();
         const { elements } = harness;
@@ -328,8 +402,29 @@ suite('Hex/Text 변환기 Webview', () => {
 
         elements.hexInput.value = '41 42 GG\n43 44\n45 46';
         elements.hexInput.dispatch('input');
-        assert.strictEqual(elements.hexOffsets.textContent, '0x00000000\n0x00000008\n0x00000010',
-            '여러 줄의 잘못된 Hex 입력에서도 화면 줄 수를 유지해야 한다');
+        assert.strictEqual(elements.hexOffsets.textContent, '0x00000000\n—\n—',
+            '잘못된 행 뒤의 오프셋은 계산할 수 없음을 표시해야 한다');
+    });
+
+    test('직접 입력한 행의 실제 바이트 오프셋을 표시하고 blur 정렬과 함께 갱신한다', () => {
+        const { elements } = runHexConverterWebview();
+        elements.hexInput.value = '48\n65';
+        elements.hexInput.dispatch('input');
+        assert.strictEqual(elements.textInput.value, 'He');
+        assert.strictEqual(elements.hexOffsets.textContent, '0x00000000\n0x00000001');
+        elements.hexInput.dispatch('blur');
+        assert.strictEqual(elements.hexInput.value, '48 65');
+        assert.strictEqual(elements.hexOffsets.textContent, '0x00000000');
+
+        elements.hexInput.value = '41'.repeat(20);
+        elements.hexInput.dispatch('input');
+        assert.strictEqual(elements.hexOffsets.textContent, '0x00000000');
+        elements.hexInput.dispatch('blur');
+        assert.strictEqual(elements.hexOffsets.textContent, '0x00000000\n0x00000010');
+
+        elements.hexInput.value = '0x48, 0x65\n6\n6C';
+        elements.hexInput.dispatch('input');
+        assert.strictEqual(elements.hexOffsets.textContent, '0x00000000\n0x00000002\n—');
     });
 
     test('호스트에서 받은 최근 변환 옵션을 초기값으로 사용한다', () => {

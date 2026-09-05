@@ -463,7 +463,8 @@ export function buildHexViewerHtml(
 
     return getWebviewContent(
         fileName, result.format, result.minAddress, result.maxAddress,
-        result.byteCount, result.entryPoint, !!result.rawBuffer, webview, expectedDeliveryId
+        result.byteCount, result.entryPoint, !!result.rawBuffer, webview, expectedDeliveryId,
+        result.invalidRecordCount ?? 0
     );
 }
 
@@ -828,6 +829,10 @@ export function buildHexViewerStrings(): Record<string, string> {
         statusValue: t('값', 'Value'),
         statusNoData: t('데이터 없음', 'no data'),
         statusSelected: t('선택 {n} 바이트', 'Selected: {n} bytes'),
+        invalidRecords: t(
+            '잘못된 레코드 {n}개를 제외했습니다. 표시된 데이터는 불완전할 수 있으니 원본 파일을 확인하세요.',
+            'Skipped {n} invalid records. Displayed data may be incomplete; check the source file.'
+        ),
     };
 }
 
@@ -840,7 +845,8 @@ function getWebviewContent(
     entryPoint: number | undefined,
     isBinaryFormat: boolean,
     webview?: vscode.Webview,
-    expectedDeliveryId?: string
+    expectedDeliveryId?: string,
+    invalidRecordCount = 0
 ): string {
     const formatLabel = format === 'intel' ? 'Intel HEX' : format === 'srec' ? 'Motorola SREC' : 'Binary';
     const entryStr = entryPoint !== undefined ? `0x${entryPoint.toString(16).toUpperCase().padStart(8, '0')}` : 'N/A';
@@ -990,9 +996,11 @@ function getWebviewContent(
         flex-wrap: wrap;
     }
     .status-bar span { white-space: nowrap; }
+    .parse-warning { padding: 8px 12px; color: var(--vscode-editorWarning-foreground); border-bottom: 1px solid var(--border); }
 </style>
 </head>
 <body>
+    ${invalidRecordCount > 0 ? `<div class="parse-warning" role="status">${esc(S.invalidRecords.replace('{n}', String(invalidRecordCount)))}</div>` : ''}
     <div class="header">
         <div class="file-info">
             <span class="file-name">${esc(fileName)}</span>
@@ -1372,7 +1380,10 @@ function getWebviewContent(
 
     function updateSelection() {
         document.querySelectorAll('.hex-cell.selected, .ascii-cell.selected').forEach(el => el.classList.remove('selected'));
-        if (selectedOffset < 0) { return; }
+        if (selectedOffset < 0) {
+            statusBar.textContent = S.statusHint;
+            return;
+        }
         applySelectionToVisible();
         const endOff = selectedEndOffset >= 0 ? selectedEndOffset : selectedOffset;
         updateStatusBar(Math.min(selectedOffset, endOff), Math.max(selectedOffset, endOff));
@@ -1421,6 +1432,7 @@ function getWebviewContent(
         const cell = e.target.closest('.hex-cell[data-offset]');
         if (!cell) { return; }
         const off = parseInt(cell.dataset.offset, 10);
+        hexContainer.focus({ preventScroll: true });
         if (e.shiftKey && selectedOffset >= 0) {
             selectedEndOffset = off;
         } else {
@@ -1495,12 +1507,17 @@ function getWebviewContent(
         selectedOffset = -1;
         selectedEndOffset = -1;
         render();
+        updateSelection();
     });
 
     // Endian change
     endianSelect.addEventListener('change', () => {
         endian = endianSelect.value;
         render();
+        updateSelection();
+        if (findBar.classList.contains('visible') && document.getElementById('findMode').value === 'value') {
+            void doFind();
+        }
     });
 
     // Go to address
@@ -1590,8 +1607,10 @@ function getWebviewContent(
 
     // Find
     function toggleFind() {
-        findBar.classList.toggle('visible');
         if (findBar.classList.contains('visible')) {
+            closeFind();
+        } else {
+            findBar.classList.add('visible');
             findHexInput.focus();
         }
     }
@@ -1739,14 +1758,16 @@ function getWebviewContent(
     }
 
     document.getElementById('findBtn').addEventListener('click', toggleFind);
-    document.getElementById('findClose').addEventListener('click', () => {
+    function closeFind() {
+        clearTimeout(findDebounceTimer);
         findGeneration++;
         findBar.classList.remove('visible');
         findMatches = [];
         findCurrentIdx = -1;
         findInfo.textContent = '';
         applyFindHighlightsToVisible();
-    });
+    }
+    document.getElementById('findClose').addEventListener('click', closeFind);
     // 키 입력마다 전체 데이터를 스캔하면 대용량 파일에서 웹뷰가 수 초씩
     // 멈춘다(M11) — memoryMapViewer의 searchTimeout 패턴과 동일한 디바운스.
     let findDebounceTimer;
@@ -1792,21 +1813,20 @@ function getWebviewContent(
 
     // Intercept copy to format properly
     document.addEventListener('copy', (e) => {
-        if (selectedOffset >= 0) {
+        const target = e.target;
+        const active = document.activeElement;
+        const isEditable = element => element instanceof Element
+            && (element.matches('input, textarea') || element.isContentEditable);
+        if (isEditable(target) || isEditable(active)) { return; }
+        const sel = window.getSelection();
+        if (sel && sel.toString().length > 0) { return; }
+        if (selectedOffset >= 0 && (active === hexContainer || hexContainer.contains(active))) {
             const endOff = selectedEndOffset >= 0 ? selectedEndOffset : selectedOffset;
             const minOff = Math.min(selectedOffset, endOff);
             const maxOff = Math.max(selectedOffset, endOff) + unitSize;
             e.clipboardData.setData('text/plain', buildCopyText(minOff, maxOff));
             e.preventDefault();
             return;
-        }
-        const sel = window.getSelection();
-        if (sel && sel.toString().trim()) {
-            const cleaned = sel.toString()
-                .replace(/\t+/g, ' ')
-                .replace(/ {2,}/g, ' ');
-            e.clipboardData.setData('text/plain', cleaned);
-            e.preventDefault();
         }
     });
 
