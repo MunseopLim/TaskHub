@@ -1031,18 +1031,23 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
         lines.push('───────────────────────────────────────────────────────────────────');
 
         const interpolated: (string | undefined)[] = [];
+        let relativeCwdUnresolved = false;
         const resolvePreviewCwd = (): string | undefined => {
             const cwd = task.cwd ? interpolatePipelineVariables(task.cwd, interpolationContext) : undefined;
             // 미해결 참조·시뮬레이션 값의 실제 경로는 아직 알 수 없다.
             if (cwd && (/\$\{[^}]+\}/.test(cwd) || /<[A-Za-z]+:[^>]*>/.test(cwd))) { return cwd; }
             const resolved = resolveTaskWorkingDirectory(cwd, options.workspaceFolder || options.workspaceRoots[0]);
             if (cwd && !resolved) {
+                relativeCwdUnresolved = true;
                 const message = 'a relative cwd requires a workspace folder; set an absolute cwd or open a workspace folder';
                 lines.push(`    ⚠️  ${message}`);
                 runtimeBlockers.push(`task '${task.id}': ${message}`);
             }
             return resolved;
         };
+        // 경로 계산에는 undefined를 유지하고, 실행 불가와 정상 기본값은 표시만 구분한다.
+        const previewCwdLabel = (resolved: string | undefined, fallback = '(defaults to process working directory)'): string =>
+            relativeCwdUnresolved ? '(unresolved relative cwd)' : (resolved ?? fallback);
 
         // 전방 참조 관용과 `??` 체인 판정은 **`when` 줄보다 먼저** 필요하다 —
         // 조건 변수도 같은 규칙으로 봐야 정상 분기를 죽었다고 하지 않는다.
@@ -1247,7 +1252,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 // 실행과 **같은 규칙**으로 펼친다 — 배열 참조는 인자 여러 개가
                 // 된다. 미리보기가 실제와 다른 개수를 보여 주면 안 된다.
                 const args = (task.args ?? []).flatMap(a => expandArgTemplate(a, interpolationContext));
-                const cwd = resolvePreviewCwd() ?? '(defaults to process working directory)';
+                const cwd = previewCwdLabel(resolvePreviewCwd());
                 const env: Record<string, string> = {};
                 if (task.env) {
                     for (const [k, v] of Object.entries(task.env)) {
@@ -1274,7 +1279,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 const url = typeof task.url === 'string'
                     ? interpolatePipelineVariables(task.url, interpolationContext)
                     : '(missing)';
-                const cwd = resolvePreviewCwd() ?? '(no workspace folder)';
+                const cwd = previewCwdLabel(resolvePreviewCwd(), '(no workspace folder)');
                 lines.push(`  url:     ${url}`);
                 lines.push(`  target:  ${task.target ?? 'integrated'}`);
                 lines.push(`  cwd:     ${cwd}`);
@@ -1320,7 +1325,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                     }
                 }
                 if (itemsFromCommand !== undefined) {
-                    const cwd = resolvePreviewCwd() ?? '(defaults to process working directory)';
+                    const cwd = previewCwdLabel(resolvePreviewCwd());
                     lines.push(`  itemsFromCommand: ${itemsFromCommand}`);
                     lines.push(`  itemsFromCommandFormat: ${task.itemsFromCommandFormat ?? 'lines'}`);
                     lines.push(`  cwd:     ${cwd}`);
@@ -1455,7 +1460,7 @@ export function buildPreviewReport(item: ActionItem, options: PreviewOptions): s
                 // 워크스페이스 격리 대상이 아니므로(다이얼로그로 고른 위치를
                 // 다루는 것이 설계다) 격리 판정은 붙이지 않는다.
                 const base = resolvePreviewCwd();
-                lines.push(`  cwd:     ${base ?? '(defaults to process working directory)'}`);
+                lines.push(`  cwd:     ${previewCwdLabel(base)}`);
                 if (task.cwd) { interpolated.push(interpolatePipelineVariables(task.cwd, interpolationContext)); }
                 const showPath = (label: string, value: string) => {
                     lines.push(`  ${label} ${value}`);

@@ -1033,13 +1033,38 @@ suite('buildPreviewReport', () => {
         }
     });
 
-    test('relative cwd without a workspace is a runtime blocker in preview', () => {
+    test('워크스페이스 없는 상대 cwd는 실행 차단으로 표시하고 아카이브 경로를 추측하지 않는다', () => {
+        const tasks: Task[] = [
+            { id: 'run', type: 'command', command: 'node' },
+            { id: 'run', type: 'shell', command: 'node' },
+            { id: 'run', type: 'browser', url: 'index.html' },
+            { id: 'run', type: 'quickPick', itemsFromCommand: 'node list.js' },
+            { id: 'run', type: 'zip', archive: 'bundle.zip', source: ['src'] },
+            { id: 'run', type: 'unzip', archive: 'bundle.zip', destination: 'out' },
+        ];
+        for (const task of tasks) {
+            const item: ActionItem = { id: 'cwd', title: 'cwd', action: {
+                description: '', tasks: [{ ...task, cwd: 'build' }],
+            } };
+            const report = buildPreviewReport(item, { ...baseOptions(), workspaceFolder: '', workspaceRoots: [] });
+            assert.match(report, /relative cwd requires a workspace folder/);
+            assert.match(report, /would FAIL at runtime/);
+            assert.match(report, /cwd:\s+\(unresolved relative cwd\)/);
+            assert.doesNotMatch(report, /defaults to process working directory|^    → resolves to:/m);
+        }
+    });
+
+    test('상대 cwd 오류 표시가 다음 태스크의 정상 기본값이나 절대 cwd에 전파되지 않는다', () => {
+        const absoluteCwd = path.resolve(WS, 'build');
         const item: ActionItem = { id: 'cwd', title: 'cwd', action: { description: '', tasks: [
-            { id: 'run', type: 'command', command: 'node', cwd: 'build' },
+            { id: 'invalid', type: 'command', command: 'node', cwd: 'build' },
+            { id: 'default', type: 'command', command: 'node' },
+            { id: 'absolute', type: 'command', command: 'node', cwd: absoluteCwd },
         ] } };
         const report = buildPreviewReport(item, { ...baseOptions(), workspaceFolder: '', workspaceRoots: [] });
-        assert.match(report, /relative cwd requires a workspace folder/);
-        assert.match(report, /would FAIL at runtime/);
+        assert.strictEqual(report.match(/cwd:\s+\(unresolved relative cwd\)/g)?.length, 1);
+        assert.strictEqual(report.match(/cwd:\s+\(defaults to process working directory\)/g)?.length, 1);
+        assert.ok(report.includes(`cwd:     ${absoluteCwd}`), report);
     });
 
     suite('zip/unzip built-in engine preview', () => {
