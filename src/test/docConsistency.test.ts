@@ -42,7 +42,8 @@ function markdownHeadingIds(body: string): Set<string> {
         const base = match[1]
             .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
             .replace(/<[^>]+>/g, '')
-            .replace(/[`*_~]/g, '')
+            .replace(/[`*~]/g, '')
+            .replace(/(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])/gu, '')
             .toLocaleLowerCase('en-US')
             .replace(/[^\p{L}\p{N}\p{M}\s_-]/gu, '')
             .replace(/\s/g, '-');
@@ -479,6 +480,14 @@ suite('Documentation Consistency', () => {
     // 10. 저장소 내 Markdown 링크와 heading anchor
     // =====================================================================
     suite('Markdown local links and anchors', () => {
+        test('heading의 식별자 내부 밑줄은 유지하고 강조 구분자만 제거한다', () => {
+            assert.deepStrictEqual([...markdownHeadingIds([
+                '### 15.4. 커스텀 타입 설정 (taskhub_types.json)',
+                '## _강조_ 및 **제목**',
+                '## `some_type` 설정',
+            ].join('\n'))], ['154-커스텀-타입-설정-taskhub_typesjson', '강조-및-제목', 'some_type-설정']);
+        });
+
         test('모든 로컬 Markdown 링크의 파일과 heading이 존재한다', () => {
             const files = markdownDocFiles();
             const headingCache = new Map<string, Set<string>>();

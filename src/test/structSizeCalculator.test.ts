@@ -414,8 +414,123 @@ suite('StructSizeCalculator Test Suite', () => {
             const result = calculator.calculateStructSize('ConstStruct', lines, structLine);
 
             assert.strictEqual(result.success, true);
-            // static members don't contribute to instance size, but parser includes them
-            assert.strictEqual(result.totalSize, 12); // 3 * 4 bytes
+            assert.deepStrictEqual(result.members.map(member => member.name), ['a', 'b']);
+            assert.strictEqual(result.totalSize, 8); // static storage is outside each instance
+        });
+    });
+
+    suite('C++ declarations and unsupported layouts', () => {
+        test('brace and equals initializers preserve all instance members', () => {
+            const result = calculator.calculateStructSize('Initialized', [
+                'struct Initialized {',
+                '    int x{}, second = (1 + 2);',
+                "    char text[3] = {'a', ',', '}'};",
+                '    char y;',
+                '};'
+            ], 0);
+            assert.strictEqual(result.success, true);
+            assert.deepStrictEqual(result.members.map(member => [member.name, member.offset]), [
+                ['x', 0], ['second', 4], ['text', 8], ['y', 11]
+            ]);
+            assert.strictEqual(result.totalSize, 12);
+        });
+
+        test('review reproduction counts brace initialization and excludes static storage', () => {
+            const initialized = calculator.calculateStructSize('S', ['struct S { int x{}; char y; };'], 0);
+            assert.strictEqual(initialized.success, true);
+            assert.strictEqual(initialized.totalSize, 8);
+            const statics = calculator.calculateStructSize('S', ['struct S { static int x; const static int z = 3; char y; };'], 0);
+            assert.strictEqual(statics.success, true);
+            assert.deepStrictEqual(statics.members.map(member => member.name), ['y']);
+            assert.strictEqual(statics.totalSize, 1);
+        });
+
+        for (const declaration of [
+            'struct S { alignas(16) int x; char y; };',
+            'struct alignas(16) S { int x; char y; };',
+            'struct S { int x; char y; } __attribute__((packed));',
+            'struct S { const char *url = "http://host"; char y; } __attribute__((packed));',
+            'class S : public Base { int x; };',
+            'class S { virtual void method(); int x; };',
+            'struct S { [[no_unique_address]] Empty value; int x; };',
+            'struct S { struct { Unknown value; } nested; int x; };',
+        ]) {
+            test(`does not certify an unsupported layout: ${declaration}`, () => {
+                const result = calculator.calculateStructSize('S', [declaration], 0);
+                assert.strictEqual(result.success, false);
+                assert.ok(result.error);
+            });
+        }
+
+        test('data after access labels and inline methods is retained', () => {
+            const result = calculator.calculateStructSize('S', [
+                'class S { public: void method() {} int x; private: char y; };'
+            ], 0);
+            assert.strictEqual(result.success, true);
+            assert.deepStrictEqual(result.members.map(member => member.name), ['x', 'y']);
+            assert.strictEqual(result.totalSize, 8);
+        });
+
+        test('nested type declaration without an instance contributes no storage', () => {
+            const result = calculator.calculateStructSize('S', [
+                'struct S { struct Inner { int x; }; char y; };'
+            ], 0);
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.totalSize, 1);
+        });
+
+        test('failed custom type registration remains unresolved in its parent', () => {
+            const failed = calculator.calculateStructSize('Inner', ['struct Inner { Unknown x; };'], 0);
+            assert.strictEqual(failed.success, false);
+            calculator.registerCustomType(failed);
+            const parent = calculator.calculateStructSize('Outer', ['struct Outer { Inner value; char y; };'], 0);
+            assert.strictEqual(parent.success, false);
+        });
+
+        for (const method of [
+            'static inline int method() { return 1; }',
+            'void method() {} public:',
+            'void method() { const char *message = "virtual # alignas"; }',
+        ]) {
+            test(`inline method preserves following instance members: ${method}`, () => {
+                const result = calculator.calculateStructSize('S', [`class S { ${method} int x; char y; };`], 0);
+                assert.strictEqual(result.success, true);
+                assert.deepStrictEqual(result.members.map(member => member.name), ['x', 'y']);
+                assert.strictEqual(result.totalSize, 8);
+            });
+        }
+
+        for (const value of ['virtual', '#', 'alignas(16)', '__attribute__((packed))']) {
+            test(`initializer text does not become layout syntax: ${value}`, () => {
+                const result = calculator.calculateStructSize('S', [`struct S { const char *text = "${value}"; int x; };`], 0);
+                assert.strictEqual(result.success, true);
+                assert.deepStrictEqual(result.members.map(member => member.name), ['text', 'x']);
+                assert.strictEqual(result.totalSize, 8);
+            });
+        }
+
+        for (const directives of [
+            ['#pragma pack(push, 1)', '#pragma pack(pop)'],
+            ['#pragma pack(1)', '#pragma pack()'],
+            ['#pragma pack(push, first, 1)', '#pragma pack(push, second, 2)', '#pragma pack(pop, first)'],
+            ['/*', '#pragma pack(1)', '*/'],
+        ]) {
+            test(`restored or commented packing does not reject later structs: ${directives.join(' ')}`, () => {
+                const lines = [...directives, 'struct S { char x; int y; };'];
+                const result = calculator.calculateStructSize('S', lines, directives.length);
+                assert.strictEqual(result.success, true);
+                assert.strictEqual(result.totalSize, 8);
+            });
+        }
+
+        test('an outer active packing directive remains active after an inner pop', () => {
+            const lines = ['#pragma pack(1)', '#pragma pack(push, 2)', '#pragma pack(pop)', 'struct S { char x; int y; };'];
+            assert.strictEqual(calculator.calculateStructSize('S', lines, 3).success, false);
+        });
+
+        test('source pragma packing is rejected instead of using natural alignment', () => {
+            const result = calculator.calculateStructSize('S', ['#pragma pack(push, 1)', 'struct S { char y; int x; };'], 1);
+            assert.strictEqual(result.success, false);
         });
     });
 

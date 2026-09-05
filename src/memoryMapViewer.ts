@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, autoDetectRegions, summarizeSections, generateTextReport, generateSummaryReport, formatSize, formatHex, MemoryRegion, MemoryUsage, ElfSection, SectionSummary, ElfFileRangeResolution, ElfSymbol } from './elfParser';
-import { parseLinkerFile } from './linkerScriptParser';
+import { parseLinkerFileWithDiagnostics } from './linkerScriptParser';
 import { ARM_LINK_MAX_ENTRIES, parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
@@ -348,16 +348,19 @@ function resolveMemoryMapRegions(
         }
         linkerName = path.basename(config.linkerFilePath) || linkerName;
         const content = readMemoryMapLinkerFile(config.linkerFilePath);
-        const regions = parseLinkerFile(content, config.linkerFilePath);
-        if (regions.length === 0) {
-            const reason = t(
+        const { regions, warnings } = parseLinkerFileWithDiagnostics(content, config.linkerFilePath);
+        if (regions.length === 0 || warnings.length > 0) {
+            const reason = regions.length > 0 ? t(
+                `링커/스캐터 파일의 일부 MEMORY 영역을 해석할 수 없습니다 (${linkerName}). 불완전한 영역 목록은 사용하지 않습니다.`,
+                `Some MEMORY regions could not be parsed in the linker/scatter file (${linkerName}). The incomplete region list will not be used.`
+            ) : t(
                 `링커/스캐터 파일에서 MEMORY 영역을 찾을 수 없습니다 (${linkerName}).`,
                 `No MEMORY regions were found in the linker/scatter file (${linkerName}).`
             );
             if (mode === 'refresh') {
                 const refreshReason = t(
-                    `${reason} MEMORY 블록을 복원하거나 파일을 다시 선택한 뒤 다시 시도하세요.`,
-                    `${reason} Restore the MEMORY block or select the file again, then try again.`
+                    `${reason} MEMORY 선언의 상수식을 확인하거나 파일을 다시 선택한 뒤 다시 시도하세요.`,
+                    `${reason} Check the constant expressions in MEMORY declarations or select the file again, then try again.`
                 );
                 vscode.window.showWarningMessage(refreshReason);
                 return { ok: false, regions: [], reason: refreshReason };

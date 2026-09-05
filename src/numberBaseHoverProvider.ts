@@ -11,7 +11,8 @@ import {
 } from './sfrBitFieldParser';
 import { MacroExpander, MacroDefinition } from './macroExpander';
 import { RegisterDecoder, RegisterDefinition } from './registerDecoder';
-import { StructSizeCalculator, TypeConfigFile } from './structSizeCalculator';
+import { StructSizeCalculator, StructSizeResult, TypeConfigFile } from './structSizeCalculator';
+import { t } from './i18n';
 
 /** Cache entry for type config loaded from taskhub_types.json */
 interface TypeConfigCacheEntry {
@@ -1402,7 +1403,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         const word = document.getText(wordRange);
 
         // Check if line contains struct/class declaration
-        const structPattern = /\b(struct|class)\s+(\w+)/;
+        const structPattern = /\b(struct|class)\s+(?:alignas\s*\([^()]*\)\s*)?(\w+)/;
         const match = lineText.match(structPattern);
 
         let structName: string | null = null;
@@ -1445,8 +1446,13 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         const result = calculator.calculateStructSize(structName, documentLines, structLine);
 
-        if (!result.success || result.members.length === 0) {
-            return null;
+        if (!result.success) {
+            const explanation = new vscode.MarkdownString();
+            explanation.appendText(t(
+                `구조체 ${structName}의 크기를 계산할 수 없습니다. 지원되지 않는 선언 또는 해석되지 않은 타입이 있습니다. 대상 컴파일러의 sizeof로 확인하고, 사용자 타입은 .vscode/taskhub_types.json에 정의하세요.`,
+                `Cannot calculate the size of ${structName}: unsupported declarations or unresolved types. Check sizeof with the target compiler and define custom types in .vscode/taskhub_types.json.`
+            ));
+            return new vscode.Hover(explanation, wordRange);
         }
 
         return new vscode.Hover(
@@ -1458,11 +1464,11 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     /**
      * Generate hover content for struct size information
      */
-    private generateStructSizeContent(result: any): vscode.MarkdownString {
+    private generateStructSizeContent(result: StructSizeResult): vscode.MarkdownString {
         const md = new vscode.MarkdownString();
 
         md.appendMarkdown(`### Struct: ${result.structName}\n\n`);
-        md.appendMarkdown(`**Total Size:** ${result.totalSize} bytes\n\n`);
+        md.appendMarkdown(`**${t('추정 크기', 'Estimated Size')}:** ${result.totalSize} bytes\n\n`);
         md.appendMarkdown(`**Alignment:** ${result.alignment} bytes\n\n`);
         md.appendMarkdown(`**Padding:** ${result.padding} bytes\n\n`);
 
@@ -1481,7 +1487,10 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         }
 
         md.appendMarkdown('\n');
-        md.appendMarkdown('*Hover calculated using default type sizes. Use `.vscode/taskhub_types.json` to customize.*\n');
+        md.appendMarkdown(t(
+            '*설정된 타입 크기와 packing 기준의 추정값입니다. 실제 ABI·비트 필드 배치는 대상 컴파일러의 sizeof로 확인하세요. `.vscode/taskhub_types.json`에서 크기와 정렬을 설정할 수 있습니다.*\n',
+            '*Estimate based on configured type sizes and packing. Verify the target ABI and bit-field layout with compiler sizeof. Customize sizes and alignment in `.vscode/taskhub_types.json`.*\n'
+        ));
 
         return md;
     }
@@ -1492,7 +1501,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      */
     private registerAllCustomTypes(calculator: StructSizeCalculator, lines: string[]): void {
         // Find all struct/class definitions
-        const structPattern = /\b(struct|class)\s+(\w+)/g;
+        const structPattern = /\b(struct|class)\s+(?:alignas\s*\([^()]*\)\s*)?(\w+)/g;
         const definitions: Array<{ name: string; line: number }> = [];
         const seenNames = new Set<string>();
 
@@ -1541,17 +1550,6 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             // If no new registrations in this pass, we're done
             if (newRegistrations === 0) {
                 break;
-            }
-        }
-
-        // Fallback: register remaining unresolved structs with best-effort calculation
-        for (const def of definitions) {
-            if (!registered.has(def.name)) {
-                const result = calculator.calculateStructSize(def.name, lines, def.line);
-                if (result.totalSize > 0) {
-                    calculator.registerCustomType(result);
-                    registered.add(def.name);
-                }
             }
         }
     }

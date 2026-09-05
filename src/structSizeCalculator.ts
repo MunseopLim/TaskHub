@@ -188,6 +188,21 @@ export class StructSizeCalculator {
             }
             const aggregateKind = this.getAggregateKind(lines[startLine]);
             const { members, unparsed } = this.parseStructMembers(lines, startLine);
+            const source = lines.slice(startLine).join('\n').replace(
+                /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
+                (text, literal: string | undefined) => literal ?? text.replace(/[^\n]/g, ' ')
+            );
+            const header = source.slice(0, source.indexOf('{'));
+            const closingBrace = this.findMatchingBraceInText(source, source.indexOf('{'));
+            const suffix = closingBrace < 0 ? '' : source.slice(closingBrace + 1).split(';')[0];
+            if (/\b(?:alignas|__attribute__|__declspec)\b|\[\[|;|:(?!:)/u.test(header + suffix)) {
+                unparsed.push(header.trim());
+            }
+            // Source-level packing is compiler/preprocessor dependent. The explicit
+            // taskhub_types.json packing setting is the only packing input we apply.
+            if (this.hasActiveSourcePacking(lines, startLine)) {
+                unparsed.push('#pragma pack');
+            }
 
             if (members.length === 0) {
                 return {
@@ -224,6 +239,37 @@ export class StructSizeCalculator {
                 error: error instanceof Error ? error.message : String(error)
             };
         }
+    }
+
+    private hasActiveSourcePacking(lines: string[], startLine: number): boolean {
+        // Ignore directive-shaped text in comments and string/character literals.
+        const source = lines.slice(0, startLine + 1).join('\n').replace(
+            /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
+            text => text.replace(/[^\n]/g, ' ')
+        );
+        let active = false;
+        const stack: Array<{ name?: string; previous: boolean }> = [];
+        for (const match of source.matchAll(/^\s*#\s*pragma\s+pack\s*\(([^)]*)\)/gm)) {
+            const args = match[1].split(',').map(arg => arg.trim()).filter(Boolean);
+            const operation = args[0];
+            if (operation === 'push') {
+                stack.push({ name: args[1] && !/^\d+$/.test(args[1]) ? args[1] : undefined, previous: active });
+                if (args.slice(1).some(arg => /^\d+$/.test(arg))) { active = true; }
+            } else if (operation === 'pop') {
+                const name = args[1] && !/^\d+$/.test(args[1]) ? args[1] : undefined;
+                const index = name === undefined ? stack.length - 1 : stack.map(entry => entry.name).lastIndexOf(name);
+                if (index >= 0) {
+                    active = stack[index].previous;
+                    stack.splice(index);
+                } else if (name !== undefined) {
+                    active = true; // Unknown stack labels cannot establish a natural layout.
+                }
+                if (args.slice(1).some(arg => /^\d+$/.test(arg))) { active = true; }
+            } else {
+                active = args.length > 0;
+            }
+        }
+        return active;
     }
 
     /**
@@ -311,7 +357,7 @@ export class StructSizeCalculator {
         const members: StructMember[] = [];
         const unparsed: string[] = [];
         for (const statement of this.splitTopLevelStatements(body)) {
-            const trimmed = statement.trim();
+            const trimmed = statement.trim().replace(/^(?:(?:public|private|protected)\s*:\s*)+/u, '');
             if (!trimmed || /^(public|private|protected)\s*:$/u.test(trimmed)) {
                 continue;
             }
@@ -375,6 +421,15 @@ export class StructSizeCalculator {
             return false;
         }
         const tail = statement.slice(closeIdx + 1).trim();
+        const header = statement.slice(0, openIdx).trim();
+        if (!/^(struct|union)(?:\s+\w+)?$/u.test(header)) {
+            unparsed.push(statement);
+            return true;
+        }
+        // A named nested type definition without a declarator occupies no storage.
+        if (tail === '' && /^(struct|union)\s+\w+$/u.test(header)) {
+            return true;
+        }
         const kind = aggregateMatch[1] as AggregateKind;
         const nestedBody = statement.slice(openIdx + 1, closeIdx);
         const nested = this.parseMemberStatements(nestedBody);
@@ -411,6 +466,9 @@ export class StructSizeCalculator {
         const nestedResult = kind === 'union'
             ? this.calculateUnionLayout(nestedName, nestedMembers)
             : this.calculateLayout(nestedName, nestedMembers);
+        if (!nestedResult.success) {
+            unparsed.push(statement);
+        }
         members.push({
             name: nestedName,
             type: `anonymous ${kind}`,
@@ -451,10 +509,36 @@ export class StructSizeCalculator {
         if (/^\s*(typedef|using)\b/u.test(statement)) {
             return;
         }
-        if (/[{}]/u.test(statement)) {
-            // 중괄호가 남아 있으면 인라인 메서드 본문(C++ class — sizeof에 기여
-            // 안 함)이거나 parseAnonymousAggregateMember가 이미 시도한 중첩
-            // 집합체다. 어느 쪽도 여기서 다룰 데이터 멤버가 아니다.
+        const unsupportedLayout = /\b(?:alignas|_Alignas|__attribute__|__declspec|virtual)\b|\[\[|#/u;
+        // A method body can be followed immediately by another member without a
+        // semicolon. Split that tail before considering static storage or literals.
+        const method = statement.match(/^[\w\s*&~]+\([^(){}]*\)\s*(?:(?:const|noexcept(?:\([^()]*\))?|override|final)\s*)*\{/u);
+        if (method) {
+            const closingBrace = this.findMatchingBraceInText(statement, statement.indexOf('{'));
+            if (unsupportedLayout.test(method[0]) || closingBrace < 0) {
+                unparsed.push(method[0]);
+            }
+            if (closingBrace >= 0) {
+                const following = this.parseMemberStatements(statement.slice(closingBrace + 1));
+                members.push(...following.members);
+                unparsed.push(...following.unparsed);
+            }
+            return;
+        }
+        const declarationPrefix = statement.split(/[=({]/u, 1)[0];
+        if (/\bstatic\b/u.test(declarationPrefix)) {
+            // Unsupported inline method signatures must not swallow later members.
+            const beforeBrace = statement.split('{', 1)[0];
+            if (statement.includes('{') && beforeBrace.includes('(') && !beforeBrace.includes('=')) {
+                unparsed.push(statement);
+            }
+            return;
+        }
+        statement = this.stripMemberInitializers(statement);
+        // Check declaration syntax only. Keywords in initializer strings or method
+        // bodies do not affect layout and must not reject valid data members.
+        if (unsupportedLayout.test(statement) || /[{}]/u.test(statement)) {
+            unparsed.push(statement);
             return;
         }
         // 함수 포인터 멤버는 포인터 크기의 데이터 멤버다:
@@ -474,7 +558,10 @@ export class StructSizeCalculator {
             return;
         }
         if (/[()]/u.test(statement)) {
-            // 함수 포인터가 아닌 괄호 = 메서드 선언/프로토타입 — sizeof에 기여 안 함
+            // Only a complete ordinary method signature can be ignored safely.
+            if (!/^[\w\s*&~]+\([^(){}]*\)\s*(?:(?:const|noexcept|override|final)\s*)*$/u.test(statement)) {
+                unparsed.push(statement);
+            }
             return;
         }
         const declarators = this.splitTopLevelCommas(statement);
@@ -507,6 +594,36 @@ export class StructSizeCalculator {
                 unparsed.push(part);
             }
         }
+    }
+
+    /** Remove =/brace member initializers while preserving comma declarators. */
+    private stripMemberInitializers(statement: string): string {
+        let result = '';
+        let initializing = false;
+        let depth = 0;
+        let inString: '"' | '\'' | null = null;
+        for (let i = 0; i < statement.length; i++) {
+            const ch = statement[i];
+            if (inString) {
+                if (!initializing) { result += ch; }
+                if (ch === '\\') {
+                    if (!initializing && i + 1 < statement.length) { result += statement[i + 1]; }
+                    i++;
+                } else if (ch === inString) {
+                    inString = null;
+                }
+                continue;
+            }
+            if (ch === '"' || ch === '\'') {
+                inString = ch;
+            }
+            if (depth === 0 && (ch === '=' || ch === '{')) { initializing = true; }
+            if (ch === '(' || ch === '[' || ch === '{') { depth++; }
+            if (ch === ')' || ch === ']' || ch === '}') { depth--; }
+            if (depth === 0 && ch === ',') { initializing = false; }
+            if (!initializing) { result += ch; }
+        }
+        return result.trim();
     }
 
     /**
@@ -772,7 +889,7 @@ export class StructSizeCalculator {
             return {
                 size: customType.totalSize,
                 alignment: customType.alignment,
-                resolved: true
+                resolved: customType.success
             };
         }
 
@@ -811,7 +928,7 @@ export class StructSizeCalculator {
      * Find struct definition in source code
      */
     static findStructDefinition(lines: string[], structName: string): number {
-        const pattern = new RegExp(`\\b(struct|class|union)\\s+${structName}\\b`);
+        const pattern = new RegExp(`\\b(struct|class|union)\\s+(?:alignas\\s*\\([^()]*\\)\\s*)?${structName}\\b`);
 
         for (let i = 0; i < lines.length; i++) {
             if (pattern.test(lines[i])) {

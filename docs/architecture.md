@@ -148,7 +148,7 @@ Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
 | 모듈 | 역할 |
 |------|------|
 | `sfrBitFieldParser.ts` | SFR 비트 필드 주석 파싱 및 계층 구조 추출 |
-| `structSizeCalculator.ts` | 구조체/클래스 크기, 오프셋, 패딩 계산 |
+| `structSizeCalculator.ts` | 설정 기반 구조체/클래스 레이아웃 추정, 미지원 선언·미해석 의존 타입 실패 전파 |
 | `registerDecoder.ts` | 레지스터 비트 필드 값 추출 및 디코딩 |
 | `macroExpander.ts` | C/C++ `#define` 매크로 확장. 현재 활성 문서 전체에서 `#define` 라인만 수집해 재귀 치환하고, 수식은 `evaluateToNumber()`(safe 문자집합 + 4096자 한도)로 계산한다. `#if`/`#else` 전처리나 include 체인 추적은 범위 밖. |
 

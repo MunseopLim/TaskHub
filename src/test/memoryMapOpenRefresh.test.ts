@@ -521,6 +521,42 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.strictEqual(fake.harness.createCount, 1);
     });
 
+    test('링커 상수식을 반영하고 일부 영역 누락 시 불완전한 용량으로 갱신하지 않는다', async () => {
+        const filePath = path.join(tempDir, 'partial-linker.elf');
+        const linkerPath = path.join(tempDir, 'expressions.ld');
+        fs.writeFileSync(filePath, buildMinimalElf32());
+        fs.writeFileSync(linkerPath, 'MEMORY { FLASH : ORIGIN = 0x08000000, LENGTH = 128K - 4K }');
+        const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+        assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath), { linkerFilePath: linkerPath }));
+        const stableHtml = panelRegistry.getHtml(filePath);
+        assert.ok(stableHtml?.includes('124.0 KB'));
+
+        fs.writeFileSync(linkerPath, `MEMORY {
+            FLASH : ORIGIN = 0x08000000, LENGTH = 64K
+            RAM : ORIGIN = 0x20000000, LENGTH = RAM_SIZE
+        }`);
+        await fake.harness.send({ command: 'refresh' });
+        assert.strictEqual(panelRegistry.getHtml(filePath), stableHtml);
+        assertRefreshFailed(fake.harness.posted.at(-1), fake.harness.renderId());
+        assert.ok(warnings.some(message => /일부|Some MEMORY/i.test(message)));
+    });
+
+    test('일부만 해석되는 linker의 cold open도 저장된 전체 영역으로 폴백한다', () => {
+        const filePath = path.join(tempDir, 'partial-open.elf');
+        const linkerPath = path.join(tempDir, 'partial.ld');
+        fs.writeFileSync(filePath, buildMinimalElf32());
+        fs.writeFileSync(linkerPath, `MEMORY {
+            FLASH : ORIGIN = 0x08000000, LENGTH = 64K
+            RAM : ORIGIN = 0x20000000, LENGTH = RAM_SIZE
+        }`);
+        assert.ok(openMemoryMapFromUri({ subscriptions: [] } as unknown as vscode.ExtensionContext, vscode.Uri.file(filePath), {
+            linkerFilePath: linkerPath,
+            regions: [{ name: 'FLASH', origin: 0x08000000, size: 96 * 1024 }],
+        }));
+        assert.ok(panelRegistry.getHtml(filePath)?.includes('96.0 KB'));
+        assert.ok(warnings.some(message => /일부|Some MEMORY/i.test(message)));
+    });
+
     test('사라진 linker의 cold open은 저장 영역을 쓰고 Refresh 실패는 이전 결과를 유지한다', async () => {
         const filePath = path.join(tempDir, 'missing-linker.axf');
         const linkerPath = path.join(tempDir, 'missing.ld');

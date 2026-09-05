@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import {
     parseSizeValue,
+    parseLinkerConstantExpression,
     parseLinkerScript,
     parseScatterFile,
     parseLinkerFile,
@@ -159,6 +160,84 @@ MEMORY
             const regions = parseLinkerScript(content);
             assert.strictEqual(regions.length, 1);
             assert.strictEqual(regions[0].name, 'FLASH');
+        });
+    });
+
+    suite('GNU constant expressions and incomplete results', () => {
+        test('evaluates entire expressions, parentheses, precedence and multiline declarations', () => {
+            const result = parseLinkerFileWithDiagnostics(`MEMORY {
+                FLASH (rx) : ORIGIN = 0x08000000 + 4K,
+                    LENGTH = 128K - 4K
+                RAM (rw) : ORIGIN = (0x20000000 + 1024 * 2), LENGTH = (64K - 1K)
+            }`, 'memory.ld');
+            assert.deepStrictEqual(result.regions, [
+                { name: 'FLASH', origin: 0x08001000, size: 124 * 1024 },
+                { name: 'RAM', origin: 0x20000800, size: 63 * 1024 },
+            ]);
+            assert.deepStrictEqual(result.warnings, []);
+            assert.strictEqual(parseLinkerConstantExpression('(10 / 3) * 1K + 10 % 4'), 3074);
+            assert.strictEqual(parseLinkerConstantExpression('010 + 0X10'), 24);
+            assert.strictEqual(parseLinkerConstantExpression('08'), null);
+        });
+
+        for (const expression of ['128K - RESERVE', '128K trailing', '(64K - 1K', '10 / 0', '1 << 4', '-1', '9007199254740991 + 2']) {
+            test(`rejects the whole unsupported expression: ${expression}`, () => {
+                const result = parseLinkerFileWithDiagnostics(`MEMORY {
+                    FLASH : ORIGIN = 0x08000000, LENGTH = ${expression}
+                    RAM : ORIGIN = 0x20000000, LENGTH = 4K
+                }`, 'memory.ld');
+                assert.deepStrictEqual(result.regions.map(region => region.name), ['RAM']);
+                assert.ok(result.warnings.some(warning => warning.includes('FLASH')));
+            });
+        }
+
+        test('comments cannot create fake regions or hide valid regions', () => {
+            const result = parseLinkerFileWithDiagnostics(`/* MEMORY { FAKE : ORIGIN = 0, LENGTH = 1M } */
+                MEMORY { FLASH : ORIGIN = 0x08000000, LENGTH = (128K /* reserved */ - 4K) }`, 'memory.ld');
+            assert.deepStrictEqual(result.regions, [{ name: 'FLASH', origin: 0x08000000, size: 124 * 1024 }]);
+            assert.deepStrictEqual(result.warnings, []);
+        });
+
+        test('missing fields and incomplete additional MEMORY blocks are diagnosed', () => {
+            const result = parseLinkerFileWithDiagnostics(`MEMORY {
+                FLASH : ORIGIN = 0, LENGTH = 4K
+                RAM : ORIGIN = 0x20000000
+            } MEMORY {`, 'memory.ld');
+            assert.strictEqual(result.regions.length, 1);
+            assert.strictEqual(result.warnings.length, 2);
+        });
+
+        test('scatter diagnostics also report a skipped symbolic region in partial results', () => {
+            const result = parseLinkerFileWithDiagnostics(`LR_FLASH 0x08000000 1M {
+                ER_FLASH 0x08000000 1M { }
+                RW_RAM 0x20000000 RAM_SIZE { }
+            }`, 'memory.sct');
+            assert.deepStrictEqual(result.regions.map(region => region.name), ['ER_FLASH']);
+            assert.ok(result.warnings.some(warning => warning.includes('RW_RAM')));
+        });
+    });
+
+    suite('Scatter completeness diagnostics', () => {
+        for (const content of [
+            'LR_FLASH 0x08000000 1M { ER_FLASH 0x08000000 64K { }',
+            'LR_FLASH 0x08000000 1M { ER_FLASH 0x08000000 64K { } RW_RAM 0x20000000 RAM_SIZE }',
+            'LR_FLASH 0x08000000 1M { ER_FLASH 0x08000000 64K { } RW_RAM 0x20000000 128K - 4K { } }',
+        ]) {
+            test(`partial valid regions cannot conceal an incomplete declaration: ${content}`, () => {
+                const result = parseLinkerFileWithDiagnostics(content, 'memory.sct');
+                assert.deepStrictEqual(result.regions, [{ name: 'ER_FLASH', origin: 0x08000000, size: 64 * 1024 }]);
+                assert.ok(result.warnings.length > 0);
+            });
+        }
+
+        test('whole scatter headers work across newlines and multiple regions on one line', () => {
+            const result = parseLinkerFileWithDiagnostics(`LR_FLASH 0x08000000 1M
+            {
+                ER_FLASH 0x08000000 64K
+                { } RW_RAM 0x20000000 128K { }
+            }`, 'memory.sct');
+            assert.deepStrictEqual(result.regions.map(region => region.name), ['ER_FLASH', 'RW_RAM']);
+            assert.deepStrictEqual(result.warnings, []);
         });
     });
 
@@ -344,6 +423,20 @@ MEMORY { FLASH (rx) : ORIGIN = 0x00000000, LENGTH = 2M }
     });
 
     suite('parseLinkerFileWithDiagnostics', () => {
+        test('서로 다른 주소·크기의 Scatter 동명 영역은 누락을 진단한다', () => {
+            for (const second of ['0x20000000 1K', '0x08000000 2K']) {
+                const result = parseLinkerFileWithDiagnostics(
+                    `LR 0x08000000 1M { ER 0x08000000 1K {} ER ${second} {} }`, 'firmware.sct'
+                );
+                assert.strictEqual(result.regions.length, 1);
+                assert.ok(result.warnings.some(warning => /more than once/.test(warning)));
+            }
+            const identical = parseLinkerFileWithDiagnostics(
+                'LR 0x08000000 1M { ER 0x08000000 1K {} ER 0x08000000 1K {} }', 'firmware.sct'
+            );
+            assert.deepStrictEqual(identical.warnings, []);
+        });
+
         test('warns when input is empty', () => {
             const result = parseLinkerFileWithDiagnostics('', '/path/to/link.ld');
             assert.strictEqual(result.regions.length, 0);

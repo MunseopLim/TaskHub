@@ -45,6 +45,39 @@ suite('NumberBaseHoverProvider Test Suite', () => {
         }
     });
 
+    suite('Struct size hover accuracy and guidance', () => {
+        test('supported declarations show a configured estimate rather than a compiler result', async () => {
+            const document = await vscode.workspace.openTextDocument({
+                language: 'cpp', content: 'struct Sample { int x{}; char y; };'
+            });
+            const hover = await (new NumberBaseHoverProvider(() => undefined) as any).tryStructSizeInfo(document, new vscode.Position(0, 8));
+            assert.ok(hover);
+            const markdown = (hover.contents[0] as vscode.MarkdownString).value;
+            assert.match(markdown, /Estimated Size|추정 크기/);
+            assert.match(markdown, /8 bytes/);
+            assert.match(markdown, /sizeof/);
+        });
+
+        for (const content of [
+            'struct Sample { alignas(16) int x; char y; };',
+            'struct alignas(16) Sample { int x; char y; };',
+            'struct UnknownInner { UnknownType value; };\nstruct Sample { UnknownInner value; char y; };',
+        ]) {
+            test(`unsupported definitions show guidance without a successful size: ${content}`, async () => {
+                const document = await vscode.workspace.openTextDocument({ language: 'cpp', content });
+                const lines = content.split('\n');
+                const lineIndex = lines.length - 1;
+                const position = new vscode.Position(lineIndex, lines[lineIndex].indexOf('Sample') + 1);
+                const hover = await (new NumberBaseHoverProvider(() => undefined) as any).tryStructSizeInfo(document, position);
+                assert.ok(hover);
+                const markdown = (hover.contents[0] as vscode.MarkdownString).value.replace(/&nbsp;/g, ' ');
+                assert.match(markdown, /Cannot calculate|계산할 수 없습니다/);
+                assert.match(markdown, /sizeof/);
+                assert.doesNotMatch(markdown, /Estimated Size|Total Size|추정 크기/);
+            });
+        }
+    });
+
     suite('Number Parsing Tests', () => {
         test('Parse hexadecimal with 0x prefix', () => {
             const result = (provider as any).parseNumber('0xFF');

@@ -3,9 +3,9 @@
  * Extracts memory region definitions (name, origin, size).
  *
  * Error contract:
- *   - Parse helpers never throw for malformed input; they return an empty
- *     region list instead. Callers that need to distinguish "no matches" from
- *     "structurally invalid" should use {@link parseLinkerFileWithDiagnostics}.
+ *   - Parse helpers return recognized regions without throwing on malformed
+ *     input. Use {@link parseLinkerFileWithDiagnostics} to detect incomplete
+ *     results before treating extracted regions as a complete memory map.
  *   - `parseSizeValue` returns `null` for unparseable input rather than NaN.
  */
 
@@ -27,7 +27,7 @@ export interface LinkerParseResult {
  */
 export function parseSizeValue(value: string): number | null {
     const trimmed = value.trim();
-    const suffixMatch = trimmed.match(/^\+?(0x[\da-fA-F]+|\d+)\s*([KkMm]?)$/);
+    const suffixMatch = trimmed.match(/^\+?(0[xX][\da-fA-F]+|\d+)\s*([KkMm]?)$/);
     if (!suffixMatch) { return null; }
 
     let num: number;
@@ -37,50 +37,112 @@ export function parseSizeValue(value: string): number | null {
     } else {
         num = parseInt(raw, 10);
     }
-    if (isNaN(num)) { return null; }
+    if (!Number.isSafeInteger(num)) { return null; }
 
     const suffix = suffixMatch[2].toUpperCase();
     if (suffix === 'K') { num *= 1024; }
     if (suffix === 'M') { num *= 1024 * 1024; }
 
-    return num;
+    return Number.isSafeInteger(num) ? num : null;
 }
 
-/**
- * Parse GNU linker script (.ld) MEMORY block.
- *
- * Expected format:
- *   MEMORY
- *   {
- *     NAME (attrs) : ORIGIN = 0x..., LENGTH = 0x...
- *     NAME (attrs) : ORIGIN = 0x..., LENGTH = 256K
- *   }
- */
-export function parseLinkerScript(content: string): MemoryRegion[] {
+/** Evaluate a bounded subset of GNU ld constant arithmetic without executing code. */
+export function parseLinkerConstantExpression(expression: string): number | null {
+    if (expression.length > 4096) { return null; }
+    const tokens = expression.match(/0[xX][\da-fA-F]+[KkMm]?|\d+[KkMm]?|[()+*/%\-]/g) ?? [];
+    if (tokens.length > 256 || tokens.join('') !== expression.replace(/\s/g, '')) { return null; }
+    let position = 0;
+    const primary = (): number | null => {
+        const token = tokens[position++];
+        if (token === '+' || token === '-') {
+            const value = primary();
+            return value === null ? null : token === '-' ? -value : value;
+        }
+        if (token === '(') {
+            const value = sum();
+            return tokens[position++] === ')' ? value : null;
+        }
+        if (token === undefined) { return null; }
+        if (/^0\d/u.test(token)) {
+            const octal = token.match(/^(0[0-7]+)([KkMm]?)$/u);
+            if (!octal) { return null; }
+            const scale = octal[2].toUpperCase() === 'K' ? 1024 : octal[2].toUpperCase() === 'M' ? 1024 * 1024 : 1;
+            const value = parseInt(octal[1], 8) * scale;
+            return Number.isSafeInteger(value) ? value : null;
+        }
+        return parseSizeValue(token);
+    };
+    const product = (): number | null => {
+        let value = primary();
+        while (['*', '/', '%'].includes(tokens[position])) {
+            const operator = tokens[position++];
+            const right = primary();
+            if (value === null || right === null || ((operator === '/' || operator === '%') && right === 0)) {
+                return null;
+            }
+            value = operator === '*' ? value * right : operator === '/' ? Math.trunc(value / right) : value % right;
+            if (!Number.isSafeInteger(value)) { return null; }
+        }
+        return value;
+    };
+    const sum = (): number | null => {
+        let value = product();
+        while (tokens[position] === '+' || tokens[position] === '-') {
+            const operator = tokens[position++];
+            const right = product();
+            if (value === null || right === null) { return null; }
+            value = operator === '+' ? value + right : value - right;
+            if (!Number.isSafeInteger(value)) { return null; }
+        }
+        return value;
+    };
+    const value = sum();
+    return position === tokens.length && value !== null && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function parseGnuMemory(content: string): LinkerParseResult {
     const regions: MemoryRegion[] = [];
-
-    // Extract MEMORY { ... } block (handle multiline)
-    const memoryBlockMatch = content.match(/MEMORY\s*\{([^}]*)\}/s);
-    if (!memoryBlockMatch) { return regions; }
-
-    const block = memoryBlockMatch[1];
-
-    // Match each region line:
-    //   NAME (attrs) : ORIGIN = value, LENGTH = value
-    //   Also supports: org/o for ORIGIN, len/l for LENGTH
-    const lineRegex = /^\s*(\w+)\s*(?:\([^)]*\))?\s*:\s*(?:ORIGIN|org|o)\s*=\s*(0x[\da-fA-F]+|\d+)\s*,\s*(?:LENGTH|len|l)\s*=\s*(0x[\da-fA-F]+|\d+[KkMm]?)/gm;
-
-    let match;
-    while ((match = lineRegex.exec(block)) !== null) {
-        const name = match[1];
-        const origin = parseSizeValue(match[2]);
-        const size = parseSizeValue(match[3]);
-        if (origin !== null && size !== null) {
+    const warnings: string[] = [];
+    // Comments can contain fake MEMORY blocks, braces, and region declarations.
+    const source = content.replace(/\/\*[\s\S]*?(?:\*\/|$)|\/\/[^\n]*/g, ' ');
+    const blocks = [...source.matchAll(/\bMEMORY\s*\{([^}]*)\}/g)];
+    if (blocks.length === 0) {
+        return { regions, warnings: ['Linker script contains no complete MEMORY { ... } block.'] };
+    }
+    if ([...source.matchAll(/\bMEMORY\s*\{/g)].length !== blocks.length) {
+        warnings.push('An incomplete MEMORY block was found.');
+    }
+    for (const blockMatch of blocks) {
+        const block = blockMatch[1];
+        const headers = [...block.matchAll(/\b([A-Za-z_][\w.-]*)\s*(?:\([^)]*\))?\s*:/g)];
+        if (headers.length === 0 || block.slice(0, headers[0]?.index).trim()) {
+            warnings.push('MEMORY block contains no region lines or unsupported content.');
+        }
+        for (let index = 0; index < headers.length; index++) {
+            const header = headers[index];
+            const name = header[1];
+            const declaration = block.slice(header.index! + header[0].length, headers[index + 1]?.index)
+                .trim().replace(/;\s*$/, '').trim();
+            const fields = declaration.match(/^(?:ORIGIN|org|o)\s*=\s*([\s\S]+?)\s*,\s*(?:LENGTH|len|l)\s*=\s*([\s\S]+)$/);
+            const origin = fields ? parseLinkerConstantExpression(fields[1]) : null;
+            const size = fields ? parseLinkerConstantExpression(fields[2]) : null;
+            if (origin === null || size === null || !Number.isSafeInteger(origin + size)) {
+                warnings.push(`MEMORY region "${name}" has an unsupported or invalid ORIGIN/LENGTH expression.`);
+                continue;
+            }
+            if (regions.some(region => region.name === name)) {
+                warnings.push(`MEMORY region "${name}" is declared more than once.`);
+                continue;
+            }
             regions.push({ name, origin, size });
         }
     }
+    return { regions, warnings };
+}
 
-    return regions;
+/** Parse GNU ld MEMORY regions. Use parseLinkerFileWithDiagnostics to detect partial results. */
+export function parseLinkerScript(content: string): MemoryRegion[] {
+    return parseGnuMemory(content).regions;
 }
 
 /**
@@ -95,56 +157,61 @@ export function parseLinkerScript(content: string): MemoryRegion[] {
  * We extract the execution regions (2nd level) as memory regions.
  */
 export function parseScatterFile(content: string): MemoryRegion[] {
+    return parseScatterFileInternal(content, []);
+}
+
+function parseScatterFileInternal(content: string, warnings: string[]): MemoryRegion[] {
     const regions: MemoryRegion[] = [];
     const seen = new Set<string>();
-
+    const source = content.replace(/\/\*[\s\S]*?(?:\*\/|$)|;[^\n]*|\/\/[^\n]*/g, ' ');
     let braceDepth = 0;
     let currentLoadOrigin: number | null = null;
-    const regionRegex = /^\s*(\w+)\s+(\+?(?:0x[\da-fA-F]+|\d+)|[A-Za-z_]\w*)\s+(\+?(?:0x[\da-fA-F]+|\d+)(?:[KkMm])?|[A-Za-z_][\w$()]*)(?:\s+[^{}]*)?\s*\{/u;
-
-    for (const rawLine of content.split(/\r?\n/)) {
-        const line = rawLine.replace(/;.*/, '');
-        const depthBefore = braceDepth;
-        const match = line.match(regionRegex);
-        if (match) {
-            const name = match[1];
-            let origin = parseSizeValue(match[2]);
-            const size = parseSizeValue(match[3]);
-
-            if (match[2].startsWith('+')) {
-                // '+offset' origins are relative to the enclosing load region.
-                // If that base is unknown (e.g. a symbolic load origin), the
-                // absolute address cannot be resolved — mark it unknown so the
-                // region is skipped instead of leaking the raw offset as if it
-                // were an absolute address.
-                const relative = parseSizeValue(match[2]);
-                origin = (currentLoadOrigin === null || relative === null)
-                    ? null
-                    : currentLoadOrigin + relative;
-            }
-
-            if (depthBefore === 0) {
-                currentLoadOrigin = origin;
-            } else if (origin !== null && size !== null) {
-                if (!seen.has(name)) {
-                    seen.add(name);
-                    regions.push({ name, origin, size });
+    let pending = '';
+    // Consume complete headers, including multiline headers. Unsupported tokens
+    // after a size must not be accepted as if they were harmless attributes.
+    const regionRegex = /^([A-Za-z_]\w*)\s+(\S+)\s+(\S+)$/u;
+    for (const ch of source) {
+        if (ch === '{') {
+            if (braceDepth <= 1) {
+                const match = pending.trim().match(regionRegex);
+                if (!match) {
+                    warnings.push('Scatter region declaration could not be parsed.');
+                    if (braceDepth === 0) { currentLoadOrigin = null; }
+                } else {
+                    const name = match[1];
+                    let origin = parseSizeValue(match[2]);
+                    const size = parseSizeValue(match[3]);
+                    if (match[2].startsWith('+')) {
+                        origin = currentLoadOrigin === null || origin === null ? null : currentLoadOrigin + origin;
+                    }
+                    if (braceDepth === 0) {
+                        currentLoadOrigin = origin;
+                    } else if (origin === null || size === null || !Number.isSafeInteger(origin + size)) {
+                        warnings.push(`Scatter execution region "${name}" has an unsupported origin or size.`);
+                    } else if (!seen.has(name)) {
+                        seen.add(name);
+                        regions.push({ name, origin, size });
+                    } else if (regions.some(region => region.name === name && (region.origin !== origin || region.size !== size))) {
+                        warnings.push(`Scatter execution region "${name}" is declared more than once with different addresses or sizes.`);
+                    }
                 }
             }
-        }
-
-        for (const ch of line) {
-            if (ch === '{') {
-                braceDepth++;
-            } else if (ch === '}') {
-                braceDepth = Math.max(0, braceDepth - 1);
-                if (braceDepth === 0) {
-                    currentLoadOrigin = null;
-                }
+            braceDepth++;
+            pending = '';
+        } else if (ch === '}') {
+            if (braceDepth === 0 || (braceDepth === 1 && pending.trim())) {
+                warnings.push('Scatter file contains an incomplete region declaration or unmatched closing brace.');
             }
+            braceDepth = Math.max(0, braceDepth - 1);
+            if (braceDepth === 0) { currentLoadOrigin = null; }
+            pending = '';
+        } else {
+            pending += ch;
         }
     }
-
+    if (braceDepth !== 0 || pending.trim()) {
+        warnings.push('Scatter file ends with an incomplete region declaration or unclosed block.');
+    }
     return regions;
 }
 
@@ -167,7 +234,8 @@ export function parseLinkerFile(content: string, filePath: string): MemoryRegion
 /**
  * Same as {@link parseLinkerFile} but also reports warnings about the input.
  *
- * Emitted warnings cover the common "why did I get zero regions?" cases:
+ * Warnings cover incomplete results and common empty-result cases:
+ *   - skipped MEMORY/execution regions or invalid constant expressions
  *   - empty input
  *   - `.ld` file without a `MEMORY { ... }` block
  *   - `.sct` file without any execution regions below a load region
@@ -184,20 +252,13 @@ export function parseLinkerFileWithDiagnostics(
 
     const lower = filePath.toLowerCase();
     const isScatter = lower.endsWith('.sct');
-    const regions = isScatter ? parseScatterFile(content) : parseLinkerScript(content);
+    if (!isScatter) { return parseGnuMemory(content); }
+    const regions = parseScatterFileInternal(content, warnings);
 
     if (regions.length === 0) {
-        if (isScatter) {
-            warnings.push(
-                'No execution regions found in scatter file. Expected "NAME 0xADDR 0xSIZE { ... }" lines nested inside a load region.'
-            );
-        } else if (!/MEMORY\s*\{/.test(content)) {
-            warnings.push('Linker script contains no MEMORY { ... } block.');
-        } else {
-            warnings.push(
-                'MEMORY block found but no region lines matched "NAME (attrs) : ORIGIN = ..., LENGTH = ...".'
-            );
-        }
+        warnings.push(
+            'No execution regions found in scatter file. Expected "NAME 0xADDR 0xSIZE { ... }" lines nested inside a load region.'
+        );
     }
 
     return { regions, warnings };
