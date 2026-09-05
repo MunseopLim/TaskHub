@@ -1,4 +1,6 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
     parseSizeValue,
     parseLinkerConstantExpression,
@@ -198,6 +200,33 @@ MEMORY
             assert.deepStrictEqual(result.warnings, []);
         });
 
+        test('GNU paths containing // or quoted comment markers do not hide MEMORY declarations', () => {
+            for (const prefix of [
+                'INPUT(/usr/lib//libc.a)',
+                'INPUT("objects/path/*literal*/file.a")',
+                'INPUT("objects//file.a")',
+                'INPUT("MEMORY { FAKE : ORIGIN = 0, LENGTH = 1M }")',
+            ]) {
+                const result = parseLinkerFileWithDiagnostics(`${prefix} MEMORY { FLASH : ORIGIN = 0, LENGTH = 4K }`, 'memory.ld');
+                assert.deepStrictEqual(result.regions, [{ name: 'FLASH', origin: 0, size: 4096 }], prefix);
+                assert.deepStrictEqual(result.diagnostics, [], prefix);
+            }
+        });
+
+        test('GNU // inside a MEMORY expression is not treated as a comment', () => {
+            const result = parseLinkerFileWithDiagnostics('MEMORY { FLASH : ORIGIN = 0, LENGTH = 4K // invalid\n}', 'memory.ld');
+            assert.deepStrictEqual(result.regions, []);
+            assert.ok(result.diagnostics.some(diagnostic => diagnostic.kind === 'incomplete'));
+        });
+
+        test('masking quoted file names must not turn unsupported MEMORY expressions into constants', () => {
+            for (const declaration of ['ORIGIN = 0 "symbol", LENGTH = 4K', 'ORIGIN = 0, LENGTH = 4K "symbol"']) {
+                const result = parseLinkerFileWithDiagnostics(`MEMORY { FLASH : ${declaration} }`, 'memory.ld');
+                assert.deepStrictEqual(result.regions, []);
+                assert.ok(result.diagnostics.some(diagnostic => diagnostic.kind === 'incomplete'));
+            }
+        });
+
         test('missing fields and incomplete additional MEMORY blocks are diagnosed', () => {
             const result = parseLinkerFileWithDiagnostics(`MEMORY {
                 FLASH : ORIGIN = 0, LENGTH = 4K
@@ -218,6 +247,109 @@ MEMORY
     });
 
     suite('Scatter completeness diagnostics', () => {
+        test('official attribute order accepts fixed execution regions and an optional load capacity', () => {
+            for (const loadSize of ['', ' 1M']) {
+                const result = parseLinkerFileWithDiagnostics(`LR_FLASH 0x08000000 ABSOLUTE NOCOMPRESS${loadSize} {
+                    ER_FLASH + 0 FIXED NOCOMPRESS 64K { .ANY (+RO) }
+                    RW_RAM 0x20000000 ABSOLUTE UNINIT 16K { .ANY (+RW +ZI) }
+                }`, 'memory.sct');
+                assert.deepStrictEqual(result.regions, [
+                    { name: 'ER_FLASH', origin: 0x08000000, size: 64 * 1024 },
+                    { name: 'RW_RAM', origin: 0x20000000, size: 16 * 1024 },
+                ]);
+                assert.deepStrictEqual(result.diagnostics, []);
+            }
+        });
+
+        test('ScatterAssert before, between, and after regions is a note, not a skipped region', () => {
+            const result = parseLinkerFileWithDiagnostics(`ScatterAssert(1)
+                LR_FLASH 0x08000000 NOCOMPRESS 1M {
+                    ScatterAssert(1) ER_FLASH +0 FIXED 64K { .ANY (+RO) }
+                    ScatterAssert((ImageLength(ER_FLASH) + 4) < 65536)
+                    RW_RAM 0x20000000 UNINIT 16K { .ANY (+ZI) }
+                    ScatterAssert(ImageLimit(RW_RAM) <= 0x20004000)
+                } ScatterAssert(1)`, 'memory.sct');
+            assert.deepStrictEqual(result.regions.map(region => region.name), ['ER_FLASH', 'RW_RAM']);
+            assert.deepStrictEqual(result.warnings, []);
+            assert.deepStrictEqual(result.diagnostics.map(({ kind, code }) => ({ kind, code })), [{ kind: 'note', code: 'scatter-assert' }]);
+        });
+
+        for (const tail of ['ScatterAssert()', 'ScatterAssert((1)', 'ScatterAssert(1))', 'ImageLimit(ER_FLASH)', 'RW_RAM 0x20000000 16K']) {
+            test(`a note must not conceal malformed scatter structure: ${tail}`, () => {
+                const result = parseLinkerFileWithDiagnostics(`LR 0x08000000 { ER_FLASH +0 64K {} ${tail} }`, 'memory.sct');
+                assert.ok(result.diagnostics.some(diagnostic => diagnostic.kind === 'incomplete'));
+            });
+        }
+
+        for (const header of ['0x20000000 PI 16K', '0x20000000 RELOC 16K', '0x20000000 ALIGN 8 16K',
+            '0x20000000 EMPTY -16K', '0x20000000 OVERLAY 16K', '0x20000000 16K UNINIT', '0x20000000 16K ALIGN 8']) {
+            test(`unsupported address semantics or attribute order remains incomplete: ${header}`, () => {
+                const result = parseLinkerFileWithDiagnostics(`LR 0x08000000 { ER_FLASH +0 64K {} RW_RAM ${header} {} }`, 'memory.sct');
+                assert.deepStrictEqual(result.regions.map(region => region.name), ['ER_FLASH']);
+                assert.ok(result.diagnostics.some(diagnostic => diagnostic.kind === 'incomplete' && diagnostic.regionName === 'RW_RAM'));
+            });
+        }
+
+        test('PI/RELOC load attributes are not silently ignored for inherited execution addresses', () => {
+            for (const attribute of ['PI', 'RELOC']) {
+                const result = parseLinkerFileWithDiagnostics(`LR 0x08000000 ${attribute} 1M { ER +0 64K {} }`, 'memory.sct');
+                assert.deepStrictEqual(result.regions, []);
+                assert.ok(result.diagnostics.some(diagnostic => diagnostic.kind === 'incomplete'));
+            }
+        });
+
+        test('relative successors require actual linked lengths, not declared maximum sizes or the load base', () => {
+            const result = parseLinkerFileWithDiagnostics(`LR 0x08000000 1M {
+                FIRST +0 64K {} NEXT +0x10 16K {}
+            } LR_NEXT +0 1M { ER_NEXT +0 64K {} }`, 'memory.sct');
+            assert.deepStrictEqual(result.regions, [{ name: 'FIRST', origin: 0x08000000, size: 64 * 1024 }]);
+            assert.ok(result.diagnostics.some(diagnostic => diagnostic.regionName === 'NEXT' && diagnostic.kind === 'incomplete'));
+            assert.ok(result.diagnostics.some(diagnostic => diagnostic.regionName === 'LR_NEXT' && diagnostic.kind === 'incomplete'));
+        });
+
+        test('conditional preprocessing is incomplete even when all literal region headers can be read', () => {
+            const result = parseLinkerFileWithDiagnostics(`LR 0x08000000 {
+                ER_FLASH +0 64K {}
+                #if 0
+                RW_RAM 0x20000000 16K {}
+                #endif
+            }`, 'memory.sct');
+            assert.ok(result.diagnostics.some(diagnostic => diagnostic.kind === 'incomplete' && diagnostic.code === 'scatter-preprocessor'));
+        });
+
+        test('quoted selector paths do not introduce comments or nested region braces', () => {
+            const result = parseLinkerFileWithDiagnostics(`LR 0x08000000 {
+                ER_FLASH +0 64K { "Objects/a;{b}//c.o" (+RO) }
+                RW_RAM 0x20000000 UNINIT 16K { .ANY (+ZI) }
+            }`, 'memory.sct');
+            assert.deepStrictEqual(result.regions.map(region => region.name), ['ER_FLASH', 'RW_RAM']);
+            assert.deepStrictEqual(result.diagnostics, []);
+        });
+
+        test('an even number of escaped path backslashes still permits the closing quote', () => {
+            for (const count of [0, 2, 4]) {
+                const backslashes = String.fromCharCode(92).repeat(count);
+                const result = parseLinkerFileWithDiagnostics(`LR 0x08000000 {
+                    ER_FLASH +0 64K { "Objects/path${backslashes}" (+RO) }
+                    RW_RAM 0x20000000 16K {}
+                }`, 'memory.sct');
+                assert.deepStrictEqual(result.regions.map(region => region.name), ['ER_FLASH', 'RW_RAM']);
+                assert.deepStrictEqual(result.diagnostics, []);
+            }
+        });
+
+        test('repository scatter fixture exposes every fixed region with assertion notes only', () => {
+            const fixture = fs.readFileSync(path.resolve(__dirname, '../../examples/sample_memory.sct'), 'utf8');
+            const result = parseLinkerFileWithDiagnostics(fixture, 'sample_memory.sct');
+            assert.deepStrictEqual(result.regions, [
+                { name: 'ER_IROM1', origin: 0x08000000, size: 0x80000 },
+                { name: 'RW_IRAM1', origin: 0x20000000, size: 0xf000 },
+                { name: 'RW_NOINIT', origin: 0x2000f000, size: 0x1000 },
+            ]);
+            assert.deepStrictEqual(result.warnings, []);
+            assert.ok(result.diagnostics.some(diagnostic => diagnostic.kind === 'note'));
+        });
+
         for (const content of [
             'LR_FLASH 0x08000000 1M { ER_FLASH 0x08000000 64K { }',
             'LR_FLASH 0x08000000 1M { ER_FLASH 0x08000000 64K { } RW_RAM 0x20000000 RAM_SIZE }',

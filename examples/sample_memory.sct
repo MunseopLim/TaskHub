@@ -1,0 +1,27 @@
+; 고정 주소를 사용하는 Cortex-M용 Scatter 예제.
+; ELF를 Memory Map Viewer로 연 뒤 이 파일을 영역 설정으로 선택한다.
+; ScatterAssert의 조건 검증은 실제 armlink 빌드 결과에서 확인한다.
+
+LR_IROM1 0x08000000 NOCOMPRESS 0x00080000
+{
+    ER_IROM1 +0 FIXED 0x00080000
+    {
+        *.o (RESET, +First)
+        *(InRoot$$Sections)
+        .ANY (+RO)
+    }
+
+    RW_IRAM1 0x20000000 0x0000F000
+    {
+        .ANY (+RW +ZI)
+    }
+
+    RW_NOINIT 0x2000F000 UNINIT 0x00001000
+    {
+        *.o (NOINIT)
+    }
+
+    ScatterAssert(ImageLength(RW_IRAM1) <= 0x0000F000)
+}
+
+ScatterAssert(ImageLimit(RW_NOINIT) <= 0x20010000)

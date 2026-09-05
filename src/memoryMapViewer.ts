@@ -348,8 +348,8 @@ function resolveMemoryMapRegions(
         }
         linkerName = path.basename(config.linkerFilePath) || linkerName;
         const content = readMemoryMapLinkerFile(config.linkerFilePath);
-        const { regions, warnings } = parseLinkerFileWithDiagnostics(content, config.linkerFilePath);
-        if (regions.length === 0 || warnings.length > 0) {
+        const { regions, diagnostics } = parseLinkerFileWithDiagnostics(content, config.linkerFilePath);
+        if (regions.length === 0 || diagnostics.some(diagnostic => diagnostic.kind === 'incomplete')) {
             const reason = regions.length > 0 ? t(
                 `링커/스캐터 파일의 일부 MEMORY 영역을 해석할 수 없습니다 (${linkerName}). 불완전한 영역 목록은 사용하지 않습니다.`,
                 `Some MEMORY regions could not be parsed in the linker/scatter file (${linkerName}). The incomplete region list will not be used.`
@@ -370,6 +370,12 @@ function resolveMemoryMapRegions(
                 `${reason} Opening with saved regions or ELF program headers instead.`
             ));
             return { ok: true, regions: config.regions ?? [] };
+        }
+        if (diagnostics.some(diagnostic => diagnostic.code === 'scatter-assert')) {
+            vscode.window.showInformationMessage(t(
+                `ScatterAssert 조건은 평가하지 않았습니다 (${linkerName}). 선언된 메모리 영역을 표시합니다. 조건 검증은 링커 빌드 결과를 확인하세요.`,
+                `ScatterAssert conditions were not evaluated (${linkerName}). Showing the declared memory regions; check the linker build result to verify the conditions.`
+            ));
         }
         return { ok: true, regions };
     } catch (e: unknown) {

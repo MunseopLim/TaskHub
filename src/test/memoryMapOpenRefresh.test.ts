@@ -150,8 +150,10 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
     let fake: ReturnType<typeof installFakeMemoryMapPanel>;
     let originalError: typeof vscode.window.showErrorMessage;
     let originalWarning: typeof vscode.window.showWarningMessage;
+    let originalInformation: typeof vscode.window.showInformationMessage;
     let errors: string[];
     let warnings: string[];
+    let information: string[];
 
     setup(() => {
         panelRegistry.clear();
@@ -159,14 +161,20 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         fake = installFakeMemoryMapPanel();
         originalError = vscode.window.showErrorMessage;
         originalWarning = vscode.window.showWarningMessage;
+        originalInformation = vscode.window.showInformationMessage;
         errors = [];
         warnings = [];
+        information = [];
         (vscode.window as any).showErrorMessage = (message: string) => {
             errors.push(message);
             return Promise.resolve(undefined);
         };
         (vscode.window as any).showWarningMessage = (message: string) => {
             warnings.push(message);
+            return Promise.resolve(undefined);
+        };
+        (vscode.window as any).showInformationMessage = (message: string) => {
+            information.push(message);
             return Promise.resolve(undefined);
         };
     });
@@ -176,6 +184,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         fake.restore();
         (vscode.window as any).showErrorMessage = originalError;
         (vscode.window as any).showWarningMessage = originalWarning;
+        (vscode.window as any).showInformationMessage = originalInformation;
         fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
@@ -535,6 +544,37 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
             FLASH : ORIGIN = 0x08000000, LENGTH = 64K
             RAM : ORIGIN = 0x20000000, LENGTH = RAM_SIZE
         }`);
+        await fake.harness.send({ command: 'refresh' });
+        assert.strictEqual(panelRegistry.getHtml(filePath), stableHtml);
+        assertRefreshFailed(fake.harness.posted.at(-1), fake.harness.renderId());
+        assert.ok(warnings.some(message => /일부|Some MEMORY/i.test(message)));
+    });
+
+    test('ScatterAssert 관찰만 있으면 고정 영역을 열고 갱신하며 실제 누락은 계속 차단한다', async () => {
+        const filePath = path.join(tempDir, 'scatter-notes.elf');
+        const linkerPath = path.join(tempDir, 'memory.sct');
+        fs.writeFileSync(filePath, buildMinimalElf32());
+        const scatter = (size: string, extra = '') => `LR 0x08000000 NOCOMPRESS {
+            ER_FLASH +0 FIXED ${size} { .ANY (+RO) }
+            ScatterAssert(ImageLength(ER_FLASH) < 0x40000)
+            ${extra}
+        }`;
+        fs.writeFileSync(linkerPath, scatter('64K'));
+        const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+        assert.ok(openMemoryMapFromUri(context, vscode.Uri.file(filePath), {
+            linkerFilePath: linkerPath,
+            regions: [{ name: 'SAVED_FLASH', origin: 0x08000000, size: 96 * 1024 }],
+        }));
+        assert.ok(panelRegistry.getHtml(filePath)?.includes('64.0 KB'), 'note 때문에 저장된 96K 영역으로 폴백하면 안 된다');
+        assert.deepStrictEqual(warnings, []);
+        assert.ok(information.some(message => /ScatterAssert/.test(message)));
+
+        fs.writeFileSync(linkerPath, scatter('128K'));
+        await fake.harness.send({ command: 'refresh' });
+        const stableHtml = panelRegistry.getHtml(filePath);
+        assert.ok(stableHtml?.includes('128.0 KB'), 'note만 있는 최신 영역으로 갱신해야 한다');
+
+        fs.writeFileSync(linkerPath, scatter('64K', 'RW_RAM 0x20000000 RAM_SIZE {}'));
         await fake.harness.send({ command: 'refresh' });
         assert.strictEqual(panelRegistry.getHtml(filePath), stableHtml);
         assertRefreshFailed(fake.harness.posted.at(-1), fake.harness.renderId());

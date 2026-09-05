@@ -15,6 +15,7 @@
 | [test_macro_expansion.h](test_macro_expansion.h) | Macro Expansion Hover | features.md §15.6 |
 | [bit_operations_example.h](bit_operations_example.h), [bit_operations_example.cpp](bit_operations_example.cpp) | Bit Operation Hover (Experimental) | features.md §16.1 |
 | [sample_armlink.txt](sample_armlink.txt), [sample_armlink_large.txt](sample_armlink_large.txt) | Memory Map Viewer (ARM linker list) | features.md §19 |
+| [sample_memory.sct](sample_memory.sct) | Memory Map Viewer (ELF에 연결하는 Scatter 영역 설정) | features.md §19 |
 | [sample_binary.bin](sample_binary.bin) | Hex Viewer | features.md §20 |
 
 ## 참고: VSIX 패키징에서 제외됨
