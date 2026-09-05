@@ -51,7 +51,7 @@
 - **Hex/Text Converter** — Convert text and Hex bytes in real time with encoding, grouping, byte-order controls, and saved values
 - **JSON Editor** — Spreadsheet-style JSON editing
 
-> See [docs/features.md](docs/features.md) for detailed explanations and JSON examples.
+> See [docs/features.md (Korean)](docs/features.md) for detailed explanations and JSON examples.
 
 ---
 
@@ -140,18 +140,26 @@
 2. In VS Code, press `Ctrl+Shift+P` (macOS: `Cmd+Shift+P`) → **Extensions: Install from VSIX...**
 3. Select the downloaded `.vsix` file
 
-To build from source or contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
+To build from source or contribute, see [CONTRIBUTING.md (Korean)](CONTRIBUTING.md).
 
 ---
 
 ## Usage
 
-1. Click the **'H' icon** in the Activity Bar to open the TaskHub view
-2. Run actions from the Actions panel; access resources from the Links panel
-3. Customize by editing `.vscode/actions.json`, `.vscode/links.json`, and `.vscode/favorites.json`
+1. Open your project folder in VS Code, then click the **'H' icon** in the Activity Bar.
+2. Choose **Create Action** or **+** in the Actions panel, then select **Direct Command**.
+3. Enter a title and command. Try `echo Hello TaskHub` to check your first action.
+4. Review the action, choose **Save**, then **Run now**, or run the saved action from the Actions panel.
 
-For action authoring, task fields, results, and composition examples, see the
-[`actions.json` authoring guide](docs/actions.md).
+Find other tools through the **TaskHub** status bar launcher. For action fields, results, and composition
+examples, see the [`actions.json` authoring guide (Korean)](docs/actions.md).
+
+Before choosing a tool, check its supported inputs:
+
+- [C/C++ Hover (Korean)](docs/features.md#15-cc-hover-기능): resolving symbols uses a C/C++ language extension. Struct layout is an estimate based on configured type sizes and alignment.
+- [Memory Map (Korean)](docs/features.md#19-memory-map-시각화) supports ELF32 and ARM Linker Listings; [Hex Viewer (Korean)](docs/features.md#20-hex-viewer) accepts files up to 50 MB.
+- [JSON Editor (Korean)](docs/features.md#json-editor-커맨드) requires an object or array at the JSON root.
+- [Browser actions (Korean)](docs/actions.md#browser) cannot open remote host file paths directly; use an HTTP URL in Remote SSH, Dev Containers, and Codespaces.
 
 ---
 
@@ -161,7 +169,7 @@ TaskHub actions are **executable configuration** that can run commands with your
 run actions from an untrusted repository or `.taskhub` file. TaskHub is disabled in VS Code Restricted Mode.
 Every import shows its actions, commands, and file operations before changing `actions.json`, regardless of Doctor
 findings, and reviewing the complete source is the default action. No additional finding does not mean that a
-fixed malicious command is safe; see [TaskHub Doctor](docs/features.md#23-taskhub-doctor-action-lint) for the
+fixed malicious command is safe; see [TaskHub Doctor (Korean)](docs/features.md#23-taskhub-doctor-action-lint) for the
 full set of checks.
 
 ---
@@ -175,6 +183,8 @@ The canonical setting definitions live in `contributes.configuration` in [packag
 ---
 
 ## Documentation
+
+The detailed guides below are currently available in Korean.
 
 | Doc | Description |
 |------|------|

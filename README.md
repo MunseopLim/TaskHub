@@ -146,9 +146,13 @@
 
 ## 사용법
 
-1. 활동 표시줄의 **'H' 아이콘**을 클릭하여 TaskHub 뷰 열기
-2. Actions 패널에서 액션 실행, 링크 패널에서 리소스에 빠르게 접근
-3. `.vscode/actions.json` · `.vscode/links.json` · `.vscode/favorites.json` 파일을 편집하여 사용자 지정
+1. VS Code에서 프로젝트 폴더를 열고 활동 표시줄의 **'H' 아이콘**으로 TaskHub 뷰를 엽니다.
+2. Actions 패널의 **액션 만들기** 또는 **+**를 누르고 **단일 명령 실행 (Direct Command)**을 고릅니다.
+3. 제목과 실행할 명령을 입력합니다. 처음에는 `echo Hello TaskHub`로 실행 흐름을 확인할 수 있습니다.
+4. 확인 화면에서 **저장**을 누른 뒤 **바로 실행**을 선택하거나, Actions 패널에서 저장한 액션을 실행합니다.
+
+다른 도구는 하단의 **TaskHub** 기능 런처에서 찾을 수 있습니다. 링크·즐겨찾기 관리와 자세한
+화면 조작은 [기능 문서](docs/features.md)를 참고하세요.
 
 액션 작성법과 태스크별 필드·결과·조합 예시는 [`actions.json` 작성 가이드](docs/actions.md)를
 참고하세요.

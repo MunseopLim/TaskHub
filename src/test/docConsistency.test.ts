@@ -70,6 +70,64 @@ function splitMarkdownTableRow(row: string): string[] {
     return cells;
 }
 
+interface DocumentedCommand {
+    command: string;
+    title: string;
+}
+
+interface HiddenPaletteCommand {
+    command: string;
+    titles: string[];
+}
+
+/** NLS와 같은 이름의 공개 명령을 반영한 뒤 문서에서 식별할 수 있는 이름을 만든다. */
+function hiddenPaletteCommands(
+    commands: DocumentedCommand[],
+    paletteMenu: Array<{ command: string; when?: string }>,
+    bundles: Array<Record<string, string>>
+): HiddenPaletteCommand[] {
+    const hiddenIds = new Set(paletteMenu.filter(entry => entry.when === 'false').map(entry => entry.command));
+    const resolveTitles = (title: string): string[] => {
+        const key = /^%([^%]+)%$/.exec(title)?.[1];
+        return Array.from(new Set((key ? bundles.map(bundle => {
+            assert.ok(typeof bundle[key] === 'string', `Missing command title translation: ${key}`);
+            return bundle[key];
+        }) : [title]).map(value => value.replace(/^TaskHub:\s*/u, ''))));
+    };
+    // 같은 이름의 공개 명령이 있으면 제목만으로 오류라고 판단할 수 없다.
+    // 예: 컨텍스트용 manageInputProfiles와 팔레트용 manageAllInputProfiles.
+    const visibleTitles = new Set(commands
+        .filter(command => !hiddenIds.has(command.command))
+        .flatMap(command => resolveTitles(command.title)));
+    return commands.filter(command => hiddenIds.has(command.command)).map(command => ({
+        command: command.command,
+        titles: resolveTitles(command.title).filter(title => !visibleTitles.has(title)),
+    }));
+}
+
+function hiddenPaletteMentions(text: string, commands: HiddenPaletteCommand[]): string[] {
+    const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const mentions = new Set<string>();
+    // 한 문장의 올바른 부정 설명이 뒤 문장의 잘못된 실행 안내를 가리지 않게 한다.
+    const statements = text.split(/(?<=[.!?。])\s+|[;\n]/u);
+    for (const statement of statements) {
+        if (!/Command Palette|명령 팔레트/iu.test(statement)) { continue; }
+        if (/(?:노출|표시)되지\s*않|실행할\s*수\s*없|숨겨져\s*있|hidden\s+from|not\s+(?:exposed|available|shown)|cannot\s+be\s+run/iu.test(statement)) {
+            continue;
+        }
+        for (const command of commands) {
+            const idHit = new RegExp(`(?<![A-Za-z0-9_.])${escapeRegex(command.command)}(?![A-Za-z0-9_.])`, 'u').test(statement);
+            const titleHit = command.titles.some(title => {
+                const escaped = escapeRegex(title);
+                return new RegExp(`TaskHub:\\s*${escaped}(?![\\p{L}\\p{N}_…])`, 'u').test(statement)
+                    || new RegExp(`(?:\x60|\\*\\*|["“])${escaped}(?:\x60|\\*\\*|["”])`, 'u').test(statement);
+            });
+            if (idHit || titleHit) { mentions.add(command.command); }
+        }
+    }
+    return Array.from(mentions);
+}
+
 suite('Documentation Consistency', () => {
 
     // =====================================================================
@@ -129,53 +187,101 @@ suite('Documentation Consistency', () => {
     //    "Command Palette / 명령 팔레트에서 실행" 식으로 안내되지 않아야 함
     // =====================================================================
     suite('hidden palette commands are not documented as palette-invokable', () => {
-        test('no doc says "Command Palette" next to a hidden command title', () => {
+        const fixtureCommands: DocumentedCommand[] = [
+            { command: 'taskhub.executeAction', title: '%cmd.executeAction%' },
+            { command: 'taskhub.exportActionItem', title: 'Export Action' },
+            { command: 'taskhub.exportActions', title: 'TaskHub: Export Actions' },
+            { command: 'taskhub.manageInputProfiles', title: 'Manage Input Profiles…' },
+            { command: 'taskhub.manageAllInputProfiles', title: 'TaskHub: Manage Input Profiles…' },
+        ];
+        const fixtureMenu = ['taskhub.executeAction', 'taskhub.exportActionItem', 'taskhub.manageInputProfiles']
+            .map(command => ({ command, when: 'false' }));
+        const fixtureBundles = [
+            { 'cmd.executeAction': 'Execute Action' },
+            { 'cmd.executeAction': '액션 실행' },
+        ];
+        const fixtures = hiddenPaletteCommands(fixtureCommands, fixtureMenu, fixtureBundles);
+
+        test('NLS 토큰 대신 한국어·영어 제목과 명령 ID로 잘못된 안내를 잡는다', () => {
+            for (const line of [
+                'Run TaskHub: Execute Action from the Command Palette.',
+                '명령 팔레트에서 **액션 실행**을 선택합니다.',
+                '명령 팔레트에서 `taskhub.executeAction`을 실행합니다.',
+            ]) {
+                assert.deepStrictEqual(hiddenPaletteMentions(line, fixtures), ['taskhub.executeAction'], line);
+            }
+        });
+
+        test('팔레트에 숨겨졌다는 올바른 부정 문장은 허용한다', () => {
+            for (const line of [
+                '`taskhub.executeAction` is hidden from the Command Palette.',
+                'TaskHub: Execute Action is not exposed in the Command Palette.',
+                '**액션 실행**은 명령 팔레트에는 노출되지 않습니다.',
+                '`taskhub.executeAction`은 명령 팔레트에서 실행할 수 없습니다.',
+            ]) {
+                assert.deepStrictEqual(hiddenPaletteMentions(line, fixtures), [], line);
+            }
+            assert.deepStrictEqual(hiddenPaletteMentions(
+                'TaskHub: Execute Action is hidden from the Command Palette. Run `taskhub.executeAction` from the Command Palette.',
+                fixtures
+            ), ['taskhub.executeAction']);
+        });
+
+        test('공개 명령과 동명 제목·접두사가 같은 다른 명령은 오탐하지 않는다', () => {
+            for (const line of [
+                'Run TaskHub: Export Actions from the Command Palette.',
+                'Run `taskhub.executeActionLater` from the Command Palette.',
+                'Run TaskHub: Manage Input Profiles… from the Command Palette.',
+            ]) {
+                assert.deepStrictEqual(hiddenPaletteMentions(line, fixtures), [], line);
+            }
+            assert.deepStrictEqual(hiddenPaletteMentions(
+                'Run `taskhub.manageInputProfiles` from the Command Palette.', fixtures
+            ), ['taskhub.manageInputProfiles']);
+        });
+
+        test('실제 번들의 공개 액션 실행… 제목은 숨김 액션 실행 명령으로 오탐하지 않는다', () => {
             const pkg = JSON.parse(readRepoFile('package.json'));
-            const commands = (pkg?.contributes?.commands ?? []) as Array<{ command: string; title: string }>;
-            const paletteMenu = (pkg?.contributes?.menus?.commandPalette ?? []) as Array<{ command: string; when?: string }>;
-            const hiddenIds = new Set(
-                paletteMenu.filter(e => e && e.when === 'false').map(e => e.command)
+            const bundles: Array<Record<string, string>> = ['package.nls.json', 'package.nls.ko.json']
+                .map(file => JSON.parse(readRepoFile(file)));
+            const hidden = hiddenPaletteCommands(pkg.contributes.commands, pkg.contributes.menus.commandPalette, bundles);
+            const titleFor = (id: string, bundle: Record<string, string>): string => {
+                const title = (pkg.contributes.commands as DocumentedCommand[]).find(command => command.command === id)!.title;
+                return bundle[title.slice(1, -1)];
+            };
+            for (const bundle of bundles) {
+                const visibleTitle = titleFor('taskhub.runAnyAction', bundle);
+                const hiddenTitle = titleFor('taskhub.executeAction', bundle);
+                assert.deepStrictEqual(hiddenPaletteMentions(
+                    `명령 팔레트에서 **${visibleTitle}**을 선택합니다.`, hidden
+                ), [], visibleTitle);
+                assert.deepStrictEqual(hiddenPaletteMentions(
+                    `Command Palette에서 **TaskHub: ${hiddenTitle}**을 선택합니다.`, hidden
+                ), ['taskhub.executeAction'], hiddenTitle);
+            }
+        });
+
+        test('명령 제목 번들 누락은 조용히 검사를 비활성화하지 않는다', () => {
+            assert.throws(() => hiddenPaletteCommands(fixtureCommands, fixtureMenu, [{}]), /Missing command title translation/);
+        });
+
+        test('no doc says "Command Palette" next to a hidden command title or ID', () => {
+            const pkg = JSON.parse(readRepoFile('package.json'));
+            const hidden = hiddenPaletteCommands(
+                pkg.contributes.commands,
+                pkg.contributes.menus.commandPalette,
+                ['package.nls.json', 'package.nls.ko.json'].map(file => JSON.parse(readRepoFile(file)))
             );
-            const hiddenTitles = commands
-                .filter(c => hiddenIds.has(c.command))
-                .map(c => c.title);
-
-            assert.ok(hiddenTitles.length > 0, 'expected some commands hidden via menus.commandPalette: when:false');
-
-            const docsToCheck = ['docs/features.md', 'examples/README.md'];
+            assert.ok(hidden.length > 0, 'expected commands hidden via menus.commandPalette: when:false');
             const violations: string[] = [];
-            const palettePhrases = ['Command Palette', '명령 팔레트'];
-
-            for (const doc of docsToCheck) {
-                const lines = readRepoFile(doc).split('\n');
-                lines.forEach((line, idx) => {
-                    // Skip explicit negations like "컨텍스트 전용 명령이며 Command Palette에는 노출되지 않습니다."
-                    if (/(노출되지\s*않|not\s+exposed|hidden\s+from)/i.test(line)) {
-                        return;
-                    }
-                    for (const title of hiddenTitles) {
-                        const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                        // Require a non-word boundary after the title so that a hidden
-                        // title like "Export Action" does NOT match a different visible
-                        // command "Export Actions" (plural, palette-exposed).
-                        const titlePattern = new RegExp(`TaskHub:\\s*${escaped}(?![A-Za-z0-9])`);
-                        const backtickPattern = new RegExp(`\`${escaped}\``);
-                        const titleHit = titlePattern.test(line) || backtickPattern.test(line);
-                        if (!titleHit) { continue; }
-                        for (const phrase of palettePhrases) {
-                            if (line.includes(phrase)) {
-                                violations.push(`${doc}:${idx + 1} — hidden command "${title}" appears alongside "${phrase}"`);
-                            }
-                        }
+            for (const doc of ['README.md', 'README.en.md', 'docs/features.md', 'examples/README.md']) {
+                readRepoFile(doc).split('\n').forEach((line, index) => {
+                    for (const command of hiddenPaletteMentions(line, hidden)) {
+                        violations.push(`${doc}:${index + 1} — hidden command "${command}" is described as palette-invokable`);
                     }
                 });
             }
-
-            assert.deepStrictEqual(
-                violations,
-                [],
-                `Commands hidden via menus.commandPalette (when:false) must not be documented as palette-invokable:\n  ${violations.join('\n  ')}`
-            );
+            assert.deepStrictEqual(violations, [], `팔레트에 숨겨진 명령의 잘못된 실행 안내:\n  ${violations.join('\n  ')}`);
         });
     });
 
