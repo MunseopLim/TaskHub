@@ -895,8 +895,11 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         assert.notStrictEqual(serializedWebviewHtml, webviewHtml, 'live outerHTML 형태의 픽스처를 만들지 못했다');
         const standalone = stripMemoryMapHostBindings(serializedWebviewHtml);
         assert.ok(webviewHtml.includes('id="refreshControls"'));
+        assert.ok(webviewHtml.includes('id="refreshHint"'));
         assert.ok(webviewHtml.includes('id="refreshStatus"'));
         assert.ok(!standalone.includes('id="refreshControls"'));
+        assert.ok(!standalone.includes('id="refreshHint"'),
+            '저장 HTML에는 동작하지 않는 Refresh의 설명이 남으면 안 된다');
         assert.ok(!standalone.includes('id="refreshStatus"'),
             '저장 HTML에는 다시 시도할 수 없는 Refresh 상태 배너가 남으면 안 된다');
         assert.ok(!standalone.includes('id="refreshDismiss"'));
@@ -1439,6 +1442,7 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
             { getElementById: (id: string) => id === 'btnRefresh' ? refreshButton : id === 'refreshStatus' ? status : dismiss },
             (callback: () => void) => queued.push(callback),
             {
+                refreshManualNotice: 'manual refresh required',
                 refreshInterrupted: 'interrupted',
                 dismissRefreshDetails: 'dismiss details',
                 showRefreshDetails: 'show details',
@@ -1451,7 +1455,16 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
             (state: Record<string, unknown>) => persisted.push(state)
         );
 
+        feedback.setRefreshFeedback('', '', false, undefined);
+        assert.strictEqual(statusText, 'manual refresh required',
+            '초기 idle 렌더가 수동 새로 고침 안내를 지우면 안 된다');
+        assert.strictEqual(status.className, 'refresh-status is-idle');
+        assert.strictEqual(dismiss.hidden, true, 'idle 안내에는 실패 상세 닫기 버튼을 표시하면 안 된다');
+        events.length = 0;
+
         feedback.setRefreshFeedback('busy', 'refreshing', false, undefined);
+        assert.strictEqual(statusText, 'refreshing', '진행 문구를 idle 안내로 덮으면 안 된다');
+        assert.strictEqual(status.className, 'refresh-status is-busy');
         const textIndex = events.indexOf('text:refreshing');
         const busyFalseIndex = events.indexOf('aria-busy:false');
         assert.ok(textIndex >= 0 && busyFalseIndex > textIndex,
@@ -1521,6 +1534,12 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         feedback.renderRefreshFailure('already complete!', 1234, false, false);
         assert.strictEqual(statusText, 'LOCAL-TIME failed: already complete!',
             '이미 있는 종결 부호를 중복하면 안 된다');
+
+        feedback.setRefreshFeedback('', '', false, undefined);
+        assert.strictEqual(statusText, 'manual refresh required',
+            '상태를 초기화하면 수동 새로 고침 안내를 다시 표시해야 한다');
+        assert.strictEqual(status.className, 'refresh-status is-idle');
+        assert.strictEqual(dismiss.hidden, true, 'idle로 돌아오면 실패 상세 닫기 버튼도 숨겨야 한다');
 
         const actionStart = html.indexOf('    function runAction(actionEl)');
         const actionEnd = html.indexOf('    // 분석이 오래 걸리는 동안에도', actionStart);

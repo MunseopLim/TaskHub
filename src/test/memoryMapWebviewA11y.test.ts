@@ -301,14 +301,52 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
             const descriptionIds = describedBy![1].split(/\s+/).filter(Boolean);
             const descriptions = descriptionIds.map(generatedTextById).join(' ').trim();
             assert.ok(descriptions.length > 0, `aria-describedby 대상이 비어 있다: ${describedBy![1]}`);
+            assert.strictEqual(button![0].match(/title="([^"]+)"/)?.[1], descriptions,
+                '툴팁과 보조 기술에 제공하는 Refresh 설명이 달라서는 안 된다');
+            for (const id of descriptionIds) {
+                const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const element = html.match(new RegExp(`<[^>]+\\bid="${escapedId}"[^>]*>`));
+                assert.ok(element, `Refresh 설명 요소가 없다: ${id}`);
+                assert.doesNotMatch(element![0], /\s(?:hidden|inert)(?:\s|=|>)|\saria-hidden="true"/,
+                    `Refresh 설명을 접근성 트리에서 제거하면 안 된다: ${element![0]}`);
+                const classes = element![0].match(/class="([^"]+)"/)?.[1].split(/\s+/) ?? [];
+                const selectors = new Set([`#${id}`, ...classes.map(className => `.${className}`)]);
+                const matchingRules = generatedCssRules()
+                    .filter(rule => rule.selectors.some(selector => selectors.has(selector)));
+                assert.ok(matchingRules.length > 0, `Refresh 설명에 연결된 시각적 숨김 CSS가 없다: ${id}`);
+                const baseStyles = matchingRules
+                    .map(rule => rule.declarations)
+                    .join('\n');
+                assert.match(baseStyles, /position\s*:\s*absolute\s*(?:;|$)/,
+                    `Refresh 설명이 평상시 문서 배치에 남아 있다: ${id}`);
+                assert.match(baseStyles, /clip-path\s*:\s*(?!none\b)\S[^;]*(?:;|$)/,
+                    `Refresh 설명을 시각적으로 숨기는 clip-path가 없다: ${id}`);
+                const styles = [baseStyles]
+                    .concat(element![0].match(/style="([^"]+)"/)?.[1] ?? '')
+                    .join('\n');
+                assert.doesNotMatch(styles, /(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))\b/,
+                    `Refresh 설명은 시각적으로만 숨겨야 한다: ${id}`);
+            }
             assert.ok(/(?:현재\s*입력|입력\s*파일|current\s+input)/i.test(descriptions)
                 && /(?:다시\s*읽|reload|re-read)/i.test(descriptions),
                 `무엇을 다시 읽는 동작인지 설명하지 않는다: ${descriptions}`);
             assert.ok(/(?:링커|스캐터|linker|scatter)/i.test(descriptions)
-                && /(?:포함|include)/i.test(descriptions),
+                && /(?:포함|includ(?:e|ing))/i.test(descriptions),
                 `AXF/ELF Refresh에 linker/scatter 파일이 포함됨을 설명하지 않는다: ${descriptions}`);
-            assert.ok(/(?:자동[\s\S]{0,20}(?:하지|않|없|안\s*함)|not[\s\S]{0,20}(?:watch|monitor))/i.test(descriptions),
-                `파일 변경을 자동 감시하지 않음을 설명하지 않는다: ${descriptions}`);
+            const manualNotice = generatedTextById('refreshStatus');
+            assert.strictEqual(manualNotice, strings.refreshManualNotice,
+                '최초 상태에 파일 변경 반영 방법을 안내해야 한다');
+            assert.ok(/(?:자동[\s\S]{0,20}(?:하지|않|없|안\s*함)|not[\s\S]{0,40}automatically)/i.test(manualNotice),
+                `파일 변경을 자동 반영하지 않음을 설명하지 않는다: ${manualNotice}`);
+
+            const focusStyles = generatedCssRules()
+                .filter(rule => rule.selectors.includes('.header-row:has(#btnRefresh:focus-visible) + .visually-hidden'))
+                .map(rule => rule.declarations)
+                .join('\n');
+            for (const declaration of ['position: static', 'width: auto', 'height: auto', 'clip-path: none']) {
+                assert.match(focusStyles, new RegExp(`${declaration.replace(': ', '\\s*:\\s*')}\\s*(?:;|$)`),
+                    `키보드 포커스 시 Refresh 설명을 표시하는 스타일이 없다: ${declaration}`);
+            }
         });
 
         test('Refresh 실패 배너가 좁은 폭에서 닫기 버튼을 밀어내지 않는다', () => {

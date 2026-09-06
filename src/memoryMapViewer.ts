@@ -2479,13 +2479,13 @@ export function buildMemoryMapStrings(): Record<string, string> {
         saveHtml: t('HTML 저장', 'Save HTML'),
         saveHtmlTitle: t('HTML 파일로 저장', 'Save as HTML file'),
         refresh: t('새로 고침', 'Refresh'),
-        refreshTitle: t(
-            '현재 입력 파일 다시 읽기 (AXF/ELF는 선택한 링커/스캐터 파일 포함)',
-            'Reload the current input (including the selected linker/scatter file for AXF/ELF)'
-        ),
         refreshHint: t(
-            '현재 입력을 다시 읽습니다. AXF/ELF는 선택한 링커/스캐터 파일도 포함하며, 파일 변경은 자동 감시하지 않습니다.',
-            'Reloads the current input and includes the selected linker/scatter file for AXF/ELF. File changes are not watched automatically.'
+            '현재 입력을 다시 읽습니다. AXF/ELF는 선택한 링커/스캐터 파일도 포함합니다.',
+            'Reloads the current input, including the selected linker/scatter file for AXF/ELF.'
+        ),
+        refreshManualNotice: t(
+            '파일 변경은 자동으로 반영되지 않습니다. 최신 결과는 새로 고침으로 확인하세요.',
+            'File changes are not applied automatically. Refresh to see the latest results.'
         ),
         refreshing: t('새로 고치는 중…', 'Refreshing…'),
         refreshTakingLong: t(
@@ -2668,13 +2668,16 @@ function getWebviewContent(
     const htmlLang = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
     const refreshControls = canRefresh || canConfigureLinker
         ? `<span id="refreshControls" class="refresh-controls">
-        ${canRefresh ? `<button id="btnRefresh" data-action="refresh" title="${esc(S.refreshTitle)}" aria-label="${esc(S.refresh)}" aria-describedby="refreshHint" aria-disabled="false">${esc(S.refresh)}</button>` : ''}
+        ${canRefresh ? `<button id="btnRefresh" data-action="refresh" title="${esc(S.refreshHint)}" aria-label="${esc(S.refresh)}" aria-describedby="refreshHint" aria-disabled="false">${esc(S.refresh)}</button>` : ''}
         ${canConfigureLinker ? `<button id="btnConfigureMemoryMap" data-action="configure-memory-map" title="${esc(S.configureMemoryMapTitle)}">${esc(S.configureMemoryMap)}</button>` : ''}
-        ${canRefresh ? `<small id="refreshHint" class="refresh-hint">${esc(S.refreshHint)}</small>` : ''}</span>`
+        </span>`
+        : '';
+    const refreshHint = canRefresh
+        ? `<div id="refreshHint" class="visually-hidden">${esc(S.refreshHint)}</div>`
         : '';
     const refreshStatus = canRefresh
         ? `<div id="refreshFeedback" class="refresh-feedback">
-            <div id="refreshStatus" class="refresh-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>
+            <div id="refreshStatus" class="refresh-status is-idle" role="status" aria-live="polite" aria-atomic="true" aria-busy="false">${esc(S.refreshManualNotice)}</div>
             <button id="refreshDismiss" class="refresh-dismiss" data-action="dismiss-refresh" aria-controls="refreshStatus" aria-expanded="true" title="${esc(S.dismissRefreshDetails)}" aria-label="${esc(S.dismissRefreshDetails)}" hidden>×</button>
         </div>`
         : '';
@@ -2888,13 +2891,33 @@ function getWebviewContent(
     .header-row {
         display: flex;
         justify-content: space-between;
-        align-items: flex-start;
+        align-items: center;
         flex-wrap: wrap;
         gap: 8px 12px;
         margin-bottom: 16px;
     }
-    .header-left { flex: 1 1 220px; min-width: 0; }
-    .header-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+    .header-left { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+    .header-actions {
+        display: flex;
+        flex: 0 1 auto;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        margin-left: auto;
+        max-width: 100%;
+        gap: 8px;
+    }
+    .header-actions button {
+        flex: 0 0 144px;
+        width: 144px;
+        max-width: 100%;
+        height: 32px;
+        padding: 6px 10px;
+        font-size: 12px;
+        line-height: 20px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
     .subtitle { font-size: 11px; opacity: 0.6; }
     button {
         background: var(--btn-bg);
@@ -3176,20 +3199,30 @@ function getWebviewContent(
     .obj-summary-header { display: inline-block; font-size: 12px; font-weight: 600; cursor: pointer; padding: 2px 4px; border-radius: 3px; }
     .obj-summary-bar button { font-size: 11px; padding: 4px 10px; }
     .obj-summary-header:hover { background: var(--hover-bg); }
-    .refresh-controls {
-        display: inline-flex;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 6px;
-        min-width: 0;
-        max-width: 520px;
+    /* Keep host controls in the same layout as the three report buttons. */
+    .refresh-controls { display: contents; }
+    .refresh-controls[hidden] { display: none; }
+    .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
     }
-    .refresh-hint {
-        flex: 1 1 260px;
-        min-width: 180px;
-        color: var(--vscode-descriptionForeground, var(--fg));
+    /* Native title tooltips do not appear on keyboard focus. */
+    .header-row:has(#btnRefresh:focus-visible) + .visually-hidden {
+        position: static;
+        width: auto;
+        height: auto;
+        margin: 0 0 8px;
+        overflow: visible;
+        clip-path: none;
+        white-space: normal;
         font-size: 11px;
-        line-height: 1.35;
+        color: var(--vscode-descriptionForeground, var(--fg));
     }
     .refresh-feedback { display: flex; align-items: flex-start; gap: 6px; }
     .refresh-status {
@@ -3199,6 +3232,11 @@ function getWebviewContent(
         overflow-wrap: anywhere;
     }
     .refresh-status:empty { border: 0; margin: 0; padding: 0; }
+    .refresh-status.is-idle {
+        margin-bottom: 12px;
+        font-size: 11px;
+        color: var(--vscode-descriptionForeground, var(--fg));
+    }
     .refresh-status.is-busy,
     .refresh-status.is-success,
     .refresh-status.is-error {
@@ -3233,10 +3271,6 @@ function getWebviewContent(
     @media (max-width: 480px) {
         body { padding: 12px; }
         .header-left { flex-basis: 100%; }
-        .header-actions { flex: 1 1 100%; justify-content: flex-start; }
-        .header-actions button { flex: 1 1 auto; white-space: nowrap; }
-        .refresh-controls { flex: 1 1 100%; max-width: none; }
-        .refresh-hint { flex-basis: 100%; min-width: 0; }
     }
     /* 0.55는 기본 Dark+ 팔레트에서 4.34:1로 WCAG AA(4.5:1) 미달이다. 이 값이
        섹션 행 토글이 무엇을 펼칠지 알려 주는 유일한 자리라 읽혀야 한다. */
@@ -3260,6 +3294,7 @@ function getWebviewContent(
             ${refreshControls}
         </div>
     </div>
+    ${refreshHint}
     <div id="memoryMapStandaloneNotice" class="standalone-notice" hidden>${esc(S.standaloneNotice)}</div>
     ${refreshStatus}
 
@@ -3445,9 +3480,9 @@ const CURRENT_TOTALS = Object.freeze({ flash: ${flashTotal}, ram: ${ramTotal} })
         if (configureButton) {
             configureButton.setAttribute('aria-disabled', refreshInFlight ? 'true' : 'false');
         }
-        refreshStatus.className = 'refresh-status' + (kind ? ' is-' + kind : '');
+        refreshStatus.className = 'refresh-status is-' + (kind || 'idle');
         refreshStatus.title = '';
-        refreshStatus.textContent = message || '';
+        refreshStatus.textContent = kind ? (message || '') : S.refreshManualNotice;
         // busy=true인 live region은 갱신 알림을 보류한다. 먼저 문구를 쓰고 현재
         // busy를 false로 풀어 알린 뒤, 진행 상태라면 다음 paint 이후에만 true로
         // 바꾼다. 그 사이 성공/실패가 도착하면 refreshInFlight guard가 stale
