@@ -1,240 +1,954 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "TaskHub Actions",
-  "description": "Defines actions, tasks, and pipelines for the TaskHub extension.",
+  "description": "TaskHub 액션 설정의 최상위 값은 배열입니다. 각 항목의 action.tasks에 실행 단계를 작성합니다. JSON에서는 주석·끝 쉼표를 사용하지 않습니다.\nThe top-level value in TaskHub action settings is an array. Write execution steps in each item's action.tasks. JSON does not allow comments or trailing commas.\n예 / Example: [{\"id\": \"project.version\", \"title\": \"Node.js 버전\", \"action\": {\"description\": \"Node.js 버전을 확인합니다.\", \"tasks\": [{\"id\": \"version\", \"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}]}}]",
   "type": "array",
-  "items": {
-    "$ref": "#/definitions/ActionItem"
-  },
+  "items": {"$ref": "#/definitions/ActionItem"},
   "definitions": {
     "ActionItem": {
       "type": "object",
       "properties": {
         "id": {
           "type": "string",
-          "description": "Unique identifier for the action (e.g., button.build, pipeline.analyze)."
+          "description": "액션·폴더·구분자를 식별하는 고유 ID입니다. 화면에 보일 이름은 title에 따로 적습니다.\nA unique ID that identifies an action, folder, or separator. Set the display name separately in title.\n예 / Example: {\"id\": \"project.version\"}",
+          "examples": ["project.version"]
         },
         "title": {
           "type": "string",
-          "description": "The label displayed in the UI for this action."
+          "description": "Actions 목록에 표시할 이름입니다. 실제 실행할 명령은 action.tasks 안에 작성합니다.\nThe name shown in the Actions list. Write the commands to run in action.tasks.\n예 / Example: {\"title\": \"Node.js 버전\"}",
+          "examples": ["Node.js 버전"]
         },
         "type": {
           "type": "string",
           "enum": ["separator", "folder"],
-          "description": "Defines special item types like separators or folders."
+          "description": "folder는 children을 묶는 폴더, separator는 구분자입니다. 실행할 액션은 이 필드를 생략하고 action을 작성합니다.\nfolder is a folder that groups children, and separator is a separator. For an executable action, omit this field and provide action.\n예 / Example: {\"type\": \"folder\"}",
+          "examples": ["folder"]
         },
         "action": {
-          "$ref": "#/definitions/Action"
+          "$ref": "#/definitions/Action",
+          "description": "실행할 태스크 묶음입니다. description과 tasks가 필요하며 successMessage·failMessage는 선택입니다.\nA group of tasks to run. description and tasks are required; successMessage and failMessage are optional.\n예 / Example: {\"action\": {\"description\": \"Node.js 버전을 확인합니다.\", \"tasks\": [{\"id\": \"version\", \"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}]}}",
+          "examples": [
+            {
+              "description": "Node.js 버전을 확인합니다.",
+              "tasks": [{"id": "version", "type": "command", "command": "node", "args": ["--version"]}]
+            }
+          ]
         },
         "children": {
           "type": "array",
-          "description": "If type is 'folder', this contains nested action items.",
-          "items": {
-            "$ref": "#/definitions/ActionItem"
-          }
+          "description": "type이 folder인 항목 아래에 표시할 액션·폴더·구분자 배열입니다.\nAn array of actions, folders, and separators shown under an item whose type is folder.\n예 / Example: {\"children\": [{\"id\": \"project.version\", \"title\": \"Node.js 버전\", \"action\": {\"description\": \"Node.js 버전을 확인합니다.\", \"tasks\": [{\"id\": \"version\", \"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}]}}]}",
+          "items": {"$ref": "#/definitions/ActionItem"},
+          "examples": [
+            [
+              {
+                "id": "project.version",
+                "title": "Node.js 버전",
+                "action": {
+                  "description": "Node.js 버전을 확인합니다.",
+                  "tasks": [{"id": "version", "type": "command", "command": "node", "args": ["--version"]}]
+                }
+              }
+            ]
+          ]
         }
       },
-      "required": ["id", "title"]
+      "required": ["id", "title"],
+      "description": "Actions 트리에 표시할 항목입니다. 실행 항목은 action, 폴더는 type: \"folder\"와 children을 사용합니다.\nAn item to display in the Actions tree. Executable items use action; folders use type: \"folder\" and children.\n예 / Example: {\"id\": \"project.version\", \"title\": \"Node.js 버전\", \"action\": {\"description\": \"Node.js 버전을 확인합니다.\", \"tasks\": [{\"id\": \"version\", \"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}]}}",
+      "examples": [
+        {
+          "id": "project.version",
+          "title": "Node.js 버전",
+          "action": {
+            "description": "Node.js 버전을 확인합니다.",
+            "tasks": [{"id": "version", "type": "command", "command": "node", "args": ["--version"]}]
+          }
+        }
+      ]
     },
     "Action": {
       "type": "object",
       "properties": {
         "description": {
           "type": "string",
-          "description": "A short explanation shown in the UI for what this action does."
+          "description": "이 액션이 하는 일을 설명합니다. 실제 명령은 tasks에 작성합니다.\nDescribes what this action does. Write the commands in tasks.\n예 / Example: {\"description\": \"Node.js 버전을 확인합니다.\"}",
+          "examples": ["Node.js 버전을 확인합니다."]
         },
         "tasks": {
           "type": "array",
-          "description": "A list of one or more tasks to execute in sequence.",
-          "items": {
-            "$ref": "#/definitions/Task"
-          }
+          "description": "실행할 태스크 배열입니다. 기본 순서대로 실행하며, parallel·dependsOn·결과 참조로 의존 순서를 조정합니다.\nAn array of tasks to run. Tasks run in order by default; use parallel, dependsOn, and result references to adjust their dependency order.\n예 / Example: {\"tasks\": [{\"id\": \"version\", \"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}]}",
+          "items": {"$ref": "#/definitions/Task"},
+          "examples": [[{"id": "version", "type": "command", "command": "node", "args": ["--version"]}]]
         },
         "successMessage": {
           "type": "string",
-          "description": "A message to show when the entire task sequence (pipeline) completes successfully."
+          "description": "액션이 성공했을 때 사용할 사용자 지정 완료 문구입니다.\nA custom completion message to use when the action succeeds.\n예 / Example: {\"successMessage\": \"검증을 완료했습니다.\"}",
+          "examples": ["검증을 완료했습니다."]
         },
         "failMessage": {
           "type": "string",
-          "description": "A message to show if any task in the sequence fails."
+          "description": "액션 실패 시 사용할 사용자 지정 안내 문구입니다.\nA custom message to use when the action fails.\n예 / Example: {\"failMessage\": \"검증 실패: 실행 보고서를 확인하세요.\"}",
+          "examples": ["검증 실패: 실행 보고서를 확인하세요."]
         }
       },
-      "required": ["description", "tasks"]
+      "required": ["description", "tasks"],
+      "description": "한 번에 실행할 액션 정의입니다. 설명과 태스크 배열을 작성합니다.\nAn action definition to run as a unit. Provide a description and an array of tasks.\n예 / Example: {\"description\": \"Node.js 버전을 확인합니다.\", \"tasks\": [{\"id\": \"version\", \"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}]}",
+      "examples": [
+        {
+          "description": "Node.js 버전을 확인합니다.",
+          "tasks": [{"id": "version", "type": "command", "command": "node", "args": ["--version"]}]
+        }
+      ]
     },
     "Task": {
       "type": "object",
       "properties": {
+        "id": {"$ref": "#/definitions/TaskFields/properties/id"},
+        "type": {"$ref": "#/definitions/TaskFields/properties/type"},
+        "when": {"$ref": "#/definitions/TaskFields/properties/when"},
+        "dependsOn": {"$ref": "#/definitions/TaskFields/properties/dependsOn"},
+        "parallel": {"$ref": "#/definitions/TaskFields/properties/parallel"},
+        "timeoutSeconds": {"$ref": "#/definitions/TaskFields/properties/timeoutSeconds"},
+        "continueOnError": {"$ref": "#/definitions/TaskFields/properties/continueOnError"},
+        "output": {"$ref": "#/definitions/TaskFields/properties/output"},
+        "passTheResultToNextTask": {"$ref": "#/definitions/TaskFields/properties/passTheResultToNextTask"},
+        "allowSecretContent": {"$ref": "#/definitions/TaskFields/properties/allowSecretContent"}
+      },
+      "required": ["id", "type"],
+      "allOf": [
+        {
+          "not": {
+            "properties": {"allowCustom": {"const": true}, "canPickMany": {"const": true}},
+            "required": ["allowCustom", "canPickMany"]
+          }
+        },
+        {
+          "if": {"required": ["default"], "patternProperties": {"^default$": {"type": "array"}}},
+          "then": {"required": ["canPickMany"], "patternProperties": {"^canPickMany$": {"const": true}}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "pathDialog"}}, "required": ["type"]},
+          "then": {"required": ["mode"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "switch"}}, "required": ["type"]},
+          "then": {"required": ["on", "cases"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "browser"}}, "required": ["type"]},
+          "then": {"required": ["url"]}
+        },
+        {
+          "if": {"required": ["forEach"]},
+          "then": {
+            "patternProperties": {
+              "^type$": {
+                "not": {
+                  "enum": [
+                    "inputBox",
+                    "quickPick",
+                    "envPick",
+                    "fileDialog",
+                    "folderDialog",
+                    "pathDialog",
+                    "confirm",
+                    "browser",
+                    "switch"
+                  ]
+                }
+              },
+              "^isOneShot$": {"not": {"const": true}}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "shell"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "command": {"$ref": "#/definitions/TaskFields/properties/command"},
+              "args": {"$ref": "#/definitions/TaskFields/properties/args"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+              "env": {"$ref": "#/definitions/TaskFields/properties/env"},
+              "revealTerminal": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
+              "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+              "forEach": {"$ref": "#/definitions/TaskFields/properties/forEach"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "command"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "command": {"$ref": "#/definitions/TaskFields/properties/command"},
+              "args": {"$ref": "#/definitions/TaskFields/properties/args"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+              "env": {"$ref": "#/definitions/TaskFields/properties/env"},
+              "revealTerminal": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
+              "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+              "forEach": {"$ref": "#/definitions/TaskFields/properties/forEach"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "fileDialog"}}, "required": ["type"]},
+          "then": {"properties": {"options": {"$ref": "#/definitions/TaskFields/properties/options"}}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "folderDialog"}}, "required": ["type"]},
+          "then": {"properties": {"options": {"$ref": "#/definitions/TaskFields/properties/options"}}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "pathDialog"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "mode": {"$ref": "#/definitions/TaskFields/properties/mode"},
+              "options": {"$ref": "#/definitions/TaskFields/properties/options"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "unzip"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "tool": {"$ref": "#/definitions/TaskFields/properties/tool"},
+              "inputs": {"$ref": "#/definitions/TaskFields/properties/inputs"},
+              "archive": {"$ref": "#/definitions/TaskFields/properties/archive"},
+              "destination": {"$ref": "#/definitions/TaskFields/properties/destination"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+              "env": {"$ref": "#/definitions/TaskFields/properties/env"},
+              "forEach": {"$ref": "#/definitions/TaskFields/properties/forEach"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "zip"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "tool": {"$ref": "#/definitions/TaskFields/properties/tool"},
+              "source": {"$ref": "#/definitions/TaskFields/properties/source"},
+              "archive": {"$ref": "#/definitions/TaskFields/properties/archive"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+              "env": {"$ref": "#/definitions/TaskFields/properties/env"},
+              "forEach": {"$ref": "#/definitions/TaskFields/properties/forEach"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "stringManipulation"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "function": {"$ref": "#/definitions/TaskFields/properties/function"},
+              "input": {"$ref": "#/definitions/TaskFields/properties/input"},
+              "forEach": {"$ref": "#/definitions/TaskFields/properties/forEach"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "inputBox"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "prompt": {"$ref": "#/definitions/TaskFields/properties/prompt"},
+              "value": {"$ref": "#/definitions/TaskFields/properties/value"},
+              "placeHolder": {"$ref": "#/definitions/TaskFields/properties/placeHolder"},
+              "password": {"$ref": "#/definitions/TaskFields/properties/password"},
+              "prefix": {"$ref": "#/definitions/TaskFields/properties/prefix"},
+              "suffix": {"$ref": "#/definitions/TaskFields/properties/suffix"},
+              "validatePattern": {"$ref": "#/definitions/TaskFields/properties/validatePattern"},
+              "validateMessage": {"$ref": "#/definitions/TaskFields/properties/validateMessage"},
+              "extractPattern": {"$ref": "#/definitions/TaskFields/properties/extractPattern"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "quickPick"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "items": {"$ref": "#/definitions/TaskFields/properties/items"},
+              "placeHolder": {"$ref": "#/definitions/TaskFields/properties/placeHolder"},
+              "canPickMany": {"$ref": "#/definitions/TaskFields/properties/canPickMany"},
+              "default": {"$ref": "#/definitions/TaskFields/properties/default"},
+              "allowCustom": {"$ref": "#/definitions/TaskFields/properties/allowCustom"},
+              "rememberLastSelection": {"$ref": "#/definitions/TaskFields/properties/rememberLastSelection"},
+              "itemsFromCommand": {"$ref": "#/definitions/TaskFields/properties/itemsFromCommand"},
+              "itemsFromCommandFormat": {"$ref": "#/definitions/TaskFields/properties/itemsFromCommandFormat"},
+              "itemsExclude": {"$ref": "#/definitions/TaskFields/properties/itemsExclude"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "envPick"}}, "required": ["type"]},
+          "then": {"properties": {"placeHolder": {"$ref": "#/definitions/TaskFields/properties/placeHolder"}}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "confirm"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "message": {"$ref": "#/definitions/TaskFields/properties/message"},
+              "confirmLabel": {"$ref": "#/definitions/TaskFields/properties/confirmLabel"},
+              "cancelLabel": {"$ref": "#/definitions/TaskFields/properties/cancelLabel"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "writeFile"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "path": {"$ref": "#/definitions/TaskFields/properties/path"},
+              "content": {"$ref": "#/definitions/TaskFields/properties/content"},
+              "encoding": {"$ref": "#/definitions/TaskFields/properties/encoding"},
+              "eol": {"$ref": "#/definitions/TaskFields/properties/eol"},
+              "overwrite": {"$ref": "#/definitions/TaskFields/properties/overwrite"},
+              "mkdirs": {"$ref": "#/definitions/TaskFields/properties/mkdirs"},
+              "forEach": {"$ref": "#/definitions/TaskFields/properties/forEach"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "appendFile"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "path": {"$ref": "#/definitions/TaskFields/properties/path"},
+              "content": {"$ref": "#/definitions/TaskFields/properties/content"},
+              "encoding": {"$ref": "#/definitions/TaskFields/properties/encoding"},
+              "eol": {"$ref": "#/definitions/TaskFields/properties/eol"},
+              "mkdirs": {"$ref": "#/definitions/TaskFields/properties/mkdirs"},
+              "forEach": {"$ref": "#/definitions/TaskFields/properties/forEach"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "browser"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "url": {"$ref": "#/definitions/TaskFields/properties/url"},
+              "target": {"$ref": "#/definitions/TaskFields/properties/target"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "switch"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "on": {"$ref": "#/definitions/TaskFields/properties/on"},
+              "cases": {"$ref": "#/definitions/TaskFields/properties/cases"},
+              "defaultCase": {"$ref": "#/definitions/TaskFields/properties/defaultCase"},
+              "command": {"$ref": "#/definitions/TaskFields/properties/command"},
+              "args": {"$ref": "#/definitions/TaskFields/properties/args"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+              "env": {"$ref": "#/definitions/TaskFields/properties/env"},
+              "revealTerminal": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
+              "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+              "tool": {"$ref": "#/definitions/TaskFields/properties/tool"},
+              "inputs": {"$ref": "#/definitions/TaskFields/properties/inputs"},
+              "archive": {"$ref": "#/definitions/TaskFields/properties/archive"},
+              "destination": {"$ref": "#/definitions/TaskFields/properties/destination"},
+              "source": {"$ref": "#/definitions/TaskFields/properties/source"},
+              "function": {"$ref": "#/definitions/TaskFields/properties/function"},
+              "input": {"$ref": "#/definitions/TaskFields/properties/input"},
+              "path": {"$ref": "#/definitions/TaskFields/properties/path"},
+              "content": {"$ref": "#/definitions/TaskFields/properties/content"},
+              "encoding": {"$ref": "#/definitions/TaskFields/properties/encoding"},
+              "eol": {"$ref": "#/definitions/TaskFields/properties/eol"},
+              "overwrite": {"$ref": "#/definitions/TaskFields/properties/overwrite"},
+              "mkdirs": {"$ref": "#/definitions/TaskFields/properties/mkdirs"},
+              "url": {"$ref": "#/definitions/TaskFields/properties/url"},
+              "target": {"$ref": "#/definitions/TaskFields/properties/target"}
+            }
+          }
+        }
+      ],
+      "$comment": "properties는 공통 필드, if/then.properties는 선택한 type의 추천 필드입니다. patternProperties는 추천에 노출하지 않고 기존 필드의 검증과 hover를 유지합니다. 필드 정의는 TaskFields 한 곳에서 관리합니다.",
+      "patternProperties": {
+        "^on$": {"$ref": "#/definitions/TaskFields/properties/on"},
+        "^cases$": {"$ref": "#/definitions/TaskFields/properties/cases"},
+        "^defaultCase$": {"$ref": "#/definitions/TaskFields/properties/defaultCase"},
+        "^command$": {"$ref": "#/definitions/TaskFields/properties/command"},
+        "^args$": {"$ref": "#/definitions/TaskFields/properties/args"},
+        "^env$": {"$ref": "#/definitions/TaskFields/properties/env"},
+        "^cwd$": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+        "^revealTerminal$": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
+        "^url$": {"$ref": "#/definitions/TaskFields/properties/url"},
+        "^target$": {"$ref": "#/definitions/TaskFields/properties/target"},
+        "^mode$": {"$ref": "#/definitions/TaskFields/properties/mode"},
+        "^options$": {"$ref": "#/definitions/TaskFields/properties/options"},
+        "^prompt$": {"$ref": "#/definitions/TaskFields/properties/prompt"},
+        "^value$": {"$ref": "#/definitions/TaskFields/properties/value"},
+        "^placeHolder$": {"$ref": "#/definitions/TaskFields/properties/placeHolder"},
+        "^password$": {"$ref": "#/definitions/TaskFields/properties/password"},
+        "^prefix$": {"$ref": "#/definitions/TaskFields/properties/prefix"},
+        "^suffix$": {"$ref": "#/definitions/TaskFields/properties/suffix"},
+        "^validatePattern$": {"$ref": "#/definitions/TaskFields/properties/validatePattern"},
+        "^validateMessage$": {"$ref": "#/definitions/TaskFields/properties/validateMessage"},
+        "^extractPattern$": {"$ref": "#/definitions/TaskFields/properties/extractPattern"},
+        "^items$": {"$ref": "#/definitions/TaskFields/properties/items"},
+        "^canPickMany$": {"$ref": "#/definitions/TaskFields/properties/canPickMany"},
+        "^default$": {"$ref": "#/definitions/TaskFields/properties/default"},
+        "^allowCustom$": {"$ref": "#/definitions/TaskFields/properties/allowCustom"},
+        "^rememberLastSelection$": {"$ref": "#/definitions/TaskFields/properties/rememberLastSelection"},
+        "^itemsFromCommand$": {"$ref": "#/definitions/TaskFields/properties/itemsFromCommand"},
+        "^itemsFromCommandFormat$": {"$ref": "#/definitions/TaskFields/properties/itemsFromCommandFormat"},
+        "^itemsExclude$": {"$ref": "#/definitions/TaskFields/properties/itemsExclude"},
+        "^forEach$": {"$ref": "#/definitions/TaskFields/properties/forEach"},
+        "^message$": {"$ref": "#/definitions/TaskFields/properties/message"},
+        "^confirmLabel$": {"$ref": "#/definitions/TaskFields/properties/confirmLabel"},
+        "^cancelLabel$": {"$ref": "#/definitions/TaskFields/properties/cancelLabel"},
+        "^tool$": {"$ref": "#/definitions/TaskFields/properties/tool"},
+        "^inputs$": {"$ref": "#/definitions/TaskFields/properties/inputs"},
+        "^archive$": {"$ref": "#/definitions/TaskFields/properties/archive"},
+        "^destination$": {"$ref": "#/definitions/TaskFields/properties/destination"},
+        "^source$": {"$ref": "#/definitions/TaskFields/properties/source"},
+        "^function$": {"$ref": "#/definitions/TaskFields/properties/function"},
+        "^input$": {"$ref": "#/definitions/TaskFields/properties/input"},
+        "^isOneShot$": {"$ref": "#/definitions/TaskFields/properties/isOneShot"},
+        "^path$": {"$ref": "#/definitions/TaskFields/properties/path"},
+        "^content$": {"$ref": "#/definitions/TaskFields/properties/content"},
+        "^encoding$": {"$ref": "#/definitions/TaskFields/properties/encoding"},
+        "^eol$": {"$ref": "#/definitions/TaskFields/properties/eol"},
+        "^overwrite$": {"$ref": "#/definitions/TaskFields/properties/overwrite"},
+        "^mkdirs$": {"$ref": "#/definitions/TaskFields/properties/mkdirs"}
+      },
+      "description": "액션의 한 실행 단계입니다. id와 type을 먼저 정하고 해당 종류의 필드를 작성합니다.\nOne execution step in an action. Set id and type first, then provide the fields for that type.\n예 / Example: {\"id\": \"version\", \"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}",
+      "examples": [{"id": "version", "type": "command", "command": "node", "args": ["--version"]}]
+    },
+    "SwitchTaskBranch": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["shell", "command", "unzip", "zip", "stringManipulation", "writeFile", "appendFile", "browser"],
+          "description": "이 case에서 실행할 종류입니다. command/shell/zip/unzip/stringManipulation/writeFile/appendFile/browser 중 선택합니다. 입력 대화상자와 switch 중첩은 지원하지 않습니다.\nThe task kind executed by this case. Choose command/shell/zip/unzip/stringManipulation/writeFile/appendFile/browser. Input dialogs and nested switches are not supported.\n예 / Example: {\"type\": \"command\"}",
+          "examples": ["command"]
+        },
+        "output": {"$ref": "#/definitions/TaskFields/properties/output"},
+        "passTheResultToNextTask": {"$ref": "#/definitions/TaskFields/properties/passTheResultToNextTask"},
+        "allowSecretContent": {"$ref": "#/definitions/TaskFields/properties/allowSecretContent"}
+      },
+      "required": ["type"],
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "browser"}}, "required": ["type"]},
+          "then": {"required": ["url"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "shell"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "command": {"$ref": "#/definitions/TaskFields/properties/command"},
+              "args": {"$ref": "#/definitions/TaskFields/properties/args"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+              "env": {"$ref": "#/definitions/TaskFields/properties/env"},
+              "revealTerminal": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
+              "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "command"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "command": {"$ref": "#/definitions/TaskFields/properties/command"},
+              "args": {"$ref": "#/definitions/TaskFields/properties/args"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+              "env": {"$ref": "#/definitions/TaskFields/properties/env"},
+              "revealTerminal": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
+              "isOneShot": {"$ref": "#/definitions/TaskFields/properties/isOneShot"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "unzip"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "tool": {"$ref": "#/definitions/TaskFields/properties/tool"},
+              "inputs": {"$ref": "#/definitions/TaskFields/properties/inputs"},
+              "archive": {"$ref": "#/definitions/TaskFields/properties/archive"},
+              "destination": {"$ref": "#/definitions/TaskFields/properties/destination"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+              "env": {"$ref": "#/definitions/TaskFields/properties/env"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "zip"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "tool": {"$ref": "#/definitions/TaskFields/properties/tool"},
+              "source": {"$ref": "#/definitions/TaskFields/properties/source"},
+              "archive": {"$ref": "#/definitions/TaskFields/properties/archive"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+              "env": {"$ref": "#/definitions/TaskFields/properties/env"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "stringManipulation"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "function": {"$ref": "#/definitions/TaskFields/properties/function"},
+              "input": {"$ref": "#/definitions/TaskFields/properties/input"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "writeFile"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "path": {"$ref": "#/definitions/TaskFields/properties/path"},
+              "content": {"$ref": "#/definitions/TaskFields/properties/content"},
+              "encoding": {"$ref": "#/definitions/TaskFields/properties/encoding"},
+              "eol": {"$ref": "#/definitions/TaskFields/properties/eol"},
+              "overwrite": {"$ref": "#/definitions/TaskFields/properties/overwrite"},
+              "mkdirs": {"$ref": "#/definitions/TaskFields/properties/mkdirs"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "appendFile"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "path": {"$ref": "#/definitions/TaskFields/properties/path"},
+              "content": {"$ref": "#/definitions/TaskFields/properties/content"},
+              "encoding": {"$ref": "#/definitions/TaskFields/properties/encoding"},
+              "eol": {"$ref": "#/definitions/TaskFields/properties/eol"},
+              "mkdirs": {"$ref": "#/definitions/TaskFields/properties/mkdirs"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "browser"}}, "required": ["type"]},
+          "then": {
+            "properties": {
+              "url": {"$ref": "#/definitions/TaskFields/properties/url"},
+              "target": {"$ref": "#/definitions/TaskFields/properties/target"},
+              "cwd": {"$ref": "#/definitions/TaskFields/properties/cwd"}
+            }
+          }
+        }
+      ],
+      "additionalProperties": false,
+      "$comment": "바깥 switch의 제어 필드는 허용하지 않습니다. 실행 필드는 기존처럼 허용·검증하되 type에 맞는 필드만 추천합니다.",
+      "patternProperties": {
+        "^command$": {"$ref": "#/definitions/TaskFields/properties/command"},
+        "^args$": {"$ref": "#/definitions/TaskFields/properties/args"},
+        "^env$": {"$ref": "#/definitions/TaskFields/properties/env"},
+        "^cwd$": {"$ref": "#/definitions/TaskFields/properties/cwd"},
+        "^revealTerminal$": {"$ref": "#/definitions/TaskFields/properties/revealTerminal"},
+        "^url$": {"$ref": "#/definitions/TaskFields/properties/url"},
+        "^target$": {"$ref": "#/definitions/TaskFields/properties/target"},
+        "^tool$": {"$ref": "#/definitions/TaskFields/properties/tool"},
+        "^inputs$": {"$ref": "#/definitions/TaskFields/properties/inputs"},
+        "^source$": {"$ref": "#/definitions/TaskFields/properties/source"},
+        "^archive$": {"$ref": "#/definitions/TaskFields/properties/archive"},
+        "^destination$": {"$ref": "#/definitions/TaskFields/properties/destination"},
+        "^function$": {"$ref": "#/definitions/TaskFields/properties/function"},
+        "^input$": {"$ref": "#/definitions/TaskFields/properties/input"},
+        "^path$": {"$ref": "#/definitions/TaskFields/properties/path"},
+        "^content$": {"$ref": "#/definitions/TaskFields/properties/content"},
+        "^encoding$": {"$ref": "#/definitions/TaskFields/properties/encoding"},
+        "^eol$": {"$ref": "#/definitions/TaskFields/properties/eol"},
+        "^overwrite$": {"$ref": "#/definitions/TaskFields/properties/overwrite"},
+        "^mkdirs$": {"$ref": "#/definitions/TaskFields/properties/mkdirs"},
+        "^isOneShot$": {"$ref": "#/definitions/TaskFields/properties/isOneShot"}
+      },
+      "description": "switch에서 선택될 실행 본문입니다. command/shell/zip/unzip/stringManipulation/writeFile/appendFile/browser만 지원합니다. 바깥 switch의 실행 설정을 상속하고 case 값으로 덮어씁니다. output도 객체 전체를 교체합니다. id·조건·스케줄링은 바깥에 둡니다.\nThe execution body selected by switch. Supports only command/shell/zip/unzip/stringManipulation/writeFile/appendFile/browser. Inherits the outer switch's execution settings and overrides them with case values. output also replaces the entire object. Keep id, conditions, and scheduling on the outer switch.\n예 / Example: {\"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}",
+      "examples": [{"type": "command", "command": "node", "args": ["--version"]}]
+    },
+    "Output": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "결과 표시·저장 방식입니다. editor는 새 문서, terminal은 출력 터미널, file은 filePath에 저장합니다. 이 기능에는 task.passTheResultToNextTask: true가 필요합니다. capture/diagnostics만 쓸 때는 생략할 수 있습니다.\nHow to display or save the result. editor opens a new document, terminal uses an output terminal, and file saves to filePath. This feature requires task.passTheResultToNextTask: true. You can omit it when using only capture/diagnostics.\n예 / Example: {\"mode\": \"editor\"}",
+          "enum": ["editor", "terminal", "file"],
+          "examples": ["editor"]
+        },
+        "language": {
+          "type": "string",
+          "description": "mode: \"editor\"로 여는 문서의 VS Code 언어 ID입니다. 기본은 plaintext이며 변수 치환하지 않습니다.\nThe VS Code language ID for the document opened with mode: \"editor\". Defaults to plaintext and does not support variable substitution.\n예 / Example: {\"language\": \"json\"}",
+          "examples": ["json"]
+        },
+        "filePath": {
+          "type": "string",
+          "description": "mode: \"file\"에서 저장할 경로입니다. 변수 치환을 지원하며 상대 경로는 액션 워크스페이스 기준입니다. 프로세스 cwd를 기준으로 하지 않고 열린 워크스페이스 밖의 파일은 거부합니다.\nThe path to save to with mode: \"file\". Supports variable substitution. Relative paths are resolved against the action workspace, not the process cwd. Files outside the open workspaces are rejected.\n예 / Example: {\"filePath\": \"build/report.txt\"}",
+          "examples": ["build/report.txt"]
+        },
+        "content": {
+          "type": "string",
+          "description": "표시·저장할 내용을 직접 정할 문자열입니다. 변수 치환을 지원합니다. 생략하거나 빈 문자열이면 문자열 result.output, 없으면 결과 객체의 JSON을 사용합니다.\nA string that directly specifies the content to display or save. Supports variable substitution. If omitted or empty, uses result.output when it is a string, or otherwise the result object as JSON.\n예 / Example: {\"content\": \"결과: ${build.output}\\n\"}",
+          "examples": ["결과: ${build.output}\n"]
+        },
+        "overwrite": {
+          "oneOf": [{"type": "boolean"}, {"type": "string"}],
+          "description": "mode: \"file\"에서 기존 파일을 덮어쓸지 정합니다. 기본 false입니다. true 또는 치환 결과가 \"true\"인 문자열을 사용하며 대소문자와 양끝 공백은 무시합니다.\nWhether to overwrite an existing file with mode: \"file\". Defaults to false. Use true or a string that resolves to \"true\" after substitution; case and leading/trailing whitespace are ignored.\n예 / Example: {\"overwrite\": true}",
+          "default": false,
+          "examples": [true]
+        },
+        "capture": {
+          "oneOf": [
+            {"$ref": "#/definitions/OutputCapture"},
+            {"type": "array", "items": {"$ref": "#/definitions/OutputCapture"}}
+          ],
+          "description": "문자열 결과에서 이름 붙인 값을 추출할 규칙 하나 또는 배열입니다. ${build.revision}처럼 참조하며 기존 output은 유지합니다. command/shell은 passTheResultToNextTask: true가 필요하고 stringManipulation은 문자열 결과를 바로 제공합니다.\nOne rule or an array of rules for extracting named values from a string result. Reference them as ${build.revision}; the existing output is preserved. command/shell require passTheResultToNextTask: true, while stringManipulation provides its string result directly.\n예 / Example: {\"capture\": {\"name\": \"revision\", \"regex\": \"^([0-9a-f]+)$\", \"group\": 1, \"trim\": true}}",
+          "examples": [{"name": "revision", "regex": "^([0-9a-f]+)$", "group": 1, "trim": true}]
+        },
+        "diagnostics": {
+          "oneOf": [
+            {"$ref": "#/definitions/DiagnosticPattern"},
+            {"type": "string", "examples": ["$gcc"]},
+            {
+              "type": "array",
+              "items": {
+                "oneOf": [{"$ref": "#/definitions/DiagnosticPattern"}, {"type": "string", "examples": ["$gcc"]}]
+              }
+            }
+          ],
+          "description": "문자열 결과에서 오류·경고를 찾아 Problems에 표시합니다. command/shell은 passTheResultToNextTask: true가 필요하며 stdout과 stderr를 함께 검사합니다. \"$gcc\"·\"$tsc\" 등의 프리셋, 직접 작성한 규칙 또는 그 배열을 사용합니다.\nFinds errors and warnings in a string result and displays them in Problems. command/shell require passTheResultToNextTask: true and inspect both stdout and stderr. Use presets such as \"$gcc\" or \"$tsc\", custom rules, or an array of these.\n예 / Example: {\"diagnostics\": \"$gcc\"}",
+          "examples": ["$gcc"]
+        }
+      },
+      "description": "결과 표시·저장·추출 설정입니다. editor/terminal/file 출력은 passTheResultToNextTask: true와 함께 사용합니다.\nSettings for displaying, saving, and extracting results. Use editor/terminal/file output together with passTheResultToNextTask: true.\n예 / Example: {\"mode\": \"editor\", \"language\": \"json\"}",
+      "examples": [{"mode": "editor", "language": "json"}]
+    },
+    "DiagnosticPattern": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "출력 한 줄마다 적용할 정규식 본문입니다. 괄호로 경로·줄 번호·메시지를 캡처하고 각 필드에 그룹 번호를 연결합니다.\nThe regular expression body to apply to each output line. Use parentheses to capture the path, line number, and message, then map each field to its group number.\n예 / Example: {\"pattern\": \"^(.+):([0-9]+):([0-9]+): (warning|error): (.+)$\"}",
+          "examples": ["^(.+):([0-9]+):([0-9]+): (warning|error): (.+)$"]
+        },
+        "flags": {
+          "type": "string",
+          "description": "JavaScript 정규식 플래그입니다. i는 대소문자 무시이며 g는 제거합니다. 매처가 출력 줄을 직접 순회하므로 여러 줄을 하나로 매치하지 않습니다.\nJavaScript regular expression flags. i ignores case, and g is removed. The matcher iterates over output lines itself, so it does not match multiple lines as one.\n예 / Example: {\"flags\": \"i\"}",
+          "examples": ["i"]
+        },
+        "file": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "파일 경로를 담은 캡처 그룹 번호(1부터)입니다. 상대 경로는 명령의 해석된 cwd, 없으면 액션 워크스페이스 기준입니다.\nThe capture group number (starting at 1) containing the file path. Relative paths are resolved against the command's resolved cwd, or the action workspace if cwd is absent.\n예 / Example: {\"file\": 1}",
+          "examples": [1]
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "줄 번호를 담은 캡처 그룹 번호(1부터)입니다. 출력에 적힌 소스 줄 번호도 1부터 시작하는 값으로 해석합니다.\nThe capture group number (starting at 1) containing the line number. Source line numbers in the output are also interpreted as starting at 1.\n예 / Example: {\"line\": 2}",
+          "examples": [2]
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "열 번호를 담은 캡처 그룹 번호(1부터)입니다. 열 번호가 없는 출력이면 생략합니다.\nThe capture group number (starting at 1) containing the column number. Omit this if the output has no column number.\n예 / Example: {\"column\": 3}",
+          "examples": [3]
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "진단 범위의 끝 줄 번호를 담은 캡처 그룹 번호(1부터)입니다. 범위가 없는 출력이면 생략합니다.\nThe capture group number (starting at 1) containing the diagnostic range's end line number. Omit this if the output has no range.\n예 / Example: {\"endLine\": 6}",
+          "examples": [6]
+        },
+        "endColumn": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "진단 범위의 끝 열 번호를 담은 캡처 그룹 번호(1부터)입니다. 범위가 없는 출력이면 생략합니다.\nThe capture group number (starting at 1) containing the diagnostic range's end column number. Omit this if the output has no range.\n예 / Example: {\"endColumn\": 7}",
+          "examples": [7]
+        },
+        "severity": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "심각도 문자열을 담은 캡처 그룹 번호(1부터)입니다. error/fatal은 오류, warning은 경고, info/note는 정보, hint는 힌트로 해석합니다.\nThe capture group number (starting at 1) containing the severity string. error/fatal are interpreted as errors, warning as a warning, info/note as information, and hint as a hint.\n예 / Example: {\"severity\": 4}",
+          "examples": [4]
+        },
+        "message": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "진단 메시지를 담은 캡처 그룹 번호(1부터)입니다. pattern·file·line과 함께 지정해야 합니다.\nThe capture group number (starting at 1) containing the diagnostic message. Must be specified together with pattern, file, and line.\n예 / Example: {\"message\": 5}",
+          "examples": [5]
+        },
+        "defaultSeverity": {
+          "type": "string",
+          "enum": ["error", "warning", "info", "hint"],
+          "description": "severity 그룹이 없거나 값을 해석할 수 없을 때 쓸 심각도입니다. error(기본)는 오류, warning은 경고, info는 정보, hint는 힌트입니다.\nThe severity to use when the severity group is absent or its value cannot be interpreted. error (the default) means an error, warning means a warning, info means information, and hint means a hint.\n예 / Example: {\"defaultSeverity\": \"error\"}",
+          "default": "error",
+          "examples": ["error"]
+        },
+        "source": {
+          "type": "string",
+          "description": "Problems 메시지에 표시할 진단 출처 이름입니다. 기본은 taskhub입니다.\nThe diagnostic source name shown in Problems messages. Defaults to taskhub.\n예 / Example: {\"source\": \"firmware-build\"}",
+          "examples": ["firmware-build"]
+        }
+      },
+      "required": ["pattern", "file", "line", "message"],
+      "description": "출력 한 줄의 정규식 캡처를 소스 위치와 메시지에 연결합니다. 그룹 번호는 1부터 시작합니다.\nMaps regular expression captures from one output line to a source location and message. Group numbers start at 1.\n예 / Example: {\"pattern\": \"^(.+):([0-9]+):([0-9]+): (warning|error): (.+)$\", \"file\": 1, \"line\": 2, \"column\": 3, \"severity\": 4, \"message\": 5}",
+      "examples": [
+        {
+          "pattern": "^(.+):([0-9]+):([0-9]+): (warning|error): (.+)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "message": 5
+        }
+      ]
+    },
+    "OutputCapture": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "추출값의 이름입니다. ${build.revision}처럼 참조하며 영문자·밑줄로 시작하고 이후 숫자를 사용할 수 있습니다. output/path/value 등 기존 결과 키와 중복 이름은 사용할 수 없습니다.\nThe name of the extracted value, referenced as ${build.revision}. It must start with an English letter or underscore and may contain digits after that. Names cannot duplicate existing result keys such as output/path/value or other extracted names.\n예 / Example: {\"name\": \"revision\"}",
+          "examples": ["revision"]
+        },
+        "regex": {
+          "type": "string",
+          "description": "전체 문자열 출력에 적용할 정규식 본문입니다. 첫 매치에서 group을 추출합니다. JSON에서는 역슬래시를 두 번 적으며 불일치하면 이 변수는 만들지 않습니다. regex가 있으면 line보다 우선합니다.\nThe regular expression body to apply to the entire string output. Extracts group from the first match. Double backslashes in JSON. If there is no match, the variable is not created. regex takes precedence over line when present.\n예 / Example: {\"regex\": \"^([0-9a-f]+)$\"}",
+          "examples": ["^([0-9a-f]+)$"]
+        },
+        "group": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "regex 매치의 캡처 그룹 번호입니다. 0은 전체 매치입니다. 생략하면 캡처 그룹이 있을 때 1, 없을 때 0을 사용합니다. 없는 그룹 번호이면 값을 만들지 않습니다.\nThe capture group number in the regex match. 0 means the entire match. If omitted, uses 1 when a capture group exists, or 0 otherwise. If the specified group does not exist, no value is created.\n예 / Example: {\"group\": 1}",
+          "default": 1,
+          "examples": [1]
+        },
+        "flags": {
+          "type": "string",
+          "description": "regex의 JavaScript 정규식 플래그입니다. i는 대소문자 무시, m은 여러 줄의 ^/$ 처리입니다. g는 제거하고 첫 매치만 사용합니다.\nJavaScript regular expression flags for regex. i ignores case, and m handles ^/$ across multiple lines. g is removed, and only the first match is used.\n예 / Example: {\"flags\": \"im\"}",
+          "examples": ["im"]
+        },
+        "line": {
+          "type": "integer",
+          "description": "출력에서 선택할 줄 번호입니다. 0부터 시작하며 -1은 마지막 줄입니다. regex가 있으면 무시합니다. regex와 line이 모두 없으면 전체 출력에서 추출합니다.\nThe line number to select from the output. Starts at 0; -1 selects the last line. Ignored when regex is present. If neither regex nor line is set, extracts from the entire output.\n예 / Example: {\"line\": -1}",
+          "examples": [-1]
+        },
+        "trim": {
+          "type": "boolean",
+          "description": "추출한 문자열의 양끝 공백·줄바꿈을 제거할지 정합니다. 기본 false입니다.\nWhether to remove leading and trailing whitespace and line breaks from the extracted string. Defaults to false.\n예 / Example: {\"trim\": true}",
+          "default": false,
+          "examples": [true]
+        }
+      },
+      "required": ["name"],
+      "description": "문자열 결과에서 변수를 추출합니다. regex, line 순으로 선택하며 둘 다 없으면 전체 출력입니다. 불일치하면 해당 변수는 만들지 않습니다.\nExtracts variables from a string result. Uses regex first, then line; if neither is set, uses the entire output. If there is no match, the variable is not created.\n예 / Example: {\"name\": \"revision\", \"regex\": \"^([0-9a-f]+)$\", \"group\": 1, \"trim\": true}",
+      "examples": [{"name": "revision", "regex": "^([0-9a-f]+)$", "group": 1, "trim": true}]
+    },
+    "TaskFields": {
+      "type": "object",
+      "properties": {
         "id": {
           "type": "string",
-          "description": "Unique identifier for the task within the pipeline. Used to reference its output."
+          "description": "같은 액션 안에서 태스크를 구분하는 고유 ID입니다. 다른 태스크에서 ${build.output}처럼 이 ID로 결과를 참조합니다.\nA unique task ID within this action. Other tasks reference its results through this ID, for example ${build.output}.\n예 / Example: {\"id\": \"build\"}",
+          "examples": ["build"]
         },
         "type": {
           "type": "string",
-          "description": "The type of the task to execute.",
-          "enum": ["shell", "command", "fileDialog", "folderDialog", "pathDialog", "unzip", "zip", "stringManipulation", "inputBox", "quickPick", "envPick", "confirm", "writeFile", "appendFile", "browser", "switch"]
+          "description": "실행 종류를 선택합니다. command는 실행 파일·인자, shell은 셸 본문입니다. fileDialog/folderDialog/pathDialog는 경로 선택, inputBox/quickPick/envPick/confirm은 입력, zip/unzip은 압축, stringManipulation은 문자열 처리, writeFile/appendFile은 파일 쓰기, browser는 URL 열기, switch는 분기입니다.\nSelects the task kind. command specifies an executable and arguments; shell specifies shell code. fileDialog/folderDialog/pathDialog select paths; inputBox/quickPick/envPick/confirm collect input; zip/unzip handle archives; stringManipulation transforms strings; writeFile/appendFile write files; browser opens a URL; switch selects a branch.\n예 / Example: {\"type\": \"command\"}",
+          "enum": [
+            "shell",
+            "command",
+            "fileDialog",
+            "folderDialog",
+            "pathDialog",
+            "unzip",
+            "zip",
+            "stringManipulation",
+            "inputBox",
+            "quickPick",
+            "envPick",
+            "confirm",
+            "writeFile",
+            "appendFile",
+            "browser",
+            "switch"
+          ],
+          "examples": ["command"]
         },
         "on": {
           "type": "string",
           "minLength": 1,
-          "description": "For 'switch': value used to choose a case after interpolation, usually '${pick}'. Matching is exact."
+          "description": "switch에서 case를 고를 문자열입니다. 변수 치환 후 cases의 키와 정확히 비교합니다.\nThe string used to select a switch case. After variable substitution, it is compared exactly with the keys in cases.\n예 / Example: {\"on\": \"${mode}\"}",
+          "examples": ["${mode}"]
         },
         "cases": {
           "type": "object",
           "minProperties": 1,
           "maxProperties": 100,
-          "propertyNames": {
-            "not": { "enum": ["__proto__", "constructor", "prototype"] }
-          },
-          "additionalProperties": { "$ref": "#/definitions/SwitchTaskBranch" },
-          "description": "For 'switch': map from an exact resolved 'on' value to a non-interactive task body. If no key matches and defaultCase is omitted, the switch succeeds without running a branch."
+          "propertyNames": {"not": {"enum": ["__proto__", "constructor", "prototype"]}},
+          "additionalProperties": {"$ref": "#/definitions/SwitchTaskBranch"},
+          "description": "switch의 선택값별 태스크 본문입니다. 1–100개 키를 사용하며 command/shell/zip/unzip/stringManipulation/writeFile/appendFile/browser만 지원합니다. id·when·dependsOn 같은 제어 필드는 바깥 switch에 둡니다.\nTask bodies keyed by switch selection values. Use 1–100 keys; supported types are command/shell/zip/unzip/stringManipulation/writeFile/appendFile/browser. Put control fields such as id, when, and dependsOn on the outer switch.\n예 / Example: {\"cases\": {\"debug\": {\"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}}}",
+          "examples": [{"debug": {"type": "command", "command": "node", "args": ["--version"]}}]
         },
         "defaultCase": {
           "$ref": "#/definitions/SwitchTaskBranch",
-          "description": "Optional non-interactive task body run when no case key matches."
+          "description": "switch의 on과 일치하는 case가 없을 때 실행할 본문입니다. 생략하면 일치하지 않은 switch는 실행 없이 성공적으로 끝납니다.\nThe task body to run when no case matches the switch on value. If omitted, an unmatched switch finishes successfully without running a branch.\n예 / Example: {\"defaultCase\": {\"type\": \"command\", \"command\": \"node\", \"args\": [\"--version\"]}}",
+          "examples": [{"type": "command", "command": "node", "args": ["--version"]}]
         },
         "command": {
           "oneOf": [
-            {
-              "type": "string"
-            },
+            {"type": "string", "examples": ["node --version"]},
             {
               "type": "object",
               "properties": {
-                "windows": { "type": "string" },
-                "macos": { "type": "string" },
-                "linux": { "type": "string" }
-              }
+                "windows": {
+                  "type": "string",
+                  "description": "Windows에서 사용할 실행 파일·명령입니다. 다른 OS의 값으로 대체하지 않으므로 실행할 OS의 키를 준비하세요.\nThe executable or command to use on Windows. Values from another OS are not used as a fallback; provide the key for the OS where this will run.\n예 / Example: {\"windows\": \"python\"}",
+                  "examples": ["python"]
+                },
+                "macos": {
+                  "type": "string",
+                  "description": "macOS에서 사용할 실행 파일·명령입니다. 다른 OS의 값으로 대체하지 않으므로 실행할 OS의 키를 준비하세요.\nThe executable or command to use on macOS. Values from another OS are not used as a fallback; provide the key for the OS where this will run.\n예 / Example: {\"macos\": \"python3\"}",
+                  "examples": ["python3"]
+                },
+                "linux": {
+                  "type": "string",
+                  "description": "Linux에서 사용할 실행 파일·명령입니다. 다른 OS의 값으로 대체하지 않으므로 실행할 OS의 키를 준비하세요.\nThe executable or command to use on Linux. Values from another OS are not used as a fallback; provide the key for the OS where this will run.\n예 / Example: {\"linux\": \"python3\"}",
+                  "examples": ["python3"]
+                }
+              },
+              "examples": [{"windows": "python", "macos": "python3", "linux": "python3"}]
             }
           ],
-          "description": "The command to execute. Can be a direct string or an OS-specific object. Required for 'shell' and 'command' types."
+          "description": "command 타입에서는 첫 토큰이 실행 파일이고 나머지 토큰 뒤에 args를 붙입니다. 따옴표로 묶인 공백과 변수 치환 값의 인자 경계를 보존합니다. shell 타입에서는 문자열 본문을 셸이 해석하므로 &&·|·>·환경변수 구문을 사용할 수 있습니다. 동적 경로는 args에 따로 넣으세요. OS별 객체는 현재 OS의 키만 사용합니다. 아래 예제는 node를 실행하고 probe.cjs, --label, two words를 인자 세 개로 전달합니다. shell 예: {\"type\":\"shell\",\"command\":\"node --version && node --version\"}은 첫 실행이 성공하면 두 번째 명령을 실행합니다.\nFor command tasks, the first token is the executable, followed by the remaining tokens and then args. Quoted spaces and argument boundaries in substituted values are preserved. For shell tasks, the shell interprets the code, so &&, |, >, and shell environment-variable syntax are available. Pass dynamic paths separately in args. An OS-specific object uses only the key for the current OS. The example below runs node with three arguments: probe.cjs, --label, and two words. In the inline shell example above, the second command runs only if the first succeeds.\n예 / Example: {\"type\": \"command\", \"command\": \"node probe.cjs\", \"args\": [\"--label\", \"two words\"]}",
+          "examples": ["node"]
         },
         "args": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Arguments for the command."
+          "items": {"type": "string"},
+          "description": "command/shell에 추가할 문자열 인자 배열입니다. 숫자도 \"8080\"처럼 적습니다. [\"--label\", \"two words\"]는 인자 두 개이며 직접 넣은 따옴표는 데이터입니다. 정확한 배열 참조 하나는 여러 인자로 펼칩니다. shell에서는 각 원소를 인용해 본문 맨 뒤에 붙이므로 파이프 앞 명령에 나누어 전달하지 않습니다. Windows 배치 파일은 인자를 다시 해석할 수 있습니다.\nAn array of string arguments appended to command/shell. Write numbers as strings, such as \"8080\". [\"--label\", \"two words\"] supplies two arguments; quote characters entered directly are data. A single exact array reference expands into multiple arguments. For shell tasks, each element is quoted and appended to the end of the code; arguments are not distributed to commands before a pipe. Windows batch files may reinterpret arguments.\n예 / Example: {\"args\": [\"probe.cjs\", \"--label\", \"two words\", \"${mode}\"]}",
+          "examples": [["probe.cjs", "--label", "two words", "${mode}"]]
         },
         "env": {
           "type": "object",
-          "description": "Environment variables to set for the task. Values support interpolation.",
-          "additionalProperties": { "type": "string" }
+          "description": "자식 프로세스가 상속한 환경변수에 추가·덮어쓸 문자열 맵입니다. command/shell과 외부 tool을 쓰는 zip/unzip에 적용하며 값은 변수 치환을 지원합니다. 같은 태스크의 ${env:MODE}는 여기 새로 쓴 값이 아니라 실행 시작 시 환경 스냅샷을 읽습니다.\nA string map added to or overriding the environment inherited by the child process. Applies to command/shell and zip/unzip using an external tool; values support variable substitution. ${env:MODE} in the same task reads the environment snapshot from the start of execution, not the value assigned here.\n예 / Example: {\"env\": {\"MODE\": \"release\"}}",
+          "additionalProperties": {"type": "string"},
+          "examples": [{"MODE": "release"}]
         },
         "cwd": {
           "type": "string",
-          "description": "Working directory for command, shell, dynamic quickPick, browser, zip, and unzip tasks. Supports interpolation. Relative cwd resolves against the action workspace; without a workspace, an absolute cwd is required. Defaults to the action workspace, or the extension host working directory for command/archive tasks without a workspace."
+          "description": "작업 디렉터리입니다. 상대 경로는 액션 워크스페이스 기준이며 생략하면 워크스페이스를 사용합니다. command/shell, 동적 quickPick, browser, zip/unzip에 적용합니다. 폴더를 만들지는 않으며 워크스페이스가 없으면 절대 경로를 쓰세요.\nThe working directory. Relative paths use the action workspace; the default is the workspace. Applies to command/shell, dynamic quickPick, browser, and zip/unzip. It does not create directories. Use an absolute path when there is no workspace.\n예 / Example: {\"cwd\": \"${workspaceFolder}\"}",
+          "examples": ["${workspaceFolder}"]
         },
         "revealTerminal": {
           "type": "string",
           "enum": ["always", "silent", "never"],
-          "description": "Controls terminal visibility for 'shell' type tasks."
+          "description": "command/shell의 일반 실행 터미널 표시 방식입니다. always는 표시(기본), silent는 VS Code의 조건부 표시, never는 자동 표시하지 않습니다. 출력 캡처·archive 작업의 출력 표시를 정하는 옵션은 아닙니다.\nControls the regular execution terminal for command/shell. always shows it (default), silent lets VS Code reveal it conditionally, and never prevents automatic reveal. This does not control captured output or archive output display.\n예 / Example: {\"revealTerminal\": \"always\"}",
+          "examples": ["always"]
         },
         "url": {
           "type": "string",
           "minLength": 1,
-          "description": "For 'browser': HTTP(S) URL, file URL, or local path to open. Supports variable interpolation. Relative paths resolve against 'cwd', then the action workspace."
+          "description": "browser에서 열 HTTP(S) URL, file URL 또는 로컬 경로입니다. 변수 치환을 지원하며 상대 경로는 cwd, 없으면 액션 워크스페이스 기준입니다. Remote 환경에서는 로컬 파일 대신 HTTP 서버 주소를 사용합니다.\nAn HTTP(S) URL, file URL, or local path to open with browser. Supports variable substitution. Relative paths use cwd, or the action workspace if cwd is absent. In Remote environments, use an HTTP server address for local files.\n예 / Example: {\"url\": \"build/report.html\"}",
+          "examples": ["build/report.html"]
         },
         "target": {
           "type": "string",
           "enum": ["integrated", "default"],
           "default": "integrated",
-          "description": "For 'browser': open inside VS Code ('integrated', default) or in the OS default browser ('default'). Integrated mode never silently falls back to the OS browser."
+          "description": "browser의 열기 대상입니다. integrated(기본)는 VS Code 내부, default는 OS 기본 브라우저입니다. 내부에서 지원되지 않는 로컬 파일을 default로 몰래 바꾸어 열지는 않습니다.\nWhere browser opens the URL: integrated (default) opens inside VS Code; default uses the OS default browser. A local file unsupported by the internal browser is not silently opened with default instead.\n예 / Example: {\"target\": \"integrated\"}",
+          "examples": ["integrated"]
         },
         "mode": {
           "oneOf": [
-            {
-              "type": "string",
-              "enum": ["file", "folder", "both"]
-            },
-            {
-              "type": "string",
-              "pattern": "^\\$\\{[^}]+\\}$"
-            }
+            {"type": "string", "enum": ["file", "folder", "both"], "examples": ["file"]},
+            {"type": "string", "pattern": "^\\$\\{[^}]+\\}$", "examples": ["${kind}"]}
           ],
-          "description": "For 'pathDialog': what may be selected. Use 'file', 'folder', or 'both', or an exact variable reference such as '${kind}' that resolves to one of them. On Windows/Linux, 'both' first asks whether to open a file or folder dialog because the native picker cannot select both kinds at once."
+          "description": "pathDialog에서 file은 파일, folder는 폴더, both는 둘 다 선택합니다. 정확한 변수 참조로도 지정할 수 있습니다. Windows/Linux에서 both는 종류를 먼저 고릅니다. options의 선택 종류보다 mode가 우선합니다.\nFor pathDialog, file selects files, folder selects folders, and both allows either. An exact variable reference is also accepted. On Windows/Linux, both first asks which kind to select. mode overrides the selection kinds in options.\n예 / Example: {\"mode\": \"both\"}",
+          "examples": ["both"]
         },
         "options": {
           "type": "object",
-          "description": "Options for 'fileDialog', 'folderDialog', or 'pathDialog', based on VS Code's OpenDialogOptions. Keys not listed here are passed through to VS Code unchanged. pathDialog.mode overrides canSelectFiles/canSelectFolders.",
+          "description": "fileDialog/folderDialog/pathDialog의 파일·폴더 선택 대화상자 옵션입니다. pathDialog는 별도 mode로 선택 종류를 지정합니다.\nFile/folder picker options for fileDialog/folderDialog/pathDialog. pathDialog uses its separate mode field to choose what can be selected.\n예 / Example: {\"options\": {\"openLabel\": \"펌웨어 선택\", \"filters\": {\"Firmware\": [\"elf\", \"bin\"]}, \"canSelectMany\": false}}",
           "properties": {
             "canSelectMany": {
               "type": "boolean",
               "default": false,
-              "description": "Allow picking several files/folders. Everything picked is exposed as ${taskId.paths} (array of absolute paths), ${taskId.names} (array of base names) and ${taskId.count}. The single-value references (${taskId.path}, .dir, .name, ...) keep pointing at the first item. In an 'args' array, an element that is exactly \"${taskId.paths}\" expands into one argument per item; anywhere else the array is joined with spaces."
+              "description": "여러 파일·폴더를 선택하도록 허용합니다. 선택 결과 전체는 ${files.paths}/${files.names}/${files.count}이고 단일 path 등은 첫 항목입니다.\nAllows selecting multiple files/folders. The full selection is available as ${files.paths}/${files.names}/${files.count}; singular fields such as path refer to the first item.\n예 / Example: {\"canSelectMany\": true}",
+              "examples": [true]
             },
             "openLabel": {
               "type": "string",
-              "description": "Label of the confirmation button, e.g. \"Select firmware\"."
+              "description": "파일·폴더 선택 대화상자의 확인 버튼 이름입니다.\nThe confirmation button label in the file/folder picker.\n예 / Example: {\"openLabel\": \"펌웨어 선택\"}",
+              "examples": ["펌웨어 선택"]
             },
             "title": {
               "type": "string",
-              "description": "Dialog title."
+              "description": "파일·폴더 선택 대화상자의 제목입니다. 운영체제에 따라 표시 여부가 다를 수 있습니다.\nThe file/folder picker title. Whether it is displayed may depend on the operating system.\n예 / Example: {\"title\": \"분석할 펌웨어\"}",
+              "examples": ["분석할 펌웨어"]
             },
             "defaultUri": {
               "type": "string",
-              "description": "Where the dialog opens, as a path or URI. When omitted TaskHub reopens the location this task last used."
+              "description": "대화상자를 처음 열 경로 또는 URI입니다. 생략하면 TaskHub의 위치 기억 설정에 따라 이전 위치를 사용합니다. 명시한 위치가 우선합니다.\nThe path or URI at which the dialog initially opens. If omitted, TaskHub may use the previous location according to its location-memory setting. An explicit location takes priority.\n예 / Example: {\"defaultUri\": \"/work/firmware\"}",
+              "examples": ["/work/firmware"]
             },
             "filters": {
               "type": "object",
-              "description": "Extension filters, e.g. { \"Firmware\": [\"elf\", \"bin\", \"hex\"] }. Ignored by folderDialog.",
-              "additionalProperties": {
-                "type": "array",
-                "items": { "type": "string" }
-              }
+              "description": "파일 확장자 필터입니다. 키는 표시 이름, 값은 점을 뺀 확장자 배열입니다. 폴더 선택에는 적용하지 않습니다.\nFile-extension filters. Keys are display names; values are arrays of extensions without dots. Does not apply to folder selection.\n예 / Example: {\"filters\": {\"Firmware\": [\"elf\", \"bin\", \"hex\"]}}",
+              "additionalProperties": {"type": "array", "items": {"type": "string"}},
+              "examples": [{"Firmware": ["elf", "bin", "hex"]}]
             },
             "canSelectFiles": {
               "type": "boolean",
-              "description": "Whether files can be picked. Leave unset: fileDialog already allows files, folderDialog forces this to false, and pathDialog derives it from mode."
+              "description": "파일 선택 허용 여부입니다. fileDialog에서는 보통 생략하며 folderDialog는 false로, pathDialog는 mode에 따라 덮어씁니다.\nWhether files can be selected. Usually omitted for fileDialog; folderDialog overrides it to false, and pathDialog overrides it according to mode.\n예 / Example: {\"canSelectFiles\": true}",
+              "examples": [true]
             },
             "canSelectFolders": {
               "type": "boolean",
-              "description": "Whether folders can be picked. Leave unset and use folderDialog, or pathDialog with a mode that can select folders."
+              "description": "폴더 선택 허용 여부입니다. folderDialog는 true로, pathDialog는 mode에 따라 덮어씁니다. 종류를 바꾸려면 해당 태스크 타입 또는 mode를 사용하세요.\nWhether folders can be selected. folderDialog overrides it to true, and pathDialog overrides it according to mode. Use the appropriate task type or mode to change the selection kind.\n예 / Example: {\"canSelectFolders\": false}",
+              "examples": [false]
             }
-          }
+          },
+          "examples": [{"openLabel": "펌웨어 선택", "filters": {"Firmware": ["elf", "bin"]}, "canSelectMany": false}]
         },
         "prompt": {
           "type": "string",
-          "description": "The prompt text for 'inputBox' type."
+          "description": "inputBox 위에 표시할 입력 안내 문구입니다. 변수 치환을 지원합니다.\nInstructions displayed above an inputBox. Supports variable substitution.\n예 / Example: {\"prompt\": \"릴리스 태그를 입력하세요\"}",
+          "examples": ["릴리스 태그를 입력하세요"]
         },
         "value": {
           "type": "string",
-          "description": "The default value for 'inputBox' type."
+          "description": "inputBox의 초기 입력값입니다. 변수 치환 후 extractPattern이 있으면 그 정규식으로 초기값을 추출합니다. 최종 입력은 ${tag.value} 또는 ${tag}로 참조합니다.\nThe initial inputBox value. After variable substitution, extractPattern, if provided, extracts the initial value using its regular expression. Reference the final input as ${tag.value} or ${tag}.\n예 / Example: {\"value\": \"v1.0.0\"}",
+          "examples": ["v1.0.0"]
         },
         "placeHolder": {
           "type": "string",
-          "description": "The placeholder text for 'inputBox' or 'quickPick' type."
+          "description": "inputBox·quickPick·envPick에 표시할 안내 문구입니다. 변수 치환을 지원하며 선택 항목의 실제 값은 바꾸지 않습니다.\nGuidance displayed in inputBox, quickPick, or envPick. Supports variable substitution without changing the actual choice values.\n예 / Example: {\"placeHolder\": \"빌드 모드를 선택하세요\"}",
+          "examples": ["빌드 모드를 선택하세요"]
         },
         "password": {
           "type": "boolean",
-          "description": "If true, the input box will be masked (for 'inputBox' type).",
-          "default": false
+          "description": "inputBox 입력을 마스킹합니다. 비밀번호와 그 파생값은 일반 History·로그 등에 보존하지 않으며, 파생 출력의 파일 저장에는 allowSecretContent가 필요합니다. 기본은 false입니다.\nMasks inputBox input. Passwords and derived values are not retained in ordinary History or logs. Saving derived output to a file requires allowSecretContent. Defaults to false.\n예 / Example: {\"password\": true}",
+          "default": false,
+          "examples": [true]
         },
         "prefix": {
           "type": "string",
-          "description": "Text to prepend to the user input (for 'inputBox' type). The final value will be: prefix + userInput + suffix"
+          "description": "inputBox에서 사용자가 입력한 값 앞에 붙일 문자열입니다. 초기 화면 값에는 붙이지 않고 최종 결과에 적용합니다. 변수 치환을 지원합니다.\nA string prepended to the inputBox result. Applies to the final result, not the initial displayed value. Supports variable substitution.\n예 / Example: {\"prefix\": \"release/\"}",
+          "examples": ["release/"]
         },
         "suffix": {
           "type": "string",
-          "description": "Text to append to the user input (for 'inputBox' type). The final value will be: prefix + userInput + suffix"
+          "description": "inputBox에서 사용자가 입력한 값 뒤에 붙일 문자열입니다. 최종 결과에 적용하며 변수 치환을 지원합니다.\nA string appended to the final inputBox result. Supports variable substitution.\n예 / Example: {\"suffix\": \".bin\"}",
+          "examples": [".bin"]
         },
         "validatePattern": {
           "type": "string",
-          "description": "For 'inputBox': a regex the user input must match. Non-matching text is rejected live with 'validateMessage'. An invalid pattern is ignored. e.g. '^[A-Z][A-Z0-9]+-\\\\d+$' for a Jira ticket key."
+          "description": "inputBox 입력이 만족해야 할 정규식 본문입니다. 입력 중 검사하며 불일치하면 validateMessage를 표시합니다. 전체 문자열을 검사하려면 ^와 $를 쓰세요. 잘못된 정규식은 검사를 적용하지 않습니다.\nA regular-expression body that inputBox input must match. Checked while typing; a mismatch displays validateMessage. Use ^ and $ to check the entire string. An invalid regular expression disables this validation.\n예 / Example: {\"validatePattern\": \"^[A-Z]+-[0-9]+$\"}",
+          "examples": ["^[A-Z]+-[0-9]+$"]
         },
         "validateMessage": {
           "type": "string",
-          "description": "For 'inputBox': message shown when the value fails 'validatePattern'. Defaults to a generic 'invalid format' message."
+          "description": "inputBox 입력이 validatePattern과 맞지 않을 때 표시할 문구입니다. 생략하면 기본 오류 안내를 사용합니다.\nThe message displayed when inputBox input does not match validatePattern. If omitted, the default validation error is used.\n예 / Example: {\"validateMessage\": \"PROJ-123 형식으로 입력하세요\"}",
+          "examples": ["PROJ-123 형식으로 입력하세요"]
         },
         "extractPattern": {
           "type": "string",
-          "description": "For 'inputBox': a regex applied to the interpolated 'value' to derive the prefilled default. Uses capture group 1 if present, else the whole match; no match prefills empty. e.g. extract a Jira key from a branch name with '[A-Z][A-Z0-9]+-\\\\d+'."
+          "description": "inputBox의 보간된 value에서 초기값을 추출할 정규식입니다. 첫 캡처 그룹이 있으면 그 값, 없으면 전체 매치를 씁니다. 불일치하거나 정규식이 잘못되면 초기값을 비웁니다.\nA regular expression that extracts the initial inputBox value from the interpolated value field. Uses the first capture group if present, otherwise the whole match. A mismatch or invalid expression leaves the initial value empty.\n예 / Example: {\"extractPattern\": \"([A-Z]+-[0-9]+)\"}",
+          "examples": ["([A-Z]+-[0-9]+)"]
         },
         "items": {
           "oneOf": [
-            {
-              "type": "array",
-              "minItems": 1,
-              "items": { "type": "string" },
-              "description": "Array of simple string items for 'quickPick' type."
-            },
+            {"type": "array", "minItems": 1, "items": {"type": "string"}, "examples": [["debug", "release"]]},
             {
               "type": "array",
               "minItems": 1,
@@ -245,567 +959,396 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128,
-                    "description": "Optional stable identity used by rememberLastSelection and History replay. Unlike label it should not change when display text changes, and it disambiguates duplicate labels."
+                    "description": "선택 기억·History 재실행용 고정 ID입니다. 표시 문구 label이 바뀌어도 동일 항목을 식별하며 중복 label을 구분합니다.\nA stable ID for remembering selections and replaying History. Identifies the same item after its label changes and distinguishes duplicate labels.\n예 / Example: {\"id\": \"debug\"}",
+                    "examples": ["debug"]
                   },
                   "label": {
                     "type": "string",
-                    "description": "The main text to display."
+                    "description": "QuickPick에 표시할 항목 이름입니다. value를 생략하면 이 문자열이 실제 선택값도 됩니다.\nThe item name displayed in QuickPick. If value is omitted, this string is also the actual selected value.\n예 / Example: {\"label\": \"디버그 빌드\"}",
+                    "examples": ["디버그 빌드"]
                   },
                   "description": {
                     "type": "string",
-                    "description": "Additional description text."
+                    "description": "QuickPick 항목 옆의 짧은 보조 설명입니다. 실제 실행 인자는 value 또는 args에 적습니다.\nA short secondary description beside the QuickPick item. Put actual execution arguments in value or args.\n예 / Example: {\"description\": \"디버그 심볼 포함\"}",
+                    "examples": ["디버그 심볼 포함"]
                   },
                   "detail": {
                     "type": "string",
-                    "description": "Detailed information about this option."
+                    "description": "QuickPick 항목에 표시할 자세한 보조 설명입니다. 실행값에는 자동으로 포함하지 않습니다.\nA detailed secondary description displayed for the QuickPick item. It is not automatically included in execution values.\n예 / Example: {\"detail\": \"개발 보드에서 사용할 설정\"}",
+                    "examples": ["개발 보드에서 사용할 설정"]
                   },
                   "value": {
-                    "oneOf": [
-                      { "type": "string" },
-                      { "type": "array", "items": { "type": "string" } }
-                    ],
-                    "description": "Value substituted for '${taskId.value}' when this item is picked. Defaults to the label. An array expands into several arguments in 'args' elements and 'command' tokens (e.g. ['--option','b']); an empty array adds no argument at all."
+                    "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                    "description": "${pick.value} 또는 ${pick}로 참조할 선택값입니다. 생략하면 label을 사용합니다. \"--slot 0\"은 인자 하나, [\"--slot\", \"0\"]은 args에서 두 인자, []는 추가 인자 없음입니다.\nThe selected value referenced as ${pick.value} or ${pick}. Defaults to label if omitted. \"--slot 0\" is one argument; [\"--slot\", \"0\"] becomes two arguments in args; [] adds no arguments.\n예 / Example: {\"value\": [\"--slot\", \"0\"]}",
+                    "examples": [["--slot", "0"]]
                   },
                   "args": {
-                    "oneOf": [
-                      { "type": "string" },
-                      { "type": "array", "items": { "type": "string" } }
-                    ],
-                    "description": "Command arguments exposed as '${taskId.args}'. Use one string for a single argument or an array for several. This is independent of 'value', so one selection can provide a semantic value such as 'file' for pathDialog.mode and a separate argv mapping such as '--input-file'. If any static item declares 'args', the result key always exists: selections without a mapping and custom input produce an empty array. Multiple selections concatenate their mapped arguments in selection order."
+                    "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                    "description": "value와 별도로 ${pick.args}에 제공할 인자입니다. 문자열은 한 인자, 배열은 여러 인자입니다. 정적 항목 중 하나라도 args를 선언하면 매핑 없는 선택·직접 입력은 빈 배열을 반환합니다. 다중 선택은 선택된 인자를 이어 붙입니다.\nArguments exposed as ${pick.args}, separately from value. A string is one argument; an array is multiple arguments. If any static item declares args, unmapped selections and custom input return an empty array. Multiple selection concatenates the selected arguments.\n예 / Example: {\"args\": [\"--input-file\"]}",
+                    "examples": [["--input-file"]]
                   }
                 },
                 "required": ["label"]
               },
-              "description": "Array of quick pick items with labels and optional descriptions."
+              "examples": [[{"id": "release", "label": "릴리스", "value": ["--mode", "release"]}]]
             },
             {
               "type": "object",
               "minProperties": 1,
-              "propertyNames": { "minLength": 1 },
+              "propertyNames": {"minLength": 1},
               "additionalProperties": {
                 "oneOf": [
-                  { "type": "null" },
-                  { "type": "string" },
-                  { "type": "array", "items": { "type": "string" } },
+                  {"type": "null", "examples": [null]},
+                  {"type": "string", "examples": ["--slot 0"]},
+                  {"type": "array", "items": {"type": "string"}, "examples": [["--slot", "0"]]},
                   {
                     "type": "object",
                     "properties": {
-                      "id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Optional stable identity for remembered selections and History replay." },
-                      "description": { "type": "string", "description": "Additional description text." },
-                      "detail": { "type": "string", "description": "Detailed information about this option." },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "선택 기억·History 재실행용 고정 ID입니다. 표시 문구 label이 바뀌어도 동일 항목을 식별하며 중복 label을 구분합니다.\nA stable ID for remembering selections and replaying History. Identifies the same item after its label changes and distinguishes duplicate labels.\n예 / Example: {\"id\": \"debug\"}",
+                        "examples": ["debug"]
+                      },
+                      "description": {
+                        "type": "string",
+                        "description": "QuickPick 항목 옆의 짧은 보조 설명입니다. 실제 실행 인자는 value 또는 args에 적습니다.\nA short secondary description beside the QuickPick item. Put actual execution arguments in value or args.\n예 / Example: {\"description\": \"디버그 심볼 포함\"}",
+                        "examples": ["디버그 심볼 포함"]
+                      },
+                      "detail": {
+                        "type": "string",
+                        "description": "QuickPick 항목에 표시할 자세한 보조 설명입니다. 실행값에는 자동으로 포함하지 않습니다.\nA detailed secondary description displayed for the QuickPick item. It is not automatically included in execution values.\n예 / Example: {\"detail\": \"개발 보드에서 사용할 설정\"}",
+                        "examples": ["개발 보드에서 사용할 설정"]
+                      },
                       "value": {
-                        "oneOf": [
-                          { "type": "string" },
-                          { "type": "array", "items": { "type": "string" } }
-                        ],
-                        "description": "Semantic or command value for this label. Defaults to the label; an array expands into multiple argv entries."
+                        "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                        "description": "${pick.value} 또는 ${pick}로 참조할 선택값입니다. 생략하면 label을 사용합니다. \"--slot 0\"은 인자 하나, [\"--slot\", \"0\"]은 args에서 두 인자, []는 추가 인자 없음입니다.\nThe selected value referenced as ${pick.value} or ${pick}. Defaults to label if omitted. \"--slot 0\" is one argument; [\"--slot\", \"0\"] becomes two arguments in args; [] adds no arguments.\n예 / Example: {\"value\": [\"--slot\", \"0\"]}",
+                        "examples": [["--slot", "0"]]
                       },
                       "args": {
-                        "oneOf": [
-                          { "type": "string" },
-                          { "type": "array", "items": { "type": "string" } }
-                        ],
-                        "description": "Separate command arguments exposed through '${taskId.args}'. Use a string for one argument or an array for several."
+                        "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                        "description": "value와 별도로 ${pick.args}에 제공할 인자입니다. 문자열은 한 인자, 배열은 여러 인자입니다. 정적 항목 중 하나라도 args를 선언하면 매핑 없는 선택·직접 입력은 빈 배열을 반환합니다. 다중 선택은 선택된 인자를 이어 붙입니다.\nArguments exposed as ${pick.args}, separately from value. A string is one argument; an array is multiple arguments. If any static item declares args, unmapped selections and custom input return an empty array. Multiple selection concatenates the selected arguments.\n예 / Example: {\"args\": [\"--input-file\"]}",
+                        "examples": [["--input-file"]]
                       }
                     },
-                    "additionalProperties": false
+                    "additionalProperties": false,
+                    "examples": [{"id": "slot0", "value": ["--slot", "0"]}]
                   }
                 ]
               },
-              "description": "Compact label-keyed quickPick items. Each property name is the displayed label. A null value keeps label=value, a string/string-array maps value, and an object configures id, description, detail, value, and args. JavaScript enumerates integer-like keys before other keys in ascending numeric order, so use the array form for numeric labels when authored display order matters, when labels repeat, or whenever ordering must be controlled explicitly."
+              "examples": [{"디버그": ["--mode", "debug"], "추가 옵션 없음": []}]
             }
           ],
-          "description": "Items to select from (for 'quickPick' type), either an array or a compact object keyed by display label."
+          "description": "quickPick의 선택 항목입니다. 문자열은 표시명과 값이 같고, 객체는 label과 value를 분리합니다. value 배열은 args에서 여러 인자로 펼쳐집니다. label을 키로 쓰는 객체 형식도 지원합니다. itemsFromCommand가 있으면 이 목록은 사용하지 않습니다.\nThe quickPick choices. Strings use the same text for label and value; objects can separate label from value. A value array expands into multiple arguments in args. An object keyed by labels is also supported. This list is ignored when itemsFromCommand is set.\n예 / Example: {\"items\": [{\"id\": \"debug\", \"label\": \"디버그\", \"value\": [\"--mode\", \"debug\"]}, {\"id\": \"none\", \"label\": \"추가 옵션 없음\", \"value\": []}]}",
+          "examples": [
+            [
+              {"id": "debug", "label": "디버그", "value": ["--mode", "debug"]},
+              {"id": "none", "label": "추가 옵션 없음", "value": []}
+            ]
+          ]
         },
         "canPickMany": {
           "type": "boolean",
-          "description": "If true, allows multiple selection (for 'quickPick' type). Results include 'value' (first selection), 'label' / 'labels', lossless 'labelList', 'values' (comma-separated), 'valueList' (array), task-level mapped 'args' (flattened array when enabled), and 'custom' (false for multi-select).",
-          "default": false
+          "description": "quickPick에서 여러 항목을 선택하게 합니다. 기본은 false입니다. 여러 값은 ${pick.valueList}, 별도 매핑 인자는 ${pick.args}로 참조합니다. allowCustom: true와 함께 사용할 수 없습니다.\nAllows multiple quickPick selections. Defaults to false. Reference multiple values as ${pick.valueList}, and separately mapped arguments as ${pick.args}. Cannot be combined with allowCustom: true.\n예 / Example: {\"canPickMany\": true}",
+          "default": false,
+          "examples": [true]
         },
         "default": {
           "oneOf": [
-            { "type": "string", "minLength": 1 },
-            { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+            {"type": "string", "minLength": 1},
+            {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1}
           ],
-          "description": "For 'quickPick': label to activate initially, or labels to preselect when canPickMany is true. Explicit default takes precedence over remembered selection. Supports variable interpolation."
+          "description": "quickPick에서 처음 활성화할 label입니다. 다중 선택(canPickMany: true)이면 label 배열을 사용합니다. id나 value가 아닌 표시 label이며, 선택 기억보다 우선합니다. 변수 치환을 지원합니다.\nThe label initially active in quickPick. For multiple selection (canPickMany: true), use an array of labels. Uses display labels, not IDs or values, and takes priority over remembered selections. Supports variable substitution.\n예 / Example: {\"default\": \"디버그\"}",
+          "examples": ["디버그"]
         },
         "allowCustom": {
           "type": "boolean",
-          "description": "For single-select 'quickPick': allow a non-empty value not present in items to be typed and returned directly. Cannot be combined with canPickMany.",
-          "default": false
+          "description": "단일 quickPick에서 목록에 없는 문자열을 직접 입력할 수 있게 합니다. 기본은 false이며 canPickMany: true와 함께 사용할 수 없습니다.\nAllows a single-selection quickPick to accept text not present in the list. Defaults to false and cannot be combined with canPickMany: true.\n예 / Example: {\"allowCustom\": true}",
+          "default": false,
+          "examples": [true]
         },
         "rememberLastSelection": {
           "type": "boolean",
-          "description": "For 'quickPick': remember the selected item id when available (otherwise its label) and whether a single value was custom per workspace, action, and task, then restore it on the next normal run. An explicit default takes precedence. Selections derived from sensitive runtime context are not stored.",
-          "default": false
+          "description": "quickPick의 마지막 선택을 워크스페이스·액션·태스크별로 기억합니다. 항목의 id가 있으면 id를 사용하고 없으면 label을 사용합니다. 명시적 default가 우선하며 민감 문맥에서 파생된 선택은 저장하지 않습니다.\nRemembers the last quickPick selection per workspace, action, and task. Uses the item id if present, otherwise its label. An explicit default takes priority. Selections derived from sensitive context are not stored.\n예 / Example: {\"rememberLastSelection\": true}",
+          "default": false,
+          "examples": [true]
         },
         "itemsFromCommand": {
           "oneOf": [
-            { "type": "string" },
+            {"type": "string", "examples": ["git branch --format=\"%(refname:short)\""]},
             {
               "type": "object",
               "properties": {
-                "windows": { "type": "string" },
-                "macos": { "type": "string" },
-                "linux": { "type": "string" }
-              }
+                "windows": {
+                  "type": "string",
+                  "description": "Windows에서 사용할 동적 목록 셸 명령입니다. 다른 OS의 값으로 대체하지 않으므로 실행할 OS의 키를 준비하세요.\nThe shell command for the dynamic list to use on Windows. Values from another OS are not used as a fallback; provide the key for the OS where this will run.\n예 / Example: {\"windows\": \"git branch --format=\\\"%(refname:short)\\\"\"}",
+                  "examples": ["git branch --format=\"%(refname:short)\""]
+                },
+                "macos": {
+                  "type": "string",
+                  "description": "macOS에서 사용할 동적 목록 셸 명령입니다. 다른 OS의 값으로 대체하지 않으므로 실행할 OS의 키를 준비하세요.\nThe shell command for the dynamic list to use on macOS. Values from another OS are not used as a fallback; provide the key for the OS where this will run.\n예 / Example: {\"macos\": \"git branch --format=\\\"%(refname:short)\\\"\"}",
+                  "examples": ["git branch --format=\"%(refname:short)\""]
+                },
+                "linux": {
+                  "type": "string",
+                  "description": "Linux에서 사용할 동적 목록 셸 명령입니다. 다른 OS의 값으로 대체하지 않으므로 실행할 OS의 키를 준비하세요.\nThe shell command for the dynamic list to use on Linux. Values from another OS are not used as a fallback; provide the key for the OS where this will run.\n예 / Example: {\"linux\": \"git branch --format=\\\"%(refname:short)\\\"\"}",
+                  "examples": ["git branch --format=\"%(refname:short)\""]
+                }
+              },
+              "examples": [
+                {
+                  "windows": "git branch --format=\"%(refname:short)\"",
+                  "macos": "git branch --format=\"%(refname:short)\"",
+                  "linux": "git branch --format=\"%(refname:short)\""
+                }
+              ]
             }
           ],
-          "description": "For 'quickPick': a shell command whose stdout becomes the pick list. By default each non-empty trimmed line is one label/value; set itemsFromCommandFormat to 'jsonl' for structured items. Runs in 'cwd' (or the workspace folder) via the login shell. Supports interpolation and the OS-specific object form. When set, 'items' is ignored."
+          "description": "quickPick 목록을 만드는 셸 명령입니다. 기본은 stdout의 비어 있지 않은 줄 하나당 항목 하나이며, 설정하면 items를 대신합니다. cwd와 현재 OS의 명령을 사용합니다. 구조화된 항목은 itemsFromCommandFormat: \"jsonl\"을 지정하세요.\nA shell command that generates the quickPick choices, replacing items when set. By default, each nonempty stdout line becomes one choice. Uses cwd and the command for the current OS. Set itemsFromCommandFormat: \"jsonl\" for structured choices.\n예 / Example: {\"itemsFromCommand\": \"git branch --format=\\\"%(refname:short)\\\"\"}",
+          "examples": ["git branch --format=\"%(refname:short)\""]
         },
         "itemsFromCommandFormat": {
           "type": "string",
           "enum": ["lines", "jsonl"],
           "default": "lines",
-          "description": "How to read itemsFromCommand stdout. 'lines' keeps the existing behavior: each non-empty trimmed line is both label and value. 'jsonl' parses each line as an object with label and optional id, description, detail, value (string or string array), and args (one string or a string array). JSONL QuickPick results always expose '${taskId.args}'; an item without args produces an empty array."
+          "description": "동적 quickPick stdout 형식입니다. lines(기본)는 한 줄을 label/value로 사용합니다. jsonl은 줄마다 label과 선택적 id·description·detail·value·args가 있는 JSON 객체를 읽습니다. args는 문자열 한 개 또는 문자열 배열이며 선택 결과의 ${taskId.args}로 전달됩니다.\nThe stdout format for a dynamic quickPick. lines (default) uses each line as its label/value. jsonl reads one JSON object per line with label and optional id, description, detail, value, and args. args is a single string or an array of strings and is exposed in the selection result as ${taskId.args}.\n예 / Example: {\"itemsFromCommandFormat\": \"jsonl\"}",
+          "examples": ["jsonl"]
         },
         "itemsExclude": {
-          "oneOf": [
-            { "type": "string" },
-            { "type": "array", "items": { "type": "string" } }
-          ],
-          "description": "For 'quickPick' with 'itemsFromCommand': exact line(s) to drop from line output (e.g. 'origin/HEAD'). In jsonl mode, an item's exact id, label, or raw JSON line can be excluded. Ignored when 'itemsFromCommand' is not set."
+          "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+          "description": "itemsFromCommand 결과에서 제외할 문자열 또는 배열입니다. lines에서는 줄의 정확한 값, jsonl에서는 id·label·원문 줄의 정확한 값으로 비교합니다. 정적 items에는 적용하지 않습니다. 제외 문자열과 stdout의 각 줄은 앞뒤 공백을 제거하며, JSONL 객체의 id·label은 원래 값과 비교합니다.\nA string or array excluded from itemsFromCommand results. Matches exact line values for lines, or exact id, label, or raw line values for jsonl. Does not apply to static items. Exclusion strings and each stdout line are trimmed; JSONL object id and label fields are compared using their original values.\n예 / Example: {\"itemsExclude\": [\"origin/HEAD\"]}",
+          "examples": [["origin/HEAD"]]
         },
         "forEach": {
           "oneOf": [
-            {
-              "type": "string",
-              "pattern": "^\\$\\{[^}]+\\}$",
-              "description": "An exact variable reference that resolves to an array, such as '${files.paths}' or '${pick.valueList}'."
-            },
-            {
-              "type": "array",
-              "items": { "type": "string" },
-              "minItems": 1,
-              "maxItems": 1000,
-              "description": "A fixed list of values to iterate over. Entries support variable interpolation."
-            }
+            {"type": "string", "pattern": "^\\$\\{[^}]+\\}$"},
+            {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 1000}
           ],
-          "description": "Run this non-interactive task once per item, sequentially. Inside the task use '${each}' or '${each.value}', plus '${each.index}' (0-based), '${each.number}' (1-based), and '${each.count}'. Dynamic lists are limited to 1000 items; accumulated results use the action result-size limit."
+          "description": "command/shell/zip/unzip/stringManipulation/writeFile/appendFile을 배열 항목마다 순차 실행합니다. 정적 배열 또는 정확한 배열 참조 하나를 쓰며 최대 1000개입니다. 현재 값은 ${each}, 순번은 ${each.number}(1부터)입니다. 입력·browser·switch 및 isOneShot과 함께 사용하지 않습니다.\nRuns command/shell/zip/unzip/stringManipulation/writeFile/appendFile sequentially for each array item. Use a static array or a single exact array reference, up to 1000 items. ${each} is the current value and ${each.number} is its 1-based position. Do not combine with input tasks, browser, switch, or isOneShot.\n예 / Example: {\"forEach\": \"${files.paths}\"}",
+          "examples": ["${files.paths}"]
         },
         "message": {
           "type": "string",
-          "description": "The confirmation message to display (for 'confirm' type). Supports variable interpolation."
+          "description": "confirm에서 표시할 확인 문구입니다. 변수 치환을 지원하며 생략하면 기본 확인 질문을 표시합니다.\nThe confirmation message for confirm. Supports variable substitution. If omitted, a default confirmation question is shown.\n예 / Example: {\"message\": \"선택한 파일을 처리할까요?\"}",
+          "examples": ["선택한 파일을 처리할까요?"]
         },
         "confirmLabel": {
           "type": "string",
-          "description": "Label for the confirm button (for 'confirm' type). Defaults to 'Yes'."
+          "description": "confirm의 진행 버튼 이름입니다. 기본은 Yes이며 이 버튼을 누르면 confirmed 결과가 문자열 \"true\"가 됩니다.\nThe proceed button label for confirm. Defaults to Yes; choosing this button sets the confirmed result to the string \"true\".\n예 / Example: {\"confirmLabel\": \"진행\"}",
+          "examples": ["진행"]
         },
         "cancelLabel": {
           "type": "string",
-          "description": "Label for the cancel button (for 'confirm' type). Defaults to 'No'."
+          "description": "confirm의 취소 버튼 이름입니다. 기본은 No이며 이 버튼이나 닫기를 누르면 입력 취소로 처리합니다.\nThe cancel button label for confirm. Defaults to No. Choosing it or closing the dialog is treated as input cancellation.\n예 / Example: {\"cancelLabel\": \"취소\"}",
+          "examples": ["취소"]
         },
         "tool": {
           "oneOf": [
-            {
-              "type": "string",
-              "description": "A direct path to the tool executable."
-            },
+            {"type": "string", "examples": ["7z"]},
             {
               "type": "object",
-              "description": "OS-specific paths for the tool executable.",
               "properties": {
-                "windows": { "type": "string" },
-                "macos": { "type": "string" },
-                "linux": { "type": "string" }
-              }
+                "windows": {
+                  "type": "string",
+                  "description": "Windows에서 사용할 외부 압축 도구 경로입니다. 다른 OS의 값으로 대체하지 않으므로 실행할 OS의 키를 준비하세요.\nThe external archive tool path to use on Windows. Values from another OS are not used as a fallback; provide the key for the OS where this will run.\n예 / Example: {\"windows\": \"C:\\\\Program Files\\\\7-Zip\\\\7z.exe\"}",
+                  "examples": ["C:\\Program Files\\7-Zip\\7z.exe"]
+                },
+                "macos": {
+                  "type": "string",
+                  "description": "macOS에서 사용할 외부 압축 도구 경로입니다. 다른 OS의 값으로 대체하지 않으므로 실행할 OS의 키를 준비하세요.\nThe external archive tool path to use on macOS. Values from another OS are not used as a fallback; provide the key for the OS where this will run.\n예 / Example: {\"macos\": \"7z\"}",
+                  "examples": ["7z"]
+                },
+                "linux": {
+                  "type": "string",
+                  "description": "Linux에서 사용할 외부 압축 도구 경로입니다. 다른 OS의 값으로 대체하지 않으므로 실행할 OS의 키를 준비하세요.\nThe external archive tool path to use on Linux. Values from another OS are not used as a fallback; provide the key for the OS where this will run.\n예 / Example: {\"linux\": \"7z\"}",
+                  "examples": ["7z"]
+                }
+              },
+              "examples": [{"windows": "7z", "macos": "7z", "linux": "7z"}]
             }
           ],
-          "description": "Path to the tool executable. Can be a direct string or an OS-specific object. Optional for 'zip' and 'unzip' types: if omitted, the built-in zip engine is used (.zip archives only). Specify a tool (e.g. 7z path) for other formats."
+          "description": "zip/unzip의 외부 7z 호환 도구입니다. 문자열 또는 OS별 경로 객체를 쓰고 변수 치환을 지원합니다. 생략하면 .zip 전용 내장 엔진을 사용합니다. command와 달리 전체 값을 도구 경로로 취급하므로 추가 옵션을 이어 쓰지 마세요.\nAn external 7z-compatible tool for zip/unzip. Accepts a string or OS-specific path object and supports variable substitution. If omitted, uses the built-in engine, which supports .zip only. Unlike command, the entire value is a tool path; do not append options.\n예 / Example: {\"tool\": {\"windows\": \"C:\\\\Program Files\\\\7-Zip\\\\7z.exe\", \"macos\": \"7z\", \"linux\": \"7z\"}}",
+          "examples": [{"windows": "C:\\Program Files\\7-Zip\\7z.exe", "macos": "7z", "linux": "7z"}]
         },
         "inputs": {
           "type": "object",
-          "description": "Specifies inputs from previous tasks' outputs. e.g., {'archive': 'zipTaskId', 'destination': 'folderDialogTaskId'}",
+          "description": "unzip에서 앞 태스크 ID를 연결하는 이전 형식입니다. archive(또는 file)는 압축 파일, destination은 대상 폴더를 제공하는 태스크 ID입니다. ${...}가 아닌 ID 자체를 쓰며 zip에는 적용하지 않습니다.\nThe legacy format for connecting earlier task IDs to unzip. archive (or file) names the task providing the archive, and destination names the task providing the target directory. Use bare IDs, not ${...} references. Does not apply to zip.\n예 / Example: {\"inputs\": {\"archive\": \"package\", \"destination\": \"folder\"}}",
           "properties": {
             "file": {
               "type": "string",
-              "description": "Legacy alias for 'archive'. References a previous task that provides an archive path."
+              "description": "unzip의 inputs.archive와 같은 이전 별칭입니다. 압축 파일 경로를 결과로 제공하는 태스크 ID를 씁니다.\nA legacy alias for unzip inputs.archive. Use the ID of the task whose result provides the archive file path.\n예 / Example: {\"file\": \"firmware\"}",
+              "examples": ["firmware"]
             },
             "archive": {
               "type": "string",
-              "description": "References a previous task that provides the archive path (e.g., fileDialog or zip task)."
+              "description": "unzip에 압축 파일 경로를 제공한 태스크 ID입니다. fileDialog의 path 또는 zip의 archivePath 등을 읽습니다. ${...}로 감싸지 않습니다.\nThe ID of the task providing the archive path to unzip. Reads fields such as fileDialog path or zip archivePath. Do not wrap the ID in ${...}.\n예 / Example: {\"archive\": \"package\"}",
+              "examples": ["package"]
             },
             "destination": {
               "type": "string",
-              "description": "References a previous task that provides a destination folder path."
+              "description": "unzip 대상 폴더 경로를 제공한 태스크 ID입니다. 명시한 destination 경로가 있으면 그 경로가 우선합니다.\nThe ID of the task providing the unzip target directory. An explicit destination path takes priority.\n예 / Example: {\"destination\": \"folder\"}",
+              "examples": ["folder"]
             }
-          }
+          },
+          "examples": [{"archive": "package", "destination": "folder"}]
         },
         "archive": {
           "type": "string",
-          "description": "For 'unzip' tasks, specifies the archive to extract. For 'zip' tasks, specifies the output archive path. Supports interpolation. Relative paths resolve against 'cwd' (default: the action's workspace folder). Unlike 'writeFile'/'appendFile', zip and unzip paths are NOT restricted to the workspace: they are meant to work on locations the user picks at runtime via fileDialog/folderDialog/pathDialog."
+          "description": "zip에서는 생성할 압축 파일, unzip에서는 풀 압축 파일의 경로입니다. 변수 치환을 지원하며 상대 경로는 cwd 또는 액션 워크스페이스 기준입니다. 내장 엔진은 .zip만 지원합니다.\nThe output archive path for zip, or input archive path for unzip. Supports variable substitution. Relative paths use cwd or the action workspace. The built-in engine supports .zip only.\n예 / Example: {\"archive\": \"build/release.zip\"}",
+          "examples": ["build/release.zip"]
         },
         "destination": {
           "type": "string",
-          "description": "For 'unzip' tasks, a string (supports interpolation) specifying the destination directory. Relative paths resolve against task.cwd when set, otherwise the action's workspace folder; like 'archive', it is not restricted to the workspace."
+          "description": "unzip의 대상 폴더입니다. 상대 경로는 cwd 또는 액션 워크스페이스 기준입니다. 생략하면 inputs.destination, 입력 파일 결과의 dir, 압축 파일의 부모 폴더 순서로 정합니다.\nThe target directory for unzip. Relative paths use cwd or the action workspace. If omitted, it is chosen from inputs.destination, then the input file result’s dir, then the archive’s parent directory.\n예 / Example: {\"destination\": \"build/extracted\"}",
+          "examples": ["build/extracted"]
         },
         "source": {
-          "oneOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "array",
-              "items": { "type": "string" }
-            }
-          ],
-          "description": "File or directory paths to be compressed. Required for 'zip' type. Relative paths resolve against 'cwd' (default: the action's workspace folder); sources outside the workspace are allowed on purpose, since a folderDialog pick may live anywhere. Symlinks that resolve outside the selected source root are skipped and reported."
+          "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+          "description": "zip에 넣을 실제 파일·폴더 경로 또는 경로 배열입니다. 상대 경로는 cwd 또는 액션 워크스페이스 기준입니다. source는 args와 달리 배열 참조를 여러 경로로 펼치지 않습니다. 선택한 소스 밖으로 향하는 심볼릭 링크는 제외하고 안내합니다.\nExisting file/directory paths to include in zip, as a string or array. Relative paths use cwd or the action workspace. Unlike args, source does not expand an array reference into multiple paths. Symbolic links pointing outside the selected sources are skipped with a message.\n예 / Example: {\"source\": [\"build/app.bin\", \"build/manifest.json\"]}",
+          "examples": [["build/app.bin", "build/manifest.json"]]
         },
         "function": {
           "type": "string",
-          "description": "The function to apply for 'stringManipulation' type (stripExtension, basename, basenameWithoutExtension, dirname, extension, toLowerCase, toUpperCase, trim)."
+          "description": "stringManipulation의 처리 함수입니다. stripExtension은 경로에서 마지막 확장자를 제거하고, basename은 파일명, basenameWithoutExtension은 확장자 없는 파일명, dirname은 부모 경로, extension은 점 없는 확장자를 구합니다. toLowerCase/toUpperCase는 대소문자 변환, trim은 양끝 공백 제거입니다.\nThe stringManipulation function. stripExtension removes the final extension from a path; basename returns the filename; basenameWithoutExtension returns the filename without its extension; dirname returns the parent path; extension returns the extension without a dot. toLowerCase/toUpperCase change case; trim removes leading and trailing whitespace.\n예 / Example: {\"function\": \"basenameWithoutExtension\"}",
+          "examples": ["basenameWithoutExtension"]
         },
         "input": {
           "type": "string",
-          "description": "The input string for 'stringManipulation' type."
+          "description": "stringManipulation에서 처리할 문자열입니다. 변수 치환 후 function을 적용하며 결과는 ${name.output}으로 참조합니다.\nThe string to process with stringManipulation. Applies function after variable substitution. Reference the result as ${name.output}.\n예 / Example: {\"input\": \"${firmware.path}\"}",
+          "examples": ["${firmware.path}"]
         },
         "output": {
-          "$ref": "#/definitions/Output"
+          "$ref": "#/definitions/Output",
+          "description": "태스크 결과를 표시·저장하거나 문자열에서 값을 추출하는 설정입니다. 화면·파일 출력에는 passTheResultToNextTask: true도 지정합니다. 입력·경로 선택 등 객체 결과는 JSON으로 표시할 수 있습니다.\nSettings to display or save task results, or extract values from strings. For display or file output, also set passTheResultToNextTask: true. Object results, such as input or path selections, can be displayed as JSON.\n예 / Example: {\"output\": {\"mode\": \"editor\", \"language\": \"json\"}}",
+          "examples": [{"mode": "editor", "language": "json"}]
         },
         "passTheResultToNextTask": {
           "type": "boolean",
-          "description": "Defaults to false. If true, the task output (stdout) is captured to be used as a variable in subsequent tasks (e.g., ${task.id.output}). If false or omitted, output is streamed live to the terminal and is not captured.",
-          "default": false
+          "description": "command/shell에서는 true일 때 종료 후 stdout/stderr를 캡처해 ${run.output}/${run.stderr}로 제공합니다. 기본 false는 일반 터미널 실행입니다. 다른 타입은 이 옵션 없이도 결과 참조가 가능하며, true는 공통 output의 표시·저장을 켭니다. isOneShot과 함께 사용하지 마세요.\nFor command/shell, true captures stdout/stderr after completion as ${run.output}/${run.stderr}. The default false uses regular terminal execution. Other task types expose their results without this option; true enables the shared output display/save settings. Do not combine with isOneShot.\n예 / Example: {\"passTheResultToNextTask\": true}",
+          "default": false,
+          "examples": [true]
         },
         "isOneShot": {
           "type": "boolean",
-          "description": "If true, the task is considered successful as soon as it starts. Useful for non-terminating processes like GUI applications. Only works when `passTheResultToNextTask` is false.",
-          "default": false
+          "description": "command/shell을 시작 요청한 뒤 완료를 기다리지 않고 다음 태스크로 진행합니다. 기본은 false이며 서버의 준비 완료나 최종 성공을 보장하지 않습니다. passTheResultToNextTask 또는 forEach와 함께 사용하지 마세요.\nRequests command/shell startup, then proceeds to the next task without waiting for completion. Defaults to false. Does not guarantee server readiness or eventual success. Do not combine with passTheResultToNextTask or forEach.\n예 / Example: {\"isOneShot\": true}",
+          "default": false,
+          "examples": [true]
         },
         "path": {
           "type": "string",
-          "description": "Destination path for 'writeFile' / 'appendFile' tasks. Supports variable interpolation. Relative paths resolve against the action's workspace folder and must stay inside it."
+          "description": "writeFile/appendFile이 쓸 파일 경로입니다. 변수 치환을 지원하며 상대 경로는 액션 워크스페이스 기준입니다. cwd를 기준으로 하지 않고 열린 워크스페이스 밖의 파일은 거부합니다.\nThe file path written by writeFile/appendFile. Supports variable substitution. Relative paths use the action workspace, not cwd. Files outside the open workspace are rejected.\n예 / Example: {\"path\": \"build/manifest.json\"}",
+          "examples": ["build/manifest.json"]
         },
         "content": {
           "type": "string",
-          "description": "Content to write for 'writeFile' / 'appendFile' tasks. Supports variable interpolation."
+          "description": "writeFile/appendFile에 기록할 문자열입니다. 빈 문자열도 가능하며 변수 치환을 지원합니다. JSON에서 줄바꿈은 \\n으로 적습니다.\nThe string to write with writeFile/appendFile. May be empty and supports variable substitution. In JSON, write a newline as \\n.\n예 / Example: {\"content\": \"mode=${mode}\\n\"}",
+          "examples": ["mode=${mode}\n"]
         },
         "encoding": {
           "type": "string",
           "enum": ["utf8", "utf8bom", "ascii"],
-          "description": "File encoding for 'writeFile' / 'appendFile' tasks. Defaults to 'utf8'. 'utf8bom' prefixes a BOM (on appendFile, only when the target file does not already exist). 'ascii' replaces non-ASCII characters with '?'.",
-          "default": "utf8"
+          "description": "writeFile/appendFile의 인코딩입니다. utf8(기본)은 BOM 없음, utf8bom은 BOM 포함, ascii는 비ASCII를 ?로 바꿉니다. 기존 파일에 appendFile할 때는 중간에 BOM을 추가하지 않습니다.\nThe writeFile/appendFile encoding. utf8 (default) has no BOM; utf8bom includes a BOM; ascii replaces non-ASCII characters with ?. appendFile does not insert a BOM in the middle of an existing file.\n예 / Example: {\"encoding\": \"utf8\"}",
+          "default": "utf8",
+          "examples": ["utf8"]
         },
         "eol": {
           "type": "string",
           "enum": ["lf", "crlf", "keep"],
-          "description": "Line-ending normalization for 'writeFile' / 'appendFile' tasks. Defaults to 'keep'.",
-          "default": "keep"
+          "description": "writeFile/appendFile의 줄바꿈 변환입니다. keep(기본)은 원문 유지, lf는 LF, crlf는 CRLF로 맞춥니다. 줄바꿈을 새로 추가하는 옵션은 아닙니다.\nLine-ending conversion for writeFile/appendFile. keep (default) preserves the input; lf normalizes to LF; crlf normalizes to CRLF. This does not add new line breaks.\n예 / Example: {\"eol\": \"lf\"}",
+          "default": "keep",
+          "examples": ["lf"]
         },
         "overwrite": {
           "type": "boolean",
-          "description": "For 'writeFile': if false, the task fails when the target file already exists. Defaults to true. Ignored for 'appendFile'.",
-          "default": true
+          "description": "writeFile에서 기존 파일 덮어쓰기를 허용할지 정합니다. 기본은 true이며 false이면 기존 파일이 있을 때 실패합니다. appendFile에는 적용하지 않습니다. output.overwrite의 기본값(false)과 다릅니다.\nWhether writeFile may replace an existing file. Defaults to true; false fails if the file already exists. Does not apply to appendFile. Unlike this field, output.overwrite defaults to false.\n예 / Example: {\"overwrite\": false}",
+          "default": true,
+          "examples": [false]
         },
         "mkdirs": {
           "type": "boolean",
-          "description": "For 'writeFile' / 'appendFile': if true (default), missing parent directories are created automatically. If false, the task fails when the parent directory is missing.",
-          "default": true
+          "description": "writeFile/appendFile에서 없는 부모 폴더를 만들지 정합니다. 기본 true이며 false일 때 부모 폴더가 없으면 실패합니다.\nWhether writeFile/appendFile create missing parent directories. Defaults to true; false fails if the parent directory does not exist.\n예 / Example: {\"mkdirs\": true}",
+          "default": true,
+          "examples": [true]
         },
         "allowSecretContent": {
           "type": "boolean",
-          "description": "Allows 'writeFile' / 'appendFile' / output.mode 'file' to persist content derived from sensitive runtime data such as password input, environment variables, clipboard text, or selected text. Without this flag such writes are refused. Files written under this flag are created with owner-only permissions (0600; no effect on Windows).",
-          "default": false
+          "description": "writeFile/appendFile 또는 output.mode: \"file\"로 비밀번호·환경변수·클립보드·선택 텍스트의 파생 내용을 저장하는 명시적 허용입니다. 생략하면 해당 저장을 거부합니다. 민감 파일에는 POSIX에서 소유자 전용 권한(0600)을 적용합니다.\nExplicitly allows writeFile/appendFile or output.mode: \"file\" to save content derived from passwords, environment variables, the clipboard, or selected text. Such writes are rejected if omitted. Sensitive files receive owner-only permissions (0600) on POSIX.\n예 / Example: {\"allowSecretContent\": true}",
+          "default": false,
+          "examples": [true]
         },
         "timeoutSeconds": {
           "type": "number",
-          "description": "Task-level timeout in seconds. If the task does not complete within this budget, it is canceled and the pipeline fails with a timeout error (subject to 'continueOnError'). 0 or omitted disables the timeout. Applies to every task type, including interactive ones.",
-          "minimum": 0
+          "description": "이 태스크 전체의 제한 시간(초)입니다. 0 또는 생략은 제한 없음이며 입력 대화상자도 포함합니다. 시간 초과는 실패로 처리하고 continueOnError에 따라 진행 여부를 정합니다.\nThe time limit in seconds for the entire task, including input dialogs. Zero or omission means no limit. A timeout is a failure; continueOnError determines whether execution continues.\n예 / Example: {\"timeoutSeconds\": 60}",
+          "minimum": 0,
+          "examples": [60]
         },
         "continueOnError": {
           "type": "boolean",
-          "description": "If true, the pipeline continues to the next task when this task fails (including timeouts and user-canceled dialogs). The failing task's result becomes empty ({}). Defaults to false.",
-          "default": false
+          "description": "기본 false입니다. true이면 실패·시간 초과·입력 취소 후 빈 결과 {}로 다음 태스크를 계속합니다. 사용자가 Stop으로 액션을 중지한 경우에는 계속 실행하지 않습니다.\nDefaults to false. If true, failures, timeouts, and input cancellations produce an empty result {} and execution continues with the next task. Execution does not continue after the user stops the action with Stop.\n예 / Example: {\"continueOnError\": true}",
+          "default": false,
+          "examples": [true]
         },
         "dependsOn": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "IDs of earlier tasks (within the same action) that must complete before this task. Combined with 'parallel' and auto-inferred dependencies from ${taskId.x} variable references to build the runtime task graph. TaskHub Doctor flags cycles, missing references, and self-dependencies."
+          "items": {"type": "string"},
+          "description": "먼저 완료되어야 하는 같은 액션의 태스크 ID 배열입니다. ${build.output} 같은 결과 참조의 자동 의존성과 합쳐집니다. parallel: true여도 이 의존성은 기다립니다.\nAn array of task IDs in the same action that must finish first. Combined with automatic dependencies from result references such as ${build.output}. These dependencies are awaited even with parallel: true.\n예 / Example: {\"dependsOn\": [\"build\"]}",
+          "examples": [["build"]]
         },
         "parallel": {
           "type": "boolean",
-          "description": "If true, this task is exempt from the implicit 'wait for every preceding task in the array' barrier and may run concurrently with its siblings. It still waits for any task listed in 'dependsOn' and any task whose output it references via ${taskId.x} (auto-inferred). Note: 'parallel: true' is not fire-and-forget — a later task without 'parallel: true' is a sync barrier and waits for this task to finish. Interactive task types are flagged by TaskHub Doctor when 'parallel: true' because the runtime serializes their prompts via a UI mutex. Defaults to false.",
-          "default": false
+          "description": "기본 false는 앞 태스크들의 완료를 기다립니다. true는 앞 태스크 전체를 기다리는 기본 장벽을 생략하지만 dependsOn·결과 참조는 기다립니다. 뒤의 일반 태스크는 앞선 병렬 작업도 기다립니다. 입력 대화상자는 서로 겹치지 않게 직렬화합니다.\nThe default false waits for earlier tasks to finish. true removes the default barrier that waits for all earlier tasks, but still waits for dependsOn and result references. A later ordinary task also waits for preceding parallel tasks. Input dialogs are serialized to prevent overlap.\n예 / Example: {\"parallel\": true}",
+          "default": false,
+          "examples": [true]
         },
         "when": {
           "type": "object",
-          "description": "Condition deciding whether this task runs. When false the task ends as skipped (not failed) and the action continues. References inside the condition are auto-inferred as dependencies, so the condition is evaluated after the task it looks at has finished. A task that plainly references a condition-skipped task is skipped too; use '${a.x ?? b.y}' when either branch's result is acceptable.",
+          "description": "태스크 실행 조건입니다. var를 문자열로 비교하며 equals/notEquals/matches/in 중 하나만 사용합니다. 거짓이면 실패 없이 건너뛰며 결과를 일반 참조하는 후속 태스크도 건너뜁니다. 대체 결과는 ${a.path ?? b.path}로 참조합니다.\nThe task execution condition. Compares var as a string using exactly one of equals/notEquals/matches/in. A false condition skips the task without failure, and later tasks with ordinary references to its result are also skipped. Use ${a.path ?? b.path} to reference an alternative result.\n예 / Example: {\"when\": {\"var\": \"${mode}\", \"equals\": \"release\"}}",
           "properties": {
             "var": {
               "type": "string",
-              "description": "Value to compare, after variable interpolation. Usually a reference such as ${pick.value}."
+              "description": "조건에서 비교할 값입니다. 변수 치환 후 문자열로 비교합니다.\nThe value to compare in the condition. Compared as a string after variable substitution.\n예 / Example: {\"var\": \"${mode}\"}",
+              "examples": ["${mode}"]
             },
-            "equals": { "type": "string", "description": "Run when the interpolated 'var' equals this string exactly." },
-            "notEquals": { "type": "string", "description": "Run when the interpolated 'var' differs from this string." },
-            "matches": { "type": "string", "description": "Run when the interpolated 'var' matches this regular expression (RegExp source, partial match)." },
+            "equals": {
+              "type": "string",
+              "description": "var와 정확히 같은 문자열이면 실행합니다. 다른 비교 연산자와 함께 쓰지 않습니다.\nRuns if var is exactly equal to this string. Do not combine with other comparison operators.\n예 / Example: {\"equals\": \"release\"}",
+              "examples": ["release"]
+            },
+            "notEquals": {
+              "type": "string",
+              "description": "var와 다른 문자열이면 실행합니다. 다른 비교 연산자와 함께 쓰지 않습니다.\nRuns if var differs from this string. Do not combine with other comparison operators.\n예 / Example: {\"notEquals\": \"skip\"}",
+              "examples": ["skip"]
+            },
+            "matches": {
+              "type": "string",
+              "description": "var에 정규식이 매치되면 실행합니다. 전체 일치가 필요하면 ^와 $를 쓰며 다른 비교 연산자와 함께 쓰지 않습니다.\nRuns if this regular expression matches var. Use ^ and $ for a full-string match. Do not combine with other comparison operators.\n예 / Example: {\"matches\": \"^release/\"}",
+              "examples": ["^release/"]
+            },
             "in": {
               "type": "array",
-              "items": { "type": "string" },
-              "description": "Run when the interpolated 'var' equals one of these strings."
+              "items": {"type": "string"},
+              "description": "var가 이 문자열 목록 중 하나와 정확히 같으면 실행합니다. 다른 비교 연산자와 함께 쓰지 않습니다.\nRuns if var exactly equals one of these strings. Do not combine with other comparison operators.\n예 / Example: {\"in\": [\"debug\", \"release\"]}",
+              "examples": [["debug", "release"]]
             }
           },
           "required": ["var"],
-          "additionalProperties": false
-        }
-      },
-      "required": ["id", "type"],
-      "allOf": [
-        {
-          "not": {
-            "properties": {
-              "allowCustom": { "const": true },
-              "canPickMany": { "const": true }
-            },
-            "required": ["allowCustom", "canPickMany"]
-          }
-        },
-        {
-          "if": {
-            "properties": { "default": { "type": "array" } },
-            "required": ["default"]
-          },
-          "then": {
-            "properties": { "canPickMany": { "const": true } },
-            "required": ["canPickMany"]
-          }
-        },
-        {
-          "if": {
-            "properties": { "type": { "const": "pathDialog" } },
-            "required": ["type"]
-          },
-          "then": {
-            "required": ["mode"]
-          }
-        },
-        {
-          "if": {
-            "properties": { "type": { "const": "switch" } },
-            "required": ["type"]
-          },
-          "then": {
-            "required": ["on", "cases"]
-          }
-        },
-        {
-          "if": {
-            "properties": { "type": { "const": "browser" } },
-            "required": ["type"]
-          },
-          "then": {
-            "required": ["url"]
-          }
-        },
-        {
-          "if": { "required": ["forEach"] },
-          "then": {
-            "properties": {
-              "type": {
-                "not": {
-                  "enum": ["inputBox", "quickPick", "envPick", "fileDialog", "folderDialog", "pathDialog", "confirm", "browser", "switch"]
-                }
-              },
-              "isOneShot": { "not": { "const": true } }
-            }
-          }
-        }
-      ]
-    },
-    "SwitchTaskBranch": {
-      "type": "object",
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": ["shell", "command", "unzip", "zip", "stringManipulation", "writeFile", "appendFile", "browser"],
-          "description": "Non-interactive task type to execute for this branch. Dialogs and nested switches stay as separate outer tasks."
-        },
-        "command": { "$ref": "#/definitions/Task/properties/command" },
-        "args": { "$ref": "#/definitions/Task/properties/args" },
-        "env": { "$ref": "#/definitions/Task/properties/env" },
-        "cwd": { "$ref": "#/definitions/Task/properties/cwd" },
-        "revealTerminal": { "$ref": "#/definitions/Task/properties/revealTerminal" },
-        "url": { "$ref": "#/definitions/Task/properties/url" },
-        "target": { "$ref": "#/definitions/Task/properties/target" },
-        "tool": { "$ref": "#/definitions/Task/properties/tool" },
-        "inputs": { "$ref": "#/definitions/Task/properties/inputs" },
-        "source": { "$ref": "#/definitions/Task/properties/source" },
-        "archive": { "$ref": "#/definitions/Task/properties/archive" },
-        "destination": { "$ref": "#/definitions/Task/properties/destination" },
-        "function": { "$ref": "#/definitions/Task/properties/function" },
-        "input": { "$ref": "#/definitions/Task/properties/input" },
-        "path": { "$ref": "#/definitions/Task/properties/path" },
-        "content": { "$ref": "#/definitions/Task/properties/content" },
-        "encoding": { "$ref": "#/definitions/Task/properties/encoding" },
-        "eol": { "$ref": "#/definitions/Task/properties/eol" },
-        "overwrite": { "$ref": "#/definitions/Task/properties/overwrite" },
-        "mkdirs": { "$ref": "#/definitions/Task/properties/mkdirs" },
-        "allowSecretContent": { "$ref": "#/definitions/Task/properties/allowSecretContent" },
-        "output": { "$ref": "#/definitions/Task/properties/output" },
-        "passTheResultToNextTask": { "$ref": "#/definitions/Task/properties/passTheResultToNextTask" },
-        "isOneShot": { "$ref": "#/definitions/Task/properties/isOneShot" }
-      },
-      "required": ["type"],
-      "allOf": [
-        {
-          "if": {
-            "properties": { "type": { "const": "browser" } },
-            "required": ["type"]
-          },
-          "then": {
-            "required": ["url"]
-          }
-        }
-      ],
-      "additionalProperties": false
-    },
-    "Output": {
-      "type": "object",
-      "properties": {
-        "mode": {
-          "type": "string",
-          "description": "Defines how to handle the task's output. Optional when only 'capture' is used.",
-          "enum": ["editor", "terminal", "file"]
-        },
-        "language": {
-          "type": "string",
-          "description": "Language mode for the editor tab when mode is 'editor'."
-        },
-        "filePath": {
-          "type": "string",
-          "description": "The path to save the output to when mode is 'file'. Can use variables."
-        },
-        "content": {
-          "type": "string",
-          "description": "The content to write to the file. Defaults to the task's stdout."
-        },
-        "overwrite": {
-          "oneOf": [
-            { "type": "boolean" },
-            { "type": "string" }
-          ],
-          "description": "If true, overwrite the target when mode is 'file'. Defaults to false. Can be a boolean or a string variable (e.g., '${someVar}') that evaluates to 'true'.",
-          "default": false
-        },
-        "capture": {
-          "oneOf": [
-            { "$ref": "#/definitions/OutputCapture" },
-            {
-              "type": "array",
-              "items": { "$ref": "#/definitions/OutputCapture" }
-            }
-          ],
-          "description": "Extract named variables from the task's string output. Each rule adds a `${task_id.<name>}` variable for downstream tasks. Only applies when the task returns a string output (shell/command with `passTheResultToNextTask: true`, or `stringManipulation`)."
-        },
-        "diagnostics": {
-          "oneOf": [
-            { "$ref": "#/definitions/DiagnosticPattern" },
-            { "type": "string", "description": "Built-in matcher preset, e.g. '$gcc' or '$tsc'." },
-            {
-              "type": "array",
-              "items": {
-                "oneOf": [
-                  { "$ref": "#/definitions/DiagnosticPattern" },
-                  { "type": "string" }
-                ]
-              }
-            }
-          ],
-          "description": "Scan the task's string output for compiler errors/warnings and surface them in the Problems panel. Same constraint as `capture` — requires a string-producing task (shell/command with `passTheResultToNextTask: true`, or `stringManipulation`). Use a preset shorthand like `\"$gcc\"` or define a custom `DiagnosticPattern`."
+          "additionalProperties": false,
+          "examples": [{"var": "${mode}", "equals": "release"}]
         }
       }
-    },
-    "DiagnosticPattern": {
-      "type": "object",
-      "properties": {
-        "pattern": {
-          "type": "string",
-          "description": "Regex pattern matched against each output line."
-        },
-        "flags": {
-          "type": "string",
-          "description": "Optional regex flags (e.g. 'i' for case-insensitive, 'm' for multiline). The `g` flag is silently stripped — the matcher iterates lines on its own."
-        },
-        "file": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "1-based capture group index for the file path. Relative paths resolve against the task's cwd."
-        },
-        "line": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "1-based capture group index for the (1-based) line number."
-        },
-        "column": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "1-based capture group index for the column number. Optional."
-        },
-        "endLine": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "1-based capture group index for the end-line number. Optional."
-        },
-        "endColumn": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "1-based capture group index for the end-column number. Optional."
-        },
-        "severity": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "1-based capture group index for severity text (error/warning/info/hint/note/fatal). Optional."
-        },
-        "message": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "1-based capture group index for the message text. Required."
-        },
-        "defaultSeverity": {
-          "type": "string",
-          "enum": ["error", "warning", "info", "hint"],
-          "description": "Severity to use when the severity group is missing or unrecognized. Defaults to 'error'.",
-          "default": "error"
-        },
-        "source": {
-          "type": "string",
-          "description": "Label shown next to the message in the Problems panel. Defaults to 'taskhub'."
-        }
-      },
-      "required": ["pattern", "file", "line", "message"]
-    },
-    "OutputCapture": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-          "description": "Variable name to expose as ${task_id.<name>}. Must be a valid identifier and must not shadow built-in keys (output, path, value, etc.)."
-        },
-        "regex": {
-          "type": "string",
-          "description": "Regex pattern matched against the task output. If it matches, the specified capture group (default 1) is used."
-        },
-        "group": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Capture group index for `regex`. Defaults to 1. Use 0 to get the full match.",
-          "default": 1
-        },
-        "flags": {
-          "type": "string",
-          "description": "Optional regex flags (e.g., 'm' for multiline, 'i' for case-insensitive)."
-        },
-        "line": {
-          "type": "integer",
-          "description": "Select one line by 0-based index. Negative values count from the end (-1 = last line). Ignored if `regex` is also provided."
-        },
-        "trim": {
-          "type": "boolean",
-          "description": "If true, apply trim() to the selected value.",
-          "default": false
-        }
-      },
-      "required": ["name"]
     }
-  }
+  },
+  "examples": [
+    [
+      {
+        "id": "project.version",
+        "title": "Node.js 버전",
+        "action": {
+          "description": "Node.js 버전을 확인합니다.",
+          "tasks": [{"id": "version", "type": "command", "command": "node", "args": ["--version"]}]
+        }
+      }
+    ]
+  ]
 }

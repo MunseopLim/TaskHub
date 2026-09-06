@@ -2983,7 +2983,7 @@ suite('Doctor', () => {
 
         test('zip/unzip 이 아닌 태스크에 달아도 보고한다', () => {
             // 이 검사에는 **타입 게이트가 없다**. `tool` 은 스키마에서 태스크 공통
-            // 속성이라(`definitions/Task/properties`) shell 에 달아도 유효한
+            // 속성이라(`definitions/TaskFields/properties`) shell 에 달아도 유효한
             // 설정이고, 런타임 `getToolCommand` 도 타입을 가리지 않는다.
             //
             // 문서 표는 이 동작을 "tool 을 가진 태스크(실질적으로 zip/unzip)" 로
@@ -4209,8 +4209,44 @@ suite('Doctor', () => {
  * 사용자가 자동완성에 나오지 않아 그런 설정이 없는 줄 알았다는 보고가 이
  * 항목의 출발점이다. 스키마가 곧 문서인 자리다.
  */
+suite('actions.schema.json — 타입별 추천과 기존 검증 호환성', () => {
+    const wrap = (task: Record<string, unknown>) => [{
+        id: 'a.compatibility', title: 'Compatibility', action: { description: 'd', tasks: [task] },
+    }];
+
+    test('추천하지 않는 필드도 기존처럼 허용하고 값의 타입은 검사한다', () => {
+        const validate = compileValidator();
+        assert.strictEqual(validate(wrap({ id: 'run', type: 'command', command: 'node', options: { title: 'unused' }, futureOption: 1 })), true);
+        assert.strictEqual(validate(wrap({ id: 'ask', type: 'inputBox', command: 42 })), false);
+        assert.strictEqual(validate(wrap({ id: 'ask', type: 'inputBox', command: 'unused' })), true);
+        assert.strictEqual(validate(wrap({ id: 'run', type: 'command', options: { canSelectMany: 'yes' } })), false);
+    });
+
+    test('기존 필드 조합 제약이 타입에 관계없이 유지된다', () => {
+        const validate = compileValidator();
+        const base = { id: 'run', type: 'command' };
+        assert.strictEqual(validate(wrap({ ...base, allowCustom: true, canPickMany: true })), false);
+        assert.strictEqual(validate(wrap({ ...base, default: ['a'] })), false);
+        assert.strictEqual(validate(wrap({ ...base, default: ['a'], canPickMany: true })), true);
+        assert.strictEqual(validate(wrap({ ...base, forEach: ['a'], isOneShot: true })), false);
+        assert.strictEqual(validate(wrap({ ...base, forEach: ['a'], isOneShot: false })), true);
+    });
+
+    test('switch 분기는 기존 실행 필드를 허용하되 제어·알 수 없는 필드는 거부한다', () => {
+        const validate = compileValidator();
+        const branch = (extra: Record<string, unknown>) => wrap({
+            id: 'choose', type: 'switch', on: 'run', cases: { run: { type: 'command', command: 'node', ...extra } },
+        });
+        assert.strictEqual(validate(branch({ overwrite: true })), true);
+        assert.strictEqual(validate(branch({ args: 42 })), false);
+        for (const field of ['id', 'forEach', 'when', 'dependsOn', 'parallel', 'timeoutSeconds', 'continueOnError', 'futureOption']) {
+            assert.strictEqual(validate(branch({ [field]: true })), false, field);
+        }
+    });
+});
+
 suite('actions.schema.json — 다이얼로그 options', () => {
-    const options: any = (actionSchema as any).definitions?.Task?.properties?.options;
+    const options: any = (actionSchema as any).definitions?.TaskFields?.properties?.options;
 
     test('제안할 키들이 스키마에 있다', () => {
         assert.ok(options, 'options 스키마를 찾지 못했다 — 경로가 바뀌었으면 이 검사를 고칠 것');
@@ -4255,7 +4291,7 @@ suite('actions.schema.json — 다이얼로그 options', () => {
 });
 
 suite('actions.schema.json — pathDialog', () => {
-    const taskSchema: any = (actionSchema as any).definitions?.Task;
+    const taskSchema: any = (actionSchema as any).definitions?.TaskFields;
     const properties: any = taskSchema?.properties;
     const wrap = (task: any) => [{
         id: 'a.path', title: 'path', action: { description: 'd', tasks: [task] },
@@ -4297,7 +4333,7 @@ suite('actions.schema.json — pathDialog', () => {
 });
 
 suite('actions.schema.json — switch', () => {
-    const taskSchema: any = (actionSchema as any).definitions?.Task;
+    const taskSchema: any = (actionSchema as any).definitions?.TaskFields;
     const wrap = (task: any) => [{
         id: 'a.switch', title: 'switch', action: { description: 'd', tasks: [task] },
     }];
@@ -4412,7 +4448,7 @@ suite('actions.schema.json — browser', () => {
 });
 
 suite('actions.schema.json — quickPick 편의 옵션', () => {
-    const taskSchema: any = (actionSchema as any).definitions?.Task;
+    const taskSchema: any = (actionSchema as any).definitions?.TaskFields;
     const properties: any = taskSchema?.properties;
 
     test('default·allowCustom·rememberLastSelection이 설명과 함께 제안된다', () => {
@@ -4425,7 +4461,7 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
     test('itemsFromCommandFormat은 기존 lines와 구조화 jsonl만 허용한다', () => {
         assert.ok(properties?.itemsFromCommandFormat);
         assert.deepStrictEqual(properties.itemsFromCommandFormat.enum, ['lines', 'jsonl']);
-        assert.match(properties.itemsFromCommandFormat.description, /args \(one string or a string array\)/);
+        assert.match(properties.itemsFromCommandFormat.description, /args는 문자열 한 개 또는 문자열 배열/);
         assert.match(properties.itemsFromCommandFormat.description, /\$\{taskId\.args\}/);
         const v = compileValidator();
         const wrap = (format: string) => [{
@@ -4443,7 +4479,7 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
     test('QuickPick object item의 안정 id를 제안하고 길이를 검증한다', () => {
         const itemSchema: any = properties?.items?.oneOf?.[1]?.items;
         assert.ok(itemSchema?.properties?.id, 'QuickPick item id가 스키마 제안에 없다');
-        assert.match(itemSchema.properties.id.description, /stable identity/i);
+        assert.match(itemSchema.properties.id.description, /고정 ID/);
 
         const v = compileValidator();
         const wrap = (id: string) => [{
@@ -4461,7 +4497,7 @@ suite('actions.schema.json — quickPick 편의 옵션', () => {
     test('QuickPick object item은 의미 value와 문자열 args 배열을 함께 허용한다', () => {
         const itemSchema: any = properties?.items?.oneOf?.[1]?.items;
         assert.ok(itemSchema?.properties?.args, 'QuickPick item args가 스키마 제안에 없다');
-        assert.match(itemSchema.properties.args.description, /command arguments/i);
+        assert.match(itemSchema.properties.args.description, /문자열은 한 인자, 배열은 여러 인자/);
 
         const v = compileValidator();
         const wrap = (args: unknown) => [{

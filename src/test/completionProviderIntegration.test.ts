@@ -4,6 +4,184 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
+suite('JSON 스키마 편집 지원 (VS Code JSON language service)', function () {
+    this.timeout(30000);
+
+    let tempDir: string;
+    let sequence = 0;
+    const marker = '/*cursor*/';
+    const labelOf = (item: vscode.CompletionItem): string =>
+        typeof item.label === 'string' ? item.label : item.label.label;
+    const wrap = (task: string): string =>
+        `[{"id":"a.demo","title":"Demo","action":{"description":"Demo","tasks":[${task}]}}]`;
+
+    async function openFixture(text: string, relativePath = '.vscode/actions.json') {
+        const offset = text.indexOf(marker);
+        assert.ok(offset >= 0, '커서 표시가 필요하다');
+        const file = path.join(tempDir, String(sequence++), relativePath);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, text.replace(marker, ''), 'utf8');
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+        return { doc, position: doc.positionAt(offset) };
+    }
+
+    async function getItems(doc: vscode.TextDocument, position: vscode.Position) {
+        const result = await vscode.commands.executeCommand<vscode.CompletionList>(
+            'vscode.executeCompletionItemProvider', doc.uri, position
+        );
+        return result?.items ?? [];
+    }
+
+    async function suggest(task: string, relativePath?: string) {
+        const { doc, position } = await openFixture(wrap(task), relativePath);
+        return (await getItems(doc, position)).map(labelOf).sort();
+    }
+
+    suiteSetup(async () => {
+        await vscode.extensions.getExtension('Munseop.taskhub')!.activate();
+        await vscode.extensions.getExtension('vscode.json-language-features')!.activate();
+        tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-json-schema-')));
+        const { doc, position } = await openFixture(wrap(`{"type":"command",${marker}}`));
+        // JSON 서버의 provider 등록과 manifest 스키마 연결이 끝난 뒤 검사한다.
+        // 개별 테스트는 재시도하지 않으므로 잘못된 추천을 기다려서 숨기지 않는다.
+        const deadline = Date.now() + 15000;
+        while (!(await getItems(doc, position)).some(item => labelOf(item) === 'timeoutSeconds')) {
+            assert.ok(Date.now() < deadline, 'JSON 스키마 자동완성 준비 시간 초과');
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+    });
+
+    suiteTeardown(() => {
+        if (tempDir) { fs.rmSync(tempDir, { recursive: true, force: true }); }
+    });
+
+    const common = [
+        'id', 'when', 'dependsOn', 'parallel', 'timeoutSeconds', 'continueOnError',
+        'output', 'passTheResultToNextTask', 'allowSecretContent',
+    ];
+    const byType: Record<string, string[]> = {
+        command: ['command', 'args', 'cwd', 'env', 'revealTerminal', 'isOneShot', 'forEach'],
+        shell: ['command', 'args', 'cwd', 'env', 'revealTerminal', 'isOneShot', 'forEach'],
+        fileDialog: ['options'],
+        folderDialog: ['options'],
+        pathDialog: ['mode', 'options'],
+        inputBox: ['prompt', 'value', 'placeHolder', 'password', 'prefix', 'suffix', 'validatePattern', 'validateMessage', 'extractPattern'],
+        quickPick: ['items', 'placeHolder', 'canPickMany', 'default', 'allowCustom', 'rememberLastSelection', 'itemsFromCommand', 'itemsFromCommandFormat', 'itemsExclude', 'cwd'],
+        envPick: ['placeHolder'],
+        confirm: ['message', 'confirmLabel', 'cancelLabel'],
+        zip: ['tool', 'source', 'archive', 'cwd', 'env', 'forEach'],
+        unzip: ['tool', 'inputs', 'archive', 'destination', 'cwd', 'env', 'forEach'],
+        stringManipulation: ['function', 'input', 'forEach'],
+        writeFile: ['path', 'content', 'encoding', 'eol', 'overwrite', 'mkdirs', 'forEach'],
+        appendFile: ['path', 'content', 'encoding', 'eol', 'mkdirs', 'forEach'],
+        browser: ['url', 'target', 'cwd'],
+    };
+
+    for (const [type, fields] of Object.entries(byType)) {
+        test(`${type}: 필수 필드 작성 전에도 공통·해당 타입 필드만 추천한다`, async () => {
+            const names = await suggest(`{"type":"${type}",${marker}}`);
+            assert.deepStrictEqual(names, [...common, ...fields].sort());
+        });
+    }
+
+    test('type 미지정·미완성 값에서는 id/type과 공통 필드부터 안내한다', async () => {
+        assert.deepStrictEqual(await suggest(`{${marker}}`), [...common, 'type'].sort());
+        assert.deepStrictEqual(await suggest(`{"type":"comm",${marker}}`), [...common].sort());
+    });
+
+    test('다른 타입의 기존 필드나 잘못된 값이 있어도 type을 기준으로 추천한다', async () => {
+        const names = await suggest(`{"type":"command","id":42,"options":{},"args":false,${marker}}`);
+        assert.deepStrictEqual(names, [...common, ...byType.command].filter(key => !['id', 'args'].includes(key)).sort());
+    });
+
+    test('기존 default·forEach 검증 조건에서 무관한 추천이 새어 나오지 않는다', async () => {
+        const names = await suggest(`{"type":"zip","default":[],"forEach":[],${marker}}`);
+        assert.deepStrictEqual(names, [...common, ...byType.zip].filter(key => key !== 'forEach').sort());
+    });
+
+    test('입력 중인 키와 type보다 앞에 있는 커서에서도 해당 타입을 따른다', async () => {
+        const names = await suggest(`{"co${marker}":null,"type":"command"}`);
+        assert.ok(names.includes('command'), names.join(', '));
+        assert.ok(!names.includes('confirmLabel'), names.join(', '));
+        assert.ok(!names.includes('content'), names.join(', '));
+    });
+
+    test('switch 바깥에서는 분기 기본값을 설정할 수 있다', async () => {
+        const names = await suggest(`{"type":"switch",${marker}}`);
+        const inherited = new Set(['on', 'cases', 'defaultCase']);
+        for (const type of ['command', 'shell', 'zip', 'unzip', 'stringManipulation', 'writeFile', 'appendFile', 'browser']) {
+            for (const key of byType[type]) {
+                if (key !== 'forEach') { inherited.add(key); }
+            }
+        }
+        assert.deepStrictEqual(names, [...common, ...inherited].sort());
+    });
+
+    test('switch case와 defaultCase에서도 내부 type에 맞는 실행 필드만 추천한다', async () => {
+        for (const field of ['"cases":{"run":', '"defaultCase":']) {
+            const end = field.startsWith('"cases"') ? '}' : '';
+            for (const type of ['command', 'shell', 'zip', 'unzip', 'stringManipulation', 'writeFile', 'appendFile', 'browser']) {
+                const names = await suggest(`{"type":"switch",${field}{"type":"${type}",${marker}}${end}}`);
+                const expected = ['allowSecretContent', 'output', 'passTheResultToNextTask', ...byType[type].filter(key => key !== 'forEach')];
+                assert.deepStrictEqual(names, expected.sort(), `${field} ${type}`);
+            }
+        }
+    });
+
+    test('중첩 options·output의 필드 추천을 유지한다', async () => {
+        const options = await suggest(`{"type":"fileDialog","options":{${marker}}}`);
+        assert.ok(options.includes('canSelectMany'), options.join(', '));
+        assert.ok(options.includes('filters'), options.join(', '));
+        assert.ok(!options.includes('command'), options.join(', '));
+        const output = await suggest(`{"type":"inputBox","output":{${marker}}}`);
+        assert.ok(output.includes('mode'), output.join(', '));
+        assert.ok(output.includes('capture'), output.join(', '));
+    });
+
+    test('OS별 command 키와 browser target 허용값을 계속 추천한다', async () => {
+        assert.deepStrictEqual(await suggest(`{"type":"command","command":{${marker}}}`), ['linux', 'macos', 'windows']);
+        assert.deepStrictEqual(await suggest(`{"type":"browser","target":${marker}}`), ['"default"', '"integrated"']);
+    });
+
+    test('워크스페이스 프리셋과 번들 예제에도 스키마가 연결된다', async () => {
+        for (const file of ['.vscode/presets/demo.json', 'media/actions_example.json']) {
+            assert.deepStrictEqual(await suggest(`{"type":"fileDialog",${marker}}`, file), [...common, 'options'].sort());
+        }
+    });
+
+    test('추천 상세 설명에 실제 command·args 입력 예제가 표시된다', async () => {
+        const { doc, position } = await openFixture(wrap(`{"type":"command",${marker}}`));
+        const items = await getItems(doc, position);
+        const documentation = (key: string): string => {
+            const value = items.find(item => labelOf(item) === key)?.documentation;
+            return typeof value === 'string' ? value : value?.value ?? '';
+        };
+        assert.match(documentation('command'), /probe\.cjs/);
+        assert.match(documentation('command'), /인자 세 개/);
+        assert.match(documentation('args'), /two words/);
+        assert.match(documentation('args'), /본문 맨 뒤/);
+    });
+
+    test('기존 무관 필드와 다른 설정 파일의 hover도 설명·예제를 보여준다', async () => {
+        const fixtures = [
+            { file: '.vscode/actions.json', text: wrap(`{"type":"inputBox","comm${marker}and":"node"}`), words: ['probe', 'two words', '인자 세 개'] },
+            { file: '.vscode/links.json', text: `[{"ti${marker}tle":"문서","link":"https://example.com"}]`, words: ['Example:', 'title'] },
+            { file: '.vscode/favorites.json', text: `[{"title":"Main","pa${marker}th":"src/main.c"}]`, words: ['Example:', 'workspaceFolder'] },
+            { file: '.vscode/taskhub_types.json', text: `{"types":{"pointer":{"si${marker}ze":8,"alignment":8}}}`, words: ['Example:', '바이트'] },
+            { file: '.vscode/actions.json', text: wrap(`{"type":"fileDialog","options":{"default${marker}Uri":"\${workspaceFolder}"}}`), words: ['defaultUri', '예'] },
+        ];
+        for (const fixture of fixtures) {
+            const { doc, position } = await openFixture(fixture.text, fixture.file);
+            const hovers = await vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', doc.uri, position);
+            const contents = (hovers ?? []).flatMap(hover => hover.contents)
+                .map(content => typeof content === 'string' ? content : content.value).join('\n');
+            for (const word of fixture.words) {
+                assert.ok(contents.includes(word), `${fixture.file}: ${word} 설명 누락: ${contents}`);
+            }
+        }
+    });
+});
+
 /**
  * `${…}` 참조 자동완성 provider 의 **글루**를 실제로 구동하는 테스트.
  *

@@ -1,32 +1,69 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "TaskHub Links",
-  "description": "A list of useful web links.",
+  "description": "워크스페이스 링크 목록입니다. .vscode/links.json에 배열로 저장하면 Workspace Links 패널에 표시됩니다.\nWorkspace link list. Save an array in .vscode/links.json to show it in the Workspace Links panel.\n예 / Example: [{\"title\":\"TaskHub 가이드\",\"link\":\"https://github.com/MunseopLim/TaskHub\"}]",
   "type": "array",
   "items": {
     "type": "object",
+    "description": "링크 한 개입니다. title과 link는 필수이며 group과 tags로 정리할 수 있습니다.\nOne link. title and link are required; group and tags help organize the list.\n예 / Example: {\"title\":\"TaskHub 가이드\",\"link\":\"https://github.com/MunseopLim/TaskHub\",\"group\":\"개발 문서\",\"tags\":[\"TaskHub\"]}",
     "properties": {
       "title": {
         "type": "string",
-        "description": "The display name for the link."
+        "description": "패널과 링크 검색에 표시할 이름입니다.\nDisplay name shown in the panel and link search.\n예 / Example: \"title\": \"TaskHub 가이드\"",
+        "examples": [
+          "TaskHub 가이드"
+        ]
       },
       "link": {
         "type": "string",
-        "description": "The URL to open.",
-        "format": "uri"
+        "description": "클릭하면 기본 브라우저 또는 연결된 앱에서 여는 URL입니다. http, https, mailto를 지원합니다.\nURL opened in the default browser or associated application when clicked. Supports http, https, and mailto.\n예 / Example: \"link\": \"https://github.com/MunseopLim/TaskHub\"",
+        "format": "uri",
+        "examples": [
+          "https://github.com/MunseopLim/TaskHub",
+          "mailto:team@example.com"
+        ]
       },
       "group": {
         "type": "string",
-        "description": "Optional group label. Links with the same group appear under a collapsible section."
+        "description": "같은 이름의 링크를 접을 수 있는 그룹으로 묶습니다. 생략하면 그룹 밖에 표시하며, /도 그룹 이름의 일부로 취급합니다.\nGroups links with the same name into a collapsible section. Omit to show the link outside groups. A slash is treated as part of the group name.\n예 / Example: \"group\": \"개발 문서\"",
+        "examples": [
+          "개발 문서"
+        ]
       },
       "tags": {
         "type": "array",
-        "description": "Optional tags to help filter links.",
+        "description": "링크 옆에 표시하고 검색에 사용할 태그 목록입니다. 문자열 배열로 입력합니다.\nTags displayed beside the link and included in searches. Enter an array of strings.\n예 / Example: \"tags\": [\"TaskHub\", \"가이드\"]",
+        "examples": [
+          [
+            "TaskHub",
+            "가이드"
+          ]
+        ],
         "items": {
-          "type": "string"
+          "type": "string",
+          "description": "검색할 태그 하나입니다.\nOne searchable tag.\n예 / Example: \"가이드\"",
+          "examples": [
+            "가이드"
+          ]
         }
       }
     },
-    "required": ["title", "link"]
-  }
+    "required": [
+      "title",
+      "link"
+    ]
+  },
+  "examples": [
+    [
+      {
+        "title": "TaskHub 가이드",
+        "link": "https://github.com/MunseopLim/TaskHub",
+        "group": "개발 문서",
+        "tags": [
+          "TaskHub",
+          "가이드"
+        ]
+      }
+    ]
+  ]
 }

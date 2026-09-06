@@ -1,32 +1,54 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "TaskHub Type Configuration",
-  "description": "Custom type sizes and alignment for struct size calculation in hover tooltips.",
+  "description": "구조체의 추정 크기·정렬과 Memory Map 영역을 설정합니다. .vscode/taskhub_types.json에 저장합니다.\nConfigures estimated struct sizes, alignment, and Memory Map regions. Save in .vscode/taskhub_types.json.\n예 / Example: {\"types\":{\"pointer\":{\"size\":8,\"alignment\":8}},\"packingAlignment\":8}",
   "type": "object",
   "properties": {
     "types": {
       "type": "object",
-      "description": "Type definitions with size and alignment.",
+      "description": "타입 이름별 크기와 정렬을 지정합니다. 기본 타입에 합쳐지며 같은 이름만 덮어씁니다. T* 포인터의 크기는 pointer 키로 설정합니다.\nSizes and alignments keyed by type name. Merged with the defaults, replacing only matching names. Use the pointer key to configure all T* pointer declarations.\n예 / Example: \"types\": {\"pointer\":{\"size\":8,\"alignment\":8},\"PacketHeader\":{\"size\":12,\"alignment\":4}}",
       "additionalProperties": {
         "type": "object",
+        "description": "타입 한 개의 크기와 정렬입니다. 대상 컴파일러의 sizeof·alignof에 맞추고 size와 alignment를 모두 입력합니다.\nSize and alignment of one type. Set both size and alignment to match sizeof and alignof from the target compiler.\n예 / Example: {\"size\":12,\"alignment\":4}",
         "properties": {
           "size": {
             "type": "integer",
             "minimum": 1,
-            "description": "Size in bytes."
+            "description": "타입 하나의 크기입니다. 바이트 단위로 1 이상의 정수를 입력합니다.\nSize of one value of this type, in bytes. Enter an integer of at least 1.\n예 / Example: \"size\": 12",
+            "examples": [
+              12
+            ]
           },
           "alignment": {
             "type": "integer",
             "minimum": 1,
-            "description": "Alignment requirement in bytes."
+            "description": "타입이 요구하는 정렬입니다. 바이트 단위로 입력하며, 실제 멤버 정렬에는 packingAlignment 상한을 적용합니다.\nAlignment required by the type, in bytes. The effective member alignment is capped by packingAlignment.\n예 / Example: \"alignment\": 4",
+            "examples": [
+              4
+            ]
           }
         },
-        "required": ["size", "alignment"]
+        "required": [
+          "size",
+          "alignment"
+        ],
+        "examples": [
+          {
+            "size": 12,
+            "alignment": 4
+          }
+        ]
       },
       "examples": [
         {
-          "MyCustomType": { "size": 8, "alignment": 4 },
-          "HANDLE": { "size": 8, "alignment": 8 }
+          "pointer": {
+            "size": 8,
+            "alignment": 8
+          },
+          "PacketHeader": {
+            "size": 12,
+            "alignment": 4
+          }
         }
       ]
     },
@@ -35,53 +57,139 @@
       "minimum": 1,
       "maximum": 16,
       "default": 8,
-      "description": "Default struct packing alignment (1, 2, 4, 8, 16). Use 1 for packed structs."
+      "description": "구조체 멤버 정렬의 상한입니다. 기본 8이며 범위는 1–16입니다. 대상 ABI에 맞는 값(보통 1, 2, 4, 8, 16)을 사용합니다. 1이면 멤버 사이 정렬 패딩을 두지 않습니다. 소스의 #pragma pack을 자동 반영하는 설정은 아닙니다.\nUpper limit on struct member alignment. Defaults to 8 and accepts values from 1 to 16. Choose a value matching the target ABI, usually 1, 2, 4, 8, or 16. A value of 1 removes alignment padding between members. This does not automatically apply #pragma pack from source files.\n예 / Example: \"packingAlignment\": 1",
+      "examples": [
+        8,
+        1
+      ]
     },
     "memoryMap": {
       "type": "object",
-      "description": "Memory map configuration for ELF/AXF memory visualization.",
+      "description": "ELF32/AXF Memory Map에 사용할 메모리 영역 설정입니다. 유효한 regions를 지정하면 처음 열 때 링커 스크립트 선택을 생략할 수 있습니다.\nMemory regions used by the ELF32/AXF Memory Map. Providing valid regions allows the initial linker script selection to be skipped.\n예 / Example: \"memoryMap\": {\"regions\":[{\"name\":\"FLASH\",\"origin\":134217728,\"size\":1048576}]}",
       "properties": {
         "regions": {
           "type": "array",
-          "description": "Memory regions (FLASH, RAM, etc.) with origin address and total size.",
+          "description": "보드의 FLASH·RAM 영역 목록입니다. 각 항목에 이름, 시작 주소, 전체 용량을 지정합니다. 주소와 크기는 10진수 JSON 숫자로 입력합니다.\nBoard memory regions such as FLASH and RAM. Specify each region name, start address, and total capacity. Enter addresses and sizes as decimal JSON numbers.\n예 / Example: \"regions\": [{\"name\":\"FLASH\",\"origin\":134217728,\"size\":1048576},{\"name\":\"RAM\",\"origin\":536870912,\"size\":262144}]",
           "items": {
             "type": "object",
+            "description": "메모리 영역 한 개입니다. name, origin, size를 모두 입력합니다.\nOne memory region. name, origin, and size are all required.\n예 / Example: {\"name\":\"FLASH\",\"origin\":134217728,\"size\":1048576}",
             "properties": {
               "name": {
                 "type": "string",
-                "description": "Region name (e.g., FLASH, RAM, DTCM, ITCM)."
+                "description": "Memory Map에 표시할 비어 있지 않은 영역 이름입니다. FLASH, RAM, DTCM처럼 구분하기 쉬운 이름을 사용합니다.\nNonempty region name displayed in Memory Map. Use an identifiable name such as FLASH, RAM, or DTCM.\n예 / Example: \"name\": \"FLASH\"",
+                "examples": [
+                  "FLASH",
+                  "RAM",
+                  "DTCM"
+                ]
               },
               "origin": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Start address of the memory region."
+                "description": "영역 시작 주소입니다. 0 이상의 10진수 정수로 입력합니다. 0x 접두사나 주소 문자열은 사용할 수 없습니다. 134217728은 0x08000000에 해당합니다.\nRegion start address as a nonnegative decimal integer. A 0x prefix or address string is not accepted. 134217728 corresponds to 0x08000000.\n예 / Example: \"origin\": 134217728",
+                "examples": [
+                  134217728,
+                  536870912
+                ]
               },
               "size": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Total size of the memory region in bytes."
+                "description": "영역의 전체 용량입니다. 사용량이 아니라 바이트 단위 용량을 1 이상의 정수로 입력합니다. 1048576은 1 MiB입니다.\nTotal region capacity, rather than its current usage, in bytes. Enter an integer of at least 1. 1048576 is 1 MiB.\n예 / Example: \"size\": 1048576",
+                "examples": [
+                  1048576,
+                  262144
+                ]
               }
             },
-            "required": ["name", "origin", "size"]
-          }
+            "required": [
+              "name",
+              "origin",
+              "size"
+            ],
+            "examples": [
+              {
+                "name": "FLASH",
+                "origin": 134217728,
+                "size": 1048576
+              }
+            ]
+          },
+          "examples": [
+            [
+              {
+                "name": "FLASH",
+                "origin": 134217728,
+                "size": 1048576
+              },
+              {
+                "name": "RAM",
+                "origin": 536870912,
+                "size": 262144
+              }
+            ]
+          ]
         }
-      }
+      },
+      "examples": [
+        {
+          "regions": [
+            {
+              "name": "FLASH",
+              "origin": 134217728,
+              "size": 1048576
+            }
+          ]
+        }
+      ]
     }
   },
   "examples": [
     {
       "types": {
-        "HANDLE": { "size": 8, "alignment": 8 },
-        "PVOID": { "size": 8, "alignment": 8 },
-        "SIZE_T": { "size": 8, "alignment": 8 }
+        "pointer": {
+          "size": 8,
+          "alignment": 8
+        },
+        "HANDLE": {
+          "size": 8,
+          "alignment": 8
+        },
+        "PVOID": {
+          "size": 8,
+          "alignment": 8
+        },
+        "SIZE_T": {
+          "size": 8,
+          "alignment": 8
+        }
       },
       "packingAlignment": 8
     },
     {
       "types": {
-        "MyPackedStruct": { "size": 12, "alignment": 1 }
+        "MyPackedStruct": {
+          "size": 12,
+          "alignment": 1
+        }
       },
       "packingAlignment": 1
+    },
+    {
+      "memoryMap": {
+        "regions": [
+          {
+            "name": "FLASH",
+            "origin": 134217728,
+            "size": 1048576
+          },
+          {
+            "name": "RAM",
+            "origin": 536870912,
+            "size": 262144
+          }
+        ]
+      }
     }
   ]
 }

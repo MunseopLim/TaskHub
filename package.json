@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.19",
+  "version": "0.8.20",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -33,6 +33,7 @@
       {
         "fileMatch": [
           "/.vscode/actions.json",
+          "/.vscode/presets/*.json",
           "/media/actions.json",
           "/media/actions_example.json"
         ],

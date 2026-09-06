@@ -94,7 +94,11 @@ VS Code 하단 Status Bar 왼쪽의 도구 아이콘과 **TaskHub** 텍스트를
 
 ### 편집 지원 (스키마 + `${…}` 자동완성)
 
-`actions.json`에는 JSON 스키마([schema/actions.schema.json](../schema/actions.schema.json))가 연결돼 있어 키·타입·허용값이 제안되고 잘못된 값에 밑줄이 그어집니다. `options` 안의 `canSelectMany` 같은 다이얼로그 옵션도 여기에 포함됩니다.
+`actions.json`과 워크스페이스의 `.vscode/presets/*.json`에는 JSON 스키마([schema/actions.schema.json](../schema/actions.schema.json))가 연결돼 있어 키·타입·허용값이 제안되고 잘못된 값에 밑줄이 그어집니다. **태스크의 `type`을 먼저 입력하면 공통 필드와 그 타입에서 사용하는 필드만 추천합니다.** 예를 들어 `"type": "command"`에는 `command`·`args`·`env`·`cwd`가, `"type": "fileDialog"`에는 `options`가 나타납니다. `id`나 다른 필수 필드를 아직 쓰지 않았어도 동작하며, `type`이 없거나 입력 중인 값이면 `id`·`type`·출력·실행 조건 같은 공통 필드부터 안내합니다.
+
+`switch`의 `cases`·`defaultCase` 안에서도 선택한 타입에 맞춰 추천합니다. 바깥 `switch`에는 분기의 기본값으로 상속할 수 있는 실행 필드도 함께 나타납니다. 추천에서 빠진 기존 필드를 자동으로 지우지는 않으며, 값의 타입 검사는 계속 적용됩니다. `options` 안의 `canSelectMany` 같은 중첩 필드도 제안합니다.
+
+필드 이름에 마우스를 올리거나 자동완성 목록의 상세 설명을 열면 **용도·적용 범위와 JSON 입력 예제**를 볼 수 있습니다. `command`와 `args`에는 실행 시 인자가 전달되는 방식도 안내합니다. 링크·즐겨찾기·커스텀 타입 설정 파일에도 같은 방식으로 설명과 예제를 제공합니다. 전체 태스크 작성 예제와 명령 실행 규칙은 [`actions.json` 작성 가이드](./actions.md)를 참고하세요.
 
 **결과 참조(`${…}`)는 스키마가 다룰 수 없습니다.** 값 문자열 *안*에 있고, 무엇이 유효한지가 같은 액션의 다른 태스크 타입에 달려 있기 때문입니다. 전용 자동완성에서 `${`를 입력하면 **같은 액션의 다른 태스크 id**와 현재 파일·선택 영역 같은 내장 문맥 변수가, `${pick.`처럼 점을 찍으면 **그 태스크 타입이 실제로 내는 결과 키**가 제안됩니다 (`fileDialog`이면 `path` · `dir` · `paths` · `names` · `count` …). `${env:` 뒤에는 현재 환경변수 이름이 제안됩니다(값은 목록에 표시하지 않음).
 

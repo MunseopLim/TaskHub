@@ -1,36 +1,77 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "TaskHub Favorites",
-  "description": "A list of favorite files for quick access.",
+  "description": "자주 여는 파일과 줄 번호 목록입니다. .vscode/favorites.json에 배열로 저장하면 Favorite Files 패널에 표시됩니다.\nList of frequently opened files and line numbers. Save an array in .vscode/favorites.json to show it in the Favorite Files panel.\n예 / Example: [{\"title\":\"메인 초기화\",\"path\":\"src/main.c\",\"line\":12}]",
   "type": "array",
   "items": {
     "type": "object",
+    "description": "즐겨찾기 한 개입니다. title과 path는 필수이며 line을 지정하면 해당 줄로 이동합니다.\nOne favorite. title and path are required; line selects the line to open.\n예 / Example: {\"title\":\"메인 초기화\",\"path\":\"src/main.c\",\"line\":12,\"group\":\"펌웨어\"}",
     "properties": {
       "title": {
         "type": "string",
-        "description": "The display name for the favorite file."
+        "description": "패널과 즐겨찾기 검색에 표시할 이름입니다. 파일명과 다르게 지정할 수 있습니다.\nDisplay name shown in the panel and favorite search. It can differ from the file name.\n예 / Example: \"title\": \"메인 초기화\"",
+        "examples": [
+          "메인 초기화"
+        ]
       },
       "path": {
         "type": "string",
-        "description": "The absolute path to the file. Can use `${workspaceFolder}`."
+        "description": "이 favorites.json이 속한 워크스페이스 폴더 기준의 파일 경로입니다. ${workspaceFolder}와 절대 경로도 지원하지만, 열린 워크스페이스 밖 파일은 열 수 없습니다. 팀 공유에는 / 구분자의 상대 경로를 사용하세요.\nFile path relative to the workspace folder containing this favorites.json. Supports ${workspaceFolder} and absolute paths, but files outside open workspace folders cannot be opened. Use relative paths with / separators when sharing with a team.\n예 / Example: \"path\": \"src/main.c\" 또는 \"path\": \"${workspaceFolder}/src/main.c\"",
+        "examples": [
+          "src/main.c",
+          "${workspaceFolder}/src/main.c"
+        ]
       },
       "line": {
         "type": "integer",
         "minimum": 1,
-        "description": "Optional 1-based line number to open."
+        "description": "파일을 열 때 이동할 줄 번호입니다. 1부터 시작하는 정수이며, 생략하면 파일만 엽니다.\nLine to navigate to when opening the file. Use an integer starting at 1; omit to open the file without selecting a line.\n예 / Example: \"line\": 12",
+        "examples": [
+          12
+        ]
       },
       "group": {
         "type": "string",
-        "description": "Optional group label. Favorites with the same group appear under a collapsible section."
+        "description": "같은 이름의 즐겨찾기를 접을 수 있는 그룹으로 묶습니다. 생략하면 그룹 밖에 표시하며, /도 그룹 이름의 일부로 취급합니다.\nGroups favorites with the same name into a collapsible section. Omit to show the favorite outside groups. A slash is treated as part of the group name.\n예 / Example: \"group\": \"펌웨어\"",
+        "examples": [
+          "펌웨어"
+        ]
       },
       "tags": {
         "type": "array",
-        "description": "Optional tags to help filter favorites.",
+        "description": "즐겨찾기 옆에 표시하고 검색에 사용할 태그 목록입니다. 문자열 배열로 입력합니다.\nTags displayed beside the favorite and included in searches. Enter an array of strings.\n예 / Example: \"tags\": [\"startup\", \"UART\"]",
+        "examples": [
+          [
+            "startup",
+            "UART"
+          ]
+        ],
         "items": {
-          "type": "string"
+          "type": "string",
+          "description": "검색할 태그 하나입니다.\nOne searchable tag.\n예 / Example: \"startup\"",
+          "examples": [
+            "startup"
+          ]
         }
       }
     },
-    "required": ["title", "path"]
-  }
+    "required": [
+      "title",
+      "path"
+    ]
+  },
+  "examples": [
+    [
+      {
+        "title": "메인 초기화",
+        "path": "src/main.c",
+        "line": 12,
+        "group": "펌웨어",
+        "tags": [
+          "startup",
+          "UART"
+        ]
+      }
+    ]
+  ]
 }
