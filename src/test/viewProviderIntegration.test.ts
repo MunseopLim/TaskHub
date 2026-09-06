@@ -5,7 +5,8 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { actionStates } from '../providers/actionStatus';
 import { Favorite, FavoriteEntry, FavoriteGroup, FavoriteParseError, FavoriteViewProvider, loadFavoritesFromDisk, removeFavoriteByIdentity } from '../providers/favoriteViewProvider';
-import { buildActionCommandId, buildRunAnyActionPaletteItems, buildRunAnyActionPicks, planRunAnyAction, serializeFavorites, syncActionCommandsFromActions, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT } from '../extension';
+import { addOpenFileToFavorites, buildActionCommandId, buildRunAnyActionPaletteItems, buildRunAnyActionPicks, planRunAnyAction, serializeFavorites, syncActionCommandsFromActions, RUN_ANY_ACTION_MRU_DEFAULT_LIMIT } from '../extension';
+import { t } from '../i18n';
 import { Link, LinkGroup, LinkParseError, LinkViewProvider } from '../providers/linkViewProvider';
 import { Action, Folder, MainViewProvider, buildActionAccessibilityLabel, formatProgressDescription } from '../providers/mainViewProvider';
 import { HistoryProvider } from '../providers/historyProvider';
@@ -16,6 +17,168 @@ function normalizeWindowsPathForAssert(value: string): string {
         ? value.replace(/\b([a-z]):\\/g, (_match, drive: string) => `${drive.toUpperCase()}:\\`)
         : value;
 }
+
+suite('열려 있는 파일 즐겨찾기 등록 방식', function () {
+    this.timeout(15000);
+
+    let workspace: string;
+    let favoritesPath: string;
+    let editor: vscode.TextEditor;
+    let choiceIndex: number | undefined;
+    let duringPick: (() => Promise<void>) | undefined;
+    let picks: vscode.QuickPickItem[];
+    let pickOptions: vscode.QuickPickOptions | undefined;
+    let messages: string[];
+    let errors: string[];
+    let refreshes: number;
+    let restore: () => void;
+    const provider = { refresh: () => { refreshes++; } };
+    const readSaved = (): Array<Record<string, unknown>> => JSON.parse(fs.readFileSync(favoritesPath, 'utf8'));
+    const writeSaved = (value: unknown): void => {
+        fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
+        fs.writeFileSync(favoritesPath, JSON.stringify(value));
+    };
+
+    setup(async () => {
+        workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-favorite-choice-')));
+        favoritesPath = path.join(workspace, '.vscode', 'favorites.json');
+        const file = path.join(workspace, 'main.c');
+        fs.writeFileSync(file, Array.from({ length: 130 }, (_, i) => `// line ${i + 1}`).join('\n'));
+        editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(file)));
+        editor.selection = new vscode.Selection(126, 0, 126, 0);
+        choiceIndex = 0;
+        duringPick = undefined;
+        picks = [];
+        pickOptions = undefined;
+        messages = [];
+        errors = [];
+        refreshes = 0;
+
+        const original = {
+            pick: vscode.window.showQuickPick,
+            information: vscode.window.showInformationMessage,
+            error: vscode.window.showErrorMessage,
+            folder: vscode.workspace.getWorkspaceFolder
+        };
+        restore = () => {
+            vscode.window.showQuickPick = original.pick;
+            vscode.window.showInformationMessage = original.information;
+            vscode.window.showErrorMessage = original.error;
+            vscode.workspace.getWorkspaceFolder = original.folder;
+        };
+        (vscode.workspace as any).getWorkspaceFolder = () => ({ uri: vscode.Uri.file(workspace), name: 'favorite-test', index: 0 });
+        (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[], options?: vscode.QuickPickOptions) => {
+            picks = items;
+            pickOptions = options;
+            await duringPick?.();
+            return choiceIndex === undefined ? undefined : items[choiceIndex];
+        };
+        (vscode.window as any).showInformationMessage = async (message: string) => { messages.push(message); return undefined; };
+        (vscode.window as any).showErrorMessage = async (message: string) => { errors.push(message); return undefined; };
+    });
+
+    teardown(async () => {
+        restore?.();
+        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        fs.rmSync(workspace, { recursive: true, force: true });
+    });
+
+    test('IT-209: 기본 선택은 파일만 등록하며 line을 저장하지 않는다', async () => {
+        await addOpenFileToFavorites(provider);
+        assert.deepStrictEqual(picks.map(item => item.label), [
+            t('파일만 등록', 'File only'),
+            t('현재 줄 포함 — 줄 127', 'Include current line — line 127')
+        ]);
+        assert.strictEqual(pickOptions?.ignoreFocusOut, true, '다른 창을 클릭해도 선택 창을 유지해야 한다');
+        assert.strictEqual(pickOptions?.title, t('즐겨찾기에 추가', 'Add to Favorites'));
+        assert.strictEqual(pickOptions?.placeHolder, t("'main.c'을(를) 어떻게 등록할까요?", "How would you like to add 'main.c'?"));
+        assert.deepStrictEqual(readSaved(), [{ title: 'main.c', path: '${workspaceFolder}/main.c' }]);
+        assert.strictEqual(refreshes, 1);
+        assert.strictEqual(messages.length, 1);
+        assert.ok(!messages[0].includes('127'), messages[0]);
+    });
+
+    test('IT-210: 현재 줄 선택은 1부터 시작하는 줄을 저장하고 파일 등록과 공존한다', async () => {
+        await addOpenFileToFavorites(provider);
+        choiceIndex = 1;
+        await addOpenFileToFavorites(provider);
+        assert.deepStrictEqual(readSaved(), [
+            { title: 'main.c', path: '${workspaceFolder}/main.c' },
+            { title: 'main.c', path: '${workspaceFolder}/main.c', line: 127 }
+        ]);
+        assert.ok(messages[1].includes('127'), messages[1]);
+        editor.selection = new vscode.Selection(0, 0, 0, 0);
+        await addOpenFileToFavorites(provider);
+        assert.strictEqual(readSaved()[2].line, 1);
+    });
+
+    test('IT-211: 취소하면 설정 파일을 만들거나 기존 내용을 바꾸지 않는다', async () => {
+        choiceIndex = undefined;
+        await addOpenFileToFavorites(provider);
+        assert.strictEqual(fs.existsSync(path.dirname(favoritesPath)), false);
+        writeSaved([{ title: 'Existing', path: 'main.c', line: 3 }]);
+        const before = fs.readFileSync(favoritesPath, 'utf8');
+        await addOpenFileToFavorites(provider);
+        assert.strictEqual(fs.readFileSync(favoritesPath, 'utf8'), before);
+        assert.strictEqual(refreshes, 0);
+        assert.deepStrictEqual(messages, []);
+    });
+
+    test('IT-212: 같은 방식으로 다시 등록하면 중복 추가나 파일 재저장을 하지 않는다', async () => {
+        for (const index of [0, 1]) {
+            choiceIndex = index;
+            await addOpenFileToFavorites(provider);
+            // 재직렬화가 일어나면 이 들여쓰기와 끝 공백이 사라진다.
+            const before = JSON.stringify(readSaved(), null, 4) + '\n\n';
+            fs.writeFileSync(favoritesPath, before);
+            const count = refreshes;
+            await addOpenFileToFavorites(provider);
+            assert.strictEqual(fs.readFileSync(favoritesPath, 'utf8'), before);
+            assert.strictEqual(refreshes, count);
+            assert.ok(messages.at(-1)?.includes(t('이미 존재합니다', 'already exists')));
+        }
+        assert.strictEqual(readSaved().length, 2);
+    });
+
+    test('IT-213: 선택 대기 중 편집기 전환과 설정 변경이 있어도 원래 위치와 최신 항목을 보존한다', async () => {
+        choiceIndex = 1;
+        const existing = { title: 'Other', path: 'other.c', tags: ['keep'] };
+        duringPick = async () => {
+            editor.selection = new vscode.Selection(0, 0, 0, 0);
+            const otherFile = path.join(workspace, 'other.c');
+            fs.writeFileSync(otherFile, '// other');
+            await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(otherFile)));
+            writeSaved([existing]);
+        };
+        await addOpenFileToFavorites(provider);
+        assert.deepStrictEqual(readSaved(), [existing, { title: 'main.c', path: '${workspaceFolder}/main.c', line: 127 }]);
+    });
+
+    test('IT-214: 선택 대기 중 설정이 손상되면 덮어쓰지 않고 오류를 알린다', async () => {
+        duringPick = async () => {
+            fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
+            fs.writeFileSync(favoritesPath, '[broken');
+        };
+        await addOpenFileToFavorites(provider);
+        assert.strictEqual(fs.readFileSync(favoritesPath, 'utf8'), '[broken');
+        assert.strictEqual(refreshes, 0);
+        assert.strictEqual(errors.length, 1);
+        assert.deepStrictEqual(messages, []);
+    });
+
+    test('IT-215: 새 파일을 등록해도 잘못된 형식의 기존 항목과 순서를 보존한다', async () => {
+        const invalid = { title: 123 };
+        const keep = { title: 'Keep', path: 'a.c' };
+        writeSaved([invalid, keep]);
+        await addOpenFileToFavorites(provider);
+        assert.deepStrictEqual(readSaved(), [
+            invalid,
+            keep,
+            { title: 'main.c', path: '${workspaceFolder}/main.c' }
+        ]);
+        assert.strictEqual(refreshes, 1);
+    });
+});
 
 /**
  * Integration tests for TreeDataProviders backed by VS Code workspace state

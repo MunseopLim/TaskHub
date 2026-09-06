@@ -4654,6 +4654,114 @@ export function addFavoriteEntry(
     return { entries: [...entries, newEntry], added: true };
 }
 
+/** Add the active file, optionally remembering its current cursor line. */
+export async function addOpenFileToFavorites(favoriteViewProvider: Pick<FavoriteViewProvider, 'refresh'>): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showInformationMessage(t('활성 편집기를 찾을 수 없습니다.', 'No active editor found.'));
+        return;
+    }
+
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+    if (!workspaceFolder) {
+        vscode.window.showErrorMessage(t('활성 파일이 열린 워크스페이스 폴더에 속하지 않습니다.', 'The active file does not belong to an open workspace folder.'));
+        return;
+    }
+
+    // Capture the target before showing UI: changing editors must not retarget the save.
+    const filePath = editor.document.uri.fsPath;
+    const title = path.basename(filePath);
+    const currentLine = editor.selection.active.line + 1;
+    const selection = await vscode.window.showQuickPick([
+        {
+            label: t('파일만 등록', 'File only'),
+            description: t('줄 번호 없이 파일을 등록합니다.', 'Add the file without a line number.'),
+            includeLine: false
+        },
+        {
+            label: t(`현재 줄 포함 — 줄 ${currentLine}`, `Include current line — line ${currentLine}`),
+            description: t('파일을 열면 이 줄로 이동합니다.', 'Jump to this line when opening the file.'),
+            includeLine: true
+        }
+    ], {
+        title: t('즐겨찾기에 추가', 'Add to Favorites'),
+        placeHolder: t(`'${title}'을(를) 어떻게 등록할까요?`, `How would you like to add '${title}'?`),
+        ignoreFocusOut: true
+    });
+    if (!selection) {
+        return;
+    }
+
+    // Read after the choice so edits made while the picker was open are preserved.
+    const favoritesPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'favorites.json');
+    const loadResult = readFavoritesFromDisk(favoritesPath, workspaceFolder.uri.fsPath);
+    if (!loadResult.ok) {
+        const openLabel = t('favorites.json 열기', 'Open favorites.json');
+        const choice = await vscode.window.showErrorMessage(
+            t(
+                `favorites.json 파싱에 실패해 변경 사항을 저장할 수 없습니다: ${loadResult.error}`,
+                `Cannot save — failed to parse favorites.json: ${loadResult.error}`
+            ),
+            openLabel
+        );
+        if (choice === openLabel && fs.existsSync(favoritesPath)) {
+            const document = await vscode.workspace.openTextDocument(favoritesPath);
+            await vscode.window.showTextDocument(document, { preview: false });
+        }
+        return;
+    }
+
+    const line = selection.includeLine ? currentLine : undefined;
+    const favoriteLabel = line === undefined ? title : t(`${title} (줄 ${line})`, `${title} (line ${line})`);
+    const favorite: FavoriteEntry = {
+        title,
+        path: toWorkspaceRelativePath(filePath, workspaceFolder.uri.fsPath),
+        line,
+        sourceFile: favoritesPath,
+        workspaceFolder: workspaceFolder.uri.fsPath
+    };
+    const { entries: updatedFavorites, added } = addFavoriteEntry(loadResult.entries, favorite);
+    const openLabel = t('favorites.json 열기', 'Open favorites.json');
+
+    if (!added) {
+        // The same file or file-and-line entry is already favorited. Mirror the
+        // Add Link duplicate path so the user gets a recovery toast
+        // instead of a confusing "saved" message followed by the row
+        // not appearing twice in the tree.
+        const choice = await vscode.window.showInformationMessage(
+            t(
+                `'${favoriteLabel}' 항목은 favorites.json에 이미 존재합니다.`,
+                `'${favoriteLabel}' already exists in favorites.json.`
+            ),
+            openLabel
+        );
+        if (choice === openLabel && fs.existsSync(favoritesPath)) {
+            const document = await vscode.workspace.openTextDocument(favoritesPath);
+            await vscode.window.showTextDocument(document, { preview: false });
+        }
+        return;
+    }
+
+    const serialized = mergeInvalidJsonEntries(serializeFavorites(updatedFavorites), loadResult.invalid);
+    if (!fs.existsSync(path.dirname(favoritesPath))) {
+        fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
+    }
+    fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
+    favoriteViewProvider.refresh();
+
+    const choice = await vscode.window.showInformationMessage(
+        t(
+            `'${favoriteLabel}' 항목이 favorites.json에 추가되었습니다. 제목/그룹/태그 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
+            `'${favoriteLabel}' was added to favorites.json. Edit favorites.json to configure title, group, or tags.`
+        ),
+        openLabel
+    );
+    if (choice === openLabel) {
+        const document = await vscode.workspace.openTextDocument(favoritesPath);
+        await vscode.window.showTextDocument(document, { preview: false });
+    }
+}
+
 /**
  * Localize a {@link validateLinkUrlForSave} result into the message string
  * expected by `vscode.InputBox.validateInput` (`null` = pass, otherwise
@@ -12194,92 +12302,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(showExampleJsonCommand);
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showExampleJsonQuickPick', async () => { const pick = await vscode.window.showQuickPick([ { label: t('actions.json 예제', 'actions.json Example'), description: t('actions.json 예제 내용 보기', 'Show example content for actions.json'), type: 'actions' }, { label: t('links.json 예제', 'links.json Example'), description: t('links.json 예제 내용 보기', 'Show example content for links.json'), type: 'links' }, { label: t('favorites.json 예제', 'favorites.json Example'), description: t('favorites.json 예제 내용 보기', 'Show example content for favorites.json'), type: 'favorites' }, ], { placeHolder: t('표시할 예제 JSON을 선택하세요', 'Select which example JSON to display') }); if (pick) { vscode.commands.executeCommand('taskhub.showExampleJson', pick.type); } }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addOpenFileToFavorites', async () => {
-        // Simplified flow (v0.4.32): zero prompts. The user clicked the
-        // *Add Open File to Favorites* button → save THIS file at the
-        // current cursor line with basename as title. Group / tags /
-        // custom title go in via the post-creation toast's *Open
-        // favorites.json* button. Broken favorites.json refuses to save
-        // and shows the same recovery surface.
-        const editor = vscode.window.activeTextEditor;
-        if (!editor) {
-            vscode.window.showInformationMessage(t('활성 편집기를 찾을 수 없습니다.', 'No active editor found.'));
-            return;
-        }
-
-        const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
-        if (!workspaceFolder) {
-            vscode.window.showErrorMessage(t('활성 파일이 열린 워크스페이스 폴더에 속하지 않습니다.', 'The active file does not belong to an open workspace folder.'));
-            return;
-        }
-
-        const filePath = editor.document.uri.fsPath;
-        const favoritesPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'favorites.json');
-        const loadResult = readFavoritesFromDisk(favoritesPath, workspaceFolder.uri.fsPath);
-        if (!loadResult.ok) {
-            const openLabel = t('favorites.json 열기', 'Open favorites.json');
-            const choice = await vscode.window.showErrorMessage(
-                t(
-                    `favorites.json 파싱에 실패해 변경 사항을 저장할 수 없습니다: ${loadResult.error}`,
-                    `Cannot save — failed to parse favorites.json: ${loadResult.error}`
-                ),
-                openLabel
-            );
-            if (choice === openLabel && fs.existsSync(favoritesPath)) {
-                const document = await vscode.workspace.openTextDocument(favoritesPath);
-                await vscode.window.showTextDocument(document, { preview: false });
-            }
-            return;
-        }
-
-        const title = path.basename(filePath);
-        const line = editor.selection.active.line + 1;
-        const favorite: FavoriteEntry = {
-            title,
-            path: toWorkspaceRelativePath(filePath, workspaceFolder.uri.fsPath),
-            line,
-            sourceFile: favoritesPath,
-            workspaceFolder: workspaceFolder.uri.fsPath
-        };
-        const { entries: updatedFavorites, added } = addFavoriteEntry(loadResult.entries, favorite);
-        const openLabel = t('favorites.json 열기', 'Open favorites.json');
-
-        if (!added) {
-            // Same line of the same file already favorited. Mirror the
-            // Add Link duplicate path so the user gets a recovery toast
-            // instead of a confusing "saved" message followed by the row
-            // not appearing twice in the tree.
-            const choice = await vscode.window.showInformationMessage(
-                t(
-                    `'${title}' (줄 ${line})는 favorites.json에 이미 존재합니다.`,
-                    `'${title}' (line ${line}) already exists in favorites.json.`
-                ),
-                openLabel
-            );
-            if (choice === openLabel && fs.existsSync(favoritesPath)) {
-                const document = await vscode.workspace.openTextDocument(favoritesPath);
-                await vscode.window.showTextDocument(document, { preview: false });
-            }
-            return;
-        }
-
-        const serialized = mergeInvalidJsonEntries(serializeFavorites(updatedFavorites), loadResult.invalid);
-        if (!fs.existsSync(path.dirname(favoritesPath))) {
-            fs.mkdirSync(path.dirname(favoritesPath), { recursive: true });
-        }
-        fs.writeFileSync(favoritesPath, JSON.stringify(serialized, null, 2) + '\n');
-        favoriteViewProvider.refresh();
-
-        const choice = await vscode.window.showInformationMessage(
-            t(
-                `'${title}' (줄 ${line})가 favorites.json에 추가되었습니다. 제목/그룹/태그 등 추가 설정이 필요하면 favorites.json을 편집하세요.`,
-                `'${title}' (line ${line}) was added to favorites.json. Edit favorites.json to configure title, group, or tags.`
-            ),
-            openLabel
-        );
-        if (choice === openLabel) {
-            const document = await vscode.workspace.openTextDocument(favoritesPath);
-            await vscode.window.showTextDocument(document, { preview: false });
-        }
+        await addOpenFileToFavorites(favoriteViewProvider);
     }));
     /**
      * Stop every running action — and *only* that. Closing terminals was

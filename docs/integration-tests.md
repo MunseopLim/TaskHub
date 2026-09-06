@@ -19,6 +19,19 @@
 
 ## 시나리오 그룹
 
+### 열려 있는 파일 즐겨찾기 등록 방식
+파일: [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-209 | 파일만 등록 기본 선택 | 첫 선택 항목·현재 줄 표시·제목 및 안내 문구·포커스 이탈 시 창 유지 옵션·`line` 없는 저장 |
+| IT-210 | 현재 줄 등록 | 1-based 줄 번호와 파일 단위 즐겨찾기 공존 |
+| IT-211 | 선택 취소 | 파일·디렉터리 생성 및 기존 설정 변경 없음 |
+| IT-212 | 동일 위치 중복 등록 | 중복 안내·재저장 및 새로고침 없음 |
+| IT-213 | 선택 대기 중 문맥 변경 | 원래 파일·커서 줄과 최신 설정 항목 보존 |
+| IT-214 | 선택 대기 중 설정 손상 | 손상된 파일을 보존하고 오류 안내 |
+| IT-215 | 잘못된 형식의 기존 항목 | 새 항목 저장 시 무효 항목과 원래 순서 보존 |
+
 ### Output Capture + Pipeline Chaining
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
 
