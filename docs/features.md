@@ -3,6 +3,11 @@
 이 문서는 TaskHub의 모든 기능에 대한 상세 설명을 제공합니다.
 간략한 소개는 [README.md](../README.md)를 참조하세요.
 
+처음 사용할 때는 프로젝트 폴더를 VS Code에서 열고, 신뢰할 수 있는 프로젝트인지 확인한 뒤
+활동 표시줄의 **H** 또는 하단 **TaskHub**를 누릅니다. Restricted Mode에서는 확장이 비활성화됩니다.
+문서의 명령 팔레트는 `Ctrl+Shift+P`(macOS `Cmd+Shift+P`)로 열며, 한국어 명령명으로 찾기 어렵다면
+`TaskHub`와 `Hex`, `JSON`, `Memory` 같은 도구 이름으로 검색하세요.
+
 ## 목차
 
 자주 찾는 도구로 바로 이동할 수 있습니다.
@@ -70,6 +75,17 @@ VS Code 하단 Status Bar 왼쪽의 도구 아이콘과 **TaskHub** 텍스트를
 
 이 확장 프로그램은 `actions.json`, `links.json`, 그리고 `favorites.json` 파일을 사용하여 뷰의 내용을 구성합니다.
 
+설정 파일마다 루트 형식과 용도가 다릅니다. 기존 파일이 있다면 아래 예제로 통째로 덮어쓰지 말고
+필요한 항목만 추가하세요. `actions.json` 등 데이터 파일에는 JSON 주석이나 끝 쉼표를 넣지 않습니다.
+
+| 프로젝트 안의 파일 | 루트 형식 | 넣는 내용 |
+| --- | --- | --- |
+| `.vscode/actions.json` | 배열 `[]` | 실행할 액션. [작성법과 실행 가능한 예제](actions.md) |
+| `.vscode/links.json` | 배열 `[]` | [링크 제목·URL·그룹](#4-링크-패널-workspace-links) |
+| `.vscode/favorites.json` | 배열 `[]` | [즐겨찾기 파일·줄 번호](#6-즐겨찾기-패널-mainviewfavorite) |
+| `.vscode/settings.json` | 객체 `{}` | `taskhub.*` 형태의 [VS Code 설정](#21-설정-레퍼런스) |
+| `.vscode/taskhub_types.json` | 객체 `{}` | [타입 크기·정렬](#154-커스텀-타입-설정-taskhub_typesjson), [메모리 영역](#메모리-영역-설정) |
+
 *   **파일 로드 우선순위**:
     *   Actions 패널은 워크스페이스의 `.vscode/actions.json`, 선택한 프리셋, 확장에 번들된 예제(`media/actions.json`)를 병합하여 표시합니다. 자세한 규칙은 아래 [액션 소스와 병합 우선순위](#액션-소스와-병합-우선순위) 참조.
     *   링크 패널은 워크스페이스의 `.vscode/links.json`만 표시합니다.
@@ -127,6 +143,10 @@ Command Palette에서 `taskhub json`을 검색하면 두 개의 JSON Editor 커�
 | **TaskHub: JSON Editor 열기** (`taskhub.openJsonEditor`) | 파일 선택 대화상자를 띄워 임의의 JSON 파일을 고른 뒤 JSON Editor로 엽니다. 활성 에디터와 무관하게 항상 동일하게 동작합니다. | 명령 팔레트에서 임의의 JSON 파일을 바로 열고 싶을 때 |
 | **TaskHub: JSON Editor로 열기** (`taskhub.openJsonEditorFromUri`) | URI 인자를 받는 컨텍스트 명령입니다. 에디터/탐색기/SCM 컨텍스트 메뉴의 *JSON Editor로 열기* 항목에서 대상 파일을 전달받아 엽니다. 명령 팔레트에서 인자 없이 실행하면 현재 활성 에디터가 `.json` 파일일 때 그 파일을 열고, 그 외에는 *TaskHub: JSON Editor 열기* 동작으로 폴백해 파일 선택 대화상자를 띄웁니다. | `.json` 파일을 연 상태에서 빠르게 JSON Editor로 전환하거나, 탐색기/에디터 우클릭 메뉴에서 호출할 때 |
 
+**처음 따라 하기:** [devices.json](../examples/devices.json)을 프로젝트에 저장하고 위 명령으로 엽니다.
+`name` 셀을 클릭하거나 포커스를 둔 채 Enter를 눌러 값을 수정한 뒤 셀 밖으로 이동합니다.
+상단 **저장** 또는 `Ctrl/Cmd+S`로 파일에 반영합니다. 표의 변경은 저장 전까지 원본 파일에 쓰이지 않습니다.
+
 #### 여는 파일의 조건
 
 **루트가 객체이거나 배열이어야 합니다.** 루트 배열, 객체의 직접 자식 배열, 한 단계 중첩 객체의 자식 배열을 시트로 표시합니다. 그 밖의 객체 속성은 표에 표시하지 않으며 저장 시 보존합니다. `{ "enabled": true }`처럼 표시할 배열이 없는 객체는 빈 데이터로 오인하지 않도록 안내하고 행/필드 추가를 비활성화합니다. **원문 열기**로 JSON 파일을 옆에서 편집할 수 있습니다. `null`·숫자·문자열·불리언 루트는 유효한 JSON이지만 열 수 없고, 패널 생성 전에 오류로 거절합니다.
@@ -178,6 +198,22 @@ JSON Editor는 다음 규칙으로 사용자 변경을 보호합니다.
 *   **검색**: 돋보기 아이콘을 클릭하여 링크를 빠르게 검색할 수 있습니다.
 *   **파일 편집**: 연필 버튼을 클릭하여 `links.json` 파일을 직접 편집할 수 있습니다.
 
+**직접 작성하는 예제 — `.vscode/links.json`:** URL은 `link` 키에 넣습니다.
+
+```json
+[
+  {
+    "title": "TaskHub 사용 가이드",
+    "link": "https://github.com/MunseopLim/TaskHub",
+    "group": "개발 문서",
+    "tags": ["TaskHub", "가이드"]
+  }
+]
+```
+
+`title`과 `link`는 필수이고 `group`·`tags`는 선택입니다. 저장하면 링크 패널에 반영됩니다.
+전체 필드 형식은 [links.schema.json](../schema/links.schema.json)을 참고하세요.
+
 ## 5. Actions 패널 (`mainView.main`)
 
 워크스페이스의 `.vscode/actions.json`, 선택한 프리셋, 설정에 따라 번들 예제를 합쳐 실행 가능한 액션 트리를 만듭니다. 실제 작성법은 [`actions.json` 작성 가이드](actions.md), JSON 형식의 정본은 [actions.schema.json](../schema/actions.schema.json)을 참고하세요.
@@ -226,7 +262,7 @@ Actions 패널의 항목은 워크스페이스의 `.vscode/actions.json`, 선택
 
 ### Preview Run (Dry-run)
 
-액션 우클릭 → **Preview Run**은 실제 명령·파일 쓰기·대화상자 없이 선택된 액션을 시뮬레이션합니다.
+액션 우클릭 → **미리 실행 (Dry-run)**(영어 **Preview Run (Dry-run)**)은 실제 명령·파일 쓰기·대화상자 없이 선택된 액션을 시뮬레이션합니다.
 
 - 현재 플랫폼에서 선택될 명령·도구·작업 디렉터리와 출력 처리 방식을 표시합니다.
   해석할 수 없는 상대 작업 디렉터리는 `unresolved relative cwd`로 표시하고 실행 차단 사유를 안내합니다.
@@ -245,6 +281,25 @@ Actions 패널의 항목은 워크스페이스의 `.vscode/actions.json`, 선택
 - *열려 있는 파일 즐겨찾기에 추가*는 활성 파일과 현재 커서 줄을 저장합니다.
 - 손상된 `favorites.json`은 덮어쓰지 않고 파일을 열어 고칠 수 있는 알림을 제공합니다.
 - 항목을 클릭하면 저장된 줄로 이동합니다. 제목 표시줄에서는 검색·파일 편집을, 항목 우클릭 메뉴에서는 확인 후 삭제를 수행합니다.
+
+**직접 작성하는 예제 — `.vscode/favorites.json`:** 아래 파일 경로와 줄 번호를 프로젝트에 맞게 바꿉니다.
+
+```json
+[
+  {
+    "title": "메인 초기화",
+    "path": "src/main.c",
+    "line": 12,
+    "group": "펌웨어",
+    "tags": ["startup"]
+  }
+]
+```
+
+`path`는 이 설정 파일이 속한 워크스페이스 폴더를 기준으로 해석합니다.
+`${workspaceFolder}/src/main.c`도 사용할 수 있으며, 절대 경로를 쓰더라도 열린 워크스페이스 밖의
+파일은 열 수 없습니다. `line`은 **1부터 시작**하고, 생략하면 파일만 엽니다.
+전체 필드 형식은 [favorites.schema.json](../schema/favorites.schema.json)을 참고하세요.
 
 ## 7. 확장 프로그램 버전 표시
 
@@ -288,7 +343,7 @@ Actions 뷰 제목 표시줄의 **+**에서 시작합니다. 필수 값만 받�
 링크와 즐겨찾기는 그룹으로 정리할 수 있어 관련 항목을 체계적으로 관리할 수 있습니다.
 
 *   **링크 그룹**: `links.json` 파일에서 `group` 속성을 사용하여 링크를 그룹화할 수 있습니다. 같은 그룹 이름을 가진 링크들은 접을 수 있는 트리 노드로 묶여서 표시됩니다.
-*   **즐겨찾기 그룹**: `favorites.json` 파일에서 `group` 속성을 사용하여 즐겨찾기를 그룹화할 수 있습니다. 그룹은 계층적으로 표시되어 많은 파일을 효율적으로 관리할 수 있습니다.
+*   **즐겨찾기 그룹**: `favorites.json` 파일에서 `group` 속성을 사용하여 즐겨찾기를 그룹화할 수 있습니다. 같은 이름의 항목을 한 그룹 아래에 표시합니다. `group`에 `/`를 넣어도 하위 그룹으로 나누지 않고 하나의 이름으로 사용합니다.
 *   **개수 표시**: 각 패널의 제목에는 전체 항목 개수가 표시되고 VS Code 언어 설정을 따릅니다 (예: `워크스페이스 링크 (5)` / `Workspace Links (5)`, `즐겨찾는 파일 (12)` / `Favorite Files (12)`).
 
 ## 11. 작업 종료
@@ -319,7 +374,7 @@ Actions 뷰 제목 표시줄의 **+**에서 시작합니다. 필수 값만 받�
 
 ## 14. 액션 실행 히스토리
 
-History 패널은 액션 실행과 Memory Map·Hex Editor·JSON Editor 열람을 저장합니다.
+History 패널은 액션 실행과 Memory Map·Hex Viewer·JSON Editor 열람을 저장합니다.
 
 - 상태는 `running`·`success`·`failure`·`cancelled`이며, 취소는 사용자가 누른 Stop과 닫은 프롬프트를 구분합니다. 완료 항목은 실행 시각과 소요 시간 배지를 표시합니다.
 - 액션 항목 클릭은 행을 선택할 뿐 실행하지 않습니다. 도구 항목은 클릭하면 저장된 파일과 열기 옵션으로 다시 엽니다. 액션은 행에 남긴 기본 재실행 버튼이나 우클릭 메뉴처럼 의도가 분명한 명령으로만 다시 실행합니다.
@@ -327,7 +382,7 @@ History 패널은 액션 실행과 Memory Map·Hex Editor·JSON Editor 열람을
 - 반복해서 쓸 입력 조합은 History 항목을 우클릭해 **입력값을 프로필로 저장…**으로 이름 붙입니다. 프로필은 팀 파일이 아닌 이 워크스페이스의 `workspaceState`에만 남으며, 액션 우클릭의 **입력 프로필로 실행…**과 **입력 프로필 관리…**에서 실행·이름 변경·삭제합니다. 삭제된 액션의 프로필은 Command Palette의 **TaskHub: 입력 프로필 관리…**에서 정리할 수 있습니다.
 - 프로필은 저장 당시의 task ID와 type을 현재 액션에 대조하고 기존 입력 검증도 다시 적용합니다. 바뀌었거나 검증할 수 없는 값은 *오래됨*으로 표시하며, 사용자 확인 없이 버리지 않습니다. 확인하고 실행하면 검증된 값만 재사용하고 나머지는 다시 묻습니다. 0.7.27 이전 History에는 type 서명이 없으므로 거기서 만든 프로필은 첫 실행에서 값을 다시 묻습니다.
 - 비밀번호 입력은 프로필에도 저장하지 않습니다. 프로필은 하나당 128KB, 워크스페이스당 50개·총 2MB로 제한됩니다.
-- `command`·`shell`의 실제 실행 명령은 태스크별 읽기 전용 문서로 볼 수 있습니다. 비밀 입력은 기록 전에 마스킹합니다.
+- 액션 기록 우클릭 → **실행된 명령 보기**에서 `command`·`shell`의 실제 실행 명령을 태스크별 읽기 전용 문서로 볼 수 있습니다. 비밀 입력은 기록 전에 마스킹합니다. 선언한 값이 어떤 실행 파일·인자로 전달됐는지 확인하는 절차는 [명령 실행 가이드](actions.md#4-명령-실행)를 참고하세요.
 - 액션 기록의 **실행 보고서 보기**는 실행 당시 결과·소요 시간·실패 사유·실패한 태스크 이름·심각도별 진단 개수와 파일 결과를 태스크 요약 표와 함께 보여 줍니다. 태스크별 명령·출력 상세는 성공한 실행에서는 접고, 실패·중지된 실행에서는 펼친 채로 엽니다. 현재 액션 정의를 다시 읽지 않으므로 액션이 이름 변경·삭제된 뒤에도 실행 당시 보고서를 열 수 있습니다.
 - 우클릭 메뉴의 **실행 보고서 보기**는 액션 기록이면 항상 있으며, 로그가 없으면 이유와 함께 **지금 켜기**·**설정 열기**를 제안합니다 — 기능이 있는 줄도 모른 채 지나가지 않도록.
 - 행에는 가장 자주 쓰는 **새 입력으로 재실행**만 인라인 버튼으로 남깁니다. 키보드 사용자는 `Shift+F10`의 우클릭 메뉴에서 같은 재실행과 저장 입력 재실행, 명령·실패 출력·실행 보고서 보기, 개별 삭제에 접근할 수 있으며, 제목 표시줄에서는 확인 후 전체 삭제합니다.
@@ -362,6 +417,20 @@ History 패널은 액션 실행과 Memory Map·Hex Editor·JSON Editor 열람을
 ## 15. C/C++ Hover 기능
 
 C/C++ 파일 작업 시 마우스를 올리면 유용한 정보를 자동으로 표시하는 기능들입니다.
+
+**시작 절차:**
+
+1. C/C++ 소스를 파일로 저장하고 엽니다. `.c`·`.cpp` 파일은 오른쪽 아래 언어 모드가 **C** 또는
+   **C++**인지 확인합니다. `.h`·`.hpp`·`.hh`·`.hxx`·`.h++` 헤더도 지원합니다. 저장 전의 Untitled 문서는 대상이 아닙니다.
+2. `taskhub.hover.numberBase.enabled`를 켭니다. 이 설정은 아래 Hover 기능 전체에 적용됩니다.
+3. 먼저 [숫자 예제](../examples/test_numbers.cpp)의 `0xFF`에 마우스를 올려 봅니다. 기본 숫자 변환은
+   별도 언어 확장 없이 동작합니다. 구조체와 같은 파일의 매크로도 해당 문서에서 직접 해석합니다.
+4. 다른 파일의 식별자나 레지스터 타입을 찾으려면 C/C++ 언어 확장이 제공하는 **정의로 이동**이
+   먼저 동작해야 합니다. 해당 언어 확장의 프로젝트·헤더 검색 경로 설정을 확인하고 인덱싱이 끝난 뒤 다시 시도합니다.
+
+스크린샷과 같은 구조체·레지스터를 확인하려면 [screenshot_demo.cpp](../examples/screenshot_demo.cpp)를
+열고 `PacketHeader` 이름과 `0x30B` 숫자 위에 각각 마우스를 올립니다.
+전체 예제 대응표는 [examples/README.md](../examples/README.md)에 있습니다.
 
 > **응답성 보호**: v0.3.12부터 모든 LSP 호출은 3초 타임아웃으로 래핑됩니다. C/C++ IntelliSense가 느리거나 응답하지 않더라도 에디터가 프리징되지 않으며, 값 해석이 불가능한 경우 기본 숫자 정보만 표시됩니다. 10,000자를 초과하는 라인(생성된/minified 코드)에서는 hover가 스킵됩니다.
 
@@ -538,7 +607,10 @@ struct Context {
 
 프로젝트별로 커스텀 타입의 크기와 alignment를 정의할 수 있습니다.
 
-**설정 파일 위치:** `.vscode/taskhub_types.json`
+**설정 파일 위치:** `.vscode/taskhub_types.json`. 현재 C/C++ 파일이 속한 워크스페이스 폴더의
+설정을 읽으며, 저장 후 다음 Hover부터 다시 확인합니다. 프로젝트 밖 파일에는 이 설정을 적용하지 않습니다.
+JSON을 읽는 데 실패하면 이전에 읽은 설정이 있으면 유지하고, 없으면 기본 타입 크기를 사용하므로
+변경이 반영되지 않으면 먼저 JSON 오류를 확인하세요.
 
 **파일 형식:**
 ```json
@@ -554,14 +626,16 @@ struct Context {
 
 **속성 설명:**
 *   `types`: 타입별 크기와 alignment 정의
-    *   `size`: 타입의 크기 (바이트)
-    *   `alignment`: alignment 요구사항 (바이트)
-*   `packingAlignment`: 기본 struct packing alignment (1, 2, 4, 8). `1`로 설정하면 packed struct처럼 동작
+    *   `size`: 타입의 크기 (1 이상의 정수, 바이트)
+    *   `alignment`: alignment 요구사항 (1 이상의 정수, 바이트)
+    *   기존 기본 타입과 합쳐지며 같은 이름만 덮어씁니다. 포인터 선언 `T*`의 크기는 **`pointer`** 키로 지정합니다.
+*   `packingAlignment`: 멤버 정렬의 상한. 스키마 범위는 1–16이며 대상 ABI에 맞는 값(보통 1, 2, 4, 8, 16)을 사용합니다. `1`이면 멤버 사이 정렬 패딩을 두지 않습니다.
 
 **사용 예시 - 64비트 포인터 환경:**
 ```json
 {
   "types": {
+    "pointer": { "size": 8, "alignment": 8 },
     "HANDLE": { "size": 8, "alignment": 8 },
     "PVOID": { "size": 8, "alignment": 8 },
     "SIZE_T": { "size": 8, "alignment": 8 },
@@ -570,6 +644,10 @@ struct Context {
   "packingAlignment": 8
 }
 ```
+
+이 예제는 `T*`와 나열한 별칭의 크기만 바꿉니다. `long`·`unsigned long`도 8바이트인 ABI라면
+해당 타입을 각각 `{ "size": 8, "alignment": 8 }`로 추가합니다. 실행 중인 PC가 64비트여도
+임베디드 빌드 대상의 ABI를 자동 감지하지는 않습니다.
 
 **사용 예시 - Packed struct 환경:**
 ```json
@@ -587,12 +665,19 @@ struct Context {
 
 ### 15.5. Register Value Decoder
 
-`reg.dword = 0x...;` 처럼 레지스터 연합/구조체에 상수를 대입하는 문장에서 **숫자 리터럴 위에 hover** 하면, 같은 레지스터의 비트 필드 정의를 참조해 각 필드가 어떤 값으로 디코드되는지를 함께 표시합니다. 내부적으로는 [src/registerDecoder.ts](../src/registerDecoder.ts)가 LSP 정의 점프 + SFR Bit Field 파서 결과를 결합해 계산합니다.
+`reg.dword = 0x...;` 같은 대입문이나 `UartCtrlReg uart_ctrl = 0x30B;` 같은 초기화에서
+**숫자 리터럴 위에 hover** 하면 레지스터 타입의 비트 필드별 값을 표시합니다.
+같은 줄에 타입이 있으면 직접 찾고, 사용처에서는 언어 확장의 Hover·정의 정보로 타입을 찾습니다.
 
 **동작 조건**
-- 좌변이 SFR 비트 필드 주석을 가진 레지스터 멤버(예: `.dword`, `.word`)에 할당.
+- 레지스터 타입의 비트 필드에 [SFR 주석 형식](#152-sfr-bit-field-hover)이 있어야 합니다. 주석의 비트 위치를 기준으로 값을 계산하고 접근 타입·설명을 함께 표시합니다.
 - 우변이 숫자 리터럴 (`0x30B`, `0b1100`, `777` 등 Number Base Hover가 인식하는 형식).
 - `taskhub.hover.numberBase.enabled: true` 필요.
+
+타입을 찾지 못하면 일반 숫자 정보로 표시됩니다. 선언 파일의 타입 정의와 사용처의 **정의로 이동**을
+확인하세요. 직접 초기화 예제는 [screenshot_demo.cpp](../examples/screenshot_demo.cpp)에 있습니다.
+이 디코더의 입력은 JavaScript `Number`를 사용하므로 `2^53−1`을 넘는 정수의 정밀도는 보장하지
+않습니다. 큰 64비트 값의 마스크 연산은 [Hex/Text 비트 계산](#비트-계산)을 사용하세요.
 
 **예시**
 ```cpp
@@ -620,7 +705,7 @@ uart_ctrl.dword = 0x30B;   // 0x30B 위에서 hover
 - **매크로 정의가 현재 활성 편집기의 같은 파일 안에 있어야 함.** 지금 구현은 `document.getText()` 결과에서 `#define` 라인만 수집하므로 헤더 파일로의 include 체인을 따라가지 않는다. include 건너서 정의된 매크로는 표시되지 않는다.
 - `#if` / `#else` 등 전처리기 분기는 평가하지 않으며, 텍스트에 남아 있는 모든 `#define` 을 그대로 수집한다.
 - 확장 후 `cleaned` 길이가 4096자 이하. 초과 시 숫자 평가는 건너뛰고 확장 문자열만 표시.
-- **확장 예산 (0.6.58부터)**: 깊이 제한만으로는 부족합니다 — `#define Mn M(n-1) M(n-1)` 형태는 깊이가 얕아도 결과가 2^n 으로 커져 hover 하나가 Extension Host 를 세울 수 있습니다. 결과 문자열 **64KB**, 치환 **20,000회**, 내부 단계 기록 **500줄** 중 먼저 걸리는 쪽에서 멈춥니다. 실제 헤더의 매크로는 이 한도에 닿지 않습니다.
+- **확장 예산 (0.6.58부터)**: 깊이 제한만으로는 부족합니다 — `#define Mn M(n-1) M(n-1)` 형태는 깊이가 얕아도 결과가 2^n 으로 커져 hover 하나가 Extension Host 를 세울 수 있습니다. 결과 문자열 **64KB**, 치환 **20,000회**, 내부 단계 기록 **500줄** 중 먼저 걸리는 쪽에서 멈춥니다.
     - **한도에 걸리면 그 매크로의 hover 가 뜨지 않습니다** — 오류 문구가 표시되는 것이 아니라 아무것도 나타나지 않습니다. 확장할 수 없는 매크로를 hover 했을 때와 같은 화면입니다.
 - **공유 하위식은 한 번만 확장**합니다. 같은 매크로가 여러 번 나오면 처음 결과를 재사용해 지수 팽창을 선형으로 접습니다. 순환 참조에 얽힌 매크로는 결과가 "누가 위에서 확장 중인가"에 달라지므로 재사용 대상에서 제외되며, 재사용이 깊이 제한을 우회하지도 않습니다(같은 정의 집합이면 토큰 순서와 무관하게 같은 답).
 
@@ -655,6 +740,8 @@ Bit Operation Hover는 Number Base Hover 파이프라인 위에 얹혀 동작하
 - `taskhub.hover.numberBase.enabled` = `true` (기본값이므로 특별히 껐다면 다시 켜야 함)
 - `taskhub.experimental.bitOperationHover.enabled` = `true`
 
+두 키는 `.vscode/settings.json`에 넣습니다. 파일 형식은 [설정 예제](#설정-json-예제)를 참고하세요.
+
 **사용 예시:**
 ```c
 uint32_t value = 0x0F;
@@ -676,11 +763,35 @@ Preset 파일은 다음 위치에서 자동으로 발견됩니다:
 - **Extension Preset** (`presets/preset-*.json`): 확장 프로그램에 번들로 포함된 팀 공통 preset
 - **Workspace Preset** (`.vscode/presets/preset-*.json`): 프로젝트별 preset (Git으로 공유 가능)
 
+### 선택 설정과 파일에 적용하기
+
+`taskhub.preset.selected`와 **프리셋 적용** 명령은 적용 방식이 다릅니다.
+
+| 방법 | 결과 |
+| --- | --- |
+| 설정에서 `taskhub.preset.selected` 지정 | 프리셋을 Actions 목록에 병합해 표시합니다. `.vscode/actions.json`을 수정하지 않으므로 프리셋 파일의 변경을 공유할 수 있습니다. |
+| **TaskHub: 프리셋 적용** | 선택한 프리셋을 `.vscode/actions.json`에 복사하거나 병합합니다. 이후에는 복사된 워크스페이스 액션을 편집합니다. |
+
+선택 ID는 확장 번들 `presets/preset-example.json`이면 `example`, 워크스페이스의
+`.vscode/presets/preset-integration.json`이면 **`워크스페이스폴더이름:integration`**입니다.
+예를 들어 VS Code 탐색기에 표시된 폴더 이름이 `firmware`일 때 `.vscode/settings.json`은 다음과 같습니다.
+
+```json
+{
+  "taskhub.preset.selected": "firmware:integration"
+}
+```
+
+`"none"`으로 바꾸면 선택 프리셋의 병합만 해제합니다. 이미 **프리셋 적용**으로 복사한 액션은
+그대로 남고, 번들 예제 표시 여부는 `taskhub.builtinActions`가 별도로 결정합니다.
+ID 충돌 시 [소스 병합 우선순위](#액션-소스와-병합-우선순위)를 따르므로, 워크스페이스에 복사된
+동일 ID의 액션이 있으면 선택 프리셋을 바꿔도 그 액션이 우선합니다.
+
 ### 사용 방법
 
 **1. Preset 적용하기**
 
-명령 팔레트(Cmd+Shift+P)에서 **"TaskHub: 프리셋 적용"** 실행:
+명령 팔레트에서 **TaskHub: 프리셋 적용** (`taskhub.applyPreset`) 실행:
 
 1. 적용할 preset 선택 (example, integration, hil 등)
 2. 기존 `actions.json`이 있는 경우:
@@ -694,7 +805,7 @@ Preset 파일은 다음 위치에서 자동으로 발견됩니다:
 
 **2. Preset 저장하기**
 
-명령 팔레트(Cmd+Shift+P)에서 **"TaskHub: 프리셋으로 저장"** 실행:
+명령 팔레트에서 **TaskHub: 프리셋으로 저장** (`taskhub.saveAsPreset`) 실행:
 
 1. Preset ID 입력 (예: integration, hil)
 2. 저장 위치 선택:
@@ -706,45 +817,10 @@ Preset 파일은 다음 위치에서 자동으로 발견됩니다:
 
 ### Preset 파일 포맷
 
-Preset은 일반 `actions.json`과 동일한 형식을 사용합니다:
-
-```json
-[
-  {
-    "id": "preset.integration.git.checkout",
-    "title": "Git: Checkout main",
-    "action": {
-      "description": "Switch to main branch",
-      "tasks": [
-        {
-          "id": "checkout",
-          "type": "shell",
-          "command": "git checkout main"
-        },
-        {
-          "id": "pull",
-          "type": "shell",
-          "command": "git pull"
-        }
-      ]
-    }
-  },
-  {
-    "id": "preset.integration.build",
-    "title": "Build: Integration",
-    "action": {
-      "description": "Build for integration environment",
-      "tasks": [
-        {
-          "id": "build",
-          "type": "shell",
-          "command": "make integration-build"
-        }
-      ]
-    }
-  }
-]
-```
+Preset은 일반 `actions.json`과 같은 **액션 배열**입니다. Export의 `version`·`exportedAt`·`actions`
+객체로 감싸지 않습니다. 실행이 확인된 `.vscode/actions.json`을 **프리셋으로 저장**하거나,
+[`actions.json` 작성 가이드](actions.md)의 완성 예제를 `preset-이름.json`으로 저장하세요.
+명령·인자·작업 디렉터리와 결과 연결 형식도 같은 가이드를 따릅니다.
 
 ### 팀 워크플로우 예시
 
@@ -760,7 +836,7 @@ Preset은 일반 `actions.json`과 동일한 형식을 사용합니다:
 
 #### 전체 내보내기
 
-명령 팔레트(Cmd+Shift+P)에서 **"TaskHub: 액션 내보내기"** 실행:
+명령 팔레트에서 **TaskHub: 액션 내보내기** (`taskhub.exportActions`) 실행:
 
 1. 현재 워크스페이스의 `.vscode/actions.json`을 읽어옵니다.
 2. 저장할 파일 위치와 이름을 선택합니다 (`.taskhub` 또는 `.json` 형식).
@@ -782,8 +858,13 @@ Actions 패널에서 액션 또는 폴더를 **우클릭** → **"액션 내보�
   "actions": [
     {
       "id": "action.build",
-      "title": "Build Project",
-      "action": { ... }
+      "title": "Git 변경 목록",
+      "action": {
+        "description": "현재 Git 변경 목록 확인",
+        "tasks": [
+          { "id": "status", "type": "command", "command": "git", "args": ["status", "--short"] }
+        ]
+      }
     }
   ]
 }
@@ -791,7 +872,7 @@ Actions 패널에서 액션 또는 폴더를 **우클릭** → **"액션 내보�
 
 ### Import (가져오기)
 
-명령 팔레트(Cmd+Shift+P)에서 **"TaskHub: 액션 가져오기"**를 실행하거나, Actions 패널 제목 표시줄의 **`…` 메뉴 → 액션 가져오기**를 선택합니다.
+명령 팔레트에서 **TaskHub: 액션 가져오기** (`taskhub.importActions`)를 실행하거나, Actions 패널 제목 표시줄의 **`…` 메뉴 → 액션 가져오기**를 선택합니다.
 
 1. 가져올 파일을 선택합니다 (`.taskhub` 또는 `.json` 형식).
 2. 파일의 스키마 유효성을 검사합니다. 스키마뿐 아니라 **액션 ID / 태스크 ID 중복**도 정상 로드 경로와 동일하게 검증하여, 가져오기 성공 후 다음 로드가 깨지는 상황을 막습니다.
@@ -825,6 +906,10 @@ ARM `.axf`/`.elf` 바이너리 또는 ARM Linker Listing을 분석해 Flash/RAM 
 2. AXF/ELF는 `.axf`·`.elf`·`.out` 파일을 고릅니다. 메모리 영역 설정이 없으면 GNU linker script나 ARM scatter file을 선택할 수 있습니다.
 3. Listing은 `armlink --list` 출력 파일을 고릅니다. Execution Region에서 영역 크기를 자동으로 읽습니다.
 4. 같은 파일을 다시 열면 기존 패널을 재사용하고, 다른 파일은 별도 탭에 엽니다.
+
+**예제로 확인하기:** [sample_armlink_large.txt](../examples/sample_armlink_large.txt)를 저장한 뒤
+**ARM Linker Listing**으로 엽니다. Memory Regions의 사용률을 확인하고 아래 영역 카드를 펼칩니다.
+바이너리를 빌드하지 않고도 영역 상세·검색·보고서 복사를 확인할 수 있습니다.
 
 Memory Map 패널의 **Refresh**는 현재 입력을 다시 읽어 같은 탭의 결과를 갱신합니다. AXF/ELF는
 처음 열 때 선택한 GNU linker script 또는 ARM scatter file도 함께 다시 읽고, ARM Linker Listing은
@@ -952,6 +1037,9 @@ Region 상세는 펼칠 때 생성하고, 200행을 넘는 표는 가상 스크�
 ```
 
 `origin`은 시작 주소, `size`는 바이트 단위 크기입니다. 이 설정이 있으면 링커 스크립트 선택을 생략합니다. ELF32의 little/big endian과 Cortex-R/M 계열을 지원합니다.
+JSON 숫자는 10진수로 적습니다. 위 `134217728`은 `0x08000000`, `536870912`는 `0x20000000`에
+해당하며 `"0x08000000"` 같은 문자열은 영역 주소로 사용할 수 없습니다. 같은 파일에 이미
+`types`·`packingAlignment`가 있으면 객체 안에 `memoryMap`을 함께 추가합니다.
 `regions`가 배열이 아니거나 항목의 `name`·`origin`·`size`가 잘못되면 부분만 임의로 쓰지 않고 설정
 전체를 무시한 뒤 ELF의 `PT_LOAD` 영역 자동 감지로 폴백합니다.
 
@@ -993,7 +1081,7 @@ ARM Compiler 5/6의 `armlink --list` 출력을 지원합니다. Execution Region
 
 | 확장자 | 설명 |
 | --- | --- |
-| `.axf`, `.elf`, `.out` | ELF 실행 바이너리 |
+| `.axf`, `.elf`, `.out` | ELF32 실행 바이너리. ELF64는 지원하지 않음 |
 | `.ld`, `.lds`, `.lcf` | GNU Linker Script |
 | `.sct` | ARM Scatter File |
 | `.txt` | ARM Linker Listing |
@@ -1004,9 +1092,13 @@ Intel HEX, Motorola SREC, raw binary 펌웨어를 VS Code 안에서 주소·Hex�
 ### Hex/Text 변환기
 
 파일 없이 문자열과 Hex 바이트를 빠르게 바꾸려면 Command Palette에서
-**TaskHub: Hex/Text 변환기**를 실행합니다. 별도 변환 버튼은 없습니다. 왼쪽 **Text** 또는 오른쪽
+**TaskHub: Hex/Text 변환기** (`taskhub.showHexConverter`)를 실행합니다. 별도 변환 버튼은 없습니다. 왼쪽 **Text** 또는 오른쪽
 **Hex bytes**에 입력하는 즉시 반대쪽 값, 문자·바이트 수, 첫 8바이트의 정수·부동소수점 해석이
 함께 갱신됩니다.
+
+**첫 변환:** 인코딩을 UTF-8로 두고 Text에 `TaskHub`를 입력하면 Hex가
+`54 61 73 6B 48 75 62`로 표시됩니다. **Text 저장**으로 저장한 뒤 입력을 지우고 저장 항목을 눌러
+다시 불러올 수 있습니다.
 
 - 문자 인코딩은 `UTF-8`과 `ASCII` 중에서 선택합니다. ASCII 범위를 벗어난 문자·바이트와 올바르지
   않은 UTF-8은 입력 영역 아래에 즉시 안내됩니다.
@@ -1059,10 +1151,17 @@ Intel HEX, Motorola SREC, raw binary 펌웨어를 VS Code 안에서 주소·Hex�
 - 계산은 Text/Hex 입력 및 **숫자 바이트 순서** 설정과 독립적입니다. **수식 지우기**는 수식만 지우며,
   계산 결과를 기존 Hex 입력에 자동으로 적용하지 않습니다. 수식·비트 폭·접힘 상태는 같은 탭의
   Webview를 다시 로드해도 복원됩니다.
+- 수식은 최대 4096자·256토큰·중첩 32단계입니다. 한도 오류가 나면 수식을 나눠 계산합니다.
+
+**64비트 예제:** 비트 폭을 **64비트**로 바꾸고 `0x123456789ABCDEF0 & 0xFFFF`를 입력하면
+Hex `0x000000000000DEF0`, Decimal `57072`가 표시됩니다. 이 계산에는 실험적 Hover 설정이 필요 없습니다.
 
 ### 사용 방법
 
-명령 팔레트에서 **TaskHub: Hex Viewer 열기**를 실행하고 파일을 고릅니다. 알려진 확장자는 그 형식을 우선 사용하고, 그 밖의 파일만 길이·자릿수·체크섬이 유효한 레코드를 찾아 텍스트 형식을 감지합니다.
+명령 팔레트에서 **TaskHub: Hex Viewer 열기** (`taskhub.showHexViewer`)를 실행하고 파일을 고릅니다. 알려진 확장자는 그 형식을 우선 사용하고, 그 밖의 파일만 길이·자릿수·체크섬이 유효한 레코드를 찾아 텍스트 형식을 감지합니다.
+
+처음에는 [sample_binary.bin](../examples/sample_binary.bin)을 열어 Unit·Endian·찾기를 확인할 수
+있습니다. Hex Viewer는 읽기 전용이며 파일의 바이트를 수정하거나 저장하는 편집 기능은 없습니다.
 
 HEX/SREC는 감지와 실제 읽기에 같은 레코드 검증을 적용합니다. 잘못된 레코드와 접두사가 깨진 입력
 줄은 제외하고, 제외 개수와 원본 확인 안내를 패널 상단에 표시합니다. 빈 줄과 `;`·`#`·`//`로 시작하는
@@ -1103,11 +1202,24 @@ Endian 변경은 선택한 숫자 해석과 Value 검색 결과에도 즉시 반
 
 ### 검색 기능
 
-`Ctrl/Cmd+F`에서 `08 00 00 20`처럼 바이트 패턴을 검색하고 Prev/Next로 이동합니다.
+`Ctrl/Cmd+F` 또는 **Find**로 찾기 바를 열고 **찾기 방식**을 먼저 선택합니다. 기본값은 **값 (Value)**입니다.
+
+| 방식 | 입력 예 | 실제로 찾는 바이트 |
+| --- | --- | --- |
+| 바이트열 (Bytes) | `08 00 00 20` | 입력 순서 그대로 `08 00 00 20`. Endian과 무관 |
+| 값 (Value), Little-Endian | `20000008` | 역순인 `08 00 00 20` |
+| 값 (Value), Big-Endian | `20000008` | 입력 순서인 `20 00 00 08` |
+| ASCII | `TASKHUB` | 해당 ASCII 문자의 바이트열 |
+
+Bytes와 Value는 **`0x` 없이 짝수 자릿수의 16진수**를 입력합니다. Value도 10진수 입력이 아니므로
+`10`은 한 바이트 `0x10`을 찾습니다. ASCII에는 U+0000–U+007F만 사용할 수 있습니다.
+Prev/Next로 결과를 순환하고, 결과가 10,000개에 닿으면 그 지점에서 검색을 멈춰 `10,000+`로 표시합니다.
 
 ### 기타 기능
 
-- **Go to**로 주소 이동
+- **Go to**에 주소를 넣고 Enter로 이동합니다. `0x400`·`400h`는 16진수 절대 주소이고, `1024`는
+  10진수입니다. 10진수는 먼저 표시 주소 범위 안의 절대 주소로 해석하고, 해당하지 않을 때만
+  시작 주소 기준 오프셋으로 해석합니다. Raw Binary는 시작 주소가 0이므로 두 값이 같습니다.
 - Shift+클릭으로 범위를 선택하고 바이트 표에 포커스를 둔 채 `Ctrl/Cmd+C`로 복사
 - 주소·검색 입력이나 일반 텍스트를 선택한 경우에는 해당 텍스트를 기본 복사
 - Intel HEX/SREC의 비어 있는 주소를 gap으로 표시
@@ -1133,6 +1245,25 @@ Endian 변경은 선택한 숫자 해석과 Value 검색 결과에도 즉시 반
 
 설정을 수정하려면 VS Code에서 `File > Preferences > Settings` → "TaskHub"로 검색하거나, 워크스페이스 `.vscode/settings.json`에 직접 키를 추가하세요.
 
+### 설정 JSON 예제
+
+프로젝트에 적용하려면 `.vscode/settings.json`의 객체 안에 필요한 키를 넣습니다. 개인적으로 모든
+프로젝트에 적용할 값은 명령 팔레트의 **Preferences: Open User Settings (JSON)**에서 설정합니다.
+이미 있는 설정 객체에 아래 키를 합치며, `.vscode/actions.json`의 액션 배열에 넣지 않습니다.
+
+```json
+{
+  "taskhub.history.maxItems": 20,
+  "taskhub.runAnyAction.recentLimit": 8,
+  "taskhub.hover.numberBase.enabled": true,
+  "taskhub.experimental.bitOperationHover.enabled": true
+}
+```
+
+이 예제는 기록을 최대 20개 보관하고 최근 액션을 최대 8개 표시하며 실험적 비트 연산 Hover를 켭니다.
+변경 후 각 기능을 다시 열어 확인합니다. 실험적 Hover를 쓰지 않으려면 마지막 키를 생략하거나
+`false`로 두면 됩니다. 타입 크기와 메모리 주소는 [별도 타입 설정 파일](#154-커스텀-타입-설정-taskhub_typesjson)에 넣습니다.
+
 ### 21.1. 전체 설정 표
 
 | 설정 ID | 타입 | 기본값 (범위) | 요약 | 관련 기능 |
@@ -1147,8 +1278,8 @@ Endian 변경은 선택한 숫자 해석과 Value 검색 결과에도 즉시 반
 | `taskhub.runLogs.maxFiles` | `integer` | `100` (1–1000) | 워크스페이스 전체에 보관할 액션 실행 로그 파일 최대 개수. | [§14 실행 로그](#실행-로그-영속화-선택) |
 | `taskhub.runLogs.retentionDays` | `integer` | `30` (0–3650) | 설정 일수보다 오래된 로그를 삭제. `0`은 기간 기준만 끄고 개수·총 용량 상한은 유지. | [§14 실행 로그](#실행-로그-영속화-선택) |
 | `taskhub.runLogs.maxTotalSizeMb` | `integer` | `100` (8–4096) | 워크스페이스 전체 로그 합계 용량(MB). 개별 파일 8MB 상한은 별도로 적용. | [§14 실행 로그](#실행-로그-영속화-선택) |
-| `taskhub.pipeline.pythonIoEncoding` | `string` | `"utf-8"` | TaskHub가 실행하는 모든 명령의 `PYTHONIOENCODING` 환경변수 값. 빈 문자열이면 강제 설정 안 함. `utf-8:ignore` 같은 값도 가능. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
-| `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell의 콘솔 출력과 `>`/`>>` 파일 리다이렉션 인코딩. `"utf8"`의 파일은 Windows PowerShell 5.1에서 BOM이 붙고 PowerShell 7에서는 BOM이 없다. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [§5 shell/command 태스크](#5-actions-패널-mainviewmain) |
+| `taskhub.pipeline.pythonIoEncoding` | `string` | `"utf-8"` | TaskHub가 실행하는 모든 명령의 `PYTHONIOENCODING` 환경변수 값. 빈 문자열이면 강제 설정 안 함. `utf-8:ignore` 같은 값도 가능. | [명령 실행](actions.md#4-명령-실행) |
+| `taskhub.pipeline.windowsPowerShellEncoding` | `"utf8"` \| `"system"` | `"utf8"` | Windows PowerShell의 콘솔 출력과 `>`/`>>` 파일 리다이렉션 인코딩. `"utf8"`의 파일은 Windows PowerShell 5.1에서 BOM이 붙고 PowerShell 7에서는 BOM이 없다. UTF-8을 인식하지 못하는 레거시 도구가 있으면 `"system"`으로 전환해 현재 콘솔 코드 페이지를 유지. | [명령 실행](actions.md#4-명령-실행) |
 | `taskhub.pipeline.outputCaptureLimitMb` | `number` | `10` (1–1024) | 캡처 모드(`passTheResultToNextTask: true`)에서 누적되는 stdout/stderr 총 크기 상한(MB). 초과 시 프로세스를 종료하고 명확한 에러로 실패. | [`actions.json` Output Capture](actions.md#output-capture) |
 | `taskhub.pipeline.totalOutputLimitMb` | `number` | `32` (1–4096) | 한 액션이 들고 있는 **모든 태스크 결과의 합계** 상한(MB). 위 설정이 태스크 하나를 막는다면 이 설정은 합계를 막는다. **태스크 상한보다 작아지지 않는다.** 초과 시 액션 실패. | [`actions.json` Output Capture](actions.md#output-capture) |
 | `taskhub.pipeline.maxParallelTasks` | `integer` | `4` (1–32) | 한 액션 안에서 동시에 실행될 수 있는 task 최대 개수. `parallel: true`가 붙은 task만 "이전 모든 task를 기다림" barrier에서 빠지며, barrier에서 빠진 뒤에도 명시적 `dependsOn`과 `${taskId.x}` 자동 추론 의존성은 그대로 기다린다. `parallel: true`가 없는 task는 `dependsOn` 유무와 무관하게 sync barrier로 동작. 기본 4는 임베디드 빌드(linker/LTO)의 메모리 부담을 고려한 보수적 값 — 자원 여유가 있는 머신에서는 늘리고, 완전 순차로 강제하려면 `1`로 설정. | [§5 Actions 패널](#5-actions-패널-mainviewmain) |
@@ -1160,7 +1291,7 @@ Endian 변경은 선택한 숫자 해석과 Value 검색 결과에도 즉시 반
 | `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. 그 용도의 기억이 없으면 가장 최근에 사용한 다이얼로그 위치를 이어받는다. `false`면 TaskHub가 시작 위치를 **일절 지정하지 않고** VS Code의 기본 규칙과 `files.dialog.defaultPath` 설정에 맡긴다. 저장 다이얼로그는 제안 파일명도 함께 사라진다. 액션 JSON의 `options.defaultUri`는 어느 쪽이든 존중한다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |
-| `taskhub.preset.selected` | `string` | `"none"` | 자동 적용할 프리셋 ID. `"none"`이면 워크스페이스 액션만 사용. 확장 내장 또는 워크스페이스 `.vscode/presets/` 내 프리셋 ID를 입력. | [§17 Preset](#17-preset-기능) |
+| `taskhub.preset.selected` | `string` | `"none"` | 목록에 병합할 프리셋 ID. `"none"`이면 프리셋 병합만 끈다. 확장 번들은 `example`, 워크스페이스 프리셋은 `폴더이름:integration` 형식이며, 번들 예제 표시 설정은 독립적이다. | [§17 Preset](#17-preset-기능) |
 
 ### 21.2. 설정 추가 체크리스트
 
@@ -1328,7 +1459,10 @@ parallel true          = explicit dependsOn + ${taskId.x} 자동 의존성만 �
 - `package`는 `parallel`이 없으므로 두 빌드를 모두 기다림. `dependsOn`을 명시했지만, 이 패턴은 `parallel: false` 기본의 barrier 규칙으로도 자동으로 만족되므로 — 명시한 이유는 "이 task가 두 빌드의 산출물을 합친다"는 의도를 코드에서 읽히게 하기 위함.
 - 한 빌드가 `continueOnError: true`였다면 실패해도 `package`까지 진행되며, 실패한 빌드의 결과는 `{}`로 전파.
 
-> **출력 캡처가 필요할 때만**: shell task의 stdout을 `${buildF4.output}`처럼 다음 task 변수로 쓰려면 `passTheResultToNextTask: true`를 함께 두거나 `output.capture` 규칙으로 명시적으로 캡처해야 한다 ([`actions.json` Output Capture](actions.md#output-capture) 참조). 그렇게 캡처된 변수를 다음 task가 참조하면 *자동 추론된 의존성*이 잡혀 `dependsOn`을 생략해도 같은 순서가 강제된다.
+> **출력 캡처가 필요할 때만**: shell/command의 stdout을 `${buildF4.output}`처럼 다음 태스크에서 쓰려면
+> `passTheResultToNextTask: true`가 필요합니다. `output.capture`는 이미 받은 출력에서 값을 추출하므로
+> 그것만 추가해 터미널 출력을 캡처할 수는 없습니다. [Output Capture](actions.md#output-capture)를
+> 참고하세요. 캡처한 결과를 참조하는 다음 태스크에는 자동 의존성이 생깁니다.
 
 ### 24.3. 자동 의존성 추론
 

@@ -151,6 +151,12 @@ ARM Linker Listing의 Flash·RAM 사용량을 살펴보고, 영역을 펼쳐 섹
 액션 작성법과 태스크별 필드·결과·조합 예시는 [`actions.json` 작성 가이드](docs/actions.md)를
 참고하세요.
 
+설정을 직접 작성할 때는 다음 순서로 확인할 수 있습니다.
+
+- [명령 설정과 실제 전달 인자](docs/actions.md#4-명령-실행): `command`/`shell` 선택, 공백·따옴표·Windows 경로, 실행 셸
+- [직접 실행하며 인자 확인](examples/command_shell/README.md): Node.js 예제로 문자열·배열·환경변수 전달 비교
+- [입력 선택부터 실행까지 조합](docs/actions.md#10-자주-쓰는-조합): 파일 선택과 QuickPick 옵션을 명령에 연결
+
 ---
 
 ## 보안

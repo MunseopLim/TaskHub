@@ -1,0 +1,94 @@
+[
+    {
+        "id": "demo.command.argv",
+        "title": "Command: 공백·경로·옵션 전달",
+        "action": {
+            "description": "프로그램이 실제로 받은 argv, 작업 위치, 지정 환경변수를 확인합니다.",
+            "tasks": [
+                {
+                    "id": "inspect",
+                    "type": "command",
+                    "command": "node",
+                    "args": [
+                        "probe.cjs",
+                        "--label",
+                        "two words",
+                        "--input",
+                        "input files/firmware image.bin",
+                        "--mode=release",
+                        "--literal",
+                        "$TASKHUB_DEMO",
+                        "|",
+                        ">",
+                        "&&"
+                    ],
+                    "cwd": "examples/command_shell",
+                    "env": { "TASKHUB_DEMO": "demo value" },
+                    "passTheResultToNextTask": true,
+                    "output": { "mode": "editor", "language": "json" }
+                }
+            ]
+        }
+    },
+    {
+        "id": "demo.shell.expansion",
+        "title": "Shell: 본문 확장과 args 비교",
+        "action": {
+            "description": "셸 본문의 환경변수는 확장되고 args의 같은 문자열은 그대로 전달됩니다.",
+            "tasks": [
+                {
+                    "id": "inspect",
+                    "type": "shell",
+                    "command": {
+                        "windows": "node probe.cjs --expanded \"$env:TASKHUB_DEMO\"",
+                        "macos": "node probe.cjs --expanded \"$TASKHUB_DEMO\"",
+                        "linux": "node probe.cjs --expanded \"$TASKHUB_DEMO\""
+                    },
+                    "args": [
+                        "--literal",
+                        "$TASKHUB_DEMO",
+                        "--input",
+                        "input files/firmware image.bin",
+                        "|",
+                        ">",
+                        "&&"
+                    ],
+                    "cwd": "examples/command_shell",
+                    "env": { "TASKHUB_DEMO": "demo value" },
+                    "passTheResultToNextTask": true,
+                    "output": { "mode": "editor", "language": "json" }
+                }
+            ]
+        }
+    },
+    {
+        "id": "demo.quickPick.argv",
+        "title": "QuickPick: 문자열·배열 인자 비교",
+        "action": {
+            "description": "옵션과 값을 배열로 나눴을 때 실제 argv가 어떻게 달라지는지 확인합니다.",
+            "tasks": [
+                {
+                    "id": "slot",
+                    "type": "quickPick",
+                    "placeHolder": "전달할 값의 형태를 선택하세요",
+                    "default": "배열: --slot, 0",
+                    "items": [
+                        { "id": "array", "label": "배열: --slot, 0", "value": ["--slot", "0"] },
+                        { "id": "string", "label": "문자열: --slot 0", "value": "--slot 0" },
+                        { "id": "empty", "label": "빈 배열: 추가 인자 없음", "value": [] }
+                    ]
+                },
+                {
+                    "id": "inspect",
+                    "type": "command",
+                    "command": "node",
+                    "args": ["probe.cjs", "${slot}"],
+                    "cwd": "examples/command_shell",
+                    "env": { "TASKHUB_DEMO": "demo value" },
+                    "passTheResultToNextTask": true,
+                    "output": { "mode": "editor", "language": "json" }
+                }
+            ]
+        }
+    }
+]

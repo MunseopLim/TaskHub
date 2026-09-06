@@ -148,6 +148,12 @@ To build from source or contribute, see [CONTRIBUTING.md (Korean)](CONTRIBUTING.
 Find other tools through the **TaskHub** status bar launcher. For action fields, results, and composition
 examples, see the [`actions.json` authoring guide (Korean)](docs/actions.md).
 
+When writing configuration, start with these guides (in Korean):
+
+- [Command configuration and the resulting arguments](docs/actions.md#4-명령-실행): `command`/`shell`, spaces, quotes, Windows paths, and shell selection
+- [Run an argument inspection example](examples/command_shell/README.md): compare strings, arrays, and environment variables with Node.js
+- [Combine input and execution tasks](docs/actions.md#10-자주-쓰는-조합): pass file selections and QuickPick options to a command
+
 Before choosing a tool, check its supported inputs:
 
 - [C/C++ Hover (Korean)](docs/features.md#15-cc-hover-기능): resolving symbols uses a C/C++ language extension. Struct layout is an estimate based on configured type sizes and alignment.

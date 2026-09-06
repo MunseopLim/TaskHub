@@ -8,6 +8,7 @@
 
 | 파일 | 대응 기능 | 참조 |
 |---|---|---|
+| [command_shell/](command_shell/README.md) | command·shell의 실제 argv·환경변수, QuickPick 문자열·배열 전달 비교 | [명령 실행](../docs/actions.md#4-명령-실행) |
 | [sensor_pipeline/](sensor_pipeline/README.md) | Build → Verify → ZIP (센서 이미지 생성·검증·압축) | [actions.json 작성 가이드](../docs/actions.md) |
 | [test_numbers.cpp](test_numbers.cpp) | Number Base Hover (숫자 리터럴) | features.md §15.1 |
 | [test_const_enum_define.cpp](test_const_enum_define.cpp) | Number Base Hover (const / enum / #define 식별자) | features.md §15.1 |
