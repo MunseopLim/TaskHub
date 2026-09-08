@@ -14,6 +14,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { t } from '../i18n';
+import { validateLinkUrlForSave } from '../pipelineUtils';
 import { normalizeTags } from './normalization';
 
 export interface LinkEntry {
@@ -99,12 +100,16 @@ export class Link extends vscode.TreeItem {
             title: t('링크 열기', 'Open Link'),
             arguments: [entry.link]
         };
-        this.contextValue = 'linkItem';
+        this.contextValue = this.canOpenInIntegratedBrowser() ? 'linkItem.browser' : 'linkItem';
         this.iconPath = new vscode.ThemeIcon('link');
     }
 
     getLink(): string {
         return this.entry.link;
+    }
+
+    canOpenInIntegratedBrowser(): boolean {
+        return /^https?:/i.test(this.entry.link) && validateLinkUrlForSave(this.entry.link).ok;
     }
 
     getEntry(): LinkEntry {

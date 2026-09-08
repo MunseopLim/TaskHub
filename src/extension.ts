@@ -1490,6 +1490,28 @@ async function openExternalLinkSafely(rawUrl: unknown): Promise<void> {
     }
 }
 
+export async function openLinkInIntegratedBrowser(item?: Link): Promise<void> {
+    if (!(item instanceof Link)) {
+        return;
+    }
+    if (!item.canOpenInIntegratedBrowser()) {
+        await vscode.window.showErrorMessage(t(
+            '통합 브라우저에서는 올바른 HTTP(S) 링크만 열 수 있습니다.',
+            'Only valid HTTP(S) links can be opened in the integrated browser.'
+        ));
+        return;
+    }
+    try {
+        await openBrowserTask({ url: item.getLink(), target: 'integrated' });
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await vscode.window.showErrorMessage(t(
+            `통합 브라우저에서 링크를 열지 못했습니다: ${message}`,
+            `Could not open the link in the integrated browser: ${message}`
+        ));
+    }
+}
+
 function resolveExecutionSettings(customEnv?: Record<string, string>): { envOverrides: Record<string, string>; useUtf8Console: boolean } {
     const configuration = vscode.workspace.getConfiguration('taskhub');
     const pythonIoEncodingSetting = configuration.get<string>('pipeline.pythonIoEncoding', 'utf-8') || '';
@@ -11343,6 +11365,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openLink', async (url: string) => { await openExternalLinkSafely(url); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openLinkInIntegratedBrowser', openLinkInIntegratedBrowser));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', async (item: Link) => { await vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage(t('링크가 클립보드에 복사되었습니다.', 'Link copied to clipboard.')); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.goToLink', async (item: Link) => { await openExternalLinkSafely(item.getLink()); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeAction', async (actionItem: Action) => {

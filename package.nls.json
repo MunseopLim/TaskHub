@@ -13,6 +13,7 @@
   "welcome.noLinks": "No workspace links yet.\nLinks are shortcuts to docs, dashboards, or issue trackers, stored in .vscode/links.json.\n[Add Link](command:taskhub.addLink)",
   "welcome.noFavorites": "No favorite files yet.\nPin files you keep coming back to — right-click a file in the Explorer, or add one here.\n[Add File to Favorites](command:taskhub.addFavoriteFile)",
   "cmd.openLink": "Open Link",
+  "cmd.openLinkInIntegratedBrowser": "Open in Integrated Browser",
   "cmd.copyLink": "Copy URL",
   "cmd.goToLink": "Open Link",
   "cmd.addLink": "TaskHub: Add Link",

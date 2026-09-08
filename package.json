@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.22",
+  "version": "0.8.23",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -317,6 +317,11 @@
         "title": "%cmd.openLink%"
       },
       {
+        "command": "taskhub.openLinkInIntegratedBrowser",
+        "title": "%cmd.openLinkInIntegratedBrowser%",
+        "icon": "$(browser)"
+      },
+      {
         "command": "taskhub.copyLink",
         "title": "%cmd.copyLink%",
         "icon": "$(copy)"
@@ -623,6 +628,10 @@
           "when": "false"
         },
         {
+          "command": "taskhub.openLinkInIntegratedBrowser",
+          "when": "false"
+        },
+        {
           "command": "taskhub.copyLink",
           "when": "false"
         },
@@ -862,28 +871,38 @@
       ],
       "view/item/context": [
         {
+          "command": "taskhub.openLinkInIntegratedBrowser",
+          "when": "view == mainView.linkWorkspace && viewItem == linkItem.browser",
+          "group": "inline@0"
+        },
+        {
           "command": "taskhub.copyLink",
-          "when": "view == mainView.linkWorkspace && viewItem == linkItem",
-          "group": "inline"
+          "when": "view == mainView.linkWorkspace && viewItem =~ /^linkItem(\\.browser)?$/",
+          "group": "inline@1"
         },
         {
           "command": "taskhub.goToLink",
-          "when": "view == mainView.linkWorkspace && viewItem == linkItem",
+          "when": "view == mainView.linkWorkspace && viewItem =~ /^linkItem(\\.browser)?$/",
           "group": "context@0"
         },
         {
+          "command": "taskhub.openLinkInIntegratedBrowser",
+          "when": "view == mainView.linkWorkspace && viewItem == linkItem.browser",
+          "group": "context@0.5"
+        },
+        {
           "command": "taskhub.copyLink",
-          "when": "view == mainView.linkWorkspace && viewItem == linkItem",
+          "when": "view == mainView.linkWorkspace && viewItem =~ /^linkItem(\\.browser)?$/",
           "group": "context@1"
         },
         {
           "command": "taskhub.editWorkspaceLink",
-          "when": "view == mainView.linkWorkspace && viewItem == linkItem",
+          "when": "view == mainView.linkWorkspace && viewItem =~ /^linkItem(\\.browser)?$/",
           "group": "context@2"
         },
         {
           "command": "taskhub.deleteLink",
-          "when": "view == mainView.linkWorkspace && viewItem == linkItem",
+          "when": "view == mainView.linkWorkspace && viewItem =~ /^linkItem(\\.browser)?$/",
           "group": "context@9"
         },
         {

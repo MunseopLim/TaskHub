@@ -178,14 +178,17 @@ suite('빈 상태 안내 (viewsWelcome)', () => {
             assert.strictEqual(conditional.length, 1, '중지 버튼은 조건부 하나여야 한다');
         });
 
-        test('트리 행은 핵심 동작 하나만 인라인에 두고 나머지는 우클릭 메뉴로 보낸다', () => {
+        test('링크 행은 브라우저 열기·복사, 다른 행은 핵심 동작만 인라인에 둔다', () => {
             const entries = manifest.contributes.menus['view/item/context'];
             const inlineCommands = (view: string): string[] => entries
                 .filter((entry: any) => entry.when.includes(`view == ${view}`)
                     && String(entry.group).startsWith('inline'))
                 .map((entry: any) => entry.command);
 
-            assert.deepStrictEqual(inlineCommands('mainView.linkWorkspace'), ['taskhub.copyLink']);
+            assert.deepStrictEqual(inlineCommands('mainView.linkWorkspace'), [
+                'taskhub.openLinkInIntegratedBrowser',
+                'taskhub.copyLink',
+            ]);
             assert.deepStrictEqual(inlineCommands('mainView.favorite'), []);
             assert.deepStrictEqual(inlineCommands('mainView.main'), ['taskhub.stopAction']);
             assert.deepStrictEqual(inlineCommands('mainView.history'), ['taskhub.rerunFromHistory']);
