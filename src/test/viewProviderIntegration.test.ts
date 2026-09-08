@@ -79,8 +79,19 @@ suite('열려 있는 파일 즐겨찾기 등록 방식', function () {
 
     teardown(async () => {
         restore?.();
-        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
-        fs.rmSync(workspace, { recursive: true, force: true });
+        // 편집기를 전환한 테스트도 있으므로 임시 폴더의 비활성 탭까지 닫는다.
+        const tabs = vscode.window.tabGroups.all.flatMap(group => group.tabs).filter(tab => {
+            if (!(tab.input instanceof vscode.TabInputText) || tab.input.uri.scheme !== 'file') {
+                return false;
+            }
+            const relative = path.relative(workspace, tab.input.uri.fsPath);
+            return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+        });
+        if (tabs.length > 0) {
+            assert.strictEqual(await vscode.window.tabGroups.close(tabs, true), true, '테스트 파일의 탭을 닫아야 한다');
+        }
+        // Windows에서는 탭을 닫아도 파일 감시 핸들이 잠시 남을 수 있다.
+        await fs.promises.rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     });
 
     test('IT-209: 기본 선택은 파일만 등록하며 line을 저장하지 않는다', async () => {

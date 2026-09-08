@@ -34,16 +34,38 @@ webview 의 로직 번들 `dist/jsonEditorWebview.js`. 후자가 없으면 JSON 
 `vscode-test` 를 수동으로 부를 때는 `node esbuild.js` 를 먼저 실행한다. 배경은
 [docs/architecture.md](docs/architecture.md) "webview 스크립트의 두 층" 참조.
 
-### 커밋 전 체크리스트
+### CI 워크플로와 커밋 전 검증
 
-커밋 전 반드시 다음 항목을 확인:
+[`.github/workflows/`](.github/workflows/)의 전체 워크플로는 다음과 같다. 실행 조건과 명령의
+원본은 각 YAML이며, 워크플로를 추가하거나 검사·환경을 바꾸면 이 표도 함께 갱신한다.
 
-1. **유닛 테스트 실행**: `npm run test`로 모든 테스트가 통과하는지 확인
-2. **프로덕션 빌드**: `npm run package`를 실행하여 다음이 모두 통과하는지 확인:
-   - [ ] TypeScript 타입 체크
-   - [ ] ESLint 검사
-   - [ ] esbuild 번들링 (minify 포함)
-3. **변경 유형별 문서 동반 갱신**: 아래 [변경 유형별 체크리스트](#변경-유형별-체크리스트)를 참고해 한 PR 안에서 관련 문서가 모두 같이 갱신되었는지 확인.
+| 워크플로 / 정의 원본 | 실행 조건 | 환경·설치 | 검사·산출물 | 원격 변경 |
+| --- | --- | --- | --- | --- |
+| **CI** — [ci.yml](.github/workflows/ci.yml) | `main` 브랜치 push, `pull_request`, 수동 `workflow_dispatch` | `ubuntu-latest`·`windows-latest`, Node.js `22`, `npm ci` | Linux: `xvfb-run -a npm test`; Windows: `npm test` | 없음 (`contents: read`) |
+| **Release** — [release.yml](.github/workflows/release.yml) | `v*.*.*` 패턴의 태그 push | `ubuntu-latest`, Node.js `22`, `npm ci` | 태그의 `v`를 뺀 값과 `package.json` 버전 일치 검사 → `xvfb-run -a npm test` → `npx --yes @vscode/vsce@3.9.0 package --out "taskhub-${VSIX_VERSION}.vsix"` (`VSIX_VERSION`은 검사한 패키지 버전) | GitHub Release 생성·릴리스 노트 자동 생성·VSIX 첨부 (`contents: write`) |
+| **Dependency Audit** — [security-audit.yml](.github/workflows/security-audit.yml) | 매주 월요일 `03:23` UTC (`23 3 * * 1`), 수동 `workflow_dispatch` | `ubuntu-latest`, Node.js `22`, `npm ci` | `npm audit --omit=dev --audit-level=high`로 운영 의존성의 high 이상 취약점 검사 | 없음 (`contents: read`) |
+
+`npm test`는 `pretest`에서 테스트 컴파일·타입 검사·린트·확장과 웹뷰 번들 빌드를 수행한 뒤
+VS Code Extension Host에서 테스트한다. 별도로 요구하는 `npm run package`는 프로덕션 빌드이며,
+VSIX 생성은 [VSIX 패키지 빌드 및 설치](#vsix-패키지-빌드-및-설치)를 참고한다. Release의 로컬
+재현에는 표에 지정한 `vsce` 버전과 패키징 명령을 사용한다. Dependency Audit는 일반 push/PR에서
+자동으로 실행되지 않으므로, 의존성 변경의 검증을 CI 테스트 결과로 대신하지 않는다.
+
+#### 커밋 전 체크리스트
+
+**매 커밋 전, 현재 변경사항이 모든 워크플로에서 통과할 수 있는지 검토한다.** 로컬에서 실행할
+수 있는 검사는 실제로 통과시킨 뒤 커밋하며, 실행할 수 없는 환경의 검토 결과와 한계도 남긴다.
+
+1. **전체 워크플로 영향 확인**: 위 표와 `.github/workflows/`의 실제 파일 목록을 대조하고 각 YAML을 읽는다. 변경사항이 테스트·의존성 설치·취약점 검사·버전 검사·VSIX 패키징에 주는 영향과 대상 OS·Node.js 버전을 확인한다. 태그나 일정에서만 실행되는 워크플로도 검토 대상이다.
+2. **알려진 CI 실패 확인**: 현재 브랜치와 관련 PR의 실패한 실행이 있으면 해당 job의 OS·로그·실패 테스트를 확인한다. 변경사항과 관련되거나 현재 커밋에도 남아 있는 실패는 원인을 수정하고 다시 검증한다. 환경 또는 외부 서비스 문제로 재현·해결할 수 없으면 근거와 미검증 범위를 기록한다.
+3. **로컬 검사 실행**: Node.js `22`와 잠금 파일 기준 `npm ci`로 설치를 확인하고, `npm run test` 전체와 `npm run package`를 통과시킨다. 변경 영향이 있는 Audit·Release 검사도 위 표에 따라 로컬에서 재현 가능한 항목을 실행한다. 실패 후 수정했으면 관련 검사와 필수 검사를 다시 통과시킨다.
+4. **OS 차이 검토**: Linux/macOS에서 통과했어도 Windows 경로의 구분자·드라이브·대소문자, 공백과 비ASCII 경로, PowerShell/cmd 인자 인용, 자식 프로세스 종료와 파일 잠금, 타이머·취소·비동기 이벤트 순서를 확인한다. 특정 OS에 의존하는 가정을 테스트에 넣지 않았는지 검토하고, 가능하면 대상 OS에서도 해당 검사를 실행한다.
+5. **테스트 종료·정리 검증**: 테스트 본문이 통과했어도 `afterEach`·`teardown`의 임시 파일 삭제 실패는 CI 실패다. Windows에서 파일을 붙잡는 VS Code 편집기·탭·프로세스·파일 핸들이 정리되는지 확인한다. 짧은 고정 지연으로 성공을 가정하는 테스트는 완료 이벤트나 명시적인 조건으로 검증하고, 일시적인 잠금 때문에 정리 재시도가 필요하면 시간·횟수를 제한한다.
+6. **변경 유형별 문서 동반 갱신**: 아래 [변경 유형별 체크리스트](#변경-유형별-체크리스트)를 따라 같은 커밋/PR에 필요한 문서가 모두 포함되었는지 확인한다.
+7. **검증 결과 구분**: 로컬 OS·Node.js 버전·수행한 검사·결과를 기록하고, 실행하지 못한 검사는 항목과 이유를 명시한다. 실제 GitHub 결과를 보고할 때는 해당 커밋과 실행/job을 확인한다. 로컬 통과만으로 GitHub CI나 Windows 검사가 통과했다고 보고하지 않는다.
+
+검증을 위해 원격 실행을 만드는 푸시·태그 게시·릴리스 생성은 별도 권한이 필요한 작업이다.
+커밋과 푸시의 허용 범위는 [Git 커밋과 푸시 권한](AGENTS.md#git-커밋과-푸시-권한)을 따른다.
 
 ### 변경 유형별 체크리스트
 
