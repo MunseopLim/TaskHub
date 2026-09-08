@@ -13,6 +13,7 @@ import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri, openJsonEditorFile, JsonEditorOpenHistory } from './jsonEditor';
 import { coerceToUri, openMarkdownPreview, openHtmlInBrowser } from './previewOpener';
 import { openBrowserTask } from './browserTask';
+import { promptLinkTitle, readClipboardLinkUrl } from './linkInput';
 import {
     showMemoryMap,
     MemoryMapConfig,
@@ -11944,7 +11945,7 @@ export function activate(context: vscode.ExtensionContext) {
         await promptWorkspaceLinkEdit(workspaceLinkViewProvider, item);
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.addLink', async () => {
-        // Simplified flow (v0.4.32): URL → title (host-default) → save.
+        // URL → title suggestion (editable while loading) → save.
         // Group / tags are no longer prompted — the post-creation toast
         // points the user at *links.json 열기* if they want to add metadata.
         // Save-time scheme validation is wired in here so a typo (e.g.
@@ -11957,23 +11958,19 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        const url = await vscode.window.showInputBox({
+        const input = await vscode.window.showInputBox({
             prompt: t('열 URL', 'URL to open'),
             placeHolder: 'https://example.com',
+            value: await readClipboardLinkUrl(),
             ignoreFocusOut: true,
             validateInput: linkUrlValidateInputMessage
         });
+        const url = input?.trim();
         if (!url) {
             return;
         }
 
-        const title = await vscode.window.showInputBox({
-            prompt: t('링크 제목', 'Title for the link'),
-            value: deriveLinkTitleFromUrl(url),
-            placeHolder: 'e.g. Project Dashboard',
-            ignoreFocusOut: true,
-            validateInput: value => value.trim().length === 0 ? t('제목을 입력하세요', 'Enter a title') : null
-        });
+        const title = await promptLinkTitle(url, deriveLinkTitleFromUrl(url));
         if (!title) {
             return;
         }

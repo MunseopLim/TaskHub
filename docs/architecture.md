@@ -33,6 +33,8 @@ TaskHub/
 │   ├── previewRun.ts                  # Preview Run (Dry-run) 리포트 생성
 │   ├── previewOpener.ts               # preview/browser 열기 명령 헬퍼
 │   ├── browserTask.ts                 # browser 태스크 URI 해석·내장/기본 브라우저 실행
+│   ├── linkInput.ts                   # 링크 추가의 클립보드 URL 제안·비동기 제목 입력
+│   ├── linkTitle.ts                   # HTTP(S) 페이지 제목 조회·시간/크기/리다이렉트 한도
 │   ├── pathIdentity.ts                # 플랫폼별 파일 경로 identity 키 정규화
 │   ├── doctor.ts                      # actions.json 정적 분석(Doctor) 순수 모듈
 │   ├── variableCompletions.ts         # actions.json 의 ${…} 참조 자동완성 (결과 키는 previewRun 과 같은 출처)
@@ -299,5 +301,9 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   `withLspTimeout(promise, token, 3000)`으로 모든 LSP 호출을 감싼다. `activeHoverCalls: Set<string>`이 동일 위치 재진입을 막는다.
     *   `taskhub_types.json` 로드는 `fs.promises.*`(stat/readFile/realpath) 기반이다. 느린 스토리지에서도 extension host 이벤트 루프를 블로킹하지 않는다.
     *   구조체는 선언의 종료 세미콜론까지만 읽는다. 소스 packing 상태는 URI·문서 버전별 불변 줄 배열을 키로 `WeakMap`에 한 번 전처리해 공유한다. 직접 전달된 가변 배열은 캐시하지 않으며, 비동기 설정 읽기 중 문서가 바뀌면 해당 Hover 계산을 중단한다.
+
+8.  **링크 제목 조회**
+    *   링크 추가에서 사용자가 URL을 확정한 뒤에만 HTTP(S) 페이지를 조회한다. 클립보드 제안은 일반 텍스트의 URL만 읽으며 그 자체로 네트워크 요청을 시작하지 않는다.
+    *   조회는 총 2초·응답 256KiB·리다이렉트 3회로 제한하고, 제목 입력을 확정하거나 취소하면 요청을 중단한다. 제목이 완성되면 본문 수신도 중단하며 자동 제안 제목은 최대 200자로 정리한다. 인증 정보가 포함된 URL·HTML이 아닌 응답·압축 응답은 조회 실패로 처리하며 쿠키를 전달하거나 페이지 스크립트를 실행하지 않는다. 조회 실패는 수동 제목 입력을 막지 않는다.
 
 보안 관련 변경 시 관련 유닛 테스트(`src/test/extension.test.ts`의 `sanitizeInterpolatedValue`, `resolveWithinWorkspace`, 파서별 `defensive` suite)를 함께 갱신한다.
