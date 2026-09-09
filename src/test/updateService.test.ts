@@ -328,7 +328,8 @@ suite('GitHub update service', () => {
         try {
             assert.strictEqual(signal.aborted, false);
             assert.strictEqual(installs.length, 0);
-            assert.ok(destination.startsWith(path.join(storage, 'updates', 'download-')));
+            // Uri.fsPath normalizes Windows drive casing; compare filesystem-relative paths.
+            assert.ok(path.relative(storage, destination).startsWith(path.join('updates', 'download-')));
         } finally {
             verified.resolve();
             await checking;
