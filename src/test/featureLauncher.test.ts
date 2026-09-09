@@ -63,10 +63,44 @@ suite('TaskHub 기능 런처', () => {
             .filter(item => item.kind !== vscode.QuickPickItemKind.Separator)
             .map(item => item.featureId);
         const uniqueFeatureIds = new Set(allFeatureIds);
-        assert.strictEqual(uniqueFeatureIds.size, 11);
-        assert.strictEqual(allFeatureIds.length, 11, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
+        assert.strictEqual(uniqueFeatureIds.size, 12);
+        assert.strictEqual(allFeatureIds.length, 12, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
         assert.ok(allFeatureIds.every(id => typeof id === 'string'));
         assert.ok(items.filter(item => item.featureId).every(item => item.label.includes('$(')));
+    });
+
+    test('새로운 기능의 읽지 않은 버전 수를 런처에 표시한다', () => {
+        const item = buildFeatureLauncherItems([], 2).find(candidate => candidate.featureId === 'whatsNew');
+        assert.strictEqual(item?.command, 'taskhub.showWhatsNew');
+        assert.ok(item?.description?.includes('2'));
+        const read = buildFeatureLauncherItems([]).find(candidate => candidate.featureId === 'whatsNew');
+        assert.notStrictEqual(read?.description, item?.description);
+    });
+
+    test('새로운 기능을 읽으면 상태 표시줄의 표시와 접근성 설명이 갱신된다', () => {
+        const originalRegisterCommand = vscode.commands.registerCommand;
+        const originalCreateStatusBarItem = vscode.window.createStatusBarItem;
+        const changed = new vscode.EventEmitter<void>();
+        let unreadCount = 2;
+        const status = { show: () => undefined, dispose: () => undefined } as unknown as vscode.StatusBarItem;
+        const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+        try {
+            (vscode.commands as any).registerCommand = () => ({ dispose: () => undefined });
+            (vscode.window as any).createStatusBarItem = () => status;
+            registerFeatureLauncher(context, { onDidChange: changed.event, getUnreadCount: () => unreadCount });
+            assert.ok(status.text.includes('$(circle-filled)'));
+            assert.ok(String(status.tooltip).includes('2'));
+            assert.ok(status.accessibilityInformation?.label.includes('2'));
+            unreadCount = 0;
+            changed.fire();
+            assert.strictEqual(status.text, '$(tools) TaskHub');
+            assert.ok(!String(status.tooltip).includes('2'));
+        } finally {
+            context.subscriptions.forEach(disposable => disposable.dispose());
+            changed.dispose();
+            (vscode.commands as any).registerCommand = originalRegisterCommand;
+            (vscode.window as any).createStatusBarItem = originalCreateStatusBarItem;
+        }
     });
 
     test('선택한 기능을 최근 맨 앞에 저장하고 원래 명령을 실행한다', async () => {

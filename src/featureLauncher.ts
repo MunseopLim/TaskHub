@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { t } from './i18n';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
+import { WHATS_NEW_COMMAND, WhatsNewController } from './whatsNew';
 
 export const FEATURE_LAUNCHER_COMMAND = 'taskhub.showFeatureLauncher';
 export const FEATURE_LAUNCHER_STATUS_ID = 'taskhub.featureLauncher';
@@ -19,6 +20,7 @@ const FEATURE_IDS = [
     'htmlBrowser',
     'settings',
     'checkForUpdates',
+    'whatsNew',
 ] as const;
 
 export type FeatureLauncherFeatureId = typeof FEATURE_IDS[number];
@@ -42,7 +44,7 @@ export interface FeatureLauncherItem extends vscode.QuickPickItem {
 
 const FEATURE_ID_SET = new Set<string>(FEATURE_IDS);
 
-function buildFeatureLauncherDefinitions(): readonly FeatureLauncherDefinition[] {
+function buildFeatureLauncherDefinitions(unreadCount: number): readonly FeatureLauncherDefinition[] {
     return [
         {
             id: 'taskhubView',
@@ -64,6 +66,15 @@ function buildFeatureLauncherDefinitions(): readonly FeatureLauncherDefinition[]
             group: 'taskhub',
             label: `$(cloud-download) ${t('업데이트 확인', 'Check for updates')}`,
             description: t('GitHub의 최신 TaskHub 릴리스를 확인합니다.', 'Check the latest TaskHub release on GitHub.'),
+        },
+        {
+            id: 'whatsNew',
+            command: WHATS_NEW_COMMAND,
+            group: 'taskhub',
+            label: `$(sparkle) ${t('새로운 기능', 'What’s New')}`,
+            description: unreadCount > 0
+                ? t(`읽지 않은 업데이트 ${unreadCount}개`, `${unreadCount} unread updates`)
+                : t('현재 버전의 변경 내용을 확인합니다.', 'Read the changes in the current version.'),
         },
         {
             id: 'runAnyAction',
@@ -157,8 +168,8 @@ function toQuickPickItem(definition: FeatureLauncherDefinition): FeatureLauncher
     };
 }
 
-export function buildFeatureLauncherItems(recentValue: unknown): FeatureLauncherItem[] {
-    const definitions = buildFeatureLauncherDefinitions();
+export function buildFeatureLauncherItems(recentValue: unknown, unreadCount = 0): FeatureLauncherItem[] {
+    const definitions = buildFeatureLauncherDefinitions(unreadCount);
     const byId = new Map(definitions.map(definition => [definition.id, definition]));
     const recent = normalizeFeatureLauncherRecent(recentValue);
     const items: FeatureLauncherItem[] = [];
@@ -235,9 +246,9 @@ function featureDisplayName(item: FeatureLauncherItem): string {
     return item.label.replace(/^\$\([^)]+\)\s*/, '');
 }
 
-export async function showFeatureLauncher(context: vscode.ExtensionContext): Promise<void> {
+export async function showFeatureLauncher(context: vscode.ExtensionContext, unreadCount = 0): Promise<void> {
     const selected = await vscode.window.showQuickPick(
-        buildFeatureLauncherItems(context.globalState.get(FEATURE_LAUNCHER_RECENT_KEY)),
+        buildFeatureLauncherItems(context.globalState.get(FEATURE_LAUNCHER_RECENT_KEY), unreadCount),
         {
             placeHolder: t('실행할 TaskHub 기능을 검색하세요…', 'Search for a TaskHub feature to run…'),
             matchOnDescription: true,
@@ -260,20 +271,30 @@ export async function showFeatureLauncher(context: vscode.ExtensionContext): Pro
     }
 }
 
-export function registerFeatureLauncher(context: vscode.ExtensionContext): void {
-    const command = vscode.commands.registerCommand(FEATURE_LAUNCHER_COMMAND, () => showFeatureLauncher(context));
+export function registerFeatureLauncher(context: vscode.ExtensionContext, whatsNew?: WhatsNewController): void {
+    const command = vscode.commands.registerCommand(FEATURE_LAUNCHER_COMMAND,
+        () => showFeatureLauncher(context, whatsNew?.getUnreadCount() ?? 0));
     const status = vscode.window.createStatusBarItem(
         FEATURE_LAUNCHER_STATUS_ID,
         vscode.StatusBarAlignment.Left,
         10
     );
     status.name = t('TaskHub 기능', 'TaskHub Features');
-    status.text = '$(tools) TaskHub';
-    status.tooltip = t('TaskHub 기능 선택', 'Choose a TaskHub feature');
-    status.command = FEATURE_LAUNCHER_COMMAND;
-    status.accessibilityInformation = {
-        label: t('TaskHub 기능 메뉴 열기', 'Open the TaskHub feature menu'),
+    const refreshStatus = () => {
+        const unreadCount = whatsNew?.getUnreadCount() ?? 0;
+        status.text = unreadCount > 0 ? '$(tools) TaskHub $(circle-filled)' : '$(tools) TaskHub';
+        status.tooltip = unreadCount > 0
+            ? t(`TaskHub 기능 선택 — 읽지 않은 업데이트 ${unreadCount}개`, `Choose a TaskHub feature — ${unreadCount} unread updates`)
+            : t('TaskHub 기능 선택', 'Choose a TaskHub feature');
+        status.accessibilityInformation = {
+            label: unreadCount > 0
+                ? t(`TaskHub 기능 메뉴 열기, 읽지 않은 업데이트 ${unreadCount}개`, `Open the TaskHub feature menu, ${unreadCount} unread updates`)
+                : t('TaskHub 기능 메뉴 열기', 'Open the TaskHub feature menu'),
+        };
     };
+    refreshStatus();
+    status.command = FEATURE_LAUNCHER_COMMAND;
     status.show();
     context.subscriptions.push(command, status);
+    if (whatsNew) { context.subscriptions.push(whatsNew.onDidChange(refreshStatus)); }
 }

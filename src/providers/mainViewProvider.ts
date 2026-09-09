@@ -16,6 +16,8 @@ import * as vscode from 'vscode';
 import { ActionItem, Action as PipelineAction } from '../schema';
 import { t } from '../i18n';
 import { actionStates, ActionProgress, ActionRunState } from './actionStatus';
+import { InputProfileStore } from '../inputProfiles';
+import { PinnedActionStore, PinnedActionReference, pinnedActionKey, findPinnedInputProfile } from '../pinnedActions';
 
 type UiLanguage = 'ko' | 'en';
 
@@ -145,12 +147,13 @@ export class Action extends vscode.TreeItem {
          * than looks: with status icons off, a running action must still
          * offer its inline Stop button.
          */
-        showTaskStatus: boolean = true
+        showTaskStatus: boolean = true,
+        stateActionId: string | undefined = id
     ) {
         super(label, collapsibleState);
         this.command = { command: 'taskhub.executeAction', title: t('액션 실행', 'Execute Action'), arguments: [this] };
         this.tooltip = action.description;
-        const state = actionStates.get(this.id || '');
+        const state = actionStates.get(stateActionId || '');
         const lang: UiLanguage = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
         this.accessibilityInformation = {
             label: buildActionAccessibilityLabel(label, state?.state, state?.progress, lang, showTaskStatus)
@@ -202,6 +205,50 @@ export class Action extends vscode.TreeItem {
     }
 }
 
+/** TreeItem id는 원본 행과 다르지만 실행·중지는 같은 actionId를 사용한다. */
+export class PinnedAction extends Action {
+    readonly actionId: string;
+
+    constructor(
+        public readonly pin: PinnedActionReference,
+        item: ActionItem | undefined,
+        profileName: string | undefined,
+        unavailable: string | undefined,
+        context: vscode.ExtensionContext,
+        treeId: string,
+        showTaskStatus: boolean
+    ) {
+        const title = item?.title ?? pin.actionId;
+        const label = pin.profileId === undefined ? title : `${title} · ${profileName ?? t('없는 프로필', 'Missing profile')}`;
+        super(label, item?.action ?? { description: '', tasks: [] }, vscode.TreeItemCollapsibleState.None, context, treeId, showTaskStatus, pin.actionId);
+        this.actionId = pin.actionId;
+        const running = actionStates.get(pin.actionId)?.state === 'running';
+        this.contextValue = running ? 'pinnedRunningAction' : 'pinnedAction';
+        // 프로필마다 별도 실행 기록이 있는 것처럼 성공·실패를 복제하지 않는다.
+        // 실행 중 상태만 공유해 어느 고정 행에서든 같은 액션을 중지할 수 있게 한다.
+        if (!running || !showTaskStatus) {
+            this.iconPath = new vscode.ThemeIcon('pinned');
+        }
+        this.description = running && showTaskStatus
+            ? [t('액션 실행 중', 'Action running'), this.description].filter(Boolean).join(' · ')
+            : undefined;
+        this.accessibilityInformation = {
+            label: `${t('고정됨', 'Pinned')}, ${label}${this.description ? `, ${this.description}` : ''}`
+        };
+        this.command = {
+            command: 'taskhub.runPinnedAction', title: t('고정 액션 실행', 'Run Pinned Action'), arguments: [this]
+        };
+        if (unavailable) {
+            this.contextValue = running ? 'pinnedRunningAction' : 'pinnedUnavailableAction';
+            this.description = unavailable;
+            this.tooltip = unavailable;
+            this.iconPath = new vscode.ThemeIcon('warning');
+            this.command = undefined;
+            this.accessibilityInformation = { label: `${label}, ${unavailable}` };
+        }
+    }
+}
+
 export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder | vscode.TreeItem>, vscode.Disposable {
     private _onDidChangeTreeData: vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void> =
         new vscode.EventEmitter<Action | Folder | vscode.TreeItem | undefined | null | void>();
@@ -212,7 +259,9 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
     constructor(
         private context: vscode.ExtensionContext,
         private readonly loadActions: () => ActionItem[],
-        private readonly loadSourceWarnings: () => readonly string[] = () => []
+        private readonly loadSourceWarnings: () => readonly string[] = () => [],
+        private readonly pinnedActionStore?: PinnedActionStore,
+        private readonly inputProfileStore?: InputProfileStore
     ) {}
 
     refresh(): void {
@@ -284,7 +333,7 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
         // title) — a permanent row cost the list its top line and, more
         // importantly, made the tree never empty, which suppressed the
         // welcome view entirely.
-        const actionItems = this.createActionItems(actionsJson);
+        const actionItems = [...this.createPinnedItems(actionsJson), ...this.createActionItems(actionsJson)];
         const sourceWarnings = this.loadSourceWarnings();
         if (sourceWarnings.length === 0) {
             return Promise.resolve(actionItems);
@@ -311,6 +360,51 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
      */
     private isStatusVisible(): boolean {
         return vscode.workspace.getConfiguration('taskhub').get<boolean>('showTaskStatus', true) !== false;
+    }
+
+    private createPinnedItems(items: ActionItem[]): vscode.TreeItem[] {
+        if (!this.pinnedActionStore) { return []; }
+        const byId = new Map<string, ActionItem>();
+        const visit = (children: ActionItem[]): void => {
+            for (const item of children) {
+                if (item.id) { byId.set(item.id, item); }
+                if (item.children) { visit(item.children); }
+            }
+        };
+        visit(items);
+        try {
+            const pins = this.pinnedActionStore.list();
+            const usedIds = new Set(byId.keys());
+            return pins.map(pin => {
+                const item = byId.get(pin.actionId);
+                let profileName: string | undefined;
+                let unavailable: string | undefined;
+                if (!item?.action) {
+                    unavailable = t('액션을 찾을 수 없습니다', 'Action not found');
+                } else if (pin.profileId !== undefined) {
+                    try {
+                        const profile = this.inputProfileStore ? findPinnedInputProfile(pin, this.inputProfileStore) : undefined;
+                        if (!profile || profile.actionId !== pin.actionId) {
+                            unavailable = t('입력 프로필을 찾을 수 없습니다', 'Input profile not found');
+                        } else {
+                            profileName = profile.name;
+                        }
+                    } catch {
+                        unavailable = t('입력 프로필을 읽을 수 없습니다', 'Cannot read input profiles');
+                    }
+                }
+                let treeId = `taskhub.pinned:${pinnedActionKey(pin)}`;
+                while (usedIds.has(treeId)) { treeId = `:${treeId}`; }
+                usedIds.add(treeId);
+                return new PinnedAction(pin, item, profileName, unavailable, this.context, treeId, this.isStatusVisible());
+            });
+        } catch (error) {
+            const errorItem = new vscode.TreeItem(t('고정 목록을 불러오지 못했습니다', 'Failed to load pinned actions'));
+            errorItem.iconPath = new vscode.ThemeIcon('error');
+            errorItem.contextValue = 'pinnedActionsLoadError';
+            errorItem.tooltip = t('저장된 고정 목록을 읽을 수 없습니다. 기존 데이터는 변경하지 않았습니다.', 'Cannot read the stored pinned actions. Existing data has not been changed.');
+            return [errorItem];
+        }
     }
 
     private createActionItems(items: ActionItem[]): (Action | Folder | vscode.TreeItem)[] {

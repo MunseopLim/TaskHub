@@ -28,6 +28,7 @@ import {
 import { showHexViewer, HexEditorProvider, HexViewerOpenHistory, openHexViewerFile } from './hexViewer';
 import { showHexConverter } from './hexConverter';
 import { registerFeatureLauncher } from './featureLauncher';
+import { registerWhatsNew, resolveChangelogUri } from './whatsNew';
 import { registerUpdateService } from './updateService';
 import { t } from './i18n';
 import { buildPreviewReport } from './previewRun';
@@ -67,6 +68,8 @@ import {
     type InputProfileInspection,
     type NamedInputProfile,
 } from './inputProfiles';
+import { PinnedActionStore } from './pinnedActions';
+import { registerPinnedActionCommands } from './pinnedActionCommands';
 import {
     ActionRunLogCollector,
     appendBoundedRunCommand,
@@ -2668,7 +2671,7 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
 // MainViewProvider, Folder, Action classes live in ./providers/mainViewProvider.
 // They are re-exported below so existing callers (including tests) can keep
 // `import { ... } from './extension'` unchanged.
-import { MainViewProvider, Folder, Action } from './providers/mainViewProvider';
+import { MainViewProvider, Folder, Action, PinnedAction } from './providers/mainViewProvider';
 import { actionStates, ActionProgress, ActionRunState } from './providers/actionStatus';
 export { MainViewProvider, Folder, Action };
 
@@ -6479,6 +6482,21 @@ function recordManualStopInHistory(provider: HistoryProvider | undefined, id: st
         t('사용자가 실행을 중지했습니다.', 'Action stopped by the user.'),
         durationMs, 'stopped'
     );
+}
+
+/** 원본 행과 고정 별칭이 같은 실행 레지스트리·History 항목을 중지한다. */
+export function registerStopActionCommand(historyProvider: HistoryProvider): vscode.Disposable {
+    return vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
+        const id = actionItem instanceof PinnedAction ? actionItem.actionId : actionItem.id || actionItem.label;
+        if (!id) { return; }
+        if (!stopRunningAction(id)) {
+            manuallyTerminatedActions.delete(id);
+            vscode.window.showWarningMessage(t(`'${actionItem.label}'에 대한 활성 태스크를 찾을 수 없습니다.`, `Could not find active task for '${actionItem.label}'.`));
+            return;
+        }
+        recordManualStopInHistory(historyProvider, id);
+        syncRunningActionsContext();
+    });
 }
 
 function isCurrentActionRun(run: ActionRunContext): boolean {
@@ -11048,7 +11066,8 @@ export function activate(context: vscode.ExtensionContext) {
     if (context.globalState.get(RUN_ANY_ACTION_MRU_KEY) !== undefined) {
         void context.globalState.update(RUN_ANY_ACTION_MRU_KEY, undefined);
     }
-    registerFeatureLauncher(context);
+    const whatsNew = registerWhatsNew(context);
+    registerFeatureLauncher(context, whatsNew);
     registerUpdateService(context, {
         hasRunningActions: () => collectRunningActionIds().length > 0 || activeTasks.size > 0 || actionChildProcesses.size > 0,
         log: message => outputChannel.appendLine(message),
@@ -11067,10 +11086,14 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(terminalDisposable);
 
 
+    const inputProfileStore = new InputProfileStore(context.workspaceState);
+    const pinnedActionStore = new PinnedActionStore(context.workspaceState);
     const mainViewProvider = new MainViewProvider(
         context,
         () => loadAllActions(context),
-        () => currentActionSourceConflictMessages()
+        () => currentActionSourceConflictMessages(),
+        pinnedActionStore,
+        inputProfileStore
     );
     // Register `taskhub.runAction.<id>` commands at activation so the user's
     // `keybindings.json` resolves to live commands as soon as the extension
@@ -11083,7 +11106,6 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceLinkViewProvider = new LinkViewProvider();
     const favoriteViewProvider = new FavoriteViewProvider(context);
     const historyProvider = new HistoryProvider(context);
-    const inputProfileStore = new InputProfileStore(context.workspaceState);
     context.subscriptions.push(
         mainViewProvider,
         workspaceLinkViewProvider,
@@ -11469,6 +11491,24 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }));
 
+    context.subscriptions.push(registerPinnedActionCommands({
+        store: pinnedActionStore,
+        profiles: inputProfileStore,
+        loadActions: () => loadAllActions(context),
+        findAction: findActionById,
+        refresh: () => mainViewProvider.refresh(),
+        validateInputs: applyCurrentInputProfileValidation,
+        confirmOutdated: confirmRunOutdatedInputProfile,
+        execute: async (item, actions, inputs) => {
+            try {
+                await executeAction(item, context, mainViewProvider, historyProvider, inputs, findActionPathById(actions, item.id));
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                outputChannel.appendLine(`[ERROR] Execution failed for pinned action '${item.id}': ${message}`);
+            }
+        },
+    }));
+
     const manageInputProfiles = async (actionItem?: Action): Promise<void> => {
         const actionId = actionItem?.id;
         let allActions: ActionItem[] = [];
@@ -11552,6 +11592,7 @@ export function activate(context: vscode.ExtensionContext) {
                 });
                 if (nextName === undefined || nextName.trim() === selected.profile.name) { return; }
                 const renamed = await inputProfileStore.rename(selected.profile.id, nextName);
+                mainViewProvider.refresh();
                 vscode.window.showInformationMessage(t(
                     `입력 프로필 이름을 '${renamed.name}'(으)로 변경했습니다.`,
                     `Renamed the input profile to '${renamed.name}'.`
@@ -11570,6 +11611,7 @@ export function activate(context: vscode.ExtensionContext) {
             );
             if (confirmed !== confirmLabel) { return; }
             if (await inputProfileStore.delete(selected.profile.id)) {
+                mainViewProvider.refresh();
                 vscode.window.showInformationMessage(t(
                     `'${selected.profile.name}' 입력 프로필을 삭제했습니다.`,
                     `Deleted input profile '${selected.profile.name}'.`
@@ -11645,6 +11687,7 @@ export function activate(context: vscode.ExtensionContext) {
                 if (choice !== replaceLabel) { return; }
             }
             const saved = await inputProfileStore.save(draft, existing?.id);
+            mainViewProvider.refresh();
             vscode.window.showInformationMessage(t(
                 `'${saved.name}' 입력 프로필을 저장했습니다.`,
                 `Saved input profile '${saved.name}'.`
@@ -11871,31 +11914,21 @@ export function activate(context: vscode.ExtensionContext) {
             ));
         }
     }));
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
-        const id = actionItem.id || actionItem.label;
-        if (!id) {
-            return;
-        }
-        if (!stopRunningAction(id)) {
-            manuallyTerminatedActions.delete(id);
-            vscode.window.showWarningMessage(t(`'${actionItem.label}'에 대한 활성 태스크를 찾을 수 없습니다.`, `Could not find active task for '${actionItem.label}'.`));
-            return;
-        }
-        recordManualStopInHistory(historyProvider, id);
-        syncRunningActionsContext();
-    }));
+    context.subscriptions.push(registerStopActionCommand(historyProvider));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showVersion', () => {
         const version = context.extension.packageJSON.version;
         vscode.window.showInformationMessage(t(`TaskHub 버전: ${version}`, `TaskHub Version: ${version}`));
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showChangelog', async () => {
-        const changelogPath = path.join(context.extensionPath, 'CHANGELOG.md');
-        if (fs.existsSync(changelogPath)) {
-            const doc = await vscode.workspace.openTextDocument(changelogPath);
-            await vscode.window.showTextDocument(doc, { preview: true });
-        } else {
+        let changelogUri: vscode.Uri;
+        try {
+            changelogUri = await resolveChangelogUri(context.extensionUri);
+        } catch {
             vscode.window.showWarningMessage(t('CHANGELOG.md 파일을 찾을 수 없습니다.', 'CHANGELOG.md not found.'));
+            return;
         }
+        const doc = await vscode.workspace.openTextDocument(changelogUri);
+        await vscode.window.showTextDocument(doc, { preview: true });
     }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openRunLogsFolder', async () => {
         const folder = await pickWorkspaceFolderForCommand(t(

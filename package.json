@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.25",
+  "version": "0.8.26",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -454,6 +454,12 @@
         "icon": "$(lightbulb)"
       },
       {
+        "command": "taskhub.showWhatsNew",
+        "title": "%cmd.showWhatsNew%",
+        "category": "TaskHub",
+        "icon": "$(sparkle)"
+      },
+      {
         "command": "taskhub.showChangelog",
         "title": "%cmd.showChangelog%"
       },
@@ -494,6 +500,21 @@
         "command": "taskhub.rerunFromHistoryWithInputs",
         "title": "%cmd.rerunFromHistoryWithInputs%",
         "icon": "$(run-all)"
+      },
+      {
+        "command": "taskhub.pinAction",
+        "title": "%cmd.pinAction%",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "taskhub.runPinnedAction",
+        "title": "%cmd.runPinnedAction%",
+        "icon": "$(play)"
+      },
+      {
+        "command": "taskhub.unpinAction",
+        "title": "%cmd.unpinAction%",
+        "icon": "$(pinned)"
       },
       {
         "command": "taskhub.runActionWithInputProfile",
@@ -737,6 +758,18 @@
         {
           "command": "taskhub.memoryMapGoToSymbol",
           "when": "activeWebviewPanelId == 'taskhub.memoryMap'"
+        },
+        {
+          "command": "taskhub.pinAction",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.runPinnedAction",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.unpinAction",
+          "when": "false"
         }
       ],
       "view/title": [
@@ -809,6 +842,11 @@
           "command": "taskhub.closeAllTerminals",
           "when": "view == mainView.main",
           "group": "9_taskhub@4"
+        },
+        {
+          "command": "taskhub.showWhatsNew",
+          "when": "view == mainView.main",
+          "group": "9_taskhub@4.5"
         },
         {
           "command": "taskhub.showChangelog",
@@ -1008,6 +1046,36 @@
           "command": "taskhub.deleteHistoryItem",
           "when": "view == mainView.history && viewItem =~ /^(historyItem|historyToolItem)/",
           "group": "context@9"
+        },
+        {
+          "command": "taskhub.pinAction",
+          "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
+          "group": "context@3.5"
+        },
+        {
+          "command": "taskhub.runPinnedAction",
+          "when": "view == mainView.main && viewItem =~ /^pinnedAction$/",
+          "group": "inline@0"
+        },
+        {
+          "command": "taskhub.runPinnedAction",
+          "when": "view == mainView.main && viewItem =~ /^pinnedAction$/",
+          "group": "context@0"
+        },
+        {
+          "command": "taskhub.unpinAction",
+          "when": "view == mainView.main && viewItem =~ /^(pinnedAction|pinnedRunningAction|pinnedUnavailableAction)$/",
+          "group": "context@9"
+        },
+        {
+          "command": "taskhub.stopAction",
+          "when": "view == mainView.main && viewItem == pinnedRunningAction",
+          "group": "inline@0"
+        },
+        {
+          "command": "taskhub.stopAction",
+          "when": "view == mainView.main && viewItem == pinnedRunningAction",
+          "group": "context@0"
         }
       ]
     },
@@ -1072,6 +1140,7 @@
     "@typescript-eslint/parser": "^8.0.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0",
+    "adm-zip": "^0.6.0",
     "ajv": "^8.17.1",
     "esbuild": "^0.28.0",
     "eslint": "^10.0.0",
@@ -1086,7 +1155,6 @@
     "glob": "^13.0.6"
   },
   "dependencies": {
-    "adm-zip": "^0.6.0",
     "proper-lockfile": "^4.1.2",
     "semver": "^7.8.5",
     "yauzl": "^3.4.0"

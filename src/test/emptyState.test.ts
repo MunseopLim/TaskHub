@@ -190,7 +190,24 @@ suite('빈 상태 안내 (viewsWelcome)', () => {
                 'taskhub.copyLink',
             ]);
             assert.deepStrictEqual(inlineCommands('mainView.favorite'), []);
-            assert.deepStrictEqual(inlineCommands('mainView.main'), ['taskhub.stopAction']);
+            const actionInlineCommands = (contextValue: string): string[] => entries
+                .filter((entry: any) => {
+                    if (!entry.when.startsWith('view == mainView.main && ') || !String(entry.group).startsWith('inline')) {
+                        return false;
+                    }
+                    const clause = /&& viewItem (==|=~) (.+)$/.exec(entry.when);
+                    assert.ok(clause, `Actions 인라인 조건을 확인할 수 없다: ${entry.when}`);
+                    return clause[1] === '=='
+                        ? clause[2] === contextValue
+                        : new RegExp(clause[2].slice(1, -1)).test(contextValue);
+                })
+                .map((entry: any) => entry.command);
+            for (const idle of ['action', 'succeededAction', 'failedAction', 'pinnedUnavailableAction']) {
+                assert.deepStrictEqual(actionInlineCommands(idle), [], idle);
+            }
+            assert.deepStrictEqual(actionInlineCommands('runningAction'), ['taskhub.stopAction']);
+            assert.deepStrictEqual(actionInlineCommands('pinnedAction'), ['taskhub.runPinnedAction']);
+            assert.deepStrictEqual(actionInlineCommands('pinnedRunningAction'), ['taskhub.stopAction']);
             assert.deepStrictEqual(inlineCommands('mainView.history'), ['taskhub.rerunFromHistory']);
 
             const inlineEntries = entries.filter((entry: any) => String(entry.group).startsWith('inline'));

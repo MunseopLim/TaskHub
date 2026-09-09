@@ -40,6 +40,8 @@ TaskHub/
 │   ├── variableCompletions.ts         # actions.json 의 ${…} 참조 자동완성 (결과 키는 previewRun 과 같은 출처)
 │   ├── dialogMemory.ts                # 파일/폴더 다이얼로그의 마지막 사용 위치 기억
 │   ├── quickPickMemory.ts             # QuickPick의 workspace/action/task별 마지막 선택 기억
+│   ├── pinnedActions.ts               # 워크스페이스별 액션·입력 프로필 고정 목록
+│   ├── pinnedActionCommands.ts        # 고정 추가·해제·실행 명령과 최신 프로필 검증 연결
 │   ├── diagnosticMatcher.ts           # shell 출력 → VS Code Diagnostic 매칭 순수 모듈
 │   ├── jsonEditor.ts                  # JSON Editor WebView (시트/행 편집)
 │   ├── jsonEditorUtils.ts             # JSON Editor 순수 로직 (host·webview 공용, vscode 비의존)
@@ -54,6 +56,7 @@ TaskHub/
 │   ├── githubUpdate.ts                # 공개 GitHub 릴리스 조회·VSIX 다운로드·무결성/호환성 검증
 │   ├── updateService.ts               # 업데이트 확인 주기·알림/설치·설정과 명령 수명주기
 │   ├── updateLock.ts                  # 여러 창의 업데이트 잠금·설치 완료 버전 원자 저장
+│   ├── whatsNew.ts                    # 번들 변경 이력의 버전 범위 추출·업데이트 안내
 │   ├── archiveUtils.ts                # zip/unzip 내장 엔진
 │   ├── i18n.ts                        # 다국어 지원 (한국어/영어, vscode.env.language 기반)
 │   ├── schema.ts                      # TypeScript 타입 정의
@@ -218,15 +221,22 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 
 ## 저장소 (Persistence)
 
-*   **workspaceState**: 히스토리 데이터 저장 (VS Code API)
+*   **workspaceState**: 히스토리·입력 프로필·고정 목록 저장 (VS Code API)
     *   키: `'taskhub.actionHistory'`
     *   값: `HistoryEntry[]` 배열 — 구조는 위 "데이터 구조" 섹션 참조.
     *   키: `'taskhub.inputProfiles.v1'`
     *   값: 버전 1 입력 프로필 배열 — 직렬화된 프로필 전체 기준 128KB, 최대 50개·총 2MB. 구조가
         잘못된 개별 항목과 알 수 없는 루트 필드는 후속 저장·삭제에서도 원본 그대로 보존하고,
         루트 구조나 버전 자체가 지원되지 않으면 기존 상태를 덮어쓰지 않는다.
+    *   키: `'taskhub.pinnedActions.v1'`
+    *   값: 버전 1 고정 목록 — 액션 ID와 선택적인 프로필 ID만 보관하며 최대 100개·전체 128KiB로 제한한다.
+        한 저장소 인스턴스의 변경은 직렬화하고, 손상되거나 지원하지 않는 상태는 덮어쓰지 않는다.
 *   **워크스페이스 파일**: 실행 로그 저장을 켰을 때 `.taskhub/logs/<sanitized-action-id+hash>/<timestamp>-<nonce>.log`에 `ActionRunLog` JSON을 저장합니다. 개별 8MB 상한을 넘으면 stdout/stderr를 줄이고 `truncated`를 남기며, 기간 → 개수 → 총 용량 순으로 오래된 파일을 회전합니다. 로그 루트의 `.gitignore`는 생성하되 기존 파일은 덮어쓰지 않습니다. History 보고서가 읽을 때도 상대 경로, 중간 symlink, 일반 파일 여부, 8MB 상한과 버전 1 스키마를 다시 검사합니다.
 *   **업데이트 상태**: `globalState`에 마지막 확인 시도 시각과 건너뛴 버전을 보관합니다. `globalStorageUri` 아래 `updates/`는 여러 창의 다운로드·설치를 직렬화하는 `proper-lockfile` 잠금과 설치 완료 버전 표식 `installed.json`을 보관합니다. 표식은 원자 저장하고 4KiB 이내의 유효한 SemVer만 읽어, 재시작 전 구버전 창의 중복 설치를 막습니다.
+
+*   **새로운 기능 읽음 기록**: `globalStorageUri/whats-new/`에 빈 파일 `baseline-<x.y.z>`와
+    `read-<x.y.z>`를 추가하는 방식으로 저장한다. 유효한 정식 버전의 일반 파일만 읽으며, 최초 실행이
+    여러 창에서 겹치면 가장 낮은 기준 버전을 선택한다. 기존 기록을 덮어쓰지 않아 동시 읽음 저장을 보존한다.
 
 설정 정의의 정본은 [package.json](../package.json)의 `contributes.configuration`입니다. [features.md §21 설정 레퍼런스](./features.md#21-설정-레퍼런스)는 이를 사용자 관점에서 설명하며, 이 문서는 중복 목록 대신 해당 레퍼런스만 가리킵니다. 키·기본값·범위의 정합성은 `src/test/docConsistency.test.ts`가 검사합니다.
 
