@@ -340,7 +340,8 @@ suite('업데이트 변경 내용', () => {
             };
             (fs.promises as any).writeFile = async (...args: Parameters<typeof fs.promises.writeFile>) => {
                 const target = String(args[0]);
-                if (blockReceiptWrites && path.dirname(target) === markerDirectory && path.basename(target).startsWith('read-')) {
+                // Uri.fsPath가 Windows 드라이브 문자를 정규화하므로 경로 문자열을 직접 비교하지 않는다.
+                if (blockReceiptWrites && path.relative(markerDirectory, path.dirname(target)) === '' && path.basename(target).startsWith('read-')) {
                     writesBlocked++;
                     if (writesBlocked === 2) { bothBlocked(); }
                     await canWrite;
@@ -364,6 +365,7 @@ suite('업데이트 변경 내용', () => {
             ]);
             releaseWrites();
             await Promise.all(pendingReads);
+            assert.strictEqual(writesBlocked, 2, '두 창의 실제 읽음 저장이 모두 동시성 대기에 진입해야 한다');
             blockReceiptWrites = false;
             assert.deepStrictEqual(fs.readdirSync(markerDirectory).sort(), ['baseline-1.0.0', 'read-1.0.1', 'read-1.0.2']);
             fs.mkdirSync(path.join(markerDirectory, 'read-1.0.10'));
@@ -390,7 +392,7 @@ suite('업데이트 변경 내용', () => {
             let initialReads = 0;
             const initialSnapshots = new Promise<void>(resolve => { releaseInitialReads = resolve; });
             (fs.promises as any).readdir = async (directory: string, options: any) => {
-                if (directory === initialMarkers && initialReads < 2) {
+                if (path.relative(initialMarkers, directory) === '' && initialReads < 2) {
                     // 두 창 모두 처음 저장소가 비어 있는 것을 읽은 뒤에만 표식을 쓰게 한다.
                     initialReads++;
                     if (initialReads === 2) { releaseInitialReads!(); }
@@ -402,6 +404,7 @@ suite('업데이트 변경 내용', () => {
             const olderStart = registerWhatsNew(makeContext('1.0.1', initialStorage));
             const newerStart = registerWhatsNew(makeContext('1.0.2', initialStorage));
             await Promise.all([handlers[5](), handlers[6]()]);
+            assert.strictEqual(initialReads, 2, '두 창이 모두 비어 있는 최초 저장소를 읽은 뒤 진행해야 한다');
             assert.deepStrictEqual(fs.readdirSync(initialMarkers).sort(), ['baseline-1.0.1', 'baseline-1.0.2']);
             assert.strictEqual(olderStart.getUnreadCount(), 0);
             await handlers[6]();
