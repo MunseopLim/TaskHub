@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.24",
+  "version": "0.8.25",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -63,6 +63,19 @@
     "configuration": {
       "title": "TaskHub",
       "properties": {
+        "taskhub.updates.mode": {
+          "type": "string",
+          "enum": ["off", "notify", "auto"],
+          "enumDescriptions": [
+            "%setting.updatesMode.off%",
+            "%setting.updatesMode.notify%",
+            "%setting.updatesMode.auto%"
+          ],
+          "default": "notify",
+          "scope": "machine",
+          "markdownDescription": "%setting.updatesMode%",
+          "tags": ["usesOnlineServices"]
+        },
         "taskhub.showTaskStatus": {
           "type": "boolean",
           "default": true,
@@ -385,6 +398,12 @@
       {
         "command": "taskhub.showVersion",
         "title": "%cmd.showVersion%"
+      },
+      {
+        "command": "taskhub.checkForUpdates",
+        "title": "%cmd.checkForUpdates%",
+        "category": "TaskHub",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "taskhub.openFavoriteFile",
@@ -1045,6 +1064,8 @@
     "@types/adm-zip": "^0.5.8",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/semver": "^7.8.0",
     "@types/vscode": "^1.75.0",
     "@types/yauzl": "^3.4.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
@@ -1066,6 +1087,8 @@
   },
   "dependencies": {
     "adm-zip": "^0.6.0",
+    "proper-lockfile": "^4.1.2",
+    "semver": "^7.8.5",
     "yauzl": "^3.4.0"
   },
   "allowScripts": {

@@ -18,6 +18,7 @@ const FEATURE_IDS = [
     'markdownPreview',
     'htmlBrowser',
     'settings',
+    'checkForUpdates',
 ] as const;
 
 export type FeatureLauncherFeatureId = typeof FEATURE_IDS[number];
@@ -56,6 +57,13 @@ function buildFeatureLauncherDefinitions(): readonly FeatureLauncherDefinition[]
             group: 'taskhub',
             label: `$(gear) ${t('TaskHub 설정', 'TaskHub settings')}`,
             description: t('TaskHub 설정만 필터링해 엽니다.', 'Open Settings filtered to TaskHub.'),
+        },
+        {
+            id: 'checkForUpdates',
+            command: 'taskhub.checkForUpdates',
+            group: 'taskhub',
+            label: `$(cloud-download) ${t('업데이트 확인', 'Check for updates')}`,
+            description: t('GitHub의 최신 TaskHub 릴리스를 확인합니다.', 'Check the latest TaskHub release on GitHub.'),
         },
         {
             id: 'runAnyAction',

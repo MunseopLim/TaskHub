@@ -63,8 +63,8 @@ suite('TaskHub 기능 런처', () => {
             .filter(item => item.kind !== vscode.QuickPickItemKind.Separator)
             .map(item => item.featureId);
         const uniqueFeatureIds = new Set(allFeatureIds);
-        assert.strictEqual(uniqueFeatureIds.size, 10);
-        assert.strictEqual(allFeatureIds.length, 10, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
+        assert.strictEqual(uniqueFeatureIds.size, 11);
+        assert.strictEqual(allFeatureIds.length, 11, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
         assert.ok(allFeatureIds.every(id => typeof id === 'string'));
         assert.ok(items.filter(item => item.featureId).every(item => item.label.includes('$(')));
     });

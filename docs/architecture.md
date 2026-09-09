@@ -51,6 +51,9 @@ TaskHub/
 │   ├── hexConverterUtils.ts           # Text/Hex 변환·숫자 해석 순수 로직
 │   ├── hexBitwiseUtils.ts             # 고정 폭 정수 비트 수식 파서·계산 순수 로직
 │   ├── featureLauncher.ts             # Status Bar 기능 런처·그룹형 Quick Pick·최근 사용
+│   ├── githubUpdate.ts                # 공개 GitHub 릴리스 조회·VSIX 다운로드·무결성/호환성 검증
+│   ├── updateService.ts               # 업데이트 확인 주기·알림/설치·설정과 명령 수명주기
+│   ├── updateLock.ts                  # 여러 창의 업데이트 잠금·설치 완료 버전 원자 저장
 │   ├── archiveUtils.ts                # zip/unzip 내장 엔진
 │   ├── i18n.ts                        # 다국어 지원 (한국어/영어, vscode.env.language 기반)
 │   ├── schema.ts                      # TypeScript 타입 정의
@@ -223,6 +226,7 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
         잘못된 개별 항목과 알 수 없는 루트 필드는 후속 저장·삭제에서도 원본 그대로 보존하고,
         루트 구조나 버전 자체가 지원되지 않으면 기존 상태를 덮어쓰지 않는다.
 *   **워크스페이스 파일**: 실행 로그 저장을 켰을 때 `.taskhub/logs/<sanitized-action-id+hash>/<timestamp>-<nonce>.log`에 `ActionRunLog` JSON을 저장합니다. 개별 8MB 상한을 넘으면 stdout/stderr를 줄이고 `truncated`를 남기며, 기간 → 개수 → 총 용량 순으로 오래된 파일을 회전합니다. 로그 루트의 `.gitignore`는 생성하되 기존 파일은 덮어쓰지 않습니다. History 보고서가 읽을 때도 상대 경로, 중간 symlink, 일반 파일 여부, 8MB 상한과 버전 1 스키마를 다시 검사합니다.
+*   **업데이트 상태**: `globalState`에 마지막 확인 시도 시각과 건너뛴 버전을 보관합니다. `globalStorageUri` 아래 `updates/`는 여러 창의 다운로드·설치를 직렬화하는 `proper-lockfile` 잠금과 설치 완료 버전 표식 `installed.json`을 보관합니다. 표식은 원자 저장하고 4KiB 이내의 유효한 SemVer만 읽어, 재시작 전 구버전 창의 중복 설치를 막습니다.
 
 설정 정의의 정본은 [package.json](../package.json)의 `contributes.configuration`입니다. [features.md §21 설정 레퍼런스](./features.md#21-설정-레퍼런스)는 이를 사용자 관점에서 설명하며, 이 문서는 중복 목록 대신 해당 레퍼런스만 가리킵니다. 키·기본값·범위의 정합성은 `src/test/docConsistency.test.ts`가 검사합니다.
 
@@ -305,5 +309,10 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
 8.  **링크 제목 조회**
     *   링크 추가에서 사용자가 URL을 확정한 뒤에만 HTTP(S) 페이지를 조회한다. 클립보드 제안은 일반 텍스트의 URL만 읽으며 그 자체로 네트워크 요청을 시작하지 않는다.
     *   조회는 총 2초·응답 256KiB·리다이렉트 3회로 제한하고, 제목 입력을 확정하거나 취소하면 요청을 중단한다. 제목이 완성되면 본문 수신도 중단하며 자동 제안 제목은 최대 200자로 정리한다. 인증 정보가 포함된 URL·HTML이 아닌 응답·압축 응답은 조회 실패로 처리하며 쿠키를 전달하거나 페이지 스크립트를 실행하지 않는다. 조회 실패는 수동 제목 입력을 막지 않는다.
+
+9.  **GitHub 업데이트 다운로드·설치**
+    *   릴리스 메타데이터는 고정된 `api.github.com/repos/MunseopLim/TaskHub/releases/latest`에서 HTTPS로 조회한다. draft·prerelease를 제외하고 SemVer를 검증하며, VSIX 최초 URL은 같은 저장소의 `releases/download/{tag}/taskhub-{version}.vsix`와 정확히 일치해야 한다. 리다이렉트는 최초 URL 또는 `release-assets.githubusercontent.com`의 HTTPS 주소로 최대 3회만 허용한다.
+    *   메타데이터는 1MiB·15초, VSIX는 128MiB·다운로드와 검증 전체 120초로 제한한다. 릴리스 메타데이터의 SHA-256 digest가 없으면 거부하며, 실제 다운로드 길이와 해시가 일치해야 한다. ZIP을 디스크에 풀지 않고 엔트리 1만 개·`extension/package.json` 1MiB 상한 아래에서 확장 ID `Munseop.taskhub`, 릴리스 버전, `engines.vscode` 호환성을 확인한다. 실패·취소 시 생성한 파일을 정리한다.
+    *   `updateLock.ts`는 갱신되는 파일 잠금으로 다운로드·설치의 중복 실행을 막고, 잠금을 잃으면 취소 신호로 설치 전 작업을 중단한다. 업데이트 동작과 진입점은 [features.md §7](./features.md#github-릴리스-업데이트)에서 설명한다.
 
 보안 관련 변경 시 관련 유닛 테스트(`src/test/extension.test.ts`의 `sanitizeInterpolatedValue`, `resolveWithinWorkspace`, 파서별 `defensive` suite)를 함께 갱신한다.
