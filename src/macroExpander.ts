@@ -323,6 +323,139 @@ export class MacroExpander {
     }
 
     /**
+     * Evaluate integer expressions without accepting rounded inputs or intermediate values.
+     * Iterative operator/value stacks keep nesting bounded by the 4096-character input limit.
+     */
+    static evaluateToSafeInteger(expanded: string): number | null {
+        if (expanded.length > 4096) {
+            return null;
+        }
+        const expression = expanded.trim();
+        if (expression.length === 0) {
+            return null;
+        }
+
+        const precedence = {
+            '|': 1, '^': 2, '&': 3, '<<': 4, '>>': 4,
+            '+': 5, '-': 5, '*': 6, '/': 6, 'u+': 7, 'u-': 7
+        } as const;
+        type Operator = keyof typeof precedence;
+        const operators: Array<Operator | '('> = [];
+        const values: number[] = [];
+
+        const applyOperator = (): boolean => {
+            const operator = operators.pop();
+            const right = values.pop();
+            if (operator === undefined || operator === '(' || right === undefined) {
+                return false;
+            }
+            if (operator === 'u+' || operator === 'u-') {
+                values.push(operator === 'u-' ? -right : right);
+                return true;
+            }
+            const left = values.pop();
+            if (left === undefined) {
+                return false;
+            }
+            let result: number;
+            switch (operator) {
+                case '+': result = left + right; break;
+                case '-': result = left - right; break;
+                case '*': result = left * right; break;
+                case '/':
+                    // Exact divisibility also rejects fractions that a later operation could hide.
+                    if (right === 0 || BigInt(left) % BigInt(right) !== 0n) {
+                        return false;
+                    }
+                    result = left / right;
+                    break;
+                case '|': result = left | right; break;
+                case '&': result = left & right; break;
+                case '^': result = left ^ right; break;
+                case '<<': result = left * Math.pow(2, Math.min(63, Math.max(0, right))); break;
+                case '>>': result = Math.floor(left / Math.pow(2, Math.min(63, Math.max(0, right)))); break;
+            }
+            if (!Number.isSafeInteger(result)) {
+                return false;
+            }
+            values.push(result);
+            return true;
+        };
+
+        // Match unsupported multi-character operators whole, so they cannot become valid tokens.
+        const tokenPattern = /\s*((?:0[xX][0-9a-fA-F]+|0[bB][01]+|\d+)[ULul]*|>>>|<<|>>|\+\+|--|\*\*|&&|\|\||[()+\-*/|&^])/y;
+        let offset = 0;
+        let expectsValue = true;
+        while (offset < expression.length) {
+            tokenPattern.lastIndex = offset;
+            const match = tokenPattern.exec(expression);
+            if (!match) {
+                return null;
+            }
+            offset = tokenPattern.lastIndex;
+            const token = match[1];
+            if (/^[0-9]/.test(token)) {
+                if (!expectsValue) {
+                    return null;
+                }
+                const value = Number(token.replace(/[ULul]+$/, ''));
+                if (!Number.isSafeInteger(value)) {
+                    return null;
+                }
+                values.push(value);
+                expectsValue = false;
+            } else if (token === '(') {
+                if (!expectsValue) {
+                    return null;
+                }
+                operators.push('(');
+            } else if (token === ')') {
+                if (expectsValue) {
+                    return null;
+                }
+                while (operators.length > 0 && operators[operators.length - 1] !== '(') {
+                    if (!applyOperator()) {
+                        return null;
+                    }
+                }
+                if (operators.pop() !== '(') {
+                    return null;
+                }
+            } else if (expectsValue) {
+                if (token !== '+' && token !== '-') {
+                    return null;
+                }
+                operators.push(token === '+' ? 'u+' : 'u-');
+            } else {
+                if (!Object.prototype.hasOwnProperty.call(precedence, token)) {
+                    return null;
+                }
+                const operator = token as Operator;
+                while (operators.length > 0) {
+                    const previous = operators[operators.length - 1];
+                    if (previous === '(' || precedence[previous] < precedence[operator]) {
+                        break;
+                    }
+                    if (!applyOperator()) {
+                        return null;
+                    }
+                }
+                operators.push(operator);
+                expectsValue = true;
+            }
+        }
+        if (expectsValue) {
+            return null;
+        }
+        while (operators.length > 0) {
+            if (!applyOperator()) {
+                return null;
+            }
+        }
+        return values.length === 1 ? values[0] : null;
+    }
+
+    /**
      * Try to evaluate expanded macro to a numeric value
      * @param expanded Expanded macro string
      * @returns Numeric value or null if not evaluable

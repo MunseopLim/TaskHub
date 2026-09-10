@@ -10,7 +10,7 @@ import {
     CompleteBitFieldInfo
 } from './sfrBitFieldParser';
 import { MacroExpander, MacroDefinition } from './macroExpander';
-import { RegisterDecoder, RegisterDefinition } from './registerDecoder';
+import { RegisterDecoder, RegisterDefinition, RegisterDecodingResult } from './registerDecoder';
 import { StructSizeCalculator, StructSizeResult, TypeConfigFile } from './structSizeCalculator';
 import { t } from './i18n';
 
@@ -25,6 +25,82 @@ const TYPE_CONFIG_CACHE_MAX = 16;
 
 /** Maximum wall-clock time for any LSP command invoked from hover. */
 const LSP_TIMEOUT_MS = 3000;
+
+const COPY_HOVER_VALUE_COMMAND = 'taskhub.copyHoverValue';
+const MAX_HOVER_LINE_LENGTH = 10_000;
+// Hex expands to at most four binary digits per source character, plus sign/prefix.
+export const MAX_HOVER_COPY_LENGTH = Math.max(64 * 1024, MAX_HOVER_LINE_LENGTH * 4 + 3);
+
+function isCopyableHoverValue(value: unknown): value is string {
+    return typeof value === 'string' && value.length > 0 && value.length <= MAX_HOVER_COPY_LENGTH
+        && value.trim() === value && /^-?(?:0x[0-9a-f]+|0b[01]+|[0-9]+)$/i.test(value);
+}
+
+/** Copy the displayed text without converting exact 64-bit values back to numbers. */
+export function registerHoverCopyCommand(): vscode.Disposable {
+    return vscode.commands.registerCommand(COPY_HOVER_VALUE_COMMAND, async (value: unknown) => {
+        if (!isCopyableHoverValue(value)) {
+            return;
+        }
+        try {
+            await vscode.env.clipboard.writeText(value);
+        } catch {
+            vscode.window.showErrorMessage(t('값을 클립보드에 복사하지 못했습니다.', 'Failed to copy the value to the clipboard.'));
+        }
+    });
+}
+
+function createCopyableHoverMarkdown(): vscode.MarkdownString {
+    const md = new vscode.MarkdownString();
+    md.isTrusted = { enabledCommands: [COPY_HOVER_VALUE_COMMAND] };
+    md.supportThemeIcons = true;
+    return md;
+}
+
+/** Treat source fragments as text, including inside table cells and headings. */
+function escapeHoverText(value: string): string {
+    return new vscode.MarkdownString('', true)
+        .appendText(value.replace(/[\r\n]+/g, ' '))
+        .value.replace(/\|/g, '\\|');
+}
+
+/** Only numeric literals may become command arguments or link titles. */
+export function formatCopyableHoverValue(value: string): string {
+    if (!isCopyableHoverValue(value)) {
+        return escapeHoverText(value);
+    }
+    const args = encodeURIComponent(JSON.stringify([value]));
+    const title = t(`${value} 복사`, `Copy ${value}`);
+    return `\`${value}\` [$(copy)](command:${COPY_HOVER_VALUE_COMMAND}?${args} "${title}")`;
+}
+
+function isExactHoverInteger(value: number | bigint): boolean {
+    return typeof value === 'bigint' || Number.isSafeInteger(value);
+}
+
+function safeIntegerOrNull(value: number): number | null {
+    return Number.isSafeInteger(value) ? value : null;
+}
+
+function formatHoverInteger(value: number | bigint, radix: 2 | 10 | 16, minDigits = 0): string {
+    const integer = BigInt(value);
+    const magnitude = integer < 0n ? -integer : integer;
+    const prefix = radix === 16 ? '0x' : radix === 2 ? '0b' : '';
+    return `${integer < 0n ? '-' : ''}${prefix}${magnitude.toString(radix).toUpperCase().padStart(minDigits, '0')}`;
+}
+
+function appendNumberConversions(md: vscode.MarkdownString, value: number | bigint): boolean {
+    if (!isExactHoverInteger(value)) {
+        md.appendText(t('정확한 정수 값을 확인할 수 없어 진법 변환과 복사를 제공하지 않습니다.',
+            'Base conversion and copying are unavailable because the exact integer value cannot be determined.'));
+        md.appendMarkdown('\n\n');
+        return false;
+    }
+    md.appendMarkdown(`**Hex:** ${formatCopyableHoverValue(formatHoverInteger(value, 16))}\n\n`);
+    md.appendMarkdown(`**Dec:** ${formatCopyableHoverValue(formatHoverInteger(value, 10))}\n\n`);
+    md.appendMarkdown(`**Bin:** ${formatCopyableHoverValue(formatHoverInteger(value, 2))}\n\n`);
+    return true;
+}
 
 /**
  * Race a promise against a timer and the hover cancellation token.
@@ -57,7 +133,7 @@ function withLspTimeout<T>(
  */
 export class NumberBaseHoverProvider implements vscode.HoverProvider {
     /** Guard against pathological lines (minified/generated) that make regex matching slow. */
-    public static readonly MAX_LINE_LENGTH = 10_000;
+    public static readonly MAX_LINE_LENGTH = MAX_HOVER_LINE_LENGTH;
 
     /**
      * Pure predicate equivalent to the in-line check
@@ -384,7 +460,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         startLine: number,
         symbolName: string
     ): Promise<number | null> {
-        let currentValue = 0;
+        let currentValue: number | null = 0;
         let inEnumBody = false;
         const resolvedValues = new Map<string, number>();
 
@@ -423,8 +499,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                         const value = this.evaluateEnumExpression(exprPart, resolvedValues);
                         if (value !== null) {
                             resolvedValues.set(name, value);
-                            currentValue = value + 1;
                         }
+                        currentValue = value === null ? null : safeIntegerOrNull(value + 1);
                         if (name === symbolName) {
                             return value;
                         }
@@ -436,11 +512,13 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 const nameMatch = entry.match(/^(\w+)/);
                 if (nameMatch) {
                     const name = nameMatch[1];
-                    resolvedValues.set(name, currentValue);
+                    if (currentValue !== null) {
+                        resolvedValues.set(name, currentValue);
+                    }
                     if (name === symbolName) {
                         return currentValue;
                     }
-                    currentValue++;
+                    currentValue = currentValue === null ? null : safeIntegerOrNull(currentValue + 1);
                 }
             }
         }
@@ -478,7 +556,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         // Bare identifier lookup
         if (/^[A-Za-z_]\w*$/.test(trimmed)) {
             const resolved = resolvedValues.get(trimmed);
-            return resolved !== undefined ? resolved : null;
+            return resolved !== undefined ? safeIntegerOrNull(resolved) : null;
         }
 
         // Simple binary arithmetic: A op B
@@ -488,15 +566,15 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             const right = this.evaluateEnumExpression(binaryMatch[3], resolvedValues);
             if (left !== null && right !== null) {
                 switch (binaryMatch[2]) {
-                    case '+': return left + right;
-                    case '-': return left - right;
-                    case '*': return left * right;
+                    case '+': return safeIntegerOrNull(left + right);
+                    case '-': return safeIntegerOrNull(left - right);
+                    case '*': return safeIntegerOrNull(left * right);
                     case '/': return right !== 0 ? Math.trunc(left / right) : null;
                     case '|': return left | right;
                     case '&': return left & right;
                     case '^': return left ^ right;
-                    case '<<': return shiftLeftNumber(left, right);
-                    case '>>': return shiftRightNumber(left, right);
+                    case '<<': return safeIntegerOrNull(shiftLeftNumber(left, right));
+                    case '>>': return safeIntegerOrNull(shiftRightNumber(left, right));
                 }
             }
         }
@@ -616,27 +694,27 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         // Check for hexadecimal (0x prefix)
         if (this.patterns.hex0x.test(text)) {
             const value = parseInt(cleanText, 16);
-            return isNaN(value) ? null : value;
+            return safeIntegerOrNull(value);
         }
 
         // Check for hexadecimal (h suffix)
         if (this.patterns.hexH.test(text)) {
             const hexPart = cleanText.slice(0, -1); // Remove 'h' or 'H'
             const value = parseInt(hexPart, 16);
-            return isNaN(value) ? null : value;
+            return safeIntegerOrNull(value);
         }
 
         // Check for binary (0b prefix)
         if (this.patterns.binary.test(text)) {
             const binaryPart = cleanText.replace(/^0[bB]/, ''); // Remove 0b or 0B prefix
             const value = parseInt(binaryPart, 2);
-            return isNaN(value) ? null : value;
+            return safeIntegerOrNull(value);
         }
 
         // Check for decimal
         if (this.patterns.decimal.test(text)) {
             const value = parseInt(cleanText, 10);
-            return isNaN(value) ? null : value;
+            return safeIntegerOrNull(value);
         }
 
         return null;
@@ -671,18 +749,16 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      * Generate Markdown formatted hover content showing the number in different bases
      */
     private generateHoverContent(value: number | bigint, original: string): vscode.MarkdownString {
-        const md = new vscode.MarkdownString();
+        const md = createCopyableHoverMarkdown();
 
         // Show conversions — toString(radix)는 number/bigint 모두에서 정확 (M6)
-        md.appendMarkdown(`**Hex:** \`0x${value.toString(16).toUpperCase()}\`\n\n`);
-        md.appendMarkdown(`**Dec:** \`${value.toString(10)}\`\n\n`);
-        md.appendMarkdown(`**Bin:** \`0b${value.toString(2)}\`\n\n`);
+        appendNumberConversions(md, value);
 
         // Add bit position display for valid positive integers.
         // number는 MAX_SAFE_INTEGER(2^53-1)까지, bigint는 64-bit까지 표시.
         const inBitRange = typeof value === 'bigint'
             ? value >= 0n && value <= 0xFFFFFFFFFFFFFFFFn
-            : value >= 0 && value <= Number.MAX_SAFE_INTEGER;
+            : Number.isSafeInteger(value) && value >= 0;
         if (inBitRange) {
             md.appendMarkdown(this.generateBitPositionDisplay(value));
         }
@@ -799,13 +875,13 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         }
 
         // Try to evaluate to a number
-        const numericValue = MacroExpander.evaluateToNumber(result.expandedValue);
+        const numericValue = MacroExpander.evaluateToSafeInteger(result.expandedValue);
 
         // Only show hover if:
         // 1. It expands to other macros (more than 1 step), OR
         // 2. It evaluates to a numeric value
         const hasExpansion = result.expansionSteps.length > 1;
-        const hasNumericValue = numericValue !== null;
+        const hasNumericValue = numericValue !== null || MacroExpander.evaluateToNumber(result.expandedValue) !== null;
 
         if (!hasExpansion && !hasNumericValue) {
             return null; // Not useful to show
@@ -826,20 +902,20 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         expansionResult: any,
         numericValue: number | null
     ): vscode.MarkdownString {
-        const md = new vscode.MarkdownString();
+        const md = createCopyableHoverMarkdown();
 
-        md.appendMarkdown(`### Macro: ${macroName}\n\n`);
+        md.appendMarkdown(`### Macro: ${escapeHoverText(macroName)}\n\n`);
 
         // Show conversions directly without expansion steps
         if (numericValue !== null) {
-            md.appendMarkdown(`**Hex:** \`0x${numericValue.toString(16).toUpperCase()}\`\n\n`);
-            md.appendMarkdown(`**Dec:** \`${numericValue.toString(10)}\`\n\n`);
-            md.appendMarkdown(`**Bin:** \`0b${numericValue.toString(2)}\`\n\n`);
+            appendNumberConversions(md, numericValue);
 
             // Add bit position display for reasonable values
-            if (numericValue >= 0 && numericValue <= Number.MAX_SAFE_INTEGER) {
+            if (Number.isSafeInteger(numericValue) && numericValue >= 0) {
                 md.appendMarkdown(this.generateBitPositionDisplay(numericValue));
             }
+        } else if (MacroExpander.evaluateToNumber(expansionResult.expandedValue ?? '') !== null) {
+            appendNumberConversions(md, NaN);
         }
 
         return md;
@@ -967,7 +1043,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         }
 
         // Generate hover content for all definitions
-        const md = new vscode.MarkdownString();
+        const md = createCopyableHoverMarkdown();
 
         // Show count if multiple definitions
         if (allLocations.length > 1) {
@@ -1041,8 +1117,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 }
 
                 // Create clickable file link with line number
-                const fileLink = `[${filePath}:${targetLine + 1}](${definition.uri.toString()}#${targetLine + 1})`;
-                md.appendMarkdown(`- ${fileLink} - ${hierarchyName} [${comment.bitPosition}][${comment.accessType}]\n`);
+                const fileLabel = escapeHoverText(`${filePath}:${targetLine + 1}`);
+                const fileTarget = definition.uri.with({ fragment: String(targetLine + 1) }).toString()
+                    .replace(/\(/g, '%28').replace(/\)/g, '%29');
+                const fileLink = definition.uri.scheme.toLowerCase() === 'command'
+                    ? fileLabel : `[${fileLabel}](${fileTarget})`;
+                md.appendMarkdown(`- ${fileLink} - ${escapeHoverText(`${hierarchyName} [${comment.bitPosition}][${comment.accessType}]`)}\n`);
             }
         }
 
@@ -1124,7 +1204,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         // Parse the number value
         const value = this.parseNumber(numberMatch.text);
-        if (value === null) {
+        if (value === null || !Number.isSafeInteger(value)) {
+            // Let the ordinary numeric hover use parseNumberExact for large literals.
             return null;
         }
 
@@ -1361,12 +1442,13 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     /**
      * Generate hover content for register value decoding
      */
-    private generateRegisterDecodingContent(result: any): vscode.MarkdownString {
-        const md = new vscode.MarkdownString();
+    private generateRegisterDecodingContent(result: RegisterDecodingResult): vscode.MarkdownString {
+        const md = createCopyableHoverMarkdown();
 
-        md.appendMarkdown(`### Register: ${result.registerName}\n\n`);
-        md.appendMarkdown(`**Value:** \`0x${result.registerValue.toString(16).toUpperCase()}\` `);
-        md.appendMarkdown(`(Dec: ${result.registerValue}, Bin: 0b${result.registerValue.toString(2)})\n\n`);
+        md.appendMarkdown(`### Register: ${escapeHoverText(result.registerName)}\n\n`);
+        if (!appendNumberConversions(md, result.registerValue)) {
+            return md;
+        }
 
         // Decoded fields table
         md.appendMarkdown('---\n\n');
@@ -1375,9 +1457,9 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         md.appendMarkdown('|-----|-------|-------|-----|-----|-------------|\n');
 
         for (const field of result.fields) {
-            const desc = field.description || '-';
-            const accessType = field.accessType ? `[${field.accessType}]` : '';
-            md.appendMarkdown(`| ${field.bitPosition} | **${field.name}** | ${field.decimal} | ${field.hex} | ${field.binary} | ${desc} ${accessType} |\n`);
+            const desc = escapeHoverText(field.description || '-');
+            const accessType = field.accessType ? escapeHoverText(`[${field.accessType}]`) : '';
+            md.appendMarkdown(`| ${escapeHoverText(field.bitPosition)} | **${escapeHoverText(field.name)}** | ${formatCopyableHoverValue(field.decimal)} | ${formatCopyableHoverValue(field.hex)} | ${formatCopyableHoverValue(field.binary)} | ${desc} ${accessType} |\n`);
         }
 
         return md;
@@ -1699,46 +1781,46 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         filePath: string,
         lineNumber: number
     ): vscode.MarkdownString {
-        const md = new vscode.MarkdownString();
+        const md = createCopyableHoverMarkdown();
 
         const comment = bitFieldInfo.commentInfo!;
         const hierarchyName = formatHierarchy(scopes, bitFieldInfo.fieldName);
 
         // Title with hierarchy
-        md.appendMarkdown(`### ${hierarchyName}\n\n`);
+        md.appendMarkdown(`### ${escapeHoverText(hierarchyName)}\n\n`);
 
         // Property table (left-aligned)
         md.appendMarkdown('| Property | Value |\n');
         md.appendMarkdown('|---|---|\n');
-        md.appendMarkdown(`| **Bit Position** | ${comment.bitPosition} |\n`);
+        md.appendMarkdown(`| **Bit Position** | ${escapeHoverText(comment.bitPosition)} |\n`);
 
         // Add bit width for multi-bit fields
         if (comment.bitWidth > 1) {
             md.appendMarkdown(`| **Bit Width** | ${comment.bitWidth} bits |\n`);
         }
 
-        md.appendMarkdown(`| **Access Type** | ${getAccessTypeDescription(comment.accessType)} |\n`);
+        md.appendMarkdown(`| **Access Type** | ${escapeHoverText(getAccessTypeDescription(comment.accessType))} |\n`);
 
         // Reset value with conversions for multi-bit fields
         if (comment.bitWidth > 1 && comment.resetValueNumeric !== null) {
             const hex = '0x' + comment.resetValueNumeric.toString(16).toUpperCase();
             const dec = comment.resetValueNumeric.toString(10);
             const bin = '0b' + comment.resetValueNumeric.toString(2);
-            md.appendMarkdown(`| **Reset Value** | ${comment.resetValue} (Dec: ${dec}, Bin: ${bin}) |\n`);
+            md.appendMarkdown(`| **Reset Value** | ${escapeHoverText(comment.resetValue)} (Dec: ${dec}, Bin: ${bin}) |\n`);
         } else {
-            md.appendMarkdown(`| **Reset Value** | ${comment.resetValue} |\n`);
+            md.appendMarkdown(`| **Reset Value** | ${escapeHoverText(comment.resetValue)} |\n`);
         }
 
         // Bit mask (32-bit) - shows the value when all bits in this field are set to 1
         const bitMask = calculateBitMask(comment.bitStart, comment.bitEnd);
         const bitMaskHex = '0x' + bitMask.toString(16).toUpperCase().padStart(8, '0');
-        md.appendMarkdown(`| **Bit Mask** | ${bitMaskHex} |\n`);
+        md.appendMarkdown(`| **Bit Mask** | ${formatCopyableHoverValue(bitMaskHex)} |\n`);
 
         // File location
-        md.appendMarkdown(`| **File** | ${filePath}:${lineNumber} |\n\n`);
+        md.appendMarkdown(`| **File** | ${escapeHoverText(`${filePath}:${lineNumber}`)} |\n\n`);
 
         // Description
-        md.appendMarkdown(`**Description:** ${comment.description}\n`);
+        md.appendMarkdown(`**Description:** ${escapeHoverText(comment.description)}\n`);
 
         return md;
     }
@@ -2030,9 +2112,12 @@ export function calculateBitOperation(
  * Format bit operation result as markdown
  */
 export function formatBitOperationResult(result: BitOperationResult): vscode.MarkdownString {
-    const md = new vscode.MarkdownString();
+    const md = createCopyableHoverMarkdown();
 
     const { operation, beforeValue, afterValue } = result;
+    const operandsAreExact = Number.isSafeInteger(operation.operand)
+        && (beforeValue === undefined || Number.isSafeInteger(beforeValue))
+        && (operation.leftOperand === undefined || Number.isSafeInteger(operation.leftOperand));
 
     // Title - different for constant expressions
     if (operation.isConstant) {
@@ -2042,25 +2127,28 @@ export function formatBitOperationResult(result: BitOperationResult): vscode.Mar
     }
 
     // Operation
-    md.appendMarkdown(`**Expression:** \`${operation.expression}\`\n\n`);
+    md.appendMarkdown(`**Expression:** ${escapeHoverText(operation.expression)}\n\n`);
 
     // Values table
     md.appendMarkdown(`| | Hex | Dec | Bin |\n`);
     md.appendMarkdown(`|---|---|---|---|\n`);
 
-    // For constant expressions, show both operands and result
-    if (operation.isConstant) {
-        if (beforeValue !== undefined) {
-            md.appendMarkdown(`| **Left** | \`0x${beforeValue.toString(16).toUpperCase().padStart(8, '0')}\` | ${beforeValue} | \`0b${beforeValue.toString(2).padStart(32, '0')}\` |\n`);
+    const appendValueRow = (label: string, value: number) => {
+        if (!operandsAreExact || !Number.isSafeInteger(value)) {
+            const unavailable = escapeHoverText(t('정확한 정수 값 없음', 'Exact integer unavailable'));
+            md.appendMarkdown(`| **${label}** | — | ${unavailable} | — |\n`);
+            return;
         }
-        md.appendMarkdown(`| **Result** | \`0x${afterValue.toString(16).toUpperCase().padStart(8, '0')}\` | ${afterValue} | \`0b${afterValue.toString(2).padStart(32, '0')}\` |\n`);
-    } else {
-        // For variable operations, show before/after
-        if (beforeValue !== undefined) {
-            md.appendMarkdown(`| **Before** | \`0x${beforeValue.toString(16).toUpperCase().padStart(8, '0')}\` | ${beforeValue} | \`0b${beforeValue.toString(2).padStart(32, '0')}\` |\n`);
-        }
-        md.appendMarkdown(`| **After** | \`0x${afterValue.toString(16).toUpperCase().padStart(8, '0')}\` | ${afterValue} | \`0b${afterValue.toString(2).padStart(32, '0')}\` |\n`);
+        const hex = formatCopyableHoverValue(formatHoverInteger(value, 16, 8));
+        const dec = formatCopyableHoverValue(formatHoverInteger(value, 10));
+        const bin = formatCopyableHoverValue(formatHoverInteger(value, 2, 32));
+        md.appendMarkdown(`| **${label}** | ${hex} | ${dec} | ${bin} |\n`);
+    };
+
+    if (beforeValue !== undefined) {
+        appendValueRow(operation.isConstant ? 'Left' : 'Before', beforeValue);
     }
+    appendValueRow(operation.isConstant ? 'Result' : 'After', afterValue);
 
     return md;
 }

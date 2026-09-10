@@ -159,7 +159,7 @@ Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
 | `sfrBitFieldParser.ts` | SFR 비트 필드 주석 파싱 및 계층 구조 추출 |
 | `structSizeCalculator.ts` | 설정 기반 구조체/클래스 레이아웃 추정, 미지원 선언·미해석 의존 타입 실패 전파 |
 | `registerDecoder.ts` | 레지스터 비트 필드 값 추출 및 디코딩 |
-| `macroExpander.ts` | C/C++ `#define` 매크로 확장. 현재 활성 문서 전체에서 `#define` 라인만 수집해 재귀 치환하고, 수식은 `evaluateToNumber()`(safe 문자집합 + 4096자 한도)로 계산한다. `#if`/`#else` 전처리나 include 체인 추적은 범위 밖. |
+| `macroExpander.ts` | C/C++ `#define` 매크로 확장과 수치 평가. 현재 활성 문서의 정의를 재귀 치환하며, 호버의 정수 평가에는 `evaluateToSafeInteger()`를 사용한다([보안 가드](#보안-가드) 참조). `#if`/`#else` 전처리나 include 체인 추적은 범위 밖. |
 
 **LSP 통합:** `vscode.commands.executeCommand('vscode.executeDefinitionProvider', ...)` 사용
 **캐시:** mtime 기반 캐시로 `taskhub_types.json` 설정 로드 최적화
@@ -311,7 +311,10 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   Intel HEX/SREC: 포맷 감지와 실제 파서가 자릿수·레코드별 길이·체크섬 검증 함수를 공유한다. 레코드당 최대 255바이트, 누적 `HEX_MAX_BYTE_ENTRIES` 초과 시 throw. 손상 레코드·입력 줄은 `invalidRecordCount`, Intel 주소 확장으로 식별 가능한 손상 레코드 이후 주소를 확정하지 못한 데이터는 `unaddressedRecordCount`로 구분한다. 후자는 다음 정상 주소 확장 전까지 이전 기준 주소를 재사용하지 않는다. 접두사·타입까지 손상된 입력은 주소 확장 여부를 추정하지 않는다.
     *   Hex Viewer 렌더링: `HEX_VIEWER_MAX_SPAN = 128 MB`. 주소 범위가 이를 초과하면(sparse 파일) 렌더링 거부.
     *   Macro 전처리: shift 카운트 0–63 clamp, 수식 길이 4KB 제한.
-7.  **Hover 타임아웃 및 비동기 IO**
+7.  **Hover 텍스트·복사 입력과 비동기 처리**
+    *   복사 아이콘을 제공하는 `MarkdownString`은 `isTrusted.enabledCommands`에 `taskhub.copyHoverValue`만 허용한다. 소스에서 온 주석·이름·경로·표현식은 테마 아이콘을 지원하는 `appendText`로 이스케이프하고, 표 구분자 `|`와 개행도 처리해 링크·아이콘·표를 위조하지 못하게 한다. 정의 파일 링크는 라벨과 URI 목적지를 각각 이스케이프한다.
+    *   복사 링크 포매터와 명령 핸들러는 같은 숫자 리터럴 검증을 적용한다. 선택적 음수 부호와 16진수·10진수·2진수 숫자만 허용하며, 공백·명령 문자열·빈 문자열·문자열이 아닌 입력은 거부한다. 복사 길이 상한은 `Math.max(64 * 1024, NumberBaseHoverProvider.MAX_LINE_LENGTH * 4 + 3)`으로 입력 줄 상한에 연동해, 허용된 16진수의 2진수 확장과 접두사·부호를 수용한다.
+    *   진법 변환은 `Number.isSafeInteger()`를 통과한 `number` 또는 정확히 파싱한 `BigInt`만 사용한다. 매크로의 `evaluateToSafeInteger()`는 4096자 이내 수식을 반복형 스택으로 파싱하고 리터럴·중간값을 검사한다. enum은 불확정 값 이후의 암시적 증가와 참조도 보류하며, 비트 연산은 피연산자의 정밀도까지 확인한다. 정밀도를 잃은 `number`를 `BigInt`로 변환해 복구한 것처럼 표시하지 않으며, 숫자 입력의 해석과 사용자 안내는 [C/C++ Hover 값 복사](features.md#15-cc-hover-기능)의 규칙을 따른다.
     *   `withLspTimeout(promise, token, 3000)`으로 모든 LSP 호출을 감싼다. `activeHoverCalls: Set<string>`이 동일 위치 재진입을 막는다.
     *   `taskhub_types.json` 로드는 `fs.promises.*`(stat/readFile/realpath) 기반이다. 느린 스토리지에서도 extension host 이벤트 루프를 블로킹하지 않는다.
     *   구조체는 선언의 종료 세미콜론까지만 읽는다. 소스 packing 상태는 URI·문서 버전별 불변 줄 배열을 키로 `WeakMap`에 한 번 전처리해 공유한다. 직접 전달된 가변 배열은 캐시하지 않으며, 비동기 설정 읽기 중 문서가 바뀌면 해당 Hover 계산을 중단한다.

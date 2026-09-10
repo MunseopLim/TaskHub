@@ -5,13 +5,21 @@ import {
     BitOperationType,
     detectBitOperation,
     calculateBitOperation,
-    formatBitOperationResult
+    formatBitOperationResult,
+    formatCopyableHoverValue,
+    registerHoverCopyCommand,
+    MAX_HOVER_COPY_LENGTH
 } from '../numberBaseHoverProvider';
 import * as vscode from 'vscode';
-import { CompleteBitFieldInfo } from '../sfrBitFieldParser';
+import { CompleteBitFieldInfo, extractBitFieldInfo } from '../sfrBitFieldParser';
+import { RegisterDecoder } from '../registerDecoder';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+
+function visibleMarkdownText(markdown: vscode.MarkdownString): string {
+    return markdown.value.replace(/&nbsp;/g, ' ').replace(/\\([\\`*_{}\[\]()#+\-.!|$>])/g, '$1');
+}
 
 suite('NumberBaseHoverProvider Test Suite', () => {
     let provider: NumberBaseHoverProvider;
@@ -220,6 +228,450 @@ suite('NumberBaseHoverProvider Test Suite', () => {
         });
     });
 
+    suite('호버 값 개별 복사', () => {
+        function copyValues(markdown: vscode.MarkdownString): string[] {
+            // Escaped source text can contain the command name without becoming a link.
+            return [...markdown.value.matchAll(/(?<!\\)\[\$\(copy\)\]\(command:taskhub\.copyHoverValue\?([^\s)]+)(?:\s+"[^"]*")?\)/g)].map(match => {
+                const args: unknown = JSON.parse(decodeURIComponent(match[1]));
+                assert.ok(Array.isArray(args));
+                assert.strictEqual(args.length, 1, '복사는 값 한 개만 전달해야 한다');
+                assert.strictEqual(typeof args[0], 'string');
+                return args[0];
+            });
+        }
+
+        function assertCopyTrust(markdown: vscode.MarkdownString): void {
+            assert.deepStrictEqual(markdown.isTrusted, { enabledCommands: ['taskhub.copyHoverValue'] });
+            assert.strictEqual(markdown.supportThemeIcons, true);
+        }
+
+        const forgedCopyLink = `[$(copy)](command:taskhub.copyHoverValue?${encodeURIComponent(JSON.stringify(['0xBAD']))} "Copy 0xFF")`;
+        const hostileText = `${forgedCopyLink} | injected cell " $(copy) \`\n| injected | row |`;
+
+        function assertOnlyGeneratedCopyIcons(markdown: vscode.MarkdownString, expected: string[]): void {
+            assert.deepStrictEqual(copyValues(markdown), expected);
+            assert.strictEqual([...markdown.value.matchAll(/(?<!\\)\$\(copy\)/g)].length, expected.length,
+                '소스 텍스트에서 온 theme icon은 렌더링되지 않아야 한다');
+            assert.doesNotMatch(markdown.value, /^\| injected \| row \|/m, '소스 개행으로 표 행을 만들 수 없다');
+        }
+
+        test('확장 활성화가 실제 복사 명령을 등록한다', async () => {
+            const extension = vscode.extensions.getExtension('Munseop.taskhub');
+            assert.ok(extension);
+            await extension.activate();
+            const commands = await vscode.commands.getCommands(true);
+            assert.ok(commands.includes('taskhub.copyHoverValue'));
+        });
+
+        test('숫자는 접두사를 포함한 각 진법의 값만 복사하고 64비트 정밀도를 유지한다', () => {
+            for (const [value, expected] of [
+                [0, ['0x0', '0', '0b0']],
+                [255, ['0xFF', '255', '0b11111111']],
+                [-5, ['-0x5', '-5', '-0b101']],
+                [-0xFFFFFFFFFFFFFFFFn, ['-0xFFFFFFFFFFFFFFFF', '-18446744073709551615', '-0b' + '1'.repeat(64)]],
+                [0xFFFFFFFFFFFFFFFFn, ['0xFFFFFFFFFFFFFFFF', '18446744073709551615', '0b' + '1'.repeat(64)]],
+            ] as const) {
+                const markdown = (provider as any).generateHoverContent(value, String(value)) as vscode.MarkdownString;
+                assert.deepStrictEqual(copyValues(markdown), [...expected]);
+                assertCopyTrust(markdown);
+            }
+        });
+
+        test('숫자 매크로의 변환값은 복사할 수 있고 비수치 매크로에는 복사 링크가 없다', () => {
+            const numeric = (provider as any).generateMacroExpansionContent('FLAGS', {}, 255) as vscode.MarkdownString;
+            assert.deepStrictEqual(copyValues(numeric), ['0xFF', '255', '0b11111111']);
+            assertCopyTrust(numeric);
+
+            const nonnumeric = (provider as any).generateMacroExpansionContent('TEXT', {}, null) as vscode.MarkdownString;
+            assert.deepStrictEqual(copyValues(nonnumeric), []);
+        });
+
+        test('레지스터 전체 값과 디코드 필드는 각 진법을 독립적으로 복사한다', () => {
+            const decoded = new RegisterDecoder().decodeValue(0x1234, {
+                name: 'CONTROL',
+                totalBits: 32,
+                fields: [{ name: 'MODE', bitStart: 0, bitEnd: 3, bitWidth: 4 }],
+            });
+            const markdown = (provider as any).generateRegisterDecodingContent(decoded) as vscode.MarkdownString;
+            const values = copyValues(markdown);
+            assert.deepStrictEqual(values.slice(0, 3), ['0x1234', '4660', '0b1001000110100']);
+            assert.deepStrictEqual(values.slice(3), ['4', '0x4', '0b0100']);
+            assertCopyTrust(markdown);
+        });
+
+        test('매크로 음수는 부호가 접두사 앞에 오는 진법 값으로 복사한다', async () => {
+            const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: '#define NEGATIVE -5' });
+            const hover = (provider as any).tryMacroExpansion(document, new vscode.Position(0, 9)) as vscode.Hover;
+            assert.ok(hover);
+            assert.deepStrictEqual(copyValues(hover.contents[0] as vscode.MarkdownString), ['-0x5', '-5', '-0b101']);
+        });
+
+        test('안전한 정수가 아닌 변환값은 숫자·매크로·레지스터 복사 링크를 만들지 않는다', () => {
+            for (const value of [Number.MAX_SAFE_INTEGER + 1, 4.722366482869645e+21, Infinity, -Infinity, NaN, 1.5]) {
+                const numeric = (provider as any).generateHoverContent(value, String(value)) as vscode.MarkdownString;
+                const macro = (provider as any).generateMacroExpansionContent('UNSAFE', {}, value) as vscode.MarkdownString;
+                const decoded = new RegisterDecoder().decodeValue(value, {
+                    name: 'CONTROL', totalBits: 32,
+                    fields: [{ name: 'MODE', bitStart: 0, bitEnd: 3, bitWidth: 4 }],
+                });
+                const register = (provider as any).generateRegisterDecodingContent(decoded) as vscode.MarkdownString;
+                assert.deepStrictEqual(copyValues(numeric), [], `일반 숫자: ${value}`);
+                assert.deepStrictEqual(copyValues(macro), [], `매크로: ${value}`);
+                assert.deepStrictEqual(copyValues(register), [], `레지스터 필드도 부정확한 값을 노출하면 안 된다: ${value}`);
+            }
+        });
+
+        test('0으로 나누는 실제 매크로에는 Infinity 복사 링크가 없다', async () => {
+            const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: '#define DIV_ZERO (1/0)' });
+            const hover = (provider as any).tryMacroExpansion(document, new vscode.Position(0, 9)) as vscode.Hover | null;
+            if (hover) {
+                assert.deepStrictEqual(copyValues(hover.contents[0] as vscode.MarkdownString), []);
+            }
+        });
+
+        test('실제 매크로는 피연산자와 중간 계산의 정밀도가 유지될 때만 복사를 제공한다', async () => {
+            for (const [expression, expected] of [
+                ['(9007199254740993 - 9007199254740992)', []],
+                ['(9007199254740991 + 2) - 9007199254740991', []],
+                ['(1 << 5) | 3', ['0x23', '35', '0b100011']],
+            ] as const) {
+                const document = await vscode.workspace.openTextDocument({
+                    language: 'cpp', content: `#define PRECISION ${expression}`,
+                });
+                const hover = (provider as any).tryMacroExpansion(document, new vscode.Position(0, 9)) as vscode.Hover | null;
+                const values = hover ? copyValues(hover.contents[0] as vscode.MarkdownString) : [];
+                assert.deepStrictEqual(values, [...expected], expression);
+            }
+        });
+
+        test('큰 레지스터 리터럴은 일반 호버로 돌아가 정확한 BigInt 변환을 복사한다', async () => {
+            const content = [
+                'struct CONTROL {',
+                '    unsigned mode : 4; // [3:0] [RW][0x0] Mode',
+                '};',
+                'CONTROL reg = 0xFFFFFFFFFFFFFFFF;',
+            ].join('\n');
+            const document = await vscode.workspace.openTextDocument({ language: 'cpp', content });
+            const originalExecuteCommand = vscode.commands.executeCommand;
+            const cancellation = new vscode.CancellationTokenSource();
+            try {
+                (vscode.commands as any).executeCommand = async () => [];
+                const hover = await provider.provideHover(document, new vscode.Position(3, 17), cancellation.token);
+                assert.ok(hover);
+                const markdown = hover.contents[0] as vscode.MarkdownString;
+                assert.deepStrictEqual(copyValues(markdown), [
+                    '0xFFFFFFFFFFFFFFFF', '18446744073709551615', '0b' + '1'.repeat(64),
+                ]);
+                assert.doesNotMatch(markdown.value, /Decoded Bit Fields/);
+            } finally {
+                vscode.commands.executeCommand = originalExecuteCommand;
+                cancellation.dispose();
+            }
+        });
+
+        test('신뢰된 레지스터의 이름·필드·설명·접근 유형은 명령이나 표 셀을 주입할 수 없다', () => {
+            const decoded = new RegisterDecoder().decodeValue(0x1234, {
+                name: hostileText,
+                totalBits: 32,
+                fields: [{
+                    name: hostileText, bitStart: 0, bitEnd: 3, bitWidth: 4,
+                    description: hostileText, accessType: hostileText,
+                }],
+            });
+            const markdown = (provider as any).generateRegisterDecodingContent(decoded) as vscode.MarkdownString;
+            assertOnlyGeneratedCopyIcons(markdown, ['0x1234', '4660', '0b1001000110100', '4', '0x4', '0b0100']);
+            const rows = markdown.value.split('\n').filter(line => line.startsWith('|'));
+            assert.strictEqual(rows.length, 3);
+            for (const row of rows) {
+                assert.strictEqual([...row.matchAll(/(?<!\\)\|/g)].length, 7, '필드 설명이 표 열 수를 바꾸면 안 된다');
+            }
+        });
+
+        test('매크로 이름은 복사 아이콘이나 링크를 만들지 않는다', () => {
+            const markdown = (provider as any).generateMacroExpansionContent(hostileText, {}, 255) as vscode.MarkdownString;
+            assertOnlyGeneratedCopyIcons(markdown, ['0xFF', '255', '0b11111111']);
+        });
+
+        test('SFR 파서가 허용한 주석과 계층·필드·파일 경로는 텍스트로 표시한다', () => {
+            const parsed = extractBitFieldInfo(`Type mode : 3; // [12:10] [RW][0x0] ${forgedCopyLink} | " $(copy)`);
+            assert.ok(parsed?.commentInfo);
+            assert.ok(parsed.commentInfo.description.includes(forgedCopyLink), '실제 주석 파서가 공격 문자열을 통과시키는 경로를 검증한다');
+            const cases = [
+                { info: parsed, scopes: [], filePath: 'vendor/register.h' },
+                { info: { ...parsed, fieldName: hostileText }, scopes: [], filePath: 'vendor/register.h' },
+                { info: parsed, scopes: [{ type: 'struct', name: hostileText, lineNumber: 0 }], filePath: 'vendor/register.h' },
+                { info: parsed, scopes: [], filePath: hostileText },
+                ...(['bitPosition', 'accessType', 'resetValue', 'description'] as const).map(key => ({
+                    info: { ...parsed, commentInfo: { ...parsed.commentInfo!, [key]: hostileText } },
+                    scopes: [], filePath: 'vendor/register.h',
+                })),
+            ];
+            for (const { info, scopes, filePath } of cases) {
+                const markdown = (provider as any).generateBitFieldHoverContent(info, scopes, filePath, 1) as vscode.MarkdownString;
+                assertOnlyGeneratedCopyIcons(markdown, ['0x00001C00']);
+                const rows = markdown.value.split('\n').filter(line => line.startsWith('|'));
+                assert.strictEqual(rows.length, 8);
+                for (const row of rows) {
+                    assert.strictEqual([...row.matchAll(/(?<!\\)\|/g)].length, 3, 'SFR 소스 텍스트가 표 열 수를 바꾸면 안 된다');
+                }
+            }
+        });
+
+        test('비트 연산 식에 포함된 소스 문법은 복사 링크를 만들지 않는다', () => {
+            const operation: BitOperation = {
+                variable: 'flags', operator: BitOperationType.OR_ASSIGN, operand: 0x80,
+                isAssignment: true, expression: hostileText, start: 0, end: hostileText.length,
+            };
+            const markdown = formatBitOperationResult(calculateBitOperation(operation, 0x0F));
+            assertOnlyGeneratedCopyIcons(markdown, [
+                '0x0000000F', '15', '0b' + '0'.repeat(28) + '1111',
+                '0x0000008F', '143', '0b' + '0'.repeat(24) + '10001111',
+            ]);
+        });
+
+        test('값 포매터는 숫자 리터럴 외 텍스트와 길이 초과 입력에 링크를 만들지 않는다', () => {
+            for (const invalid of [
+                hostileText, '0x-5', '0b-101', 'Infinity', 'NaN', '1e+21', '1.5',
+                ' 255', '255 ', '255\n', '0x1" title', '0x1|cell', '0b2', '',
+                '0'.repeat(MAX_HOVER_COPY_LENGTH + 1),
+            ]) {
+                const markdown = new vscode.MarkdownString(formatCopyableHoverValue(invalid), true);
+                assertOnlyGeneratedCopyIcons(markdown, []);
+                assert.doesNotMatch(markdown.value, /(?<!\\)\|/, '잘못된 포매터 입력도 표 셀을 만들 수 없다');
+            }
+        });
+
+        test('비트 연산은 이전 값과 결과 값의 표시 패딩을 그대로 복사한다', () => {
+            for (const isConstant of [false, true]) {
+                const operation: BitOperation = {
+                    variable: isConstant ? undefined : 'flags',
+                    operator: isConstant ? BitOperationType.OR : BitOperationType.OR_ASSIGN,
+                    operand: 0x80,
+                    isAssignment: !isConstant,
+                    isConstant,
+                    leftOperand: isConstant ? 0x0F : undefined,
+                    expression: isConstant ? '0x0F | 0x80' : 'flags |= 0x80',
+                    start: 0,
+                    end: 13,
+                };
+                const markdown = formatBitOperationResult(calculateBitOperation(operation, 0x0F));
+                assert.deepStrictEqual(copyValues(markdown), [
+                    '0x0000000F', '15', '0b' + '0'.repeat(28) + '1111',
+                    '0x0000008F', '143', '0b' + '0'.repeat(24) + '10001111',
+                ]);
+                assertCopyTrust(markdown);
+            }
+        });
+
+        test('SFR 정의에서 조립한 최종 호버에서도 마스크 복사 명령만 활성화된다', async () => {
+            const document = await vscode.workspace.openTextDocument({
+                language: 'cpp',
+                content: `Type mode : 3; // [12:10] [RW][0x0] Mode ${forgedCopyLink} | " $(copy)`,
+            });
+            const originalExecuteCommand = vscode.commands.executeCommand;
+            try {
+                (vscode.commands as any).executeCommand = async (command: string) => {
+                    if (command === 'vscode.executeDefinitionProvider') {
+                        return [new vscode.Location(document.uri, new vscode.Range(0, 5, 0, 9))];
+                    }
+                    return [];
+                };
+                const hover = await (provider as any).tryBitFieldHover(document, new vscode.Position(0, 6)) as vscode.Hover;
+                assert.ok(hover);
+                const markdown = hover.contents[0] as vscode.MarkdownString;
+                assertOnlyGeneratedCopyIcons(markdown, ['0x00001C00']);
+                assertCopyTrust(markdown);
+            } finally {
+                vscode.commands.executeCommand = originalExecuteCommand;
+            }
+        });
+
+        test('SFR 추가 정의의 파일 라벨과 URI는 가짜 복사 링크를 만들지 않는다', async () => {
+            const document = await vscode.workspace.openTextDocument({
+                language: 'cpp', content: 'Type mode : 3; // [12:10] [RW][0x0] Mode',
+            });
+            const originalExecuteCommand = vscode.commands.executeCommand;
+            const originalOpenTextDocument = vscode.workspace.openTextDocument;
+            try {
+                for (const uri of [
+                    vscode.Uri.from({ scheme: 'file', path: `/virtual/vendor (SDK)/${forgedCopyLink}.h` }),
+                    vscode.Uri.from({ scheme: 'command', path: 'taskhub.copyHoverValue', query: JSON.stringify(['0xBAD']) }),
+                ]) {
+                    const secondDocument = {
+                        uri,
+                        lineCount: document.lineCount,
+                        lineAt: (line: number) => document.lineAt(line),
+                        getText: (range?: vscode.Range) => document.getText(range),
+                    } as vscode.TextDocument;
+                    (vscode.workspace as any).openTextDocument = async (target: vscode.Uri) => {
+                        if (target.toString() === uri.toString()) {
+                            return secondDocument;
+                        }
+                        return originalOpenTextDocument(target);
+                    };
+                    (vscode.commands as any).executeCommand = async (command: string) => {
+                        if (command === 'vscode.executeDefinitionProvider') {
+                            return [
+                                new vscode.Location(document.uri, new vscode.Range(0, 5, 0, 9)),
+                                new vscode.Location(uri, new vscode.Range(0, 5, 0, 9)),
+                            ];
+                        }
+                        return [];
+                    };
+                    const hover = await (provider as any).tryBitFieldHover(document, new vscode.Position(0, 6)) as vscode.Hover;
+                    assert.ok(hover);
+                    const markdown = hover.contents[0] as vscode.MarkdownString;
+                    assertOnlyGeneratedCopyIcons(markdown, ['0x00001C00']);
+                    const additional = markdown.value.split('**Additional definitions:**\n\n')[1];
+                    assert.ok(additional, '두 번째 정의의 파일 링크 경로를 검증한다');
+                    const rawFileLabel = uri.scheme === 'command'
+                        ? additional.slice(2, additional.indexOf(' - '))
+                        : additional.match(/^- \[((?:\\.|[^\\\]])*)\]\(/)?.[1];
+                    assert.ok(rawFileLabel, '추가 정의에서 파일 라벨을 분리한다');
+                    // appendText escapes icons before Markdown escaping; the icon renderer
+                    // consumes the remaining backslash after Markdown has been decoded.
+                    const visibleFileLabel = visibleMarkdownText(new vscode.MarkdownString(rawFileLabel))
+                        .replace(/\\(\$\([A-Za-z0-9~-]+\))/g, '$1');
+                    const expectedFileLabel = `${uri.fsPath}:1`;
+                    assert.strictEqual(visibleFileLabel, expectedFileLabel, '이스케이프 후에도 파일 라벨의 텍스트를 보존한다');
+                    const targets = [...additional.matchAll(/(?<!\\)\]\(([^()\s]+)\)/g)].map(match => match[1]);
+                    if (uri.scheme === 'command') {
+                        assert.deepStrictEqual(targets, [], 'command 스킴의 정의 위치는 클릭 링크가 될 수 없다');
+                    } else {
+                        assert.strictEqual(targets.length, 1, '추가 정의에는 실제 파일 링크 한 개만 존재한다');
+                        assert.match(targets[0], /%28/);
+                        assert.match(targets[0], /%29/);
+                        assert.match(targets[0], /%20/);
+                        assert.doesNotMatch(targets[0], /[()\s]/);
+                        const targetUri = vscode.Uri.parse(targets[0]);
+                        assert.strictEqual(targetUri.scheme, 'file');
+                        assert.strictEqual(targetUri.path, uri.path);
+                        assert.strictEqual(targetUri.fragment, '1');
+                    }
+                }
+            } finally {
+                vscode.commands.executeCommand = originalExecuteCommand;
+                vscode.workspace.openTextDocument = originalOpenTextDocument;
+            }
+        });
+
+        test('비트 NOT의 음수 결과는 부호와 패딩이 올바른 값으로 복사된다', () => {
+            const operation = detectBitOperation('~flags', 1);
+            assert.ok(operation);
+            const result = calculateBitOperation(operation, 0xFF);
+            assert.strictEqual(result.afterValue, -256);
+            const markdown = formatBitOperationResult(result);
+            assert.deepStrictEqual(copyValues(markdown), [
+                '0x000000FF', '255', '0b' + '0'.repeat(24) + '11111111',
+                '-0x00000100', '-256', '-0b' + '0'.repeat(23) + '100000000',
+            ]);
+            assert.doesNotMatch(markdown.value, /0x0+-|0b0+-/);
+        });
+
+        test('비트 연산이 부정확한 입력을 32비트로 잘라도 복사 가능한 값으로 취급하지 않는다', () => {
+            const operation: BitOperation = {
+                variable: 'flags', operator: BitOperationType.AND, operand: 0xFF,
+                isAssignment: false, expression: 'flags & 0xFF', start: 0, end: 12,
+            };
+            for (const [input, beforeValue] of [
+                [{ ...operation, operand: Number.MAX_SAFE_INTEGER + 1 }, 15],
+                [operation, Infinity],
+                [{ ...operation, isConstant: true, leftOperand: Number.MAX_SAFE_INTEGER + 1 }, undefined],
+            ] as const) {
+                const result = calculateBitOperation(input, beforeValue);
+                assert.ok(Number.isSafeInteger(result.afterValue), '비트 연산의 절삭으로 결과만 정수가 되는 경로');
+                assert.deepStrictEqual(copyValues(formatBitOperationResult(result)), []);
+            }
+        });
+
+        test('허용된 최장 16진수 리터럴의 2진수 링크를 실제 복사 명령이 처리한다', async () => {
+            const extension = vscode.extensions.getExtension('Munseop.taskhub');
+            assert.ok(extension);
+            await extension.activate();
+            const literal = '0x' + 'F'.repeat(NumberBaseHoverProvider.MAX_LINE_LENGTH - 2);
+            assert.strictEqual(NumberBaseHoverProvider.isLineTooLongForHover(literal), false);
+            const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: literal });
+            const originalClipboard = Object.getOwnPropertyDescriptor(vscode.env, 'clipboard');
+            assert.ok(originalClipboard);
+            const copied: string[] = [];
+            const cancellation = new vscode.CancellationTokenSource();
+            try {
+                Object.defineProperty(vscode.env, 'clipboard', {
+                    configurable: true,
+                    value: { writeText: async (value: string) => { copied.push(value); } },
+                });
+                const hover = await provider.provideHover(document, new vscode.Position(0, 2), cancellation.token);
+                assert.ok(hover);
+                const values = copyValues(hover.contents[0] as vscode.MarkdownString);
+                assert.strictEqual(values.length, 3);
+                const binary = '0b' + '1'.repeat((literal.length - 2) * 4);
+                assert.strictEqual(values[2], binary);
+                assert.ok(binary.length <= MAX_HOVER_COPY_LENGTH);
+                await vscode.commands.executeCommand('taskhub.copyHoverValue', values[2]);
+                assert.deepStrictEqual(copied, [binary]);
+            } finally {
+                Object.defineProperty(vscode.env, 'clipboard', originalClipboard);
+                cancellation.dispose();
+            }
+        });
+
+        test('복사 명령은 문자열을 그대로 쓰고 잘못된 인자와 클립보드 실패를 처리한다', async () => {
+            const originalRegisterCommand = vscode.commands.registerCommand;
+            const originalClipboard = Object.getOwnPropertyDescriptor(vscode.env, 'clipboard');
+            const originalShowErrorMessage = vscode.window.showErrorMessage;
+            assert.ok(originalClipboard);
+            const copied: string[] = [];
+            const errors: string[] = [];
+            let clipboardFails = false;
+            let handler: ((value: unknown) => Promise<void>) | undefined;
+            let registration: vscode.Disposable | undefined;
+            try {
+                (vscode.commands as any).registerCommand = (id: string, callback: typeof handler) => {
+                    assert.strictEqual(id, 'taskhub.copyHoverValue');
+                    handler = callback;
+                    return new vscode.Disposable(() => {});
+                };
+                Object.defineProperty(vscode.env, 'clipboard', {
+                    configurable: true,
+                    value: { writeText: async (value: string) => {
+                        if (clipboardFails) { throw new Error('clipboard unavailable'); }
+                        copied.push(value);
+                    } },
+                });
+                (vscode.window as any).showErrorMessage = async (message: string) => { errors.push(message); };
+                registration = registerHoverCopyCommand();
+                assert.ok(handler);
+
+                const values = ['0x000000FF', '18446744073709551615', '-0x5', '-5', '-0b101', '0'.repeat(MAX_HOVER_COPY_LENGTH)];
+                for (const value of values) {
+                    await handler(value);
+                }
+                assert.deepStrictEqual(copied, values, '값을 다시 파싱하거나 패딩을 없애지 않는다');
+
+                for (const invalid of [
+                    undefined, null, 255, 255n, {}, ['0xFF'], '', '0'.repeat(MAX_HOVER_COPY_LENGTH + 1),
+                    'arbitrary shell command', hostileText, '0x-5', 'Infinity', 'NaN', '1e+21',
+                    '1.5', ' 255', '255 ', '255\n', '0x1" title', '0x1|cell', '0b2',
+                ]) {
+                    await handler(invalid);
+                }
+                assert.deepStrictEqual(copied, values, '잘못된 인자는 클립보드를 변경하지 않는다');
+
+                errors.length = 0;
+                clipboardFails = true;
+                await assert.doesNotReject(() => handler!('0xFF'));
+                assert.strictEqual(errors.length, 1);
+                assert.match(errors[0], /클립보드|clipboard/i);
+                assert.deepStrictEqual(copied, values);
+            } finally {
+                registration?.dispose();
+                vscode.commands.registerCommand = originalRegisterCommand;
+                Object.defineProperty(vscode.env, 'clipboard', originalClipboard);
+                vscode.window.showErrorMessage = originalShowErrorMessage;
+            }
+        });
+    });
+
     suite('Number Detection Tests', () => {
         test('Find hex number at position', () => {
             const result = (provider as any).findNumberAtPosition('int x = 0xFF;', 8);
@@ -408,6 +860,57 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             } as any as vscode.TextDocument;
         }
 
+        test('부정확한 enum 리터럴의 참조와 자동 증가를 전파하지 않고 명시 값에서 복구한다', async () => {
+            const doc = makeDoc([
+                'enum Precision', '{',
+                '    A = 9007199254740993,',
+                '    B = A & 1,',
+                '    C,',
+                '    D = 7,',
+                '    E,',
+                '};',
+            ]);
+            for (const [name, expected] of [['A', null], ['B', null], ['C', null], ['D', 7], ['E', 8]] as const) {
+                assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, name), expected, name);
+            }
+        });
+
+        test('enum 자동 증가가 안전한 정수 범위를 넘으면 후속 참조도 복사할 값을 얻지 못한다', async () => {
+            const doc = makeDoc([
+                'enum Precision', '{',
+                '    A = 9007199254740991,',
+                '    B,',
+                '    C = B & 1,',
+                '    D,',
+                '    E = 7,',
+                '    F,',
+                '};',
+            ]);
+            for (const [name, expected] of [
+                ['A', Number.MAX_SAFE_INTEGER], ['B', null], ['C', null], ['D', null], ['E', 7], ['F', 8],
+            ] as const) {
+                assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, name), expected, name);
+            }
+        });
+
+        test('enum 중간 연산이 범위를 넘은 뒤 다시 작은 값이 되어도 정밀도 손실을 숨기지 않는다', async () => {
+            const doc = makeDoc([
+                'enum Precision', '{',
+                '    A = 9007199254740991,',
+                '    B = A + 2,',
+                '    C = B - A,',
+                '    D,',
+                '    E = 7,',
+                '    F,',
+                '};',
+            ]);
+            for (const [name, expected] of [
+                ['A', Number.MAX_SAFE_INTEGER], ['B', null], ['C', null], ['D', null], ['E', 7], ['F', 8],
+            ] as const) {
+                assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, name), expected, name);
+            }
+        });
+
         test('Implicit values with first = 0', async () => {
             const doc = makeDoc([
                 'enum Test',
@@ -517,12 +1020,12 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 36
             );
 
-            assert.ok(result.value.includes('RegTestInt::IntRegSts::int0_set'), 'Should include hierarchy name');
-            assert.ok(result.value.includes('0'), 'Should include bit position');
-            assert.ok(result.value.includes('RW1C'), 'Should include access type');
-            assert.ok(result.value.includes('0x0'), 'Should include reset value');
-            assert.ok(result.value.includes('Test interrupt 1'), 'Should include description');
-            assert.ok(result.value.includes('h1/test.h:36'), 'Should include file location');
+            assert.ok(visibleMarkdownText(result).includes('RegTestInt::IntRegSts::int0_set'), 'Should include hierarchy name');
+            assert.ok(visibleMarkdownText(result).includes('0'), 'Should include bit position');
+            assert.ok(visibleMarkdownText(result).includes('RW1C'), 'Should include access type');
+            assert.ok(visibleMarkdownText(result).includes('0x0'), 'Should include reset value');
+            assert.ok(visibleMarkdownText(result).includes('Test interrupt 1'), 'Should include description');
+            assert.ok(visibleMarkdownText(result).includes('h1/test.h:36'), 'Should include file location');
         });
 
         test('Generate hover content for multi-bit field with conversions', () => {
@@ -553,11 +1056,11 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 47
             );
 
-            assert.ok(result.value.includes('12:10'), 'Should include bit position range');
-            assert.ok(result.value.includes('3 bits'), 'Should include bit width');
-            assert.ok(result.value.includes('Dec: 7'), 'Should include decimal conversion');
-            assert.ok(result.value.includes('Bin: 0b111'), 'Should include binary conversion');
-            assert.ok(result.value.includes('0x00001C00'), 'Should include bit mask');
+            assert.ok(visibleMarkdownText(result).includes('12:10'), 'Should include bit position range');
+            assert.ok(visibleMarkdownText(result).includes('3 bits'), 'Should include bit width');
+            assert.ok(visibleMarkdownText(result).includes('Dec: 7'), 'Should include decimal conversion');
+            assert.ok(visibleMarkdownText(result).includes('Bin: 0b111'), 'Should include binary conversion');
+            assert.ok(visibleMarkdownText(result).includes('0x00001C00'), 'Should include bit mask');
         });
 
         test('Verify different bit positions produce different content', () => {
@@ -613,16 +1116,16 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             );
 
             // Verify first definition has correct info
-            assert.ok(result1.value.includes('12:10'), 'First definition should show [12:10]');
-            assert.ok(result1.value.includes('3 bits'), 'First definition should show 3 bits');
-            assert.ok(result1.value.includes('0x7'), 'First definition should show reset value 0x7');
-            assert.ok(result1.value.includes('0x00001C00'), 'First definition should show bit mask 0x00001C00');
+            assert.ok(visibleMarkdownText(result1).includes('12:10'), 'First definition should show [12:10]');
+            assert.ok(visibleMarkdownText(result1).includes('3 bits'), 'First definition should show 3 bits');
+            assert.ok(visibleMarkdownText(result1).includes('0x7'), 'First definition should show reset value 0x7');
+            assert.ok(visibleMarkdownText(result1).includes('0x00001C00'), 'First definition should show bit mask 0x00001C00');
 
             // Verify second definition has DIFFERENT info
-            assert.ok(result2.value.includes('11:10'), 'Second definition should show [11:10]');
-            assert.ok(result2.value.includes('2 bits'), 'Second definition should show 2 bits');
-            assert.ok(result2.value.includes('0x3'), 'Second definition should show reset value 0x3');
-            assert.ok(result2.value.includes('0x00000C00'), 'Second definition should show bit mask 0x00000C00');
+            assert.ok(visibleMarkdownText(result2).includes('11:10'), 'Second definition should show [11:10]');
+            assert.ok(visibleMarkdownText(result2).includes('2 bits'), 'Second definition should show 2 bits');
+            assert.ok(visibleMarkdownText(result2).includes('0x3'), 'Second definition should show reset value 0x3');
+            assert.ok(visibleMarkdownText(result2).includes('0x00000C00'), 'Second definition should show bit mask 0x00000C00');
 
             // Verify they are actually different
             assert.notStrictEqual(result1.value, result2.value, 'Different bit field definitions should produce different hover content');
@@ -651,7 +1154,7 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 'test.h',
                 1
             );
-            assert.ok(result1.value.includes('0x00000001'), 'Bit [0] should have mask 0x00000001');
+            assert.ok(visibleMarkdownText(result1).includes('0x00000001'), 'Bit [0] should have mask 0x00000001');
 
             // Test bit mask for [12:10] - 3 bits
             const bitFieldInfo2: CompleteBitFieldInfo = {
@@ -675,7 +1178,7 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 'test.h',
                 1
             );
-            assert.ok(result2.value.includes('0x00001C00'), 'Bits [12:10] should have mask 0x00001C00');
+            assert.ok(visibleMarkdownText(result2).includes('0x00001C00'), 'Bits [12:10] should have mask 0x00001C00');
 
             // Test bit mask for [11:10] - 2 bits
             const bitFieldInfo3: CompleteBitFieldInfo = {
@@ -699,7 +1202,7 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 'test.h',
                 1
             );
-            assert.ok(result3.value.includes('0x00000C00'), 'Bits [11:10] should have mask 0x00000C00');
+            assert.ok(visibleMarkdownText(result3).includes('0x00000C00'), 'Bits [11:10] should have mask 0x00000C00');
         });
     });
 
@@ -1267,11 +1770,11 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             const result = calculateBitOperation(operation, 0x0F);
             const markdown = formatBitOperationResult(result);
 
-            assert.ok(markdown.value.includes('Bit Operation Result'));
-            assert.ok(markdown.value.includes('value |= 0x80'));
-            assert.ok(markdown.value.includes('Before'));
-            assert.ok(markdown.value.includes('After'));
-            assert.ok(markdown.value.includes('0x0000008F')); // Hex values are 8-digit padded
+            assert.ok(visibleMarkdownText(markdown).includes('Bit Operation Result'));
+            assert.ok(visibleMarkdownText(markdown).includes('value |= 0x80'));
+            assert.ok(visibleMarkdownText(markdown).includes('Before'));
+            assert.ok(visibleMarkdownText(markdown).includes('After'));
+            assert.ok(visibleMarkdownText(markdown).includes('0x0000008F')); // Hex values are 8-digit padded
         });
 
         test('should format operation result without before value', () => {
@@ -1288,9 +1791,9 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             const result = calculateBitOperation(operation); // No before value
             const markdown = formatBitOperationResult(result);
 
-            assert.ok(markdown.value.includes('Bit Operation Result'));
-            assert.ok(markdown.value.includes('After'));
-            assert.ok(markdown.value.includes('0x00000080'));
+            assert.ok(visibleMarkdownText(markdown).includes('Bit Operation Result'));
+            assert.ok(visibleMarkdownText(markdown).includes('After'));
+            assert.ok(visibleMarkdownText(markdown).includes('0x00000080'));
         });
     });
 

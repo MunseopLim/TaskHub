@@ -290,6 +290,93 @@ const int x = 5;
         });
     });
 
+    suite('Safe Integer Evaluation', () => {
+        test('keeps integer literal formats, suffixes, unary signs, and ordinary masks', () => {
+            const cases: Array<[string, number]> = [
+                ['0xFF', 255], ['0B1010UL', 10], ['255U', 255], ['00010 + 0', 10],
+                ['+0xFFuLL', 255], ['-(0b1010U + 2L)', -12], ['1 + +2', 3],
+                ['(1U << 0) | (1UL << 5) | 0x40ULL', 0x61],
+                ['9007199254740991', Number.MAX_SAFE_INTEGER],
+                ['-9007199254740991', -Number.MAX_SAFE_INTEGER],
+                ['0x1FFFFFFFFFFFFF', Number.MAX_SAFE_INTEGER],
+                ['\t (0x40000000 + 0x1000) \n', 0x40001000]
+            ];
+            for (const [expression, expected] of cases) {
+                assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), expected, expression);
+            }
+        });
+
+        test('respects precedence, parentheses, associativity, and signed bitwise semantics', () => {
+            const cases: Array<[string, number]> = [
+                ['3 + 4 * 5', 23], ['(3 + 4) * 5', 35], ['100 / 5 / 2', 10],
+                ['20 - 5 - 3', 12], ['1 + 2 << 3', 24], ['1 | 2 ^ 3 & 6', 1],
+                ['0xFFFFFFFF | 0', -1], ['0x80000000 ^ 1', -2147483647],
+                ['0x100000000 | 0', 0], ['-3 & 0xFF', 253]
+            ];
+            for (const [expression, expected] of cases) {
+                assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), expected, expression);
+            }
+        });
+
+        test('retains clamped shifts while rejecting unsafe shift results', () => {
+            const cases: Array<[string, number | null]> = [
+                ['1 << 52', 2 ** 52], ['1 << 53', null], ['1 << 9999', null],
+                ['0 << 9999', 0], ['8 << -1', 8], ['8 >> -1', 8],
+                ['8 >> 2', 2], ['3 >> 1', 1], ['-3 >> 1', -2],
+                ['9007199254740991 >> 9999', 0], ['-1 >> 9999', -1]
+            ];
+            for (const [expression, expected] of cases) {
+                assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), expected, expression);
+            }
+        });
+
+        test('rejects unsafe inputs and intermediate values even when the final value would be safe', () => {
+            for (const expression of [
+                '9007199254740993 & 1',
+                '9007199254740993 - 9007199254740992',
+                '(9007199254740991 + 2) - 9007199254740991',
+                '(9007199254740991 * 2) / 2',
+                '(1 << 53) >> 53',
+                '0x20000000000001 & 1',
+                '0b1' + '0'.repeat(53),
+                '9'.repeat(1000)
+            ]) {
+                assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), null, expression);
+            }
+        });
+
+        test('rejects division by zero and fractional intermediates', () => {
+            for (const expression of ['1 / 0', '0 / 0', '1 / (2 - 2)', '3 / 2', '-3 / 2', '(3 / 2) * 2']) {
+                assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), null, expression);
+            }
+        });
+
+        test('rejects incomplete syntax and unsupported tokens without evaluating code', () => {
+            for (const expression of [
+                '', '  ', 'NaN', 'Infinity', '1e2', '1.5', '0x', '0b2', '1 2', '()', '(1', '1)',
+                '1 +', '1(2)', '~1', '1 && 2', '1 || 2', '1++2', '1--2', '1 ** 2', '1 >>> 2',
+                '1 // 2', '1 /* comment */ + 2', 'globalThis.process.exit()', '1; 2'
+            ]) {
+                assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), null, expression);
+            }
+        });
+
+        test('enforces the 4096-character limit before parsing literals or whitespace', () => {
+            const boundaryExpression = '1 ' + '+1'.repeat(2047);
+            assert.strictEqual(boundaryExpression.length, 4096);
+            assert.strictEqual(MacroExpander.evaluateToSafeInteger(boundaryExpression), 2048);
+            assert.strictEqual(MacroExpander.evaluateToSafeInteger(boundaryExpression + ' '), null);
+            assert.strictEqual(MacroExpander.evaluateToSafeInteger('0'.repeat(4095) + '1'), 1);
+            assert.strictEqual(MacroExpander.evaluateToSafeInteger('0'.repeat(4096) + '1'), null);
+            assert.strictEqual(MacroExpander.evaluateToSafeInteger(' '.repeat(4096) + '1'), null);
+        });
+
+        test('handles deeply nested parentheses and unary signs without recursive parsing', () => {
+            assert.strictEqual(MacroExpander.evaluateToSafeInteger('('.repeat(2047) + '1' + ')'.repeat(2047)), 1);
+            assert.strictEqual(MacroExpander.evaluateToSafeInteger('- '.repeat(2047) + '1'), -1);
+        });
+    });
+
     suite('Real-world Examples', () => {
         test('Expand typical bit mask macro', () => {
             const macros = new Map<string, MacroDefinition>([

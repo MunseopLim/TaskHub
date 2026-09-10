@@ -9,7 +9,7 @@ import { StringDecoder } from 'string_decoder';
 import Ajv from 'ajv';
 import { ActionItem, Action as PipelineAction, type QuickPickItem } from './schema';
 import * as actionSchema from '../schema/actions.schema.json';
-import { NumberBaseHoverProvider } from './numberBaseHoverProvider';
+import { NumberBaseHoverProvider, registerHoverCopyCommand } from './numberBaseHoverProvider';
 import { openJsonEditor, openJsonEditorFromUri, openJsonEditorFile, JsonEditorOpenHistory } from './jsonEditor';
 import { coerceToUri, openMarkdownPreview, openHtmlInBrowser } from './previewOpener';
 import { openBrowserTask } from './browserTask';
@@ -11281,6 +11281,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Register hover provider for number base conversion and SFR bit fields in C/C++ files
     const numberBaseHoverProvider = new NumberBaseHoverProvider();
     context.subscriptions.push(
+        registerHoverCopyCommand(),
         vscode.languages.registerHoverProvider(
             [
                 { scheme: 'file', language: 'c' },

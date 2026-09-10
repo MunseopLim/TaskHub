@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.26",
+  "version": "0.8.27",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -340,6 +340,11 @@
         "icon": "$(copy)"
       },
       {
+        "command": "taskhub.copyHoverValue",
+        "title": "%cmd.copyHoverValue%",
+        "category": "TaskHub"
+      },
+      {
         "command": "taskhub.goToLink",
         "title": "%cmd.goToLink%"
       },
@@ -673,6 +678,10 @@
         },
         {
           "command": "taskhub.copyLink",
+          "when": "false"
+        },
+        {
+          "command": "taskhub.copyHoverValue",
           "when": "false"
         },
         {

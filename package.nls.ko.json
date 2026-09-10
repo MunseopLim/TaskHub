@@ -15,6 +15,7 @@
   "cmd.openLink": "링크 열기",
   "cmd.openLinkInIntegratedBrowser": "통합 브라우저에서 열기",
   "cmd.copyLink": "URL 복사",
+  "cmd.copyHoverValue": "호버 값 복사",
   "cmd.goToLink": "링크 열기",
   "cmd.addLink": "TaskHub: 링크 추가",
   "cmd.editWorkspaceLink": "링크 편집",

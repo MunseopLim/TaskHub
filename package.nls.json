@@ -15,6 +15,7 @@
   "cmd.openLink": "Open Link",
   "cmd.openLinkInIntegratedBrowser": "Open in Integrated Browser",
   "cmd.copyLink": "Copy URL",
+  "cmd.copyHoverValue": "Copy Hover Value",
   "cmd.goToLink": "Open Link",
   "cmd.addLink": "TaskHub: Add Link",
   "cmd.editWorkspaceLink": "Edit Link",
