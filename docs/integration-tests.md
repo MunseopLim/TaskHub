@@ -305,6 +305,9 @@
 
 | ID | 파일 | 그룹 계약 |
 | --- | --- | --- |
+| IT-216 | [hexViewerBrowser.test.ts](../src/test/hexViewerBrowser.test.ts) | 실제 VS Code 웹뷰에서 BIN·HEX·SREC HTML과 CSP를 실행해 ready → 데이터 전송 → ACK, 로딩 해제와 바이트 표시를 검증하고 HTML 파싱 중 발생하는 스크립트 오류도 실패로 처리 |
+| IT-217 | [hexViewerBrowser.test.ts](../src/test/hexViewerBrowser.test.ts) | 실제 웹뷰의 첫 렌더부터 저장된 표시 단위·Endian·찾기 방식이 적용되고 탭 상태에도 보관되는지 검증 |
+| IT-218 | [hexViewerBrowser.test.ts](../src/test/hexViewerBrowser.test.ts) | 실제 웹뷰에서 설정을 바꾸고 HTML을 다시 로드해도 탭 설정·바이트 표시를 복원하며 초기화가 전역 설정 변경 메시지를 다시 보내지 않는지 검증 |
 | IT-088, IT-089, IT-090, IT-091, IT-092, IT-098, IT-099, IT-100, IT-102, IT-103, IT-104, IT-105, IT-106, IT-107 | [viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) | Quick Action Palette가 실행 가능한 액션만 평면화하고, 폴더 경로·MRU·recent limit·빈 목록·로드 오류를 구분 |
 | IT-110, IT-111, IT-112, IT-113, IT-114, IT-115, IT-116 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 보간 완료 명령줄을 성공·실패 History에 기록하고, 저장 입력이 있을 때만 대화형 태스크를 건너뜀 |
 | IT-117, IT-118 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 다이얼로그 위치를 액션 ID + 태스크 ID + 종류별로 분리하고 파일은 부모 폴더, 폴더는 선택 자체를 기억 |

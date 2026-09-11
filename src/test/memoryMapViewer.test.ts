@@ -191,7 +191,10 @@ suite('Memory Map Viewer Test Suite', () => {
                 return Promise.resolve(undefined);
             };
 
-            const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+            const ctx = {
+                extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [],
+                globalState: { get: () => undefined, update: async () => {} },
+            } as unknown as vscode.ExtensionContext;
             assert.ok(openMemoryMapPanel(ctx, filePath, {
                 regions: [
                     { name: 'FLASH', origin: 0x08000000, size: 0x1000 },

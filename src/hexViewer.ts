@@ -21,6 +21,59 @@ interface HexPanelState {
 /** standalone Hex Viewer 패널은 파일별로 하나씩 유지한다. */
 const hexPanels = new Map<string, HexPanelState>();
 
+const HEX_VIEWER_PREFERENCES_KEY = 'taskhub.hexViewer.preferences.v1';
+
+export interface HexViewerPreferences {
+    unitSize: 1 | 2 | 4 | 8;
+    endian: 'little' | 'big';
+    findMode: 'bytes' | 'value' | 'ascii';
+}
+
+export function normalizeHexViewerPreferences(stored: unknown): HexViewerPreferences {
+    const value = stored && typeof stored === 'object' ? stored as Partial<HexViewerPreferences> : {};
+    return {
+        unitSize: value.unitSize === 2 || value.unitSize === 4 || value.unitSize === 8 ? value.unitSize : 1,
+        endian: value.endian === 'big' ? 'big' : 'little',
+        findMode: value.findMode === 'bytes' || value.findMode === 'ascii' ? value.findMode : 'value',
+    };
+}
+
+interface HexViewerPreferenceStore {
+    value: HexViewerPreferences;
+    pending: Promise<void>;
+    pendingWrites: number;
+}
+
+// 파일별 패널과 Custom Editor가 같은 저장소를 쓴다. 저장 완료 전 새 파일을
+// 열어도 최신 선택을 쓰며, 패널을 닫은 뒤 이전 저장이 최신 값을 덮지 않게 한다.
+const preferenceStores = new WeakMap<vscode.Memento, HexViewerPreferenceStore>();
+
+function getPreferenceStore(context: vscode.ExtensionContext): HexViewerPreferenceStore {
+    let store = preferenceStores.get(context.globalState);
+    if (!store) {
+        store = {
+            value: normalizeHexViewerPreferences(context.globalState.get<unknown>(HEX_VIEWER_PREFERENCES_KEY)),
+            pending: Promise.resolve(),
+            pendingWrites: 0,
+        };
+        preferenceStores.set(context.globalState, store);
+    } else if (store.pendingWrites === 0) {
+        // 다른 VS Code 창에서 바꾼 값도 다음 파일을 열 때 반영한다.
+        store.value = normalizeHexViewerPreferences(context.globalState.get<unknown>(HEX_VIEWER_PREFERENCES_KEY));
+    }
+    return store;
+}
+
+function savePreferences(context: vscode.ExtensionContext, value: HexViewerPreferences): Promise<void> {
+    const store = getPreferenceStore(context);
+    store.value = value;
+    store.pendingWrites++;
+    store.pending = store.pending.then(() => context.globalState.update(HEX_VIEWER_PREFERENCES_KEY, value))
+        .catch(() => { /* 설정 저장 실패는 현재 파일 표시를 막지 않는다. 다음 변경에서 다시 저장한다. */ })
+        .finally(() => { store.pendingWrites--; });
+    return store.pending;
+}
+
 function hexPanelKey(filePath: string): string {
     return filePathIdentityKey(filePath);
 }
@@ -466,7 +519,8 @@ export function buildHexViewerHtml(
     fileName: string,
     result: HexParseResult,
     webview?: vscode.Webview,
-    expectedDeliveryId?: string
+    expectedDeliveryId?: string,
+    preferences?: HexViewerPreferences
 ): string {
     const totalSize = result.maxAddress - result.minAddress + 1;
     assertWithinHexViewerSpan(totalSize);
@@ -474,7 +528,8 @@ export function buildHexViewerHtml(
     return getWebviewContent(
         fileName, result.format, result.minAddress, result.maxAddress,
         result.byteCount, result.entryPoint, !!result.rawBuffer, webview, expectedDeliveryId,
-        result.invalidRecordCount ?? 0, result.unaddressedRecordCount ?? 0
+        result.invalidRecordCount ?? 0, result.unaddressedRecordCount ?? 0,
+        normalizeHexViewerPreferences(preferences)
     );
 }
 
@@ -541,12 +596,27 @@ interface HexWebviewHandshake extends vscode.Disposable {
 }
 
 function setupWebviewMessageHandler(
+    context: vscode.ExtensionContext,
     webview: vscode.Webview,
     onReady?: () => void,
     onDataReceived?: (deliveryId: string) => void
 ): HexWebviewHandshake {
     let readyReceived = false;
-    const subscription = webview.onDidReceiveMessage(message => {
+    const subscription = webview.onDidReceiveMessage(async message => {
+        if (!message || typeof message !== 'object') { return; }
+        if (message.command === 'updatePreferences') {
+            if (
+                (message.unitSize !== 1 && message.unitSize !== 2 && message.unitSize !== 4 && message.unitSize !== 8)
+                || (message.endian !== 'little' && message.endian !== 'big')
+                || (message.findMode !== 'bytes' && message.findMode !== 'value' && message.findMode !== 'ascii')
+            ) { return; }
+            await savePreferences(context, {
+                unitSize: message.unitSize,
+                endian: message.endian,
+                findMode: message.findMode,
+            });
+            return;
+        }
         if (message.command === 'ready') {
             readyReceived = true;
             onReady?.();
@@ -605,6 +675,7 @@ function setupWebviewMessageHandler(
  * 남아 있었다.
  */
 function renderWithReadyHandshake(
+    context: vscode.ExtensionContext,
     webview: vscode.Webview,
     fileName: string,
     result: HexParseResult,
@@ -625,6 +696,7 @@ function renderWithReadyHandshake(
         }
     };
     const handshake = setupWebviewMessageHandler(
+        context,
         webview,
         () => {
             readyObserved = true;
@@ -654,7 +726,7 @@ function renderWithReadyHandshake(
     // 남는다 (`buildHexViewerHtml` 은 span 한도로 throw 할 수 있다). 호출부의
     // catch 는 오류 HTML 만 세팅하고 이 disposable 은 받지 못한다.
     try {
-        const html = buildHexViewerHtml(fileName, result, webview, deliveryId);
+        const html = buildHexViewerHtml(fileName, result, webview, deliveryId, getPreferenceStore(context).value);
         webview.html = html;
     } catch (e) {
         pendingResult = undefined;
@@ -730,7 +802,7 @@ function openPanel(
         // ready/fallback 응답이 최신 렌더를 덮지 못하게 한다.
         const generation = ++state.renderGeneration;
         const messageDisposable = renderWithReadyHandshake(
-            panel.webview, fileName, result,
+            context, panel.webview, fileName, result,
             () => hexPanels.get(key) === state && state.renderGeneration === generation,
             initialSelection,
             () => {
@@ -861,7 +933,8 @@ function getWebviewContent(
     webview?: vscode.Webview,
     expectedDeliveryId?: string,
     invalidRecordCount = 0,
-    unaddressedRecordCount = 0
+    unaddressedRecordCount = 0,
+    preferences: HexViewerPreferences = normalizeHexViewerPreferences(undefined)
 ): string {
     const formatLabel = format === 'intel' ? 'Intel HEX' : format === 'srec' ? 'Motorola SREC' : 'Binary';
     const entryStr = entryPoint !== undefined ? `0x${entryPoint.toString(16).toUpperCase().padStart(8, '0')}` : 'N/A';
@@ -1090,6 +1163,9 @@ function getWebviewContent(
     const TOTAL_SIZE = ${maxAddress - minAddress + 1};
     const IS_BINARY = ${isBinaryFormat};
     const EXPECTED_DELIVERY_ID = ${expectedDeliveryLiteral};
+    const INITIAL_PREFERENCES = ${JSON.stringify(preferences)};
+    const restored = vscode.getState();
+    const saved = restored && typeof restored === 'object' ? restored : {};
 
     // 데이터는 HTML 에 박혀 오지 않고 postMessage 로 도착한다 —
     // Base64 인코딩 / atob / 거대한 HTML 파싱을 모두 없애기 위해서다
@@ -1112,8 +1188,9 @@ function getWebviewContent(
         return true;
     }
 
-    let unitSize = 1;
-    let endian = 'little';
+    let unitSize = [1, 2, 4, 8].includes(saved.unitSize) ? saved.unitSize : INITIAL_PREFERENCES.unitSize;
+    let endian = saved.endian === 'little' || saved.endian === 'big' ? saved.endian : INITIAL_PREFERENCES.endian;
+    const initialFindMode = ['bytes', 'value', 'ascii'].includes(saved.findMode) ? saved.findMode : INITIAL_PREFERENCES.findMode;
     let selectedOffset = -1;
     let selectedEndOffset = -1;
     let findMatches = [];
@@ -1136,6 +1213,31 @@ function getWebviewContent(
     const findBar = document.getElementById('findBar');
     const findHexInput = document.getElementById('findHexInput');
     const findInfo = document.getElementById('findInfo');
+    const findModeSelect = document.getElementById('findMode');
+
+    unitSelect.value = String(unitSize);
+    endianSelect.value = endian;
+    findModeSelect.value = initialFindMode;
+    updateFindPlaceholder();
+
+    function currentPreferences() {
+        return { unitSize, endian, findMode: findModeSelect.value };
+    }
+
+    function persistPreferences() {
+        const preferences = currentPreferences();
+        vscode.setState(preferences);
+        vscode.postMessage({ command: 'updatePreferences', ...preferences });
+    }
+
+    function updateFindPlaceholder() {
+        const mode = findModeSelect.value;
+        findHexInput.placeholder = mode === 'ascii' ? 'Hello' : mode === 'value' ? '20020000' : '00 00 02 20';
+    }
+
+    // 같은 탭을 다시 로드하면 그 탭에서 선택한 설정을 우선한다.
+    // 새 탭의 초기값도 보관하되 사용자 변경 전에는 전역 설정을 다시 쓰지 않는다.
+    vscode.setState(currentPreferences());
 
     const totalRowCount = Math.ceil(TOTAL_SIZE / BYTES_PER_ROW);
 
@@ -1520,6 +1622,7 @@ function getWebviewContent(
     // Unit size change
     unitSelect.addEventListener('change', () => {
         unitSize = parseInt(unitSelect.value, 10);
+        persistPreferences();
         selectedOffset = -1;
         selectedEndOffset = -1;
         render();
@@ -1529,6 +1632,7 @@ function getWebviewContent(
     // Endian change
     endianSelect.addEventListener('change', () => {
         endian = endianSelect.value;
+        persistPreferences();
         render();
         updateSelection();
         if (findBar.classList.contains('visible') && document.getElementById('findMode').value === 'value') {
@@ -1691,8 +1795,10 @@ function getWebviewContent(
         const generation = ++findGeneration;
         findMatches = [];
         findCurrentIdx = -1;
+        // HTML 템플릿에는 역슬래시를 보존한다. 실제 NUL은 HTML 파서가
+        // U+FFFD로 바꿔 정규식 범위가 뒤집히고 웹뷰 초기화 전체를 중단시킨다.
         if (document.getElementById('findMode').value === 'ascii'
-            && /[^\x00-\x7F]/.test(findHexInput.value)) {
+            && /[^\\x00-\\x7F]/.test(findHexInput.value)) {
             findInfo.textContent = S.findAsciiOnly;
             applyFindHighlightsToVisible();
             return;
@@ -1791,9 +1897,9 @@ function getWebviewContent(
         clearTimeout(findDebounceTimer);
         findDebounceTimer = setTimeout(doFind, 250);
     });
-    document.getElementById('findMode').addEventListener('change', () => {
-        const mode = document.getElementById('findMode').value;
-        findHexInput.placeholder = mode === 'ascii' ? 'Hello' : mode === 'value' ? '20020000' : '00 00 02 20';
+    findModeSelect.addEventListener('change', () => {
+        updateFindPlaceholder();
+        persistPreferences();
         doFind();
     });
     document.getElementById('findNext').addEventListener('click', () => {
@@ -1989,7 +2095,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         try {
             // 이 웹뷰는 이 문서 전용이라 "아직 그것인가" 를 볼 필요가 없다.
             // dispose 되면 VS Code 가 postMessage 를 조용히 무시한다.
-            handshake = renderWithReadyHandshake(webviewPanel.webview, fileName, result, () => true);
+            handshake = renderWithReadyHandshake(this.context, webviewPanel.webview, fileName, result, () => true);
         } catch (e: any) {
             const msg = t(
                 `Hex Viewer 렌더링 실패 (${fileName}): ${e.message}`,

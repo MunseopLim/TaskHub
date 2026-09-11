@@ -32,6 +32,8 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         sendReady: () => void;
         /** 웹뷰가 임의 메시지를 보내는 동작을 흉내 낸다. */
         sendMessage: (message: any) => void;
+        /** 비동기 호스트 작업까지 끝난 뒤 검사할 때 사용한다. */
+        sendMessageAsync: (message: any) => Promise<void>;
         /** 다음 reveal 호출에서 던질 오류를 지정한다. */
         setRevealError: (error: Error | undefined) => void;
         /** 사용자가 탭을 닫는 동작을 흉내 낸다. */
@@ -43,7 +45,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         const posted: any[] = [];
         const revealPreserveFocus: Array<boolean | undefined> = [];
         let html = '';
-        const messageHandlers = new Set<(m: any) => void>();
+        const messageHandlers = new Set<(m: any) => unknown>();
         let disposeHandler: (() => void) | undefined;
         let disposed = false;
         let revealError: Error | undefined;
@@ -67,7 +69,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
                     posted.push(message);
                     return Promise.resolve(true);
                 },
-                onDidReceiveMessage: (handler: (m: any) => void) => {
+                onDidReceiveMessage: (handler: (m: any) => unknown) => {
                     messageHandlers.add(handler);
                     events.push('handler-installed');
                     return {
@@ -108,6 +110,9 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
             panel,
             sendReady: () => sendMessage({ command: 'ready' }),
             sendMessage,
+            async sendMessageAsync(message: any) {
+                await Promise.all(Array.from(messageHandlers, handler => handler(message)));
+            },
             setRevealError: error => { revealError = error; },
             dispose: () => panel.dispose(),
         };
@@ -145,6 +150,17 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         return filePath;
     }
 
+    function createContext(persisted = new Map<string, unknown>()): vscode.ExtensionContext {
+        return {
+            extensionPath: tempDir,
+            subscriptions: [],
+            globalState: {
+                get(key: string, fallback: unknown) { return persisted.has(key) ? persisted.get(key) : fallback; },
+                async update(key: string, value: unknown) { persisted.set(key, value); },
+            },
+        } as unknown as vscode.ExtensionContext;
+    }
+
     setup(() => {
         tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-hex-open-'));
         hexPanelRegistry.clear();
@@ -164,11 +180,188 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
     });
 
+    suite('최근 표시 설정', () => {
+        const preferencesKey = 'taskhub.hexViewer.preferences.v1';
+
+        function initialPreferences(fake: FakePanel): unknown {
+            const match = fake.panel.webview.html.match(/const INITIAL_PREFERENCES = (\{[^\n]+\});/);
+            assert.ok(match, '호스트가 최근 설정을 웹뷰에 전달하지 않았다');
+            return JSON.parse(match[1]);
+        }
+
+        test('처음 열기와 손상된 저장값에서는 허용된 기본 설정으로 시작한다', () => {
+            const created = installFakePanelFactory();
+            const defaults = { unitSize: 1, endian: 'little', findMode: 'value' };
+            const cases = [
+                { stored: undefined, expected: defaults },
+                { stored: null, expected: defaults },
+                { stored: ['4', 'big', 'ascii'], expected: defaults },
+                { stored: { unitSize: '4', endian: 'middle', findMode: '</script>' }, expected: defaults },
+                { stored: { unitSize: 4, endian: 'invalid', findMode: 'ascii' }, expected: { unitSize: 4, endian: 'little', findMode: 'ascii' } },
+            ];
+            for (const [index, { stored, expected }] of cases.entries()) {
+                const persisted = new Map<string, unknown>([[preferencesKey, stored]]);
+                assert.ok(openHexViewerFile(createContext(persisted), writeIntelHex(`defaults-${index}.hex`)));
+                assert.deepStrictEqual(initialPreferences(created[index]), expected, `저장값: ${JSON.stringify(stored)}`);
+                created[index].sendReady();
+            }
+            assert.deepStrictEqual(shownErrors, [], '손상된 UI 설정이 파일 열기를 막으면 안 된다');
+        });
+
+        test('마지막 설정을 다른 파일과 새 ExtensionContext에서 복원하며 열린 탭은 유지한다', async () => {
+            const persisted = new Map<string, unknown>();
+            const context = createContext(persisted);
+            const created = installFakePanelFactory();
+            const firstPath = writeIntelHex('preferences-first.hex');
+            assert.ok(openHexViewerFile(context, firstPath));
+            assert.ok(openHexViewerFile(context, writeIntelHex('preferences-open-tab.hex')));
+            created[0].sendReady();
+            created[1].sendReady();
+            const otherHtml = created[1].panel.webview.html;
+            const otherMessages = [...created[1].posted];
+
+            const preferences = { unitSize: 4, endian: 'big', findMode: 'ascii' };
+            await created[0].sendMessageAsync({
+                command: 'updatePreferences', ...preferences,
+                findText: 'confidential search', gotoAddress: '0x8000', selectedOffset: 7,
+            });
+            assert.deepStrictEqual(persisted.get(preferencesKey), preferences, '표시 설정 외에 검색어·위치를 저장하면 안 된다');
+            assert.strictEqual(created[1].panel.webview.html, otherHtml, '다른 열린 탭의 HTML을 바꿨다');
+            assert.deepStrictEqual(created[1].posted, otherMessages, '다른 열린 탭에 설정 동기화를 보냈다');
+
+            assert.ok(openHexViewerFile(context, writeIntelHex('preferences-next.hex')));
+            assert.deepStrictEqual(initialPreferences(created[2]), preferences, '다른 파일의 새 패널에 마지막 설정이 빠졌다');
+            created[2].sendReady();
+            created[0].dispose();
+
+            // 새 Memento 객체로 재생성해 모듈의 메모리 캐시가 아닌 영속 저장값을
+            // 사용한다. 실제 확장 재활성화 뒤의 context와 같은 경계다.
+            assert.ok(openHexViewerFile(createContext(persisted), firstPath));
+            assert.deepStrictEqual(initialPreferences(created[3]), preferences, '확장 재활성화 뒤 마지막 설정이 사라졌다');
+            created[3].sendReady();
+
+            // 다른 VS Code 창의 변경이 Memento에 반영되면, 진행 중인 로컬
+            // 저장이 없는 다음 열기에서는 캐시 대신 갱신된 값을 읽어야 한다.
+            const external = { unitSize: 2, endian: 'little', findMode: 'bytes' };
+            persisted.set(preferencesKey, external);
+            assert.ok(openHexViewerFile(context, writeIntelHex('preferences-external.hex')));
+            assert.deepStrictEqual(initialPreferences(created[4]), external, '이전 캐시가 다른 창의 최근 설정을 가렸다');
+            created[4].sendReady();
+        });
+
+        test('Custom Editor도 저장 설정으로 열리고 변경값을 standalone 패널과 공유한다', async () => {
+            const previous = { unitSize: 4, endian: 'big', findMode: 'ascii' };
+            const persisted = new Map<string, unknown>([[preferencesKey, previous]]);
+            const context = createContext(persisted);
+            const custom = createFakePanel();
+            try {
+                await new HexEditorProvider(context).resolveCustomEditor(
+                    { uri: vscode.Uri.file(writeIntelHex('preferences-custom.hex')), dispose() {} },
+                    custom.panel
+                );
+                assert.deepStrictEqual(initialPreferences(custom), previous);
+                custom.sendReady();
+                const preferences = { unitSize: 8, endian: 'little', findMode: 'bytes' };
+                await custom.sendMessageAsync({ command: 'updatePreferences', ...preferences });
+                assert.deepStrictEqual(persisted.get(preferencesKey), preferences, 'Custom Editor가 설정을 저장하지 않았다');
+
+                const standalone = installFakePanel();
+                assert.ok(openHexViewerFile(context, writeIntelHex('preferences-after-custom.hex')));
+                assert.deepStrictEqual(initialPreferences(standalone), preferences);
+                standalone.sendReady();
+            } finally {
+                custom.dispose();
+            }
+        });
+
+        test('잘못되거나 일부가 빠진 웹뷰 설정 메시지는 최근 설정을 덮지 않는다', async () => {
+            const preferences = { unitSize: 2, endian: 'big', findMode: 'bytes' };
+            const persisted = new Map<string, unknown>([[preferencesKey, preferences]]);
+            const context = createContext(persisted);
+            const fake = installFakePanel();
+            const writes: unknown[] = [];
+            context.globalState.update = async (_key: string, value: unknown) => { writes.push(value); };
+            assert.ok(openHexViewerFile(context, writeIntelHex('preferences-invalid.hex')));
+            fake.sendReady();
+
+            for (const invalid of [
+                { unitSize: 0 }, { unitSize: 3 }, { unitSize: 16 }, { unitSize: '4' },
+                { unitSize: NaN }, { unitSize: Infinity }, { unitSize: undefined },
+                { endian: 'middle' }, { endian: false }, { endian: undefined },
+                { findMode: 'regex' }, { findMode: null }, { findMode: undefined },
+            ]) {
+                await fake.sendMessageAsync({ command: 'updatePreferences', ...preferences, ...invalid });
+            }
+            for (const invalid of [null, undefined, 'updatePreferences', 4, [], { command: 'updatePreferences' }]) {
+                await fake.sendMessageAsync(invalid);
+            }
+            assert.deepStrictEqual(writes, [], '허용값이 아닌 메시지를 영속 저장했다');
+            assert.deepStrictEqual(persisted.get(preferencesKey), preferences);
+            assert.deepStrictEqual(shownErrors, [], '잘못된 내부 메시지가 사용자 오류로 새면 안 된다');
+        });
+
+        test('여러 패널의 저장을 순서대로 마치고 저장 중 다시 열어도 최신 선택을 사용한다', async () => {
+            const persisted = new Map<string, unknown>();
+            const context = createContext(persisted);
+            const created = installFakePanelFactory();
+            const firstPath = writeIntelHex('preferences-pending-first.hex');
+            assert.ok(openHexViewerFile(context, firstPath));
+            assert.ok(openHexViewerFile(context, writeIntelHex('preferences-pending-second.hex')));
+            created[0].sendReady();
+            created[1].sendReady();
+            const writes: Array<{ value: unknown; finish: () => void }> = [];
+            context.globalState.update = (key: string, value: unknown) => new Promise<void>(resolve => {
+                writes.push({ value, finish() { persisted.set(key, value); resolve(); } });
+            });
+            const first = { unitSize: 2, endian: 'big', findMode: 'bytes' };
+            const latest = { unitSize: 8, endian: 'little', findMode: 'ascii' };
+
+            const firstSave = created[0].sendMessageAsync({ command: 'updatePreferences', ...first });
+            await Promise.resolve();
+            assert.strictEqual(writes.length, 1);
+            const latestSave = created[1].sendMessageAsync({ command: 'updatePreferences', ...latest });
+            await Promise.resolve();
+            assert.strictEqual(writes.length, 1, '다른 패널의 저장을 병렬 실행하면 완료 순서에 따라 옛 값이 남는다');
+            created[0].dispose();
+            assert.ok(openHexViewerFile(context, firstPath));
+            assert.deepStrictEqual(initialPreferences(created[2]), latest, '저장 중 다시 열면 마지막 선택을 잃는다');
+            created[2].sendReady();
+
+            writes[0].finish();
+            await firstSave;
+            assert.strictEqual(writes.length, 2, '첫 저장 뒤 다음 패널의 변경을 저장하지 않았다');
+            assert.deepStrictEqual(writes[1].value, latest);
+            writes[1].finish();
+            await latestSave;
+            assert.deepStrictEqual(persisted.get(preferencesKey), latest);
+        });
+
+        test('저장 실패가 데이터 로딩과 후속 설정 저장을 막지 않는다', async () => {
+            const persisted = new Map<string, unknown>();
+            const context = createContext(persisted);
+            const fake = installFakePanel();
+            let writes = 0;
+            context.globalState.update = async (key: string, value: unknown) => {
+                if (++writes === 1) { throw new Error('storage unavailable'); }
+                persisted.set(key, value);
+            };
+            assert.ok(openHexViewerFile(context, writeIntelHex('preferences-save-failure.hex')));
+            await fake.sendMessageAsync({ command: 'updatePreferences', unitSize: 4, endian: 'big', findMode: 'bytes' });
+            fake.sendReady();
+            assert.strictEqual(fake.posted[0]?.command, 'hexData', '설정 저장 실패가 파일 표시까지 막았다');
+            const latest = { unitSize: 8, endian: 'little', findMode: 'value' };
+            await fake.sendMessageAsync({ command: 'updatePreferences', ...latest });
+            assert.strictEqual(writes, 2, '실패한 저장 Promise가 후속 변경을 막았다');
+            assert.deepStrictEqual(persisted.get(preferencesKey), latest);
+            assert.deepStrictEqual(shownErrors, [], '선택 설정의 저장 실패가 데이터 오류로 보고되었다');
+        });
+    });
+
     test('파일을 열면 패널이 생기고 HTML 과 데이터가 모두 전달된다', () => {
         const fake = installFakePanel();
         const filePath = writeIntelHex('sample.hex');
 
-        const ok = openHexViewerFile({ extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext, filePath);
+        const ok = openHexViewerFile(createContext(), filePath);
 
         assert.strictEqual(ok, true, `열기에 실패했다: ${shownErrors.join(' / ')}`);
         assert.ok(fake.events.includes('create-panel'), '패널이 만들어지지 않았다');
@@ -224,7 +417,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
     test('웹뷰 재로드 중 파일이 사라지면 무한 loading 대신 복구 안내를 표시한다', () => {
         const fake = installFakePanel();
-        const ctx = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const ctx = createContext();
         const filePath = path.join(tempDir, 'deleted-during-reload.bin');
         fs.writeFileSync(filePath, Buffer.from([0x41, 0x42]));
 
@@ -262,7 +455,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         fs.writeFileSync(filePath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0xaa, 0xbb, 0xcc, 0xdd]));
 
         const ok = openHexViewerFile(
-            { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext,
+            createContext(),
             filePath,
             { forceBinary: true, initialSelection: { startOffset: 4, endOffset: 6 } }
         );
@@ -283,7 +476,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         fs.writeFileSync(filePath, Buffer.from([1, 2, 3, 4]));
 
         const ok = openHexViewerFile(
-            { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext,
+            createContext(),
             filePath,
             { forceBinary: true, initialSelection: { startOffset: 2, endOffset: 4 } }
         );
@@ -300,7 +493,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         // JavaScript나 any가 판별 유니온을 우회해도 HEX 주소 공간을 원본 파일
         // offset으로 오인하지 않는다.
         const ok = openHexViewerFile(
-            { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext,
+            createContext(),
             filePath,
             { initialSelection: { startOffset: 0, endOffset: 1 } } as any
         );
@@ -333,7 +526,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
      */
     test('데이터는 웹뷰가 ready 를 보낸 뒤에 간다', () => {
         const fake = installFakePanel();
-        openHexViewerFile({ extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext, writeIntelHex('order.hex'));
+        openHexViewerFile(createContext(), writeIntelHex('order.hex'));
 
         const handlerAt = fake.events.indexOf('handler-installed');
         const htmlAt = fake.events.indexOf('set-html');
@@ -355,7 +548,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
     test('ready 가 오지 않아도 시한 뒤에는 데이터를 보낸다', async function () {
         this.timeout(20000);
         const fake = installFakePanel();
-        openHexViewerFile({ extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext, writeIntelHex('fallback.hex'));
+        openHexViewerFile(createContext(), writeIntelHex('fallback.hex'));
 
         assert.strictEqual(fake.posted.length, 0, '아직은 보내지 않아야 한다');
         await new Promise(resolve => setTimeout(resolve, 3500));
@@ -384,7 +577,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
     test('서로 다른 파일은 이름이 같아도 독립된 패널과 데이터 흐름을 갖는다', () => {
         const created = installFakePanelFactory();
-        const ctx = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const ctx = createContext();
         const firstPath = path.join(tempDir, 'first', 'same.bin');
         const secondPath = path.join(tempDir, 'second', 'same.bin');
         fs.mkdirSync(path.dirname(firstPath), { recursive: true });
@@ -413,7 +606,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
     test('같은 파일을 다시 열면 기존 패널을 reveal하고 최신 내용으로 교체한다', () => {
         const created = installFakePanelFactory();
-        const ctx = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const ctx = createContext();
         const filePath = path.join(tempDir, 'same-file.bin');
         fs.writeFileSync(filePath, Buffer.from([0x11, 0x12, 0x13]));
 
@@ -452,7 +645,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
     test('기존 패널 reveal 실패를 처리하고 현재 패널 상태를 보존한다', () => {
         const fake = installFakePanel();
-        const ctx = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const ctx = createContext();
         const filePath = path.join(tempDir, 'reveal-failure.bin');
         fs.writeFileSync(filePath, Buffer.from([0x31, 0x32]));
 
@@ -475,7 +668,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
     test('재렌더 실패 뒤 패널 종료가 해제된 메시지 구독을 다시 해제하지 않는다', () => {
         const fake = installFakePanel();
-        const ctx = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const ctx = createContext();
         const filePath = path.join(tempDir, 'render-failure.hex');
         fs.writeFileSync(filePath, ':01000000AA55\n:00000001FF\n');
 
@@ -501,7 +694,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
     test('한 파일의 패널을 닫아도 다른 파일의 패널과 핸들러는 유지된다', () => {
         const created = installFakePanelFactory();
-        const ctx = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const ctx = createContext();
         const firstPath = path.join(tempDir, 'dispose-first.bin');
         const secondPath = path.join(tempDir, 'dispose-second.bin');
         fs.writeFileSync(firstPath, Buffer.from([0x11]));
@@ -522,7 +715,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
     test('이전 패널의 지연 dispose가 같은 경로의 새 패널을 제거하지 않는다', () => {
         const created = installFakePanelFactory();
-        const ctx = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const ctx = createContext();
         const filePath = path.join(tempDir, 'recreated.bin');
         fs.writeFileSync(filePath, Buffer.from([0x33]));
 
@@ -546,7 +739,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         fs.ftruncateSync(fd, 512 * 1024 * 1024);
         fs.closeSync(fd);
 
-        const ok = openHexViewerFile({ extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext, filePath);
+        const ok = openHexViewerFile(createContext(), filePath);
 
         assert.strictEqual(ok, false, '한도를 넘는 파일을 열었다');
         assert.ok(!fake.events.includes('create-panel'), '거부했는데 패널을 만들었다');
@@ -557,7 +750,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         const fake = installFakePanel();
 
         const ok = openHexViewerFile(
-            { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext,
+            createContext(),
             path.join(tempDir, 'does-not-exist.hex')
         );
 
@@ -576,7 +769,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         const fake = installFakePanel();
         const filePath = path.join(tempDir, 'unknown-address.hex');
         fs.writeFileSync(filePath, ':00000004FC\n:01000000AA55');
-        const context = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+        const context = createContext();
         const originalWarning = vscode.window.showWarningMessage;
         const warnings: string[] = [];
         (vscode.window as any).showWarningMessage = async (message: string) => { warnings.push(message); };
@@ -604,7 +797,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
         async function resolve(filePath: string, fake: FakePanel): Promise<void> {
             const provider = new HexEditorProvider(
-                { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext
+                createContext()
             );
             await provider.resolveCustomEditor(
                 { uri: vscode.Uri.file(filePath), dispose() { /* no-op */ } } as vscode.CustomDocument,
@@ -678,7 +871,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
         test('ready 전에 같은 파일을 다시 열면 이전 데이터가 새 화면에 오지 않는다', async () => {
             const fake = installFakePanel();
-            const ctx = { extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext;
+            const ctx = createContext();
             const filePath = path.join(tempDir, 'stale.bin');
 
             // 첫 내용을 열고 **ready 를 보내지 않는다** — 타이머가 살아 있는 상태.
@@ -711,7 +904,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
                 return { dispose() { /* no-op */ } };
             };
 
-            const resolving = new HexEditorProvider({ extensionPath: tempDir, subscriptions: [] } as unknown as vscode.ExtensionContext)
+            const resolving = new HexEditorProvider(createContext())
                 .resolveCustomEditor(
                     { uri: vscode.Uri.file(writeIntelHex('closed.hex')), dispose() { /* no-op */ } } as vscode.CustomDocument,
                     fake.panel

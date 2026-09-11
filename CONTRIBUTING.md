@@ -24,7 +24,7 @@ npm run compile          # 타입 체크 + 린트 + esbuild 번들링
 npm run package          # 프로덕션 빌드 (minify 포함)
 npm run check-types      # TypeScript 타입 체크만
 npm run lint             # ESLint 검사 (src/)
-npm run test             # 유닛 테스트 실행 (vscode-test)
+npm run test             # 유닛·통합·웹뷰 테스트 실행 (vscode-test)
 npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 ```
 
@@ -73,6 +73,7 @@ VSIX 생성은 [VSIX 패키지 빌드 및 설치](#vsix-패키지-빌드-및-설
 
 | 변경 유형 | 동반 갱신 대상 (모두 같은 PR) |
 | --- | --- |
+| **기능 추가·변경·삭제 / 버그 수정** | 본 문서 [기능 변경 검증 의무](#기능-변경-검증-의무) 적용 |
 | **새 설정** 추가 / 기본값·범위 변경 | [package.json](package.json) `contributes.configuration` (원본) · [docs/features.md §21 설정 레퍼런스](docs/features.md#21-설정-레퍼런스) 표 한 행 · 관련 기능 섹션에서 자연스러운 맥락으로 1회 언급 · [CHANGELOG.md](CHANGELOG.md) |
 | **새 명령** 추가 / 인자 요구사항 변경 | [package.json](package.json) `contributes.commands` · 인자 없이 안전히 호출할 수 없는 명령은 `menus.commandPalette` 에 `{"command":"…","when":"false"}` 추가 · [docs/features.md](docs/features.md) 기능 섹션에서 진입점 설명 (컨텍스트 전용이면 "Command Palette" 언급 금지) · [CHANGELOG.md](CHANGELOG.md) |
 | **`src/` 파일** 추가·이동·삭제 | [docs/architecture.md](docs/architecture.md) 프로젝트 구조 트리 (§프로젝트 구조) · 필요 시 주요 컴포넌트/데이터 구조 섹션 · 분리되는 모듈이 TreeDataProvider면 `src/providers/` 규약 준수 |
@@ -128,6 +129,29 @@ npx @vscode/vsce package # TaskHub-<version>.vsix 생성
 
 ## 테스트 작성
 
+### 기능 변경 검증 의무
+
+**기능을 추가·변경·삭제하거나 버그를 수정할 때는 영향받는 동작을 검증하는 자동화 테스트를
+반드시 같은 작업에서 추가하거나 수정하고, 직접 실행해 검증합니다.** 커밋 여부와 관계없이
+적용하며, 기존 테스트가 모두 통과한다는 사실만으로 변경된 동작의 검증을 대신하지 않습니다.
+
+- **검증 수준 선택:** 계산·파싱·입력 검증은 유닛 테스트로 정상값·경계값·실패 경로를 확인합니다.
+  명령 등록, UI와 호스트의 메시지 교환, 파일 접근, 설정 저장·복원처럼 여러 구성 요소가 연결되는
+  기능은 통합 테스트로 연결된 동작을 확인합니다. 변경의 영향에 맞는 수준을 선택하고 필요하면
+  함께 사용합니다.
+- **사용자 결과 확인:** 함수 호출 여부나 소스 문자열의 존재만으로 동작 검증을 끝내지 않습니다.
+  특히 웹뷰 초기화·상태 복원·렌더링은 실제 브라우저의 HTML 파싱·CSP·메시지 전달을 거치는
+  테스트를 포함합니다. 가짜 DOM이나 메시지 핸들러만 사용하는 테스트가 놓치는 경계를 확인합니다.
+- **버그 수정·기능 삭제:** 버그를 재현하는 회귀 테스트를 남기고 수정 후 통과를 확인합니다.
+  기능 삭제 시 제거된 명령·UI·동작이 더 이상 제공되지 않고 남은 기능이 정상 동작하는지 검증하며,
+  바뀐 사양에 맞춰 기존 테스트를 수정·정리합니다. 실패를 피하려고 테스트를 삭제·건너뛰거나
+  단언을 약화하지 않습니다.
+- **실행·보고:** 관련 테스트와 변경 영향이 있는 검사를 실행하고 실패 원인을 수정한 뒤 다시
+  검증합니다. 수행한 명령·결과와 실행하지 못한 검사의 사유를 보고합니다. 전체 검증 범위와
+  환경별 실행 절차는 [CI 워크플로와 커밋 전 검증](#ci-워크플로와-커밋-전-검증)을 따릅니다.
+
+### 작성 형식
+
 ```typescript
 suite('ModuleName Test Suite', () => {
     suite('Category', () => {
@@ -144,7 +168,7 @@ suite('ModuleName Test Suite', () => {
 
 ## Pull Requests
 
-1. 모든 테스트 통과 확인
+1. [기능 변경 검증 의무](#기능-변경-검증-의무) 준수 및 모든 테스트 통과 확인
 2. 린팅 에러 없음 확인
 3. 필요 시 문서 업데이트
 4. 변경사항에 대한 명확한 설명 포함
