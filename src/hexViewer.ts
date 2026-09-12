@@ -1673,6 +1673,9 @@ function getWebviewContent(
         const rowIndex = Math.floor(offset / BYTES_PER_ROW);
         selectedOffset = offset;
         selectedEndOffset = offset;
+        // 좁은 창에서는 선택 정보가 줄바꿈되어 표시 영역이 줄어든다.
+        // 최종 상태바 높이를 반영한 뒤 스크롤해야 선택 셀이 가려지지 않는다.
+        updateSelection();
         // scrollToRow 가 scrollTop 을 중앙으로 맞추고 renderVisibleRows() 까지 호출한다.
         scrollToRow(rowIndex);
         // 다음 frame: scrollIntoView 로 미세 보정(block: 'nearest' 라 이미 중앙인 row 는 안 움직임) →

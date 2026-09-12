@@ -313,6 +313,7 @@
 | IT-221 | [hexConverterBrowser.test.ts](../src/test/hexConverterBrowser.test.ts) | 실제 HTML·CSP와 호스트를 연결해 UTF-8 변환·64비트 복사·클립보드 실패 응답 및 탭 재로드의 입력·설정 복원을 검증 |
 | IT-222 | [hexConverterBrowser.test.ts](../src/test/hexConverterBrowser.test.ts) | 저장값의 HTML 문자를 초기화·목록 렌더에서 텍스트로 보존하고, 실제 자식 요소 클릭의 불러오기와 저장·삭제 실패 후 재시도를 검증 |
 | IT-223 | [hexViewerBrowser.test.ts](../src/test/hexViewerBrowser.test.ts) | 가상 스크롤 밖의 마지막 불완전 단위를 End·검색으로 실제 뷰포트에 표시하고 선택·검색 강조와 없는 바이트를 채우지 않는 복사 결과를 검증 |
+| IT-224 | [hexViewerBrowser.test.ts](../src/test/hexViewerBrowser.test.ts) | 464×388px의 좁은 창·14px 글꼴·15px 가로 스크롤바를 실제 브라우저에 재현하고, End·검색으로 이동한 마지막 셀 전체가 스크롤바를 제외한 콘텐츠 영역에 표시되는지 검증 |
 | IT-088, IT-089, IT-090, IT-091, IT-092, IT-098, IT-099, IT-100, IT-102, IT-103, IT-104, IT-105, IT-106, IT-107 | [viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts) | Quick Action Palette가 실행 가능한 액션만 평면화하고, 폴더 경로·MRU·recent limit·빈 목록·로드 오류를 구분 |
 | IT-110, IT-111, IT-112, IT-113, IT-114, IT-115, IT-116 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 보간 완료 명령줄을 성공·실패 History에 기록하고, 저장 입력이 있을 때만 대화형 태스크를 건너뜀 |
 | IT-117, IT-118 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 다이얼로그 위치를 액션 ID + 태스크 ID + 종류별로 분리하고 파일은 부모 폴더, 폴더는 선택 자체를 기억 |
