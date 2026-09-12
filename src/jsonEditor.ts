@@ -1778,7 +1778,7 @@ export function getWebviewContent(
     const errorEl = document.getElementById('errorMsg');
     const srStatusEl = document.getElementById('srStatus');
     function showError(msg) {
-        errorEl.style.display = 'block';
+        errorEl.style.display = msg ? 'block' : 'none';
         errorEl.textContent = msg;
     }
     /** Announce a transient change (row moved, …) to screen readers only. */
@@ -3031,6 +3031,7 @@ export function getWebviewContent(
             if (jsonTextarea) {
                 try {
                     const newVal = JSON.parse(jsonTextarea.value);
+                    showError('');
                     if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
                         getActiveRows()[rowIdx][col] = newVal;
                         changed = true;
@@ -3056,6 +3057,7 @@ export function getWebviewContent(
             if (jsonTextarea) {
                 try {
                     const newVal = JSON.parse(jsonTextarea.value);
+                    showError('');
                     if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
                         getActiveRows()[rowIdx][col] = newVal;
                         changed = true;

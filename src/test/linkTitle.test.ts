@@ -94,6 +94,25 @@ suite('링크 제목 조회', () => {
         assert.strictEqual(await fetchLinkTitle(origin), 'Café');
     });
 
+    test('BOM·HTTP 헤더·meta 순서로 인코딩을 선택해 비UTF-8 페이지의 제목을 보존한다', async () => {
+        const legacyHtml = '<meta charset="windows-1252"><title>Caf\xe9</title>';
+        const utf16Html = '<meta charset="windows-1252"><title>한글 🚀</title>';
+        const utf16le = Buffer.from(utf16Html, 'utf16le');
+        for (const [body, contentType, expected] of [
+            [Buffer.from(legacyHtml, 'latin1'), 'text/html', 'Café'],
+            [Buffer.from('<meta charset="utf-8"><title>Caf\xe9</title>', 'latin1'), 'text/html; charset=windows-1252', 'Café'],
+            [Buffer.concat([Buffer.from([0xff, 0xfe]), utf16le]), 'text/html; charset=windows-1252', '한글 🚀'],
+            [Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(utf16le).swap16()]), 'text/html; charset=utf-8', '한글 🚀'],
+        ] as const) {
+            handler = (_request, response) => {
+                response.writeHead(200, { 'Content-Type': contentType });
+                response.end(body);
+            };
+
+            assert.strictEqual(await fetchLinkTitle(origin), expected, `${contentType}: ${body.subarray(0, 2).toString('hex')}`);
+        }
+    });
+
     test('제목 누락·빈 제목·불완전한 title·알 수 없는 charset은 폴백한다', async () => {
         for (const html of ['<html>no title</html>', '<title> \n &nbsp; </title>', '<title>unfinished']) {
             serveHtml(html);

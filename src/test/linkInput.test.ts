@@ -206,6 +206,28 @@ suite('링크 추가 입력', () => {
             assert.strictEqual(box.value, 'example.com', '닫힌 입력창에 늦은 결과를 반영하면 안 된다');
         });
 
+        test('입력창을 즉시 확정하거나 닫으면 예약된 제목 조회를 시작하지 않는다', async () => {
+            for (const accept of [true, false]) {
+                let requests = 0;
+                const result = promptLinkTitle('https://example.com', 'example.com', async () => {
+                    requests++;
+                    return 'Unexpected title';
+                });
+                const box = boxes.at(-1)!;
+                if (accept) {
+                    box.accept();
+                } else {
+                    box.hide();
+                }
+
+                assert.strictEqual(await result, accept ? 'example.com' : undefined);
+                await flushAsyncWork();
+                assert.strictEqual(requests, 0, '이미 완료된 입력을 위해 네트워크 요청을 시작하면 안 된다');
+                assert.strictEqual(box.disposed, true);
+                assert.strictEqual(box.value, 'example.com');
+            }
+        });
+
         test('Escape는 등록을 취소하고 늦은 조회 결과를 무시한다', async () => {
             const title = deferred<string | undefined>();
             let requestSignal: AbortSignal | undefined;

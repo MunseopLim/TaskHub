@@ -148,6 +148,125 @@ async function checkBrowserLoading(
 }
 
 suite('Hex Viewer 실제 브라우저 초기화', () => {
+    test('IT-223: 가상 스크롤 끝의 불완전 단위를 키보드·검색으로 표시하고 실제 바이트만 복사한다', async function () {
+        this.timeout(25000);
+        const tailOffset = 64 * 1024;
+        const bytes = Buffer.alloc(tailOffset + 3);
+        bytes.set([0xDE, 0xAD, 0xBE], tailOffset);
+        const result = parseBinary(bytes);
+        const panel = vscode.window.createWebviewPanel(
+            'taskhub.test.hexNavigation', 'Hex navigation regression', vscode.ViewColumn.One,
+            { enableScripts: true, retainContextWhenHidden: true },
+        );
+        let subscription: vscode.Disposable | undefined;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            const deliveryId = 'browser-navigation';
+            const html = buildHexViewerHtml('navigation.bin', result, panel.webview, deliveryId, {
+                unitSize: 4, endian: 'little', findMode: 'bytes',
+            });
+            const scriptTag = html.match(/<script nonce="[^"]+">/)?.[0];
+            assert.ok(scriptTag);
+            const observer = `${scriptTag}
+            (() => {
+                const api = acquireVsCodeApi();
+                window.acquireVsCodeApi = () => api;
+                window.addEventListener('error', event => api.postMessage({ command: 'testError', error: event.message }));
+                window.addEventListener('unhandledrejection', event => api.postMessage({ command: 'testError', error: String(event.reason) }));
+                const report = stage => requestAnimationFrame(() => requestAnimationFrame(() => {
+                    const container = document.getElementById('hexContainer');
+                    const cell = document.querySelector('#hexBody .hex-cell[data-offset="${tailOffset}"]');
+                    const bounds = cell?.getBoundingClientRect();
+                    const viewport = container.getBoundingClientRect();
+                    container.focus();
+                    const clipboardData = new DataTransfer();
+                    const event = new ClipboardEvent('copy', { clipboardData, bubbles: true, cancelable: true });
+                    container.dispatchEvent(event);
+                    api.postMessage({
+                        command: 'testNavigationState', stage,
+                        tailText: cell?.textContent.trim(), selected: cell?.classList.contains('selected'),
+                        currentMatch: cell?.classList.contains('find-current'),
+                        // clientHeight/scrollTop 반올림으로 생기는 1 CSS px 미만의 경계 차이만 허용한다.
+                        visible: !!bounds && bounds.height > 0
+                            && bounds.top >= Math.floor(viewport.top) && bounds.bottom <= Math.ceil(viewport.bottom),
+                        bounds: bounds?.toJSON(), viewport: viewport.toJSON(),
+                        scrollTop: container.scrollTop, clientHeight: container.clientHeight, scrollHeight: container.scrollHeight,
+                        windowHeight: window.innerHeight,
+                        renderedRows: document.querySelectorAll('#hexBody .hex-row').length,
+                        status: document.getElementById('statusBar').textContent,
+                        findInfo: document.getElementById('findInfo').textContent,
+                        copied: clipboardData.getData('text/plain'), copyPrevented: event.defaultPrevented,
+                    });
+                }));
+                window.addEventListener('message', event => {
+                    if (event.data?.command !== 'testNavigate') { return; }
+                    const stage = event.data.stage;
+                    const container = document.getElementById('hexContainer');
+                    if (stage === 'end') {
+                        container.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+                    } else if (stage === 'search') {
+                        container.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+                        const info = document.getElementById('findInfo');
+                        const searchObserver = new MutationObserver(() => {
+                            if (info.textContent !== '1 / 1') { return; }
+                            searchObserver.disconnect();
+                            report(stage);
+                        });
+                        searchObserver.observe(info, { childList: true, characterData: true, subtree: true });
+                        document.getElementById('findBtn').click();
+                        const input = document.getElementById('findHexInput');
+                        input.value = 'DE AD BE';
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        return;
+                    }
+                    report(stage);
+                });
+            })();
+            </script>`;
+            await new Promise<void>((resolve, reject) => {
+                timer = setTimeout(() => reject(new Error('Hex Viewer browser navigation timed out')), 20000);
+                subscription = panel.webview.onDidReceiveMessage(message => {
+                    try {
+                        if (message.command === 'testError') { throw new Error(message.error); }
+                        if (message.command === 'ready') {
+                            postHexViewerData(panel.webview, result, undefined, deliveryId);
+                        } else if (message.command === 'dataReceived') {
+                            void panel.webview.postMessage({ command: 'testNavigate', stage: 'initial' });
+                        } else if (message.command === 'testNavigationState') {
+                            assert.ok(message.renderedRows > 0 && message.renderedRows < 4097,
+                                '전체 행을 만들어 가상 스크롤 경계를 우회하면 안 된다');
+                            if (message.stage === 'initial') {
+                                assert.strictEqual(message.tailText, undefined, '처음에는 마지막 셀이 가상 DOM 밖에 있어야 한다');
+                                void panel.webview.postMessage({ command: 'testNavigate', stage: 'end' });
+                                return;
+                            }
+                            assert.strictEqual(message.tailText, 'BEADDE');
+                            assert.strictEqual(message.selected, true);
+                            assert.strictEqual(message.visible, true,
+                                '선택된 마지막 셀이 실제 뷰포트 안에 있어야 한다: ' + JSON.stringify(message));
+                            assert.match(message.status, /0x00010000/);
+                            assert.strictEqual(message.copied, 'BEADDE', '없는 네 번째 바이트를 채우거나 끝 세 바이트를 누락하면 안 된다');
+                            assert.strictEqual(message.copyPrevented, true);
+                            if (message.stage === 'end') {
+                                void panel.webview.postMessage({ command: 'testNavigate', stage: 'search' });
+                            } else {
+                                assert.strictEqual(message.stage, 'search');
+                                assert.strictEqual(message.findInfo, '1 / 1');
+                                assert.strictEqual(message.currentMatch, true);
+                                resolve();
+                            }
+                        }
+                    } catch (error) { reject(error); }
+                });
+                panel.webview.html = html.replace(scriptTag, observer + scriptTag);
+            });
+        } finally {
+            clearTimeout(timer);
+            subscription?.dispose();
+            panel.dispose();
+        }
+    });
+
     test('IT-216: BIN·HEX·SREC 웹뷰가 ready 이후 데이터를 받아 Loading을 닫고 바이트를 표시한다', async function () {
         this.timeout(70000);
         for (const [fileName, result] of [

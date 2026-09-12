@@ -46,6 +46,49 @@ suite('Pinned action storage', () => {
         assert.deepStrictEqual(store.list(), [{ actionId: 'b' }, { actionId: 'c' }]);
     });
 
+    test('100개까지 고정하고 초과 실패 후에도 중복 확인·해제·새 고정을 계속 처리한다', async () => {
+        const memory = new MemoryMemento();
+        const store = new PinnedActionStore(memory);
+        const pins = Array.from({ length: 100 }, (_, index) => ({ actionId: `action-${index}` }));
+        for (const pin of pins) {
+            assert.strictEqual(await store.add(pin), true);
+        }
+        const saved = memory.values.get(PINNED_ACTIONS_STATE_KEY);
+
+        await assert.rejects(store.add({ actionId: 'overflow' }), error =>
+            error instanceof PinnedActionStoreError && error.code === 'too-many-pins');
+        assert.strictEqual(memory.values.get(PINNED_ACTIONS_STATE_KEY), saved, '한도 초과로 기존 고정을 덮어쓰면 안 된다');
+        assert.deepStrictEqual(new PinnedActionStore(memory).list(), pins);
+        assert.strictEqual(await store.add(pins[0]), false, '이미 고정한 항목은 한도에서 오류가 아닌 중복으로 처리한다');
+
+        assert.strictEqual(await store.remove(pins[0]), true);
+        assert.strictEqual(await store.add({ actionId: 'replacement' }), true);
+        assert.deepStrictEqual(new PinnedActionStore(memory).list(), [...pins.slice(1), { actionId: 'replacement' }]);
+    });
+
+    test('128 KiB 저장 한도는 UTF-8 바이트로 검사하고 초과해도 목록과 다음 저장을 보존한다', async () => {
+        const memory = new MemoryMemento();
+        const store = new PinnedActionStore(memory);
+        const stateOverhead = Buffer.byteLength(JSON.stringify({ version: 1, pins: [{ actionId: '' }] }), 'utf8');
+        const availableBytes = 128 * 1024 - stateOverhead;
+        const boundaryId = '한'.repeat(Math.floor(availableBytes / 3)) + 'a'.repeat(availableBytes % 3);
+        assert.strictEqual(await store.add({ actionId: boundaryId }), true);
+        const saved = memory.values.get(PINNED_ACTIONS_STATE_KEY);
+        assert.strictEqual(Buffer.byteLength(JSON.stringify(saved), 'utf8'), 128 * 1024);
+
+        await assert.rejects(store.add({ actionId: 'extra' }), error =>
+            error instanceof PinnedActionStoreError && error.code === 'store-too-large');
+        assert.strictEqual(memory.values.get(PINNED_ACTIONS_STATE_KEY), saved);
+        assert.deepStrictEqual(new PinnedActionStore(memory).list(), [{ actionId: boundaryId }]);
+        assert.strictEqual(await store.remove({ actionId: boundaryId }), true);
+
+        await assert.rejects(store.add({ actionId: boundaryId + 'a' }), error =>
+            error instanceof PinnedActionStoreError && error.code === 'store-too-large');
+        assert.deepStrictEqual(store.list(), []);
+        assert.strictEqual(await store.add({ actionId: 'small' }), true, '실패한 쓰기 때문에 이후 저장 큐가 중단되면 안 된다');
+        assert.deepStrictEqual(new PinnedActionStore(memory).list(), [{ actionId: 'small' }]);
+    });
+
     test('손상·미지원·중복 상태를 덮어쓰지 않고 저장 실패 후 재시도할 수 있다', async () => {
         for (const raw of [
             { version: 2, pins: [] }, { version: 1, pins: [{ actionId: 'a', profileId: null }] },
@@ -379,6 +422,36 @@ suite('Pinned action tree and registered commands', () => {
         assert.strictEqual(confirmations, 1);
         assert.strictEqual(executions[0].item.title, 'Changed while confirming');
         assert.deepStrictEqual(executions[0].inputs?.target, { value: 'latest' });
+        assert.deepStrictEqual(errors, []);
+    });
+
+    test('확인 중 바뀐 프로필도 오래된 상태라면 다시 확인하고 두 번째 취소는 실행을 막는다', async () => {
+        const profile = await saveProfile();
+        const row = await pinRow(profile.id);
+        actions[0].action!.tasks = [{ id: 'newTarget', type: 'inputBox' }];
+        let confirmations = 0;
+        confirm = async () => {
+            confirmations++;
+            if (confirmations === 1) {
+                actions[0] = {
+                    ...makeAction(), title: 'Changed while confirming',
+                    action: { description: 'Changed fixture', tasks: [{ id: 'latestTarget', type: 'inputBox' }] }
+                };
+                await profiles.save({
+                    actionId, name: 'Changed profile', inputs: { target: { value: 'changed' } },
+                    taskTypes: { target: 'inputBox' }
+                }, profile.id);
+                return true;
+            }
+            return false;
+        };
+
+        await callbacks.get('taskhub.runPinnedAction')!(row);
+
+        assert.strictEqual(confirmations, 2, '이전 정의에 대한 승인으로 바뀐 오래된 프로필을 실행하면 안 된다');
+        assert.deepStrictEqual(executions, []);
+        assert.deepStrictEqual(store.list(), [{ actionId, profileId: profile.id }]);
+        assert.strictEqual((await provider.getChildren())[0].label, 'Changed while confirming · Changed profile');
         assert.deepStrictEqual(errors, []);
     });
 

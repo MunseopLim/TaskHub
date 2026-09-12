@@ -354,6 +354,98 @@ suite('GitHub update service', () => {
         assert.ok(!messages.some(message => message.items.includes(reloadLabel())));
     });
 
+    test('다운로드 중 수동·자동 확인이 겹쳐도 설치는 한 번만 진행한다', async () => {
+        mode = 'auto';
+        const started = deferred<void>();
+        const verified = deferred<void>();
+        const service = makeService({ download: async (_release, destination) => {
+            downloads.push(destination);
+            started.resolve();
+            await verified.promise;
+            await fs.writeFile(destination, 'verified VSIX fixture');
+        } });
+        const checking = service.check(false);
+        try {
+            await started.promise;
+            await Promise.all([service.check(), service.check(false), service.check()]);
+            assert.strictEqual(fetches, 1);
+            assert.strictEqual(downloads.length, 1);
+            assert.strictEqual(installs.length, 0);
+            assert.strictEqual(messages.length, 2, '수동 중복 요청에만 진행 중임을 안내한다');
+            assert.ok(messages.every(message => message.items.length === 0));
+            assert.strictEqual(activeTimers().length, 0);
+        } finally {
+            verified.resolve();
+            await checking;
+        }
+        assert.strictEqual(installs.length, 1);
+        assert.strictEqual(messages.filter(message => message.items.includes(reloadLabel())).length, 1);
+        assert.strictEqual(activeTimers().length, 1);
+        assert.deepStrictEqual(await fs.readdir(path.join(storage, 'updates')), ['installed.json']);
+    });
+
+    test('설치 명령 실패는 성공 표식을 남기지 않고 같은 버전의 재시도를 허용한다', async () => {
+        respond = chooseInstall;
+        let attempts = 0;
+        const service = makeService({ install: async destination => {
+            assert.strictEqual(await fs.readFile(destination, 'utf8'), 'verified VSIX fixture');
+            attempts++;
+            if (attempts === 1) { throw new Error('private installation failure'); }
+            installs.push(destination);
+        } });
+        await service.check();
+        assert.strictEqual(attempts, 1);
+        assert.strictEqual(installs.length, 0);
+        assert.strictEqual(errors.length, 1);
+        assert.strictEqual(logs.length, 1);
+        assert.ok([...errors, ...logs].every(message => !message.includes('private installation failure')));
+        assert.ok(!messages.some(message => message.items.includes(reloadLabel())));
+        assert.deepStrictEqual(await fs.readdir(path.join(storage, 'updates')), []);
+
+        await service.check();
+        assert.strictEqual(attempts, 2);
+        assert.strictEqual(fetches, 2);
+        assert.strictEqual(downloads.length, 2);
+        assert.strictEqual(installs.length, 1);
+        assert.strictEqual(errors.length, 1);
+        assert.ok(messages.at(-1)!.items.includes(reloadLabel()));
+        assert.deepStrictEqual(await fs.readdir(path.join(storage, 'updates')), ['installed.json']);
+        assert.strictEqual(JSON.parse(await fs.readFile(path.join(storage, 'updates', 'installed.json'), 'utf8')), '1.2.3');
+    });
+
+    test('설치 성공 뒤 표식 저장 실패는 완료 안내와 같은 창의 재설치 방지를 유지한다', async () => {
+        respond = chooseInstall;
+        let markerAttempts = 0;
+        const service = makeService({
+            withInstallLock: (directory, callback) => withUpdateInstallLock(directory, installState => callback({
+                ...installState,
+                markInstalled: async () => {
+                    markerAttempts++;
+                    throw new Error('private marker write failure');
+                },
+            })),
+        });
+        await service.check();
+        assert.strictEqual(installs.length, 1);
+        assert.strictEqual(markerAttempts, 1);
+        assert.strictEqual(errors.length, 0);
+        assert.deepStrictEqual(logs, [t(
+            '업데이트는 설치되었지만 설치 버전 기록을 저장하지 못했습니다.',
+            'The update was installed, but its version record could not be saved.',
+        )]);
+        assert.ok(messages.at(-1)!.items.includes(reloadLabel()));
+        assert.deepStrictEqual(await fs.readdir(path.join(storage, 'updates')), []);
+
+        messages = [];
+        await service.check();
+        assert.strictEqual(fetches, 2);
+        assert.strictEqual(downloads.length, 1);
+        assert.strictEqual(installs.length, 1);
+        assert.strictEqual(markerAttempts, 1);
+        assert.strictEqual(messages.length, 1);
+        assert.deepStrictEqual(messages[0].items, [reloadLabel()]);
+    });
+
     test('자동 notify 알림에서 설치를 선택한 사용자는 설치 오류를 확인할 수 있다', async () => {
         respond = chooseInstall;
         await makeService({ download: async () => { throw new GithubUpdateError('invalidVsix'); } }).check(false);
@@ -444,6 +536,79 @@ suite('GitHub update service', () => {
         assert.strictEqual(errors.length, 0);
         assert.deepStrictEqual(await fs.readdir(path.join(storage, 'updates')), []);
         assert.ok(!messages.some(message => message.items.includes(reloadLabel())));
+    });
+
+    test('잠금 임대 취소는 다운로드에 전파되고 늦은 검증 성공도 설치와 표식을 만들지 않는다', async () => {
+        respond = chooseInstall;
+        const lease = new AbortController();
+        const started = deferred<AbortSignal>();
+        const verified = deferred<void>();
+        const markers: string[] = [];
+        const service = makeService({
+            withInstallLock: (directory, callback) => withUpdateInstallLock(directory, installState => callback({
+                ...installState,
+                signal: lease.signal,
+                markInstalled: async version => { markers.push(version); await installState.markInstalled(version); },
+            })),
+            download: async (_release, destination, _version, signal) => {
+                downloads.push(destination);
+                started.resolve(signal);
+                await verified.promise;
+                await fs.writeFile(destination, 'verified VSIX fixture');
+            },
+        });
+        const checking = service.check();
+        try {
+            const signal = await started.promise;
+            assert.strictEqual(signal.aborted, false);
+            lease.abort(new Error('installation lease lost'));
+            assert.strictEqual(signal.aborted, true);
+        } finally {
+            verified.resolve();
+            await checking;
+        }
+        assert.strictEqual(downloads.length, 1);
+        assert.strictEqual(installs.length, 0);
+        assert.deepStrictEqual(markers, []);
+        assert.strictEqual(errors.length, 0);
+        assert.ok(!messages.some(message => message.items.includes(reloadLabel())));
+        assert.deepStrictEqual(await fs.readdir(path.join(storage, 'updates')), []);
+        assert.deepStrictEqual(
+            await withUpdateInstallLock(path.join(storage, 'updates'), async installState => installState.installedVersion),
+            { acquired: true, value: undefined },
+        );
+    });
+
+    test('설치 명령 시작 후 취소해도 완료된 설치를 기록하고 다음 확인에서 재설치하지 않는다', async () => {
+        respond = chooseInstall;
+        const started = deferred<void>();
+        const installed = deferred<void>();
+        const service = makeService({ install: async destination => {
+            assert.strictEqual(await fs.readFile(destination, 'utf8'), 'verified VSIX fixture');
+            started.resolve();
+            await installed.promise;
+            installs.push(destination);
+        } });
+        const checking = service.check();
+        try {
+            await started.promise;
+            progressSources.at(-1)!.cancel();
+        } finally {
+            installed.resolve();
+            await checking;
+        }
+        assert.strictEqual(installs.length, 1);
+        assert.strictEqual(errors.length, 0);
+        assert.ok(!messages.some(message => message.items.includes(reloadLabel())));
+        assert.deepStrictEqual(await fs.readdir(path.join(storage, 'updates')), ['installed.json']);
+        assert.strictEqual(JSON.parse(await fs.readFile(path.join(storage, 'updates', 'installed.json'), 'utf8')), '1.2.3');
+
+        messages = [];
+        await service.check();
+        assert.strictEqual(downloads.length, 1);
+        assert.strictEqual(installs.length, 1);
+        assert.strictEqual(messages.length, 1);
+        assert.deepStrictEqual(messages[0].items, [reloadLabel()]);
     });
 
     test('다운로드 중 auto를 notify로 바꾸면 자동 설치 권한을 철회한다', async () => {
