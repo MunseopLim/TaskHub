@@ -1,10 +1,16 @@
 import * as assert from 'assert';
 import * as vm from 'vm';
-import { buildHexViewerHtml, buildHexViewerStrings, HexViewerPreferences } from '../hexViewer';
-import { parseBinary, parseIntelHex, parseSrec } from '../hexParser';
+import { buildHexViewerHtml, buildHexViewerPayload, buildHexViewerStrings, HexViewerPreferences } from '../hexViewer';
+import { HexParseResult, parseBinary, parseIntelHex, parseSrec } from '../hexParser';
 
 /** 실제 생성된 스크립트 전체를 실행한다. DOM은 이벤트·포커스·표 조회 경계만 제공한다. */
-function runViewer(bytes: number[], options: { preferences?: HexViewerPreferences; state?: unknown } = {}) {
+function runViewer(bytes: number[], options: {
+    preferences?: HexViewerPreferences;
+    state?: unknown;
+    result?: HexParseResult;
+    maxDataReads?: number;
+    maxHighlightAdds?: number;
+} = {}) {
     let focused: FakeElement | null = null;
     let selectedText = '';
     let state = options.state;
@@ -79,7 +85,18 @@ function runViewer(bytes: number[], options: { preferences?: HexViewerPreference
     const windowEvents = new FakeElement();
     let nextTimer = 0;
     const delayed = new Map<number, { callback: () => unknown; delay: number }>();
-    const html = buildHexViewerHtml('interaction.bin', parseBinary(Buffer.from(bytes)), undefined, undefined, options.preferences);
+    const result = options.result ?? parseBinary(Buffer.from(bytes));
+    const html = buildHexViewerHtml('interaction.bin', result, undefined, undefined, options.preferences);
+    let dataReads = 0;
+    let highlightAdds = 0;
+    class BoundedSet extends Set<number> {
+        override add(value: number): this {
+            if (++highlightAdds > (options.maxHighlightAdds ?? Infinity)) {
+                throw new Error('Visible highlights exceeded their bounded work budget.');
+            }
+            return super.add(value);
+        }
+    }
     // HTML 파서는 줄바꿈을 LF로 정규화하고 script data의 NUL을 U+FFFD로 바꾼다.
     // 원문을 곧바로 VM에 넣으면 브라우저에서만 발생하는 구문 오류를 놓친다.
     const script = html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)![1]
@@ -87,6 +104,7 @@ function runViewer(bytes: number[], options: { preferences?: HexViewerPreference
     vm.runInNewContext(script, {
         Element: FakeElement,
         Uint8Array,
+        Set: BoundedSet,
         acquireVsCodeApi: () => ({
             getState: () => state,
             setState: (value: unknown) => {
@@ -122,15 +140,40 @@ function runViewer(bytes: number[], options: { preferences?: HexViewerPreference
         savedStates,
         messages,
         getState: () => state,
-        async flushSearch() {
-            for (const [id, timer] of delayed) {
-                if (timer.delay !== 250) { continue; }
-                delayed.delete(id);
-                await timer.callback();
+        async flushSearch(onYield?: (count: number) => Promise<void>) {
+            const scheduled = [...delayed].find(([, timer]) => timer.delay === 250);
+            if (!scheduled) { return 0; }
+            delayed.delete(scheduled[0]);
+            let done = false;
+            let failure: unknown;
+            const running = Promise.resolve(scheduled[1].callback()).catch(error => { failure = error; }).finally(() => { done = true; });
+            let yields = 0;
+            while (!done) {
+                await Promise.resolve();
+                const next = [...delayed].find(([, timer]) => timer.delay === 0);
+                if (!next) { continue; }
+                delayed.delete(next[0]);
+                if (onYield) { await onYield(++yields); } else { yields++; }
+                next[1].callback();
             }
+            await running;
+            if (failure) { throw failure; }
+            return yields;
         },
         setSelectedText(text: string) { selectedText = text; },
-        async load() { await windowEvents.dispatch('message', { data: { command: 'hexData', data: Uint8Array.from(bytes) } }); },
+        async load() {
+            const payload = buildHexViewerPayload(result);
+            const data = new Proxy(payload.data, {
+                get(target, key) {
+                    if (typeof key === 'string' && /^\d+$/.test(key)
+                        && ++dataReads > (options.maxDataReads ?? Infinity)) {
+                        throw new Error('Search exceeded its linear data-read budget.');
+                    }
+                    return Reflect.get(target, key, target);
+                },
+            });
+            await windowEvents.dispatch('message', { data: { command: 'hexData', data, gap: payload.gap } });
+        },
         async clickByte(offset: number) {
             const cell = elements.hexBody.querySelector(`.hex-cell[data-offset="${offset}"]`);
             assert.ok(cell, `offset ${offset} cell`);
@@ -150,6 +193,103 @@ function runViewer(bytes: number[], options: { preferences?: HexViewerPreference
 }
 
 suite('Hex Viewer 연속 조작', () => {
+    test('긴 공통 접두사 검색은 선형 작업량 안에서 마지막 일치 위치를 찾는다', async () => {
+        const bytes = Array<number>(65536).fill(0x41);
+        bytes[bytes.length - 1] = 0x42;
+        const viewer = runViewer(bytes, {
+            preferences: { unitSize: 1, endian: 'big', findMode: 'ascii' },
+            maxDataReads: bytes.length * 8,
+            maxHighlightAdds: 20000,
+        });
+        await viewer.load();
+        await viewer.elements.findBtn.dispatch('click');
+        viewer.elements.findHexInput.value = 'A'.repeat(8192) + 'B';
+        await viewer.elements.findHexInput.dispatch('input');
+        assert.ok(await viewer.flushSearch() > 0, '검색이 이벤트 처리를 허용하지 않았다');
+        assert.strictEqual(viewer.elements.findInfo.textContent, '1 / 1');
+        assert.strictEqual(viewer.elements.hexBody.querySelector('.find-current')?.dataset.offset, String(bytes.length - 8193));
+    });
+
+    test('긴 중첩 매치는 가시 셀만 강조하고 다음·이전 결과를 이동한다', async () => {
+        const viewer = runViewer(Array<number>(32768).fill(0x41), {
+            preferences: { unitSize: 1, endian: 'big', findMode: 'ascii' },
+            maxDataReads: 32768 * 8,
+            maxHighlightAdds: 20000,
+        });
+        await viewer.load();
+        await viewer.elements.findBtn.dispatch('click');
+        viewer.elements.findHexInput.value = 'A'.repeat(16384);
+        await viewer.elements.findHexInput.dispatch('input');
+        await viewer.flushSearch();
+        assert.strictEqual(viewer.elements.findInfo.textContent, `1 / ${(10000).toLocaleString()}+`);
+        assert.strictEqual(viewer.elements.hexBody.querySelector('.find-current')?.dataset.offset, '0');
+        await viewer.elements.findNext.dispatch('click');
+        assert.strictEqual(viewer.elements.findInfo.textContent, `2 / ${(10000).toLocaleString()}+`);
+        assert.strictEqual(viewer.elements.hexBody.querySelector('.find-current')?.dataset.offset, '1');
+        await viewer.elements.findPrev.dispatch('click');
+        assert.strictEqual(viewer.elements.hexBody.querySelector('.find-current')?.dataset.offset, '0');
+    });
+
+    test('sparse HEX의 gap 채움값과 gap을 가로지른 부분 패턴은 검색되지 않는다', async () => {
+        const result: HexParseResult = {
+            format: 'intel', minAddress: 0, maxAddress: 6, byteCount: 6,
+            data: new Map([[0, 0xFF], [2, 0xFF], [3, 0xFF], [4, 0xAA], [5, 0xFF], [6, 0xFF]]),
+        };
+        const viewer = runViewer([], { result, preferences: { unitSize: 1, endian: 'big', findMode: 'bytes' } });
+        await viewer.load();
+        await viewer.elements.findBtn.dispatch('click');
+        for (const [query, count, first] of [['FF', '1 / 5', '0'], ['FF FF', '1 / 2', '2'], ['FF FF AA', '1 / 1', '2']] as const) {
+            viewer.elements.findHexInput.value = query;
+            await viewer.elements.findHexInput.dispatch('input');
+            await viewer.flushSearch();
+            assert.strictEqual(viewer.elements.findInfo.textContent, count);
+            assert.strictEqual(viewer.elements.hexBody.querySelector('.find-current')?.dataset.offset, first);
+            assert.strictEqual(viewer.elements.hexBody.querySelector('.find-current[data-offset="1"]'), null);
+            if (query === 'FF FF') {
+                await viewer.elements.findNext.dispatch('click');
+                assert.strictEqual(viewer.elements.findInfo.textContent, '2 / 2');
+                assert.strictEqual(viewer.elements.hexBody.querySelector('.find-current')?.dataset.offset, '5');
+            }
+        }
+        viewer.elements.findHexInput.value = 'FF FF FF';
+        await viewer.elements.findHexInput.dispatch('input');
+        await viewer.flushSearch();
+        assert.strictEqual(viewer.elements.findInfo.textContent, buildHexViewerStrings().findNoMatches);
+        assert.strictEqual(viewer.elements.hexBody.querySelector('.find-current, .find-highlight'), null);
+    });
+
+    test('긴 검색의 접두사 계산 중 닫기·새 입력은 이전 결과의 선택 이동을 취소한다', async () => {
+        for (const close of [true, false]) {
+            const bytes = Array<number>(65536).fill(0x41);
+            bytes[bytes.length - 1] = 0x42;
+            const viewer = runViewer(bytes, { preferences: { unitSize: 1, endian: 'big', findMode: 'ascii' } });
+            await viewer.load();
+            await viewer.clickByte(3);
+            await viewer.elements.findBtn.dispatch('click');
+            viewer.elements.findHexInput.value = 'A'.repeat(40000) + 'B';
+            await viewer.elements.findHexInput.dispatch('input');
+            const yields = await viewer.flushSearch(async count => {
+                if (count !== 1) { return; }
+                assert.strictEqual(viewer.elements.findInfo.textContent, buildHexViewerStrings().finding);
+                if (close) {
+                    await viewer.elements.findClose.dispatch('click');
+                } else {
+                    viewer.elements.findHexInput.value = 'B';
+                    await viewer.elements.findHexInput.dispatch('input');
+                }
+            });
+            assert.strictEqual(yields, 1, '취소된 검색이 계속 계산됐다');
+            assert.strictEqual(viewer.elements.findInfo.textContent, '');
+            assert.match(viewer.elements.statusBar.innerHTML, /0x00000003/);
+            assert.strictEqual(viewer.elements.hexBody.querySelector('.find-current, .find-highlight'), null);
+            if (!close) {
+                await viewer.flushSearch();
+                assert.strictEqual(viewer.elements.findInfo.textContent, '1 / 1');
+                assert.strictEqual(viewer.elements.hexBody.querySelector('.find-current')?.dataset.offset, String(bytes.length - 1));
+            }
+        }
+    });
+
     test('마지막 표시 단위·엔디안·검색 방식을 첫 렌더와 검색에 적용한다', async () => {
         for (const [findMode, input, offset, placeholder] of [
             ['value', '0102', '4', '20020000'],

@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { buildJsonEditorStrings, getWebviewContent } from '../jsonEditor';
-import { addJsonEditorField, buildSheetMap, coerceEditedCellValue, coerceEditedArrayItems, effectiveBaseline, getRowsByPath } from '../jsonEditorUtils';
+import { addJsonEditorField, buildSheetMap, coerceEditedCellValue, coerceEditedArrayItems, effectiveBaseline, getRowsByPath, parseJsonEditorText } from '../jsonEditorUtils';
 
 /** 실제 배포 HTML의 폼 이벤트와 history/save 경로를 최소 DOM 위에서 실행한다. */
 function boot(initial: Record<string, unknown>) {
@@ -99,10 +99,10 @@ function boot(initial: Record<string, unknown>) {
         'return {data: () => data, undo, redo, save: saveAction, render: renderTable, dirty: () => modified, wireCellInputs, switchSheet: index => { activeIdx = index; renderTable(); }};',
     ].join('\n');
     api = new Function('initial', 'document', 'S', 'vscode', 'setTimeout',
-        'addJsonEditorField', 'buildSheetMap', 'getRowsByPath', 'effectiveBaseline', 'coerceEditedCellValue', 'coerceEditedArrayItems', script)(
+        'addJsonEditorField', 'buildSheetMap', 'getRowsByPath', 'effectiveBaseline', 'coerceEditedCellValue', 'coerceEditedArrayItems', 'parseJsonEditorText', script)(
         initial, document, buildJsonEditorStrings(), { postMessage: (value: unknown) => posted.push(JSON.parse(JSON.stringify(value))) },
         (callback: () => void) => timers.push(callback), addJsonEditorField, buildSheetMap, getRowsByPath, effectiveBaseline,
-        coerceEditedCellValue, coerceEditedArrayItems
+        coerceEditedCellValue, coerceEditedArrayItems, parseJsonEditorText
     );
     function editCell(col: string, value: string, json: boolean = false): Element {
         const input = new Element('cell-input');

@@ -30,4 +30,5 @@ export {
     decideSaveResult,
     buildDraftSnapshot,
     resolveActiveDraftState,
+    parseJsonEditorText,
 } from '../jsonEditorUtils';

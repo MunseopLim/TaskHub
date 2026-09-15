@@ -1,12 +1,52 @@
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { TextDecoder } from 'node:util';
+import { promises as dns, type LookupAddress } from 'node:dns';
+import { BlockList, isIP } from 'node:net';
 
 const REQUEST_TIMEOUT_MS = 2000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_REDIRECTS = 3;
 const MAX_TITLE_LENGTH = 200;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+const privateAddresses = new BlockList();
+for (const [address, prefix] of [
+    ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+    ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
+    ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15],
+    ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
+] as const) {
+    privateAddresses.addSubnet(address, prefix, 'ipv4');
+}
+for (const [address, prefix] of [
+    ['2001::', 23], ['2001:db8::', 32], ['2002::', 16], ['3fff::', 20],
+] as const) {
+    privateAddresses.addSubnet(address, prefix, 'ipv6');
+}
+const globalIpv6 = new BlockList();
+globalIpv6.addSubnet('2000::', 3, 'ipv6');
+
+/** 자동 제목 조회는 공개 주소로 제한하고, 수동 제목 입력은 항상 제공한다. */
+export function isPublicTitleAddress(address: string): boolean {
+    const family = isIP(address);
+    if (family === 4) {
+        return !privateAddresses.check(address, 'ipv4');
+    }
+    return family === 6 && globalIpv6.check(address, 'ipv6')
+        && !privateAddresses.check(address, 'ipv6');
+}
+
+/** Tests replace DNS/transport, while the production address policy stays on the path. */
+export interface LinkTitleNetwork {
+    lookup(hostname: string): Promise<LookupAddress[]>;
+    request(url: URL, options: http.RequestOptions): http.ClientRequest;
+}
+
+const defaultNetwork: LinkTitleNetwork = {
+    lookup: hostname => dns.lookup(hostname, { all: true, verbatim: true }),
+    request: (url, options) => (url.protocol === 'https:' ? https : http).request(url, options),
+};
 
 const TITLE_ENTITIES: Readonly<Record<string, string>> = {
     amp: '&', AMP: '&', lt: '<', LT: '<', gt: '>', GT: '>',
@@ -80,7 +120,9 @@ function extractTitle(body: Buffer, contentType: string): string | undefined {
 }
 
 /** 사용자에게 제안할 HTML 제목만 조회한다. 실패·취소는 항상 undefined다. */
-export async function fetchLinkTitle(rawUrl: string, signal?: AbortSignal): Promise<string | undefined> {
+export async function fetchLinkTitle(
+    rawUrl: string, signal?: AbortSignal, network: LinkTitleNetwork = defaultNetwork,
+): Promise<string | undefined> {
     const initialUrl = parseTitleUrl(rawUrl);
     if (!initialUrl || signal?.aborted) {
         return undefined;
@@ -106,13 +148,37 @@ export async function fetchLinkTitle(rawUrl: string, signal?: AbortSignal): Prom
             resolve(title);
         }
 
-        function requestTitle(url: URL, redirects: number): void {
+        async function requestTitle(url: URL, redirects: number): Promise<void> {
             if (settled) {
                 return;
             }
             try {
-                const request = (url.protocol === 'https:' ? https : http).request(url, {
+                const hostname = url.hostname.replace(/^\[|\]$/g, '');
+                const family = isIP(hostname);
+                const addresses = family ? [{ address: hostname, family }] : await network.lookup(hostname);
+                if (settled) { return; }
+                if (addresses.length === 0 || addresses.length > 32
+                    || addresses.some(entry => entry.family !== isIP(entry.address)
+                        || !isPublicTitleAddress(entry.address))) {
+                    finish();
+                    return;
+                }
+                const request = network.request(url, {
                     agent: false,
+                    // 검증한 DNS 응답을 연결에도 사용해 재조회로 주소가 바뀌지 않게 한다.
+                    lookup: (_host, options, callback) => {
+                        // Node's lookup contract also accepts the legacy names.
+                        const family = options.family === 'IPv4' ? 4
+                            : options.family === 'IPv6' ? 6 : options.family;
+                        const matching = addresses.filter(entry => !family || entry.family === family);
+                        if (matching.length === 0) {
+                            callback(new Error('No public address for the requested family.'), []);
+                        } else if (options.all) {
+                            callback(null, matching);
+                        } else {
+                            callback(null, matching[0].address, matching[0].family);
+                        }
+                    },
                     headers: {
                         Accept: 'text/html, application/xhtml+xml',
                         'Accept-Encoding': 'identity',
@@ -151,7 +217,7 @@ export async function fetchLinkTitle(rawUrl: string, signal?: AbortSignal): Prom
                         activeRequest = undefined;
                         response.destroy();
                         request.destroy();
-                        requestTitle(nextUrl, redirects + 1);
+                        void requestTitle(nextUrl, redirects + 1);
                         return;
                     }
 
@@ -199,7 +265,7 @@ export async function fetchLinkTitle(rawUrl: string, signal?: AbortSignal): Prom
         if (signal?.aborted) {
             finish();
         } else {
-            requestTitle(initialUrl, 0);
+            void requestTitle(initialUrl, 0);
         }
     });
 }

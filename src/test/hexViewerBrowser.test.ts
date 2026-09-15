@@ -158,6 +158,7 @@ async function checkBrowserNavigation(compact = false): Promise<void> {
     );
     let subscription: vscode.Disposable | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const trace: string[] = [];
     try {
         const deliveryId = 'browser-navigation';
         let html = buildHexViewerHtml('navigation.bin', result, panel.webview, deliveryId, {
@@ -168,6 +169,7 @@ async function checkBrowserNavigation(compact = false): Promise<void> {
             // 제품 스크립트·CSP는 유지하고, 테스트 문서의 크기·글꼴·스크롤바만 고정한다.
             html = html.replace('</head>', `<style>
                 body { width: 464px; height: 388px; font-size: 14px; font-family: monospace; }
+                #hexContainer { scrollbar-width: auto; scrollbar-color: auto; }
                 #hexContainer::-webkit-scrollbar { width: 15px; height: 15px; }
                 #hexContainer::-webkit-scrollbar-thumb { background: #808080; }
             </style></head>`);
@@ -180,7 +182,9 @@ async function checkBrowserNavigation(compact = false): Promise<void> {
             window.acquireVsCodeApi = () => api;
             window.addEventListener('error', event => api.postMessage({ command: 'testError', error: event.message }));
             window.addEventListener('unhandledrejection', event => api.postMessage({ command: 'testError', error: String(event.reason) }));
-            const report = stage => requestAnimationFrame(() => requestAnimationFrame(() => {
+            const report = stage => {
+                api.postMessage({ command: 'testPhase', stage: stage + ':frame-scheduled:' + document.visibilityState });
+                requestAnimationFrame(() => requestAnimationFrame(() => {
                 const container = document.getElementById('hexContainer');
                 const cell = document.querySelector('#hexBody .hex-cell[data-offset="${tailOffset}"]');
                 const bounds = cell?.getBoundingClientRect();
@@ -196,8 +200,9 @@ async function checkBrowserNavigation(compact = false): Promise<void> {
                     tailText: cell?.textContent.trim(), selected: cell?.classList.contains('selected'),
                     currentMatch: cell?.classList.contains('find-current'),
                     // clientHeight/scrollTop 반올림으로 생기는 1 CSS px 미만의 경계 차이만 허용한다.
+                    // floor/ceil은 viewport 소수부에 따라 허용폭이 달라지므로 차이를 직접 비교한다.
                     visible: !!bounds && bounds.height > 0
-                        && bounds.top >= Math.floor(contentTop) && bounds.bottom <= Math.ceil(contentBottom),
+                        && contentTop - bounds.top < 1 && bounds.bottom - contentBottom < 1,
                     bounds: bounds?.toJSON(), viewport: viewport.toJSON(),
                     contentTop, contentBottom,
                     scrollTop: container.scrollTop, clientHeight: container.clientHeight, scrollHeight: container.scrollHeight,
@@ -210,7 +215,8 @@ async function checkBrowserNavigation(compact = false): Promise<void> {
                     findInfo: document.getElementById('findInfo').textContent,
                     copied: clipboardData.getData('text/plain'), copyPrevented: event.defaultPrevented,
                 });
-            }));
+                }));
+            };
             window.addEventListener('message', event => {
                 if (event.data?.command !== 'testNavigate') { return; }
                 const stage = event.data.stage;
@@ -237,8 +243,9 @@ async function checkBrowserNavigation(compact = false): Promise<void> {
         })();
         </script>`;
         await new Promise<void>((resolve, reject) => {
-            timer = setTimeout(() => reject(new Error('Hex Viewer browser navigation timed out')), 20000);
+            timer = setTimeout(() => reject(new Error('Hex Viewer browser navigation timed out: ' + trace.join(', '))), 20000);
             subscription = panel.webview.onDidReceiveMessage(message => {
+                trace.push(message.command + (message.stage ? ':' + message.stage : ''));
                 try {
                     if (message.command === 'testError') { throw new Error(message.error); }
                     if (message.command === 'ready') {
@@ -252,7 +259,7 @@ async function checkBrowserNavigation(compact = false): Promise<void> {
                             assert.strictEqual(message.fontSize, '14px');
                             assert.ok(message.scrollWidth > message.clientWidth, '좁은 창은 가로 스크롤이 생겨야 한다');
                             assert.ok(message.viewport.bottom - message.contentBottom >= 14,
-                                '가로 스크롤바가 실제 콘텐츠 높이를 줄이는 조건을 재현해야 한다');
+                                '가로 스크롤바가 실제 콘텐츠 높이를 줄이는 조건을 재현해야 한다: ' + JSON.stringify(message));
                         }
                         assert.ok(message.renderedRows > 0 && message.renderedRows < 4097,
                             '전체 행을 만들어 가상 스크롤 경계를 우회하면 안 된다');
@@ -288,7 +295,104 @@ async function checkBrowserNavigation(compact = false): Promise<void> {
     }
 }
 
+async function checkBrowserSearchCancellation(): Promise<void> {
+    const bytes = Buffer.alloc(1024 * 1024, 0x41);
+    bytes[bytes.length - 1] = 0x42;
+    const result = parseBinary(bytes);
+    const panel = vscode.window.createWebviewPanel(
+        'taskhub.test.hexSearchCancellation', 'Hex search cancellation regression', vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true },
+    );
+    const deliveryId = 'browser-search-cancellation';
+    let subscription: vscode.Disposable | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const trace: string[] = [];
+    try {
+        const html = buildHexViewerHtml('long-search.bin', result, panel.webview, deliveryId, {
+            unitSize: 1, endian: 'big', findMode: 'bytes',
+        });
+        const scriptTag = html.match(/<script nonce="[^"]+">/)?.[0];
+        assert.ok(scriptTag);
+        const observer = `${scriptTag}
+        (() => {
+            const api = acquireVsCodeApi();
+            window.acquireVsCodeApi = () => api;
+            window.addEventListener('error', event => api.postMessage({ command: 'testError', error: event.message }));
+            window.addEventListener('unhandledrejection', event => api.postMessage({ command: 'testError', error: String(event.reason) }));
+            window.addEventListener('message', event => {
+                if (event.data?.command !== 'testStartSearch') { return; }
+                const input = document.getElementById('findHexInput');
+                const mode = document.getElementById('findMode');
+                const info = document.getElementById('findInfo');
+                document.getElementById('findBtn').click();
+                input.value = 'A'.repeat(65536) + 'B';
+                mode.value = 'ascii';
+                // Changing mode starts the real search immediately. Its first
+                // yielded prefix-table chunk lets a new user input cancel it.
+                mode.dispatchEvent(new Event('change', { bubbles: true }));
+                api.postMessage({ command: 'testSearchStarted', info: info.textContent });
+                input.value = 'B';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                const finished = new MutationObserver(() => {
+                    if (info.textContent !== '1 / 1') { return; }
+                    finished.disconnect();
+                    api.postMessage({
+                        command: 'testSearchFinished', info: info.textContent,
+                        offset: document.querySelector('#hexBody .hex-cell.find-current')?.dataset.offset,
+                        status: document.getElementById('statusBar').textContent,
+                        input: input.value,
+                        rows: document.querySelectorAll('#hexBody .hex-row').length,
+                    });
+                });
+                finished.observe(info, { childList: true, characterData: true, subtree: true });
+                setTimeout(() => api.postMessage({
+                    command: 'testSearchCancelled', info: info.textContent,
+                    current: document.querySelector('#hexBody .find-current')?.dataset.offset,
+                }), 0);
+            });
+        })();
+        </script>`;
+        await new Promise<void>((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Hex search cancellation timed out: ' + trace.join(', '))), 20000);
+            subscription = panel.webview.onDidReceiveMessage(message => {
+                trace.push(message.command);
+                try {
+                    if (message.command === 'testError') { throw new Error(message.error); }
+                    if (message.command === 'ready') {
+                        postHexViewerData(panel.webview, result, undefined, deliveryId);
+                    } else if (message.command === 'dataReceived') {
+                        void panel.webview.postMessage({ command: 'testStartSearch' });
+                    } else if (message.command === 'testSearchStarted') {
+                        assert.strictEqual(message.info, buildHexViewerStrings().finding);
+                    } else if (message.command === 'testSearchCancelled') {
+                        assert.strictEqual(message.info, '', '새 입력의 debounce 전에 취소된 검색 결과가 표시됐다');
+                        assert.strictEqual(message.current, undefined);
+                    } else if (message.command === 'testSearchFinished') {
+                        assert.ok(trace.includes('testSearchCancelled'), '취소 확인 전에 검색이 완료됐다');
+                        assert.strictEqual(message.info, '1 / 1');
+                        assert.strictEqual(message.input, 'B');
+                        assert.strictEqual(message.offset, String(bytes.length - 1), '이전 긴 검색이 최신 검색의 선택을 덮었다');
+                        assert.match(message.status, /0x000FFFFF/);
+                        assert.ok(message.rows > 0 && message.rows < bytes.length / 16);
+                        resolve();
+                    }
+                } catch (error) { reject(error); }
+            });
+            panel.webview.html = html.replace(scriptTag, observer + scriptTag);
+        });
+    } finally {
+        clearTimeout(timer);
+        subscription?.dispose();
+        panel.dispose();
+    }
+}
+
 suite('Hex Viewer 실제 브라우저 초기화', () => {
+    test('IT-227: 긴 패턴 검색을 새 입력으로 취소하고 최신 검색의 마지막 바이트만 선택한다', async function () {
+        this.timeout(25000);
+        await checkBrowserSearchCancellation();
+    });
+
     test('IT-223: 가상 스크롤 끝의 불완전 단위를 키보드·검색으로 표시하고 실제 바이트만 복사한다', async function () {
         this.timeout(25000);
         await checkBrowserNavigation();

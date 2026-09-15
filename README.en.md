@@ -61,66 +61,66 @@
 
 Generate a sensor data binary, verify it, and archive it in one action, with output and run history in view. [Runnable example](examples/sensor_pipeline/README.md)
 
-![TaskHub Build → Verify → ZIP action with output and History](docs/images/workflow-overview.jpg)
+![TaskHub Build → Verify → ZIP action with output and History](docs/images/workflow-overview.webp)
 
 ### Memory Map — Usage and region details
 
 Inspect Flash and RAM usage from an ARM Linker Listing, then expand a region to see its sections and functions.
 
-![Flash and RAM usage with an expanded memory region](docs/images/memory-map-detail.jpg)
+![Flash and RAM usage with an expanded memory region](docs/images/memory-map-detail.webp)
 
 ### Register Decoder — Read register values
 
 Hover over `UartCtrlReg uart_ctrl = 0x30B` to read fields such as `tx_en`, `rx_en`, and `baud_sel`.
 
-![Hover decoding 0x30B into UartCtrlReg bit fields](docs/images/hover-register-decoder.jpg)
+![Hover decoding 0x30B into UartCtrlReg bit fields](docs/images/hover-register-decoder.webp)
 
 ### Hex/Text — Conversion, saved values, and bitwise calculations
 
 Convert `TaskHub` to Hex and save reusable values. Calculate a 64-bit mask such as `0x123456789ABCDEF0 & 0xFFFF` in the same view.
 
-![Hex/Text Converter showing TaskHub text as Hex bytes and saved values](docs/images/hex-text-converter.jpg)
+![Hex/Text Converter showing TaskHub text as Hex bytes and saved values](docs/images/hex-text-converter.webp)
 
-![64-bit mask expression with Hex, Decimal, and Binary results](docs/images/hex-bitwise-calculator.jpg)
+![64-bit mask expression with Hex, Decimal, and Binary results](docs/images/hex-bitwise-calculator.webp)
 
 ### Struct Size — Size and padding
 
 Check the estimated size, member offsets, and padding of `PacketHeader` directly in the editor.
 
-![Hover showing estimated PacketHeader size, member offsets, and padding](docs/images/hover-struct-size.jpg)
+![Hover showing estimated PacketHeader size, member offsets, and padding](docs/images/hover-struct-size.webp)
 
 ### JSON Editor — Edit device settings
 
 View and edit device names, addresses, enabled states, and tags from `devices.json` in a table.
 
-![JSON Editor showing device names, addresses, enabled states, and tags](docs/images/json-editor-devices.jpg)
+![JSON Editor showing device names, addresses, enabled states, and tags](docs/images/json-editor-devices.webp)
 
 <details>
 <summary>More feature examples</summary>
 
 **Quick Action Palette** — Search recent runs and all available actions.
 
-![Quick Action Palette showing recent runs and action search](docs/images/quick-action-palette.png)
+![Quick Action Palette showing recent runs and action search](docs/images/quick-action-palette.webp)
 
 **Problem Matcher** — View build diagnostics in the Problems panel.
 
-![Build diagnostics in the Problems panel](docs/images/problem-matcher.png)
+![Build diagnostics in the Problems panel](docs/images/problem-matcher.webp)
 
 **Number Base Hover** — Inspect number base conversions and bit information.
 
-![Hover showing number base conversions and bit information](docs/images/hover-number-base.png)
+![Hover showing number base conversions and bit information](docs/images/hover-number-base.webp)
 
 **SFR Bit Field Hover** — Inspect bit positions, access types, and reset values.
 
-![Hover showing register bit field information](docs/images/hover-sfr-bit-field.png)
+![Hover showing register bit field information](docs/images/hover-sfr-bit-field.webp)
 
 **Macro Expansion Hover** — Read the final expansion of a `#define` macro.
 
-![Hover showing the final macro expansion](docs/images/hover-macro-expansion.png)
+![Hover showing the final macro expansion](docs/images/hover-macro-expansion.webp)
 
 **Hex Viewer** — Inspect binary addresses, Hex bytes, and ASCII together.
 
-![Hex Viewer displaying sample_binary.bin](docs/images/hex-viewer.png)
+![Hex Viewer displaying sample_binary.bin](docs/images/hex-viewer.webp)
 
 </details>
 

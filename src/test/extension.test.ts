@@ -1598,6 +1598,21 @@ suite('Extension Test Suite', () => {
 	 * 그 근거가 실제로 참이어야 면제가 정당해진다.
 	 */
 	suite('savedInputStillValid', () => {
+		test('저장값은 현재 대화형 태스크의 결과 구조를 만족해야 한다', () => {
+			for (const type of ['inputBox', 'envPick', 'fileDialog', 'folderDialog', 'pathDialog', 'quickPick', 'confirm']) {
+				assert.strictEqual(savedInputStillValid({ type }, undefined), false, type);
+				assert.strictEqual(savedInputStillValid({ type }, []), false, type);
+			}
+			assert.strictEqual(savedInputStillValid({ type: 'confirm' }, { value: 'release' }), false);
+			assert.strictEqual(savedInputStillValid({ type: 'confirm' }, { confirmed: false }), false);
+			assert.strictEqual(savedInputStillValid({ type: 'confirm' }, { confirmed: 'true' }), true);
+			assert.strictEqual(savedInputStillValid({ type: 'confirm' }, Object.create({ confirmed: 'true' })), false);
+			assert.strictEqual(savedInputStillValid({ type: 'inputBox' }, { value: 1 }), false);
+			assert.strictEqual(savedInputStillValid({ type: 'envPick' }, { path: '/tmp' }), false);
+			assert.strictEqual(savedInputStillValid({ type: 'folderDialog' }, { value: 'release' }), false);
+			assert.strictEqual(savedInputStillValid({ type: 'fileDialog' }, { path: '/tmp/file', paths: [42] }), false);
+			assert.strictEqual(savedInputStillValid({ type: 'quickPick', itemsFromCommand: 'list' }, { value: { bad: true } }), false);
+		});
 		test('현재 패턴을 만족하지 않는 저장값은 거부한다', () => {
 			const task = { type: 'inputBox', validatePattern: '^[A-Za-z_][A-Za-z0-9_]*$' };
 			assert.strictEqual(savedInputStillValid(task, { value: 'PATH' }), true);
@@ -4736,8 +4751,14 @@ suite('Extension Test Suite', () => {
 		test('IT-190b: 기본 재실행은 새 입력을 받고 저장 입력 명령만 기록값을 재사용한다', () => {
 			const entry = makeEntry('rerun-inputs', 'success', 1);
 			entry.inputs = { target: { value: 'saved' } };
+			entry.inputTaskTypes = { target: 'inputBox' };
+			const tasks = [{ id: 'target', type: 'inputBox' } as const];
 			assert.strictEqual(selectHistoryRerunInputs(entry, false), undefined);
-			assert.strictEqual(selectHistoryRerunInputs(entry, true), entry.inputs);
+			assert.deepStrictEqual({ ...selectHistoryRerunInputs(entry, true, tasks) }, entry.inputs);
+			assert.strictEqual(selectHistoryRerunInputs(entry, true, [{ id: 'target', type: 'confirm' }]), undefined);
+			assert.strictEqual(selectHistoryRerunInputs(entry, true, [{ id: 'target', type: 'inputBox', password: true }]), undefined);
+			delete entry.inputTaskTypes;
+			assert.strictEqual(selectHistoryRerunInputs(entry, true, tasks), undefined, '타입을 모르는 이전 입력은 다시 묻는다');
 		});
 
 		test('IT-192: Actions 제목 표시줄에서 전체 액션 검색을 바로 연다', () => {

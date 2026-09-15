@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { RECOVERY_STATE_KEY, jsonPanelRegistry, openJsonEditorFile } from '../jsonEditor';
+import { JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE, RECOVERY_STATE_KEY, ROOT_ARRAY_KEY, jsonPanelRegistry, openJsonEditorFile } from '../jsonEditor';
 
 /**
  * JSON Editor의 **실제 진입점**을 실행하는 테스트 (0.6.47).
@@ -22,12 +22,17 @@ import { RECOVERY_STATE_KEY, jsonPanelRegistry, openJsonEditorFile } from '../js
  */
 suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
     this.timeout(20000);
+    // tsc의 import * namespace는 getter-only다. 실제 CommonJS 모듈을 바꿔야
+    // 제품 코드의 namespace getter도 모킹한 함수를 조회한다.
+    const mutableFs = require('fs') as typeof fs;
 
     let tempDir: string;
     let originalCreateWebviewPanel: typeof vscode.window.createWebviewPanel;
     let originalShowError: typeof vscode.window.showErrorMessage;
     let originalShowInfo: typeof vscode.window.showInformationMessage;
     const shownErrors: string[] = [];
+    const errorPrompts: { message: string; buttons: string[] }[] = [];
+    let errorAnswer: number | undefined;
     const shownWarnings: string[] = [];
     let originalShowWarning: typeof vscode.window.showWarningMessage;
     const infoPrompts: { message: string; buttons: string[] }[] = [];
@@ -163,6 +168,8 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         originalShowInfo = vscode.window.showInformationMessage;
         originalShowWarning = vscode.window.showWarningMessage;
         shownErrors.length = 0;
+        errorPrompts.length = 0;
+        errorAnswer = undefined;
         shownWarnings.length = 0;
         infoPrompts.length = 0;
         infoAnswer = undefined;
@@ -170,9 +177,11 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             shownWarnings.push(message);
             return Promise.resolve(undefined);
         };
-        (vscode.window as any).showErrorMessage = (message: string) => {
+        (vscode.window as any).showErrorMessage = (message: string, ...rest: unknown[]) => {
             shownErrors.push(message);
-            return Promise.resolve(undefined);
+            const buttons = rest.filter((r): r is string => typeof r === 'string');
+            errorPrompts.push({ message, buttons });
+            return Promise.resolve(errorAnswer === undefined ? undefined : buttons[errorAnswer]);
         };
         (vscode.window as any).showInformationMessage = (message: string, ...rest: unknown[]) => {
             const buttons = rest.filter((r): r is string => typeof r === 'string');
@@ -321,6 +330,311 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         await openJsonEditorFile(makeContext(), filePath);
 
         assert.ok(shownErrors.length > 0, '파싱 실패를 알리지 않았다');
+    });
+
+    test('손실되는 숫자가 있는 파일은 복구본이 있어도 열지 않고 원문을 보존한다', async () => {
+        for (const token of ['9007199254740993', '1e400', '1e-400', '0.1234567890123456789']) {
+            const fake = installFakePanel();
+            const filePath = path.join(tempDir, 'number.json');
+            const original = '{"rows":[{"id":' + token + '}]}';
+            fs.writeFileSync(filePath, original);
+            const stat = fs.statSync(filePath);
+            const recovery = { data: { rows: [{ id: 1 }] }, fileMtimeMs: stat.mtimeMs, fileSize: stat.size, capturedAt: Date.now(), isRootArray: false };
+            infoAnswer = 0;
+            const ctx = makeContext({ [RECOVERY_STATE_KEY]: { [filePath]: recovery } });
+            await openJsonEditorFile(ctx, filePath);
+            assert.ok(!fake.events.includes('create-panel'));
+            assert.match(shownErrors.at(-1) ?? '', /정확하게 보존|preserved exactly/);
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), original);
+            assert.deepStrictEqual(readRecoveryEntry(ctx, filePath), recovery);
+            jsonPanelRegistry.clear();
+        }
+    });
+
+    test('지원 불가 숫자의 복구본과 저장 메시지는 원본 숫자를 덮어쓰지 않는다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('numeric-message.json', { rows: [{ id: 1 }] });
+        const original = fs.readFileSync(filePath, 'utf8');
+        const stat = fs.statSync(filePath);
+        const recovery = { data: { rows: [{ id: Number.MAX_SAFE_INTEGER + 1 }] }, fileMtimeMs: stat.mtimeMs, fileSize: stat.size, capturedAt: Date.now(), isRootArray: false };
+        const ctx = makeContext({ [RECOVERY_STATE_KEY]: { [filePath]: recovery } });
+        infoAnswer = 0;
+        await openJsonEditorFile(ctx, filePath);
+        assert.strictEqual(jsonPanelRegistry.isDirty(), false);
+        assert.match(shownErrors.at(-1) ?? '', /정확하게 보존|preserved exactly/);
+        assert.deepStrictEqual(readRecoveryEntry(ctx, filePath), recovery, '읽지 못한 복구본을 삭제하지 않는다');
+        for (const number of [NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+            await fake.send({ command: 'save', data: { rows: [{ id: number }] }, seq: 1 });
+            assert.strictEqual(fake.posted.at(-1)?.success, false);
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), original);
+        }
+    });
+
+    test('외부 숫자 변경 후 다시 읽기와 저장은 원문을 보존한다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('numeric-reload.json', { rows: [{ id: 1 }] });
+        await openJsonEditorFile(makeContext(), filePath);
+        const external = '{"rows":[{"id":9007199254740993}]}';
+        fs.writeFileSync(filePath, external);
+        await fake.send({ command: 'reload' });
+        assert.ok(!fake.posted.some(message => message.command === 'loadData'));
+        assert.ok(fake.posted.some(message => message.command === 'markBaselineUnknown'));
+        assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+        await fake.send({ command: 'save', data: { rows: [{ id: 2 }] }, seq: 9 });
+        assert.strictEqual(fake.posted.at(-1)?.success, false);
+        assert.strictEqual(fs.readFileSync(filePath, 'utf8'), external);
+        assert.match(shownErrors.at(-1) ?? '', /정확하게 보존|preserved exactly/);
+    });
+
+    test('직접 저장한 뒤 외부에서 바뀐 파일은 다시 검사하고 너무 크면 원문을 읽지 않고 저장을 중단한다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-check-cache.json', { rows: [{ id: 1 }] });
+        await openJsonEditorFile(makeContext(), filePath);
+        await fake.send({ command: 'save', data: { rows: [{ id: 2 }] }, seq: 1 });
+        assert.strictEqual(fake.posted.at(-1)?.success, true);
+        await fake.send({ command: 'save', data: { rows: [{ id: 3 }] }, seq: 2 });
+        assert.strictEqual(fake.posted.at(-1)?.success, true, '직접 쓴 상태 그대로인 파일은 연속 저장된다');
+
+        // 직접 저장한 기록이 남아 있어도 외부 변경은 검사를 통과하지 못한다.
+        const external = '{"rows":[{"id":9007199254740993}]}';
+        fs.writeFileSync(filePath, external);
+        await fake.send({ command: 'save', data: { rows: [{ id: 4 }] }, seq: 3 });
+        assert.strictEqual(fake.posted.at(-1)?.success, false);
+        assert.strictEqual(fs.readFileSync(filePath, 'utf8'), external);
+
+        const fd = fs.openSync(filePath, 'r+');
+        fs.ftruncateSync(fd, JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE + 1);
+        fs.closeSync(fd);
+        const originalRead = fs.readFileSync;
+        let reads = 0;
+        (mutableFs as any).readFileSync = (target: unknown, ...args: unknown[]) => {
+            if (target === filePath) { reads++; }
+            return (originalRead as any)(target, ...args);
+        };
+        try {
+            await fake.send({ command: 'save', data: { rows: [{ id: 5 }] }, seq: 4 });
+        } finally {
+            (mutableFs as any).readFileSync = originalRead;
+        }
+        assert.strictEqual(fake.posted.at(-1)?.success, false);
+        assert.strictEqual(reads, 0, '64MB를 넘는 외부 원문은 읽기 전에 거부한다');
+        assert.match(shownErrors.at(-1) ?? '', /너무 커서|too large/);
+        assert.strictEqual(fs.statSync(filePath).size, JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE + 1);
+    });
+
+    test('본인이 쓴 파일만 재읽기를 생략하고 다시 열면 저장 검사를 새로 시작한다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-cache-reads.json', { rows: [{ id: 1 }] });
+        const ctx = makeContext();
+        await openJsonEditorFile(ctx, filePath);
+        const originalRead = fs.readFileSync;
+        let reads = 0;
+        (mutableFs as any).readFileSync = (target: unknown, ...args: unknown[]) => {
+            if (target === filePath) { reads++; }
+            return (originalRead as any)(target, ...args);
+        };
+        try {
+            await fake.send({ command: 'save', data: { rows: [{ id: 2 }] }, seq: 1 });
+            assert.strictEqual(fake.posted.at(-1)?.success, true);
+            assert.strictEqual(reads, 1, '첫 저장은 원문을 검사한다');
+            reads = 0;
+            await fake.send({ command: 'save', data: { rows: [{ id: 3 }] }, seq: 2 });
+            assert.strictEqual(fake.posted.at(-1)?.success, true);
+            assert.strictEqual(reads, 0, '직접 쓴 상태 그대로면 인증용 재읽기도 하지 않는다');
+            await fake.send({ command: 'saveAck', seq: 2, dirty: false });
+
+            await openJsonEditorFile(ctx, filePath);
+            reads = 0;
+            await fake.send({ command: 'save', data: { rows: [{ id: 4 }] }, seq: 1 });
+            assert.strictEqual(fake.posted.at(-1)?.success, true);
+            assert.strictEqual(reads, 1, '이전 열기의 캐시를 새 세션으로 넘기지 않는다');
+        } finally {
+            (mutableFs as any).readFileSync = originalRead;
+        }
+    });
+
+    test('같은 크기와 mtime을 유지한 외부 숫자 변경도 저장 캐시를 무효화한다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-cache-restored-mtime.json', { rows: [] });
+        const ctx = makeContext();
+        await openJsonEditorFile(ctx, filePath);
+        const saved = { rows: [{ id: 1, label: '9007199254740993' }] };
+        const originalWrite = fs.writeFileSync;
+        const stamp = 1_700_000_000;
+        // FS의 sub-ms 시간을 utimes로 복원할 때 반올림되어 검사가 우연히
+        // 실패하지 않도록, 최초 저장 시각부터 정확한 초 단위로 고정한다.
+        (mutableFs as any).writeFileSync = (target: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+            (originalWrite as any)(target, ...args);
+            if (typeof target === 'number') { fs.futimesSync(target, stamp, stamp); }
+            else if (target === filePath) { fs.utimesSync(filePath, stamp, stamp); }
+        };
+        try {
+            await fake.send({ command: 'save', data: saved, seq: 1 });
+        } finally {
+            (mutableFs as any).writeFileSync = originalWrite;
+        }
+        assert.strictEqual(fake.posted.at(-1)?.success, true);
+        const before = fs.statSync(filePath, { bigint: true });
+        const external = (JSON.stringify(saved, null, 2) + '\n')
+            .replace('"id": 1,', '"id": 9007199254740993,')
+            .replace('"label": "9007199254740993"', '"label": "1"');
+        fs.writeFileSync(filePath, external);
+        fs.utimesSync(filePath, stamp, stamp);
+        const after = fs.statSync(filePath, { bigint: true });
+        assert.strictEqual(after.size, before.size);
+        assert.strictEqual(after.mtimeNs, before.mtimeNs);
+
+        await fake.send({ command: 'modified', value: true });
+        await fake.send({ command: 'snapshot', data: saved });
+        await fake.send({ command: 'save', data: saved, seq: 2 });
+        assert.strictEqual(fake.posted.at(-1)?.success, false);
+        assert.match(shownErrors.at(-1) ?? '', /정확하게 보존|preserved exactly/);
+        assert.strictEqual(fs.readFileSync(filePath, 'utf8'), external);
+        assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+        fake.disposePanel();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepStrictEqual((readRecoveryEntry(ctx, filePath) as any)?.data, saved);
+    });
+
+    test('쓰기 후 path stat 전에 바뀐 외부 파일을 직접 저장한 버전으로 등록하지 않는다', async () => {
+        for (const replace of [false, true]) {
+            const fake = installFakePanel();
+            const filePath = writeJson(`save-cache-race-${replace}.json`, { rows: [] });
+            const ctx = makeContext();
+            await openJsonEditorFile(ctx, filePath);
+            const saved = { rows: [{ id: 1, label: '9007199254740993' }] };
+            const external = (JSON.stringify(saved, null, 2) + '\n')
+                .replace('"id": 1,', '"id": 9007199254740993,')
+                .replace('"label": "9007199254740993"', '"label": "1"');
+            const originalWrite = fs.writeFileSync;
+            const originalStat = fs.statSync;
+            const stamp = 1_700_000_000;
+            let ownWriteFinished = false;
+            let changed = false;
+            (mutableFs as any).writeFileSync = (target: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+                (originalWrite as any)(target, ...args);
+                if (typeof target === 'number') { fs.futimesSync(target, stamp, stamp); }
+                else if (target === filePath) { fs.utimesSync(filePath, stamp, stamp); }
+                ownWriteFinished = true;
+            };
+            (mutableFs as any).statSync = (target: fs.PathLike, ...args: unknown[]) => {
+                if (target === filePath && ownWriteFinished && !changed) {
+                    changed = true;
+                    if (replace) { fs.renameSync(filePath, `${filePath}.previous`); }
+                    originalWrite(filePath, external);
+                    fs.utimesSync(filePath, stamp, stamp);
+                }
+                return (originalStat as any)(target, ...args);
+            };
+            try {
+                await fake.send({ command: 'save', data: saved, seq: 1 });
+            } finally {
+                (mutableFs as any).writeFileSync = originalWrite;
+                (mutableFs as any).statSync = originalStat;
+            }
+            assert.strictEqual(changed, true, '쓰기 후 stat 직전에 외부 변경을 재현해야 한다');
+            assert.strictEqual(fake.posted.at(-1)?.success, true, '완료된 쓰기 자체의 성공은 유지한다');
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), external);
+            await fake.send({ command: 'modified', value: true });
+            await fake.send({ command: 'snapshot', data: saved });
+            await fake.send({ command: 'save', data: saved, seq: 2 });
+            assert.strictEqual(fake.posted.at(-1)?.success, false, '외부 버전을 캐시에 등록해 숫자 검사를 건너뛰면 안 된다');
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), external);
+            assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+            fake.disposePanel();
+            await new Promise(resolve => setImmediate(resolve));
+            assert.deepStrictEqual((readRecoveryEntry(ctx, filePath) as any)?.data, saved);
+            jsonPanelRegistry.clear();
+        }
+    });
+
+    test('자동 다시 읽기와 현재 편집 유지도 외부 숫자의 손실을 차단한다', async () => {
+        const originalWatcher = vscode.workspace.createFileSystemWatcher;
+        let change!: (uri: vscode.Uri) => Promise<void>;
+        (vscode.workspace as any).createFileSystemWatcher = () => ({
+            onDidChange(callback: typeof change) { change = callback; return { dispose() {} }; },
+            onDidCreate() { return { dispose() {} }; },
+            onDidDelete() { return { dispose() {} }; },
+            dispose() {},
+        });
+        try {
+            for (const dirty of [false, true]) {
+                const fake = installFakePanel();
+                const filePath = writeJson('numeric-watch.json', { rows: [{ id: 1 }] });
+                await openJsonEditorFile(makeContext(), filePath);
+                if (dirty) { await fake.send({ command: 'modified', value: true }); }
+                const external = '{"rows":[{"id":1e400}]}';
+                fs.writeFileSync(filePath, external);
+                await change(vscode.Uri.file(filePath));
+                assert.ok(fake.posted.some(message => message.command === 'markBaselineUnknown'));
+                assert.ok(!fake.posted.some(message => ['loadData', 'setSavedBaseline'].includes(message.command)));
+                await fake.send({ command: 'save', data: { rows: [{ id: 2 }] }, seq: 4 });
+                assert.strictEqual(fake.posted.at(-1)?.success, false);
+                assert.strictEqual(fs.readFileSync(filePath, 'utf8'), external);
+                jsonPanelRegistry.clear();
+            }
+        } finally {
+            (vscode.workspace as any).createFileSystemWatcher = originalWatcher;
+        }
+    });
+
+    test('12MB 외부 파일에서 현재 편집 유지 후 저장하며 뒤쪽의 손실 숫자는 거부한다', async () => {
+        const originalWatcher = vscode.workspace.createFileSystemWatcher;
+        const originalWarning = vscode.window.showWarningMessage;
+        let change!: (uri: vscode.Uri) => Promise<void>;
+        let keepSelections = 0;
+        (vscode.workspace as any).createFileSystemWatcher = () => ({
+            onDidChange(callback: typeof change) { change = callback; return { dispose() {} }; },
+            onDidCreate() { return { dispose() {} }; },
+            onDidDelete() { return { dispose() {} }; },
+            dispose() {},
+        });
+        (vscode.window as any).showWarningMessage = (message: string, ...rest: unknown[]) => {
+            shownWarnings.push(message);
+            const keep = rest.find((item): item is string => typeof item === 'string' && /현재 편집 유지|Keep current edits/.test(item));
+            if (keep) { keepSelections++; }
+            return Promise.resolve(keep);
+        };
+        try {
+            for (const [number, success] of [['1', true], ['0.1234567890123456789', false]] as const) {
+                const fake = installFakePanel();
+                const filePath = writeJson('large-external-keep.json', { rows: [{ id: 1 }] });
+                const ctx = makeContext();
+                await openJsonEditorFile(ctx, filePath);
+                const edited = { rows: [{ id: 2 }] };
+                await fake.send({ command: 'modified', value: true });
+                await fake.send({ command: 'snapshot', data: edited });
+                // 위험 숫자를 10MB 뒤에 두어 저장 전 숫자 검사가 파일 전체를
+                // 대상으로 하는지 검증한다. 큰 원문도 안전한 경우에는 저장한다.
+                const external = '{"padding":"' + 'x'.repeat(12 * 1024 * 1024) + '","rows":[{"id":' + number + '}]}';
+                fs.writeFileSync(filePath, external);
+                const beforeKeep = keepSelections;
+                await change(vscode.Uri.file(filePath));
+                assert.strictEqual(keepSelections, beforeKeep + 1);
+                assert.ok(fake.posted.some(message => message.command === 'markBaselineUnknown'));
+                assert.ok(!fake.posted.some(message => ['loadData', 'setSavedBaseline'].includes(message.command)));
+                assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+                assert.deepStrictEqual((readRecoveryEntry(ctx, filePath) as any)?.data, edited);
+
+                await fake.send({ command: 'save', data: edited, seq: 1 });
+                assert.strictEqual(fake.posted.at(-1)?.success, success);
+                if (success) {
+                    assert.deepStrictEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), edited);
+                    await fake.send({ command: 'saveAck', seq: 1, dirty: false });
+                    assert.strictEqual(jsonPanelRegistry.isDirty(), false);
+                    assert.strictEqual(readRecoveryEntry(ctx, filePath), undefined);
+                } else {
+                    assert.match(shownErrors.at(-1) ?? '', /정확하게 보존|preserved exactly/);
+                    assert.strictEqual(fs.readFileSync(filePath, 'utf8'), external);
+                    assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+                    assert.deepStrictEqual((readRecoveryEntry(ctx, filePath) as any)?.data, edited);
+                }
+                jsonPanelRegistry.clear();
+            }
+        } finally {
+            (vscode.workspace as any).createFileSystemWatcher = originalWatcher;
+            (vscode.window as any).showWarningMessage = originalWarning;
+        }
     });
 
     /**
@@ -535,6 +849,81 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
      * baseline 으로 되찾으려면 호스트가 요청 번호를 그대로 돌려줘야 한다.
      */
     suite('저장 응답 (saveResult) 계약', () => {
+        test('루트 배열은 원래 탭 들여쓰기와 개행을 보존하며 10MB를 넘어도 저장한다', async () => {
+            const fake = installFakePanel();
+            const filePath = path.join(tempDir, 'save-exact-size.json');
+            fs.writeFileSync(filePath, JSON.stringify([{ text: '' }], null, '\t') + '\n');
+            const ctx = makeContext();
+            await openJsonEditorFile(ctx, filePath);
+            const limit = 10 * 1024 * 1024;
+            const overhead = Buffer.byteLength(JSON.stringify([{ text: '' }], null, '\t') + '\n', 'utf8');
+            const atLimit = [{ text: 'x'.repeat(limit - overhead) }];
+            await fake.send({ command: 'modified', value: true });
+            await fake.send({ command: 'save', data: { [ROOT_ARRAY_KEY]: atLimit }, seq: 1 });
+            assert.strictEqual(fake.posted.at(-1)?.success, true);
+            const written = fs.readFileSync(filePath, 'utf8');
+            assert.strictEqual(Buffer.byteLength(written, 'utf8'), limit);
+            assert.strictEqual(written, JSON.stringify(atLimit, null, '\t') + '\n');
+            await fake.send({ command: 'saveAck', seq: 1, dirty: false });
+
+            await fake.send({ command: 'modified', value: true });
+            const overLimit = [{ text: atLimit[0].text + 'x' }];
+            await fake.send({ command: 'save', data: { [ROOT_ARRAY_KEY]: overLimit }, seq: 2 });
+            assert.strictEqual(fake.posted.at(-1)?.success, true, '열기 크기 제한을 저장에 적용하지 않는다');
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), JSON.stringify(overLimit, null, '\t') + '\n');
+            assert.strictEqual(fs.statSync(filePath).size, limit + 1);
+            await fake.send({ command: 'saveAck', seq: 2, dirty: false });
+            assert.strictEqual(jsonPanelRegistry.isDirty(), false);
+        });
+
+        test('10MB를 넘는 UTF-8 첫 저장 이후 더 큰 내용도 연속 저장할 수 있다', async () => {
+            const fake = installFakePanel();
+            const filePath = writeJson('save-size.json', { rows: [] });
+            const ctx = makeContext();
+            await openJsonEditorFile(ctx, filePath);
+            const limit = 10 * 1024 * 1024;
+            const overhead = Buffer.byteLength(JSON.stringify({ rows: [{ text: '' }] }, null, 2) + '\n', 'utf8');
+            const edited = { rows: [{ text: '가'.repeat(Math.floor((limit - overhead) / 3) + 1) }] };
+            assert.ok(Buffer.byteLength(JSON.stringify(edited), 'utf8') < limit, '들여쓰기 전에는 한도 이내다');
+            assert.ok(Buffer.byteLength(JSON.stringify(edited, null, 2) + '\n', 'utf8') > limit);
+            await fake.send({ command: 'modified', value: true });
+            await fake.send({ command: 'snapshot', data: edited });
+            await fake.send({ command: 'save', data: edited, seq: 1 });
+
+            assert.strictEqual(fake.posted.at(-1)?.success, true, '첫 저장 결과가 10MB를 넘더라도 저장해야 한다');
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), edited);
+            assert.ok(fs.statSync(filePath).size > limit);
+            await fake.send({ command: 'saveAck', seq: 1, dirty: false });
+            assert.strictEqual(jsonPanelRegistry.isDirty(), false);
+            assert.strictEqual(readRecoveryEntry(ctx, filePath), undefined);
+
+            const larger = { rows: [{ text: edited.rows[0].text + '다음 편집' }] };
+            await fake.send({ command: 'modified', value: true });
+            await fake.send({ command: 'snapshot', data: larger });
+            await fake.send({ command: 'save', data: larger, seq: 2 });
+            assert.strictEqual(fake.posted.at(-1)?.success, true, '이미 10MB를 넘는 파일에도 연속 저장할 수 있어야 한다');
+            const largeText = fs.readFileSync(filePath, 'utf8');
+            assert.deepStrictEqual(JSON.parse(largeText), larger);
+            await fake.send({ command: 'saveAck', seq: 2, dirty: false });
+            assert.strictEqual(jsonPanelRegistry.isDirty(), false);
+
+            // 큰 저장 데이터에도 숫자 정밀도 검사는 그대로 적용된다.
+            await fake.send({ command: 'modified', value: true });
+            await fake.send({ command: 'save', data: { ...larger, id: Number.MAX_SAFE_INTEGER + 1 }, seq: 3 });
+            assert.strictEqual(fake.posted.at(-1)?.success, false);
+            assert.match(shownErrors.at(-1) ?? '', /정확하게 보존|preserved exactly/);
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), largeText);
+            await fake.send({ command: 'saveAck', seq: 3, dirty: true });
+            const smaller = { rows: [{ text: '줄인 편집' }] };
+            await fake.send({ command: 'snapshot', data: smaller });
+            await fake.send({ command: 'save', data: smaller, seq: 4 });
+            assert.strictEqual(fake.posted.at(-1)?.success, true);
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), smaller);
+            await fake.send({ command: 'saveAck', seq: 4, dirty: false });
+            assert.strictEqual(jsonPanelRegistry.isDirty(), false);
+            assert.strictEqual(readRecoveryEntry(ctx, filePath), undefined);
+        });
+
         function lastSaveResult(fake: { posted: any[] }): any {
             const hits = fake.posted.filter(m => m && m.command === 'saveResult');
             assert.ok(hits.length > 0, 'saveResult 를 보내지 않았다');
@@ -975,6 +1364,67 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             };
         }
 
+        test('오래된 지원 불가 숫자 복구본은 반복 오류 없이 보관한다', async () => {
+            installFakePanel();
+            const filePath = writeJson('stale-number-recovery.json', { rows: [{ id: 1 }] });
+            const seed = seedRecovery(filePath, { rows: [{ id: Number.MAX_SAFE_INTEGER + 1 }] });
+            seed[RECOVERY_STATE_KEY][filePath].fileMtimeMs -= 1000;
+            const ctx = makeContext(seed);
+            const recovery = seed[RECOVERY_STATE_KEY][filePath];
+            for (let count = 0; count < 2; count++) {
+                await openJsonEditorFile(ctx, filePath);
+                assert.deepStrictEqual(shownErrors, [], '제안하지 않을 오래된 복구본의 숫자 오류를 매번 알리면 안 된다');
+                assert.deepStrictEqual(infoPrompts, []);
+                assert.deepStrictEqual(readRecoveryEntry(ctx, filePath), recovery, '오래된 복구본도 자동 삭제하지 않는다');
+                assert.strictEqual(jsonPanelRegistry.isDirty(), false);
+            }
+        });
+
+        test('지원 불가 숫자 복구 알림을 닫으면 보관하고 명시적으로 버리면 다시 알리지 않는다', async () => {
+            installFakePanel();
+            const filePath = writeJson('invalid-number-recovery.json', { rows: [{ id: 1 }] });
+            const original = fs.readFileSync(filePath, 'utf8');
+            const seed = seedRecovery(filePath, { rows: [{ id: Number.MAX_SAFE_INTEGER + 1 }] });
+            const ctx = makeContext(seed);
+            await openJsonEditorFile(ctx, filePath);
+            assert.deepStrictEqual(readRecoveryEntry(ctx, filePath), seed[RECOVERY_STATE_KEY][filePath]);
+            assert.strictEqual(errorPrompts.length, 1);
+            assert.ok(errorPrompts[0].buttons.some(button => /버리기|Discard/.test(button)), '복구할 수 없는 스냅샷에 명시적 정리 경로가 필요하다');
+            assert.strictEqual(jsonPanelRegistry.isDirty(), false);
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), original);
+
+            errorAnswer = errorPrompts[0].buttons.findIndex(button => /버리기|Discard/.test(button));
+            await openJsonEditorFile(ctx, filePath);
+            assert.strictEqual(readRecoveryEntry(ctx, filePath), undefined);
+            const errorsBeforeReopen = shownErrors.length;
+            await openJsonEditorFile(ctx, filePath);
+            assert.strictEqual(shownErrors.length, errorsBeforeReopen, '버린 복구본의 오류가 다시 뜨면 안 된다');
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), original);
+        });
+
+        test('원본이 없는 지원 불가 숫자 복구본도 명시적 버리기로 해당 스냅샷만 지운다', async () => {
+            const fake = installFakePanel();
+            const filePath = writeJson('missing-invalid-recovery.json', { rows: [{ id: 1 }] });
+            const otherPath = writeJson('other-recovery.json', { rows: [] });
+            const seed = seedRecovery(filePath, { rows: [{ id: Number.MAX_SAFE_INTEGER + 1 }] });
+            const otherRecovery = seedRecovery(otherPath, { rows: [{ id: 2 }] })[RECOVERY_STATE_KEY][otherPath];
+            seed[RECOVERY_STATE_KEY][otherPath] = otherRecovery;
+            const ctx = makeContext(seed);
+            fs.unlinkSync(filePath);
+
+            await openJsonEditorFile(ctx, filePath);
+            assert.deepStrictEqual(readRecoveryEntry(ctx, filePath), seed[RECOVERY_STATE_KEY][filePath], '알림을 닫으면 유일한 복구본도 보존한다');
+            const prompt = errorPrompts.find(entry => entry.buttons.some(button => /버리기|Discard/.test(button)));
+            assert.ok(prompt, 'freshness를 생략하는 fallback도 명시적으로 정리할 수 있어야 한다');
+            errorAnswer = prompt.buttons.findIndex(button => /버리기|Discard/.test(button));
+            await openJsonEditorFile(ctx, filePath);
+
+            assert.strictEqual(readRecoveryEntry(ctx, filePath), undefined);
+            assert.deepStrictEqual(readRecoveryEntry(ctx, otherPath), otherRecovery);
+            assert.strictEqual(fs.existsSync(filePath), false);
+            assert.ok(!fake.events.includes('create-panel'));
+        });
+
         test('미저장 스냅샷이 있으면 복구를 제안한다', async () => {
             installFakePanel();
             const filePath = writeJson('recover.json', { rows: [{ a: 1 }] });
@@ -1097,6 +1547,38 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
                 infoPrompts.length, 1,
                 `크기 한도 초과에서 미저장 변경이 잠겼다: ${shownErrors.join(' / ')}`
             );
+        });
+
+        test('큰 원문의 복구본을 열어도 숫자 손실을 막고 안전한 큰 원문에는 저장한다', async () => {
+            const fake = installFakePanel();
+            const original = '{"rows":[{"id":9007199254740993}],"pad":"' + 'x'.repeat(11 * 1024 * 1024) + '"}';
+            const { filePath, ctx } = seedThenBreak('oversize-save.json', p2 => {
+                fs.writeFileSync(p2, original);
+            });
+            infoAnswer = 0;
+            await openJsonEditorFile(ctx, filePath);
+            const recovery = readRecoveryEntry(ctx, filePath);
+            const edited = { rows: [{ a: 'kept edits' }] };
+            await fake.send({ command: 'save', data: edited, seq: 1 });
+            assert.strictEqual(fake.posted.at(-1)?.success, false);
+            assert.match(shownErrors.at(-1) ?? '', /정확하게 보존|preserved exactly/);
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), original);
+            assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+            assert.deepStrictEqual(readRecoveryEntry(ctx, filePath), recovery);
+
+            // 원문을 줄여도 아직 정확히 보존할 수 없는 숫자가 있으면 보호한다.
+            const smallUnsafe = '{"rows":[{"id":9007199254740993}]}';
+            fs.writeFileSync(filePath, smallUnsafe);
+            await fake.send({ command: 'save', data: edited, seq: 2 });
+            assert.strictEqual(fake.posted.at(-1)?.success, false);
+            assert.match(shownErrors.at(-1) ?? '', /정확하게 보존|preserved exactly/);
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), smallUnsafe);
+            assert.deepStrictEqual(readRecoveryEntry(ctx, filePath), recovery);
+
+            fs.writeFileSync(filePath, '{"rows":[{"id":1}],"pad":"' + 'x'.repeat(12 * 1024 * 1024) + '"}');
+            await fake.send({ command: 'save', data: edited, seq: 3 });
+            assert.strictEqual(fake.posted.at(-1)?.success, true);
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), edited);
         });
 
         test('제안을 거절해도(Esc) 스냅샷은 남는다 — 신선도 불일치로 지우지 않는다', async () => {

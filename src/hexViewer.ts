@@ -1182,6 +1182,7 @@ function getWebviewContent(
 
     function hasDataRange(offset, size) {
         if (offset < 0 || offset + size > TOTAL_SIZE) { return false; }
+        if (IS_BINARY) { return true; }
         for (let i = 0; i < size; i++) {
             if (!hasData(offset + i)) { return false; }
         }
@@ -1813,23 +1814,53 @@ function getWebviewContent(
             return;
         }
         findInfo.textContent = S.finding;
-        for (let i = 0; i <= TOTAL_SIZE - bytes.length; i++) {
-            if (i > 0 && (i & 0x3FFFF) === 0) {
-                await new Promise(resolve => setTimeout(resolve, 0));
-                if (generation !== findGeneration) { return; }
+        // KMP는 긴 공통 접두사를 다시 비교하지 않아 파일+검색어 길이에
+        // 비례한다. 접두사 표를 만드는 동안에도 취소와 새 검색을 처리한다.
+        const matches = [];
+        if (bytes.length <= TOTAL_SIZE) {
+            const prefix = new Uint32Array(bytes.length);
+            let work = 0;
+            for (let i = 1, matched = 0; i < bytes.length; i++) {
+                while (matched > 0 && bytes[i] !== bytes[matched]) {
+                    matched = prefix[matched - 1];
+                    if ((++work & 0x3FFF) === 0) {
+                        await new Promise(resolve => setTimeout(resolve, 0));
+                        if (generation !== findGeneration) { return; }
+                    }
+                }
+                if (bytes[i] === bytes[matched]) { matched++; }
+                prefix[i] = matched;
+                if ((++work & 0x3FFF) === 0) {
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                    if (generation !== findGeneration) { return; }
+                }
             }
-            if (!hasDataRange(i, bytes.length)) { continue; }
-            let match = true;
-            // 끝에서 비교하면 00 … 00 01처럼 긴 공통 prefix를 가진
-            // no-match 검색이 첫 바이트부터 매번 다시 훑지 않는다.
-            for (let j = bytes.length - 1; j >= 0; j--) {
-                if (DATA[i + j] !== bytes[j]) { match = false; break; }
-            }
-            if (match) {
-                findMatches.push(i);
-                if (findMatches.length >= FIND_MAX_MATCHES) { break; }
+            for (let i = 0, matched = 0; i < TOTAL_SIZE; i++) {
+                if (!hasData(i)) {
+                    matched = 0;
+                } else {
+                    while (matched > 0 && DATA[i] !== bytes[matched]) {
+                        matched = prefix[matched - 1];
+                        if ((++work & 0x3FFF) === 0) {
+                            await new Promise(resolve => setTimeout(resolve, 0));
+                            if (generation !== findGeneration) { return; }
+                        }
+                    }
+                    if (DATA[i] === bytes[matched]) { matched++; }
+                    if (matched === bytes.length) {
+                        matches.push(i - bytes.length + 1);
+                        if (matches.length >= FIND_MAX_MATCHES) { break; }
+                        matched = prefix[matched - 1];
+                    }
+                }
+                if ((++work & 0x3FFF) === 0) {
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                    if (generation !== findGeneration) { return; }
+                }
             }
         }
+        if (generation !== findGeneration) { return; }
+        findMatches = matches;
         if (findMatches.length > 0) {
             findCurrentIdx = 0;
             goToFindMatch();
@@ -1861,15 +1892,24 @@ function getWebviewContent(
 
         const matchSet = new Set();
         const currentSet = new Set();
+        // Matches are sorted. Merge their visible portions so overlapping long
+        // patterns never revisit the same cell thousands of times.
+        let coveredUntil = visStartOff;
         for (let mi = 0; mi < findMatches.length; mi++) {
             const mOff = findMatches[mi];
-            if (mOff + bytes.length < visStartOff || mOff > visEndOff + BYTES_PER_ROW) { continue; }
-            for (let j = 0; j < bytes.length; j++) {
-                const off = mOff + j;
-                const unitOff = Math.floor(off / unitSize) * unitSize;
-                matchSet.add(unitOff);
-                if (mi === findCurrentIdx) { currentSet.add(unitOff); }
+            if (mOff >= visEndOff) { break; }
+            const end = Math.min(mOff + bytes.length, visEndOff, TOTAL_SIZE);
+            const start = Math.max(Math.floor(mOff / unitSize) * unitSize, coveredUntil);
+            for (let off = start; off < end; off += unitSize) {
+                matchSet.add(off);
             }
+            coveredUntil = Math.max(coveredUntil, Math.ceil(end / unitSize) * unitSize);
+        }
+        if (findCurrentIdx >= 0 && findCurrentIdx < findMatches.length) {
+            const currentOff = findMatches[findCurrentIdx];
+            const start = Math.max(Math.floor(currentOff / unitSize) * unitSize, visStartOff);
+            const end = Math.min(currentOff + bytes.length, visEndOff, TOTAL_SIZE);
+            for (let off = start; off < end; off += unitSize) { currentSet.add(off); }
         }
 
         hexBody.querySelectorAll('.hex-cell[data-offset]').forEach(el => {
@@ -1898,6 +1938,12 @@ function getWebviewContent(
     let findDebounceTimer;
     findHexInput.addEventListener('input', () => {
         clearTimeout(findDebounceTimer);
+        // Invalidate active work immediately, before the next debounce fires.
+        findGeneration++;
+        findMatches = [];
+        findCurrentIdx = -1;
+        findInfo.textContent = '';
+        applyFindHighlightsToVisible();
         findDebounceTimer = setTimeout(doFind, 250);
     });
     findModeSelect.addEventListener('change', () => {

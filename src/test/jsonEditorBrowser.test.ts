@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { jsonPanelRegistry, openJsonEditorFile } from '../jsonEditor';
+import { jsonPanelRegistry, openJsonEditorFile, RECOVERY_STATE_KEY } from '../jsonEditor';
 
 interface BrowserMessage {
     command: string;
@@ -76,6 +76,7 @@ async function withJsonBrowser(
         operate(operations: Array<Record<string, unknown>>): Promise<BrowserMessage>;
         waitFor(command: string, after?: number): Promise<BrowserMessage>;
     }) => Promise<void>,
+    options: { recoveryData?: unknown; expectedErrors?: RegExp[] } = {},
 ): Promise<void> {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-json-browser-'));
     const filePath = path.join(tempDir, '한글 설정.json');
@@ -112,7 +113,8 @@ async function withJsonBrowser(
     });
 
     try {
-        (vscode.window as any).showInformationMessage = () => Promise.resolve(undefined);
+        (vscode.window as any).showInformationMessage = (_message: string, ...buttons: unknown[]) =>
+            Promise.resolve(options.recoveryData === undefined ? undefined : buttons.find(button => typeof button === 'string'));
         (vscode.window as any).showErrorMessage = (message: string) => {
             errors.push(message);
             return Promise.resolve(undefined);
@@ -145,6 +147,12 @@ async function withJsonBrowser(
             });
         };
         const store = new Map<string, unknown>();
+        if (options.recoveryData !== undefined) {
+            const stat = fs.statSync(filePath);
+            store.set(RECOVERY_STATE_KEY, {
+                [filePath]: { data: options.recoveryData, fileMtimeMs: stat.mtimeMs, fileSize: stat.size, capturedAt: Date.now(), isRootArray: false },
+            });
+        }
         const extensionPath = path.resolve(__dirname, '..', '..');
         const context = {
             extensionPath,
@@ -169,7 +177,9 @@ async function withJsonBrowser(
             },
         });
         assert.strictEqual(browserError, undefined);
-        assert.deepStrictEqual(errors, [], '확장 호스트 저장 오류');
+        const expectedErrors = options.expectedErrors ?? [];
+        assert.strictEqual(errors.length, expectedErrors.length, `확장 호스트 저장 오류: ${errors.join(', ')}`);
+        expectedErrors.forEach((pattern, index) => assert.match(errors[index], pattern));
     } finally {
         panel?.dispose();
         jsonPanelRegistry.clear();
@@ -187,11 +197,12 @@ suite('JSON Editor 실제 브라우저 편집과 저장', function () {
     test('IT-219: 실제 번들로 root 배열을 열고 활성 셀을 저장해 문자열·특수문자·들여쓰기를 보존한다', async () => {
         const specialKey = '키 "<&>';
         const specialValue = '</script><div id="unexpected-injection">한글 & "값" 😀</div>';
-        const initial = [{ code: '001', count: 3, [specialKey]: specialValue }];
+        const initial = [{ code: '001', count: 3, [specialKey]: specialValue, ['__proto__']: { role: 'admin' } }];
         await withJsonBrowser(initial, async browser => {
             assert.strictEqual(browser.ready.dirty, false);
             assert.strictEqual(browser.ready.injected, false, 'JSON 내용을 HTML로 실행하면 안 된다');
-            assert.strictEqual(browser.ready.cells.length, 3);
+            assert.strictEqual(browser.ready.cells.length, 4);
+            assert.ok(browser.ready.cells.some((cell: any) => cell.col === '__proto__'), '유효한 __proto__ 열을 잃으면 안 된다');
             assert.strictEqual(browser.ready.cells.find((cell: any) => cell.col === specialKey)?.label, specialValue);
 
             const after = browser.messages.length;
@@ -254,5 +265,88 @@ suite('JSON Editor 실제 브라우저 편집과 저장', function () {
                 });
             });
         }
+    });
+
+    test('IT-225: 지원 불가 숫자의 셀 입력은 원문을 보존하고 수정한 뒤 저장된다', async () => {
+        const initial = { rows: [{ id: 1, config: { id: 1 }, values: [1], text: '9007199254740993' }] };
+        await withJsonBrowser(initial, async browser => {
+            for (const [col, invalidValue, corrected] of [
+                ['id', '9007199254740993', '1'],
+                ['id', '0.1234567890123456789', '1'],
+                ['config', '{"id":1e400}', '{"id":1}'],
+                ['values', '9007199254740993', '1'],
+            ]) {
+                const before = browser.messages.length;
+                const invalid = await browser.operate([
+                    { kind: 'edit', col, value: invalidValue }, { kind: 'click', id: 'btnSave' },
+                ]);
+                assert.strictEqual(invalid.errorVisible, true, col);
+                assert.match(invalid.error, /정확하게 보존|preserved exactly/);
+                assert.strictEqual(invalid.dirty, true);
+                assert.ok(!browser.messages.slice(before).some(message => message.command === 'save'));
+                assert.strictEqual(fs.readFileSync(browser.filePath, 'utf8'), browser.initialText);
+                const retry = browser.messages.length;
+                await browser.operate([{ kind: 'edit', col, value: corrected }, { kind: 'click', id: 'btnSave' }]);
+                assert.strictEqual((await browser.waitFor('saveAck', retry)).dirty, false);
+                assert.strictEqual((await browser.operate([])).errorVisible, false);
+                assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), initial);
+            }
+        });
+    });
+
+    test('IT-226: __proto__ 복구 baseline과 셀을 보존하여 편집과 저장을 왕복한다', async () => {
+        const initial = JSON.parse('{"rows":[{"__proto__":{"role":"admin"},"name":"old"}]}');
+        const recovered = JSON.parse('{"rows":[{"__proto__":{"role":"admin"},"name":"draft"}]}');
+        await withJsonBrowser(initial, async browser => {
+            assert.strictEqual(browser.ready.dirty, true);
+            const reverted = await browser.operate([
+                { kind: 'edit', col: 'name', value: 'old' }, { kind: 'click', id: 'btnAddField' },
+            ]);
+            assert.strictEqual(reverted.dirty, false, 'saved baseline의 __proto__ 키까지 같아야 clean이다');
+            assert.strictEqual(fs.readFileSync(browser.filePath, 'utf8'), browser.initialText);
+            const before = browser.messages.length;
+            await browser.operate([
+                { kind: 'edit', col: '__proto__', value: '{"role":"user","constructor":"literal"}' },
+                { kind: 'click', id: 'btnSave' },
+            ]);
+            assert.strictEqual((await browser.waitFor('saveAck', before)).dirty, false);
+            const saved = JSON.parse(fs.readFileSync(browser.filePath, 'utf8'));
+            assert.strictEqual(Object.getPrototypeOf(saved.rows[0]), Object.prototype);
+            assert.ok(Object.hasOwn(saved.rows[0], '__proto__'));
+            assert.deepStrictEqual(saved.rows[0].__proto__, { role: 'user', constructor: 'literal' });
+            assert.strictEqual(saved.rows[0].name, 'old');
+        }, { recoveryData: recovered });
+    });
+
+    test('IT-228: 열린 파일이 10MB를 넘어도 크기를 늘리거나 줄이며 연속 저장된다', async function () {
+        this.timeout(60000);
+        const limit = 10 * 1024 * 1024;
+        const initial = { rows: [{ label: 'base' }], padding: '' };
+        const overhead = Buffer.byteLength(JSON.stringify(initial, null, 4) + '\n', 'utf8');
+        // 표에 표시하지 않는 속성으로 실제 파일 크기를 경계 바로 아래에 둔다.
+        initial.padding = 'a'.repeat(limit - overhead - 1);
+        await withJsonBrowser(initial, async browser => {
+            assert.strictEqual(fs.statSync(browser.filePath).size, limit - 1);
+            const oversize = { ...initial, rows: [{ label: '한글' }] };
+            const oversizeText = JSON.stringify(oversize, null, 4) + '\n';
+            assert.ok(oversizeText.length < limit, 'UTF-8 바이트 수가 문자 수보다 큰 경계 사례');
+            assert.strictEqual(Buffer.byteLength(oversizeText, 'utf8'), limit + 1);
+
+            // 첫 저장으로 한도를 넘고, 큰 디스크 파일에 다시 저장한 뒤 한도 아래로 줄인다.
+            for (const label of ['한글', '한글다음', 'x']) {
+                const retry = browser.messages.length;
+                await browser.operate([
+                    { kind: 'edit', col: 'label', value: label }, { kind: 'click', id: 'btnSave' },
+                ]);
+                assert.strictEqual((await browser.waitFor('saveAck', retry)).dirty, false);
+                const saved = await browser.operate([]);
+                assert.strictEqual(saved.dirty, false);
+                assert.strictEqual(jsonPanelRegistry.isDirty(), false);
+                assert.strictEqual(saved.cells.find((cell: any) => cell.col === 'label')?.label, label);
+                assert.strictEqual(fs.readFileSync(browser.filePath, 'utf8'),
+                    JSON.stringify({ ...initial, rows: [{ label }] }, null, 4) + '\n');
+                assert.strictEqual(fs.statSync(browser.filePath).size > limit, label !== 'x');
+            }
+        });
     });
 });

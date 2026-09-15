@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as path from 'path';
 import {
     extractBitFieldInfo,
     extractHierarchy,
@@ -23,8 +24,51 @@ interface TypeConfigCacheEntry {
 /** Maximum number of taskhub_types.json files cached across workspaces. */
 const TYPE_CONFIG_CACHE_MAX = 16;
 
-/** Maximum wall-clock time for any LSP command invoked from hover. */
+/** One budget shared by every LSP request and document read in a hover. */
 const LSP_TIMEOUT_MS = 3000;
+export const MAX_HOVER_DEFINITION_CANDIDATES = 16;
+
+interface DefinitionCandidates {
+    locations: vscode.Location[];
+    incomplete: boolean;
+    candidateLimitReached: boolean;
+}
+
+type CandidateDocumentListener = (location: vscode.Location, document: Promise<vscode.TextDocument | undefined>) => void;
+
+interface DefinitionLookup {
+    result: Promise<DefinitionCandidates>;
+    documents: Map<string, { location: vscode.Location; document: Promise<vscode.TextDocument | undefined> }>;
+    listeners: Set<CandidateDocumentListener>;
+}
+
+interface HoverCandidate<T> {
+    location: vscode.Location;
+    value: T | null;
+    /** The location timed out or failed; it is listed but does not take part in agreement. */
+    unchecked?: boolean;
+}
+
+interface CandidateResolution<T> {
+    candidates: HoverCandidate<T>[];
+    incomplete: boolean;
+    /** Some lookups failed; agreeing checked values are shown with a warning instead of withheld. */
+    unverified?: boolean;
+    /** Recognized values can conflict within a single LSP hover location. */
+    hasValueEvidence?: boolean;
+}
+
+interface HoverRequest {
+    token?: vscode.CancellationToken;
+    deadline: number;
+    allowLsp: boolean;
+    definitions: Map<string, DefinitionLookup>;
+    identifiers: Map<string, Promise<CandidateResolution<number>>>;
+    documents: Map<string, Promise<vscode.TextDocument | undefined>>;
+    versions: Map<vscode.TextDocument, number>;
+    visited: Set<string>;
+    maxCandidates: number;
+}
 
 const COPY_HOVER_VALUE_COMMAND = 'taskhub.copyHoverValue';
 const MAX_HOVER_LINE_LENGTH = 10_000;
@@ -55,6 +99,13 @@ function createCopyableHoverMarkdown(): vscode.MarkdownString {
     md.isTrusted = { enabledCommands: [COPY_HOVER_VALUE_COMMAND] };
     md.supportThemeIcons = true;
     return md;
+}
+
+/** `extern const int X;`-style line: names the identifier with no initializer, body, or call. */
+function isValuelessDeclaration(line: string, word: string): boolean {
+    const code = line.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/, '');
+    const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`^[^=(){}#]*\\b${escapedWord}\\b\\s*(?:\\[[^\\]]*\\]\\s*)*;\\s*$`).test(code);
 }
 
 /** Treat source fragments as text, including inside table cells and headings. */
@@ -107,23 +158,27 @@ function appendNumberConversions(md: vscode.MarkdownString, value: number | bigi
  * Returns undefined when the LSP call does not complete in time or the user moves the cursor.
  */
 function withLspTimeout<T>(
-    call: Thenable<T>,
+    call: () => Thenable<T>,
     token?: vscode.CancellationToken,
     timeoutMs: number = LSP_TIMEOUT_MS
 ): Promise<T | undefined> {
+    if (token?.isCancellationRequested || timeoutMs <= 0) { return Promise.resolve(undefined); }
     return new Promise<T | undefined>(resolve => {
         let settled = false;
+        let onCancel: vscode.Disposable | undefined;
         const finish = (value: T | undefined) => {
             if (settled) { return; }
             settled = true;
+            clearTimeout(timer);
+            onCancel?.dispose();
             resolve(value);
         };
         const timer = setTimeout(() => finish(undefined), timeoutMs);
-        const onCancel = token?.onCancellationRequested(() => finish(undefined));
-        Promise.resolve(call).then(
-            (value) => { clearTimeout(timer); onCancel?.dispose(); finish(value); },
-            () => { clearTimeout(timer); onCancel?.dispose(); finish(undefined); }
-        );
+        onCancel = token?.onCancellationRequested(() => finish(undefined));
+        if (token?.isCancellationRequested) { finish(undefined); return; }
+        try {
+            Promise.resolve(call()).then(finish, () => finish(undefined));
+        } catch { finish(undefined); }
     });
 }
 
@@ -151,16 +206,20 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      * at the same position and avoids races when the cursor moves quickly.
      */
     private readonly activeHoverCalls = new Set<string>();
+    /** Separate from provider lifetime: a local result may return before its fallback settles. */
+    private readonly activeLspHovers = new Map<string, number>();
 
     constructor(
         private readonly workspaceFolderForUri: (uri: vscode.Uri) => vscode.WorkspaceFolder | undefined
-            = uri => vscode.workspace.getWorkspaceFolder(uri)
+            = uri => vscode.workspace.getWorkspaceFolder(uri),
+        private readonly limits = { timeoutMs: LSP_TIMEOUT_MS, maxCandidates: MAX_HOVER_DEFINITION_CANDIDATES }
     ) {}
 
     // M12 성능 캐시 — 같은 문서 버전이면 호버마다 전체 텍스트를 다시
     // 파싱/복사하지 않는다 (수만 줄 SFR 헤더에서 호버 지연의 주범).
     private macroTableCache: { uri: string; version: number; macros: Map<string, MacroDefinition> } | undefined;
     private documentLinesCache: { uri: string; version: number; lines: string[] } | undefined;
+    private registerCodeCache: { uri: string; version: number; text: string } | undefined;
 
     /**
      * 문서 전체 라인 배열 (document.version 키 캐시). 반환 배열은 캐시와
@@ -196,6 +255,159 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         return `${uri.toString()}:${position.line}:${position.character}`;
     }
 
+    private createRequest(token?: vscode.CancellationToken, allowLsp = true): HoverRequest {
+        return {
+            token, deadline: Date.now() + this.limits.timeoutMs, allowLsp,
+            definitions: new Map(), identifiers: new Map(), documents: new Map(), versions: new Map(), visited: new Set(),
+            maxCandidates: this.limits.maxCandidates,
+        };
+    }
+
+    private requestActive(request: HoverRequest): boolean {
+        return this.requestSnapshotValid(request) && Date.now() < request.deadline;
+    }
+
+    private requestSnapshotValid(request: HoverRequest): boolean {
+        return !request.token?.isCancellationRequested
+            && [...request.versions].every(([document, version]) => document.version === version);
+    }
+
+    private waitForRequest<T>(request: HoverRequest, call: () => Thenable<T>): Promise<T | undefined> {
+        if (!this.requestActive(request)) { return Promise.resolve(undefined); }
+        return withLspTimeout(call, request.token, request.deadline - Date.now());
+    }
+
+    private async requestLspHovers(uri: vscode.Uri, position: vscode.Position, request: HoverRequest): Promise<vscode.Hover[] | undefined> {
+        if (!request.allowLsp || !this.requestActive(request)) { return undefined; }
+        const key = this.hoverKey(uri, position);
+        this.activeLspHovers.set(key, (this.activeLspHovers.get(key) ?? 0) + 1);
+        try {
+            return await this.waitForRequest(request, () => vscode.commands.executeCommand<vscode.Hover[]>(
+                'vscode.executeHoverProvider', uri, position));
+        } finally {
+            // Release on the bounded wait, not the raw LSP promise: a stalled
+            // language server must not permanently suppress future user hovers.
+            const remaining = (this.activeLspHovers.get(key) ?? 1) - 1;
+            if (remaining === 0) { this.activeLspHovers.delete(key); }
+            else { this.activeLspHovers.set(key, remaining); }
+        }
+    }
+
+    /** Definitions and declarations are alternatives, never evidence that the first is active. */
+    private definitionCandidates(document: vscode.TextDocument, position: vscode.Position, request: HoverRequest,
+        onDocument?: CandidateDocumentListener): Promise<DefinitionCandidates> {
+        if (!request.allowLsp) { return Promise.resolve({ locations: [], incomplete: false, candidateLimitReached: false }); }
+        const key = this.hoverKey(document.uri, position);
+        const cached = request.definitions.get(key);
+        if (cached) {
+            if (onDocument) {
+                cached.listeners.add(onDocument);
+                for (const candidate of cached.documents.values()) { onDocument(candidate.location, candidate.document); }
+            }
+            return cached.result;
+        }
+        const documents: DefinitionLookup['documents'] = new Map();
+        const listeners = new Set<CandidateDocumentListener>(onDocument ? [onDocument] : []);
+        const pending = (async (): Promise<DefinitionCandidates> => {
+            const byLocation = new Map<string, vscode.Location>();
+            const documentReads: Promise<vscode.TextDocument | undefined>[] = [];
+            let incomplete = false;
+            let candidateLimitReached = false;
+            await Promise.all(['vscode.executeDefinitionProvider', 'vscode.executeDeclarationProvider'].map(async command => {
+                const resultsForCommand = await this.waitForRequest(request, () =>
+                    vscode.commands.executeCommand<Array<vscode.Location | vscode.LocationLink>>(command, document.uri, position));
+                if (!resultsForCommand) { incomplete = true; return; }
+                if (resultsForCommand.length > request.maxCandidates) { candidateLimitReached = true; }
+                for (const candidate of resultsForCommand.slice(0, request.maxCandidates)) {
+                    const uri = 'targetUri' in candidate ? candidate.targetUri : candidate.uri;
+                    const range = 'targetUri' in candidate ? candidate.targetSelectionRange ?? candidate.targetRange : candidate.range;
+                    if (!uri || !range) { incomplete = true; continue; }
+                    const locationKey = this.hoverKey(uri, range.start);
+                    if (byLocation.has(locationKey)) { continue; }
+                    if (byLocation.size >= request.maxCandidates) { candidateLimitReached = true; continue; }
+                    const location = new vscode.Location(uri, range);
+                    byLocation.set(locationKey, location);
+                    // Start bounded reads as each provider responds. A slow declaration
+                    // provider or document must not consume the budget before other values are read.
+                    const candidateDocument = this.openCandidate(location, request);
+                    documents.set(locationKey, { location, document: candidateDocument });
+                    documentReads.push(candidateDocument);
+                    for (const listener of listeners) { listener(location, candidateDocument); }
+                }
+            }));
+            await Promise.all(documentReads);
+            const locations = [...byLocation.values()].sort((a, b) =>
+                this.hoverKey(a.uri, a.range.start).localeCompare(this.hoverKey(b.uri, b.range.start)));
+            return { locations, incomplete: incomplete || candidateLimitReached, candidateLimitReached };
+        })();
+        request.definitions.set(key, { result: pending, documents, listeners });
+        return pending;
+    }
+
+    private async openCandidate(location: vscode.Location, request: HoverRequest): Promise<vscode.TextDocument | undefined> {
+        if (!this.requestSnapshotValid(request)) { return undefined; }
+        const locationKey = this.hoverKey(location.uri, location.range.start);
+        if (!request.visited.has(locationKey)) {
+            if (request.visited.size >= request.maxCandidates) { return undefined; }
+            request.visited.add(locationKey);
+        }
+        const key = location.uri.toString();
+        let pending = request.documents.get(key);
+        if (!pending) {
+            if (!this.requestActive(request)) { return undefined; }
+            pending = this.waitForRequest(request, () => vscode.workspace.openTextDocument(location.uri));
+            request.documents.set(key, pending);
+        }
+        const document = await pending;
+        if (document && !request.versions.has(document)) { request.versions.set(document, document.version); }
+        return this.requestSnapshotValid(request) && document && location.range.start.line < document.lineCount
+            ? document : undefined;
+    }
+
+    private resolvedCandidateValue<T>(resolution: CandidateResolution<T>): T | null {
+        const checked = resolution.candidates.filter(candidate => !candidate.unchecked);
+        if (resolution.incomplete || checked.length === 0) { return null; }
+        const first = checked[0].value;
+        if (first === null) { return null; }
+        const signature = JSON.stringify(first);
+        return checked.every(candidate => candidate.value !== null && JSON.stringify(candidate.value) === signature)
+            ? first : null;
+    }
+
+    private hasValueCandidates<T>(resolution: CandidateResolution<T>): boolean {
+        return resolution.hasValueEvidence === true || resolution.candidates.some(candidate => candidate.value !== null);
+    }
+
+    private candidatePath(location: vscode.Location): string {
+        const folder = this.workspaceFolderForUri(location.uri);
+        return `${folder ? `${folder.name}/${path.relative(folder.uri.fsPath, location.uri.fsPath).replace(/\\/g, '/')}` : location.uri.fsPath}:${location.range.start.line + 1}`;
+    }
+
+    private appendCandidates<T>(md: vscode.MarkdownString, resolution: CandidateResolution<T>, describe: (value: T) => string): void {
+        md.appendMarkdown(`\n\n**${t('정의 후보', 'Definition candidates')}:**\n\n`);
+        for (const candidate of resolution.candidates) {
+            const label = escapeHoverText(this.candidatePath(candidate.location));
+            const target = candidate.location.uri.with({ fragment: String(candidate.location.range.start.line + 1) }).toString()
+                .replace(/\(/g, '%28').replace(/\)/g, '%29');
+            const link = candidate.location.uri.scheme.toLowerCase() === 'command' ? label : `[${label}](${target})`;
+            const detail = candidate.unchecked ? t('확인하지 못함', 'Not checked')
+                : candidate.value === null ? t('해석하지 못함', 'Unresolved') : describe(candidate.value);
+            md.appendMarkdown(`- ${link} — ${escapeHoverText(detail)}\n`);
+        }
+        if (resolution.incomplete || resolution.unverified) {
+            md.appendText(t('시간·후보 수 제한 또는 조회 실패로 확인하지 못한 후보가 있습니다.',
+                'Some candidates could not be checked because a time/candidate limit was reached or a lookup failed.'));
+        }
+    }
+
+    private unresolvedCandidates<T>(resolution: CandidateResolution<T>, describe: (value: T) => string): vscode.MarkdownString {
+        const md = new vscode.MarkdownString();
+        md.appendText(t('정의 후보가 다르거나 모두 확인되지 않아 값을 확정할 수 없습니다. F12/Peek에서 사용할 정의를 확인하세요.',
+            'The value cannot be determined because definitions differ or could not all be checked. Inspect the intended definition with F12/Peek.'));
+        this.appendCandidates(md, resolution, describe);
+        return md;
+    }
+
     /**
      * Regex patterns for detecting different number formats
      */
@@ -225,7 +437,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         }
         this.activeHoverCalls.add(key);
         try {
-            return await this.provideHoverImpl(document, position, token);
+            const version = document.version;
+            // LSP callbacks at a guarded target may still show local information,
+            // but cannot recursively start another language-server lookup.
+            const request = this.createRequest(token, !this.activeLspHovers.has(key));
+            const hover = await this.provideHoverImpl(document, position, request);
+            return !this.requestSnapshotValid(request) || document.version !== version ? undefined : hover;
         } finally {
             this.activeHoverCalls.delete(key);
         }
@@ -234,8 +451,10 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     private async provideHoverImpl(
         document: vscode.TextDocument,
         position: vscode.Position,
-        token: vscode.CancellationToken
+        request: HoverRequest
     ): Promise<vscode.Hover | undefined> {
+
+        if (request.token?.isCancellationRequested) { return undefined; }
 
         // Check if the feature is enabled
         const config = vscode.workspace.getConfiguration('taskhub.hover');
@@ -261,13 +480,13 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         const result = this.findNumberAtPosition(lineText, charPosition);
         if (result) {
             // 레지스터 할당(REG = 0x123;)의 디코딩 호버가 일반 진법 변환보다 우선
-            const registerHover = await this.tryRegisterValueDecoding(document, position);
+            const registerHover = await this.tryRegisterValueDecoding(document, position, request);
             if (registerHover) {
                 return registerHover;
             }
 
             // Try bit operation hover (experimental feature)
-            const numberBitOperationHover = await this.tryBitOperationHover(document, position);
+            const numberBitOperationHover = await this.tryBitOperationHover(document, position, request);
             if (numberBitOperationHover) {
                 return numberBitOperationHover;
             }
@@ -290,39 +509,54 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             // 숫자처럼 보이지만 파싱 불가 — 식별자 경로로 폴백
         }
 
+        // A current declaration needs no LSP. Other numeric candidates start as
+        // their documents arrive, sharing the SFR lookup and the same deadline.
+        const localBitField = this.localBitFieldHover(document, position);
+        if (localBitField) { return localBitField; }
+        const macroHover = this.tryMacroExpansion(document, position);
+        const identifierResult = macroHover ? Promise.resolve<CandidateResolution<number>>({ candidates: [], incomplete: false })
+            : this.resolveIdentifierValue(document, position, request);
+
         // First, try to detect SFR bit field
-        const bitFieldHover = await this.tryBitFieldHover(document, position);
+        const bitFieldHover = await this.tryBitFieldHover(document, position, request);
         if (bitFieldHover) {
             return bitFieldHover;
         }
 
         // Try macro expansion
-        const macroHover = this.tryMacroExpansion(document, position);
         if (macroHover) {
             return macroHover;
         }
 
         // Try struct size information (async: may read taskhub_types.json from disk)
-        const structSizeHover = await this.tryStructSizeInfo(document, position);
+        const structSizeHover = await this.waitForRequest(request, () => this.tryStructSizeInfo(document, position, request));
         if (structSizeHover) {
             return structSizeHover;
         }
 
         // Try bit operation hover (experimental feature)
-        const bitOperationHover = await this.tryBitOperationHover(document, position);
+        const bitOperationHover = await this.tryBitOperationHover(document, position, request);
         if (bitOperationHover) {
             return bitOperationHover;
         }
 
         // If not a number literal, try to find identifier value
-        const identifierValue = await this.getIdentifierValue(document, position);
+        const identifier = await identifierResult;
+        const identifierValue = this.resolvedCandidateValue(identifier);
         if (identifierValue !== null) {
             const wordRange = document.getWordRangeAtPosition(position);
             if (wordRange) {
                 const word = document.getText(wordRange);
                 const hoverContent = this.generateHoverContent(identifierValue, word);
+                if (identifier.candidates.length > 1 || identifier.unverified) {
+                    this.appendCandidates(hoverContent, identifier, value => String(value));
+                }
                 return new vscode.Hover(hoverContent, wordRange);
             }
+        }
+
+        if (this.hasValueCandidates(identifier)) {
+            return new vscode.Hover(this.unresolvedCandidates(identifier, value => String(value)), document.getWordRangeAtPosition(position));
         }
 
         return undefined;
@@ -332,78 +566,74 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      * Get the numeric value of an identifier (const, enum, etc.) using LSP
      * Returns the numeric value if found, null otherwise
      */
-    private async getIdentifierValue(document: vscode.TextDocument, position: vscode.Position): Promise<number | null> {
-        try {
-            const wordRange = document.getWordRangeAtPosition(position);
-            if (!wordRange) {
-                return null;
-            }
+    private async getIdentifierValue(document: vscode.TextDocument, position: vscode.Position, request = this.createRequest()): Promise<number | null> {
+        return this.resolvedCandidateValue(await this.resolveIdentifierValue(document, position, request));
+    }
 
-            const word = document.getText(wordRange);
+    private resolveIdentifierValue(document: vscode.TextDocument, position: vscode.Position, request: HoverRequest): Promise<CandidateResolution<number>> {
+        const key = this.hoverKey(document.uri, position);
+        const cached = request.identifiers.get(key);
+        if (cached) { return cached; }
+        const pending = this.collectIdentifierValues(document, position, request)
+            .catch((): CandidateResolution<number> => ({ candidates: [], incomplete: false }));
+        request.identifiers.set(key, pending);
+        return pending;
+    }
 
-            // Use LSP to find the definition of the symbol at this position
-            const definitions = await withLspTimeout(
-                vscode.commands.executeCommand<vscode.Location[]>(
-                    'vscode.executeDefinitionProvider',
-                    document.uri,
-                    position
-                )
-            );
-
-            if (!definitions || definitions.length === 0) {
-                return null;
-            }
-
-            // Get the first definition
-            const definition = definitions[0];
-
-            // Try to get hover information at the definition location.
-            // Re-entry at the same position is already blocked by the hoverKey guard in provideHover,
-            // so no extra flag is required here.
-            {
-                const hovers = await withLspTimeout(
-                    vscode.commands.executeCommand<vscode.Hover[]>(
-                        'vscode.executeHoverProvider',
-                        definition.uri,
-                        definition.range.start
-                    )
-                );
-
-                if (hovers && hovers.length > 0) {
-                    for (const hover of hovers) {
-                        for (const content of hover.contents) {
-                            const text = typeof content === 'string' ? content : content.value;
-
-                            // Try to extract enum value from hover text
-                            // Format: "(enum Test1) Test3_third = 1"
-                            const enumValueMatch = text.match(/=\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)/);
-                            if (enumValueMatch) {
-                                const valueStr = enumValueMatch[1];
-                                const value = this.parseNumber(valueStr);
-                                if (value !== null) {
-                                    return value;
-                                }
-                            }
+    private async collectIdentifierValues(document: vscode.TextDocument, position: vscode.Position, request: HoverRequest): Promise<CandidateResolution<number>> {
+        const wordRange = document.getWordRangeAtPosition(position);
+        if (!wordRange) { return { candidates: [], incomplete: false }; }
+        const word = document.getText(wordRange);
+        const candidateValues: Promise<HoverCandidate<number> | undefined>[] = [];
+        let hasValueEvidence = false;
+        const readValue = async (location: vscode.Location, candidateDocument: Promise<vscode.TextDocument | undefined>): Promise<HoverCandidate<number> | undefined> => {
+            let value: number | null = null;
+            let conflictingHoverValues = false;
+            const defDocument = await candidateDocument;
+            // A location that could not be read is not evidence of "no value".
+            if (!defDocument) { return { location, value: null, unchecked: true }; }
+            // Parse the actual source first. A hover can include unrelated numbers
+            // from several providers; it must not override a known source value.
+            try {
+                value = await this.extractValueFromDefinitionContext(defDocument, location.range.start.line, word);
+            } catch { /* Fall back to the language server hover below. */ }
+            if (value === null) {
+                const hovers = await this.requestLspHovers(location.uri, location.range.start, request);
+                if (!hovers) {
+                    // `extern const int X;` has no value in source, so a missing hover loses nothing.
+                    return isValuelessDeclaration(defDocument.lineAt(location.range.start.line).text, word)
+                        ? undefined : { location, value: null, unchecked: true };
+                }
+                const values = new Set<number>();
+                for (const hover of hovers) {
+                    for (const content of hover.contents) {
+                        const text = typeof content === 'string' ? content : content.value;
+                        const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        for (const match of text.matchAll(new RegExp(`\\b${escapedWord}\\s*=\\s*(-?(?:0x[0-9a-fA-F]+|0b[01]+|\\d+))\\b`, 'g'))) {
+                            const parsed = this.parseNumber(match[1]);
+                            if (parsed !== null) { values.add(parsed); }
                         }
                     }
                 }
+                hasValueEvidence ||= values.size > 0;
+                conflictingHoverValues = values.size > 1;
+                if (values.size === 1) { value = [...values][0]; }
             }
-
-            // Fallback: Open the document containing the definition
-            const defDocument = await vscode.workspace.openTextDocument(definition.uri);
-
-            // Try to extract value from the definition line and surrounding context
-            const value = await this.extractValueFromDefinitionContext(defDocument, definition.range.start.line, word);
-
-            if (value !== null) {
-                return value;
-            }
-
-            return null;
-        } catch (error) {
-            // LSP might not be available or symbol not found
-            return null;
-        }
+            // A checked location without a number supplies no competing value.
+            // Keep a null only when that location supplied multiple conflicting numbers.
+            return value !== null || conflictingHoverValues ? { location, value } : undefined;
+        };
+        const definitions = await this.definitionCandidates(document, position, request, (location, candidateDocument) => {
+            // Every needed fallback starts independently; one empty declaration
+            // must not block another location's immediately available hover value.
+            candidateValues.push(readValue(location, candidateDocument)
+                .catch((): HoverCandidate<number> => ({ location, value: null, unchecked: true })));
+        });
+        const candidates = (await Promise.all(candidateValues)).filter((candidate): candidate is HoverCandidate<number> => candidate !== undefined)
+            .sort((a, b) => this.hoverKey(a.location.uri, a.location.range.start).localeCompare(this.hoverKey(b.location.uri, b.location.range.start)));
+        if (!this.requestSnapshotValid(request)) { return { candidates: [], incomplete: false }; }
+        const unverified = definitions.incomplete || candidates.some(candidate => candidate.unchecked);
+        return { candidates, incomplete: definitions.candidateLimitReached, unverified, hasValueEvidence };
     }
 
     /**
@@ -921,522 +1151,241 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         return md;
     }
 
+    private localBitFieldHover(document: vscode.TextDocument, position: vscode.Position): vscode.Hover | null {
+        const wordRange = document.getWordRangeAtPosition(position);
+        if (!wordRange) { return null; }
+        const word = document.getText(wordRange);
+        const localInfo = extractBitFieldInfo(document.lineAt(position.line).text,
+            position.line > 0 ? document.lineAt(position.line - 1).text : undefined);
+        if (localInfo?.commentInfo && localInfo.fieldName === word) {
+            const location = new vscode.Location(document.uri, wordRange);
+            return new vscode.Hover(this.generateBitFieldHoverContent(localInfo,
+                extractHierarchy(this.getDocumentLines(document), position.line),
+                this.candidatePath(location).replace(/:\d+$/, ''), position.line + 1), wordRange);
+        }
+        return null;
+    }
+
     /**
      * Try to provide hover information for SFR bit field
      * Returns hover if current position is on a bit field declaration or usage
      */
     private async tryBitFieldHover(
         document: vscode.TextDocument,
-        position: vscode.Position
+        position: vscode.Position,
+        request = this.createRequest()
     ): Promise<vscode.Hover | null> {
-        const line = document.lineAt(position.line);
-        const lineText = line.text;
-
-        // Get preceding line for comment detection
-        const precedingLine = position.line > 0 ? document.lineAt(position.line - 1).text : undefined;
-
-        // Try to extract bit field info from current line (declaration)
-        let bitFieldInfo = extractBitFieldInfo(lineText, precedingLine);
-
-        // If not found on current line, try to find definition using LSP
-        if (!bitFieldInfo || !bitFieldInfo.commentInfo) {
-            bitFieldInfo = await this.tryBitFieldFromDefinition(document, position);
-        }
-
-        if (!bitFieldInfo || !bitFieldInfo.commentInfo) {
-            return null;
-        }
-
-        // Check if cursor is on the field name
         const wordRange = document.getWordRangeAtPosition(position);
-        if (!wordRange) {
-            return null;
-        }
-
+        if (!wordRange) { return null; }
         const word = document.getText(wordRange);
+        if (!/^[A-Za-z_]\w*$/.test(word)) { return null; }
+        const local = this.localBitFieldHover(document, position);
+        if (local) { return local; }
 
-        if (word !== bitFieldInfo.fieldName) {
-            return null;
+        const definitions = await this.definitionCandidates(document, position, request);
+        const candidates: HoverCandidate<CompleteBitFieldInfo>[] = [];
+        const documents = new Map<string, vscode.TextDocument>();
+        for (const location of definitions.locations) {
+            const target = await this.openCandidate(location, request);
+            const line = location.range.start.line;
+            const info = target ? extractBitFieldInfo(target.lineAt(line).text,
+                line > 0 ? target.lineAt(line - 1).text : undefined) : null;
+            const value = info?.commentInfo && info.fieldName === word ? info : null;
+            if (target) { documents.set(location.uri.toString(), target); }
+            candidates.push({ location, value });
         }
-
-        // Get all definition and declaration locations (with timeout to avoid infinite wait if LSP is unresponsive)
-        const lspTimeout = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('LSP request timed out')), 3000)
-        );
-        let definitions: vscode.Location[] | undefined;
-        let declarations: vscode.Location[] | undefined;
-        try {
-            [definitions, declarations] = await Promise.race([
-                Promise.all([
-                    vscode.commands.executeCommand<vscode.Location[]>(
-                        'vscode.executeDefinitionProvider',
-                        document.uri,
-                        position
-                    ),
-                    vscode.commands.executeCommand<vscode.Location[]>(
-                        'vscode.executeDeclarationProvider',
-                        document.uri,
-                        position
-                    )
-                ]),
-                lspTimeout
-            ]);
-        } catch {
-            return null;
-        }
-
-        // Combine and deduplicate locations
-        const allLocations: vscode.Location[] = [];
-        const locationSet = new Set<string>();
-
-        const addLocation = (loc: vscode.Location) => {
-            const key = `${loc.uri.toString()}:${loc.range.start.line}:${loc.range.start.character}`;
-            if (!locationSet.has(key)) {
-                locationSet.add(key);
-                allLocations.push(loc);
-            }
-        };
-
-        if (definitions) {
-            definitions.forEach(addLocation);
-        }
-        if (declarations) {
-            declarations.forEach(addLocation);
-        }
-
-        // If we found limited results, try workspace symbol search for more
-        if (allLocations.length <= 1 && word) {
-            const workspaceSymbols = await withLspTimeout(
-                vscode.commands.executeCommand<vscode.SymbolInformation[]>(
-                    'vscode.executeWorkspaceSymbolProvider',
-                    word
-                )
-            );
-
-            if (workspaceSymbols) {
-                // Filter for exact name match
-                const exactMatches = workspaceSymbols.filter(sym => sym.name === word);
-
-                // Add locations from workspace symbols
-                for (const symbol of exactMatches) {
-                    addLocation(symbol.location);
-                }
-            }
-        }
-
-        if (allLocations.length === 0) {
-            // No definitions found, use current location (read-only shared cache)
-            const lines = this.getDocumentLines(document);
-            const scopes = extractHierarchy(lines, position.line);
-            const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-            const filePath = workspaceFolder
-                ? vscode.workspace.asRelativePath(document.uri, false)
-                : document.uri.fsPath;
-
-            const hoverContent = this.generateBitFieldHoverContent(
-                bitFieldInfo,
-                scopes,
-                filePath,
-                position.line + 1
-            );
-            return new vscode.Hover(hoverContent, wordRange);
-        }
-
-        // Generate hover content for all definitions
-        const md = createCopyableHoverMarkdown();
-
-        // Show count if multiple definitions
-        if (allLocations.length > 1) {
-            md.appendMarkdown(`*Multiple definitions found (${allLocations.length})*\n\n`);
-            md.appendMarkdown('---\n\n');
-        }
-
-        // Show first definition in full detail
-        const firstDefinition = allLocations[0];
-        const firstDocument = await vscode.workspace.openTextDocument(firstDefinition.uri);
-        const firstLine = firstDefinition.range.start.line;
-
-        // Extract hierarchy information from first document
-        const firstLines: string[] = [];
-        for (let j = 0; j < firstDocument.lineCount; j++) {
-            firstLines.push(firstDocument.getText(firstDocument.lineAt(j).range));
-        }
-        const firstScopes = extractHierarchy(firstLines, firstLine);
-
-        // Get file path relative to workspace
-        const firstWorkspaceFolder = vscode.workspace.getWorkspaceFolder(firstDocument.uri);
-        const firstFilePath = firstWorkspaceFolder
-            ? vscode.workspace.asRelativePath(firstDocument.uri, false)
-            : firstDocument.uri.fsPath;
-
-        // Generate and append first definition content
-        const firstContent = this.generateBitFieldHoverContent(
-            bitFieldInfo,
-            firstScopes,
-            firstFilePath,
-            firstLine + 1
-        );
-        md.appendMarkdown(firstContent.value);
-
-        // For remaining definitions, just show file paths
-        if (allLocations.length > 1) {
-            md.appendMarkdown('\n\n---\n\n');
-            md.appendMarkdown('**Additional definitions:**\n\n');
-
-            for (let i = 1; i < allLocations.length; i++) {
-                const definition = allLocations[i];
-                const targetDocument = await vscode.workspace.openTextDocument(definition.uri);
-                const targetLine = definition.range.start.line;
-
-                // Extract bit field info from this specific definition
-                const defLineText = targetDocument.lineAt(targetLine).text;
-                const precedingLineText = targetLine > 0
-                    ? targetDocument.lineAt(targetLine - 1).text
-                    : undefined;
-                const thisBitFieldInfo = extractBitFieldInfo(defLineText, precedingLineText);
-
-                // Extract hierarchy information from target document
-                const lines: string[] = [];
-                for (let j = 0; j < targetDocument.lineCount; j++) {
-                    lines.push(targetDocument.getText(targetDocument.lineAt(j).range));
-                }
-                const scopes = extractHierarchy(lines, targetLine);
-
-                // Get file path relative to workspace
-                const workspaceFolder = vscode.workspace.getWorkspaceFolder(targetDocument.uri);
-                const filePath = workspaceFolder
-                    ? vscode.workspace.asRelativePath(targetDocument.uri, false)
-                    : targetDocument.uri.fsPath;
-
-                const hierarchyName = formatHierarchy(scopes, bitFieldInfo.fieldName);
-
-                // Use the comment info from THIS definition, not the first one
-                const comment = thisBitFieldInfo?.commentInfo ?? bitFieldInfo.commentInfo;
-                if (!comment) {
-                    continue;
-                }
-
-                // Create clickable file link with line number
-                const fileLabel = escapeHoverText(`${filePath}:${targetLine + 1}`);
-                const fileTarget = definition.uri.with({ fragment: String(targetLine + 1) }).toString()
-                    .replace(/\(/g, '%28').replace(/\)/g, '%29');
-                const fileLink = definition.uri.scheme.toLowerCase() === 'command'
-                    ? fileLabel : `[${fileLabel}](${fileTarget})`;
-                md.appendMarkdown(`- ${fileLink} - ${escapeHoverText(`${hierarchyName} [${comment.bitPosition}][${comment.accessType}]`)}\n`);
-            }
-        }
-
-        return new vscode.Hover(md, wordRange);
+        // An ordinary symbol must still reach the macro/enum hover paths.
+        if (!candidates.some(candidate => candidate.value !== null)) { return null; }
+        const resolution = { candidates, incomplete: definitions.incomplete || !this.requestActive(request) };
+        const describe = (info: CompleteBitFieldInfo): string =>
+            `${info.fieldName} [${info.commentInfo!.bitPosition}] [${info.commentInfo!.accessType}] ${info.commentInfo!.resetValue} — ${info.commentInfo!.description}`;
+        const info = this.resolvedCandidateValue(resolution);
+        if (!info) { return new vscode.Hover(this.unresolvedCandidates(resolution, describe), wordRange); }
+        const location = candidates[0].location;
+        const target = documents.get(location.uri.toString())!;
+        const content = this.generateBitFieldHoverContent(info,
+            extractHierarchy(this.getDocumentLines(target), location.range.start.line),
+            this.candidatePath(location).replace(/:\d+$/, ''), location.range.start.line + 1);
+        if (candidates.length > 1) { this.appendCandidates(content, resolution, describe); }
+        return new vscode.Hover(content, wordRange);
     }
 
-    /**
-     * Try to get bit field info from definition using LSP
-     */
-    private async tryBitFieldFromDefinition(
-        document: vscode.TextDocument,
-        position: vscode.Position
-    ): Promise<CompleteBitFieldInfo | null> {
-        try {
-            // Get word at current position
-            const wordRange = document.getWordRangeAtPosition(position);
-            if (!wordRange) {
-                return null;
+    /** Only aggregate headers with a body are local definitions, not type uses. */
+    private *registerDefinitionHeaders(document: vscode.TextDocument, typeName: string): Generator<{ line: number; character: number; kind: string }> {
+        const uri = document.uri.toString();
+        if (this.registerCodeCache?.uri !== uri || this.registerCodeCache.version !== document.version) {
+            // Preserve source offsets and line numbers while ignoring comments and literals.
+            // A quote inside a numeric token (1'000, 0xAB'CD) is a digit separator.
+            const text = document.getText().replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|(?<!\w)(?:u8|[uUL])?'(?:\\[^\r\n]|[^'\\\r\n])*'/g,
+                fragment => fragment.replace(/[^\n]/g, ' '));
+            this.registerCodeCache = { uri, version: document.version, text };
+        }
+        const text = this.registerCodeCache.text;
+        const escapedType = typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const modifiers = '(?:(?:final\\b|\\[\\[[^;{}]*?\\]\\]|__attribute__\\s*\\(\\([^;{}]*?\\)\\)|__declspec\\s*\\([^;{}]*?\\))\\s*)*';
+        const pattern = new RegExp(`\\b(struct|union|class)\\s+${escapedType}\\b\\s*${modifiers}(?::[^;{}()=]*)?\\{`, 'g');
+        let line = 0;
+        let lineStart = 0;
+        for (const match of text.matchAll(pattern)) {
+            let newline = text.indexOf('\n', lineStart);
+            while (newline !== -1 && newline < match.index!) {
+                line++;
+                lineStart = newline + 1;
+                newline = text.indexOf('\n', lineStart);
             }
-
-            // 비트필드 가능성 사전 필터(M12): C 식별자가 아니면 정의 위치를
-            // 조회할 이유가 없다 — LSP 왕복을 건너뛴다.
-            const word = document.getText(wordRange);
-            if (!/^[A-Za-z_]\w*$/.test(word)) {
-                return null;
-            }
-
-            // Use LSP to find definition (guarded by a short timeout to avoid UI stalls)
-            const definitions = await withLspTimeout(
-                vscode.commands.executeCommand<vscode.Location[]>(
-                    'vscode.executeDefinitionProvider',
-                    document.uri,
-                    position
-                )
-            );
-
-            if (!definitions || definitions.length === 0) {
-                return null;
-            }
-
-            // Get the first definition
-            const definition = definitions[0];
-
-            // Open the document containing the definition
-            const defDocument = await vscode.workspace.openTextDocument(definition.uri);
-            const defLine = defDocument.lineAt(definition.range.start.line);
-            const defLineText = defLine.text;
-
-            // Get preceding line for comment
-            const precedingLine = definition.range.start.line > 0
-                ? defDocument.lineAt(definition.range.start.line - 1).text
-                : undefined;
-
-            // Try to extract bit field info from definition line
-            const bitFieldInfo = extractBitFieldInfo(defLineText, precedingLine);
-            return bitFieldInfo;
-        } catch (error) {
-            return null;
+            yield { line, character: match.index! - lineStart, kind: match[1] };
         }
     }
 
-    /**
-     * Try to decode register value if current position is on a register assignment
-     * Returns hover if the value can be decoded as a register
-     */
+    private parseRegisterCandidate(document: vscode.TextDocument, location: vscode.Location, typeName: string): RegisterDefinition | null {
+        const lines = this.getDocumentLines(document);
+        const line = location.range.start.line;
+        let kind: string | undefined;
+        for (const header of this.registerDefinitionHeaders(document, typeName)) {
+            if (header.line === line) { kind = header.kind; break; }
+            if (header.line > line) { break; }
+        }
+        if (!kind) { return null; }
+        const definition = kind === 'struct'
+            ? RegisterDecoder.parseRegisterFromStruct(lines, line, typeName)
+            : RegisterDecoder.parseRegisterFromUnion(lines, line, typeName);
+        if (!definition?.fields.length) { return null; }
+        definition.fields.sort((a, b) => a.bitStart - b.bitStart || a.name.localeCompare(b.name));
+        return definition;
+    }
+
+    private localRegisterCandidates(document: vscode.TextDocument, typeName: string, request: HoverRequest): CandidateResolution<RegisterDefinition> {
+        const candidates: HoverCandidate<RegisterDefinition>[] = [];
+        let incomplete = false;
+        for (const header of this.registerDefinitionHeaders(document, typeName)) {
+            if (candidates.length >= request.maxCandidates) { incomplete = true; break; }
+            const location = new vscode.Location(document.uri, new vscode.Position(header.line, header.character));
+            candidates.push({ location, value: this.parseRegisterCandidate(document, location, typeName) });
+        }
+        return { candidates, incomplete };
+    }
+
+    private async registerTypeCandidates(document: vscode.TextDocument, position: vscode.Position, typeName: string, request: HoverRequest): Promise<CandidateResolution<RegisterDefinition>> {
+        const definitions = await this.definitionCandidates(document, position, request);
+        if (definitions.locations.length === 0 && !definitions.incomplete) {
+            return this.localRegisterCandidates(document, typeName, request);
+        }
+        const candidates: HoverCandidate<RegisterDefinition>[] = [];
+        for (const location of definitions.locations) {
+            const target = await this.openCandidate(location, request);
+            candidates.push({ location, value: target ? this.parseRegisterCandidate(target, location, typeName) : null });
+        }
+        return { candidates, incomplete: definitions.incomplete || !this.requestActive(request) };
+    }
+
     private async tryRegisterValueDecoding(
         document: vscode.TextDocument,
-        position: vscode.Position
+        position: vscode.Position,
+        request = this.createRequest()
     ): Promise<vscode.Hover | null> {
-        const line = document.lineAt(position.line);
-        const lineText = line.text;
-        const charPosition = position.character;
-
-        // Find number at current position
-        const numberMatch = this.findNumberAtPosition(lineText, charPosition);
-        if (!numberMatch) {
-            return null;
-        }
-
-        // Parse the number value
+        const lineText = document.lineAt(position.line).text;
+        const numberMatch = this.findNumberAtPosition(lineText, position.character);
+        if (!numberMatch) { return null; }
         const value = this.parseNumber(numberMatch.text);
-        if (value === null || !Number.isSafeInteger(value)) {
-            // Let the ordinary numeric hover use parseNumberExact for large literals.
-            return null;
-        }
-
-        // Try to find variable assignment pattern
-        // Patterns: Type varName = value; or varName = value; or object.member = value;
-        const beforeValue = lineText.substring(0, numberMatch.start).trim();
-
-        // Check if this looks like an assignment
-        if (!beforeValue.includes('=')) {
-            return null;
-        }
-
-        // Extract variable/member expression before '='
-        // Matches: varName or object.member or object.member.submember
+        if (value === null || !Number.isSafeInteger(value)) { return null; }
+        const beforeValue = lineText.substring(0, numberMatch.start);
         const assignMatch = beforeValue.match(/([\w.]+)\s*=\s*$/);
-        if (!assignMatch) {
-            return null;
-        }
-
+        if (!assignMatch) { return null; }
         const fullExpression = assignMatch[1];
-
-        // Find the variable declaration or type on this line
-        const typeMatch = lineText.match(/(\w+)\s+([\w.]+)\s*=/);
-        let typeName: string | null = null;
-
-        if (typeMatch && typeMatch[2] === fullExpression) {
-            // Found type in same line: Type varName = value;
-            typeName = typeMatch[1];
-        } else {
-            // Try to use LSP hover to get type information
-            try {
-                // Position at the start of the expression (before '=')
-                const exprStart = beforeValue.lastIndexOf(fullExpression);
-                if (exprStart === -1) {
-                    return null;
-                }
-
-                // Get hover information to extract type
-                // Re-entry guard is handled at provideHover level (activeHoverCalls);
-                // we still bound the wait to keep the UI responsive.
-                const exprPos = new vscode.Position(position.line, exprStart + fullExpression.length - 1);
-
-                {
-                    const hovers = await withLspTimeout(
-                        vscode.commands.executeCommand<vscode.Hover[]>(
-                            'vscode.executeHoverProvider',
-                            document.uri,
-                            exprPos
-                        )
-                    );
-
-                    if (hovers && hovers.length > 0) {
-                        for (const hover of hovers) {
-                            for (const content of hover.contents) {
-                                const text = typeof content === 'string' ? content : content.value;
-
-                                // Extract type from hover text
-                                // Format examples:
-                                // "Type dword"
-                                // "(member) RegTestInt::IntRegSts<volatile unsigned int>::dword"
-                                // "volatile unsigned int dword"
-
-                                // Try to extract the base type name
-                                // Look for struct/union/class name patterns
-                                const structMatch = text.match(/\b(struct|union|class)\s+(\w+)/);
-                                if (structMatch) {
-                                    typeName = structMatch[2];
-                                    break;
-                                }
-
-                                // For member variables, try to extract the containing type
-                                const memberMatch = text.match(/(\w+)::\w+<[^>]+>::(\w+)/);
-                                if (memberMatch) {
-                                    // This is a template union/struct, look for anonymous struct inside
-                                    typeName = memberMatch[1];
-                                    break;
-                                }
-                            }
-                            if (typeName) {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                // Fallback: Try using definition provider
-                if (!typeName) {
-                    const varPosition = lineText.indexOf(fullExpression.split('.')[0]);
-                    if (varPosition !== -1) {
-                        const varPos = new vscode.Position(position.line, varPosition);
-                        const definitions = await withLspTimeout(
-                            vscode.commands.executeCommand<vscode.Location[]>(
-                                'vscode.executeDefinitionProvider',
-                                document.uri,
-                                varPos
-                            )
-                        );
-
-                        if (definitions && definitions.length > 0) {
-                            const defDoc = await vscode.workspace.openTextDocument(definitions[0].uri);
-                            const defLine = defDoc.lineAt(definitions[0].range.start.line);
-                            const defMatch = defLine.text.match(/(\w+)\s+(\w+)/);
-                            if (defMatch) {
-                                typeName = defMatch[1];
-                            }
-                        }
-                    }
-                }
-            } catch (error) {
-                // LSP might not be available
-                return null;
+        const isScalarType = (name: string): boolean => /^(?:bool|char|short|int|long|signed|unsigned|float|double|u?int(?:8|16|32|64)_t)$/.test(name);
+        const range = new vscode.Range(position.line, numberMatch.start, position.line, numberMatch.end);
+        const describe = (definition: RegisterDefinition): string => `${definition.name}: ${definition.fields.map(field =>
+            `${field.name}[${field.bitEnd}:${field.bitStart}]${field.accessType ? ` ${field.accessType}` : ''}`).join(', ')}`;
+        const show = (resolution: CandidateResolution<RegisterDefinition>): vscode.Hover | null => {
+            // Unknown types include ordinary typedef scalars. A lookup failure alone
+            // does not establish that the assignment has a register layout to decode.
+            if (!this.hasValueCandidates(resolution)) { return null; }
+            const definition = this.resolvedCandidateValue(resolution);
+            if (!definition) {
+                // Literal conversion remains useful even when the register layout is ambiguous.
+                const content = this.generateHoverContent(value, numberMatch.text);
+                content.appendMarkdown('\n\n');
+                content.appendMarkdown(this.unresolvedCandidates(resolution, describe).value);
+                return new vscode.Hover(content, range);
             }
+            const decoded = new RegisterDecoder().decodeValue(value, definition);
+            if (!decoded.success) { return null; }
+            const content = this.generateRegisterDecodingContent(decoded);
+            if (resolution.candidates.length > 1) { this.appendCandidates(content, resolution, describe); }
+            return new vscode.Hover(content, range);
+        };
+
+        const explicitType = lineText.match(/(\w+)\s+([\w.]+)\s*=/);
+        if (explicitType && explicitType[2] === fullExpression) {
+            if (isScalarType(explicitType[1])) { return null; }
+            const local = this.localRegisterCandidates(document, explicitType[1], request);
+            if (local.candidates.length > 0) { return show(local); }
+            return show(await this.registerTypeCandidates(document,
+                new vscode.Position(position.line, explicitType.index!), explicitType[1], request));
         }
 
-        if (!typeName) {
-            return null;
-        }
-
-        // Try to find the type definition using LSP
-        let registerDef: RegisterDefinition | null = null;
-
-        try {
-            // Find where this type is defined
-            const varPosition = lineText.indexOf(fullExpression.split('.')[0]);
-            if (varPosition !== -1) {
-                const varPos = new vscode.Position(position.line, varPosition);
-                const varDefinitions = await withLspTimeout(
-                    vscode.commands.executeCommand<vscode.Location[]>(
-                        'vscode.executeDefinitionProvider',
-                        document.uri,
-                        varPos
-                    )
-                );
-
-                if (varDefinitions && varDefinitions.length > 0) {
-                    // Get the document where the variable is defined
-                    const varDefDoc = await vscode.workspace.openTextDocument(varDefinitions[0].uri);
-                    const varDefLine = varDefDoc.lineAt(varDefinitions[0].range.start.line);
-
-                    // Extract type name from definition line
-                    const typeMatch = varDefLine.text.match(/(\w+(?:<[^>]+>)?)\s+(\w+)/);
-                    if (typeMatch) {
-                        const fullTypeName = typeMatch[1];
-                        // Remove template parameters if any (e.g., "IntRegSts<volatile uint32_t>" -> "IntRegSts")
-                        const baseTypeName = fullTypeName.replace(/<.*>/, '');
-
-                        // Try to find type definition in the same document
-                        let typeDefDoc = varDefDoc;
-                        let typeDefLines: string[] = [];
-
-                        // First, try to find type definition using LSP
-                        const typePos = new vscode.Position(
-                            varDefinitions[0].range.start.line,
-                            varDefLine.text.indexOf(fullTypeName)
-                        );
-
-                        const typeDefinitions = await withLspTimeout(
-                            vscode.commands.executeCommand<vscode.Location[]>(
-                                'vscode.executeDefinitionProvider',
-                                varDefDoc.uri,
-                                typePos
-                            )
-                        );
-
-                        if (typeDefinitions && typeDefinitions.length > 0) {
-                            // Type is defined in another file (header file)
-                            typeDefDoc = await vscode.workspace.openTextDocument(typeDefinitions[0].uri);
-                        }
-
-                        // Parse the document containing type definition
-                        for (let i = 0; i < typeDefDoc.lineCount; i++) {
-                            typeDefLines.push(typeDefDoc.getText(typeDefDoc.lineAt(i).range));
-                        }
-
-                        // Try to find struct definition first
-                        const structLine = RegisterDecoder.findStructDefinition(typeDefLines, baseTypeName);
-                        if (structLine !== -1) {
-                            registerDef = RegisterDecoder.parseRegisterFromStruct(typeDefLines, structLine, baseTypeName);
-                        } else {
-                            // Try to find union or class containing union
-                            const unionLine = RegisterDecoder.findUnionDefinition(typeDefLines, baseTypeName);
-                            if (unionLine !== -1) {
-                                registerDef = RegisterDecoder.parseRegisterFromUnion(typeDefLines, unionLine, baseTypeName);
-                            }
-                        }
-                    }
-                }
+        const variablePosition = new vscode.Position(position.line, beforeValue.lastIndexOf(fullExpression));
+        const variables = await this.definitionCandidates(document, variablePosition, request);
+        const resolution: CandidateResolution<RegisterDefinition> = { candidates: [], incomplete: variables.incomplete };
+        let allScalar = variables.locations.length > 0;
+        for (const variable of variables.locations) {
+            if (resolution.candidates.length >= request.maxCandidates) {
+                resolution.incomplete = true;
+                break;
             }
-        } catch (error) {
-            // If LSP approach fails, fallback to searching in current document
-        }
-
-        // Fallback: Search in current document if not found via LSP
-        if (!registerDef) {
-            const documentLines = this.getDocumentLines(document);
-
-            const structLine = RegisterDecoder.findStructDefinition(documentLines, typeName);
-            if (structLine !== -1) {
-                registerDef = RegisterDecoder.parseRegisterFromStruct(documentLines, structLine, typeName);
-            } else {
-                const unionLine = RegisterDecoder.findUnionDefinition(documentLines, typeName);
-                if (unionLine !== -1) {
-                    registerDef = RegisterDecoder.parseRegisterFromUnion(documentLines, unionLine, typeName);
+            const variableDocument = await this.openCandidate(variable, request);
+            const text = variableDocument?.lineAt(variable.range.start.line).text;
+            const type = text?.match(/\b(?:(?:const|volatile|static|extern|struct|union|class)\s+)*([A-Za-z_]\w*(?:<[^>]+>)?)\s+(?:[*&]\s*)*\w+/);
+            if (!variableDocument || !type) {
+                allScalar = false;
+                resolution.candidates.push({ location: variable, value: null });
+                continue;
+            }
+            const typeName = type[1].replace(/<.*>/, '');
+            if (isScalarType(typeName)) {
+                resolution.candidates.push({ location: variable, value: null });
+                continue;
+            }
+            allScalar = false;
+            const typePosition = new vscode.Position(variable.range.start.line, text!.indexOf(type[1], type.index));
+            const types = await this.registerTypeCandidates(variableDocument, typePosition, typeName, request);
+            resolution.incomplete ||= types.incomplete;
+            if (types.candidates.length === 0) { resolution.candidates.push({ location: variable, value: null }); }
+            for (const candidate of types.candidates) {
+                if (resolution.candidates.length >= request.maxCandidates) { resolution.incomplete = true; break; }
+                if (!resolution.candidates.some(existing => this.hoverKey(existing.location.uri, existing.location.range.start)
+                    === this.hoverKey(candidate.location.uri, candidate.location.range.start))) {
+                    resolution.candidates.push(candidate);
                 }
             }
         }
-
-        if (!registerDef || registerDef.fields.length === 0) {
-            return null;
+        if (allScalar && !resolution.incomplete) { return null; }
+        if (variables.locations.length === 0 && !variables.incomplete) {
+            // Keep the existing member-expression fallback, but inspect every reported type.
+            const hovers = await this.requestLspHovers(document.uri,
+                new vscode.Position(position.line, variablePosition.character + fullExpression.length - 1), request);
+            const typeNames = new Set<string>();
+            for (const hover of hovers ?? []) {
+                for (const content of hover.contents) {
+                    const text = typeof content === 'string' ? content : content.value;
+                    const type = text.match(/\b(?:struct|union|class)\s+(\w+)/)
+                        ?? text.match(/(\w+)::\w+<[^>]+>::\w+/);
+                    if (type) { typeNames.add(type[1]); }
+                }
+            }
+            for (const typeName of typeNames) {
+                if (resolution.candidates.length >= request.maxCandidates || !this.requestActive(request)) {
+                    resolution.incomplete = true;
+                    break;
+                }
+                const local = this.localRegisterCandidates(document, typeName, request);
+                const remaining = request.maxCandidates - resolution.candidates.length;
+                resolution.candidates.push(...local.candidates.slice(0, remaining));
+                resolution.incomplete ||= local.incomplete || local.candidates.length > remaining;
+            }
         }
-
-        // Decode the register value
-        const decoder = new RegisterDecoder();
-        const result = decoder.decodeValue(value, registerDef);
-
-        if (!result.success) {
-            return null;
-        }
-
-        // Generate hover content
-        const range = new vscode.Range(
-            position.line,
-            numberMatch.start,
-            position.line,
-            numberMatch.end
-        );
-
-        return new vscode.Hover(
-            this.generateRegisterDecodingContent(result),
-            range
-        );
+        resolution.incomplete ||= !this.requestActive(request);
+        return show(resolution);
     }
 
     /**
@@ -1473,7 +1422,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      */
     private async tryStructSizeInfo(
         document: vscode.TextDocument,
-        position: vscode.Position
+        position: vscode.Position,
+        request = this.createRequest()
     ): Promise<vscode.Hover | null> {
         const line = document.lineAt(position.line);
         const lineText = line.text;
@@ -1525,7 +1475,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         // Calculate struct size
         // Load custom type configuration if available (async fs I/O under the hood)
         const typeConfig = await this.loadTypeConfig(document);
-        if (document.version !== sourceVersion) { return null; }
+        if (document.version !== sourceVersion || !this.requestActive(request)) { return null; }
         const calculator = new StructSizeCalculator(typeConfig);
 
         // Register all struct/class definitions in the document
@@ -1713,7 +1663,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      */
     private async tryBitOperationHover(
         document: vscode.TextDocument,
-        position: vscode.Position
+        position: vscode.Position,
+        request = this.createRequest()
     ): Promise<vscode.Hover | null> {
         // Check if bit operation hover feature is enabled
         const bitOpEnabled = vscode.workspace.getConfiguration('taskhub.experimental').get('bitOperationHover.enabled', false);
@@ -1733,6 +1684,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         // Try to get the current value of the variable (skip for constant expressions)
         let beforeValue: number | undefined = undefined;
+        let identifier: CandidateResolution<number> | undefined;
 
         // For constant expressions, we don't need to look up the variable value
         if (!operation.isConstant && operation.variable) {
@@ -1746,7 +1698,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 );
 
                 const variablePosition = new vscode.Position(position.line, lineText.indexOf(operation.variable));
-                const value = await this.getIdentifierValue(document, variablePosition);
+                identifier = await this.resolveIdentifierValue(document, variablePosition, request);
+                const value = this.resolvedCandidateValue(identifier);
                 if (value !== null) {
                     beforeValue = value;
                 }
@@ -1760,6 +1713,13 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         // Format the result as markdown
         const markdown = formatBitOperationResult(result);
+        if (identifier && this.hasValueCandidates(identifier)) {
+            if (this.resolvedCandidateValue(identifier) === null) {
+                markdown.appendMarkdown('\n\n' + this.unresolvedCandidates(identifier, value => String(value)).value);
+            } else if (identifier.candidates.length > 1 || identifier.unverified) {
+                this.appendCandidates(markdown, identifier, value => String(value));
+            }
+        }
 
         // Create range for the hover
         const range = new vscode.Range(

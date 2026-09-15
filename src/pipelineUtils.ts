@@ -379,18 +379,22 @@ const WINDOWS_RESERVED_NAME_RE = /^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\.|$)/i;
 function canonicalizeForContainment(p: string): string {
     let existing = p;
     const tail: string[] = [];
-    while (!fs.existsSync(existing)) {
-        const parent = path.dirname(existing);
-        if (parent === existing) { break; } // filesystem root
-        tail.unshift(path.basename(existing));
-        existing = parent;
+    while (true) {
+        try {
+            // existsSync follows links and reports a dangling link as absent.
+            // lstat keeps that link in the path so realpath must validate it.
+            fs.lstatSync(existing);
+            break;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
+            const parent = path.dirname(existing);
+            if (parent === existing) { throw error; }
+            tail.unshift(path.basename(existing));
+            existing = parent;
+        }
     }
-    let canonical: string;
-    try {
-        canonical = fs.realpathSync.native(existing);
-    } catch {
-        canonical = existing; // 권한 등으로 실패 시 어휘적 경로 유지
-    }
+    // Missing link targets, loops and permission failures cannot prove safety.
+    const canonical = fs.realpathSync.native(existing);
     return tail.length > 0 ? path.join(canonical, ...tail) : canonical;
 }
 
@@ -527,12 +531,84 @@ export function isInsideWorkspaceRoots(resolvedPath: string, workspaceRoots: str
             }
         }
     }
-    const canonicalResolved = canonicalizeForContainment(resolved);
-    return normalizedRoots.some(root => {
-        const canonicalRoot = canonicalizeForContainment(root);
-        const rel = path.relative(canonicalRoot, canonicalResolved);
-        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-    });
+    try {
+        const canonicalResolved = canonicalizeForContainment(resolved);
+        return normalizedRoots.some(root => {
+            try {
+                const canonicalRoot = canonicalizeForContainment(root);
+                const rel = path.relative(canonicalRoot, canonicalResolved);
+                return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+            } catch {
+                // 연결이 끊기거나 읽을 수 없는 root 하나가 다른 정상 root까지 막지 않는다.
+                return false;
+            }
+        });
+    } catch {
+        return false;
+    }
+}
+
+/** Write through a checked file descriptor, without truncating an unchecked target. */
+export function writeWorkspaceFileSync(
+    targetPath: string,
+    workspaceRoots: string[],
+    baseDir: string,
+    content: string | Uint8Array,
+    options: { append?: boolean; overwrite?: boolean; mkdirs?: boolean; mode?: number } = {}
+): string {
+    const safePath = resolveWithinWorkspace(targetPath, workspaceRoots, baseDir);
+    const directory = path.dirname(safePath);
+    if (!fs.existsSync(directory)) {
+        if (options.mkdirs === false) {
+            throw new Error(`Cannot write to '${safePath}': parent directory does not exist and 'mkdirs' is false.`);
+        }
+        fs.mkdirSync(directory, { recursive: true });
+    }
+    // Preserve supported in-workspace symlinks by opening their checked target.
+    resolveWithinWorkspace(safePath, workspaceRoots, baseDir);
+    const canonicalPath = canonicalizeForContainment(safePath);
+    try {
+        const existing = fs.lstatSync(canonicalPath);
+        if (!existing.isFile() || existing.nlink !== 1) {
+            throw new Error(`Refusing to write to an unsafe file: '${safePath}'.`);
+        }
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
+    }
+    const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+    // A FIFO swapped into the final name must not block the extension host.
+    const nonBlock = process.platform === 'win32' ? 0 : fs.constants.O_NONBLOCK;
+    const exclusive = !options.append && options.overwrite === false;
+    const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | noFollow | nonBlock
+        | (options.append ? fs.constants.O_APPEND : 0)
+        | (exclusive ? fs.constants.O_EXCL : 0);
+    let fd: number;
+    try {
+        fd = fs.openSync(canonicalPath, flags, options.mode);
+    } catch (error) {
+        if (exclusive && (error as NodeJS.ErrnoException).code === 'EEXIST') {
+            throw new Error(`Write refused to overwrite existing file '${safePath}' (overwrite: false).`);
+        }
+        throw error;
+    }
+    try {
+        // Recheck after open, before permissions, truncation or content changes.
+        resolveWithinWorkspace(canonicalPath, workspaceRoots, baseDir);
+        const opened = fs.fstatSync(fd);
+        const current = fs.lstatSync(canonicalPath);
+        if (!opened.isFile() || !current.isFile() || opened.nlink !== 1
+            || opened.dev !== current.dev || opened.ino !== current.ino) {
+            throw new Error(`Refusing to write to an unsafe or changed file: '${safePath}'.`);
+        }
+        if (options.mode !== undefined && process.platform !== 'win32') {
+            fs.fchmodSync(fd, options.mode);
+        }
+        if (!options.append) { fs.ftruncateSync(fd, 0); }
+        fs.writeFileSync(fd, content);
+    } finally {
+        fs.closeSync(fd);
+    }
+    return safePath;
 }
 
 /**

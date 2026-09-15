@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import {
     executeAction,
     executeActionPipeline,
+    selectHistoryRerunInputs,
     __testHook_flushBackgroundCompletions,
     __testHook_resetShellEnvNamesCache,
 } from '../extension';
@@ -678,7 +679,7 @@ suite('Pipeline integration', function () {
 
             await assert.rejects(
                 () => run(action),
-                /attempted to write/
+                /overwrite: false/
             );
             assert.strictEqual(fs.readFileSync(resultPath, 'utf8'), 'old');
         });
@@ -2934,6 +2935,67 @@ try {
             }
         });
 
+        test('History 입력 타입 변경과 잘못된 confirm 결과는 재확인 없이 다음 태스크를 실행하지 않는다', async () => {
+            const originalWarning = vscode.window.showWarningMessage;
+            const marker = path.join(tempWorkspace, 'confirmed.txt');
+            const action: PipelineAction = {
+                description: 'history confirmation boundary',
+                tasks: [
+                    { id: 'gate', type: 'confirm', message: 'Deploy?' },
+                    { id: 'deploy', type: 'writeFile', path: marker, content: 'deployed' },
+                ],
+            };
+            let confirmations = 0;
+            try {
+                (vscode.window as any).showWarningMessage = async () => {
+                    confirmations++;
+                    return undefined;
+                };
+                const histories: HistoryEntry[] = [
+                    { actionId: 'replay', actionTitle: 'replay', timestamp: 1, status: 'success', inputs: { gate: { value: 'release-1' } }, inputTaskTypes: { gate: 'inputBox' } },
+                    { actionId: 'replay', actionTitle: 'replay', timestamp: 2, status: 'success', inputs: { gate: { confirmed: 'true' } } },
+                    { actionId: 'replay', actionTitle: 'replay', timestamp: 3, status: 'success', inputs: { gate: { value: 'release-1' } }, inputTaskTypes: { gate: 'confirm' } },
+                ];
+                for (const [index, entry] of histories.entries()) {
+                    await assert.rejects(() => executeActionPipeline(
+                        action,
+                        { extensionPath: path.resolve(__dirname, '..', '..') } as vscode.ExtensionContext,
+                        `history-confirm-${index}`,
+                        tempWorkspace,
+                        [tempWorkspace],
+                        { presetInputs: selectHistoryRerunInputs(entry, true, action.tasks) }
+                    ));
+                    assert.strictEqual(confirmations, index + 1);
+                    assert.strictEqual(fs.existsSync(marker), false, '취소한 확인 뒤에 배포 태스크가 실행됐다');
+                }
+
+                // Direct presets also go through the runtime shape gate.
+                await assert.rejects(() => executeActionPipeline(
+                    action,
+                    { extensionPath: path.resolve(__dirname, '..', '..') } as vscode.ExtensionContext,
+                    'direct-confirm-shape', tempWorkspace, [tempWorkspace],
+                    { presetInputs: { gate: { value: 'release-1' } } }
+                ));
+                assert.strictEqual(confirmations, 4);
+                assert.strictEqual(fs.existsSync(marker), false);
+
+                const valid: HistoryEntry = {
+                    actionId: 'replay', actionTitle: 'replay', timestamp: 4, status: 'success',
+                    inputs: { gate: { confirmed: 'true' } }, inputTaskTypes: { gate: 'confirm' },
+                };
+                await executeActionPipeline(
+                    action,
+                    { extensionPath: path.resolve(__dirname, '..', '..') } as vscode.ExtensionContext,
+                    'history-confirm-compatible', tempWorkspace, [tempWorkspace],
+                    { presetInputs: selectHistoryRerunInputs(valid, true, action.tasks) }
+                );
+                assert.strictEqual(confirmations, 4, '호환되는 명시적 저장 입력도 다시 물었다');
+                assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'deployed');
+            } finally {
+                (vscode.window as any).showWarningMessage = originalWarning;
+            }
+        });
+
         test('IT-113: 여러 command/shell task가 각자의 id로 모두 기록된다 (command 타입 포함)', async () => {
             const action: PipelineAction = {
                 description: 'IT-113',
@@ -4977,6 +5039,28 @@ try {
                 fs.readFileSync(path.join(tempWorkspace, 'name.txt'), 'utf8'),
                 'output.json'
             );
+        });
+
+        test('세 파일 쓰기 경로는 끊어진 symlink로 워크스페이스 밖에 파일을 생성하지 않는다', async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-write-outside-'));
+            try {
+                const target = path.join(outside, 'must-not-exist.txt');
+                const link = path.join(tempWorkspace, 'report.txt');
+                fs.symlinkSync(target, link);
+                const tasks: PipelineAction['tasks'] = [
+                    { id: 'write', type: 'writeFile', path: link, content: 'blocked', overwrite: false },
+                    { id: 'append', type: 'appendFile', path: link, content: 'blocked' },
+                    { id: 'output', type: 'stringManipulation', function: 'trim', input: 'blocked', passTheResultToNextTask: true, output: { mode: 'file', filePath: link } },
+                ];
+                for (const task of tasks) {
+                    await assert.rejects(() => run({ description: 'dangling link boundary', tasks: [task] }, `dangling-${task.id}`), /outside the current workspace/);
+                    assert.strictEqual(fs.existsSync(target), false, `${task.type}가 외부 파일을 만들었다`);
+                    assert.strictEqual(fs.lstatSync(link).isSymbolicLink(), true);
+                }
+            } finally {
+                fs.rmSync(outside, { recursive: true, force: true });
+            }
         });
 
         test('IT-055: writeFile은 path 누락 시 즉시 에러', async () => {

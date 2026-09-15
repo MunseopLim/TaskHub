@@ -103,12 +103,8 @@ suite('Hex Viewer 웹뷰 지역화 / 접근성', () => {
     suite('검색 유효성', () => {
         const html = render();
 
-        test('sparse HEX의 빈 주소를 검색 결과로 취급하지 않는다', () => {
-            assert.ok(
-                html.includes('if (!hasDataRange(i, bytes.length)) { continue; }'),
-                'DATA의 gap 채움값만 비교하면 존재하지 않는 주소에서 FF가 검색된다'
-            );
-        });
+        // Sparse gap 검색은 hexViewerInteraction.test.ts에서 실제 검색 결과와
+        // 강조·다음 결과 이동으로 검증한다. 검색 알고리즘의 소스 모양에 묶지 않는다.
 
         test('ASCII 범위를 벗어난 입력은 하위 바이트로 잘라 검색하지 않는다', () => {
             assert.ok(html.includes('S.findAsciiOnly'), '비 ASCII 입력 안내가 없다');

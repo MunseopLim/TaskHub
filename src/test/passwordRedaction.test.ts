@@ -1741,9 +1741,11 @@ suite('Password taint and redaction', function () {
                                     id: 'deploy',
                                     type: 'command',
                                     command: platformCommand('node'),
-                                    args: ['-e', 'process.stdout.write(process.argv[1]); setTimeout(() => {}, 5000)', '${ask.value}'],
+                                    args: ['-e', "require('fs').writeSync(1, process.argv[1]); setTimeout(() => {}, 10000)", '${ask.value}'],
                                     passTheResultToNextTask: true,
-                                    timeoutSeconds: 0.08,
+                                    // 80ms는 느린 CI에서 Node 시작 전에 끝난다. 출력은
+                                    // 동기 flush하고 자식 수명(10초)보다 먼저 timeout한다.
+                                    timeoutSeconds: 2,
                                 },
                             ],
                         },
@@ -1761,10 +1763,13 @@ suite('Password taint and redaction', function () {
             }
 
             assert.ok(failure);
+            assert.strictEqual(failure.name, 'SensitiveTaskError');
+            assert.match(failure.message, /timed out|시간 초과/i);
             assert.ok(!failure!.message.includes(secret), '기본 실패 객체에는 비밀이 없어야 한다');
             assert.ok(panelHtml.includes(secret), '동의한 화면에 timeout 전 부분 출력이 없다');
-            assert.match(panelHtml, /timed out|시간 초과/i);
+            assert.match(panelHtml, /timed out after 2s\./, '원본 timeout 오류 메시지가 동의한 화면에 없다');
             assert.ok(!shownErrors.join('\n').includes(secret), '일반 실패 알림에 원본이 샜다');
+            assert.ok(!verboseLines.join('\n').includes(secret), 'verbose 로그에 원본이 샜다');
         });
 
         test('stdout/stderr 없는 built-in 실패도 raw Error.message를 동의 화면에서 진단할 수 있다', async () => {

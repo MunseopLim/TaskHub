@@ -8,7 +8,8 @@ import {
     formatBitOperationResult,
     formatCopyableHoverValue,
     registerHoverCopyCommand,
-    MAX_HOVER_COPY_LENGTH
+    MAX_HOVER_COPY_LENGTH,
+    MAX_HOVER_DEFINITION_CANDIDATES
 } from '../numberBaseHoverProvider';
 import * as vscode from 'vscode';
 import { CompleteBitFieldInfo, extractBitFieldInfo } from '../sfrBitFieldParser';
@@ -19,6 +20,17 @@ import * as path from 'path';
 
 function visibleMarkdownText(markdown: vscode.MarkdownString): string {
     return markdown.value.replace(/&nbsp;/g, ' ').replace(/\\([\\`*_{}\[\]()#+\-.!|$>])/g, '$1');
+}
+
+function copyValues(markdown: vscode.MarkdownString): string[] {
+    // Escaped source text can contain the command name without becoming a link.
+    return [...markdown.value.matchAll(/(?<!\\)\[\$\(copy\)\]\(command:taskhub\.copyHoverValue\?([^\s)]+)(?:\s+"[^"]*")?\)/g)].map(match => {
+        const args: unknown = JSON.parse(decodeURIComponent(match[1]));
+        assert.ok(Array.isArray(args));
+        assert.strictEqual(args.length, 1, '복사는 값 한 개만 전달해야 한다');
+        assert.strictEqual(typeof args[0], 'string');
+        return args[0];
+    });
 }
 
 suite('NumberBaseHoverProvider Test Suite', () => {
@@ -121,6 +133,832 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             };
             const hover = await (provider as any).tryStructSizeInfo(document, new vscode.Position(0, 8));
             assert.strictEqual(hover, null);
+        });
+    });
+
+    suite('LSP definition agreement and request lifetime', () => {
+        function sourceDocument(filePath: string, text: string): vscode.TextDocument {
+            const lines = text.split('\n');
+            return {
+                uri: vscode.Uri.file(filePath), version: 1, lineCount: lines.length,
+                lineAt: (line: number) => ({ text: lines[line], range: new vscode.Range(line, 0, line, lines[line].length) }),
+                getText: (range?: vscode.Range) => range
+                    ? lines[range.start.line].slice(range.start.character, range.end.character) : text,
+                getWordRangeAtPosition: (position: vscode.Position) => {
+                    for (const match of lines[position.line].matchAll(/\b[A-Za-z_]\w*\b/g)) {
+                        if (position.character >= match.index! && position.character < match.index! + match[0].length) {
+                            return new vscode.Range(position.line, match.index!, position.line, match.index! + match[0].length);
+                        }
+                    }
+                    return undefined;
+                },
+            } as unknown as vscode.TextDocument;
+        }
+
+        const location = (document: vscode.TextDocument, line = 0): vscode.Location =>
+            new vscode.Location(document.uri, new vscode.Position(line, 0));
+        const markdownText = (hover: vscode.Hover | null | undefined): string => {
+            assert.ok(hover, 'the hover must explain its result');
+            return visibleMarkdownText(new vscode.MarkdownString(hover.contents
+                .map(content => typeof content === 'string' ? content : content.value).join('\n'))).replace(/\\/g, '/');
+        };
+
+        async function withLsp<T>(documents: vscode.TextDocument[], execute: (command: string, uri: vscode.Uri, position: vscode.Position) => unknown, run: () => Promise<T>): Promise<T> {
+            const originalExecute = vscode.commands.executeCommand;
+            const originalOpen = vscode.workspace.openTextDocument;
+            try {
+                (vscode.commands as any).executeCommand = async (command: string, uri: vscode.Uri, position: vscode.Position) => execute(command, uri, position);
+                (vscode.workspace as any).openTextDocument = async (uri: vscode.Uri) => {
+                    const document = documents.find(entry => entry.uri.toString() === uri.toString());
+                    if (!document) { throw new Error('Missing definition fixture'); }
+                    return document;
+                };
+                return await run();
+            } finally {
+                vscode.commands.executeCommand = originalExecute;
+                vscode.workspace.openTextDocument = originalOpen;
+            }
+        }
+
+        for (const [symbol, declaration] of [
+            ['work', 'void work();'],
+            ['count', 'extern int count;'],
+        ]) {
+            test(`ordinary nonnumeric identifiers do not show definition ambiguity: ${symbol}`, async () => {
+                const source = sourceDocument('/hover/source.c', `${symbol};`);
+                const target = sourceDocument('/hover/ordinary.h', declaration);
+                await withLsp([target], command => command === 'vscode.executeDefinitionProvider'
+                    ? [location(target)] : [], async () => {
+                    const cancellation = new vscode.CancellationTokenSource();
+                    try {
+                        assert.strictEqual(await provider.provideHover(source, new vscode.Position(0, 1), cancellation.token), undefined);
+                    } finally { cancellation.dispose(); }
+                });
+            });
+        }
+
+        for (const result of ['unavailable', 'timeout']) {
+            test(`identifier lookups without numeric evidence stay silent: ${result}`, async () => {
+                const source = sourceDocument('/hover/source.c', 'work();');
+                const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+                const commands: string[] = [];
+                await withLsp([], command => {
+                    commands.push(command);
+                    return result === 'timeout' ? new Promise(() => {}) : undefined;
+                }, async () => {
+                    const cancellation = new vscode.CancellationTokenSource();
+                    try {
+                        assert.strictEqual(await bounded.provideHover(source, new vscode.Position(0, 1), cancellation.token), undefined);
+                        if (result === 'timeout') {
+                            assert.deepStrictEqual(commands.sort(), ['vscode.executeDeclarationProvider', 'vscode.executeDefinitionProvider']);
+                        }
+                    } finally { cancellation.dispose(); }
+                });
+            });
+        }
+
+        test('conflicting numeric hover values at one definition still show ambiguity', async () => {
+            const source = sourceDocument('/hover/source.c', 'VALUE');
+            const target = sourceDocument('/hover/external.h', 'extern int VALUE;');
+            await withLsp([target], command => command === 'vscode.executeDefinitionProvider'
+                ? [location(target)] : command === 'vscode.executeHoverProvider'
+                    ? [new vscode.Hover('VALUE = 1'), new vscode.Hover('VALUE = 8')] : [], async () => {
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const text = markdownText(await provider.provideHover(source, new vscode.Position(0, 1), cancellation.token));
+                    assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                    assert.doesNotMatch(text, /command:taskhub.copyHoverValue/);
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        for (const declarationFirst of [true, false]) {
+            for (const timeout of [false, true]) {
+                test(`valueless declarations do not hide a numeric definition: declarationFirst=${declarationFirst}, timeout=${timeout}`, async () => {
+                    const source = sourceDocument('/hover/source.c', 'X;');
+                    const declaration = sourceDocument(`/hover/${declarationFirst ? 'a' : 'z'}-declaration.h`, 'extern const int X;');
+                    const definition = sourceDocument(`/hover/${declarationFirst ? 'z' : 'a'}-definition.c`, 'const int X = 5;');
+                    const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+                    await withLsp([declaration, definition], command => command === 'vscode.executeDefinitionProvider'
+                        ? (declarationFirst ? [location(declaration), location(definition)] : [location(definition), location(declaration)])
+                        : command === 'vscode.executeHoverProvider' && timeout ? new Promise(() => {}) : [], async () => {
+                        assert.strictEqual(await (bounded as any).getIdentifierValue(source, new vscode.Position(0, 0)), 5);
+                        const cancellation = new vscode.CancellationTokenSource();
+                        try {
+                            const hover = await bounded.provideHover(source, new vscode.Position(0, 0), cancellation.token);
+                            const text = markdownText(hover);
+                            assert.ok(copyValues(hover!.contents[0] as vscode.MarkdownString).includes('5'));
+                            assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다|declaration.h|Unresolved|해석하지 못함/);
+                        } finally { cancellation.dispose(); }
+                    });
+                });
+            }
+        }
+
+        test('a declaration provider timeout keeps an available numeric definition but warns that lookup was incomplete', async () => {
+            const source = sourceDocument('/hover/source.c', 'X;');
+            const definition = sourceDocument('/hover/definition.c', 'const int X = 5;');
+            const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+            const commands: string[] = [];
+            await withLsp([definition], command => {
+                commands.push(command);
+                return command === 'vscode.executeDefinitionProvider' ? [location(definition)] : new Promise(() => {});
+            }, async () => {
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const hover = await bounded.provideHover(source, new vscode.Position(0, 0), cancellation.token);
+                    const text = markdownText(hover);
+                    assert.ok(copyValues(hover!.contents[0] as vscode.MarkdownString).includes('5'));
+                    assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다/);
+                    assert.match(text, /could not be checked|확인하지 못한 후보/);
+                    assert.deepStrictEqual(commands.sort(), ['vscode.executeDeclarationProvider', 'vscode.executeDefinitionProvider']);
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        test('an unreadable alternative definition is listed as not checked instead of silently dropped', async () => {
+            const source = sourceDocument('/hover/source.c', 'X;');
+            const first = sourceDocument('/hover/a.h', 'const int X = 1;');
+            const second = sourceDocument('/hover/b.h', 'const int X = 2;');
+            const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+            await withLsp([first], command => command === 'vscode.executeDefinitionProvider'
+                ? [location(first), location(second)] : [], async () => {
+                const open = vscode.workspace.openTextDocument;
+                (vscode.workspace as any).openTextDocument = (uri: vscode.Uri) => uri.toString() === second.uri.toString()
+                    ? new Promise(() => {}) : open(uri);
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const text = markdownText(await bounded.provideHover(source, new vscode.Position(0, 0), cancellation.token));
+                    assert.ok(text.includes('b.h'));
+                    assert.match(text, /Not checked|확인하지 못함/);
+                    assert.match(text, /could not be checked|확인하지 못한 후보/);
+                } finally {
+                    (vscode.workspace as any).openTextDocument = open;
+                    cancellation.dispose();
+                }
+            });
+        });
+
+        test('a hover lookup timeout for a definition without a source value is not treated as valueless', async () => {
+            const source = sourceDocument('/hover/source.c', 'X;');
+            const known = sourceDocument('/hover/a.c', 'const int X = 1;');
+            const computed = sourceDocument('/hover/b.c', 'const int X = other();');
+            const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+            await withLsp([known, computed], command => command === 'vscode.executeDefinitionProvider'
+                ? [location(known), location(computed)]
+                : command === 'vscode.executeHoverProvider' ? new Promise(() => {}) : [], async () => {
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const text = markdownText(await bounded.provideHover(source, new vscode.Position(0, 0), cancellation.token));
+                    assert.ok(text.includes('b.c'));
+                    assert.match(text, /Not checked|확인하지 못함/);
+                    assert.match(text, /could not be checked|확인하지 못한 후보/);
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        test('a declaration document timeout does not block reading another numeric definition', async () => {
+            const source = sourceDocument('/hover/source.c', 'X;');
+            const declaration = sourceDocument('/hover/a-declaration.h', 'extern const int X;');
+            const definition = sourceDocument('/hover/z-definition.c', 'const int X = 5;');
+            const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+            await withLsp([definition], command => command === 'vscode.executeDefinitionProvider'
+                ? [location(declaration), location(definition)] : [], async () => {
+                const open = vscode.workspace.openTextDocument;
+                (vscode.workspace as any).openTextDocument = (uri: vscode.Uri) => uri.toString() === declaration.uri.toString()
+                    ? new Promise(() => {}) : open(uri);
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const hover = await bounded.provideHover(source, new vscode.Position(0, 0), cancellation.token);
+                    assert.ok(hover);
+                    assert.ok(copyValues(hover.contents[0] as vscode.MarkdownString).includes('5'));
+                    assert.doesNotMatch(markdownText(hover), /cannot be determined|확정할 수 없습니다/);
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        test('numeric conflicts within one hover location cannot be dropped beside a resolved definition', async () => {
+            const source = sourceDocument('/hover/source.c', 'X;');
+            const declaration = sourceDocument('/hover/declaration.h', 'extern const int X;');
+            const definition = sourceDocument('/hover/definition.c', 'const int X = 5;');
+            await withLsp([declaration, definition], command => command === 'vscode.executeDefinitionProvider'
+                ? [location(declaration), location(definition)] : command === 'vscode.executeHoverProvider'
+                    ? [new vscode.Hover('X = 1'), new vscode.Hover('X = 8')] : [], async () => {
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const text = markdownText(await provider.provideHover(source, new vscode.Position(0, 0), cancellation.token));
+                    assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                    assert.doesNotMatch(text, /command:taskhub.copyHoverValue/);
+                    assert.ok(text.includes('declaration.h'));
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        test('conflicting numbers in one hover content remain conflicting candidates', async () => {
+            const source = sourceDocument('/hover/source.c', 'X;');
+            const declaration = sourceDocument('/hover/declaration.h', 'extern const int X;');
+            await withLsp([declaration], command => command === 'vscode.executeDefinitionProvider'
+                ? [location(declaration)] : command === 'vscode.executeHoverProvider'
+                    ? [new vscode.Hover('X = 1\nX = 8')] : [], async () => {
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const text = markdownText(await provider.provideHover(source, new vscode.Position(0, 0), cancellation.token));
+                    assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                    assert.doesNotMatch(text, /command:taskhub.copyHoverValue/);
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        test('a valueless declaration timeout cannot hide conflicting numeric definitions', async () => {
+            const source = sourceDocument('/hover/source.c', 'X;');
+            const declaration = sourceDocument('/hover/a-declaration.h', 'extern const int X;');
+            const first = sourceDocument('/hover/b-definition.c', 'const int X = 1;');
+            const second = sourceDocument('/hover/c-definition.c', 'const int X = 8;');
+            const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+            await withLsp([declaration, first, second], command => command === 'vscode.executeDefinitionProvider'
+                ? [location(declaration), location(first), location(second)] : command === 'vscode.executeHoverProvider'
+                    ? new Promise(() => {}) : [], async () => {
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const text = markdownText(await bounded.provideHover(source, new vscode.Position(0, 0), cancellation.token));
+                    assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                    assert.ok(text.includes('b-definition.c'));
+                    assert.ok(text.includes('c-definition.c'));
+                    assert.doesNotMatch(text, /command:taskhub.copyHoverValue|a-declaration.h/);
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        for (const slowProvider of [false, true]) {
+            for (const sourceValue of [undefined, 8]) {
+                test(`numeric hover fallbacks start before unrelated lookups time out: slowProvider=${slowProvider}, sourceValue=${sourceValue}`, async () => {
+                    const source = sourceDocument('/hover/source.c', 'X;');
+                    const declaration = sourceDocument('/hover/a-declaration.h', 'extern const int X;');
+                    const fallback = sourceDocument('/hover/z-definition.c', 'const int X = other();');
+                    const known = sourceDocument('/hover/known.c', `const int X = ${sourceValue};`);
+                    const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+                    const requestedHovers: string[] = [];
+                    await withLsp([declaration, fallback, known], (command, uri) => {
+                        if (command === 'vscode.executeDefinitionProvider') {
+                            return [location(declaration), location(fallback), ...(sourceValue === undefined ? [] : [location(known)])];
+                        }
+                        if (command === 'vscode.executeDeclarationProvider') { return slowProvider ? new Promise(() => {}) : []; }
+                        if (command === 'vscode.executeHoverProvider') {
+                            requestedHovers.push(uri.toString());
+                            return uri.toString() === fallback.uri.toString() ? [new vscode.Hover('X = 5')] : new Promise(() => {});
+                        }
+                        return [];
+                    }, async () => {
+                        const cancellation = new vscode.CancellationTokenSource();
+                        try {
+                            const hover = await bounded.provideHover(source, new vscode.Position(0, 0), cancellation.token);
+                            const text = markdownText(hover);
+                            assert.ok(requestedHovers.includes(fallback.uri.toString()));
+                            if (sourceValue === undefined) {
+                                assert.ok(copyValues(hover!.contents[0] as vscode.MarkdownString).includes('5'));
+                                assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다/);
+                            } else {
+                                assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                                assert.doesNotMatch(text, /command:taskhub.copyHoverValue/);
+                                assert.ok(text.includes('z-definition.c'));
+                                assert.ok(text.includes('known.c'));
+                            }
+                        } finally { cancellation.dispose(); }
+                    });
+                });
+            }
+        }
+
+        test('an edited numeric definition is not reused after waiting for a valueless declaration', async () => {
+            const source = sourceDocument('/hover/source.c', 'X;');
+            const declaration = sourceDocument('/hover/a-declaration.h', 'extern const int X;');
+            const definition = sourceDocument('/hover/z-definition.c', 'const int X = 5;');
+            let started!: () => void;
+            const lookupStarted = new Promise<void>(resolve => { started = resolve; });
+            const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+            await withLsp([declaration, definition], command => {
+                if (command === 'vscode.executeDefinitionProvider') { return [location(declaration), location(definition)]; }
+                if (command === 'vscode.executeHoverProvider') { started(); return new Promise(() => {}); }
+                return [];
+            }, async () => {
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const pending = bounded.provideHover(source, new vscode.Position(0, 0), cancellation.token);
+                    await lookupStarted;
+                    (definition as any).version++;
+                    assert.strictEqual(await pending, undefined);
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        test('a local macro result does not start a delayed self-hover chain', async () => {
+            const source = sourceDocument('/hover/local-macro.h', '#define F (1)');
+            const position = new vscode.Position(0, 8);
+            const pending: Array<{ run: () => Promise<void>; finish: () => void }> = [];
+            let hoverCalls = 0;
+            const cancellation = new vscode.CancellationTokenSource();
+            await withLsp([source], command => {
+                if (command === 'vscode.executeDefinitionProvider') { return [new vscode.Location(source.uri, position)]; }
+                if (command === 'vscode.executeHoverProvider') {
+                    hoverCalls++;
+                    return new Promise<vscode.Hover[]>(resolve => {
+                        pending.push({
+                            run: async () => {
+                                const hover = await provider.provideHover(source, position, cancellation.token);
+                                resolve(hover ? [hover] : []);
+                            },
+                            finish: () => resolve([]),
+                        });
+                    });
+                }
+                return [];
+            }, async () => {
+                try {
+                    assert.match(markdownText(await provider.provideHover(source, position, cancellation.token)), /Macro: F/);
+                    // Deliver callbacks only after the original local hover returned.
+                    // Stop the broken implementation after three callbacks so the fixture terminates.
+                    for (let index = 0; pending.length > 0 && index < 3; index++) { await pending.shift()!.run(); }
+                    assert.strictEqual(hoverCalls, 0, 'a complete local macro result needs no numeric hover fallback');
+                } finally {
+                    cancellation.cancel();
+                    for (const callback of pending) { callback.finish(); }
+                    cancellation.dispose();
+                }
+            });
+        });
+
+        test('an LSP fallback callback at its definition cannot start another lookup chain', async () => {
+            const source = sourceDocument('/hover/source.c', 'X;');
+            const definition = sourceDocument('/hover/definition.c', 'const int X = other();');
+            const position = new vscode.Position(0, 10);
+            let hoverCalls = 0;
+            const cancellation = new vscode.CancellationTokenSource();
+            await withLsp([definition], async command => {
+                if (command === 'vscode.executeDefinitionProvider') { return [new vscode.Location(definition.uri, position)]; }
+                if (command === 'vscode.executeHoverProvider') {
+                    hoverCalls++;
+                    await new Promise<void>(resolve => setImmediate(resolve));
+                    await provider.provideHover(definition, position, cancellation.token);
+                    return [new vscode.Hover('X = 5')];
+                }
+                return [];
+            }, async () => {
+                try {
+                    const hover = await provider.provideHover(source, new vscode.Position(0, 0), cancellation.token);
+                    assert.ok(hover);
+                    assert.ok(copyValues(hover.contents[0] as vscode.MarkdownString).includes('5'));
+                    assert.strictEqual(hoverCalls, 1, 'only the original numeric fallback queries LSP');
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        test('overlapping LSP fallbacks keep their target guarded until both bounded waits finish', async () => {
+            const source = sourceDocument('/hover/overlap.c', 'const int X = other();');
+            const position = new vscode.Position(0, 10);
+            const finish: Array<(hovers: vscode.Hover[]) => void> = [];
+            let hoverCalls = 0;
+            const cancellation = new vscode.CancellationTokenSource();
+            await withLsp([source], command => {
+                if (command === 'vscode.executeDefinitionProvider') { return [new vscode.Location(source.uri, position)]; }
+                if (command === 'vscode.executeHoverProvider') {
+                    hoverCalls++;
+                    return hoverCalls <= 2 ? new Promise<vscode.Hover[]>(resolve => { finish.push(resolve); })
+                        : [new vscode.Hover('X = 5')];
+                }
+                return [];
+            }, async () => {
+                try {
+                    const first = (provider as any).requestLspHovers(source.uri, position, (provider as any).createRequest(cancellation.token));
+                    const second = (provider as any).requestLspHovers(source.uri, position, (provider as any).createRequest(cancellation.token));
+                    finish[0]([]);
+                    await first;
+                    assert.strictEqual(await provider.provideHover(source, position, cancellation.token), undefined);
+                    assert.strictEqual(hoverCalls, 2, 'one completed request must not unlock another pending callback');
+                    finish[1]([]);
+                    await second;
+                    const recovered = await provider.provideHover(source, position, cancellation.token);
+                    assert.ok(recovered);
+                    assert.ok(copyValues(recovered.contents[0] as vscode.MarkdownString).includes('5'));
+                    assert.strictEqual(hoverCalls, 3);
+                } finally {
+                    for (const resolve of finish) { resolve([]); }
+                    cancellation.dispose();
+                }
+            });
+        });
+
+        for (const failure of ['timeout', 'cancellation', 'rejection']) {
+            test(`a later user hover can retry a numeric lookup after ${failure}`, async () => {
+                const source = sourceDocument('/hover/retry.c', 'const int X = other();');
+                const position = new vscode.Position(0, 10);
+                const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+                const firstCancellation = new vscode.CancellationTokenSource();
+                const nextCancellation = new vscode.CancellationTokenSource();
+                let started!: () => void;
+                const lookupStarted = new Promise<void>(resolve => { started = resolve; });
+                let hoverCalls = 0;
+                await withLsp([source], command => {
+                    if (command === 'vscode.executeDefinitionProvider') { return [new vscode.Location(source.uri, position)]; }
+                    if (command === 'vscode.executeHoverProvider') {
+                        hoverCalls++;
+                        if (hoverCalls === 1) {
+                            started();
+                            if (failure === 'rejection') { throw new Error('Language server unavailable'); }
+                            return new Promise(() => {});
+                        }
+                        return [new vscode.Hover('X = 5')];
+                    }
+                    return [];
+                }, async () => {
+                    try {
+                        const first = bounded.provideHover(source, position, firstCancellation.token);
+                        await lookupStarted;
+                        if (failure === 'cancellation') { firstCancellation.cancel(); }
+                        assert.strictEqual(await first, undefined);
+                        const next = await bounded.provideHover(source, position, nextCancellation.token);
+                        assert.ok(next, 'a hung or failed raw command must not permanently suppress this position');
+                        assert.ok(copyValues(next.contents[0] as vscode.MarkdownString).includes('5'));
+                        assert.strictEqual(hoverCalls, 2);
+                    } finally {
+                        firstCancellation.dispose();
+                        nextCancellation.dispose();
+                    }
+                });
+            });
+        }
+
+        test('conflicting numeric definitions never select the first LSP result', async () => {
+            const source = sourceDocument('/hover/source.c', 'VALUE');
+            const first = sourceDocument('/hover/project-a/config.h', '#define VALUE 1');
+            const second = sourceDocument('/hover/project-b/config.h', '#define VALUE 8');
+            for (const definitions of [[location(first), location(second)], [location(second), location(first)]]) {
+                await withLsp([first, second], command => command === 'vscode.executeDefinitionProvider' ? definitions : [], async () => {
+                    assert.strictEqual(await (provider as any).getIdentifierValue(source, new vscode.Position(0, 1)), null);
+                    const cancellation = new vscode.CancellationTokenSource();
+                    try {
+                        const text = markdownText(await provider.provideHover(source, new vscode.Position(0, 1), cancellation.token));
+                        assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                        assert.ok(text.includes('project-a/config.h'));
+                        assert.ok(text.includes('project-b/config.h'));
+                        assert.doesNotMatch(text, /command:taskhub.copyHoverValue/);
+                    } finally { cancellation.dispose(); }
+                });
+            }
+        });
+
+        test('single and equivalent numeric candidates retain exact conversion and show both workspace names', async () => {
+            const source = sourceDocument('/hover/source.c', 'VALUE');
+            const first = sourceDocument('/hover/a/config.h', '#define VALUE 8');
+            const second = sourceDocument('/hover/b/config.h', '#define VALUE 8');
+            const folderProvider = new NumberBaseHoverProvider(uri => ({
+                name: uri.fsPath.includes(`${path.sep}a${path.sep}`) ? 'Project A' : 'Project B',
+                uri: vscode.Uri.file(path.dirname(uri.fsPath)), index: 0,
+            }));
+            for (const definitions of [[location(first)], [location(first), location(second)]]) {
+                await withLsp([first, second], command => command === 'vscode.executeDefinitionProvider' ? definitions : [], async () => {
+                    assert.strictEqual(await (folderProvider as any).getIdentifierValue(source, new vscode.Position(0, 1)), 8);
+                    const cancellation = new vscode.CancellationTokenSource();
+                    try {
+                        const text = markdownText(await folderProvider.provideHover(source, new vscode.Position(0, 1), cancellation.token));
+                        assert.match(text, /command:taskhub.copyHoverValue/);
+                        if (definitions.length === 2) {
+                            assert.match(text.replace(/&nbsp;/g, ' '), /Project A\/config/);
+                            assert.match(text.replace(/&nbsp;/g, ' '), /Project B\/config/);
+                        }
+                    } finally { cancellation.dispose(); }
+                });
+            }
+        });
+
+        test('LocationLink and declaration conflicts participate in numeric agreement', async () => {
+            const source = sourceDocument('/hover/source.c', 'VALUE');
+            const first = sourceDocument('/hover/first.h', '#define VALUE 1');
+            const second = sourceDocument('/hover/second.h', '#define VALUE 8');
+            await withLsp([first, second], command => command === 'vscode.executeDefinitionProvider'
+                ? [{ targetUri: first.uri, targetRange: new vscode.Range(0, 0, 0, 15), targetSelectionRange: new vscode.Range(0, 8, 0, 13) }]
+                : command === 'vscode.executeDeclarationProvider' ? [location(second)] : [], async () => {
+                assert.strictEqual(await (provider as any).getIdentifierValue(source, new vscode.Position(0, 1)), null);
+            });
+        });
+
+        for (const secondField of [
+            'Type mode : 4; // [7:4] [RW][0x0] Mode',
+            'Type mode;',
+            'Type mode : 4; // [3:0] [RW][0x0] Mode',
+        ]) {
+            test(`SFR candidates keep details only when every field agrees: ${secondField}`, async () => {
+                const source = sourceDocument('/hover/source.c', 'reg.mode;');
+                const first = sourceDocument('/hover/first.h', 'Type mode : 4; // [3:0] [RW][0x0] Mode');
+                const second = sourceDocument('/hover/second.h', secondField);
+                await withLsp([first, second], command => command === 'vscode.executeDefinitionProvider'
+                    ? [location(first), location(second)] : [], async () => {
+                    const text = markdownText(await (provider as any).tryBitFieldHover(source, new vscode.Position(0, 5)));
+                    assert.ok(text.includes('first.h'));
+                    assert.ok(text.includes('second.h'));
+                    if (secondField.includes('[3:0]')) {
+                        assert.match(text, /Bit Mask/);
+                        assert.match(text, /command:taskhub.copyHoverValue/);
+                    } else {
+                        assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                        assert.doesNotMatch(text, /command:taskhub.copyHoverValue/);
+                    }
+                });
+            });
+        }
+
+        test('a current SFR declaration keeps its own detail without workspace symbol search', async () => {
+            const source = sourceDocument('/hover/current.h', 'Type mode : 4; // [3:0] [RW][0x0] Mode');
+            const commands: string[] = [];
+            await withLsp([], command => { commands.push(command); return []; }, async () => {
+                const text = markdownText(await (provider as any).tryBitFieldHover(source, new vscode.Position(0, 6)));
+                assert.match(text, /Bit Mask/);
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    assert.match(markdownText(await provider.provideHover(source, new vscode.Position(0, 6), cancellation.token)), /Bit Mask/);
+                } finally { cancellation.dispose(); }
+                assert.deepStrictEqual(commands, []);
+            });
+        });
+
+        for (const bitPosition of ['3:0', '7:4']) {
+            test(`Register type definitions are compared before decoding: ${bitPosition}`, async () => {
+                const source = sourceDocument('/hover/source.c', 'REG reg = 0x8;');
+                const first = sourceDocument('/hover/first.h', 'struct REG {\nType mode : 4; // [3:0] [RW][0x0] Mode\n};');
+                const second = sourceDocument('/hover/second.h', `struct REG {\nType mode : 4; // [${bitPosition}] [RW][0x0] Mode\n};`);
+                await withLsp([first, second], command => command === 'vscode.executeDefinitionProvider'
+                    ? [location(first), location(second)] : [], async () => {
+                    const text = markdownText(await (provider as any).tryRegisterValueDecoding(source, new vscode.Position(0, 11)));
+                    assert.ok(text.includes('first.h'));
+                    assert.ok(text.includes('second.h'));
+                    assert.match(text, /command:taskhub.copyHoverValue/, 'the literal remains convertible');
+                    if (bitPosition === '3:0') { assert.match(text, /Decoded Bit Fields/); }
+                    else {
+                        assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                        assert.doesNotMatch(text, /Decoded Bit Fields/);
+                    }
+                });
+            });
+        }
+
+        test('Register variable definitions also retain conflicting type paths', async () => {
+            const source = sourceDocument('/hover/source.c', 'reg = 0x8;');
+            const variables = ['a', 'b'].map(name => sourceDocument(`/hover/${name}/var.h`, 'REG reg;'));
+            const types = ['3:0', '7:4'].map((bits, index) => sourceDocument(`/hover/${index}/type.h`,
+                `struct REG {\nType mode : 4; // [${bits}] [RW][0x0] Mode\n};`));
+            await withLsp([...variables, ...types], (command, uri) => {
+                if (command !== 'vscode.executeDefinitionProvider') { return []; }
+                if (uri.toString() === source.uri.toString()) { return variables.map(entry => location(entry)); }
+                const index = variables.findIndex(entry => entry.uri.toString() === uri.toString());
+                return index >= 0 ? [location(types[index])] : [];
+            }, async () => {
+                const text = markdownText(await (provider as any).tryRegisterValueDecoding(source, new vscode.Position(0, 7)));
+                assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                assert.doesNotMatch(text, /Decoded Bit Fields/);
+                assert.ok(text.includes('0/type.h'));
+                assert.ok(text.includes('1/type.h'));
+            });
+        });
+
+        test('current Register declarations keep decoded details and scalar assignments stay numeric', async () => {
+            const source = sourceDocument('/hover/local.c', 'struct REG {\nType mode : 4; // [3:0] [RW][0x0] Mode\n};\nREG reg = 0x8;');
+            const scalar = sourceDocument('/hover/scalar.c', 'uint32_t count = 0x8;');
+            const commands: string[] = [];
+            await withLsp([], command => { commands.push(command); return []; }, async () => {
+                const text = markdownText(await (provider as any).tryRegisterValueDecoding(source, new vscode.Position(3, 11)));
+                assert.match(text, /Decoded Bit Fields/);
+                assert.strictEqual(await (provider as any).tryRegisterValueDecoding(scalar, new vscode.Position(0, 18)), null);
+                assert.deepStrictEqual(commands, []);
+            });
+        });
+
+        for (const kind of ['struct', 'union', 'class']) {
+            test(`local ${kind} type uses are not additional register definitions`, async () => {
+                const body = kind === 'struct'
+                    ? 'Type mode : 4; // [3:0] [RW][0x0] Mode'
+                    : 'struct {\nType mode : 4; // [3:0] [RW][0x0] Mode\n} bits;';
+                const contents = `${kind} REG;\n${kind} REG\n{\n${body}\n};\n${kind} REG reg = 0x8;`;
+                const source = sourceDocument('/hover/local.c', contents);
+                const lastLine = source.lineCount - 1;
+                const commands: string[] = [];
+                await withLsp([], command => { commands.push(command); return []; }, async () => {
+                    const text = markdownText(await (provider as any).tryRegisterValueDecoding(source,
+                        new vscode.Position(lastLine, source.lineAt(lastLine).text.indexOf('0x8') + 1)));
+                    assert.match(text, /Decoded Bit Fields/);
+                    assert.match(text, /mode/);
+                    assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다|Unresolved|해석하지 못함/);
+                    assert.deepStrictEqual(commands, []);
+                });
+            });
+        }
+
+        test('local type uses cannot exhaust the register definition candidate budget', async () => {
+            const uses = Array.from({ length: MAX_HOVER_DEFINITION_CANDIDATES + 1 }, (_, index) => `struct REG *pointer${index};`);
+            const contents = [...uses, 'struct REG {', 'Type mode : 4; // [3:0] [RW][0x0] Mode', '};', 'struct REG reg = 0x8;'].join('\n');
+            const source = sourceDocument('/hover/local.c', contents);
+            await withLsp([], () => [], async () => {
+                const text = markdownText(await (provider as any).tryRegisterValueDecoding(source, new vscode.Position(source.lineCount - 1, 18)));
+                assert.match(text, /Decoded Bit Fields/);
+                assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다|limit|제한/);
+            });
+        });
+
+        test('comments, multiline type uses and function bodies do not create local register definitions', async () => {
+            const contents = [
+                '// struct REG {',
+                'const char *label = "struct REG {";',
+                "const auto marker = 'struct REG {'; const char escaped = '\\''; const char prefix = u8'X';",
+                "constexpr auto first = 1'000, second = 2'000;",
+                'struct REG', ';',
+                'struct REG', '*next;',
+                'void visit(struct REG *reg) {}',
+                'int width = sizeof(struct REG);',
+                'struct REG instance{};',
+                'struct REG /* comment { ; } */', '{',
+                'Type mode : 4; // [3:0] [RW][0x0] Mode',
+                '};',
+                'struct REG reg = 0x8;',
+            ].join('\n');
+            const source = sourceDocument('/hover/local.c', contents);
+            await withLsp([], () => [], async () => {
+                const text = markdownText(await (provider as any).tryRegisterValueDecoding(source, new vscode.Position(source.lineCount - 1, 18)));
+                assert.match(text, /Decoded Bit Fields/);
+                assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다|Unresolved|해석하지 못함/);
+            });
+        });
+
+        for (const [before, after] of [['1\'000', '2\'000'], ['0xAB\'CD', '0xFF\'FF'], ['0b1\'001', '0b1\'111']]) {
+            test(`digit separators do not hide register definitions between literals: ${before}`, async () => {
+                const source = sourceDocument('/hover/local.c', [
+                    `constexpr auto before = ${before};`, 'struct REG {',
+                    'Type mode : 4; // [3:0] [RW][0x0] Mode', '};',
+                    `constexpr auto after = ${after};`,
+                    'REG reg = 0x8;',
+                ].join('\n'));
+                await withLsp([], () => [], async () => {
+                    const text = markdownText(await (provider as any).tryRegisterValueDecoding(source, new vscode.Position(5, 11)));
+                    assert.match(text, /Decoded Bit Fields/);
+                    assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다/);
+                });
+            });
+        }
+
+        for (const attribute of ['[[gnu::packed]]', '__attribute__((packed))', '__declspec(align(4))']) {
+            test(`aggregate attributes keep their register definition: ${attribute}`, async () => {
+                const source = sourceDocument('/hover/local.c', [
+                    `struct REG ${attribute} {`,
+                    'Type mode : 4; // [3:0] [RW][0x0] Mode', '};',
+                    'struct REG reg = 0x8;',
+                ].join('\n'));
+                await withLsp([], () => [], async () => {
+                    const text = markdownText(await (provider as any).tryRegisterValueDecoding(source, new vscode.Position(3, 18)));
+                    assert.match(text, /Decoded Bit Fields/);
+                    assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다/);
+                });
+            });
+        }
+
+        test('an unresolved local definition is still compared with a known register layout', async () => {
+            const source = sourceDocument('/hover/local.c', [
+                'struct REG {', 'Type mode : 4; // [3:0] [RW][0x0] Mode', '};',
+                'struct REG {', 'UnknownType mode;', '};',
+                'struct REG reg = 0x8;',
+            ].join('\n'));
+            await withLsp([], () => [], async () => {
+                const text = markdownText(await (provider as any).tryRegisterValueDecoding(source, new vscode.Position(6, 18)));
+                assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                assert.ok(text.includes('local.c:1'));
+                assert.ok(text.includes('local.c:4'));
+                assert.doesNotMatch(text, /Decoded Bit Fields/);
+            });
+        });
+
+        for (const count of [MAX_HOVER_DEFINITION_CANDIDATES, MAX_HOVER_DEFINITION_CANDIDATES + 1]) {
+            test(`the local register candidate budget still counts actual definitions: ${count}`, async () => {
+                const contents = Array.from({ length: count }, () => 'struct REG {\nType mode : 4; // [3:0] [RW][0x0] Mode\n};')
+                    .concat('REG reg = 0x8;').join('\n');
+                const source = sourceDocument('/hover/local.c', contents);
+                await withLsp([], () => [], async () => {
+                    const text = markdownText(await (provider as any).tryRegisterValueDecoding(source, new vscode.Position(source.lineCount - 1, 11)));
+                    if (count === MAX_HOVER_DEFINITION_CANDIDATES) {
+                        assert.match(text, /Decoded Bit Fields/);
+                        assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다/);
+                    } else {
+                        assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                        assert.match(text, /limit|제한/);
+                        assert.doesNotMatch(text, /Decoded Bit Fields/);
+                    }
+                });
+            });
+        }
+
+        for (const typeName of ['size_t', 'Count']) {
+            for (const assignment of [`${typeName} count = 5;`, 'count = 5;']) {
+                test(`typedef scalar assignments keep only literal conversions: ${assignment}`, async () => {
+                    const source = sourceDocument('/hover/source.c', assignment);
+                    const variable = sourceDocument('/hover/variable.h', `${typeName} count;`);
+                    const type = sourceDocument('/hover/type.h', `typedef unsigned long ${typeName};`);
+                    await withLsp([variable, type], (command, uri) => {
+                        if (command !== 'vscode.executeDefinitionProvider') { return []; }
+                        return uri.toString() === source.uri.toString() && assignment === 'count = 5;'
+                            ? [location(variable)] : [location(type)];
+                    }, async () => {
+                        const cancellation = new vscode.CancellationTokenSource();
+                        try {
+                            const text = markdownText(await provider.provideHover(source,
+                                new vscode.Position(0, assignment.indexOf('5')), cancellation.token));
+                            assert.match(text, /command:taskhub.copyHoverValue/);
+                            assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다|Definition candidates|정의 후보|Decoded Bit Fields/);
+                        } finally { cancellation.dispose(); }
+                    });
+                });
+            }
+        }
+
+        test('a known register layout plus an unresolved type still prevents decoding', async () => {
+            const source = sourceDocument('/hover/source.c', 'REG reg = 0x8;');
+            const known = sourceDocument('/hover/known.h', 'struct REG {\nType mode : 4; // [3:0] [RW][0x0] Mode\n};');
+            const unknown = sourceDocument('/hover/unknown.h', 'struct REG;');
+            await withLsp([known, unknown], command => command === 'vscode.executeDefinitionProvider'
+                ? [location(known), location(unknown)] : [], async () => {
+                const text = markdownText(await (provider as any).tryRegisterValueDecoding(source, new vscode.Position(0, 11)));
+                assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                assert.ok(text.includes('known.h'));
+                assert.ok(text.includes('unknown.h'));
+                assert.match(text, /command:taskhub.copyHoverValue/);
+                assert.doesNotMatch(text, /Decoded Bit Fields/);
+            });
+        });
+
+        test('valueless unreadable candidates are excluded but excess definitions still prevent agreement', async () => {
+            const source = sourceDocument('/hover/source.c', 'VALUE');
+            const definitions = Array.from({ length: MAX_HOVER_DEFINITION_CANDIDATES + 1 }, (_, index) =>
+                sourceDocument(`/hover/${index}.h`, '#define VALUE 8'));
+            for (const [selected, available] of [
+                [definitions.slice(0, 2), definitions.slice(0, 1)],
+                [definitions, definitions],
+            ]) {
+                await withLsp(available, command => command === 'vscode.executeDefinitionProvider'
+                    ? selected.map(entry => location(entry)) : [], async () => {
+                    const exceeded = selected.length > MAX_HOVER_DEFINITION_CANDIDATES;
+                    assert.strictEqual(await (provider as any).getIdentifierValue(source, new vscode.Position(0, 1)), exceeded ? null : 8);
+                    const cancellation = new vscode.CancellationTokenSource();
+                    try {
+                        const text = markdownText(await provider.provideHover(source, new vscode.Position(0, 1), cancellation.token));
+                        if (exceeded) {
+                            assert.match(text, /cannot be determined|확정할 수 없습니다/);
+                            assert.match(text, /limit|제한/);
+                            assert.doesNotMatch(text, /command:taskhub.copyHoverValue/);
+                        } else {
+                            assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다/);
+                            assert.match(text, /command:taskhub.copyHoverValue/);
+                        }
+                    } finally { cancellation.dispose(); }
+                });
+            }
+        });
+
+        test('cancellation stops definition follow-ups and an already cancelled hover starts no requests', async () => {
+            const source = sourceDocument('/hover/source.c', 'VALUE');
+            const commands: string[] = [];
+            let started!: () => void;
+            const firstRequest = new Promise<void>(resolve => { started = resolve; });
+            const cancellation = new vscode.CancellationTokenSource();
+            await withLsp([], command => {
+                commands.push(command);
+                started();
+                return new Promise(() => {});
+            }, async () => {
+                try {
+                    const pending = provider.provideHover(source, new vscode.Position(0, 1), cancellation.token);
+                    await firstRequest;
+                    cancellation.cancel();
+                    assert.strictEqual(await pending, undefined);
+                    const before = [...commands];
+                    assert.strictEqual(await provider.provideHover(source, new vscode.Position(0, 1), cancellation.token), undefined);
+                    assert.deepStrictEqual(commands, before);
+                    assert.deepStrictEqual(commands.sort(), ['vscode.executeDeclarationProvider', 'vscode.executeDefinitionProvider']);
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        test('one total deadline prevents follow-up LSP calls and preserves literal conversions', async () => {
+            const source = sourceDocument('/hover/source.c', 'reg = 0x8;');
+            const bounded = new NumberBaseHoverProvider(() => undefined, { timeoutMs: 25, maxCandidates: 16 });
+            const commands: string[] = [];
+            const cancellation = new vscode.CancellationTokenSource();
+            await withLsp([], command => {
+                commands.push(command);
+                return new Promise(() => {});
+            }, async () => {
+                try {
+                    const started = Date.now();
+                    const text = markdownText(await bounded.provideHover(source, new vscode.Position(0, 7), cancellation.token));
+                    assert.ok(Date.now() - started < 1000, 'the full hover shares one short test budget');
+                    assert.match(text, /command:taskhub.copyHoverValue/);
+                    assert.doesNotMatch(text, /cannot be determined|확정할 수 없습니다|Definition candidates|정의 후보|limit|제한/);
+                    assert.deepStrictEqual(commands.sort(), ['vscode.executeDeclarationProvider', 'vscode.executeDefinitionProvider']);
+                } finally { cancellation.dispose(); }
+            });
         });
     });
 
@@ -229,17 +1067,6 @@ suite('NumberBaseHoverProvider Test Suite', () => {
     });
 
     suite('호버 값 개별 복사', () => {
-        function copyValues(markdown: vscode.MarkdownString): string[] {
-            // Escaped source text can contain the command name without becoming a link.
-            return [...markdown.value.matchAll(/(?<!\\)\[\$\(copy\)\]\(command:taskhub\.copyHoverValue\?([^\s)]+)(?:\s+"[^"]*")?\)/g)].map(match => {
-                const args: unknown = JSON.parse(decodeURIComponent(match[1]));
-                assert.ok(Array.isArray(args));
-                assert.strictEqual(args.length, 1, '복사는 값 한 개만 전달해야 한다');
-                assert.strictEqual(typeof args[0], 'string');
-                return args[0];
-            });
-        }
-
         function assertCopyTrust(markdown: vscode.MarkdownString): void {
             assert.deepStrictEqual(markdown.isTrusted, { enabledCommands: ['taskhub.copyHoverValue'] });
             assert.strictEqual(markdown.supportThemeIcons, true);
@@ -490,6 +1317,7 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             const document = await vscode.workspace.openTextDocument({
                 language: 'cpp', content: 'Type mode : 3; // [12:10] [RW][0x0] Mode',
             });
+            const usage = await vscode.workspace.openTextDocument({ language: 'cpp', content: 'reg.mode;' });
             const originalExecuteCommand = vscode.commands.executeCommand;
             const originalOpenTextDocument = vscode.workspace.openTextDocument;
             try {
@@ -518,23 +1346,31 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                         }
                         return [];
                     };
-                    const hover = await (provider as any).tryBitFieldHover(document, new vscode.Position(0, 6)) as vscode.Hover;
+                    const hover = await (provider as any).tryBitFieldHover(usage, new vscode.Position(0, 5)) as vscode.Hover;
                     assert.ok(hover);
                     const markdown = hover.contents[0] as vscode.MarkdownString;
                     assertOnlyGeneratedCopyIcons(markdown, ['0x00001C00']);
-                    const additional = markdown.value.split('**Additional definitions:**\n\n')[1];
+                    const additional = markdown.value.split(/\*\*(?:Definition candidates|정의 후보):\*\*\n\n/)[1];
                     assert.ok(additional, '두 번째 정의의 파일 링크 경로를 검증한다');
+                    const expectedFileLabel = `${uri.fsPath}:1`;
+                    const candidateLine = additional.split('\n').find(line => {
+                        const raw = uri.scheme === 'command'
+                            ? line.slice(2, line.indexOf(' — '))
+                            : line.match(/^- \[((?:\\.|[^\\\]])*)\]\(/)?.[1];
+                        return raw && visibleMarkdownText(new vscode.MarkdownString(raw))
+                            .replace(/\\(\$\([A-Za-z0-9~-]+\))/g, '$1') === expectedFileLabel;
+                    });
+                    assert.ok(candidateLine, '정의 후보 목록에서 정확한 두 번째 정의를 찾는다');
                     const rawFileLabel = uri.scheme === 'command'
-                        ? additional.slice(2, additional.indexOf(' - '))
-                        : additional.match(/^- \[((?:\\.|[^\\\]])*)\]\(/)?.[1];
+                        ? candidateLine.slice(2, candidateLine.indexOf(' — '))
+                        : candidateLine.match(/^- \[((?:\\.|[^\\\]])*)\]\(/)?.[1];
                     assert.ok(rawFileLabel, '추가 정의에서 파일 라벨을 분리한다');
                     // appendText escapes icons before Markdown escaping; the icon renderer
                     // consumes the remaining backslash after Markdown has been decoded.
                     const visibleFileLabel = visibleMarkdownText(new vscode.MarkdownString(rawFileLabel))
                         .replace(/\\(\$\([A-Za-z0-9~-]+\))/g, '$1');
-                    const expectedFileLabel = `${uri.fsPath}:1`;
                     assert.strictEqual(visibleFileLabel, expectedFileLabel, '이스케이프 후에도 파일 라벨의 텍스트를 보존한다');
-                    const targets = [...additional.matchAll(/(?<!\\)\]\(([^()\s]+)\)/g)].map(match => match[1]);
+                    const targets = [...candidateLine.matchAll(/(?<!\\)\]\(([^()\s]+)\)/g)].map(match => match[1]);
                     if (uri.scheme === 'command') {
                         assert.deepStrictEqual(targets, [], 'command 스킴의 정의 위치는 클릭 링크가 될 수 없다');
                     } else {

@@ -61,66 +61,66 @@
 
 센서 데이터 바이너리를 생성·검증·압축하는 액션을 실행하고, 출력과 실행 기록을 함께 확인합니다. [실행 예제](examples/sensor_pipeline/README.md)
 
-![TaskHub의 Build → Verify → ZIP 액션과 실행 결과 및 History](docs/images/workflow-overview.jpg)
+![TaskHub의 Build → Verify → ZIP 액션과 실행 결과 및 History](docs/images/workflow-overview.webp)
 
 ### Memory Map — 메모리 사용량과 영역 상세
 
 ARM Linker Listing의 Flash·RAM 사용량을 살펴보고, 영역을 펼쳐 섹션과 함수 배치를 확인합니다.
 
-![Flash와 RAM 사용량 및 펼쳐진 메모리 영역 상세](docs/images/memory-map-detail.jpg)
+![Flash와 RAM 사용량 및 펼쳐진 메모리 영역 상세](docs/images/memory-map-detail.webp)
 
 ### Register Decoder — 레지스터 값 해석
 
 `UartCtrlReg uart_ctrl = 0x30B`에 마우스를 올려 `tx_en`, `rx_en`, `baud_sel` 같은 필드 값을 읽습니다.
 
-![UartCtrlReg에 대입한 0x30B를 비트 필드별로 해석한 Hover](docs/images/hover-register-decoder.jpg)
+![UartCtrlReg에 대입한 0x30B를 비트 필드별로 해석한 Hover](docs/images/hover-register-decoder.webp)
 
 ### Hex/Text — 변환, 저장값, 비트 연산
 
 `TaskHub`를 Hex로 변환하고 자주 쓰는 값을 저장합니다. 같은 화면에서 `0x123456789ABCDEF0 & 0xFFFF` 같은 64비트 마스크 계산도 할 수 있습니다.
 
-![TaskHub 문자열을 Hex로 변환하고 저장값을 표시한 변환기](docs/images/hex-text-converter.jpg)
+![TaskHub 문자열을 Hex로 변환하고 저장값을 표시한 변환기](docs/images/hex-text-converter.webp)
 
-![64비트 마스크 식과 Hex·Decimal·Binary 계산 결과](docs/images/hex-bitwise-calculator.jpg)
+![64비트 마스크 식과 Hex·Decimal·Binary 계산 결과](docs/images/hex-bitwise-calculator.webp)
 
 ### Struct Size — 크기와 패딩 확인
 
 `PacketHeader`의 추정 크기와 멤버별 오프셋·패딩을 코드 위에서 확인합니다.
 
-![PacketHeader 구조체의 추정 크기와 멤버 오프셋 및 패딩을 보여 주는 Hover](docs/images/hover-struct-size.jpg)
+![PacketHeader 구조체의 추정 크기와 멤버 오프셋 및 패딩을 보여 주는 Hover](docs/images/hover-struct-size.webp)
 
 ### JSON Editor — 장치 설정 편집
 
 `devices.json`의 장치 이름·주소·활성 상태·태그를 표로 확인하고 편집합니다.
 
-![장치 이름, 주소, 활성 상태, 태그를 표시한 JSON Editor](docs/images/json-editor-devices.jpg)
+![장치 이름, 주소, 활성 상태, 태그를 표시한 JSON Editor](docs/images/json-editor-devices.webp)
 
 <details>
 <summary>다른 기능 예시 더 보기</summary>
 
 **Quick Action Palette** — 최근 실행 항목과 전체 액션을 검색합니다.
 
-![최근 실행 항목과 액션 검색을 보여 주는 Quick Action Palette](docs/images/quick-action-palette.png)
+![최근 실행 항목과 액션 검색을 보여 주는 Quick Action Palette](docs/images/quick-action-palette.webp)
 
 **Problem Matcher** — 빌드 진단을 Problems 패널에서 확인합니다.
 
-![빌드 진단이 표시된 Problems 패널](docs/images/problem-matcher.png)
+![빌드 진단이 표시된 Problems 패널](docs/images/problem-matcher.webp)
 
 **Number Base Hover** — 숫자의 진법 변환과 비트 정보를 확인합니다.
 
-![숫자 리터럴의 진법 변환과 비트 정보를 보여 주는 Hover](docs/images/hover-number-base.png)
+![숫자 리터럴의 진법 변환과 비트 정보를 보여 주는 Hover](docs/images/hover-number-base.webp)
 
 **SFR Bit Field Hover** — 비트 필드의 위치·접근 타입·리셋 값을 확인합니다.
 
-![레지스터 비트 필드 정보를 보여 주는 Hover](docs/images/hover-sfr-bit-field.png)
+![레지스터 비트 필드 정보를 보여 주는 Hover](docs/images/hover-sfr-bit-field.webp)
 
 **Macro Expansion Hover** — `#define` 매크로의 최종 확장을 확인합니다.
 
-![매크로의 최종 확장 결과를 보여 주는 Hover](docs/images/hover-macro-expansion.png)
+![매크로의 최종 확장 결과를 보여 주는 Hover](docs/images/hover-macro-expansion.webp)
 
 **Hex Viewer** — 바이너리 파일의 주소·Hex·ASCII를 함께 확인합니다.
 
-![sample_binary.bin을 표시한 Hex Viewer](docs/images/hex-viewer.png)
+![sample_binary.bin을 표시한 Hex Viewer](docs/images/hex-viewer.webp)
 
 </details>
 

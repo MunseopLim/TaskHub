@@ -11,6 +11,7 @@ import {
     parseReferenceAlternatives,
     resolvePipelineReference,
     resolveWithinWorkspace,
+    writeWorkspaceFileSync,
     isInsideWorkspaceRoots,
     resolveFavoriteFilePath,
     validateLinkScheme,
@@ -389,6 +390,128 @@ suite('pipelineUtils — direct-import smoke suite', () => {
             assert.ok(ok.endsWith('b.txt'));
         } finally {
             fs.rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    test('멀티루트의 읽을 수 없는 폴더는 순서와 무관하게 다른 정상 폴더 쓰기를 막지 않는다', () => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-write-multiroot-'));
+        const unavailable = path.join(base, 'unavailable');
+        const available = path.join(base, 'available');
+        const originalRealpath = fs.realpathSync.native;
+        try {
+            fs.mkdirSync(unavailable);
+            fs.mkdirSync(available);
+            fs.realpathSync.native = ((file: fs.PathLike, options?: any) => {
+                if (String(file) === unavailable) {
+                    throw Object.assign(new Error('inaccessible workspace root'), { code: 'EACCES' });
+                }
+                return originalRealpath(file, options);
+            }) as typeof fs.realpathSync.native;
+            for (const roots of [[unavailable, available], [available, unavailable]]) {
+                const target = path.join(available, 'result.txt');
+                assert.strictEqual(isInsideWorkspaceRoots(target, roots), true);
+                writeWorkspaceFileSync(target, roots, available, 'normal output');
+                assert.strictEqual(fs.readFileSync(target, 'utf8'), 'normal output');
+                assert.strictEqual(isInsideWorkspaceRoots(path.join(unavailable, 'result.txt'), roots), false);
+            }
+        } finally {
+            fs.realpathSync.native = originalRealpath;
+            fs.rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    test('workspace 쓰기는 끊어진 symlink와 외부 hardlink를 거부한다', function () {
+        if (process.platform === 'win32') { this.skip(); }
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-write-links-'));
+        try {
+            const root = path.join(base, 'workspace');
+            const outside = path.join(base, 'outside');
+            fs.mkdirSync(root);
+            fs.mkdirSync(outside);
+            const missing = path.join(outside, 'missing.txt');
+            const dangling = path.join(root, 'dangling.txt');
+            fs.symlinkSync(missing, dangling);
+            assert.strictEqual(isInsideWorkspaceRoots(dangling, [root]), false);
+            assert.throws(() => resolveWithinWorkspace(dangling, [root]), /outside the current workspace/);
+            for (const append of [false, true]) {
+                assert.throws(() => writeWorkspaceFileSync(dangling, [root], root, 'blocked', { append }));
+            }
+            assert.strictEqual(fs.existsSync(missing), false);
+
+            const external = path.join(outside, 'existing.txt');
+            const hardlink = path.join(root, 'hardlink.txt');
+            fs.writeFileSync(external, 'external-original');
+            fs.linkSync(external, hardlink);
+            assert.throws(() => writeWorkspaceFileSync(hardlink, [root], root, 'blocked'), /unsafe file/);
+            assert.strictEqual(fs.readFileSync(external, 'utf8'), 'external-original');
+
+            const inside = path.join(root, 'inside.txt');
+            const internalLink = path.join(root, 'internal-link.txt');
+            fs.writeFileSync(inside, 'old');
+            fs.symlinkSync(inside, internalLink);
+            writeWorkspaceFileSync(internalLink, [root], root, 'new');
+            writeWorkspaceFileSync(internalLink, [root], root, '+tail', { append: true });
+            assert.strictEqual(fs.readFileSync(inside, 'utf8'), 'new+tail');
+        } finally {
+            fs.rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    test('최종 open 직전에 교체된 symlink는 외부 파일을 수정하지 않는다', function () {
+        if (process.platform === 'win32') { this.skip(); }
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-write-race-'));
+        const nativeFs = require('fs') as typeof fs;
+        const originalOpen = nativeFs.openSync;
+        try {
+            const root = path.join(base, 'workspace');
+            fs.mkdirSync(root);
+            const target = path.join(root, 'target.txt');
+            const outside = path.join(base, 'outside.txt');
+            fs.writeFileSync(target, 'inside');
+            fs.writeFileSync(outside, 'outside-original');
+            const openedTarget = fs.realpathSync.native(target);
+            nativeFs.openSync = ((file: fs.PathLike, flags: string | number, mode?: fs.Mode) => {
+                if (file === openedTarget) {
+                    fs.unlinkSync(target);
+                    fs.symlinkSync(outside, target);
+                }
+                return originalOpen(file, flags, mode);
+            }) as typeof fs.openSync;
+            assert.throws(() => writeWorkspaceFileSync(target, [root], root, 'blocked'));
+            nativeFs.openSync = originalOpen;
+            assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'outside-original');
+        } finally {
+            nativeFs.openSync = originalOpen;
+            fs.rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    test('민감 파일은 내용 쓰기 전에 권한을 제한하고 실패하면 원문을 보존한다', function () {
+        if (process.platform === 'win32') { this.skip(); }
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-secret-mode-'));
+        const nativeFs = require('fs') as typeof fs;
+        const originalWrite = nativeFs.writeFileSync;
+        const originalChmod = nativeFs.fchmodSync;
+        try {
+            const target = path.join(root, 'secret.txt');
+            fs.writeFileSync(target, 'original', { mode: 0o644 });
+            let observedWrite = false;
+            nativeFs.writeFileSync = ((file: fs.PathOrFileDescriptor, data: any, options?: any) => {
+                if (typeof file === 'number') {
+                    observedWrite = true;
+                    assert.strictEqual(fs.fstatSync(file).mode & 0o777, 0o600);
+                }
+                return originalWrite(file, data, options);
+            }) as typeof fs.writeFileSync;
+            writeWorkspaceFileSync(target, [root], root, 'secret', { mode: 0o600 });
+            assert.strictEqual(observedWrite, true);
+            nativeFs.fchmodSync = () => { throw Object.assign(new Error('blocked chmod'), { code: 'EPERM' }); };
+            assert.throws(() => writeWorkspaceFileSync(target, [root], root, 'replacement', { mode: 0o600 }), /blocked chmod/);
+            assert.strictEqual(fs.readFileSync(target, 'utf8'), 'secret');
+        } finally {
+            nativeFs.writeFileSync = originalWrite;
+            nativeFs.fchmodSync = originalChmod;
+            fs.rmSync(root, { recursive: true, force: true });
         }
     });
 

@@ -1326,6 +1326,7 @@ import {
     INTERPOLATED_VALUE_MAX_LENGTH,
     wouldExceedCaptureLimit,
     resolveWithinWorkspace,
+    writeWorkspaceFileSync,
     isInsideWorkspaceRoots,
     resolveArchiveTaskPath,
     resolveTaskWorkingDirectory,
@@ -3104,31 +3105,11 @@ function requireSecretContentOptIn(task: import('./schema').Task, secretDerived:
     );
 }
 
-/**
- * `writeFileSync` 의 `mode` 는 **파일을 새로 만들 때만** 적용된다. 이미
- * 0644 로 있던 파일을 덮어쓰면 권한이 그대로 남으므로 쓴 뒤에 한 번 더 조인다.
- * Windows 는 읽기 전용 비트만 대응하므로 건너뛴다 — 실패해도 쓰기 자체를
- * 되돌리지는 않는다(파일은 이미 만들어졌고, 사용자가 요청한 동작이다).
- */
-function restrictSecretFilePermissions(filePath: string, displayPath = SECRET_PLACEHOLDER): void {
-    if (process.platform === 'win32') { return; }
-    try {
-        fs.chmodSync(filePath, SECRET_FILE_MODE);
-    } catch (error) {
-        // filePath 자체가 `${env:TOKEN}` 등 민감값에서 파생됐을 수 있다.
-        // Node의 원문 오류도 경로를 포함하므로 안전한 errno code만 남긴다.
-        const code = typeof (error as NodeJS.ErrnoException)?.code === 'string'
-            ? ` (${(error as NodeJS.ErrnoException).code})`
-            : '';
-        outputChannel.appendLine(`[WARN] Could not restrict permissions on sensitive output file '${displayPath}'${code}.`);
-    }
-}
-
 /** 민감 입력이 디스크에 남는 순간은 조용히 지나가면 안 된다. */
 function notifySecretFileWrite(taskId: string, displayPath: string): void {
     vscode.window.showWarningMessage(t(
-        `태스크 '${taskId}'가 민감한 실행 문맥에서 파생된 값을 '${displayPath}'에 저장했습니다. 경로의 민감 부분은 가렸습니다. 소유자만 읽도록 권한을 조였지만, 버전 관리에 올라가지 않는지 확인하세요.`,
-        `Task '${taskId}' stored a value derived from sensitive runtime data in '${displayPath}'. Sensitive parts of the path were hidden. Permissions were restricted to the owner — make sure the file is not committed to version control.`
+        `태스크 '${taskId}'가 민감한 실행 문맥에서 파생된 값을 '${displayPath}'에 저장했습니다. 경로의 민감 부분은 가렸습니다. 파일 접근 권한과 버전 관리에 올라가지 않는지 확인하세요.`,
+        `Task '${taskId}' stored a value derived from sensitive runtime data in '${displayPath}'. Sensitive parts of the path were hidden. Check the file's access permissions and make sure it is not committed to version control.`
     ));
 }
 
@@ -4155,9 +4136,23 @@ import { normalizeLineNumber } from './providers/normalization';
  */
 export function selectHistoryRerunInputs(
     entry: HistoryEntry,
-    reuseSavedInputs: boolean
+    reuseSavedInputs: boolean,
+    tasks: readonly import('./schema').Task[] = []
 ): Record<string, unknown> | undefined {
-    return reuseSavedInputs ? entry.inputs : undefined;
+    if (!reuseSavedInputs || !entry.inputs) { return undefined; }
+    const reusable: Record<string, unknown> = Object.create(null);
+    for (const task of tasks) {
+        if (!INTERACTIVE_TASK_TYPES.has(task.type)
+            || (task.type === 'inputBox' && task.password === true)
+            || !Object.prototype.hasOwnProperty.call(entry.inputs, task.id)
+            || !Object.prototype.hasOwnProperty.call(entry.inputTaskTypes ?? {}, task.id)
+            || entry.inputTaskTypes?.[task.id] !== task.type) {
+            continue;
+        }
+        const saved = entry.inputs[task.id];
+        if (savedInputStillValid(task, saved)) { reusable[task.id] = saved; }
+    }
+    return Object.keys(reusable).length > 0 ? reusable : undefined;
 }
 
 type MemoryMapRegions = NonNullable<MemoryMapConfig['regions']>;
@@ -7012,6 +7007,31 @@ export function backfillQuickPickValue(task: any, saved: any, context?: any): an
 }
 
 export function savedInputStillValid(task: any, saved: any, context?: any): boolean {
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) { return false; }
+    const owns = (key: string) => Object.prototype.hasOwnProperty.call(saved, key);
+    if (task?.type === 'confirm') {
+        return owns('confirmed') && saved.confirmed === 'true';
+    }
+    if (task?.type === 'inputBox' || task?.type === 'envPick') {
+        if (!owns('value') || typeof saved.value !== 'string') { return false; }
+    } else if (task?.type === 'fileDialog' || task?.type === 'folderDialog' || task?.type === 'pathDialog') {
+        if (!owns('path') || typeof saved.path !== 'string' || saved.path.length === 0) { return false; }
+        if (owns('paths') && (!Array.isArray(saved.paths) || saved.paths.length === 0
+            || !saved.paths.every((value: unknown) => typeof value === 'string' && value.length > 0))) {
+            return false;
+        }
+    } else if (task?.type === 'quickPick') {
+        // Static choices are rebuilt from their labels below. Dynamic choices
+        // retain the saved mapping, so validate the values that will be reused.
+        if (quickPickUsesItemsFromCommand(task)) {
+            const stringArray = (value: unknown) => Array.isArray(value)
+                && value.every(item => typeof item === 'string');
+            if (!owns('value') || (typeof saved.value !== 'string' && !stringArray(saved.value))) { return false; }
+            if (owns('args') && !stringArray(saved.args)) { return false; }
+        }
+    } else {
+        return false;
+    }
     // 옛 형식이면서 다중 선택인 다이얼로그는 복원할 수 없다 ({@link backfillDialogArrays}).
     // `value` 검사보다 앞에 둔다 — 다이얼로그 결과에는 `value` 가 없어서
     // 아래 조기 반환에 걸리면 이 검사에 닿지 못한다.
@@ -7522,8 +7542,7 @@ async function executeSingleTask(
                 writeRoots,
                 defaultWorkspace,
                 task.type === 'appendFile',
-                writesSensitiveContent,
-                writeDisplayPath
+                writesSensitiveContent
             );
             if (writesSensitiveContent && typeof result?.path === 'string') {
                 notifySecretFileWrite(task.id, writeDisplayPath ?? SECRET_PLACEHOLDER);
@@ -7853,20 +7872,15 @@ async function executeSingleTask(
                 requireSecretContentOptIn(task, secretDerived);
                 throwIfTaskInactive(scope);
                 if (!interpolatedOutput.filePath) { throw new Error(`Task '${task.id}' has output mode 'file' but 'filePath' is not defined.`); }
-                const safeOutputPath = resolveWithinWorkspace(
+                const safeOutputPath = writeWorkspaceFileSync(
                     interpolatedOutput.filePath,
                     workspaceRoots ?? getWorkspaceRoots(),
-                    defaultWorkspace
-                );
-                const dir = path.dirname(safeOutputPath);
-                if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
-                if (interpolatedOutput.overwrite !== true && fs.existsSync(safeOutputPath)) {
-                    throw new Error(`Task '${task.id}' attempted to write to '${safeOutputPath}', but the file already exists. Set 'overwrite': true to replace it.`);
-                }
-                fs.writeFileSync(
-                    safeOutputPath,
+                    defaultWorkspace,
                     interpolatedOutput.content,
-                    secretDerived ? { mode: SECRET_FILE_MODE } : undefined
+                    {
+                        overwrite: interpolatedOutput.overwrite === true,
+                        mode: secretDerived ? SECRET_FILE_MODE : undefined,
+                    }
                 );
                 if (secretDerived) {
                     const displayPath = buildSensitiveDisplayPath(
@@ -7876,7 +7890,6 @@ async function executeSingleTask(
                         workspaceRoots ?? getWorkspaceRoots(),
                         defaultWorkspace
                     );
-                    restrictSecretFilePermissions(safeOutputPath, displayPath);
                     notifySecretFileWrite(task.id, displayPath);
                 }
                 runLogCollector?.recordArtifact(
@@ -9485,8 +9498,7 @@ async function handleWriteFile(
     workspaceRoots: string[],
     defaultWorkspace: string,
     append: boolean,
-    secretDerived = false,
-    secretDisplayPath?: string
+    secretDerived = false
 ): Promise<{ path: string }> {
     if (typeof task.path !== 'string' || task.path.length === 0) {
         throw new Error(`Task '${task.id}' of type '${task.type}' requires a non-empty 'path' property.`);
@@ -9499,20 +9511,7 @@ async function handleWriteFile(
     const content = interpolatePipelineVariables(task.content, interpolationContext);
     const safePath = resolveWithinWorkspace(rawPath, workspaceRoots, defaultWorkspace);
 
-    const mkdirs = task.mkdirs !== false;
-    const dir = path.dirname(safePath);
-    if (!fs.existsSync(dir)) {
-        if (mkdirs) {
-            fs.mkdirSync(dir, { recursive: true });
-        } else {
-            throw new Error(`Task '${task.id}' cannot write to '${safePath}': parent directory does not exist and 'mkdirs' is false.`);
-        }
-    }
-
     const targetExists = fs.existsSync(safePath);
-    if (!append && task.overwrite === false && targetExists) {
-        throw new Error(`Task '${task.id}' refused to overwrite existing file '${safePath}' (overwrite: false).`);
-    }
 
     const normalized = normalizeEol(content, task.eol);
     // For appendFile on an existing file, suppress the BOM — planting a BOM
@@ -9521,14 +9520,12 @@ async function handleWriteFile(
     const includeBom = !(append && targetExists);
     const buffer = encodeFileContent(normalized, task.encoding, includeBom);
 
-    if (append) {
-        fs.appendFileSync(safePath, buffer, secretDerived ? { mode: SECRET_FILE_MODE } : undefined);
-    } else {
-        fs.writeFileSync(safePath, buffer, secretDerived ? { mode: SECRET_FILE_MODE } : undefined);
-    }
-    if (secretDerived) {
-        restrictSecretFilePermissions(safePath, secretDisplayPath);
-    }
+    writeWorkspaceFileSync(safePath, workspaceRoots, defaultWorkspace, buffer, {
+        append,
+        overwrite: task.overwrite !== false,
+        mkdirs: task.mkdirs !== false,
+        mode: secretDerived ? SECRET_FILE_MODE : undefined,
+    });
 
     return { path: safePath };
 }
@@ -12566,7 +12563,7 @@ export function activate(context: vscode.ExtensionContext) {
                 context,
                 mainViewProvider,
                 historyProvider,
-                selectHistoryRerunInputs(entry, true),
+                selectHistoryRerunInputs(entry, true, fullActionItem.action?.tasks),
                 pathParts
             );
         } catch (error) {

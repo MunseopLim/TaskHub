@@ -123,6 +123,17 @@ npx @vscode/vsce package # TaskHub-<version>.vsix 생성
 
 생성된 `.vsix` 파일은 VS Code `Extensions: Install from VSIX...` 명령으로 설치해 실제 설치 환경과 동일하게 검증할 수 있습니다.
 
+`.vscodeignore`는 에이전트/개발 설정을 패키지에서 제외합니다. 문서 스크린샷은 저용량 WebP로
+압축해 영문 README와 함께 동봉하며, 실행 번들·스키마·내장 예제·아이콘과 업데이트 안내에서 여는
+Markdown 문서도 유지합니다. 문서에서 연결하는 `CONTRIBUTING.md`는 `vsce`의 기본 제외를
+`!CONTRIBUTING.md`로 해제해 포함합니다. `vsce`는 기본 README의 이미지와 영문 문서 링크를 GitHub URL로
+변환합니다. 제외 규칙이나 이미지 형식을 바꾸면 실제 VSIX의 파일 목록과 README 링크를 확인하세요.
+
+스크린샷 갱신 시 `cwebp`로 원본 해상도와 ICC 프로필을 유지합니다. PNG는
+`cwebp -lossless -exact -q 100 -m 6 -metadata icc input.png -o output.webp`, JPEG는
+`cwebp -preset text -q 75 -m 6 -sharp_yuv -metadata icc input.jpg -o output.webp`를 사용합니다.
+변환 뒤 작은 글자의 가독성과 README의 이미지 경로를 확인합니다. 이미지 변환 도구는 일반 빌드에 필요하지 않습니다.
+
 ## 코드 스타일
 
 코딩 컨벤션(TypeScript strict, 세미콜론, `===`, 들여쓰기 등)은 [CLAUDE.md](CLAUDE.md#코딩-컨벤션)에서 단일 출처로 관리합니다. 기여 시 해당 규칙을 따라주세요.
@@ -165,6 +176,9 @@ suite('ModuleName Test Suite', () => {
 - 테스트 파일: `src/test/<module>.test.ts`
 - 프레임워크: Mocha + Node.js `assert`
 - 테스트 설정: `.vscode-test.mjs`
+
+실제 웹뷰 테스트는 창이 다른 창에 가려져도 Chromium의 배경 타이머·렌더링 제한 때문에 멈추지 않도록
+테스트 호스트에서만 해당 제한을 해제합니다. 제품의 HTML·CSP·스크립트와 테스트 단언은 그대로 실행합니다.
 
 ## Pull Requests
 

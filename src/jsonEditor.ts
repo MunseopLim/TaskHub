@@ -10,6 +10,9 @@ import {
     RecoveryEntry,
     RecoveryStore,
     makeRecoveryStore,
+    assertSupportedJsonNumbers,
+    parseJsonEditorText,
+    UnsupportedJsonNumberError,
 } from './jsonEditorUtils';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 
@@ -43,6 +46,7 @@ export const jsonPanelRegistry = {
         if (currentSnapshotTimer) { clearTimeout(currentSnapshotTimer); }
         currentSnapshotTimer = undefined;
         currentPendingSnapshot = undefined;
+        verifiedSaveTarget = undefined;
         // 복구 저장소는 **모듈 싱글턴**이라 첫 컨텍스트에 묶인다. 실전에서는
         // 컨텍스트가 하나뿐이라 문제가 없지만, 테스트는 케이스마다 새
         // workspaceState 를 주므로 여기서 놓아 주지 않으면 이전 케이스의
@@ -149,9 +153,20 @@ function showSaveSuccess(fileName: string): void {
 
 function showSaveFailure(fileName: string, error: any): void {
     vscode.window.showErrorMessage(t(
-        `JSON 저장 실패 (${fileName}): ${error.message}`,
-        `Failed to save JSON (${fileName}): ${error.message}`
+        `JSON 저장 실패 (${fileName}): ${jsonEditorErrorDetail(error)}`,
+        `Failed to save JSON (${fileName}): ${jsonEditorErrorDetail(error)}`
     ));
+}
+
+function unsupportedJsonNumberMessage(): string {
+    return t(
+        '정확하게 보존할 수 없는 숫자가 있습니다. 정수는 ±9,007,199,254,740,991 범위여야 하며, 소수는 저장 시 값이 달라지면 안 됩니다. 원문을 텍스트 편집기에서 편집해 주세요.',
+        'A number cannot be preserved exactly. Integers must be within ±9,007,199,254,740,991, and decimals must retain their value when saved. Edit the source in a text editor.'
+    );
+}
+
+function jsonEditorErrorDetail(error: any): string {
+    return error instanceof UnsupportedJsonNumberError ? unsupportedJsonNumberMessage() : error.message;
 }
 
 /**
@@ -246,8 +261,23 @@ async function offerRecoveryIfAny(
         return null;
     }
     const fileName = path.basename(filePath);
-    const recoverLabel = t('복구', 'Recover');
     const discardLabel = t('버리기', 'Discard');
+    try {
+        assertSupportedJsonNumbers(entry.data);
+    } catch (error) {
+        const choice = await vscode.window.showErrorMessage(
+            t(
+                `${fileName}의 복구 스냅샷을 열 수 없습니다. ${jsonEditorErrorDetail(error)} 복구본은 '버리기'를 선택한 경우에만 삭제됩니다.`,
+                `The recovery snapshot for ${fileName} cannot be opened. ${jsonEditorErrorDetail(error)} The snapshot is kept unless you choose Discard.`
+            ),
+            discardLabel
+        );
+        if (choice === discardLabel) {
+            await setRecoveryEntry(context, filePath, null);
+        }
+        return null;
+    }
+    const recoverLabel = t('복구', 'Recover');
     const choice = await vscode.window.showInformationMessage(
         t(
             `${fileName}에 이전 세션의 미저장 변경사항이 있습니다. 복구하시겠습니까?`,
@@ -284,8 +314,85 @@ async function confirmDiscardIfDirty(fileName: string): Promise<boolean> {
     return choice === discardLabel;
 }
 
-/** JSON Editor에서 처리 가능한 최대 파일 크기 (10 MB) */
+/** JSON Editor에서 열거나 다시 읽을 수 있는 최대 파일 크기 (10 MB). 저장 크기는 제한하지 않는다. */
 const JSON_EDITOR_MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+/**
+ * 큰 원문의 읽기·파싱이 확장 호스트를 오래 점유하거나 런타임 문자열 한도에
+ * 걸리지 않도록 저장 전 숫자 검사에서 읽는 원문의 크기를 제한한다.
+ */
+export const JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE = 64 * 1024 * 1024;
+
+/**
+ * JSON Editor가 마지막으로 직접 쓴 파일 상태. mtime을 복원한 외부 편집은
+ * ctime으로, 같은 경로의 파일 교체는 dev/ino로 구분한다. 밀리초 반올림으로
+ * 가까운 쓰기가 같아지지 않도록 파일 시스템이 제공하는 나노초 값을 보존한다.
+ * baselineMtimeMs 는 "현재 편집 유지" 시 외부 버전으로도 옮겨지므로 쓸 수 없다.
+ *
+ * 내용의 암호학적 증명은 아니다. 같은 inode를 다른 프로세스가 write~fstat
+ * 사이에 수정하는 경합까지 원자적으로 격리하지는 않는다. 기존 파일의 링크와
+ * 권한을 유지하는 비원자적 저장이며, 저장마다 전체 내용을 다시 읽지는 않는다.
+ */
+type SaveTargetFingerprint = Pick<fs.BigIntStats, 'dev' | 'ino' | 'size' | 'mtimeNs' | 'ctimeNs'>;
+let verifiedSaveTarget: { filePath: string; fingerprint: SaveTargetFingerprint } | undefined;
+
+function sameSaveTarget(left: SaveTargetFingerprint, right: SaveTargetFingerprint): boolean {
+    return left.dev === right.dev && left.ino === right.ino && left.size === right.size
+        && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function rememberVerifiedSaveTarget(filePath: string, written: fs.BigIntStats, current: fs.BigIntStats): void {
+    verifiedSaveTarget = sameSaveTarget(written, current)
+        ? { filePath, fingerprint: written }
+        : undefined;
+}
+
+/** 실제 쓴 fd의 상태를 닫기 전에 잡아, 나중의 path stat으로 외부 파일을 인증하지 않는다. */
+function writeJsonWithFingerprint(filePath: string, text: string): { written?: fs.BigIntStats; statError?: unknown } {
+    verifiedSaveTarget = undefined;
+    const fd = fs.openSync(filePath, 'w');
+    try {
+        fs.writeFileSync(fd, text, 'utf8');
+        try {
+            return { written: fs.fstatSync(fd, { bigint: true }) };
+        } catch (statError) {
+            // 쓰기는 끝났다. 메타데이터 실패는 저장 성공을 뒤집지 않는다.
+            return { statError };
+        }
+    } finally {
+        fs.closeSync(fd);
+    }
+}
+
+/** 외부 숫자 손실 위험을 검사해 이전 표 내용으로 덮어쓰지 않는다. 직접 쓴 뒤 바뀌지 않은 파일은 다시 읽지 않는다. */
+function assertDiskNumbersBeforeSave(filePath: string): void {
+    let content: string;
+    try {
+        const stat = fs.statSync(filePath, { bigint: true });
+        if (verifiedSaveTarget?.filePath === filePath
+            && sameSaveTarget(verifiedSaveTarget.fingerprint, stat)) {
+            return;
+        }
+        verifiedSaveTarget = undefined;
+        if (stat.size > BigInt(JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE)) {
+            throw new Error(t(
+                `외부에서 바뀐 원문(${formatFileSize(Number(stat.size))})이 너무 커서 숫자 손실 여부를 확인하지 못해 저장을 중단했습니다. 표의 편집 내용은 유지됩니다.`,
+                `Saving stopped because the externally changed source (${formatFileSize(Number(stat.size))}) is too large to check for lossy numbers. Your table edits are kept.`
+            ));
+        }
+        content = fs.readFileSync(filePath, 'utf8');
+    } catch (error: any) {
+        if (error.code === 'ENOENT') { return; }
+        throw error;
+    }
+    try {
+        parseJsonEditorText(content);
+    } catch (error) {
+        // 문법이 깨진 파일은 기존 복구 기능으로 고칠 수 있다. 숫자 손실은 별도로 차단한다.
+        if (error instanceof SyntaxError) { return; }
+        throw error;
+    }
+}
 
 export interface JsonEditorOpenHistory {
     filePath: string;
@@ -487,8 +594,12 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         let parsed: unknown;
         let parseFailure: string | undefined;
         try {
-            parsed = JSON.parse(content);
+            parsed = parseJsonEditorText(content);
         } catch (error: any) {
+            if (error instanceof UnsupportedJsonNumberError) {
+                vscode.window.showErrorMessage(`${fileName}: ${unsupportedJsonNumberMessage()}`);
+                return false;
+            }
             parseFailure = t(
                 `JSON 파싱 실패 (${fileName}): ${error.message}`,
                 `Failed to parse JSON (${fileName}): ${error.message}`
@@ -612,6 +723,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             currentSessionId = NO_SESSION;
             currentFlushPendingSnapshot = undefined;
             currentLastReceivedSnapshot = undefined;
+            verifiedSaveTarget = undefined;
             disposeFileWatcher();
             clearSnapshotTimer();
         });
@@ -621,6 +733,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     // 하므로 html 을 세팅하기 직전에 한 번만 뽑는다.
     const sessionId = ++jsonEditorSessionCounter;
     currentSessionId = sessionId;
+    verifiedSaveTarget = undefined;
 
     currentPanel.title = `JSON Editor: ${fileName}`;
     const logicScriptUri = currentPanel.webview.asWebviewUri(
@@ -787,6 +900,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     break;
                 }
                 case 'snapshot': {
+                    try { assertSupportedJsonNumbers(message.data); } catch { break; }
                     currentLastReceivedSnapshot = message.data;
                     scheduleSnapshotWrite(message.data);
                     break;
@@ -808,9 +922,13 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                         if (!delivered) { awaitingSaveAck.delete(saveSeq); }
                     };
                     try {
+                        let writeResult: ReturnType<typeof writeJsonWithFingerprint>;
                         try {
                             const saveData = unwrapIfRootArray(message.data, isRootArray);
-                            fs.writeFileSync(filePath, JSON.stringify(saveData, null, detectedIndent) + '\n', 'utf-8');
+                            assertSupportedJsonNumbers(saveData);
+                            const saveText = JSON.stringify(saveData, null, detectedIndent) + '\n';
+                            assertDiskNumbersBeforeSave(filePath);
+                            writeResult = writeJsonWithFingerprint(filePath, saveText);
                         } catch (error: any) {
                             // 디스크에 쓰지 못했다 — 진짜 저장 실패.
                             settle(postSaveResult(false, saveSeq));
@@ -824,11 +942,17 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                         // "외부에서 바뀌었다" 는 모달을 띄울 수 있다 — 데이터
                         // 손실은 없지만 조용히 넘기지는 않는다.
                         try {
-                            const written = fs.statSync(filePath);
-                            currentLastWriteMtime = written.mtimeMs;
-                            currentLastWriteSize = written.size;
-                            baselineMtimeMs = written.mtimeMs;
-                            baselineFileSize = written.size;
+                            if (!writeResult.written) { throw writeResult.statError; }
+                            const written = writeResult.written;
+                            const current = fs.statSync(filePath, { bigint: true });
+                            rememberVerifiedSaveTarget(filePath, written, current);
+                            // 경로가 그 사이 교체돼도 baseline은 실제 쓴 파일의 것이다.
+                            const writtenMtimeMs = Number(written.mtimeNs) / 1_000_000;
+                            const writtenSize = Number(written.size);
+                            currentLastWriteMtime = writtenMtimeMs;
+                            currentLastWriteSize = writtenSize;
+                            baselineMtimeMs = writtenMtimeMs;
+                            baselineFileSize = writtenSize;
                         } catch (statError: any) {
                             showSaveBaselineWarning(fileName, statError);
                         }
@@ -947,7 +1071,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     }
                     try {
                         const reloadContent = fs.readFileSync(filePath, 'utf-8');
-                        const parsed = JSON.parse(reloadContent);
+                        const parsed = parseJsonEditorText(reloadContent);
                         const result = wrapIfArray(parsed);
                         isRootArray = result.isRootArray;
                         const reloadedStat = fs.statSync(filePath);
@@ -985,7 +1109,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                                 `Failed to parse JSON (${fileName}): file content is not valid JSON. ${error.message}`
                             ));
                         } else {
-                            vscode.window.showErrorMessage(t(`파일 다시 읽기 실패 (${fileName}): ${error.message}`, `Failed to reload file (${fileName}): ${error.message}`));
+                            vscode.window.showErrorMessage(t(`파일 다시 읽기 실패 (${fileName}): ${jsonEditorErrorDetail(error)}`, `Failed to reload file (${fileName}): ${jsonEditorErrorDetail(error)}`));
                         }
                     }
                     break;
@@ -1100,8 +1224,11 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                 // unwrapIfRootArray 가 array 를 unwrap 하지 못해 디스크에
                 // `{"_rootArray":[...]}` object 로 저장된다.
                 try {
+                    if (postPromptStat.size > JSON_EDITOR_MAX_FILE_SIZE) {
+                        throw new Error(t('외부 파일이 JSON Editor의 10MB 한도를 초과합니다.', 'The external file exceeds the JSON Editor 10MB limit.'));
+                    }
                     const newDiskContent = fs.readFileSync(filePath, 'utf-8');
-                    const newDiskParsed = JSON.parse(newDiskContent);
+                    const newDiskParsed = parseJsonEditorText(newDiskContent);
                     const newWrapped = wrapIfArray(newDiskParsed);
                     postToWebview({
                         command: 'setSavedBaseline',
@@ -1119,8 +1246,8 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     // `{}` 객체를 보냈을 때는 사용자가 실제로 빈 객체를 편집
                     // 중일 때 충돌했음.)
                     vscode.window.showWarningMessage(t(
-                        `${fileName}: 현재 편집 유지 후 saved baseline 갱신 실패. 저장 전 외부 변경을 재확인해 주세요. (${e.message})`,
-                        `${fileName}: failed to refresh saved baseline after Keep. Re-verify external changes before saving. (${e.message})`
+                        `${fileName}: 현재 편집 유지 후 saved baseline 갱신 실패. 저장 전 외부 변경을 재확인해 주세요. (${jsonEditorErrorDetail(e)})`,
+                        `${fileName}: failed to refresh saved baseline after Keep. Re-verify external changes before saving. (${jsonEditorErrorDetail(e)})`
                     ));
                     postToWebview({ command: 'markBaselineUnknown' });
                 }
@@ -1156,7 +1283,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         }
         try {
             const reloadContent = fs.readFileSync(filePath, 'utf-8');
-            const parsed = JSON.parse(reloadContent);
+            const parsed = parseJsonEditorText(reloadContent);
             const result = wrapIfArray(parsed);
             isRootArray = result.isRootArray;
             baselineMtimeMs = changedStat.mtimeMs;
@@ -1197,8 +1324,8 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             currentIsDirty = true;
             postToWebview({ command: 'markBaselineUnknown' });
             vscode.window.showWarningMessage(t(
-                `외부 변경 감지 후 다시 읽기 실패 (${fileName}): ${e.message}`,
-                `Failed to reload after external change (${fileName}): ${e.message}`
+                `외부 변경 감지 후 다시 읽기 실패 (${fileName}): ${jsonEditorErrorDetail(e)}`,
+                `Failed to reload after external change (${fileName}): ${jsonEditorErrorDetail(e)}`
             ));
         }
     };
@@ -1245,6 +1372,7 @@ function generateNonce(): string {
  */
 export function buildJsonEditorStrings(): Record<string, string> {
     return {
+        unsupportedNumber: unsupportedJsonNumberMessage(),
         save: t('저장', 'Save'),
         saveTitle: t('저장 (Ctrl+S)', 'Save (Ctrl+S)'),
         reload: t('다시 불러오기', 'Reload'),
@@ -1366,14 +1494,18 @@ export function getWebviewContent(
     // savedData가 주어지면(=복구 경로) webview의 saved baseline은 디스크 데이터로
     // 잡혀 modified 표시와 undo 동작이 올바르게 처리된다.
     const escapeForScript = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
-    const jsonLiteral = escapeForScript(data);
+    assertSupportedJsonNumbers(data);
+    assertSupportedJsonNumbers(savedData);
+    // JSON 객체를 JS 리터럴로 실행하면 __proto__가 데이터 키 대신 prototype이 된다.
+    // 문자열을 전달하고 JSON.parse로 복원해 모든 키를 own property로 유지한다.
+    const jsonLiteral = `JSON.parse(${escapeForScript(JSON.stringify(data))})`;
     const strings = buildJsonEditorStrings();
     const stringsLiteral = escapeForScript(strings);
     const htmlLang = vscode.env.language.startsWith('ko') ? 'ko' : 'en';
     // Static markup interpolates these, so escape for attribute/text context.
     const esc = (value: string) => value
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    const savedLiteral = savedData !== undefined ? escapeForScript(savedData) : 'undefined';
+    const savedLiteral = savedData !== undefined ? `JSON.parse(${escapeForScript(JSON.stringify(savedData))})` : 'undefined';
     // src 속성 컨텍스트. asWebviewUri 결과에 따옴표가 들어갈 일은 없지만,
     // 속성으로 나가는 값은 예외 없이 이스케이프한다.
     const escapedLogicScriptUri = esc(logicScriptUri);
@@ -1813,6 +1945,7 @@ export function getWebviewContent(
         decideSaveResult,
         buildDraftSnapshot,
         resolveActiveDraftState,
+        parseJsonEditorText,
     } = TaskHubJsonEditorLogic;
 
     // 이 webview 인스턴스의 세션 번호. host 가 html 에 심어 준다.
@@ -2069,7 +2202,11 @@ export function getWebviewContent(
             const raws = [];
             inputs.forEach(input => { raws.push(input.value); });
             // 타입 보존은 **arr 를 비우기 전에** 계산해야 한다 (옛 항목이 기준).
-            const newArr = coerceEditedArrayItems(raws, arr);
+            let newArr;
+            try { newArr = coerceEditedArrayItems(raws, arr); } catch {
+                showError(S.unsupportedNumber);
+                return null;
+            }
             arr.length = 0;
             for (const v of newArr) { arr.push(v); }
         }
@@ -2345,7 +2482,7 @@ export function getWebviewContent(
             html += '<td class="row-num">' + (rowIdx + 1) + '</td>';
             if (isPlainObject(row)) {
                 columns.forEach((col, colIdx) => {
-                    const val = row[col];
+                    const val = Object.hasOwn(row, col) ? row[col] : undefined;
                     const isArray = Array.isArray(val);
                     const isMultiline = detectMultiline(val);
                     html += '<td data-row="' + rowIdx + '" data-col="' + escapeAttr(col) + '">';
@@ -2399,7 +2536,8 @@ export function getWebviewContent(
             return { value: String(val) };
         }
         if (typeof val === 'string') {
-            const parsed = parseValue(val);
+            let parsed;
+            try { parsed = parseValue(val); } catch { return null; }
             // 'abc' 처럼 되돌려도 그대로인 값에는 버튼을 내지 않는다.
             // ('' 도 parseValue 가 '' 를 돌려주므로 여기서 함께 걸러진다.)
             if (typeof parsed === 'string') { return null; }
@@ -3023,71 +3161,77 @@ export function getWebviewContent(
         // 되돌릴 수 없는 손실이라 방어를 남긴다.
         const row = getActiveRows()[rowIdx];
         if (!isPlainObject(row)) { return true; }
-        const oldVal = row[col];
+        const oldVal = Object.hasOwn(row, col) ? row[col] : undefined;
         let changed = false;
 
-        if (Array.isArray(oldVal)) {
-            const jsonTextarea = td.querySelector('.cell-edit textarea.json-edit');
-            if (jsonTextarea) {
-                try {
-                    const newVal = JSON.parse(jsonTextarea.value);
-                    showError('');
-                    if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
-                        getActiveRows()[rowIdx][col] = newVal;
+        try {
+            if (Array.isArray(oldVal)) {
+                const jsonTextarea = td.querySelector('.cell-edit textarea.json-edit');
+                if (jsonTextarea) {
+                    try {
+                        const newVal = parseJsonEditorText(jsonTextarea.value);
+                        showError('');
+                        if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+                            Object.defineProperty(row, col, { value: newVal, enumerable: true, configurable: true, writable: true });
+                            changed = true;
+                        }
+                    } catch (e) {
+                        showError(fmt(S.invalidJsonInCell, { col: col, message: e.name === 'UnsupportedJsonNumberError' ? S.unsupportedNumber : e.message }));
+                        return false;
+                    }
+                } else {
+                    const inputs = td.querySelectorAll('.cell-edit input[data-arr-idx]');
+                    const raws = [];
+                    inputs.forEach(input => { raws.push(input.value); });
+                    // 항목마다 옛 값의 타입을 보존한다 — 그렇지 않으면 편집 없이
+                    // 셀을 열었다 나가는 것만으로 [1,true,null] 이 문자열 배열이 된다.
+                    const newArr = coerceEditedArrayItems(raws, oldVal);
+                    if (JSON.stringify(oldVal) !== JSON.stringify(newArr)) {
+                        getActiveRows()[rowIdx][col] = newArr;
                         changed = true;
                     }
-                } catch (e) {
-                    showError(fmt(S.invalidJsonInCell, { col: col, message: e.message }));
-                    return false;
                 }
             } else {
-                const inputs = td.querySelectorAll('.cell-edit input[data-arr-idx]');
-                const raws = [];
-                inputs.forEach(input => { raws.push(input.value); });
-                // 항목마다 옛 값의 타입을 보존한다 — 그렇지 않으면 편집 없이
-                // 셀을 열었다 나가는 것만으로 [1,true,null] 이 문자열 배열이 된다.
-                const newArr = coerceEditedArrayItems(raws, oldVal);
-                if (JSON.stringify(oldVal) !== JSON.stringify(newArr)) {
-                    getActiveRows()[rowIdx][col] = newArr;
-                    changed = true;
-                }
-            }
-        } else {
-            const jsonTextarea = td.querySelector('.cell-edit textarea.json-edit');
-            if (jsonTextarea) {
-                try {
-                    const newVal = JSON.parse(jsonTextarea.value);
-                    showError('');
-                    if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
-                        getActiveRows()[rowIdx][col] = newVal;
+                const jsonTextarea = td.querySelector('.cell-edit textarea.json-edit');
+                if (jsonTextarea) {
+                    try {
+                        const newVal = parseJsonEditorText(jsonTextarea.value);
+                        showError('');
+                        if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+                            Object.defineProperty(row, col, { value: newVal, enumerable: true, configurable: true, writable: true });
+                            changed = true;
+                        }
+                    } catch (e) {
+                        showError(fmt(S.invalidJsonInCell, { col: col, message: e.name === 'UnsupportedJsonNumberError' ? S.unsupportedNumber : e.message }));
+                        return false; // Don't close editing on invalid JSON
+                    }
+                } else {
+                    const textarea = td.querySelector('.cell-edit textarea');
+                    const input = td.querySelector('.cell-edit input');
+                    let newVal;
+                    if (textarea) {
+                        newVal = textarea.value;
+                    } else if (input) {
+                        // 옛 값이 문자열이면 raw 를 그대로 둔다 — "00123" · "true" ·
+                        // "null" 이 저장할 때 조용히 숫자/불리언/null 로 바뀌지 않도록.
+                        // 규칙은 번들의 coerceEditedCellValue 한 곳에만 있다.
+                        newVal = coerceEditedCellValue(input.value, oldVal);
+                    }
+                    const oldEmpty = oldVal === undefined || oldVal === null || oldVal === '';
+                    const newEmpty = newVal === undefined || newVal === null || newVal === '';
+                    if (oldEmpty && newEmpty) {
+                        // No real change
+                    } else if (oldVal !== newVal) {
+                        Object.defineProperty(row, col, { value: newVal, enumerable: true, configurable: true, writable: true });
                         changed = true;
                     }
-                } catch (e) {
-                    showError(fmt(S.invalidJsonInCell, { col: col, message: e.message }));
-                    return false; // Don't close editing on invalid JSON
-                }
-            } else {
-                const textarea = td.querySelector('.cell-edit textarea');
-                const input = td.querySelector('.cell-edit input');
-                let newVal;
-                if (textarea) {
-                    newVal = textarea.value;
-                } else if (input) {
-                    // 옛 값이 문자열이면 raw 를 그대로 둔다 — "00123" · "true" ·
-                    // "null" 이 저장할 때 조용히 숫자/불리언/null 로 바뀌지 않도록.
-                    // 규칙은 번들의 coerceEditedCellValue 한 곳에만 있다.
-                    newVal = coerceEditedCellValue(input.value, oldVal);
-                }
-                const oldEmpty = oldVal === undefined || oldVal === null || oldVal === '';
-                const newEmpty = newVal === undefined || newVal === null || newVal === '';
-                if (oldEmpty && newEmpty) {
-                    // No real change
-                } else if (oldVal !== newVal) {
-                    getActiveRows()[rowIdx][col] = newVal;
-                    changed = true;
                 }
             }
+        } catch (error) {
+            showError(error.name === 'UnsupportedJsonNumberError' ? S.unsupportedNumber : error.message);
+            return false;
         }
+        showError('');
         td.classList.remove('editing');
         if (changed) {
             pushHistory();

@@ -1,6 +1,8 @@
 .vscode/**
 .vscode-test/**
 .claude/**
+.codex/**
+.agents/**
 .idea/**
 .git/**
 .github/**
@@ -13,6 +15,9 @@ coverage/**
 .yarnrc
 esbuild.js
 CLAUDE.md
+AGENTS.md
+.nvmrc
+!CONTRIBUTING.md
 scripts/**
 examples/**
 *.vsix

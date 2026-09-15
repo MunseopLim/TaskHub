@@ -266,6 +266,80 @@ export interface SheetEntry {
     path: string[];
 }
 
+/** JSON Editor가 숫자 원문을 손실 없이 왕복할 수 없을 때 사용한다. UI 문구는 호스트 번들에서 제공한다. */
+export class UnsupportedJsonNumberError extends Error {
+    constructor() {
+        super('Unsupported JSON number');
+        this.name = 'UnsupportedJsonNumberError';
+    }
+}
+
+/** 이미 파싱된 복구본·웹뷰 메시지도 정수 범위와 유한성을 검사한다. */
+export function assertSupportedJsonNumbers(value: unknown): void {
+    const pending = [value];
+    const seen = new Set<object>();
+    while (pending.length > 0) {
+        const item = pending.pop();
+        if (typeof item === 'number') {
+            if (!Number.isFinite(item) || (Number.isInteger(item) && !Number.isSafeInteger(item))) {
+                throw new UnsupportedJsonNumberError();
+            }
+        } else if (item && typeof item === 'object' && !seen.has(item)) {
+            seen.add(item);
+            for (const child of Object.values(item)) { pending.push(child); }
+        }
+    }
+}
+
+// 부동소수점 계산 없이 십진수의 의미를 정규화한다. 1.20e2와 120은 같지만,
+// 0.1234567890123456789와 Number가 돌려주는 0.12345678901234568은 다르다.
+const DECIMAL_NUMBER_INPUT = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+function normalizedDecimal(token: string): string {
+    const match = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(token)!;
+    let digits = (match[2] + (match[3] ?? '')).replace(/^0+/, '');
+    if (!digits) { return '0'; }
+    const withoutTrailing = digits.replace(/0+$/, '');
+    const exponent = Number(match[4] ?? 0) - (match[3]?.length ?? 0) + digits.length - withoutTrailing.length;
+    digits = withoutTrailing;
+    return `${match[1] === '-' ? '-' : ''}${digits}e${exponent}`;
+}
+
+function assertSupportedNumberToken(token: string, value: number): void {
+    assertSupportedJsonNumbers(value);
+    if (DECIMAL_NUMBER_INPUT.test(token)
+        && normalizedDecimal(token) !== normalizedDecimal(JSON.stringify(value))) {
+        throw new UnsupportedJsonNumberError();
+    }
+}
+
+/** JSON.parse 직후 원래 숫자 토큰도 검사해 반올림·overflow·underflow 손실을 거절한다. */
+export function parseJsonEditorText(text: string): unknown {
+    const value: unknown = JSON.parse(text);
+    assertSupportedJsonNumbers(value);
+    // 문자열은 반복 정규식으로 잡지 않는다. 수 MB짜리 문자열은 V8 정규식의
+    // 스택을 소진할 수 있다. JSON.parse가 문법을 확인했으므로 문자열/숫자 경계만 걷는다.
+    let index = 0;
+    while (index < text.length) {
+        const character = text[index];
+        if (character === '"') {
+            index++;
+            while (index < text.length) {
+                if (text[index] === '\\') { index += 2; }
+                else if (text[index++] === '"') { break; }
+            }
+        } else if (character === '-' || (character >= '0' && character <= '9')) {
+            const start = index++;
+            while (index < text.length && /[\d.eE+-]/.test(text[index])) { index++; }
+            const token = text.slice(start, index);
+            assertSupportedNumberToken(token, Number(token));
+        } else {
+            index++;
+        }
+    }
+    return value;
+}
+
 /** 표의 객체 행에 새 필드를 추가한다. 객체 행이 없으면 첫 객체 행을 만든다. */
 export function addJsonEditorField(rows: unknown[], fieldName: string): 'added' | 'empty-name' | 'duplicate-name' {
     const name = fieldName.trim();
@@ -328,7 +402,10 @@ export function parseValue(str: string): unknown {
     if (str === 'true') { return true; }
     if (str === 'false') { return false; }
     const num = Number(str);
-    if (Number.isFinite(num) && str.trim() !== '') { return num; }
+    if (str.trim() !== '' && (Number.isFinite(num) || DECIMAL_NUMBER_INPUT.test(str.trim()))) {
+        assertSupportedNumberToken(str.trim(), num);
+        return num;
+    }
     return str;
 }
 
@@ -566,37 +643,42 @@ export function buildDraftSnapshot(input: DraftSnapshotInput): DraftSnapshotResu
     const row = ref[rowIdx];
     if (!row || typeof row !== 'object' || Array.isArray(row)) { return { kind: 'skip' }; }
     const rowObj = row as Record<string, unknown>;
-    const oldVal = rowObj[col];
+    const oldVal = Object.hasOwn(rowObj, col) ? rowObj[col] : undefined;
 
-    if (arrValues) {
-        const arr = rowObj[col];
-        if (!Array.isArray(arr) || arrValues.length === 0) { return { kind: 'skip' }; }
-        // 셀의 **모든** input 값을 commitCell 과 같은 규칙으로 한 번에 반영한다
-        // (coerceEditedArrayItems). 하나만 반영하면 같은 셀의 다른 미커밋 입력이
-        // 사라지고, draft 만 string 으로 굳히면 복구 후 저장에서 숫자/불리언/null
-        // 배열이 문자열 배열로 디스크에 기록된다.
-        rowObj[col] = coerceEditedArrayItems(arrValues, arr);
-    } else if (isJsonEdit) {
-        let parsed: unknown;
-        try {
-            parsed = JSON.parse(rawInputValue);
-        } catch {
-            return { kind: 'skip' };
+    try {
+        if (arrValues) {
+            const arr = rowObj[col];
+            if (!Array.isArray(arr) || arrValues.length === 0) { return { kind: 'skip' }; }
+            // 셀의 **모든** input 값을 commitCell 과 같은 규칙으로 한 번에 반영한다
+            // (coerceEditedArrayItems). 하나만 반영하면 같은 셀의 다른 미커밋 입력이
+            // 사라지고, draft 만 string 으로 굳히면 복구 후 저장에서 숫자/불리언/null
+            // 배열이 문자열 배열로 디스크에 기록된다.
+            rowObj[col] = coerceEditedArrayItems(arrValues, arr);
+        } else if (isJsonEdit) {
+            let parsed: unknown;
+            try {
+                parsed = parseJsonEditorText(rawInputValue);
+            } catch {
+                return { kind: 'skip' };
+            }
+            Object.defineProperty(rowObj, col, { value: parsed, enumerable: true, configurable: true, writable: true });
+        } else {
+            const newVal = coerceEditedCellValue(rawInputValue, oldVal);
+            // **commitCell 의 empty 가드와 같은 규칙.** null / undefined / 빈 값 셀은
+            // input 에 `""` 로 그려지므로, 아무것도 타이핑하지 않고 셀을 열어 두기만
+            // 해도 draft 가 `""` 로 달라진다 — 저장 뒤에도 dirty 가 풀리지 않고
+            // (blur 의 commitCell 은 이 가드 때문에 changed 로 보지 않는다),
+            // recovery 스냅샷에 `null → ""` 이 굳으며 그 키가 없던 행에는
+            // `col: ""` 가 새로 생긴다.
+            const oldEmpty = oldVal === undefined || oldVal === null || oldVal === '';
+            const newEmpty = newVal === undefined || newVal === null || newVal === '';
+            if (!(oldEmpty && newEmpty)) {
+                Object.defineProperty(rowObj, col, { value: newVal, enumerable: true, configurable: true, writable: true });
+            }
         }
-        rowObj[col] = parsed;
-    } else {
-        const newVal = coerceEditedCellValue(rawInputValue, oldVal);
-        // **commitCell 의 empty 가드와 같은 규칙.** null / undefined / 빈 값 셀은
-        // input 에 `""` 로 그려지므로, 아무것도 타이핑하지 않고 셀을 열어 두기만
-        // 해도 draft 가 `""` 로 달라진다 — 저장 뒤에도 dirty 가 풀리지 않고
-        // (blur 의 commitCell 은 이 가드 때문에 changed 로 보지 않는다),
-        // recovery 스냅샷에 `null → ""` 이 굳으며 그 키가 없던 행에는
-        // `col: ""` 가 새로 생긴다.
-        const oldEmpty = oldVal === undefined || oldVal === null || oldVal === '';
-        const newEmpty = newVal === undefined || newVal === null || newVal === '';
-        if (!(oldEmpty && newEmpty)) {
-            rowObj[col] = newVal;
-        }
+    } catch {
+        // 입력 중 지원 불가 숫자도 invalid JSON과 동일하게 draft를 덮어쓰지 않는다.
+        return { kind: 'skip' };
     }
 
     if (lastSavedSnapshot !== null && lastSavedSnapshot !== undefined) {

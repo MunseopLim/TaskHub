@@ -7,12 +7,51 @@ import {
     wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY, getWebviewContent,
     isSupportedJsonRoot, unsupportedJsonRootMessage,
 } from '../jsonEditor';
+import { assertSupportedJsonNumbers, parseJsonEditorText, UnsupportedJsonNumberError } from '../jsonEditorUtils';
 
 function readSourceForRegex(filePath: string): string {
     return fs.readFileSync(filePath, 'utf-8').replace(/\r\n/g, '\n');
 }
 
 suite('JsonEditorUtils Test Suite', () => {
+    suite('숫자 원문 손실 차단', () => {
+        test('안전 정수 경계와 값이 같은 십진 표기·숫자 문자열을 보존한다', () => {
+            const raw = '{"rows":[9007199254740991,-9007199254740991,1.2300e2,0.1,5e-324,"9007199254740993","1e400"]}';
+            assert.deepStrictEqual(parseJsonEditorText(raw), JSON.parse(raw));
+            assert.strictEqual(coerceEditedCellValue('9007199254740993', 'old string'), '9007199254740993');
+        });
+
+        test('큰 문자열과 이스케이프 안의 숫자는 스택 소진 없이 그대로 보존한다', () => {
+            const initial = { rows: [{ text: 'a'.repeat(8 * 1024 * 1024), escaped: '\\"1e400\\\\9007199254740993' }] };
+            assert.deepStrictEqual(parseJsonEditorText(JSON.stringify(initial)), initial);
+            for (const raw of ['+.1234567890123456789', '.1234567890123456789', '+1e400']) {
+                assert.throws(() => coerceEditedCellValue(raw, 1), UnsupportedJsonNumberError);
+            }
+        });
+
+        test('큰 정수·소수 반올림·overflow·underflow를 파싱 전에 손실시키지 않는다', () => {
+            for (const raw of ['9007199254740992', '9007199254740993', '-9007199254740993', '1e400', '1e-400', '0.1234567890123456789']) {
+                assert.throws(() => parseJsonEditorText('{"rows":[{"id":' + raw + '}]}'), UnsupportedJsonNumberError, raw);
+                assert.throws(() => coerceEditedCellValue(raw, 1), UnsupportedJsonNumberError, raw);
+                assert.throws(() => coerceEditedArrayItems([raw], [1]), UnsupportedJsonNumberError, raw);
+                assert.throws(() => coerceEditedArrayItems([raw], ['']), UnsupportedJsonNumberError, raw);
+            }
+        });
+
+        test('이미 파싱된 복구·저장 메시지와 미커밋 draft도 검사한다', () => {
+            for (const number of [NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+                assert.throws(() => assertSupportedJsonNumbers({ rows: [{ number }] }), UnsupportedJsonNumberError);
+            }
+            for (const edit of [
+                { rawInputValue: '9007199254740993' },
+                { rawInputValue: '{"id":1e400}', isJsonEdit: true },
+                { rawInputValue: '', arrValues: ['9007199254740993'] },
+            ]) {
+                const data = { rows: [{ id: edit.arrValues ? [1] : 1 }] };
+                assert.deepStrictEqual(buildDraftSnapshot({ data, sheetPath: ['rows'], rowIdx: 0, col: 'id', lastSavedSnapshot: null, ...edit }), { kind: 'skip' });
+            }
+        });
+    });
     suite('buildSheetMap', () => {
         test('flat array sheets', () => {
             const data = {
@@ -2710,7 +2749,7 @@ suite('JsonEditorUtils Test Suite', () => {
         // 회귀 가드: 이전의 base64 + atob() 디코딩은 atob()가 latin1이라 멀티바이트
         // 문자(한글, "—", "≥")가 mojibake 된 채 JSON.parse 가 "성공"해 조용히
         // 손상됐고, Save 시 깨진 데이터가 디스크에 영구 기록됐다. 데이터는
-        // escapeForScript(JSON.stringify + "<" 이스케이프) JS 리터럴로 주입돼야 한다.
+        // JSON 문자열을 안전하게 전달한 뒤 JSON.parse로 복원해야 한다.
         const fakeWebview = { cspSource: 'https://test.invalid' } as unknown as import('vscode').Webview;
         // 이 스위트는 세션과 무관하지만 인자는 필수다 — 0 을 넘기면 오가는
         // 메시지를 전부 버리는 webview 가 만들어진다 (NO_SESSION 과 같은 값).
@@ -2721,12 +2760,11 @@ suite('JsonEditorUtils Test Suite', () => {
             arr: ['α', 'β', '🎯'],
         };
 
-        // escapeForScript 출력은 < 이스케이프를 포함한 valid JSON 이므로
-        // 추출한 리터럴을 JSON.parse 로 바로 복원할 수 있다.
+        // 실제 주입된 초기화 표현식을 실행해 JSON.parse 경계까지 검사한다.
         function extractJsLiteral(html: string, pattern: RegExp): unknown {
             const m = html.match(pattern);
             assert.ok(m, 'could not locate injected literal: ' + pattern);
-            return JSON.parse(m![1]);
+            return new Function(`return (${m![1]});`)();
         }
 
         test('data literal preserves multi-byte characters losslessly', () => {
@@ -2742,6 +2780,18 @@ suite('JsonEditorUtils Test Suite', () => {
             const html = getWebviewContent(unicodeData, saved, '/tmp/t.json', fakeWebview, false, SESSION, 'https://test.invalid/jsonEditorWebview.js');
             const roundTripped = extractJsLiteral(html, /const savedInit = (.*);/);
             assert.deepStrictEqual(roundTripped, saved);
+        });
+
+        test('__proto__ 키는 초기 데이터와 saved baseline 모두 own property로 복원한다', () => {
+            const original = JSON.parse('{"__proto__":{"rows":[{"__proto__":{"role":"admin"}}]}}');
+            const html = getWebviewContent(original, original, '/t.json', fakeWebview, false, SESSION, 'https://test.invalid/jsonEditorWebview.js');
+            for (const expression of [/let data = (.*);/, /const savedInit = (.*);/]) {
+                const restored: any = extractJsLiteral(html, expression);
+                assert.deepStrictEqual(restored, original);
+                assert.strictEqual(Object.getPrototypeOf(restored), Object.prototype);
+                assert.ok(Object.hasOwn(restored, '__proto__'));
+                assert.ok(Object.hasOwn(restored.__proto__.rows[0], '__proto__'));
+            }
         });
 
         test('살아 있는 세션이 아닌 값은 거부한다', () => {
@@ -2763,7 +2813,7 @@ suite('JsonEditorUtils Test Suite', () => {
             const m = html.match(/let data = (.*);/);
             assert.ok(m, 'could not locate injected data literal');
             assert.ok(!m![1].includes('</scr' + 'ipt>'), 'literal must escape "<" so the HTML parser cannot see a closing script tag');
-            assert.deepStrictEqual(JSON.parse(m![1]), payload);
+            assert.deepStrictEqual(new Function(`return (${m![1]});`)(), payload);
         });
 
         test('webview no longer decodes injected data via JSON.parse(atob(...))', () => {
