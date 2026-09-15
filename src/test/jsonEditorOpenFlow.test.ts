@@ -3,7 +3,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE, RECOVERY_STATE_KEY, ROOT_ARRAY_KEY, jsonPanelRegistry, openJsonEditorFile } from '../jsonEditor';
+import { JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE, RECOVERY_STATE_KEY, ROOT_ARRAY_KEY, assertDiskNumbersBeforeSave, jsonPanelRegistry, openJsonEditorFile } from '../jsonEditor';
+import { UnsupportedJsonNumberError } from '../jsonEditorUtils';
 
 /**
  * JSON Editor의 **실제 진입점**을 실행하는 테스트 (0.6.47).
@@ -422,7 +423,7 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         assert.strictEqual(fs.statSync(filePath).size, JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE + 1);
     });
 
-    test('본인이 쓴 파일만 재읽기를 생략하고 다시 열면 저장 검사를 새로 시작한다', async () => {
+    test('본인이 쓴 파일은 전체 문자열 재읽기를 생략하고 다시 열면 저장 검사를 새로 시작한다', async () => {
         const fake = installFakePanel();
         const filePath = writeJson('save-cache-reads.json', { rows: [{ id: 1 }] });
         const ctx = makeContext();
@@ -440,7 +441,7 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             reads = 0;
             await fake.send({ command: 'save', data: { rows: [{ id: 3 }] }, seq: 2 });
             assert.strictEqual(fake.posted.at(-1)?.success, true);
-            assert.strictEqual(reads, 0, '직접 쓴 상태 그대로면 인증용 재읽기도 하지 않는다');
+            assert.strictEqual(reads, 0, '직접 쓴 상태 그대로면 전체 문자열을 다시 만들지 않는다 (Windows는 청크 해시 확인)');
             await fake.send({ command: 'saveAck', seq: 2, dirty: false });
 
             await openJsonEditorFile(ctx, filePath);
@@ -450,6 +451,153 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             assert.strictEqual(reads, 1, '이전 열기의 캐시를 새 세션으로 넘기지 않는다');
         } finally {
             (mutableFs as any).readFileSync = originalRead;
+        }
+    });
+
+    test('Windows 저장 검사는 UTF-8 청크 경계를 보존하고 동일 메타데이터의 외부 숫자 변경도 거부한다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-cache-windows-hash.json', { rows: [] });
+        await openJsonEditorFile(makeContext(), filePath);
+        const saved = { rows: [{ id: 1, label: '9007199254740993' }], padding: '' };
+        const emptyText = JSON.stringify(saved, null, 2) + '\n';
+        const prefixLength = emptyText.indexOf('"padding": "') + '"padding": "'.length;
+        // 4바이트 문자가 첫 64KiB 읽기의 마지막 바이트에서 시작한다.
+        saved.padding = 'x'.repeat(64 * 1024 - prefixLength - 1) + '😀한글';
+        await fake.send({ command: 'save', data: saved, seq: 1 });
+        assert.strictEqual(fake.posted.at(-1)?.success, true);
+        const fingerprint = fs.statSync(filePath, { bigint: true });
+        const originalReadFile = fs.readFileSync;
+        const originalRead = fs.readSync;
+        const originalStat = fs.statSync;
+        const originalFstat = fs.fstatSync;
+        let wholeReads = 0;
+        const chunkLengths: number[] = [];
+        (mutableFs as any).readFileSync = (target: unknown, ...args: unknown[]) => {
+            if (target === filePath) { wholeReads++; }
+            return (originalReadFile as any)(target, ...args);
+        };
+        (mutableFs as any).readSync = (fd: number, buffer: Buffer, offset: number, length: number, position: number | null) => {
+            chunkLengths.push(length);
+            return originalRead(fd, buffer, offset, length, position);
+        };
+        try {
+            assert.doesNotThrow(() => assertDiskNumbersBeforeSave(filePath, 'win32'));
+            assert.strictEqual(wholeReads, 0, '일치하는 파일은 전체 문자열 읽기와 숫자 파싱을 생략한다');
+            assert.ok(chunkLengths.length >= 3, '두 데이터 청크와 EOF 확인을 읽어야 한다');
+            assert.strictEqual(chunkLengths[0], 64 * 1024);
+            assert.ok(chunkLengths.every(length => length <= 64 * 1024));
+
+            const external = (JSON.stringify(saved, null, 2) + '\n')
+                .replace('"id": 1,', '"id": 9007199254740993,')
+                .replace('"label": "9007199254740993"', '"label": "1"');
+            fs.writeFileSync(filePath, external);
+            assert.strictEqual(fs.statSync(filePath, { bigint: true }).size, fingerprint.size);
+            // Windows에서 연속 쓰기의 시각이 같은 값으로 보고되는 경계를
+            // 로컬 OS의 실제 시계 해상도에 의존하지 않고 재현한다.
+            (mutableFs as any).statSync = (target: fs.PathLike, options?: { bigint?: boolean }) => {
+                return target === filePath && options?.bigint
+                    ? fingerprint : (originalStat as any)(target, options);
+            };
+            (mutableFs as any).fstatSync = (fd: number, options?: { bigint?: boolean }) => {
+                const current = (originalFstat as any)(fd, options);
+                return options?.bigint && current.dev === fingerprint.dev && current.ino === fingerprint.ino
+                    ? fingerprint : current;
+            };
+            assert.throws(() => assertDiskNumbersBeforeSave(filePath, 'win32'), UnsupportedJsonNumberError);
+            assert.strictEqual(wholeReads, 1, '해시 불일치 뒤에는 원문 전체의 숫자를 검사한다');
+            assert.throws(() => assertDiskNumbersBeforeSave(filePath, 'darwin'), UnsupportedJsonNumberError);
+            assert.strictEqual(wholeReads, 2, '실패한 해시 검사는 메타데이터만으로 재사용할 캐시를 남기지 않는다');
+            assert.strictEqual(originalReadFile(filePath, 'utf8'), external);
+        } finally {
+            (mutableFs as any).readFileSync = originalReadFile;
+            (mutableFs as any).readSync = originalRead;
+            (mutableFs as any).statSync = originalStat;
+            (mutableFs as any).fstatSync = originalFstat;
+        }
+    });
+
+    test('Windows 청크 읽기 실패는 fd를 닫고 저장 캐시를 무효화한다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-cache-read-error.json', { rows: [] });
+        await openJsonEditorFile(makeContext(), filePath);
+        await fake.send({ command: 'save', data: { rows: [{ id: 1 }] }, seq: 1 });
+        assert.strictEqual(fake.posted.at(-1)?.success, true);
+        const originalRead = fs.readSync;
+        const originalReadFile = fs.readFileSync;
+        let openedFd: number | undefined;
+        let wholeReads = 0;
+        (mutableFs as any).readSync = (fd: number) => {
+            openedFd = fd;
+            throw Object.assign(new Error('simulated chunk read failure'), { code: 'EACCES' });
+        };
+        (mutableFs as any).readFileSync = (target: unknown, ...args: unknown[]) => {
+            if (target === filePath) { wholeReads++; }
+            return (originalReadFile as any)(target, ...args);
+        };
+        try {
+            assert.throws(() => assertDiskNumbersBeforeSave(filePath, 'win32'), { code: 'EACCES' });
+            assert.notStrictEqual(openedFd, undefined);
+            assert.throws(() => fs.fstatSync(openedFd!), { code: 'EBADF' }, '실패한 읽기의 fd도 닫아야 한다');
+            (mutableFs as any).readSync = originalRead;
+            assert.doesNotThrow(() => assertDiskNumbersBeforeSave(filePath, 'darwin'));
+            assert.strictEqual(wholeReads, 1, '읽기 실패 뒤에는 이전 캐시를 믿지 않고 원문을 다시 검사한다');
+        } finally {
+            (mutableFs as any).readSync = originalRead;
+            (mutableFs as any).readFileSync = originalReadFile;
+        }
+    });
+
+    test('닫힌 뒤 시각이 확정된 65MiB 자체 저장 파일도 해시 확인 후 연속 저장한다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-cache-large-finalization.json', { rows: [] });
+        await openJsonEditorFile(makeContext(), filePath);
+        const saved = { rows: [{ id: 1 }], padding: 'x'.repeat(65 * 1024 * 1024) };
+        const originalWrite = fs.writeFileSync;
+        const originalFstat = fs.fstatSync;
+        const originalReadFile = fs.readFileSync;
+        let pendingWriteFd: number | undefined;
+        let finalizedWrites = 0;
+        let wholeReads = 0;
+        (mutableFs as any).writeFileSync = (target: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+            (originalWrite as any)(target, ...args);
+            if (typeof target === 'number') { pendingWriteFd = target; }
+        };
+        (mutableFs as any).fstatSync = (fd: number, options?: { bigint?: boolean }) => {
+            const current = (originalFstat as any)(fd, options);
+            if (fd === pendingWriteFd && options?.bigint) {
+                pendingWriteFd = undefined;
+                finalizedWrites++;
+                // 쓰기 fd에서 본 값이 close 이후 path stat보다 1ns 이전인
+                // 상황을 고정한다. 이후 읽기 fd는 실제 path stat과 일치한다.
+                return { ...current, ctimeNs: current.ctimeNs - 1n };
+            }
+            return current;
+        };
+        try {
+            await fake.send({ command: 'save', data: saved, seq: 1 });
+            assert.strictEqual(fake.posted.at(-1)?.success, true);
+            assert.ok(fs.statSync(filePath).size > JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE);
+            (mutableFs as any).readFileSync = (target: unknown, ...args: unknown[]) => {
+                if (target === filePath) { wholeReads++; }
+                return (originalReadFile as any)(target, ...args);
+            };
+            assert.doesNotThrow(() => assertDiskNumbersBeforeSave(filePath, 'win32'));
+            saved.rows[0].id = 2;
+            await fake.send({ command: 'save', data: saved, seq: 2 });
+            assert.strictEqual(fake.posted.at(-1)?.success, true, '64MiB 초과 자체 파일도 시각 확정 차이로 저장이 막히면 안 된다');
+            assert.strictEqual(finalizedWrites, 2);
+            assert.strictEqual(wholeReads, 0, '큰 자체 파일은 고정 크기 청크로 확인하고 전체 문자열을 재생성하지 않는다');
+            assert.ok(fs.statSync(filePath).size > JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE);
+            const fd = fs.openSync(filePath, 'r');
+            try {
+                const prefix = Buffer.alloc(128);
+                const read = fs.readSync(fd, prefix, 0, prefix.length, 0);
+                assert.match(prefix.subarray(0, read).toString('utf8'), /"id": 2/);
+            } finally { fs.closeSync(fd); }
+        } finally {
+            (mutableFs as any).writeFileSync = originalWrite;
+            (mutableFs as any).fstatSync = originalFstat;
+            (mutableFs as any).readFileSync = originalReadFile;
         }
     });
 
@@ -545,6 +693,48 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             await new Promise(resolve => setImmediate(resolve));
             assert.deepStrictEqual((readRecoveryEntry(ctx, filePath) as any)?.data, saved);
             jsonPanelRegistry.clear();
+        }
+    });
+
+    test('watcher는 URI 경로로 현재 파일을 식별하고 형제 파일은 무시한다', async () => {
+        const originalWatcher = vscode.workspace.createFileSystemWatcher;
+        let change!: (uri: vscode.Uri) => Promise<void>;
+        let create!: (uri: vscode.Uri) => Promise<void>;
+        (vscode.workspace as any).createFileSystemWatcher = () => ({
+            onDidChange(callback: typeof change) { change = callback; return { dispose() {} }; },
+            onDidCreate(callback: typeof create) { create = callback; return { dispose() {} }; },
+            onDidDelete() { return { dispose() {} }; },
+            dispose() {},
+        });
+        try {
+            const fake = installFakePanel();
+            const writtenPath = writeJson('Current.json', { rows: [{ id: 1 }] });
+            // Windows CI의 임시 경로가 이미 소문자여도 C: → Uri.fsPath의 c:
+            // 차이를 재현한다. 나머지 플랫폼에서도 실제 watcher 경로를 실행한다.
+            const filePath = process.platform === 'win32'
+                ? writtenPath.replace(/^[a-z]:/i, drive => drive.toUpperCase())
+                : writtenPath;
+            await openJsonEditorFile(makeContext(), filePath);
+            // 실제 파일이 있어야 잘못 통과한 경로 필터가 stat의 ENOENT에
+            // 가려지지 않는다. case-insensitive 볼륨의 대상 내용은 아래에서 다시 쓴다.
+            writeJson('current.json', { rows: [{ id: 99999 }] });
+            writeJson('Current.json.bak', { rows: [{ id: 99999 }] });
+            for (const [index, notify] of [change, create].entries()) {
+                const external = { rows: [{ id: 10 ** (index + 2) }] };
+                fs.writeFileSync(filePath, JSON.stringify(external));
+                const before = fake.posted.length;
+                // 대소문자만 다른 이름도 전체 경로 소문자화로 매치하면 안 된다.
+                await notify(vscode.Uri.file(path.join(tempDir, 'current.json')));
+                await notify(vscode.Uri.file(filePath + '.bak'));
+                assert.strictEqual(fake.posted.length, before, '형제 파일 이벤트는 무시해야 한다');
+                await notify(vscode.Uri.file(filePath));
+                assert.deepStrictEqual(fake.posted.slice(before), [
+                    { command: 'loadData', data: external, session: fake.sessionId() },
+                ]);
+                assert.strictEqual(jsonPanelRegistry.isDirty(), false);
+            }
+        } finally {
+            (vscode.workspace as any).createFileSystemWatcher = originalWatcher;
         }
     });
 

@@ -130,6 +130,15 @@ function hiddenPaletteMentions(text: string, commands: HiddenPaletteCommand[]): 
 
 suite('Documentation Consistency', () => {
 
+    test('AGENTS.md와 CLAUDE.md는 도구 이름을 제외한 지침이 같다', () => {
+        const normalizeInstructions = (name: string): string => readRepoFile(name)
+            .replace(/\r\n/g, '\n')
+            .replace(/^# (?:AGENTS|CLAUDE)\.md\n/, '# Agent instructions\n')
+            .replace(/\*\*(?:Codex|Claude Code)\(및 다른 AI 에이전트\)/, '**Agent(및 다른 AI 에이전트)');
+        assert.strictEqual(normalizeInstructions('AGENTS.md'), normalizeInstructions('CLAUDE.md'),
+            '버전 관리 등을 한 에이전트 지침에만 수정하지 말고 두 파일을 함께 갱신해야 한다');
+    });
+
     // =====================================================================
     // 1. package.json contributes.configuration ↔ features.md §21 정합성
     // =====================================================================

@@ -324,56 +324,96 @@ const JSON_EDITOR_MAX_FILE_SIZE = 10 * 1024 * 1024;
 export const JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE = 64 * 1024 * 1024;
 
 /**
- * JSON Editor가 마지막으로 직접 쓴 파일 상태. mtime을 복원한 외부 편집은
- * ctime으로, 같은 경로의 파일 교체는 dev/ino로 구분한다. 밀리초 반올림으로
- * 가까운 쓰기가 같아지지 않도록 파일 시스템이 제공하는 나노초 값을 보존한다.
+ * JSON Editor가 마지막으로 직접 쓴 파일 상태. ctime과 dev/ino도 비교하고,
+ * Windows에서는 같은 시각 값으로 보고되는 연속 쓰기를 구분하기 위해 실제
+ * 파일의 SHA-256도 확인한다. 문자열 전체를 다시 만들거나 파싱하지는 않는다.
  * baselineMtimeMs 는 "현재 편집 유지" 시 외부 버전으로도 옮겨지므로 쓸 수 없다.
  *
- * 내용의 암호학적 증명은 아니다. 같은 inode를 다른 프로세스가 write~fstat
- * 사이에 수정하는 경합까지 원자적으로 격리하지는 않는다. 기존 파일의 링크와
- * 권한을 유지하는 비원자적 저장이며, 저장마다 전체 내용을 다시 읽지는 않는다.
+ * 기존 파일의 링크와 권한을 유지하는 비원자적 저장이다. 검사 뒤 쓰기까지
+ * 다른 프로세스의 수정을 격리하지는 않는다. Windows 이외의 메타데이터 비교는
+ * 내용의 암호학적 증명이 아니며 같은 inode의 write~fstat 경합이 남는다.
  */
 type SaveTargetFingerprint = Pick<fs.BigIntStats, 'dev' | 'ino' | 'size' | 'mtimeNs' | 'ctimeNs'>;
-let verifiedSaveTarget: { filePath: string; fingerprint: SaveTargetFingerprint } | undefined;
+let verifiedSaveTarget: {
+    filePath: string;
+    fingerprint: SaveTargetFingerprint;
+    contentHash: string;
+    requiresContentHash: boolean;
+} | undefined;
 
 function sameSaveTarget(left: SaveTargetFingerprint, right: SaveTargetFingerprint): boolean {
     return left.dev === right.dev && left.ino === right.ino && left.size === right.size
         && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 }
 
-function rememberVerifiedSaveTarget(filePath: string, written: fs.BigIntStats, current: fs.BigIntStats): void {
-    verifiedSaveTarget = sameSaveTarget(written, current)
-        ? { filePath, fingerprint: written }
+function rememberVerifiedSaveTarget(filePath: string, written: fs.BigIntStats, current: fs.BigIntStats, contentHash: string): void {
+    // 핸들을 닫으며 시각이 확정돼 달라진 경우도 내용 해시가 일치해야만 재사용할
+    // 후보로 남긴다. path stat만 보고 그 내용을 직접 쓴 것으로 인증하지 않는다.
+    verifiedSaveTarget = written.dev === current.dev && written.ino === current.ino && written.size === current.size
+        ? { filePath, fingerprint: current, contentHash, requiresContentHash: !sameSaveTarget(written, current) }
         : undefined;
 }
 
 /** 실제 쓴 fd의 상태를 닫기 전에 잡아, 나중의 path stat으로 외부 파일을 인증하지 않는다. */
-function writeJsonWithFingerprint(filePath: string, text: string): { written?: fs.BigIntStats; statError?: unknown } {
+function writeJsonWithFingerprint(filePath: string, text: string): { written?: fs.BigIntStats; statError?: unknown; contentHash: string } {
     verifiedSaveTarget = undefined;
+    const contentHash = crypto.createHash('sha256').update(text, 'utf8').digest('hex');
     const fd = fs.openSync(filePath, 'w');
     try {
         fs.writeFileSync(fd, text, 'utf8');
         try {
-            return { written: fs.fstatSync(fd, { bigint: true }) };
+            return { written: fs.fstatSync(fd, { bigint: true }), contentHash };
         } catch (statError) {
             // 쓰기는 끝났다. 메타데이터 실패는 저장 성공을 뒤집지 않는다.
-            return { statError };
+            return { statError, contentHash };
         }
     } finally {
         fs.closeSync(fd);
     }
 }
 
-/** 외부 숫자 손실 위험을 검사해 이전 표 내용으로 덮어쓰지 않는다. 직접 쓴 뒤 바뀌지 않은 파일은 다시 읽지 않는다. */
-function assertDiskNumbersBeforeSave(filePath: string): void {
-    let content: string;
+/** 캐시 크기만큼만 읽고 끝의 한 바이트로 성장을 확인한다. 추가 메모리는 고정 64KiB다. */
+function matchesSavedJsonHash(filePath: string, stat: fs.BigIntStats, contentHash: string): boolean {
+    const fd = fs.openSync(filePath, 'r');
     try {
-        const stat = fs.statSync(filePath, { bigint: true });
-        if (verifiedSaveTarget?.filePath === filePath
-            && sameSaveTarget(verifiedSaveTarget.fingerprint, stat)) {
-            return;
+        const opened = fs.fstatSync(fd, { bigint: true });
+        if (!sameSaveTarget(stat, opened)) { return false; }
+        const hash = crypto.createHash('sha256');
+        const buffer = Buffer.allocUnsafe(64 * 1024);
+        let remaining = stat.size;
+        while (remaining > 0n) {
+            const length = Number(remaining < BigInt(buffer.length) ? remaining : BigInt(buffer.length));
+            const read = fs.readSync(fd, buffer, 0, length, null);
+            if (read === 0) { return false; }
+            hash.update(buffer.subarray(0, read));
+            remaining -= BigInt(read);
         }
-        verifiedSaveTarget = undefined;
+        if (fs.readSync(fd, buffer, 0, 1, null) !== 0) { return false; }
+        const afterRead = fs.fstatSync(fd, { bigint: true });
+        const current = fs.statSync(filePath, { bigint: true });
+        return sameSaveTarget(opened, afterRead) && sameSaveTarget(afterRead, current)
+            && hash.digest('hex') === contentHash;
+    } finally {
+        fs.closeSync(fd);
+    }
+}
+
+/** 외부 숫자 손실을 검사한다. platform 인자는 Windows의 실제 저장 검사를 다른 OS에서도 회귀 검증하기 위한 경계다. */
+export function assertDiskNumbersBeforeSave(filePath: string, platform: NodeJS.Platform = process.platform): void {
+    let content: string;
+    const cached = verifiedSaveTarget;
+    verifiedSaveTarget = undefined;
+    try {
+        let stat = fs.statSync(filePath, { bigint: true });
+        if (cached?.filePath === filePath && sameSaveTarget(cached.fingerprint, stat)) {
+            if ((platform !== 'win32' && !cached.requiresContentHash)
+                || matchesSavedJsonHash(filePath, stat, cached.contentHash)) {
+                verifiedSaveTarget = cached;
+                return;
+            }
+            // 해시 검사 중 파일이 커졌다면 새 크기에 64MB 파싱 상한을 적용한다.
+            stat = fs.statSync(filePath, { bigint: true });
+        }
         if (stat.size > BigInt(JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE)) {
             throw new Error(t(
                 `외부에서 바뀐 원문(${formatFileSize(Number(stat.size))})이 너무 커서 숫자 손실 여부를 확인하지 못해 저장을 중단했습니다. 표의 편집 내용은 유지됩니다.`,
@@ -945,7 +985,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                             if (!writeResult.written) { throw writeResult.statError; }
                             const written = writeResult.written;
                             const current = fs.statSync(filePath, { bigint: true });
-                            rememberVerifiedSaveTarget(filePath, written, current);
+                            rememberVerifiedSaveTarget(filePath, written, current, writeResult.contentHash);
                             // 경로가 그 사이 교체돼도 baseline은 실제 쓴 파일의 것이다.
                             const writtenMtimeMs = Number(written.mtimeNs) / 1_000_000;
                             const writtenSize = Number(written.size);
@@ -1143,8 +1183,10 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         false,  // ignoreChangeEvents
         false   // ignoreDeleteEvents
     );
-    // 파일명 normalization 으로 false positive (sibling 매치) 한 번 더 차단.
-    const targetFsPath = path.normalize(filePath);
+    // watcher의 URI와 같은 규칙으로 비교한다. Windows에서는 Uri.fsPath가
+    // 드라이브 문자를 소문자로 바꾸므로 원래 C: 경로와 직접 비교하면 누락된다.
+    // 파일명까지 소문자로 바꾸면 대소문자를 구분하는 디렉터리의 형제 파일이 섞인다.
+    const targetFsPath = path.normalize(vscode.Uri.file(filePath).fsPath);
     const handleExternalChange = async (changedUri: vscode.Uri) => {
         if (currentFilePath !== filePath) { return; }
         if (path.normalize(changedUri.fsPath) !== targetFsPath) { return; }
