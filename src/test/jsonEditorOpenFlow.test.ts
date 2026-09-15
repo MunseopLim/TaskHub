@@ -547,7 +547,9 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         }
     });
 
-    test('닫힌 뒤 시각이 확정된 65MiB 자체 저장 파일도 해시 확인 후 연속 저장한다', async () => {
+    test('닫힌 뒤 시각이 확정된 65MiB 자체 저장 파일도 해시 확인 후 연속 저장한다', async function () {
+        // 큰 실파일 왕복의 I/O 시간은 runner마다 달라, 이 사례만 60초를 허용한다.
+        this.timeout(60_000);
         const fake = installFakePanel();
         const filePath = writeJson('save-cache-large-finalization.json', { rows: [] });
         await openJsonEditorFile(makeContext(), filePath);
@@ -555,11 +557,16 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         const originalWrite = fs.writeFileSync;
         const originalFstat = fs.fstatSync;
         const originalReadFile = fs.readFileSync;
+        const originalRead = fs.readSync;
+        const milliseconds = () => Number(process.hrtime.bigint()) / 1_000_000;
+        const timings: Record<string, number> = { writeMs: 0, readMs: 0, readCalls: 0, readBytes: 0 };
         let pendingWriteFd: number | undefined;
         let finalizedWrites = 0;
         let wholeReads = 0;
         (mutableFs as any).writeFileSync = (target: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+            const started = milliseconds();
             (originalWrite as any)(target, ...args);
+            timings.writeMs += milliseconds() - started;
             if (typeof target === 'number') { pendingWriteFd = target; }
         };
         (mutableFs as any).fstatSync = (fd: number, options?: { bigint?: boolean }) => {
@@ -574,30 +581,50 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             return current;
         };
         try {
+            const firstSaveStart = milliseconds();
             await fake.send({ command: 'save', data: saved, seq: 1 });
+            timings.firstSaveMs = milliseconds() - firstSaveStart;
             assert.strictEqual(fake.posted.at(-1)?.success, true);
-            assert.ok(fs.statSync(filePath).size > JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE);
+            const savedSize = fs.statSync(filePath).size;
+            assert.ok(savedSize > JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE);
             (mutableFs as any).readFileSync = (target: unknown, ...args: unknown[]) => {
                 if (target === filePath) { wholeReads++; }
                 return (originalReadFile as any)(target, ...args);
             };
-            assert.doesNotThrow(() => assertDiskNumbersBeforeSave(filePath, 'win32'));
+            (mutableFs as any).readSync = (fd: number, buffer: Buffer, offset: number, length: number, position: number | null) => {
+                assert.ok(length <= 64 * 1024, '해시 확인은 고정 크기 청크로 읽어야 한다');
+                const started = milliseconds();
+                const read = originalRead(fd, buffer, offset, length, position);
+                timings.readMs += milliseconds() - started;
+                timings.readCalls++;
+                timings.readBytes += read;
+                return read;
+            };
+            // requiresContentHash 후보라 모든 OS에서 실제 두 번째 저장이 원문을
+            // 해시 검사한다. 같은 파일을 먼저 별도로 해시해 I/O를 중복하지 않는다.
             saved.rows[0].id = 2;
+            const secondSaveStart = milliseconds();
             await fake.send({ command: 'save', data: saved, seq: 2 });
+            timings.secondSaveMs = milliseconds() - secondSaveStart;
             assert.strictEqual(fake.posted.at(-1)?.success, true, '64MiB 초과 자체 파일도 시각 확정 차이로 저장이 막히면 안 된다');
             assert.strictEqual(finalizedWrites, 2);
             assert.strictEqual(wholeReads, 0, '큰 자체 파일은 고정 크기 청크로 확인하고 전체 문자열을 재생성하지 않는다');
+            assert.strictEqual(timings.readBytes, savedSize, '두 번째 저장은 기존 파일 전체의 해시를 한 번 확인해야 한다');
             assert.ok(fs.statSync(filePath).size > JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE);
             const fd = fs.openSync(filePath, 'r');
             try {
                 const prefix = Buffer.alloc(128);
-                const read = fs.readSync(fd, prefix, 0, prefix.length, 0);
+                const read = originalRead(fd, prefix, 0, prefix.length, 0);
                 assert.match(prefix.subarray(0, read).toString('utf8'), /"id": 2/);
             } finally { fs.closeSync(fd); }
         } finally {
             (mutableFs as any).writeFileSync = originalWrite;
             (mutableFs as any).fstatSync = originalFstat;
             (mutableFs as any).readFileSync = originalReadFile;
+            (mutableFs as any).readSync = originalRead;
+            console.log('JSON Editor large-save timings (ms/bytes):', JSON.stringify(
+                Object.fromEntries(Object.entries(timings).map(([key, value]) => [key, Math.round(value)]))
+            ));
         }
     });
 

@@ -62,7 +62,11 @@ suite('릴리스 버전 검사 CLI', function () {
         tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-release-version-'));
         repository = path.join(tempDir, 'repository with spaces 한글');
         fs.mkdirSync(repository);
-        environment = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull };
+        // Git for Windows는 os.devNull의 장치 경로를 config 파일로 열지 못한다.
+        // 실제 빈 파일로 사용자 설정을 격리하고 임시 저장소와 함께 정리한다.
+        const globalConfig = path.join(tempDir, 'empty-gitconfig');
+        fs.writeFileSync(globalConfig, '');
+        environment = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: globalConfig };
         for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'TASKHUB_VERSION_BASE']) {
             delete environment[key];
         }
