@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE, RECOVERY_STATE_KEY, ROOT_ARRAY_KEY, assertDiskNumbersBeforeSave, jsonPanelRegistry, openJsonEditorFile } from '../jsonEditor';
+import { JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE, JSON_EDITOR_SAVE_HASH_CHUNK_SIZE, RECOVERY_STATE_KEY, ROOT_ARRAY_KEY, assertDiskNumbersBeforeSave, jsonPanelRegistry, openJsonEditorFile } from '../jsonEditor';
 import { UnsupportedJsonNumberError } from '../jsonEditorUtils';
 
 /**
@@ -461,13 +461,13 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         const saved = { rows: [{ id: 1, label: '9007199254740993' }], padding: '' };
         const emptyText = JSON.stringify(saved, null, 2) + '\n';
         const prefixLength = emptyText.indexOf('"padding": "') + '"padding": "'.length;
-        // 4바이트 문자가 첫 64KiB 읽기의 마지막 바이트에서 시작한다.
-        saved.padding = 'x'.repeat(64 * 1024 - prefixLength - 1) + '😀한글';
+        // 4바이트 문자가 첫 청크 읽기의 마지막 바이트에서 시작한다.
+        saved.padding = 'x'.repeat(JSON_EDITOR_SAVE_HASH_CHUNK_SIZE - prefixLength - 1) + '😀한글';
         await fake.send({ command: 'save', data: saved, seq: 1 });
         assert.strictEqual(fake.posted.at(-1)?.success, true);
         const fingerprint = fs.statSync(filePath, { bigint: true });
         const originalReadFile = fs.readFileSync;
-        const originalRead = fs.readSync;
+        const originalRead = fs.read;
         const originalStat = fs.statSync;
         const originalFstat = fs.fstatSync;
         let wholeReads = 0;
@@ -476,16 +476,16 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             if (target === filePath) { wholeReads++; }
             return (originalReadFile as any)(target, ...args);
         };
-        (mutableFs as any).readSync = (fd: number, buffer: Buffer, offset: number, length: number, position: number | null) => {
+        (mutableFs as any).read = (fd: number, buffer: Buffer, offset: number, length: number, position: number | null, callback: (error: NodeJS.ErrnoException | null, bytesRead: number) => void) => {
             chunkLengths.push(length);
-            return originalRead(fd, buffer, offset, length, position);
+            return originalRead(fd, buffer, offset, length, position, callback);
         };
         try {
-            assert.doesNotThrow(() => assertDiskNumbersBeforeSave(filePath, 'win32'));
+            await assert.doesNotReject(assertDiskNumbersBeforeSave(filePath, 'win32'));
             assert.strictEqual(wholeReads, 0, '일치하는 파일은 전체 문자열 읽기와 숫자 파싱을 생략한다');
             assert.ok(chunkLengths.length >= 3, '두 데이터 청크와 EOF 확인을 읽어야 한다');
-            assert.strictEqual(chunkLengths[0], 64 * 1024);
-            assert.ok(chunkLengths.every(length => length <= 64 * 1024));
+            assert.strictEqual(chunkLengths[0], JSON_EDITOR_SAVE_HASH_CHUNK_SIZE);
+            assert.ok(chunkLengths.every(length => length <= JSON_EDITOR_SAVE_HASH_CHUNK_SIZE));
 
             const external = (JSON.stringify(saved, null, 2) + '\n')
                 .replace('"id": 1,', '"id": 9007199254740993,')
@@ -503,14 +503,14 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
                 return options?.bigint && current.dev === fingerprint.dev && current.ino === fingerprint.ino
                     ? fingerprint : current;
             };
-            assert.throws(() => assertDiskNumbersBeforeSave(filePath, 'win32'), UnsupportedJsonNumberError);
+            await assert.rejects(assertDiskNumbersBeforeSave(filePath, 'win32'), UnsupportedJsonNumberError);
             assert.strictEqual(wholeReads, 1, '해시 불일치 뒤에는 원문 전체의 숫자를 검사한다');
-            assert.throws(() => assertDiskNumbersBeforeSave(filePath, 'darwin'), UnsupportedJsonNumberError);
+            await assert.rejects(assertDiskNumbersBeforeSave(filePath, 'darwin'), UnsupportedJsonNumberError);
             assert.strictEqual(wholeReads, 2, '실패한 해시 검사는 메타데이터만으로 재사용할 캐시를 남기지 않는다');
             assert.strictEqual(originalReadFile(filePath, 'utf8'), external);
         } finally {
             (mutableFs as any).readFileSync = originalReadFile;
-            (mutableFs as any).readSync = originalRead;
+            (mutableFs as any).read = originalRead;
             (mutableFs as any).statSync = originalStat;
             (mutableFs as any).fstatSync = originalFstat;
         }
@@ -522,29 +522,150 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         await openJsonEditorFile(makeContext(), filePath);
         await fake.send({ command: 'save', data: { rows: [{ id: 1 }] }, seq: 1 });
         assert.strictEqual(fake.posted.at(-1)?.success, true);
-        const originalRead = fs.readSync;
+        const originalRead = fs.read;
         const originalReadFile = fs.readFileSync;
         let openedFd: number | undefined;
         let wholeReads = 0;
-        (mutableFs as any).readSync = (fd: number) => {
+        (mutableFs as any).read = (fd: number, ...args: unknown[]) => {
             openedFd = fd;
-            throw Object.assign(new Error('simulated chunk read failure'), { code: 'EACCES' });
+            const callback = args.at(-1) as (error: NodeJS.ErrnoException | null, bytesRead: number) => void;
+            setImmediate(() => callback(Object.assign(new Error('simulated chunk read failure'), { code: 'EACCES' }), 0));
         };
         (mutableFs as any).readFileSync = (target: unknown, ...args: unknown[]) => {
             if (target === filePath) { wholeReads++; }
             return (originalReadFile as any)(target, ...args);
         };
         try {
-            assert.throws(() => assertDiskNumbersBeforeSave(filePath, 'win32'), { code: 'EACCES' });
+            await assert.rejects(assertDiskNumbersBeforeSave(filePath, 'win32'), { code: 'EACCES' });
             assert.notStrictEqual(openedFd, undefined);
             assert.throws(() => fs.fstatSync(openedFd!), { code: 'EBADF' }, '실패한 읽기의 fd도 닫아야 한다');
-            (mutableFs as any).readSync = originalRead;
-            assert.doesNotThrow(() => assertDiskNumbersBeforeSave(filePath, 'darwin'));
+            (mutableFs as any).read = originalRead;
+            await assert.doesNotReject(assertDiskNumbersBeforeSave(filePath, 'darwin'));
             assert.strictEqual(wholeReads, 1, '읽기 실패 뒤에는 이전 캐시를 믿지 않고 원문을 다시 검사한다');
         } finally {
-            (mutableFs as any).readSync = originalRead;
+            (mutableFs as any).read = originalRead;
             (mutableFs as any).readFileSync = originalReadFile;
         }
+    });
+
+    /** 쓰기 fd 의 ctime 을 1ns 앞당겨, 다음 저장 전 검사가 모든 OS 에서 청크 해시 경로를 타게 한다. */
+    async function saveRequiringContentHash(fake: FakePanel, data: unknown, seq: number): Promise<void> {
+        const originalWrite = fs.writeFileSync;
+        const originalFstat = fs.fstatSync;
+        let pendingWriteFd: number | undefined;
+        (mutableFs as any).writeFileSync = (target: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+            (originalWrite as any)(target, ...args);
+            if (typeof target === 'number') { pendingWriteFd = target; }
+        };
+        (mutableFs as any).fstatSync = (fd: number, options?: { bigint?: boolean }) => {
+            const current = (originalFstat as any)(fd, options);
+            if (fd === pendingWriteFd && options?.bigint) {
+                pendingWriteFd = undefined;
+                return { ...current, ctimeNs: current.ctimeNs - 1n };
+            }
+            return current;
+        };
+        try {
+            await fake.send({ command: 'save', data, seq });
+        } finally {
+            (mutableFs as any).writeFileSync = originalWrite;
+            (mutableFs as any).fstatSync = originalFstat;
+        }
+    }
+
+    test('저장 전 해시 확인은 청크 사이에 이벤트 루프를 양보한다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-hash-yields.json', { rows: [] });
+        await openJsonEditorFile(makeContext(), filePath);
+        const saved = { rows: [{ id: 1 }], padding: 'x'.repeat(3 * JSON_EDITOR_SAVE_HASH_CHUNK_SIZE) };
+        await saveRequiringContentHash(fake, saved, 1);
+        assert.strictEqual(fake.posted.at(-1)?.success, true);
+        const originalRead = fs.read;
+        let ranImmediates = 0;
+        const immediatesSeenByRead: number[] = [];
+        (mutableFs as any).read = (...args: unknown[]) => {
+            immediatesSeenByRead.push(ranImmediates);
+            setImmediate(() => { ranImmediates++; });
+            return (originalRead as any)(...args);
+        };
+        try {
+            saved.rows[0].id = 2;
+            await fake.send({ command: 'save', data: saved, seq: 2 });
+        } finally {
+            (mutableFs as any).read = originalRead;
+        }
+        assert.strictEqual(fake.posted.at(-1)?.success, true);
+        assert.ok(immediatesSeenByRead.length >= 4, '여러 청크와 EOF 확인을 읽어야 한다');
+        assert.ok(immediatesSeenByRead.slice(1).every((seen, index) => seen > index),
+            `각 청크 읽기 전에 앞서 예약한 콜백이 실행돼야 한다: ${immediatesSeenByRead.join(',')}`);
+        assert.match(fs.readFileSync(filePath, 'utf8'), /"id": 2/);
+    });
+
+    test('해시 확인 중 도착한 다음 저장은 앞 저장이 끝난 뒤 순서대로 쓴다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-hash-queue.json', { rows: [] });
+        await openJsonEditorFile(makeContext(), filePath);
+        await saveRequiringContentHash(fake, { rows: [{ id: 1 }] }, 1);
+        const originalRead = fs.read;
+        let releaseFirstRead!: () => void;
+        const firstReadHeld = new Promise<void>(resolve => { releaseFirstRead = resolve; });
+        let heldOnce = false;
+        let readStarted!: () => void;
+        const firstReadStarted = new Promise<void>(resolve => { readStarted = resolve; });
+        (mutableFs as any).read = (...args: unknown[]) => {
+            if (!heldOnce) {
+                heldOnce = true;
+                readStarted();
+                void firstReadHeld.then(() => (originalRead as any)(...args));
+                return;
+            }
+            return (originalRead as any)(...args);
+        };
+        try {
+            const first = fake.send({ command: 'save', data: { rows: [{ id: 2 }] }, seq: 2 });
+            await firstReadStarted;
+            const second = fake.send({ command: 'save', data: { rows: [{ id: 3 }] }, seq: 3 });
+            await new Promise(resolve => setImmediate(resolve));
+            assert.match(fs.readFileSync(filePath, 'utf8'), /"id": 1/, '앞 저장의 확인이 끝나기 전에는 다음 저장이 쓰지 않는다');
+            releaseFirstRead();
+            await Promise.all([first, second]);
+        } finally {
+            (mutableFs as any).read = originalRead;
+        }
+        const results = fake.posted.filter(message => message.command === 'saveResult');
+        assert.deepStrictEqual(results.slice(-2).map(message => [message.seq, message.success]), [[2, true], [3, true]]);
+        assert.match(fs.readFileSync(filePath, 'utf8'), /"id": 3/);
+    });
+
+    test('해시 확인 중 다른 파일을 열면 이전 파일에 쓰지 않고 알린다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-hash-session-a.json', { rows: [] });
+        const otherPath = writeJson('save-hash-session-b.json', { rows: [{ id: 9 }] });
+        const ctx = makeContext();
+        await openJsonEditorFile(ctx, filePath);
+        await saveRequiringContentHash(fake, { rows: [{ id: 1 }] }, 1);
+        const before = fs.readFileSync(filePath, 'utf8');
+        const originalRead = fs.read;
+        let releaseRead!: () => void;
+        const readHeld = new Promise<void>(resolve => { releaseRead = resolve; });
+        let readStarted!: () => void;
+        const started = new Promise<void>(resolve => { readStarted = resolve; });
+        (mutableFs as any).read = (...args: unknown[]) => {
+            readStarted();
+            void readHeld.then(() => (originalRead as any)(...args));
+        };
+        try {
+            const pending = fake.send({ command: 'save', data: { rows: [{ id: 2 }] }, seq: 2 });
+            await started;
+            (mutableFs as any).read = originalRead;
+            await openJsonEditorFile(ctx, otherPath);
+            releaseRead();
+            await pending;
+        } finally {
+            (mutableFs as any).read = originalRead;
+        }
+        assert.strictEqual(fs.readFileSync(filePath, 'utf8'), before);
+        assert.match(shownWarnings.at(-1) ?? '', /저장하지 않았습니다|not saved/);
     });
 
     test('닫힌 뒤 시각이 확정된 65MiB 자체 저장 파일도 해시 확인 후 연속 저장한다', async function () {
@@ -557,7 +678,7 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         const originalWrite = fs.writeFileSync;
         const originalFstat = fs.fstatSync;
         const originalReadFile = fs.readFileSync;
-        const originalRead = fs.readSync;
+        const originalRead = fs.read;
         const milliseconds = () => Number(process.hrtime.bigint()) / 1_000_000;
         const timings: Record<string, number> = { writeMs: 0, readMs: 0, readCalls: 0, readBytes: 0 };
         let pendingWriteFd: number | undefined;
@@ -591,14 +712,15 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
                 if (target === filePath) { wholeReads++; }
                 return (originalReadFile as any)(target, ...args);
             };
-            (mutableFs as any).readSync = (fd: number, buffer: Buffer, offset: number, length: number, position: number | null) => {
-                assert.ok(length <= 64 * 1024, '해시 확인은 고정 크기 청크로 읽어야 한다');
+            (mutableFs as any).read = (fd: number, buffer: Buffer, offset: number, length: number, position: number | null, callback: (error: NodeJS.ErrnoException | null, bytesRead: number) => void) => {
+                assert.ok(length <= JSON_EDITOR_SAVE_HASH_CHUNK_SIZE, '해시 확인은 고정 크기 청크로 읽어야 한다');
                 const started = milliseconds();
-                const read = originalRead(fd, buffer, offset, length, position);
-                timings.readMs += milliseconds() - started;
-                timings.readCalls++;
-                timings.readBytes += read;
-                return read;
+                originalRead(fd, buffer, offset, length, position, (error, read) => {
+                    timings.readMs += milliseconds() - started;
+                    timings.readCalls++;
+                    timings.readBytes += read;
+                    callback(error, read);
+                });
             };
             // requiresContentHash 후보라 모든 OS에서 실제 두 번째 저장이 원문을
             // 해시 검사한다. 같은 파일을 먼저 별도로 해시해 I/O를 중복하지 않는다.
@@ -614,14 +736,14 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             const fd = fs.openSync(filePath, 'r');
             try {
                 const prefix = Buffer.alloc(128);
-                const read = originalRead(fd, prefix, 0, prefix.length, 0);
+                const read = fs.readSync(fd, prefix, 0, prefix.length, 0);
                 assert.match(prefix.subarray(0, read).toString('utf8'), /"id": 2/);
             } finally { fs.closeSync(fd); }
         } finally {
             (mutableFs as any).writeFileSync = originalWrite;
             (mutableFs as any).fstatSync = originalFstat;
             (mutableFs as any).readFileSync = originalReadFile;
-            (mutableFs as any).readSync = originalRead;
+            (mutableFs as any).read = originalRead;
             console.log('JSON Editor large-save timings (ms/bytes):', JSON.stringify(
                 Object.fromEntries(Object.entries(timings).map(([key, value]) => [key, Math.round(value)]))
             ));

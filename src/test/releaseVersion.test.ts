@@ -94,7 +94,14 @@ suite('릴리스 버전 검사 CLI', function () {
     });
 
     teardown(() => {
-        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        // Windows에서는 방금 끝난 git 프로세스나 백신 검사가 새 저장소 핸들을 잠시
+        // 붙잡아 EPERM이 날 수 있다. os.tmpdir() 아래 임시 저장소의 정리 실패로
+        // 검사 결과를 실패시키지 않는다 (pipelineIntegration 테스트와 같은 정책).
+        try {
+            fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+        } catch (err: any) {
+            console.warn(`teardown: could not remove ${tempDir} (${err?.code ?? err?.message ?? err}); leaving for OS temp cleanup`);
+        }
     });
 
     test('현재 저장소와 npm test/package의 필수 검사 연결을 검증한다', () => {

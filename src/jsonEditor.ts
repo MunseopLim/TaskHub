@@ -372,23 +372,33 @@ function writeJsonWithFingerprint(filePath: string, text: string): { written?: f
     }
 }
 
-/** 캐시 크기만큼만 읽고 끝의 한 바이트로 성장을 확인한다. 추가 메모리는 고정 64KiB다. */
-function matchesSavedJsonHash(filePath: string, stat: fs.BigIntStats, contentHash: string): boolean {
+/** 해시 확인에서 한 번에 읽는 크기. 추가 메모리는 이 크기로 고정된다. */
+export const JSON_EDITOR_SAVE_HASH_CHUNK_SIZE = 1024 * 1024;
+
+/** 청크 읽기는 libuv 스레드 풀에서 수행해 큰 파일의 해시 확인이 확장 호스트를 멈추지 않게 한다. */
+function readChunk(fd: number, buffer: Buffer, length: number): Promise<number> {
+    return new Promise((resolve, reject) => {
+        fs.read(fd, buffer, 0, length, null, (error, bytesRead) => error ? reject(error) : resolve(bytesRead));
+    });
+}
+
+/** 캐시 크기만큼만 읽고 끝의 한 바이트로 성장을 확인한다. */
+async function matchesSavedJsonHash(filePath: string, stat: fs.BigIntStats, contentHash: string): Promise<boolean> {
     const fd = fs.openSync(filePath, 'r');
     try {
         const opened = fs.fstatSync(fd, { bigint: true });
         if (!sameSaveTarget(stat, opened)) { return false; }
         const hash = crypto.createHash('sha256');
-        const buffer = Buffer.allocUnsafe(64 * 1024);
+        const buffer = Buffer.allocUnsafe(JSON_EDITOR_SAVE_HASH_CHUNK_SIZE);
         let remaining = stat.size;
         while (remaining > 0n) {
             const length = Number(remaining < BigInt(buffer.length) ? remaining : BigInt(buffer.length));
-            const read = fs.readSync(fd, buffer, 0, length, null);
+            const read = await readChunk(fd, buffer, length);
             if (read === 0) { return false; }
             hash.update(buffer.subarray(0, read));
             remaining -= BigInt(read);
         }
-        if (fs.readSync(fd, buffer, 0, 1, null) !== 0) { return false; }
+        if (await readChunk(fd, buffer, 1) !== 0) { return false; }
         const afterRead = fs.fstatSync(fd, { bigint: true });
         const current = fs.statSync(filePath, { bigint: true });
         return sameSaveTarget(opened, afterRead) && sameSaveTarget(afterRead, current)
@@ -399,7 +409,7 @@ function matchesSavedJsonHash(filePath: string, stat: fs.BigIntStats, contentHas
 }
 
 /** 외부 숫자 손실을 검사한다. platform 인자는 Windows의 실제 저장 검사를 다른 OS에서도 회귀 검증하기 위한 경계다. */
-export function assertDiskNumbersBeforeSave(filePath: string, platform: NodeJS.Platform = process.platform): void {
+export async function assertDiskNumbersBeforeSave(filePath: string, platform: NodeJS.Platform = process.platform): Promise<void> {
     let content: string;
     const cached = verifiedSaveTarget;
     verifiedSaveTarget = undefined;
@@ -407,7 +417,7 @@ export function assertDiskNumbersBeforeSave(filePath: string, platform: NodeJS.P
         let stat = fs.statSync(filePath, { bigint: true });
         if (cached?.filePath === filePath && sameSaveTarget(cached.fingerprint, stat)) {
             if ((platform !== 'win32' && !cached.requiresContentHash)
-                || matchesSavedJsonHash(filePath, stat, cached.contentHash)) {
+                || await matchesSavedJsonHash(filePath, stat, cached.contentHash)) {
                 verifiedSaveTarget = cached;
                 return;
             }
@@ -882,6 +892,12 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
      */
     const awaitingSaveAck = new Set<unknown>();
 
+    /**
+     * 저장 전 해시 확인은 비동기다. 그 사이 도착한 다음 저장이 먼저 쓰거나
+     * 앞 저장이 무효화한 캐시를 보고 검사하지 않도록 세션 안에서 순서대로 처리한다.
+     */
+    let saveQueue: Promise<void> = Promise.resolve();
+
     currentMessageDisposable?.dispose();
     currentMessageDisposable = currentPanel.webview.onDidReceiveMessage(
         async (message) => {
@@ -961,13 +977,28 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     const settle = (delivered: boolean) => {
                         if (!delivered) { awaitingSaveAck.delete(saveSeq); }
                     };
+                    const previousSave = saveQueue;
+                    let releaseSave!: () => void;
+                    saveQueue = new Promise<void>(resolve => { releaseSave = resolve; });
                     try {
+                        await previousSave;
                         let writeResult: ReturnType<typeof writeJsonWithFingerprint>;
                         try {
                             const saveData = unwrapIfRootArray(message.data, isRootArray);
                             assertSupportedJsonNumbers(saveData);
                             const saveText = JSON.stringify(saveData, null, detectedIndent) + '\n';
-                            assertDiskNumbersBeforeSave(filePath);
+                            await assertDiskNumbersBeforeSave(filePath);
+                            // 확인하는 동안 다른 파일을 열었거나 패널을 닫았다면 쓰지 않는다.
+                            // 이후의 baseline·recovery 전역은 이미 새 세션의 것이다.
+                            // 미저장 편집은 dispose 경로의 recovery 에 남는다.
+                            if (!isCurrentSession()) {
+                                awaitingSaveAck.delete(saveSeq);
+                                vscode.window.showWarningMessage(t(
+                                    `${fileName}: 저장 전 확인 중 JSON Editor 화면이 닫히거나 다른 파일로 바뀌어 저장하지 않았습니다.`,
+                                    `${fileName}: not saved because the JSON Editor was closed or switched to another file while checking before save.`
+                                ));
+                                return;
+                            }
                             writeResult = writeJsonWithFingerprint(filePath, saveText);
                         } catch (error: any) {
                             // 디스크에 쓰지 못했다 — 진짜 저장 실패.
@@ -1046,6 +1077,8 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                         // 알린 뒤 다시 던져 스택은 로그에 남긴다.
                         showSaveHandlerFailure(fileName, unexpected);
                         throw unexpected;
+                    } finally {
+                        releaseSave();
                     }
                     break;
                 }
