@@ -254,8 +254,9 @@ async function checkBrowserNavigation(compact = false): Promise<void> {
                         void panel.webview.postMessage({ command: 'testNavigate', stage: 'initial' });
                     } else if (message.command === 'testNavigationState') {
                         if (compact) {
-                            assert.strictEqual(message.bodyBounds.width, 464);
-                            assert.strictEqual(message.bodyBounds.height, 388);
+                            // 배율·줌에 따라 레이아웃 좌표가 기기 픽셀로 스냅되어 464.00003처럼 미세한 오차가 생긴다.
+                            assert.ok(Math.abs(message.bodyBounds.width - 464) < 0.5, 'body width: ' + message.bodyBounds.width);
+                            assert.ok(Math.abs(message.bodyBounds.height - 388) < 0.5, 'body height: ' + message.bodyBounds.height);
                             assert.strictEqual(message.fontSize, '14px');
                             assert.ok(message.scrollWidth > message.clientWidth, '좁은 창은 가로 스크롤이 생겨야 한다');
                             assert.ok(message.viewport.bottom - message.contentBottom >= 14,
