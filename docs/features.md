@@ -835,6 +835,98 @@ uint32_t value = 0x0F;
 value |= 0x80;  // Hover over '|=' to see: 0x0F → 0x8F
 ```
 
+### 16.2. Jenkins 테스트 추적
+
+여러 Jenkins 서버에서 실행되는 테스트를 **브랜치 → 요청 SHA → 개별 요청 → 빌드·단계·테스트 결과**로 확인합니다.
+같은 브랜치·SHA를 다시 요청해도 서로 다른 요청으로 기록하며, 요청할 때 받은 대기열에서 실제 빌드 번호를 따라갑니다.
+서버 수는 두 대로 고정하지 않고 추가·수정·삭제할 수 있습니다. 사내 Jenkins의 실제 job 구성과 연결 방식은 현장에서 검증해야 합니다.
+
+**사내에서 처음 사용하기:**
+
+1. [VSIX 설치 방법](../CONTRIBUTING.md#vsix-패키지-빌드-및-설치)에 따라 시험 버전을 설치하고, User Settings에서
+   `taskhub.experimental.jenkins.enabled`를 켭니다. 기본값은 꺼짐이며 TaskHub 사이드바에 **Jenkins 테스트 (실험적)** 뷰가 나타납니다.
+2. 뷰 제목의 **서버 관리** 또는 명령 팔레트의 **TaskHub: Jenkins: 서버 관리…**에서 서버를 추가합니다.
+   표시 이름, 접속 URL, 사용자 ID, API token을 입력합니다. URL에는 `https://jenkins.example.internal:8443/jenkins/`처럼
+   프로토콜·포트·Jenkins 접속 경로를 포함합니다. 다른 서버도 같은 방식으로 추가합니다.
+   사내 인증서를 사용하는 서버는 해당 CA 파일을 지정할 수 있으며 인증서 검증을 끄지 않습니다.
+3. 테스트할 Git 저장소를 열고 **브랜치 테스트 요청**을 실행합니다. 시작 서버와 API로 가져온 job 목록에서 시작 job을 선택합니다.
+   브랜치·SHA는 현재 저장소에서 읽고, job의 파라미터 중 브랜치와 SHA를 받을 항목을 연결합니다.
+   로컬 브랜치와 upstream 이름이 다르면 검증한 원격 브랜치 이름을 전달하며, 실행 확인창과 요청 상세에 표시합니다.
+   제품·장비·테스트 종류처럼 job이 요구하는 나머지 값도 확인합니다. SHA 파라미터를 전달해도 실제 checkout 방식은 Pipeline이 결정합니다.
+   첫 버전은 String·Text·Choice·Boolean 파라미터를 지원하며, 파일·비밀번호 등 다른 파라미터가 있는 job은 Jenkins 웹에서 실행해야 합니다.
+4. 요청 내용을 확인해 실행합니다. 확장은 commit·push를 수행하지 않으며 로컬 미커밋 변경을 Jenkins로 전송하지 않습니다.
+   작업 트리에 변경이 없고 upstream이 설정된 브랜치만 요청할 수 있으며, 현재 SHA가 원격 브랜치와 일치하는지 확인합니다.
+   결과의 **요청 SHA와 실제 빌드 SHA**를 비교합니다. 실제 SHA를 제공하지 않는 job은 확인 불가로 남습니다.
+5. 상태 표시줄과 Jenkins 뷰에서 진행 상황을 확인합니다. 완료 알림에서 결과를 열고, 빌드 항목에서 **빌드 결과 열기** 또는 **빌드 로그 열기**로
+   Jenkins 결과 페이지 또는 VS Code의 읽기 전용 로그 문서를 엽니다. 행을 펼치는 동작은 브라우저를 열지 않습니다. 통과/전체 빌드 수에는 대표 빌드도 포함합니다. 실행이 끝난 빌드도 큰 로그는 앞부분을 크기 한도 안에서 표시합니다. 로그가 일부만 조회되면 안내 문구를 표시하며 전체 로그는 Jenkins에서 확인합니다. 아직 확인된 빌드가 없으면 로그 대기 안내를 표시합니다.
+   `taskhub.jenkins.notifications`로 전체 알림·실패 알림·알림 끄기를 선택할 수 있습니다.
+
+**요청 연결과 전체 결과의 의미:**
+
+- 같은 Jenkins에서는 빌드의 upstream cause를 따라 관련 하위 빌드를 찾습니다. 여러 서버에서 브랜치·SHA가 같다는 이유만으로 실행을 합치지 않습니다.
+- 서버를 넘는 실행은 Pipeline이 전달하는 **요청 ID 파라미터**를 처음 job 설정에서 선택하거나, 대표 빌드가 게시하는 아래 manifest를 사용합니다.
+  요청 ID는 TaskHub가 요청마다 생성하며 하위 job까지 같은 값이 전달되어야 합니다. 관련 파라미터나 산출물이 없으면 서버 토큰만으로 연결을 확정할 수 없습니다.
+- 빌드 결과와 JUnit 테스트 개수, Pipeline 단계는 서로 다른 단위입니다. 보고서나 Pipeline API가 없는 job에서는 확인 가능한 빌드 결과만 표시합니다.
+  결과 조회 실패는 성공으로 바꾸지 않습니다. 실제 SHA가 없는 빌드는 결과와 별도로 checkout 미검증을 표시하고,
+  실제 SHA가 요청 SHA와 다르면 전체 PASS로 표시하지 않습니다. 테스트 통과와 요청 커밋의 검증 여부를 함께 확인해야 합니다.
+- 대표 빌드가 끝나도 하위 테스트 목록의 완전성을 확인하지 못하면 **Jenkins 대표 결과**와 **발견한 테스트의 결과**만 보여줍니다.
+  대표 빌드의 SUCCESS나 발견한 빌드들의 SUCCESS를 근거로 모든 서버의 테스트가 PASS라고 단정하지 않습니다.
+- 전체 결과를 확정하려면 대표 빌드의 manifest가 목록을 완성했다고 표시하고 모든 등록 빌드의 결과가 확인되어야 합니다.
+  권한 부족·통신 오류·탐색 한도·미등록 서버의 결과는 확인 불가 또는 탐색 불완전으로 표시합니다.
+
+**개발 환경과 서버 장애 대응:**
+
+- VPN/DNS/포트 차단, 서버 재시작, 인증 만료, 인증서 오류, 응답 지연은 조회 오류로 표시합니다. 장애 서버는 재조회 간격을 늘리며 다른 서버는 계속 확인합니다. 설정·키체인·초기화 오류도 Jenkins 기능 안에서 처리합니다.
+- 진행 중인 요청·응답 크기·이력에는 [자원 상한](architecture.md#보안-가드)이 있습니다. 서버는 최대 32개, 동시 추적은 20개입니다. 한도를 넘으면 조회 불완전 또는 중지 상태로 남기며 원격 빌드를 취소하거나 전체 PASS로 바꾸지 않습니다. 많은 완료 이력이 쌓이면 오래된 이력부터 정리합니다.
+- 작업 탐색의 취소 버튼, 요청의 추적 중지, 기능 비활성화로 기다리는 조회를 중단할 수 있습니다. 기능 비활성화는 진행 중인 Git 확인도 중단합니다. Git 설정·작업 파일·브랜치를 수정하지 않습니다.
+- 상세 단계·사례가 크면 일부만 표시합니다. 총 테스트 개수와 PASS/FAIL 판정은 전체 보고서의 합계를 사용하며, 생략된 상세는 Jenkins 웹에서 확인합니다.
+- 같은 주소·계정의 서버 이름을 수정할 때 토큰을 빈 값으로 확인하면 기존 토큰을 유지합니다. Esc는 수정을 취소합니다. 주소나 계정이 바뀌면 새 토큰을 입력해야 합니다.
+- HTTPS를 권장하며 사내 인증서라면 CA 파일을 지정합니다. HTTP는 토큰과 데이터가 평문으로 전송되므로 서버 등록/수정 시 별도로 허용해야 합니다. 이전 시험판의 HTTP 설정은 서버를 수정해 다시 허용하기 전까지 연결하지 않습니다.
+- 연결에는 등록한 직접 URL을 사용합니다. SSO 로그인 페이지로 리다이렉트되거나 API가 다른 호스트명을 반환하면 자동으로 인증을 따라 보내지 않습니다. 이 경우 사내 Jenkins의 API용 URL·사용자 ID·토큰·CA 구성을 확인해야 합니다. VS Code 프록시 설정이나 TLS 검증을 임의로 변경하지 않습니다.
+
+**선택적 관련 빌드 manifest:**
+
+대표 job이 `taskhub-jenkins-runs.json`을 Jenkins artifact로 게시하면 여러 서버의 실행을 명확하게 연결할 수 있습니다.
+아래 예시는 사내 Pipeline 담당자가 적용하는 형식이며, 사용자가 테스트마다 입력하는 내용이 아닙니다.
+
+```json
+{
+  "schemaVersion": 1,
+  "rootBuildUrl": "https://jenkins-a.example.internal/job/fw-test/42/",
+  "complete": true,
+  "runs": [
+    { "buildUrl": "https://jenkins-a.example.internal/job/host-test/151/" },
+    { "buildUrl": "https://jenkins-b.example.internal/job/ftl-test/315/" }
+  ]
+}
+```
+
+`rootBuildUrl`은 이번 대표 빌드의 정확한 URL이어야 합니다. 대신 이번 TaskHub 요청과 일치하는 `requestId`를 넣을 수도 있습니다. 둘 다 넣으면 모두 일치해야 합니다.
+`complete: true`는 추가로 시작할 테스트가 없고 필요한 하위 빌드 목록이 모두 담겼다는 Pipeline의 선언입니다.
+아직 목록을 만드는 중이면 `false`로 유지합니다. 연결 대상은 사용자가 등록한 Jenkins 서버에 한하며 manifest는 최대 1,000개 빌드를 담을 수 있습니다.
+파일명이 다르면 고급 설정 `taskhub.jenkins.manifestArtifact`를 변경합니다. 이 설정 자체가 Jenkins job을 수정하거나 결과 목록을 생성하지는 않습니다.
+
+**조회·보관·중지:**
+
+- 빌드 결과와 보고서 조회 상태를 구분합니다. 보고서 권한이 없으면 확인된 빌드 통과/실패와 함께 보고서 미확인 및 권한 안내를 표시합니다. 403이면 해당 보고서의 재조회만 잠시 대기하고 같은 서버의 다른 API는 계속 조회합니다. 401 인증 실패는 서버 전체 재시도를 늦추므로 사용자 이름·토큰을 확인해야 합니다. 권한 오류가 추적 용량을 넘으면 해당 서버의 조회를 잠시 중지하고 별도 한도 안내를 표시합니다. 보고서를 확인하기 전에는 전체 통과로 확정하지 않습니다.
+
+- `taskhub.jenkins.pollIntervalSeconds`는 대기열·추적 빌드 조회 간격, `taskhub.jenkins.discoveryIntervalSeconds`는 관련 빌드 탐색 간격입니다.
+  탐색은 서버별 `taskhub.jenkins.discoveryJobLimit`개 job과 job별 `taskhub.jenkins.recentBuildLimit`개 최근 빌드 안에서 진행합니다.
+  같은 회차의 탐색을 여러 요청이 공유하고, 많은 폴더·job은 다음 회차에 이어서 조회합니다. 요청 행의 범위 미확인 표시는 탐색 회차가 바뀌어도 유지하고, 진행 여부는 펼친 상세에 따로 표시합니다. 그래프/범위 한도는 탐색 한도로 표시합니다.
+  Job/폴더 수나 목록 보관 용량 한도에 걸린 서버는 같은 탐색을 반복하지 않습니다. **Jenkins: 결과 새로 고침**으로 해당 서버를 다시 탐색할 수 있습니다. 폴더 수·깊이 한도 자체는 유지하므로 서버의 폴더 구조를 정리한 뒤 재시도하거나 manifest로 목록을 제공하세요. 서버 연결 정보나 `taskhub.jenkins.discoveryJobLimit`을 수정하거나 기능을 껐다 켜도 다시 탐색합니다.
+  오래된 빌드나 많은 job이 있는 환경에서는 목록이 제한될 수 있으며, 한도 안의 검색 결과만으로 전체 PASS를 보장하지 않습니다.
+- `taskhub.jenkins.historyLimit`으로 완료된 요청의 보관량을 조절합니다. 진행 중인 요청은 보존하고 VS Code를 다시 열면 저장한 요청의 조회를 재개합니다.
+  저장 용량이 차면 오래된 완료 이력부터 제거하고, 남은 요청도 오래된 순서로 단계 상세를 줄입니다. 빌드 결과·SHA·JUnit 개수는 우선 보존하며, 더 줄일 수 없으면 전체 범위 미확인 상태로 추적을 중지합니다.
+  전송 중 종료되어 대기열 주소를 확보하지 못한 요청은 전송 결과 미확인으로 남기고 추적을 중지합니다. 중복 실행을 피하려면 Jenkins에서 수락 여부를 확인한 뒤 다시 요청합니다.
+  VS Code가 종료된 동안에는 확장 알림을 받을 수 없습니다.
+- **요청 추적 중지**는 선택한 요청의 로컬 조회만 중지합니다. Jenkins 빌드를 취소하지 않습니다.
+  `taskhub.jenkins.trackingTimeoutHours`를 넘긴 요청은 추적 중지로 표시하고, 미확인 결과와 기간 만료 이유를 그대로 남깁니다. 기능 설정을 꺼도 서버 빌드는 계속 실행됩니다.
+- 서버·계정은 확장의 로컬 공통 상태, 요청 이력·job 파라미터 연결은 워크스페이스별 상태에 보관하고 token은 VS Code SecretStorage에 분리합니다.
+  JUnit 통과·실패·건너뜀 개수는 이력에 저장하지만 개별 테스트의 이름·오류 본문은 저장하지 않습니다. 재시작 후 완료된 실행의 상세는 Jenkins에서 확인합니다.
+  Jenkins 로그와 테스트 보고서에는 사내 데이터가 포함될 수 있으므로 TaskHub는 이를 외부 서비스로 자동 전송하거나 별도 파일로 자동 내보내지 않습니다.
+  로그는 한 개의 읽기 전용 가상 문서를 재사용하고 재시작 시 본문을 복원하지 않습니다. 사용자의 복사·다른 이름으로 저장이나 다른 확장의 문서 접근까지 막는 보안 격리는 아닙니다.
+- Jenkins 계정에는 필요한 job의 조회·실행 권한만 부여하고 관리자 계정은 피합니다. API 토큰은 해당 계정의 권한으로 동작합니다. 실제 서버의 권한·플러그인·인증서·망 정책은 별도로 확인해야 하며, 정상 서버가 제공한 결과/manifest의 정확성을 TaskHub가 독립적으로 증명하지는 못합니다.
+
 ## 17. Preset 기능
 
 Preset 기능을 사용하면 프로젝트 환경별(integration, hil 등) action 설정을 쉽게 공유하고 적용할 수 있습니다.
@@ -1386,6 +1478,15 @@ Prev/Next로 결과를 순환하고, 결과가 10,000개에 닿으면 그 지점
 | `taskhub.dialog.rememberLastLocation` | `boolean` | `true` | TaskHub의 파일/폴더 다이얼로그를 같은 용도로 마지막에 사용한 위치에서 연다. 그 용도의 기억이 없으면 가장 최근에 사용한 다이얼로그 위치를 이어받는다. `false`면 TaskHub가 시작 위치를 **일절 지정하지 않고** VS Code의 기본 규칙과 `files.dialog.defaultPath` 설정에 맡긴다. 저장 다이얼로그는 제안 파일명도 함께 사라진다. 액션 JSON의 `options.defaultUri`는 어느 쪽이든 존중한다. | [§25 다이얼로그 위치 기억](#25-파일폴더-다이얼로그-위치-기억) |
 | `taskhub.hover.numberBase.enabled` | `boolean` | `true` | C/C++ hover 파이프라인 전체의 **마스터 토글**. 이 값이 `false`이면 Number Base / SFR Bit Field / Struct Size / Register Decoder / Macro Expansion 모두 비활성화되며, Bit Operation Hover의 상위 게이트도 닫힌다. | [§15 C/C++ Hover](#15-cc-hover-기능), [§16.1 Bit Operation](#161-bit-operation-hover) |
 | `taskhub.experimental.bitOperationHover.enabled` | `boolean` | `false` | **[실험적]** C/C++ 비트 연산식(`value \|= 0x80` 등) 위 Before/After 값 표시. 향후 변경될 수 있음. | [§16.1 Bit Operation Hover](#161-bit-operation-hover) |
+| `taskhub.experimental.jenkins.enabled` | `boolean` | `false` | **[실험적]** Jenkins 연결·요청·결과 추적 활성화. 끄면 로컬 조회만 멈추며 서버 빌드는 취소하지 않는다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
+| `taskhub.jenkins.pollIntervalSeconds` | `integer` | `15` (5–300) | 대기열·추적 빌드 조회 간격(초). 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
+| `taskhub.jenkins.discoveryIntervalSeconds` | `integer` | `60` (15–600) | 여러 서버의 관련 빌드 탐색 간격(초). 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
+| `taskhub.jenkins.notifications` | `"all"` \| `"failures"` \| `"off"` | `"all"` | 요청 결과 알림 정책. 알림을 꺼도 목록에서 조회할 수 있다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
+| `taskhub.jenkins.trackingTimeoutHours` | `integer` | `24` (1–168) | 요청별 최대 추적 시간. 시간 초과는 미확인 상태로 남으며 빌드를 취소하지 않는다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
+| `taskhub.jenkins.historyLimit` | `integer` | `50` (10–500) | 완료된 요청 보관 개수. 진행 중인 요청은 추적이 끝날 때까지 유지. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
+| `taskhub.jenkins.discoveryJobLimit` | `integer` | `200` (20–2000) | 등록 서버별 관련 빌드 탐색 대상 job 상한. 제한으로 누락된 결과는 통과로 간주하지 않는다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
+| `taskhub.jenkins.recentBuildLimit` | `integer` | `20` (5–200) | 탐색 시 job별 최근 빌드 조회 상한. 오래된 빌드는 범위 밖일 수 있다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
+| `taskhub.jenkins.manifestArtifact` | `string` | `"taskhub-jenkins-runs.json"` | 관련 빌드 목록을 게시한 선택적 artifact 이름. Pipeline이 문서 형식을 제공해야 한다. 머신 범위. | [§16.2 Jenkins 테스트 추적](#162-jenkins-테스트-추적) |
 | `taskhub.preset.selected` | `string` | `"none"` | 목록에 병합할 프리셋 ID. `"none"`이면 프리셋 병합만 끈다. 확장 번들은 `example`, 워크스페이스 프리셋은 `폴더이름:integration` 형식이며, 번들 예제 표시 설정은 독립적이다. | [§17 Preset](#17-preset-기능) |
 
 ### 21.2. 설정 추가 체크리스트

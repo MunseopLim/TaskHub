@@ -19,6 +19,33 @@
 
 ## 시나리오 그룹
 
+### Jenkins 다중 서버 테스트 추적
+파일: [src/test/jenkinsTracking.test.ts](../src/test/jenkinsTracking.test.ts)
+
+로컬 HTTP 서버 두 대를 Jenkins API fixture로 사용하고 실제 `JenkinsClient`·polling·집계를 연결합니다.
+사내 서버나 실제 token은 사용하지 않으며 테스트 종료 시 소켓과 서버를 모두 닫습니다.
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-229, IT-229b | 대기열부터 여러 서버의 완료 결과까지 | 대기 → 실행 → 24개 하위 빌드 완료, 중복 URL 제거, 서버별 인증 분리, 단계·JUnit 보고서 보존, 실패 합산과 GET 전용 polling. 모든 빌드가 성공해도 manifest 목록이 완성된 뒤에만 전체 PASS 확정 |
+| IT-230 | 미등록 manifest 서버 차단 | 전체 manifest를 검증하기 전에 일부 실행을 조회하지 않으며, 미등록 origin에는 요청·인증을 보내지 않고 전체 결과를 미확정으로 유지 |
+| IT-231, IT-231b | 탐색 한도와 불완전성 | 서버의 job 한도 초과·최근 빌드 범위 밖의 실행을 전체 PASS로 오인하지 않고 요청한 최근 빌드 제한을 API에 전달 |
+| IT-232 | 요청 연결 근거 | 정확한 동일 서버 upstream 또는 명시적으로 선택한 요청 ID만 연결하고, 같은 브랜치·SHA·다른 서버의 동일 빌드 번호를 섞지 않음 |
+| IT-233 | 중지·완료한 요청의 수명주기 | 종료한 요청은 인증 정보를 다시 읽거나 GET을 시작하지 않음 |
+| IT-234, IT-234b | 만료된 대기열 복구 | 정확한 queueId만 복구하며 찾지 못한 요청을 최신 빌드로 대체하거나 POST로 재실행하지 않음 |
+| IT-235, IT-235b, IT-235c | 보고서 조회 오류와 실패·미확정 결과 | 403을 보고서 미지원(404)으로 숨기지 않고 오류를 보존하며 전체 PASS·추적 완료를 막고 응답 본문을 저장하지 않음. 빌드 SUCCESS라도 JUnit 실패가 있으면 전체 테스트 PASS로 표시하지 않으며, 결과가 null·알 수 없음인 실행은 계속 추적해 확정 결과를 읽음 |
+
+파일: [src/test/jenkinsController.test.ts](../src/test/jenkinsController.test.ts)
+
+| ID | 제목 | 핵심 검증 |
+| --- | --- | --- |
+| IT-236 | 실험적 기능 수명주기 | 기능 설정 꺼짐 → 켜짐 → 꺼짐에 따라 명령을 실제 등록·해제하고 전역 사용자 설정은 변경하지 않음 |
+| IT-237 | 요청 트리 구분 | 저장소·브랜치 → SHA → 반복 요청을 구분하고 빌드별 서버와 실행을 표시 |
+| IT-238 | 미확인 결과 표시 | 대표 빌드 성공만으로 전체 PASS를 표시하지 않고 SHA 불일치·접근 불가 상태를 유지 |
+| IT-239 | 결과 노드 진입점과 상세 | 요청·빌드 노드의 명령 인자와 Pipeline 단계·JUnit 요약 및 실패 항목을 실제 provider로 검증 |
+| IT-240 | 테스트 요청 명령의 연결 | Git 상태·입력·HTTP 경계만 fixture로 대체한 실제 `controller.run()`에서 브랜치·SHA·요청 ID 전달, 중복 호출의 단일 POST, 대기열 URL·요청 저장과 refresh의 재실행 방지를 검증 |
+| IT-241, IT-242, IT-243, IT-244 | Jenkins 장애 격리 | 지연 서버·정상 서버 독립 조회, 추적 중지 시 연결 취소, 저장 실패 복구, 멈춘 토큰 저장소 취소, 초기화 실패의 다른 기능 격리 |
+
 ### 열려 있는 파일 즐겨찾기 등록 방식
 파일: [src/test/viewProviderIntegration.test.ts](../src/test/viewProviderIntegration.test.ts)
 
@@ -337,6 +364,24 @@
 | IT-195a, IT-195b, IT-195c | [memoryMapViewer.test.ts](../src/test/memoryMapViewer.test.ts) | DWARF 5 `.debug_line_str` 경로와 0-based file table을 host에서 해석해 기록된 소스 줄을 열고 실제 컴파일 경로는 웹뷰에 노출하지 않으며, 압축 문자열 section은 손상 경고 대신 미지원 안내 후 소스 이동만 숨기고 정상 unit이 함께 있어도 안내를 유지 |
 | IT-199, IT-200, IT-201, IT-202 | [previewOpener.test.ts](../src/test/previewOpener.test.ts) | Markdown/HTML 열기 명령의 실제 등록, manifest 선언, Explorer·Editor·SCM 메뉴 행렬과 Source Control 표시 설정 게이트를 함께 검증 |
 | IT-203, IT-204, IT-205, IT-206, IT-207 | [pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts) | 병렬 다중 실패 집계, 실제 동시 실행, 직렬화 설정, 자동 의존성 대기와 실패 뒤 실행 중 형제 drain을 전체 파이프라인에서 검증 |
+| IT-245 | [jenkinsSecurity.test.ts](../src/test/jenkinsSecurity.test.ts) | 링크·manifest의 중첩 인코딩 경로 우회와 요청 ID/대표 빌드 모순을 거부 |
+| IT-246 | [jenkinsSecurity.test.ts](../src/test/jenkinsSecurity.test.ts) | 임의 빌드 명령 인자를 브라우저 열기·토큰 읽기·로그 요청 전에 거부 |
+| IT-247 | [jenkinsSecurity.test.ts](../src/test/jenkinsSecurity.test.ts) | 실제 호스트에서 로그를 untitled가 아닌 가상 문서로 열고 크기·URI·종료 시 provider 본문 해제를 검증 |
+| IT-248 | [jenkinsSecurity.test.ts](../src/test/jenkinsSecurity.test.ts) | HTTP 등록 취소 시 계정·토큰을 묻거나 저장하지 않고, 명시적 동의한 경우에만 평문 연결 허용을 보관 |
+| IT-249 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 실제 HTTP의 200개 job 서버를 두 요청이 공유하며 회차 예산 이후 위치부터 이어서 탐색 |
+| IT-250 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 연결 그래프 초과를 인증/접속 오류 대신 탐색 한도로 표시 |
+| IT-251 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 폴더가 없는 창에서 Git 호출 전에 프로젝트 폴더 안내 |
+| IT-252 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 이름 수정의 빈 토큰은 유지하되 다른 서버로 기존 토큰을 이동하지 않음 |
+| IT-253 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 대표 실패 포함 숫자, 한국어 상태, 전송 중 표시, 펼치기 전용 행과 접근성 아이콘 검증 |
+| IT-254 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 최초 서버 등록 후 같은 실행 흐름에서 Git 선행 조건 검사로 이어짐 |
+| IT-255 | [jenkinsTracking.test.ts](../src/test/jenkinsTracking.test.ts) | 공유 guard와 실제 HTTP의 반복 폴링에서 보고서 403만 대기하고 다른 API·빌드 결과를 유지하며 권한 회복 뒤 전체 판정 재개 |
+| IT-256 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 완료된 대용량 HTTP 로그를 제한된 읽기 전용 문서와 부분 표시 안내로 열기 |
+| IT-257 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 180개 폴더 탐색의 실제 HTTP 150회 한도와 미처리 폴더 재개·후반 job 발견 |
+| IT-258 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 추적 만료의 중지 표시, 안정적인 범위 라벨, 알려진 빌드 결과와 보고서 오류의 구분 |
+| IT-259 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 빌드가 없는 요청의 로그 열기는 빈 선택창 대신 상태 안내 |
+| IT-260 | [jenkinsTracking.test.ts](../src/test/jenkinsTracking.test.ts) | 100개 빌드의 401 실패를 서버 수준에서 억제하고 반복 폴링·다른 서버 격리를 실제 HTTP로 확인 |
+| IT-261 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 한도 초과 서버를 재스캔하지 않으면서 다른 서버를 조회하고 설정 변경·초기화 뒤 탐색 재개 |
+| IT-262 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 깊이 한도에 걸린 서버는 자동 스캔을 쉬고 실제 결과 새로 고침 명령으로 폴더 구조 변경 후 탐색 복구 |
 
 IT-093~IT-097은 MRU를 별도 저장하던 구현이 제거되면서 함께 삭제된 번호이며 재사용하지 않습니다.
 

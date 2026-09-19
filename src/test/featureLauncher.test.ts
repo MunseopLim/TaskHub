@@ -77,6 +77,38 @@ suite('TaskHub 기능 런처', () => {
         assert.notStrictEqual(read?.description, item?.description);
     });
 
+    test('Jenkins 기능을 켰을 때만 표시하고 꺼진 최근 항목은 숨긴다', () => {
+        const enabled = buildFeatureLauncherItems(['jenkins'], 0, true);
+        const jenkins = enabled.filter(item => item.featureId === 'jenkins');
+        assert.strictEqual(jenkins.length, 1);
+        assert.strictEqual(jenkins[0].command, 'taskhub.jenkins.showRuns');
+        assert.strictEqual(enabled[1].featureId, 'jenkins');
+
+        const disabled = buildFeatureLauncherItems(['jenkins'], 0, false);
+        assert.ok(disabled.every(item => item.featureId !== 'jenkins'));
+        assert.strictEqual(disabled.filter(item => item.kind === vscode.QuickPickItemKind.Separator).length, 4,
+            '비활성화된 기능만 최근 목록에 있으면 빈 최근 사용 그룹을 표시하면 안 된다');
+        assert.strictEqual(disabled.filter(item => item.featureId).length, 12);
+    });
+
+    test('Jenkins 설정 변경은 다음 런처 목록에 반영된다', () => {
+        const originalGetConfiguration = vscode.workspace.getConfiguration;
+        let enabled = false;
+        try {
+            (vscode.workspace as any).getConfiguration = (section: string) => {
+                assert.strictEqual(section, 'taskhub');
+                return { get: (key: string, fallback: unknown) => key === 'experimental.jenkins.enabled' ? enabled : fallback };
+            };
+            assert.ok(!buildFeatureLauncherItems([]).some(item => item.featureId === 'jenkins'));
+            enabled = true;
+            assert.ok(buildFeatureLauncherItems([]).some(item => item.featureId === 'jenkins'));
+            enabled = false;
+            assert.ok(!buildFeatureLauncherItems(['jenkins']).some(item => item.featureId === 'jenkins'));
+        } finally {
+            (vscode.workspace as any).getConfiguration = originalGetConfiguration;
+        }
+    });
+
     test('새로운 기능을 읽으면 상태 표시줄의 표시와 접근성 설명이 갱신된다', () => {
         const originalRegisterCommand = vscode.commands.registerCommand;
         const originalCreateStatusBarItem = vscode.window.createStatusBarItem;

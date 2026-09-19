@@ -27,6 +27,7 @@ import {
 } from './memoryMapViewer';
 import { showHexViewer, HexEditorProvider, HexViewerOpenHistory, openHexViewerFile } from './hexViewer';
 import { showHexConverter } from './hexConverter';
+import { registerJenkins } from './jenkins/controller';
 import { registerFeatureLauncher } from './featureLauncher';
 import { registerWhatsNew, resolveChangelogUri } from './whatsNew';
 import { registerUpdateService } from './updateService';
@@ -11065,6 +11066,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
     const whatsNew = registerWhatsNew(context);
     registerFeatureLauncher(context, whatsNew);
+    context.subscriptions.push(registerJenkins(context));
     registerUpdateService(context, {
         hasRunningActions: () => collectRunningActionIds().length > 0 || activeTasks.size > 0 || actionChildProcesses.size > 0,
         log: message => outputChannel.appendLine(message),
