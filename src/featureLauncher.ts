@@ -21,6 +21,7 @@ const FEATURE_IDS = [
     'settings',
     'checkForUpdates',
     'whatsNew',
+    'jenkins',
 ] as const;
 
 export type FeatureLauncherFeatureId = typeof FEATURE_IDS[number];
@@ -44,8 +45,8 @@ export interface FeatureLauncherItem extends vscode.QuickPickItem {
 
 const FEATURE_ID_SET = new Set<string>(FEATURE_IDS);
 
-function buildFeatureLauncherDefinitions(unreadCount: number): readonly FeatureLauncherDefinition[] {
-    return [
+function buildFeatureLauncherDefinitions(unreadCount: number, jenkinsEnabled: boolean): readonly FeatureLauncherDefinition[] {
+    const definitions: FeatureLauncherDefinition[] = [
         {
             id: 'taskhubView',
             command: 'workbench.view.extension.mainView',
@@ -135,6 +136,19 @@ function buildFeatureLauncherDefinitions(unreadCount: number): readonly FeatureL
             filePicker: 'html',
         },
     ];
+    if (jenkinsEnabled) {
+        definitions.push({
+            id: 'jenkins',
+            command: 'taskhub.jenkins.showRuns',
+            group: 'actions',
+            label: `$(beaker) ${t('Jenkins 테스트 (실험적)', 'Jenkins tests (Experimental)')}`,
+            description: t(
+                '여러 서버의 테스트를 브랜치와 커밋별로 확인합니다.',
+                'Track tests by branch and commit across Jenkins servers.'
+            ),
+        });
+    }
+    return definitions;
 }
 
 function groupLabel(group: FeatureLauncherGroup): string {
@@ -168,10 +182,14 @@ function toQuickPickItem(definition: FeatureLauncherDefinition): FeatureLauncher
     };
 }
 
-export function buildFeatureLauncherItems(recentValue: unknown, unreadCount = 0): FeatureLauncherItem[] {
-    const definitions = buildFeatureLauncherDefinitions(unreadCount);
+export function buildFeatureLauncherItems(
+    recentValue: unknown,
+    unreadCount = 0,
+    jenkinsEnabled = vscode.workspace.getConfiguration('taskhub').get<boolean>('experimental.jenkins.enabled', false)
+): FeatureLauncherItem[] {
+    const definitions = buildFeatureLauncherDefinitions(unreadCount, jenkinsEnabled);
     const byId = new Map(definitions.map(definition => [definition.id, definition]));
-    const recent = normalizeFeatureLauncherRecent(recentValue);
+    const recent = normalizeFeatureLauncherRecent(recentValue).filter(id => byId.has(id));
     const items: FeatureLauncherItem[] = [];
 
     if (recent.length > 0) {
