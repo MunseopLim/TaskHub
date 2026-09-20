@@ -32,7 +32,9 @@ export function jenkinsErrorLabel(code?: string): string {
         JENKINS_REPORT_UNAVAILABLE: t('빌드 상세 보고서를 조회하지 못했습니다.', 'The detailed build report could not be retrieved.'),
         JENKINS_QUEUE_CANCELLED: t('Jenkins 대기열에서 실행이 취소되었습니다.', 'The build was cancelled in the Jenkins queue.'),
         JENKINS_QUEUE_EXPIRED: t('대기열 항목이 만료되어 빌드를 확인하지 못했습니다. Jenkins에서 확인해주세요.', 'The queue item expired before its build could be identified. Check Jenkins.'),
-        JENKINS_TRACKING_TIMEOUT: t('추적 기간이 끝났습니다. Jenkins에서 남은 결과를 확인해주세요.', 'The tracking period ended. Check Jenkins for remaining results.'),
+        JENKINS_TRACKING_TIMEOUT: t('결과 확인에 너무 오래 걸려 설정한 제한 시간에 조회를 종료했습니다. 확인된 결과는 보존하며 자동 재시도하지 않습니다. 다시 확인하려면 SHA 결과 다시 조회를 실행해주세요.', 'Result verification exceeded the configured time limit. Known results are retained and automatic checks have stopped. Run Check SHA results again to start a new observation.'),
+        JENKINS_RESULTS_INCOMPLETE: t('일부 선택 테스트나 보고서를 확인하지 못해 자동 조회를 종료했습니다. 확인된 빌드 결과는 보존합니다.', 'Automatic checks stopped because some selected tests or reports could not be verified. Known build results are retained.'),
+        JENKINS_ACTIVE_LIMIT: t('동시에 추적할 수 있는 요청은 20개입니다. 기존 요청을 중지하거나 지워주세요.', 'Up to 20 requests can be tracked. Stop or clear an existing request first.'),
         JENKINS_POLL_DEADLINE: t('이번 조회 시간이 끝났습니다. 다음 회차에서 계속합니다.', 'This polling round reached its deadline. Tracking continues on the next refresh.'),
         JENKINS_RUN_LIMIT: t('추적 빌드 수 한도에 도달했습니다. Jenkins에서 전체 결과를 확인해주세요.', 'The tracked-build limit was reached. Check Jenkins for the full result.'),
         JENKINS_STORAGE_LIMIT: t('이력 용량 한도로 추적을 중지했습니다. Jenkins에서 전체 결과를 확인해주세요.', 'Tracking stopped because the history size limit was reached. Check Jenkins for the full result.'),
@@ -47,10 +49,12 @@ export function jenkinsStatusLabel(status: string): string {
     const labels: Record<string, string> = {
         partial: t('보고서 미확인', 'Report unverified'),
         passed: t('통과', 'PASS'), failed: t('실패', 'FAIL'), nonpass: t('통과 미확인', 'Not passed'),
-        queued: t('대기 중', 'Queued'), running: t('실행 중', 'Running'), unknown: t('확인 중', 'Unverified'),
+        observedPassed: t('잠정 통과', 'Provisional pass'),
+        timedout: t('조회 실패: 시간 초과', 'Check failed: timeout'), incomplete: t('조회 실패: 결과 미확인', 'Check failed: incomplete results'),
+        queued: t('대기 중', 'Queued'), running: t('실행 중', 'Running'), unknown: t('결과 미확인', 'Result unverified'),
         unreachable: t('조회 불가', 'Unavailable'), aborted: t('실행 취소', 'Aborted'), skipped: t('건너뜀', 'Skipped'),
         sha_mismatch: t('체크아웃 SHA 불일치', 'Checkout SHA mismatch'), sending: t('요청 전송 중', 'Submitting'),
         unconfirmed: t('전송 결과 미확인', 'Submission unconfirmed'), stopped: t('추적 중지', 'Tracking stopped'),
     };
-    return labels[status] ?? labels.unknown;
+    return Object.hasOwn(labels, status) ? labels[status] : labels.unknown;
 }

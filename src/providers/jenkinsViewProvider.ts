@@ -7,6 +7,11 @@ import { JenkinsRequest, JenkinsServer, TrackedJenkinsBuild } from '../jenkins/t
 export interface JenkinsTreeNode { kind: 'branch' | 'sha' | 'request' | 'build' | 'detail'; label: string; requests?: JenkinsRequest[]; request?: JenkinsRequest; run?: TrackedJenkinsBuild; description?: string; children?: JenkinsTreeNode[]; }
 
 export function discoveryLabel(request: JenkinsRequest): string {
+    if (request.shaTracking) {
+        const total = request.shaTracking.jobs.length;
+        const observed = request.shaTracking.jobs.filter(job => request.runs.some(run => run.serverId === job.serverId && run.jobUrl === job.jobUrl)).length;
+        return t(`선택 ${total}개 중 ${observed}개 확인`, `${observed}/${total} selected tests observed`);
+    }
     if (request.stopped) { return t('추적 중지', 'Tracking stopped'); }
     if (request.discovery.complete) { return t('전체 목록 확인됨', 'Complete inventory'); }
     if (request.discovery.message === 'manifestInvalid') { return t('목록 파일 확인 필요', 'Invalid or unresolved manifest'); }
@@ -18,19 +23,26 @@ export function discoveryLabel(request: JenkinsRequest): string {
 function requestStatus(request: JenkinsRequest): string {
     const summary = aggregate(request);
     if (request.submission === 'sending') { return 'sending'; }
-    if (request.submission === 'unconfirmed') { return 'unconfirmed'; }
+    if (request.outcome === 'timeout') { return 'timedout'; }
     if (summary.observedResult === 'failed') { return 'failed'; }
-    if (request.stopped) { return 'stopped'; }
-    if (request.error || request.runs.some(run => run.error)) { return 'unreachable'; }
+    if (request.stopped) { return summary.observedResult === 'passed' ? 'observedPassed' : 'stopped'; }
+    if (request.outcome === 'incomplete') { return 'incomplete'; }
+    if (request.submission === 'unconfirmed') { return 'unconfirmed'; }
+    if (request.error || request.runs.some(run => run.error) || request.shaTracking?.jobs.some(job => job.error)) { return 'unreachable'; }
     if (request.runs.some(run => run.reportErrors)) { return 'partial'; }
     if (summary.allPassed) { return 'passed'; }
-    if (summary.phase === 'active') { return request.root.buildUrl ? 'running' : 'queued'; }
-    return summary.observedResult === 'nonpass' ? 'nonpass' : 'unknown';
+    if (summary.phase === 'active') { return request.root.buildUrl || summary.counts.running > 0 ? 'running' : 'queued'; }
+    if (summary.observedResult === 'nonpass') { return 'nonpass'; }
+    // Nothing is running here. Keep "every build we found passed" distinct from "not known yet":
+    // without a manifest the inventory is never provably complete, so this is the resting state.
+    return summary.observedResult === 'passed' ? 'observedPassed' : 'unknown';
 }
 
 function statusIcon(status: string): vscode.ThemeIcon {
     const icons: Record<string, [string, string]> = {
         partial: ['warning', 'list.warningForeground'],
+        timedout: ['error', 'testing.iconFailed'], incomplete: ['warning', 'list.warningForeground'],
+        observedPassed: ['circle-large-outline', 'list.warningForeground'],
         passed: ['pass', 'testing.iconPassed'], failed: ['error', 'testing.iconFailed'],
         sha_mismatch: ['error', 'list.warningForeground'], unreachable: ['debug-disconnect', 'list.errorForeground'],
         running: ['sync~spin', 'progressBar.background'], sending: ['cloud-upload', 'progressBar.background'],
@@ -85,13 +97,25 @@ export class JenkinsViewProvider implements vscode.TreeDataProvider<JenkinsTreeN
         if (node.kind === 'request' && node.request) {
             const request = node.request;
             const details: JenkinsTreeNode[] = [{ kind: 'detail', label: discoveryLabel(request) }];
+            if (request.shaTracking) {
+                details.push({ kind: 'detail', label: t(`선택한 테스트 ${request.shaTracking.jobs.length}개 · SHA 기준`, `${request.shaTracking.jobs.length} selected tests · matched by SHA`) });
+                for (const job of request.shaTracking.jobs) {
+                    if (!request.runs.some(run => run.serverId === job.serverId && run.jobUrl === job.jobUrl)) {
+                        const state = job.error ? jenkinsErrorLabel(job.error) : t('해당 SHA의 실행 미확인', 'No matching SHA execution found');
+                        details.push({ kind: 'detail', label: `${this.servers().find(server => server.id === job.serverId)?.name ?? job.serverId} · ${job.name} · ${state}` });
+                    }
+                }
+            }
+            if (!request.stopped && !request.settledAt && request.nextPollAt) {
+                details.push({ kind: 'detail', label: t(`다음 조회: ${new Date(request.nextPollAt).toLocaleString()}`, `Next check: ${new Date(request.nextPollAt).toLocaleString()}`) });
+            }
             if (request.discovery.message === 'discoveryInProgress') { details.push({ kind: 'detail', label: t('탐색 진행 중 · 다음 회차에 계속', 'Discovery in progress · continues next round') }); }
             if (request.remoteBranch && request.remoteBranch !== request.branch) {
                 details.push({ kind: 'detail', label: t(`전송한 원격 브랜치: ${request.remoteBranch}`, `Submitted remote branch: ${request.remoteBranch}`) });
             }
             if (request.error) { details.push({ kind: 'detail', label: jenkinsErrorLabel(request.error) }); }
             if (request.submission === 'sending') { details.push({ kind: 'detail', label: jenkinsStatusLabel('sending') }); }
-            if (!request.root.buildUrl && request.submission !== 'sending') { details.push({ kind: 'detail', label: request.queueReason ?? t('Jenkins 대기열 확인 중', 'Checking Jenkins queue') }); }
+            if (!request.shaTracking?.readOnly && !request.root.buildUrl && request.submission !== 'sending') { details.push({ kind: 'detail', label: request.queueReason ?? t('Jenkins 대기열 확인 중', 'Checking Jenkins queue') }); }
             return [...details, ...request.runs.map(run => ({ kind: 'build' as const, request, run,
                 label: `${jenkinsStatusLabel(normalizeRunStatus(run, request.sha))}${run.reportErrors ? ' · ' + jenkinsStatusLabel('partial') : ''} · ${this.servers().find(server => server.id === run.serverId)?.name ?? run.serverId} · ${run.fullDisplayName ?? `#${run.number}`}`,
                 description: `${run.correlation === 'root' ? t('대표 결과', 'Representative result') + ' · ' : ''}${jenkinsStatusLabel(normalizeRunStatus(run, request.sha))}` }))];

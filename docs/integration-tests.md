@@ -374,14 +374,35 @@
 | IT-252 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 이름 수정의 빈 토큰은 유지하되 다른 서버로 기존 토큰을 이동하지 않음 |
 | IT-253 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 대표 실패 포함 숫자, 한국어 상태, 전송 중 표시, 펼치기 전용 행과 접근성 아이콘 검증 |
 | IT-254 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 최초 서버 등록 후 같은 실행 흐름에서 Git 선행 조건 검사로 이어짐 |
-| IT-255 | [jenkinsTracking.test.ts](../src/test/jenkinsTracking.test.ts) | 공유 guard와 실제 HTTP의 반복 폴링에서 보고서 403만 대기하고 다른 API·빌드 결과를 유지하며 권한 회복 뒤 전체 판정 재개 |
+| IT-255 | [jenkinsTracking.test.ts](../src/test/jenkinsTracking.test.ts) | 종료 보고서 403 이후 자동 재조회 중단·다른 API 격리·명시적 새 조회의 권한 회복 확인 |
 | IT-256 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 완료된 대용량 HTTP 로그를 제한된 읽기 전용 문서와 부분 표시 안내로 열기 |
 | IT-257 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 180개 폴더 탐색의 실제 HTTP 150회 한도와 미처리 폴더 재개·후반 job 발견 |
 | IT-258 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 추적 만료의 중지 표시, 안정적인 범위 라벨, 알려진 빌드 결과와 보고서 오류의 구분 |
 | IT-259 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 빌드가 없는 요청의 로그 열기는 빈 선택창 대신 상태 안내 |
 | IT-260 | [jenkinsTracking.test.ts](../src/test/jenkinsTracking.test.ts) | 100개 빌드의 401 실패를 서버 수준에서 억제하고 반복 폴링·다른 서버 격리를 실제 HTTP로 확인 |
 | IT-261 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 한도 초과 서버를 재스캔하지 않으면서 다른 서버를 조회하고 설정 변경·초기화 뒤 탐색 재개 |
-| IT-262 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 깊이 한도에 걸린 서버는 자동 스캔을 쉬고 실제 결과 새로 고침 명령으로 폴더 구조 변경 후 탐색 복구 |
+| IT-262 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 깊이 한도 서버의 수동 재탐색도 10분 조회 간격을 지키며 다음 예정 회차에서 복구 |
+| IT-263 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 트리거 서버와 요청 ID로 연결된 다른 서버의 결과를 함께 세고, manifest가 없어 범위를 확정하지 못하는 상태를 실행 중이 아닌 관측 통과로 구분해 표시 |
+| IT-264 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 두 서버의 SHA 연결·빌드 URL 고정·종료 빌드 HTTP 재조회 금지 |
+| IT-265 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 종료 보고서 403을 조회 실패로 확정하고 저장/복원 후 재시도하지 않음 |
+| IT-266 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 10분/20분 간격·시간 제한 연장·장애 중 만료 전 HTTP 차단 |
+| IT-267 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 개별/전체 삭제 후 이력 및 네트워크 조회 제거 |
+| IT-268 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 여러 SHA의 공용 HTTP 예산 및 창 재시작 시 조회 간격 유지 |
+| IT-269 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 요청 전 빌드 번호 경계 및 SHA 파라미터/실제 SHA 일치 검사 |
+| IT-270 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 추적 중지 후 관측 통과 보존과 시간 초과 별도 표시 |
+| IT-271 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 종료 이력의 명시적 재조회가 POST 없이 새 회차·설정한 제한 시간으로 시작 |
+| IT-272 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 진행 중 삭제의 HTTP 취소 및 늦은 응답 후 이력 재생성 방지 |
+| IT-273 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 선택 job 목록의 저장 용량 회수 및 후속 저장/복원 복구 |
+| IT-274 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 회차 취소·복원 후 종료 빌드 재조회 없이 미조회 보고서만 확인하고 실제 403은 확정 종료 |
+| IT-275 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 큐 대기·POST 미확정·대표 서버 자격 증명 오류/삭제에서도 다른 서버 SHA 관측 및 과거 대표 빌드 배제 |
+| IT-276 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 활성 요청 한도 오류의 사용자 안내 도달 |
+| IT-277 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 구버전 기한을 종전 24시간 또는 명시 설정 168시간으로 복원·저장 |
+| IT-278 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 전체 비우기 확인 취소 시 진행 중 조회와 이력 보존 |
+| IT-279 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 서로 다른 범위의 공용 예산 배분과 HTTP 미사용 요청의 다음 예산 창 예약 |
+| IT-280 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 보고서 예산 중단 시 미조회만 계속하고 실제 FAIL과 조회 미완료를 함께 보존 |
+| IT-281 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 느린 core는 다음 job으로 순환하고 예산 고갈은 미처리 job부터 이어서 조회 |
+| IT-282 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 전송 중 종료된 요청의 전체 사전 빌드 번호가 있을 때만 GET 관측 복원 |
+| IT-283 | [jenkinsShaTracking.test.ts](../src/test/jenkinsShaTracking.test.ts) | 미조회 보고서의 자격 증명 오류도 완료 core를 보존하고 자동 조회 종료 |
 
 IT-093~IT-097은 MRU를 별도 저장하던 구현이 제거되면서 함께 삭제된 번호이며 재사용하지 않습니다.
 

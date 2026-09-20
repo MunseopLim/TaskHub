@@ -8,7 +8,7 @@ import { JENKINS_REQUESTS_KEY, JENKINS_SERVERS_KEY, jenkinsSecretKey } from '../
 import type { JenkinsJob, JenkinsRequest, JenkinsServer, TrackedJenkinsBuild } from '../jenkins/types';
 import { discoveryLabel, JenkinsTreeNode, JenkinsViewProvider } from '../providers/jenkinsViewProvider';
 
-const commandIds = ['manageServers', 'run', 'refresh', 'openRun', 'openLog', 'stopTracking', 'showRuns']
+const commandIds = ['manageServers', 'run', 'trackSha', 'refresh', 'openRun', 'openLog', 'stopTracking', 'showRuns', 'clearResults']
     .map(command => `taskhub.jenkins.${command}`);
 const requestedSha = 'a'.repeat(40);
 const otherSha = 'b'.repeat(40);
@@ -302,6 +302,7 @@ suite('Jenkins controller and results tree', () => {
         const originalListJobs = JenkinsClient.prototype.listJobs;
         const originalGetJob = JenkinsClient.prototype.getJob;
         const originalTrigger = JenkinsClient.prototype.trigger;
+        const originalRecent = JenkinsClient.prototype.listRecentBuilds;
         const originalProgress = vscode.window.withProgress;
         const progressTitles: string[] = [];
         const originalGetQueue = JenkinsClient.prototype.getQueue;
@@ -321,7 +322,7 @@ suite('Jenkins controller and results tree', () => {
                 return originalProgress.call(vscode.window, options, task) as ReturnType<typeof task>;
             };
             // Dialog choices are deterministic; the real controller constructs and validates their contents.
-            (vscode.window as { showQuickPick: typeof originalQuickPick }).showQuickPick = (async (input: unknown) => {
+            (vscode.window as { showQuickPick: typeof originalQuickPick }).showQuickPick = (async (input: unknown, options?: vscode.QuickPickOptions) => {
                 const items = await input as Array<Record<string, unknown> | string>;
                 assert.ok(items.length > 0);
                 if (typeof items[0] === 'string') {
@@ -329,6 +330,8 @@ suite('Jenkins controller and results tree', () => {
                     return 'full';
                 }
                 const records = items as Array<Record<string, unknown>>;
+                if (options?.canPickMany) { return [records[0]]; }
+                if ('reuse' in records[0]) { return records[0]; }
                 if ('folder' in records[0] || 'server' in records[0] || 'job' in records[0]) {
                     return records[0];
                 }
@@ -339,12 +342,14 @@ suite('Jenkins controller and results tree', () => {
                 return selected;
             }) as unknown as typeof originalQuickPick;
             (vscode.window as { showInputBox: typeof originalInputBox }).showInputBox = async options => {
+                if (options?.title?.startsWith('SHA parameter name')) { return 'COMMIT_HASH'; }
                 assert.ok(options?.title === 'NOTE' || options?.title === '__proto__');
                 return 'ephemeral-run-note';
             };
             (vscode.window as { showInformationMessage: typeof originalInformationMessage }).showInformationMessage =
                 (async (_message: string, _options: vscode.MessageOptions, ...items: string[]) => items[0]) as typeof originalInformationMessage;
             JenkinsClient.prototype.listJobs = async () => [job];
+            JenkinsClient.prototype.listRecentBuilds = async () => [];
             JenkinsClient.prototype.getJob = async url => {
                 assert.strictEqual(url, job.url);
                 return job;
@@ -371,6 +376,7 @@ suite('Jenkins controller and results tree', () => {
             assert.strictEqual(stored.length, 1);
             assert.strictEqual(stored[0].root.queueUrl, queueUrl);
             assert.strictEqual(stored[0].root.buildUrl, undefined);
+            assert.strictEqual(stored[0].shaTracking?.jobs[0].afterBuild, 0, 'Root job must also capture a pre-POST baseline.');
             assert.strictEqual(stored[0].sha, requestedSha);
             assert.strictEqual(stored[0].branch, snapshot.branch);
             assert.strictEqual(stored[0].remoteBranch, 'validation/firmware');
@@ -398,6 +404,7 @@ suite('Jenkins controller and results tree', () => {
             JenkinsClient.prototype.listJobs = originalListJobs;
             JenkinsClient.prototype.getJob = originalGetJob;
             JenkinsClient.prototype.trigger = originalTrigger;
+            JenkinsClient.prototype.listRecentBuilds = originalRecent;
             (vscode.window as { withProgress: typeof originalProgress }).withProgress = originalProgress;
             JenkinsClient.prototype.getQueue = originalGetQueue;
             secretsChanged.dispose();

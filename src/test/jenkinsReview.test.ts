@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 import { JenkinsController } from '../jenkins/controller';
 import { JenkinsClient } from '../jenkins/client';
 import { JenkinsInventory } from '../jenkins/inventory';
-import { createRequest, aggregate } from '../jenkins/model';
+import { createRequest, aggregate, discoverMatchingBuilds } from '../jenkins/model';
 import { jenkinsErrorLabel, jenkinsStatusLabel } from '../jenkins/messages';
 import { pollJenkinsRequest } from '../jenkins/tracking';
 import { JENKINS_REQUESTS_KEY, JENKINS_SERVERS_KEY, jenkinsSecretKey } from '../jenkins/storage';
@@ -77,6 +77,7 @@ suite('Jenkins review regressions', function () {
         const data = fixture([configuration], [request(configuration, 1), request(configuration, 2)]);
         const originalMessage = vscode.window.showInformationMessage;
         let controller: JenkinsController | undefined;
+        const originalNow = Date.now; let now = originalNow(); Date.now = () => now;
         try {
             (vscode.window as { showInformationMessage: typeof originalMessage }).showInformationMessage = async () => undefined;
             controller = new JenkinsController(data.context);
@@ -85,9 +86,8 @@ suite('Jenkins review regressions', function () {
             assert.ok(saved.every(value => value.discovery.message === 'discoveryInProgress'));
             assert.ok(saved.every(value => !value.error));
             assert.strictEqual(paths.filter(path => path === '/jenkins/api/json').length, 1);
-            assert.strictEqual(paths.filter(path => /\/suite\d+\/api\/json$/.test(path)).length, 149);
-            (controller as unknown as { lastDiscovery: number }).lastDiscovery = 0;
-            await controller.refresh();
+            assert.strictEqual(paths.filter(path => /\/suite\d+\/api\/json$/.test(path)).length, 39);
+            for (let round = 0; round < 5; round++) { now += 10 * 60000; await controller.refresh(); }
             saved = data.workspace.get(JENKINS_REQUESTS_KEY) as JenkinsRequest[];
             assert.strictEqual(paths.filter(path => path === '/jenkins/api/json').length, 1, 'No repeated inventory for the second request or second batch.');
             assert.strictEqual(paths.filter(path => /\/suite\d+\/api\/json$/.test(path)).length, 200);
@@ -95,6 +95,7 @@ suite('Jenkins review regressions', function () {
             assert.ok(saved.every(value => value.discovery.message === 'discoveryBounded' && !value.error));
             assert.ok(saved.every(value => !aggregate(value).allPassed), 'Scanning still does not certify complete coverage.');
         } finally {
+            Date.now = originalNow;
             controller?.dispose();
             (vscode.window as { showInformationMessage: typeof originalMessage }).showInformationMessage = originalMessage;
             for (const socket of sockets) { socket.destroy(); }
@@ -190,6 +191,65 @@ suite('Jenkins review regressions', function () {
                 assert.match(jenkinsErrorLabel(code), /[가-힣]/);
                 assert.ok(!jenkinsErrorLabel(code).includes(code));
             }
+        } finally { provider.dispose(); Object.defineProperty(vscode.env, 'language', language); }
+    });
+
+    test('IT-263: two servers linked by request ID report observed passes without claiming full coverage', () => {
+        const language = Object.getOwnPropertyDescriptor(vscode.env, 'language')!;
+        const remote: JenkinsServer = { id: 'remote', name: 'CI-B', url: 'https://ci-b.example/jenkins/', username: 'developer' };
+        const value = request();
+        value.requestIdParameter = 'TASKHUB_REQUEST_ID';
+        // One server takes the trigger; the tests themselves run on both, and the report leaves
+        // Jenkins by e-mail, so there is no JUnit report and no manifest to close the list with.
+        value.runs = [{ serverId: base.id, jobUrl: value.root.jobUrl, url: value.root.buildUrl!, number: 1,
+            building: false, result: 'SUCCESS', correlation: 'root', tests: null, stages: null }];
+        const candidate: TrackedJenkinsBuild = { serverId: remote.id, jobUrl: `${remote.url}job/fw-test/`,
+            url: `${remote.url}job/fw-test/7/`, number: 7, building: false, result: 'SUCCESS',
+            actions: [{ parameters: [{ name: 'TASKHUB_REQUEST_ID', value: value.id }] }] };
+        const matches = discoverMatchingBuilds(value, [candidate], { servers: [base, remote] });
+        assert.deepStrictEqual(matches.map(run => run.correlation), ['requestId']);
+        value.runs.push({ ...matches[0], tests: null, stages: null });
+
+        const summary = aggregate(value);
+        assert.strictEqual(summary.observedResult, 'passed');
+        assert.strictEqual(summary.allPassed, false);
+        assert.strictEqual(summary.counts.passed, 2);
+        assert.strictEqual(summary.counts.total, 2);
+
+        const provider = new JenkinsViewProvider(() => [value], () => [base, remote]);
+        const node = () => provider.getChildren(provider.getChildren(provider.getChildren()[0])[0])[0];
+        try {
+            Object.defineProperty(vscode.env, 'language', { value: 'ko', configurable: true });
+            const resting = jenkinsStatusLabel('observedPassed');
+            assert.ok(node().label.startsWith(resting), node().label);
+            assert.ok(!node().label.startsWith(jenkinsStatusLabel('unknown')));
+            assert.ok(!resting.includes('확인 중'), 'nothing is running, so the label must not read as in progress');
+            assert.notStrictEqual(resting, jenkinsStatusLabel('passed'));
+            assert.ok(!jenkinsStatusLabel('unknown').includes('확인 중'));
+            assert.match(node().description!, /2\/2/);
+            assert.ok(node().description!.includes(discoveryLabel(value)));
+            const restingIcon = provider.getTreeItem(node()).iconPath as vscode.ThemeIcon;
+            assert.notStrictEqual(restingIcon.id, 'pass', 'the pass glyph is reserved for proven coverage');
+            value.discovery.complete = true;
+            const provenIcon = provider.getTreeItem(node()).iconPath as vscode.ThemeIcon;
+            assert.ok(node().label.startsWith(jenkinsStatusLabel('passed')));
+            assert.strictEqual(provenIcon.id, 'pass');
+            assert.notStrictEqual(restingIcon.color!.id, provenIcon.color!.id);
+
+            // The resting state must yield to a live build and must not survive a non-pass outcome.
+            value.discovery.complete = false;
+            value.runs[1].building = true;
+            assert.ok(node().label.startsWith(jenkinsStatusLabel('running')));
+            value.runs[1].building = false;
+            value.runs[1].result = 'ABORTED';
+            assert.ok(node().label.startsWith(jenkinsStatusLabel('nonpass')));
+            value.runs[1].result = 'FAILURE';
+            assert.ok(node().label.startsWith(jenkinsStatusLabel('failed')));
+            value.runs[1].result = 'SUCCESS';
+
+            Object.defineProperty(vscode.env, 'language', { value: 'en', configurable: true });
+            assert.ok(node().label.startsWith(jenkinsStatusLabel('observedPassed')));
+            assert.ok(!/[가-힣]/u.test(jenkinsStatusLabel('observedPassed')));
         } finally { provider.dispose(); Object.defineProperty(vscode.env, 'language', language); }
     });
 
@@ -429,7 +489,7 @@ suite('Jenkins review regressions', function () {
     });
 
 
-    test('IT-262: explicit refresh retries a depth-limited server while automatic polling stays paused', async () => {
+    test('IT-262: explicit refresh retries a depth-limited server at the next scheduled check', async () => {
         let deep = true;
         const folderPaths: string[] = [];
         await withHttp((path, response, server) => {
@@ -447,22 +507,26 @@ suite('Jenkins review regressions', function () {
             const data = fixture([server], [request(server)]);
             const controller = new JenkinsController(data.context);
             const originalMessage = vscode.window.showInformationMessage;
+            const originalNow = Date.now; let now = originalNow(); Date.now = () => now;
             try {
                 (vscode.window as { showInformationMessage: typeof originalMessage }).showInformationMessage = async () => undefined;
                 await controller.refresh();
                 const saved = () => (data.workspace.get(JENKINS_REQUESTS_KEY) as JenkinsRequest[])[0];
                 assert.strictEqual(saved().discovery.message, 'discoveryLimited');
                 const calls = folderPaths.length;
-                (controller as unknown as { lastDiscovery: number }).lastDiscovery = 0;
+                now += 10 * 60000;
                 await controller.refresh();
                 assert.strictEqual(folderPaths.length, calls, 'Automatic refresh must not restart the same over-limit scan.');
                 deep = false; // An administrator has reduced the folder nesting on Jenkins.
                 await vscode.commands.executeCommand('taskhub.jenkins.refresh');
+                assert.strictEqual(folderPaths.length, calls, 'Manual refresh does not bypass the cadence.');
+                now += 10 * 60000; await controller.refresh();
                 assert.strictEqual(folderPaths.length, calls + 1);
                 assert.strictEqual(saved().discovery.message, 'discoveryBounded');
                 assert.strictEqual(saved().error, undefined);
                 assert.strictEqual(aggregate(saved()).allPassed, false);
             } finally {
+                Date.now = originalNow;
                 controller.dispose();
                 (vscode.window as { showInformationMessage: typeof originalMessage }).showInformationMessage = originalMessage;
             }

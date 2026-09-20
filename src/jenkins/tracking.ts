@@ -1,7 +1,8 @@
 import { JenkinsClient, JenkinsClientError, normalizeJenkinsServerUrl, scopedJenkinsUrl } from './client';
 import { JenkinsInventory, JenkinsInventoryResult } from './inventory';
-import { aggregate, buildKey, discoverMatchingBuilds, extractActualSha, normalizeRunStatus } from './model';
+import { aggregate, buildKey, discoverMatchingBuilds, extractActualSha, isTerminalJenkinsBuild, normalizeRunStatus } from './model';
 import { JenkinsRequest, JenkinsServer, TrackedJenkinsBuild, jenkinsLimits } from './types';
+import { expireJenkinsRequest, pollJenkinsSha } from './shaTracking';
 
 export interface TrackingOptions {
     signal?: AbortSignal;
@@ -12,6 +13,7 @@ export interface TrackingOptions {
     discover: boolean;
     recentBuildLimit: number;
     manifestArtifact: string;
+    read?<T>(key: string, fetch: () => Promise<T>): Promise<T>;
 }
 
 export function serverForUrl(servers: JenkinsServer[], value: string): JenkinsServer | undefined {
@@ -27,7 +29,7 @@ export function serverForUrl(servers: JenkinsServer[], value: string): JenkinsSe
 
 export function safeJenkinsError(error: unknown): string {
     if (error instanceof JenkinsClientError) { return error.code; }
-    if (error instanceof Error && /^JENKINS_(?:STORAGE_LIMIT|RUN_LIMIT|SERVER_LIMIT|NEW_DESTINATION_REQUIRES_TOKEN|PARAMETER_CHOICE)$/.test(error.message)) { return error.message; }
+    if (error instanceof Error && /^JENKINS_(?:ACTIVE_LIMIT|STORAGE_LIMIT|RUN_LIMIT|SERVER_LIMIT|NEW_DESTINATION_REQUIRES_TOKEN|PARAMETER_CHOICE)$/.test(error.message)) { return error.message; }
     return 'JENKINS_UNAVAILABLE';
 }
 
@@ -76,6 +78,8 @@ export function parseJenkinsManifest(data: Buffer, request: JenkinsRequest, serv
 /** Each tick is idempotent and GET-only. Triggering builds belongs to the explicit Run command. */
 export async function pollJenkinsRequest(request: JenkinsRequest, options: TrackingOptions): Promise<void> {
     if (request.stopped || request.settledAt || request.submission === 'sending' || options.signal?.aborted) { return; }
+    if (request.deadlineAt && expireJenkinsRequest(request)) { return; }
+    if (request.shaTracking) { await pollJenkinsSha(request, options); return; }
     if (request.runs.length > jenkinsLimits.maxRunsPerRequest) { request.error = 'JENKINS_RUN_LIMIT'; request.stopped = true; return; }
     const rootServer = options.servers.find(server => server.id === request.root.serverId);
     if (!rootServer) { request.error = 'JENKINS_SERVER_REMOVED'; return; }
@@ -123,6 +127,7 @@ export async function pollJenkinsRequest(request: JenkinsRequest, options: Track
     }
     const refresh = async (run: TrackedJenkinsBuild): Promise<TrackedJenkinsBuild> => {
         if (options.signal?.aborted || request.stopped) { throw new JenkinsClientError('CANCELLED'); }
+        if (run.finalizedAt) { return run; }
         if (run.correlation !== 'root' && !run.error && !run.reportErrors && !run.building && ['passed', 'failed', 'aborted', 'skipped', 'sha_mismatch'].includes(normalizeRunStatus(run, request.sha))
             && run.tests !== undefined && run.stages !== undefined) { return run; }
         const server = options.servers.find(item => item.id === run.serverId);
@@ -133,6 +138,7 @@ export async function pollJenkinsRequest(request: JenkinsRequest, options: Track
             const result: TrackedJenkinsBuild = { ...run, ...build, serverId: run.serverId, jobUrl: run.jobUrl,
                 correlation: run.correlation, actualSha: extractActualSha(build, request.repoRemote), error: undefined,
                 actions: undefined, artifacts: run.correlation === 'root' ? build.artifacts : undefined };
+            if (isTerminalJenkinsBuild(build)) { result.finalizedAt = Date.now(); }
             const [stages, tests] = await Promise.allSettled([client.getStages(run.url), client.getTestReport(run.url)]);
             delete result.reportErrors;
             if (stages.status === 'fulfilled') { result.stages = stages.value; }
@@ -204,7 +210,9 @@ export async function pollJenkinsRequest(request: JenkinsRequest, options: Track
     if (options.signal?.aborted || request.stopped) { throw new JenkinsClientError('CANCELLED'); }
     const summary = aggregate(request);
     if (summary.phase === 'complete' && request.runs.length > 0 && request.runs.every(run =>
-        !run.reportErrors && ['passed', 'failed', 'aborted', 'skipped', 'sha_mismatch'].includes(normalizeRunStatus(run, request.sha)))) {
+        ['passed', 'failed', 'aborted', 'skipped', 'sha_mismatch'].includes(normalizeRunStatus(run, request.sha)))) {
         request.settledAt = Date.now();
+        request.outcome = request.runs.some(run => run.reportErrors) ? 'incomplete' : 'complete';
+        if (request.outcome === 'incomplete') { request.error = 'JENKINS_RESULTS_INCOMPLETE'; }
     }
 }
