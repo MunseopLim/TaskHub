@@ -9,11 +9,12 @@ import { createJenkinsScope } from './lifecycle';
 import { JenkinsGitError, readJenkinsGitSnapshot } from './git';
 import { aggregate, createRequest, normalizeRunStatus } from './model';
 import { JenkinsStore } from './storage';
+import { expireJenkinsRequest } from './shaTracking';
 import { mapConcurrent, pollJenkinsRequest, safeJenkinsError, serverForUrl } from './tracking';
-import { JenkinsJob, JenkinsJobProfile, JenkinsParameter, JenkinsRequest, JenkinsServer, TrackedJenkinsBuild, jenkinsLimits } from './types';
+import { JenkinsJob, JenkinsJobProfile, JenkinsParameter, JenkinsRequest, JenkinsServer, JenkinsShaJob, TrackedJenkinsBuild, jenkinsLimits } from './types';
 import { discoveryLabel, JenkinsTreeNode, JenkinsViewProvider } from '../providers/jenkinsViewProvider';
 
-const COMMANDS = ['manageServers', 'run', 'refresh', 'openRun', 'openLog', 'stopTracking', 'showRuns'] as const;
+const COMMANDS = ['manageServers', 'run', 'trackSha', 'refresh', 'openRun', 'openLog', 'stopTracking', 'showRuns', 'clearResults'] as const;
 const config = (): vscode.WorkspaceConfiguration => vscode.workspace.getConfiguration('taskhub');
 
 function numberSetting(key: string, fallback: number, min: number, max: number): number {
@@ -78,10 +79,15 @@ export class JenkinsController implements vscode.Disposable {
     private disposed = false;
     private submitting = false;
     private lastDiscovery = 0;
+    private pollRotation = 0;
+    private httpWindow = { resetAt: 0, remaining: 0 };
+    private pollFailureUntil = 0;
     constructor(context: vscode.ExtensionContext) {
         try {
             this.store = new JenkinsStore(context);
-            this.requests = this.store.requests();
+            const timeout = config().inspect<number>('jenkins.trackingTimeoutHours');
+            const explicitTimeout = timeout?.workspaceFolderValue ?? timeout?.workspaceValue ?? timeout?.globalValue;
+            this.requests = this.store.requests(explicitTimeout ?? 24);
             this.provider = new JenkinsViewProvider(() => this.requests, () => this.store.servers());
             this.disposables.push(this.provider);
             this.logDocument = new JenkinsLogDocument();
@@ -121,7 +127,11 @@ export class JenkinsController implements vscode.Disposable {
     private schedule(delay?: number): void {
         if (this.disposed) { return; }
         if (this.timer) { clearTimeout(this.timer); }
-        this.timer = setTimeout(() => { void this.refresh(); }, delay ?? numberSetting('jenkins.pollIntervalSeconds', 15, 5, 300) * 1000);
+        const active = this.requests.filter(request => !request.stopped && !request.settledAt);
+        if (!active.length) { return; }
+        const next = Math.min(...active.map(request => Math.min(Math.max(request.nextPollAt ?? Date.now(), this.pollFailureUntil),
+            request.deadlineAt ?? request.createdAt + jenkinsLimits.trackingTimeoutMs)));
+        this.timer = setTimeout(() => { void this.refresh(); }, delay ?? Math.max(50, next - Date.now()));
     }
     private async client(server: JenkinsServer, signal = this.abort.signal, budget?: { remaining: number }): Promise<JenkinsClient> {
         if (this.disposed || signal.aborted) { throw new JenkinsClientError('CANCELLED'); }
@@ -187,49 +197,108 @@ export class JenkinsController implements vscode.Disposable {
         if (this.disposed) { return; }
         if (this.polling) { return this.polling; }
         this.polling = this.poll().catch(async error => {
-            if (!this.disposed) { this.status.tooltip = errorMessage(error); }
+            if (!this.disposed) { this.pollFailureUntil = Date.now() + jenkinsLimits.pollIntervalMs; this.status.tooltip = errorMessage(error); }
         }).finally(() => { this.polling = undefined; this.schedule(); });
         return this.polling;
     }
     private async poll(): Promise<void> {
         const now = Date.now();
-        const active = this.requests.filter(request => !request.stopped && !request.settledAt);
-        const discover = active.some(request => request.root.buildUrl) && now - this.lastDiscovery >= numberSetting('jenkins.discoveryIntervalSeconds', 60, 15, 600) * 1000;
+        // Expire before credentials, discovery or any HTTP. Restart/manual refresh cannot revive it.
+        for (const request of this.requests) {
+            if (!request.stopped && !request.settledAt && expireJenkinsRequest(request, now)) { await this.notify(request); }
+        }
+        const due = this.requests.filter(request => !request.stopped && !request.settledAt && (request.nextPollAt ?? 0) <= now);
+        if (!due.length) { await this.persist(); this.updateView(); return; }
+        const start = this.pollRotation++ % due.length;
+        const active = [...due.slice(start), ...due.slice(0, start)];
+        if (now >= this.httpWindow.resetAt) {
+            this.httpWindow = { resetAt: now + jenkinsLimits.pollIntervalMs, remaining: jenkinsLimits.pollHttpBudget };
+        }
+        const previousPolls = new Map(active.map(request => [request.id, request.nextPollAt]));
+        for (const request of active) {
+            request.nextPollAt = this.httpWindow.remaining > 0
+                ? now + (now - request.createdAt >= 3600000 ? 2 : 1) * jenkinsLimits.pollIntervalMs : this.httpWindow.resetAt;
+        }
+        // Persist the cadence before I/O so reloading the window does not cause an extra burst.
+        try { await this.persist(); }
+        catch (error) {
+            for (const request of active) { request.nextPollAt = previousPolls.get(request.id); }
+            throw error;
+        }
+        this.pollFailureUntil = 0;
+        const budget = this.httpWindow;
+        if (budget.remaining <= 0) { this.updateView(); return; }
+        const reads = new Map<string, Promise<unknown>>();
+        const read = <T>(key: string, fetch: () => Promise<T>): Promise<T> => {
+            const existing = reads.get(key);
+            if (existing) {
+                return (existing as Promise<T>).catch(error => {
+                    // A peer's local quota/cancellation cannot consume this request's turn.
+                    if (!(error instanceof JenkinsClientError) || !['REQUEST_LIMIT', 'CANCELLED'].includes(error.code)) { throw error; }
+                    if (reads.get(key) === existing) { reads.delete(key); }
+                    return read(key, fetch);
+                });
+            }
+            if (!reads.has(key)) {
+                const pending = fetch();
+                reads.set(key, pending);
+                void pending.catch(error => {
+                    if (error instanceof JenkinsClientError && ['REQUEST_LIMIT', 'CANCELLED'].includes(error.code)
+                        && reads.get(key) === pending) { reads.delete(key); }
+                });
+            }
+            return reads.get(key)! as Promise<T>;
+        };
+        const legacy = active.filter(request => !request.shaTracking);
+        const discover = legacy.some(request => request.root.buildUrl) && now - this.lastDiscovery >= numberSetting('jenkins.discoveryIntervalSeconds', 60, 15, 600) * 1000;
         let inventory: JenkinsInventoryResult | undefined;
         if (discover) {
             this.lastDiscovery = now;
-            const budget = { remaining: 150 };
             const scope = createJenkinsScope([this.abort.signal], jenkinsLimits.requestDeadlineMs);
+            const inventoryBudget = { remaining: Math.min(40, budget.remaining) };
+            const initialBudget = inventoryBudget.remaining;
             try {
-                inventory = await this.inventory.collect({ servers: this.store.servers(), requests: active,
-                    client: server => this.client(server, scope.signal, budget), signal: scope.signal,
+                inventory = await this.inventory.collect({ servers: this.store.servers(), requests: legacy,
+                    client: server => this.client(server, scope.signal, inventoryBudget), signal: scope.signal,
                     jobLimit: numberSetting('jenkins.discoveryJobLimit', 200, 20, 2000),
                     recentBuildLimit: numberSetting('jenkins.recentBuildLimit', 20, 5, 200) });
-            } finally { scope.dispose(); }
+            } finally { budget.remaining -= initialBudget - inventoryBudget.remaining; scope.dispose(); }
         }
-        await mapConcurrent([...this.requests], async request => {
-            if (this.disposed || request.stopped || request.settledAt) { return; }
-            if (now - request.createdAt > numberSetting('jenkins.trackingTimeoutHours', 24, 1, 168) * 3600000) {
-                request.stopped = true; request.error = 'JENKINS_TRACKING_TIMEOUT'; return;
-            }
+        // Share this controller's automatic HTTP window fairly across due observations.
+        // Explicit job selection/baseline commands have their own bounded user-operation budget.
+        const allowance = Math.max(1, Math.ceil(budget.remaining / active.length));
+        await mapConcurrent(active, async request => {
+            if (this.disposed || request.stopped || request.settledAt || expireJenkinsRequest(request)) { return; }
             const operation = new AbortController();
             this.requestAborts.set(request.id, operation);
-            const scope = createJenkinsScope([this.abort.signal, operation.signal]);
-            const signal = scope.signal;
-            const timer = setTimeout(() => operation.abort(), jenkinsLimits.requestDeadlineMs);
-            const budget = { remaining: 150 };
+            const scope = createJenkinsScope([this.abort.signal, operation.signal], Math.max(1, Math.min(jenkinsLimits.requestDeadlineMs,
+                (request.deadlineAt ?? request.createdAt + jenkinsLimits.trackingTimeoutMs) - Date.now())));
+            let remaining = allowance;
+            let used = 0;
+            const requestBudget = {
+                get remaining(): number { return Math.min(remaining, budget.remaining); },
+                set remaining(value: number) {
+                    const spent = Math.max(0, this.remaining - value);
+                    remaining -= spent; budget.remaining -= spent; used += spent;
+                },
+            };
             try {
-                await pollJenkinsRequest(request, { servers: this.store.servers(), client: server => this.client(server, signal, budget), discover, signal, inventory,
+                await pollJenkinsRequest(request, { servers: this.store.servers(), client: server => this.client(server, scope.signal, request.shaTracking ? requestBudget : budget), discover, signal: scope.signal, inventory, read,
                     reserveRuns: count => this.reserveRuns(count),
                     recentBuildLimit: numberSetting('jenkins.recentBuildLimit', 20, 5, 200),
                     manifestArtifact: config().get<string>('jenkins.manifestArtifact', 'taskhub-jenkins-runs.json') });
-                if (!this.disposed && !request.stopped && !signal.aborted) { await this.notify(request); }
+                if (!this.disposed && !request.stopped && !scope.signal.aborted) { await this.notify(request); }
             } catch (error) {
                 if (!this.disposed && !request.stopped) {
-                    request.error = signal.aborted ? 'JENKINS_POLL_DEADLINE' : safeJenkinsError(error);
+                    request.error = scope.signal.aborted ? 'JENKINS_POLL_DEADLINE' : safeJenkinsError(error);
                     request.discovery.complete = false;
                 }
-            } finally { clearTimeout(timer); scope.dispose(); this.requestAborts.delete(request.id); }
+            } finally {
+                if (request.shaTracking && !used && budget.remaining <= 0 && !request.stopped && !request.settledAt) {
+                    request.nextPollAt = budget.resetAt;
+                }
+                scope.dispose(); this.requestAborts.delete(request.id);
+            }
             this.updateView();
         }, 2);
         if (!this.disposed) { await this.persist(); this.updateView(); }
@@ -242,10 +311,12 @@ export class JenkinsController implements vscode.Disposable {
         request.notified[key] = true;
         try { await this.persist(); } catch (error) { delete request.notified[key]; throw error; }
         const preference = config().get<string>('jenkins.notifications', 'all');
-        const failed = summary.observedResult === 'failed' || summary.observedResult === 'nonpass';
+        const failed = request.outcome === 'timeout' || request.outcome === 'incomplete' || summary.observedResult === 'failed' || summary.observedResult === 'nonpass';
         if (preference === 'off' || (preference === 'failures' && !failed) || this.disposed) { return; }
         const label = key === 'complete' ? t('전체 테스트', 'All tracked tests') : t('Jenkins 대표 결과 (전체 범위 미확인)', 'Jenkins representative result (coverage unverified)');
-        const message = `${request.branch}@${request.sha.slice(0, 8)} · ${label}: ${key === 'complete' ? jenkinsStatusLabel(summary.allPassed ? 'passed' : summary.observedResult === 'failed' ? 'failed' : 'nonpass') : jenkinsStatusLabel(root ? normalizeRunStatus(root, request.sha) : 'unknown')}`;
+        const resultStatus = request.outcome === 'timeout' ? 'timedout' : request.outcome === 'incomplete' ? 'incomplete'
+            : summary.allPassed ? 'passed' : summary.observedResult === 'failed' ? 'failed' : 'nonpass';
+        const message = `${request.branch}@${request.sha.slice(0, 8)} · ${label}: ${key === 'complete' ? jenkinsStatusLabel(resultStatus) : jenkinsStatusLabel(root ? normalizeRunStatus(root, request.sha) : 'unknown')}`;
         const open = t('결과 보기', 'View results');
         const result = failed ? vscode.window.showWarningMessage(message, open) : vscode.window.showInformationMessage(message, open);
         void Promise.resolve(result).then(async choice => { if (choice === open && !this.disposed) { await this.openRun({ kind: 'request', label: '', request }); } }).catch(() => { /* A closed/disposed notification must not leak a rejected promise. */ });
@@ -362,8 +433,11 @@ export class JenkinsController implements vscode.Disposable {
         const job = await client.getJob(chosen.job.url);
         const profile = await this.parametersProfile(server, job);
         if (!profile) { return; }
+        const testJobs = await this.selectTestJobs(profile, job);
+        if (!testJobs) { return; }
         const remoteBranch = snapshot.remoteRef.slice('refs/heads/'.length);
         const request = createRequest({ ...snapshot, remoteBranch, root: { serverId: server.id, jobUrl: job.url }, shaParameter: profile.shaParameter, requestIdParameter: profile.requestIdParameter });
+        request.shaTracking = { jobs: testJobs, cursor: 0, readOnly: false };
         const parameters: Record<string, string> = Object.create(null);
         for (const parameter of job.parameters ?? []) {
             const mapped = parameter.name === profile.branchParameter ? remoteBranch : parameter.name === profile.shaParameter ? snapshot.sha : parameter.name === profile.requestIdParameter ? request.id : undefined;
@@ -375,10 +449,23 @@ export class JenkinsController implements vscode.Disposable {
         const start = t('테스트 요청', 'Start tests');
         const pin = profile.shaParameter ? t(`SHA 파라미터: ${profile.shaParameter}`, `SHA parameter: ${profile.shaParameter}`) : t('SHA 파라미터 없음: Jenkins SCM 설정에 따라 체크아웃됩니다.', 'No SHA parameter: checkout follows the Jenkins SCM configuration.');
         if (await vscode.window.showInformationMessage(`${server.name} · ${job.fullName}\n${snapshot.branch}@${snapshot.sha}\n${t('전송할 원격 브랜치', 'Remote branch to submit')}: ${remoteBranch}\n${pin}`, { modal: true }, start) !== start) { return; }
-        // Recheck after dialogs: branch/HEAD/remote may have changed while the user chose parameters.
+        if (this.disposed) { return; }
+        // Capture build counters before POST. Previous executions of the same SHA cannot
+        // satisfy a newly submitted test request, even if the server clock differs.
+        await this.withOperation(t('테스트 시작 전 빌드 번호 확인 중', 'Checking build numbers before submission'), async signal => {
+            const budget = { remaining: 150 };
+            for (const target of testJobs) {
+                const targetServer = this.store.servers().find(item => item.id === target.serverId);
+                if (!targetServer) { throw new JenkinsClientError('INVALID_PARAMETER'); }
+                const builds = await (await this.client(targetServer, signal, budget)).listRecentBuilds(target.jobUrl, 1);
+                target.afterBuild = Math.max(0, ...builds.map(build => build.number));
+            }
+        });
+        // Recheck after dialogs and baseline reads, immediately before committing the request.
         const current = await this.withOperation(t('전송 전 Git 상태 재확인 중', 'Rechecking Git before submission'), signal => readJenkinsGitSnapshot(snapshot.repoPath, signal));
         if (current.branch !== snapshot.branch || current.sha !== snapshot.sha || current.remote !== snapshot.remote || current.remoteRef !== snapshot.remoteRef) { throw new JenkinsGitError('notPushed'); }
         if (this.disposed) { return; }
+        this.startTracking(request);
         request.submission = 'sending';
         this.requests.unshift(request);
         try { await this.persist(); } catch (error) { this.requests.splice(this.requests.indexOf(request), 1); throw error; }
@@ -392,13 +479,129 @@ export class JenkinsController implements vscode.Disposable {
         } catch (error) {
             request.submission = 'unconfirmed';
             request.error = `JENKINS_SUBMISSION_UNCONFIRMED_${safeJenkinsError(error)}`;
-            request.stopped = true;
             await this.persist(); this.updateView();
-            quietMessage(() => vscode.window.showWarningMessage(t('요청 수락 여부를 확인할 수 없습니다. 중복 실행을 피하려면 Jenkins 대기열을 먼저 확인해주세요. 자동 재시도하지 않습니다.', 'Build acceptance could not be confirmed. Check the Jenkins queue before retrying to avoid duplicates. This request will not be retried automatically.')));
+            quietMessage(() => vscode.window.showWarningMessage(t('요청 수락 여부를 확인할 수 없습니다. 빌드 요청은 재전송하지 않고 선택한 SHA의 결과 조회만 계속합니다. 다시 실행하기 전 Jenkins 대기열을 확인해주세요.', 'Build acceptance could not be confirmed. Only SHA result checks will continue; the build request will not be resent. Check the Jenkins queue before starting another build.')));
+            await this.refresh();
             return;
         }
         await this.persist(); this.updateView();
         await this.refresh();
+    }
+    private startTracking(request: JenkinsRequest): void {
+        request.createdAt = Date.now();
+        request.deadlineAt = request.createdAt + numberSetting('jenkins.trackingTimeoutHours', 2, 1, 168) * 3600000;
+        delete request.nextPollAt;
+    }
+
+    private async selectTestJobs(profile: JenkinsJobProfile, root?: JenkinsJob): Promise<JenkinsShaJob[] | undefined> {
+        const servers = this.store.servers();
+        let selected: JenkinsShaJob[] | undefined;
+        if (profile.testJobs?.length && profile.testJobs.every(job => servers.some(server =>
+            server.id === job.serverId && serverForUrl([server], job.jobUrl)))) {
+            const reuse = await vscode.window.showQuickPick([
+                { label: t(`저장된 테스트 ${profile.testJobs.length}개 사용`, `Use ${profile.testJobs.length} saved tests`), reuse: true },
+                { label: t('테스트 목록 다시 선택', 'Select tests again'), reuse: false },
+            ], { title: t('이번 SHA의 전체 테스트 범위', 'Complete test scope for this SHA') });
+            if (!reuse) { return; }
+            if (reuse.reuse) { selected = profile.testJobs; }
+        }
+        if (!selected) {
+            const available = await this.withOperation(t('서버별 테스트 목록 조회 중', 'Loading tests from registered servers'), async signal => {
+                const budget = { remaining: 150 };
+                const jobs: Array<{ label: string; description: string; job: JenkinsShaJob; picked: boolean }> = [];
+                for (const server of servers) {
+                    const inventory = await (await this.client(server, signal, budget)).listJobs();
+                    for (const job of inventory.filter(item => item.buildable)) {
+                        jobs.push({ label: `${server.name} · ${job.fullName}`, description: job.url,
+                            job: { serverId: server.id, jobUrl: job.url, name: job.fullName },
+                            picked: profile.testJobs?.some(item => item.serverId === server.id && item.jobUrl === job.url)
+                                ?? (profile.serverId === server.id && root?.url === job.url) });
+                    }
+                }
+                return jobs;
+            });
+            if (!available.length) { throw new JenkinsClientError('NOT_FOUND'); }
+            const picks = await vscode.window.showQuickPick(available, { canPickMany: true,
+                title: t('이번 SHA에서 실행할 테스트 전체 선택', 'Select all tests expected for this SHA'),
+                placeHolder: t('선택한 목록 전체를 기준으로 완료를 판단합니다. 실행하지 않을 job은 제외하세요.', 'Completion is based on this entire selection. Exclude jobs that will not run.') });
+            if (!picks?.length) { return; }
+            selected = picks.map(item => item.job);
+            const shaParameter = await vscode.window.showInputBox({ title: t('테스트 job의 SHA 파라미터 이름 (선택)', 'SHA parameter name on test jobs (optional)'),
+                value: profile.shaParameter ?? profile.testJobs?.[0]?.shaParameter ?? '',
+                prompt: t('Git checkout 정보가 없는 job에서 사용합니다. 모든 선택 job에 같은 이름이 전달될 때 입력하세요.', 'Used for jobs without Git checkout data. Enter it only when the same parameter name is passed to the selected jobs.'),
+                validateInput: value => value.length > 256 ? t('256자 이내로 입력해주세요.', 'Use at most 256 characters.') : undefined });
+            if (shaParameter === undefined) { return; }
+            selected = selected.map(job => ({ ...job, shaParameter: shaParameter.trim() || undefined }));
+        }
+        selected = selected.map(job => ({ serverId: job.serverId, jobUrl: job.jobUrl, name: job.name, shaParameter: job.shaParameter }));
+        if (root && !selected.some(job => job.serverId === profile.serverId && job.jobUrl === root.url)) {
+            selected.unshift({ serverId: profile.serverId, jobUrl: root.url, name: root.fullName, shaParameter: profile.shaParameter });
+        }
+        if (selected.length > jenkinsLimits.maxSelectedJobs) { throw new JenkinsClientError('DISCOVERY_LIMIT'); }
+        profile.testJobs = selected;
+        await this.store.saveProfile(profile);
+        return selected.map(job => ({ ...job }));
+    }
+
+    /** Explicit read-only observation, including a new attempt after completion or timeout. */
+    async trackSha(node?: JenkinsTreeNode): Promise<void> {
+        if (this.submitting || this.disposed) { return; }
+        this.submitting = true;
+        try {
+            if (this.requests.filter(request => !request.stopped && !request.settledAt).length >= jenkinsLimits.maxActiveRequests) {
+                throw new Error('JENKINS_ACTIVE_LIMIT');
+            }
+            const previous = node?.request && this.requests.includes(node.request) ? node.request : undefined;
+            let snapshot: Pick<JenkinsRequest, 'repoPath' | 'repoRemote' | 'branch' | 'sha'>;
+            if (previous) { snapshot = previous; }
+            else {
+                const folders = vscode.workspace.workspaceFolders?.filter(folder => folder.uri.scheme === 'file') ?? [];
+                if (!folders.length) {
+                    quietMessage(() => vscode.window.showInformationMessage(t('Git 프로젝트 폴더를 먼저 열어주세요.', 'Open a Git project folder first.'))); return;
+                }
+                const folder = folders.length === 1 ? folders[0] : (await vscode.window.showQuickPick(folders.map(folder => ({ label: folder.name, folder }))))?.folder;
+                if (!folder) { return; }
+                snapshot = await this.withOperation(t('Git 브랜치와 SHA 확인 중', 'Reading Git branch and SHA'), signal => readJenkinsGitSnapshot(folder.uri.fsPath, signal));
+                const sha = await vscode.window.showInputBox({ title: t('조회할 전체 커밋 SHA', 'Full commit SHA to observe'), value: snapshot.sha,
+                    validateInput: value => /^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(value) ? undefined : t('전체 SHA를 입력해주세요.', 'Enter the full commit SHA.') });
+                if (!sha) { return; }
+                snapshot = { ...snapshot, sha: sha.toLowerCase() };
+            }
+            if (!this.store.servers().length) { await this.editServer(); }
+            if (!this.store.servers().length || this.disposed) { return; }
+            const profile = previous?.shaTracking ? { serverId: '__sha__', jobUrl: snapshot.repoPath, testJobs: previous.shaTracking.jobs }
+                : this.store.profile('__sha__', snapshot.repoPath) ?? { serverId: '__sha__', jobUrl: snapshot.repoPath };
+            const jobs = await this.selectTestJobs(profile);
+            if (!jobs || this.disposed) { return; }
+            const request = createRequest({ repoPath: snapshot.repoPath, repoRemote: snapshot.repoRemote,
+                branch: snapshot.branch, sha: snapshot.sha, root: { serverId: jobs[0].serverId, jobUrl: jobs[0].jobUrl } });
+            request.shaTracking = { jobs, cursor: 0, readOnly: true };
+            this.startTracking(request);
+            this.requests.unshift(request);
+            try { await this.persist(); } catch (error) { this.requests.splice(this.requests.indexOf(request), 1); throw error; }
+            this.updateView();
+            await this.refresh();
+        } finally { this.submitting = false; }
+    }
+
+    async clearResults(node?: JenkinsTreeNode): Promise<void> {
+        const targets = node?.request ? this.requests.filter(request => request === node.request) : [...this.requests];
+        if (!targets.length) { return; }
+        if (!node?.request) {
+            const active = targets.filter(request => !request.stopped && !request.settledAt).length;
+            const clear = t('전체 비우기', 'Clear all');
+            if (await vscode.window.showWarningMessage(t(
+                `Jenkins 결과 ${targets.length}개를 모두 지울까요? 진행 중인 조회 ${active}개도 중지합니다. Jenkins 빌드는 계속 실행됩니다.`,
+                `Clear all ${targets.length} Jenkins results? This also stops ${active} active observations. Jenkins builds will continue running.`),
+            { modal: true }, clear) !== clear) { return; }
+        }
+        for (const request of targets) { request.stopped = true; this.requestAborts.get(request.id)?.abort(); }
+        // Finish in-flight persistence before deleting so late responses cannot resurrect rows.
+        if (this.polling) { await this.polling; }
+        if (this.disposed) { return; }
+        const ids = new Set(targets.map(request => request.id));
+        this.requests.splice(0, this.requests.length, ...this.requests.filter(request => !ids.has(request.id)));
+        await this.persist(); this.updateView(); this.schedule();
     }
     private async parametersProfile(server: JenkinsServer, job: JenkinsJob): Promise<JenkinsJobProfile | undefined> {
         const parameters = job.parameters ?? [];

@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.34",
+  "version": "0.8.35",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -65,7 +65,11 @@
       "properties": {
         "taskhub.updates.mode": {
           "type": "string",
-          "enum": ["off", "notify", "auto"],
+          "enum": [
+            "off",
+            "notify",
+            "auto"
+          ],
           "enumDescriptions": [
             "%setting.updatesMode.off%",
             "%setting.updatesMode.notify%",
@@ -74,7 +78,9 @@
           "default": "notify",
           "scope": "machine",
           "markdownDescription": "%setting.updatesMode%",
-          "tags": ["usesOnlineServices"]
+          "tags": [
+            "usesOnlineServices"
+          ]
         },
         "taskhub.showTaskStatus": {
           "type": "boolean",
@@ -268,7 +274,8 @@
           "minimum": 5,
           "maximum": 300,
           "scope": "machine",
-          "markdownDescription": "%setting.jenkinsPollInterval%"
+          "markdownDescription": "%setting.jenkinsPollInterval%",
+          "deprecationMessage": "%setting.jenkinsPollFixed%"
         },
         "taskhub.jenkins.discoveryIntervalSeconds": {
           "type": "integer",
@@ -296,7 +303,7 @@
         },
         "taskhub.jenkins.trackingTimeoutHours": {
           "type": "integer",
-          "default": 24,
+          "default": 2,
           "minimum": 1,
           "maximum": 168,
           "scope": "machine",
@@ -783,6 +790,20 @@
         "command": "taskhub.openHtmlInBrowser",
         "title": "%cmd.openHtmlInBrowser%",
         "category": "TaskHub"
+      },
+      {
+        "command": "taskhub.jenkins.trackSha",
+        "title": "%cmd.jenkins.trackSha%",
+        "category": "TaskHub",
+        "icon": "$(search)",
+        "enablement": "config.taskhub.experimental.jenkins.enabled"
+      },
+      {
+        "command": "taskhub.jenkins.clearResults",
+        "title": "%cmd.jenkins.clearResults%",
+        "category": "TaskHub",
+        "icon": "$(trash)",
+        "enablement": "config.taskhub.experimental.jenkins.enabled"
       }
     ],
     "keybindings": [
@@ -942,6 +963,14 @@
         {
           "command": "taskhub.unpinAction",
           "when": "false"
+        },
+        {
+          "command": "taskhub.jenkins.trackSha",
+          "when": "config.taskhub.experimental.jenkins.enabled"
+        },
+        {
+          "command": "taskhub.jenkins.clearResults",
+          "when": "config.taskhub.experimental.jenkins.enabled"
         }
       ],
       "view/title": [
@@ -1044,6 +1073,16 @@
           "command": "taskhub.clearAllHistory",
           "when": "view == mainView.history",
           "group": "navigation"
+        },
+        {
+          "command": "taskhub.jenkins.trackSha",
+          "when": "view == mainView.jenkins && config.taskhub.experimental.jenkins.enabled",
+          "group": "navigation@4"
+        },
+        {
+          "command": "taskhub.jenkins.clearResults",
+          "when": "view == mainView.jenkins && config.taskhub.experimental.jenkins.enabled",
+          "group": "navigation@5"
         }
       ],
       "editor/context": [
@@ -1288,6 +1327,16 @@
           "command": "taskhub.stopAction",
           "when": "view == mainView.main && viewItem == pinnedRunningAction",
           "group": "context@0"
+        },
+        {
+          "command": "taskhub.jenkins.trackSha",
+          "when": "view == mainView.jenkins && viewItem == jenkinsRequest && config.taskhub.experimental.jenkins.enabled",
+          "group": "context@7"
+        },
+        {
+          "command": "taskhub.jenkins.clearResults",
+          "when": "view == mainView.jenkins && viewItem == jenkinsRequest && config.taskhub.experimental.jenkins.enabled",
+          "group": "context@10"
         }
       ]
     },

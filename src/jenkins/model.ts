@@ -1,11 +1,15 @@
 import { randomUUID } from 'crypto';
 import { JenkinsClientError } from './client';
 import {
-    JenkinsBuild, JenkinsCause, JenkinsRequest, JenkinsServer, TrackedJenkinsBuild,
+    JenkinsBuild, JenkinsCause, JenkinsRequest, JenkinsServer, TrackedJenkinsBuild, jenkinsLimits,
 } from './types';
 
 export type JenkinsRunStatus = 'queued' | 'running' | 'passed' | 'failed' | 'aborted'
     | 'skipped' | 'unknown' | 'unreachable' | 'sha_mismatch';
+
+export function isTerminalJenkinsBuild(build: JenkinsBuild): boolean {
+    return !build.building && ['SUCCESS', 'FAILURE', 'UNSTABLE', 'ABORTED', 'NOT_BUILT'].includes(build.result ?? '');
+}
 
 export interface JenkinsAggregate {
     phase: 'active' | 'discovering' | 'complete';
@@ -38,6 +42,7 @@ export function createRequest(input: CreateJenkinsRequest): JenkinsRequest {
     return {
         id: input.id ?? randomUUID(),
         createdAt: input.createdAt ?? Date.now(),
+        deadlineAt: (input.createdAt ?? Date.now()) + jenkinsLimits.trackingTimeoutMs,
         branch: input.branch,
         remoteBranch: input.remoteBranch,
         sha: input.sha,
@@ -121,20 +126,24 @@ export function aggregate(request: JenkinsRequest): JenkinsAggregate {
     for (const run of countedRuns) {
         counts[normalizeRunStatus(run, request.sha)]++;
     }
+    const missing = request.shaTracking?.jobs.filter(job => !runs.some(run => run.serverId === job.serverId && run.jobUrl === job.jobUrl)).length ?? 0;
+    counts.total += missing;
+    counts.unknown += missing;
 
     const statuses = runs.map(run => normalizeRunStatus(run, request.sha));
     const shaMismatches = runs.filter(run => hasShaMismatch(run, request.sha));
-    const hasActive = runs.some(run => run.building)
+    const hasActive = !request.stopped && !request.settledAt && (missing > 0 || runs.some(run => run.building)
+        || Boolean(request.shaTracking && runs.some(run => run.coreCompletedAt && !run.finalizedAt))
         || statuses.some(status => status === 'queued' || status === 'running')
-        || (!request.root.buildUrl && roots.length === 0 && !request.error && !request.stopped);
+        || (!request.shaTracking && !request.root.buildUrl && roots.length === 0 && !request.error));
     const phase = hasActive ? 'active' : request.discovery.complete ? 'complete' : 'discovering';
     let observedResult: JenkinsAggregate['observedResult'];
     if (statuses.includes('failed')) {
         observedResult = 'failed';
-    } else if (shaMismatches.length > 0 || request.error || request.stopped
+    } else if (shaMismatches.length > 0
         || statuses.some(status => ['aborted', 'skipped', 'unreachable', 'sha_mismatch'].includes(status))) {
         observedResult = 'nonpass';
-    } else if (roots.length === 0 || runs.some(run => run.reportErrors) || statuses.some(status => status !== 'passed')) {
+    } else if ((!request.shaTracking && roots.length === 0) || missing > 0 || runs.some(run => run.reportErrors) || statuses.some(status => status !== 'passed')) {
         observedResult = 'unknown';
     } else {
         observedResult = 'passed';
@@ -143,7 +152,7 @@ export function aggregate(request: JenkinsRequest): JenkinsAggregate {
     return {
         phase,
         observedResult,
-        allPassed: phase === 'complete' && observedResult === 'passed',
+        allPassed: phase === 'complete' && observedResult === 'passed' && !request.error && !request.stopped,
         counts,
         shaMismatches,
         rootStatus: roots.length > 0 ? normalizeRunStatus(roots[0], request.sha) : undefined,

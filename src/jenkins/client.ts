@@ -681,7 +681,10 @@ export class JenkinsClient {
     }
 
     private async request(input: URL, method = 'GET', body?: Buffer, allowPrefix = false): Promise<HttpResponse> {
-        if (this.budget && this.budget.remaining-- <= 0) { throw new JenkinsClientError('REQUEST_LIMIT'); }
+        if (this.budget) {
+            if (this.budget.remaining <= 0) { throw new JenkinsClientError('REQUEST_LIMIT'); }
+            this.budget.remaining--;
+        }
         const operation = new AbortController();
         const cancel = (): void => operation.abort();
         this.signal?.addEventListener('abort', cancel, { once: true });

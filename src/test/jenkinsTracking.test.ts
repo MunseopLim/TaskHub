@@ -91,7 +91,7 @@ suite('Jenkins request tracking over HTTP', function () {
     }
 
     function request(buildUrl?: string): JenkinsRequest {
-        return createRequest({ id: 'request-unique-1', createdAt: 1000, repoPath: '/workspace/fw',
+        return createRequest({ id: 'request-unique-1', createdAt: Date.now(), repoPath: '/workspace/fw',
             branch: 'feature/ftl-gc', sha: 'a'.repeat(40),
             root: { serverId: first.id, jobUrl: first.url('job/root/'),
                 queueUrl: first.url('queue/item/81/'), buildUrl } });
@@ -308,7 +308,8 @@ suite('Jenkins request tracking over HTTP', function () {
         assert.strictEqual(tracked.runs[0].reportErrors?.tests, 'FORBIDDEN', '403 must remain a report permission error');
         assert.strictEqual(tracked.runs[0].error, undefined);
         assert.strictEqual(aggregate(tracked).allPassed, false);
-        assert.strictEqual(tracked.settledAt, undefined);
+        assert.ok(tracked.settledAt);
+        assert.strictEqual(tracked.outcome, 'incomplete');
         assert.ok(!JSON.stringify(tracked).includes('private fixture response'));
     });
 
@@ -347,7 +348,7 @@ suite('Jenkins request tracking over HTTP', function () {
         assert.strictEqual(aggregate(tracked).allPassed, true);
     });
 
-    test('IT-255: shared guard isolates optional report permissions over three HTTP polls and recovers after cooldown', async () => {
+    test('IT-255: terminal report failure stops polling while shared guard allows other resources and explicit new observation', async () => {
         let now = 1000;
         const guard = new JenkinsTransportGuard(() => now, () => 0);
         const client = new JenkinsClient(first.configuration, { token: first.token, guard, timeoutMs: 1000 });
@@ -361,14 +362,15 @@ suite('Jenkins request tracking over HTTP', function () {
         for (let index = 0; index < 3; index++) {
             const before = first.requests.length;
             await pollJenkinsRequest(tracked, settings);
-            assert.ok(first.requests.length > before, 'Every round must still read the root build.');
-            assert.strictEqual(tracked.error, undefined);
+            if (index === 0) { assert.ok(first.requests.length > before); }
+            else { assert.strictEqual(first.requests.length, before, 'A terminal request must not be polled again.'); }
+            assert.strictEqual(tracked.error, 'JENKINS_RESULTS_INCOMPLETE');
             assert.strictEqual(tracked.runs[0].error, undefined);
             assert.strictEqual(tracked.runs[0].result, 'SUCCESS');
             assert.strictEqual(tracked.runs[0].reportErrors?.tests, 'FORBIDDEN');
             assert.strictEqual(aggregate(tracked).rootStatus, 'passed');
             assert.strictEqual(aggregate(tracked).allPassed, false);
-            assert.strictEqual(tracked.settledAt, undefined);
+            assert.ok(tracked.settledAt);
             await client.verify();
         }
         assert.strictEqual(first.requests.filter(entry => entry.pathname.endsWith('/testReport/api/json')).length, 1);
@@ -378,8 +380,11 @@ suite('Jenkins request tracking over HTTP', function () {
         first.reply('job/root/42/testReport/api/json', { passCount: 2, failCount: 0, skipCount: 0 });
         now += 60001;
         await pollJenkinsRequest(tracked, settings);
-        assert.strictEqual(tracked.runs[0].reportErrors, undefined);
-        assert.strictEqual(aggregate(tracked).allPassed, true);
+        assert.strictEqual(tracked.runs[0].reportErrors?.tests, 'FORBIDDEN');
+        assert.strictEqual(aggregate(tracked).allPassed, false);
+        const explicit = request(root.url);
+        await pollJenkinsRequest(explicit, settings);
+        assert.strictEqual(aggregate(explicit).allPassed, true);
         assert.ok(tracked.settledAt);
         assert.ok(!JSON.stringify(tracked).includes('never-display'));
     });
