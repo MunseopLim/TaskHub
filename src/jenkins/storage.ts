@@ -1,6 +1,6 @@
 import type * as vscode from 'vscode';
 import { createHash } from 'crypto';
-import { JenkinsJobProfile, JenkinsRequest, JenkinsServer, TrackedJenkinsBuild, jenkinsLimits } from './types';
+import { JenkinsJobProfile, JenkinsRequest, JenkinsServer, JenkinsShaJob, TrackedJenkinsBuild, jenkinsLimits } from './types';
 import { sanitizeJenkinsGitRemote } from './git';
 
 export const JENKINS_SERVERS_KEY = 'taskhub.jenkins.servers.v1';
@@ -11,10 +11,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isShaJobs(value: unknown): value is JenkinsShaJob[] {
+    return Array.isArray(value) && value.length > 0 && value.length <= jenkinsLimits.maxSelectedJobs
+        && value.every(job => isRecord(job) && ['serverId', 'jobUrl', 'name'].every(key => typeof job[key] === 'string' && (job[key] as string).length <= 4096)
+            && ['shaParameter', 'buildUrl', 'error'].every(key => job[key] === undefined || typeof job[key] === 'string')
+            && (job.afterBuild === undefined || (Number.isSafeInteger(job.afterBuild) && (job.afterBuild as number) >= 0)))
+        && value.every(job => job.finalizedAt === undefined || Number.isFinite(job.finalizedAt))
+        && new Set(value.map(job => `${job.serverId}\n${job.jobUrl}`)).size === value.length;
+}
+
+function copyShaJobs(jobs: JenkinsShaJob[]): JenkinsShaJob[] {
+    return jobs.map(job => ({ serverId: job.serverId, jobUrl: job.jobUrl, name: job.name, shaParameter: job.shaParameter,
+        afterBuild: job.afterBuild, buildUrl: job.buildUrl, error: job.error, finalizedAt: job.finalizedAt }));
+}
+
 function isRun(value: unknown): value is TrackedJenkinsBuild {
     return isRecord(value) && ['serverId', 'jobUrl', 'url'].every(key => typeof value[key] === 'string')
         && Number.isSafeInteger(value.number) && (value.number as number) > 0 && typeof value.building === 'boolean'
         && (value.result === null || typeof value.result === 'string')
+        && (value.finalizedAt === undefined || Number.isFinite(value.finalizedAt))
+        && (value.coreCompletedAt === undefined || Number.isFinite(value.coreCompletedAt))
         && ['actualSha', 'error', 'correlation', 'fullDisplayName'].every(key => value[key] === undefined || typeof value[key] === 'string')
         && (value.reportErrors === undefined || (isRecord(value.reportErrors)
             && ['stages', 'tests'].every(key => (value.reportErrors as Record<string, unknown>)[key] === undefined || typeof (value.reportErrors as Record<string, unknown>)[key] === 'string')))
@@ -40,12 +56,15 @@ function persistableRequest(request: JenkinsRequest): JenkinsRequest {
         requestIdParameter: request.requestIdParameter, shaParameter: request.shaParameter,
         submission: request.submission, queueReason: request.queueReason, error: request.error, stopped: request.stopped,
         settledAt: request.settledAt,
+        deadlineAt: request.deadlineAt, nextPollAt: request.nextPollAt, outcome: request.outcome,
+        shaTracking: request.shaTracking ? { jobs: copyShaJobs(request.shaTracking.jobs), cursor: request.shaTracking.cursor, readOnly: request.shaTracking.readOnly } : undefined,
         notified: Object.fromEntries(Object.entries(request.notified).filter(([, value]) => typeof value === 'boolean')),
         runs: request.runs.map(run => ({
             serverId: run.serverId, jobUrl: run.jobUrl, url: run.url, number: run.number,
             fullDisplayName: run.fullDisplayName, building: run.building, result: run.result,
             timestamp: run.timestamp, duration: run.duration, queueId: run.queueId,
             correlation: run.correlation, actualSha: run.actualSha, error: run.error,
+            finalizedAt: run.finalizedAt, coreCompletedAt: run.coreCompletedAt,
             reportErrors: run.reportErrors ? { stages: run.reportErrors.stages, tests: run.reportErrors.tests } : undefined,
             stages: run.stages ? {
                 status: run.stages.status, detailsTruncated: run.stages.detailsTruncated,
@@ -60,7 +79,8 @@ function persistableRequest(request: JenkinsRequest): JenkinsRequest {
 }
 
 function isProfile(value: unknown): value is JenkinsJobProfile {
-    return isRecord(value) && typeof value.serverId === 'string' && typeof value.jobUrl === 'string';
+    return isRecord(value) && typeof value.serverId === 'string' && typeof value.jobUrl === 'string'
+        && (value.testJobs === undefined || isShaJobs(value.testJobs));
 }
 
 export function jenkinsSecretKey(server: JenkinsServer): string {
@@ -101,20 +121,29 @@ export class JenkinsStore {
 
     token(server: JenkinsServer): Thenable<string | undefined> { return this.context.secrets.get(jenkinsSecretKey(server)); }
 
-    requests(): JenkinsRequest[] {
+    requests(legacyTimeoutHours = 24): JenkinsRequest[] {
         const value = this.context.workspaceState.get<unknown>(JENKINS_REQUESTS_KEY, []);
         if (!Array.isArray(value)) { return []; }
         const restored = value.slice(0, 520).filter((r): r is JenkinsRequest => isRecord(r) && typeof r.id === 'string' && typeof r.branch === 'string'
             && typeof r.sha === 'string' && typeof r.repoPath === 'string' && Number.isFinite(r.createdAt)
             && isRecord(r.root) && typeof r.root.serverId === 'string' && typeof r.root.jobUrl === 'string'
             && Array.isArray(r.runs) && r.runs.length <= jenkinsLimits.maxRunsPerRequest && r.runs.every(isRun) && isRecord(r.discovery)
-            && typeof r.discovery.complete === 'boolean' && isRecord(r.notified)).map(persistableRequest);
+            && typeof r.discovery.complete === 'boolean' && isRecord(r.notified)
+            && (r.deadlineAt === undefined || Number.isFinite(r.deadlineAt))
+            && (r.nextPollAt === undefined || Number.isFinite(r.nextPollAt))
+            && (r.shaTracking === undefined || (isRecord(r.shaTracking) && isShaJobs(r.shaTracking.jobs)
+                && Number.isSafeInteger(r.shaTracking.cursor) && (r.shaTracking.cursor as number) >= 0 && typeof r.shaTracking.readOnly === 'boolean'))).map(persistableRequest);
         let runs = 0;
         let active = 0;
         for (const request of restored) {
+            // Old releases had a 24-hour default. Preserve explicit user settings and
+            // freeze the migrated deadline so future setting changes cannot extend it.
+            request.deadlineAt ??= request.createdAt + Math.max(1, Math.min(168,
+                Number.isFinite(legacyTimeoutHours) ? legacyTimeoutHours : 24)) * 3600000;
             if (!request.root.queueUrl && !request.root.buildUrl
                 && (request.submission === 'sending' || request.error === 'JENKINS_SUBMITTING')) {
-                request.submission = 'unconfirmed'; request.stopped = true;
+                request.submission = 'unconfirmed';
+                if (!request.shaTracking || request.shaTracking.jobs.some(job => job.afterBuild === undefined)) { request.stopped = true; }
                 request.error = 'JENKINS_SUBMISSION_UNCONFIRMED'; request.discovery.complete = false;
                 delete request.settledAt;
             }
@@ -161,6 +190,7 @@ export class JenkinsStore {
             if (bytes <= jenkinsLimits.maxStoredBytes) { break; }
             const before = sizes.get(request)!;
             request.runs = []; request.stopped = true; delete request.settledAt;
+            request.shaTracking = undefined;
             request.discovery = { complete: false }; request.error = 'JENKINS_STORAGE_LIMIT';
             bytes += size(request) - before;
         }
@@ -181,6 +211,7 @@ export class JenkinsStore {
         const safe = {
             serverId: profile.serverId, jobUrl: profile.jobUrl, branchParameter: profile.branchParameter,
             shaParameter: profile.shaParameter, requestIdParameter: profile.requestIdParameter,
+            testJobs: profile.testJobs ? copyShaJobs(profile.testJobs).map(job => ({ serverId: job.serverId, jobUrl: job.jobUrl, name: job.name, shaParameter: job.shaParameter })) : undefined,
         };
         await this.context.workspaceState.update(PROFILES_KEY, [...profiles.filter(p => p.serverId !== profile.serverId || p.jobUrl !== profile.jobUrl), safe].slice(-100));
     }

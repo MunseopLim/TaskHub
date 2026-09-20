@@ -1,6 +1,7 @@
 export const jenkinsLimits = {
     maxServers: 32, maxActiveRequests: 20, maxRunsPerRequest: 1001, maxRetainedRuns: 2000,
     requestDeadlineMs: 30000, maxCandidates: 2000, maxStoredBytes: 8 * 1024 * 1024,
+    trackingTimeoutMs: 2 * 60 * 60 * 1000, pollIntervalMs: 10 * 60 * 1000, pollHttpBudget: 60, maxSelectedJobs: 100,
 } as const;
 
 export interface JenkinsServer {
@@ -96,7 +97,9 @@ export interface JenkinsTestReport {
 export interface TrackedJenkinsBuild extends JenkinsBuild {
     serverId: string;
     jobUrl: string;
-    correlation?: 'root' | 'upstream' | 'requestId' | 'manifest';
+    correlation?: 'root' | 'upstream' | 'requestId' | 'manifest' | 'sha';
+    finalizedAt?: number;
+    coreCompletedAt?: number;
     actualSha?: string;
     error?: string;
     reportErrors?: { stages?: string; tests?: string };
@@ -122,7 +125,23 @@ export interface JenkinsRequest {
     error?: string;
     stopped?: boolean;
     settledAt?: number;
+    deadlineAt?: number;
+    nextPollAt?: number;
+    outcome?: 'complete' | 'incomplete' | 'timeout';
+    shaTracking?: { jobs: JenkinsShaJob[]; cursor: number; readOnly: boolean };
     notified: Record<string, boolean>;
+}
+
+/** Frozen expected scope. A bound build URL is never replaced by a newer execution. */
+export interface JenkinsShaJob {
+    serverId: string;
+    jobUrl: string;
+    name: string;
+    shaParameter?: string;
+    afterBuild?: number;
+    finalizedAt?: number;
+    buildUrl?: string;
+    error?: string;
 }
 
 export interface JenkinsJobProfile {
@@ -131,4 +150,5 @@ export interface JenkinsJobProfile {
     branchParameter?: string;
     shaParameter?: string;
     requestIdParameter?: string;
+    testJobs?: JenkinsShaJob[];
 }
