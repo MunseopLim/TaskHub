@@ -23,8 +23,8 @@ export function discoveryLabel(request: JenkinsRequest): string {
 function requestStatus(request: JenkinsRequest): string {
     const summary = aggregate(request);
     if (request.submission === 'sending') { return 'sending'; }
-    if (request.outcome === 'timeout') { return 'timedout'; }
     if (summary.observedResult === 'failed') { return 'failed'; }
+    if (request.outcome === 'timeout') { return 'timedout'; }
     if (request.stopped) { return summary.observedResult === 'passed' ? 'observedPassed' : 'stopped'; }
     if (request.outcome === 'incomplete') { return 'incomplete'; }
     if (request.submission === 'unconfirmed') { return 'unconfirmed'; }
@@ -41,10 +41,10 @@ function requestStatus(request: JenkinsRequest): string {
 function statusIcon(status: string): vscode.ThemeIcon {
     const icons: Record<string, [string, string]> = {
         partial: ['warning', 'list.warningForeground'],
-        timedout: ['error', 'testing.iconFailed'], incomplete: ['warning', 'list.warningForeground'],
-        observedPassed: ['circle-large-outline', 'list.warningForeground'],
+        timedout: ['watch', 'list.warningForeground'], incomplete: ['warning', 'list.warningForeground'],
+        observedPassed: ['pass-filled', 'list.warningForeground'],
         passed: ['pass', 'testing.iconPassed'], failed: ['error', 'testing.iconFailed'],
-        sha_mismatch: ['error', 'list.warningForeground'], unreachable: ['debug-disconnect', 'list.errorForeground'],
+        sha_mismatch: ['git-compare', 'list.warningForeground'], unreachable: ['debug-disconnect', 'list.errorForeground'],
         running: ['sync~spin', 'progressBar.background'], sending: ['cloud-upload', 'progressBar.background'],
         queued: ['clock', 'descriptionForeground'], aborted: ['circle-slash', 'testing.iconFailed'],
         skipped: ['debug-step-over', 'descriptionForeground'], stopped: ['debug-pause', 'descriptionForeground'],
@@ -63,7 +63,13 @@ export class JenkinsViewProvider implements vscode.TreeDataProvider<JenkinsTreeN
     getTreeItem(node: JenkinsTreeNode): vscode.TreeItem {
         const item = new vscode.TreeItem(node.label, node.kind === 'detail' ? vscode.TreeItemCollapsibleState.None : vscode.TreeItemCollapsibleState.Collapsed);
         item.description = node.description;
-        item.contextValue = node.kind === 'request' ? 'jenkinsRequest' : node.kind === 'build' ? 'jenkinsBuild' : 'jenkinsDetail';
+        item.contextValue = node.kind === 'request'
+            ? !node.request?.stopped && !node.request?.settledAt ? 'jenkinsRequestActive' : 'jenkinsRequest'
+            : node.kind === 'build' ? 'jenkinsBuild' : 'jenkinsDetail';
+        if (node.kind === 'sha' && node.requests?.length) {
+            const latest = node.requests.reduce((a, b) => a.createdAt >= b.createdAt ? a : b);
+            item.iconPath = statusIcon(requestStatus(latest));
+        }
         if (node.kind === 'request' || node.kind === 'build') {
             const status = node.run ? normalizeRunStatus(node.run, node.request?.sha) : node.request ? requestStatus(node.request) : 'unknown';
             item.iconPath = statusIcon(node.run?.reportErrors && status === 'passed' ? 'partial' : status);
@@ -84,14 +90,17 @@ export class JenkinsViewProvider implements vscode.TreeDataProvider<JenkinsTreeN
         if (node.kind === 'branch') {
             const shas = new Map<string, JenkinsRequest[]>();
             for (const request of node.requests ?? []) { shas.set(request.sha, [...(shas.get(request.sha) ?? []), request]); }
-            return [...shas].map(([sha, requests]) => ({ kind: 'sha', label: sha.slice(0, 12), description: t(`${requests.length}회 요청`, `${requests.length} requests`), requests }));
+            return [...shas].map(([sha, requests]) => {
+                const latest = requests.reduce((a, b) => a.createdAt >= b.createdAt ? a : b);
+                return { kind: 'sha', label: sha.slice(0, 12), description: `${jenkinsStatusLabel(requestStatus(latest))} · ${t(`${requests.length}회 관측`, `${requests.length} observations`)}`, requests };
+            });
         }
         if (node.kind === 'sha') {
             return (node.requests ?? []).map(request => {
                 const summary = aggregate(request);
                 const overall = jenkinsStatusLabel(requestStatus(request));
                 return { kind: 'request', label: `${overall} · ${new Date(request.createdAt).toLocaleString()} · ${request.id.slice(0, 8)}`, request,
-                    description: `${overall} · ${summary.counts.passed}/${summary.counts.total} · ${discoveryLabel(request)}` };
+                    description: `${summary.counts.passed}/${summary.counts.total} · ${discoveryLabel(request)}${request.outcome === 'timeout' ? ' · ' + jenkinsStatusLabel('timedout') : ''}` };
             });
         }
         if (node.kind === 'request' && node.request) {
@@ -115,7 +124,7 @@ export class JenkinsViewProvider implements vscode.TreeDataProvider<JenkinsTreeN
             }
             if (request.error) { details.push({ kind: 'detail', label: jenkinsErrorLabel(request.error) }); }
             if (request.submission === 'sending') { details.push({ kind: 'detail', label: jenkinsStatusLabel('sending') }); }
-            if (!request.shaTracking?.readOnly && !request.root.buildUrl && request.submission !== 'sending') { details.push({ kind: 'detail', label: request.queueReason ?? t('Jenkins 대기열 확인 중', 'Checking Jenkins queue') }); }
+            if (!request.stopped && !request.settledAt && !request.shaTracking?.readOnly && !request.root.buildUrl && request.submission !== 'sending') { details.push({ kind: 'detail', label: request.queueReason ?? t('Jenkins 대기열 확인 중', 'Checking Jenkins queue') }); }
             return [...details, ...request.runs.map(run => ({ kind: 'build' as const, request, run,
                 label: `${jenkinsStatusLabel(normalizeRunStatus(run, request.sha))}${run.reportErrors ? ' · ' + jenkinsStatusLabel('partial') : ''} · ${this.servers().find(server => server.id === run.serverId)?.name ?? run.serverId} · ${run.fullDisplayName ?? `#${run.number}`}`,
                 description: `${run.correlation === 'root' ? t('대표 결과', 'Representative result') + ' · ' : ''}${jenkinsStatusLabel(normalizeRunStatus(run, request.sha))}` }))];

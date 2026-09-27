@@ -2792,7 +2792,8 @@ export function withTaskTimeout<T>(
             const remaining = durationMs - (performance.now() - startedAt);
             if (remaining > 0) {
                 // Node clamps overflowing delays to 1ms. Long timeouts use
-                // bounded timers and a monotonic clock, including after sleep.
+                // bounded timers and a monotonic clock. System sleep may pause
+                // this clock on some platforms, just as with the original timer.
                 timer = setTimeout(checkDeadline, Math.min(remaining, 0x7fffffff));
                 return;
             }

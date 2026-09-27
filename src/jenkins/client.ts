@@ -47,10 +47,17 @@ const errorMessages: Record<string, string> = {
 
 /** Only fixed descriptions and HTTP status are exposed; never server bodies or credentials. */
 export class JenkinsClientError extends Error {
-    constructor(public readonly code: string, public readonly status?: number, public readonly retryAfterMs?: number) {
+    constructor(public readonly code: string, public readonly status?: number, public readonly retryAfterMs?: number,
+        public readonly deferred = false) {
         super(`${errorMessages[code] ?? 'Jenkins request failed.'}${status === undefined ? '' : ` (HTTP ${status})`}`);
         this.name = 'JenkinsClientError';
     }
+}
+
+/** No report was attempted: keep its slot open for a later observation round. */
+export function isDeferredJenkinsError(error: unknown): boolean {
+    return error instanceof JenkinsClientError && (error.deferred
+        || ['REQUEST_LIMIT', 'CANCELLED', 'BACKOFF', 'BUSY', 'PERMISSION_LIMIT'].includes(error.code));
 }
 
 /** The configured URL is the only origin and context path allowed to receive credentials. */
@@ -198,10 +205,10 @@ export class JenkinsTransportGuard {
     private check(server: string, resource: string): void {
         const failure = this.failures.get(server);
         if (failure && failure.until > this.now()) {
-            throw new JenkinsClientError(failure.authentication ? 'AUTH_REQUIRED' : 'BACKOFF', failure.authentication ? 401 : undefined);
+            throw new JenkinsClientError(failure.authentication ? 'AUTH_REQUIRED' : 'BACKOFF', failure.authentication ? 401 : undefined, undefined, true);
         }
         const permission = this.permissions.get(resource);
-        if (permission && permission.until > this.now()) { throw new JenkinsClientError('FORBIDDEN', 403); }
+        if (permission && permission.until > this.now()) { throw new JenkinsClientError('FORBIDDEN', 403, undefined, true); }
         if ((this.permissionOverflow.get(server) ?? 0) > this.now()) { throw new JenkinsClientError('PERMISSION_LIMIT'); }
     }
     private acquire(server: string, signal: AbortSignal, resource: string): Promise<() => void> {
@@ -681,32 +688,29 @@ export class JenkinsClient {
     }
 
     private async request(input: URL, method = 'GET', body?: Buffer, allowPrefix = false): Promise<HttpResponse> {
-        if (this.budget) {
-            if (this.budget.remaining <= 0) { throw new JenkinsClientError('REQUEST_LIMIT'); }
-            this.budget.remaining--;
-        }
         const operation = new AbortController();
         const cancel = (): void => operation.abort();
         this.signal?.addEventListener('abort', cancel, { once: true });
         if (this.signal?.aborted) { cancel(); }
         let timedOut = false;
+        let dispatched = false;
         const timer = setTimeout(() => { timedOut = true; operation.abort(); }, this.timeoutMs);
         const signal = operation.signal;
         const run = async (): Promise<HttpResponse> => {
             try {
                 const ca = await abortable(this.certificate(), signal);
-                return await this.sendRequest(input, method, body, ca, signal, allowPrefix);
-            } catch (error) { if (timedOut) { throw new JenkinsClientError('TIMEOUT'); } throw error; }
+                return await this.sendRequest(input, method, body, ca, signal, allowPrefix, () => { dispatched = true; });
+            } catch (error) { if (timedOut) { throw new JenkinsClientError('TIMEOUT', undefined, undefined, !dispatched); } throw error; }
         };
         try {
             return await (this.guard ? this.guard.run(this.baseUrl.href, signal, run, `${method} ${input.origin}${input.pathname}`) : run());
         } catch (error) {
-            if (timedOut) { throw new JenkinsClientError('TIMEOUT'); }
+            if (timedOut) { throw new JenkinsClientError('TIMEOUT', undefined, undefined, !dispatched); }
             throw error;
         } finally { clearTimeout(timer); this.signal?.removeEventListener('abort', cancel); }
     }
 
-    private sendRequest(input: URL, method: string, body: Buffer | undefined, ca: Array<string | Buffer> | undefined, signal: AbortSignal, allowPrefix: boolean): Promise<HttpResponse> {
+    private sendRequest(input: URL, method: string, body: Buffer | undefined, ca: Array<string | Buffer> | undefined, signal: AbortSignal, allowPrefix: boolean, onDispatch: () => void): Promise<HttpResponse> {
         const url = scopedJenkinsUrl(this.baseUrl, input.href);
         return new Promise((resolve, reject) => {
             let settled = false;
@@ -746,6 +750,13 @@ export class JenkinsClient {
             };
             try {
                 const transport = url.protocol === 'https:' ? https : http;
+                // Charge only after cancellation, guard and CA checks, directly before
+                // dispatch. This synchronous check also bounds concurrent callers.
+                if (this.budget) {
+                    if (this.budget.remaining <= 0) { fail(new JenkinsClientError('REQUEST_LIMIT')); return; }
+                    this.budget.remaining--;
+                }
+                onDispatch();
                 request = transport.request(url, options, response => {
                     const status = response.statusCode ?? 0;
                     if (status < 200 || status >= 300) {

@@ -239,7 +239,7 @@ suite('Jenkins request tracking over HTTP', function () {
     });
 
     test('IT-232: 같은 브랜치·SHA·빌드 번호도 정확한 upstream 또는 요청 ID 없이는 연결하지 않는다', async () => {
-        const root = first.build('root', 42);
+        const root = first.build('root', 42, { building: true, result: null });
         const matching = first.build('child', 7, { actions: [{ causes: [{ upstreamUrl: 'job/root/', upstreamBuild: 42 }] }] });
         const wrongParent = first.build('child', 8, { actions: [{ causes: [{ upstreamUrl: 'job/root/', upstreamBuild: 41 }] }] });
         const sameSha = first.build('child', 9, { actions: [{ parameters: [
@@ -254,6 +254,7 @@ suite('Jenkins request tracking over HTTP', function () {
         assert.deepStrictEqual(tracked.runs.map(run => run.url).sort(), [root.url, matching.url].sort());
         assert.strictEqual(tracked.runs.find(run => run.url === matching.url)?.correlation, 'upstream');
 
+        first.build('root', 42);
         tracked.requestIdParameter = 'REQUEST_ID';
         await pollJenkinsRequest(tracked, options());
         assert.deepStrictEqual(tracked.runs.map(run => run.url).sort(), [root.url, matching.url, explicitId.url].sort());

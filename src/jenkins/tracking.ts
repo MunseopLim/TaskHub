@@ -1,4 +1,4 @@
-import { JenkinsClient, JenkinsClientError, normalizeJenkinsServerUrl, scopedJenkinsUrl } from './client';
+import { isDeferredJenkinsError, JenkinsClient, JenkinsClientError, normalizeJenkinsServerUrl, scopedJenkinsUrl } from './client';
 import { JenkinsInventory, JenkinsInventoryResult } from './inventory';
 import { aggregate, buildKey, discoverMatchingBuilds, extractActualSha, isTerminalJenkinsBuild, normalizeRunStatus } from './model';
 import { JenkinsRequest, JenkinsServer, TrackedJenkinsBuild, jenkinsLimits } from './types';
@@ -129,24 +129,40 @@ export async function pollJenkinsRequest(request: JenkinsRequest, options: Track
         if (options.signal?.aborted || request.stopped) { throw new JenkinsClientError('CANCELLED'); }
         if (run.finalizedAt) { return run; }
         if (run.correlation !== 'root' && !run.error && !run.reportErrors && !run.building && ['passed', 'failed', 'aborted', 'skipped', 'sha_mismatch'].includes(normalizeRunStatus(run, request.sha))
-            && run.tests !== undefined && run.stages !== undefined) { return run; }
+            && run.tests !== undefined && run.stages !== undefined) { run.finalizedAt = Date.now(); return run; }
         const server = options.servers.find(item => item.id === run.serverId);
         if (!server) { return { ...run, error: 'JENKINS_SERVER_REMOVED' }; }
         try {
             const client = await clientFor(server);
-            const build = await client.getBuild(run.url);
+            const build = run.coreCompletedAt ? run : await client.getBuild(run.url);
             const result: TrackedJenkinsBuild = { ...run, ...build, serverId: run.serverId, jobUrl: run.jobUrl,
-                correlation: run.correlation, actualSha: extractActualSha(build, request.repoRemote), error: undefined,
+                correlation: run.correlation, actualSha: run.coreCompletedAt ? run.actualSha : extractActualSha(build, request.repoRemote), error: undefined,
+                reportErrors: run.reportErrors ? { ...run.reportErrors } : undefined,
                 actions: undefined, artifacts: run.correlation === 'root' ? build.artifacts : undefined };
-            if (isTerminalJenkinsBuild(build)) { result.finalizedAt = Date.now(); }
-            const [stages, tests] = await Promise.allSettled([client.getStages(run.url), client.getTestReport(run.url)]);
-            delete result.reportErrors;
-            if (stages.status === 'fulfilled') { result.stages = stages.value; }
-            else { delete result.stages; result.reportErrors = { stages: safeJenkinsError(stages.reason) }; }
-            if (tests.status === 'fulfilled') { result.tests = tests.value; }
-            else { delete result.tests; result.reportErrors = { ...result.reportErrors, tests: safeJenkinsError(tests.reason) }; }
+            if (isTerminalJenkinsBuild(build)) { result.coreCompletedAt ??= Date.now(); }
+            const [stages, tests] = await Promise.allSettled([
+                run.coreCompletedAt && (run.stages !== undefined || run.reportErrors?.stages) ? run.stages : client.getStages(run.url),
+                run.coreCompletedAt && (run.tests !== undefined || run.reportErrors?.tests) ? run.tests : client.getTestReport(run.url),
+            ]);
+            if (stages.status === 'fulfilled') {
+                result.stages = stages.value;
+                if (stages.value !== undefined && result.reportErrors) { delete result.reportErrors.stages; }
+            } else {
+                delete result.stages;
+                if (!isDeferredJenkinsError(stages.reason)) { result.reportErrors = { ...result.reportErrors, stages: safeJenkinsError(stages.reason) }; }
+            }
+            if (tests.status === 'fulfilled') {
+                result.tests = tests.value;
+                if (tests.value !== undefined && result.reportErrors) { delete result.reportErrors.tests; }
+            } else {
+                delete result.tests;
+                if (!isDeferredJenkinsError(tests.reason)) { result.reportErrors = { ...result.reportErrors, tests: safeJenkinsError(tests.reason) }; }
+            }
+            if (result.reportErrors && Object.keys(result.reportErrors).length === 0) { delete result.reportErrors; }
+            if (result.coreCompletedAt && (result.stages !== undefined || result.reportErrors?.stages)
+                && (result.tests !== undefined || result.reportErrors?.tests)) { result.finalizedAt = Date.now(); }
             return result;
-        } catch (error) { return { ...run, error: safeJenkinsError(error) }; }
+        } catch (error) { return isDeferredJenkinsError(error) && run.coreCompletedAt ? run : { ...run, error: safeJenkinsError(error) }; }
     };
     await mapConcurrent(request.runs.map((run, index) => ({ run, index })), async ({ run, index }) => {
         request.runs[index] = await refresh(run);
@@ -208,9 +224,11 @@ export async function pollJenkinsRequest(request: JenkinsRequest, options: Track
         request.discovery = { complete: false, checkedAt: Date.now(), message: inventory.failures.length > 0 ? 'discoveryPartial' : inventory.limited ? 'discoveryLimited' : inventory.continuing ? 'discoveryInProgress' : 'discoveryBounded' };
     }
     if (options.signal?.aborted || request.stopped) { throw new JenkinsClientError('CANCELLED'); }
+    if (request.deadlineAt && expireJenkinsRequest(request)) { return; }
     const summary = aggregate(request);
-    if (summary.phase === 'complete' && request.runs.length > 0 && request.runs.every(run =>
-        ['passed', 'failed', 'aborted', 'skipped', 'sha_mismatch'].includes(normalizeRunStatus(run, request.sha)))) {
+    const boundedObservationComplete = request.discovery.message === 'discoveryBounded';
+    if ((summary.phase === 'complete' || boundedObservationComplete) && request.runs.length > 0 && request.runs.every(run =>
+        run.finalizedAt && ['passed', 'failed', 'aborted', 'skipped', 'sha_mismatch'].includes(normalizeRunStatus(run, request.sha)))) {
         request.settledAt = Date.now();
         request.outcome = request.runs.some(run => run.reportErrors) ? 'incomplete' : 'complete';
         if (request.outcome === 'incomplete') { request.error = 'JENKINS_RESULTS_INCOMPLETE'; }

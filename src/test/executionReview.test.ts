@@ -12,6 +12,7 @@ import { HistoryProvider } from '../providers/historyProvider';
 import { actionStates } from '../providers/actionStatus';
 import { buildBuiltinVariableContext } from '../builtinVariables';
 import { ActionRunLogCollector } from '../runLogStore';
+import { TaskScheduler } from '../pipelineUtils';
 
 suite('실행 경계 회귀', function () {
     this.timeout(15000);
@@ -109,6 +110,44 @@ suite('실행 경계 회귀', function () {
             }
         });
     }
+
+    test('예기치 않은 스케줄러 예외는 실행 중인 형제 프로세스를 중단하고 종료까지 기다린다', async () => {
+        const originalDialog = vscode.window.showOpenDialog;
+        const originalComplete = TaskScheduler.prototype.markCompleted;
+        const marker = new Error('unexpected scheduler failure');
+        const pidFile = path.join(workspace, 'child.pid');
+        const script = path.join(workspace, 'child.cjs');
+        fs.writeFileSync(script, "require('fs').writeFileSync('child.pid', String(process.pid)); setInterval(() => {}, 1000);");
+        let release!: (uris: vscode.Uri[]) => void;
+        const dialog = new Promise<vscode.Uri[]>(resolve => { release = resolve; });
+        vscode.window.showOpenDialog = () => dialog;
+        TaskScheduler.prototype.markCompleted = function (id) {
+            if (id === 'scheduler-error') { throw marker; }
+            originalComplete.call(this, id);
+        };
+        let childPid: number | undefined;
+        const execution = run({ description: '', tasks: [
+            { id: 'sibling', type: 'command', command: 'node', args: [script], parallel: true, passTheResultToNextTask: true, timeoutSeconds: 10 },
+            { id: 'scheduler-error', type: 'fileDialog', parallel: true },
+        ] }, { abortDrainTimeoutMs: 2000 }).then(() => undefined, error => error);
+        try {
+            const deadline = Date.now() + 5000;
+            while (!fs.existsSync(pidFile) && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+            assert.ok(fs.existsSync(pidFile), 'The sibling must be running before injecting the scheduler exception.');
+            childPid = Number(fs.readFileSync(pidFile, 'utf8'));
+            assert.ok(childPid > 0);
+            process.kill(childPid, 0);
+            release([vscode.Uri.file(script)]);
+            assert.strictEqual(await execution, marker);
+            assert.throws(() => process.kill(childPid!, 0), 'Pipeline rejection must wait for the owned child to exit.');
+        } finally {
+            release([]);
+            if (childPid) { try { process.kill(childPid, 'SIGKILL'); } catch { /* Already drained. */ } }
+            await execution;
+            vscode.window.showOpenDialog = originalDialog;
+            TaskScheduler.prototype.markCompleted = originalComplete;
+        }
+    });
 
     test('Stop을 두 번 눌러도 History는 cancelled이고 실패 알림이 없다', async () => {
         const originalDialog = vscode.window.showOpenDialog;

@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.36",
+  "version": "0.8.37",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -1175,7 +1175,7 @@
         },
         {
           "command": "taskhub.jenkins.stopTracking",
-          "when": "view == mainView.jenkins && viewItem == jenkinsRequest && config.taskhub.experimental.jenkins.enabled",
+          "when": "view == mainView.jenkins && viewItem == jenkinsRequestActive && config.taskhub.experimental.jenkins.enabled",
           "group": "context@9"
         },
         {
@@ -1330,12 +1330,12 @@
         },
         {
           "command": "taskhub.jenkins.trackSha",
-          "when": "view == mainView.jenkins && viewItem == jenkinsRequest && config.taskhub.experimental.jenkins.enabled",
+          "when": "view == mainView.jenkins && viewItem =~ /^jenkinsRequest(Active)?$/ && config.taskhub.experimental.jenkins.enabled",
           "group": "context@7"
         },
         {
           "command": "taskhub.jenkins.clearResults",
-          "when": "view == mainView.jenkins && viewItem == jenkinsRequest && config.taskhub.experimental.jenkins.enabled",
+          "when": "view == mainView.jenkins && viewItem =~ /^jenkinsRequest(Active)?$/ && config.taskhub.experimental.jenkins.enabled",
           "group": "context@10"
         }
       ]

@@ -71,6 +71,27 @@ export interface JenkinsGitSnapshot {
     repoRemote?: string;
 }
 
+/** Read-only observations need local context, not a clean or remotely reachable HEAD. */
+export async function readJenkinsGitContext(cwd: string, signal?: AbortSignal): Promise<Pick<JenkinsGitSnapshot, 'repoPath' | 'branch' | 'sha' | 'repoRemote'>> {
+    const scope = createJenkinsScope([signal], 30000);
+    try {
+        const run = (directory: string, args: string[]): Promise<string> => git(directory, args, scope.signal);
+        let repoPath: string;
+        try { repoPath = await run(cwd, ['rev-parse', '--show-toplevel']); } catch { throw new JenkinsGitError('notRepository'); }
+        let branch = 'HEAD';
+        try { branch = await run(repoPath, ['symbolic-ref', '--short', 'HEAD']); } catch { /* Detached HEAD is valid for observation. */ }
+        let sha = '';
+        try { sha = await run(repoPath, ['rev-parse', '--verify', 'HEAD']); } catch { /* Allow entering a SHA in an unborn repository. */ }
+        let repoRemote: string | undefined;
+        try {
+            const remote = await run(repoPath, ['config', '--get', `branch.${branch}.remote`]);
+            if (remote !== '.') { repoRemote = sanitizeJenkinsGitRemote(await run(repoPath, ['remote', 'get-url', '--', remote])); }
+        } catch { /* An upstream is optional; never contact the remote for a GET-only observation. */ }
+        if (scope.signal.aborted) { throw new Error('GIT_CANCELLED'); }
+        return { repoPath, branch, sha, repoRemote };
+    } finally { scope.dispose(); }
+}
+
 /** Repository identity must never persist credentials or signed URL query parameters. */
 export function sanitizeJenkinsGitRemote(remote: string): string | undefined {
     const value = remote.trim();

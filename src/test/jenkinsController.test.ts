@@ -63,6 +63,72 @@ function iconId(item: vscode.TreeItem): string | undefined {
 }
 
 suite('Jenkins controller and results tree', () => {
+    for (const stage of ['persist', 'token'] as const) {
+        for (const action of ['stop', 'clear'] as const) {
+            test(`review regression: ${action} while awaiting pre-POST ${stage} prevents submission and resurrection`, async () => {
+                const state = memoryState(); state.values.set(JENKINS_SERVERS_KEY, [servers[0]]);
+                const snapshot = jenkinsGit.readJenkinsGitSnapshot;
+                const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox;
+                const info = vscode.window.showInformationMessage;
+                const list = JenkinsClient.prototype.listJobs; const get = JenkinsClient.prototype.getJob;
+                const recent = JenkinsClient.prototype.listRecentBuilds; const trigger = JenkinsClient.prototype.trigger;
+                const job: JenkinsJob = { name: 'test', fullName: 'test', url: `${servers[0].url}job/test/`, kind: 'job', buildable: true, parameters: [] };
+                let ready!: () => void; let release!: () => void;
+                const waiting = new Promise<void>(resolve => { ready = resolve; });
+                const gate = new Promise<void>(resolve => { release = resolve; });
+                let pause = false; let calls = 0;
+                const context = { globalState: state.memento, workspaceState: state.memento, subscriptions: [], secrets: {
+                    get: async () => { if (pause && stage === 'token') { ready(); await gate; } return 'fixture-token'; },
+                    onDidChange: () => new vscode.Disposable(() => {}),
+                } } as unknown as vscode.ExtensionContext;
+                let controller: JenkinsController | undefined;
+                let running: Promise<void> | undefined;
+                try {
+                    (jenkinsGit as { readJenkinsGitSnapshot: typeof snapshot }).readJenkinsGitSnapshot = async () => ({
+                        repoPath: vscode.workspace.workspaceFolders![0].uri.fsPath, branch: 'main', sha: requestedSha,
+                        remote: 'origin', remoteRef: 'refs/heads/main',
+                    });
+                    vscode.window.showQuickPick = (async (items: unknown, options?: vscode.QuickPickOptions) => {
+                        const values = await items as unknown[]; return options?.canPickMany ? values : values[0];
+                    }) as typeof pick;
+                    vscode.window.showInputBox = async () => '';
+                    vscode.window.showInformationMessage = (async (_message: string, _options: unknown, item?: string) => item) as typeof info;
+                    JenkinsClient.prototype.listJobs = async () => [job];
+                    JenkinsClient.prototype.getJob = async () => job;
+                    JenkinsClient.prototype.listRecentBuilds = async () => [];
+                    JenkinsClient.prototype.trigger = async () => { calls++; return { queueUrl: `${servers[0].url}queue/item/1/` }; };
+                    const update = state.memento.update;
+                    state.memento.update = async (key, value) => {
+                        await update(key, value);
+                        if (key === JENKINS_REQUESTS_KEY && !pause && (value as JenkinsRequest[])?.some(request => request.submission === 'sending')) {
+                            pause = true;
+                            if (stage === 'persist') { ready(); await gate; }
+                            else { (controller as unknown as { tokenCache: Map<string, unknown> }).tokenCache.clear(); }
+                        }
+                    };
+                    controller = new JenkinsController(context);
+                    running = controller.run();
+                    await waiting;
+                    const request = (controller as unknown as { requests: JenkinsRequest[] }).requests[0];
+                    const stopping = action === 'stop' ? controller.stopTracking({ kind: 'request', label: '', request })
+                        : controller.clearResults({ kind: 'request', label: '', request });
+                    await new Promise<void>(resolve => setImmediate(resolve));
+                    release();
+                    await Promise.all([running, stopping]);
+                    assert.strictEqual(calls, 0);
+                    const saved = state.values.get(JENKINS_REQUESTS_KEY) as JenkinsRequest[];
+                    if (action === 'clear') { assert.deepStrictEqual(saved, []); }
+                    else { assert.strictEqual(saved.length, 1); assert.strictEqual(saved[0].stopped, true); assert.notStrictEqual(saved[0].submission, 'sending'); }
+                } finally {
+                    release(); controller?.dispose(); await running;
+                    (jenkinsGit as { readJenkinsGitSnapshot: typeof snapshot }).readJenkinsGitSnapshot = snapshot;
+                    vscode.window.showQuickPick = pick; vscode.window.showInputBox = input; vscode.window.showInformationMessage = info;
+                    JenkinsClient.prototype.listJobs = list; JenkinsClient.prototype.getJob = get;
+                    JenkinsClient.prototype.listRecentBuilds = recent; JenkinsClient.prototype.trigger = trigger;
+                }
+            });
+        }
+    }
     test('IT-236: experimental gate registers real host commands and disposes them without changing global settings', async () => {
         const originalGetConfiguration = vscode.workspace.getConfiguration;
         const originalOnDidChangeConfiguration = vscode.workspace.onDidChangeConfiguration;
@@ -197,22 +263,22 @@ suite('Jenkins controller and results tree', () => {
 
             request.discovery.complete = true;
             node = requestNode(provider);
-            assert.ok(node.description?.startsWith('PASS'));
+            assert.ok(node.label.startsWith('PASS'));
             assert.strictEqual(iconId(provider.getTreeItem(node)), 'pass');
 
             request.runs[0].actualSha = otherSha;
             node = requestNode(provider);
-            assert.ok(!node.description?.startsWith('PASS'));
+            assert.ok(!node.label.startsWith('PASS'));
             assert.notStrictEqual(iconId(provider.getTreeItem(node)), 'pass');
             let build = provider.getChildren(node).find(child => child.kind === 'build')!;
             assert.ok(build.description?.includes('Checkout SHA mismatch'));
-            assert.strictEqual(iconId(provider.getTreeItem(build)), 'error');
+            assert.strictEqual(iconId(provider.getTreeItem(build)), 'git-compare');
             assert.ok(String(provider.getTreeItem(build).tooltip).includes(otherSha));
 
             request.runs[0].actualSha = requestedSha;
             request.runs[0].error = 'HTTP_403';
             node = requestNode(provider);
-            assert.ok(!node.description?.startsWith('PASS'));
+            assert.ok(!node.label.startsWith('PASS'));
             build = provider.getChildren(node).find(child => child.kind === 'build')!;
             assert.ok(build.description?.includes('Unavailable'));
             assert.notStrictEqual(iconId(provider.getTreeItem(build)), 'pass');
@@ -235,7 +301,7 @@ suite('Jenkins controller and results tree', () => {
         try {
             const node = requestNode(provider);
             const requestItem = provider.getTreeItem(node);
-            assert.strictEqual(requestItem.contextValue, 'jenkinsRequest');
+            assert.strictEqual(requestItem.contextValue, 'jenkinsRequestActive');
             assert.strictEqual(requestItem.command, undefined, 'Expanding a request must not open the browser.');
             assert.strictEqual(node.request, request);
 

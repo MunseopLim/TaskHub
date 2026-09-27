@@ -133,7 +133,7 @@ export function aggregate(request: JenkinsRequest): JenkinsAggregate {
     const statuses = runs.map(run => normalizeRunStatus(run, request.sha));
     const shaMismatches = runs.filter(run => hasShaMismatch(run, request.sha));
     const hasActive = !request.stopped && !request.settledAt && (missing > 0 || runs.some(run => run.building)
-        || Boolean(request.shaTracking && runs.some(run => run.coreCompletedAt && !run.finalizedAt))
+        || runs.some(run => run.coreCompletedAt && !run.finalizedAt)
         || statuses.some(status => status === 'queued' || status === 'running')
         || (!request.shaTracking && !request.root.buildUrl && roots.length === 0 && !request.error));
     const phase = hasActive ? 'active' : request.discovery.complete ? 'complete' : 'discovering';

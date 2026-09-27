@@ -1,4 +1,4 @@
-import { JenkinsClientError } from './client';
+import { isDeferredJenkinsError, JenkinsClientError } from './client';
 import { buildKey, extractActualSha, isTerminalJenkinsBuild } from './model';
 import type { TrackingOptions } from './tracking';
 import { JenkinsBuild, JenkinsRequest, JenkinsShaJob, jenkinsLimits } from './types';
@@ -21,11 +21,19 @@ function errorCode(error: unknown): string {
 export function matchesJenkinsSha(build: JenkinsBuild, request: JenkinsRequest, job: JenkinsShaJob): boolean {
     const actual = extractActualSha(build, request.repoRemote);
     if (actual) { return actual === request.sha.toLowerCase(); }
+    if (matchingCheckoutSha(build, request.sha)) { return true; }
     // An explicitly configured parameter can identify the tested firmware even when the
     // job only downloads an image. It is not presented as proof of a Git checkout.
     return Boolean(job.shaParameter && build.actions?.some(action => action.parameters?.some(parameter =>
         parameter.name === job.shaParameter && typeof parameter.value === 'string'
         && parameter.value.toLowerCase() === request.sha.toLowerCase())));
+}
+
+function matchingCheckoutSha(build: JenkinsBuild, sha: string): string | undefined {
+    // A full checkout hash is positive evidence even when SSH/HTTPS/Gerrit URLs
+    // differ. Remote identity is still used above to reject a known mismatch.
+    return build.actions?.some(action => (!action._class || action._class === 'hudson.plugins.git.util.BuildData')
+        && action.lastBuiltRevision?.SHA1?.toLowerCase() === sha.toLowerCase()) ? sha.toLowerCase() : undefined;
 }
 
 /** Only the frozen job scope is queried; no server-wide scan and no POST happen here. */
@@ -60,7 +68,7 @@ export async function pollJenkinsSha(request: JenkinsRequest, options: TrackingO
                                 request.root.buildUrl = queue.executable.url;
                             }
                         } catch (error) {
-                            if (['REQUEST_LIMIT', 'CANCELLED'].includes(errorCode(error))) { throw error; }
+                            if (isDeferredJenkinsError(error)) { throw error; }
                             // Queue expiry, credentials or a busy root never block other servers.
                             request.queueReason = undefined;
                         }
@@ -72,8 +80,9 @@ export async function pollJenkinsSha(request: JenkinsRequest, options: TrackingO
                     if (!scope.readOnly && job.afterBuild === undefined) { job.error = 'JENKINS_RESULTS_INCOMPLETE'; job.finalizedAt = Date.now(); continue; }
                     const recent = await read(`${server.id}\nrecent\n${job.jobUrl}`, () => client.listRecentBuilds(job.jobUrl, options.recentBuildLimit));
                     const queueId = root && !scope.readOnly ? /\/queue\/item\/(\d+)\/?$/.exec(request.root.queueUrl ?? '')?.[1] : undefined;
-                    const match = recent.filter(item => item.number > (job.afterBuild ?? 0) && matchesJenkinsSha(item, request, job)
-                        && (!queueId || item.queueId === Number(queueId))).sort((a, b) => b.number - a.number)[0];
+                    const match = recent.filter(item => item.number > (job.afterBuild ?? 0)
+                        && (queueId ? item.queueId === Number(queueId) : matchesJenkinsSha(item, request, job)))
+                        .sort((a, b) => b.number - a.number)[0];
                     if (!match) { delete job.error; continue; }
                     job.buildUrl = match.url;
                     build = match;
@@ -89,7 +98,7 @@ export async function pollJenkinsSha(request: JenkinsRequest, options: TrackingO
                     run = { ...build, serverId: server.id, jobUrl: job.jobUrl, correlation: root && !scope.readOnly ? 'root' : 'sha' };
                     request.runs.push(run);
                 }
-                Object.assign(run, build, { actualSha: extractActualSha(build, request.repoRemote), error: undefined });
+                Object.assign(run, build, { actualSha: extractActualSha(build, request.repoRemote) ?? matchingCheckoutSha(build, request.sha), error: undefined });
                 delete run.actions; delete run.artifacts; delete job.error;
                 if (!isTerminalJenkinsBuild(build)) { continue; }
                 // Freeze the terminal core immediately; deferred reports never refetch it.
@@ -104,18 +113,20 @@ export async function pollJenkinsSha(request: JenkinsRequest, options: TrackingO
                 } catch (error) {
                     // Local scheduling interruption is not a failed report. Actual HTTP
                     // errors are recorded once and are never retried automatically.
-                    if (options.signal?.aborted || ['REQUEST_LIMIT', 'CANCELLED'].includes(errorCode(error))) { throw error; }
+                    if (options.signal?.aborted || isDeferredJenkinsError(error)) { throw error; }
                     run.reportErrors = { ...run.reportErrors, [kind]: errorCode(error) };
                 }
             }
+            if (options.signal?.aborted || expireJenkinsRequest(request)) { return; }
             run.finalizedAt = Date.now();
             delete run.error;
             delete job.error;
         } catch (error) {
             const code = errorCode(error);
-            if (options.signal?.aborted || code === 'REQUEST_LIMIT' || code === 'CANCELLED') {
+            if (options.signal?.aborted || isDeferredJenkinsError(error)) {
                 retainCursor = code === 'REQUEST_LIMIT';
-                return;
+                if (options.signal?.aborted || code === 'REQUEST_LIMIT' || code === 'CANCELLED') { return; }
+                continue; // A guarded server must not block independent servers.
             }
             if (run?.coreCompletedAt) {
                 // Credential/client setup can fail before a deferred report starts.

@@ -3,7 +3,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { JenkinsGitError, readJenkinsGitSnapshot, sanitizeJenkinsGitRemote } from '../jenkins/git';
+import { JenkinsGitError, readJenkinsGitContext, readJenkinsGitSnapshot, sanitizeJenkinsGitRemote } from '../jenkins/git';
 
 suite('Jenkins Git remote identity', () => {
     test('removes URL credentials, query secrets and fragments before persistence', () => {
@@ -101,6 +101,23 @@ suite('Jenkins Git preflight with a local remote', function () {
         assert.strictEqual(snapshot.remote, 'origin');
         assert.strictEqual(snapshot.remoteRef, 'refs/heads/main');
         assert.strictEqual(snapshot.repoRemote, remote);
+    });
+
+    test('read-only observation accepts dirty, untracked, unpushed and upstream-free repositories without contacting the remote', async () => {
+        const sha = commit('int main(void) { return 1; }\n');
+        fs.writeFileSync(path.join(repository, 'untracked.txt'), 'local');
+        fs.appendFileSync(path.join(repository, 'firmware.c'), '// unsaved work\n');
+        // The remote does not exist: success proves no ls-remote preflight is attempted.
+        git('remote', 'set-url', 'origin', path.join(directory, 'missing-remote.git'));
+        const before = git('status', '--porcelain');
+        const value = await readJenkinsGitContext(repository);
+        assert.strictEqual(value.sha, sha); assert.strictEqual(value.branch, 'main');
+        git('branch', '--unset-upstream');
+        assert.strictEqual((await readJenkinsGitContext(repository)).sha, sha);
+        git('checkout', '--quiet', '--detach');
+        const detached = await readJenkinsGitContext(repository);
+        assert.strictEqual(detached.branch, 'HEAD'); assert.strictEqual(detached.sha, sha);
+        assert.strictEqual(git('status', '--porcelain'), before);
     });
 
     test('rejects a directory outside a Git repository', async () => {

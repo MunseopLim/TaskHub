@@ -20,6 +20,7 @@ coverage/
 
 # Local assistant settings
 .claude/
+/REVIEW.md
 
 # Environment/local configuration
 .env

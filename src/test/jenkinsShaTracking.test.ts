@@ -2,7 +2,7 @@ import * as assert from 'node:assert';
 import * as http from 'node:http';
 import { once } from 'node:events';
 import * as vscode from 'vscode';
-import { JenkinsClient, JenkinsClientError } from '../jenkins/client';
+import { JenkinsClient, JenkinsClientError, JenkinsTransportGuard } from '../jenkins/client';
 import { JenkinsController } from '../jenkins/controller';
 import { createRequest, aggregate } from '../jenkins/model';
 import { pollJenkinsRequest, safeJenkinsError, TrackingOptions } from '../jenkins/tracking';
@@ -85,6 +85,176 @@ suite('Jenkins SHA observations', function () {
         return { servers: [a.server, b.server], client: async server => new JenkinsClient(server, { token: 'token' }),
             discover: true, recentBuildLimit: 20, manifestArtifact: 'taskhub-jenkins-runs.json' };
     }
+    test('review regression: server discovery failure leaves healthy tests selectable and reports the failed server', async () => {
+        a.reply('/api/json', {}, 403);
+        b.reply('/api/json', { jobs: [{ name: 'test', fullName: 'test', url: b.job.jobUrl, buildable: true, _class: 'hudson.model.FreeStyleProject' }] });
+        const data = context([a.server, b.server], []); const controller = new JenkinsController(data.context);
+        const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox;
+        const warnings: string[] = [];
+        vscode.window.showWarningMessage = (async (message: string) => { warnings.push(message); }) as typeof originalWarning;
+        vscode.window.showQuickPick = (async (items: unknown) => {
+            const available = await items as Array<{ label: string }>;
+            assert.strictEqual(available.length, 1); assert.ok(available[0].label.startsWith('B ·'));
+            return available;
+        }) as unknown as typeof pick;
+        vscode.window.showInputBox = async () => '';
+        try {
+            const selected = await (controller as unknown as { selectTestJobs(profile: { serverId: string; jobUrl: string }): Promise<unknown[]> })
+                .selectTestJobs({ serverId: '__sha__', jobUrl: '/repo' });
+            assert.strictEqual(selected.length, 1);
+            assert.ok(warnings.some(message => message.includes('A:') && message.includes('Access denied')));
+            assert.strictEqual(a.paths.length, 1); assert.strictEqual(b.paths.length, 1);
+        } finally { controller.dispose(); vscode.window.showQuickPick = pick; vscode.window.showInputBox = input; }
+    });
+    test('review regression: legacy bounded discovery settles provisionally and never changes to a timeout', async () => {
+        const value = request(); delete value.shaTracking; value.root.buildUrl = a.build(1).url;
+        a.reply('/job/test/1/api/json', a.build(1));
+        await pollJenkinsRequest(value, { ...options(), inventory: { candidates: [], failures: [], continuing: false, limited: false } });
+        assert.ok(value.settledAt); assert.strictEqual(aggregate(value).observedResult, 'passed');
+        assert.strictEqual(aggregate(value).allPassed, false); assert.strictEqual(value.discovery.complete, false);
+        const calls = a.paths.length;
+        now += 25 * 3600000;
+        await pollJenkinsRequest(value, options());
+        assert.strictEqual(value.outcome, 'complete'); assert.strictEqual(a.paths.length, calls);
+    });
+    test('review regression: legacy report deferral preserves the frozen core and its checkout SHA', async () => {
+        const value = request(); delete value.shaTracking; value.root.buildUrl = a.build(1).url;
+        a.reply('/job/test/1/api/json', a.build(1));
+        const budget = { remaining: 1 };
+        const settings = { ...options(), inventory: { candidates: [], failures: [], continuing: false, limited: false },
+            client: async (server: JenkinsServer) => new JenkinsClient(server, { token: 'token', budget }) };
+        await pollJenkinsRequest(value, settings);
+        assert.ok(value.runs[0].coreCompletedAt); assert.strictEqual(value.runs[0].finalizedAt, undefined);
+        assert.strictEqual(value.runs[0].reportErrors, undefined); assert.strictEqual(value.settledAt, undefined);
+        budget.remaining = 2; await pollJenkinsRequest(value, settings);
+        assert.strictEqual(value.runs[0].actualSha, sha); assert.ok(value.settledAt);
+        assert.strictEqual(a.paths.filter(path => path === '/job/test/1/api/json').length, 1);
+    });
+    for (const status of [401, 403]) {
+        test(`review regression: cached HTTP ${status} postpones reports without spending their quota`, async () => {
+            const value = request(); value.shaTracking!.jobs = [{ ...a.job, buildUrl: a.build(1).url }];
+            value.runs = [{ ...a.build(1), ...a.job, correlation: 'sha', coreCompletedAt: now, actualSha: sha }];
+            const guard = new JenkinsTransportGuard(() => now, () => 0);
+            const budget = { remaining: 10 };
+            const client = new JenkinsClient(a.server, { token: 'token', guard, budget });
+            const path = status === 401 ? '/whoAmI/api/json' : '/job/test/1/wfapi/describe';
+            a.reply(path, {}, status);
+            await assert.rejects(status === 401 ? client.verify() : client.getStages(a.build(1).url));
+            await pollJenkinsRequest(value, { ...options(), client: async () => client });
+            assert.strictEqual(value.runs[0].reportErrors, undefined); assert.strictEqual(value.settledAt, undefined);
+            assert.strictEqual(budget.remaining, 9); assert.strictEqual(a.paths.length, 1);
+            now += 600000; a.reply(path, {}, 404);
+            await pollJenkinsRequest(value, { ...options(), client: async () => client });
+            assert.ok(value.settledAt); assert.strictEqual(value.runs[0].actualSha, sha);
+            assert.strictEqual(budget.remaining, 7);
+        });
+    }
+    test('review regression: observed failure stays prominent after expiry and refresh explains its cadence', async () => {
+        const value = request();
+        a.reply('/job/test/api/json', { builds: [{ ...a.build(1), result: 'FAILURE' }] }); b.reply('/job/test/api/json', { builds: [] });
+        const messages: string[] = [];
+        vscode.window.showInformationMessage = (async (message: string) => { messages.push(message); }) as typeof originalMessage;
+        vscode.window.showWarningMessage = (async (message: string) => { messages.push(message); }) as typeof originalWarning;
+        const data = context([a.server, b.server], [value]); const controller = new JenkinsController(data.context);
+        try {
+            await vscode.commands.executeCommand('taskhub.jenkins.refresh');
+            const calls = a.paths.length + b.paths.length;
+            await vscode.commands.executeCommand('taskhub.jenkins.refresh');
+            assert.strictEqual(a.paths.length + b.paths.length, calls);
+            assert.ok(messages.some(message => message.includes('Next automatic check:')));
+            now = value.deadlineAt!;
+            await controller.refresh();
+            assert.ok(messages.some(message => message.includes('FAIL') && message.includes('Observation timed out')));
+            const internal = (controller as unknown as { requests: JenkinsRequest[] }).requests[0];
+            const provider = new JenkinsViewProvider(() => [internal], () => [a.server, b.server]);
+            try {
+                const shaNode = provider.getChildren(provider.getChildren()[0])[0];
+                const node = provider.getChildren(shaNode)[0];
+                assert.ok(node.label.startsWith('FAIL'));
+                assert.match(node.description!, /Observation timed out/);
+                assert.strictEqual((provider.getTreeItem(shaNode).iconPath as vscode.ThemeIcon).id, 'error');
+                assert.strictEqual(provider.getTreeItem(node).contextValue, 'jenkinsRequest');
+            } finally { provider.dispose(); }
+        } finally { controller.dispose(); }
+    });
+    test('review regression: a local backoff defers unread reports without freezing a false failure', async () => {
+        const value = request(); value.shaTracking!.jobs = [{ ...a.job }];
+        a.reply('/job/test/api/json', { builds: [a.build(1)] });
+        a.reply('/job/test/1/wfapi/describe', {}, 503);
+        const guard = new JenkinsTransportGuard(() => now, () => 0);
+        const budget = { remaining: 20 };
+        const settings = { ...options(), client: async (server: JenkinsServer) => new JenkinsClient(server, { token: 'token', guard, budget }) };
+        await pollJenkinsRequest(value, settings);
+        assert.strictEqual(value.runs[0].reportErrors?.stages, 'HTTP_ERROR');
+        assert.strictEqual(value.runs[0].reportErrors?.tests, undefined);
+        assert.strictEqual(value.runs[0].finalizedAt, undefined);
+        assert.strictEqual(value.settledAt, undefined);
+        assert.strictEqual(budget.remaining, 18, 'Only the two actual HTTP attempts use the budget.');
+        now += 600000;
+        await pollJenkinsRequest(value, settings);
+        assert.ok(value.settledAt && value.runs[0].finalizedAt);
+        assert.strictEqual(a.paths.filter(path => path.endsWith('/wfapi/describe')).length, 1);
+        assert.strictEqual(a.paths.filter(path => path.endsWith('/testReport/api/json')).length, 1);
+        assert.strictEqual(a.paths.filter(path => path === '/job/test/api/json').length, 1);
+    });
+    test('review regression: exact checkout SHA survives SSH/Gerrit remote aliases and multiple checkouts', () => {
+        const value = request(); value.repoRemote = 'ssh://git.example:29418/team/firmware';
+        const build: import('../jenkins/types').JenkinsBuild = a.build(1);
+        build.actions = [
+            { lastBuiltRevision: { SHA1: 'b'.repeat(40) }, remoteUrls: ['https://git.example/tools'] },
+            { lastBuiltRevision: { SHA1: sha }, remoteUrls: ['https://git.example/a/team/firmware'] },
+        ];
+        assert.strictEqual(matchesJenkinsSha(build, value, a.job), true);
+    });
+    test('review regression: expired queue identifies a coordinator by queue ID without SCM data', async () => {
+        const value = request(); value.shaTracking = { jobs: [{ ...a.job, afterBuild: 1 }], cursor: 0, readOnly: false };
+        value.root.queueUrl = `${a.server.url}queue/item/42/`;
+        a.reply('/job/test/api/json', { builds: [{ ...a.build(2), actions: [], queueId: 42 }] });
+        await pollJenkinsRequest(value, options());
+        assert.strictEqual(value.root.buildUrl, a.build(2).url);
+        assert.ok(value.settledAt);
+        assert.strictEqual(aggregate(value).allPassed, true);
+    });
+    test('review regression: pending POST does not consume the first observation cadence', async () => {
+        const value = request();
+        const data = context([a.server, b.server], [value]); const controller = new JenkinsController(data.context);
+        try {
+            const internal = (controller as unknown as { requests: JenkinsRequest[] }).requests[0];
+            internal.submission = 'sending';
+            await controller.refresh();
+            assert.strictEqual(internal.nextPollAt, undefined);
+            assert.strictEqual(a.paths.length + b.paths.length, 0);
+            delete internal.submission;
+            a.reply('/job/test/api/json', { builds: [a.build(1)] }); b.reply('/job/test/api/json', { builds: [b.build(1)] });
+            await controller.refresh();
+            assert.ok(internal.settledAt, 'The first GET round starts as soon as submission finishes.');
+        } finally { controller.dispose(); }
+    });
+    test('review regression: expiry during a GET records exactly one completion notification', async () => {
+        const value = request(); value.deadlineAt = now + 10000;
+        const gate = a.hold('/job/test/api/json'); a.reply('/job/test/api/json', { builds: [a.build(1)] });
+        const data = context([a.server, b.server], [value]); const controller = new JenkinsController(data.context);
+        try {
+            const pending = controller.refresh(); await gate.ready; now += 10001; gate.release(); await pending;
+            const internal = (controller as unknown as { requests: JenkinsRequest[] }).requests[0];
+            assert.strictEqual(internal.outcome, 'timeout');
+            assert.strictEqual(internal.notified.complete, true);
+            await controller.refresh();
+            assert.strictEqual(internal.notified.complete, true);
+        } finally { gate.release(); controller.dispose(); }
+    });
+    test('review regression: stopping a completed request preserves its PASS', async () => {
+        const value = request();
+        a.reply('/job/test/api/json', { builds: [a.build(1)] }); b.reply('/job/test/api/json', { builds: [b.build(1)] });
+        const data = context([a.server, b.server], [value]); const controller = new JenkinsController(data.context);
+        try {
+            await controller.refresh();
+            const internal = (controller as unknown as { requests: JenkinsRequest[] }).requests[0];
+            assert.strictEqual(aggregate(internal).allPassed, true);
+            await controller.stopTracking({ kind: 'request', label: '', request: internal });
+            assert.strictEqual(aggregate(internal).allPassed, true);
+        } finally { controller.dispose(); }
+    });
     test('IT-264: two controllers match SHA, freeze build URLs, and never read completed executions again', async () => {
         const value = request();
         a.reply('/job/test/api/json', { builds: [a.build(9, false, 'b'.repeat(40)), a.build(1)] });
@@ -203,7 +373,7 @@ suite('Jenkins SHA observations', function () {
             const row = () => provider.getChildren(provider.getChildren(provider.getChildren()[0])[0])[0];
             assert.match(row().label, /Provisional pass/);
             value.outcome = 'timeout'; value.error = 'JENKINS_TRACKING_TIMEOUT';
-            assert.match(row().label, /Check failed: timeout/);
+            assert.match(row().label, /Observation timed out/);
             assert.match(row().description!, /1\/1/);
         } finally { provider.dispose(); }
     });
@@ -226,6 +396,34 @@ suite('Jenkins SHA observations', function () {
             const saved = data.state.get(JENKINS_REQUESTS_KEY) as JenkinsRequest[];
             assert.strictEqual(saved.length, 2);
             const latest = saved.find(item => item.id !== old.id)!;
+            assert.strictEqual(latest.deadlineAt, latest.createdAt + 6 * 3600000);
+            assert.ok(latest.shaTracking?.readOnly && latest.settledAt && aggregate(latest).allPassed);
+            assert.strictEqual(saved.find(item => item.id === old.id)?.outcome, 'timeout');
+        } finally { controller.dispose(); vscode.window.showQuickPick = originalPick; vscode.workspace.getConfiguration = originalConfig; }
+    });
+    test('review regression: rechecking a submitted request discards old baselines and finalized job URLs', async () => {
+        const old = request(); old.stopped = true; old.settledAt = now; old.outcome = 'timeout'; old.error = 'JENKINS_TRACKING_TIMEOUT';
+        old.shaTracking!.readOnly = false;
+        old.shaTracking!.jobs = old.shaTracking!.jobs.map(job => ({ ...job, afterBuild: 500, buildUrl: job.jobUrl + '500/', finalizedAt: now, error: 'NOT_FOUND' }));
+        a.reply('/job/test/api/json', { builds: [a.build(1)] }); b.reply('/job/test/api/json', { builds: [b.build(7)] });
+        const data = context([a.server, b.server], [old]); const controller = new JenkinsController(data.context);
+        const originalPick = vscode.window.showQuickPick;
+        const originalConfig = vscode.workspace.getConfiguration;
+        try {
+            vscode.window.showQuickPick = (async (input: unknown) => (await input as unknown[])[0]) as typeof originalPick;
+            vscode.workspace.getConfiguration = ((section?: string, ...args: unknown[]) => {
+                const actual = originalConfig.call(vscode.workspace, section, args[0] as vscode.ConfigurationScope);
+                if (section !== 'taskhub') { return actual; }
+                return { ...actual, get: (key: string, fallback: unknown) => key === 'jenkins.trackingTimeoutHours' ? 6 : actual.get(key, fallback) };
+            }) as typeof originalConfig;
+            const previous = (controller as unknown as { requests: JenkinsRequest[] }).requests[0];
+            await controller.refresh(); assert.strictEqual(a.paths.length + b.paths.length, 0);
+            await controller.trackSha({ kind: 'request', label: '', request: previous });
+            const saved = data.state.get(JENKINS_REQUESTS_KEY) as JenkinsRequest[];
+            assert.strictEqual(saved.length, 2);
+            const latest = saved.find(item => item.id !== old.id)!;
+            assert.ok(latest.shaTracking!.jobs.every(job => job.afterBuild === undefined && job.error === undefined && job.finalizedAt === undefined));
+            assert.ok(latest.runs.every(run => run.number < 500));
             assert.strictEqual(latest.deadlineAt, latest.createdAt + 6 * 3600000);
             assert.ok(latest.shaTracking?.readOnly && latest.settledAt && aggregate(latest).allPassed);
             assert.strictEqual(saved.find(item => item.id === old.id)?.outcome, 'timeout');

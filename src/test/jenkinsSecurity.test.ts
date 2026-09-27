@@ -1,6 +1,6 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
-import { JenkinsClient } from '../jenkins/client';
+import { JenkinsClientError, JenkinsClient } from '../jenkins/client';
 import { JenkinsController } from '../jenkins/controller';
 import { JenkinsLogDocument } from '../jenkins/logDocument';
 import { createRequest } from '../jenkins/model';
@@ -59,8 +59,8 @@ suite('Jenkins security boundaries', () => {
             JenkinsClient.prototype.getLog = async () => { sideEffects++; return { text: '', nextStart: 0, more: false }; };
             const live = (controller as unknown as { requests: JenkinsRequest[] }).requests[0];
             const node = { kind: 'build' as const, label: 'forged', request: live, run: { ...live.runs[0], url: `${server.url}manage/` } };
-            await assert.rejects(controller.openRun(node), /JENKINS_INVALID_RUN/);
-            await assert.rejects(controller.openLog(node), /JENKINS_INVALID_RUN/);
+            await assert.rejects(controller.openRun(node), (error: unknown) => error instanceof JenkinsClientError && error.code === 'INVALID_RUN');
+            await assert.rejects(controller.openLog(node), (error: unknown) => error instanceof JenkinsClientError && error.code === 'INVALID_RUN');
             assert.strictEqual(sideEffects, 0);
             assert.strictEqual(state.secretReads(), 0);
         } finally {
