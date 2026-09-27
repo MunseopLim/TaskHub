@@ -33,7 +33,7 @@ esbuild는 초기 확장·기능별 지연 로딩·공유 상태·사전 생성 
 출력 파일과 역할은 [빌드 출력](docs/architecture.md#프로젝트-구조)을 참고한다. `dist/` 전체가 배포 단위이며
 `extension.js`만 복사하면 기능을 사용할 수 없다. `actions.schema.json` 변경은 watch 빌드에서도 검증기에 반영된다.
 테스트를 직접 돌릴 때(`npm test`는 `pretest`가 빌드한다)는 `node esbuild.js`를 먼저 실행한다.
-검증기는 런타임 컴파일과의 판정·상세 오류 동등성을 검사하고, 기능 분리는 실제 배포 번들의 로드 경계로 검사한다.
+검증기는 런타임 컴파일과의 판정·사용자 표시 오류 동등성을 검사하고, 기능 분리는 실제 배포 번들의 로드 경계로 검사한다.
 
 ### CI 워크플로와 커밋 전 검증
 
@@ -131,6 +131,55 @@ Extension Development Host로 실행하려면 로컬에 `.vscode/launch.json`을
 1. `npm run watch`로 빌드 watch 모드 실행 (또는 `npm run compile`로 일회성 빌드)
 2. VS Code에서 `F5` 키를 눌러 Extension Development Host 실행
 3. 새 창에서 변경사항 테스트
+
+#### F5 실행 시 확장 호스트 연결 시간 초과
+
+`Extension host did not start in 10 seconds`와 함께 디버거 로그에
+`Could not connect to debug target at http://localhost:...`,
+`Socket closed before the connection was established`가 나오면 디버거 연결 실패부터 확인합니다.
+확장 활성화 로그가 시작되기 전의 오류라면 확장 로딩 시간이 원인이라고 단정하지 않습니다.
+macOS의 VS Code 1.139.1 / 내장 js-debug 1.117.0에서는 IPv4로 응답하는 호스트를
+`localhost`의 IPv4·IPv6 주소로 동시에 탐색하다 실패하는 사례를 확인했습니다.
+
+이 경우 아래 구성을 `.vscode/launch.json`의 `configurations`에 추가하면 IPv4로 직접 연결할 수 있습니다.
+
+```json
+{
+    "name": "Run Extension (IPv4)",
+    "type": "node",
+    "request": "attach",
+    "address": "127.0.0.1",
+    "port": 9239,
+    "continueOnAttach": true,
+    "autoAttachChildProcesses": false,
+    "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+    "preLaunchTask": "Launch Extension Host (IPv4)"
+}
+```
+
+`.vscode/tasks.json`의 `tasks`에는 다음 항목을 추가합니다. 위 절차대로 빌드를 먼저 실행하거나,
+이미 빌드 태스크가 있으면 이 항목의 `dependsOn`으로 지정합니다.
+
+```json
+{
+    "label": "Launch Extension Host (IPv4)",
+    "type": "process",
+    "command": "${execPath}",
+    "args": [
+        "--new-window",
+        "--inspect-brk-extensions=9239",
+        "--extensionDevelopmentPath=${workspaceFolder}"
+    ],
+    "problemMatcher": [],
+    "presentation": { "reveal": "never", "panel": "dedicated" }
+}
+```
+
+Run and Debug에서 **Run Extension (IPv4)**를 선택한 뒤 F5를 누릅니다. 이 구성은 attach 방식이므로
+디버거를 끊은 뒤에는 Extension Development Host 창도 닫습니다. 재실행 전에 이전 호스트를 닫고,
+9239 포트를 다른 프로세스가 사용 중이면 양쪽 포트를 함께 변경합니다. 한국어 호스트가 필요하면
+태스크의 `args`에 `--locale=ko`를 추가합니다. 이 우회 구성은 macOS에서 확인했으며,
+VS Code 자체 수정 후에는 기본 `extensionHost` 구성으로 다시 확인할 수 있습니다.
 
 ### VSIX 패키지 빌드 및 설치
 
