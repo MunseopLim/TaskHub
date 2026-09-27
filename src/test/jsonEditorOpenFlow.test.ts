@@ -650,7 +650,7 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         assert.ok(/damaged|손상/.test(message), message);
     });
 
-    test('저장 전 해시 확인은 청크 사이에 이벤트 루프를 양보한다', async () => {
+    test('저장 전 해시 확인은 청크를 비동기로 읽으며 응답성을 유지한다', async () => {
         const fake = installFakePanel();
         const filePath = writeJson('save-hash-yields.json', { rows: [] });
         await openJsonEditorFile(makeContext(), filePath);
@@ -658,23 +658,46 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         await saveRequiringContentHash(fake, saved, 1);
         assert.strictEqual(fake.posted.at(-1)?.success, true);
         const originalRead = fs.read;
-        let ranImmediates = 0;
-        const immediatesSeenByRead: number[] = [];
+        const readLengths: number[] = [];
+        let releaseRead!: () => void;
+        const readHeld = new Promise<void>(resolve => { releaseRead = resolve; });
+        let notifyReadStarted!: () => void;
+        const readStarted = new Promise<void>(resolve => { notifyReadStarted = resolve; });
         (mutableFs as any).read = (...args: unknown[]) => {
-            immediatesSeenByRead.push(ranImmediates);
-            setImmediate(() => { ranImmediates++; });
+            readLengths.push(args[3] as number);
+            if (readLengths.length === 1) {
+                notifyReadStarted();
+                // 실제 디스크 속도나 poll/check 단계 순서 대신 명시적으로 첫 읽기를 붙잡는다.
+                void readHeld.then(() => (originalRead as any)(...args));
+                return;
+            }
             return (originalRead as any)(...args);
         };
+        let pending: Promise<void> | undefined;
         try {
             saved.rows[0].id = 2;
-            await fake.send({ command: 'save', data: saved, seq: 2 });
+            pending = fake.send({ command: 'save', data: saved, seq: 2 });
+            await Promise.race([
+                readStarted,
+                pending.then(() => assert.fail('비동기 해시 읽기를 기다리기 전에 저장이 끝나면 안 된다')),
+            ]);
+            await new Promise<void>(resolve => setImmediate(resolve));
+            assert.strictEqual(readLengths.length, 1, '앞 청크가 끝나기 전에는 다음 청크를 읽지 않는다');
+            assert.match(fs.readFileSync(filePath, 'utf8'), /"id": 1/, '해시 확인 중에는 원문을 덮지 않는다');
+            assert.ok(!fake.posted.some(message => message.command === 'saveResult' && message.seq === 2),
+                '이벤트 루프가 진행돼도 읽기를 마치기 전에는 저장 결과를 보내지 않는다');
+            releaseRead();
+            await pending;
         } finally {
+            releaseRead();
+            await pending?.catch(() => undefined);
             (mutableFs as any).read = originalRead;
         }
         assert.strictEqual(fake.posted.at(-1)?.success, true);
-        assert.ok(immediatesSeenByRead.length >= 4, '여러 청크와 EOF 확인을 읽어야 한다');
-        assert.ok(immediatesSeenByRead.slice(1).every((seen, index) => seen > index),
-            `각 청크 읽기 전에 앞서 예약한 콜백이 실행돼야 한다: ${immediatesSeenByRead.join(',')}`);
+        assert.ok(readLengths.length >= 4, '여러 청크와 EOF 확인을 읽어야 한다');
+        assert.ok(readLengths.every(length => length > 0 && length <= JSON_EDITOR_SAVE_HASH_CHUNK_SIZE),
+            `청크 크기는 메모리 상한을 지켜야 한다: ${readLengths.join(',')}`);
+        assert.strictEqual(readLengths.at(-1), 1, '마지막 한 바이트 읽기로 파일 성장을 확인한다');
         assert.match(fs.readFileSync(filePath, 'utf8'), /"id": 2/);
     });
 
