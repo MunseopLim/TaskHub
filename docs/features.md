@@ -963,7 +963,7 @@ Preset 파일은 다음 위치에서 자동으로 발견됩니다:
 - **Personal Preset** (개인 프리셋 폴더의 `preset-*.json`): **프리셋으로 저장**에서 **Personal**(한국어 UI: 개인)을 고르면 저장되며, 확장을 업데이트해도 유지됩니다. 폴더는 VS Code 사용자 데이터 폴더 아래 `User/globalStorage/munseop.taskhub/presets/`입니다(예: macOS `~/Library/Application Support/Code/User/globalStorage/munseop.taskhub/presets/`, Windows `%APPDATA%\Code\User\globalStorage\munseop.taskhub\presets\`, Linux `~/.config/Code/User/globalStorage/munseop.taskhub/presets/`). Settings Sync로 동기화되지 않으므로 다른 PC와 나누려면 Workspace preset을 쓰세요. ID는 번들 preset과 같은 형식(`preset-mine.json` → `mine`)이고, 같은 ID면 개인 preset이 우선합니다.
 - **Workspace Preset** (`.vscode/presets/preset-*.json`): 프로젝트별 preset (Git으로 공유 가능)
 
-이전 버전에서 *Extension* 위치로 저장한 개인 preset은 확장 설치 폴더에 있어 업데이트 뒤 사라질 수 있었습니다. 활성화 뒤 백그라운드에서 현재·이전 설치 폴더에 남아 있는 이런 파일을 개인 프리셋 폴더로 복사하고, 옮긴 이름과 **폴더 열기** 버튼을 알립니다. 같은 이름이면 가장 최근 파일만 옮기며, 그 복사가 실패하면 오래된 사본으로 대신하지 않고 다음 활성화에 다시 시도합니다. 개인 프리셋 폴더의 기존 파일은 덮어쓰지 않으며 원본도 지우지 않습니다. 한 번 옮긴 원본은 기록해 두므로, 옮긴 뒤 개인 프리셋 폴더에서 지우거나 이름을 바꾼 preset이 다시 복사되거나 설치 폴더의 원본으로 되살아나지 않습니다. 이미 정리된 이전 설치 폴더의 파일은 복구할 수 없습니다.
+이전 버전에서 *Extension* 위치로 저장한 개인 preset은 확장 설치 폴더에 있어 업데이트 뒤 사라질 수 있었습니다. 활성화 뒤 백그라운드에서 현재·이전 설치 폴더에 남아 있는 이런 파일을 개인 프리셋 폴더로 복사하고, 옮긴 이름과 **폴더 열기** 버튼을 알립니다. 같은 이름이면 가장 최근 파일만 옮기며, 그 복사가 실패하면 오래된 사본으로 대신하지 않고 다음 활성화에 다시 시도합니다. 개인 프리셋 폴더의 기존 파일은 덮어쓰지 않으며 원본도 지우지 않습니다. 여러 창에서 동시에 이관해도 복사가 끝난 파일만 개인 프리셋으로 공개합니다. 이를 지원하지 않는 파일 시스템에서는 실패를 기록하고 다음 활성화에 재시도합니다. 중단된 이관의 숨김 임시 사본은 다음 활성화에서 수정된 지 하루가 지난 파일만 정리하며, 최근 파일·링크·다른 사용자 파일은 유지합니다. 한 번 옮긴 원본은 기록해 두므로, 옮긴 뒤 개인 프리셋 폴더에서 지우거나 이름을 바꾼 preset이 다시 복사되거나 설치 폴더의 원본으로 되살아나지 않습니다. 이미 정리된 이전 설치 폴더의 파일은 복구할 수 없습니다.
 
 선택한 preset 파일을 편집·교체·삭제하면 Actions 목록과 단축키용 `taskhub.runAction.<id>` 명령이 자동으로 다시 로드됩니다.
 

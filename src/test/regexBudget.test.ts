@@ -16,6 +16,13 @@ import {
     RegexJobCancelledError,
     applyDiagnosticMatchersOffThread,
     REGEX_WORKER_POOL_SIZE,
+    IDLE_WORKER_TTL_MS,
+    REGEX_QUEUE_MAX_INPUT_BYTES,
+    REGEX_QUEUE_MAX_JOBS,
+    RegexQueueFullError,
+    regexWorkerQueueUsage,
+    shutdownRegexWorkerPool,
+    startRegexWorkerPool,
     applyOutputCaptureOffThread,
     disposeRegexWorkerPool,
     regexWorkerPath,
@@ -105,7 +112,8 @@ suite('사용자 정규식 시간 예산', function () {
  */
 suite('사용자 정규식 worker 실행', function () {
     this.timeout(30000);
-    teardown(() => disposeRegexWorkerPool());
+    setup(() => startRegexWorkerPool());
+    teardown(() => { disposeRegexWorkerPool(); startRegexWorkerPool(); });
     const CATASTROPHIC = '^(a+)+$';
     const input = 'a'.repeat(30) + '!';
 
@@ -167,6 +175,74 @@ suite('사용자 정규식 worker 실행', function () {
             assert.deepStrictEqual(await applyOutputCaptureOffThread(`n=${i}`, { name: 'n', regex: 'n=(\\d+)' }), { n: String(i) });
         }
         assert.strictEqual(regexWorkerPoolSize(), 1, '순차 작업은 쉬는 worker 하나를 계속 쓴다');
+    });
+
+    test('쉬는 worker의 30초 타이머 만료 후 재요청은 새 worker로 처리한다', async () => {
+        disposeRegexWorkerPool();
+        // 제품이 예약한 실제 만료 콜백만 앞당긴다. 작업 watchdog과 worker 종료는 그대로 둔다.
+        const originalTimeout = global.setTimeout;
+        let expire: (() => void) | undefined;
+        (global as any).setTimeout = (callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+            if (delay === IDLE_WORKER_TTL_MS) { expire = () => callback(...args); }
+            return originalTimeout(callback, delay, ...args);
+        };
+        try {
+            assert.strictEqual(IDLE_WORKER_TTL_MS, 30_000);
+            await applyOutputCaptureOffThread('n=1', { name: 'n', regex: 'n=(\\d)' });
+            assert.ok(expire, '정상 처리 후 유휴 만료를 예약해야 한다');
+            expire();
+            const deadline = Date.now() + 5000;
+            while (regexWorkerPoolSize() > 0 && Date.now() < deadline) {
+                await new Promise(resolve => setImmediate(resolve));
+            }
+            assert.strictEqual(regexWorkerPoolSize(), 0, '유휴 worker가 실제로 종료돼야 한다');
+            assert.deepStrictEqual(await applyOutputCaptureOffThread('n=2', { name: 'n', regex: 'n=(\\d)' }), { n: '2' });
+        } finally {
+            global.setTimeout = originalTimeout;
+        }
+    });
+
+    test('비활성화 후 늦은 요청은 worker를 만들지 않고 명시적 재활성화 뒤에만 실행한다', async () => {
+        shutdownRegexWorkerPool();
+        const size = regexWorkerPoolSize();
+        await assert.rejects(applyOutputCaptureOffThread('n=1', { name: 'n', regex: 'n=(\\d)' }), RegexJobCancelledError);
+        assert.ok(regexWorkerPoolSize() <= size);
+        assert.deepStrictEqual(regexWorkerQueueUsage(), { jobs: 0, inputBytes: 0 });
+        startRegexWorkerPool();
+        assert.deepStrictEqual(await applyOutputCaptureOffThread('n=2', { name: 'n', regex: 'n=(\\d)' }), { n: '2' });
+    });
+
+    test('대기 출력 용량과 개수 상한을 지키고 취소하면 용량을 돌려준다', async () => {
+        disposeRegexWorkerPool();
+        const deadline = Date.now() + 5000;
+        while (regexWorkerPoolSize() > 0 && Date.now() < deadline) {
+            await new Promise(resolve => setImmediate(resolve));
+        }
+        assert.strictEqual(regexWorkerPoolSize(), 0, '이전 테스트의 종료 중인 worker까지 정리한다');
+        const blockers = Array.from({ length: REGEX_WORKER_POOL_SIZE }, () =>
+            applyOutputCaptureOffThread(input, { name: 'x', regex: CATASTROPHIC }).catch(error => error));
+        let cancel: (() => void) | undefined;
+        const token = { isCancellationRequested: false, onCancellationRequested(cb: () => void) {
+            cancel = cb; return { dispose() { cancel = undefined; } };
+        } };
+        const queued = applyOutputCaptureOffThread('x'.repeat(REGEX_QUEUE_MAX_INPUT_BYTES / 2), { name: 'x', line: 0 }, token);
+        const queuedResult = queued.catch(error => error);
+        try {
+            assert.deepStrictEqual(regexWorkerQueueUsage(), { jobs: 1, inputBytes: REGEX_QUEUE_MAX_INPUT_BYTES });
+            await assert.rejects(applyOutputCaptureOffThread('x', { name: 'x', line: 0 }), RegexQueueFullError);
+            cancel?.();
+            assert.ok(await queuedResult instanceof RegexJobCancelledError);
+            assert.deepStrictEqual(regexWorkerQueueUsage(), { jobs: 0, inputBytes: 0 });
+            const small = Array.from({ length: REGEX_QUEUE_MAX_JOBS }, () =>
+                applyOutputCaptureOffThread('', { name: 'x', line: 0 }).catch(error => error));
+            await assert.rejects(applyOutputCaptureOffThread('', { name: 'x', line: 0 }), RegexQueueFullError);
+            shutdownRegexWorkerPool();
+            assert.ok((await Promise.all(small)).every(error => error instanceof RegexJobCancelledError));
+            assert.deepStrictEqual(regexWorkerQueueUsage(), { jobs: 0, inputBytes: 0 });
+        } finally {
+            disposeRegexWorkerPool();
+            await Promise.all([...blockers, queuedResult]);
+        }
     });
 
     test('동시 작업은 풀 크기 안에서 나눠 처리하고 폭주한 worker 만 버린다', async () => {
@@ -231,6 +307,7 @@ suite('사용자 정규식 worker 실행', function () {
         const started = Date.now();
         tokens[0].cancel();
         assert.deepStrictEqual(await queued, { n: '3' });
+        assert.deepStrictEqual(regexWorkerQueueUsage(), { jobs: 0, inputBytes: 0 });
         assert.ok(Date.now() - started < 2000, '폭주 작업의 예산을 기다리지 않아야 한다');
         assert.ok(regexWorkerPoolSize() <= REGEX_WORKER_POOL_SIZE, '종료 중인 worker 도 자리를 차지해 한도를 넘지 않는다');
         tokens[1].cancel();

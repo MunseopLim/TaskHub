@@ -4,6 +4,7 @@ import { Worker } from 'worker_threads';
 import type { ParsedDiagnostic } from './diagnosticMatcher';
 import { RegexTimeoutError, regexBudgetForInput } from './regexBudget';
 import type { DiagnosticConfig, OutputCapture } from './schema';
+import { t } from './i18n';
 
 export type UserRegexJob =
     | { op: 'capture'; output: string; capture: OutputCapture | OutputCapture[] }
@@ -60,7 +61,21 @@ export interface RegexJobOptions {
 export const REGEX_WORKER_POOL_SIZE = 2;
 
 /** 쉬는 worker를 이 시간 뒤 종료한다. 반복 캡처(forEach 등)는 같은 worker를 다시 쓴다. */
-const IDLE_WORKER_TTL_MS = 30_000;
+export const IDLE_WORKER_TTL_MS = 30_000;
+
+/** 대기 작업의 출력 문자열은 UTF-16 최악값으로 합산한다. 실행 중인 두 작업은 별도다. */
+export const REGEX_QUEUE_MAX_INPUT_BYTES = 64 * 1024 * 1024;
+export const REGEX_QUEUE_MAX_JOBS = 128;
+
+export class RegexQueueFullError extends Error {
+    constructor() {
+        super(t(
+            '정규식 처리 대기열이 가득 찼습니다. 동시에 실행하는 액션이나 출력 크기를 줄인 뒤 다시 실행하세요.',
+            'The regular expression queue is full. Reduce concurrent actions or output size and try again.'
+        ));
+        this.name = 'RegexQueueFullError';
+    }
+}
 
 /**
  * 이보다 큰 입력(문자 수)을 처리한 worker는 재사용하지 않는다. 복제한 출력과
@@ -77,6 +92,7 @@ interface PooledWorker {
 }
 
 interface PoolWaiter {
+    readonly inputBytes: number;
     readonly workerPath: string;
     readonly grant: (entry: PooledWorker) => void;
     /** 작업을 오류로 끝낸다(풀 정리, worker 생성 실패). */
@@ -85,6 +101,29 @@ interface PoolWaiter {
 
 const pool: PooledWorker[] = [];
 const waiters: PoolWaiter[] = [];
+let queuedInputBytes = 0;
+let acceptingJobs = true;
+
+function removeWaiter(index: number): PoolWaiter {
+    const [waiter] = waiters.splice(index, 1);
+    queuedInputBytes -= waiter.inputBytes;
+    return waiter;
+}
+
+/** 명시적 재활성화에서만 종료 상태를 해제한다. */
+export function startRegexWorkerPool(): void {
+    acceptingJobs = true;
+}
+
+/** 비활성화가 시작되면 늦게 들어오는 요청도 취소한다. */
+export function shutdownRegexWorkerPool(): void {
+    acceptingJobs = false;
+    disposeRegexWorkerPool();
+}
+
+export function regexWorkerQueueUsage(): { jobs: number; inputBytes: number } {
+    return { jobs: waiters.length, inputBytes: queuedInputBytes };
+}
 /** worker를 받아 실행 중인 작업. 풀을 정리할 때 취소로 끝낸다. */
 const activeJobs = new Set<{ abandon: (error: unknown) => void }>();
 
@@ -131,17 +170,17 @@ function tryAcquire(workerPath: string): PooledWorker | undefined {
 }
 
 function dispatchWaiters(): void {
-    while (waiters.length > 0) {
+    while (acceptingJobs && waiters.length > 0) {
         let entry: PooledWorker | undefined;
         try {
             entry = tryAcquire(waiters[0].workerPath);
         } catch (error) {
             // 스레드를 만들지 못했다(자원 부족 등). 이 작업을 오류로 끝내고 다음 작업을 본다.
-            waiters.shift()!.abandon(error);
+            removeWaiter(0).abandon(error);
             continue;
         }
         if (!entry) { return; }
-        waiters.shift()!.grant(entry);
+        removeWaiter(0).grant(entry);
     }
 }
 
@@ -160,7 +199,7 @@ function releaseWorker(entry: PooledWorker, reusable: boolean): void {
 
 /** 확장 비활성화 시 모든 worker를 종료하고, 대기·실행 중인 작업은 취소로 끝낸다. */
 export function disposeRegexWorkerPool(): void {
-    for (const waiter of waiters.splice(0)) { waiter.abandon(new RegexJobCancelledError()); }
+    while (waiters.length > 0) { removeWaiter(0).abandon(new RegexJobCancelledError()); }
     for (const job of [...activeJobs]) { job.abandon(new RegexJobCancelledError()); }
     for (const entry of [...pool]) { retireWorker(entry); }
 }
@@ -184,7 +223,7 @@ export function regexWorkerPoolSize(): number {
  * 되살아나므로 재설치를 안내하는 오류로 끝낸다.
  */
 export function runUserRegexJob(job: UserRegexJob, cancellation?: RegexJobCancellation, options: RegexJobOptions = {}): Promise<unknown> {
-    if (cancellation?.isCancellationRequested) {
+    if (!acceptingJobs || cancellation?.isCancellationRequested) {
         return Promise.reject(new RegexJobCancelledError());
     }
     const workerPath = options.workerPath ?? regexWorkerPath();
@@ -203,6 +242,7 @@ export function runUserRegexJob(job: UserRegexJob, cancellation?: RegexJobCancel
         const listeners: Array<[string, (...args: any[]) => void]> = [];
         const active = { abandon: (error: unknown) => finish(() => reject(error), false) };
         const waiter: PoolWaiter = {
+            inputBytes: job.output.length * 2,
             workerPath,
             grant: granted => start(granted),
             abandon: error => finish(() => reject(error), false),
@@ -215,7 +255,7 @@ export function runUserRegexJob(job: UserRegexJob, cancellation?: RegexJobCancel
             cancelSubscription?.dispose();
             activeJobs.delete(active);
             const index = waiters.indexOf(waiter);
-            if (index >= 0) { waiters.splice(index, 1); }
+            if (index >= 0) { removeWaiter(index); }
             const released = entry;
             if (released) {
                 for (const [event, listener] of listeners) { released.worker.off(event, listener); }
@@ -260,6 +300,12 @@ export function runUserRegexJob(job: UserRegexJob, cancellation?: RegexJobCancel
         };
 
         cancelSubscription = cancellation?.onCancellationRequested(() => finish(() => reject(new RegexJobCancelledError()), false));
+        // 토큰이 구독 시점에 동기적으로 취소를 알릴 수도 있다.
+        if (settled) { cancelSubscription?.dispose(); return; }
+        if (!acceptingJobs || cancellation?.isCancellationRequested) {
+            finish(() => reject(new RegexJobCancelledError()), false);
+            return;
+        }
         let immediate: PooledWorker | undefined;
         try {
             immediate = tryAcquire(workerPath);
@@ -269,7 +315,11 @@ export function runUserRegexJob(job: UserRegexJob, cancellation?: RegexJobCancel
         }
         if (immediate) {
             start(immediate);
+        } else if (waiters.length >= REGEX_QUEUE_MAX_JOBS
+            || queuedInputBytes + waiter.inputBytes > REGEX_QUEUE_MAX_INPUT_BYTES) {
+            finish(() => reject(new RegexQueueFullError()), false);
         } else {
+            queuedInputBytes += waiter.inputBytes;
             waiters.push(waiter);
         }
     });

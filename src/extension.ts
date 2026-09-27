@@ -20,7 +20,7 @@ import { registerWhatsNew, resolveChangelogUri } from './whatsNew';
 import { registerUpdateService } from './updateService';
 import { t } from './i18n';
 import { runWithRegexBudget } from './regexBudget';
-import { RegexJobCancelledError, applyDiagnosticMatchersOffThread, applyOutputCaptureOffThread, disposeRegexWorkerPool, type RegexJobCancellation } from './regexWorkerClient';
+import { RegexJobCancelledError, applyDiagnosticMatchersOffThread, applyOutputCaptureOffThread, startRegexWorkerPool, shutdownRegexWorkerPool, type RegexJobCancellation } from './regexWorkerClient';
 import { buildPreviewReport } from './previewRun';
 import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput } from './doctor';
 import { createZipArchive, extractZipArchive } from './archiveUtils';
@@ -585,6 +585,29 @@ export interface LegacyPresetMigration {
     failed: { file: string; message: string }[];
 }
 
+/** 종료 중 남은 이관 사본만 정리한다. 최근 파일·링크·임의의 사용자 파일은 건드리지 않는다. */
+async function cleanupLegacyPresetMigrationTemps(personalDir: string): Promise<void> {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    let files: string[];
+    try {
+        files = await fs.promises.readdir(personalDir);
+    } catch {
+        return;
+    }
+    for (const file of files) {
+        if (!/^\.taskhub-migrate-[0-9a-f]{32}\.tmp$/.test(file)) { continue; }
+        const fullPath = path.join(personalDir, file);
+        try {
+            const stat = await fs.promises.lstat(fullPath);
+            if (stat.isFile() && stat.mtimeMs < cutoff) {
+                await fs.promises.unlink(fullPath);
+            }
+        } catch {
+            // 다른 창의 정리·파일 잠금·권한 오류는 이관을 막지 않고 다음 활성화에 재시도한다.
+        }
+    }
+}
+
 /**
  * 현재·이전 설치 경로의 `presets/`에 남은 개인 프리셋을 개인 폴더로 복사한다.
  *
@@ -603,6 +626,7 @@ export async function migrateLegacyExtensionPresets(
     personalDir: string,
     alreadyProcessed: ReadonlySet<string> = new Set()
 ): Promise<LegacyPresetMigration> {
+    await cleanupLegacyPresetMigrationTemps(personalDir);
     const installDirs = new Set<string>([extensionPath]);
     // `publisher.name-버전[-플랫폼]` 설치 폴더만 본다. 이름이 접두사로 겹치는 다른 확장은 제외한다.
     const escapedId = extensionId.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -661,15 +685,22 @@ export async function migrateLegacyExtensionPresets(
         }
         copies.sort((a, b) => b.mtimeMs - a.mtimeMs);
         const newest = copies[0];
+        const temporary = path.join(personalDir, `.taskhub-migrate-${randomBytes(16).toString('hex')}.tmp`);
+        let prepared = false;
         try {
-            await fs.promises.copyFile(newest.fullPath, path.join(personalDir, file), fs.constants.COPYFILE_EXCL);
+            await fs.promises.copyFile(newest.fullPath, temporary, fs.constants.COPYFILE_EXCL);
+            prepared = true;
+            // 같은 폴더의 완성된 사본만 배타적으로 공개한다. rename은 기존 개인 파일을 덮으므로 쓰지 않는다.
+            await fs.promises.link(temporary, path.join(personalDir, file));
             result.copied.push(file);
         } catch (error: any) {
-            if (error?.code !== 'EEXIST') {
+            if (!prepared || error?.code !== 'EEXIST') {
                 // 이 이름은 아무것도 처리하지 않은 것으로 두고 다음에 최신 사본부터 다시 시도한다.
                 result.failed.push({ file, message: error?.message ?? String(error) });
                 continue;
             }
+        } finally {
+            await fs.promises.unlink(temporary).catch(() => undefined);
         }
         result.processedSources.push(presetNameKey(file), ...copies.map(copy => presetSourceKey(copy.fullPath)));
     }
@@ -11364,6 +11395,7 @@ async function showActionRunReport(entry: HistoryEntry): Promise<void> {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+    startRegexWorkerPool();
     // 파일/폴더 다이얼로그의 마지막 위치 저장소. 등록 전에 열린 다이얼로그는
     // 기억 없이 워크스페이스 폴더에서 열리므로 activate 최상단에서 연결한다.
     initDialogMemory(context);
@@ -11449,7 +11481,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
     syncActionCommands(context);
     context.subscriptions.push(new vscode.Disposable(() => disposeAllActionCommands()));
-    context.subscriptions.push(new vscode.Disposable(() => disposeRegexWorkerPool()));
+    context.subscriptions.push(new vscode.Disposable(() => shutdownRegexWorkerPool()));
     const workspaceLinkViewProvider = new LinkViewProvider();
     const favoriteViewProvider = new FavoriteViewProvider(context);
     const historyProvider = new HistoryProvider(context);
@@ -13623,6 +13655,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export async function deactivate(): Promise<void> {
+    shutdownRegexWorkerPool();
     backgroundCompletionBatcher?.dispose();
     backgroundCompletionBatcher = undefined;
 

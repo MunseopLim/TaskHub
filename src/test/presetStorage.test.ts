@@ -29,6 +29,55 @@ suite('개인 프리셋 저장소 이관', () => {
         return target;
     }
 
+    test('이관 후보가 없어도 하루 지난 전용 임시 파일만 정리한다', async () => {
+        fs.mkdirSync(personalDir, { recursive: true });
+        const old = path.join(personalDir, `.taskhub-migrate-${'a'.repeat(32)}.tmp`);
+        const recent = path.join(personalDir, `.taskhub-migrate-${'b'.repeat(32)}.tmp`);
+        const unrelated = path.join(personalDir, '.taskhub-migrate-user.tmp');
+        const directory = path.join(personalDir, `.taskhub-migrate-${'c'.repeat(32)}.tmp`);
+        const yesterday = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+        for (const file of [old, recent, unrelated]) { fs.writeFileSync(file, 'keep unless expired'); }
+        fs.mkdirSync(directory);
+        for (const file of [old, unrelated, directory]) { fs.utimesSync(file, yesterday, yesterday); }
+        const link = path.join(personalDir, `.taskhub-migrate-${'d'.repeat(32)}.tmp`);
+        if (process.platform !== 'win32') { fs.symlinkSync(unrelated, link); }
+
+        const result = await migrateLegacyExtensionPresets(path.join(extensionsRoot, 'current'), 'Munseop.taskhub', personalDir);
+        assert.deepStrictEqual(result, { copied: [], processedSources: [], failed: [] });
+        assert.strictEqual(fs.existsSync(old), false);
+        assert.strictEqual(fs.readFileSync(recent, 'utf8'), 'keep unless expired');
+        assert.strictEqual(fs.readFileSync(unrelated, 'utf8'), 'keep unless expired');
+        assert.ok(fs.statSync(directory).isDirectory());
+        if (process.platform !== 'win32') { assert.ok(fs.lstatSync(link).isSymbolicLink()); }
+    });
+
+    test('임시 파일 정리 실패는 정상 이관을 막지 않고 다음 활성화에서 재시도한다', async () => {
+        const current = path.join(extensionsRoot, 'munseop.taskhub-0.8.39');
+        writePreset('munseop.taskhub-0.8.39', 'preset-cleanup.json', '["complete"]');
+        fs.mkdirSync(personalDir, { recursive: true });
+        const old = path.join(personalDir, `.taskhub-migrate-${'e'.repeat(32)}.tmp`);
+        fs.writeFileSync(old, 'partial');
+        const yesterday = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+        fs.utimesSync(old, yesterday, yesterday);
+        const originalUnlink = fs.promises.unlink;
+        let result!: Awaited<ReturnType<typeof migrateLegacyExtensionPresets>>;
+        (fs.promises as any).unlink = async (file: fs.PathLike) => {
+            if (file === old) { throw Object.assign(new Error('locked'), { code: 'EPERM' }); }
+            return originalUnlink(file);
+        };
+        try {
+            result = await migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir);
+            assert.deepStrictEqual(result.failed, []);
+            assert.deepStrictEqual(result.copied, ['preset-cleanup.json']);
+            assert.strictEqual(fs.readFileSync(path.join(personalDir, 'preset-cleanup.json'), 'utf8'), '["complete"]');
+            assert.strictEqual(fs.existsSync(old), true);
+        } finally {
+            (fs.promises as any).unlink = originalUnlink;
+        }
+        await migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir, new Set(result.processedSources));
+        assert.strictEqual(fs.existsSync(old), false);
+    });
+
     test('번들 프리셋 목록은 저장소의 presets/ 폴더와 같다', () => {
         const repoPresets = path.resolve(__dirname, '..', '..', 'presets');
         const files = fs.readdirSync(repoPresets).filter(f => f.startsWith('preset-') && f.endsWith('.json')).sort();
@@ -105,6 +154,66 @@ suite('개인 프리셋 저장소 이관', () => {
         assert.deepStrictEqual(migration.copied, ['preset-ok.json']);
         assert.deepStrictEqual(migration.failed.map(failure => failure.file), ['preset-blocked.json']);
         assert.ok(!migration.processedSources.includes(blocked), '실패한 원본은 다음에 다시 시도한다');
+    });
+
+    test('동시 이관 중 한 복사가 부분 실패해도 다른 창은 완성된 개인 사본만 기록한다', async () => {
+        const current = path.join(extensionsRoot, 'munseop.taskhub-0.8.39');
+        const source = writePreset('munseop.taskhub-0.8.39', 'preset-race.json', '["complete"]');
+        const destination = path.join(personalDir, 'preset-race.json');
+        const promises = (require('fs') as typeof fs).promises;
+        const originalCopy = promises.copyFile;
+        let release!: () => void;
+        const held = new Promise<void>(resolve => { release = resolve; });
+        let started!: () => void;
+        const copying = new Promise<void>(resolve => { started = resolve; });
+        let intercepted = false;
+        (promises as any).copyFile = async (src: fs.PathLike, dest: fs.PathLike, mode?: number) => {
+            if (String(src) === source && !intercepted) {
+                intercepted = true;
+                await promises.writeFile(dest, '["partial', { flag: 'wx' });
+                started();
+                await held;
+                await promises.unlink(dest);
+                throw Object.assign(new Error('EIO: partial copy failed'), { code: 'EIO' });
+            }
+            return originalCopy(src, dest, mode);
+        };
+        const first = migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir);
+        try {
+            await copying;
+            assert.strictEqual(fs.existsSync(destination), false, '복사 중인 파일을 개인 프리셋으로 노출하지 않는다');
+            const second = await migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir);
+            assert.deepStrictEqual(second.copied, ['preset-race.json']);
+            release();
+            const failed = await first;
+            assert.deepStrictEqual(failed.processedSources, []);
+            assert.strictEqual(failed.failed.length, 1);
+            assert.ok(second.processedSources.includes(presetNameKey('preset-race.json')));
+            assert.strictEqual(fs.readFileSync(destination, 'utf8'), '["complete"]');
+            assert.deepStrictEqual(fs.readdirSync(personalDir), ['preset-race.json']);
+        } finally {
+            release();
+            await first;
+            (promises as any).copyFile = originalCopy;
+        }
+    });
+
+    test('완성 사본 공개 실패는 처리 기록을 남기지 않고 임시 파일을 정리한다', async () => {
+        const current = path.join(extensionsRoot, 'munseop.taskhub-0.8.39');
+        writePreset('munseop.taskhub-0.8.39', 'preset-publish.json', '[]');
+        const promises = (require('fs') as typeof fs).promises;
+        const originalLink = promises.link;
+        (promises as any).link = async () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); };
+        try {
+            const result = await migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir);
+            assert.deepStrictEqual(result.processedSources, []);
+            assert.deepStrictEqual(result.copied, []);
+            assert.strictEqual(result.failed.length, 1);
+            assert.deepStrictEqual(fs.readdirSync(personalDir), []);
+        } finally {
+            (promises as any).link = originalLink;
+        }
+        assert.deepStrictEqual((await migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir)).copied, ['preset-publish.json']);
     });
 
     test('최신 사본 복사가 실패하면 오래된 사본으로 대신하지 않고 다음에 최신 사본을 옮긴다', async () => {
