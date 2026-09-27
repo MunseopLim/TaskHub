@@ -8,6 +8,7 @@
  */
 
 import type { DiagnosticConfig, DiagnosticPattern } from './schema';
+import { regexBudgetForInput, runWithRegexBudget } from './regexBudget';
 
 /**
  * Output of `applyDiagnosticMatchers` — a flat list of structured records
@@ -200,6 +201,13 @@ export function applyDiagnosticMatchers(
         compiled.push({ pattern, re: compileMatcher(pattern) });
     }
 
+    // 줄마다 감싸면 호출 비용이 줄 수에 비례하므로, 전체 순회를 한 예산으로 묶는다.
+    // 여러 패턴을 `|` 로 이으면 하나의 alternation 처럼 읽히므로 따옴표로 구분한다.
+    const patternLabel = compiled.map(({ pattern }) => pattern.pattern).join("', '");
+    return runWithRegexBudget(patternLabel, () => matchLines(output, compiled), regexBudgetForInput(output.length));
+}
+
+function matchLines(output: string, compiled: Array<{ pattern: DiagnosticPattern; re: RegExp }>): ParsedDiagnostic[] {
     const lines = output.split(/\r?\n/);
     const results: ParsedDiagnostic[] = [];
 

@@ -78,6 +78,9 @@ TaskHub/
 │   ├── structSizeCalculator.ts        # 구조체 크기/레이아웃 계산
 │   ├── registerDecoder.ts             # 레지스터 비트 필드 디코더
 │   ├── macroExpander.ts               # C/C++ 매크로 전처리기 (4096자 ReDoS guard)
+│   ├── regexBudget.ts                 # 사용자 설정 정규식의 vm timeout 실행 예산
+│   ├── regexWorker.ts                 # 출력 캡처·진단 정규식을 호스트 밖에서 실행하는 worker (dist/regexWorker.js)
+│   ├── regexWorkerClient.ts           # worker 풀·취소·watchdog, worker 누락 시 재설치 안내
 │   ├── elfParser.ts                   # ELF32 파서와 가상 주소→파일 offset 변환
 │   ├── dwarfLineParser.ts             # DWARF 2~5 .debug_line 상태 머신·주소→소스 범위·v5 MD5 보존
 │   ├── linkerScriptParser.ts          # GNU/ARM 링커 스크립트 파서
@@ -114,6 +117,7 @@ TaskHub/
 
 **빌드 출력:**
 - `dist/extension.js`: esbuild, CommonJS, 단일 파일 번들 (Node)
+- `dist/regexWorker.js`: esbuild, CJS, Node 타깃. 사용자 정규식 worker (`src/regexWorker.ts`)
 - `dist/jsonEditorWebview.js`: esbuild, IIFE, 브라우저 타깃. JSON Editor webview 의 순수 로직 번들 (아래 참조)
 - `out/`: tsc 컴파일 (테스트용)
 - 외부 의존성: `vscode` (번들에서 제외)
@@ -233,6 +237,7 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
    * 캐시 변수는 모듈 스코프(`cachedAllActions`).
    * `invalidateActionsCache()`로만 무효화:
      * `.vscode/actions.json` 파일 watcher 콜백.
+     * 프리셋이 선택돼 있을 때 워크스페이스 `.vscode/presets/preset-*.json`·개인 프리셋 폴더의 watcher 콜백.
      * `taskhub.preset.selected` 설정 변경 핸들러.
      * 쓰기 동작(액션 생성 wizard, 프리셋 적용, import) 직후.
    * 트리 렌더링 때마다 JSON을 다시 파싱하지 않도록 해 UI 응답성을 유지.
@@ -323,10 +328,13 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
 
 1.  **워크스페이스 신뢰와 Import 신뢰 결정**
     *   `package.json`의 `capabilities.untrustedWorkspaces.supported`는 `false`다. 워크스페이스의 `actions.json`이 임의 명령을 실행할 수 있으므로 VS Code Restricted Mode에서는 확장을 활성화하지 않는다.
+    *   `capabilities.virtualWorkspaces.supported`도 `false`다. 설정 읽기·쓰기가 `workspaceFolder.uri.fsPath`와 Node `fs`를 쓰고 shell·장비 도구를 실행하므로, 비-`file` URI 가상 워크스페이스에서 설정이 없는 것처럼 보이거나 저장이 실패하는 대신 확장을 활성화하지 않는다.
     *   Import는 스키마·중복 검증 뒤 `collectImportTrustAdvisories()`로 **가져온 액션만** Doctor에 전달하지만, 결과 유무와 관계없이 대상 `actions.json`을 읽거나 쓰기 전에 trust modal을 표시한다. 액션 목록과 명령·argv·cwd·env·파일/아카이브 부작용을 보여 주며, 첫/default 버튼은 원본 열기, 두 번째 버튼만 명시적 import다. Cancel은 `isCloseAffordance` 하나로 두어 Escape·닫기도 쓰기 없이 끝낸다.
     *   Doctor range는 정규화해 재직렬화한 배열 기준이므로 finding의 `filePath`는 실제 원본이 아닌 `<import-review>` 합성 경로다. 현재 UI는 메시지만 사용하며, 이 구분은 나중에 실제 파일의 잘못된 줄로 진단을 게시하는 오용을 막는다.
     *   원본을 처음 읽은 문자열을 최종 동의 시점에 다시 읽은 값과 비교한다. 검토 중 파일이 수정·교체·삭제되면 가져오기를 취소해, 화면에서 확인한 내용과 실제 병합되는 in-memory 스냅샷이 갈라지지 않게 한다.
     *   손상된 기존 `actions.json`도 백업 동의 시점에 다시 읽는다. 검토 중 고쳐져 유효해졌다면 `parseAndValidateActionsContent()`로 그 스냅샷을 정상 병합하고, 여전히 유효하지 않다면 다시 읽은 최신 문자열만 `.bak`에 쓴다. 모달 전에 읽은 오래된 문자열을 백업하거나 최신 편집을 덮어쓰지 않는다.
+    *   Import·프리셋 적용의 백업은 `nextActionsBackupPath()`가 `lstat`으로 고른 **아직 없는** 이름(`actions.json.bak`, `actions.json.1.bak`, …)에 `writeActionsBackupSync()`로 새 파일만 만든다. 이 함수는 실제 `actions.json` 폴더를 root로 `writeWorkspaceFileSync(..., { overwrite: false })`를 거치므로 기존 백업, 같은 이름의 파일·링크(끊어진 링크 포함), hardlink에 쓰지 않는다. 백업 내용은 손상된 `actions.json` 원문, 곧 저장소가 정한 문자열이므로 백업 이름에 심어 둔 링크를 따라가면 임의 파일을 그 내용으로 덮을 수 있다. `.vscode` 폴더 자체가 링크인 구성은 막지 않는다 — 본 저장도 같은 링크를 따르므로 백업만 막으면 보호는 늘지 않고 복구 흐름만 끊긴다.
+    *   프리셋 적용은 교체/병합 선택을 기다리기 전에 읽은 `actions.json` 원문(없었다면 "없음")을 저장 직전에 `actionsFileUnchangedSince()`로 다시 대조한다. 그 사이 내용이 바뀌거나 파일이 생기거나 지워졌으면 저장하지 않고 알린다.
     *   Doctor 진단은 셸 보간 같은 작성·런타임 위험을 보조할 뿐, `curl … | sh` 같은 고정 악성 명령을 판별하지 못한다. 따라서 진단 0건도 안전 판정으로 표현하지 않으며 이 관문을 샌드박스로 설명하지 않는다.
 2.  **변수 치환(`interpolatePipelineVariables`) 입력 정화**
     *   `sanitizeInterpolatedValue(value)`에서 null 바이트(`\0`)를 거부하고 32KB 길이 상한을 강제한다.
@@ -352,6 +360,7 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   Memory Map의 Hex 진입점은 웹뷰에 실제 ELF file offset을 싣지 않고 opaque target ID만 보낸다. extension host가 렌더 시점에 보관한 `sh_offset`/`p_offset` 변환 결과를 다시 찾으며, ELF의 크기나 수정 시각이 달라졌으면 오래된 target을 사용하지 않는다.
     *   DWARF 소스 경로·줄·선택적 MD5도 같은 opaque target ID 뒤의 extension host에만 둔다. 웹뷰에는 컴파일 머신의 경로와 checksum을 노출하지 않으며, 열기 직전에 ELF 변경 여부와 대상 ID를 다시 검증한다. MD5는 보안 검증이 아니라 이미 찾은 소스 후보와 빌드 기록의 내용 일치 여부를 보조하는 데만 쓴다. 후보 비교 결과는 열린 패널에만 두고 크기·mtime·ctime이 모두 같을 때 재사용하며 Refresh와 stale ELF 감지 시 폐기한다.
     *   JSON Editor의 초기 데이터와 복구 baseline은 이스케이프한 JSON 문자열을 `JSON.parse`로 복원한다. JavaScript 객체 리터럴로 넣지 않아 `__proto__` 같은 키의 의미를 보존한다. 숫자 원문 검사는 `parseJsonEditorText()`로 파일·셀 입력에 공통 적용하고, 파싱된 복구 데이터·저장 메시지도 `assertSupportedJsonNumbers()`로 확인한다. 사용자에게 허용하는 숫자 범위와 오류 동작은 [JSON Editor 데이터 보호](features.md#데이터-보호)를 참조한다.
+    *   JSON Editor 저장은 링크·권한을 유지하려고 같은 inode에 쓰지만 먼저 truncate하지 않는다. `writeJsonWithFingerprint()`는 원본을 `pread`로 읽어 둔 뒤 앞에서부터 덮어쓰고 마지막에 길이를 맞추며, 쓰기나 길이 조정이 실패하면 원본이 쓰던 블록에 원래 바이트를 다시 써서 원래 길이로 되돌린다. 복원까지 실패하면 `JsonSaveRestoreError`로 파일 손상 가능성을 따로 알린다. 원자적 교체는 아니므로 프로세스가 쓰기 도중 강제 종료되는 경우까지 보호하지는 않는다.
     *   JSON 저장 전 숫자 검사는 마지막 직접 저장의 파일 식별자·크기·고해상도 수정/변경 시각이 같을 때 생략한다. Windows에서는 이 메타데이터가 외부 쓰기 전후에 같을 수 있어, 1MiB 고정 버퍼로 비동기로 나누어 읽은 원문의 SHA-256이 직접 저장한 내용과 같은지도 확인한다. 확인 중 확장 호스트를 막지 않으므로 같은 세션의 저장은 순서대로 처리하고, 확인이 끝났을 때 세션이 바뀌었으면 쓰지 않는다. 캐시는 쓴 fd의 상태와 현재 경로의 상태를 비교해 등록하며, 시각만 달라진 경우에도 내용 검사 없이 재사용하지 않는다. 외부 변경을 반영하는 saved baseline과는 분리한다. 이 검사는 동시 쓰기를 잠그거나 원자적 저장을 보장하지 않는다. 검사 크기 한도와 실패 시 동작은 [JSON Editor 데이터 보호](features.md#데이터-보호)를 참조한다. 정상 디스크 파일의 복구본은 먼저 신선도를 판정하고 복구 대상에만 숫자 검사를 적용하며, 지원 불가 데이터를 사용자 선택 없이 삭제하지 않는다.
     *   에러/정보 HTML 출력은 `escapeHtml` 경유를 강제한다.
 6.  **파서 입력 한도**
@@ -361,7 +370,8 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   ELF32: 헤더 최소 크기/섹션 테이블/string table 범위를 선검증하고 `sh_offset`·`p_offset`을 보존한다. 심볼은 소속 섹션 범위 안에서만 `sh_offset`으로 변환하며, 섹션 정보가 없는 주소만 `PT_LOAD`의 file-backed 구간에 한해 `p_offset`으로 변환한다. NOBITS·zero-fill·파일 밖 범위는 다른 위치로 fallback하지 않는다.
     *   DWARF `.debug_line`: DWARF 2~5의 32-bit unit을 상태 머신으로 확장하고, v5의 0-based directory/file table, 선택적 `DW_LNCT_MD5` 및 `.debug_line_str`·`.debug_str` 참조를 함께 검증한다. 섹션 32MB, unit 1만 개, 행 50만 개, 파일 20만 개, 디렉터리 10만 개, 문자열 하나 4KB·누적 디코딩 경로 32MB, v5 entry format 64개·decoded field 200만 개 상한을 둔다. 소스 열기의 MD5 비교는 이미 찾은 후보만 파일당 8MB·요청당 총 32MB까지 취소 가능하게 읽고, 미저장 편집과 확인 실패가 섞인 다중 후보를 자동 선택하지 않는다. 손상된 unit은 소스 이동만 비활성화하고, DWARF64 unit은 길이를 검증한 뒤 건너뛴다. `SHF_COMPRESSED` `.debug_line`은 상태 머신에 넘기기 전에 감지하고, 실제 참조한 압축 문자열 section, `.debug_str_offsets`가 필요한 `strx*` 경로와 supplementary object가 필요한 `strp_sup` 경로도 구조화된 미지원 결과로 분리해 파서 손상 경고와 구분한다.
     *   Intel HEX/SREC: 포맷 감지와 실제 파서가 자릿수·레코드별 길이·체크섬 검증 함수를 공유한다. 레코드당 최대 255바이트, 누적 `HEX_MAX_BYTE_ENTRIES` 초과 시 throw. 손상 레코드·입력 줄은 `invalidRecordCount`, Intel 주소 확장으로 식별 가능한 손상 레코드 이후 주소를 확정하지 못한 데이터는 `unaddressedRecordCount`로 구분한다. 후자는 다음 정상 주소 확장 전까지 이전 기준 주소를 재사용하지 않는다. 접두사·타입까지 손상된 입력은 주소 확장 여부를 추정하지 않는다.
-    *   Hex Viewer 렌더링: `HEX_VIEWER_MAX_SPAN = 128 MB`. 주소 범위가 이를 초과하면(sparse 파일) 렌더링 거부.
+    *   Hex Viewer 렌더링: `HEX_VIEWER_MAX_SPAN = 128 MB`. 주소 범위가 이를 초과하면(sparse 파일) 렌더링 거부. 한도 안에서는 `buildHexViewerPayload()`가 HEX/SREC의 바이트 배열과 gap 비트맵을 실제 데이터 항목 한 번 순회로 채우고, `toFlatArray()`도 항목 수가 요청 길이보다 적으면 항목만 순회한다. 준비 비용이 빈 구간 크기가 아니라 데이터 양에 비례한다. 파싱 결과가 바이트마다 `Map` 항목을 갖는 구조는 그대로라 큰 연속 HEX의 파싱 메모리는 줄지 않는다.
+    *   사용자 설정 정규식(`output.capture[].regex`, `when.matches`, `output.diagnostics`, inputBox `extractPattern`/`validatePattern`)은 `runWithRegexBudget()`(`regexBudget.ts`) 안에서 실행한다. 같은 스레드의 타이머로는 실행 중인 정규식을 끊지 못하므로 `vm` timeout의 watchdog으로 중단한다. 입력이 큰 출력 캡처·진단은 `regexWorkerClient.ts`가 `dist/regexWorker.js` worker에서 같은 순수 함수를 실행한다. worker 안의 예산은 3초에 입력 1MiB마다 1초를 더하며(긴 줄에서 줄 길이에 제곱으로 도는 비앵커 `(.+)` 같은 흔한 패턴이 큰 빌드 로그에서 끊기지 않을 만큼 넉넉하게), 그동안 확장 호스트는 응답한다. worker는 최대 2개의 풀에서 재사용하고(넘치는 작업은 대기열, 쉬는 worker는 30초 뒤 종료) 비활성화 때 정리한다. 태스크 취소 토큰이 오면 그 worker를 즉시 종료하며, 대기 중이던 작업은 worker를 받지 않고 끝난다. worker 안에서는 캡처 규칙마다 예산이 따로 붙으므로 호스트 watchdog은 worker를 받은 때부터 `정규식 캡처 규칙 수 × 예산 + 5초`(진단은 `예산 + 5초`) 안에 답이 없으면 그 worker를 종료한다. 결과를 돌려준 worker(정상, worker 안 예산 초과, 설정 오류)는 입력이 1Mi 문자 이하일 때만 다시 쓰고, watchdog 초과·취소·worker 오류·비정상 종료가 난 worker는 버린다. 종료가 끝날 때까지 그 자리를 비우지 않아 동시에 사는 worker가 풀 크기를 넘지 않는다. worker를 만들지 못하면 그 작업만 오류로 끝내고 대기열은 계속 처리한다. 비활성화 때 대기·실행 중인 작업은 취소로 끝난다. worker 파일이 없으면 설치 손상으로 보고 호스트에서 대신 실행하지 않은 채 재설치를 안내하는 오류로 끝낸다. 호스트 스레드에 남는 `when.matches`·inputBox 경로는 길이가 보간 상한 안인 값이므로 입력 길이와 관계없는 1초 절대 상한(`USER_REGEX_HOST_THREAD_MAX_MS`)만 준다. capture·조건·진단은 `RegexTimeoutError`로 태스크를 실패시키고(조건 시간 초과를 "맞지 않음"으로 삼키지 않는다. Preview는 오류로 알린다), inputBox 추출은 출력 채널에 이유를 남기고 빈 값으로 시작하며, 입력 검증은 시간 초과 안내를 오류로 표시하고 같은 입력란에서는 그 패턴을 다시 실행하지 않는다. 저장된 입력의 재사용 판정은 다시 묻는 쪽으로 처리한다. 진단 매처는 줄마다가 아니라 전체 순회를 한 예산으로 묶는다.
     *   Macro 전처리: shift 카운트 0–63 clamp, 수식 길이 4KB 제한.
 7.  **Hover 텍스트·복사 입력과 비동기 처리**
     *   복사 아이콘을 제공하는 `MarkdownString`은 `isTrusted.enabledCommands`에 `taskhub.copyHoverValue`만 허용한다. 소스에서 온 주석·이름·경로·표현식은 테마 아이콘을 지원하는 `appendText`로 이스케이프하고, 표 구분자 `|`와 개행도 처리해 링크·아이콘·표를 위조하지 못하게 한다. 정의 파일 링크는 라벨과 URI 목적지를 각각 이스케이프한다.

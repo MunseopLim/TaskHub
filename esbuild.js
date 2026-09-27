@@ -88,9 +88,32 @@ const webviewConfig = {
 	plugins: [esbuildProblemMatcherPlugin],
 };
 
+/**
+ * 사용자 정규식 worker 번들 (Node, `worker_threads`).
+ *
+ * 출력 캡처·진단의 사용자 정규식을 확장 호스트 밖에서 실행한다. 호스트 번들이
+ * `__dirname` 기준으로 같은 `dist/`에서 찾으므로 파일 이름을 바꾸지 않는다.
+ */
+const regexWorkerConfig = {
+	entryPoints: [
+		'src/regexWorker.ts'
+	],
+	bundle: true,
+	format: 'cjs',
+	minify: production,
+	sourcemap: !production,
+	sourcesContent: false,
+	platform: 'node',
+	outfile: 'dist/regexWorker.js',
+	// `vscode` 를 external 로 두지 않는다. worker 에는 vscode API 가 없으므로
+	// 의존성 쪽으로 import 가 새어 들어오면 실행이 아니라 빌드에서 실패해야 한다.
+	logLevel: 'silent',
+	plugins: [esbuildProblemMatcherPlugin],
+};
+
 async function main() {
 	const contexts = await Promise.all(
-		[extensionConfig, webviewConfig].map(config => esbuild.context(config))
+		[extensionConfig, webviewConfig, regexWorkerConfig].map(config => esbuild.context(config))
 	);
 	if (watch) {
 		await Promise.all(contexts.map(ctx => ctx.watch()));

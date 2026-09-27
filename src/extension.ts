@@ -32,6 +32,8 @@ import { registerFeatureLauncher } from './featureLauncher';
 import { registerWhatsNew, resolveChangelogUri } from './whatsNew';
 import { registerUpdateService } from './updateService';
 import { t } from './i18n';
+import { runWithRegexBudget } from './regexBudget';
+import { RegexJobCancelledError, applyDiagnosticMatchersOffThread, applyOutputCaptureOffThread, disposeRegexWorkerPool, type RegexJobCancellation } from './regexWorkerClient';
 import { buildPreviewReport } from './previewRun';
 import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput } from './doctor';
 import { createZipArchive, extractZipArchive } from './archiveUtils';
@@ -502,30 +504,188 @@ export function createGroupedTaskPresentationOptions(
 // Preset Management
 // ============================================================================
 
-interface PresetInfo {
+export interface PresetInfo {
     id: string;
     name: string;
-    source: 'extension' | 'workspace';
+    source: 'extension' | 'user' | 'workspace';
     filePath: string;
     workspaceName?: string;
 }
 
-function discoverPresets(context: vscode.ExtensionContext): PresetInfo[] {
-    const presets: PresetInfo[] = [];
+/**
+ * VSIX에 들어 있는 프리셋 파일. 설치 경로의 `presets/`에서 이 밖의 파일은
+ * 이전 버전의 "확장 프로그램" 저장 위치에 사용자가 저장한 개인 프리셋이다.
+ */
+export const BUNDLED_PRESET_FILES: ReadonlySet<string> = new Set(['preset-example.json']);
 
-    // Scan extension presets
-    const extPresetsDir = path.join(context.extensionPath, 'presets');
-    if (fs.existsSync(extPresetsDir)) {
-        const files = fs.readdirSync(extPresetsDir).filter(f => f.startsWith('preset-') && f.endsWith('.json'));
-        for (const file of files) {
-            const id = file.replace('preset-', '').replace('.json', '');
-            presets.push({
-                id,
-                name: id,
-                source: 'extension',
-                filePath: path.join(extPresetsDir, file)
-            });
+/**
+ * 개인 프리셋 폴더. 설치 경로는 업데이트마다 바뀌고 이전 설치는 정리되므로
+ * 업데이트 뒤에도 유지되는 사용자 저장소에 둔다.
+ */
+export function personalPresetsDir(globalStoragePath: string): string {
+    return path.join(globalStoragePath, 'presets');
+}
+
+function listPresetFiles(dir: string): string[] {
+    try {
+        return fs.readdirSync(dir).filter(f => f.startsWith('preset-') && f.endsWith('.json'));
+    } catch {
+        return [];
+    }
+}
+
+/** 이관을 이미 처리한 원본 경로·이름 기록. 사용자가 지운 개인 프리셋을 다시 복사하거나 후보로 되살리지 않는다. */
+export const MIGRATED_LEGACY_PRESETS_KEY = 'taskhub.migratedLegacyPresetSources';
+
+/**
+ * 처리 기록에 쓰는 원본 경로 키. Windows 경로는 대소문자를 구분하지 않으므로
+ * 세션마다 설치 경로 표기가 달라도 같은 원본으로 본다.
+ */
+export function presetSourceKey(filePath: string, platform: NodeJS.Platform = process.platform): string {
+    return platform === 'win32' ? filePath.toLowerCase() : filePath;
+}
+
+/**
+ * 이름 단위 처리 기록 키. 경로 기록만으로는 옮긴 원본이 있던 설치 폴더가 정리된 뒤
+ * 다른 설치 폴더의 같은 이름 사본이 "처음 보는 파일"이 되어, 지운 개인 프리셋이
+ * 다시 복사된다. 한 번 옮긴 이름은 폴더가 사라져도 다시 옮기지 않는다.
+ */
+export function presetNameKey(fileName: string, platform: NodeJS.Platform = process.platform): string {
+    return `name:${platform === 'win32' ? fileName.toLowerCase() : fileName}`;
+}
+
+export interface LegacyPresetMigration {
+    /** 개인 폴더로 새로 복사한 파일 이름. */
+    copied: string[];
+    /** 다시 보지 않아도 되는 원본의 {@link presetSourceKey}와 이름의 {@link presetNameKey}(복사했거나 이미 같은 이름이 있던 것). */
+    processedSources: string[];
+    /** 복사하지 못한 파일과 이유. 다음 활성화에 다시 시도한다. */
+    failed: { file: string; message: string }[];
+}
+
+/**
+ * 현재·이전 설치 경로의 `presets/`에 남은 개인 프리셋을 개인 폴더로 복사한다.
+ *
+ * 같은 이름은 가장 최근에 수정한 사본 **하나만** 후보로 삼는다. 그 복사가 실패하면
+ * 오래된 사본으로 대신하지 않고 그 이름 전체를 다음 활성화에 다시 시도한다. 대신
+ * 복사하면 다음 시도에서 최신 사본이 `EEXIST`로 막혀 옛 정의가 굳어지기 때문이다.
+ * 개인 폴더의 기존 파일은 덮어쓰지 않고 원본은 지우지 않는다. 같은 이름의 사본 중
+ * 하나라도 `alreadyProcessed`에 있으면 그 이름은 이미 옮긴 것으로 보고 복사하지 않아,
+ * 이관 뒤 사용자가 지우거나 이름을 바꾼 프리셋이 되살아나지 않게 한다. 그 뒤에 새로
+ * 나타난 사본이 더 최신이어도 옮기지 않는다(사용자의 삭제를 우선한다). 활성화를 막지
+ * 않도록 비동기로 읽고 쓴다.
+ */
+export async function migrateLegacyExtensionPresets(
+    extensionPath: string,
+    extensionId: string,
+    personalDir: string,
+    alreadyProcessed: ReadonlySet<string> = new Set()
+): Promise<LegacyPresetMigration> {
+    const installDirs = new Set<string>([extensionPath]);
+    // `publisher.name-버전[-플랫폼]` 설치 폴더만 본다. 이름이 접두사로 겹치는 다른 확장은 제외한다.
+    const escapedId = extensionId.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const installDirPattern = new RegExp(`^${escapedId}-\\d+\\.\\d+\\.\\d+(?:[-+][0-9a-z.-]+)?$`);
+    try {
+        const extensionsRoot = path.dirname(extensionPath);
+        for (const entry of await fs.promises.readdir(extensionsRoot)) {
+            if (installDirPattern.test(entry.toLowerCase())) {
+                installDirs.add(path.join(extensionsRoot, entry));
+            }
         }
+    } catch {
+        // 설치 루트를 읽지 못하면 현재 설치만 본다.
+    }
+    // 이름별로 모든 사본을 모은다. 처리한 원본도 최신 판정에는 넣어, 옛 사본이 새 후보가 되지 않게 한다.
+    const byName = new Map<string, { fullPath: string; mtimeMs: number }[]>();
+    for (const dir of installDirs) {
+        const presetsDir = path.join(dir, 'presets');
+        let files: string[];
+        try {
+            files = (await fs.promises.readdir(presetsDir)).filter(f => f.startsWith('preset-') && f.endsWith('.json'));
+        } catch {
+            continue;
+        }
+        for (const file of files) {
+            if (BUNDLED_PRESET_FILES.has(file)) { continue; }
+            const fullPath = path.join(presetsDir, file);
+            try {
+                const stat = await fs.promises.lstat(fullPath);
+                if (!stat.isFile()) { continue; }
+                const copies = byName.get(file) ?? [];
+                copies.push({ fullPath, mtimeMs: stat.mtimeMs });
+                byName.set(file, copies);
+            } catch {
+                // 사라진 파일은 건너뛴다.
+            }
+        }
+    }
+    const result: LegacyPresetMigration = { copied: [], processedSources: [], failed: [] };
+    const pending = [...byName].filter(([file, copies]) =>
+        !alreadyProcessed.has(presetNameKey(file)) || copies.some(copy => !alreadyProcessed.has(presetSourceKey(copy.fullPath))));
+    if (pending.length === 0) { return result; }
+    try {
+        await fs.promises.mkdir(personalDir, { recursive: true });
+    } catch (error: any) {
+        result.failed.push(...pending.map(([file]) => ({ file, message: error.message })));
+        return result;
+    }
+    for (const [file, copies] of pending) {
+        // 이 이름을 이미 한 번 옮겼다면(사본 하나라도 처리 기록이 있으면) 다시 복사하지
+        // 않는다. 뒤늦게 보인 과거 사본(읽기 실패였던 폴더 등) 때문에 사용자가 지우거나
+        // 이름을 바꾼 개인 프리셋이 되살아나면 안 된다. 새로 보인 사본만 기록에 더한다.
+        if (alreadyProcessed.has(presetNameKey(file)) || copies.some(copy => alreadyProcessed.has(presetSourceKey(copy.fullPath)))) {
+            result.processedSources.push(presetNameKey(file), ...copies.map(copy => presetSourceKey(copy.fullPath)));
+            continue;
+        }
+        copies.sort((a, b) => b.mtimeMs - a.mtimeMs);
+        const newest = copies[0];
+        try {
+            await fs.promises.copyFile(newest.fullPath, path.join(personalDir, file), fs.constants.COPYFILE_EXCL);
+            result.copied.push(file);
+        } catch (error: any) {
+            if (error?.code !== 'EEXIST') {
+                // 이 이름은 아무것도 처리하지 않은 것으로 두고 다음에 최신 사본부터 다시 시도한다.
+                result.failed.push({ file, message: error?.message ?? String(error) });
+                continue;
+            }
+        }
+        result.processedSources.push(presetNameKey(file), ...copies.map(copy => presetSourceKey(copy.fullPath)));
+    }
+    return result;
+}
+
+export function discoverPresets(context: vscode.ExtensionContext): PresetInfo[] {
+    const presets: PresetInfo[] = [];
+    const seen = new Set<string>();
+
+    // 개인 프리셋이 먼저다. 이관된 파일이 설치 경로에 남아 있어도 개인 폴더의
+    // 사본을 편집·실행 대상으로 삼는다.
+    const personalDir = context.globalStorageUri ? personalPresetsDir(context.globalStorageUri.fsPath) : undefined;
+    for (const file of personalDir ? listPresetFiles(personalDir) : []) {
+        const id = file.replace('preset-', '').replace('.json', '');
+        seen.add(id);
+        presets.push({ id, name: id, source: 'user', filePath: path.join(personalDir!, file) });
+    }
+
+    // Scan extension presets. 개인 폴더로 이관을 마친 비번들 원본은 후보에서 뺀다.
+    // 개인 사본을 지우거나 이름을 바꾼 뒤 설치 폴더의 옛 정의가 되살아나면 안 된다.
+    // 이관에 실패한 파일은 기록되지 않으므로 계속 여기서 찾는다.
+    const migratedSources = new Set(context.globalState?.get<string[]>(MIGRATED_LEGACY_PRESETS_KEY, []) ?? []);
+    const extPresetsDir = path.join(context.extensionPath, 'presets');
+    for (const file of listPresetFiles(extPresetsDir)) {
+        const id = file.replace('preset-', '').replace('.json', '');
+        if (seen.has(id)) { continue; }
+        const filePath = path.join(extPresetsDir, file);
+        // 경로 기록뿐 아니라 이름 기록도 본다. 설치 폴더 경로가 바뀌면 경로 기록이 맞지 않아,
+        // 백그라운드 이관이 끝나기 전까지 지운 프리셋이 다시 후보가 되기 때문이다.
+        if (!BUNDLED_PRESET_FILES.has(file)
+            && (migratedSources.has(presetSourceKey(filePath)) || migratedSources.has(presetNameKey(file)))) { continue; }
+        presets.push({
+            id,
+            name: id,
+            source: 'extension',
+            filePath
+        });
     }
 
     // Scan workspace presets
@@ -3846,14 +4006,18 @@ function resolveDiagnosticUri(file: string, baseCwd: string): vscode.Uri {
  * (invalid regex / unknown preset / missing required group) bubbled up
  * from `applyDiagnosticMatchers`.
  */
-function applyDiagnosticsToCollection(
+async function applyDiagnosticsToCollection(
     output: string,
     config: import('./schema').DiagnosticConfig,
     task: any,
     actionId: string,
-    baseCwd: string
-): TaskRunLogDiagnostics {
-    const parsed = applyDiagnosticMatchers(output, config);
+    baseCwd: string,
+    cancellation: RegexJobCancellation,
+    assertStillActive: () => void
+): Promise<TaskRunLogDiagnostics> {
+    const parsed = await applyDiagnosticMatchersOffThread(output, config, cancellation);
+    // 중지·시간 초과된 태스크의 늦은 결과를 Problems에 게시하지 않는다.
+    assertStillActive();
     const summary: TaskRunLogDiagnostics = { error: 0, warning: 0, info: 0, hint: 0 };
     for (const diagnostic of parsed) {
         summary[diagnostic.severity]++;
@@ -4601,14 +4765,14 @@ export type ApplyPresetBackupChoice = 'backup' | 'cancel';
  */
 export async function confirmApplyPresetBackup(
     actionsPath: string,
-    invalidReason: string
+    invalidReason: string,
+    backupPath = `${actionsPath}.bak`
 ): Promise<ApplyPresetBackupChoice> {
-    const backupPath = `${actionsPath}.bak`;
     const backupLabel = t('손상된 파일 백업 후 계속', 'Back up corrupt file and continue');
     const cancelLabel = t('취소', 'Cancel');
     const choice = await vscode.window.showWarningMessage(
         t(
-            `기존 actions.json이 유효하지 않아 프리셋 적용을 안전하게 진행할 수 없습니다 (${invalidReason}). 원본을 ${path.basename(backupPath)}로 백업하고 계속할까요?`,
+            `기존 actions.json이 유효하지 않아 프리셋 적용을 안전하게 진행할 수 없습니다 (${invalidReason}). 원본을 백업 파일 ${path.basename(backupPath)}에 저장하고 계속할까요?`,
             `The existing actions.json is invalid, so applying the preset cannot proceed safely (${invalidReason}). Back up the original to ${path.basename(backupPath)} and continue?`
         ),
         { modal: true },
@@ -4616,6 +4780,70 @@ export async function confirmApplyPresetBackup(
         cancelLabel
     );
     return choice === backupLabel ? 'backup' : 'cancel';
+}
+
+/**
+ * 손상된 actions.json을 보존할 **아직 없는** 백업 경로를 고른다. 기존 백업을
+ * 덮지 않고, `lstat`으로 끊어진 링크까지 존재하는 이름으로 본다
+ * (`actions.json.bak`, `actions.json.1.bak`, …).
+ */
+export function nextActionsBackupPath(actionsPath: string): string {
+    for (let index = 0; index < 1000; index++) {
+        const candidate = index === 0 ? `${actionsPath}.bak` : `${actionsPath}.${index}.bak`;
+        try {
+            fs.lstatSync(candidate);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return candidate; }
+            throw error;
+        }
+    }
+    throw new Error(`Too many backup files next to '${actionsPath}'.`);
+}
+
+/**
+ * 백업은 실제 `actions.json`이 있는 폴더에 새 파일로만 만든다. 그 사이 생긴 같은
+ * 이름의 파일·링크(끊어진 링크 포함)나 hardlink에는 쓰지 않는다.
+ *
+ * `.vscode`가 링크여도 막지 않는다. 그 경우 본 저장도 같은 링크를 따라가므로
+ * 백업만 막으면 보호는 늘지 않고 손상 파일 복구만 끊긴다. 위험한 쪽은 백업
+ * 이름 자체를 링크로 심어 두는 것이고, 새 이름 + exclusive create가 그것을 막는다.
+ */
+export function writeActionsBackupSync(backupPath: string, content: string): void {
+    const directory = fs.realpathSync.native(path.dirname(backupPath));
+    const target = path.join(directory, path.basename(backupPath));
+    try {
+        writeWorkspaceFileSync(target, [directory], directory, content, { overwrite: false, mkdirs: false });
+    } catch (error) {
+        if (fs.existsSync(target) || isSymbolicLinkPath(target)) {
+            throw new Error(t(
+                `백업 파일 ${path.basename(backupPath)}이(가) 방금 다른 곳에서 만들어져 덮어쓰지 않았습니다. 다시 시도하세요.`,
+                `Backup file ${path.basename(backupPath)} was just created elsewhere, so it was not overwritten. Try again.`
+            ));
+        }
+        throw error;
+    }
+}
+
+function isSymbolicLinkPath(target: string): boolean {
+    try {
+        return fs.lstatSync(target).isSymbolicLink();
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 선택을 기다리기 전에 읽은 actions.json이 저장 직전에도 그대로인지 확인한다.
+ * `expectedContent`가 undefined이면 "파일이 없었다"는 뜻이다.
+ */
+export function actionsFileUnchangedSince(actionsPath: string, expectedContent: string | undefined): boolean {
+    let current: string;
+    try {
+        current = fs.readFileSync(actionsPath, 'utf-8');
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'ENOENT' && expectedContent === undefined;
+    }
+    return current === expectedContent;
 }
 
 export type SavePresetOverwriteChoice = 'overwrite' | 'open-existing' | 'cancel';
@@ -7090,7 +7318,12 @@ export function savedInputStillValid(task: any, saved: any, context?: any): bool
         const core = value.startsWith(prefix) && value.endsWith(suffix)
             ? value.slice(prefix.length, value.length - (suffix.length || 0) || undefined)
             : value;
-        return re.test(core);
+        try {
+            return runWithRegexBudget(task.validatePattern, () => re.test(core));
+        } catch {
+            // 판정하지 못한 저장값은 재사용하지 않고 다시 묻는다.
+            return false;
+        }
     }
     return true;
 }
@@ -7695,20 +7928,25 @@ async function executeSingleTask(
                     if (err instanceof ShellCommandError && task.output?.diagnostics && !taskUsesSensitiveData) {
                         const failedOutput = combineStdoutStderrForDiagnostics(err.stdout, err.stderr);
                         try {
-                            const diagnostics = applyDiagnosticsToCollection(
+                            const diagnostics = await applyDiagnosticsToCollection(
                                 failedOutput,
                                 task.output.diagnostics,
                                 task,
                                 actionId,
-                                interpolatedCwd ?? defaultWorkspace
+                                interpolatedCwd ?? defaultWorkspace,
+                                scope.cancellation.token,
+                                () => throwIfTaskInactive(scope)
                             );
                             runLogCollector?.recordDiagnostics(task.id, diagnostics);
                         } catch (diagErr) {
-                            // Don't mask the original failure — log only.
-                            const msg = diagErr instanceof Error ? diagErr.message : String(diagErr);
-                            outputChannel.appendLine(
-                                `[Warning] Task '${task.id}' diagnostic emission on failure itself failed: ${msg}`
-                            );
+                            // Don't mask the original failure — log only. 중지·시간 초과로
+                            // 진단을 버린 것은 실패가 아니므로 경고로 남기지 않는다.
+                            if (!scope.cancellation.token.isCancellationRequested && !(diagErr instanceof RegexJobCancelledError)) {
+                                const msg = diagErr instanceof Error ? diagErr.message : String(diagErr);
+                                outputChannel.appendLine(
+                                    `[Warning] Task '${task.id}' diagnostic emission on failure itself failed: ${msg}`
+                                );
+                            }
                         }
                     } else if (err instanceof ShellCommandError && task.output?.diagnostics && taskUsesSensitiveData) {
                         // Diagnostic messages and their resolved file URIs are
@@ -7773,9 +8011,12 @@ async function executeSingleTask(
     if (task.output && task.output.capture) {
         if (result && typeof result.output === 'string') {
             try {
-                const captured = applyOutputCapture(result.output, task.output.capture);
+                // 입력이 큰 사용자 정규식은 worker에서 돌려 그동안에도 Stop·명령이 처리되게 한다.
+                const captured = await applyOutputCaptureOffThread(result.output, task.output.capture, scope.cancellation.token);
+                throwIfTaskInactive(scope);
                 result = { ...result, ...captured };
             } catch (error: any) {
+                throwIfTaskInactive(scope);
                 throw new Error(`Task '${task.id}' capture failed: ${error.message}`);
             }
         } else {
@@ -7809,15 +8050,18 @@ async function executeSingleTask(
                     result.output,
                     typeof result.stderr === 'string' ? result.stderr : ''
                 );
-                const diagnostics = applyDiagnosticsToCollection(
+                const diagnostics = await applyDiagnosticsToCollection(
                     combined,
                     task.output.diagnostics,
                     task,
                     actionId,
-                    interpolatedCwd ?? defaultWorkspace
+                    interpolatedCwd ?? defaultWorkspace,
+                    scope.cancellation.token,
+                    () => throwIfTaskInactive(scope)
                 );
                 runLogCollector?.recordDiagnostics(task.id, diagnostics);
             } catch (error: any) {
+                throwIfTaskInactive(scope);
                 throw new Error(`Task '${task.id}' diagnostics failed: ${error.message}`);
             }
         } else {
@@ -8596,7 +8840,14 @@ async function handleInputBox(task: any, token?: vscode.CancellationToken): Prom
             extractRe = undefined;
         }
         if (extractRe && typeof task.value === 'string') {
-            const match = task.value.match(extractRe);
+            const source = task.value;
+            let match: RegExpMatchArray | null = null;
+            try {
+                match = runWithRegexBudget(task.extractPattern, () => source.match(extractRe!));
+            } catch (error: any) {
+                // 시간 초과도 추출 실패와 같게 빈 값으로 시작하되, 이유는 남긴다.
+                outputChannel.appendLine(`[Warning] Task '${task.id}' extractPattern was stopped, so the input starts empty: ${error?.message ?? error}`);
+            }
             if (match) {
                 initialValue = match[1] !== undefined ? match[1] : match[0];
             }
@@ -8623,7 +8874,22 @@ async function handleInputBox(task: any, token?: vscode.CancellationToken): Prom
             const invalidMessage = typeof task.validateMessage === 'string' && task.validateMessage.length > 0
                 ? task.validateMessage
                 : t('입력 형식이 올바르지 않습니다.', 'Input does not match the required format.');
-            options.validateInput = (input: string) => (validateRe!.test(input) ? undefined : invalidMessage);
+            const validatePattern = task.validatePattern;
+            const timeoutMessage = t(
+                'validatePattern 정규식이 시간 제한을 넘겨 입력을 확인할 수 없습니다. Esc로 취소한 뒤 actions.json의 패턴을 단순하게 고치세요.',
+                'The validatePattern regex exceeded its time limit, so the input cannot be checked. Press Esc to cancel, then simplify the pattern in actions.json.'
+            );
+            // 한 번 시간을 넘긴 패턴은 입력이 바뀔 때마다 다시 호스트를 붙잡지 않도록 다시 돌리지 않는다.
+            let validateTimedOut = false;
+            options.validateInput = (input: string) => {
+                if (validateTimedOut) { return timeoutMessage; }
+                try {
+                    return runWithRegexBudget(validatePattern, () => validateRe!.test(input)) ? undefined : invalidMessage;
+                } catch {
+                    validateTimedOut = true;
+                    return timeoutMessage;
+                }
+            };
         }
     }
 
@@ -10348,7 +10614,7 @@ export async function confirmImportInvalidActionsBackup(
     const cancelItem: vscode.MessageItem = { title: cancelLabel, isCloseAffordance: true };
     const choice = await vscode.window.showWarningMessage(
         t(
-            `기존 actions.json이 유효하지 않아 그대로 병합할 수 없습니다. 원본을 ${path.basename(backupPath)}로 백업하고 가져온 액션만 저장할 수 있습니다.`,
+            `기존 actions.json이 유효하지 않아 그대로 병합할 수 없습니다. 원본을 백업 파일 ${path.basename(backupPath)}에 저장하고 가져온 액션만 저장할 수 있습니다.`,
             `The existing actions.json is invalid and cannot be merged as-is. TaskHub can back it up to ${path.basename(backupPath)} and save only the imported actions.`
         ),
         { modal: true, detail: invalidReason },
@@ -11123,8 +11389,45 @@ export function activate(context: vscode.ExtensionContext) {
     // first `getChildren` call the TreeView would do anyway. Single context
     // subscription disposes every entry on deactivate, regardless of partial
     // state in the map.
+    // 이관은 설치 폴더 검색·복사가 들어가므로 활성화를 기다리게 하지 않는다. 그동안
+    // 현재 설치 폴더의 옛 파일은 그대로 탐색되고, 끝나면 목록을 한 번 다시 읽는다.
+    const personalDirForMigration = personalPresetsDir(context.globalStorageUri.fsPath);
+    const processedPresetSources = context.globalState.get<string[]>(MIGRATED_LEGACY_PRESETS_KEY, []);
+    void migrateLegacyExtensionPresets(
+        context.extensionPath,
+        context.extension.id,
+        personalDirForMigration,
+        new Set(processedPresetSources)
+    ).then(async migration => {
+        if (migration.processedSources.length > 0) {
+            // 다른 창이 그 사이 기록한 항목을 잃지 않도록 쓰기 직전에 다시 읽어 합친다.
+            const latest = context.globalState.get<string[]>(MIGRATED_LEGACY_PRESETS_KEY, []);
+            await context.globalState.update(MIGRATED_LEGACY_PRESETS_KEY, [...new Set([...latest, ...migration.processedSources])]);
+        }
+        for (const failure of migration.failed) {
+            outputChannel.appendLine(`[Preset Warning] Failed to copy personal preset '${failure.file}' to ${personalDirForMigration}: ${failure.message}`);
+        }
+        if (migration.processedSources.length > 0 && getSelectedPresetId()) {
+            refreshActionsAndCommands(context, mainViewProvider);
+        }
+        if (migration.copied.length > 0) {
+            const names = migration.copied.map(file => file.replace(/^preset-/, '').replace(/\.json$/, ''));
+            outputChannel.appendLine(`[Preset] Copied personal presets from the extension install folder to ${personalDirForMigration}: ${migration.copied.join(', ')}`);
+            const openFolderLabel = t('폴더 열기', 'Open Folder');
+            const pick = await vscode.window.showInformationMessage(t(
+                `확장 설치 폴더에 저장돼 업데이트 때 사라질 수 있던 개인 프리셋(${names.join(', ')})을 개인 프리셋 폴더로 복사했습니다. 프리셋 ID와 taskhub.preset.selected 설정은 그대로 쓸 수 있습니다.`,
+                `Copied personal presets (${names.join(', ')}) that were saved in the extension install folder, where updates could remove them, to your personal preset folder. Preset IDs and the taskhub.preset.selected setting keep working.`
+            ), openFolderLabel);
+            if (pick === openFolderLabel) {
+                void vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(personalDirForMigration));
+            }
+        }
+    }).catch((error: any) => {
+        outputChannel.appendLine(`[Preset Warning] Failed to copy personal presets to user storage: ${error?.message ?? error}`);
+    });
     syncActionCommands(context);
     context.subscriptions.push(new vscode.Disposable(() => disposeAllActionCommands()));
+    context.subscriptions.push(new vscode.Disposable(() => disposeRegexWorkerPool()));
     const workspaceLinkViewProvider = new LinkViewProvider();
     const favoriteViewProvider = new FavoriteViewProvider(context);
     const historyProvider = new HistoryProvider(context);
@@ -11328,6 +11631,24 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceLinksWatchers = registerWorkspaceFileWatchers('.vscode/links.json', () => workspaceLinkViewProvider.refresh());
     const workspaceFavoritesWatchers = registerWorkspaceFileWatchers('.vscode/favorites.json', () => favoriteViewProvider.refresh());
     context.subscriptions.push(workspaceActionsWatchers, workspaceLinksWatchers, workspaceFavoritesWatchers);
+    // 선택한 프리셋 파일을 편집·교체·삭제하면 캐시된 액션과 동적 명령도 따라간다.
+    // 선택이 없으면 프리셋 파일은 목록에 영향이 없으므로 다시 읽지 않는다.
+    const refreshIfPresetSelected = () => {
+        if (getSelectedPresetId()) { refreshActionsAndCommands(context, mainViewProvider); }
+    };
+    context.subscriptions.push(registerWorkspaceFileWatchers('.vscode/presets/preset-*.json', refreshIfPresetSelected));
+    try {
+        const personalDir = personalPresetsDir(context.globalStorageUri.fsPath);
+        fs.mkdirSync(personalDir, { recursive: true });
+        const personalPresetWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(personalDir), 'preset-*.json'));
+        const debouncedPersonalRefresh = debounce(refreshIfPresetSelected, 200);
+        personalPresetWatcher.onDidChange(debouncedPersonalRefresh.run);
+        personalPresetWatcher.onDidCreate(debouncedPersonalRefresh.run);
+        personalPresetWatcher.onDidDelete(debouncedPersonalRefresh.run);
+        context.subscriptions.push(new vscode.Disposable(() => { debouncedPersonalRefresh.cancel(); personalPresetWatcher.dispose(); }));
+    } catch (error: any) {
+        outputChannel.appendLine(`[Preset Warning] Cannot watch personal presets: ${error.message}`);
+    }
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.createAction', async () => {
         await runActionCreationWizard(context, mainViewProvider);
     }));
@@ -11853,12 +12174,22 @@ export function activate(context: vscode.ExtensionContext) {
         const workspaceFolder = actionWorkspaceFolderMap.get(actionId)
             ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
             ?? '';
-        const report = buildPreviewReport(fullActionItem, {
-            workspaceFolder,
-            extensionPath: context.extensionPath,
-            workspaceRoots: getWorkspaceRoots(),
-            builtinVariables: buildPreviewBuiltinVariables(workspaceFolder, context.extensionPath),
-        });
+        let report: string;
+        try {
+            report = buildPreviewReport(fullActionItem, {
+                workspaceFolder,
+                extensionPath: context.extensionPath,
+                workspaceRoots: getWorkspaceRoots(),
+                builtinVariables: buildPreviewBuiltinVariables(workspaceFolder, context.extensionPath),
+            });
+        } catch (error: any) {
+            // 조건 정규식의 시간 초과 등. 처리하지 않으면 명령이 아무 표시 없이 끝난다.
+            vscode.window.showErrorMessage(t(
+                `실행 미리보기를 만들지 못했습니다: ${error?.message ?? error}`,
+                `Could not build the run preview: ${error?.message ?? error}`
+            ));
+            return;
+        }
         const channel = getPreviewOutputChannel();
         channel.appendLine(report);
         channel.appendLine('');
@@ -12690,6 +13021,9 @@ export function activate(context: vscode.ExtensionContext) {
 
             const actionsPath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
             const hasExisting = fs.existsSync(actionsPath);
+            // 저장 직전에 대조할 기준. 선택을 기다리는 동안 바뀐 파일을 옛 내용으로 덮지 않는다.
+            let expectedContent: string | undefined;
+            let writtenBackupPath: string | undefined;
 
             // Step 2: Discover and select preset
             const presets = discoverPresets(context);
@@ -12703,7 +13037,9 @@ export function activate(context: vscode.ExtensionContext) {
                     label: p.name,
                     description: p.source === 'extension'
                         ? t('기본 제공', 'built-in')
-                        : t(`워크스페이스: ${p.workspaceName}`, `workspace: ${p.workspaceName}`),
+                        : p.source === 'user'
+                            ? t('개인', 'personal')
+                            : t(`워크스페이스: ${p.workspaceName}`, `workspace: ${p.workspaceName}`),
                     preset: p
                 })),
                 { placeHolder: t('적용할 프리셋을 선택하세요', 'Select a preset to apply') }
@@ -12737,6 +13073,7 @@ export function activate(context: vscode.ExtensionContext) {
                 let existingContent: string;
                 try {
                     existingContent = fs.readFileSync(actionsPath, 'utf-8');
+                    expectedContent = existingContent;
                 } catch (e: any) {
                     vscode.window.showErrorMessage(t(
                         `기존 actions.json을 읽을 수 없어 프리셋 적용을 중단합니다: ${e.message}`,
@@ -12751,13 +13088,14 @@ export function activate(context: vscode.ExtensionContext) {
                     existingInvalidReason = e.message;
                 }
                 if (existingInvalidReason) {
-                    const choice = await confirmApplyPresetBackup(actionsPath, existingInvalidReason);
+                    const backupPath = nextActionsBackupPath(actionsPath);
+                    const choice = await confirmApplyPresetBackup(actionsPath, existingInvalidReason, backupPath);
                     if (choice !== 'backup') {
                         return;
                     }
-                    const backupPath = `${actionsPath}.bak`;
                     try {
-                        fs.writeFileSync(backupPath, existingContent, 'utf-8');
+                        writeActionsBackupSync(backupPath, existingContent);
+                        writtenBackupPath = backupPath;
                     } catch (backupErr: any) {
                         vscode.window.showErrorMessage(t(
                             `백업 파일 작성에 실패하여 프리셋 적용을 중단합니다: ${backupErr.message}`,
@@ -12821,6 +13159,20 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
             // Step 5: Save
+            if (!actionsFileUnchangedSince(actionsPath, expectedContent)) {
+                const backupNote = writtenBackupPath
+                    ? t(` 앞서 만든 백업 ${path.basename(writtenBackupPath)}은(는) 그대로 남아 있습니다.`, ` The backup ${path.basename(writtenBackupPath)} created earlier is kept.`)
+                    : '';
+                const openChangedLabel = t('actions.json 열기', 'Open actions.json');
+                const pick = await vscode.window.showWarningMessage(t(
+                    `프리셋을 적용하는 동안 다른 곳에서 actions.json이 바뀌어 저장하지 않았습니다. 바뀐 내용을 확인한 뒤 프리셋을 다시 적용하세요.${backupNote}`,
+                    `actions.json was changed elsewhere while the preset was being applied, so nothing was saved. Review the change and apply the preset again.${backupNote}`
+                ), ...(fs.existsSync(actionsPath) ? [openChangedLabel] : []));
+                if (pick === openChangedLabel) {
+                    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(actionsPath));
+                }
+                return;
+            }
             const vscodeDir = path.dirname(actionsPath);
             fs.mkdirSync(vscodeDir, { recursive: true });
             fs.writeFileSync(actionsPath, JSON.stringify(finalActions, null, 2) + '\n');
@@ -12881,11 +13233,11 @@ export function activate(context: vscode.ExtensionContext) {
 
             // Step 4: Choose save location
             const workspaceLabel = t('워크스페이스', 'Workspace');
-            const extensionLabel = t('확장 프로그램', 'Extension');
+            const personalLabel = t('개인', 'Personal');
             const customLabel = t('사용자 지정 위치', 'Custom location');
             const saveLocation = await vscode.window.showQuickPick([
                 { label: workspaceLabel, description: t('.vscode/presets/에 저장 (Git으로 공유)', 'Save to .vscode/presets/ (shared via Git)') },
-                { label: extensionLabel, description: t('확장 프로그램 presets/ 폴더에 저장', 'Save to extension presets/ folder') },
+                { label: personalLabel, description: t('이 VS Code에만 저장 (확장을 업데이트해도 유지)', 'Only on this VS Code (kept across extension updates)') },
                 { label: customLabel, description: t('파일 위치 직접 선택', 'Choose a file location') }
             ], { placeHolder: t('프리셋을 어디에 저장할까요?', 'Where to save this preset?') });
 
@@ -12908,8 +13260,8 @@ export function activate(context: vscode.ExtensionContext) {
                 const presetsDir = path.join(folder.uri.fsPath, '.vscode', 'presets');
                 fs.mkdirSync(presetsDir, { recursive: true });
                 targetPath = path.join(presetsDir, fileName);
-            } else if (saveLocation.label === extensionLabel) {
-                const presetsDir = path.join(context.extensionPath, 'presets');
+            } else if (saveLocation.label === personalLabel) {
+                const presetsDir = personalPresetsDir(context.globalStorageUri.fsPath);
                 fs.mkdirSync(presetsDir, { recursive: true });
                 targetPath = path.join(presetsDir, fileName);
             } else {
@@ -13129,7 +13481,7 @@ export function activate(context: vscode.ExtensionContext) {
                 existingInvalidReason = e.message;
             }
             if (existingInvalidReason) {
-                const backupPath = `${actionsPath}.bak`;
+                const backupPath = nextActionsBackupPath(actionsPath);
                 const resolution = await confirmImportInvalidActionsBackup(
                     actionsPath,
                     backupPath,
@@ -13143,7 +13495,7 @@ export function activate(context: vscode.ExtensionContext) {
                     existingActions = resolution.actions;
                 } else {
                     try {
-                        fs.writeFileSync(backupPath, resolution.content, 'utf-8');
+                        writeActionsBackupSync(backupPath, resolution.content);
                     } catch (backupErr: any) {
                         vscode.window.showErrorMessage(t(
                             `백업 파일 작성에 실패하여 가져오기를 중단합니다: ${backupErr.message}`,

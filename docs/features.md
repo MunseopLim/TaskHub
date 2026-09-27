@@ -174,6 +174,7 @@ JSON Editor는 다음 규칙으로 사용자 변경을 보호합니다.
 - **복구 한도**: 최신 20개·총 32MB 중 먼저 닿는 한도를 적용해 오래된 항목부터 제거합니다. 단일 스냅샷이 총량보다 커도 그 항목 하나는 남깁니다.
 - **타입 보존과 변환**: 기존 문자열은 문자열로, 숫자·불리언·`null`은 원래 타입으로 commit합니다. 배열도 항목별로 적용하며 새 빈 항목은 주변 타입을 따릅니다. `a→s`·`s→a`와, 손실 없는 경우에만 보이는 `s→#`·`#→s`로 의도적인 변환을 수행합니다.
 - **외부 변경 감지**: dirty가 아니면 자동으로 다시 읽고, dirty면 *다시 읽기 / 현재 편집 유지*를 묻습니다.
+- **저장 실패 시 원본 보존**: 디스크 공간 부족 등으로 저장 중 쓰기가 실패하면 원본 파일 내용을 그대로 되돌리고, 원본이 바뀌지 않았다고 알립니다. 표의 편집 내용은 남아 있으므로 원인을 해결한 뒤 다시 저장할 수 있습니다. 되돌리기마저 실패하면 파일이 손상됐을 수 있다고 따로 알립니다. 이때는 JSON Editor를 닫지 말고 원인을 해결한 뒤 다시 저장하면 파일이 복구됩니다. 기존 파일의 링크와 권한은 유지합니다.
 
 #### 기타 단축키
 
@@ -958,8 +959,13 @@ Preset 기능을 사용하면 프로젝트 환경별(integration, hil 등) actio
 
 Preset 파일은 다음 위치에서 자동으로 발견됩니다:
 
-- **Extension Preset** (`presets/preset-*.json`): 확장 프로그램에 번들로 포함된 팀 공통 preset
+- **Extension Preset** (`presets/preset-*.json`): 확장 프로그램에 번들로 포함된 preset (읽기 전용)
+- **Personal Preset** (개인 프리셋 폴더의 `preset-*.json`): **프리셋으로 저장**에서 **Personal**(한국어 UI: 개인)을 고르면 저장되며, 확장을 업데이트해도 유지됩니다. 폴더는 VS Code 사용자 데이터 폴더 아래 `User/globalStorage/munseop.taskhub/presets/`입니다(예: macOS `~/Library/Application Support/Code/User/globalStorage/munseop.taskhub/presets/`, Windows `%APPDATA%\Code\User\globalStorage\munseop.taskhub\presets\`, Linux `~/.config/Code/User/globalStorage/munseop.taskhub/presets/`). Settings Sync로 동기화되지 않으므로 다른 PC와 나누려면 Workspace preset을 쓰세요. ID는 번들 preset과 같은 형식(`preset-mine.json` → `mine`)이고, 같은 ID면 개인 preset이 우선합니다.
 - **Workspace Preset** (`.vscode/presets/preset-*.json`): 프로젝트별 preset (Git으로 공유 가능)
+
+이전 버전에서 *Extension* 위치로 저장한 개인 preset은 확장 설치 폴더에 있어 업데이트 뒤 사라질 수 있었습니다. 활성화 뒤 백그라운드에서 현재·이전 설치 폴더에 남아 있는 이런 파일을 개인 프리셋 폴더로 복사하고, 옮긴 이름과 **폴더 열기** 버튼을 알립니다. 같은 이름이면 가장 최근 파일만 옮기며, 그 복사가 실패하면 오래된 사본으로 대신하지 않고 다음 활성화에 다시 시도합니다. 개인 프리셋 폴더의 기존 파일은 덮어쓰지 않으며 원본도 지우지 않습니다. 한 번 옮긴 원본은 기록해 두므로, 옮긴 뒤 개인 프리셋 폴더에서 지우거나 이름을 바꾼 preset이 다시 복사되거나 설치 폴더의 원본으로 되살아나지 않습니다. 이미 정리된 이전 설치 폴더의 파일은 복구할 수 없습니다.
+
+선택한 preset 파일을 편집·교체·삭제하면 Actions 목록과 단축키용 `taskhub.runAction.<id>` 명령이 자동으로 다시 로드됩니다.
 
 ### 선택 설정과 파일에 적용하기
 
@@ -970,7 +976,7 @@ Preset 파일은 다음 위치에서 자동으로 발견됩니다:
 | 설정에서 `taskhub.preset.selected` 지정 | 프리셋을 Actions 목록에 병합해 표시합니다. `.vscode/actions.json`을 수정하지 않으므로 프리셋 파일의 변경을 공유할 수 있습니다. |
 | **TaskHub: 프리셋 적용** | 선택한 프리셋을 `.vscode/actions.json`에 복사하거나 병합합니다. 이후에는 복사된 워크스페이스 액션을 편집합니다. |
 
-선택 ID는 확장 번들 `presets/preset-example.json`이면 `example`, 워크스페이스의
+선택 ID는 확장 번들 `presets/preset-example.json`이면 `example`, 개인 preset `preset-mine.json`이면 `mine`, 워크스페이스의
 `.vscode/presets/preset-integration.json`이면 **`워크스페이스폴더이름:integration`**입니다.
 예를 들어 VS Code 탐색기에 표시된 폴더 이름이 `firmware`일 때 `.vscode/settings.json`은 다음과 같습니다.
 
@@ -999,7 +1005,9 @@ ID 충돌 시 [소스 병합 우선순위](#액션-소스와-병합-우선순위
    - **Keep existing**: 기존 actions 우선, 충돌하지 않는 preset actions만 추가
    - **Use preset**: Preset actions 우선, 충돌하지 않는 기존 actions만 유지
 
-> **데이터 보호 (v0.4.33부터)**: 기존 `actions.json`이 JSON 파싱 또는 스키마 검증에 실패하면 *교체 / 병합* 선택 직전에 *손상된 파일 백업 후 계속 / 취소* 모달이 뜹니다. 백업을 선택하면 원본이 `actions.json.bak`으로 옮겨진 뒤 빈 배열로 진행되어, 손상된 파일을 무방비로 덮어쓰지 않습니다. (*액션 가져오기*와 같은 보호 절차)
+> **데이터 보호 (v0.4.33부터)**: 기존 `actions.json`이 JSON 파싱 또는 스키마 검증에 실패하면 *교체 / 병합* 선택 직전에 *손상된 파일 백업 후 계속 / 취소* 모달이 뜹니다. 백업을 선택하면 원본을 백업 파일에 복사한 뒤 빈 배열로 진행되어, 손상된 파일을 무방비로 덮어쓰지 않습니다. (*액션 가져오기*와 같은 보호 절차) 백업 파일은 `actions.json.bak`이며, 이미 있으면 기존 백업을 보존하고 `actions.json.1.bak`처럼 다음 번호를 씁니다. 모달에 실제 이름이 표시됩니다. 백업 이름에 파일·링크가 이미 있으면 그것을 덮지 않습니다.
+>
+> 프리셋을 적용하는 동안 `actions.json`이 다른 편집기·창·도구에서 바뀌거나 새로 생기거나 지워지면, 이전에 읽은 내용으로 덮지 않고 저장을 중단합니다. 알림의 **actions.json 열기**로 바뀐 내용을 확인한 뒤 다시 적용하세요. 앞서 만든 백업은 남아 있습니다.
 
 **2. Preset 저장하기**
 
@@ -1008,10 +1016,10 @@ ID 충돌 시 [소스 병합 우선순위](#액션-소스와-병합-우선순위
 1. Preset ID 입력 (예: integration, hil)
 2. 저장 위치 선택:
    - **Workspace**: `.vscode/presets/`에 저장 (Git으로 공유)
-   - **Extension**: Extension `presets/` 폴더에 저장
+   - **Personal** (한국어 UI: 개인): 개인 프리셋 폴더에 저장 (이 VS Code에서만 사용, 확장 업데이트 후에도 유지)
    - **Custom location**: 원하는 위치에 파일로 저장
 
-> **덮어쓰기 보호 (v0.4.33부터)**: *Workspace / Extension* 위치에서 같은 ID의 preset 파일이 이미 존재하면 modal *덮어쓰기 / 기존 파일 열기* 가 뜹니다. *Custom location*은 `showSaveDialog`가 OS 레벨 덮어쓰기 confirm을 자동으로 띄우므로 별도 prompt가 없습니다. 같은 ID로 두 번 저장해 이전 preset이 조용히 사라지던 동작을 차단합니다.
+> **덮어쓰기 보호 (v0.4.33부터)**: *Workspace / Personal* 위치에서 같은 ID의 preset 파일이 이미 존재하면 modal *덮어쓰기 / 기존 파일 열기* 가 뜹니다. *Custom location*은 `showSaveDialog`가 OS 레벨 덮어쓰기 confirm을 자동으로 띄우므로 별도 prompt가 없습니다. 같은 ID로 두 번 저장해 이전 preset이 조용히 사라지던 동작을 차단합니다.
 
 ### Preset 파일 포맷
 

@@ -17,6 +17,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import type { OutputCapture, SwitchTaskBranch, Task, TaskCondition } from './schema';
+import { USER_REGEX_HOST_THREAD_MAX_MS, regexBudgetForInput, runWithRegexBudget } from './regexBudget';
 import {
     BUILTIN_VARIABLE_NAMES,
     type BuiltinVariableName,
@@ -334,7 +335,7 @@ export function applyOutputCapture(
             } catch (e: any) {
                 throw new Error(`Capture '${name}' has invalid regex: ${e.message}`);
             }
-            const m = output.match(re);
+            const m = runWithRegexBudget(rule.regex, () => output.match(re), regexBudgetForInput(output.length));
             if (m) {
                 // Default group: 1 if the pattern has capture groups, otherwise 0
                 // (full match). Explicit out-of-range group is silently skipped.
@@ -1041,13 +1042,18 @@ export function evaluateTaskCondition(when: TaskCondition | undefined, resolved:
     if (typeof when.equals === 'string') { return resolved === when.equals; }
     if (typeof when.notEquals === 'string') { return resolved !== when.notEquals; }
     if (typeof when.matches === 'string') {
+        let re: RegExp;
         try {
-            return new RegExp(when.matches).test(resolved);
+            re = new RegExp(when.matches);
         } catch {
             // 잘못된 패턴은 Doctor 가 잡는다. 런타임에서 던지면 액션 전체가
             // 실패하므로, 여기서는 "맞지 않음" 으로 본다.
             return false;
         }
+        // 시간 초과는 "맞지 않음"으로 삼키지 않는다. 조용히 건너뛰면 원인을 알 수 없다.
+        // 호스트 스레드에서 돌므로 입력 길이와 관계없는 절대 상한만 준다.
+        const pattern = when.matches;
+        return runWithRegexBudget(pattern, () => re.test(resolved), USER_REGEX_HOST_THREAD_MAX_MS);
     }
     if (Array.isArray(when.in)) { return when.in.some(candidate => candidate === resolved); }
     return true;

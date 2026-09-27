@@ -152,9 +152,19 @@ function showSaveSuccess(fileName: string): void {
 }
 
 function showSaveFailure(fileName: string, error: any): void {
+    if (error instanceof JsonSaveRestoreError) {
+        vscode.window.showErrorMessage(t(
+            `JSON 저장 실패 (${fileName}): ${jsonEditorErrorDetail(error.writeError)}. 원본 내용도 되돌리지 못해 파일이 손상됐을 수 있습니다. JSON Editor를 닫지 마세요. 편집 내용이 여기에만 남아 있으며, 디스크 공간과 권한을 확인한 뒤 다시 저장하면 파일이 복구됩니다. (되돌리기 오류: ${jsonEditorErrorDetail(error.restoreError)})`,
+            `Failed to save JSON (${fileName}): ${jsonEditorErrorDetail(error.writeError)}. The original content could not be restored either, so the file may be damaged. Do not close the JSON Editor: your edits exist only here. Check disk space and permissions, then save again to repair the file. (Restore error: ${jsonEditorErrorDetail(error.restoreError)})`
+        ));
+        return;
+    }
+    // 이 경로의 실패는 쓰기 전에 멈췄거나 쓰던 내용을 원본으로 되돌린 경우다.
+    const detail = jsonEditorErrorDetail(error);
+    const sentence = /[.!?。]$/.test(detail) ? detail : `${detail}.`;
     vscode.window.showErrorMessage(t(
-        `JSON 저장 실패 (${fileName}): ${jsonEditorErrorDetail(error)}`,
-        `Failed to save JSON (${fileName}): ${jsonEditorErrorDetail(error)}`
+        `JSON 저장 실패 (${fileName}): ${sentence} 원본 파일은 바뀌지 않았고 편집 내용은 유지됩니다.`,
+        `Failed to save JSON (${fileName}): ${sentence} The original file is unchanged and your edits are kept.`
     ));
 }
 
@@ -329,7 +339,8 @@ export const JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE = 64 * 1024 * 1024;
  * 파일의 SHA-256도 확인한다. 문자열 전체를 다시 만들거나 파싱하지는 않는다.
  * baselineMtimeMs 는 "현재 편집 유지" 시 외부 버전으로도 옮겨지므로 쓸 수 없다.
  *
- * 기존 파일의 링크와 권한을 유지하는 비원자적 저장이다. 검사 뒤 쓰기까지
+ * 기존 파일의 링크와 권한을 유지하는 비원자적 저장이다. 쓰기 실패 시 원본 바이트는
+ * 되돌리지만(`writeJsonWithFingerprint`), 검사 뒤 쓰기까지
  * 다른 프로세스의 수정을 격리하지는 않는다. Windows 이외의 메타데이터 비교는
  * 내용의 암호학적 증명이 아니며 같은 inode의 write~fstat 경합이 남는다.
  */
@@ -354,13 +365,73 @@ function rememberVerifiedSaveTarget(filePath: string, written: fs.BigIntStats, c
         : undefined;
 }
 
-/** 실제 쓴 fd의 상태를 닫기 전에 잡아, 나중의 path stat으로 외부 파일을 인증하지 않는다. */
-function writeJsonWithFingerprint(filePath: string, text: string): { written?: fs.BigIntStats; statError?: unknown; contentHash: string } {
+/** 쓰기 실패 뒤 원본 바이트까지 되돌리지 못했다. 파일이 손상됐을 수 있다. */
+export class JsonSaveRestoreError extends Error {
+    constructor(readonly writeError: unknown, readonly restoreError: unknown) {
+        super(`${jsonEditorErrorDetail(writeError)}; restore failed: ${jsonEditorErrorDetail(restoreError)}`);
+        this.name = 'JsonSaveRestoreError';
+    }
+}
+
+/** 파일 위치를 옮기지 않는 pread로 fd 전체를 읽는다. */
+function readWholeFd(fd: number): Buffer {
+    const size = fs.fstatSync(fd).size;
+    const buffer = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+        const read = fs.readSync(fd, buffer, offset, size - offset, offset);
+        if (read === 0) { break; }
+        offset += read;
+    }
+    return offset === size ? buffer : buffer.subarray(0, offset);
+}
+
+/** 원본이 차지하던 블록 위에 다시 쓰고 원래 길이로 자른다. */
+function restoreOriginalBytes(fd: number, original: Buffer): void {
+    let offset = 0;
+    while (offset < original.length) {
+        offset += fs.writeSync(fd, original, offset, original.length - offset, offset);
+    }
+    fs.ftruncateSync(fd, original.length);
+}
+
+/**
+ * 실제 쓴 fd의 상태를 닫기 전에 잡아, 나중의 path stat으로 외부 파일을 인증하지 않는다.
+ *
+ * 링크와 권한을 유지하려고 같은 inode에 쓰지만, 먼저 truncate하지 않는다. 원본을
+ * 읽어 둔 뒤 앞에서부터 덮어쓰고 마지막에 길이를 맞추므로, 쓰기가 실패하면 원본이
+ * 쓰던 블록에 원래 바이트를 되돌릴 수 있다. 테스트가 실패 주입에 쓰도록 export한다.
+ */
+export function writeJsonWithFingerprint(filePath: string, text: string): { written?: fs.BigIntStats; statError?: unknown; contentHash: string } {
     verifiedSaveTarget = undefined;
     const contentHash = crypto.createHash('sha256').update(text, 'utf8').digest('hex');
-    const fd = fs.openSync(filePath, 'w');
+    let fd: number;
+    let created = false;
     try {
-        fs.writeFileSync(fd, text, 'utf8');
+        fd = fs.openSync(filePath, 'r+');
+    } catch (openError) {
+        if ((openError as NodeJS.ErrnoException).code !== 'ENOENT') { throw openError; }
+        fd = fs.openSync(filePath, 'w');
+        created = true;
+    }
+    try {
+        // 새로 만든 파일은 되돌릴 원본이 없다.
+        const original = created ? undefined : readWholeFd(fd);
+        try {
+            fs.writeFileSync(fd, text, 'utf8');
+            // 줄어든 경우에만 자른다. 같은 길이의 truncate도 시각을 바꾸는 OS가 있다.
+            const byteLength = Buffer.byteLength(text, 'utf8');
+            if (original && original.length > byteLength) { fs.ftruncateSync(fd, byteLength); }
+        } catch (writeError) {
+            if (original) {
+                try {
+                    restoreOriginalBytes(fd, original);
+                } catch (restoreError) {
+                    throw new JsonSaveRestoreError(writeError, restoreError);
+                }
+            }
+            throw writeError;
+        }
         try {
             return { written: fs.fstatSync(fd, { bigint: true }), contentHash };
         } catch (statError) {

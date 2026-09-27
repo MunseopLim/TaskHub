@@ -353,6 +353,15 @@ suite('HexParser Test Suite', () => {
             const arr = toFlatArray(result, 0, 4, 0x00);
             assert.strictEqual(arr[1], 0x00);
         });
+
+        test('희소 경로와 조밀 경로가 범위 밖 항목을 똑같이 제외한다', () => {
+            const data = new Map<number, number>([[9, 0x09], [10, 0x0A], [13, 0x0D], [14, 0x0E]]);
+            const result = { format: 'intel' as const, data, minAddress: 9, maxAddress: 14, byteCount: data.size };
+            // 길이 8 > 항목 4 → 항목 순회, 길이 2 < 항목 4 → 주소 순회.
+            assert.deepStrictEqual([...toFlatArray(result, 8, 8, 0)], [0, 0x09, 0x0A, 0, 0, 0x0D, 0x0E, 0]);
+            assert.deepStrictEqual([...toFlatArray(result, 10, 2, 0)], [0x0A, 0]);
+            assert.deepStrictEqual([...toFlatArray(result, 13, 3, 0)], [0x0D, 0x0E, 0]);
+        });
     });
 
     suite('hasData', () => {

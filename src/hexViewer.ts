@@ -471,17 +471,21 @@ export interface HexViewerPayload {
 export function buildHexViewerPayload(result: HexParseResult): HexViewerPayload {
     const totalSize = result.maxAddress - result.minAddress + 1;
     assertWithinHexViewerSpan(totalSize);
-    const data = toFlatArray(result, result.minAddress, totalSize);
 
     if (result.rawBuffer) {
         // Binary format: all bytes have data, no gap bitmap needed
-        return { data };
+        return { data: toFlatArray(result, result.minAddress, totalSize) };
     }
+    // 바이트 배열과 gap 비트맵을 실제 데이터 항목 한 번 순회로 함께 채운다.
+    // 주소 범위 전체를 두 번 돌며 `Map.get`/`has` 하던 비용이 항목 수에 비례한다.
+    const data = new Uint8Array(totalSize);
+    data.fill(0xFF);
     const gap = new Uint8Array(Math.ceil(totalSize / 8));
-    for (let i = 0; i < totalSize; i++) {
-        if (result.data.has(result.minAddress + i)) {
-            gap[Math.floor(i / 8)] |= (1 << (i % 8));
-        }
+    for (const [address, value] of result.data) {
+        const offset = address - result.minAddress;
+        if (offset < 0 || offset >= totalSize) { continue; }
+        data[offset] = value;
+        gap[offset >>> 3] |= 1 << (offset & 7);
     }
     return { data, gap };
 }

@@ -2,6 +2,9 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import {
 	interpolatePipelineVariables,
+	nextActionsBackupPath,
+	writeActionsBackupSync,
+	actionsFileUnchangedSince,
 	sanitizeInterpolatedValue,
 	resolveWithinWorkspace,
 	resolveArchiveTaskPath,
@@ -3935,6 +3938,111 @@ suite('Extension Test Suite', () => {
 			} finally {
 				(vscode.window as any).showWarningMessage = original;
 			}
+		});
+
+		test('names the backup path chosen by the caller', async () => {
+			const original = vscode.window.showWarningMessage;
+			let captured: any[] = [];
+			(vscode.window as any).showWarningMessage = async (...args: any[]) => {
+				captured = args;
+				return undefined;
+			};
+			try {
+				await confirmApplyPresetBackup('/work/.vscode/actions.json', 'bad', '/work/.vscode/actions.json.2.bak');
+				assert.ok(captured[0].includes('actions.json.2.bak'), captured[0]);
+			} finally {
+				(vscode.window as any).showWarningMessage = original;
+			}
+		});
+	});
+
+	suite('actions.json 백업과 저장 전 대조', () => {
+		let tempDir: string;
+		let workspaceRoot: string;
+		let vscodeDir: string;
+		let actionsPath: string;
+		let outsideFile: string;
+
+		setup(() => {
+			tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-backup-')));
+			workspaceRoot = path.join(tempDir, 'ws');
+			vscodeDir = path.join(workspaceRoot, '.vscode');
+			fs.mkdirSync(vscodeDir, { recursive: true });
+			actionsPath = path.join(vscodeDir, 'actions.json');
+			fs.writeFileSync(actionsPath, 'broken source');
+			outsideFile = path.join(tempDir, 'outside.txt');
+			fs.writeFileSync(outsideFile, 'outside sentinel');
+		});
+
+		teardown(() => {
+			try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
+		});
+
+		function trySymlink(target: string, linkPath: string, type: fs.symlink.Type): boolean {
+			try {
+				fs.symlinkSync(target, linkPath, type);
+				return fs.lstatSync(linkPath).isSymbolicLink();
+			} catch {
+				return false;
+			}
+		}
+
+		test('기존 백업은 보존하고 다음 이름에 새로 쓴다', () => {
+			fs.writeFileSync(`${actionsPath}.bak`, 'older backup');
+			const backupPath = nextActionsBackupPath(actionsPath);
+			assert.strictEqual(backupPath, `${actionsPath}.1.bak`);
+			writeActionsBackupSync(backupPath, 'broken source');
+			assert.strictEqual(fs.readFileSync(`${actionsPath}.bak`, 'utf8'), 'older backup');
+			assert.strictEqual(fs.readFileSync(backupPath, 'utf8'), 'broken source');
+		});
+
+		test('백업 이름의 링크는 따라가지 않고 워크스페이스 밖 파일을 유지한다', function () {
+			if (!trySymlink(outsideFile, `${actionsPath}.bak`, 'file')) { this.skip(); }
+			const backupPath = nextActionsBackupPath(actionsPath);
+			assert.notStrictEqual(backupPath, `${actionsPath}.bak`, '링크가 있는 이름은 고르지 않는다');
+			writeActionsBackupSync(backupPath, 'broken source');
+			assert.strictEqual(fs.readFileSync(outsideFile, 'utf8'), 'outside sentinel');
+		});
+
+		test('끊어진 링크도 이미 있는 이름으로 본다', function () {
+			if (!trySymlink(path.join(tempDir, 'missing.txt'), `${actionsPath}.bak`, 'file')) { this.skip(); }
+			assert.strictEqual(nextActionsBackupPath(actionsPath), `${actionsPath}.1.bak`);
+			assert.strictEqual(fs.existsSync(path.join(tempDir, 'missing.txt')), false);
+		});
+
+		test('고른 뒤 같은 이름이 생기면 덮어쓰지 않고 실패한다', function () {
+			const backupPath = nextActionsBackupPath(actionsPath);
+			if (!trySymlink(outsideFile, backupPath, 'file')) {
+				fs.writeFileSync(backupPath, 'raced file');
+			}
+			assert.throws(() => writeActionsBackupSync(backupPath, 'broken source'), /actions\.json\.bak/);
+			assert.strictEqual(fs.readFileSync(outsideFile, 'utf8'), 'outside sentinel');
+		});
+
+		test('.vscode 가 링크여도 실제 actions.json 옆에 새 파일로만 백업한다', function () {
+			// 본 저장도 같은 링크를 따라가므로 백업만 막으면 복구 흐름만 끊긴다.
+			const outsideDir = path.join(tempDir, 'outside-dir');
+			fs.mkdirSync(outsideDir);
+			fs.writeFileSync(path.join(outsideDir, 'actions.json.bak'), 'older backup');
+			fs.rmSync(vscodeDir, { recursive: true, force: true });
+			if (!trySymlink(outsideDir, vscodeDir, 'junction')) { this.skip(); }
+			const linkedActions = path.join(vscodeDir, 'actions.json');
+			fs.writeFileSync(linkedActions, 'broken source');
+			const backupPath = nextActionsBackupPath(linkedActions);
+			writeActionsBackupSync(backupPath, 'broken source');
+			assert.deepStrictEqual(fs.readdirSync(outsideDir).sort(), ['actions.json', 'actions.json.1.bak', 'actions.json.bak']);
+			assert.strictEqual(fs.readFileSync(path.join(outsideDir, 'actions.json.bak'), 'utf8'), 'older backup');
+		});
+
+		test('저장 직전 대조는 내용 변경·생성·삭제를 모두 감지한다', () => {
+			assert.strictEqual(actionsFileUnchangedSince(actionsPath, 'broken source'), true);
+			fs.writeFileSync(actionsPath, 'concurrent edit');
+			assert.strictEqual(actionsFileUnchangedSince(actionsPath, 'broken source'), false);
+			fs.rmSync(actionsPath);
+			assert.strictEqual(actionsFileUnchangedSince(actionsPath, 'broken source'), false);
+			assert.strictEqual(actionsFileUnchangedSince(actionsPath, undefined), true);
+			fs.writeFileSync(actionsPath, '[]');
+			assert.strictEqual(actionsFileUnchangedSince(actionsPath, undefined), false);
 		});
 	});
 

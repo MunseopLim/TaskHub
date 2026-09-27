@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE, JSON_EDITOR_SAVE_HASH_CHUNK_SIZE, RECOVERY_STATE_KEY, ROOT_ARRAY_KEY, assertDiskNumbersBeforeSave, jsonPanelRegistry, openJsonEditorFile } from '../jsonEditor';
+import { JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE, JSON_EDITOR_SAVE_HASH_CHUNK_SIZE, RECOVERY_STATE_KEY, ROOT_ARRAY_KEY, assertDiskNumbersBeforeSave, jsonPanelRegistry, openJsonEditorFile, writeJsonWithFingerprint } from '../jsonEditor';
 import { UnsupportedJsonNumberError } from '../jsonEditorUtils';
 
 /**
@@ -572,6 +572,83 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             (mutableFs as any).fstatSync = originalFstat;
         }
     }
+
+    /** fd 쓰기에서 앞부분만 쓴 뒤 ENOSPC 로 실패시킨다. */
+    async function saveWithPartialWriteFailure(fake: FakePanel, data: unknown, seq: number, failRestore = false): Promise<void> {
+        const originalWrite = fs.writeFileSync;
+        const originalWriteSync = fs.writeSync;
+        (mutableFs as any).writeFileSync = (target: fs.PathOrFileDescriptor, text: string, ...args: unknown[]) => {
+            if (typeof target !== 'number') { return (originalWrite as any)(target, text, ...args); }
+            (originalWrite as any)(target, text.slice(0, 3), ...args);
+            throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+        };
+        if (failRestore) {
+            (mutableFs as any).writeSync = () => {
+                throw Object.assign(new Error('EIO: i/o error, write'), { code: 'EIO' });
+            };
+        }
+        try {
+            await fake.send({ command: 'save', data, seq });
+        } finally {
+            (mutableFs as any).writeFileSync = originalWrite;
+            (mutableFs as any).writeSync = originalWriteSync;
+        }
+    }
+
+    test('저장 쓰기가 중간에 실패하면 원본 바이트를 그대로 되돌린다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-enospc.json', { value: 'original', rows: [1, 2, 3] });
+        const originalBytes = fs.readFileSync(filePath);
+        await openJsonEditorFile(makeContext(), filePath);
+        await saveWithPartialWriteFailure(fake, { value: 'much longer replacement '.repeat(20) }, 1);
+        assert.strictEqual(fake.posted.at(-1)?.success, false);
+        assert.ok(shownErrors.some(message => message.includes('ENOSPC') && /unchanged|바뀌지 않았/.test(message)), shownErrors.join('\n'));
+        assert.deepStrictEqual(fs.readFileSync(filePath), originalBytes, '원본 바이트와 길이가 그대로여야 한다');
+    });
+
+    test('원본보다 짧은 내용을 저장하면 남는 뒷부분을 잘라낸다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-shrink.json', { value: 'x'.repeat(4096) });
+        await openJsonEditorFile(makeContext(), filePath);
+        await fake.send({ command: 'save', data: { value: 'y' }, seq: 1 });
+        assert.strictEqual(fake.posted.at(-1)?.success, true);
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), { value: 'y' });
+    });
+
+    test('짧게 저장하다 길이 조정이 실패해도 원본을 되돌린다', () => {
+        const filePath = writeJson('save-truncate-fail.json', { value: 'x'.repeat(256) });
+        const originalBytes = fs.readFileSync(filePath);
+        const originalTruncate = fs.ftruncateSync;
+        let calls = 0;
+        (mutableFs as any).ftruncateSync = (...args: unknown[]) => {
+            if (calls++ === 0) { throw Object.assign(new Error('EIO: i/o error, ftruncate'), { code: 'EIO' }); }
+            return (originalTruncate as any)(...args);
+        };
+        try {
+            assert.throws(() => writeJsonWithFingerprint(filePath, '{"value":"y"}\n'), /EIO/);
+        } finally {
+            (mutableFs as any).ftruncateSync = originalTruncate;
+        }
+        assert.deepStrictEqual(fs.readFileSync(filePath), originalBytes);
+    });
+
+    test('없는 파일은 새로 만들어 저장한다', () => {
+        const filePath = path.join(tempDir, 'save-new-file.json');
+        const result = writeJsonWithFingerprint(filePath, '{"created":true}\n');
+        assert.ok(result.written);
+        assert.strictEqual(fs.readFileSync(filePath, 'utf8'), '{"created":true}\n');
+    });
+
+    test('원본 복원까지 실패하면 파일 손상 가능성을 알린다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('save-restore-fail.json', { value: 'original' });
+        await openJsonEditorFile(makeContext(), filePath);
+        await saveWithPartialWriteFailure(fake, { value: 'replacement' }, 1, true);
+        assert.strictEqual(fake.posted.at(-1)?.success, false);
+        const message = shownErrors.at(-1) ?? '';
+        assert.ok(message.includes('ENOSPC') && message.includes('EIO'), message);
+        assert.ok(/damaged|손상/.test(message), message);
+    });
 
     test('저장 전 해시 확인은 청크 사이에 이벤트 루프를 양보한다', async () => {
         const fake = installFakePanel();

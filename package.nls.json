@@ -2,6 +2,7 @@
   "_comment": "Default (English) manifest strings. Korean lives in package.nls.ko.json. VS Code substitutes %key% throughout package.json at load time; source strings must stay here rather than inline so the two locales cannot drift apart silently.",
   "extension.description": "A customizable sidebar for running tasks and workflows in VS Code.",
   "extension.untrustedWorkspaceDescription": "TaskHub can execute shell/command tasks defined in a workspace's .vscode/actions.json, so it is disabled in untrusted workspaces.",
+  "extension.virtualWorkspaceDescription": "TaskHub reads and writes workspace files such as .vscode/actions.json through the local file system and runs shell tasks and device tools, so it is disabled in virtual workspaces.",
   "view.actions": "Actions",
   "view.links": "Workspace Links",
   "view.favorites": "Favorite Files",

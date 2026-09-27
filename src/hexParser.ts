@@ -318,6 +318,17 @@ export function toFlatArray(result: HexParseResult, startAddress: number, length
     }
     const arr = new Uint8Array(length);
     arr.fill(fillByte);
+    // 희소한 결과는 주소 범위 대신 실제 데이터 항목만 돈다. 두 바이트뿐인
+    // 128MiB 구간을 1억 번 `Map.get` 하던 비용이 항목 수에 비례하게 된다.
+    if (result.data.size < length) {
+        const end = startAddress + length;
+        for (const [address, value] of result.data) {
+            if (address >= startAddress && address < end) {
+                arr[address - startAddress] = value;
+            }
+        }
+        return arr;
+    }
     for (let i = 0; i < length; i++) {
         const val = result.data.get(startAddress + i);
         if (val !== undefined) {

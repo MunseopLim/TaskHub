@@ -29,11 +29,14 @@ npm run test             # 유닛·통합·웹뷰 테스트 실행 (vscode-test)
 npm run watch            # 개발 시 watch 모드 (esbuild + tsc 병렬)
 ```
 
-esbuild 는 **번들 두 개**를 만든다 — 확장 호스트용 `dist/extension.js` 와 JSON Editor
-webview 의 로직 번들 `dist/jsonEditorWebview.js`. 후자가 없으면 JSON Editor 화면이
-통째로 비므로, 테스트를 직접 돌릴 때(`npm run test` 는 `pretest` 가 알아서 빌드한다)나
-`vscode-test` 를 수동으로 부를 때는 `node esbuild.js` 를 먼저 실행한다. 배경은
-[docs/architecture.md](docs/architecture.md) "webview 스크립트의 두 층" 참조.
+esbuild 는 **번들 세 개**를 만든다 — 확장 호스트용 `dist/extension.js`, JSON Editor
+webview 의 로직 번들 `dist/jsonEditorWebview.js`, 출력 캡처·진단의 사용자 정규식을 실행하는
+worker `dist/regexWorker.js`. 두 번째가 없으면 JSON Editor 화면이 통째로 비고, 세 번째가
+없으면 `output.capture`·`output.diagnostics`를 쓰는 태스크가 재설치 안내 오류로 실패한다.
+테스트를 직접 돌릴 때(`npm run test` 는 `pretest` 가 알아서 빌드한다)나 `vscode-test` 를
+수동으로 부를 때는 `node esbuild.js` 를 먼저 실행한다. 배경은
+[docs/architecture.md](docs/architecture.md) "webview 스크립트의 두 층"과 보안 절의 사용자
+정규식 항목 참조.
 
 ### CI 워크플로와 커밋 전 검증
 

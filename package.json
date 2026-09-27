@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.38",
+  "version": "0.8.39",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -21,6 +21,10 @@
     "untrustedWorkspaces": {
       "supported": false,
       "description": "%extension.untrustedWorkspaceDescription%"
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "%extension.virtualWorkspaceDescription%"
     }
   },
   "activationEvents": [
@@ -1403,7 +1407,6 @@
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0",
     "adm-zip": "^0.6.1",
-    "ajv": "^8.17.1",
     "esbuild": "^0.28.0",
     "eslint": "^10.0.0",
     "mocha": "^11.0.0",
@@ -1417,6 +1420,7 @@
     "glob": "^13.0.6"
   },
   "dependencies": {
+    "ajv": "^8.20.0",
     "proper-lockfile": "^4.1.2",
     "semver": "^7.8.5",
     "yauzl": "^3.4.0"

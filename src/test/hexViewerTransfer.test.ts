@@ -93,6 +93,33 @@ suite('Hex Viewer 데이터 전송', () => {
             assert.ok(has(16), 'offset 16 에 데이터가 있어야 한다');
         });
 
+        test('넓은 빈 구간은 주소 범위가 아니라 실제 항목 수에 비례해 준비한다', () => {
+            // 128MiB 구간 양 끝에만 데이터가 있다. 주소 범위를 두 번 돌며 조회하면 수 초가 걸렸다.
+            // 벽시계 대신 주소 조회 횟수로 판정해 느린 CI에서도 흔들리지 않게 한다.
+            let lookups = 0;
+            class CountingMap extends Map<number, number> {
+                get(key: number) { lookups++; return super.get(key); }
+                has(key: number) { lookups++; return super.has(key); }
+            }
+            const span = 128 * 1024 * 1024;
+            const sparse = {
+                format: 'intel' as const,
+                data: new CountingMap([[0, 0x11], [span - 1, 0x22]]),
+                minAddress: 0,
+                maxAddress: span - 1,
+                byteCount: 2,
+            };
+            const payload = buildHexViewerPayload(sparse);
+            assert.strictEqual(lookups, 0, '빈 주소마다 Map 을 조회하면 안 된다');
+            assert.strictEqual(payload.data.length, span);
+            assert.strictEqual(payload.data[0], 0x11);
+            assert.strictEqual(payload.data[span - 1], 0x22);
+            assert.strictEqual(payload.data[1], 0xFF, '빈 바이트는 0xFF 로 채운다');
+            assert.strictEqual(payload.gap![0], 0x01);
+            assert.strictEqual(payload.gap![payload.gap!.length - 1], 0x80);
+            assert.strictEqual(payload.gap!.subarray(1, -1).some(byte => byte !== 0), false);
+        });
+
         test('gap 비트맵 크기가 데이터 길이에 맞는다', () => {
             const parsed = parseIntelHex([':0400000001020304F2', ':00000001FF'].join('\n'));
             const payload = buildHexViewerPayload(parsed);
