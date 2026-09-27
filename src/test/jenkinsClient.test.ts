@@ -72,6 +72,45 @@ suite('Jenkins REST client', () => {
         });
     });
 
+    test('review regression: a pre-dispatch CA timeout leaves the server available for the next request', async () => {
+        const guard = new JenkinsTransportGuard();
+        const budget = { remaining: 2 };
+        const waiting = new JenkinsClient(configuration, { token, timeoutMs: 30, guard, budget });
+        let release!: () => void;
+        (waiting as unknown as { certificate(): Promise<undefined> }).certificate = () => new Promise(resolve => { release = () => resolve(undefined); });
+        try {
+            await assert.rejects(waiting.verify(), error => {
+                assert.ok(error instanceof JenkinsClientError);
+                assert.strictEqual(error.code, 'TIMEOUT'); assert.strictEqual(error.deferred, true); return true;
+            });
+            assert.strictEqual(requests.length, 0); assert.strictEqual(budget.remaining, 2);
+            handler = (_request, response) => json(response, { authenticated: true, name: 'developer' });
+            assert.strictEqual((await new JenkinsClient(configuration, { token, guard, budget }).verify()).authenticated, true);
+            assert.strictEqual(requests.length, 1); assert.strictEqual(budget.remaining, 1);
+        } finally { release(); }
+    });
+
+    test('POST dispatch evidence stays absent during local refusal and CA timeout but survives a lost response', async () => {
+        let dispatched = 0;
+        const mark = () => { dispatched++; };
+        const jobUrl = `${configuration.url}job/test/`;
+        await assert.rejects(new JenkinsClient(configuration, { token, budget: { remaining: 0 } }).trigger(jobUrl, {}, mark), errorCode('REQUEST_LIMIT'));
+        const abort = new AbortController(); abort.abort();
+        await assert.rejects(new JenkinsClient(configuration, { token, signal: abort.signal }).trigger(jobUrl, {}, mark), errorCode('CANCELLED'));
+        const guard = new JenkinsTransportGuard();
+        const waiting = new JenkinsClient(configuration, { token, timeoutMs: 30, guard });
+        let release!: () => void;
+        (waiting as unknown as { certificate(): Promise<undefined> }).certificate = () => new Promise(resolve => { release = () => resolve(undefined); });
+        try { await assert.rejects(waiting.trigger(jobUrl, {}, mark), errorCode('TIMEOUT')); }
+        finally { release(); }
+        assert.strictEqual(dispatched, 0); assert.strictEqual(requests.length, 0);
+        handler = () => {}; // An actual POST with no response must remain ambiguous and back off.
+        await assert.rejects(new JenkinsClient(configuration, { token, timeoutMs: 100, guard }).trigger(jobUrl, {}, mark), errorCode('TIMEOUT'));
+        assert.strictEqual(dispatched, 1); assert.strictEqual(requests.length, 1); assert.strictEqual(requests[0].method, 'POST');
+        await assert.rejects(new JenkinsClient(configuration, { token, guard }).trigger(jobUrl, {}, mark), errorCode('BACKOFF'));
+        assert.strictEqual(dispatched, 1); assert.strictEqual(requests.length, 1);
+    });
+
     test('normalizes an explicitly configured server and rejects URL credentials or query data', () => {
         assert.strictEqual(normalizeJenkinsServerUrl(' https://ci.example/jenkins '), 'https://ci.example/jenkins/');
         assert.strictEqual(normalizeJenkinsServerUrl('http://10.0.0.2:8080'), 'http://10.0.0.2:8080/');

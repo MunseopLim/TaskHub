@@ -14,6 +14,7 @@ export function jenkinsErrorLabel(code?: string): string {
         PERMISSION_LIMIT: t('권한 오류 추적 한도에 도달해 이 서버의 조회를 잠시 중지했습니다. 계정 권한을 확인해주세요.', 'The permission-error tracking limit was reached. Queries to this server are briefly paused; check account permissions.'),
         BUSY: t('조회 대기열이 가득 찼습니다. 잠시 후 다시 시도해주세요.', 'The request queue is full. Try again shortly.'),
         TIMEOUT: t('서버 응답 시간이 초과되었습니다. 연결 상태를 확인해주세요.', 'The server response timed out. Check connectivity.'),
+        JENKINS_SUBMISSION_PREPARATION_TIMEOUT: t('빌드 요청을 준비하는 동안 제한 시간을 초과했습니다. 서버 설정과 인증 정보를 확인해주세요.', 'Build submission preparation timed out. Check the server configuration and credentials.'),
         NETWORK_ERROR: t('서버에 연결하지 못했습니다. VPN·네트워크·인증서 설정을 확인해주세요.', 'Cannot connect to the server. Check VPN, network and certificate settings.'),
         INVALID_CA: t('CA 인증서를 읽거나 검증하지 못했습니다. PEM 파일을 확인해주세요.', 'Cannot read or validate the CA certificate. Check the PEM file.'),
         INSECURE_HTTP: t('HTTP 연결이 차단되었습니다. HTTPS를 사용하거나 서버 설정에서 평문 전송을 명시적으로 허용해주세요.', 'HTTP is blocked. Use HTTPS or explicitly allow unencrypted transport in server settings.'),
@@ -56,6 +57,7 @@ export function jenkinsStatusLabel(status: string): string {
         unreachable: t('조회 불가', 'Unavailable'), aborted: t('실행 취소', 'Aborted'), skipped: t('건너뜀', 'Skipped'),
         sha_mismatch: t('체크아웃 SHA 불일치', 'Checkout SHA mismatch'), sending: t('요청 전송 중', 'Submitting'),
         unconfirmed: t('전송 결과 미확인', 'Submission unconfirmed'), stopped: t('추적 중지', 'Tracking stopped'),
+        notSent: t('빌드 요청 전 중지', 'Not submitted'),
     };
     return Object.hasOwn(labels, status) ? labels[status] : labels.unknown;
 }

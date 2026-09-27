@@ -1,10 +1,10 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
-import { JenkinsClient } from '../jenkins/client';
+import { JenkinsClient, JenkinsClientError } from '../jenkins/client';
 import { JenkinsController, registerJenkins } from '../jenkins/controller';
 import * as jenkinsGit from '../jenkins/git';
 import { createRequest } from '../jenkins/model';
-import { JENKINS_REQUESTS_KEY, JENKINS_SERVERS_KEY, jenkinsSecretKey } from '../jenkins/storage';
+import { JenkinsStore, JENKINS_REQUESTS_KEY, JENKINS_SERVERS_KEY, jenkinsSecretKey } from '../jenkins/storage';
 import type { JenkinsJob, JenkinsRequest, JenkinsServer, TrackedJenkinsBuild } from '../jenkins/types';
 import { discoveryLabel, JenkinsTreeNode, JenkinsViewProvider } from '../providers/jenkinsViewProvider';
 
@@ -63,13 +63,14 @@ function iconId(item: vscode.TreeItem): string | undefined {
 }
 
 suite('Jenkins controller and results tree', () => {
-    for (const stage of ['persist', 'token'] as const) {
-        for (const action of ['stop', 'clear'] as const) {
-            test(`review regression: ${action} while awaiting pre-POST ${stage} prevents submission and resurrection`, async () => {
+    for (const stage of ['persist', 'token', 'post'] as const) {
+        for (const action of (stage === 'persist' ? ['stop', 'clear'] : ['stop', 'clear', 'fail']) as Array<'stop' | 'clear' | 'fail'>) {
+            test(`review regression: ${action} while awaiting ${stage === 'post' ? 'dispatched POST' : 'pre-POST ' + stage} preserves dispatch evidence without resurrection`, async () => {
                 const state = memoryState(); state.values.set(JENKINS_SERVERS_KEY, [servers[0]]);
                 const snapshot = jenkinsGit.readJenkinsGitSnapshot;
                 const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox;
                 const info = vscode.window.showInformationMessage;
+                const warning = vscode.window.showWarningMessage;
                 const list = JenkinsClient.prototype.listJobs; const get = JenkinsClient.prototype.getJob;
                 const recent = JenkinsClient.prototype.listRecentBuilds; const trigger = JenkinsClient.prototype.trigger;
                 const job: JenkinsJob = { name: 'test', fullName: 'test', url: `${servers[0].url}job/test/`, kind: 'job', buildable: true, parameters: [] };
@@ -77,8 +78,15 @@ suite('Jenkins controller and results tree', () => {
                 const waiting = new Promise<void>(resolve => { ready = resolve; });
                 const gate = new Promise<void>(resolve => { release = resolve; });
                 let pause = false; let calls = 0;
+                const messages: string[] = [];
                 const context = { globalState: state.memento, workspaceState: state.memento, subscriptions: [], secrets: {
-                    get: async () => { if (pause && stage === 'token') { ready(); await gate; } return 'fixture-token'; },
+                    get: async () => {
+                        if (pause && stage === 'token') {
+                            ready(); await gate;
+                            if (action === 'fail') { throw new JenkinsClientError('TIMEOUT', undefined, undefined, true); }
+                        }
+                        return 'fixture-token';
+                    },
                     onDidChange: () => new vscode.Disposable(() => {}),
                 } } as unknown as vscode.ExtensionContext;
                 let controller: JenkinsController | undefined;
@@ -92,18 +100,26 @@ suite('Jenkins controller and results tree', () => {
                         const values = await items as unknown[]; return options?.canPickMany ? values : values[0];
                     }) as typeof pick;
                     vscode.window.showInputBox = async () => '';
-                    vscode.window.showInformationMessage = (async (_message: string, _options: unknown, item?: string) => item) as typeof info;
+                    vscode.window.showInformationMessage = (async (message: string, _options: unknown, item?: string) => { messages.push(message); return item; }) as typeof info;
+                    vscode.window.showWarningMessage = (async (message: string) => { messages.push(message); }) as typeof warning;
                     JenkinsClient.prototype.listJobs = async () => [job];
                     JenkinsClient.prototype.getJob = async () => job;
                     JenkinsClient.prototype.listRecentBuilds = async () => [];
-                    JenkinsClient.prototype.trigger = async () => { calls++; return { queueUrl: `${servers[0].url}queue/item/1/` }; };
+                    JenkinsClient.prototype.trigger = async (_url, _parameters, onDispatch) => {
+                        calls++; onDispatch?.();
+                        if (stage === 'post') {
+                            ready(); await gate;
+                            if (action === 'fail') { throw new JenkinsClientError('TIMEOUT'); }
+                        }
+                        return { queueUrl: `${servers[0].url}queue/item/1/` };
+                    };
                     const update = state.memento.update;
                     state.memento.update = async (key, value) => {
                         await update(key, value);
                         if (key === JENKINS_REQUESTS_KEY && !pause && (value as JenkinsRequest[])?.some(request => request.submission === 'sending')) {
                             pause = true;
                             if (stage === 'persist') { ready(); await gate; }
-                            else { (controller as unknown as { tokenCache: Map<string, unknown> }).tokenCache.clear(); }
+                            else if (stage === 'token') { (controller as unknown as { tokenCache: Map<string, unknown> }).tokenCache.clear(); }
                         }
                     };
                     controller = new JenkinsController(context);
@@ -111,18 +127,39 @@ suite('Jenkins controller and results tree', () => {
                     await waiting;
                     const request = (controller as unknown as { requests: JenkinsRequest[] }).requests[0];
                     const stopping = action === 'stop' ? controller.stopTracking({ kind: 'request', label: '', request })
-                        : controller.clearResults({ kind: 'request', label: '', request });
+                        : action === 'clear' ? controller.clearResults({ kind: 'request', label: '', request }) : Promise.resolve();
                     await new Promise<void>(resolve => setImmediate(resolve));
                     release();
                     await Promise.all([running, stopping]);
-                    assert.strictEqual(calls, 0);
+                    assert.strictEqual(calls, stage === 'post' ? 1 : 0);
                     const saved = state.values.get(JENKINS_REQUESTS_KEY) as JenkinsRequest[];
                     if (action === 'clear') { assert.deepStrictEqual(saved, []); }
-                    else { assert.strictEqual(saved.length, 1); assert.strictEqual(saved[0].stopped, true); assert.notStrictEqual(saved[0].submission, 'sending'); }
+                    else {
+                        const stopped = action !== 'fail' || stage !== 'post';
+                        assert.strictEqual(saved.length, 1); assert.strictEqual(!!saved[0].stopped, stopped);
+                        assert.strictEqual(saved[0].submission, stage === 'post' ? 'unconfirmed' : 'notSent');
+                        assert.strictEqual(messages.some(message => message.includes('No build was requested')), stage !== 'post');
+                        assert.ok(messages.every(message => !message.includes('builds continue running')));
+                        const restored = new JenkinsStore(context).requests()[0];
+                        assert.strictEqual(restored.submission, saved[0].submission); assert.strictEqual(!!restored.stopped, stopped);
+                        const provider = new JenkinsViewProvider(() => [restored], () => servers);
+                        try {
+                            const node = requestNode(provider);
+                            assert.strictEqual(node.label.startsWith('Not submitted'), stage !== 'post');
+                            assert.strictEqual(provider.getChildren(node).some(item => item.label === 'No build was requested.'), stage !== 'post');
+                            assert.strictEqual(provider.getChildren(node).some(item => item.label.includes('Submission could not be confirmed')), stage === 'post');
+                            if (action === 'fail' && stage === 'token') {
+                                assert.ok(provider.getChildren(node).some(item => item.label.startsWith('Build submission preparation timed out.')));
+                                assert.ok(provider.getChildren(node).every(item => !item.label.includes('server response timed out')));
+                            }
+                            if (stopped) { assert.ok(provider.getChildren(node).every(item => !item.label.includes('Checking Jenkins queue'))); }
+                        } finally { provider.dispose(); }
+                    }
                 } finally {
                     release(); controller?.dispose(); await running;
                     (jenkinsGit as { readJenkinsGitSnapshot: typeof snapshot }).readJenkinsGitSnapshot = snapshot;
                     vscode.window.showQuickPick = pick; vscode.window.showInputBox = input; vscode.window.showInformationMessage = info;
+                    vscode.window.showWarningMessage = warning;
                     JenkinsClient.prototype.listJobs = list; JenkinsClient.prototype.getJob = get;
                     JenkinsClient.prototype.listRecentBuilds = recent; JenkinsClient.prototype.trigger = trigger;
                 }

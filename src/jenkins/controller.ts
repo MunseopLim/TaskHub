@@ -72,6 +72,8 @@ export class JenkinsController implements vscode.Disposable {
     private readonly guard = new JenkinsTransportGuard();
     private readonly tokenCache = new Map<string, Promise<string | undefined>>();
     private readonly requestAborts = new Map<string, AbortController>();
+    // Runtime evidence only: persisting false before POST would be misleading after a crash.
+    private readonly submissionDispatched = new Map<string, boolean>();
     private readonly busyCommands = new Set<string>();
     private readonly status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
     private timer?: ReturnType<typeof setTimeout>;
@@ -120,6 +122,7 @@ export class JenkinsController implements vscode.Disposable {
         if (this.timer) { clearTimeout(this.timer); }
         this.abort.abort();
         this.requestAborts.forEach(controller => controller.abort());
+        this.submissionDispatched.clear();
         this.tokenCache.clear();
         this.inventory.clear();
         this.status.dispose();
@@ -488,6 +491,7 @@ export class JenkinsController implements vscode.Disposable {
         this.requests.unshift(request);
         const submission = new AbortController();
         this.requestAborts.set(request.id, submission);
+        this.submissionDispatched.set(request.id, false);
         const retained = (): boolean => !this.disposed && this.requests.includes(request) && !request.stopped;
         try {
             try { await this.persist(); }
@@ -502,7 +506,7 @@ export class JenkinsController implements vscode.Disposable {
                 const queued = await this.withOperation(t('Jenkins에 테스트 요청 전송 중 · 취소해도 빌드가 실행될 수 있습니다', 'Submitting tests to Jenkins · cancellation may not stop the build'), async signal => {
                     const sendingClient = await this.client(server, signal);
                     if (!retained() || signal.aborted) { throw new JenkinsClientError('CANCELLED'); }
-                    return sendingClient.trigger(job.url, parameters);
+                    return sendingClient.trigger(job.url, parameters, () => { this.submissionDispatched.set(request.id, true); });
                 }, submission.signal);
                 if (!retained()) { return; }
                 request.root.queueUrl = queued.queueUrl;
@@ -510,13 +514,23 @@ export class JenkinsController implements vscode.Disposable {
                 delete request.error;
             } catch (error) {
                 if (!retained()) { return; }
-                request.submission = 'unconfirmed';
-                request.error = `JENKINS_SUBMISSION_UNCONFIRMED_${safeJenkinsError(error)}`;
-                quietMessage(() => vscode.window.showWarningMessage(t('요청 수락 여부를 확인할 수 없습니다. 빌드 요청은 재전송하지 않고 선택한 SHA의 결과 조회만 계속합니다. 다시 실행하기 전 Jenkins 대기열을 확인해주세요.', 'Build acceptance could not be confirmed. Only SHA result checks will continue; the build request will not be resent. Check the Jenkins queue before starting another build.')));
+                if (this.submissionDispatched.get(request.id) === false) {
+                    request.submission = 'notSent'; request.stopped = true;
+                    request.error = safeJenkinsError(error);
+                    if (request.error === 'TIMEOUT') { request.error = 'JENKINS_SUBMISSION_PREPARATION_TIMEOUT'; }
+                    quietMessage(() => vscode.window.showWarningMessage(t(
+                        `전송 전에 중단되어 빌드를 요청하지 않았습니다. ${jenkinsErrorLabel(request.error)}`,
+                        `Submission stopped before sending. No build was requested. ${jenkinsErrorLabel(request.error)}`)));
+                } else {
+                    request.submission = 'unconfirmed';
+                    request.error = `JENKINS_SUBMISSION_UNCONFIRMED_${safeJenkinsError(error)}`;
+                    quietMessage(() => vscode.window.showWarningMessage(t('요청 수락 여부를 확인할 수 없습니다. 빌드 요청은 재전송하지 않고 선택한 SHA의 결과 조회만 계속합니다. 다시 실행하기 전 Jenkins 대기열을 확인해주세요.', 'Build acceptance could not be confirmed. Only SHA result checks will continue; the build request will not be resent. Check the Jenkins queue before starting another build.')));
+                }
             }
             await this.persist(); this.updateView();
         } finally {
             if (this.requestAborts.get(request.id) === submission) { this.requestAborts.delete(request.id); }
+            this.submissionDispatched.delete(request.id);
             this.schedule();
         }
         if (retained()) { await this.refresh(); }
@@ -542,27 +556,15 @@ export class JenkinsController implements vscode.Disposable {
         }
         if (!selected) {
             const available = await this.withOperation(t('서버별 테스트 목록 조회 중', 'Loading tests from registered servers'), async signal => {
-                const failures: string[] = [];
-                // Every server gets its own share before discovery begins. A slow or
-                // overly broad server cannot spend a healthy server's time or HTTP quota.
-                const timeout = Math.min(15000, Math.floor(28000 / Math.ceil(servers.length / 4)));
-                const batches = await mapConcurrent(servers, async server => {
-                    const scope = createJenkinsScope([signal], timeout);
-                    const budget = { remaining: Math.floor(150 / servers.length) };
-                    try {
-                        const inventory = await (await this.client(server, scope.signal, budget)).listJobs();
-                        return inventory.filter(item => item.buildable).map(job => ({
-                            label: `${server.name} · ${job.fullName}`, description: job.url,
-                            job: { serverId: server.id, jobUrl: job.url, name: job.fullName } as JenkinsShaJob,
-                            picked: profile.testJobs?.some(item => item.serverId === server.id && item.jobUrl === job.url)
-                                ?? (profile.serverId === server.id && root?.url === job.url),
-                        }));
-                    } catch (error) {
-                        if (signal.aborted) { throw error; }
-                        failures.push(`${server.name}: ${jenkinsErrorLabel(scope.signal.aborted ? 'TIMEOUT' : safeJenkinsError(error))}`);
-                        return [];
-                    } finally { scope.dispose(); }
-                }, 4, signal);
+                const inventories = await this.testJobInventories(servers, signal);
+                const failures = inventories.filter(item => item.error).map(item => `${item.server.name}: ${jenkinsErrorLabel(item.error)}`);
+                const batches = inventories.map(({ server, jobs }) =>
+                    jobs.filter(item => item.buildable).map(job => ({
+                        label: `${server.name} · ${job.fullName}`, description: job.url,
+                        job: { serverId: server.id, jobUrl: job.url, name: job.fullName } as JenkinsShaJob,
+                        picked: profile.testJobs?.some(item => item.serverId === server.id && item.jobUrl === job.url)
+                            ?? (profile.serverId === server.id && root?.url === job.url),
+                    })));
                 if (failures.length) {
                     quietMessage(() => vscode.window.showWarningMessage(t(
                         `일부 서버의 테스트 목록을 조회하지 못했습니다. 조회된 서버에서 선택할 수 있습니다. ${failures.join(' · ')}`,
@@ -591,6 +593,46 @@ export class JenkinsController implements vscode.Disposable {
         profile.testJobs = selected;
         await this.store.saveProfile(profile);
         return selected.map(job => ({ ...job }));
+    }
+
+    private async testJobInventories(servers: JenkinsServer[], signal: AbortSignal): Promise<Array<{ server: JenkinsServer; jobs: JenkinsJob[]; error?: string }>> {
+        const states = servers.map(server => ({ server, jobs: [] as JenkinsJob[], error: undefined as string | undefined,
+            pages: new Map<string, JenkinsJob[]>(), elapsed: 0 }));
+        let pending = states;
+        let remaining = 150;
+        const deadline = performance.now() + 28000;
+        while (pending.length && remaining > 0) {
+            const timeLeft = deadline - performance.now();
+            if (timeLeft <= 0) { pending.forEach(state => { state.error = 'TIMEOUT'; }); break; }
+            const initial = remaining;
+            const share = Math.floor(initial / pending.length);
+            const extra = initial % pending.length;
+            const timeout = Math.floor(timeLeft / Math.ceil(pending.length / 4));
+            // Give every server a turn, then redistribute unused HTTP quota. Successful
+            // pages survive only this operation; retries never repeat their HTTP reads.
+            await mapConcurrent(pending.map((state, index) => ({ state, index })), async ({ state, index }) => {
+                const allocation = share + (index < extra ? 1 : 0);
+                if (!allocation) { state.error = 'REQUEST_LIMIT'; return; }
+                if (state.elapsed >= 15000) { state.error = 'TIMEOUT'; return; }
+                const scope = createJenkinsScope([signal], Math.max(1, Math.min(15000 - state.elapsed, timeout)));
+                const budget = { remaining: allocation };
+                const started = performance.now();
+                try {
+                    state.jobs = await (await this.client(state.server, scope.signal, budget)).listJobs(state.pages);
+                    state.error = undefined;
+                } catch (error) {
+                    if (signal.aborted) { throw error; }
+                    state.error = scope.signal.aborted ? 'TIMEOUT' : safeJenkinsError(error);
+                } finally {
+                    state.elapsed += performance.now() - started;
+                    remaining -= allocation - budget.remaining;
+                    scope.dispose();
+                }
+            }, 4, signal);
+            pending = pending.filter(state => state.error === 'REQUEST_LIMIT');
+            if (remaining === initial) { break; }
+        }
+        return states;
     }
 
     /** Explicit read-only observation, including a new attempt after completion or timeout. */
@@ -748,9 +790,14 @@ export class JenkinsController implements vscode.Disposable {
         const request = await this.pickRequest(node, true);
         if (!request || request.stopped || request.settledAt) { return; }
         request.stopped = true;
-        if (request.submission === 'sending') { request.submission = 'unconfirmed'; }
+        if (request.submission === 'sending') {
+            request.submission = this.submissionDispatched.get(request.id) === false ? 'notSent' : 'unconfirmed';
+            if (request.submission === 'unconfirmed') { request.error = 'JENKINS_SUBMISSION_UNCONFIRMED'; }
+        }
         this.requestAborts.get(request.id)?.abort();
         await this.persist(); this.updateView(); this.schedule();
-        quietMessage(() => vscode.window.showInformationMessage(t('로컬 추적을 중지했습니다. Jenkins 빌드는 계속 실행됩니다.', 'Local tracking stopped. Jenkins builds continue running.')));
+        quietMessage(() => vscode.window.showInformationMessage(request.submission === 'notSent'
+            ? t('빌드 요청 전에 중지했습니다. 빌드를 요청하지 않았습니다.', 'Stopped before submission. No build was requested.')
+            : t('로컬 추적을 중지했습니다. 이미 전송한 요청은 취소되지 않습니다. 실행 여부는 Jenkins에서 확인해주세요.', 'Local tracking stopped. Requests already sent are not cancelled. Check Jenkins for their execution status.')));
     }
 }

@@ -106,6 +106,43 @@ suite('Jenkins SHA observations', function () {
             assert.strictEqual(a.paths.length, 1); assert.strictEqual(b.paths.length, 1);
         } finally { controller.dispose(); vscode.window.showQuickPick = pick; vscode.window.showInputBox = input; }
     });
+    for (const folders of [45, 151]) {
+        test(`review regression: folder discovery redistributes unused server quotas within 150 HTTP requests (${folders} folders)`, async () => {
+            const c = await fixture('C'); const d = await fixture('D');
+            const fixtures = [a, b, c, d];
+            a.reply('/api/json', { jobs: Array.from({ length: folders }, (_, index) => ({
+                name: `folder${index}`, url: `${a.server.url}job/folder${index}/`, _class: 'com.cloudbees.hudson.plugins.folder.Folder',
+            })) });
+            for (let index = 0; index < folders; index++) {
+                a.reply(`/job/folder${index}/api/json`, { jobs: folders === 45 ? [{ name: 'test',
+                    url: `${a.server.url}job/folder${index}/job/test/`, buildable: true, _class: 'hudson.model.FreeStyleProject' }] : [] });
+            }
+            for (const item of fixtures.slice(1)) {
+                item.reply('/api/json', { jobs: [{ name: 'test', url: item.job.jobUrl, buildable: true, _class: 'hudson.model.FreeStyleProject' }] });
+            }
+            const controller = new JenkinsController(context(fixtures.map(item => item.server), []).context);
+            const pick = vscode.window.showQuickPick; const input = vscode.window.showInputBox;
+            const warnings: string[] = [];
+            vscode.window.showWarningMessage = (async (message: string) => { warnings.push(message); }) as typeof originalWarning;
+            vscode.window.showQuickPick = (async (items: unknown) => {
+                const available = await items as Array<{ label: string }>;
+                assert.strictEqual(available.length, folders === 45 ? 48 : 3);
+                return available;
+            }) as unknown as typeof pick;
+            vscode.window.showInputBox = async () => '';
+            try {
+                await (controller as unknown as { selectTestJobs(profile: { serverId: string; jobUrl: string }): Promise<unknown[]> })
+                    .selectTestJobs({ serverId: '__sha__', jobUrl: '/repo' });
+                assert.strictEqual(fixtures.reduce((total, item) => total + item.paths.length, 0), folders === 45 ? 49 : 150);
+                assert.strictEqual(new Set(a.paths).size, a.paths.length, 'Redistribution must resume without fetching old pages again.');
+                assert.strictEqual(warnings.length, folders === 45 ? 0 : 1);
+                if (folders === 151) { assert.ok(warnings[0].includes('A:')); }
+            } finally {
+                controller.dispose(); vscode.window.showQuickPick = pick; vscode.window.showInputBox = input;
+                await Promise.all([c.close(), d.close()]);
+            }
+        });
+    }
     test('review regression: legacy bounded discovery settles provisionally and never changes to a timeout', async () => {
         const value = request(); delete value.shaTracking; value.root.buildUrl = a.build(1).url;
         a.reply('/job/test/1/api/json', a.build(1));

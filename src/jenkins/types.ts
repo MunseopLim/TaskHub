@@ -120,7 +120,7 @@ export interface JenkinsRequest {
     discovery: { complete: boolean; message?: string; checkedAt?: number };
     requestIdParameter?: string;
     shaParameter?: string;
-    submission?: 'sending' | 'unconfirmed';
+    submission?: 'sending' | 'unconfirmed' | 'notSent';
     queueReason?: string;
     error?: string;
     stopped?: boolean;

@@ -140,6 +140,7 @@ export class JenkinsStore {
             // freeze the migrated deadline so future setting changes cannot extend it.
             request.deadlineAt ??= request.createdAt + Math.max(1, Math.min(168,
                 Number.isFinite(legacyTimeoutHours) ? legacyTimeoutHours : 24)) * 3600000;
+            if (request.submission === 'notSent') { request.stopped = true; }
             if (!request.root.queueUrl && !request.root.buildUrl
                 && (request.submission === 'sending' || request.error === 'JENKINS_SUBMITTING')) {
                 request.submission = 'unconfirmed';

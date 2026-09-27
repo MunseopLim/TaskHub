@@ -246,7 +246,7 @@ export class JenkinsTransportGuard {
             if (this.failures.get(server) === before) { this.failures.delete(server); }
             return result;
         } catch (error) {
-            if (!current()) { throw error; }
+            if (!current() || (error instanceof JenkinsClientError && error.deferred)) { throw error; }
             if (error instanceof JenkinsClientError && error.code === 'FORBIDDEN') {
                 // Reclaim only expired entries; FIFO eviction would let denied URLs retry immediately.
                 if (this.permissions.size >= jenkinsClientLimits.maxPermissionEntries) {
@@ -358,7 +358,8 @@ export class JenkinsClient {
         return { authenticated: true, name: value.name };
     }
 
-    async listJobs(): Promise<JenkinsJob[]> {
+    /** A caller may retain validated pages only for the duration of one discovery operation. */
+    async listJobs(pages?: Map<string, JenkinsJob[]>): Promise<JenkinsJob[]> {
         const jobs: JenkinsJob[] = [];
         const pending = [{ url: this.baseUrl.href, parent: '', depth: 0 }];
         const visited = new Set<string>();
@@ -371,7 +372,10 @@ export class JenkinsClient {
             if (folder.depth > jenkinsClientLimits.maxFolderDepth || visited.size > jenkinsClientLimits.maxFolders) {
                 throw new JenkinsClientError('DISCOVERY_LIMIT');
             }
-            for (const job of await this.listJobsPage(folder.url, folder.parent)) {
+            if (this.signal?.aborted) { throw new JenkinsClientError('CANCELLED'); }
+            const page = pages?.get(folder.url) ?? await this.listJobsPage(folder.url, folder.parent);
+            pages?.set(folder.url, page);
+            for (const job of page) {
                 jobs.push(job);
                 if (jobs.length > this.maxJobs) {
                     throw new JenkinsClientError('DISCOVERY_LIMIT');
@@ -429,7 +433,7 @@ export class JenkinsClient {
         return job;
     }
 
-    async trigger(url: string, parameters: Record<string, string | number | boolean> = {}): Promise<{ queueUrl: string }> {
+    async trigger(url: string, parameters: Record<string, string | number | boolean> = {}, onDispatch?: () => void): Promise<{ queueUrl: string }> {
         const entries = Object.entries(parameters);
         const body = new URLSearchParams();
         for (const [name, value] of entries) {
@@ -441,7 +445,7 @@ export class JenkinsClient {
         }
         const endpoint = this.endpoint(url, entries.length > 0 ? 'buildWithParameters' : 'build');
         // Never retry a POST automatically: a lost response may still represent a queued build.
-        const response = await this.request(endpoint, 'POST', Buffer.from(body.toString(), 'utf8'));
+        const response = await this.request(endpoint, 'POST', Buffer.from(body.toString(), 'utf8'), false, onDispatch);
         const location = response.headers.location;
         if (!location) {
             throw new JenkinsClientError('QUEUE_LOCATION_MISSING', response.status);
@@ -687,7 +691,7 @@ export class JenkinsClient {
         }
     }
 
-    private async request(input: URL, method = 'GET', body?: Buffer, allowPrefix = false): Promise<HttpResponse> {
+    private async request(input: URL, method = 'GET', body?: Buffer, allowPrefix = false, onDispatch?: () => void): Promise<HttpResponse> {
         const operation = new AbortController();
         const cancel = (): void => operation.abort();
         this.signal?.addEventListener('abort', cancel, { once: true });
@@ -699,7 +703,7 @@ export class JenkinsClient {
         const run = async (): Promise<HttpResponse> => {
             try {
                 const ca = await abortable(this.certificate(), signal);
-                return await this.sendRequest(input, method, body, ca, signal, allowPrefix, () => { dispatched = true; });
+                return await this.sendRequest(input, method, body, ca, signal, allowPrefix, () => { dispatched = true; onDispatch?.(); });
             } catch (error) { if (timedOut) { throw new JenkinsClientError('TIMEOUT', undefined, undefined, !dispatched); } throw error; }
         };
         try {

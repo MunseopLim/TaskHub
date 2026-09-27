@@ -23,6 +23,7 @@ export function discoveryLabel(request: JenkinsRequest): string {
 function requestStatus(request: JenkinsRequest): string {
     const summary = aggregate(request);
     if (request.submission === 'sending') { return 'sending'; }
+    if (request.submission === 'notSent') { return 'notSent'; }
     if (summary.observedResult === 'failed') { return 'failed'; }
     if (request.outcome === 'timeout') { return 'timedout'; }
     if (request.stopped) { return summary.observedResult === 'passed' ? 'observedPassed' : 'stopped'; }
@@ -48,6 +49,7 @@ function statusIcon(status: string): vscode.ThemeIcon {
         running: ['sync~spin', 'progressBar.background'], sending: ['cloud-upload', 'progressBar.background'],
         queued: ['clock', 'descriptionForeground'], aborted: ['circle-slash', 'testing.iconFailed'],
         skipped: ['debug-step-over', 'descriptionForeground'], stopped: ['debug-pause', 'descriptionForeground'],
+        notSent: ['debug-stop', 'descriptionForeground'],
         unconfirmed: ['question', 'list.warningForeground'], nonpass: ['warning', 'list.warningForeground'],
     };
     const [icon, color] = icons[status] ?? ['question', 'descriptionForeground'];
@@ -123,7 +125,11 @@ export class JenkinsViewProvider implements vscode.TreeDataProvider<JenkinsTreeN
                 details.push({ kind: 'detail', label: t(`전송한 원격 브랜치: ${request.remoteBranch}`, `Submitted remote branch: ${request.remoteBranch}`) });
             }
             if (request.error) { details.push({ kind: 'detail', label: jenkinsErrorLabel(request.error) }); }
+            if (request.submission === 'unconfirmed' && !request.error?.startsWith('JENKINS_SUBMISSION_UNCONFIRMED')) {
+                details.push({ kind: 'detail', label: jenkinsErrorLabel('JENKINS_SUBMISSION_UNCONFIRMED') });
+            }
             if (request.submission === 'sending') { details.push({ kind: 'detail', label: jenkinsStatusLabel('sending') }); }
+            if (request.submission === 'notSent') { details.push({ kind: 'detail', label: t('빌드를 요청하지 않았습니다.', 'No build was requested.') }); }
             if (!request.stopped && !request.settledAt && !request.shaTracking?.readOnly && !request.root.buildUrl && request.submission !== 'sending') { details.push({ kind: 'detail', label: request.queueReason ?? t('Jenkins 대기열 확인 중', 'Checking Jenkins queue') }); }
             return [...details, ...request.runs.map(run => ({ kind: 'build' as const, request, run,
                 label: `${jenkinsStatusLabel(normalizeRunStatus(run, request.sha))}${run.reportErrors ? ' · ' + jenkinsStatusLabel('partial') : ''} · ${this.servers().find(server => server.id === run.serverId)?.name ?? run.serverId} · ${run.fullDisplayName ?? `#${run.number}`}`,
