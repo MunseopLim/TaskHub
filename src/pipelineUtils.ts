@@ -2125,7 +2125,9 @@ export function mergeCommandAndArgs(command: string, extraArgs: string[]): { exe
  * everything is literal except another single quote, which is escaped as `''`.
  */
 export function quotePowerShellArgument(value: string): string {
-    return value.length === 0 ? "''" : `'${value.replace(/'/g, "''")}'`;
+    // PowerShell treats all five characters as single quotes, including inside
+    // ASCII-quoted strings (CodeGeneration.EscapeSingleQuotedStringContent).
+    return value.length === 0 ? "''" : `'${value.replace(/['\u2018\u2019\u201a\u201b]/g, quote => quote + quote)}'`;
 }
 
 /**
@@ -2782,8 +2784,18 @@ export function withTaskTimeout<T>(
     }
     return new Promise<T>((resolve, reject) => {
         let settled = false;
-        const timer = setTimeout(() => {
+        const startedAt = performance.now();
+        const durationMs = timeoutSeconds * 1000;
+        let timer: ReturnType<typeof setTimeout>;
+        const checkDeadline = () => {
             if (settled) { return; }
+            const remaining = durationMs - (performance.now() - startedAt);
+            if (remaining > 0) {
+                // Node clamps overflowing delays to 1ms. Long timeouts use
+                // bounded timers and a monotonic clock, including after sleep.
+                timer = setTimeout(checkDeadline, Math.min(remaining, 0x7fffffff));
+                return;
+            }
             settled = true;
             try { onTimeout?.(); } catch { /* swallow — best effort */ }
             const timeoutError = new Error(`Task '${taskId}' timed out after ${timeoutSeconds}s.`);
@@ -2792,7 +2804,8 @@ export function withTaskTimeout<T>(
             // 바뀌면 조용히 깨지므로 이름을 남긴다.
             timeoutError.name = 'TaskTimeoutError';
             reject(timeoutError);
-        }, timeoutSeconds * 1000);
+        };
+        timer = setTimeout(checkDeadline, Math.min(durationMs, 0x7fffffff));
         promise.then(
             value => {
                 if (settled) { return; }

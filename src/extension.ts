@@ -5728,7 +5728,14 @@ async function executeActionPipelineForRun(
         // **'running' 을 알리기 전에 판정한다.** 돌지 않은 태스크가 화면과
         // 히스토리에 "실행됨" 으로 잠깐이라도 보이면 안 된다. markStarted 는
         // 스케줄러 상태 기계가 markCompleted 전에 요구하므로 그대로 둔다.
-        const skipReason = conditionGate(task);
+        let skipReason: string | undefined;
+        let conditionFailure: { error: unknown } | undefined;
+        try {
+            skipReason = conditionGate(task);
+        } catch (error) {
+            // 조건·switch 보간 실패도 아래 공통 실패 처리에서 기록하고 정책을 적용한다.
+            conditionFailure = { error };
+        }
         if (skipReason !== undefined) {
             conditionSkipped.add(taskId);
             runLogCollector?.skipTask(taskId, skipReason, Date.now());
@@ -5766,6 +5773,7 @@ async function executeActionPipelineForRun(
             // 취소된 명령을 잠깐이라도 실행하게 된다.
             try {
                 throwIfTaskInactive(taskScope);
+                if (conditionFailure) { throw conditionFailure.error; }
                 return await executeSingleTask(
                     task,
                     stepResults,
@@ -5785,7 +5793,7 @@ async function executeActionPipelineForRun(
                 disposeTaskExecutionScope(taskScope);
             }
         };
-        const underlying: Promise<unknown> = isInteractive
+        const underlying: Promise<unknown> = isInteractive && !conditionFailure
             ? withInteractivePromptLock(startTask)
             : startTask();
         // On timeout, kill only this task's child processes and
@@ -6006,6 +6014,10 @@ async function executeActionPipelineForRun(
             `Action '${id}' had ${failures.length} task failures — ${summary}`
         );
     }
+    } catch (error) {
+        // 스케줄러/콜백의 예기치 않은 동기 예외도 실행 중인 형제를 남기지 않는다.
+        await abortInFlightTasks();
+        throw error;
     } finally {
         if (isParallelAction) { exitParallelAction(id); }
     }
@@ -6025,9 +6037,13 @@ function actionFailureNotificationMessage(
     action: PipelineAction,
     error: Error
 ): string {
+    // 토스트에는 실패 원인과 마지막 진단만 남긴다. 더 긴 요약은 History에 있다.
+    const detail = error.message.length > 512
+        ? `${error.message.slice(0, 160)}\n…\n${error.message.slice(-320)}`
+        : error.message;
     return action.failMessage
-        ? `${action.failMessage}: ${error.message}`
-        : t(`'${actionItem.title}' 액션 실패: ${error.message}`, `Action '${actionItem.title}' failed: ${error.message}`);
+        ? `${action.failMessage}: ${detail}`
+        : t(`'${actionItem.title}' 액션 실패: ${detail}`, `Action '${actionItem.title}' failed: ${detail}`);
 }
 
 /**
@@ -6484,8 +6500,8 @@ export function registerStopActionCommand(historyProvider: HistoryProvider): vsc
     return vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
         const id = actionItem instanceof PinnedAction ? actionItem.actionId : actionItem.id || actionItem.label;
         if (!id) { return; }
+        if (manuallyTerminatedActions.has(id)) { return; }
         if (!stopRunningAction(id)) {
-            manuallyTerminatedActions.delete(id);
             vscode.window.showWarningMessage(t(`'${actionItem.label}'에 대한 활성 태스크를 찾을 수 없습니다.`, `Could not find active task for '${actionItem.label}'.`));
             return;
         }
@@ -10642,7 +10658,8 @@ export function executeShellCommand(
                 : 'powershell.exe';
             childProcess = spawn(shell, ['-NoProfile', '-EncodedCommand', encoded], {
                 cwd: workingDirectory,
-                env: childEnv
+                env: childEnv,
+                stdio: ['ignore', 'pipe', 'pipe']
             });
             attachChildHandlers();
         };
@@ -10706,10 +10723,14 @@ export function executeShellCommand(
                     // Carry the captured stdout/stderr on the error so callers
                     // can still parse diagnostics out of the failed build (gcc /
                     // clang emit errors on stderr AND exit non-zero).
+                    const reason = signal
+                        ? t(`명령이 ${signal} 신호로 종료되었습니다.`, `Command terminated by signal ${signal}`)
+                        : t(`명령이 종료 코드 ${code}로 실패했습니다.`, `Command failed with exit code ${code}`);
+                    // 원문은 diagnostics/run log가 쓰는 stderr에 보존한다. History와
+                    // 알림에는 마지막 진단 일부만 남겨 workspaceState의 누적을 제한한다.
+                    const summary = stderr.length > 4096 ? `…${stderr.slice(-4096)}` : stderr;
                     reject(new ShellCommandError(
-                        stderr || (signal
-                            ? `Command terminated by signal ${signal}`
-                            : `Command failed with exit code ${code}`),
+                        summary ? `${reason}\n${summary}` : reason,
                         stdout,
                         stderr,
                         code,
@@ -10750,7 +10771,8 @@ export function executeShellCommand(
             // 필요 없다 (POSIX 만 프로세스 그룹이 필요하다).
             childProcess = spawn(native.executable, native.args, {
                 cwd: workingDirectory,
-                env: childEnv
+                env: childEnv,
+                stdio: ['ignore', 'pipe', 'pipe']
             });
             attachChildHandlers();
         } else if (windowsPlan) {
@@ -10763,6 +10785,7 @@ export function executeShellCommand(
             childProcess = spawn(commandLine, [], {
                 cwd: workingDirectory,
                 env: childEnv,
+                stdio: ['ignore', 'pipe', 'pipe'],
                 shell: true,
                 // 자기 프로세스 그룹을 갖게 해야 중지가 셸 아래의 실제 명령까지
                 // 죽인다 (killProcessTree 의 `process.kill(-pid)`). 이게 없으면

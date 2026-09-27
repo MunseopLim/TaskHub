@@ -537,6 +537,14 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         assert.strictEqual(quotePowerShellArgument("it's"), "'it''s'");
     });
 
+    test('PowerShell quotes every quote character recognized by its parser', () => {
+        for (const quote of ["'", '\u2018', '\u2019', '\u201a', '\u201b']) {
+            const input = `path${quote};Write-Output injected;${quote}.txt`;
+            assert.strictEqual(quotePowerShellArgument(input), `'path${quote}${quote};Write-Output injected;${quote}${quote}.txt'`);
+            assert.ok(buildPowerShellInvocation('echo', [input], false).script.includes(quotePowerShellArgument(input)));
+        }
+    });
+
     test('Windows command-line quoting preserves embedded double quotes for native argv fallback paths', () => {
         assert.strictEqual(
             quoteWindowsCommandLineArgument('process.stdout.write("ok")'),
@@ -1449,6 +1457,15 @@ suite('encodeFileContent', () => {
 });
 
 suite('withTaskTimeout', () => {
+    test('timeouts beyond the Node timer limit do not expire immediately', async () => {
+        for (const seconds of [2147484, Number.MAX_VALUE]) {
+            const result = await withTaskTimeout(
+                new Promise<string>(resolve => setTimeout(() => resolve('completed'), 25)),
+                seconds, 'long-running'
+            );
+            assert.strictEqual(result, 'completed');
+        }
+    });
     test('resolves when inner promise settles before timeout', async () => {
         const result = await withTaskTimeout(Promise.resolve('ok'), 5, 't1');
         assert.strictEqual(result, 'ok');

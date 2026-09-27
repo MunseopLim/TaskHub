@@ -123,6 +123,7 @@
 대화상자에서 입력을 기다리는 시간도 `timeoutSeconds`에 포함됩니다. [동적 QuickPick](#quickpick)의
 목록 생성 명령은 별도 제한이 있으므로 `timeoutSeconds: 0`으로 그 제한까지 해제되지는 않습니다.
 사용자가 **액션 중지**를 누르면 `continueOnError`와 관계없이 액션을 중단합니다.
+`when`이나 `switch.on`의 변수 평가에 실패한 경우에도 같은 실패 정책을 적용하고 실행 기록에 남깁니다.
 
 ### 동적 값은 `args`에 넣기
 
