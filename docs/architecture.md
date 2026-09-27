@@ -116,10 +116,13 @@ TaskHub/
 ```
 
 **빌드 출력:**
-- `dist/extension.js`: esbuild, CommonJS, 단일 파일 번들 (Node)
+- `dist/extension.js`: esbuild, CommonJS, 초기 확장 호스트 번들 (Node)
+- `dist/{jsonEditor,memoryMapViewer,hexViewer,hexConverter,actionRunReport}.js`: 해당 기능을 처음 호출할 때 로드하는 CommonJS 번들. Hex Custom Editor도 실제 문서 열기 전에는 구현을 로드하지 않는다.
+- `dist/dialogMemory.js`: 초기 호스트와 기능 번들이 함께 사용하는 상태 모듈. 따로 복제하면 마지막 파일 열기 위치가 분리되므로 모든 번들이 같은 파일을 참조한다.
+- `dist/actionsValidator.js`: 현재 `schema/actions.schema.json`에서 Ajv standalone으로 빌드한 검증기. 런타임에는 스키마 컴파일러가 필요 없다.
 - `dist/regexWorker.js`: esbuild, CJS, Node 타깃. 사용자 정규식 worker (`src/regexWorker.ts`)
 - `dist/jsonEditorWebview.js`: esbuild, IIFE, 브라우저 타깃. JSON Editor webview 의 순수 로직 번들 (아래 참조)
-- `out/`: tsc 컴파일 (테스트용)
+- `out/`: tsc 컴파일 (테스트용). `out/build/*.meta.json`은 각 번들에 실제 포함된 패키지를 확인하는 esbuild 메타데이터다. 생성 검증기의 Ajv 도우미와 전이 의존성도 `npm audit --omit=dev` 범위에 들어가는지 검사하며 배포에는 포함하지 않는다.
 - 외부 의존성: `vscode` (번들에서 제외)
 
 **webview 스크립트의 두 층.** `jsonEditor.ts`의 템플릿 리터럴에는 DOM 어댑터만 두고,
@@ -230,8 +233,9 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 `activate()`는 가능한 한 가볍게 유지한다. 다음 두 가지 패턴이 반복 비용의 주범이므로 항상 캐싱한다:
 
 1. **Ajv 스키마 검증기 (`getActionsValidator`)**
-   * `actions.json` 스키마 컴파일은 모듈 레벨에서 싱글톤으로 관리.
-   * `loadAndValidateActions()`, `parseImportData()` 등 모든 호출 경로에서 동일 인스턴스를 재사용.
+   * 스키마 컴파일은 `esbuild.js`에서 수행한다. watch 빌드도 스키마 변경을 감시해 검증기를 다시 만든다.
+   * `getActionsValidator()`는 생성된 `dist/actionsValidator.js`를 첫 호출에 읽고 Node 모듈 캐시로 재사용한다. `inlineRefs: false`로 참조 검증 함수를 재사용한다. 검증 판정과 사용자 표시 오류(입력 경로·키워드·인자·메시지·순서)는 유지하며, 참조 내부의 `schemaPath`는 참조 스키마 기준 상대 경로가 될 수 있다.
+   * 웹뷰 기능도 위의 별도 번들로 분리한다. 정적 import로 다시 연결하면 지연 로딩이 사라지므로 실제 배포 번들의 로드 경계를 테스트한다.
 
 2. **`loadAllActions()` 결과 캐시**
    * 캐시 변수는 모듈 스코프(`cachedAllActions`).

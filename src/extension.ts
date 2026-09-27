@@ -6,27 +6,14 @@ import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import { StringDecoder } from 'string_decoder';
-import Ajv from 'ajv';
 import { ActionItem, Action as PipelineAction, type QuickPickItem } from './schema';
-import * as actionSchema from '../schema/actions.schema.json';
 import { NumberBaseHoverProvider, registerHoverCopyCommand } from './numberBaseHoverProvider';
-import { openJsonEditor, openJsonEditorFromUri, openJsonEditorFile, JsonEditorOpenHistory } from './jsonEditor';
+import type { JsonEditorOpenHistory } from './jsonEditor';
 import { coerceToUri, openMarkdownPreview, openHtmlInBrowser } from './previewOpener';
 import { openBrowserTask } from './browserTask';
 import { promptLinkTitle, readClipboardLinkUrl } from './linkInput';
-import {
-    showMemoryMap,
-    MemoryMapConfig,
-    MemoryMapOpenHistory,
-    goToSymbol,
-    revealSourceSymbolInMemoryMap,
-    openMemoryMapFromUri,
-    openMemoryMapPanel,
-    openMemoryMapFromListing,
-    withMemoryMapAnalysisProgress,
-} from './memoryMapViewer';
-import { showHexViewer, HexEditorProvider, HexViewerOpenHistory, openHexViewerFile } from './hexViewer';
-import { showHexConverter } from './hexConverter';
+import type { MemoryMapConfig, MemoryMapOpenHistory } from './memoryMapViewer';
+import type { HexViewerOpenHistory } from './hexViewer';
 import { registerJenkins } from './jenkins/controller';
 import { registerFeatureLauncher } from './featureLauncher';
 import { registerWhatsNew, resolveChangelogUri } from './whatsNew';
@@ -91,7 +78,6 @@ import {
     type TaskRunLogOutputAvailability,
     type TaskRunLogDiagnostics,
 } from './runLogStore';
-import { buildActionRunReportHtml } from './actionRunReport';
 import {
     attachPipelineTaskIds,
     buildBuiltinVariableContext,
@@ -160,16 +146,52 @@ function assertUnreachableVariableCompletion(value: never): never {
     throw new Error(`Unsupported variable completion detail: ${String(value)}`);
 }
 
-// Compile the actions JSON-schema validator once and reuse it. Re-compiling on
-// every load path (activation + every view refresh + every executeAction) was
-// a noticeable chunk of the activation cost.
-let cachedActionsValidator: import('ajv').ValidateFunction<ActionItem[]> | undefined;
+/** 빌드 때 생성한 검증기를 재사용한다. 활성화 중 Ajv 컴파일을 하지 않는다. */
 export function getActionsValidator(): import('ajv').ValidateFunction<ActionItem[]> {
-    if (!cachedActionsValidator) {
-        const ajv = new Ajv({ allErrors: true });
-        cachedActionsValidator = ajv.compile<ActionItem[]>(actionSchema);
-    }
-    return cachedActionsValidator;
+    return require(path.join(__dirname, '..', 'dist', 'actionsValidator.js'));
+}
+
+/** 기능을 처음 사용할 때만 별도 CJS 번들을 읽는다. Node의 모듈 캐시가 상태를 공유한다. */
+const openJsonEditor: typeof import('./jsonEditor').openJsonEditor = (...args) =>
+    (require('./jsonEditor') as typeof import('./jsonEditor')).openJsonEditor(...args);
+const openJsonEditorFromUri: typeof import('./jsonEditor').openJsonEditorFromUri = (...args) =>
+    (require('./jsonEditor') as typeof import('./jsonEditor')).openJsonEditorFromUri(...args);
+const openJsonEditorFile: typeof import('./jsonEditor').openJsonEditorFile = (...args) =>
+    (require('./jsonEditor') as typeof import('./jsonEditor')).openJsonEditorFile(...args);
+const showMemoryMap: typeof import('./memoryMapViewer').showMemoryMap = (...args) =>
+    (require('./memoryMapViewer') as typeof import('./memoryMapViewer')).showMemoryMap(...args);
+const goToSymbol: typeof import('./memoryMapViewer').goToSymbol = (...args) =>
+    (require('./memoryMapViewer') as typeof import('./memoryMapViewer')).goToSymbol(...args);
+const revealSourceSymbolInMemoryMap: typeof import('./memoryMapViewer').revealSourceSymbolInMemoryMap = (...args) =>
+    (require('./memoryMapViewer') as typeof import('./memoryMapViewer')).revealSourceSymbolInMemoryMap(...args);
+const openMemoryMapFromUri: typeof import('./memoryMapViewer').openMemoryMapFromUri = (...args) =>
+    (require('./memoryMapViewer') as typeof import('./memoryMapViewer')).openMemoryMapFromUri(...args);
+const openMemoryMapPanel: typeof import('./memoryMapViewer').openMemoryMapPanel = (...args) =>
+    (require('./memoryMapViewer') as typeof import('./memoryMapViewer')).openMemoryMapPanel(...args);
+const openMemoryMapFromListing: typeof import('./memoryMapViewer').openMemoryMapFromListing = (...args) =>
+    (require('./memoryMapViewer') as typeof import('./memoryMapViewer')).openMemoryMapFromListing(...args);
+const withMemoryMapAnalysisProgress: typeof import('./memoryMapViewer').withMemoryMapAnalysisProgress = (...args) =>
+    (require('./memoryMapViewer') as typeof import('./memoryMapViewer')).withMemoryMapAnalysisProgress(...args);
+const showHexViewer: typeof import('./hexViewer').showHexViewer = (...args) =>
+    (require('./hexViewer') as typeof import('./hexViewer')).showHexViewer(...args);
+const openHexViewerFile: typeof import('./hexViewer').openHexViewerFile = (...args) =>
+    (require('./hexViewer') as typeof import('./hexViewer')).openHexViewerFile(...args);
+const showHexConverter: typeof import('./hexConverter').showHexConverter = (...args) =>
+    (require('./hexConverter') as typeof import('./hexConverter')).showHexConverter(...args);
+const buildActionRunReportHtml: typeof import('./actionRunReport').buildActionRunReportHtml = (...args) =>
+    (require('./actionRunReport') as typeof import('./actionRunReport')).buildActionRunReportHtml(...args);
+
+/** 등록만으로 Hex 파서와 웹뷰를 읽지 않는다. 실제 문서를 열 때 provider를 만든다. */
+export function createLazyHexEditorProvider(
+    context: vscode.ExtensionContext,
+    recordHistory: import('./hexViewer').HexViewerHistoryRecorder
+): vscode.CustomReadonlyEditorProvider {
+    let provider: import('./hexViewer').HexEditorProvider | undefined;
+    const get = () => provider ??= new (require('./hexViewer') as typeof import('./hexViewer')).HexEditorProvider(context, recordHistory);
+    return {
+        openCustomDocument: uri => get().openCustomDocument(uri),
+        resolveCustomEditor: (document, panel) => get().resolveCustomEditor(document, panel),
+    };
 }
 
 /**
@@ -13595,7 +13617,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.window.registerCustomEditorProvider(
         'taskhub.hexEditor',
-        new HexEditorProvider(context, entry => recordHexViewerHistory(historyProvider, entry)),
+        createLazyHexEditorProvider(context, entry => recordHexViewerHistory(historyProvider, entry)),
         { supportsMultipleEditorsPerDocument: true }
     ));
 }

@@ -42,8 +42,30 @@ suite('운영 의존성 분류', () => {
                 used.set(name, path.relative(repoRoot, file));
             }
         }
-        assert.ok(used.has('ajv'), `검사가 실제 import 를 찾지 못한다: ${[...used.keys()].join(', ')}`);
+        assert.ok(used.has('yauzl'), `검사가 실제 import 를 찾지 못한다: ${[...used.keys()].join(', ')}`);
         const missing = [...used].filter(([name]) => !packageJson.dependencies?.[name]);
         assert.deepStrictEqual(missing, [], '번들에 들어가는 패키지가 dependencies 에 없다');
+    });
+
+    test('생성 검증기를 포함한 배포 번들의 패키지도 운영 의존성 감사에 포함된다', () => {
+        const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8'));
+        const used = new Map<string, string>();
+        for (const bundle of ['extension', 'features', 'actionsValidator', 'jsonEditorWebview', 'regexWorker']) {
+            const metadata = JSON.parse(fs.readFileSync(path.join(repoRoot, 'out', 'build', `${bundle}.meta.json`), 'utf8'));
+            for (const output of Object.values(metadata.outputs) as { inputs: Record<string, { bytesInOutput: number }> }[]) {
+                for (const [input, contribution] of Object.entries(output.inputs)) {
+                    if (contribution.bytesInOutput === 0) { continue; }
+                    const match = /^(node_modules\/(?:.*\/node_modules\/)?((?:@[^/]+\/)?[^/]+))(?:\/|$)/.exec(input.replace(/\\/g, '/'));
+                    if (match) { used.set(match[1], match[2]); }
+                }
+            }
+        }
+        assert.ok(used.has('node_modules/ajv'), '생성 검증기에 들어간 Ajv 런타임 도우미를 검사해야 한다');
+        const missing = [...used].filter(([location, name]) => {
+            const entry = lock.packages[location];
+            return !entry || entry.dev === true
+                || (packageJson.devDependencies?.[name] && !packageJson.dependencies?.[name]);
+        });
+        assert.deepStrictEqual(missing, [], '배포 번들의 패키지가 npm audit --omit=dev 범위에서 빠졌다');
     });
 });

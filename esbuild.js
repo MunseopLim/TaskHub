@@ -1,4 +1,24 @@
 const esbuild = require("esbuild");
+const fs = require('node:fs');
+const path = require('node:path');
+const Ajv = require('ajv');
+const standaloneCode = require('ajv/dist/standalone').default;
+
+// dialogMemory도 한 벌만 쓴다. 기능 번들에 각각 넣으면 활성화에서 초기화한 기억과 분리된다.
+const featureModules = ['jsonEditor', 'memoryMapViewer', 'hexViewer', 'hexConverter', 'actionRunReport', 'dialogMemory'];
+const externalModulePaths = new Set(featureModules.map(name => path.join(__dirname, 'src', name)));
+const featureBoundaryPlugin = {
+    name: 'feature-boundaries',
+    setup(build) {
+        build.onResolve({ filter: /^\./ }, args => {
+            if (args.kind === 'entry-point') { return; }
+            const resolved = path.resolve(args.resolveDir, args.path).replace(/\.ts$/, '');
+            if (externalModulePaths.has(resolved)) {
+                return { path: './' + path.basename(resolved) + '.js', external: true };
+            }
+        });
+    },
+};
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -6,7 +26,7 @@ const watch = process.argv.includes('--watch');
 /**
  * `.vscode/tasks.json` 의 background 문제 매처가 읽는 시작/끝 신호를 낸다.
  *
- * **번들이 둘이어도 한 쌍만 낸다.** 설정마다 따로 내면 한 번의 빌드에 begin/end 가
+ * **번들이 여러 개여도 한 쌍만 낸다.** 설정마다 따로 내면 한 번의 빌드에 begin/end 가
  * 두 쌍 나오고, F5 의 preLaunchTask 가 **첫 번째 finished** 를 보고 빌드가 끝났다고
  * 판단해 나머지 번들이 아직 디스크에 써지는 중에 확장이 뜬다.
  *
@@ -25,9 +45,15 @@ const esbuildProblemMatcherPlugin = (() => {
 				outstanding++;
 			});
 			build.onEnd((result) => {
+				if (result.metafile && result.errors.length === 0) {
+					const name = path.basename(build.initialOptions.outfile || 'features', '.js');
+					const directory = path.join(__dirname, 'out', 'build');
+					fs.mkdirSync(directory, { recursive: true });
+					fs.writeFileSync(path.join(directory, `${name}.meta.json`), JSON.stringify(result.metafile));
+				}
 				result.errors.forEach(({ text, location }) => {
 					console.error(`✘ [ERROR] ${text}`);
-					console.error(`    ${location.file}:${location.line}:${location.column}:`);
+					if (location) { console.error(`    ${location.file}:${location.line}:${location.column}:`); }
 				});
 				outstanding--;
 				if (outstanding === 0) {
@@ -51,11 +77,12 @@ const extensionConfig = {
 	sourcemap: !production,
 	sourcesContent: false,
 	platform: 'node',
+	metafile: true,
 	outfile: 'dist/extension.js',
 	external: ['vscode'],
 	logLevel: 'silent',
 	plugins: [
-		/* add to the end of plugins array */
+        featureBoundaryPlugin,
 		esbuildProblemMatcherPlugin,
 	],
 };
@@ -82,6 +109,7 @@ const webviewConfig = {
 	sourcemap: !production,
 	sourcesContent: false,
 	platform: 'browser',
+	metafile: true,
 	target: 'es2022',
 	outfile: 'dist/jsonEditorWebview.js',
 	logLevel: 'silent',
@@ -104,6 +132,7 @@ const regexWorkerConfig = {
 	sourcemap: !production,
 	sourcesContent: false,
 	platform: 'node',
+	metafile: true,
 	outfile: 'dist/regexWorker.js',
 	// `vscode` 를 external 로 두지 않는다. worker 에는 vscode API 가 없으므로
 	// 의존성 쪽으로 import 가 새어 들어오면 실행이 아니라 빌드에서 실패해야 한다.
@@ -111,9 +140,39 @@ const regexWorkerConfig = {
 	plugins: [esbuildProblemMatcherPlugin],
 };
 
+const featureConfig = {
+    ...extensionConfig,
+    entryPoints: Object.fromEntries(featureModules.map(name => [name, `src/${name}.ts`])),
+    outfile: undefined,
+    outdir: 'dist',
+};
+
+const validatorConfig = {
+    ...extensionConfig,
+    entryPoints: ['actions-validator'],
+    outfile: 'dist/actionsValidator.js',
+    plugins: [{
+        name: 'precompile-actions-schema',
+        setup(build) {
+            build.onResolve({ filter: /^actions-validator$/ }, () => ({ path: 'actions-validator', namespace: 'schema' }));
+            build.onLoad({ filter: /.*/, namespace: 'schema' }, () => {
+                const schemaPath = path.join(__dirname, 'schema', 'actions.schema.json');
+                const ajv = new Ajv({ allErrors: true, inlineRefs: false, code: { source: true } });
+                const validate = ajv.compile(JSON.parse(fs.readFileSync(schemaPath, 'utf8')));
+                return {
+                    contents: standaloneCode(ajv, validate),
+                    loader: 'js',
+                    resolveDir: __dirname,
+                    watchFiles: [schemaPath],
+                };
+            });
+        },
+    }, esbuildProblemMatcherPlugin],
+};
+
 async function main() {
 	const contexts = await Promise.all(
-		[extensionConfig, webviewConfig, regexWorkerConfig].map(config => esbuild.context(config))
+		[extensionConfig, featureConfig, validatorConfig, webviewConfig, regexWorkerConfig].map(config => esbuild.context(config))
 	);
 	if (watch) {
 		await Promise.all(contexts.map(ctx => ctx.watch()));
