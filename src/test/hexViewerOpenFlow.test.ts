@@ -805,6 +805,70 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
             );
         }
 
+        test('같은 문서의 분할 패널은 한 번만 파싱하고 독립적으로 전송·재전송한다', async () => {
+            const filePath = writeIntelHex('shared-document.hex');
+            const provider = new HexEditorProvider(createContext());
+            const document = provider.openCustomDocument(vscode.Uri.file(filePath));
+            const first = createFakePanel();
+            const second = createFakePanel();
+            const third = createFakePanel();
+            const mutableFs = require('fs') as typeof fs;
+            const readFile = mutableFs.readFileSync;
+            let reads = 0;
+            (mutableFs as any).readFileSync = (file: fs.PathOrFileDescriptor, ...args: any[]) => {
+                if (file === filePath) { reads++; }
+                return (readFile as any)(file, ...args);
+            };
+            try {
+                await Promise.all([provider.resolveCustomEditor(document, first.panel), provider.resolveCustomEditor(document, second.panel)]);
+                assert.strictEqual(reads, 1);
+                first.sendReady();
+                second.sendReady();
+                assert.deepStrictEqual(Array.from(first.posted[0].data), [0xde, 0xad, 0xbe, 0xef]);
+                assert.deepStrictEqual(second.posted[0].data, first.posted[0].data);
+                first.dispose();
+                second.sendReady();
+                assert.strictEqual(second.posted.length, 2, '다른 분할을 닫아도 재전송할 수 있어야 한다');
+                assert.deepStrictEqual(second.posted[1].data, second.posted[0].data);
+                await provider.resolveCustomEditor(document, third.panel);
+                third.sendReady();
+                assert.strictEqual(reads, 1, '한 패널을 닫아도 문서의 공유 파싱 결과는 유지한다');
+                assert.deepStrictEqual(third.posted[0].data, second.posted[0].data);
+            } finally {
+                (mutableFs as any).readFileSync = readFile;
+                first.dispose(); second.dispose(); third.dispose(); document.dispose();
+            }
+        });
+
+        test('파일 변경과 문서 재열기는 다시 파싱하고 닫힌 문서는 지연 분석하지 않는다', async () => {
+            const filePath = path.join(tempDir, 'changed-document.bin');
+            fs.writeFileSync(filePath, Buffer.from([1]));
+            const provider = new HexEditorProvider(createContext());
+            const document = provider.openCustomDocument(vscode.Uri.file(filePath));
+            const first = createFakePanel();
+            const second = createFakePanel();
+            const reopened = createFakePanel();
+            const closed = createFakePanel();
+            const freshDocument = provider.openCustomDocument(document.uri);
+            try {
+                await provider.resolveCustomEditor(document, first.panel);
+                first.sendReady();
+                fs.writeFileSync(filePath, Buffer.from([2, 3]));
+                await provider.resolveCustomEditor(document, second.panel);
+                second.sendReady();
+                assert.deepStrictEqual(Array.from(second.posted[0].data), [2, 3]);
+                first.dispose(); second.dispose(); document.dispose();
+                await provider.resolveCustomEditor(document, closed.panel);
+                assert.strictEqual(closed.events.includes('set-html'), false);
+                await provider.resolveCustomEditor(freshDocument, reopened.panel);
+                reopened.sendReady();
+                assert.deepStrictEqual(Array.from(reopened.posted[0].data), [2, 3]);
+            } finally {
+                first.dispose(); second.dispose(); reopened.dispose(); closed.dispose();
+                document.dispose(); freshDocument.dispose();
+            }
+        });
+
         test('핸들러를 HTML 보다 먼저 걸고, ready 를 받은 뒤에 보낸다', async () => {
             const fake = installFakePanel();
             const filePath = writeIntelHex('custom-editor.hex');

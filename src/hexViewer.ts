@@ -9,6 +9,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexParseResult, HexFormat } from './hexParser';
 import { t } from './i18n';
+import { HexByteStore } from './hexByteStore';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 import { filePathIdentityKey } from './pathIdentity';
 
@@ -481,6 +482,10 @@ export function buildHexViewerPayload(result: HexParseResult): HexViewerPayload 
     const data = new Uint8Array(totalSize);
     data.fill(0xFF);
     const gap = new Uint8Array(Math.ceil(totalSize / 8));
+    if (result.data instanceof HexByteStore) {
+        result.data.copyTo(data, result.minAddress, gap);
+        return { data, gap };
+    }
     for (const [address, value] of result.data) {
         const offset = address - result.minAddress;
         if (offset < 0 || offset >= totalSize) { continue; }
@@ -2073,10 +2078,20 @@ function getWebviewContent(
 }
 
 export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
+    private readonly parsedDocuments = new WeakMap<vscode.CustomDocument, { stamp: string; result: HexParseResult }>();
+    private readonly disposedDocuments = new WeakSet<vscode.CustomDocument>();
+
     constructor(private context: vscode.ExtensionContext, private recordHistory?: HexViewerHistoryRecorder) {}
 
     openCustomDocument(uri: vscode.Uri): vscode.CustomDocument {
-        return { uri, dispose() {} };
+        const document = {
+            uri,
+            dispose: () => {
+                this.parsedDocuments.delete(document);
+                this.disposedDocuments.add(document);
+            },
+        };
+        return document;
     }
 
     resolveCustomEditor(
@@ -2090,7 +2105,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             handshake?.dispose();
         });
         return withHexViewerAnalysisProgress(document.uri.fsPath, () => {
-            if (disposed) { return; }
+            if (disposed || this.disposedDocuments.has(document)) { return; }
             handshake = this.resolveCustomEditorNow(document, webviewPanel);
             if (disposed) { handshake?.dispose(); }
         });
@@ -2126,7 +2141,12 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
         let result: HexParseResult;
         try {
-            result = parseFile(filePath);
+            // VS Code는 같은 파일의 분할 패널에 같은 CustomDocument를 넘긴다.
+            // 같은 스냅샷만 공유하며, 파일 교체·수정 뒤 새 패널은 다시 읽는다.
+            const stamp = [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
+            const cached = this.parsedDocuments.get(document);
+            result = cached?.stamp === stamp ? cached.result : parseFile(filePath);
+            this.parsedDocuments.set(document, { stamp, result });
         } catch (e: any) {
             const msg = t(`파일 파싱 실패 (${fileName}): ${e.message}`, `Failed to parse file (${fileName}): ${e.message}`);
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');

@@ -1,35 +1,20 @@
+import { HexByteStore } from './hexByteStore';
+
 /**
  * Hex file parser supporting Intel HEX, Motorola SREC, and raw binary formats.
  */
 
 export type HexFormat = 'intel' | 'srec' | 'binary';
 
-/**
- * 파서가 받아들이는 최대 byte entry 수.
- *
- * 여기서 entry 는 **주소 하나에 담긴 바이트 하나**(`data: Map<주소, 바이트>`)다.
- * 이 Map 은 **HEX/SREC 전용**이고, binary 는 `rawBuffer`(Uint8Array)를 쓰므로
- * 이 상한과 무관하다.
- *
- * 이전 값(100M, 주석에 "최악 1.6GB")은 **도달할 수 없는 숫자**였다. HEX/SREC 는
- * 텍스트 포맷이라 1바이트를 최소 2자 + 레코드 오버헤드로 적으므로, Hex Viewer
- * 의 50MB 파일 상한을 통과한 입력이 만들 수 있는 entry 는 최대 약 25M 이다
- * (Intel HEX 최대 레코드 길이 255바이트 기준 2.05자/바이트, SREC 도 비슷).
- * 즉 옛 상한은 어떤 입력으로도 걸리지 않았고, 계산도 실제 V8 Map 비용(entry 당
- * 수십 바이트)보다 낙관적이었다.
- *
- * 32M 은 그 도달 가능 최대치(~25M) 위의 backstop 이다 — 정상 파일을 거부하지
- * 않으면서, 파일 상한이 어떤 이유로 완화되더라도 파서가 무한정 담지는 않는다.
- * 파일 상한과의 관계는 `hexParserLimits.test.ts` 가 고정한다.
- */
+/** HEX/SREC의 고유 바이트 수 상한. Binary는 rawBuffer와 파일 크기 제한을 쓴다. */
 export const HEX_MAX_BYTE_ENTRIES = 32 * 1024 * 1024;
 /** Maximum bytes per single record (Intel HEX data field is 1 byte → 255; SREC is 253). Guards malformed input. */
 const HEX_MAX_RECORD_BYTES = 255;
 
 export interface HexParseResult {
     format: HexFormat;
-    /** Sparse memory data: address → byte value (used for HEX/SREC) */
-    data: Map<number, number>;
+    /** Sparse memory data: address → byte value (HEX/SREC use compact pages) */
+    data: ReadonlyMap<number, number> | HexByteStore;
     /** Raw buffer for binary format (avoids Map overhead for large files) */
     rawBuffer?: Uint8Array;
     /** Entry point address (if available) */
@@ -86,9 +71,28 @@ function recordIsValid(line: string, kind: 'intel' | 'srec'): boolean {
     }
     let sum = 0;
     for (let i = start; i < expectedLength; i += 2) {
-        sum += parseInt(line.slice(i, i + 2), 16);
+        sum += hexByte(line, i);
     }
     return (sum & 0xFF) === (kind === 'intel' ? 0 : 0xFF);
+}
+
+/** 검증을 통과한 두 자리 16진수. parseInt용 임시 문자열을 바이트마다 만들지 않는다. */
+function hexByte(line: string, offset: number): number {
+    const high = line.charCodeAt(offset);
+    const low = line.charCodeAt(offset + 1);
+    return (high <= 57 ? high - 48 : (high | 32) - 87) * 16
+        + (low <= 57 ? low - 48 : (low | 32) - 87);
+}
+
+/** 전체 줄 배열을 만들지 않는다. 레코드 한 줄만 임시 문자열로 유지한다. */
+function* recordLines(content: string): IterableIterator<string> {
+    let start = 0;
+    while (start < content.length) {
+        const newline = content.indexOf('\n', start);
+        if (newline < 0) { yield content.slice(start); return; }
+        yield content.slice(start, newline);
+        start = newline + 1;
+    }
 }
 
 function isHexCommentOrBlank(line: string): boolean {
@@ -146,7 +150,7 @@ export function detectFormat(content: string | Buffer): HexFormat {
  * Parse Intel HEX format (https://en.wikipedia.org/wiki/Intel_HEX).
  */
 export function parseIntelHex(content: string): HexParseResult {
-    const data = new Map<number, number>();
+    const data = new HexByteStore();
     let baseAddress: number | undefined = 0;
     let entryPoint: number | undefined;
     let minAddress = Infinity;
@@ -154,8 +158,7 @@ export function parseIntelHex(content: string): HexParseResult {
     let invalidRecordCount = 0;
     let unaddressedRecordCount = 0;
 
-    const lines = content.split(/\r?\n/);
-    for (const rawLine of lines) {
+    for (const rawLine of recordLines(content)) {
         const line = rawLine.trim();
         if (isHexCommentOrBlank(line)) { continue; }
         if (!recordIsValid(line, 'intel')) {
@@ -179,7 +182,7 @@ export function parseIntelHex(content: string): HexParseResult {
                 }
                 const fullAddress = baseAddress + address;
                 for (let i = 0; i < byteCount; i++) {
-                    const byte = parseInt(line.substring(9 + i * 2, 11 + i * 2), 16);
+                    const byte = hexByte(line, 9 + i * 2);
                     if (!Number.isFinite(byte)) { continue; }
                     const addr = fullAddress + i;
                     data.set(addr, byte);
@@ -223,14 +226,13 @@ export function parseIntelHex(content: string): HexParseResult {
  * Parse Motorola SREC format (https://en.wikipedia.org/wiki/SREC_(file_format)).
  */
 export function parseSrec(content: string): HexParseResult {
-    const data = new Map<number, number>();
+    const data = new HexByteStore();
     let entryPoint: number | undefined;
     let minAddress = Infinity;
     let maxAddress = -Infinity;
     let invalidRecordCount = 0;
 
-    const lines = content.split(/\r?\n/);
-    for (const rawLine of lines) {
+    for (const rawLine of recordLines(content)) {
         const line = rawLine.trim();
         if (isHexCommentOrBlank(line)) { continue; }
         if (!recordIsValid(line, 'srec')) { invalidRecordCount++; continue; }
@@ -264,7 +266,7 @@ export function parseSrec(content: string): HexParseResult {
         }
 
         for (let i = 0; i < dataByteCount; i++) {
-            const byte = parseInt(line.substring(dataStart + i * 2, dataStart + i * 2 + 2), 16);
+            const byte = hexByte(line, dataStart + i * 2);
             if (!Number.isFinite(byte)) { continue; }
             const addr = address + i;
             data.set(addr, byte);
@@ -318,6 +320,10 @@ export function toFlatArray(result: HexParseResult, startAddress: number, length
     }
     const arr = new Uint8Array(length);
     arr.fill(fillByte);
+    if (result.data instanceof HexByteStore) {
+        result.data.copyTo(arr, startAddress);
+        return arr;
+    }
     // 희소한 결과는 주소 범위 대신 실제 데이터 항목만 돈다. 두 바이트뿐인
     // 128MiB 구간을 1억 번 `Map.get` 하던 비용이 항목 수에 비례하게 된다.
     if (result.data.size < length) {

@@ -5,8 +5,8 @@ import { HEX_VIEWER_MAX_FILE_SIZE } from '../hexViewer';
 /**
  * 파서 entry 상한과 파일 크기 상한의 관계 (0.6.41).
  *
- * `HEX_MAX_BYTE_ENTRIES` 는 `data: Map<주소, 바이트>` 의 항목 수 상한이다.
- * 여기서 entry 하나는 **주소 하나에 담긴 바이트 하나**이며, 이 Map 은
+ * `HEX_MAX_BYTE_ENTRIES` 는 주소별 고유 바이트 수 상한이다.
+ * 여기서 entry 하나는 **주소 하나에 담긴 바이트 하나**이며, 이 저장소는
  * **HEX/SREC 전용**이다 (binary 는 `rawBuffer` 를 쓴다).
  *
  * 이전 값 100M 은 **어떤 입력으로도 도달할 수 없는 숫자**였다. HEX/SREC 는
@@ -65,7 +65,7 @@ suite('Hex 파서 상한과 파일 상한의 관계', () => {
         );
     });
 
-    test('entry 상한은 Map 을 쓰는 HEX/SREC 에만 해당한다', () => {
+    test('entry 상한은 페이지 저장소를 쓰는 HEX/SREC 에만 해당한다', () => {
         // binary 는 rawBuffer(Uint8Array)를 쓰므로 이 상한과 무관하다.
         // 파일 상한 50MB 가 binary 의 유일한 제동 장치다.
         assert.strictEqual(HEX_VIEWER_MAX_FILE_SIZE, 50 * 1024 * 1024);
