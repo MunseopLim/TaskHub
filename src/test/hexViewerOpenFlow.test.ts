@@ -816,7 +816,8 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
             const readFile = mutableFs.readFileSync;
             let reads = 0;
             (mutableFs as any).readFileSync = (file: fs.PathOrFileDescriptor, ...args: any[]) => {
-                if (file === filePath) { reads++; }
+                // VS Code URI는 Windows 드라이브 문자의 대소문자를 정규화한다.
+                if (file === document.uri.fsPath) { reads++; }
                 return (readFile as any)(file, ...args);
             };
             try {

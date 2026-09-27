@@ -95,7 +95,7 @@ suite('개인 프리셋 저장소 이관', () => {
         const migration = await migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir);
         assert.deepStrictEqual(migration.copied.sort(), ['preset-current.json', 'preset-mine.json']);
         assert.deepStrictEqual(migration.failed, []);
-        assert.ok(migration.processedSources.includes(oldSource));
+        assert.ok(migration.processedSources.includes(presetSourceKey(oldSource)));
         assert.strictEqual(fs.readFileSync(path.join(personalDir, 'preset-mine.json'), 'utf8'), '["old install"]');
         assert.ok(fs.existsSync(oldSource), '원본은 지우지 않는다');
         assert.deepStrictEqual(fs.readdirSync(personalDir).sort(), ['preset-current.json', 'preset-mine.json']);
@@ -111,8 +111,8 @@ suite('개인 프리셋 저장소 이관', () => {
         fs.writeFileSync(path.join(personalDir, 'preset-kept.json'), '["edited personal copy"]');
         const migration = await migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir);
         assert.deepStrictEqual(migration.copied, ['preset-dup.json']);
-        assert.ok(migration.processedSources.includes(older), '더 오래된 사본도 처리한 것으로 기록한다');
-        assert.ok(migration.processedSources.includes(kept), '이미 있는 이름도 처리한 것으로 기록한다');
+        assert.ok(migration.processedSources.includes(presetSourceKey(older)), '더 오래된 사본도 처리한 것으로 기록한다');
+        assert.ok(migration.processedSources.includes(presetSourceKey(kept)), '이미 있는 이름도 처리한 것으로 기록한다');
         assert.strictEqual(fs.readFileSync(path.join(personalDir, 'preset-dup.json'), 'utf8'), '["newer"]');
         assert.strictEqual(fs.readFileSync(path.join(personalDir, 'preset-kept.json'), 'utf8'), '["edited personal copy"]');
     });
@@ -153,7 +153,7 @@ suite('개인 프리셋 저장소 이관', () => {
         const migration = await withCopyFailure(blocked, () => migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir));
         assert.deepStrictEqual(migration.copied, ['preset-ok.json']);
         assert.deepStrictEqual(migration.failed.map(failure => failure.file), ['preset-blocked.json']);
-        assert.ok(!migration.processedSources.includes(blocked), '실패한 원본은 다음에 다시 시도한다');
+        assert.ok(!migration.processedSources.includes(presetSourceKey(blocked)), '실패한 원본은 다음에 다시 시도한다');
     });
 
     test('동시 이관 중 한 복사가 부분 실패해도 다른 창은 완성된 개인 사본만 기록한다', async () => {
@@ -225,7 +225,7 @@ suite('개인 프리셋 저장소 이관', () => {
         const first = await withCopyFailure(newer, () => migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir));
         assert.deepStrictEqual(first.copied, []);
         assert.deepStrictEqual(first.failed.map(failure => failure.file), ['preset-duplicate.json']);
-        assert.ok(!first.processedSources.includes(older) && !first.processedSources.includes(newer));
+        assert.ok(!first.processedSources.includes(presetSourceKey(older)) && !first.processedSources.includes(presetSourceKey(newer)));
         assert.strictEqual(fs.existsSync(path.join(personalDir, 'preset-duplicate.json')), false);
 
         const second = await migrateLegacyExtensionPresets(current, 'Munseop.taskhub', personalDir, new Set(first.processedSources));
