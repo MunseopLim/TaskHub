@@ -63,8 +63,8 @@ suite('TaskHub 기능 런처', () => {
             .filter(item => item.kind !== vscode.QuickPickItemKind.Separator)
             .map(item => item.featureId);
         const uniqueFeatureIds = new Set(allFeatureIds);
-        assert.strictEqual(uniqueFeatureIds.size, 12);
-        assert.strictEqual(allFeatureIds.length, 12, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
+        assert.strictEqual(uniqueFeatureIds.size, 13);
+        assert.strictEqual(allFeatureIds.length, 13, '최근 기능을 일반 그룹에 다시 표시하면 검색 결과가 중복된다');
         assert.ok(allFeatureIds.every(id => typeof id === 'string'));
         assert.ok(items.filter(item => item.featureId).every(item => item.label.includes('$(')));
     });
@@ -77,7 +77,7 @@ suite('TaskHub 기능 런처', () => {
         assert.notStrictEqual(read?.description, item?.description);
     });
 
-    test('Jenkins 기능을 켰을 때만 표시하고 꺼진 최근 항목은 숨긴다', () => {
+    test('Jenkins가 꺼져 있어도 활성화 경로를 표시하고 최근 항목과 중복하지 않는다', () => {
         const enabled = buildFeatureLauncherItems(['jenkins'], 0, true);
         const jenkins = enabled.filter(item => item.featureId === 'jenkins');
         assert.strictEqual(jenkins.length, 1);
@@ -85,27 +85,52 @@ suite('TaskHub 기능 런처', () => {
         assert.strictEqual(enabled[1].featureId, 'jenkins');
 
         const disabled = buildFeatureLauncherItems(['jenkins'], 0, false);
-        assert.ok(disabled.every(item => item.featureId !== 'jenkins'));
-        assert.strictEqual(disabled.filter(item => item.kind === vscode.QuickPickItemKind.Separator).length, 4,
-            '비활성화된 기능만 최근 목록에 있으면 빈 최근 사용 그룹을 표시하면 안 된다');
-        assert.strictEqual(disabled.filter(item => item.featureId).length, 12);
+        const enableJenkins = disabled.filter(item => item.featureId === 'jenkins');
+        assert.strictEqual(enableJenkins.length, 1);
+        assert.strictEqual(enableJenkins[0].command, 'workbench.action.openSettings');
+        assert.notStrictEqual(enableJenkins[0].label, jenkins[0].label);
+        assert.strictEqual(disabled[1].featureId, 'jenkins');
+        assert.strictEqual(disabled.filter(item => item.featureId).length, 13);
+        assert.ok(buildFeatureLauncherItems([], 0, false).some(item => item.featureId === 'jenkins'),
+            '최근 사용 기록이 없는 신규 사용자에게도 활성화 경로를 표시해야 한다');
     });
 
-    test('Jenkins 설정 변경은 다음 런처 목록에 반영된다', () => {
+    test('런처에서 꺼진 Jenkins는 활성화 설정을 열고 켠 뒤에는 실행 목록을 연다', async () => {
         const originalGetConfiguration = vscode.workspace.getConfiguration;
+        const originalShowQuickPick = vscode.window.showQuickPick;
+        const originalExecuteCommand = vscode.commands.executeCommand;
+        const executions: Array<{ command: string; args: unknown[] }> = [];
+        const { memento } = createMemoryState();
+        const context = { globalState: memento } as unknown as vscode.ExtensionContext;
         let enabled = false;
         try {
             (vscode.workspace as any).getConfiguration = (section: string) => {
                 assert.strictEqual(section, 'taskhub');
                 return { get: (key: string, fallback: unknown) => key === 'experimental.jenkins.enabled' ? enabled : fallback };
             };
-            assert.ok(!buildFeatureLauncherItems([]).some(item => item.featureId === 'jenkins'));
+            (vscode.window as any).showQuickPick = async (items: ReturnType<typeof buildFeatureLauncherItems>) => {
+                const jenkins = items.filter(item => item.featureId === 'jenkins');
+                assert.strictEqual(jenkins.length, 1, '설정 상태와 관계없이 선택할 수 있어야 한다');
+                return jenkins[0];
+            };
+            (vscode.commands as any).executeCommand = async (command: string, ...args: unknown[]) => {
+                executions.push({ command, args });
+            };
+            await showFeatureLauncher(context);
             enabled = true;
-            assert.ok(buildFeatureLauncherItems([]).some(item => item.featureId === 'jenkins'));
+            await showFeatureLauncher(context);
             enabled = false;
-            assert.ok(!buildFeatureLauncherItems(['jenkins']).some(item => item.featureId === 'jenkins'));
+            await showFeatureLauncher(context);
+            assert.deepStrictEqual(executions, [
+                { command: 'workbench.action.openSettings', args: ['@id:taskhub.experimental.jenkins.enabled'] },
+                { command: 'taskhub.jenkins.showRuns', args: [] },
+                { command: 'workbench.action.openSettings', args: ['@id:taskhub.experimental.jenkins.enabled'] },
+            ]);
+            assert.deepStrictEqual(memento.get(FEATURE_LAUNCHER_RECENT_KEY), ['jenkins']);
         } finally {
             (vscode.workspace as any).getConfiguration = originalGetConfiguration;
+            (vscode.window as any).showQuickPick = originalShowQuickPick;
+            (vscode.commands as any).executeCommand = originalExecuteCommand;
         }
     });
 

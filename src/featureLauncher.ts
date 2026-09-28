@@ -31,6 +31,7 @@ type FeatureLauncherFilePicker = 'markdown' | 'html';
 interface FeatureLauncherDefinition {
     id: FeatureLauncherFeatureId;
     command: string;
+    commandArgs?: unknown[];
     group: FeatureLauncherGroup;
     label: string;
     description: string;
@@ -40,6 +41,7 @@ interface FeatureLauncherDefinition {
 export interface FeatureLauncherItem extends vscode.QuickPickItem {
     featureId?: FeatureLauncherFeatureId;
     command?: string;
+    commandArgs?: unknown[];
     filePicker?: FeatureLauncherFilePicker;
 }
 
@@ -136,18 +138,24 @@ function buildFeatureLauncherDefinitions(unreadCount: number, jenkinsEnabled: bo
             filePicker: 'html',
         },
     ];
-    if (jenkinsEnabled) {
-        definitions.push({
-            id: 'jenkins',
-            command: 'taskhub.jenkins.showRuns',
-            group: 'actions',
-            label: `$(beaker) ${t('Jenkins 테스트 (실험적)', 'Jenkins tests (Experimental)')}`,
-            description: t(
+    definitions.push({
+        id: 'jenkins',
+        command: jenkinsEnabled ? 'taskhub.jenkins.showRuns' : 'workbench.action.openSettings',
+        commandArgs: jenkinsEnabled ? undefined : ['@id:taskhub.experimental.jenkins.enabled'],
+        group: 'actions',
+        label: `$(beaker) ${jenkinsEnabled
+            ? t('Jenkins 테스트 (실험적)', 'Jenkins tests (Experimental)')
+            : t('Jenkins 테스트 활성화… (실험적)', 'Enable Jenkins tests… (Experimental)')}`,
+        description: jenkinsEnabled
+            ? t(
                 '여러 서버의 테스트를 브랜치와 커밋별로 확인합니다.',
                 'Track tests by branch and commit across Jenkins servers.'
+            )
+            : t(
+                'Jenkins 기능을 켜는 사용자 설정을 엽니다.',
+                'Open the user setting to enable Jenkins.'
             ),
-        });
-    }
+    });
     return definitions;
 }
 
@@ -178,6 +186,7 @@ function toQuickPickItem(definition: FeatureLauncherDefinition): FeatureLauncher
         description: definition.description,
         featureId: definition.id,
         command: definition.command,
+        commandArgs: definition.commandArgs,
         filePicker: definition.filePicker,
     };
 }
@@ -247,7 +256,7 @@ function previewOpenDialogOptions(filePicker: FeatureLauncherFilePicker): vscode
 }
 
 async function resolveFeatureArguments(item: FeatureLauncherItem): Promise<unknown[] | undefined> {
-    if (!item.filePicker) { return []; }
+    if (!item.filePicker) { return item.commandArgs ?? []; }
     const scope = item.filePicker === 'markdown' ? DIALOG_SCOPE.previewMarkdown : DIALOG_SCOPE.previewHtml;
     const selectedFiles = await showOpenDialogWithMemory(scope, previewOpenDialogOptions(item.filePicker));
     if (!selectedFiles?.[0]) { return undefined; }

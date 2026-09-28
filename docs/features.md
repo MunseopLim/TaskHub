@@ -844,7 +844,9 @@ value |= 0x80;  // Hover over '|=' to see: 0x0F → 0x8F
 
 **사내에서 처음 사용하기:**
 
-1. 시험 VSIX를 설치한 뒤 User Settings의 `taskhub.experimental.jenkins.enabled`를 켭니다.
+1. 시험 VSIX를 설치한 뒤 하단 **TaskHub** [기능 런처](#status-bar-기능-런처)에서 **Jenkins 테스트 활성화… (실험적)** 를 선택합니다.
+   열리는 User Settings의 `taskhub.experimental.jenkins.enabled`를 켜면 재시작 없이 Jenkins 뷰·명령이 나타나고, 런처 항목도 실행 목록을 여는 **Jenkins 테스트 (실험적)** 으로 바뀝니다.
+   기능을 꺼도 런처의 활성화 항목은 남아 다시 켤 수 있습니다.
    TaskHub 사이드바의 **Jenkins 테스트 (실험적)** 에서 **서버 관리**로 각 서버의 이름·URL·사용자 ID·API token을 등록합니다.
    URL에는 프로토콜·포트·접속 경로를 포함합니다. 사내 CA 인증서를 지정할 수 있으며 token은 SecretStorage에 저장됩니다.
 2. **브랜치 테스트 요청**은 선택한 서버/job에 테스트를 한 번 요청합니다. 현재 브랜치는 커밋·푸시되어 있고 수정·추적되지 않은 파일이 없어야 하며
