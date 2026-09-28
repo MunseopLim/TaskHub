@@ -45,8 +45,26 @@ const errorMessages: Record<string, string> = {
     CANCELLED: 'The Jenkins request was cancelled. A submitted build may still be queued.',
 };
 
-/** Only fixed descriptions and HTTP status are exposed; never server bodies or credentials. */
+export interface JenkinsRequestDiagnostic {
+    dispatched: boolean;
+    responseStatus?: number;
+    responseType?: 'json' | 'html' | 'text' | 'other' | 'unknown';
+    jenkinsHeader?: boolean;
+    authentication?: 'anonymous' | 'configured-user' | 'other-user' | 'not-reported';
+    requiredPermission?: 'Overall/Read' | 'Job/Read' | 'Job/Build' | 'other';
+    networkCode?: string;
+}
+
+const diagnosticNetworkCodes = new Set([
+    'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH',
+    'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID',
+    'EPROTO',
+]);
+
+/** Only fixed descriptions, HTTP status and allowlisted facts; never response text or credentials. */
 export class JenkinsClientError extends Error {
+    diagnostic?: JenkinsRequestDiagnostic;
     constructor(public readonly code: string, public readonly status?: number, public readonly retryAfterMs?: number,
         public readonly deferred = false) {
         super(`${errorMessages[code] ?? 'Jenkins request failed.'}${status === undefined ? '' : ` (HTTP ${status})`}`);
@@ -316,6 +334,7 @@ function loadCertificate(path: string): Promise<Array<string | Buffer>> {
 export class JenkinsClient {
     private readonly baseUrl: URL;
     private readonly authorization: string;
+    private readonly username: string;
     private readonly timeoutMs: number;
     private readonly maxResponseBytes: number;
     private readonly maxJobs: number;
@@ -332,6 +351,7 @@ export class JenkinsClient {
             throw new JenkinsClientError('INVALID_CREDENTIALS');
         }
         this.authorization = `Basic ${Buffer.from(`${server.username}:${options.token}`, 'utf8').toString('base64')}`;
+        this.username = server.username;
         this.timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
         this.maxResponseBytes = options.maxResponseBytes ?? defaultMaxResponseBytes;
         this.maxJobs = options.maxJobs ?? jenkinsClientLimits.defaultMaxJobs;
@@ -351,11 +371,39 @@ export class JenkinsClient {
     }
 
     async verify(): Promise<{ authenticated: boolean; name: string }> {
-        const value = requireRecord(await this.json(this.endpoint(this.baseUrl.href, 'whoAmI/api/json')));
-        if (value.authenticated !== true || typeof value.name !== 'string') {
-            throw new JenkinsClientError('AUTH_REQUIRED');
+        const response = await this.request(this.endpoint(this.baseUrl.href, 'whoAmI/api/json'));
+        try {
+            const value = requireRecord(this.parseJson(response));
+            if (value.authenticated !== true || typeof value.name !== 'string') {
+                const error = new JenkinsClientError('AUTH_REQUIRED');
+                error.diagnostic = this.responseDiagnostic(response.status, response.headers);
+                if (value.authenticated === false) { error.diagnostic.authentication = 'anonymous'; }
+                throw error;
+            }
+            return { authenticated: true, name: value.name };
+        } catch (error) {
+            if (error instanceof JenkinsClientError) {
+                error.diagnostic ??= this.responseDiagnostic(response.status, response.headers);
+            }
+            throw error;
         }
-        return { authenticated: true, name: value.name };
+    }
+
+    private responseDiagnostic(status: number, headers: http.IncomingHttpHeaders): JenkinsRequestDiagnostic {
+        const contentType = headers['content-type']?.split(';', 1)[0].trim().toLowerCase();
+        const identity = headers['x-you-are-authenticated-as'];
+        const permission = headers['x-required-permission'];
+        return {
+            dispatched: true,
+            responseStatus: status,
+            responseType: !contentType ? 'unknown' : contentType === 'application/json' ? 'json'
+                : contentType === 'text/html' ? 'html' : contentType === 'text/plain' ? 'text' : 'other',
+            jenkinsHeader: headers['x-jenkins'] !== undefined,
+            authentication: identity === undefined ? 'not-reported' : identity === 'anonymous' ? 'anonymous'
+                : identity === this.username ? 'configured-user' : 'other-user',
+            requiredPermission: permission === undefined ? undefined : permission === 'hudson.model.Hudson.Read' ? 'Overall/Read'
+                : permission === 'hudson.model.Item.Read' ? 'Job/Read' : permission === 'hudson.model.Item.Build' ? 'Job/Build' : 'other',
+        };
     }
 
     /** A caller may retain validated pages only for the duration of one discovery operation. */
@@ -673,10 +721,16 @@ export class JenkinsClient {
 
     private async json(url: URL): Promise<unknown> {
         const response = await this.request(url);
+        return this.parseJson(response);
+    }
+
+    private parseJson(response: HttpResponse): unknown {
         try {
             return JSON.parse(response.body.toString('utf8')) as unknown;
         } catch {
-            throw new JenkinsClientError('INVALID_RESPONSE');
+            const error = new JenkinsClientError('INVALID_RESPONSE');
+            error.diagnostic = this.responseDiagnostic(response.status, response.headers);
+            throw error;
         }
     }
 
@@ -700,16 +754,22 @@ export class JenkinsClient {
         let dispatched = false;
         const timer = setTimeout(() => { timedOut = true; operation.abort(); }, this.timeoutMs);
         const signal = operation.signal;
+        const timeoutError = (error: unknown): JenkinsClientError => {
+            const failure = new JenkinsClientError('TIMEOUT', undefined, undefined, !dispatched);
+            failure.diagnostic = { ...(error instanceof JenkinsClientError ? error.diagnostic : undefined), dispatched };
+            return failure;
+        };
         const run = async (): Promise<HttpResponse> => {
             try {
                 const ca = await abortable(this.certificate(), signal);
                 return await this.sendRequest(input, method, body, ca, signal, allowPrefix, () => { dispatched = true; onDispatch?.(); });
-            } catch (error) { if (timedOut) { throw new JenkinsClientError('TIMEOUT', undefined, undefined, !dispatched); } throw error; }
+            } catch (error) { if (timedOut) { throw timeoutError(error); } throw error; }
         };
         try {
             return await (this.guard ? this.guard.run(this.baseUrl.href, signal, run, `${method} ${input.origin}${input.pathname}`) : run());
         } catch (error) {
-            if (timedOut) { throw new JenkinsClientError('TIMEOUT', undefined, undefined, !dispatched); }
+            if (timedOut) { throw timeoutError(error); }
+            if (error instanceof JenkinsClientError) { error.diagnostic ??= { dispatched }; }
             throw error;
         } finally { clearTimeout(timer); this.signal?.removeEventListener('abort', cancel); }
     }
@@ -720,6 +780,7 @@ export class JenkinsClient {
             let settled = false;
             let timer: ReturnType<typeof setTimeout> | undefined;
             let request: http.ClientRequest | undefined;
+            let diagnostic: JenkinsRequestDiagnostic = { dispatched: false };
             const cleanup = () => {
                 clearTimeout(timer);
                 signal?.removeEventListener('abort', cancel);
@@ -728,6 +789,7 @@ export class JenkinsClient {
                 if (!settled) {
                     settled = true;
                     cleanup();
+                    error.diagnostic = { ...diagnostic };
                     reject(error);
                 }
             };
@@ -761,8 +823,10 @@ export class JenkinsClient {
                     this.budget.remaining--;
                 }
                 onDispatch();
+                diagnostic.dispatched = true;
                 request = transport.request(url, options, response => {
                     const status = response.statusCode ?? 0;
+                    diagnostic = this.responseDiagnostic(status, response.headers);
                     if (status < 200 || status >= 300) {
                         const code = status >= 300 && status < 400 ? 'REDIRECT' :
                             status === 401 ? 'AUTH_REQUIRED' : status === 403 ? 'FORBIDDEN' :
@@ -813,7 +877,10 @@ export class JenkinsClient {
                     response.on('error', () => fail(new JenkinsClientError('NETWORK_ERROR')));
                     response.on('aborted', () => fail(new JenkinsClientError('NETWORK_ERROR')));
                 });
-                request.on('error', () => fail(new JenkinsClientError('NETWORK_ERROR')));
+                request.on('error', (error: NodeJS.ErrnoException) => {
+                    if (error.code && diagnosticNetworkCodes.has(error.code)) { diagnostic.networkCode = error.code; }
+                    fail(new JenkinsClientError('NETWORK_ERROR'));
+                });
                 timer = setTimeout(() => {
                     fail(new JenkinsClientError('TIMEOUT'));
                     request?.destroy();

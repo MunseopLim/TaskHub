@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { t } from '../i18n';
 import { abortable, JenkinsClientError, JenkinsTransportGuard, JenkinsClient, normalizeJenkinsServerUrl, validateJenkinsServerUrl } from './client';
 import { JenkinsInventory, JenkinsInventoryResult } from './inventory';
-import { jenkinsErrorLabel, jenkinsStatusLabel } from './messages';
+import { jenkinsConnectionDiagnostic, jenkinsErrorLabel, jenkinsStatusLabel } from './messages';
 import { JenkinsLogDocument } from './logDocument';
 import { createJenkinsScope } from './lifecycle';
 import { JenkinsGitError, readJenkinsGitContext, readJenkinsGitSnapshot } from './git';
@@ -353,9 +353,22 @@ export class JenkinsController implements vscode.Disposable {
             { label: t('서버 삭제', 'Remove server'), id: 'remove' },
         ], { title: server.name });
         if (action?.id === 'verify') {
-            const result = await this.withOperation(t('Jenkins 연결 확인 중', 'Verifying Jenkins connection'), async signal => (await this.client(server, signal)).verify());
-            if (!result.authenticated) { throw new JenkinsClientError('AUTH_REQUIRED'); }
-            quietMessage(() => vscode.window.showInformationMessage(t(`${server.name}: 연결되었습니다.`, `${server.name}: connected.`)));
+            try {
+                const result = await this.withOperation(t('Jenkins 연결 확인 중', 'Verifying Jenkins connection'), async signal => (await this.client(server, signal)).verify());
+                if (!result.authenticated) { throw new JenkinsClientError('AUTH_REQUIRED'); }
+                if (!this.disposed) {
+                    quietMessage(() => vscode.window.showInformationMessage(t(
+                        `${server.name}: 사용자 인증을 확인했습니다. Job 조회·빌드 권한은 별도 확인이 필요합니다.`,
+                        `${server.name}: identity verified. Job read and build permissions need a separate check.`)));
+                }
+            } catch (error) {
+                if (this.disposed) { return; }
+                const detail = jenkinsConnectionDiagnostic(server.url, error);
+                const copy = t('진단 정보 복사', 'Copy diagnostics');
+                const selected = await vscode.window.showErrorMessage(t('Jenkins 연결 확인에 실패했습니다.', 'Jenkins connection check failed.'),
+                    { modal: true, detail }, copy);
+                if (selected === copy && !this.disposed) { await vscode.env.clipboard.writeText(detail); }
+            }
         } else if (action?.id === 'edit') { await this.editServer(server); }
         else if (action?.id === 'ca') {
             const files = await vscode.window.showOpenDialog({ canSelectMany: false, openLabel: t('PEM 인증서 선택', 'Select PEM certificate'), filters: { PEM: ['pem', 'crt'] } });

@@ -1,9 +1,13 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
+import * as http from 'node:http';
+import { once } from 'node:events';
+import type { Socket } from 'node:net';
 import { JenkinsClientError, JenkinsClient } from '../jenkins/client';
 import { JenkinsController } from '../jenkins/controller';
 import { JenkinsLogDocument } from '../jenkins/logDocument';
 import { createRequest } from '../jenkins/model';
+import { jenkinsConnectionDiagnostic } from '../jenkins/messages';
 import { JENKINS_REQUESTS_KEY, JENKINS_SERVERS_KEY } from '../jenkins/storage';
 import { parseJenkinsManifest, serverForUrl } from '../jenkins/tracking';
 import { JenkinsRequest, JenkinsServer } from '../jenkins/types';
@@ -33,6 +37,108 @@ function fixture(): { context: vscode.ExtensionContext; global: Map<string, unkn
 }
 
 suite('Jenkins security boundaries', () => {
+    test('IT-284: connection verification presents and copies localized safe diagnostics from a real HTTP denial', async () => {
+        const pick = vscode.window.showQuickPick;
+        const showError = vscode.window.showErrorMessage;
+        const showInfo = vscode.window.showInformationMessage;
+        const clipboard = Object.getOwnPropertyDescriptor(vscode.env, 'clipboard')!;
+        const language = Object.getOwnPropertyDescriptor(vscode.env, 'language')!;
+        const sockets = new Set<Socket>();
+        const requests: string[] = [];
+        let authenticated = false;
+        const endpoint = http.createServer((request, response) => {
+            requests.push(`${request.method} ${request.url}`);
+            if (authenticated) {
+                response.writeHead(200, { 'Content-Type': 'application/json' });
+                response.end(JSON.stringify({ authenticated: true, name: 'developer' }));
+                return;
+            }
+            response.writeHead(403, {
+                'Content-Type': 'text/html', 'X-Jenkins': '2.500',
+                'X-You-Are-Authenticated-As': 'anonymous', 'X-Required-Permission': 'hudson.model.Hudson.Read',
+                'Set-Cookie': 'private-session=fixture-token', Location: 'https://sso.example/fixture-token',
+            });
+            response.end('<html>fixture-token and private server trace</html>');
+        });
+        endpoint.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+        let controller: JenkinsController | undefined;
+        try {
+            endpoint.listen(0, '127.0.0.1');
+            await once(endpoint, 'listening');
+            const address = endpoint.address();
+            assert.ok(address && typeof address !== 'string');
+            const url = `http://127.0.0.1:${address.port}/jenkins/`;
+            for (const locale of ['ko', 'en']) {
+                authenticated = false;
+                Object.defineProperty(vscode.env, 'language', { configurable: true, value: locale });
+                const state = fixture();
+                state.global.set(JENKINS_SERVERS_KEY, [{ ...server, url, allowInsecureHttp: true }]);
+                const originalState = JSON.stringify([...state.global]);
+                controller = new JenkinsController(state.context);
+                const reports: string[] = [];
+                const copies: string[] = [];
+                let copy = true;
+                vscode.window.showQuickPick = (async (items: any) => (await items).find((item: any) => item.server || item.id === 'verify')) as typeof pick;
+                vscode.window.showErrorMessage = (async (_message: string, options: vscode.MessageOptions, ...items: string[]) => {
+                    assert.strictEqual(options.modal, true);
+                    assert.ok(options.detail);
+                    reports.push(options.detail);
+                    assert.strictEqual(items[0], locale === 'ko' ? '진단 정보 복사' : 'Copy diagnostics');
+                    return copy ? items[0] : undefined;
+                }) as typeof showError;
+                Object.defineProperty(vscode.env, 'clipboard', {
+                    configurable: true, value: { writeText: async (value: string) => { copies.push(value); } },
+                });
+                await vscode.commands.executeCommand('taskhub.jenkins.manageServers');
+                assert.strictEqual(reports.length, 1);
+                assert.deepStrictEqual(copies, reports);
+                const report = reports[0];
+                assert.ok(report.includes(`GET ${url}whoAmI/api/json`));
+                assert.ok(report.includes('403') && report.includes('Overall/Read') && report.includes('HTML'));
+                assert.ok(report.includes(locale === 'ko' ? '익명 사용자' : 'Reported as anonymous'));
+                assert.ok(report.includes(locale === 'ko' ? 'Job 조회·빌드 권한은 검사하지 않습니다' : 'does not test job read or build permissions'));
+                for (const secret of ['fixture-token', 'private-session', 'sso.example', 'private server trace',
+                    Buffer.from('developer:fixture-token').toString('base64')]) {
+                    assert.ok(!report.includes(secret), 'Diagnostic output must omit response and credential data.');
+                }
+                copy = false;
+                const requestCount = requests.length;
+                await vscode.commands.executeCommand('taskhub.jenkins.manageServers');
+                assert.strictEqual(requests.length, requestCount, 'A cached denial must not dispatch again.');
+                assert.strictEqual(copies.length, 1, 'Dismissing diagnostics must not modify the clipboard.');
+                assert.ok(reports[1].includes(locale === 'ko' ? 'HTTP 전송 전에 중단' : 'stopped before HTTP dispatch'));
+                assert.strictEqual(JSON.stringify([...state.global]), originalState, 'Verification must not change saved server data.');
+                controller.dispose(); controller = undefined;
+                authenticated = true;
+                const information: string[] = [];
+                vscode.window.showInformationMessage = (async (message: string) => { information.push(message); return undefined; }) as typeof showInfo;
+                controller = new JenkinsController(state.context);
+                await vscode.commands.executeCommand('taskhub.jenkins.manageServers');
+                assert.strictEqual(reports.length, 2, 'Successful identity checks must not display an error.');
+                assert.strictEqual(information.length, 1);
+                assert.ok(information[0].includes(locale === 'ko' ? 'Job 조회·빌드 권한은 별도 확인' : 'Job read and build permissions need a separate check'));
+                controller.dispose(); controller = undefined;
+            }
+            assert.deepStrictEqual(requests, Array(4).fill('GET /jenkins/whoAmI/api/json'));
+        } finally {
+            controller?.dispose();
+            vscode.window.showQuickPick = pick;
+            vscode.window.showErrorMessage = showError;
+            vscode.window.showInformationMessage = showInfo;
+            Object.defineProperty(vscode.env, 'clipboard', clipboard);
+            Object.defineProperty(vscode.env, 'language', language);
+            for (const socket of sockets) { socket.destroy(); }
+            if (endpoint.listening) { await new Promise<void>(resolve => endpoint.close(() => resolve())); }
+        }
+    });
+
+    test('connection diagnostics do not expose arbitrary exceptions or invalid stored URLs', () => {
+        const secret = 'credential-secret';
+        const report = jenkinsConnectionDiagnostic(`https://user:${secret}@ci.example/?token=${secret}`, new Error(secret));
+        assert.ok(!report.includes(secret));
+        assert.ok(!report.includes('user:'));
+    });
+
     test('IT-245: links and manifests reject encoded escapes and contradictory request identities', () => {
         assert.strictEqual(serverForUrl([server], `${server.url}job/feature%252Freset/1/`), server);
         for (const path of ['%252e%252e%252foutside/1/', 'job/%00evil/1/', 'job/%3b/1/',

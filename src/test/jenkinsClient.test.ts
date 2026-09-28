@@ -327,6 +327,104 @@ suite('Jenkins REST client', () => {
         assert.strictEqual(requests.length, before);
     });
 
+    test('connection denial retains safe HTTP and permission facts without response secrets', async () => {
+        handler = (_request, response) => {
+            response.writeHead(403, {
+                'Content-Type': 'text/html; charset=utf-8', 'X-Jenkins': '2.500',
+                'X-You-Are-Authenticated-As': 'anonymous', 'X-Required-Permission': 'hudson.model.Hudson.Read',
+                'Set-Cookie': `session=${token}`, Location: `https://sso.example/?token=${token}`,
+            });
+            response.end(`<html>${token}</html>`);
+        };
+        await assert.rejects(client.verify(), error => {
+            assert.ok(error instanceof JenkinsClientError);
+            assert.strictEqual(error.status, 403);
+            assert.deepStrictEqual(error.diagnostic, {
+                dispatched: true, responseStatus: 403, responseType: 'html', jenkinsHeader: true,
+                authentication: 'anonymous', requiredPermission: 'Overall/Read',
+            });
+            assert.ok(!JSON.stringify(error).includes(token));
+            assert.ok(!JSON.stringify(error).includes('sso.example'));
+            return true;
+        });
+        assert.strictEqual(requests.length, 1, 'Diagnostics must not send extra requests or trigger builds.');
+    });
+
+    test('diagnostic headers are classified rather than copied, even when they reflect credentials', async () => {
+        const authorization = Buffer.from(`developer:${token}`).toString('base64');
+        handler = (_request, response) => {
+            response.writeHead(403, {
+                'Content-Type': `application/${token}`, 'X-Jenkins': token,
+                'X-You-Are-Authenticated-As': authorization, 'X-Required-Permission': token,
+            });
+            response.end(token);
+        };
+        await assert.rejects(client.verify(), error => {
+            assert.ok(error instanceof JenkinsClientError);
+            assert.deepStrictEqual(error.diagnostic, {
+                dispatched: true, responseStatus: 403, responseType: 'other', jenkinsHeader: true,
+                authentication: 'other-user', requiredPermission: 'other',
+            });
+            assert.ok(!JSON.stringify(error).includes(token));
+            assert.ok(!JSON.stringify(error).includes(authorization));
+            return true;
+        });
+    });
+
+    test('diagnostics distinguish the configured identity and known job permissions', async () => {
+        for (const permission of ['Read', 'Build']) {
+            handler = (_request, response) => {
+                response.writeHead(403, { 'X-You-Are-Authenticated-As': 'developer',
+                    'X-Required-Permission': `hudson.model.Item.${permission}` });
+                response.end();
+            };
+            await assert.rejects(client.verify(), error => {
+                assert.ok(error instanceof JenkinsClientError);
+                assert.strictEqual(error.diagnostic?.authentication, 'configured-user');
+                assert.strictEqual(error.diagnostic?.requiredPermission, `Job/${permission}`);
+                assert.strictEqual(error.diagnostic?.jenkinsHeader, false);
+                return true;
+            });
+        }
+    });
+
+    test('HTML login pages and anonymous JSON keep HTTP 200 in connection diagnostics', async () => {
+        handler = (_request, response) => {
+            response.writeHead(200, { 'Content-Type': 'text/html' }); response.end(`<html>${token}</html>`);
+        };
+        await assert.rejects(client.verify(), error => {
+            assert.ok(error instanceof JenkinsClientError);
+            assert.strictEqual(error.code, 'INVALID_RESPONSE');
+            assert.strictEqual(error.diagnostic?.responseStatus, 200);
+            assert.strictEqual(error.diagnostic?.responseType, 'html');
+            assert.ok(!JSON.stringify(error).includes(token));
+            return true;
+        });
+        handler = (_request, response) => json(response, { authenticated: false, name: token });
+        await assert.rejects(client.verify(), error => {
+            assert.ok(error instanceof JenkinsClientError);
+            assert.strictEqual(error.code, 'AUTH_REQUIRED');
+            assert.strictEqual(error.diagnostic?.responseStatus, 200);
+            assert.strictEqual(error.diagnostic?.authentication, 'anonymous');
+            assert.ok(!JSON.stringify(error).includes(token));
+            return true;
+        });
+    });
+
+    test('a cached connection denial is distinguished from a fresh HTTP response', async () => {
+        const guard = new JenkinsTransportGuard();
+        const guarded = new JenkinsClient(configuration, { token, guard });
+        handler = (_request, response) => json(response, {}, 403);
+        await assert.rejects(guarded.verify(), errorCode('FORBIDDEN', 403));
+        await assert.rejects(guarded.verify(), error => {
+            assert.ok(error instanceof JenkinsClientError);
+            assert.strictEqual(error.deferred, true);
+            assert.deepStrictEqual(error.diagnostic, { dispatched: false });
+            return true;
+        });
+        assert.strictEqual(requests.length, 1);
+    });
+
     test('does not silently retry accepted builds with absent or off-server queue locations', async () => {
         for (const location of [undefined, 'https://elsewhere.example/queue/item/1/', '/outside/queue/item/1/']) {
             handler = (_request, response) => {
@@ -499,7 +597,14 @@ suite('Jenkins REST client', () => {
             const address = secure.address();
             assert.ok(address && typeof address !== 'string');
             const profile = { ...configuration, url: `https://127.0.0.1:${address.port}/jenkins/` };
-            await assert.rejects(new JenkinsClient(profile, { token }).verify(), errorCode('NETWORK_ERROR'));
+            await assert.rejects(new JenkinsClient(profile, { token }).verify(), error => {
+                assert.ok(error instanceof JenkinsClientError);
+                assert.strictEqual(error.code, 'NETWORK_ERROR');
+                assert.strictEqual(error.diagnostic?.networkCode, 'DEPTH_ZERO_SELF_SIGNED_CERT');
+                assert.strictEqual(error.diagnostic?.responseStatus, undefined);
+                assert.ok(!JSON.stringify(error).includes(token));
+                return true;
+            });
             assert.strictEqual(received, 0);
             assert.strictEqual((await new JenkinsClient({ ...profile, caFile: certificate }, { token }).verify()).authenticated, true);
             await assert.rejects(new JenkinsClient({ ...profile, caFile: join(__dirname, '../../package.json') }, { token }).verify(), errorCode('INVALID_CA'));

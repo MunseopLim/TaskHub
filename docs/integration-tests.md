@@ -368,6 +368,7 @@
 | IT-246 | [jenkinsSecurity.test.ts](../src/test/jenkinsSecurity.test.ts) | 임의 빌드 명령 인자를 브라우저 열기·토큰 읽기·로그 요청 전에 거부 |
 | IT-247 | [jenkinsSecurity.test.ts](../src/test/jenkinsSecurity.test.ts) | 실제 호스트에서 로그를 untitled가 아닌 가상 문서로 열고 크기·URI·종료 시 provider 본문 해제를 검증 |
 | IT-248 | [jenkinsSecurity.test.ts](../src/test/jenkinsSecurity.test.ts) | HTTP 등록 취소 시 계정·토큰을 묻거나 저장하지 않고, 명시적 동의한 경우에만 평문 연결 허용을 보관 |
+| IT-284 | [jenkinsSecurity.test.ts](../src/test/jenkinsSecurity.test.ts) | 실제 HTTP 403의 연결 진단을 한국어·영어로 표시·복사하고, 토큰·본문 비노출·재시도 대기의 미전송·복사 취소를 검증 |
 | IT-249 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 실제 HTTP의 200개 job 서버를 두 요청이 공유하며 회차 예산 이후 위치부터 이어서 탐색 |
 | IT-250 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 연결 그래프 초과를 인증/접속 오류 대신 탐색 한도로 표시 |
 | IT-251 | [jenkinsReview.test.ts](../src/test/jenkinsReview.test.ts) | 폴더가 없는 창에서 Git 호출 전에 프로젝트 폴더 안내 |

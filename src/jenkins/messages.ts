@@ -1,4 +1,5 @@
 import { t } from '../i18n';
+import { JenkinsClientError, normalizeJenkinsServerUrl } from './client';
 
 /** Only known codes are translated; never display an arbitrary exception or response body. */
 export function jenkinsErrorLabel(code?: string): string {
@@ -8,7 +9,7 @@ export function jenkinsErrorLabel(code?: string): string {
     const labels: Record<string, string> = {
         AUTH_REQUIRED: t('인증이 필요합니다. 사용자 이름과 API 토큰을 확인해주세요.', 'Authentication required. Check the username and API token.'),
         INVALID_CREDENTIALS: t('사용자 이름 또는 API 토큰이 없거나 유효하지 않습니다.', 'The username or API token is missing or invalid.'),
-        FORBIDDEN: t('조회 또는 실행 권한이 없습니다. Jenkins 계정 권한을 확인해주세요.', 'Access denied. Check the Jenkins account’s read and build permissions.'),
+        FORBIDDEN: t('서버가 접근을 거부했습니다. 계정 인증·권한 또는 프록시/SSO 정책을 확인해주세요.', 'Access denied. Check account authentication, permissions, or proxy/SSO policy.'),
         REDIRECT: t('로그인 페이지 또는 다른 주소로 이동하는 연결입니다. SSO 페이지 대신 직접 접근할 Jenkins API 주소를 설정해주세요.', 'The server redirects to a login page or another URL. Configure a direct Jenkins API URL instead of the SSO page.'),
         BACKOFF: t('서버 오류 후 재시도를 잠시 기다리고 있습니다.', 'Waiting before retrying after a server error.'),
         PERMISSION_LIMIT: t('권한 오류 추적 한도에 도달해 이 서버의 조회를 잠시 중지했습니다. 계정 권한을 확인해주세요.', 'The permission-error tracking limit was reached. Queries to this server are briefly paused; check account permissions.'),
@@ -45,6 +46,67 @@ export function jenkinsErrorLabel(code?: string): string {
         JENKINS_NEW_DESTINATION_REQUIRES_TOKEN: t('서버 주소나 계정을 바꾸면 새 토큰이 필요합니다.', 'A changed server URL or account requires a new token.'),
     };
     return labels[code ?? ''] ?? t('Jenkins 작업을 완료하지 못했습니다. 잠시 후 다시 시도하거나 Jenkins에서 상태를 확인해주세요.', 'The Jenkins operation could not be completed. Try again later or check Jenkins directly.');
+}
+
+/** A bounded, copyable report for a user-initiated identity check, without raw server data. */
+export function jenkinsConnectionDiagnostic(serverUrl: string, error: unknown): string {
+    const failure = error instanceof JenkinsClientError ? error : undefined;
+    const diagnostic = failure?.diagnostic;
+    const unknown = t('확인 불가', 'Unknown');
+    let requestUrl = unknown;
+    try { requestUrl = new URL('whoAmI/api/json', normalizeJenkinsServerUrl(serverUrl)).href.slice(0, 2048); }
+    catch { /* Invalid stored configuration must not expose unvalidated text. */ }
+    const status = diagnostic?.responseStatus ?? failure?.status;
+    const identities = {
+        anonymous: t('익명 사용자로 응답됨', 'Reported as anonymous'),
+        'configured-user': t('등록한 사용자 이름과 일치', 'Matches the configured username'),
+        'other-user': t('등록한 사용자 이름과 다름 (원문 생략)', 'Differs from the configured username (value omitted)'),
+        'not-reported': t('서버가 인증 사용자 정보를 보내지 않음', 'The server did not report an authenticated identity'),
+    };
+    const types = {
+        json: 'JSON', html: 'HTML', text: t('텍스트', 'Text'), other: t('기타', 'Other'), unknown,
+    };
+    const lines = [
+        t('Jenkins 연결 진단', 'Jenkins connection diagnostics'),
+        `${t('시각 (UTC)', 'Time (UTC)')}: ${new Date().toISOString()}`,
+        `${t('연결 확인 요청', 'Connection check request')}: GET ${requestUrl}`,
+        `${t('HTTP 상태', 'HTTP status')}: ${status ?? unknown}`,
+        `${t('오류', 'Error')}: ${jenkinsErrorLabel(failure?.code)}`,
+        `${t('응답 형식', 'Response format')}: ${types[diagnostic?.responseType ?? 'unknown']}`,
+        `${t('X-Jenkins 헤더', 'X-Jenkins header')}: ${diagnostic?.jenkinsHeader === undefined ? unknown
+            : diagnostic.jenkinsHeader ? t('있음 (서버가 보낸 단서)', 'Present (server-reported hint)') : t('없음 (Jenkins가 아니라고 단정할 수 없음)', 'Absent (does not rule out Jenkins)')}`,
+        `${t('서버가 보고한 인증 상태', 'Server-reported identity')}: ${diagnostic?.authentication ? identities[diagnostic.authentication] : unknown}`,
+    ];
+    if (diagnostic?.requiredPermission) {
+        lines.push(`${t('서버가 요구한 권한', 'Server-reported required permission')}: ${diagnostic.requiredPermission === 'other'
+            ? t('기타 권한 (원문 생략)', 'Other permission (value omitted)') : diagnostic.requiredPermission}`);
+    }
+    if (diagnostic?.networkCode) { lines.push(`${t('네트워크/TLS 코드', 'Network/TLS code')}: ${diagnostic.networkCode}`); }
+    if (diagnostic?.dispatched === false) {
+        lines.push(t('이번 시도는 HTTP 전송 전에 중단되었습니다. 표시된 HTTP 상태는 이전 응답일 수 있습니다.',
+            'This attempt stopped before HTTP dispatch. Any HTTP status shown may be from an earlier response.'));
+    }
+    if (failure?.deferred) {
+        lines.push(t('재시도 대기 또는 로컬 준비 중 중단입니다. 계정·토큰을 수정했으면 저장한 뒤 다시 확인하고, 그렇지 않으면 잠시 기다려주세요.',
+            'A retry delay or local preparation stopped this attempt. Save any account/token changes before checking again, or wait briefly.'));
+    }
+    lines.push('', t('연결 확인은 사용자 인증만 검사합니다. Job 조회·빌드 권한은 검사하지 않습니다.',
+        'This check verifies identity only. It does not test job read or build permissions.'));
+    if (failure?.code === 'FORBIDDEN' || failure?.code === 'AUTH_REQUIRED') {
+        lines.push(t('사용자 ID와 사용자 설정에서 발급한 API 토큰을 확인하세요. 계정 비밀번호나 job 전용 빌드 토큰과는 다릅니다. 프록시/SSO가 API의 Basic 인증을 허용하고 Authorization 헤더를 전달하는지도 관리자에게 확인하세요.',
+            'Check the user ID and the API token issued in that user’s settings, rather than an account password or job build token. Ask the administrator whether proxy/SSO policy permits API Basic authentication and forwards the Authorization header.'));
+    }
+    if (diagnostic?.requiredPermission === 'Overall/Read') {
+        lines.push(t('서버가 Overall/Read 권한을 요구했습니다. 익명으로 표시되면 인증 전달부터 확인하고, 등록 계정으로 표시되면 해당 계정의 권한을 관리자에게 확인하세요.',
+            'The server requested Overall/Read. If it reported anonymous access, check authentication forwarding first; if it reported the configured user, ask the administrator to check that account’s permissions.'));
+    }
+    if (diagnostic?.responseType === 'html' || failure?.code === 'REDIRECT') {
+        lines.push(t('HTML 또는 리다이렉트는 로그인·프록시·오류 페이지일 수 있습니다. Jenkins의 직접 API 주소와 context path를 확인하세요. 리다이렉트 대상에는 인증정보를 보내지 않습니다.',
+            'HTML or a redirect may indicate a login, proxy, or error page. Check the direct Jenkins API URL and context path. Credentials are not forwarded to redirect targets.'));
+    }
+    lines.push('', t('응답 본문·토큰·인증 헤더·쿠키·리다이렉트 주소는 포함하지 않습니다. 관리자에게 전달할 때는 이 시각과 요청 경로의 서버/프록시 로그를 확인하도록 요청하세요.',
+        'Response bodies, tokens, authorization headers, cookies, and redirect URLs are omitted. Ask the administrator to check server/proxy logs for this time and request path.'));
+    return lines.join('\n');
 }
 
 export function jenkinsStatusLabel(status: string): string {
