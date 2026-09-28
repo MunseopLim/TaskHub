@@ -372,7 +372,12 @@ export class JenkinsController implements vscode.Disposable {
         } else if (action?.id === 'edit') { await this.editServer(server); }
         else if (action?.id === 'ca') {
             const files = await vscode.window.showOpenDialog({ canSelectMany: false, openLabel: t('PEM 인증서 선택', 'Select PEM certificate'), filters: { PEM: ['pem', 'crt'] } });
-            if (files?.[0]) { await this.store.saveServer({ ...server, caFile: files[0].fsPath }); }
+            if (files?.[0] && !this.disposed) {
+                await this.store.saveServer({ ...server, caFile: files[0].fsPath });
+                this.guard.reset(server.url);
+                this.inventory.clear();
+                this.requestAborts.forEach(operation => operation.abort());
+            }
         } else if (action?.id === 'remove') {
             const remove = t('삭제', 'Remove');
             if (await vscode.window.showWarningMessage(t(`${server.name} 연결 설정을 삭제할까요? 원격 빌드는 계속 실행됩니다.`, `Remove ${server.name}? Remote builds will keep running.`), { modal: true }, remove) === remove) {

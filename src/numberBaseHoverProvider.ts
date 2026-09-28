@@ -697,18 +697,17 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         for (let i = startLine; i < document.lineCount; i++) {
             const line = document.lineAt(i);
             const rawText = line.text;
-            const text = this.stripInlineComments(rawText).trim();
+            let text = this.stripInlineComments(rawText).trim();
 
             // Start of enum body
             if (!inEnumBody && text.includes('{')) {
                 inEnumBody = true;
-                continue;
+                text = text.slice(text.indexOf('{') + 1);
             }
 
-            // End of enum body (support both `};` and bare `}`)
-            if (inEnumBody && text.includes('}')) {
-                break;
-            }
+            // Parse entries on the brace lines too, including one-line enums.
+            const closingBrace = text.indexOf('}');
+            if (closingBrace >= 0) { text = text.slice(0, closingBrace); }
 
             if (!inEnumBody) {
                 continue;
@@ -751,6 +750,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                     currentValue = currentValue === null ? null : safeIntegerOrNull(currentValue + 1);
                 }
             }
+            if (closingBrace >= 0) { break; }
         }
 
         return null;
@@ -800,9 +800,9 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                     case '-': return safeIntegerOrNull(left - right);
                     case '*': return safeIntegerOrNull(left * right);
                     case '/': return right !== 0 ? Math.trunc(left / right) : null;
-                    case '|': return left | right;
-                    case '&': return left & right;
-                    case '^': return left ^ right;
+                    case '|': return safeIntegerOrNull(Number(BigInt(left) | BigInt(right)));
+                    case '&': return safeIntegerOrNull(Number(BigInt(left) & BigInt(right)));
+                    case '^': return safeIntegerOrNull(Number(BigInt(left) ^ BigInt(right)));
                     case '<<': return safeIntegerOrNull(shiftLeftNumber(left, right));
                     case '>>': return safeIntegerOrNull(shiftRightNumber(left, right));
                 }

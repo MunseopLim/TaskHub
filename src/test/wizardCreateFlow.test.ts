@@ -141,6 +141,68 @@ suite('마법사 생성 종단 흐름', () => {
         return JSON.parse(fs.readFileSync(actionsPath!, 'utf-8'));
     }
 
+    for (const change of ['modify', 'delete', 'create', 'dirty'] as const) {
+        test(`마법사 진행 중 ${change} 충돌 시 원본을 유지하고 작성한 액션을 초안으로 보존한다`, async function () {
+            this.timeout(20000);
+            assert.ok(actionsPath);
+            fs.mkdirSync(path.dirname(actionsPath), { recursive: true });
+            const initial = { id: 'initial', title: 'Initial', action: { description: 'fixture', tasks: [{ id: 'run', type: 'command', command: 'echo initial' }] } };
+            const external = { id: 'external', title: 'External', action: { description: 'fixture', tasks: [{ id: 'run', type: 'command', command: 'echo external' }] } };
+            if (change !== 'create') { fs.writeFileSync(actionsPath, JSON.stringify([initial])); }
+            let dirtyDocument: vscode.TextDocument | undefined;
+            let draftText: string | undefined;
+            let expectedContent: string | undefined;
+            const open = vscode.workspace.openTextDocument;
+            const show = vscode.window.showTextDocument;
+            const warning = vscode.window.showWarningMessage;
+            const error = vscode.window.showErrorMessage;
+            const warnings: string[] = [];
+            const errors: string[] = [];
+            const script = scriptPrompts({
+                quickPick: [async (items: any[]) => {
+                    if (change === 'delete') { fs.unlinkSync(actionsPath); }
+                    else if (change === 'dirty') {
+                        dirtyDocument = await open(vscode.Uri.file(actionsPath));
+                        const edit = new vscode.WorkspaceEdit();
+                        edit.insert(dirtyDocument.uri, new vscode.Position(0, 0), ' ');
+                        assert.ok(await vscode.workspace.applyEdit(edit));
+                        assert.ok(dirtyDocument.isDirty);
+                    } else { fs.writeFileSync(actionsPath, JSON.stringify([initial, external])); }
+                    expectedContent = fs.existsSync(actionsPath) ? fs.readFileSync(actionsPath, 'utf8') : undefined;
+                    return items[0];
+                }],
+                inputBox: ['Review Added', 'echo added'], information: [0, undefined],
+            });
+            try {
+                vscode.workspace.openTextDocument = (async (options: { content: string }) => {
+                    draftText = options.content;
+                    return { getText: () => options.content, isUntitled: true };
+                }) as unknown as typeof open;
+                vscode.window.showTextDocument = (async (document: vscode.TextDocument, options: vscode.TextDocumentShowOptions) => {
+                    assert.ok(document.isUntitled); assert.strictEqual(options.preview, false);
+                }) as unknown as typeof show;
+                vscode.window.showWarningMessage = (async (message: string) => { warnings.push(message); }) as typeof warning;
+                vscode.window.showErrorMessage = (async (message: string) => { errors.push(message); }) as typeof error;
+                await vscode.commands.executeCommand('taskhub.createAction');
+                assert.deepStrictEqual(errors, []);
+                assert.strictEqual(fs.existsSync(actionsPath) ? fs.readFileSync(actionsPath, 'utf8') : undefined, expectedContent);
+                const draft = JSON.parse(draftText!);
+                assert.strictEqual(draft.length, 1);
+                assert.strictEqual(draft[0].id, 'review-added');
+                assert.strictEqual(draft[0].action.tasks[0].command, 'echo added');
+                assert.strictEqual(warnings.length, 1);
+                assert.ok(!script.executed.some(call => call.command === 'taskhub.executeActionById'));
+                if (dirtyDocument) { assert.ok(dirtyDocument.isDirty); }
+            } finally {
+                script.restore();
+                vscode.workspace.openTextDocument = open; vscode.window.showTextDocument = show;
+                vscode.window.showWarningMessage = warning;
+                vscode.window.showErrorMessage = error;
+                if (dirtyDocument) { await dirtyDocument.save(); }
+            }
+        });
+    }
+
     test('IT-119: 확인 단계에서 ID를 바꾸면 저장·실행 모두 새 ID를 쓴다', async function () {
         this.timeout(20000);
         assert.ok(workspaceFolder, '워크스페이스 폴더가 필요하다');

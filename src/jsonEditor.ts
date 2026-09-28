@@ -373,6 +373,19 @@ export class JsonSaveRestoreError extends Error {
     }
 }
 
+class JsonSaveConflictError extends Error {
+    constructor(readonly actualContentHash: string | undefined) {
+        super(t(
+            '원본이 외부에서 변경되어 저장하지 않았습니다. 표의 편집 내용은 유지됩니다. 다시 저장하여 외부 변경을 확인해 주세요.',
+            'The source changed externally and was not saved. Your table edits are kept. Save again to review the external change.'
+        ));
+    }
+}
+
+function jsonContentHash(content: string | Buffer): string {
+    return crypto.createHash('sha256').update(content).digest('hex');
+}
+
 /** 파일 위치를 옮기지 않는 pread로 fd 전체를 읽는다. */
 function readWholeFd(fd: number): Buffer {
     const size = fs.fstatSync(fd).size;
@@ -402,7 +415,7 @@ function restoreOriginalBytes(fd: number, original: Buffer): void {
  * 읽어 둔 뒤 앞에서부터 덮어쓰고 마지막에 길이를 맞추므로, 쓰기가 실패하면 원본이
  * 쓰던 블록에 원래 바이트를 되돌릴 수 있다. 테스트가 실패 주입에 쓰도록 export한다.
  */
-export function writeJsonWithFingerprint(filePath: string, text: string): { written?: fs.BigIntStats; statError?: unknown; contentHash: string } {
+export function writeJsonWithFingerprint(filePath: string, text: string, expected?: { contentHash: string | undefined }): { written?: fs.BigIntStats; statError?: unknown; contentHash: string } {
     verifiedSaveTarget = undefined;
     const contentHash = crypto.createHash('sha256').update(text, 'utf8').digest('hex');
     let fd: number;
@@ -411,12 +424,19 @@ export function writeJsonWithFingerprint(filePath: string, text: string): { writ
         fd = fs.openSync(filePath, 'r+');
     } catch (openError) {
         if ((openError as NodeJS.ErrnoException).code !== 'ENOENT') { throw openError; }
-        fd = fs.openSync(filePath, 'w');
+        if (expected?.contentHash !== undefined) { throw new JsonSaveConflictError(undefined); }
+        fd = fs.openSync(filePath, 'wx');
         created = true;
     }
     try {
         // 새로 만든 파일은 되돌릴 원본이 없다.
         const original = created ? undefined : readWholeFd(fd);
+        // Compare the bytes from the actual write handle before touching them.
+        // This also catches changes while an overwrite confirmation was open.
+        if (expected) {
+            const actualContentHash = original === undefined ? undefined : jsonContentHash(original);
+            if (actualContentHash !== expected.contentHash) { throw new JsonSaveConflictError(actualContentHash); }
+        }
         try {
             fs.writeFileSync(fd, text, 'utf8');
             // 줄어든 경우에만 자른다. 같은 길이의 truncate도 시각을 바꾸는 OS가 있다.
@@ -853,6 +873,9 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     // 이 열기에 붙는 세션 번호. html 주입과 메시지 핸들러가 **같은 값**을 써야
     // 하므로 html 을 세팅하기 직전에 한 번만 뽑는다.
     const sessionId = ++jsonEditorSessionCounter;
+    // Kept separately from recovery mtime and the webview's dirty baseline:
+    // choosing Keep in a watcher notification does not approve an overwrite.
+    let diskBaseline = { contentHash: content === undefined ? undefined : jsonContentHash(content) };
     currentSessionId = sessionId;
     verifiedSaveTarget = undefined;
 
@@ -1053,6 +1076,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     saveQueue = new Promise<void>(resolve => { releaseSave = resolve; });
                     try {
                         await previousSave;
+                        const saveBaseline = diskBaseline;
                         let writeResult: ReturnType<typeof writeJsonWithFingerprint>;
                         try {
                             const saveData = unwrapIfRootArray(message.data, isRootArray);
@@ -1062,15 +1086,35 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                             // 확인하는 동안 다른 파일을 열었거나 패널을 닫았다면 쓰지 않는다.
                             // 이후의 baseline·recovery 전역은 이미 새 세션의 것이다.
                             // 미저장 편집은 dispose 경로의 recovery 에 남는다.
-                            if (!isCurrentSession()) {
-                                awaitingSaveAck.delete(saveSeq);
+                            if (!isCurrentSession() || diskBaseline !== saveBaseline) {
+                                settle(postSaveResult(false, saveSeq));
                                 vscode.window.showWarningMessage(t(
-                                    `${fileName}: 저장 전 확인 중 JSON Editor 화면이 닫히거나 다른 파일로 바뀌어 저장하지 않았습니다.`,
-                                    `${fileName}: not saved because the JSON Editor was closed or switched to another file while checking before save.`
+                                    `${fileName}: 저장 전 확인 중 JSON Editor가 닫히거나 파일을 다시 읽어 저장하지 않았습니다.`,
+                                    `${fileName}: not saved because the JSON Editor was closed, switched files or reloaded while checking before save.`
                                 ));
                                 return;
                             }
-                            writeResult = writeJsonWithFingerprint(filePath, saveText);
+                            try {
+                                writeResult = writeJsonWithFingerprint(filePath, saveText, saveBaseline);
+                            } catch (error) {
+                                if (!(error instanceof JsonSaveConflictError)) { throw error; }
+                                const overwrite = t('외부 변경 덮어쓰기', 'Overwrite external change');
+                                const choice = await vscode.window.showWarningMessage(t(
+                                    `${fileName} 원본이 외부에서 변경되거나 삭제되었습니다. 표의 내용으로 덮어쓸까요? 취소하면 원본과 표의 편집 내용을 유지합니다.`,
+                                    `${fileName} was changed or deleted externally. Overwrite it with the table contents? Cancel keeps both the source and your table edits.`
+                                ), { modal: true }, overwrite);
+                                if (choice !== overwrite || !isCurrentSession() || diskBaseline !== saveBaseline) {
+                                    settle(postSaveResult(false, saveSeq));
+                                    return;
+                                }
+                                await assertDiskNumbersBeforeSave(filePath);
+                                if (!isCurrentSession() || diskBaseline !== saveBaseline) {
+                                    settle(postSaveResult(false, saveSeq));
+                                    return;
+                                }
+                                writeResult = writeJsonWithFingerprint(filePath, saveText, { contentHash: error.actualContentHash });
+                            }
+                            diskBaseline = { contentHash: writeResult.contentHash };
                         } catch (error: any) {
                             // 디스크에 쓰지 못했다 — 진짜 저장 실패.
                             settle(postSaveResult(false, saveSeq));
@@ -1185,6 +1229,8 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     // lastSavedSnapshot 이 옛 valid disk 데이터로 남아 사용자가 그것에 도달할
                     // 때 dirty=false 로 풀려 같은 데이터 손실 패턴이 발생한다. watcher 의
                     // auto-reload 실패 경로와 동일한 처치.
+                    // Invalidate pending saves; accept new bytes only on a successful reload.
+                    diskBaseline = { ...diskBaseline };
                     const handleReloadFailure = (statForBaseline?: fs.Stats) => {
                         if (statForBaseline) {
                             baselineMtimeMs = statForBaseline.mtimeMs;
@@ -1230,6 +1276,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                         currentLastReceivedSnapshot = undefined;
                         await setRecoveryEntry(context, filePath, null);
                         if (!isCurrentSession()) { break; }
+                        diskBaseline = { contentHash: jsonContentHash(reloadContent) };
                         postToWebview({ command: 'loadData', data: result.wrapped });
                     } catch (error: any) {
                         // 지연된 reject 로 여기 닿는 사이 다른 파일이 열렸을 수
@@ -1428,6 +1475,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             return;
         }
         try {
+            diskBaseline = { ...diskBaseline };
             const reloadContent = fs.readFileSync(filePath, 'utf-8');
             const parsed = parseJsonEditorText(reloadContent);
             const result = wrapIfArray(parsed);
@@ -1445,6 +1493,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             // recovery 정리를 기다리는 사이 다른 파일이 열렸다면 여기서 멈춘다 —
             // 아래 상태 변경과 상태바 메시지는 모두 이 파일에 대한 것이다.
             if (!isCurrentSession()) { return; }
+            diskBaseline = { contentHash: jsonContentHash(reloadContent) };
             postToWebview({ command: 'loadData', data: result.wrapped });
             if (!currentIsDirty) {
                 vscode.window.setStatusBarMessage(

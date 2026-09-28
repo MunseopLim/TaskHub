@@ -212,6 +212,97 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         return state?.[filePath];
     }
 
+    for (const action of ['cancel', 'overwrite', 'change-again', 'delete', 'delete-cancel', 'reload'] as const) {
+        test(`감시 이벤트가 오기 전 저장 충돌: ${action}`, async () => {
+            const watcher = vscode.workspace.createFileSystemWatcher;
+            const noEvent = () => new vscode.Disposable(() => {});
+            vscode.workspace.createFileSystemWatcher = (() => ({
+                onDidChange: noEvent, onDidCreate: noEvent, onDidDelete: noEvent, dispose() {},
+            })) as unknown as typeof watcher;
+            try {
+                const fake = installFakePanel();
+                const ctx = makeContext();
+                const filePath = writeJson('conflict.json', { value: 'initial' });
+                await openJsonEditorFile(ctx, filePath);
+                const edited = { value: 'table edit' };
+                await fake.send({ command: 'modified', value: true });
+                await fake.send({ command: 'snapshot', data: edited });
+                const external = JSON.stringify({ value: 'changed' }, null, 2);
+                const stat = fs.statSync(filePath);
+                if (action === 'delete' || action === 'delete-cancel') { fs.unlinkSync(filePath); }
+                else {
+                    fs.writeFileSync(filePath, external);
+                    fs.utimesSync(filePath, stat.atime, stat.mtime);
+                    assert.strictEqual(fs.statSync(filePath).size, stat.size, '같은 크기와 보존된 mtime도 충돌이다');
+                }
+                let confirmations = 0;
+                vscode.window.showWarningMessage = (async (_message: string, _options: unknown, overwrite: string) => {
+                    confirmations++;
+                    if (action === 'change-again') { fs.writeFileSync(filePath, '{"value":"newer change"}'); }
+                    if (action === 'reload') {
+                        // The reload's discard confirmation is explicit too.
+                        vscode.window.showWarningMessage = (async (_text: string, _opts: unknown, discard: string) => discard) as typeof originalShowWarning;
+                        await fake.send({ command: 'reload' });
+                    }
+                    return action === 'cancel' || action === 'delete-cancel' ? undefined : overwrite;
+                }) as typeof originalShowWarning;
+                await fake.send({ command: 'save', data: edited, seq: 1 });
+                const result = [...fake.posted].reverse().find(message => message.command === 'saveResult');
+                assert.strictEqual(confirmations, 1);
+                assert.strictEqual(result?.success, action === 'overwrite' || action === 'delete');
+                if (action === 'delete-cancel') {
+                    assert.ok(!fs.existsSync(filePath), '취소하면 삭제된 파일을 다시 만들지 않는다');
+                    assert.ok(jsonPanelRegistry.isDirty());
+                    return;
+                }
+                const saved = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                assert.deepStrictEqual(saved, action === 'overwrite' || action === 'delete' ? edited
+                    : { value: action === 'change-again' ? 'newer change' : 'changed' });
+                if (action === 'cancel' || action === 'change-again') {
+                    assert.ok(jsonPanelRegistry.isDirty());
+                    fake.disposePanel();
+                    await new Promise<void>(resolve => setImmediate(resolve));
+                    assert.deepStrictEqual((readRecoveryEntry(ctx, filePath) as any)?.data, edited);
+                }
+                if (action === 'reload') {
+                    assert.ok(fake.posted.some(message => message.command === 'loadData' && message.data.value === 'changed'));
+                }
+            } finally { vscode.workspace.createFileSystemWatcher = watcher; }
+        });
+    }
+
+    test('다시 읽기에 실패한 외부 원문도 덮어쓰기 승인을 받아야 한다', async () => {
+        const watcher = vscode.workspace.createFileSystemWatcher;
+        const originalStat = fs.statSync;
+        const noEvent = () => new vscode.Disposable(() => {});
+        vscode.workspace.createFileSystemWatcher = (() => ({
+            onDidChange: noEvent, onDidCreate: noEvent, onDidDelete: noEvent, dispose() {},
+        })) as unknown as typeof watcher;
+        try {
+            const fake = installFakePanel();
+            const filePath = writeJson('reload-failure.json', { value: 'initial' });
+            await openJsonEditorFile(makeContext(), filePath);
+            const external = '{"value":"external"}';
+            fs.writeFileSync(filePath, external);
+            let stats = 0;
+            (mutableFs as any).statSync = (target: fs.PathLike, ...args: unknown[]) => {
+                if (target === filePath && ++stats === 2) { throw new Error('reload stat failure'); }
+                return (originalStat as any)(target, ...args);
+            };
+            await fake.send({ command: 'reload' });
+            (mutableFs as any).statSync = originalStat;
+            assert.ok(!fake.posted.some(message => message.command === 'loadData'));
+            assert.ok(fake.posted.some(message => message.command === 'markBaselineUnknown'));
+            await fake.send({ command: 'save', data: { value: 'table edit' }, seq: 1 });
+            assert.strictEqual(fake.posted.at(-1)?.success, false);
+            assert.strictEqual(fs.readFileSync(filePath, 'utf8'), external);
+            assert.strictEqual(shownWarnings.length, 1);
+        } finally {
+            (mutableFs as any).statSync = originalStat;
+            vscode.workspace.createFileSystemWatcher = watcher;
+        }
+    });
+
     test('원문 열기는 현재 파일을 옆에서 열고 미저장 표와 디스크를 유지한다', async () => {
         const fake = installFakePanel();
         const filePath = writeJson('source.json', { rows: [] });
@@ -1017,7 +1108,7 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         }
     });
 
-    test('12MB 외부 파일에서 현재 편집 유지 후 저장하며 뒤쪽의 손실 숫자는 거부한다', async () => {
+    test('12MB 외부 파일에서 현재 편집 유지 후 명시적으로 덮어쓰며 뒤쪽의 손실 숫자는 거부한다', async () => {
         const originalWatcher = vscode.workspace.createFileSystemWatcher;
         const originalWarning = vscode.window.showWarningMessage;
         let change!: (uri: vscode.Uri) => Promise<void>;
@@ -1032,7 +1123,8 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             shownWarnings.push(message);
             const keep = rest.find((item): item is string => typeof item === 'string' && /현재 편집 유지|Keep current edits/.test(item));
             if (keep) { keepSelections++; }
-            return Promise.resolve(keep);
+            const overwrite = rest.find((item): item is string => typeof item === 'string' && /외부 변경 덮어쓰기|Overwrite external change/.test(item));
+            return Promise.resolve(keep ?? overwrite);
         };
         try {
             for (const [number, success] of [['1', true], ['0.1234567890123456789', false]] as const) {
@@ -2015,7 +2107,14 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             assert.deepStrictEqual(readRecoveryEntry(ctx, filePath), recovery);
 
             fs.writeFileSync(filePath, '{"rows":[{"id":1}],"pad":"' + 'x'.repeat(12 * 1024 * 1024) + '"}');
+            let overwriteConfirmations = 0;
+            vscode.window.showWarningMessage = (async (_message: string, _options: unknown, overwrite: string) => {
+                overwriteConfirmations++;
+                assert.match(overwrite, /외부 변경 덮어쓰기|Overwrite external change/);
+                return overwrite;
+            }) as typeof originalShowWarning;
             await fake.send({ command: 'save', data: edited, seq: 3 });
+            assert.strictEqual(overwriteConfirmations, 1);
             assert.strictEqual(fake.posted.at(-1)?.success, true);
             assert.deepStrictEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), edited);
         });

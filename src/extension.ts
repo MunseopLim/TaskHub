@@ -466,6 +466,7 @@ interface WizardActionSources {
      */
     otherSources: ActionSource[];
     workspaceActionsPath: string;
+    workspaceActionsContent: string | undefined;
     workspaceFolder: vscode.WorkspaceFolder;
 }
 
@@ -2267,6 +2268,12 @@ export function wizardTakenActionIds(sources: {
 
 function loadWizardActionSources(context: vscode.ExtensionContext, workspaceFolder: vscode.WorkspaceFolder): WizardActionSources {
     const workspaceActionsPath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'actions.json');
+    let workspaceActionsContent: string | undefined;
+    try {
+        workspaceActionsContent = fs.readFileSync(workspaceActionsPath, 'utf8');
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
+    }
 
     // Same resolver the tree loader uses, so "what already exists" cannot
     // drift between the two views again.
@@ -2287,6 +2294,7 @@ function loadWizardActionSources(context: vscode.ExtensionContext, workspaceFold
         workspaceActions,
         otherSources: orderedActionSources(effective).filter(source => source !== target),
         workspaceActionsPath,
+        workspaceActionsContent,
         workspaceFolder,
     };
 }
@@ -2867,6 +2875,19 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
             return;
         }
 
+        const targetUri = vscode.Uri.file(sources.workspaceActionsPath).toString();
+        const hasDirtyDocument = vscode.workspace.textDocuments.some(document => document.uri.toString() === targetUri && document.isDirty);
+        if (hasDirtyDocument || !actionsFileUnchangedSince(sources.workspaceActionsPath, sources.workspaceActionsContent)) {
+            const draft = await vscode.workspace.openTextDocument({
+                language: 'json', content: JSON.stringify([newAction], null, 2) + '\n',
+            });
+            await vscode.window.showTextDocument(draft, { preview: false });
+            vscode.window.showWarningMessage(t(
+                'actions.json이 변경되었거나 저장하지 않은 편집이 있어 저장을 중단했습니다. 새 액션은 별도 초안으로 열었습니다. 최신 actions.json에 초안의 액션을 추가해 주세요.',
+                'Saving stopped because actions.json changed or has unsaved edits. The new action is open in a separate draft. Add the draft action to the latest actions.json.'
+            ));
+            return;
+        }
         persistWorkspaceActions(targetFolder.uri.fsPath, sources.workspaceActionsPath, sources.workspaceActions);
         refreshActionsAndCommands(context, mainViewProvider);
         // `newAction.id` rather than the derived `id`: the review step's

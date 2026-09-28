@@ -1,6 +1,6 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
-import { JenkinsClient, JenkinsClientError } from '../jenkins/client';
+import { JenkinsClient, JenkinsClientError, JenkinsTransportGuard } from '../jenkins/client';
 import { JenkinsController, registerJenkins } from '../jenkins/controller';
 import * as jenkinsGit from '../jenkins/git';
 import { createRequest } from '../jenkins/model';
@@ -63,6 +63,54 @@ function iconId(item: vscode.TreeItem): string | undefined {
 }
 
 suite('Jenkins controller and results tree', () => {
+    for (const chooseCertificate of [true, false]) {
+        test(`CA 선택 ${chooseCertificate ? '완료 후 즉시 재시도하며 옛 요청의 늦은 실패도 무시한다' : '취소 시 기존 재시도 대기를 유지한다'}`, async () => {
+            const state = memoryState();
+            state.values.set(JENKINS_SERVERS_KEY, [{ ...servers[0], caFile: '/old.pem' }]);
+            const context = { globalState: state.memento, workspaceState: state.memento, subscriptions: [], secrets: {
+                get: async () => 'fixture-token', onDidChange: () => new vscode.Disposable(() => {}),
+            } } as unknown as vscode.ExtensionContext;
+            const pick = vscode.window.showQuickPick;
+            const open = vscode.window.showOpenDialog;
+            const controller = new JenkinsController(context);
+            const guard = new JenkinsTransportGuard(() => 1000, () => 0);
+            (controller as unknown as { guard: JenkinsTransportGuard }).guard = guard;
+            const signal = new AbortController().signal;
+            let failOld!: () => void;
+            let started!: () => void;
+            const ready = new Promise<void>(resolve => { started = resolve; });
+            const oldRequest = guard.run(servers[0].url, signal, () => new Promise<void>((_resolve, reject) => {
+                failOld = () => reject(new JenkinsClientError('INVALID_CA')); started();
+            }));
+            const oldFailure = assert.rejects(oldRequest, (error: unknown) => error instanceof JenkinsClientError && error.code === 'INVALID_CA');
+            try {
+                await ready;
+                await assert.rejects(guard.run(servers[0].url, signal, async () => { throw new JenkinsClientError('INVALID_CA'); }));
+                let picks = 0;
+                vscode.window.showQuickPick = (async (items: unknown) => {
+                    const list = await items as Array<{ id?: string }>;
+                    return picks++ === 0 ? list[1] : list.find(item => item.id === 'ca');
+                }) as typeof pick;
+                vscode.window.showOpenDialog = async () => chooseCertificate ? [vscode.Uri.file('/new.pem')] : undefined;
+                await controller.manageServers();
+                failOld(); await oldFailure;
+                let sent = false;
+                const retry = guard.run(servers[0].url, signal, async () => { sent = true; return 'connected'; });
+                if (chooseCertificate) {
+                    assert.strictEqual(await retry, 'connected');
+                } else {
+                    await assert.rejects(retry, (error: unknown) => error instanceof JenkinsClientError && error.code === 'BACKOFF');
+                }
+                assert.strictEqual(sent, chooseCertificate);
+                assert.strictEqual((state.values.get(JENKINS_SERVERS_KEY) as JenkinsServer[])[0].caFile,
+                    chooseCertificate ? vscode.Uri.file('/new.pem').fsPath : '/old.pem');
+            } finally {
+                failOld(); await oldFailure;
+                controller.dispose(); vscode.window.showQuickPick = pick; vscode.window.showOpenDialog = open;
+            }
+        });
+    }
+
     for (const stage of ['persist', 'token', 'post'] as const) {
         for (const action of (stage === 'persist' ? ['stop', 'clear'] : ['stop', 'clear', 'fail']) as Array<'stop' | 'clear' | 'fail'>) {
             test(`review regression: ${action} while awaiting ${stage === 'post' ? 'dispatched POST' : 'pre-POST ' + stage} preserves dispatch evidence without resurrection`, async () => {

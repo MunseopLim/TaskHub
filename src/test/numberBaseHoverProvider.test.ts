@@ -1689,11 +1689,65 @@ suite('NumberBaseHoverProvider Test Suite', () => {
     });
 
     suite('Enum Value Extraction Tests', () => {
+        test('32비트 밖 enum 값도 실제 호버와 복사 링크에 정확히 표시한다', async () => {
+            const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: [
+                'enum class Flags : unsigned long long {',
+                '    Base = 0x100000000,',
+                '    Combined = Base | 1,',
+                '};',
+                'Flags flag = Flags::Combined;',
+            ].join('\n') });
+            const execute = vscode.commands.executeCommand;
+            const cancellation = new vscode.CancellationTokenSource();
+            vscode.commands.executeCommand = (async (command: string) => {
+                if (command === 'vscode.executeDefinitionProvider' || command === 'vscode.executeDeclarationProvider') {
+                    return [new vscode.Location(document.uri, new vscode.Range(2, 4, 2, 12))];
+                }
+                return [];
+            }) as typeof execute;
+            try {
+                const hover = await provider.provideHover(document, new vscode.Position(4, 22), cancellation.token);
+                assert.ok(hover);
+                const values = hover.contents.flatMap(content => content instanceof vscode.MarkdownString ? copyValues(content) : []);
+                assert.ok(values.includes('4294967297'), JSON.stringify(values));
+                assert.ok(values.includes('0x100000001'), JSON.stringify(values));
+            } finally { vscode.commands.executeCommand = execute; cancellation.dispose(); }
+        });
+
         function makeDoc(lines: string[]): vscode.TextDocument {
             return {
                 lineCount: lines.length,
                 lineAt: (i: number) => ({ text: lines[i] })
             } as any as vscode.TextDocument;
+        }
+
+        test('enum 비트 연산은 bit 31과 32 이상을 보존하고 참조와 자동 증가에도 반영한다', async () => {
+            const doc = makeDoc([
+                'enum class Flags : unsigned long long {',
+                '    Base = 0x100000000, Combined = Base | 1,',
+                '    Next, Masked = Combined & Base, Flipped = Combined ^ Base,',
+                '    High = 0x80000000 | 1, Maximum = 0x1FFFFFFFFFFFFF & 0x1FFFFFFFFFFFFF,',
+                '};',
+            ]);
+            for (const [name, expected] of [
+                ['Combined', 4294967297], ['Next', 4294967298], ['Masked', 4294967296],
+                ['Flipped', 1], ['High', 2147483649], ['Maximum', Number.MAX_SAFE_INTEGER],
+            ] as const) {
+                assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, name), expected, name);
+            }
+        });
+
+        for (const lines of [
+            ['enum Numbers { First = 8,', 'Second, Last = Second | 16 };', 'enum Other { Outside = 99 };'],
+            ['enum Numbers { First = 8, Second, Last = Second | 16 };', 'enum Other { Outside = 99 };'],
+            ['enum Numbers', '{ First = 8, /* initial */ Second,', 'Last = Second | 16 } ;', 'enum Other { Outside = 99 };'],
+        ]) {
+            test(`enum 중괄호와 같은 줄의 항목도 계산하고 본문 밖은 읽지 않는다: ${lines.join(' / ')}`, async () => {
+                const doc = makeDoc(lines);
+                for (const [name, expected] of [['First', 8], ['Second', 9], ['Last', 25], ['Outside', null]] as const) {
+                    assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, name), expected, name);
+                }
+            });
         }
 
         test('부정확한 enum 리터럴의 참조와 자동 증가를 전파하지 않고 명시 값에서 복구한다', async () => {

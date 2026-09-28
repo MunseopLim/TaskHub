@@ -193,6 +193,46 @@ async function withJsonBrowser(
 
 suite('JSON Editor 실제 브라우저 편집과 저장', function () {
     this.timeout(30000);
+    test('외부 변경 덮어쓰기를 취소해도 표 편집과 dirty를 유지하고 재승인 후 저장한다', async () => {
+        const watcher = vscode.workspace.createFileSystemWatcher;
+        const warning = vscode.window.showWarningMessage;
+        const noEvent = () => new vscode.Disposable(() => {});
+        let approve = false;
+        let confirmations = 0;
+        vscode.workspace.createFileSystemWatcher = (() => ({
+            onDidChange: noEvent, onDidCreate: noEvent, onDidDelete: noEvent, dispose() {},
+        })) as unknown as typeof watcher;
+        vscode.window.showWarningMessage = (async (_message: string, _options: unknown, overwrite: string) => {
+            assert.match(overwrite, /외부 변경 덮어쓰기|Overwrite external change/);
+            confirmations++;
+            return approve ? overwrite : undefined;
+        }) as typeof warning;
+        try {
+            await withJsonBrowser({ rows: [{ value: 'initial' }] }, async browser => {
+                await browser.operate([{ kind: 'edit', col: 'value', value: 'table edit' }]);
+                const external = JSON.stringify({ rows: [{ value: 'external' }] });
+                fs.writeFileSync(browser.filePath, external);
+                const first = browser.messages.length;
+                await browser.operate([{ kind: 'click', id: 'btnSave' }]);
+                assert.strictEqual((await browser.waitFor('saveAck', first)).dirty, true);
+                const kept = await browser.operate([]);
+                assert.strictEqual(kept.dirty, true);
+                assert.strictEqual(kept.cells[0].label, 'table edit');
+                assert.strictEqual(fs.readFileSync(browser.filePath, 'utf8'), external);
+                approve = true;
+                const retry = browser.messages.length;
+                await browser.operate([{ kind: 'click', id: 'btnSave' }]);
+                assert.strictEqual((await browser.waitFor('saveAck', retry)).dirty, false);
+                assert.strictEqual((await browser.operate([])).dirty, false);
+                assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), { rows: [{ value: 'table edit' }] });
+                assert.strictEqual(confirmations, 2);
+            });
+        } finally {
+            vscode.workspace.createFileSystemWatcher = watcher;
+            vscode.window.showWarningMessage = warning;
+        }
+    });
+
 
     test('IT-219: 실제 번들로 root 배열을 열고 활성 셀을 저장해 문자열·특수문자·들여쓰기를 보존한다', async () => {
         const specialKey = '키 "<&>';
