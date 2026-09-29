@@ -28,6 +28,8 @@ interface RawZipEntry {
     flags?: number;
     /** 압축 방식. 0=stored, 8=deflate. 그 외는 `yauzl` 이 지원하지 않는다. */
     method?: number;
+    madeBy?: number;
+    unixMode?: number;
 }
 
 const CRC_TABLE: number[] = (() => {
@@ -55,7 +57,7 @@ function buildRawZip(entries: RawZipEntry[]): Buffer {
     const centrals: Buffer[] = [];
     let offset = 0;
 
-    for (const { name, data, flags, method } of entries) {
+    for (const { name, data, flags, method, madeBy, unixMode } of entries) {
         const nameBuf = Buffer.from(name, 'utf8');
         const crc = crc32(data);
 
@@ -75,7 +77,7 @@ function buildRawZip(entries: RawZipEntry[]): Buffer {
 
         const cdh = Buffer.alloc(46);
         cdh.writeUInt32LE(0x02014b50, 0);       // central directory signature
-        cdh.writeUInt16LE(20, 4);               // version made by
+        cdh.writeUInt16LE(madeBy ?? (unixMode === undefined ? 20 : 0x0314), 4);
         cdh.writeUInt16LE(20, 6);               // version needed to extract
         cdh.writeUInt16LE(flags ?? 0, 8);       // general purpose bit flag
         cdh.writeUInt16LE(method ?? 0, 10);     // compression method (0 = stored)
@@ -85,6 +87,7 @@ function buildRawZip(entries: RawZipEntry[]): Buffer {
         cdh.writeUInt32LE(data.length, 20);     // compressed size
         cdh.writeUInt32LE(data.length, 24);     // uncompressed size
         cdh.writeUInt16LE(nameBuf.length, 28);  // file name length
+        cdh.writeUInt32LE(((unixMode ?? 0) << 16) >>> 0, 38);
         cdh.writeUInt32LE(offset, 42);          // local header offset
         centrals.push(Buffer.concat([cdh, nameBuf]));
 
@@ -127,6 +130,263 @@ suite('archiveUtils', () => {
         if (!fs.existsSync(dir)) { return []; }
         return fs.readdirSync(dir).filter(name => name.includes('.taskhub-') && name.endsWith('.tmp'));
     }
+
+    suite('권한·이름 충돌·출력 재포함 회귀', () => {
+        test('새 Unix 파일의 비공개 권한과 실행 비트를 왕복 보존한다', async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const files = [0o600, 0o755].map(mode => {
+                const file = path.join(tempDir, `${mode.toString(8)}.txt`);
+                fs.writeFileSync(file, `mode ${mode}`);
+                fs.chmodSync(file, mode);
+                return file;
+            });
+            const archive = path.join(tempDir, 'modes.zip');
+            const destination = path.join(tempDir, 'modes');
+            await createZipArchive(archive, files);
+            await extractZipArchive(archive, destination);
+            for (const file of files) {
+                assert.strictEqual(fs.statSync(path.join(destination, path.basename(file))).mode & 0o777,
+                    (fs.statSync(file).mode & 0o777) & ~process.umask());
+            }
+        });
+
+        test('Unix 디렉터리 권한은 하위 파일을 추출한 뒤 복원한다', async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const archive = writeRawZip('private-tree.zip', [
+                { name: 'private/', data: Buffer.alloc(0), unixMode: 0o40700 },
+                { name: 'private/readonly/', data: Buffer.alloc(0), unixMode: 0o40500 },
+                { name: 'private/readonly/key', data: Buffer.from('fixture'), unixMode: 0o100600 },
+            ]);
+            const destination = path.join(tempDir, 'tree');
+            try {
+                await extractZipArchive(archive, destination);
+                assert.strictEqual(fs.statSync(path.join(destination, 'private')).mode & 0o777, 0o700 & ~process.umask());
+                assert.strictEqual(fs.statSync(path.join(destination, 'private/readonly')).mode & 0o777, 0o500 & ~process.umask());
+                assert.strictEqual(fs.readFileSync(path.join(destination, 'private/readonly/key'), 'utf8'), 'fixture');
+            } finally {
+                if (fs.existsSync(path.join(destination, 'private/readonly'))) {
+                    fs.chmodSync(path.join(destination, 'private/readonly'), 0o700);
+                }
+            }
+        });
+
+        test('디렉터리 source 자체의 권한과 빈 디렉터리도 왕복 보존한다', async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const source = path.join(tempDir, 'private-empty');
+            fs.mkdirSync(source, { mode: 0o700 });
+            const archive = path.join(tempDir, 'empty.zip');
+            const destination = path.join(tempDir, 'empty-restored');
+            await createZipArchive(archive, [source]);
+            await extractZipArchive(archive, destination);
+            assert.strictEqual(fs.statSync(path.join(destination, 'private-empty')).mode & 0o777, 0o700 & ~process.umask());
+        });
+
+        test('특수 권한은 제거하고 기존 파일의 접근 권한을 확대하지 않는다', async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const archive = writeRawZip('special-modes.zip', [
+                { name: 'special', data: Buffer.from('special'), unixMode: 0o107777 },
+                { name: 'existing', data: Buffer.from('replacement'), unixMode: 0o100777 },
+                { name: 'private', data: Buffer.from('private replacement'), unixMode: 0o100600 },
+            ]);
+            const destination = path.join(tempDir, 'special');
+            fs.mkdirSync(destination);
+            fs.writeFileSync(path.join(destination, 'existing'), 'original');
+            fs.chmodSync(path.join(destination, 'existing'), 0o600);
+            fs.writeFileSync(path.join(destination, 'private'), 'original');
+            fs.chmodSync(path.join(destination, 'private'), 0o644);
+            await extractZipArchive(archive, destination);
+            assert.strictEqual(fs.statSync(path.join(destination, 'special')).mode & 0o7777, 0o777 & ~process.umask());
+            assert.strictEqual(fs.statSync(path.join(destination, 'existing')).mode & 0o7777, 0o600);
+            assert.strictEqual(fs.statSync(path.join(destination, 'private')).mode & 0o7777, 0o600);
+        });
+
+        test('DOS ZIP의 상위 속성 비트를 Unix 권한으로 해석하지 않는다', async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const archive = writeRawZip('dos-mode.zip', [
+                { name: 'dos.txt', data: Buffer.from('dos'), madeBy: 20, unixMode: 0o100777 },
+            ]);
+            const destination = path.join(tempDir, 'dos');
+            await extractZipArchive(archive, destination);
+            assert.strictEqual(fs.statSync(path.join(destination, 'dos.txt')).mode & 0o777, 0o666 & ~process.umask());
+        });
+
+        test('기존 비공개 디렉터리는 넓은 ZIP 권한으로 바뀌지 않는다', async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const archive = writeRawZip('existing-directory.zip', [
+                { name: 'private/', data: Buffer.alloc(0), unixMode: 0o40777 },
+                { name: 'private/key', data: Buffer.from('fixture'), unixMode: 0o100600 },
+            ]);
+            const destination = path.join(tempDir, 'existing-directory');
+            fs.mkdirSync(path.join(destination, 'private'), { recursive: true });
+            fs.chmodSync(path.join(destination, 'private'), 0o700);
+            await extractZipArchive(archive, destination);
+            assert.strictEqual(fs.statSync(path.join(destination, 'private')).mode & 0o777, 0o700 & ~process.umask());
+        });
+
+        test('기존 write/search 전용 폴더의 최종 권한이 같으면 read 권한 없이 추출한다', async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const archive = writeRawZip('write-search-directory.zip', [
+                { name: 'dropbox/', data: Buffer.alloc(0), unixMode: 0o40700 },
+                { name: 'dropbox/result.txt', data: Buffer.from('payload'), unixMode: 0o100600 },
+            ]);
+            const destination = path.join(tempDir, 'write-search-directory');
+            const restricted = path.join(destination, 'dropbox');
+            fs.mkdirSync(restricted, { recursive: true });
+            fs.chmodSync(restricted, 0o300);
+            try {
+                await extractZipArchive(archive, destination);
+                assert.strictEqual(fs.statSync(restricted).mode & 0o7777, 0o300);
+                assert.strictEqual(fs.readFileSync(path.join(restricted, 'result.txt'), 'utf8'), 'payload');
+            } finally {
+                fs.chmodSync(restricted, 0o700);
+            }
+        });
+
+        test('더 엄격한 umask와 Unix 000 권한을 존중한다', function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const archive = writeRawZip('strict-umask.zip', [
+                { name: 'program', data: Buffer.from('fixture'), unixMode: 0o100777 },
+                { name: 'unreadable', data: Buffer.from('fixture'), unixMode: 0o100000 },
+            ]);
+            const destination = path.join(tempDir, 'strict-umask');
+            execFileSync(process.execPath, ['-e',
+                `process.umask(0o077); require(process.argv[1]).extractZipArchive(process.argv[2], process.argv[3]).catch(error => { console.error(error); process.exitCode = 1; });`,
+                require.resolve('../archiveUtils'), archive, destination]);
+            assert.strictEqual(fs.statSync(path.join(destination, 'program')).mode & 0o777, 0o700);
+            assert.strictEqual(fs.statSync(path.join(destination, 'unreadable')).mode & 0o777, 0);
+        });
+
+        test('기존 공유 디렉터리의 sticky·setgid는 ZIP 권한과 독립적으로 보존한다', function () {
+            if (process.platform === 'win32') { this.skip(); }
+            const archive = writeRawZip('shared-directories.zip', [
+                { name: 'sticky/', data: Buffer.alloc(0), unixMode: 0o40777 },
+                { name: 'sticky/result.txt', data: Buffer.from('payload'), unixMode: 0o100600 },
+                { name: 'setgid/', data: Buffer.alloc(0), unixMode: 0o40777 },
+                { name: 'setgid/result.txt', data: Buffer.from('payload'), unixMode: 0o100600 },
+                { name: 'new/', data: Buffer.alloc(0), unixMode: 0o47777 },
+            ]);
+            const destination = path.join(tempDir, 'shared-directories');
+            const originalModes = new Map<string, number>();
+            for (const [name, mode] of [['sticky', 0o1777], ['setgid', 0o2770]] as const) {
+                fs.mkdirSync(path.join(destination, name), { recursive: true });
+                fs.chmodSync(path.join(destination, name), mode);
+                // Some macOS filesystems clear setgid even on chmod. Preserve
+                // the actual existing state, while requiring sticky below so
+                // the deletion-protection regression is always exercised.
+                originalModes.set(name, fs.statSync(path.join(destination, name)).mode & 0o7777);
+            }
+            assert.strictEqual(originalModes.get('sticky'), 0o1777);
+            execFileSync(process.execPath, ['-e',
+                `process.umask(0); require(process.argv[1]).extractZipArchive(process.argv[2], process.argv[3]).catch(error => { console.error(error); process.exitCode = 1; });`,
+                require.resolve('../archiveUtils'), archive, destination]);
+            assert.strictEqual(fs.statSync(path.join(destination, 'sticky')).mode & 0o7777, 0o1777);
+            assert.strictEqual(fs.statSync(path.join(destination, 'setgid')).mode & 0o7777, originalModes.get('setgid'));
+            assert.strictEqual(fs.statSync(path.join(destination, 'new')).mode & 0o7777, 0o777);
+            assert.strictEqual(fs.readFileSync(path.join(destination, 'sticky/result.txt'), 'utf8'), 'payload');
+        });
+
+        test('basename이 같은 파일 sources는 기존 ZIP을 보존한 채 거부한다', async () => {
+            const sources = ['first', 'second'].map(name => {
+                const directory = path.join(tempDir, name);
+                fs.mkdirSync(directory);
+                const file = path.join(directory, 'firmware.bin');
+                fs.writeFileSync(file, name);
+                return file;
+            });
+            const archive = path.join(tempDir, 'collision.zip');
+            fs.writeFileSync(archive, 'previous archive');
+            await assert.rejects(createZipArchive(archive, sources), /Conflicting archive entry/);
+            assert.strictEqual(fs.readFileSync(archive, 'utf8'), 'previous archive');
+            assert.deepStrictEqual(taskHubTempFiles(tempDir), []);
+        });
+
+        test('같은 경로를 정규화해 두 번 선택해도 중복 엔트리를 만들지 않는다', async () => {
+            const source = path.join(tempDir, 'same.bin');
+            fs.writeFileSync(source, 'same');
+            await assert.rejects(createZipArchive(path.join(tempDir, 'duplicate.zip'), [source, `${tempDir}${path.sep}.${path.sep}same.bin`]),
+                /Conflicting archive entry/);
+        });
+
+        test('동일 basename 폴더와 파일·폴더 source 충돌을 사전에 거부한다', async () => {
+            const first = path.join(tempDir, 'first', 'bundle');
+            const second = path.join(tempDir, 'second', 'bundle');
+            fs.mkdirSync(first, { recursive: true });
+            fs.mkdirSync(second, { recursive: true });
+            fs.writeFileSync(path.join(first, 'first.txt'), 'first');
+            fs.writeFileSync(path.join(second, 'second.txt'), 'second');
+            await assert.rejects(createZipArchive(path.join(tempDir, 'directories.zip'), [first, second]), /Conflicting archive entry/);
+            fs.rmSync(second, { recursive: true });
+            fs.writeFileSync(second, 'file');
+            await assert.rejects(createZipArchive(path.join(tempDir, 'file-directory.zip'), [first, second]), /Conflicting archive entry/);
+        });
+
+        test('대소문자·Unicode·후행 점 이름 충돌은 다른 OS에서 풀기 전에 거부한다', async () => {
+            for (const [firstName, secondName] of [['Firmware.bin', 'firmware.bin'], ['\u00e9.bin', 'e\u0301.bin'], ['report.', 'report']]) {
+                const first = path.join(tempDir, 'first-' + randomBytes(3).toString('hex'));
+                const second = path.join(tempDir, 'second-' + randomBytes(3).toString('hex'));
+                fs.mkdirSync(first); fs.mkdirSync(second);
+                fs.writeFileSync(path.join(first, firstName), 'first');
+                fs.writeFileSync(path.join(second, secondName), 'second');
+                await assert.rejects(createZipArchive(path.join(tempDir, 'portable.zip'), [path.join(first, firstName), path.join(second, secondName)]),
+                    /Conflicting archive entry/);
+            }
+        });
+
+        test('출력 ZIP이 source 폴더 안에 있어도 재실행과 같은 내용의 별도 파일은 안전하다', async () => {
+            const source = path.join(tempDir, 'project');
+            fs.mkdirSync(source);
+            fs.writeFileSync(path.join(source, 'main.c'), 'int main() {}');
+            const archive = path.join(source, 'release.zip');
+            await createZipArchive(archive, [source]);
+            fs.copyFileSync(archive, path.join(source, 'keep.zip'));
+            await createZipArchive(archive, [source]);
+            const names = new AdmZip(archive).getEntries().filter(entry => !entry.isDirectory).map(entry => entry.entryName).sort();
+            assert.deepStrictEqual(names, ['project/keep.zip', 'project/main.c']);
+        });
+
+        test('기존 출력 ZIP의 hardlink alias도 제외하되 모든 source가 출력이면 거부한다', async () => {
+            const source = path.join(tempDir, 'linked-project');
+            fs.mkdirSync(source);
+            const archive = path.join(source, 'release.zip');
+            fs.writeFileSync(path.join(source, 'main.c'), 'source');
+            await createZipArchive(archive, [source]);
+            const alias = path.join(source, 'old-output.zip');
+            fs.linkSync(archive, alias);
+            const original = fs.readFileSync(archive);
+            await assert.rejects(createZipArchive(archive, [archive, alias]), /No archive sources remain/);
+            assert.deepStrictEqual(fs.readFileSync(archive), original);
+            await createZipArchive(archive, [source]);
+            assert.deepStrictEqual(new AdmZip(archive).getEntries().filter(entry => !entry.isDirectory).map(entry => entry.entryName), ['linked-project/main.c']);
+        });
+
+        test('출력 ZIP의 내부 symlink와 출력 부모의 symlink alias를 모두 제외한다', async function () {
+            const source = path.join(tempDir, 'symlink-project');
+            fs.mkdirSync(source);
+            fs.writeFileSync(path.join(source, 'main.c'), 'source');
+            const archive = path.join(source, 'release.zip');
+            await createZipArchive(archive, [source]);
+            const aliasDirectory = path.join(tempDir, 'alias-project');
+            try {
+                fs.symlinkSync(source, aliasDirectory, process.platform === 'win32' ? 'junction' : 'dir');
+                fs.symlinkSync(archive, path.join(source, 'output-alias.zip'), 'file');
+            } catch { this.skip(); }
+            await createZipArchive(path.join(aliasDirectory, 'release.zip'), [source]);
+            assert.deepStrictEqual(new AdmZip(archive).getEntries().filter(entry => !entry.isDirectory).map(entry => entry.entryName), ['symlink-project/main.c']);
+        });
+
+        test('출력 자체가 symlink면 링크만 교체하고 원래 가리키던 source는 보존한다', async function () {
+            const source = path.join(tempDir, 'replace-output-link');
+            fs.mkdirSync(source);
+            const original = path.join(source, 'original.bin');
+            const archive = path.join(source, 'release.zip');
+            fs.writeFileSync(original, 'keep original');
+            try { fs.symlinkSync(original, archive, 'file'); } catch { this.skip(); }
+            await createZipArchive(archive, [source]);
+            assert.strictEqual(fs.lstatSync(archive).isSymbolicLink(), false);
+            assert.strictEqual(fs.readFileSync(original, 'utf8'), 'keep original');
+            assert.deepStrictEqual(new AdmZip(archive).getEntries().filter(entry => !entry.isDirectory).map(entry => entry.entryName), ['replace-output-link/original.bin']);
+        });
+    });
 
     suite('createZipArchive', () => {
         test('빈 sources 배열이면 거부', async () => {
@@ -307,7 +567,7 @@ suite('archiveUtils', () => {
             });
 
             const names = new AdmZip(archivePath).getEntries().map(e => e.entryName).sort();
-            assert.deepStrictEqual(names, ['proj/ok.txt'], `링크를 따라 바깥 내용이 담겼다: ${names.join(', ')}`);
+            assert.deepStrictEqual(names, ['proj/', 'proj/ok.txt'], `링크를 따라 바깥 내용이 담겼다: ${names.join(', ')}`);
             assert.deepStrictEqual(skipped.sort(), ['linkdir', 'linkfile.txt'], '건너뛴 링크를 알리지 않았다');
         });
 

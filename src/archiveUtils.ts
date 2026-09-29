@@ -221,6 +221,52 @@ interface ZipSourceEntry {
     stat: fs.Stats;
 }
 
+interface ZipOutputIdentity {
+    path: string;
+    realPath?: string;
+    stat?: fs.Stats;
+}
+
+async function zipOutputIdentity(archivePath: string): Promise<ZipOutputIdentity> {
+    const output: ZipOutputIdentity = { path: path.resolve(archivePath) };
+    try {
+        const stat = await fs.promises.lstat(output.path);
+        // rename replaces a final symlink rather than its target. Do not exclude
+        // that unrelated target's contents just because the destination is a link.
+        output.realPath = path.join(await fs.promises.realpath(path.dirname(output.path)), path.basename(output.path));
+        if (stat.isFile()) { output.stat = stat; }
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
+    }
+    return output;
+}
+
+function isZipOutput(output: ZipOutputIdentity, sourcePath: string, realPath: string, stat: fs.Stats): boolean {
+    return path.resolve(sourcePath) === output.path || realPath === output.realPath
+        || Boolean(output.stat && sameFileIdentity(output.stat, stat));
+}
+
+/** Reject names that extract to one path on common Windows/macOS filesystems. */
+function assertDistinctZipEntries(entries: readonly { entryName: string; isDirectory: boolean }[]): void {
+    const paths = new Map<string, { directory: boolean; explicit: boolean; name: string }>();
+    for (const entry of entries) {
+        const parts = entry.entryName.replace(/\/$/, '').split('/');
+        let key = '';
+        for (let index = 0; index < parts.length; index++) {
+            const part = parts[index].normalize('NFC').replace(/[. ]+$/u, '').toLowerCase();
+            if (!part) { throw new Error(`Conflicting archive entry name after filesystem normalization: ${JSON.stringify(entry.entryName)}`); }
+            key = key ? `${key}/${part}` : part;
+            const explicit = index === parts.length - 1;
+            const directory = !explicit || entry.isDirectory;
+            const existing = paths.get(key);
+            if (existing && (!existing.directory || !directory || (explicit && existing.explicit))) {
+                throw new Error(`Conflicting archive entry names: ${JSON.stringify(existing.name)} and ${JSON.stringify(entry.entryName)}`);
+            }
+            if (!existing || explicit) { paths.set(key, { directory, explicit, name: entry.entryName }); }
+        }
+    }
+}
+
 function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
     return left.dev === right.dev && left.ino === right.ino;
 }
@@ -330,7 +376,8 @@ async function collectDirectoryEntries(
     entries: ZipSourceEntry[],
     signal: AbortSignal | undefined,
     rootRealPath: string,
-    options: ArchiveOptions
+    options: ArchiveOptions,
+    output: ZipOutputIdentity
 ): Promise<void> {
     throwIfAborted(signal);
     const names = await fs.promises.readdir(sourceDir);
@@ -365,6 +412,7 @@ async function collectDirectoryEntries(
         }
 
         const stat = await fs.promises.stat(resolvedTarget);
+        if (isZipOutput(output, sourcePath, resolvedTarget, stat)) { continue; }
         const entryName = normalizeArchiveEntryName(`${archiveDir}/${name}`, stat.isDirectory());
         if (stat.isDirectory()) {
             appendZipSourceEntry(entries, {
@@ -383,7 +431,8 @@ async function collectDirectoryEntries(
                         entries,
                         signal,
                         rootRealPath,
-                        options
+                        options,
+                        output
                     );
                 } finally {
                     activeRealDirectories.delete(resolvedTarget);
@@ -398,7 +447,7 @@ async function collectDirectoryEntries(
     }
 }
 
-async function collectZipSourceEntries(sources: string[], signal: AbortSignal | undefined, options: ArchiveOptions): Promise<ZipSourceEntry[]> {
+async function collectZipSourceEntries(sources: string[], signal: AbortSignal | undefined, options: ArchiveOptions, output: ZipOutputIdentity): Promise<ZipSourceEntry[]> {
     const entries: ZipSourceEntry[] = [];
     for (const source of sources) {
         throwIfAborted(signal);
@@ -409,10 +458,15 @@ async function collectZipSourceEntries(sources: string[], signal: AbortSignal | 
             throw new Error(`Source path not found: ${source}`);
         }
 
+        const realPath = await fs.promises.realpath(source);
+        if (isZipOutput(output, source, realPath, stat)) { continue; }
         if (stat.isDirectory()) {
             // 사용자가 **직접 지정한** source 는 링크여도 따라간다 — 그건
             // 스스로의 선택이고, 그 실제 경로가 이 트리의 루트가 된다.
-            const realPath = await fs.promises.realpath(source);
+            appendZipSourceEntry(entries, {
+                sourcePath: source, readPath: realPath, rootRealPath: realPath,
+                entryName: normalizeArchiveEntryName(path.basename(source), true), isDirectory: true, stat,
+            });
             await collectDirectoryEntries(
                 source,
                 normalizeArchiveEntryName(path.basename(source), false),
@@ -420,10 +474,10 @@ async function collectZipSourceEntries(sources: string[], signal: AbortSignal | 
                 entries,
                 signal,
                 realPath,
-                options
+                options,
+                output
             );
         } else if (stat.isFile()) {
-            const realPath = await fs.promises.realpath(source);
             appendZipSourceEntry(entries, {
                 sourcePath: source,
                 readPath: realPath,
@@ -435,6 +489,8 @@ async function collectZipSourceEntries(sources: string[], signal: AbortSignal | 
             throw new Error(`Unsupported source type (not a file or directory): ${source}`);
         }
     }
+    if (entries.length === 0) { throw new Error('No archive sources remain after excluding the destination ZIP.'); }
+    assertDistinctZipEntries(entries);
     return entries;
 }
 
@@ -528,7 +584,8 @@ export async function createZipArchive(archivePath: string, sources: string[], o
         throw new Error('createZipArchive requires at least one source path.');
     }
     throwIfAborted(options.signal);
-    const sourceEntries = await collectZipSourceEntries(sources, options.signal, options);
+    const output = await zipOutputIdentity(archivePath);
+    const sourceEntries = await collectZipSourceEntries(sources, options.signal, options, output);
     if (sourceEntries.length > ZIP_CREATE_MAX_ENTRIES) {
         throw new Error('Archive contains more than 65535 entries; ZIP64 creation is not supported.');
     }
@@ -542,7 +599,7 @@ export async function createZipArchive(archivePath: string, sources: string[], o
         }
     }
 
-    const resolvedArchivePath = path.resolve(archivePath);
+    const resolvedArchivePath = output.path;
     await fs.promises.mkdir(path.dirname(resolvedArchivePath), { recursive: true });
     throwIfAborted(options.signal);
     const temp = openExclusiveSiblingTempFile(resolvedArchivePath, 'archive');
@@ -779,7 +836,13 @@ function normalizeZipError(error: unknown): Error {
  * `dest` **자신**은 검사하지 않는다 — 사용자가 링크를 대상으로 지정한 것은
  * 스스로의 선택이고, 이 함수의 계약은 "dest 안에 머문다"이다.
  */
-function mkdirWithinDestination(resolvedDest: string, dirPath: string): void {
+interface ZipDirectoryMode {
+    mode: number;
+    created: boolean;
+    stat: fs.Stats;
+}
+
+function mkdirWithinDestination(resolvedDest: string, dirPath: string, modes?: Map<string, ZipDirectoryMode>): void {
     fs.mkdirSync(resolvedDest, { recursive: true });
     const relative = path.relative(resolvedDest, dirPath);
     if (relative === '') { return; }
@@ -795,7 +858,11 @@ function mkdirWithinDestination(resolvedDest: string, dirPath: string): void {
             stat = undefined;   // 아직 없다 — 우리가 만든다
         }
         if (!stat) {
-            fs.mkdirSync(current);
+            // Keep new subtrees private until every entry has been placed. In
+            // particular, a private source directory must not expose its names
+            // through a temporary default-0755 directory during extraction.
+            fs.mkdirSync(current, { mode: modes ? 0o700 : undefined });
+            if (modes) { modes.set(current, { mode: 0o777 & ~process.umask(), created: true, stat: fs.lstatSync(current) }); }
             continue;
         }
         // Windows 의 junction 도 Node 에서 `isSymbolicLink()` 로 잡힌다.
@@ -831,13 +898,13 @@ function mkdirWithinDestination(resolvedDest: string, dirPath: string): void {
  * 링크를 지우고 새로 쓰는 대신 **거부**한다 — 사용자가 의도해 둔 링크를
  * 아카이브가 조용히 없애는 편이 더 나쁘다.
  */
-function assertEntryTargetReplaceable(resolvedDest: string, targetPath: string): number {
+function assertEntryTargetReplaceable(resolvedDest: string, targetPath: string): number | undefined {
     const shown = path.relative(resolvedDest, targetPath);
     let pathStat: fs.Stats;
     try {
         pathStat = fs.lstatSync(targetPath);
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return defaultCreatedFileMode(); }
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return undefined; }
         throw error;
     }
     if (pathStat.isSymbolicLink()) {
@@ -858,7 +925,7 @@ function assertEntryTargetReplaceable(resolvedDest: string, targetPath: string):
             throw new Error(`Blocked symlinked path in archive destination: ${shown}`);
         }
         // 검사 사이에 대상이 사라졌다면 rename은 새 파일을 만들 뿐이다.
-        if ((e as NodeJS.ErrnoException).code === 'ENOENT') { return defaultCreatedFileMode(); }
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') { return undefined; }
         throw e;
     }
 
@@ -873,6 +940,53 @@ function assertEntryTargetReplaceable(resolvedDest: string, targetPath: string):
         return openedStat.mode & 0o777;
     } finally {
         try { fs.closeSync(fd); } catch { /* best effort */ }
+    }
+}
+
+/** Only Unix rwx permissions are portable; never apply ownership or special bits. */
+function zipEntryMode(entry: yauzl.Entry, directory: boolean): number | undefined {
+    if (process.platform === 'win32' || ![3, 19].includes(entry.versionMadeBy >>> 8)) { return undefined; }
+    const mode = entry.externalFileAttributes >>> 16;
+    const type = mode & 0xf000;
+    if (mode === 0 || (type !== 0 && type !== (directory ? 0x4000 : 0x8000))) { return undefined; }
+    return (mode & 0o777) & ~process.umask();
+}
+
+function extractedFileMode(entry: yauzl.Entry, existingMode: number | undefined): number {
+    const archiveMode = zipEntryMode(entry, false);
+    if (archiveMode === undefined) { return existingMode ?? defaultCreatedFileMode(); }
+    // Replacing a private existing file must never grant additional access,
+    // even if the archive carries broad permissions for its replacement.
+    return existingMode === undefined ? archiveMode : archiveMode & existingMode;
+}
+
+function restoreZipDirectoryModes(resolvedDest: string, modes: Map<string, ZipDirectoryMode>): void {
+    // A parent may become read-only or unsearchable. Finish descendants first.
+    const ordered = [...modes].sort(([left], [right]) => right.split(path.sep).length - left.split(path.sep).length);
+    for (const [directory, metadata] of ordered) {
+        mkdirWithinDestination(resolvedDest, directory);
+        const pathStat = fs.lstatSync(directory);
+        if (!pathStat.isDirectory() || !sameFileIdentity(pathStat, metadata.stat)) {
+            throw new Error(`Archive destination directory changed during extraction: ${directory}`);
+        }
+        // Existing directory flags belong to the user, not the ZIP. In
+        // particular, clearing sticky would remove deletion protection from
+        // a shared directory; clearing setgid would change group inheritance.
+        const restoredMode = (currentMode: number): number => metadata.created ? metadata.mode
+            : (metadata.mode & currentMode & 0o777) | (currentMode & 0o7000);
+        const mode = restoredMode(pathStat.mode);
+        // Write/search-only directories can accept known filenames without
+        // permitting O_RDONLY. Do not require read access for a chmod no-op.
+        // Compare special bits too: new directories must not retain them.
+        if ((pathStat.mode & 0o7777) === mode) { continue; }
+        const fd = fs.openSync(directory, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+        try {
+            const stat = fs.fstatSync(fd);
+            if (!stat.isDirectory() || !sameFileIdentity(stat, metadata.stat)) {
+                throw new Error(`Archive destination directory changed during extraction: ${directory}`);
+            }
+            fs.fchmodSync(fd, restoredMode(stat.mode));
+        } finally { fs.closeSync(fd); }
     }
 }
 
@@ -929,6 +1043,7 @@ export async function extractZipArchive(archivePath: string, destination: string
     }
     throwIfAborted(options.signal);
     const resolvedDest = path.resolve(destination);
+    const directoryModes = new Map<string, ZipDirectoryMode>();
 
     const zipFile = await new Promise<yauzl.ZipFile>((resolve, reject) => {
         // `lazyEntries` 는 엔트리를 하나씩 요청해 읽게 한다 — 전량을 미리
@@ -983,10 +1098,19 @@ export async function extractZipArchive(archivePath: string, destination: string
             throwIfAborted(options.signal);
             const targetPath = resolveEntryTarget(resolvedDest, entry.fileName);
             if (targetPath === null) {
-                mkdirWithinDestination(resolvedDest, path.resolve(resolvedDest, entry.fileName));
+                const directory = path.resolve(resolvedDest, entry.fileName);
+                mkdirWithinDestination(resolvedDest, directory, directoryModes);
+                const mode = zipEntryMode(entry, true);
+                // The chosen extraction root has no archive-owned permissions.
+                if (mode !== undefined && directory !== resolvedDest) {
+                    const previous = directoryModes.get(directory);
+                    const stat = fs.lstatSync(directory);
+                    directoryModes.set(directory, { mode: previous?.created ? mode : mode & (stat.mode & 0o777),
+                        created: previous?.created ?? false, stat: previous?.stat ?? stat });
+                }
                 continue;
             }
-            mkdirWithinDestination(resolvedDest, path.dirname(targetPath));
+            mkdirWithinDestination(resolvedDest, path.dirname(targetPath), directoryModes);
 
             // 읽기 스트림을 먼저 연다. 암호화 엔트리나 미지원 압축 방식이면
             // 임시 파일조차 만들지 않고 거부할 수 있다.
@@ -1001,7 +1125,7 @@ export async function extractZipArchive(archivePath: string, destination: string
             try {
                 // openReadStream을 기다리는 동안 부모가 링크로 바뀌었을 수 있다.
                 // 임시 파일 open 직전에 다시 검사하고 같은 turn에서 O_EXCL로 연다.
-                mkdirWithinDestination(resolvedDest, path.dirname(targetPath));
+                mkdirWithinDestination(resolvedDest, path.dirname(targetPath), directoryModes);
                 temp = openExclusiveSiblingTempFile(targetPath, 'entry');
             } catch (e) {
                 readStream.destroy();
@@ -1030,16 +1154,19 @@ export async function extractZipArchive(archivePath: string, destination: string
 
                 // 부모가 링크로 바뀌지 않았는지 다시 확인하고, 최종 이름 자체의
                 // symlink/hardlink 방어도 commit 직전에 수행한다.
-                mkdirWithinDestination(resolvedDest, path.dirname(targetPath));
-                const finalMode = assertEntryTargetReplaceable(resolvedDest, targetPath);
+                mkdirWithinDestination(resolvedDest, path.dirname(targetPath), directoryModes);
+                const finalMode = extractedFileMode(entry, assertEntryTargetReplaceable(resolvedDest, targetPath));
                 fs.fchmodSync(temp.fd, finalMode);
                 await closeFd(temp.fd);
                 fdOwned = false;
 
                 // close 동안 대상 경로가 바뀔 수 있으므로 마지막으로 한 번 더
                 // 링크 방어를 확인한다. rename은 링크를 따라 쓰지 않고 이름을 교체한다.
-                mkdirWithinDestination(resolvedDest, path.dirname(targetPath));
-                assertEntryTargetReplaceable(resolvedDest, targetPath);
+                mkdirWithinDestination(resolvedDest, path.dirname(targetPath), directoryModes);
+                const recheckedMode = extractedFileMode(entry, assertEntryTargetReplaceable(resolvedDest, targetPath));
+                if (recheckedMode !== finalMode) {
+                    throw new Error(`Archive destination file permissions changed during extraction: ${targetPath}`);
+                }
                 throwIfAborted(options.signal);
                 await fs.promises.rename(temp.tempPath, targetPath);
                 committed = true;
@@ -1052,6 +1179,7 @@ export async function extractZipArchive(archivePath: string, destination: string
                 }
             }
         }
+        if (process.platform !== 'win32') { restoreZipDirectoryModes(resolvedDest, directoryModes); }
     } finally {
         // `autoClose: false` 로 열었으므로 fd 를 직접 닫는다. 안 닫으면 Windows
         // 에서 아카이브 파일이 잠긴 채 남는다.
