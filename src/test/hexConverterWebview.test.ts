@@ -8,6 +8,7 @@ import {
     HexConverterPreferences,
     hexConverterPanelRegistry,
     normalizeHexConverterSavedValues,
+    showDeveloperCalculator,
     showHexConverter,
 } from '../hexConverter';
 
@@ -50,6 +51,7 @@ class FakeWebviewElement {
         for (const listener of this.listeners.get(type) ?? []) { listener(event); }
     }
     focus(): void { this.focused = true; }
+    scrollIntoView(): void {}
     setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
     getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
     setSelectionRange(start: number, end: number): void {
@@ -71,6 +73,8 @@ function runHexConverterWebview(options: {
         'copyText', 'copyHex', 'saveText', 'saveHex', 'clearButton', 'status',
         'statusText', 'valueGrid', 'hexOffsets', 'hexGroupWarning', 'hexGroupMessage',
         'hexGroupPreviewLabel', 'hexGroupPresent', 'hexGroupMissing', 'savedList', 'savedCount',
+        'calculatorMode', 'calculatorSize', 'calculatorExamples', 'bitwiseHint', 'bitwiseRules',
+        'calculatorAddressExample', 'calculatorRangeExample', 'calculatorAlignExample', 'calculatorMemoryExample',
         'bitwisePanel', 'bitwiseExpression', 'bitwiseWidth', 'bitwiseStatus',
         'bitwiseHex', 'bitwiseDecimal', 'bitwiseBinary',
         'copyBitwiseHex', 'copyBitwiseDecimal', 'copyBitwiseBinary', 'bitwiseClear',
@@ -158,6 +162,101 @@ suite('Hex/Text 변환기 Webview', () => {
     test('Command Palette 명령이 실제 extension host에 등록된다', async () => {
         const commands = await vscode.commands.getCommands(true);
         assert.ok(commands.includes('taskhub.showHexConverter'));
+    });
+
+    test('개발 계산기 명령이 등록되고 혼합 진법·음수·크기를 표시한다', async () => {
+        assert.ok((await vscode.commands.getCommands(true)).includes('taskhub.showDeveloperCalculator'));
+        const harness = runHexConverterWebview();
+        const { elements } = harness;
+        harness.dispatchWindowMessage({ command: 'openCalculator', expression: '0x08000000 - 0x08004000' });
+        assert.strictEqual(elements.calculatorMode.value, 'integer');
+        assert.strictEqual(elements.bitwiseHex.textContent, '-0x4000');
+        assert.strictEqual(elements.bitwiseDecimal.textContent, '-16384');
+        assert.ok(elements.calculatorSize.textContent.endsWith('-16 KiB'));
+        assert.strictEqual(elements.bitwiseWidth.disabled, true);
+        assert.strictEqual(elements.bitwiseExpression.focused, true);
+        assert.strictEqual(harness.persisted().bitwise.mode, 'integer');
+        elements.calculatorAlignExample.dispatch('click');
+        assert.strictEqual(elements.bitwiseHex.textContent, '0x20000104');
+        elements.calculatorRangeExample.dispatch('click');
+        assert.strictEqual(elements.bitwiseDecimal.textContent, '16384');
+    });
+
+    test('주소 계산의 실패는 복사와 크기를 비우고 레지스터 모드는 기존 폭을 유지한다', () => {
+        const harness = runHexConverterWebview({ restoredState: { bitwise: { mode: 'integer', expression: '0x100 - 1', width: 8 } } });
+        const { elements } = harness;
+        assert.strictEqual(elements.bitwiseDecimal.textContent, '255');
+        for (const expression of ['1 / 0', 'alignUp(1,0)', '0755', '09', '0755.0', 'globalThis.x=1']) {
+            elements.bitwiseExpression.value = expression;
+            elements.bitwiseExpression.dispatch('input');
+            assert.strictEqual(elements.copyBitwiseDecimal.disabled, true);
+            assert.strictEqual(elements.calculatorSize.textContent, '');
+            harness.flushTimers();
+            assert.ok(elements.bitwiseStatus.classes.has('is-error'));
+        }
+        elements.bitwiseExpression.value = '~0';
+        elements.bitwiseExpression.dispatch('input');
+        assert.strictEqual(elements.bitwiseDecimal.textContent, '-1');
+        elements.calculatorMode.value = 'register';
+        elements.calculatorMode.dispatch('change');
+        assert.strictEqual(elements.bitwiseDecimal.textContent, '255');
+        assert.strictEqual(elements.bitwiseWidth.disabled, false);
+        assert.strictEqual(elements.calculatorSize.hidden, true);
+    });
+
+    test('잘못된 열기 메시지는 무시하고 수식 없는 열기는 기존 입력을 유지한다', () => {
+        const harness = runHexConverterWebview({ restoredState: { bitwise: { mode: 'register', expression: '0xFF', width: 8, open: false } } });
+        const { elements } = harness;
+        const initial = JSON.stringify(harness.persisted());
+        for (const expression of [null, 5, {}, [], '1'.repeat(4097)]) {
+            harness.dispatchWindowMessage({ command: 'openCalculator', expression });
+            assert.strictEqual(elements.calculatorMode.value, 'register');
+            assert.strictEqual(elements.bitwisePanel.open, false);
+            assert.strictEqual(elements.bitwiseExpression.focused, false);
+            assert.strictEqual(JSON.stringify(harness.persisted()), initial);
+        }
+        for (const expression of [undefined, '', ' \t\n ']) {
+            harness.dispatchWindowMessage({ command: 'openCalculator', expression });
+            assert.strictEqual(elements.calculatorMode.value, 'integer');
+            assert.strictEqual(elements.bitwisePanel.open, true);
+            assert.strictEqual(elements.bitwiseExpression.value, '0xFF');
+            assert.strictEqual(elements.bitwiseDecimal.textContent, '255');
+            assert.strictEqual(elements.bitwiseExpression.focused, true);
+        }
+    });
+
+    test('정수 모드 오류 위치와 반전·시프트 안내를 한국어와 영어로 표시한다', () => {
+        for (const language of ['ko', 'en']) {
+            withLanguage(language, () => {
+                const strings = buildHexConverterStrings();
+                const harness = runHexConverterWebview();
+                for (const [expression, key, position] of [
+                    ['2 + 0755', 'calculatorLeadingZero', '5'],
+                    ['1 / 0', 'calculatorDivisionByZero', '5'],
+                    ['1 +', 'bitwiseInvalidExpression', '4'],
+                    ['1 << 256', 'bitwiseInvalidShift', '6'],
+                ]) {
+                    harness.dispatchWindowMessage({ command: 'openCalculator', expression });
+                    assert.strictEqual(harness.elements.bitwiseStatus.textContent, strings.bitwiseErrorPosition
+                        .replace('{message}', strings[key].replace('{max}', '255')).replace('{position}', position));
+                    assert.strictEqual(harness.elements.copyBitwiseDecimal.disabled, true);
+                }
+                harness.dispatchWindowMessage({ command: 'openCalculator', expression: '~0xFF' });
+                assert.strictEqual(harness.elements.bitwiseHex.textContent, '-0x100');
+                assert.ok(harness.elements.bitwiseRules.textContent.includes('~0xFF = -0x100'));
+                assert.ok(harness.elements.bitwiseRules.textContent.includes('-7 >> 1 = -4'));
+            });
+        }
+    });
+
+    test('잘못된 복원 모드는 레지스터 기본값으로 계산하고 폭을 유지한다', () => {
+        for (const mode of ['unknown', 'INTEGER', '', null, 1, {}]) {
+            const harness = runHexConverterWebview({ restoredState: { bitwise: { mode, expression: '~0', width: 8 } } });
+            assert.strictEqual(harness.elements.calculatorMode.value, 'register');
+            assert.strictEqual(harness.elements.bitwiseDecimal.textContent, '255');
+            assert.strictEqual(harness.elements.bitwiseWidth.disabled, false);
+            assert.strictEqual(harness.elements.calculatorSize.hidden, true);
+        }
     });
 
     test('인라인 스크립트가 문법적으로 유효하다', () => {
@@ -921,6 +1020,59 @@ suite('Hex/Text 변환기 Webview', () => {
             }
         });
 
+        test('선택 없음·공백·초과 선택은 계산기를 열고 4096자 경계 선택은 가져온다', async () => {
+            const editorDescriptor = Object.getOwnPropertyDescriptor(vscode.window, 'activeTextEditor');
+            assert.ok(editorDescriptor?.configurable);
+            const originalWarning = vscode.window.showWarningMessage;
+            const warnings: string[] = [];
+            (vscode.window as any).showWarningMessage = (message: string) => { warnings.push(message); return Promise.resolve(undefined); };
+            const context = { globalState: { get(_key: string, fallback: unknown) { return fallback; } } } as unknown as vscode.ExtensionContext;
+            try {
+                for (const selected of [undefined, '', ' \t\n ', 'x'.repeat(4097), ' '.repeat(4091) + '1 + 1']) {
+                    hexConverterPanelRegistry.clear();
+                    const posted: any[] = [];
+                    let handler: ((message: any) => Promise<void>) | undefined;
+                    let readCount = 0;
+                    const selection = { isEmpty: selected === '', start: 0, end: selected?.length ?? 0 };
+                    Object.defineProperty(vscode.window, 'activeTextEditor', { configurable: true, value: selected === undefined ? undefined : {
+                        selection,
+                        document: {
+                            offsetAt(position: number) { return position; },
+                            getText(range: unknown) {
+                                assert.strictEqual(range, selection, '문서 전체를 읽으면 안 된다');
+                                assert.ok(selected.length <= 4096 && selected.length > 0, '빈 선택과 초과 선택은 읽으면 안 된다');
+                                readCount++;
+                                return selected;
+                            },
+                        },
+                    } });
+                    (vscode.window as any).createWebviewPanel = () => ({
+                        webview: {
+                            cspSource: 'vscode-webview:',
+                            set html(_value: string) { assert.ok(handler, 'HTML 전에 ready 핸들러를 등록해야 한다'); },
+                            onDidReceiveMessage(callback: typeof handler) { handler = callback; return { dispose() {} }; },
+                            postMessage(message: any) { posted.push(message); return Promise.resolve(true); },
+                        },
+                        onDidDispose() { return { dispose() {} }; },
+                        dispose() {},
+                    });
+                    const warningsBefore = warnings.length;
+                    showDeveloperCalculator(context);
+                    assert.ok(hexConverterPanelRegistry.hasPanel(), '초과 선택도 계산기 열기를 막으면 안 된다');
+                    assert.strictEqual(posted.length, 0, 'ready 전 수식을 보내면 안 된다');
+                    assert.ok(handler);
+                    await handler({ command: 'ready' });
+                    const oversized = selected !== undefined && selected.length > 4096;
+                    assert.deepStrictEqual(posted, [{ command: 'openCalculator', expression: oversized ? undefined : selected?.trim() || undefined }]);
+                    assert.strictEqual(warnings.length - warningsBefore, oversized ? 1 : 0);
+                    assert.strictEqual(readCount, selected && !oversized ? 1 : 0);
+                }
+            } finally {
+                Object.defineProperty(vscode.window, 'activeTextEditor', editorDescriptor);
+                vscode.window.showWarningMessage = originalWarning;
+            }
+        });
+
         test('비트 복사는 호스트가 64비트 결과를 재계산하고 잘못된 메시지와 클립보드 실패를 처리한다', async () => {
             let messageHandler: ((message: any) => Promise<void>) | undefined;
             const copied: string[] = [];
@@ -968,7 +1120,7 @@ suite('Hex/Text 변환기 Webview', () => {
                 { expression: '' }, { expression: 1 }, { expression: '0x100', width: 8 },
                 { expression: '1 << 64' }, { expression: '1 <<' }, { expression: '(1 2)' },
                 { expression: '1'.repeat(10000) },
-                { width: '64' }, { width: 128 }, { format: 'toString' },
+                { width: '64' }, { width: 128 }, { format: 'toString' }, { mode: 'unknown' },
             ]) {
                 const postedBefore = posted.length;
                 await messageHandler!({ ...validRequest, ...invalid });
@@ -983,10 +1135,18 @@ suite('Hex/Text 변환기 Webview', () => {
                 assert.strictEqual(posted.length, postedBefore, '잘못된 requestId에는 응답을 보내면 안 된다');
             }
 
+            await messageHandler!({ ...validRequest, mode: 'integer', expression: '0x10000000000000000 - 1' });
+            assert.strictEqual(copied.at(-1), '18446744073709551615');
+            const beforeInvalidCalculator = copied.length;
+            for (const expression of ['1/0', '0755', '09', '1lL']) {
+                await messageHandler!({ ...validRequest, mode: 'integer', expression });
+                assert.strictEqual(copied.length, beforeInvalidCalculator);
+                assert.strictEqual(posted.at(-1).ok, false);
+            }
             clipboardFails = true;
             await messageHandler!(validRequest);
             assert.deepStrictEqual(posted.at(-1), { command: 'bitwiseCopyResult', ok: false, requestId: 0 });
-            assert.strictEqual(copied.length, 3);
+            assert.strictEqual(copied.length, 4);
         });
 
         test('명령을 다시 실행하면 기존 패널을 표시하고 클립보드 결과를 돌려준다', async () => {
@@ -1030,8 +1190,8 @@ suite('Hex/Text 변환기 Webview', () => {
                 },
             } as unknown as vscode.ExtensionContext;
 
-            showHexConverter(context);
-            showHexConverter(context);
+            showHexConverter(context, { expression: '0x100 - 1' });
+            showHexConverter(context, { expression: '0x200 - 1' });
 
             assert.strictEqual(createCount, 1);
             assert.strictEqual(revealCount, 1);
@@ -1039,6 +1199,13 @@ suite('Hex/Text 변환기 Webview', () => {
             assert.ok(hexConverterPanelRegistry.hasPanel());
             assert.ok((hexConverterPanelRegistry.getHtml() ?? '').includes('id="textInput"'));
             assert.ok(messageHandler, '복사 메시지 핸들러가 없다');
+            assert.strictEqual(posted.length, 0, '웹뷰가 준비되기 전에 선택 수식을 보내면 유실된다');
+            await messageHandler!({ command: 'ready' });
+            assert.deepStrictEqual(posted.slice(), [{ command: 'openCalculator', expression: '0x200 - 1' }]);
+            await messageHandler!({ command: 'ready' });
+            assert.strictEqual(posted.length, 1, '중복 ready가 사용자 입력을 이전 선택 수식으로 덮으면 안 된다');
+            showHexConverter(context, { expression: '0x300 - 1' });
+            assert.deepStrictEqual(posted.at(-1), { command: 'openCalculator', expression: '0x300 - 1' });
             await messageHandler!({ command: 'copy', kind: 'hex', text: '48 69' });
             assert.deepStrictEqual(copied, ['48 69']);
             assert.deepStrictEqual(posted.at(-1), { command: 'copyResult', ok: true, kind: 'hex' });
@@ -1063,6 +1230,9 @@ suite('Hex/Text 변환기 Webview', () => {
                 'const INITIAL_PREFERENCES = {"encoding":"ascii","hexGroup":4,"endian":"big"};'
             ), '패널을 다시 열 때 최근 옵션을 Webview에 주입하지 않았다');
             assert.ok(messageHandler, '다시 연 패널의 메시지 핸들러가 없다');
+            const postedBeforeReopenReady = posted.length;
+            await messageHandler!({ command: 'ready' });
+            assert.strictEqual(posted.length, postedBeforeReopenReady, '닫은 패널의 수식 요청이 다시 열기로 새면 안 된다');
 
             await messageHandler!({
                 command: 'saveValue', kind: 'text', value: 'Hi', encoding: 'utf8', endian: 'little',

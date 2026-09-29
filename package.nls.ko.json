@@ -140,5 +140,6 @@
   "setting.jenkinsTrackingTimeout": "새 조회의 제한 시간(시간)입니다. 기본 2시간이며 최대 168시간까지 늘릴 수 있습니다. 만료 시 조회 실패로 종료하고 확인된 결과를 보존합니다. 자동 재시도하거나 Jenkins 빌드를 취소하지 않습니다. 설정 변경으로 종료된 이력이 재개되지 않습니다.",
   "cmd.jenkins.trackSha": "Jenkins: SHA 결과 조회 / 다시 조회…",
   "cmd.jenkins.clearResults": "Jenkins: 결과 지우기",
-  "setting.jenkinsPollFixed": "조회는 최초 즉시, 1시간까지 10분 간격, 이후 20분 간격으로 고정됩니다."
+  "setting.jenkinsPollFixed": "조회는 최초 즉시, 1시간까지 10분 간격, 이후 20분 간격으로 고정됩니다.",
+  "cmd.showDeveloperCalculator": "개발 계산기 (선택 영역 계산)"
 }

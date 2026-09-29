@@ -176,6 +176,8 @@ const showHexViewer: typeof import('./hexViewer').showHexViewer = (...args) =>
     (require('./hexViewer') as typeof import('./hexViewer')).showHexViewer(...args);
 const openHexViewerFile: typeof import('./hexViewer').openHexViewerFile = (...args) =>
     (require('./hexViewer') as typeof import('./hexViewer')).openHexViewerFile(...args);
+const showDeveloperCalculator: typeof import('./hexConverter').showDeveloperCalculator = (...args) =>
+    (require('./hexConverter') as typeof import('./hexConverter')).showDeveloperCalculator(...args);
 const showHexConverter: typeof import('./hexConverter').showHexConverter = (...args) =>
     (require('./hexConverter') as typeof import('./hexConverter')).showHexConverter(...args);
 const buildActionRunReportHtml: typeof import('./actionRunReport').buildActionRunReportHtml = (...args) =>
@@ -13720,6 +13722,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showHexViewer', async () => {
         await showHexViewer(context, entry => recordHexViewerHistory(historyProvider, entry));
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.showDeveloperCalculator', () => {
+        showDeveloperCalculator(context);
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.showHexConverter', () => {

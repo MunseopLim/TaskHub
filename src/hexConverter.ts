@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { t } from './i18n';
 import { evaluateHexBitwiseExpression } from './hexBitwiseUtils';
+import { evaluateDeveloperExpression } from './developerCalculator';
 import {
     buildHexConverterValueRows,
     decodeHexConverterBytes,
@@ -44,6 +45,33 @@ export interface HexConverterSavedValue {
 
 let currentPanel: vscode.WebviewPanel | undefined;
 let currentMessageDisposable: vscode.Disposable | undefined;
+let converterReady = false;
+let calculatorRequest: { expression?: string } | undefined;
+
+function sendCalculatorRequest(): void {
+    if (!currentPanel || !converterReady || !calculatorRequest) { return; }
+    const request = calculatorRequest;
+    calculatorRequest = undefined;
+    void currentPanel.webview.postMessage({ command: 'openCalculator', ...request }).then(undefined, () => undefined);
+}
+
+/** Open the calculator with the explicit editor selection, never the whole document. */
+export function showDeveloperCalculator(context: vscode.ExtensionContext): void {
+    const editor = vscode.window.activeTextEditor;
+    let expression: string | undefined;
+    if (editor && !editor.selection.isEmpty) {
+        const length = editor.document.offsetAt(editor.selection.end) - editor.document.offsetAt(editor.selection.start);
+        if (length > 4096) {
+            vscode.window.showWarningMessage(t(
+                '선택 영역이 4096자를 넘어 가져오지 않았습니다. 기존 수식을 유지한 채 계산기를 엽니다.',
+                'The selection exceeds 4096 characters and was not imported. Opening the calculator with its existing expression.'
+            ));
+        } else {
+            expression = editor.document.getText(editor.selection).trim() || undefined;
+        }
+    }
+    showHexConverter(context, { expression });
+}
 
 export function buildHexConverterStrings(): Record<string, string> {
     return {
@@ -93,7 +121,30 @@ export function buildHexConverterStrings(): Record<string, string> {
         inspectorTitle: t('값 해석', 'Value inspector'),
         inspectorHint: t('첫 8바이트를 선택한 바이트 순서로 해석합니다.', 'Interprets the first 8 bytes using the selected byte order.'),
         noBytes: t('변환된 바이트가 여기에 표시됩니다.', 'Converted byte values appear here.'),
-        bitwiseTitle: t('비트 계산', 'Bitwise calculator'),
+        bitwiseTitle: t('개발 계산기', 'Developer calculator'),
+        calculatorModeLabel: t('계산 방식', 'Calculation mode'),
+        calculatorInteger: t('주소·정수 계산', 'Address / integer'),
+        calculatorRegister: t('레지스터·비트 계산', 'Register / bits'),
+        calculatorIntegerHint: t(
+            '0x: Hex · 0b: Binary · 접두사 없음: 10진수. 0755 같은 선행 0 숫자는 지원하지 않습니다. + - * / % & | ^ ~ << >>, 괄호, KiB·MiB·GiB, C 정수 접미사를 지원합니다.',
+            '0x: hex · 0b: binary · no prefix: decimal. Leading-zero numbers such as 0755 are not supported. Supports + - * / % & | ^ ~ << >>, parentheses, KiB/MiB/GiB, and C integer suffixes.'
+        ),
+        calculatorIntegerRules: t(
+            '음수와 큰 결과를 잘라내지 않습니다(256비트 한도). /는 0 방향 정수 나눗셈, >>는 부호 유지(-7 >> 1 = -4)입니다. ~x = -x - 1이며 ~0xFF = -0x100입니다. 고정 폭 반전은 레지스터 모드를 사용하세요. alignUp/alignDown(주소, 정렬 단위), rangeSize(시작, 끝 포함)를 지원합니다.',
+            'Keeps negative and large results without wrapping (256-bit limit). / truncates toward zero; >> preserves the sign (-7 >> 1 = -4). ~x = -x - 1, so ~0xFF = -0x100; use register mode for fixed-width inversion. Supports alignUp/alignDown(address, alignment) and rangeSize(start, inclusive end).'
+        ),
+        calculatorLeadingZero: t('선행 0 숫자는 8진수와 혼동될 수 있어 계산하지 않습니다. 같은 값을 10진수 또는 0x/0b 형식으로 입력하세요.', 'Leading-zero numbers are ambiguous with octal. Enter the equivalent value in decimal or with a 0x/0b prefix.'),
+        calculatorSuccess: t('정확한 정수 계산 결과', 'Exact integer result'),
+        calculatorTruncated: t('정수 나눗셈으로 소수 부분을 버렸습니다.', 'Integer division discarded a fractional part.'),
+        calculatorRange: t('숫자 또는 중간 결과가 256비트 한도를 넘었습니다.', 'A number or intermediate result exceeds the 256-bit limit.'),
+        calculatorDivisionByZero: t('0으로 나누거나 나머지를 구할 수 없습니다.', 'Cannot divide or take a remainder by zero.'),
+        calculatorArguments: t('주소는 0 이상, 정렬 단위는 양수여야 합니다. 범위 끝은 시작 이상이어야 합니다.', 'Addresses must be nonnegative and alignment positive. A range end must not precede its start.'),
+        calculatorSize: t('바이트로 해석', 'As a byte size'),
+        calculatorExamples: t('수식 예제', 'Expression examples'),
+        calculatorAddressExample: t('주소 차이', 'Address difference'),
+        calculatorRangeExample: t('범위 크기 (끝 포함)', 'Range size (inclusive)'),
+        calculatorAlignExample: t('주소 정렬', 'Align address'),
+        calculatorMemoryExample: t('메모리 크기', 'Memory size'),
         bitwiseExpressionLabel: t('수식', 'Expression'),
         bitwisePlaceholder: '(0x1234 >> 8) & 0xFF',
         bitwiseWidthLabel: t('비트 폭', 'Bit width'),
@@ -481,6 +532,9 @@ export function buildHexConverterHtml(
         .bitwise-panel summary:focus-visible { outline-offset: -2px; }
         .bitwise-panel summary h2 { display: inline; margin: 0; font: inherit; }
         .bitwise-body { padding: 12px; border-top: 1px solid var(--vscode-panel-border); }
+        [hidden] { display: none !important; }
+        #calculatorExamples { margin-top: 10px; }
+        #calculatorExamples button { padding: 4px 10px; color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
         .bitwise-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
         .bitwise-expression-control { flex: 1 1 300px; min-width: 0; }
         .bitwise-width-control { min-width: 100px; }
@@ -690,6 +744,13 @@ export function buildHexConverterHtml(
         <summary aria-labelledby="bitwiseTitle"><h2 id="bitwiseTitle">${htmlStrings.bitwiseTitle}</h2></summary>
         <div class="bitwise-body">
             <div class="bitwise-controls">
+                <div class="control">
+                    <label for="calculatorMode">${htmlStrings.calculatorModeLabel}</label>
+                    <select id="calculatorMode">
+                        <option value="integer">${htmlStrings.calculatorInteger}</option>
+                        <option value="register" selected>${htmlStrings.calculatorRegister}</option>
+                    </select>
+                </div>
                 <div class="control bitwise-expression-control">
                     <label for="bitwiseExpression">${htmlStrings.bitwiseExpressionLabel}</label>
                     <input id="bitwiseExpression" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="bitwiseHint bitwiseRules bitwiseStatus" placeholder="${htmlStrings.bitwisePlaceholder}">
@@ -705,6 +766,13 @@ export function buildHexConverterHtml(
                 </div>
                 <button id="bitwiseClear" class="clear-button" type="button">${htmlStrings.bitwiseClear}</button>
             </div>
+            <div id="calculatorExamples" class="bitwise-controls" role="group" aria-label="${htmlStrings.calculatorExamples}" hidden>
+                <button id="calculatorAddressExample" type="button">${htmlStrings.calculatorAddressExample}</button>
+                <button id="calculatorRangeExample" type="button">${htmlStrings.calculatorRangeExample}</button>
+                <button id="calculatorAlignExample" type="button">${htmlStrings.calculatorAlignExample}</button>
+                <button id="calculatorMemoryExample" type="button">${htmlStrings.calculatorMemoryExample}</button>
+            </div>
+            <p id="calculatorSize" class="bitwise-hint" hidden></p>
             <p id="bitwiseHint" class="bitwise-hint">${htmlStrings.bitwiseHint}</p>
             <p id="bitwiseRules" class="bitwise-hint">${htmlStrings.bitwiseRules}</p>
             <div id="bitwiseStatus" class="status" role="status" aria-live="polite" aria-atomic="true">${htmlStrings.bitwiseReady}</div>
@@ -758,6 +826,7 @@ export function buildHexConverterHtml(
     const decodeHexConverterBytes = ${decodeHexConverterBytes.toString()};
     const buildHexConverterValueRows = ${buildHexConverterValueRows.toString()};
     const evaluateHexBitwiseExpression = ${evaluateHexBitwiseExpression.toString()};
+    const evaluateDeveloperExpression = ${evaluateDeveloperExpression.toString()};
 
     const textInput = document.getElementById('textInput');
     const hexInput = document.getElementById('hexInput');
@@ -783,6 +852,11 @@ export function buildHexConverterHtml(
     const hexGroupMissing = document.getElementById('hexGroupMissing');
     const savedList = document.getElementById('savedList');
     const savedCount = document.getElementById('savedCount');
+    const calculatorMode = document.getElementById('calculatorMode');
+    const calculatorSize = document.getElementById('calculatorSize');
+    const calculatorExamples = document.getElementById('calculatorExamples');
+    const bitwiseHint = document.getElementById('bitwiseHint');
+    const bitwiseRules = document.getElementById('bitwiseRules');
     const bitwisePanel = document.getElementById('bitwisePanel');
     const bitwiseExpression = document.getElementById('bitwiseExpression');
     const bitwiseWidth = document.getElementById('bitwiseWidth');
@@ -983,6 +1057,7 @@ export function buildHexConverterHtml(
             endian: endian.value,
             bitwise: {
                 expression: bitwiseExpression.value,
+                mode: calculatorMode.value,
                 width: Number(bitwiseWidth.value),
                 open: bitwisePanel.open,
             },
@@ -1002,7 +1077,15 @@ export function buildHexConverterHtml(
         }
         bitwiseCopyRequestId++;
         const width = Number(bitwiseWidth.value);
-        const result = evaluateHexBitwiseExpression(bitwiseExpression.value, width);
+        const integer = calculatorMode.value === 'integer';
+        bitwiseWidth.disabled = integer;
+        calculatorExamples.hidden = !integer;
+        bitwiseHint.textContent = integer ? S.calculatorIntegerHint : S.bitwiseHint;
+        bitwiseRules.textContent = integer ? S.calculatorIntegerRules : S.bitwiseRules;
+        const result = integer ? evaluateDeveloperExpression(bitwiseExpression.value)
+            : evaluateHexBitwiseExpression(bitwiseExpression.value, width);
+        calculatorSize.hidden = !integer || !result.ok;
+        calculatorSize.textContent = integer && result.ok ? S.calculatorSize + ': ' + result.size : '';
         bitwiseResult = result.ok ? result : undefined;
         const hasError = !result.ok && result.reason !== 'empty';
         bitwiseExpression.setAttribute('aria-invalid', String(hasError && !deferError));
@@ -1011,7 +1094,7 @@ export function buildHexConverterHtml(
             bitwiseCopyButtons[format].disabled = !result.ok;
         }
         if (result.ok) {
-            setBitwiseStatus(template(S.bitwiseSuccess, { width }), 'success');
+            setBitwiseStatus(integer ? (result.truncated ? S.calculatorTruncated : S.calculatorSuccess) : template(S.bitwiseSuccess, { width }), 'success');
         } else if (!hasError) {
             setBitwiseStatus(S.bitwiseReady, 'idle');
         } else {
@@ -1019,8 +1102,11 @@ export function buildHexConverterHtml(
                 'invalid-width': S.bitwiseInvalidWidth,
                 'invalid-token': S.bitwiseInvalidToken,
                 'invalid-expression': S.bitwiseInvalidExpression,
-                'out-of-range': template(S.bitwiseOutOfRange, { width }),
-                'invalid-shift': template(S.bitwiseInvalidShift, { max: width - 1 }),
+                'leading-zero': S.calculatorLeadingZero,
+                'out-of-range': integer ? S.calculatorRange : template(S.bitwiseOutOfRange, { width }),
+                'invalid-shift': template(S.bitwiseInvalidShift, { max: integer ? 255 : width - 1 }),
+                'divide-by-zero': S.calculatorDivisionByZero,
+                'invalid-arguments': S.calculatorArguments,
                 'too-complex': S.bitwiseTooComplex,
             };
             const showError = () => {
@@ -1039,6 +1125,20 @@ export function buildHexConverterHtml(
         }
     }
 
+    calculatorMode.addEventListener('change', () => { updateBitwise(); persist(); });
+    for (const [id, expression] of [
+        ['calculatorAddressExample', '0x08004000 - 0x08000000'],
+        ['calculatorRangeExample', 'rangeSize(0x08000000, 0x08003FFF)'],
+        ['calculatorAlignExample', 'alignUp(0x20000103, 4)'],
+        ['calculatorMemoryExample', '64KiB - 0x1800'],
+    ]) {
+        document.getElementById(id).addEventListener('click', () => {
+            bitwiseExpression.value = expression;
+            updateBitwise();
+            persist();
+            bitwiseExpression.focus();
+        });
+    }
     bitwiseExpression.addEventListener('input', () => { updateBitwise(true); persist(); });
     bitwiseExpression.addEventListener('blur', () => {
         if (bitwiseErrorTimer !== undefined) { updateBitwise(); }
@@ -1057,6 +1157,7 @@ export function buildHexConverterHtml(
             vscode.postMessage({
                 command: 'copyBitwiseResult',
                 expression: bitwiseExpression.value,
+                mode: calculatorMode.value,
                 width: Number(bitwiseWidth.value),
                 format,
                 requestId: ++bitwiseCopyRequestId,
@@ -1257,7 +1358,19 @@ export function buildHexConverterHtml(
     window.addEventListener('message', event => {
         const message = event.data;
         if (!message) { return; }
-        if (message.command === 'bitwiseCopyResult') {
+        if (message.command === 'openCalculator') {
+            if (message.expression !== undefined
+                && (typeof message.expression !== 'string' || message.expression.length > 4096)) { return; }
+            calculatorMode.value = 'integer';
+            if (typeof message.expression === 'string' && message.expression.trim()) {
+                bitwiseExpression.value = message.expression.trim();
+            }
+            bitwisePanel.open = true;
+            updateBitwise();
+            persist();
+            bitwisePanel.scrollIntoView({ block: 'start' });
+            bitwiseExpression.focus();
+        } else if (message.command === 'bitwiseCopyResult') {
             if (message.requestId === bitwiseCopyRequestId && bitwiseResult) {
                 setBitwiseStatus(message.ok ? S.bitwiseCopied : S.copyFailed, message.ok ? 'success' : 'error');
             }
@@ -1277,9 +1390,11 @@ export function buildHexConverterHtml(
     hexGroup.value = String(INITIAL_PREFERENCES.hexGroup);
     endian.value = INITIAL_PREFERENCES.endian;
     bitwiseWidth.value = '32';
+    calculatorMode.value = 'register';
     bitwisePanel.open = true;
     const restored = vscode.getState();
     if (restored && restored.bitwise && typeof restored.bitwise === 'object') {
+        if (restored.bitwise.mode === 'integer') { calculatorMode.value = 'integer'; }
         if ([8, 16, 32, 64].includes(restored.bitwise.width)) {
             bitwiseWidth.value = String(restored.bitwise.width);
         }
@@ -1299,6 +1414,7 @@ export function buildHexConverterHtml(
     updateHexPlaceholder();
     updateBitwise();
     if (restored && restored.source === 'hex') { scheduleConversion('hex'); } else { scheduleConversion('text'); }
+    vscode.postMessage({ command: 'ready' });
 </script>
 </body>
 </html>`;
@@ -1310,10 +1426,13 @@ function disposeCurrentMessage(): void {
     disposable?.dispose();
 }
 
-export function showHexConverter(context: vscode.ExtensionContext): void {
+export function showHexConverter(context: vscode.ExtensionContext, calculator?: { expression?: string }): void {
+    if (calculator) { calculatorRequest = calculator; }
     if (currentPanel) {
         try {
+            currentPanel.title = calculator ? t('개발 계산기', 'Developer Calculator') : t('Hex/Text 변환기', 'Hex/Text Converter');
             currentPanel.reveal(vscode.ViewColumn.Active);
+            sendCalculatorRequest();
             return;
         } catch {
             disposeCurrentMessage();
@@ -1323,16 +1442,22 @@ export function showHexConverter(context: vscode.ExtensionContext): void {
 
     const panel = vscode.window.createWebviewPanel(
         'taskhub.hexConverter',
-        t('Hex/Text 변환기', 'Hex/Text Converter'),
+        calculator ? t('개발 계산기', 'Developer Calculator') : t('Hex/Text 변환기', 'Hex/Text Converter'),
         vscode.ViewColumn.Active,
         { enableScripts: true, retainContextWhenHidden: true }
     );
     currentPanel = panel;
-    panel.webview.html = buildHexConverterHtml(panel.webview, readSavedValues(context), readPreferences(context));
+    converterReady = false;
 
     let preferencesUpdate = Promise.resolve();
     currentMessageDisposable = panel.webview.onDidReceiveMessage(async message => {
+        if (currentPanel !== panel) { return; }
         switch (message?.command) {
+            case 'ready': {
+                converterReady = true;
+                sendCalculatorRequest();
+                return;
+            }
             case 'updatePreferences': {
                 if (
                     (message.encoding !== 'utf8' && message.encoding !== 'ascii')
@@ -1376,13 +1501,15 @@ export function showHexConverter(context: vscode.ExtensionContext): void {
                 const requestId: number = message.requestId;
                 if (
                     typeof message.expression !== 'string'
+                    || (message.mode !== undefined && message.mode !== 'integer' && message.mode !== 'register')
                     || typeof message.width !== 'number'
                     || (message.format !== 'hex' && message.format !== 'decimal' && message.format !== 'binary')
                 ) {
                     await panel.webview.postMessage({ command: 'bitwiseCopyResult', ok: false, requestId });
                     return;
                 }
-                const result = evaluateHexBitwiseExpression(message.expression, message.width);
+                const result = message.mode === 'integer' ? evaluateDeveloperExpression(message.expression)
+                    : evaluateHexBitwiseExpression(message.expression, message.width);
                 if (!result.ok) {
                     await panel.webview.postMessage({ command: 'bitwiseCopyResult', ok: false, requestId });
                     return;
@@ -1441,7 +1568,10 @@ export function showHexConverter(context: vscode.ExtensionContext): void {
         if (currentPanel !== panel) { return; }
         disposeCurrentMessage();
         currentPanel = undefined;
+        converterReady = false;
+        calculatorRequest = undefined;
     });
+    panel.webview.html = buildHexConverterHtml(panel.webview, readSavedValues(context), readPreferences(context));
 }
 
 /** 테스트에서 singleton 패널 수명주기를 관찰·정리한다. */
@@ -1452,6 +1582,8 @@ export const hexConverterPanelRegistry = {
         const panel = currentPanel;
         disposeCurrentMessage();
         currentPanel = undefined;
+        converterReady = false;
+        calculatorRequest = undefined;
         panel?.dispose();
     },
 };

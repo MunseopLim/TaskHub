@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.50",
+  "version": "0.8.51",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -786,6 +786,11 @@
         "category": "TaskHub"
       },
       {
+        "command": "taskhub.showDeveloperCalculator",
+        "title": "%cmd.showDeveloperCalculator%",
+        "category": "TaskHub"
+      },
+      {
         "command": "taskhub.openMarkdownPreview",
         "title": "%cmd.openMarkdownPreview%",
         "category": "TaskHub"
@@ -1103,6 +1108,11 @@
           "command": "taskhub.revealSymbolInMemoryMap",
           "when": "editorLangId == c || editorLangId == cpp",
           "group": "1_taskhub"
+        },
+        {
+          "command": "taskhub.showDeveloperCalculator",
+          "when": "editorHasSelection",
+          "group": "1_taskhub@3"
         }
       ],
       "explorer/context": [

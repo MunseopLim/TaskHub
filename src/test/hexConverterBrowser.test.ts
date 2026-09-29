@@ -1,5 +1,8 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
     buildHexConverterHtml,
     buildHexConverterStrings,
@@ -7,6 +10,7 @@ import {
     HexConverterPreferences,
     normalizeHexConverterSavedValues,
     showHexConverter,
+    showDeveloperCalculator,
 } from '../hexConverter';
 
 interface ConverterBrowserAction {
@@ -20,6 +24,7 @@ interface ConverterBrowserAction {
 async function withConverterBrowser(body: (browser: {
     act(actions: ConverterBrowserAction[], responseCommand?: string): Promise<any>;
     reload(preferences?: HexConverterPreferences): Promise<any>;
+    calculateSelection(expression: string): Promise<void>;
     copied: string[];
     persisted: Map<string, unknown>;
     failClipboard: () => void;
@@ -64,7 +69,7 @@ async function withConverterBrowser(body: (browser: {
                 api.postMessage({ command: 'testConverterState', stage, state: {
                     values: Object.fromEntries([
                         'textInput', 'hexInput', 'encoding', 'hexGroup', 'bytesPerRow', 'endian',
-                        'bitwiseExpression', 'bitwiseWidth',
+                        'bitwiseExpression', 'bitwiseWidth', 'calculatorMode',
                     ].map(id => [id, element(id).value])),
                     disabled: Object.fromEntries([
                         'copyText', 'copyHex', 'saveText', 'saveHex', 'copyBitwiseDecimal',
@@ -73,6 +78,8 @@ async function withConverterBrowser(body: (browser: {
                     error: element('status').classList.contains('is-error'),
                     bitwiseStatus: element('bitwiseStatus').textContent,
                     bitwiseDecimal: element('bitwiseDecimal').textContent,
+                    bitwiseHex: element('bitwiseHex').textContent,
+                    calculatorSize: element('calculatorSize').textContent,
                     offsets: element('hexOffsets').textContent,
                     previews: Array.from(document.querySelectorAll('.saved-preview')).map(item => item.textContent),
                     savedMarkupCount: document.querySelectorAll('#savedList img, #savedList script').length,
@@ -169,6 +176,26 @@ async function withConverterBrowser(body: (browser: {
                 ), stage);
                 return result;
             },
+            async calculateSelection(expression) {
+                const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-calculator-'));
+                const file = path.join(directory, 'selected.c');
+                try {
+                    fs.writeFileSync(file, 'ignored before\n' + expression + '\nignored after');
+                    const document = await vscode.workspace.openTextDocument(file);
+                    const editor = await vscode.window.showTextDocument(document);
+                    editor.selection = new vscode.Selection(document.positionAt(15), document.positionAt(15 + expression.length));
+                    showDeveloperCalculator(context);
+                } finally {
+                    for (const group of vscode.window.tabGroups.all) {
+                        for (const tab of group.tabs) {
+                            if (tab.input instanceof vscode.TabInputText && tab.input.uri.fsPath === file) {
+                                await vscode.window.tabGroups.close(tab);
+                            }
+                        }
+                    }
+                    await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+                }
+            },
             copied,
             persisted,
             failClipboard: () => { clipboardFails = true; },
@@ -187,6 +214,156 @@ async function withConverterBrowser(body: (browser: {
 }
 
 suite('Hex/Text 변환기 실제 브라우저', () => {
+    test('닫힌 패널에서 선택 영역 명령을 처음 실행하면 ready 뒤 수식·결과·포커스가 전달된다', async function () {
+        this.timeout(45000);
+        const extension = vscode.extensions.getExtension('Munseop.taskhub');
+        assert.ok(extension, 'TaskHub 확장이 설치되어 있어야 한다');
+        await extension.activate();
+        for (const group of vscode.window.tabGroups.all) {
+            for (const tab of group.tabs) {
+                if (tab.input instanceof vscode.TabInputWebview && tab.input.viewType.endsWith('taskhub.hexConverter')) {
+                    await vscode.window.tabGroups.close(tab);
+                }
+            }
+        }
+        const originalCreate = vscode.window.createWebviewPanel;
+        const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-calculator-cold-'));
+        const file = path.join(directory, 'selected.c');
+        const expression = '  0x08004000 - 0x08000000  ';
+        const prefix = 'ignored before\n';
+        const source = prefix + expression + '\nignored after';
+        const messages: string[] = [];
+        let panel: vscode.WebviewPanel | undefined;
+        let subscription: vscode.Disposable | undefined;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let resolveState: (state: any) => void;
+        let rejectState: (error: Error) => void;
+        const stateReceived = new Promise<any>((resolve, reject) => {
+            resolveState = resolve;
+            rejectState = reject;
+        });
+        try {
+            fs.writeFileSync(file, source);
+            const document = await vscode.workspace.openTextDocument(file);
+            const editor = await vscode.window.showTextDocument(document);
+            editor.selection = new vscode.Selection(document.positionAt(prefix.length), document.positionAt(prefix.length + expression.length));
+            (vscode.window as any).createWebviewPanel = (...args: Parameters<typeof originalCreate>) => {
+                if (args[0] !== 'taskhub.hexConverter') { return originalCreate(...args); }
+                assert.strictEqual(panel, undefined, '처음 실행은 패널 하나만 만들어야 한다');
+                panel = originalCreate(...args);
+                const webview = panel.webview;
+                subscription = webview.onDidReceiveMessage(message => {
+                    if (message?.command === 'ready') { messages.push('ready'); }
+                    if (message?.command === 'testColdCalculatorState') { resolveState(message.state); }
+                    if (message?.command === 'testColdCalculatorError') { rejectState(new Error(String(message.error))); }
+                });
+                const originalPost = webview.postMessage.bind(webview);
+                webview.postMessage = message => {
+                    if (message?.command === 'openCalculator') { messages.push('openCalculator'); }
+                    return originalPost(message);
+                };
+                let owner: object | null = webview;
+                let descriptor: PropertyDescriptor | undefined;
+                while (owner && !descriptor) {
+                    descriptor = Object.getOwnPropertyDescriptor(owner, 'html');
+                    owner = Object.getPrototypeOf(owner);
+                }
+                assert.ok(descriptor?.get && descriptor.set, '실제 웹뷰 HTML 접근자가 있어야 한다');
+                // 첫 HTML 할당 전에 관찰자를 붙인다. 재로드나 가짜 ready를 보내지 않는다.
+                Object.defineProperty(webview, 'html', {
+                    configurable: true,
+                    get: () => descriptor.get!.call(webview),
+                    set: (html: string) => {
+                        const scriptTag = html.match(/<script nonce="[^"]+">/)?.[0];
+                        assert.ok(scriptTag, '제품 CSP nonce가 있는 스크립트');
+                        descriptor.set!.call(webview, html.replace(scriptTag, `${scriptTag}
+                        (() => {
+                            const api = acquireVsCodeApi();
+                            window.acquireVsCodeApi = () => api;
+                            const fail = error => api.postMessage({ command: 'testColdCalculatorError', error: String(error) });
+                            window.addEventListener('error', event => fail(event.message));
+                            window.addEventListener('unhandledrejection', event => fail(event.reason));
+                            window.addEventListener('message', event => {
+                                if (event.data?.command !== 'openCalculator') { return; }
+                                setTimeout(() => api.postMessage({ command: 'testColdCalculatorState', state: {
+                                    mode: document.getElementById('calculatorMode').value,
+                                    expression: document.getElementById('bitwiseExpression').value,
+                                    hex: document.getElementById('bitwiseHex').textContent,
+                                    decimal: document.getElementById('bitwiseDecimal').textContent,
+                                    focused: document.activeElement?.id,
+                                    expanded: document.getElementById('bitwisePanel').open,
+                                } }), 0);
+                            });
+                        })();
+                        </script>${scriptTag}`));
+                    },
+                });
+                return panel;
+            };
+            timer = setTimeout(() => rejectState(new Error('처음 연 계산기가 ready 뒤 수식을 받지 못했다')), 15000);
+            const [, state] = await Promise.all([
+                vscode.commands.executeCommand('taskhub.showDeveloperCalculator'),
+                stateReceived,
+            ]);
+            assert.ok(panel, '등록된 명령이 실제 새 패널을 만들어야 한다');
+            assert.deepStrictEqual(messages, ['ready', 'openCalculator']);
+            assert.deepStrictEqual(state, {
+                mode: 'integer', expression: expression.trim(), hex: '0x4000', decimal: '16384',
+                focused: 'bitwiseExpression', expanded: true,
+            });
+            assert.strictEqual(document.getText(), source, '계산은 선택한 원본을 변경하지 않는다');
+        } finally {
+            if (timer) { clearTimeout(timer); }
+            subscription?.dispose();
+            panel?.dispose();
+            (vscode.window as any).createWebviewPanel = originalCreate;
+            for (const group of vscode.window.tabGroups.all) {
+                for (const tab of group.tabs) {
+                    if (tab.input instanceof vscode.TabInputText && tab.input.uri.fsPath === file) {
+                        await vscode.window.tabGroups.close(tab);
+                    }
+                }
+            }
+            await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        }
+    });
+
+    test('선택한 주소 수식을 실제 웹뷰로 전달하고 정확한 복사·복원·오류를 검증한다', async () => {
+        await withConverterBrowser(async browser => {
+            await browser.act([{ selector: '#textInput', value: 'Keep conversion', event: 'input' }]);
+            await browser.calculateSelection('0xFFFFFFFFFFFFFFFF - 0xFFFFFFFFFFFFFF00');
+            let state = await browser.act([]);
+            assert.strictEqual(state.values.calculatorMode, 'integer');
+            assert.strictEqual(state.values.bitwiseExpression, '0xFFFFFFFFFFFFFFFF - 0xFFFFFFFFFFFFFF00');
+            assert.strictEqual(state.bitwiseHex, '0xFF');
+            assert.strictEqual(state.bitwiseDecimal, '255');
+            assert.strictEqual(state.values.textInput, 'Keep conversion');
+            state = await browser.act([{ selector: '#copyBitwiseDecimal', click: true }], 'bitwiseCopyResult');
+            assert.strictEqual(browser.copied.at(-1), '255');
+            state = await browser.reload();
+            assert.strictEqual(state.values.calculatorMode, 'integer');
+            assert.strictEqual(state.bitwiseDecimal, '255');
+            state = await browser.act([{ selector: '#calculatorRangeExample', click: true }]);
+            assert.strictEqual(state.bitwiseDecimal, '16384');
+            assert.ok(state.calculatorSize.endsWith('16 KiB'));
+            state = await browser.act([{ selector: '#bitwiseExpression', value: '0x10 - 0x20', event: 'input' }]);
+            assert.strictEqual(state.bitwiseHex, '-0x10');
+            state = await browser.act([{ selector: '#copyBitwiseDecimal', click: true }], 'bitwiseCopyResult');
+            assert.strictEqual(browser.copied.at(-1), '-16');
+            state = await browser.act([{ selector: '#bitwiseExpression', value: '1 / 0', event: 'input' }]);
+            assert.strictEqual(state.bitwiseDecimal, '—');
+            assert.strictEqual(state.disabled.copyBitwiseDecimal, true);
+            assert.strictEqual(state.calculatorSize, '');
+            state = await browser.act([
+                { selector: '#calculatorMode', value: 'register', event: 'change' },
+                { selector: '#bitwiseWidth', value: '8', event: 'change' },
+                { selector: '#bitwiseExpression', value: '~0', event: 'input' },
+            ]);
+            assert.strictEqual(state.bitwiseDecimal, '255');
+            assert.strictEqual(state.values.textInput, 'Keep conversion');
+        });
+    });
+
     test('IT-221: 실제 입력·64비트 복사·실패 응답과 탭 재로드가 변환값을 보존한다', async function () {
         this.timeout(45000);
         const strings = buildHexConverterStrings();

@@ -140,5 +140,6 @@
   "setting.jenkinsTrackingTimeout": "Time limit in hours for new observations. Defaults to 2 hours and can be extended to 168. Expiry ends observation as a verification failure and retains known results. It does not retry automatically or cancel Jenkins builds. Changing this setting never resumes ended observations.",
   "cmd.jenkins.trackSha": "Jenkins: Check SHA Results / Check Again…",
   "cmd.jenkins.clearResults": "Jenkins: Clear Results",
-  "setting.jenkinsPollFixed": "Checks run immediately, every 10 minutes for the first hour, then every 20 minutes."
+  "setting.jenkinsPollFixed": "Checks run immediately, every 10 minutes for the first hour, then every 20 minutes.",
+  "cmd.showDeveloperCalculator": "Developer Calculator (Calculate Selection)"
 }
