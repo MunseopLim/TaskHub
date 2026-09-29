@@ -285,7 +285,7 @@ const int x = 5;
     suite('Safe Integer Evaluation', () => {
         test('keeps integer literal formats, suffixes, unary signs, and ordinary masks', () => {
             const cases: Array<[string, number]> = [
-                ['0xFF', 255], ['0B1010UL', 10], ['255U', 255], ['00010 + 0', 10],
+                ['0xFF', 255], ['0B1010UL', 10], ['255U', 255], ['00010 + 0', 8],
                 ['+0xFFuLL', 255], ['-(0b1010 + 2L)', -12], ['1 + +2', 3],
                 ['(1U << 0) | (1UL << 5) | 0x40ULL', 0x61],
                 ['9007199254740991', Number.MAX_SAFE_INTEGER],
@@ -295,6 +295,31 @@ const int x = 5;
             ];
             for (const [expression, expected] of cases) {
                 assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), expected, expression);
+            }
+        });
+
+        test('evaluates C octal literals, suffixes, and intermediate expressions exactly', () => {
+            for (const [expression, expected] of [
+                ['0755', 493], ['0644', 420], ['0', 0], ['00U', 0],
+                ['0755U', 493], ['0644L', 420], ['0755ULL', 493], ['0644llu', 420],
+                ['0755 - 0644', 73], ['(0644U | 0111U) & 0777U', 493],
+                ['010ULL << 03', 64], ['-010L + 02', -6],
+                ['037777777777 | 0', 4294967295],
+                ['040000000000ULL | 01ULL', 4294967297],
+            ] as const) {
+                assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), expected, expression);
+                assert.strictEqual(MacroExpander.evaluateToNumber(expression), expected, expression);
+            }
+        });
+
+        test('rejects invalid C octal and preserves conservative shift and overflow limits', () => {
+            for (const expression of [
+                '08', '09', '0789', '08U', '09L', '08ULL', '1 + 09', '0755 | 08U',
+                '037777777777 + 1', '037777777777U + 01U',
+                '01 << 037', '01UL << 050', '1 << 31', '1UL << 40',
+            ]) {
+                assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), null, expression);
+                assert.strictEqual(MacroExpander.evaluateToNumber(expression), null, expression);
             }
         });
 

@@ -335,6 +335,107 @@ suite('JSON Editor 실제 브라우저 편집과 저장', function () {
         } finally { release(); }
     });
 
+    test('외부 변경 안내 중 새 입력 후 다시 읽기를 선택해도 편집을 최신 파일 기준으로 복구한다', async () => {
+        const originalWatcher = vscode.workspace.createFileSystemWatcher;
+        const originalWarning = vscode.window.showWarningMessage;
+        let change!: (uri: vscode.Uri) => Promise<void>;
+        const noEvent = () => new vscode.Disposable(() => {});
+        vscode.workspace.createFileSystemWatcher = (() => ({
+            onDidChange: (callback: typeof change) => { change = callback; return noEvent(); },
+            onDidCreate: noEvent, onDidDelete: noEvent, dispose() {},
+        })) as unknown as typeof originalWatcher;
+        let answer!: () => void;
+        let prompted!: () => void;
+        const promptStarted = new Promise<void>(resolve => { prompted = resolve; });
+        const warnings: string[] = [];
+        vscode.window.showWarningMessage = ((_message: string, ...rest: unknown[]) => {
+            warnings.push(_message);
+            if (warnings.length > 1) { return Promise.resolve(rest.find(item => typeof item === 'string')); }
+            prompted();
+            return new Promise(resolve => { answer = () => resolve(rest.find(item => typeof item === 'string')); });
+        }) as typeof originalWarning;
+        try {
+            await withJsonBrowser({ rows: [{ value: 'initial' }] }, async browser => {
+                await browser.operate([{ kind: 'edit', col: 'value', value: 'before prompt' }]);
+                fs.writeFileSync(browser.filePath, JSON.stringify({ rows: [{ value: 'first external' }] }));
+                const pending = change(vscode.Uri.file(browser.filePath));
+                await promptStarted;
+                await browser.operate([{ kind: 'edit', col: 'value', value: 'latest draft during prompt' }]);
+                const latestDisk = JSON.stringify({ rows: [{ value: 'another external version while prompt is open' }] });
+                fs.writeFileSync(browser.filePath, latestDisk);
+                answer();
+                await pending;
+                assert.strictEqual((await browser.operate([])).cells[0].input, 'latest draft during prompt');
+                assert.strictEqual(browser.messages.some(message => message.command === 'host:loadData'), false);
+                assert.strictEqual(fs.readFileSync(browser.filePath, 'utf8'), latestDisk);
+                const recovered = await browser.reopen();
+                assert.strictEqual(recovered.cells[0].label, 'latest draft during prompt');
+                assert.strictEqual(recovered.dirty, true);
+                assert.ok(warnings.slice(1).some(message => /편집 상태가 바뀌|editor state changed/.test(message)),
+                    '편집 상태 변경 때문에 다시 읽기를 취소했다는 이유를 알려야 한다');
+            });
+        } finally {
+            answer?.();
+            vscode.workspace.createFileSystemWatcher = originalWatcher;
+            vscode.window.showWarningMessage = originalWarning;
+        }
+    });
+
+    test('외부 변경 안내 중 추가 입력 없이 저장한 뒤 다시 읽기를 선택해도 저장 상태를 유지하고 상태 변경으로 안내한다', async () => {
+        const originalWatcher = vscode.workspace.createFileSystemWatcher;
+        const originalWarning = vscode.window.showWarningMessage;
+        let change!: (uri: vscode.Uri) => Promise<void>;
+        const noEvent = () => new vscode.Disposable(() => {});
+        vscode.workspace.createFileSystemWatcher = (() => ({
+            onDidChange: (callback: typeof change) => { change = callback; return noEvent(); },
+            onDidCreate: noEvent, onDidDelete: noEvent, dispose() {},
+        })) as unknown as typeof originalWatcher;
+        let answer!: () => void;
+        let prompted!: () => void;
+        const promptStarted = new Promise<void>(resolve => { prompted = resolve; });
+        const warnings: string[] = [];
+        vscode.window.showWarningMessage = ((message: string, ...rest: unknown[]) => {
+            warnings.push(message);
+            if (warnings.length > 1) { return Promise.resolve(rest.find(item => typeof item === 'string')); }
+            prompted();
+            return new Promise(resolve => { answer = () => resolve(rest.find(item => typeof item === 'string')); });
+        }) as typeof originalWarning;
+        try {
+            await withJsonBrowser({ rows: [{ value: 'initial' }] }, async browser => {
+                await browser.operate([{ kind: 'edit', col: 'value', value: 'draft before prompt' }]);
+                fs.writeFileSync(browser.filePath, JSON.stringify({ rows: [{ value: 'external version' }] }));
+                const pending = change(vscode.Uri.file(browser.filePath));
+                await promptStarted;
+                const after = browser.messages.length;
+                const promptRevision = Math.max(...browser.messages.map(message => Number(message.revision) || 0));
+                await browser.operate([{ kind: 'click', id: 'btnSave' }]);
+                const saved = await browser.waitFor('saveAck', after);
+                assert.strictEqual(saved.dirty, false);
+                assert.ok(saved.revision > promptRevision, '새 입력 없이 저장 처리만으로 revision이 바뀌어야 한다');
+                assert.ok(browser.messages.slice(after).some(message => message.command === 'snapshot'));
+                assert.ok(!browser.messages.slice(after).some(message => message.command === 'editRevision'),
+                    '외부 변경 안내가 열린 뒤 추가 input 이벤트는 없어야 한다');
+                answer();
+                await pending;
+                const result = await browser.operate([]);
+                assert.strictEqual(result.cells[0].label, 'draft before prompt');
+                assert.strictEqual(result.dirty, false);
+                assert.strictEqual(browser.messages.some(message => message.command === 'host:loadData'), false);
+                assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), { rows: [{ value: 'draft before prompt' }] });
+                const reopened = await browser.reopen();
+                assert.strictEqual(reopened.cells[0].label, 'draft before prompt');
+                assert.strictEqual(reopened.dirty, false);
+                const notice = warnings.find(message => /편집 상태가 바뀌|editor state changed/.test(message));
+                assert.ok(notice, '입력 대신 저장으로 바뀐 편집 상태도 사실에 맞게 안내해야 한다');
+                assert.doesNotMatch(notice, /새 입력|new edits/);
+            });
+        } finally {
+            answer?.();
+            vscode.workspace.createFileSystemWatcher = originalWatcher;
+            vscode.window.showWarningMessage = originalWarning;
+        }
+    });
+
     test('연속 외부 다시 읽기의 최신 제안이 거절되어도 새 편집을 최신 파일 기준으로 복구한다', async () => {
         const originalWatcher = vscode.workspace.createFileSystemWatcher;
         const originalWarning = vscode.window.showWarningMessage;

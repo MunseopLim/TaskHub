@@ -418,12 +418,17 @@ export class MacroExpander {
                 const literal = token.replace(/[ULul]+$/, '');
                 const suffix = token.slice(literal.length).toLowerCase();
                 if (!/^(?:u(?:l|ll)?|(?:l|ll)u?)?$/.test(suffix)) { return null; }
-                const value = BigInt(literal);
+                // C/C++의 선행 0 정수는 8진수다. BigInt('0755')는 10진수로
+                // 읽으므로 명시적으로 변환하고, 08/09는 부분 값도 쓰지 않는다.
+                const octal = /^0\d/.test(literal);
+                if (octal && !/^0[0-7]+$/.test(literal)) { return null; }
+                const value = BigInt(octal ? '0o' + literal : literal);
+                const nonDecimal = octal || /^0[xXbB]/.test(literal);
                 const bits = suffix.includes('ll') || value > 0xffffffffn
-                    || (!/^0[xXbB]/.test(literal) && value > 0x7fffffffn && !suffix.includes('u'))
+                    || (!nonDecimal && value > 0x7fffffffn && !suffix.includes('u'))
                     ? 64 : 32;
                 const unsigned = suffix.includes('u')
-                    || (bits === 32 && /^0[xXbB]/.test(literal) && value > 0x7fffffffn);
+                    || (bits === 32 && nonDecimal && value > 0x7fffffffn);
                 const parsed: IntegerValue = { value, unsigned, bits };
                 if (!fits(parsed)) { return null; }
                 values.push(parsed);

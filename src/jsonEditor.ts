@@ -671,7 +671,10 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     const fileName = filePath.split(/[\\/]/).pop() || 'JSON Editor';
     const openAttempt = ++jsonEditorOpenCounter;
     const previousSession = currentSessionId;
-    const isCurrentOpen = () => openAttempt === jsonEditorOpenCounter && currentSessionId === previousSession;
+    // 기존 패널을 닫는 것은 대기 중인 최신 열기 요청을 취소하지 않는다.
+    // 새 열기 요청이나 다른 활성 세션이 생긴 경우에만 이전 요청을 무효화한다.
+    const isCurrentOpen = () => openAttempt === jsonEditorOpenCounter
+        && (currentSessionId === previousSession || currentSessionId === NO_SESSION);
     let approvedRevision = currentEditRevision;
 
     if (currentPanel && currentFilePath) {
@@ -1485,16 +1488,23 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                 reloadLabel,
                 keepLabel
             );
-            // **모달이 떠 있는 동안 다른 파일이 열렸을 수 있다.** 그 뒤로
+            // **비모달 안내가 떠 있는 동안 다른 파일이 열렸을 수 있다.** 그 뒤로
             // `currentIsDirty` · `currentLastReceivedSnapshot` · snapshot timer 는
             // 모두 **새 파일의 것**이므로, 옛 세션의 이 콜백이 계속 진행하면
             // 새 파일의 미저장 편집을 clean 으로 바꾸거나 recovery 를 지운다.
             // 메시지의 session 필터는 발신만 막을 뿐 이 전역 상태 변경을 막지
             // 못한다.
             if (!isCurrentSession()) { return; }
-            if (choice !== reloadLabel) {
-                // 사용자가 Keep을 선택했다. 디스크는 이제 새 외부 버전이지만
-                // 사용자는 자기 편집을 유지하기로 했으므로 baselineMtime을 외부
+            const keepNewEdits = choice === reloadLabel && currentEditRevision !== requestedRevision;
+            if (choice !== reloadLabel || keepNewEdits) {
+                if (keepNewEdits) {
+                    vscode.window.showWarningMessage(t(
+                        `${fileName}: 외부 변경 안내가 열린 동안 편집 상태가 바뀌어 다시 읽기를 취소하고 현재 편집을 유지했습니다.`,
+                        `${fileName}: reload was cancelled because the editor state changed while the external-change prompt was open. Your edits were kept.`
+                    ));
+                }
+                // 사용자가 Keep을 선택했거나 안내 뒤 편집 상태가 바뀌었다. 디스크는 새 외부 버전이지만
+                // 현재 편집을 유지하므로 baselineMtime을 외부
                 // 변경 후의 값으로 갱신해 둬야, 이후 close → reopen 시
                 // shouldOfferRecovery가 stale로 폐기되지 않는다. 또한 webview가
                 // 마지막으로 보낸 스냅샷이 있다면 새 mtime으로 즉시 recovery
@@ -1571,7 +1581,6 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                 return;
             }
         }
-        if (currentEditRevision !== requestedRevision) { return; }
         // open 경로의 size guard 와 동일하게, 외부 변경으로 파일이 10MB 초과로
         // 바뀐 경우 readFileSync 가 메모리를 크게 잡아먹지 않도록 사이즈 체크.
         // 사이즈 초과면 자동 reload 를 포기하되, parse-fail 과 동일한 정책으로

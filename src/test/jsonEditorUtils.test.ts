@@ -1760,7 +1760,7 @@ suite('JsonEditorUtils Test Suite', () => {
             // data 의 root shape 를 가리키므로 그대로 둬야 한다. 디스크 shape 으로
             // 덮어쓰면 다음 save 에서 unwrapIfRootArray 가 잘못 동작해, array 형태
             // 의 user data 가 디스크에 `{"_rootArray":[...]}` object 로 기록된다.
-            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\)\s*\{([\s\S]*?)\n\s{12}\}/);
+            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\|\|\s*keepNewEdits\s*\)\s*\{([\s\S]*?)\n\s{12}\}/);
             assert.ok(keepBranch, 'could not locate Keep branch body');
             const body = keepBranch![1];
             assert.ok(
@@ -1797,7 +1797,7 @@ suite('JsonEditorUtils Test Suite', () => {
             // 결과와 절대 같지 않음) 로 baseline 을 잡게 한다. (이전 버전은
             // `data: {}` 객체 sentinel 을 썼지만 사용자가 실제 빈 객체를 편집
             // 중일 때 충돌했음 — 그 패턴은 다시 들어오면 안 된다.)
-            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\)\s*\{([\s\S]*?)\n\s{12}\}/);
+            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\|\|\s*keepNewEdits\s*\)\s*\{([\s\S]*?)\n\s{12}\}/);
             assert.ok(keepBranch, 'could not locate Keep branch body');
             const body = keepBranch![1];
             assert.ok(
@@ -1906,9 +1906,9 @@ suite('JsonEditorUtils Test Suite', () => {
             // 보내야 한다.
             const reloadLabelMatch = editorSource.match(/const\s+reloadLabel\s*=\s*t\(/);
             assert.ok(reloadLabelMatch, 'could not locate Keep/Reload modal in watcher');
-            // Keep 분기 (choice !== reloadLabel) 안에 fs.readFileSync(filePath)
+            // Keep 또는 새 입력 보호 분기 안에 fs.readFileSync(filePath)
             // 와 setSavedBaseline postMessage 가 모두 있어야 한다.
-            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\)\s*\{([\s\S]*?)\n\s{12}\}/);
+            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\|\|\s*keepNewEdits\s*\)\s*\{([\s\S]*?)\n\s{12}\}/);
             assert.ok(keepBranch, 'could not locate Keep branch body');
             const body = keepBranch![1];
             assert.ok(
@@ -2293,7 +2293,7 @@ suite('JsonEditorUtils Test Suite', () => {
             // 회귀 가드: P2-3. 사용자가 Keep을 골랐을 때 baselineMtimeMs가
             // 새 외부 mtime으로 갱신되지 않으면 reopen 시 shouldOfferRecovery가
             // stale로 폐기해 사용자의 명시적 Keep이 무시된다.
-            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\)\s*\{([\s\S]*?)return;\s*\n\s*\}\s*\n\s*\}/);
+            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\|\|\s*keepNewEdits\s*\)\s*\{([\s\S]*?)return;\s*\n\s*\}\s*\n\s*\}/);
             assert.ok(keepBranch, 'could not locate the external-change Keep branch');
             const body = keepBranch![1];
             assert.ok(/baselineMtimeMs\s*=\s*postPromptStat\.mtimeMs/.test(body),
@@ -2309,7 +2309,7 @@ suite('JsonEditorUtils Test Suite', () => {
             // 콜백 시작에서 잡은 changedStat.mtime 은 stale 이다. 응답 직후 fresh
             // stat 을 다시 잡지 않으면 baseline/recovery 가 옛 mtime 으로 stamp 돼
             // reopen 에서 stale 로 폐기, 사용자의 명시적 Keep 이 무시된다.
-            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\)\s*\{([\s\S]*?)return;\s*\n\s*\}\s*\n\s*\}/);
+            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\|\|\s*keepNewEdits\s*\)\s*\{([\s\S]*?)return;\s*\n\s*\}\s*\n\s*\}/);
             assert.ok(keepBranch, 'could not locate the external-change Keep branch');
             const body = keepBranch![1];
             // showWarningMessage(prompt) 의 await 이 끝난 뒤(=Keep 분기 진입 후)에

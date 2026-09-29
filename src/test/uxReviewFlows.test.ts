@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { invalidateActionsCache, promptWorkspaceLinkEdit, runActionWithInputProfile, showActionRunReport } from '../extension';
+import { addLinkEntry, invalidateActionsCache, promptWorkspaceLinkEdit, runActionWithInputProfile, showActionRunReport } from '../extension';
 import { InputProfileStore } from '../inputProfiles';
 import { t } from '../i18n';
 import { HistoryItem, HistoryProvider } from '../providers/historyProvider';
@@ -72,6 +72,73 @@ suite('UX review flows', function () {
             return JSON.parse(fs.readFileSync(file, 'utf8'));
         }
         const base = { title: 'Docs', link: 'https://example.com' };
+        for (const metadata of [{ group: 'Firmware' }, { tags: ['manual'] }, { group: 'Firmware', tags: ['manual'] }]) {
+            test(`adding rejects a title/URL duplicate regardless of metadata: ${JSON.stringify(metadata)}`, () => {
+                const first = { ...base, ...metadata };
+                const entries = [first];
+                const added = addLinkEntry(entries, base);
+                assert.strictEqual(added.added, false);
+                assert.strictEqual(added.entries, entries);
+                assert.deepStrictEqual(entries, [first]);
+            });
+            test(`the add command preserves an existing grouped/tagged link: ${JSON.stringify(metadata)}`, async () => {
+                const extension = vscode.extensions.getExtension('Munseop.taskhub');
+                assert.ok(extension);
+                await extension.activate();
+                const folders = vscode.workspace.workspaceFolders;
+                assert.strictEqual(folders?.length, 1, 'test workspace must have one folder');
+                const linksPath = path.join(folders![0].uri.fsPath, '.vscode', 'links.json');
+                const directoryExisted = fs.existsSync(path.dirname(linksPath));
+                const previous = fs.existsSync(linksPath) ? fs.readFileSync(linksPath) : undefined;
+                const originalCreate = vscode.window.createInputBox;
+                const originalClipboard = Object.getOwnPropertyDescriptor(vscode.env, 'clipboard');
+                assert.ok(originalClipboard);
+                const accept = new vscode.EventEmitter<void>();
+                const noopEvent = () => new vscode.Disposable(() => {});
+                const box = {
+                    value: '',
+                    onDidChangeValue: noopEvent,
+                    onDidAccept: accept.event,
+                    onDidHide: noopEvent,
+                    show() { this.value = base.title; accept.fire(); },
+                    dispose() { accept.dispose(); },
+                };
+                try {
+                    fs.mkdirSync(path.dirname(linksPath), { recursive: true });
+                    const originalText = JSON.stringify([{ ...base, ...metadata, extra: { preserved: true } }], null, 4) + '\n';
+                    fs.writeFileSync(linksPath, originalText);
+                    Object.defineProperty(vscode.env, 'clipboard', {
+                        configurable: true, value: { readText: async () => '' },
+                    });
+                    vscode.window.showInputBox = (async () => base.link) as typeof original.input;
+                    vscode.window.createInputBox = () => box as unknown as vscode.InputBox;
+                    await vscode.commands.executeCommand('taskhub.addLink');
+                    assert.strictEqual(fs.readFileSync(linksPath, 'utf8'), originalText,
+                        'duplicate add must preserve file bytes, metadata, and unknown fields');
+                    assert.ok(messages.includes(t('이 링크는 links.json에 이미 존재합니다.', 'This link already exists in links.json.')));
+                    assert.deepStrictEqual(errors, []);
+                } finally {
+                    vscode.window.createInputBox = originalCreate;
+                    Object.defineProperty(vscode.env, 'clipboard', originalClipboard);
+                    accept.dispose();
+                    if (previous !== undefined) { fs.writeFileSync(linksPath, previous); }
+                    else { fs.rmSync(linksPath, { force: true }); }
+                    if (!directoryExisted) { fs.rmdirSync(path.dirname(linksPath)); }
+                }
+            });
+        }
+        test('adding the same complete identity again keeps the original rows', () => {
+            const entry = { ...base, group: 'Firmware', tags: ['manual'] };
+            const entries = [entry];
+            const duplicate = addLinkEntry(entries, { ...entry, title: '  Docs  ', link: '  https://example.com  ' });
+            assert.strictEqual(duplicate.added, false);
+            assert.strictEqual(duplicate.entries, entries);
+            assert.deepStrictEqual(entries, [entry]);
+        });
+        test('adding treats omitted and empty tags as the same identity', () => {
+            const entries = [base];
+            assert.strictEqual(addLinkEntry(entries, { ...base, tags: [] }).added, false);
+        });
         test('editing the second group keeps the first row and unknown fields intact', async () => {
             const first = { ...base, group: 'Firmware', extra: { keep: true } };
             const second = { ...base, group: 'Bootloader', extra: 42 };

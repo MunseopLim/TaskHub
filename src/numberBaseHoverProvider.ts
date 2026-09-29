@@ -478,11 +478,21 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return undefined;
         }
 
+        // 소수점·지수·접미사도 하나의 숫자 토큰이다. 정수 부분을 변환하거나
+        // 지수를 식별자로 오인해 LSP로 내려가면 다른 값을 복사하게 된다.
+        if (this.isFloatingLiteralAtPosition(lineText, charPosition)) { return undefined; }
+
         // M12: 숫자 리터럴 검사(정규식 한 줄, 비용 ~0)를 최우선으로. 숫자
         // 위에서는 식별자 기반 경로(비트필드 LSP 왕복 최대 3초, 매크로 테이블
         // 전체 파싱, struct 크기)가 매치될 수 없으므로 전부 건너뛴다.
         const result = this.findNumberAtPosition(lineText, charPosition);
         if (result) {
+            // C/C++의 잘못된 8진수는 레지스터/비트 연산/LSP 경로에서도
+            // 유효한 앞부분이나 10진수로 되살리지 않는다.
+            if (/^0[\d']+$/.test(result.text) && /[89]/.test(result.text)) {
+                return new vscode.Hover(this.generateHoverContent(NaN, result.text),
+                    new vscode.Range(position.line, result.start, position.line, result.end));
+            }
             // 레지스터 할당(REG = 0x123;)의 디코딩 호버가 일반 진법 변환보다 우선
             const registerHover = await this.tryRegisterValueDecoding(document, position, request);
             if (registerHover) {
@@ -614,7 +624,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                         const text = typeof content === 'string' ? content : content.value;
                         const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                         for (const match of text.matchAll(new RegExp(`\\b${escapedWord}\\s*=\\s*(-?(?:0x[0-9a-fA-F]+|0b[01]+|\\d+))\\b`, 'g'))) {
-                            const parsed = this.parseNumber(match[1]);
+                            const parsed = this.parseIntegerMatch(text, match);
                             if (parsed !== null) { values.add(parsed); }
                         }
                     }
@@ -838,14 +848,14 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             const specificAssignPattern = new RegExp(`\\b${escapedName}\\s*=\\s*([0-9a-fA-FxXbB']+)\\s*[;,]`);
             const specificMatch = text.match(specificAssignPattern);
             if (specificMatch) {
-                return this.parseNumber(specificMatch[1]);
+                return this.parseIntegerMatch(text, specificMatch);
             }
 
             // Pattern for #define with specific symbol: #define symbolName VALUE
             const specificDefinePattern = new RegExp(`#define\\s+${escapedName}\\s+([0-9a-fA-FxXbB']+)`);
             const specificDefineMatch = text.match(specificDefinePattern);
             if (specificDefineMatch) {
-                return this.parseNumber(specificDefineMatch[1]);
+                return this.parseIntegerMatch(text, specificDefineMatch);
             }
 
             return null;
@@ -855,17 +865,41 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         const assignPattern = /=\s*([0-9a-fA-FxXbB']+)\s*[;,]/;
         const assignMatch = text.match(assignPattern);
         if (assignMatch) {
-            return this.parseNumber(assignMatch[1]);
+            return this.parseIntegerMatch(text, assignMatch);
         }
 
         // Pattern for #define: #define NAME VALUE
         const definePattern = /#define\s+\w+\s+([0-9a-fA-FxXbB']+)/;
         const defineMatch = text.match(definePattern);
         if (defineMatch) {
-            return this.parseNumber(defineMatch[1]);
+            return this.parseIntegerMatch(text, defineMatch);
         }
 
         return null;
+    }
+
+    /** Check the original token before parsing a regex's first numeric capture. */
+    private parseIntegerMatch(text: string, match: RegExpMatchArray): number | null {
+        const captured = match[1];
+        const start = match.index! + match[0].lastIndexOf(captured);
+        // LSP의 음수 값도 부호 뒤 숫자 위치를 검사해야 같은 float 토큰에 닿는다.
+        const digitStart = start + (captured.startsWith('-') ? 1 : 0);
+        return this.isFloatingLiteralAtPosition(text, digitStart) ? null : this.parseNumber(captured);
+    }
+
+    /** Floating preprocessing-number tokens must not be split into integer hovers. */
+    private isFloatingLiteralAtPosition(text: string, position: number): boolean {
+        // 지수의 부호를 토큰 안에 남긴다. 0xFE처럼 E가 16진수 자릿수인 경우와
+        // 기존 지원 형식인 0DEADh는 10진수 지수 표기로 취급하지 않는다.
+        const tokens = /(?<![\w.'])(?:\d|\.\d)(?:[eEpP][+-]|[\w.'])*/g;
+        for (const match of text.matchAll(tokens)) {
+            if (position < match.index! || position >= match.index! + match[0].length) { continue; }
+            const token = match[0];
+            if (/^0[xX]/.test(token)) { return /[.pP]/.test(token); }
+            if (/^[0-9a-fA-F][0-9a-fA-F']*[hH]$/.test(token)) { return false; }
+            return /[.eEfF]/.test(token);
+        }
+        return false;
     }
 
     /**
@@ -873,6 +907,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
      * Returns the text and its start/end positions, or null if not found
      */
     private findNumberAtPosition(text: string, position: number): { text: string; start: number; end: number } | null {
+        if (this.isFloatingLiteralAtPosition(text, position)) { return null; }
         // Define all number patterns with global flag to find all matches.
         // \b/(?!\w) 경계가 없으면 식별자 일부(`Foo123h`의 `123h`)나 잘못된
         // 리터럴의 앞부분(`0x12g3`의 `0x12`)에 부분 매치된다(M8).
@@ -945,6 +980,11 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return safeIntegerOrNull(value);
         }
 
+        // C/C++ leading-zero integer literals are octal, including digit separators.
+        if (/^0\d+$/.test(cleanText)) {
+            return /^0[0-7]+$/.test(cleanText) ? safeIntegerOrNull(parseInt(cleanText, 8)) : null;
+        }
+
         // Check for decimal
         if (this.patterns.decimal.test(text)) {
             const value = parseInt(cleanText, 10);
@@ -968,6 +1008,9 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 big = BigInt(cleanText); // BigInt()는 0x/0X/0b/0B 접두사를 그대로 지원
             } else if (this.patterns.hexH.test(text)) {
                 big = BigInt('0x' + cleanText.slice(0, -1)); // h/H 접미사 제거
+            } else if (/^0\d+$/.test(cleanText)) {
+                if (!/^0[0-7]+$/.test(cleanText)) { return null; }
+                big = BigInt('0o' + cleanText);
             } else if (this.patterns.decimal.test(text)) {
                 big = BigInt(cleanText);
             } else {
@@ -1976,7 +2019,7 @@ export function detectBitOperation(line: string, cursorPosition: number): BitOpe
 }
 
 /**
- * Parse a number literal (hex, binary, or decimal)
+ * Parse a C/C++ number literal (hex, binary, octal, or decimal)
  */
 function parseNumberLiteral(str: string): number | undefined {
     // Remove digit separators
@@ -1988,6 +2031,8 @@ function parseNumberLiteral(str: string): number | undefined {
     } else if (str.startsWith('0b') || str.startsWith('0B')) {
         // Binary
         return parseInt(str.slice(2), 2);
+    } else if (/^0\d+$/.test(str)) {
+        return /^0[0-7]+$/.test(str) ? parseInt(str, 8) : undefined;
     } else if (/^\d+$/.test(str)) {
         // Decimal
         return parseInt(str, 10);

@@ -4642,6 +4642,8 @@ export function serializeLinks(entries: LinkEntry[]): any[] {
 export function addLinkEntry(entries: LinkEntry[], newEntry: LinkEntry): { entries: LinkEntry[]; added: boolean } {
     const trimmedTitle = newEntry.title.trim();
     const trimmedLink = newEntry.link.trim();
+    // 추가 화면은 그룹·태그를 받지 않으므로 기존 링크의 그룹 없는 사본을 막는다.
+    // 편집·삭제는 이미 구분된 항목을 선택하므로 아래의 전체 identity를 사용한다.
     const duplicate = entries.some(entry => entry.title === trimmedTitle && entry.link === trimmedLink);
     if (duplicate) {
         return { entries, added: false };

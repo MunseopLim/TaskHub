@@ -243,6 +243,57 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         assert.deepStrictEqual((readRecoveryEntry(ctx, fileB) as { data: unknown })?.data, edited);
     });
 
+    for (const recover of [true, false]) {
+        for (const openNewerFile of [false, true]) {
+            test(`복구 안내 중 이전 패널을 닫으면 최신 열기만 계속한다: recover=${recover}, newer=${openNewerFile}`, async () => {
+                const fake = installFakePanel();
+                const fileA = writeJson('closing-current.json', { rows: [{ value: 'A' }] });
+                const fileB = writeJson('pending-open.json', { rows: [{ value: 'B disk' }] });
+                const fileC = writeJson('newer-open.json', { rows: [{ value: 'C' }] });
+                const stat = fs.statSync(fileB);
+                const recovery = {
+                    data: { rows: [{ value: 'B recovered' }] }, isRootArray: false,
+                    fileMtimeMs: stat.mtimeMs, fileSize: stat.size, capturedAt: Date.now(),
+                };
+                const ctx = makeContext({ [RECOVERY_STATE_KEY]: { [fileB]: recovery } });
+                await openJsonEditorFile(ctx, fileA);
+                const initialSession = fake.sessionId();
+                let answer!: () => void;
+                let started!: () => void;
+                const prompted = new Promise<void>(resolve => { started = resolve; });
+                (vscode.window as any).showInformationMessage = (_message: string, recoverLabel: string, discardLabel: string) => {
+                    started();
+                    return new Promise<string>(resolve => { answer = () => resolve(recover ? recoverLabel : discardLabel); });
+                };
+                const pending = openJsonEditorFile(ctx, fileB);
+                await prompted;
+                fake.disposePanel();
+                const newerData = { rows: [{ value: 'C latest draft' }] };
+                if (openNewerFile) {
+                    await openJsonEditorFile(ctx, fileC);
+                    await fake.send({ command: 'modified', value: true });
+                    await fake.send({ command: 'snapshot', data: newerData });
+                }
+                answer();
+                await pending;
+                assert.strictEqual(jsonPanelRegistry.getFilePath(), openNewerFile ? fileC : fileB);
+                assert.ok(fake.sessionId() > initialSession);
+                assert.strictEqual(fake.events.filter(event => event === 'create-panel').length, 2);
+                if (openNewerFile) {
+                    assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+                    assert.deepStrictEqual(readRecoveryEntry(ctx, fileB), recovery, '오래된 답변은 대기했던 파일 복구본도 바꾸면 안 된다');
+                    fake.disposePanel();
+                    await new Promise<void>(resolve => setImmediate(resolve));
+                    assert.deepStrictEqual((readRecoveryEntry(ctx, fileC) as { data: unknown })?.data, newerData);
+                } else {
+                    assert.strictEqual(jsonPanelRegistry.isDirty(), recover);
+                    assert.ok(fake.html().includes(recover ? 'B recovered' : 'B disk'));
+                    assert.deepStrictEqual(readRecoveryEntry(ctx, fileB), recover ? recovery : undefined);
+                }
+            });
+        }
+    }
+
     for (const promptKind of ['information', 'error'] as const) {
         test(`같은 파일의 오래된 ${promptKind} 복구 버리기는 새 세션의 복구본을 지우지 않는다`, async () => {
             const fake = installFakePanel();

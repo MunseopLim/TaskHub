@@ -488,8 +488,8 @@ suite('NumberBaseHoverProvider Test Suite', () => {
         });
 
         test('rejected numeric macros cannot fall back to copying their first literal', async () => {
-            for (const expression of ['0xFFFFFFFFU + 1U', '9007199254740993 & 1', '-1U']) {
-                const source = sourceDocument('/hover/rejected-macro.h', `#define BAD ${expression}`);
+            for (const expression of ['0xFFFFFFFFU + 1U', '9007199254740993 & 1', '-1U', '08', '09U', '0755 | 08ULL']) {
+                const source = sourceDocument(`/hover/rejected-${encodeURIComponent(expression)}.h`, `#define BAD ${expression}`);
                 const position = new vscode.Position(0, 9);
                 const cancellation = new vscode.CancellationTokenSource();
                 await withLsp([source], command => command === 'vscode.executeDefinitionProvider'
@@ -502,6 +502,48 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 });
             }
         });
+
+        test('floating tokens never fall back to integer copies or identifier lookup at any position', async () => {
+            const literals = [
+                '0755.0', '09.5', '0755e3', '0755E+3', '0.755e-2f', '.5F', '1.', '1.e+3L',
+                '0x1.fp3', '0X1.P-2', '0x1p+4', '0x1.2p+3f', "1'234.5'6e+2",
+            ];
+            let lookups = 0;
+            await withLsp([], () => { lookups++; return []; }, async () => {
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    for (const literal of literals) {
+                        const prefix = 'double value = ';
+                        const source = sourceDocument(`/hover/float-${encodeURIComponent(literal)}.c`, `${prefix}${literal};`);
+                        for (let offset = 0; offset < literal.length; offset++) {
+                            const position = new vscode.Position(0, prefix.length + offset);
+                            assert.strictEqual(await provider.provideHover(source, position, cancellation.token), undefined,
+                                `${literal}: character ${offset} must not offer an integer hover`);
+                        }
+                    }
+                    assert.strictEqual(lookups, 0, 'an exponent or suffix must not trigger identifier fallback');
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        for (const route of ['definition', 'LSP hover'] as const) {
+            test(`floating values from another file never become partial integer copies through ${route}`, async () => {
+                for (const literal of ['0755.0', '09.5', '0755e3', '0755E+3', '.5F', '1.', '0x1.fp+4', '0x1p2', '-0755.0']) {
+                    const source = sourceDocument(`/hover/float-use-${encodeURIComponent(literal)}.c`, 'X;');
+                    const target = sourceDocument(`/hover/float-definition-${encodeURIComponent(literal)}.h`,
+                        route === 'definition' ? `#define X ${literal}` : 'extern double X;');
+                    await withLsp([target], command => command === 'vscode.executeDefinitionProvider'
+                        ? [location(target)] : command === 'vscode.executeHoverProvider' && route === 'LSP hover'
+                            ? [new vscode.Hover(`X = ${literal}`)] : [], async () => {
+                        const cancellation = new vscode.CancellationTokenSource();
+                        try {
+                            const hover = await provider.provideHover(source, new vscode.Position(0, 0), cancellation.token);
+                            assert.strictEqual(hover, undefined, `${route}: ${literal}`);
+                        } finally { cancellation.dispose(); }
+                    });
+                }
+            });
+        }
 
         test('an LSP fallback callback at its definition cannot start another lookup chain', async () => {
             const source = sourceDocument('/hover/source.c', 'X;');
@@ -979,6 +1021,26 @@ suite('NumberBaseHoverProvider Test Suite', () => {
     });
 
     suite('Number Parsing Tests', () => {
+        test('C octal parsing agrees for safe numbers and exact large literals', () => {
+            for (const [literal, expected] of [['0755', 493], ['0644', 420], ["07'55", 493], ['08', null], ['09', null]] as const) {
+                assert.strictEqual((provider as any).parseNumber(literal), expected, literal);
+                assert.strictEqual((provider as any).parseNumberExact(literal), expected, literal);
+            }
+            assert.strictEqual((provider as any).parseNumberExact('01777777777777777777777'), 18446744073709551615n);
+            assert.strictEqual((provider as any).parseNumber('01777777777777777777777'), null);
+        });
+
+        test('C octal operands keep the same value in enum and bit operation hover helpers', () => {
+            assert.strictEqual((provider as any).evaluateEnumExpression('0755 | 0200', new Map()), 493);
+            const operation = detectBitOperation('0755U | 0200U', 3);
+            assert.ok(operation);
+            assert.strictEqual(operation.leftOperand, 493);
+            assert.strictEqual(operation.operand, 128);
+            assert.strictEqual(calculateBitOperation(operation).afterValue, 493);
+            assert.strictEqual(detectBitOperation('0755 | 08', 3), undefined);
+            assert.strictEqual((provider as any).evaluateEnumExpression('0755 | 08', new Map()), null);
+        });
+
         test('Parse hexadecimal with 0x prefix', () => {
             const result = (provider as any).parseNumber('0xFF');
             assert.strictEqual(result, 255);
@@ -1147,6 +1209,41 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             const hover = (provider as any).tryMacroExpansion(document, new vscode.Position(0, 9)) as vscode.Hover;
             assert.ok(hover);
             assert.deepStrictEqual(copyValues(hover.contents[0] as vscode.MarkdownString), ['-0x5', '-5', '-0b101']);
+        });
+
+        test('C 8진 매크로와 원문 리터럴은 실제 호버에서 같은 정확한 값을 복사한다', async () => {
+            const originalExecuteCommand = vscode.commands.executeCommand;
+            const cancellation = new vscode.CancellationTokenSource();
+            try {
+                (vscode.commands as any).executeCommand = async () => [];
+                for (const [expression, expected] of [
+                    ['0755', 493], ['0644U', 420], ['0755L', 493], ['0755ULL', 493],
+                    ['(0644U | 0111U)', 493], ['(0755 - 0644)', 73],
+                    ['08', null], ['09U', null], ['(0755 | 08ULL)', null],
+                ] as const) {
+                    const document = await vscode.workspace.openTextDocument({
+                        language: 'cpp', content: `#define PERMISSIONS ${expression}`,
+                    });
+                    const positions = [new vscode.Position(0, 9)];
+                    if (!expression.startsWith('(')) {
+                        positions.push(new vscode.Position(0, document.lineAt(0).text.indexOf(expression) + 1));
+                    }
+                    for (const position of positions) {
+                        const hover = await provider.provideHover(document, position, cancellation.token);
+                        assert.ok(hover, `${expression} at ${position.character}`);
+                        const markdown = hover.contents[0] as vscode.MarkdownString;
+                        const values = expected === null ? []
+                            : [`0x${expected.toString(16).toUpperCase()}`, String(expected), `0b${expected.toString(2)}`];
+                        assert.deepStrictEqual(copyValues(markdown), values, `${expression} at ${position.character}`);
+                        if (expected === null) {
+                            assert.match(visibleMarkdownText(markdown), /exact integer value cannot be determined|정확한 정수 값을 확인할 수 없어/);
+                        }
+                    }
+                }
+            } finally {
+                vscode.commands.executeCommand = originalExecuteCommand;
+                cancellation.dispose();
+            }
         });
 
         test('안전한 정수가 아닌 변환값은 숫자·매크로·레지스터 복사 링크를 만들지 않는다', () => {
@@ -1529,6 +1626,30 @@ suite('NumberBaseHoverProvider Test Suite', () => {
     });
 
     suite('Number Detection Tests', () => {
+        test('floating tokens contain no standalone integer match, including exponent and hex digits', () => {
+            for (const literal of ['0755.0', '09.5', '0755e3', '.5', '1.e-3F', '0x1.fp+4', '0x1p2']) {
+                const line = `double value = ${literal};`;
+                const start = line.indexOf(literal);
+                for (let offset = 0; offset < literal.length; offset++) {
+                    assert.strictEqual((provider as any).findNumberAtPosition(line, start + offset), null,
+                        `${literal}: character ${offset}`);
+                }
+            }
+        });
+
+        test('integer tokens beside floating tokens retain octal, suffix, hex, binary and h-suffix conversion', () => {
+            for (const [literal, expected] of [
+                ['0755', 493], ['0644U', 420], ['0xFE', 254], ['0xBEEF', 48879],
+                ['0b1011', 11], ['0DEADh', 57005],
+            ] as const) {
+                const line = `double other = 0755e3; int value = ${literal};`;
+                const start = line.indexOf(literal, line.indexOf('int value'));
+                const result = (provider as any).findNumberAtPosition(line, start + 1);
+                assert.ok(result, literal);
+                assert.strictEqual((provider as any).parseNumberExact(result.text), expected, literal);
+            }
+        });
+
         test('Find hex number at position', () => {
             const result = (provider as any).findNumberAtPosition('int x = 0xFF;', 8);
             assert.notStrictEqual(result, null);
@@ -1617,6 +1738,16 @@ suite('NumberBaseHoverProvider Test Suite', () => {
     });
 
     suite('Value Extraction Tests', () => {
+        test('floating macro definitions cannot expose an integer prefix with or without a symbol filter', () => {
+            for (const literal of ['0755.0', '09.5', '0755e3', '0x1.fp+4']) {
+                const line = `#define VALUE ${literal}`;
+                assert.strictEqual((provider as any).extractValueFromLine(line, 'VALUE'), null, literal);
+                assert.strictEqual((provider as any).extractValueFromLine(line), null, literal);
+            }
+            assert.strictEqual((provider as any).extractValueFromLine('#define VALUE 0755', 'VALUE'), 493);
+            assert.strictEqual((provider as any).extractValueFromLine('#define VALUE 0755'), 493);
+        });
+
         test('Extract value from const declaration', () => {
             const result = (provider as any).extractValueFromLine('const int MASK = 0xFF;');
             assert.strictEqual(result, 255);
