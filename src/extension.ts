@@ -4650,18 +4650,20 @@ export function addLinkEntry(entries: LinkEntry[], newEntry: LinkEntry): { entri
     return { entries: [...entries, normalized], added: true };
 }
 
+function sameLinkIdentity(entry: LinkEntry, target: LinkEntry): boolean {
+    return entry.title === target.title
+        && entry.link === target.link
+        && (entry.group ?? null) === (target.group ?? null)
+        && JSON.stringify(entry.tags ?? []) === JSON.stringify(target.tags ?? []);
+}
+
 export function removeLinkByIdentity(entries: LinkEntry[], target: LinkEntry): LinkEntry[] {
     let removed = false;
-    const targetTags = JSON.stringify(target.tags ?? []);
     return entries.filter(entry => {
         if (removed) {
             return true;
         }
-        const sameTitle = entry.title === target.title;
-        const sameLink = entry.link === target.link;
-        const sameGroup = (entry.group ?? null) === (target.group ?? null);
-        const sameTags = JSON.stringify(entry.tags ?? []) === targetTags;
-        if (sameTitle && sameLink && sameGroup && sameTags) {
+        if (sameLinkIdentity(entry, target)) {
             removed = true;
             return false;
         }
@@ -4824,6 +4826,104 @@ async function confirmRunOutdatedInputProfile(
         continueLabel
     );
     return choice === continueLabel;
+}
+
+export async function runActionWithInputProfile(
+    actionItem: Action,
+    context: vscode.ExtensionContext,
+    mainViewProvider: MainViewProvider,
+    historyProvider: HistoryProvider,
+    inputProfileStore: InputProfileStore
+): Promise<void> {
+    const actionId = actionItem?.id;
+    if (!actionId) {
+        vscode.window.showWarningMessage(t('입력 프로필로 실행할 액션을 선택하세요.', 'Select an action to run with an input profile.'));
+        return;
+    }
+    let allActions: ActionItem[];
+    try {
+        allActions = loadAllActions(context);
+    } catch (error: any) {
+        outputChannel.appendLine(`[ERROR] ${error.message}`);
+        vscode.window.showErrorMessage(t(`입력 프로필을 사용할 수 없습니다: ${error.message}`, `Could not use an input profile: ${error.message}`));
+        return;
+    }
+    const fullActionItem = findActionById(allActions, actionId);
+    if (!fullActionItem?.action) {
+        vscode.window.showErrorMessage(t(`ID '${actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${actionId}'.`));
+        return;
+    }
+    let profiles: NamedInputProfile[];
+    try {
+        profiles = inputProfileStore.list(actionId);
+    } catch (error) {
+        vscode.window.showErrorMessage(inputProfileErrorMessage(error));
+        return;
+    }
+    if (profiles.length === 0) {
+        vscode.window.showInformationMessage(t(
+            '이 액션에 저장된 입력 프로필이 없습니다. 액션을 실행한 뒤 History 항목에서 입력 프로필을 저장하세요.',
+            'This action has no saved input profiles. Run it, then save an input profile from its History item.'
+        ));
+        return;
+    }
+    const selection = await vscode.window.showQuickPick(
+        buildInputProfilePickItems(profiles, fullActionItem.action.tasks),
+        {
+            placeHolder: t(`'${fullActionItem.title}'에 사용할 입력 프로필 선택`, `Select an input profile for '${fullActionItem.title}'`),
+            matchOnDescription: true,
+            matchOnDetail: true,
+            ignoreFocusOut: false,
+        }
+    );
+    if (!selection) { return; }
+
+    const resolveCurrent = () => {
+        // File watchers are debounced. A response may arrive before they invalidate
+        // the cache, so the execution boundary must read the current files itself.
+        invalidateActionsCache();
+        const actions = loadAllActions(context);
+        const item = findActionById(actions, actionId);
+        if (!item?.action) {
+            throw new Error(t(`액션 '${actionId}'을(를) 찾을 수 없습니다.`, `Action '${actionId}' no longer exists.`));
+        }
+        const profile = inputProfileStore.list(actionId).find(candidate => candidate.id === selection.profile.id);
+        if (!profile) {
+            throw new Error(t('선택한 입력 프로필이 삭제되었습니다. 목록을 다시 열어 주세요.', 'The selected input profile was deleted. Reopen the list.'));
+        }
+        return { actions, item, profile };
+    };
+    for (;;) {
+        let current: ReturnType<typeof resolveCurrent>;
+        let inspection: InputProfileInspection;
+        try {
+            current = resolveCurrent();
+            inspection = applyCurrentInputProfileValidation(
+                inspectInputProfile(current.profile, current.item.action!.tasks), current.item.action!.tasks
+            );
+            if (inspection.staleTaskIds.length > 0) {
+                const signature = JSON.stringify([current.item, current.profile]);
+                if (!await confirmRunOutdatedInputProfile(current.profile.name, inspection)) { return; }
+                const latest = resolveCurrent();
+                if (JSON.stringify([latest.item, latest.profile]) !== signature) { continue; }
+                current = latest;
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(t(`입력 프로필을 사용할 수 없습니다: ${message}`, `Could not use an input profile: ${message}`));
+            return;
+        }
+        try {
+            await executeAction(
+                current.item, context, mainViewProvider, historyProvider,
+                inspection.usableInputs, findActionPathById(current.actions, actionId)
+            );
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            outputChannel.appendLine(`[ERROR] Execution failed for action '${actionId}' (input profile '${current.profile.name}'): ${msg}`);
+        }
+        return;
+    }
 }
 
 export type ApplyPresetBackupChoice = 'backup' | 'cancel';
@@ -5181,7 +5281,7 @@ async function promptLinkSearch(linkViewProvider: LinkViewProvider): Promise<voi
     }
 }
 
-async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, target?: Link): Promise<void> {
+export async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, target?: Link): Promise<void> {
     const entries = linkViewProvider.getAllEntries().filter(entry => entry.sourceFile);
     if (entries.length === 0) {
         vscode.window.showInformationMessage(t('편집할 워크스페이스 링크가 없습니다.', 'No workspace links available to edit.'));
@@ -5280,15 +5380,16 @@ async function promptWorkspaceLinkEdit(linkViewProvider: LinkViewProvider, targe
         return;
     }
     const links = loadResult.entries;
-    const targetIndex = links.findIndex(link => link.title === entryToEdit.title && link.link === entryToEdit.link);
+    const targetIndex = links.findIndex(link => sameLinkIdentity(link, entryToEdit));
     if (targetIndex === -1) {
         vscode.window.showInformationMessage(t('links.json에서 선택한 링크를 찾을 수 없습니다.', 'Could not find the selected link in links.json.'));
         return;
     }
 
-    const duplicate = links.some((link, index) => index !== targetIndex && link.title === trimmedTitle && link.link === trimmedUrl);
+    const duplicate = links.some((link, index) => index !== targetIndex
+        && sameLinkIdentity(link, { title: trimmedTitle, link: trimmedUrl, group, tags }));
     if (duplicate) {
-        vscode.window.showInformationMessage(t('같은 제목과 URL을 가진 다른 링크가 이미 존재합니다.', 'Another link with the same title and URL already exists.'));
+        vscode.window.showInformationMessage(t('같은 제목·URL·그룹·태그를 가진 링크가 이미 존재합니다.', 'A link with the same title, URL, group, and tags already exists.'));
         return;
     }
 
@@ -11244,14 +11345,17 @@ function actionRunReportKey(entry: HistoryEntry): string {
     return `${entry.actionId}\0${entry.timestamp}`;
 }
 
-async function showActionRunReport(entry: HistoryEntry): Promise<void> {
+export async function showActionRunReport(entry: HistoryEntry): Promise<void> {
     if (!entry.runLog) {
+        const workspaceRoot = actionWorkspaceFolderMap.get(entry.actionId)
+            ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const readRunLogConfiguration = () => vscode.workspace.getConfiguration(
+            'taskhub.runLogs', workspaceRoot ? vscode.Uri.file(workspaceRoot) : undefined
+        );
         if (entry.status === 'running') {
             // 설정이 꺼져 있으면 **끝나도 보고서는 생기지 않는다.** 그것을 말하지
             // 않으면 사용자는 오지 않을 것을 기다린다.
-            const willRecord = vscode.workspace
-                .getConfiguration('taskhub.runLogs')
-                .get<boolean>('enabled', false);
+            const willRecord = readRunLogConfiguration().get<boolean>('enabled', false);
             vscode.window.showInformationMessage(willRecord
                 ? t(
                     '실행이 끝난 뒤 실행 로그가 저장되면 보고서를 볼 수 있습니다.',
@@ -11275,9 +11379,7 @@ async function showActionRunReport(entry: HistoryEntry): Promise<void> {
         // 않고 "꺼져 있습니다 + 지금 켜기" 를 내밀면, 방금 켠 사용자가 **옛 기록**을
         // 눌렀을 때 같은 안내를 다시 받고 아무 일도 일어나지 않는 버튼을 또 누른다 —
         // 이 변경이 없애려던 "고장 났나 보다" 를 그대로 재현하는 자리다.
-        const alreadyEnabled = vscode.workspace
-            .getConfiguration('taskhub.runLogs')
-            .get<boolean>('enabled', false);
+        const alreadyEnabled = readRunLogConfiguration().get<boolean>('enabled', false);
         const openSettings = t('설정 열기', 'Open Settings');
         if (alreadyEnabled) {
             const choice = await vscode.window.showInformationMessage(
@@ -11314,6 +11416,16 @@ async function showActionRunReport(entry: HistoryEntry): Promise<void> {
                 await vscode.workspace.getConfiguration('taskhub.runLogs')
                     .update('enabled', true, vscode.ConfigurationTarget.Global);
                 const openSettingsAfter = t('설정 열기', 'Open Settings');
+                if (!readRunLogConfiguration().get<boolean>('enabled', false)) {
+                    const after = await vscode.window.showWarningMessage(t(
+                        '사용자 설정에는 실행 로그 저장을 켰지만 이 워크스페이스의 설정에서 꺼져 있어 기록되지 않습니다. 설정에서 워크스페이스 값을 확인하세요.',
+                        'Run logs are enabled in user settings, but this workspace overrides them to off. Runs will not be recorded. Check the workspace value in Settings.'
+                    ), openSettingsAfter);
+                    if (after === openSettingsAfter) {
+                        await vscode.commands.executeCommand('workbench.action.openSettings', '@id:taskhub.runLogs.enabled');
+                    }
+                    return;
+                }
                 // 어디에 썼는지 말해 두지 않으면, 나중에 설정 화면에서 확인하려던
                 // 사용자가 다른 탭을 보고 "안 켜졌다" 고 판단한다.
                 const after = await vscode.window.showInformationMessage(
@@ -11850,65 +11962,9 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }));
 
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.runActionWithInputProfile', async (actionItem: Action) => {
-        const actionId = actionItem?.id;
-        if (!actionId) {
-            vscode.window.showWarningMessage(t('입력 프로필로 실행할 액션을 선택하세요.', 'Select an action to run with an input profile.'));
-            return;
-        }
-        let allActions: ActionItem[];
-        try {
-            allActions = loadAllActions(context);
-        } catch (error: any) {
-            outputChannel.appendLine(`[ERROR] ${error.message}`);
-            vscode.window.showErrorMessage(t(`입력 프로필을 사용할 수 없습니다: ${error.message}`, `Could not use an input profile: ${error.message}`));
-            return;
-        }
-        const fullActionItem = findActionById(allActions, actionId);
-        if (!fullActionItem?.action) {
-            vscode.window.showErrorMessage(t(`ID '${actionId}'에 대한 액션 정의를 찾을 수 없습니다.`, `Could not find action definition for ID '${actionId}'.`));
-            return;
-        }
-        let profiles: NamedInputProfile[];
-        try {
-            profiles = inputProfileStore.list(actionId);
-        } catch (error) {
-            vscode.window.showErrorMessage(inputProfileErrorMessage(error));
-            return;
-        }
-        if (profiles.length === 0) {
-            vscode.window.showInformationMessage(t(
-                '이 액션에 저장된 입력 프로필이 없습니다. 액션을 실행한 뒤 History 항목에서 입력 프로필을 저장하세요.',
-                'This action has no saved input profiles. Run it, then save an input profile from its History item.'
-            ));
-            return;
-        }
-        const selection = await vscode.window.showQuickPick(
-            buildInputProfilePickItems(profiles, fullActionItem.action.tasks),
-            {
-                placeHolder: t(`'${fullActionItem.title}'에 사용할 입력 프로필 선택`, `Select an input profile for '${fullActionItem.title}'`),
-                matchOnDescription: true,
-                matchOnDetail: true,
-                ignoreFocusOut: false,
-            }
-        );
-        if (!selection) { return; }
-        if (!await confirmRunOutdatedInputProfile(selection.profile.name, selection.inspection)) { return; }
-        const pathParts = findActionPathById(allActions, actionId);
-        try {
-            await executeAction(
-                fullActionItem,
-                context,
-                mainViewProvider,
-                historyProvider,
-                selection.inspection.usableInputs,
-                pathParts
-            );
-        } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            outputChannel.appendLine(`[ERROR] Execution failed for action '${actionId}' (input profile '${selection.profile.name}'): ${msg}`);
-        }
-    }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.runActionWithInputProfile', (actionItem: Action) =>
+        runActionWithInputProfile(actionItem, context, mainViewProvider, historyProvider, inputProfileStore)
+    ));
 
     context.subscriptions.push(registerPinnedActionCommands({
         store: pinnedActionStore,
