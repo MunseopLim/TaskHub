@@ -23,6 +23,7 @@ import {
     buildElf32WithDwarf5Lines,
     buildElf32WithDwarfLines,
     buildElf32WithSymbols,
+    buildElf32WithThumbSymbols,
     buildMinimalElf32,
 } from './fixtures/elfFixtures';
 import { computeSymbolUsage, parseElf32 } from '../elfParser';
@@ -146,7 +147,7 @@ suite('Memory Map Viewer Test Suite', () => {
         const dir = path.join(tmpDir, 'taskhub-test', 'hex-flow');
         fs.mkdirSync(dir, { recursive: true });
         const filePath = path.join(dir, 'flow.axf');
-        const buffer = buildElf32WithSymbols();
+        const buffer = buildElf32WithThumbSymbols();
         fs.writeFileSync(filePath, buffer);
         tmpFiles.push(filePath);
 
@@ -204,24 +205,30 @@ suite('Memory Map Viewer Test Suite', () => {
             assert.ok(memoryHandler, 'Memory Map host message handler가 설치되지 않았다');
 
             const targets = panelRegistry.getHexTargets(filePath) ?? [];
-            const main = targets.find(target => target.label === 'main');
+            const sectionEnd = targets.find(target => target.label === 'section_end');
             const bss = targets.find(target => target.label === '.bss');
-            assert.ok(main && main.fileRange.kind === 'file');
+            assert.ok(sectionEnd && sectionEnd.fileRange.kind === 'file');
             assert.ok(bss && bss.fileRange.kind === 'unavailable');
+            const text = parseElf32(buffer).sections.find(section => section.name === '.text')!;
+            assert.deepStrictEqual(sectionEnd!.fileRange, { kind: 'file', offset: text.offset! + 12, size: 4 },
+                'Thumb bit0를 코드 주소로 오인하면 섹션 끝 함수가 unmapped되거나 1바이트 밀린다');
 
             const renderId = currentMemoryMapRenderId(filePath);
-            await memoryHandler!({ command: 'openHex', targetId: main!.id, renderId });
+            await memoryHandler!({ command: 'openHex', targetId: sectionEnd!.id, renderId });
             assert.ok(hexPanelRegistry.has(filePath), 'Hex Viewer 패널이 열리지 않았다');
             assert.ok(hexHandler, 'Hex Viewer ready handler가 설치되지 않았다');
             hexHandler!({ command: 'ready' });
             assert.strictEqual(hexPosted.length, 1);
             assert.deepStrictEqual(hexPosted[0].initialSelection, {
-                startOffset: main!.fileRange.kind === 'file' ? main!.fileRange.offset : -1,
-                endOffset: main!.fileRange.kind === 'file'
-                    ? main!.fileRange.offset + main!.fileRange.size - 1
+                startOffset: sectionEnd!.fileRange.kind === 'file' ? sectionEnd!.fileRange.offset : -1,
+                endOffset: sectionEnd!.fileRange.kind === 'file'
+                    ? sectionEnd!.fileRange.offset + sectionEnd!.fileRange.size - 1
                     : -1,
             });
             assert.strictEqual(hexPosted[0].data.length, buffer.length, 'ELF 컨테이너 전체를 raw binary로 열어야 한다');
+            const selection = hexPosted[0].initialSelection;
+            assert.deepStrictEqual([...hexPosted[0].data.slice(selection.startOffset, selection.endOffset + 1)],
+                [12, 13, 14, 15], 'Hex 선택은 함수의 처음부터 마지막 바이트까지 정확히 포함해야 한다');
 
             await memoryHandler!({ command: 'openHex', targetId: bss!.id, renderId });
             assert.ok(warnings.some(message => /BSS|NOBITS/.test(message)), 'NOBITS는 파일 바이트가 없다고 안내해야 한다');

@@ -341,7 +341,17 @@ export class MacroExpander {
         } as const;
         type Operator = keyof typeof precedence;
         const operators: Array<Operator | '('> = [];
-        const values: number[] = [];
+        // C의 전체 타입 체계 대신 확정 가능한 공통 범위만 계산한다. int는
+        // 32비트, LL은 64비트이며 L의 플랫폼별 폭 차이는 좁은 쪽으로 제한한다.
+        // unsigned 혼합 음수/overflow는 변환·wraparound를 추측하지 않는다.
+        interface IntegerValue { value: bigint; unsigned: boolean; bits: 32 | 64; }
+        const values: IntegerValue[] = [];
+        const safeLimit = BigInt(Number.MAX_SAFE_INTEGER);
+        const fits = ({ value, unsigned, bits }: IntegerValue): boolean => {
+            const upper = unsigned ? (1n << BigInt(bits)) - 1n : (1n << BigInt(bits - 1)) - 1n;
+            const lower = unsigned ? 0n : -(1n << BigInt(bits - 1));
+            return value >= lower && value <= upper && value >= -safeLimit && value <= safeLimit;
+        };
 
         const applyOperator = (): boolean => {
             const operator = operators.pop();
@@ -350,34 +360,41 @@ export class MacroExpander {
                 return false;
             }
             if (operator === 'u+' || operator === 'u-') {
-                values.push(operator === 'u-' ? -right : right);
+                if (operator === 'u-' && right.unsigned && right.value !== 0n) { return false; }
+                const result = { ...right, value: operator === 'u-' ? -right.value : right.value };
+                if (!fits(result)) { return false; }
+                values.push(result);
                 return true;
             }
             const left = values.pop();
             if (left === undefined) {
                 return false;
             }
-            let result: number;
-            switch (operator) {
-                case '+': result = left + right; break;
-                case '-': result = left - right; break;
-                case '*': result = left * right; break;
-                case '/':
-                    // Exact divisibility also rejects fractions that a later operation could hide.
-                    if (right === 0 || BigInt(left) % BigInt(right) !== 0n) {
-                        return false;
-                    }
-                    result = left / right;
-                    break;
-                case '|': result = left | right; break;
-                case '&': result = left & right; break;
-                case '^': result = left ^ right; break;
-                case '<<': result = left * Math.pow(2, Math.min(63, Math.max(0, right))); break;
-                case '>>': result = Math.floor(left / Math.pow(2, Math.min(63, Math.max(0, right)))); break;
-            }
-            if (!Number.isSafeInteger(result)) {
+            const shift = operator === '<<' || operator === '>>';
+            const bits = shift ? left.bits : Math.max(left.bits, right.bits) as 32 | 64;
+            const unsigned = shift ? left.unsigned : left.unsigned || right.unsigned;
+            if (!shift && unsigned && (left.value < 0n || right.value < 0n)) { return false; }
+            if (shift && (left.value < 0n || right.value < 0n || right.value >= BigInt(left.bits))) {
                 return false;
             }
+            let value: bigint;
+            switch (operator) {
+                case '+': value = left.value + right.value; break;
+                case '-': value = left.value - right.value; break;
+                case '*': value = left.value * right.value; break;
+                case '/':
+                    // Fractional intermediates remain outside the integer-only contract.
+                    if (right.value === 0n || left.value % right.value !== 0n) { return false; }
+                    value = left.value / right.value;
+                    break;
+                case '|': value = left.value | right.value; break;
+                case '&': value = left.value & right.value; break;
+                case '^': value = left.value ^ right.value; break;
+                case '<<': value = left.value << right.value; break;
+                case '>>': value = left.value >> right.value; break;
+            }
+            const result = { value, unsigned, bits };
+            if (!fits(result)) { return false; }
             values.push(result);
             return true;
         };
@@ -398,11 +415,18 @@ export class MacroExpander {
                 if (!expectsValue) {
                     return null;
                 }
-                const value = Number(token.replace(/[ULul]+$/, ''));
-                if (!Number.isSafeInteger(value)) {
-                    return null;
-                }
-                values.push(value);
+                const literal = token.replace(/[ULul]+$/, '');
+                const suffix = token.slice(literal.length).toLowerCase();
+                if (!/^(?:u(?:l|ll)?|(?:l|ll)u?)?$/.test(suffix)) { return null; }
+                const value = BigInt(literal);
+                const bits = suffix.includes('ll') || value > 0xffffffffn
+                    || (!/^0[xXbB]/.test(literal) && value > 0x7fffffffn && !suffix.includes('u'))
+                    ? 64 : 32;
+                const unsigned = suffix.includes('u')
+                    || (bits === 32 && /^0[xXbB]/.test(literal) && value > 0x7fffffffn);
+                const parsed: IntegerValue = { value, unsigned, bits };
+                if (!fits(parsed)) { return null; }
+                values.push(parsed);
                 expectsValue = false;
             } else if (token === '(') {
                 if (!expectsValue) {
@@ -452,7 +476,7 @@ export class MacroExpander {
                 return null;
             }
         }
-        return values.length === 1 ? values[0] : null;
+        return values.length === 1 ? Number(values[0].value) : null;
     }
 
     /**
@@ -461,71 +485,8 @@ export class MacroExpander {
      * @returns Numeric value or null if not evaluable
      */
     static evaluateToNumber(expanded: string): number | null {
-        try {
-            // Remove whitespace
-            let cleaned = expanded.trim();
-
-            // Handle simple hex: 0xABC or 0xABCU
-            if (/^0[xX][0-9a-fA-F]+[ULul]*$/.test(cleaned)) {
-                // Remove suffix and parse
-                const numStr = cleaned.replace(/[ULul]+$/, '');
-                return parseInt(numStr, 16);
-            }
-
-            // Handle simple binary: 0b1010 or 0b1010U
-            if (/^0[bB][01]+[ULul]*$/.test(cleaned)) {
-                // Remove suffix and parse
-                const numStr = cleaned.replace(/[ULul]+$/, '').substring(2);
-                return parseInt(numStr, 2);
-            }
-
-            // Handle simple decimal: 123 or 123U
-            if (/^\d+[ULul]*$/.test(cleaned)) {
-                // Remove suffix and parse
-                const numStr = cleaned.replace(/[ULul]+$/, '');
-                return parseInt(numStr, 10);
-            }
-
-            // Remove integer suffixes (U, L, UL, ULL, LL, etc.) before evaluation
-            // This handles decimal, hex, and binary numbers with suffixes
-            cleaned = cleaned.replace(/\b(0[xX][0-9a-fA-F]+|0[bB][01]+|\d+)[ULul]+\b/g, '$1');
-
-            // Convert hex numbers to decimal for evaluation
-            cleaned = cleaned.replace(/0[xX][0-9a-fA-F]+/g, (match) => {
-                return parseInt(match, 16).toString();
-            });
-
-            // Convert binary numbers to decimal for evaluation
-            cleaned = cleaned.replace(/0[bB][01]+/g, (match) => {
-                return parseInt(match.substring(2), 2).toString();
-            });
-
-            // Try to evaluate expressions with operators
-            // For safety, only allow specific characters, and bound length to avoid ReDoS/huge eval payloads.
-            if (cleaned.length > 4096) { return null; }
-            const safeExpression = /^[\d\s+\-*/<>|&^()]+$/;
-            if (safeExpression.test(cleaned)) {
-                // Replace shift operators with multiplication/division; clamp shift count to 63 bits
-                // to match C semantics for 64-bit integers and avoid Math.pow overflow surprises.
-                cleaned = cleaned.replace(/(\d+)\s*<<\s*(\d+)/g, (_, num, shift) => {
-                    const s = Math.min(63, Math.max(0, parseInt(shift, 10) || 0));
-                    return (parseInt(num, 10) * Math.pow(2, s)).toString();
-                });
-                cleaned = cleaned.replace(/(\d+)\s*>>\s*(\d+)/g, (_, num, shift) => {
-                    const s = Math.min(63, Math.max(0, parseInt(shift, 10) || 0));
-                    return Math.floor(parseInt(num, 10) / Math.pow(2, s)).toString();
-                });
-
-                // The expression has already passed a strict numeric/operator whitelist above.
-                const result = new Function(`return ${cleaned}`)();
-                if (typeof result === 'number' && !isNaN(result)) {
-                    return Math.floor(result);
-                }
-            }
-
-            return null;
-        } catch {
-            return null;
-        }
+        // 모든 호출자가 같은 정확도·타입 경계를 사용한다. Number의 비트 연산이나
+        // new Function으로 재평가하면 안전 평가기가 거부한 식을 잘못된 값으로 살린다.
+        return MacroExpander.evaluateToSafeInteger(expanded);
     }
 }

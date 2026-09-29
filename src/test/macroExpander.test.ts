@@ -223,11 +223,9 @@ const int x = 5;
             assert.strictEqual(result, 256);
         });
 
-        test('Shift count is clamped to avoid overflow', () => {
-            // Prior code performed `Math.pow(2, 9999)` which becomes Infinity.
-            // The clamped version must return a finite number (possibly null, never NaN/Infinity).
+        test('Out-of-range shifts are rejected instead of overflowing or clamping', () => {
             const result = MacroExpander.evaluateToNumber('1 << 9999');
-            assert.ok(result === null || Number.isFinite(result), `expected finite or null, got ${result}`);
+            assert.strictEqual(result, null);
         });
 
         test('Very long expressions are rejected', () => {
@@ -236,14 +234,8 @@ const int x = 5;
         });
 
         // --- 4096-length boundary -----------------------------------------
-        // MacroExpander.evaluateToNumber bails with `cleaned.length > 4096`
-        // as a ReDoS / huge-eval guard. The method trims leading/trailing
-        // whitespace first (`cleaned = expanded.trim()`), so the inputs
-        // below use only non-whitespace at each end to make the boundary
-        // exact. The expressions `1+1+1+...+1` and `1 +1+1+...+1` do not
-        // hit any of the simple-pattern early returns, pass the
-        // safe-character regex, and survive hex/binary rewriting unchanged —
-        // so length(cleaned) === length(input.trim()).
+        // 두 평가 진입점 모두 원문 길이를 먼저 제한한다. 연산자·리터럴·공백을
+        // 포함하는 실제 파서 입력의 경계에서 정상식은 계속 평가되어야 한다.
         test('expression at length 4095 evaluates (below the limit)', () => {
             // "1" (len 1) + "+1" * 2047 (len 4094) = 4095 chars, value 2048
             const expr = '1' + '+1'.repeat(2047);
@@ -294,7 +286,7 @@ const int x = 5;
         test('keeps integer literal formats, suffixes, unary signs, and ordinary masks', () => {
             const cases: Array<[string, number]> = [
                 ['0xFF', 255], ['0B1010UL', 10], ['255U', 255], ['00010 + 0', 10],
-                ['+0xFFuLL', 255], ['-(0b1010U + 2L)', -12], ['1 + +2', 3],
+                ['+0xFFuLL', 255], ['-(0b1010 + 2L)', -12], ['1 + +2', 3],
                 ['(1U << 0) | (1UL << 5) | 0x40ULL', 0x61],
                 ['9007199254740991', Number.MAX_SAFE_INTEGER],
                 ['-9007199254740991', -Number.MAX_SAFE_INTEGER],
@@ -310,23 +302,49 @@ const int x = 5;
             const cases: Array<[string, number]> = [
                 ['3 + 4 * 5', 23], ['(3 + 4) * 5', 35], ['100 / 5 / 2', 10],
                 ['20 - 5 - 3', 12], ['1 + 2 << 3', 24], ['1 | 2 ^ 3 & 6', 1],
-                ['0xFFFFFFFF | 0', -1], ['0x80000000 ^ 1', -2147483647],
-                ['0x100000000 | 0', 0], ['-3 & 0xFF', 253]
+                ['0xFFFFFFFF | 0', 4294967295], ['0x80000000 ^ 1', 2147483649],
+                ['0x100000000 | 0', 4294967296], ['-3 & 0xFF', 253]
             ];
             for (const [expression, expected] of cases) {
                 assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), expected, expression);
             }
         });
 
-        test('retains clamped shifts while rejecting unsafe shift results', () => {
+        test('keeps defined shifts and rejects invalid counts or implementation-dependent negative shifts', () => {
             const cases: Array<[string, number | null]> = [
-                ['1 << 52', 2 ** 52], ['1 << 53', null], ['1 << 9999', null],
-                ['0 << 9999', 0], ['8 << -1', 8], ['8 >> -1', 8],
-                ['8 >> 2', 2], ['3 >> 1', 1], ['-3 >> 1', -2],
-                ['9007199254740991 >> 9999', 0], ['-1 >> 9999', -1]
+                ['1ULL << 52', 2 ** 52], ['1ULL << 53', null], ['1 << 9999', null],
+                ['0 << 9999', null], ['8 << -1', null], ['8 >> -1', null],
+                ['8 >> 2', 2], ['3 >> 1', 1], ['-3 >> 1', null],
+                ['9007199254740991 >> 9999', null], ['-1 >> 9999', null],
+                ['1U << 31', 2147483648], ['1U << 32', null], ['1 << 31', null]
             ];
             for (const [expression, expected] of cases) {
                 assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), expected, expression);
+            }
+        });
+
+        test('preserves high mask bits and unsigned values without JavaScript int32 coercion', () => {
+            for (const [expression, expected] of [
+                ['0x100000000ULL | 1ULL', 4294967297],
+                ['0xFFFFFFFFU | 0U', 4294967295],
+                ['0x1FFFFFFFFFFFFFULL & 0x100000000ULL', 4294967296],
+                ['0x100000003ULL ^ 0x100000000ULL', 3],
+                ['-0x100000000LL | 1LL', -4294967295],
+            ] as const) {
+                assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), expected, expression);
+                assert.strictEqual(MacroExpander.evaluateToNumber(expression), expected, expression);
+            }
+        });
+
+        test('does not guess unsigned wraparound or mixed signed conversion results', () => {
+            for (const expression of [
+                '-1U', '-(0b1010U + 2L)', '0U - 1U',
+                '-1 & 0xFFFFFFFFU', '0xFFFFFFFFU + 1U',
+                '0xFFFFFFFFUL + 1UL', '2147483647 + 1',
+                '1UU', '1LLLL',
+            ]) {
+                assert.strictEqual(MacroExpander.evaluateToSafeInteger(expression), null, expression);
+                assert.strictEqual(MacroExpander.evaluateToNumber(expression), null, expression);
             }
         });
 

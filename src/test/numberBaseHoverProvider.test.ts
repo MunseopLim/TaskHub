@@ -487,6 +487,22 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             });
         });
 
+        test('rejected numeric macros cannot fall back to copying their first literal', async () => {
+            for (const expression of ['0xFFFFFFFFU + 1U', '9007199254740993 & 1', '-1U']) {
+                const source = sourceDocument('/hover/rejected-macro.h', `#define BAD ${expression}`);
+                const position = new vscode.Position(0, 9);
+                const cancellation = new vscode.CancellationTokenSource();
+                await withLsp([source], command => command === 'vscode.executeDefinitionProvider'
+                    ? [new vscode.Location(source.uri, position)] : [], async () => {
+                    try {
+                        const text = markdownText(await provider.provideHover(source, position, cancellation.token));
+                        assert.match(text, /Macro: BAD/, expression);
+                        assert.doesNotMatch(text, /command:taskhub.copyHoverValue/, expression);
+                    } finally { cancellation.dispose(); }
+                });
+            }
+        });
+
         test('an LSP fallback callback at its definition cannot start another lookup chain', async () => {
             const source = sourceDocument('/hover/source.c', 'X;');
             const definition = sourceDocument('/hover/definition.c', 'const int X = other();');
@@ -1161,6 +1177,10 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 ['(9007199254740993 - 9007199254740992)', []],
                 ['(9007199254740991 + 2) - 9007199254740991', []],
                 ['(1 << 5) | 3', ['0x23', '35', '0b100011']],
+                ['0x100000000ULL | 1ULL', ['0x100000001', '4294967297', '0b1' + '0'.repeat(31) + '1']],
+                ['0xFFFFFFFFU | 0U', ['0xFFFFFFFF', '4294967295', '0b' + '1'.repeat(32)]],
+                ['-1U', []],
+                ['0xFFFFFFFFU + 1U', []],
             ] as const) {
                 const document = await vscode.workspace.openTextDocument({
                     language: 'cpp', content: `#define PRECISION ${expression}`,

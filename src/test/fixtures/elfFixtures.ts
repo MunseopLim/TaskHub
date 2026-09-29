@@ -19,6 +19,7 @@
  * | --- | --- |
  * | `buildMinimalElf32()` | 개요 표, All Sections 표 |
  * | `buildElf32WithSymbols()` | + region 카드 상세 표, Object Summary |
+ * | `buildElf32WithThumbSymbols()` | + Thumb 함수 bit0·섹션 끝의 Hex 선택 범위 |
  * | `buildElf32WithDwarfLines()` | + DWARF 4 함수별 소스 열기 |
  * | `buildElf32WithDwarf5Lines()` | + 외부 문자열 table을 쓰는 DWARF 5 소스 열기 |
  * | `examples/sample_armlink.txt` | + `func`(함수명) 열과 `Function ▶` 토글 |
@@ -102,6 +103,19 @@ export function buildElf32WithSymbols(): Buffer {
         { name: 'g_buffer', addr: 0x20000040, size: 0x40, type: 1, sectionIndex: 3 },
     ];
     return assembleElf32(sections, symbols);
+}
+
+/** ARM ELF의 함수 포인터 bit0와 실제 코드 주소가 다른 입력. */
+export function buildElf32WithThumbSymbols(): Buffer {
+    return assembleElf32([
+        { name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 0x10 },
+        { name: '.bss', type: SHT_NOBITS, flags: SHF_ALLOC | SHF_WRITE, addr: 0x20000000, size: 0x20 },
+    ], [
+        { name: 'main', addr: 0x08000001, size: 4, type: 2, sectionIndex: 1 },
+        { name: 'odd_object', addr: 0x08000005, size: 1, type: 1, sectionIndex: 1 },
+        { name: 'arm_function', addr: 0x08000008, size: 4, type: 2, sectionIndex: 1 },
+        { name: 'section_end', addr: 0x0800000d, size: 4, type: 2, sectionIndex: 1 },
+    ]);
 }
 
 /**

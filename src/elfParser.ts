@@ -8,6 +8,7 @@ const ELF_MAGIC = [0x7f, 0x45, 0x4c, 0x46]; // \x7fELF
 
 // ELF class
 const ELFCLASS32 = 1;
+const EM_ARM = 40;
 
 // ELF data encoding
 const ELFDATA2LSB = 1; // Little-endian
@@ -178,6 +179,7 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
     };
 
     // ELF32 header fields
+    const machine = read16(18);
     const entryPoint = read32(24);
     const phOff = read32(28);        // Program header table offset
     const shOff = read32(32);        // Section header table offset
@@ -351,7 +353,10 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
                 if ((sType === STT_FUNC || sType === STT_OBJECT) && sz > 0) {
                     symbols.push({
                         name: readStringFrom(symStrTabOffset, symStrTabSize, nameOff),
-                        addr: value,
+                        // ARM ELF의 Thumb FUNC st_value bit0는 명령어 집합 표시다.
+                        // 크기·섹션 범위·DWARF·Hex 선택에는 실제 코드 주소를 쓴다.
+                        // OBJECT와 다른 아키텍처의 홀수 주소는 유효한 주소이므로 유지한다.
+                        addr: machine === EM_ARM && sType === STT_FUNC ? value - (value % 2) : value,
                         size: sz,
                         type: sType === STT_FUNC ? 'FUNC' : 'OBJECT',
                         sectionIndex: shndx,

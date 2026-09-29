@@ -16,7 +16,37 @@ import {
     ElfSegment,
     MemoryRegion,
 } from '../elfParser';
-import { buildElf32WithSymbols } from './fixtures/elfFixtures';
+import { buildElf32WithSymbols, buildElf32WithThumbSymbols } from './fixtures/elfFixtures';
+
+suite('ARM Thumb symbol addresses', () => {
+    test('clears Thumb bit0 only for ARM functions and retains their full section-end byte range', () => {
+        const buffer = buildElf32WithThumbSymbols();
+        const parsed = parseElf32(buffer);
+        const byName = new Map(parsed.symbols.map(symbol => [symbol.name, symbol]));
+        assert.strictEqual(byName.get('main')?.addr, 0x08000000);
+        assert.strictEqual(byName.get('arm_function')?.addr, 0x08000008);
+        assert.strictEqual(byName.get('odd_object')?.addr, 0x08000005);
+        assert.strictEqual(byName.get('section_end')?.addr, 0x0800000c);
+
+        const text = parsed.sections.find(section => section.name === '.text')!;
+        const usage = computeSymbolUsage(parsed.symbols, parsed.sections,
+            [{ name: 'FLASH', origin: text.addr, size: text.size }], parsed.segments, buffer.length);
+        const end = usage[0].sections.find(section => section.name === 'section_end');
+        assert.deepStrictEqual(end?.fileRange, { kind: 'file', offset: text.offset! + 12, size: 4 });
+        assert.strictEqual(end?.addr, text.addr + 12);
+        assert.strictEqual(end!.addr + end!.size, text.addr + text.size);
+        assert.deepStrictEqual([...buffer.subarray(text.offset! + 12, text.offset! + 16)], [12, 13, 14, 15]);
+    });
+
+    test('preserves odd function addresses for non-ARM ELF machines', () => {
+        const buffer = buildElf32WithThumbSymbols();
+        buffer.writeUInt16LE(3, 18); // EM_386
+        const symbols = parseElf32(buffer).symbols;
+        assert.strictEqual(symbols.find(symbol => symbol.name === 'main')?.addr, 0x08000001);
+        assert.strictEqual(symbols.find(symbol => symbol.name === 'section_end')?.addr, 0x0800000d);
+        assert.strictEqual(symbols.find(symbol => symbol.name === 'odd_object')?.addr, 0x08000005);
+    });
+});
 
 /**
  * Helper to build a minimal ELF32 little-endian binary in a Buffer.

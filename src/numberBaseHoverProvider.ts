@@ -24,6 +24,10 @@ interface TypeConfigCacheEntry {
 /** Maximum number of taskhub_types.json files cached across workspaces. */
 const TYPE_CONFIG_CACHE_MAX = 16;
 
+// 안전 평가를 거부한 숫자식도 매크로 호버가 소유한다. LSP의 단순 #define
+// 리터럴 추출로 내려가면 전체 식 대신 첫 피연산자를 복사 가능한 값으로 보인다.
+const NUMERIC_MACRO_PREFIX = /^[\s()+-]*\d/;
+
 /** One budget shared by every LSP request and document read in a hover. */
 const LSP_TIMEOUT_MS = 3000;
 export const MAX_HOVER_DEFINITION_CANDIDATES = 16;
@@ -1111,7 +1115,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         // 1. It expands to other macros (more than 1 step), OR
         // 2. It evaluates to a numeric value
         const hasExpansion = result.expansionSteps.length > 1;
-        const hasNumericValue = numericValue !== null || MacroExpander.evaluateToNumber(result.expandedValue) !== null;
+        const hasNumericValue = numericValue !== null || NUMERIC_MACRO_PREFIX.test(result.expandedValue);
 
         if (!hasExpansion && !hasNumericValue) {
             return null; // Not useful to show
@@ -1144,7 +1148,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             if (Number.isSafeInteger(numericValue) && numericValue >= 0) {
                 md.appendMarkdown(this.generateBitPositionDisplay(numericValue));
             }
-        } else if (MacroExpander.evaluateToNumber(expansionResult.expandedValue ?? '') !== null) {
+        } else if (NUMERIC_MACRO_PREFIX.test(expansionResult.expandedValue ?? '')) {
             appendNumberConversions(md, NaN);
         }
 
