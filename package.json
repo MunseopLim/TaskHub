@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.51",
+  "version": "0.8.52",
   "license": "MIT",
   "repository": {
     "type": "git",

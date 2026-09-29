@@ -6,6 +6,7 @@ import { parseElf32, classifySections, computeMemoryUsage, computeSymbolUsage, a
 import { parseLinkerFileWithDiagnostics } from './linkerScriptParser';
 import { ARM_LINK_MAX_ENTRIES, parseArmLinkList, toMemoryRegions, toElfSections, toAggregatedSummary, toMemoryUsage } from './armLinkListParser';
 import { t } from './i18n';
+import { plainNotificationText } from './notificationText';
 import { DIALOG_SCOPE, showOpenDialogWithMemory, showSaveDialogWithMemory } from './dialogMemory';
 import { openHexViewerFile } from './hexViewer';
 import { coerceToUri } from './previewOpener';
@@ -199,10 +200,10 @@ export const MEMORY_MAP_MAX_SYMBOL_PICK_ITEMS = 5000;
  */
 function showSaveHtmlTooLargeError(): void {
     const mb = Math.round(MEMORY_MAP_MAX_SAVE_HTML_CHARS / (1024 * 1024));
-    vscode.window.showErrorMessage(t(
+    vscode.window.showErrorMessage(plainNotificationText(t(
         `저장할 HTML이 너무 큽니다(${mb}MB 초과). HTML에는 접기·검색 상태와 무관하게 전체 맵 데이터가 포함됩니다. 더 작거나 분할된 맵을 열거나, 간략한 *Copy Report* 또는 전체 텍스트인 *Copy Full Dump* 를 사용하세요.`,
         `The HTML to save is too large (over ${mb} MB). HTML always contains the full map data regardless of collapse or search state. Open a smaller or split map, or use the compact *Copy Report* or the complete text *Copy Full Dump* instead.`
-    ));
+    )));
 }
 
 function formatFileSize(bytes: number): string {
@@ -362,32 +363,32 @@ function resolveMemoryMapRegions(
                     `${reason} MEMORY 선언의 상수식을 확인하거나 파일을 다시 선택한 뒤 다시 시도하세요.`,
                     `${reason} Check the constant expressions in MEMORY declarations or select the file again, then try again.`
                 );
-                vscode.window.showWarningMessage(refreshReason);
+                vscode.window.showWarningMessage(plainNotificationText(refreshReason));
                 return { ok: false, regions: [], reason: refreshReason };
             }
-            vscode.window.showWarningMessage(t(
+            vscode.window.showWarningMessage(plainNotificationText(t(
                 `${reason} 저장된 영역 또는 ELF 프로그램 헤더로 계속 엽니다.`,
                 `${reason} Opening with saved regions or ELF program headers instead.`
-            ));
+            )));
             return { ok: true, regions: config.regions ?? [] };
         }
         if (diagnostics.some(diagnostic => diagnostic.code === 'scatter-assert')) {
-            vscode.window.showInformationMessage(t(
+            vscode.window.showInformationMessage(plainNotificationText(t(
                 `ScatterAssert 조건은 평가하지 않았습니다 (${linkerName}). 선언된 메모리 영역을 표시합니다. 조건 검증은 링커 빌드 결과를 확인하세요.`,
                 `ScatterAssert conditions were not evaluated (${linkerName}). Showing the declared memory regions; check the linker build result to verify the conditions.`
-            ));
+            )));
         }
         return { ok: true, regions };
     } catch (e: unknown) {
         const reason = describeMemoryMapLinkerFailure(e, linkerName);
         if (mode === 'refresh') {
-            vscode.window.showErrorMessage(reason);
+            vscode.window.showErrorMessage(plainNotificationText(reason));
             return { ok: false, regions: [], reason };
         }
-        vscode.window.showWarningMessage(t(
+        vscode.window.showWarningMessage(plainNotificationText(t(
             `${reason} 저장된 영역 또는 ELF 프로그램 헤더로 계속 엽니다.`,
             `${reason} Opening with saved regions or ELF program headers instead.`
-        ));
+        )));
         return { ok: true, regions: config.regions ?? [] };
     }
 }
@@ -505,17 +506,17 @@ export function openMemoryMapFromUri(
     // UI-side authority that Node fs cannot preserve, so accepting it here
     // would silently read the same path on the wrong machine.
     if (uri && uri.scheme !== 'file') {
-        vscode.window.showErrorMessage(t(
+        vscode.window.showErrorMessage(plainNotificationText(t(
             `Memory Map은 ${uri.scheme}: URI를 직접 열 수 없습니다. 로컬 또는 현재 원격 확장 호스트에서 접근 가능한 파일을 선택해 주세요.`,
             `Memory Map cannot open ${uri.scheme}: URIs directly. Select a file accessible to the local or current remote extension host.`
-        ));
+        )));
         return false;
     }
     if (!uri || !/\.(?:elf|axf|out)$/i.test(uri.fsPath)) {
-        vscode.window.showErrorMessage(t(
+        vscode.window.showErrorMessage(plainNotificationText(t(
             'Memory Map으로 열 ELF 파일(.elf/.axf/.out)을 선택해 주세요.',
             'Select an ELF file (.elf/.axf/.out) to open with Memory Map.'
-        ));
+        )));
         return false;
     }
 
@@ -560,7 +561,7 @@ function openMemoryMapPanelResult(
         stat = fs.statSync(filePath);
     } catch (e: unknown) {
         const reason = describeMemoryMapInputFailure(e, fileName);
-        vscode.window.showErrorMessage(reason);
+        vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -569,7 +570,7 @@ function openMemoryMapPanelResult(
             `파일 크기(${formatFileSize(stat.size)})가 Memory Map 처리 한도(${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)})를 초과합니다. 한도 이하의 입력 파일을 사용하세요.`,
             `File size (${formatFileSize(stat.size)}) exceeds the Memory Map limit (${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)}). Use an input file within the limit.`
         );
-        vscode.window.showErrorMessage(reason);
+        vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -578,7 +579,7 @@ function openMemoryMapPanelResult(
         buffer = fs.readFileSync(filePath);
     } catch (e: unknown) {
         const reason = describeMemoryMapInputFailure(e, fileName);
-        vscode.window.showErrorMessage(reason);
+        vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -587,7 +588,7 @@ function openMemoryMapPanelResult(
             `유효한 ELF 파일이 아닙니다 (${fileName}): 파일이 너무 작습니다 (${formatFileSize(buffer.length)}). 파일을 다시 빌드한 뒤 다시 시도하세요.`,
             `Not a valid ELF file (${fileName}): file is too small (${formatFileSize(buffer.length)}). Rebuild the file, then try again.`
         );
-        vscode.window.showErrorMessage(reason);
+        vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -596,7 +597,7 @@ function openMemoryMapPanelResult(
         parseResult = parseElf32(buffer);
     } catch (_e: unknown) {
         const reason = describeMemoryMapParseFailure(fileName, 'elf');
-        vscode.window.showErrorMessage(reason);
+        vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -646,10 +647,10 @@ function openMemoryMapPanelResult(
     const debugLine = sections.find(section => section.name === '.debug_line');
     if (debugLine && debugLine.offset !== undefined && !debugLine.isNoBits) {
         if ((debugLine.flags & ELF_SHF_COMPRESSED) !== 0) {
-            vscode.window.showInformationMessage(t(
+            vscode.window.showInformationMessage(plainNotificationText(t(
                 `압축된 DWARF .debug_line은 아직 지원하지 않습니다 (${fileName}). Memory Map의 나머지 기능은 그대로 사용할 수 있습니다.`,
                 `Compressed DWARF .debug_line is not supported yet (${fileName}). The rest of the Memory Map remains available.`
-            ));
+            )));
         } else {
             const debugLineEnd = debugLine.offset + debugLine.size;
             if (
@@ -686,22 +687,22 @@ function openMemoryMapPanelResult(
                             ),
                         };
                         formats.push(...dwarf.unsupportedFeatures.map(feature => featureLabels[feature]));
-                        vscode.window.showInformationMessage(t(
+                        vscode.window.showInformationMessage(plainNotificationText(t(
                             `이 ELF의 소스 위치 정보(${formats.join(', ')})는 아직 지원하지 않습니다. Memory Map의 나머지 기능은 그대로 사용할 수 있습니다.`,
                             `Source locations in this ELF (${formats.join(', ')}) are not supported yet. The rest of the Memory Map remains available.`
-                        ));
+                        )));
                     }
                 } catch (e: any) {
-                    vscode.window.showWarningMessage(t(
+                    vscode.window.showWarningMessage(plainNotificationText(t(
                         `DWARF 소스 위치를 읽지 못했습니다 (${fileName}). Memory Map은 계속 엽니다: ${e.message}`,
                         `Could not read DWARF source locations (${fileName}). The Memory Map will still open: ${e.message}`
-                    ));
+                    )));
                 }
             } else {
-                vscode.window.showWarningMessage(t(
+                vscode.window.showWarningMessage(plainNotificationText(t(
                     `DWARF .debug_line 범위가 ELF 파일을 벗어납니다 (${fileName}). Memory Map은 소스 이동 없이 계속 엽니다.`,
                     `The DWARF .debug_line range exceeds the ELF file (${fileName}). The Memory Map will continue without source navigation.`
-                ));
+                )));
             }
         }
     }
@@ -749,7 +750,7 @@ function openMemoryMapFromListingResult(
         stat = fs.statSync(filePath);
     } catch (e: unknown) {
         const reason = describeMemoryMapInputFailure(e, fileName);
-        vscode.window.showErrorMessage(reason);
+        vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -758,7 +759,7 @@ function openMemoryMapFromListingResult(
             `파일 크기(${formatFileSize(stat.size)})가 Memory Map 처리 한도(${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)})를 초과합니다. 한도 이하의 입력 파일을 사용하세요.`,
             `File size (${formatFileSize(stat.size)}) exceeds the Memory Map limit (${formatFileSize(MEMORY_MAP_MAX_FILE_SIZE)}). Use an input file within the limit.`
         );
-        vscode.window.showErrorMessage(reason);
+        vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -767,7 +768,7 @@ function openMemoryMapFromListingResult(
         content = fs.readFileSync(filePath, 'utf-8');
     } catch (e: unknown) {
         const reason = describeMemoryMapInputFailure(e, fileName);
-        vscode.window.showErrorMessage(reason);
+        vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -776,7 +777,7 @@ function openMemoryMapFromListingResult(
             `Listing 파일이 비어 있습니다 (${fileName}). Listing을 다시 생성한 뒤 다시 시도하세요.`,
             `The listing file is empty (${fileName}). Regenerate it, then try again.`
         );
-        vscode.window.showWarningMessage(reason);
+        vscode.window.showWarningMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -785,7 +786,7 @@ function openMemoryMapFromListingResult(
         result = parseArmLinkList(content);
     } catch (_e: unknown) {
         const reason = describeMemoryMapParseFailure(fileName, 'listing');
-        vscode.window.showErrorMessage(reason);
+        vscode.window.showErrorMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -793,10 +794,10 @@ function openMemoryMapFromListingResult(
     // "이 심볼이 왜 없지"가 링커 문제인지 뷰어 한계인지 알 수 없다.
     // 요약 수치(Total RO/RW/ROM)는 잘린 엔트리까지 포함해 계산되므로 정확하다.
     if (result.truncatedEntries > 0) {
-        vscode.window.showWarningMessage(t(
+        vscode.window.showWarningMessage(plainNotificationText(t(
             `엔트리가 너무 많아 ${ARM_LINK_MAX_ENTRIES.toLocaleString()}개까지만 표시합니다 (${result.truncatedEntries.toLocaleString()}개 생략, ${fileName}). 요약 수치는 전체 기준입니다.`,
             `Too many entries — showing the first ${ARM_LINK_MAX_ENTRIES.toLocaleString()} (${result.truncatedEntries.toLocaleString()} omitted, ${fileName}). Summary totals still cover the whole file.`
-        ));
+        )));
     }
 
     if (result.execRegions.length === 0) {
@@ -804,7 +805,7 @@ function openMemoryMapFromListingResult(
             `Execution Region을 찾을 수 없습니다 (${fileName}). ARM Linker Listing (armlink --list) 출력 파일인지 확인해 주세요.`,
             `No execution regions found (${fileName}). Please verify this is an ARM Linker Listing (armlink --list) output file.`
         );
-        vscode.window.showWarningMessage(reason);
+        vscode.window.showWarningMessage(plainNotificationText(reason));
         return { opened: false, reason };
     }
 
@@ -838,7 +839,7 @@ function ensureMemoryMapElfIsCurrent(
     try {
         current = fs.statSync(filePath);
     } catch (e: unknown) {
-        vscode.window.showErrorMessage(describeMemoryMapInputFailure(e, fileName));
+        vscode.window.showErrorMessage(plainNotificationText(describeMemoryMapInputFailure(e, fileName)));
         return false;
     }
     if (current.size !== fingerprint.size || current.mtimeMs !== fingerprint.mtimeMs) {
@@ -848,11 +849,11 @@ function ensureMemoryMapElfIsCurrent(
         );
         if (requestRefresh) {
             const refreshLabel = t('새로 고침', 'Refresh');
-            void vscode.window.showWarningMessage(message, refreshLabel).then(selected => {
+            void vscode.window.showWarningMessage(plainNotificationText(message), refreshLabel).then(selected => {
                 if (selected === refreshLabel) { requestRefresh(); }
             });
         } else {
-            vscode.window.showWarningMessage(message);
+            vscode.window.showWarningMessage(plainNotificationText(message));
         }
         return false;
     }
@@ -908,7 +909,7 @@ function showPanel(
             'taskhub.memoryMap',
             `Memory Map: ${fileName}`,
             vscode.ViewColumn.Active,
-            { enableScripts: true }
+            { enableScripts: true, localResourceRoots: [] }
         );
         created = true;
         panel.onDidDispose(() => {
@@ -981,7 +982,8 @@ function showPanel(
     let nextMessageDisposable: vscode.Disposable | undefined;
     try {
         nextMessageDisposable = panel.webview.onDidReceiveMessage(async (message: any) => {
-            if (panels.get(panelKey) !== state || message.renderId !== state.renderId) {
+            if (!message || typeof message !== 'object' || Array.isArray(message)
+                || panels.get(panelKey) !== state || message.renderId !== state.renderId) {
                 return;
             }
             if (message.command === 'openHex') {
@@ -1010,15 +1012,15 @@ function showPanel(
                 const shownLabel = compactMemoryMapTargetLabel(target.label);
                 if (target.fileRange.kind !== 'file') {
                     if (target.fileRange.reason === 'nobits' || target.fileRange.reason === 'zero-fill') {
-                        vscode.window.showWarningMessage(t(
+                        vscode.window.showWarningMessage(plainNotificationText(t(
                             `'${shownLabel}'은 메모리에서만 존재하는 BSS/NOBITS 영역이라 ELF 파일에 표시할 바이트가 없습니다.`,
                             `'${shownLabel}' exists only in a BSS/NOBITS memory range, so the ELF file has no bytes to show.`
-                        ));
+                        )));
                     } else {
-                        vscode.window.showErrorMessage(t(
+                        vscode.window.showErrorMessage(plainNotificationText(t(
                             `'${shownLabel}'의 메모리 주소 범위를 ELF 파일 바이트로 변환할 수 없습니다. 파일이 손상되었거나 범위가 섹션 경계를 벗어났습니다.`,
                             `Cannot map the memory range for '${shownLabel}' to ELF file bytes. The file may be malformed or the range crosses a section boundary.`
-                        ));
+                        )));
                     }
                     return;
                 }
@@ -1095,7 +1097,7 @@ function showPanel(
                     result = refresh();
                 } catch (_e: unknown) {
                     const reason = describeUnexpectedMemoryMapRefreshFailure(fileName);
-                    vscode.window.showErrorMessage(reason);
+                    vscode.window.showErrorMessage(plainNotificationText(reason));
                     result = { opened: false, reason };
                 }
                 if (!result.opened) {
@@ -1152,7 +1154,7 @@ function showPanel(
                         : undefined;
                 if (copyText === undefined) { return; }
                 await vscode.env.clipboard.writeText(copyText);
-                vscode.window.showInformationMessage(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.'));
+                vscode.window.showInformationMessage(plainNotificationText(t('메모리 맵 리포트가 클립보드에 복사되었습니다.', 'Memory map report copied to clipboard.')));
             } else if (message.command === 'saveHtmlTooLarge') {
                 // 웹뷰가 **직렬화 전에** 걸러 낸 경우. 아래 호스트 검사와 같은
                 // 안내를 쓴다 — 사용자에게는 같은 상황이다.
@@ -1182,12 +1184,12 @@ function showPanel(
                         // 복제된다. 두 번 써서 그 사본을 없앤다.
                         fs.writeFileSync(uri.fsPath, '<!DOCTYPE html>\n', 'utf-8');
                         fs.appendFileSync(uri.fsPath, html, 'utf-8');
-                        vscode.window.showInformationMessage(t('HTML 파일이 저장되었습니다.', 'HTML file saved.'));
+                        vscode.window.showInformationMessage(plainNotificationText(t('HTML 파일이 저장되었습니다.', 'HTML file saved.')));
                     } catch (e: any) {
-                        vscode.window.showErrorMessage(t(
+                        vscode.window.showErrorMessage(plainNotificationText(t(
                             `HTML 파일 저장 실패: ${e.message}`,
                             `Failed to save HTML file: ${e.message}`
-                        ));
+                        )));
                     }
                 }
             }
@@ -1704,10 +1706,10 @@ export async function selectDwarfSourceCandidate(
         } else {
             comparisons = await vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
-                title: t(
+                title: plainNotificationText(t(
                     `${shownTargetLabel} 소스 checksum 비교 중…`,
                     `Comparing source checksums for ${shownTargetLabel}…`
-                ),
+                )),
                 cancellable: true,
             }, (_progress, cancellationToken) => compareDwarfSourceCandidates(
                 expectedMd5,
@@ -1743,19 +1745,19 @@ export async function selectDwarfSourceCandidate(
                 if (shouldWarn) {
                     const showWarningMessage = options.showWarningMessage
                         ?? ((message: string) => vscode.window.showWarningMessage(message));
-                    void Promise.resolve(showWarningMessage(t(
+                    void Promise.resolve(showWarningMessage(plainNotificationText(t(
                         `유일한 소스 후보를 엽니다. ELF 기록과 내용이 달라 빌드 후 소스가 변경되었을 수 있습니다: ${path.basename(candidate)}`,
                         `Opening the only source candidate. Its contents differ from the ELF record and may have changed after the build: ${path.basename(candidate)}`
-                    ))).catch(() => undefined);
+                    )))).catch(() => undefined);
                 }
             } else if (comparison?.status === 'unavailable' && shouldWarn) {
                 const reason = checksumUnavailableDetail(comparison.reason);
                 const showWarningMessage = options.showWarningMessage
                     ?? ((message: string) => vscode.window.showWarningMessage(message));
-                void Promise.resolve(showWarningMessage(t(
+                void Promise.resolve(showWarningMessage(plainNotificationText(t(
                     `유일한 소스 후보를 열지만 checksum을 확인하지 못했습니다: ${reason}`,
                     `Opening the only source candidate, but its checksum could not be verified: ${reason}`
-                ))).catch(() => undefined);
+                )))).catch(() => undefined);
             }
             return candidate;
         }
@@ -1842,24 +1844,24 @@ export async function openMemoryMapSourceLocation(
             candidates = await findWorkspaceSourceBySuffix(target.location.filePath);
         } catch (e: any) {
             if (e instanceof DwarfSourceSearchLimitError) {
-                vscode.window.showWarningMessage(t(
+                vscode.window.showWarningMessage(plainNotificationText(t(
                     `소스 후보가 100개를 초과해 자동으로 선택하지 않았습니다 (${target.location.filePath}). 워크스페이스 범위를 좁혀 다시 시도하세요.`,
                     `More than 100 source candidates matched, so none was selected automatically (${target.location.filePath}). Narrow the workspace and try again.`
-                ));
+                )));
                 return;
             }
-            vscode.window.showErrorMessage(t(
+            vscode.window.showErrorMessage(plainNotificationText(t(
                 `워크스페이스에서 소스 파일 검색 실패 (${target.location.filePath}): ${e.message}`,
                 `Failed to search the workspace for the source file (${target.location.filePath}): ${e.message}`
-            ));
+            )));
             return;
         }
     }
     if (candidates.length === 0) {
-        vscode.window.showWarningMessage(t(
+        vscode.window.showWarningMessage(plainNotificationText(t(
             `소스 파일을 찾을 수 없습니다: ${target.location.filePath}:${target.location.line}`,
             `Source file not found: ${target.location.filePath}:${target.location.line}`
-        ));
+        )));
         return;
     }
 
@@ -1872,10 +1874,10 @@ export async function openMemoryMapSourceLocation(
     } catch (error: unknown) {
         if (error instanceof vscode.CancellationError) {
             const selectManually = t('직접 선택', 'Select manually');
-            const selected = await vscode.window.showInformationMessage(t(
+            const selected = await vscode.window.showInformationMessage(plainNotificationText(t(
                 '소스 checksum 비교를 취소했습니다. 비교 없이 후보를 직접 선택할 수 있습니다.',
                 'Source checksum comparison was canceled. You can select a candidate without verification.'
-            ), selectManually);
+            )), selectManually);
             if (selected !== selectManually) { return; }
             const targetWithoutChecksum: MemoryMapSourceTarget = {
                 ...target,
@@ -1890,10 +1892,10 @@ export async function openMemoryMapSourceLocation(
         } else {
             const reason = error instanceof Error ? error.message : String(error);
             const shownTargetLabel = compactMemoryMapTargetLabel(target.label);
-            vscode.window.showErrorMessage(t(
+            vscode.window.showErrorMessage(plainNotificationText(t(
                 `소스 후보 확인 실패 (${shownTargetLabel}): ${reason}`,
                 `Failed to verify source candidates (${shownTargetLabel}): ${reason}`
-            ));
+            )));
             return;
         }
     }
@@ -1904,10 +1906,10 @@ export async function openMemoryMapSourceLocation(
         const requestedLine = target.location.line - 1;
         const line = Math.max(0, Math.min(requestedLine, document.lineCount - 1));
         if (line !== requestedLine) {
-            vscode.window.showWarningMessage(t(
+            vscode.window.showWarningMessage(plainNotificationText(t(
                 `기록된 ${target.location.line}행이 ${path.basename(selectedPath)}의 범위를 벗어나 가장 가까운 ${line + 1}행을 엽니다. ELF를 만든 뒤 소스가 변경되었을 수 있습니다.`,
                 `Recorded line ${target.location.line} is outside ${path.basename(selectedPath)}. Opening the nearest line, ${line + 1}; the source may have changed since the ELF was built.`
-            ));
+            )));
         }
         const editor = await vscode.window.showTextDocument(document, { preview: true });
         const textLine = document.lineAt(line);
@@ -1917,10 +1919,10 @@ export async function openMemoryMapSourceLocation(
         editor.selection = new vscode.Selection(position, position);
         editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
     } catch (e: any) {
-        vscode.window.showErrorMessage(t(
+        vscode.window.showErrorMessage(plainNotificationText(t(
             `소스 파일 열기 실패 (${selectedPath}): ${e.message}`,
             `Failed to open source file (${selectedPath}): ${e.message}`
-        ));
+        )));
     }
 }
 
@@ -2315,10 +2317,10 @@ export function collectSourceSymbolMatches(
 export async function revealSourceSymbolInMemoryMap(identifier: string): Promise<void> {
     const trimmed = identifier.trim();
     if (!trimmed) {
-        vscode.window.showInformationMessage(t(
+        vscode.window.showInformationMessage(plainNotificationText(t(
             '커서 위치에서 심볼 이름을 찾지 못했습니다.',
             'No symbol name found at the cursor position.'
-        ));
+        )));
         return;
     }
 
@@ -2327,10 +2329,10 @@ export async function revealSourceSymbolInMemoryMap(identifier: string): Promise
         // 만나는 화면이 대개 여기다. 안내로 끝내면 막다른 길이라 여는 길을 같이 준다.
         const openLabel = t('Memory Map 열기', 'Open Memory Map');
         const choice = await vscode.window.showInformationMessage(
-            t(
+            plainNotificationText(t(
                 '열려 있는 Memory Map 이 없습니다. 먼저 .axf/.elf 또는 Linker Listing 파일로 Memory Map 을 열어 주세요.',
                 'No Memory Map is open. Open one from an .axf/.elf or linker listing file first.'
-            ),
+            )),
             openLabel
         );
         if (choice === openLabel) {
@@ -2350,7 +2352,7 @@ export async function revealSourceSymbolInMemoryMap(identifier: string): Promise
         // 열린 맵 중 심볼 단위 행을 가진 것이 하나도 없으면, 원인은 이 심볼이
         // 아니라 맵 자체다. 그 경우 "인라인됐을 수 있다" 는 매번 틀린 설명이 된다.
         const anySymbolic = Array.from(panels.values()).some(state => state.hasSymbols);
-        vscode.window.showInformationMessage(anySymbolic
+        vscode.window.showInformationMessage(plainNotificationText(anySymbolic
             ? t(
                 `'${trimmed}' — 열려 있는 Memory Map 에서 찾지 못했습니다. 최적화로 인라인됐거나, 크기가 0이거나, 다른 바이너리의 심볼일 수 있습니다.`,
                 `'${trimmed}' was not found in any open Memory Map. It may have been inlined, have zero size, or belong to a different binary.`
@@ -2358,7 +2360,7 @@ export async function revealSourceSymbolInMemoryMap(identifier: string): Promise
             : t(
                 '열려 있는 Memory Map 에 심볼 단위 행이 없습니다 — stripped 바이너리이거나, 함수 단위 섹션 없이 만든 Listing 입니다. 심볼 테이블이 있는 .axf/.elf 를 열거나 -ffunction-sections 로 빌드해 주세요.',
                 'No open Memory Map has symbol-level rows — the binary is stripped, or the listing was built without per-function sections. Open an .axf/.elf that still has its symbol table, or build with -ffunction-sections.'
-            ));
+            )));
         return;
     }
 
@@ -2396,10 +2398,10 @@ export async function revealSourceSymbolInMemoryMap(identifier: string): Promise
     const state = panels.get(filePathIdentityKey(picked.filePath));
     if (!state) {
         // Quick Pick 을 띄워 둔 사이에 그 패널이 닫힌 경우.
-        vscode.window.showInformationMessage(t(
+        vscode.window.showInformationMessage(plainNotificationText(t(
             '선택한 Memory Map 패널이 닫혔습니다. 다시 열고 시도해 주세요.',
             'That Memory Map panel was closed. Reopen it and try again.'
-        ));
+        )));
         return;
     }
     lastActivePanel = picked.filePath;
@@ -2412,20 +2414,20 @@ export async function goToSymbol() {
     if (!active) {
         // 조용히 끝내면 명령이 죽은 것으로 읽힌다 — 형제 명령(소스 → 맵)과 같은
         // 상황에서 같은 안내를 한다.
-        vscode.window.showInformationMessage(t(
+        vscode.window.showInformationMessage(plainNotificationText(t(
             '열려 있는 Memory Map 이 없습니다. 먼저 .axf/.elf 또는 Linker Listing 파일로 Memory Map 을 열어 주세요.',
             'No Memory Map is open. Open one from an .axf/.elf or linker listing file first.'
-        ));
+        )));
         return;
     }
     if (active.entries.length === 0 && active.regions.length === 0) {
         // 이 상태는 "영역이 정의되지 않음"이다 — 패널에는 All Sections 표가 그대로
         // 떠 있으므로, "아무것도 없다"고만 하면 화면과 어긋나 명령이 고장 난 것으로
         // 읽힌다. 패널 안내와 같은 다음 단계를 가리킨다.
-        vscode.window.showInformationMessage(t(
+        vscode.window.showInformationMessage(plainNotificationText(t(
             '이동할 목록이 없습니다. 메모리 영역이 정의되지 않았습니다 — 링커 스크립트(.ld/.sct)를 선택하거나 .vscode/taskhub_types.json 에 memoryMap.regions 를 추가하세요.',
             'Nothing to go to: no memory regions are defined. Pick a linker script (.ld/.sct), or add memoryMap.regions to .vscode/taskhub_types.json.'
-        ));
+        )));
         return;
     }
 

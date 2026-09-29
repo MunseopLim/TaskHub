@@ -250,6 +250,7 @@ suite('Hex/Text 변환기 실제 브라우저', () => {
             (vscode.window as any).createWebviewPanel = (...args: Parameters<typeof originalCreate>) => {
                 if (args[0] !== 'taskhub.hexConverter') { return originalCreate(...args); }
                 assert.strictEqual(panel, undefined, '처음 실행은 패널 하나만 만들어야 한다');
+                assert.deepStrictEqual(args[3]?.localResourceRoots, [], '계산기는 로컬 파일 리소스를 직접 읽지 않는다');
                 panel = originalCreate(...args);
                 const webview = panel.webview;
                 subscription = webview.onDidReceiveMessage(message => {

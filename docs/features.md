@@ -425,6 +425,11 @@ Actions 뷰 제목 표시줄의 **+**에서 시작합니다. 필수 값만 받�
 
 실행 중인 행의 사각형 아이콘이나 해당 행의 우클릭 메뉴로 액션 하나를, Actions 제목 표시줄의 **Stop All Actions**(`taskhub.stopAllActions`)로 전체를 중지합니다. 전체 중지 버튼은 실행 중인 액션이 있을 때만 보이며, 대상이 여러 개면 확인을 받습니다. 중지된 실행은 History에 `cancelled`·`stopped`로 기록되고 실패 알림은 표시하지 않습니다.
 
+TaskHub가 직접 실행한 프로세스를 중지할 때 macOS·Linux에서는 먼저 프로세스 그룹에 SIGTERM을
+보내 정리할 기회를 주고, 1초 뒤에도 남은 프로세스는 SIGKILL로 종료합니다. 종료 확인에는 전체
+2초 상한이 있습니다. Windows의 프로세스 트리 종료는 `taskkill /T /F`를 사용하므로 같은 유예를
+보장하지 않습니다. VS Code Task의 종료는 VS Code에 위임합니다.
+
 ### 대화형 태스크를 기다리는 중의 중지
 
 - `inputBox`와 `quickPick`은 즉시 닫힙니다.

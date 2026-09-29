@@ -19,6 +19,7 @@ import { registerFeatureLauncher } from './featureLauncher';
 import { registerWhatsNew, resolveChangelogUri } from './whatsNew';
 import { registerUpdateService } from './updateService';
 import { t } from './i18n';
+import { plainNotificationText } from './notificationText';
 import { runWithRegexBudget } from './regexBudget';
 import { RegexJobCancelledError, applyDiagnosticMatchersOffThread, applyOutputCaptureOffThread, startRegexWorkerPool, shutdownRegexWorkerPool, type RegexJobCancellation } from './regexWorkerClient';
 import { buildPreviewReport } from './previewRun';
@@ -4133,91 +4134,139 @@ async function applyDiagnosticsToCollection(
     return summary;
 }
 
+// Stop/timeout/출력 상한이 겹쳐도 종료를 공유한다. 확인된 종료도 기억해 PID 재사용 후 재신호하지 않는다.
+const pendingProcessTreeKills = new WeakMap<ReturnType<typeof spawn>, Promise<boolean>>();
+
 /**
- * spawn 한 프로세스와 **그 자손까지** 종료한다.
+ * spawn 한 프로세스와 같은 그룹의 자손을 종료한다.
  *
- * `child.kill()` 은 우리가 띄운 셸 래퍼(`cmd.exe /c …`, `sh -l -c …`)만
- * 죽인다. Windows 의 `TerminateProcess` 는 트리를 따라가지 않으므로 래퍼가
- * 사라진 뒤에도 그 아래 실제 명령이 고아로 남아 계속 돈다. POSIX 도 자식이
- * 다른 프로세스 그룹을 만들었으면 마찬가지다.
- *
- * Windows 는 `taskkill /T /F` 로 트리를 지우고, POSIX 는 프로세스 그룹 전체에
- * 시그널을 보낸다(`process.kill(-pid)`). 어느 쪽이든 실패하면 최소한 래퍼는
- * 죽도록 `child.kill()` 로 폴백한다 — 아무것도 안 죽는 것보다 낫다.
+ * POSIX는 그룹에 SIGTERM을 보내 정리할 시간을 1초 주고, 남은 그룹만 SIGKILL로
+ * 종료한다. 셸 래퍼가 먼저 종료돼도 자손의 정리를 기다린다. 그룹이 없으면 직접
+ * child를 종료한다. Windows의 taskkill /T /F는 협력적 종료를 보장하지 않으므로
+ * 기존 강제 트리 종료를 유지한다. 어느 경로든 전체 대기는 최대 2초다.
  */
 export function killProcessTree(child: ReturnType<typeof spawn>): Promise<boolean> {
-    // `child.killed` 로 미리 빠져나가지 않는다 — 그 값은 "죽었다"가 아니라
-    // "시그널을 보냈다"는 뜻이다. 출력 상한 같은 다른 경로가 먼저
-    // `child.kill()` 을 불렀다면 래퍼에만 시그널이 갔을 뿐 자손은 그대로이므로,
-    // 트리 종료는 여전히 필요하다.
     if (!child || typeof child.pid !== 'number') {
         try { child?.kill(); } catch { /* ignore */ }
         return Promise.resolve(false);
     }
+    const pending = pendingProcessTreeKills.get(child);
+    if (pending) { return pending; }
     const pid = child.pid;
+    // `child.killed`는 종료 여부가 아니라 시그널 전송 여부이므로 쓰지 않는다.
+    const hasExited = () => child.exitCode !== null || child.signalCode !== null;
+    if (hasExited() && (!child.stdout || child.stdout.destroyed) && (!child.stderr || child.stderr.destroyed)) {
+        // 파이프까지 이미 닫힌 이전 실행의 PID는 더 이상 신호 대상으로 삼지 않는다.
+        return Promise.resolve(false);
+    }
+    let groupGone = false;
+    const killDirect = (signal: NodeJS.Signals) => {
+        // 종료를 관찰한 child의 PID를 나중에 다시 사용하지 않는다.
+        if (!hasExited()) { try { child.kill(signal); } catch { /* ignore */ } }
+    };
+    const termination = new Promise<boolean>(resolve => {
+        let settled = false;
+        let groupSignalled = false;
+        let windowsRequestFinished = false;
+        let windowsTreeKilled = false;
+        let graceTimer: ReturnType<typeof setTimeout> | undefined;
+        let pollTimer: ReturnType<typeof setInterval> | undefined;
+        let taskkill: ReturnType<typeof spawn> | undefined;
 
-    // 실제 종료를 기다린다. `taskkill` 이 성공했다고 보고해도 프로세스가
-    // 즉시 사라지는 것은 아니고, 호출부(취소 경로)는 종료를 확인한 뒤
-    // reject 해야 "중지했는데 아직 돌더라" 를 만들지 않는다.
-    const exited = new Promise<void>(resolve => {
-        if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
-        child.once('close', () => resolve());
-        child.once('exit', () => resolve());
-    });
-    const fallbackKill = () => { try { child.kill('SIGKILL'); } catch { /* ignore */ } };
+        const groupExists = () => {
+            if (groupGone) { return false; }
+            try { process.kill(-pid, 0); return true; } catch (error) {
+                // 소멸을 한 번 관찰한 그룹 ID는 재사용될 수 있으므로 다시 신호를 보내지 않는다.
+                groupGone = (error as NodeJS.ErrnoException).code === 'ESRCH';
+                return !groupGone;
+            }
+        };
+        const finish = (treeKilled: boolean) => {
+            if (settled) { return; }
+            settled = true;
+            clearTimeout(deadline);
+            if (graceTimer) { clearTimeout(graceTimer); }
+            if (pollTimer) { clearInterval(pollTimer); }
+            child.removeListener('exit', checkExited);
+            child.removeListener('close', checkExited);
+            resolve(treeKilled);
+        };
+        const checkExited = () => {
+            if (settled) { return; }
+            if (process.platform === 'win32') {
+                if (windowsRequestFinished && hasExited()) { finish(windowsTreeKilled); }
+            } else if (groupSignalled) {
+                // 래퍼의 exit만으로 grace timer를 지우면 SIGTERM을 무시하는 자손이
+                // 남는다. 그룹 소멸을 관찰하면 지연된 SIGKILL도 함께 취소한다.
+                if (!groupExists() && hasExited()) { finish(true); }
+            } else if (hasExited()) {
+                finish(false);
+            }
+        };
+        const deadline = setTimeout(() => {
+            if (settled) { return; }
+            outputChannel.appendLine(`[WARN] Process tree termination for pid ${pid} did not confirm within 2s; continuing.`);
+            if (!groupGone) { killDirect('SIGKILL'); }
+            // taskkill 자체가 멈췄어도 취소 처리는 상한 내에 끝나야 한다.
+            if (taskkill && taskkill.exitCode === null && taskkill.signalCode === null) {
+                try { taskkill.kill(); } catch { /* ignore */ }
+            }
+            finish(false);
+        }, 2000);
+        child.on('exit', checkExited);
+        child.on('close', checkExited);
 
-    const requested = new Promise<boolean>(resolve => {
         if (process.platform === 'win32') {
-            let tk: ReturnType<typeof spawn>;
+            const completeRequest = (treeKilled: boolean) => {
+                if (settled || windowsRequestFinished) { return; }
+                windowsRequestFinished = true;
+                windowsTreeKilled = treeKilled;
+                if (!treeKilled) { killDirect('SIGKILL'); }
+                checkExited();
+            };
             try {
-                tk = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+                taskkill = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
             } catch {
-                fallbackKill();
-                resolve(false);
+                completeRequest(false);
                 return;
             }
-            tk.on('error', () => { fallbackKill(); resolve(false); });
-            // exit code 를 확인한다. `taskkill` 이 정상 실행되고도 실패하는
-            // 경우(권한 부족, 이미 종료됨 등)가 있는데 예전에는 `error`
-            // 이벤트만 봐서 그 실패가 조용히 묻혔다.
-            tk.on('close', (code) => {
+            taskkill.on('error', () => completeRequest(false));
+            taskkill.on('close', (code) => {
+                if (settled || windowsRequestFinished) { return; }
                 if (code !== 0) {
                     outputChannel.appendLine(`[WARN] taskkill /T /F on pid ${pid} exited with ${code}; falling back to direct kill.`);
-                    fallbackKill();
-                    resolve(false);
-                    return;
                 }
-                resolve(true);
+                completeRequest(code === 0);
             });
         } else {
             try {
-                // `detached: true` 로 띄운 자식은 pid 가 곧 프로세스 그룹 id 다.
-                process.kill(-pid, 'SIGKILL');
-                resolve(true);
+                process.kill(-pid, 'SIGTERM');
+                groupSignalled = true;
             } catch {
-                // 그룹이 없다(detached 누락 등) — 최소한 래퍼는 죽인다.
-                fallbackKill();
-                resolve(false);
+                // detached가 없는 프로세스 등: 같은 방식으로 직접 종료를 시도한다.
+                killDirect('SIGTERM');
             }
+            checkExited();
+            if (settled) { return; }
+            pollTimer = setInterval(checkExited, 25);
+            graceTimer = setTimeout(() => {
+                checkExited();
+                if (settled) { return; }
+                if (groupSignalled && groupExists()) {
+                    try { process.kill(-pid, 'SIGKILL'); } catch { killDirect('SIGKILL'); }
+                } else if (!groupSignalled) {
+                    killDirect('SIGKILL');
+                }
+                checkExited();
+            }, 1000);
         }
-    });
-
-    // 상한은 **전체**를 덮어야 한다. 예전에는 `requested` 가 끝난 *뒤에야*
-    // 2초 race 로 들어가서, `taskkill` 자체가 멈추면(디스크 IO 지연, 권한
-    // 프롬프트 등) 이 함수와 그것을 기다리는 취소 처리가 무한정 걸렸다.
-    const deadline = new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), 2000));
-    const whole = requested.then(async (treeKilled) => {
-        await exited;
+    }).then(treeKilled => {
+        // 실패한 살아 있는 대상만 다음 Stop에서 재시도한다. WeakMap이므로 child와 함께 정리된다.
+        if (!treeKilled && !groupGone) { pendingProcessTreeKills.delete(child); }
         return treeKilled;
     });
-    return Promise.race([whole, deadline]).then(result => {
-        if (result === 'timeout') {
-            outputChannel.appendLine(`[WARN] Process tree termination for pid ${pid} did not confirm within 2s; continuing.`);
-            fallbackKill();
-            return false;
-        }
-        return result;
-    });
+    pendingProcessTreeKills.set(child, termination);
+    return termination;
 }
 
 /**
@@ -6449,9 +6498,9 @@ function actionFailureNotificationMessage(
     const detail = error.message.length > 512
         ? `${error.message.slice(0, 160)}\n…\n${error.message.slice(-320)}`
         : error.message;
-    return action.failMessage
+    return plainNotificationText(action.failMessage
         ? `${action.failMessage}: ${detail}`
-        : t(`'${actionItem.title}' 액션 실패: ${detail}`, `Action '${actionItem.title}' failed: ${detail}`);
+        : t(`'${actionItem.title}' 액션 실패: ${detail}`, `Action '${actionItem.title}' failed: ${detail}`));
 }
 
 /**
@@ -6475,7 +6524,7 @@ async function offerSensitiveDebugRerun(
     failureMessage: string
 ): Promise<void> {
     const debugLabel = t('민감 디버그로 한 번 다시 실행', 'Re-run once with sensitive debug');
-    const picked = await vscode.window.showErrorMessage(failureMessage, debugLabel);
+    const picked = await vscode.window.showErrorMessage(plainNotificationText(failureMessage), debugLabel);
     if (picked !== debugLabel) { return; }
 
     const proceed = t('다시 실행', 'Re-run');
@@ -8144,7 +8193,7 @@ async function executeSingleTask(
                             const msg = error instanceof Error ? error.message : String(error);
                             outputChannel.appendLine(`[ERROR] One-shot task ${task.id} failed: ${msg}`);
                             if (readDetachedFailureNotifications()) {
-                                vscode.window.showErrorMessage(t(`원샷 태스크 '${task.id}' 시작 실패: ${msg}`, `One-shot task '${task.id}' failed to start: ${msg}`));
+                                vscode.window.showErrorMessage(plainNotificationText(t(`원샷 태스크 '${task.id}' 시작 실패: ${msg}`, `One-shot task '${task.id}' failed to start: ${msg}`)));
                             }
                         });
                     }
@@ -9106,13 +9155,18 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
 
         const isWindows = process.platform === 'win32';
         const shell = isWindows ? 'cmd.exe' : (process.env.SHELL || '/bin/sh');
-        const args = isWindows ? ['/c', command] : ['-l', '-c', command];
+        // cmd의 인용 규칙은 Windows argv 인용과 다르다. Node의 shell:true와
+        // 같은 외곽 인용 + /s를 쓰고 libuv의 재인용을 막아 node -e "..."와
+        // 공백이 든 실행 파일 경로의 내부 큰따옴표를 그대로 보존한다.
+        // /d는 사용자 AutoRun 설정이 목록 생성에 명령을 끼워 넣지 않게 한다.
+        const args = isWindows ? ['/d', '/s', '/c', `"${command}"`] : ['-l', '-c', command];
 
         let child: ReturnType<typeof spawn>;
         try {
             child = spawn(shell, args, {
                 cwd: cwd && cwd.length > 0 ? cwd : undefined,
                 stdio: ['ignore', 'pipe', 'pipe'],
+                windowsVerbatimArguments: isWindows,
                 // POSIX 에서 자기 프로세스 그룹을 갖게 해, 취소 시 그룹 전체에
                 // 시그널을 보낼 수 있게 한다 (killProcessTree 참조).
                 detached: !isWindows
@@ -9880,7 +9934,9 @@ function getShellAccessibleEnvNames(): Promise<Set<string> | null> {
             clearTimeout(timer);
             finish(null);
         });
-        child.on('exit', (code) => {
+        // exit 뒤에도 stdout의 마지막 청크가 올 수 있다. 파이프가 모두
+        // 닫힌 close에서만 캐시를 확정해야 마지막 환경변수가 누락되지 않는다.
+        child.on('close', (code) => {
             clearTimeout(timer);
             if (code !== 0) {
                 finish(null);
@@ -10183,10 +10239,10 @@ async function handleZip(
                     const shown = skippedLinks.slice(0, 3).map(p => path.basename(p)).join(', ');
                     const more = skippedLinkCount > 3 ? ` 외 ${skippedLinkCount - 3}개` : '';
                     const moreEn = skippedLinkCount > 3 ? ` and ${skippedLinkCount - 3} more` : '';
-                    vscode.window.showWarningMessage(t(
+                    vscode.window.showWarningMessage(plainNotificationText(t(
                         `소스 폴더 밖을 가리키는 심볼릭 링크 ${skippedLinkCount}개를 아카이브에서 제외했습니다 (${shown}${more}). 자세한 내용은 TaskHub 출력 채널을 보세요.`,
                         `Excluded ${skippedLinkCount} symlink(s) pointing outside the source folder (${shown}${moreEn}). See the TaskHub output channel for details.`
-                    ));
+                    )));
                 }
             }
             // 다음 태스크가 `${zip.archivePath}` 로 받는 값이므로 해석된 절대

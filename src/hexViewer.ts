@@ -9,6 +9,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { detectFormat, parseIntelHex, parseSrec, parseBinary, toFlatArray, HexParseResult, HexFormat } from './hexParser';
 import { t } from './i18n';
+import { plainNotificationText } from './notificationText';
 import { HexByteStore } from './hexByteStore';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 import { filePathIdentityKey } from './pathIdentity';
@@ -241,10 +242,10 @@ function openHexViewerFileInternal(
     // dense 주소 범위는 원본 파일 offset이 아니므로 그 상태에서 선택하면
     // 엉뚱한 바이트를 가리킨다.
     if (options?.initialSelection !== undefined && options.forceBinary !== true) {
-        vscode.window.showErrorMessage(t(
+        vscode.window.showErrorMessage(plainNotificationText(t(
             `Hex Viewer의 처음 선택 범위는 원본 바이너리 모드에서만 사용할 수 있습니다: ${fileName}`,
             `The initial Hex Viewer selection can only be used in raw binary mode: ${fileName}`
-        ));
+        )));
         return false;
     }
 
@@ -252,18 +253,18 @@ function openHexViewerFileInternal(
     try {
         stat = fs.statSync(filePath);
     } catch (e: any) {
-        vscode.window.showErrorMessage(t(
+        vscode.window.showErrorMessage(plainNotificationText(t(
             `파일을 읽을 수 없습니다: ${filePath}\n${e.message}`,
             `Cannot read file: ${filePath}\n${e.message}`
-        ));
+        )));
         return false;
     }
 
     if (stat.size > HEX_VIEWER_MAX_FILE_SIZE) {
-        vscode.window.showErrorMessage(t(
+        vscode.window.showErrorMessage(plainNotificationText(t(
             `파일 크기(${formatFileSize(stat.size)})가 Hex Viewer 처리 한도(${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)})를 초과합니다. 대용량 파일은 외부 Hex Editor를 사용해 주세요.`,
             `File size (${formatFileSize(stat.size)}) exceeds the Hex Viewer limit (${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)}). Please use an external hex editor for large files.`
-        ));
+        )));
         return false;
     }
 
@@ -271,25 +272,25 @@ function openHexViewerFileInternal(
     try {
         result = parseFile(filePath, options?.forceBinary === true);
     } catch (e: any) {
-        vscode.window.showErrorMessage(t(
+        vscode.window.showErrorMessage(plainNotificationText(t(
             `파일 파싱 실패 (${fileName}): ${e.message}`,
             `Failed to parse file (${fileName}): ${e.message}`
-        ));
+        )));
         return false;
     }
 
     if (result.byteCount === 0) {
-        vscode.window.showWarningMessage(describeEmptyHexData(result, fileName));
+        vscode.window.showWarningMessage(plainNotificationText(describeEmptyHexData(result, fileName)));
         return false;
     }
 
     const totalSize = result.maxAddress - result.minAddress + 1;
     const initialSelection = validateHexViewerSelection(options?.initialSelection, totalSize);
     if (options?.initialSelection !== undefined && initialSelection === undefined) {
-        vscode.window.showErrorMessage(t(
+        vscode.window.showErrorMessage(plainNotificationText(t(
             `Hex Viewer 선택 범위가 파일을 벗어납니다: ${fileName}`,
             `Hex Viewer selection is outside the file: ${fileName}`
-        ));
+        )));
         return false;
     }
 
@@ -648,19 +649,19 @@ function setupWebviewMessageHandler(
             // notification 에 표시할 입력값은 길이를 제한해 UI 가 무너지지 않도록 한다.
             const inputPreview = rawInput.length > 64 ? rawInput.slice(0, 64) + '…' : rawInput;
             if (message.reason === 'invalid-format') {
-                vscode.window.showErrorMessage(t(
+                vscode.window.showErrorMessage(plainNotificationText(t(
                     `Go to: 입력 형식이 올바르지 않습니다. 10진수(예: 1024) 또는 16진수(예: 0x400, 400h) 만 허용됩니다. (입력값: "${inputPreview}")`,
                     `Go to: invalid input format. Use decimal (e.g. 1024) or hex (e.g. 0x400, 400h). (got: "${inputPreview}")`
-                ));
+                )));
             } else if (message.reason === 'out-of-range') {
                 const maxOffset = typeof message.maxOffset === 'number' ? message.maxOffset : 0;
                 const maxAddress = typeof message.maxAddress === 'number' ? message.maxAddress : maxOffset;
                 const maxOffsetHex = '0x' + maxOffset.toString(16).toUpperCase();
                 const maxAddressHex = '0x' + maxAddress.toString(16).toUpperCase();
-                vscode.window.showErrorMessage(t(
+                vscode.window.showErrorMessage(plainNotificationText(t(
                     `Go to: 입력값이 파일 범위를 벗어납니다. 마지막 offset: ${maxOffset} (${maxOffsetHex}), 마지막 주소: ${maxAddressHex}. (입력값: "${inputPreview}")`,
                     `Go to: input is past the end of file. Last offset: ${maxOffset} (${maxOffsetHex}), last address: ${maxAddressHex}. (got: "${inputPreview}")`
-                ));
+                )));
             }
         }
     });
@@ -781,10 +782,10 @@ function openPanel(
             state.panel.reveal(vscode.ViewColumn.One, preserveFocus);
         } catch (e: unknown) {
             const reason = e instanceof Error ? e.message : String(e);
-            vscode.window.showErrorMessage(t(
+            vscode.window.showErrorMessage(plainNotificationText(t(
                 `Hex Viewer 패널을 표시할 수 없습니다 (${fileName}): ${reason}`,
                 `Cannot reveal Hex Viewer panel (${fileName}): ${reason}`
-            ));
+            )));
             return false;
         }
     } else {
@@ -792,7 +793,7 @@ function openPanel(
             'taskhub.hexViewer',
             `Hex: ${fileName}`,
             vscode.ViewColumn.One,
-            { enableScripts: true, retainContextWhenHidden: true }
+            { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] }
         );
         const newState: HexPanelState = { panel, messageDisposable: undefined, renderGeneration: 0 };
         state = newState;
@@ -857,7 +858,7 @@ function openPanel(
         } catch {
             // 이미 닫힌 패널에는 오류 HTML을 쓸 수 없다. 토스트는 계속 표시한다.
         }
-        vscode.window.showErrorMessage(msg);
+        vscode.window.showErrorMessage(plainNotificationText(msg));
         return false;
     }
     return true;
@@ -2115,7 +2116,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         document: vscode.CustomDocument,
         webviewPanel: vscode.WebviewPanel
     ): HexWebviewHandshake | undefined {
-        webviewPanel.webview.options = { enableScripts: true };
+        webviewPanel.webview.options = { enableScripts: true, localResourceRoots: [] };
         const filePath = document.uri.fsPath;
         const fileName = path.basename(filePath);
 
@@ -2125,7 +2126,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         } catch (e: any) {
             const msg = t(`파일을 읽을 수 없습니다: ${e.message}`, `Cannot read file: ${e.message}`);
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
-            vscode.window.showErrorMessage(msg);
+            vscode.window.showErrorMessage(plainNotificationText(msg));
             return;
         }
 
@@ -2135,7 +2136,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 `File size (${formatFileSize(stat.size)}) exceeds the Hex Viewer limit (${formatFileSize(HEX_VIEWER_MAX_FILE_SIZE)}). Please use an external hex editor for large files.`
             );
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
-            vscode.window.showErrorMessage(msg);
+            vscode.window.showErrorMessage(plainNotificationText(msg));
             return;
         }
 
@@ -2150,14 +2151,14 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
         } catch (e: any) {
             const msg = t(`파일 파싱 실패 (${fileName}): ${e.message}`, `Failed to parse file (${fileName}): ${e.message}`);
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
-            vscode.window.showErrorMessage(msg);
+            vscode.window.showErrorMessage(plainNotificationText(msg));
             return;
         }
 
         if (result.byteCount === 0) {
             const msg = describeEmptyHexData(result, fileName);
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'info');
-            vscode.window.showWarningMessage(msg);
+            vscode.window.showWarningMessage(plainNotificationText(msg));
             return;
         }
 
@@ -2175,7 +2176,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 `Failed to render Hex Viewer (${fileName}): ${e.message}`
             );
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
-            vscode.window.showErrorMessage(msg);
+            vscode.window.showErrorMessage(plainNotificationText(msg));
             return;
         }
         this.recordHistory?.({ filePath, fileName });

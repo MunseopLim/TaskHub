@@ -1176,7 +1176,12 @@ suite('Hex/Text 변환기 Webview', () => {
                 },
                 dispose() { disposeHandler?.(); },
             } as unknown as vscode.WebviewPanel;
-            (vscode.window as any).createWebviewPanel = () => { createCount++; return panel; };
+            (vscode.window as any).createWebviewPanel = (_type: string, _title: string, _column: vscode.ViewColumn, options: vscode.WebviewOptions) => {
+                assert.deepStrictEqual(options.localResourceRoots, []);
+                assert.strictEqual(options.enableScripts, true);
+                createCount++;
+                return panel;
+            };
             Object.defineProperty(vscode.env, 'clipboard', {
                 configurable: true,
                 value: { writeText: async (value: string) => { copied.push(value); } },

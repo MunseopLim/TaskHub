@@ -120,9 +120,10 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
     function installFakePanel(): FakePanel {
         const fake = createFakePanel();
-        (vscode.window as any).createWebviewPanel = (_viewType: string, title: string) => {
+        (vscode.window as any).createWebviewPanel = (_viewType: string, title: string, _column: vscode.ViewColumn, options: vscode.WebviewOptions) => {
             fake.events.push('create-panel');
             fake.panel.title = title;
+            fake.panel.webview.options = options;
             return fake.panel;
         };
         return fake;
@@ -130,10 +131,11 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
     function installFakePanelFactory(): FakePanel[] {
         const created: FakePanel[] = [];
-        (vscode.window as any).createWebviewPanel = (_viewType: string, title: string) => {
+        (vscode.window as any).createWebviewPanel = (_viewType: string, title: string, _column: vscode.ViewColumn, options: vscode.WebviewOptions) => {
             const fake = createFakePanel();
             fake.events.push('create-panel');
             fake.panel.title = title;
+            fake.panel.webview.options = options;
             created.push(fake);
             return fake.panel;
         };
@@ -178,6 +180,45 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
         (vscode.window as any).showErrorMessage = originalShowError;
         try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    });
+
+    test('파일명·파싱 오류의 명령 링크는 알림에서만 무력화하고 경로와 패널 원문을 유지한다', async () => {
+        const injected = '[Inspect](command:taskhub.testProbe)';
+        const name = process.platform === 'win32' ? '[Inspect].hex' : `${injected}.hex`;
+        const filePath = writeIntelHex(name);
+        const customUri = vscode.Uri.file(filePath);
+        const customFilePath = customUri.fsPath;
+        const context = createContext();
+        const fake = installFakePanel();
+        const mutableFs = require('fs') as typeof fs;
+        const originalRead = mutableFs.readFileSync;
+        const attemptedPaths: string[] = [];
+        (mutableFs as any).readFileSync = (target: fs.PathOrFileDescriptor, ...args: any[]) => {
+            if (target === filePath || target === customFilePath) {
+                attemptedPaths.push(target);
+                throw new Error(`Read failed: ${injected}`);
+            }
+            return (originalRead as any)(target, ...args);
+        };
+        const custom = createFakePanel();
+        try {
+            assert.strictEqual(openHexViewerFile(context, filePath), false);
+            assert.ok(!fake.events.includes('create-panel'), '파싱 실패 시 standalone 패널을 만들면 안 된다');
+            await new HexEditorProvider(context).resolveCustomEditor(
+                { uri: customUri, dispose() {} }, custom.panel
+            );
+            assert.deepStrictEqual(attemptedPaths, [filePath, customFilePath], '파일 접근에 표시용 변환된 경로를 쓰면 안 된다');
+            assert.strictEqual(shownErrors.length, 2);
+            for (const message of shownErrors) {
+                assert.ok(message.includes('［Inspect］(command：taskhub.testProbe)'), message);
+                assert.ok(!/[\[\]]|command:/i.test(message));
+            }
+            assert.ok(custom.panel.webview.html.includes(injected), '패널의 escape된 원문 오류는 알림 문구와 분리한다');
+            assert.ok(!custom.panel.webview.html.includes('［Inspect］'), '웹뷰 원문까지 표시용 변환하면 안 된다');
+        } finally {
+            (mutableFs as any).readFileSync = originalRead;
+            custom.dispose();
+        }
     });
 
     suite('최근 표시 설정', () => {
@@ -365,6 +406,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
 
         assert.strictEqual(ok, true, `열기에 실패했다: ${shownErrors.join(' / ')}`);
         assert.ok(fake.events.includes('create-panel'), '패널이 만들어지지 않았다');
+        assert.deepStrictEqual(fake.panel.webview.options.localResourceRoots, []);
         assert.ok(hexPanelRegistry.has(filePath), '레지스트리가 패널을 잡고 있지 않다');
         assert.ok(
             hexPanelRegistry.has(vscode.Uri.file(filePath).fsPath),
@@ -803,6 +845,7 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
                 { uri: vscode.Uri.file(filePath), dispose() { /* no-op */ } } as vscode.CustomDocument,
                 fake.panel
             );
+            assert.deepStrictEqual(fake.panel.webview.options.localResourceRoots, []);
         }
 
         test('같은 문서의 분할 패널은 한 번만 파싱하고 독립적으로 전송·재전송한다', async () => {

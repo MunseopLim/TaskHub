@@ -958,6 +958,35 @@ suite('Password taint and redaction', function () {
         }
     });
 
+    test('ZIP에서 제외한 symlink 이름의 명령 링크는 알림에서만 무력화한다', async function () {
+        // command:를 포함한 실제 파일명은 Windows에서 만들 수 없다.
+        if (process.platform === 'win32') { this.skip(); }
+        const source = path.join(tempWorkspace, 'source');
+        const outside = path.join(tempWorkspace, 'outside.txt');
+        const name = '[Inspect](command:taskhub.testProbe)';
+        const archive = path.join(tempWorkspace, 'safe.zip');
+        fs.mkdirSync(source);
+        fs.writeFileSync(outside, 'outside');
+        fs.symlinkSync(outside, path.join(source, name));
+        const originalWarning = vscode.window.showWarningMessage;
+        const warnings: string[] = [];
+        (vscode.window as any).showWarningMessage = async (message: string) => { warnings.push(message); };
+        try {
+            await extension.executeAction({
+                id: 'zip-notification-link', title: 'ZIP notification link',
+                action: { description: '', tasks: [{ id: 'zip', type: 'zip', source, archive }] },
+            }, makeContext(), makeMainViewProvider());
+            assert.ok(fs.existsSync(archive));
+            assert.strictEqual(warnings.length, 1);
+            assert.ok(warnings[0].includes('［Inspect］(command：taskhub.testProbe)'), warnings[0]);
+            assert.ok(!/[\[\]]|command:/i.test(warnings[0]));
+            assert.ok(verboseLines.some(line => line.includes(name)), '출력 채널의 진단 원문을 바꾸면 안 된다');
+            assert.strictEqual(fs.readlinkSync(path.join(source, name)), outside, '실제 파일명이나 링크를 바꾸면 안 된다');
+        } finally {
+            (vscode.window as any).showWarningMessage = originalWarning;
+        }
+    });
+
     test('password-derived ZIP의 제외 symlink 경고는 경로 없이 한 줄로 요약한다', async function () {
         if (process.platform === 'win32') { this.skip(); }
 

@@ -1444,7 +1444,7 @@ export function showHexConverter(context: vscode.ExtensionContext, calculator?: 
         'taskhub.hexConverter',
         calculator ? t('개발 계산기', 'Developer Calculator') : t('Hex/Text 변환기', 'Hex/Text Converter'),
         vscode.ViewColumn.Active,
-        { enableScripts: true, retainContextWhenHidden: true }
+        { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] }
     );
     currentPanel = panel;
     converterReady = false;

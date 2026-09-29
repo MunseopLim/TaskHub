@@ -231,4 +231,82 @@ suite('실행 경계 회귀', function () {
             (vscode.window as any).showErrorMessage = originalError;
         }
     });
+
+    test('stderr의 명령 링크는 실패 알림에서만 무력화하고 History 원문은 유지한다', async () => {
+        const script = path.join(workspace, 'notification-link.cjs');
+        const untrustedText = '[Inspect](command:taskhub.testProbe)';
+        fs.writeFileSync(script, `process.stderr.write(${JSON.stringify(untrustedText)}); process.exitCode = 7;`);
+        const originalError = vscode.window.showErrorMessage;
+        const messages: string[] = [];
+        (vscode.window as any).showErrorMessage = async (message: string) => { messages.push(message); };
+        try {
+            for (const failMessage of [undefined, '[Failure](command:taskhub.testProbe)']) {
+                const item: ActionItem = { id: 'notification-link', title: '[Action](command:taskhub.testProbe)', action: {
+                    description: '', failMessage,
+                    tasks: [{ id: 'fail', type: 'command', command: 'node', args: [script], passTheResultToNextTask: true }],
+                } };
+                const history = new HistoryProvider(context);
+                const view = new MainViewProvider(context, () => [item]);
+                try {
+                    await assert.rejects(executeAction(item, context, view, history));
+                    assert.ok(history.getHistory()[0].output?.includes(untrustedText), 'History 진단 원문을 바꾸면 안 된다');
+                    const message = messages.at(-1)!;
+                    assert.ok(message.includes('［Inspect］(command：taskhub.testProbe)'), message);
+                    assert.ok(!/[\[\]]|command:/i.test(message), '알림에서 외부 명령 링크를 클릭할 수 있으면 안 된다');
+                } finally {
+                    view.dispose();
+                }
+            }
+            assert.strictEqual(messages.length, 2);
+        } finally {
+            (vscode.window as any).showErrorMessage = originalError;
+        }
+    });
+
+    test('민감·일반 병렬 실패가 섞인 디버그 재실행 알림도 stderr 명령 링크를 무력화한다', async () => {
+        const untrustedText = '[Inspect](command:taskhub.testProbe)';
+        const secret = 'notification-review-synthetic-secret';
+        const publicScript = path.join(workspace, 'public-parallel-failure.cjs');
+        const sensitiveScript = path.join(workspace, 'sensitive-parallel-failure.cjs');
+        fs.writeFileSync(publicScript, `process.stderr.write(${JSON.stringify(untrustedText)}); process.exitCode = 7;`);
+        fs.writeFileSync(sensitiveScript, 'process.stderr.write(process.argv[2]); process.exitCode = 8;');
+        const originalInput = vscode.window.showInputBox;
+        const originalError = vscode.window.showErrorMessage;
+        const messages: Array<{ message: string; choices: unknown[] }> = [];
+        (vscode.window as any).showInputBox = async () => secret;
+        (vscode.window as any).showErrorMessage = async (message: string, ...choices: unknown[]) => {
+            messages.push({ message, choices });
+        };
+        const item: ActionItem = { id: 'mixed-notification-link', title: 'Mixed parallel failures', action: {
+            description: '', tasks: [
+                { id: 'token', type: 'inputBox', password: true },
+                { id: 'sensitive', type: 'command', command: 'node', args: [sensitiveScript, '${token.value}'], parallel: true, passTheResultToNextTask: true },
+                { id: 'public', type: 'command', command: 'node', args: [publicScript], parallel: true, passTheResultToNextTask: true },
+            ],
+        } };
+        const history = new HistoryProvider(context);
+        const view = new MainViewProvider(context, () => [item]);
+        try {
+            await assert.rejects(executeAction(item, context, view, history), (error: unknown) => {
+                assert.ok(error instanceof AggregateError, 'Both parallel failures must reach the same notification.');
+                assert.strictEqual(error.errors.length, 2);
+                assert.ok(error.message.includes(untrustedText), 'The ordinary stderr must remain intact in the aggregate error.');
+                assert.ok(!error.message.includes(secret), 'The sensitive failure must still hide its original output.');
+                return true;
+            });
+            assert.strictEqual(messages.length, 1);
+            const notification = messages[0];
+            assert.strictEqual(notification.choices.length, 1, 'This must exercise the sensitive-debug offer, not the regular failure toast.');
+            assert.match(String(notification.choices[0]), /sensitive debug|민감 디버그/);
+            assert.ok(notification.message.includes('［Inspect］(command：taskhub.testProbe)'), notification.message);
+            assert.ok(!/[\[\]]|command:/i.test(notification.message));
+            assert.ok(history.getHistory()[0].output?.includes(untrustedText), 'History must preserve the ordinary stderr.');
+            assert.ok(!JSON.stringify(history.getHistory()[0]).includes(secret));
+        } finally {
+            view.dispose();
+            (vscode.window as any).showInputBox = originalInput;
+            (vscode.window as any).showErrorMessage = originalError;
+        }
+    });
+
 });

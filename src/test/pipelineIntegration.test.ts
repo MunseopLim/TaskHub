@@ -2560,7 +2560,7 @@ try {
             };
             (vscode.tasks as any).executeTask = async () => {
                 executeTaskCalls++;
-                throw new Error('detached launch failed');
+                throw new Error('detached launch failed: [Inspect](command:taskhub.testProbe)');
             };
 
             const runOneShot = async (id: string): Promise<void> => {
@@ -2591,6 +2591,8 @@ try {
                 ]);
                 assert.strictEqual(shownErrors.length, 1,
                     'followStatus는 showTaskStatus=false에서도 기존 one-shot 실패 알림을 보존한다');
+                assert.ok(shownErrors[0].includes('［Inspect］(command：taskhub.testProbe)'), shownErrors[0]);
+                assert.ok(!/[\[\]]|command:/i.test(shownErrors[0]), 'one-shot 오류의 외부 문자열이 알림 명령 링크가 되면 안 된다');
 
                 shownErrors.length = 0;
                 await config.update('executionNotifications', 'off', vscode.ConfigurationTarget.Global);

@@ -92,6 +92,86 @@ suite('Memory Map Viewer Test Suite', () => {
         assert.strictEqual(panelRegistry.size(), 1, 'should still have 1 panel');
     });
 
+    test('빈 웹뷰 메시지를 무시하고 ELF 이름의 알림 링크와 로컬 리소스 접근을 차단한다', async () => {
+        const label = '[Inspect](command:taskhub.testProbe)';
+        const buffer = buildMinimalElf32(label);
+        // 바이트가 없는 NOBITS 섹션에 실제 ELF 문자열 테이블에서 읽은 이름을 넣는다.
+        buffer.writeUInt32LE(8, buffer.readUInt32LE(32) + 40 + 4);
+        const filePath = createTempElf('notification-link', 'notification-link.elf');
+        fs.writeFileSync(filePath, buffer);
+        const originalCreate = vscode.window.createWebviewPanel;
+        const originalWarning = vscode.window.showWarningMessage;
+        let receive!: (message: unknown) => Promise<void>;
+        let options: vscode.WebviewOptions | undefined;
+        const warnings: string[] = [];
+        try {
+            (vscode.window as any).createWebviewPanel = (
+                _type: string, title: string, _column: vscode.ViewColumn, webviewOptions: vscode.WebviewOptions
+            ) => {
+                options = webviewOptions;
+                return {
+                    title, active: true,
+                    webview: {
+                        html: '', cspSource: 'vscode-webview:',
+                        postMessage: async () => true,
+                        onDidReceiveMessage: (listener: typeof receive) => {
+                            receive = listener;
+                            return new vscode.Disposable(() => {});
+                        },
+                    },
+                    reveal() {}, dispose() {},
+                    onDidDispose: () => new vscode.Disposable(() => {}),
+                    onDidChangeViewState: () => new vscode.Disposable(() => {}),
+                } as unknown as vscode.WebviewPanel;
+            };
+            (vscode.window as any).showWarningMessage = async (message: string) => { warnings.push(message); };
+            const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
+            assert.ok(openMemoryMapPanel(context, filePath));
+            assert.deepStrictEqual(options?.localResourceRoots, [], '이 패널은 로컬 리소스를 로드하지 않는다');
+            for (const invalid of [null, undefined, false, 0, '', [], {}, { command: 'openHex' }]) {
+                await receive(invalid);
+            }
+            assert.strictEqual(warnings.length, 0, '잘못된 메시지가 상태나 알림을 바꾸면 안 된다');
+            const target = panelRegistry.getHexTargets(filePath)?.find(entry => entry.label === label);
+            assert.ok(target, 'ELF에서 읽은 원래 이름으로 target을 찾아야 한다');
+            await receive({ command: 'openHex', targetId: target!.id, renderId: currentMemoryMapRenderId(filePath) });
+            assert.strictEqual(warnings.length, 1);
+            assert.ok(warnings[0].includes('［Inspect］(command：taskhub.testProbe)'), warnings[0]);
+            assert.ok(!/[\[\]]|command:/i.test(warnings[0]));
+            assert.strictEqual(target!.label, label, 'ELF·웹뷰 데이터의 원문은 바꾸면 안 된다');
+        } finally {
+            panelRegistry.clear();
+            (vscode.window as any).createWebviewPanel = originalCreate;
+            (vscode.window as any).showWarningMessage = originalWarning;
+        }
+    });
+
+    test('DWARF에서 기록한 미존재 소스 경로는 알림에서만 링크를 무력화한다', async () => {
+        const recordedPath = '/missing-taskhub-review/[Inspect](command:taskhub.testProbe).c';
+        const originalFind = vscode.workspace.findFiles;
+        const originalWarning = vscode.window.showWarningMessage;
+        const warnings: string[] = [];
+        try {
+            vscode.workspace.findFiles = async () => [];
+            (vscode.window as any).showWarningMessage = async (message: string) => { warnings.push(message); };
+            const target = {
+                id: 'source-notification-link', label: 'main',
+                location: {
+                    address: 0x08000000, endAddress: 0x08000010, filePath: recordedPath,
+                    line: 1, column: 0, isStatement: true,
+                },
+            };
+            await openMemoryMapSourceLocation(target, path.join(tmpDir, 'missing.elf'), new Map(), new Map());
+            assert.strictEqual(warnings.length, 1);
+            assert.ok(warnings[0].includes('［Inspect］(command：taskhub.testProbe).c:1'), warnings[0]);
+            assert.ok(!/[\[\]]|command:/i.test(warnings[0]));
+            assert.strictEqual(target.location.filePath, recordedPath, '원래 경로를 바꾸면 파일 검색이 달라진다');
+        } finally {
+            vscode.workspace.findFiles = originalFind;
+            (vscode.window as any).showWarningMessage = originalWarning;
+        }
+    });
+
     test('should track last active panel', () => {
         const file1 = createTempElf('project-d', 'a.axf');
         const file2 = createTempElf('project-e', 'b.axf');

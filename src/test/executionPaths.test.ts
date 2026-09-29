@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { EventEmitter } from 'events';
 import * as vscode from 'vscode';
-import { executeActionPipeline, handleQuickPick, runCommandCaptureLines } from '../extension';
+import { __testHook_resetShellEnvNamesCache, executeActionPipeline, handleEnvPick, handleQuickPick, runCommandCaptureLines } from '../extension';
 import { resolveTaskWorkingDirectory } from '../pipelineUtils';
 
 suite('실행 작업 디렉터리와 UTF-8 목록', () => {
@@ -46,6 +46,113 @@ suite('실행 작업 디렉터리와 UTF-8 목록', () => {
             }
         });
     }
+
+    test('Windows 목록 명령은 cmd 문법을 재인용하지 않고 POSIX는 로그인 셸을 유지한다', async () => {
+        const childProcess = require('child_process') as typeof import('child_process');
+        const originalSpawn = childProcess.spawn;
+        const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+        const command = '"C:\\Program Files\\nodejs\\node.exe" -e "console.log(\'Debug\')" && echo Release';
+        try {
+            for (const platform of ['win32', 'linux', 'darwin']) {
+                let captured: { shell: string; args: string[]; options: import('child_process').SpawnOptions } | undefined;
+                const child = Object.assign(new EventEmitter(), {
+                    stdout: new EventEmitter(), stderr: new EventEmitter(),
+                });
+                (childProcess as any).spawn = (shell: string, args: string[], options: import('child_process').SpawnOptions) => {
+                    captured = { shell, args, options };
+                    queueMicrotask(() => {
+                        child.stdout.emit('data', Buffer.from('Debug\nRelease\n'));
+                        child.emit('close', 0);
+                    });
+                    return child;
+                };
+                Object.defineProperty(process, 'platform', { value: platform });
+                const result = runCommandCaptureLines(command, '/selected/workspace');
+                Object.defineProperty(process, 'platform', platformDescriptor);
+                assert.deepStrictEqual(await result, ['Debug', 'Release']);
+                assert.ok(captured);
+                const isWindows = platform === 'win32';
+                assert.strictEqual(captured.shell, isWindows ? 'cmd.exe' : (process.env.SHELL || '/bin/sh'));
+                assert.deepStrictEqual(captured.args, isWindows ? ['/d', '/s', '/c', `"${command}"`] : ['-l', '-c', command]);
+                assert.strictEqual(captured.options.windowsVerbatimArguments, isWindows);
+                assert.strictEqual(captured.options.detached, !isWindows);
+                assert.strictEqual(captured.options.cwd, '/selected/workspace');
+                assert.deepStrictEqual(captured.options.stdio, ['ignore', 'pipe', 'pipe']);
+            }
+        } finally {
+            Object.defineProperty(process, 'platform', platformDescriptor);
+            childProcess.spawn = originalSpawn;
+        }
+    });
+
+    test('itemsFromCommand 문서의 큰따옴표가 든 node -e 예제가 실제 목록을 만든다', async function () {
+        this.timeout(15000);
+        assert.deepStrictEqual(
+            await runCommandCaptureLines('node -e "console.log(\'Debug\'); console.log(\'Release\')"', undefined),
+            ['Debug', 'Release']
+        );
+    });
+
+    test('Windows 목록 명령은 공백이 든 실행 파일 경로와 내부 인용·명령 연결을 보존한다', async function () {
+        if (process.platform !== 'win32') { this.skip(); }
+        this.timeout(15000);
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub quoted command '));
+        const wrapper = path.join(dir, 'node wrapper.cmd');
+        fs.writeFileSync(wrapper, '@echo off\r\nnode %*\r\n');
+        try {
+            assert.deepStrictEqual(
+                await runCommandCaptureLines(`"${wrapper}" -e "console.log('quoted path')" && echo tail`, dir),
+                ['quoted path', 'tail']
+            );
+            await assert.rejects(
+                runCommandCaptureLines(`"${wrapper}" -e "console.error('quoted failure'); process.exit(7)"`, dir),
+                /quoted failure/
+            );
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test('envPick은 exit 뒤 도착한 마지막 stdout까지 읽고 close에서 목록을 만든다', async () => {
+        const childProcess = require('child_process') as typeof import('child_process');
+        const originalSpawn = childProcess.spawn;
+        const originalPick = vscode.window.showQuickPick;
+        const firstName = 'TASKHUB_CAPTURE_FIRST';
+        const lastName = 'TASKHUB_CAPTURE_LAST';
+        const previousFirst = process.env[firstName];
+        const previousLast = process.env[lastName];
+        const child = Object.assign(new EventEmitter(), {
+            stdout: new EventEmitter(), stderr: new EventEmitter(),
+        });
+        let seenNames: string[] | undefined;
+        (childProcess as any).spawn = () => child;
+        (vscode.window as any).showQuickPick = async (items: vscode.QuickPickItem[]) => {
+            seenNames = items.map(item => item.label);
+            return items.find(item => item.label === lastName);
+        };
+        process.env[firstName] = 'first';
+        process.env[lastName] = 'last';
+        __testHook_resetShellEnvNamesCache();
+        try {
+            const pick = handleEnvPick({ id: 'env-probe' });
+            void pick.catch(() => { /* 아래에서 결과를 검증한다. */ });
+            child.stdout.emit('data', Buffer.from(`${firstName}=first\n`));
+            child.emit('exit', 0);
+            await new Promise<void>(resolve => setImmediate(resolve));
+            assert.strictEqual(seenNames, undefined, '파이프가 닫히기 전에 목록을 표시했다');
+            child.stdout.emit('data', Buffer.from(`${lastName}=last\n`));
+            child.emit('close', 0);
+            assert.deepStrictEqual(await pick, { value: lastName });
+            assert.deepStrictEqual(seenNames, [firstName, lastName]);
+        } finally {
+            child.emit('close', 1);
+            childProcess.spawn = originalSpawn;
+            (vscode.window as any).showQuickPick = originalPick;
+            if (previousFirst === undefined) { delete process.env[firstName]; } else { process.env[firstName] = previousFirst; }
+            if (previousLast === undefined) { delete process.env[lastName]; } else { process.env[lastName] = previousLast; }
+            __testHook_resetShellEnvNamesCache();
+        }
+    });
 
     test('캡처 command와 shell이 액션 워크스페이스의 상대 cwd에서 실행한다', async function () {
         this.timeout(15000);

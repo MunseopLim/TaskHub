@@ -31,6 +31,7 @@ TaskHub/
 │   ├── backgroundCompletion.ts        # 장시간 액션 완료 정책·750ms 묶음·표시 문구 순수 로직
 │   ├── runLogStore.ts                 # 구조화 실행 로그 수집·상한·원자 저장·회전
 │   ├── actionRunReport.ts             # 실행 로그 → 스크립트 없는 읽기 전용 보고서 HTML
+│   ├── notificationText.ts            # 외부 텍스트의 알림 링크·command URI 무력화
 │   ├── previewRun.ts                  # Preview Run (Dry-run) 리포트 생성
 │   ├── previewOpener.ts               # preview/browser 열기 명령 헬퍼
 │   ├── browserTask.ts                 # browser 태스크 URI 해석·내장/기본 브라우저 실행
@@ -360,9 +361,11 @@ TaskHub는 사용자가 JSON으로 정의한 임의 명령을 실행하므로, �
     *   Windows — **native 경로**(계획 결과가 `native`일 때): `executeShellCommand`와 비밀번호 입력을 쓰는 민감 one-shot은 `spawn(file, argvArray)`, VS Code Task 경로는 `vscode.ProcessExecution`, 일반 one-shot은 `ProcessStartInfo`(`UseShellExecute=$false`)를 사용하며 모두 계획에 보존한 같은 절대 경로를 실행한다. 인자를 argv 배열 또는 `quoteWindowsCommandLineArgument`로 escape한 문자열로 직접 넘겨 **Windows PowerShell 5.1의 native-command 인자 큐오팅 버그**(`"` 가 사라지는 문제)를 우회한다. 판정 뒤 파일이 사라지거나 실행이 거부되면 원래 bare 이름을 PowerShell로 재해석하지 않고 시작 실패를 반환한다.
     *   Windows — **PowerShell 경로**(계획 결과가 `powershell`/`raw-shell`일 때): `buildPowerShellInvocation`이 `quotePowerShellArgument`로 ASCII·스마트 작은따옴표를 모두 escape하고 각 인자를 싱글쿼트로 감싸 PowerShell `-EncodedCommand`로 전달한다. 일반 one-shot은 `Start-Process -FilePath … -ArgumentList @(…)`를 사용해 PATHEXT/파일 연결을 셸처럼 해석한다. 비밀번호 입력을 쓰는 민감 one-shot은 PowerShell 자체를 `stdio: 'ignore'`로 띄우므로 콘솔 출력 인코딩을 바꿀 대상이 없다. 이 경로에서는 `[Console]::OutputEncoding`을 설정하지 않으며, raw 명령의 `>`·`>>`에 필요한 `Out-File:Encoding` 기본값만 유지한다. **이 경로만 `detached`를 쓰지 않는다** — `powershell.exe`를 `DETACHED_PROCESS`로 띄우면 스크립트를 실행하지 않고 exit 0으로 끝나(Windows CI 실측) 작업과 실패 신호를 함께 잃는다. native·POSIX 경로는 그대로 `detached`를 쓰며, 확장 호스트를 붙잡지 않는 `unref()`는 모든 경로에 공통이다.
     *   password·환경변수·클립보드·선택 텍스트 파생값을 **파일로 남기는 것**은 태스크의 `allowSecretContent` 선언이 있을 때만 수행한다. `editor`·`terminal`은 사용자가 위치를 고르지 않은 암묵적 영속화라 계속 전면 차단이고, `writeFile`·`appendFile`·`output.mode: 'file'`은 사용자가 적은 경로이므로 선언을 요구하는 쪽을 택한다 — 기능을 없애면 같은 일이 `shell`의 리다이렉션으로 내려가 마스킹·권한·기록이 모두 사라지기 때문이다. 선언된 쓰기는 POSIX에서 내용을 쓰기 전 열린 fd에 `0600`을 적용하며, 권한 설정 실패 시 내용을 쓰지 않는다. Windows에서는 같은 POSIX 권한 격리를 보장하지 않으며 저장 안내에도 소유자 전용이라고 표시하지 않는다. 사용자 관점 설명은 [`actions.json` 작성 가이드의 민감한 입력](./actions.md#민감한-입력) 참조.
-    *   `password: true` 입력과 그 파생값은 TaskHub의 History·로그·알림·터미널·에디터에서 숨기지만, 실행 대상에는 원래 값이 전달되어야 한다. 따라서 argv에 넣은 값은 Windows 프로세스 명령줄 조회 등 로컬 OS 관찰 수단에 보일 수 있으며, 이 마스킹을 같은 사용자·관리자 권한의 로컬 프로세스에 대한 비밀 격리로 간주하지 않는다. 프로세스 명령줄에서 빼려면 액션 정의와 실행 대상이 stdin이나 별도 비밀 전달 채널을 사용해야 하며, 그것만으로 로컬 프로세스 격리가 생기는 것은 아니다.
-5.  **WebView 보안**
+    *   민감한 값의 마스킹 범위와 운영체제의 프로세스 조회에 대한 한계는 [민감한 입력](actions.md#민감한-입력)을 참조한다.
+5.  **알림·WebView 보안**
+    *   액션·원샷 실패, ZIP 제외 파일명, Hex Viewer·Memory Map 알림의 외부 오류·심볼·경로는 `plainNotificationText()`로 링크 문법과 command URI를 무력화한 뒤 VS Code 알림에 전달한다. 원본 로그·분석 데이터·웹뷰 HTML은 변경하지 않는다.
     *   스크립트를 쓰는 WebView(Hex Viewer, Hex/Text Converter, JSON Editor, Memory Map)는 `Content-Security-Policy` 메타 태그를 포함하고, `script-src`는 패널마다 새로 생성되는 16바이트 nonce만 허용한다. nonce는 `crypto.randomBytes(16).toString('base64')`(CSPRNG)로 생성하며 허용할 스크립트에 부여한다.
+    *   외부 로컬 리소스가 필요 없는 Hex Viewer(standalone·Custom Editor), Hex/Text Converter·개발 계산기, Memory Map은 `localResourceRoots: []`로 웹뷰의 직접 파일 접근을 막는다. 파일 내용은 기존 host 검증과 메시지 전달 경로로만 보낸다.
     *   실행 보고서와 민감 디버그 출력처럼 스크립트가 필요 없는 패널은 `enableScripts: false`와 `default-src 'none'`을 사용한다.
     *   CSP가 HTML의 인라인 이벤트 핸들러를 차단하므로 `onclick="..."` 같은 속성을 쓰지 않는다. 이벤트는 nonce가 붙은 스크립트에서 컨트롤에 직접 연결하거나 `data-action` 기반 위임 리스너로 처리한다.
     *   Memory Map의 Hex 진입점은 웹뷰에 실제 ELF file offset을 싣지 않고 opaque target ID만 보낸다. extension host가 렌더 시점에 보관한 `sh_offset`/`p_offset` 변환 결과를 다시 찾으며, ELF의 크기나 수정 시각이 달라졌으면 오래된 target을 사용하지 않는다.
