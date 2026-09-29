@@ -1424,6 +1424,28 @@ suite('Password taint and redaction', function () {
             } as unknown as ActionItem;
         }
 
+        async function persistSensitiveAction(item: ActionItem): Promise<{
+            replace: (items: ActionItem[]) => void;
+            restore: () => Promise<void>;
+        }> {
+            const directory = path.join(tempWorkspace, 'media');
+            fs.mkdirSync(directory, { recursive: true });
+            const file = path.join(directory, 'actions.json');
+            const replace = (items: ActionItem[]) => fs.writeFileSync(file, JSON.stringify(items));
+            replace([item]);
+            const config = vscode.workspace.getConfiguration('taskhub');
+            const previous = config.inspect('builtinActions')?.globalValue;
+            await config.update('builtinActions', 'always', vscode.ConfigurationTarget.Global);
+            extension.invalidateActionsCache();
+            return {
+                replace,
+                restore: async () => {
+                    extension.invalidateActionsCache();
+                    await config.update('builtinActions', previous, vscode.ConfigurationTarget.Global);
+                },
+            };
+        }
+
         test('실패 메시지에 단계·종료 코드·마스킹된 명령이 남고 비밀은 없다', async () => {
             const secret = 'Sup3r-S3cret-Value';
             const scriptPath = makeFailingScript(secret, 3);
@@ -1468,6 +1490,8 @@ suite('Password taint and redaction', function () {
             ].join('\n'));
 
             const context = makeContext();
+            const item = passwordAction(id, scriptPath);
+            const persisted = await persistSensitiveAction(item);
             const history = new HistoryProvider(context);
             const originalInputBox = vscode.window.showInputBox;
             const originalShowError = vscode.window.showErrorMessage;
@@ -1511,7 +1535,7 @@ suite('Password taint and redaction', function () {
 
             try {
                 await extension.executeAction(
-                    passwordAction(id, scriptPath),
+                    item,
                     context,
                     makeMainViewProvider(),
                     history
@@ -1527,6 +1551,7 @@ suite('Password taint and redaction', function () {
                 (vscode.window as any).showWarningMessage = originalShowWarning;
                 (vscode.window as any).showInformationMessage = originalShowInformation;
                 (vscode.window as any).createWebviewPanel = originalCreateWebviewPanel;
+                await persisted.restore();
             }
 
             assert.deepStrictEqual(stateAtFailurePrompt, ['failure'],
@@ -1546,6 +1571,76 @@ suite('Password taint and redaction', function () {
             assert.ok(!entries.some(entry => entry.status === 'running'), 'running 이력이 고착됐다');
             assert.ok(!JSON.stringify(entries).includes(secret), '민감 재실행 원본이 history에 저장됐다');
         });
+
+        for (const stage of ['notification', 'confirmation'] as const) {
+            for (const change of ['changed', 'removed'] as const) {
+                test(`민감 디버그 ${stage} 대기 중 정의가 ${change} 상태가 되면 재실행하지 않는다`, async () => {
+                    const id = `sensitive-stale-${stage}-${change}`;
+                    const item = passwordAction(id, makeFailingScript('stale-secret', 9));
+                    const persisted = await persistSensitiveAction(item);
+                    const replacementMarker = path.join(tempWorkspace, 'replacement-ran.txt');
+                    const replace = () => persisted.replace(change === 'removed' ? [] : [{
+                        ...item,
+                        action: { description: 'new definition', tasks: [{
+                            id: 'replacement', type: 'writeFile', path: replacementMarker, content: 'must not run',
+                        }] },
+                    }]);
+                    const originalInput = vscode.window.showInputBox;
+                    const originalError = vscode.window.showErrorMessage;
+                    const originalWarning = vscode.window.showWarningMessage;
+                    const originalPanel = vscode.window.createWebviewPanel;
+                    let inputs = 0;
+                    let panels = 0;
+                    let confirmations = 0;
+                    let offer = true;
+                    let canceled!: () => void;
+                    const cancellation = new Promise<void>(resolve => { canceled = resolve; });
+                    (vscode.window as any).showInputBox = async () => { inputs++; return 'stale-secret'; };
+                    (vscode.window as any).showErrorMessage = async (_message: string, ...items: unknown[]) => {
+                        if (!offer) { return undefined; }
+                        if (stage === 'notification') { replace(); }
+                        return items.find(value => typeof value === 'string' && /민감 디버그|sensitive debug/i.test(value));
+                    };
+                    (vscode.window as any).showWarningMessage = async (message: string, ...items: unknown[]) => {
+                        if (items.some(value => typeof value === 'object' && value !== null && (value as any).modal)) {
+                            confirmations++;
+                            if (stage === 'confirmation') { replace(); }
+                            return [...items].reverse().find(value => typeof value === 'string');
+                        }
+                        assert.match(message, /변경되었거나 삭제|changed or was removed/);
+                        canceled();
+                        return undefined;
+                    };
+                    (vscode.window as any).createWebviewPanel = () => { panels++; throw new Error('Unapproved debug report.'); };
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    try {
+                        await extension.executeAction(item, makeContext(), makeMainViewProvider()).catch(() => undefined);
+                        await Promise.race([
+                            cancellation,
+                            new Promise<never>((_resolve, reject) => {
+                                timer = setTimeout(() => reject(new Error('Stale debug cancellation timed out.')), 3000);
+                            }),
+                        ]);
+                        assert.strictEqual(inputs, 1, '동의 후 이전 정의나 새 정의를 실행하면 안 된다');
+                        assert.strictEqual(confirmations, stage === 'notification' ? 0 : 1);
+                        assert.strictEqual(panels, 0);
+                        assert.ok(!fs.existsSync(replacementMarker));
+                        // 거절된 동의가 다음 일반 실행의 민감 디버그 플래그로 남지 않아야 한다.
+                        offer = false;
+                        await extension.executeAction(item, makeContext(), makeMainViewProvider()).catch(() => undefined);
+                        assert.strictEqual(inputs, 2);
+                        assert.strictEqual(panels, 0, '다음 일반 실행에 원본 노출 승인이 새면 안 된다');
+                    } finally {
+                        clearTimeout(timer);
+                        (vscode.window as any).showInputBox = originalInput;
+                        (vscode.window as any).showErrorMessage = originalError;
+                        (vscode.window as any).showWarningMessage = originalWarning;
+                        (vscode.window as any).createWebviewPanel = originalPanel;
+                        await persisted.restore();
+                    }
+                });
+            }
+        }
 
         test('병렬 AggregateError 안의 민감 실패도 디버그 재실행을 제안한다', async () => {
             const id = 'sensitive-aggregate';

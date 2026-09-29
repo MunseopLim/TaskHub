@@ -23,6 +23,7 @@ function runViewer(bytes: number[], options: {
         textContent = '';
         className = '';
         isContentEditable = false;
+        isConnected = true;
         clientHeight = 200;
         scrollTop = 0;
         style: Record<string, string> = {};
@@ -103,6 +104,7 @@ function runViewer(bytes: number[], options: {
         .replace(/\r\n?/g, '\n').replace(/\0/g, '\uFFFD');
     vm.runInNewContext(script, {
         Element: FakeElement,
+        HTMLElement: FakeElement,
         Uint8Array,
         Set: BoundedSet,
         acquireVsCodeApi: () => ({

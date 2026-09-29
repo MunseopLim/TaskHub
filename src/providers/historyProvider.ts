@@ -55,7 +55,7 @@ export interface HistoryEntry {
     actionTitle: string;
     timestamp: number;
     /**
-     * `cancelled` 는 **사용자가 중지한** 실행이다 (0.6.46).
+     * `cancelled` 는 사용자가 취소했거나 이전 세션 종료로 추적이 끊긴 실행이다.
      *
      * 예전에는 중지도 `failure` 로 적어서, 의도적으로 멈춘 것이 빨간 오류
      * 아이콘으로 쌓였다 — 진짜 실패와 눈으로 구분되지 않아 History 를 훑을 때
@@ -69,6 +69,8 @@ export interface HistoryEntry {
      *
      *  - `stopped` — 사용자가 Stop 버튼을 눌러 실행 중인 것을 끊었다.
      *  - `prompt`  — 대화형 태스크의 프롬프트를 사용자가 닫았다(Escape/Cancel).
+     *  - `interrupted` — 이전 확장 호스트 세션이 끝나 실행 결과를 확인할 수 없다.
+     *    프로세스가 실제로 종료됐거나 실패했다는 판정은 아니다.
      *
      * 0.6.52 이전에는 둘 다 `cancelled` 하나였고 화면에는 **"중지됨 / Stopped"**
      * 로만 나왔다. 다이얼로그를 닫은 것을 "중지됨"이라고 부르는 것은 사실과
@@ -79,7 +81,7 @@ export interface HistoryEntry {
      * 없으면 `stopped` 로 읽는다 — 이 필드가 생기기 전의 기록은 전부 Stop
      * 이었다. 기존 기록을 마이그레이션하지 않으므로 안전한 기본값이다.
      */
-    cancelKind?: 'stopped' | 'prompt';
+    cancelKind?: 'stopped' | 'prompt' | 'interrupted';
     output?: string;
     tool?: HistoryToolMetadata;
     /**
@@ -354,7 +356,9 @@ export function formatRecentRunDetail(
         // 프롬프트를 닫은 것을 "중지됨"이라고 부르지 않는다 — `cancelKind` 주석 참조.
         const word = entry.cancelKind === 'prompt'
             ? (lang === 'ko' ? '취소됨' : 'Canceled')
-            : (lang === 'ko' ? '중지됨' : 'Stopped');
+            : entry.cancelKind === 'interrupted'
+                ? (lang === 'ko' ? '추적 중단' : 'Interrupted')
+                : (lang === 'ko' ? '중지됨' : 'Stopped');
         return `${word} · ${badge}`;
     }
     return badge;
@@ -394,7 +398,9 @@ export function buildHistoryItemAriaLabel(
             : entry.status === 'cancelled'
                 ? (entry.cancelKind === 'prompt'
                     ? (lang === 'ko' ? '취소됨' : 'canceled')
-                    : (lang === 'ko' ? '중지됨' : 'stopped'))
+                    : entry.cancelKind === 'interrupted'
+                        ? (lang === 'ko' ? '추적 중단' : 'interrupted')
+                        : (lang === 'ko' ? '중지됨' : 'stopped'))
                 : (lang === 'ko' ? '실행 중' : 'running');
     const durationPart = entry.durationMs !== undefined
         ? ` · ${formatDuration(entry.durationMs)}`
@@ -542,7 +548,7 @@ export class HistoryItem extends vscode.TreeItem {
         } else if (entry.status === 'failure') {
             this.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('charts.red'));
         } else if (entry.status === 'cancelled') {
-            // 사용자가 의도해서 멈춘 것이므로 오류색을 쓰지 않는다.
+            // 취소나 추적 중단은 실제 실패를 뜻하지 않으므로 오류색을 쓰지 않는다.
             this.iconPath = new vscode.ThemeIcon('circle-slash', new vscode.ThemeColor('disabledForeground'));
         } else {
             this.iconPath = new vscode.ThemeIcon('history');
@@ -587,7 +593,9 @@ export class HistoryItem extends vscode.TreeItem {
         const cancelLine = entry.status === 'cancelled'
             ? (entry.cancelKind === 'prompt'
                 ? t('취소됨 (프롬프트를 닫았습니다)\n', 'Cancelled (a prompt was dismissed)\n')
-                : t('중지됨 (Stop)\n', 'Stopped (Stop button)\n'))
+                : entry.cancelKind === 'interrupted'
+                    ? t('추적 중단 (이전 세션이 끝나 실행 결과를 확인할 수 없습니다)\n', 'Interrupted (the previous session ended; the execution outcome is unknown)\n')
+                    : t('중지됨 (Stop)\n', 'Stopped (Stop button)\n'))
             : '';
         this.tooltip = `${pathLine}${cancelLine}${isToolEntry
             ? t(`연 시각: ${date.toLocaleString()}`, `Opened at: ${date.toLocaleString()}`)
@@ -641,6 +649,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
     readonly onDidChangeTreeData: vscode.Event<HistoryItem | undefined | null | void> = this._onDidChangeTreeData.event;
     public view: vscode.TreeView<HistoryItem> | undefined;
     private historyKey = 'taskhub.actionHistory';
+    private saveErrorReported = false;
 
     constructor(
         private context: vscode.ExtensionContext,
@@ -683,6 +692,41 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
         return this.context.workspaceState.get<HistoryEntry[]>(this.historyKey, []);
     }
 
+    /**
+     * 활성화 시 새 실행을 받기 전에 한 번 호출한다. 이전 호스트가 남긴 running은
+     * 현재 세션이 추적할 수 없으며, reload/crash 시 실제 결과도 단정할 수 없다.
+     * 생성자나 일반 조회에서 처리하면 같은 세션의 다른 provider가 살아 있는 실행을
+     * 취소로 바꿀 수 있으므로 활성화 경계에서만 명시적으로 복구한다.
+     */
+    async recoverInterruptedRuns(): Promise<void> {
+        let changed = false;
+        const history = this.getHistory().map(entry => {
+            if (entry.status !== 'running' || isToolHistoryEntry(entry)) { return entry; }
+            changed = true;
+            // 기존 진단·입력·로그 참조를 보존한다. 중단 시각을 알 수 없으므로
+            // durationMs를 현재 시각에서 추정하거나 기존 output을 덮어쓰지 않는다.
+            return { ...entry, status: 'cancelled' as const, cancelKind: 'interrupted' as const };
+        });
+        if (!changed) { return; }
+        await this.context.workspaceState.update(this.historyKey, history);
+        this.refresh();
+    }
+
+    private async saveHistory(history: HistoryEntry[]): Promise<void> {
+        try {
+            await this.context.workspaceState.update(this.historyKey, history);
+        } catch {
+            // 한 실행에서 상태·입력·명령을 연달아 저장하므로 같은 장애는 한 번만 알린다.
+            if (!this.saveErrorReported) {
+                this.saveErrorReported = true;
+                void vscode.window.showWarningMessage(t(
+                    '실행 기록을 저장하지 못했습니다. 창을 다시 열면 최근 기록이 사라질 수 있습니다.',
+                    'Could not save execution history. Recent entries may be lost when the window is reopened.'
+                ));
+            }
+        }
+    }
+
     private getMaxItems(): number {
         return this.options.getMaxItems?.()
             ?? vscode.workspace.getConfiguration('taskhub.history').get<number>('maxItems', 10);
@@ -698,7 +742,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
             history.splice(maxItems);
         }
 
-        this.context.workspaceState.update(this.historyKey, history);
+        void this.saveHistory(history);
         this.refresh();
     }
 
@@ -708,7 +752,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
         status: 'success' | 'failure' | 'cancelled',
         output?: string,
         durationMs?: number,
-        cancelKind?: 'stopped' | 'prompt'
+        cancelKind?: HistoryEntry['cancelKind']
     ): void {
         const history = this.getHistory();
         const entry = history.find(e => e.actionId === actionId && e.timestamp === timestamp);
@@ -724,7 +768,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
             if (durationMs !== undefined) {
                 entry.durationMs = durationMs;
             }
-            this.context.workspaceState.update(this.historyKey, history);
+            void this.saveHistory(history);
             this.refresh();
         }
     }
@@ -759,7 +803,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
                 delete entry.inputTaskTypes;
             }
         }
-        this.context.workspaceState.update(this.historyKey, history);
+        void this.saveHistory(history);
         this.refresh();
     }
 
@@ -781,7 +825,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
         } else {
             entry.commands = copyTaskRecord(commands);
         }
-        this.context.workspaceState.update(this.historyKey, history);
+        void this.saveHistory(history);
         this.refresh();
     }
 
@@ -796,7 +840,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
             workspaceFolderUri: runLog.workspaceFolderUri,
             relativePath: runLog.relativePath,
         };
-        this.context.workspaceState.update(this.historyKey, history);
+        void this.saveHistory(history);
         this.refresh();
     }
 
@@ -805,13 +849,13 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
         const index = history.findIndex(e => e.actionId === entry.actionId && e.timestamp === entry.timestamp);
         if (index !== -1) {
             history.splice(index, 1);
-            this.context.workspaceState.update(this.historyKey, history);
+            void this.saveHistory(history);
             this.refresh();
         }
     }
 
     clearAllHistory(): void {
-        this.context.workspaceState.update(this.historyKey, []);
+        void this.saveHistory([]);
         this.refresh();
     }
 
@@ -820,7 +864,7 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
         const history = this.getHistory();
         if (history.length > maxItems) {
             history.splice(maxItems);
-            this.context.workspaceState.update(this.historyKey, history);
+            void this.saveHistory(history);
             this.refresh();
         }
     }

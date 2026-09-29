@@ -43,6 +43,7 @@ function observeHtml(html: string): string {
         window.addEventListener('message', event => {
             if (event.data?.command !== 'testOperate') { return; }
             try {
+                const keyResults = [];
                 for (const operation of event.data.operations) {
                     if (operation.kind === 'edit') {
                         const td = Array.from(document.querySelectorAll('td[data-row]'))
@@ -54,9 +55,18 @@ function observeHtml(html: string): string {
                         input.dispatchEvent(new Event('input', { bubbles: true }));
                     } else if (operation.kind === 'click') {
                         required('#' + operation.id).click();
+                    } else if (operation.kind === 'key') {
+                        const input = required(operation.selector);
+                        input.focus();
+                        const key = new KeyboardEvent('keydown', {
+                            key: operation.key, ctrlKey: operation.ctrlKey, metaKey: operation.metaKey,
+                            isComposing: operation.isComposing, bubbles: true, cancelable: true,
+                        });
+                        input.dispatchEvent(key);
+                        keyResults.push({ prevented: key.defaultPrevented });
                     }
                 }
-                api.postMessage({ command: 'testResult', request: event.data.request, ...inspect() });
+                api.postMessage({ command: 'testResult', request: event.data.request, keyResults, ...inspect() });
             } catch (error) {
                 api.postMessage({ command: 'testError', error: String(error) });
             }
@@ -220,6 +230,47 @@ async function withJsonBrowser(
 
 suite('JSON Editor 실제 브라우저 편집과 저장', function () {
     this.timeout(30000);
+    test('textarea는 Ctrl/Cmd+Enter로 확정하고 일반 Enter·IME 조합은 유지하며 잘못된 JSON은 막는다', async () => {
+        await withJsonBrowser({ rows: [{ object: { nested: 1 }, notes: 'first\nsecond' }] }, async browser => {
+            const selector = 'td[data-col="object"] textarea';
+            let state = await browser.operate([
+                { kind: 'edit', col: 'object', value: '{"nested":2}' },
+                { kind: 'key', selector, key: 'Enter' },
+            ]);
+            assert.strictEqual(state.cells.find((cell: any) => cell.col === 'object').editing, true);
+            assert.strictEqual(state.keyResults[0].prevented, false);
+            state = await browser.operate([{ kind: 'key', selector, key: 'Enter', metaKey: true, isComposing: true }]);
+            assert.strictEqual(state.cells.find((cell: any) => cell.col === 'object').editing, true);
+            assert.strictEqual(state.keyResults[0].prevented, false);
+            state = await browser.operate([{ kind: 'key', selector, key: 'Enter', metaKey: true }]);
+            assert.strictEqual(state.cells.find((cell: any) => cell.col === 'object').editing, false);
+            assert.strictEqual(state.keyResults[0].prevented, true);
+            state = await browser.operate([
+                { kind: 'edit', col: 'notes', value: 'changed\nnotes' },
+                { kind: 'key', selector: 'td[data-col="notes"] textarea', key: 'Enter', ctrlKey: true },
+            ]);
+            assert.strictEqual(state.cells.find((cell: any) => cell.col === 'notes').editing, false);
+            assert.strictEqual(state.keyResults[0].prevented, true);
+            state = await browser.operate([
+                { kind: 'edit', col: 'object', value: '{"nested":' },
+                { kind: 'key', selector, key: 'Enter', metaKey: true },
+            ]);
+            assert.strictEqual(state.cells.find((cell: any) => cell.col === 'object').editing, true);
+            assert.strictEqual(state.errorVisible, true);
+            assert.strictEqual(state.keyResults[0].prevented, true);
+            const after = browser.messages.length;
+            await browser.operate([
+                { kind: 'edit', col: 'object', value: '{"nested":3}' },
+                { kind: 'key', selector, key: 'Enter', ctrlKey: true },
+                { kind: 'click', id: 'btnSave' },
+            ]);
+            await browser.waitFor('saveAck', after);
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), {
+                rows: [{ object: { nested: 3 }, notes: 'changed\nnotes' }],
+            });
+        });
+    });
+
     test('다시 읽기의 복구 저장소 대기 중 입력한 활성 셀을 보존한다', async () => {
         let release!: () => void;
         let entered!: () => void;

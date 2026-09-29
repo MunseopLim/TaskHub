@@ -113,7 +113,7 @@ suite('Hex Viewer 웹뷰 지역화 / 접근성', () => {
         });
 
         test('대용량 검색은 이벤트 루프에 양보하고 새 검색으로 취소할 수 있다', () => {
-            assert.ok(html.includes('async function doFind()'), '검색 루프가 동기 함수다');
+            assert.match(html, /async function doFind\([^)]*\)/, '검색 루프가 동기 함수다');
             assert.ok(html.includes('await new Promise(resolve => setTimeout(resolve, 0))'),
                 '긴 검색 중 웹뷰가 입력과 렌더링을 처리할 틈이 없다');
             assert.ok(html.includes('generation !== findGeneration'), '새 검색이 이전 검색을 중단하지 못한다');

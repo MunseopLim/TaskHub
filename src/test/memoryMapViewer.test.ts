@@ -92,6 +92,109 @@ suite('Memory Map Viewer Test Suite', () => {
         assert.strictEqual(panelRegistry.size(), 1, 'should still have 1 panel');
     });
 
+    test('실제 브라우저의 타입 배지는 밝은·어두운·고대비 테마에서 전경과 배경을 함께 적용한다', async function () {
+        this.timeout(25000);
+        const filePath = createTempElf('badge-contrast', 'badge-contrast.elf');
+        const originalCreate = vscode.window.createWebviewPanel;
+        let panel: vscode.WebviewPanel | undefined;
+        let subscription: vscode.Disposable | undefined;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            vscode.window.createWebviewPanel = ((...args: Parameters<typeof originalCreate>) => {
+                panel = originalCreate(...args);
+                return panel;
+            }) as typeof originalCreate;
+            assert.ok(openMemoryMapPanel({ subscriptions: [] } as unknown as vscode.ExtensionContext, filePath));
+            assert.ok(panel);
+            const html = panel.webview.html;
+            const scriptTag = html.match(/<script nonce="[^"]+">/)?.[0];
+            assert.ok(scriptTag);
+            const observer = `${scriptTag}
+            (() => {
+                const api = acquireVsCodeApi();
+                window.acquireVsCodeApi = () => api;
+                window.addEventListener('error', event => api.postMessage({ command: 'testError', error: event.message }));
+                window.addEventListener('unhandledrejection', event => api.postMessage({ command: 'testError', error: String(event.reason) }));
+                document.addEventListener('DOMContentLoaded', () => {
+                    const renderedBadge = document.querySelector('.type-badge');
+                    if (!renderedBadge) { api.postMessage({ command: 'testError', error: 'Missing rendered type badge' }); return; }
+                    const badges = ['code', 'data', 'rodata', 'nobits', 'free'].map(type => {
+                        const badge = renderedBadge.cloneNode(false);
+                        badge.className = 'type-badge type-' + type;
+                        badge.textContent = type.toUpperCase();
+                        document.body.appendChild(badge);
+                        return badge;
+                    });
+                    const themes = [
+                        { name: 'vscode-light', fg: '#333333', bg: '#d4d4d4', border: 'transparent' },
+                        { name: 'vscode-dark', fg: '#ffffff', bg: '#4d4d4d', border: 'transparent' },
+                        { name: 'vscode-high-contrast', fg: '#ffffff', bg: '#000000', border: '#ffffff' },
+                        { name: 'vscode-high-contrast-light', fg: '#000000', bg: '#ffffff', border: '#000000' },
+                    ];
+                    const results = themes.map(theme => {
+                        document.body.classList.remove(...themes.map(item => item.name));
+                        document.body.classList.add(theme.name);
+                        const style = document.documentElement.style;
+                        style.setProperty('--vscode-badge-foreground', theme.fg);
+                        style.setProperty('--vscode-badge-background', theme.bg);
+                        style.setProperty('--vscode-contrastBorder', theme.border);
+                        return { name: theme.name, badges: badges.map(badge => {
+                            const style = getComputedStyle(badge);
+                            return { text: badge.textContent, fg: style.color, bg: style.backgroundColor,
+                                border: style.borderTopColor, borderWidth: style.borderTopWidth };
+                        }) };
+                    });
+                    api.postMessage({ command: 'testBadgeThemes', results });
+                }, { once: true });
+            })();
+            </script>`;
+            await new Promise<void>((resolve, reject) => {
+                timer = setTimeout(() => reject(new Error('Memory Map theme browser test timed out')), 20000);
+                subscription = panel!.webview.onDidReceiveMessage(message => {
+                    try {
+                        if (message.command === 'testError') { throw new Error(message.error); }
+                        if (message.command !== 'testBadgeThemes') { return; }
+                        const expected = [
+                            ['rgb(51, 51, 51)', 'rgb(212, 212, 212)'],
+                            ['rgb(255, 255, 255)', 'rgb(77, 77, 77)'],
+                            ['rgb(255, 255, 255)', 'rgb(0, 0, 0)'],
+                            ['rgb(0, 0, 0)', 'rgb(255, 255, 255)'],
+                        ];
+                        const luminance = (rgb: string) => {
+                            const channels = rgb.match(/\d+/g)!.map(Number).map(value => {
+                                const linear = value / 255;
+                                return linear <= 0.04045 ? linear / 12.92 : ((linear + 0.055) / 1.055) ** 2.4;
+                            });
+                            return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+                        };
+                        assert.strictEqual(message.results.length, expected.length);
+                        message.results.forEach((theme: any, index: number) => {
+                            assert.strictEqual(theme.badges.length, 5);
+                            for (const badge of theme.badges) {
+                                assert.strictEqual(badge.fg, expected[index][0], `${theme.name} ${badge.text} foreground`);
+                                assert.strictEqual(badge.bg, expected[index][1], `${theme.name} ${badge.text} background`);
+                                const foreground = luminance(badge.fg);
+                                const background = luminance(badge.bg);
+                                assert.ok((Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05) >= 4.5);
+                                if (index >= 2) {
+                                    assert.strictEqual(badge.border, expected[index][0]);
+                                    assert.strictEqual(badge.borderWidth, '1px');
+                                }
+                            }
+                        });
+                        resolve();
+                    } catch (error) { reject(error); }
+                });
+                panel!.webview.html = html.replace(scriptTag, observer + scriptTag);
+            });
+        } finally {
+            clearTimeout(timer);
+            subscription?.dispose();
+            panel?.dispose();
+            vscode.window.createWebviewPanel = originalCreate;
+        }
+    });
+
     test('빈 웹뷰 메시지를 무시하고 ELF 이름의 알림 링크와 로컬 리소스 접근을 차단한다', async () => {
         const label = '[Inspect](command:taskhub.testProbe)';
         const buffer = buildMinimalElf32(label);

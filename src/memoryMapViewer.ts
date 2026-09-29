@@ -3029,12 +3029,8 @@ function getWebviewContent(
         font-weight: 600;
         background: var(--badge-bg);
         color: var(--badge-fg);
+        border: 1px solid var(--vscode-contrastBorder, transparent);
     }
-    .type-code { background: #2196f3; }
-    .type-data { background: #ff9800; }
-    .type-rodata { background: #9c27b0; color: #fff; }
-    .type-nobits { background: #607d8b; }
-    .type-free { background: #37474f; }
     .map-bar {
         display: flex;
         gap: 1px;

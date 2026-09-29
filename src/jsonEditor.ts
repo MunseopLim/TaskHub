@@ -3161,10 +3161,13 @@ export function getWebviewContent(
             });
         });
 
-        // Textarea: Escape to cancel, Ctrl+Enter to commit
+        // Textarea: Escape to cancel, Ctrl/Cmd+Enter to commit
         document.querySelectorAll('.cell-edit textarea').forEach(ta => {
             ta.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' && e.ctrlKey) { commitCell(ta.closest('td')); }
+                if (!e.isComposing && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    commitCell(ta.closest('td'));
+                }
                 if (e.key === 'Escape') { cancelCell(ta.closest('td')); }
             });
             ta.addEventListener('blur', (e) => {

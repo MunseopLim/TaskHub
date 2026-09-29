@@ -388,7 +388,114 @@ async function checkBrowserSearchCancellation(): Promise<void> {
     }
 }
 
+async function checkBrowserFindKeys(): Promise<void> {
+    const result = parseBinary(Buffer.from([0xAA, 0, 0xAA, 0, 0xAA]));
+    const panel = vscode.window.createWebviewPanel(
+        'taskhub.test.hexFindKeys', 'Hex find keyboard regression', vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true },
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let subscription: vscode.Disposable | undefined;
+    const operation = (kind: string, id: string, extra: Record<string, unknown> = {}) => ({ kind, id, ...extra });
+    const key = (key: string, shiftKey = false) => operation('key', 'findHexInput', { key, shiftKey });
+    const phases = [
+        { operations: [operation('focus', 'hexContainer'), operation('key', 'hexContainer', { key: 'f', ctrlKey: true })],
+            visible: true, focused: 'findHexInput', info: '', current: undefined },
+        { operations: [operation('input', 'findHexInput', { value: 'AA' }), key('Enter')],
+            visible: true, focused: 'findHexInput', info: '1 / 3', current: '0' },
+        { operations: [key('Enter')], visible: true, focused: 'findHexInput', info: '2 / 3', current: '2' },
+        { operations: [key('Enter', true)], visible: true, focused: 'findHexInput', info: '1 / 3', current: '0' },
+        { operations: [key('Enter', true)], visible: true, focused: 'findHexInput', info: '3 / 3', current: '4' },
+        { operations: [operation('input', 'findHexInput', { value: 'BB' }), key('Enter')],
+            visible: true, focused: 'findHexInput', info: buildHexViewerStrings().findNoMatches, current: undefined },
+        { operations: [key('Escape')], visible: false, focused: 'hexContainer', info: '', current: undefined },
+        { operations: [operation('focus', 'gotoInput'), operation('key', 'gotoInput', { key: 'f', metaKey: true })],
+            visible: true, focused: 'findHexInput', info: '', current: undefined },
+        { operations: [operation('input', 'findHexInput', { value: 'AA' }), key('Enter', true)],
+            visible: true, focused: 'findHexInput', info: '3 / 3', current: '4' },
+        { operations: [operation('click', 'findClose')], visible: false, focused: 'gotoInput', info: '', current: undefined },
+        { operations: [operation('focus', 'findBtn'), operation('click', 'findBtn'),
+            operation('input', 'findHexInput', { value: 'AA' }), key('Escape')],
+            visible: false, focused: 'findBtn', info: '', current: undefined, waitMs: 300 },
+    ];
+    try {
+        const deliveryId = 'keyboard-search';
+        const html = buildHexViewerHtml('keyboard.bin', result, panel.webview, deliveryId, {
+            unitSize: 1, endian: 'little', findMode: 'bytes',
+        });
+        const scriptTag = html.match(/<script nonce="[^"]+">/)?.[0];
+        assert.ok(scriptTag);
+        const observer = `${scriptTag}
+        (() => {
+            const api = acquireVsCodeApi();
+            window.acquireVsCodeApi = () => api;
+            window.addEventListener('error', event => api.postMessage({ command: 'testError', error: event.message }));
+            window.addEventListener('unhandledrejection', event => api.postMessage({ command: 'testError', error: String(event.reason) }));
+            window.addEventListener('message', event => {
+                if (event.data?.command !== 'testFindKeys') { return; }
+                const prevented = [];
+                for (const operation of event.data.operations) {
+                    const element = document.getElementById(operation.id);
+                    if (operation.kind === 'focus') { element.focus(); }
+                    if (operation.kind === 'click') { element.click(); }
+                    if (operation.kind === 'input') {
+                        element.value = operation.value;
+                        element.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                    if (operation.kind === 'key') {
+                        const key = new KeyboardEvent('keydown', {
+                            key: operation.key, shiftKey: operation.shiftKey, ctrlKey: operation.ctrlKey,
+                            metaKey: operation.metaKey, bubbles: true, cancelable: true,
+                        });
+                        element.dispatchEvent(key);
+                        prevented.push(key.defaultPrevented);
+                    }
+                }
+                setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+                    api.postMessage({
+                        command: 'testFindState', phase: event.data.phase, prevented,
+                        visible: document.getElementById('findBar').classList.contains('visible'),
+                        focused: document.activeElement?.id,
+                        info: document.getElementById('findInfo').textContent,
+                        current: document.querySelector('.hex-cell.find-current')?.dataset.offset,
+                    });
+                })), event.data.waitMs ?? 0);
+            });
+        })();
+        </script>`;
+        await new Promise<void>((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Hex find keyboard browser test timed out')), 20000);
+            const send = (phase: number) => { void panel.webview.postMessage({ command: 'testFindKeys', phase, ...phases[phase] }); };
+            subscription = panel.webview.onDidReceiveMessage(message => {
+                try {
+                    if (message.command === 'testError') { throw new Error(message.error); }
+                    if (message.command === 'ready') { postHexViewerData(panel.webview, result, undefined, deliveryId); }
+                    if (message.command === 'dataReceived') { send(0); }
+                    if (message.command === 'testFindState') {
+                        const expected = phases[message.phase];
+                        for (const field of ['visible', 'focused', 'info', 'current'] as const) {
+                            assert.strictEqual(message[field], expected[field], `phase ${message.phase}: ${field}`);
+                        }
+                        assert.ok(message.prevented.every((value: boolean) => value), 'handled keyboard shortcuts must suppress their default action');
+                        if (message.phase + 1 < phases.length) { send(message.phase + 1); } else { resolve(); }
+                    }
+                } catch (error) { reject(error); }
+            });
+            panel.webview.html = html.replace(scriptTag, observer + scriptTag);
+        });
+    } finally {
+        clearTimeout(timer);
+        subscription?.dispose();
+        panel.dispose();
+    }
+}
+
 suite('Hex Viewer 실제 브라우저 초기화', () => {
+    test('찾기 Enter·Shift+Enter 순환 이동과 Escape 닫기가 이전 포커스를 복원한다', async function () {
+        this.timeout(25000);
+        await checkBrowserFindKeys();
+    });
+
     test('IT-227: 긴 패턴 검색을 새 입력으로 취소하고 최신 검색의 마지막 바이트만 선택한다', async function () {
         this.timeout(25000);
         await checkBrowserSearchCancellation();

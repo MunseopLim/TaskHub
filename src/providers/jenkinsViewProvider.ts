@@ -64,6 +64,18 @@ export class JenkinsViewProvider implements vscode.TreeDataProvider<JenkinsTreeN
     dispose(): void { this.emitter.dispose(); }
     getTreeItem(node: JenkinsTreeNode): vscode.TreeItem {
         const item = new vscode.TreeItem(node.label, node.kind === 'detail' ? vscode.TreeItemCollapsibleState.None : vscode.TreeItemCollapsibleState.Collapsed);
+        // 상태·조회 시각이 label에 포함되므로 label 기반 자동 ID는 매번 바뀐다.
+        // 저장소/브랜치/요청/빌드의 불변 식별자로 펼침 상태를 유지한다.
+        const group = node.requests?.[0];
+        if (node.kind === 'branch' && group) {
+            item.id = JSON.stringify(['jenkins', 'branch', group.repoPath, group.branch]);
+        } else if (node.kind === 'sha' && group) {
+            item.id = JSON.stringify(['jenkins', 'sha', group.repoPath, group.branch, group.sha]);
+        } else if (node.kind === 'request' && node.request) {
+            item.id = JSON.stringify(['jenkins', 'request', node.request.id]);
+        } else if (node.kind === 'build' && node.request && node.run) {
+            item.id = JSON.stringify(['jenkins', 'build', node.request.id, node.run.serverId, node.run.url]);
+        }
         item.description = node.description;
         item.contextValue = node.kind === 'request'
             ? !node.request?.stopped && !node.request?.settledAt ? 'jenkinsRequestActive' : 'jenkinsRequest'

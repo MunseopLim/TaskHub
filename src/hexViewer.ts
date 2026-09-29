@@ -1740,10 +1740,14 @@ function getWebviewContent(
     });
 
     // Find
+    let findReturnFocus = null;
     function toggleFind() {
         if (findBar.classList.contains('visible')) {
             closeFind();
         } else {
+            const active = document.activeElement;
+            findReturnFocus = active instanceof HTMLElement && active !== document.body && !findBar.contains(active)
+                ? active : hexContainer;
             findBar.classList.add('visible');
             findHexInput.focus();
         }
@@ -1805,7 +1809,7 @@ function getWebviewContent(
             : String(findMatches.length);
     }
 
-    async function doFind() {
+    async function doFind(direction = 1) {
         const generation = ++findGeneration;
         findMatches = [];
         findCurrentIdx = -1;
@@ -1872,7 +1876,7 @@ function getWebviewContent(
         if (generation !== findGeneration) { return; }
         findMatches = matches;
         if (findMatches.length > 0) {
-            findCurrentIdx = 0;
+            findCurrentIdx = direction < 0 ? findMatches.length - 1 : 0;
             goToFindMatch();
         } else {
             findInfo.textContent = S.findNoMatches;
@@ -1941,6 +1945,9 @@ function getWebviewContent(
         findCurrentIdx = -1;
         findInfo.textContent = '';
         applyFindHighlightsToVisible();
+        const target = findReturnFocus?.isConnected ? findReturnFocus : hexContainer;
+        target.focus();
+        findReturnFocus = null;
     }
     document.getElementById('findClose').addEventListener('click', closeFind);
     // 키 입력마다 전체 데이터를 스캔하면 대용량 파일에서 웹뷰가 수 초씩
@@ -1961,15 +1968,27 @@ function getWebviewContent(
         persistPreferences();
         doFind();
     });
-    document.getElementById('findNext').addEventListener('click', () => {
-        if (findMatches.length === 0) { return; }
-        findCurrentIdx = (findCurrentIdx + 1) % findMatches.length;
+    function moveFind(direction) {
+        clearTimeout(findDebounceTimer);
+        if (findMatches.length === 0) {
+            void doFind(direction);
+            return;
+        }
+        findCurrentIdx = (findCurrentIdx + direction + findMatches.length) % findMatches.length;
         goToFindMatch();
+    }
+    document.getElementById('findNext').addEventListener('click', () => moveFind(1));
+    document.getElementById('findPrev').addEventListener('click', () => moveFind(-1));
+    findHexInput.addEventListener('keydown', (e) => {
+        if (e.isComposing || e.key !== 'Enter') { return; }
+        e.preventDefault();
+        moveFind(e.shiftKey ? -1 : 1);
     });
-    document.getElementById('findPrev').addEventListener('click', () => {
-        if (findMatches.length === 0) { return; }
-        findCurrentIdx = (findCurrentIdx - 1 + findMatches.length) % findMatches.length;
-        goToFindMatch();
+    findBar.addEventListener('keydown', (e) => {
+        if (e.isComposing || e.key !== 'Escape') { return; }
+        e.preventDefault();
+        e.stopPropagation();
+        closeFind();
     });
 
     function buildCopyText(minOff, maxOff) {

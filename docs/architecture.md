@@ -158,6 +158,7 @@ Named Input Profile의 저장·상한·stale 판정은 VS Code 비의존 모듈
 *   **executeAction()**: 메인 액션 실행 함수 (히스토리 추적 통합)
 *   **executeSingleTask()**: 개별 태스크 실행
     *   지원 태스크 타입과 필드·결과는 [`actions.json` 작성 가이드의 태스크 선택표](./actions.md#2-태스크-선택표)를 참고합니다. 타입 정의의 원본은 [src/schema.ts](../src/schema.ts)입니다.
+*   **VS Code Task 식별**: `Task` 생성자가 shell/process 정의를 명령·인자 기준으로 다시 만들므로, 생성 후 `definition.id`를 실행마다 고유하게 부여합니다. 같은 명령의 작업 폴더·환경변수가 달라도 독립 실행하며 표시 이름과 터미널 그룹은 유지합니다.
 *   **변수 치환**: `${task_id.property}` 형식으로 파이프라인 간 데이터 전달
 *   **Task DAG**: `dependsOn` 및 `${taskId.x}` 자동 추론 의존성으로 그래프를 구성하며, `parallel: true` 태스크는 sync barrier에서 빠져 동시 실행 풀에 들어간다. 상세 시맨틱은 [features.md §24 병렬 실행 / Task DAG](./features.md#24-병렬-실행--task-dag) 참조.
 *   **장시간 완료 피드백**: `executeAction()`이 성공·실패·명시적 중지의 `durationMs`와 완료 시점 창 포커스를 확정하고, [executionFeedback.ts](../src/executionFeedback.ts)가 Actions 상태 표시와 실행 알림의 호환 정책을, [backgroundCompletion.ts](../src/backgroundCompletion.ts)가 임계값·대상 결과·알림 정책과 750ms 묶음을 판정합니다. 성공·중지 알림만 묶고 실패는 원인이 있는 기존 오류 알림을 개별 유지하며, 상태 표시줄은 모든 대상 결과를 요약합니다. `taskhub.executionNotifications`가 완료 피드백의 마스터 게이트이며 비밀번호 파생 실패의 민감 디버그 알림은 대체하지 않습니다.
@@ -245,7 +246,9 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
    * `invalidateActionsCache()`로만 무효화:
      * `.vscode/actions.json` 파일 watcher 콜백.
      * 프리셋이 선택돼 있을 때 워크스페이스 `.vscode/presets/preset-*.json`·개인 프리셋 폴더의 watcher 콜백.
-     * `taskhub.preset.selected` 설정 변경 핸들러.
+     * `taskhub.preset.selected`·`taskhub.builtinActions` 설정 변경 핸들러와 워크스페이스 폴더 목록 변경.
+     * 입력 프로필 실행·민감 디버그 재실행의 확인 뒤 현재 정의 재검증.
+     * 개발 모드의 번들 액션 watcher와 개인 프리셋 이관 완료.
      * 쓰기 동작(액션 생성 wizard, 프리셋 적용, import) 직후.
    * 트리 렌더링 때마다 JSON을 다시 파싱하지 않도록 해 UI 응답성을 유지.
 
@@ -289,13 +292,13 @@ C/C++ 파일을 열었을 때 hover가 동작하려면 확장이 활성화되어
 3. `activate()` 내에서 설정 확인 후 조건부 등록
 4. `docs/features.md` 섹션 16에 문서화
 
-현재 실험적 기능: Bit Operation Hover (`taskhub.experimental.bitOperationHover.enabled`)
+현재 실험적 기능은 Bit Operation Hover와 Jenkins 테스트 추적입니다. 설정과 사용법은 [기능 레퍼런스](./features.md)의 실험적 기능 항목을 참조하세요.
 
 > 실험적 기능의 상세 추가 가이드는 [CONTRIBUTING.md](../CONTRIBUTING.md)를 참조하세요.
 
 ## 개발 시 주의사항
 
-- **History**: 액션과 도구 열람은 같은 `taskhub.actionHistory` 저장소를 사용합니다. 종료 경로는 상태·`durationMs`·입력·실행 명령을 함께 확정하고, `password: true` 입력은 기록하지 않습니다. 회고 정보는 History에, 실행 중 진행률은 Actions에만 표시합니다.
+- **History**: 액션과 도구 열람은 같은 `taskhub.actionHistory` 저장소를 사용합니다. 활성화 시 이전 세션의 `running`을 `cancelled`·`interrupted`로 복구한 뒤 새 실행을 받습니다. 종료 경로는 상태·`durationMs`·입력·실행 명령을 함께 확정하고, `password: true` 입력은 기록하지 않습니다. 회고 정보는 History에, 실행 중 진행률은 Actions에만 표시합니다.
 - **Problem Matcher**: 문자열 매칭은 [diagnosticMatcher.ts](../src/diagnosticMatcher.ts), VS Code `DiagnosticCollection` 관리는 [extension.ts](../src/extension.ts)가 담당합니다. 컬렉션은 액션별로 격리하고 재실행 시 그 액션의 이전 진단만 지웁니다.
 - **새 패널**: TreeDataProvider는 `src/providers/`에 두고 `activate()`에서는 생성·등록만 합니다. 컨텍스트 전용 명령은 Command Palette에서 숨깁니다.
 - **새 명령**: `package.json` 선언, `activate()` 핸들러, 필요한 메뉴와 문서를 함께 갱신합니다.

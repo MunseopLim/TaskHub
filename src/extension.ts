@@ -3168,7 +3168,7 @@ function disposeTaskExecutionScope(scope: TaskExecutionScope): void {
 function throwIfTaskInactive(scope: TaskExecutionScope): void {
     throwIfActionCancelled(scope.run);
     if (scope.timedOut) {
-        throw new Error(`Task '${scope.taskId}' resumed after its timeout and was discarded.`);
+        throw new Error(t(`태스크 '${scope.taskId}'가 시간 초과 후 재개되어 결과를 폐기했습니다.`, `Task '${scope.taskId}' resumed after its timeout and was discarded.`));
     }
 }
 
@@ -3613,7 +3613,7 @@ class SensitiveTaskError extends Error {
         // 사용자가 **아무 단서도 없이** 막힌다. 그래서 가려도 안전한 것만
         // 골라 남긴다: 어느 단계에서 실패했는지, 종료 코드와 시그널, 이미
         // 마스킹된 명령. 원본 출력은 일회성 "민감 디버그" 재실행으로만 본다.
-        const parts: string[] = [`Task '${taskId}' ${sensitiveStageLabel(detail.stage)}`];
+        const parts: string[] = [t(`태스크 '${taskId}' ${sensitiveStageLabel(detail.stage)}`, `Task '${taskId}' ${sensitiveStageLabel(detail.stage)}`)];
         if (detail.stage === 'exit') {
             if (typeof detail.exitCode === 'number') {
                 parts.push(t(`종료 코드 ${detail.exitCode}`, `exit code ${detail.exitCode}`));
@@ -5937,27 +5937,28 @@ async function executeActionPipelineForRun(
     const issues = validateTaskGraph(action.tasks, graph);
     if (issues.length > 0) {
         const lines = issues.map(formatGraphIssue).map(m => `  - ${m}`).join('\n');
-        throw new Error(`Action '${id}' has invalid task graph:\n${lines}`);
+        throw new Error(t(`액션 '${id}'의 태스크 의존 관계가 올바르지 않습니다:\n${lines}`, `Action '${id}' has invalid task graph:\n${lines}`));
     }
     for (const task of action.tasks) {
         if (task.forEach === undefined) { continue; }
         if (INTERACTIVE_TASK_TYPES.has(task.type)) {
-            throw new Error(`Task '${task.id}' cannot use 'forEach' with interactive type '${task.type}'.`);
+            throw new Error(t(`태스크 '${task.id}'의 대화형 유형 '${task.type}'에는 'forEach'를 사용할 수 없습니다.`, `Task '${task.id}' cannot use 'forEach' with interactive type '${task.type}'.`));
         }
         if (task.type === 'browser') {
-            throw new Error(`Task '${task.id}' cannot use 'forEach' with type 'browser'.`);
+            throw new Error(t(`태스크 '${task.id}'의 'browser' 유형에는 'forEach'를 사용할 수 없습니다.`, `Task '${task.id}' cannot use 'forEach' with type 'browser'.`));
         }
         if (task.isOneShot === true) {
-            throw new Error(`Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`);
+            throw new Error(t(`태스크 '${task.id}'에서 'forEach'와 'isOneShot'을 함께 사용할 수 없습니다.`, `Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`));
         }
         const hasEachProducer = action.tasks.some(candidate => candidate !== task && candidate.id === 'each');
         if (typeof task.when?.var === 'string'
             && extractVariableHeads(task.when.var).includes('each')
             && !hasEachProducer) {
-            throw new Error(
+            throw new Error(t(
+                `태스크 '${task.id}'의 'when.var'에는 항목별 변수 '\${each}'를 사용할 수 없습니다. 태스크 조건은 'forEach'를 시작하기 전에 평가합니다.`,
                 `Task '${task.id}' cannot use the per-item variable '\${each}' in 'when.var'; `
                 + "the task-level condition is evaluated before 'forEach' starts."
-            );
+            ));
         }
     }
 
@@ -6398,7 +6399,7 @@ async function executeActionPipelineForRun(
         if (inFlight.size === 0) {
             // Validator should have caught any case where this is
             // reachable. Fail loudly rather than infinite-loop.
-            throw new Error(`Pipeline scheduler stalled in action '${id}'.`);
+            throw new Error(t(`액션 '${id}'에서 다음에 실행할 태스크를 결정하지 못했습니다.`, `Pipeline scheduler stalled in action '${id}'.`));
         }
 
         const outcome = await Promise.race(inFlight.values());
@@ -6468,7 +6469,7 @@ async function executeActionPipelineForRun(
         const summary = failures.map(f => `${f.taskId}: ${f.error.message}`).join('; ');
         throw new AggregateError(
             failures.map(f => f.error),
-            `Action '${id}' had ${failures.length} task failures — ${summary}`
+            t(`액션 '${id}'의 태스크 ${failures.length}개가 실패했습니다 — ${summary}`, `Action '${id}' had ${failures.length} task failures — ${summary}`)
         );
     }
     } catch (error) {
@@ -6523,9 +6524,35 @@ async function offerSensitiveDebugRerun(
     historyProvider: HistoryProvider | undefined,
     failureMessage: string
 ): Promise<void> {
+    const approvedDefinition = JSON.stringify([actionItem, actionWorkspaceFolderMap.get(actionItem.id)]);
+    const resolveCurrent = (): { item: ActionItem; actions: ActionItem[] } | undefined => {
+        try {
+            // 실패 알림과 확인 모달 모두 오래 열려 있을 수 있다. 파일 watcher의
+            // debounce를 기다리지 않고 현재 정의·워크스페이스 소속을 다시 읽는다.
+            invalidateActionsCache();
+            const actions = loadAllActions(context);
+            const item = findActionById(actions, actionItem.id);
+            if (!item?.action || JSON.stringify([item, actionWorkspaceFolderMap.get(item.id)]) !== approvedDefinition) {
+                vscode.window.showWarningMessage(t(
+                    '액션 정의가 변경되었거나 삭제되어 민감 디버그 재실행을 취소했습니다. 현재 액션을 확인한 뒤 다시 실행하세요.',
+                    'Sensitive debug re-run was canceled because the action changed or was removed. Review the current action and run it again.'
+                ));
+                return undefined;
+            }
+            return { item, actions };
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(plainNotificationText(t(
+                `현재 액션 정의를 확인하지 못해 민감 디버그 재실행을 취소했습니다: ${reason}`,
+                `Sensitive debug re-run was canceled because the current action could not be verified: ${reason}`
+            )));
+            return undefined;
+        }
+    };
     const debugLabel = t('민감 디버그로 한 번 다시 실행', 'Re-run once with sensitive debug');
     const picked = await vscode.window.showErrorMessage(plainNotificationText(failureMessage), debugLabel);
     if (picked !== debugLabel) { return; }
+    if (!resolveCurrent()) { return; }
 
     const proceed = t('다시 실행', 'Re-run');
     const confirmed = await vscode.window.showWarningMessage(
@@ -6541,10 +6568,13 @@ async function offerSensitiveDebugRerun(
         proceed
     );
     if (confirmed !== proceed) { return; }
+    const current = resolveCurrent();
+    if (!current) { return; }
 
     pendingSensitiveDebugActionIds.add(actionItem.id);
     try {
-        await executeAction(actionItem, context, mainViewProvider, historyProvider);
+        await executeAction(current.item, context, mainViewProvider, historyProvider,
+            undefined, findActionPathById(current.actions, current.item.id));
     } catch {
         // 재실행의 실패는 평소 경로가 이미 알린다. 여기서 또 띄우지 않는다.
     } finally {
@@ -6957,12 +6987,16 @@ export function registerStopActionCommand(historyProvider: HistoryProvider): vsc
     return vscode.commands.registerCommand('taskhub.stopAction', (actionItem: Action) => {
         const id = actionItem instanceof PinnedAction ? actionItem.actionId : actionItem.id || actionItem.label;
         if (!id) { return; }
-        if (manuallyTerminatedActions.has(id)) { return; }
+        const alreadyRequested = manuallyTerminatedActions.has(id);
         if (!stopRunningAction(id)) {
-            vscode.window.showWarningMessage(t(`'${actionItem.label}'에 대한 활성 태스크를 찾을 수 없습니다.`, `Could not find active task for '${actionItem.label}'.`));
+            if (!alreadyRequested) {
+                vscode.window.showWarningMessage(t(`'${actionItem.label}'에 대한 활성 태스크를 찾을 수 없습니다.`, `Could not find active task for '${actionItem.label}'.`));
+            }
             return;
         }
-        recordManualStopInHistory(historyProvider, id);
+        // 이전 종료 요청이 실패했어도 살아 있는 Task에는 다시 요청한다.
+        // 이미 기록한 중지 시점은 반복 클릭으로 바꾸지 않는다.
+        if (!alreadyRequested) { recordManualStopInHistory(historyProvider, id); }
         syncRunningActionsContext();
     });
 }
@@ -7021,54 +7055,11 @@ export async function executeAction(
         return;
     }
 
-    // Clear diagnostics this action emitted on a previous run so stale
-    // compiler errors / warnings don't linger in the Problems panel. New
-    // diagnostics from this run are emitted by `output.diagnostics` matchers
-    // inside `executeSingleTask`.
-    clearActionDiagnostics(id);
-
-    const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
-    logActionStart(showVerboseLogs, actionItem.title, action.description);
-
-    // Add history entry
     const timestamp = Date.now();
-    const runLog = configuredRunLog(
-        actionWorkspaceFolder ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-        id,
-        actionItem.title,
-        timestamp,
-        action.tasks
-    );
+    let runLog: ConfiguredRunLog | undefined;
     let runLogOutcome: ActionRunLogOutcome = 'failure';
     let runLogError: string | undefined;
     let runLogErrorCode: ActionRunLogErrorCode | undefined;
-    actionStartTimestamps.set(id, timestamp);
-    if (historyProvider) {
-        // Resolve breadcrumb path so HistoryItem can disambiguate same-title
-        // actions in different folders. Caller-supplied `actionPathParts`
-        // wins (cheap when caller already iterated the action tree); the
-        // fallback re-loads the action tree once. Both branches may yield
-        // `undefined` for actions sitting at the root — that's fine, the
-        // History panel only adds the prefix when there's an actual title
-        // collision so root-level actions render bare either way.
-        let resolvedPath = actionPathParts;
-        if (!resolvedPath) {
-            try {
-                resolvedPath = findActionPathById(loadAllActions(context), id);
-            } catch {
-                // loadAllActions can throw on validation errors. Disambiguation
-                // is a nice-to-have — never block execution over it.
-                resolvedPath = undefined;
-            }
-        }
-        historyProvider.addHistoryEntry({
-            actionId: id,
-            actionTitle: actionItem.title,
-            timestamp: timestamp,
-            status: 'running',
-            actionPath: resolvedPath
-        });
-    }
 
     // Accumulator for interactive task inputs — attached to the history
     // entry below so a later "Re-run with saved inputs" can replay them.
@@ -7088,6 +7079,51 @@ export async function executeAction(
     let executedTaskCount = 0;
 
     try {
+        // Clear diagnostics this action emitted on a previous run so stale
+        // compiler errors / warnings don't linger in the Problems panel. New
+        // diagnostics from this run are emitted by `output.diagnostics` matchers
+        // inside `executeSingleTask`.
+        clearActionDiagnostics(id);
+
+        const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
+        logActionStart(showVerboseLogs, actionItem.title, action.description);
+
+        // Add history entry
+        runLog = configuredRunLog(
+            actionWorkspaceFolder ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+            id,
+            actionItem.title,
+            timestamp,
+            action.tasks
+        );
+        actionStartTimestamps.set(id, timestamp);
+        if (historyProvider) {
+            // Resolve breadcrumb path so HistoryItem can disambiguate same-title
+            // actions in different folders. Caller-supplied `actionPathParts`
+            // wins (cheap when caller already iterated the action tree); the
+            // fallback re-loads the action tree once. Both branches may yield
+            // `undefined` for actions sitting at the root — that's fine, the
+            // History panel only adds the prefix when there's an actual title
+            // collision so root-level actions render bare either way.
+            let resolvedPath = actionPathParts;
+            if (!resolvedPath) {
+                try {
+                    resolvedPath = findActionPathById(loadAllActions(context), id);
+                } catch {
+                    // loadAllActions can throw on validation errors. Disambiguation
+                    // is a nice-to-have — never block execution over it.
+                    resolvedPath = undefined;
+                }
+            }
+            historyProvider.addHistoryEntry({
+                actionId: id,
+                actionTitle: actionItem.title,
+                timestamp: timestamp,
+                status: 'running',
+                actionPath: resolvedPath
+            });
+        }
+
         await executeActionPipelineForRun(action, context, id, actionWorkspaceFolder, undefined, {
             presetInputs,
             recordInputs,
@@ -7606,13 +7642,13 @@ async function executeForEachTask(
     builtinVariables: BuiltinVariableContext
 ): Promise<Record<string, any>> {
     if (INTERACTIVE_TASK_TYPES.has(task.type)) {
-        throw new Error(`Task '${task.id}' cannot use 'forEach' with interactive type '${task.type}'.`);
+        throw new Error(t(`태스크 '${task.id}'의 대화형 유형 '${task.type}'에는 'forEach'를 사용할 수 없습니다.`, `Task '${task.id}' cannot use 'forEach' with interactive type '${task.type}'.`));
     }
     if (task.type === 'browser') {
-        throw new Error(`Task '${task.id}' cannot use 'forEach' with type 'browser'.`);
+        throw new Error(t(`태스크 '${task.id}'의 'browser' 유형에는 'forEach'를 사용할 수 없습니다.`, `Task '${task.id}' cannot use 'forEach' with type 'browser'.`));
     }
     if (task.isOneShot === true) {
-        throw new Error(`Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`);
+        throw new Error(t(`태스크 '${task.id}'에서 'forEach'와 'isOneShot'을 함께 사용할 수 없습니다.`, `Task '${task.id}' cannot combine 'forEach' with 'isOneShot'.`));
     }
 
     const baseContext = Object.assign(Object.create(null), builtinVariables, allResults);
@@ -7664,13 +7700,13 @@ async function executeForEachTask(
             if (resultBytes > resultLimit) {
                 const limitMb = Math.round(resultLimit / (1024 * 1024));
                 throw new Error(
-                    `Task '${task.id}' forEach results exceeded the ${limitMb} MB combined result limit.`
+                    t(`태스크 '${task.id}'의 forEach 결과가 전체 결과 한도 ${limitMb}MB를 초과했습니다.`, `Task '${task.id}' forEach results exceeded the ${limitMb} MB combined result limit.`)
                 );
             }
             results.push(iterationResult);
         } catch (error) {
             if (error instanceof Error) {
-                error.message = `Task '${task.id}' forEach iteration ${index + 1}/${items.length} failed: ${error.message}`;
+                error.message = t(`태스크 '${task.id}'의 forEach 반복 ${index + 1}/${items.length} 실패: ${error.message}`, `Task '${task.id}' forEach iteration ${index + 1}/${items.length} failed: ${error.message}`);
             }
             throw error;
         }
@@ -7679,7 +7715,7 @@ async function executeForEachTask(
     const aggregate = aggregateForEachResults(results);
     if (approximateResultBytes(aggregate) > resultLimit) {
         const limitMb = Math.round(resultLimit / (1024 * 1024));
-        throw new Error(`Task '${task.id}' forEach aggregate exceeded the ${limitMb} MB combined result limit.`);
+        throw new Error(t(`태스크 '${task.id}'의 forEach 결과 집계가 전체 결과 한도 ${limitMb}MB를 초과했습니다.`, `Task '${task.id}' forEach aggregate exceeded the ${limitMb} MB combined result limit.`));
     }
     return aggregate;
 }
@@ -7702,7 +7738,7 @@ async function executeSingleTask(
     // The scheduler always supplies its captured generation. Never fall back
     // to the current action-id map here: this function resumes after native
     // dialogs and must not accidentally adopt a newer run of the same id.
-    if (!scope) { throw new Error(`Task '${task.id}' is missing its execution scope.`); }
+    if (!scope) { throw new Error(t(`태스크 '${task.id}'의 실행 문맥이 없습니다.`, `Task '${task.id}' is missing its execution scope.`)); }
     const executionRun = scope.run;
     // `taskUsesSecret` 은 **앞선** 비밀 태스크를 참조하는지만 본다. 비밀을
     // 직접 만드는 태스크 자신은 `markTaskResultSecret` 이 이 함수 끝에서야
@@ -7724,20 +7760,20 @@ async function executeSingleTask(
     );
     if (task.type === 'switch') {
         if (task.forEach !== undefined) {
-            throw new Error(`Task '${task.id}' cannot combine 'switch' with 'forEach'.`);
+            throw new Error(t(`태스크 '${task.id}'에서 'switch'와 'forEach'를 함께 사용할 수 없습니다.`, `Task '${task.id}' cannot combine 'switch' with 'forEach'.`));
         }
         if (typeof task.on !== 'string' || task.on.length === 0) {
-            throw new Error(`Task '${task.id}' of type 'switch' requires a non-empty 'on' string.`);
+            throw new Error(t(`switch 태스크 '${task.id}'에는 비어 있지 않은 'on' 문자열이 필요합니다.`, `Task '${task.id}' of type 'switch' requires a non-empty 'on' string.`));
         }
         if (!task.cases || typeof task.cases !== 'object' || Array.isArray(task.cases)) {
-            throw new Error(`Task '${task.id}' of type 'switch' requires a 'cases' object.`);
+            throw new Error(t(`switch 태스크 '${task.id}'에는 'cases' 객체가 필요합니다.`, `Task '${task.id}' of type 'switch' requires a 'cases' object.`));
         }
         const caseNames = Object.keys(task.cases);
         if (caseNames.length === 0 || caseNames.length > 100) {
-            throw new Error(`Task '${task.id}' switch must define between 1 and 100 cases.`);
+            throw new Error(t(`switch 태스크 '${task.id}'에는 1개 이상 100개 이하의 분기가 필요합니다.`, `Task '${task.id}' switch must define between 1 and 100 cases.`));
         }
         if (caseNames.some(name => name === '__proto__' || name === 'constructor' || name === 'prototype')) {
-            throw new Error(`Task '${task.id}' switch uses a reserved case name.`);
+            throw new Error(t(`switch 태스크 '${task.id}'의 분기 이름에 예약어를 사용할 수 없습니다.`, `Task '${task.id}' switch uses a reserved case name.`));
         }
         const selected = interpolatePipelineVariables(task.on, interpolationContext);
         const matched = Object.prototype.hasOwnProperty.call(task.cases, selected);
@@ -8087,7 +8123,7 @@ async function executeSingleTask(
                 }
             }
 
-            if (!command) { throw new Error(`Task ${task.id} of type '${task.type}' requires a 'command' property.`); }
+            if (!command) { throw new Error(t(`'${task.type}' 태스크 '${task.id}'에는 'command' 속성이 필요합니다.`, `Task ${task.id} of type '${task.type}' requires a 'command' property.`)); }
             // Record the resolved command line (post-interpolation) so history
             // can show exactly what ran — including the dir picked from a
             // dialog — without re-executing. Uses the native-invocation display
@@ -8193,7 +8229,7 @@ async function executeSingleTask(
                             const msg = error instanceof Error ? error.message : String(error);
                             outputChannel.appendLine(`[ERROR] One-shot task ${task.id} failed: ${msg}`);
                             if (readDetachedFailureNotifications()) {
-                                vscode.window.showErrorMessage(plainNotificationText(t(`원샷 태스크 '${task.id}' 시작 실패: ${msg}`, `One-shot task '${task.id}' failed to start: ${msg}`)));
+                                vscode.window.showErrorMessage(plainNotificationText(t(`원샷 태스크 '${task.id}' 실행 실패: ${msg}`, `One-shot task '${task.id}' failed: ${msg}`)));
                             }
                         });
                     }
@@ -8204,7 +8240,7 @@ async function executeSingleTask(
             }
             break;
         default:
-            throw new Error(`Unsupported task type: ${task.type}`);
+            throw new Error(t(`지원하지 않는 태스크 유형: ${task.type}`, `Unsupported task type: ${task.type}`));
     } }
 
     // TaskHub가 결과 경로를 직접 확정한 **파일** 쓰기만 보고서의 파일 결과로
@@ -8245,7 +8281,7 @@ async function executeSingleTask(
                 result = { ...result, ...captured };
             } catch (error: any) {
                 throwIfTaskInactive(scope);
-                throw new Error(`Task '${task.id}' capture failed: ${error.message}`);
+                throw new Error(t(`태스크 '${task.id}'의 출력 캡처 실패: ${error.message}`, `Task '${task.id}' capture failed: ${error.message}`));
             }
         } else {
             const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
@@ -8290,7 +8326,7 @@ async function executeSingleTask(
                 runLogCollector?.recordDiagnostics(task.id, diagnostics);
             } catch (error: any) {
                 throwIfTaskInactive(scope);
-                throw new Error(`Task '${task.id}' diagnostics failed: ${error.message}`);
+                throw new Error(t(`태스크 '${task.id}'의 진단 처리 실패: ${error.message}`, `Task '${task.id}' diagnostics failed: ${error.message}`));
             }
         } else {
             const showVerboseLogs = vscode.workspace.getConfiguration('taskhub').get('pipeline.showVerboseLogs', false);
@@ -8360,7 +8396,7 @@ async function executeSingleTask(
                 const secretDerived = taskUsesSensitiveData || taskProducesSecret;
                 requireSecretContentOptIn(task, secretDerived);
                 throwIfTaskInactive(scope);
-                if (!interpolatedOutput.filePath) { throw new Error(`Task '${task.id}' has output mode 'file' but 'filePath' is not defined.`); }
+                if (!interpolatedOutput.filePath) { throw new Error(t(`태스크 '${task.id}'의 출력 모드가 'file'이지만 'filePath'가 없습니다.`, `Task '${task.id}' has output mode 'file' but 'filePath' is not defined.`)); }
                 const safeOutputPath = writeWorkspaceFileSync(
                     interpolatedOutput.filePath,
                     workspaceRoots ?? getWorkspaceRoots(),
@@ -8637,7 +8673,7 @@ function resolveTaskCwd(cwd: string | undefined, workspaceFolderPath?: string): 
 function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExecutionSetup {
     const { command, args, cwd, id, actionId, revealTerminal, env: taskEnv, isOneShot } = task;
     if (typeof command !== 'string') {
-        throw new Error(`Task ${id} requires a string 'command' property.`);
+        throw new Error(t(`태스크 '${id}'에는 문자열 'command' 속성이 필요합니다.`, `Task ${id} requires a string 'command' property.`));
     }
 
     const actionKey = actionId || id;
@@ -8681,9 +8717,13 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
         displayCommand = task.redactedDisplay;
     }
 
-    const taskDefinition: vscode.TaskDefinition = { type: 'shell', actionId: actionKey };
     const taskName = `TaskHub: ${actionKey}`;
-    const vsCodeTask = new vscode.Task(taskDefinition, vscode.TaskScope.Workspace, taskName, 'taskhub', shellExecution);
+    const vsCodeTask = new vscode.Task({ type: 'shell' }, vscode.TaskScope.Workspace, taskName, 'taskhub', shellExecution);
+    // Task 생성자는 shell/process 정의를 명령·인자에서 다시 만든다. cwd/env는
+    // 그 ID에 들어가지 않아 동일 명령을 다른 폴더에서 병렬 실행하면 VS Code가
+    // 이미 실행 중인 Task를 재사용한다. 생성 후 공개 setter로 실행마다 ID를
+    // 분리한다. 표시 이름과 터미널 그룹은 기존대로 유지한다.
+    vsCodeTask.definition = { type: vsCodeTask.definition.type, id: `taskhub:${randomBytes(16).toString('hex')}` };
     vsCodeTask.presentationOptions = createGroupedTaskPresentationOptions(
         actionKey,
         revealTerminal,
@@ -8725,7 +8765,9 @@ async function executeStreamedTask(task: any, workspaceFolderPath?: string): Pro
                 if (e.exitCode === 0) {
                     resolve();
                 } else {
-                    reject(new Error(`Task ${task.id} failed with exit code ${e.exitCode}.`));
+                    reject(new Error(e.exitCode === undefined
+                        ? t(`태스크 '${task.id}'가 종료 코드를 남기지 않고 종료되었습니다.`, `Task '${task.id}' terminated without an exit code.`)
+                        : t(`태스크 '${task.id}'가 종료 코드 ${e.exitCode}로 실패했습니다.`, `Task ${task.id} failed with exit code ${e.exitCode}.`)));
                 }
             }
         });
@@ -9270,7 +9312,9 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
             stdout += stdoutDecoder.end();
             stderr += stderrDecoder.end();
             if (code !== 0) {
-                const detail = stderr.trim() || `exit code ${code}`;
+                const detail = stderr.trim() || (code === null
+                    ? t('명령이 종료 코드를 남기지 않고 종료되었습니다.', 'Command terminated without an exit code.')
+                    : t(`종료 코드 ${code}`, `exit code ${code}`));
                 finish(() => reject(new Error(detail)));
                 return;
             }
@@ -9490,13 +9534,13 @@ function quickPickEntries(items: readonly any[]): QuickPickEntry[] {
         }
         if (item.id !== undefined) {
             if (typeof item.id !== 'string' || item.id.length === 0 || item.id.length > 128) {
-                throw new Error('QuickPick item id must be a non-empty string of at most 128 characters.');
+                throw new Error(t('QuickPick 항목 id는 비어 있지 않은 128자 이하의 문자열이어야 합니다.', 'QuickPick item id must be a non-empty string of at most 128 characters.'));
             }
             if (seenIds.has(item.id)) {
                 // 동적 JSONL의 id는 환경변수·password 파생 출력일 수도 있다.
                 // Doctor는 정적 actions.json의 id를 구체적으로 알려 주지만,
                 // 런타임 오류에는 값을 싣지 않아 알림 표면으로 새지 않게 한다.
-                throw new Error('QuickPick item id is duplicated.');
+                throw new Error(t('QuickPick 항목 id가 중복되었습니다.', 'QuickPick item id is duplicated.'));
             }
             seenIds.add(item.id);
         }
@@ -9583,16 +9627,16 @@ async function showAdvancedQuickPick(
     token?: vscode.CancellationToken
 ): Promise<QuickPickEntry[]> {
     if (task.allowCustom === true && task.canPickMany === true) {
-        throw new Error(`Task '${task.id}' cannot combine 'allowCustom' with 'canPickMany'.`);
+        throw new Error(t(`태스크 '${task.id}'에서 'allowCustom'과 'canPickMany'를 함께 사용할 수 없습니다.`, `Task '${task.id}' cannot combine 'allowCustom' with 'canPickMany'.`));
     }
 
     let { selections: requested, explicit } = requestedQuickPickSelections(task, memoryAllowed);
     if (explicit && requested.some(selection => selection.label.length === 0)) {
-        throw new Error(`Task '${task.id}' has an empty quickPick default label.`);
+        throw new Error(t(`태스크 '${task.id}'의 quickPick 기본 선택 이름이 비어 있습니다.`, `Task '${task.id}' has an empty quickPick default label.`));
     }
     if (task.canPickMany !== true && requested.length > 1) {
         if (explicit) {
-            throw new Error(`Task '${task.id}' has multiple default labels but 'canPickMany' is not true.`);
+            throw new Error(t(`태스크 '${task.id}'의 기본 선택이 여러 개이지만 'canPickMany'가 켜져 있지 않습니다.`, `Task '${task.id}' has multiple default labels but 'canPickMany' is not true.`));
         }
         // 과거에는 다중 선택이던 task가 단일 선택으로 바뀔 수 있다. 저장된 두
         // 항목을 설정 오류로 취급하면 QuickPick이 열리지도 않으므로, 이 기억만
@@ -9622,11 +9666,11 @@ async function showAdvancedQuickPick(
         const ambiguous = missing.filter(selection => entriesForLabel(selection.label).length > 1);
         if (ambiguous.length > 0) {
             throw new Error(
-                `Task '${task.id}' default label is ambiguous: ${ambiguous.map(v => v.label).join(', ')}`
+                t(`태스크 '${task.id}'의 기본 선택 이름이 모호합니다: ${ambiguous.map(v => v.label).join(', ')}`, `Task '${task.id}' default label is ambiguous: ${ambiguous.map(v => v.label).join(', ')}`)
             );
         }
         if (!(task.allowCustom === true && missing.length === 1)) {
-            throw new Error(`Task '${task.id}' default label was not found: ${missing.map(v => v.label).join(', ')}`);
+            throw new Error(t(`태스크 '${task.id}'의 기본 선택 이름을 찾을 수 없습니다: ${missing.map(v => v.label).join(', ')}`, `Task '${task.id}' default label was not found: ${missing.map(v => v.label).join(', ')}`));
         }
     }
 
@@ -9780,7 +9824,7 @@ export async function handleQuickPick(
     }
 
     if (!pickItems || !Array.isArray(pickItems) || pickItems.length === 0) {
-        throw new Error(`Task '${task.id}' of type 'quickPick' requires a non-empty 'items' array or an 'itemsFromCommand'.`);
+        throw new Error(t(`quickPick 태스크 '${task.id}'에는 비어 있지 않은 'items' 배열 또는 'itemsFromCommand'가 필요합니다.`, `Task '${task.id}' of type 'quickPick' requires a non-empty 'items' array or an 'itemsFromCommand'.`));
     }
     task = { ...task, items: pickItems };
     const producesArgs = quickPickProducesArgsResult(task);
@@ -9989,7 +10033,7 @@ export async function handleEnvPick(task: any, token?: vscode.CancellationToken)
     }
 
     if (names.length === 0) {
-        throw new Error(`Task '${task.id}' of type 'envPick' found no environment variables.`);
+        throw new Error(t(`envPick 태스크 '${task.id}'에서 환경변수를 찾을 수 없습니다.`, `Task '${task.id}' of type 'envPick' found no environment variables.`));
     }
 
     const items: vscode.QuickPickItem[] = names.map(name => ({ label: name }));
@@ -10019,10 +10063,10 @@ async function handleWriteFile(
     secretDerived = false
 ): Promise<{ path: string }> {
     if (typeof task.path !== 'string' || task.path.length === 0) {
-        throw new Error(`Task '${task.id}' of type '${task.type}' requires a non-empty 'path' property.`);
+        throw new Error(t(`'${task.type}' 태스크 '${task.id}'에는 비어 있지 않은 'path' 속성이 필요합니다.`, `Task '${task.id}' of type '${task.type}' requires a non-empty 'path' property.`));
     }
     if (typeof task.content !== 'string') {
-        throw new Error(`Task '${task.id}' of type '${task.type}' requires a 'content' property (string).`);
+        throw new Error(t(`'${task.type}' 태스크 '${task.id}'에는 문자열 'content' 속성이 필요합니다.`, `Task '${task.id}' of type '${task.type}' requires a 'content' property (string).`));
     }
 
     const rawPath = interpolatePipelineVariables(task.path, interpolationContext);
@@ -10080,7 +10124,7 @@ async function handleUnzip(
         archivePath = resolveValue(archiveSource, ['path', 'archivePath']);
     }
     if (!archivePath) {
-        throw new Error(`Unzip task '${task.id}' requires an archive path via 'inputs.archive', 'inputs.file', or the 'archive' property.`);
+        throw new Error(t(`unzip 태스크 '${task.id}'에는 'inputs.archive', 'inputs.file' 또는 'archive' 속성으로 지정한 압축 파일 경로가 필요합니다.`, `Unzip task '${task.id}' requires an archive path via 'inputs.archive', 'inputs.file', or the 'archive' property.`));
     }
 
     const destinationSourceId = inputs.destination;
@@ -10105,7 +10149,7 @@ async function handleUnzip(
     // tool (e.g. 7z) since adm-zip cannot read those formats.
     if (task.tool === undefined || task.tool === null) {
         if (path.extname(archivePath).toLowerCase() !== '.zip') {
-            throw new Error(`Built-in engine only supports .zip archives. For '${path.basename(archivePath)}', specify a 'tool' (e.g. 7z).`);
+            throw new Error(t(`내장 엔진은 .zip 압축 파일만 지원합니다. '${path.basename(archivePath)}'에는 'tool'(예: 7z)을 지정하세요.`, `Built-in engine only supports .zip archives. For '${path.basename(archivePath)}', specify a 'tool' (e.g. 7z).`));
         }
         // 상대 경로는 `cwd` → 워크스페이스 기준이다. 내장 엔진은 cwd 개념이
         // 없어 `path.resolve` 가 extension host 의 `process.cwd()` 를 쓰는데,
@@ -10126,7 +10170,7 @@ async function handleUnzip(
             // 중지로 끝난 것을 "실패"로 포장하면 사용자가 누른 Stop 이
             // 오류처럼 보이고, 파이프라인의 중지 처리도 타지 않는다.
             if (isArchiveAbortError(error)) { throw new ActionStoppedError(); }
-            throw new Error(`Failed to unzip file: ${error.message}`);
+            throw new Error(t(`압축 파일 해제 실패: ${error.message}`, `Failed to unzip file: ${error.message}`));
         } finally {
             abort.dispose();
         }
@@ -10155,7 +10199,7 @@ async function handleUnzip(
         // 경로를 돌려줘 `tool` 유무로 downstream 이 갈리지 않게 한다.
         return { outputDir: resolveArchiveTaskPath(outputDir, archiveBase) };
     } catch (error: any) {
-        throw new Error(`Failed to unzip file: ${error.message}`);
+        throw new Error(t(`압축 파일 해제 실패: ${error.message}`, `Failed to unzip file: ${error.message}`));
     }
 }
 
@@ -10172,7 +10216,7 @@ async function handleZip(
     const interpolationContext = Object.assign(Object.create(null), builtinVariables, allResults);
 
     const archive = task.archive ? interpolatePipelineVariables(task.archive, interpolationContext) : undefined;
-    if (!archive) { throw new Error(`Zip task '${task.id}' is missing the 'archive' property.`); }
+    if (!archive) { throw new Error(t(`zip 태스크 '${task.id}'에 'archive' 속성이 없습니다.`, `Zip task '${task.id}' is missing the 'archive' property.`)); }
 
     let sourcePaths: string[] = [];
     if (Array.isArray(task.source)) {
@@ -10182,7 +10226,7 @@ async function handleZip(
     }
 
     if (sourcePaths.length === 0) {
-        throw new Error(`Zip task '${task.id}' has no 'source' files or directories specified.`);
+        throw new Error(t(`zip 태스크 '${task.id}'에 'source' 파일 또는 폴더가 지정되지 않았습니다.`, `Zip task '${task.id}' has no 'source' files or directories specified.`));
     }
 
     // 외부 tool 경로가 자식 프로세스의 cwd 로 쓰는 값과 **같은 기준점**이다
@@ -10195,7 +10239,7 @@ async function handleZip(
     // supported; other formats still require an external tool.
     if (task.tool === undefined || task.tool === null) {
         if (path.extname(archive).toLowerCase() !== '.zip') {
-            throw new Error(`Built-in engine only supports .zip archives. For '${path.basename(archive)}', specify a 'tool' (e.g. 7z).`);
+            throw new Error(t(`내장 엔진은 .zip 압축 파일만 지원합니다. '${path.basename(archive)}'에는 'tool'(예: 7z)을 지정하세요.`, `Built-in engine only supports .zip archives. For '${path.basename(archive)}', specify a 'tool' (e.g. 7z).`));
         }
         // `resolveArchiveTaskPath` 주석 참조 — 내장 엔진의 `path.resolve` 는
         // extension host 의 `process.cwd()` 를 기준으로 삼는다.
@@ -10251,7 +10295,7 @@ async function handleZip(
             return { archivePath: resolvedArchive };
         } catch (error: any) {
             if (isArchiveAbortError(error)) { throw new ActionStoppedError(); }
-            throw new Error(`Failed to zip files for task '${task.id}': ${error.message}`);
+            throw new Error(t(`태스크 '${task.id}'의 파일 압축 실패: ${error.message}`, `Failed to zip files for task '${task.id}': ${error.message}`));
         } finally {
             abort.dispose();
         }
@@ -10286,13 +10330,13 @@ async function handleZip(
         // 내장 엔진과 같은 절대 경로를 돌려준다 — 위 unzip 주석 참조.
         return { archivePath: resolveArchiveTaskPath(archive, archiveBase) };
     } catch (error: any) {
-        throw new Error(`Failed to zip files for task '${task.id}': ${error.message}`);
+        throw new Error(t(`태스크 '${task.id}'의 파일 압축 실패: ${error.message}`, `Failed to zip files for task '${task.id}': ${error.message}`));
     }
 }
 
 export async function handleStringManipulation(task: any): Promise<{ output: string }> {
     const { function: func, input } = task;
-    if (typeof input !== 'string') { throw new Error(`String manipulation task '${task.id}' requires the 'input' property to be a string.`); }
+    if (typeof input !== 'string') { throw new Error(t(`문자열 처리 태스크 '${task.id}'의 'input' 속성은 문자열이어야 합니다.`, `String manipulation task '${task.id}' requires the 'input' property to be a string.`)); }
 
     const value = input;
     let output: string;
@@ -10326,7 +10370,7 @@ export async function handleStringManipulation(task: any): Promise<{ output: str
             output = value.trim();
             break;
         default:
-            throw new Error(`Unsupported string manipulation function: ${func}`);
+            throw new Error(t(`지원하지 않는 문자열 처리 함수: ${func}`, `Unsupported string manipulation function: ${func}`));
     }
     return { output };
 }
@@ -11587,7 +11631,16 @@ export async function showActionRunReport(entry: HistoryEntry): Promise<void> {
     }
 }
 
-export function activate(context: vscode.ExtensionContext) {
+/** 트리 UI의 저장 실패가 이벤트 리스너의 처리되지 않은 rejection으로 남지 않게 한다. */
+export async function saveActionFolderState(context: vscode.ExtensionContext, folderId: string, expanded: boolean): Promise<void> {
+    try {
+        await context.workspaceState.update(`folderState:${folderId}`, expanded);
+    } catch (error) {
+        outputChannel.appendLine(`[State Warning] Failed to save folder state: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
     startRegexWorkerPool();
     // 파일/폴더 다이얼로그의 마지막 위치 저장소. 등록 전에 열린 다이얼로그는
     // 기억 없이 워크스페이스 폴더에서 열리므로 activate 최상단에서 연결한다.
@@ -11678,6 +11731,12 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceLinkViewProvider = new LinkViewProvider();
     const favoriteViewProvider = new FavoriteViewProvider(context);
     const historyProvider = new HistoryProvider(context);
+    try {
+        await historyProvider.recoverInterruptedRuns();
+    } catch (error) {
+        // 저장소 오류가 다른 도구의 활성화까지 막지 않게 한다.
+        outputChannel.appendLine(`[History Warning] Failed to recover interrupted runs: ${error instanceof Error ? error.message : String(error)}`);
+    }
     context.subscriptions.push(
         mainViewProvider,
         workspaceLinkViewProvider,
@@ -11696,8 +11755,8 @@ export function activate(context: vscode.ExtensionContext) {
     mainView.description = context.extension.packageJSON.version;
     context.subscriptions.push(mainView);
     context.subscriptions.push(
-        mainView.onDidExpandElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, true); } }),
-        mainView.onDidCollapseElement(async e => { if (e.element instanceof Folder && e.element.id) { await context.workspaceState.update(`folderState:${e.element.id}`, false); } })
+        mainView.onDidExpandElement(e => { if (e.element instanceof Folder && e.element.id) { void saveActionFolderState(context, e.element.id, true); } }),
+        mainView.onDidCollapseElement(e => { if (e.element instanceof Folder && e.element.id) { void saveActionFolderState(context, e.element.id, false); } })
     );
     workspaceLinkViewProvider.view = vscode.window.createTreeView('mainView.linkWorkspace', { treeDataProvider: workspaceLinkViewProvider });
     favoriteViewProvider.view = vscode.window.createTreeView('mainView.favorite', { treeDataProvider: favoriteViewProvider });
