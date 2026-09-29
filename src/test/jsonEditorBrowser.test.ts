@@ -73,10 +73,16 @@ async function withJsonBrowser(
         initialText: string;
         messages: BrowserMessage[];
         ready: BrowserMessage;
+        reopen(): Promise<BrowserMessage>;
         operate(operations: Array<Record<string, unknown>>): Promise<BrowserMessage>;
         waitFor(command: string, after?: number): Promise<BrowserMessage>;
     }) => Promise<void>,
-    options: { recoveryData?: unknown; expectedErrors?: RegExp[] } = {},
+    options: {
+        recoveryData?: unknown;
+        expectedErrors?: RegExp[];
+        beforeRecoveryUpdate?: () => Promise<void>;
+        beforeHostPost?: (message: BrowserMessage) => Promise<void>;
+    } = {},
 ): Promise<void> {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-json-browser-'));
     const filePath = path.join(tempDir, '한글 설정.json');
@@ -92,6 +98,7 @@ async function withJsonBrowser(
     let panel: vscode.WebviewPanel | undefined;
     let request = 0;
     let browserError: Error | undefined;
+    let acceptRecovery = false;
     jsonPanelRegistry.clear();
 
     const waitFor = (command: string, after = 0, requestId?: number): Promise<BrowserMessage> => new Promise((resolve, reject) => {
@@ -114,7 +121,7 @@ async function withJsonBrowser(
 
     try {
         (vscode.window as any).showInformationMessage = (_message: string, ...buttons: unknown[]) =>
-            Promise.resolve(options.recoveryData === undefined ? undefined : buttons.find(button => typeof button === 'string'));
+            Promise.resolve(options.recoveryData === undefined && !acceptRecovery ? undefined : buttons.find(button => typeof button === 'string'));
         (vscode.window as any).showErrorMessage = (message: string) => {
             errors.push(message);
             return Promise.resolve(undefined);
@@ -131,6 +138,15 @@ async function withJsonBrowser(
                     return Reflect.set(target, property, property === 'html' ? observeHtml(value) : value, target);
                 },
                 get(target, property) {
+                    if (property === 'postMessage') {
+                        return async (message: BrowserMessage) => {
+                            await options.beforeHostPost?.(message);
+                            const delivered = await target.postMessage(message);
+                            messages.push({ ...message, command: 'host:' + message.command });
+                            for (const listener of [...listeners]) { listener(); }
+                            return delivered;
+                        };
+                    }
                     const value = Reflect.get(target, property, target);
                     return typeof value === 'function' ? value.bind(target) : value;
                 },
@@ -160,7 +176,10 @@ async function withJsonBrowser(
             subscriptions: disposables,
             workspaceState: {
                 get: (key: string, fallback: unknown) => store.get(key) ?? fallback,
-                update: async (key: string, value: unknown) => { store.set(key, value); },
+                update: async (key: string, value: unknown) => {
+                    await options.beforeRecoveryUpdate?.();
+                    store.set(key, value);
+                },
             },
         } as unknown as vscode.ExtensionContext;
         await openJsonEditorFile(context, filePath);
@@ -169,6 +188,14 @@ async function withJsonBrowser(
         assert.strictEqual(ready.errorVisible, false, ready.error);
         await body({
             filePath, initialText, messages, ready, waitFor,
+            async reopen() {
+                const after = messages.length;
+                panel!.dispose();
+                acceptRecovery = true;
+                try { await openJsonEditorFile(context, filePath); }
+                finally { acceptRecovery = false; }
+                return waitFor('testReady', after);
+            },
             async operate(operations) {
                 const requestId = ++request;
                 const after = messages.length;
@@ -193,6 +220,197 @@ async function withJsonBrowser(
 
 suite('JSON Editor 실제 브라우저 편집과 저장', function () {
     this.timeout(30000);
+    test('다시 읽기의 복구 저장소 대기 중 입력한 활성 셀을 보존한다', async () => {
+        let release!: () => void;
+        let entered!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const started = new Promise<void>(resolve => { entered = resolve; });
+        let armed = false;
+        try {
+            await withJsonBrowser({ rows: [{ value: 'disk' }] }, async browser => {
+                armed = true;
+                await browser.operate([{ kind: 'click', id: 'btnReload' }]);
+                await started;
+                await browser.operate([{ kind: 'edit', col: 'value', value: 'new draft' }]);
+                release();
+                await browser.waitFor('host:loadData');
+                const result = await browser.operate([]);
+                assert.strictEqual(result.cells[0].input, 'new draft');
+                assert.strictEqual(result.dirty, true);
+                assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+                const recovered = await browser.reopen();
+                assert.strictEqual(recovered.cells[0].label, 'new draft');
+                assert.strictEqual(recovered.dirty, true);
+                const after = browser.messages.length;
+                await browser.operate([{ kind: 'click', id: 'btnSave' }]);
+                await browser.waitFor('saveAck', after);
+                assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), { rows: [{ value: 'new draft' }] });
+            }, { beforeRecoveryUpdate: async () => {
+                if (armed) { armed = false; entered(); await gate; }
+            } });
+        } finally { release(); }
+    });
+
+    for (const trigger of ['toolbar', 'external'] as const) {
+        test(`지연된 ${trigger} 다시 읽기를 거절하면 새 입력과 기존 루트 배열 형태를 보존한다`, async () => {
+            const originalWatcher = vscode.workspace.createFileSystemWatcher;
+            const originalWarning = vscode.window.showWarningMessage;
+            let change!: (uri: vscode.Uri) => Promise<void>;
+            const noEvent = () => new vscode.Disposable(() => {});
+            vscode.workspace.createFileSystemWatcher = (() => ({
+                onDidChange: (callback: typeof change) => { change = callback; return noEvent(); },
+                onDidCreate: noEvent, onDidDelete: noEvent, dispose() {},
+            })) as unknown as typeof originalWatcher;
+            vscode.window.showWarningMessage = (async (_message: string, _options: unknown, overwrite: string) => overwrite) as typeof originalWarning;
+            let release!: () => void;
+            let entered!: () => void;
+            const gate = new Promise<void>(resolve => { release = resolve; });
+            const started = new Promise<void>(resolve => { entered = resolve; });
+            try {
+                await withJsonBrowser([{ value: 'disk array' }], async browser => {
+                    fs.writeFileSync(browser.filePath, JSON.stringify({ rows: [{ value: 'external object' }] }));
+                    if (trigger === 'toolbar') {
+                        await browser.operate([{ kind: 'click', id: 'btnReload' }]);
+                    } else {
+                        await change(vscode.Uri.file(browser.filePath));
+                    }
+                    await started;
+                    await browser.operate([{ kind: 'edit', col: 'value', value: 'kept array draft' }]);
+                    release();
+                    await browser.waitFor('host:loadData');
+                    const ack = await browser.waitFor('loadAck');
+                    assert.strictEqual(ack.accepted, false, '전송 중 생긴 입력 때문에 오래된 다시 읽기는 거절해야 한다');
+                    const kept = await browser.operate([]);
+                    assert.strictEqual(kept.cells[0].input, 'kept array draft');
+                    assert.strictEqual(kept.dirty, true);
+                    assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+                    const recovered = await browser.reopen();
+                    assert.strictEqual(recovered.cells[0].label, 'kept array draft');
+                    assert.strictEqual(recovered.dirty, true);
+                    const after = browser.messages.length;
+                    await browser.operate([{ kind: 'click', id: 'btnSave' }]);
+                    assert.strictEqual((await browser.waitFor('saveAck', after)).dirty, false);
+                    assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), [{ value: 'kept array draft' }]);
+                }, { beforeHostPost: async message => {
+                    if (message.command === 'loadData') { entered(); await gate; }
+                } });
+            } finally {
+                release();
+                vscode.workspace.createFileSystemWatcher = originalWatcher;
+                vscode.window.showWarningMessage = originalWarning;
+            }
+        });
+    }
+
+    test('다시 읽기 전송 중 연속된 invalid JSON 입력도 세대를 올려 원문 입력을 지킨다', async () => {
+        let release!: () => void;
+        let entered!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const started = new Promise<void>(resolve => { entered = resolve; });
+        try {
+            await withJsonBrowser({ rows: [{ value: { nested: 1 } }] }, async browser => {
+                await browser.operate([{ kind: 'click', id: 'btnReload' }]);
+                await started;
+                await browser.operate([{ kind: 'edit', col: 'value', value: '{' }]);
+                const before = browser.messages.length;
+                await browser.operate([{ kind: 'edit', col: 'value', value: '{"nested":' }]);
+                assert.ok(browser.messages.slice(before).some(message => message.command === 'editRevision'),
+                    '이미 dirty이고 유효한 snapshot도 없는 입력을 호스트가 알아야 한다');
+                release();
+                assert.strictEqual((await browser.waitFor('loadAck')).accepted, false);
+                const kept = await browser.operate([]);
+                assert.strictEqual(kept.cells[0].input, '{"nested":');
+                assert.strictEqual(kept.cells[0].editing, true);
+                assert.strictEqual(kept.dirty, true);
+                assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+                const savedAfter = browser.messages.length;
+                await browser.operate([
+                    { kind: 'edit', col: 'value', value: '{"nested":2}' }, { kind: 'click', id: 'btnSave' },
+                ]);
+                assert.strictEqual((await browser.waitFor('saveAck', savedAfter)).dirty, false);
+                assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), { rows: [{ value: { nested: 2 } }] });
+            }, { beforeHostPost: async message => {
+                if (message.command === 'loadData') { entered(); await gate; }
+            } });
+        } finally { release(); }
+    });
+
+    test('연속 외부 다시 읽기의 최신 제안이 거절되어도 새 편집을 최신 파일 기준으로 복구한다', async () => {
+        const originalWatcher = vscode.workspace.createFileSystemWatcher;
+        const originalWarning = vscode.window.showWarningMessage;
+        let change!: (uri: vscode.Uri) => Promise<void>;
+        const noEvent = () => new vscode.Disposable(() => {});
+        vscode.workspace.createFileSystemWatcher = (() => ({
+            onDidChange: (callback: typeof change) => { change = callback; return noEvent(); },
+            onDidCreate: noEvent, onDidDelete: noEvent, dispose() {},
+        })) as unknown as typeof originalWatcher;
+        vscode.window.showWarningMessage = (async (_message: string, ...rest: unknown[]) =>
+            rest.find(item => typeof item === 'string')) as typeof originalWarning;
+        const releases: Array<() => void> = [];
+        let bothProposed!: () => void;
+        const proposed = new Promise<void>(resolve => { bothProposed = resolve; });
+        try {
+            await withJsonBrowser({ rows: [{ value: 'initial' }] }, async browser => {
+                await browser.operate([{ kind: 'edit', col: 'value', value: 'old draft' }]);
+                fs.writeFileSync(browser.filePath, JSON.stringify({ rows: [{ value: 'first external' }] }));
+                await change(vscode.Uri.file(browser.filePath));
+                fs.writeFileSync(browser.filePath, JSON.stringify({ rows: [{ value: 'second external with another size' }] }));
+                await change(vscode.Uri.file(browser.filePath));
+                await proposed;
+                releases[0]();
+                const first = await browser.waitFor('loadAck');
+                assert.strictEqual(first.accepted, true);
+                const after = browser.messages.length;
+                releases[1]();
+                const second = await browser.waitFor('loadAck', after);
+                assert.strictEqual(second.accepted, false);
+                await browser.operate([{ kind: 'edit', col: 'value', value: 'latest retained draft' }]);
+                const recovered = await browser.reopen();
+                assert.strictEqual(recovered.cells[0].label, 'latest retained draft');
+                assert.strictEqual(recovered.dirty, true);
+                const savedAfter = browser.messages.length;
+                await browser.operate([{ kind: 'click', id: 'btnSave' }]);
+                assert.strictEqual((await browser.waitFor('saveAck', savedAfter)).dirty, false);
+                assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), { rows: [{ value: 'latest retained draft' }] });
+            }, { beforeHostPost: async message => {
+                if (message.command !== 'loadData') { return; }
+                await new Promise<void>(resolve => {
+                    releases.push(resolve);
+                    if (releases.length === 2) { bothProposed(); }
+                });
+            } });
+        } finally {
+            for (const release of releases) { release(); }
+            vscode.workspace.createFileSystemWatcher = originalWatcher;
+            vscode.window.showWarningMessage = originalWarning;
+        }
+    });
+
+    test('승인된 외부 다시 읽기는 루트 형태와 저장 기준을 함께 바꾼다', async () => {
+        const originalWatcher = vscode.workspace.createFileSystemWatcher;
+        let change!: (uri: vscode.Uri) => Promise<void>;
+        const noEvent = () => new vscode.Disposable(() => {});
+        vscode.workspace.createFileSystemWatcher = (() => ({
+            onDidChange: (callback: typeof change) => { change = callback; return noEvent(); },
+            onDidCreate: noEvent, onDidDelete: noEvent, dispose() {},
+        })) as unknown as typeof originalWatcher;
+        try {
+            await withJsonBrowser([{ value: 'original array' }], async browser => {
+                const external = { rows: [{ value: 'loaded object' }] };
+                fs.writeFileSync(browser.filePath, JSON.stringify(external));
+                await change(vscode.Uri.file(browser.filePath));
+                assert.strictEqual((await browser.waitFor('loadAck')).accepted, true);
+                assert.strictEqual((await browser.operate([])).cells[0].label, 'loaded object');
+                const after = browser.messages.length;
+                await browser.operate([
+                    { kind: 'edit', col: 'value', value: 'saved object' }, { kind: 'click', id: 'btnSave' },
+                ]);
+                assert.strictEqual((await browser.waitFor('saveAck', after)).dirty, false);
+                assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), { rows: [{ value: 'saved object' }] });
+            });
+        } finally { vscode.workspace.createFileSystemWatcher = originalWatcher; }
+    });
+
     test('외부 변경 덮어쓰기를 취소해도 표 편집과 dirty를 유지하고 재승인 후 저장한다', async () => {
         const watcher = vscode.workspace.createFileSystemWatcher;
         const warning = vscode.window.showWarningMessage;

@@ -2021,15 +2021,10 @@ suite('JsonEditorUtils Test Suite', () => {
                     window: editorSource.match(/case 'save':[\s\S]*?postSaveResult\(true/)?.[0],
                 },
                 {
-                    // case 'reload' 의 첫 break; 는 confirmDiscardIfDirty 거부 시
-                    // early-return 이라 성공 분기까지 안 닿는다. reloadedStat
-                    // 변수는 성공 try-block 에서만 선언되므로 그 anchor 사용.
-                    name: "case 'reload' success branch",
-                    window: editorSource.match(/reloadedStat\s*=\s*fs\.statSync[\s\S]{0,1500}?postToWebview\(\s*\{\s*command:\s*'loadData'/)?.[0],
-                },
-                {
-                    name: 'auto-reload watcher branch',
-                    window: editorSource.match(/baselineMtimeMs\s*=\s*changedStat\.mtimeMs[\s\S]{0,1000}?postToWebview\(\s*\{\s*command:\s*'loadData'/)?.[0],
+                    // 수동·자동 reload는 이제 웹뷰의 실제 적용 확인 후 같은
+                    // 성공 분기에서 정리한다. 제안/거절 단계에서는 지우면 안 된다.
+                    name: "case 'loadAck' accepted branch",
+                    window: editorSource.match(/lastAcceptedReloadId\s*=\s*message\.loadId;[\s\S]*?await setRecoveryEntry\(context, filePath, null\)/)?.[0],
                 },
             ];
             for (const site of sites) {

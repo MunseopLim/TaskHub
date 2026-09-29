@@ -212,6 +212,124 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         return state?.[filePath];
     }
 
+    test('동시 열기에서 오래된 복구 응답은 새 파일 편집을 폐기하지 않는다', async () => {
+        const fake = installFakePanel();
+        const fileA = writeJson('pending-recovery.json', { rows: [{ value: 'A' }] });
+        const fileB = writeJson('new-current.json', { rows: [{ value: 'B' }] });
+        const stat = fs.statSync(fileA);
+        const ctx = makeContext({ [RECOVERY_STATE_KEY]: { [fileA]: {
+            data: { rows: [{ value: 'recovered A' }] }, isRootArray: false,
+            fileMtimeMs: stat.mtimeMs, fileSize: stat.size, capturedAt: Date.now(),
+        } } });
+        let answer!: () => void;
+        let started!: () => void;
+        const prompted = new Promise<void>(resolve => { started = resolve; });
+        (vscode.window as any).showInformationMessage = (_message: string, recover: string) => {
+            started();
+            return new Promise<string>(resolve => { answer = () => resolve(recover); });
+        };
+        const pending = openJsonEditorFile(ctx, fileA);
+        await prompted;
+        await openJsonEditorFile(ctx, fileB);
+        const edited = { rows: [{ value: 'unsaved B' }] };
+        await fake.send({ command: 'modified', value: true });
+        await fake.send({ command: 'snapshot', data: edited });
+        answer();
+        await pending;
+        assert.strictEqual(jsonPanelRegistry.getFilePath(), fileB);
+        assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+        fake.disposePanel();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.deepStrictEqual((readRecoveryEntry(ctx, fileB) as { data: unknown })?.data, edited);
+    });
+
+    for (const promptKind of ['information', 'error'] as const) {
+        test(`같은 파일의 오래된 ${promptKind} 복구 버리기는 새 세션의 복구본을 지우지 않는다`, async () => {
+            const fake = installFakePanel();
+            const filePath = writeJson('same-file-recovery.json', { rows: [{ value: 'disk' }] });
+            const stat = fs.statSync(filePath);
+            let persisted!: () => void;
+            const snapshotPersisted = new Promise<void>(resolve => { persisted = resolve; });
+            const ctx = makeContext({ [RECOVERY_STATE_KEY]: { [filePath]: {
+                data: { rows: [{ value: promptKind === 'error' ? Number.MAX_SAFE_INTEGER + 1 : 'recovered' }] },
+                isRootArray: false, fileMtimeMs: stat.mtimeMs, fileSize: stat.size, capturedAt: Date.now(),
+            } } }, async () => { persisted(); });
+            let answer!: () => void;
+            let started!: () => void;
+            const prompted = new Promise<void>(resolve => { started = resolve; });
+            let prompts = 0;
+            const prompt = (_message: string, ...rest: unknown[]) => {
+                const buttons = rest.filter((item): item is string => typeof item === 'string');
+                if (++prompts > 1) { return Promise.resolve(promptKind === 'information' ? buttons[0] : undefined); }
+                started();
+                return new Promise<string>(resolve => {
+                    answer = () => resolve(buttons[promptKind === 'information' ? 1 : 0]);
+                });
+            };
+            if (promptKind === 'information') { (vscode.window as any).showInformationMessage = prompt; }
+            else { (vscode.window as any).showErrorMessage = prompt; }
+            const obsolete = openJsonEditorFile(ctx, filePath);
+            await prompted;
+            await openJsonEditorFile(ctx, filePath);
+            const edited = { rows: [{ value: 'new session draft' }] };
+            await fake.send({ command: 'modified', value: true });
+            await fake.send({ command: 'snapshot', data: edited });
+            await snapshotPersisted;
+            await new Promise<void>(resolve => setImmediate(resolve));
+            answer();
+            await obsolete;
+            assert.strictEqual(jsonPanelRegistry.getFilePath(), filePath);
+            assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+            assert.deepStrictEqual((readRecoveryEntry(ctx, filePath) as { data: unknown })?.data, edited);
+            fake.disposePanel();
+            await new Promise<void>(resolve => setImmediate(resolve));
+            assert.deepStrictEqual((readRecoveryEntry(ctx, filePath) as { data: unknown })?.data, edited);
+        });
+    }
+
+    for (const discardNewEdits of [false, true]) {
+        test(`복구 안내 중 현재 파일을 편집하면 교체 직전에 폐기를 재확인한다: ${discardNewEdits}`, async () => {
+            const fake = installFakePanel();
+            const fileA = writeJson('awaiting-recovery.json', { rows: [{ value: 'A' }] });
+            const fileB = writeJson('editing-current.json', { rows: [{ value: 'B' }] });
+            const stat = fs.statSync(fileA);
+            const ctx = makeContext({ [RECOVERY_STATE_KEY]: { [fileA]: {
+                data: { rows: [{ value: 'recovered A' }] }, isRootArray: false,
+                fileMtimeMs: stat.mtimeMs, fileSize: stat.size, capturedAt: Date.now(),
+            } } });
+            await openJsonEditorFile(ctx, fileB);
+            let answer!: () => void;
+            let started!: () => void;
+            const prompted = new Promise<void>(resolve => { started = resolve; });
+            (vscode.window as any).showInformationMessage = (_message: string, recover: string) => {
+                started();
+                return new Promise<string>(resolve => { answer = () => resolve(recover); });
+            };
+            const pending = openJsonEditorFile(ctx, fileA);
+            await prompted;
+            const edited = { rows: [{ value: 'B during recovery prompt' }] };
+            await fake.send({ command: 'modified', value: true });
+            await fake.send({ command: 'snapshot', data: edited });
+            let confirmations = 0;
+            (vscode.window as any).showWarningMessage = (_message: string, _options: unknown, discard: string) => {
+                confirmations++;
+                return Promise.resolve(discardNewEdits ? discard : undefined);
+            };
+            answer();
+            await pending;
+            assert.strictEqual(confirmations, 1);
+            assert.strictEqual(jsonPanelRegistry.getFilePath(), discardNewEdits ? fileA : fileB);
+            assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+            fake.disposePanel();
+            await new Promise<void>(resolve => setImmediate(resolve));
+            if (discardNewEdits) {
+                assert.strictEqual(readRecoveryEntry(ctx, fileB), undefined);
+            } else {
+                assert.deepStrictEqual((readRecoveryEntry(ctx, fileB) as { data: unknown })?.data, edited);
+            }
+        });
+    }
+
     for (const action of ['cancel', 'overwrite', 'change-again', 'delete', 'delete-cancel', 'reload'] as const) {
         test(`감시 이벤트가 오기 전 저장 충돌: ${action}`, async () => {
             const watcher = vscode.workspace.createFileSystemWatcher;
@@ -1069,8 +1187,9 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
                 assert.strictEqual(fake.posted.length, before, '형제 파일 이벤트는 무시해야 한다');
                 await notify(vscode.Uri.file(filePath));
                 assert.deepStrictEqual(fake.posted.slice(before), [
-                    { command: 'loadData', data: external, session: fake.sessionId() },
+                    { command: 'loadData', data: external, session: fake.sessionId(), revision: 0, loadId: index + 1 },
                 ]);
+                await fake.send({ command: 'loadAck', loadId: index + 1, accepted: true });
                 assert.strictEqual(jsonPanelRegistry.isDirty(), false);
             }
         } finally {
@@ -1235,33 +1354,26 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
      * 표시되고, 이어서 저장하면 B 파일까지 A 데이터가 된다.
      */
     suite('세션 전환 후 지연 메시지', () => {
-        test('reload 의 loadData 가 새 파일의 webview 로 가지 않는다', async () => {
+        test('이전 파일의 지연된 reload 수신 확인이 새 파일 상태를 바꾸지 않는다', async () => {
             const fake = installFakePanel();
             const fileA = writeJson('reload-a.json', { rows: [{ a: 'A-DATA' }] });
             const fileB = writeJson('reload-b.json', { rows: [{ b: 'B-DATA' }] });
-
-            let release!: () => void;
-            const gate = new Promise<void>(resolve => { release = resolve; });
-            let gateArmed = false;
-            const ctx = makeContext(undefined, async () => {
-                if (gateArmed) { gateArmed = false; await gate; }
-            });
-
+            const ctx = makeContext();
             await openJsonEditorFile(ctx, fileA);
-            // reload 는 dirty 가 아니면 확인 없이 진행한다. recovery 정리에서
-            // 멈추도록 게이트를 여기서 무장한다.
-            gateArmed = true;
-            const reloadPending = fake.send({ command: 'reload' });
+            await fake.send({ command: 'reload' });
+            const load = fake.posted.find(message => message.command === 'loadData');
+            assert.ok(load, '현재 A 웹뷰에는 다시 읽기 데이터가 전달되어야 한다');
+            assert.strictEqual(load.session, fake.sessionId());
             await openJsonEditorFile(ctx, fileB);
-            release();
-            await reloadPending;
-
-            const loads = fake.posted.filter(m => m && m.command === 'loadData');
-            const leaked = loads.filter(m => JSON.stringify(m.data).includes('A-DATA'));
-            assert.deepStrictEqual(
-                leaked, [],
-                `A 의 데이터가 B 의 webview 로 배달됐다: ${JSON.stringify(leaked)}`
-            );
+            const edited = { rows: [{ b: 'B-EDIT' }] };
+            await fake.send({ command: 'modified', value: true });
+            await fake.send({ command: 'snapshot', data: edited });
+            await fake.send({ command: 'loadAck', loadId: load.loadId, accepted: true, session: load.session });
+            assert.strictEqual(jsonPanelRegistry.getFilePath(), fileB);
+            assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+            fake.disposePanel();
+            await new Promise<void>(resolve => setImmediate(resolve));
+            assert.deepStrictEqual((readRecoveryEntry(ctx, fileB) as { data: unknown })?.data, edited);
         });
 
         test('폐기 확인창 뒤에 세션이 바뀌면 새 파일 상태를 건드리지 않는다', async () => {

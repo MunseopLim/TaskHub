@@ -230,6 +230,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             'function resetHistoryToCurrent() {}',
             'let savedSnapshot;',
             'let activeIdx = 0;',
+            'let editRevision = 0;',
             'const handleMessage = (event) => {' + extractMessageHandlerBody() + '\n    };',
             'return {',
             '    handleMessage: handleMessage,',
@@ -1693,7 +1694,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             });
 
             api.handleMessage({
-                data: { command: 'loadData', session: SESSION, data: { rows: [{ a: 'D' }] } }
+                data: { command: 'loadData', session: SESSION, revision: 0, loadId: 1, data: { rows: [{ a: 'D' }] } }
             });
 
             assert.deepStrictEqual(
@@ -1715,7 +1716,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             });
 
             api.handleMessage({
-                data: { command: 'loadData', session: SESSION, data: { rows: [{ a: 'D' }] } }
+                data: { command: 'loadData', session: SESSION, revision: 0, loadId: 1, data: { rows: [{ a: 'D' }] } }
             });
             saveResult(api, 1);
 
