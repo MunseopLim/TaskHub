@@ -9,6 +9,11 @@ import {
     openBrowserTask,
 } from '../browserTask';
 import { filePathIdentityKey } from '../pathIdentity';
+import { buildBuiltinVariableContext } from '../builtinVariables';
+import { executeAction, executeActionPipeline, MainViewProvider, stopRunningAction } from '../extension';
+import { actionStates } from '../providers/actionStatus';
+import { Action as PipelineAction, ActionItem } from '../schema';
+import { ActionRunLogCollector } from '../runLogStore';
 
 interface CapturedCommand {
     command: string;
@@ -26,6 +31,12 @@ interface FakeBrowserDeps {
 function assertSameFilePath(actual: string | undefined, expected: string): void {
     assert.ok(actual, '로컬 파일 결과에는 path가 있어야 한다');
     assert.strictEqual(filePathIdentityKey(actual), filePathIdentityKey(expected));
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(complete => { resolve = complete; });
+    return { promise, resolve };
 }
 
 function makeFakeDeps(options?: {
@@ -396,4 +407,226 @@ suite('browserTask', () => {
         );
         assert.strictEqual(fake.externalUris.length, 1);
     });
+
+    test('an inactive request stops before browser preparation or external opening', async () => {
+        for (const target of ['integrated', 'default'] as const) {
+            const fake = makeFakeDeps({ availableCommands: ['workbench.action.browser.open'] });
+            const stopped = new Error('inactive browser task');
+            await assert.rejects(openBrowserTask(localRequest({
+                target,
+                assertActive: () => { throw stopped; },
+            }), fake.deps), error => error === stopped);
+            assert.deepStrictEqual(fake.getCommandsArgs, []);
+            assert.deepStrictEqual(fake.commands, []);
+            assert.deepStrictEqual(fake.externalUris, []);
+            assert.deepStrictEqual(fake.externalUriInputs, []);
+        }
+    });
+
+    test('the default target rechecks the owning task immediately before openExternal', async () => {
+        const fake = makeFakeDeps();
+        let active = true;
+        fake.deps.remoteName = () => { active = false; return undefined; };
+        await assert.rejects(openBrowserTask(localRequest({
+            target: 'default',
+            assertActive: () => { if (!active) { throw new Error('inactive browser task'); } },
+        }), fake.deps), /inactive browser task/);
+        assert.deepStrictEqual(fake.externalUris, []);
+    });
+
+    for (const command of ['workbench.action.browser.open', 'simpleBrowser.show']) {
+        test(`cancelled command discovery cannot dispatch ${command}`, async () => {
+            const fake = makeFakeDeps();
+            const discovery = deferred<string[]>();
+            fake.deps.getCommands = () => discovery.promise;
+            let active = true;
+            const opening = openBrowserTask(localRequest({
+                url: 'https://example.com/report',
+                assertActive: () => { if (!active) { throw new Error('inactive browser task'); } },
+            }), fake.deps);
+            active = false;
+            discovery.resolve([command]);
+            await assert.rejects(opening, /inactive browser task/);
+            assert.deepStrictEqual(fake.commands, []);
+            assert.deepStrictEqual(fake.externalUris, []);
+        });
+    }
+
+    test('cancelled Remote URI conversion cannot discover commands or open the forwarded URL', async () => {
+        const fake = makeFakeDeps({ remoteName: 'ssh-remote' });
+        const forwarding = deferred<vscode.Uri>();
+        fake.deps.asExternalUri = () => forwarding.promise;
+        let active = true;
+        const opening = openBrowserTask(localRequest({
+            url: 'http://localhost:3000/report',
+            assertActive: () => { if (!active) { throw new Error('inactive browser task'); } },
+        }), fake.deps);
+        active = false;
+        forwarding.resolve(vscode.Uri.parse('https://forwarded.example.test/'));
+        await assert.rejects(opening, /inactive browser task/);
+        assert.deepStrictEqual(fake.getCommandsArgs, []);
+        assert.deepStrictEqual(fake.commands, []);
+        assert.deepStrictEqual(fake.externalUris, []);
+    });
+
+    test('an already dispatched external open may complete after its owning task becomes inactive', async () => {
+        const fake = makeFakeDeps();
+        const dispatched = deferred<boolean>();
+        fake.deps.openExternal = uri => { fake.externalUris.push(uri); return dispatched.promise; };
+        let active = true;
+        const opening = openBrowserTask(localRequest({
+            url: 'https://example.com/report', target: 'default',
+            assertActive: () => { if (!active) { throw new Error('inactive browser task'); } },
+        }), fake.deps);
+        assert.strictEqual(fake.externalUris.length, 1);
+        active = false;
+        dispatched.resolve(true);
+        assert.deepStrictEqual(await opening, { url: 'https://example.com/report' });
+    });
+});
+
+suite('browser task execution lifecycle', function () {
+    this.timeout(8000);
+    let workspaceRoot: string;
+    let context: vscode.ExtensionContext;
+
+    setup(() => {
+        workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-browser-lifecycle-'));
+        const state = new Map<string, unknown>();
+        const memento = {
+            get: (key: string, fallback?: unknown) => state.has(key) ? state.get(key) : fallback,
+            update: async (key: string, value: unknown) => { state.set(key, value); },
+            keys: () => [...state.keys()],
+        };
+        context = {
+            extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [],
+            workspaceState: memento, globalState: memento,
+            extensionMode: vscode.ExtensionMode.Test,
+            extension: { packageJSON: { version: '0.0.0-test' } },
+        } as unknown as vscode.ExtensionContext;
+    });
+
+    teardown(() => {
+        actionStates.clear();
+        context.subscriptions.forEach(subscription => subscription.dispose());
+        fs.rmSync(workspaceRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    });
+
+    function pauseBrowserPreparation(phase: 'commands' | 'forwarding', availableCommand: string) {
+        const originalCommands = vscode.commands.getCommands;
+        const originalExecute = vscode.commands.executeCommand;
+        const originalExternal = vscode.env.openExternal;
+        const originalForwarding = vscode.env.asExternalUri;
+        const originalRemote = Object.getOwnPropertyDescriptor(vscode.env, 'remoteName');
+        const entered = deferred<void>();
+        const commandGate = deferred<string[]>();
+        const forwardingGate = deferred<vscode.Uri>();
+        const opened: string[] = [];
+        let discoveries = 0;
+        Object.defineProperty(vscode.env, 'remoteName', {
+            configurable: true, value: phase === 'forwarding' ? 'ssh-remote' : undefined,
+        });
+        vscode.commands.getCommands = () => {
+            discoveries++;
+            if (phase === 'commands') { entered.resolve(); return commandGate.promise; }
+            return Promise.resolve([availableCommand]);
+        };
+        vscode.commands.executeCommand = (async (command: string, ...args: unknown[]) => {
+            if (command === 'workbench.action.browser.open' || command === 'simpleBrowser.show') {
+                opened.push(command);
+                return undefined;
+            }
+            return originalExecute(command, ...args);
+        }) as typeof originalExecute;
+        vscode.env.openExternal = async () => { opened.push('external'); return true; };
+        vscode.env.asExternalUri = uri => {
+            if (phase === 'forwarding') { entered.resolve(); return forwardingGate.promise; }
+            return Promise.resolve(uri);
+        };
+        const release = () => {
+            commandGate.resolve([availableCommand]);
+            forwardingGate.resolve(vscode.Uri.parse('https://forwarded.example.test/report'));
+        };
+        return {
+            entered: entered.promise, opened, discoveries: () => discoveries, release,
+            restore: () => {
+                vscode.commands.getCommands = originalCommands;
+                vscode.commands.executeCommand = originalExecute;
+                vscode.env.openExternal = originalExternal;
+                vscode.env.asExternalUri = originalForwarding;
+                if (originalRemote) { Object.defineProperty(vscode.env, 'remoteName', originalRemote); }
+                else { delete (vscode.env as { remoteName?: string }).remoteName; }
+            },
+        };
+    }
+
+    for (const [phase, command] of [
+        ['commands', 'workbench.action.browser.open'],
+        ['commands', 'simpleBrowser.show'],
+        ['forwarding', 'workbench.action.browser.open'],
+    ] as const) {
+        test(`a timed-out pipeline browser cannot open after delayed ${phase} (${command})`, async () => {
+            const gate = pauseBrowserPreparation(phase, command);
+            const marker = path.join(workspaceRoot, 'after-timeout.txt');
+            const action: PipelineAction = { description: '', tasks: [
+                { id: 'browser', type: 'browser', url: 'http://localhost:3000/report',
+                    timeoutSeconds: 0.05, continueOnError: true },
+                { id: 'after', type: 'writeFile', path: marker, content: 'continued' },
+            ] };
+            const collector = new ActionRunLogCollector('browser-timeout', 'browser-timeout', Date.now(), action.tasks);
+            const execution = executeActionPipeline(action, context, 'browser-timeout', workspaceRoot, [workspaceRoot], {
+                builtinVariables: buildBuiltinVariableContext({ workspaceFolder: workspaceRoot,
+                    extensionPath: context.extensionPath, environment: {}, strict: true }),
+                runLogCollector: collector,
+            });
+            // Observe rejection immediately too, so a failed setup cannot create an
+            // unhandled rejection while the test waits for the preparation gate.
+            void execution.catch(() => {});
+            try {
+                await gate.entered;
+                await execution;
+                assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'continued');
+                assert.strictEqual(collector.finish('success', Date.now()).tasks[0].status, 'continued');
+                gate.release();
+                // All continuations released above run before this event-loop fence.
+                await new Promise<void>(resolve => setImmediate(resolve));
+                assert.deepStrictEqual(gate.opened, []);
+                if (phase === 'forwarding') { assert.strictEqual(gate.discoveries(), 0); }
+            } finally {
+                gate.release();
+                await execution.catch(() => {});
+                await new Promise<void>(resolve => setImmediate(resolve));
+                gate.restore();
+            }
+        });
+    }
+
+    for (const phase of ['commands', 'forwarding'] as const) {
+        test(`Stop prevents a delayed ${phase} response from opening the browser or running the next task`, async () => {
+            const gate = pauseBrowserPreparation(phase, 'workbench.action.browser.open');
+            const marker = path.join(workspaceRoot, 'after-stop.txt');
+            const id = `browser-stop-${phase}`;
+            const item: ActionItem = { id, title: id, action: { description: '', tasks: [
+                { id: 'browser', type: 'browser', url: 'http://localhost:3000/report' },
+                { id: 'after', type: 'writeFile', path: marker, content: 'must not run' },
+            ] } };
+            const mainView = new MainViewProvider(context, () => [item]);
+            const execution = executeAction(item, context, mainView);
+            void execution.catch(() => {});
+            try {
+                await gate.entered;
+                assert.strictEqual(stopRunningAction(id), true);
+                gate.release();
+                await execution;
+                assert.deepStrictEqual(gate.opened, []);
+                assert.strictEqual(fs.existsSync(marker), false);
+                if (phase === 'forwarding') { assert.strictEqual(gate.discoveries(), 0); }
+            } finally {
+                stopRunningAction(id);
+                gate.release();
+                await execution.catch(() => {});
+                gate.restore();
+            }
+        });
+    }
 });

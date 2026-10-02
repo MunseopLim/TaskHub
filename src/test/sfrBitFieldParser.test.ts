@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import {
     parseBitFieldComment,
+    calculateBitMask,
     calculateValidRange,
     parseBitFieldDeclaration,
     extractBitFieldInfo,
@@ -116,11 +117,42 @@ suite('SFR BitField Parser Test Suite', () => {
                 '// [abc][RW][0x0] Invalid bit position',
                 '// [10:20][RW][0x0] Start > End',
                 '// [:10][RW][0x0] Missing start',
+                '// [-1][RW][0x0] Negative position',
+                '// [64][RW][0x0] Beyond 64-bit register',
+                '// [64:0][RW][0x0] Width exceeds 64 bits',
+                '// [63999999:0][RW][0x0] Allocation amplification',
+                '// [1junk][RW][0x0] Partial integer',
+                '// [3:1junk][RW][0x0] Partial range',
+                '// [3:1:0][RW][0x0] Extra range part',
+                '// [1.5][RW][0x0] Fractional position',
             ];
 
             for (const comment of invalidComments) {
                 const result = parseBitFieldComment(comment);
                 assert.strictEqual(result, null, `Should return null for: ${comment}`);
+            }
+        });
+
+        test('64-bit reset values remain exact and JSON-safe at the boundaries', () => {
+            for (const reset of ['0xFFFFFFFFFFFFFFFF', "0xFFFF'FFFF'FFFF'FFFF", '18446744073709551615', '0b' + '1'.repeat(64)]) {
+                const result = parseBitFieldComment(`// [63:0][RW][${reset}] Full register`);
+                assert.ok(result);
+                assert.strictEqual(result.bitWidth, 64);
+                assert.strictEqual(result.resetValueNumeric, null);
+                assert.strictEqual(result.resetValueExact, '18446744073709551615');
+                assert.doesNotThrow(() => JSON.stringify(result));
+            }
+            const safe = parseBitFieldComment('// [52:0][RW][9007199254740991] Safe integer');
+            assert.strictEqual(safe?.resetValueNumeric, Number.MAX_SAFE_INTEGER);
+            assert.strictEqual(safe?.resetValueExact, undefined);
+        });
+
+        test('invalid or wider reset literals never expose a rounded numeric value', () => {
+            for (const reset of ['0x10000000000000000', '18446744073709551616', "0xF''F", '12junk', '0b102', '0'.repeat(257)]) {
+                const result = parseBitFieldComment(`// [63:0][RW][${reset}] Unsupported reset`);
+                assert.ok(result);
+                assert.strictEqual(result.resetValueNumeric, null);
+                assert.strictEqual(result.resetValueExact, undefined);
             }
         });
 
@@ -162,6 +194,20 @@ suite('SFR BitField Parser Test Suite', () => {
             const range = calculateValidRange(32);
             assert.strictEqual(range.min, 0);
             assert.strictEqual(range.max, 4294967295);
+        });
+
+        test('64-bit range and masks are exact; invalid ranges allocate no mask', () => {
+            assert.strictEqual(calculateValidRange(64).max, 0xFFFFFFFFFFFFFFFFn);
+            assert.strictEqual(calculateBitMask(0, 31), 0xFFFFFFFF);
+            assert.strictEqual(calculateBitMask(0, 63), 0xFFFFFFFFFFFFFFFFn);
+            assert.strictEqual(calculateBitMask(63, 63), 0x8000000000000000n);
+            assert.strictEqual(calculateBitMask(32, 35), 0xF00000000n);
+            for (const [start, end] of [[-1, 1], [0, 64], [0, 63999999], [1.5, 2], [0, Infinity], [NaN, 1]]) {
+                assert.strictEqual(calculateBitMask(start, end), 0);
+            }
+            for (const width of [0, 65, 63999999, 1.5, Infinity]) {
+                assert.strictEqual(calculateValidRange(width).max, 0);
+            }
         });
     });
 
@@ -225,6 +271,8 @@ suite('SFR BitField Parser Test Suite', () => {
                 'Type field : 0;',  // Zero width
                 'Type field : -1;', // Negative
                 'Type field : abc;', // Not a number
+                'Type field : 65;',
+                'Type field : 63999999;',
             ];
 
             for (const line of invalidLines) {
@@ -292,6 +340,12 @@ suite('SFR BitField Parser Test Suite', () => {
             assert.strictEqual(result!.commentInfo!.bitWidth, 3);
             // They should match!
             assert.strictEqual(result!.declaredWidth, result!.commentInfo!.bitWidth);
+        });
+
+        test('mismatched comment widths do not become usable register annotations', () => {
+            const result = extractBitFieldInfo('Type field : 1; // [63:0][RW][0x0] Wrong width');
+            assert.ok(result);
+            assert.strictEqual(result.commentInfo, null);
         });
 
         test('Return null for invalid declaration', () => {

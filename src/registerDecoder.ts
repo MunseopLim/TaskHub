@@ -3,7 +3,7 @@
  * Parses register definitions from structs and decodes numeric values
  */
 
-import { BitFieldInfo, extractBitFieldInfo } from './sfrBitFieldParser';
+import { BitFieldInfo, extractBitFieldInfo, isValidSfrBitRange } from './sfrBitFieldParser';
 
 /**
  * Bit field definition for a register
@@ -87,6 +87,10 @@ export class RegisterDecoder {
      */
     decodeValue(value: number, definition: RegisterDefinition): RegisterDecodingResult {
         try {
+            if (!Number.isSafeInteger(value) || value < 0
+                || definition.fields.some(field => !isValidSfrBitRange(field.bitStart, field.bitEnd, field.bitWidth))) {
+                throw new Error('Register value or bit-field range cannot be decoded exactly.');
+            }
             const decodedFields: DecodedField[] = [];
 
             // Sort fields by bit position (LSB first) for consistent display

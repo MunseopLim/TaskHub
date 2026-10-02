@@ -732,6 +732,36 @@ suite('RegisterDecoder Test Suite', () => {
     });
 
     suite('Edge Cases', () => {
+        test('direct decoder inputs validate the range and width before padding or shifting', () => {
+            const valid: BitFieldDefinition = { name: 'ALL', bitStart: 0, bitEnd: 63, bitWidth: 64 };
+            const definition = (field: BitFieldDefinition): RegisterDefinition => ({ name: 'REG', totalBits: 64, fields: [field] });
+            const full = decoder.decodeValue(Number.MAX_SAFE_INTEGER, definition(valid));
+            assert.strictEqual(full.success, true);
+            assert.strictEqual(full.fields[0].binary, '0b' + '0'.repeat(11) + '1'.repeat(53));
+            for (const field of [
+                { ...valid, bitEnd: 64, bitWidth: 65 },
+                { ...valid, bitEnd: 63999999, bitWidth: 64000000 },
+                { ...valid, bitStart: -1 },
+                { ...valid, bitStart: 0.5 },
+                { ...valid, bitWidth: 1 },
+                { ...valid, bitWidth: Infinity },
+            ]) {
+                const result = decoder.decodeValue(1, definition(field));
+                assert.strictEqual(result.success, false);
+                assert.deepStrictEqual(result.fields, []);
+            }
+            for (const value of [Number.MAX_SAFE_INTEGER + 1, -1, 1.5, NaN, Infinity]) {
+                assert.strictEqual(decoder.decodeValue(value, definition(valid)).success, false);
+            }
+        });
+
+        test('malformed or oversized source comments never reach register decoding', () => {
+            for (const position of ['63999999:0', '64:0', '-1', '3:0junk']) {
+                const lines = ['struct REG {', `unsigned flag : 1; // [${position}][RW][0x0] Invalid`, '};'];
+                assert.strictEqual(RegisterDecoder.parseRegisterFromStruct(lines, 0, 'REG'), null);
+            }
+        });
+
         test('Decode zero value', () => {
             const definition: RegisterDefinition = {
                 name: 'TEST_REG',

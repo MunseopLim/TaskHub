@@ -7577,12 +7577,21 @@ export function savedInputStillValid(task: any, saved: any, context?: any): bool
             return true;
         }
         // prefix/suffix 는 검증 뒤에 붙으므로 검증 대상에서 뺀다 (입력 시점과 동일).
-        const prefix = typeof task.prefix === 'string' ? task.prefix : '';
-        const suffix = typeof task.suffix === 'string' ? task.suffix : '';
-        const core = value.startsWith(prefix) && value.endsWith(suffix)
-            ? value.slice(prefix.length, value.length - (suffix.length || 0) || undefined)
-            : value;
+        const rawPrefix = typeof task.prefix === 'string' ? task.prefix : '';
+        const rawSuffix = typeof task.suffix === 'string' ? task.suffix : '';
+        // 프로필 선택 시에는 선행 태스크 결과가 아직 없다. 실행기가 실제
+        // 문맥에서 입력 때와 같은 affix를 만든 뒤 다시 검증한다.
+        if (context === undefined && (rawPrefix.includes('${') || rawSuffix.includes('${'))) {
+            return true;
+        }
         try {
+            const prefix = context === undefined ? rawPrefix : interpolatePipelineVariables(rawPrefix, context);
+            const suffix = context === undefined ? rawSuffix : interpolatePipelineVariables(rawSuffix, context);
+            if (value.length < prefix.length + suffix.length
+                || !value.startsWith(prefix) || !value.endsWith(suffix)) {
+                return false;
+            }
+            const core = value.slice(prefix.length, value.length - suffix.length);
             return runWithRegexBudget(task.validatePattern, () => re.test(core));
         } catch {
             // 판정하지 못한 저장값은 재사용하지 않고 다시 묻는다.
@@ -8079,6 +8088,7 @@ async function executeSingleTask(
                 url,
                 target: task.target,
                 baseDir,
+                assertActive: () => throwIfTaskInactive(scope),
             });
             throwIfTaskInactive(scope);
             break;

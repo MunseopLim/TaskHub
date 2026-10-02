@@ -45,14 +45,16 @@ function observeHtml(html: string): string {
             try {
                 const keyResults = [];
                 for (const operation of event.data.operations) {
-                    if (operation.kind === 'edit') {
+                    if (operation.kind === 'edit' || operation.kind === 'open') {
                         const td = Array.from(document.querySelectorAll('td[data-row]'))
                             .find(cell => Number(cell.dataset.row) === (operation.row ?? 0) && cell.dataset.col === operation.col);
                         if (!td) { throw new Error('Missing editable cell: ' + operation.col); }
                         td.querySelector('.cell-view').click();
                         const input = td.querySelector('.cell-edit input, .cell-edit textarea');
-                        input.value = operation.value;
-                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        if (operation.kind === 'edit') {
+                            input.value = operation.value;
+                            input.dispatchEvent(new Event('input', { bubbles: true }));
+                        }
                     } else if (operation.kind === 'click') {
                         required('#' + operation.id).click();
                     } else if (operation.kind === 'key') {
@@ -230,6 +232,106 @@ async function withJsonBrowser(
 
 suite('JSON Editor 실제 브라우저 편집과 저장', function () {
     this.timeout(30000);
+    test('수정 없이 셀을 열고 확정해도 NUL·CR·CRLF·선행 LF와 배열 줄바꿈을 그대로 저장한다', async () => {
+        const initial = { rows: [{
+            nul: 'a\0b',
+            cr: 'first\rsecond',
+            crlf: 'first\r\nsecond',
+            lf: '\nfirst\nsecond',
+            tags: ['a\0b', 'second'],
+            multilineTags: ['first\nsecond', 'first\r\nsecond', 'first\rsecond', 'a\0b', 1, true, null],
+            object: { nested: 'a\0b' },
+        }] };
+        const cells = [
+            { col: 'nul', value: initial.rows[0].nul, multiline: false },
+            { col: 'cr', value: JSON.stringify(initial.rows[0].cr), multiline: true },
+            { col: 'crlf', value: JSON.stringify(initial.rows[0].crlf), multiline: true },
+            { col: 'lf', value: initial.rows[0].lf, multiline: true },
+            { col: 'tags', value: initial.rows[0].tags[0], multiline: false },
+            { col: 'multilineTags', value: JSON.stringify(initial.rows[0].multilineTags, null, 2), multiline: true },
+            { col: 'object', value: JSON.stringify(initial.rows[0].object, null, 2), multiline: true },
+        ];
+        await withJsonBrowser(initial, async browser => {
+            for (const cell of cells) {
+                const opened = await browser.operate([{ kind: 'open', col: cell.col }]);
+                assert.strictEqual(opened.cells.find((item: any) => item.col === cell.col).input, cell.value, cell.col);
+                const selector = `td[data-col="${cell.col}"] .cell-edit ${cell.multiline ? 'textarea' : 'input'}`;
+                const committed = await browser.operate([{ kind: 'key', selector, key: 'Enter', ctrlKey: cell.multiline }]);
+                assert.strictEqual(committed.cells.find((item: any) => item.col === cell.col).editing, false, cell.col);
+                assert.strictEqual(committed.dirty, false, `${cell.col}: 값을 수정하지 않으면 clean이어야 한다`);
+            }
+            const after = browser.messages.length;
+            await browser.operate([{ kind: 'click', id: 'btnSave' }]);
+            assert.strictEqual((await browser.waitFor('saveAck', after)).dirty, false);
+            assert.deepStrictEqual(browser.messages.slice(after).find(message => message.command === 'save')?.data, initial);
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), initial);
+        });
+    });
+
+    test('NUL과 이스케이프된 줄바꿈 편집은 draft 복구·Undo/Redo·저장에서도 원문 문자를 유지한다', async () => {
+        const initial = { rows: [{ value: 'old\0value', crlf: 'old\r\nvalue', tags: ['old\nvalue', 1, true, null] }] };
+        const expected = { rows: [{ value: 'new\0value', crlf: 'new\r\nvalue', tags: ['new\nvalue', 'new\r\nvalue', 2, false, null] }] };
+        await withJsonBrowser(initial, async browser => {
+            await browser.operate([
+                { kind: 'edit', col: 'value', value: expected.rows[0].value },
+                { kind: 'key', selector: 'td[data-col="value"] input', key: 'Enter' },
+                { kind: 'edit', col: 'tags', value: JSON.stringify(expected.rows[0].tags) },
+                { kind: 'key', selector: 'td[data-col="tags"] textarea', key: 'Enter', ctrlKey: true },
+                { kind: 'click', id: 'btnUndo' },
+            ]);
+            const undone = await browser.operate([{ kind: 'open', col: 'tags' }]);
+            assert.deepStrictEqual(JSON.parse(undone.cells.find((cell: any) => cell.col === 'tags').input), initial.rows[0].tags);
+            await browser.operate([
+                { kind: 'key', selector: 'td[data-col="tags"] textarea', key: 'Escape' },
+                { kind: 'click', id: 'btnRedo' },
+                { kind: 'edit', col: 'crlf', value: JSON.stringify(expected.rows[0].crlf) },
+            ]);
+            const recovered = await browser.reopen();
+            assert.strictEqual(recovered.dirty, true);
+            assert.strictEqual(recovered.cells.find((cell: any) => cell.col === 'value').input, expected.rows[0].value);
+            assert.strictEqual(JSON.parse(recovered.cells.find((cell: any) => cell.col === 'crlf').input), expected.rows[0].crlf);
+            assert.deepStrictEqual(JSON.parse(recovered.cells.find((cell: any) => cell.col === 'tags').input), expected.rows[0].tags);
+            const after = browser.messages.length;
+            await browser.operate([{ kind: 'click', id: 'btnSave' }]);
+            assert.strictEqual((await browser.waitFor('saveAck', after)).dirty, false);
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), expected);
+        });
+    });
+
+    test('일반·배열·여러 줄·JSON 셀은 IME Enter/Escape 동안 입력을 유지하고 조합 종료 후 확정한다', async () => {
+        const initial = { rows: [{ name: 'old', tags: ['old'], notes: 'old\nnotes', object: { nested: 1 } }] };
+        const cells = [
+            { col: 'name', selector: 'td[data-col="name"] input', value: '조합한 이름', multiline: false },
+            { col: 'tags', selector: 'td[data-col="tags"] input', value: '조합한 항목', multiline: false },
+            { col: 'notes', selector: 'td[data-col="notes"] textarea', value: '조합한\n메모', multiline: true },
+            { col: 'object', selector: 'td[data-col="object"] textarea', value: '{"nested":2}', multiline: true },
+        ];
+        await withJsonBrowser(initial, async browser => {
+            for (const cell of cells) {
+                await browser.operate([{ kind: 'edit', col: cell.col, value: cell.value }]);
+                for (const key of ['Enter', 'Escape']) {
+                    const composing = await browser.operate([
+                        { kind: 'key', selector: cell.selector, key, ctrlKey: cell.multiline, isComposing: true },
+                    ]);
+                    const actual = composing.cells.find((item: any) => item.col === cell.col);
+                    assert.strictEqual(actual.editing, true, `${cell.col}: 조합 중 ${key}로 편집이 끝났다`);
+                    assert.strictEqual(actual.input, cell.value, `${cell.col}: 조합 중 ${key}로 입력이 바뀌었다`);
+                    assert.strictEqual(composing.keyResults[0].prevented, false);
+                }
+                const committed = await browser.operate([
+                    { kind: 'key', selector: cell.selector, key: 'Enter', ctrlKey: cell.multiline },
+                ]);
+                assert.strictEqual(committed.cells.find((item: any) => item.col === cell.col).editing, false);
+            }
+            const after = browser.messages.length;
+            await browser.operate([{ kind: 'click', id: 'btnSave' }]);
+            assert.strictEqual((await browser.waitFor('saveAck', after)).dirty, false);
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), {
+                rows: [{ name: '조합한 이름', tags: ['조합한 항목'], notes: '조합한\n메모', object: { nested: 2 } }],
+            });
+        });
+    });
+
     test('textarea는 Ctrl/Cmd+Enter로 확정하고 일반 Enter·IME 조합은 유지하며 잘못된 JSON은 막는다', async () => {
         await withJsonBrowser({ rows: [{ object: { nested: 1 }, notes: 'first\nsecond' }] }, async browser => {
             const selector = 'td[data-col="object"] textarea';

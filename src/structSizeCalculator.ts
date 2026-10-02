@@ -599,8 +599,13 @@ export class StructSizeCalculator {
             if (!part) { continue; }
             let declarator = part;
             if (i === 0) {
-                const first = part.match(/^([\w\s*]+?)\s+((?:\*?\s*\w+(?:\s*\[\s*(?:0[xX][\da-fA-F]+|\d+)\s*\])*(?:\s*:\s*\d+)?)|(?:\s*:\s*\d+))$/u);
-                if (!first) {
+                // A star belongs to its declarator, including `T* a, b` and
+                // `T * const a, b`. It must never become the shared base type.
+                const pointer = part.indexOf('*');
+                const first = pointer >= 0
+                    ? [part, part.slice(0, pointer).trim(), part.slice(pointer).trim()]
+                    : part.match(/^([\w\s]+?)\s+((?:\w+(?:\s*\[\s*(?:0[xX][\da-fA-F]+|\d+)\s*\])*(?:\s*:\s*\d+)?)|(?:\s*:\s*\d+))$/u);
+                if (!first || !/^[A-Za-z_]\w*(?:\s+[A-Za-z_]\w*)*$/u.test(first[1].trim())) {
                     // 매크로/식별자 배열 차원(`buf[SIZE]`) 등 해석 불가 선언.
                     // 조용히 누락하면 sizeof가 그럴듯한 오답이 되므로(M4)
                     // 명시적으로 실패를 전파한다.
@@ -720,7 +725,7 @@ export class StructSizeCalculator {
             };
         }
 
-        const match = declarator.match(/^(\*?)\s*(\w+)((?:\s*\[\s*(?:0[xX][\da-fA-F]+|\d+)\s*\])*)(?:\s*:\s*(\d+))?$/u);
+        const match = declarator.match(/^((?:\*\s*(?:(?:const|volatile|restrict)\b\s*)*)*)\s*(\w+)((?:\s*\[\s*(?:0[xX][\da-fA-F]+|\d+)\s*\])*)(?:\s*:\s*(\d+))?$/u);
         if (!match) {
             return null;
         }

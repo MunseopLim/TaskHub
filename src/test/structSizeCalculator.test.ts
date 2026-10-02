@@ -305,6 +305,23 @@ suite('StructSizeCalculator Test Suite', () => {
             assert.strictEqual(result.members[1].offset, 64);
             assert.strictEqual(result.totalSize, 68);
         });
+
+        test('pointer stars and qualifiers belong only to their comma declarator', () => {
+            for (const declaration of [
+                'uint8_t* a, b[8];', 'uint8_t *a, b[8];', 'uint8_t * a, b[8];',
+                'uint8_t* const a, b[8];', 'uint8_t * const a, b[8];', 'uint8_t** a, b[8];',
+            ]) {
+                const result = calculator.calculateStructSize('Pointers', [`struct Pointers { ${declaration} };`], 0);
+                assert.strictEqual(result.success, true, declaration);
+                assert.strictEqual(result.totalSize, 12, declaration);
+                assert.deepStrictEqual(result.members.map(member => [member.name, member.size, member.offset]), [
+                    ['a', 4, 0], ['b', 8, 4],
+                ], declaration);
+            }
+            const arrays = calculator.calculateStructSize('Pointers', ['struct Pointers { uint8_t* a[2], b[8]; };'], 0);
+            assert.strictEqual(arrays.totalSize, 16);
+            assert.deepStrictEqual(arrays.members.map(member => member.size), [8, 8]);
+        });
     });
 
     suite('Padding Calculation', () => {

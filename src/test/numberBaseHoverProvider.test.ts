@@ -40,6 +40,131 @@ suite('NumberBaseHoverProvider Test Suite', () => {
         provider = new NumberBaseHoverProvider();
     });
 
+    suite('Review regressions: exact SFR and bit-operation hover', () => {
+        test('connected constant fragments own operator and operand hovers without copying', async () => {
+            const originalConfig = vscode.workspace.getConfiguration;
+            const originalExecuteCommand = vscode.commands.executeCommand;
+            const cancellation = new vscode.CancellationTokenSource();
+            try {
+                (vscode.workspace as any).getConfiguration = (section: string) => ({
+                    get: (key: string, fallback: unknown) => section === 'taskhub.experimental' && key === 'bitOperationHover.enabled' ? true : fallback,
+                });
+                (vscode.commands as any).executeCommand = async () => [];
+                for (const expression of [
+                    '~1U | 2U', '!1U | 2U', '1U | 2U + 4U', '1U & 2U | 4U',
+                    '(1U | 2U) & 4U', '1U | 2U == 4U', '3U == 1U | 2U',
+                    '3U != 1U | 2U', '3U <= 1U | 2U', '3U >= 1U | 2U',
+                    '(uint8_t)0xFFFFU | 2U', 'sizeof 1U | 2U',
+                ]) {
+                    const prefix = 'auto value = ';
+                    const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: `${prefix}${expression};` });
+                    for (const position of expression.matchAll(/[&|]|\b(?:0x[\da-fA-F]+|\d+)U\b/g)) {
+                        const hover = await provider.provideHover(document, new vscode.Position(0, prefix.length + position.index!), cancellation.token);
+                        assert.ok(hover, `${expression} at ${position.index}`);
+                        const markdown = hover.contents[0] as vscode.MarkdownString;
+                        assert.deepStrictEqual(copyValues(markdown), [], `${expression} at ${position.index}`);
+                        assert.match(visibleMarkdownText(markdown), /surrounding operators|주변 연산자/);
+                    }
+                }
+                const compound = await vscode.workspace.openTextDocument({ language: 'cpp', content: 'flags &= 1U | 2U;' });
+                for (const character of [9, 12, 14]) {
+                    const hover = await provider.provideHover(compound, new vscode.Position(0, character), cancellation.token);
+                    assert.ok(hover);
+                    assert.deepStrictEqual(copyValues(hover.contents[0] as vscode.MarkdownString), []);
+                }
+                for (const line of ['1U | 2U', 'return 1U | 2U;', 'auto value = 1U | 2U;', 'auto value = (1U | 2U);', 'return ((1U | 2U));']) {
+                    const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: line });
+                    const hover = await provider.provideHover(document, new vscode.Position(0, line.indexOf('|')), cancellation.token);
+                    assert.ok(hover, line);
+                    assert.ok(copyValues(hover.contents[0] as vscode.MarkdownString).includes('3'), line);
+                }
+                assert.strictEqual(detectBitOperation('1U | 2U;', 7), undefined, 'the semicolon is outside the half-open match range');
+            } finally {
+                vscode.workspace.getConfiguration = originalConfig;
+                vscode.commands.executeCommand = originalExecuteCommand;
+                cancellation.dispose();
+            }
+        });
+
+        test('a 64-bit SFR reset and copied mask retain all bits in the actual hover', async () => {
+            const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: [
+                'struct REG {',
+                '    uint64_t all : 64; // [63:0][RW][0xFFFFFFFFFFFFFFFF] Full register',
+                '};',
+            ].join('\n') });
+            const cancellation = new vscode.CancellationTokenSource();
+            try {
+                const hover = await provider.provideHover(document, new vscode.Position(1, 15), cancellation.token);
+                assert.ok(hover);
+                const markdown = hover.contents[0] as vscode.MarkdownString;
+                const text = visibleMarkdownText(markdown);
+                assert.match(text, /Dec: 18446744073709551615/);
+                assert.ok(text.includes('Bin: 0b' + '1'.repeat(64)));
+                assert.doesNotMatch(text, /18446744073709552000/);
+                assert.deepStrictEqual(copyValues(markdown), ['0xFFFFFFFFFFFFFFFF']);
+            } finally { cancellation.dispose(); }
+        });
+
+        test('an oversized SFR comment falls back to a bounded exact literal hover', async () => {
+            const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: [
+                'struct REG {',
+                '    unsigned flag : 1; // [63999999:0][RW][0x0] Oversized annotation',
+                '};',
+                'REG reg = 1;',
+            ].join('\n') });
+            const cancellation = new vscode.CancellationTokenSource();
+            try {
+                const hover = await provider.provideHover(document, new vscode.Position(3, 10), cancellation.token);
+                assert.ok(hover);
+                const markdown = hover.contents[0] as vscode.MarkdownString;
+                assert.ok(markdown.value.length < 20_000);
+                assert.doesNotMatch(markdown.value, /Decoded Bit Fields/);
+                assert.deepStrictEqual(copyValues(markdown), ['0x1', '1', '0b1']);
+            } finally { cancellation.dispose(); }
+        });
+
+        test('experimental constant hover copies exact unsigned and 64-bit results', async () => {
+            const originalConfig = vscode.workspace.getConfiguration;
+            const cancellation = new vscode.CancellationTokenSource();
+            try {
+                (vscode.workspace as any).getConfiguration = (section: string) => ({
+                    get: (key: string, fallback: unknown) => section === 'taskhub.experimental' && key === 'bitOperationHover.enabled' ? true : fallback,
+                });
+                for (const [expression, expectedHex, expectedDecimal] of [
+                    ['0x100000000ULL | 1ULL', '0x100000001', '4294967297'],
+                    ['0xFFFFFFFFU | 0U', '0xFFFFFFFF', '4294967295'],
+                    ["0x1'0000'0000ULL | 1ULL", '0x100000001', '4294967297'],
+                ]) {
+                    const line = `unsigned long long value = ${expression};`;
+                    const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: line });
+                    const hover = await provider.provideHover(document, new vscode.Position(0, line.indexOf('|')), cancellation.token);
+                    assert.ok(hover, expression);
+                    const values = copyValues(hover.contents[0] as vscode.MarkdownString);
+                    assert.ok(values.includes(expectedHex), expression);
+                    assert.ok(values.includes(expectedDecimal), expression);
+                    assert.ok(!values.includes('-1'), expression);
+                }
+                for (const expression of ['1 << 31', '1UL << 40', '1ULL << 64', '-1U | 0U', '- 1U | 0U', '1.0 | 2', '1 | 2.0', '0x1.p2 | 2']) {
+                    const line = `auto value = ${expression};`;
+                    const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: line });
+                    const operator = line.search(/<<|\|/);
+                    const hover = await provider.provideHover(document, new vscode.Position(0, operator), cancellation.token);
+                    assert.deepStrictEqual(hover ? copyValues(hover.contents[0] as vscode.MarkdownString) : [], [], expression);
+                }
+                const variable = await vscode.workspace.openTextDocument({ language: 'cpp', content: 'uint32_t value = 0x80000000;\n~value;' });
+                const hover = await (provider as any).tryBitOperationHover(variable, new vscode.Position(1, 0));
+                assert.ok(hover);
+                assert.deepStrictEqual(copyValues(hover.contents[0]), []);
+                assert.match(visibleMarkdownText(hover.contents[0]), /C\/C\+\+.*(?:cannot be determined|확정할 수 없어)/);
+                assert.match((hover.contents[0] as vscode.MarkdownString).value, /\|\n\n(?:The(?: |&nbsp;)variable|변수의)/,
+                    '불확정 안내가 결과 표의 첫 칸으로 렌더링되지 않도록 문단을 분리한다');
+            } finally {
+                vscode.workspace.getConfiguration = originalConfig;
+                cancellation.dispose();
+            }
+        });
+    });
+
     test('처음에는 없던 taskhub_types.json을 세션 중 생성하면 다음 조회에서 읽는다', async () => {
         const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-hover-config-'));
         try {
@@ -1521,7 +1646,7 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             assert.doesNotMatch(markdown.value, /0x0+-|0b0+-/);
         });
 
-        test('비트 연산이 부정확한 입력을 32비트로 잘라도 복사 가능한 값으로 취급하지 않는다', () => {
+        test('비트 연산은 부정확한 입력을 계산하거나 복사 가능한 값으로 취급하지 않는다', () => {
             const operation: BitOperation = {
                 variable: 'flags', operator: BitOperationType.AND, operand: 0xFF,
                 isAssignment: false, expression: 'flags & 0xFF', start: 0, end: 12,
@@ -1532,7 +1657,7 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 [{ ...operation, isConstant: true, leftOperand: Number.MAX_SAFE_INTEGER + 1 }, undefined],
             ] as const) {
                 const result = calculateBitOperation(input, beforeValue);
-                assert.ok(Number.isSafeInteger(result.afterValue), '비트 연산의 절삭으로 결과만 정수가 되는 경로');
+                assert.ok(Number.isNaN(result.afterValue));
                 assert.deepStrictEqual(copyValues(formatBitOperationResult(result)), []);
             }
         });
@@ -2712,7 +2837,7 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 leftOperand: 1,
                 isAssignment: false,
                 isConstant: true,
-                expression: '1 << 40',
+                expression: '1ULL << 40',
                 start: 0,
                 end: 7
             };
@@ -2818,7 +2943,7 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             assert.ok(visibleMarkdownText(markdown).includes('0x0000008F')); // Hex values are 8-digit padded
         });
 
-        test('should format operation result without before value', () => {
+        test('an unknown before value does not become a zero-based result or copy link', () => {
             const operation: BitOperation = {
                 variable: 'value',
                 operator: BitOperationType.OR_ASSIGN,
@@ -2834,7 +2959,9 @@ suite('NumberBaseHoverProvider Test Suite', () => {
 
             assert.ok(visibleMarkdownText(markdown).includes('Bit Operation Result'));
             assert.ok(visibleMarkdownText(markdown).includes('After'));
-            assert.ok(visibleMarkdownText(markdown).includes('0x00000080'));
+            assert.ok(Number.isNaN(result.afterValue));
+            assert.deepStrictEqual(copyValues(markdown), []);
+            assert.match(visibleMarkdownText(markdown), /Exact integer unavailable|정확한 정수 값 없음/);
         });
     });
 

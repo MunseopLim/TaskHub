@@ -2724,7 +2724,7 @@ export function getWebviewContent(
     }
 
     function detectMultiline(val) {
-        return typeof val === 'string' && val.includes('\\n');
+        return typeof val === 'string' && /[\\r\\n]/.test(val);
     }
 
     function renderTable() {
@@ -2946,12 +2946,14 @@ export function getWebviewContent(
     }
 
     function renderCellEdit(val, isArray, isMultiline, rowIdx, col) {
-        if (isPlainObject(val)) {
-            return '<div class="cell-edit"><textarea class="json-edit">' + escapeHtml(JSON.stringify(val, null, 2)) + '</textarea></div>';
+        // textarea.value도 CR/CRLF를 LF로 정규화한다. CR이 있는 문자열과
+        // 단일행 태그 입력으로 표현할 수 없는 배열은 JSON의 이스케이프를 편집한다.
+        if (isPlainObject(val) || (typeof val === 'string' && val.includes('\\r'))) {
+            return '<div class="cell-edit"><textarea class="json-edit"></textarea></div>';
         }
         if (isArray) {
-            if (!hasOnlyPrimitives(val)) {
-                return '<div class="cell-edit"><textarea class="json-edit">' + escapeHtml(JSON.stringify(val, null, 2)) + '</textarea></div>';
+            if (!hasOnlyPrimitives(val) || val.some(item => detectMultiline(item))) {
+                return '<div class="cell-edit"><textarea class="json-edit"></textarea></div>';
             }
             let html = '<div class="cell-edit"><div class="array-edit-area">';
             val.forEach((item, i) => {
@@ -2959,8 +2961,7 @@ export function getWebviewContent(
                 // 이름 없는 input 이었다. ✕ / + 는 이 칸으로 포커스를 옮기는
                 // 것으로 결과를 알리는데, 이름이 없으면 스크린리더는 옆 항목의
                 // 값만 읽어 줘 무슨 일이 일어났는지 알 수 없다.
-                html += '<input type="text" value="' + escapeAttr(String(item))
-                    + '" data-arr-idx="' + i + '" aria-label="'
+                html += '<input type="text" data-arr-idx="' + i + '" aria-label="'
                     + escapeAttr(fmt(S.arrayItemLabel, { col: col, n: i + 1 })) + '">';
                 const removeLabel = fmt(S.removeArrayItem, { n: i + 1 });
                 html += '<button class="small danger" data-remove-arr="' + i
@@ -2973,9 +2974,9 @@ export function getWebviewContent(
             return html;
         }
         if (isMultiline) {
-            return '<div class="cell-edit"><textarea>' + escapeHtml(String(val)) + '</textarea></div>';
+            return '<div class="cell-edit"><textarea></textarea></div>';
         }
-        return '<div class="cell-edit"><input type="text" value="' + escapeAttr(String(val ?? '')) + '"></div>';
+        return '<div class="cell-edit"><input type="text"></div>';
     }
 
     // buildDraftSnapshot 은 번들에서 온다 (구현·단위테스트는
@@ -3086,6 +3087,22 @@ export function getWebviewContent(
         document.querySelectorAll('td[data-row]').forEach(td => {
             const view = td.querySelector('.cell-view');
             if (!view) { return; }
+            // 값을 HTML에 넣으면 NUL은 U+FFFD로, CRLF는 LF로 바뀌며 textarea의
+            // 첫 LF도 사라진다. DOM을 만든 뒤 모델의 값을 직접 대입한다.
+            const row = getActiveRows()[parseInt(td.dataset.row)];
+            const val = Object.hasOwn(row, td.dataset.col) ? row[td.dataset.col] : undefined;
+            const editor = td.querySelector('.cell-edit input, .cell-edit textarea');
+            if (editor) {
+                if (editor.classList.contains('json-edit')) {
+                    editor.value = JSON.stringify(val, null, 2);
+                } else if (Array.isArray(val)) {
+                    td.querySelectorAll('.cell-edit input[data-arr-idx]').forEach(input => {
+                        input.value = String(val[parseInt(input.dataset.arrIdx)]);
+                    });
+                } else {
+                    editor.value = String(val ?? '');
+                }
+            }
             const beginEdit = () => {
                 // Close other editing cells. invalid JSON 등으로 commit이
                 // 거부되면 그 셀은 editing 상태로 남으며, 새 셀로의 진입을
@@ -3143,6 +3160,7 @@ export function getWebviewContent(
         // Blur / Enter to commit for simple inputs
         document.querySelectorAll('.cell-edit input[type="text"]:not([data-arr-idx])').forEach(input => {
             input.addEventListener('keydown', (e) => {
+                if (e.isComposing) { return; }
                 if (e.key === 'Enter') { commitCell(input.closest('td')); }
                 if (e.key === 'Escape') { cancelCell(input.closest('td')); }
             });
@@ -3164,7 +3182,8 @@ export function getWebviewContent(
         // Textarea: Escape to cancel, Ctrl/Cmd+Enter to commit
         document.querySelectorAll('.cell-edit textarea').forEach(ta => {
             ta.addEventListener('keydown', (e) => {
-                if (!e.isComposing && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                if (e.isComposing) { return; }
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                     e.preventDefault();
                     commitCell(ta.closest('td'));
                 }
@@ -3185,6 +3204,7 @@ export function getWebviewContent(
         // Array item inputs
         document.querySelectorAll('.cell-edit input[data-arr-idx]').forEach(input => {
             input.addEventListener('keydown', (e) => {
+                if (e.isComposing) { return; }
                 if (e.key === 'Enter') { commitCell(input.closest('td')); }
                 if (e.key === 'Escape') { cancelCell(input.closest('td')); }
             });

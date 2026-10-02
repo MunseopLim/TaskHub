@@ -1631,6 +1631,51 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(savedInputStillValid(task, { value: 'vabc-rc' }), false);
 		});
 
+        test('동적 prefix/suffix는 현재 실행 문맥으로 보간해 검사한다', () => {
+            const task = {
+                type: 'inputBox', validatePattern: '^\\d+$',
+                prefix: '${prefix.output}', suffix: '${suffix.output}',
+            };
+            const saved = { value: 'tag-42-rc' };
+            assert.strictEqual(savedInputStillValid(task, saved), true);
+            assert.strictEqual(savedInputStillValid(task, saved, {
+                prefix: { output: 'tag-' }, suffix: { output: '-rc' },
+            }), true);
+            assert.strictEqual(savedInputStillValid(task, saved, {
+                prefix: { output: 'release-' }, suffix: { output: '-rc' },
+            }), false);
+            assert.strictEqual(savedInputStillValid(task, { value: 'tag-invalid-rc' }, {
+                prefix: { output: 'tag-' }, suffix: { output: '-rc' },
+            }), false);
+            assert.strictEqual(savedInputStillValid(task, saved, {}), false);
+        });
+
+        test('affix만 있는 저장값은 빈 입력을 현재 패턴으로 검사한다', () => {
+            assert.strictEqual(savedInputStillValid({
+                type: 'inputBox', validatePattern: '^$', suffix: 'tail',
+            }, { value: 'tail' }), true);
+            assert.strictEqual(savedInputStillValid({
+                type: 'inputBox', validatePattern: '^$', prefix: 'head', suffix: 'tail',
+            }, { value: 'headtail' }), true);
+            assert.strictEqual(savedInputStillValid({
+                type: 'inputBox', validatePattern: '^$', prefix: 'same', suffix: 'same',
+            }, { value: 'same' }), false, '겹친 affix를 빈 입력으로 오인했다');
+            assert.strictEqual(savedInputStillValid({
+                type: 'inputBox', validatePattern: '^.*$', prefix: 'changed-',
+            }, { value: 'old-42' }), false);
+        });
+
+        test('프로필 사전검증은 동적 affix 입력을 실행 시 재검증하도록 보존한다', () => {
+            const task = {
+                id: 'tag', type: 'inputBox', validatePattern: '^\\d+$', prefix: '${prior.output}',
+            };
+            const result = applyCurrentInputProfileValidation({
+                usableInputs: { tag: { value: 'tag-42' } }, staleTaskIds: [], promptTaskIds: [],
+            }, [task as any]);
+            assert.deepStrictEqual({ ...result.usableInputs }, { tag: { value: 'tag-42' } });
+            assert.deepStrictEqual(result.promptTaskIds, []);
+        });
+
 		test('잘못된 정규식은 입력 시점과 같게 무시한다', () => {
 			// 두 경로가 다른 판정을 하면 그것대로 혼란스럽다.
 			assert.strictEqual(savedInputStillValid({ type: 'inputBox', validatePattern: '[' }, { value: 'x' }), true);

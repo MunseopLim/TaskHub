@@ -1711,7 +1711,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     private async tryBitOperationHover(
         document: vscode.TextDocument,
         position: vscode.Position,
-        request = this.createRequest()
+        _request?: HoverRequest
     ): Promise<vscode.Hover | null> {
         // Check if bit operation hover feature is enabled
         const bitOpEnabled = vscode.workspace.getConfiguration('taskhub.experimental').get('bitOperationHover.enabled', false);
@@ -1729,43 +1729,22 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return null;
         }
 
-        // Try to get the current value of the variable (skip for constant expressions)
-        let beforeValue: number | undefined = undefined;
-        let identifier: CandidateResolution<number> | undefined;
-
-        // For constant expressions, we don't need to look up the variable value
-        if (!operation.isConstant && operation.variable) {
-            // Try to find the variable definition and get its value
-            try {
-                const wordRange = new vscode.Range(
-                    position.line,
-                    lineText.indexOf(operation.variable),
-                    position.line,
-                    lineText.indexOf(operation.variable) + operation.variable.length
-                );
-
-                const variablePosition = new vscode.Position(position.line, lineText.indexOf(operation.variable));
-                identifier = await this.resolveIdentifierValue(document, variablePosition, request);
-                const value = this.resolvedCandidateValue(identifier);
-                if (value !== null) {
-                    beforeValue = value;
-                }
-            } catch (error) {
-                // If we can't get the value, continue without it
-            }
-        }
-
-        // Calculate the bit operation result
-        const result = calculateBitOperation(operation, beforeValue);
-
-        // Format the result as markdown
+        // An initializer cannot establish the variable's current value, integer
+        // promotions or assignment conversion. Only constant expressions are exact.
+        const result = calculateBitOperation(operation);
         const markdown = formatBitOperationResult(result);
-        if (identifier && this.hasValueCandidates(identifier)) {
-            if (this.resolvedCandidateValue(identifier) === null) {
-                markdown.appendMarkdown('\n\n' + this.unresolvedCandidates(identifier, value => String(value)).value);
-            } else if (identifier.candidates.length > 1 || identifier.unverified) {
-                this.appendCandidates(markdown, identifier, value => String(value));
-            }
+        if (!operation.isConstant) {
+            markdown.appendMarkdown('\n');
+            markdown.appendText(t(
+                '변수의 C/C++ 타입과 연산 시점의 값을 확정할 수 없어 연산 결과와 복사를 제공하지 않습니다.',
+                'The variable\'s C/C++ type and value at this operation cannot be determined, so the result and copying are unavailable.'
+            ));
+        } else if (operation.expressionComplete === false) {
+            markdown.appendMarkdown('\n');
+            markdown.appendText(t(
+                '주변 연산자와 연결된 부분식이므로 전체 결과와 복사를 제공하지 않습니다.',
+                'This is part of an expression with surrounding operators, so the full result and copying are unavailable.'
+            ));
         }
 
         // Create range for the hover
@@ -1809,18 +1788,18 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         md.appendMarkdown(`| **Access Type** | ${escapeHoverText(getAccessTypeDescription(comment.accessType))} |\n`);
 
         // Reset value with conversions for multi-bit fields
-        if (comment.bitWidth > 1 && comment.resetValueNumeric !== null) {
-            const hex = '0x' + comment.resetValueNumeric.toString(16).toUpperCase();
-            const dec = comment.resetValueNumeric.toString(10);
-            const bin = '0b' + comment.resetValueNumeric.toString(2);
+        const reset = comment.resetValueExact !== undefined ? BigInt(comment.resetValueExact) : comment.resetValueNumeric;
+        if (comment.bitWidth > 1 && reset !== null) {
+            const dec = reset.toString(10);
+            const bin = '0b' + reset.toString(2);
             md.appendMarkdown(`| **Reset Value** | ${escapeHoverText(comment.resetValue)} (Dec: ${dec}, Bin: ${bin}) |\n`);
         } else {
             md.appendMarkdown(`| **Reset Value** | ${escapeHoverText(comment.resetValue)} |\n`);
         }
 
-        // Bit mask (32-bit) - shows the value when all bits in this field are set to 1
+        // Exact mask through bit 63; keep the existing 8-digit display for 32-bit fields.
         const bitMask = calculateBitMask(comment.bitStart, comment.bitEnd);
-        const bitMaskHex = '0x' + bitMask.toString(16).toUpperCase().padStart(8, '0');
+        const bitMaskHex = '0x' + bitMask.toString(16).toUpperCase().padStart(comment.bitEnd < 32 ? 8 : 16, '0');
         md.appendMarkdown(`| **Bit Mask** | ${formatCopyableHoverValue(bitMaskHex)} |\n`);
 
         // File location
@@ -1876,6 +1855,8 @@ export interface BitOperation {
     isConstant?: boolean;
     /** Left operand for constant expressions */
     leftOperand?: number;
+    /** False when the detected pair is connected to a larger expression. */
+    expressionComplete?: boolean;
 }
 
 /**
@@ -1908,8 +1889,9 @@ function shiftRightNumber(value: number, operand: number): number {
     return Math.floor(value / Math.pow(2, normalizeShiftAmount(operand)));
 }
 
-// Patterns for bit operation detection (module-level to avoid recompilation per hover call)
-// Note: Use negative lookbehind to avoid matching part of hex/binary literals or numeric suffixes
+// Whole C integer tokens only: separators and suffixes must not leave a valid prefix behind.
+const BIT_OPERATION_LITERAL = "(?:0[xX][\\da-fA-F](?:'?[\\da-fA-F])*|0[bB][01](?:'?[01])*|\\d(?:'?\\d)*)(?:[uU](?:[lL]|ll|LL)?|(?:[lL]|ll|LL)[uU]?)?(?![\\w'.])";
+// Patterns are shared to avoid recompilation per hover call.
 const BIT_OPERATION_PATTERNS: Array<{
     regex: RegExp;
     isAssignment: boolean;
@@ -1918,12 +1900,12 @@ const BIT_OPERATION_PATTERNS: Array<{
 }> = [
     // Assignment operations: var &= value, var |= value, etc.
     {
-        regex: /(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)\s*(&=|\|=|\^=|<<=|>>=)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)/g,
+        regex: new RegExp(`(?<![\\w'.])([a-zA-Z_]\\w*)\\s*(&=|\\|=|\\^=|<<=|>>=)\\s*(${BIT_OPERATION_LITERAL})`, 'g'),
         isAssignment: true
     },
     // Non-assignment operations: var & value, var | value, etc.
     {
-        regex: /(?<![0-9a-fA-FxXbBULul])([a-zA-Z_]\w*)\s*(&|\||\^|<<|>>)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)/g,
+        regex: new RegExp(`(?<![\\w'.])([a-zA-Z_]\\w*)\\s*(&|\\||\\^|<<|>>)\\s*(${BIT_OPERATION_LITERAL})`, 'g'),
         isAssignment: false
     },
     // NOT operation: ~var (only match identifiers, not numbers or hex literals or suffixes)
@@ -1935,11 +1917,37 @@ const BIT_OPERATION_PATTERNS: Array<{
     // Constant expressions: number & number, number | number, etc.
     // Matches: 1U << 5, 0xFF & 0x0F, (1U << 5), etc.
     {
-        regex: /\(?\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)[ULul]*\s*(&|\||\^|<<|>>)\s*(0x[0-9a-fA-F]+|0b[01]+|\d+)[ULul]*\s*\)?/g,
+        regex: new RegExp(`(?<![\\w'.+-])\\(?\\s*([+-]?\\s*${BIT_OPERATION_LITERAL})\\s*(&|\\||\\^|<<|>>)\\s*([+-]?\\s*${BIT_OPERATION_LITERAL})\\s*\\)?`, 'g'),
         isAssignment: false,
         isConstant: true
     }
 ];
+
+/** A regex pair cannot establish precedence, casts or unary operators around it. */
+function constantBitOperationContext(line: string, start: number, end: number): { complete: boolean; start: number; end: number } {
+    const maskComments = (text: string): string => text.replace(/\/\*.*?\*\//g, ' ').replace(/\/\/.*$/g, '');
+    let before = maskComments(line.slice(0, start)).trimEnd();
+    let after = maskComments(line.slice(end)).trimStart();
+    // Extra balanced parentheses do not change an otherwise independent value.
+    while (before.endsWith('(') && after.startsWith(')')) {
+        before = before.slice(0, -1).trimEnd();
+        after = after.slice(1).trimStart();
+    }
+    const connectedBefore = /[+\-*/%&|^~<>?:!)]\s*=?$|[=!<>]=$|\b(?:sizeof|alignof|_Alignof|not|compl|and|or|xor|bitand|bitor|not_eq|and_eq|or_eq|xor_eq)\s*$/u;
+    const connectedAfter = /^(?:[+\-*/%&|^<>?:!=()]|(?:and|or|xor|bitand|bitor|not_eq)\b)/u;
+    if (!connectedBefore.test(before) && !connectedAfter.test(after)) { return { complete: true, start, end }; }
+
+    // Keep the unsupported expression owned at its later operators/operands as
+    // well, so they cannot fall back to copying a misleading literal fragment.
+    let ownedStart = Math.max(line.lastIndexOf(';', start - 1), line.lastIndexOf(',', start - 1)) + 1;
+    const ends = [line.indexOf(';', end), line.indexOf(',', end), line.indexOf('//', end)].filter(index => index >= 0);
+    const ownedEnd = ends.length > 0 ? Math.min(...ends) : line.length;
+    for (const assignment of line.slice(ownedStart, start).matchAll(/(?<![=<>!])=(?!=)/g)) {
+        ownedStart += assignment.index! + 1;
+        break;
+    }
+    return { complete: false, start: ownedStart, end: ownedEnd };
+}
 
 /**
  * Detect bit operations in a line of code
@@ -1953,9 +1961,12 @@ export function detectBitOperation(line: string, cursorPosition: number): BitOpe
         while ((match = pattern.regex.exec(line)) !== null) {
             const matchStart = match.index;
             const matchEnd = match.index + match[0].length;
+            const context = pattern.isConstant ? constantBitOperationContext(line, matchStart, matchEnd) : undefined;
+            const hoverStart = context?.start ?? matchStart;
+            const hoverEnd = context?.end ?? matchEnd;
 
             // Check if cursor is within this match
-            if (cursorPosition >= matchStart && cursorPosition <= matchEnd) {
+            if (cursorPosition >= hoverStart && cursorPosition < hoverEnd) {
                 if (pattern.isNot) {
                     // NOT operation
                     return {
@@ -1969,9 +1980,9 @@ export function detectBitOperation(line: string, cursorPosition: number): BitOpe
                     };
                 } else if (pattern.isConstant) {
                     // Constant expression: number op number
-                    const leftStr = match[1].replace(/[ULul]+$/, ''); // Remove suffix
+                    const leftStr = match[1];
                     const operator = match[2] as BitOperationType;
-                    const rightStr = match[3].replace(/[ULul]+$/, ''); // Remove suffix
+                    const rightStr = match[3];
 
                     const leftOperand = parseNumberLiteral(leftStr);
                     const operand = parseNumberLiteral(rightStr);
@@ -1986,9 +1997,10 @@ export function detectBitOperation(line: string, cursorPosition: number): BitOpe
                         leftOperand,
                         isAssignment: false,
                         isConstant: true,
-                        expression: match[0].trim(),
-                        start: matchStart,
-                        end: matchEnd
+                        expressionComplete: context!.complete,
+                        expression: context!.complete ? match[0].trim() : line.slice(hoverStart, hoverEnd).trim(),
+                        start: hoverStart,
+                        end: hoverEnd
                     };
                 } else {
                     // Regular binary operation
@@ -2022,69 +2034,55 @@ export function detectBitOperation(line: string, cursorPosition: number): BitOpe
  * Parse a C/C++ number literal (hex, binary, octal, or decimal)
  */
 function parseNumberLiteral(str: string): number | undefined {
-    // Remove digit separators
-    str = str.replace(/'/g, '');
-
-    if (str.startsWith('0x') || str.startsWith('0X')) {
-        // Hexadecimal
-        return parseInt(str.slice(2), 16);
-    } else if (str.startsWith('0b') || str.startsWith('0B')) {
-        // Binary
-        return parseInt(str.slice(2), 2);
-    } else if (/^0\d+$/.test(str)) {
-        return /^0[0-7]+$/.test(str) ? parseInt(str, 8) : undefined;
-    } else if (/^\d+$/.test(str)) {
-        // Decimal
-        return parseInt(str, 10);
-    }
-
-    return undefined;
+    return MacroExpander.evaluateToSafeInteger(str.replace(/'/g, '')) ?? undefined;
 }
 
 /**
- * Calculate bit operation result
+ * Calculate exact integer math for explicit numeric inputs. Variable hover must
+ * not supply an inferred initializer without knowing C types and runtime values.
  */
 export function calculateBitOperation(
     operation: BitOperation,
     beforeValue?: number
 ): BitOperationResult {
-    let afterValue: number;
+    let afterValue = NaN;
     let actualBeforeValue: number;
 
     // For constant expressions, use leftOperand; otherwise use beforeValue
     if (operation.isConstant && operation.leftOperand !== undefined) {
         actualBeforeValue = operation.leftOperand;
     } else {
-        actualBeforeValue = beforeValue ?? 0;
+        actualBeforeValue = beforeValue ?? NaN;
     }
 
-    // Perform the operation
-    switch (operation.operator) {
-        case BitOperationType.AND:
-        case BitOperationType.AND_ASSIGN:
-            afterValue = actualBeforeValue & operation.operand;
-            break;
-        case BitOperationType.OR:
-        case BitOperationType.OR_ASSIGN:
-            afterValue = actualBeforeValue | operation.operand;
-            break;
-        case BitOperationType.XOR:
-        case BitOperationType.XOR_ASSIGN:
-            afterValue = actualBeforeValue ^ operation.operand;
-            break;
-        case BitOperationType.LEFT_SHIFT:
-        case BitOperationType.LEFT_SHIFT_ASSIGN:
-            afterValue = shiftLeftNumber(actualBeforeValue, operation.operand);
-            break;
-        case BitOperationType.RIGHT_SHIFT:
-        case BitOperationType.RIGHT_SHIFT_ASSIGN:
-            afterValue = shiftRightNumber(actualBeforeValue, operation.operand);
-            break;
-        case BitOperationType.NOT:
-            afterValue = ~actualBeforeValue;
-            break;
-        default:
-            afterValue = actualBeforeValue;
+    if (operation.expressionComplete !== false && Number.isSafeInteger(actualBeforeValue) && Number.isSafeInteger(operation.operand)) {
+        if (operation.isConstant) {
+            // Preserve literal suffixes and use the same C integer bounds as macro hover.
+            afterValue = MacroExpander.evaluateToSafeInteger(operation.expression.replace(/'/g, '')) ?? NaN;
+        } else {
+            const left = BigInt(actualBeforeValue);
+            const right = BigInt(operation.operand);
+            let exact: bigint | undefined;
+            switch (operation.operator) {
+                case BitOperationType.AND:
+                case BitOperationType.AND_ASSIGN: exact = left & right; break;
+                case BitOperationType.OR:
+                case BitOperationType.OR_ASSIGN: exact = left | right; break;
+                case BitOperationType.XOR:
+                case BitOperationType.XOR_ASSIGN: exact = left ^ right; break;
+                case BitOperationType.LEFT_SHIFT:
+                case BitOperationType.LEFT_SHIFT_ASSIGN:
+                case BitOperationType.RIGHT_SHIFT:
+                case BitOperationType.RIGHT_SHIFT_ASSIGN:
+                    if (left >= 0n && right >= 0n && right < 64n) {
+                        exact = operation.operator === BitOperationType.LEFT_SHIFT || operation.operator === BitOperationType.LEFT_SHIFT_ASSIGN
+                            ? left << right : left >> right;
+                    }
+                    break;
+                case BitOperationType.NOT: exact = ~left; break;
+            }
+            if (exact !== undefined) { afterValue = safeIntegerOrNull(Number(exact)) ?? NaN; }
+        }
     }
 
     // Calculate changed bits
@@ -2092,17 +2090,16 @@ export function calculateBitOperation(
     const setBits: number[] = [];
     const clearedBits: number[] = [];
 
-    // Compare up to 32 bits
-    for (let i = 0; i < 32; i++) {
-        const beforeBit = (actualBeforeValue >> i) & 1;
-        const afterBit = (afterValue >> i) & 1;
-
-        if (beforeBit !== afterBit) {
-            changedBits.push(i);
-            if (afterBit === 1) {
-                setBits.push(i);
-            } else {
-                clearedBits.push(i);
+    if (Number.isSafeInteger(actualBeforeValue) && Number.isSafeInteger(afterValue)) {
+        const before = BigInt(actualBeforeValue);
+        const after = BigInt(afterValue);
+        for (let i = 0; i < 64; i++) {
+            const beforeBit = (before >> BigInt(i)) & 1n;
+            const afterBit = (after >> BigInt(i)) & 1n;
+            if (beforeBit !== afterBit) {
+                changedBits.push(i);
+                if (afterBit === 1n) { setBits.push(i); }
+                else { clearedBits.push(i); }
             }
         }
     }
@@ -2124,7 +2121,7 @@ export function formatBitOperationResult(result: BitOperationResult): vscode.Mar
     const md = createCopyableHoverMarkdown();
 
     const { operation, beforeValue, afterValue } = result;
-    const operandsAreExact = Number.isSafeInteger(operation.operand)
+    const operandsAreExact = Number.isSafeInteger(afterValue) && Number.isSafeInteger(operation.operand)
         && (beforeValue === undefined || Number.isSafeInteger(beforeValue))
         && (operation.leftOperand === undefined || Number.isSafeInteger(operation.leftOperand));
 

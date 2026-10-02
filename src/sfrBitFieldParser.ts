@@ -21,8 +21,19 @@ export interface BitFieldInfo {
     resetValue: string;
     /** Numeric reset value */
     resetValueNumeric: number | null;
+    /** Exact decimal reset value when it does not fit a safe Number. JSON-safe for hover candidate comparison. */
+    resetValueExact?: string;
     /** Bit field description */
     description: string;
+}
+
+export const SFR_MAX_BITS = 64;
+
+/** Validate before allocating a mask or padding a binary string. */
+export function isValidSfrBitRange(bitStart: number, bitEnd: number, bitWidth = bitEnd - bitStart + 1): boolean {
+    return Number.isInteger(bitStart) && Number.isInteger(bitEnd) && Number.isInteger(bitWidth)
+        && bitStart >= 0 && bitEnd < SFR_MAX_BITS && bitStart <= bitEnd
+        && bitWidth === bitEnd - bitStart + 1;
 }
 
 /**
@@ -54,26 +65,28 @@ export function parseBitFieldComment(comment: string): BitFieldInfo | null {
     let bitStart: number;
     let bitEnd: number;
 
+    if (!/^\d+(?:\s*:\s*\d+)?$/.test(bitPos)) { return null; }
     if (bitPos.includes(':')) {
         // Range format: "12:10"
         const [endStr, startStr] = bitPos.split(':').map(s => s.trim());
-        bitStart = parseInt(startStr, 10);
-        bitEnd = parseInt(endStr, 10);
+        bitStart = Number(startStr);
+        bitEnd = Number(endStr);
     } else {
         // Single bit: "0"
-        bitStart = parseInt(bitPos, 10);
+        bitStart = Number(bitPos);
         bitEnd = bitStart;
     }
 
     // Validate bit positions
-    if (isNaN(bitStart) || isNaN(bitEnd) || bitStart > bitEnd) {
+    if (!isValidSfrBitRange(bitStart, bitEnd)) {
         return null;
     }
 
     const bitWidth = bitEnd - bitStart + 1;
 
     // Parse reset value
-    const resetValueNumeric = parseResetValue(resetValue);
+    const reset = parseResetValue(resetValue);
+    const resetValueNumeric = reset !== null && reset <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(reset) : null;
 
     return {
         bitPosition: bitPos,
@@ -83,6 +96,7 @@ export function parseBitFieldComment(comment: string): BitFieldInfo | null {
         accessType,
         resetValue,
         resetValueNumeric,
+        ...(reset !== null && resetValueNumeric === null ? { resetValueExact: reset.toString() } : {}),
         description
     };
 }
@@ -91,29 +105,13 @@ export function parseBitFieldComment(comment: string): BitFieldInfo | null {
  * Parse reset value from various formats
  * Supports: 0x0, 0xFF, 0b1010, 255
  */
-function parseResetValue(value: string): number | null {
-    const cleaned = value.replace(/'/g, ''); // Remove digit separators
-
-    // Hexadecimal: 0x0, 0xFF
-    if (/^0[xX][0-9a-fA-F]+$/.test(cleaned)) {
-        const num = parseInt(cleaned, 16);
-        return isNaN(num) ? null : num;
+function parseResetValue(value: string): bigint | null {
+    // 64-bit binary with digit separators needs at most 129 characters.
+    if (value.length > 256 || !/^(?:0[xX][\da-fA-F](?:'?[\da-fA-F])*|0[bB][01](?:'?[01])*|\d(?:'?\d)*)$/.test(value)) {
+        return null;
     }
-
-    // Binary: 0b1010
-    if (/^0[bB][01]+$/.test(cleaned)) {
-        const binaryPart = cleaned.replace(/^0[bB]/, '');
-        const num = parseInt(binaryPart, 2);
-        return isNaN(num) ? null : num;
-    }
-
-    // Decimal: 255
-    if (/^\d+$/.test(cleaned)) {
-        const num = parseInt(cleaned, 10);
-        return isNaN(num) ? null : num;
-    }
-
-    return null;
+    const integer = BigInt(value.replace(/'/g, ''));
+    return integer < (1n << BigInt(SFR_MAX_BITS)) ? integer : null;
 }
 
 /**
@@ -121,29 +119,26 @@ function parseResetValue(value: string): number | null {
  * @param bitWidth Number of bits in the field
  * @returns Object with min and max values
  */
-export function calculateValidRange(bitWidth: number): { min: number; max: number } {
-    return {
-        min: 0,
-        max: Math.pow(2, bitWidth) - 1
-    };
+export function calculateValidRange(bitWidth: number): { min: number; max: number | bigint } {
+    if (!isValidSfrBitRange(0, bitWidth - 1)) { return { min: 0, max: 0 }; }
+    const max = (1n << BigInt(bitWidth)) - 1n;
+    return { min: 0, max: max <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(max) : max };
 }
 
 /**
- * Calculate bit mask for a bit field (32-bit)
+ * Calculate an exact bit mask for a bit field (up to 64-bit).
  * Sets all bits in the field to 1
  * @param bitStart Starting bit position (LSB)
  * @param bitEnd Ending bit position (MSB)
- * @returns 32-bit mask value
+ * @returns Number for 32-bit masks, BigInt for masks reaching bit 32 or above
  */
-export function calculateBitMask(bitStart: number, bitEnd: number): number {
-    // Validate input range (0-31 for 32-bit registers)
-    if (bitStart < 0 || bitEnd > 31 || bitStart > bitEnd) {
+export function calculateBitMask(bitStart: number, bitEnd: number): number | bigint {
+    if (!isValidSfrBitRange(bitStart, bitEnd)) {
         return 0;
     }
     const bitWidth = bitEnd - bitStart + 1;
-    // Handle full 32-bit mask correctly (avoid 1 << 32 wrap issue)
-    const fieldMask = bitWidth >= 32 ? 0xFFFFFFFF : (1 << bitWidth) - 1;
-    return (fieldMask << bitStart) >>> 0; // Convert to unsigned 32-bit
+    const mask = ((1n << BigInt(bitWidth)) - 1n) << BigInt(bitStart);
+    return bitEnd < 32 ? Number(mask) : mask;
 }
 
 /**
@@ -183,7 +178,7 @@ export function parseBitFieldDeclaration(line: string): BitFieldDeclaration | nu
     const fieldName = match[1];
     const declaredWidth = parseInt(match[2], 10);
 
-    if (isNaN(declaredWidth) || declaredWidth <= 0) {
+    if (!isValidSfrBitRange(0, declaredWidth - 1)) {
         return null;
     }
 
@@ -240,6 +235,8 @@ export function extractBitFieldInfo(
             commentInfo = parseBitFieldComment(trimmed);
         }
     }
+
+    if (commentInfo && commentInfo.bitWidth !== declaration.declaredWidth) { commentInfo = null; }
 
     return {
         fieldName: declaration.fieldName,

@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import {
     executeAction,
     executeActionPipeline,
+    applyCurrentInputProfileValidation,
     selectHistoryRerunInputs,
     __testHook_flushBackgroundCompletions,
     __testHook_resetShellEnvNamesCache,
@@ -2797,6 +2798,68 @@ try {
             } finally {
                 (vscode.window as any).showQuickPick = originalShowQuickPick;
                 (vscode.window as any).showInputBox = originalShowInputBox;
+            }
+        });
+
+        test('IT-285: 동적 affix와 빈 입력 프로필은 현재 문맥에서 검증한 뒤 재사용한다', async () => {
+            const original = vscode.window.showInputBox;
+            const output = path.join(tempWorkspace, 'affix-profile.txt');
+            const action: PipelineAction = {
+                description: 'dynamic affix profile',
+                tasks: [
+                    { id: 'prefix', type: 'stringManipulation', function: 'trim', input: 'tag-' },
+                    { id: 'suffix', type: 'stringManipulation', function: 'trim', input: '-rc' },
+                    {
+                        id: 'tag', type: 'inputBox', validatePattern: '^\\d+$',
+                        prefix: '${prefix.output}', suffix: '${suffix.output}',
+                    },
+                    { id: 'empty', type: 'inputBox', validatePattern: '^$', suffix: 'tail' },
+                    { id: 'write', type: 'writeFile', path: output, content: '${tag.value}:${empty.value}' },
+                ],
+            };
+            const context = makeDialogMemoryContext();
+            const recorded: Record<string, unknown> = {};
+            const extensionContext = { extensionPath: path.resolve(__dirname, '..', '..') } as vscode.ExtensionContext;
+            let prompts = 0;
+            try {
+                (vscode.window as any).showInputBox = async (options: vscode.InputBoxOptions) => {
+                    const value = prompts++ === 0 ? '42' : '';
+                    assert.strictEqual(await options.validateInput?.(value), undefined);
+                    return value;
+                };
+                await executeActionPipeline(action, extensionContext, 'it285.first', tempWorkspace,
+                    [tempWorkspace], { recordInputs: recorded });
+                assert.strictEqual(prompts, 2);
+                assert.strictEqual(fs.readFileSync(output, 'utf8'), 'tag-42-rc:tail');
+
+                const store = new InputProfileStore(context.workspaceState);
+                await store.save(buildInputProfileDraft('deploy', 'Release', action.tasks, recorded,
+                    { tag: 'inputBox', empty: 'inputBox' }));
+                const profile = store.list('deploy')[0];
+                const inspection = applyCurrentInputProfileValidation(inspectInputProfile(profile, action.tasks), action.tasks);
+                assert.deepStrictEqual(inspection.promptTaskIds, []);
+                (vscode.window as any).showInputBox = async () => {
+                    throw new Error('valid saved inputs must not open a dialog');
+                };
+                fs.unlinkSync(output);
+                await executeActionPipeline(action, extensionContext, 'it285.replay', tempWorkspace,
+                    [tempWorkspace], { presetInputs: inspection.usableInputs });
+                assert.strictEqual(fs.readFileSync(output, 'utf8'), 'tag-42-rc:tail');
+
+                // 현재 선행 결과가 바뀌면 예전 affix를 재사용하지 않고 새 입력을 받는다.
+                action.tasks[0] = { ...action.tasks[0], input: 'release-' } as any;
+                prompts = 0;
+                (vscode.window as any).showInputBox = async (options: vscode.InputBoxOptions) => {
+                    prompts++;
+                    assert.strictEqual(await options.validateInput?.('7'), undefined);
+                    return '7';
+                };
+                await executeActionPipeline(action, extensionContext, 'it285.changed', tempWorkspace,
+                    [tempWorkspace], { presetInputs: inspection.usableInputs });
+                assert.strictEqual(prompts, 1);
+                assert.strictEqual(fs.readFileSync(output, 'utf8'), 'release-7-rc:tail');
+            } finally {
+                (vscode.window as any).showInputBox = original;
             }
         });
 

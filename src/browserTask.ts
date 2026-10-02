@@ -9,6 +9,8 @@ export interface BrowserTaskRequest {
     url: string;
     target?: BrowserTaskTarget;
     baseDir?: string;
+    /** 실행기의 취소·시간 초과 상태를 준비 단계와 실제 열기 직전에 확인한다. */
+    assertActive?: () => void;
 }
 
 export interface BrowserTaskResult {
@@ -197,6 +199,7 @@ export async function openBrowserTask(
     request: BrowserTaskRequest,
     deps: BrowserTaskDeps = defaultDeps,
 ): Promise<BrowserTaskResult> {
+    request.assertActive?.();
     const target = request.target ?? 'integrated';
     if (target !== 'integrated' && target !== 'default') {
         throw new Error(t(
@@ -215,6 +218,7 @@ export async function openBrowserTask(
         // Uri.query에 억지로 보존하면 VS Code에서 이중 인코딩되므로 정규 Uri를
         // 넘기고, 결과와 오류에는 검증한 URL을 유지한다. false는 실제로 열리지
         // 않았다는 뜻이다.
+        request.assertActive?.();
         const opened = await deps.openExternal(targetUri);
         if (!opened) {
             throw new Error(t(
@@ -231,12 +235,16 @@ export async function openBrowserTask(
     let targetUrl = resolved.url;
     if ((targetUri.scheme === 'http' || targetUri.scheme === 'https') && remoteName) {
         targetUri = await deps.asExternalUri(targetUri);
+        request.assertActive?.();
         // asExternalUri 뒤에는 원본 문자열이 없으므로 VS Code가 반환한 URI의 query
         // delimiter를 보존하는 직렬화가 최선이다.
         targetUrl = targetUri.toString(true);
     }
 
     const commands = new Set(await deps.getCommands(true));
+    // VS Code API의 준비가 끝난 뒤에도 소유 실행이 유효해야 한다. 이미
+    // 전달한 열기 요청은 취소할 수 없으므로 이 검사는 dispatch 전에 둔다.
+    request.assertActive?.();
     if (commands.has(INTEGRATED_BROWSER_COMMAND)) {
         await deps.executeCommand(INTEGRATED_BROWSER_COMMAND, targetUrl);
     } else if ((targetUri.scheme === 'http' || targetUri.scheme === 'https')

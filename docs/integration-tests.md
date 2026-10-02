@@ -166,6 +166,7 @@
 | IT-065 | `password: true` inputBox는 inputs에 저장되지 않음 | 비밀번호 task의 입력값은 `recordInputs`에 누적되지 않으며, history entry 직렬화에 비밀 문자열이 포함되지 않음 |
 | IT-066 | 재실행 시에도 인터랙티브 task의 output 후처리가 실행됨 | preset이 type-specific dispatch를 우회하더라도 공통 후처리(capture + `passTheResultToNextTask` output 처리)는 그대로 실행되어 `output.mode: 'file'` 등이 정상 작동 |
 | IT-157 | workspace 입력 프로필 재실행 | `workspaceState`에 저장한 이름 있는 프로필을 다시 읽어 현재 액션과 대조한 뒤 `presetInputs`로 전달하면 대화상자를 열지 않고 downstream 파일 결과까지 생성 |
+| IT-285 | 동적 affix·빈 입력 프로필 재검증 | 실제 입력·저장·프로필 사전검증·재실행에서 치환된 접두·접미사와 빈 입력을 보존하고, 현재 affix가 바뀌면 해당 입력만 다시 물어 파일에 반영 |
 
 ### Structured Run Logs
 파일: [src/test/pipelineIntegration.test.ts](../src/test/pipelineIntegration.test.ts)
