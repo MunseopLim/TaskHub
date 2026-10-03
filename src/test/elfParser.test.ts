@@ -19,6 +19,51 @@ import {
 import { buildElf32WithSymbols, buildElf32WithThumbSymbols } from './fixtures/elfFixtures';
 
 suite('ARM Thumb symbol addresses', () => {
+    test('PT_LOAD의 물리 주소와 파일 위치로 초기값의 Flash 사용량을 계산한다', () => {
+        const sections: ElfSection[] = [
+            { name: '', type: 0, flags: 0, addr: 0, offset: 0, size: 0, isAlloc: false, isWrite: false, isExec: false, isNoBits: false },
+            { name: '.text', type: 1, flags: 6, addr: 0x08000000, offset: 0x80, size: 32, isAlloc: true, isWrite: false, isExec: true, isNoBits: false },
+            { name: '.data', type: 1, flags: 3, addr: 0x20000000, offset: 0x100, size: 16, isAlloc: true, isWrite: true, isExec: false, isNoBits: false },
+            { name: '.bss', type: 8, flags: 3, addr: 0x20000010, offset: 0x110, size: 64, isAlloc: true, isWrite: true, isExec: false, isNoBits: true },
+        ];
+        const segments: ElfSegment[] = [{ type: 1, offset: 0x100, vaddr: 0x20000000, paddr: 0x08000020,
+            filesz: 16, memsz: 80, flags: 6, isRead: true, isWrite: true, isExec: false }];
+        const regions: MemoryRegion[] = [{ name: 'FLASH', origin: 0x08000000, size: 256 }, { name: 'RAM', origin: 0x20000000, size: 256 }];
+        const symbols: ElfSymbol[] = [{ name: 'value', addr: 0x20000000, size: 8, type: 'OBJECT', sectionIndex: 2, binding: 'GLOBAL' }];
+        for (const usage of [computeMemoryUsage(sections, regions, segments, 512), computeSymbolUsage(symbols, sections, regions, segments, 512)]) {
+            assert.strictEqual(usage[0].used, 48);
+            assert.strictEqual(usage[1].used, 80);
+            const load = usage[0].sections.find(entry => entry.type === 'LOAD')!;
+            assert.strictEqual(load.addr, 0x08000020);
+            assert.strictEqual(load.size, 16);
+            assert.deepStrictEqual(load.fileRange, { kind: 'file', offset: 0x100, size: 16 });
+        }
+        assert.strictEqual(computeMemoryUsage(sections, regions, [{ ...segments[0], paddr: segments[0].vaddr }])[0].used, 32);
+        assert.strictEqual(computeMemoryUsage(sections, regions, [{ ...segments[0], offset: 0x200 }])[0].used, 32);
+        const classified = classifySections(sections, segments);
+        assert.strictEqual(classified.flash.reduce((sum, section) => sum + section.size, 0), 48);
+        assert.strictEqual(classified.ram.reduce((sum, section) => sum + section.size, 0), 80);
+        const detected = autoDetectRegions([
+            { type: 1, offset: 0x80, vaddr: 0x08000000, paddr: 0x08000000, filesz: 32, memsz: 32,
+                flags: 5, isRead: true, isWrite: false, isExec: true }, ...segments,
+        ], sections);
+        assert.strictEqual(detected.find(region => region.name === 'FLASH')?.size, 48);
+    });
+    test('Flash에 배치되는 초기화 테이블은 writable 플래그가 있어도 Flash로 분류한다', () => {
+        for (const type of [14, 15, 16]) {
+            const section: ElfSection = { name: '.init_array', type, flags: 3, addr: 0x08000000,
+                size: 8, isAlloc: true, isWrite: true, isExec: false, isNoBits: false };
+            assert.deepStrictEqual(classifySections([section]).flash, [section]);
+            assert.deepStrictEqual(classifySections([section], [], [
+                { name: 'RAM', origin: section.addr, size: section.size },
+            ]).ram, [section], '실행 영역이 RAM이면 타입만으로 Flash로 바꾸지 않는다');
+            const detected = autoDetectRegions([{
+                type: 1, offset: 0, vaddr: section.addr, paddr: section.addr,
+                filesz: 8, memsz: 8, flags: 6, isRead: true, isWrite: true, isExec: false,
+            }], [section]);
+            assert.strictEqual(detected[0].name, 'FLASH');
+        }
+    });
     test('clears Thumb bit0 only for ARM functions and retains their full section-end byte range', () => {
         const buffer = buildElf32WithThumbSymbols();
         const parsed = parseElf32(buffer);
@@ -187,6 +232,7 @@ suite('ELF Parser Test Suite', () => {
             buf.writeUInt32LE(1, phOffset);          // PT_LOAD
             buf.writeUInt32LE(0x234, phOffset + 4);  // p_offset
             buf.writeUInt32LE(0x08000000, phOffset + 8);
+            buf.writeUInt32LE(0x08004000, phOffset + 12);
             buf.writeUInt32LE(0x100, phOffset + 16);
             buf.writeUInt32LE(0x180, phOffset + 20);
             buf.writeUInt32LE(5, phOffset + 24);
@@ -194,6 +240,7 @@ suite('ELF Parser Test Suite', () => {
             const result = parseElf32(buf);
             assert.strictEqual(result.segments.length, 1);
             assert.strictEqual(result.segments[0].offset, 0x234);
+            assert.strictEqual(result.segments[0].paddr, 0x08004000);
         });
 
         test('should throw for non-ELF file', () => {

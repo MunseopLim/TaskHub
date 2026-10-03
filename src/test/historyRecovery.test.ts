@@ -10,6 +10,23 @@ import {
 } from '../providers/historyProvider';
 
 suite('이전 세션의 실행 기록 복구', () => {
+    test('상한 축소는 실행 중 기록과 완료 시 붙는 결과·입력·보고서를 보존한다', () => {
+        const running = { actionId: 'long', timestamp: 1, status: 'running' as const } as HistoryEntry;
+        const store = createStore([{ ...running, actionId: 'new', timestamp: 3 }, entry('done', 'success'), running]);
+        const provider = new HistoryProvider(store.context, { getMaxItems: () => 1 });
+        try {
+            provider.trimHistoryToMax();
+            assert.deepStrictEqual(provider.getHistory().map(item => item.actionId), ['new', 'long']);
+            provider.updateHistoryStatus('long', 1, 'failure', 'result', 100);
+            provider.setHistoryInputs('long', 1, { input: { value: 'Debug' } });
+            provider.setHistoryRunLog('long', 1, { workspaceFolderUri: 'file:///workspace', relativePath: '.taskhub/logs/long.log' });
+            const completed = provider.getHistory().find(item => item.actionId === 'long')!;
+            assert.strictEqual(completed.status, 'failure');
+            assert.strictEqual(completed.output, 'result');
+            assert.deepStrictEqual(completed.inputs, { input: { value: 'Debug' } });
+            assert.strictEqual(completed.runLog?.relativePath, '.taskhub/logs/long.log');
+        } finally { provider.dispose(); }
+    });
     function createStore(initial: HistoryEntry[]) {
         const data = new Map<string, unknown>([['taskhub.actionHistory', initial]]);
         const writes: HistoryEntry[][] = [];

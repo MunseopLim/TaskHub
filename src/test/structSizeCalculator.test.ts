@@ -2,6 +2,27 @@ import * as assert from 'assert';
 import { StructSizeCalculator, TypeConfigFile, StructSizeResult } from '../structSizeCalculator';
 
 suite('StructSizeCalculator Test Suite', () => {
+    test('전방 선언·포인터·주석 뒤의 실제 정의를 찾아 크기를 계산한다', () => {
+        const lines = [
+            '// struct Header { int wrong; };',
+            'struct Header;',
+            'struct Header *hdr;',
+            'struct Other { int x; int y; };',
+            'struct Header /* tag */',
+            '{ char a; };',
+        ];
+        assert.strictEqual(StructSizeCalculator.findStructDefinition(lines, 'Header'), 4);
+        const result = new StructSizeCalculator().calculateStructSize('Header', lines, 4);
+        assert.strictEqual(result.success, true, result.error);
+        assert.strictEqual(result.totalSize, 1);
+        assert.strictEqual(StructSizeCalculator.findStructDefinition(['struct Node;', 'struct Node *p;'], 'Node'), -1);
+        assert.strictEqual(StructSizeCalculator.findStructDefinition([
+            "const int MASK = 0xFF'00;", 'struct Packet { char a; };', "const int NEXT = 1'000;",
+        ], 'Packet'), 1);
+        const packed = ["const int MASK = 0xFF'00;", '#pragma pack(1)',
+            'struct Packet { char a; int b; };', "const int NEXT = 1'000;"];
+        assert.strictEqual(new StructSizeCalculator().calculateStructSize('Packet', packed, 2).success, false);
+    });
     let calculator: StructSizeCalculator;
 
     setup(() => {

@@ -538,7 +538,7 @@ export function isInsideWorkspaceRoots(resolvedPath: string, workspaceRoots: str
             try {
                 const canonicalRoot = canonicalizeForContainment(root);
                 const rel = path.relative(canonicalRoot, canonicalResolved);
-                return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+                return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
             } catch {
                 // 연결이 끊기거나 읽을 수 없는 root 하나가 다른 정상 root까지 막지 않는다.
                 return false;
@@ -2402,6 +2402,13 @@ export function assertWindowsBatchArgumentsSafe(
     try {
         if (raw) {
             if (args.length === 0) { return; }
+            const unsafe = args.find(arg => CMD_METACHARACTERS.test(arg));
+            // A raw script can invoke a batch file after a separator, through
+            // a block or a dynamic call. The first token cannot prove args safe.
+            const syntax = command.replace(/'(?:''|[^'])*'|"(?:`.|[^"`])*"/g, '');
+            if (unsafe && /[;&|<>{}()\r\n]|\$|`/.test(syntax)) {
+                throw new WindowsBatchArgumentError('<compound shell>', unsafe);
+            }
             executable = tokenizeCommandLine(command.trim())[0] ?? '';
             checked = args;
         } else {
@@ -2409,7 +2416,8 @@ export function assertWindowsBatchArgumentsSafe(
             executable = merged.executable;
             checked = merged.args;
         }
-    } catch {
+    } catch (error) {
+        if (error instanceof WindowsBatchArgumentError) { throw error; }
         return;
     }
     if (!executable || !checked.some(arg => CMD_METACHARACTERS.test(arg))) { return; }
@@ -2706,10 +2714,23 @@ export function quotePosixArgument(value: string): string {
  * `args` 는 뒤에 **인용해서** 붙인다. 공백이 든 경로를 안전하게 넘기는 통로가
  * 그대로 필요하기 때문이다 — raw 문자열 안에 그런 값을 보간하면 셸이 쪼갠다.
  */
-export function buildRawShellCommandLine(command: string, args: string[]): string {
+export function buildRawShellCommandLine(command: string, args: string[], shell = '/bin/sh'): string {
     const trimmed = command.trim();
     if (!args || args.length === 0) { return trimmed; }
-    return `${trimmed} ${args.map(arg => quotePosixArgument(arg)).join(' ')}`;
+    const name = path.basename(shell).toLowerCase().replace(/\.exe$/, '');
+    let quote: (value: string) => string;
+    if (['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name)) {
+        quote = quotePosixArgument;
+    } else if (name === 'fish') {
+        quote = value => `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+    } else if (name === 'pwsh' || name === 'powershell') {
+        quote = quotePowerShellArgument;
+    } else {
+        const error = new Error(`Cannot safely quote arguments for shell '${name}'.`);
+        error.name = 'UnsupportedRawShellArgumentsError';
+        throw error;
+    }
+    return `${trimmed} ${args.map(quote).join(' ')}`;
 }
 
 /** {@link buildRawShellCommandLine} 의 PowerShell 판. */

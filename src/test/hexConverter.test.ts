@@ -9,6 +9,18 @@ import {
 } from '../hexConverterUtils';
 
 suite('Hex/Text 변환 순수 로직', () => {
+    test('한 자리 0x 토큰은 각각 한 바이트이고 홀수 토큰을 이어 붙이지 않는다', () => {
+        for (const input of ['0x1, 0x2', '0X0:0xf', '0x01 0x2']) {
+            const result = parseHexConverterInput(input, 2);
+            assert.strictEqual(result.ok, true, input);
+            if (result.ok) { assert.strictEqual(result.bytes.length, 2); }
+        }
+        assert.deepStrictEqual(parseHexConverterInput('0x1, 0x2', 2), { ok: true, bytes: Uint8Array.of(1, 2) });
+        for (const input of ['A B', '0x123 0x456', '1 23']) {
+            assert.deepStrictEqual(parseHexConverterInput(input, 10), { ok: false, reason: 'odd-digits' }, input);
+        }
+        assert.deepStrictEqual(parseHexConverterInput('0x1 0x2', 1), { ok: false, reason: 'too-large' });
+    });
     test('compact, 구분자, 0x 표기를 같은 바이트로 읽는다', () => {
         for (const input of ['48656c6c6f', '48 65 6c 6c 6f', '0x48, 0x65-0x6c_6c:6f']) {
             const result = parseHexConverterInput(input, 1024);

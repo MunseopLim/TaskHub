@@ -284,7 +284,14 @@ export class MacroExpander {
      */
     static parseMacroDefinitions(text: string): Map<string, MacroDefinition> {
         const macros = new Map<string, MacroDefinition>();
-        const lines = text.split('\n');
+        // C preprocessing removes comments before parsing directives. Preserve
+        // newlines and quoted literals so URLs and comment markers in strings survive.
+        const lines = text.replace(/\\\r?\n/g, '').replace(
+            /"(?:\\.|[^"\\])*"|(?<!\w)(?:u8|[uUL])?'(?:\\.|[^'\\])*'|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g,
+            token => token.startsWith('/*') || token.startsWith('//')
+                ? token.replace(/[^\r\n]/g, ' ')
+                : token
+        ).split('\n');
 
         for (const line of lines) {
             const trimmed = line.trim();
@@ -304,13 +311,7 @@ export class MacroExpander {
 
             if (match) {
                 const name = match[1];
-                let value = match[2].trim();
-
-                // Remove trailing comments
-                const commentIndex = value.indexOf('//');
-                if (commentIndex !== -1) {
-                    value = value.substring(0, commentIndex).trim();
-                }
+                const value = match[2].trim();
 
                 macros.set(name, {
                     name,

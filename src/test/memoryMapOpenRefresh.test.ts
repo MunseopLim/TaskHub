@@ -16,6 +16,7 @@ import {
     loadMemoryMapConfigForResource,
 } from '../extension';
 import { filePathIdentityKey } from '../pathIdentity';
+import { parseElf32 } from '../elfParser';
 import { buildElf32WithSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
 
 type MessageHandler = (message: any) => Promise<void> | void;
@@ -186,6 +187,41 @@ suite('Memory Map 빠른 열기 · Refresh', () => {
         (vscode.window as any).showWarningMessage = originalWarning;
         (vscode.window as any).showInformationMessage = originalInformation;
         fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    test('ELF 로드 주소가 Flash 합계·영역 행·Hex 파일 범위에 함께 반영된다', () => {
+        const elf = buildElf32WithSymbols();
+        const sections = parseElf32(elf).sections;
+        const text = sections.find(section => section.name === '.text')!;
+        const data = sections.find(section => section.name === '.data')!;
+        const phoff = elf.length;
+        const buffer = Buffer.concat([elf, Buffer.alloc(64)]);
+        buffer.writeUInt32LE(phoff, 28);
+        buffer.writeUInt16LE(32, 42);
+        buffer.writeUInt16LE(2, 44);
+        for (const [index, section] of [text, data].entries()) {
+            const base = phoff + index * 32;
+            buffer.writeUInt32LE(1, base);
+            buffer.writeUInt32LE(section.offset!, base + 4);
+            buffer.writeUInt32LE(section.addr, base + 8);
+            buffer.writeUInt32LE(index === 0 ? section.addr : 0x08000500, base + 12);
+            buffer.writeUInt32LE(index === 0 ? 0x500 : section.size, base + 16);
+            buffer.writeUInt32LE(index === 0 ? 0x500 : 0x280, base + 20);
+            buffer.writeUInt32LE(index === 0 ? 5 : 6, base + 24);
+        }
+        const filePath = path.join(tempDir, 'load-data.elf');
+        fs.writeFileSync(filePath, buffer);
+        assert.strictEqual(openMemoryMapFromUri(
+            { subscriptions: [] } as unknown as vscode.ExtensionContext, vscode.Uri.file(filePath)
+        ), true);
+        const html = panelRegistry.getHtml(filePath)!;
+        const totals = html.match(/const CURRENT_TOTALS = Object.freeze\((\{[^\n]+\})\);/)![1];
+        assert.deepStrictEqual(JSON.parse(totals.replace(/(flash|ram):/g, '"$1":')), { flash: 0x580, ram: 0x280 });
+        assert.ok(html.includes('.data [load]'));
+        const loadEntry = panelRegistry.getEntries(filePath)!.find(entry => entry.name === '.data [load]')!;
+        assert.strictEqual(loadEntry.addr, 0x08000500);
+        const loadTarget = panelRegistry.getHexTargets(filePath)!.find(target => target.label === '.data [load]')!;
+        assert.deepStrictEqual(loadTarget.fileRange, { kind: 'file', offset: data.offset, size: data.size });
     });
 
     test('Explorer URI를 대화상자 없이 열고 History를 한 번 기록한다', () => {

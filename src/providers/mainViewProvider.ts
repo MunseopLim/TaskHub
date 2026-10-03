@@ -262,7 +262,8 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
         private readonly loadActions: () => ActionItem[],
         private readonly loadSourceWarnings: () => readonly string[] = () => [],
         private readonly pinnedActionStore?: PinnedActionStore,
-        private readonly inputProfileStore?: InputProfileStore
+        private readonly inputProfileStore?: InputProfileStore,
+        private readonly loadSourceErrors: () => readonly { filePath: string; message: string }[] = () => []
     ) {}
 
     refresh(): void {
@@ -334,7 +335,16 @@ export class MainViewProvider implements vscode.TreeDataProvider<Action | Folder
         // title) — a permanent row cost the list its top line and, more
         // importantly, made the tree never empty, which suppressed the
         // welcome view entirely.
-        const actionItems = [...this.createPinnedItems(actionsJson), ...this.createActionItems(actionsJson)];
+        const errorItems = this.loadSourceErrors().map(error => {
+            const item = new vscode.TreeItem(t('actions.json 로드 실패', 'Failed to load actions.json'));
+            item.description = error.filePath;
+            item.tooltip = error.message;
+            item.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('charts.red'));
+            item.contextValue = 'actionsLoadError';
+            item.command = { command: 'vscode.open', title: t('actions.json 열기', 'Open actions.json'), arguments: [vscode.Uri.file(error.filePath)] };
+            return item;
+        });
+        const actionItems = [...errorItems, ...this.createPinnedItems(actionsJson), ...this.createActionItems(actionsJson)];
         const sourceWarnings = this.loadSourceWarnings();
         if (sourceWarnings.length === 0) {
             return Promise.resolve(actionItems);

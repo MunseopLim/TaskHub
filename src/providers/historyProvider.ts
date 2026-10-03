@@ -871,7 +871,13 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
         const maxItems = this.getMaxItems();
         const history = this.getHistory();
         if (history.length > maxItems) {
-            history.splice(maxItems);
+            let excess = history.length - maxItems;
+            for (let index = history.length - 1; index >= 0 && excess > 0; index--) {
+                if (history[index].status !== 'running') {
+                    history.splice(index, 1);
+                    excess--;
+                }
+            }
             void this.saveHistory(history);
             this.refresh();
         }

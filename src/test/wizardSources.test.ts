@@ -1,11 +1,21 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import * as vscode from 'vscode';
 import { ActionItem } from '../schema';
 import {
     collectTakenActionIds,
     deriveActionIdFromTitle,
     validateActionIdInput,
     wizardTakenActionIds,
+    loadAllActions,
+    invalidateActionsCache,
+    currentActionSourceLoadErrors,
+    executeActionPipeline,
 } from '../extension';
+import { MainViewProvider } from '../providers/mainViewProvider';
+import { quoteForCommandTokenizer } from '../pipelineUtils';
 
 /**
  * 마법사가 보는 "이미 쓰인 ID" 범위 (0.6.32).
@@ -165,5 +175,56 @@ suite('마법사가 보는 기존 ID 범위', () => {
                 '자동 도출만 막고 수동 입력을 열어 두면 같은 충돌이 그대로 생긴다');
             assert.strictEqual(validateActionIdInput('brand-new', taken), undefined);
         });
+    });
+});
+
+suite('multi-root 액션 파일 오류 격리', () => {
+    test('손상된 폴더의 오류를 표시하며 정상 폴더의 액션을 실행하고 복구 후 다시 읽는다', async function () {
+        this.timeout(15000);
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-multi-root-'));
+        const good = path.join(root, 'good');
+        const bad = path.join(root, 'bad');
+        for (const folder of [good, bad]) { fs.mkdirSync(path.join(folder, '.vscode'), { recursive: true }); }
+        const goodActions: ActionItem[] = [{ id: 'healthy', title: 'Healthy', action: { description: 'Healthy', tasks: [
+            { id: 'probe', type: 'command', command: quoteForCommandTokenizer(process.execPath),
+                args: ['-e', 'process.stdout.write(process.cwd())'], passTheResultToNextTask: true },
+            { id: 'write', type: 'writeFile', path: 'marker.txt', content: '${probe.output}' },
+        ] } }];
+        fs.writeFileSync(path.join(good, '.vscode', 'actions.json'), JSON.stringify(goodActions));
+        const brokenPath = path.join(bad, '.vscode', 'actions.json');
+        fs.writeFileSync(brokenPath, '{ invalid JSON');
+        const descriptor = Object.getOwnPropertyDescriptor(vscode.workspace, 'workspaceFolders')!;
+        const getConfiguration = vscode.workspace.getConfiguration;
+        const context = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [],
+            globalState: { get: (_key: string, fallback: unknown) => fallback } } as unknown as vscode.ExtensionContext;
+        let provider: MainViewProvider | undefined;
+        try {
+            Object.defineProperty(vscode.workspace, 'workspaceFolders', { configurable: true, value: [good, bad].map((folder, index) => ({
+                uri: vscode.Uri.file(folder), name: path.basename(folder), index,
+            })) });
+            (vscode.workspace as any).getConfiguration = (section: string, resource?: vscode.ConfigurationScope) => section === 'taskhub'
+                ? { get: (key: string, fallback: unknown) => key === 'builtinActions' ? 'never' : fallback }
+                : getConfiguration(section, resource);
+            invalidateActionsCache();
+            const actions = loadAllActions(context);
+            assert.deepStrictEqual(actions.map(action => action.id), ['healthy']);
+            assert.strictEqual(currentActionSourceLoadErrors()[0].filePath, brokenPath);
+            provider = new MainViewProvider(context, () => loadAllActions(context), undefined, undefined, undefined, currentActionSourceLoadErrors);
+            const rows = await provider.getChildren();
+            assert.ok(rows.some(row => row.contextValue === 'actionsLoadError' && row.command?.arguments?.[0].fsPath === brokenPath));
+            assert.ok(rows.some(row => row.label === 'Healthy'));
+            await executeActionPipeline(actions[0].action!, context, 'healthy', good, [good, bad]);
+            assert.strictEqual(fs.realpathSync(fs.readFileSync(path.join(good, 'marker.txt'), 'utf8')), fs.realpathSync(good));
+            fs.writeFileSync(brokenPath, '[]');
+            invalidateActionsCache();
+            assert.strictEqual(loadAllActions(context).length, 1);
+            assert.strictEqual(currentActionSourceLoadErrors().length, 0);
+        } finally {
+            provider?.dispose();
+            Object.defineProperty(vscode.workspace, 'workspaceFolders', descriptor);
+            (vscode.workspace as any).getConfiguration = getConfiguration;
+            invalidateActionsCache();
+            fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        }
     });
 });

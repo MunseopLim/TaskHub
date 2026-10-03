@@ -7,13 +7,43 @@ import {
     wrapIfArray, unwrapIfRootArray, ROOT_ARRAY_KEY, getWebviewContent,
     isSupportedJsonRoot, unsupportedJsonRootMessage,
 } from '../jsonEditor';
-import { assertSupportedJsonNumbers, parseJsonEditorText, UnsupportedJsonNumberError } from '../jsonEditorUtils';
+import { assertSupportedJsonNumbers, parseJsonEditorText, serializeJsonEditorText, UnsupportedJsonNumberError } from '../jsonEditorUtils';
 
 function readSourceForRegex(filePath: string): string {
     return fs.readFileSync(filePath, 'utf-8').replace(/\r\n/g, '\n');
 }
 
 suite('JsonEditorUtils Test Suite', () => {
+    suite('원문 형식을 보존하는 JSON 저장', () => {
+        test('한 값만 바꿔도 CRLF·BOM·정수 키 순서·숫자 표기·끝 줄바꿈을 유지한다', () => {
+            const original = '\uFEFF{\r\n\t"10": 1e2,\r\n\t"2": { "value": "old" },\r\n\t"0": -0\r\n}';
+            const data = parseJsonEditorText(original) as Record<string, any>;
+            data['2'].value = 'new';
+            assert.strictEqual(serializeJsonEditorText(original, data), original.replace('"old"', '"new"'));
+        });
+        test('minified 배열의 셀 편집은 한 토큰만 바꾼다', () => {
+            const original = '[{"10":1,"2":2},{"text":"a\\r\\nb"}]\n';
+            const data = JSON.parse(original);
+            data[0]['2'] = 3;
+            assert.strictEqual(serializeJsonEditorText(original, data), original.replace('"2":2', '"2":3'));
+        });
+        test('키·행 추가와 삭제도 원래 순서와 문서 형식을 따른다', () => {
+            const original = '{"10":1,"2":2,"rows":[1,2]}';
+            const data = { '10': 1, '2': 2, rows: [2], added: { text: '한글' } };
+            const saved = serializeJsonEditorText(original, data);
+            assert.strictEqual(saved, '{"10":1,"2":2,"rows":[2],"added":{"text":"한글"}}');
+            assert.deepStrictEqual(JSON.parse(saved), data);
+        });
+        test('빈 값·이스케이프 키·중복 키와 배열을 JSON 의미대로 저장한다', () => {
+            const original = '{ "a":1, "a":2, "\\u0062":[], "__proto__":null }';
+            const data = JSON.parse(original);
+            data.a = 3;
+            data.b = [null, true, false, { k: '"\\\n' }];
+            const saved = serializeJsonEditorText(original, data);
+            assert.ok(saved.startsWith('{ "a":1, "a":3,'));
+            assert.deepStrictEqual(JSON.parse(saved), data);
+        });
+    });
     suite('숫자 원문 손실 차단', () => {
         test('안전 정수 경계와 값이 같은 십진 표기·숫자 문자열을 보존한다', () => {
             const raw = '{"rows":[9007199254740991,-9007199254740991,1.2300e2,0.1,5e-324,"9007199254740993","1e400"]}';

@@ -2,6 +2,25 @@ import * as assert from 'assert';
 import { MacroExpander, MacroDefinition } from '../macroExpander';
 
 suite('MacroExpander Test Suite', () => {
+    test('C 블록 주석을 제거하고 문자열과 참조 매크로를 보존한다', () => {
+        const macros = MacroExpander.parseMacroDefinitions([
+            '/* #define FAKE 99 */',
+            '#define X 0x0800UL /*!< CMSIS constant */',
+            '#define Y (X /* base */ + 4) // next address',
+            '#define URL "https://example.com/a/*b*/"',
+            '#define Z (Y + \\',
+            '    2)',
+            "#define SEPARATED 0xFF'00 /* suffix */",
+        ].join('\n'));
+        assert.strictEqual(macros.has('FAKE'), false);
+        assert.strictEqual(macros.get('URL')?.value, '"https://example.com/a/*b*/"');
+        assert.strictEqual(macros.get('SEPARATED')?.value, "0xFF'00");
+        for (const [name, expected] of [['X', 2048], ['Y', 2052], ['Z', 2054]] as const) {
+            const result = new MacroExpander().expandMacro(name, macros);
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(MacroExpander.evaluateToSafeInteger(result.expandedValue), expected, name);
+        }
+    });
     let expander: MacroExpander;
 
     setup(() => {

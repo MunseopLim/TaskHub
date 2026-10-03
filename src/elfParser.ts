@@ -106,6 +106,8 @@ export interface ElfSegment {
     /** ELF `p_offset`. */
     offset: number;
     vaddr: number;
+    /** ELF `p_paddr`: load address used by embedded linker scripts. */
+    paddr?: number;
     memsz: number;
     filesz: number;
     flags: number;
@@ -249,6 +251,7 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
             const pType = read32(base);
             const offset = read32(base + 4);
             const vaddr = read32(base + 8);
+            const paddr = read32(base + 12);
             const filesz = read32(base + 16);
             const memsz = read32(base + 20);
             const flags = read32(base + 24);
@@ -257,6 +260,7 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
                 type: pType,
                 offset,
                 vaddr,
+                paddr,
                 memsz,
                 filesz,
                 flags,
@@ -450,28 +454,70 @@ export function resolveElfFileRange(
     return { kind: 'unavailable', reason: 'unmapped' };
 }
 
-export function classifySections(sections: ElfSection[]): { flash: ElfSection[]; ram: ElfSection[] } {
+export function classifySections(
+    sections: ElfSection[], segments: ElfSegment[] = [], regions: MemoryRegion[] = []
+): { flash: ElfSection[]; ram: ElfSection[] } {
     const flash: ElfSection[] = [];
     const ram: ElfSection[] = [];
 
     for (const sec of sections) {
         if (!sec.isAlloc || sec.size === 0) { continue; }
 
+        const region = regions.find(candidate => sec.addr >= candidate.origin
+            && sec.addr + sec.size <= candidate.origin + candidate.size);
+        const loadAddress = sectionLoadAddress(sec, segments);
+        const isInitTable = [14, 15, 16].includes(sec.type);
+        const inFlash = region && /flash|rom/i.test(region.name);
+        const inRam = region && /ram/i.test(region.name);
         if (sec.isNoBits) {
             // .bss-like: RAM only (no file content)
             ram.push(sec);
-        } else if (sec.isWrite) {
-            // Writable with content (e.g., .data): VMA is in RAM.
-            // LMA may be in Flash but we only have VMA from section headers.
-            // Classify by VMA to stay consistent with computeMemoryUsage.
+        } else if (inRam || (!inFlash && (loadAddress !== undefined || (sec.isWrite && !isInitTable)))) {
+            // Prefer the linker region and a distinct load address to flag heuristics.
             ram.push(sec);
         } else {
             // Read-only or executable (e.g., .text, .rodata): Flash only
             flash.push(sec);
         }
+        if (loadAddress !== undefined) {
+            flash.push({ ...sec, name: `${sec.name} [load]`, addr: loadAddress,
+                isWrite: false, isExec: false, flags: sec.flags & ~(SHF_WRITE | SHF_EXECINSTR) });
+        }
     }
 
     return { flash, ram };
+}
+
+function sectionLoadAddress(section: ElfSection, segments: ElfSegment[]): number | undefined {
+    if (!section.isAlloc || section.isNoBits || section.size <= 0 || section.offset === undefined) { return undefined; }
+    const segment = segments.find(candidate => candidate.type === PT_LOAD && candidate.paddr !== undefined
+        && section.addr >= candidate.vaddr && section.addr + section.size <= candidate.vaddr + candidate.filesz
+        && section.offset === candidate.offset + section.addr - candidate.vaddr);
+    if (!segment || segment.paddr === segment.vaddr) { return undefined; }
+    const loadAddress = segment.paddr! + section.addr - segment.vaddr;
+    return Number.isSafeInteger(loadAddress) && loadAddress >= 0 ? loadAddress : undefined;
+}
+
+/** File-backed sections can occupy both a run address and a different load address. */
+function sectionLoadEntries(
+    sections: ElfSection[], region: MemoryRegion, segments: ElfSegment[], fileSize?: number
+): MemoryUsageEntry[] {
+    const entries: MemoryUsageEntry[] = [];
+    for (let index = 0; index < sections.length; index++) {
+        const section = sections[index];
+        const loadAddress = sectionLoadAddress(section, segments);
+        if (loadAddress === undefined) { continue; }
+        const address = Math.max(loadAddress, region.origin);
+        const end = Math.min(loadAddress + section.size, region.origin + region.size);
+        if (end <= address) { continue; }
+        entries.push({
+            name: `${section.name} [load]`, addr: address, size: end - address, type: 'LOAD', object: section.name,
+            fileRange: fileSize === undefined ? undefined : resolveElfFileRange(
+                section.addr + address - loadAddress, end - address, sections, segments, fileSize, index
+            ),
+        });
+    }
+    return entries;
 }
 
 export function computeMemoryUsage(
@@ -503,6 +549,7 @@ export function computeMemoryUsage(
             }
         }
 
+        matchingSections.push(...sectionLoadEntries(sections, region, segments, fileSize));
         // Sort by address to compute free spaces (gaps between sections)
         const addrSorted = [...matchingSections].sort((a, b) => a.addr - b.addr);
         const freeSpaces: { addr: number; size: number }[] = [];
@@ -550,8 +597,13 @@ export function autoDetectRegions(segments: ElfSegment[], sections: ElfSection[]
     let ramIdx = 0;
 
     for (const seg of sorted) {
-        // Determine region type: executable or read-only → FLASH, writable → RAM
-        const isFlash = seg.isExec || !seg.isWrite;
+        const allocated = sections.filter(section => section.isAlloc && section.size > 0
+            && section.addr >= seg.vaddr && section.addr + section.size <= seg.vaddr + seg.memsz);
+        const readOnlyOrInit = allocated.length > 0 && allocated.every(section => !section.isNoBits
+            && (!section.isWrite || [14, 15, 16].includes(section.type)));
+        // Copied code/data runs in RAM. Writable initialization tables can stay in Flash.
+        const distinctLoad = seg.paddr !== undefined && seg.paddr !== seg.vaddr;
+        const isFlash = !distinctLoad && (seg.isExec || !seg.isWrite || readOnlyOrInit);
         let name: string;
         if (isFlash) {
             name = flashIdx === 0 ? 'FLASH' : `FLASH_${flashIdx}`;
@@ -567,6 +619,23 @@ export function autoDetectRegions(segments: ElfSegment[], sections: ElfSection[]
             origin: seg.vaddr,
             size: seg.memsz,
         });
+    }
+
+    for (const segment of loadSegments) {
+        if (segment.paddr === undefined || segment.paddr === segment.vaddr || segment.filesz <= 0) { continue; }
+        const start = segment.paddr;
+        const end = start + segment.filesz;
+        if (!Number.isSafeInteger(end) || start < 0) { continue; }
+        const flashRegion = regions.find(region => region.name.startsWith('FLASH')
+            && start <= region.origin + region.size && end >= region.origin);
+        if (flashRegion) {
+            const origin = Math.min(start, flashRegion.origin);
+            flashRegion.size = Math.max(end, flashRegion.origin + flashRegion.size) - origin;
+            flashRegion.origin = origin;
+        } else {
+            regions.push({ name: flashIdx === 0 ? 'FLASH' : `FLASH_${flashIdx}`, origin: start, size: segment.filesz });
+            flashIdx++;
+        }
     }
 
     return regions;
@@ -727,6 +796,7 @@ export function computeSymbolUsage(
             }
         }
 
+        entries.push(...sectionLoadEntries(sections, region, segments, fileSize));
         // Sort by address to compute free spaces
         const addrSorted = [...entries].sort((a, b) => a.addr - b.addr);
         const freeSpaces: { addr: number; size: number }[] = [];
@@ -799,7 +869,7 @@ export function generateTextReport(
     lines.push(`Memory Map: ${fileName}`);
     lines.push(`Entry Point: ${formatHex(entryPoint)}`);
     lines.push('');
-    lines.push(`Flash (Code + RO Data): ${formatSize(flashTotal)}`);
+    lines.push(`Flash (Code + RO Data + Load Data): ${formatSize(flashTotal)}`);
     lines.push(`RAM (Data + BSS):       ${formatSize(ramTotal)}`);
     lines.push('');
 
@@ -867,7 +937,7 @@ export function generateSummaryReport(
     lines.push('## Totals');
     lines.push('');
     if (memoryUsage.length > 0) {
-        lines.push(`- Flash (Code + RO Data): ${formatSize(flashTotal)}`);
+        lines.push(`- Flash (Code + RO Data + Load Data): ${formatSize(flashTotal)}`);
         lines.push(`- RAM (Data + BSS): ${formatSize(ramTotal)}`);
     }
     lines.push(`- Sections: ${sectionSummary.length}`);

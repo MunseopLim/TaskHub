@@ -318,6 +318,12 @@ npm run build && npm test
 `shell`에서도 `args`의 각 원소는 인용한 데이터로 붙습니다. **본문 안의 특정 위치를 대신 채우거나
 모든 명령에 나누어 전달하지 않습니다.**
 
+macOS/Linux의 일반 터미널 출력은 VS Code의 작업용 셸(automation profile, 없으면 기본 profile)을 사용하며,
+`sh`·`bash`·`zsh`·`dash`·`ksh`·`fish`·`pwsh`의 문법에 맞춰 인용합니다. 다른 셸에서는 `args`가 있으면 실행을 거절합니다.
+셸 본문만 사용하는 작업에는 이 제한이 없습니다. 캡처·파일·editor 출력과 one-shot은 `/bin/sh`를 사용합니다.
+Windows에서는 명령 연결·파이프·블록·동적 호출이 있는 복합 본문에 배치 파일 위험 문자가 든 `args`를 붙이지 않습니다.
+실행 대상을 확정할 수 없으므로 명령을 별도 태스크로 나누고 `command` 타입으로 전달하세요.
+
 ```json
 {
   "id": "afterVersion",

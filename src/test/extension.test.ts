@@ -68,6 +68,7 @@ import {
 	encodePowerShellScript,
 	wrapCommandForOneShot,
 	createShellExecution,
+    resolveRawTaskShellOptions,
 	filterConflictingItems,
 	findConflictingIds,
 	mergeActions,
@@ -5661,6 +5662,30 @@ suite('Extension Test Suite', () => {
 	});
 
 	suite('createShellExecution', () => {
+        test('raw 터미널의 프로필과 인용 문법을 함께 확정하고 sh에서 실제 argv를 보존한다', () => {
+            if (process.platform === 'win32') { return; }
+            const originalConfig = vscode.workspace.getConfiguration;
+            let profile = { path: '/bin/sh', args: [] as string[] };
+            (vscode.workspace as any).getConfiguration = (section: string, resource?: vscode.ConfigurationScope) => section === 'terminal.integrated'
+                ? { get: (key: string, fallback: unknown) => key.startsWith('automationProfile.') ? profile : fallback }
+                : originalConfig(section, resource);
+            try {
+                const args = ['', 'a b', "a\\b'c; echo INJECTED", 'line\nbreak'];
+                const command = quotePosixArgument(process.execPath) + ' -e ' + quotePosixArgument('process.stdout.write(JSON.stringify(process.argv.slice(1)))');
+                const execution = createShellExecution(command, args, {}, false, true).shellExecution as vscode.ShellExecution;
+                assert.strictEqual(execution.options?.executable, '/bin/sh');
+                const result = require('child_process').spawnSync('/bin/sh', [...execution.options!.shellArgs!, execution.commandLine!], { encoding: 'utf8' });
+                assert.strictEqual(result.status, 0, result.stderr);
+                assert.deepStrictEqual(JSON.parse(result.stdout), args);
+                profile = { path: '/custom/fish', args: ['-l'] };
+                const fish = createShellExecution('echo', ["a\\b'c"], {}, false, true).shellExecution as vscode.ShellExecution;
+                assert.strictEqual(fish.commandLine, "echo 'a\\\\b\\'c'");
+                assert.deepStrictEqual(fish.options?.shellArgs, ['-l', '-c']);
+                assert.strictEqual(resolveRawTaskShellOptions({ executable: '/bin/bash' }).executable, '/bin/bash');
+                profile = { path: '/custom/nu', args: [] };
+                assert.throws(() => createShellExecution('echo', ['value'], {}, false, true), /args|인용/);
+            } finally { (vscode.workspace as any).getConfiguration = originalConfig; }
+        });
 		test('should create native ProcessExecution for a directly-launchable Windows command', () => {
 			const originalPlatform = process.platform;
 			try {
@@ -6698,6 +6723,16 @@ suite('Extension Test Suite', () => {
 	});
 
 	suite('mergeImportedActions', () => {
+        test('여러 하위 ID가 충돌해도 추가 개수는 음수가 아니고 제외된 폴더를 안내한다', () => {
+            const result = mergeImportedActions([{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }], [
+                { id: 'folder', title: 'Folder', children: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }, { id: 'unique', title: 'Unique' }] },
+                { id: 'new', title: 'New' },
+            ]);
+            assert.strictEqual(result.addedCount, 1);
+            assert.deepStrictEqual(result.skippedItems, ['folder']);
+            assert.deepStrictEqual(result.skipped, ['a', 'b']);
+            assert.deepStrictEqual(result.merged.map(item => item.id), ['a', 'b', 'new']);
+        });
 		test('should merge non-conflicting actions', () => {
 			const existing: ActionItem[] = [{ id: 'existing.1', title: 'Existing' }];
 			const imported: ActionItem[] = [{ id: 'imported.1', title: 'Imported' }];

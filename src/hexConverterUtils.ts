@@ -28,8 +28,18 @@ export interface HexValueRow {
  */
 export function parseHexConverterInput(input: string, maxBytes: number): HexInputResult {
     let digits = '';
+    let tokenDigits = '';
+    let prefixed = false;
     let tokenStart = true;
     let prefixNeedsDigit = false;
+    const finishToken = (): HexInputResult | undefined => {
+        if (prefixed && tokenDigits.length === 1) { tokenDigits = `0${tokenDigits}`; }
+        if (tokenDigits.length % 2 !== 0) { return { ok: false, reason: 'odd-digits' }; }
+        digits += tokenDigits;
+        tokenDigits = '';
+        prefixed = false;
+        return digits.length > maxBytes * 2 ? { ok: false, reason: 'too-large' } : undefined;
+    };
 
     for (let index = 0; index < input.length; index++) {
         const ch = input[index];
@@ -37,11 +47,14 @@ export function parseHexConverterInput(input: string, maxBytes: number): HexInpu
             if (prefixNeedsDigit) {
                 return { ok: false, reason: 'missing-byte', index };
             }
+            const error = finishToken();
+            if (error) { return error; }
             tokenStart = true;
             continue;
         }
         if (tokenStart && ch === '0' && (input[index + 1] === 'x' || input[index + 1] === 'X')) {
             prefixNeedsDigit = true;
+            prefixed = true;
             tokenStart = false;
             index++;
             continue;
@@ -49,10 +62,10 @@ export function parseHexConverterInput(input: string, maxBytes: number): HexInpu
         if (!/[0-9a-fA-F]/.test(ch)) {
             return { ok: false, reason: 'invalid-character', index };
         }
-        digits += ch;
+        tokenDigits += ch;
         prefixNeedsDigit = false;
         tokenStart = false;
-        if (digits.length > maxBytes * 2) {
+        if (digits.length + tokenDigits.length > maxBytes * 2) {
             return { ok: false, reason: 'too-large' };
         }
     }
@@ -60,9 +73,8 @@ export function parseHexConverterInput(input: string, maxBytes: number): HexInpu
     if (prefixNeedsDigit) {
         return { ok: false, reason: 'missing-byte', index: input.length };
     }
-    if (digits.length % 2 !== 0) {
-        return { ok: false, reason: 'odd-digits' };
-    }
+    const error = finishToken();
+    if (error) { return error; }
 
     const bytes = new Uint8Array(digits.length / 2);
     for (let index = 0; index < bytes.length; index++) {

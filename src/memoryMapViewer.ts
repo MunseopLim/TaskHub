@@ -604,7 +604,6 @@ function openMemoryMapPanelResult(
     }
 
     const { sections, entryPoint, symbols, segments, isLittleEndian } = parseResult;
-    const { flash, ram } = classifySections(sections);
     const sectionSummary = summarizeSections(sections, segments, buffer.length);
 
     // Auto-detect regions from program headers if no linker script provided
@@ -612,6 +611,7 @@ function openMemoryMapPanelResult(
     if (regions.length === 0 && segments.length > 0) {
         regions = autoDetectRegions(segments, sections);
     }
+    const { flash, ram } = classifySections(sections, segments, regions);
 
     // Use symbol-level detail when symbols available, otherwise section-level
     const memoryUsage = regions.length > 0

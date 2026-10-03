@@ -23,6 +23,19 @@ import { t } from '../i18n';
  * 그 동작을 실제로 실행하는 테스트는 하나도 없었다. 여기서 실행한다.
  */
 suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
+    test('실제 저장 메시지가 CRLF·정수 키 순서·minified 형식을 바이트 단위로 보존한다', async () => {
+        for (const original of ['{\r\n  "10": 1,\r\n  "2": [{"value":"old"}]\r\n}', '{"10":1,"2":[{"value":"old"}]}\n']) {
+            const filePath = path.join(tempDir, 'format.json');
+            fs.writeFileSync(filePath, original);
+            const fake = installFakePanel();
+            await openJsonEditorFile(makeContext(), filePath);
+            const data = JSON.parse(original);
+            data['2'][0].value = 'new';
+            await fake.send({ command: 'save', data, seq: 1 });
+            assert.deepStrictEqual(fs.readFileSync(filePath), Buffer.from(original.replace('"old"', '"new"')));
+            fake.disposePanel();
+        }
+    });
     this.timeout(20000);
     // tsc의 import * namespace는 getter-only다. 실제 CommonJS 모듈을 바꿔야
     // 제품 코드의 namespace getter도 모킹한 함수를 조회한다.
@@ -911,7 +924,7 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             assert.strictEqual(chunkLengths[0], JSON_EDITOR_SAVE_HASH_CHUNK_SIZE);
             assert.ok(chunkLengths.every(length => length <= JSON_EDITOR_SAVE_HASH_CHUNK_SIZE));
 
-            const external = (JSON.stringify(saved, null, 2) + '\n')
+            const external = originalReadFile(filePath, 'utf8')
                 .replace('"id": 1,', '"id": 9007199254740993,')
                 .replace('"label": "9007199254740993"', '"label": "1"');
             fs.writeFileSync(filePath, external);
@@ -1296,7 +1309,7 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
         }
         assert.strictEqual(fake.posted.at(-1)?.success, true);
         const before = fs.statSync(filePath, { bigint: true });
-        const external = (JSON.stringify(saved, null, 2) + '\n')
+        const external = fs.readFileSync(filePath, 'utf8')
             .replace('"id": 1,', '"id": 9007199254740993,')
             .replace('"label": "9007199254740993"', '"label": "1"');
         fs.writeFileSync(filePath, external);

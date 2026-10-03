@@ -773,3 +773,130 @@ export function resolveActiveDraftState(
     }
     return { snapshot: committed, data, valid: false, recoveryData: lastRecoverableDraft };
 }
+
+interface JsonTextNode {
+    start: number;
+    end: number;
+    kind: 'object' | 'array' | 'value';
+    children: JsonTextNode[];
+    properties: { key: string; node: JsonTextNode }[];
+    value?: unknown;
+}
+
+/** Preserve untouched JSON tokens, property order, whitespace, BOM and final newline. */
+export function serializeJsonEditorText(original: string, data: unknown): string {
+    assertSupportedJsonNumbers(data);
+    const eol = original.includes('\r\n') ? '\r\n' : '\n';
+    const multiline = /[\r\n]/u.test(stripUtf8Bom(original).trim());
+    const indent = original.match(/^[ \t]+(?=\S)/mu)?.[0] ?? '  ';
+    let root: JsonTextNode | undefined;
+    try { parseJsonEditorText(original); } catch (error) {
+        if (!(error instanceof SyntaxError)) { throw error; }
+        const bom = original.startsWith(UTF8_BOM) ? UTF8_BOM : '';
+        const finalEol = original.endsWith('\n') ? eol : '';
+        return bom + JSON.stringify(data, null, indent).replace(/\n/g, eol) + finalEol;
+    }
+    // Walk quoted strings instead of repeating a regexp branch: multi-MB
+    // strings can exhaust V8's regexp stack even when JSON.parse accepts them.
+    function* tokens(): Generator<{ value: string; start: number; end: number }> {
+        let index = 0;
+        while (index < original.length) {
+            const character = original[index];
+            if (/\s/u.test(character)) { index++; continue; }
+            const start = index++;
+            if (character === '"') {
+                while (index < original.length) {
+                    if (original[index] === '\\') { index += 2; }
+                    else if (original[index++] === '"') { break; }
+                }
+            } else if (!'{}[]:,'.includes(character)) {
+                while (index < original.length && !/[\s,}\]]/u.test(original[index])) { index++; }
+            }
+            yield { value: original.slice(start, index), start, end: index };
+        }
+    }
+    const frames: { node: JsonTextNode; key?: string; expectsKey: boolean }[] = [];
+    for (const token of tokens()) {
+        const value = token.value;
+        const frame = frames[frames.length - 1];
+        if (value === ':') { continue; }
+        if (value === ',') {
+            if (frame) { frame.expectsKey = frame.node.kind === 'object'; }
+            continue;
+        }
+        if (value === '}' || value === ']') {
+            frames.pop()!.node.end = token.end;
+            continue;
+        }
+        if (frame?.expectsKey) {
+            frame.key = JSON.parse(value) as string;
+            frame.expectsKey = false;
+            continue;
+        }
+        const node: JsonTextNode = {
+            start: token.start, end: token.end,
+            kind: value === '{' ? 'object' : value === '[' ? 'array' : 'value',
+            children: [], properties: [],
+        };
+        if (frame?.node.kind === 'object') {
+            frame.node.properties.push({ key: frame.key!, node });
+        } else if (frame) {
+            frame.node.children.push(node);
+        } else {
+            root = node;
+        }
+        if (node.kind === 'value') {
+            node.value = JSON.parse(value);
+        } else {
+            frames.push({ node, expectsKey: node.kind === 'object' });
+        }
+    }
+    const render = (node: JsonTextNode | undefined, value: unknown, level: number): string => {
+        if (node?.kind === 'value' && Object.is(node.value, value)) {
+            return original.slice(node.start, node.end);
+        }
+        const isObject = value !== null && typeof value === 'object' && !Array.isArray(value);
+        const keys = isObject ? Object.keys(value as Record<string, unknown>) : [];
+        const oldKeys = node?.properties.map(property => property.key) ?? [];
+        const sameObject = node?.kind === 'object' && isObject
+            && new Set(oldKeys).size === keys.length && oldKeys.every(key => Object.hasOwn(value!, key));
+        const sameArray = node?.kind === 'array' && Array.isArray(value) && node.children.length === value.length;
+        if (node && (sameObject || sameArray)) {
+            let cursor = node.start;
+            let result = '';
+            const lastProperties = new Map(node.properties.map(property => [property.key, property.node]));
+            const children = sameArray ? node.children.map((child, index) => ({ child, value: value[index] }))
+                : node.properties.map(property => ({
+                    child: property.node,
+                    value: lastProperties.get(property.key) === property.node
+                        ? (value as Record<string, unknown>)[property.key] : undefined,
+                    preserve: lastProperties.get(property.key) !== property.node,
+                }));
+            for (const entry of children) {
+                result += original.slice(cursor, entry.child.start);
+                result += 'preserve' in entry && entry.preserve
+                    ? original.slice(entry.child.start, entry.child.end) : render(entry.child, entry.value, level + 1);
+                cursor = entry.child.end;
+            }
+            return result + original.slice(cursor, node.end);
+        }
+        if (!isObject && !Array.isArray(value)) {
+            const serialized = JSON.stringify(value);
+            if (serialized === undefined) { throw new TypeError('Unsupported JSON value'); }
+            return serialized;
+        }
+        const orderedKeys = [...new Set([...oldKeys.filter(key => Object.hasOwn(value!, key)), ...keys])];
+        const oldProperties = new Map(node?.properties.map(property => [property.key, property.node]) ?? []);
+        const parts = Array.isArray(value)
+            ? value.map((item, index) => render(node?.children[index], item, level + 1))
+            : orderedKeys.map(key => JSON.stringify(key) + (multiline ? ': ' : ':')
+                + render(oldProperties.get(key), (value as Record<string, unknown>)[key], level + 1));
+        const open = Array.isArray(value) ? '[' : '{';
+        const close = Array.isArray(value) ? ']' : '}';
+        if (parts.length === 0) { return open + close; }
+        if (!multiline) { return open + parts.join(',') + close; }
+        return open + eol + indent.repeat(level + 1) + parts.join(',' + eol + indent.repeat(level + 1))
+            + eol + indent.repeat(level) + close;
+    };
+    return original.slice(0, root!.start) + render(root, data, 0) + original.slice(root!.end);
+}

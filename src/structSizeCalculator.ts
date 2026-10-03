@@ -262,7 +262,7 @@ export class StructSizeCalculator {
     private buildSourcePacking(lines: string[]): readonly boolean[] {
         // Mask once for the whole immutable document, preserving line positions.
         const source = lines.join('\n').replace(
-            /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
+            /"(?:\\.|[^"\\])*"|(?<!\w)(?:u8|[uUL])?'(?:\\.|[^'\\])*'|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
             text => text.replace(/[^\n]/g, ' ')
         );
         let active = false;
@@ -990,11 +990,15 @@ export class StructSizeCalculator {
      */
     static findStructDefinition(lines: string[], structName: string): number {
         const escapedName = structName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const pattern = new RegExp(`\\b(struct|class|union)\\s+(?:alignas\\s*\\([^()]*\\)\\s*)?${escapedName}\\b`);
-
-        for (let i = 0; i < lines.length; i++) {
-            if (pattern.test(lines[i])) {
-                return i;
+        const source = lines.join('\n').replace(
+            /"(?:\\.|[^"\\])*"|(?<!\w)(?:u8|[uUL])?'(?:\\.|[^'\\])*'|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
+            token => token.replace(/[^\n]/g, ' ')
+        );
+        const pattern = new RegExp(`\\b(struct|class|union)\\s+(?:alignas\\s*\\([^()]*\\)\\s*)?${escapedName}\\b`, 'g');
+        for (const match of source.matchAll(pattern)) {
+            const rest = source.slice(match.index! + match[0].length);
+            if (/^\s*(?:final\s*)?(?::[^;{]*)?\{/u.test(rest)) {
+                return source.slice(0, match.index).split('\n').length - 1;
             }
         }
 

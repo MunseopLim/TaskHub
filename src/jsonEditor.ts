@@ -13,9 +13,8 @@ import {
     makeRecoveryStore,
     assertSupportedJsonNumbers,
     parseJsonEditorText,
-    stripUtf8Bom,
     UnsupportedJsonNumberError,
-    UTF8_BOM,
+    serializeJsonEditorText,
 } from './jsonEditorUtils';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 
@@ -599,18 +598,6 @@ function formatFileSize(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function detectIndent(text: string): string | number {
-    const match = text.match(/^[ \t]+/m);
-    if (!match) {
-        return 2;
-    }
-    const indent = match[0];
-    if (indent.includes('\t')) {
-        return '\t';
-    }
-    return indent.length;
-}
-
 export async function openJsonEditor(context: vscode.ExtensionContext, recordHistory?: JsonEditorHistoryRecorder) {
     const jsonFiles = t('JSON 파일', 'JSON Files');
     const fileUris = await showOpenDialogWithMemory(DIALOG_SCOPE.jsonEditor, {
@@ -798,15 +785,10 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
 
     let jsonData!: Record<string, unknown>;
     let isRootArray = false;
-    let detectedIndent: string | number = 2;
-    // BOM이 있던 파일은 저장할 때도 BOM을 유지한다(다른 도구가 BOM을 기대할 수 있다).
-    let fileHasBom = false;
     let content: string | undefined;
     if (!earlyError) {
         try {
             content = fs.readFileSync(filePath, 'utf-8');
-            // 디스크 JSON이 깨져 복구본으로 열어도 저장 때 원래 BOM을 유지한다.
-            fileHasBom = content.startsWith(UTF8_BOM);
         } catch (error: any) {
             earlyError = {
                 msg: t(`파일 읽기 실패 (${fileName}): ${error.message}`, `Failed to read file (${fileName}): ${error.message}`)
@@ -841,7 +823,6 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             const result = wrapIfArray(parsed);
             jsonData = result.wrapped;
             isRootArray = result.isRootArray;
-            detectedIndent = detectIndent(stripUtf8Bom(content));
             diskDataIfValid = jsonData;
             parseSucceeded = true;
         }
@@ -975,6 +956,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     // Kept separately from recovery mtime and the webview's dirty baseline:
     // choosing Keep in a watcher notification does not approve an overwrite.
     let diskBaseline = { contentHash: content === undefined ? undefined : jsonContentHash(content) };
+    let sourceText = content ?? '';
     currentSessionId = sessionId;
     currentEditRevision = 0;
     verifiedSaveTarget = undefined;
@@ -1124,7 +1106,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         rootArray: boolean;
         stat: fs.Stats;
         automatic: boolean;
-        bom: boolean;
+        sourceText: string;
     }>();
     const proposeReload = (
         result: ReturnType<typeof wrapIfArray>, content: string, reloadStat: fs.Stats, automatic = false
@@ -1134,7 +1116,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         const id = ++reloadCounter;
         pendingReloads.set(id, {
             contentHash: jsonContentHash(content), saveGeneration: successfulSaveGeneration,
-            rootArray: result.isRootArray, stat: reloadStat, automatic, bom: content.startsWith(UTF8_BOM)
+            rootArray: result.isRootArray, stat: reloadStat, automatic, sourceText: content
         });
         postToWebview({ command: 'loadData', data: result.wrapped, revision: currentEditRevision, loadId: id });
     };
@@ -1199,7 +1181,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     }
                     lastAcceptedReloadId = message.loadId;
                     isRootArray = loaded.rootArray;
-                    fileHasBom = loaded.bom;
+                    sourceText = loaded.sourceText;
                     diskBaseline = { contentHash: loaded.contentHash };
                     baselineMtimeMs = loaded.stat.mtimeMs;
                     baselineFileSize = loaded.stat.size;
@@ -1298,7 +1280,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                         try {
                             const saveData = unwrapIfRootArray(message.data, isRootArray);
                             assertSupportedJsonNumbers(saveData);
-                            const saveText = (fileHasBom ? UTF8_BOM : '') + JSON.stringify(saveData, null, detectedIndent) + '\n';
+                            const saveText = serializeJsonEditorText(sourceText, saveData);
                             await assertDiskNumbersBeforeSave(filePath);
                             // 확인하는 동안 다른 파일을 열었거나 패널을 닫았다면 쓰지 않는다.
                             // 이후의 baseline·recovery 전역은 이미 새 세션의 것이다.
@@ -1348,6 +1330,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                                 writeResult = writeJsonWithFingerprint(filePath, saveText, { contentHash: error.actualContentHash });
                             }
                             diskBaseline = { contentHash: writeResult.contentHash };
+                            sourceText = saveText;
                             successfulSaveGeneration++;
                         } catch (error: any) {
                             // 디스크에 쓰지 못했다 — 진짜 저장 실패.

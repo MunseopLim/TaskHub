@@ -427,6 +427,11 @@ export function findActionSourceConflicts(
 }
 
 let latestActionSourceConflicts: ActionSourceConflict[] = [];
+let latestActionSourceLoadErrors: { filePath: string; message: string }[] = [];
+
+export function currentActionSourceLoadErrors(): readonly { filePath: string; message: string }[] {
+    return latestActionSourceLoadErrors;
+}
 
 function describeActionSourceConflict(conflict: ActionSourceConflict): string {
     const locations = conflict.definitions
@@ -1177,7 +1182,7 @@ function refreshActionsAndCommands(context: vscode.ExtensionContext, mainViewPro
     mainViewProvider.refresh();
 }
 
-function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
+export function loadAllActions(context: vscode.ExtensionContext): ActionItem[] {
     if (cachedAllActions) {
         return cachedAllActions;
     }
@@ -1260,12 +1265,12 @@ interface EffectiveActionSources {
  * Resolve the sources above. Ordered lowest-priority first (bundled →
  * preset → workspace), matching how `loadAllActionsUncached` merges them.
  *
- * Throws whatever `loadAndValidateActions` throws for a *workspace* file —
- * a broken `.vscode/actions.json` must surface, and both callers want that.
+ * Workspace failures are strict by default (including the write wizard).
+ * The multi-root reader can isolate them and expose a row for each failed file.
  * A broken preset or bundled file only warns: neither is the user's to fix
  * from here, and losing them shouldn't block the workspace's own actions.
  */
-function collectEffectiveActionSources(context: vscode.ExtensionContext): EffectiveActionSources {
+function collectEffectiveActionSources(context: vscode.ExtensionContext, isolateWorkspaceErrors = false): EffectiveActionSources {
     const extensionLabel = t('확장 번들 media/actions.json', 'extension media/actions.json');
 
     // Load selected preset from settings
@@ -1295,9 +1300,21 @@ function collectEffectiveActionSources(context: vscode.ExtensionContext): Effect
     const workspaces = workspaceFolders.map(folder => {
         const workspaceJsonPath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
         const sourceLabel = `${folder.name}:.vscode/actions.json`;
+        let actions: ActionItem[];
+        try {
+            actions = loadAndValidateActions(workspaceJsonPath, { sourceLabel });
+        } catch (error: unknown) {
+            // The wizard stays strict: it must never overwrite an unreadable source.
+            if (!isolateWorkspaceErrors || workspaceFolders.length < 2) { throw error; }
+            const detail = error instanceof Error ? error.message : String(error);
+            const message = t(`${sourceLabel}을 불러오지 못했습니다: ${detail}`, `Failed to load ${sourceLabel}: ${detail}`);
+            latestActionSourceLoadErrors.push({ filePath: workspaceJsonPath, message });
+            outputChannel.appendLine(message);
+            actions = [];
+        }
         return {
             sourceLabel,
-            actions: loadAndValidateActions(workspaceJsonPath, { sourceLabel }),
+            actions,
             workspaceFolderPath: folder.uri.fsPath,
         };
     });
@@ -1364,7 +1381,8 @@ export function resolveWorkspaceActions(
 
 function loadAllActionsUncached(context: vscode.ExtensionContext): ActionItem[] {
     latestActionSourceConflicts = [];
-    const effective = collectEffectiveActionSources(context);
+    latestActionSourceLoadErrors = [];
+    const effective = collectEffectiveActionSources(context, true);
     const extensionActions = effective.bundled.actions;
     const presetActions = effective.preset?.actions ?? [];
 
@@ -6311,7 +6329,10 @@ async function executeActionPipelineForRun(
 
         const contextualized = wrapped.catch((error: unknown) => {
             if (error instanceof WindowsBatchArgumentError) {
-                error.message = t(
+                error.message = error.executable === '<compound shell>' ? t(
+                    `복합 shell 본문의 args ${JSON.stringify(previewBatchArgument(error.argument))}에 cmd.exe 특수 문자가 있어 실행하지 않았습니다. 뒤쪽 명령이나 동적 호출이 배치 파일일 수 있습니다. 명령을 별도 태스크로 나누고 command 타입으로 인자를 전달하세요.`,
+                    `Did not run compound shell script: args ${JSON.stringify(previewBatchArgument(error.argument))} contain cmd.exe special characters. A later command or dynamic call may invoke a batch file. Split commands into separate tasks and pass arguments with type 'command'.`
+                ) : t(
                     `배치 파일 '${error.executable}'의 인자 ${JSON.stringify(previewBatchArgument(error.argument))}에 cmd.exe 특수 문자(& | < > ^ % ! ")가 있어 실행하지 않았습니다. Windows가 배치 파일 인자를 다시 해석해 명령이 주입될 수 있습니다. 값을 확인하거나, 셸 문법이 필요하면 shell 타입으로 직접 인용하세요.`,
                     `Did not run batch file '${error.executable}': argument ${JSON.stringify(previewBatchArgument(error.argument))} contains cmd.exe special characters (& | < > ^ % ! "). Windows re-parses batch file arguments, which could inject commands. Check the value, or use a shell task and quote it yourself if you need shell syntax.`
                 );
@@ -8707,8 +8728,21 @@ export function createShellExecution(
                 displayCommand: line
             };
         }
-        const line = buildRawShellCommandLine(command, args);
-        return { shellExecution: new vscode.ShellExecution(line, options), displayCommand: line };
+        if (args.length === 0) {
+            return { shellExecution: new vscode.ShellExecution(command.trim(), options), displayCommand: command.trim() };
+        }
+        const shellOptions = resolveRawTaskShellOptions(options);
+        let line: string;
+        try {
+            line = buildRawShellCommandLine(command, args, shellOptions.executable);
+        } catch (error) {
+            if (!(error instanceof Error) || error.name !== 'UnsupportedRawShellArgumentsError') { throw error; }
+            throw new Error(t(
+                `작업용 셸 '${shellOptions.executable}'에는 args를 안전하게 인용할 수 없습니다. command 타입을 사용하거나 sh·bash·zsh·fish·pwsh 작업용 셸을 선택하세요.`,
+                `Cannot safely quote args for task shell '${shellOptions.executable}'. Use type 'command' or select sh, bash, zsh, fish or pwsh as the task shell.`
+            ));
+        }
+        return { shellExecution: new vscode.ShellExecution(line, shellOptions), displayCommand: line };
     }
 
     if (process.platform === 'win32') {
@@ -8745,6 +8779,26 @@ export function createShellExecution(
 /** TaskHub가 조립한 sh 문법 명령줄은 사용자 셸 설정과 관계없이 /bin/sh -c로 실행한다. */
 export function withPosixShell(options: vscode.ShellExecutionOptions): vscode.ShellExecutionOptions {
     return { ...options, executable: '/bin/sh', shellArgs: ['-c'] };
+}
+
+/** Resolve and retain the same task shell whose grammar quotes the arguments. */
+export function resolveRawTaskShellOptions(options: vscode.ShellExecutionOptions): vscode.ShellExecutionOptions & { executable: string } {
+    const config = vscode.workspace.getConfiguration('terminal.integrated', options.cwd ? vscode.Uri.file(options.cwd) : undefined);
+    const platform = process.platform === 'darwin' ? 'osx' : 'linux';
+    type Profile = { path?: string | string[]; args?: string[] };
+    const automation = config.get<Profile | null>(`automationProfile.${platform}`);
+    const profiles = config.get<Record<string, Profile>>(`profiles.${platform}`, {});
+    const defaultName = config.get<string | null>(`defaultProfile.${platform}`);
+    const profile = automation ?? (defaultName ? profiles[defaultName] : undefined);
+    const configuredPath = profile?.path;
+    const executable = options.executable ?? (Array.isArray(configuredPath)
+        ? configuredPath.find(candidate => fs.existsSync(candidate)) ?? configuredPath[0] : configuredPath)
+        ?? vscode.env.shell;
+    const shellArgs = [...(options.shellArgs ?? profile?.args ?? [])];
+    const name = path.basename(executable).toLowerCase().replace(/\.exe$/, '');
+    const flag = name === 'pwsh' || name === 'powershell' ? '-Command' : '-c';
+    if (!shellArgs.some(argument => argument.toLowerCase() === flag.toLowerCase())) { shellArgs.push(flag); }
+    return { ...options, executable, shellArgs };
 }
 
 export function wrapCommandForOneShot(
@@ -11141,7 +11195,9 @@ export async function confirmImportInvalidActionsBackup(
         : { kind: 'cancel' };
 }
 
-export function mergeImportedActions(existing: ActionItem[], imported: ActionItem[]): { merged: ActionItem[]; skipped: string[] } {
+export function mergeImportedActions(existing: ActionItem[], imported: ActionItem[]): {
+    merged: ActionItem[]; skipped: string[]; addedCount: number; skippedItems: string[];
+} {
     const existingIds = new Set<string>();
     const collectIds = (items: ActionItem[]) => {
         for (const item of items) {
@@ -11159,6 +11215,7 @@ export function mergeImportedActions(existing: ActionItem[], imported: ActionIte
     };
 
     const skipped: string[] = [];
+    const skippedItems: string[] = [];
     const newActions: ActionItem[] = [];
     for (const item of imported) {
         const ids: string[] = [];
@@ -11166,13 +11223,14 @@ export function mergeImportedActions(existing: ActionItem[], imported: ActionIte
         const conflicts = ids.filter(id => existingIds.has(id));
         if (conflicts.length > 0) {
             skipped.push(...conflicts);
+            skippedItems.push(item.id || item.title || '(unnamed)');
         } else {
             newActions.push(item);
             for (const id of ids) { existingIds.add(id); }
         }
     }
 
-    return { merged: [...existing, ...newActions], skipped };
+    return { merged: [...existing, ...newActions], skipped, addedCount: newActions.length, skippedItems };
 }
 
 const DEFAULT_CAPTURE_LIMIT_MB = 10;
@@ -11903,7 +11961,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         () => loadAllActions(context),
         () => currentActionSourceConflictMessages(),
         pinnedActionStore,
-        inputProfileStore
+        inputProfileStore,
+        () => currentActionSourceLoadErrors()
     );
     // Register `taskhub.runAction.<id>` commands at activation so the user's
     // `keybindings.json` resolves to live commands as soon as the extension
@@ -14003,17 +14062,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             }
         }
 
-        const { merged, skipped } = mergeImportedActions(existingActions, importedActions);
+        const { merged, addedCount, skippedItems } = mergeImportedActions(existingActions, importedActions);
         const vscodeDir = path.join(workspaceFolder, '.vscode');
         if (!fs.existsSync(vscodeDir)) { fs.mkdirSync(vscodeDir, { recursive: true }); }
         fs.writeFileSync(actionsPath, JSON.stringify(merged, null, 2), 'utf-8');
 
-        const addedCount = importedActions.length - skipped.length;
-        let msg = t(`${addedCount}개 액션을 가져왔습니다.`, `Imported ${addedCount} action(s).`);
-        if (skipped.length > 0) {
-            msg += t(` ${skipped.length}개 중복 건너뜀: ${skipped.join(', ')}`, ` Skipped ${skipped.length} duplicate(s): ${skipped.join(', ')}`);
+        let msg = t(`${addedCount}개 항목을 가져왔습니다.`, `Imported ${addedCount} item(s).`);
+        if (skippedItems.length > 0) {
+            msg += t(
+                ` 중복 ID로 ${skippedItems.length}개 항목 건너뜀: ${skippedItems.join(', ')}. 폴더의 하위 항목도 함께 제외됩니다.`,
+                ` Skipped ${skippedItems.length} item(s) due to duplicate IDs: ${skippedItems.join(', ')}. Children of skipped folders are also excluded.`
+            );
         }
-        vscode.window.showInformationMessage(msg);
+        vscode.window.showInformationMessage(plainNotificationText(msg));
         refreshActionsAndCommands(context, mainViewProvider);
     }));
 

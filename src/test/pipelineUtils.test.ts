@@ -22,6 +22,8 @@ import {
     quotePosixArgument,
     quotePowerShellArgument,
     quoteWindowsCommandLineArgument,
+    buildRawShellCommandLine,
+    assertWindowsBatchArgumentsSafe,
     buildPosixCommandLine,
     buildPowerShellInvocation,
     buildNativeCommandInvocation,
@@ -63,6 +65,27 @@ import { attachPipelineTaskIds, buildBuiltinVariableContext } from '../builtinVa
  * file will fail to load.
  */
 suite('pipelineUtils — direct-import smoke suite', () => {
+    test('raw shell의 인자는 실제 인터프리터 문법으로 인용하고 미지원 셸은 거부한다', () => {
+        const argument = "a\\b'c; echo INJECTED";
+        assert.strictEqual(buildRawShellCommandLine('printf', [argument], '/bin/sh'), `printf ${quotePosixArgument(argument)}`);
+        assert.strictEqual(buildRawShellCommandLine('echo', [argument], '/usr/bin/fish'), "echo 'a\\\\b\\'c; echo INJECTED'");
+        assert.strictEqual(buildRawShellCommandLine('echo', [argument], '/usr/bin/pwsh'), `echo ${quotePowerShellArgument(argument)}`);
+        assert.throws(() => buildRawShellCommandLine('echo', [argument], '/usr/bin/nu'), /Cannot safely quote/);
+        assert.strictEqual(buildRawShellCommandLine('echo custom syntax', [], '/usr/bin/nu'), 'echo custom syntax');
+    });
+    test('Windows 복합 raw 본문 뒤의 위험 인자는 첫 토큰이 내장 명령이어도 거부한다', () => {
+        const lookup = { env: { PATH: 'C:\\tools', PATHEXT: '.EXE;.CMD' }, cwd: 'C:\\work',
+            isFile: (candidate: string) => candidate.toLowerCase() === 'c:\\tools\\build.cmd' };
+        for (const command of ['echo x; build', 'echo x | build', 'echo x && build', '& $tool', 'if ($true) { build }']) {
+            for (const argument of ['a&echo INJECTED', 'x%PATH%', 'x\ny', 'a"b']) {
+                assert.throws(() => assertWindowsBatchArgumentsSafe(true, command, [argument], lookup), WindowsBatchArgumentError);
+                assert.throws(() => resolveWindowsTaskSpawn(true, command, [argument], lookup), WindowsBatchArgumentError);
+            }
+            assert.doesNotThrow(() => assertWindowsBatchArgumentsSafe(true, command, ['normal'], lookup));
+        }
+        assert.throws(() => assertWindowsBatchArgumentsSafe(true, 'build', ['a&b'], lookup), WindowsBatchArgumentError);
+        assert.doesNotThrow(() => assertWindowsBatchArgumentsSafe(true, "echo 'literal; text'", ['a&b'], lookup));
+    });
     test('QuickPick 동적 목록 활성 판정은 빈 command를 정적 목록으로 되돌린다', () => {
         const staticArgs = {
             type: 'quickPick', itemsFromCommand: '',
@@ -365,6 +388,10 @@ suite('pipelineUtils — direct-import smoke suite', () => {
 
         // 정상 경로는 계속 허용
         assert.strictEqual(isInsideWorkspaceRoots(path.join(root, 'a.txt'), [root]), true);
+        const dotdotName = path.join(root, '..cache', 'result.txt');
+        assert.strictEqual(isInsideWorkspaceRoots(dotdotName, [root]), true);
+        assert.strictEqual(resolveWithinWorkspace(dotdotName, [root]), dotdotName);
+        assert.strictEqual(isInsideWorkspaceRoots(path.join(root, '..', 'outside.txt'), [root]), false);
     });
 
     test('resolveWithinWorkspace rejects symlink escape (M10 회귀 가드)', function () {
@@ -709,8 +736,8 @@ suite('pipelineUtils — direct-import smoke suite', () => {
             WindowsBatchArgumentError);
         // 괄호·공백은 cmd 특수 문자가 아니다.
         assert.strictEqual(resolveWindowsTaskSpawn(false, 'C:\\t\\build', ['C:\\Program Files (x86)\\x'], base).strategy, 'powershell');
-        // 알려진 한계: raw 본문의 첫 토큰이 셸 내장이면 뒤 명령이 배치여도 검사하지 않는다(문서화).
-        assert.strictEqual(resolveWindowsTaskSpawn(true, 'cd sub; gen', ['a&b'], base).strategy, 'raw-shell');
+        // 복합 본문은 뒤쪽 배치 호출 여부를 확정할 수 없어 위험 인자를 거부한다.
+        assert.throws(() => resolveWindowsTaskSpawn(true, 'cd sub; gen', ['a&b'], base), WindowsBatchArgumentError);
     });
 
     test('Windows one-shot checks batch files named after PowerShell aliases', () => {
