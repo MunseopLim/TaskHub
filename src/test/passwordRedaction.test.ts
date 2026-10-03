@@ -9,7 +9,14 @@ import { MainViewProvider } from '../providers/mainViewProvider';
 import { ActionRunLogCollector } from '../runLogStore';
 import { ActionItem, Action as PipelineAction, Task } from '../schema';
 import { describeSensitiveFailure, sensitiveStageLabel } from '../extension';
-import { WindowsBatchArgumentError } from '../pipelineUtils';
+import { resolveWindowsTaskSpawn, WindowsBatchArgumentError } from '../pipelineUtils';
+
+// Windows 전용 실행 테스트와 OS 독립 사전 검사가 같은 입력을 사용한다.
+// 성공/exit 검증에 cmd.exe 특수 문자를 다시 넣으면 모든 OS에서 실패해야 한다.
+const windowsBatchOneShotPasswords = {
+    success: 'Cmd Shim 비밀 S3cret tail',
+    failure: 'Cmd Failure 비밀 S3cret tail',
+};
 
 /**
  * Password results are deliberately kept intact for execution and are only
@@ -77,6 +84,21 @@ suite('Password taint and redaction', function () {
             `fs.writeFileSync(${JSON.stringify(filePath)}, process.argv[1]);`,
             "process.stdout.write('ok');",
         ].join('');
+    }
+
+    function observeChildExitCodes(): { exitCodes: Array<number | null>; restore(): void } {
+        const childProcess = require('child_process') as typeof import('child_process');
+        const originalSpawn = childProcess.spawn;
+        const exitCodes: Array<number | null> = [];
+        childProcess.spawn = ((...args: Parameters<typeof childProcess.spawn>) => {
+            const child = originalSpawn(...args);
+            child.once('exit', code => { exitCodes.push(code); });
+            return child;
+        }) as typeof childProcess.spawn;
+        return {
+            exitCodes,
+            restore: () => { childProcess.spawn = originalSpawn; },
+        };
     }
 
     async function runPasswordSwitchFailure(matched: boolean): Promise<{
@@ -1112,7 +1134,7 @@ suite('Password taint and redaction', function () {
         if (process.platform !== 'win32') { this.skip(); }
 
         const id = 'sensitive-one-shot-cmd-shim';
-        const secret = 'Cmd Shim S3cret & tail';
+        const secret = windowsBatchOneShotPasswords.success;
         const marker = path.join(tempWorkspace, 'cmd-shim-one-shot.marker');
         const runner = path.join(tempWorkspace, 'cmd-shim-runner.js');
         const shim = path.join(tempWorkspace, 'sensitive-shim.cmd');
@@ -1143,6 +1165,7 @@ suite('Password taint and redaction', function () {
         const originalExecuteTask = vscode.tasks.executeTask;
         const originalShowError = vscode.window.showErrorMessage;
         const shownErrors: string[] = [];
+        const observedChild = observeChildExitCodes();
         let executeTaskCalls = 0;
         (vscode.tasks as any).executeTask = () => {
             executeTaskCalls++;
@@ -1179,7 +1202,7 @@ suite('Password taint and redaction', function () {
                 '완료된 pipeline 뒤에 .cmd one-shot이 Stop All 유령 대상을 만들었다');
 
             const deadline = Date.now() + 10000;
-            while (!fs.existsSync(marker) && Date.now() < deadline) {
+            while (observedChild.exitCodes.length === 0 && shownErrors.length === 0 && Date.now() < deadline) {
                 await new Promise(resolve => setTimeout(resolve, 20));
             }
             const redact = (value: string) => value.split(secret).join('***');
@@ -1190,6 +1213,7 @@ suite('Password taint and redaction', function () {
                 'PowerShell .cmd one-shot marker timeout — 어디서 끊겼는지:\n'
                 + `  batch 진입(cmd.exe 실행됨): ${readIfPresent(reachedMarker)}\n`
                 + `  node argv(%* 전달됨): ${readIfPresent(argvDump)}\n`
+                + `  실제 종료 코드: ${JSON.stringify(observedChild.exitCodes)}\n`
                 + `  실패 알림(spawn 오류 또는 nonzero 종료): ${redact(shownErrors.join(' | ')) || '(없음)'}\n`
                 + '  → 셋 다 없음이면 PowerShell 래퍼가 배치를 시작하지 못한 것(제품),\n'
                 + '    진입만 있으면 `%*` 인용이 node 호출을 깨뜨린 것(fixture)이다.\n'
@@ -1197,11 +1221,12 @@ suite('Password taint and redaction', function () {
             );
             assert.strictEqual(fs.readFileSync(marker, 'utf8'), secret,
                 'PowerShell .cmd one-shot이 password 인자를 보존하지 못했다');
-            await new Promise(resolve => setTimeout(resolve, 50));
+            assert.deepStrictEqual(observedChild.exitCodes, [0], 'PowerShell .cmd one-shot이 exit 0으로 끝나야 한다');
             assert.strictEqual(shownErrors.length, 0,
                 `성공한 민감 .cmd one-shot이 실패 알림을 냈다: ${redact(shownErrors.join(' | '))}`);
             assert.ok(!verboseLines.join('\n').includes(secret), '민감 .cmd 명령이 verbose log에 샜다');
         } finally {
+            observedChild.restore();
             (vscode.tasks as any).executeTask = originalExecuteTask;
             (vscode.window as any).showErrorMessage = originalShowError;
         }
@@ -1212,29 +1237,34 @@ suite('Password taint and redaction', function () {
      * 는 PowerShell 분기로 가는데, 그 분기가 종료 코드를 그대로 물려주는지가
      * 이번 설계에서 `Start-Process` 를 **쓰지 않기로 한 이유**다 — `Start-Process`
      * 는 바깥 PowerShell 을 즉시 exit 0 으로 끝내 실패 알림을 없앤다. 이 경로는
-     * stdio 도 없고 안내도 무내용이라, 알림이 유일한 단서다.
+     * stdio 도 없고 안내도 무내용이라, 실제 실행 marker와 종료 코드를 함께 확인한다.
      */
     test('민감 non-native one-shot의 nonzero exit도 실패 알림을 한 번만 낸다', async function () {
         if (process.platform !== 'win32') { this.skip(); }
 
         const id = 'sensitive-one-shot-cmd-failure';
-        const secret = 'Cmd Failure S3cret & tail';
+        const secret = windowsBatchOneShotPasswords.failure;
         const shim = path.join(tempWorkspace, 'failing-shim.cmd');
-        fs.writeFileSync(shim, '@echo off\r\nexit /b 7\r\n', 'utf8');
+        const reachedMarker = path.join(tempWorkspace, 'failing-shim-reached.marker');
+        fs.writeFileSync(
+            shim,
+            '@echo off\r\n'
+            + '>"%~dp0failing-shim-reached.marker" echo reached\r\n'
+            + 'exit /b 7\r\n',
+            'utf8'
+        );
 
         const originalExecuteTask = vscode.tasks.executeTask;
         const originalShowError = vscode.window.showErrorMessage;
         const shownErrors: string[] = [];
+        const observedChild = observeChildExitCodes();
         let executeTaskCalls = 0;
-        let resolveFailure!: () => void;
-        const failureShown = new Promise<void>(resolve => { resolveFailure = resolve; });
         (vscode.tasks as any).executeTask = () => {
             executeTaskCalls++;
             throw new Error('sensitive one-shot must not create a terminal Task');
         };
         (vscode.window as any).showErrorMessage = async (message: string) => {
             shownErrors.push(message);
-            resolveFailure();
             return undefined;
         };
 
@@ -1260,19 +1290,19 @@ suite('Password taint and redaction', function () {
                 { presetInputs: { ask: { value: secret } } }
             );
             assert.strictEqual(executeTaskCalls, 0, '민감 .cmd one-shot이 터미널 Task를 만들었다');
-            await Promise.race([
-                failureShown,
-                new Promise<never>((_, reject) => setTimeout(
-                    () => reject(new Error(
-                        'PowerShell .cmd one-shot이 exit 7을 알리지 않았다 '
-                        + '(Start-Process 처럼 즉시 exit 0 으로 끝나면 이 단서가 사라진다):\n'
-                        + verboseLines.join('\n').split(secret).join('***')
-                    )),
-                    10000
-                )),
-            ]);
-            await new Promise(resolve => setTimeout(resolve, 25));
+            const deadline = Date.now() + 10000;
+            while (shownErrors.length === 0 && observedChild.exitCodes.length === 0 && Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            assert.ok(fs.existsSync(reachedMarker),
+                'exit 7 fixture가 배치를 실행하지 않았다 (실행 전 거부 알림으로 통과하면 안 된다):\n'
+                + verboseLines.join('\n').split(secret).join('***'));
+            assert.deepStrictEqual(observedChild.exitCodes, [7], 'PowerShell이 배치의 실제 exit 7을 전달해야 한다');
+            assert.strictEqual(shownErrors.length, 1,
+                'PowerShell .cmd one-shot이 exit 7을 한 번 알려야 한다:\n'
+                + verboseLines.join('\n').split(secret).join('***'));
         } finally {
+            observedChild.restore();
             (vscode.tasks as any).executeTask = originalExecuteTask;
             (vscode.window as any).showErrorMessage = originalShowError;
         }
@@ -2153,15 +2183,38 @@ suite('shell / command 실행 계약 (0.6.47)', function () {
 });
 
 suite('민감 태스크의 Windows 배치 인자 차단', () => {
+    const lookup = { env: {}, cwd: 'C:\\fixtures', isFile: () => false };
+    const shim = 'C:\\fixtures\\sensitive-shim.cmd';
+
+    test('Windows one-shot 실행 fixture는 모든 OS에서 배치 인자 사전 검사를 통과한다', () => {
+        for (const secret of Object.values(windowsBatchOneShotPasswords)) {
+            assert.strictEqual(
+                resolveWindowsTaskSpawn(false, shim, ['C:\\fixtures\\one-shot.marker', secret], lookup).strategy,
+                'powershell',
+                '실제 Windows 성공/exit fixture가 실행 전에 거부되면 안 된다'
+            );
+        }
+    });
+
     test('거부한 인자 값 없이 이유만 남긴다', () => {
-        const secret = 'p&ss%word';
-        const error = new WindowsBatchArgumentError('C:\\node\\npx.cmd', secret);
-        assert.ok(error.message.includes(secret), '원문은 로그용으로 값을 담는다');
-        const detail = describeSensitiveFailure(error, 'npx tool ***');
-        assert.strictEqual(detail.stage, 'batch-argument');
-        assert.strictEqual(detail.command, 'npx tool ***');
-        const label = sensitiveStageLabel(detail.stage);
-        assert.ok(!label.includes(secret));
-        assert.match(label, /cmd\.exe/);
+        for (const metacharacter of ['&', '|', '<', '>', '^', '%', '!', '"', '\r', '\n']) {
+            const secret = `Cmd Shim S3cret ${metacharacter} tail`;
+            assert.throws(
+                () => resolveWindowsTaskSpawn(false, shim, [secret], lookup),
+                (error: unknown) => {
+                    assert.ok(error instanceof WindowsBatchArgumentError,
+                        '프로세스를 시작하기 전에 배치 인자를 거부해야 한다');
+                    assert.strictEqual(error.argument, secret);
+                    const detail = describeSensitiveFailure(error, 'sensitive-shim.cmd ***');
+                    assert.strictEqual(detail.stage, 'batch-argument');
+                    assert.strictEqual(detail.command, 'sensitive-shim.cmd ***');
+                    const label = sensitiveStageLabel(detail.stage);
+                    assert.ok(!JSON.stringify(detail).includes(secret));
+                    assert.ok(!label.includes(secret));
+                    assert.match(label, /cmd\.exe/);
+                    return true;
+                }
+            );
+        }
     });
 });

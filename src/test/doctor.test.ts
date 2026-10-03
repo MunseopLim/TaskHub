@@ -3125,6 +3125,7 @@ suite('Doctor', () => {
     });
 
     test('quickPick args 결과는 태스크 단위로 판정하고 죽은 정적 items는 제외한다', () => {
+        const validator = compileValidator();
         const unresolvedCount = (pick: any) => {
             const findings = runDoctor([makeInput([{
                 id: 'a.quick-args-contract', title: 'quick', action: {
@@ -3134,7 +3135,7 @@ suite('Doctor', () => {
                         { id: 'run', type: 'command', command: 'node', args: ['${pick.args}'] },
                     ],
                 },
-            }])], compileValidator());
+            }])], validator);
             return findings.filter(f => f.code === 'variable.unresolved').length;
         };
 
