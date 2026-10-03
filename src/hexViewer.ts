@@ -1238,6 +1238,11 @@ function getWebviewContent(
     const initialFindMode = ['bytes', 'value', 'ascii'].includes(saved.findMode) ? saved.findMode : INITIAL_PREFERENCES.findMode;
     let selectedOffset = -1;
     let selectedEndOffset = -1;
+    // 선택은 항상 정확한 inclusive byte 범위다. Shift 이동의 기준 unit과
+    // 현재 커서는 별도로 두어 byte 끝점을 unit 시작점으로 다시 해석하지 않는다.
+    let selectionAnchorStart = -1;
+    let selectionAnchorEnd = -1;
+    let selectionFocusOffset = -1;
     let findMatches = [];
     let findCurrentIdx = -1;
 
@@ -1559,10 +1564,7 @@ function getWebviewContent(
     function updateStatusBar(minOff, maxOff) {
         const le = endian === 'little';
         const addr = BASE_ADDR + minOff;
-        // 마지막 unit 은 덜 찼을 수 있으므로 파일 끝을 넘겨 세지 않는다.
-        // 더하기 unitSize 로 고정하면 18바이트 파일에서 "선택 20 바이트" 처럼
-        // 실제 파일보다 큰 값이 표시됐다.
-        const selSize = Math.min(maxOff - minOff + unitSize, Math.max(0, TOTAL_SIZE - minOff));
+        const selSize = maxOff - minOff + 1;
         const dataSpan = selSize;
         const selectionHasData = dataSpan > 0 && hasDataRange(minOff, dataSpan);
         let html = '<span>' + S.statusOffset + ': 0x' + formatHex(minOff, 8) + '</span>';
@@ -1592,12 +1594,31 @@ function getWebviewContent(
                 html += '<span>u32: 0x' + formatHex(v, 8) + ' (' + v + ')</span>';
             }
         }
-        if (selSize > unitSize) {
+        if (selSize > 1) {
             html += '<span>' + fmt(S.statusSelected, { n: selSize }) + '</span>';
             announce += ', ' + fmt(S.statusSelected, { n: selSize });
         }
         statusBar.innerHTML = html;
         hexAnnounce.textContent = announce;
+    }
+
+    function selectByteRange(start, end, focus = start) {
+        selectedOffset = start;
+        selectedEndOffset = end;
+        selectionAnchorStart = start;
+        selectionAnchorEnd = Math.min(end, start + unitSize - 1);
+        selectionFocusOffset = focus;
+    }
+
+    function selectUnit(offset, extend) {
+        const end = Math.min(offset + unitSize - 1, TOTAL_SIZE - 1);
+        if (extend && selectionAnchorStart >= 0) {
+            selectedOffset = Math.min(selectionAnchorStart, offset);
+            selectedEndOffset = Math.max(selectionAnchorEnd, end);
+            selectionFocusOffset = offset;
+        } else {
+            selectByteRange(offset, end);
+        }
     }
 
     // Click handler on hex cells
@@ -1606,12 +1627,7 @@ function getWebviewContent(
         if (!cell) { return; }
         const off = parseInt(cell.dataset.offset, 10);
         hexContainer.focus({ preventScroll: true });
-        if (e.shiftKey && selectedOffset >= 0) {
-            selectedEndOffset = off;
-        } else {
-            selectedOffset = off;
-            selectedEndOffset = off;
-        }
+        selectUnit(off, e.shiftKey);
         updateSelection();
     });
 
@@ -1639,14 +1655,12 @@ function getWebviewContent(
         }
         e.preventDefault();
 
-        // 경계는 jumpToOffset 과 같은 규칙을 쓴다 (lastSelectableOffset).
-        // 파일이 unit 하나보다 작으면 고를 수 있는 셀 자체가 없다.
+        // 파일 끝의 부분 unit도 선택할 수 있고, 빈 파일에는 선택할 셀이 없다.
         const lastUnitStart = lastSelectableOffset();
         if (lastUnitStart < 0) { return; }
 
         // 아직 아무것도 고르지 않았으면 첫 바이트에서 시작한다.
-        const current = selectedEndOffset >= 0 ? selectedEndOffset
-            : (selectedOffset >= 0 ? selectedOffset : 0);
+        const current = selectionFocusOffset >= 0 ? selectionFocusOffset : 0;
         let next;
         if (e.key === 'Home') {
             next = 0;
@@ -1660,7 +1674,7 @@ function getWebviewContent(
 
         if (e.shiftKey && selectedOffset >= 0) {
             // 시작점을 고정한 채 끝점만 옮긴다 — Shift+클릭과 같은 의미.
-            selectedEndOffset = next;
+            selectUnit(next, true);
             updateSelection();
             const cell = hexBody.querySelector('.hex-cell[data-offset="' + next + '"]');
             if (cell && typeof cell.scrollIntoView === 'function') {
@@ -1680,6 +1694,9 @@ function getWebviewContent(
         persistPreferences();
         selectedOffset = -1;
         selectedEndOffset = -1;
+        selectionAnchorStart = -1;
+        selectionAnchorEnd = -1;
+        selectionFocusOffset = -1;
         render();
         updateSelection();
     });
@@ -1721,13 +1738,12 @@ function getWebviewContent(
         return Math.floor((TOTAL_SIZE - 1) / unitSize) * unitSize;
     }
 
-    function jumpToOffset(offset) {
+    function jumpToOffset(offset, endOffset = Math.min(offset + unitSize - 1, TOTAL_SIZE - 1), focus = offset) {
         if (typeof offset !== 'number' || offset < 0 || offset >= TOTAL_SIZE) { return; }
         // 요청한 주소를 바꾸지 않는다. 파일 안의 주소면 그 주소를 담은 unit
         // 셀이 반드시 존재하므로(불완전한 unit 도 렌더된다) 정렬만 하면 된다.
         const rowIndex = Math.floor(offset / BYTES_PER_ROW);
-        selectedOffset = offset;
-        selectedEndOffset = offset;
+        selectByteRange(offset, endOffset, focus);
         // 좁은 창에서는 선택 정보가 줄바꿈되어 표시 영역이 줄어든다.
         // 최종 상태바 높이를 반영한 뒤 스크롤해야 선택 셀이 가려지지 않는다.
         updateSelection();
@@ -1976,7 +1992,9 @@ function getWebviewContent(
         if (findCurrentIdx < 0 || findCurrentIdx >= findMatches.length) { return; }
         const offset = findMatches[findCurrentIdx];
         findInfo.textContent = (findCurrentIdx + 1) + ' / ' + findCountLabel();
-        jumpToOffset(offset);
+        const bytes = getFindBytes();
+        if (!bytes) { return; }
+        jumpToOffset(offset, offset + bytes.length - 1);
     }
 
     function applyFindHighlightsToVisible() {
@@ -2082,13 +2100,11 @@ function getWebviewContent(
 
     function buildCopyText(minOff, maxOff) {
         const le = endian === 'little';
-        const digits = unitHexDigits();
         const parts = [];
         for (let off = minOff; off < maxOff && off < TOTAL_SIZE; off += unitSize) {
-            // 남은 바이트만 읽는다. 완전한 unit 을 고집하면 파일 끝의 1~7
-            // 바이트가 readUnit 의 null 로 빠져 **복사 결과에서 통째로
-            // 사라졌다** — 화면에는 보이는데 복사하면 없는 상태였다.
-            const available = unitBytesAt(off);
+            // 파일 끝과 선택 끝점에서 모두 멈춘다. 비정렬 symbol이나 짧은 검색
+            // 결과가 unit 중간에서 끝나도 선택 밖의 바이트를 덧붙이지 않는다.
+            const available = Math.min(unitBytesAt(off), maxOff - off);
             if (available <= 0) { break; }
             const val = readUnit(off, available, le);
             if (val !== null) {
@@ -2112,7 +2128,7 @@ function getWebviewContent(
         if (selectedOffset >= 0 && (active === hexContainer || hexContainer.contains(active))) {
             const endOff = selectedEndOffset >= 0 ? selectedEndOffset : selectedOffset;
             const minOff = Math.min(selectedOffset, endOff);
-            const maxOff = Math.max(selectedOffset, endOff) + unitSize;
+            const maxOff = Math.max(selectedOffset, endOff) + 1;
             e.clipboardData.setData('text/plain', buildCopyText(minOff, maxOff));
             e.preventDefault();
             return;
@@ -2159,11 +2175,9 @@ function getWebviewContent(
             && initial.startOffset >= 0 && initial.endOffset >= initial.startOffset
             && initial.endOffset < TOTAL_SIZE
         ) {
-            // 기존 Go-to 경로가 가상 스크롤과 unit 정렬을 모두 처리한다. 시작점으로
-            // 이동한 뒤 끝점만 복원해 symbol/section 전체를 선택한다.
-            jumpToOffset(initial.startOffset);
-            selectedEndOffset = initial.endOffset;
-            updateSelection();
+            // 가상 스크롤은 Go-to 경로를 재사용하되 symbol/section의 정확한 byte
+            // 끝점을 넘기고, 키보드 범위 확장은 마지막 선택 바이트에서 이어 간다.
+            jumpToOffset(initial.startOffset, initial.endOffset, initial.endOffset);
         }
         if (typeof msg.deliveryId === 'string') {
             vscode.postMessage({ command: 'dataReceived', deliveryId: msg.deliveryId });

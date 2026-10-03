@@ -944,6 +944,35 @@ suite('ELF Parser Test Suite', () => {
             assert.strictEqual(helperEntry!.size, 0x40);
         });
 
+        test('객체 심볼과 uncovered 영역을 부모 섹션의 메모리 타입으로 일관되게 분류한다', () => {
+            const typedSections: ElfSection[] = [
+                { name: '', type: 0, flags: 0, addr: 0, size: 0, isAlloc: false, isWrite: false, isExec: false, isNoBits: false },
+                { ...sections[0], name: '.rodata', addr: 0x1000, size: 16, flags: SHF_ALLOC, isExec: false },
+                { ...sections[1], name: '.data', addr: 0x2000, size: 16 },
+                { ...sections[1], name: '.bss', addr: 0x3000, size: 16, isNoBits: true, type: SHT_NOBITS },
+                { ...sections[0], name: '.text', addr: 0x4000, size: 16 },
+            ];
+            const typedSymbols: ElfSymbol[] = typedSections.slice(1).map((section, index) => ({
+                name: `object${index}`, addr: section.addr, size: 8,
+                type: 'OBJECT', sectionIndex: index + 1, binding: 'GLOBAL',
+            }));
+            const typedRegions = typedSections.slice(1).map(section => ({ name: section.name, origin: section.addr, size: section.size }));
+            const usages = computeSymbolUsage(typedSymbols, typedSections, typedRegions);
+            const summary = summarizeSections(typedSections);
+            for (const [index, expected] of ['RODATA', 'DATA', 'NOBITS', 'CODE'].entries()) {
+                assert.strictEqual(summary[index].type, expected);
+                assert.strictEqual(usages[index].used, 16);
+                assert.strictEqual(usages[index].sections.reduce((sum, entry) => sum + entry.size, 0), 16);
+                assert.ok(usages[index].sections.every(entry => entry.type === expected), JSON.stringify(usages[index]));
+            }
+            const unknown = computeSymbolUsage([
+                { ...typedSymbols[0], sectionIndex: 0 },
+                { ...typedSymbols[0], name: 'function', addr: 0x1008, type: 'FUNC', sectionIndex: 1 },
+            ], typedSections, [typedRegions[0]])[0];
+            assert.strictEqual(unknown.sections.find(entry => entry.name === 'object0')?.type, 'DATA');
+            assert.strictEqual(unknown.sections.find(entry => entry.name === 'function')?.type, 'CODE');
+        });
+
         test('alias symbols at the same address and size form one row with the global name first', () => {
             const aliasSymbols: ElfSymbol[] = [
                 { name: 'USART1_IRQHandler', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'WEAK' },

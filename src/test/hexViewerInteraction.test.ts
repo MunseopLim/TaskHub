@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vm from 'vm';
-import { buildHexViewerHtml, buildHexViewerPayload, buildHexViewerStrings, HexViewerPreferences } from '../hexViewer';
+import { buildHexViewerHtml, buildHexViewerPayload, buildHexViewerStrings, HexViewerPreferences, HexViewerSelection } from '../hexViewer';
 import { HexParseResult, parseBinary, parseIntelHex, parseSrec } from '../hexParser';
 
 /** 실제 생성된 스크립트 전체를 실행한다. DOM은 이벤트·포커스·표 조회 경계만 제공한다. */
@@ -165,7 +165,7 @@ function runViewer(bytes: number[], options: {
             return yields;
         },
         setSelectedText(text: string) { selectedText = text; },
-        async load() {
+        async load(initialSelection?: HexViewerSelection) {
             const payload = buildHexViewerPayload(result);
             const data = new Proxy(payload.data, {
                 get(target, key) {
@@ -176,12 +176,15 @@ function runViewer(bytes: number[], options: {
                     return Reflect.get(target, key, target);
                 },
             });
-            await windowEvents.dispatch('message', { data: { command: 'hexData', data, gap: payload.gap } });
+            await windowEvents.dispatch('message', { data: { command: 'hexData', data, gap: payload.gap, initialSelection } });
         },
-        async clickByte(offset: number) {
+        async clickByte(offset: number, shiftKey = false) {
             const cell = elements.hexBody.querySelector(`.hex-cell[data-offset="${offset}"]`);
             assert.ok(cell, `offset ${offset} cell`);
-            await elements.hexBody.dispatch('click', { target: cell });
+            await elements.hexBody.dispatch('click', { target: cell, shiftKey });
+        },
+        async key(key: string, shiftKey = false) {
+            await elements.hexContainer.dispatch('keydown', { key, shiftKey, preventDefault() {} });
         },
         async copy(target: FakeElement) {
             let copied: string | undefined;
@@ -197,6 +200,105 @@ function runViewer(bytes: number[], options: {
 }
 
 suite('Hex Viewer 연속 조작', () => {
+    test('초기 byte 범위는 표시 단위와 무관하게 지정한 바이트만 세고 복사한다', async () => {
+        for (const [unitSize, startOffset, endOffset, copied, selectedCells] of [
+            [1, 16, 23, '10 11 12 13 14 15 16 17', ['16', '17', '18', '19', '20', '21', '22', '23']],
+            [2, 16, 23, '1110 1312 1514 1716', ['16', '18', '20', '22']],
+            [4, 16, 23, '13121110 17161514', ['16', '20']],
+            [8, 16, 23, '1716151413121110', ['16']],
+            [4, 17, 18, '1211', ['16']],
+            [4, 17, 21, '14131211 15', ['16', '20']],
+            [8, 21, 21, '15', ['16']],
+            [4, 30, 31, '1F1E', ['28']],
+        ] as const) {
+            const viewer = runViewer(Array.from({ length: 32 }, (_, index) => index), {
+                preferences: { unitSize, endian: 'little', findMode: 'bytes' },
+            });
+            await viewer.load({ startOffset, endOffset });
+            viewer.elements.hexContainer.focus();
+            assert.deepStrictEqual(await viewer.copy(viewer.elements.hexContainer), { copied, prevented: true });
+            assert.deepStrictEqual(viewer.elements.hexBody.querySelectorAll('.hex-cell.selected')
+                .map(cell => cell.dataset.offset), selectedCells);
+            if (endOffset > startOffset) {
+                const label = buildHexViewerStrings().statusSelected.replace('{n}', String(endOffset - startOffset + 1));
+                assert.ok(viewer.elements.statusBar.innerHTML.includes(label), viewer.elements.statusBar.innerHTML);
+            }
+            if (endOffset - startOffset < 3) {
+                assert.ok(!viewer.elements.statusBar.innerHTML.includes('u32:'), '선택 밖의 바이트를 숫자 해석에 사용했다');
+            }
+        }
+    });
+
+    test('비정렬 초기 범위 이후 Shift 이동은 요청 시작점의 첫 unit을 기준으로 확장한다', async () => {
+        const viewer = runViewer(Array.from({ length: 34 }, (_, index) => index), {
+            preferences: { unitSize: 4, endian: 'big', findMode: 'bytes' },
+        });
+        await viewer.load({ startOffset: 17, endOffset: 21 });
+        viewer.elements.hexContainer.focus();
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '11121314 15');
+        await viewer.key('ArrowLeft', true);
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '10111213 14');
+        assert.ok(viewer.elements.statusBar.innerHTML.includes(buildHexViewerStrings().statusSelected.replace('{n}', '5')));
+        await viewer.key('End', true);
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '11121314 15161718 191A1B1C 1D1E1F20 21');
+        assert.ok(viewer.elements.statusBar.innerHTML.includes(buildHexViewerStrings().statusSelected.replace('{n}', '17')));
+        await viewer.key('ArrowLeft');
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '1C1D1E1F');
+    });
+
+    test('Shift 클릭과 키보드는 같은 unit 범위를 앞뒤로 확장하고 끝의 부분 unit만 포함한다', async () => {
+        const viewer = runViewer(Array.from({ length: 18 }, (_, index) => index), {
+            preferences: { unitSize: 4, endian: 'big', findMode: 'bytes' },
+        });
+        await viewer.load();
+        await viewer.clickByte(8);
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '08090A0B');
+        await viewer.clickByte(0, true);
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '00010203 04050607 08090A0B');
+        await viewer.key('ArrowRight', true);
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '04050607 08090A0B');
+        await viewer.key('End', true);
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '08090A0B 0C0D0E0F 1011');
+        await viewer.key('ArrowRight');
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '1011');
+        assert.ok(viewer.elements.statusBar.innerHTML.includes(buildHexViewerStrings().statusSelected.replace('{n}', '2')));
+        viewer.elements.unitSize.value = '8';
+        await viewer.elements.unitSize.dispatch('change');
+        assert.strictEqual(viewer.elements.statusBar.textContent, buildHexViewerStrings().statusHint);
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).prevented, false);
+        await viewer.key('Home');
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '0001020304050607');
+    });
+
+    test('비정렬 Go to와 Find는 실제 요청·일치 범위에서 복사를 끝낸다', async () => {
+        const viewer = runViewer(Array.from({ length: 18 }, (_, index) => index), {
+            preferences: { unitSize: 4, endian: 'big', findMode: 'bytes' },
+        });
+        await viewer.load();
+        viewer.elements.gotoInput.value = '0x03';
+        await viewer.elements.gotoBtn.dispatch('click');
+        viewer.elements.hexContainer.focus();
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '03040506');
+        await viewer.key('ArrowRight');
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '04050607');
+        await viewer.elements.findBtn.dispatch('click');
+        for (const [query, copied, selectedCells] of [
+            ['05 06', '0506', ['4']],
+            ['05 06 07 08 09', '05060708 09', ['4', '8']],
+            ['10 11', '1011', ['16']],
+        ] as const) {
+            viewer.elements.findHexInput.value = query;
+            await viewer.elements.findHexInput.dispatch('input');
+            await viewer.flushSearch();
+            viewer.elements.hexContainer.focus();
+            assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, copied);
+            assert.deepStrictEqual(viewer.elements.hexBody.querySelectorAll('.hex-cell.selected')
+                .map(cell => cell.dataset.offset), selectedCells);
+        }
+        await viewer.elements.endian.dispatch('change');
+        assert.strictEqual((await viewer.copy(viewer.elements.hexContainer)).copied, '1011');
+    });
+
     test('긴 공통 접두사 검색은 선형 작업량 안에서 마지막 일치 위치를 찾는다', async () => {
         const bytes = Array<number>(65536).fill(0x41);
         bytes[bytes.length - 1] = 0x42;

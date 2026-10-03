@@ -8815,8 +8815,14 @@ export function wrapCommandForOneShot(
         // started via UseShellExecute=$false — use Start-Process, which resolves
         // PATHEXT / file associations the way a shell would.
         const filePath = quotePowerShellArgument(executable);
-        const argList = combinedArgs.map(arg => quotePowerShellArgument(arg));
-        const argumentListPart = argList.length > 0 ? ` -ArgumentList @(${argList.join(', ')})` : '';
+        // Start-Process joins an ArgumentList array with spaces and removes
+        // PowerShell's outer quotes. Supply one already quoted child command
+        // line so paths with spaces and empty argv entries survive that join.
+        // Batch shims forward %* to native programs such as node.exe, which
+        // parse Windows argv quotes again. Leave plain args unquoted and double
+        // trailing backslashes when quoting so they cannot escape the closing quote.
+        const argumentLine = combinedArgs.map(arg => quoteWindowsCommandLineArgument(arg)).join(' ');
+        const argumentListPart = combinedArgs.length > 0 ? ` -ArgumentList ${quotePowerShellArgument(argumentLine)}` : '';
         const workingDirectoryPart = cwd ? ` -WorkingDirectory ${quotePowerShellArgument(cwd)}` : '';
         const script = `${utf8Prefix}Start-Process -FilePath ${filePath}${argumentListPart}${workingDirectoryPart}`;
         return { commandLine: script, displayCommand: script, isPowerShellScript: true };

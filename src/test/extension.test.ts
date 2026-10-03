@@ -5636,7 +5636,7 @@ suite('Extension Test Suite', () => {
 				assert.strictEqual(result.isPowerShellScript, true);
 				assert.ok(!result.commandLine.includes('ProcessStartInfo'));
 				assert.ok(result.commandLine.includes("Start-Process -FilePath 'deploy.cmd'"));
-				assert.ok(result.commandLine.includes("-ArgumentList @('--prod')"));
+				assert.ok(result.commandLine.includes("-ArgumentList '--prod'"));
 				assert.ok(result.commandLine.includes("-WorkingDirectory 'C:\\cwd'"));
 			} finally {
 				Object.defineProperty(process, 'platform', { value: originalPlatform });

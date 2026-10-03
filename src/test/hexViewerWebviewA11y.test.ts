@@ -217,7 +217,7 @@ suite('Hex Viewer 웹뷰 지역화 / 접근성', () => {
 
         test('Shift와 함께 누르면 시작점을 고정한 채 범위를 넓힌다', () => {
             assert.ok(
-                /if \(e\.shiftKey && selectedOffset >= 0\)[\s\S]{0,120}selectedEndOffset = next/.test(html),
+                /if \(e\.shiftKey && selectedOffset >= 0\)[\s\S]{0,120}selectUnit\(next, true\)/.test(html),
                 'Shift 확장이 Shift+클릭과 같은 의미로 동작하지 않는다'
             );
         });

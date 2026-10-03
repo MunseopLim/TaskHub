@@ -77,6 +77,21 @@ interface HoverRequest {
     maxCandidates: number;
 }
 
+interface CommentScanState {
+    inBlockComment: boolean;
+    inLineComment?: boolean;
+    quote?: '"' | "'";
+    quotedEscape?: boolean;
+    rawStringEnd?: string;
+}
+
+interface CommentLinesCache {
+    version: number;
+    lines: string[];
+    state: CommentScanState;
+    blockedLine?: number;
+}
+
 const COPY_HOVER_VALUE_COMMAND = 'taskhub.copyHoverValue';
 const MAX_HOVER_LINE_LENGTH = 10_000;
 // Hex expands to at most four binary digits per source character, plus sign/prefix.
@@ -226,6 +241,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     // 파싱/복사하지 않는다 (수만 줄 SFR 헤더에서 호버 지연의 주범).
     private macroTableCache: { uri: string; version: number; macros: Map<string, MacroDefinition> } | undefined;
     private documentLinesCache: { uri: string; version: number; lines: string[] } | undefined;
+    private readonly commentLinesCache = new WeakMap<vscode.TextDocument, CommentLinesCache>();
     private registerCodeCache: { uri: string; version: number; text: string } | undefined;
 
     /**
@@ -613,7 +629,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             // Parse the actual source first. A hover can include unrelated numbers
             // from several providers; it must not override a known source value.
             try {
-                value = await this.extractValueFromDefinitionContext(defDocument, location.range.start.line, word);
+                value = await this.extractValueFromDefinitionContext(defDocument, location.range.start.line, word, request);
             } catch { /* Fall back to the language server hover below. */ }
             if (value === null) {
                 const hovers = await this.requestLspHovers(location.uri, location.range.start, request);
@@ -660,10 +676,12 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     private async extractValueFromDefinitionContext(
         document: vscode.TextDocument,
         startLine: number,
-        symbolName: string
+        symbolName: string,
+        request?: HoverRequest
     ): Promise<number | null> {
-        const defLine = document.lineAt(startLine);
-        const defText = defLine.text;
+        const sourceLines = this.getLinesWithoutComments(document, startLine, request);
+        if (!sourceLines) { return null; }
+        const defText = sourceLines[startLine];
 
         // Try to extract from the definition line itself
         const directValue = this.extractValueFromLine(defText, symbolName);
@@ -678,8 +696,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         // Search upward for enum declaration, bounded by scope boundaries
         if (!defText.includes('enum')) {
             for (let i = startLine; i >= 0; i--) {
-                const line = document.lineAt(i);
-                const text = line.text;
+                const text = sourceLines[i];
                 if (text.includes('enum')) {
                     enumDeclLine = i;
                     break;
@@ -693,7 +710,7 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
 
         // Try to extract enum value
         if (enumDeclLine !== startLine || defText.includes('enum')) {
-            return await this.extractEnumValue(document, enumDeclLine, symbolName);
+            return await this.extractEnumValue(document, enumDeclLine, symbolName, request);
         }
 
         return null;
@@ -706,16 +723,25 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     private async extractEnumValue(
         document: vscode.TextDocument,
         startLine: number,
-        symbolName: string
+        symbolName: string,
+        request?: HoverRequest
     ): Promise<number | null> {
         let currentValue: number | null = 0;
         let inEnumBody = false;
+        let pendingEntry = '';
+        let directiveContinues = false;
         const resolvedValues = new Map<string, number>();
 
         for (let i = startLine; i < document.lineCount; i++) {
-            const line = document.lineAt(i);
-            const rawText = line.text;
-            let text = this.stripInlineComments(rawText).trim();
+            const sourceLines = this.getLinesWithoutComments(document, i, request);
+            if (!sourceLines) { return null; }
+            let text = sourceLines[i].trim();
+            // Directives are not enumerators. This does not evaluate conditional
+            // compilation; branch selection remains the language server's job.
+            if (directiveContinues || text.startsWith('#')) {
+                directiveContinues = sourceLines[i].endsWith('\\');
+                continue;
+            }
 
             // Start of enum body
             if (!inEnumBody && text.includes('{')) {
@@ -724,54 +750,111 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             }
 
             // Parse entries on the brace lines too, including one-line enums.
-            const closingBrace = text.indexOf('}');
-            if (closingBrace >= 0) { text = text.slice(0, closingBrace); }
-
             if (!inEnumBody) {
                 continue;
             }
 
-            // Parse enum entries (can be multiple per line or comma-separated)
-            const entries = text.split(',').map(e => e.trim()).filter(e => e.length > 0);
-
-            for (const entry of entries) {
-                const eqIdx = entry.indexOf('=');
-                if (eqIdx > 0) {
-                    // Explicit assignment: NAME = EXPR
-                    const namePart = entry.substring(0, eqIdx).trim();
-                    const exprPart = entry.substring(eqIdx + 1).trim();
-                    const nameMatch = namePart.match(/^(\w+)$/);
-                    if (nameMatch) {
-                        const name = nameMatch[1];
-                        const value = this.evaluateEnumExpression(exprPart, resolvedValues);
-                        if (value !== null) {
-                            resolvedValues.set(name, value);
-                        }
-                        currentValue = value === null ? null : safeIntegerOrNull(value + 1);
-                        if (name === symbolName) {
-                            return value;
-                        }
-                        continue;
+            // A comment or ordinary newline can split one initializer. Only a
+            // comma or the closing brace completes an enumerator.
+            if (text) { pendingEntry += `${text}\n`; }
+            const entries: string[] = [];
+            const groups: string[] = [];
+            let entryStart = 0;
+            let closed = false;
+            for (const { index, character } of this.enumStructuralCharacters(pendingEntry)) {
+                const closing = character === '(' ? ')' : character === '[' ? ']' : character === '{' ? '}' : undefined;
+                if (closing) {
+                    groups.push(closing);
+                } else if (groups.length > 0 && character === groups[groups.length - 1]) {
+                    groups.pop();
+                } else if (groups.length === 0 && (character === ',' || character === '}')) {
+                    entries.push(pendingEntry.slice(entryStart, index));
+                    entryStart = index + 1;
+                    if (character === '}') {
+                        entryStart = pendingEntry.length;
+                        closed = true;
+                        break;
                     }
-                }
-
-                // Implicit value: NAME
-                const nameMatch = entry.match(/^(\w+)/);
-                if (nameMatch) {
-                    const name = nameMatch[1];
-                    if (currentValue !== null) {
-                        resolvedValues.set(name, currentValue);
-                    }
-                    if (name === symbolName) {
-                        return currentValue;
-                    }
-                    currentValue = currentValue === null ? null : safeIntegerOrNull(currentValue + 1);
                 }
             }
-            if (closingBrace >= 0) { break; }
+            pendingEntry = pendingEntry.slice(entryStart);
+            if (pendingEntry.length > MAX_HOVER_LINE_LENGTH || entries.some(entry => entry.length > MAX_HOVER_LINE_LENGTH)) {
+                return null;
+            }
+
+            for (const rawEntry of entries) {
+                const entry = rawEntry.trim();
+                if (!entry) { continue; }
+                const member = this.parseEnumMember(entry);
+                if (!member) {
+                    currentValue = null;
+                    continue;
+                }
+                const value: number | null = member.expression === undefined
+                    ? currentValue : this.evaluateEnumExpression(member.expression, resolvedValues);
+                if (value !== null) {
+                    resolvedValues.set(member.name, value);
+                }
+                currentValue = value === null ? null : safeIntegerOrNull(value + 1);
+                if (member.name === symbolName) { return value; }
+            }
+            if (closed) { break; }
         }
 
         return null;
+    }
+
+    /** Ignore delimiters inside ordinary/raw literals, including attribute messages. */
+    private *enumStructuralCharacters(text: string): Generator<{ index: number; character: string }> {
+        for (let index = 0; index < text.length; index++) {
+            const character = text[index];
+            const rawStart = character === 'R' && text[index + 1] === '"'
+                ? text.slice(index).match(/^R"([^\s()\\]{0,16})\(/u) : null;
+            if (rawStart) {
+                const endToken = `)${rawStart[1]}"`;
+                const end = text.indexOf(endToken, index + rawStart[0].length);
+                if (end < 0) { return; }
+                index = end + endToken.length - 1;
+                continue;
+            }
+            const separator = character === "'" && /[\da-fA-F]/.test(text[index - 1] ?? '')
+                && /[\da-fA-F]/.test(text[index + 1] ?? '');
+            if (character === '"' || (character === "'" && !separator)) {
+                const quote = character;
+                for (index++; index < text.length; index++) {
+                    if (text[index] === '\\') { index++; }
+                    else if (text[index] === quote) { break; }
+                }
+                if (index >= text.length) { return; }
+                continue;
+            }
+            yield { index, character };
+        }
+    }
+
+    /** Accept an identifier followed only by balanced standard/GNU attributes and an optional initializer. */
+    private parseEnumMember(entry: string): { name: string; expression?: string } | undefined {
+        const name = entry.match(/^[A-Za-z_]\w*/)?.[0];
+        if (!name) { return undefined; }
+        let suffix = entry.slice(name.length).trim();
+        while (suffix.startsWith('[[') || /^__attribute__\s*\(\s*\(/u.test(suffix)) {
+            const start = suffix.startsWith('[[') ? 0 : suffix.indexOf('(');
+            const groups: string[] = [];
+            let end: number | undefined;
+            for (const { index, character } of this.enumStructuralCharacters(suffix.slice(start))) {
+                const closing = character === '(' ? ')' : character === '[' ? ']' : character === '{' ? '}' : undefined;
+                if (closing) {
+                    groups.push(closing);
+                } else if (character === ')' || character === ']' || character === '}') {
+                    if (character !== groups.pop()) { return undefined; }
+                    if (groups.length === 0) { end = start + index + 1; break; }
+                }
+            }
+            if (end === undefined) { return undefined; }
+            suffix = suffix.slice(end).trim();
+        }
+        if (suffix === '') { return { name }; }
+        return suffix.startsWith('=') ? { name, expression: suffix.slice(1).trim() } : undefined;
     }
 
     /**
@@ -830,14 +913,91 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         return null;
     }
 
-    /**
-     * Strip inline line comments and single-line block comments from a line.
-     * Does not handle multi-line block comments.
-     */
-    private stripInlineComments(text: string): string {
-        return text
-            .replace(/\/\*.*?\*\//g, '')
-            .replace(/\/\/.*$/, '');
+    /** Extend the version snapshot only through the requested line, retaining lexical state. */
+    private getLinesWithoutComments(document: vscode.TextDocument, throughLine: number, request?: HoverRequest): string[] | undefined {
+        if (request && !this.requestActive(request)) { return undefined; }
+        let cached = this.commentLinesCache.get(document);
+        if (!cached || cached.version !== document.version) {
+            cached = { version: document.version, lines: [], state: { inBlockComment: false } };
+            this.commentLinesCache.set(document, cached);
+        }
+        if (cached.blockedLine !== undefined && throughLine >= cached.blockedLine) { return undefined; }
+        const lastLine = Math.min(throughLine, document.lineCount - 1);
+        for (let index = cached.lines.length; index <= lastLine; index++) {
+            if (request && !this.requestActive(request)) { return undefined; }
+            const text = document.lineAt(index).text;
+            if (NumberBaseHoverProvider.isLineTooLongForHover(text)) {
+                cached.blockedLine = index;
+                return undefined;
+            }
+            cached.lines.push(this.stripInlineComments(text, cached.state));
+        }
+        return request && !this.requestActive(request) ? undefined : cached.lines;
+    }
+
+    private stripInlineComments(text: string, state: CommentScanState = { inBlockComment: false }): string {
+        if (state.inLineComment) {
+            state.inLineComment = text.endsWith('\\');
+            return '';
+        }
+        let result = '';
+        for (let index = 0; index < text.length; index++) {
+            const character = text[index];
+            const next = text[index + 1];
+            if (state.rawStringEnd !== undefined) {
+                const end = text.indexOf(state.rawStringEnd, index);
+                if (end < 0) {
+                    result += text.slice(index);
+                    break;
+                }
+                result += text.slice(index, end + state.rawStringEnd.length);
+                index = end + state.rawStringEnd.length - 1;
+                state.rawStringEnd = undefined;
+            } else if (state.inBlockComment) {
+                if (character === '*' && next === '/') {
+                    state.inBlockComment = false;
+                    index++;
+                }
+            } else if (state.quote) {
+                result += character;
+                // A physical trailing backslash is removed before C/C++ tokenization.
+                // Keep an earlier escape for the first character of the continued line.
+                if (character === '\\' && next === undefined) { continue; }
+                if (state.quotedEscape) {
+                    state.quotedEscape = false;
+                } else if (character === '\\') {
+                    state.quotedEscape = true;
+                } else if (character === state.quote) {
+                    state.quote = undefined;
+                }
+            } else if (character === '/' && next === '/') {
+                state.inLineComment = text.endsWith('\\');
+                break;
+            } else if (character === '/' && next === '*') {
+                result += ' ';
+                state.inBlockComment = true;
+                index++;
+            } else {
+                const rawStart = character === 'R' && next === '"'
+                    ? text.slice(index).match(/^R"([^\s()\\]{0,16})\(/u) : null;
+                if (rawStart) {
+                    result += rawStart[0];
+                    state.rawStringEnd = `)${rawStart[1]}"`;
+                    index += rawStart[0].length - 1;
+                    continue;
+                }
+                result += character;
+                // C++ digit separators are part of a number, not character literals.
+                const separator = character === "'" && /[\da-fA-F]/.test(text[index - 1] ?? '')
+                    && /[\da-fA-F]/.test(next ?? '');
+                if (character === '"' || (character === "'" && !separator)) { state.quote = character; }
+            }
+        }
+        if (state.quote && !text.endsWith('\\')) {
+            state.quote = undefined;
+            state.quotedEscape = false;
+        }
+        return result;
     }
 
     /**

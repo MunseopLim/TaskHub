@@ -2030,6 +2030,37 @@ suite('NumberBaseHoverProvider Test Suite', () => {
     });
 
     suite('Enum Value Extraction Tests', () => {
+        test('여러 줄 주석의 가짜 enum·열거자·중괄호를 제외한 값을 실제 호버에서 복사한다', async () => {
+            const lines = [
+                'enum Values {',
+                '    First = 7,',
+                '    /* documentation',
+                '    enum Pretend { Example,',
+                '    };',
+                '    */',
+                '    Last,',
+                '};',
+                'Values current = Last;',
+            ];
+            const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: lines.join('\n') });
+            const execute = vscode.commands.executeCommand;
+            const cancellation = new vscode.CancellationTokenSource();
+            vscode.commands.executeCommand = (async (command: string) => {
+                if (command === 'vscode.executeDefinitionProvider' || command === 'vscode.executeDeclarationProvider') {
+                    return [new vscode.Location(document.uri, new vscode.Range(6, 4, 6, 8))];
+                }
+                return [];
+            }) as typeof execute;
+            try {
+                const hover = await provider.provideHover(document, new vscode.Position(8, lines[8].indexOf('Last')), cancellation.token);
+                assert.ok(hover);
+                const values = hover.contents.flatMap(content => content instanceof vscode.MarkdownString ? copyValues(content) : []);
+                assert.ok(values.includes('8'), JSON.stringify(values));
+                assert.ok(values.includes('0x8'), JSON.stringify(values));
+                assert.ok(!values.includes('9'), JSON.stringify(values));
+            } finally { vscode.commands.executeCommand = execute; cancellation.dispose(); }
+        });
+
         test('32비트 밖 enum 값도 실제 호버와 복사 링크에 정확히 표시한다', async () => {
             const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: [
                 'enum class Flags : unsigned long long {',
@@ -2061,6 +2092,257 @@ suite('NumberBaseHoverProvider Test Suite', () => {
                 lineAt: (i: number) => ({ text: lines[i] })
             } as any as vscode.TextDocument;
         }
+
+        test('enum 본문의 전처리 지시문과 이어진 지시문은 열거자 자동 증가에 섞이지 않는다', async () => {
+            const doc = makeDoc([
+                'enum Values {',
+                '    A,',
+                '    #ifdef X',
+                '    B,',
+                '    #endif',
+                '    #define IGNORED \\',
+                '        Fake, }',
+                '    C,',
+                '};',
+            ]);
+            for (const [name, expected] of [['A', 0], ['B', 1], ['C', 2], ['Fake', null]] as const) {
+                assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, name), expected, name);
+            }
+        });
+
+        test('enum의 표준·GNU 속성은 암시 값·명시 값과 후속 참조를 유지한다', async () => {
+            for (const attribute of [
+                '[[deprecated]]',
+                '[[deprecated("old, use ]} New"), maybe_unused]]',
+                '[[deprecated("old = New, use ]} New")]]',
+                '__attribute__((deprecated))',
+                '__attribute__ ((deprecated("old, use New"), unused))',
+                '[[deprecated]] __attribute__((unused))',
+                '[[deprecated(R"tag(old, \" ]} New)tag")]]',
+                '[[deprecated(\n"old, use New")]]',
+            ]) {
+                const doc = makeDoc([
+                    'enum Values {',
+                    '    A,',
+                    `    B ${attribute},`,
+                    '    C,',
+                    `    D ${attribute} = 7,`,
+                    '    E = D + 1,',
+                    '};',
+                ].flatMap(line => line.split('\n')));
+                for (const [name, expected] of [['B', 1], ['C', 2], ['D', 7], ['E', 8]] as const) {
+                    assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, name), expected, `${attribute}: ${name}`);
+                }
+            }
+        });
+
+        test('속성 이외의 enum 이름 뒤 문법은 확정 값으로 인정하지 않는다', async () => {
+            for (const declaration of ['B unrelated', 'B [[deprecated]] unrelated', 'B __attribute__((unused)) unrelated']) {
+                const doc = makeDoc(['enum Values { A,', declaration + ',', 'C, Reset = 7, Last };']);
+                for (const [name, expected] of [['B', null], ['C', null], ['Reset', 7], ['Last', 8]] as const) {
+                    assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, name), expected, `${declaration}: ${name}`);
+                }
+            }
+        });
+
+        test('긴 raw 문자열 속성도 열거자 상한 안에서만 로컬 값을 제공한다', async () => {
+            for (const [length, expected] of [[9000, 1], [NumberBaseHoverProvider.MAX_LINE_LENGTH - 40, null]] as const) {
+                const doc = makeDoc([
+                    'enum Values { A [[deprecated(R"tag(',
+                    'x'.repeat(length),
+                    'y'.repeat(100) + ')tag")]], B };',
+                ]);
+                assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, 'B'), expected);
+            }
+        });
+
+        test('지시문·속성이 붙은 enum도 실제 호버에서 로컬 증가값을 복사한다', async () => {
+            for (const declaration of [
+                ['#ifdef X', 'B,', '#endif'],
+                ['B [[deprecated("old, use New")]],'],
+                ['B __attribute__((deprecated)),'],
+            ]) {
+                const lines = ['enum Values {', 'A,', ...declaration, 'C,', '};', 'Values value = B;', 'Values next = C;'];
+                const document = await vscode.workspace.openTextDocument({ language: 'cpp', content: lines.join('\n') });
+                const execute = vscode.commands.executeCommand;
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    for (const [name, value, referenceLine] of [['B', 1, lines.length - 2], ['C', 2, lines.length - 1]] as const) {
+                        const definitionLine = lines.findIndex(line => line.startsWith(name));
+                        vscode.commands.executeCommand = (async (command: string) => {
+                            if (command === 'vscode.executeDefinitionProvider' || command === 'vscode.executeDeclarationProvider') {
+                                return [new vscode.Location(document.uri, new vscode.Range(definitionLine, 0, definitionLine, 1))];
+                            }
+                            return [];
+                        }) as typeof execute;
+                        const hover = await provider.provideHover(document, new vscode.Position(referenceLine, lines[referenceLine].lastIndexOf(name)), cancellation.token);
+                        assert.ok(hover, `${declaration}: ${name}`);
+                        const values = hover.contents.flatMap(content => content instanceof vscode.MarkdownString ? copyValues(content) : []);
+                        assert.ok(values.includes(String(value)), `${declaration}: ${name}: ${JSON.stringify(values)}`);
+                    }
+                } finally { vscode.commands.executeCommand = execute; cancellation.dispose(); }
+            }
+        });
+
+        test('raw 문자열의 주석 문자와 가짜 종료 구분자가 뒤 enum을 숨기지 않는다', async () => {
+            for (const [prefix, delimiter] of [['R', ''], ['u8R', 'tag'], ['uR', 'tag'], ['UR', 'tag'], ['LR', 'tag']]) {
+                const literalLines = [
+                    `const auto banner = ${prefix}"${delimiter}(`,
+                    '/* raw text, } // "',
+                    ')other"; /* still raw text',
+                    'enum Pretend { Fake = 99 };',
+                    `)${delimiter}";`,
+                ];
+                for (const comments of [[], ['/* actual comment', 'enum Hidden { HiddenValue = 123 };', '*/']]) {
+                    const lines = [...literalLines, ...comments, 'enum Values { First = 7, Last };'];
+                    assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(makeDoc(lines), lines.length - 1, 'Last'), 8, prefix);
+                }
+            }
+        });
+
+        test('백슬래시로 이어진 일반 문자열 안의 주석 문자도 뒤 enum을 숨기지 않는다', async () => {
+            for (const backslashes of ['\\', '\\\\']) {
+                const literalLines = [
+                    'const char* banner = "first' + backslashes,
+                    (backslashes.length === 2 ? '"' : '') + '/* continued literal' + '\\',
+                    'last";',
+                ];
+                for (const comments of [[], ['/* actual comment', 'enum Hidden { HiddenValue = 123 };', '*/']]) {
+                    const lines = [...literalLines, ...comments, 'enum Values { First = 7, Last };'];
+                    assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(makeDoc(lines), lines.length - 1, 'Last'), 8, backslashes);
+                }
+            }
+        });
+
+        test('주석 제거는 같은 줄과 여러 줄 raw 문자열의 본문을 보존한다', () => {
+            const literal = 'R"tag(/* literal // " text)tag"';
+            const source = `const char* banner = ${literal}; /* removed */ const int Flag = 7;`;
+            assert.strictEqual((provider as any).stripInlineComments(source), source.replace('/* removed */', ' '));
+            const lines = ['const char* banner = R"tag(', '/* literal // " text', 'body)tag"; // removed', 'const int Flag = 7;'];
+            assert.deepStrictEqual((provider as any).getLinesWithoutComments(makeDoc(lines), 3), [
+                lines[0], lines[1], 'body)tag"; ', lines[3],
+            ]);
+        });
+
+        test('백슬래시로 이어진 줄 주석의 가짜 정의를 제외한다', async () => {
+            const doc = makeDoc(['// documentation' + '\\', 'const int Hidden = 99;', 'const int Flag = 7;']);
+            assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 1, 'Hidden'), null);
+            assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 2, 'Flag'), 7);
+        });
+
+        test('짧은 상수 정의는 필요한 prefix만 읽고 캐시를 확장하며 버전 변경을 반영한다', async () => {
+            const lines = ['const int First = 7;', '/* actual comment', 'const int Hidden = 99;', '*/ const int Second = 8;'];
+            const reads: number[] = [];
+            const doc = {
+                version: 1, lineCount: 100_000,
+                lineAt: (index: number) => {
+                    reads.push(index);
+                    assert.ok(index < lines.length, '정의 뒤의 거대한 문서 영역은 읽지 않아야 한다');
+                    return { text: lines[index] };
+                },
+            };
+            assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 0, 'First'), 7);
+            assert.deepStrictEqual(reads, [0]);
+            assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 0, 'First'), 7);
+            assert.deepStrictEqual(reads, [0]);
+            assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 3, 'Second'), 8);
+            assert.deepStrictEqual(reads, [0, 1, 2, 3]);
+            lines[0] = 'const int First = 9;';
+            doc.version++;
+            assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 0, 'First'), 9);
+            assert.deepStrictEqual(reads, [0, 1, 2, 3, 0]);
+        });
+
+        test('enum 값이나 닫는 중괄호를 찾으면 뒤 문서를 선스캔하지 않는다', async () => {
+            const reads: number[] = [];
+            const doc = {
+                version: 1, lineCount: 100_000,
+                lineAt: (index: number) => {
+                    reads.push(index);
+                    assert.strictEqual(index, 0, 'enum 뒤 문서는 읽지 않아야 한다');
+                    return { text: 'enum Values { First = 7, Last };' };
+                },
+            };
+            assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, 'Last'), 8);
+            assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, 'Missing'), null);
+            assert.deepStrictEqual(reads, [0]);
+        });
+
+        test('정의 앞 주석도 기존 줄 길이 상한을 적용하고 버전 변경 뒤 복구한다', async () => {
+            const max = NumberBaseHoverProvider.MAX_LINE_LENGTH;
+            const lines = ['/*' + 'x'.repeat(max - 1), '*/ const int Flag = 7;'];
+            const reads: number[] = [];
+            const doc = {
+                version: 1, lineCount: lines.length,
+                lineAt: (index: number) => { reads.push(index); return { text: lines[index] }; },
+            };
+            assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 1, 'Flag'), null);
+            assert.deepStrictEqual(reads, [0]);
+            assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 1, 'Flag'), null);
+            assert.deepStrictEqual(reads, [0], '같은 버전의 거대한 줄은 다시 읽지 않아야 한다');
+            lines[0] = '/*' + 'x'.repeat(max - 2);
+            doc.version++;
+            assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 1, 'Flag'), 7);
+            assert.deepStrictEqual(reads, [0, 0, 1]);
+        });
+
+        test('주석 prefix 탐색은 공유 deadline과 취소를 따르고 새 요청에서 이어 읽는다', async () => {
+            for (const stop of ['deadline', 'cancel'] as const) {
+                const token = { isCancellationRequested: false };
+                const request = (provider as any).createRequest(token);
+                const reads: number[] = [];
+                const doc = {
+                    version: 1, lineCount: 3,
+                    lineAt: (index: number) => {
+                        reads.push(index);
+                        if (index === 0) {
+                            if (stop === 'deadline') { request.deadline = 0; }
+                            else { token.isCancellationRequested = true; }
+                        }
+                        return { text: ['/* actual comment', '*/', 'const int Flag = 7;'][index] };
+                    },
+                };
+                assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 2, 'Flag', request), null, stop);
+                assert.deepStrictEqual(reads, [0], stop);
+                assert.strictEqual(await (provider as any).extractValueFromDefinitionContext(doc, 2, 'Flag', (provider as any).createRequest()), 7, stop);
+                assert.deepStrictEqual(reads, [0, 1, 2], stop);
+            }
+        });
+
+        test('빈 주석 줄은 초기화 식 한도를 소모하지 않고 긴 미완성 식은 중단한다', async () => {
+            const max = NumberBaseHoverProvider.MAX_LINE_LENGTH;
+            const blankComment = makeDoc(['enum Values { First = 7, /*', ...Array<string>(max + 1).fill(' * documentation'), '*/ Last };']);
+            assert.strictEqual(await (provider as any).extractEnumValue(blankComment, 0, 'Last'), 8);
+            const longInitializer = makeDoc(['enum Values { First =', '1'.repeat(max), ', Last };']);
+            assert.strictEqual(await (provider as any).extractEnumValue(longInitializer, 0, 'Last'), null);
+        });
+
+        test('주석이 나눈 초기화 식을 이어 읽고 주석 종료 뒤 자동 증가를 유지한다', async () => {
+            const doc = makeDoc([
+                'enum Values {',
+                '    First = 1 /* ignored, } //',
+                '    Fake = 99,',
+                '    */ + 2,',
+                "    Mask = 0x1'000 /* inline */ | 1, // no extra enumerator",
+                '    Last',
+                '};',
+            ]);
+            for (const [name, expected] of [['First', 3], ['Mask', 4097], ['Last', 4098], ['Fake', null]] as const) {
+                assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, name), expected, name);
+            }
+        });
+
+        test('주석 제거 캐시는 문서 버전이 바뀌면 다시 계산하며 닫히지 않은 주석은 값을 만들지 않는다', async () => {
+            const lines = ['enum Values { First = 7,', '/* Last,', '*/ Last };'];
+            const doc = { ...makeDoc(lines), version: 1 };
+            assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, 'Last'), 8);
+            lines[0] = 'enum Values { First = 10,';
+            doc.version++;
+            assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, 'Last'), 11);
+            lines[2] = 'Last };';
+            doc.version++;
+            assert.strictEqual(await (provider as any).extractEnumValue(doc, 0, 'Last'), null);
+        });
 
         test('enum 비트 연산은 bit 31과 32 이상을 보존하고 참조와 자동 증가에도 반영한다', async () => {
             const doc = makeDoc([

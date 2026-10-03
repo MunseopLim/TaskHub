@@ -508,8 +508,8 @@ suite('Hex Viewer 진입점 (openHexViewerFile)', () => {
         assert.deepStrictEqual(fake.posted[0].initialSelection, { startOffset: 4, endOffset: 6 });
         assert.deepStrictEqual(Array.from(fake.posted[0].data), [0x7f, 0x45, 0x4c, 0x46, 0xaa, 0xbb, 0xcc, 0xdd]);
         const html = hexPanelRegistry.getHtml(filePath) ?? '';
-        assert.ok(html.includes('jumpToOffset(initial.startOffset)'), '기존 Go-to 경로로 처음 선택 위치를 열어야 한다');
-        assert.ok(html.includes('selectedEndOffset = initial.endOffset'), '선택 끝점이 보존되어야 한다');
+        assert.ok(html.includes('jumpToOffset(initial.startOffset, initial.endOffset, initial.endOffset)'),
+            'Go-to 경로에 inclusive 시작·끝 범위를 함께 전달해야 한다');
     });
 
     test('처음 선택 범위가 파일 밖이면 패널을 만들지 않는다', () => {

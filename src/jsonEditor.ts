@@ -3289,6 +3289,8 @@ export function getWebviewContent(
                 }
             }
             const beginEdit = () => {
+                const rowIdx = parseInt(td.dataset.row);
+                const col = td.dataset.col;
                 // Close other editing cells. invalid JSON 등으로 commit이
                 // 거부되면 그 셀은 editing 상태로 남으며, 새 셀로의 진입을
                 // 막아 두 셀이 동시에 편집 상태가 되는 것을 방지한다.
@@ -3306,8 +3308,12 @@ export function getWebviewContent(
                     }
                     return;
                 }
-                td.classList.add('editing');
-                const input = td.querySelector('.cell-edit input, .cell-edit textarea');
+                // 다른 셀의 commit은 표 전체를 다시 그린다. 클릭/keydown을
+                // 받은 td도 이미 교체됐을 수 있으므로 새 DOM에서 같은 셀을 연다.
+                const target = findCellByCol(rowIdx, col);
+                if (!target) { return; }
+                target.classList.add('editing');
+                const input = target.querySelector('.cell-edit input, .cell-edit textarea');
                 if (input) { input.focus(); input.select && input.select(); }
             };
             view.addEventListener('click', beginEdit);

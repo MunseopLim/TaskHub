@@ -23,6 +23,12 @@ function observeHtml(html: string): string {
             if (!element) { throw new Error('Missing element: ' + selector); }
             return element;
         };
+        const requiredCell = operation => {
+            const td = Array.from(document.querySelectorAll('td[data-row]'))
+                .find(cell => Number(cell.dataset.row) === (operation.row ?? 0) && cell.dataset.col === operation.col);
+            if (!td) { throw new Error('Missing editable cell: ' + operation.col); }
+            return td;
+        };
         const inspect = () => ({
             cells: Array.from(document.querySelectorAll('td[data-row]')).map(td => ({
                 row: Number(td.dataset.row), col: td.dataset.col,
@@ -47,6 +53,10 @@ function observeHtml(html: string): string {
                 if (td && element.classList.contains('cell-view')) { return 'cell:' + td.dataset.row + ':' + td.dataset.col; }
                 return element.id || element.tagName;
             })(),
+            focusedCell: (() => {
+                const td = document.activeElement?.closest?.('td[data-row]');
+                return td ? { row: Number(td.dataset.row), col: td.dataset.col } : undefined;
+            })(),
             // 화면에 보이는 Tab 정지만 센다(편집 중이 아닌 셀의 입력 컨트롤은 숨겨져 있다).
             tableTabStops: Array.from(document.querySelectorAll('#tableWrapper tbody button, #tableWrapper tbody .cell-view'))
                 .filter(element => element.tabIndex >= 0 && element.getClientRects().length > 0).length,
@@ -61,12 +71,18 @@ function observeHtml(html: string): string {
             try {
                 const keyResults = [];
                 for (const operation of event.data.operations) {
-                    if (operation.kind === 'edit' || operation.kind === 'open') {
-                        const td = Array.from(document.querySelectorAll('td[data-row]'))
-                            .find(cell => Number(cell.dataset.row) === (operation.row ?? 0) && cell.dataset.col === operation.col);
-                        if (!td) { throw new Error('Missing editable cell: ' + operation.col); }
-                        td.querySelector('.cell-view').click();
-                        const input = td.querySelector('.cell-edit input, .cell-edit textarea');
+                    if (operation.kind === 'edit' || operation.kind === 'open' || operation.kind === 'pointerOpen') {
+                        const view = requiredCell(operation).querySelector('.cell-view');
+                        if (operation.kind === 'pointerOpen') {
+                            view.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                            // 합성 MouseEvent는 기본 포커스 이동을 하지 않는다. 실제
+                            // 포인터처럼 blur를 먼저 발생시키고 같은 turn에서 클릭한다.
+                            view.focus();
+                            view.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                        }
+                        view.click();
+                        // 다른 셀 commit으로 표가 교체되어도 현재 화면의 입력을 읽는다.
+                        const input = requiredCell(operation).querySelector('.cell-edit input, .cell-edit textarea');
                         if (operation.kind === 'edit') {
                             input.value = operation.value;
                             input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -248,6 +264,108 @@ async function withJsonBrowser(
 
 suite('JSON Editor 실제 브라우저 편집과 저장', function () {
     this.timeout(30000);
+    test('셀 blur 직후 클릭해 다른 열과 행으로 이어 편집하고 저장한다', async () => {
+        await withJsonBrowser({ rows: [{ a: 'old', b: 'next' }, { a: 'other', b: 'last' }] }, async browser => {
+            let state = await browser.operate([
+                { kind: 'edit', col: 'a', value: 'first edit' },
+                { kind: 'pointerOpen', col: 'b' },
+            ]);
+            assert.strictEqual(state.cells.find((cell: any) => cell.row === 0 && cell.col === 'a').label, 'first edit');
+            assert.strictEqual(state.cells.find((cell: any) => cell.row === 0 && cell.col === 'a').editing, false);
+            assert.strictEqual(state.cells.find((cell: any) => cell.row === 0 && cell.col === 'b').editing, true);
+            assert.deepStrictEqual(state.focusedCell, { row: 0, col: 'b' });
+            assert.strictEqual(state.dirty, true);
+
+            state = await browser.operate([
+                { kind: 'edit', col: 'b', value: 'second edit' },
+                { kind: 'pointerOpen', row: 1, col: 'a' },
+            ]);
+            assert.strictEqual(state.cells.find((cell: any) => cell.row === 0 && cell.col === 'b').label, 'second edit');
+            assert.strictEqual(state.cells.find((cell: any) => cell.row === 1 && cell.col === 'a').editing, true);
+            assert.deepStrictEqual(state.focusedCell, { row: 1, col: 'a' });
+
+            const after = browser.messages.length;
+            await browser.operate([
+                { kind: 'edit', row: 1, col: 'a', value: 'third edit' },
+                { kind: 'click', id: 'btnSave' },
+            ]);
+            assert.strictEqual((await browser.waitFor('saveAck', after)).dirty, false);
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), {
+                rows: [{ a: 'first edit', b: 'second edit' }, { a: 'third edit', b: 'last' }],
+            });
+        });
+    });
+
+    test('셀 blur 직후 Enter와 Space로 다른 셀을 열어 편집과 포커스를 이어 간다', async () => {
+        await withJsonBrowser({ rows: [{ a: 'old', b: 'next' }, { a: 'other', b: 'last' }] }, async browser => {
+            let state = await browser.operate([
+                { kind: 'edit', col: 'a', value: 'first edit' },
+                { kind: 'key', selector: 'td[data-row="0"][data-col="b"] .cell-view', key: 'Enter' },
+            ]);
+            assert.strictEqual(state.keyResults[0].prevented, true);
+            assert.strictEqual(state.cells.find((cell: any) => cell.row === 0 && cell.col === 'a').label, 'first edit');
+            assert.strictEqual(state.cells.find((cell: any) => cell.row === 0 && cell.col === 'b').editing, true);
+            assert.deepStrictEqual(state.focusedCell, { row: 0, col: 'b' });
+
+            state = await browser.operate([
+                { kind: 'edit', col: 'b', value: 'second edit' },
+                { kind: 'key', selector: 'td[data-row="1"][data-col="a"] .cell-view', key: ' ' },
+            ]);
+            assert.strictEqual(state.keyResults[0].prevented, true);
+            assert.strictEqual(state.cells.find((cell: any) => cell.row === 0 && cell.col === 'b').label, 'second edit');
+            assert.strictEqual(state.cells.find((cell: any) => cell.row === 1 && cell.col === 'a').editing, true);
+            assert.deepStrictEqual(state.focusedCell, { row: 1, col: 'a' });
+
+            const after = browser.messages.length;
+            await browser.operate([{ kind: 'click', id: 'btnSave' }]);
+            assert.strictEqual((await browser.waitFor('saveAck', after)).dirty, false);
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), {
+                rows: [{ a: 'first edit', b: 'second edit' }, { a: 'other', b: 'last' }],
+            });
+        });
+    });
+
+    for (const activation of ['pointer', 'keyboard']) {
+        test(`잘못된 JSON 셀에서 ${activation} 전환을 막고 수정 후 같은 동작으로 다음 셀을 연다`, async () => {
+            await withJsonBrowser({ rows: [{ a: { nested: 1 }, b: 'next' }] }, async browser => {
+                const openNext = activation === 'pointer'
+                    ? { kind: 'pointerOpen', col: 'b' }
+                    : { kind: 'key', selector: 'td[data-col="b"] .cell-view', key: 'Enter' };
+                let state = await browser.operate([
+                    { kind: 'edit', col: 'a', value: '{' },
+                    openNext,
+                ]);
+                assert.strictEqual(state.cells.find((cell: any) => cell.col === 'a').editing, true);
+                assert.strictEqual(state.cells.find((cell: any) => cell.col === 'a').input, '{');
+                assert.strictEqual(state.cells.find((cell: any) => cell.col === 'b').editing, false);
+                assert.deepStrictEqual(state.focusedCell, { row: 0, col: 'a' });
+                assert.strictEqual(state.errorVisible, true);
+                assert.strictEqual(state.dirty, true);
+                assert.strictEqual(fs.readFileSync(browser.filePath, 'utf8'), browser.initialText);
+
+                state = await browser.operate([
+                    { kind: 'edit', col: 'a', value: '{"nested":2}' },
+                    openNext,
+                ]);
+                assert.strictEqual(state.cells.find((cell: any) => cell.col === 'a').editing, false);
+                assert.deepStrictEqual(JSON.parse(state.cells.find((cell: any) => cell.col === 'a').input), { nested: 2 });
+                assert.strictEqual(state.cells.find((cell: any) => cell.col === 'b').editing, true);
+                assert.deepStrictEqual(state.focusedCell, { row: 0, col: 'b' });
+                assert.strictEqual(state.errorVisible, false);
+
+                const after = browser.messages.length;
+                await browser.operate([
+                    { kind: 'edit', col: 'b', value: 'continued edit' },
+                    { kind: 'click', id: 'btnSave' },
+                ]);
+                assert.strictEqual((await browser.waitFor('saveAck', after)).dirty, false);
+                assert.deepStrictEqual(JSON.parse(fs.readFileSync(browser.filePath, 'utf8')), {
+                    rows: [{ a: { nested: 2 }, b: 'continued edit' }],
+                });
+            });
+        });
+    }
+
     test('수정 없이 셀을 열고 확정해도 NUL·CR·CRLF·선행 LF와 배열 줄바꿈을 그대로 저장한다', async () => {
         const initial = { rows: [{
             nul: 'a\0b',

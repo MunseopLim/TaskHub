@@ -88,6 +88,10 @@ export interface MemoryUsage {
     reportedUsed?: number;
 }
 
+function sectionUsageType(section: ElfSection): string {
+    return section.isNoBits ? 'NOBITS' : section.isExec ? 'CODE' : section.isWrite ? 'DATA' : 'RODATA';
+}
+
 export interface ElfSymbol {
     name: string;
     addr: number;
@@ -486,7 +490,7 @@ export function computeMemoryUsage(
             const sec = sections[sectionIndex];
             if (!sec.isAlloc || sec.size === 0) { continue; }
             if (sec.addr >= region.origin && sec.addr < regionEnd) {
-                const type = sec.isNoBits ? 'NOBITS' : (sec.isExec ? 'CODE' : (sec.isWrite ? 'DATA' : 'RODATA'));
+                const type = sectionUsageType(sec);
                 matchingSections.push({
                     name: sec.name,
                     size: sec.size,
@@ -611,7 +615,9 @@ export function computeSymbolUsage(
         const bindingRank = (binding: string): number => binding === 'GLOBAL' ? 2 : binding === 'WEAK' ? 1 : 0;
         const aliasOwners = new Map<string, { entry: MemoryUsageEntry; rank: number }>();
         for (const sym of regionSymbols) {
-            const symType = sym.type === 'FUNC' ? 'CODE' : 'DATA';
+            const parentSection = sym.sectionIndex > 0 && sym.sectionIndex < sections.length
+                ? sections[sym.sectionIndex] : undefined;
+            const symType = sym.type === 'FUNC' ? 'CODE' : parentSection ? sectionUsageType(parentSection) : 'DATA';
             // Overlay 섹션은 같은 실행 주소에 서로 다른 파일 바이트를 담을 수 있다.
             const aliasKey = `${sym.sectionIndex}:${sym.addr}:${sym.size}:${symType}`;
             const owner = aliasOwners.get(aliasKey);
@@ -634,8 +640,6 @@ export function computeSymbolUsage(
                 continue;
             }
             // Find parent section name
-            const parentSection = sym.sectionIndex > 0 && sym.sectionIndex < sections.length
-                ? sections[sym.sectionIndex] : undefined;
             const parentName = parentSection?.name || '';
 
             const entry: MemoryUsageEntry = {
@@ -669,7 +673,7 @@ export function computeSymbolUsage(
             const secStart = sec.addr;
             const secEnd = sec.addr + sec.size;
             let cursor = secStart;
-            const secType = sec.isNoBits ? 'NOBITS' : (sec.isExec ? 'CODE' : (sec.isWrite ? 'DATA' : 'RODATA'));
+            const secType = sectionUsageType(sec);
 
             for (const cr of merged) {
                 if (cr.start >= secEnd) { break; }
@@ -775,7 +779,7 @@ export function summarizeSections(
             size: s.size,
             addr: s.addr,
             endAddr: s.addr + s.size,
-            type: s.isNoBits ? 'NOBITS' : (s.isExec ? 'CODE' : (s.isWrite ? 'DATA' : 'RODATA')),
+            type: sectionUsageType(s),
             fileRange: fileSize === undefined
                 ? undefined
                 : resolveElfFileRange(s.addr, s.size, sections, segments, fileSize, sectionIndex),

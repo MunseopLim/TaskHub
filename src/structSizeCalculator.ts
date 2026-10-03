@@ -3,6 +3,8 @@
  * Calculates struct/class sizes based on type configuration
  */
 
+import { t } from './i18n';
+
 /**
  * Type configuration for size and alignment
  */
@@ -660,15 +662,28 @@ export class StructSizeCalculator {
 
     /**
      * Parse a C array-dimension token, accepting both decimal (`16`) and
-     * hexadecimal (`0x10`) sizes — the latter is common in embedded buffers
-     * such as `uint8_t buf[0x100];`. Returns undefined for missing/invalid sizes.
+     * hexadecimal (`0x10`) and C octal (`010`) sizes. Invalid numeric dimensions
+     * fail the layout instead of silently turning an array into a scalar.
      */
     private parseArraySize(text: string | undefined): number | undefined {
         if (text === undefined || text === '') {
             return undefined;
         }
-        const n = Number(text);
-        return Number.isInteger(n) && n >= 0 ? n : undefined;
+        const octal = /^0\d/u.test(text);
+        if (octal && !/^0[0-7]+$/u.test(text)) {
+            throw new Error(t(
+                `잘못된 8진 배열 길이입니다: ${text}`,
+                `Invalid octal array dimension: ${text}`
+            ));
+        }
+        const n = Number(octal ? `0o${text.slice(1)}` : text);
+        if (!Number.isSafeInteger(n) || n < 0) {
+            throw new Error(t(
+                `지원되지 않는 배열 길이입니다: ${text}`,
+                `Unsupported array dimension: ${text}`
+            ));
+        }
+        return n;
     }
 
     /**
@@ -686,7 +701,7 @@ export class StructSizeCalculator {
             if (n === undefined) {
                 return undefined;
             }
-            product = (product ?? 1) * n;
+            product = this.checkedSize((product ?? 1) * n);
         }
         return product;
     }
@@ -759,13 +774,14 @@ export class StructSizeCalculator {
         // 선언 타입이 달라도(`uint8_t:3` 뒤 `uint16_t:12`) 같은 저장 단위를 이어 쓰며, 필드가
         // 선언 타입 크기의 정렬된 단위 경계를 넘을 때만 다음 단위로 옮긴다. 비트필드 뒤의 일반
         // 멤버는 사용한 마지막 바이트 다음부터 배치된다.
-        let bitCursor: number | undefined;
+        // 비트 위치는 안전한 바이트 크기의 8배까지 커질 수 있어 정수 연산으로 유지한다.
+        let bitCursor: bigint | undefined;
 
-        const packingAlignment = this.typeConfig.packingAlignment || 8;
+        const packingAlignment = this.checkedSize(this.typeConfig.packingAlignment || 8);
 
         const flushBitField = () => {
             if (bitCursor !== undefined) {
-                currentOffset = Math.ceil(bitCursor / 8);
+                currentOffset = this.checkedSize(Number((bitCursor + 7n) / 8n));
                 bitCursor = undefined;
             }
         };
@@ -780,7 +796,7 @@ export class StructSizeCalculator {
             // Apply packing alignment limit
             const memberAlignment = Math.min(typeInfo.alignment, packingAlignment);
             // `data[0]`(길이 0 배열)은 0바이트다 — `|| 1`이면 한 요소로 계산됐다.
-            const memberSize = typeInfo.size * (member.arraySize ?? 1);
+            const memberSize = this.checkedSize(typeInfo.size * (member.arraySize ?? 1));
 
             // Update struct alignment (max of all member alignments). AAPCS(arm-none-eabi·aarch64-none-elf)는
             // 이름 없는 비트필드(`T : 0` 포함)의 타입도 구조체 정렬에 넣는다 — `uint8_t a:3; uint32_t :0;
@@ -788,15 +804,16 @@ export class StructSizeCalculator {
             structAlignment = Math.max(structAlignment, memberAlignment);
 
             if (member.isBitField) {
-                const bitWidth = member.bitWidth ?? 0;
+                const bitWidth = this.checkedSize(member.bitWidth ?? 0);
                 const storageSize = typeInfo.size;
-                const unitBits = Math.max(8, storageSize * 8);
-                const cursor = bitCursor ?? currentOffset * 8;
+                const unitBits = BigInt(Math.max(1, storageSize)) * 8n;
+                const cursor = bitCursor ?? BigInt(currentOffset) * 8n;
                 if (member.isAnonymousBitField && bitWidth === 0) {
                     // `T : 0`은 다음 비트필드를 T 정렬 경계에서 시작시킨다.
-                    const alignedBits = Math.ceil(cursor / (memberAlignment * 8)) * memberAlignment * 8;
-                    totalPadding += alignedBits / 8 - Math.ceil(cursor / 8);
-                    currentOffset = alignedBits / 8;
+                    const alignmentBits = BigInt(Math.max(1, memberAlignment)) * 8n;
+                    const alignedBits = (cursor + alignmentBits - 1n) / alignmentBits * alignmentBits;
+                    totalPadding = this.checkedSize(totalPadding + Number(alignedBits / 8n - (cursor + 7n) / 8n));
+                    currentOffset = this.checkedSize(Number(alignedBits / 8n));
                     bitCursor = undefined;
                     member.offset = currentOffset;
                     member.size = 0;
@@ -805,16 +822,16 @@ export class StructSizeCalculator {
                 }
                 let start = cursor;
                 // packing이 정렬을 낮추면(#pragma pack) GCC는 단위 경계를 넘는 배치를 허용한다.
-                const straddles = Math.floor(start / unitBits) !== Math.floor((start + Math.max(bitWidth, 1) - 1) / unitBits);
+                const straddles = start / unitBits !== (start + BigInt(Math.max(bitWidth, 1)) - 1n) / unitBits;
                 if (straddles && memberAlignment >= typeInfo.alignment) {
-                    const next = Math.ceil(start / unitBits) * unitBits;
-                    totalPadding += next / 8 - Math.ceil(start / 8);
+                    const next = (start + unitBits - 1n) / unitBits * unitBits;
+                    totalPadding = this.checkedSize(totalPadding + Number(next / 8n - (start + 7n) / 8n));
                     start = next;
                 }
-                member.offset = Math.floor(start / unitBits) * storageSize;
+                member.offset = this.checkedSize(Number(start / unitBits * BigInt(storageSize)));
                 member.size = storageSize;
                 member.alignment = memberAlignment;
-                bitCursor = start + bitWidth;
+                bitCursor = start + BigInt(bitWidth);
                 continue;
             }
 
@@ -822,8 +839,8 @@ export class StructSizeCalculator {
 
             // Add padding before this member
             const padding = this.calculatePadding(currentOffset, memberAlignment);
-            totalPadding += padding;
-            currentOffset += padding;
+            totalPadding = this.checkedSize(totalPadding + padding);
+            currentOffset = this.checkedSize(currentOffset + padding);
 
             // Set member offset and size
             member.offset = currentOffset;
@@ -831,15 +848,15 @@ export class StructSizeCalculator {
             member.alignment = memberAlignment;
 
             // Move to next position
-            currentOffset += memberSize;
+            currentOffset = this.checkedSize(currentOffset + memberSize);
         }
 
         flushBitField();
 
         // Add trailing padding to align struct size to struct alignment
         const trailingPadding = this.calculatePadding(currentOffset, structAlignment);
-        totalPadding += trailingPadding;
-        currentOffset += trailingPadding;
+        totalPadding = this.checkedSize(totalPadding + trailingPadding);
+        currentOffset = this.checkedSize(currentOffset + trailingPadding);
 
         return {
             structName,
@@ -855,7 +872,7 @@ export class StructSizeCalculator {
         let maxSize = 0;
         let unionAlignment = 1;
         let hasUnresolvedTypes = false;
-        const packingAlignment = this.typeConfig.packingAlignment || 8;
+        const packingAlignment = this.checkedSize(this.typeConfig.packingAlignment || 8);
 
         for (const member of members) {
             const typeInfo = this.getMemberTypeInfo(member);
@@ -863,7 +880,7 @@ export class StructSizeCalculator {
                 hasUnresolvedTypes = true;
             }
             const memberAlignment = Math.min(typeInfo.alignment, packingAlignment);
-            const memberSize = typeInfo.size * (member.arraySize ?? 1);
+            const memberSize = this.checkedSize(typeInfo.size * (member.arraySize ?? 1));
             unionAlignment = Math.max(unionAlignment, memberAlignment);
             maxSize = Math.max(maxSize, memberSize);
             member.offset = 0;
@@ -874,7 +891,7 @@ export class StructSizeCalculator {
         const trailingPadding = this.calculatePadding(maxSize, unionAlignment);
         return {
             structName,
-            totalSize: maxSize + trailingPadding,
+            totalSize: this.checkedSize(maxSize + trailingPadding),
             alignment: unionAlignment,
             members,
             padding: trailingPadding,
@@ -883,10 +900,23 @@ export class StructSizeCalculator {
     }
 
     private getMemberTypeInfo(member: StructMember): TypeConfig & { resolved: boolean } {
-        if (typeof member.fixedSize === 'number' && typeof member.fixedAlignment === 'number') {
-            return { size: member.fixedSize, alignment: member.fixedAlignment, resolved: true };
+        const info = typeof member.fixedSize === 'number' && typeof member.fixedAlignment === 'number'
+            ? { size: member.fixedSize, alignment: member.fixedAlignment, resolved: true }
+            : this.getTypeInfo(member.type);
+        this.checkedSize(info.size);
+        this.checkedSize(info.alignment);
+        return info;
+    }
+
+    /** Reject imprecise layout values before they can become successful estimates. */
+    private checkedSize(value: number): number {
+        if (!Number.isSafeInteger(value) || value < 0) {
+            throw new Error(t(
+                '구조체 크기, 오프셋, 정렬은 안전한 음이 아닌 정수여야 합니다.',
+                'Struct sizes, offsets, and alignments must be non-negative safe integers.'
+            ));
         }
-        return this.getTypeInfo(member.type);
+        return value;
     }
 
     /**
@@ -930,8 +960,10 @@ export class StructSizeCalculator {
      * Calculate padding needed to align to given alignment
      */
     private calculatePadding(currentOffset: number, alignment: number): number {
-        // Guard against zero/negative alignment from misconfigured types (modulo 0 → NaN/hang).
-        if (!Number.isFinite(alignment) || alignment <= 0) { return 0; }
+        this.checkedSize(currentOffset);
+        this.checkedSize(alignment);
+        // Preserve zero-alignment handling for custom types without taking modulo 0.
+        if (alignment === 0) { return 0; }
         const remainder = currentOffset % alignment;
         return remainder === 0 ? 0 : alignment - remainder;
     }

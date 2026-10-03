@@ -524,7 +524,40 @@ function truncateUtf8(value: string, maxBytes: number): string {
     return value.slice(0, low);
 }
 
-/** 직렬화 자체가 영속 로그 상한을 넘으면 가장 큰 stdout/stderr부터 줄인다. */
+/** JSON 문자열의 바깥 따옴표를 제외한 실제 저장 비용. NUL·줄바꿈의 escape도 포함한다. */
+function jsonStringContentBytes(value: string): number {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8') - 2;
+}
+
+/** 종료 원인·마지막 진단이 있는 뒷부분을 JSON UTF-8 byte 상한 안에서 남긴다. */
+function truncateUtf8Tail(value: string, maxBytes: number): string {
+    if (maxBytes <= 0) { return ''; }
+    if (jsonStringContentBytes(value) <= maxBytes) { return value; }
+    const tail = (length: number): string => {
+        let start = value.length - length;
+        if (
+            start > 0 && start < value.length
+            && value.charCodeAt(start - 1) >= 0xD800 && value.charCodeAt(start - 1) <= 0xDBFF
+            && value.charCodeAt(start) >= 0xDC00 && value.charCodeAt(start) <= 0xDFFF
+        ) {
+            start++;
+        }
+        return value.slice(start);
+    };
+    let low = 0;
+    let high = value.length;
+    while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (jsonStringContentBytes(tail(mid)) <= maxBytes) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    return tail(low);
+}
+
+/** 직렬화 상한을 넘으면 stdout/stderr의 앞부분부터 버려 마지막 진단을 남긴다. */
 export function serializeActionRunLog(log: ActionRunLog, maxBytes = RUN_LOG_MAX_FILE_BYTES): string {
     const cloned = JSON.parse(JSON.stringify(log)) as ActionRunLog;
     let encoded = `${JSON.stringify(cloned, null, 2)}\n`;
@@ -554,22 +587,22 @@ export function serializeActionRunLog(log: ActionRunLog, maxBytes = RUN_LOG_MAX_
     for (let i = 0; i < streams.length; i++) {
         const stream = streams[i];
         const share = Math.floor(remainingBudget / (streams.length - i));
-        const text = truncateUtf8(stream.original, share);
+        const text = truncateUtf8Tail(stream.original, share);
         stream.output[stream.key] = text;
-        remainingBudget -= Buffer.byteLength(text, 'utf8');
+        remainingBudget -= jsonStringContentBytes(text);
     }
 
     encoded = `${JSON.stringify(cloned, null, 2)}\n`;
     while (Buffer.byteLength(encoded, 'utf8') > maxBytes) {
         const populated = streams
-            .map(stream => ({ stream, bytes: Buffer.byteLength(stream.output[stream.key] ?? '', 'utf8') }))
+            .map(stream => ({ stream, bytes: jsonStringContentBytes(stream.output[stream.key] ?? '') }))
             .filter(item => item.bytes > 0)
             .sort((a, b) => b.bytes - a.bytes)[0];
         if (!populated) {
             throw new Error(`Run log metadata exceeds the ${maxBytes}-byte file limit.`);
         }
         const excess = Buffer.byteLength(encoded, 'utf8') - maxBytes;
-        populated.stream.output[populated.stream.key] = truncateUtf8(
+        populated.stream.output[populated.stream.key] = truncateUtf8Tail(
             populated.stream.output[populated.stream.key] ?? '',
             Math.max(0, populated.bytes - excess - 256)
         );

@@ -527,7 +527,92 @@ async function checkBrowserFindKeys(): Promise<void> {
     }
 }
 
+async function checkBrowserInitialSelection(): Promise<void> {
+    const result = parseBinary(Buffer.from(Array.from({ length: 34 }, (_, index) => index)));
+    const panel = vscode.window.createWebviewPanel(
+        'taskhub.test.hexSelection', 'Hex selection regression', vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true },
+    );
+    const deliveryId = 'browser-byte-selection';
+    const cases = [
+        { startOffset: 16, endOffset: 23, copied: '13121110 17161514', selected: ['16', '20'] },
+        { startOffset: 17, endOffset: 21, copied: '14131211 15', selected: ['16', '20'] },
+        { startOffset: 17, endOffset: 18, copied: '1211', selected: ['16'] },
+        { startOffset: 17, endOffset: 17, copied: '11', selected: ['16'] },
+        { startOffset: 32, endOffset: 33, copied: '2120', selected: ['32'] },
+    ];
+    let phase = 0;
+    let subscription: vscode.Disposable | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        const html = buildHexViewerHtml('selection.bin', result, panel.webview, deliveryId, {
+            unitSize: 4, endian: 'little', findMode: 'bytes',
+        });
+        const scriptTag = html.match(/<script nonce="[^"]+">/)?.[0];
+        assert.ok(scriptTag);
+        const observer = `${scriptTag}
+        (() => {
+            const api = acquireVsCodeApi();
+            window.acquireVsCodeApi = () => api;
+            window.addEventListener('error', event => api.postMessage({ command: 'testError', error: event.message }));
+            window.addEventListener('unhandledrejection', event => api.postMessage({ command: 'testError', error: String(event.reason) }));
+            window.addEventListener('message', event => {
+                if (event.data?.command !== 'testInspectSelection') { return; }
+                requestAnimationFrame(() => requestAnimationFrame(() => {
+                    document.getElementById('hexContainer').focus();
+                    const clipboard = new DataTransfer();
+                    const copy = new ClipboardEvent('copy', { clipboardData: clipboard, bubbles: true, cancelable: true });
+                    document.dispatchEvent(copy);
+                    api.postMessage({
+                        command: 'testSelectionState', phase: event.data.phase,
+                        selected: Array.from(document.querySelectorAll('#hexBody .hex-cell.selected')).map(cell => cell.dataset.offset),
+                        status: document.getElementById('statusBar').textContent,
+                        copied: clipboard.getData('text/plain'), prevented: copy.defaultPrevented,
+                    });
+                }));
+            });
+        })();
+        </script>`;
+        await new Promise<void>((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error(`Hex initial selection timed out at phase ${phase}`)), 20000);
+            const deliver = () => postHexViewerData(panel.webview, result, cases[phase], deliveryId);
+            subscription = panel.webview.onDidReceiveMessage(message => {
+                try {
+                    if (message.command === 'testError') { throw new Error(message.error); }
+                    if (message.command === 'ready') { deliver(); }
+                    if (message.command === 'dataReceived') {
+                        void panel.webview.postMessage({ command: 'testInspectSelection', phase });
+                    }
+                    if (message.command === 'testSelectionState') {
+                        assert.strictEqual(message.phase, phase);
+                        const expected = cases[phase];
+                        assert.deepStrictEqual(message.selected, expected.selected);
+                        assert.strictEqual(message.copied, expected.copied, `phase ${phase}: selection copied extra bytes`);
+                        assert.strictEqual(message.prevented, true);
+                        const count = expected.endOffset - expected.startOffset + 1;
+                        if (count > 1) {
+                            assert.ok(message.status.includes(buildHexViewerStrings().statusSelected.replace('{n}', String(count))), message.status);
+                        }
+                        if (count < 4) { assert.ok(!message.status.includes('u32:'), message.status); }
+                        if (++phase < cases.length) { deliver(); } else { resolve(); }
+                    }
+                } catch (error) { reject(error); }
+            });
+            panel.webview.html = html.replace(scriptTag, observer + scriptTag);
+        });
+    } finally {
+        clearTimeout(timer);
+        subscription?.dispose();
+        panel.dispose();
+    }
+}
+
 suite('Hex Viewer 실제 브라우저 초기화', () => {
+    test('초기 symbol byte 범위를 실제 웹뷰에서 정확하게 표시하고 unit 밖의 바이트를 복사하지 않는다', async function () {
+        this.timeout(25000);
+        await checkBrowserInitialSelection();
+    });
+
     test('찾기 Enter·Shift+Enter 순환 이동과 Escape 닫기가 이전 포커스를 복원한다', async function () {
         this.timeout(25000);
         await checkBrowserFindKeys();

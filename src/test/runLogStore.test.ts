@@ -105,6 +105,28 @@ suite('Action run log storage', () => {
         assert.ok((parsed.tasks[0].output.originalBytes ?? 0) > 20_000);
     });
 
+    test('저장 상한과 JSON escape 비용이 커도 stdout/stderr의 마지막 진단과 UTF-8 문자를 보존한다', () => {
+        const log = sampleLog();
+        const stdoutTail = '마지막 stdout 오류🙂';
+        const stderrTail = '마지막 stderr 진단🛑';
+        log.tasks[0].output.stdout = '앞부분 stdout\n' + '\u0000🙂'.repeat(10000) + stdoutTail;
+        log.tasks[0].output.stderr = '앞부분 stderr\n' + '\u0000🛑'.repeat(10000) + stderrTail;
+        const encoded = serializeActionRunLog(log, 8192);
+        const stored = JSON.parse(encoded) as ActionRunLog;
+        assert.ok(Buffer.byteLength(encoded, 'utf8') <= 8192);
+        assert.strictEqual(stored.truncated, true);
+        assert.strictEqual(stored.tasks[0].output.truncated, true);
+        assert.strictEqual(stored.tasks[0].output.originalBytes,
+            Buffer.byteLength(log.tasks[0].output.stdout, 'utf8') + Buffer.byteLength(log.tasks[0].output.stderr, 'utf8'));
+        for (const [stream, tail] of [['stdout', stdoutTail], ['stderr', stderrTail]] as const) {
+            const value = stored.tasks[0].output[stream]!;
+            assert.ok(value.endsWith(tail), `${stream}의 마지막 진단이 사라졌다`);
+            assert.ok(!value.includes('앞부분'), '상한을 넘으면 앞부분부터 버려야 한다');
+            assert.strictEqual(Buffer.from(value, 'utf8').toString('utf8'), value, '잘린 surrogate가 남았다');
+        }
+        assert.ok(log.tasks[0].output.stdout.startsWith('앞부분 stdout'), '직렬화는 실행 당시 원본을 변경하지 않는다');
+    });
+
     test('워크스페이스 내부에 원자적으로 쓰고 logs 전용 .gitignore를 만든다', async () => {
         let nonce = 0;
         const store = new RunLogStore(workspaceRoot, () => Date.now(), () => `n${++nonce}`);

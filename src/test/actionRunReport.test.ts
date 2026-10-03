@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import { buildActionRunReportHtml } from '../actionRunReport';
 import { t } from '../i18n';
-import type { ActionRunLog } from '../runLogStore';
+import { type ActionRunLog, serializeActionRunLog } from '../runLogStore';
 
 suite('Action Run Report', () => {
     function sampleLog(): ActionRunLog {
@@ -71,6 +71,20 @@ suite('Action Run Report', () => {
         assert.ok(/<details class="tasks">/.test(html));
         assert.ok(!/<details class="tasks" open>/.test(html));
         assert.ok(html.includes('<table>'), 'the summary table stays visible even on success');
+    });
+
+    test('저장 상한을 넘긴 실패 stdout도 실행 보고서에서 마지막 원인을 읽을 수 있다', () => {
+        const log = sampleLog();
+        const marker = 'FINAL BUILD FAILURE: missing firmware symbol';
+        log.tasks[0].output.stdout = 'noise\n'.repeat(10000) + marker;
+        log.tasks[0].output.stderr = '';
+        const stored = JSON.parse(serializeActionRunLog(log, 8192)) as ActionRunLog;
+        const html = buildActionRunReportHtml(stored, 'n');
+        assert.ok(html.includes(marker), '저장/읽기/표시를 거쳐도 마지막 실패 원인이 남아야 한다');
+        assert.ok(html.includes(t(
+            '로그 파일 크기 상한 때문에 원래 출력의 일부만 저장되었습니다.',
+            'Only part of the original output was stored because of the log file size limit.'
+        )));
     });
 
     test('실패한 태스크 이름을 요약에 직접 적는다', () => {

@@ -336,6 +336,130 @@ suite('StructSizeCalculator Test Suite', () => {
             assert.strictEqual(result.totalSize, 0x104);
         });
 
+        test('C의 8진 배열 길이를 일반·포인터·함수 포인터·중첩 배열에 동일하게 적용한다', () => {
+            const cases = [
+                ['uint8_t values[010];', 8],
+                ['uint8_t values[02][010];', 16],
+                ['uint8_t *values[010];', 32],
+                ['void (*values[010])(int);', 32],
+                ['struct { uint8_t value; } values[010];', 8],
+            ] as const;
+            for (const [declaration, expectedSize] of cases) {
+                const result = calculator.calculateStructSize('Octal', [`struct Octal { ${declaration} };`], 0);
+                assert.strictEqual(result.success, true, declaration);
+                assert.strictEqual(result.totalSize, expectedSize, declaration);
+                assert.strictEqual(result.members[0].size, expectedSize, declaration);
+            }
+        });
+
+        test('잘못된 8진수·부정확한 차원·차원 곱은 배열을 스칼라로 축소하지 않는다', () => {
+            for (const dimensions of ['[08]', '[09]', '[9007199254740993]', '[0x20000000000001]', '[9007199254740991][2]']) {
+                for (const declaration of [
+                    `uint8_t values${dimensions};`,
+                    `void (*values${dimensions})(int);`,
+                    `struct { uint8_t value; } values${dimensions};`,
+                ]) {
+                    const result = calculator.calculateStructSize('Invalid', [`struct Invalid { ${declaration} };`], 0);
+                    assert.strictEqual(result.success, false, declaration);
+                    assert.strictEqual(result.totalSize, 0, declaration);
+                }
+            }
+            assert.strictEqual(calculator.calculateStructSize('Zero', ['struct Zero { uint8_t values[00]; uint8_t last; };'], 0).totalSize, 1);
+        });
+
+        suite('안전한 정수 범위의 레이아웃 경계값', () => {
+            const maximum = Number.MAX_SAFE_INTEGER;
+
+            function assertUnsafe(result: StructSizeResult, declaration: string): void {
+                assert.strictEqual(result.success, false, declaration);
+                assert.strictEqual(result.totalSize, 0, declaration);
+                assert.deepStrictEqual(result.members, [], declaration);
+                assert.match(result.error ?? '', /safe integers|안전한.*정수/u, declaration);
+            }
+
+            test('배열 길이가 안전해도 원소 크기를 곱한 바이트 수가 넘치면 실패한다', () => {
+                for (const kind of ['struct', 'union']) {
+                    for (const declaration of [
+                        `uint32_t values[${maximum}];`,
+                        `uint8_t *values[${maximum}];`,
+                        `void (*values[${maximum}])(int);`,
+                        `struct { uint32_t value; } values[${maximum}];`,
+                    ]) {
+                        assertUnsafe(calculator.calculateStructSize('Overflow', [`${kind} Overflow { ${declaration} };`], 0), declaration);
+                    }
+                }
+            });
+
+            test('멤버 합·멤버 앞 패딩·끝 패딩·중첩 멤버의 초과를 모두 거부한다', () => {
+                for (const declaration of [
+                    `struct Overflow { uint8_t values[${maximum}]; uint8_t last; };`,
+                    `struct Overflow { uint8_t values[${maximum}]; uint32_t aligned[0]; };`,
+                    `struct Overflow { uint32_t aligned[0]; uint8_t values[${maximum}]; };`,
+                    `union Overflow { uint32_t aligned[0]; uint8_t values[${maximum}]; };`,
+                    `struct Overflow { struct { uint8_t values[${maximum}]; uint8_t last; } nested; };`,
+                ]) {
+                    assertUnsafe(calculator.calculateStructSize('Overflow', [declaration], 0), declaration);
+                }
+            });
+
+            test('안전한 최대 크기와 정렬 경계 바로 아래의 계산은 정확히 성공한다', () => {
+                const cases = [
+                    [`struct Boundary { uint8_t values[${maximum}]; };`, maximum],
+                    [`union Boundary { uint8_t values[${maximum}]; };`, maximum],
+                    [`struct Boundary { uint8_t values[${maximum - 1}]; uint8_t last; };`, maximum],
+                    [`struct Boundary { uint32_t values[${Math.floor(maximum / 4)}]; };`, maximum - 3],
+                    [`struct Boundary { uint8_t values[${maximum - 7}]; uint32_t last; };`, maximum - 3],
+                ] as const;
+                for (const [declaration, expected] of cases) {
+                    const result = calculator.calculateStructSize('Boundary', [declaration], 0);
+                    assert.strictEqual(result.success, true, declaration);
+                    assert.strictEqual(result.totalSize, expected, declaration);
+                    for (const member of result.members) {
+                        assert.ok(Number.isSafeInteger(member.offset), declaration);
+                        assert.ok(Number.isSafeInteger(member.size), declaration);
+                    }
+                }
+            });
+
+            test('비트 위치가 큰 경우에도 바이트 경계를 정확히 계산하고 초과는 실패한다', () => {
+                const boundary = calculator.calculateStructSize('Boundary', [
+                    `struct Boundary { uint8_t values[${maximum - 1}]; uint8_t last : 1; };`
+                ], 0);
+                assert.strictEqual(boundary.success, true);
+                assert.strictEqual(boundary.totalSize, maximum);
+                assert.strictEqual(boundary.members[1].offset, maximum - 1);
+
+                const aligned = calculator.calculateStructSize('Boundary', [
+                    `struct Boundary { uint8_t values[${maximum - 7}]; uint32_t last : 31; };`
+                ], 0);
+                assert.strictEqual(aligned.success, true);
+                assert.strictEqual(aligned.totalSize, maximum - 3);
+                assert.strictEqual(aligned.members[1].offset, maximum - 7);
+
+                for (const declaration of [
+                    `struct Overflow { uint8_t values[${maximum}]; uint8_t last : 1; };`,
+                    `struct Overflow { uint8_t values[${maximum}]; uint32_t : 0; };`,
+                    `struct Overflow { uint8_t last : ${maximum + 1}; };`,
+                ]) {
+                    assertUnsafe(calculator.calculateStructSize('Overflow', [declaration], 0), declaration);
+                }
+            });
+
+            test('사용자 타입·packing의 부정확한 크기와 정렬을 거부한다', () => {
+                const configs: TypeConfigFile[] = [
+                    StructSizeCalculator.loadTypeConfig({ types: { Invalid: { size: maximum + 1, alignment: 1 } } }),
+                    StructSizeCalculator.loadTypeConfig({ types: { Invalid: { size: 1, alignment: maximum + 1 } } }),
+                    StructSizeCalculator.loadTypeConfig({ types: { Invalid: { size: 1, alignment: 1.5 } } }),
+                    StructSizeCalculator.loadTypeConfig({ types: { Invalid: { size: 1, alignment: -1 } } }),
+                    StructSizeCalculator.loadTypeConfig({ packingAlignment: maximum + 1, types: { Invalid: { size: 1, alignment: 1 } } }),
+                ];
+                for (const config of configs) {
+                    const result = new StructSizeCalculator(config).calculateStructSize('Overflow', ['struct Overflow { Invalid value; };'], 0);
+                    assertUnsafe(result, JSON.stringify(config));
+                }
+            });
+        });
+
         test('Hexadecimal array size works in a multi-declarator line', () => {
             const lines = [
                 'struct HexMulti {',
