@@ -55,8 +55,10 @@ export const ARM_LINK_MAX_ENTRIES = 500_000;
 // Regex patterns — flexible whitespace for cross-version compatibility
 const EXEC_REGION_RE = /Execution\s+Region\s+(\S+)\s+\((.+)\)/i;
 const LOAD_REGION_RE = /Load\s+Region\s+\S+\s+\(/i;
-const ENTRY_RE = /^\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(Code|Data|Zero)\s+(RO|RW|ZI)\b/i;
-const PAD_RE = /^\s+0x[0-9a-fA-F]+\s+0x[0-9a-fA-F]+\s+PAD\b/i;
+// 엔트리 행은 `Exec Addr  Size` 2열과 `Exec Addr  Load Addr  Size` 3열 형식이 모두 있다.
+// 3열에서 ZI 영역의 Load Addr 자리는 `-`다. `Ven`은 링커가 만든 veneer(코드)다.
+const ENTRY_RE = /^\s+(0x[0-9a-fA-F]+)\s+(?:(?:0x[0-9a-fA-F]+|-)\s+)?(0x[0-9a-fA-F]+)\s+(Code|Data|Zero|Ven)\s+(RO|RW|ZI)\b/i;
+const PAD_RE = /^\s+0x[0-9a-fA-F]+\s+(?:(?:0x[0-9a-fA-F]+|-)\s+)?0x[0-9a-fA-F]+\s+PAD\b/i;
 const OBJ_SECTION_RE = /(\S+)\(([^)]*)\)\s*$/;
 const ENTRY_POINT_RE = /Image\s+Entry\s+point\s*:\s*(0x[0-9a-fA-F]+)/i;
 const RO_TOTAL_RE = /Total\s+RO\s+Size[^0-9]*(\d+)\s*\(/i;
@@ -151,7 +153,7 @@ export function parseArmLinkList(content: string): ArmLinkListResult {
             if (entryMatch) {
                 const addr = parseInt(entryMatch[1], 16);
                 const sz = parseInt(entryMatch[2], 16);
-                const kind = entryMatch[3];
+                const kind = /^ven$/i.test(entryMatch[3]) ? 'Code' : entryMatch[3];
                 const attr = entryMatch[4].toUpperCase();
 
                 // Extract idx, section token, and object(section) from the rest of the line

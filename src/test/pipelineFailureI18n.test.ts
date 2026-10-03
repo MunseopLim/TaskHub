@@ -9,6 +9,7 @@ import { actionStates } from '../providers/actionStatus';
 import { HistoryProvider } from '../providers/historyProvider';
 import { MainViewProvider } from '../providers/mainViewProvider';
 import { ActionItem, Task } from '../schema';
+import { RunLogStore } from '../runLogStore';
 
 suite('파이프라인 실패 안내 다국어', function () {
     this.timeout(15000);
@@ -121,6 +122,90 @@ suite('파이프라인 실패 안내 다국어', function () {
             (vscode.tasks as any).executeTask = originalExecute;
             (vscode.tasks as any).onDidEndTaskProcess = originalEnd;
             (vscode.window as any).showErrorMessage = originalError;
+        }
+    });
+
+    test('실패 알림의 버튼은 이 실행의 실행 로그 저장이 끝난 뒤의 기록을 쓴다', async () => {
+        const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        assert.ok(folder, '실행 로그를 쓸 워크스페이스가 필요하다');
+        const taskhubDir = path.join(folder, '.taskhub');
+        const hadTaskhubDir = fs.existsSync(taskhubDir);
+        const config = vscode.workspace.getConfiguration('taskhub');
+        const previousRunLogs = config.inspect('runLogs.enabled')?.globalValue;
+        await config.update('runLogs.enabled', true, vscode.ConfigurationTarget.Global);
+        const originalExecute = vscode.tasks.executeTask;
+        const originalEnd = vscode.tasks.onDidEndTaskProcess;
+        const originalError = vscode.window.showErrorMessage;
+        const originalCommand = vscode.commands.executeCommand;
+        const originalWrite = RunLogStore.prototype.write;
+        const listeners = new Set<(event: vscode.TaskProcessEndEvent) => unknown>();
+        const rerunEntries: any[] = [];
+        let rerunDone!: () => void;
+        const rerun = new Promise<void>(resolve => { rerunDone = resolve; });
+        let writeStarted!: () => void;
+        const writing = new Promise<void>(resolve => { writeStarted = resolve; });
+        let releaseWrite!: () => void;
+        const writeAllowed = new Promise<void>(resolve => { releaseWrite = resolve; });
+        async function within(pending: Promise<void>, label: string): Promise<void> {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+                await Promise.race([pending, new Promise<never>((_, reject) => {
+                    timer = setTimeout(() => reject(new Error(`${label} timed out`)), 3000);
+                })]);
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+        (vscode.tasks as any).onDidEndTaskProcess = (listener: (event: vscode.TaskProcessEndEvent) => unknown) => {
+            listeners.add(listener);
+            return new vscode.Disposable(() => listeners.delete(listener));
+        };
+        (vscode.tasks as any).executeTask = async (task: vscode.Task) => {
+            const execution = { task, terminate() {} } as vscode.TaskExecution;
+            setImmediate(() => { for (const listener of [...listeners]) { listener({ execution, exitCode: 3 }); } });
+            return execution;
+        };
+        // 사용자가 알림이 뜨자마자 "다시 실행"을 누른다.
+        (vscode.window as any).showErrorMessage = async (_message: string, ...buttons: string[]) =>
+            buttons.find(button => button === buttons[1]);
+        (vscode.commands as any).executeCommand = async (command: string, ...args: unknown[]) => {
+            // 같은 기록 객체가 나중에 갱신되므로 누른 시점의 사본을 남긴다.
+            if (command === 'taskhub.rerunFromHistory') { rerunEntries.push(JSON.parse(JSON.stringify(args[0]))); rerunDone(); return; }
+            return originalCommand.call(vscode.commands, command, ...args);
+        };
+        // 로그 저장이 시작된 뒤에도 명시적으로 풀기 전까지 완료되지 않게 한다.
+        RunLogStore.prototype.write = function (this: RunLogStore, ...args: Parameters<RunLogStore['write']>) {
+            writeStarted();
+            return writeAllowed.then(() => originalWrite.apply(this, args));
+        } as RunLogStore['write'];
+        const item: ActionItem = {
+            id: 'failure-report-wait', title: 'Build',
+            action: { description: '', tasks: [{ id: 'build', type: 'command', command: 'unused-by-mock' }] },
+        };
+        const history = new HistoryProvider(context);
+        const view = new MainViewProvider(context, () => [item]);
+        let execution: Promise<void> | undefined;
+        try {
+            execution = assert.rejects(executeAction(item, context, view, history));
+            await within(writing, 'run log write start');
+            assert.strictEqual(rerunEntries.length, 0, '저장이 끝나기 전에는 기록으로 다시 실행하지 않는다');
+            releaseWrite();
+            await within(execution, 'action finalization');
+            await within(rerun, 'rerun');
+            assert.strictEqual(rerunEntries.length, 1);
+            assert.ok(rerunEntries[0].runLog, '저장 전에 기록을 쓰면 보고서가 "로그를 남기지 못했다"로 열린다');
+            assert.strictEqual(rerunEntries[0].status, 'failure');
+        } finally {
+            releaseWrite();
+            await execution?.catch(() => undefined);
+            view.dispose();
+            RunLogStore.prototype.write = originalWrite;
+            (vscode.tasks as any).executeTask = originalExecute;
+            (vscode.tasks as any).onDidEndTaskProcess = originalEnd;
+            (vscode.window as any).showErrorMessage = originalError;
+            (vscode.commands as any).executeCommand = originalCommand;
+            await config.update('runLogs.enabled', previousRunLogs, vscode.ConfigurationTarget.Global);
+            if (!hadTaskhubDir) { fs.rmSync(taskhubDir, { recursive: true, force: true }); }
         }
     });
 

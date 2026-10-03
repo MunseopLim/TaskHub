@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import Ajv from 'ajv';
-import { runDoctor, runDoctorPerSource, DoctorInput, DoctorFinding, DoctorValidator, scriptCandidateTokens, enumerateArgvCandidates } from '../doctor';
+import { runDoctor, runDoctorPerSource, DoctorInput, DoctorFinding, DoctorValidator, scriptCandidateTokens, enumerateArgvCandidates, locateJsonPointer } from '../doctor';
 import { detectFrozenCondition } from '../previewRun';
 import { evaluateTaskCondition } from '../pipelineUtils';
 import * as actionSchema from '../../schema/actions.schema.json';
@@ -4673,5 +4673,28 @@ suite('forEach 설정과 Doctor', () => {
         }];
         const findings = runDoctor([makeInput(items)], compileValidator());
         assert.ok(codes(findings).includes('secret.file-optin'), JSON.stringify(findings, null, 2));
+    });
+});
+
+suite('locateJsonPointer', () => {
+    test('배열 원소·중첩 객체 안의 키까지 내려가 정확한 줄을 가리킨다', () => {
+        const actions = [
+            { id: 'build', action: { description: 'b', tasks: [{ id: 't', type: 'shell', command: 'x' }] } },
+            { id: 'group', children: [{ id: 'flash', title: 'Flash' }] },
+        ];
+        const text = JSON.stringify(actions, null, 2);
+        const lineOf = (needle: string) => text.split('\n').findIndex(line => line.includes(needle)) + 1;
+        // 예전에는 `{` 위 커서에서 키를 찾아 한 단계 깊게 세는 바람에 상위 위치(/1)에 머물렀다.
+        assert.strictEqual(locateJsonPointer(text, actions, '/1/children/0/title').startLine, lineOf('"title": "Flash"'));
+        assert.strictEqual(locateJsonPointer(text, actions, '/0/action/tasks/0/command').startLine, lineOf('"command": "x"'));
+    });
+});
+
+suite('Doctor BOM 입력', () => {
+    test('BOM으로 시작하는 actions.json을 파싱 오류로 오판하지 않는다', () => {
+        const ajv = new Ajv({ allErrors: true, strict: false });
+        const validator = ajv.compile({}) as unknown as DoctorValidator;
+        const findings = runDoctor([{ filePath: '/ws/.vscode/actions.json', sourceLabel: 'ws', rawText: '\uFEFF[]', workspaceRoots: ['/ws'], extensionPath: '/ext' }], validator);
+        assert.ok(!findings.some(finding => finding.code === 'json.parse'), JSON.stringify(findings));
     });
 });

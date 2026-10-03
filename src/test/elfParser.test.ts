@@ -63,14 +63,14 @@ function buildMinimalElf32(sections: {
     let strTab = '\0';
     const nameOffsets: number[] = [];
     for (const sec of sections) {
-        nameOffsets.push(strTab.length);
+        nameOffsets.push(Buffer.byteLength(strTab, 'utf8'));
         strTab += sec.name + '\0';
     }
     // Add the .shstrtab entry itself
-    const shstrtabNameOffset = strTab.length;
+    const shstrtabNameOffset = Buffer.byteLength(strTab, 'utf8');
     strTab += '.shstrtab\0';
 
-    const strTabBuf = Buffer.from(strTab, 'ascii');
+    const strTabBuf = Buffer.from(strTab, 'utf8');
 
     // Layout: ELF header (52 bytes) | string table | section headers
     const elfHeaderSize = 52;
@@ -135,6 +135,20 @@ const SHF_ALLOC = 0x2;
 const SHF_EXECINSTR = 0x4;
 
 suite('ELF Parser Test Suite', () => {
+    suite('names', () => {
+        test('long C++ mangled names and UTF-8 names are read in full', () => {
+            const longName = `.text._ZN${'VeryLongTemplateArgument'.repeat(16)}E`;
+            assert.ok(longName.length > 300);
+            const buf = buildMinimalElf32([
+                { name: longName, type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 16 },
+                { name: '.data.한글_섹션', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_WRITE, addr: 0x20000000, size: 4 },
+            ]);
+            const names = parseElf32(buf).sections.map(section => section.name);
+            assert.ok(names.includes(longName), 'a name longer than 256 bytes must not be truncated');
+            assert.ok(names.includes('.data.한글_섹션'), 'UTF-8 names must not be decoded byte by byte');
+        });
+    });
+
     suite('parseElf32', () => {
         test('should parse valid ELF32 with sections', () => {
             const buf = buildMinimalElf32([
@@ -928,6 +942,76 @@ suite('ELF Parser Test Suite', () => {
             const helperEntry = flash.sections.find(s => s.name === 'helper');
             assert.ok(helperEntry);
             assert.strictEqual(helperEntry!.size, 0x40);
+        });
+
+        test('alias symbols at the same address and size form one row with the global name first', () => {
+            const aliasSymbols: ElfSymbol[] = [
+                { name: 'USART1_IRQHandler', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'WEAK' },
+                { name: 'Default_Handler', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'GLOBAL' },
+                { name: 'USART2_IRQHandler', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'WEAK' },
+            ];
+            const flash = computeSymbolUsage(aliasSymbols, sections, regions).find(u => u.region === 'FLASH')!;
+            const rows = flash.sections.filter(s => s.addr === 0x08000100);
+            assert.strictEqual(rows.length, 1, 'aliases must not be counted once per name');
+            assert.strictEqual(rows[0].name, 'Default_Handler');
+            assert.deepStrictEqual(rows[0].aliases, ['USART1_IRQHandler', 'USART2_IRQHandler']);
+            const total = flash.sections.reduce((sum, s) => sum + s.size, 0);
+            assert.strictEqual(total, 0x200, 'row sizes add up to the section size exactly once');
+        });
+
+        test('alias merging promotes a later GLOBAL over an earlier WEAK of the same name and never aliases itself', () => {
+            const aliasSymbols: ElfSymbol[] = [
+                { name: 'IRQ_A', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'WEAK' },
+                { name: 'Handler', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'WEAK' },
+                { name: 'Handler', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'GLOBAL' },
+                { name: 'IRQ_A', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'WEAK' },
+            ];
+            const flash = computeSymbolUsage(aliasSymbols, sections, regions).find(u => u.region === 'FLASH')!;
+            const rows = flash.sections.filter(s => s.addr === 0x08000100);
+            assert.deepStrictEqual(rows.map(row => [row.name, row.aliases]), [['Handler', ['IRQ_A']]]);
+        });
+
+        test('a repeated owner name upgrades its binding rank before later aliases arrive', () => {
+            const aliasSymbols: ElfSymbol[] = [
+                { name: 'Handler', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'LOCAL' },
+                { name: 'Handler', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'GLOBAL' },
+                { name: 'IRQ_A', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'WEAK' },
+            ];
+            const flash = computeSymbolUsage(aliasSymbols, sections, regions).find(u => u.region === 'FLASH')!;
+            const rows = flash.sections.filter(s => s.addr === 0x08000100);
+            assert.deepStrictEqual(rows.map(row => [row.name, row.aliases]), [['Handler', ['IRQ_A']]]);
+        });
+
+        test('overlay sections with the same execution address keep their distinct file bytes', () => {
+            const overlaySections: ElfSection[] = [
+                { name: '', type: 0, flags: 0, addr: 0, size: 0, isAlloc: false, isWrite: false, isExec: false, isNoBits: false },
+                { name: '.overlay_a', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x1000, size: 0x10, offset: 0x40, isAlloc: true, isWrite: false, isExec: true, isNoBits: false },
+                { name: '.overlay_b', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x1000, size: 0x10, offset: 0x50, isAlloc: true, isWrite: false, isExec: true, isNoBits: false },
+            ];
+            const overlaySymbols: ElfSymbol[] = [
+                { name: 'OverlayA', addr: 0x1000, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'GLOBAL' },
+                { name: 'OverlayB', addr: 0x1000, size: 0x10, type: 'FUNC', sectionIndex: 2, binding: 'GLOBAL' },
+            ];
+            const [usage] = computeSymbolUsage(overlaySymbols, overlaySections, [{ name: 'RAM', origin: 0x1000, size: 0x10 }], [], 0x80);
+            assert.strictEqual(usage.used, 0x10, 'overlays occupy the same runtime address range');
+            assert.deepStrictEqual(usage.sections.map(row => [row.name, row.object, row.aliases, row.fileRange]), [
+                ['OverlayA', '.overlay_a', undefined, { kind: 'file', offset: 0x40, size: 0x10 }],
+                ['OverlayB', '.overlay_b', undefined, { kind: 'file', offset: 0x50, size: 0x10 }],
+            ]);
+        });
+
+        test('alias merging keeps an earlier GLOBAL name and leaves same-address symbols of other sizes separate', () => {
+            const aliasSymbols: ElfSymbol[] = [
+                { name: 'Reset_Handler', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'GLOBAL' },
+                { name: 'weak_reset', addr: 0x08000100, size: 0x10, type: 'FUNC', sectionIndex: 1, binding: 'WEAK' },
+                { name: 'reset_prologue', addr: 0x08000100, size: 0x4, type: 'FUNC', sectionIndex: 1, binding: 'LOCAL' },
+            ];
+            const flash = computeSymbolUsage(aliasSymbols, sections, regions).find(u => u.region === 'FLASH')!;
+            const rows = flash.sections.filter(s => s.addr === 0x08000100);
+            assert.deepStrictEqual(rows.map(row => [row.name, row.size, row.aliases]), [
+                ['Reset_Handler', 0x10, ['weak_reset']],
+                ['reset_prologue', 0x4, undefined],
+            ]);
         });
 
         test('should include uncovered section portions as [other]', () => {

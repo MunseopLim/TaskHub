@@ -779,6 +779,20 @@ suite('Memory Map Viewer Test Suite', () => {
             ), [path.resolve('/workspace/project/src/main.c')]);
         });
 
+        test('UNC·장치 경로는 존재 확인조차 하지 않고 워크스페이스 suffix로만 찾는다', () => {
+            const source = path.resolve('/workspace/project/src/main.c');
+            for (const recorded of ['//attacker/share/src/main.c', '\\\\attacker\\share\\src\\main.c', '\\\\?\\UNC\\attacker\\share\\src\\main.c', '\\\\.\\pipe\\src\\main.c']) {
+                const probed: string[] = [];
+                const result = resolveDwarfSourcePathCandidates(recorded, '/repo/build/app.elf', ['/workspace/project'], candidate => {
+                    probed.push(candidate);
+                    return path.resolve(candidate) === source;
+                });
+                assert.deepStrictEqual(result, [source], recorded);
+                assert.ok(probed.every(candidate => path.resolve(candidate).startsWith(path.resolve('/workspace/project'))),
+                    `${recorded}: 워크스페이스 밖(원격 호스트)을 확인하면 SMB 접속이 일어날 수 있다: ${probed.join(', ')}`);
+            }
+        });
+
         test('워크스페이스 밖으로 나가는 suffix와 중복 후보를 제외한다', () => {
             const source = path.resolve('/workspace/project/src/main.c');
             const result = resolveDwarfSourcePathCandidates(

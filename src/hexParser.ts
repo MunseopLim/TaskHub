@@ -152,6 +152,9 @@ export function detectFormat(content: string | Buffer): HexFormat {
 export function parseIntelHex(content: string): HexParseResult {
     const data = new HexByteStore();
     let baseAddress: number | undefined = 0;
+    // Extended Segment(02) 주소 공간에서는 레코드 안의 오프셋이 64K에서 감긴다
+    // (SBA*16 + ((DRLO + DRI) mod 64K)). Extended Linear(04)는 감기지 않는다.
+    let segmentAddressing = false;
     let entryPoint: number | undefined;
     let minAddress = Infinity;
     let maxAddress = -Infinity;
@@ -180,11 +183,10 @@ export function parseIntelHex(content: string): HexParseResult {
                     unaddressedRecordCount++;
                     break;
                 }
-                const fullAddress = baseAddress + address;
                 for (let i = 0; i < byteCount; i++) {
                     const byte = hexByte(line, 9 + i * 2);
                     if (!Number.isFinite(byte)) { continue; }
-                    const addr = fullAddress + i;
+                    const addr = baseAddress + (segmentAddressing ? (address + i) & 0xFFFF : address + i);
                     data.set(addr, byte);
                     if (addr < minAddress) { minAddress = addr; }
                     if (addr > maxAddress) { maxAddress = addr; }
@@ -200,6 +202,7 @@ export function parseIntelHex(content: string): HexParseResult {
                 break;
             case 0x02: // Extended Segment Address
                 baseAddress = parseInt(line.substring(9, 13), 16) << 4;
+                segmentAddressing = true;
                 break;
             case 0x03: // Start Segment Address
                 entryPoint = (parseInt(line.substring(9, 13), 16) << 4) +
@@ -210,6 +213,7 @@ export function parseIntelHex(content: string): HexParseResult {
                 // 주소 — STM32 QSPI 0x90000000, PIC32 kseg 등)이 음수가 된다.
                 // 곱셈은 부호 없는 53비트 정수 범위에서 안전.
                 baseAddress = parseInt(line.substring(9, 13), 16) * 0x10000;
+                segmentAddressing = false;
                 break;
             case 0x05: // Start Linear Address
                 entryPoint = parseInt(line.substring(9, 17), 16);

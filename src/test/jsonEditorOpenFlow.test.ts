@@ -3,8 +3,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE, JSON_EDITOR_SAVE_HASH_CHUNK_SIZE, RECOVERY_STATE_KEY, ROOT_ARRAY_KEY, assertDiskNumbersBeforeSave, jsonPanelRegistry, openJsonEditorFile, writeJsonWithFingerprint } from '../jsonEditor';
+import { JSON_EDITOR_SAVE_CHECK_MAX_FILE_SIZE, JSON_EDITOR_SAVE_HASH_CHUNK_SIZE, RECOVERY_STATE_KEY, ROOT_ARRAY_KEY, assertDiskNumbersBeforeSave, jsonPanelRegistry, openJsonEditorFile, openJsonEditorFromUri, writeJsonWithFingerprint } from '../jsonEditor';
 import { UnsupportedJsonNumberError } from '../jsonEditorUtils';
+import { t } from '../i18n';
 
 /**
  * JSON Editor의 **실제 진입점**을 실행하는 테스트 (0.6.47).
@@ -629,6 +630,169 @@ suite('JSON Editor 진입점 (openJsonEditorFile)', function () {
             assert.strictEqual(fake.posted.at(-1)?.success, false);
             assert.strictEqual(fs.readFileSync(filePath, 'utf8'), original);
         }
+    });
+
+    /** 같은 파일을 텍스트 편집기에서 수정 중(미저장)인 상태를 흉내 낸다. */
+    async function withDirtyTextDocument(filePath: string, run: (saves: string[]) => Promise<void>): Promise<void> {
+        const original = Object.getOwnPropertyDescriptor(vscode.workspace, 'textDocuments');
+        assert.ok(original?.configurable, 'textDocuments를 흉내 낼 수 없다');
+        const saves: string[] = [];
+        const document = {
+            uri: vscode.Uri.file(filePath), isDirty: true,
+            save: async () => { saves.push(filePath); document.isDirty = false; return true; },
+        };
+        Object.defineProperty(vscode.workspace, 'textDocuments', { configurable: true, get: () => [document] });
+        try { await run(saves); } finally { Object.defineProperty(vscode.workspace, 'textDocuments', original!); }
+    }
+
+    test('텍스트 편집기에 미저장 변경이 있으면 열기 전에 묻고 취소하면 열지 않는다', async () => {
+        const filePath = writeJson('dirty-open.json', { rows: [] });
+        const warningPrompts: { message: string; buttons: string[] }[] = [];
+        let warningAnswer: number | undefined;
+        (vscode.window as any).showWarningMessage = (message: string, ...rest: unknown[]) => {
+            const buttons = rest.filter((r): r is string => typeof r === 'string');
+            warningPrompts.push({ message, buttons });
+            return Promise.resolve(warningAnswer === undefined ? undefined : buttons[warningAnswer]);
+        };
+        await withDirtyTextDocument(filePath, async saves => {
+            const fake = installFakePanel();
+            await openJsonEditorFile(makeContext(), filePath);
+            assert.strictEqual(warningPrompts.length, 1);
+            assert.match(warningPrompts[0].message, /저장하지 않았|unsaved changes/);
+            assert.ok(!fake.events.includes('create-panel'), '취소하면 옛 디스크 내용으로 열지 않는다');
+
+            warningAnswer = 0; // 텍스트 편집기 저장 후 열기
+            await openJsonEditorFile(makeContext(), filePath);
+            assert.deepStrictEqual(saves, [filePath]);
+            assert.ok(fake.events.includes('create-panel'));
+        });
+    });
+
+    test('다른 파일의 텍스트 편집기 확인을 취소해도 현재 표의 미저장 편집과 복구본을 잃지 않는다', async () => {
+        const fake = installFakePanel();
+        const ctx = makeContext();
+        const first = writeJson('first.json', { rows: [] });
+        const second = writeJson('second.json', { rows: [] });
+        await openJsonEditorFile(ctx, first);
+        const edited = { rows: [{ id: 'draft' }] };
+        await fake.send({ command: 'modified', value: true });
+        await fake.send({ command: 'snapshot', data: edited });
+        await new Promise(resolve => setTimeout(resolve, 400));
+        assert.deepStrictEqual((readRecoveryEntry(ctx, first) as any)?.data, edited);
+        const prompts: string[] = [];
+        const discardLabel = t('변경사항 버리기', 'Discard changes');
+        (vscode.window as any).showWarningMessage = (message: string, ...rest: unknown[]) => {
+            prompts.push(message);
+            // 현재 표의 변경 폐기는 수락하고, 텍스트 편집기 확인만 취소한다.
+            return Promise.resolve(rest.includes(discardLabel) ? discardLabel : undefined);
+        };
+        await withDirtyTextDocument(second, async () => {
+            await openJsonEditorFile(ctx, second);
+        });
+        assert.strictEqual(prompts.length, 1, '텍스트 편집기 확인이 변경 폐기 확인보다 먼저 와야 한다');
+        assert.match(prompts[0], /second\.json/);
+        assert.strictEqual(jsonPanelRegistry.getFilePath(), first);
+        assert.strictEqual(jsonPanelRegistry.isDirty(), true);
+        assert.deepStrictEqual((readRecoveryEntry(ctx, first) as any)?.data, edited, '취소했는데 복구본이 지워지면 다시 열 때 편집이 사라진다');
+    });
+
+    test('텍스트 편집기에 미저장 변경이 있으면 표 저장을 멈추고 디스크와 표 편집을 모두 유지한다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('dirty-save.json', { rows: [{ id: 1 }] });
+        await openJsonEditorFile(makeContext(), filePath);
+        const before = fs.readFileSync(filePath, 'utf8');
+        await fake.send({ command: 'modified', value: true });
+        await withDirtyTextDocument(filePath, async () => {
+            await fake.send({ command: 'save', data: { rows: [{ id: 2 }] }, seq: 3 });
+        });
+        assert.strictEqual(fake.posted.at(-1)?.success, false);
+        assert.strictEqual(fs.readFileSync(filePath, 'utf8'), before, '텍스트 편집기 저장이 충돌하지 않도록 디스크를 바꾸지 않는다');
+        assert.strictEqual(jsonPanelRegistry.isDirty(), true, '표 편집은 그대로 남는다');
+        assert.match(shownWarnings.at(-1) ?? '', /텍스트 편집기|text editor/);
+
+        await fake.send({ command: 'saveAck', seq: 3, dirty: true });
+        await fake.send({ command: 'save', data: { rows: [{ id: 2 }] }, seq: 4 });
+        assert.strictEqual(fake.posted.at(-1)?.success, true, '텍스트 편집기를 정리하면 다시 저장할 수 있다');
+    });
+
+    test('git: 리비전처럼 디스크 파일이 아닌 URI는 작업 트리 파일로 바꿔 열지 않는다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('worktree.json', { rows: [] });
+        await openJsonEditorFromUri(makeContext(), vscode.Uri.file(filePath).with({ scheme: 'git', query: '{"ref":"HEAD"}' }));
+        assert.ok(!fake.events.includes('create-panel'), 'HEAD를 보던 사용자가 작업 트리 파일을 편집하게 된다');
+        assert.match(shownWarnings.at(-1) ?? '', /git:/);
+
+        // 인자 없이 호출하면 활성 편집기의 파일을 연다. `.JSON` 대문자 확장자도 JSON이다.
+        const upper = writeJson('CONFIG.JSON', { rows: [] });
+        const original = Object.getOwnPropertyDescriptor(vscode.window, 'activeTextEditor');
+        assert.ok(original?.configurable);
+        Object.defineProperty(vscode.window, 'activeTextEditor', {
+            configurable: true,
+            get: () => ({ document: { uri: vscode.Uri.file(upper), fileName: upper } }),
+        });
+        try {
+            await openJsonEditorFromUri(makeContext());
+        } finally {
+            Object.defineProperty(vscode.window, 'activeTextEditor', original!);
+        }
+        assert.ok(fake.events.includes('create-panel'), '대문자 확장자를 열기 대화상자로 돌리지 않는다');
+        assert.strictEqual(jsonPanelRegistry.getFilePath(), vscode.Uri.file(upper).fsPath);
+    });
+
+    test('복구 스냅샷 저장이 실패하면 처리되지 않은 rejection 없이 한 번만 알린다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('snapshot-failure.json', { rows: [] });
+        let failing = false;
+        const ctx = makeContext(undefined, async () => {
+            if (failing) { throw new Error('storage quota exceeded'); }
+        });
+        await openJsonEditorFile(ctx, filePath);
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+        process.on('unhandledRejection', onUnhandled);
+        try {
+            failing = true;
+            await fake.send({ command: 'modified', value: true });
+            await fake.send({ command: 'snapshot', data: { rows: [{ id: 1 }] } });
+            await new Promise(resolve => setTimeout(resolve, 400)); // 디바운스(300ms) 타이머 경로
+            await fake.send({ command: 'snapshot', data: { rows: [{ id: 2 }] } });
+            fake.disposePanel(); // dispose flush 경로
+            await new Promise(resolve => setTimeout(resolve, 50));
+            assert.deepStrictEqual(unhandled, []);
+            const notices = shownWarnings.filter(message => /복구 스냅샷|recovery snapshot/.test(message));
+            assert.strictEqual(notices.length, 1, notices.join(' / '));
+            assert.match(notices[0], /storage quota exceeded/);
+        } finally {
+            process.off('unhandledRejection', onUnhandled);
+        }
+    });
+
+    test('미저장 편집이 있으면 탭 제목에 ● 표시를 붙이고 저장하면 지운다', async () => {
+        const fake = installFakePanel();
+        const filePath = writeJson('title.json', { rows: [] });
+        await openJsonEditorFile(makeContext(), filePath);
+        assert.strictEqual(jsonPanelRegistry.getTitle(), 'JSON Editor: title.json');
+        await fake.send({ command: 'modified', value: true });
+        assert.strictEqual(jsonPanelRegistry.getTitle(), '● JSON Editor: title.json');
+        await fake.send({ command: 'save', data: { rows: [{ id: 1 }] }, seq: 1 });
+        await fake.send({ command: 'saveAck', seq: 1, dirty: false });
+        assert.strictEqual(jsonPanelRegistry.getTitle(), 'JSON Editor: title.json');
+    });
+
+    test('UTF-8 BOM으로 시작하는 JSON을 열고 저장해도 BOM을 유지한다', async () => {
+        const fake = installFakePanel();
+        const filePath = path.join(tempDir, 'bom.json');
+        fs.writeFileSync(filePath, '\uFEFF{\n    "rows": [{ "id": 1 }]\n}\n', 'utf8');
+        await openJsonEditorFile(makeContext(), filePath);
+        assert.ok(fake.events.includes('create-panel'), `BOM 파일이 파싱 실패로 열리지 않았다: ${shownErrors.join(' / ')}`);
+        assert.strictEqual(shownErrors.length, 0, shownErrors.join(' / '));
+
+        await fake.send({ command: 'save', data: { rows: [{ id: 2 }] }, seq: 1 });
+        assert.strictEqual(fake.posted.at(-1)?.success, true, `${shownErrors.join(' / ')} ${shownWarnings.join(' / ')}`);
+        const saved = fs.readFileSync(filePath, 'utf8');
+        assert.ok(saved.startsWith('\uFEFF'), '원래 있던 BOM을 지우면 BOM을 기대하는 도구가 깨질 수 있다');
+        assert.deepStrictEqual(JSON.parse(saved.slice(1)), { rows: [{ id: 2 }] });
+        assert.match(saved, /^\uFEFF\{\n {4}"rows"/, '들여쓰기 감지도 BOM에 방해받지 않는다');
     });
 
     test('외부 숫자 변경 후 다시 읽기와 저장은 원문을 보존한다', async () => {

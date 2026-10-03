@@ -755,16 +755,18 @@ export class StructSizeCalculator {
         let structAlignment = 1;
         let totalPadding = 0;
         let hasUnresolvedTypes = false;
-        let activeBitField:
-            | { type: string; storageOffset: number; storageSize: number; storageBits: number; alignment: number; usedBits: number }
-            | undefined;
+        // 연속된 비트필드는 구조체 시작부터의 비트 위치로 배치한다(GCC·Clang·AAPCS 규칙).
+        // 선언 타입이 달라도(`uint8_t:3` 뒤 `uint16_t:12`) 같은 저장 단위를 이어 쓰며, 필드가
+        // 선언 타입 크기의 정렬된 단위 경계를 넘을 때만 다음 단위로 옮긴다. 비트필드 뒤의 일반
+        // 멤버는 사용한 마지막 바이트 다음부터 배치된다.
+        let bitCursor: number | undefined;
 
         const packingAlignment = this.typeConfig.packingAlignment || 8;
 
         const flushBitField = () => {
-            if (activeBitField) {
-                currentOffset = activeBitField.storageOffset + activeBitField.storageSize;
-                activeBitField = undefined;
+            if (bitCursor !== undefined) {
+                currentOffset = Math.ceil(bitCursor / 8);
+                bitCursor = undefined;
             }
         };
 
@@ -777,47 +779,42 @@ export class StructSizeCalculator {
 
             // Apply packing alignment limit
             const memberAlignment = Math.min(typeInfo.alignment, packingAlignment);
-            const memberSize = typeInfo.size * (member.arraySize || 1);
+            // `data[0]`(길이 0 배열)은 0바이트다 — `|| 1`이면 한 요소로 계산됐다.
+            const memberSize = typeInfo.size * (member.arraySize ?? 1);
 
-            // Update struct alignment (max of all member alignments)
+            // Update struct alignment (max of all member alignments). AAPCS(arm-none-eabi·aarch64-none-elf)는
+            // 이름 없는 비트필드(`T : 0` 포함)의 타입도 구조체 정렬에 넣는다 — `uint8_t a:3; uint32_t :0;
+            // uint8_t b:1;`은 8바이트·정렬 4다. x86-64 SysV·Apple arm64는 넣지 않아 5바이트가 된다.
             structAlignment = Math.max(structAlignment, memberAlignment);
 
             if (member.isBitField) {
                 const bitWidth = member.bitWidth ?? 0;
                 const storageSize = typeInfo.size;
-                const storageBits = Math.max(1, storageSize * 8);
+                const unitBits = Math.max(8, storageSize * 8);
+                const cursor = bitCursor ?? currentOffset * 8;
                 if (member.isAnonymousBitField && bitWidth === 0) {
-                    flushBitField();
-                    const padding = this.calculatePadding(currentOffset, memberAlignment);
-                    totalPadding += padding;
-                    currentOffset += padding;
+                    // `T : 0`은 다음 비트필드를 T 정렬 경계에서 시작시킨다.
+                    const alignedBits = Math.ceil(cursor / (memberAlignment * 8)) * memberAlignment * 8;
+                    totalPadding += alignedBits / 8 - Math.ceil(cursor / 8);
+                    currentOffset = alignedBits / 8;
+                    bitCursor = undefined;
                     member.offset = currentOffset;
                     member.size = 0;
                     member.alignment = memberAlignment;
                     continue;
                 }
-                const needsNewStorage = !activeBitField
-                    || activeBitField.type !== member.type
-                    || activeBitField.usedBits + bitWidth > activeBitField.storageBits;
-                if (needsNewStorage) {
-                    flushBitField();
-                    const padding = this.calculatePadding(currentOffset, memberAlignment);
-                    totalPadding += padding;
-                    currentOffset += padding;
-                    activeBitField = {
-                        type: member.type,
-                        storageOffset: currentOffset,
-                        storageSize,
-                        storageBits,
-                        alignment: memberAlignment,
-                        usedBits: 0
-                    };
+                let start = cursor;
+                // packing이 정렬을 낮추면(#pragma pack) GCC는 단위 경계를 넘는 배치를 허용한다.
+                const straddles = Math.floor(start / unitBits) !== Math.floor((start + Math.max(bitWidth, 1) - 1) / unitBits);
+                if (straddles && memberAlignment >= typeInfo.alignment) {
+                    const next = Math.ceil(start / unitBits) * unitBits;
+                    totalPadding += next / 8 - Math.ceil(start / 8);
+                    start = next;
                 }
-                const bitField = activeBitField!;
-                member.offset = bitField.storageOffset;
+                member.offset = Math.floor(start / unitBits) * storageSize;
                 member.size = storageSize;
                 member.alignment = memberAlignment;
-                bitField.usedBits += bitWidth;
+                bitCursor = start + bitWidth;
                 continue;
             }
 
@@ -866,7 +863,7 @@ export class StructSizeCalculator {
                 hasUnresolvedTypes = true;
             }
             const memberAlignment = Math.min(typeInfo.alignment, packingAlignment);
-            const memberSize = typeInfo.size * (member.arraySize || 1);
+            const memberSize = typeInfo.size * (member.arraySize ?? 1);
             unionAlignment = Math.max(unionAlignment, memberAlignment);
             maxSize = Math.max(maxSize, memberSize);
             member.offset = 0;

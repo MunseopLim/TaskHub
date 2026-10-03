@@ -3292,6 +3292,31 @@ suite('Extension Test Suite', () => {
 			try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best-effort */ }
 		});
 
+		test('links.json / favorites.json starting with a UTF-8 BOM are read normally', () => {
+			const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-bom-'));
+			try {
+				const links = path.join(dir, 'links.json');
+				fs.writeFileSync(links, '\uFEFF[{"title":"Docs","link":"https://example.com"}]', 'utf8');
+				const linkResult = readLinksFromDisk(links);
+				assert.ok(linkResult.ok, linkResult.ok ? '' : linkResult.error);
+				assert.strictEqual(linkResult.entries.length, 1);
+
+				const favorites = path.join(dir, 'favorites.json');
+				fs.writeFileSync(favorites, '\uFEFF[{"title":"Main","path":"' + path.join(dir, 'main.c').replace(/\\/g, '\\\\') + '"}]', 'utf8');
+				const favoriteResult = readFavoritesFromDisk(favorites);
+				assert.ok(favoriteResult.ok, favoriteResult.ok ? '' : favoriteResult.error);
+				assert.strictEqual(favoriteResult.entries.length, 1);
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		test('actions.json and import data starting with a UTF-8 BOM parse normally', () => {
+			const imported = parseImportData('\uFEFF[{"id":"a","title":"A","action":{"description":"d","tasks":[{"id":"t","type":"shell","command":"echo"}]}}]');
+			assert.deepStrictEqual(imported.errors, []);
+			assert.strictEqual(imported.actions.length, 1);
+		});
+
 		test('readLinksFromDisk returns ok with empty entries when the file does not exist', () => {
 			const result = readLinksFromDisk(path.join(tempDir, 'never-created.json'));
 			assert.strictEqual(result.ok, true);
@@ -4611,6 +4636,28 @@ suite('Extension Test Suite', () => {
 			);
 		});
 
+		test('trimming keeps a still-running entry so its final status and run log can be attached', () => {
+			const provider = createHistoryProvider(3);
+			provider.addHistoryEntry(makeEntry('flash', 'running', 1));
+			for (let i = 0; i < 5; i++) {
+				provider.addHistoryEntry(makeEntry(`short${i}`, 'success', 100 + i));
+			}
+			assert.deepStrictEqual(provider.getHistory().map(e => e.actionId), ['short4', 'short3', 'flash'],
+				'the oldest finished entries go first; the running one stays');
+
+			provider.updateHistoryStatus('flash', 1, 'success', 'done', 600000);
+			const runLog = { workspaceFolderUri: 'file:///ws', relativePath: '.taskhub/logs/flash.log' };
+			provider.setHistoryRunLog('flash', 1, runLog);
+			const flash = provider.getHistory().find(e => e.actionId === 'flash');
+			assert.strictEqual(flash?.status, 'success');
+			assert.strictEqual(flash?.output, 'done');
+			assert.deepStrictEqual(flash?.runLog, runLog);
+
+			provider.addHistoryEntry(makeEntry('next', 'success', 200));
+			assert.deepStrictEqual(provider.getHistory().map(e => e.actionId), ['next', 'short4', 'short3'],
+				'once finished, the entry is trimmed by the next add');
+		});
+
 		test('updateHistoryStatus mutates an entry matched by (actionId, timestamp)', () => {
 			const provider = new HistoryProvider(createMockContext());
 			const timestamp = 123;
@@ -5331,10 +5378,13 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(result, '/usr/bin/7z');
 		});
 
-		test('should quote tool path with spaces', () => {
-			const tool = 'C:\\Program Files\\7-Zip\\7z.exe';
-			const result = getToolCommand(tool);
-			assert.strictEqual(result, '"C:\\Program Files\\7-Zip\\7z.exe"');
+		test('should quote tool path with spaces so the tokenizer returns the exact path', () => {
+			// 계약은 문자열 모양이 아니라 실행 단계 토크나이저가 원래 경로를 되돌려 주는 것이다.
+			for (const tool of ['C:\\Program Files\\7-Zip\\7z.exe', '\\\\srv\\Shared Tools\\7z.exe', '/opt/my tools/7z']) {
+				const result = getToolCommand(tool);
+				assert.ok(result.startsWith('"'), result);
+				assert.strictEqual(mergeCommandAndArgs(result, ['a']).executable, tool, 'UNC의 앞 \\\\가 줄면 도구를 찾지 못한다');
+			}
 		});
 
 		test('should not double-quote already quoted path', () => {
@@ -5690,6 +5740,27 @@ suite('Extension Test Suite', () => {
 
 				assert.ok(result.shellExecution);
 				assert.strictEqual(result.displayCommand, "ls '-la'");
+			} finally {
+				Object.defineProperty(process, 'platform', { value: originalPlatform });
+			}
+		});
+
+		test('POSIX command 타입은 사용자 작업 셸이 아니라 /bin/sh -c로 sh 인용 줄을 실행한다', () => {
+			const originalPlatform = process.platform;
+			try {
+				Object.defineProperty(process, 'platform', { value: 'linux' });
+				const result = createShellExecution('printf', ["it's", 'a b'], { cwd: '/tmp', env: { A: '1' } }, false);
+				const exec = result.shellExecution as vscode.ShellExecution;
+				assert.ok(exec instanceof vscode.ShellExecution);
+				assert.strictEqual(exec.commandLine, "printf 'it'\\''s' 'a b'");
+				assert.strictEqual(exec.options?.executable, '/bin/sh', 'pwsh·nushell은 POSIX 인용을 다르게 해석한다');
+				assert.deepStrictEqual(exec.options?.shellArgs, ['-c']);
+				assert.strictEqual(exec.options?.cwd, '/tmp');
+				assert.deepStrictEqual(exec.options?.env, { A: '1' });
+
+				// shell 타입 본문은 문서대로 VS Code 작업 셸 설정을 따른다.
+				const raw = createShellExecution('echo $HOME', [], { cwd: '/tmp' }, false, true).shellExecution as vscode.ShellExecution;
+				assert.strictEqual(raw.options?.executable, undefined);
 			} finally {
 				Object.defineProperty(process, 'platform', { value: originalPlatform });
 			}

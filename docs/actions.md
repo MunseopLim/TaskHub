@@ -239,9 +239,11 @@ python3 'flash.py' '--board' 'STM32 F4' '/work/sensor/release files/app.bin'
 또한 `command` 안의 따옴표는 토큰을 묶는 데 쓰지만, `args` 안에 직접 넣은 따옴표는 데이터입니다.
 `command`의 토큰은 변수 치환 **전에** 구분되므로 치환된 `STM32 F4`도 한 인자로 유지됩니다.
 
-Windows의 `.cmd`·`.bat`(예: `npm.cmd`)는 배치 처리기에서 인자를 다시 해석할 수 있습니다.
-위 인자 보존 예시는 `node.exe`·`python.exe`처럼 직접 실행되는 프로그램을 기준으로 합니다.
-따옴표나 `&`, `|`가 포함된 동적 값을 배치 파일에 전달한다면 해당 도구에서도 실제 인자를 확인하세요.
+Windows의 `.cmd`·`.bat`(예: `npm.cmd`)는 `cmd.exe`가 인자를 다시 해석하므로, 인자 안의 `&`·`|`·`<`·`>`·`^`·`%`·`!`·`"`가
+명령 구분자·리다이렉션·변수 확장으로 동작해 다른 명령이 실행될 수 있습니다. 그래서 TaskHub는 배치 파일로 실행되는 명령
+(PATHEXT로 `npm`→`npm.cmd`처럼 풀리는 이름 포함)의 인자에 이 문자가 있으면 **실행하지 않고 오류로 끝냅니다.**
+파일 이름·브랜치 이름·클립보드처럼 바깥에서 온 값에 이 문자가 섞여 있을 때 실행이 멈추며, 정말 셸 문법이 필요하면
+`shell` 타입 본문에 직접 인용해 쓰세요. 위 인자 보존 예시는 `node.exe`·`python.exe`처럼 직접 실행되는 프로그램을 기준으로 합니다.
 이 차이는 [PowerShell의 외부 프로그램 인자 전달 규칙](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing#passing-arguments-that-contain-quote-characters)에도 설명되어 있습니다.
 
 #### Windows 실행 파일 경로와 JSON 역슬래시
@@ -383,7 +385,8 @@ TaskHub가 작은따옴표로 감싼 `args` 값은 원문으로 전달됩니다.
 
 | 환경 / 모드 | 셸 선택 |
 | --- | --- |
-| macOS/Linux, 일반 터미널 실행 | VS Code의 작업용 셸 설정을 사용 |
+| macOS/Linux, `shell` 타입 터미널 실행 | VS Code의 작업용 셸 설정을 사용 |
+| macOS/Linux, `command` 타입 터미널 실행 | `/bin/sh -c` 사용. 인자를 sh 규칙으로 인용하므로 작업용 셸이 pwsh·nushell이어도 인자 경계가 같음. 태스크를 실행할 때 작업용 셸의 시작 파일(`.zshenv` 등)을 다시 읽지 않음(VS Code가 이미 가져온 PATH 등 환경은 상속할 수 있음). 추가 환경변수는 태스크 `env`로 지정하고, 셸 함수가 필요하면 별도 스크립트로 두거나 `shell` 타입에서 셸을 명시해 호출 |
 | macOS/Linux, 출력 캡처 | `/bin/sh` 사용. 사용자의 로그인 셸이 zsh여도 동일 |
 | macOS/Linux, `isOneShot: true` | 셸 본문을 `sh -c`로 감싸 백그라운드 실행 |
 | Windows, 셸 본문 실행 | 기본 `powershell.exe`(Windows PowerShell 5.1), `-NoProfile` 사용 |

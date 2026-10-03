@@ -162,7 +162,9 @@ export function runDoctorPerSource(
     return findings;
 }
 
-function analyzeFile(input: DoctorInput, validator: DoctorValidator): DoctorFinding[] {
+function analyzeFile(rawInput: DoctorInput, validator: DoctorValidator): DoctorFinding[] {
+    // VS Code 문서 텍스트에는 BOM이 없다. 그대로 두면 JSON 파싱 오류로 오판하고 첫 줄 위치도 어긋난다.
+    const input = rawInput.rawText.startsWith('\uFEFF') ? { ...rawInput, rawText: rawInput.rawText.slice(1) } : rawInput;
     const findings: DoctorFinding[] = [];
 
     let parsed: any;
@@ -292,7 +294,7 @@ function ajvErrorToFinding(
  * position it falls back to the deepest position it *did* reach, so the
  * user is still taken close to the offending node. Worst case is line 1.
  */
-function locateJsonPointer(
+export function locateJsonPointer(
     rawText: string,
     parsed: unknown,
     pointer: string
@@ -333,7 +335,11 @@ function locateJsonPointer(
             bestOffset = cursor;
             currentValue = currentValue[idx];
         } else if (currentValue && typeof currentValue === 'object') {
-            const keyOffset = findObjectKey(rawText, seg, cursor);
+            // 앞 단계가 남긴 커서는 이 객체의 `{` 위다. 거기서 찾기 시작하면 키가 한 단계 깊게
+            // 세어져 찾지 못하고, 진단이 상위 위치에 머물렀다.
+            const at = skipWhitespace(rawText, cursor);
+            const objectStart = rawText[at] === '{' ? at + 1 : cursor;
+            const keyOffset = findObjectKey(rawText, seg, objectStart);
             if (keyOffset < 0) {
                 break;
             }

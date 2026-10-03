@@ -288,6 +288,9 @@ suite('RegisterDecoder Test Suite', () => {
 
             const structLine = RegisterDecoder.findStructDefinition(lines, 'TestReg');
             assert.strictEqual(structLine, 0);
+            // 이름은 정규식이 아니라 문자 그대로 찾는다.
+            assert.strictEqual(RegisterDecoder.findStructDefinition(lines, 'Test.*'), -1);
+            assert.strictEqual(RegisterDecoder.findUnionDefinition(lines, '(Test'), -1, '메타문자가 정규식 오류를 내지 않는다');
 
             const definition = RegisterDecoder.parseRegisterFromStruct(lines, structLine, 'TestReg');
 

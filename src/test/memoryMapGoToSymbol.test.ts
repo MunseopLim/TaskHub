@@ -162,6 +162,16 @@ suite('Memory Map — Go to Symbol', () => {
             assert.deepStrictEqual(entries.map(e => e.regionIndex), [0, 1], '순번이 없으면 둘째 RAM 의 행이 첫째 카드로 간다');
         });
 
+        test('한 행으로 합친 별칭 심볼 이름을 Quick Pick 검색 대상에 남긴다', () => {
+            const entries = collectPickEntries([usage({
+                sections: [section({ name: 'Default_Handler', aliases: ['USART1_IRQHandler', 'USART2_IRQHandler'] })],
+            })]);
+            assert.deepStrictEqual(entries[0].aliases, ['USART1_IRQHandler', 'USART2_IRQHandler']);
+            const item = buildGoToSymbolItems(entries, []).find(it => it.label === 'Default_Handler');
+            assert.match(item?.description ?? '', /USART1_IRQHandler, USART2_IRQHandler/,
+                'matchOnDescription 으로 합쳐진 이름도 찾을 수 있어야 한다');
+        });
+
         test('부모 섹션(object)과 함수명을 잃지 않는다', () => {
             const [e] = collectPickEntries([usage({
                 sections: [section({ object: '.text', section: '.text.main', func: 'main' })],
@@ -279,6 +289,12 @@ suite('Memory Map — Go to Symbol', () => {
         test('이름이 그대로 맞으면 exact', () => {
             assert.strictEqual(matchSourceIdentifier(entry({ name: 'main' }), 'main'), 'exact');
             assert.strictEqual(matchSourceIdentifier(entry({ name: 'main.o', func: 'HAL_Init' }), 'HAL_Init'), 'exact');
+        });
+
+        test('한 행으로 합쳐진 별칭 이름으로도 찾는다', () => {
+            const merged = entry({ name: 'Default_Handler', aliases: ['USART1_IRQHandler'] });
+            assert.strictEqual(matchSourceIdentifier(merged, 'USART1_IRQHandler'), 'exact');
+            assert.strictEqual(matchSourceIdentifier(merged, 'USART2_IRQHandler'), undefined);
         });
 
         test('부분문자열로는 걸리지 않는다', () => {

@@ -313,8 +313,17 @@ function assertSupportedNumberToken(token: string, value: number): void {
     }
 }
 
+/** 파일 맨 앞의 UTF-8 BOM. Node의 `readFileSync(..., 'utf8')`은 이것을 지우지 않는다. */
+export const UTF8_BOM = '\uFEFF';
+
+/** Windows PowerShell 5.1·구형 메모장이 붙이는 BOM을 떼어 낸다(`JSON.parse`는 BOM을 거부한다). */
+export function stripUtf8Bom(text: string): string {
+    return text.startsWith(UTF8_BOM) ? text.slice(UTF8_BOM.length) : text;
+}
+
 /** JSON.parse 직후 원래 숫자 토큰도 검사해 반올림·overflow·underflow 손실을 거절한다. */
-export function parseJsonEditorText(text: string): unknown {
+export function parseJsonEditorText(rawText: string): unknown {
+    const text = stripUtf8Bom(rawText);
     const value: unknown = JSON.parse(text);
     assertSupportedJsonNumbers(value);
     // 문자열은 반복 정규식으로 잡지 않는다. 수 MB짜리 문자열은 V8 정규식의

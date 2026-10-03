@@ -272,9 +272,10 @@ function openHexViewerFileInternal(
     try {
         result = parseFile(filePath, options?.forceBinary === true);
     } catch (e: any) {
+        const detail = localizeHexParseError(String(e?.message ?? e));
         vscode.window.showErrorMessage(plainNotificationText(t(
-            `파일 파싱 실패 (${fileName}): ${e.message}`,
-            `Failed to parse file (${fileName}): ${e.message}`
+            `파일 파싱 실패 (${fileName}): ${detail}`,
+            `Failed to parse file (${fileName}): ${detail}`
         )));
         return false;
     }
@@ -644,26 +645,8 @@ function setupWebviewMessageHandler(
         // 가로채 `clipboardData.setData` 로 처리하므로(아래 스크립트 참조)
         // 호스트를 거치지 않는다. 죽은 채로 클립보드 쓰기 권한을 여는 분기라
         // 지웠다. 같은 유형은 `webviewMessageContract.test.ts` 가 막는다.
-        if (message.command === 'gotoError') {
-            const rawInput = typeof message.input === 'string' ? message.input : '';
-            // notification 에 표시할 입력값은 길이를 제한해 UI 가 무너지지 않도록 한다.
-            const inputPreview = rawInput.length > 64 ? rawInput.slice(0, 64) + '…' : rawInput;
-            if (message.reason === 'invalid-format') {
-                vscode.window.showErrorMessage(plainNotificationText(t(
-                    `Go to: 입력 형식이 올바르지 않습니다. 10진수(예: 1024) 또는 16진수(예: 0x400, 400h) 만 허용됩니다. (입력값: "${inputPreview}")`,
-                    `Go to: invalid input format. Use decimal (e.g. 1024) or hex (e.g. 0x400, 400h). (got: "${inputPreview}")`
-                )));
-            } else if (message.reason === 'out-of-range') {
-                const maxOffset = typeof message.maxOffset === 'number' ? message.maxOffset : 0;
-                const maxAddress = typeof message.maxAddress === 'number' ? message.maxAddress : maxOffset;
-                const maxOffsetHex = '0x' + maxOffset.toString(16).toUpperCase();
-                const maxAddressHex = '0x' + maxAddress.toString(16).toUpperCase();
-                vscode.window.showErrorMessage(plainNotificationText(t(
-                    `Go to: 입력값이 파일 범위를 벗어납니다. 마지막 offset: ${maxOffset} (${maxOffsetHex}), 마지막 주소: ${maxAddressHex}. (입력값: "${inputPreview}")`,
-                    `Go to: input is past the end of file. Last offset: ${maxOffset} (${maxOffsetHex}), last address: ${maxAddressHex}. (got: "${inputPreview}")`
-                )));
-            }
-        }
+        // Go to 입력 오류는 웹뷰가 입력칸 옆에 직접 표시한다(aria-invalid). 알림 토스트는
+        // 입력칸과 떨어져 있어 무엇이 틀렸는지 보며 고치기 어려웠다.
     });
     return {
         get readyReceived() { return readyReceived; },
@@ -868,6 +851,19 @@ function esc(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/** `hexParser`·`hexByteStore`(vscode 비의존 모듈)의 한도 초과 오류를 사용자 언어로 옮긴다. */
+export function localizeHexParseError(message: string): string {
+    const payload = message.match(/^(Intel HEX|SREC) payload exceeds (\d+) byte entries; refusing to load\.$/);
+    if (payload) {
+        return t(`${payload[1]} 데이터가 ${payload[2]}바이트 한도를 넘어 열지 않았습니다.`, message);
+    }
+    const storage = message.match(/^HEX\/SREC sparse storage exceeds (\d+) bytes; refusing to load\.$/);
+    if (storage) {
+        return t(`HEX/SREC 주소 범위가 저장 한도(${storage[1]}바이트)를 넘어 열지 않았습니다.`, message);
+    }
+    return message;
+}
+
 /**
  * Every user-facing string the Hex Viewer webview renders, resolved once in
  * the extension host. Same contract as the JSON Editor bundle: the webview
@@ -897,6 +893,14 @@ export function buildHexViewerStrings(): Record<string, string> {
             '0x... or ...h: hex address. Bare digits: decimal (absolute address inside range, otherwise file offset).'
         ),
         gotoButton: t('이동', 'Go'),
+        gotoInvalidFormat: t(
+            '형식이 올바르지 않습니다. 10진수(1024) 또는 16진수(0x400, 400h)를 입력하세요.',
+            'Invalid format. Enter decimal (1024) or hex (0x400, 400h).'
+        ),
+        gotoOutOfRange: t(
+            '범위를 벗어났습니다. 마지막 오프셋 {offset}, 마지막 주소 {address}',
+            'Out of range. Last offset {offset}, last address {address}'
+        ),
         findButton: t('찾기 (Ctrl+F)', 'Find (Ctrl+F)'),
         findModeLabel: t('찾기 방식', 'Search mode'),
         findModeBytes: t('바이트열', 'Bytes'),
@@ -908,10 +912,18 @@ export function buildHexViewerStrings(): Record<string, string> {
         finding: t('검색 중…', 'Searching…'),
         findNoMatches: t('결과 없음', 'No matches'),
         findAsciiOnly: t('ASCII 검색은 영문자와 ASCII 기호만 지원합니다.', 'ASCII search supports ASCII characters only.'),
+        findInvalidHex: t(
+            '16진수로 읽을 수 없습니다. 예: 바이트열 DE AD 또는 0xDE 0xAD, 값 0xDEADBEEF',
+            'Not valid hex. Examples: bytes DE AD or 0xDE 0xAD, value 0xDEADBEEF'
+        ),
         addressHeader: t('주소', 'Address'),
-        statusHint: t('바이트를 클릭하면 값을 확인할 수 있습니다', 'Click a byte to inspect'),
+        statusHint: t(
+            '바이트를 클릭하거나 표에서 화살표 키로 이동하세요 · Shift+화살표 범위 선택 · Ctrl/Cmd+C 복사',
+            'Click a byte or use the arrow keys in the grid · Shift+arrows to select · Ctrl/Cmd+C to copy'
+        ),
         loading: t('불러오는 중…', 'Loading…'),
         loadFailed: t('데이터를 불러오지 못했습니다. 파일을 다시 열어 주세요.', 'Failed to load data. Please reopen the file.'),
+        gridRoleDescription: t('16진수 바이트 표', 'hex byte grid'),
         gridLabel: t('16진수 바이트 표 — 화살표 키로 이동, Shift와 함께 누르면 범위 선택', 'Hex byte grid — arrow keys to move, hold Shift to extend the selection'),
         // 상태 표시줄의 첫 항목. 바로 옆 `statusAddress`는 번들에 있는데 이것만
         // 하드코딩돼 있었다 — 정적 마크업이 아니라 innerHTML로 조립되는 자리라
@@ -1017,6 +1029,13 @@ function getWebviewContent(
     }
     .toolbar select:focus, .toolbar input:focus { outline: none; border-color: var(--focus-border); }
     .toolbar input.goto-input { width: 100px; }
+    .toolbar input.goto-input[aria-invalid="true"] { outline: 1px solid var(--vscode-inputValidation-errorBorder, #be1100); }
+    .goto-error { color: var(--vscode-errorForeground, #f48771); font-size: 0.85em; margin-left: 8px; }
+    .goto-error:empty { display: none; }
+    .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
     .toolbar button {
         background: var(--button-bg); color: var(--button-fg);
         border: none; border-radius: 3px; padding: 3px 10px; cursor: pointer;
@@ -1075,6 +1094,12 @@ function getWebviewContent(
     .hex-cell.selected { background: var(--select); border-radius: 2px; }
     .hex-cell.find-highlight { background: var(--vscode-editor-findMatchHighlightBackground, #ea5c0055); border-radius: 2px; }
     .hex-cell.find-current { background: var(--vscode-editor-findMatchBackground, #515c6a); border-radius: 2px; }
+    /* 고대비 테마는 배경색 구분이 약하므로 테마의 대비 경계선을 함께 그린다.
+       일반 테마에서는 변수가 없어 투명하다. */
+    .hex-cell.selected, .ascii-cell.selected, .hex-cell.find-current {
+        outline: 1px solid var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px;
+    }
+    .hex-cell.find-highlight { outline: 1px dashed var(--vscode-contrastBorder, transparent); outline-offset: -1px; }
 
     .group-sep-cell { width: 6px; }
 
@@ -1127,7 +1152,9 @@ function getWebviewContent(
         <input type="text" id="gotoInput" class="goto-input" placeholder="0x08000000 / 1024" title="${esc(S.gotoTitle)}">
         <button id="gotoBtn">${esc(S.gotoButton)}</button>
         <div class="sep"></div>
-        <button id="findBtn">${esc(S.findButton)}</button>
+        <button id="findBtn" aria-expanded="false" aria-controls="findBar">${esc(S.findButton)}</button>
+        <!-- 툴바 끝에 둬 오류 문구가 나타나도 찾기 버튼을 밀어내지 않는다. -->
+        <span id="gotoError" class="goto-error" role="alert"></span>
     </div>
     <div class="find-bar" id="findBar">
         <select id="findMode" aria-label="${esc(S.findModeLabel)}">
@@ -1149,16 +1176,23 @@ function getWebviewContent(
          사용자가 "파일이 비었나"로 읽는다. role=status 라 스크린리더에도 전달된다. -->
     <div id="hexLoading" role="status" aria-live="polite"
          style="padding:16px;opacity:0.7">${esc(S.loading)}</div>
-    <div class="hex-container" id="hexContainer" tabindex="0" role="grid"
-         aria-label="${esc(S.gridLabel)}">
+    <!-- role="grid"는 gridcell·aria-activedescendant 없이 쓰면 "grid"라고만 읽히고
+         셀 이동을 알리지 못한다. group은 스크린리더 탐색 모드에서 화살표 키가 가상
+         커서로 가 버린다. 직접 키를 처리하는 영역이므로 application으로 두어 포커스
+         모드로 바뀌게 하고, 선택 결과는 아래 hexAnnounce가 짧게 읽어 준다. -->
+    <div class="hex-container" id="hexContainer" tabindex="0" role="application"
+         aria-roledescription="${esc(S.gridRoleDescription)}" aria-label="${esc(S.gridLabel)}">
         <table class="hex-table" id="hexTable">
             <thead id="hexHead"></thead>
             <tbody id="hexBody"></tbody>
         </table>
     </div>
-    <div class="status-bar" id="statusBar" role="status" aria-live="polite">
+    <!-- 상태 표시줄은 키를 누를 때마다 통째로 다시 그려져 live region이면 매번 전체가
+         반복해 읽혔다. 화면 표시는 그대로 두고 낭독은 짧은 전용 문구로 한다. -->
+    <div class="status-bar" id="statusBar">
         <span>${esc(S.statusHint)}</span>
     </div>
+    <div id="hexAnnounce" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script nonce="${nonce}">
 (function() {
@@ -1221,6 +1255,9 @@ function getWebviewContent(
     const unitSelect = document.getElementById('unitSize');
     const endianSelect = document.getElementById('endian');
     const gotoInput = document.getElementById('gotoInput');
+    const gotoError = document.getElementById('gotoError');
+    const hexAnnounce = document.getElementById('hexAnnounce');
+    const findBtn = document.getElementById('findBtn');
     const findBar = document.getElementById('findBar');
     const findHexInput = document.getElementById('findHexInput');
     const findInfo = document.getElementById('findInfo');
@@ -1511,6 +1548,7 @@ function getWebviewContent(
         document.querySelectorAll('.hex-cell.selected, .ascii-cell.selected').forEach(el => el.classList.remove('selected'));
         if (selectedOffset < 0) {
             statusBar.textContent = S.statusHint;
+            hexAnnounce.textContent = '';
             return;
         }
         applySelectionToVisible();
@@ -1529,10 +1567,14 @@ function getWebviewContent(
         const selectionHasData = dataSpan > 0 && hasDataRange(minOff, dataSpan);
         let html = '<span>' + S.statusOffset + ': 0x' + formatHex(minOff, 8) + '</span>';
         html += '<span>' + S.statusAddress + ': ' + formatAddr(addr) + '</span>';
+        // 스크린리더에는 주소와 첫 값만 짧게 알린다(상태 표시줄 전체를 매번 읽히지 않는다).
+        let announce = formatAddr(addr) + ': ';
 
         if (!selectionHasData) {
             html += '<span>' + S.statusValue + ': ' + S.statusNoData + '</span>';
+            announce += S.statusNoData;
         } else {
+            announce += '0x' + formatHex(DATA[minOff], 2);
             if (selSize === 1) {
                 const b = DATA[minOff];
                 html += '<span>' + S.statusValue + ': 0x' + formatHex(b, 2) + ' (' + b + ')</span>';
@@ -1552,8 +1594,10 @@ function getWebviewContent(
         }
         if (selSize > unitSize) {
             html += '<span>' + fmt(S.statusSelected, { n: selSize }) + '</span>';
+            announce += ', ' + fmt(S.statusSelected, { n: selSize });
         }
         statusBar.innerHTML = html;
+        hexAnnounce.textContent = announce;
     }
 
     // Click handler on hex cells
@@ -1715,21 +1759,33 @@ function getWebviewContent(
         if (!rawInput.trim()) { return; }
         const result = parseGoToOffset(rawInput, BASE_ADDR, TOTAL_SIZE);
         if (result.kind === 'ok') {
+            clearGotoError();
             jumpToOffset(result.offset);
             return;
         }
         if (result.kind === 'invalid-format') {
-            vscode.postMessage({ command: 'gotoError', reason: 'invalid-format', input: rawInput });
+            showGotoError(S.gotoInvalidFormat);
         } else if (result.kind === 'out-of-range') {
-            vscode.postMessage({
-                command: 'gotoError',
-                reason: 'out-of-range',
-                input: rawInput,
-                maxOffset: result.maxOffset,
-                maxAddress: result.maxAddress
-            });
+            showGotoError(fmt(S.gotoOutOfRange, {
+                offset: result.maxOffset + ' (0x' + result.maxOffset.toString(16).toUpperCase() + ')',
+                address: '0x' + result.maxAddress.toString(16).toUpperCase(),
+            }));
         }
     }
+
+    function showGotoError(message) {
+        gotoError.textContent = message;
+        gotoInput.setAttribute('aria-invalid', 'true');
+        gotoInput.setAttribute('aria-describedby', 'gotoError');
+    }
+
+    function clearGotoError() {
+        if (!gotoError.textContent) { return; }
+        gotoError.textContent = '';
+        gotoInput.removeAttribute('aria-invalid');
+        gotoInput.removeAttribute('aria-describedby');
+    }
+    gotoInput.addEventListener('input', clearGotoError);
 
     document.getElementById('gotoBtn').addEventListener('click', goToAddress);
     gotoInput.addEventListener('keydown', (e) => {
@@ -1741,35 +1797,62 @@ function getWebviewContent(
 
     // Find
     let findReturnFocus = null;
-    function toggleFind() {
-        if (findBar.classList.contains('visible')) {
-            closeFind();
-        } else {
+    function openFind() {
+        // 이미 열려 있으면 VS Code 찾기처럼 입력칸으로 돌아가 내용을 선택한다(닫지 않는다).
+        if (!findBar.classList.contains('visible')) {
             const active = document.activeElement;
             findReturnFocus = active instanceof HTMLElement && active !== document.body && !findBar.contains(active)
                 ? active : hexContainer;
             findBar.classList.add('visible');
-            findHexInput.focus();
+            findBtn.setAttribute('aria-expanded', 'true');
+        }
+        findHexInput.focus();
+        findHexInput.select();
+    }
+
+    function toggleFind() {
+        if (findBar.classList.contains('visible')) {
+            closeFind();
+        } else {
+            openFind();
         }
     }
 
-    function parseFindBytes(input) {
-        const clean = input.replace(/[^0-9a-fA-F]/g, '');
-        if (clean.length === 0 || clean.length % 2 !== 0) { return null; }
+    function hexDigitsToBytes(digits) {
         const bytes = [];
-        for (let i = 0; i < clean.length; i += 2) {
-            bytes.push(parseInt(clean.substring(i, i + 2), 16));
+        for (let i = 0; i < digits.length; i += 2) {
+            bytes.push(parseInt(digits.substring(i, i + 2), 16));
         }
         return bytes;
     }
 
-    function parseFindValue(input) {
-        const clean = input.replace(/[^0-9a-fA-F]/g, '');
-        if (clean.length === 0 || clean.length % 2 !== 0) { return null; }
-        const bytes = [];
-        for (let i = 0; i < clean.length; i += 2) {
-            bytes.push(parseInt(clean.substring(i, i + 2), 16));
+    // 바이트열: 공백·쉼표·콜론·하이픈으로 나눈 토큰마다 0x 접두사를 뗀다. 예전에는 16진수가
+    // 아닌 문자만 지워 '0x20 0x00'이 '02 00 00'이 됐다. 한 자리 토큰과 0x 토큰은 앞에 0을 채운다.
+    // 잘못된 입력은 undefined(안내 표시), 빈 입력은 null이다.
+    function parseFindBytes(input) {
+        const tokens = input.trim().split(/[\\s,:;-]+/).filter(token => token.length > 0);
+        if (tokens.length === 0) { return null; }
+        let digits = '';
+        for (const token of tokens) {
+            const prefixed = /^0[xX]/.test(token);
+            const body = prefixed ? token.slice(2) : token;
+            if (!/^[0-9a-fA-F]+$/.test(body)) { return undefined; }
+            if (body.length % 2 !== 0) {
+                if (!prefixed && body.length !== 1) { return undefined; }
+                digits += '0' + body;
+            } else {
+                digits += body;
+            }
         }
+        return hexDigitsToBytes(digits);
+    }
+
+    // 값: 하나의 16진 값(0x 접두사, 자릿수 구분자 ' _ 공백 허용 — '2002 0000' 붙여넣기). 홀수 자리는 앞에 0을 채운다.
+    function parseFindValue(input) {
+        const body = input.trim().replace(/^0[xX]/, '').replace(/['_\\s]/g, '');
+        if (body.length === 0) { return null; }
+        if (!/^[0-9a-fA-F]+$/.test(body)) { return undefined; }
+        const bytes = hexDigitsToBytes(body.length % 2 === 0 ? body : '0' + body);
         if (endian === 'little') {
             bytes.reverse();
         }
@@ -1822,6 +1905,11 @@ function getWebviewContent(
             return;
         }
         const bytes = getFindBytes();
+        if (bytes === undefined) {
+            findInfo.textContent = S.findInvalidHex;
+            applyFindHighlightsToVisible();
+            return;
+        }
         if (!bytes || bytes.length === 0) {
             findInfo.textContent = '';
             applyFindHighlightsToVisible();
@@ -1936,11 +2024,12 @@ function getWebviewContent(
         });
     }
 
-    document.getElementById('findBtn').addEventListener('click', toggleFind);
+    findBtn.addEventListener('click', toggleFind);
     function closeFind() {
         clearTimeout(findDebounceTimer);
         findGeneration++;
         findBar.classList.remove('visible');
+        findBtn.setAttribute('aria-expanded', 'false');
         findMatches = [];
         findCurrentIdx = -1;
         findInfo.textContent = '';
@@ -2034,7 +2123,11 @@ function getWebviewContent(
     document.addEventListener('keydown', (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
             e.preventDefault();
-            toggleFind();
+            openFind();
+        } else if (e.key === 'Escape' && !e.isComposing && findBar.classList.contains('visible') && !findBar.contains(e.target)) {
+            // 찾기 막대 밖(바이트 표 등)에 포커스가 있어도 Esc 한 번으로 찾기를 닫는다.
+            e.preventDefault();
+            closeFind();
         }
     });
 
@@ -2168,7 +2261,8 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider {
             result = cached?.stamp === stamp ? cached.result : parseFile(filePath);
             this.parsedDocuments.set(document, { stamp, result });
         } catch (e: any) {
-            const msg = t(`파일 파싱 실패 (${fileName}): ${e.message}`, `Failed to parse file (${fileName}): ${e.message}`);
+            const detail = localizeHexParseError(String(e?.message ?? e));
+            const msg = t(`파일 파싱 실패 (${fileName}): ${detail}`, `Failed to parse file (${fileName}): ${detail}`);
             webviewPanel.webview.html = buildErrorHtml(webviewPanel.webview, msg, 'error');
             vscode.window.showErrorMessage(plainNotificationText(msg));
             return;

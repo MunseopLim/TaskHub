@@ -417,6 +417,28 @@ async function checkBrowserFindKeys(): Promise<void> {
         { operations: [operation('focus', 'findBtn'), operation('click', 'findBtn'),
             operation('input', 'findHexInput', { value: 'AA' }), key('Escape')],
             visible: false, focused: 'findBtn', info: '', current: undefined, waitMs: 300 },
+        // 0x 접두사는 토큰마다 떼어 낸다 — 예전에는 '0xAA 0x00'이 '0A A0 00'으로 읽혔다.
+        { operations: [operation('focus', 'hexContainer'), operation('key', 'hexContainer', { key: 'f', ctrlKey: true }),
+            operation('input', 'findHexInput', { value: '0xAA 0x00' }), key('Enter')],
+            visible: true, focused: 'findHexInput', info: '1 / 2', current: '0' },
+        // 이미 열린 찾기에서 Ctrl+F는 닫지 않고 입력칸에 머문다.
+        { operations: [operation('key', 'findHexInput', { key: 'f', ctrlKey: true })],
+            visible: true, focused: 'findHexInput', info: '1 / 2', current: '0', selectedAll: true },
+        { operations: [operation('input', 'findHexInput', { value: 'AA 0' }), key('Enter')],
+            visible: true, focused: 'findHexInput', info: '1 / 2', current: '0' },
+        { operations: [operation('input', 'findHexInput', { value: '0xZZ' }), key('Enter')],
+            visible: true, focused: 'findHexInput', info: buildHexViewerStrings().findInvalidHex, current: undefined },
+        { operations: [operation('change', 'findMode', { value: 'value' }),
+            operation('input', 'findHexInput', { value: '0x00AA' }), key('Enter')],
+            visible: true, focused: 'findHexInput', info: '1 / 2', current: '0' },
+        { operations: [operation('input', 'findHexInput', { value: '0xAA00' }), key('Enter')],
+            visible: true, focused: 'findHexInput', info: '1 / 2', current: '1' },
+        // 값 모드에 공백으로 끊어 붙여넣은 값도 하나의 값이다.
+        { operations: [operation('input', 'findHexInput', { value: 'AA 00' }), key('Enter')],
+            visible: true, focused: 'findHexInput', info: '1 / 2', current: '1' },
+        // 바이트 표에 포커스가 있어도 Esc 한 번으로 찾기를 닫는다.
+        { operations: [operation('focus', 'hexContainer'), operation('key', 'hexContainer', { key: 'Escape' })],
+            visible: false, focused: 'hexContainer', info: '', current: undefined, expanded: 'false' },
     ];
     try {
         const deliveryId = 'keyboard-search';
@@ -442,6 +464,10 @@ async function checkBrowserFindKeys(): Promise<void> {
                         element.value = operation.value;
                         element.dispatchEvent(new Event('input', { bubbles: true }));
                     }
+                    if (operation.kind === 'change') {
+                        element.value = operation.value;
+                        element.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
                     if (operation.kind === 'key') {
                         const key = new KeyboardEvent('keydown', {
                             key: operation.key, shiftKey: operation.shiftKey, ctrlKey: operation.ctrlKey,
@@ -458,6 +484,11 @@ async function checkBrowserFindKeys(): Promise<void> {
                         focused: document.activeElement?.id,
                         info: document.getElementById('findInfo').textContent,
                         current: document.querySelector('.hex-cell.find-current')?.dataset.offset,
+                        expanded: document.getElementById('findBtn').getAttribute('aria-expanded'),
+                        selectedAll: (() => {
+                            const input = document.getElementById('findHexInput');
+                            return input.value.length > 0 && input.selectionStart === 0 && input.selectionEnd === input.value.length;
+                        })(),
                     });
                 })), event.data.waitMs ?? 0);
             });
@@ -475,6 +506,12 @@ async function checkBrowserFindKeys(): Promise<void> {
                         const expected = phases[message.phase];
                         for (const field of ['visible', 'focused', 'info', 'current'] as const) {
                             assert.strictEqual(message[field], expected[field], `phase ${message.phase}: ${field}`);
+                        }
+                        if ('expanded' in expected) {
+                            assert.strictEqual(message.expanded, expected.expanded, `phase ${message.phase}: aria-expanded`);
+                        }
+                        if ('selectedAll' in expected) {
+                            assert.strictEqual(message.selectedAll, expected.selectedAll, `phase ${message.phase}: selectedAll`);
                         }
                         assert.ok(message.prevented.every((value: boolean) => value), 'handled keyboard shortcuts must suppress their default action');
                         if (message.phase + 1 < phases.length) { send(message.phase + 1); } else { resolve(); }

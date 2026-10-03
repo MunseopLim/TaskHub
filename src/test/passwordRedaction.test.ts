@@ -8,6 +8,8 @@ import { HistoryProvider } from '../providers/historyProvider';
 import { MainViewProvider } from '../providers/mainViewProvider';
 import { ActionRunLogCollector } from '../runLogStore';
 import { ActionItem, Action as PipelineAction, Task } from '../schema';
+import { describeSensitiveFailure, sensitiveStageLabel } from '../extension';
+import { WindowsBatchArgumentError } from '../pipelineUtils';
 
 /**
  * Password results are deliberately kept intact for execution and are only
@@ -2147,5 +2149,19 @@ suite('shell / command 실행 계약 (0.6.47)', function () {
         const body = fs.readFileSync(path.join(workspace, 'out.txt'), 'utf8');
         assert.match(body, /first/);
         assert.match(body, /second/, '&& 뒤의 명령이 실행되지 않았다');
+    });
+});
+
+suite('민감 태스크의 Windows 배치 인자 차단', () => {
+    test('거부한 인자 값 없이 이유만 남긴다', () => {
+        const secret = 'p&ss%word';
+        const error = new WindowsBatchArgumentError('C:\\node\\npx.cmd', secret);
+        assert.ok(error.message.includes(secret), '원문은 로그용으로 값을 담는다');
+        const detail = describeSensitiveFailure(error, 'npx tool ***');
+        assert.strictEqual(detail.stage, 'batch-argument');
+        assert.strictEqual(detail.command, 'npx tool ***');
+        const label = sensitiveStageLabel(detail.stage);
+        assert.ok(!label.includes(secret));
+        assert.match(label, /cmd\.exe/);
     });
 });

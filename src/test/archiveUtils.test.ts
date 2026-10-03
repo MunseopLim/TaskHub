@@ -13,6 +13,8 @@ import {
     createZipArchive,
     extractZipArchive,
 } from './../archiveUtils';
+import * as vscode from 'vscode';
+import { localizeArchiveErrorMessage } from '../extension';
 
 /**
  * adm-zip은 `addFile()` 시점에 엔트리 이름을 정규화하므로 ('../evil.txt' →
@@ -1447,5 +1449,52 @@ suite('archiveUtils', () => {
                 `추출 실패 ${rounds}회에 열린 fd 가 ${after - before}개 늘었다 (${before} → ${after}) — 출력 스트림이 닫히지 않는다`
             );
         });
+    });
+});
+
+suite('내장 ZIP 엔진 오류의 사용자 언어 표시', () => {
+    let originalLanguage: PropertyDescriptor | undefined;
+    setup(() => {
+        originalLanguage = Object.getOwnPropertyDescriptor(vscode.env, 'language');
+        Object.defineProperty(vscode.env, 'language', { value: 'ko', configurable: true });
+    });
+    teardown(() => {
+        if (originalLanguage) { Object.defineProperty(vscode.env, 'language', originalLanguage); }
+    });
+
+    test('대표 오류를 한국어로 옮기고 경로·이름 같은 세부 값은 보존한다', () => {
+        const cases: Array<[string, RegExp]> = [
+            ['Blocked path traversal in archive: ../evil.txt', /^대상 폴더 밖을 가리키는 항목을 막았습니다: \.\.\/evil\.txt$/],
+            ['Source path not found: /ws/missing', /압축할 경로를 찾을 수 없습니다: \/ws\/missing/],
+            ["Archive entry 'big.bin' is 600 MB uncompressed, exceeding the 512 MB per-entry limit.", /'big\.bin'.*600 MB.*512 MB/],
+            ["Archive entry size mismatch for 'a.txt': expected 10, got 9.", /예상 10, 실제 9/],
+            ['Unsafe archive entry name (NUL byte): "a\\u0000b"', /안전하지 않은 압축 항목 이름입니다\(NUL byte\)/],
+        ];
+        for (const [message, expected] of cases) {
+            assert.match(localizeArchiveErrorMessage(message), expected, message);
+        }
+        assert.strictEqual(localizeArchiveErrorMessage('end of central directory record signature not found'),
+            'end of central directory record signature not found', '모르는 문구는 원문을 그대로 둔다');
+    });
+
+    test('archiveUtils 가 사용자에게 던지는 모든 단일 문구에 번역이 있다', () => {
+        // 새 오류 문구를 추가하고 번역 표를 빠뜨리면 한국어 사용자에게 영어가 섞여 보인다.
+        const source = fs.readFileSync(path.resolve(__dirname, '..', '..', 'src', 'archiveUtils.ts'), 'utf8');
+        const internal = new Set([
+            'Archive operation was cancelled.',
+            'Failed to make progress while writing ZIP archive.',
+            'Could not create a temporary file beside: 1',
+            'createZipArchive requires at least one source path.',
+            'Failed to open archive',
+            'Failed to open entry stream',
+        ]);
+        const literals = [...source.matchAll(/new Error\(\s*(?:`([^`]*)`|'([^']*)')\s*\)/g)]
+            .map(match => (match[1] ?? match[2]).replace(/\$\{[^}]*\}/g, '1'));
+        const ternary = [...source.matchAll(/\? `([^`]*)`\s*: `([^`]*)`\)/g)].flatMap(match => [match[1], match[2]])
+            .map(text => text.replace(/\$\{[^}]*\}/g, '1'));
+        const messages = [...new Set([...literals, ...ternary])].filter(message => !internal.has(message));
+        assert.ok(messages.length >= 15, `오류 문구 추출이 깨졌다: ${messages.length}`);
+        const untranslated = messages.filter(message => localizeArchiveErrorMessage(message) === message);
+        assert.deepStrictEqual(untranslated, []);
     });
 });

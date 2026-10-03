@@ -18,12 +18,13 @@ import { registerJenkins } from './jenkins/controller';
 import { registerFeatureLauncher } from './featureLauncher';
 import { registerWhatsNew, resolveChangelogUri } from './whatsNew';
 import { registerUpdateService } from './updateService';
+import { stripUtf8Bom } from './jsonEditorUtils';
 import { t } from './i18n';
 import { plainNotificationText } from './notificationText';
 import { runWithRegexBudget } from './regexBudget';
 import { RegexJobCancelledError, applyDiagnosticMatchersOffThread, applyOutputCaptureOffThread, startRegexWorkerPool, shutdownRegexWorkerPool, type RegexJobCancellation } from './regexWorkerClient';
 import { buildPreviewReport } from './previewRun';
-import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput } from './doctor';
+import { runDoctor, runDoctorPerSource, DoctorFinding, DoctorInput, locateJsonPointer } from './doctor';
 import { createZipArchive, extractZipArchive } from './archiveUtils';
 import { DIALOG_SCOPE, coerceDefaultUri, initDialogMemory, showOpenDialogWithMemory, showSaveDialogWithMemory, taskDialogScope } from './dialogMemory';
 import {
@@ -228,7 +229,7 @@ function parseAndValidateActionsContent(
 ): ActionItem[] {
     const validate = getActionsValidator();
     let parsedJson: any;
-    try { parsedJson = JSON.parse(fileContent); } catch (e: any) { throw actionsLoadError(filePath, `Error parsing JSON in ${path.basename(filePath)}: ${e.message}`); }
+    try { parsedJson = JSON.parse(stripUtf8Bom(fileContent)); } catch (e: any) { throw actionsLoadError(filePath, `Error parsing JSON in ${path.basename(filePath)}: ${e.message}`); }
     if (validate(parsedJson)) { const sourceLabel = options?.sourceLabel ?? filePath; performAdditionalActionValidation(parsedJson, { sourceLabel, filePath }); return parsedJson; } else { const errors = validate.errors?.map(error => `  - path: '${error.instancePath}' - message: ${error.message}`).join('\n'); throw actionsLoadError(filePath, `Validation failed for ${path.basename(filePath)}:\n${errors}`); }
 }
 
@@ -1408,7 +1409,8 @@ function collectDoctorInputs(context: vscode.ExtensionContext): DoctorInput[] {
             return undefined;
         }
         try {
-            return fs.readFileSync(filePath, 'utf-8');
+            // VS Code 문서 텍스트에는 BOM이 없으므로 떼어 내야 진단 위치도 맞고 파싱 오류로 오판하지 않는다.
+            return stripUtf8Bom(fs.readFileSync(filePath, 'utf-8'));
         } catch (e: any) {
             outputChannel.appendLine(`[Doctor] Failed to read ${filePath}: ${e?.message ?? e}`);
             return undefined;
@@ -1578,6 +1580,8 @@ import {
     resolvePwshPath,
     rawCommandUsesChainOperators,
     resolveWindowsTaskSpawn,
+    WindowsBatchArgumentError,
+    previewBatchArgument,
     buildRawOneShotWindowsScript,
     withPowerShellExitCode,
     interpolateCommandPreservingTokens,
@@ -2284,7 +2288,10 @@ function loadWizardActionSources(context: vscode.ExtensionContext, workspaceFold
     try {
         effective = collectEffectiveActionSources(context);
     } catch (error: any) {
-        throw new Error(`Could not load ${workspaceActionsPath}: ${error.message}`);
+        throw new Error(t(
+            `${workspaceActionsPath}을(를) 불러오지 못했습니다: ${error.message}`,
+            `Could not load ${workspaceActionsPath}: ${error.message}`
+        ));
     }
 
     // The target folder's array is the one the wizard mutates and writes
@@ -2593,7 +2600,7 @@ async function confirmWizardAction(input: {
                 extensionPath: input.extensionPath,
             });
             const existingText = fs.existsSync(input.workspaceActionsPath)
-                ? fs.readFileSync(input.workspaceActionsPath, 'utf-8')
+                ? stripUtf8Bom(fs.readFileSync(input.workspaceActionsPath, 'utf-8'))
                 : '[]';
             const before = runDoctor([doctorInput(existingText)], validator as any);
             const after = runDoctor([doctorInput(JSON.stringify(input.prospectiveActions, null, 2) + '\n')], validator as any);
@@ -2797,8 +2804,8 @@ async function runActionCreationWizard(context: vscode.ExtensionContext, mainVie
             const continueLabel = t('그대로 만들기', 'Create anyway');
             const choice = await vscode.window.showWarningMessage(
                 t(
-                    `명령어에 셸 연산자(\`&&\`, \`|\`, \`>\` 등)가 있습니다. 마법사는 안전을 위해 \`command\` 타입으로 저장하며, 이 타입은 연산자를 **리터럴 인자로** 넘깁니다 — 연산자가 동작하지 않습니다. 셸 해석이 필요하면 만든 뒤 actions.json 에서 타입을 \`shell\` 로 바꾸세요. 다만 \`shell\` 에서는 \${...} 로 들어온 값도 셸 문법으로 해석되므로, 사용자 입력이나 파일 경로는 \`args\` 배열로 넘기세요.`,
-                    `The command contains shell operators (\`&&\`, \`|\`, \`>\`, …). The wizard saves a \`command\` task for safety, and that type passes operators as **literal arguments** — they will not work. If you need shell interpretation, change the type to \`shell\` in actions.json afterwards. Note that in \`shell\`, interpolated \${...} values are also parsed as shell syntax, so pass user input and file paths through the \`args\` array instead.`
+                    `명령어에 셸 연산자(&&, |, > 등)가 있습니다. 마법사는 안전을 위해 command 타입으로 저장하며, 이 타입은 연산자를 셸 연산자가 아니라 일반 인자로 넘기므로 연산자가 동작하지 않습니다. 셸 해석이 필요하면 만든 뒤 actions.json에서 타입을 shell로 바꾸세요. 다만 shell에서는 \${...}로 들어온 값도 셸 문법으로 해석되므로, 사용자 입력이나 파일 경로는 args 배열로 넘기세요.`,
+                    `The command contains shell operators (&&, |, >, …). The wizard saves a command task for safety, and that type passes operators as plain arguments, so they will not work. If you need shell interpretation, change the type to shell in actions.json afterwards. Note that in shell, interpolated \${...} values are also parsed as shell syntax, so pass user input and file paths through the args array instead.`
                 ),
                 { modal: true },
                 continueLabel
@@ -3473,15 +3480,15 @@ export function isOnlyPromptCancellation(error: unknown, seen = new Set<unknown>
  * 문자열 치환만으로는 가릴 수 없기 때문이다.
  */
 interface SensitiveFailureDetail {
-    stage: 'start' | 'exit' | 'timeout' | 'capture-limit' | 'unknown';
+    stage: 'start' | 'exit' | 'timeout' | 'capture-limit' | 'batch-argument' | 'unknown';
     exitCode?: number | null;
     signal?: NodeJS.Signals | null;
     /** 이미 마스킹된 명령줄. */
     command?: string;
 }
 
-/** 실패 원인 중 **가릴 필요가 없는** 부분만 추려 낸다. */
-function describeSensitiveFailure(raw: Error, maskedCommand?: string): SensitiveFailureDetail {
+/** 실패 원인 중 **가릴 필요가 없는** 부분만 추려 낸다. (테스트용으로 export) */
+export function describeSensitiveFailure(raw: Error, maskedCommand?: string): SensitiveFailureDetail {
     if (raw instanceof ShellCommandError) {
         return { stage: 'exit', exitCode: raw.exitCode, signal: raw.signal, command: maskedCommand };
     }
@@ -3490,6 +3497,10 @@ function describeSensitiveFailure(raw: Error, maskedCommand?: string): Sensitive
     }
     if (raw.name === 'CaptureLimitError') {
         return { stage: 'capture-limit', command: maskedCommand };
+    }
+    // 원문에는 거부한 인자 값이 들어 있어 비밀이 섞일 수 있다. 값 없이 이유만 남긴다.
+    if (raw instanceof WindowsBatchArgumentError) {
+        return { stage: 'batch-argument', command: maskedCommand };
     }
     // spawn 자체가 실패한 경우(ENOENT/EACCES 등). errno 코드는 경로나 비밀을
     // 담지 않는다.
@@ -3589,12 +3600,16 @@ function containsDebuggableSensitiveTaskError(error: unknown, seen = new Set<unk
     );
 }
 
-function sensitiveStageLabel(stage: SensitiveFailureDetail['stage']): string {
+export function sensitiveStageLabel(stage: SensitiveFailureDetail['stage']): string {
     switch (stage) {
         case 'start': return t('실행 시작 실패', 'failed to start');
         case 'exit': return t('비정상 종료', 'exited with a failure');
         case 'timeout': return t('시간 초과', 'timed out');
         case 'capture-limit': return t('출력 한도 초과', 'exceeded the output limit');
+        case 'batch-argument': return t(
+            'Windows 배치 파일 인자에 cmd.exe 특수 문자(& | < > ^ % ! ")가 있어 실행하지 않음',
+            'not run: a Windows batch file argument contains cmd.exe special characters (& | < > ^ % ! ")'
+        );
         default: return t('실패', 'failed');
     }
 }
@@ -3900,6 +3915,32 @@ interface ChildProcessBucket {
 }
 
 const actionChildProcesses = new Map<string, Map<string, ChildProcessBucket>>();
+
+/**
+ * 태스크 실행 전 준비 단계의 보조 프로세스(`itemsFromCommand` 목록 생성, 로그인 셸 env 탐색).
+ * POSIX에서 `detached`로 자기 프로세스 그룹을 가지므로, 창을 다시 로드할 때 종료하지 않으면
+ * 네트워크를 기다리는 `git fetch` 같은 명령이 extension host 밖에서 고아로 계속 돈다.
+ * 액션 registry에는 속하지 않으므로 `deactivate()`만 이 집합을 함께 종료한다.
+ */
+const auxiliaryChildProcesses = new Set<ReturnType<typeof spawn>>();
+
+function trackAuxiliaryChild(child: ReturnType<typeof spawn>): void {
+    auxiliaryChildProcesses.add(child);
+    const release = () => { auxiliaryChildProcesses.delete(child); };
+    child.once('close', release);
+    child.once('error', release);
+}
+
+/** 확장 종료 때 트리째 종료할 모든 하위 프로세스(액션 registry + 준비 단계 보조 프로세스). */
+export function collectShutdownChildProcesses(): Set<ReturnType<typeof spawn>> {
+    const childProcesses = new Set<ReturnType<typeof spawn>>(auxiliaryChildProcesses);
+    for (const perAction of actionChildProcesses.values()) {
+        for (const bucket of perAction.values()) {
+            for (const child of bucket.processes) { childProcesses.add(child); }
+        }
+    }
+    return childProcesses;
+}
 
 /**
  * Test seam: 지금 이 액션에 대해 *Stop All* 이 볼 수 있는 자식 프로세스들.
@@ -4506,7 +4547,7 @@ export function loadMemoryMapConfig(workspaceFolder?: string): MemoryMapConfig |
         return undefined;
     }
     try {
-        const typesData = JSON.parse(fs.readFileSync(typesPath, 'utf-8'));
+        const typesData = JSON.parse(stripUtf8Bom(fs.readFileSync(typesPath, 'utf-8')));
         const regions = validateMemoryMapRegions(typesData?.memoryMap?.regions);
         if (regions) {
             return { regions };
@@ -5162,7 +5203,7 @@ export async function addOpenFileToFavorites(favoriteViewProvider: Pick<Favorite
             includeLine: true
         }
     ], {
-        title: t('즐겨찾기에 추가', 'Add to Favorites'),
+        title: t('즐겨찾는 파일에 추가', 'Add to Favorite Files'),
         placeHolder: t(`'${title}'을(를) 어떻게 등록할까요?`, `How would you like to add '${title}'?`),
         ignoreFocusOut: true
     });
@@ -5500,7 +5541,7 @@ async function promptFavoriteSearch(favoriteViewProvider: FavoriteViewProvider):
     });
 
     const pick = await vscode.window.showQuickPick(items, {
-        placeHolder: t('제목, 그룹, 줄 번호 또는 태그로 즐겨찾기 검색', 'Search favorites by title, group, line, or tag'),
+        placeHolder: t('제목, 그룹, 줄 번호 또는 태그로 즐겨찾는 파일 검색', 'Search favorite files by title, group, line, or tag'),
         matchOnDescription: true,
         matchOnDetail: true,
         ignoreFocusOut: true
@@ -6269,9 +6310,18 @@ async function executeActionPipelineForRun(
         });
 
         const contextualized = wrapped.catch((error: unknown) => {
+            if (error instanceof WindowsBatchArgumentError) {
+                error.message = t(
+                    `배치 파일 '${error.executable}'의 인자 ${JSON.stringify(previewBatchArgument(error.argument))}에 cmd.exe 특수 문자(& | < > ^ % ! ")가 있어 실행하지 않았습니다. Windows가 배치 파일 인자를 다시 해석해 명령이 주입될 수 있습니다. 값을 확인하거나, 셸 문법이 필요하면 shell 타입으로 직접 인용하세요.`,
+                    `Did not run batch file '${error.executable}': argument ${JSON.stringify(previewBatchArgument(error.argument))} contains cmd.exe special characters (& | < > ^ % ! "). Windows re-parses batch file arguments, which could inject commands. Check the value, or use a shell task and quote it yourself if you need shell syntax.`
+                );
+            }
             if (error instanceof Error && error.name === 'TaskTimeoutError' && taskScope.forEachIteration) {
                 const { index, total } = taskScope.forEachIteration;
-                error.message = `Task '${taskId}' forEach iteration ${index}/${total} failed: ${error.message}`;
+                error.message = t(
+                    `태스크 '${taskId}'의 forEach ${index}/${total}번째 반복이 실패했습니다: ${error.message}`,
+                    `Task '${taskId}' forEach iteration ${index}/${total} failed: ${error.message}`
+                );
             }
             throw error;
         });
@@ -6336,7 +6386,8 @@ async function executeActionPipelineForRun(
                     ? new SensitiveTaskError(
                         taskId,
                         describeSensitiveFailure(raw, maskedCommandForTask(taskId)),
-                        taskUsesSecret
+                        // 실행 전에 거부된 것이라 민감 디버그로 다시 돌려도 볼 출력이 없다.
+                        taskUsesSecret && !(raw instanceof WindowsBatchArgumentError)
                     )
                     : raw;
                 // 사용자 중지는 `continueOnError` 보다 우선한다. 그 설정의 뜻은
@@ -6414,8 +6465,8 @@ async function executeActionPipelineForRun(
             if (accumulatedResultBytes > totalResultLimit) {
                 const limitMb = Math.round(totalResultLimit / (1024 * 1024));
                 const limitError = new Error(t(
-                    `태스크 결과 총량이 ${limitMb}MB 한도를 초과했습니다. \`taskhub.pipeline.totalOutputLimitMb\` 설정을 높이거나, 큰 출력을 캡처하지 않도록 태스크를 나누세요.`,
-                    `Combined task output exceeded the ${limitMb} MB limit. Raise \`taskhub.pipeline.totalOutputLimitMb\`, or split the task so the large output is not captured.`
+                    `태스크 결과 총량이 ${limitMb}MB 한도를 초과했습니다. 'taskhub.pipeline.totalOutputLimitMb' 설정을 높이거나, 큰 출력을 캡처하지 않도록 태스크를 나누세요.`,
+                    `Combined task output exceeded the ${limitMb} MB limit. Raise 'taskhub.pipeline.totalOutputLimitMb', or split the task so the large output is not captured.`
                 ));
                 // 던지기 **전에** 형제를 멈춘다. 그냥 던지면 액션은 실패로
                 // 끝나는데 병렬 형제의 빌드·플래싱은 계속 돈다.
@@ -6771,13 +6822,102 @@ function handleActionFailure(
     actionItem: ActionItem,
     action: PipelineAction,
     error: Error,
-    showExecutionNotifications: boolean
+    showExecutionNotifications: boolean,
+    findHistoryEntry?: () => HistoryEntry | undefined | Promise<HistoryEntry | undefined>
 ): void {
     actionStates.set(id, { state: 'failure' });
     if (!showExecutionNotifications) {
         return;
     }
-    vscode.window.showErrorMessage(actionFailureNotificationMessage(actionItem, action, error));
+    void showActionFailureNotification(actionFailureNotificationMessage(actionItem, action, error), findHistoryEntry);
+}
+
+/**
+ * 가장 자주 보는 오류인데 다음 행동이 없어 사용자가 History 패널을 직접 찾아가야 했다.
+ * 같은 실행의 History 항목으로 보고서 보기·다시 실행을 바로 잇는다. 항목은 버튼을 누른
+ * 시점에 찾는다 — 알림이 뜬 직후에야 실패 상태·로그 참조가 기록된다.
+ */
+export async function showActionFailureNotification(
+    message: string,
+    findHistoryEntry?: () => HistoryEntry | undefined | Promise<HistoryEntry | undefined>
+): Promise<void> {
+    if (!findHistoryEntry) {
+        void vscode.window.showErrorMessage(message);
+        return;
+    }
+    const reportLabel = t('실행 보고서 보기', 'View Run Report');
+    const rerunLabel = t('다시 실행', 'Run Again');
+    const picked = await vscode.window.showErrorMessage(message, reportLabel, rerunLabel);
+    if (!picked) { return; }
+    const entry = await findHistoryEntry();
+    if (!entry) {
+        void vscode.window.showWarningMessage(t(
+            '이 실행의 기록을 찾을 수 없습니다. 기록이 지워졌거나 실행 기록 보관 개수를 넘어 정리됐습니다.',
+            'The history entry for this run is no longer available. It was deleted or trimmed by the History limit.'
+        ));
+        return;
+    }
+    if (picked === reportLabel) {
+        await showActionRunReport(entry);
+    } else {
+        await vscode.commands.executeCommand('taskhub.rerunFromHistory', entry);
+    }
+}
+
+/** `actions.json` 배열 안에서 id가 같은 항목의 JSON 포인터(`/0/children/2`). 폴더 아래도 찾는다. */
+export function findActionJsonPointer(items: unknown, id: string, base = ''): string | undefined {
+    if (!Array.isArray(items)) { return undefined; }
+    for (let index = 0; index < items.length; index++) {
+        const item = items[index] as { id?: unknown; children?: unknown } | null;
+        if (!item || typeof item !== 'object') { continue; }
+        const pointer = `${base}/${index}`;
+        if (item.id === id) { return pointer; }
+        const nested = findActionJsonPointer(item.children, id, `${pointer}/children`);
+        if (nested) { return nested; }
+    }
+    return undefined;
+}
+
+/**
+ * 액션 하나를 고치려고 파일 전체를 열어 직접 찾지 않도록, 그 정의 위치로 바로 연다.
+ * 워크스페이스 밖(확장 예제·프리셋)에서 온 액션은 고칠 파일이 워크스페이스에 없으므로 알린다.
+ */
+export async function openActionDefinition(actionId: string, workspaceFolderPath: string | undefined): Promise<void> {
+    const filePath = workspaceFolderPath ? path.join(workspaceFolderPath, '.vscode', 'actions.json') : undefined;
+    if (!filePath || !fs.existsSync(filePath)) {
+        vscode.window.showInformationMessage(t(
+            `'${actionId}' 액션은 TaskHub 기본 예제나 프리셋에 정의되어 있어 워크스페이스의 actions.json에 없습니다.`,
+            `The action '${actionId}' comes from the TaskHub built-in examples or a preset, so it is not in this workspace's actions.json.`
+        ));
+        return;
+    }
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+    let position = new vscode.Position(0, 0);
+    try {
+        const text = document.getText();
+        const parsed: unknown = JSON.parse(stripUtf8Bom(text));
+        const pointer = findActionJsonPointer(parsed, actionId);
+        if (pointer) {
+            const range = locateJsonPointer(text, parsed, pointer);
+            position = new vscode.Position(Math.max(0, range.startLine - 1), Math.max(0, range.startColumn - 1));
+        }
+    } catch {
+        // 깨진 파일도 열어서 고칠 수 있게 한다. 위치만 맨 앞으로 둔다.
+    }
+    await vscode.window.showTextDocument(document, { preview: false, selection: new vscode.Range(position, position) });
+}
+
+/** 터미널을 닫으면 그 안에서 돌던 빌드·플래싱도 함께 끝난다. 실행 중인 액션이 있을 때만 묻는다. */
+export async function confirmCloseTerminalsWhileRunning(running: readonly string[]): Promise<boolean> {
+    if (running.length === 0) { return true; }
+    const closeLabel = t('터미널 닫기', 'Close Terminals');
+    const choice = await vscode.window.showWarningMessage(
+        t(`실행 중인 액션 ${running.length}개가 있습니다. TaskHub 터미널을 닫으면 그 안에서 실행 중인 작업도 종료됩니다.`,
+          `${running.length} action(s) are running. Closing TaskHub terminals also ends the work running in them.`),
+        { modal: true },
+        closeLabel
+    );
+    return choice === closeLabel;
 }
 
 /**
@@ -7058,6 +7198,9 @@ export async function executeAction(
     const timestamp = Date.now();
     let runLog: ConfiguredRunLog | undefined;
     let runLogOutcome: ActionRunLogOutcome = 'failure';
+    // 실패 알림은 실행 로그 저장보다 먼저 뜬다. 보고서 버튼은 이 실행의 저장이 끝난 뒤에 기록을 찾는다.
+    let markRunLogSettled!: () => void;
+    const runLogSettled = new Promise<void>(resolve => { markRunLogSettled = resolve; });
     let runLogError: string | undefined;
     let runLogErrorCode: ActionRunLogErrorCode | undefined;
 
@@ -7275,7 +7418,12 @@ export async function executeAction(
                           `Action '${actionItem.title}' failed: ${error.message}`)
                     );
                 } else {
-                    handleActionFailure(id, actionItem, action, error, showExecutionNotifications);
+                    handleActionFailure(id, actionItem, action, error, showExecutionNotifications, historyProvider
+                        ? async () => {
+                            await runLogSettled;
+                            return historyProvider.getHistory().find(entry => entry.actionId === id && entry.timestamp === timestamp);
+                        }
+                        : undefined);
                 }
             }
 
@@ -7372,10 +7520,14 @@ export async function executeAction(
             }
         }
     } finally {
-        finalizeActionRun(run, mainViewProvider);
-        const persistedRunLog = await persistRunLog(runLog, runLogOutcome, Date.now(), runLogError, runLogErrorCode);
-        if (persistedRunLog && historyProvider) {
-            historyProvider.setHistoryRunLog(id, timestamp, persistedRunLog);
+        try {
+            finalizeActionRun(run, mainViewProvider);
+            const persistedRunLog = await persistRunLog(runLog, runLogOutcome, Date.now(), runLogError, runLogErrorCode);
+            if (persistedRunLog && historyProvider) {
+                historyProvider.setHistoryRunLog(id, timestamp, persistedRunLog);
+            }
+        } finally {
+            markRunLogSettled();
         }
     }
 }
@@ -8513,8 +8665,8 @@ export function resolveRawShellExecutable(
         // 경로에서도 이 메시지만은 그대로 보여야 한다. 명령 텍스트나 비밀을
         // 담지 않으므로 노출해도 안전하다.
         const error = new Error(t(
-            `이 명령은 \`&&\` 또는 \`||\` 를 사용하는데, Windows PowerShell 5.1(\`powershell.exe\`)은 이 연산자를 지원하지 않습니다 — PowerShell 7(\`pwsh.exe\`)부터 도입됐습니다. PowerShell 7 을 설치하거나(PATH 에 있으면 자동으로 사용합니다), 태스크를 둘로 나누세요. 파이프라인은 앞 단계가 실패하면 뒤 단계를 실행하지 않으므로 \`&&\` 와 의미가 같고, 어느 단계가 실패했는지도 드러납니다.`,
-            `This command uses \`&&\` or \`||\`, which Windows PowerShell 5.1 (\`powershell.exe\`) does not support — those operators arrived in PowerShell 7 (\`pwsh.exe\`). Install PowerShell 7 (it is used automatically when on PATH), or split the task in two. A pipeline already stops at the first failing step, so it means the same thing as \`&&\` and also shows which step failed.`
+            `이 명령은 '&&' 또는 '||' 를 사용하는데, Windows PowerShell 5.1('powershell.exe')은 이 연산자를 지원하지 않습니다 — PowerShell 7('pwsh.exe')부터 도입됐습니다. PowerShell 7 을 설치하거나(PATH 에 있으면 자동으로 사용합니다), 태스크를 둘로 나누세요. 파이프라인은 앞 단계가 실패하면 뒤 단계를 실행하지 않으므로 '&&' 와 의미가 같고, 어느 단계가 실패했는지도 드러납니다.`,
+            `This command uses '&&' or '||', which Windows PowerShell 5.1 ('powershell.exe') does not support — those operators arrived in PowerShell 7 ('pwsh.exe'). Install PowerShell 7 (it is used automatically when on PATH), or split the task in two. A pipeline already stops at the first failing step, so it means the same thing as '&&' and also shows which step failed.`
         ));
         error.name = RAW_SHELL_UNSUPPORTED_ERROR;
         throw error;
@@ -8581,11 +8733,18 @@ export function createShellExecution(
         };
     }
 
+    // POSIX 인용(`'\''`)은 sh 문법이다. 사용자의 작업 셸이 pwsh·nushell이면 같은 줄이 다르게
+    // 해석돼 인자 경계와 주입 방지가 깨지므로, `command` 타입은 캡처 경로와 같은 /bin/sh로 고정한다.
     const commandLine = buildPosixCommandLine(command, args);
     return {
-        shellExecution: new vscode.ShellExecution(commandLine, options),
+        shellExecution: new vscode.ShellExecution(commandLine, withPosixShell(options)),
         displayCommand: commandLine
     };
+}
+
+/** TaskHub가 조립한 sh 문법 명령줄은 사용자 셸 설정과 관계없이 /bin/sh -c로 실행한다. */
+export function withPosixShell(options: vscode.ShellExecutionOptions): vscode.ShellExecutionOptions {
+    return { ...options, executable: '/bin/sh', shellArgs: ['-c'] };
 }
 
 export function wrapCommandForOneShot(
@@ -8599,7 +8758,8 @@ export function wrapCommandForOneShot(
 ): { commandLine: string; displayCommand: string; isPowerShellScript: boolean } {
     const windowsLookup = { env, cwd: cwd || process.cwd(), ...lookup };
     const windowsPlan = process.platform === 'win32'
-        ? resolveWindowsTaskSpawn(raw, command, args, windowsLookup)
+        // 비-raw one-shot은 shim·스크립트를 `Start-Process`로 띄워 PATHEXT(.cmd)로 풀린다.
+        ? resolveWindowsTaskSpawn(raw, command, args, windowsLookup, { startProcess: !raw })
         : undefined;
     if (raw && process.platform !== 'win32') {
         // **명령을 `sh -c` 로 감싼다.** 예전에는 raw 문자열을 `nohup … >/dev/null
@@ -8710,7 +8870,8 @@ function prepareTaskExecution(task: any, workspaceFolderPath?: string): TaskExec
             const encoded = encodePowerShellScript(wrapped.commandLine);
             shellExecution = new vscode.ShellExecution('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], options);
         } else {
-            shellExecution = new vscode.ShellExecution(wrapped.commandLine, options);
+            // `nohup … &` 래퍼는 sh 문법이다(raw 본문도 안쪽 `sh -c`로 감싼다).
+            shellExecution = new vscode.ShellExecution(wrapped.commandLine, withPosixShell(options));
         }
         displayCommand = wrapped.displayCommand;
     } else {
@@ -9227,6 +9388,7 @@ export function runCommandCaptureLines(command: string, cwd: string | undefined,
             reject(e instanceof Error ? e : new Error(String(e)));
             return;
         }
+        trackAuxiliaryChild(child);
 
         let stdout = '';
         let stderr = '';
@@ -9955,6 +10117,7 @@ function getShellAccessibleEnvNames(): Promise<Set<string> | null> {
             resolve(null);
             return;
         }
+        trackAuxiliaryChild(child);
 
         let stdout = '';
         let settled = false;
@@ -10102,6 +10265,47 @@ async function handleWriteFile(
     return { path: safePath };
 }
 
+/**
+ * 내장 ZIP 엔진(`archiveUtils`, vscode에 의존하지 않는 순수 모듈)이 던지는 영어 오류를 사용자
+ * 언어로 옮긴다. 원문은 로그·테스트가 보는 그대로 두고 표시할 때만 바꾼다. 표에 없는 문구는 원문을
+ * 그대로 돌려준다 — `archiveUtils` 의 새 문구가 표에서 빠지면 `archiveUtils.test.ts` 가 잡는다.
+ */
+const ARCHIVE_ERROR_TRANSLATIONS: ReadonlyArray<[RegExp, (m: RegExpMatchArray) => string]> = [
+    [/^Conflicting archive entry name after filesystem normalization: (.+)$/s, m => t(`파일 시스템 정규화 후 압축 항목 이름이 겹칩니다: ${m[1]}`, m[0])],
+    [/^Conflicting archive entry names: (.+) and (.+)$/s, m => t(`압축 항목 이름이 겹칩니다: ${m[1]}, ${m[2]}`, m[0])],
+    [/^Archive source changed while it was being prepared: (.+)$/s, m => t(`압축할 원본이 준비하는 동안 바뀌었습니다: ${m[1]}`, m[0])],
+    [/^Unsafe archive entry name \((.+?)\): (.+)$/s, m => t(`안전하지 않은 압축 항목 이름입니다(${m[1]}): ${m[2]}`, m[0])],
+    [/^Archive contains more than (\d+) entries; ZIP64 creation is not supported\.$/, m => t(`항목이 ${m[1]}개를 넘어 압축 파일을 만들 수 없습니다(ZIP64 미지원).`, m[0])],
+    [/^Source path not found: (.+)$/s, m => t(`압축할 경로를 찾을 수 없습니다: ${m[1]}`, m[0])],
+    [/^Unsupported source type \(not a file or directory\): (.+)$/s, m => t(`파일이나 폴더가 아니어서 압축할 수 없습니다: ${m[1]}`, m[0])],
+    [/^No archive sources remain after excluding the destination ZIP\.$/, m => t('대상 ZIP 파일을 제외하면 압축할 원본이 남지 않습니다.', m[0])],
+    [/^(.+) exceeds the 4 GB limit of this ZIP writer\.$/s, m => t(`${m[1]}이(가) 내장 ZIP 엔진의 4GB 한도를 넘습니다.`, m[0])],
+    [/^Archive entry name is too long: (.+)$/s, m => t(`압축 항목 이름이 너무 깁니다: ${m[1]}`, m[0])],
+    [/^Invalid uncompressed size in archive entry: (.+)$/s, m => t(`압축 항목의 원래 크기 정보가 올바르지 않습니다: ${m[1]}`, m[0])],
+    [/^Archive entry '(.+)' is (.+) uncompressed, exceeding the (.+) per-entry limit\.$/s, m => t(`압축 항목 '${m[1]}'의 풀린 크기(${m[2]})가 항목당 한도(${m[3]})를 넘습니다.`, m[0])],
+    [/^Archive expands to more than (.+) uncompressed; refusing to extract\.$/s, m => t(`압축을 풀면 ${m[1]}를 넘어 해제하지 않았습니다.`, m[0])],
+    [/^Archive contains more than (\d+) entries; refusing to extract\.$/, m => t(`항목이 ${m[1]}개를 넘어 해제하지 않았습니다.`, m[0])],
+    [/^Invalid archive entry resolves to destination root: (.+)$/s, m => t(`대상 폴더 자체를 가리키는 잘못된 항목입니다: ${m[1]}`, m[0])],
+    [/^Blocked path traversal in archive: (.+)$/s, m => t(`대상 폴더 밖을 가리키는 항목을 막았습니다: ${m[1]}`, m[0])],
+    [/^Blocked symlinked path in archive destination: (.+)$/s, m => t(`대상 경로의 심볼릭 링크를 따라 쓰지 않도록 막았습니다: ${m[1]}`, m[0])],
+    [/^Archive entry needs a directory but a file exists at: (.+)$/s, m => t(`폴더가 있어야 할 자리에 파일이 있습니다: ${m[1]}`, m[0])],
+    [/^Archive entry needs a file but a non-file exists at: (.+)$/s, m => t(`파일이 있어야 할 자리에 파일이 아닌 항목이 있습니다: ${m[1]}`, m[0])],
+    [/^Blocked hard-linked path in archive destination: (.+)$/s, m => t(`대상 경로의 하드 링크를 덮어쓰지 않도록 막았습니다: ${m[1]}`, m[0])],
+    [/^Archive destination directory changed during extraction: (.+)$/s, m => t(`해제하는 동안 대상 폴더가 바뀌었습니다: ${m[1]}`, m[0])],
+    [/^Archive destination file permissions changed during extraction: (.+)$/s, m => t(`해제하는 동안 대상 파일 권한이 바뀌었습니다: ${m[1]}`, m[0])],
+    [/^Archive not found: (.+)$/s, m => t(`압축 파일을 찾을 수 없습니다: ${m[1]}`, m[0])],
+    [/^Archive entry size mismatch for '(.+)': expected (\d+), got (\d+)\.$/s, m => t(`압축 항목 '${m[1]}'의 크기가 다릅니다(예상 ${m[2]}, 실제 ${m[3]}). 압축 파일이 손상됐을 수 있습니다.`, m[0])],
+    [/^Archive entry CRC mismatch: (.+)$/s, m => t(`압축 항목의 CRC가 맞지 않습니다. 압축 파일이 손상됐을 수 있습니다: ${m[1]}`, m[0])],
+];
+
+export function localizeArchiveErrorMessage(message: string): string {
+    for (const [pattern, translate] of ARCHIVE_ERROR_TRANSLATIONS) {
+        const match = message.match(pattern);
+        if (match) { return translate(match); }
+    }
+    return message;
+}
+
 async function handleUnzip(
     task: any,
     allResults: any,
@@ -10180,7 +10384,8 @@ async function handleUnzip(
             // 중지로 끝난 것을 "실패"로 포장하면 사용자가 누른 Stop 이
             // 오류처럼 보이고, 파이프라인의 중지 처리도 타지 않는다.
             if (isArchiveAbortError(error)) { throw new ActionStoppedError(); }
-            throw new Error(t(`압축 파일 해제 실패: ${error.message}`, `Failed to unzip file: ${error.message}`));
+            const detail = localizeArchiveErrorMessage(String(error?.message ?? error));
+            throw new Error(t(`압축 파일 해제 실패: ${detail}`, `Failed to unzip file: ${detail}`));
         } finally {
             abort.dispose();
         }
@@ -10305,7 +10510,8 @@ async function handleZip(
             return { archivePath: resolvedArchive };
         } catch (error: any) {
             if (isArchiveAbortError(error)) { throw new ActionStoppedError(); }
-            throw new Error(t(`태스크 '${task.id}'의 파일 압축 실패: ${error.message}`, `Failed to zip files for task '${task.id}': ${error.message}`));
+            const detail = localizeArchiveErrorMessage(String(error?.message ?? error));
+            throw new Error(t(`태스크 '${task.id}'의 파일 압축 실패: ${detail}`, `Failed to zip files for task '${task.id}': ${detail}`));
         } finally {
             abort.dispose();
         }
@@ -10424,7 +10630,7 @@ export function parseImportData(content: string): { actions: ActionItem[]; error
     const errors: string[] = [];
     let parsed: any;
     try {
-        parsed = JSON.parse(content);
+        parsed = JSON.parse(stripUtf8Bom(content));
     } catch {
         return { actions: [], errors: ['Invalid JSON format.'] };
     }
@@ -11264,8 +11470,8 @@ export function executeShellCommand(
                     settled = true;
                     const limitMb = Math.round(captureLimitBytes / (1024 * 1024));
                     const limitError = new Error(t(
-                        `캡처된 출력이 ${limitMb}MB 한도를 초과하여 명령을 중단했습니다. \`taskhub.pipeline.outputCaptureLimitMb\` 설정을 높이거나, 캡처가 필요 없다면 \`passTheResultToNextTask\` 를 꺼서 터미널로 흘려보내세요.`,
-                        `Captured output exceeded the ${limitMb} MB limit and the command was aborted. Raise \`taskhub.pipeline.outputCaptureLimitMb\`, or turn off \`passTheResultToNextTask\` so the output streams to the terminal instead of being captured.`
+                        `캡처된 출력이 ${limitMb}MB 한도를 초과하여 명령을 중단했습니다. 'taskhub.pipeline.outputCaptureLimitMb' 설정을 높이거나, 캡처가 필요 없다면 'passTheResultToNextTask' 를 꺼서 터미널로 흘려보내세요.`,
+                        `Captured output exceeded the ${limitMb} MB limit and the command was aborted. Raise 'taskhub.pipeline.outputCaptureLimitMb', or turn off 'passTheResultToNextTask' so the output streams to the terminal instead of being captured.`
                     ));
                     limitError.name = 'CaptureLimitError';
                     reject(limitError);
@@ -12056,6 +12262,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.openLinkInIntegratedBrowser', openLinkInIntegratedBrowser));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.copyLink', async (item: Link) => { await vscode.env.clipboard.writeText(item.getLink()); vscode.window.showInformationMessage(t('링크가 클립보드에 복사되었습니다.', 'Link copied to clipboard.')); }));
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.goToLink', async (item: Link) => { await openExternalLinkSafely(item.getLink()); }));
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.openActionDefinition', async (actionItem: Action | undefined) => {
+        const actionId = actionItem?.id;
+        if (!actionId) { return; }
+        await openActionDefinition(actionId, actionWorkspaceFolderMap.get(actionId));
+    }));
+
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.executeAction', async (actionItem: Action) => {
         let allActions: ActionItem[];
         try {
@@ -12132,8 +12344,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         if (profiles.length === 0) {
             vscode.window.showInformationMessage(t(
-                '관리할 입력 프로필이 없습니다.',
-                'There are no input profiles to manage.'
+                '관리할 입력 프로필이 없습니다. 실행 기록 패널에서 항목을 우클릭하고 "입력값을 프로필로 저장…"을 고르면 만들 수 있습니다.',
+                'There are no input profiles to manage. Right-click a run in History and choose "Save Inputs as Profile…" to create one.'
             ));
             return;
         }
@@ -12458,10 +12670,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.doctor', async () => {
         const inputs: DoctorInput[] = collectDoctorInputs(context);
         if (inputs.length === 0) {
-            vscode.window.showInformationMessage(t(
-                'TaskHub Doctor: 점검할 actions.json 소스를 찾을 수 없습니다.',
-                'TaskHub Doctor: no actions.json sources were found to lint.'
-            ));
+            const createLabel = t('액션 만들기', 'Create Action');
+            const choice = await vscode.window.showInformationMessage(t(
+                'TaskHub Doctor: 점검할 actions.json 소스를 찾을 수 없습니다. 먼저 액션을 만들어 보세요.',
+                'TaskHub Doctor: no actions.json sources were found to lint. Create an action first.'
+            ), createLabel);
+            if (choice === createLabel) {
+                await vscode.commands.executeCommand('taskhub.createAction');
+            }
             return;
         }
         const validator = getActionsValidator() as unknown as (data: unknown) => boolean;
@@ -12552,10 +12768,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (!folder) { return; }
         const logsPath = path.join(folder.uri.fsPath, RUN_LOG_DIRECTORY);
         if (!fs.existsSync(logsPath)) {
-            vscode.window.showInformationMessage(t(
-                '아직 저장된 실행 로그가 없습니다. `taskhub.runLogs.enabled`를 켠 뒤 액션을 실행하세요.',
-                'No run logs have been saved yet. Enable `taskhub.runLogs.enabled`, then run an action.'
-            ));
+            if (vscode.workspace.getConfiguration('taskhub.runLogs', folder.uri).get<boolean>('enabled', false)) {
+                vscode.window.showInformationMessage(t(
+                    '아직 저장된 실행 로그가 없습니다. 액션을 실행하면 이 워크스페이스의 .taskhub/logs/에 저장됩니다.',
+                    'No run logs have been saved yet. Run an action and its log is saved to .taskhub/logs/ in this workspace.'
+                ));
+                return;
+            }
+            // 설정 이름만 알려 주면 사용자가 설정 검색창에서 이름을 맞혀야 한다. 바로 그 설정으로 보낸다.
+            const openSettings = t('설정 열기', 'Open Settings');
+            const choice = await vscode.window.showInformationMessage(t(
+                '실행 로그 저장이 꺼져 있어 저장된 로그가 없습니다. 설정에서 실행 로그 저장(taskhub.runLogs.enabled)을 켠 뒤 액션을 실행하세요.',
+                'Run log storage is off, so no logs have been saved. Turn on run log storage (taskhub.runLogs.enabled) in Settings, then run an action.'
+            ), openSettings);
+            if (choice === openSettings) {
+                await vscode.commands.executeCommand('workbench.action.openSettings', 'taskhub.runLogs.enabled');
+            }
             return;
         }
         await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(logsPath));
@@ -12701,7 +12929,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         } else {
             fileUris = await showOpenDialogWithMemory(DIALOG_SCOPE.favoriteFile, {
                 canSelectMany: true,
-                openLabel: t('즐겨찾기에 추가', 'Add to Favorites')
+                openLabel: t('즐겨찾는 파일에 추가', 'Add to Favorite Files')
             });
         }
 
@@ -13058,7 +13286,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     context.subscriptions.push(vscode.commands.registerCommand('taskhub.stopAllActions', () => stopAllRunningActions()));
 
-    context.subscriptions.push(vscode.commands.registerCommand('taskhub.closeAllTerminals', () => {
+    context.subscriptions.push(vscode.commands.registerCommand('taskhub.closeAllTerminals', async () => {
+        if (!await confirmCloseTerminalsWhileRunning(collectRunningActionIds())) { return; }
         const closed = closeAllTaskHubTerminals();
         if (closed === 0) {
             vscode.window.showInformationMessage(t('닫을 TaskHub 터미널이 없습니다.', 'No TaskHub terminals to close.'));
@@ -13878,12 +14107,7 @@ export async function deactivate(): Promise<void> {
     for (const perAction of activeTasks.values()) {
         for (const active of perAction.values()) { taskExecutions.add(active.execution); }
     }
-    const childProcesses = new Set<ReturnType<typeof spawn>>();
-    for (const perAction of actionChildProcesses.values()) {
-        for (const bucket of perAction.values()) {
-            for (const child of bucket.processes) { childProcesses.add(child); }
-        }
-    }
+    const childProcesses = collectShutdownChildProcesses();
 
     for (const run of Array.from(currentActionRuns.values())) {
         run.abandoned = true;

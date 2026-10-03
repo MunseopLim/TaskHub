@@ -89,7 +89,7 @@ function boot(initial: Record<string, unknown>) {
         'let fieldFormSheetKey, fieldFormHadFields = false;',
         'let historyStack = [], historyIndex = -1, lastSavedSnapshot = null, savedSnapshot, lastRecoverableDraft, saveSeq = 0;',
         'const pendingSaveSnapshots = new Map(), MAX_PENDING_SAVES = 8, HISTORY_MAX_STEPS = 20, HISTORY_MAX_BYTES = 16 * 1024 * 1024;',
-        'function renderTabs() {} function attachCellEvents() {} function detectMultiline() { return false; }',
+        'function renderTabs() {} function attachCellEvents() {} function applyRovingTabindex() {} function detectMultiline() { return false; }',
         'function renderCellView(value) { return "<div class=cell-view>" + escapeHtml(String(value)) + "</div>"; }',
         'function renderCellEdit() { return ""; } function announce(message) { document.getElementById("status").textContent = message; }',
         'function showError(message) { document.getElementById("cellError").textContent = message; }',

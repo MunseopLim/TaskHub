@@ -738,8 +738,16 @@ export class HistoryProvider implements vscode.TreeDataProvider<HistoryItem>, vs
 
         history.unshift(entry);
 
-        if (history.length > maxItems) {
-            history.splice(maxItems);
+        // 오래된 항목부터 지우되 **실행 중인 항목은 남긴다.** 긴 플래싱 중에 짧은 액션이 상한만큼
+        // 실행되면 실행 중 항목이 잘려, 끝났을 때 결과·입력·실행 보고서 링크를 붙일 곳이 없었다.
+        // 끝난 항목은 이어지는 입력·명령·로그 기록이 같은 항목을 찾아야 하므로 상태 갱신 때가
+        // 아니라 다음 추가 때 정리된다.
+        let excess = history.length - maxItems;
+        for (let index = history.length - 1; index >= 0 && excess > 0; index--) {
+            if (history[index].status !== 'running') {
+                history.splice(index, 1);
+                excess--;
+            }
         }
 
         void this.saveHistory(history);

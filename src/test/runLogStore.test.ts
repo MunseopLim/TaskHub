@@ -8,6 +8,7 @@ import {
     appendBoundedRunCommand,
     readActionRunLog,
     RUN_LOG_COMMAND_TRUNCATED_MARKER,
+    RUN_LOG_ORPHAN_TEMP_AGE_MS,
     RunLogReadError,
     RunLogStore,
     serializeActionRunLog,
@@ -335,6 +336,31 @@ suite('Action run log storage', () => {
 
         assert.ok(!fs.existsSync(old.absolutePath));
         assert.ok(fs.existsSync(newest.absolutePath));
+    });
+
+    test('강제 종료로 남은 오래된 임시 로그는 회전 때 지우고 쓰는 중일 수 있는 최근 것은 남긴다', async () => {
+        let nonce = 0;
+        const now = Date.parse('2026-08-14T12:00:00.000Z');
+        const store = new RunLogStore(workspaceRoot, () => now, () => `n${++nonce}`);
+        const policy = { maxFiles: 10, retentionDays: 0, maxTotalBytes: 10 * 1024 * 1024 };
+        const first = await store.write(sampleLog(now), policy);
+        const actionDir = path.dirname(first.absolutePath);
+        const orphan = path.join(actionDir, '.2026-08-14T00-00-00-000Z-dead.log.tmp-abc123');
+        const recent = path.join(actionDir, '.2026-08-14T11-59-00-000Z-live.log.tmp-def456');
+        const unrelated = path.join(actionDir, 'notes.tmp-abc');
+        for (const file of [orphan, recent, unrelated]) { fs.writeFileSync(file, 'x'.repeat(1024)); }
+        const old = new Date(now - RUN_LOG_ORPHAN_TEMP_AGE_MS - 1000);
+        fs.utimesSync(orphan, old, old);
+        fs.utimesSync(unrelated, old, old);
+        const fresh = new Date(now - 1000);
+        fs.utimesSync(recent, fresh, fresh);
+
+        await store.write(sampleLog(now + 1), policy);
+
+        assert.ok(!fs.existsSync(orphan), 'rename 전에 남은 고아 임시 파일은 상한 밖에서 영원히 쌓였다');
+        assert.ok(fs.existsSync(recent), '다른 창이 아직 쓰는 중일 수 있는 임시 파일은 남긴다');
+        assert.ok(fs.existsSync(unrelated), 'TaskHub 임시 파일 이름이 아니면 건드리지 않는다');
+        assert.ok(fs.existsSync(first.absolutePath));
     });
 
     test('고정 로그 경로의 상위 디렉터리가 symlink면 워크스페이스 밖 쓰기를 거부한다', async function () {

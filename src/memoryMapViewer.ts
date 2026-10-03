@@ -35,6 +35,8 @@ export interface PanelEntry {
     object?: string;
     section?: string;
     func?: string;
+    /** 같은 행으로 합쳐진 별칭 심볼 이름. 소스 이름 매칭에 함께 쓴다. */
+    aliases?: string[];
 }
 
 interface PanelState {
@@ -201,8 +203,8 @@ export const MEMORY_MAP_MAX_SYMBOL_PICK_ITEMS = 5000;
 function showSaveHtmlTooLargeError(): void {
     const mb = Math.round(MEMORY_MAP_MAX_SAVE_HTML_CHARS / (1024 * 1024));
     vscode.window.showErrorMessage(plainNotificationText(t(
-        `저장할 HTML이 너무 큽니다(${mb}MB 초과). HTML에는 접기·검색 상태와 무관하게 전체 맵 데이터가 포함됩니다. 더 작거나 분할된 맵을 열거나, 간략한 *Copy Report* 또는 전체 텍스트인 *Copy Full Dump* 를 사용하세요.`,
-        `The HTML to save is too large (over ${mb} MB). HTML always contains the full map data regardless of collapse or search state. Open a smaller or split map, or use the compact *Copy Report* or the complete text *Copy Full Dump* instead.`
+        `저장할 HTML이 너무 큽니다(${mb}MB 초과). HTML에는 접기·검색 상태와 무관하게 전체 맵 데이터가 포함됩니다. 더 작거나 분할된 맵을 열거나, 간략한 'Copy Report' 또는 전체 텍스트인 'Copy Full Dump'를 사용하세요.`,
+        `The HTML to save is too large (over ${mb} MB). HTML always contains the full map data regardless of collapse or search state. Open a smaller or split map, or use the compact 'Copy Report' or the complete text 'Copy Full Dump' instead.`
     )));
 }
 
@@ -1317,7 +1319,10 @@ export function resolveDwarfSourcePathCandidates(
     if (isPortableAbsolute(recordedPath)) {
         // A Windows absolute path cannot be resolved on POSIX, but suffix matching below
         // can still find its source in the current workspace.
-        if (path.isAbsolute(native)) { add(native); }
+        // UNC·장치 경로(`\\host\share`, `//host/share`, `\\?\`, `\\.\`)는 직접 열지 않는다.
+        // 받은 ELF의 DWARF가 공격자 호스트를 가리키면 존재 확인(stat)만으로 Windows가 SMB에
+        // 접속해 NTLM 해시를 넘길 수 있다. 이런 경로도 아래 워크스페이스 suffix 매칭으로는 찾는다.
+        if (path.isAbsolute(native) && !/^[/\\]{2}/.test(recordedPath)) { add(native); }
     } else {
         // 의도적으로 ELF 디렉터리에 가두지 않는다. out/debug/app.elf에서
         // ../../src/main.c를 기록하는 빌드가 흔하고, 이 경로는 쓰기가 아니라
@@ -1947,6 +1952,7 @@ export function collectPickEntries(memoryUsage: MemoryUsage[]): PanelEntry[] {
             entries.push({
                 name: s.name, addr: s.addr, size: s.size, type: s.type,
                 region: u.region, regionIndex, object: s.object, section: s.section, func: s.func,
+                ...(s.aliases?.length ? { aliases: s.aliases } : {}),
             });
         }
     });
@@ -2009,6 +2015,8 @@ export function buildGoToSymbolItems(
             for (const extra of [e.section, e.object]) {
                 if (extra && !parts.includes(extra)) { parts.push(extra); }
             }
+            // 한 행으로 합친 별칭(약한 IRQ 핸들러 등)도 이름으로 찾을 수 있어야 한다.
+            if (e.aliases?.length) { parts.push(`= ${e.aliases.join(', ')}`); }
             items.push({ label, description: parts.join('  ·  '), entry: e });
         }
     }
@@ -2273,7 +2281,7 @@ export function stripCloneSuffix(name: string): string {
  * Exported for testing.
  */
 export function matchSourceIdentifier(entry: PanelEntry, identifier: string): 'exact' | 'mangled' | undefined {
-    const names = [entry.func, entry.name].filter((n): n is string => typeof n === 'string' && n.length > 0);
+    const names = [entry.func, entry.name, ...(entry.aliases ?? [])].filter((n): n is string => typeof n === 'string' && n.length > 0);
     if (names.some(n => n === identifier || stripCloneSuffix(n) === identifier)) { return 'exact'; }
     if (names.some(n => mangledNameContains(stripCloneSuffix(n), identifier))) { return 'mangled'; }
     return undefined;
@@ -2372,6 +2380,8 @@ export async function revealSourceSymbolInMemoryMap(identifier: string): Promise
             for (const extra of [m.entry.section, m.entry.object]) {
                 if (extra && !parts.includes(extra)) { parts.push(extra); }
             }
+            // 별칭으로 맞은 행이 대표 이름만 보이면 왜 후보인지 알 수 없다.
+            if (m.entry.aliases?.length) { parts.push(`= ${m.entry.aliases.join(', ')}`); }
             return {
                 label: m.entry.func || m.entry.name,
                 description: parts.join('  ·  '),
@@ -2475,6 +2485,7 @@ export function buildMemoryMapStrings(): Record<string, string> {
     return {
         entryPoint: t('진입점', 'Entry Point'),
         copyReport: t('리포트 복사', 'Copy Report'),
+        mapBarLabel: t('메모리 배치: {summary}', 'Memory layout: {summary}'),
         copyReportTitle: t('요약 리포트 복사 (마크다운, 약 50줄)', 'Copy summary report (markdown, ~50 lines)'),
         copyFullDump: t('전체 덤프 복사', 'Copy Full Dump'),
         copyFullDumpTitle: t('전체 텍스트 덤프 복사 (모든 섹션)', 'Copy full text dump (every section)'),
@@ -2692,7 +2703,7 @@ function getWebviewContent(
         const allSegments = [
             ...u.sections.map((s, entryIndex) => ({
                 name: s.name, size: s.size, addr: s.addr, type: s.type,
-                section: s.section || '', func: s.func || '',
+                section: s.section || '', func: s.func || '', aliases: s.aliases ?? [],
                 hexTargetId: s.fileRange ? entryHexTargetId(regionIndex, entryIndex) : '',
                 hexAvailable: s.fileRange?.kind === 'file',
                 sourceTargetId: sourceTargets.has(entrySourceTargetId(regionIndex, entryIndex))
@@ -2700,7 +2711,7 @@ function getWebviewContent(
                     : '',
             })),
             ...u.freeSpaces.map(f => ({
-                name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', section: '', func: '',
+                name: '[FREE]', size: f.size, addr: f.addr, type: 'FREE', section: '', func: '', aliases: [] as string[],
                 hexTargetId: '', hexAvailable: false, sourceTargetId: '',
             })),
         ].sort((a, b) => a.addr - b.addr).filter(e => e.size > 0);
@@ -2708,15 +2719,21 @@ function getWebviewContent(
         const hasSectionInfo = u.sections.some(s => s.section);
         const hasFuncInfo = u.sections.some(s => s.func);
 
+        const typeTotals = new Map<string, number>();
+        for (const e of allSegments) { typeTotals.set(e.type, (typeTotals.get(e.type) ?? 0) + e.size); }
+        const mapBarSummary = Array.from(typeTotals, ([type, size]) => `${type} ${formatSize(size)}`).join(', ');
         const mapSegHtml = allSegments.map(e => {
             const cls = `seg-${e.type.toLowerCase()}`;
-            return `<div class="map-seg ${cls}" style="flex:${e.size}" title="${esc(e.name)} @ ${formatHex(e.addr)} (${formatSize(e.size)})"></div>`;
+            const names = [e.name, ...e.aliases].join(' = ');
+            return `<div class="map-seg ${cls}" style="flex:${e.size}" title="${esc(names)} @ ${formatHex(e.addr)} (${formatSize(e.size)})"></div>`;
         }).join('');
 
         const segments = allSegments.map(e => ({
             n: e.name, s: e.section, f: e.func, a: e.addr,
             ah: formatHex(e.addr), eh: formatHex(e.size > 0 ? e.addr + e.size - 1 : e.addr),
             sz: e.size, ss: formatSize(e.size), t: e.type, fr: e.type === 'FREE',
+            // 한 행으로 합친 별칭 심볼 이름. 화면에 보이고 검색에도 걸려야 이전처럼 이름으로 찾는다.
+            al: e.aliases.join(', '),
             hx: e.hexTargetId, ha: e.hexAvailable, sx: e.sourceTargetId,
         }));
 
@@ -2750,7 +2767,7 @@ function getWebviewContent(
         const linkerFree = u.reportedUsed !== undefined ? u.total - u.reportedUsed : 0;
 
         return {
-            name: u.region, pct, color, mapSegHtml,
+            name: u.region, pct, color, mapSegHtml, mapBarSummary,
             infoText: `${S.colUsed}: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct.toFixed(1)}%) | ${S.colFree}: ${formatSize(calcFree)}`,
             linkerLine: u.reportedUsed !== undefined
                 ? `Linker: Base=${formatHex(regionOrigin)} Used=${formatHex(u.reportedUsed)} (${formatSize(u.reportedUsed)}) Max=${formatHex(u.total)} (${formatSize(u.total)}) Free: ${formatSize(linkerFree)}`
@@ -2871,8 +2888,9 @@ function getWebviewContent(
         --bg: var(--vscode-editor-background);
         --fg: var(--vscode-editor-foreground);
         --border: var(--vscode-panel-border, #444);
-        --ok: #4caf50;
-        --warn: #ff9800;
+        /* 테마 차트 색을 따른다(고대비·밝은 테마에서도 대비가 맞게). 값이 없을 때만 기본색. */
+        --ok: var(--vscode-charts-green, #4caf50);
+        --warn: var(--vscode-charts-orange, #ff9800);
         --danger: var(--vscode-errorForeground, #f44);
         --badge-bg: var(--vscode-badge-background, #444);
         --badge-fg: var(--vscode-badge-foreground, #fff);
@@ -3045,10 +3063,10 @@ function getWebviewContent(
         min-width: 0;
     }
     .map-seg:hover { opacity: 0.75; }
-    .seg-code { background: #2196f3; }
-    .seg-rodata { background: #9c27b0; }
-    .seg-data { background: #ff9800; }
-    .seg-nobits { background: #607d8b; }
+    .seg-code { background: var(--vscode-charts-blue, #2196f3); }
+    .seg-rodata { background: var(--vscode-charts-purple, #9c27b0); }
+    .seg-data { background: var(--vscode-charts-orange, #ff9800); }
+    .seg-nobits { background: var(--vscode-charts-lines, #607d8b); }
     .seg-free { background: rgba(128,128,128,0.15); }
     .free-row { opacity: 0.55; font-style: italic; }
     .search-box {
@@ -3115,7 +3133,10 @@ function getWebviewContent(
         width: 16px;
         font-size: 10px;
     }
-    .region-detail { margin-top: 4px; }
+    .region-detail { margin-top: 4px; overflow-x: auto; }
+    .alias-names { opacity: 0.75; }
+    /* 좁은 편집기 그룹에서 표 때문에 페이지 전체가 가로로 밀리지 않게 표 영역만 스크롤한다. */
+    .table-scroll { overflow-x: auto; }
     .overview-table { margin-bottom: 12px; }
     .overview-table td { padding: 4px 8px; }
     .overview-row { cursor: pointer; }
@@ -3305,7 +3326,7 @@ function getWebviewContent(
 
     ${hasRegions ? `
         <div class="section-heading"><h2>${esc(S.memoryRegions)}</h2></div>
-        <table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table>
+        <div class="table-scroll"><table class="overview-table"><thead><tr>${overviewHeaders}</tr></thead><tbody>${regionOverviewRows}</tbody></table></div>
         ${!hasLinkerData && !hasSymbols ? `<div class="info-note">${esc(S.elfSectionInfo)}</div>` : ''}
         ${hasSymbols ? `<div class="info-note">${esc(S.elfSymbolInfo)}</div>` : ''}
         <div class="section-heading"><h2>${esc(S.regionDetails)}</h2><span id="regMatchInfo" role="status" aria-live="polite"></span> <button data-action="toggle-all" id="toggleAllBtn" title="${esc(S.expandAllHint)}" aria-label="${esc(S.expandAll)}" aria-expanded="false">▶ ${esc(S.expandAll)}</button>${hasFuncData ? ` <button data-action="toggle-func-col" title="${esc(S.toggleFunctionColumn)}" aria-label="${esc(S.toggleFunctionColumn)}">${esc(S.funcColumnToggle)} ▶</button>` : ''}</div>
@@ -3319,6 +3340,7 @@ function getWebviewContent(
     `}
 
     <div class="section-heading"><h2>${esc(S.allSections)} (<span id="allSecCount">${sectionSummary.length}</span>)</h2></div>
+    <div class="table-scroll">
     <table id="sectionTable" class="sortable-table">
         <thead>
             <tr>
@@ -3333,6 +3355,7 @@ function getWebviewContent(
         </thead>
         <tbody>${sectionTableRows}</tbody>
     </table>
+    </div>
 
 <button id="scrollTop" class="scroll-top" title="${esc(S.scrollTop)}" aria-label="${esc(S.scrollTop)}">↑</button>
 
@@ -3740,11 +3763,12 @@ const CURRENT_TOTALS = Object.freeze({ flash: ${flashTotal}, ram: ${ramTotal} })
             + ' data-sort-size="' + e.sz + '"'
             + ' data-sort-bytes="' + e.sz + '"'
             + ' data-sort-type="' + esc(e.t) + '"';
-        return '<tr' + rc + sv + '><td>' + hl(e.n) + '</td>' + sc + fc + '<td class="num">' + hl(e.ah) + '</td><td class="num">' + e.eh + '</td><td class="num">' + hl(e.ss) + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + hl(e.t) + '</span></td>' + hc + sourceCell + '</tr>';
+        const aliasNames = e.al ? '<span class="alias-names"> = ' + hl(e.al) + '</span>' : '';
+        return '<tr' + rc + sv + '><td>' + hl(e.n) + aliasNames + '</td>' + sc + fc + '<td class="num">' + hl(e.ah) + '</td><td class="num">' + e.eh + '</td><td class="num">' + hl(e.ss) + '</td><td class="num">' + e.sz + '</td><td><span class="type-badge type-' + e.t.toLowerCase() + '">' + hl(e.t) + '</span></td>' + hc + sourceCell + '</tr>';
     }
 
     function matchSeg(e, q) {
-        return (e.n + ' ' + e.s + ' ' + e.f + ' ' + e.ah + ' ' + e.ss + ' ' + e.t).toLowerCase().includes(q);
+        return (e.n + ' ' + e.al + ' ' + e.s + ' ' + e.f + ' ' + e.ah + ' ' + e.ss + ' ' + e.t).toLowerCase().includes(q);
     }
 
     function renderDetail(idx) {
@@ -3757,7 +3781,8 @@ const CURRENT_TOTALS = Object.freeze({ flash: ${flashTotal}, ram: ${ramTotal} })
 
         // Map bar
         if (rd.segments.length > 0) {
-            h += '<div class="map-bar">' + rd.mapSegHtml + '</div>';
+            // 조각마다 hover title만 있어 키보드·터치로는 배치를 알 수 없었다. 막대 전체를 요약해 읽힌다.
+            h += '<div class="map-bar" role="img" aria-label="' + esc(fmt(S.mapBarLabel, { summary: rd.mapBarSummary })) + '">' + rd.mapSegHtml + '</div>';
         }
 
         // Object summary

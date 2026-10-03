@@ -5,6 +5,11 @@
 
 import { BitFieldInfo, extractBitFieldInfo, isValidSfrBitRange } from './sfrBitFieldParser';
 
+/** 소스에서 온 이름을 정규식에 넣기 전에 메타문자를 이스케이프한다(`a+`·`(` 등이 패턴이 되지 않게). */
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Bit field definition for a register
  */
@@ -283,7 +288,7 @@ export class RegisterDecoder {
      * @returns Line number or -1 if not found
      */
     static findStructDefinition(lines: string[], structName: string): number {
-        const pattern = new RegExp(`\\bstruct\\s+${structName}\\b`);
+        const pattern = new RegExp(`\\bstruct\\s+${escapeRegExp(structName)}\\b`);
 
         for (let i = 0; i < lines.length; i++) {
             if (pattern.test(lines[i])) {
@@ -302,7 +307,7 @@ export class RegisterDecoder {
      */
     static findUnionDefinition(lines: string[], name: string): number {
         // Try to find union directly
-        const unionPattern = new RegExp(`\\bunion\\s+${name}\\b`);
+        const unionPattern = new RegExp(`\\bunion\\s+${escapeRegExp(name)}\\b`);
         for (let i = 0; i < lines.length; i++) {
             if (unionPattern.test(lines[i])) {
                 return i;
@@ -310,7 +315,7 @@ export class RegisterDecoder {
         }
 
         // Try to find class/struct that contains union
-        const classPattern = new RegExp(`\\b(class|struct)\\s+${name}\\b`);
+        const classPattern = new RegExp(`\\b(class|struct)\\s+${escapeRegExp(name)}\\b`);
         for (let i = 0; i < lines.length; i++) {
             if (classPattern.test(lines[i])) {
                 return i;

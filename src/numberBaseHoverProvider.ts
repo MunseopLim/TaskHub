@@ -27,6 +27,9 @@ const TYPE_CONFIG_CACHE_MAX = 16;
 // 안전 평가를 거부한 숫자식도 매크로 호버가 소유한다. LSP의 단순 #define
 // 리터럴 추출로 내려가면 전체 식 대신 첫 피연산자를 복사 가능한 값으로 보인다.
 const NUMERIC_MACRO_PREFIX = /^[\s()+-]*\d/;
+/** C 정수 리터럴 접미사(`U`, `L`, `UL`, `LL`, `ULL`, `LU` …)를 선택적으로 받는 정규식 조각. */
+const INTEGER_LITERAL_SUFFIX = '(?:[uU](?:ll|LL|[lL])?|(?:ll|LL|[lL])[uU]?)?';
+const INTEGER_SUFFIX_AT_END = /(?:[uU](?:ll|LL|[lL])?|(?:ll|LL|[lL])[uU]?)$/;
 
 /** One budget shared by every LSP request and document read in a hover. */
 const LSP_TIMEOUT_MS = 3000;
@@ -418,8 +421,9 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
     private readonly patterns = {
         // Hexadecimal: 0xABC, 0XABC (with optional digit separators)
         hex0x: /\b0[xX][0-9a-fA-F']+\b/,
-        // Hexadecimal with 'h' suffix: ABCh, ABCh (with optional digit separators)
-        hexH: /\b[0-9a-fA-F']+[hH]\b/,
+        // Hexadecimal with 'h' suffix: 0ABCh, 12h (with optional digit separators).
+        // 어셈블러처럼 숫자로 시작해야 한다 — 아니면 `ch`, `each` 같은 식별자가 숫자가 된다.
+        hexH: /\b[0-9][0-9a-fA-F']*[hH]\b/,
         // Binary: 0b1010, 0B1010 (with optional digit separators)
         binary: /\b0[bB][01']+\b/,
         // Decimal: 123, 1'000'000 (with optional digit separators)
@@ -851,11 +855,10 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 return this.parseIntegerMatch(text, specificMatch);
             }
 
-            // Pattern for #define with specific symbol: #define symbolName VALUE
-            const specificDefinePattern = new RegExp(`#define\\s+${escapedName}\\s+([0-9a-fA-FxXbB']+)`);
-            const specificDefineMatch = text.match(specificDefinePattern);
+            // Pattern for #define with specific symbol: #define symbolName BODY
+            const specificDefineMatch = text.match(new RegExp(`^\\s*#\\s*define\\s+${escapedName}(?=\\s)(.*)$`));
             if (specificDefineMatch) {
-                return this.parseIntegerMatch(text, specificDefineMatch);
+                return this.evaluateDefineBody(specificDefineMatch[1]);
             }
 
             return null;
@@ -868,14 +871,27 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
             return this.parseIntegerMatch(text, assignMatch);
         }
 
-        // Pattern for #define: #define NAME VALUE
-        const definePattern = /#define\s+\w+\s+([0-9a-fA-FxXbB']+)/;
-        const defineMatch = text.match(definePattern);
+        // Pattern for #define: #define NAME BODY (function-like macros excluded)
+        const defineMatch = text.match(/^\s*#\s*define\s+\w+(?=\s)(.*)$/);
         if (defineMatch) {
-            return this.parseIntegerMatch(text, defineMatch);
+            return this.evaluateDefineBody(defineMatch[1]);
         }
 
         return null;
+    }
+
+    /**
+     * 매크로 대체 목록 **전체**를 값으로 계산한다. 첫 숫자만 읽으면 `#define N 16 * 4`가
+     * 16으로 표시됐다. 다른 매크로를 참조하는 등 확정할 수 없는 본문은 값을 내지 않는다.
+     */
+    private evaluateDefineBody(body: string): number | null {
+        const expression = this.stripInlineComments(body).trim();
+        if (expression.length === 0) { return null; }
+        // 단일 리터럴(`0FFh` 같은 어셈블러 형식 포함)은 기존 파서로, 식은 매크로 평가기로 계산한다.
+        if (/^[0-9][0-9a-fA-F']*[hH]$/.test(expression)) {
+            return this.parseNumber(expression);
+        }
+        return MacroExpander.evaluateToSafeInteger(expression.replace(/'/g, ''));
     }
 
     /** Check the original token before parsing a regex's first numeric capture. */
@@ -911,13 +927,16 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
         // Define all number patterns with global flag to find all matches.
         // \b/(?!\w) 경계가 없으면 식별자 일부(`Foo123h`의 `123h`)나 잘못된
         // 리터럴의 앞부분(`0x12g3`의 `0x12`)에 부분 매치된다(M8).
+        // 0x/0b 리터럴은 C 정수 접미사(`0xFFU`, `0x1FUL`)까지 한 토큰으로 잡는다. 접미사를
+        // 허용하지 않으면 (?!\w)에 막혀 10진수 패턴이 맨 앞 `0`만 잡아 0을 정상 결과처럼 보였다.
+        const suffix = INTEGER_LITERAL_SUFFIX;
         const numberPatterns = [
             // Hexadecimal with 0x prefix (must come before decimal)
-            { regex: /\b0[xX][0-9a-fA-F']+(?!\w)/g, priority: 1 },
+            { regex: new RegExp(`\\b0[xX][0-9a-fA-F']+${suffix}(?!\\w)`, 'g'), priority: 1 },
             // Binary with 0b prefix (must come before decimal)
-            { regex: /\b0[bB][01']+(?!\w)/g, priority: 1 },
-            // Hexadecimal with h suffix
-            { regex: /\b[0-9a-fA-F][0-9a-fA-F']*[hH]\b/g, priority: 2 },
+            { regex: new RegExp(`\\b0[bB][01']+${suffix}(?!\\w)`, 'g'), priority: 1 },
+            // Hexadecimal with h suffix (must start with a digit, as in assemblers)
+            { regex: /\b[0-9][0-9a-fA-F']*[hH]\b/g, priority: 2 },
             // Decimal numbers (lowest priority to avoid matching parts of hex)
             { regex: /\b\d[\d']*/g, priority: 3 },
         ];
@@ -934,7 +953,8 @@ export class NumberBaseHoverProvider implements vscode.HoverProvider {
                 // Check if the position is within this match
                 if (position >= start && position < end) {
                     matches.push({
-                        text: match[0],
+                        // 호버 범위는 접미사까지, 파싱할 값은 접미사를 뺀 리터럴
+                        text: priority === 1 ? match[0].replace(INTEGER_SUFFIX_AT_END, '') : match[0],
                         start,
                         end,
                         priority

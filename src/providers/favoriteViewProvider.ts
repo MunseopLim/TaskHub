@@ -15,6 +15,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { t } from '../i18n';
+import { stripUtf8Bom } from '../jsonEditorUtils';
 import { normalizeLineNumber, normalizeTags } from './normalization';
 import { InvalidJsonEntry } from './linkViewProvider';
 
@@ -171,7 +172,8 @@ export function readFavoritesFromDisk(filePath: string, workspaceFolderPath?: st
     }
     let parsed: unknown;
     try {
-        parsed = JSON.parse(raw);
+        // Windows PowerShell 5.1·구형 메모장이 붙인 BOM은 JSON.parse가 거부한다.
+        parsed = JSON.parse(stripUtf8Bom(raw));
     } catch (error: any) {
         return { ok: false, error: error.message };
     }

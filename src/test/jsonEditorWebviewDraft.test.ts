@@ -1014,6 +1014,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             const focused: string[] = [];
             const announced: string[] = [];
             let clickHandler: ((e: unknown) => void) | undefined;
+            let keydownHandler: ((e: unknown) => void) | undefined;
             const doc = {
                 querySelectorAll(selector: string) {
                     assert.strictEqual(selector, '[data-delete-row]', `가짜 DOM 이 모르는 셀렉터: ${selector}`);
@@ -1025,6 +1026,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                     return [{
                         dataset: { deleteRow },
                         addEventListener: (type: string, fn: (e: unknown) => void) => {
+                            if (type === 'keydown') { keydownHandler = fn; return; }
                             assert.strictEqual(type, 'click', `예상 밖의 이벤트: ${type}`);
                             clickHandler = fn;
                         },
@@ -1049,8 +1051,22 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
             new Function('LOGIC', 'document', 'data', 'sheetMap', 'calls', 'announced', 'S', script)(
                 logicBundle(), doc, data, options.sheets ?? sheetMap, calls, announced, buildJsonEditorStrings());
             assert.ok(clickHandler, 'data-delete-row 에 click 핸들러가 등록되지 않았다');
-            return { data, calls, focused, announced, click: () => clickHandler!({}) };
+            return {
+                data, calls, focused, announced, click: () => clickHandler!({}),
+                keydown: (event: Record<string, unknown>) => {
+                    let prevented = false;
+                    keydownHandler!({ ...event, preventDefault: () => { prevented = true; } });
+                    return prevented;
+                },
+            };
         }
+
+        test('✕에서 Enter를 누르고 있어 생긴 키 반복은 다음 행 삭제로 이어지지 않는다', () => {
+            const { keydown } = bootDelete(3, '0');
+            assert.strictEqual(keydown({ key: 'Enter', repeat: true }), true, '반복 입력은 click 합성을 막는다');
+            assert.strictEqual(keydown({ key: ' ', repeat: true }), true);
+            assert.strictEqual(keydown({ key: 'Enter', repeat: false }), false, '의도한 한 번 누름은 그대로 삭제한다');
+        });
 
         test('지운 자리로 올라온 행의 ✕ 로 포커스가 간다', () => {
             // 방금 사라진 버튼에 포커스를 두면 body 로 떨어져 표 맨 앞으로 튕긴다.
@@ -2083,6 +2099,7 @@ suite('JSON Editor webview — 활성 셀 draft (실행 테스트)', () => {
                 'function renderCellView(val) { return "<v>" + String(val) + "</v>"; }',
                 'function renderCellEdit() { return ""; }',
                 'function attachCellEvents() {}',
+                'function applyRovingTabindex() {}',
                 'let lastRecoverableDraft;',
                 'return renderTable;',
             ].join('\n');

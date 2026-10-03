@@ -95,6 +95,8 @@ export function buildHexConverterStrings(): Record<string, string> {
         littleEndian: t('Little-Endian', 'Little-Endian'),
         bigEndian: t('Big-Endian', 'Big-Endian'),
         clear: t('입력 지우기', 'Clear input'),
+        undoClear: t('지운 입력 되돌리기', 'Restore cleared input'),
+        cleared: t('입력을 지웠습니다. 바로 되돌릴 수 있습니다.', 'Input cleared. You can restore it right away.'),
         textLabel: t('Text', 'Text'),
         textHint: t('일반 문자열을 입력하세요.', 'Enter regular text.'),
         textPlaceholder: t('예: Hello', 'e.g. Hello'),
@@ -121,7 +123,7 @@ export function buildHexConverterStrings(): Record<string, string> {
         inspectorTitle: t('값 해석', 'Value inspector'),
         inspectorHint: t('첫 8바이트를 선택한 바이트 순서로 해석합니다.', 'Interprets the first 8 bytes using the selected byte order.'),
         noBytes: t('변환된 바이트가 여기에 표시됩니다.', 'Converted byte values appear here.'),
-        bitwiseTitle: t('개발 계산기', 'Developer calculator'),
+        bitwiseTitle: t('개발 계산기', 'Developer Calculator'),
         calculatorModeLabel: t('계산 방식', 'Calculation mode'),
         calculatorInteger: t('주소·정수 계산', 'Address / integer'),
         calculatorRegister: t('레지스터·비트 계산', 'Register / bits'),
@@ -1297,16 +1299,43 @@ export function buildHexConverterHtml(
         persistPreferences();
     });
     hexInput.addEventListener('scroll', () => { hexOffsets.scrollTop = hexInput.scrollTop; });
-    clearButton.addEventListener('click', () => {
+    // 코드로 textarea를 비우면 브라우저 실행 취소 기록에 남지 않아 Ctrl+Z로 되돌릴 수 없었다.
+    // 지운 직후에는 같은 버튼이 되돌리기가 되고, 다시 입력하면 원래대로 돌아온다.
+    let clearedInput = null;
+    function resetClearButton() {
+        clearedInput = null;
+        clearButton.textContent = S.clear;
+    }
+    // 지운 직후 같은 버튼이 되돌리기가 되므로, 더블클릭이나 Enter를 누르고 있어 생긴 연속 입력이
+    // 곧바로 복원으로 이어지지 않게 한다.
+    clearButton.addEventListener('keydown', (e) => {
+        if (e.repeat && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); }
+    });
+    clearButton.addEventListener('click', (e) => {
+        if (clearedInput && e.detail > 1) { return; }
+        if (clearedInput) {
+            const restored = clearedInput;
+            resetClearButton();
+            textInput.value = restored.text;
+            hexInput.value = restored.hex;
+            scheduleConversion(restored.source);
+            (restored.source === 'hex' ? hexInput : textInput).focus();
+            return;
+        }
+        if (textInput.value === '' && hexInput.value === '') { return; }
         cancelPendingConversion();
+        clearedInput = { text: textInput.value, hex: hexInput.value, source: activeSource };
         textInput.value = '';
         hexInput.value = '';
         activeSource = 'text';
         setBytes(new Uint8Array());
-        setStatus(S.ready, 'idle');
+        setStatus(S.cleared, 'idle');
+        clearButton.textContent = S.undoClear;
         persist();
-        textInput.focus();
+        clearButton.focus();
     });
+    textInput.addEventListener('input', resetClearButton);
+    hexInput.addEventListener('input', resetClearButton);
     copyText.addEventListener('click', () => {
         if (textInput.value.length > 0) { vscode.postMessage({ command: 'copy', kind: 'text', text: textInput.value }); }
     });
@@ -1343,6 +1372,9 @@ export function buildHexConverterHtml(
         encoding.value = entry.encoding;
         endian.value = entry.endian;
         persistPreferences();
+        // 코드로 입력을 바꾸면 input 이벤트가 없다. 지우기 직후의 되돌리기 상태가 남으면 다음 클릭이
+        // 불러온 값을 지우는 대신 그 전에 지운 입력을 복원했다.
+        resetClearButton();
         if (entry.kind === 'hex') {
             cancelPendingConversion();
             hexInput.value = entry.value;

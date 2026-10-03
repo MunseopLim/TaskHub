@@ -352,6 +352,12 @@ suite('action run generation isolation', () => {
             await within(pipeline, 3000, 'one-shot pipeline finalization');
             assert.ok(requestedTask, 'executeTask must receive the prepared VS Code task');
             assert.ok(endListener, 'executeStreamedTask must register its process-end listener');
+            if (process.platform !== 'win32') {
+                // `nohup … &` 래퍼는 sh 문법이라 사용자 작업 셸(pwsh 등)로 넘기면 깨진다.
+                const execution = requestedTask.execution as vscode.ShellExecution;
+                assert.strictEqual(execution.options?.executable, '/bin/sh');
+                assert.deepStrictEqual(execution.options?.shellArgs, ['-c']);
+            }
 
             fakeExecution = {
                 task: requestedTask,

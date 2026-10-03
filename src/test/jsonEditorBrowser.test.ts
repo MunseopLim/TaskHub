@@ -34,6 +34,22 @@ function observeHtml(html: string): string {
             error: required('#errorMsg').textContent,
             errorVisible: getComputedStyle(required('#errorMsg')).display !== 'none',
             injected: Boolean(document.getElementById('unexpected-injection')),
+            focused: (() => {
+                const element = document.activeElement;
+                if (!element) { return undefined; }
+                if (element.matches?.('button[data-move-row]')) { return 'grip:' + element.dataset.moveRow; }
+                if (element.matches?.('button[data-delete-row]')) { return 'delete:' + element.dataset.deleteRow; }
+                if (element.matches?.('.convert-btn')) {
+                    const owner = element.closest('td[data-row]');
+                    return 'convert:' + owner.dataset.row + ':' + owner.dataset.col;
+                }
+                const td = element.closest?.('td[data-row]');
+                if (td && element.classList.contains('cell-view')) { return 'cell:' + td.dataset.row + ':' + td.dataset.col; }
+                return element.id || element.tagName;
+            })(),
+            // 화면에 보이는 Tab 정지만 센다(편집 중이 아닌 셀의 입력 컨트롤은 숨겨져 있다).
+            tableTabStops: Array.from(document.querySelectorAll('#tableWrapper tbody button, #tableWrapper tbody .cell-view'))
+                .filter(element => element.tabIndex >= 0 && element.getClientRects().length > 0).length,
         });
         window.addEventListener('error', event => api.postMessage({ command: 'testError', error: event.message }));
         window.addEventListener('unhandledrejection', event => api.postMessage({ command: 'testError', error: String(event.reason) }));
@@ -58,8 +74,8 @@ function observeHtml(html: string): string {
                     } else if (operation.kind === 'click') {
                         required('#' + operation.id).click();
                     } else if (operation.kind === 'key') {
-                        const input = required(operation.selector);
-                        input.focus();
+                        const input = operation.selector ? required(operation.selector) : document.activeElement;
+                        if (operation.selector) { input.focus(); }
                         const key = new KeyboardEvent('keydown', {
                             key: operation.key, ctrlKey: operation.ctrlKey, metaKey: operation.metaKey,
                             isComposing: operation.isComposing, bubbles: true, cancelable: true,
@@ -534,6 +550,65 @@ suite('JSON Editor 실제 브라우저 편집과 저장', function () {
         }
     });
 
+    test('미저장 상태에서 안내 뒤 다시 읽기를 고르면 안내 중 다시 바뀐 파일의 stat을 기준으로 삼아 이후 편집을 복구한다', async () => {
+        const originalWatcher = vscode.workspace.createFileSystemWatcher;
+        const originalWarning = vscode.window.showWarningMessage;
+        const originalStatus = vscode.window.setStatusBarMessage;
+        let change!: (uri: vscode.Uri) => Promise<void>;
+        const noEvent = () => new vscode.Disposable(() => {});
+        vscode.workspace.createFileSystemWatcher = (() => ({
+            onDidChange: (callback: typeof change) => { change = callback; return noEvent(); },
+            onDidCreate: noEvent, onDidDelete: noEvent, dispose() {},
+        })) as unknown as typeof originalWatcher;
+        let answer!: () => void;
+        let prompted!: () => void;
+        const promptStarted = new Promise<void>(resolve => { prompted = resolve; });
+        let promptCount = 0;
+        vscode.window.showWarningMessage = ((_message: string, ...rest: unknown[]) => {
+            if (++promptCount > 1) { return Promise.resolve(undefined); }
+            prompted();
+            // 첫 버튼이 "다시 읽기 (변경사항 버리기)"다.
+            return new Promise(resolve => { answer = () => resolve(rest.find(item => typeof item === 'string')); });
+        }) as typeof originalWarning;
+        const statusMessages: string[] = [];
+        vscode.window.setStatusBarMessage = ((text: string) => {
+            statusMessages.push(text);
+            return new vscode.Disposable(() => {});
+        }) as typeof originalStatus;
+        try {
+            await withJsonBrowser({ rows: [{ value: 'initial' }] }, async browser => {
+                await browser.operate([{ kind: 'edit', col: 'value', value: 'draft before external change' }]);
+                fs.writeFileSync(browser.filePath, JSON.stringify({ rows: [{ value: 'first external' }] }));
+                const firstTime = new Date(Date.now() - 60_000);
+                fs.utimesSync(browser.filePath, firstTime, firstTime);
+                const pending = change(vscode.Uri.file(browser.filePath));
+                await promptStarted;
+                fs.writeFileSync(browser.filePath, JSON.stringify({ rows: [{ value: 'second external, written while the prompt is open' }] }));
+                const secondTime = new Date(Date.now() - 30_000);
+                fs.utimesSync(browser.filePath, secondTime, secondTime);
+                const loadedAfter = browser.messages.length;
+                answer();
+                await pending;
+                await browser.waitFor('host:loadData', loadedAfter);
+                const reloaded = await browser.operate([]);
+                assert.strictEqual(reloaded.cells[0].label, 'second external, written while the prompt is open');
+                assert.ok(!statusMessages.some(text => /자동|auto-reloaded/.test(text)),
+                    '사용자가 직접 고른 다시 읽기를 자동 다시 읽기로 표시하지 않는다');
+
+                await browser.operate([{ kind: 'edit', col: 'value', value: 'edit after reload' }]);
+                const recovered = await browser.reopen();
+                assert.strictEqual(recovered.cells[0].label, 'edit after reload',
+                    '안내 전 stat으로 복구본을 찍으면 다시 열 때 오래된 것으로 버려진다');
+                assert.strictEqual(recovered.dirty, true);
+            });
+        } finally {
+            answer?.();
+            vscode.workspace.createFileSystemWatcher = originalWatcher;
+            vscode.window.showWarningMessage = originalWarning;
+            vscode.window.setStatusBarMessage = originalStatus;
+        }
+    });
+
     test('외부 변경 안내 중 추가 입력 없이 저장한 뒤 다시 읽기를 선택해도 저장 상태를 유지하고 상태 변경으로 안내한다', async () => {
         const originalWatcher = vscode.workspace.createFileSystemWatcher;
         const originalWarning = vscode.window.showWarningMessage;
@@ -705,6 +780,41 @@ suite('JSON Editor 실제 브라우저 편집과 저장', function () {
         }
     });
 
+
+    test('표는 Tab 정지 하나로 들어오고 화살표·Home·End로 셀 사이를 이동한다', async () => {
+        // 둘째 행의 a는 객체라 변환 버튼이 없다 — 행마다 항목 수가 달라도 ↑/↓는 열을 지켜야 한다.
+        await withJsonBrowser({ rows: [{ a: 1, b: 2 }, { a: { k: 1 }, b: 4 }, { a: 5, b: 6 }] }, async browser => {
+            const start = await browser.operate([]);
+            assert.strictEqual(start.tableTabStops, 1, '셀마다 Tab 정지가 있으면 표를 지나가는 데만 수십 번을 눌러야 한다');
+            const key = (name: string, extra: Record<string, unknown> = {}) => ({ kind: 'key', key: name, ...extra });
+            let state = await browser.operate([{ kind: 'key', selector: 'td[data-row="0"][data-col="a"] .cell-view', key: 'ArrowRight' }]);
+            assert.strictEqual(state.focused, 'convert:0:a', '셀 안의 변환 버튼도 화살표로 닿는다');
+            assert.ok(state.keyResults[0].prevented, '화살표가 표를 스크롤하지 않고 이동만 한다');
+            state = await browser.operate([key('ArrowRight')]);
+            assert.strictEqual(state.focused, 'cell:0:b');
+            state = await browser.operate([key('ArrowDown')]);
+            assert.strictEqual(state.focused, 'cell:1:b');
+            state = await browser.operate([key('ArrowRight'), key('ArrowRight')]);
+            assert.strictEqual(state.focused, 'delete:1', '행의 마지막 항목은 ✕다');
+            state = await browser.operate([key('Home')]);
+            assert.strictEqual(state.focused, 'grip:1', '행의 첫 항목은 ⠿다');
+            state = await browser.operate([key('End', { ctrlKey: true })]);
+            assert.strictEqual(state.focused, 'delete:2');
+            state = await browser.operate([key('Home', { ctrlKey: true })]);
+            assert.strictEqual(state.focused, 'grip:0');
+            assert.strictEqual(state.tableTabStops, 1, '이동한 위치가 다음 Tab 진입점이 된다');
+            state = await browser.operate([key('ArrowDown')]);
+            assert.strictEqual(state.focused, 'grip:1', '⠿에서는 ⠿끼리 이동한다');
+            state = await browser.operate([{ kind: 'key', selector: 'td[data-row="0"][data-col="a"] .convert-btn', key: 'ArrowDown' }]);
+            assert.strictEqual(state.focused, 'cell:1:a', '변환 버튼이 없는 행에서도 같은 열의 셀로 간다(✕가 아니다)');
+            state = await browser.operate([{ kind: 'key', selector: 'td[data-row="0"][data-col="b"] .cell-view', key: 'ArrowUp' }]);
+            assert.strictEqual(state.focused, 'cell:0:b', '첫 행에서 ↑는 제자리에 머문다');
+            // 편집 중인 셀에서는 화살표가 입력 커서를 움직인다.
+            state = await browser.operate([{ kind: 'open', col: 'a', row: 1 }, key('ArrowRight')]);
+            assert.strictEqual(state.keyResults[0].prevented, false);
+            assert.ok(state.cells.find((cell: { row: number; col: string; editing: boolean }) => cell.row === 1 && cell.col === "a")?.editing);
+        });
+    });
 
     test('IT-219: 실제 번들로 root 배열을 열고 활성 셀을 저장해 문자열·특수문자·들여쓰기를 보존한다', async () => {
         const specialKey = '키 "<&>';

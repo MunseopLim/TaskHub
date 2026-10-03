@@ -2524,7 +2524,7 @@ try {
                 assert.ok(shownInfo.includes('Dynamic completion'),
                     'followStatus가 시작 시점 false에 고정되면 완료 시 켠 알림이 나오지 않는다');
                 const completed = (await mainView.getChildren())[0];
-                assert.strictEqual((completed.iconPath as vscode.ThemeIcon).id, 'check');
+                assert.strictEqual((completed.iconPath as vscode.ThemeIcon).id, 'pass');
                 assert.strictEqual(completed.contextValue, 'succeededAction');
                 assert.ok(changeCount >= 3,
                     '시작·태스크 종료·최종화 refresh가 있어야 설정 전환 뒤 상태가 정체되지 않는다');

@@ -184,6 +184,22 @@ suite('HexParser Test Suite', () => {
             assert.strictEqual(result.data.get(0xFFFF0010), 0xBB);
         });
 
+        test('Extended Segment data wraps its offset at 64K while Extended Linear data does not', () => {
+            const record = (type: number, address: number, bytes: number[]): string => {
+                const body = [bytes.length, address >> 8, address & 0xFF, type, ...bytes];
+                const checksum = (0x100 - (body.reduce((sum, value) => sum + value, 0) & 0xFF)) & 0xFF;
+                return ':' + [...body, checksum].map(value => value.toString(16).padStart(2, '0').toUpperCase()).join('');
+            };
+            const data = [1, 2, 3, 4];
+            const segment = parseIntelHex([record(0x02, 0, [0x10, 0x00]), record(0x00, 0xFFFE, data), ':00000001FF'].join('\n'));
+            // SBA 0x1000 → base 0x10000. Intel 사양: SBA*16 + ((0xFFFE + i) mod 64K)
+            assert.deepStrictEqual([0x1FFFE, 0x1FFFF, 0x10000, 0x10001].map(addr => segment.data.get(addr)), data);
+            assert.strictEqual(segment.data.get(0x20000), undefined);
+
+            const linear = parseIntelHex([record(0x04, 0, [0x00, 0x01]), record(0x00, 0xFFFE, data), ':00000001FF'].join('\n'));
+            assert.deepStrictEqual([0x1FFFE, 0x1FFFF, 0x20000, 0x20001].map(addr => linear.data.get(addr)), data);
+        });
+
         test('should parse Start Linear Address (entry point)', () => {
             const lines = [
                 ':0400000508000000EF',  // Start Linear Address: 0x08000000 (incorrect checksum, will be skipped)

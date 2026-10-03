@@ -55,7 +55,7 @@ function buildFeatureLauncherDefinitions(unreadCount: number, jenkinsEnabled: bo
             command: 'workbench.view.extension.mainView',
             group: 'taskhub',
             label: `$(home) ${t('TaskHub 사이드바 열기', 'Open TaskHub sidebar')}`,
-            description: t('Actions, Links, Favorites와 History를 엽니다.', 'Open Actions, Links, Favorites, and History.'),
+            description: t('액션, 워크스페이스 링크, 즐겨찾는 파일, 실행 기록을 엽니다.', 'Open Actions, Workspace Links, Favorite Files, and History.'),
         },
         {
             id: 'settings',

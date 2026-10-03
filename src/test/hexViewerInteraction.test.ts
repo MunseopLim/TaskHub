@@ -52,6 +52,8 @@ function runViewer(bytes: number[], options: {
         }
         appendChild(child: FakeElement): FakeElement { this.children.push(child); return child; }
         setAttribute(): void {}
+        removeAttribute(): void {}
+        select(): void {}
         focus(): void { focused = this; }
         scrollIntoView(): void {}
         all(): FakeElement[] { return [this, ...this.children.flatMap(child => child.all())]; }
@@ -73,7 +75,7 @@ function runViewer(bytes: number[], options: {
     const ids = [
         'hexContainer', 'hexHead', 'hexBody', 'statusBar', 'unitSize', 'endian', 'gotoInput',
         'gotoBtn', 'findBar', 'findMode', 'findHexInput', 'findInfo', 'findBtn', 'findClose',
-        'findNext', 'findPrev', 'hexLoading',
+        'findNext', 'findPrev', 'hexLoading', 'gotoError', 'hexAnnounce',
     ];
     const elements = Object.fromEntries(ids.map(id => [id,
         new FakeElement(['gotoInput', 'findHexInput'].includes(id) ? 'INPUT' : 'DIV')
@@ -397,6 +399,26 @@ suite('Hex Viewer 연속 조작', () => {
             assert.ok(elements.statusBar.innerHTML.includes(`0x${offset.toString(16).padStart(8, '0')}`));
             assert.strictEqual(elements.hexBody.querySelector('.find-current')?.dataset.offset, String(offset));
         }
+    });
+
+    test('Go to 오류는 알림 대신 입력칸 옆에 표시하고 입력을 고치면 지운다', async () => {
+        const viewer = runViewer([0x01, 0x02, 0x03, 0x04]);
+        const { elements } = viewer;
+        await viewer.load();
+        const strings = buildHexViewerStrings();
+        elements.gotoInput.value = 'zz';
+        await elements.gotoBtn.dispatch('click');
+        assert.strictEqual(elements.gotoError.textContent, strings.gotoInvalidFormat);
+        elements.gotoInput.value = '0x100';
+        await elements.gotoInput.dispatch('input');
+        assert.strictEqual(elements.gotoError.textContent, '', '입력을 고치면 이전 오류가 사라진다');
+        await elements.gotoBtn.dispatch('click');
+        assert.match(elements.gotoError.textContent, /0x3\b/, '마지막 오프셋을 알려 준다');
+        elements.gotoInput.value = '0x02';
+        await elements.gotoBtn.dispatch('click');
+        assert.strictEqual(elements.gotoError.textContent, '');
+        assert.match(elements.hexAnnounce.textContent, /0x03$/, '선택한 바이트를 짧게 알린다');
+        assert.ok(!viewer.messages.some(message => message.command === 'gotoError'), '호스트 알림으로 보내지 않는다');
     });
 
     test('ASCII 검색에 비ASCII 문자를 넣으면 안내하고 이전 검색 강조를 지운다', async () => {

@@ -1875,8 +1875,8 @@ suite('JsonEditorUtils Test Suite', () => {
             const watcher = editorSource.match(/handleExternalChange\s*=\s*async[\s\S]*?\n\s{4}\};/);
             assert.ok(watcher, 'could not locate watcher handleExternalChange');
             assert.ok(
-                /changedStat\.size\s*>\s*JSON_EDITOR_MAX_FILE_SIZE/.test(watcher![0]),
-                'watcher auto-reload must check changedStat.size against JSON_EDITOR_MAX_FILE_SIZE before readFileSync'
+                /reloadStat\.size\s*>\s*JSON_EDITOR_MAX_FILE_SIZE/.test(watcher![0]),
+                'watcher auto-reload must check reloadStat.size against JSON_EDITOR_MAX_FILE_SIZE before readFileSync'
             );
         });
 
@@ -1892,7 +1892,7 @@ suite('JsonEditorUtils Test Suite', () => {
             assert.ok(watcher, 'could not locate watcher handleExternalChange');
             // catch 블록에서 baselineMtimeMs 갱신 + markBaselineUnknown postMessage.
             assert.ok(
-                /catch\s*\([^)]*\)\s*\{[\s\S]*?baselineMtimeMs\s*=\s*changedStat\.mtimeMs[\s\S]*?postToWebview\(\s*\{\s*command:\s*'markBaselineUnknown'\s*\}/.test(watcher![0]),
+                /catch\s*\([^)]*\)\s*\{[\s\S]*?baselineMtimeMs\s*=\s*reloadStat\.mtimeMs[\s\S]*?postToWebview\(\s*\{\s*command:\s*'markBaselineUnknown'\s*\}/.test(watcher![0]),
                 'auto-reload catch must update baselineMtimeMs and post markBaselineUnknown so the user\'s next edit lands in a recovery entry stamped with the new mtime'
             );
         });
@@ -2012,7 +2012,7 @@ suite('JsonEditorUtils Test Suite', () => {
                     // 앞쪽에는 pending-save 가드의 early `break;` 가 있으므로
                     // 실제 상태 전이가 시작되는 지점부터 창을 잡는다.
                     name: "case 'modified' (modified=false branch)",
-                    window: editorSource.match(/currentIsDirty = nextDirty;[\s\S]{0,900}?break;/)?.[0],
+                    window: editorSource.match(/setCurrentDirty\(nextDirty\);[\s\S]{0,900}?break;/)?.[0],
                 },
                 {
                     // 성공 분기의 끝을 `postSaveResult(true` 로 잡는다. 글자 수
@@ -2030,7 +2030,7 @@ suite('JsonEditorUtils Test Suite', () => {
             for (const site of sites) {
                 assert.ok(site.window, `could not locate ${site.name}`);
                 assert.ok(
-                    /setRecoveryEntry\(\s*context\s*,\s*filePath\s*,\s*null\s*\)/.test(site.window!),
+                    /setRecoveryEntry\(\s*context\s*,\s*filePath\s*,\s*null\s*\)|clearRecoveryAfterClean\(\)/.test(site.window!),
                     `${site.name} should clear the recovery entry (sanity check — if this fails, the regex anchor needs updating)`
                 );
                 assert.ok(
@@ -2293,7 +2293,7 @@ suite('JsonEditorUtils Test Suite', () => {
             // 회귀 가드: P2-3. 사용자가 Keep을 골랐을 때 baselineMtimeMs가
             // 새 외부 mtime으로 갱신되지 않으면 reopen 시 shouldOfferRecovery가
             // stale로 폐기해 사용자의 명시적 Keep이 무시된다.
-            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\|\|\s*keepNewEdits\s*\)\s*\{([\s\S]*?)return;\s*\n\s*\}\s*\n\s*\}/);
+            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\|\|\s*keepNewEdits\s*\)\s*\{([\s\S]*?)return;\s*\n\s*\}\s*\n\s*automaticReload\s*=\s*false;/);
             assert.ok(keepBranch, 'could not locate the external-change Keep branch');
             const body = keepBranch![1];
             assert.ok(/baselineMtimeMs\s*=\s*postPromptStat\.mtimeMs/.test(body),
@@ -2309,7 +2309,7 @@ suite('JsonEditorUtils Test Suite', () => {
             // 콜백 시작에서 잡은 changedStat.mtime 은 stale 이다. 응답 직후 fresh
             // stat 을 다시 잡지 않으면 baseline/recovery 가 옛 mtime 으로 stamp 돼
             // reopen 에서 stale 로 폐기, 사용자의 명시적 Keep 이 무시된다.
-            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\|\|\s*keepNewEdits\s*\)\s*\{([\s\S]*?)return;\s*\n\s*\}\s*\n\s*\}/);
+            const keepBranch = editorSource.match(/if\s*\(\s*choice\s*!==\s*reloadLabel\s*\|\|\s*keepNewEdits\s*\)\s*\{([\s\S]*?)return;\s*\n\s*\}\s*\n\s*automaticReload\s*=\s*false;/);
             assert.ok(keepBranch, 'could not locate the external-change Keep branch');
             const body = keepBranch![1];
             // showWarningMessage(prompt) 의 await 이 끝난 뒤(=Keep 분기 진입 후)에
@@ -2340,7 +2340,7 @@ suite('JsonEditorUtils Test Suite', () => {
                 'handleReloadFailure must update baselineMtimeMs from a stat snapshot');
             assert.ok(/baselineFileSize\s*=\s*statForBaseline\.size/.test(helperBody),
                 'handleReloadFailure must update baselineFileSize from the same stat snapshot');
-            assert.ok(/currentIsDirty\s*=\s*true/.test(helperBody),
+            assert.ok(/setCurrentDirty\(\s*true\s*\)/.test(helperBody),
                 'handleReloadFailure must flip currentIsDirty to true');
             assert.ok(/markBaselineUnknown/.test(helperBody),
                 'handleReloadFailure must send markBaselineUnknown to the webview');
@@ -2376,7 +2376,7 @@ suite('JsonEditorUtils Test Suite', () => {
             // 회귀 가드: size fingerprint 가 빠지면 mtime 보존형 외부 변경
             // (예: `touch -r`) 을 reopen 에서 잡지 못해 사용자가 보지 않은
             // 변경 위에 stale 복구가 덮인다.
-            const writer = editorSource.match(/const\s+writeSnapshotEntry\s*=\s*\([^)]*\)\s*:\s*Promise<void>\s*=>\s*\{([\s\S]*?)\n\s{4}\};/);
+            const writer = editorSource.match(/const\s+writeSnapshotEntry\s*=\s*(?:async\s*)?\([^)]*\)\s*:\s*Promise<void>\s*=>\s*\{([\s\S]*?)\n\s{4}\};/);
             assert.ok(writer, 'could not locate writeSnapshotEntry');
             const body = writer![1];
             assert.ok(/fileMtimeMs\s*:\s*baselineMtimeMs/.test(body),

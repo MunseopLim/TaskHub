@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "icon": "media/h_icon.png",
   "publisher": "Munseop",
-  "version": "0.8.54",
+  "version": "0.8.55",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -419,6 +419,10 @@
         "view": "mainView.favorite",
         "when": "workbenchState != empty",
         "contents": "%welcome.noFavorites%"
+      },
+      {
+        "view": "mainView.history",
+        "contents": "%welcome.noHistory%"
       }
     ],
     "commands": [
@@ -473,16 +477,19 @@
       },
       {
         "command": "taskhub.openLink",
-        "title": "%cmd.openLink%"
+        "title": "%cmd.openLink%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.openLinkInIntegratedBrowser",
         "title": "%cmd.openLinkInIntegratedBrowser%",
+        "category": "TaskHub",
         "icon": "$(browser)"
       },
       {
         "command": "taskhub.copyLink",
         "title": "%cmd.copyLink%",
+        "category": "TaskHub",
         "icon": "$(copy)"
       },
       {
@@ -492,36 +499,49 @@
       },
       {
         "command": "taskhub.goToLink",
-        "title": "%cmd.goToLink%"
+        "title": "%cmd.goToLink%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.addLink",
         "title": "%cmd.addLink%",
+        "category": "TaskHub",
         "icon": "$(add)"
       },
       {
         "command": "taskhub.editWorkspaceLink",
         "title": "%cmd.editWorkspaceLink%",
+        "category": "TaskHub",
         "icon": "$(pencil)"
       },
       {
         "command": "taskhub.searchLinks",
         "title": "%cmd.searchLinks%",
+        "category": "TaskHub",
         "icon": "$(search)"
       },
       {
         "command": "taskhub.searchFavorites",
         "title": "%cmd.searchFavorites%",
+        "category": "TaskHub",
         "icon": "$(search)"
       },
       {
         "command": "taskhub.createAction",
         "title": "%cmd.createAction%",
+        "category": "TaskHub",
         "icon": "$(add)"
       },
       {
         "command": "taskhub.executeAction",
-        "title": "%cmd.executeAction%"
+        "title": "%cmd.executeAction%",
+        "category": "TaskHub"
+      },
+      {
+        "command": "taskhub.openActionDefinition",
+        "title": "%cmd.openActionDefinition%",
+        "category": "TaskHub",
+        "icon": "$(go-to-file)"
       },
       {
         "command": "taskhub.previewAction",
@@ -544,11 +564,13 @@
       {
         "command": "taskhub.stopAction",
         "title": "%cmd.stopAction%",
+        "category": "TaskHub",
         "icon": "$(primitive-square)"
       },
       {
         "command": "taskhub.showVersion",
-        "title": "%cmd.showVersion%"
+        "title": "%cmd.showVersion%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.checkForUpdates",
@@ -558,50 +580,60 @@
       },
       {
         "command": "taskhub.openFavoriteFile",
-        "title": "%cmd.openFavoriteFile%"
+        "title": "%cmd.openFavoriteFile%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.editFavorites",
         "title": "%cmd.editFavorites%",
+        "category": "TaskHub",
         "icon": "$(pencil)"
       },
       {
         "command": "taskhub.editLinks",
         "title": "%cmd.editLinks%",
+        "category": "TaskHub",
         "icon": "$(pencil)"
       },
       {
         "command": "taskhub.editActions",
         "title": "%cmd.editActions%",
+        "category": "TaskHub",
         "icon": "$(pencil)"
       },
       {
         "command": "taskhub.addFavoriteFile",
         "title": "%cmd.addFavoriteFile%",
+        "category": "TaskHub",
         "icon": "$(add)"
       },
       {
         "command": "taskhub.deleteFavorite",
         "title": "%cmd.deleteFavorite%",
+        "category": "TaskHub",
         "icon": "$(trash)"
       },
       {
         "command": "taskhub.deleteLink",
         "title": "%cmd.deleteLink%",
+        "category": "TaskHub",
         "icon": "$(trash)"
       },
       {
         "command": "taskhub.addOpenFileToFavorites",
         "title": "%cmd.addOpenFileToFavorites%",
+        "category": "TaskHub",
         "icon": "$(add)"
       },
       {
         "command": "taskhub.showExampleJson",
-        "title": "%cmd.showExampleJson%"
+        "title": "%cmd.showExampleJson%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.showExampleJsonQuickPick",
         "title": "%cmd.showExampleJsonQuickPick%",
+        "category": "TaskHub",
         "icon": "$(lightbulb)"
       },
       {
@@ -612,112 +644,136 @@
       },
       {
         "command": "taskhub.showChangelog",
-        "title": "%cmd.showChangelog%"
+        "title": "%cmd.showChangelog%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.stopAllActions",
         "title": "%cmd.stopAllActions%",
+        "category": "TaskHub",
         "icon": "$(primitive-square)"
       },
       {
         "command": "taskhub.closeAllTerminals",
         "title": "%cmd.closeAllTerminals%",
+        "category": "TaskHub",
         "icon": "$(terminal)"
       },
       {
         "command": "taskhub.terminateAllActions",
         "title": "%cmd.terminateAllActions%",
+        "category": "TaskHub",
         "icon": "$(primitive-square)"
       },
       {
         "command": "taskhub.openSettings",
-        "title": "%cmd.openSettings%"
+        "title": "%cmd.openSettings%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.openRunLogsFolder",
-        "title": "%cmd.openRunLogsFolder%"
+        "title": "%cmd.openRunLogsFolder%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.viewActionRunReport",
         "title": "%cmd.viewActionRunReport%",
+        "category": "TaskHub",
         "icon": "$(preview)"
       },
       {
         "command": "taskhub.rerunFromHistory",
         "title": "%cmd.rerunFromHistory%",
+        "category": "TaskHub",
         "icon": "$(refresh)"
       },
       {
         "command": "taskhub.rerunFromHistoryWithInputs",
         "title": "%cmd.rerunFromHistoryWithInputs%",
+        "category": "TaskHub",
         "icon": "$(run-all)"
       },
       {
         "command": "taskhub.pinAction",
         "title": "%cmd.pinAction%",
+        "category": "TaskHub",
         "icon": "$(pin)"
       },
       {
         "command": "taskhub.runPinnedAction",
         "title": "%cmd.runPinnedAction%",
+        "category": "TaskHub",
         "icon": "$(play)"
       },
       {
         "command": "taskhub.unpinAction",
         "title": "%cmd.unpinAction%",
+        "category": "TaskHub",
         "icon": "$(pinned)"
       },
       {
         "command": "taskhub.runActionWithInputProfile",
-        "title": "%cmd.runActionWithInputProfile%"
+        "title": "%cmd.runActionWithInputProfile%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.manageInputProfiles",
-        "title": "%cmd.manageInputProfiles%"
+        "title": "%cmd.manageInputProfiles%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.manageAllInputProfiles",
-        "title": "%cmd.manageAllInputProfiles%"
+        "title": "%cmd.manageAllInputProfiles%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.saveHistoryInputsAsProfile",
-        "title": "%cmd.saveHistoryInputsAsProfile%"
+        "title": "%cmd.saveHistoryInputsAsProfile%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.viewHistoryOutput",
         "title": "%cmd.viewHistoryOutput%",
+        "category": "TaskHub",
         "icon": "$(output)"
       },
       {
         "command": "taskhub.viewHistoryCommand",
         "title": "%cmd.viewHistoryCommand%",
+        "category": "TaskHub",
         "icon": "$(terminal)"
       },
       {
         "command": "taskhub.deleteHistoryItem",
         "title": "%cmd.deleteHistoryItem%",
+        "category": "TaskHub",
         "icon": "$(trash)"
       },
       {
         "command": "taskhub.clearAllHistory",
         "title": "%cmd.clearAllHistory%",
+        "category": "TaskHub",
         "icon": "$(clear-all)"
       },
       {
         "command": "taskhub.toggleHistoryPanel",
-        "title": "%cmd.toggleHistoryPanel%"
+        "title": "%cmd.toggleHistoryPanel%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.applyPreset",
-        "title": "%cmd.applyPreset%"
+        "title": "%cmd.applyPreset%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.saveAsPreset",
-        "title": "%cmd.saveAsPreset%"
+        "title": "%cmd.saveAsPreset%",
+        "category": "TaskHub"
       },
       {
         "command": "taskhub.openJsonEditor",
         "title": "%cmd.openJsonEditor%",
+        "category": "TaskHub",
         "icon": "$(edit)"
       },
       {
@@ -748,16 +804,19 @@
       {
         "command": "taskhub.exportActions",
         "title": "%cmd.exportActions%",
+        "category": "TaskHub",
         "icon": "$(cloud-upload)"
       },
       {
         "command": "taskhub.importActions",
         "title": "%cmd.importActions%",
+        "category": "TaskHub",
         "icon": "$(cloud-download)"
       },
       {
         "command": "taskhub.exportActionItem",
         "title": "%cmd.exportActionItem%",
+        "category": "TaskHub",
         "icon": "$(cloud-upload)"
       },
       {
@@ -768,6 +827,7 @@
       {
         "command": "taskhub.runAnyAction",
         "title": "%cmd.runAnyAction%",
+        "category": "TaskHub",
         "icon": "$(search)"
       },
       {
@@ -825,6 +885,10 @@
     ],
     "menus": {
       "commandPalette": [
+        {
+          "command": "taskhub.openActionDefinition",
+          "when": "false"
+        },
         {
           "command": "taskhub.jenkins.manageServers",
           "when": "config.taskhub.experimental.jenkins.enabled"
@@ -1097,12 +1161,13 @@
       "editor/context": [
         {
           "command": "taskhub.addOpenFileToFavorites",
-          "group": "navigation"
+          "when": "resourceScheme == file",
+          "group": "1_taskhub@8"
         },
         {
           "command": "taskhub.openJsonEditorFromUri",
-          "when": "resourceExtname == .json",
-          "group": "navigation"
+          "when": "resourceScheme == file && resourceExtname =~ /^\\.json$/i",
+          "group": "1_taskhub@9"
         },
         {
           "command": "taskhub.revealSymbolInMemoryMap",
@@ -1118,7 +1183,7 @@
       "explorer/context": [
         {
           "command": "taskhub.openJsonEditorFromUri",
-          "when": "resourceExtname == .json",
+          "when": "resourceScheme == file && resourceExtname =~ /^\\.json$/i",
           "group": "navigation"
         },
         {
@@ -1152,7 +1217,7 @@
       "scm/resourceState/context": [
         {
           "command": "taskhub.openJsonEditorFromUri",
-          "when": "resourceExtname == .json",
+          "when": "resourceScheme == file && resourceExtname =~ /^\\.json$/i",
           "group": "navigation"
         },
         {
@@ -1225,42 +1290,52 @@
         {
           "command": "taskhub.deleteLink",
           "when": "view == mainView.linkWorkspace && viewItem =~ /^linkItem(\\.browser)?$/",
-          "group": "context@9"
+          "group": "context_delete@9"
         },
         {
           "command": "taskhub.deleteFavorite",
           "when": "view == mainView.favorite && viewItem == favoriteItem",
-          "group": "context@9"
+          "group": "context_delete@9"
+        },
+        {
+          "command": "taskhub.executeAction",
+          "when": "view == mainView.main && viewItem =~ /^(action|succeededAction|failedAction)$/",
+          "group": "context_1run@0"
+        },
+        {
+          "command": "taskhub.openActionDefinition",
+          "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
+          "group": "context_2edit@0"
         },
         {
           "command": "taskhub.previewAction",
           "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
-          "group": "context@1"
+          "group": "context_1run@2"
         },
         {
           "command": "taskhub.exportActionItem",
           "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
-          "group": "context@2"
+          "group": "context_3manage@3"
         },
         {
           "command": "taskhub.exportActionItem",
           "when": "view == mainView.main && viewItem == folder",
-          "group": "context@2"
+          "group": "context_3manage@3"
         },
         {
           "command": "taskhub.assignShortcut",
           "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
-          "group": "context@3"
+          "group": "context_3manage@1"
         },
         {
           "command": "taskhub.runActionWithInputProfile",
           "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
-          "group": "context@4"
+          "group": "context_1run@1"
         },
         {
           "command": "taskhub.manageInputProfiles",
           "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
-          "group": "context@5"
+          "group": "context_3manage@2"
         },
         {
           "command": "taskhub.stopAction",
@@ -1310,12 +1385,12 @@
         {
           "command": "taskhub.deleteHistoryItem",
           "when": "view == mainView.history && viewItem =~ /^(historyItem|historyToolItem)/",
-          "group": "context@9"
+          "group": "context_delete@9"
         },
         {
           "command": "taskhub.pinAction",
           "when": "view == mainView.main && viewItem =~ /^(action|runningAction|succeededAction|failedAction)$/",
-          "group": "context@3.5"
+          "group": "context_3manage@0"
         },
         {
           "command": "taskhub.runPinnedAction",

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { addLinkEntry, invalidateActionsCache, promptWorkspaceLinkEdit, runActionWithInputProfile, showActionRunReport } from '../extension';
+import { addLinkEntry, invalidateActionsCache, promptWorkspaceLinkEdit, runActionWithInputProfile, findActionJsonPointer, openActionDefinition, showActionFailureNotification, showActionRunReport } from '../extension';
 import { InputProfileStore } from '../inputProfiles';
 import { t } from '../i18n';
 import { HistoryItem, HistoryProvider } from '../providers/historyProvider';
@@ -320,6 +320,33 @@ suite('UX review flows', function () {
         const show = () => showActionRunReport(new HistoryItem({
             actionId: 'ux-review-run-log', actionTitle: 'Review', timestamp: 1, status: 'success',
         }).getEntry());
+        test('실행 로그 폴더가 없고 저장이 꺼져 있으면 그 설정으로 바로 가는 버튼을 준다', async () => {
+            await config.update('enabled', undefined, vscode.ConfigurationTarget.Workspace);
+            const folder = vscode.workspace.workspaceFolders?.[0];
+            assert.ok(folder, '테스트 워크스페이스가 필요하다');
+            assert.ok(!fs.existsSync(path.join(folder.uri.fsPath, '.taskhub', 'logs')));
+            const prompts: string[][] = [];
+            vscode.window.showInformationMessage = (async (message: string, ...choices: string[]) => {
+                messages.push(message);
+                prompts.push(choices);
+                return choices.find(choice => choice === t('설정 열기', 'Open Settings'));
+            }) as unknown as typeof original.information;
+            const originalExecute = vscode.commands.executeCommand;
+            const opened: unknown[] = [];
+            (vscode.commands as any).executeCommand = (command: string, ...args: unknown[]) => {
+                if (command === 'workbench.action.openSettings') { opened.push(args[0]); return Promise.resolve(); }
+                return originalExecute.call(vscode.commands, command, ...args);
+            };
+            try {
+                await vscode.commands.executeCommand('taskhub.openRunLogsFolder');
+            } finally {
+                (vscode.commands as any).executeCommand = originalExecute;
+            }
+            assert.deepStrictEqual(prompts.at(-1), [t('설정 열기', 'Open Settings')]);
+            assert.ok(!messages.at(-1)!.includes('`'), '알림은 마크다운을 그리지 않으므로 백틱이 그대로 보인다');
+            assert.deepStrictEqual(opened, ['taskhub.runLogs.enabled']);
+        });
+
         test('workspace false is reported instead of claiming future runs will be logged', async () => {
             await config.update('enabled', false, vscode.ConfigurationTarget.Workspace);
             await show();
@@ -335,6 +362,94 @@ suite('UX review flows', function () {
             assert.strictEqual(vscode.workspace.getConfiguration('taskhub.runLogs').get('enabled'), true);
             assert.strictEqual(warnings.length, 0);
             assert.ok(messages.some(message => message.includes(t('다음 실행부터', 'Runs from now on'))));
+        });
+    });
+
+    suite('action failure notification', () => {
+        test('실패 알림에서 같은 실행의 보고서 보기·다시 실행으로 바로 이어진다', async () => {
+            const entry = { actionId: 'build', actionTitle: 'Build', timestamp: 42, status: 'failure' } as any;
+            const prompts: string[][] = [];
+            let answer: string | undefined;
+            vscode.window.showErrorMessage = (async (message: string, ...buttons: string[]) => {
+                errors.push(message);
+                prompts.push(buttons);
+                return answer;
+            }) as unknown as typeof original.error;
+            const originalExecute = vscode.commands.executeCommand;
+            const executed: unknown[][] = [];
+            (vscode.commands as any).executeCommand = async (...args: unknown[]) => { executed.push(args); };
+            try {
+                answer = t('다시 실행', 'Run Again');
+                let lookups = 0;
+                await showActionFailureNotification('Build failed', () => { lookups++; return entry; });
+                assert.deepStrictEqual(prompts[0], [t('실행 보고서 보기', 'View Run Report'), t('다시 실행', 'Run Again')]);
+                assert.strictEqual(lookups, 1, '기록은 버튼을 누른 시점에 찾는다');
+                assert.deepStrictEqual(executed, [['taskhub.rerunFromHistory', entry]]);
+
+                answer = t('다시 실행', 'Run Again');
+                await showActionFailureNotification('Build failed', () => undefined);
+                assert.strictEqual(executed.length, 1, '기록이 사라졌으면 실행하지 않고 이유를 알린다');
+                assert.match(warnings.at(-1) ?? '', /기록|history entry/);
+
+                await showActionFailureNotification('No history');
+                assert.deepStrictEqual(prompts.at(-1), [], 'History가 없으면 버튼을 달지 않는다');
+
+                // 알림은 실행 로그 저장보다 먼저 뜬다. 저장이 끝날 때까지 기록 조회를 기다려야
+                // 보고서가 "로그를 남기지 못했다"로 잘못 열리지 않는다.
+                let releaseSave!: (value: unknown) => void;
+                const saved = new Promise(resolve => { releaseSave = resolve; });
+                let settled = false;
+                const pending = showActionFailureNotification('Build failed', async () => {
+                    await saved;
+                    settled = true;
+                    return entry;
+                }).then(() => { assert.ok(settled, '저장 완료 전에 기록을 쓰면 안 된다'); });
+                await new Promise(resolve => setTimeout(resolve, 20));
+                assert.strictEqual(executed.length, 1, '저장이 끝나기 전에는 다시 실행하지 않는다');
+                releaseSave(undefined);
+                await pending;
+                assert.deepStrictEqual(executed.at(-1), ['taskhub.rerunFromHistory', entry]);
+            } finally {
+                (vscode.commands as any).executeCommand = originalExecute;
+            }
+        });
+    });
+
+    suite('open action definition', () => {
+        test('폴더 아래 액션도 JSON 포인터로 찾고 그 정의 줄에서 actions.json을 연다', async () => {
+            const actions = [
+                { id: 'build', title: 'Build', action: { description: 'b', tasks: [{ id: 'flash', type: 'shell', command: 'x' }] } },
+                { id: 'group', title: 'Group', children: [{ id: 'flash', title: 'Flash', action: { description: 'f', tasks: [] } }] },
+            ];
+            assert.strictEqual(findActionJsonPointer(actions, 'flash'), '/1/children/0', '태스크 id가 아니라 액션 id를 찾는다');
+            assert.strictEqual(findActionJsonPointer(actions, 'missing'), undefined);
+
+            const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'taskhub-open-definition-'));
+            const originalShow = vscode.window.showTextDocument;
+            let shown: { line: number; file: string } | undefined;
+            (vscode.window as any).showTextDocument = async (document: vscode.TextDocument, options: vscode.TextDocumentShowOptions) => {
+                shown = { line: options.selection!.start.line, file: document.uri.fsPath };
+            };
+            try {
+                fs.mkdirSync(path.join(folder, '.vscode'));
+                const text = JSON.stringify(actions, null, 2);
+                fs.writeFileSync(path.join(folder, '.vscode', 'actions.json'), text);
+                await openActionDefinition('flash', folder);
+                // 항목 객체를 여는 `{` 줄(= `"title": "Flash"` 두 줄 위)로 정확히 간다.
+                const expectedLine = text.split('\n').findIndex(line => line.includes('"title": "Flash"')) - 2;
+                assert.ok(shown, '파일을 열지 않았다');
+                assert.strictEqual(path.basename(shown!.file), 'actions.json');
+                assert.strictEqual(text.split('\n')[expectedLine].trim(), '{');
+                assert.strictEqual(shown!.line, expectedLine);
+
+                shown = undefined;
+                await openActionDefinition('builtin-example', undefined);
+                assert.strictEqual(shown, undefined, '워크스페이스에 없는 액션은 파일을 열지 않는다');
+                assert.match(messages.at(-1) ?? '', /기본 예제|built-in examples/);
+            } finally {
+                (vscode.window as any).showTextDocument = originalShow;
+                fs.rmSync(folder, { recursive: true, force: true });
+            }
         });
     });
 });

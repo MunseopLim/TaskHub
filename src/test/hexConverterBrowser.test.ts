@@ -75,6 +75,7 @@ async function withConverterBrowser(body: (browser: {
                         'copyText', 'copyHex', 'saveText', 'saveHex', 'copyBitwiseDecimal',
                     ].map(id => [id, element(id).disabled])),
                     status: element('statusText').textContent,
+                    clearLabel: element('clearButton').textContent,
                     error: element('status').classList.contains('is-error'),
                     bitwiseStatus: element('bitwiseStatus').textContent,
                     bitwiseDecimal: element('bitwiseDecimal').textContent,
@@ -413,6 +414,39 @@ suite('Hex/Text 변환기 실제 브라우저', () => {
             assert.strictEqual(state.error, true);
             assert.strictEqual(state.values.textInput, 'ABCDE');
             assert.deepStrictEqual(browser.copied, [hex, '18446744073709551615']);
+        });
+    });
+
+    test('입력 지우기는 바로 되돌릴 수 있고 다시 입력하면 원래 버튼으로 돌아온다', async function () {
+        this.timeout(30000);
+        const strings = buildHexConverterStrings();
+        await withConverterBrowser(async browser => {
+            let state = await browser.act([{ selector: '#textInput', value: 'Hello', event: 'input' }]);
+            const hex = state.values.hexInput;
+            assert.ok(hex.length > 0);
+            state = await browser.act([{ selector: '#clearButton', click: true }]);
+            assert.strictEqual(state.values.textInput, '');
+            assert.strictEqual(state.values.hexInput, '');
+            assert.strictEqual(state.status, strings.cleared);
+            assert.strictEqual(state.clearLabel, strings.undoClear, '코드로 비운 textarea는 Ctrl+Z로 되돌릴 수 없다');
+            state = await browser.act([{ selector: '#clearButton', click: true }]);
+            assert.strictEqual(state.values.textInput, 'Hello');
+            assert.strictEqual(state.values.hexInput, hex);
+            assert.strictEqual(state.clearLabel, strings.clear);
+
+            state = await browser.act([{ selector: '#clearButton', click: true }]);
+            state = await browser.act([{ selector: '#textInput', value: 'New', event: 'input' }]);
+            assert.strictEqual(state.clearLabel, strings.clear, '새로 입력하면 이전 내용으로 되돌리지 않는다');
+
+            // 지운 뒤 저장값을 불러오면 버튼은 다시 "지우기"다 — 불러온 값을 지워야 한다.
+            state = await browser.act([{ selector: '#saveText', click: true }], 'savedValues');
+            state = await browser.act([{ selector: '#clearButton', click: true }]);
+            assert.strictEqual(state.clearLabel, strings.undoClear);
+            state = await browser.act([{ selector: '.saved-preview', click: true }]);
+            assert.strictEqual(state.values.textInput, 'New');
+            assert.strictEqual(state.clearLabel, strings.clear, '불러온 뒤에도 되돌리기 상태가 남으면 엉뚱한 입력을 복원한다');
+            state = await browser.act([{ selector: '#clearButton', click: true }]);
+            assert.strictEqual(state.values.textInput, '', '불러온 값을 지운다');
         });
     });
 

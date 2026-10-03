@@ -105,6 +105,17 @@ export function buildElf32WithSymbols(): Buffer {
     return assembleElf32(sections, symbols);
 }
 
+/** 같은 주소·크기의 별칭 심볼(약한 IRQ 핸들러 별칭 같은)이 있는 입력. Memory Map은 한 행으로 합친다. */
+export function buildElf32WithAliasSymbols(): Buffer {
+    return assembleElf32([
+        { name: '.text', type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, addr: 0x08000000, size: 0x400 },
+    ], [
+        { name: 'main', addr: 0x08000000, size: 0x100, type: 2, sectionIndex: 1 },
+        { name: 'Default_Handler', addr: 0x08000100, size: 0x10, type: 2, sectionIndex: 1 },
+        { name: 'USART1_IRQHandler', addr: 0x08000100, size: 0x10, type: 2, sectionIndex: 1 },
+    ]);
+}
+
 /** ARM ELF의 함수 포인터 bit0와 실제 코드 주소가 다른 입력. */
 export function buildElf32WithThumbSymbols(): Buffer {
     return assembleElf32([

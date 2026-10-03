@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { t } from './i18n';
 import { coerceToUri } from './previewOpener';
+import { filePathIdentityKey } from './pathIdentity';
 import {
     shouldOfferRecovery,
     shouldSuppressJsonEditorSelfWrite,
@@ -12,7 +13,9 @@ import {
     makeRecoveryStore,
     assertSupportedJsonNumbers,
     parseJsonEditorText,
+    stripUtf8Bom,
     UnsupportedJsonNumberError,
+    UTF8_BOM,
 } from './jsonEditorUtils';
 import { DIALOG_SCOPE, showOpenDialogWithMemory } from './dialogMemory';
 
@@ -38,7 +41,7 @@ export const jsonPanelRegistry = {
         currentPanel = undefined;
         currentMessageDisposable?.dispose();
         currentMessageDisposable = undefined;
-        currentIsDirty = false;
+        setCurrentDirty(false);
         currentFilePath = undefined;
         currentSessionId = NO_SESSION;
         jsonEditorOpenCounter++;
@@ -57,6 +60,19 @@ export const jsonPanelRegistry = {
 };
 let currentMessageDisposable: vscode.Disposable | undefined;
 let currentIsDirty = false;
+/** 미저장 표시를 붙이기 전의 탭 제목(`JSON Editor: name.json`). */
+let currentPanelBaseTitle: string | undefined;
+
+/**
+ * dirty 상태를 바꾸고 탭 제목에 미저장 표시(●)를 맞춘다. 단일 WebviewPanel은 VS Code가
+ * 미저장 표시를 그려 주지 않아, 툴바의 작은 "Modified" 글자 말고는 탭에서 알 수 없었다.
+ */
+function setCurrentDirty(value: boolean): void {
+    currentIsDirty = value;
+    if (!currentPanel || !currentPanelBaseTitle) { return; }
+    const title = (value ? '● ' : '') + currentPanelBaseTitle;
+    if (currentPanel.title !== title) { currentPanel.title = title; }
+}
 let currentFilePath: string | undefined;
 /**
  * 패널이 지금 어느 "열기"에 묶여 있는지. `openJsonEditorWithPath` 는 파일을
@@ -318,6 +334,31 @@ async function offerRecoveryIfAny(
         await setRecoveryEntry(context, filePath, null);
     }
     return null;
+}
+
+/**
+ * 같은 파일을 텍스트 편집기에서 고치고 아직 저장하지 않았는가. JSON Editor는 디스크를 직접
+ * 읽고 쓰므로, 이것을 무시하면 열 때는 옛 내용을 보여 주고 저장 뒤에는 텍스트 편집기 저장이
+ * 충돌해 어느 한쪽 편집이 사라졌다.
+ */
+function findDirtyTextDocument(filePath: string): vscode.TextDocument | undefined {
+    const key = filePathIdentityKey(filePath);
+    return vscode.workspace.textDocuments.find(document =>
+        document.uri.scheme === 'file' && document.isDirty && filePathIdentityKey(document.uri.fsPath) === key);
+}
+
+/** 열기 전에 미저장 텍스트 편집을 처리한다. 계속 열면 true. */
+async function resolveDirtyTextDocumentBeforeOpen(filePath: string, fileName: string): Promise<boolean> {
+    const document = findDirtyTextDocument(filePath);
+    if (!document) { return true; }
+    const saveAndOpen = t('텍스트 편집기 저장 후 열기', 'Save Text Editor and Open');
+    const openSaved = t('저장된 내용으로 열기', 'Open Saved Version');
+    const choice = await vscode.window.showWarningMessage(t(
+        `${fileName}을(를) 텍스트 편집기에서 수정하고 아직 저장하지 않았습니다. JSON Editor는 디스크에 저장된 내용을 엽니다. 텍스트 편집기를 저장하거나 되돌리기 전에는 표를 저장할 수 없습니다.`,
+        `${fileName} has unsaved changes in a text editor. The JSON Editor opens the version saved on disk, and the table cannot be saved until the text editor is saved or reverted.`
+    ), { modal: true }, saveAndOpen, openSaved);
+    if (choice === saveAndOpen) { return document.save(); }
+    return choice === openSaved;
 }
 
 async function confirmDiscardIfDirty(fileName: string): Promise<boolean> {
@@ -596,11 +637,20 @@ export async function openJsonEditorFromUri(context: vscode.ExtensionContext, ar
     let uri = coerceToUri(arg);
     if (!uri) {
         const editor = vscode.window.activeTextEditor;
-        if (editor && editor.document.fileName.endsWith('.json')) {
+        if (editor && editor.document.uri.scheme === 'file' && /\.json$/i.test(editor.document.fileName)) {
             uri = editor.document.uri;
         } else {
             return openJsonEditor(context, recordHistory);
         }
+    }
+    // JSON Editor는 디스크의 파일을 직접 읽고 쓴다. diff의 `git:` 리비전 같은 가상 문서를
+    // `fsPath`로 열면 사용자가 HEAD를 본다고 생각하는 동안 작업 트리 파일을 편집하게 된다.
+    if (uri.scheme !== 'file') {
+        vscode.window.showWarningMessage(t(
+            `이 문서(${uri.scheme}:)는 디스크의 파일이 아니라 JSON Editor로 열 수 없습니다. 작업 트리의 파일을 여세요.`,
+            `This document (${uri.scheme}:) is not a file on disk, so the JSON Editor cannot open it. Open the working-tree file instead.`
+        ));
+        return;
     }
 
     const filePath = uri.fsPath;
@@ -677,6 +727,12 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         && (currentSessionId === previousSession || currentSessionId === NO_SESSION);
     let approvedRevision = currentEditRevision;
 
+    // 현재 표의 변경을 버리기 **전에** 묻는다. 버린 뒤에 이 확인을 취소하면 옛 표는 열린 채
+    // dirty로 남는데 복구본만 지워져, 창을 다시 열면 미저장 편집이 사라졌다.
+    if (!await resolveDirtyTextDocumentBeforeOpen(filePath, fileName)) { return false; }
+    if (!isCurrentOpen()) { return false; }
+    approvedRevision = currentEditRevision;
+
     if (currentPanel && currentFilePath) {
         if (currentFilePath !== filePath) {
             const wasDirty = currentIsDirty;
@@ -743,10 +799,14 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     let jsonData!: Record<string, unknown>;
     let isRootArray = false;
     let detectedIndent: string | number = 2;
+    // BOM이 있던 파일은 저장할 때도 BOM을 유지한다(다른 도구가 BOM을 기대할 수 있다).
+    let fileHasBom = false;
     let content: string | undefined;
     if (!earlyError) {
         try {
             content = fs.readFileSync(filePath, 'utf-8');
+            // 디스크 JSON이 깨져 복구본으로 열어도 저장 때 원래 BOM을 유지한다.
+            fileHasBom = content.startsWith(UTF8_BOM);
         } catch (error: any) {
             earlyError = {
                 msg: t(`파일 읽기 실패 (${fileName}): ${error.message}`, `Failed to read file (${fileName}): ${error.message}`)
@@ -781,7 +841,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             const result = wrapIfArray(parsed);
             jsonData = result.wrapped;
             isRootArray = result.isRootArray;
-            detectedIndent = detectIndent(content);
+            detectedIndent = detectIndent(stripUtf8Bom(content));
             diskDataIfValid = jsonData;
             parseSucceeded = true;
         }
@@ -895,7 +955,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             currentPanel = undefined;
             currentMessageDisposable?.dispose();
             currentMessageDisposable = undefined;
-            currentIsDirty = false;
+            setCurrentDirty(false);
             currentFilePath = undefined;
             // 닫힌 것도 세션의 끝이다. 이 줄이 없으면 모달·await 뒤에서 깨어난
             // 옛 콜백이 `isCurrentSession()` 을 통과해, 화면에 없는 파일 때문에
@@ -919,12 +979,13 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     currentEditRevision = 0;
     verifiedSaveTarget = undefined;
 
-    currentPanel.title = `JSON Editor: ${fileName}`;
+    currentPanelBaseTitle = `JSON Editor: ${fileName}`;
+    currentPanel.title = currentPanelBaseTitle;
     const logicScriptUri = currentPanel.webview.asWebviewUri(
         vscode.Uri.joinPath(context.extensionUri, 'dist', 'jsonEditorWebview.js')
     ).toString();
     currentPanel.webview.html = getWebviewContent(jsonData, savedDataForWebview, filePath, currentPanel.webview, baselineUnknownForWebview, sessionId, logicScriptUri);
-    currentIsDirty = Boolean(recovered);
+    setCurrentDirty(Boolean(recovered));
     currentFilePath = filePath;
     currentLastWriteMtime = baselineMtimeMs;
     currentLastWriteSize = baselineFileSize;
@@ -933,7 +994,19 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
     // 스냅샷 디바운스: 편집 중 webview가 보내는 'snapshot' 메시지를 모아 마지막
     // 값만 workspaceState에 기록한다. flushNow는 패널 dispose / 외부 변경 Keep
     // 분기에서 즉시 기록을 강제할 때 사용된다.
-    const writeSnapshotEntry = (data: unknown): Promise<void> => {
+    // 복구 스냅샷 쓰기는 디바운스 타이머·패널 dispose에서 기다리는 쪽 없이 실행된다. 실패(저장소
+    // 용량 초과 등)를 그대로 두면 처리되지 않은 rejection이 로그에만 남고, 메모리의 사본 때문에
+    // 같은 세션에서는 복구되는 것처럼 보이다가 창을 다시 열면 사라진다. 세션당 한 번 알린다.
+    let snapshotFailureReported = false;
+    const reportSnapshotFailure = (error: unknown): void => {
+        if (snapshotFailureReported) { return; }
+        snapshotFailureReported = true;
+        vscode.window.showWarningMessage(t(
+            `${fileName}: 미저장 편집의 복구 스냅샷을 저장하지 못했습니다. 창을 다시 열면 저장하지 않은 편집이 사라질 수 있으니 먼저 저장하세요. (${jsonEditorErrorDetail(error)})`,
+            `${fileName}: could not store the recovery snapshot of unsaved edits. Save first; unsaved edits may be lost when the window is reopened. (${jsonEditorErrorDetail(error)})`
+        ));
+    };
+    const writeSnapshotEntry = async (data: unknown): Promise<void> => {
         const entry: RecoveryEntry = {
             data,
             isRootArray,
@@ -941,7 +1014,21 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             fileSize: baselineFileSize,
             capturedAt: Date.now()
         };
-        return Promise.resolve(setRecoveryEntry(context, filePath, entry));
+        try {
+            await setRecoveryEntry(context, filePath, entry);
+        } catch (error: unknown) {
+            reportSnapshotFailure(error);
+        }
+    };
+    const clearRecoveryAfterClean = async (): Promise<void> => {
+        try {
+            await setRecoveryEntry(context, filePath, null);
+        } catch (error: unknown) {
+            vscode.window.showWarningMessage(t(
+                `${fileName}: 복구 스냅샷을 지우지 못했습니다. 다시 열 때 지난 편집의 복구를 제안할 수 있습니다. (${jsonEditorErrorDetail(error)})`,
+                `${fileName}: could not clear the recovery snapshot. Reopening may offer to restore earlier edits. (${jsonEditorErrorDetail(error)})`
+            ));
+        }
     };
     const flushPendingSnapshot = async (): Promise<void> => {
         if (currentSnapshotTimer) {
@@ -1037,6 +1124,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         rootArray: boolean;
         stat: fs.Stats;
         automatic: boolean;
+        bom: boolean;
     }>();
     const proposeReload = (
         result: ReturnType<typeof wrapIfArray>, content: string, reloadStat: fs.Stats, automatic = false
@@ -1046,7 +1134,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
         const id = ++reloadCounter;
         pendingReloads.set(id, {
             contentHash: jsonContentHash(content), saveGeneration: successfulSaveGeneration,
-            rootArray: result.isRootArray, stat: reloadStat, automatic
+            rootArray: result.isRootArray, stat: reloadStat, automatic, bom: content.startsWith(UTF8_BOM)
         });
         postToWebview({ command: 'loadData', data: result.wrapped, revision: currentEditRevision, loadId: id });
     };
@@ -1111,12 +1199,13 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     }
                     lastAcceptedReloadId = message.loadId;
                     isRootArray = loaded.rootArray;
+                    fileHasBom = loaded.bom;
                     diskBaseline = { contentHash: loaded.contentHash };
                     baselineMtimeMs = loaded.stat.mtimeMs;
                     baselineFileSize = loaded.stat.size;
                     currentLastWriteMtime = loaded.stat.mtimeMs;
                     currentLastWriteSize = loaded.stat.size;
-                    currentIsDirty = false;
+                    setCurrentDirty(false);
                     clearSnapshotTimer();
                     currentLastReceivedSnapshot = undefined;
                     try {
@@ -1163,7 +1252,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     if (!nextDirty && awaitingSaveAck.size > 0) {
                         break;
                     }
-                    currentIsDirty = nextDirty;
+                    setCurrentDirty(nextDirty);
                     if (!currentIsDirty) {
                         clearSnapshotTimer();
                         // recovery 엔트리를 비울 때는 마지막으로 받은 snapshot
@@ -1173,7 +1262,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                         // currentLastReceivedSnapshot 의 stale 값을 새 mtime 으로
                         // recovery 에 써, cancelled draft 가 reopen 에서 부활한다.
                         currentLastReceivedSnapshot = undefined;
-                        await setRecoveryEntry(context, filePath, null);
+                        await clearRecoveryAfterClean();
                     }
                     break;
                 }
@@ -1209,7 +1298,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                         try {
                             const saveData = unwrapIfRootArray(message.data, isRootArray);
                             assertSupportedJsonNumbers(saveData);
-                            const saveText = JSON.stringify(saveData, null, detectedIndent) + '\n';
+                            const saveText = (fileHasBom ? UTF8_BOM : '') + JSON.stringify(saveData, null, detectedIndent) + '\n';
                             await assertDiskNumbersBeforeSave(filePath);
                             // 확인하는 동안 다른 파일을 열었거나 패널을 닫았다면 쓰지 않는다.
                             // 이후의 baseline·recovery 전역은 이미 새 세션의 것이다.
@@ -1220,6 +1309,22 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                                     `${fileName}: 저장 전 확인 중 JSON Editor가 닫히거나 파일을 다시 읽어 저장하지 않았습니다.`,
                                     `${fileName}: not saved because the JSON Editor was closed, switched files or reloaded while checking before save.`
                                 ));
+                                return;
+                            }
+                            // 디스크에 쓰면 텍스트 편집기의 미저장 편집과 충돌한다. 어느 쪽을 버릴지
+                            // 대신 고르지 않고, 표 편집은 그대로 둔 채 저장을 멈춘다.
+                            const dirtyDocument = findDirtyTextDocument(filePath);
+                            if (dirtyDocument) {
+                                settle(postSaveResult(false, saveSeq));
+                                const showEditor = t('텍스트 편집기 보기', 'Show Text Editor');
+                                void vscode.window.showWarningMessage(t(
+                                    `${fileName}: 같은 파일을 텍스트 편집기에서 수정하고 저장하지 않아 표를 저장하지 않았습니다. 텍스트 편집기에서 저장하거나 되돌린 뒤 다시 저장하세요. 표의 편집 내용은 그대로 남아 있습니다.`,
+                                    `${fileName}: the table was not saved because the same file has unsaved changes in a text editor. Save or revert the text editor, then save again. Your table edits are kept.`
+                                ), showEditor).then(choice => {
+                                    if (choice === showEditor) {
+                                        void vscode.window.showTextDocument(dirtyDocument, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+                                    }
+                                });
                                 return;
                             }
                             try {
@@ -1336,11 +1441,11 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                     // 복원하지 않아 **정상 저장인데도 host 가 영원히 dirty 로
                     // 남는다** (파일을 바꿀 때마다 폐기 확인창).
                     awaitingSaveAck.delete(message.seq);
-                    currentIsDirty = Boolean(message.dirty);
+                    setCurrentDirty(Boolean(message.dirty));
                     if (!currentIsDirty) {
                         clearSnapshotTimer();
                         currentLastReceivedSnapshot = undefined;
-                        await setRecoveryEntry(context, filePath, null);
+                        await clearRecoveryAfterClean();
                     }
                     break;
                 }
@@ -1368,7 +1473,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                             currentLastWriteMtime = statForBaseline.mtimeMs;
                             currentLastWriteSize = statForBaseline.size;
                         }
-                        currentIsDirty = true;
+                        setCurrentDirty(true);
                         postToWebview({ command: 'markBaselineUnknown' });
                     };
                     // open 경로에 있는 size guard 와 동일하게 reload 도 디스크
@@ -1477,6 +1582,10 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             return;
         }
         const requestedRevision = currentEditRevision;
+        // 아래 다시 읽기의 기준 stat. 미저장 상태에서 사용자가 "다시 읽기"를 고르면 안내가 떠 있는
+        // 동안 파일이 또 바뀌었을 수 있으므로 안내 뒤에 다시 잡는다(편집 유지 분기와 같은 규칙).
+        let reloadStat = changedStat;
+        let automaticReload = true;
         if (currentIsDirty) {
             const reloadLabel = t('다시 읽기 (변경사항 버리기)', 'Reload (discard edits)');
             const keepLabel = t('현재 편집 유지', 'Keep current edits');
@@ -1580,22 +1689,24 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
                 }
                 return;
             }
+            automaticReload = false;
+            try { reloadStat = fs.statSync(filePath); } catch { /* 사라졌으면 안내 전 stat 으로 읽기를 시도한다. */ }
         }
         // open 경로의 size guard 와 동일하게, 외부 변경으로 파일이 10MB 초과로
         // 바뀐 경우 readFileSync 가 메모리를 크게 잡아먹지 않도록 사이즈 체크.
         // 사이즈 초과면 자동 reload 를 포기하되, parse-fail 과 동일한 정책으로
         // baseline mtime 을 갱신하고 webview 를 baseline-unknown 으로 dirty 전환
         // — 사용자가 의식적으로 save 또는 다른 결정을 내리도록.
-        if (changedStat.size > JSON_EDITOR_MAX_FILE_SIZE) {
-            baselineMtimeMs = changedStat.mtimeMs;
-            baselineFileSize = changedStat.size;
-            currentLastWriteMtime = changedStat.mtimeMs;
-            currentLastWriteSize = changedStat.size;
-            currentIsDirty = true;
+        if (reloadStat.size > JSON_EDITOR_MAX_FILE_SIZE) {
+            baselineMtimeMs = reloadStat.mtimeMs;
+            baselineFileSize = reloadStat.size;
+            currentLastWriteMtime = reloadStat.mtimeMs;
+            currentLastWriteSize = reloadStat.size;
+            setCurrentDirty(true);
             postToWebview({ command: 'markBaselineUnknown' });
             vscode.window.showWarningMessage(t(
-                `${fileName}: 외부 변경 후 파일 크기(${formatFileSize(changedStat.size)})가 JSON Editor 처리 한도(${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)})를 초과해 자동 다시 읽기를 중단했습니다.`,
-                `${fileName}: external file size (${formatFileSize(changedStat.size)}) now exceeds the JSON Editor limit (${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)}); auto-reload aborted.`
+                `${fileName}: 외부 변경 후 파일 크기(${formatFileSize(reloadStat.size)})가 JSON Editor 처리 한도(${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)})를 초과해 자동 다시 읽기를 중단했습니다.`,
+                `${fileName}: external file size (${formatFileSize(reloadStat.size)}) now exceeds the JSON Editor limit (${formatFileSize(JSON_EDITOR_MAX_FILE_SIZE)}); auto-reload aborted.`
             ));
             return;
         }
@@ -1604,7 +1715,7 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             const reloadContent = fs.readFileSync(filePath, 'utf-8');
             const parsed = parseJsonEditorText(reloadContent);
             const result = wrapIfArray(parsed);
-            proposeReload(result, reloadContent, changedStat, true);
+            proposeReload(result, reloadContent, reloadStat, automaticReload);
         } catch (e: any) {
             // 지연된 reject 로 여기 닿는 사이 다른 파일이 열렸을 수 있다.
             if (!isCurrentSession()) { return; }
@@ -1616,11 +1727,11 @@ async function openJsonEditorWithPath(context: vscode.ExtensionContext, filePath
             // 풀려 같은 문제가 발생한다. parse 실패도 외부 변경 버전으로
             // 인정해 mtime 을 갱신하고, webview 는 baseline-unknown 으로 dirty
             // 전환 — 사용자의 다음 save 가 invalid 디스크를 명시적으로 복구.
-            baselineMtimeMs = changedStat.mtimeMs;
-            baselineFileSize = changedStat.size;
-            currentLastWriteMtime = changedStat.mtimeMs;
-            currentLastWriteSize = changedStat.size;
-            currentIsDirty = true;
+            baselineMtimeMs = reloadStat.mtimeMs;
+            baselineFileSize = reloadStat.size;
+            currentLastWriteMtime = reloadStat.mtimeMs;
+            currentLastWriteSize = reloadStat.size;
+            setCurrentDirty(true);
             postToWebview({ command: 'markBaselineUnknown' });
             vscode.window.showWarningMessage(t(
                 `외부 변경 감지 후 다시 읽기 실패 (${fileName}): ${jsonEditorErrorDetail(e)}`,
@@ -1709,8 +1820,8 @@ export function buildJsonEditorStrings(): Record<string, string> {
         emptyCellLabel: t('빈 셀', 'Empty cell'),
         editableCellRole: t('편집 가능한 셀', 'Editable cell'),
         editCellInstructions: t(
-            '편집하려면 Enter 또는 Space 키를 누르세요.',
-            'Press Enter or Space to edit.'
+            '편집하려면 Enter 또는 Space 키를 누르세요. 화살표 키로 셀 사이를 이동합니다.',
+            'Press Enter or Space to edit. Use the arrow keys to move between cells.'
         ),
         removeArrayItem: t('{n}번째 항목 삭제', 'Remove item {n}'),
         arrayItemLabel: t('{col} {n}번째 항목', '{col} item {n}'),
@@ -2828,6 +2939,80 @@ export function getWebviewContent(
         html += '</tbody></table>';
         wrapper.innerHTML = html;
         attachCellEvents();
+        applyRovingTabindex();
+    }
+
+    // ── 표 안 키보드 이동 (roving tabindex) ────────────────────────────────
+    // 셀마다 tabindex=0이면 50행 × 6열 표에서 Tab 정지가 300개를 넘었다(행마다 ⠿·✕까지).
+    // Tab으로는 표에 한 번 들어오고, 안에서는 화살표·Home·End로 움직인다(Hex Viewer와 같은 패턴).
+    // 한 행의 이동 항목은 문서 순서대로 [⠿, 셀, (그 셀의 변환 버튼)..., ✕]다.
+    let rovingPos = { row: 0, item: 1 };
+    function rovingRows() {
+        return Array.from(document.querySelectorAll('#tableWrapper tbody tr')).map(tr =>
+            Array.from(tr.querySelectorAll('button[data-move-row], td[data-row] .cell-view, td[data-row] .cell-view .convert-btn, button[data-delete-row]')));
+    }
+    function locateRoving(rows, element) {
+        for (let r = 0; r < rows.length; r++) {
+            const i = rows[r].indexOf(element);
+            if (i >= 0) { return { row: r, item: i }; }
+        }
+        return null;
+    }
+    function applyRovingTabindex() {
+        const rows = rovingRows();
+        rows.forEach(items => items.forEach(el => { el.tabIndex = -1; }));
+        if (rows.length === 0) { return; }
+        const r = Math.min(rovingPos.row, rows.length - 1);
+        const items = rows[r];
+        if (items.length === 0) { return; }
+        items[Math.min(rovingPos.item, items.length - 1)].tabIndex = 0;
+    }
+    const tableWrapperEl = document.getElementById('tableWrapper');
+    tableWrapperEl.addEventListener('focusin', (e) => {
+        const rows = rovingRows();
+        const pos = locateRoving(rows, e.target);
+        if (!pos) { return; }
+        rovingPos = pos;
+        rows.forEach(items => items.forEach(el => { el.tabIndex = el === e.target ? 0 : -1; }));
+    });
+    tableWrapperEl.addEventListener('keydown', (e) => {
+        // Alt+↑/↓는 ⠿의 행 이동, 편집 중인 셀은 입력 컨트롤이 키를 쓴다.
+        if (e.altKey || e.isComposing || e.shiftKey) { return; }
+        const rows = rovingRows();
+        const pos = locateRoving(rows, e.target);
+        if (!pos) { return; }
+        const td = e.target.closest('td');
+        if (td && td.classList.contains('editing')) { return; }
+        let row = pos.row;
+        let item = pos.item;
+        const toEdge = e.ctrlKey || e.metaKey;
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+            // ↑/↓는 **같은 열**을 따라간다. 행마다 변환 버튼 유무가 달라 항목 번호로 옮기면 다른 열이나
+            // ✕(삭제)에 닿았다. ⠿·✕는 같은 종류끼리, 셀이 없는 행에서는 ⠿로 간다.
+            e.preventDefault();
+            row += e.key === 'ArrowUp' ? -1 : 1;
+            if (row < 0 || row >= rows.length) { return; }
+            const target = verticalTarget(rows[row], e.target);
+            if (target) { target.focus(); }
+            return;
+        }
+        if (e.key === 'ArrowLeft') { item--; }
+        else if (e.key === 'ArrowRight') { item++; }
+        else if (e.key === 'Home') { item = 0; if (toEdge) { row = 0; } }
+        else if (e.key === 'End') { item = Number.MAX_SAFE_INTEGER; if (toEdge) { row = rows.length - 1; } }
+        else { return; }
+        e.preventDefault();
+        if (row < 0 || row >= rows.length || rows[row].length === 0) { return; }
+        item = Math.max(0, Math.min(item, rows[row].length - 1));
+        rows[row][item].focus();
+    });
+    function verticalTarget(items, from) {
+        const grip = items.find(el => el.matches('button[data-move-row]'));
+        if (from.matches('button[data-move-row]')) { return grip; }
+        if (from.matches('button[data-delete-row]')) { return items.find(el => el.matches('button[data-delete-row]')); }
+        const col = from.closest('td[data-col]')?.dataset.col;
+        const cell = items.find(el => el.classList.contains('cell-view') && el.closest('td[data-col]')?.dataset.col === col);
+        return cell || grip;
     }
 
     // scalar 셀의 타입을 사용자가 **의도적으로** 바꿀 수 있게 한다.
@@ -3368,6 +3553,11 @@ export function getWebviewContent(
 
         // Delete row
         document.querySelectorAll('[data-delete-row]').forEach(btn => {
+            // 지운 뒤 포커스가 다음 행의 ✕로 오므로, Enter·Space를 누르고 있으면 키 반복으로
+            // 여러 행이 연달아 지워졌다. 반복 입력은 삭제로 받지 않는다(의도한 두 번 누름은 그대로).
+            btn.addEventListener('keydown', (e) => {
+                if (e.repeat && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); }
+            });
             btn.addEventListener('click', () => {
                 // 다른 셀이 편집 중이면 먼저 commit. invalid JSON 으로 거부되면
                 // 행 삭제도 중단해 stale 인덱스로 잘못된 행에 쓰는 사고를 막는다.

@@ -190,7 +190,8 @@ export class Action extends vscode.TreeItem {
                     }
                     break;
                 case 'success':
-                    this.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.blue'));
+                    // History의 성공 표시와 같은 아이콘·색을 쓴다(같은 결과가 패널마다 달라 보이지 않게).
+                    this.iconPath = new vscode.ThemeIcon('pass', new vscode.ThemeColor('charts.green'));
                     this.contextValue = 'succeededAction';
                     break;
                 case 'failure':

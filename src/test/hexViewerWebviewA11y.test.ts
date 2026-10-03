@@ -85,10 +85,18 @@ suite('Hex Viewer 웹뷰 지역화 / 접근성', () => {
                 `결과 개수가 조용히 바뀌면 스크린리더 사용자는 검색 성패를 알 수 없다: ${findInfo![0]}`);
         });
 
-        test('상태 표시줄(바이트 검사 결과)이 live region이다', () => {
+        test('바이트 검사 결과는 짧은 전용 live region으로 알리고 상태 표시줄 전체를 반복해 읽히지 않는다', () => {
             const statusBar = html.match(/<div class="status-bar"[^>]*>/);
-            assert.ok(statusBar![0].includes('role="status"'), statusBar![0]);
-            assert.ok(statusBar![0].includes('aria-live'), statusBar![0]);
+            assert.ok(!statusBar![0].includes('aria-live') && !statusBar![0].includes('role="status"'),
+                `키마다 다시 그려지는 상태 표시줄이 live region이면 전체가 반복해 읽힌다: ${statusBar![0]}`);
+            const announce = html.match(/<div id="hexAnnounce"[^>]*>/);
+            assert.ok(announce, '선택 결과를 알릴 live region이 없다');
+            assert.ok(announce![0].includes('role="status"') && announce![0].includes('aria-atomic="true"'), announce![0]);
+        });
+
+        test('Go to 오류는 입력칸 옆 alert로 표시한다', () => {
+            const error = html.match(/<span id="gotoError"[^>]*>/);
+            assert.ok(error && error[0].includes('role="alert"'), 'Go to 오류 표시 영역이 없다');
         });
 
         test('아이콘 전용 버튼(◀ ▶ ✕)에 aria-label이 있다', () => {
@@ -180,7 +188,11 @@ suite('Hex Viewer 웹뷰 지역화 / 접근성', () => {
             const container = html.match(/<div class="hex-container" id="hexContainer"[^>]*>/);
             assert.ok(container, 'hexContainer를 찾지 못했다');
             assert.ok(container![0].includes('tabindex="0"'), `Tab이 닿지 않는다: ${container![0]}`);
-            assert.ok(container![0].includes('role="grid"'), `역할이 없다: ${container![0]}`);
+            // gridcell·aria-activedescendant 없는 role="grid"는 셀 이동을 알리지 못하고, group은
+            // 탐색 모드의 화살표 키를 가상 커서가 가져간다. 직접 키를 처리하는 영역이다.
+            assert.ok(container![0].includes('role="application"'), `역할이 없다: ${container![0]}`);
+            assert.ok(/aria-roledescription="[^"]+"/.test(container![0]), container![0]);
+            assert.ok(!container![0].includes('role="grid"'), container![0]);
             assert.ok(/aria-label="[^"]+"/.test(container![0]), `접근 가능한 이름이 없다: ${container![0]}`);
         });
 

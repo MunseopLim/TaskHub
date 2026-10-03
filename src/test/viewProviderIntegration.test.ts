@@ -101,7 +101,7 @@ suite('열려 있는 파일 즐겨찾기 등록 방식', function () {
             t('현재 줄 포함 — 줄 127', 'Include current line — line 127')
         ]);
         assert.strictEqual(pickOptions?.ignoreFocusOut, true, '다른 창을 클릭해도 선택 창을 유지해야 한다');
-        assert.strictEqual(pickOptions?.title, t('즐겨찾기에 추가', 'Add to Favorites'));
+        assert.strictEqual(pickOptions?.title, t('즐겨찾는 파일에 추가', 'Add to Favorite Files'));
         assert.strictEqual(pickOptions?.placeHolder, t("'main.c'을(를) 어떻게 등록할까요?", "How would you like to add 'main.c'?"));
         assert.deepStrictEqual(readSaved(), [{ title: 'main.c', path: '${workspaceFolder}/main.c' }]);
         assert.strictEqual(refreshes, 1);
@@ -441,7 +441,7 @@ suite('View provider integration', function () {
         assert.ok(roots[2] instanceof Action);
         assert.strictEqual(labelOf(roots[2]), 'Flash');
         assert.strictEqual(roots[2].contextValue, 'succeededAction');
-        assert.strictEqual((roots[2].iconPath as vscode.ThemeIcon).id, 'check');
+        assert.strictEqual((roots[2].iconPath as vscode.ThemeIcon).id, 'pass');
         assert.ok(
             /성공|succeeded/.test(roots[2].accessibilityInformation?.label ?? ''),
             '색 아이콘을 읽을 수 없는 사용자에게 성공 상태가 전달되지 않는다'

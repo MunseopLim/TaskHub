@@ -28,6 +28,8 @@ import {
     resolveWindowsDirectExecutable,
     windowsCommandIsDirectlyLaunchable,
     resolveWindowsTaskSpawn,
+    resolveWindowsBatchTarget,
+    WindowsBatchArgumentError,
     buildWindowsNativeProcessScript,
     buildPowerShellUtf8Preamble,
     buildPowerShellFileRedirectionPreamble,
@@ -653,6 +655,79 @@ suite('pipelineUtils — direct-import smoke suite', () => {
         // shell builtins / aliases
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('echo hi', [], lookup), false);
         assert.strictEqual(windowsCommandIsDirectlyLaunchable('dir', [], lookup), false);
+    });
+
+    test('Windows batch targets reject cmd.exe metacharacters in arguments (BatBadBut)', () => {
+        const lookup = {
+            env: { PATH: 'C:\\node;C:\\tools', PATHEXT: '.COM;.EXE;.BAT;.CMD' },
+            cwd: 'C:\\repo',
+            isFile: (p: string) => [
+                'C:\\node\\node.exe', 'C:\\node\\npx.cmd', 'C:\\node\\npm.cmd',
+                'C:\\tools\\both.exe', 'C:\\tools\\both.cmd', 'C:\\repo\\scripts\\build.bat',
+            ].includes(p),
+        };
+        assert.strictEqual(resolveWindowsBatchTarget('npx', lookup), 'C:\\node\\npx.cmd');
+        assert.strictEqual(resolveWindowsBatchTarget('scripts\\build', lookup), 'C:\\repo\\scripts\\build.bat');
+        assert.strictEqual(resolveWindowsBatchTarget('tool.cmd', lookup), 'tool.cmd');
+        assert.strictEqual(resolveWindowsBatchTarget('node', lookup), undefined);
+        assert.strictEqual(resolveWindowsBatchTarget('both', lookup), undefined, 'PATHEXT puts .exe before .cmd');
+        assert.strictEqual(resolveWindowsBatchTarget('echo', lookup), undefined, 'shell builtins are not batch files');
+
+        for (const value of ['C:\\src\\x&calc&.js', 'feat|curl', 'a>b', 'a^b', '%USERPROFILE%', '!VAR!', 'a"b', 'a\nb']) {
+            assert.throws(() => resolveWindowsTaskSpawn(false, 'npx prettier --write', [value], lookup), (error: unknown) =>
+                error instanceof WindowsBatchArgumentError && error.argument === value && error.executable === 'C:\\node\\npx.cmd', value);
+            // shell 타입도 명시적 args는 PowerShell이 인용해 붙이므로 같은 위험이 있다.
+            assert.throws(() => resolveWindowsTaskSpawn(true, 'npm run', [value], lookup), WindowsBatchArgumentError, value);
+            assert.throws(() => resolveWindowsTaskSpawn(true, 'npm', [value], lookup), WindowsBatchArgumentError, value);
+        }
+        // 보간 값이 명령 문자열 토큰으로 들어와도 같은 검사를 받는다.
+        assert.throws(() => resolveWindowsTaskSpawn(false, 'npx prettier "a&b.js"', [], lookup), WindowsBatchArgumentError);
+        // 안전한 인자, 배치가 아닌 대상, raw 셸 문법 자체는 막지 않는다.
+        assert.strictEqual(resolveWindowsTaskSpawn(false, 'npx prettier', ['C:\\Program Files (x86)\\a b.js'], lookup).strategy, 'powershell');
+        assert.strictEqual(resolveWindowsTaskSpawn(false, 'node', ['-e', 'a&b'], lookup).strategy, 'native');
+        assert.strictEqual(resolveWindowsTaskSpawn(false, 'echo', ['a&b'], lookup).strategy, 'powershell');
+        assert.strictEqual(resolveWindowsTaskSpawn(true, 'npm run build && npm test', [], lookup).strategy, 'raw-shell');
+    });
+
+    test('Windows batch target lookup covers paths, PATH forms, PATHEXT defaults and PowerShell .ps1 precedence', () => {
+        const files = new Set([
+            'C:\\t\\build.cmd', 'C:\\repo\\bin\\gen.bat', 'C:\\quoted dir\\q.cmd', 'C:\\tools\\my.tool.cmd',
+            'C:\\node\\npm.cmd', 'C:\\node\\npm.ps1',
+        ]);
+        const lookup = (env: NodeJS.ProcessEnv) => ({ env, cwd: 'C:\\repo', isFile: (p: string) => files.has(p) });
+        const base = lookup({ PATH: 'bin;"C:\\quoted dir";C:\\tools;C:\\node' });
+        assert.strictEqual(resolveWindowsBatchTarget('C:\\t\\build', base), 'C:\\t\\build.cmd', '확장자 없는 절대 경로');
+        assert.strictEqual(resolveWindowsBatchTarget('gen', base), 'C:\\repo\\bin\\gen.bat', '상대 PATH 항목은 cwd 기준');
+        assert.strictEqual(resolveWindowsBatchTarget('q', base), 'C:\\quoted dir\\q.cmd', '따옴표로 감싼 PATH 항목');
+        assert.strictEqual(resolveWindowsBatchTarget('my.tool', base), 'C:\\tools\\my.tool.cmd', '이름에 든 점은 확장자가 아니다');
+        assert.strictEqual(resolveWindowsBatchTarget('build', lookup({ PATH: 'C:\\t' })), 'C:\\t\\build.cmd', 'PATHEXT가 없으면 기본 목록');
+
+        // `&`(스트리밍·캡처)는 npm.ps1을 먼저 실행하므로 cmd.exe 재해석이 없다 — semver `^`를 막지 않는다.
+        assert.strictEqual(resolveWindowsTaskSpawn(false, 'npm install', ['lodash@^4.17.0'], base).strategy, 'powershell');
+        // Start-Process(비-raw one-shot)는 PATHEXT를 따라 npm.cmd로 가므로 막는다.
+        assert.throws(() => resolveWindowsTaskSpawn(false, 'npm install', ['lodash@^4.17.0'], base, { startProcess: true }),
+            WindowsBatchArgumentError);
+        // 괄호·공백은 cmd 특수 문자가 아니다.
+        assert.strictEqual(resolveWindowsTaskSpawn(false, 'C:\\t\\build', ['C:\\Program Files (x86)\\x'], base).strategy, 'powershell');
+        // 알려진 한계: raw 본문의 첫 토큰이 셸 내장이면 뒤 명령이 배치여도 검사하지 않는다(문서화).
+        assert.strictEqual(resolveWindowsTaskSpawn(true, 'cd sub; gen', ['a&b'], base).strategy, 'raw-shell');
+    });
+
+    test('Windows one-shot checks batch files named after PowerShell aliases', () => {
+        const lookup = {
+            env: { PATH: 'C:\\tools' },
+            cwd: 'C:\\repo',
+            isFile: (candidate: string) => candidate === 'C:\\tools\\echo.cmd',
+        };
+        assert.strictEqual(resolveWindowsBatchTarget('echo', lookup, { powerShellCallOperator: true }), undefined,
+            'the call operator invokes the PowerShell alias');
+        assert.strictEqual(resolveWindowsBatchTarget('echo', lookup, { powerShellCallOperator: false }), 'C:\\tools\\echo.cmd',
+            'Start-Process resolves an external file even when its name is an alias');
+        assert.strictEqual(resolveWindowsTaskSpawn(false, 'echo', ['a&b'], lookup).strategy, 'powershell');
+        assert.throws(() => resolveWindowsTaskSpawn(false, 'echo', ['a&b'], lookup, { startProcess: true }),
+            WindowsBatchArgumentError);
+        assert.strictEqual(resolveWindowsTaskSpawn(false, 'echo', ['safe value'], lookup, { startProcess: true }).strategy,
+            'powershell');
     });
 
     test('Windows native plan reuses one PATH result for invocation and ProcessStartInfo', () => {

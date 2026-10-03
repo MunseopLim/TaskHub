@@ -144,8 +144,9 @@ suite('빈 상태 안내 (viewsWelcome)', () => {
                 contents: resolveNls(w.contents),
             }));
 
-        test('Actions / Links / Favorites 세 뷰에 빈 상태 안내가 있다', () => {
-            for (const view of ['mainView.main', 'mainView.linkWorkspace', 'mainView.favorite']) {
+        test('Actions / Links / Favorites / History 뷰에 빈 상태 안내가 있다', () => {
+            // History가 빠져 있으면 첫 실행 전에는 아무 설명 없는 빈 패널만 보였다.
+            for (const view of ['mainView.main', 'mainView.linkWorkspace', 'mainView.favorite', 'mainView.history']) {
                 assert.ok(welcomes.some(w => w.view === view), `${view}에 viewsWelcome이 없다`);
             }
         });
@@ -250,6 +251,8 @@ suite('빈 상태 안내 (viewsWelcome)', () => {
                 const item = entries.find((entry: any) => entry.command === command);
                 assert.ok(item, `${command} 메뉴가 없다`);
                 assert.ok(String(item.group).startsWith('context'), `${command}가 파괴적인 인라인 동작으로 돌아갔다`);
+                // 복사·편집과 같은 그룹이면 구분선 없이 붙어 실수로 누르기 쉽다.
+                assert.ok(String(item.group).startsWith('context_delete'), `${command}가 다른 동작과 구분선 없이 붙어 있다`);
             }
         });
     });

@@ -9,8 +9,13 @@ import {
     runStopAllActions,
     STOP_ALL_CONFIRM_TITLE_LIMIT,
     terminateTrackedWorkForShutdown,
+    collectShutdownChildProcesses,
+    confirmCloseTerminalsWhileRunning,
+    runCommandCaptureLines,
 } from '../extension';
+import * as vscode from 'vscode';
 import { ActionProgress, ActionRunState } from '../providers/actionStatus';
+import { t } from '../i18n';
 
 /**
  * "실행 중지 / 터미널 닫기 분리" (0.6.13).
@@ -67,6 +72,28 @@ suite('실행 중지 / 터미널 닫기', () => {
             releaseKill();
             await shutdown;
             assert.strictEqual(settled, true);
+        });
+    });
+
+    suite('준비 단계 보조 프로세스', () => {
+        test('itemsFromCommand 목록 명령은 실행 중 종료 대상에 포함되고 끝나면 빠진다', async function () {
+            if (process.platform === 'win32') { this.skip(); }
+            this.timeout(10000);
+            const before = collectShutdownChildProcesses().size;
+            const cancellation = new vscode.CancellationTokenSource();
+            const pending = runCommandCaptureLines('sleep 30', undefined, 20000, cancellation.token);
+            try {
+                assert.strictEqual(collectShutdownChildProcesses().size, before + 1,
+                    'detached 목록 명령이 창 다시 로드 때 종료 대상에서 빠지면 고아로 남는다');
+            } finally {
+                cancellation.cancel();
+                await assert.rejects(pending);
+                cancellation.dispose();
+            }
+            for (let attempt = 0; attempt < 50 && collectShutdownChildProcesses().size !== before; attempt++) {
+                await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            assert.strictEqual(collectShutdownChildProcesses().size, before);
         });
     });
 
@@ -295,6 +322,30 @@ suite('실행 중지 / 터미널 닫기', () => {
             const declared = manifest.contributes.commands
                 .find((c: any) => c.command === 'taskhub.terminateAllActions');
             assert.ok(declared, '기존 keybindings.json이 깨지지 않도록 명령 자체는 남긴다');
+        });
+
+        test('실행 중인 액션이 있으면 터미널을 닫기 전에 확인하고 실행 중이 아니면 묻지 않는다', async () => {
+            const originalWarning = vscode.window.showWarningMessage;
+            const prompts: { message: string; options: unknown }[] = [];
+            let answer: string | undefined;
+            (vscode.window as any).showWarningMessage = async (message: string, options: unknown, ...buttons: string[]) => {
+                prompts.push({ message, options });
+                return buttons.find(button => button === answer);
+            };
+            try {
+                assert.strictEqual(await confirmCloseTerminalsWhileRunning([]), true);
+                assert.strictEqual(prompts.length, 0, '실행 중인 것이 없으면 확인 없이 닫는다');
+
+                assert.strictEqual(await confirmCloseTerminalsWhileRunning(['fw.build', 'fw.flash']), false,
+                    '취소하면 실행 중인 빌드·플래싱을 끝내지 않는다');
+                assert.match(prompts[0].message, /2/);
+                assert.deepStrictEqual(prompts[0].options, { modal: true });
+
+                answer = t('터미널 닫기', 'Close Terminals');
+                assert.strictEqual(await confirmCloseTerminalsWhileRunning(['fw.build']), true);
+            } finally {
+                (vscode.window as any).showWarningMessage = originalWarning;
+            }
         });
 
         test('신규 두 명령이 모두 선언되어 있다', () => {

@@ -49,6 +49,19 @@ suite('manifest 지역화 (package.nls)', () => {
         assert.deepStrictEqual(missing, [], `package.json이 참조하는 키가 번들에 없다: ${missing.join(', ')}`);
     });
 
+    test('모든 명령은 TaskHub 카테고리를 쓰고 제목에 접두사를 직접 넣지 않는다', () => {
+        // 카테고리가 없으면 팔레트에서 "Clear All History"가 VS Code 자체 명령과 구분되지 않는다.
+        // 제목에 "TaskHub: "를 넣으면 뷰 툴바·메뉴에도 접두사가 그대로 보인다.
+        const commands: Array<{ command: string; title: string; category?: string }> = JSON.parse(manifestText).contributes.commands;
+        const uncategorized = commands.filter(c => c.category !== 'TaskHub').map(c => c.command);
+        assert.deepStrictEqual(uncategorized, []);
+        const prefixed = commands.flatMap(c => {
+            const key = c.title.replace(/^%|%$/g, '');
+            return [en[key], ko[key]].filter((v: unknown) => typeof v === 'string' && v.startsWith('TaskHub:')).map(() => c.command);
+        });
+        assert.deepStrictEqual(prefixed, []);
+    });
+
     test('Custom Editor 표시 이름은 NLS 자리표시자를 사용한다', () => {
         const manifest = JSON.parse(manifestText);
         for (const editor of manifest.contributes?.customEditors ?? []) {

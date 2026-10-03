@@ -127,8 +127,55 @@ suite('StructSizeCalculator Test Suite', () => {
             assert.strictEqual(result.members.length, 3);
             assert.strictEqual(result.members[0].offset, 0);
             assert.strictEqual(result.members[1].offset, 0);
-            assert.strictEqual(result.members[2].offset, 4);
-            assert.strictEqual(result.totalSize, 8);
+            // GCC/Clang/AAPCS: 8비트만 쓴 비트필드 뒤의 일반 멤버는 다음 바이트에 놓인다.
+            assert.strictEqual(result.members[2].offset, 1);
+            assert.strictEqual(result.totalSize, 4);
+        });
+
+        // 기대값은 `clang -target arm-none-eabi`(AAPCS32)의 sizeof/offsetof 실측값이다. aarch64-none-elf도 같다.
+        // x86-64 SysV·Apple arm64는 이름 없는 비트필드를 구조체 정렬에 넣지 않아 일부 결과가 다르다.
+        const bitFieldCases: Array<{ name: string; body: string[]; size: number; offsets?: number[]; pack?: number }> = [
+            { name: 'MixedWidthTypes', body: ['uint8_t flag : 1;', 'uint8_t mode : 3;', 'uint16_t count : 12;'], size: 2 },
+            { name: 'SameSizeAliases', body: ['uint32_t a : 1;', 'unsigned int b : 1;'], size: 4 },
+            { name: 'StraddleMovesToNextUnit', body: ['uint8_t a : 7;', 'uint8_t b : 2;'], size: 2 },
+            { name: 'WiderTypeCrossesBoundary', body: ['uint8_t a : 4;', 'uint32_t b : 30;'], size: 8 },
+            { name: 'MemberAfterBits', body: ['uint32_t a : 30;', 'uint8_t c;'], size: 8, offsets: [0, 4] },
+            { name: 'PackedBitsMayStraddle', body: ['uint8_t a : 4;', 'uint32_t b : 30;'], size: 5, pack: 1 },
+            { name: 'PackedTail', body: ['uint32_t a : 3;', 'uint8_t tail;'], size: 2, offsets: [0, 1], pack: 1 },
+            { name: 'Pack2Straddle', body: ['uint16_t a : 12;', 'uint32_t b : 8;'], size: 4, pack: 2 },
+            { name: 'BitsAfterPlainMember', body: ['char c;', 'int x : 4;'], size: 4, offsets: [0, 0] },
+            { name: 'AnonymousZeroWidthAlignsStructOnAapcs', body: ['uint8_t a : 3;', 'uint32_t : 0;', 'uint8_t b : 1;'], size: 8, offsets: [0, 4, 4] },
+            { name: 'AnonymousWidthAlignsStructOnAapcs', body: ['uint8_t a : 3;', 'uint32_t : 5;', 'uint8_t b : 1;'], size: 4 },
+            { name: 'ZeroWidthOfOtherType', body: ['uint8_t a : 3;', 'uint16_t : 0;', 'uint8_t b : 1;', 'uint32_t w;'], size: 8, offsets: [0, 2, 2, 4] },
+        ];
+        for (const { name, body, size, offsets, pack } of bitFieldCases) {
+            test(`bit-field layout follows GCC/AAPCS rules: ${name}`, () => {
+                const lines = [`struct ${name} {`, ...body.map(line => `    ${line}`), '};'];
+                // packing은 taskhub_types.json의 packingAlignment로만 적용된다(소스 #pragma pack은 미지원).
+                const target = pack
+                    ? new StructSizeCalculator({ types: (calculator as any).typeConfig.types, packingAlignment: pack })
+                    : calculator;
+                const structLine = StructSizeCalculator.findStructDefinition(lines, name);
+                const result = target.calculateStructSize(name, lines, structLine);
+                assert.strictEqual(result.success, true, name);
+                assert.strictEqual(result.totalSize, size, name);
+                if (offsets) { assert.deepStrictEqual(result.members.map(m => m.offset), offsets, name); }
+            });
+        }
+
+        test('zero-length trailing arrays occupy no bytes', () => {
+            const lines = ['struct Frame {', '    uint16_t len;', '    uint8_t data[0];', '};'];
+            const structLine = StructSizeCalculator.findStructDefinition(lines, 'Frame');
+            const result = calculator.calculateStructSize('Frame', lines, structLine);
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.totalSize, 2);
+            assert.strictEqual(result.members[1].offset, 2);
+            assert.strictEqual(result.members[1].size, 0);
+
+            const unionLines = ['union Empty {', '    uint8_t data[0];', '    uint8_t one;', '};'];
+            const unionResult = calculator.calculateStructSize('Empty', unionLines, StructSizeCalculator.findStructDefinition(unionLines, 'Empty'));
+            assert.strictEqual(unionResult.members[0].size, 0);
+            assert.strictEqual(unionResult.totalSize, 1);
         });
 
         test('Zero-width anonymous bit fields force a new storage unit', () => {

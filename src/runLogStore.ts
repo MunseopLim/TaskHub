@@ -609,12 +609,38 @@ async function collectLogFiles(logsRoot: string): Promise<StoredLogFile[]> {
     return files;
 }
 
+/** 다른 창이 아직 쓰는 중일 수 있으므로 이보다 오래된 임시 파일만 고아로 본다. */
+export const RUN_LOG_ORPHAN_TEMP_AGE_MS = 10 * 60 * 1000;
+const RUN_LOG_TEMP_NAME = /^\..+\.log\.tmp-[A-Za-z0-9]+$/;
+
+/**
+ * 임시 파일에 쓰고 rename하기 전에 extension host가 강제 종료되면 `.<이름>.log.tmp-<nonce>`가
+ * 남는다. `*.log`만 세는 회전 대상에서 빠져 파일 수·총 용량 상한에 걸리지 않고 영원히 쌓였다.
+ */
+async function sweepOrphanTempFiles(logsRoot: string, now: number): Promise<void> {
+    for (const entry of await fs.readdir(logsRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) { continue; }
+        const actionDir = path.join(logsRoot, entry.name);
+        for (const child of await fs.readdir(actionDir, { withFileTypes: true })) {
+            if (!child.isFile() || !RUN_LOG_TEMP_NAME.test(child.name)) { continue; }
+            const filePath = path.join(actionDir, child.name);
+            // 다른 창이 그 사이 rename을 마쳤을 수 있다. 사라진 파일 때문에 회전 전체를 멈추지 않는다.
+            let stat: Awaited<ReturnType<typeof fs.lstat>>;
+            try { stat = await fs.lstat(filePath); } catch { continue; }
+            if (stat.isFile() && !stat.isSymbolicLink() && now - stat.mtimeMs > RUN_LOG_ORPHAN_TEMP_AGE_MS) {
+                await fs.unlink(filePath).catch(() => undefined);
+            }
+        }
+    }
+}
+
 async function rotateLogs(
     logsRoot: string,
     newestPath: string,
     policy: RunLogRetentionPolicy,
     now: number
 ): Promise<void> {
+    await sweepOrphanTempFiles(logsRoot, now);
     let files = await collectLogFiles(logsRoot);
     const retentionDays = Math.max(0, Math.floor(policy.retentionDays));
     if (retentionDays > 0) {

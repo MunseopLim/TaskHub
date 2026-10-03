@@ -1977,9 +1977,11 @@ export function getToolCommand(tool: any): string {
         throw new Error(`No tool path specified for the current platform (${process.platform}) in actions.json`);
     }
 
-    // Quote the command if it contains spaces to handle paths like "C:\Program Files\..."
+    // Quote the command if it contains spaces to handle paths like "C:\Program Files\...".
+    // 토크나이저는 큰따옴표 안의 `\\`를 `\`로 줄이므로 역슬래시도 이스케이프한다 — 그대로 감싸면
+    // UNC 경로 `\\srv\Shared Tools\7z.exe`의 앞 `\\`가 `\`가 되어 도구를 찾지 못했다.
     if (toolCommand.includes(' ') && !toolCommand.startsWith('"')) {
-        toolCommand = `"${toolCommand}"`;
+        toolCommand = quoteForCommandTokenizer(toolCommand);
     }
     return toolCommand;
 }
@@ -2300,6 +2302,123 @@ export function resolveWindowsDirectExecutable(
     return undefined;
 }
 
+const WINDOWS_BATCH_EXTENSIONS = ['.cmd', '.bat'];
+
+export interface WindowsBatchLookupOptions {
+    /** 명령을 PowerShell `&`로 호출한다(`.ps1`이 `.cmd`보다 우선). `Start-Process`면 false. */
+    powerShellCallOperator?: boolean;
+}
+const WINDOWS_DEFAULT_PATHEXT = ['.com', '.exe', '.bat', '.cmd'];
+/**
+ * PowerShell 인용은 PowerShell 파서에만 유효하다. `.cmd`/`.bat`은 Windows가 내부적으로
+ * `cmd.exe /c`로 명령줄을 다시 해석하므로, PowerShell이 따옴표 없이 넘긴 인자의 `&`·`|`·
+ * `<`·`>`·`^`는 명령 구분자·리다이렉션이 되고 `%VAR%`·`!VAR!`는 따옴표 안에서도 확장된다
+ * (BatBadBut, Node CVE-2024-27980과 같은 계열).
+ */
+const CMD_METACHARACTERS = /[&|<>^%!"\r\n]/;
+
+/** 배치 파일로 실행될 명령의 인자에 cmd.exe 특수 문자가 있어 실행을 거부했다. */
+export class WindowsBatchArgumentError extends Error {
+    constructor(readonly executable: string, readonly argument: string) {
+        super(`Refused to run batch file '${executable}': argument ${JSON.stringify(previewBatchArgument(argument))} contains cmd.exe special characters (& | < > ^ % ! ").`);
+        this.name = 'WindowsBatchArgumentError';
+    }
+}
+
+/** 오류 메시지에 넣을 인자 미리보기(길이 제한). */
+export function previewBatchArgument(argument: string): string {
+    return argument.length > 80 ? `${argument.slice(0, 80)}…` : argument;
+}
+
+/**
+ * 명령이 Windows에서 `.cmd`/`.bat` 배치 파일로 실행되는지 판정하고 그 경로를 돌려준다.
+ * 확장자 없는 이름은 PATHEXT 순서로 PATH(또는 지정 디렉터리)를 찾는다 — `npm`이 `npm.cmd`로
+ * 풀리는 경우다. `.exe`·`.com`이 먼저 잡히거나 셸 내장 명령이면 배치가 아니다.
+ */
+export function resolveWindowsBatchTarget(
+    executable: string,
+    lookup: Partial<WindowsExecutableLookup> = {},
+    options: WindowsBatchLookupOptions = {}
+): string | undefined {
+    const env = lookup.env ?? defaultWindowsExecutableLookup.env;
+    const cwd = lookup.cwd ?? process.cwd();
+    const isFile = lookup.isFile ?? defaultWindowsExecutableLookup.isFile;
+    const base = (executable.split(/[\\/]/).pop() || executable).toLowerCase();
+    const pathExt = (env.PATHEXT ?? env.PathExt)?.split(';')
+        .map(ext => ext.trim().toLowerCase())
+        .filter(ext => ext.startsWith('.')) ?? [];
+    const extensions = pathExt.length > 0 ? pathExt : WINDOWS_DEFAULT_PATHEXT;
+    const dotIndex = base.lastIndexOf('.');
+    const explicitExtension = dotIndex > 0 ? base.slice(dotIndex) : undefined;
+    if (explicitExtension && WINDOWS_BATCH_EXTENSIONS.includes(explicitExtension)) { return executable; }
+    // `.exe` 같은 실행 확장자는 그 파일 그대로 실행된다. `my.tool`처럼 PATHEXT에 없는 점은 이름의
+    // 일부라 아래에서 확장자를 붙여 찾는다(`my.tool.cmd`).
+    if (explicitExtension && extensions.includes(explicitExtension)) { return undefined; }
+    const hasSeparator = /[\\/]/.test(executable);
+    // `Start-Process`는 PowerShell 별칭을 호출하지 않고 같은 이름의 파일을 찾는다.
+    // `echo.cmd`가 PATH에 있으면 원샷의 `echo`도 배치이므로 검사를 생략하면 안 된다.
+    if (options.powerShellCallOperator !== false && !hasSeparator && WINDOWS_SHELL_COMMANDS.has(base)) {
+        return undefined;
+    }
+    const directories: string[] = [];
+    if (hasSeparator) {
+        directories.push(path.win32.isAbsolute(executable) ? '' : cwd);
+    } else {
+        const pathValue = env.PATH ?? env.Path ?? '';
+        for (const rawDir of pathValue.split(';')) {
+            if (rawDir.length === 0) { continue; }
+            const dir = rawDir.length >= 2 && rawDir.startsWith('"') && rawDir.endsWith('"') ? rawDir.slice(1, -1) : rawDir;
+            directories.push(path.win32.isAbsolute(dir) ? dir : path.win32.resolve(cwd, dir));
+        }
+    }
+    for (const dir of directories) {
+        const baseCandidate = dir ? path.win32.resolve(dir, executable) : path.win32.normalize(executable);
+        // PowerShell의 `&`는 같은 폴더의 `.ps1`을 PATHEXT보다 먼저 고른다(Node가 함께 설치하는
+        // `npm.ps1`·`npx.ps1`). 그때는 cmd.exe가 인자를 다시 해석하지 않으므로 배치가 아니다.
+        // `Start-Process`는 PATHEXT만 따르므로 이 예외를 쓰지 않는다.
+        if (options.powerShellCallOperator && isFile(baseCandidate + '.ps1')) { return undefined; }
+        for (const ext of extensions) {
+            if (isFile(baseCandidate + ext)) {
+                return WINDOWS_BATCH_EXTENSIONS.includes(ext) ? baseCandidate + ext : undefined;
+            }
+        }
+    }
+    return undefined;
+}
+
+/**
+ * 배치 파일로 실행될 명령에 cmd.exe 특수 문자가 든 인자가 있으면 {@link WindowsBatchArgumentError}를 던진다.
+ * `raw`(shell 타입)는 명령 문자열이 작성자의 셸 문법이므로 명시적 `args`만 검사한다.
+ */
+export function assertWindowsBatchArgumentsSafe(
+    raw: boolean,
+    command: string,
+    args: string[],
+    lookup: Partial<WindowsExecutableLookup> = {},
+    options: WindowsBatchLookupOptions = {}
+): void {
+    let executable: string;
+    let checked: string[];
+    try {
+        if (raw) {
+            if (args.length === 0) { return; }
+            executable = tokenizeCommandLine(command.trim())[0] ?? '';
+            checked = args;
+        } else {
+            const merged = mergeCommandAndArgs(command, args);
+            executable = merged.executable;
+            checked = merged.args;
+        }
+    } catch {
+        return;
+    }
+    if (!executable || !checked.some(arg => CMD_METACHARACTERS.test(arg))) { return; }
+    const target = resolveWindowsBatchTarget(executable, lookup, options);
+    if (!target) { return; }
+    const unsafe = checked.find(arg => CMD_METACHARACTERS.test(arg))!;
+    throw new WindowsBatchArgumentError(target, unsafe);
+}
+
 /** Whether {@link resolveWindowsDirectExecutable} found a native executable. */
 export function windowsCommandIsDirectlyLaunchable(
     command: string,
@@ -2388,8 +2507,11 @@ export function resolveWindowsTaskSpawn(
     raw: boolean,
     command: string,
     args: string[] = [],
-    lookup: Partial<WindowsExecutableLookup> = {}
+    lookup: Partial<WindowsExecutableLookup> = {},
+    launch: { startProcess?: boolean } = {}
 ): WindowsTaskSpawnPlan {
+    // raw 본문과 `&` 호출은 PowerShell이 명령을 찾고, 비-raw one-shot의 `Start-Process`만 PATHEXT를 따른다.
+    const batchOptions: WindowsBatchLookupOptions = { powerShellCallOperator: raw || !launch.startProcess };
     if (raw) {
         let tokens: string[];
         try {
@@ -2398,17 +2520,19 @@ export function resolveWindowsTaskSpawn(
             return { strategy: 'raw-shell' };
         }
         if (args.length === 0 || tokens.length !== 1) {
+            assertWindowsBatchArgumentsSafe(true, command, args, lookup, batchOptions);
             return { strategy: 'raw-shell' };
         }
         const executable = resolveWindowsDirectExecutable(command, args, lookup);
-        return executable
-            ? { strategy: 'native', executable }
-            : { strategy: 'raw-shell' };
+        if (executable) { return { strategy: 'native', executable }; }
+        assertWindowsBatchArgumentsSafe(true, command, args, lookup, batchOptions);
+        return { strategy: 'raw-shell' };
     }
     const executable = resolveWindowsDirectExecutable(command, args, lookup);
-    return executable
-        ? { strategy: 'native', executable }
-        : { strategy: 'powershell' };
+    if (executable) { return { strategy: 'native', executable }; }
+    // PowerShell 경로는 `.cmd`/`.bat`을 cmd.exe가 다시 해석하므로 그 인자는 여기서 막는다.
+    assertWindowsBatchArgumentsSafe(false, command, args, lookup, batchOptions);
+    return { strategy: 'powershell' };
 }
 
 /**

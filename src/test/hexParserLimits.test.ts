@@ -1,6 +1,9 @@
 import * as assert from 'assert';
 import { HEX_MAX_BYTE_ENTRIES } from '../hexParser';
-import { HEX_VIEWER_MAX_FILE_SIZE } from '../hexViewer';
+import { HEX_VIEWER_MAX_FILE_SIZE, localizeHexParseError } from '../hexViewer';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as vscode from 'vscode';
 
 /**
  * 파서 entry 상한과 파일 크기 상한의 관계 (0.6.41).
@@ -69,5 +72,30 @@ suite('Hex 파서 상한과 파일 상한의 관계', () => {
         // binary 는 rawBuffer(Uint8Array)를 쓰므로 이 상한과 무관하다.
         // 파일 상한 50MB 가 binary 의 유일한 제동 장치다.
         assert.strictEqual(HEX_VIEWER_MAX_FILE_SIZE, 50 * 1024 * 1024);
+    });
+});
+
+suite('HEX 한도 초과 오류의 사용자 언어 표시', () => {
+    test('hexParser·hexByteStore 의 한도 문구를 한국어로 옮기고 모르는 문구는 그대로 둔다', () => {
+        const original = Object.getOwnPropertyDescriptor(vscode.env, 'language');
+        Object.defineProperty(vscode.env, 'language', { value: 'ko', configurable: true });
+        try {
+            assert.strictEqual(localizeHexParseError('Intel HEX payload exceeds 1000 byte entries; refusing to load.'),
+                'Intel HEX 데이터가 1000바이트 한도를 넘어 열지 않았습니다.');
+            assert.strictEqual(localizeHexParseError('SREC payload exceeds 5 byte entries; refusing to load.'),
+                'SREC 데이터가 5바이트 한도를 넘어 열지 않았습니다.');
+            assert.match(localizeHexParseError('HEX/SREC sparse storage exceeds 64 bytes; refusing to load.'), /저장 한도\(64바이트\)/);
+            assert.strictEqual(localizeHexParseError('something else'), 'something else');
+            // 원문이 바뀌면 번역이 조용히 빠진다 — 실제 파서 소스의 문구로 고정한다(한도까지 채우기엔 너무 크다).
+            const root = path.resolve(__dirname, '..', '..', 'src');
+            const parserSource = fs.readFileSync(path.join(root, 'hexParser.ts'), 'utf8');
+            const storeSource = fs.readFileSync(path.join(root, 'hexByteStore.ts'), 'utf8');
+            for (const format of ['Intel HEX', 'SREC']) {
+                assert.ok(parserSource.includes('`' + format + ' payload exceeds ${HEX_MAX_BYTE_ENTRIES} byte entries; refusing to load.`'), format);
+            }
+            assert.ok(storeSource.includes('`HEX/SREC sparse storage exceeds ${this.storageLimit} bytes; refusing to load.`'));
+        } finally {
+            if (original) { Object.defineProperty(vscode.env, 'language', original); }
+        }
     });
 });

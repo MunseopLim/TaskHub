@@ -670,6 +670,32 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             });
         }
 
+        test('a macro defined as an expression in another file shows its evaluated value, not its first literal', async () => {
+            const source = sourceDocument('/hover/expr-use.c', 'BUF_SIZE;');
+            const target = sourceDocument('/hover/expr-definition.h', '#define BUF_SIZE 16 * 4');
+            await withLsp([target], command => command === 'vscode.executeDefinitionProvider' ? [location(target)] : [], async () => {
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    const text = markdownText(await provider.provideHover(source, new vscode.Position(0, 2), cancellation.token));
+                    assert.match(text, /\b64\b/);
+                    assert.doesNotMatch(text, /0x10\b/, 'the first literal 16 must not be shown as the value');
+                } finally { cancellation.dispose(); }
+            });
+        });
+
+        test('hovering a suffixed hex literal shows its value instead of 0', async () => {
+            const source = sourceDocument('/hover/suffix.c', 'uint32_t mask = 0xFFU;');
+            await withLsp([], () => [], async () => {
+                const cancellation = new vscode.CancellationTokenSource();
+                try {
+                    for (const character of [16, 18, 20]) {
+                        const text = markdownText(await provider.provideHover(source, new vscode.Position(0, character), cancellation.token));
+                        assert.match(text, /\b255\b/, `character ${character}`);
+                    }
+                } finally { cancellation.dispose(); }
+            });
+        });
+
         test('an LSP fallback callback at its definition cannot start another lookup chain', async () => {
             const source = sourceDocument('/hover/source.c', 'X;');
             const definition = sourceDocument('/hover/definition.c', 'const int X = other();');
@@ -1177,12 +1203,12 @@ suite('NumberBaseHoverProvider Test Suite', () => {
         });
 
         test('Parse hexadecimal with h suffix', () => {
-            const result = (provider as any).parseNumber('FFh');
+            const result = (provider as any).parseNumber('0FFh');
             assert.strictEqual(result, 255);
         });
 
         test('Parse hexadecimal with H suffix (uppercase)', () => {
-            const result = (provider as any).parseNumber('FFH');
+            const result = (provider as any).parseNumber('0FFH');
             assert.strictEqual(result, 255);
         });
 
@@ -1243,7 +1269,7 @@ suite('NumberBaseHoverProvider Test Suite', () => {
 
         test('parseNumberExact keeps plain number within 2^53', () => {
             assert.strictEqual((provider as any).parseNumberExact('0xFF'), 255);
-            assert.strictEqual((provider as any).parseNumberExact('FFh'), 255);
+            assert.strictEqual((provider as any).parseNumberExact('0FFh'), 255);
             assert.strictEqual((provider as any).parseNumberExact('0b1111'), 15);
             assert.strictEqual((provider as any).parseNumberExact('255'), 255);
         });
@@ -1822,6 +1848,28 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             assert.strictEqual(result, null);
         });
 
+        test('hex and binary literals with C integer suffixes are parsed as a whole at every character', () => {
+            for (const [literal, expected] of [['0xFFU', 255], ['0x1FUL', 31], ['0b101u', 5], ['0xFFull', 255], ['0x10LU', 16]] as const) {
+                const line = `uint32_t mask = ${literal};`;
+                const start = line.indexOf(literal);
+                for (let offset = 0; offset < literal.length; offset++) {
+                    const result = (provider as any).findNumberAtPosition(line, start + offset);
+                    assert.ok(result, `${literal}: character ${offset}`);
+                    assert.strictEqual(result.start, start, literal);
+                    assert.strictEqual(result.end, start + literal.length, `${literal}: hover range covers the suffix`);
+                    assert.strictEqual((provider as any).parseNumberExact(result.text), expected, literal);
+                }
+            }
+        });
+
+        test('h-suffix hex must start with a digit so identifiers like ch/each stay identifiers', () => {
+            assert.strictEqual((provider as any).findNumberAtPosition('char ch = getc(f);', 5), null);
+            assert.strictEqual((provider as any).findNumberAtPosition('int each = 0;', 4), null);
+            assert.strictEqual((provider as any).parseNumber('ch'), null);
+            assert.strictEqual((provider as any).parseNumber('FFh'), null);
+            assert.strictEqual((provider as any).extractValueFromLine('int y = each;'), null);
+        });
+
         test('still matches a valid h-suffix literal at word boundaries', () => {
             const result = (provider as any).findNumberAtPosition('mov a, 0FFh;', 8);
             assert.notStrictEqual(result, null);
@@ -1871,6 +1919,23 @@ suite('NumberBaseHoverProvider Test Suite', () => {
             }
             assert.strictEqual((provider as any).extractValueFromLine('#define VALUE 0755', 'VALUE'), 493);
             assert.strictEqual((provider as any).extractValueFromLine('#define VALUE 0755'), 493);
+        });
+
+        test('#define values evaluate the whole replacement list instead of the first literal', () => {
+            const cases: Array<[string, number | null]> = [
+                ['#define BUF_SIZE 16 * 4', 64],
+                ['#define BUF_SIZE 0x10 + 1 // comment', 17],
+                ['#define BUF_SIZE (1U << 3) /* bits */', 8],
+                ['#define BUF_SIZE 0xFFU', 255],
+                ['#define BUF_SIZE 0FFh', 255],
+                ['#define BUF_SIZE OTHER + 1', null],
+                ['#define BUF_SIZE 16 + other()', null],
+                ['#define BUF_SIZE(x) 16', null],
+            ];
+            for (const [line, expected] of cases) {
+                assert.strictEqual((provider as any).extractValueFromLine(line, 'BUF_SIZE'), expected, line);
+                assert.strictEqual((provider as any).extractValueFromLine(line), expected, `${line} (no symbol filter)`);
+            }
         });
 
         test('Extract value from const declaration', () => {

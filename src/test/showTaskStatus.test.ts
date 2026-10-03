@@ -101,7 +101,7 @@ suite('showTaskStatus 렌더 게이트', () => {
         test('인자를 생략하면 켜진 것으로 본다 (기존 호출부 호환)', () => {
             actionStates.set('build', { state: 'success' });
             const item = new Action('Build', multiTask, vscode.TreeItemCollapsibleState.None, makeContext(), 'build');
-            assert.strictEqual(iconIdOf(item), 'check');
+            assert.strictEqual(iconIdOf(item), 'pass');
         });
 
         test('실행 이력이 없는 액션은 설정과 무관하게 타입 아이콘', () => {
@@ -149,7 +149,7 @@ suite('showTaskStatus 렌더 게이트', () => {
             const provider = new MainViewProvider(makeContext(), () => actions);
 
             await withSetting(true, async () => {
-                assert.strictEqual(iconIdOf((await provider.getChildren())[0]), 'check');
+                assert.strictEqual(iconIdOf((await provider.getChildren())[0]), 'pass');
             });
         });
     });

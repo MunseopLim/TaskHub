@@ -174,6 +174,48 @@ suite('ArmLinkListParser Test Suite', () => {
         });
     });
 
+    suite('Exec Addr / Load Addr / Size 3열 형식', () => {
+        const THREE_COLUMN = `
+    Execution Region ER_IROM1 (Exec base: 0x08000000, Load base: 0x08000000, Size: 0x000012d4, Max: 0x00080000, ABSOLUTE)
+
+    Exec Addr    Load Addr    Size         Type   Attr      Idx    E Section Name        Object
+
+    0x08000000   0x08000000   0x000001ac   Data   RO            3    RESET               startup_stm32f407xx.o
+    0x080001ac   0x080001ac   0x00000008   Ven    RO          120    Veneer$$Code        anon$$obj.o
+    0x080001b4   0x080001b4   0x00000004   PAD
+    0x080001b8   0x080001b8   0x00000100   Code   RO           10    .text.main          main.o
+
+    Execution Region RW_IRAM1 (Exec base: 0x20000000, Load base: 0x080012d4, Size: 0x00000074, Max: 0x00020000, ABSOLUTE)
+
+    Exec Addr    Load Addr    Size         Type   Attr      Idx    E Section Name        Object
+
+    0x20000000   0x080012d4   0x00000014   Data   RW            3    .data               main.o
+    0x20000014        -       0x00000060   Zero   RW            4    .bss                main.o
+    0x20000074        -       0x00000004   PAD
+`;
+
+        test('RW 행의 Load Addr와 ZI 행의 `-` 열을 건너뛰고 Size를 읽는다', () => {
+            const result = parseArmLinkList(THREE_COLUMN);
+            assert.strictEqual(result.execRegions.length, 2);
+            const [flash, ram] = result.execRegions;
+            assert.deepStrictEqual(flash.entries.map(e => [e.addr, e.size, e.kind]), [
+                [0x08000000, 0x1ac, 'Data'], [0x080001ac, 0x8, 'Code'], [0x080001b8, 0x100, 'Code'],
+            ]);
+            assert.deepStrictEqual(ram.entries.map(e => [e.addr, e.size, e.kind]), [
+                [0x20000000, 0x14, 'Data'], [0x20000014, 0x60, 'Zero'],
+            ]);
+            assert.strictEqual(ram.entries[0].object, 'main.o');
+            assert.strictEqual(ram.entries[1].section, '.bss');
+        });
+
+        test('3열 형식의 사용량이 0이 아니라 실제 엔트리 합으로 나온다', () => {
+            const usage = toMemoryUsage(parseArmLinkList(THREE_COLUMN));
+            const ram = usage.find(u => u.region === 'RW_IRAM1');
+            assert.ok(ram);
+            assert.strictEqual(ram.used, 0x14 + 0x60);
+        });
+    });
+
     /**
      * 엔트리 개수 상한 (0.6.40).
      *

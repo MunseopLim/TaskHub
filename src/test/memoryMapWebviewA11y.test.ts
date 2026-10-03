@@ -4,7 +4,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { buildMemoryMapStrings, openMemoryMapPanel, panelRegistry } from '../memoryMapViewer';
-import { buildMinimalElf32 } from './fixtures/elfFixtures';
+import { buildElf32WithAliasSymbols, buildMinimalElf32 } from './fixtures/elfFixtures';
+import { computeSymbolUsage, generateTextReport, parseElf32 } from '../elfParser';
 
 /**
  * "Memory Map 웹뷰 지역화 / 접근성" (0.6.21) — 웹뷰 3종의 마지막.
@@ -86,6 +87,66 @@ suite('Memory Map 웹뷰 지역화 / 접근성', () => {
         blocks.forEach((source, i) => {
             assert.ok(source.trim().length > 0, `${i}번 스크립트 블록이 비어 있다`);
             assert.doesNotThrow(() => new Function(source), `${i}번 스크립트 블록에 문법 오류가 있다`);
+        });
+    });
+
+    suite('색·좁은 화면·막대 요약', () => {
+        test('사용률·세그먼트 색은 테마 차트 색을 따른다', () => {
+            const rules = generatedCssRules();
+            const declarationsOf = (selector: string) => rules.filter(rule => rule.selectors.includes(selector)).map(rule => rule.declarations).join(';');
+            for (const selector of ['.seg-code', '.seg-rodata', '.seg-data', '.seg-nobits']) {
+                assert.match(declarationsOf(selector), /var\(--vscode-charts-/, `${selector}가 테마를 무시한다`);
+            }
+            const root = declarationsOf(':root');
+            assert.match(root, /--ok:\s*var\(--vscode-charts-green/);
+            assert.match(root, /--warn:\s*var\(--vscode-charts-orange/);
+        });
+
+        test('표는 자기 영역에서만 가로로 스크롤해 페이지 전체가 밀리지 않는다', () => {
+            assert.ok(/<div class="table-scroll">\s*<table id="sectionTable"/.test(html), '전체 섹션 표가 스크롤 영역에 없다');
+            assert.ok(/<div class="table-scroll"><table class="overview-table"/.test(html), '영역 개요 표가 스크롤 영역에 없다');
+            const scroll = generatedCssRules().find(rule => rule.selectors.includes('.table-scroll'));
+            assert.match(scroll?.declarations ?? '', /overflow-x:\s*auto/);
+        });
+
+        test('한 행으로 합친 별칭이 실제 영역 데이터와 Copy Full Dump에 남는다', () => {
+            const aliasPath = path.join(os.tmpdir(), `taskhub-mm-alias-${process.pid}.axf`);
+            fs.writeFileSync(aliasPath, buildElf32WithAliasSymbols());
+            try {
+                const ctx = { extensionPath: path.resolve(__dirname, '..', '..'), subscriptions: [] } as unknown as vscode.ExtensionContext;
+                const config = { regions: [{ name: 'FLASH', origin: 0x08000000, size: 512 * 1024 }] };
+                assert.ok(openMemoryMapPanel(ctx, aliasPath, config));
+                const aliasHtml = panelRegistry.getHtml(aliasPath) ?? '';
+                // 행 하나에 대표 이름과 별칭이 함께 실린다(같은 바이트를 두 번 세지 않는다).
+                assert.match(aliasHtml, /"n":"(Default_Handler|USART1_IRQHandler)"[^}]*"al":"(USART1_IRQHandler|Default_Handler)"/);
+                // 세그먼트 행(`n` 다음에 `s`)만 센다 — Object Summary 데이터도 `n` 키를 쓴다.
+                assert.strictEqual((aliasHtml.match(/"n":"(?:Default_Handler|USART1_IRQHandler)","s":/g) ?? []).length, 1);
+                const usage = computeSymbolUsage(parseElf32(fs.readFileSync(aliasPath)).symbols, parseElf32(fs.readFileSync(aliasPath)).sections,
+                    config.regions);
+                const dump = generateTextReport(aliasPath, 0, 0, 0, [], usage);
+                assert.match(dump, /Default_Handler\s+16 B\s+= USART1_IRQHandler|USART1_IRQHandler\s+16 B\s+= Default_Handler/,
+                    '복사한 덤프에서도 별칭 이름으로 찾을 수 있어야 한다');
+            } finally {
+                panelRegistry.clear();
+                try { fs.unlinkSync(aliasPath); } catch { /* best effort */ }
+            }
+        });
+
+        test('웹뷰 표 검색은 한 행으로 합친 별칭 이름에도 걸린다', () => {
+            const source = html.match(/function matchSeg\(e, q\) \{[\s\S]*?\n    \}/)?.[0];
+            assert.ok(source, 'matchSeg 를 찾지 못했다');
+            const matchSeg = new Function(`${source}; return matchSeg;`)() as (e: Record<string, string>, q: string) => boolean;
+            const row = { n: 'Default_Handler', al: 'USART1_IRQHandler, USART2_IRQHandler', s: '', f: '', ah: '0x08000100', ss: '16 B', t: 'CODE' };
+            assert.strictEqual(matchSeg(row, 'usart2_irq'), true);
+            assert.strictEqual(matchSeg(row, 'spi1'), false);
+            assert.ok(html.includes(`'<span class="alias-names"> = ' + hl(e.al)`), '검색에 걸린 별칭이 화면에도 보여야 한다');
+        });
+
+        test('세그먼트 막대는 hover 없이도 요약을 읽힌다', () => {
+            assert.ok(strings.mapBarLabel.includes('{summary}'));
+            assert.ok(html.includes(`'<div class="map-bar" role="img" aria-label="' + esc(fmt(S.mapBarLabel, { summary: rd.mapBarSummary }))`),
+                '키보드·터치 사용자는 조각마다 붙은 title을 볼 수 없다');
+            assert.match(html, /"mapBarSummary":"[^"]*\b(?:CODE|DATA|RODATA|NOBITS|FREE) /, '영역 데이터에 막대 요약이 없다');
         });
     });
 

@@ -5,6 +5,8 @@
 
 // ELF magic number
 const ELF_MAGIC = [0x7f, 0x45, 0x4c, 0x46]; // \x7fELF
+/** 섹션·심볼 이름 하나에 읽는 최대 바이트 수 (손상된 문자열 테이블 방어). */
+export const ELF_MAX_NAME_BYTES = 4096;
 
 // ELF class
 const ELFCLASS32 = 1;
@@ -37,6 +39,7 @@ const PF_R = 0x4;
 const STT_FUNC = 2;
 const STT_OBJECT = 1;
 const STB_LOCAL = 0;
+const STB_WEAK = 2;
 
 export interface ElfSection {
     name: string;
@@ -71,6 +74,8 @@ export interface MemoryUsageEntry {
     func?: string;
     /** ELF 원본 파일에서 이 행이 차지하는 바이트 범위. Listing 행에는 없다. */
     fileRange?: ElfFileRangeResolution;
+    /** 같은 주소·크기의 별칭 심볼 이름(`__attribute__((alias))` 등). 한 행으로 합쳐 중복 집계하지 않는다. */
+    aliases?: string[];
 }
 
 export interface MemoryUsage {
@@ -216,16 +221,16 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
         throw new Error('ELF section name string table exceeds file size.');
     }
 
+    // 템플릿이 들어간 C++ mangled 이름은 수백 바이트를 넘기 쉬워 256바이트에서 자르면
+    // Go to Symbol·소스 역탐색과 맞지 않았다. 손상된 테이블에서 끝없는 이름을 만들지 않도록
+    // 상한은 두되 넉넉히 잡고, 바이트 단위 Latin-1 대신 UTF-8로 읽는다.
     const readStringFrom = (tabOffset: number, tabSize: number, nameOffset: number): string => {
         const start = tabOffset + nameOffset;
         if (start >= buffer.length) { return ''; }
-        const end = Math.min(start + 256, tabOffset + tabSize, buffer.length);
-        let str = '';
-        for (let i = start; i < end; i++) {
-            if (buffer[i] === 0) { break; }
-            str += String.fromCharCode(buffer[i]);
-        }
-        return str;
+        const end = Math.min(start + ELF_MAX_NAME_BYTES, tabOffset + tabSize, buffer.length);
+        if (end <= start) { return ''; }
+        const nul = buffer.subarray(start, end).indexOf(0);
+        return buffer.toString('utf8', start, nul >= 0 ? start + nul : end);
     };
 
     const readString = (nameOffset: number): string =>
@@ -360,7 +365,7 @@ export function parseElf32(buffer: Buffer): ElfParseResult {
                         size: sz,
                         type: sType === STT_FUNC ? 'FUNC' : 'OBJECT',
                         sectionIndex: shndx,
-                        binding: sBind === STB_LOCAL ? 'LOCAL' : 'GLOBAL',
+                        binding: sBind === STB_LOCAL ? 'LOCAL' : sBind === STB_WEAK ? 'WEAK' : 'GLOBAL',
                     });
                 }
             }
@@ -600,14 +605,40 @@ export function computeSymbolUsage(
         // Track symbol-covered ranges to find uncovered section portions
         const coveredRanges: { start: number; end: number }[] = [];
 
+        // 같은 섹션의 별칭 심볼은 같은 바이트를 가리키므로 한 행으로 합친다. 그러지 않으면 요약 리포트의
+        // 합계와 Top 목록이 같은 바이트를 여러 번 센다.
+        // 대표 이름은 GLOBAL > WEAK > LOCAL 순으로 고른다(약한 IRQ 별칭보다 실제 핸들러 이름).
+        const bindingRank = (binding: string): number => binding === 'GLOBAL' ? 2 : binding === 'WEAK' ? 1 : 0;
+        const aliasOwners = new Map<string, { entry: MemoryUsageEntry; rank: number }>();
         for (const sym of regionSymbols) {
             const symType = sym.type === 'FUNC' ? 'CODE' : 'DATA';
+            // Overlay 섹션은 같은 실행 주소에 서로 다른 파일 바이트를 담을 수 있다.
+            const aliasKey = `${sym.sectionIndex}:${sym.addr}:${sym.size}:${symType}`;
+            const owner = aliasOwners.get(aliasKey);
+            if (owner) {
+                const { entry } = owner;
+                if (entry.name === sym.name) {
+                    owner.rank = Math.max(owner.rank, bindingRank(sym.binding));
+                    continue;
+                }
+                const existing = entry.aliases?.indexOf(sym.name) ?? -1;
+                if (bindingRank(sym.binding) > owner.rank) {
+                    // 같은 이름이 WEAK로 먼저 나왔다가 GLOBAL로 다시 나와도 대표 이름으로 올린다.
+                    if (existing >= 0) { entry.aliases!.splice(existing, 1); }
+                    (entry.aliases ??= []).push(entry.name);
+                    entry.name = sym.name;
+                    owner.rank = bindingRank(sym.binding);
+                } else if (existing < 0) {
+                    (entry.aliases ??= []).push(sym.name);
+                }
+                continue;
+            }
             // Find parent section name
             const parentSection = sym.sectionIndex > 0 && sym.sectionIndex < sections.length
                 ? sections[sym.sectionIndex] : undefined;
             const parentName = parentSection?.name || '';
 
-            entries.push({
+            const entry: MemoryUsageEntry = {
                 name: sym.name,
                 size: sym.size,
                 addr: sym.addr,
@@ -616,7 +647,9 @@ export function computeSymbolUsage(
                 fileRange: fileSize === undefined
                     ? undefined
                     : resolveElfFileRange(sym.addr, sym.size, sections, segments, fileSize, sym.sectionIndex),
-            });
+            };
+            aliasOwners.set(aliasKey, { entry, rank: bindingRank(sym.binding) });
+            entries.push(entry);
             coveredRanges.push({ start: sym.addr, end: sym.addr + sym.size });
         }
 
@@ -774,7 +807,9 @@ export function generateTextReport(
             const freePct = u.total > 0 ? (calcFree / u.total * 100).toFixed(1) : '0.0';
             lines.push(`${u.region}: ${formatSize(u.used)} / ${formatSize(u.total)} (${pct}%) | Free: ${formatSize(calcFree)} (${freePct}%)`);
             for (const s of u.sections) {
-                lines.push(`  ${s.name.padEnd(24)} ${formatSize(s.size).padStart(10)}`);
+                // 한 행으로 합친 별칭도 덤프에서 이름으로 찾을 수 있게 남긴다.
+                const aliases = s.aliases?.length ? `  = ${s.aliases.join(', ')}` : '';
+                lines.push(`  ${s.name.padEnd(24)} ${formatSize(s.size).padStart(10)}${aliases}`);
             }
             for (const f of u.freeSpaces) {
                 lines.push(`  ${'[FREE]'.padEnd(24)} ${formatSize(f.size).padStart(10)}  @ ${formatHex(f.addr)}`);
