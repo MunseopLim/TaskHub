@@ -1113,11 +1113,12 @@ suite('archiveUtils', () => {
         });
 
         test('엔트리 목록을 읽는 중에 취소하면 아무것도 풀지 않는다', async () => {
-            const entries = Array.from({ length: 2000 }, (_, i) => ({
-                name: `f${String(i).padStart(4, '0')}.txt`,
-                data: Buffer.alloc(4096, 0x41),
-            }));
-            const archivePath = writeRawZip('cancel-phase1.zip', entries);
+            // 목록 읽기는 비동기이므로 호출 직후 취소하면 파일 수·크기와
+            // 무관하게 1단계에서 중단된다. 대형 fixture 생성에 의존하지 않는다.
+            const archivePath = writeRawZip('cancel-phase1.zip', [
+                { name: 'first.txt', data: Buffer.from('first') },
+                { name: 'second.txt', data: Buffer.from('second') },
+            ]);
             const dest = path.join(tempDir, 'cancel-phase1-out');
 
             const controller = new AbortController();
@@ -1125,8 +1126,7 @@ suite('archiveUtils', () => {
             controller.abort();   // 1단계(목록 읽기) 안에서 걸린다
 
             await assert.rejects(run, (e: Error) => e.name === 'AbortError');
-            const written = fs.existsSync(dest) ? fs.readdirSync(dest).length : 0;
-            assert.strictEqual(written, 0, '1단계에서 취소했는데 파일이 만들어졌다');
+            assert.ok(!fs.existsSync(dest), '1단계에서 취소했는데 대상 디렉터리가 생겼다');
         });
 
         test('쓰기가 시작된 뒤 취소하면 남은 엔트리를 풀지 않는다', async function () {
